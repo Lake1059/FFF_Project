@@ -1,0 +1,90 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <StartupObject>Sub Main</StartupObject>
+    <UseWindowsForms>true</UseWindowsForms>
+    <MyType>WindowsForms</MyType>
+	<UseWPF>True</UseWPF>
+	<!--<PublishReadyToRun>True</PublishReadyToRun>
+    <PublishReadyToRunEmitSymbols>True</PublishReadyToRunEmitSymbols>-->
+	<SelfContained>False</SelfContained>
+	<!--<IncludeNativeLibrariesForSelfExtract>True</IncludeNativeLibrariesForSelfExtract>-->
+	<!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
+	<Authors>1059 Studio</Authors>
+	<Company>1059 Studio</Company>
+	<AssemblyVersion>1.0.0</AssemblyVersion>
+	<FileVersion>1.0.0</FileVersion>
+	<Version>1.0.0</Version>
+	<SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+	<Title>FFF.Recorder</Title>
+	<ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+	<ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
+	<PlatformTarget>x64</PlatformTarget>
+	<Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Import Include="System.Data" />
+    <Import Include="System.Drawing" />
+    <Import Include="System.Windows.Forms" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\Shaders\缩放RGBA.cso" LogicalName="FFF.Recorder.Shaders.ScaleRgba.cso" />
+    <EmbeddedResource Include="Assets\Shaders\全屏三角形.cso" LogicalName="FFF.Recorder.Shaders.FullscreenTriangle.cso" />
+    <EmbeddedResource Include="Assets\Shaders\复制到BGRA.cso" LogicalName="FFF.Recorder.Shaders.CopyBgra.cso" />
+    <EmbeddedResource Include="Assets\Shaders\HDR到PQ.cso" LogicalName="FFF.Recorder.Shaders.HdrToPq.cso" />
+    <EmbeddedResource Include="Assets\Shaders\HDR到SDR.cso" LogicalName="FFF.Recorder.Shaders.HdrToSdr.cso" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProductNative Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" />
+    <DevelopmentRuntime Include="..\runtime\avcodec*.dll" />
+    <DevelopmentRuntime Include="..\runtime\avformat*.dll" />
+    <DevelopmentRuntime Include="..\runtime\avutil*.dll" />
+    <DevelopmentRuntime Include="..\runtime\swresample*.dll" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <Content Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" Link="FFF.Native.dll">
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+
+  <Target Name="CopyNativeRuntime" AfterTargets="Build">
+    <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')"
+           Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
+    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyProductNativeToPublish" AfterTargets="Publish" Condition="'$(PublishSingleFile)' != 'true'">
+    <Copy SourceFiles="@(ProductNative)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <ItemGroup>
+    <PackageReference Include="LakeUI" Version="3.9.0" />
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DirectX" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Update="My Project\Application.Designer.vb">
+      <DesignTime>True</DesignTime>
+      <AutoGen>True</AutoGen>
+      <DependentUpon>Application.myapp</DependentUpon>
+    </Compile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="My Project\Application.myapp">
+      <Generator>MyApplicationCodeGenerator</Generator>
+      <LastGenOutput>Application.Designer.vb</LastGenOutput>
+    </None>
+  </ItemGroup>
+
+</Project>

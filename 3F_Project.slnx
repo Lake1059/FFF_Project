@@ -1,0 +1,9 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="FFF.Native/FFF.Native.vcxproj" Id="284c3ec6-6c87-4ae6-84f3-096921761d43" />
+  <Project Path="FFF.Recorder/FFF.Recorder.vbproj" />
+</Solution>

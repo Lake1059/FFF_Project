@@ -1,0 +1,11 @@
+.vs/
+
+FFF.Native/obj/
+FFF.Native/x64/
+FFF.Native/FFF.Native/
+FFF.Recorder/bin/
+FFF.Recorder/obj/
+
+publish/
+runtime/*.dll
+third_party/ffmpeg/
