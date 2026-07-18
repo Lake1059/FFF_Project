@@ -32,6 +32,8 @@ Partial Class Form1
         Dim ModernTabPage7 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         Dim ModernTabPage8 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         Dim ModernTabPage9 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage10 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage11 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         ModernTabListControl1 = New LakeUI.ModernTabListControl()
         ThisIsYourWindow1 = New LakeUI.ThisIsYourWindow(components)
         SuspendLayout()
@@ -44,12 +46,14 @@ Partial Class Form1
         ModernTabPage1.Text = "3FR 单源录制器"
         ModernTabPage2.Text = "总控台"
         ModernTabPage3.IsSeparator = True
-        ModernTabPage4.Text = "输出文件"
-        ModernTabPage5.Text = "视频设置"
-        ModernTabPage6.Text = "音频设置"
+        ModernTabPage4.Text = "输出设置"
+        ModernTabPage5.Text = "视频参数"
+        ModernTabPage6.Text = "音频参数"
         ModernTabPage7.IsSeparator = True
         ModernTabPage8.Text = "软件设置"
-        ModernTabPage9.Text = "支持者"
+        ModernTabPage9.Text = "个性化"
+        ModernTabPage10.Text = "支持者"
+        ModernTabPage11.IsSeparator = True
         ModernTabListControl1.Items.Add(ModernTabPage1)
         ModernTabListControl1.Items.Add(ModernTabPage2)
         ModernTabListControl1.Items.Add(ModernTabPage3)
@@ -59,15 +63,40 @@ Partial Class Form1
         ModernTabListControl1.Items.Add(ModernTabPage7)
         ModernTabListControl1.Items.Add(ModernTabPage8)
         ModernTabListControl1.Items.Add(ModernTabPage9)
+        ModernTabListControl1.Items.Add(ModernTabPage10)
+        ModernTabListControl1.Items.Add(ModernTabPage11)
         ModernTabListControl1.Location = New Point(0, 0)
         ModernTabListControl1.Name = "ModernTabListControl1"
         ModernTabListControl1.Size = New Size(1008, 537)
         ModernTabListControl1.TabIndex = 0
+        ModernTabListControl1.TabItemHeight = 30
+        ModernTabListControl1.TabStripWidth = 160
         ' 
         ' ThisIsYourWindow1
         ' 
+        ThisIsYourWindow1.BackdropNoiseScale = 0.5F
+        ThisIsYourWindow1.BackdropTintColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
+        ThisIsYourWindow1.BackdropTintInactiveColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
+        ThisIsYourWindow1.BorderColor = Color.Gray
+        ThisIsYourWindow1.BorderInactiveColor = Color.Gray
+        ThisIsYourWindow1.ButtonCornerRadius = 5
+        ThisIsYourWindow1.ButtonGlyphLineWidth = 2F
+        ThisIsYourWindow1.ButtonPadding = New Padding(0, 5, 5, 5)
+        ThisIsYourWindow1.ButtonWidth = 40
+        ThisIsYourWindow1.CaptionBackColor = Color.FromArgb(CByte(48), CByte(48), CByte(48))
         ThisIsYourWindow1.CaptionButtonGlyphColor = Color.FromArgb(CByte(200), CByte(200), CByte(200))
+        ThisIsYourWindow1.CaptionButtonHoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        ThisIsYourWindow1.CaptionButtonPressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        ThisIsYourWindow1.CaptionHeight = 42
+        ThisIsYourWindow1.CaptionInactiveBackColor = Color.FromArgb(CByte(48), CByte(48), CByte(48))
         ThisIsYourWindow1.CloseButtonGlyphColor = Color.FromArgb(CByte(200), CByte(200), CByte(200))
+        ThisIsYourWindow1.IconPaddingLeft = 10
+        ThisIsYourWindow1.IconSize = 26
+        ThisIsYourWindow1.LayerShadowResizeFullArea = True
+        ThisIsYourWindow1.ShadowMode = LakeUI.ThisIsYourWindow.ShadowModeEnum.Layer
+        ThisIsYourWindow1.TitleAlign = LakeUI.ThisIsYourWindow.TitleAlignEnum.Center
+        ThisIsYourWindow1.TitleForeColor = Color.Silver
+        ThisIsYourWindow1.TitleInactiveForeColor = Color.DarkGray
         ' 
         ' Form1
         ' 
@@ -78,9 +107,10 @@ Partial Class Form1
         Controls.Add(ModernTabListControl1)
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver
+        MaximizeBox = False
         Name = "Form1"
         StartPosition = FormStartPosition.CenterParent
-        Text = "Form1"
+        Text = "FFF.Recorder"
         ResumeLayout(False)
     End Sub
 
