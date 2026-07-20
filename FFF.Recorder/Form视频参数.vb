@@ -1,7 +1,7 @@
 Imports System.Globalization
 
 Public Class Form视频参数
-    Private 正在初始化 As Boolean
+    Private 正在初始化 As Boolean = True
 
     Friend Sub 初始化页面()
         正在初始化 = True
@@ -178,7 +178,12 @@ Public Class Form视频参数
     End Sub
 
     Private Sub ETB_质量值_ValueChanged(sender As Object, e As EventArgs) Handles ETB_质量值.ValueChanged
-        If Not 正在初始化 Then 设置.实例对象.质量值 = ETB_质量值.Value
+        If Not 正在初始化 Then 保存当前质量值()
+    End Sub
+
+    Friend Sub 保存当前质量值()
+        设置.实例对象.质量值 = Math.Clamp(
+            CInt(Math.Round(ETB_质量值.Value, MidpointRounding.AwayFromZero)), 0, 63)
     End Sub
 
     Private Sub MTB_自定义参数_TextChanged(sender As Object, e As EventArgs) Handles MTB_自定义参数.TextChanged

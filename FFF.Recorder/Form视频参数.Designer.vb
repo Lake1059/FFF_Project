@@ -582,11 +582,12 @@ Partial Class Form视频参数
         ETB_质量值.Maximum = 63R
         ETB_质量值.Name = "ETB_质量值"
         ETB_质量值.Size = New Size(250, 32)
+        ETB_质量值.SmallChange = 1R
         ETB_质量值.TabIndex = 28
         ETB_质量值.ThumbBorderWidth = 0
         ETB_质量值.ThumbColor = Color.OliveDrab
         ETB_质量值.ThumbHeight = 28
-        ETB_质量值.ThumbTextDecimalPlaces = 1
+        ETB_质量值.ThumbTextDecimalPlaces = 0
         ETB_质量值.ThumbTextMode = LakeUI.ExcellentTrackBar.ThumbTextModeEnum.Value
         ETB_质量值.ThumbWidth = 38
         ETB_质量值.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))

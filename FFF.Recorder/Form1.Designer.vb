@@ -112,7 +112,7 @@ Partial Class Form1
         ForeColor = Color.Silver
         MaximizeBox = False
         Name = "Form1"
-        StartPosition = FormStartPosition.CenterParent
+        StartPosition = FormStartPosition.CenterScreen
         Text = "FFF.Recorder"
         ResumeLayout(False)
     End Sub
