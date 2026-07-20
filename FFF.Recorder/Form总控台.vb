@@ -155,6 +155,10 @@ Public Class Form总控台
 
     Private Sub MCB_视频源_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_视频源.SelectedIndexChanged
         If 正在初始化 Then Return
+        应用当前视频源选择()
+    End Sub
+
+    Private Sub 应用当前视频源选择()
         Dim 项目 = 当前视频源条目
         If 项目 IsNot Nothing Then
             设置.实例对象.视频源键 = 项目.键
@@ -176,14 +180,18 @@ Public Class Form总控台
     Private Sub MCB_视频源_DropDownOpened(sender As Object, e As EventArgs) Handles MCB_视频源.DropDownOpened
         If 正在初始化 OrElse 录制交互.是否录制中 Then Return
         Dim 原键 = If(当前视频源条目?.键, 设置.实例对象.视频源键)
+        Dim 选择已回退 As Boolean
         正在初始化 = True
         Try
             重建视频源列表()
             Dim 索引 = 视频源列表.FindIndex(Function(x) String.Equals(x.键, 原键, StringComparison.Ordinal))
+            选择已回退 = 索引 < 0
             MCB_视频源.SelectedIndex = If(索引 >= 0, 索引, 0)
         Finally
             正在初始化 = False
         End Try
+        ' 列表重建时选择事件会被抑制，源丢失后的回退选择需要在这里显式应用。
+        If 选择已回退 Then 应用当前视频源选择()
     End Sub
 
     Private Sub MCB_音频源_DropDownOpened(sender As Object, e As EventArgs) Handles MCB_音频源.DropDownOpened

@@ -14,13 +14,131 @@ extern "C" {
 #include <libavutil/opt.h>
 }
 
+#include <d3dcompiler.h>
+
+namespace {
+constexpr char RgbToYuvShader[] = R"(
+Texture2D<float4> Source : register(t0);
+
+RWTexture2D<float> Luma : register(u0);
+#if PLANAR_444
+RWTexture2D<float> ChromaU : register(u1);
+RWTexture2D<float> ChromaV : register(u2);
+#elif PLANAR_422
+RWTexture2D<float> ChromaU : register(u1);
+RWTexture2D<float> ChromaV : register(u2);
+#elif PLANAR_420
+RWTexture2D<float> ChromaU : register(u1);
+RWTexture2D<float> ChromaV : register(u2);
+#else
+RWTexture2D<float2> Chroma : register(u1);
+#endif
+
+#if HDR_BT2020
+static const float Kr = 0.2627;
+static const float Kb = 0.0593;
+#else
+static const float Kr = 0.2126;
+static const float Kb = 0.0722;
+#endif
+static const float Kg = 1.0 - Kr - Kb;
+
+float3 ConvertRgb(float3 rgb)
+{
+    float y = dot(rgb, float3(Kr, Kg, Kb));
+    float cb = (rgb.b - y) / (2.0 * (1.0 - Kb)) + 0.5;
+    float cr = (rgb.r - y) / (2.0 * (1.0 - Kr)) + 0.5;
+    return saturate(float3(y, cb, cr));
+}
+
+float StoreLuma(float value)
+{
+#if FULL_RANGE
+#if TEN_BIT
+    return round(saturate(value) * 1023.0) * (64.0 / 65535.0);
+#else
+    return saturate(value);
+#endif
+#else
+#if TEN_BIT
+    return (round(saturate(value) * 876.0) + 64.0) * (64.0 / 65535.0);
+#else
+    return (round(saturate(value) * 219.0) + 16.0) / 255.0;
+#endif
+#endif
+}
+
+float2 StoreChroma(float2 value)
+{
+#if FULL_RANGE
+#if TEN_BIT
+    return round(saturate(value) * 1023.0) * (64.0 / 65535.0);
+#else
+    return saturate(value);
+#endif
+#else
+#if TEN_BIT
+    return (round(saturate(value) * 896.0) + 64.0) * (64.0 / 65535.0);
+#else
+    return (round(saturate(value) * 224.0) + 16.0) / 255.0;
+#endif
+#endif
+}
+
+[numthreads(8, 8, 1)]
+void Convert(uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    Source.GetDimensions(width, height);
+    if (id.x >= width || id.y >= height) return;
+
+    float3 yuv = ConvertRgb(Source.Load(int3(id.xy, 0)).rgb);
+    Luma[id.xy] = StoreLuma(yuv.x);
+#if PLANAR_444
+    ChromaU[id.xy] = StoreChroma(yuv.yy).x;
+    ChromaV[id.xy] = StoreChroma(yuv.zz).x;
+#elif PLANAR_422
+    if ((id.x & 1) == 0) {
+        uint2 p1 = min(id.xy + uint2(1, 0), uint2(width - 1, height - 1));
+        float3 rgb = (Source.Load(int3(id.xy, 0)).rgb + Source.Load(int3(p1, 0)).rgb) * 0.5;
+        float2 chroma = StoreChroma(ConvertRgb(rgb).yz);
+        ChromaU[uint2(id.x / 2, id.y)] = chroma.x;
+        ChromaV[uint2(id.x / 2, id.y)] = chroma.y;
+    }
+#elif PLANAR_420
+    if ((id.x & 1) == 0 && (id.y & 1) == 0) {
+        uint2 p1 = min(id.xy + uint2(1, 0), uint2(width - 1, height - 1));
+        uint2 p2 = min(id.xy + uint2(0, 1), uint2(width - 1, height - 1));
+        uint2 p3 = min(id.xy + uint2(1, 1), uint2(width - 1, height - 1));
+        float3 rgb = (Source.Load(int3(id.xy, 0)).rgb + Source.Load(int3(p1, 0)).rgb +
+            Source.Load(int3(p2, 0)).rgb + Source.Load(int3(p3, 0)).rgb) * 0.25;
+        float2 chroma = StoreChroma(ConvertRgb(rgb).yz);
+        ChromaU[id.xy / 2] = chroma.x;
+        ChromaV[id.xy / 2] = chroma.y;
+    }
+#else
+    if ((id.x & 1) == 0 && (id.y & 1) == 0) {
+        uint2 p1 = min(id.xy + uint2(1, 0), uint2(width - 1, height - 1));
+        uint2 p2 = min(id.xy + uint2(0, 1), uint2(width - 1, height - 1));
+        uint2 p3 = min(id.xy + uint2(1, 1), uint2(width - 1, height - 1));
+        float3 rgb = (Source.Load(int3(id.xy, 0)).rgb + Source.Load(int3(p1, 0)).rgb +
+            Source.Load(int3(p2, 0)).rgb + Source.Load(int3(p3, 0)).rgb) * 0.25;
+        Chroma[id.xy / 2] = StoreChroma(ConvertRgb(rgb).yz);
+    }
+#endif
+}
+)";
+}
+
 // 构造一个尚未绑定设备或文件的封装器。所有原生指针初始化为空，保证任何中途失败路径都可
 // 统一调用 ReleaseResources；构造函数不触发 FFmpeg、GPU 或文件系统操作。
 VideoMuxer::VideoMuxer() noexcept
-    : immediateContext_(nullptr), d3d11Device_(nullptr), hardwareDevice_(nullptr), hardwareFrames_(nullptr),
+    : immediateContext_(nullptr), d3d11Device_(nullptr), d3d11Device3_(nullptr), rgbToYuvShader_(nullptr),
+      hardwareDevice_(nullptr), hardwareFrames_(nullptr),
       encoderHardwareDevice_(nullptr), encoderFrames_(nullptr), codecContext_(nullptr), formatContext_(nullptr),
       videoStream_(nullptr), width_(0), height_(0), inputDxgiFormat_(0), qsvEncoder_(false),
-      softwareEncoder_(false), hdr10_(false),
+      softwareEncoder_(false), videoProcessorConversion_(false), shaderConversion_(false),
+      softwareYuvConversion_(false), tenBit_(false), chromaSampling_(0), hdr10_(false),
       videoDevice_(nullptr), videoContext_(nullptr), videoContext1_(nullptr), videoProcessorEnumerator_(nullptr),
       videoProcessor_(nullptr),
       initialized_(false), headerWritten_(false), finished_(false),
@@ -63,8 +181,16 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         lastError_ = "H.264 is not enabled for the HDR10 recording path; use HEVC or AV1.";
         return FFFResult::NotSupported;
     }
+    if (chromaSampling > 2) {
+        lastError_ = "The requested chroma sampling mode is invalid.";
+        return FFFResult::InvalidArgument;
+    }
     if (chromaSampling == 0 && ((width & 1U) != 0 || (height & 1U) != 0)) {
         lastError_ = "4:2:0 encoding requires even output width and height.";
+        return FFFResult::InvalidArgument;
+    }
+    if (chromaSampling == 2 && (width & 1U) != 0) {
+        lastError_ = "4:2:2 encoding requires an even output width.";
         return FFFResult::InvalidArgument;
     }
 
@@ -72,7 +198,30 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     height_ = height;
     hdr10_ = hdr10;
     qsvEncoder_ = encoderName.find("_qsv") != std::string::npos;
-    softwareEncoder_ = encoderName == "libx264";
+    const bool x264Encoder = encoderName == "libx264";
+    const bool x265Encoder = encoderName == "libx265";
+    const bool svtAv1Encoder = encoderName == "libsvtav1";
+    softwareEncoder_ = x264Encoder || x265Encoder || svtAv1Encoder;
+    const bool nvencEncoder = encoderName.find("_nvenc") != std::string::npos;
+    const bool amfEncoder = encoderName.find("_amf") != std::string::npos;
+    softwareYuvConversion_ = softwareEncoder_ ||
+        ((nvencEncoder || qsvEncoder_) && chromaSampling != 0);
+    if (chromaSampling != 0 && encoderName.find("av1") != std::string::npos) {
+        lastError_ = "The selected FFmpeg AV1 encoder has no valid non-4:2:0 encoding path.";
+        return FFFResult::NotSupported;
+    }
+    if (amfEncoder && chromaSampling != 0) {
+        lastError_ = "The FFmpeg AMF encoders only expose NV12/P010 4:2:0 input formats.";
+        return FFFResult::NotSupported;
+    }
+    if (qsvEncoder_ && chromaSampling != 0 && encoderName.find("hevc") == std::string::npos) {
+        lastError_ = "Only the FFmpeg HEVC QSV encoder exposes 4:2:2 and 4:4:4 input formats.";
+        return FFFResult::NotSupported;
+    }
+    videoProcessorConversion_ = qsvEncoder_ && !softwareYuvConversion_;
+    shaderConversion_ = nvencEncoder || amfEncoder || softwareYuvConversion_;
+    tenBit_ = tenBit;
+    chromaSampling_ = chromaSampling;
     AVPixelFormat softwareFormat = AV_PIX_FMT_BGRA;
     switch (inputTextureFormat) {
     case 0:
@@ -87,15 +236,31 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         lastError_ = "The requested D3D11 encoder input format is not supported.";
         return FFFResult::NotSupported;
     }
-    if (qsvEncoder_ || softwareEncoder_) {
-        if (chromaSampling != 0) {
-            lastError_ = "This encoder path requires NV12/P010 4:2:0 surfaces.";
+    if (softwareEncoder_) {
+        if (x264Encoder && tenBit) {
+            lastError_ = "The libx264 fallback accepts eight-bit input only.";
             return FFFResult::NotSupported;
         }
-        if (softwareEncoder_ && tenBit) {
-            lastError_ = "The libx264 fallback accepts the eight-bit NV12 path only.";
-            return FFFResult::NotSupported;
-        }
+        if (chromaSampling == 1)
+            softwareFormat = tenBit ? AV_PIX_FMT_YUV444P10 : AV_PIX_FMT_YUV444P;
+        else if (chromaSampling == 2)
+            softwareFormat = tenBit ? AV_PIX_FMT_YUV422P10 : AV_PIX_FMT_YUV422P;
+        else
+            softwareFormat = tenBit ? AV_PIX_FMT_YUV420P10 : AV_PIX_FMT_YUV420P;
+    } else if (qsvEncoder_) {
+        if (chromaSampling == 2)
+            softwareFormat = tenBit ? AV_PIX_FMT_Y210 : AV_PIX_FMT_YUYV422;
+        else if (chromaSampling == 1)
+            softwareFormat = tenBit ? AV_PIX_FMT_XV30 : AV_PIX_FMT_VUYX;
+        else
+            softwareFormat = tenBit ? AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
+    } else if (nvencEncoder) {
+        softwareFormat = softwareYuvConversion_
+            ? (chromaSampling == 2
+                ? (tenBit ? AV_PIX_FMT_P210 : AV_PIX_FMT_NV16)
+                : (tenBit ? AV_PIX_FMT_YUV444P10MSB : AV_PIX_FMT_YUV444P))
+            : (tenBit ? AV_PIX_FMT_P010 : AV_PIX_FMT_NV12);
+    } else if (amfEncoder) {
         softwareFormat = tenBit ? AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
     }
     d3d11Device_ = device;
@@ -125,27 +290,31 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         return FFFResult::FfmpegFailure;
     }
 
-    hardwareFrames_ = av_hwframe_ctx_alloc(hardwareDevice_);
-    if (hardwareFrames_ == nullptr) {
-        lastError_ = "Could not allocate the FFmpeg D3D11 frame context.";
-        ReleaseResources(false);
-        return FFFResult::FfmpegFailure;
-    }
-    auto* frameContext = reinterpret_cast<AVHWFramesContext*>(hardwareFrames_->data);
-    frameContext->format = AV_PIX_FMT_D3D11;
-    frameContext->sw_format = softwareFormat;
-    frameContext->width = static_cast<int>(width);
-    frameContext->height = static_cast<int>(height);
-    frameContext->initial_pool_size = softwareEncoder_ ? 0 : std::max(24U, bFrameCount + 10U);
-    if (qsvEncoder_ || softwareEncoder_) {
-        auto* d3d11Frames = reinterpret_cast<AVD3D11VAFramesContext*>(frameContext->hwctx);
-        d3d11Frames->BindFlags = D3D11_BIND_RENDER_TARGET;
-    }
-    result = av_hwframe_ctx_init(hardwareFrames_);
-    if (result < 0) {
-        SetFfmpegError("av_hwframe_ctx_init", result);
-        ReleaseResources(false);
-        return FFFResult::FfmpegFailure;
+    if (!softwareYuvConversion_) {
+        hardwareFrames_ = av_hwframe_ctx_alloc(hardwareDevice_);
+        if (hardwareFrames_ == nullptr) {
+            lastError_ = "Could not allocate the FFmpeg D3D11 frame context.";
+            ReleaseResources(false);
+            return FFFResult::FfmpegFailure;
+        }
+        auto* frameContext = reinterpret_cast<AVHWFramesContext*>(hardwareFrames_->data);
+        frameContext->format = AV_PIX_FMT_D3D11;
+        frameContext->sw_format = softwareFormat;
+        frameContext->width = static_cast<int>(width);
+        frameContext->height = static_cast<int>(height);
+        frameContext->initial_pool_size = (softwareEncoder_ || shaderConversion_)
+            ? 0 : std::max(24U, bFrameCount + 10U);
+        if (videoProcessorConversion_ || shaderConversion_) {
+            auto* d3d11Frames = reinterpret_cast<AVD3D11VAFramesContext*>(frameContext->hwctx);
+            d3d11Frames->BindFlags = videoProcessorConversion_
+                ? D3D11_BIND_RENDER_TARGET : D3D11_BIND_UNORDERED_ACCESS;
+        }
+        result = av_hwframe_ctx_init(hardwareFrames_);
+        if (result < 0) {
+            SetFfmpegError("av_hwframe_ctx_init", result);
+            ReleaseResources(false);
+            return FFFResult::FfmpegFailure;
+        }
     }
 
     if (qsvEncoder_) {
@@ -156,28 +325,38 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
             ReleaseResources(false);
             return FFFResult::NotSupported;
         }
-        result = av_hwframe_ctx_create_derived(&encoderFrames_, AV_PIX_FMT_QSV,
-            encoderHardwareDevice_, hardwareFrames_, AV_HWFRAME_MAP_READ | AV_HWFRAME_MAP_DIRECT);
-        if (result < 0) {
-            SetFfmpegError("av_hwframe_ctx_create_derived(QSV from D3D11 frames)", result);
-            ReleaseResources(false);
-            return FFFResult::NotSupported;
+        if (!softwareYuvConversion_) {
+            result = av_hwframe_ctx_create_derived(&encoderFrames_, AV_PIX_FMT_QSV,
+                encoderHardwareDevice_, hardwareFrames_, AV_HWFRAME_MAP_READ | AV_HWFRAME_MAP_DIRECT);
+            if (result < 0) {
+                SetFfmpegError("av_hwframe_ctx_create_derived(QSV from D3D11 frames)", result);
+                ReleaseResources(false);
+                return FFFResult::NotSupported;
+            }
         }
     } else if (!softwareEncoder_) {
         encoderHardwareDevice_ = av_buffer_ref(hardwareDevice_);
-        encoderFrames_ = av_buffer_ref(hardwareFrames_);
-        if (encoderHardwareDevice_ == nullptr || encoderFrames_ == nullptr) {
+        if (hardwareFrames_ != nullptr) encoderFrames_ = av_buffer_ref(hardwareFrames_);
+        if (encoderHardwareDevice_ == nullptr || (!softwareYuvConversion_ && encoderFrames_ == nullptr)) {
             lastError_ = "Could not retain the FFmpeg encoder hardware contexts.";
             ReleaseResources(false);
             return FFFResult::FfmpegFailure;
         }
     }
-    if (qsvEncoder_ || softwareEncoder_) {
+    if (videoProcessorConversion_) {
         const auto processorResult = InitializeVideoProcessor(frameRateNumerator,
-            frameRateDenominator, hdr10);
+            frameRateDenominator, hdr10, colorRange);
         if (processorResult != FFFResult::Success) {
             ReleaseResources(false);
             return processorResult;
+        }
+    }
+    if (shaderConversion_) {
+        const auto converterResult = InitializeRgbToYuvConverter(tenBit, hdr10,
+            chromaSampling, softwareYuvConversion_, colorRange);
+        if (converterResult != FFFResult::Success) {
+            ReleaseResources(false);
+            return converterResult;
         }
     }
 
@@ -191,21 +370,23 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     codecContext_->height = static_cast<int>(height);
     codecContext_->time_base = { static_cast<int>(frameRateDenominator), static_cast<int>(frameRateNumerator) };
     codecContext_->framerate = { static_cast<int>(frameRateNumerator), static_cast<int>(frameRateDenominator) };
-    codecContext_->pix_fmt = softwareEncoder_ ? softwareFormat :
+    codecContext_->pix_fmt = softwareYuvConversion_ ? softwareFormat :
         (qsvEncoder_ ? AV_PIX_FMT_QSV : AV_PIX_FMT_D3D11);
     codecContext_->sw_pix_fmt = softwareFormat;
     codecContext_->bit_rate = bitRate;
     codecContext_->gop_size = static_cast<int>(gopSize);
     codecContext_->max_b_frames = static_cast<int>(bFrameCount);
     codecContext_->rc_max_rate = maximumBitRate;
-    codecContext_->color_range = colorRange == 2 ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+    // Treat the automatic/default mode as PC full range. Only an explicit limited
+    // selection requests TV range; this keeps existing recorder configurations full-range.
+    codecContext_->color_range = colorRange == 1 ? AVCOL_RANGE_MPEG : AVCOL_RANGE_JPEG;
     codecContext_->color_primaries = hdr10 ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709;
     codecContext_->color_trc = hdr10 ? AVCOL_TRC_SMPTE2084 : AVCOL_TRC_BT709;
     codecContext_->colorspace = hdr10 ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709;
     codecContext_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     if (!softwareEncoder_) {
         codecContext_->hw_device_ctx = av_buffer_ref(encoderHardwareDevice_);
-        codecContext_->hw_frames_ctx = av_buffer_ref(encoderFrames_);
+        if (encoderFrames_ != nullptr) codecContext_->hw_frames_ctx = av_buffer_ref(encoderFrames_);
     }
     if (qsvEncoder_ && rateControl == 1) {
         codecContext_->bit_rate = 0;
@@ -215,7 +396,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     }
 
     AVDictionary* encoderOptions = nullptr;
-    const bool nvenc = encoderName.find("_nvenc") != std::string::npos;
+    const bool nvenc = nvencEncoder;
     const bool qsv = qsvEncoder_;
     const bool amf = encoderName.find("_amf") != std::string::npos;
     if ((qsv || amf) && multipass != 0) {
@@ -228,9 +409,8 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         av_dict_set(&encoderOptions, "preset", preset.empty() ? "p4" : preset.c_str(), 0);
         av_dict_set(&encoderOptions, "tune", sceneOptimization.empty() ? "hq" : sceneOptimization.c_str(), 0);
         av_dict_set(&encoderOptions, "surfaces", "8", 0);
-        av_dict_set(&encoderOptions, "rgb_mode", chromaSampling == 1 ? "yuv444" : "yuv420", 0);
         const auto selectedProfile = profile.empty() && tenBit && encoderName.find("hevc") != std::string::npos
-            ? (chromaSampling == 1 ? "rext" : "main10") : profile.c_str();
+            ? (chromaSampling != 0 ? "rext" : "main10") : profile.c_str();
         if (selectedProfile != nullptr && *selectedProfile != '\0')
             av_dict_set(&encoderOptions, "profile", selectedProfile, 0);
         if (tenBit && encoderName.find("av1") != std::string::npos)
@@ -251,7 +431,10 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
             selectedPreset = Presets[preset[1] - '0'];
         }
         if (!selectedPreset.empty()) av_dict_set(&encoderOptions, "preset", selectedPreset.c_str(), 0);
-        if (!profile.empty()) av_dict_set(&encoderOptions, "profile", profile.c_str(), 0);
+        const auto selectedProfile = profile.empty() && chromaSampling != 0 &&
+            encoderName.find("hevc") != std::string::npos ? "rext" : profile.c_str();
+        if (selectedProfile != nullptr && *selectedProfile != '\0')
+            av_dict_set(&encoderOptions, "profile", selectedProfile, 0);
         if (rateControl == 1 && quality >= 0) {
             codecContext_->flags |= AV_CODEC_FLAG_QSCALE;
             codecContext_->global_quality = quality * FF_QP2LAMBDA;
@@ -328,7 +511,6 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         ReleaseResources(false);
         return FFFResult::FfmpegFailure;
     }
-    formatContext_->flags |= AVFMT_FLAG_BITEXACT;
     videoStream_ = avformat_new_stream(formatContext_, nullptr);
     if (videoStream_ == nullptr) {
         lastError_ = "Could not create the Matroska video stream.";
@@ -403,10 +585,356 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     return FFFResult::Success;
 }
 
+FFFResult VideoMuxer::InitializeRgbToYuvConverter(const bool tenBit, const bool hdr10,
+    const std::uint32_t chromaSampling, const bool softwareYuv,
+    const std::uint32_t colorRange) noexcept {
+    auto result = d3d11Device_->QueryInterface(IID_PPV_ARGS(&d3d11Device3_));
+    if (FAILED(result)) {
+        lastError_ = "Full-range GPU color conversion requires ID3D11Device3.";
+        return FFFResult::NotSupported;
+    }
+
+    const D3D_SHADER_MACRO macros[] = {
+        { "PLANAR_444", softwareYuv && chromaSampling == 1 ? "1" : "0" },
+        { "PLANAR_422", softwareYuv && chromaSampling == 2 ? "1" : "0" },
+        { "PLANAR_420", softwareYuv && chromaSampling == 0 ? "1" : "0" },
+        { "TEN_BIT", tenBit ? "1" : "0" },
+        { "HDR_BT2020", hdr10 ? "1" : "0" },
+        { "FULL_RANGE", colorRange == 1 ? "0" : "1" },
+        { nullptr, nullptr }
+    };
+    Microsoft::WRL::ComPtr<ID3DBlob> byteCode;
+    Microsoft::WRL::ComPtr<ID3DBlob> errors;
+    result = D3DCompile(RgbToYuvShader, sizeof(RgbToYuvShader) - 1, "RgbToYuv", macros, nullptr,
+        "Convert", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &byteCode, &errors);
+    if (FAILED(result)) {
+        lastError_ = "Could not compile the full-range RGB to YUV shader";
+        if (errors != nullptr && errors->GetBufferPointer() != nullptr) {
+            lastError_ += ": " + std::string(static_cast<const char*>(errors->GetBufferPointer()),
+                errors->GetBufferSize());
+        }
+        return FFFResult::NativeFailure;
+    }
+    result = d3d11Device_->CreateComputeShader(byteCode->GetBufferPointer(), byteCode->GetBufferSize(),
+        nullptr, &rgbToYuvShader_);
+    if (FAILED(result)) {
+        lastError_ = "Could not create the full-range RGB to YUV compute shader: " +
+            std::to_string(static_cast<long>(result));
+        return FFFResult::DeviceFailure;
+    }
+    if (softwareYuv) {
+        D3D11_TEXTURE2D_DESC description{};
+        description.MipLevels = 1;
+        description.ArraySize = 1;
+        description.Format = tenBit ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        for (std::size_t plane = 0; plane < 3; ++plane) {
+            description.Width = plane == 0 || chromaSampling == 1 ? width_ : width_ / 2;
+            description.Height = plane == 0 || chromaSampling != 0 ? height_ : height_ / 2;
+            result = d3d11Device_->CreateTexture2D(&description, nullptr, &yuv444GpuTextures_[plane]);
+            if (FAILED(result)) {
+                lastError_ = "Could not create the GPU software YUV conversion plane: " +
+                    std::to_string(static_cast<long>(result));
+                return FFFResult::DeviceFailure;
+            }
+            description.Usage = D3D11_USAGE_STAGING;
+            description.BindFlags = 0;
+            description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            result = d3d11Device_->CreateTexture2D(&description, nullptr, &yuv444StagingTextures_[plane]);
+            if (FAILED(result)) {
+                lastError_ = "Could not create the staging software YUV conversion plane: " +
+                    std::to_string(static_cast<long>(result));
+                return FFFResult::DeviceFailure;
+            }
+            description.Usage = D3D11_USAGE_DEFAULT;
+            description.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+            description.CPUAccessFlags = 0;
+        }
+    }
+    return FFFResult::Success;
+}
+
+FFFResult VideoMuxer::ConvertTextureToEncoderSurfaceWithShader(ID3D11Texture2D* sourceTexture,
+    const std::uint32_t sourceArrayIndex, ID3D11Texture2D* destinationTexture,
+    const std::uint32_t destinationArrayIndex) noexcept {
+    D3D11_TEXTURE2D_DESC sourceDescription{};
+    sourceTexture->GetDesc(&sourceDescription);
+    if (sourceDescription.ArraySize != 1 || sourceArrayIndex != 0) {
+        lastError_ = "The full-range RGB converter requires a single-surface source texture.";
+        return FFFResult::NotSupported;
+    }
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sourceView;
+    auto result = d3d11Device_->CreateShaderResourceView(sourceTexture, nullptr, &sourceView);
+    if (FAILED(result)) {
+        lastError_ = "Could not create the RGB encoder input view: " +
+            std::to_string(static_cast<long>(result));
+        return FFFResult::DeviceFailure;
+    }
+
+    D3D11_TEXTURE2D_DESC destinationDescription{};
+    destinationTexture->GetDesc(&destinationDescription);
+    auto createOutputView = [&](const DXGI_FORMAT format, const std::uint32_t plane,
+        ID3D11UnorderedAccessView1** outputView) {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC1 description{};
+        description.Format = format;
+        if (destinationDescription.ArraySize > 1) {
+            description.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+            description.Texture2DArray.MipSlice = 0;
+            description.Texture2DArray.FirstArraySlice = destinationArrayIndex;
+            description.Texture2DArray.ArraySize = 1;
+            description.Texture2DArray.PlaneSlice = plane;
+        } else {
+            description.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+            description.Texture2D.MipSlice = 0;
+            description.Texture2D.PlaneSlice = plane;
+        }
+        return d3d11Device3_->CreateUnorderedAccessView1(destinationTexture, &description, outputView);
+    };
+
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView1> outputViews[2];
+    const auto lumaFormat = tenBit_ ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+    const auto chromaFormat = tenBit_ ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
+    result = createOutputView(lumaFormat, 0, outputViews[0].GetAddressOf());
+    if (SUCCEEDED(result)) result = createOutputView(chromaFormat, 1, outputViews[1].GetAddressOf());
+    if (FAILED(result)) {
+        lastError_ = "Could not create the full-range YUV encoder output view: " +
+            std::to_string(static_cast<long>(result));
+        return FFFResult::DeviceFailure;
+    }
+
+    ID3D11ShaderResourceView* sourceViews[] = { sourceView.Get() };
+    ID3D11UnorderedAccessView* unorderedViews[] = { outputViews[0].Get(), outputViews[1].Get() };
+    immediateContext_->CSSetShader(rgbToYuvShader_, nullptr, 0);
+    immediateContext_->CSSetShaderResources(0, 1, sourceViews);
+    immediateContext_->CSSetUnorderedAccessViews(0, 2, unorderedViews, nullptr);
+    immediateContext_->Dispatch((width_ + 7U) / 8U, (height_ + 7U) / 8U, 1);
+    ID3D11ShaderResourceView* nullSource[] = { nullptr };
+    ID3D11UnorderedAccessView* nullOutputs[] = { nullptr, nullptr };
+    immediateContext_->CSSetShaderResources(0, 1, nullSource);
+    immediateContext_->CSSetUnorderedAccessViews(0, 2, nullOutputs, nullptr);
+    immediateContext_->CSSetShader(nullptr, nullptr, 0);
+    return FFFResult::Success;
+}
+
+FFFResult VideoMuxer::EncodeSoftwareYuv(ID3D11Texture2D* sourceTexture,
+    const std::uint32_t sourceArrayIndex, const std::int64_t presentationTimestamp) noexcept {
+    D3D11_TEXTURE2D_DESC sourceDescription{};
+    sourceTexture->GetDesc(&sourceDescription);
+    if (sourceDescription.ArraySize != 1 || sourceArrayIndex != 0) {
+        lastError_ = "The full-range software YUV converter requires a single-surface source texture.";
+        return FFFResult::NotSupported;
+    }
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sourceView;
+    auto result = d3d11Device_->CreateShaderResourceView(sourceTexture, nullptr, &sourceView);
+    if (FAILED(result)) {
+        lastError_ = "Could not create the RGB software YUV input view: " +
+            std::to_string(static_cast<long>(result));
+        return FFFResult::DeviceFailure;
+    }
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> outputViews[3];
+    for (std::size_t plane = 0; plane < 3; ++plane) {
+        result = d3d11Device_->CreateUnorderedAccessView(yuv444GpuTextures_[plane], nullptr,
+            &outputViews[plane]);
+        if (FAILED(result)) {
+            lastError_ = "Could not create the planar software YUV output view: " +
+                std::to_string(static_cast<long>(result));
+            return FFFResult::DeviceFailure;
+        }
+    }
+
+    ID3D11ShaderResourceView* sourceViews[] = { sourceView.Get() };
+    ID3D11UnorderedAccessView* unorderedViews[] = {
+        outputViews[0].Get(), outputViews[1].Get(), outputViews[2].Get()
+    };
+    immediateContext_->CSSetShader(rgbToYuvShader_, nullptr, 0);
+    immediateContext_->CSSetShaderResources(0, 1, sourceViews);
+    immediateContext_->CSSetUnorderedAccessViews(0, 3, unorderedViews, nullptr);
+    immediateContext_->Dispatch((width_ + 7U) / 8U, (height_ + 7U) / 8U, 1);
+    ID3D11ShaderResourceView* nullSource[] = { nullptr };
+    ID3D11UnorderedAccessView* nullOutputs[] = { nullptr, nullptr, nullptr };
+    immediateContext_->CSSetShaderResources(0, 1, nullSource);
+    immediateContext_->CSSetUnorderedAccessViews(0, 3, nullOutputs, nullptr);
+    immediateContext_->CSSetShader(nullptr, nullptr, 0);
+    for (std::size_t plane = 0; plane < 3; ++plane) {
+        immediateContext_->CopyResource(yuv444StagingTextures_[plane], yuv444GpuTextures_[plane]);
+    }
+
+    AVFrame* frame = av_frame_alloc();
+    if (frame == nullptr) {
+        lastError_ = "Could not allocate the software YUV encoder frame.";
+        return FFFResult::FfmpegFailure;
+    }
+    frame->format = codecContext_->pix_fmt;
+    frame->width = static_cast<int>(width_);
+    frame->height = static_cast<int>(height_);
+    result = av_frame_get_buffer(frame, 32);
+    if (result < 0) {
+        SetFfmpegError("av_frame_get_buffer(software YUV)", result);
+        av_frame_free(&frame);
+        return FFFResult::FfmpegFailure;
+    }
+    D3D11_MAPPED_SUBRESOURCE mappedPlanes[3]{};
+    std::size_t mappedPlaneCount = 0;
+    for (std::size_t plane = 0; plane < 3; ++plane) {
+        const auto mappedResult = immediateContext_->Map(yuv444StagingTextures_[plane], 0,
+            D3D11_MAP_READ, 0, &mappedPlanes[plane]);
+        if (FAILED(mappedResult)) {
+            for (std::size_t mappedPlane = 0; mappedPlane < mappedPlaneCount; ++mappedPlane)
+                immediateContext_->Unmap(yuv444StagingTextures_[mappedPlane], 0);
+            lastError_ = "Could not read back the converted software YUV plane: " +
+                std::to_string(static_cast<long>(mappedResult));
+            av_frame_free(&frame);
+            return FFFResult::DeviceFailure;
+        }
+        ++mappedPlaneCount;
+    }
+    if (codecContext_->pix_fmt == AV_PIX_FMT_XV30) {
+        for (std::uint32_t row = 0; row < height_; ++row) {
+            auto* output = reinterpret_cast<std::uint32_t*>(frame->data[0] +
+                static_cast<std::size_t>(row) * frame->linesize[0]);
+            const auto* y = reinterpret_cast<const std::uint16_t*>(
+                static_cast<const std::uint8_t*>(mappedPlanes[0].pData) +
+                static_cast<std::size_t>(row) * mappedPlanes[0].RowPitch);
+            const auto* u = reinterpret_cast<const std::uint16_t*>(
+                static_cast<const std::uint8_t*>(mappedPlanes[1].pData) +
+                static_cast<std::size_t>(row) * mappedPlanes[1].RowPitch);
+            const auto* v = reinterpret_cast<const std::uint16_t*>(
+                static_cast<const std::uint8_t*>(mappedPlanes[2].pData) +
+                static_cast<std::size_t>(row) * mappedPlanes[2].RowPitch);
+            for (std::uint32_t column = 0; column < width_; ++column)
+                output[column] = (u[column] >> 6) | ((y[column] >> 6) << 10) |
+                    ((v[column] >> 6) << 20);
+        }
+    } else if (codecContext_->pix_fmt == AV_PIX_FMT_VUYX) {
+        for (std::uint32_t row = 0; row < height_; ++row) {
+            auto* output = frame->data[0] + static_cast<std::size_t>(row) * frame->linesize[0];
+            const auto* y = static_cast<const std::uint8_t*>(mappedPlanes[0].pData) +
+                static_cast<std::size_t>(row) * mappedPlanes[0].RowPitch;
+            const auto* u = static_cast<const std::uint8_t*>(mappedPlanes[1].pData) +
+                static_cast<std::size_t>(row) * mappedPlanes[1].RowPitch;
+            const auto* v = static_cast<const std::uint8_t*>(mappedPlanes[2].pData) +
+                static_cast<std::size_t>(row) * mappedPlanes[2].RowPitch;
+            for (std::uint32_t column = 0; column < width_; ++column) {
+                output[column * 4] = v[column]; output[column * 4 + 1] = u[column];
+                output[column * 4 + 2] = y[column]; output[column * 4 + 3] = 0xFF;
+            }
+        }
+    } else if (codecContext_->pix_fmt == AV_PIX_FMT_Y210 ||
+        codecContext_->pix_fmt == AV_PIX_FMT_YUYV422) {
+        for (std::uint32_t row = 0; row < height_; ++row) {
+            auto* output = frame->data[0] + static_cast<std::size_t>(row) * frame->linesize[0];
+            const auto* y = static_cast<const std::uint8_t*>(mappedPlanes[0].pData) +
+                static_cast<std::size_t>(row) * mappedPlanes[0].RowPitch;
+            const auto* u = static_cast<const std::uint8_t*>(mappedPlanes[1].pData) +
+                static_cast<std::size_t>(row) * mappedPlanes[1].RowPitch;
+            const auto* v = static_cast<const std::uint8_t*>(mappedPlanes[2].pData) +
+                static_cast<std::size_t>(row) * mappedPlanes[2].RowPitch;
+            if (tenBit_) {
+                auto* words = reinterpret_cast<std::uint16_t*>(output);
+                const auto* yy = reinterpret_cast<const std::uint16_t*>(y);
+                const auto* uu = reinterpret_cast<const std::uint16_t*>(u);
+                const auto* vv = reinterpret_cast<const std::uint16_t*>(v);
+                for (std::uint32_t column = 0; column < width_ / 2; ++column) {
+                    words[column * 4] = yy[column * 2]; words[column * 4 + 1] = uu[column];
+                    words[column * 4 + 2] = yy[column * 2 + 1]; words[column * 4 + 3] = vv[column];
+                }
+            } else {
+                for (std::uint32_t column = 0; column < width_ / 2; ++column) {
+                    output[column * 4] = y[column * 2]; output[column * 4 + 1] = u[column];
+                    output[column * 4 + 2] = y[column * 2 + 1]; output[column * 4 + 3] = v[column];
+                }
+            }
+        }
+    } else if (codecContext_->pix_fmt == AV_PIX_FMT_P210 ||
+        codecContext_->pix_fmt == AV_PIX_FMT_NV16) {
+        for (std::uint32_t row = 0; row < height_; ++row) {
+            const auto componentBytes = tenBit_ ? 2U : 1U;
+            std::memcpy(frame->data[0] + static_cast<std::size_t>(row) * frame->linesize[0],
+                static_cast<const std::uint8_t*>(mappedPlanes[0].pData) +
+                    static_cast<std::size_t>(row) * mappedPlanes[0].RowPitch,
+                static_cast<std::size_t>(width_) * componentBytes);
+            auto* destination = frame->data[1] + static_cast<std::size_t>(row) * frame->linesize[1];
+            const auto* sourceU = static_cast<const std::uint8_t*>(mappedPlanes[1].pData) +
+                static_cast<std::size_t>(row) * mappedPlanes[1].RowPitch;
+            const auto* sourceV = static_cast<const std::uint8_t*>(mappedPlanes[2].pData) +
+                static_cast<std::size_t>(row) * mappedPlanes[2].RowPitch;
+            if (tenBit_) {
+                auto* output = reinterpret_cast<std::uint16_t*>(destination);
+                const auto* inputU = reinterpret_cast<const std::uint16_t*>(sourceU);
+                const auto* inputV = reinterpret_cast<const std::uint16_t*>(sourceV);
+                for (std::uint32_t column = 0; column < width_ / 2; ++column) {
+                    output[column * 2] = inputU[column];
+                    output[column * 2 + 1] = inputV[column];
+                }
+            } else {
+                for (std::uint32_t column = 0; column < width_ / 2; ++column) {
+                    destination[column * 2] = sourceU[column];
+                    destination[column * 2 + 1] = sourceV[column];
+                }
+            }
+        }
+    } else {
+        const bool lowAlignedTenBit =
+            codecContext_->pix_fmt == AV_PIX_FMT_YUV420P10 ||
+            codecContext_->pix_fmt == AV_PIX_FMT_YUV422P10 ||
+            codecContext_->pix_fmt == AV_PIX_FMT_YUV444P10;
+        const bool planar = lowAlignedTenBit ||
+            codecContext_->pix_fmt == AV_PIX_FMT_YUV420P ||
+            codecContext_->pix_fmt == AV_PIX_FMT_YUV422P ||
+            codecContext_->pix_fmt == AV_PIX_FMT_YUV444P ||
+            codecContext_->pix_fmt == AV_PIX_FMT_YUV444P10MSB;
+        if (!planar) {
+            for (std::size_t plane = 0; plane < 3; ++plane)
+                immediateContext_->Unmap(yuv444StagingTextures_[plane], 0);
+            lastError_ = "The selected encoder software pixel format is not packable.";
+            av_frame_free(&frame);
+            return FFFResult::NotSupported;
+        }
+        for (std::size_t plane = 0; plane < 3; ++plane) {
+            const auto planeWidth = plane == 0 || chromaSampling_ == 1 ? width_ : width_ / 2;
+            const auto planeHeight = plane == 0 || chromaSampling_ != 0 ? height_ : height_ / 2;
+            for (std::uint32_t row = 0; row < planeHeight; ++row) {
+                auto* destination = frame->data[plane] +
+                    static_cast<std::size_t>(row) * frame->linesize[plane];
+                const auto* source = static_cast<const std::uint8_t*>(mappedPlanes[plane].pData) +
+                    static_cast<std::size_t>(row) * mappedPlanes[plane].RowPitch;
+                if (tenBit_ && lowAlignedTenBit) {
+                    auto* output = reinterpret_cast<std::uint16_t*>(destination);
+                    const auto* input = reinterpret_cast<const std::uint16_t*>(source);
+                    for (std::uint32_t column = 0; column < planeWidth; ++column)
+                        output[column] = input[column] >> 6;
+                } else {
+                    std::memcpy(destination, source,
+                        static_cast<std::size_t>(planeWidth) * (tenBit_ ? 2U : 1U));
+                }
+            }
+        }
+    }
+    for (std::size_t plane = 0; plane < 3; ++plane)
+        immediateContext_->Unmap(yuv444StagingTextures_[plane], 0);
+    frame->pts = presentationTimestamp;
+    frame->duration = 1;
+    frame->color_range = codecContext_->color_range;
+    frame->color_primaries = codecContext_->color_primaries;
+    frame->color_trc = codecContext_->color_trc;
+    frame->colorspace = codecContext_->colorspace;
+    result = avcodec_send_frame(codecContext_, frame);
+    av_frame_free(&frame);
+    if (result < 0) {
+        SetFfmpegError("avcodec_send_frame(software YUV)", result);
+        return FFFResult::FfmpegFailure;
+    }
+    return DrainPackets();
+}
+
 // 为需要 NV12/P010 的编码路径创建 D3D11 Video Processor 和颜色空间配置。输入是托管 shader 生成的 BGRA8 SDR
 // 或 RGB10 PQ，输出是 FFmpeg surface pool 的 NV12/P010；所有接口都来自同一个 D3D11 Device。
 FFFResult VideoMuxer::InitializeVideoProcessor(const std::uint32_t frameRateNumerator,
-    const std::uint32_t frameRateDenominator, const bool hdr10) noexcept {
+    const std::uint32_t frameRateDenominator, const bool hdr10,
+    const std::uint32_t colorRange) noexcept {
+    const bool fullRange = colorRange != 1;
     auto result = d3d11Device_->QueryInterface(IID_PPV_ARGS(&videoDevice_));
     if (FAILED(result)) {
         lastError_ = "The D3D11 device does not expose ID3D11VideoDevice for color conversion.";
@@ -444,9 +972,13 @@ FFFResult VideoMuxer::InitializeVideoProcessor(const std::uint32_t frameRateNume
     if (videoContext1_ != nullptr) {
         videoContext1_->VideoProcessorSetStreamColorSpace1(videoProcessor_, 0,
             hdr10 ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        // DXGI has no full-range YCbCr PQ enum. Use the full-range P2020 matrix here;
+        // SMPTE 2084 is still carried by the AVFrame, codec VUI, and container metadata.
         videoContext1_->VideoProcessorSetOutputColorSpace1(videoProcessor_,
-            hdr10 ? DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020 :
-                DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
+            hdr10 ? (fullRange ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020 :
+                DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020) :
+                (fullRange ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709 :
+                    DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709));
     } else if (hdr10) {
         lastError_ = "HDR conversion requires ID3D11VideoContext1 color-space controls.";
         return FFFResult::NotSupported;
@@ -455,7 +987,7 @@ FFFResult VideoMuxer::InitializeVideoProcessor(const std::uint32_t frameRateNume
         inputColor.Nominal_Range = 2;
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE outputColor{};
         outputColor.YCbCr_Matrix = 1;
-        outputColor.Nominal_Range = 1;
+        outputColor.Nominal_Range = fullRange ? 2 : 1;
         videoContext_->VideoProcessorSetStreamColorSpace(videoProcessor_, 0, &inputColor);
         videoContext_->VideoProcessorSetOutputColorSpace(videoProcessor_, &outputColor);
     }
@@ -532,6 +1064,10 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
         return FFFResult::InvalidArgument;
     }
 
+    if (softwareYuvConversion_) {
+        return EncodeSoftwareYuv(sourceTexture, sourceArrayIndex, presentationTimestamp);
+    }
+
     AVFrame* frame = av_frame_alloc();
     if (frame == nullptr) {
         lastError_ = "Could not allocate an FFmpeg video frame.";
@@ -545,7 +1081,14 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
     }
     auto* destinationTexture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
     const auto destinationIndex = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
-    if (qsvEncoder_ || softwareEncoder_) {
+    if (shaderConversion_) {
+        const auto converted = ConvertTextureToEncoderSurfaceWithShader(sourceTexture, sourceArrayIndex,
+            destinationTexture, destinationIndex);
+        if (converted != FFFResult::Success) {
+            av_frame_free(&frame);
+            return converted;
+        }
+    } else if (videoProcessorConversion_) {
         const auto converted = ConvertTextureToEncoderSurface(sourceTexture, sourceArrayIndex,
             destinationTexture, destinationIndex);
         if (converted != FFFResult::Success) {
@@ -942,6 +1485,24 @@ void VideoMuxer::ReleaseResources(const bool writeTrailer) noexcept {
         videoDevice_->Release();
         videoDevice_ = nullptr;
     }
+    if (rgbToYuvShader_ != nullptr) {
+        rgbToYuvShader_->Release();
+        rgbToYuvShader_ = nullptr;
+    }
+    for (std::size_t plane = 0; plane < 3; ++plane) {
+        if (yuv444StagingTextures_[plane] != nullptr) {
+            yuv444StagingTextures_[plane]->Release();
+            yuv444StagingTextures_[plane] = nullptr;
+        }
+        if (yuv444GpuTextures_[plane] != nullptr) {
+            yuv444GpuTextures_[plane]->Release();
+            yuv444GpuTextures_[plane] = nullptr;
+        }
+    }
+    if (d3d11Device3_ != nullptr) {
+        d3d11Device3_->Release();
+        d3d11Device3_ = nullptr;
+    }
     if (encoderFrames_ != nullptr) av_buffer_unref(&encoderFrames_);
     if (encoderHardwareDevice_ != nullptr) av_buffer_unref(&encoderHardwareDevice_);
     if (hardwareFrames_ != nullptr) av_buffer_unref(&hardwareFrames_);
@@ -955,5 +1516,10 @@ void VideoMuxer::ReleaseResources(const bool writeTrailer) noexcept {
     inputDxgiFormat_ = 0;
     qsvEncoder_ = false;
     softwareEncoder_ = false;
+    videoProcessorConversion_ = false;
+    shaderConversion_ = false;
+    softwareYuvConversion_ = false;
+    tenBit_ = false;
+    chromaSampling_ = 0;
     hdr10_ = false;
 }

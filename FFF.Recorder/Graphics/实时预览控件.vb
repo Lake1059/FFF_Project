@@ -26,6 +26,7 @@ Public NotInheritable Class 实时预览控件
     Private 已释放 As Boolean
     Private 源代次 As Integer
     Private 状态文本 As String = "请选择视频源"
+    Private 切换任务 As Task = Task.CompletedTask
 
     Public Sub New()
         SetStyle(ControlStyles.Opaque Or ControlStyles.ResizeRedraw, True)
@@ -47,8 +48,7 @@ Public NotInheritable Class 实时预览控件
             应启动 = 活动 AndAlso 源 IsNot Nothing AndAlso Not 录制接管 AndAlso IsHandleCreated
         End SyncLock
         Invalidate()
-        排队释放空闲预览(待释放)
-        If 应启动 Then 排队启动空闲预览(源, 当前代次)
+        排队切换空闲预览(待释放, If(应启动, 源, Nothing), 当前代次)
     End Sub
 
     Public Sub 设置活动(是否活动 As Boolean)
@@ -69,8 +69,7 @@ Public NotInheritable Class 实时预览控件
                 If(源 Is Nothing, "请选择视频源", If(录制接管, "等待录制画面...", "正在连接预览...")))
         End SyncLock
         Invalidate()
-        排队释放空闲预览(待释放)
-        If 应启动 Then 排队启动空闲预览(源, 当前代次)
+        排队切换空闲预览(待释放, If(应启动, 源, Nothing), 当前代次)
     End Sub
 
     Public Sub 开始录制预览()
@@ -83,7 +82,7 @@ Public NotInheritable Class 实时预览控件
             状态文本 = If(活动, "等待录制画面...", String.Empty)
         End SyncLock
         Invalidate()
-        排队释放空闲预览(待释放)
+        排队切换空闲预览(待释放, Nothing, 0)
     End Sub
 
     Public Sub 结束录制预览()
@@ -100,7 +99,7 @@ Public NotInheritable Class 实时预览控件
             应启动 = 活动 AndAlso 源 IsNot Nothing AndAlso IsHandleCreated
         End SyncLock
         Invalidate()
-        If 应启动 Then 排队启动空闲预览(源, 当前代次)
+        If 应启动 Then 排队切换空闲预览(Nothing, 源, 当前代次)
     End Sub
 
     Friend Sub 提交GPU帧(图形 As 图形设备, 帧 As 处理后视频帧)
@@ -154,7 +153,7 @@ Public NotInheritable Class 实时预览控件
             当前代次 = 源代次
             允许启动 = 活动 AndAlso Not 录制接管
         End SyncLock
-        If 源 IsNot Nothing AndAlso 允许启动 Then 排队启动空闲预览(源, 当前代次)
+        If 源 IsNot Nothing AndAlso 允许启动 Then 排队切换空闲预览(Nothing, 源, 当前代次)
     End Sub
 
     Protected Overrides Sub OnHandleDestroyed(e As EventArgs)
@@ -195,40 +194,55 @@ Public NotInheritable Class 实时预览控件
         MyBase.Dispose(disposing)
     End Sub
 
-    Private Sub 排队启动空闲预览(源 As 视频源条目, 代次 As Integer)
+    Private Sub 排队切换空闲预览(待释放 As 预览控制器, 源 As 视频源条目, 代次 As Integer)
         Dim 预览尺寸 = ClientSize
         Dim 捕获鼠标 = 设置.实例对象.捕获鼠标
-        Task.Run(
-            Sub()
-                Dim 新预览 As New 预览控制器(Me, 源, 捕获鼠标,
-                    Math.Max(1, 预览尺寸.Width), Math.Max(1, 预览尺寸.Height))
-                Try
-                    SyncLock 同步锁
-                        If 已释放 OrElse Not 活动 OrElse 录制接管 OrElse Not IsHandleCreated OrElse
-                            代次 <> 源代次 OrElse 当前源 IsNot 源 Then Return
-                        空闲预览 = 新预览
-                        新预览.开始()
-                    End SyncLock
-                Catch ex As Exception
-                    SyncLock 同步锁
-                        If 空闲预览 Is 新预览 Then
-                            空闲预览 = Nothing
-                            状态文本 = $"预览不可用：{ex.Message}"
-                        End If
-                    End SyncLock
-                    If IsHandleCreated Then
-                        Try
-                            BeginInvoke(Sub() Invalidate())
-                        Catch ex2 As InvalidOperationException
-                        End Try
+        SyncLock 同步锁
+            ' 所有释放和启动共用一条任务链，避免多个 WGC/D3D 初始化同时争用 GPU。
+            切换任务 = 切换任务.ContinueWith(
+                Sub(已完成任务) 执行空闲预览切换(待释放, 源, 代次, 预览尺寸, 捕获鼠标),
+                TaskScheduler.Default)
+        End SyncLock
+    End Sub
+
+    Private Sub 执行空闲预览切换(待释放 As 预览控制器, 源 As 视频源条目, 代次 As Integer,
+        预览尺寸 As Size, 捕获鼠标 As Boolean)
+        Try
+            待释放?.释放()
+        Catch
+        End Try
+        If 源 Is Nothing Then Return
+
+        Dim 新预览 As New 预览控制器(Me, 源, 捕获鼠标,
+            Math.Max(1, 预览尺寸.Width), Math.Max(1, 预览尺寸.Height))
+        Try
+            SyncLock 同步锁
+                If 已释放 OrElse Not 活动 OrElse 录制接管 OrElse Not IsHandleCreated OrElse
+                    代次 <> 源代次 OrElse 当前源 IsNot 源 OrElse 空闲预览 IsNot Nothing Then Return
+                空闲预览 = 新预览
+            End SyncLock
+            新预览.开始()
+        Catch ex As Exception
+            SyncLock 同步锁
+                If 空闲预览 Is 新预览 Then
+                    空闲预览 = Nothing
+                    If 代次 = 源代次 AndAlso 当前源 Is 源 Then
+                        状态文本 = $"预览不可用：{ex.Message}"
                     End If
-                Finally
-                    SyncLock 同步锁
-                        If 空闲预览 Is 新预览 Then 新预览 = Nothing
-                    End SyncLock
-                    新预览?.释放()
+                End If
+            End SyncLock
+            If IsHandleCreated Then
+                Try
+                    BeginInvoke(Sub() Invalidate())
+                Catch ex2 As InvalidOperationException
                 End Try
-            End Sub)
+            End If
+        Finally
+            SyncLock 同步锁
+                If 空闲预览 Is 新预览 Then 新预览 = Nothing
+            End SyncLock
+            新预览?.释放()
+        End Try
     End Sub
 
     Private Function 取出空闲预览() As 预览控制器
@@ -236,10 +250,6 @@ Public NotInheritable Class 实时预览控件
         空闲预览 = Nothing
         Return 结果
     End Function
-
-    Private Shared Sub 排队释放空闲预览(预览 As 预览控制器)
-        If 预览 IsNot Nothing Then Task.Run(Sub() 预览.释放())
-    End Sub
 
     Private Sub 渲染(图形 As 图形设备, 帧 As 处理后视频帧)
         Dim 纹理 = 帧.纹理

@@ -41,24 +41,23 @@ Public Class Form视频参数
 
     Friend Function 取得编码器名称() As String
         Select Case MCB_视频编码器.SelectedIndex
-            Case 1 : Return "libsvtav1"
-            Case 2 : Return "av1_nvenc"
-            Case 3 : Return "av1_qsv"
-            Case 4 : Return "av1_amf"
-            Case 5 : Return "libx265"
-            Case 6 : Return "hevc_nvenc"
-            Case 7 : Return "hevc_qsv"
-            Case 8 : Return "hevc_amf"
-            Case 9 : Return "libx264"
-            Case 10 : Return "h264_nvenc"
-            Case 11 : Return "h264_qsv"
-            Case 12 : Return "h264_amf"
+            Case 0 : Return "libsvtav1"
+            Case 1 : Return "av1_nvenc"
+            Case 2 : Return "av1_qsv"
+            Case 3 : Return "av1_amf"
+            Case 4 : Return "libx265"
+            Case 5 : Return "hevc_nvenc"
+            Case 6 : Return "hevc_qsv"
+            Case 7 : Return "hevc_amf"
+            Case 8 : Return "libx264"
+            Case 9 : Return "h264_nvenc"
+            Case 10 : Return "h264_qsv"
+            Case 11 : Return "h264_amf"
             Case Else : Return "libx264"
         End Select
     End Function
 
     Friend Function 取得编码预设() As String
-        If MCB_视频编码器.SelectedIndex = 0 Then Return "medium"
         Return If(MCB_编码预设.SelectedIndex >= 0, MCB_编码预设.Text, String.Empty)
     End Function
 
@@ -209,7 +208,7 @@ Public Class Form视频参数
             If encoder.Contains("nvenc") Then presets.AddRange({"p1", "p2", "p3", "p4", "p5", "p6", "p7"})
             If encoder.Contains("hevc") Then profiles.AddRange({"main", "main10", "rext"})
             scenes.AddRange(获取场景优化值(encoder))
-            Dim 当前预设 = If(MCB_视频编码器.SelectedIndex = 0, "medium", 设置.实例对象.视频预设)
+            Dim 当前预设 = 设置.实例对象.视频预设
             重建下拉(MCB_编码预设, presets, 当前预设)
             重建下拉(MCB_配置文件, profiles, 设置.实例对象.视频配置文件)
             重建下拉(MCB_场景优化, scenes, 设置.实例对象.视频场景优化)

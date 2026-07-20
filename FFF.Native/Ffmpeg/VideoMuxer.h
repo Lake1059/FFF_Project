@@ -19,7 +19,9 @@ struct AVFormatContext;
 struct AVStream;
 struct AVPacket;
 struct ID3D11Device;
+struct ID3D11Device3;
 struct ID3D11DeviceContext;
+struct ID3D11ComputeShader;
 struct ID3D11Texture2D;
 struct ID3D11VideoDevice;
 struct ID3D11VideoContext;
@@ -82,10 +84,18 @@ public:
 private:
     // 建立同设备 D3D11 Video Processor，负责 packed RGB 到 NV12/P010 的 GPU 转换。
     FFFResult InitializeVideoProcessor(std::uint32_t frameRateNumerator,
-        std::uint32_t frameRateDenominator, bool hdr10) noexcept;
+        std::uint32_t frameRateDenominator, bool hdr10, std::uint32_t colorRange) noexcept;
+    // 建立明确指定 BT.709/BT.2020 完整范围矩阵的 DirectCompute RGB 到 YUV 转换器。
+    FFFResult InitializeRgbToYuvConverter(bool tenBit, bool hdr10,
+        std::uint32_t chromaSampling, bool softwareYuv, std::uint32_t colorRange) noexcept;
     // 把一张调用方 RGB 纹理转换到 FFmpeg D3D11 NV12/P010 surface。
     FFFResult ConvertTextureToEncoderSurface(ID3D11Texture2D* sourceTexture, std::uint32_t sourceArrayIndex,
         ID3D11Texture2D* destinationTexture, std::uint32_t destinationArrayIndex) noexcept;
+    FFFResult ConvertTextureToEncoderSurfaceWithShader(ID3D11Texture2D* sourceTexture,
+        std::uint32_t sourceArrayIndex, ID3D11Texture2D* destinationTexture,
+        std::uint32_t destinationArrayIndex) noexcept;
+    FFFResult EncodeSoftwareYuv(ID3D11Texture2D* sourceTexture,
+        std::uint32_t sourceArrayIndex, std::int64_t presentationTimestamp) noexcept;
     // 持续接收视频编码 packet、重标时间基并交给异步写队列，直到 EAGAIN 或 EOF。
     FFFResult DrainPackets() noexcept;
     // 克隆调用方 packet 并放入有界异步队列；队列或写线程失败时返回明确错误。
@@ -103,6 +113,8 @@ private:
 
     ID3D11DeviceContext* immediateContext_;
     ID3D11Device* d3d11Device_;
+    ID3D11Device3* d3d11Device3_;
+    ID3D11ComputeShader* rgbToYuvShader_;
     AVBufferRef* hardwareDevice_;
     AVBufferRef* hardwareFrames_;
     AVBufferRef* encoderHardwareDevice_;
@@ -115,12 +127,19 @@ private:
     std::uint32_t inputDxgiFormat_;
     bool qsvEncoder_;
     bool softwareEncoder_;
+    bool videoProcessorConversion_;
+    bool shaderConversion_;
+    bool softwareYuvConversion_;
+    bool tenBit_;
+    std::uint32_t chromaSampling_;
     bool hdr10_;
     ID3D11VideoDevice* videoDevice_;
     ID3D11VideoContext* videoContext_;
     ID3D11VideoContext1* videoContext1_;
     ID3D11VideoProcessorEnumerator* videoProcessorEnumerator_;
     ID3D11VideoProcessor* videoProcessor_;
+    ID3D11Texture2D* yuv444GpuTextures_[3]{};
+    ID3D11Texture2D* yuv444StagingTextures_[3]{};
     bool initialized_;
     bool headerWritten_;
     bool finished_;

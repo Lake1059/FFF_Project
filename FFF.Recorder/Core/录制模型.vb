@@ -95,6 +95,7 @@ End Enum
 Public Enum 视频采样格式 As UInteger
     YUV四二零 = 0
     YUV四四四 = 1
+    YUV四二二 = 2
 End Enum
 
 Public Enum 编码速率控制 As UInteger
@@ -135,6 +136,7 @@ Public NotInheritable Class 视频处理配置
     Public Property 输出十位SDR As Boolean
     Public Property 允许HDR转SDR As Boolean
     Public Property 缩放方式 As 视频缩放方式 = 视频缩放方式.适应
+    Public Property 高质量缩放 As Boolean
     Public Property 裁剪左边 As UInteger
     Public Property 裁剪顶边 As UInteger
     Public Property 裁剪右边 As UInteger
@@ -188,7 +190,8 @@ Public NotInheritable Class 录制配置
     Public Property 编码配置档 As String = String.Empty
     Public Property 场景优化 As String = String.Empty
     Public Property 多遍模式 As 编码多遍模式 = 编码多遍模式.禁用
-    Public Property 色彩范围 As 视频色彩范围 = 视频色彩范围.自动
+    ' 录制器输出按 PC 完整范围处理；只有显式选择“有限”时才使用 TV 范围。
+    Public Property 色彩范围 As 视频色彩范围 = 视频色彩范围.完整
     Public Property 系统音频增益 As Single = 1.0F
     Public Property 麦克风增益 As Single = 1.0F
     Public Property 静音系统音频 As Boolean

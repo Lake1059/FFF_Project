@@ -66,7 +66,7 @@ Public NotInheritable Class 视频处理器
         Public 高光压缩 As Single
         Public 饱和度 As Single
         Public 旋转 As UInteger
-        Public 保留三 As UInteger
+        Public 高质量缩放 As UInteger
         Public 保留四 As UInteger
     End Structure
 
@@ -76,6 +76,7 @@ Public NotInheritable Class 视频处理器
     Private ReadOnly 输出HDR模式 As Boolean
     Private ReadOnly 输出十位模式 As Boolean
     Private ReadOnly 允许HDR转SDR值 As Boolean
+    Private ReadOnly 高质量缩放值 As Boolean
     Private ReadOnly 缩放方式值 As 视频缩放方式
     Private ReadOnly 裁剪左边值 As UInteger
     Private ReadOnly 裁剪顶边值 As UInteger
@@ -115,6 +116,7 @@ Public NotInheritable Class 视频处理器
         输出HDR模式 = 配置.输出HDR10
         输出十位模式 = 配置.输出HDR10 OrElse 配置.输出十位SDR
         允许HDR转SDR值 = 配置.允许HDR转SDR
+        高质量缩放值 = 配置.高质量缩放
         缩放方式值 = 配置.缩放方式
         裁剪左边值 = 配置.裁剪左边
         裁剪顶边值 = 配置.裁剪顶边
@@ -298,7 +300,7 @@ Public NotInheritable Class 视频处理器
                 .源左边比例 = 源左, .源顶边比例 = 源顶, .源宽度比例 = 源宽比例, .源高度比例 = 源高比例,
                 .参考白尼特 = 参考白尼特值, .目标峰值尼特 = 目标峰值尼特值,
                 .曝光 = 曝光值, .高光压缩 = 高光压缩值, .饱和度 = 饱和度值,
-                .旋转 = CUInt(旋转方式)
+                .旋转 = CUInt(旋转方式), .高质量缩放 = If(高质量缩放值, 1UI, 0UI)
             }
             Dim 本次着色器 = If(输入HDR, If(输出HDR模式, HDR计算着色器, 色调映射着色器), SDR计算着色器)
             Dim 本次预览视图 As ID3D11ShaderResourceView = Nothing

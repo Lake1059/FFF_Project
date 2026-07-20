@@ -1028,7 +1028,6 @@ Partial Class Form视频参数
         MCB_视频编码器.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MCB_视频编码器.DropDownSelectedForeColor = Color.White
         MCB_视频编码器.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_视频编码器.Items.Add("兜底 - libx264 medium（CPU）")
         MCB_视频编码器.Items.Add("AV1 - libsvtav1（CPU）")
         MCB_视频编码器.Items.Add("AV1 - av1_nvenc（NVIDIA）")
         MCB_视频编码器.Items.Add("AV1 - av1_qsv（Intel）")

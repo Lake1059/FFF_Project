@@ -12,7 +12,7 @@ Public Class 设置
     Public Property 视频源类型 As Integer = 0
     Public Property 音频源键 As String = String.Empty
     Public Property 音频跟随默认设备 As Boolean = True
-    Public Property 视频编码器索引 As Integer = 0
+    Public Property 视频编码器索引 As Integer = 8
     Public Property 视频编码器名称 As String = "libx264"
     Public Property 视频预设 As String = "medium"
     Public Property 视频配置文件 As String = String.Empty
@@ -102,11 +102,14 @@ Public Class 设置
         输出目录 = If(String.IsNullOrWhiteSpace(输出目录), Application.StartupPath, 输出目录)
         If Not Directory.Exists(输出目录) Then 输出目录 = Application.StartupPath
         自动命名方式 = Math.Clamp(自动命名方式, 0, 1)
-        视频编码器索引 = Math.Clamp(视频编码器索引, 0, 12)
-        If 视频编码器索引 = 0 Then
-            视频编码器名称 = "libx264"
-            视频预设 = "medium"
-        End If
+        Dim 视频编码器名称列表 = {
+            "libsvtav1", "av1_nvenc", "av1_qsv", "av1_amf",
+            "libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf",
+            "libx264", "h264_nvenc", "h264_qsv", "h264_amf"}
+        视频编码器索引 = Array.FindIndex(视频编码器名称列表,
+            Function(名称) String.Equals(名称, 视频编码器名称, StringComparison.OrdinalIgnoreCase))
+        If 视频编码器索引 < 0 Then 视频编码器索引 = 8
+        视频编码器名称 = 视频编码器名称列表(视频编码器索引)
         视频分辨率索引 = Math.Clamp(视频分辨率索引, 0, 5)
         自定义视频宽度 = If(自定义视频宽度, String.Empty).Trim()
         自定义视频高度 = If(自定义视频高度, String.Empty).Trim()

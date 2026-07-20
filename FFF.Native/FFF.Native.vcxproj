@@ -134,7 +134,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;delayimp.lib;d3d11.lib;dxgi.lib;ole32.lib;propsys.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;ole32.lib;propsys.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
@@ -160,7 +160,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;delayimp.lib;d3d11.lib;dxgi.lib;ole32.lib;propsys.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;ole32.lib;propsys.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
