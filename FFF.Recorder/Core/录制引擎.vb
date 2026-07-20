@@ -3,7 +3,7 @@ Imports System.Text.Json
 Imports System.Collections.Concurrent
 
 Public NotInheritable Class 录制引擎
-    Private Const 期望接口版本 As UInteger = 2
+    Private Const 期望接口版本 As UInteger = 3
     Private Shared ReadOnly 编码器能力缓存 As New ConcurrentDictionary(Of String, 编码器探测结果)()
     Private Shared ReadOnly 接口兼容 As New Lazy(Of Boolean)(AddressOf 检查接口兼容)
 

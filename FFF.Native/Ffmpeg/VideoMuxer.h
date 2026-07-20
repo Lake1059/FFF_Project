@@ -41,23 +41,25 @@ public:
         const std::string& encoderName, std::uint32_t width, std::uint32_t height,
         std::uint32_t frameRateNumerator, std::uint32_t frameRateDenominator,
         std::int64_t bitRate, std::uint32_t gopSize, std::uint32_t bFrameCount,
-        bool tenBit, bool hdr10, const std::vector<std::string>& audioTrackTitles,
-        bool mixAudioSources, std::size_t audioSourceCount, std::uint32_t inputTextureFormat,
-        std::uint32_t chromaSampling, std::uint32_t rateControl, std::int32_t quality,
+        bool tenBit, bool hdr10, bool mixAudioSources, std::uint32_t inputTextureFormat,
+        std::uint32_t chromaSampling, std::uint32_t rateControl,
+        std::uint32_t qualityMode, const std::string& customVideoParameters,
+        std::int32_t quality,
         std::int64_t maximumBitRate, std::uint32_t lookaheadFrames, const std::string& preset,
-        const std::string& profile, std::uint32_t multipass, std::uint32_t colorRange,
-        const std::vector<float>& audioSourceGains) noexcept;
+        const std::string& profile, const std::string& sceneOptimization,
+        std::uint32_t multipass, std::uint32_t colorRange,
+        const std::vector<float>& audioSourceGains, const std::string& audioEncoderName,
+        std::uint32_t audioSampleRate, std::uint32_t audioChannelCount,
+        std::int64_t audioBitRate, std::uint32_t audioMode) noexcept;
     // 把同设备纹理复制到 FFmpeg hardware frame，并提交准确视频 PTS。
     FFFResult Encode(ID3D11Texture2D* sourceTexture, std::uint32_t sourceArrayIndex,
         std::int64_t presentationTimestamp) noexcept;
     // 排空全部编码器和异步写队列，写 trailer 后释放资源。
     FFFResult Finish() noexcept;
-    // 把一包 WASAPI 数据送入指定独立轨或混音源的 48 kHz 时间线。
+    // 把一包 WASAPI 数据送入指定独立轨或混音源的目标采样率时间线。
     FFFResult EncodeAudio(std::size_t trackIndex, const std::uint8_t* data,
         std::uint32_t frameCount, std::uint32_t flags, std::int64_t targetPresentationSample,
         const WasapiSampleFormat& inputFormat) noexcept;
-    // 返回首个已接受视频帧建立的原始 QPC 起点；尚未开始时间线时返回零。
-    std::int64_t StartQpc() const noexcept;
     // 丢弃待写 packet 并释放所有资源，允许输出缺少正常 trailer。
     void Abort() noexcept;
     // 返回最近一次 FFmpeg、D3D11、队列或文件错误。
@@ -70,17 +72,19 @@ public:
     std::uint64_t LastWriteMicroseconds() const noexcept;
     // 返回会话内单个 packet 文件写入耗时峰值，单位为微秒。
     std::uint64_t PeakWriteMicroseconds() const noexcept;
+    std::uint64_t VideoBytes() const noexcept;
+    std::uint64_t AudioBytes() const noexcept;
     // 返回指定音频源最近一次目标位置与编码时间线的样本误差；索引越界时返回零。
     std::int64_t AudioTimelineErrorSamples(std::size_t sourceIndex) const noexcept;
     // 返回指定音频源当前平滑重采样补偿的近似 ppm；索引越界时返回零。
     std::int32_t AudioCompensationPpm(std::size_t sourceIndex) const noexcept;
 
 private:
-    // 为 QSV 建立同设备 D3D11 Video Processor，负责 packed RGB 到 NV12/P010 的 GPU 转换。
-    FFFResult InitializeQsvVideoProcessor(std::uint32_t frameRateNumerator,
+    // 建立同设备 D3D11 Video Processor，负责 packed RGB 到 NV12/P010 的 GPU 转换。
+    FFFResult InitializeVideoProcessor(std::uint32_t frameRateNumerator,
         std::uint32_t frameRateDenominator, bool hdr10) noexcept;
-    // 把一张调用方 RGB 纹理转换到 FFmpeg D3D11 NV12/P010 surface，不发生 CPU 读回。
-    FFFResult ConvertTextureForQsv(ID3D11Texture2D* sourceTexture, std::uint32_t sourceArrayIndex,
+    // 把一张调用方 RGB 纹理转换到 FFmpeg D3D11 NV12/P010 surface。
+    FFFResult ConvertTextureToEncoderSurface(ID3D11Texture2D* sourceTexture, std::uint32_t sourceArrayIndex,
         ID3D11Texture2D* destinationTexture, std::uint32_t destinationArrayIndex) noexcept;
     // 持续接收视频编码 packet、重标时间基并交给异步写队列，直到 EAGAIN 或 EOF。
     FFFResult DrainPackets() noexcept;
@@ -110,6 +114,7 @@ private:
     std::uint32_t height_;
     std::uint32_t inputDxgiFormat_;
     bool qsvEncoder_;
+    bool softwareEncoder_;
     bool hdr10_;
     ID3D11VideoDevice* videoDevice_;
     ID3D11VideoContext* videoContext_;
@@ -119,7 +124,6 @@ private:
     bool initialized_;
     bool headerWritten_;
     bool finished_;
-    std::int64_t startQpc_;
     mutable std::mutex packetMutex_;
     std::condition_variable packetCondition_;
     std::deque<AVPacket*> packetQueue_;
@@ -130,6 +134,8 @@ private:
     std::atomic<std::uint32_t> peakQueueDepth_;
     std::atomic<std::uint64_t> lastWriteMicroseconds_;
     std::atomic<std::uint64_t> peakWriteMicroseconds_;
+    std::atomic<std::uint64_t> videoBytes_;
+    std::atomic<std::uint64_t> audioBytes_;
     std::vector<std::unique_ptr<AudioTrackEncoder>> audioTracks_;
     std::unique_ptr<AudioMixer> audioMixer_;
     std::string lastError_;

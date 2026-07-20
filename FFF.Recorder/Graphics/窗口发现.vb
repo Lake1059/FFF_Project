@@ -40,8 +40,10 @@ Public NotInheritable Class 窗口发现
                 读取窗口标题(窗口句柄, 标题缓冲, 标题缓冲.Capacity)
                 Dim 边界 As 原生矩形
                 If Not 读取窗口边界(窗口句柄, 边界) Then Return True
+                If 边界.右边 <= 边界.左边 OrElse 边界.底边 <= 边界.顶边 Then Return True
                 Dim 遮蔽 As UInteger
                 读取桌面窗口属性(窗口句柄, 遮蔽属性, 遮蔽, CUInt(Marshal.SizeOf(Of UInteger)()))
+                If 遮蔽 <> 0 OrElse 判断窗口最小化(窗口句柄) Then Return True
                 Dim 进程名称 = String.Empty
                 Try
                     Using 进程 = Process.GetProcessById(CInt(进程标识))

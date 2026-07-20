@@ -1,6 +1,5 @@
 cbuffer HdrConstants : register(b0)
 {
-    uint2 SourceSize;
     uint2 OutputSize;
     uint4 DestinationRect;
     float4 SourceRect;
@@ -10,7 +9,6 @@ cbuffer HdrConstants : register(b0)
     float HighlightCompression;
     float Saturation;
     uint Rotation;
-    float2 Reserved;
 };
 
 Texture2D<float4> SourceTexture : register(t0);
@@ -60,10 +58,19 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     linear2020.r = dot(linear709, float3(0.6274040, 0.3292820, 0.0433136));
     linear2020.g = dot(linear709, float3(0.0690970, 0.9195400, 0.0113612));
     linear2020.b = dot(linear709, float3(0.0163916, 0.0880132, 0.8955950));
-    float3 nits = linear2020 * ReferenceWhiteNits * exp2(Exposure);
-    float knee = TargetPeakNits * (1.0 - HighlightCompression * 0.5);
-    float3 excess = max(nits - knee, 0.0);
-    nits = min(nits, knee) + excess / (1.0 + excess / max(TargetPeakNits - knee, 1.0));
-    nits = min(nits, TargetPeakNits);
+    linear2020 = max(linear2020, 0.0);
+    float sourceLuminance = max(dot(linear2020, float3(0.2627, 0.6780, 0.0593)), 0.000001);
+    float sourceNits = sourceLuminance * ReferenceWhiteNits * exp2(Exposure);
+    float normalized = saturate(sourceNits / max(TargetPeakNits, 1.0));
+    float knee = lerp(0.75, 0.45, saturate(HighlightCompression));
+    float mapped = normalized <= knee ? normalized : knee + (1.0 - knee) *
+        ((normalized - knee) / max(1.0 + normalized - 2.0 * knee, 0.0001));
+    float targetLuminance = mapped * TargetPeakNits;
+    float3 chroma = linear2020 / sourceLuminance;
+    float maxChroma = max(max(chroma.r, chroma.g), chroma.b);
+    chroma /= max(1.0, maxChroma);
+    float3 nits = chroma * targetLuminance;
+    float maxNits = max(max(nits.r, nits.g), nits.b);
+    nits *= min(1.0, TargetPeakNits / max(maxNits, 0.0001));
     OutputTexture[pixel] = float4(EncodePq(nits.r), EncodePq(nits.g), EncodePq(nits.b), 1.0);
 }

@@ -1,7 +1,52 @@
 #include "pch.h"
 #include "Audio/WasapiCapture.h"
 
+#include <algorithm>
+#include <cmath>
+
 using Microsoft::WRL::ComPtr;
+
+namespace {
+float PacketPeak(const BYTE* data, const UINT32 frameCount, const DWORD flags,
+    const WasapiSampleFormat& format) noexcept {
+    if (data == nullptr || frameCount == 0 || format.channelCount == 0 ||
+        (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0) return 0.0F;
+    const auto sampleCount = static_cast<std::size_t>(frameCount) * format.channelCount;
+    const auto bits = format.validBitsPerSample == 0 ? format.bitsPerSample : format.validBitsPerSample;
+    float peak = 0.0F;
+    if (format.floatingPoint && bits >= 32 && format.blockAlign >= format.channelCount * 4U) {
+        const auto* samples = reinterpret_cast<const float*>(data);
+        for (std::size_t i = 0; i < sampleCount; ++i) {
+            const auto value = std::isfinite(samples[i]) ? std::abs(samples[i]) : 0.0F;
+            peak = std::max(peak, std::min(1.0F, value));
+        }
+        return peak;
+    }
+    if (bits <= 16 && format.blockAlign >= format.channelCount * 2U) {
+        const auto* samples = reinterpret_cast<const std::int16_t*>(data);
+        for (std::size_t i = 0; i < sampleCount; ++i)
+            peak = std::max(peak, std::min(1.0F, std::abs(static_cast<float>(samples[i])) / 32768.0F));
+        return peak;
+    }
+    if (bits <= 24 && format.blockAlign >= format.channelCount * 3U) {
+        for (std::size_t i = 0; i < sampleCount; ++i) {
+            const auto* sample = data + i * 3U;
+            std::int32_t value = static_cast<std::int32_t>(sample[0]) |
+                (static_cast<std::int32_t>(sample[1]) << 8) |
+                (static_cast<std::int32_t>(sample[2]) << 16);
+            if ((value & 0x00800000) != 0) value |= static_cast<std::int32_t>(0xFF000000);
+            peak = std::max(peak, std::min(1.0F, std::abs(static_cast<float>(value)) / 8388608.0F));
+        }
+        return peak;
+    }
+    if (format.blockAlign >= format.channelCount * 4U) {
+        const auto* samples = reinterpret_cast<const std::int32_t*>(data);
+        for (std::size_t i = 0; i < sampleCount; ++i)
+            peak = std::max(peak, std::min(1.0F, std::abs(static_cast<float>(samples[i])) / 2147483648.0F));
+    }
+    return peak;
+}
+}
 
 // 保存端点标识和采集类型，并创建两个仅供本对象使用的事件句柄。构造函数不初始化 COM，
 // 因为 WASAPI 接口必须在实际采集线程内创建和释放。endpointId 在构造时复制，调用方可立即释放。
@@ -117,13 +162,23 @@ void WasapiCapture::CaptureThread() noexcept {
             mixFormat->wBitsPerSample,
             mixFormat->wBitsPerSample,
             mixFormat->nBlockAlign,
+            0,
             mixFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT
         };
         if (mixFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
             mixFormat->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
             const auto* extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(mixFormat);
             sampleFormat.validBitsPerSample = extensible->Samples.wValidBitsPerSample;
+            sampleFormat.channelMask = extensible->dwChannelMask;
             sampleFormat.floatingPoint = IsEqualGUID(extensible->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
+        }
+        if (sampleFormat.channelMask == 0) {
+            if (sampleFormat.channelCount == 1) sampleFormat.channelMask = SPEAKER_FRONT_CENTER;
+            else if (sampleFormat.channelCount == 2) sampleFormat.channelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+        }
+        {
+            std::scoped_lock lock(mutex_);
+            statistics_.channelMask = sampleFormat.channelMask;
         }
         const DWORD streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
             AUDCLNT_STREAMFLAGS_NOPERSIST | (loopback_ ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0);
@@ -182,6 +237,7 @@ void WasapiCapture::CaptureThread() noexcept {
                     SetEvent(stopEvent_);
                     break;
                 }
+                const auto packetPeak = PacketPeak(data, frameCount, flags, sampleFormat);
                 {
                     std::scoped_lock lock(mutex_);
                     if (statistics_.packetCount == 0) {
@@ -195,6 +251,7 @@ void WasapiCapture::CaptureThread() noexcept {
                     if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0) ++statistics_.silentPacketCount;
                     if ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0) ++statistics_.discontinuityCount;
                     if ((flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0) ++statistics_.timestampErrorCount;
+                    statistics_.peakLevel = std::max(packetPeak, statistics_.peakLevel * 0.82F);
                 }
                 FFFResult callbackResult = FFFResult::Success;
                 if (packetCallback_) {

@@ -33,7 +33,6 @@ Partial Class Form1
         Dim ModernTabPage8 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         Dim ModernTabPage9 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         Dim ModernTabPage10 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage11 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         ModernTabListControl1 = New LakeUI.ModernTabListControl()
         ThisIsYourWindow1 = New LakeUI.ThisIsYourWindow(components)
         SuspendLayout()
@@ -53,7 +52,6 @@ Partial Class Form1
         ModernTabPage8.Text = "软件设置"
         ModernTabPage9.Text = "个性化"
         ModernTabPage10.Text = "支持者"
-        ModernTabPage11.IsSeparator = True
         ModernTabListControl1.Items.Add(ModernTabPage1)
         ModernTabListControl1.Items.Add(ModernTabPage2)
         ModernTabListControl1.Items.Add(ModernTabPage3)
@@ -64,12 +62,17 @@ Partial Class Form1
         ModernTabListControl1.Items.Add(ModernTabPage8)
         ModernTabListControl1.Items.Add(ModernTabPage9)
         ModernTabListControl1.Items.Add(ModernTabPage10)
-        ModernTabListControl1.Items.Add(ModernTabPage11)
         ModernTabListControl1.Location = New Point(0, 0)
         ModernTabListControl1.Name = "ModernTabListControl1"
+        ModernTabListControl1.ScrollBarThumbColor = Color.FromArgb(CByte(40), CByte(200), CByte(200), CByte(200))
+        ModernTabListControl1.ScrollBarThumbHoverColor = Color.FromArgb(CByte(80), CByte(200), CByte(200), CByte(200))
+        ModernTabListControl1.ScrollBarTrackColor = Color.FromArgb(CByte(20), CByte(200), CByte(200), CByte(200))
+        ModernTabListControl1.SeparatorColor = Color.FromArgb(CByte(80), CByte(200), CByte(200), CByte(200))
         ModernTabListControl1.Size = New Size(1008, 537)
         ModernTabListControl1.TabIndex = 0
-        ModernTabListControl1.TabItemHeight = 30
+        ModernTabListControl1.TabItemHeight = 32
+        ModernTabListControl1.TabItemHoverBackColor = Color.FromArgb(CByte(40), CByte(200), CByte(200), CByte(200))
+        ModernTabListControl1.TabItemSelectedBackColor = Color.FromArgb(CByte(80), CByte(200), CByte(200), CByte(200))
         ModernTabListControl1.TabStripWidth = 160
         ' 
         ' ThisIsYourWindow1

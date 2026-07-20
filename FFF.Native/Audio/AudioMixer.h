@@ -59,6 +59,9 @@ private:
     AudioTrackEncoder* outputTrack_;
     std::vector<SourceState> sources_;
     std::vector<float> sourceGains_;
+    std::vector<float> convertedBuffer_;
+    std::vector<std::uint8_t> silenceBuffer_;
+    std::vector<float> mixBuffer_;
     std::int64_t nextMixedSample_;
     mutable std::mutex mutex_;
     std::string lastError_;

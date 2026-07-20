@@ -16,7 +16,7 @@ extern "C" {
 using Microsoft::WRL::ComPtr;
 
 namespace {
-constexpr std::uint32_t ApiVersion = 2;
+constexpr std::uint32_t ApiVersion = 3;
 
 // 把 UTF-8 值复制到调用方缓冲区，并报告包含末尾 NUL 的所需字节数。空缓冲区或容量不足属于
 // 合法的容量查询，函数绝不会写入截断字符串。requiredSize 可为空，其余指针所有权均归调用方。
@@ -180,7 +180,7 @@ FFFResult FFF_EnumerateAudioEndpoints(char* outputUtf8, const std::uint32_t outp
         std::ostringstream json;
         json << '[';
         bool first = true;
-        const auto render = AppendEndpoints(enumerator.Get(), eRender, "loopback", first, json);
+        const auto render = AppendEndpoints(enumerator.Get(), eRender, "render", first, json);
         const auto capture = AppendEndpoints(enumerator.Get(), eCapture, "microphone", first, json);
         json << ']';
         if (uninitialize) CoUninitialize();
@@ -280,19 +280,22 @@ FFFResult FFF_ProbeD3D11Encoder(const FFFSessionConfiguration* configuration,
         configuration->encoderNameUtf8 == nullptr) return FFFResult::InvalidArgument;
     try {
         VideoMuxer muxer;
-        const std::vector<std::string> noAudio;
         const std::vector<float> noAudioGains;
         const auto result = muxer.Initialize(static_cast<ID3D11Device*>(configuration->d3d11Device),
             "NUL", configuration->encoderNameUtf8, configuration->width, configuration->height,
             configuration->frameRateNumerator, configuration->frameRateDenominator,
             configuration->bitRate, configuration->gopSize, configuration->bFrameCount,
-            configuration->tenBit != 0, configuration->hdr10 != 0, noAudio, false, 0,
+            configuration->tenBit != 0, configuration->hdr10 != 0, false,
             configuration->inputTextureFormat, configuration->chromaSampling,
-            configuration->rateControl, configuration->quality, configuration->maximumBitRate,
+            configuration->rateControl, configuration->qualityMode,
+            configuration->customVideoParametersUtf8 == nullptr ? "" : configuration->customVideoParametersUtf8,
+            configuration->quality, configuration->maximumBitRate,
             configuration->lookaheadFrames,
             configuration->presetUtf8 == nullptr ? "" : configuration->presetUtf8,
             configuration->profileUtf8 == nullptr ? "" : configuration->profileUtf8,
-            configuration->multipass, configuration->colorRange, noAudioGains);
+            configuration->sceneOptimizationUtf8 == nullptr ? "" : configuration->sceneOptimizationUtf8,
+            configuration->multipass, configuration->colorRange, noAudioGains,
+            "aac", 48'000, 2, 192'000, 0);
         const std::string json = result == FFFResult::Success
             ? "{\"supported\":true,\"encoder\":\"" + EscapeJson(configuration->encoderNameUtf8) + "\"}"
             : "{\"supported\":false,\"encoder\":\"" + EscapeJson(configuration->encoderNameUtf8) +
@@ -360,6 +363,17 @@ FFFResult FFF_PauseSession(const FFFSessionHandle session, const std::int64_t ti
 // 恢复全部媒体流，并从媒体时间中扣除精确的共享暂停区间；时间戳不得早于暂停起点。
 FFFResult FFF_ResumeSession(const FFFSessionHandle session, const std::int64_t timestamp) noexcept {
     return session == nullptr ? FFFResult::InvalidArgument : static_cast<RecorderSession*>(session)->Resume(timestamp);
+}
+
+FFFResult FFF_SplitSession(const FFFSessionHandle session, const char* outputPathUtf8) noexcept {
+    return session == nullptr ? FFFResult::InvalidArgument :
+        static_cast<RecorderSession*>(session)->Split(outputPathUtf8);
+}
+
+FFFResult FFF_SwitchSystemAudioEndpoint(const FFFSessionHandle session,
+    const char* endpointIdUtf8) noexcept {
+    return session == nullptr ? FFFResult::InvalidArgument :
+        static_cast<RecorderSession*>(session)->SwitchSystemAudioEndpoint(endpointIdUtf8);
 }
 
 // 请求正常终止转换。编码模块接入后，此调用负责排空编码器并完整写入 Matroska trailer。

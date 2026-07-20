@@ -16,9 +16,14 @@ Friend Interface IGraphicsCaptureItemInterop
     Function CreateForMonitor(显示器句柄 As IntPtr, ByRef 接口标识 As Guid, ByRef 捕获项目 As IntPtr) As Integer
 End Interface
 
+<ComImport, Guid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)>
+Friend Interface IWinRTDxgiInterfaceAccess
+    <PreserveSig>
+    Function GetInterface(ByRef 接口标识 As Guid, ByRef 原生接口 As IntPtr) As Integer
+End Interface
+
 Public NotInheritable Class 窗口捕获帧
     Implements IDisposable
-    Implements I自有捕获帧
 
     Friend ReadOnly 纹理 As ID3D11Texture2D
     Private ReadOnly 回收纹理 As Action(Of ID3D11Texture2D)
@@ -34,19 +39,6 @@ Public NotInheritable Class 窗口捕获帧
         回收纹理 = 回收操作
     End Sub
 
-    Public ReadOnly Property 原生纹理指针 As IntPtr
-        Get
-            If 已释放 Then Throw New ObjectDisposedException(NameOf(窗口捕获帧))
-            Return 纹理.NativePointer
-        End Get
-    End Property
-
-    Private ReadOnly Property 调度纹理指针 As IntPtr Implements I自有捕获帧.纹理指针
-        Get
-            Return 原生纹理指针
-        End Get
-    End Property
-
     Public ReadOnly Property QPC时间戳 As Long
     Public ReadOnly Property 宽度 As Integer
     Public ReadOnly Property 高度 As Integer
@@ -57,10 +49,6 @@ Public NotInheritable Class 窗口捕获帧
         回收纹理(纹理)
         已释放 = True
         GC.SuppressFinalize(Me)
-    End Sub
-
-    Private Sub 调度释放() Implements I自有捕获帧.释放
-        释放()
     End Sub
 End Class
 
@@ -103,6 +91,8 @@ Public NotInheritable Class 窗口捕获器
     Private 当前尺寸 As Windows.Graphics.SizeInt32
     Private 已启动 As Boolean
     Private 已释放 As Boolean
+    Private 已收到有效帧 As Boolean
+    Private 报告脏区域 As Boolean
     Private 诊断会话 As 录制会话
 
     Private Sub New(设备 As 图形设备, 项目 As GraphicsCaptureItem, Direct3D设备 As IDirect3DDevice,
@@ -153,10 +143,38 @@ Public NotInheritable Class 窗口捕获器
         End Try
     End Function
 
+    Friend Shared Function 获取窗口显示器(窗口句柄 As IntPtr) As 显示器信息
+        If 窗口句柄 = IntPtr.Zero Then Return Nothing
+        Dim 显示器句柄 = 查找窗口显示器(窗口句柄, 2UI)
+        Return 显示器捕获器.枚举显示器().FirstOrDefault(Function(x) x.显示器句柄 = 显示器句柄)
+    End Function
+
+    Public Shared Function 创建显示器(显示器 As 显示器信息, Optional 请求HDR As Boolean = False) As 窗口捕获器
+        ArgumentNullException.ThrowIfNull(显示器)
+        If Not 显示器.连接到桌面 OrElse 显示器.显示器句柄 = IntPtr.Zero Then
+            Throw New ArgumentException("目标显示器未连接到桌面。", NameOf(显示器))
+        End If
+        If Not GraphicsCaptureSession.IsSupported() Then Throw New PlatformNotSupportedException("当前系统不支持 Windows Graphics Capture。")
+        If 请求HDR AndAlso Not 显示器.HDR已启用 Then
+            Throw New InvalidOperationException("目标显示器当前未启用 HDR/Advanced Color。")
+        End If
+
+        Dim 设备 = 创建显示器适配器设备(显示器.显示器句柄)
+        Try
+            Dim 项目 = 创建显示器捕获项目(显示器.显示器句柄)
+            Dim Direct3D设备 = 创建WinRT设备(设备.设备)
+            Return New 窗口捕获器(设备, 项目, Direct3D设备, 请求HDR, 显示器)
+        Catch
+            设备.释放()
+            Throw
+        End Try
+    End Function
+
     Public Sub 应用到配置(配置 As 录制配置)
         ArgumentNullException.ThrowIfNull(配置)
         配置.捕获后端 = "Windows Graphics Capture"
-        配置.捕获源说明 = If(String.IsNullOrWhiteSpace(捕获项目.DisplayName), "HWND window", 捕获项目.DisplayName)
+        配置.捕获源说明 = If(String.IsNullOrWhiteSpace(捕获项目.DisplayName),
+            If(目标显示器值 Is Nothing, "HWND window", 目标显示器值.名称), 捕获项目.DisplayName)
         配置.捕获源格式 = If(使用HDR, "R16G16B16A16_FLOAT scRGB", "B8G8R8A8_UNORM SDR")
     End Sub
 
@@ -173,6 +191,12 @@ Public NotInheritable Class 窗口捕获器
         帧池 = Direct3D11CaptureFramePool.CreateFreeThreaded(WinRT设备, 像素格式, 3, 当前尺寸)
         捕获会话 = 帧池.CreateCaptureSession(捕获项目)
         捕获会话.IsCursorCaptureEnabled = 捕获光标
+        报告脏区域 = Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent(
+            "Windows.Graphics.Capture.GraphicsCaptureSession", "DirtyRegionMode") AndAlso
+            Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent(
+                "Windows.Graphics.Capture.Direct3D11CaptureFrame", "DirtyRegions")
+        If 报告脏区域 Then 捕获会话.DirtyRegionMode = GraphicsCaptureDirtyRegionMode.ReportOnly
+        已收到有效帧 = False
         AddHandler 帧池.FrameArrived, AddressOf 处理帧到达
         AddHandler 捕获项目.Closed, AddressOf 处理捕获关闭
         捕获会话.StartCapture()
@@ -205,6 +229,9 @@ Public NotInheritable Class 窗口捕获器
             Using 系统帧 = 发送者.TryGetNextFrame()
                 If 系统帧 Is Nothing Then Return
                 Dim 新尺寸 = 系统帧.ContentSize
+                Dim 尺寸已变化 = 新尺寸.Width <> 当前尺寸.Width OrElse 新尺寸.Height <> 当前尺寸.Height
+                If 报告脏区域 AndAlso 已收到有效帧 AndAlso Not 尺寸已变化 AndAlso
+                    系统帧.DirtyRegions.Count = 0 Then Return
                 Using 源纹理 = 取得D3D11纹理(系统帧.Surface)
                     Dim 实际HDR = 源纹理.Description.Format = Format.R16G16B16A16_Float
                     If 使用HDR AndAlso Not 实际HDR Then
@@ -219,11 +246,12 @@ Public NotInheritable Class 窗口捕获器
                     If 自有纹理 Is Nothing Then Return
                     图形.执行图形命令(Sub() 图形.上下文.CopyResource(自有纹理, 源纹理))
                     Dim 时间戳 = 转换系统相对时间(系统帧.SystemRelativeTime)
+                    已收到有效帧 = True
                     RaiseEvent 收到帧(Me, New 窗口捕获帧事件参数(
                         New 窗口捕获帧(自有纹理, 时间戳, 新尺寸.Width, 新尺寸.Height, 实际HDR,
                             AddressOf 纹理池.归还)))
                 End Using
-                If 新尺寸.Width <> 当前尺寸.Width OrElse 新尺寸.Height <> 当前尺寸.Height Then
+                If 尺寸已变化 Then
                     诊断会话?.记录诊断事件("wgc_resize", $"{当前尺寸.Width}x{当前尺寸.Height} -> {新尺寸.Width}x{新尺寸.Height}")
                     当前尺寸 = 新尺寸
                     帧池.Recreate(WinRT设备, If(使用HDR, DirectXPixelFormat.R16G16B16A16Float,
@@ -248,6 +276,22 @@ Public NotInheritable Class 窗口捕获器
             Dim 原生项目 As IntPtr
             Dim 接口标识 = 捕获项目接口标识
             Dim 结果 = 互操作.CreateForWindow(窗口句柄, 接口标识, 原生项目)
+            If 结果 < 0 Then Marshal.ThrowExceptionForHR(结果)
+            Try
+                Return MarshalInspectable(Of GraphicsCaptureItem).FromAbi(原生项目)
+            Finally
+                Marshal.Release(原生项目)
+            End Try
+        End Using
+    End Function
+
+    Private Shared Function 创建显示器捕获项目(显示器句柄 As IntPtr) As GraphicsCaptureItem
+        Using 工厂引用 = ActivationFactory.Get("Windows.Graphics.Capture.GraphicsCaptureItem",
+            GetType(IGraphicsCaptureItemInterop).GUID)
+            Dim 互操作 = 工厂引用.AsInterface(Of IGraphicsCaptureItemInterop)()
+            Dim 原生项目 As IntPtr
+            Dim 接口标识 = 捕获项目接口标识
+            Dim 结果 = 互操作.CreateForMonitor(显示器句柄, 接口标识, 原生项目)
             If 结果 < 0 Then Marshal.ThrowExceptionForHR(结果)
             Try
                 Return MarshalInspectable(Of GraphicsCaptureItem).FromAbi(原生项目)
@@ -297,13 +341,22 @@ Public NotInheritable Class 窗口捕获器
 
     Private Shared Function 取得D3D11纹理(表面 As IDirect3DSurface) As ID3D11Texture2D
         Dim 表面指针 = MarshalInspectable(Of IDirect3DSurface).FromManaged(表面)
+        Dim 访问指针 As IntPtr
+        Dim 访问对象 As Object = Nothing
         Dim 纹理指针 As IntPtr
         Try
-            Dim 接口标识 = D3D11纹理接口标识
-            Dim 结果 = Marshal.QueryInterface(表面指针, 接口标识, 纹理指针)
+            Dim 访问接口标识 = GetType(IWinRTDxgiInterfaceAccess).GUID
+            Dim 结果 = Marshal.QueryInterface(表面指针, 访问接口标识, 访问指针)
+            If 结果 < 0 Then Marshal.ThrowExceptionForHR(结果)
+            访问对象 = Marshal.GetObjectForIUnknown(访问指针)
+            Dim 接口访问 = DirectCast(访问对象, IWinRTDxgiInterfaceAccess)
+            Dim 纹理接口标识 = D3D11纹理接口标识
+            结果 = 接口访问.GetInterface(纹理接口标识, 纹理指针)
             If 结果 < 0 Then Marshal.ThrowExceptionForHR(结果)
             Return New ID3D11Texture2D(纹理指针)
         Finally
+            If 访问对象 IsNot Nothing Then Marshal.ReleaseComObject(访问对象)
+            If 访问指针 <> IntPtr.Zero Then Marshal.Release(访问指针)
             Marshal.Release(表面指针)
         End Try
     End Function

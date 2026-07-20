@@ -24,6 +24,8 @@ struct WasapiCaptureStatistics {
     std::uint32_t sampleRate;
     std::uint16_t channelCount;
     std::uint16_t bitsPerSample;
+    std::uint32_t channelMask;
+    float peakLevel;
 };
 
 class WasapiCapture final {

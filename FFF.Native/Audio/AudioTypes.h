@@ -11,6 +11,7 @@ struct WasapiSampleFormat {
     std::uint16_t bitsPerSample;
     std::uint16_t validBitsPerSample;
     std::uint16_t blockAlign;
+    std::uint32_t channelMask;
     bool floatingPoint;
 };
 

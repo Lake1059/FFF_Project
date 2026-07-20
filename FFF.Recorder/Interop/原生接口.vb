@@ -54,6 +54,15 @@ Friend Structure 原生会话配置
     Public 源格式UTF8 As IntPtr
     Public 诊断回调 As IntPtr
     Public 诊断回调上下文 As IntPtr
+    Public 音频编码器名称UTF8 As IntPtr
+    Public 音频采样率 As UInteger
+    Public 音频声道数 As UInteger
+    Public 音频码率 As Long
+    Public 音频模式 As UInteger
+    Public 场景优化UTF8 As IntPtr
+    Public 跟随默认系统音频设备 As UInteger
+    Public 质量控制模式 As UInteger
+    Public 自定义视频参数UTF8 As IntPtr
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -87,6 +96,12 @@ Friend Structure 原生会话统计
     Public 麦克风时间线误差微秒 As Long
     Public 系统音频补偿PPM As Integer
     Public 麦克风补偿PPM As Integer
+    Public 视频字节数 As ULong
+    Public 音频字节数 As ULong
+    Public 音频声道数 As UInteger
+    Public 音频声道掩码 As UInteger
+    Public 系统音频峰值 As Single
+    Public 麦克风峰值 As Single
 End Structure
 
 Friend NotInheritable Class 原生会话句柄
@@ -171,6 +186,14 @@ Friend Module 原生接口
 
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF_ResumeSession(会话 As 原生会话句柄, QPC时间戳 As Long) As 原生结果
+    End Function
+
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF_SplitSession(会话 As 原生会话句柄, 输出路径UTF8 As IntPtr) As 原生结果
+    End Function
+
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF_SwitchSystemAudioEndpoint(会话 As 原生会话句柄, 端点标识UTF8 As IntPtr) As 原生结果
     End Function
 
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>

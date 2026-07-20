@@ -1,5 +1,6 @@
 Imports System.Diagnostics
 Imports System.Runtime.InteropServices
+Imports System.Text.Json
 
 Friend NotInheritable Class 原生配置封送范围
     Implements IDisposable
@@ -10,6 +11,9 @@ Friend NotInheritable Class 原生配置封送范围
     Private ReadOnly 麦克风指针 As IntPtr
     Private ReadOnly 预设指针 As IntPtr
     Private ReadOnly 配置档指针 As IntPtr
+    Private ReadOnly 场景优化指针 As IntPtr
+    Private ReadOnly 自定义视频参数指针 As IntPtr
+    Private ReadOnly 音频编码器指针 As IntPtr
     Private ReadOnly 诊断日志指针 As IntPtr
     Private ReadOnly 捕获后端指针 As IntPtr
     Private ReadOnly 源说明指针 As IntPtr
@@ -29,8 +33,13 @@ Friend NotInheritable Class 原生配置封送范围
                 Marshal.StringToCoTaskMemUTF8(配置.编码预设))
             配置档指针 = If(String.IsNullOrWhiteSpace(配置.编码配置档), IntPtr.Zero,
                 Marshal.StringToCoTaskMemUTF8(配置.编码配置档))
+            场景优化指针 = If(String.IsNullOrWhiteSpace(配置.场景优化), IntPtr.Zero,
+                Marshal.StringToCoTaskMemUTF8(配置.场景优化))
+            自定义视频参数指针 = If(String.IsNullOrWhiteSpace(配置.自定义视频参数), IntPtr.Zero,
+                Marshal.StringToCoTaskMemUTF8(配置.自定义视频参数))
+            音频编码器指针 = Marshal.StringToCoTaskMemUTF8(配置.音频编码器名称)
             Dim 诊断路径 = If(String.IsNullOrWhiteSpace(配置.诊断日志文件),
-                IO.Path.GetFullPath(配置.输出文件) & ".diagnostic.jsonl", IO.Path.GetFullPath(配置.诊断日志文件))
+                IO.Path.ChangeExtension(IO.Path.GetFullPath(配置.输出文件), ".json"), IO.Path.GetFullPath(配置.诊断日志文件))
             诊断日志指针 = Marshal.StringToCoTaskMemUTF8(诊断路径)
             捕获后端指针 = If(String.IsNullOrWhiteSpace(配置.捕获后端), IntPtr.Zero,
                 Marshal.StringToCoTaskMemUTF8(配置.捕获后端))
@@ -60,7 +69,13 @@ Friend NotInheritable Class 原生配置封送范围
             .静音系统音频 = If(配置.静音系统音频, 1UI, 0UI),
             .静音麦克风 = If(配置.静音麦克风, 1UI, 0UI), .诊断日志路径UTF8 = 诊断日志指针,
             .捕获后端UTF8 = 捕获后端指针, .源说明UTF8 = 源说明指针, .源格式UTF8 = 源格式指针,
-            .诊断回调 = 诊断回调, .诊断回调上下文 = 诊断回调上下文
+            .诊断回调 = 诊断回调, .诊断回调上下文 = 诊断回调上下文,
+            .音频编码器名称UTF8 = 音频编码器指针, .音频采样率 = 配置.音频采样率,
+            .音频声道数 = 配置.音频声道数, .音频码率 = 配置.音频码率,
+            .音频模式 = 配置.音频模式, .场景优化UTF8 = 场景优化指针,
+            .跟随默认系统音频设备 = If(配置.跟随默认系统音频设备, 1UI, 0UI),
+            .质量控制模式 = 配置.质量控制模式,
+            .自定义视频参数UTF8 = 自定义视频参数指针
         }
     End Sub
 
@@ -74,6 +89,9 @@ Friend NotInheritable Class 原生配置封送范围
         If 麦克风指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(麦克风指针)
         If 预设指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(预设指针)
         If 配置档指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(配置档指针)
+        If 场景优化指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(场景优化指针)
+        If 自定义视频参数指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(自定义视频参数指针)
+        If 音频编码器指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(音频编码器指针)
         If 诊断日志指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(诊断日志指针)
         If 捕获后端指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(捕获后端指针)
         If 源说明指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(源说明指针)
@@ -97,13 +115,15 @@ Public NotInheritable Class 录制会话
     Private ReadOnly 回调委托 As 原生诊断回调
     Private 回调GC句柄 As GCHandle
     Private 已分配回调句柄 As Boolean
+    Private ReadOnly 诊断日志路径 As String
     Private 已释放 As Boolean
 
     Private Sub New(原生句柄 As 原生会话句柄, 诊断回调 As 原生诊断回调,
-        诊断回调句柄 As GCHandle)
+        诊断回调句柄 As GCHandle, 日志路径 As String)
         句柄 = 原生句柄
         回调委托 = 诊断回调
         回调GC句柄 = 诊断回调句柄
+        诊断日志路径 = 日志路径
         已分配回调句柄 = True
     End Sub
 
@@ -113,12 +133,14 @@ Public NotInheritable Class 录制会话
         Dim 回调桥 As New 原生诊断回调桥()
         Dim 回调 As New 原生诊断回调(AddressOf 处理原生诊断回调)
         Dim 回调句柄 = GCHandle.Alloc(回调桥)
+        Dim 日志路径 = If(String.IsNullOrWhiteSpace(配置.诊断日志文件),
+            IO.Path.ChangeExtension(IO.Path.GetFullPath(配置.输出文件), ".json"), IO.Path.GetFullPath(配置.诊断日志文件))
         Try
             Using 封送范围 As New 原生配置封送范围(配置, 设备指针,
                 Marshal.GetFunctionPointerForDelegate(回调), GCHandle.ToIntPtr(回调句柄))
             Dim 原生指针 As IntPtr
             录制引擎.检查结果(原生接口.FFF_CreateSession(封送范围.值, 原生指针), "创建录制会话失败。")
-                Dim 结果 = New 录制会话(New 原生会话句柄(原生指针), 回调, 回调句柄)
+                Dim 结果 = New 录制会话(New 原生会话句柄(原生指针), 回调, 回调句柄, 日志路径)
                 回调桥.会话 = 结果
                 Return 结果
             End Using
@@ -175,14 +197,47 @@ Public NotInheritable Class 录制会话
         录制引擎.检查结果(原生接口.FFF_ResumeSession(句柄, QPC时间戳), "恢复录制失败。")
     End Sub
 
+    Public Sub 切分(输出文件 As String)
+        确保未释放()
+        If String.IsNullOrWhiteSpace(输出文件) Then Throw New ArgumentException("输出文件不能为空。", NameOf(输出文件))
+        Dim 完整路径 = IO.Path.GetFullPath(输出文件)
+        Dim 路径指针 = Marshal.StringToCoTaskMemUTF8(完整路径)
+        Try
+            录制引擎.检查结果(原生接口.FFF_SplitSession(句柄, 路径指针),
+                读取最后错误("切分录制文件失败。"))
+        Finally
+            Marshal.FreeCoTaskMem(路径指针)
+        End Try
+    End Sub
+
+    Public Sub 切换系统音频端点(端点标识 As String)
+        确保未释放()
+        If String.IsNullOrWhiteSpace(端点标识) Then Throw New ArgumentException("音频端点标识不能为空。", NameOf(端点标识))
+        Dim 标识指针 = Marshal.StringToCoTaskMemUTF8(端点标识)
+        Try
+            录制引擎.检查结果(原生接口.FFF_SwitchSystemAudioEndpoint(句柄, 标识指针),
+                读取最后错误("切换系统音频设备失败。"))
+        Finally
+            Marshal.FreeCoTaskMem(标识指针)
+        End Try
+    End Sub
+
     Public Sub 停止()
         确保未释放()
-        录制引擎.检查结果(原生接口.FFF_StopSession(句柄), 读取最后错误("停止录制失败。"))
+        Try
+            录制引擎.检查结果(原生接口.FFF_StopSession(句柄), 读取最后错误("停止录制失败。"))
+        Finally
+            格式化诊断日志()
+        End Try
     End Sub
 
     Public Sub 强制中止()
         If 已释放 Then Return
-        录制引擎.检查结果(原生接口.FFF_AbortSession(句柄), "强制中止录制失败。")
+        Try
+            录制引擎.检查结果(原生接口.FFF_AbortSession(句柄), "强制中止录制失败。")
+        Finally
+            格式化诊断日志()
+        End Try
     End Sub
 
     Public Function 读取统计() As 录制统计
@@ -207,19 +262,34 @@ Public NotInheritable Class 录制会话
             .系统音频时间线误差微秒 = 原生统计.系统音频时间线误差微秒,
             .麦克风时间线误差微秒 = 原生统计.麦克风时间线误差微秒,
             .系统音频补偿PPM = 原生统计.系统音频补偿PPM,
-            .麦克风补偿PPM = 原生统计.麦克风补偿PPM
+            .麦克风补偿PPM = 原生统计.麦克风补偿PPM,
+            .视频字节数 = 原生统计.视频字节数, .音频字节数 = 原生统计.音频字节数,
+            .音频声道数 = 原生统计.音频声道数, .音频声道掩码 = 原生统计.音频声道掩码,
+            .系统音频峰值 = 原生统计.系统音频峰值, .麦克风峰值 = 原生统计.麦克风峰值
         }
     End Function
 
     Public Sub 释放() Implements IDisposable.Dispose
         If 已释放 Then Return
         句柄.Dispose()
+        格式化诊断日志()
         If 已分配回调句柄 Then
             回调GC句柄.Free()
             已分配回调句柄 = False
         End If
         已释放 = True
         GC.SuppressFinalize(Me)
+    End Sub
+
+    Private Sub 格式化诊断日志()
+        If String.IsNullOrWhiteSpace(诊断日志路径) OrElse Not IO.File.Exists(诊断日志路径) Then Return
+        Try
+            Using 文档 = JsonDocument.Parse(IO.File.ReadAllText(诊断日志路径))
+                IO.File.WriteAllText(诊断日志路径, JsonSerializer.Serialize(文档.RootElement, JsonSO))
+            End Using
+        Catch
+            ' 录制进程被强制终止时可能只留下未闭合数组；保留原始内容用于故障分析。
+        End Try
     End Sub
 
     Private Function 读取最后错误(后备消息 As String) As String

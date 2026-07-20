@@ -1,6 +1,5 @@
 cbuffer ToneMapConstants : register(b0)
 {
-    uint2 SourceSize;
     uint2 OutputSize;
     uint4 DestinationRect;
     float4 SourceRect;
@@ -10,7 +9,6 @@ cbuffer ToneMapConstants : register(b0)
     float HighlightCompression;
     float Saturation;
     uint Rotation;
-    float2 Reserved;
 };
 
 Texture2D<float4> SourceTexture : register(t0);
@@ -66,5 +64,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float3 toneMapped = linear709 * (targetLinear / luminance);
     float mappedLuminance = dot(toneMapped, float3(0.2126, 0.7152, 0.0722));
     toneMapped = max(lerp(mappedLuminance.xxx, toneMapped, Saturation), 0.0);
+    float maxOutput = max(max(toneMapped.r, toneMapped.g), toneMapped.b);
+    float outputLimit = max(TargetPeakNits / 100.0, 0.0001);
+    toneMapped *= min(1.0, outputLimit / max(maxOutput, 0.0001));
     OutputTexture[pixel] = float4(Bt709Encode(toneMapped.r), Bt709Encode(toneMapped.g), Bt709Encode(toneMapped.b), 1.0);
 }

@@ -30,15 +30,22 @@ $RuntimeFiles = @(
 )
 
 function Get-VisualCppTool {
-    $installRoot = "C:\Program Files\Microsoft Visual Studio\18"
-    $tool = Get-ChildItem -LiteralPath $installRoot -Directory -ErrorAction SilentlyContinue |
-        ForEach-Object { Get-ChildItem -LiteralPath (Join-Path $_.FullName "VC\Tools\MSVC") -Directory -ErrorAction SilentlyContinue } |
-        Sort-Object Name -Descending |
-        Select-Object -First 1
-    if ($null -eq $tool) {
-        throw "Visual C++ v145 x64 build tools were not found. Install the Desktop development with C++ workload."
+    param([Parameter(Mandatory = $true)] [string]$Name)
+
+    if (-not [string]::IsNullOrWhiteSpace($env:VCToolsInstallDir)) {
+        $candidate = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\$Name"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return [IO.Path]::GetFullPath($candidate)
+        }
     }
-    return $tool
+
+    $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $command) {
+        return $command.Source
+    }
+
+    throw "$Name was not found in VCToolsInstallDir or PATH. Run this script from a Visual Studio Developer PowerShell or Developer Command Prompt."
 }
 
 function Get-RuntimeDll {
@@ -112,12 +119,8 @@ foreach ($Component in $Components) {
 Copy-Item -LiteralPath (Join-Path $SourceDirectory "COPYING.LGPLv2.1") -Destination $ThirdPartyDirectory -Force
 Copy-Item -LiteralPath (Join-Path $SourceDirectory "COPYING.LGPLv3") -Destination $ThirdPartyDirectory -Force
 
-$tool = Get-VisualCppTool
-$Dumpbin = Join-Path $tool.FullName "bin\Hostx64\x64\dumpbin.exe"
-$Lib = Join-Path $tool.FullName "bin\Hostx64\x64\lib.exe"
-if (-not (Test-Path -LiteralPath $Dumpbin) -or -not (Test-Path -LiteralPath $Lib)) {
-    throw "Visual C++ x64 linker tools are missing from $($tool.FullName)"
-}
+$Dumpbin = Get-VisualCppTool -Name "dumpbin.exe"
+$Lib = Get-VisualCppTool -Name "lib.exe"
 
 foreach ($item in $RuntimeFiles) {
     $SourceDll = Get-RuntimeDll -Directory $RuntimeSource -Prefix $item.Prefix

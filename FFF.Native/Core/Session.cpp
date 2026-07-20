@@ -97,16 +97,25 @@ RecorderSession::RecorderSession(const FFFSessionConfiguration& configuration)
       systemAudioEndpointId_(configuration.systemAudioEndpointIdUtf8 == nullptr ? "" : configuration.systemAudioEndpointIdUtf8),
       microphoneEndpointId_(configuration.microphoneEndpointIdUtf8 == nullptr ? "" : configuration.microphoneEndpointIdUtf8),
       keepSeparateAudioTracks_(configuration.keepSeparateAudioTracks != 0),
-      timelineStarted_(false),
+      timelineStarted_(false), segmentVideoOffset_(0), segmentAudioOffset_(0),
       inputTextureFormat_(configuration.inputTextureFormat),
       chromaSampling_(configuration.chromaSampling),
       rateControl_(configuration.rateControl), quality_(configuration.quality),
       maximumBitRate_(configuration.maximumBitRate), lookaheadFrames_(configuration.lookaheadFrames),
       preset_(configuration.presetUtf8 == nullptr ? "" : configuration.presetUtf8),
       profile_(configuration.profileUtf8 == nullptr ? "" : configuration.profileUtf8),
+      sceneOptimization_(configuration.sceneOptimizationUtf8 == nullptr ? "" : configuration.sceneOptimizationUtf8),
       multipass_(configuration.multipass), colorRange_(configuration.colorRange),
       systemAudioGain_(configuration.muteSystemAudio != 0 ? 0.0F : configuration.systemAudioGain),
       microphoneGain_(configuration.muteMicrophone != 0 ? 0.0F : configuration.microphoneGain),
+      audioEncoderName_(configuration.audioEncoderNameUtf8 == nullptr ? "aac" : configuration.audioEncoderNameUtf8),
+      audioSampleRate_(configuration.audioSampleRate == 0 ? 48'000U : configuration.audioSampleRate),
+      audioChannelCount_(configuration.audioChannelCount == 0 ? 2U : configuration.audioChannelCount),
+      audioBitRate_(configuration.audioBitRate < 0 ? 0 : configuration.audioBitRate),
+      audioMode_(configuration.audioMode),
+      followDefaultSystemAudioDevice_(configuration.followDefaultSystemAudioDevice != 0),
+      qualityMode_(configuration.qualityMode),
+      customVideoParameters_(configuration.customVideoParametersUtf8 == nullptr ? "" : configuration.customVideoParametersUtf8),
       diagnosticLogPath_(configuration.diagnosticLogPathUtf8 == nullptr ? "" : configuration.diagnosticLogPathUtf8),
       captureBackend_(configuration.captureBackendUtf8 == nullptr ? "" : configuration.captureBackendUtf8),
       sourceDescription_(configuration.sourceDescriptionUtf8 == nullptr ? "" : configuration.sourceDescriptionUtf8),
@@ -115,7 +124,8 @@ RecorderSession::RecorderSession(const FFFSessionConfiguration& configuration)
       diagnosticCallbackContext_(configuration.diagnosticCallbackContext),
       state_(FFFSessionState::Created), submittedFrames_(0), droppedFrames_(0), repeatedFrames_(0),
       lastVideoQpc_(0), lastErrorCode_(0), lastEncodeMicroseconds_(0), peakEncodeMicroseconds_(0),
-      trailerWritten_(false), videoMuxer_(std::make_unique<VideoMuxer>()) {
+      trailerWritten_(false), completedVideoBytes_(0), completedAudioBytes_(0), diagnosticFirstEntry_(true),
+      videoMuxer_(std::make_unique<VideoMuxer>()) {
     if (device_ != nullptr) {
         device_->AddRef();
     }
@@ -151,6 +161,7 @@ FFFResult RecorderSession::Start() noexcept {
             const std::u8string utf8Path(reinterpret_cast<const char8_t*>(diagnosticLogPath_.data()),
                 reinterpret_cast<const char8_t*>(diagnosticLogPath_.data() + diagnosticLogPath_.size()));
             diagnosticLog_.open(std::filesystem::path(utf8Path), std::ios::out | std::ios::trunc);
+            if (diagnosticLog_) diagnosticLog_ << "[\n";
         } catch (...) {
             diagnosticLog_.setstate(std::ios::failbit);
         }
@@ -178,29 +189,26 @@ FFFResult RecorderSession::Start() noexcept {
         ",\"lookahead\":" + std::to_string(lookaheadFrames_) +
         ",\"preset\":\"" + EscapeDiagnosticJson(preset_) +
         "\",\"profile\":\"" + EscapeDiagnosticJson(profile_) +
-        "\",\"multipass\":" + std::to_string(multipass_) +
+        "\",\"sceneOptimization\":\"" + EscapeDiagnosticJson(sceneOptimization_) +
+        "\",\"audioEncoder\":\"" + EscapeDiagnosticJson(audioEncoderName_) +
+        "\",\"audioSampleRate\":" + std::to_string(audioSampleRate_) +
+        ",\"audioChannels\":" + std::to_string(audioChannelCount_) +
+        ",\"multipass\":" + std::to_string(multipass_) +
         ",\"chromaSampling\":" + std::to_string(chromaSampling_) +
         ",\"colorRange\":" + std::to_string(colorRange_) +
         ",\"tenBit\":" + (tenBit_ ? "true" : "false") +
         ",\"hdr10\":" + (hdr10_ ? "true" : "false"));
     const bool mixAudioSources = !keepSeparateAudioTracks_ &&
         !systemAudioEndpointId_.empty() && !microphoneEndpointId_.empty();
-    std::vector<std::string> audioTrackTitles;
-    if (mixAudioSources) audioTrackTitles.emplace_back("Mixed audio");
-    else {
-        if (!systemAudioEndpointId_.empty()) audioTrackTitles.emplace_back("System audio");
-        if (!microphoneEndpointId_.empty()) audioTrackTitles.emplace_back("Microphone");
-    }
-    const auto audioSourceCount = static_cast<std::size_t>(!systemAudioEndpointId_.empty()) +
-        static_cast<std::size_t>(!microphoneEndpointId_.empty());
     std::vector<float> audioSourceGains;
     if (!systemAudioEndpointId_.empty()) audioSourceGains.push_back(systemAudioGain_);
     if (!microphoneEndpointId_.empty()) audioSourceGains.push_back(microphoneGain_);
     const auto initialized = videoMuxer_->Initialize(device_, outputPath_, encoderName_, width_, height_,
         frameRateNumerator_, frameRateDenominator_, bitRate_, gopSize_, bFrameCount_, tenBit_, hdr10_,
-        audioTrackTitles, mixAudioSources, audioSourceCount, inputTextureFormat_, chromaSampling_,
-        rateControl_, quality_, maximumBitRate_, lookaheadFrames_, preset_, profile_, multipass_, colorRange_,
-        audioSourceGains);
+        mixAudioSources, inputTextureFormat_, chromaSampling_,
+        rateControl_, qualityMode_, customVideoParameters_, quality_, maximumBitRate_, lookaheadFrames_, preset_, profile_, sceneOptimization_,
+        multipass_, colorRange_, audioSourceGains, audioEncoderName_, audioSampleRate_,
+        audioChannelCount_, audioBitRate_, audioMode_);
     if (initialized != FFFResult::Success) {
         SetError(initialized, videoMuxer_->LastError());
         state_.store(FFFSessionState::Failed);
@@ -209,61 +217,18 @@ FFFResult RecorderSession::Start() noexcept {
         return initialized;
     }
     state_.store(FFFSessionState::Running);
-    auto addCapture = [this](const std::string& endpointId, const bool loopback,
-        const std::size_t trackIndex) -> FFFResult {
-        if (endpointId.empty()) return FFFResult::Success;
-        const auto required = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            endpointId.c_str(), -1, nullptr, 0);
-        if (required <= 1) return FFFResult::InvalidArgument;
-        std::wstring wideId(static_cast<std::size_t>(required), L'\0');
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, endpointId.c_str(), -1,
-            wideId.data(), required);
-        wideId.resize(static_cast<std::size_t>(required - 1));
-        auto callback = [this, trackIndex](const std::uint8_t* data, const std::uint32_t frameCount,
-            const std::uint32_t flags, const std::uint64_t qpcPosition100ns,
-            const WasapiSampleFormat& format) -> FFFResult {
-            std::scoped_lock callbackLock(mutex_);
-            if (state_.load() != FFFSessionState::Running || !timelineStarted_) return FFFResult::Success;
-            const auto frequency = timeline_.Frequency();
-            const auto wholeSeconds = qpcPosition100ns / 10'000'000ULL;
-            const auto remaining100ns = qpcPosition100ns % 10'000'000ULL;
-            const auto rawQpc = static_cast<std::int64_t>(wholeSeconds * frequency +
-                (remaining100ns * frequency) / 10'000'000ULL);
-            const auto targetSample = timeline_.ToMediaTicks(rawQpc, 48'000);
-            const auto encoded = videoMuxer_->EncodeAudio(trackIndex, data, frameCount, flags,
-                targetSample, format);
-            if (encoded != FFFResult::Success) {
-                SetError(encoded, videoMuxer_->LastError());
-                state_.store(FFFSessionState::Failed);
-                WriteDiagnostic("audio_failed", "\"message\":\"" +
-                    EscapeDiagnosticJson(videoMuxer_->LastError()) + "\"");
-            }
-            return encoded;
-        };
-        auto failureCallback = [this](const std::string& message) {
-            std::scoped_lock callbackLock(mutex_);
-            const auto state = state_.load();
-            if (state != FFFSessionState::Running && state != FFFSessionState::Paused) return;
-            SetError(FFFResult::DeviceFailure, message);
-            state_.store(FFFSessionState::Failed);
-            WriteDiagnostic("audio_device_failed", "\"message\":\"" +
-                EscapeDiagnosticJson(message) + "\"");
-        };
-        auto capture = std::make_unique<WasapiCapture>(std::move(wideId), loopback,
-            std::move(callback), std::move(failureCallback));
-        const auto started = capture->Start();
-        if (started != FFFResult::Success) {
-            SetError(started, capture->LastError());
-            return started;
-        }
-        audioCaptures_.push_back(std::move(capture));
-        return FFFResult::Success;
-    };
     std::size_t trackIndex = 0;
     auto audioResult = FFFResult::Success;
-    if (!systemAudioEndpointId_.empty()) audioResult = addCapture(systemAudioEndpointId_, true, trackIndex++);
-    if (audioResult == FFFResult::Success && !microphoneEndpointId_.empty())
-        audioResult = addCapture(microphoneEndpointId_, false, trackIndex);
+    if (!systemAudioEndpointId_.empty()) {
+        std::unique_ptr<WasapiCapture> capture;
+        audioResult = CreateAudioCapture(systemAudioEndpointId_, true, trackIndex++, capture);
+        if (audioResult == FFFResult::Success) audioCaptures_.push_back(std::move(capture));
+    }
+    if (audioResult == FFFResult::Success && !microphoneEndpointId_.empty()) {
+        std::unique_ptr<WasapiCapture> capture;
+        audioResult = CreateAudioCapture(microphoneEndpointId_, false, trackIndex, capture);
+        if (audioResult == FFFResult::Success) audioCaptures_.push_back(std::move(capture));
+    }
     if (audioResult != FFFResult::Success) {
         CollectAudioStatistics();
         for (auto& capture : audioCaptures_) capture->Stop();
@@ -296,8 +261,8 @@ FFFResult RecorderSession::Submit(ID3D11Texture2D* texture, const std::uint32_t 
         timeline_.Reset(qpcTimestamp);
         timelineStarted_ = true;
     }
-    const auto presentationTimestamp = timeline_.ToMediaTicks(qpcTimestamp, frameRateNumerator_) /
-        frameRateDenominator_;
+    const auto presentationTimestamp = std::max<std::int64_t>(0,
+        timeline_.ToMediaTicks(qpcTimestamp, frameRateNumerator_) / frameRateDenominator_ - segmentVideoOffset_);
     LARGE_INTEGER encodeStarted{};
     QueryPerformanceCounter(&encodeStarted);
     const auto encoded = videoMuxer_->Encode(texture, textureArrayIndex, presentationTimestamp);
@@ -329,7 +294,7 @@ FFFResult RecorderSession::ReportDroppedFrames(const std::uint32_t frameCount) n
     return FFFResult::Success;
 }
 
-// 接收托管 WGC/DXGI 层产生的结构化事件，并通过与 Native 错误相同的 JSONL/回调通道上报。
+// 接收托管 WGC/DXGI 层产生的结构化事件，并通过与 Native 错误相同的 JSON 数组/回调通道上报。
 // 字符串只在调用期间借用；message 会经过 JSON 转义，调用方无需构造 JSON 也不会破坏日志格式。
 FFFResult RecorderSession::ReportDiagnosticEvent(const char* eventName, const char* message) noexcept {
     if (eventName == nullptr || *eventName == '\0') return FFFResult::InvalidArgument;
@@ -364,6 +329,141 @@ FFFResult RecorderSession::Resume(const std::int64_t qpcTimestamp) noexcept {
     return FFFResult::Success;
 }
 
+// 正常结束当前 Matroska 后，在同一捕获会话中建立新的编码/封装器。调用期间持有会话锁，
+// 因此音频回调和视频提交会在文件边界处短暂等待，而不会向已经关闭的 muxer 写入。
+FFFResult RecorderSession::Split(const char* outputPathUtf8) noexcept {
+    if (outputPathUtf8 == nullptr || *outputPathUtf8 == '\0') return FFFResult::InvalidArgument;
+    std::scoped_lock lock(mutex_);
+    if (state_.load() != FFFSessionState::Running) return FFFResult::InvalidState;
+
+    const auto finished = videoMuxer_->Finish();
+    if (finished != FFFResult::Success) {
+        SetError(finished, videoMuxer_->LastError());
+        state_.store(FFFSessionState::Failed);
+        return finished;
+    }
+    completedVideoBytes_ += videoMuxer_->VideoBytes();
+    completedAudioBytes_ += videoMuxer_->AudioBytes();
+
+    const bool mixAudioSources = !keepSeparateAudioTracks_ &&
+        !systemAudioEndpointId_.empty() && !microphoneEndpointId_.empty();
+    std::vector<float> audioSourceGains;
+    if (!systemAudioEndpointId_.empty()) audioSourceGains.push_back(systemAudioGain_);
+    if (!microphoneEndpointId_.empty()) audioSourceGains.push_back(microphoneGain_);
+
+    auto nextMuxer = std::make_unique<VideoMuxer>();
+    const auto initialized = nextMuxer->Initialize(device_, outputPathUtf8, encoderName_, width_, height_,
+        frameRateNumerator_, frameRateDenominator_, bitRate_, gopSize_, bFrameCount_, tenBit_, hdr10_,
+        mixAudioSources, inputTextureFormat_, chromaSampling_,
+        rateControl_, qualityMode_, customVideoParameters_, quality_, maximumBitRate_, lookaheadFrames_, preset_, profile_, sceneOptimization_,
+        multipass_, colorRange_, audioSourceGains, audioEncoderName_, audioSampleRate_,
+        audioChannelCount_, audioBitRate_, audioMode_);
+    if (initialized != FFFResult::Success) {
+        SetError(initialized, nextMuxer->LastError());
+        state_.store(FFFSessionState::Failed);
+        return initialized;
+    }
+
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    segmentVideoOffset_ = timelineStarted_ ?
+        timeline_.ToMediaTicks(now.QuadPart, frameRateNumerator_) / frameRateDenominator_ : 0;
+    segmentAudioOffset_ = timelineStarted_ ? timeline_.ToMediaTicks(now.QuadPart, audioSampleRate_) : 0;
+    videoMuxer_ = std::move(nextMuxer);
+    outputPath_ = outputPathUtf8;
+    WriteDiagnostic("split", "\"outputPath\":\"" + EscapeDiagnosticJson(outputPath_) + "\"");
+    return FFFResult::Success;
+}
+
+FFFResult RecorderSession::SwitchSystemAudioEndpoint(const char* endpointIdUtf8) noexcept {
+    if (endpointIdUtf8 == nullptr || *endpointIdUtf8 == '\0') return FFFResult::InvalidArgument;
+    std::unique_ptr<WasapiCapture> previousCapture;
+    {
+        std::scoped_lock lock(mutex_);
+        const auto state = state_.load();
+        if ((state != FFFSessionState::Running && state != FFFSessionState::Paused) ||
+            systemAudioEndpointId_.empty() || audioCaptures_.empty()) return FFFResult::InvalidState;
+        if (systemAudioEndpointId_ == endpointIdUtf8) return FFFResult::Success;
+        previousCapture = std::move(audioCaptures_.front());
+        audioCaptures_.erase(audioCaptures_.begin());
+    }
+    previousCapture->Stop();
+
+    std::unique_ptr<WasapiCapture> replacement;
+    const auto started = CreateAudioCapture(endpointIdUtf8, true, 0, replacement);
+    if (started != FFFResult::Success) {
+        if (previousCapture->Start() == FFFResult::Success) {
+            std::scoped_lock lock(mutex_);
+            audioCaptures_.insert(audioCaptures_.begin(), std::move(previousCapture));
+        }
+        return started;
+    }
+    {
+        std::scoped_lock lock(mutex_);
+        systemAudioEndpointId_ = endpointIdUtf8;
+        audioCaptures_.insert(audioCaptures_.begin(), std::move(replacement));
+        completedAudioStatistics_.clear();
+        completedAudioTimelineErrors_.clear();
+        completedAudioCompensationPpm_.clear();
+        WriteDiagnostic("system_audio_endpoint_switched", "\"endpoint\":\"" +
+            EscapeDiagnosticJson(systemAudioEndpointId_) + "\"");
+    }
+    return FFFResult::Success;
+}
+
+FFFResult RecorderSession::CreateAudioCapture(const std::string& endpointId, const bool loopback,
+    const std::size_t trackIndex, std::unique_ptr<WasapiCapture>& capture) noexcept {
+    if (endpointId.empty()) return FFFResult::InvalidArgument;
+    const auto required = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        endpointId.c_str(), -1, nullptr, 0);
+    if (required <= 1) return FFFResult::InvalidArgument;
+    std::wstring wideId(static_cast<std::size_t>(required), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, endpointId.c_str(), -1,
+        wideId.data(), required);
+    wideId.resize(static_cast<std::size_t>(required - 1));
+    auto packetCallback = [this, trackIndex](const std::uint8_t* data, const std::uint32_t frameCount,
+        const std::uint32_t flags, const std::uint64_t qpcPosition100ns,
+        const WasapiSampleFormat& format) -> FFFResult {
+        std::scoped_lock callbackLock(mutex_);
+        if (state_.load() != FFFSessionState::Running || !timelineStarted_) return FFFResult::Success;
+        const auto frequency = timeline_.Frequency();
+        const auto wholeSeconds = qpcPosition100ns / 10'000'000ULL;
+        const auto remaining100ns = qpcPosition100ns % 10'000'000ULL;
+        const auto rawQpc = static_cast<std::int64_t>(wholeSeconds * frequency +
+            (remaining100ns * frequency) / 10'000'000ULL);
+        const auto targetSample = std::max<std::int64_t>(0,
+            timeline_.ToMediaTicks(rawQpc, audioSampleRate_) - segmentAudioOffset_);
+        const auto encoded = videoMuxer_->EncodeAudio(trackIndex, data, frameCount, flags,
+            targetSample, format);
+        if (encoded != FFFResult::Success) {
+            SetError(encoded, videoMuxer_->LastError());
+            state_.store(FFFSessionState::Failed);
+            WriteDiagnostic("audio_failed", "\"message\":\"" +
+                EscapeDiagnosticJson(videoMuxer_->LastError()) + "\"");
+        }
+        return encoded;
+    };
+    auto failureCallback = [this, trackIndex](const std::string& message) {
+        std::scoped_lock callbackLock(mutex_);
+        const auto state = state_.load();
+        if (state != FFFSessionState::Running && state != FFFSessionState::Paused) return;
+        WriteDiagnostic("audio_device_failed", "\"message\":\"" +
+            EscapeDiagnosticJson(message) + "\"");
+        if (trackIndex == 0 && followDefaultSystemAudioDevice_) return;
+        SetError(FFFResult::DeviceFailure, message);
+        state_.store(FFFSessionState::Failed);
+    };
+    try {
+        capture = std::make_unique<WasapiCapture>(std::move(wideId), loopback,
+            std::move(packetCallback), std::move(failureCallback));
+    } catch (...) {
+        return FFFResult::NativeFailure;
+    }
+    const auto started = capture->Start();
+    if (started != FFFResult::Success) SetError(started, capture->LastError());
+    return started;
+}
+
 // 执行正常终止转换。成功停止后重复调用仍返回成功；此过程排空音频 FIFO、音视频编码器和异步
 // packet 队列，最后写入 Matroska trailer。
 FFFResult RecorderSession::Stop() noexcept {
@@ -391,7 +491,10 @@ FFFResult RecorderSession::Stop() noexcept {
         ",\"repeatedFrames\":" + std::to_string(repeatedFrames_.load()) +
         ",\"peakEncodeMicroseconds\":" + std::to_string(peakEncodeMicroseconds_.load()) +
         ",\"trailerWritten\":true");
-    diagnosticLog_.close();
+    if (diagnosticLog_.is_open()) {
+        diagnosticLog_ << "\n]\n";
+        diagnosticLog_.close();
+    }
     return FFFResult::Success;
 }
 
@@ -407,7 +510,10 @@ FFFResult RecorderSession::Abort() noexcept {
     std::scoped_lock lock(mutex_);
     videoMuxer_->Abort();
     WriteDiagnostic("abort", "\"trailerWritten\":false");
-    diagnosticLog_.close();
+    if (diagnosticLog_.is_open()) {
+        diagnosticLog_ << "\n]\n";
+        diagnosticLog_.close();
+    }
     return FFFResult::Success;
 }
 
@@ -464,7 +570,7 @@ FFFResult RecorderSession::GetStatistics(FFFSessionStatistics& statistics) const
     audioIndex = 0;
     if (!systemAudioEndpointId_.empty()) {
         statistics.systemAudioTimelineErrorMicroseconds =
-            timelineErrors[audioIndex] * 1'000'000LL / 48'000LL;
+            timelineErrors[audioIndex] * 1'000'000LL / audioSampleRate_;
         statistics.systemAudioCompensationPpm = compensationPpm[audioIndex++];
     } else {
         statistics.systemAudioTimelineErrorMicroseconds = 0;
@@ -472,12 +578,18 @@ FFFResult RecorderSession::GetStatistics(FFFSessionStatistics& statistics) const
     }
     if (!microphoneEndpointId_.empty()) {
         statistics.microphoneTimelineErrorMicroseconds =
-            timelineErrors[audioIndex] * 1'000'000LL / 48'000LL;
+            timelineErrors[audioIndex] * 1'000'000LL / audioSampleRate_;
         statistics.microphoneCompensationPpm = compensationPpm[audioIndex];
     } else {
         statistics.microphoneTimelineErrorMicroseconds = 0;
-        statistics.microphoneCompensationPpm = 0;
+    statistics.microphoneCompensationPpm = 0;
     }
+    statistics.videoBytes = completedVideoBytes_ + videoMuxer_->VideoBytes();
+    statistics.audioBytes = completedAudioBytes_ + videoMuxer_->AudioBytes();
+    statistics.audioChannelCount = system.channelCount;
+    statistics.audioChannelMask = system.channelMask;
+    statistics.systemAudioPeak = system.peakLevel;
+    statistics.microphonePeak = microphone.peakLevel;
     return FFFResult::Success;
 }
 
@@ -498,7 +610,7 @@ void RecorderSession::SetError(const FFFResult result, std::string message) noex
     }
 }
 
-// 追加一条单行 JSON 诊断事件。每条记录包含原始 QPC，detail 只能是已经转义的 JSON 字段片段；
+// 向 JSON 数组追加一条诊断事件。每条记录包含原始 QPC，detail 只能是已经转义的 JSON 字段片段；
 // 写入失败不会递归覆盖主录制错误，避免日志磁盘故障掩盖编码器的首要失败原因。
 void RecorderSession::WriteDiagnostic(const char* eventName, const std::string& detail) noexcept {
     LARGE_INTEGER now{};
@@ -506,7 +618,9 @@ void RecorderSession::WriteDiagnostic(const char* eventName, const std::string& 
     try {
         if (diagnosticLog_.is_open()) {
             std::scoped_lock lock(diagnosticMutex_);
-            diagnosticLog_ << "{\"event\":\"" << eventName << "\",\"qpc\":" << now.QuadPart;
+            if (!diagnosticFirstEntry_) diagnosticLog_ << ",\n";
+            diagnosticFirstEntry_ = false;
+            diagnosticLog_ << "  {\"event\":\"" << eventName << "\",\"qpc\":" << now.QuadPart;
             if (!detail.empty()) diagnosticLog_ << ',' << detail;
             diagnosticLog_ << "}\n";
             diagnosticLog_.flush();

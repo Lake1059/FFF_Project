@@ -48,13 +48,13 @@ FFFResult AudioMixer::Encode(const std::size_t sourceIndex, const std::uint8_t* 
     const auto capacity = static_cast<int>(av_rescale_rnd(
         swr_get_delay(source.resampler, inputFormat.sampleRate) + frameCount,
         48'000, inputFormat.sampleRate, AV_ROUND_UP));
-    std::vector<float> converted(static_cast<std::size_t>(capacity) * 2);
-    std::uint8_t* outputPlanes[] = { reinterpret_cast<std::uint8_t*>(converted.data()) };
-    std::vector<std::uint8_t> silence;
+    convertedBuffer_.resize(static_cast<std::size_t>(capacity) * 2);
+    std::uint8_t* outputPlanes[] = { reinterpret_cast<std::uint8_t*>(convertedBuffer_.data()) };
     const std::uint8_t* input = data;
     if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || input == nullptr) {
-        silence.resize(static_cast<std::size_t>(frameCount) * inputFormat.blockAlign, 0);
-        input = silence.data();
+        silenceBuffer_.resize(static_cast<std::size_t>(frameCount) * inputFormat.blockAlign);
+        std::fill(silenceBuffer_.begin(), silenceBuffer_.end(), 0);
+        input = silenceBuffer_.data();
     }
     const std::uint8_t* inputPlanes[] = { input };
     const auto convertedCount = swr_convert(source.resampler, outputPlanes, capacity,
@@ -63,7 +63,7 @@ FFFResult AudioMixer::Encode(const std::size_t sourceIndex, const std::uint8_t* 
         SetFfmpegError("swr_convert(mixer)", convertedCount);
         return FFFResult::FfmpegFailure;
     }
-    converted.resize(static_cast<std::size_t>(convertedCount) * 2);
+    const auto convertedSize = static_cast<std::size_t>(convertedCount) * 2;
     std::int64_t appendAt = targetPresentationSample;
     std::size_t inputOffset = 0;
     if (!source.seenPacket) {
@@ -81,8 +81,9 @@ FFFResult AudioMixer::Encode(const std::size_t sourceIndex, const std::uint8_t* 
         appendAt += overlap;
     }
     if (appendAt < source.endSample) return MixReady(false);
-    source.samples.insert(source.samples.end(), converted.begin() + inputOffset, converted.end());
-    source.endSample += static_cast<std::int64_t>((converted.size() - inputOffset) / 2);
+    source.samples.insert(source.samples.end(), convertedBuffer_.begin() + inputOffset,
+        convertedBuffer_.begin() + convertedSize);
+    source.endSample += static_cast<std::int64_t>((convertedSize - inputOffset) / 2);
     return MixReady(false);
 }
 
@@ -164,17 +165,18 @@ FFFResult AudioMixer::MixReady(const bool force) noexcept {
     static const WasapiSampleFormat mixedFormat{ 48'000, 2, 32, 32, 8, true };
     while (nextMixedSample_ < readyEnd) {
         const auto count = static_cast<int>(std::min<std::int64_t>(1024, readyEnd - nextMixedSample_));
-        std::vector<float> mixed(static_cast<std::size_t>(count) * 2, 0.0F);
+        mixBuffer_.resize(static_cast<std::size_t>(count) * 2);
+        std::fill(mixBuffer_.begin(), mixBuffer_.end(), 0.0F);
         for (int sample = 0; sample < count; ++sample) {
             for (int channel = 0; channel < 2; ++channel) {
                 float value = 0.0F;
                 for (std::size_t sourceIndex = 0; sourceIndex < sources_.size(); ++sourceIndex)
                     value += ReadSample(sources_[sourceIndex], nextMixedSample_ + sample, channel) *
                         sourceGains_[sourceIndex];
-                mixed[static_cast<std::size_t>(sample) * 2 + channel] = std::clamp(value, -1.0F, 1.0F);
+                mixBuffer_[static_cast<std::size_t>(sample) * 2 + channel] = std::clamp(value, -1.0F, 1.0F);
             }
         }
-        const auto encoded = outputTrack_->Encode(reinterpret_cast<const std::uint8_t*>(mixed.data()),
+        const auto encoded = outputTrack_->Encode(reinterpret_cast<const std::uint8_t*>(mixBuffer_.data()),
             count, 0, nextMixedSample_, mixedFormat);
         if (encoded != FFFResult::Success) {
             lastError_ = outputTrack_->LastError();

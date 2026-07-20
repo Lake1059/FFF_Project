@@ -72,8 +72,11 @@ std::int64_t QpcTimeline::ToMediaTicks(const std::int64_t qpcTimestamp,
     }
     const auto wholeSeconds = elapsed / frequency_;
     const auto remainingTicks = elapsed % frequency_;
+    // Round to the nearest media tick. Flooring an interval that represents exactly 1/60 s can
+    // produce zero because the scheduler's integer QPC step is a few ticks short. That creates
+    // duplicate PTS and makes a fixed-rate stream appear variable.
     return wholeSeconds * timeBaseDenominator +
-        (remainingTicks * timeBaseDenominator) / frequency_;
+        (remainingTicks * timeBaseDenominator + frequency_ / 2) / frequency_;
 }
 
 // 返回已完成暂停的累计 QPC tick 数。当前仍在进行的暂停尚无最终长度，因此不计入结果。

@@ -1,6 +1,5 @@
 cbuffer ScalingConstants : register(b0)
 {
-    uint2 SourceSize;
     uint2 OutputSize;
     uint4 DestinationRect;
     float4 SourceRect;
@@ -10,7 +9,6 @@ cbuffer ScalingConstants : register(b0)
     float HighlightCompression;
     float Saturation;
     uint Rotation;
-    float2 Reserved;
 };
 
 Texture2D<float4> SourceTexture : register(t0);

@@ -37,6 +37,7 @@
     <EmbeddedResource Include="Assets\Shaders\复制到BGRA.cso" LogicalName="FFF.Recorder.Shaders.CopyBgra.cso" />
     <EmbeddedResource Include="Assets\Shaders\HDR到PQ.cso" LogicalName="FFF.Recorder.Shaders.HdrToPq.cso" />
     <EmbeddedResource Include="Assets\Shaders\HDR到SDR.cso" LogicalName="FFF.Recorder.Shaders.HdrToSdr.cso" />
+    <EmbeddedResource Include="Assets\SP_默认背景图.jpg" LogicalName="FFF.Recorder.Assets.SP_DefaultBackground.jpg" />
   </ItemGroup>
 
   <ItemGroup>
@@ -55,8 +56,7 @@
   </ItemGroup>
 
   <Target Name="CopyNativeRuntime" AfterTargets="Build">
-    <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')"
-           Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
+    <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
     <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 
@@ -65,11 +65,16 @@
   </Target>
 
   <ItemGroup>
-    <PackageReference Include="LakeUI" Version="3.9.0" />
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectX" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="LakeUI">
+      <HintPath>..\..\LakeUI\LakeUI\bin\Debug\net10.0-windows10.0.17763.0\LakeUI.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>
@@ -78,6 +83,19 @@
       <AutoGen>True</AutoGen>
       <DependentUpon>Application.myapp</DependentUpon>
     </Compile>
+    <Compile Update="My Project\Resources.Designer.vb">
+      <DesignTime>True</DesignTime>
+      <AutoGen>True</AutoGen>
+      <DependentUpon>Resources.resx</DependentUpon>
+    </Compile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Update="My Project\Resources.resx">
+      <CustomToolNamespace>My.Resources</CustomToolNamespace>
+      <Generator>VbMyResourcesResXFileCodeGenerator</Generator>
+      <LastGenOutput>Resources.Designer.vb</LastGenOutput>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>

@@ -30,7 +30,6 @@ End Class
 
 Public NotInheritable Class 显示器捕获帧
     Implements IDisposable
-    Implements I自有捕获帧
 
     Friend ReadOnly 纹理 As ID3D11Texture2D
     Private ReadOnly 回收纹理 As Action(Of ID3D11Texture2D)
@@ -45,19 +44,6 @@ Public NotInheritable Class 显示器捕获帧
         回收纹理 = 回收操作
     End Sub
 
-    Public ReadOnly Property 原生纹理指针 As IntPtr
-        Get
-            If 已释放 Then Throw New ObjectDisposedException(NameOf(显示器捕获帧))
-            Return 纹理.NativePointer
-        End Get
-    End Property
-
-    Private ReadOnly Property 调度纹理指针 As IntPtr Implements I自有捕获帧.纹理指针
-        Get
-            Return 原生纹理指针
-        End Get
-    End Property
-
     Public ReadOnly Property QPC时间戳 As Long
     Public ReadOnly Property 是HDR源 As Boolean
     Public ReadOnly Property 旋转方式 As 视频旋转方式
@@ -67,10 +53,6 @@ Public NotInheritable Class 显示器捕获帧
         回收纹理(纹理)
         已释放 = True
         GC.SuppressFinalize(Me)
-    End Sub
-
-    Private Sub 调度释放() Implements I自有捕获帧.释放
-        释放()
     End Sub
 End Class
 
@@ -239,6 +221,9 @@ Public NotInheritable Class 显示器捕获器
         If 结果.Failure Then Throw New InvalidOperationException($"捕获显示器帧失败：0x{结果.Code:X8}")
         已获取帧 = True
         Try
+            ' AcquireNextFrame also wakes for pointer-only updates. The desktop texture did not
+            ' change in that case, so VFR must not treat it as a new picture.
+            If 帧信息.LastPresentTime <= 0 Then Return Nothing
             Using 资源
                 Using 源纹理 = 资源.QueryInterface(Of ID3D11Texture2D)()
                     Dim 实际格式 = 源纹理.Description.Format
@@ -248,7 +233,8 @@ Public NotInheritable Class 显示器捕获器
                     If HDR模式 AndAlso 实际格式 = Format.R10G10B10A2_UNorm Then
                         Throw New NotSupportedException("当前图像处理链只接受线性 FP16/scRGB HDR；不能把 PQ R10 表面误作线性 HDR。")
                     End If
-                    If Not HDR模式 AndAlso 实际格式 <> Format.B8G8R8A8_UNorm Then
+                    If Not HDR模式 AndAlso 实际格式 <> Format.B8G8R8A8_UNorm AndAlso
+                        实际格式 <> Format.R16G16B16A16_Float Then
                         Throw New InvalidOperationException($"SDR Desktop Duplication 返回了意外格式 {实际格式}。")
                     End If
                     Dim 描述 = 源纹理.Description
@@ -312,7 +298,16 @@ Public NotInheritable Class 显示器捕获器
                     {Format.B8G8R8A8_UNorm})
                 ' Output5 可用时保留显式格式协商和底层失败原因。部分 Advanced Color 驱动即使
                 ' SDR 列表只含 BGRA8 仍可能返回 FP16，取帧时会按调用者是否允许 tone mapping 处理。
-                Return 输出五.DuplicateOutput1(图形.设备, 格式)
+                Try
+                    Return 输出五.DuplicateOutput1(图形.设备, 格式)
+                Catch when Not 请求HDR
+                    ' A few WDDM drivers expose IDXGIOutput5 but reject
+                    ' DuplicateOutput1 even for BGRA8. The legacy duplication
+                    ' path is equivalent for SDR and avoids DXGI_ERROR_UNSUPPORTED.
+                    Using 输出一 = 原生输出.QueryInterface(Of IDXGIOutput1)()
+                        Return 输出一.DuplicateOutput(图形.设备)
+                    End Using
+                End Try
             End If
         End Using
         If 请求HDR Then Throw New PlatformNotSupportedException("该显示输出不支持 HDR DuplicateOutput1。")

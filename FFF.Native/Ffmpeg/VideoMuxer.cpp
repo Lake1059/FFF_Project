@@ -19,12 +19,13 @@ extern "C" {
 VideoMuxer::VideoMuxer() noexcept
     : immediateContext_(nullptr), d3d11Device_(nullptr), hardwareDevice_(nullptr), hardwareFrames_(nullptr),
       encoderHardwareDevice_(nullptr), encoderFrames_(nullptr), codecContext_(nullptr), formatContext_(nullptr),
-      videoStream_(nullptr), width_(0), height_(0), inputDxgiFormat_(0), qsvEncoder_(false), hdr10_(false),
+      videoStream_(nullptr), width_(0), height_(0), inputDxgiFormat_(0), qsvEncoder_(false),
+      softwareEncoder_(false), hdr10_(false),
       videoDevice_(nullptr), videoContext_(nullptr), videoContext1_(nullptr), videoProcessorEnumerator_(nullptr),
       videoProcessor_(nullptr),
-      initialized_(false), headerWritten_(false), finished_(false), startQpc_(0),
+      initialized_(false), headerWritten_(false), finished_(false),
       writerStopRequested_(false), writerFailed_(false), queueDepth_(0), peakQueueDepth_(0),
-      lastWriteMicroseconds_(0), peakWriteMicroseconds_(0) {
+      lastWriteMicroseconds_(0), peakWriteMicroseconds_(0), videoBytes_(0), audioBytes_(0) {
 }
 
 // 析构时只执行无条件资源清理，不尝试补写 trailer。正常调用方必须先用 Finish 排空编码器；
@@ -40,13 +41,16 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     const std::string& encoderName, const std::uint32_t width, const std::uint32_t height,
     const std::uint32_t frameRateNumerator, const std::uint32_t frameRateDenominator,
     const std::int64_t bitRate, const std::uint32_t gopSize, const std::uint32_t bFrameCount,
-    const bool tenBit, const bool hdr10, const std::vector<std::string>& audioTrackTitles,
-    const bool mixAudioSources, const std::size_t audioSourceCount,
+    const bool tenBit, const bool hdr10, const bool mixAudioSources,
     const std::uint32_t inputTextureFormat, const std::uint32_t chromaSampling,
-    const std::uint32_t rateControl, const std::int32_t quality, const std::int64_t maximumBitRate,
+    const std::uint32_t rateControl, const std::uint32_t qualityMode, const std::string& customVideoParameters,
+    const std::int32_t quality, const std::int64_t maximumBitRate,
     const std::uint32_t lookaheadFrames, const std::string& preset, const std::string& profile,
-    const std::uint32_t multipass, const std::uint32_t colorRange,
-    const std::vector<float>& audioSourceGains) noexcept {
+    const std::string& sceneOptimization, const std::uint32_t multipass,
+    const std::uint32_t colorRange, const std::vector<float>& audioSourceGains,
+    const std::string& audioEncoderName, const std::uint32_t audioSampleRate,
+    const std::uint32_t audioChannelCount, const std::int64_t audioBitRate,
+    const std::uint32_t audioMode) noexcept {
     if (initialized_ || device == nullptr || outputPath.empty() || encoderName.empty() ||
         width == 0 || height == 0 || frameRateNumerator == 0 || frameRateDenominator == 0) {
         return FFFResult::InvalidArgument;
@@ -68,6 +72,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     height_ = height;
     hdr10_ = hdr10;
     qsvEncoder_ = encoderName.find("_qsv") != std::string::npos;
+    softwareEncoder_ = encoderName == "libx264";
     AVPixelFormat softwareFormat = AV_PIX_FMT_BGRA;
     switch (inputTextureFormat) {
     case 0:
@@ -82,9 +87,13 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         lastError_ = "The requested D3D11 encoder input format is not supported.";
         return FFFResult::NotSupported;
     }
-    if (qsvEncoder_) {
+    if (qsvEncoder_ || softwareEncoder_) {
         if (chromaSampling != 0) {
-            lastError_ = "QSV 4:4:4 input is not enabled because this path requires NV12/P010 4:2:0 surfaces.";
+            lastError_ = "This encoder path requires NV12/P010 4:2:0 surfaces.";
+            return FFFResult::NotSupported;
+        }
+        if (softwareEncoder_ && tenBit) {
+            lastError_ = "The libx264 fallback accepts the eight-bit NV12 path only.";
             return FFFResult::NotSupported;
         }
         softwareFormat = tenBit ? AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
@@ -127,8 +136,8 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     frameContext->sw_format = softwareFormat;
     frameContext->width = static_cast<int>(width);
     frameContext->height = static_cast<int>(height);
-    frameContext->initial_pool_size = std::max(24U, bFrameCount + 10U);
-    if (qsvEncoder_) {
+    frameContext->initial_pool_size = softwareEncoder_ ? 0 : std::max(24U, bFrameCount + 10U);
+    if (qsvEncoder_ || softwareEncoder_) {
         auto* d3d11Frames = reinterpret_cast<AVD3D11VAFramesContext*>(frameContext->hwctx);
         d3d11Frames->BindFlags = D3D11_BIND_RENDER_TARGET;
     }
@@ -154,19 +163,21 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
             ReleaseResources(false);
             return FFFResult::NotSupported;
         }
-        const auto processorResult = InitializeQsvVideoProcessor(frameRateNumerator,
-            frameRateDenominator, hdr10);
-        if (processorResult != FFFResult::Success) {
-            ReleaseResources(false);
-            return processorResult;
-        }
-    } else {
+    } else if (!softwareEncoder_) {
         encoderHardwareDevice_ = av_buffer_ref(hardwareDevice_);
         encoderFrames_ = av_buffer_ref(hardwareFrames_);
         if (encoderHardwareDevice_ == nullptr || encoderFrames_ == nullptr) {
             lastError_ = "Could not retain the FFmpeg encoder hardware contexts.";
             ReleaseResources(false);
             return FFFResult::FfmpegFailure;
+        }
+    }
+    if (qsvEncoder_ || softwareEncoder_) {
+        const auto processorResult = InitializeVideoProcessor(frameRateNumerator,
+            frameRateDenominator, hdr10);
+        if (processorResult != FFFResult::Success) {
+            ReleaseResources(false);
+            return processorResult;
         }
     }
 
@@ -180,7 +191,8 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     codecContext_->height = static_cast<int>(height);
     codecContext_->time_base = { static_cast<int>(frameRateDenominator), static_cast<int>(frameRateNumerator) };
     codecContext_->framerate = { static_cast<int>(frameRateNumerator), static_cast<int>(frameRateDenominator) };
-    codecContext_->pix_fmt = qsvEncoder_ ? AV_PIX_FMT_QSV : AV_PIX_FMT_D3D11;
+    codecContext_->pix_fmt = softwareEncoder_ ? softwareFormat :
+        (qsvEncoder_ ? AV_PIX_FMT_QSV : AV_PIX_FMT_D3D11);
     codecContext_->sw_pix_fmt = softwareFormat;
     codecContext_->bit_rate = bitRate;
     codecContext_->gop_size = static_cast<int>(gopSize);
@@ -191,8 +203,10 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     codecContext_->color_trc = hdr10 ? AVCOL_TRC_SMPTE2084 : AVCOL_TRC_BT709;
     codecContext_->colorspace = hdr10 ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709;
     codecContext_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    codecContext_->hw_device_ctx = av_buffer_ref(encoderHardwareDevice_);
-    codecContext_->hw_frames_ctx = av_buffer_ref(encoderFrames_);
+    if (!softwareEncoder_) {
+        codecContext_->hw_device_ctx = av_buffer_ref(encoderHardwareDevice_);
+        codecContext_->hw_frames_ctx = av_buffer_ref(encoderFrames_);
+    }
     if (qsvEncoder_ && rateControl == 1) {
         codecContext_->bit_rate = 0;
         codecContext_->rc_max_rate = 0;
@@ -212,7 +226,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     }
     if (nvenc) {
         av_dict_set(&encoderOptions, "preset", preset.empty() ? "p4" : preset.c_str(), 0);
-        av_dict_set(&encoderOptions, "tune", "hq", 0);
+        av_dict_set(&encoderOptions, "tune", sceneOptimization.empty() ? "hq" : sceneOptimization.c_str(), 0);
         av_dict_set(&encoderOptions, "surfaces", "8", 0);
         av_dict_set(&encoderOptions, "rgb_mode", chromaSampling == 1 ? "yuv444" : "yuv420", 0);
         const auto selectedProfile = profile.empty() && tenBit && encoderName.find("hevc") != std::string::npos
@@ -223,7 +237,8 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
             av_dict_set(&encoderOptions, "highbitdepth", "1", 0);
         const char* rateControlName = rateControl == 1 ? "constqp" : (rateControl == 2 ? "cbr" : "vbr");
         av_dict_set(&encoderOptions, "rc", rateControlName, 0);
-        if (quality >= 0) av_dict_set_int(&encoderOptions, rateControl == 1 ? "qp" : "cq", quality, 0);
+        if (quality >= 0) av_dict_set_int(&encoderOptions,
+            rateControl == 1 && qualityMode == 2 ? "cq" : "qp", quality, 0);
         if (lookaheadFrames > 0) av_dict_set_int(&encoderOptions, "rc-lookahead", lookaheadFrames, 0);
         av_dict_set(&encoderOptions, "multipass", multipass == 2 ? "fullres" :
             (multipass == 1 ? "qres" : "disabled"), 0);
@@ -262,8 +277,29 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
             av_dict_set_int(&encoderOptions, "pa_lookahead_buffer_depth", lookaheadFrames, 0);
         }
     } else {
-        if (!preset.empty()) av_dict_set(&encoderOptions, "preset", preset.c_str(), 0);
+        const auto selectedPreset = preset.empty() && encoderName == "libx264" ? "medium" : preset.c_str();
+        if (selectedPreset != nullptr && *selectedPreset != '\0')
+            av_dict_set(&encoderOptions, "preset", selectedPreset, 0);
         if (!profile.empty()) av_dict_set(&encoderOptions, "profile", profile.c_str(), 0);
+        if (!sceneOptimization.empty()) av_dict_set(&encoderOptions, "tune", sceneOptimization.c_str(), 0);
+        if (rateControl == 1 && quality >= 0)
+            av_dict_set_int(&encoderOptions, qualityMode == 1 ? "crf" : "qp", quality, 0);
+    }
+    if (!customVideoParameters.empty()) {
+        std::istringstream arguments(customVideoParameters);
+        std::string token;
+        while (arguments >> token) {
+            if (!token.empty() && token.front() == '-') token.erase(token.begin());
+            const auto separator = token.find('=');
+            if (separator == std::string::npos || separator == 0 || separator + 1 >= token.size()) {
+                lastError_ = "Custom video parameters must use key=value tokens.";
+                av_dict_free(&encoderOptions);
+                ReleaseResources(false);
+                return FFFResult::InvalidArgument;
+            }
+            av_dict_set(&encoderOptions, token.substr(0, separator).c_str(),
+                token.substr(separator + 1).c_str(), 0);
+        }
     }
     result = avcodec_open2(codecContext_, codec, &encoderOptions);
     if (result >= 0 && av_dict_count(encoderOptions) > 0) {
@@ -291,6 +327,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         ReleaseResources(false);
         return FFFResult::FfmpegFailure;
     }
+    formatContext_->flags |= AVFMT_FLAG_BITEXACT;
     videoStream_ = avformat_new_stream(formatContext_, nullptr);
     if (videoStream_ == nullptr) {
         lastError_ = "Could not create the Matroska video stream.";
@@ -299,21 +336,34 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     }
     videoStream_->time_base = codecContext_->time_base;
     videoStream_->avg_frame_rate = codecContext_->framerate;
+    videoStream_->r_frame_rate = codecContext_->framerate;
     result = avcodec_parameters_from_context(videoStream_->codecpar, codecContext_);
     if (result < 0) {
         SetFfmpegError("avcodec_parameters_from_context", result);
         ReleaseResources(false);
         return FFFResult::FfmpegFailure;
     }
+    // Keep the container track metadata aligned with the encoder VUI. Some Matroska readers use
+    // codec parameters instead of parsing the HEVC headers when reporting the color range.
+    videoStream_->codecpar->color_range = codecContext_->color_range;
+    videoStream_->codecpar->color_primaries = codecContext_->color_primaries;
+    videoStream_->codecpar->color_trc = codecContext_->color_trc;
+    videoStream_->codecpar->color_space = codecContext_->colorspace;
     videoStream_->codecpar->codec_tag = 0;
-    av_dict_set(&videoStream_->metadata, "title", "Game recording", 0);
-    audioTracks_.reserve(audioTrackTitles.size());
-    for (std::size_t trackIndex = 0; trackIndex < audioTrackTitles.size(); ++trackIndex) {
+    if (mixAudioSources && audioSourceGains.size() < 2) {
+        lastError_ = "Mixed audio requires at least two sources.";
+        ReleaseResources(false);
+        return FFFResult::InvalidArgument;
+    }
+    const auto audioTrackCount = mixAudioSources ? 1U : audioSourceGains.size();
+    audioTracks_.reserve(audioTrackCount);
+    for (std::size_t trackIndex = 0; trackIndex < audioTrackCount; ++trackIndex) {
         auto track = std::make_unique<AudioTrackEncoder>();
         const auto gain = mixAudioSources ? 1.0F : audioSourceGains[trackIndex];
         const auto audioResult = track->Initialize(formatContext_,
             [this](const AVPacket* packet) { return EnqueuePacket(packet); },
-            audioTrackTitles[trackIndex], gain);
+            gain, audioEncoderName, audioSampleRate,
+            audioChannelCount, audioBitRate, audioMode);
         if (audioResult != FFFResult::Success) {
             lastError_ = track->LastError();
             ReleaseResources(false);
@@ -322,22 +372,8 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         audioTracks_.push_back(std::move(track));
     }
     if (mixAudioSources) {
-        if (audioTracks_.size() != 1 || audioSourceCount < 2) {
-            lastError_ = "Mixed audio requires one output track and at least two input sources.";
-            ReleaseResources(false);
-            return FFFResult::InvalidArgument;
-        }
         audioMixer_ = std::make_unique<AudioMixer>(audioTracks_[0].get(), audioSourceGains);
     }
-    av_dict_set(&formatContext_->metadata, "ENCODER", "FFF.Recorder 1.0.0", 0);
-    av_dict_set(&formatContext_->metadata, "title", "FFF game recording", 0);
-    SYSTEMTIME recordingTime{};
-    GetSystemTime(&recordingTime);
-    char creationTime[32]{};
-    std::snprintf(creationTime, sizeof(creationTime), "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",
-        recordingTime.wYear, recordingTime.wMonth, recordingTime.wDay, recordingTime.wHour,
-        recordingTime.wMinute, recordingTime.wSecond, recordingTime.wMilliseconds);
-    av_dict_set(&formatContext_->metadata, "creation_time", creationTime, 0);
     if ((formatContext_->oformat->flags & AVFMT_NOFILE) == 0) {
         result = avio_open(&formatContext_->pb, outputPath.c_str(), AVIO_FLAG_WRITE);
         if (result < 0) {
@@ -362,27 +398,22 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         ReleaseResources(false);
         return writerStarted;
     }
-    LARGE_INTEGER now{};
-    LARGE_INTEGER frequency{};
-    QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&frequency);
-    startQpc_ = now.QuadPart;
     initialized_ = true;
     return FFFResult::Success;
 }
 
-// 为 QSV 创建 D3D11 Video Processor 和颜色空间配置。输入是托管 shader 生成的 BGRA8 SDR
+// 为需要 NV12/P010 的编码路径创建 D3D11 Video Processor 和颜色空间配置。输入是托管 shader 生成的 BGRA8 SDR
 // 或 RGB10 PQ，输出是 FFmpeg surface pool 的 NV12/P010；所有接口都来自同一个 D3D11 Device。
-FFFResult VideoMuxer::InitializeQsvVideoProcessor(const std::uint32_t frameRateNumerator,
+FFFResult VideoMuxer::InitializeVideoProcessor(const std::uint32_t frameRateNumerator,
     const std::uint32_t frameRateDenominator, const bool hdr10) noexcept {
     auto result = d3d11Device_->QueryInterface(IID_PPV_ARGS(&videoDevice_));
     if (FAILED(result)) {
-        lastError_ = "The D3D11 device does not expose ID3D11VideoDevice for QSV color conversion.";
+        lastError_ = "The D3D11 device does not expose ID3D11VideoDevice for color conversion.";
         return FFFResult::NotSupported;
     }
     result = immediateContext_->QueryInterface(IID_PPV_ARGS(&videoContext_));
     if (FAILED(result)) {
-        lastError_ = "The D3D11 context does not expose ID3D11VideoContext for QSV color conversion.";
+        lastError_ = "The D3D11 context does not expose ID3D11VideoContext for color conversion.";
         return FFFResult::NotSupported;
     }
     immediateContext_->QueryInterface(IID_PPV_ARGS(&videoContext1_));
@@ -397,13 +428,13 @@ FFFResult VideoMuxer::InitializeQsvVideoProcessor(const std::uint32_t frameRateN
     description.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
     result = videoDevice_->CreateVideoProcessorEnumerator(&description, &videoProcessorEnumerator_);
     if (FAILED(result)) {
-        lastError_ = "CreateVideoProcessorEnumerator failed for the QSV GPU conversion: " +
+        lastError_ = "CreateVideoProcessorEnumerator failed for GPU color conversion: " +
             std::to_string(static_cast<long>(result));
         return FFFResult::DeviceFailure;
     }
     result = videoDevice_->CreateVideoProcessor(videoProcessorEnumerator_, 0, &videoProcessor_);
     if (FAILED(result)) {
-        lastError_ = "CreateVideoProcessor failed for the QSV GPU conversion: " +
+        lastError_ = "CreateVideoProcessor failed for GPU color conversion: " +
             std::to_string(static_cast<long>(result));
         return FFFResult::DeviceFailure;
     }
@@ -416,7 +447,7 @@ FFFResult VideoMuxer::InitializeQsvVideoProcessor(const std::uint32_t frameRateN
             hdr10 ? DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020 :
                 DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
     } else if (hdr10) {
-        lastError_ = "HDR QSV conversion requires ID3D11VideoContext1 color-space controls.";
+        lastError_ = "HDR conversion requires ID3D11VideoContext1 color-space controls.";
         return FFFResult::NotSupported;
     } else {
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColor{};
@@ -432,7 +463,7 @@ FFFResult VideoMuxer::InitializeQsvVideoProcessor(const std::uint32_t frameRateN
 
 // 为源纹理和目标 NV12/P010 surface 创建短生命周期 VideoProcessor view，并执行一次 GPU blit。
 // arrayIndex 会原样写入 view 描述，兼容 FFmpeg 固定纹理数组池；返回前不等待 CPU readback。
-FFFResult VideoMuxer::ConvertTextureForQsv(ID3D11Texture2D* sourceTexture,
+FFFResult VideoMuxer::ConvertTextureToEncoderSurface(ID3D11Texture2D* sourceTexture,
     const std::uint32_t sourceArrayIndex, ID3D11Texture2D* destinationTexture,
     const std::uint32_t destinationArrayIndex) noexcept {
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDescription{};
@@ -445,7 +476,7 @@ FFFResult VideoMuxer::ConvertTextureForQsv(ID3D11Texture2D* sourceTexture,
     auto result = videoDevice_->CreateVideoProcessorInputView(sourceTexture,
         videoProcessorEnumerator_, &inputDescription, &inputView);
     if (FAILED(result)) {
-        lastError_ = "CreateVideoProcessorInputView failed for QSV: " +
+        lastError_ = "CreateVideoProcessorInputView failed for GPU color conversion: " +
             std::to_string(static_cast<long>(result));
         return FFFResult::DeviceFailure;
     }
@@ -465,7 +496,7 @@ FFFResult VideoMuxer::ConvertTextureForQsv(ID3D11Texture2D* sourceTexture,
     result = videoDevice_->CreateVideoProcessorOutputView(destinationTexture,
         videoProcessorEnumerator_, &outputDescription, &outputView);
     if (FAILED(result)) {
-        lastError_ = "CreateVideoProcessorOutputView failed for QSV: " +
+        lastError_ = "CreateVideoProcessorOutputView failed for GPU color conversion: " +
             std::to_string(static_cast<long>(result));
         return FFFResult::DeviceFailure;
     }
@@ -476,7 +507,8 @@ FFFResult VideoMuxer::ConvertTextureForQsv(ID3D11Texture2D* sourceTexture,
     stream.pInputSurface = inputView.Get();
     result = videoContext_->VideoProcessorBlt(videoProcessor_, outputView.Get(), 0, 1, &stream);
     if (FAILED(result)) {
-        lastError_ = "VideoProcessorBlt failed for QSV: " + std::to_string(static_cast<long>(result));
+        lastError_ = "VideoProcessorBlt failed for GPU color conversion: " +
+            std::to_string(static_cast<long>(result));
         return FFFResult::DeviceFailure;
     }
     return FFFResult::Success;
@@ -512,8 +544,8 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
     }
     auto* destinationTexture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
     const auto destinationIndex = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
-    if (qsvEncoder_) {
-        const auto converted = ConvertTextureForQsv(sourceTexture, sourceArrayIndex,
+    if (qsvEncoder_ || softwareEncoder_) {
+        const auto converted = ConvertTextureToEncoderSurface(sourceTexture, sourceArrayIndex,
             destinationTexture, destinationIndex);
         if (converted != FFFResult::Success) {
             av_frame_free(&frame);
@@ -525,9 +557,15 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
     }
     immediateContext_->Flush();
     frame->pts = presentationTimestamp;
+    frame->duration = 1;
+    frame->color_range = codecContext_->color_range;
+    frame->color_primaries = codecContext_->color_primaries;
+    frame->color_trc = codecContext_->color_trc;
+    frame->colorspace = codecContext_->colorspace;
 
     AVFrame* encoderFrame = frame;
     AVFrame* mappedFrame = nullptr;
+    AVFrame* softwareFrame = nullptr;
     if (qsvEncoder_) {
         mappedFrame = av_frame_alloc();
         if (mappedFrame == nullptr) {
@@ -546,10 +584,37 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
             return FFFResult::FfmpegFailure;
         }
         mappedFrame->pts = presentationTimestamp;
+        mappedFrame->duration = 1;
+        mappedFrame->color_range = codecContext_->color_range;
+        mappedFrame->color_primaries = codecContext_->color_primaries;
+        mappedFrame->color_trc = codecContext_->color_trc;
+        mappedFrame->colorspace = codecContext_->colorspace;
         encoderFrame = mappedFrame;
+    } else if (softwareEncoder_) {
+        softwareFrame = av_frame_alloc();
+        if (softwareFrame == nullptr) {
+            lastError_ = "Could not allocate the software encoder frame.";
+            av_frame_free(&frame);
+            return FFFResult::FfmpegFailure;
+        }
+        result = av_hwframe_transfer_data(softwareFrame, frame, 0);
+        if (result < 0) {
+            SetFfmpegError("av_hwframe_transfer_data(D3D11 to software)", result);
+            av_frame_free(&softwareFrame);
+            av_frame_free(&frame);
+            return FFFResult::FfmpegFailure;
+        }
+        softwareFrame->pts = presentationTimestamp;
+        softwareFrame->duration = 1;
+        softwareFrame->color_range = codecContext_->color_range;
+        softwareFrame->color_primaries = codecContext_->color_primaries;
+        softwareFrame->color_trc = codecContext_->color_trc;
+        softwareFrame->colorspace = codecContext_->colorspace;
+        encoderFrame = softwareFrame;
     }
 
     result = avcodec_send_frame(codecContext_, encoderFrame);
+    av_frame_free(&softwareFrame);
     av_frame_free(&mappedFrame);
     av_frame_free(&frame);
     if (result < 0) {
@@ -637,12 +702,6 @@ FFFResult VideoMuxer::EncodeAudio(const std::size_t trackIndex, const std::uint8
     return result;
 }
 
-// 返回 Matroska header 写完时记录的原始 QPC，供 Session 把视频时间线重置到与音频相同的 T0。
-// 初始化成功后该值只读，可从启动线程无锁读取。
-std::int64_t VideoMuxer::StartQpc() const noexcept {
-    return startQpc_;
-}
-
 // 强制释放编码、COM 和文件句柄，不发送 drain 帧也不写 trailer。该方法幂等且不抛异常，
 // 仅供设备移除、时间戳损坏或进程关闭等无法安全继续编码的路径使用。
 void VideoMuxer::Abort() noexcept {
@@ -670,6 +729,10 @@ std::uint64_t VideoMuxer::LastWriteMicroseconds() const noexcept { return lastWr
 
 // 返回本次会话单个 Matroska packet 的最大写入耗时，单位微秒。
 std::uint64_t VideoMuxer::PeakWriteMicroseconds() const noexcept { return peakWriteMicroseconds_.load(); }
+
+std::uint64_t VideoMuxer::VideoBytes() const noexcept { return videoBytes_.load(); }
+
+std::uint64_t VideoMuxer::AudioBytes() const noexcept { return audioBytes_.load(); }
 
 // 读取一个逻辑音频源最近的时间线误差。混音模式查询 mixer，独立轨模式查询对应 AAC 轨。
 std::int64_t VideoMuxer::AudioTimelineErrorSamples(const std::size_t sourceIndex) const noexcept {
@@ -702,6 +765,10 @@ FFFResult VideoMuxer::DrainPackets() noexcept {
             av_packet_free(&packet);
             return FFFResult::FfmpegFailure;
         }
+        // The codec time base is one output frame. Supplying an explicit packet duration keeps
+        // Matroska DefaultDuration and player CFR detection deterministic even when an encoder
+        // omits packet durations for hardware frames.
+        if (packet->duration <= 0) packet->duration = 1;
         av_packet_rescale_ts(packet, codecContext_->time_base, videoStream_->time_base);
         packet->stream_index = videoStream_->index;
         const auto writeResult = EnqueuePacket(packet);
@@ -755,6 +822,8 @@ FFFResult VideoMuxer::StartWriter() noexcept {
     peakQueueDepth_.store(0);
     lastWriteMicroseconds_.store(0);
     peakWriteMicroseconds_.store(0);
+    videoBytes_.store(0);
+    audioBytes_.store(0);
     try {
         writerThread_ = std::thread(&VideoMuxer::WriterThread, this);
         return FFFResult::Success;
@@ -801,6 +870,8 @@ void VideoMuxer::WriterThread() noexcept {
         }
         LARGE_INTEGER started{};
         LARGE_INTEGER finished{};
+        const auto packetBytes = static_cast<std::uint64_t>(std::max(packet->size, 0));
+        const auto videoPacket = packet->stream_index == videoStream_->index;
         QueryPerformanceCounter(&started);
         const auto writeResult = av_interleaved_write_frame(formatContext_, packet);
         QueryPerformanceCounter(&finished);
@@ -820,6 +891,8 @@ void VideoMuxer::WriterThread() noexcept {
             queueDepth_.store(0);
             return;
         }
+        if (videoPacket) videoBytes_.fetch_add(packetBytes);
+        else audioBytes_.fetch_add(packetBytes);
     }
 }
 
@@ -878,8 +951,8 @@ void VideoMuxer::ReleaseResources(const bool writeTrailer) noexcept {
     }
     initialized_ = false;
     d3d11Device_ = nullptr;
-    startQpc_ = 0;
     inputDxgiFormat_ = 0;
     qsvEncoder_ = false;
+    softwareEncoder_ = false;
     hdr10_ = false;
 }

@@ -5,16 +5,28 @@ Friend NotInheritable Class 图形命令调度器
     Implements IDisposable
 
     Private NotInheritable Class 工作项
-        Friend ReadOnly 操作 As Action
+        Friend Property 操作 As Action
         Friend ReadOnly 完成 As New ManualResetEventSlim(False)
         Friend Property 异常 As Exception
 
-        Friend Sub New(图形操作 As Action)
+        Friend Sub 准备(图形操作 As Action)
             操作 = 图形操作
+            异常 = Nothing
+            完成.Reset()
+        End Sub
+
+        Friend Sub 清理()
+            操作 = Nothing
+            异常 = Nothing
+        End Sub
+
+        Friend Sub 释放()
+            完成.Dispose()
         End Sub
     End Class
 
     Private ReadOnly 队列 As New BlockingCollection(Of 工作项)(64)
+    Private ReadOnly 空闲工作项 As New ConcurrentBag(Of 工作项)
     Private ReadOnly 线程 As Thread
     Private 已释放 As Boolean
 
@@ -30,17 +42,27 @@ Friend NotInheritable Class 图形命令调度器
             操作()
             Return
         End If
-        Dim 项目 As New 工作项(操作)
-        队列.Add(项目)
+        Dim 项目 As 工作项 = Nothing
+        If Not 空闲工作项.TryTake(项目) Then 项目 = New 工作项()
+        项目.准备(操作)
+        Try
+            队列.Add(项目)
+        Catch
+            项目.清理()
+            空闲工作项.Add(项目)
+            Throw
+        End Try
         项目.完成.Wait()
-        项目.完成.Dispose()
-        If 项目.异常 IsNot Nothing Then Throw New InvalidOperationException("GPU Pipeline 命令执行失败。", 项目.异常)
+        Dim 错误 = 项目.异常
+        项目.清理()
+        空闲工作项.Add(项目)
+        If 错误 IsNot Nothing Then Throw New InvalidOperationException("GPU Pipeline 命令执行失败。", 错误)
     End Sub
 
     Private Sub 运行()
         For Each 项目 In 队列.GetConsumingEnumerable()
             Try
-                项目.操作()
+                项目.操作.Invoke()
             Catch 错误 As Exception
                 项目.异常 = 错误
             Finally
@@ -53,6 +75,10 @@ Friend NotInheritable Class 图形命令调度器
         If 已释放 Then Return
         队列.CompleteAdding()
         If Thread.CurrentThread IsNot 线程 Then 线程.Join()
+        Dim 项目 As 工作项 = Nothing
+        While 空闲工作项.TryTake(项目)
+            项目.释放()
+        End While
         队列.Dispose()
         已释放 = True
     End Sub

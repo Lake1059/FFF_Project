@@ -78,6 +78,15 @@ struct FFFSessionConfiguration {
     const char* sourceFormatUtf8;
     FFFDiagnosticCallback diagnosticCallback;
     void* diagnosticCallbackContext;
+    const char* audioEncoderNameUtf8;
+    std::uint32_t audioSampleRate;
+    std::uint32_t audioChannelCount;
+    std::int64_t audioBitRate;
+    std::uint32_t audioMode;
+    const char* sceneOptimizationUtf8;
+    std::uint32_t followDefaultSystemAudioDevice;
+    std::uint32_t qualityMode;
+    const char* customVideoParametersUtf8;
 };
 
 struct FFFSessionStatistics {
@@ -110,6 +119,12 @@ struct FFFSessionStatistics {
     std::int64_t microphoneTimelineErrorMicroseconds;
     std::int32_t systemAudioCompensationPpm;
     std::int32_t microphoneCompensationPpm;
+    std::uint64_t videoBytes;
+    std::uint64_t audioBytes;
+    std::uint32_t audioChannelCount;
+    std::uint32_t audioChannelMask;
+    float systemAudioPeak;
+    float microphonePeak;
 };
 
 using FFFSessionHandle = void*;
@@ -142,13 +157,18 @@ FFF_API FFFResult FFF_SubmitVideoTexture(FFFSessionHandle session, void* d3d11Te
     std::uint32_t textureArrayIndex, std::int64_t qpcTimestamp, std::uint32_t submissionFlags) noexcept;
 // 汇入托管捕获层主动丢弃的源帧数量，仅更新统计而不推进编码时间线。
 FFF_API FFFResult FFF_ReportDroppedVideoFrames(FFFSessionHandle session, std::uint32_t frameCount) noexcept;
-// 把托管捕获事件写入统一 JSONL/回调通道；UTF-8 字符串只在调用期间借用。
+// 把托管捕获事件写入统一 JSON 数组/回调通道；UTF-8 字符串只在调用期间借用。
 FFF_API FFFResult FFF_ReportDiagnosticEvent(FFFSessionHandle session, const char* eventNameUtf8,
     const char* messageUtf8) noexcept;
 // 以原始 QPC 记录暂停起点；Paused 状态拒绝继续提交视频帧。
 FFF_API FFFResult FFF_PauseSession(FFFSessionHandle session, std::int64_t qpcTimestamp) noexcept;
 // 结束暂停并从后续媒体 PTS 扣除暂停区间；时间戳不得早于暂停起点。
 FFF_API FFFResult FFF_ResumeSession(FFFSessionHandle session, std::int64_t qpcTimestamp) noexcept;
+// 在保持捕获器和会话状态的情况下结束当前 Matroska，并从零时间戳开始写入新文件。
+FFF_API FFFResult FFF_SplitSession(FFFSessionHandle session, const char* outputPathUtf8) noexcept;
+// 在同一媒体时间线和 Matroska 音轨内重建系统音频回环捕获器，用于默认播放设备变化。
+FFF_API FFFResult FFF_SwitchSystemAudioEndpoint(FFFSessionHandle session,
+    const char* endpointIdUtf8) noexcept;
 // 正常停止采集、排空编码与写队列并写 Matroska trailer；重复停止保持幂等。
 FFF_API FFFResult FFF_StopSession(FFFSessionHandle session) noexcept;
 // 紧急丢弃待写数据并释放资源，允许输出缺少正常 trailer。
