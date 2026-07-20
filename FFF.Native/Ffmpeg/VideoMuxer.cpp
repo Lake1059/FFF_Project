@@ -265,6 +265,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         if (preset.size() == 2 && preset[0] == 'p') selectedPreset = "balanced";
         if (!selectedPreset.empty()) av_dict_set(&encoderOptions, "preset", selectedPreset.c_str(), 0);
         if (!profile.empty()) av_dict_set(&encoderOptions, "profile", profile.c_str(), 0);
+        if (!sceneOptimization.empty()) av_dict_set(&encoderOptions, "usage", sceneOptimization.c_str(), 0);
         av_dict_set(&encoderOptions, "rc", rateControl == 1 ? "cqp" :
             (rateControl == 2 ? "cbr" : "vbr_peak"), 0);
         if (quality >= 0 && rateControl == 1) {

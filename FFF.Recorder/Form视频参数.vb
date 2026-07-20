@@ -203,7 +203,7 @@ Public Class Form视频参数
             If encoder.Contains("x264") OrElse encoder.Contains("x265") Then presets.AddRange({"ultrafast", "fast", "medium", "slow", "veryslow"})
             If encoder.Contains("nvenc") Then presets.AddRange({"p1", "p2", "p3", "p4", "p5", "p6", "p7"})
             If encoder.Contains("hevc") Then profiles.AddRange({"main", "main10", "rext"})
-            If encoder.Contains("av1") Then scenes.AddRange({"good", "realtime"})
+            scenes.AddRange(获取场景优化值(encoder))
             Dim 当前预设 = If(MCB_视频编码器.SelectedIndex = 0, "medium", 设置.实例对象.视频预设)
             重建下拉(MCB_编码预设, presets, 当前预设)
             重建下拉(MCB_配置文件, profiles, 设置.实例对象.视频配置文件)
@@ -212,6 +212,27 @@ Public Class Form视频参数
             正在初始化 = 原初始化状态
         End Try
     End Sub
+
+    Private Shared Function 获取场景优化值(encoder As String) As IEnumerable(Of String)
+        Select Case encoder
+            Case "av1_nvenc", "hevc_nvenc"
+                Return {"hq", "uhq", "ll", "ull", "lossless"}
+            Case "h264_nvenc"
+                Return {"hq", "ll", "ull", "lossless"}
+            Case "av1_amf"
+                Return {"transcoding", "ultralowlatency", "lowlatency", "high_quality", "lowlatency_high_quality"}
+            Case "hevc_amf"
+                Return {"transcoding", "ultralowlatency", "lowlatency", "webcam", "high_quality", "lowlatency_high_quality"}
+            Case "h264_amf"
+                Return {"transcoding", "ultralowlatency", "lowlatency", "webcam", "high_quality", "lowlatency_high_quality"}
+            Case "libx265"
+                Return {"psnr", "ssim", "grain", "fastdecode", "zerolatency", "animation", "stillimage"}
+            Case "libx264"
+                Return {"film", "animation", "grain", "stillimage", "psnr", "ssim", "fastdecode", "zerolatency"}
+            Case Else
+                Return Enumerable.Empty(Of String)()
+        End Select
+    End Function
 
     Private Shared Sub 重建下拉(控件 As LakeUI.ModernComboBox, 候选 As IEnumerable(Of String), 当前值 As String)
         Dim 候选列表 = 候选.ToList()

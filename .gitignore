@@ -36,6 +36,7 @@ bld/
 publish/
 runtime/
 third_party/
+runtime/
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/
