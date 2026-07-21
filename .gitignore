@@ -33,6 +33,10 @@ bld/
 [Ll]og/
 [Ll]ogs/
 
+# Generated release executables
+/*.exe
+tools/*.exe
+
 publish/
 runtime/
 third_party/
