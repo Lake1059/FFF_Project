@@ -59,6 +59,8 @@ Partial Class Form总控台
         MCB_音频源 = New LakeUI.ModernComboBox()
         JustEmptyControl12 = New LakeUI.JustEmptyControl()
         MCB_视频源 = New LakeUI.ModernComboBox()
+        JustEmptyControl14 = New LakeUI.JustEmptyControl()
+        MCB_视频捕获模式 = New LakeUI.ModernComboBox()
         ModernPanel1.SuspendLayout()
         ModernPanel5.SuspendLayout()
         Panel1.SuspendLayout()
@@ -78,7 +80,7 @@ Partial Class Form总控台
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
         ModernPanel1.Padding = New Padding(20)
-        ModernPanel1.Size = New Size(831, 506)
+        ModernPanel1.Size = New Size(831, 564)
         ModernPanel1.TabIndex = 0
         ' 
         ' ModernPanel5
@@ -93,7 +95,7 @@ Partial Class Form总控台
         ModernPanel5.Location = New Point(477, 20)
         ModernPanel5.Name = "ModernPanel5"
         ModernPanel5.Padding = New Padding(10)
-        ModernPanel5.Size = New Size(334, 466)
+        ModernPanel5.Size = New Size(334, 524)
         ModernPanel5.TabIndex = 34
         ' 
         ' MTB_执行日志
@@ -115,7 +117,7 @@ Partial Class Form总控台
         MTB_执行日志.Padding = New Padding(10, 8, 10, 8)
         MTB_执行日志.ReadOnly = True
         MTB_执行日志.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_执行日志.Size = New Size(304, 332)
+        MTB_执行日志.Size = New Size(304, 390)
         MTB_执行日志.TabIndex = 27
         MTB_执行日志.WaterText = "执行日志"
         MTB_执行日志.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
@@ -132,7 +134,7 @@ Partial Class Form总控台
         MCK_防误触模式.BoxTextSpacing = 10
         MCK_防误触模式.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_防误触模式.Dock = DockStyle.Bottom
-        MCK_防误触模式.Location = New Point(15, 347)
+        MCK_防误触模式.Location = New Point(15, 405)
         MCK_防误触模式.Name = "MCK_防误触模式"
         MCK_防误触模式.Padding = New Padding(0, 10, 0, 10)
         MCK_防误触模式.Size = New Size(304, 44)
@@ -148,13 +150,14 @@ Partial Class Form总控台
         Panel1.Controls.Add(JustEmptyControl1)
         Panel1.Controls.Add(MB_结束)
         Panel1.Dock = DockStyle.Bottom
-        Panel1.Location = New Point(15, 391)
+        Panel1.Location = New Point(15, 449)
         Panel1.Name = "Panel1"
         Panel1.Size = New Size(304, 60)
         Panel1.TabIndex = 0
         ' 
         ' MB_启动或暂停或继续录制
         ' 
+        MB_启动或暂停或继续录制.AnimationDuration = 1000
         MB_启动或暂停或继续录制.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_启动或暂停或继续录制.BorderRadius = 10
         MB_启动或暂停或继续录制.BorderSize = 0
@@ -180,6 +183,7 @@ Partial Class Form总控台
         ' 
         ' MB_分割
         ' 
+        MB_分割.AnimationDuration = 1000
         MB_分割.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_分割.BorderRadius = 10
         MB_分割.BorderSize = 0
@@ -206,6 +210,7 @@ Partial Class Form总控台
         ' 
         ' MB_结束
         ' 
+        MB_结束.AnimationDuration = 1000
         MB_结束.BackColor1 = Color.FromArgb(CByte(40), CByte(255), CByte(180), CByte(180))
         MB_结束.BorderRadius = 10
         MB_结束.BorderSize = 0
@@ -228,7 +233,7 @@ Partial Class Form总控台
         JustEmptyControl11.Dock = DockStyle.Left
         JustEmptyControl11.Location = New Point(462, 20)
         JustEmptyControl11.Name = "JustEmptyControl11"
-        JustEmptyControl11.Size = New Size(15, 466)
+        JustEmptyControl11.Size = New Size(15, 524)
         JustEmptyControl11.TabIndex = 33
         ' 
         ' Panel2
@@ -239,7 +244,7 @@ Partial Class Form总控台
         Panel2.Dock = DockStyle.Left
         Panel2.Location = New Point(20, 20)
         Panel2.Name = "Panel2"
-        Panel2.Size = New Size(442, 466)
+        Panel2.Size = New Size(442, 524)
         Panel2.TabIndex = 1
         ' 
         ' ModernPanel4
@@ -251,14 +256,14 @@ Partial Class Form总控台
         ModernPanel4.Location = New Point(0, 0)
         ModernPanel4.Name = "ModernPanel4"
         ModernPanel4.Padding = New Padding(10)
-        ModernPanel4.Size = New Size(442, 232)
+        ModernPanel4.Size = New Size(442, 248)
         ModernPanel4.TabIndex = 19
         ' 
         ' JustEmptyControl2
         ' 
         JustEmptyControl2.BackColor = Color.Transparent
         JustEmptyControl2.Dock = DockStyle.Bottom
-        JustEmptyControl2.Location = New Point(0, 232)
+        JustEmptyControl2.Location = New Point(0, 248)
         JustEmptyControl2.Name = "JustEmptyControl2"
         JustEmptyControl2.Size = New Size(442, 15)
         JustEmptyControl2.TabIndex = 18
@@ -274,11 +279,13 @@ Partial Class Form总控台
         ModernPanel2.Controls.Add(MCB_音频源)
         ModernPanel2.Controls.Add(JustEmptyControl12)
         ModernPanel2.Controls.Add(MCB_视频源)
+        ModernPanel2.Controls.Add(JustEmptyControl14)
+        ModernPanel2.Controls.Add(MCB_视频捕获模式)
         ModernPanel2.Dock = DockStyle.Bottom
-        ModernPanel2.Location = New Point(0, 247)
+        ModernPanel2.Location = New Point(0, 263)
         ModernPanel2.Name = "ModernPanel2"
         ModernPanel2.Padding = New Padding(10)
-        ModernPanel2.Size = New Size(442, 219)
+        ModernPanel2.Size = New Size(442, 261)
         ModernPanel2.TabIndex = 13
         ' 
         ' Panel3
@@ -302,7 +309,7 @@ Partial Class Form总控台
         Panel3.Controls.Add(JustEmptyControl3)
         Panel3.Controls.Add(EPB_L)
         Panel3.Dock = DockStyle.Top
-        Panel3.Location = New Point(15, 104)
+        Panel3.Location = New Point(15, 146)
         Panel3.Name = "Panel3"
         Panel3.Size = New Size(412, 100)
         Panel3.TabIndex = 18
@@ -617,7 +624,7 @@ Partial Class Form总控台
         ' 
         JustEmptyControl8.BackColor = Color.Transparent
         JustEmptyControl8.Dock = DockStyle.Top
-        JustEmptyControl8.Location = New Point(15, 89)
+        JustEmptyControl8.Location = New Point(15, 131)
         JustEmptyControl8.Name = "JustEmptyControl8"
         JustEmptyControl8.Size = New Size(412, 15)
         JustEmptyControl8.TabIndex = 15
@@ -638,7 +645,7 @@ Partial Class Form总控台
         MCB_音频源.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MCB_音频源.DropDownSelectedForeColor = Color.White
         MCB_音频源.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_音频源.Location = New Point(15, 57)
+        MCB_音频源.Location = New Point(15, 99)
         MCB_音频源.Margin = New Padding(2, 2, 2, 2)
         MCB_音频源.MaxDropDownItems = 12
         MCB_音频源.Name = "MCB_音频源"
@@ -655,7 +662,7 @@ Partial Class Form总控台
         ' 
         JustEmptyControl12.BackColor = Color.Transparent
         JustEmptyControl12.Dock = DockStyle.Top
-        JustEmptyControl12.Location = New Point(15, 47)
+        JustEmptyControl12.Location = New Point(15, 89)
         JustEmptyControl12.Name = "JustEmptyControl12"
         JustEmptyControl12.Size = New Size(412, 10)
         JustEmptyControl12.TabIndex = 19
@@ -676,7 +683,7 @@ Partial Class Form总控台
         MCB_视频源.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MCB_视频源.DropDownSelectedForeColor = Color.White
         MCB_视频源.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_视频源.Location = New Point(15, 15)
+        MCB_视频源.Location = New Point(15, 57)
         MCB_视频源.Margin = New Padding(2, 2, 2, 2)
         MCB_视频源.MaxDropDownItems = 12
         MCB_视频源.Name = "MCB_视频源"
@@ -689,12 +696,53 @@ Partial Class Form总控台
         MCB_视频源.WaterText = "选择视频源"
         MCB_视频源.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ' 
+        ' JustEmptyControl14
+        ' 
+        JustEmptyControl14.BackColor = Color.Transparent
+        JustEmptyControl14.Dock = DockStyle.Top
+        JustEmptyControl14.Location = New Point(15, 47)
+        JustEmptyControl14.Name = "JustEmptyControl14"
+        JustEmptyControl14.Size = New Size(412, 10)
+        JustEmptyControl14.TabIndex = 21
+        ' 
+        ' MCB_视频捕获模式
+        ' 
+        MCB_视频捕获模式.BackColor = Color.Transparent
+        MCB_视频捕获模式.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_视频捕获模式.BorderRadius = 10
+        MCB_视频捕获模式.BorderSize = 0
+        MCB_视频捕获模式.Dock = DockStyle.Top
+        MCB_视频捕获模式.DropDownBackdropBlurPasses = 2
+        MCB_视频捕获模式.DropDownBackdropBlurRadius = 30
+        MCB_视频捕获模式.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_视频捕获模式.DropDownHoverColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MCB_视频捕获模式.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_视频捕获模式.DropDownPadding = New Padding(10)
+        MCB_视频捕获模式.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_视频捕获模式.DropDownSelectedForeColor = Color.White
+        MCB_视频捕获模式.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCB_视频捕获模式.Items.Add("显示器")
+        MCB_视频捕获模式.Items.Add("窗口（带标题栏）")
+        MCB_视频捕获模式.Items.Add("窗口（客户区）")
+        MCB_视频捕获模式.Location = New Point(15, 15)
+        MCB_视频捕获模式.Margin = New Padding(2, 2, 2, 2)
+        MCB_视频捕获模式.MaxDropDownItems = 12
+        MCB_视频捕获模式.Name = "MCB_视频捕获模式"
+        MCB_视频捕获模式.Padding = New Padding(10, 0, 10, 0)
+        MCB_视频捕获模式.Size = New Size(412, 32)
+        MCB_视频捕获模式.TabIndex = 22
+        MCB_视频捕获模式.ToolTipGap = -1
+        MCB_视频捕获模式.ToolTipMaxWidth = 350
+        MCB_视频捕获模式.ToolTipPadding = New Padding(15)
+        MCB_视频捕获模式.WaterText = "选择视频捕获模式"
+        MCB_视频捕获模式.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        ' 
         ' Form总控台
         ' 
         AutoScaleDimensions = New SizeF(96F, 96F)
         AutoScaleMode = AutoScaleMode.Dpi
         BackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))
-        ClientSize = New Size(831, 506)
+        ClientSize = New Size(831, 564)
         Controls.Add(ModernPanel1)
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver
@@ -748,4 +796,6 @@ Partial Class Form总控台
     Friend WithEvents MTB_执行日志 As LakeUI.ModernTextBox
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents JustEmptyControl15 As LakeUI.JustEmptyControl
+    Friend WithEvents JustEmptyControl14 As LakeUI.JustEmptyControl
+    Friend WithEvents MCB_视频捕获模式 As LakeUI.ModernComboBox
 End Class

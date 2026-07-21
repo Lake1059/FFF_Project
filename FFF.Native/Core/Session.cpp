@@ -240,29 +240,30 @@ FFFResult RecorderSession::Start() noexcept {
     return FFFResult::Success;
 }
 
-// 接收一张由调用方持有的 D3D11 纹理，验证原始 QPC 时间戳严格递增，并同步完成 GPU 到
-// FFmpeg surface 的复制和硬件编码提交；已编码 packet 随后由独立文件线程异步写入。
+// 视频编码只占用视频锁；状态与时间线起点只在短暂持有会话锁时读取。这样 CPU 编码器同步
+// 消耗一帧的期间不会阻塞 WASAPI 回调，音视频编码线程交由操作系统和 FFmpeg 独立调度。
 FFFResult RecorderSession::Submit(ID3D11Texture2D* texture, const std::uint32_t textureArrayIndex,
     const std::int64_t qpcTimestamp, const bool repeatedFrame) noexcept {
-    std::scoped_lock lock(mutex_);
-    static_cast<void>(textureArrayIndex);
-    if (state_.load() != FFFSessionState::Running) {
-        return FFFResult::InvalidState;
-    }
-    if (texture == nullptr || qpcTimestamp <= 0) {
-        return FFFResult::InvalidArgument;
-    }
-    const auto previous = lastVideoQpc_.load();
-    if (previous != 0 && qpcTimestamp <= previous) {
-        SetError(FFFResult::InvalidArgument, "Video timestamps must increase monotonically.");
-        return FFFResult::InvalidArgument;
-    }
-    if (!timelineStarted_) {
-        timeline_.Reset(qpcTimestamp);
-        timelineStarted_ = true;
+    std::scoped_lock encodeLock(videoEncodeMutex_);
+    std::int64_t segmentOffset = 0;
+    {
+        std::scoped_lock lock(mutex_);
+        static_cast<void>(textureArrayIndex);
+        if (state_.load() != FFFSessionState::Running) return FFFResult::InvalidState;
+        if (texture == nullptr || qpcTimestamp <= 0) return FFFResult::InvalidArgument;
+        const auto previous = lastVideoQpc_.load();
+        if (previous != 0 && qpcTimestamp <= previous) {
+            SetError(FFFResult::InvalidArgument, "Video timestamps must increase monotonically.");
+            return FFFResult::InvalidArgument;
+        }
+        if (!timelineStarted_) {
+            timeline_.Reset(qpcTimestamp);
+            timelineStarted_ = true;
+        }
+        segmentOffset = segmentVideoOffset_;
     }
     const auto presentationTimestamp = std::max<std::int64_t>(0,
-        timeline_.ToMediaTicks(qpcTimestamp, frameRateNumerator_) / frameRateDenominator_ - segmentVideoOffset_);
+        timeline_.ToMediaTicks(qpcTimestamp, frameRateNumerator_) / frameRateDenominator_ - segmentOffset);
     LARGE_INTEGER encodeStarted{};
     QueryPerformanceCounter(&encodeStarted);
     const auto encoded = videoMuxer_->Encode(texture, textureArrayIndex, presentationTimestamp);
@@ -309,6 +310,7 @@ FFFResult RecorderSession::ReportDiagnosticEvent(const char* eventName, const ch
 
 // 在指定时间戳暂停共享 QPC 时间线，并拒绝重复或倒退的状态转换。Paused 状态下不接收视频帧。
 FFFResult RecorderSession::Pause(const std::int64_t qpcTimestamp) noexcept {
+    std::scoped_lock encodeLock(videoEncodeMutex_, audioEncodeMutex_);
     std::scoped_lock lock(mutex_);
     if (state_.load() != FFFSessionState::Running || !timeline_.Pause(qpcTimestamp)) {
         return FFFResult::InvalidState;
@@ -320,6 +322,7 @@ FFFResult RecorderSession::Pause(const std::int64_t qpcTimestamp) noexcept {
 
 // 在同一时间线上恢复所有媒体，并从后续 PTS 扣除精确暂停时长。音频和视频必须共用同一恢复时间戳。
 FFFResult RecorderSession::Resume(const std::int64_t qpcTimestamp) noexcept {
+    std::scoped_lock encodeLock(videoEncodeMutex_, audioEncodeMutex_);
     std::scoped_lock lock(mutex_);
     if (state_.load() != FFFSessionState::Paused || !timeline_.Resume(qpcTimestamp)) {
         return FFFResult::InvalidState;
@@ -333,6 +336,7 @@ FFFResult RecorderSession::Resume(const std::int64_t qpcTimestamp) noexcept {
 // 因此音频回调和视频提交会在文件边界处短暂等待，而不会向已经关闭的 muxer 写入。
 FFFResult RecorderSession::Split(const char* outputPathUtf8) noexcept {
     if (outputPathUtf8 == nullptr || *outputPathUtf8 == '\0') return FFFResult::InvalidArgument;
+    std::scoped_lock encodeLock(videoEncodeMutex_, audioEncodeMutex_);
     std::scoped_lock lock(mutex_);
     if (state_.load() != FFFSessionState::Running) return FFFResult::InvalidState;
 
@@ -424,15 +428,20 @@ FFFResult RecorderSession::CreateAudioCapture(const std::string& endpointId, con
     auto packetCallback = [this, trackIndex](const std::uint8_t* data, const std::uint32_t frameCount,
         const std::uint32_t flags, const std::uint64_t qpcPosition100ns,
         const WasapiSampleFormat& format) -> FFFResult {
-        std::scoped_lock callbackLock(mutex_);
-        if (state_.load() != FFFSessionState::Running || !timelineStarted_) return FFFResult::Success;
+        std::scoped_lock encodeLock(audioEncodeMutex_);
+        std::int64_t segmentOffset = 0;
+        {
+            std::scoped_lock callbackLock(mutex_);
+            if (state_.load() != FFFSessionState::Running || !timelineStarted_) return FFFResult::Success;
+            segmentOffset = segmentAudioOffset_;
+        }
         const auto frequency = timeline_.Frequency();
         const auto wholeSeconds = qpcPosition100ns / 10'000'000ULL;
         const auto remaining100ns = qpcPosition100ns % 10'000'000ULL;
         const auto rawQpc = static_cast<std::int64_t>(wholeSeconds * frequency +
             (remaining100ns * frequency) / 10'000'000ULL);
         const auto targetSample = std::max<std::int64_t>(0,
-            timeline_.ToMediaTicks(rawQpc, audioSampleRate_) - segmentAudioOffset_);
+            timeline_.ToMediaTicks(rawQpc, audioSampleRate_) - segmentOffset);
         const auto encoded = videoMuxer_->EncodeAudio(trackIndex, data, frameCount, flags,
             targetSample, format);
         if (encoded != FFFResult::Success) {
@@ -478,6 +487,7 @@ FFFResult RecorderSession::Stop() noexcept {
     for (auto& capture : audioCaptures_) capture->Stop();
     CollectAudioStatistics();
     audioCaptures_.clear();
+    std::scoped_lock encodeLock(videoEncodeMutex_, audioEncodeMutex_);
     std::scoped_lock lock(mutex_);
     const auto finished = videoMuxer_->Finish();
     if (finished != FFFResult::Success) {
@@ -507,6 +517,7 @@ FFFResult RecorderSession::Abort() noexcept {
     for (auto& capture : audioCaptures_) capture->Stop();
     CollectAudioStatistics();
     audioCaptures_.clear();
+    std::scoped_lock encodeLock(videoEncodeMutex_, audioEncodeMutex_);
     std::scoped_lock lock(mutex_);
     videoMuxer_->Abort();
     WriteDiagnostic("abort", "\"trailerWritten\":false");
@@ -595,7 +606,7 @@ FFFResult RecorderSession::GetStatistics(FFFSessionStatistics& statistics) const
 
 // 返回最新 UTF-8 可读错误的副本。复制期间持有互斥锁，避免并发失败回调使字符串存储失效。
 std::string RecorderSession::LastError() const {
-    std::scoped_lock lock(mutex_);
+    std::scoped_lock lock(errorMutex_);
     return lastError_;
 }
 
@@ -603,6 +614,7 @@ std::string RecorderSession::LastError() const {
 // 内存分配失败，本方法也不会让异常越过 DLL 边界。
 void RecorderSession::SetError(const FFFResult result, std::string message) noexcept {
     lastErrorCode_.store(static_cast<std::int32_t>(result));
+    std::scoped_lock lock(errorMutex_);
     try {
         lastError_ = std::move(message);
     } catch (...) {

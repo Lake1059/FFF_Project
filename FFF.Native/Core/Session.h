@@ -60,6 +60,9 @@ private:
         std::unique_ptr<WasapiCapture>& capture) noexcept;
 
     mutable std::mutex mutex_;
+    mutable std::mutex errorMutex_;
+    std::mutex videoEncodeMutex_;
+    std::mutex audioEncodeMutex_;
     ID3D11Device* device_;
     std::string outputPath_;
     std::string encoderName_;

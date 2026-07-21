@@ -68,7 +68,7 @@ Partial Class Form1
         ModernTabListControl1.ScrollBarThumbHoverColor = Color.FromArgb(CByte(80), CByte(200), CByte(200), CByte(200))
         ModernTabListControl1.ScrollBarTrackColor = Color.FromArgb(CByte(20), CByte(200), CByte(200), CByte(200))
         ModernTabListControl1.SeparatorColor = Color.FromArgb(CByte(80), CByte(200), CByte(200), CByte(200))
-        ModernTabListControl1.Size = New Size(1008, 537)
+        ModernTabListControl1.Size = New Size(984, 561)
         ModernTabListControl1.TabIndex = 0
         ModernTabListControl1.TabItemHeight = 32
         ModernTabListControl1.TabItemHoverBackColor = Color.FromArgb(CByte(40), CByte(200), CByte(200), CByte(200))
@@ -106,11 +106,12 @@ Partial Class Form1
         AutoScaleDimensions = New SizeF(96F, 96F)
         AutoScaleMode = AutoScaleMode.Dpi
         BackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))
-        ClientSize = New Size(1008, 537)
+        ClientSize = New Size(984, 561)
         Controls.Add(ModernTabListControl1)
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver
         MaximizeBox = False
+        MinimumSize = New Size(1000, 600)
         Name = "Form1"
         StartPosition = FormStartPosition.CenterScreen
         Text = "FFF.Recorder"

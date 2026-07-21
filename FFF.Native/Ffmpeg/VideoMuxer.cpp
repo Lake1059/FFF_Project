@@ -95,7 +95,7 @@ void Convert(uint3 id : SV_DispatchThreadID)
     float3 yuv = ConvertRgb(Source.Load(int3(id.xy, 0)).rgb);
     Luma[id.xy] = StoreLuma(yuv.x);
 #if PLANAR_444
-    ChromaU[id.xy] = StoreChroma(yuv.yy).x;
+    ChromaU[id.xy] = StoreChroma(yuv.yz).x;
     ChromaV[id.xy] = StoreChroma(yuv.zz).x;
 #elif PLANAR_422
     if ((id.x & 1) == 0) {
@@ -218,8 +218,11 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         lastError_ = "Only the FFmpeg HEVC QSV encoder exposes 4:2:2 and 4:4:4 input formats.";
         return FFFResult::NotSupported;
     }
-    videoProcessorConversion_ = qsvEncoder_ && !softwareYuvConversion_;
-    shaderConversion_ = nvencEncoder || amfEncoder || softwareYuvConversion_;
+    // FFmpeg deliberately forces packed RGB NVENC input to BT.601 limited range. Keep the
+    // conversion explicit: NVIDIA/QSV 4:2:0 uses the D3D11 video processor, while 4:2:2 and
+    // 4:4:4 use the exact system-memory layout advertised through sw_pix_fmt.
+    videoProcessorConversion_ = (nvencEncoder || qsvEncoder_) && !softwareYuvConversion_;
+    shaderConversion_ = amfEncoder || softwareYuvConversion_;
     tenBit_ = tenBit;
     chromaSampling_ = chromaSampling;
     AVPixelFormat softwareFormat = AV_PIX_FMT_BGRA;
@@ -302,7 +305,9 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         frameContext->sw_format = softwareFormat;
         frameContext->width = static_cast<int>(width);
         frameContext->height = static_cast<int>(height);
-        frameContext->initial_pool_size = (softwareEncoder_ || shaderConversion_)
+        // NV12/P010 render-target arrays are rejected by some D3D11 drivers. A dynamic pool
+        // gives the video processor one independently viewable texture per encoder surface.
+        frameContext->initial_pool_size = (softwareEncoder_ || shaderConversion_ || videoProcessorConversion_)
             ? 0 : std::max(24U, bFrameCount + 10U);
         if (videoProcessorConversion_ || shaderConversion_) {
             auto* d3d11Frames = reinterpret_cast<AVD3D11VAFramesContext*>(frameContext->hwctx);
@@ -961,6 +966,20 @@ FFFResult VideoMuxer::InitializeVideoProcessor(const std::uint32_t frameRateNume
             std::to_string(static_cast<long>(result));
         return FFFResult::DeviceFailure;
     }
+    UINT inputFormatSupport = 0;
+    UINT outputFormatSupport = 0;
+    const auto outputFormat = tenBit_ ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+    result = videoProcessorEnumerator_->CheckVideoProcessorFormat(
+        static_cast<DXGI_FORMAT>(inputDxgiFormat_), &inputFormatSupport);
+    if (SUCCEEDED(result)) {
+        result = videoProcessorEnumerator_->CheckVideoProcessorFormat(outputFormat, &outputFormatSupport);
+    }
+    if (FAILED(result) ||
+        (inputFormatSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0 ||
+        (outputFormatSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0) {
+        lastError_ = "The D3D11 video processor does not support the required RGB to NV12/P010 conversion.";
+        return FFFResult::NotSupported;
+    }
     result = videoDevice_->CreateVideoProcessor(videoProcessorEnumerator_, 0, &videoProcessor_);
     if (FAILED(result)) {
         lastError_ = "CreateVideoProcessor failed for GPU color conversion: " +
@@ -1254,11 +1273,10 @@ void VideoMuxer::Abort() noexcept {
     finished_ = true;
 }
 
-// 返回最近一次失败消息的值副本。当前类由 RecorderSession 串行调用，因此无需额外互斥锁；
-// 若后续引入独立编码线程，应由队列所有者在读取和写入此字段时加同一把锁。
+// 返回最近一次失败消息的值副本。视频、音频和文件写线程会并发更新错误文本，存储对象内部
+// 使用独立互斥锁，不会重新串行化正常的编码路径。
 std::string VideoMuxer::LastError() const {
-    std::scoped_lock lock(packetMutex_);
-    return lastError_;
+    return lastError_.Copy();
 }
 
 // 返回当前等待文件写线程处理的已编码 packet 数。该值不包含编码器内部 surface 或正在写入的

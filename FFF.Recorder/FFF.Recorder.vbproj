@@ -65,6 +65,7 @@
   </Target>
 
   <ItemGroup>
+    <PackageReference Include="LakeUI.Notifications" Version="1.0.0" />
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectX" Version="3.8.3" />

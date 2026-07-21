@@ -46,7 +46,7 @@ Public NotInheritable Class 窗口捕获帧
 
     Public Sub 释放() Implements IDisposable.Dispose
         If 已释放 Then Return
-        回收纹理(纹理)
+        回收纹理?.Invoke(纹理)
         已释放 = True
         GC.SuppressFinalize(Me)
     End Sub
@@ -84,6 +84,7 @@ Public NotInheritable Class 窗口捕获器
     Private ReadOnly 捕获项目 As GraphicsCaptureItem
     Private ReadOnly WinRT设备 As IDirect3DDevice
     Private ReadOnly 使用HDR As Boolean
+    Private ReadOnly 直接使用帧纹理 As Boolean
     Private ReadOnly 目标显示器值 As 显示器信息
     Private ReadOnly 纹理池 As D3D11纹理池
     Private 帧池 As Direct3D11CaptureFramePool
@@ -96,11 +97,12 @@ Public NotInheritable Class 窗口捕获器
     Private 诊断会话 As 录制会话
 
     Private Sub New(设备 As 图形设备, 项目 As GraphicsCaptureItem, Direct3D设备 As IDirect3DDevice,
-        HDR As Boolean, 目标显示器 As 显示器信息)
+        HDR As Boolean, 目标显示器 As 显示器信息, Optional 零拷贝 As Boolean = False)
         图形 = 设备
         捕获项目 = 项目
         WinRT设备 = Direct3D设备
         使用HDR = HDR
+        直接使用帧纹理 = 零拷贝
         目标显示器值 = 目标显示器
         纹理池 = New D3D11纹理池(设备, 8)
         当前尺寸 = 项目.Size
@@ -122,7 +124,8 @@ Public NotInheritable Class 窗口捕获器
         End Get
     End Property
 
-    Public Shared Function 创建(窗口句柄 As IntPtr, Optional 请求HDR As Boolean = False) As 窗口捕获器
+    Public Shared Function 创建(窗口句柄 As IntPtr, Optional 请求HDR As Boolean = False,
+        Optional 零拷贝帧 As Boolean = False) As 窗口捕获器
         If 窗口句柄 = IntPtr.Zero Then Throw New ArgumentException("窗口句柄不能为空。", NameOf(窗口句柄))
         If Not GraphicsCaptureSession.IsSupported() Then Throw New PlatformNotSupportedException("当前系统不支持 Windows Graphics Capture。")
 
@@ -136,7 +139,7 @@ Public NotInheritable Class 窗口捕获器
         Try
             Dim 项目 = 创建窗口捕获项目(窗口句柄)
             Dim Direct3D设备 = 创建WinRT设备(设备.设备)
-            Return New 窗口捕获器(设备, 项目, Direct3D设备, 请求HDR, 显示器)
+            Return New 窗口捕获器(设备, 项目, Direct3D设备, 请求HDR, 显示器, 零拷贝帧)
         Catch
             设备.释放()
             Throw
@@ -149,7 +152,8 @@ Public NotInheritable Class 窗口捕获器
         Return 显示器捕获器.枚举显示器().FirstOrDefault(Function(x) x.显示器句柄 = 显示器句柄)
     End Function
 
-    Public Shared Function 创建显示器(显示器 As 显示器信息, Optional 请求HDR As Boolean = False) As 窗口捕获器
+    Public Shared Function 创建显示器(显示器 As 显示器信息, Optional 请求HDR As Boolean = False,
+        Optional 零拷贝帧 As Boolean = False) As 窗口捕获器
         ArgumentNullException.ThrowIfNull(显示器)
         If Not 显示器.连接到桌面 OrElse 显示器.显示器句柄 = IntPtr.Zero Then
             Throw New ArgumentException("目标显示器未连接到桌面。", NameOf(显示器))
@@ -163,7 +167,7 @@ Public NotInheritable Class 窗口捕获器
         Try
             Dim 项目 = 创建显示器捕获项目(显示器.显示器句柄)
             Dim Direct3D设备 = 创建WinRT设备(设备.设备)
-            Return New 窗口捕获器(设备, 项目, Direct3D设备, 请求HDR, 显示器)
+            Return New 窗口捕获器(设备, 项目, Direct3D设备, 请求HDR, 显示器, 零拷贝帧)
         Catch
             设备.释放()
             Throw
@@ -237,19 +241,27 @@ Public NotInheritable Class 窗口捕获器
                     If 使用HDR AndAlso Not 实际HDR Then
                         Throw New InvalidOperationException("WGC 未返回 FP16/scRGB 帧，不能把本次捕获标记为 HDR。")
                     End If
-                    Dim 描述 = 源纹理.Description
-                    描述.BindFlags = BindFlags.ShaderResource
-                    描述.Usage = ResourceUsage.Default
-                    描述.CPUAccessFlags = CpuAccessFlags.None
-                    描述.MiscFlags = ResourceOptionFlags.None
-                    Dim 自有纹理 = 纹理池.尝试租用(描述)
-                    If 自有纹理 Is Nothing Then Return
-                    图形.执行图形命令(Sub() 图形.上下文.CopyResource(自有纹理, 源纹理))
                     Dim 时间戳 = 转换系统相对时间(系统帧.SystemRelativeTime)
                     已收到有效帧 = True
-                    RaiseEvent 收到帧(Me, New 窗口捕获帧事件参数(
-                        New 窗口捕获帧(自有纹理, 时间戳, 新尺寸.Width, 新尺寸.Height, 实际HDR,
-                            AddressOf 纹理池.归还)))
+                    If 直接使用帧纹理 Then
+                        ' 事件在当前 FrameArrived 回调中同步执行，渲染完成后才离开
+                        ' Using 范围，因此可以安全地直接采样 WGC 表面，省掉一次 CopyResource。
+                        RaiseEvent 收到帧(Me, New 窗口捕获帧事件参数(
+                            New 窗口捕获帧(源纹理, 时间戳, 新尺寸.Width, 新尺寸.Height, 实际HDR,
+                                Nothing)))
+                    Else
+                        Dim 描述 = 源纹理.Description
+                        描述.BindFlags = BindFlags.ShaderResource
+                        描述.Usage = ResourceUsage.Default
+                        描述.CPUAccessFlags = CpuAccessFlags.None
+                        描述.MiscFlags = ResourceOptionFlags.None
+                        Dim 自有纹理 = 纹理池.尝试租用(描述)
+                        If 自有纹理 Is Nothing Then Return
+                        图形.执行图形命令(Sub() 图形.上下文.CopyResource(自有纹理, 源纹理))
+                        RaiseEvent 收到帧(Me, New 窗口捕获帧事件参数(
+                            New 窗口捕获帧(自有纹理, 时间戳, 新尺寸.Width, 新尺寸.Height, 实际HDR,
+                                AddressOf 纹理池.归还)))
+                    End If
                 End Using
                 If 尺寸已变化 Then
                     诊断会话?.记录诊断事件("wgc_resize", $"{当前尺寸.Width}x{当前尺寸.Height} -> {新尺寸.Width}x{新尺寸.Height}")

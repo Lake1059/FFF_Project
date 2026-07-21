@@ -31,6 +31,41 @@ struct ID3D11VideoProcessor;
 class AudioTrackEncoder;
 class AudioMixer;
 
+class SynchronizedErrorText final {
+public:
+    void operator=(std::string value) noexcept {
+        std::scoped_lock lock(mutex_);
+        try {
+            value_ = std::move(value);
+        } catch (...) {
+            try { value_ = "Native error message allocation failed."; }
+            catch (...) { value_.clear(); }
+        }
+    }
+
+    void operator=(const char* value) noexcept { operator=(std::string(value)); }
+
+    void operator+=(std::string suffix) noexcept {
+        std::scoped_lock lock(mutex_);
+        try { value_ += suffix; }
+        catch (...) {}
+    }
+
+    bool empty() const noexcept {
+        std::scoped_lock lock(mutex_);
+        return value_.empty();
+    }
+
+    std::string Copy() const {
+        std::scoped_lock lock(mutex_);
+        return value_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::string value_;
+};
+
 class VideoMuxer final {
 public:
     // 构造空封装器；不打开文件、设备或 FFmpeg 上下文。
@@ -157,5 +192,5 @@ private:
     std::atomic<std::uint64_t> audioBytes_;
     std::vector<std::unique_ptr<AudioTrackEncoder>> audioTracks_;
     std::unique_ptr<AudioMixer> audioMixer_;
-    std::string lastError_;
+    SynchronizedErrorText lastError_;
 };

@@ -1,6 +1,7 @@
 ﻿Imports LakeUI
 
 Imports System.Runtime.InteropServices
+Imports LakeUI.Notifications
 
 Public Class Form1
     Public Shared Property 当前主窗体 As Form1
@@ -16,6 +17,8 @@ Public Class Form1
     Private ReadOnly registeredHotKeyCombos As New Dictionary(Of Integer, (Modifiers As UInteger, Key As Keys))
     Private nextHotKeyRegistrationId As Integer = 1000
     Private suppressCapturedHotKey As Boolean
+    Private 快捷键通知可用 As Boolean
+    Private ReadOnly 快捷键通知锁 As New Threading.SemaphoreSlim(1, 1)
     Private ReadOnly 选项卡根面板 As New List(Of ModernPanel)
     Private 性能统计计时器 As PrecisionTimer
 
@@ -35,6 +38,7 @@ Public Class Form1
         设置.启动时加载设置()
         Me.ThisIsYourWindow1.Attach(Me)
         录制交互.初始化(Me)
+        初始化快捷键通知()
         更新快捷键按钮文本()
         注册已保存快捷键()
         Me.ModernTabListControl1.Items(1).BoundControl = Form总控台
@@ -184,9 +188,9 @@ Public Class Form1
         If Not parsed.HasValue Then Return
         For Each item In registeredHotKeys
             If item.Key <> id AndAlso 快捷键相同(item.Value, parsed.Value) AndAlso
-                (快捷键动作状态(item.Key) And 快捷键动作状态(id)) <> 0 Then
+                Not 快捷键允许共用(item.Key, id) Then
                 Dim 冲突动作名称 = 快捷键动作名称(item.Key)
-                MessageBox.Show($"该快捷键与 {冲突动作名称} 会在同一录制状态下冲突。",
+                MessageBox.Show($"该快捷键已用于【{冲突动作名称}】。只有【开始/结束】和【暂停/继续】可以成对共用快捷键。",
                     "快捷键冲突", MessageBoxButtons.OK, MessageBoxIcon.Warning)
                 Return
             End If
@@ -255,6 +259,7 @@ Public Class Form1
                 (快捷键动作状态(item.Key) And 当前状态) <> 0).
             Select(Function(item) item.Key).
             FirstOrDefault()
+        If 动作编号 = 0 Then Return
         Select Case 动作编号
             Case 1 : 录制交互.开始录制()
             Case 2 : 录制交互.暂停()
@@ -262,7 +267,63 @@ Public Class Form1
             Case 4 : 录制交互.停止录制()
             Case 5 : 录制交互.切分文件()
         End Select
+        If 快捷键动作已完成(动作编号) Then 显示快捷键状态通知(动作编号)
     End Sub
+
+    Private Sub 初始化快捷键通知()
+        Try
+            Dim 错误消息 = String.Empty
+            快捷键通知可用 = LakeNotificationManager.TryInitialize(
+                New LakeNotificationRegistrationOptions With {
+                    .DisplayName = "FFF.Recorder",
+                    .ShowRuntimeInstallerUi = False
+                }, 错误消息)
+        Catch
+            快捷键通知可用 = False
+        End Try
+    End Sub
+
+    Private Async Sub 显示快捷键状态通知(动作编号 As Integer)
+        If Not 快捷键通知可用 Then Return
+        Await 快捷键通知锁.WaitAsync()
+        Try
+            Await LakeNotificationManager.RemoveByGroupAsync("recording-hotkeys")
+            Dim 通知 As New LakeNotificationRequest With {
+                .MuteAudio = True,
+                .Tag = "latest-hotkey",
+                .Group = "recording-hotkeys"
+            }
+            通知.Texts.Add(New LakeNotificationText("FFF.Recorder"))
+            通知.Texts.Add(New LakeNotificationText(快捷键状态通知文案(动作编号)))
+            LakeNotificationManager.Show(通知)
+        Catch
+            ' 通知不可用时仍需正常执行快捷键动作。
+        Finally
+            快捷键通知锁.Release()
+        End Try
+    End Sub
+
+    Private Shared Function 快捷键动作已完成(id As Integer) As Boolean
+        Select Case id
+            Case 1 : Return 录制交互.是否录制中
+            Case 2 : Return 录制交互.是否已暂停
+            Case 3 : Return 录制交互.是否录制中 AndAlso Not 录制交互.是否已暂停
+            Case 4 : Return Not 录制交互.是否录制中
+            Case 5 : Return 录制交互.是否录制中 AndAlso Not 录制交互.是否已暂停
+            Case Else : Return False
+        End Select
+    End Function
+
+    Private Shared Function 快捷键状态通知文案(id As Integer) As String
+        Select Case id
+            Case 1 : Return "已开始录制。"
+            Case 2 : Return "已暂停录制。"
+            Case 3 : Return "已继续录制。"
+            Case 4 : Return "已停止录制。"
+            Case 5 : Return "已切分文件。"
+            Case Else : Return "录制状态已更新。"
+        End Select
+    End Function
 
     Private Shared Function 快捷键动作状态(id As Integer) As Integer
         Select Case id
@@ -272,6 +333,13 @@ Public Class Form1
             Case 4 : Return 2 Or 4
             Case Else : Return 0
         End Select
+    End Function
+
+    Private Shared Function 快捷键允许共用(第一个动作 As Integer, 第二个动作 As Integer) As Boolean
+        Return (第一个动作 = 1 AndAlso 第二个动作 = 4) OrElse
+            (第一个动作 = 4 AndAlso 第二个动作 = 1) OrElse
+            (第一个动作 = 2 AndAlso 第二个动作 = 3) OrElse
+            (第一个动作 = 3 AndAlso 第二个动作 = 2)
     End Function
 
     Private Shared Function 快捷键动作名称(id As Integer) As String

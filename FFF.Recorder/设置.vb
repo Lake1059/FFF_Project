@@ -10,6 +10,7 @@ Public Class 设置
     Public Property 自动命名方式 As Integer = 0
     Public Property 视频源键 As String = String.Empty
     Public Property 视频源类型 As Integer = 0
+    Public Property 视频捕获模式 As Integer = -1
     Public Property 音频源键 As String = String.Empty
     Public Property 音频跟随默认设备 As Boolean = True
     Public Property 视频编码器索引 As Integer = 8
@@ -102,6 +103,8 @@ Public Class 设置
         输出目录 = If(String.IsNullOrWhiteSpace(输出目录), Application.StartupPath, 输出目录)
         If Not Directory.Exists(输出目录) Then 输出目录 = Application.StartupPath
         自动命名方式 = Math.Clamp(自动命名方式, 0, 1)
+        If 视频捕获模式 < 0 Then 视频捕获模式 = If(视频源类型 = 1, 1, 0)
+        视频捕获模式 = Math.Clamp(视频捕获模式, 0, 2)
         Dim 视频编码器名称列表 = {
             "libsvtav1", "av1_nvenc", "av1_qsv", "av1_amf",
             "libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf",

@@ -3,6 +3,7 @@ Imports System.IO
 
 Public NotInheritable Class 视频源条目
     Public Property 类型 As Integer
+    Public Property 捕获模式 As Integer
     Public Property 键 As String = String.Empty
     Public Property 显示文本 As String = String.Empty
     Public Property 显示器 As 显示器信息
@@ -79,6 +80,7 @@ Public Module 录制交互
     Public Sub 开始录制()
         If 是否录制中 Then Return
         Form总控台.MTB_执行日志.Text = String.Empty
+        Form总控台.重置录制统计()
         Try
             Form总控台.预览?.开始录制预览()
             Dim 源 = Form总控台.当前视频源条目
@@ -125,10 +127,17 @@ Public Module 录制交互
                 .保留独立音轨 = True}
 
             Dim 宽度 As UInteger = 1920, 高度 As UInteger = 1080
+            Dim 客户区裁剪 As 窗口裁剪信息 = Nothing
             If 源.显示器 IsNot Nothing Then 宽度 = 源.显示器.宽度 : 高度 = 源.显示器.高度
             If 源.窗口 IsNot Nothing Then
-                宽度 = CUInt(Math.Max(1, 源.窗口.右边 - 源.窗口.左边))
-                高度 = CUInt(Math.Max(1, 源.窗口.底边 - 源.窗口.顶边))
+                If 源.捕获模式 = 2 Then
+                    客户区裁剪 = 窗口发现.获取客户区裁剪(源.窗口.窗口句柄)
+                    宽度 = 客户区裁剪.宽度
+                    高度 = 客户区裁剪.高度
+                Else
+                    宽度 = CUInt(Math.Max(1, 源.窗口.右边 - 源.窗口.左边))
+                    高度 = CUInt(Math.Max(1, 源.窗口.底边 - 源.窗口.顶边))
+                End If
             End If
             Dim 输出尺寸 = Form视频参数.取得输出尺寸(宽度, 高度)
             Dim 视频配置 As New 视频处理配置 With {
@@ -136,6 +145,10 @@ Public Module 录制交互
                 .输出HDR10 = 设置.实例对象.色彩模式 = 1,
                 .输出十位SDR = 设置.实例对象.色彩模式 = 0 AndAlso 设置.实例对象.灰阶位深 > 0 AndAlso Not H264不支持十位,
                 .允许HDR转SDR = 设置.实例对象.色彩模式 = 0,
+                .裁剪左边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.左边),
+                .裁剪顶边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.顶边),
+                .裁剪右边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.右边),
+                .裁剪底边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.底边),
                 .目标峰值尼特 = If(设置.实例对象.色彩模式 = 0, 设置.实例对象.SDR亮度, 设置.实例对象.HDR峰值),
                 .参考白尼特 = 80.0F}
 
@@ -148,11 +161,17 @@ Public Module 录制交互
             AddHandler 当前控制器.录制失败, AddressOf 录制失败
             AddHandler 当前控制器.收到诊断事件, AddressOf 诊断事件
             AddHandler 当前控制器.收到处理后帧, AddressOf 处理录制预览帧
+            写日志($"录制源：{源.显示文本}")
+            写日志($"捕获模式：{If(源.捕获模式 = 0, "显示器", If(源.捕获模式 = 2, "窗口客户区", "完整窗口"))}")
+            写日志($"视频参数：{输出尺寸.宽度} × {输出尺寸.高度}，{格式化帧率(录制帧率.分子, 录制帧率.分母)} 帧/秒，{编码器名称}")
+            写日志($"音频来源：{If(音频 Is Nothing, "未选择", 音频.名称)}")
+            写日志($"音频参数：{设置.实例对象.音频采样率} 赫兹，{声道数} 声道，{取得音频编码器显示名称(设置.实例对象.音频编码器索引)}")
+            写日志($"输出文件：{输出文件}")
             当前控制器.开始()
             录制开始计数 = Stopwatch.GetTimestamp()
             暂停开始计数 = 0
             累计暂停计数 = 0
-            写日志($"已开始录制：{输出文件}")
+            写日志("录制已开始。")
         Catch ex As Exception
             写日志($"开始录制失败：{ex.Message}")
             清理控制器()
@@ -244,6 +263,10 @@ Public Module 录制交互
 
     Private Sub 清理控制器()
         If 当前控制器 IsNot Nothing Then
+            Try
+                Form总控台.显示录制统计(当前控制器.读取统计())
+            Catch
+            End Try
             RemoveHandler 当前控制器.录制失败, AddressOf 录制失败
             RemoveHandler 当前控制器.收到诊断事件, AddressOf 诊断事件
             RemoveHandler 当前控制器.收到处理后帧, AddressOf 处理录制预览帧
@@ -272,6 +295,24 @@ Public Module 录制交互
         Return 候选
     End Function
 
+    Private Function 格式化帧率(分子 As UInteger, 分母 As UInteger) As String
+        If 分母 = 0 Then Return "未知"
+        Dim 帧率 = CDbl(分子) / 分母
+        If Math.Abs(帧率 - Math.Round(帧率)) < 0.001 Then Return Math.Round(帧率).ToString("F0")
+        Return 帧率.ToString("F2")
+    End Function
+
+    Private Function 取得音频编码器显示名称(索引 As Integer) As String
+        Select Case 索引
+            Case 1 : Return "NMR AAC"
+            Case 2 : Return "FDK AAC"
+            Case 3 : Return "无损 WAV 24 位"
+            Case 4 : Return "无损 WAV 32 位"
+            Case 5 : Return "无损 FLAC"
+            Case Else : Return "AAC"
+        End Select
+    End Function
+
     Private Sub 写日志(文本 As String)
         If 当前主窗体 Is Nothing OrElse 当前主窗体.IsDisposed Then Return
         Form总控台.MTB_执行日志.AppendText($"[{DateTime.Now:HH:mm:ss}] {文本}{vbCrLf}")
@@ -293,11 +334,50 @@ Public Module 录制交互
     Private Sub 诊断事件(sender As Object, e As 录制诊断事件参数)
         If 当前主窗体 Is Nothing OrElse 当前主窗体.IsDisposed Then Return
         当前主窗体.BeginInvoke(Sub()
-                              If String.Equals(e.事件名称, "stop", StringComparison.OrdinalIgnoreCase) Then
-                                  写日志("stop")
-                              Else
-                                  写日志($"{e.事件名称} {e.详细信息JSON}")
-                              End If
+                              Dim 消息 = 读取诊断消息(e.详细信息JSON)
+                              Select Case e.事件名称.ToLowerInvariant()
+                                  Case "start", "pause", "resume", "stop", "split",
+                                       "controller_paused", "controller_resumed",
+                                       "system_audio_endpoint_switched", "recording_controller_failed"
+                                      Return
+                                  Case "encoder_initialization_failed"
+                                      写日志($"视频编码器初始化失败：{消息}")
+                                  Case "video_failed"
+                                      写日志($"视频编码失败：{消息}")
+                                  Case "audio_failed"
+                                      写日志($"音频编码失败：{消息}")
+                                  Case "audio_device_failed"
+                                      写日志($"音频设备异常：{消息}")
+                                  Case "dxgi_access_lost_rebuilt"
+                                      写日志($"显示画面捕获中断后已自动恢复。{格式化可选诊断消息(消息)}")
+                                  Case "wgc_resize"
+                                      写日志($"目标窗口尺寸已变化：{消息}")
+                                  Case "wgc_failed"
+                                      写日志($"窗口画面捕获失败：{消息}")
+                                  Case "wgc_closed"
+                                      写日志(If(String.IsNullOrWhiteSpace(消息), "目标窗口已关闭。", 消息))
+                                  Case "abort"
+                                      写日志("录制已异常中止。")
+                                  Case Else
+                                      If Not String.IsNullOrWhiteSpace(消息) Then 写日志($"录制组件提示：{消息}")
+                              End Select
                           End Sub)
     End Sub
+
+    Private Function 读取诊断消息(详细信息JSON As String) As String
+        If String.IsNullOrWhiteSpace(详细信息JSON) Then Return String.Empty
+        Try
+            Using 文档 = System.Text.Json.JsonDocument.Parse(详细信息JSON)
+                Dim 消息元素 As System.Text.Json.JsonElement
+                If 文档.RootElement.TryGetProperty("message", 消息元素) Then Return If(消息元素.GetString(), String.Empty)
+            End Using
+        Catch
+        End Try
+        Return String.Empty
+    End Function
+
+    Private Function 格式化可选诊断消息(消息 As String) As String
+        If String.IsNullOrWhiteSpace(消息) Then Return String.Empty
+        Return " " & 消息.Replace("重建次数=", "恢复次数：")
+    End Function
 End Module

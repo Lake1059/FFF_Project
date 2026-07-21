@@ -1,4 +1,5 @@
 Public Class Form总控台
+    Private Const 空统计文本 As String = "总帧数：0<br>已丢帧：0<br>重复帧：0<br>视频体积：0.0 MB<br>音频体积：0.0 MB"
     Public Shared Property 预览 As 实时预览控件
 
     Private ReadOnly 视频源列表 As New List(Of 视频源条目)
@@ -58,16 +59,19 @@ Public Class Form总控台
         已初始化 = True
         正在初始化 = True
         Try
+            MCB_视频捕获模式.SelectedIndex = 设置.实例对象.视频捕获模式
             重建视频源列表()
             重建音频源列表()
             恢复视频源()
             恢复音频源()
             MCK_防误触模式.Checked = 设置.实例对象.防误触模式
             重置响度条()
+            重置录制统计()
         Finally
             正在初始化 = False
         End Try
         应用防误触模式()
+        预览?.设置源(当前视频源条目)
         初始化刷新计时器()
         If 页面活动 Then 刷新响度计()
         Try
@@ -109,6 +113,8 @@ Public Class Form总控台
         MB_启动或暂停或继续录制.Enabled = True
         MB_结束.Enabled = 录制中
         MB_分割.Enabled = 录制中 AndAlso Not 已暂停
+        MCB_视频捕获模式.Enabled = Not 录制中
+        MCB_视频源.Enabled = Not 录制中
         If Not 录制中 Then
             MB_启动或暂停或继续录制.Text = "启动录制"
             MB_启动或暂停或继续录制.SubText = String.Empty
@@ -155,6 +161,19 @@ Public Class Form总控台
 
     Private Sub MCB_视频源_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_视频源.SelectedIndexChanged
         If 正在初始化 Then Return
+        应用当前视频源选择
+    End Sub
+
+    Private Sub MCB_视频捕获模式_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_视频捕获模式.SelectedIndexChanged
+        If 正在初始化 OrElse MCB_视频捕获模式.SelectedIndex < 0 Then Return
+        设置.实例对象.视频捕获模式 = MCB_视频捕获模式.SelectedIndex
+        正在初始化 = True
+        Try
+            重建视频源列表()
+            恢复视频源()
+        Finally
+            正在初始化 = False
+        End Try
         应用当前视频源选择()
     End Sub
 
@@ -163,6 +182,7 @@ Public Class Form总控台
         If 项目 IsNot Nothing Then
             设置.实例对象.视频源键 = 项目.键
             设置.实例对象.视频源类型 = 项目.类型
+            设置.实例对象.视频捕获模式 = 项目.捕获模式
         End If
         预览?.设置源(项目)
     End Sub
@@ -178,12 +198,12 @@ Public Class Form总控台
     End Sub
 
     Private Sub MCB_视频源_DropDownOpened(sender As Object, e As EventArgs) Handles MCB_视频源.DropDownOpened
-        If 正在初始化 OrElse 录制交互.是否录制中 Then Return
+        If 正在初始化 OrElse 是否录制中 Then Return
         Dim 原键 = If(当前视频源条目?.键, 设置.实例对象.视频源键)
         Dim 选择已回退 As Boolean
         正在初始化 = True
         Try
-            重建视频源列表()
+            重建视频源列表
             Dim 索引 = 视频源列表.FindIndex(Function(x) String.Equals(x.键, 原键, StringComparison.Ordinal))
             选择已回退 = 索引 < 0
             MCB_视频源.SelectedIndex = If(索引 >= 0, 索引, 0)
@@ -191,7 +211,7 @@ Public Class Form总控台
             正在初始化 = False
         End Try
         ' 列表重建时选择事件会被抑制，源丢失后的回退选择需要在这里显式应用。
-        If 选择已回退 Then 应用当前视频源选择()
+        If 选择已回退 Then 应用当前视频源选择
     End Sub
 
     Private Sub MCB_音频源_DropDownOpened(sender As Object, e As EventArgs) Handles MCB_音频源.DropDownOpened
@@ -201,14 +221,20 @@ Public Class Form总控台
 
     Private Sub 重建视频源列表()
         视频源列表.Clear()
-        For Each 显示器 In 显示器捕获器.枚举显示器().Where(Function(x) x.连接到桌面 AndAlso x.宽度 > 0 AndAlso x.高度 > 0)
-            视频源列表.Add(New 视频源条目 With {
-                .类型 = 0, .键 = 显示器.名称, .显示文本 = $"显示器：{显示器.名称} ({显示器.宽度}x{显示器.高度})", .显示器 = 显示器})
-        Next
-        For Each 窗口 In 窗口发现.枚举可捕获窗口()
-            视频源列表.Add(New 视频源条目 With {
-                .类型 = 1, .键 = $"{窗口.进程标识}:{窗口.标题}", .显示文本 = $"窗口：{窗口.标题} ({窗口.进程名称})", .窗口 = 窗口})
-        Next
+        Dim 捕获模式 = Math.Clamp(MCB_视频捕获模式.SelectedIndex, 0, 2)
+        If 捕获模式 = 0 Then
+            For Each 显示器 In 显示器捕获器.枚举显示器().Where(Function(x) x.连接到桌面 AndAlso x.宽度 > 0 AndAlso x.高度 > 0)
+                视频源列表.Add(New 视频源条目 With {
+                    .类型 = 0, .捕获模式 = 捕获模式, .键 = 显示器.名称,
+                    .显示文本 = $"显示器：{显示器.名称} ({显示器.宽度}x{显示器.高度})", .显示器 = 显示器})
+            Next
+        Else
+            For Each 窗口 In 窗口发现.枚举可捕获窗口()
+                视频源列表.Add(New 视频源条目 With {
+                    .类型 = 1, .捕获模式 = 捕获模式, .键 = $"{窗口.进程标识}:{窗口.标题}",
+                    .显示文本 = $"窗口：{窗口.标题} ({窗口.进程名称})", .窗口 = 窗口})
+            Next
+        End If
         MCB_视频源.Items.Clear()
         For Each 项目 In 视频源列表
             MCB_视频源.Items.Add(项目.显示文本)
@@ -247,6 +273,7 @@ Public Class Form总控台
         If 项目 IsNot Nothing Then
             设置.实例对象.视频源键 = 项目.键
             设置.实例对象.视频源类型 = 项目.类型
+            设置.实例对象.视频捕获模式 = 项目.捕获模式
         End If
     End Sub
 
@@ -331,10 +358,15 @@ Public Class Form总控台
     Private Sub 刷新统计(sender As Object, e As EventArgs)
         更新录制状态()
         Dim 统计 As 录制统计
-        If Not 录制交互.尝试读取统计(统计) Then
-            HtmlColorLabel1.Text = "总帧数：0<br>已丢帧：0<br>重复帧：0<br>视频体积：0.0 MB<br>音频体积：0.0 MB"
-            Return
-        End If
+        If Not 录制交互.尝试读取统计(统计) Then Return
+        显示录制统计(统计)
+    End Sub
+
+    Friend Sub 重置录制统计()
+        HtmlColorLabel1.Text = 空统计文本
+    End Sub
+
+    Friend Sub 显示录制统计(统计 As 录制统计)
         HtmlColorLabel1.Text = $"总帧数：{统计.已提交帧数}<br>已丢帧：{统计.已丢弃帧数}<br>重复帧：{统计.已重复帧数}<br>视频体积：{格式化体积(统计.视频字节数)}<br>音频体积：{格式化体积(统计.音频字节数)}"
     End Sub
 

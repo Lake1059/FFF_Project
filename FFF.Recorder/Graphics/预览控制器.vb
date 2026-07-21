@@ -25,9 +25,14 @@ Friend NotInheritable Class 预览控制器
             If 已释放 Then Throw New ObjectDisposedException(NameOf(预览控制器))
             Dim 源宽度 As UInteger
             Dim 源高度 As UInteger
+            Dim 客户区裁剪 As 窗口裁剪信息 = Nothing
             If 源.显示器 IsNot Nothing Then
                 源宽度 = 源.显示器.宽度
                 源高度 = 源.显示器.高度
+            ElseIf 源.捕获模式 = 2 Then
+                客户区裁剪 = 窗口发现.获取客户区裁剪(源.窗口.窗口句柄)
+                源宽度 = 客户区裁剪.宽度
+                源高度 = 客户区裁剪.高度
             Else
                 源宽度 = CUInt(Math.Max(1, 源.窗口.右边 - 源.窗口.左边))
                 源高度 = CUInt(Math.Max(1, 源.窗口.底边 - 源.窗口.顶边))
@@ -37,18 +42,25 @@ Friend NotInheritable Class 预览控制器
             Dim 高度 = CUInt(Math.Max(1.0, Math.Round(源高度 * 缩放)))
             Dim 输出HDR = 设置.实例对象.色彩模式 = 1
             If 源.显示器 IsNot Nothing Then
-                捕获器 = 窗口捕获器.创建显示器(源.显示器, 输出HDR)
+                捕获器 = 窗口捕获器.创建显示器(源.显示器, 输出HDR, True)
             Else
-                捕获器 = 窗口捕获器.创建(源.窗口.窗口句柄, 输出HDR)
+                捕获器 = 窗口捕获器.创建(源.窗口.窗口句柄, 输出HDR, True)
             End If
             Dim 配置 As New 视频处理配置 With {
                 .输出宽度 = 宽度, .输出高度 = 高度,
                 .输出HDR10 = 输出HDR,
                 .允许HDR转SDR = Not 输出HDR,
                 .高质量缩放 = True,
+                .裁剪左边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.左边),
+                .裁剪顶边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.顶边),
+                .裁剪右边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.右边),
+                .裁剪底边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.底边),
                 .目标峰值尼特 = If(输出HDR, 设置.实例对象.HDR峰值, 设置.实例对象.SDR亮度),
                 .参考白尼特 = 80.0F}
-            处理器 = New 视频处理器(捕获器.设备, 配置)
+            ' 普通 SDR 预览直接使用 WGC 纹理；HDR 色调映射和客户区裁剪才建立处理管线。
+            If 输出HDR OrElse 客户区裁剪 IsNot Nothing Then
+                处理器 = New 视频处理器(捕获器.设备, 配置)
+            End If
             AddHandler 捕获器.收到帧, AddressOf 收到捕获帧
             AddHandler 捕获器.捕获失败, AddressOf 捕获失败
             AddHandler 捕获器.捕获已关闭, AddressOf 捕获关闭
@@ -61,9 +73,15 @@ Friend NotInheritable Class 预览控制器
             Using e.帧
                 SyncLock 生命周期锁
                     If 已释放 Then Return
-                    Using 帧 = 处理器.处理帧(e.帧)
-                        If 帧 IsNot Nothing Then 目标控件.提交空闲GPU帧(Me, 捕获器.设备, 帧)
-                    End Using
+                    If 处理器 Is Nothing Then
+                        ' 捕获纹理由 Using 保护到提交完成，控件在同一 D3D 设备上
+                        ' 直接创建 SRV 并绘制到交换链，完全绕过 CPU/计算着色器处理。
+                        目标控件.提交空闲原始帧(Me, 捕获器.设备, e.帧)
+                    Else
+                        Using 帧 = 处理器.处理帧(e.帧)
+                            If 帧 IsNot Nothing Then 目标控件.提交空闲GPU帧(Me, 捕获器.设备, 帧)
+                        End Using
+                    End If
                 End SyncLock
             End Using
         Catch ex As Exception

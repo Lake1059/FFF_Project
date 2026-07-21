@@ -2,7 +2,10 @@
 #include "Audio/WasapiCapture.h"
 
 #include <algorithm>
+#include <avrt.h>
 #include <cmath>
+
+#pragma comment(lib, "Avrt.lib")
 
 using Microsoft::WRL::ComPtr;
 
@@ -119,6 +122,8 @@ std::string WasapiCapture::LastError() const {
 // 循环不复制音频内容；后续重采样器会在 ReleaseBuffer 前通过同一位置消费 data 和 frameCount。
 void WasapiCapture::CaptureThread() noexcept {
     const auto comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    DWORD mmcssTaskIndex = 0;
+    const auto mmcssHandle = AvSetMmThreadCharacteristicsW(L"Audio", &mmcssTaskIndex);
     bool clientStarted = false;
     ComPtr<IAudioClient> audioClient;
     try {
@@ -280,6 +285,7 @@ void WasapiCapture::CaptureThread() noexcept {
     }
     if (clientStarted) audioClient->Stop();
     running_.store(false);
+    if (mmcssHandle != nullptr) AvRevertMmThreadCharacteristics(mmcssHandle);
     if (SUCCEEDED(comResult)) CoUninitialize();
     if (clientStarted && !stopRequested_.load() && failureCallback_) {
         const auto failure = LastError();

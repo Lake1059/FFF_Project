@@ -110,11 +110,26 @@ Public NotInheritable Class 实时预览控件
         提交预览帧(控制器, 图形, 帧)
     End Sub
 
+    Friend Sub 提交空闲原始帧(控制器 As 预览控制器, 图形 As 图形设备, 帧 As 窗口捕获帧)
+        If 已释放 OrElse Not 活动 OrElse 图形 Is Nothing OrElse 帧 Is Nothing OrElse
+            Not IsHandleCreated OrElse ClientSize.Width <= 0 OrElse ClientSize.Height <= 0 Then Return
+        SyncLock 同步锁
+            If 已释放 OrElse Not 活动 OrElse 录制接管 OrElse 空闲预览 IsNot 控制器 Then Return
+            Try
+                执行预览渲染(图形, Sub() 渲染原始(图形, 帧))
+                状态文本 = String.Empty
+            Catch ex As Exception
+                状态文本 = $"预览不可用：{ex.Message}"
+                释放渲染资源()
+                Invalidate()
+            End Try
+        End SyncLock
+    End Sub
+
     Private Sub 提交预览帧(控制器 As 预览控制器, 图形 As 图形设备, 帧 As 处理后视频帧)
         If 已释放 OrElse Not 活动 OrElse 图形 Is Nothing OrElse 帧 Is Nothing OrElse
             Not IsHandleCreated OrElse ClientSize.Width <= 0 OrElse ClientSize.Height <= 0 Then Return
-        If Not Threading.Monitor.TryEnter(同步锁) Then Return
-        Try
+        SyncLock 同步锁
             If 已释放 OrElse Not 活动 Then Return
             If 控制器 Is Nothing Then
                 If Not 录制接管 Then Return
@@ -122,16 +137,14 @@ Public NotInheritable Class 实时预览控件
                 Return
             End If
             Try
-                图形.执行图形命令(Sub() 渲染(图形, 帧))
+                执行预览渲染(图形, Sub() 渲染(图形, 帧))
                 状态文本 = String.Empty
             Catch ex As Exception
                 状态文本 = $"预览不可用：{ex.Message}"
                 释放渲染资源()
                 Invalidate()
             End Try
-        Finally
-            Threading.Monitor.Exit(同步锁)
-        End Try
+        End SyncLock
     End Sub
 
     Friend Sub 报告预览错误(控制器 As 预览控制器, 消息 As String)
@@ -198,20 +211,21 @@ Public NotInheritable Class 实时预览控件
         Dim 预览尺寸 = ClientSize
         Dim 捕获鼠标 = 设置.实例对象.捕获鼠标
         SyncLock 同步锁
-            ' 所有释放和启动共用一条任务链，避免多个 WGC/D3D 初始化同时争用 GPU。
-            切换任务 = 切换任务.ContinueWith(
-                Sub(已完成任务) 执行空闲预览切换(待释放, 源, 代次, 预览尺寸, 捕获鼠标),
-                TaskScheduler.Default)
+            ' 切换请求只保留代次判断，不再让新捕获等待旧捕获完整排空。
+            ' 旧控制器在后台释放；这样 WGC 可以立即为最新窗口建立首帧通道。
+            切换任务 = Task.Run(Sub() 执行空闲预览切换(待释放, 源, 代次, 预览尺寸, 捕获鼠标))
         End SyncLock
     End Sub
 
     Private Sub 执行空闲预览切换(待释放 As 预览控制器, 源 As 视频源条目, 代次 As Integer,
         预览尺寸 As Size, 捕获鼠标 As Boolean)
-        Try
-            待释放?.释放()
-        Catch
-        End Try
-        If 源 Is Nothing Then Return
+        If 源 Is Nothing Then
+            Try
+                待释放?.释放()
+            Catch
+            End Try
+            Return
+        End If
 
         Dim 新预览 As New 预览控制器(Me, 源, 捕获鼠标,
             Math.Max(1, 预览尺寸.Width), Math.Max(1, 预览尺寸.Height))
@@ -242,6 +256,10 @@ Public NotInheritable Class 实时预览控件
                 If 空闲预览 Is 新预览 Then 新预览 = Nothing
             End SyncLock
             新预览?.释放()
+            Try
+                待释放?.释放()
+            Catch
+            End Try
         End Try
     End Sub
 
@@ -250,6 +268,18 @@ Public NotInheritable Class 实时预览控件
         空闲预览 = Nothing
         Return 结果
     End Function
+
+    Private Sub 执行预览渲染(图形 As 图形设备, 操作 As Action)
+        Try
+            图形.执行图形命令(操作)
+        Catch
+            ' 首次交换链创建或提交失败时复用当前仍有效的捕获帧立即重试，
+            ' 避免静态源必须等到下一次内容更新才能恢复预览。
+            释放渲染资源()
+            Threading.Thread.Yield()
+            图形.执行图形命令(操作)
+        End Try
+    End Sub
 
     Private Sub 渲染(图形 As 图形设备, 帧 As 处理后视频帧)
         Dim 纹理 = 帧.纹理
@@ -279,7 +309,48 @@ Public NotInheritable Class 实时预览控件
         图形.上下文.PSSetShader(Nothing)
         图形.上下文.VSSetShader(Nothing)
         图形.上下文.OMSetRenderTargets(CType(Nothing, ID3D11RenderTargetView), Nothing)
-        交换链.Present(0UI, PresentFlags.None)
+        提交交换链()
+    End Sub
+
+    Private Sub 渲染原始(图形 As 图形设备, 帧 As 窗口捕获帧)
+        Dim 纹理 = 帧.纹理
+        Dim source = 纹理.Description
+        If source.Format <> Format.B8G8R8A8_UNorm AndAlso source.Format <> Format.R8G8B8A8_UNorm Then
+            Throw New NotSupportedException($"原始预览不支持输入格式 {source.Format}。")
+        End If
+        If 当前图形 IsNot 图形 OrElse 交换链 Is Nothing OrElse 交换链格式 <> Format.B8G8R8A8_UNorm OrElse
+            交换链宽度 <> ClientSize.Width OrElse 交换链高度 <> ClientSize.Height Then
+            释放渲染资源()
+            创建渲染资源(图形, Format.B8G8R8A8_UNorm, False)
+        End If
+        If source.Width <= 0 OrElse source.Height <= 0 Then Return
+        Dim scale = Math.Min(CDbl(交换链宽度) / source.Width, CDbl(交换链高度) / source.Height)
+        Dim w = CSng(Math.Max(1.0, Math.Round(source.Width * scale)))
+        Dim h = CSng(Math.Max(1.0, Math.Round(source.Height * scale)))
+        ' SRV 的生命期严格限制在 WGC 系统帧内部，不能缓存对帧池纹理的引用，
+        ' 否则会妨碍三缓冲表面的及时复用。
+        Using 视图 = 图形.设备.CreateShaderResourceView(纹理, Nothing)
+            图形.上下文.OMSetRenderTargets(交换链渲染目标, Nothing)
+            图形.上下文.RSSetViewport((交换链宽度 - w) / 2.0F, (交换链高度 - h) / 2.0F, w, h, 0.0F, 1.0F)
+            图形.上下文.IASetPrimitiveTopology(PrimitiveTopology.TriangleList)
+            图形.上下文.VSSetShader(顶点着色器)
+            图形.上下文.PSSetShader(像素着色器)
+            图形.上下文.PSSetSampler(0, 采样器)
+            图形.上下文.PSSetShaderResource(0, 视图)
+            图形.上下文.Draw(3, 0)
+            图形.上下文.PSSetShaderResource(0, Nothing)
+            图形.上下文.PSSetShader(Nothing)
+            图形.上下文.VSSetShader(Nothing)
+            图形.上下文.OMSetRenderTargets(CType(Nothing, ID3D11RenderTargetView), Nothing)
+        End Using
+        提交交换链()
+    End Sub
+
+    Private Sub 提交交换链()
+        Dim 结果 = 交换链.Present(0UI, PresentFlags.None)
+        If 结果.Failure Then
+            Throw New InvalidOperationException($"提交预览交换链失败：0x{结果.Code:X8}")
+        End If
     End Sub
 
     Private Sub 创建渲染资源(图形 As 图形设备, format As Format, HDR输出 As Boolean)
