@@ -19,7 +19,7 @@
 - 收录 AV1/HEVC/AVC 的软件编码器和红绿蓝三家硬件编码器
 - 自由使用 CRF/CQ/QP/自定义参数 来进行质量控制
 - 支持 CFR/VFR 自由切换
-- 支持 420/422/444 采样，支持 8bit/10bit/12bit/16bit
+- 支持 420/422/444 采样，支持 8bit/10bit
 - 支持 HDR PQ，可调节 SDR 亮度和 HDR 最大亮度
 - 音频收录 AAC/NMR/FDK，无损支持 WAV 24bit/32bit 和 FLAC
 - MKV 直出，无混流合成步骤，被中断仍可正常播放
