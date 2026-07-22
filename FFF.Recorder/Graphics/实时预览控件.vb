@@ -52,7 +52,7 @@ Public NotInheritable Class 实时预览控件
     End Sub
 
     Public Sub 设置活动(是否活动 As Boolean)
-        Dim 待释放 As 预览控制器
+        Dim 现有预览 As 预览控制器
         Dim 源 As 视频源条目
         Dim 当前代次 As Integer
         Dim 应启动 As Boolean
@@ -62,14 +62,21 @@ Public NotInheritable Class 实时预览控件
             源代次 += 1
             当前代次 = 源代次
             源 = 当前源
-            待释放 = 取出空闲预览()
+            现有预览 = 空闲预览
             释放渲染资源()
-            应启动 = 活动 AndAlso 源 IsNot Nothing AndAlso Not 录制接管 AndAlso IsHandleCreated
+            应启动 = 活动 AndAlso 现有预览 Is Nothing AndAlso 源 IsNot Nothing AndAlso
+                Not 录制接管 AndAlso IsHandleCreated
             状态文本 = If(Not 活动, String.Empty,
                 If(源 Is Nothing, "请选择视频源", If(录制接管, "等待录制画面...", "正在连接预览...")))
         End SyncLock
         Invalidate()
-        排队切换空闲预览(待释放, If(应启动, 源, Nothing), 当前代次)
+        If Not 是否活动 Then
+            排队暂停空闲预览(现有预览)
+        ElseIf 现有预览 IsNot Nothing AndAlso Not 录制接管 Then
+            排队恢复空闲预览(现有预览, 当前代次)
+        ElseIf 应启动 Then
+            排队切换空闲预览(Nothing, 源, 当前代次)
+        End If
     End Sub
 
     Public Sub 开始录制预览()
@@ -210,22 +217,32 @@ Public NotInheritable Class 实时预览控件
     Private Sub 排队切换空闲预览(待释放 As 预览控制器, 源 As 视频源条目, 代次 As Integer)
         Dim 预览尺寸 = ClientSize
         Dim 捕获鼠标 = 设置.实例对象.捕获鼠标
+        排队预览操作(Sub() 执行空闲预览切换(待释放, 源, 代次, 预览尺寸, 捕获鼠标))
+    End Sub
+
+    Private Sub 排队暂停空闲预览(预览 As 预览控制器)
+        If 预览 Is Nothing Then Return
+        排队预览操作(Sub() 执行暂停空闲预览(预览))
+    End Sub
+
+    Private Sub 排队恢复空闲预览(预览 As 预览控制器, 代次 As Integer)
+        排队预览操作(Sub() 执行恢复空闲预览(预览, 代次))
+    End Sub
+
+    Private Sub 排队预览操作(操作 As Action)
         SyncLock 同步锁
-            ' 切换请求只保留代次判断，不再让新捕获等待旧捕获完整排空。
-            ' 旧控制器在后台释放；这样 WGC 可以立即为最新窗口建立首帧通道。
-            切换任务 = Task.Run(Sub() 执行空闲预览切换(待释放, 源, 代次, 预览尺寸, 捕获鼠标))
+            ' WGC 帧池和 D3D 设备必须按生命周期顺序切换，避免新旧设备在驱动侧叠加。
+            切换任务 = 切换任务.ContinueWith(Sub(已完成任务) 操作(), TaskScheduler.Default)
         End SyncLock
     End Sub
 
     Private Sub 执行空闲预览切换(待释放 As 预览控制器, 源 As 视频源条目, 代次 As Integer,
         预览尺寸 As Size, 捕获鼠标 As Boolean)
-        If 源 Is Nothing Then
-            Try
-                待释放?.释放()
-            Catch
-            End Try
-            Return
-        End If
+        Try
+            待释放?.释放()
+        Catch
+        End Try
+        If 源 Is Nothing Then Return
 
         Dim 新预览 As New 预览控制器(Me, 源, 捕获鼠标,
             Math.Max(1, 预览尺寸.Width), Math.Max(1, 预览尺寸.Height))
@@ -256,10 +273,47 @@ Public NotInheritable Class 实时预览控件
                 If 空闲预览 Is 新预览 Then 新预览 = Nothing
             End SyncLock
             新预览?.释放()
+        End Try
+    End Sub
+
+    Private Sub 执行暂停空闲预览(预览 As 预览控制器)
+        Try
+            预览.暂停()
+        Catch
+            SyncLock 同步锁
+                If 空闲预览 Is 预览 Then 空闲预览 = Nothing
+            End SyncLock
             Try
-                待释放?.释放()
+                预览.释放()
             Catch
             End Try
+        End Try
+    End Sub
+
+    Private Sub 执行恢复空闲预览(预览 As 预览控制器, 代次 As Integer)
+        SyncLock 同步锁
+            If 已释放 OrElse Not 活动 OrElse 录制接管 OrElse Not IsHandleCreated OrElse
+                代次 <> 源代次 OrElse 空闲预览 IsNot 预览 Then Return
+        End SyncLock
+        Try
+            预览.开始()
+        Catch ex As Exception
+            SyncLock 同步锁
+                If 空闲预览 Is 预览 Then
+                    空闲预览 = Nothing
+                    If 代次 = 源代次 Then 状态文本 = $"预览不可用：{ex.Message}"
+                End If
+            End SyncLock
+            Try
+                预览.释放()
+            Catch
+            End Try
+            If IsHandleCreated Then
+                Try
+                    BeginInvoke(Sub() Invalidate())
+                Catch ex2 As InvalidOperationException
+                End Try
+            End If
         End Try
     End Sub
 

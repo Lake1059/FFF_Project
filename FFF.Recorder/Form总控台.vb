@@ -88,6 +88,8 @@ Public Class Form总控台
     Friend Sub 释放页面资源()
         页面活动 = False
         预览?.设置活动(False)
+        预览?.Dispose()
+        预览 = Nothing
         If 响度计时器 IsNot Nothing Then
             RemoveHandler 响度计时器.Tick, AddressOf 刷新响度条
             响度计时器.Dispose()

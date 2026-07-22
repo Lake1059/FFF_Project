@@ -208,14 +208,23 @@ Public NotInheritable Class 窗口捕获器
     End Sub
 
     Public Sub 停止()
-        If 已释放 OrElse Not 已启动 Then Return
-        RemoveHandler 捕获项目.Closed, AddressOf 处理捕获关闭
-        RemoveHandler 帧池.FrameArrived, AddressOf 处理帧到达
-        捕获会话.Dispose()
-        帧池.Dispose()
+        If 已释放 Then Return
+        Dim 待释放会话 = 捕获会话
+        Dim 待释放帧池 = 帧池
         捕获会话 = Nothing
         帧池 = Nothing
         已启动 = False
+        If 待释放会话 Is Nothing AndAlso 待释放帧池 Is Nothing Then Return
+        RemoveHandler 捕获项目.Closed, AddressOf 处理捕获关闭
+        If 待释放帧池 IsNot Nothing Then
+            RemoveHandler 待释放帧池.FrameArrived, AddressOf 处理帧到达
+        End If
+        Try
+            待释放会话?.Dispose()
+        Finally
+            ' 即使 StartCapture 在已启动标志写入前失败，也必须关闭已经创建的帧池。
+            待释放帧池?.Dispose()
+        End Try
     End Sub
 
     Public Sub 释放() Implements IDisposable.Dispose

@@ -23,6 +23,10 @@ Friend NotInheritable Class 预览控制器
     Friend Sub 开始()
         SyncLock 生命周期锁
             If 已释放 Then Throw New ObjectDisposedException(NameOf(预览控制器))
+            If 捕获器 IsNot Nothing Then
+                捕获器.开始(捕获鼠标)
+                Return
+            End If
             Dim 源宽度 As UInteger
             Dim 源高度 As UInteger
             Dim 客户区裁剪 As 窗口裁剪信息 = Nothing
@@ -68,6 +72,16 @@ Friend NotInheritable Class 预览控制器
         End SyncLock
     End Sub
 
+    Friend Sub 暂停()
+        SyncLock 生命周期锁
+            If 已释放 Then Return
+            If 捕获器 IsNot Nothing Then
+                捕获器.停止()
+                捕获器.设备.清空并刷新()
+            End If
+        End SyncLock
+    End Sub
+
     Private Sub 收到捕获帧(sender As Object, e As 窗口捕获帧事件参数)
         Try
             Using e.帧
@@ -100,16 +114,27 @@ Friend NotInheritable Class 预览控制器
     Public Sub 释放() Implements IDisposable.Dispose
         SyncLock 生命周期锁
             If 已释放 Then Return
-            If 捕获器 IsNot Nothing Then
-                RemoveHandler 捕获器.收到帧, AddressOf 收到捕获帧
-                RemoveHandler 捕获器.捕获失败, AddressOf 捕获失败
-                RemoveHandler 捕获器.捕获已关闭, AddressOf 捕获关闭
-                捕获器.释放()
-            End If
-            处理器?.释放()
+            已释放 = True
+            Dim 待释放捕获器 = 捕获器
+            Dim 待释放处理器 = 处理器
             捕获器 = Nothing
             处理器 = Nothing
-            已释放 = True
+            If 待释放捕获器 IsNot Nothing Then
+                RemoveHandler 待释放捕获器.收到帧, AddressOf 收到捕获帧
+                RemoveHandler 待释放捕获器.捕获失败, AddressOf 捕获失败
+                RemoveHandler 待释放捕获器.捕获已关闭, AddressOf 捕获关闭
+            End If
+            Try
+                待释放捕获器?.停止()
+            Finally
+                Try
+                    ' 视频处理资源依赖捕获器持有的 D3D 设备，必须先释放子资源。
+                    待释放处理器?.释放()
+                Finally
+                    待释放捕获器?.释放()
+                End Try
+            End Try
+            GC.SuppressFinalize(Me)
         End SyncLock
     End Sub
 End Class

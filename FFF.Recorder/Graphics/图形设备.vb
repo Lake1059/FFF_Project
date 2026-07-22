@@ -64,11 +64,26 @@ Public NotInheritable Class 图形设备
 
     Public Sub 释放() Implements IDisposable.Dispose
         If 已释放 Then Return
-        命令调度器.释放()
-        上下文.Dispose()
-        设备.Dispose()
-        已释放 = True
-        GC.SuppressFinalize(Me)
+        Try
+            清空并刷新()
+        Finally
+            已释放 = True
+            命令调度器.释放()
+            上下文.Dispose()
+            设备.Dispose()
+            GC.SuppressFinalize(Me)
+        End Try
+    End Sub
+
+    Friend Sub 清空并刷新()
+        确保未释放()
+        ' ClearState 解除上下文对 SRV/RTV/采样器等对象的内部引用，Flush 将释放命令
+        ' 及时提交给驱动，避免反复创建预览资源时显存延迟堆积。
+        命令调度器.执行(
+            Sub()
+                上下文.ClearState()
+                上下文.Flush()
+            End Sub)
     End Sub
 
     Friend Sub 执行图形命令(操作 As Action)
