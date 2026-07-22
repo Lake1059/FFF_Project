@@ -1,5 +1,6 @@
 Imports System.Diagnostics
 Imports System.IO
+Imports System.Threading.Tasks
 
 Public NotInheritable Class 视频源条目
     Public Property 类型 As Integer
@@ -29,6 +30,7 @@ Public Module 录制交互
     Private 录制开始计数 As Long
     Private 暂停开始计数 As Long
     Private 累计暂停计数 As Long
+    Private 正在停止任务 As Task
 
     Public ReadOnly Property 是否录制中 As Boolean
         Get
@@ -39,6 +41,12 @@ Public Module 录制交互
     Public ReadOnly Property 是否已暂停 As Boolean
         Get
             Return 当前控制器 IsNot Nothing AndAlso 当前控制器.已暂停
+        End Get
+    End Property
+
+    Public ReadOnly Property 是否正在停止 As Boolean
+        Get
+            Return 正在停止任务 IsNot Nothing
         End Get
     End Property
 
@@ -78,7 +86,7 @@ Public Module 录制交互
     End Sub
 
     Public Sub 开始录制()
-        If 是否录制中 Then Return
+        If 当前控制器 IsNot Nothing OrElse 是否正在停止 Then Return
         Form总控台.MTB_执行日志.Text = String.Empty
         Form总控台.重置录制统计()
         Try
@@ -105,6 +113,9 @@ Public Module 录制交互
             Dim 音频端点 = If(音频 Is Nothing OrElse 音频.默认设备, 获取默认音频端点(), 音频.标识)
             Dim 录制帧率 = Form视频参数.取得录制帧率()
             Dim 质量控制模式 = CUInt(Math.Clamp(设置.实例对象.质量控制模式, 0, 4))
+            Dim 使用十位色 = 设置.实例对象.灰阶位深 > 0 AndAlso Not H264不支持十位
+            Dim 视频采样 = If(设置.实例对象.像素采样 = 1, 视频采样格式.YUV四二二,
+                If(设置.实例对象.像素采样 = 2, 视频采样格式.YUV四四四, 视频采样格式.YUV四二零))
             Dim 配置 As New 录制配置 With {
                 .输出文件 = 输出文件, .编码器名称 = 编码器名称,
                 .帧率分子 = 录制帧率.分子, .帧率分母 = 录制帧率.分母,
@@ -113,10 +124,9 @@ Public Module 录制交互
                 .质量控制模式 = 质量控制模式,
                 .质量值 = 设置.实例对象.质量值,
                 .自定义视频参数 = 设置.实例对象.自定义视频参数,
-                .使用十位色 = 设置.实例对象.灰阶位深 > 0 AndAlso Not H264不支持十位,
+                .使用十位色 = 使用十位色,
                 .使用HDR10 = 设置.实例对象.色彩模式 = 1,
-                .视频采样 = If(设置.实例对象.像素采样 = 1, 视频采样格式.YUV四二二,
-                    If(设置.实例对象.像素采样 = 2, 视频采样格式.YUV四四四, 视频采样格式.YUV四二零)),
+                .视频采样 = 视频采样,
                 .色彩范围 = 视频色彩范围.完整,
                 .编码预设 = Form视频参数.取得编码预设(),
                 .编码配置档 = If(Form视频参数.MCB_配置文件.SelectedIndex >= 0, Form视频参数.MCB_配置文件.Text, String.Empty),
@@ -204,16 +214,38 @@ Public Module 录制交互
         End Try
     End Sub
 
-    Public Sub 停止录制()
-        If 当前控制器 Is Nothing Then Return
+    Public Function 停止录制异步(Optional 记录正常停止 As Boolean = True) As Task
+        If 正在停止任务 IsNot Nothing Then Return 正在停止任务
+        Dim 待停止控制器 = 当前控制器
+        If 待停止控制器 Is Nothing Then Return Task.CompletedTask
+        Dim 完成信号 As New TaskCompletionSource(Of Boolean)(TaskCreationOptions.RunContinuationsAsynchronously)
+        ' 对外任务覆盖原生 drain、统计读取、资源释放和 UI 状态复位，关闭窗口和重复点击等待同一事务。
+        正在停止任务 = 完成信号.Task
+        Dim 收尾计时 = Stopwatch.StartNew()
+        写日志("正在停止录制并写入文件尾……")
+        Form总控台.更新录制状态()
+        执行停止录制异步(待停止控制器, 记录正常停止, 收尾计时, 完成信号)
+        Return 完成信号.Task
+    End Function
+
+    Private Async Sub 执行停止录制异步(待停止控制器 As 录制控制器, 记录正常停止 As Boolean,
+                              收尾计时 As Stopwatch, 完成信号 As TaskCompletionSource(Of Boolean))
         Try
-            当前控制器.停止()
-            写日志("录制已停止。")
+            ' 捕获线程、编码器 drain 和 MKV trailer 都可能等待 CPU 编码器；不得阻塞 UI 消息循环。
+            Await Task.Run(Sub() 待停止控制器.停止())
+            If 记录正常停止 Then 写日志($"录制已停止，收尾耗时 {收尾计时.Elapsed.TotalSeconds:F2} 秒。")
         Catch ex As Exception
             写日志($"停止录制失败：{ex.Message}")
         Finally
-            清理控制器()
-            Form总控台.更新录制状态()
+            Try
+                清理控制器(待停止控制器)
+            Catch ex As Exception
+                写日志($"释放录制资源失败：{ex.Message}")
+            Finally
+                正在停止任务 = Nothing
+                Form总控台.更新录制状态()
+                完成信号.TrySetResult(True)
+            End Try
         End Try
     End Sub
 
@@ -252,12 +284,13 @@ Public Module 录制交互
         End Try
     End Sub
 
-    Friend Sub 关闭()
-        If 当前控制器 IsNot Nothing Then 停止录制()
+    Friend Async Function 关闭异步() As Task
+        If 当前控制器 IsNot Nothing Then Await 停止录制异步()
         Form总控台.释放页面资源()
-    End Sub
+    End Function
 
-    Private Sub 清理控制器()
+    Private Sub 清理控制器(Optional 待清理控制器 As 录制控制器 = Nothing)
+        If 待清理控制器 IsNot Nothing AndAlso Not ReferenceEquals(当前控制器, 待清理控制器) Then Return
         If 当前控制器 IsNot Nothing Then
             Try
                 Form总控台.显示录制统计(当前控制器.读取统计())
@@ -353,11 +386,12 @@ Public Module 录制交互
 
     Private Sub 录制失败(sender As Object, e As 录制失败事件参数)
         If 当前主窗体 Is Nothing OrElse 当前主窗体.IsDisposed Then Return
-        当前主窗体.BeginInvoke(Sub()
-                              写日志($"录制失败：{e.异常.Message}")
-                              清理控制器()
-                              Form总控台.更新录制状态()
-                          End Sub)
+        当前主窗体.BeginInvoke(Sub() 处理录制失败(e.异常))
+    End Sub
+
+    Private Async Sub 处理录制失败(错误 As Exception)
+        写日志($"录制失败：{错误.Message}")
+        Await 停止录制异步(False)
     End Sub
 
     Private Sub 处理录制预览帧(sender As Object, e As 处理后视频帧事件参数)

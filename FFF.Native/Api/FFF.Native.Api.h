@@ -141,7 +141,7 @@ FFF_API FFFResult FFF_EnumerateAudioEndpoints(char* outputUtf8, std::uint32_t ou
 FFF_API FFFResult FFF_TestAudioEndpoint(const char* endpointIdUtf8, std::uint32_t loopback,
     std::uint32_t durationMilliseconds, char* outputUtf8, std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept;
-// 使用保守 NV12 软件配置真实打开指定编码器，返回支持状态及 FFmpeg 原因 JSON。
+// 使用编码器实际接受的保守 8-bit 4:2:0 配置真实打开指定编码器，返回支持状态及 FFmpeg 原因 JSON。
 FFF_API FFFResult FFF_ProbeEncoder(const char* encoderNameUtf8, std::uint32_t width, std::uint32_t height,
     std::uint32_t frameRateNumerator, std::uint32_t frameRateDenominator,
     char* outputUtf8, std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;

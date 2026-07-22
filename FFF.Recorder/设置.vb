@@ -154,6 +154,7 @@ Public Class 设置
             Function(名称) String.Equals(名称, 视频编码器名称, StringComparison.OrdinalIgnoreCase))
         If 视频编码器索引 < 0 Then 视频编码器索引 = 8
         视频编码器名称 = 视频编码器名称列表(视频编码器索引)
+        视频预设 = 规范化视频预设(视频编码器名称, 视频预设)
         视频分辨率索引 = Math.Clamp(视频分辨率索引, 0, 5)
         自定义视频宽度 = If(自定义视频宽度, String.Empty).Trim()
         自定义视频高度 = If(自定义视频高度, String.Empty).Trim()
@@ -192,6 +193,28 @@ Public Class 设置
         SP_毛玻璃背景来源 = Math.Clamp(SP_毛玻璃背景来源, -1, 1)
         SP_毛玻璃噪点颗粒 = Math.Clamp(SP_毛玻璃噪点颗粒, -1, 2)
     End Sub
+
+    Private Shared Function 规范化视频预设(编码器 As String, 当前值 As String) As String
+        Dim 值 = If(当前值, String.Empty).Trim().ToLowerInvariant()
+        If 值.Length = 0 Then Return String.Empty
+        Select Case 编码器
+            Case "libx264", "libx265"
+                ' 旧版允许的三个极慢档迁移为 slow，避免历史设置继续造成长时间收尾。
+                If {"placebo", "veryslow", "slower"}.Contains(值) Then Return "slow"
+                If {"slow", "medium", "fast", "faster", "veryfast", "superfast", "ultrafast"}.Contains(值) Then Return 值
+            Case "libsvtav1"
+                Dim 数字预设 As Integer
+                If Integer.TryParse(值, 数字预设) AndAlso 数字预设 >= 1 AndAlso 数字预设 <= 13 Then Return 数字预设.ToString()
+            Case "av1_nvenc", "hevc_nvenc", "h264_nvenc"
+                If {"p1", "p2", "p3", "p4", "p5", "p6", "p7"}.Contains(值) Then Return 值
+            Case "av1_qsv", "hevc_qsv", "h264_qsv"
+                If {"veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"}.Contains(值) Then Return 值
+            Case "av1_amf", "hevc_amf", "h264_amf"
+                If {"high_quality", "quality", "balanced", "speed"}.Contains(值) Then Return 值
+        End Select
+        ' 编码器切换后遗留的其他编码器预设回到该编码器的原生默认值。
+        Return String.Empty
+    End Function
 
     Public Shared Sub 应用SP个性化设置()
         If Not SP_UnLock OrElse Form1.当前主窗体 Is Nothing Then Return

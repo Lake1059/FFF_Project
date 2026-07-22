@@ -5,6 +5,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 #include <libavutil/dict.h>
@@ -16,7 +17,336 @@ extern "C" {
 
 #include <d3dcompiler.h>
 
+#include <array>
+
 namespace {
+enum class VideoCodecFamily : std::uint8_t {
+    Av1,
+    Hevc,
+    H264
+};
+
+enum class EncoderPresetFamily : std::uint8_t {
+    SvtAv1,
+    Nvenc,
+    Qsv,
+    Amf,
+    X26x
+};
+
+enum class BitstreamColorMetadataPath : std::uint8_t {
+    None,
+    EncoderNative,
+    H265MetadataBsf
+};
+
+struct ColorPipelineDefinition final {
+    bool supported;
+    RgbToYuvPath conversionPath;
+    AVPixelFormat softwarePixelFormat;
+    YuvBitPacking bitPacking;
+    AVColorPrimaries colorPrimaries;
+    AVColorTransferCharacteristic colorTransfer;
+    AVColorSpace colorSpace;
+    AVChromaLocation chromaLocation;
+    AVColorRange colorRange;
+    BitstreamColorMetadataPath bitstreamMetadataPath;
+};
+
+constexpr std::size_t ColorPipelineCount = 12;
+
+constexpr ColorPipelineDefinition UnsupportedPipeline{
+    false, RgbToYuvPath::None, AV_PIX_FMT_NONE, YuvBitPacking::EightBit,
+    AVCOL_PRI_UNSPECIFIED, AVCOL_TRC_UNSPECIFIED, AVCOL_SPC_UNSPECIFIED,
+    AVCHROMA_LOC_UNSPECIFIED, AVCOL_RANGE_UNSPECIFIED, BitstreamColorMetadataPath::None
+};
+
+constexpr ColorPipelineDefinition Sdr8Pipeline(const RgbToYuvPath path,
+    const AVPixelFormat format, const AVChromaLocation chromaLocation,
+    const BitstreamColorMetadataPath bitstreamMetadataPath =
+        BitstreamColorMetadataPath::EncoderNative) noexcept {
+    return { true, path, format, YuvBitPacking::EightBit, AVCOL_PRI_BT709,
+        AVCOL_TRC_BT709, AVCOL_SPC_BT709, chromaLocation,
+        AVCOL_RANGE_JPEG, bitstreamMetadataPath };
+}
+
+constexpr ColorPipelineDefinition Sdr10Pipeline(const RgbToYuvPath path,
+    const AVPixelFormat format, const YuvBitPacking packing,
+    const AVChromaLocation chromaLocation,
+    const BitstreamColorMetadataPath bitstreamMetadataPath =
+        BitstreamColorMetadataPath::EncoderNative) noexcept {
+    return { true, path, format, packing, AVCOL_PRI_BT709,
+        AVCOL_TRC_BT709, AVCOL_SPC_BT709, chromaLocation, AVCOL_RANGE_JPEG,
+        bitstreamMetadataPath };
+}
+
+constexpr ColorPipelineDefinition Hdr10Pipeline(const RgbToYuvPath path,
+    const AVPixelFormat format, const YuvBitPacking packing,
+    const AVChromaLocation chromaLocation,
+    const BitstreamColorMetadataPath bitstreamMetadataPath =
+        BitstreamColorMetadataPath::EncoderNative) noexcept {
+    return { true, path, format, packing, AVCOL_PRI_BT2020,
+        AVCOL_TRC_SMPTE2084, AVCOL_SPC_BT2020_NCL, chromaLocation, AVCOL_RANGE_JPEG,
+        bitstreamMetadataPath };
+}
+
+struct EncoderStrategy final {
+    const char* name;
+    VideoEncoderBackend backend;
+    VideoCodecFamily codec;
+    // Fixed order: SDR8, SDR10, HDR8, HDR10; within each group: 420, 444, 422.
+    std::array<ColorPipelineDefinition, ColorPipelineCount> colorPipelines;
+    EncoderPresetFamily presetFamily;
+    const char* defaultPreset;
+};
+
+// Each encoder owns all twelve color combinations. Unsupported entries are intentional,
+// reviewable records rather than gaps inferred from codec/backend conditionals. Subsampled
+// 4:2:0 uses left chroma siting because FFmpeg can represent it in HEVC, H.264, AV1 and
+// Matroska; the shader uses the matching sampling phase. FFmpeg's NVENC wrapper does not
+// copy AVCodecContext::chroma_sample_location into the NVIDIA HEVC VUI fields, so the NVENC
+// HEVC 4:2:0 records explicitly select h265_metadata to write the same phase into the SPS.
+constexpr EncoderStrategy EncoderStrategies[] = {
+    { "libsvtav1", VideoEncoderBackend::Software, VideoCodecFamily::Av1, {
+        Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline
+    }, EncoderPresetFamily::SvtAv1, "8" },
+    { "av1_nvenc", VideoEncoderBackend::Nvenc, VideoCodecFamily::Av1, {
+        Sdr8Pipeline(RgbToYuvPath::D3D11VideoProcessor420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline
+    }, EncoderPresetFamily::Nvenc, "p4" },
+    { "av1_qsv", VideoEncoderBackend::Qsv, VideoCodecFamily::Av1, {
+        Sdr8Pipeline(RgbToYuvPath::D3D11VideoProcessor420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline
+    }, EncoderPresetFamily::Qsv, "medium" },
+    { "av1_amf", VideoEncoderBackend::Amf, VideoCodecFamily::Av1, {
+        Sdr8Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline
+    }, EncoderPresetFamily::Amf, "balanced" },
+    { "libx265", VideoEncoderBackend::Software, VideoCodecFamily::Hevc, {
+        Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P, AVCHROMA_LOC_LEFT), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P, AVCHROMA_LOC_UNSPECIFIED), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV422P, AVCHROMA_LOC_CENTER),
+        Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_LEFT), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_UNSPECIFIED), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV422P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_CENTER),
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_LEFT), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_UNSPECIFIED), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV422P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_CENTER)
+    }, EncoderPresetFamily::X26x, "medium" },
+    { "hevc_nvenc", VideoEncoderBackend::Nvenc, VideoCodecFamily::Hevc, {
+        Sdr8Pipeline(RgbToYuvPath::D3D11VideoProcessor420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT, BitstreamColorMetadataPath::H265MetadataBsf), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P, AVCHROMA_LOC_UNSPECIFIED), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_NV16, AVCHROMA_LOC_CENTER),
+        Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT, BitstreamColorMetadataPath::H265MetadataBsf), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P10MSB, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_UNSPECIFIED), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_P210, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_CENTER),
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT, BitstreamColorMetadataPath::H265MetadataBsf), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P10MSB, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_UNSPECIFIED), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_P210, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_CENTER)
+    }, EncoderPresetFamily::Nvenc, "p4" },
+    { "hevc_qsv", VideoEncoderBackend::Qsv, VideoCodecFamily::Hevc, {
+        Sdr8Pipeline(RgbToYuvPath::D3D11VideoProcessor420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_VUYX, AVCHROMA_LOC_UNSPECIFIED), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUYV422, AVCHROMA_LOC_CENTER),
+        Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_XV30, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_UNSPECIFIED), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_Y210, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_CENTER),
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_XV30, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_UNSPECIFIED), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_Y210, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_CENTER)
+    }, EncoderPresetFamily::Qsv, "medium" },
+    { "hevc_amf", VideoEncoderBackend::Amf, VideoCodecFamily::Hevc, {
+        Sdr8Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline
+    }, EncoderPresetFamily::Amf, "balanced" },
+    { "libx264", VideoEncoderBackend::Software, VideoCodecFamily::H264, {
+        Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P, AVCHROMA_LOC_LEFT), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P, AVCHROMA_LOC_UNSPECIFIED), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV422P, AVCHROMA_LOC_CENTER),
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline
+    }, EncoderPresetFamily::X26x, "medium" },
+    { "h264_nvenc", VideoEncoderBackend::Nvenc, VideoCodecFamily::H264, {
+        Sdr8Pipeline(RgbToYuvPath::D3D11VideoProcessor420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P, AVCHROMA_LOC_UNSPECIFIED), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_NV16, AVCHROMA_LOC_CENTER),
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline
+    }, EncoderPresetFamily::Nvenc, "p4" },
+    { "h264_qsv", VideoEncoderBackend::Qsv, VideoCodecFamily::H264, {
+        Sdr8Pipeline(RgbToYuvPath::D3D11VideoProcessor420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline
+    }, EncoderPresetFamily::Qsv, "medium" },
+    { "h264_amf", VideoEncoderBackend::Amf, VideoCodecFamily::H264, {
+        Sdr8Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
+        UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline
+    }, EncoderPresetFamily::Amf, "balanced" }
+};
+
+constexpr bool ValidateColorPipelineTable() noexcept {
+    for (const auto& strategy : EncoderStrategies) {
+        for (std::size_t index = 0; index < strategy.colorPipelines.size(); ++index) {
+            const auto& pipeline = strategy.colorPipelines[index];
+            if (!pipeline.supported) continue;
+            if (pipeline.conversionPath == RgbToYuvPath::None ||
+                pipeline.softwarePixelFormat == AV_PIX_FMT_NONE ||
+                pipeline.colorPrimaries == AVCOL_PRI_UNSPECIFIED ||
+                pipeline.colorTransfer == AVCOL_TRC_UNSPECIFIED ||
+                pipeline.colorSpace == AVCOL_SPC_UNSPECIFIED) return false;
+            const bool tenBitSlot = ((index / 3U) & 1U) != 0;
+            if (tenBitSlot == (pipeline.bitPacking == YuvBitPacking::EightBit)) return false;
+            const bool hdr8Slot = index >= 6U && index < 9U;
+            if (hdr8Slot) return false;
+            if (pipeline.bitstreamMetadataPath == BitstreamColorMetadataPath::None) return false;
+            if (pipeline.colorRange != AVCOL_RANGE_JPEG) return false;
+            if (pipeline.bitstreamMetadataPath == BitstreamColorMetadataPath::H265MetadataBsf &&
+                (strategy.codec != VideoCodecFamily::Hevc || index % 3U != 0U ||
+                    pipeline.chromaLocation != AVCHROMA_LOC_LEFT)) return false;
+        }
+    }
+    return true;
+}
+
+static_assert(ValidateColorPipelineTable(),
+    "Every supported color pipeline must be complete and match its bit-depth slot.");
+
+struct SoftwareEncoderRuntimeStrategy final {
+    const char* name;
+    std::uint32_t maximumWorkerThreads;
+    std::uint32_t defaultLookaheadFrames;
+    std::uint32_t maximumLookaheadFrames;
+};
+
+// CPU encoders must leave scheduling capacity for capture, audio, UI, and the packet writer.
+// The lookahead caps bound the amount of delayed work that a normal Stop must drain.
+constexpr SoftwareEncoderRuntimeStrategy SoftwareRuntimeStrategies[] = {
+    { "libsvtav1", 16, 16, 32 },
+    { "libx265",   16, 16, 32 },
+    { "libx264",   16, 16, 32 }
+};
+
+struct ResolvedEncoderPlan final {
+    const EncoderStrategy* strategy = nullptr;
+    const ColorPipelineDefinition* colorPipeline = nullptr;
+};
+
+const char* SamplingName(const std::uint32_t chromaSampling) noexcept {
+    return chromaSampling == 0 ? "4:2:0" : (chromaSampling == 1 ? "4:4:4" : "4:2:2");
+}
+
+constexpr std::size_t ColorPipelineIndex(const bool tenBit, const bool hdr10,
+    const std::uint32_t chromaSampling) noexcept {
+    return (hdr10 ? 6U : 0U) + (tenBit ? 3U : 0U) + chromaSampling;
+}
+
+bool ResolveEncoderPlan(const std::string& encoderName, const bool tenBit, const bool hdr10,
+    const std::uint32_t chromaSampling, ResolvedEncoderPlan& plan, std::string& error) {
+    const auto strategy = std::find_if(std::begin(EncoderStrategies), std::end(EncoderStrategies),
+        [&](const EncoderStrategy& candidate) { return encoderName == candidate.name; });
+    if (strategy == std::end(EncoderStrategies)) {
+        error = "The selected encoder is not present in the application's explicit strategy table.";
+        return false;
+    }
+    const auto& colorPipeline = strategy->colorPipelines[
+        ColorPipelineIndex(tenBit, hdr10, chromaSampling)];
+    if (!colorPipeline.supported) {
+        const auto mode = hdr10 ? (tenBit ? "HDR10" : "HDR8") : (tenBit ? "SDR10" : "SDR8");
+        error = std::string(strategy->name) + " does not support " + mode + " " +
+            SamplingName(chromaSampling) + " in the application encoder strategy.";
+        return false;
+    }
+
+    plan.strategy = &*strategy;
+    plan.colorPipeline = &colorPipeline;
+    return true;
+}
+
+const SoftwareEncoderRuntimeStrategy* FindSoftwareRuntimeStrategy(const std::string& encoderName) noexcept {
+    const auto strategy = std::find_if(std::begin(SoftwareRuntimeStrategies),
+        std::end(SoftwareRuntimeStrategies), [&](const auto& candidate) { return encoderName == candidate.name; });
+    return strategy == std::end(SoftwareRuntimeStrategies) ? nullptr : &*strategy;
+}
+
+bool IsNumericPreset(const std::string& value, const int minimum, const int maximum) noexcept {
+    if (value.empty() || !std::all_of(value.begin(), value.end(),
+        [](const char character) { return character >= '0' && character <= '9'; })) return false;
+    try {
+        const auto number = std::stoi(value);
+        return number >= minimum && number <= maximum;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool IsOneOf(const std::string& value, const std::initializer_list<const char*>& choices) noexcept {
+    return std::any_of(choices.begin(), choices.end(),
+        [&](const char* choice) { return value == choice; });
+}
+
+bool ResolveEncoderPreset(const EncoderStrategy& strategy, const std::string& requested,
+    std::string& selected, std::string& error) {
+    selected = requested.empty() ? strategy.defaultPreset : requested;
+    if (strategy.presetFamily == EncoderPresetFamily::X26x) {
+        // These presets were exposed by older builds but are intentionally no longer offered
+        // for real-time capture.  Keep old settings usable without reintroducing their drain cost.
+        if (selected == "placebo" || selected == "veryslow" || selected == "slower") selected = "slow";
+        if (IsOneOf(selected, { "slow", "medium", "fast", "faster", "veryfast", "superfast", "ultrafast" })) return true;
+    } else if (strategy.presetFamily == EncoderPresetFamily::SvtAv1) {
+        if (IsNumericPreset(selected, 1, 13)) return true;
+    } else if (strategy.presetFamily == EncoderPresetFamily::Nvenc) {
+        if (IsOneOf(selected, { "p1", "p2", "p3", "p4", "p5", "p6", "p7" })) return true;
+    } else if (strategy.presetFamily == EncoderPresetFamily::Qsv) {
+        if (IsOneOf(selected, { "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow" })) return true;
+    } else if (strategy.presetFamily == EncoderPresetFamily::Amf) {
+        if (IsOneOf(selected, { "high_quality", "quality", "balanced", "speed" })) return true;
+    }
+    error = std::string(strategy.name) + " does not accept preset '" + selected + "'.";
+    return false;
+}
+
+std::uint32_t RealtimeWorkerCount(const std::uint32_t maximum) noexcept {
+    const auto logicalProcessors = std::max(1U, std::thread::hardware_concurrency());
+    // Keep two logical processors free on normal desktop CPUs. Small systems retain one.
+    const auto reserved = logicalProcessors > 4 ? 2U : 1U;
+    const auto available = logicalProcessors > reserved ? logicalProcessors - reserved : 1U;
+    return std::max(1U, std::min(maximum, std::min(available, 16U)));
+}
+
+std::uint32_t RealtimeLookahead(const SoftwareEncoderRuntimeStrategy& strategy,
+    const std::uint32_t requested) noexcept {
+    const auto selected = requested == 0 ? strategy.defaultLookaheadFrames : requested;
+    return std::min(selected, strategy.maximumLookaheadFrames);
+}
+
+void ConfigureSoftwareEncoderRuntime(const std::string& encoderName, AVCodecContext* codecContext,
+    AVDictionary** encoderOptions, const std::uint32_t requestedLookahead) noexcept {
+    const auto* strategy = FindSoftwareRuntimeStrategy(encoderName);
+    if (strategy == nullptr || codecContext == nullptr || encoderOptions == nullptr) return;
+    const auto workers = RealtimeWorkerCount(strategy->maximumWorkerThreads);
+    const auto lookahead = RealtimeLookahead(*strategy, requestedLookahead);
+    if (encoderName == "libx264") {
+        // x264 owns its worker pool; FFmpeg's count is the explicit upper bound.
+        codecContext->thread_count = static_cast<int>(workers);
+        av_dict_set_int(encoderOptions, "rc-lookahead", lookahead, 0);
+    } else if (encoderName == "libx265") {
+        // x265 has a pool plus frame-parallel workers. Bound both instead of allowing the
+        // default pool to consume every logical processor during capture and drain.
+        const auto frameThreads = std::max(1U, std::min(4U, workers / 4U));
+        codecContext->thread_count = static_cast<int>(frameThreads);
+        const auto parameters = "pools=" + std::to_string(workers) +
+            ":frame-threads=" + std::to_string(frameThreads) +
+            ":rc-lookahead=" + std::to_string(lookahead);
+        av_dict_set(encoderOptions, "x265-params", parameters.c_str(), 0);
+    } else {
+        // SVT-AV1 uses its own task graph (not FFmpeg frame threading). lp is a parallelism
+        // level, not a thread count; level 3 avoids the large end-of-stream picture backlog.
+        codecContext->thread_count = 1;
+        codecContext->thread_type = 0;
+        const auto parallelism = std::thread::hardware_concurrency() >= 8 ? 3U : 2U;
+        const auto parameters = "lp=" + std::to_string(parallelism) +
+            ":lookahead=" + std::to_string(lookahead);
+        av_dict_set(encoderOptions, "svtav1-params", parameters.c_str(), 0);
+    }
+}
+
 constexpr char RgbToYuvShader[] = R"(
 Texture2D<float4> Source : register(t0);
 
@@ -44,6 +374,9 @@ static const float Kb = 0.0722;
 
 float3 ConvertRgb(float3 rgb)
 {
+    // The incoming channels are already display-referred R'G'B': BT.709 gamma for
+    // SDR or BT.2020 PQ for HDR. This stage changes only the matrix representation;
+    // decoding/re-encoding the transfer function here would make HDR green/washed.
     // The difference form makes neutral RGB produce exactly zero chroma even
     // when the shader compiler reassociates floating-point operations.
     float y = rgb.g + Kr * (rgb.r - rgb.g) + Kb * (rgb.b - rgb.g);
@@ -54,36 +387,29 @@ float3 ConvertRgb(float3 rgb)
 
 float StoreLuma(float value)
 {
-#if FULL_RANGE
 #if TEN_BIT
     return round(saturate(value) * 1023.0) * (64.0 / 65535.0);
 #else
     return saturate(value);
 #endif
-#else
-#if TEN_BIT
-    return (round(saturate(value) * 876.0) + 64.0) * (64.0 / 65535.0);
-#else
-    return (round(saturate(value) * 219.0) + 16.0) / 255.0;
-#endif
-#endif
 }
 
 float2 StoreChroma(float2 value)
 {
-#if FULL_RANGE
 #if TEN_BIT
     return clamp(round(value * 1023.0) + 512.0, 0.0, 1023.0) * (64.0 / 65535.0);
 #else
     return clamp(round(value * 255.0) + 128.0, 0.0, 255.0) / 255.0;
 #endif
-#else
-#if TEN_BIT
-    return (round(value * 896.0) + 512.0) * (64.0 / 65535.0);
-#else
-    return (round(value * 224.0) + 128.0) / 255.0;
-#endif
-#endif
+}
+
+float3 LoadLeftSitedChromaRow(uint2 position, uint width, uint height)
+{
+    uint2 left = uint2(position.x == 0 ? 0 : position.x - 1, position.y);
+    uint2 right = min(position + uint2(1, 0), uint2(width - 1, height - 1));
+    return Source.Load(int3(left, 0)).rgb * 0.25 +
+        Source.Load(int3(position, 0)).rgb * 0.5 +
+        Source.Load(int3(right, 0)).rgb * 0.25;
 }
 
 [numthreads(8, 8, 1)]
@@ -108,22 +434,34 @@ void Convert(uint3 id : SV_DispatchThreadID)
     }
 #elif PLANAR_420
     if ((id.x & 1) == 0 && (id.y & 1) == 0) {
+#if CHROMA_LEFT
+        uint2 nextRow = min(id.xy + uint2(0, 1), uint2(width - 1, height - 1));
+        float3 rgb = (LoadLeftSitedChromaRow(id.xy, width, height) +
+            LoadLeftSitedChromaRow(nextRow, width, height)) * 0.5;
+#else
         uint2 p1 = min(id.xy + uint2(1, 0), uint2(width - 1, height - 1));
         uint2 p2 = min(id.xy + uint2(0, 1), uint2(width - 1, height - 1));
         uint2 p3 = min(id.xy + uint2(1, 1), uint2(width - 1, height - 1));
         float3 rgb = (Source.Load(int3(id.xy, 0)).rgb + Source.Load(int3(p1, 0)).rgb +
             Source.Load(int3(p2, 0)).rgb + Source.Load(int3(p3, 0)).rgb) * 0.25;
+#endif
         float2 chroma = StoreChroma(ConvertRgb(rgb).yz);
         ChromaU[id.xy / 2] = chroma.x;
         ChromaV[id.xy / 2] = chroma.y;
     }
 #else
     if ((id.x & 1) == 0 && (id.y & 1) == 0) {
+#if CHROMA_LEFT
+        uint2 nextRow = min(id.xy + uint2(0, 1), uint2(width - 1, height - 1));
+        float3 rgb = (LoadLeftSitedChromaRow(id.xy, width, height) +
+            LoadLeftSitedChromaRow(nextRow, width, height)) * 0.5;
+#else
         uint2 p1 = min(id.xy + uint2(1, 0), uint2(width - 1, height - 1));
         uint2 p2 = min(id.xy + uint2(0, 1), uint2(width - 1, height - 1));
         uint2 p3 = min(id.xy + uint2(1, 1), uint2(width - 1, height - 1));
         float3 rgb = (Source.Load(int3(id.xy, 0)).rgb + Source.Load(int3(p1, 0)).rgb +
             Source.Load(int3(p2, 0)).rgb + Source.Load(int3(p3, 0)).rgb) * 0.25;
+#endif
         Chroma[id.xy / 2] = StoreChroma(ConvertRgb(rgb).yz);
     }
 #endif
@@ -136,11 +474,13 @@ void Convert(uint3 id : SV_DispatchThreadID)
 VideoMuxer::VideoMuxer() noexcept
     : immediateContext_(nullptr), d3d11Device_(nullptr), d3d11Device3_(nullptr), rgbToYuvShader_(nullptr),
       hardwareDevice_(nullptr), hardwareFrames_(nullptr),
-      encoderHardwareDevice_(nullptr), encoderFrames_(nullptr), codecContext_(nullptr), formatContext_(nullptr),
-      videoStream_(nullptr), width_(0), height_(0), inputDxgiFormat_(0), qsvEncoder_(false),
-      softwareEncoder_(false), videoProcessorConversion_(false), shaderConversion_(false),
-      softwareYuvConversion_(false), tenBit_(false), chromaSampling_(0), hdr10_(false),
-      videoDevice_(nullptr), videoContext_(nullptr), videoContext1_(nullptr), videoProcessorEnumerator_(nullptr),
+      encoderHardwareDevice_(nullptr), encoderFrames_(nullptr), videoBitstreamFilter_(nullptr),
+      codecContext_(nullptr), formatContext_(nullptr),
+      videoStream_(nullptr), width_(0), height_(0), inputDxgiFormat_(0),
+      encoderBackend_(VideoEncoderBackend::None), rgbToYuvPath_(RgbToYuvPath::None),
+      yuvBitPacking_(YuvBitPacking::EightBit), tenBit_(false), chromaSampling_(0),
+      videoDevice_(nullptr), videoContext_(nullptr),
+      videoProcessorEnumerator_(nullptr),
       videoProcessor_(nullptr),
       initialized_(false), headerWritten_(false), finished_(false),
       writerStopRequested_(false), writerFailed_(false), queueDepth_(0), peakQueueDepth_(0),
@@ -155,7 +495,7 @@ VideoMuxer::~VideoMuxer() {
 
 // 使用调用方现有 D3D11 Device 建立 FFmpeg D3D11VA 设备、硬件帧池、硬件编码器和 Matroska
 // 输出。device 仅在初始化期间借用，FFmpeg 设备上下文和本类 Immediate Context 都各自持有引用。
-// 输入可为 BGRA8 SDR 或 RGB10 HDR，具体 RGB 到 4:2:0/4:4:4 转换由经过真实探测的硬件编码器完成。
+// 输入可为 BGRA8 SDR 或 RGB10 SDR/HDR；策略表决定 RGB 到 4:2:0/4:2:2/4:4:4 的唯一转换路径。
 FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& outputPath,
     const std::string& encoderName, const std::uint32_t width, const std::uint32_t height,
     const std::uint32_t frameRateNumerator, const std::uint32_t frameRateDenominator,
@@ -174,12 +514,16 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         width == 0 || height == 0 || frameRateNumerator == 0 || frameRateDenominator == 0) {
         return FFFResult::InvalidArgument;
     }
+    if (colorRange != static_cast<std::uint32_t>(AVCOL_RANGE_JPEG)) {
+        lastError_ = "3FR records full-range video only.";
+        return FFFResult::InvalidArgument;
+    }
     if (hdr10 && (!tenBit || inputTextureFormat != 2)) {
         lastError_ = "HDR10 requires a native ten-bit RGB10 GPU texture; refusing false HDR output.";
         return FFFResult::NotSupported;
     }
-    if (hdr10 && encoderName.find("h264") != std::string::npos) {
-        lastError_ = "H.264 is not enabled for the HDR10 recording path; use HEVC or AV1.";
+    if ((!tenBit && inputTextureFormat != 0) || (tenBit && inputTextureFormat != 2)) {
+        lastError_ = "The configured bit depth and D3D11 RGB input texture format do not match.";
         return FFFResult::NotSupported;
     }
     if (chromaSampling > 2) {
@@ -195,77 +539,42 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         return FFFResult::InvalidArgument;
     }
 
+    ResolvedEncoderPlan encoderPlan;
+    std::string strategyError;
+    if (!ResolveEncoderPlan(encoderName, tenBit, hdr10, chromaSampling, encoderPlan, strategyError)) {
+        lastError_ = std::move(strategyError);
+        return FFFResult::NotSupported;
+    }
+
     width_ = width;
     height_ = height;
-    hdr10_ = hdr10;
-    qsvEncoder_ = encoderName.find("_qsv") != std::string::npos;
-    const bool x264Encoder = encoderName == "libx264";
-    const bool x265Encoder = encoderName == "libx265";
-    const bool svtAv1Encoder = encoderName == "libsvtav1";
-    softwareEncoder_ = x264Encoder || x265Encoder || svtAv1Encoder;
-    const bool nvencEncoder = encoderName.find("_nvenc") != std::string::npos;
-    const bool amfEncoder = encoderName.find("_amf") != std::string::npos;
-    softwareYuvConversion_ = softwareEncoder_ ||
-        ((nvencEncoder || qsvEncoder_) && chromaSampling != 0);
-    if (chromaSampling != 0 && encoderName.find("av1") != std::string::npos) {
-        lastError_ = "The selected FFmpeg AV1 encoder has no valid non-4:2:0 encoding path.";
-        return FFFResult::NotSupported;
-    }
-    if (amfEncoder && chromaSampling != 0) {
-        lastError_ = "The FFmpeg AMF encoders only expose NV12/P010 4:2:0 input formats.";
-        return FFFResult::NotSupported;
-    }
-    if (qsvEncoder_ && chromaSampling != 0 && encoderName.find("hevc") == std::string::npos) {
-        lastError_ = "Only the FFmpeg HEVC QSV encoder exposes 4:2:2 and 4:4:4 input formats.";
-        return FFFResult::NotSupported;
-    }
-    // FFmpeg deliberately forces packed RGB NVENC input to BT.601 limited range. Keep the
-    // conversion explicit: NVIDIA/QSV 4:2:0 uses the D3D11 video processor, while 4:2:2 and
-    // 4:4:4 use the exact system-memory layout advertised through sw_pix_fmt.
-    videoProcessorConversion_ = (nvencEncoder || qsvEncoder_) && !softwareYuvConversion_;
-    shaderConversion_ = amfEncoder || softwareYuvConversion_;
+    encoderBackend_ = encoderPlan.strategy->backend;
+    const auto& colorPipeline = *encoderPlan.colorPipeline;
+    rgbToYuvPath_ = colorPipeline.conversionPath;
+    yuvBitPacking_ = colorPipeline.bitPacking;
     tenBit_ = tenBit;
     chromaSampling_ = chromaSampling;
-    AVPixelFormat softwareFormat = AV_PIX_FMT_BGRA;
+    const auto softwareFormat = colorPipeline.softwarePixelFormat;
+    const bool softwareYuv = rgbToYuvPath_ == RgbToYuvPath::SoftwarePlanar;
+    const bool videoProcessorConversion = rgbToYuvPath_ == RgbToYuvPath::D3D11VideoProcessor420;
+    const bool shaderConversion = softwareYuv ||
+        rgbToYuvPath_ == RgbToYuvPath::D3D11ComputeShader420;
+    const bool softwareEncoder = encoderBackend_ == VideoEncoderBackend::Software;
+    const bool nvencEncoder = encoderBackend_ == VideoEncoderBackend::Nvenc;
+    const bool qsvEncoder = encoderBackend_ == VideoEncoderBackend::Qsv;
+    const bool amfEncoder = encoderBackend_ == VideoEncoderBackend::Amf;
+    const bool av1Codec = encoderPlan.strategy->codec == VideoCodecFamily::Av1;
+    const bool hevcCodec = encoderPlan.strategy->codec == VideoCodecFamily::Hevc;
     switch (inputTextureFormat) {
     case 0:
         inputDxgiFormat_ = DXGI_FORMAT_B8G8R8A8_UNORM;
-        softwareFormat = AV_PIX_FMT_BGRA;
         break;
     case 2:
         inputDxgiFormat_ = DXGI_FORMAT_R10G10B10A2_UNORM;
-        softwareFormat = AV_PIX_FMT_X2BGR10;
         break;
     default:
         lastError_ = "The requested D3D11 encoder input format is not supported.";
         return FFFResult::NotSupported;
-    }
-    if (softwareEncoder_) {
-        if (x264Encoder && tenBit) {
-            lastError_ = "The libx264 fallback accepts eight-bit input only.";
-            return FFFResult::NotSupported;
-        }
-        if (chromaSampling == 1)
-            softwareFormat = tenBit ? AV_PIX_FMT_YUV444P10 : AV_PIX_FMT_YUV444P;
-        else if (chromaSampling == 2)
-            softwareFormat = tenBit ? AV_PIX_FMT_YUV422P10 : AV_PIX_FMT_YUV422P;
-        else
-            softwareFormat = tenBit ? AV_PIX_FMT_YUV420P10 : AV_PIX_FMT_YUV420P;
-    } else if (qsvEncoder_) {
-        if (chromaSampling == 2)
-            softwareFormat = tenBit ? AV_PIX_FMT_Y210 : AV_PIX_FMT_YUYV422;
-        else if (chromaSampling == 1)
-            softwareFormat = tenBit ? AV_PIX_FMT_XV30 : AV_PIX_FMT_VUYX;
-        else
-            softwareFormat = tenBit ? AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
-    } else if (nvencEncoder) {
-        softwareFormat = softwareYuvConversion_
-            ? (chromaSampling == 2
-                ? (tenBit ? AV_PIX_FMT_P210 : AV_PIX_FMT_NV16)
-                : (tenBit ? AV_PIX_FMT_YUV444P10MSB : AV_PIX_FMT_YUV444P))
-            : (tenBit ? AV_PIX_FMT_P010 : AV_PIX_FMT_NV12);
-    } else if (amfEncoder) {
-        softwareFormat = tenBit ? AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
     }
     d3d11Device_ = device;
     const AVCodec* codec = avcodec_find_encoder_by_name(encoderName.c_str());
@@ -294,7 +603,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         return FFFResult::FfmpegFailure;
     }
 
-    if (!softwareYuvConversion_) {
+    if (!softwareYuv) {
         hardwareFrames_ = av_hwframe_ctx_alloc(hardwareDevice_);
         if (hardwareFrames_ == nullptr) {
             lastError_ = "Could not allocate the FFmpeg D3D11 frame context.";
@@ -308,13 +617,10 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         frameContext->height = static_cast<int>(height);
         // NV12/P010 render-target arrays are rejected by some D3D11 drivers. A dynamic pool
         // gives the video processor one independently viewable texture per encoder surface.
-        frameContext->initial_pool_size = (softwareEncoder_ || shaderConversion_ || videoProcessorConversion_)
-            ? 0 : std::max(24U, bFrameCount + 10U);
-        if (videoProcessorConversion_ || shaderConversion_) {
-            auto* d3d11Frames = reinterpret_cast<AVD3D11VAFramesContext*>(frameContext->hwctx);
-            d3d11Frames->BindFlags = videoProcessorConversion_
-                ? D3D11_BIND_RENDER_TARGET : D3D11_BIND_UNORDERED_ACCESS;
-        }
+        frameContext->initial_pool_size = 0;
+        auto* d3d11Frames = reinterpret_cast<AVD3D11VAFramesContext*>(frameContext->hwctx);
+        d3d11Frames->BindFlags = videoProcessorConversion ?
+            D3D11_BIND_RENDER_TARGET : D3D11_BIND_UNORDERED_ACCESS;
         result = av_hwframe_ctx_init(hardwareFrames_);
         if (result < 0) {
             SetFfmpegError("av_hwframe_ctx_init", result);
@@ -323,7 +629,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         }
     }
 
-    if (qsvEncoder_) {
+    if (qsvEncoder) {
         result = av_hwdevice_ctx_create_derived(&encoderHardwareDevice_, AV_HWDEVICE_TYPE_QSV,
             hardwareDevice_, 0);
         if (result < 0) {
@@ -331,7 +637,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
             ReleaseResources(false);
             return FFFResult::NotSupported;
         }
-        if (!softwareYuvConversion_) {
+        if (!softwareYuv) {
             result = av_hwframe_ctx_create_derived(&encoderFrames_, AV_PIX_FMT_QSV,
                 encoderHardwareDevice_, hardwareFrames_, AV_HWFRAME_MAP_READ | AV_HWFRAME_MAP_DIRECT);
             if (result < 0) {
@@ -340,26 +646,27 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
                 return FFFResult::NotSupported;
             }
         }
-    } else if (!softwareEncoder_) {
+    } else if (!softwareEncoder) {
         encoderHardwareDevice_ = av_buffer_ref(hardwareDevice_);
         if (hardwareFrames_ != nullptr) encoderFrames_ = av_buffer_ref(hardwareFrames_);
-        if (encoderHardwareDevice_ == nullptr || (!softwareYuvConversion_ && encoderFrames_ == nullptr)) {
+        if (encoderHardwareDevice_ == nullptr || (!softwareYuv && encoderFrames_ == nullptr)) {
             lastError_ = "Could not retain the FFmpeg encoder hardware contexts.";
             ReleaseResources(false);
             return FFFResult::FfmpegFailure;
         }
     }
-    if (videoProcessorConversion_) {
+    if (videoProcessorConversion) {
         const auto processorResult = InitializeVideoProcessor(frameRateNumerator,
-            frameRateDenominator, hdr10, colorRange);
+            frameRateDenominator);
         if (processorResult != FFFResult::Success) {
             ReleaseResources(false);
             return processorResult;
         }
     }
-    if (shaderConversion_) {
+    if (shaderConversion) {
         const auto converterResult = InitializeRgbToYuvConverter(tenBit, hdr10,
-            chromaSampling, softwareYuvConversion_, colorRange);
+            chromaSampling, softwareYuv,
+            colorPipeline.chromaLocation == AVCHROMA_LOC_LEFT);
         if (converterResult != FFFResult::Success) {
             ReleaseResources(false);
             return converterResult;
@@ -376,29 +683,30 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     codecContext_->height = static_cast<int>(height);
     codecContext_->time_base = { static_cast<int>(frameRateDenominator), static_cast<int>(frameRateNumerator) };
     codecContext_->framerate = { static_cast<int>(frameRateNumerator), static_cast<int>(frameRateDenominator) };
-    codecContext_->pix_fmt = softwareYuvConversion_ ? softwareFormat :
-        (qsvEncoder_ ? AV_PIX_FMT_QSV : AV_PIX_FMT_D3D11);
+    codecContext_->pix_fmt = softwareYuv ? softwareFormat :
+        (qsvEncoder ? AV_PIX_FMT_QSV : AV_PIX_FMT_D3D11);
     codecContext_->sw_pix_fmt = softwareFormat;
     codecContext_->bit_rate = bitRate;
     codecContext_->gop_size = static_cast<int>(gopSize);
     codecContext_->max_b_frames = static_cast<int>(bFrameCount);
     codecContext_->rc_max_rate = maximumBitRate;
-    // Treat the automatic/default mode as PC full range. Only an explicit limited
-    // selection requests TV range; this keeps existing recorder configurations full-range.
-    codecContext_->color_range = colorRange == 1 ? AVCOL_RANGE_MPEG : AVCOL_RANGE_JPEG;
-    codecContext_->color_primaries = hdr10 ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709;
-    codecContext_->color_trc = hdr10 ? AVCOL_TRC_SMPTE2084 : AVCOL_TRC_BT709;
-    codecContext_->colorspace = hdr10 ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709;
-    // The custom 4:2:x shader averages each chroma block at its center. The D3D11
-    // video processor is configured for the DXGI left-sited 4:2:0 color spaces.
-    codecContext_->chroma_sample_location = chromaSampling == 1 ? AVCHROMA_LOC_UNSPECIFIED :
-        (videoProcessorConversion_ ? AVCHROMA_LOC_LEFT : AVCHROMA_LOC_CENTER);
+    // Constant-quality modes must not also advertise an ABR target.  SVT-AV1 rejects
+    // that combination outright and x265 otherwise silently switches back to ABR.
+    if (softwareEncoder && rateControl == 1 && qualityMode != 4) {
+        codecContext_->bit_rate = 0;
+        codecContext_->rc_max_rate = 0;
+    }
+    codecContext_->color_range = colorPipeline.colorRange;
+    codecContext_->color_primaries = colorPipeline.colorPrimaries;
+    codecContext_->color_trc = colorPipeline.colorTransfer;
+    codecContext_->colorspace = colorPipeline.colorSpace;
+    codecContext_->chroma_sample_location = colorPipeline.chromaLocation;
     codecContext_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    if (!softwareEncoder_) {
+    if (!softwareEncoder) {
         codecContext_->hw_device_ctx = av_buffer_ref(encoderHardwareDevice_);
         if (encoderFrames_ != nullptr) codecContext_->hw_frames_ctx = av_buffer_ref(encoderFrames_);
     }
-    if (qsvEncoder_ && rateControl == 1) {
+    if (qsvEncoder && rateControl == 1) {
         codecContext_->bit_rate = 0;
         codecContext_->rc_max_rate = 0;
     } else if (rateControl == 2) {
@@ -407,8 +715,17 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
 
     AVDictionary* encoderOptions = nullptr;
     const bool nvenc = nvencEncoder;
-    const bool qsv = qsvEncoder_;
-    const bool amf = encoderName.find("_amf") != std::string::npos;
+    const bool qsv = qsvEncoder;
+    const bool amf = amfEncoder;
+    std::string selectedPreset;
+    std::string presetError;
+    if (!ResolveEncoderPreset(*encoderPlan.strategy, preset, selectedPreset, presetError)) {
+        lastError_ = std::move(presetError);
+        ReleaseResources(false);
+        return FFFResult::InvalidArgument;
+    }
+    if (softwareEncoder) ConfigureSoftwareEncoderRuntime(encoderName, codecContext_,
+        &encoderOptions, lookaheadFrames);
     if ((qsv || amf) && multipass != 0) {
         lastError_ = "The selected backend does not expose the requested multipass mode.";
         av_dict_free(&encoderOptions);
@@ -416,14 +733,14 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         return FFFResult::NotSupported;
     }
     if (nvenc) {
-        av_dict_set(&encoderOptions, "preset", preset.empty() ? "p4" : preset.c_str(), 0);
+        av_dict_set(&encoderOptions, "preset", selectedPreset.c_str(), 0);
         av_dict_set(&encoderOptions, "tune", sceneOptimization.empty() ? "hq" : sceneOptimization.c_str(), 0);
         av_dict_set(&encoderOptions, "surfaces", "8", 0);
-        const auto selectedProfile = profile.empty() && tenBit && encoderName.find("hevc") != std::string::npos
+        const auto selectedProfile = profile.empty() && tenBit && hevcCodec
             ? (chromaSampling != 0 ? "rext" : "main10") : profile.c_str();
         if (selectedProfile != nullptr && *selectedProfile != '\0')
             av_dict_set(&encoderOptions, "profile", selectedProfile, 0);
-        if (tenBit && encoderName.find("av1") != std::string::npos)
+        if (tenBit && av1Codec)
             av_dict_set(&encoderOptions, "highbitdepth", "1", 0);
         const char* rateControlName = qualityMode == 2 ? "vbr" :
             (rateControl == 1 ? "constqp" : (rateControl == 2 ? "cbr" : "vbr"));
@@ -434,16 +751,9 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         av_dict_set(&encoderOptions, "multipass", multipass == 2 ? "fullres" :
             (multipass == 1 ? "qres" : "disabled"), 0);
     } else if (qsv) {
-        std::string selectedPreset = preset;
-        if (preset.size() == 2 && preset[0] == 'p' && preset[1] >= '1' && preset[1] <= '7') {
-            static constexpr const char* Presets[] = {
-                "", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"
-            };
-            selectedPreset = Presets[preset[1] - '0'];
-        }
-        if (!selectedPreset.empty()) av_dict_set(&encoderOptions, "preset", selectedPreset.c_str(), 0);
-        const auto selectedProfile = profile.empty() && chromaSampling != 0 &&
-            encoderName.find("hevc") != std::string::npos ? "rext" : profile.c_str();
+        av_dict_set(&encoderOptions, "preset", selectedPreset.c_str(), 0);
+        const auto selectedProfile = profile.empty() && chromaSampling != 0 && hevcCodec ?
+            "rext" : profile.c_str();
         if (selectedProfile != nullptr && *selectedProfile != '\0')
             av_dict_set(&encoderOptions, "profile", selectedProfile, 0);
         if (!sceneOptimization.empty())
@@ -457,9 +767,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
             av_dict_set_int(&encoderOptions, "look_ahead_depth", lookaheadFrames, 0);
         }
     } else if (amf) {
-        std::string selectedPreset = preset;
-        if (preset.size() == 2 && preset[0] == 'p') selectedPreset = "balanced";
-        if (!selectedPreset.empty()) av_dict_set(&encoderOptions, "preset", selectedPreset.c_str(), 0);
+        av_dict_set(&encoderOptions, "preset", selectedPreset.c_str(), 0);
         if (!profile.empty()) av_dict_set(&encoderOptions, "profile", profile.c_str(), 0);
         if (!sceneOptimization.empty()) av_dict_set(&encoderOptions, "usage", sceneOptimization.c_str(), 0);
         av_dict_set(&encoderOptions, "rc", rateControl == 1 ? "cqp" :
@@ -474,9 +782,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
             av_dict_set_int(&encoderOptions, "pa_lookahead_buffer_depth", lookaheadFrames, 0);
         }
     } else {
-        const auto selectedPreset = preset.empty() && encoderName == "libx264" ? "medium" : preset.c_str();
-        if (selectedPreset != nullptr && *selectedPreset != '\0')
-            av_dict_set(&encoderOptions, "preset", selectedPreset, 0);
+        av_dict_set(&encoderOptions, "preset", selectedPreset.c_str(), 0);
         if (!profile.empty()) av_dict_set(&encoderOptions, "profile", profile.c_str(), 0);
         if (!sceneOptimization.empty()) av_dict_set(&encoderOptions, "tune", sceneOptimization.c_str(), 0);
         if (rateControl == 1 && quality >= 0)
@@ -520,6 +826,31 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         return FFFResult::FfmpegFailure;
     }
 
+    if (colorPipeline.bitstreamMetadataPath == BitstreamColorMetadataPath::H265MetadataBsf) {
+        const auto* filter = av_bsf_get_by_name("hevc_metadata");
+        if (filter == nullptr) {
+            lastError_ = "This FFmpeg build does not provide the HEVC metadata bitstream filter.";
+            ReleaseResources(false);
+            return FFFResult::NotSupported;
+        }
+        result = av_bsf_alloc(filter, &videoBitstreamFilter_);
+        if (result >= 0) {
+            result = avcodec_parameters_from_context(videoBitstreamFilter_->par_in, codecContext_);
+        }
+        if (result >= 0) {
+            videoBitstreamFilter_->time_base_in = codecContext_->time_base;
+            // HEVC chroma_sample_loc_type 0 is AVCHROMA_LOC_LEFT (the enum value minus one).
+            result = av_opt_set_int(videoBitstreamFilter_->priv_data,
+                "chroma_sample_loc_type", 0, 0);
+        }
+        if (result >= 0) result = av_bsf_init(videoBitstreamFilter_);
+        if (result < 0) {
+            SetFfmpegError("initialize hevc_metadata bitstream filter", result);
+            ReleaseResources(false);
+            return FFFResult::FfmpegFailure;
+        }
+    }
+
     result = avformat_alloc_output_context2(&formatContext_, nullptr, "matroska", outputPath.c_str());
     if (result < 0 || formatContext_ == nullptr) {
         SetFfmpegError("avformat_alloc_output_context2", result);
@@ -535,7 +866,9 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     videoStream_->time_base = codecContext_->time_base;
     videoStream_->avg_frame_rate = codecContext_->framerate;
     videoStream_->r_frame_rate = codecContext_->framerate;
-    result = avcodec_parameters_from_context(videoStream_->codecpar, codecContext_);
+    result = videoBitstreamFilter_ != nullptr ?
+        avcodec_parameters_copy(videoStream_->codecpar, videoBitstreamFilter_->par_out) :
+        avcodec_parameters_from_context(videoStream_->codecpar, codecContext_);
     if (result < 0) {
         SetFfmpegError("avcodec_parameters_from_context", result);
         ReleaseResources(false);
@@ -602,8 +935,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
 }
 
 FFFResult VideoMuxer::InitializeRgbToYuvConverter(const bool tenBit, const bool hdr10,
-    const std::uint32_t chromaSampling, const bool softwareYuv,
-    const std::uint32_t colorRange) noexcept {
+    const std::uint32_t chromaSampling, const bool softwareYuv, const bool leftChroma) noexcept {
     auto result = d3d11Device_->QueryInterface(IID_PPV_ARGS(&d3d11Device3_));
     if (FAILED(result)) {
         lastError_ = "Full-range GPU color conversion requires ID3D11Device3.";
@@ -616,7 +948,7 @@ FFFResult VideoMuxer::InitializeRgbToYuvConverter(const bool tenBit, const bool 
         { "PLANAR_420", softwareYuv && chromaSampling == 0 ? "1" : "0" },
         { "TEN_BIT", tenBit ? "1" : "0" },
         { "HDR_BT2020", hdr10 ? "1" : "0" },
-        { "FULL_RANGE", colorRange == 1 ? "0" : "1" },
+        { "CHROMA_LEFT", leftChroma ? "1" : "0" },
         { nullptr, nullptr }
     };
     Microsoft::WRL::ComPtr<ID3DBlob> byteCode;
@@ -649,7 +981,7 @@ FFFResult VideoMuxer::InitializeRgbToYuvConverter(const bool tenBit, const bool 
         for (std::size_t plane = 0; plane < 3; ++plane) {
             description.Width = plane == 0 || chromaSampling == 1 ? width_ : width_ / 2;
             description.Height = plane == 0 || chromaSampling != 0 ? height_ : height_ / 2;
-            result = d3d11Device_->CreateTexture2D(&description, nullptr, &yuv444GpuTextures_[plane]);
+            result = d3d11Device_->CreateTexture2D(&description, nullptr, &planarYuvGpuTextures_[plane]);
             if (FAILED(result)) {
                 lastError_ = "Could not create the GPU software YUV conversion plane: " +
                     std::to_string(static_cast<long>(result));
@@ -658,7 +990,7 @@ FFFResult VideoMuxer::InitializeRgbToYuvConverter(const bool tenBit, const bool 
             description.Usage = D3D11_USAGE_STAGING;
             description.BindFlags = 0;
             description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            result = d3d11Device_->CreateTexture2D(&description, nullptr, &yuv444StagingTextures_[plane]);
+            result = d3d11Device_->CreateTexture2D(&description, nullptr, &planarYuvStagingTextures_[plane]);
             if (FAILED(result)) {
                 lastError_ = "Could not create the staging software YUV conversion plane: " +
                     std::to_string(static_cast<long>(result));
@@ -751,7 +1083,7 @@ FFFResult VideoMuxer::EncodeSoftwareYuv(ID3D11Texture2D* sourceTexture,
     }
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> outputViews[3];
     for (std::size_t plane = 0; plane < 3; ++plane) {
-        result = d3d11Device_->CreateUnorderedAccessView(yuv444GpuTextures_[plane], nullptr,
+        result = d3d11Device_->CreateUnorderedAccessView(planarYuvGpuTextures_[plane], nullptr,
             &outputViews[plane]);
         if (FAILED(result)) {
             lastError_ = "Could not create the planar software YUV output view: " +
@@ -774,7 +1106,7 @@ FFFResult VideoMuxer::EncodeSoftwareYuv(ID3D11Texture2D* sourceTexture,
     immediateContext_->CSSetUnorderedAccessViews(0, 3, nullOutputs, nullptr);
     immediateContext_->CSSetShader(nullptr, nullptr, 0);
     for (std::size_t plane = 0; plane < 3; ++plane) {
-        immediateContext_->CopyResource(yuv444StagingTextures_[plane], yuv444GpuTextures_[plane]);
+        immediateContext_->CopyResource(planarYuvStagingTextures_[plane], planarYuvGpuTextures_[plane]);
     }
 
     AVFrame* frame = av_frame_alloc();
@@ -794,11 +1126,11 @@ FFFResult VideoMuxer::EncodeSoftwareYuv(ID3D11Texture2D* sourceTexture,
     D3D11_MAPPED_SUBRESOURCE mappedPlanes[3]{};
     std::size_t mappedPlaneCount = 0;
     for (std::size_t plane = 0; plane < 3; ++plane) {
-        const auto mappedResult = immediateContext_->Map(yuv444StagingTextures_[plane], 0,
+        const auto mappedResult = immediateContext_->Map(planarYuvStagingTextures_[plane], 0,
             D3D11_MAP_READ, 0, &mappedPlanes[plane]);
         if (FAILED(mappedResult)) {
             for (std::size_t mappedPlane = 0; mappedPlane < mappedPlaneCount; ++mappedPlane)
-                immediateContext_->Unmap(yuv444StagingTextures_[mappedPlane], 0);
+                immediateContext_->Unmap(planarYuvStagingTextures_[mappedPlane], 0);
             lastError_ = "Could not read back the converted software YUV plane: " +
                 std::to_string(static_cast<long>(mappedResult));
             av_frame_free(&frame);
@@ -892,10 +1224,7 @@ FFFResult VideoMuxer::EncodeSoftwareYuv(ID3D11Texture2D* sourceTexture,
             }
         }
     } else {
-        const bool lowAlignedTenBit =
-            codecContext_->pix_fmt == AV_PIX_FMT_YUV420P10 ||
-            codecContext_->pix_fmt == AV_PIX_FMT_YUV422P10 ||
-            codecContext_->pix_fmt == AV_PIX_FMT_YUV444P10;
+        const bool lowAlignedTenBit = yuvBitPacking_ == YuvBitPacking::TenBitLsb;
         const bool planar = lowAlignedTenBit ||
             codecContext_->pix_fmt == AV_PIX_FMT_YUV420P ||
             codecContext_->pix_fmt == AV_PIX_FMT_YUV422P ||
@@ -903,7 +1232,7 @@ FFFResult VideoMuxer::EncodeSoftwareYuv(ID3D11Texture2D* sourceTexture,
             codecContext_->pix_fmt == AV_PIX_FMT_YUV444P10MSB;
         if (!planar) {
             for (std::size_t plane = 0; plane < 3; ++plane)
-                immediateContext_->Unmap(yuv444StagingTextures_[plane], 0);
+                immediateContext_->Unmap(planarYuvStagingTextures_[plane], 0);
             lastError_ = "The selected encoder software pixel format is not packable.";
             av_frame_free(&frame);
             return FFFResult::NotSupported;
@@ -929,7 +1258,7 @@ FFFResult VideoMuxer::EncodeSoftwareYuv(ID3D11Texture2D* sourceTexture,
         }
     }
     for (std::size_t plane = 0; plane < 3; ++plane)
-        immediateContext_->Unmap(yuv444StagingTextures_[plane], 0);
+        immediateContext_->Unmap(planarYuvStagingTextures_[plane], 0);
     frame->pts = presentationTimestamp;
     frame->duration = 1;
     frame->color_range = codecContext_->color_range;
@@ -946,12 +1275,10 @@ FFFResult VideoMuxer::EncodeSoftwareYuv(ID3D11Texture2D* sourceTexture,
     return DrainPackets();
 }
 
-// 为需要 NV12/P010 的编码路径创建 D3D11 Video Processor 和颜色空间配置。输入是托管 shader 生成的 BGRA8 SDR
-// 或 RGB10 PQ，输出是 FFmpeg surface pool 的 NV12/P010；所有接口都来自同一个 D3D11 Device。
+// 为 SDR 4:2:0 编码路径创建 D3D11 Video Processor。HDR 永远不进入此函数：DXGI 没有
+// full-range PQ YCbCr 输出空间，误用 Video Processor 会改变传递函数并造成严重偏色。
 FFFResult VideoMuxer::InitializeVideoProcessor(const std::uint32_t frameRateNumerator,
-    const std::uint32_t frameRateDenominator, const bool hdr10,
-    const std::uint32_t colorRange) noexcept {
-    const bool fullRange = colorRange != 1;
+    const std::uint32_t frameRateDenominator) noexcept {
     auto result = d3d11Device_->QueryInterface(IID_PPV_ARGS(&videoDevice_));
     if (FAILED(result)) {
         lastError_ = "The D3D11 device does not expose ID3D11VideoDevice for color conversion.";
@@ -962,7 +1289,6 @@ FFFResult VideoMuxer::InitializeVideoProcessor(const std::uint32_t frameRateNume
         lastError_ = "The D3D11 context does not expose ID3D11VideoContext for color conversion.";
         return FFFResult::NotSupported;
     }
-    immediateContext_->QueryInterface(IID_PPV_ARGS(&videoContext1_));
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC description{};
     description.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
     description.InputFrameRate = { frameRateNumerator, frameRateDenominator };
@@ -1000,25 +1326,20 @@ FFFResult VideoMuxer::InitializeVideoProcessor(const std::uint32_t frameRateNume
     }
     videoContext_->VideoProcessorSetStreamFrameFormat(videoProcessor_, 0,
         D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-    if (videoContext1_ != nullptr) {
-        videoContext1_->VideoProcessorSetStreamColorSpace1(videoProcessor_, 0,
-            hdr10 ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
-        // DXGI has no full-range YCbCr PQ enum. Use the full-range P2020 matrix here;
-        // SMPTE 2084 is still carried by the AVFrame, codec VUI, and container metadata.
-        videoContext1_->VideoProcessorSetOutputColorSpace1(videoProcessor_,
-            hdr10 ? (fullRange ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020 :
-                DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020) :
-                (fullRange ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709 :
-                    DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709));
-    } else if (hdr10) {
-        lastError_ = "HDR conversion requires ID3D11VideoContext1 color-space controls.";
-        return FFFResult::NotSupported;
+    Microsoft::WRL::ComPtr<ID3D11VideoContext1> videoContext1;
+    if (SUCCEEDED(immediateContext_->QueryInterface(IID_PPV_ARGS(&videoContext1)))) {
+        videoContext1->VideoProcessorSetStreamColorSpace1(videoProcessor_, 0,
+            DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        videoContext1->VideoProcessorSetOutputColorSpace1(videoProcessor_,
+            DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709);
     } else {
+        // The legacy controls still select BT.709 and the full nominal range on
+        // systems that expose ID3D11VideoContext but not ID3D11VideoContext1.
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColor{};
         inputColor.Nominal_Range = 2;
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE outputColor{};
         outputColor.YCbCr_Matrix = 1;
-        outputColor.Nominal_Range = fullRange ? 2 : 1;
+        outputColor.Nominal_Range = 2;
         videoContext_->VideoProcessorSetStreamColorSpace(videoProcessor_, 0, &inputColor);
         videoContext_->VideoProcessorSetOutputColorSpace(videoProcessor_, &outputColor);
     }
@@ -1095,7 +1416,7 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
         return FFFResult::InvalidArgument;
     }
 
-    if (softwareYuvConversion_) {
+    if (rgbToYuvPath_ == RgbToYuvPath::SoftwarePlanar) {
         return EncodeSoftwareYuv(sourceTexture, sourceArrayIndex, presentationTimestamp);
     }
 
@@ -1112,14 +1433,14 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
     }
     auto* destinationTexture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
     const auto destinationIndex = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
-    if (shaderConversion_) {
+    if (rgbToYuvPath_ == RgbToYuvPath::D3D11ComputeShader420) {
         const auto converted = ConvertTextureToEncoderSurfaceWithShader(sourceTexture, sourceArrayIndex,
             destinationTexture, destinationIndex);
         if (converted != FFFResult::Success) {
             av_frame_free(&frame);
             return converted;
         }
-    } else if (videoProcessorConversion_) {
+    } else if (rgbToYuvPath_ == RgbToYuvPath::D3D11VideoProcessor420) {
         const auto converted = ConvertTextureToEncoderSurface(sourceTexture, sourceArrayIndex,
             destinationTexture, destinationIndex);
         if (converted != FFFResult::Success) {
@@ -1127,8 +1448,9 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
             return converted;
         }
     } else {
-        immediateContext_->CopySubresourceRegion(destinationTexture, destinationIndex, 0, 0, 0,
-            sourceTexture, sourceArrayIndex, nullptr);
+        av_frame_free(&frame);
+        lastError_ = "The resolved encoder strategy has no RGB to YUV conversion path.";
+        return FFFResult::InvalidState;
     }
     immediateContext_->Flush();
     frame->pts = presentationTimestamp;
@@ -1141,8 +1463,7 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
 
     AVFrame* encoderFrame = frame;
     AVFrame* mappedFrame = nullptr;
-    AVFrame* softwareFrame = nullptr;
-    if (qsvEncoder_) {
+    if (encoderBackend_ == VideoEncoderBackend::Qsv) {
         mappedFrame = av_frame_alloc();
         if (mappedFrame == nullptr) {
             lastError_ = "Could not allocate the mapped QSV frame.";
@@ -1167,32 +1488,9 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
         mappedFrame->colorspace = codecContext_->colorspace;
         mappedFrame->chroma_location = codecContext_->chroma_sample_location;
         encoderFrame = mappedFrame;
-    } else if (softwareEncoder_) {
-        softwareFrame = av_frame_alloc();
-        if (softwareFrame == nullptr) {
-            lastError_ = "Could not allocate the software encoder frame.";
-            av_frame_free(&frame);
-            return FFFResult::FfmpegFailure;
-        }
-        result = av_hwframe_transfer_data(softwareFrame, frame, 0);
-        if (result < 0) {
-            SetFfmpegError("av_hwframe_transfer_data(D3D11 to software)", result);
-            av_frame_free(&softwareFrame);
-            av_frame_free(&frame);
-            return FFFResult::FfmpegFailure;
-        }
-        softwareFrame->pts = presentationTimestamp;
-        softwareFrame->duration = 1;
-        softwareFrame->color_range = codecContext_->color_range;
-        softwareFrame->color_primaries = codecContext_->color_primaries;
-        softwareFrame->color_trc = codecContext_->color_trc;
-        softwareFrame->colorspace = codecContext_->colorspace;
-        softwareFrame->chroma_location = codecContext_->chroma_sample_location;
-        encoderFrame = softwareFrame;
     }
 
     result = avcodec_send_frame(codecContext_, encoderFrame);
-    av_frame_free(&softwareFrame);
     av_frame_free(&mappedFrame);
     av_frame_free(&frame);
     if (result < 0) {
@@ -1331,9 +1629,44 @@ FFFResult VideoMuxer::DrainPackets() noexcept {
         lastError_ = "Could not allocate an FFmpeg packet.";
         return FFFResult::FfmpegFailure;
     }
+    const auto enqueueVideoPacket = [&](AVPacket* output, const AVRational sourceTimeBase) {
+        if (output->duration <= 0) output->duration = 1;
+        av_packet_rescale_ts(output, sourceTimeBase, videoStream_->time_base);
+        output->stream_index = videoStream_->index;
+        return EnqueuePacket(output);
+    };
+    const auto receiveFilteredPackets = [&]() {
+        while (true) {
+            const auto filteredResult = av_bsf_receive_packet(videoBitstreamFilter_, packet);
+            if (filteredResult == AVERROR(EAGAIN) || filteredResult == AVERROR_EOF)
+                return FFFResult::Success;
+            if (filteredResult < 0) {
+                SetFfmpegError("av_bsf_receive_packet(hevc_metadata)", filteredResult);
+                return FFFResult::FfmpegFailure;
+            }
+            const auto writeResult = enqueueVideoPacket(packet, videoBitstreamFilter_->time_base_out);
+            av_packet_unref(packet);
+            if (writeResult != FFFResult::Success) return writeResult;
+        }
+    };
     while (true) {
         const auto result = avcodec_receive_packet(codecContext_, packet);
-        if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
+        if (result == AVERROR(EAGAIN)) {
+            av_packet_free(&packet);
+            return FFFResult::Success;
+        }
+        if (result == AVERROR_EOF) {
+            if (videoBitstreamFilter_ != nullptr) {
+                const auto flushResult = av_bsf_send_packet(videoBitstreamFilter_, nullptr);
+                if (flushResult < 0 && flushResult != AVERROR_EOF) {
+                    SetFfmpegError("av_bsf_send_packet(hevc_metadata drain)", flushResult);
+                    av_packet_free(&packet);
+                    return FFFResult::FfmpegFailure;
+                }
+                const auto filteredResult = receiveFilteredPackets();
+                av_packet_free(&packet);
+                return filteredResult;
+            }
             av_packet_free(&packet);
             return FFFResult::Success;
         }
@@ -1345,11 +1678,19 @@ FFFResult VideoMuxer::DrainPackets() noexcept {
         // The codec time base is one output frame. Supplying an explicit packet duration keeps
         // Matroska DefaultDuration and player CFR detection deterministic even when an encoder
         // omits packet durations for hardware frames.
-        if (packet->duration <= 0) packet->duration = 1;
-        av_packet_rescale_ts(packet, codecContext_->time_base, videoStream_->time_base);
-        packet->stream_index = videoStream_->index;
-        const auto writeResult = EnqueuePacket(packet);
-        av_packet_unref(packet);
+        FFFResult writeResult;
+        if (videoBitstreamFilter_ != nullptr) {
+            const auto filterResult = av_bsf_send_packet(videoBitstreamFilter_, packet);
+            if (filterResult < 0) {
+                SetFfmpegError("av_bsf_send_packet(hevc_metadata)", filterResult);
+                av_packet_free(&packet);
+                return FFFResult::FfmpegFailure;
+            }
+            writeResult = receiveFilteredPackets();
+        } else {
+            writeResult = enqueueVideoPacket(packet, codecContext_->time_base);
+            av_packet_unref(packet);
+        }
         if (writeResult != FFFResult::Success) {
             av_packet_free(&packet);
             return writeResult;
@@ -1497,6 +1838,7 @@ void VideoMuxer::ReleaseResources(const bool writeTrailer) noexcept {
     if (formatContext_ != nullptr) avformat_free_context(formatContext_);
     formatContext_ = nullptr;
     videoStream_ = nullptr;
+    if (videoBitstreamFilter_ != nullptr) av_bsf_free(&videoBitstreamFilter_);
     if (codecContext_ != nullptr) avcodec_free_context(&codecContext_);
     if (videoProcessor_ != nullptr) {
         videoProcessor_->Release();
@@ -1505,10 +1847,6 @@ void VideoMuxer::ReleaseResources(const bool writeTrailer) noexcept {
     if (videoProcessorEnumerator_ != nullptr) {
         videoProcessorEnumerator_->Release();
         videoProcessorEnumerator_ = nullptr;
-    }
-    if (videoContext1_ != nullptr) {
-        videoContext1_->Release();
-        videoContext1_ = nullptr;
     }
     if (videoContext_ != nullptr) {
         videoContext_->Release();
@@ -1523,13 +1861,13 @@ void VideoMuxer::ReleaseResources(const bool writeTrailer) noexcept {
         rgbToYuvShader_ = nullptr;
     }
     for (std::size_t plane = 0; plane < 3; ++plane) {
-        if (yuv444StagingTextures_[plane] != nullptr) {
-            yuv444StagingTextures_[plane]->Release();
-            yuv444StagingTextures_[plane] = nullptr;
+        if (planarYuvStagingTextures_[plane] != nullptr) {
+            planarYuvStagingTextures_[plane]->Release();
+            planarYuvStagingTextures_[plane] = nullptr;
         }
-        if (yuv444GpuTextures_[plane] != nullptr) {
-            yuv444GpuTextures_[plane]->Release();
-            yuv444GpuTextures_[plane] = nullptr;
+        if (planarYuvGpuTextures_[plane] != nullptr) {
+            planarYuvGpuTextures_[plane]->Release();
+            planarYuvGpuTextures_[plane] = nullptr;
         }
     }
     if (d3d11Device3_ != nullptr) {
@@ -1547,12 +1885,9 @@ void VideoMuxer::ReleaseResources(const bool writeTrailer) noexcept {
     initialized_ = false;
     d3d11Device_ = nullptr;
     inputDxgiFormat_ = 0;
-    qsvEncoder_ = false;
-    softwareEncoder_ = false;
-    videoProcessorConversion_ = false;
-    shaderConversion_ = false;
-    softwareYuvConversion_ = false;
+    encoderBackend_ = VideoEncoderBackend::None;
+    rgbToYuvPath_ = RgbToYuvPath::None;
+    yuvBitPacking_ = YuvBitPacking::EightBit;
     tenBit_ = false;
     chromaSampling_ = 0;
-    hdr10_ = false;
 }

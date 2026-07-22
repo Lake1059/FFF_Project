@@ -111,8 +111,6 @@ Public Enum 编码多遍模式 As UInteger
 End Enum
 
 Public Enum 视频色彩范围 As UInteger
-    自动 = 0
-    有限 = 1
     完整 = 2
 End Enum
 
@@ -190,7 +188,7 @@ Public NotInheritable Class 录制配置
     Public Property 编码配置档 As String = String.Empty
     Public Property 场景优化 As String = String.Empty
     Public Property 多遍模式 As 编码多遍模式 = 编码多遍模式.禁用
-    ' 录制器输出按 PC 完整范围处理；只有显式选择“有限”时才使用 TV 范围。
+    ' 3FR 的所有视频颜色管线固定输出 PC 完整范围。
     Public Property 色彩范围 As 视频色彩范围 = 视频色彩范围.完整
     Public Property 系统音频增益 As Single = 1.0F
     Public Property 麦克风增益 As Single = 1.0F

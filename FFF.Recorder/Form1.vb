@@ -21,6 +21,8 @@ Public Class Form1
     Private ReadOnly 快捷键通知锁 As New Threading.SemaphoreSlim(1, 1)
     Private ReadOnly 选项卡根面板 As New List(Of ModernPanel)
     Private 性能统计计时器 As PrecisionTimer
+    Private 正在关闭 As Boolean
+    Private 关闭清理已完成 As Boolean
 
     <DllImport("user32.dll", SetLastError:=True)>
     Private Shared Function RegisterHotKey(hWnd As IntPtr, id As Integer, fsModifiers As UInteger, vk As UInteger) As Boolean
@@ -72,13 +74,24 @@ Public Class Form1
         初始化性能统计()
     End Sub
 
-    Private Sub Form1_FormClosing(sender As Object, e As FormClosingEventArgs) Handles Me.FormClosing
+    Private Async Sub Form1_FormClosing(sender As Object, e As FormClosingEventArgs) Handles Me.FormClosing
+        If 关闭清理已完成 Then Return
+        e.Cancel = True
+        If 正在关闭 Then Return
+        正在关闭 = True
         Form总控台.设置页面活动(False)
         停止性能统计()
         注销所有快捷键()
-        录制交互.关闭()
-        Form视频参数.保存当前质量值()
-        设置.退出时保存设置()
+        Try
+            ' 关闭窗口也必须等待异步收尾完成，不能让进程退出截断编码器或 Matroska trailer。
+            Await 录制交互.关闭异步()
+            Form视频参数.保存当前质量值()
+            设置.退出时保存设置()
+        Finally
+            正在关闭 = False
+            关闭清理已完成 = True
+            BeginInvoke(Sub() Close())
+        End Try
     End Sub
 
     Private Sub 更新总控台活动状态(Optional sender As Object = Nothing, Optional e As EventArgs = Nothing) _
@@ -260,7 +273,7 @@ Public Class Form1
         registeredHotKeyCombos.Remove(注册编号)
     End Sub
 
-    Private Sub 执行快捷键组合(组合 As (Modifiers As UInteger, Key As Keys))
+    Private Async Sub 执行快捷键组合(组合 As (Modifiers As UInteger, Key As Keys))
         Dim 当前状态 = If(Not 录制交互.是否录制中, 1,
             If(录制交互.是否已暂停, 4, 2))
         Dim 动作编号 = registeredHotKeys.
@@ -273,7 +286,7 @@ Public Class Form1
             Case 1 : 录制交互.开始录制()
             Case 2 : 录制交互.暂停()
             Case 3 : 录制交互.继续录制()
-            Case 4 : 录制交互.停止录制()
+            Case 4 : Await 录制交互.停止录制异步()
             Case 5 : 录制交互.切分文件()
         End Select
         If 快捷键动作已完成(动作编号) Then 显示快捷键状态通知(动作编号)

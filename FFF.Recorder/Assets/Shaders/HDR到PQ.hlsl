@@ -31,6 +31,10 @@ float EncodePq(float nits)
     return pow((c1 + c2 * powered) / (1.0 + c3 * powered), m2);
 }
 
+// SourceTexture is linear scRGB/BT.709 (1.0 == ReferenceWhiteNits). The output
+// is display-referred BT.2020 PQ, ready for the native RGB10-to-YCbCr matrix;
+// the native encoder must preserve this PQ transfer instead of applying gamma.
+
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {

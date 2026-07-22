@@ -112,12 +112,16 @@ Public Class Form总控台
     Friend Sub 更新录制状态()
         Dim 录制中 = 录制交互.是否录制中
         Dim 已暂停 = 录制交互.是否已暂停
-        MB_启动或暂停或继续录制.Enabled = True
-        MB_结束.Enabled = 录制中
-        MB_分割.Enabled = 录制中 AndAlso Not 已暂停
-        MCB_视频捕获模式.Enabled = Not 录制中
-        MCB_视频源.Enabled = Not 录制中
-        If Not 录制中 Then
+        Dim 正在停止 = 录制交互.是否正在停止
+        MB_启动或暂停或继续录制.Enabled = Not 正在停止
+        MB_结束.Enabled = 录制中 AndAlso Not 正在停止
+        MB_分割.Enabled = 录制中 AndAlso Not 已暂停 AndAlso Not 正在停止
+        MCB_视频捕获模式.Enabled = Not 录制中 AndAlso Not 正在停止
+        MCB_视频源.Enabled = Not 录制中 AndAlso Not 正在停止
+        If 正在停止 Then
+            MB_启动或暂停或继续录制.Text = "正在停止"
+            MB_启动或暂停或继续录制.SubText = 格式化时长(录制交互.已录制时长)
+        ElseIf Not 录制中 Then
             MB_启动或暂停或继续录制.Text = "启动录制"
             MB_启动或暂停或继续录制.SubText = String.Empty
         ElseIf 已暂停 Then
@@ -141,8 +145,8 @@ Public Class Form总控台
         录制交互.切换录制状态()
     End Sub
 
-    Private Sub MB_结束_Click(sender As Object, e As EventArgs) Handles MB_结束.Click
-        录制交互.停止录制()
+    Private Async Sub MB_结束_Click(sender As Object, e As EventArgs) Handles MB_结束.Click
+        Await 录制交互.停止录制异步()
     End Sub
 
     Private Sub MB_分割_Click(sender As Object, e As EventArgs) Handles MB_分割.Click

@@ -233,8 +233,8 @@ FFFResult FFF_TestAudioEndpoint(const char* endpointIdUtf8, const std::uint32_t 
     }
 }
 
-// 使用保守的 NV12 输入执行真实 avcodec_open2 初始化探测，而不是只检查编码器名称。会话启动时
-// 还要结合具体适配器设备，重新探测 D3D11、10-bit 和 4:4:4 组合。
+// 使用编码器实际接受的保守 8-bit 4:2:0 输入执行真实 avcodec_open2 初始化探测，而不是只检查
+// 编码器名称。会话启动时还要结合具体适配器设备，重新探测 D3D11、10-bit 和 4:4:4 组合。
 FFFResult FFF_ProbeEncoder(const char* encoderNameUtf8, const std::uint32_t width,
     const std::uint32_t height, const std::uint32_t frameRateNumerator,
     const std::uint32_t frameRateDenominator, char* outputUtf8, const std::uint32_t outputSize,
@@ -254,7 +254,10 @@ FFFResult FFF_ProbeEncoder(const char* encoderNameUtf8, const std::uint32_t widt
         context->height = static_cast<int>(height);
         context->time_base = { static_cast<int>(frameRateDenominator), static_cast<int>(frameRateNumerator) };
         context->framerate = { static_cast<int>(frameRateNumerator), static_cast<int>(frameRateDenominator) };
-        context->pix_fmt = AV_PIX_FMT_NV12;
+        // Software encoders in this build intentionally expose planar YUV input;
+        // NV12 is a hardware-facing format and makes x265/SVT-AV1 look unsupported.
+        context->pix_fmt = (std::string(encoderNameUtf8) == "libx265" ||
+            std::string(encoderNameUtf8) == "libsvtav1") ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_NV12;
         context->bit_rate = 8'000'000;
         context->gop_size = std::max(1, static_cast<int>(frameRateNumerator / frameRateDenominator * 2));
         const auto opened = avcodec_open2(context, codec, nullptr);

@@ -26,6 +26,10 @@ x86/
 [Ww][Ii][Nn]32/
 [Aa][Rr][Mm]/
 [Aa][Rr][Mm]64/
+color-test-output*/
+color-investigation-*/
+cpu-stop-*/
+preset-*/
 bld/
 [Bb]in/
 [Oo]bj/

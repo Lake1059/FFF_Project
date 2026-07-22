@@ -14,6 +14,7 @@
 #include <thread>
 
 struct AVBufferRef;
+struct AVBSFContext;
 struct AVCodecContext;
 struct AVFormatContext;
 struct AVStream;
@@ -25,11 +26,34 @@ struct ID3D11ComputeShader;
 struct ID3D11Texture2D;
 struct ID3D11VideoDevice;
 struct ID3D11VideoContext;
-struct ID3D11VideoContext1;
 struct ID3D11VideoProcessorEnumerator;
 struct ID3D11VideoProcessor;
 class AudioTrackEncoder;
 class AudioMixer;
+
+// These two values are resolved once from the explicit encoder strategy table.  Every
+// allocation and per-frame branch below uses them instead of independently guessing from
+// the encoder name, bit depth, and chroma sampling.
+enum class VideoEncoderBackend : std::uint8_t {
+    None,
+    Software,
+    Nvenc,
+    Qsv,
+    Amf
+};
+
+enum class RgbToYuvPath : std::uint8_t {
+    None,
+    SoftwarePlanar,
+    D3D11VideoProcessor420,
+    D3D11ComputeShader420
+};
+
+enum class YuvBitPacking : std::uint8_t {
+    EightBit,
+    TenBitLsb,
+    TenBitMsb
+};
 
 class SynchronizedErrorText final {
 public:
@@ -117,12 +141,12 @@ public:
     std::int32_t AudioCompensationPpm(std::size_t sourceIndex) const noexcept;
 
 private:
-    // 建立同设备 D3D11 Video Processor，负责 packed RGB 到 NV12/P010 的 GPU 转换。
+    // 建立同设备 D3D11 Video Processor，仅负责 SDR BT.709 packed RGB 到 NV12/P010。
     FFFResult InitializeVideoProcessor(std::uint32_t frameRateNumerator,
-        std::uint32_t frameRateDenominator, bool hdr10, std::uint32_t colorRange) noexcept;
+        std::uint32_t frameRateDenominator) noexcept;
     // 建立明确指定 BT.709/BT.2020 完整范围矩阵的 DirectCompute RGB 到 YUV 转换器。
     FFFResult InitializeRgbToYuvConverter(bool tenBit, bool hdr10,
-        std::uint32_t chromaSampling, bool softwareYuv, std::uint32_t colorRange) noexcept;
+        std::uint32_t chromaSampling, bool softwareYuv, bool leftChroma) noexcept;
     // 把一张调用方 RGB 纹理转换到 FFmpeg D3D11 NV12/P010 surface。
     FFFResult ConvertTextureToEncoderSurface(ID3D11Texture2D* sourceTexture, std::uint32_t sourceArrayIndex,
         ID3D11Texture2D* destinationTexture, std::uint32_t destinationArrayIndex) noexcept;
@@ -154,27 +178,24 @@ private:
     AVBufferRef* hardwareFrames_;
     AVBufferRef* encoderHardwareDevice_;
     AVBufferRef* encoderFrames_;
+    AVBSFContext* videoBitstreamFilter_;
     AVCodecContext* codecContext_;
     AVFormatContext* formatContext_;
     AVStream* videoStream_;
     std::uint32_t width_;
     std::uint32_t height_;
     std::uint32_t inputDxgiFormat_;
-    bool qsvEncoder_;
-    bool softwareEncoder_;
-    bool videoProcessorConversion_;
-    bool shaderConversion_;
-    bool softwareYuvConversion_;
+    VideoEncoderBackend encoderBackend_;
+    RgbToYuvPath rgbToYuvPath_;
+    YuvBitPacking yuvBitPacking_;
     bool tenBit_;
     std::uint32_t chromaSampling_;
-    bool hdr10_;
     ID3D11VideoDevice* videoDevice_;
     ID3D11VideoContext* videoContext_;
-    ID3D11VideoContext1* videoContext1_;
     ID3D11VideoProcessorEnumerator* videoProcessorEnumerator_;
     ID3D11VideoProcessor* videoProcessor_;
-    ID3D11Texture2D* yuv444GpuTextures_[3]{};
-    ID3D11Texture2D* yuv444StagingTextures_[3]{};
+    ID3D11Texture2D* planarYuvGpuTextures_[3]{};
+    ID3D11Texture2D* planarYuvStagingTextures_[3]{};
     bool initialized_;
     bool headerWritten_;
     bool finished_;

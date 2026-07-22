@@ -224,8 +224,8 @@ Public Class Form视频参数
             Case "av1_amf", "hevc_amf", "h264_amf"
                 预设.AddRange({"high_quality", "quality", "balanced", "speed"})
             Case "libx265", "libx264"
-                预设.AddRange({"placebo", "veryslow", "slower", "slow", "medium", "fast",
-                    "faster", "veryfast", "superfast", "ultrafast"})
+                ' 极慢预设只带来很小的压缩收益，却会放大实时编码和停止排空延迟。
+                预设.AddRange({"slow", "medium", "fast", "faster", "veryfast", "superfast", "ultrafast"})
         End Select
         Return 预设
     End Function
