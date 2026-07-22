@@ -164,9 +164,18 @@ Public Class Form1
     End Sub
 
     Protected Overrides Sub WndProc(ByRef m As Message)
-        If m.Msg = WM_HOTKEY AndAlso pendingShortcut = 0 AndAlso Not suppressCapturedHotKey Then
+        If m.Msg = WM_HOTKEY Then
             Dim 组合 As (Modifiers As UInteger, Key As Keys)
-            If registeredHotKeyCombos.TryGetValue(m.WParam.ToInt32(), 组合) Then 执行快捷键组合(组合)
+            If registeredHotKeyCombos.TryGetValue(m.WParam.ToInt32(), 组合) Then
+                If pendingShortcut <> 0 Then
+                    Dim 快捷键编号 = pendingShortcut
+                    pendingShortcut = 0
+                    保存快捷键(快捷键编号, 已注册组合键文本(组合))
+                    更新快捷键按钮文本()
+                ElseIf Not suppressCapturedHotKey Then
+                    执行快捷键组合(组合)
+                End If
+            End If
         End If
         MyBase.WndProc(m)
     End Sub
@@ -190,7 +199,7 @@ Public Class Form1
             If item.Key <> id AndAlso 快捷键相同(item.Value, parsed.Value) AndAlso
                 Not 快捷键允许共用(item.Key, id) Then
                 Dim 冲突动作名称 = 快捷键动作名称(item.Key)
-                MessageBox.Show($"该快捷键已用于【{冲突动作名称}】。只有【开始/结束】和【暂停/继续】可以成对共用快捷键。",
+                MessageBox.Show($"该快捷键已用于【{冲突动作名称}】。只有【开始/停止】和【暂停/继续】可以成对共用快捷键。",
                     "快捷键冲突", MessageBoxButtons.OK, MessageBoxIcon.Warning)
                 Return
             End If
@@ -388,6 +397,16 @@ Public Class Form1
         If (modifiers And Keys.Alt) <> 0 Then parts.Add("Alt")
         If Win键按下 Then parts.Add("Win")
         parts.Add(key.ToString())
+        Return String.Join("+", parts)
+    End Function
+
+    Private Function 已注册组合键文本(组合 As (Modifiers As UInteger, Key As Keys)) As String
+        Dim parts As New List(Of String)
+        If (组合.Modifiers And MOD_CONTROL) <> 0 Then parts.Add("Ctrl")
+        If (组合.Modifiers And MOD_SHIFT) <> 0 Then parts.Add("Shift")
+        If (组合.Modifiers And MOD_ALT) <> 0 Then parts.Add("Alt")
+        If (组合.Modifiers And MOD_WIN) <> 0 Then parts.Add("Win")
+        parts.Add(组合.Key.ToString())
         Return String.Join("+", parts)
     End Function
 

@@ -227,6 +227,7 @@ Public NotInheritable Class 录制配置
         End If
         If 视频码率 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(视频码率), "视频码率必须大于零。")
         If 最大码率 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(最大码率), "最大码率不能小于零。")
+        If 质量控制模式 > 4UI Then Throw New ArgumentOutOfRangeException(NameOf(质量控制模式), "质量控制模式无效。")
         If 质量值 < -1 OrElse 质量值 > 63 Then Throw New ArgumentOutOfRangeException(NameOf(质量值), "质量值必须在 -1 到 63 之间。")
         If 前瞻帧数 > 64 Then Throw New ArgumentOutOfRangeException(NameOf(前瞻帧数), "前瞻帧数不能超过 64。")
         If 系统音频增益 < 0 OrElse 系统音频增益 > 8 Then Throw New ArgumentOutOfRangeException(NameOf(系统音频增益))

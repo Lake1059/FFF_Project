@@ -41,14 +41,15 @@ static const float Kb = 0.0593;
 static const float Kr = 0.2126;
 static const float Kb = 0.0722;
 #endif
-static const float Kg = 1.0 - Kr - Kb;
 
 float3 ConvertRgb(float3 rgb)
 {
-    float y = dot(rgb, float3(Kr, Kg, Kb));
-    float cb = (rgb.b - y) / (2.0 * (1.0 - Kb)) + 0.5;
-    float cr = (rgb.r - y) / (2.0 * (1.0 - Kr)) + 0.5;
-    return saturate(float3(y, cb, cr));
+    // The difference form makes neutral RGB produce exactly zero chroma even
+    // when the shader compiler reassociates floating-point operations.
+    float y = rgb.g + Kr * (rgb.r - rgb.g) + Kb * (rgb.b - rgb.g);
+    float cb = (rgb.b - y) / (2.0 * (1.0 - Kb));
+    float cr = (rgb.r - y) / (2.0 * (1.0 - Kr));
+    return float3(saturate(y), clamp(float2(cb, cr), -0.5, 0.5));
 }
 
 float StoreLuma(float value)
@@ -72,15 +73,15 @@ float2 StoreChroma(float2 value)
 {
 #if FULL_RANGE
 #if TEN_BIT
-    return round(saturate(value) * 1023.0) * (64.0 / 65535.0);
+    return clamp(round(value * 1023.0) + 512.0, 0.0, 1023.0) * (64.0 / 65535.0);
 #else
-    return saturate(value);
+    return clamp(round(value * 255.0) + 128.0, 0.0, 255.0) / 255.0;
 #endif
 #else
 #if TEN_BIT
-    return (round(saturate(value) * 896.0) + 64.0) * (64.0 / 65535.0);
+    return (round(value * 896.0) + 512.0) * (64.0 / 65535.0);
 #else
-    return (round(saturate(value) * 224.0) + 16.0) / 255.0;
+    return (round(value * 224.0) + 128.0) / 255.0;
 #endif
 #endif
 }
@@ -388,6 +389,10 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     codecContext_->color_primaries = hdr10 ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709;
     codecContext_->color_trc = hdr10 ? AVCOL_TRC_SMPTE2084 : AVCOL_TRC_BT709;
     codecContext_->colorspace = hdr10 ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709;
+    // The custom 4:2:x shader averages each chroma block at its center. The D3D11
+    // video processor is configured for the DXGI left-sited 4:2:0 color spaces.
+    codecContext_->chroma_sample_location = chromaSampling == 1 ? AVCHROMA_LOC_UNSPECIFIED :
+        (videoProcessorConversion_ ? AVCHROMA_LOC_LEFT : AVCHROMA_LOC_CENTER);
     codecContext_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     if (!softwareEncoder_) {
         codecContext_->hw_device_ctx = av_buffer_ref(encoderHardwareDevice_);
@@ -420,10 +425,11 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
             av_dict_set(&encoderOptions, "profile", selectedProfile, 0);
         if (tenBit && encoderName.find("av1") != std::string::npos)
             av_dict_set(&encoderOptions, "highbitdepth", "1", 0);
-        const char* rateControlName = rateControl == 1 ? "constqp" : (rateControl == 2 ? "cbr" : "vbr");
+        const char* rateControlName = qualityMode == 2 ? "vbr" :
+            (rateControl == 1 ? "constqp" : (rateControl == 2 ? "cbr" : "vbr"));
         av_dict_set(&encoderOptions, "rc", rateControlName, 0);
-        if (quality >= 0) av_dict_set_int(&encoderOptions,
-            rateControl == 1 && qualityMode == 2 ? "cq" : "qp", quality, 0);
+        if (quality >= 0 && qualityMode != 4)
+            av_dict_set_int(&encoderOptions, qualityMode == 2 ? "cq" : "qp", quality, 0);
         if (lookaheadFrames > 0) av_dict_set_int(&encoderOptions, "rc-lookahead", lookaheadFrames, 0);
         av_dict_set(&encoderOptions, "multipass", multipass == 2 ? "fullres" :
             (multipass == 1 ? "qres" : "disabled"), 0);
@@ -440,6 +446,8 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
             encoderName.find("hevc") != std::string::npos ? "rext" : profile.c_str();
         if (selectedProfile != nullptr && *selectedProfile != '\0')
             av_dict_set(&encoderOptions, "profile", selectedProfile, 0);
+        if (!sceneOptimization.empty())
+            av_dict_set(&encoderOptions, "scenario", sceneOptimization.c_str(), 0);
         if (rateControl == 1 && quality >= 0) {
             codecContext_->flags |= AV_CODEC_FLAG_QSCALE;
             codecContext_->global_quality = quality * FF_QP2LAMBDA;
@@ -474,6 +482,8 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         if (rateControl == 1 && quality >= 0)
             av_dict_set_int(&encoderOptions, qualityMode == 1 ? "crf" : "qp", quality, 0);
     }
+    // Custom options are applied after every built-in quality mode, so explicit keys can
+    // override encoder defaults in QP, CRF, CQ, global_quality, and custom mode alike.
     if (!customVideoParameters.empty()) {
         std::istringstream arguments(customVideoParameters);
         std::string token;
@@ -537,6 +547,7 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     videoStream_->codecpar->color_primaries = codecContext_->color_primaries;
     videoStream_->codecpar->color_trc = codecContext_->color_trc;
     videoStream_->codecpar->color_space = codecContext_->colorspace;
+    videoStream_->codecpar->chroma_location = codecContext_->chroma_sample_location;
     videoStream_->codecpar->codec_tag = 0;
     if (mixAudioSources && audioSourceGains.size() < 2) {
         lastError_ = "Mixed audio requires at least two sources.";
@@ -925,6 +936,7 @@ FFFResult VideoMuxer::EncodeSoftwareYuv(ID3D11Texture2D* sourceTexture,
     frame->color_primaries = codecContext_->color_primaries;
     frame->color_trc = codecContext_->color_trc;
     frame->colorspace = codecContext_->colorspace;
+    frame->chroma_location = codecContext_->chroma_sample_location;
     result = avcodec_send_frame(codecContext_, frame);
     av_frame_free(&frame);
     if (result < 0) {
@@ -1125,6 +1137,7 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
     frame->color_primaries = codecContext_->color_primaries;
     frame->color_trc = codecContext_->color_trc;
     frame->colorspace = codecContext_->colorspace;
+    frame->chroma_location = codecContext_->chroma_sample_location;
 
     AVFrame* encoderFrame = frame;
     AVFrame* mappedFrame = nullptr;
@@ -1152,6 +1165,7 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
         mappedFrame->color_primaries = codecContext_->color_primaries;
         mappedFrame->color_trc = codecContext_->color_trc;
         mappedFrame->colorspace = codecContext_->colorspace;
+        mappedFrame->chroma_location = codecContext_->chroma_sample_location;
         encoderFrame = mappedFrame;
     } else if (softwareEncoder_) {
         softwareFrame = av_frame_alloc();
@@ -1173,6 +1187,7 @@ FFFResult VideoMuxer::Encode(ID3D11Texture2D* sourceTexture, const std::uint32_t
         softwareFrame->color_primaries = codecContext_->color_primaries;
         softwareFrame->color_trc = codecContext_->color_trc;
         softwareFrame->colorspace = codecContext_->colorspace;
+        softwareFrame->chroma_location = codecContext_->chroma_sample_location;
         encoderFrame = softwareFrame;
     }
 

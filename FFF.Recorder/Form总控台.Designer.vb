@@ -92,10 +92,10 @@ Partial Class Form总控台
         ModernPanel5.Controls.Add(MCK_防误触模式)
         ModernPanel5.Controls.Add(Panel1)
         ModernPanel5.Dock = DockStyle.Fill
-        ModernPanel5.Location = New Point(477, 20)
+        ModernPanel5.Location = New Point(492, 20)
         ModernPanel5.Name = "ModernPanel5"
         ModernPanel5.Padding = New Padding(10)
-        ModernPanel5.Size = New Size(334, 524)
+        ModernPanel5.Size = New Size(319, 524)
         ModernPanel5.TabIndex = 34
         ' 
         ' MTB_执行日志
@@ -117,7 +117,7 @@ Partial Class Form总控台
         MTB_执行日志.Padding = New Padding(10, 8, 10, 8)
         MTB_执行日志.ReadOnly = True
         MTB_执行日志.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_执行日志.Size = New Size(304, 390)
+        MTB_执行日志.Size = New Size(289, 390)
         MTB_执行日志.TabIndex = 27
         MTB_执行日志.WaterText = "执行日志"
         MTB_执行日志.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
@@ -137,7 +137,7 @@ Partial Class Form总控台
         MCK_防误触模式.Location = New Point(15, 405)
         MCK_防误触模式.Name = "MCK_防误触模式"
         MCK_防误触模式.Padding = New Padding(0, 10, 0, 10)
-        MCK_防误触模式.Size = New Size(304, 44)
+        MCK_防误触模式.Size = New Size(289, 44)
         MCK_防误触模式.TabIndex = 26
         MCK_防误触模式.Text = "防误触模式 ：按住以触发按钮"
         ' 
@@ -152,7 +152,7 @@ Partial Class Form总控台
         Panel1.Dock = DockStyle.Bottom
         Panel1.Location = New Point(15, 449)
         Panel1.Name = "Panel1"
-        Panel1.Size = New Size(304, 60)
+        Panel1.Size = New Size(289, 60)
         Panel1.TabIndex = 0
         ' 
         ' MB_启动或暂停或继续录制
@@ -168,7 +168,7 @@ Partial Class Form总控台
         MB_启动或暂停或继续录制.Margin = New Padding(2)
         MB_启动或暂停或继续录制.Name = "MB_启动或暂停或继续录制"
         MB_启动或暂停或继续录制.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_启动或暂停或继续录制.Size = New Size(124, 60)
+        MB_启动或暂停或继续录制.Size = New Size(119, 60)
         MB_启动或暂停或继续录制.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_启动或暂停或继续录制.TabIndex = 12
         MB_启动或暂停或继续录制.Text = "启动录制"
@@ -176,7 +176,7 @@ Partial Class Form总控台
         ' JustEmptyControl13
         ' 
         JustEmptyControl13.Dock = DockStyle.Right
-        JustEmptyControl13.Location = New Point(124, 0)
+        JustEmptyControl13.Location = New Point(119, 0)
         JustEmptyControl13.Name = "JustEmptyControl13"
         JustEmptyControl13.Size = New Size(10, 60)
         JustEmptyControl13.TabIndex = 33
@@ -191,11 +191,11 @@ Partial Class Form总控台
         MB_分割.Enabled = False
         MB_分割.Font = New Font("Microsoft YaHei UI", 11F)
         MB_分割.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_分割.Location = New Point(134, 0)
+        MB_分割.Location = New Point(129, 0)
         MB_分割.Margin = New Padding(2)
         MB_分割.Name = "MB_分割"
         MB_分割.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_分割.Size = New Size(80, 60)
+        MB_分割.Size = New Size(70, 60)
         MB_分割.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_分割.TabIndex = 34
         MB_分割.Text = "分割"
@@ -203,7 +203,7 @@ Partial Class Form总控台
         ' JustEmptyControl1
         ' 
         JustEmptyControl1.Dock = DockStyle.Right
-        JustEmptyControl1.Location = New Point(214, 0)
+        JustEmptyControl1.Location = New Point(199, 0)
         JustEmptyControl1.Name = "JustEmptyControl1"
         JustEmptyControl1.Size = New Size(10, 60)
         JustEmptyControl1.TabIndex = 31
@@ -218,7 +218,7 @@ Partial Class Form总控台
         MB_结束.Enabled = False
         MB_结束.Font = New Font("Microsoft YaHei UI", 11F)
         MB_结束.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(255), CByte(180), CByte(180))
-        MB_结束.Location = New Point(224, 0)
+        MB_结束.Location = New Point(209, 0)
         MB_结束.Margin = New Padding(2)
         MB_结束.Name = "MB_结束"
         MB_结束.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(255), CByte(180), CByte(180))
@@ -231,7 +231,7 @@ Partial Class Form总控台
         ' JustEmptyControl11
         ' 
         JustEmptyControl11.Dock = DockStyle.Left
-        JustEmptyControl11.Location = New Point(462, 20)
+        JustEmptyControl11.Location = New Point(477, 20)
         JustEmptyControl11.Name = "JustEmptyControl11"
         JustEmptyControl11.Size = New Size(15, 524)
         JustEmptyControl11.TabIndex = 33
@@ -244,7 +244,7 @@ Partial Class Form总控台
         Panel2.Dock = DockStyle.Left
         Panel2.Location = New Point(20, 20)
         Panel2.Name = "Panel2"
-        Panel2.Size = New Size(442, 524)
+        Panel2.Size = New Size(457, 524)
         Panel2.TabIndex = 1
         ' 
         ' ModernPanel4
@@ -256,7 +256,7 @@ Partial Class Form总控台
         ModernPanel4.Location = New Point(0, 0)
         ModernPanel4.Name = "ModernPanel4"
         ModernPanel4.Padding = New Padding(10)
-        ModernPanel4.Size = New Size(442, 248)
+        ModernPanel4.Size = New Size(457, 248)
         ModernPanel4.TabIndex = 19
         ' 
         ' JustEmptyControl2
@@ -265,7 +265,7 @@ Partial Class Form总控台
         JustEmptyControl2.Dock = DockStyle.Bottom
         JustEmptyControl2.Location = New Point(0, 248)
         JustEmptyControl2.Name = "JustEmptyControl2"
-        JustEmptyControl2.Size = New Size(442, 15)
+        JustEmptyControl2.Size = New Size(457, 15)
         JustEmptyControl2.TabIndex = 18
         ' 
         ' ModernPanel2
@@ -285,7 +285,7 @@ Partial Class Form总控台
         ModernPanel2.Location = New Point(0, 263)
         ModernPanel2.Name = "ModernPanel2"
         ModernPanel2.Padding = New Padding(10)
-        ModernPanel2.Size = New Size(442, 261)
+        ModernPanel2.Size = New Size(457, 261)
         ModernPanel2.TabIndex = 13
         ' 
         ' Panel3
@@ -311,7 +311,7 @@ Partial Class Form总控台
         Panel3.Dock = DockStyle.Top
         Panel3.Location = New Point(15, 146)
         Panel3.Name = "Panel3"
-        Panel3.Size = New Size(412, 100)
+        Panel3.Size = New Size(427, 100)
         Panel3.TabIndex = 18
         ' 
         ' HtmlColorLabel1
@@ -327,7 +327,7 @@ Partial Class Form总控台
         HtmlColorLabel1.Margin = New Padding(2)
         HtmlColorLabel1.Name = "HtmlColorLabel1"
         HtmlColorLabel1.Padding = New Padding(10, 0, 0, 0)
-        HtmlColorLabel1.Size = New Size(186, 100)
+        HtmlColorLabel1.Size = New Size(201, 100)
         HtmlColorLabel1.TabIndex = 34
         HtmlColorLabel1.Text = "总帧数<br>已丢帧<br>重复帧<br>视频体积<br>音频体积"
         HtmlColorLabel1.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
@@ -626,7 +626,7 @@ Partial Class Form总控台
         JustEmptyControl8.Dock = DockStyle.Top
         JustEmptyControl8.Location = New Point(15, 131)
         JustEmptyControl8.Name = "JustEmptyControl8"
-        JustEmptyControl8.Size = New Size(412, 15)
+        JustEmptyControl8.Size = New Size(427, 15)
         JustEmptyControl8.TabIndex = 15
         ' 
         ' MCB_音频源
@@ -650,7 +650,7 @@ Partial Class Form总控台
         MCB_音频源.MaxDropDownItems = 12
         MCB_音频源.Name = "MCB_音频源"
         MCB_音频源.Padding = New Padding(10, 0, 10, 0)
-        MCB_音频源.Size = New Size(412, 32)
+        MCB_音频源.Size = New Size(427, 32)
         MCB_音频源.TabIndex = 16
         MCB_音频源.ToolTipGap = -1
         MCB_音频源.ToolTipMaxWidth = 350
@@ -664,7 +664,7 @@ Partial Class Form总控台
         JustEmptyControl12.Dock = DockStyle.Top
         JustEmptyControl12.Location = New Point(15, 89)
         JustEmptyControl12.Name = "JustEmptyControl12"
-        JustEmptyControl12.Size = New Size(412, 10)
+        JustEmptyControl12.Size = New Size(427, 10)
         JustEmptyControl12.TabIndex = 19
         ' 
         ' MCB_视频源
@@ -688,7 +688,7 @@ Partial Class Form总控台
         MCB_视频源.MaxDropDownItems = 12
         MCB_视频源.Name = "MCB_视频源"
         MCB_视频源.Padding = New Padding(10, 0, 10, 0)
-        MCB_视频源.Size = New Size(412, 32)
+        MCB_视频源.Size = New Size(427, 32)
         MCB_视频源.TabIndex = 20
         MCB_视频源.ToolTipGap = -1
         MCB_视频源.ToolTipMaxWidth = 350
@@ -702,7 +702,7 @@ Partial Class Form总控台
         JustEmptyControl14.Dock = DockStyle.Top
         JustEmptyControl14.Location = New Point(15, 47)
         JustEmptyControl14.Name = "JustEmptyControl14"
-        JustEmptyControl14.Size = New Size(412, 10)
+        JustEmptyControl14.Size = New Size(427, 10)
         JustEmptyControl14.TabIndex = 21
         ' 
         ' MCB_视频捕获模式
@@ -729,7 +729,7 @@ Partial Class Form总控台
         MCB_视频捕获模式.MaxDropDownItems = 12
         MCB_视频捕获模式.Name = "MCB_视频捕获模式"
         MCB_视频捕获模式.Padding = New Padding(10, 0, 10, 0)
-        MCB_视频捕获模式.Size = New Size(412, 32)
+        MCB_视频捕获模式.Size = New Size(427, 32)
         MCB_视频捕获模式.TabIndex = 22
         MCB_视频捕获模式.ToolTipGap = -1
         MCB_视频捕获模式.ToolTipMaxWidth = 350

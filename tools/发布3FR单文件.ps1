@@ -16,6 +16,20 @@ if (-not (Test-Path -LiteralPath $MSBuild)) { throw "Visual Studio x64 MSBuild w
 $PublishRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot "publish"))
 $IsDefaultOutput = [String]::Equals($OutputDirectory, [IO.Path]::GetFullPath((Join-Path $PublishRoot "win-x64")), [StringComparison]::OrdinalIgnoreCase)
 if ($IsDefaultOutput -and (Test-Path -LiteralPath $OutputDirectory)) {
+    $UserDataDirectory = Join-Path $env:LOCALAPPDATA "FFF.Recorder"
+    New-Item -ItemType Directory -Path $UserDataDirectory -Force | Out-Null
+    $LegacyFiles = @{
+        "FFF.Recorder.Settings.json" = "Settings.json"
+        "SP_Icon" = "SP_Icon"
+        "SP_BackImage" = "SP_BackImage"
+    }
+    foreach ($LegacyFile in $LegacyFiles.GetEnumerator()) {
+        $Source = Join-Path $OutputDirectory $LegacyFile.Key
+        $Destination = Join-Path $UserDataDirectory $LegacyFile.Value
+        if ((Test-Path -LiteralPath $Source -PathType Leaf) -and -not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
+            Copy-Item -LiteralPath $Source -Destination $Destination
+        }
+    }
     Remove-Item -LiteralPath $OutputDirectory -Recurse -Force
 }
 

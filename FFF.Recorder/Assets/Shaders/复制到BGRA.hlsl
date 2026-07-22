@@ -56,6 +56,10 @@ float4 PSMain(VertexOutput input) : SV_Target
     float2 uvDy = ddy(input.UV);
     float sourcePixelsPerOutputPixel = max(length(uvDx * sourceSize), length(uvDy * sourceSize));
 
+    // The intermediate and output surfaces are normally identical in size. Use
+    // an exact load there; retain filtered sampling for a differently sized preview.
+    if (abs(sourcePixelsPerOutputPixel - 1.0) <= 0.0001)
+        return SourceTexture.Load(int3(uint2(input.UV * sourceSize), 0));
     if (sourcePixelsPerOutputPixel <= 1.0)
         return SampleCubic(input.UV, sourceSize);
 

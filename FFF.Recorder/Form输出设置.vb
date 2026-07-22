@@ -30,9 +30,17 @@ Public Class Form输出设置
             Case 2
                 设置.实例对象.输出目录 = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
             Case 3
-                Using 选择目录 As New FolderBrowserDialog()
+                Using 选择目录 As New FolderBrowserDialog With {.SelectedPath = 设置.实例对象.输出目录}
                     If 选择目录.ShowDialog(Form1.当前主窗体) = DialogResult.OK Then 设置.实例对象.输出目录 = 选择目录.SelectedPath
                 End Using
+                ' 浏览项是命令而不是持久选项；恢复为可再次触发的自定义路径显示状态。
+                正在初始化 = True
+                Try
+                    MCB_输出位置.SelectedIndex = -1
+                    MCB_输出位置.Text = 设置.实例对象.输出目录
+                Finally
+                    正在初始化 = False
+                End Try
         End Select
     End Sub
 

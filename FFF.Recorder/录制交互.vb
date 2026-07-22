@@ -104,12 +104,13 @@ Public Module 录制交互
             Dim H264不支持十位 = 编码器名称.Contains("264", StringComparison.OrdinalIgnoreCase)
             Dim 音频端点 = If(音频 Is Nothing OrElse 音频.默认设备, 获取默认音频端点(), 音频.标识)
             Dim 录制帧率 = Form视频参数.取得录制帧率()
+            Dim 质量控制模式 = CUInt(Math.Clamp(设置.实例对象.质量控制模式, 0, 4))
             Dim 配置 As New 录制配置 With {
                 .输出文件 = 输出文件, .编码器名称 = 编码器名称,
                 .帧率分子 = 录制帧率.分子, .帧率分母 = 录制帧率.分母,
                 .可变帧率 = 设置.实例对象.帧率模式 = 1,
-                .速率控制 = If(设置.实例对象.质量控制模式 = 4, 编码速率控制.可变码率, 编码速率控制.恒定质量),
-                .质量控制模式 = CUInt(设置.实例对象.质量控制模式),
+                .速率控制 = 取得速率控制(质量控制模式),
+                .质量控制模式 = 质量控制模式,
                 .质量值 = 设置.实例对象.质量值,
                 .自定义视频参数 = 设置.实例对象.自定义视频参数,
                 .使用十位色 = 设置.实例对象.灰阶位深 > 0 AndAlso Not H264不支持十位,
@@ -119,7 +120,7 @@ Public Module 录制交互
                 .色彩范围 = 视频色彩范围.完整,
                 .编码预设 = Form视频参数.取得编码预设(),
                 .编码配置档 = If(Form视频参数.MCB_配置文件.SelectedIndex >= 0, Form视频参数.MCB_配置文件.Text, String.Empty),
-                .场景优化 = If(Form视频参数.MCB_场景优化.SelectedIndex > 0, Form视频参数.MCB_场景优化.Text, String.Empty),
+                .场景优化 = Form视频参数.取得场景优化值(),
                 .系统音频端点标识 = 音频端点,
                 .跟随默认系统音频设备 = 音频 Is Nothing OrElse 音频.默认设备,
                 .音频编码器名称 = 音频名称, .音频采样率 = CUInt(设置.实例对象.音频采样率),
@@ -161,12 +162,7 @@ Public Module 录制交互
             AddHandler 当前控制器.录制失败, AddressOf 录制失败
             AddHandler 当前控制器.收到诊断事件, AddressOf 诊断事件
             AddHandler 当前控制器.收到处理后帧, AddressOf 处理录制预览帧
-            写日志($"录制源：{源.显示文本}")
-            写日志($"捕获模式：{If(源.捕获模式 = 0, "显示器", If(源.捕获模式 = 2, "窗口客户区", "完整窗口"))}")
-            写日志($"视频参数：{输出尺寸.宽度} × {输出尺寸.高度}，{格式化帧率(录制帧率.分子, 录制帧率.分母)} 帧/秒，{编码器名称}")
-            写日志($"音频来源：{If(音频 Is Nothing, "未选择", 音频.名称)}")
-            写日志($"音频参数：{设置.实例对象.音频采样率} 赫兹，{声道数} 声道，{取得音频编码器显示名称(设置.实例对象.音频编码器索引)}")
-            写日志($"输出文件：{输出文件}")
+            写入录制配置日志(源, 音频, 配置, 录制帧率, 输出文件)
             当前控制器.开始()
             录制开始计数 = Stopwatch.GetTimestamp()
             暂停开始计数 = 0
@@ -302,6 +298,39 @@ Public Module 录制交互
         Return 帧率.ToString("F2")
     End Function
 
+    Private Function 取得速率控制(质量控制模式 As UInteger) As 编码速率控制
+        ' CQ 和自定义参数都需要允许编码器使用可变码率；其余质量模式由编码器的恒定质量选项控制。
+        Return If(质量控制模式 = 2UI OrElse 质量控制模式 = 4UI,
+            编码速率控制.可变码率, 编码速率控制.恒定质量)
+    End Function
+
+    Private Sub 写入录制配置日志(源 As 视频源条目, 音频 As 音频源条目,
+                             配置 As 录制配置, 录制帧率 As (分子 As UInteger, 分母 As UInteger),
+                             输出文件 As String)
+        Dim 捕获模式 = If(源.捕获模式 = 0, "显示器", If(源.捕获模式 = 2, "窗口客户区", "完整窗口"))
+        Dim 质量模式名称 = {"通用 QP 恒定量化", "CRF - CPU", "CQ - NVIDIA", "global_quality - Intel", "自定义参数"}
+        Dim 质量模式文本 = If(配置.质量控制模式 < CUInt(质量模式名称.Length),
+            质量模式名称(CInt(配置.质量控制模式)), "未知")
+        写日志($"录制源：{源.显示文本}", False)
+        写日志($"捕获选项：模式={捕获模式}，捕获鼠标={If(设置.实例对象.捕获鼠标, "是", "否")}", False)
+        写日志($"视频选项：分辨率={If(String.IsNullOrWhiteSpace(Form视频参数.MCB_视频分辨率.Text), "原生分辨率", Form视频参数.MCB_视频分辨率.Text)}（实际 {配置.宽度} × {配置.高度}），帧率={格式化帧率(录制帧率.分子, 录制帧率.分母)} 帧/秒，帧率模式={If(配置.可变帧率, "VFR", "CFR")}", False)
+        写日志($"编码选项：编码器={配置.编码器名称}，预设={If(String.IsNullOrWhiteSpace(配置.编码预设), "默认", 配置.编码预设)}，配置档={If(String.IsNullOrWhiteSpace(配置.编码配置档), "默认", 配置.编码配置档)}，场景优化={If(String.IsNullOrWhiteSpace(配置.场景优化), "默认", 配置.场景优化)}", False)
+        写日志($"色彩选项：采样={取得采样描述(配置.视频采样)}，位深选项={Form视频参数.MCB_灰阶位深.Text}（实际 {If(配置.使用十位色, "10bit", "8bit")}），色彩模式={Form视频参数.MCB_色彩模式.Text}，HDR={If(配置.使用HDR10, "是", "否")}", False)
+        写日志($"色彩处理：SDR亮度={设置.实例对象.SDR亮度} nit，HDR峰值={设置.实例对象.HDR峰值} nit，色彩范围={配置.色彩范围}", False)
+        写日志($"质量控制：模式={质量模式文本}（{配置.质量控制模式}），质量值={配置.质量值}，速率控制={配置.速率控制}", False)
+        写日志($"自定义视频参数：{If(String.IsNullOrWhiteSpace(配置.自定义视频参数), "无", 配置.自定义视频参数)}", False)
+        写日志($"音频选项：来源={If(音频 Is Nothing, "未选择", 音频.名称)}，跟随默认设备={If(配置.跟随默认系统音频设备, "是", "否")}，编码器={取得音频编码器显示名称(设置.实例对象.音频编码器索引)}，采样率={配置.音频采样率} 赫兹，声道={配置.音频声道数}，码率={If(配置.音频码率 > 0, $"{配置.音频码率 \ 1000} kbps", "无损/由编码器决定")}", False)
+        写日志($"输出文件：{输出文件}", False)
+    End Sub
+
+    Private Function 取得采样描述(采样 As 视频采样格式) As String
+        Select Case 采样
+            Case 视频采样格式.YUV四二二 : Return "4:2:2"
+            Case 视频采样格式.YUV四四四 : Return "4:4:4"
+            Case Else : Return "4:2:0"
+        End Select
+    End Function
+
     Private Function 取得音频编码器显示名称(索引 As Integer) As String
         Select Case 索引
             Case 1 : Return "NMR AAC"
@@ -313,9 +342,13 @@ Public Module 录制交互
         End Select
     End Function
 
-    Private Sub 写日志(文本 As String)
+    Private Sub 写日志(文本 As String, Optional 是否带时间戳 As Boolean = True)
         If 当前主窗体 Is Nothing OrElse 当前主窗体.IsDisposed Then Return
-        Form总控台.MTB_执行日志.AppendText($"[{DateTime.Now:HH:mm:ss}] {文本}{vbCrLf}")
+        If 是否带时间戳 Then
+            Form总控台.MTB_执行日志.AppendText($"[{DateTime.Now:HH:mm:ss}] {文本}{vbCrLf}")
+        Else
+            Form总控台.MTB_执行日志.AppendText($"{文本}{vbCrLf}")
+        End If
     End Sub
 
     Private Sub 录制失败(sender As Object, e As 录制失败事件参数)

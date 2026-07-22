@@ -183,7 +183,10 @@ FFFResult RecorderSession::Start() noexcept {
         ",\"bitRate\":" + std::to_string(bitRate_) +
         ",\"maximumBitRate\":" + std::to_string(maximumBitRate_) +
         ",\"rateControl\":" + std::to_string(rateControl_) +
+        ",\"qualityMode\":" + std::to_string(qualityMode_) +
         ",\"quality\":" + std::to_string(quality_) +
+        ",\"customVideoParameters\":\"" + EscapeDiagnosticJson(customVideoParameters_) +
+        "\",\"inputTextureFormat\":" + std::to_string(inputTextureFormat_) +
         ",\"gopSize\":" + std::to_string(gopSize_) +
         ",\"bFrames\":" + std::to_string(bFrameCount_) +
         ",\"lookahead\":" + std::to_string(lookaheadFrames_) +
@@ -193,6 +196,14 @@ FFFResult RecorderSession::Start() noexcept {
         "\",\"audioEncoder\":\"" + EscapeDiagnosticJson(audioEncoderName_) +
         "\",\"audioSampleRate\":" + std::to_string(audioSampleRate_) +
         ",\"audioChannels\":" + std::to_string(audioChannelCount_) +
+        ",\"audioBitRate\":" + std::to_string(audioBitRate_) +
+        ",\"audioMode\":" + std::to_string(audioMode_) +
+        ",\"systemAudioEnabled\":" + (!systemAudioEndpointId_.empty() ? "true" : "false") +
+        ",\"microphoneEnabled\":" + (!microphoneEndpointId_.empty() ? "true" : "false") +
+        ",\"followDefaultSystemAudioDevice\":" + (followDefaultSystemAudioDevice_ ? "true" : "false") +
+        ",\"keepSeparateAudioTracks\":" + (keepSeparateAudioTracks_ ? "true" : "false") +
+        ",\"systemAudioGain\":" + std::to_string(systemAudioGain_) +
+        ",\"microphoneGain\":" + std::to_string(microphoneGain_) +
         ",\"multipass\":" + std::to_string(multipass_) +
         ",\"chromaSampling\":" + std::to_string(chromaSampling_) +
         ",\"colorRange\":" + std::to_string(colorRange_) +

@@ -353,8 +353,6 @@ Partial Class Form视频参数
         MCB_灰阶位深.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCB_灰阶位深.Items.Add("8bit")
         MCB_灰阶位深.Items.Add("10bit")
-        MCB_灰阶位深.Items.Add("12bit")
-        MCB_灰阶位深.Items.Add("16bit")
         MCB_灰阶位深.Location = New Point(450, 0)
         MCB_灰阶位深.Margin = New Padding(2, 2, 2, 2)
         MCB_灰阶位深.Name = "MCB_灰阶位深"

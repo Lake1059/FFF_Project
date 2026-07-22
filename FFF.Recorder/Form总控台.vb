@@ -132,7 +132,7 @@ Public Class Form总控台
     End Sub
 
     Private Sub Form总控台_SizeChanged(sender As Object, e As EventArgs) Handles Me.SizeChanged
-        Panel2.Width = CInt(Me.ClientSize.Width * 0.5)
+        Panel2.Width = (ModernPanel1.Width - ModernPanel1.Padding.Left - ModernPanel1.Padding.Right - JustEmptyControl11.Width) * 0.56
     End Sub
 
     Private Sub MB_启动或暂停或继续录制_Click(sender As Object, e As EventArgs) Handles MB_启动或暂停或继续录制.Click
@@ -248,7 +248,7 @@ Public Class Form总控台
             Dim 端点 = 录制引擎.枚举音频端点().Where(Function(x) String.Equals(x.类型, "render", StringComparison.OrdinalIgnoreCase)).ToList()
             Dim 默认标识 = 获取默认音频端点()
             Dim 默认端点 = 端点.FirstOrDefault(Function(x) String.Equals(x.标识, 默认标识, StringComparison.Ordinal))
-            If 默认端点 IsNot Nothing Then 默认名称 = $"默认设备（{默认端点.名称}）"
+            If 默认端点 IsNot Nothing Then 默认名称 = $"默认设备 {默认端点.名称}"
             音频源列表.Add(New 音频源条目 With {.默认设备 = True, .名称 = 默认名称})
             For Each 项目 In 端点
                 音频源列表.Add(New 音频源条目 With {.标识 = 项目.标识, .名称 = 项目.名称})

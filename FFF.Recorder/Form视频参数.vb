@@ -120,7 +120,7 @@ Public Class Form视频参数
     End Sub
 
     Private Sub MCB_场景优化_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_场景优化.SelectedIndexChanged
-        If Not 正在初始化 Then 设置.实例对象.视频场景优化 = If(MCB_场景优化.SelectedIndex <= 0, String.Empty, MCB_场景优化.Text)
+        If Not 正在初始化 Then 设置.实例对象.视频场景优化 = 取得场景优化值()
     End Sub
 
     Private Sub MCB_视频分辨率_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_视频分辨率.SelectedIndexChanged
@@ -201,42 +201,105 @@ Public Class Form视频参数
         正在初始化 = True
         Try
             Dim encoder = 取得编码器名称()
-            Dim presets As New List(Of String) From {String.Empty}
-            Dim profiles As New List(Of String) From {String.Empty}
-            Dim scenes As New List(Of String) From {String.Empty}
-            If encoder.Contains("x264") OrElse encoder.Contains("x265") Then presets.AddRange({"ultrafast", "fast", "medium", "slow", "veryslow"})
-            If encoder.Contains("nvenc") Then presets.AddRange({"p1", "p2", "p3", "p4", "p5", "p6", "p7"})
-            If encoder.Contains("hevc") Then profiles.AddRange({"main", "main10", "rext"})
-            scenes.AddRange(获取场景优化值(encoder))
             Dim 当前预设 = 设置.实例对象.视频预设
-            重建下拉(MCB_编码预设, presets, 当前预设)
-            重建下拉(MCB_配置文件, profiles, 设置.实例对象.视频配置文件)
-            重建下拉(MCB_场景优化, scenes, 设置.实例对象.视频场景优化)
+            重建下拉(MCB_编码预设, 获取编码预设值(encoder), 当前预设)
+            重建下拉(MCB_配置文件, 获取配置文件值(encoder), 设置.实例对象.视频配置文件)
+            重建场景优化下拉(MCB_场景优化, 获取场景优化选项(encoder), 设置.实例对象.视频场景优化)
         Finally
             正在初始化 = 原初始化状态
         End Try
     End Sub
 
-    Private Shared Function 获取场景优化值(encoder As String) As IEnumerable(Of String)
+    Private Shared Function 获取编码预设值(encoder As String) As IEnumerable(Of String)
+        Dim 预设 As New List(Of String) From {String.Empty}
+        Select Case encoder
+            Case "libsvtav1"
+                For 值 = 1 To 13
+                    预设.Add(值.ToString(CultureInfo.InvariantCulture))
+                Next
+            Case "av1_nvenc", "hevc_nvenc", "h264_nvenc"
+                预设.AddRange({"p7", "p6", "p5", "p4", "p3", "p2", "p1"})
+            Case "av1_qsv", "hevc_qsv", "h264_qsv"
+                预设.AddRange({"veryslow", "slower", "slow", "medium", "fast", "faster", "veryfast"})
+            Case "av1_amf", "hevc_amf", "h264_amf"
+                预设.AddRange({"high_quality", "quality", "balanced", "speed"})
+            Case "libx265", "libx264"
+                预设.AddRange({"placebo", "veryslow", "slower", "slow", "medium", "fast",
+                    "faster", "veryfast", "superfast", "ultrafast"})
+        End Select
+        Return 预设
+    End Function
+
+    Private Shared Function 获取配置文件值(encoder As String) As IEnumerable(Of String)
+        Dim 配置文件 As New List(Of String) From {String.Empty}
+        Select Case encoder
+            Case "av1_qsv", "av1_amf"
+                配置文件.Add("main")
+            Case "libx265"
+                配置文件.AddRange({"main", "main10"})
+            Case "hevc_nvenc"
+                配置文件.AddRange({"main", "main10", "rext"})
+            Case "hevc_qsv"
+                配置文件.AddRange({"main", "main10", "mainsp", "rext", "scc"})
+            Case "hevc_amf"
+                配置文件.AddRange({"main", "main10"})
+            Case "libx264"
+                配置文件.AddRange({"baseline", "main", "high", "high10", "high422", "high444"})
+            Case "h264_nvenc"
+                配置文件.AddRange({"baseline", "main", "high", "high10", "high422", "high444p"})
+            Case "h264_qsv"
+                配置文件.AddRange({"baseline", "main", "high"})
+            Case "h264_amf"
+                配置文件.AddRange({"main", "high", "constrained_baseline", "constrained_high"})
+        End Select
+        Return 配置文件
+    End Function
+
+    Friend Function 取得场景优化值() As String
+        Dim 选项 = 获取场景优化选项(取得编码器名称())
+        If MCB_场景优化.SelectedIndex <= 0 OrElse MCB_场景优化.SelectedIndex >= 选项.Count Then Return String.Empty
+        Return 选项(MCB_场景优化.SelectedIndex).参数值
+    End Function
+
+    Private Shared Function 获取场景优化选项(encoder As String) As IReadOnlyList(Of (显示文本 As String, 参数值 As String))
+        Dim 选项 As New List(Of (显示文本 As String, 参数值 As String)) From {
+            ("默认", String.Empty)
+        }
         Select Case encoder
             Case "av1_nvenc", "hevc_nvenc"
-                Return {"hq", "uhq", "ll", "ull", "lossless"}
+                选项.AddRange({("高质量", "hq"), ("超高质量", "uhq"), ("低延迟", "ll"), ("超低延迟", "ull"), ("无损", "lossless")})
             Case "h264_nvenc"
-                Return {"hq", "ll", "ull", "lossless"}
+                选项.AddRange({("高质量", "hq"), ("低延迟", "ll"), ("超低延迟", "ull"), ("无损", "lossless")})
             Case "av1_amf"
-                Return {"transcoding", "ultralowlatency", "lowlatency", "high_quality", "lowlatency_high_quality"}
-            Case "hevc_amf"
-                Return {"transcoding", "ultralowlatency", "lowlatency", "webcam", "high_quality", "lowlatency_high_quality"}
-            Case "h264_amf"
-                Return {"transcoding", "ultralowlatency", "lowlatency", "webcam", "high_quality", "lowlatency_high_quality"}
+                选项.AddRange({("转码", "transcoding"), ("超低延迟", "ultralowlatency"), ("低延迟", "lowlatency"),
+                    ("网络摄像头", "webcam"), ("高质量", "high_quality"), ("低延迟高质量", "lowlatency_high_quality")})
+            Case "hevc_amf", "h264_amf"
+                选项.AddRange({("转码", "transcoding"), ("超低延迟", "ultralowlatency"), ("低延迟", "lowlatency"),
+                    ("网络摄像头", "webcam"), ("高质量", "high_quality"), ("低延迟高质量", "lowlatency_high_quality")})
+            Case "hevc_qsv", "h264_qsv"
+                选项.AddRange({("显示器远程", "displayremoting"), ("视频会议", "videoconference"), ("存档", "archive"),
+                    ("直播", "livestreaming"), ("摄像机采集", "cameracapture"), ("视频监控", "videosurveillance"),
+                    ("游戏串流", "gamestreaming"), ("远程游戏", "remotegaming")})
             Case "libx265"
-                Return {"psnr", "ssim", "grain", "fastdecode", "zerolatency", "animation", "stillimage"}
+                选项.AddRange({("PSNR 指标", "psnr"), ("SSIM 指标", "ssim"), ("保留颗粒", "grain"),
+                    ("快速解码", "fastdecode"), ("零延迟", "zerolatency"), ("动画", "animation"), ("静态图像", "stillimage")})
             Case "libx264"
-                Return {"film", "animation", "grain", "stillimage", "psnr", "ssim", "fastdecode", "zerolatency"}
-            Case Else
-                Return Enumerable.Empty(Of String)()
+                选项.AddRange({("电影", "film"), ("动画", "animation"), ("保留颗粒", "grain"), ("静态图像", "stillimage"),
+                    ("PSNR 指标", "psnr"), ("SSIM 指标", "ssim"), ("快速解码", "fastdecode"), ("零延迟", "zerolatency")})
         End Select
+        Return 选项
     End Function
+
+    Private Shared Sub 重建场景优化下拉(控件 As LakeUI.ModernComboBox,
+        候选 As IReadOnlyList(Of (显示文本 As String, 参数值 As String)), 当前参数值 As String)
+        控件.Items.Clear()
+        For Each 选项 In 候选
+            控件.Items.Add(选项.显示文本)
+        Next
+        Dim 索引 = 候选.ToList().FindIndex(Function(选项) String.Equals(
+            选项.参数值, If(当前参数值, String.Empty), StringComparison.OrdinalIgnoreCase))
+        控件.SelectedIndex = If(索引 >= 0, 索引, 0)
+    End Sub
 
     Private Shared Sub 重建下拉(控件 As LakeUI.ModernComboBox, 候选 As IEnumerable(Of String), 当前值 As String)
         Dim 候选列表 = 候选.ToList()
