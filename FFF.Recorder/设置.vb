@@ -10,7 +10,7 @@ Public Class 设置
     Public Property 自动命名方式 As Integer = 0
     Public Property 视频源键 As String = String.Empty
     Public Property 视频源类型 As Integer = 0
-    Public Property 视频捕获模式 As Integer = -1
+    Public Property 视频捕获模式 As Integer
     Public Property 音频源键 As String = String.Empty
     Public Property 音频跟随默认设备 As Boolean = True
     Public Property 视频编码器索引 As Integer = 8
@@ -67,22 +67,13 @@ Public Class 设置
     Private Shared 默认背景图 As Image
     Private Shared 当前自有图标 As Icon
 
-    ' 发布时程序目录会被整体替换，设置必须放在用户数据目录中才能跨版本保留。
-    Private Shared ReadOnly 用户本地数据目录 As String = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
-    Private Shared ReadOnly 设置目录路径 As String = If(String.IsNullOrWhiteSpace(用户本地数据目录),
-        Application.StartupPath, Path.Combine(用户本地数据目录, "FFF.Recorder"))
-    Private Shared ReadOnly 设置文件路径 As String = Path.Combine(设置目录路径, "Settings.json")
-    Private Shared ReadOnly 旧设置文件路径 As String = Path.Combine(Application.StartupPath, "FFF.Recorder.Settings.json")
-    Public Shared ReadOnly 自定义图标路径 As String = Path.Combine(设置目录路径, "SP_Icon")
-    Public Shared ReadOnly 自定义背景图路径 As String = Path.Combine(设置目录路径, "SP_BackImage")
-    Private Shared ReadOnly 旧自定义图标路径 As String = Path.Combine(Application.StartupPath, "SP_Icon")
-    Private Shared ReadOnly 旧自定义背景图路径 As String = Path.Combine(Application.StartupPath, "SP_BackImage")
+    Private Shared ReadOnly 设置文件路径 As String = Path.Combine(Application.StartupPath, "FFF.Recorder.Settings.json")
+    Public Shared ReadOnly 自定义图标路径 As String = Path.Combine(Application.StartupPath, "SP_Icon")
+    Public Shared ReadOnly 自定义背景图路径 As String = Path.Combine(Application.StartupPath, "SP_BackImage")
     Public Shared Sub 退出时保存设置()
         Dim 临时路径 As String = Nothing
         Try
             实例对象.规范化()
-            Dim 目录 = Path.GetDirectoryName(设置文件路径)
-            If Not String.IsNullOrWhiteSpace(目录) Then Directory.CreateDirectory(目录)
             临时路径 = 设置文件路径 & ".tmp-" & Guid.NewGuid().ToString("N")
             File.WriteAllText(临时路径, JsonSerializer.Serialize(实例对象, JsonSO), System.Text.Encoding.UTF8)
             File.Move(临时路径, 设置文件路径, True)
@@ -98,26 +89,20 @@ Public Class 设置
     End Sub
     Public Shared Sub 启动时加载设置()
         Try
-            迁移旧个性化文件()
-            Dim 读取路径 = If(File.Exists(设置文件路径), 设置文件路径,
-                If(File.Exists(旧设置文件路径), 旧设置文件路径, Nothing))
-            If String.IsNullOrWhiteSpace(读取路径) Then
+            If Not File.Exists(设置文件路径) Then
                 If FontFamily.Families.Any(Function(f) f.Name = "微软雅黑") Then 实例对象.字体 = "微软雅黑"
                 退出时保存设置()
                 Return
             End If
-            Dim 读取 = JsonSerializer.Deserialize(Of 设置)(File.ReadAllText(读取路径, System.Text.Encoding.UTF8))
+            Dim 读取 = JsonSerializer.Deserialize(Of 设置)(File.ReadAllText(设置文件路径, System.Text.Encoding.UTF8))
             If 读取 Is Nothing Then Throw New JsonException("设置对象为空。")
             实例对象 = 读取
             实例对象.规范化()
-            If String.Equals(读取路径, 旧设置文件路径, StringComparison.OrdinalIgnoreCase) AndAlso
-                Not String.Equals(设置文件路径, 旧设置文件路径, StringComparison.OrdinalIgnoreCase) Then
-                退出时保存设置()
-            End If
         Catch
             Try
-                Dim 损坏源 = If(File.Exists(设置文件路径), 设置文件路径, 旧设置文件路径)
-                If File.Exists(损坏源) Then File.Copy(损坏源, 损坏源 & ".broken-" & DateTime.Now.ToString("yyyyMMddHHmmss"), True)
+                If File.Exists(设置文件路径) Then
+                    File.Copy(设置文件路径, 设置文件路径 & ".broken-" & DateTime.Now.ToString("yyyyMMddHHmmss"), True)
+                End If
             Catch
             End Try
             实例对象 = New 设置()
@@ -125,26 +110,10 @@ Public Class 设置
         End Try
     End Sub
 
-    Private Shared Sub 迁移旧个性化文件()
-        If String.Equals(设置目录路径, Application.StartupPath, StringComparison.OrdinalIgnoreCase) Then Return
-        Try
-            Directory.CreateDirectory(设置目录路径)
-            If Not File.Exists(自定义图标路径) AndAlso File.Exists(旧自定义图标路径) Then
-                File.Copy(旧自定义图标路径, 自定义图标路径)
-            End If
-            If Not File.Exists(自定义背景图路径) AndAlso File.Exists(旧自定义背景图路径) Then
-                File.Copy(旧自定义背景图路径, 自定义背景图路径)
-            End If
-        Catch
-            ' 个性化资源迁移失败不能阻止主设置加载。
-        End Try
-    End Sub
-
     Public Sub 规范化()
         输出目录 = If(String.IsNullOrWhiteSpace(输出目录), Application.StartupPath, 输出目录)
         If Not Directory.Exists(输出目录) Then 输出目录 = Application.StartupPath
         自动命名方式 = Math.Clamp(自动命名方式, 0, 1)
-        If 视频捕获模式 < 0 Then 视频捕获模式 = If(视频源类型 = 1, 1, 0)
         视频捕获模式 = Math.Clamp(视频捕获模式, 0, 2)
         Dim 视频编码器名称列表 = {
             "libsvtav1", "av1_nvenc", "av1_qsv", "av1_amf",
@@ -169,8 +138,7 @@ Public Class 设置
             帧率分母 = 1
         End If
         像素采样 = Math.Clamp(像素采样, 0, 2)
-        ' 当前 GPU 处理与编码接口只提供 8-bit 和 10-bit 路径；旧版 12/16-bit 选择迁移为 10-bit。
-        灰阶位深 = If(灰阶位深 <= 0, 0, 1)
+        灰阶位深 = Math.Clamp(灰阶位深, 0, 1)
         色彩模式 = Math.Clamp(色彩模式, 0, 1)
         If SDR亮度 < 100 OrElse SDR亮度 > 500 OrElse (SDR亮度 - 100) Mod 25 <> 0 Then SDR亮度 = 300
         If Not {400, 600, 800, 1000, 2000}.Contains(HDR峰值) Then HDR峰值 = 1000
@@ -199,8 +167,6 @@ Public Class 设置
         If 值.Length = 0 Then Return String.Empty
         Select Case 编码器
             Case "libx264", "libx265"
-                ' 旧版允许的三个极慢档迁移为 slow，避免历史设置继续造成长时间收尾。
-                If {"placebo", "veryslow", "slower"}.Contains(值) Then Return "slow"
                 If {"slow", "medium", "fast", "faster", "veryfast", "superfast", "ultrafast"}.Contains(值) Then Return 值
             Case "libsvtav1"
                 Dim 数字预设 As Integer
@@ -212,7 +178,6 @@ Public Class 设置
             Case "av1_amf", "hevc_amf", "h264_amf"
                 If {"high_quality", "quality", "balanced", "speed"}.Contains(值) Then Return 值
         End Select
-        ' 编码器切换后遗留的其他编码器预设回到该编码器的原生默认值。
         Return String.Empty
     End Function
 
