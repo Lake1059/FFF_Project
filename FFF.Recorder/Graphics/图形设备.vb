@@ -13,6 +13,11 @@ Public NotInheritable Class 图形设备
     Private Sub New(原生设备 As ID3D11Device, 原生上下文 As ID3D11DeviceContext)
         设备 = 原生设备
         上下文 = 原生上下文
+        ' 原生编码器与托管预处理共用同一个 immediate context。开启 D3D11 的线程保护后，
+        ' 编码线程只会在实际提交 GPU 命令时与渲染线程互斥，不再把整个 FFmpeg 编码周期串行化。
+        Using 多线程接口 = 上下文.QueryInterface(Of ID3D11Multithread)()
+            多线程接口.SetMultithreadProtected(True)
+        End Using
         命令调度器 = New 图形命令调度器()
     End Sub
 

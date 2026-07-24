@@ -3,7 +3,7 @@ Imports System.Text.Json
 Imports System.Collections.Concurrent
 
 Public NotInheritable Class 录制引擎
-    Private Const 期望接口版本 As UInteger = 3
+    Private Const 期望接口版本 As UInteger = 4
     Private Shared ReadOnly 编码器能力缓存 As New ConcurrentDictionary(Of String, 编码器探测结果)()
     Private Shared ReadOnly 接口兼容 As New Lazy(Of Boolean)(AddressOf 检查接口兼容)
 
@@ -90,10 +90,10 @@ Public NotInheritable Class 录制引擎
 
         Dim 缓存键 = String.Join("|", 图形设备.适配器标识, 配置.编码器名称, 配置.宽度, 配置.高度,
             配置.帧率分子, 配置.帧率分母, 配置.视频码率, 配置.最大码率, 配置.关键帧间隔,
-            配置.B帧数量, 配置.使用十位色, 配置.使用HDR10, CUInt(配置.输入纹理格式),
+            配置.使用十位色, 配置.使用HDR10, CUInt(配置.输入纹理格式),
             CUInt(配置.视频采样), CUInt(配置.速率控制), 配置.质量值, 配置.前瞻帧数,
             配置.编码预设, 配置.编码配置档, 配置.场景优化, CUInt(配置.多遍模式),
-            CUInt(配置.色彩范围), 配置.质量控制模式, 配置.自定义视频参数)
+            CUInt(配置.色彩范围), 配置.质量控制模式, 配置.自定义视频参数, 配置.HDR标称峰值)
         If 使用缓存 AndAlso 编码器能力缓存.TryGetValue(缓存键, Nothing) Then
             Return 复制探测结果(编码器能力缓存(缓存键))
         End If

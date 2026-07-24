@@ -101,7 +101,7 @@ public:
     FFFResult Initialize(ID3D11Device* device, const std::string& outputPath,
         const std::string& encoderName, std::uint32_t width, std::uint32_t height,
         std::uint32_t frameRateNumerator, std::uint32_t frameRateDenominator,
-        std::int64_t bitRate, std::uint32_t gopSize, std::uint32_t bFrameCount,
+        std::int64_t bitRate, std::uint32_t gopSize,
         bool tenBit, bool hdr10, bool mixAudioSources, std::uint32_t inputTextureFormat,
         std::uint32_t chromaSampling, std::uint32_t rateControl,
         std::uint32_t qualityMode, const std::string& customVideoParameters,
@@ -109,6 +109,7 @@ public:
         std::int64_t maximumBitRate, std::uint32_t lookaheadFrames, const std::string& preset,
         const std::string& profile, const std::string& sceneOptimization,
         std::uint32_t multipass, std::uint32_t colorRange,
+        std::uint32_t hdrNominalPeakLevel,
         const std::vector<float>& audioSourceGains, const std::string& audioEncoderName,
         std::uint32_t audioSampleRate, std::uint32_t audioChannelCount,
         std::int64_t audioBitRate, std::uint32_t audioMode) noexcept;

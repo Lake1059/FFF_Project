@@ -107,6 +107,17 @@ Public NotInheritable Class 窗口发现
             .宽度 = CUInt(客户区宽度), .高度 = CUInt(客户区高度)}
     End Function
 
+    Public Shared Function 获取窗口捕获尺寸(窗口句柄 As IntPtr) As (宽度 As UInteger, 高度 As UInteger)
+        If 窗口句柄 = IntPtr.Zero Then Throw New ArgumentException("窗口句柄不能为空。", NameOf(窗口句柄))
+        Dim 捕获边界 As 原生矩形
+        If Not 读取窗口捕获边界(窗口句柄, 捕获边界) OrElse
+            捕获边界.右边 <= 捕获边界.左边 OrElse 捕获边界.底边 <= 捕获边界.顶边 Then
+            Throw New InvalidOperationException("无法读取目标窗口捕获尺寸。")
+        End If
+        Return (CUInt(捕获边界.右边 - 捕获边界.左边),
+            CUInt(捕获边界.底边 - 捕获边界.顶边))
+    End Function
+
     Private Delegate Function 枚举窗口回调(窗口句柄 As IntPtr, 参数 As IntPtr) As Boolean
 
     <StructLayout(LayoutKind.Sequential)>

@@ -14,9 +14,9 @@
 	<!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
 	<Authors>1059 Studio</Authors>
 	<Company>1059 Studio</Company>
-	<AssemblyVersion>1.0.0</AssemblyVersion>
-	<FileVersion>1.0.0</FileVersion>
-	<Version>1.0.0</Version>
+	<AssemblyVersion>2026.7.24</AssemblyVersion>
+	<FileVersion>2026.7.24</FileVersion>
+	<Version>2026.7.24</Version>
 	<SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
 	<Title>FFF.Recorder</Title>
 	<ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
@@ -46,6 +46,13 @@
     <DevelopmentRuntime Include="..\runtime\avformat*.dll" />
     <DevelopmentRuntime Include="..\runtime\avutil*.dll" />
     <DevelopmentRuntime Include="..\runtime\swresample*.dll" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FFF.Native\FFF.Native.vcxproj"
+                      Condition="'$(MSBuildRuntimeType)' != 'Core'"
+                      ReferenceOutputAssembly="false"
+                      SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(PublishSingleFile)' == 'true'">

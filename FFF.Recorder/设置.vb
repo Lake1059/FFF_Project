@@ -172,7 +172,7 @@ Public Class 设置
         ' 当前 GPU 处理与编码接口只提供 8-bit 和 10-bit 路径；旧版 12/16-bit 选择迁移为 10-bit。
         灰阶位深 = If(灰阶位深 <= 0, 0, 1)
         色彩模式 = Math.Clamp(色彩模式, 0, 1)
-        If Not {100, 200, 300}.Contains(SDR亮度) Then SDR亮度 = 300
+        If SDR亮度 < 100 OrElse SDR亮度 > 500 OrElse (SDR亮度 - 100) Mod 25 <> 0 Then SDR亮度 = 300
         If Not {400, 600, 800, 1000, 2000}.Contains(HDR峰值) Then HDR峰值 = 1000
         质量控制模式 = Math.Clamp(质量控制模式, 0, 4)
         质量值 = Math.Clamp(质量值, 0, 63)

@@ -28,6 +28,7 @@ Friend Structure 原生会话配置
     Public 帧率分母 As UInteger
     Public 视频码率 As Long
     Public 关键帧间隔 As UInteger
+    ' ABI v4 兼容槽位；实时默认禁用 B 帧，自定义编码参数仍可显式覆盖。
     Public B帧数量 As UInteger
     Public 十位色 As UInteger
     Public HDR10 As UInteger
@@ -63,6 +64,7 @@ Friend Structure 原生会话配置
     Public 跟随默认系统音频设备 As UInteger
     Public 质量控制模式 As UInteger
     Public 自定义视频参数UTF8 As IntPtr
+    Public HDR标称峰值 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>

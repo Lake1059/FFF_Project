@@ -12,6 +12,7 @@ Public Class Form总控台
     Private 已初始化 As Boolean
     Private 设备刷新已排队 As Boolean
     Private 页面活动 As Boolean
+    Private 上次视频捕获模式文案 As String()
 
     Friend ReadOnly Property 当前视频源条目 As 视频源条目
         Get
@@ -64,6 +65,7 @@ Public Class Form总控台
             重建音频源列表()
             恢复视频源()
             恢复音频源()
+            更新视频捕获模式文案()
             MCK_防误触模式.Checked = 设置.实例对象.防误触模式
             重置响度条()
             重置录制统计()
@@ -102,6 +104,7 @@ Public Class Form总控台
         End If
         当前响度计?.释放()
         当前响度计 = Nothing
+        上次视频捕获模式文案 = Nothing
         If 设备监视器 IsNot Nothing Then
             RemoveHandler 设备监视器.设备已变更, AddressOf 音频设备已变更
             设备监视器.Dispose()
@@ -167,7 +170,7 @@ Public Class Form总控台
 
     Private Sub MCB_视频源_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_视频源.SelectedIndexChanged
         If 正在初始化 Then Return
-        应用当前视频源选择
+        应用当前视频源选择()
     End Sub
 
     Private Sub MCB_视频捕获模式_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_视频捕获模式.SelectedIndexChanged
@@ -177,6 +180,7 @@ Public Class Form总控台
         Try
             重建视频源列表()
             恢复视频源()
+            更新视频捕获模式文案()
         Finally
             正在初始化 = False
         End Try
@@ -190,6 +194,7 @@ Public Class Form总控台
             设置.实例对象.视频源类型 = 项目.类型
             设置.实例对象.视频捕获模式 = 项目.捕获模式
         End If
+        更新视频捕获模式文案()
         预览?.设置源(项目)
     End Sub
 
@@ -209,15 +214,21 @@ Public Class Form总控台
         Dim 选择已回退 As Boolean
         正在初始化 = True
         Try
-            重建视频源列表
+            重建视频源列表()
             Dim 索引 = 视频源列表.FindIndex(Function(x) String.Equals(x.键, 原键, StringComparison.Ordinal))
             选择已回退 = 索引 < 0
             MCB_视频源.SelectedIndex = If(索引 >= 0, 索引, 0)
+            更新视频捕获模式文案()
         Finally
             正在初始化 = False
         End Try
         ' 列表重建时选择事件会被抑制，源丢失后的回退选择需要在这里显式应用。
-        If 选择已回退 Then 应用当前视频源选择
+        If 选择已回退 Then 应用当前视频源选择()
+    End Sub
+
+    Private Sub MCB_视频捕获模式_DropDownOpened(sender As Object, e As EventArgs) Handles MCB_视频捕获模式.DropDownOpened
+        If 正在初始化 Then Return
+        更新视频捕获模式文案()
     End Sub
 
     Private Sub MCB_音频源_DropDownOpened(sender As Object, e As EventArgs) Handles MCB_音频源.DropDownOpened
@@ -245,6 +256,51 @@ Public Class Form总控台
         For Each 项目 In 视频源列表
             MCB_视频源.Items.Add(项目.显示文本)
         Next
+    End Sub
+
+    Private Sub 更新视频捕获模式文案()
+        Dim 文案 = {"显示器", "窗口带标题栏", "窗口客户区"}
+        Dim 项目 = 当前视频源条目
+        If 项目?.显示器 IsNot Nothing Then
+            Dim 当前显示器 = 显示器捕获器.枚举显示器().FirstOrDefault(
+                Function(x) String.Equals(x.名称, 项目.显示器.名称, StringComparison.Ordinal))
+            If 当前显示器 Is Nothing Then 当前显示器 = 项目.显示器
+            文案(0) = $"显示器 - 当前 {当前显示器.宽度}x{当前显示器.高度}"
+        ElseIf 项目?.窗口 IsNot Nothing Then
+            Try
+                Dim 完整尺寸 = 窗口发现.获取窗口捕获尺寸(项目.窗口.窗口句柄)
+                文案(1) = $"窗口带标题栏 - 当前 {完整尺寸.宽度}x{完整尺寸.高度}"
+            Catch
+            End Try
+            Try
+                Dim 客户区 = 窗口发现.获取客户区裁剪(项目.窗口.窗口句柄)
+                文案(2) = $"窗口客户区 - 当前 {客户区.宽度}x{客户区.高度}"
+            Catch
+            End Try
+        End If
+
+        If 上次视频捕获模式文案?.SequenceEqual(文案, StringComparer.Ordinal) Then Return
+
+        Dim 原索引 = Math.Clamp(MCB_视频捕获模式.SelectedIndex, 0, 2)
+        Dim 原初始化状态 = 正在初始化
+        正在初始化 = True
+        Try
+            While MCB_视频捕获模式.Items.Count < 文案.Length
+                MCB_视频捕获模式.Items.Add(String.Empty)
+            End While
+            For 索引 = 0 To 文案.Length - 1
+                If Not String.Equals(MCB_视频捕获模式.Items(索引), 文案(索引), StringComparison.Ordinal) Then
+                    ' ModernComboBox.SetItem 会同步更新当前选中项的内部文本渲染器。
+                    MCB_视频捕获模式.Items(索引) = 文案(索引)
+                End If
+            Next
+            If MCB_视频捕获模式.SelectedIndex <> 原索引 Then MCB_视频捕获模式.SelectedIndex = 原索引
+            MCB_视频捕获模式.Text = 文案(原索引)
+            MCB_视频捕获模式.Invalidate()
+            上次视频捕获模式文案 = CType(文案.Clone(), String())
+        Finally
+            正在初始化 = 原初始化状态
+        End Try
     End Sub
 
     Private Sub 重建音频源列表()
@@ -352,7 +408,7 @@ Public Class Form总控台
         If 页面活动 Then 响度计时器.Start()
 
         统计计时器 = New LakeUI.PrecisionTimer With {
-            .Interval = 500,
+            .Interval = 1000,
             .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
             .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop,
             .WorkerThreadCount = 1,
@@ -363,6 +419,9 @@ Public Class Form总控台
 
     Private Sub 刷新统计(sender As Object, e As EventArgs)
         更新录制状态()
+        If Not 录制交互.是否录制中 AndAlso Not 录制交互.是否正在停止 Then
+            更新视频捕获模式文案()
+        End If
         Dim 统计 As 录制统计
         If Not 录制交互.尝试读取统计(统计) Then Return
         显示录制统计(统计)

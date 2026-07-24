@@ -16,7 +16,7 @@ extern "C" {
 using Microsoft::WRL::ComPtr;
 
 namespace {
-constexpr std::uint32_t ApiVersion = 3;
+constexpr std::uint32_t ApiVersion = 4;
 
 // 把 UTF-8 值复制到调用方缓冲区，并报告包含末尾 NUL 的所需字节数。空缓冲区或容量不足属于
 // 合法的容量查询，函数绝不会写入截断字符串。requiredSize 可为空，其余指针所有权均归调用方。
@@ -279,7 +279,7 @@ FFFResult FFF_ProbeEncoder(const char* encoderNameUtf8, const std::uint32_t widt
 FFFResult FFF_ProbeD3D11Encoder(const FFFSessionConfiguration* configuration,
     char* outputUtf8, const std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept {
     if (configuration == nullptr || configuration->size < sizeof(FFFSessionConfiguration) ||
-        configuration->version != 1 || configuration->d3d11Device == nullptr ||
+        configuration->version != 2 || configuration->d3d11Device == nullptr ||
         configuration->encoderNameUtf8 == nullptr) return FFFResult::InvalidArgument;
     try {
         VideoMuxer muxer;
@@ -287,7 +287,7 @@ FFFResult FFF_ProbeD3D11Encoder(const FFFSessionConfiguration* configuration,
         const auto result = muxer.Initialize(static_cast<ID3D11Device*>(configuration->d3d11Device),
             "NUL", configuration->encoderNameUtf8, configuration->width, configuration->height,
             configuration->frameRateNumerator, configuration->frameRateDenominator,
-            configuration->bitRate, configuration->gopSize, configuration->bFrameCount,
+            configuration->bitRate, configuration->gopSize,
             configuration->tenBit != 0, configuration->hdr10 != 0, false,
             configuration->inputTextureFormat, configuration->chromaSampling,
             configuration->rateControl, configuration->qualityMode,
@@ -297,7 +297,8 @@ FFFResult FFF_ProbeD3D11Encoder(const FFFSessionConfiguration* configuration,
             configuration->presetUtf8 == nullptr ? "" : configuration->presetUtf8,
             configuration->profileUtf8 == nullptr ? "" : configuration->profileUtf8,
             configuration->sceneOptimizationUtf8 == nullptr ? "" : configuration->sceneOptimizationUtf8,
-            configuration->multipass, configuration->colorRange, noAudioGains,
+            configuration->multipass, configuration->colorRange,
+            configuration->hdrNominalPeakLevel, noAudioGains,
             "aac", 48'000, 2, 192'000, 0);
         const std::string json = result == FFFResult::Success
             ? "{\"supported\":true,\"encoder\":\"" + EscapeJson(configuration->encoderNameUtf8) + "\"}"
@@ -317,7 +318,7 @@ FFFResult FFF_ProbeD3D11Encoder(const FFFSessionConfiguration* configuration,
 FFFResult FFF_CreateSession(const FFFSessionConfiguration* configuration,
     FFFSessionHandle* session) noexcept {
     if (configuration == nullptr || session == nullptr ||
-        configuration->size < sizeof(FFFSessionConfiguration) || configuration->version != 1)
+        configuration->size < sizeof(FFFSessionConfiguration) || configuration->version != 2)
         return FFFResult::InvalidArgument;
     try {
         *session = new RecorderSession(*configuration);

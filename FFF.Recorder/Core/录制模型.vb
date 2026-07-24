@@ -145,11 +145,18 @@ Public NotInheritable Class 视频处理配置
     Public Property 高光压缩 As Single = 0.25F
     Public Property 饱和度 As Single = 1.0F
 
+    Public Sub 设置色彩模式(HDR输出 As Boolean, SDR白电平 As Single, HDR标称峰值 As Single)
+        输出HDR10 = HDR输出
+        允许HDR转SDR = Not HDR输出
+        目标峰值尼特 = If(HDR输出, HDR标称峰值, SDR白电平)
+        ' WGC 的 scRGB 约定是 1.0=80 nit；OBS 会按 SDRWhite/80 映射到 Rec.2100 PQ，
+        ' 因而 HDR 输出必须把用户选择的 SDR 白电平作为 PQ 转换参考白。
+        参考白尼特 = If(HDR输出, SDR白电平, 80.0F)
+    End Sub
+
     Public Sub 验证()
         If 输出宽度 = 0 OrElse 输出高度 = 0 Then Throw New ArgumentOutOfRangeException(NameOf(输出宽度), "输出尺寸必须大于零。")
-        ' 目标峰值是输出映射的硬上限。较高的请求被限制到 1000 nits，
-        ' 随后的 HDR 着色器会把超过该有效峰值的亮度压缩并裁切。
-        目标峰值尼特 = Math.Min(目标峰值尼特, 1000.0F)
+        If Not 输出HDR10 Then 目标峰值尼特 = Math.Min(目标峰值尼特, 1000.0F)
         If 参考白尼特 <= 0 OrElse 目标峰值尼特 < 参考白尼特 Then
             Throw New ArgumentOutOfRangeException(NameOf(目标峰值尼特), "目标峰值必须不低于参考白。")
         End If
@@ -169,9 +176,9 @@ Public NotInheritable Class 录制配置
     Public Property 可变帧率 As Boolean
     Public Property 视频码率 As Long = 20_000_000
     Public Property 关键帧间隔 As UInteger = 120
-    Public Property B帧数量 As UInteger = 2
     Public Property 使用十位色 As Boolean
     Public Property 使用HDR10 As Boolean
+    Public Property HDR标称峰值 As UInteger = 1000
     Public Property 系统音频端点标识 As String = String.Empty
     Public Property 跟随默认系统音频设备 As Boolean
     Public Property 质量控制模式 As UInteger
@@ -220,6 +227,9 @@ Public NotInheritable Class 录制配置
         帧率分子 = 规范分子
         帧率分母 = 规范分母
         If 使用HDR10 AndAlso Not 使用十位色 Then Throw New ArgumentException("HDR10 必须使用十位色输入。", NameOf(使用HDR10))
+        If HDR标称峰值 < 400UI OrElse HDR标称峰值 > 2000UI Then
+            Throw New ArgumentOutOfRangeException(NameOf(HDR标称峰值), "HDR 标称峰值必须在 400 到 2000 nit 之间。")
+        End If
         If 视频采样 = 视频采样格式.YUV四二零 AndAlso ((宽度 And 1UI) <> 0 OrElse (高度 And 1UI) <> 0) Then
             Throw New ArgumentException("4:2:0 输出的宽度和高度必须是偶数。", NameOf(视频采样))
         End If

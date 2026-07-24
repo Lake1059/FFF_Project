@@ -72,9 +72,9 @@ private:
     std::uint32_t frameRateDenominator_;
     std::int64_t bitRate_;
     std::uint32_t gopSize_;
-    std::uint32_t bFrameCount_;
     bool tenBit_;
     bool hdr10_;
+    std::uint32_t hdrNominalPeakLevel_;
     std::string systemAudioEndpointId_;
     std::string microphoneEndpointId_;
     bool keepSeparateAudioTracks_;

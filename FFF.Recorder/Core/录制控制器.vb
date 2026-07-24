@@ -31,12 +31,16 @@ Public NotInheritable Class 录制控制器
     Private ReadOnly 处理器 As 视频处理器
     Private ReadOnly 会话 As 录制会话
     Private ReadOnly 调度器 As 固定帧率调度器
+    Private ReadOnly 动态编码器 As 可变帧率编码器
     Private ReadOnly 显示器捕获 As 显示器捕获器
     Private ReadOnly 窗口捕获 As 窗口捕获器
     Private ReadOnly 捕获光标值 As Boolean
     Private ReadOnly 动态帧最小间隔QPC As Long
     Private ReadOnly 首帧事件 As New ManualResetEventSlim(False)
+    Private ReadOnly 窗口帧事件 As New AutoResetEvent(False)
     Private 显示器线程 As Thread
+    Private 窗口处理线程 As Thread
+    Private 待处理窗口帧 As 窗口捕获帧
     Private 待提交首帧 As 处理后视频帧
     Private 首帧错误 As Exception
     Private 请求停止 As Boolean
@@ -47,43 +51,39 @@ Public NotInheritable Class 录制控制器
     Private 已报告失败 As Boolean
     Private 最后动态帧QPC As Long
 
-    Private Sub New(配置 As 录制配置, 视频配置 As 视频处理配置, 捕获器 As 显示器捕获器)
+    Private Sub New(配置 As 录制配置, 视频配置 As 视频处理配置,
+        显示器捕获器值 As 显示器捕获器, 窗口捕获器值 As 窗口捕获器, 捕获光标 As Boolean)
         配置值 = 配置
-        显示器捕获 = 捕获器
-        捕获器.应用到配置(配置)
-        处理器 = New 视频处理器(捕获器.设备, 视频配置)
-        处理器.应用到配置(配置)
-        配置.验证()
-        If 配置.可变帧率 Then 动态帧最小间隔QPC = 计算动态帧最小间隔(配置.帧率分子, 配置.帧率分母)
-        会话 = 录制引擎.创建会话(配置, 捕获器.设备.原生设备指针)
-        AddHandler 会话.收到诊断事件, AddressOf 转发诊断事件
-        捕获器.绑定诊断会话(会话)
-        If Not 配置.可变帧率 Then
-            调度器 = New 固定帧率调度器(会话, 捕获器.设备, 配置.帧率分子, 配置.帧率分母)
-            AddHandler 调度器.调度失败, AddressOf 处理调度失败
-        End If
-    End Sub
-
-    Private Sub New(配置 As 录制配置, 视频配置 As 视频处理配置, 捕获器 As 窗口捕获器,
-        捕获光标 As Boolean)
-        配置值 = 配置
-        窗口捕获 = 捕获器
+        显示器捕获 = 显示器捕获器值
+        窗口捕获 = 窗口捕获器值
         捕获光标值 = 捕获光标
-        捕获器.应用到配置(配置)
-        处理器 = New 视频处理器(捕获器.设备, 视频配置)
+        Dim 图形 = If(显示器捕获器值?.设备, 窗口捕获器值.设备)
+        If 显示器捕获器值 IsNot Nothing Then
+            显示器捕获器值.应用到配置(配置)
+        Else
+            窗口捕获器值.应用到配置(配置)
+        End If
+        处理器 = New 视频处理器(图形, 视频配置)
         处理器.应用到配置(配置)
         配置.验证()
         If 配置.可变帧率 Then 动态帧最小间隔QPC = 计算动态帧最小间隔(配置.帧率分子, 配置.帧率分母)
-        会话 = 录制引擎.创建会话(配置, 捕获器.设备.原生设备指针)
+        会话 = 录制引擎.创建会话(配置, 图形.原生设备指针)
         AddHandler 会话.收到诊断事件, AddressOf 转发诊断事件
-        捕获器.绑定诊断会话(会话)
-        If Not 配置.可变帧率 Then
-            调度器 = New 固定帧率调度器(会话, 捕获器.设备, 配置.帧率分子, 配置.帧率分母)
+        If 配置.可变帧率 Then
+            动态编码器 = New 可变帧率编码器(会话)
+            AddHandler 动态编码器.编码失败, AddressOf 处理调度失败
+        Else
+            调度器 = New 固定帧率调度器(会话, 配置.帧率分子, 配置.帧率分母)
             AddHandler 调度器.调度失败, AddressOf 处理调度失败
         End If
-        AddHandler 捕获器.收到帧, AddressOf 处理窗口帧
-        AddHandler 捕获器.捕获失败, AddressOf 处理窗口失败
-        AddHandler 捕获器.捕获已关闭, AddressOf 处理窗口关闭
+        If 显示器捕获器值 IsNot Nothing Then
+            显示器捕获器值.绑定诊断会话(会话)
+        Else
+            窗口捕获器值.绑定诊断会话(会话)
+            AddHandler 窗口捕获器值.收到帧, AddressOf 处理窗口帧
+            AddHandler 窗口捕获器值.捕获失败, AddressOf 处理窗口失败
+            AddHandler 窗口捕获器值.捕获已关闭, AddressOf 处理窗口关闭
+        End If
     End Sub
 
     Public Event 录制失败 As EventHandler(Of 录制失败事件参数)
@@ -102,7 +102,7 @@ Public NotInheritable Class 录制控制器
         Dim 请求HDR源 = 视频配置.输出HDR10
         Dim 捕获器 = 显示器捕获器.创建(显示器, 请求HDR源, 启用调试层)
         Try
-            Return New 录制控制器(配置, 视频配置, 捕获器)
+            Return New 录制控制器(配置, 视频配置, 捕获器, Nothing, False)
         Catch
             捕获器.释放()
             Throw
@@ -117,7 +117,7 @@ Public NotInheritable Class 录制控制器
         Dim 请求HDR源 = 视频配置.输出HDR10
         Dim 捕获器 = 窗口捕获器.创建(窗口句柄, 请求HDR源)
         Try
-            Return New 录制控制器(配置, 视频配置, 捕获器, 捕获光标)
+            Return New 录制控制器(配置, 视频配置, Nothing, 捕获器, 捕获光标)
         Catch
             捕获器.释放()
             Throw
@@ -133,7 +133,7 @@ Public NotInheritable Class 录制控制器
         Dim 请求HDR源 = 视频配置.输出HDR10
         Dim 捕获器 = 窗口捕获器.创建显示器(显示器, 请求HDR源)
         Try
-            Return New 录制控制器(配置, 视频配置, 捕获器, 捕获光标)
+            Return New 录制控制器(配置, 视频配置, Nothing, 捕获器, 捕获光标)
         Catch
             捕获器.释放()
             Throw
@@ -174,9 +174,16 @@ Public NotInheritable Class 录制控制器
         End SyncLock
 
         If 窗口捕获 IsNot Nothing Then
+            窗口处理线程 = New Thread(AddressOf 运行窗口处理) With {
+                .IsBackground = True,
+                .Name = "FFF WGC 处理",
+                .Priority = ThreadPriority.AboveNormal
+            }
+            窗口处理线程.Start()
             窗口捕获.开始(捕获光标值)
             If Not 首帧事件.Wait(首帧超时毫秒) Then
                 窗口捕获.停止()
+                停止窗口处理()
                 Throw New TimeoutException("等待首个有效 WGC 帧超时。")
             End If
         Else
@@ -184,10 +191,12 @@ Public NotInheritable Class 录制控制器
         End If
         If 首帧错误 IsNot Nothing Then
             窗口捕获?.停止()
+            停止窗口处理()
             Throw New InvalidOperationException("首个捕获帧验证失败。", 首帧错误)
         End If
         If 待提交首帧 Is Nothing Then
             窗口捕获?.停止()
+            停止窗口处理()
             Throw New InvalidOperationException("未获得可编码的首帧。")
         End If
 
@@ -202,10 +211,13 @@ Public NotInheritable Class 录制控制器
                 待提交首帧 = Nothing
             End SyncLock
             调度器?.开始(Stopwatch.GetTimestamp())
+            动态编码器?.开始()
             提交处理帧(首帧)
             If 显示器捕获 IsNot Nothing Then
                 显示器线程 = New Thread(AddressOf 运行显示器捕获) With {
-                    .IsBackground = True, .Name = "FFF DXGI 捕获"
+                    .IsBackground = True,
+                    .Name = "FFF DXGI 捕获",
+                    .Priority = ThreadPriority.AboveNormal
                 }
                 显示器线程.Start()
             End If
@@ -213,6 +225,7 @@ Public NotInheritable Class 录制控制器
             待提交首帧?.释放()
             待提交首帧 = Nothing
             窗口捕获?.停止()
+            停止窗口处理()
             Throw
         End Try
     End Sub
@@ -225,6 +238,7 @@ Public NotInheritable Class 录制控制器
             已暂停值 = True
         End SyncLock
         调度器?.停止(暂停时间戳, True)
+        动态编码器?.停止()
         会话.暂停(暂停时间戳)
         会话.记录诊断事件("controller_paused")
     End Sub
@@ -237,6 +251,7 @@ Public NotInheritable Class 录制控制器
         End SyncLock
         会话.恢复(恢复时间戳)
         调度器?.开始(恢复时间戳)
+        动态编码器?.开始()
         SyncLock 同步锁
             已暂停值 = False
             最后动态帧QPC = 0
@@ -273,8 +288,10 @@ Public NotInheritable Class 录制控制器
             已停止值 = True
         End SyncLock
         窗口捕获?.停止()
+        停止窗口处理()
         If 捕获线程 IsNot Nothing AndAlso 捕获线程 IsNot Thread.CurrentThread Then 捕获线程.Join()
         调度器?.停止(停止时间戳)
+        动态编码器?.停止()
         会话.停止()
         SyncLock 同步锁
             已暂停值 = False
@@ -292,6 +309,7 @@ Public NotInheritable Class 录制控制器
             If 已开始值 AndAlso Not 已停止值 Then 停止()
         Finally
             If 调度器 IsNot Nothing Then RemoveHandler 调度器.调度失败, AddressOf 处理调度失败
+            If 动态编码器 IsNot Nothing Then RemoveHandler 动态编码器.编码失败, AddressOf 处理调度失败
             If 窗口捕获 IsNot Nothing Then
                 RemoveHandler 窗口捕获.收到帧, AddressOf 处理窗口帧
                 RemoveHandler 窗口捕获.捕获失败, AddressOf 处理窗口失败
@@ -299,12 +317,14 @@ Public NotInheritable Class 录制控制器
             End If
             待提交首帧?.释放()
             调度器?.释放()
+            动态编码器?.释放()
             RemoveHandler 会话.收到诊断事件, AddressOf 转发诊断事件
             会话.释放()
             处理器.释放()
             窗口捕获?.释放()
             显示器捕获?.释放()
             首帧事件.Dispose()
+            窗口帧事件.Dispose()
             已释放 = True
             GC.SuppressFinalize(Me)
         End Try
@@ -359,31 +379,75 @@ Public NotInheritable Class 录制控制器
     End Sub
 
     Private Sub 处理窗口帧(发送者 As Object, 参数 As 窗口捕获帧事件参数)
+        Dim 丢弃一帧 As Boolean
+        SyncLock 同步锁
+            If 请求停止 OrElse 已暂停值 OrElse 已停止值 Then
+                参数.帧.释放()
+                Return
+            End If
+            If 待处理窗口帧 IsNot Nothing Then
+                待处理窗口帧.释放()
+                丢弃一帧 = 已开始值
+            End If
+            待处理窗口帧 = 参数.帧
+        End SyncLock
+        If 丢弃一帧 Then 安全报告丢帧(会话)
+        窗口帧事件.Set()
+    End Sub
+
+    Private Sub 运行窗口处理()
         Try
-            Using 帧 = 参数.帧
-                Dim 处理帧 = 处理器.处理帧(帧)
-                If 处理帧 Is Nothing Then Return
-                通知预览(处理帧)
+            Do
+                Dim 原始帧 As 窗口捕获帧 = Nothing
                 SyncLock 同步锁
-                    If Not 已开始值 Then
-                        待提交首帧?.释放()
-                        待提交首帧 = 处理帧
-                        首帧事件.Set()
-                        Return
+                    If 请求停止 Then Exit Do
+                    If 待处理窗口帧 IsNot Nothing Then
+                        原始帧 = 待处理窗口帧
+                        待处理窗口帧 = Nothing
                     End If
-                    If 已暂停值 OrElse 已停止值 Then
-                        处理帧.释放()
-                        Return
-                    End If
-                    ' 与暂停/停止共用控制器锁，保证调度器停止后不会再出现迟到提交。
-                    提交处理帧(处理帧)
                 End SyncLock
-            End Using
+                If 原始帧 Is Nothing Then
+                    窗口帧事件.WaitOne(20)
+                    Continue Do
+                End If
+                Using 原始帧
+                    Dim 处理帧 = 处理器.处理帧(原始帧)
+                    If 处理帧 Is Nothing Then Continue Do
+                    通知预览(处理帧)
+                    SyncLock 同步锁
+                        If Not 已开始值 Then
+                            待提交首帧?.释放()
+                            待提交首帧 = 处理帧
+                            首帧事件.Set()
+                        ElseIf 已暂停值 OrElse 已停止值 OrElse 请求停止 Then
+                            处理帧.释放()
+                        Else
+                            提交处理帧(处理帧)
+                        End If
+                    End SyncLock
+                End Using
+            Loop
         Catch 错误 As Exception
             首帧错误 = 错误
             首帧事件.Set()
             触发失败(错误)
         End Try
+    End Sub
+
+    Private Sub 停止窗口处理()
+        Dim 待等待线程 As Thread
+        SyncLock 同步锁
+            待等待线程 = 窗口处理线程
+            If 待等待线程 Is Nothing Then Return
+            请求停止 = True
+        End SyncLock
+        窗口帧事件.Set()
+        If 待等待线程 IsNot Thread.CurrentThread Then 待等待线程.Join()
+        SyncLock 同步锁
+            待处理窗口帧?.释放()
+            待处理窗口帧 = Nothing
+            窗口处理线程 = Nothing
+        End SyncLock
     End Sub
 
     Private Sub 处理窗口失败(发送者 As Object, 参数 As 窗口捕获错误事件参数)
@@ -412,14 +476,7 @@ Public NotInheritable Class 录制控制器
             帧.释放()
             Return
         End If
-        Try
-            Dim 时间戳 = 帧.QPC时间戳
-            Dim 指针 = 帧.原生纹理指针
-            Dim 图形 = If(显示器捕获 IsNot Nothing, 显示器捕获.设备, 窗口捕获.设备)
-            图形.执行图形命令(Sub() 会话.提交视频纹理(指针, 时间戳, 0UI, False))
-        Finally
-            帧.释放()
-        End Try
+        动态编码器.提交帧(帧)
     End Sub
 
     Private Function 应提交动态帧(QPC时间戳 As Long) As Boolean

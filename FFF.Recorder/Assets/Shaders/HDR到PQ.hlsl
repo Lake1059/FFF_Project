@@ -31,9 +31,9 @@ float EncodePq(float nits)
     return pow((c1 + c2 * powered) / (1.0 + c3 * powered), m2);
 }
 
-// SourceTexture is linear scRGB/BT.709 (1.0 == ReferenceWhiteNits). The output
-// is display-referred BT.2020 PQ, ready for the native RGB10-to-YCbCr matrix;
-// the native encoder must preserve this PQ transfer instead of applying gamma.
+// Windows scRGB capture is physically 1.0=80 nit, but OBS maps that canvas value to the
+// selected SDR white before PQ encoding. ReferenceWhiteNits carries that selected value;
+// the native encoder must preserve the resulting display-referred Rec.2100 PQ signal.
 
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
@@ -63,18 +63,6 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     linear2020.g = dot(linear709, float3(0.0690970, 0.9195400, 0.0113612));
     linear2020.b = dot(linear709, float3(0.0163916, 0.0880132, 0.8955950));
     linear2020 = max(linear2020, 0.0);
-    float sourceLuminance = max(dot(linear2020, float3(0.2627, 0.6780, 0.0593)), 0.000001);
-    float sourceNits = sourceLuminance * ReferenceWhiteNits * exp2(Exposure);
-    float normalized = saturate(sourceNits / max(TargetPeakNits, 1.0));
-    float knee = lerp(0.75, 0.45, saturate(HighlightCompression));
-    float mapped = normalized <= knee ? normalized : knee + (1.0 - knee) *
-        ((normalized - knee) / max(1.0 + normalized - 2.0 * knee, 0.0001));
-    float targetLuminance = mapped * TargetPeakNits;
-    float3 chroma = linear2020 / sourceLuminance;
-    float maxChroma = max(max(chroma.r, chroma.g), chroma.b);
-    chroma /= max(1.0, maxChroma);
-    float3 nits = chroma * targetLuminance;
-    float maxNits = max(max(nits.r, nits.g), nits.b);
-    nits *= min(1.0, TargetPeakNits / max(maxNits, 0.0001));
+    float3 nits = linear2020 * ReferenceWhiteNits * exp2(Exposure);
     OutputTexture[pixel] = float4(EncodePq(nits.r), EncodePq(nits.g), EncodePq(nits.b), 1.0);
 }

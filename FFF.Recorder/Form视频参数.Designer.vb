@@ -200,9 +200,6 @@ Partial Class Form视频参数
         MCB_SDR亮度.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MCB_SDR亮度.DropDownSelectedForeColor = Color.White
         MCB_SDR亮度.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_SDR亮度.Items.Add("100nit")
-        MCB_SDR亮度.Items.Add("200nit")
-        MCB_SDR亮度.Items.Add("300nit")
         MCB_SDR亮度.Location = New Point(190, 0)
         MCB_SDR亮度.Margin = New Padding(2, 2, 2, 2)
         MCB_SDR亮度.Name = "MCB_SDR亮度"
@@ -238,7 +235,7 @@ Partial Class Form视频参数
         MCB_色彩模式.DropDownSelectedForeColor = Color.White
         MCB_色彩模式.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCB_色彩模式.Items.Add("标准范围 SDR")
-        MCB_色彩模式.Items.Add("高动态范围 HDR")
+        MCB_色彩模式.Items.Add("高动态范围 HDR PQ")
         MCB_色彩模式.Location = New Point(0, 0)
         MCB_色彩模式.Margin = New Padding(2, 2, 2, 2)
         MCB_色彩模式.Name = "MCB_色彩模式"
@@ -271,7 +268,7 @@ Partial Class Form视频参数
         HtmlColorLabel8.Name = "HtmlColorLabel8"
         HtmlColorLabel8.Size = New Size(120, 25)
         HtmlColorLabel8.TabIndex = 6
-        HtmlColorLabel8.Text = "HDR 最亮值"
+        HtmlColorLabel8.Text = "HDR 标称峰值"
         ' 
         ' HtmlColorLabel7
         ' 
@@ -282,7 +279,7 @@ Partial Class Form视频参数
         HtmlColorLabel7.Name = "HtmlColorLabel7"
         HtmlColorLabel7.Size = New Size(130, 25)
         HtmlColorLabel7.TabIndex = 5
-        HtmlColorLabel7.Text = "SDR 亮度"
+        HtmlColorLabel7.Text = "SDR 白电平"
         ' 
         ' HtmlColorLabel9
         ' 
@@ -580,7 +577,6 @@ Partial Class Form视频参数
         ETB_质量值.Maximum = 63R
         ETB_质量值.Name = "ETB_质量值"
         ETB_质量值.Size = New Size(250, 32)
-        ETB_质量值.SmallChange = 1R
         ETB_质量值.TabIndex = 28
         ETB_质量值.ThumbBorderWidth = 0
         ETB_质量值.ThumbColor = Color.OliveDrab

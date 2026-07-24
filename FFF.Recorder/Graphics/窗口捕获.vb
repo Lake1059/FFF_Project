@@ -79,6 +79,9 @@ Public NotInheritable Class 窗口捕获器
 
     Private Shared ReadOnly 捕获项目接口标识 As New Guid("79C3F95B-31F7-4EC2-A464-632EF5D30760")
     Private Shared ReadOnly D3D11纹理接口标识 As New Guid("6F15AAF2-D208-4E89-9AB4-489535D34F9C")
+    Private Const 最小系统帧缓冲数 As Integer = 4
+    Private Const 最大系统帧缓冲数 As Integer = 10
+    Private Const 系统帧缓冲预算字节 As Long = 160L * 1024L * 1024L
 
     Private ReadOnly 图形 As 图形设备
     Private ReadOnly 捕获项目 As GraphicsCaptureItem
@@ -192,7 +195,8 @@ Public NotInheritable Class 窗口捕获器
         If 已启动 Then Throw New InvalidOperationException("窗口捕获已经开始。")
         Dim 像素格式 = If(使用HDR, DirectXPixelFormat.R16G16B16A16Float,
             DirectXPixelFormat.B8G8R8A8UIntNormalized)
-        帧池 = Direct3D11CaptureFramePool.CreateFreeThreaded(WinRT设备, 像素格式, 3, 当前尺寸)
+        Dim 缓冲数 = 计算系统帧缓冲数(当前尺寸)
+        帧池 = Direct3D11CaptureFramePool.CreateFreeThreaded(WinRT设备, 像素格式, 缓冲数, 当前尺寸)
         捕获会话 = 帧池.CreateCaptureSession(捕获项目)
         捕获会话.IsCursorCaptureEnabled = 捕获光标
         报告脏区域 = Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent(
@@ -275,8 +279,9 @@ Public NotInheritable Class 窗口捕获器
                 If 尺寸已变化 Then
                     诊断会话?.记录诊断事件("wgc_resize", $"{当前尺寸.Width}x{当前尺寸.Height} -> {新尺寸.Width}x{新尺寸.Height}")
                     当前尺寸 = 新尺寸
+                    Dim 缓冲数 = 计算系统帧缓冲数(当前尺寸)
                     帧池.Recreate(WinRT设备, If(使用HDR, DirectXPixelFormat.R16G16B16A16Float,
-                        DirectXPixelFormat.B8G8R8A8UIntNormalized), 3, 当前尺寸)
+                        DirectXPixelFormat.B8G8R8A8UIntNormalized), 缓冲数, 当前尺寸)
                 End If
             End Using
         Catch 错误 As Exception
@@ -284,6 +289,13 @@ Public NotInheritable Class 窗口捕获器
             RaiseEvent 捕获失败(Me, New 窗口捕获错误事件参数("处理 WGC 帧失败。", 错误))
         End Try
     End Sub
+
+    Private Function 计算系统帧缓冲数(尺寸 As Windows.Graphics.SizeInt32) As Integer
+        Dim 每像素字节 = If(使用HDR, 8L, 4L)
+        Dim 单帧字节 = Math.Max(1L, CLng(Math.Max(1, 尺寸.Width)) * Math.Max(1, 尺寸.Height) * 每像素字节)
+        Return CInt(Math.Clamp(系统帧缓冲预算字节 \ 单帧字节,
+            CLng(最小系统帧缓冲数), CLng(最大系统帧缓冲数)))
+    End Function
 
     Private Sub 处理捕获关闭(发送者 As GraphicsCaptureItem, 参数 As Object)
         诊断会话?.记录诊断事件("wgc_closed", "目标窗口已关闭。")

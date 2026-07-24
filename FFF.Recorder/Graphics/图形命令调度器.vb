@@ -31,7 +31,11 @@ Friend NotInheritable Class 图形命令调度器
     Private 已释放 As Boolean
 
     Friend Sub New()
-        线程 = New Thread(AddressOf 运行) With {.IsBackground = True, .Name = "FFF GPU Pipeline"}
+        线程 = New Thread(AddressOf 运行) With {
+            .IsBackground = True,
+            .Name = "FFF GPU Pipeline",
+            .Priority = ThreadPriority.AboveNormal
+        }
         线程.Start()
     End Sub
 

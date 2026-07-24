@@ -92,8 +92,9 @@ RecorderSession::RecorderSession(const FFFSessionConfiguration& configuration)
       frameRateNumerator_(configuration.frameRateNumerator),
       frameRateDenominator_(configuration.frameRateDenominator),
       bitRate_(configuration.bitRate), gopSize_(configuration.gopSize),
-      bFrameCount_(configuration.bFrameCount), tenBit_(configuration.tenBit != 0),
+      tenBit_(configuration.tenBit != 0),
       hdr10_(configuration.hdr10 != 0),
+      hdrNominalPeakLevel_(configuration.hdrNominalPeakLevel),
       systemAudioEndpointId_(configuration.systemAudioEndpointIdUtf8 == nullptr ? "" : configuration.systemAudioEndpointIdUtf8),
       microphoneEndpointId_(configuration.microphoneEndpointIdUtf8 == nullptr ? "" : configuration.microphoneEndpointIdUtf8),
       keepSeparateAudioTracks_(configuration.keepSeparateAudioTracks != 0),
@@ -188,7 +189,7 @@ FFFResult RecorderSession::Start() noexcept {
         ",\"customVideoParameters\":\"" + EscapeDiagnosticJson(customVideoParameters_) +
         "\",\"inputTextureFormat\":" + std::to_string(inputTextureFormat_) +
         ",\"gopSize\":" + std::to_string(gopSize_) +
-        ",\"bFrames\":" + std::to_string(bFrameCount_) +
+        ",\"bFrames\":0" +
         ",\"lookahead\":" + std::to_string(lookaheadFrames_) +
         ",\"preset\":\"" + EscapeDiagnosticJson(preset_) +
         "\",\"profile\":\"" + EscapeDiagnosticJson(profile_) +
@@ -208,17 +209,18 @@ FFFResult RecorderSession::Start() noexcept {
         ",\"chromaSampling\":" + std::to_string(chromaSampling_) +
         ",\"colorRange\":" + std::to_string(colorRange_) +
         ",\"tenBit\":" + (tenBit_ ? "true" : "false") +
-        ",\"hdr10\":" + (hdr10_ ? "true" : "false"));
+        ",\"hdr10\":" + (hdr10_ ? "true" : "false") +
+        ",\"hdrNominalPeakLevel\":" + std::to_string(hdrNominalPeakLevel_));
     const bool mixAudioSources = !keepSeparateAudioTracks_ &&
         !systemAudioEndpointId_.empty() && !microphoneEndpointId_.empty();
     std::vector<float> audioSourceGains;
     if (!systemAudioEndpointId_.empty()) audioSourceGains.push_back(systemAudioGain_);
     if (!microphoneEndpointId_.empty()) audioSourceGains.push_back(microphoneGain_);
     const auto initialized = videoMuxer_->Initialize(device_, outputPath_, encoderName_, width_, height_,
-        frameRateNumerator_, frameRateDenominator_, bitRate_, gopSize_, bFrameCount_, tenBit_, hdr10_,
+        frameRateNumerator_, frameRateDenominator_, bitRate_, gopSize_, tenBit_, hdr10_,
         mixAudioSources, inputTextureFormat_, chromaSampling_,
         rateControl_, qualityMode_, customVideoParameters_, quality_, maximumBitRate_, lookaheadFrames_, preset_, profile_, sceneOptimization_,
-        multipass_, colorRange_, audioSourceGains, audioEncoderName_, audioSampleRate_,
+        multipass_, colorRange_, hdrNominalPeakLevel_, audioSourceGains, audioEncoderName_, audioSampleRate_,
         audioChannelCount_, audioBitRate_, audioMode_);
     if (initialized != FFFResult::Success) {
         SetError(initialized, videoMuxer_->LastError());
@@ -368,10 +370,10 @@ FFFResult RecorderSession::Split(const char* outputPathUtf8) noexcept {
 
     auto nextMuxer = std::make_unique<VideoMuxer>();
     const auto initialized = nextMuxer->Initialize(device_, outputPathUtf8, encoderName_, width_, height_,
-        frameRateNumerator_, frameRateDenominator_, bitRate_, gopSize_, bFrameCount_, tenBit_, hdr10_,
+        frameRateNumerator_, frameRateDenominator_, bitRate_, gopSize_, tenBit_, hdr10_,
         mixAudioSources, inputTextureFormat_, chromaSampling_,
         rateControl_, qualityMode_, customVideoParameters_, quality_, maximumBitRate_, lookaheadFrames_, preset_, profile_, sceneOptimization_,
-        multipass_, colorRange_, audioSourceGains, audioEncoderName_, audioSampleRate_,
+        multipass_, colorRange_, hdrNominalPeakLevel_, audioSourceGains, audioEncoderName_, audioSampleRate_,
         audioChannelCount_, audioBitRate_, audioMode_);
     if (initialized != FFFResult::Success) {
         SetError(initialized, nextMuxer->LastError());

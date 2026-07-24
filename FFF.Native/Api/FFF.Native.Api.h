@@ -52,6 +52,7 @@ struct FFFSessionConfiguration {
     std::uint32_t frameRateDenominator;
     std::int64_t bitRate;
     std::uint32_t gopSize;
+    // ABI v4 compatibility slot. Real-time defaults disable B frames; custom options may override.
     std::uint32_t bFrameCount;
     std::uint32_t tenBit;
     std::uint32_t hdr10;
@@ -87,6 +88,7 @@ struct FFFSessionConfiguration {
     std::uint32_t followDefaultSystemAudioDevice;
     std::uint32_t qualityMode;
     const char* customVideoParametersUtf8;
+    std::uint32_t hdrNominalPeakLevel;
 };
 
 struct FFFSessionStatistics {

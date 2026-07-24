@@ -52,15 +52,12 @@ Friend NotInheritable Class 预览控制器
             End If
             Dim 配置 As New 视频处理配置 With {
                 .输出宽度 = 宽度, .输出高度 = 高度,
-                .输出HDR10 = 输出HDR,
-                .允许HDR转SDR = Not 输出HDR,
                 .高质量缩放 = True,
                 .裁剪左边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.左边),
                 .裁剪顶边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.顶边),
                 .裁剪右边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.右边),
-                .裁剪底边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.底边),
-                .目标峰值尼特 = If(输出HDR, 设置.实例对象.HDR峰值, 设置.实例对象.SDR亮度),
-                .参考白尼特 = 80.0F}
+                .裁剪底边 = If(客户区裁剪 Is Nothing, 0UI, 客户区裁剪.底边)}
+            配置.设置色彩模式(输出HDR, 设置.实例对象.SDR亮度, 设置.实例对象.HDR峰值)
             ' 普通 SDR 预览直接使用 WGC 纹理；HDR 色调映射和客户区裁剪才建立处理管线。
             If 输出HDR OrElse 客户区裁剪 IsNot Nothing Then
                 处理器 = New 视频处理器(捕获器.设备, 配置)

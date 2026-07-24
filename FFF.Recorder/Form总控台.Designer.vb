@@ -721,9 +721,9 @@ Partial Class Form总控台
         MCB_视频捕获模式.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MCB_视频捕获模式.DropDownSelectedForeColor = Color.White
         MCB_视频捕获模式.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_视频捕获模式.Items.Add("显示器")
-        MCB_视频捕获模式.Items.Add("窗口（带标题栏）")
-        MCB_视频捕获模式.Items.Add("窗口（客户区）")
+        MCB_视频捕获模式.Items.Add("显示器 - 当前 ?x?")
+        MCB_视频捕获模式.Items.Add("窗口带标题栏 - 当前 ?x?")
+        MCB_视频捕获模式.Items.Add("窗口客户区 - 当前 ?x?")
         MCB_视频捕获模式.Location = New Point(15, 15)
         MCB_视频捕获模式.Margin = New Padding(2, 2, 2, 2)
         MCB_视频捕获模式.MaxDropDownItems = 12

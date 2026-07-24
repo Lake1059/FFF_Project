@@ -2,7 +2,9 @@
 
 Public Class Form支持者
 
-    Public Shared ReadOnly 付费支持者列表 As New List(Of String) From {}
+    Public Shared ReadOnly 付费支持者列表 As New List(Of String) From {
+        "Avec"
+    }
     Public Shared ReadOnly 赠送支持者列表 As New List(Of String) From {
         "格里芬指挥官|#39C5BB",
         "陆耀YSNX462 (FFBOX最严厉的父亲)|#66FF66",

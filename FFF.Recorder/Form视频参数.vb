@@ -1,6 +1,7 @@
 Imports System.Globalization
 
 Public Class Form视频参数
+    Private Shared ReadOnly SDR白电平选项 As Integer() = Enumerable.Range(0, 17).Select(Function(索引) 100 + 索引 * 25).ToArray()
     Private 正在初始化 As Boolean = True
 
     Friend Sub 初始化页面()
@@ -28,7 +29,7 @@ Public Class Form视频参数
             设置索引(MCB_像素采样, 设置.实例对象.像素采样)
             设置索引(MCB_灰阶位深, 设置.实例对象.灰阶位深)
             设置索引(MCB_色彩模式, 设置.实例对象.色彩模式)
-            设置索引(MCB_SDR亮度, {100, 200, 300}.ToList().IndexOf(设置.实例对象.SDR亮度), 2)
+            重建SDR白电平下拉()
             设置索引(MCB_HDR最亮值, {400, 600, 800, 1000, 2000}.ToList().IndexOf(设置.实例对象.HDR峰值), 3)
             设置索引(MCB_质量控制模式, 设置.实例对象.质量控制模式)
             ETB_质量值.Value = 设置.实例对象.质量值
@@ -193,6 +194,14 @@ Public Class Form视频参数
         Dim 启用自定义 = MCB_视频分辨率.SelectedIndex = 1
         MCB_自定义宽度.Enabled = 启用自定义
         MCB_自定义高度.Enabled = 启用自定义
+    End Sub
+
+    Private Sub 重建SDR白电平下拉()
+        MCB_SDR亮度.Items.Clear()
+        For Each 白电平 In SDR白电平选项
+            MCB_SDR亮度.Items.Add($"{白电平}nit")
+        Next
+        设置索引(MCB_SDR亮度, Array.IndexOf(SDR白电平选项, 设置.实例对象.SDR亮度), 8)
     End Sub
 
     Private Sub 更新编码器依赖项(Optional 强制 As Boolean = False)

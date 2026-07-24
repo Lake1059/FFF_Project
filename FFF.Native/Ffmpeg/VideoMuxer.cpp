@@ -10,8 +10,10 @@ extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
+#include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/opt.h>
 }
 
@@ -102,58 +104,58 @@ struct EncoderStrategy final {
 
 // Each encoder owns all twelve color combinations. Unsupported entries are intentional,
 // reviewable records rather than gaps inferred from codec/backend conditionals. Subsampled
-// 4:2:0 uses left chroma siting because FFmpeg can represent it in HEVC, H.264, AV1 and
-// Matroska; the shader uses the matching sampling phase. FFmpeg's NVENC wrapper does not
+// SDR 4:2:0 uses left chroma siting; Rec.2100 4:2:0 uses top-left like OBS. FFmpeg can
+// represent both in HEVC, H.264, AV1 and Matroska. FFmpeg's NVENC wrapper does not
 // copy AVCodecContext::chroma_sample_location into the NVIDIA HEVC VUI fields, so the NVENC
-// HEVC 4:2:0 records explicitly select h265_metadata to write the same phase into the SPS.
+// HEVC 4:2:0 records explicitly select h265_metadata to write the selected phase into the SPS.
 constexpr EncoderStrategy EncoderStrategies[] = {
     { "libsvtav1", VideoEncoderBackend::Software, VideoCodecFamily::Av1, {
         Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
         Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
         UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
-        Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline
+        Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_TOPLEFT), UnsupportedPipeline, UnsupportedPipeline
     }, EncoderPresetFamily::SvtAv1, "8" },
     { "av1_nvenc", VideoEncoderBackend::Nvenc, VideoCodecFamily::Av1, {
         Sdr8Pipeline(RgbToYuvPath::D3D11VideoProcessor420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
         Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
         UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
-        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_TOPLEFT), UnsupportedPipeline, UnsupportedPipeline
     }, EncoderPresetFamily::Nvenc, "p4" },
     { "av1_qsv", VideoEncoderBackend::Qsv, VideoCodecFamily::Av1, {
         Sdr8Pipeline(RgbToYuvPath::D3D11VideoProcessor420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
         Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
         UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
-        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_TOPLEFT), UnsupportedPipeline, UnsupportedPipeline
     }, EncoderPresetFamily::Qsv, "medium" },
     { "av1_amf", VideoEncoderBackend::Amf, VideoCodecFamily::Av1, {
         Sdr8Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
         Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
         UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
-        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_TOPLEFT), UnsupportedPipeline, UnsupportedPipeline
     }, EncoderPresetFamily::Amf, "balanced" },
     { "libx265", VideoEncoderBackend::Software, VideoCodecFamily::Hevc, {
         Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P, AVCHROMA_LOC_LEFT), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P, AVCHROMA_LOC_UNSPECIFIED), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV422P, AVCHROMA_LOC_CENTER),
         Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_LEFT), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_UNSPECIFIED), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV422P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_CENTER),
         UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
-        Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_LEFT), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_UNSPECIFIED), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV422P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_CENTER)
+        Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_TOPLEFT), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_UNSPECIFIED), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV422P10, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_CENTER)
     }, EncoderPresetFamily::X26x, "medium" },
     { "hevc_nvenc", VideoEncoderBackend::Nvenc, VideoCodecFamily::Hevc, {
-        Sdr8Pipeline(RgbToYuvPath::D3D11VideoProcessor420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT, BitstreamColorMetadataPath::H265MetadataBsf), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P, AVCHROMA_LOC_UNSPECIFIED), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_NV16, AVCHROMA_LOC_CENTER),
-        Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT, BitstreamColorMetadataPath::H265MetadataBsf), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P10MSB, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_UNSPECIFIED), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_P210, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_CENTER),
+        Sdr8Pipeline(RgbToYuvPath::D3D11VideoProcessor420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT, BitstreamColorMetadataPath::H265MetadataBsf), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P, AVCHROMA_LOC_UNSPECIFIED, BitstreamColorMetadataPath::H265MetadataBsf), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_NV16, AVCHROMA_LOC_CENTER, BitstreamColorMetadataPath::H265MetadataBsf),
+        Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT, BitstreamColorMetadataPath::H265MetadataBsf), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P10MSB, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_UNSPECIFIED, BitstreamColorMetadataPath::H265MetadataBsf), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_P210, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_CENTER, BitstreamColorMetadataPath::H265MetadataBsf),
         UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
-        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT, BitstreamColorMetadataPath::H265MetadataBsf), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P10MSB, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_UNSPECIFIED), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_P210, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_CENTER)
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_TOPLEFT, BitstreamColorMetadataPath::H265MetadataBsf), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P10MSB, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_UNSPECIFIED, BitstreamColorMetadataPath::H265MetadataBsf), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_P210, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_CENTER, BitstreamColorMetadataPath::H265MetadataBsf)
     }, EncoderPresetFamily::Nvenc, "p4" },
     { "hevc_qsv", VideoEncoderBackend::Qsv, VideoCodecFamily::Hevc, {
         Sdr8Pipeline(RgbToYuvPath::D3D11VideoProcessor420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_VUYX, AVCHROMA_LOC_UNSPECIFIED), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUYV422, AVCHROMA_LOC_CENTER),
         Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_XV30, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_UNSPECIFIED), Sdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_Y210, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_CENTER),
         UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
-        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_XV30, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_UNSPECIFIED), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_Y210, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_CENTER)
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_TOPLEFT), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_XV30, YuvBitPacking::TenBitLsb, AVCHROMA_LOC_UNSPECIFIED), Hdr10Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_Y210, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_CENTER)
     }, EncoderPresetFamily::Qsv, "medium" },
     { "hevc_amf", VideoEncoderBackend::Amf, VideoCodecFamily::Hevc, {
         Sdr8Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_NV12, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
         Sdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline,
         UnsupportedPipeline, UnsupportedPipeline, UnsupportedPipeline,
-        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_LEFT), UnsupportedPipeline, UnsupportedPipeline
+        Hdr10Pipeline(RgbToYuvPath::D3D11ComputeShader420, AV_PIX_FMT_P010, YuvBitPacking::TenBitMsb, AVCHROMA_LOC_TOPLEFT), UnsupportedPipeline, UnsupportedPipeline
     }, EncoderPresetFamily::Amf, "balanced" },
     { "libx264", VideoEncoderBackend::Software, VideoCodecFamily::H264, {
         Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV420P, AVCHROMA_LOC_LEFT), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV444P, AVCHROMA_LOC_UNSPECIFIED), Sdr8Pipeline(RgbToYuvPath::SoftwarePlanar, AV_PIX_FMT_YUV422P, AVCHROMA_LOC_CENTER),
@@ -198,8 +200,7 @@ constexpr bool ValidateColorPipelineTable() noexcept {
             if (pipeline.bitstreamMetadataPath == BitstreamColorMetadataPath::None) return false;
             if (pipeline.colorRange != AVCOL_RANGE_JPEG) return false;
             if (pipeline.bitstreamMetadataPath == BitstreamColorMetadataPath::H265MetadataBsf &&
-                (strategy.codec != VideoCodecFamily::Hevc || index % 3U != 0U ||
-                    pipeline.chromaLocation != AVCHROMA_LOC_LEFT)) return false;
+                strategy.codec != VideoCodecFamily::Hevc) return false;
         }
     }
     return true;
@@ -230,6 +231,61 @@ struct ResolvedEncoderPlan final {
 
 const char* SamplingName(const std::uint32_t chromaSampling) noexcept {
     return chromaSampling == 0 ? "4:2:0" : (chromaSampling == 1 ? "4:4:4" : "4:2:2");
+}
+
+void FillHdrStaticMetadata(AVContentLightMetadata& content,
+    AVMasteringDisplayMetadata& mastering, const std::uint32_t nominalPeakLevel) noexcept {
+    content.MaxCLL = nominalPeakLevel;
+    content.MaxFALL = nominalPeakLevel;
+    mastering.display_primaries[0][0] = av_make_q(17, 25);
+    mastering.display_primaries[0][1] = av_make_q(8, 25);
+    mastering.display_primaries[1][0] = av_make_q(53, 200);
+    mastering.display_primaries[1][1] = av_make_q(69, 100);
+    mastering.display_primaries[2][0] = av_make_q(3, 20);
+    mastering.display_primaries[2][1] = av_make_q(3, 50);
+    mastering.white_point[0] = av_make_q(3127, 10000);
+    mastering.white_point[1] = av_make_q(329, 1000);
+    mastering.min_luminance = av_make_q(0, 1);
+    mastering.max_luminance = av_make_q(static_cast<int>(nominalPeakLevel), 1);
+    mastering.has_primaries = 1;
+    mastering.has_luminance = 1;
+}
+
+bool AttachEncoderHdrStaticMetadata(AVCodecContext& context,
+    const std::uint32_t nominalPeakLevel) noexcept {
+    auto* contentData = av_frame_side_data_new(&context.decoded_side_data,
+        &context.nb_decoded_side_data, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL,
+        sizeof(AVContentLightMetadata), AV_FRAME_SIDE_DATA_FLAG_UNIQUE);
+    auto* masteringData = av_frame_side_data_new(&context.decoded_side_data,
+        &context.nb_decoded_side_data, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
+        sizeof(AVMasteringDisplayMetadata), AV_FRAME_SIDE_DATA_FLAG_UNIQUE);
+    if (contentData == nullptr || masteringData == nullptr) return false;
+    auto& content = *reinterpret_cast<AVContentLightMetadata*>(contentData->data);
+    auto& mastering = *reinterpret_cast<AVMasteringDisplayMetadata*>(masteringData->data);
+    FillHdrStaticMetadata(content, mastering, nominalPeakLevel);
+    return true;
+}
+
+bool AttachStreamHdrStaticMetadata(AVCodecParameters& parameters,
+    const std::uint32_t nominalPeakLevel) noexcept {
+    std::size_t contentSize = 0;
+    auto* content = av_content_light_metadata_alloc(&contentSize);
+    auto* mastering = av_mastering_display_metadata_alloc();
+    if (content == nullptr || mastering == nullptr) {
+        av_free(content);
+        av_free(mastering);
+        return false;
+    }
+    FillHdrStaticMetadata(*content, *mastering, nominalPeakLevel);
+    const auto contentAdded = av_packet_side_data_add(&parameters.coded_side_data,
+        &parameters.nb_coded_side_data, AV_PKT_DATA_CONTENT_LIGHT_LEVEL,
+        content, contentSize, 0) != nullptr;
+    const auto masteringAdded = av_packet_side_data_add(&parameters.coded_side_data,
+        &parameters.nb_coded_side_data, AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
+        mastering, sizeof(*mastering), 0) != nullptr;
+    if (!contentAdded) av_free(content);
+    if (!masteringAdded) av_free(mastering);
+    return contentAdded && masteringAdded;
 }
 
 constexpr std::size_t ColorPipelineIndex(const bool tenBit, const bool hdr10,
@@ -499,14 +555,15 @@ VideoMuxer::~VideoMuxer() {
 FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& outputPath,
     const std::string& encoderName, const std::uint32_t width, const std::uint32_t height,
     const std::uint32_t frameRateNumerator, const std::uint32_t frameRateDenominator,
-    const std::int64_t bitRate, const std::uint32_t gopSize, const std::uint32_t bFrameCount,
+    const std::int64_t bitRate, const std::uint32_t gopSize,
     const bool tenBit, const bool hdr10, const bool mixAudioSources,
     const std::uint32_t inputTextureFormat, const std::uint32_t chromaSampling,
     const std::uint32_t rateControl, const std::uint32_t qualityMode, const std::string& customVideoParameters,
     const std::int32_t quality, const std::int64_t maximumBitRate,
     const std::uint32_t lookaheadFrames, const std::string& preset, const std::string& profile,
     const std::string& sceneOptimization, const std::uint32_t multipass,
-    const std::uint32_t colorRange, const std::vector<float>& audioSourceGains,
+    const std::uint32_t colorRange, const std::uint32_t hdrNominalPeakLevel,
+    const std::vector<float>& audioSourceGains,
     const std::string& audioEncoderName, const std::uint32_t audioSampleRate,
     const std::uint32_t audioChannelCount, const std::int64_t audioBitRate,
     const std::uint32_t audioMode) noexcept {
@@ -521,6 +578,10 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     if (hdr10 && (!tenBit || inputTextureFormat != 2)) {
         lastError_ = "HDR10 requires a native ten-bit RGB10 GPU texture; refusing false HDR output.";
         return FFFResult::NotSupported;
+    }
+    if (hdr10 && (hdrNominalPeakLevel < 400 || hdrNominalPeakLevel > 2000)) {
+        lastError_ = "HDR nominal peak level must be between 400 and 2000 nits.";
+        return FFFResult::InvalidArgument;
     }
     if ((!tenBit && inputTextureFormat != 0) || (tenBit && inputTextureFormat != 2)) {
         lastError_ = "The configured bit depth and D3D11 RGB input texture format do not match.";
@@ -550,6 +611,10 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     height_ = height;
     encoderBackend_ = encoderPlan.strategy->backend;
     const auto& colorPipeline = *encoderPlan.colorPipeline;
+    if (colorRange != static_cast<std::uint32_t>(colorPipeline.colorRange)) {
+        lastError_ = "The requested color range does not match the selected SDR/HDR pipeline.";
+        return FFFResult::InvalidArgument;
+    }
     rgbToYuvPath_ = colorPipeline.conversionPath;
     yuvBitPacking_ = colorPipeline.bitPacking;
     tenBit_ = tenBit;
@@ -688,7 +753,6 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     codecContext_->sw_pix_fmt = softwareFormat;
     codecContext_->bit_rate = bitRate;
     codecContext_->gop_size = static_cast<int>(gopSize);
-    codecContext_->max_b_frames = static_cast<int>(bFrameCount);
     codecContext_->rc_max_rate = maximumBitRate;
     // Constant-quality modes must not also advertise an ABR target.  SVT-AV1 rejects
     // that combination outright and x265 otherwise silently switches back to ABR.
@@ -702,6 +766,11 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     codecContext_->colorspace = colorPipeline.colorSpace;
     codecContext_->chroma_sample_location = colorPipeline.chromaLocation;
     codecContext_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    if (hdr10 && !AttachEncoderHdrStaticMetadata(*codecContext_, hdrNominalPeakLevel)) {
+        lastError_ = "Could not attach HDR static metadata to the video encoder.";
+        ReleaseResources(false);
+        return FFFResult::FfmpegFailure;
+    }
     if (!softwareEncoder) {
         codecContext_->hw_device_ctx = av_buffer_ref(encoderHardwareDevice_);
         if (encoderFrames_ != nullptr) codecContext_->hw_frames_ctx = av_buffer_ref(encoderFrames_);
@@ -735,7 +804,11 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     if (nvenc) {
         av_dict_set(&encoderOptions, "preset", selectedPreset.c_str(), 0);
         av_dict_set(&encoderOptions, "tune", sceneOptimization.empty() ? "hq" : sceneOptimization.c_str(), 0);
-        av_dict_set(&encoderOptions, "surfaces", "8", 0);
+        // B frames are intentionally disabled for real-time recording. Keep enough surfaces
+        // for lookahead without paying for reordering surfaces that can increase latency.
+        const auto encoderSurfaces = std::clamp<std::uint32_t>(
+            std::max(8U, lookaheadFrames + 4U), 8U, 32U);
+        av_dict_set_int(&encoderOptions, "surfaces", encoderSurfaces, 0);
         const auto selectedProfile = profile.empty() && tenBit && hevcCodec
             ? (chromaSampling != 0 ? "rext" : "main10") : profile.c_str();
         if (selectedProfile != nullptr && *selectedProfile != '\0')
@@ -788,8 +861,12 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         if (rateControl == 1 && quality >= 0)
             av_dict_set_int(&encoderOptions, qualityMode == 1 ? "crf" : "qp", quality, 0);
     }
+    // Disable B frames by default for real-time recording. Custom options are deliberately
+    // applied afterwards, preserving the advanced user's ability to override every default.
+    codecContext_->max_b_frames = 0;
+    av_dict_set(&encoderOptions, "bf", "0", 0);
     // Custom options are applied after every built-in quality mode, so explicit keys can
-    // override encoder defaults in QP, CRF, CQ, global_quality, and custom mode alike.
+    // override encoder defaults in QP, CRF, CQ, global_quality, B frames, and custom mode alike.
     if (!customVideoParameters.empty()) {
         std::istringstream arguments(customVideoParameters);
         std::string token;
@@ -839,9 +916,24 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         }
         if (result >= 0) {
             videoBitstreamFilter_->time_base_in = codecContext_->time_base;
-            // HEVC chroma_sample_loc_type 0 is AVCHROMA_LOC_LEFT (the enum value minus one).
+            result = av_opt_set_int(videoBitstreamFilter_->priv_data, "video_full_range_flag",
+                colorPipeline.colorRange == AVCOL_RANGE_JPEG ? 1 : 0, 0);
+        }
+        if (result >= 0) {
+            result = av_opt_set_int(videoBitstreamFilter_->priv_data, "colour_primaries",
+                static_cast<std::int64_t>(colorPipeline.colorPrimaries), 0);
+        }
+        if (result >= 0) {
+            result = av_opt_set_int(videoBitstreamFilter_->priv_data, "transfer_characteristics",
+                static_cast<std::int64_t>(colorPipeline.colorTransfer), 0);
+        }
+        if (result >= 0) {
+            result = av_opt_set_int(videoBitstreamFilter_->priv_data, "matrix_coefficients",
+                static_cast<std::int64_t>(colorPipeline.colorSpace), 0);
+        }
+        if (result >= 0) {
             result = av_opt_set_int(videoBitstreamFilter_->priv_data,
-                "chroma_sample_loc_type", 0, 0);
+                "chroma_sample_loc_type", static_cast<std::int64_t>(colorPipeline.chromaLocation) - 1, 0);
         }
         if (result >= 0) result = av_bsf_init(videoBitstreamFilter_);
         if (result < 0) {
@@ -882,6 +974,12 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
     videoStream_->codecpar->color_space = codecContext_->colorspace;
     videoStream_->codecpar->chroma_location = codecContext_->chroma_sample_location;
     videoStream_->codecpar->codec_tag = 0;
+    // Some players read HEVC SEI while others trust only Matroska track metadata; keep both.
+    if (hdr10 && !AttachStreamHdrStaticMetadata(*videoStream_->codecpar, hdrNominalPeakLevel)) {
+        lastError_ = "Could not attach HDR static metadata to the video stream.";
+        ReleaseResources(false);
+        return FFFResult::FfmpegFailure;
+    }
     if (mixAudioSources && audioSourceGains.size() < 2) {
         lastError_ = "Mixed audio requires at least two sources.";
         ReleaseResources(false);
