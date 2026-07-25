@@ -3,7 +3,7 @@ Imports System.Reflection
 Public Module SP加载器
     Public Sub 启动时加载()
         SP_UnLock = False
-        Dim assemblyPath As String = IO.Path.Combine(Application.StartupPath, "FFFRecorderSupporter.dll")
+        Dim assemblyPath As String = IO.Path.Combine(程序目录, "FFFRecorderSupporter.dll")
         If Not IO.File.Exists(assemblyPath) Then Return
         Try
             Dim loadedAssembly As Assembly = Assembly.LoadFile(assemblyPath)

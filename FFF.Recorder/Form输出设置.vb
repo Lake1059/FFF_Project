@@ -4,7 +4,7 @@ Public Class Form输出设置
     Friend Sub 初始化页面()
         正在初始化 = True
         Try
-            If 设置.实例对象.输出目录 = Application.StartupPath Then
+            If 设置.实例对象.输出目录 = 程序目录 Then
                 设置索引(MCB_输出位置, 0)
             ElseIf 设置.实例对象.输出目录 = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos) Then
                 设置索引(MCB_输出位置, 1)
@@ -24,7 +24,7 @@ Public Class Form输出设置
         If 正在初始化 Then Return
         Select Case MCB_输出位置.SelectedIndex
             Case 0
-                设置.实例对象.输出目录 = Application.StartupPath
+                设置.实例对象.输出目录 = 程序目录
             Case 1
                 设置.实例对象.输出目录 = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos)
             Case 2

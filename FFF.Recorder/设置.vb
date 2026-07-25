@@ -6,7 +6,7 @@ Imports System.Runtime.InteropServices
 Public Class 设置
     Public Shared Property 实例对象 As New 设置
 
-    Public Property 输出目录 As String = Application.StartupPath
+    Public Property 输出目录 As String = 程序目录
     Public Property 自动命名方式 As Integer = 0
     Public Property 视频源键 As String = String.Empty
     Public Property 视频源类型 As Integer = 0
@@ -67,9 +67,9 @@ Public Class 设置
     Private Shared 默认背景图 As Image
     Private Shared 当前自有图标 As Icon
 
-    Private Shared ReadOnly 设置文件路径 As String = Path.Combine(Application.StartupPath, "FFF.Recorder.Settings.json")
-    Public Shared ReadOnly 自定义图标路径 As String = Path.Combine(Application.StartupPath, "SP_Icon")
-    Public Shared ReadOnly 自定义背景图路径 As String = Path.Combine(Application.StartupPath, "SP_BackImage")
+    Private Shared ReadOnly 设置文件路径 As String = Path.Combine(程序目录, "FFF.Recorder.Settings.json")
+    Public Shared ReadOnly 自定义图标路径 As String = Path.Combine(程序目录, "SP_Icon")
+    Public Shared ReadOnly 自定义背景图路径 As String = Path.Combine(程序目录, "SP_BackImage")
     Public Shared Sub 退出时保存设置()
         Dim 临时路径 As String = Nothing
         Try
@@ -111,8 +111,8 @@ Public Class 设置
     End Sub
 
     Public Sub 规范化()
-        输出目录 = If(String.IsNullOrWhiteSpace(输出目录), Application.StartupPath, 输出目录)
-        If Not Directory.Exists(输出目录) Then 输出目录 = Application.StartupPath
+        输出目录 = If(String.IsNullOrWhiteSpace(输出目录), 程序目录, 输出目录)
+        If Not Directory.Exists(输出目录) Then 输出目录 = 程序目录
         自动命名方式 = Math.Clamp(自动命名方式, 0, 1)
         视频捕获模式 = Math.Clamp(视频捕获模式, 0, 2)
         Dim 视频编码器名称列表 = {

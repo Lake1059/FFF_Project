@@ -94,7 +94,7 @@ Public Module 录制交互
             Dim 源 = Form总控台.当前视频源条目
             If 源 Is Nothing Then Throw New InvalidOperationException("请选择视频源。")
             Dim 音频 = Form总控台.当前音频源条目
-            Dim 输出目录 = If(String.IsNullOrWhiteSpace(设置.实例对象.输出目录), Application.StartupPath, 设置.实例对象.输出目录)
+            Dim 输出目录 = If(String.IsNullOrWhiteSpace(设置.实例对象.输出目录), 程序目录, 设置.实例对象.输出目录)
             Directory.CreateDirectory(输出目录)
             Dim 输出文件 = 生成输出文件(输出目录)
 
@@ -251,7 +251,7 @@ Public Module 录制交互
     Public Sub 切分文件()
         If 当前控制器 Is Nothing OrElse Not 当前控制器.已开始 OrElse 当前控制器.已暂停 Then Return
         Try
-            Dim 输出目录 = If(String.IsNullOrWhiteSpace(设置.实例对象.输出目录), Application.StartupPath, 设置.实例对象.输出目录)
+            Dim 输出目录 = If(String.IsNullOrWhiteSpace(设置.实例对象.输出目录), 程序目录, 设置.实例对象.输出目录)
             Directory.CreateDirectory(输出目录)
             Dim 新文件 = 生成输出文件(输出目录)
             当前控制器.切分(新文件)
