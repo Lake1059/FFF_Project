@@ -5,5 +5,6 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="FFF.Native/FFF.Native.vcxproj" Id="284c3ec6-6c87-4ae6-84f3-096921761d43" />
+  <Project Path="FFF.Player/FFF.Player.vbproj" Id="0b22364a-f9b7-4e3f-8a14-706b859aa98b" />
   <Project Path="FFF.Recorder/FFF.Recorder.vbproj" />
 </Solution>

@@ -1,0 +1,47 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+	  <OutputType>WinExe</OutputType>
+	  <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+	  <StartupObject>Sub Main</StartupObject>
+	  <UseWindowsForms>true</UseWindowsForms>
+	  <MyType>WindowsForms</MyType>
+	  <UseWPF>True</UseWPF>
+	  <!--<PublishReadyToRun>True</PublishReadyToRun>
+      <PublishReadyToRunEmitSymbols>True</PublishReadyToRunEmitSymbols>-->
+	  <SelfContained>False</SelfContained>
+	  <!--<IncludeNativeLibrariesForSelfExtract>True</IncludeNativeLibrariesForSelfExtract>-->
+	  <!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
+	  <Authors>1059 Studio</Authors>
+	  <Company>1059 Studio</Company>
+	  <AssemblyVersion>2026.7.25</AssemblyVersion>
+	  <FileVersion>2026.7.25</FileVersion>
+	  <Version>2026.7.25</Version>
+	  <Title>FFF.Player</Title>
+	  <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+	  <ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
+	  <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Import Include="System.Data" />
+    <Import Include="System.Drawing" />
+    <Import Include="System.Windows.Forms" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Update="My Project\Application.Designer.vb">
+      <DesignTime>True</DesignTime>
+      <AutoGen>True</AutoGen>
+      <DependentUpon>Application.myapp</DependentUpon>
+    </Compile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="My Project\Application.myapp">
+      <Generator>MyApplicationCodeGenerator</Generator>
+      <LastGenOutput>Application.Designer.vb</LastGenOutput>
+    </None>
+  </ItemGroup>
+
+</Project>
