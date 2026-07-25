@@ -387,7 +387,7 @@ Public NotInheritable Class 录制控制器
             End If
             If 待处理窗口帧 IsNot Nothing Then
                 待处理窗口帧.释放()
-                丢弃一帧 = 已开始值
+                丢弃一帧 = 已开始值 AndAlso 动态编码器 IsNot Nothing
             End If
             待处理窗口帧 = 参数.帧
         End SyncLock

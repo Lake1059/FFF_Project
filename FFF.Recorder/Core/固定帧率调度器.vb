@@ -73,7 +73,6 @@ Public NotInheritable Class 固定帧率调度器
     Public Sub 提交帧(帧 As 处理后视频帧)
         ArgumentNullException.ThrowIfNull(帧)
         确保未释放()
-        Dim 丢弃一帧 As Boolean
         SyncLock 同步锁
             If Not 已启动 Then
                 帧.释放()
@@ -81,11 +80,9 @@ Public NotInheritable Class 固定帧率调度器
             End If
             If 最新帧 IsNot Nothing Then
                 最新帧.释放()
-                丢弃一帧 = True
             End If
             最新帧 = 帧
         End SyncLock
-        If 丢弃一帧 Then 安全报告丢帧(会话)
         唤醒事件.Set()
     End Sub
 

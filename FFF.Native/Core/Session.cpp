@@ -299,8 +299,8 @@ FFFResult RecorderSession::Submit(ID3D11Texture2D* texture, const std::uint32_t 
     return FFFResult::Success;
 }
 
-// 累加托管捕获/CFR 层在进入编码器前主动丢弃的源帧。此计数不改变媒体时间线，也不把编码
-// 失败误算为调度丢帧；零数量是合法空操作，便于调用方批量汇报。
+// 累加托管层因处理过载而丢失的 VFR 源帧，或 CFR 调度器错过的输出时隙。CFR 对高帧率
+// 捕获源所做的正常抽样不属于丢帧；零数量是合法空操作，便于调用方批量汇报。
 FFFResult RecorderSession::ReportDroppedFrames(const std::uint32_t frameCount) noexcept {
     const auto state = state_.load();
     if (state != FFFSessionState::Running && state != FFFSessionState::Paused) return FFFResult::InvalidState;
