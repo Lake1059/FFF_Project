@@ -21,12 +21,57 @@
 	  <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
 	  <ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
 	  <PlatformTarget>x64</PlatformTarget>
+	  <Prefer32Bit>false</Prefer32Bit>
+	  <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <Import Include="System.Data" />
     <Import Include="System.Drawing" />
     <Import Include="System.Windows.Forms" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProductNative Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" />
+    <DevelopmentRuntime Include="..\runtime\avcodec*.dll" />
+    <DevelopmentRuntime Include="..\runtime\avformat*.dll" />
+    <DevelopmentRuntime Include="..\runtime\avutil*.dll" />
+    <DevelopmentRuntime Include="..\runtime\swresample*.dll" />
+    <DevelopmentRuntime Include="..\runtime\swscale*.dll" />
+    <DevelopmentRuntime Include="..\runtime\avfilter*.dll" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DirectX" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FFF.Native\FFF.Native.vcxproj" Condition="'$(MSBuildRuntimeType)' != 'Core'" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <Content Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" Link="FFF.Native.dll">
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+
+  <Target Name="CopyNativeRuntime" AfterTargets="Build">
+    <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
+    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyProductNativeToPublish" AfterTargets="Publish" Condition="'$(PublishSingleFile)' != 'true'">
+    <Copy SourceFiles="@(ProductNative)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <ItemGroup>
+    <Reference Include="LakeUI">
+      <HintPath>..\..\LakeUI\LakeUI\bin\Debug\net10.0-windows10.0.17763.0\LakeUI.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>

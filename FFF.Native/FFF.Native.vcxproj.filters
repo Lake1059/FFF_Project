@@ -29,7 +29,10 @@
     <ClCompile Include="pch.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="Ffmpeg\FfmpegRuntime.cpp">
+    <ClCompile Include="Shared\Ffmpeg\FfmpegRuntime.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Subtitle\BitmapSubtitleDecoder.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

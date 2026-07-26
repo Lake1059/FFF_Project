@@ -1,0 +1,204 @@
+Imports System.Runtime.InteropServices
+Imports Microsoft.Win32.SafeHandles
+
+Friend Enum 原生播放器结果 As Integer
+    成功 = 0
+    参数无效 = -1
+    状态无效 = -2
+    缓冲区不足 = -3
+    原生失败 = -4
+    FFmpeg失败 = -5
+    设备失败 = -6
+    不支持 = -7
+End Enum
+
+<UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+Friend Delegate Sub 原生播放器回调(上下文 As IntPtr, 事件类型 As UInteger, 详情UTF8 As IntPtr)
+
+<StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生播放器配置
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 输出窗口 As IntPtr
+    Public 解码器 As UInteger
+    Public 色彩模式 As UInteger
+    Public SDR峰值 As Single
+    Public HDR峰值 As Single
+    Public SDR纸白 As Single
+    Public 音频端点UTF8 As IntPtr
+    Public 回调 As IntPtr
+    Public 回调上下文 As IntPtr
+End Structure
+
+<StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生播放器快照
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 状态 As UInteger
+    Public 解码器 As UInteger
+    Public 请求色彩模式 As UInteger
+    Public 实际色彩模式 As UInteger
+    Public 位置100纳秒 As Long
+    Public 时长100纳秒 As Long
+    Public 帧序号 As Long
+    Public 原始帧PTS As Long
+    Public 帧时间基分子 As Integer
+    Public 帧时间基分母 As Integer
+    Public 当前视频流 As Integer
+    Public 当前音频流 As Integer
+    Public 视频宽度 As UInteger
+    Public 视频高度 As UInteger
+    Public 是HDR源 As UInteger
+    Public 正在使用外部音轨 As UInteger
+    Public 外部音轨偏移100纳秒 As Long
+End Structure
+
+<Flags>
+Friend Enum 原生位图字幕标志 As UInteger
+    无 = 0
+    清除 = 1
+    流结束 = 2
+    强制 = 4
+End Enum
+
+<StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生位图字幕帧
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 标志 As 原生位图字幕标志
+    Public 保留 As UInteger
+    Public 开始100纳秒 As Long
+    Public 结束100纳秒 As Long
+    Public 画布宽度 As Integer
+    Public 画布高度 As Integer
+    Public X As Integer
+    Public Y As Integer
+    Public 宽度 As Integer
+    Public 高度 As Integer
+    Public 行跨度 As Integer
+    Public 像素字节数 As UInteger
+    Public 序号 As Long
+End Structure
+
+Friend NotInheritable Class 播放器原生句柄
+    Inherits SafeHandleZeroOrMinusOneIsInvalid
+    Private 回调句柄 As GCHandle
+
+    Friend Sub New(原生指针 As IntPtr, 持有回调 As GCHandle)
+        MyBase.New(True)
+        SetHandle(原生指针)
+        回调句柄 = 持有回调
+    End Sub
+
+    Protected Overrides Function ReleaseHandle() As Boolean
+        播放器原生接口.FFF3FP_Destroy(handle)
+        If 回调句柄.IsAllocated Then 回调句柄.Free()
+        Return True
+    End Function
+End Class
+
+Friend NotInheritable Class 位图字幕原生句柄
+    Inherits SafeHandleZeroOrMinusOneIsInvalid
+
+    Friend Sub New(原生指针 As IntPtr)
+        MyBase.New(True)
+        SetHandle(原生指针)
+    End Sub
+
+    Protected Overrides Function ReleaseHandle() As Boolean
+        播放器原生接口.FFF3FP_DestroyBitmapSubtitle(handle)
+        Return True
+    End Function
+End Class
+
+Friend Module 播放器原生接口
+    Friend Const 动态库名称 As String = "FFF.Native.dll"
+
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetApiVersion() As UInteger
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_Create(ByRef 配置 As 原生播放器配置, ByRef 播放器 As IntPtr) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_Open(播放器 As 播放器原生句柄, 路径UTF8 As IntPtr) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_Play(播放器 As 播放器原生句柄) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_Pause(播放器 As 播放器原生句柄) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_Stop(播放器 As 播放器原生句柄) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_Close(播放器 As 播放器原生句柄) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_Seek(播放器 As 播放器原生句柄, 位置100纳秒 As Long) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SeekFrame(播放器 As 播放器原生句柄, 帧序号 As Long) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_StepFrame(播放器 As 播放器原生句柄, 方向 As Integer) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SelectVideoStream(播放器 As 播放器原生句柄, 流索引 As Integer) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SelectAudioStream(播放器 As 播放器原生句柄, 流索引 As Integer) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_LoadExternalAudio(播放器 As 播放器原生句柄, 路径UTF8 As IntPtr, 流索引 As Integer, 偏移100纳秒 As Long) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_ClearExternalAudio(播放器 As 播放器原生句柄) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetExternalAudioOffset(播放器 As 播放器原生句柄, 偏移100纳秒 As Long) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetColorMode(播放器 As 播放器原生句柄, 模式 As UInteger, SDR峰值 As Single, HDR峰值 As Single, SDR纸白 As Single) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetOutputWindow(播放器 As 播放器原生句柄, 窗口 As IntPtr) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetAudioEndpoint(播放器 As 播放器原生句柄, 端点UTF8 As IntPtr) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetVolume(播放器 As 播放器原生句柄, 音量 As Single, 静音 As UInteger) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetSnapshot(播放器 As 播放器原生句柄, ByRef 快照 As 原生播放器快照) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetMediaInfo(播放器 As 播放器原生句柄, 输出UTF8 As IntPtr, 输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetLastError(播放器 As 播放器原生句柄, 输出UTF8 As IntPtr, 输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Sub FFF3FP_Destroy(播放器 As IntPtr)
+    End Sub
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_OpenBitmapSubtitle(路径UTF8 As IntPtr, 流索引 As Integer, ByRef 解码器 As IntPtr) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_ReadBitmapSubtitle(解码器 As 位图字幕原生句柄, ByRef 帧 As 原生位图字幕帧) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_CopyBitmapSubtitlePixels(解码器 As 位图字幕原生句柄, 输出 As IntPtr, 输出大小 As UInteger) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SeekBitmapSubtitle(解码器 As 位图字幕原生句柄, 位置100纳秒 As Long) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetBitmapSubtitleLastError(解码器 As 位图字幕原生句柄, 输出UTF8 As IntPtr, 输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Sub FFF3FP_DestroyBitmapSubtitle(解码器 As IntPtr)
+    End Sub
+End Module

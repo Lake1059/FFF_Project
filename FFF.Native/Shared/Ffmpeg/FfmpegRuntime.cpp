@@ -16,6 +16,8 @@ constexpr FfmpegModule Modules[] = {
     { "avformat-63.dll", L"avformat" },
     { "avutil-61.dll", L"avutil" },
     { "swresample-7.dll", L"swresample" },
+    { "swscale-10.dll", L"swscale" },
+    { "avfilter-12.dll", L"avfilter" },
 };
 
 bool EqualsIgnoreCase(const wchar_t* left, const wchar_t* right) {

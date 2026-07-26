@@ -21,12 +21,14 @@ $IncludeDirectory = Join-Path $ThirdPartyDirectory "include"
 $LibraryDirectory = Join-Path $ThirdPartyDirectory "lib\x64"
 $RuntimeDirectory = Join-Path $ProjectRoot "runtime"
 $PinnedCommit = "7f6b35d6c804ed8d1bc517c33044f075d72852ba"
-$Components = @("libavcodec", "libavformat", "libavutil", "libswresample")
+$Components = @("libavcodec", "libavformat", "libavutil", "libswresample", "libswscale", "libavfilter")
 $RuntimeFiles = @(
     @{ ImportName = "avcodec-63"; Prefix = "avcodec" },
     @{ ImportName = "avformat-63"; Prefix = "avformat" },
     @{ ImportName = "avutil-61"; Prefix = "avutil" },
-    @{ ImportName = "swresample-7"; Prefix = "swresample" }
+    @{ ImportName = "swresample-7"; Prefix = "swresample" },
+    @{ ImportName = "swscale-10"; Prefix = "swscale" },
+    @{ ImportName = "avfilter-12"; Prefix = "avfilter" }
 )
 
 function Get-VisualCppTool {
@@ -153,4 +155,4 @@ foreach ($item in $RuntimeFiles) {
 }
 
 Write-Host "FFmpeg headers, import libraries, and runtime DLLs are ready."
-Write-Host "Native accepts avcodec, avformat, avutil, and swresample DLL names with an optional numeric suffix."
+Write-Host "Native accepts all prepared FFmpeg DLL names with an optional numeric suffix."

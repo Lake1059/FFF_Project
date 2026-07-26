@@ -11,6 +11,8 @@ extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
 #include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
+#include <libavfilter/avfilter.h>
 }
 
 using Microsoft::WRL::ComPtr;
@@ -140,7 +142,9 @@ FFFResult FFF_RunSelfTest(char* outputUtf8, const std::uint32_t outputSize,
         const bool versionsOk = AV_VERSION_MAJOR(avcodec_version()) == LIBAVCODEC_VERSION_MAJOR &&
             AV_VERSION_MAJOR(avformat_version()) == LIBAVFORMAT_VERSION_MAJOR &&
             AV_VERSION_MAJOR(avutil_version()) == LIBAVUTIL_VERSION_MAJOR &&
-            AV_VERSION_MAJOR(swresample_version()) == LIBSWRESAMPLE_VERSION_MAJOR;
+            AV_VERSION_MAJOR(swresample_version()) == LIBSWRESAMPLE_VERSION_MAJOR &&
+            AV_VERSION_MAJOR(swscale_version()) == LIBSWSCALE_VERSION_MAJOR &&
+            AV_VERSION_MAJOR(avfilter_version()) == LIBAVFILTER_VERSION_MAJOR;
         const std::string json = std::string("{\"passed\":") + (clockOk && versionsOk ? "true" : "false") +
             ",\"qpcFrequency\":" + std::to_string(timeline.Frequency()) +
             ",\"ffmpegMajorsMatch\":" + (versionsOk ? "true" : "false") + "}";
@@ -158,7 +162,9 @@ FFFResult FFF_GetRuntimeInfo(char* outputUtf8, const std::uint32_t outputSize,
             "\",\"avcodec\":" + std::to_string(avcodec_version()) +
             ",\"avformat\":" + std::to_string(avformat_version()) +
             ",\"avutil\":" + std::to_string(avutil_version()) +
-            ",\"swresample\":" + std::to_string(swresample_version()) + "}";
+            ",\"swresample\":" + std::to_string(swresample_version()) +
+            ",\"swscale\":" + std::to_string(swscale_version()) +
+            ",\"avfilter\":" + std::to_string(avfilter_version()) + "}";
         return CopyUtf8(json, outputUtf8, outputSize, requiredSize);
     } catch (...) { return FFFResult::NativeFailure; }
 }

@@ -46,6 +46,8 @@
     <DevelopmentRuntime Include="..\runtime\avformat*.dll" />
     <DevelopmentRuntime Include="..\runtime\avutil*.dll" />
     <DevelopmentRuntime Include="..\runtime\swresample*.dll" />
+    <DevelopmentRuntime Include="..\runtime\swscale*.dll" />
+    <DevelopmentRuntime Include="..\runtime\avfilter*.dll" />
   </ItemGroup>
 
   <ItemGroup>

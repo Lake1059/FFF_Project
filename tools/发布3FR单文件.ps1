@@ -52,7 +52,10 @@ try {
     $Executable = Join-Path $OutputDirectory "FFF.Recorder.exe"
     $PendingExecutable = Join-Path $OutputDirectory ("FFF.Recorder.exe.new-" + [Guid]::NewGuid().ToString("N"))
     Copy-Item -LiteralPath $PublishedExecutable -Destination $PendingExecutable
-    Move-Item -LiteralPath $PendingExecutable -Destination $Executable -Force
+    if (Test-Path -LiteralPath $Executable -PathType Leaf) {
+        Remove-Item -LiteralPath $Executable -Force
+    }
+    Move-Item -LiteralPath $PendingExecutable -Destination $Executable
     $PendingExecutable = $null
     $PublishedFile = Get-Item -LiteralPath $Executable
     Write-Host "Single-file publish completed: $($PublishedFile.FullName) ($($PublishedFile.Length) bytes)"
