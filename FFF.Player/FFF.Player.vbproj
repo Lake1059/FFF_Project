@@ -75,6 +75,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="UI\播放器画面控件.vb" />
+    <Compile Include="UI\播放器画面控件.vb">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Update="My Project\Application.Designer.vb">
       <DesignTime>True</DesignTime>
       <AutoGen>True</AutoGen>

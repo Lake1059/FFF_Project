@@ -32,6 +32,7 @@ public:
     FFFResult Stop() noexcept;
     FFFResult Close() noexcept;
     FFFResult Seek(std::int64_t position100ns) noexcept;
+    FFFResult SeekKeyframe(std::int64_t position100ns) noexcept;
     FFFResult SeekFrame(std::int64_t frameIndex) noexcept;
     FFFResult StepFrame(std::int32_t direction) noexcept;
     FFFResult SelectVideoStream(std::int32_t streamIndex) noexcept;
@@ -45,7 +46,9 @@ public:
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;
     FFFResult SetVolume(float volume, bool muted) noexcept;
+    FFFResult SetTimedTextLayer(const FFF3FPTimedTextLayer& layer) noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
+    FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
 
@@ -57,7 +60,8 @@ private:
     void PumpExternalAudio() noexcept;
     void DoOpen(std::string pathUtf8) noexcept;
     void DoClose(FFF3FPState finalState = FFF3FPState::Closed) noexcept;
-    void DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1) noexcept;
+    void DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1,
+        bool exact = true) noexcept;
     void DecodeUntilSeekTarget() noexcept;
     void DoSelectStream(std::int32_t streamIndex, bool video) noexcept;
     void DoLoadExternalAudio(std::string pathUtf8, std::int32_t streamIndex,
@@ -74,6 +78,10 @@ private:
         std::int32_t streamIndex, std::int32_t hardwarePixelFormat) noexcept;
     FFFResult DecodePacket(AVCodecContext* decoder, AVPacket* packet, bool video,
         AVFormatContext* owner) noexcept;
+    bool PumpVideoPresentation() noexcept;
+    void QueueVideoFrame(AVFrame* frame) noexcept;
+    void ClearVideoQueue() noexcept;
+    std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
     void QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, std::int32_t streamIndex) noexcept;
     void FlushAtEnd() noexcept;
@@ -94,6 +102,7 @@ private:
     mutable std::mutex mutex_;
     mutable std::mutex snapshotMutex_;
     mutable std::mutex errorMutex_;
+    mutable std::mutex timedTextSubmitMutex_;
     std::condition_variable commandCondition_;
     std::deque<Command> commands_;
     std::thread worker_;
@@ -126,8 +135,12 @@ private:
     std::int64_t qpcFrequency_;
     std::int64_t seekTarget100ns_;
     std::int64_t seekTargetFrame_;
+    bool keyframeSeekPending_;
     std::int64_t lastVideoFrameDuration100ns_;
     std::vector<std::int64_t> framePtsIndex_;
+    std::deque<AVFrame*> videoFrameQueue_;
     AVFrame* displayedFrame_;
     bool draining_;
+    bool timedTextCommandQueued_;
+    TimedTextRenderLayer pendingTimedTextLayer_;
 };

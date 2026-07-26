@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <RootNamespace></RootNamespace>
+    <StartupObject>Program</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FFF.Player\FFF.Player.vbproj" />
+    <ProductNative Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" />
+    <DevelopmentRuntime Include="..\runtime\avcodec*.dll" />
+    <DevelopmentRuntime Include="..\runtime\avformat*.dll" />
+    <DevelopmentRuntime Include="..\runtime\avutil*.dll" />
+    <DevelopmentRuntime Include="..\runtime\swresample*.dll" />
+    <DevelopmentRuntime Include="..\runtime\swscale*.dll" />
+    <DevelopmentRuntime Include="..\runtime\avfilter*.dll" />
+  </ItemGroup>
+
+  <Target Name="CopyNativeRuntime" AfterTargets="Build">
+    <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')"
+           Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
+    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime)" DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

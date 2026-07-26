@@ -51,6 +51,11 @@ Friend Structure 原生播放器快照
     Public 是HDR源 As UInteger
     Public 正在使用外部音轨 As UInteger
     Public 外部音轨偏移100纳秒 As Long
+    Public 已解码视频帧数 As ULong
+    Public 已呈现视频帧数 As ULong
+    Public 已丢弃视频帧数 As ULong
+    Public 视频队列帧数 As UInteger
+    Public 保留 As UInteger
 End Structure
 
 <Flags>
@@ -78,6 +83,77 @@ Friend Structure 原生位图字幕帧
     Public 行跨度 As Integer
     Public 像素字节数 As UInteger
     Public 序号 As Long
+End Structure
+
+Friend Enum 原生定时文字命令类型 As UInteger
+    文字 = 1
+    位图 = 2
+End Enum
+
+<Flags>
+Friend Enum 原生定时文字标志 As UInteger
+    无 = 0
+    粗体 = 1
+    斜体 = 2
+    下划线 = 4
+    删除线 = 8
+End Enum
+
+Friend Enum 原生定时文字对齐 As UInteger
+    靠前 = 0
+    居中 = 1
+    靠后 = 2
+End Enum
+
+<StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生定时文字命令
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 类型 As 原生定时文字命令类型
+    Public 标志 As 原生定时文字标志
+    Public X As Single
+    Public Y As Single
+    Public 宽度 As Single
+    Public 高度 As Single
+    Public 前景色ARGB As UInteger
+    Public 描边色ARGB As UInteger
+    Public 字号 As Single
+    Public 描边宽度 As Single
+    Public 水平对齐 As 原生定时文字对齐
+    Public 垂直对齐 As 原生定时文字对齐
+    Public 文本UTF8 As IntPtr
+    Public 字体UTF8 As IntPtr
+    Public 位图BGRA As IntPtr
+    Public 位图宽度 As UInteger
+    Public 位图高度 As UInteger
+    Public 位图行跨度 As UInteger
+    Public 位图字节数 As UInteger
+    Public 内容标识 As ULong
+End Structure
+
+<StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生定时文字图层
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 画布宽度 As UInteger
+    Public 画布高度 As UInteger
+    Public 命令数 As UInteger
+    Public 保留 As UInteger
+    Public 序号 As ULong
+    Public 命令 As IntPtr
+End Structure
+
+<StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生定时文字状态
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 已提交序号 As ULong
+    Public 已绘制序号 As ULong
+    Public 命令数 As UInteger
+    Public 画布宽度 As UInteger
+    Public 画布高度 As UInteger
+    Public 保留 As UInteger
+    Public 可见像素数 As ULong
 End Structure
 
 Friend NotInheritable Class 播放器原生句柄
@@ -139,6 +215,9 @@ Friend Module 播放器原生接口
     Friend Function FFF3FP_Seek(播放器 As 播放器原生句柄, 位置100纳秒 As Long) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SeekKeyframe(播放器 As 播放器原生句柄, 位置100纳秒 As Long) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SeekFrame(播放器 As 播放器原生句柄, 帧序号 As Long) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
@@ -171,8 +250,16 @@ Friend Module 播放器原生接口
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetVolume(播放器 As 播放器原生句柄, 音量 As Single, 静音 As UInteger) As 原生播放器结果
     End Function
+
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl)>
+    Friend Function FFF3FP_SetTimedTextLayer(播放器 As 播放器原生句柄, ByRef 图层 As 原生定时文字图层) As 原生播放器结果
+    End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetSnapshot(播放器 As 播放器原生句柄, ByRef 快照 As 原生播放器快照) As 原生播放器结果
+    End Function
+
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl)>
+    Friend Function FFF3FP_GetTimedTextStatus(播放器 As 播放器原生句柄, ByRef 状态 As 原生定时文字状态) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetMediaInfo(播放器 As 播放器原生句柄, 输出UTF8 As IntPtr, 输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果

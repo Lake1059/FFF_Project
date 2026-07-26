@@ -21,7 +21,7 @@ Public NotInheritable Class 播放器会话
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
         配置.验证()
-        If 播放器原生接口.FFF3FP_GetApiVersion() <> 1UI Then Throw New InvalidOperationException("FFF.Native 的 3FP API 版本不兼容。")
+        If 播放器原生接口.FFF3FP_GetApiVersion() <> 2UI Then Throw New InvalidOperationException("FFF.Native 的 3FP API 版本不兼容。")
         同步上下文 = 配置.事件同步上下文
         Dim 状态 = New 回调状态()
         Dim 回调句柄 = GCHandle.Alloc(状态)
@@ -29,7 +29,7 @@ Public NotInheritable Class 播放器会话
         Try
             If Not String.IsNullOrEmpty(配置.音频端点标识) Then 端点指针 = Marshal.StringToCoTaskMemUTF8(配置.音频端点标识)
             Dim 原生配置 As New 原生播放器配置 With {
-                .大小 = CUInt(Marshal.SizeOf(Of 原生播放器配置)()), .版本 = 1UI,
+                .大小 = CUInt(Marshal.SizeOf(Of 原生播放器配置)()), .版本 = 2UI,
                 .输出窗口 = 配置.输出窗口句柄, .解码器 = CUInt(配置.解码器),
                 .色彩模式 = CUInt(配置.色彩模式), .SDR峰值 = 配置.SDR峰值尼特,
                 .HDR峰值 = 配置.HDR峰值尼特, .SDR纸白 = 配置.SDR纸白尼特,
@@ -126,6 +126,10 @@ Public NotInheritable Class 播放器会话
         If 位置 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(位置))
         检查结果(播放器原生接口.FFF3FP_Seek(取得句柄(), 位置.Ticks))
     End Sub
+    Public Sub 跳转到关键帧(位置 As TimeSpan)
+        If 位置 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(位置))
+        检查结果(播放器原生接口.FFF3FP_SeekKeyframe(取得句柄(), 位置.Ticks))
+    End Sub
     Public Sub 跳转到帧(帧序号 As Long)
         If 帧序号 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(帧序号))
         检查结果(播放器原生接口.FFF3FP_SeekFrame(取得句柄(), 帧序号))
@@ -165,9 +169,82 @@ Public NotInheritable Class 播放器会话
         检查结果(播放器原生接口.FFF3FP_SetVolume(取得句柄(), 音量, If(静音, 1UI, 0UI)))
     End Sub
 
+    Public Sub 设置定时文字图层(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令), 序号 As ULong)
+        If 画布大小.Width <= 0 OrElse 画布大小.Height <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(画布大小))
+        ArgumentNullException.ThrowIfNull(命令)
+        Dim native As 原生定时文字命令()
+        If 命令.Count = 0 Then
+            native = Array.Empty(Of 原生定时文字命令)()
+        Else
+            ReDim native(命令.Count - 1)
+        End If
+        Dim allocations As New List(Of IntPtr)(命令.Count * 2)
+        Dim pins As New List(Of GCHandle)()
+        Dim commandsPin As GCHandle
+        Try
+            For index = 0 To 命令.Count - 1
+                Dim source = 命令(index)
+                ArgumentNullException.ThrowIfNull(source)
+                Dim value As New 原生定时文字命令 With {
+                    .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字命令)()), .版本 = 1UI,
+                    .类型 = If(source.是位图, 原生定时文字命令类型.位图, 原生定时文字命令类型.文字),
+                    .标志 = CType(CUInt(source.样式), 原生定时文字标志),
+                    .X = source.X, .Y = source.Y, .宽度 = source.宽度, .高度 = source.高度,
+                    .前景色ARGB = source.前景色ARGB, .描边色ARGB = source.描边色ARGB,
+                    .字号 = source.字号, .描边宽度 = source.描边宽度,
+                    .水平对齐 = CType(CUInt(source.水平对齐), 原生定时文字对齐),
+                    .垂直对齐 = CType(CUInt(source.垂直对齐), 原生定时文字对齐),
+                    .内容标识 = source.内容标识}
+                If source.是位图 Then
+                    ArgumentNullException.ThrowIfNull(source.位图像素BGRA)
+                    Dim pinned = GCHandle.Alloc(source.位图像素BGRA, GCHandleType.Pinned)
+                    pins.Add(pinned)
+                    value.位图BGRA = pinned.AddrOfPinnedObject()
+                    value.位图宽度 = CUInt(source.位图宽度)
+                    value.位图高度 = CUInt(source.位图高度)
+                    value.位图行跨度 = CUInt(source.位图行跨度)
+                    value.位图字节数 = CUInt(source.位图像素BGRA.Length)
+                Else
+                    value.文本UTF8 = Marshal.StringToCoTaskMemUTF8(If(source.文本, String.Empty))
+                    value.字体UTF8 = Marshal.StringToCoTaskMemUTF8(If(source.字体, String.Empty))
+                    allocations.Add(value.文本UTF8)
+                    allocations.Add(value.字体UTF8)
+                End If
+                native(index) = value
+            Next
+            Dim pointer = IntPtr.Zero
+            If native.Length > 0 Then
+                commandsPin = GCHandle.Alloc(native, GCHandleType.Pinned)
+                pointer = commandsPin.AddrOfPinnedObject()
+            End If
+            Dim layer As New 原生定时文字图层 With {
+                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字图层)()), .版本 = 1UI,
+                .画布宽度 = CUInt(画布大小.Width), .画布高度 = CUInt(画布大小.Height),
+                .命令数 = CUInt(native.Length), .序号 = 序号, .命令 = pointer}
+            检查结果(播放器原生接口.FFF3FP_SetTimedTextLayer(取得句柄(), layer))
+        Finally
+            If commandsPin.IsAllocated Then commandsPin.Free()
+            For Each pinned In pins
+                If pinned.IsAllocated Then pinned.Free()
+            Next
+            For Each pointer In allocations
+                If pointer <> IntPtr.Zero Then Marshal.FreeCoTaskMem(pointer)
+            Next
+        End Try
+    End Sub
+
+    Public ReadOnly Property 当前定时文字状态 As 定时文字状态
+        Get
+            Dim 值 As New 原生定时文字状态 With {
+                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字状态)()), .版本 = 1UI}
+            检查结果(播放器原生接口.FFF3FP_GetTimedTextStatus(取得句柄(), 值))
+            Return New 定时文字状态(值)
+        End Get
+    End Property
+
     Public ReadOnly Property 当前快照 As 播放器快照
         Get
-            Dim 值 As New 原生播放器快照 With {.大小 = CUInt(Marshal.SizeOf(Of 原生播放器快照)()), .版本 = 1UI}
+            Dim 值 As New 原生播放器快照 With {.大小 = CUInt(Marshal.SizeOf(Of 原生播放器快照)()), .版本 = 2UI}
             检查结果(播放器原生接口.FFF3FP_GetSnapshot(取得句柄(), 值))
             Return New 播放器快照(值)
         End Get

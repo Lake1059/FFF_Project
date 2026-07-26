@@ -71,6 +71,10 @@ Public NotInheritable Class 播放器快照
         是HDR源 = 值.是HDR源 <> 0
         正在使用外部音轨 = 值.正在使用外部音轨 <> 0
         外部音轨偏移 = TimeSpan.FromTicks(值.外部音轨偏移100纳秒)
+        已解码视频帧数 = 值.已解码视频帧数
+        已呈现视频帧数 = 值.已呈现视频帧数
+        已丢弃视频帧数 = 值.已丢弃视频帧数
+        视频队列帧数 = CInt(值.视频队列帧数)
     End Sub
 
     Public ReadOnly Property 状态 As 播放状态
@@ -90,6 +94,89 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 是HDR源 As Boolean
     Public ReadOnly Property 正在使用外部音轨 As Boolean
     Public ReadOnly Property 外部音轨偏移 As TimeSpan
+    Public ReadOnly Property 已解码视频帧数 As ULong
+    Public ReadOnly Property 已呈现视频帧数 As ULong
+    Public ReadOnly Property 已丢弃视频帧数 As ULong
+    Public ReadOnly Property 视频队列帧数 As Integer
+End Class
+
+Public Enum 定时文字对齐
+    靠前 = 0
+    居中 = 1
+    靠后 = 2
+End Enum
+
+<Flags>
+Public Enum 定时文字样式
+    无 = 0
+    粗体 = 1
+    斜体 = 2
+    下划线 = 4
+    删除线 = 8
+End Enum
+
+Public NotInheritable Class 定时文字命令
+    Private Sub New()
+    End Sub
+
+    Friend Property 是位图 As Boolean
+    Friend Property 位图像素BGRA As Byte()
+    Friend Property 位图宽度 As Integer
+    Friend Property 位图高度 As Integer
+    Friend Property 位图行跨度 As Integer
+
+    Public Property 文本 As String = String.Empty
+    Public Property 字体 As String = "Segoe UI"
+    Public Property 字号 As Single
+    Public Property 样式 As 定时文字样式
+    Public Property 前景色ARGB As UInteger = &HFFFFFFFFUI
+    Public Property 描边色ARGB As UInteger = &HFF000000UI
+    Public Property 描边宽度 As Single
+    Public Property X As Single
+    Public Property Y As Single
+    Public Property 宽度 As Single
+    Public Property 高度 As Single
+    Public Property 水平对齐 As 定时文字对齐
+    Public Property 垂直对齐 As 定时文字对齐
+    Public Property 内容标识 As ULong
+
+    Public Shared Function 创建文字(文本 As String, 字体 As String, 字号 As Single,
+                                  区域 As RectangleF, 前景色ARGB As UInteger,
+                                  描边色ARGB As UInteger, 描边宽度 As Single,
+                                  水平对齐 As 定时文字对齐, 垂直对齐 As 定时文字对齐,
+                                  Optional 样式 As 定时文字样式 = 定时文字样式.无) As 定时文字命令
+        Return New 定时文字命令 With {
+            .文本 = If(文本, String.Empty), .字体 = If(字体, "Segoe UI"), .字号 = 字号,
+            .X = 区域.X, .Y = 区域.Y, .宽度 = 区域.Width, .高度 = 区域.Height,
+            .前景色ARGB = 前景色ARGB, .描边色ARGB = 描边色ARGB, .描边宽度 = 描边宽度,
+            .水平对齐 = 水平对齐, .垂直对齐 = 垂直对齐, .样式 = 样式}
+    End Function
+
+    Public Shared Function 创建位图(像素BGRA As Byte(), 位图宽度 As Integer, 位图高度 As Integer,
+                                  行跨度 As Integer, 区域 As RectangleF,
+                                  Optional 内容标识 As ULong = 0) As 定时文字命令
+        ArgumentNullException.ThrowIfNull(像素BGRA)
+        Return New 定时文字命令 With {
+            .是位图 = True, .位图像素BGRA = 像素BGRA, .位图宽度 = 位图宽度,
+            .位图高度 = 位图高度, .位图行跨度 = 行跨度,
+            .X = 区域.X, .Y = 区域.Y, .宽度 = 区域.Width, .高度 = 区域.Height,
+            .内容标识 = 内容标识}
+    End Function
+End Class
+
+Public NotInheritable Class 定时文字状态
+    Friend Sub New(值 As 原生定时文字状态)
+        已提交序号 = 值.已提交序号
+        已绘制序号 = 值.已绘制序号
+        命令数 = CInt(值.命令数)
+        画布大小 = New Size(CInt(值.画布宽度), CInt(值.画布高度))
+        可见像素数 = 值.可见像素数
+    End Sub
+    Public ReadOnly Property 已提交序号 As ULong
+    Public ReadOnly Property 已绘制序号 As ULong
+    Public ReadOnly Property 命令数 As Integer
+    Public ReadOnly Property 画布大小 As Size
+    Public ReadOnly Property 可见像素数 As ULong
 End Class
 
 Public NotInheritable Class 媒体信息

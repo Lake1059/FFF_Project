@@ -20,7 +20,7 @@ public:
 
     FFFResult Start() noexcept;
     void Stop() noexcept;
-    FFFResult Enqueue(const AVFrame* frame) noexcept;
+    FFFResult Enqueue(const AVFrame* frame, std::int64_t position100ns) noexcept;
     void SetPaused(bool paused) noexcept;
     void Reset(std::int64_t position100ns) noexcept;
     void SetVolume(float volume, bool muted) noexcept;
@@ -58,5 +58,7 @@ private:
     std::atomic<std::int64_t> resetPosition100ns_;
     std::atomic<std::int64_t> clockPosition100ns_;
     std::atomic<std::uint64_t> pendingMediaFrames_;
+    std::atomic<std::uint64_t> playedMediaFrames_;
+    std::uint64_t submittedTimelineFrames_;
     std::string lastError_;
 };

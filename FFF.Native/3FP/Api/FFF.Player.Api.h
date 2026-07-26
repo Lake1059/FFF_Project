@@ -75,6 +75,11 @@ struct FFF3FPSnapshot {
     std::uint32_t isHdrSource;
     std::uint32_t isExternalAudio;
     std::int64_t externalAudioOffset100ns;
+    std::uint64_t decodedVideoFrames;
+    std::uint64_t presentedVideoFrames;
+    std::uint64_t droppedVideoFrames;
+    std::uint32_t queuedVideoFrames;
+    std::uint32_t reserved;
 };
 
 using FFF3FPHandle = void*;
@@ -105,6 +110,73 @@ struct FFF3FPBitmapSubtitleFrame {
     std::int64_t sequence;
 };
 
+enum class FFF3FPTimedTextCommandType : std::uint32_t {
+    Text = 1,
+    Bitmap = 2,
+};
+
+enum class FFF3FPTimedTextFlags : std::uint32_t {
+    None = 0,
+    Bold = 1,
+    Italic = 2,
+    Underline = 4,
+    Strikeout = 8,
+};
+
+enum class FFF3FPTimedTextAlignment : std::uint32_t {
+    Near = 0,
+    Center = 1,
+    Far = 2,
+};
+
+struct FFF3FPTimedTextCommand {
+    std::uint32_t size;
+    std::uint32_t version;
+    FFF3FPTimedTextCommandType type;
+    FFF3FPTimedTextFlags flags;
+    float x;
+    float y;
+    float width;
+    float height;
+    std::uint32_t foregroundArgb;
+    std::uint32_t outlineArgb;
+    float fontSize;
+    float outlineWidth;
+    FFF3FPTimedTextAlignment horizontalAlignment;
+    FFF3FPTimedTextAlignment verticalAlignment;
+    const char* textUtf8;
+    const char* fontFamilyUtf8;
+    const void* bitmapBgra;
+    std::uint32_t bitmapWidth;
+    std::uint32_t bitmapHeight;
+    std::uint32_t bitmapStride;
+    std::uint32_t bitmapBytes;
+    std::uint64_t contentId;
+};
+
+struct FFF3FPTimedTextLayer {
+    std::uint32_t size;
+    std::uint32_t version;
+    std::uint32_t canvasWidth;
+    std::uint32_t canvasHeight;
+    std::uint32_t commandCount;
+    std::uint32_t reserved;
+    std::uint64_t sequence;
+    const FFF3FPTimedTextCommand* commands;
+};
+
+struct FFF3FPTimedTextStatus {
+    std::uint32_t size;
+    std::uint32_t version;
+    std::uint64_t submittedSequence;
+    std::uint64_t renderedSequence;
+    std::uint32_t commandCount;
+    std::uint32_t canvasWidth;
+    std::uint32_t canvasHeight;
+    std::uint32_t reserved;
+    std::uint64_t visiblePixelCount;
+};
+
 #ifdef FFFNATIVE_EXPORTS
 #define FFF3FP_API extern "C" __declspec(dllexport)
 #else
@@ -120,6 +192,7 @@ FFF3FP_API FFFResult FFF3FP_Pause(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Stop(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Close(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Seek(FFF3FPHandle player, std::int64_t position100ns) noexcept;
+FFF3FP_API FFFResult FFF3FP_SeekKeyframe(FFF3FPHandle player, std::int64_t position100ns) noexcept;
 FFF3FP_API FFFResult FFF3FP_SeekFrame(FFF3FPHandle player, std::int64_t frameIndex) noexcept;
 FFF3FP_API FFFResult FFF3FP_StepFrame(FFF3FPHandle player, std::int32_t direction) noexcept;
 FFF3FP_API FFFResult FFF3FP_SelectVideoStream(FFF3FPHandle player,
@@ -137,7 +210,11 @@ FFF3FP_API FFFResult FFF3FP_SetOutputWindow(FFF3FPHandle player, void* outputWin
 FFF3FP_API FFFResult FFF3FP_SetAudioEndpoint(FFF3FPHandle player,
     const char* endpointIdUtf8) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetVolume(FFF3FPHandle player, float volume, std::uint32_t muted) noexcept;
+FFF3FP_API FFFResult FFF3FP_SetTimedTextLayer(FFF3FPHandle player,
+    const FFF3FPTimedTextLayer* layer) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetSnapshot(FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept;
+FFF3FP_API FFFResult FFF3FP_GetTimedTextStatus(FFF3FPHandle player,
+    FFF3FPTimedTextStatus* status) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetMediaInfo(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,

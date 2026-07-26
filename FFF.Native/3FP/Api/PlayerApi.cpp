@@ -5,7 +5,7 @@
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 1;
+constexpr std::uint32_t PlayerApiVersion = 2;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -37,6 +37,7 @@ FFFResult FFF3FP_Pause(const FFF3FPHandle player) noexcept { return player ? sta
 FFFResult FFF3FP_Stop(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->Stop() : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_Close(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->Close() : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_Seek(const FFF3FPHandle player, const std::int64_t position) noexcept { return player ? static_cast<PlayerSession*>(player)->Seek(position) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_SeekKeyframe(const FFF3FPHandle player, const std::int64_t position) noexcept { return player ? static_cast<PlayerSession*>(player)->SeekKeyframe(position) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SeekFrame(const FFF3FPHandle player, const std::int64_t frame) noexcept { return player ? static_cast<PlayerSession*>(player)->SeekFrame(frame) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_StepFrame(const FFF3FPHandle player, const std::int32_t direction) noexcept { return player ? static_cast<PlayerSession*>(player)->StepFrame(direction) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SelectVideoStream(const FFF3FPHandle player, const std::int32_t stream) noexcept { return player ? static_cast<PlayerSession*>(player)->SelectVideoStream(stream) : FFFResult::InvalidArgument; }
@@ -50,7 +51,17 @@ FFFResult FFF3FP_SetColorMode(const FFF3FPHandle player, const FFF3FPColorMode m
 FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetAudioEndpoint(const FFF3FPHandle player, const char* endpoint) noexcept { return player ? static_cast<PlayerSession*>(player)->SetAudioEndpoint(endpoint) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetVolume(const FFF3FPHandle player, const float volume, const std::uint32_t muted) noexcept { return player ? static_cast<PlayerSession*>(player)->SetVolume(volume, muted != 0) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_SetTimedTextLayer(const FFF3FPHandle player,
+    const FFF3FPTimedTextLayer* layer) noexcept {
+    return player && layer ? static_cast<PlayerSession*>(player)->SetTimedTextLayer(*layer)
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_GetSnapshot(const FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept { return player && snapshot ? static_cast<PlayerSession*>(player)->GetSnapshot(*snapshot) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_GetTimedTextStatus(const FFF3FPHandle player,
+    FFF3FPTimedTextStatus* status) noexcept {
+    return player && status ? static_cast<PlayerSession*>(player)->GetTimedTextStatus(*status)
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_GetMediaInfo(const FFF3FPHandle player, char* output, const std::uint32_t size,
     std::uint32_t* required) noexcept { if (!player) return FFFResult::InvalidArgument; try { return CopyUtf8(static_cast<PlayerSession*>(player)->MediaInfo(), output, size, required); } catch (...) { return FFFResult::NativeFailure; } }
 FFFResult FFF3FP_GetLastError(const FFF3FPHandle player, char* output, const std::uint32_t size,
