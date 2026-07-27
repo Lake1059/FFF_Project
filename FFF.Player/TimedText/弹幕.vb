@@ -2,6 +2,8 @@ Imports System.Collections.ObjectModel
 Imports System.Globalization
 Imports System.IO
 Imports System.Text
+Imports System.Threading
+Imports System.Threading.Tasks
 Imports System.Xml
 
 <Flags>
@@ -210,6 +212,29 @@ Public NotInheritable Class B站弹幕解析器
             Case 8 : Return 弹幕类型.脚本
             Case Else : Return 弹幕类型.无
         End Select
+    End Function
+End Class
+
+''' <summary>按媒体文件名查找并后台解析 B 站 XML 弹幕。</summary>
+Public NotInheritable Class 弹幕自动加载器
+    Private Sub New()
+    End Sub
+
+    Public Shared Function 尝试加载同名弹幕Async(媒体路径 As String,
+                                              取消令牌 As CancellationToken) As Task(Of 弹幕资料库)
+        ArgumentException.ThrowIfNullOrWhiteSpace(媒体路径)
+        Return Task.Run(Function() 尝试加载同名弹幕(媒体路径, 取消令牌), 取消令牌)
+    End Function
+
+    Public Shared Function 尝试加载同名弹幕(媒体路径 As String,
+                                         Optional 取消令牌 As CancellationToken = Nothing) As 弹幕资料库
+        ArgumentException.ThrowIfNullOrWhiteSpace(媒体路径)
+        取消令牌.ThrowIfCancellationRequested()
+        Dim 弹幕路径 = Path.ChangeExtension(媒体路径, ".xml")
+        If Not File.Exists(弹幕路径) Then Return Nothing
+        Dim database = B站弹幕解析器.解析文件(弹幕路径)
+        取消令牌.ThrowIfCancellationRequested()
+        Return If(database.数量 > 0, database, Nothing)
     End Function
 End Class
 

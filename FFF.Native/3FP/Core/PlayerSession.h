@@ -102,7 +102,6 @@ private:
     mutable std::mutex mutex_;
     mutable std::mutex snapshotMutex_;
     mutable std::mutex errorMutex_;
-    mutable std::mutex timedTextSubmitMutex_;
     std::condition_variable commandCondition_;
     std::deque<Command> commands_;
     std::thread worker_;
@@ -141,6 +140,4 @@ private:
     std::deque<AVFrame*> videoFrameQueue_;
     AVFrame* displayedFrame_;
     bool draining_;
-    bool timedTextCommandQueued_;
-    TimedTextRenderLayer pendingTimedTextLayer_;
 };

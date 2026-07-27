@@ -63,6 +63,7 @@ public:
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits) noexcept;
     FFFResult Render(const AVFrame* frame) noexcept;
+    FFFResult PresentTimedText() noexcept;
     FFFResult SetTimedTextLayer(TimedTextRenderLayer layer) noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept;
     void Close() noexcept;
@@ -76,10 +77,12 @@ private:
     FFFResult EnsureSwapChain(std::uint32_t width, std::uint32_t height) noexcept;
     FFFResult EnsurePipeline(std::uint32_t sourceWidth, std::uint32_t sourceHeight,
         std::uint32_t inputLayout, std::uint32_t bitDepth) noexcept;
+    FFFResult EnsureVideoBaseResources() noexcept;
     FFFResult EnsureTimedTextResources() noexcept;
     FFFResult DrawTimedText() noexcept;
     void CompositeTimedText(ID3D11RenderTargetView* target) noexcept;
     void ReleaseTimedTextResources() noexcept;
+    void ReleaseVideoBaseResources() noexcept;
     bool OutputSupportsHdr() noexcept;
     void SetHdrMetadata() noexcept;
     void ClearSurface() noexcept;
@@ -96,6 +99,8 @@ private:
     ID3D11Buffer* constants_;
     ID3D11Texture2D* sourceTextures_[3];
     ID3D11ShaderResourceView* sourceViews_[3];
+    ID3D11Texture2D* videoBaseTexture_;
+    ID3D11RenderTargetView* videoBaseTarget_;
     ID3D11Texture2D* timedTextTexture_;
     ID3D11ShaderResourceView* timedTextView_;
     ID3D11BlendState* timedTextBlend_;
@@ -125,6 +130,7 @@ private:
     std::uint32_t timedTextRenderedCommandCount_;
     std::uint32_t timedTextWidth_;
     std::uint32_t timedTextHeight_;
+    std::uint32_t timedTextPresentCount_;
     std::string fallbackReason_;
     std::string lastError_;
 };

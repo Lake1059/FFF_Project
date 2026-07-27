@@ -82,6 +82,7 @@ filterSettings.屏蔽关键词.Add("剧透")
 
 Dim settings As New 弹幕显示配置 With {
     .目标帧率 = 60, .滚动速度 = 180, .同屏最大数量 = 100,
+    .常规滚动最大行数 = 5, .顶部最大行数 = 5,
     .常规滚动最大行数 = 12, .行间距 = 8}
 Dim scheduler As New 弹幕调度器(database, settings, filterSettings.创建快照())
 Dim commands As New List(Of 弹幕绘制项)(settings.同屏最大数量)
@@ -94,13 +95,19 @@ scheduler.生成帧(position, area, commands)
 文档和资料库在构造后只读，可跨线程共享。帧生成器和 `弹幕调度器` 为减少锁与每帧分配而保留
 复用状态，应由单一呈现线程使用；设置或过滤条件变化后，在同一线程更新或重建调度器。
 
+播放器当前会自动加载与媒体同名的 `.xml` 文件，并通过现有 Direct2D 到 D3D11 的定时文字图层
+在 GPU 上合成。尚未提供交互选项时，默认使用 `Microsoft YaHei`、基础字号 `32`、`60 FPS`、
+常规滚动与顶部固定弹幕分别最多 5 行、
+同屏最多 `100` 条；真实 HDR 输出会将该图层按纸白亮度转换为 PQ，避免弹幕仍按 SDR 白色输出。
+
 ## 测试
 
-独立测试工程不需要 UI，可直接使用真实文件：
+独立测试工程会创建受控的内部播放窗口，但只依据命令数、GPU 已绘制序号和纹理可见像素等程序数据断言，
+不使用画面截图或人工视觉验证。可直接使用真实文件：
 
 ```powershell
-dotnet run --project FFF.Player.TimedText.Tests -c Debug -- `
-  "movie.ass" "movie.srt" "danmaku.xml" "movie.mp4" "subtitle.sup"
+dotnet run --project FFF.Player.Tests -c Debug -- `
+  "movie.mp4" "danmaku.xml" ["movie.ass"] ["movie.srt"]
 ```
 
 测试覆盖真实条目数、双语行、SSA 旧格式、ASS 覆盖标签、B站 mode、搜索和屏蔽、轨道上限、

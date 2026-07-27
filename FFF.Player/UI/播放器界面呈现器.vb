@@ -30,7 +30,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private ReadOnly 正在切换提供器 As Func(Of Boolean)
     Private ReadOnly 解码器提供器 As Func(Of 解码模式)
     Private ReadOnly 色彩模式提供器 As Func(Of 色彩输出模式)
-    Private ReadOnly 刷新计时器 As New System.Windows.Forms.Timer With {.Interval = 100}
+    Private ReadOnly 刷新计时器 As LakeUI.PrecisionTimer
 
     Private 正在更新进度条 As Boolean
     Private 正在拖动进度条 As Boolean
@@ -75,6 +75,12 @@ Friend NotInheritable Class 播放器界面呈现器
         Me.正在切换提供器 = 正在切换提供器
         Me.解码器提供器 = 解码器提供器
         Me.色彩模式提供器 = 色彩模式提供器
+        刷新计时器 = New LakeUI.PrecisionTimer With {
+            .Interval = 100,
+            .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
+            .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop,
+            .SynchronizingObject = 进度条
+        }
 
         配置控件()
         时间标签.AutoSize = True

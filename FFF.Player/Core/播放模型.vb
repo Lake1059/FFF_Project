@@ -170,13 +170,27 @@ Public NotInheritable Class 定时文字状态
         已绘制序号 = 值.已绘制序号
         命令数 = CInt(值.命令数)
         画布大小 = New Size(CInt(值.画布宽度), CInt(值.画布高度))
+        图层呈现帧数 = 值.图层呈现帧数
         可见像素数 = 值.可见像素数
     End Sub
     Public ReadOnly Property 已提交序号 As ULong
     Public ReadOnly Property 已绘制序号 As ULong
     Public ReadOnly Property 命令数 As Integer
     Public ReadOnly Property 画布大小 As Size
+    Public ReadOnly Property 图层呈现帧数 As UInteger
     Public ReadOnly Property 可见像素数 As ULong
+End Class
+
+Public NotInheritable Class 播放器弹幕事件参数
+    Inherits EventArgs
+
+    Friend Sub New(路径值 As String, 数量值 As Integer)
+        路径 = 路径值
+        数量 = 数量值
+    End Sub
+
+    Public ReadOnly Property 路径 As String
+    Public ReadOnly Property 数量 As Integer
 End Class
 
 Public NotInheritable Class 媒体信息

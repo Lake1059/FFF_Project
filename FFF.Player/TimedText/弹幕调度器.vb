@@ -21,15 +21,17 @@ Public NotInheritable Class 默认弹幕文本测量器
 End Class
 
 Public NotInheritable Class 弹幕显示配置
-    Public Property 字体 As String = "Microsoft YaHei UI"
-    Public Property 字号 As Single = 36.0F
+    ''' <summary>当前未提供交互设置，因此这里是播放器启用弹幕时的默认配置。</summary>
+    Public Property 字体 As String = "Microsoft YaHei"
+    Public Property 字号 As Single = 32.0F
     Public Property 使用源字号 As Boolean
     Public Property 使用源颜色 As Boolean = True
     Public Property 颜色ARGB As UInteger = &HFFFFFFFFUI
     Public Property 滚动速度 As Single = 180.0F
     Public Property 目标帧率 As Single = 60.0F
     Public Property 同屏最大数量 As Integer = 100
-    Public Property 常规滚动最大行数 As Integer = 12
+    Public Property 常规滚动最大行数 As Integer = 5
+    Public Property 顶部最大行数 As Integer = 5
     Public Property 行间距 As Single = 8.0F
     Public Property 顶部边距 As Single = 24.0F
     Public Property 固定弹幕持续秒数 As Single = 4.0F
@@ -42,6 +44,7 @@ Public NotInheritable Class 弹幕显示配置
         If Not Single.IsFinite(目标帧率) OrElse 目标帧率 < 1 OrElse 目标帧率 > 240 Then Throw New ArgumentOutOfRangeException(NameOf(目标帧率))
         If 同屏最大数量 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(同屏最大数量))
         If 常规滚动最大行数 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(常规滚动最大行数))
+        If 顶部最大行数 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(顶部最大行数))
         If Not Single.IsFinite(行间距) OrElse 行间距 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(行间距))
         If Not Single.IsFinite(顶部边距) OrElse 顶部边距 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(顶部边距))
         If Not Single.IsFinite(固定弹幕持续秒数) OrElse 固定弹幕持续秒数 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(固定弹幕持续秒数))
@@ -131,10 +134,14 @@ Public NotInheritable Class 弹幕调度器
         配置.验证()
         Dim signature = HashCode.Combine(区域.X像素, 区域.Y像素, 区域.宽度像素, 区域.高度像素,
                                          配置.字体, 配置.字号, 配置.使用源字号, 配置.滚动速度)
-        signature = HashCode.Combine(signature, 配置.目标帧率, 配置.同屏最大数量, 配置.常规滚动最大行数,
-                                     配置.行间距, 配置.顶部边距, 配置.固定弹幕持续秒数, 配置.基准视频高度)
+        signature = HashCode.Combine(signature, 配置.目标帧率, 配置.同屏最大数量, 配置.常规滚动最大行数, 配置.顶部最大行数,
+                                     配置.行间距, 配置.顶部边距, 配置.固定弹幕持续秒数)
+        signature = HashCode.Combine(signature, 配置.基准视频高度)
         signature = HashCode.Combine(signature, 配置.使用源颜色, 配置.颜色ARGB)
-        Dim frame = CLng(Math.Floor(时间.TotalSeconds * 配置.目标帧率 + 0.0000001R))
+        ' 就近量化到显示帧。TimeSpan 无法精确表示 1/60 秒；若始终向下取整，
+        ' 小尺寸下会形成“停一帧、下一帧跳两像素”的可见闪烁。
+        Dim frame = CLng(Math.Round(时间.TotalSeconds * 配置.目标帧率,
+                                   MidpointRounding.AwayFromZero))
         Dim seconds = frame / CDbl(配置.目标帧率)
         Dim discontinuity = 上一帧 = Long.MinValue OrElse frame < 上一帧 OrElse frame - 上一帧 > Math.Ceiling(配置.目标帧率 * 2)
         If signature <> 上一签名 Then discontinuity = True
@@ -199,7 +206,9 @@ Public NotInheritable Class 弹幕调度器
         Dim lineHeight = 实际行高(fontSize, area)
         Dim availableLines = Math.Max(1, CInt(Math.Floor((area.高度像素 - 实际顶部边距(area) * 2) / lineHeight)))
         Dim maxLines = If(item.类型 = 弹幕类型.常规滚动 OrElse item.类型 = 弹幕类型.逆向滚动,
-                          Math.Min(配置.常规滚动最大行数, availableLines), availableLines)
+                          Math.Min(配置.常规滚动最大行数, availableLines),
+                          If(item.类型 = 弹幕类型.顶部,
+                             Math.Min(配置.顶部最大行数, availableLines), availableLines))
         Dim startSeconds = item.出现时间.TotalSeconds
         Dim lane = 查找可用行(item.类型, maxLines, startSeconds, width, area)
         If lane < 0 Then Return

@@ -8,7 +8,7 @@ Friend NotInheritable Class 播放器窗口布局控制器
     Private ReadOnly 视频容器 As Control
     Private ReadOnly 画面控件 As 播放器画面控件
     Private ReadOnly 重绑输出窗口 As Action
-    Private ReadOnly 重绑计时器 As New System.Windows.Forms.Timer With {.Interval = 180}
+    Private ReadOnly 重绑计时器 As LakeUI.PrecisionTimer
 
     Private 已校正启动视频比例 As Boolean
     Private 已释放 As Boolean
@@ -22,6 +22,13 @@ Friend NotInheritable Class 播放器窗口布局控制器
         Me.视频容器 = 视频容器
         Me.画面控件 = 画面控件
         Me.重绑输出窗口 = 重绑输出窗口
+        重绑计时器 = New LakeUI.PrecisionTimer With {
+            .Interval = 180,
+            .AutoReset = False,
+            .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
+            .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop,
+            .SynchronizingObject = 窗体
+        }
 
         AddHandler 画面控件.输出窗口创建, AddressOf 输出窗口已创建
         AddHandler 画面控件.SizeChanged, AddressOf 请求重绑
@@ -56,7 +63,6 @@ Friend NotInheritable Class 播放器窗口布局控制器
     End Sub
 
     Private Sub 重绑计时器_Tick(sender As Object, e As EventArgs)
-        重绑计时器.Stop()
         If 已释放 OrElse Not 画面控件.IsHandleCreated Then Return
         重绑输出窗口()
     End Sub

@@ -163,7 +163,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       clockOriginPosition100ns_(0), clockOriginQpc_(0), playbackPosition100ns_(0),
       state_(FFF3FPState::Idle), qpcFrequency_(0), seekTarget100ns_(-1), seekTargetFrame_(-1),
       keyframeSeekPending_(false), lastVideoFrameDuration100ns_(0),
-      displayedFrame_(nullptr), draining_(false), timedTextCommandQueued_(false) {
+      displayedFrame_(nullptr), draining_(false) {
     snapshot_ = {};
     snapshot_.size = sizeof(snapshot_); snapshot_.version = 2; snapshot_.state = FFF3FPState::Idle;
     snapshot_.decodeMode = configuration.decodeMode; snapshot_.requestedColorMode = configuration.colorMode;
@@ -292,26 +292,18 @@ FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) no
             }
             layer.commands.push_back(std::move(command));
         }
-        {
-            std::lock_guard lock(timedTextSubmitMutex_);
-            pendingTimedTextLayer_ = std::move(layer);
-            if (timedTextCommandQueued_) return FFFResult::Success;
-            timedTextCommandQueued_ = true;
+        // Timed text has its own high-precision 60 Hz producer. Routing it through
+        // the decode command queue coalesced frames whenever video work was busy.
+        const auto result = videoRenderer_.SetTimedTextLayer(std::move(layer));
+        if (result != FFFResult::Success) {
+            ReportError(result, videoRenderer_.LastError(), "timed-text");
+            return result;
         }
-        Enqueue([this] {
-            TimedTextRenderLayer latest;
-            {
-                std::lock_guard lock(timedTextSubmitMutex_);
-                latest = std::move(pendingTimedTextLayer_);
-                timedTextCommandQueued_ = false;
-            }
-            const auto result = videoRenderer_.SetTimedTextLayer(std::move(latest));
-            if (result != FFFResult::Success) ReportError(result, videoRenderer_.LastError(), "timed-text");
-            const auto* frame = displayedFrame_ != nullptr ? displayedFrame_ : coverArtFrame_;
-            if (frame != nullptr && state_.load() != FFF3FPState::Playing &&
-                videoRenderer_.Render(frame) != FFFResult::Success)
-                ReportError(FFFResult::DeviceFailure, videoRenderer_.LastError(), "timed-text-redraw");
-        });
+        const auto presentResult = videoRenderer_.PresentTimedText();
+        if (presentResult != FFFResult::Success) {
+            ReportError(presentResult, videoRenderer_.LastError(), "timed-text-redraw");
+            return presentResult;
+        }
         return FFFResult::Success;
     } catch (...) { return FFFResult::NativeFailure; }
 }

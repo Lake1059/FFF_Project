@@ -24,7 +24,7 @@ Public Class Form1
         界面呈现器 = 创建界面呈现器()
         定时文字图层呈现器 = New 播放器定时文字图层呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
-            AddressOf 播放控制器.提交定时文字图层)
+            AddressOf 播放控制器.提交定时文字图层, Function() 播放控制器.当前弹幕)
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
 
@@ -33,6 +33,7 @@ Public Class Form1
         AddHandler 播放控制器.播放错误, AddressOf 播放控制器_播放错误
         AddHandler 播放控制器.HDR输出状态已确认, AddressOf 播放控制器_HDR输出状态已确认
         AddHandler 播放控制器.外部字幕已加载, AddressOf 播放控制器_外部字幕已加载
+        AddHandler 播放控制器.外部弹幕已加载, AddressOf 播放控制器_外部弹幕已加载
         AddHandler 界面呈现器.请求跳转到关键帧, AddressOf 界面呈现器_请求跳转到关键帧
         AddHandler 界面呈现器.音量已变更, AddressOf 界面呈现器_音量已变更
         界面呈现器.启动()
@@ -107,6 +108,12 @@ Public Class Form1
         If 正在关闭 Then Return
         定时文字图层呈现器?.使图层失效()
         LakeUI.ExFloatingTip(MB_查看当前媒体信息, $"已加载 {e.格式} 字幕")
+    End Sub
+
+    Private Sub 播放控制器_外部弹幕已加载(sender As Object, e As 播放器弹幕事件参数)
+        If 正在关闭 Then Return
+        定时文字图层呈现器?.使图层失效()
+        LakeUI.ExFloatingTip(MB_查看当前媒体信息, $"已加载 {e.数量} 条弹幕")
     End Sub
 
     Private Sub 界面呈现器_请求跳转到关键帧(sender As Object, e As 播放器跳转请求事件参数)

@@ -152,7 +152,7 @@ Friend Structure 原生定时文字状态
     Public 命令数 As UInteger
     Public 画布宽度 As UInteger
     Public 画布高度 As UInteger
-    Public 保留 As UInteger
+    Public 图层呈现帧数 As UInteger
     Public 可见像素数 As ULong
 End Structure
 

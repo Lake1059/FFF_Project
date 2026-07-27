@@ -20,7 +20,9 @@ Public NotInheritable Class 播放器控制器
     Private 会话 As 播放器会话
     Private 会话操作取消 As CancellationTokenSource
     Private 字幕加载取消 As CancellationTokenSource
+    Private 弹幕加载取消 As CancellationTokenSource
     Private 当前外部字幕 As 外部字幕轨道
+    Private 当前弹幕资料库 As 弹幕资料库
     Private 当前文件路径 As String = String.Empty
     Private 当前解码器 As 解码模式 = 解码模式.CPU
     Private 当前色彩输出 As 色彩输出模式 = 色彩输出模式.映射到SDR
@@ -40,6 +42,7 @@ Public NotInheritable Class 播放器控制器
     Public Event 播放错误 As EventHandler(Of 播放器错误事件参数)
     Public Event HDR输出状态已确认 As EventHandler(Of 播放器HDR状态事件参数)
     Public Event 外部字幕已加载 As EventHandler(Of 播放器字幕事件参数)
+    Public Event 外部弹幕已加载 As EventHandler(Of 播放器弹幕事件参数)
 
     Public ReadOnly Property 解码器 As 解码模式
         Get
@@ -80,6 +83,12 @@ Public NotInheritable Class 播放器控制器
     Public ReadOnly Property 当前字幕 As 外部字幕轨道
         Get
             Return 当前外部字幕
+        End Get
+    End Property
+
+    Public ReadOnly Property 当前弹幕 As 弹幕资料库
+        Get
+            Return 当前弹幕资料库
         End Get
     End Property
 
@@ -280,7 +289,10 @@ Public NotInheritable Class 播放器控制器
             If 恢复播放 Then 会话.播放()
 
             RaiseEvent 媒体已打开(Me, New 播放器媒体事件参数(当前文件路径, 媒体信息, 快照))
-            If Not 保留当前字幕 Then 开始自动加载字幕(当前文件路径)
+            If Not 保留当前字幕 Then
+                开始自动加载字幕(当前文件路径)
+                开始自动加载弹幕(当前文件路径)
+            End If
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
         Catch ex As OperationCanceledException
             ' 新请求或停止操作会主动取消当前打开过程。
@@ -405,8 +417,43 @@ Public NotInheritable Class 播放器控制器
         待释放?.释放()
     End Sub
 
+    Private Sub 开始自动加载弹幕(媒体路径 As String)
+        释放当前弹幕()
+        Dim 本次取消 As New CancellationTokenSource()
+        弹幕加载取消 = 本次取消
+        Dim 忽略 = 自动加载同名弹幕Async(媒体路径, 本次取消)
+    End Sub
+
+    Private Async Function 自动加载同名弹幕Async(媒体路径 As String, 本次取消 As CancellationTokenSource) As Task
+        Try
+            Dim 候选资料库 = Await 弹幕自动加载器.尝试加载同名弹幕Async(媒体路径, 本次取消.Token)
+            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
+                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) OrElse
+                候选资料库 Is Nothing Then Return
+            当前弹幕资料库 = 候选资料库
+            RaiseEvent 外部弹幕已加载(Me, New 播放器弹幕事件参数(
+                Path.ChangeExtension(媒体路径, ".xml"), 候选资料库.数量))
+        Catch ex As OperationCanceledException
+            ' 新媒体、停止或关闭会取消尚未完成的自动加载。
+        Catch
+            ' 弹幕是可选资源，加载失败不影响媒体播放。
+        Finally
+            If ReferenceEquals(弹幕加载取消, 本次取消) Then 弹幕加载取消 = Nothing
+            本次取消.Dispose()
+        End Try
+    End Function
+
+    Private Sub 释放当前弹幕()
+        Dim 取消源 = Interlocked.Exchange(弹幕加载取消, Nothing)
+        取消源?.Cancel()
+        当前弹幕资料库 = Nothing
+    End Sub
+
     Private Sub 释放当前会话(Optional 保留已加载字幕 As Boolean = False)
-        If Not 保留已加载字幕 Then 释放当前字幕()
+        If Not 保留已加载字幕 Then
+            释放当前字幕()
+            释放当前弹幕()
+        End If
         Dim 待释放 = 会话
         会话 = Nothing
         当前文件路径 = String.Empty

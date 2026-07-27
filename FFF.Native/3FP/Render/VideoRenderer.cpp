@@ -188,7 +188,9 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):ToLinear709(rgb)*PaperWhite);
     if(ColorMode==2){ if(Source2020==0)nits=To2020(nits); return float4(NitsToPq(Tone(nits,1000.0)),1); }
     if(Source2020!=0)nits=To709(nits);
-    nits*=SdrPeak*0.75/max(PaperWhite,1.0);
+    // SDR paper white must reach the configured SDR peak.  Applying an additional
+    // 0.75 multiplier here made a second switch back to SDR visibly too dark.
+    nits*=SdrPeak/max(PaperWhite,1.0);
     return float4(ToBt709(Tone(nits,SdrPeak)/SdrPeak),1);
 })";
 
@@ -284,6 +286,7 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), timedTextPixelShader_(nullptr), sampler_(nullptr), constants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
+      videoBaseTexture_(nullptr), videoBaseTarget_(nullptr),
       timedTextTexture_(nullptr), timedTextView_(nullptr), timedTextBlend_(nullptr),
       d2dFactory_(nullptr), d2dDevice_(nullptr), d2dContext_(nullptr), d2dTarget_(nullptr),
       writeFactory_(nullptr), scaler_(nullptr),
@@ -292,7 +295,7 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
       requestedMode_(FFF3FPColorMode::MapToSdr), actualMode_(FFF3FPColorMode::MapToSdr),
       sdrPeakNits_(100.0f), hdrPeakNits_(TrueHdrOutputPeakNits),
       paperWhiteNits_(203.0f), timedTextRenderedSequence_(0), timedTextRenderedCommandCount_(0),
-      timedTextWidth_(0), timedTextHeight_(0) {}
+      timedTextWidth_(0), timedTextHeight_(0), timedTextPresentCount_(0) {}
 
 PlayerVideoRenderer::~PlayerVideoRenderer() { Close(); }
 
@@ -395,7 +398,8 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     if (swapChain_ != nullptr && hdr == swapHdr_) {
         context_->ClearState();
         if (SUCCEEDED(swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0))) {
-            swapWidth_ = width; swapHeight_ = height; ReleaseTimedTextResources();
+            swapWidth_ = width; swapHeight_ = height;
+            ReleaseTimedTextResources(); ReleaseVideoBaseResources();
             return FFFResult::Success;
         }
         swapChain_->Release(); swapChain_ = nullptr;
@@ -419,7 +423,7 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
         SetError("Could not create the playback swap chain."); return FFFResult::DeviceFailure;
     }
     swapWidth_ = width; swapHeight_ = height; swapHdr_ = hdr;
-    ReleaseTimedTextResources();
+    ReleaseTimedTextResources(); ReleaseVideoBaseResources();
     if (hdr) {
         UINT support = 0;
         if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) ||
@@ -493,6 +497,25 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     return FFFResult::Success;
 }
 
+FFFResult PlayerVideoRenderer::EnsureVideoBaseResources() noexcept {
+    if (videoBaseTexture_ != nullptr && videoBaseTarget_ != nullptr) return FFFResult::Success;
+    ReleaseVideoBaseResources();
+    if (device_ == nullptr || swapWidth_ == 0 || swapHeight_ == 0) return FFFResult::InvalidState;
+    D3D11_TEXTURE2D_DESC texture{};
+    texture.Width = swapWidth_; texture.Height = swapHeight_;
+    texture.MipLevels = texture.ArraySize = 1;
+    texture.Format = swapHdr_ ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
+    texture.SampleDesc.Count = 1; texture.Usage = D3D11_USAGE_DEFAULT;
+    texture.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(device_->CreateTexture2D(&texture, nullptr, &videoBaseTexture_)) ||
+        FAILED(device_->CreateRenderTargetView(videoBaseTexture_, nullptr, &videoBaseTarget_))) {
+        ReleaseVideoBaseResources();
+        SetError("Could not create the cached GPU video surface.");
+        return FFFResult::DeviceFailure;
+    }
+    return FFFResult::Success;
+}
+
 FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer) noexcept {
     try {
         std::lock_guard lock(timedTextMutex_);
@@ -516,7 +539,7 @@ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status)
         status.renderedSequence = timedTextRenderedSequence_;
         status.commandCount = timedTextRenderedCommandCount_;
         status.canvasWidth = timedTextWidth_; status.canvasHeight = timedTextHeight_;
-        status.reserved = 0; status.visiblePixelCount = 0;
+        status.reserved = timedTextPresentCount_; status.visiblePixelCount = 0;
     }
     if (status.submittedSequence != status.renderedSequence || status.commandCount == 0 ||
         timedTextTexture_ == nullptr || device_ == nullptr || context_ == nullptr)
@@ -659,21 +682,23 @@ FFFResult PlayerVideoRenderer::DrawTimedText() noexcept {
             layout->SetStrikethrough(TRUE, DWRITE_TEXT_RANGE{0, static_cast<UINT32>(command.text.size())});
         const auto origin = D2D1::Point2F(destination.left, destination.top);
         const auto outline = std::max(command.outlineWidth * (scaleX + scaleY) * 0.5f, 0.0f);
+        const auto textOptions = static_cast<D2D1_DRAW_TEXT_OPTIONS>(
+            D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP);
         if (outline > 0 && (command.outlineArgb >> 24) != 0) {
             ComPtr<ID2D1SolidColorBrush> outlineBrush;
             if (SUCCEEDED(d2dContext_->CreateSolidColorBrush(ToD2dColor(command.outlineArgb), &outlineBrush))) {
                 const auto radius = std::max(1, static_cast<int>(std::ceil(outline)));
-                constexpr int directions[][2] = {{-1,0},{1,0},{0,-1},{0,1},{-1,-1},{1,-1},{-1,1},{1,1}};
+                constexpr int directions[][2] = {{-1,0},{1,0},{0,-1},{0,1}};
                 for (const auto& direction : directions)
                     d2dContext_->DrawTextLayout(D2D1::Point2F(origin.x + direction[0] * radius,
                         origin.y + direction[1] * radius), layout.Get(), outlineBrush.Get(),
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                        textOptions);
             }
         }
         if ((command.foregroundArgb >> 24) != 0) {
             ComPtr<ID2D1SolidColorBrush> foreground;
             if (SUCCEEDED(d2dContext_->CreateSolidColorBrush(ToD2dColor(command.foregroundArgb), &foreground)))
-                d2dContext_->DrawTextLayout(origin, layout.Get(), foreground.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                d2dContext_->DrawTextLayout(origin, layout.Get(), foreground.Get(), textOptions);
         }
     }
     const auto end = d2dContext_->EndDraw();
@@ -683,6 +708,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText() noexcept {
         std::lock_guard lock(timedTextMutex_);
         timedTextRenderedSequence_ = layer.sequence;
         timedTextRenderedCommandCount_ = static_cast<std::uint32_t>(layer.commands.size());
+        if (timedTextRenderedCommandCount_ > 0) ++timedTextPresentCount_;
     }
     return FFFResult::Success;
 }
@@ -717,6 +743,11 @@ void PlayerVideoRenderer::ReleaseTimedTextResources() noexcept {
     }
 }
 
+void PlayerVideoRenderer::ReleaseVideoBaseResources() noexcept {
+    if (videoBaseTarget_ != nullptr) { videoBaseTarget_->Release(); videoBaseTarget_ = nullptr; }
+    if (videoBaseTexture_ != nullptr) { videoBaseTexture_->Release(); videoBaseTexture_ = nullptr; }
+}
+
 void PlayerVideoRenderer::SetHdrMetadata() noexcept {
     if (swapChain_ == nullptr || !swapHdr_) return;
     DXGI_HDR_METADATA_HDR10 metadata{};
@@ -743,6 +774,8 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
     const auto directYuv = input.layout != 0;
     const auto pipelineResult = EnsurePipeline(width, height, input.layout, input.bitDepth);
     if (pipelineResult != FFFResult::Success) return pipelineResult;
+    const auto baseResult = EnsureVideoBaseResources();
+    if (baseResult != FFFResult::Success) return baseResult;
     if (directYuv) {
         context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, frame->data[0], frame->linesize[0], 0);
         context_->UpdateSubresource(sourceTextures_[1], 0, nullptr, frame->data[1], frame->linesize[1], 0);
@@ -795,13 +828,15 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
     YuvCoefficients(frame->colorspace, frame->width, settings.kr, settings.kb);
     context_->UpdateSubresource(constants_, 0, nullptr, &settings, 0, 0);
     D3D11_VIEWPORT viewport{0, 0, static_cast<float>(swapWidth_), static_cast<float>(swapHeight_), 0, 1};
-    context_->OMSetRenderTargets(1, target.GetAddressOf(), nullptr); context_->RSSetViewports(1, &viewport);
+    context_->OMSetRenderTargets(1, &videoBaseTarget_, nullptr); context_->RSSetViewports(1, &viewport);
     context_->IASetInputLayout(nullptr); context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(vertexShader_, nullptr, 0); context_->PSSetShader(pixelShader_, nullptr, 0);
     context_->PSSetConstantBuffers(0, 1, &constants_); context_->PSSetSamplers(0, 1, &sampler_);
     context_->PSSetShaderResources(0, ARRAYSIZE(sourceViews_), sourceViews_); context_->Draw(3, 0);
     ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
     context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
+    context_->CopyResource(backBuffer.Get(), videoBaseTexture_);
     const auto timedTextResult = DrawTimedText();
     if (timedTextResult != FFFResult::Success) {
         context_->OMSetRenderTargets(0, nullptr, nullptr);
@@ -809,11 +844,35 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
     }
     CompositeTimedText(target.Get());
     context_->OMSetRenderTargets(0, nullptr, nullptr);
-    const auto present = swapChain_->Present(1, 0);
+    // Playback timing is driven by the media clock.  Waiting for vblank here holds
+    // the session worker and can starve the independent 60 Hz timed-text presents.
+    const auto present = swapChain_->Present(0, 0);
     if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET) {
         SetError("The D3D11 playback device was removed."); return FFFResult::DeviceFailure;
     }
-    return FAILED(present) ? FFFResult::DeviceFailure : FFFResult::Success;
+    if (FAILED(present)) return FFFResult::DeviceFailure;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
+    std::lock_guard deviceLock(deviceMutex_);
+    if (swapChain_ == nullptr || videoBaseTexture_ == nullptr) return FFFResult::Success;
+    ComPtr<ID3D11Texture2D> backBuffer;
+    if (FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer)))) return FFFResult::DeviceFailure;
+    ComPtr<ID3D11RenderTargetView> target;
+    if (FAILED(device_->CreateRenderTargetView(backBuffer.Get(), nullptr, &target))) return FFFResult::DeviceFailure;
+    context_->CopyResource(backBuffer.Get(), videoBaseTexture_);
+    const auto timedTextResult = DrawTimedText();
+    if (timedTextResult != FFFResult::Success) return timedTextResult;
+    CompositeTimedText(target.Get());
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
+    const auto present = swapChain_->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+    if (present == DXGI_ERROR_WAS_STILL_DRAWING) return FFFResult::Success;
+    if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET) {
+        SetError("The D3D11 playback device was removed."); return FFFResult::DeviceFailure;
+    }
+    if (FAILED(present)) return FFFResult::DeviceFailure;
+    return FFFResult::Success;
 }
 
 void PlayerVideoRenderer::ClearSurface() noexcept {
@@ -839,11 +898,13 @@ void PlayerVideoRenderer::Close() noexcept {
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
     ReleaseTimedTextResources();
+    ReleaseVideoBaseResources();
     if (writeFactory_ != nullptr) { writeFactory_->Release(); writeFactory_ = nullptr; }
     if (d2dFactory_ != nullptr) { d2dFactory_->Release(); d2dFactory_ = nullptr; }
     {
         std::lock_guard lock(timedTextMutex_);
         timedTextLayer_ = {};
+        timedTextPresentCount_ = 0;
     }
     if (swapChain_ != nullptr) { swapChain_->Release(); swapChain_ = nullptr; }
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {

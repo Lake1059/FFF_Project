@@ -9,12 +9,17 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     Private ReadOnly 快照提供器 As Func(Of 播放器快照)
     Private ReadOnly 字幕提供器 As Func(Of 外部字幕轨道)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong)
+    Private ReadOnly 弹幕提供器 As Func(Of 弹幕资料库)
+    Private ReadOnly 弹幕配置 As 弹幕显示配置
     Private ReadOnly SRT绘制项 As New List(Of SRT字幕绘制项)()
     Private ReadOnly ASS绘制项 As New List(Of ASS字幕绘制项)()
     Private ReadOnly SUP绘制项 As New List(Of SUP字幕绘制项)(1)
+    Private ReadOnly 弹幕绘制项 As New List(Of 弹幕绘制项)(100)
     Private ReadOnly 图层命令 As New List(Of 定时文字命令)()
-    Private ReadOnly 刷新计时器 As New System.Windows.Forms.Timer()
-    Private 当前目标帧率 As Integer = 10
+    Private ReadOnly 刷新计时器 As LakeUI.PrecisionTimer
+    Private 当前目标帧率 As Integer = 60
+    Private 当前弹幕资料库 As 弹幕资料库
+    Private 当前弹幕调度器 As 弹幕调度器
     Private 图层序号 As ULong
     Private 上次图层签名 As ULong
     Private 上次图层签名有效 As Boolean
@@ -22,7 +27,9 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
 
     Friend Sub New(画面控件 As 播放器画面控件, 快照提供器 As Func(Of 播放器快照),
                    字幕提供器 As Func(Of 外部字幕轨道),
-                   提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong))
+                   提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong),
+                   Optional 弹幕提供器 As Func(Of 弹幕资料库) = Nothing,
+                   Optional 弹幕配置 As 弹幕显示配置 = Nothing)
         ArgumentNullException.ThrowIfNull(画面控件)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(字幕提供器)
@@ -31,6 +38,14 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         Me.快照提供器 = 快照提供器
         Me.字幕提供器 = 字幕提供器
         Me.提交图层 = 提交图层
+        Me.弹幕提供器 = 弹幕提供器
+        Me.弹幕配置 = If(弹幕配置, New 弹幕显示配置())
+        Me.弹幕配置.验证()
+        刷新计时器 = New LakeUI.PrecisionTimer With {
+            .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
+            .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop,
+            .SynchronizingObject = 画面控件
+        }
         AddHandler 刷新计时器.Tick, AddressOf 刷新计时器_Tick
         更新刷新间隔()
         刷新计时器.Start()
@@ -56,19 +71,26 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         If 快照 Is Nothing OrElse 快照.视频宽度 = 0 OrElse 快照.视频高度 = 0 OrElse
             画面控件.ClientSize.Width <= 0 OrElse 画面控件.ClientSize.Height <= 0 Then Return
         提交当前帧(画面控件.ClientSize, 快照.视频宽度, 快照.视频高度,
-                 快照.播放位置, 字幕提供器())
+                 快照.播放位置, 字幕提供器(), 画面控件.DeviceDpi)
     End Sub
 
     Private Sub 更新刷新间隔()
-        刷新计时器.Interval = Math.Max(1, CInt(Math.Round(1000.0R / 当前目标帧率)))
+        ' 用 2 倍采样率抵抗 4K 视频提交造成的短暂 GPU 互斥等待；弹幕调度器仍量化为
+        ' 目标帧率，重复逻辑帧会被图层签名去重，不会产生 120 FPS 的额外 GPU 呈现。
+        刷新计时器.Interval = Math.Max(1, CInt(Math.Floor(1000.0R / (当前目标帧率 * 2.0R))))
     End Sub
 
     Friend Function 生成命令(客户区大小 As Size, 视频宽度 As UInteger, 视频高度 As UInteger,
-                         播放位置 As TimeSpan, 字幕 As 外部字幕轨道) As IReadOnlyList(Of 定时文字命令)
+                         播放位置 As TimeSpan, 字幕 As 外部字幕轨道,
+                         Optional DPI As Single = 96.0F) As IReadOnlyList(Of 定时文字命令)
         图层命令.Clear()
         If 已释放 OrElse 视频宽度 = 0 OrElse 视频高度 = 0 OrElse
             客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return 图层命令.ToArray()
-        Dim 区域 = 视频显示区域.计算(客户区大小.Width, 客户区大小.Height, 96.0F,
+        If Not Single.IsFinite(DPI) OrElse DPI <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(DPI))
+        ' WinForms 的 ClientSize 已经是物理像素；先换回 DIP，再交给字幕/弹幕共用的
+        ' 视频显示区域换算，避免高 DPI 下重复放大。
+        Dim DPI缩放 = DPI / 96.0F
+        Dim 区域 = 视频显示区域.计算(客户区大小.Width / DPI缩放, 客户区大小.Height / DPI缩放, DPI,
                                       CInt(视频宽度), CInt(视频高度))
         If 字幕 IsNot Nothing Then
             Select Case 字幕.格式
@@ -80,15 +102,17 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
                     生成SUP命令(字幕.SUP生成器, 播放位置, 区域)
             End Select
         End If
+        生成弹幕命令(弹幕提供器?.Invoke(), 播放位置, 区域)
         RaiseEvent 绘制扩展定时文字(Me,
             New 定时文字图层绘制事件参数(图层命令, 播放位置, 区域))
         Return 图层命令.ToArray()
     End Function
 
     Friend Sub 提交当前帧(客户区大小 As Size, 视频宽度 As UInteger, 视频高度 As UInteger,
-                       播放位置 As TimeSpan, 字幕 As 外部字幕轨道)
+                       播放位置 As TimeSpan, 字幕 As 外部字幕轨道,
+                       Optional DPI As Single = 96.0F)
         Try
-            Dim commands = 生成命令(客户区大小, 视频宽度, 视频高度, 播放位置, 字幕)
+            Dim commands = 生成命令(客户区大小, 视频宽度, 视频高度, 播放位置, 字幕, DPI)
             Dim signature = 计算图层签名(客户区大小, commands)
             If 上次图层签名有效 AndAlso signature = 上次图层签名 Then Return
             上次图层签名 = signature
@@ -209,6 +233,27 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
             图层命令.Add(定时文字命令.创建位图(事件.像素BGRA, 事件.宽度, 事件.高度,
                 事件.行跨度, New RectangleF(项.X像素, 项.Y像素, 项.宽度像素, 项.高度像素),
                 CULng(Math.Max(0, 事件.序号))))
+        Next
+    End Sub
+
+    Private Sub 生成弹幕命令(资料库 As 弹幕资料库, 时间 As TimeSpan, 区域 As 视频显示区域)
+        If 资料库 Is Nothing Then
+            当前弹幕资料库 = Nothing
+            当前弹幕调度器 = Nothing
+            Return
+        End If
+        If Not ReferenceEquals(当前弹幕资料库, 资料库) Then
+            当前弹幕资料库 = 资料库
+            当前弹幕调度器 = New 弹幕调度器(资料库, 弹幕配置)
+        End If
+        弹幕绘制项.Clear()
+        当前弹幕调度器.生成帧(时间, 区域, 弹幕绘制项)
+        For Each 项 In 弹幕绘制项
+            If String.IsNullOrWhiteSpace(项.项目.文本) Then Continue For
+            图层命令.Add(定时文字命令.创建文字(项.项目.文本, 项.字体, 项.字号像素,
+                New RectangleF(项.X像素, 项.Y像素, Math.Max(1.0F, 项.宽度像素), Math.Max(1.0F, 项.高度像素)),
+                项.颜色ARGB, &H80000000UI, Math.Max(0.5F, 项.字号像素 / 32.0F),
+                定时文字对齐.靠前, 定时文字对齐.靠前))
         Next
     End Sub
 
