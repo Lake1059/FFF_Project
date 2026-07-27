@@ -75,6 +75,15 @@ Public NotInheritable Class 播放器快照
         已呈现视频帧数 = 值.已呈现视频帧数
         已丢弃视频帧数 = 值.已丢弃视频帧数
         视频队列帧数 = CInt(值.视频队列帧数)
+        源峰值尼特 = 值.源峰值尼特
+        已解码音频帧数 = 值.已解码音频帧数
+        音频位置 = TimeSpan.FromTicks(值.音频位置100纳秒)
+        音频缓冲时长 = TimeSpan.FromTicks(Math.Max(0, 值.音频缓冲100纳秒))
+        音频欠载次数 = 值.音频欠载次数
+        音频时间戳抖动帧数 = 值.音频时间戳抖动帧数
+        音频不连续次数 = 值.音频不连续次数
+        音频插入静音帧数 = 值.音频插入静音帧数
+        音频丢弃重叠帧数 = 值.音频丢弃重叠帧数
     End Sub
 
     Public ReadOnly Property 状态 As 播放状态
@@ -98,6 +107,15 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 已呈现视频帧数 As ULong
     Public ReadOnly Property 已丢弃视频帧数 As ULong
     Public ReadOnly Property 视频队列帧数 As Integer
+    Public ReadOnly Property 源峰值尼特 As UInteger
+    Public ReadOnly Property 已解码音频帧数 As ULong
+    Public ReadOnly Property 音频位置 As TimeSpan
+    Public ReadOnly Property 音频缓冲时长 As TimeSpan
+    Public ReadOnly Property 音频欠载次数 As ULong
+    Public ReadOnly Property 音频时间戳抖动帧数 As ULong
+    Public ReadOnly Property 音频不连续次数 As ULong
+    Public ReadOnly Property 音频插入静音帧数 As ULong
+    Public ReadOnly Property 音频丢弃重叠帧数 As ULong
 End Class
 
 Public Enum 定时文字对齐
@@ -116,7 +134,7 @@ Public Enum 定时文字样式
 End Enum
 
 Public NotInheritable Class 定时文字命令
-    Private Sub New()
+    Friend Sub New()
     End Sub
 
     Friend Property 是位图 As Boolean
@@ -144,24 +162,70 @@ Public NotInheritable Class 定时文字命令
                                   区域 As RectangleF, 前景色ARGB As UInteger,
                                   描边色ARGB As UInteger, 描边宽度 As Single,
                                   水平对齐 As 定时文字对齐, 垂直对齐 As 定时文字对齐,
-                                  Optional 样式 As 定时文字样式 = 定时文字样式.无) As 定时文字命令
-        Return New 定时文字命令 With {
-            .文本 = If(文本, String.Empty), .字体 = If(字体, "Segoe UI"), .字号 = 字号,
-            .X = 区域.X, .Y = 区域.Y, .宽度 = 区域.Width, .高度 = 区域.Height,
-            .前景色ARGB = 前景色ARGB, .描边色ARGB = 描边色ARGB, .描边宽度 = 描边宽度,
-            .水平对齐 = 水平对齐, .垂直对齐 = 垂直对齐, .样式 = 样式}
+                                  Optional 样式 As 定时文字样式 = 定时文字样式.无,
+                                  Optional 内容标识 As ULong = 0) As 定时文字命令
+        Dim result As New 定时文字命令()
+        result.设置文字(文本, 字体, 字号, 区域, 前景色ARGB, 描边色ARGB, 描边宽度,
+                    水平对齐, 垂直对齐, 样式, 内容标识)
+        Return result
     End Function
+
+    Friend Sub 设置文字(文本值 As String, 字体值 As String, 字号值 As Single,
+                      区域 As RectangleF, 前景色值 As UInteger, 描边色值 As UInteger,
+                      描边宽度值 As Single, 水平对齐值 As 定时文字对齐,
+                      垂直对齐值 As 定时文字对齐, 样式值 As 定时文字样式,
+                      Optional 内容标识值 As ULong = 0)
+        是位图 = False
+        位图像素BGRA = Nothing
+        位图宽度 = 0 : 位图高度 = 0 : 位图行跨度 = 0
+        文本 = If(文本值, String.Empty)
+        字体 = If(字体值, "Segoe UI")
+        字号 = 字号值
+        X = 区域.X : Y = 区域.Y : 宽度 = 区域.Width : 高度 = 区域.Height
+        前景色ARGB = 前景色值 : 描边色ARGB = 描边色值 : 描边宽度 = 描边宽度值
+        水平对齐 = 水平对齐值 : 垂直对齐 = 垂直对齐值 : 样式 = 样式值
+        内容标识 = If(内容标识值 <> 0, 内容标识值, 计算文字内容标识(文本, 字体))
+    End Sub
+
+    Private Shared Function 计算文字内容标识(文本 As String, 字体 As String) As ULong
+        ' 内容标识只描述不可变的文字负载；位置、大小和样式由原生布局键另行混合。
+        ' 因而滚动弹幕逐帧只改变 X/Y 时，可以安全复用 DirectWrite 布局。
+        Dim hash As ULong = &HCBF29CE484222325UL
+        混合文字内容(hash, 文本)
+        混合文字内容(hash, 字体)
+        Return If(hash = 0, 1UL, hash)
+    End Function
+
+    Private Shared Sub 混合文字内容(ByRef hash As ULong, value As String)
+        For Each character In value
+            hash = Numerics.BitOperations.RotateLeft(hash, 7) Xor CULng(AscW(character) And &HFFFF&)
+        Next
+        hash = Numerics.BitOperations.RotateLeft(hash, 7) Xor &HFFFFUL
+    End Sub
 
     Public Shared Function 创建位图(像素BGRA As Byte(), 位图宽度 As Integer, 位图高度 As Integer,
                                   行跨度 As Integer, 区域 As RectangleF,
                                   Optional 内容标识 As ULong = 0) As 定时文字命令
         ArgumentNullException.ThrowIfNull(像素BGRA)
-        Return New 定时文字命令 With {
-            .是位图 = True, .位图像素BGRA = 像素BGRA, .位图宽度 = 位图宽度,
-            .位图高度 = 位图高度, .位图行跨度 = 行跨度,
-            .X = 区域.X, .Y = 区域.Y, .宽度 = 区域.Width, .高度 = 区域.Height,
-            .内容标识 = 内容标识}
+        Dim result As New 定时文字命令()
+        result.设置位图(像素BGRA, 位图宽度, 位图高度, 行跨度, 区域, 内容标识)
+        Return result
     End Function
+
+    Friend Sub 设置位图(像素BGRA As Byte(), 位图宽度值 As Integer, 位图高度值 As Integer,
+                      行跨度值 As Integer, 区域 As RectangleF, 内容标识值 As ULong)
+        ArgumentNullException.ThrowIfNull(像素BGRA)
+        是位图 = True : 位图像素BGRA = 像素BGRA
+        位图宽度 = 位图宽度值 : 位图高度 = 位图高度值 : 位图行跨度 = 行跨度值
+        X = 区域.X : Y = 区域.Y : 宽度 = 区域.Width : 高度 = 区域.Height
+        ' 池对象可能上一帧是文字命令；清掉所有引用和值，避免旧字幕负载
+        ' 被位图命令无谓保活，也避免以后新增原生字段时读到陈旧状态。
+        文本 = String.Empty : 字体 = String.Empty : 字号 = 0
+        前景色ARGB = 0 : 描边色ARGB = 0 : 描边宽度 = 0
+        水平对齐 = 定时文字对齐.靠前 : 垂直对齐 = 定时文字对齐.靠前
+        样式 = 定时文字样式.无
+        内容标识 = 内容标识值
+    End Sub
 End Class
 
 Public NotInheritable Class 定时文字状态
@@ -172,6 +236,10 @@ Public NotInheritable Class 定时文字状态
         画布大小 = New Size(CInt(值.画布宽度), CInt(值.画布高度))
         图层呈现帧数 = 值.图层呈现帧数
         可见像素数 = 值.可见像素数
+        精灵缓存命中次数 = 值.精灵缓存命中次数
+        精灵缓存未命中次数 = 值.精灵缓存未命中次数
+        后备缓冲获取次数 = 值.后备缓冲获取次数
+        合成像素着色器调用次数 = 值.合成像素着色器调用次数
     End Sub
     Public ReadOnly Property 已提交序号 As ULong
     Public ReadOnly Property 已绘制序号 As ULong
@@ -179,6 +247,10 @@ Public NotInheritable Class 定时文字状态
     Public ReadOnly Property 画布大小 As Size
     Public ReadOnly Property 图层呈现帧数 As UInteger
     Public ReadOnly Property 可见像素数 As ULong
+    Public ReadOnly Property 精灵缓存命中次数 As ULong
+    Public ReadOnly Property 精灵缓存未命中次数 As ULong
+    Public ReadOnly Property 后备缓冲获取次数 As ULong
+    Public ReadOnly Property 合成像素着色器调用次数 As ULong
 End Class
 
 Public NotInheritable Class 播放器弹幕事件参数
@@ -223,6 +295,16 @@ Public NotInheritable Class 媒体流信息
     Public Property 宽度 As Integer
     <JsonPropertyName("height")>
     Public Property 高度 As Integer
+    <JsonPropertyName("averageFrameRateNumerator")>
+    Public Property 平均帧率分子 As Integer
+    <JsonPropertyName("averageFrameRateDenominator")>
+    Public Property 平均帧率分母 As Integer
+    <JsonIgnore>
+    Public ReadOnly Property 平均帧率 As Double
+        Get
+            Return If(平均帧率分母 > 0, CDbl(平均帧率分子) / 平均帧率分母, 0.0R)
+        End Get
+    End Property
     <JsonPropertyName("hdr")>
     Public Property 是HDR As Boolean
     <JsonPropertyName("attachedPicture")>

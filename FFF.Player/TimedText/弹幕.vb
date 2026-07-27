@@ -215,7 +215,7 @@ Public NotInheritable Class B站弹幕解析器
     End Function
 End Class
 
-''' <summary>按媒体文件名查找并后台解析 B 站 XML 弹幕。</summary>
+''' <summary>按媒体文件名查找或显式加载 B 站 XML 弹幕。</summary>
 Public NotInheritable Class 弹幕自动加载器
     Private Sub New()
     End Sub
@@ -226,15 +226,38 @@ Public NotInheritable Class 弹幕自动加载器
         Return Task.Run(Function() 尝试加载同名弹幕(媒体路径, 取消令牌), 取消令牌)
     End Function
 
+    Public Shared Function 是支持的弹幕文件(路径 As String) As Boolean
+        Return Not String.IsNullOrWhiteSpace(路径) AndAlso
+            Path.GetExtension(路径).Equals(".xml", StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Public Shared Function 加载弹幕Async(弹幕路径 As String,
+                                      取消令牌 As CancellationToken) As Task(Of 弹幕资料库)
+        ArgumentException.ThrowIfNullOrWhiteSpace(弹幕路径)
+        Return Task.Run(Function() 加载弹幕(弹幕路径, 取消令牌), 取消令牌)
+    End Function
+
+    ''' <summary>完整解析指定 XML；有效的空文件也表示用空资料库清除当前弹幕。</summary>
+    Public Shared Function 加载弹幕(弹幕路径 As String,
+                                 Optional 取消令牌 As CancellationToken = Nothing) As 弹幕资料库
+        ArgumentException.ThrowIfNullOrWhiteSpace(弹幕路径)
+        Dim 完整路径 = Path.GetFullPath(弹幕路径)
+        If Not File.Exists(完整路径) Then Throw New FileNotFoundException("弹幕文件不存在。", 完整路径)
+        If Not 是支持的弹幕文件(完整路径) Then Throw New NotSupportedException("仅支持 B 站 XML 弹幕文件。")
+        取消令牌.ThrowIfCancellationRequested()
+        Dim 资料库 = B站弹幕解析器.解析文件(完整路径)
+        取消令牌.ThrowIfCancellationRequested()
+        Return 资料库
+    End Function
+
     Public Shared Function 尝试加载同名弹幕(媒体路径 As String,
                                          Optional 取消令牌 As CancellationToken = Nothing) As 弹幕资料库
         ArgumentException.ThrowIfNullOrWhiteSpace(媒体路径)
         取消令牌.ThrowIfCancellationRequested()
         Dim 弹幕路径 = Path.ChangeExtension(媒体路径, ".xml")
         If Not File.Exists(弹幕路径) Then Return Nothing
-        Dim database = B站弹幕解析器.解析文件(弹幕路径)
-        取消令牌.ThrowIfCancellationRequested()
-        Return If(database.数量 > 0, database, Nothing)
+        Dim 资料库 = 加载弹幕(弹幕路径, 取消令牌)
+        Return If(资料库.数量 > 0, 资料库, Nothing)
     End Function
 End Class
 

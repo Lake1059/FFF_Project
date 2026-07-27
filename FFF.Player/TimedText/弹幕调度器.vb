@@ -244,9 +244,17 @@ Public NotInheritable Class 弹幕调度器
     End Function
 
     Private Sub 清除过期(seconds As Double)
-        For i = 活动列表.Count - 1 To 0 Step -1
-            If 活动列表(i).结束秒 <= seconds Then 活动列表.RemoveAt(i)
+        ' 稳定压缩一次完成清理；连续 RemoveAt 会在密集弹幕同时过期时反复移动尾部。
+        Dim writeIndex = 0
+        For readIndex = 0 To 活动列表.Count - 1
+            Dim active = 活动列表(readIndex)
+            If active.结束秒 <= seconds Then Continue For
+            If writeIndex <> readIndex Then 活动列表(writeIndex) = active
+            writeIndex += 1
         Next
+        If writeIndex < 活动列表.Count Then
+            活动列表.RemoveRange(writeIndex, 活动列表.Count - writeIndex)
+        End If
     End Sub
 
     Private Function 实际滚动速度(area As 视频显示区域) As Single

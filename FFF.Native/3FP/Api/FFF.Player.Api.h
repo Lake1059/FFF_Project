@@ -17,6 +17,12 @@ enum class FFF3FPColorMode : std::uint32_t {
     MapToHdr = 2,
 };
 
+enum class FFF3FPColorTransfer : std::uint32_t {
+    SdrBt709 = 0,
+    Pq = 1,
+    Hlg = 2,
+};
+
 enum class FFF3FPState : std::uint32_t {
     Idle = 0,
     Opening = 1,
@@ -79,7 +85,18 @@ struct FFF3FPSnapshot {
     std::uint64_t presentedVideoFrames;
     std::uint64_t droppedVideoFrames;
     std::uint32_t queuedVideoFrames;
-    std::uint32_t reserved;
+    std::uint32_t sourcePeakNits;
+    // Audio diagnostics use the same 100 ns time base as position100ns. They
+    // report renderer state only; the media clock remains the owner of video
+    // presentation timing.
+    std::uint64_t decodedAudioFrames;
+    std::int64_t audioPosition100ns;
+    std::int64_t bufferedAudio100ns;
+    std::uint64_t audioUnderruns;
+    std::uint64_t audioTimestampJitterFrames;
+    std::uint64_t audioDiscontinuities;
+    std::uint64_t audioInsertedSilenceFrames;
+    std::uint64_t audioDroppedOverlapFrames;
 };
 
 using FFF3FPHandle = void*;
@@ -160,9 +177,15 @@ struct FFF3FPTimedTextLayer {
     std::uint32_t canvasWidth;
     std::uint32_t canvasHeight;
     std::uint32_t commandCount;
-    std::uint32_t reserved;
+    // 0 = subtitle, 1 = danmaku. Kept in the original reserved field so the
+    // version-1 ABI remains stable while the two producers become independent.
+    std::uint32_t layerSlot;
     std::uint64_t sequence;
     const FFF3FPTimedTextCommand* commands;
+    // Optional version-1 tail. Older callers may pass the legacy size and are
+    // treated as 60 Hz; current callers publish the layer's independent pace.
+    float targetFrameRate;
+    std::uint32_t reserved2;
 };
 
 struct FFF3FPTimedTextStatus {
@@ -175,6 +198,33 @@ struct FFF3FPTimedTextStatus {
     std::uint32_t canvasHeight;
     std::uint32_t reserved;
     std::uint64_t visiblePixelCount;
+    std::uint64_t spriteCacheHits;
+    std::uint64_t spriteCacheMisses;
+    // D3D11 exposes only logical buffer 0 for flip-model chains. Its physical
+    // identity rotates, so this count must advance once per final presentation.
+    std::uint64_t backBufferAcquisitionCount;
+    std::uint64_t compositePixelShaderInvocations;
+};
+
+// Numeric probe for the production color transform.  This is deliberately
+// independent of a swap chain so automated tests can verify luminance anchors
+// without judging screenshots by eye.
+struct FFF3FPColorTransform {
+    std::uint32_t size;
+    std::uint32_t version;
+    FFF3FPColorMode colorMode;
+    FFF3FPColorTransfer transfer;
+    std::uint32_t source2020;
+    std::uint32_t reserved;
+    float inputRed;
+    float inputGreen;
+    float inputBlue;
+    float sdrPeakNits;
+    float sourcePeakNits;
+    float paperWhiteNits;
+    float outputRed;
+    float outputGreen;
+    float outputBlue;
 };
 
 #ifdef FFFNATIVE_EXPORTS
@@ -215,6 +265,9 @@ FFF3FP_API FFFResult FFF3FP_SetTimedTextLayer(FFF3FPHandle player,
 FFF3FP_API FFFResult FFF3FP_GetSnapshot(FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetTimedTextStatus(FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept;
+FFF3FP_API FFFResult FFF3FP_GetDanmakuStatus(FFF3FPHandle player,
+    FFF3FPTimedTextStatus* status) noexcept;
+FFF3FP_API FFFResult FFF3FP_EvaluateColorTransform(FFF3FPColorTransform* transform) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetMediaInfo(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,

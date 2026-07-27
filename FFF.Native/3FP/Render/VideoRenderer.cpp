@@ -3,14 +3,19 @@
 
 extern "C" {
 #include <libavutil/frame.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/rational.h>
 #include <libswscale/swscale.h>
 }
 
 #include <d3dcompiler.h>
 #include <d2d1helper.h>
+#include <bit>
+#include <chrono>
 #include <cmath>
+#include <cstring>
 
 using Microsoft::WRL::ComPtr;
 
@@ -106,10 +111,37 @@ void Convert709To2020(float& r, float& g, float& b) noexcept {
     r = nr; g = ng; b = nb;
 }
 
-float ToneMapNits(const float nits, const float peak) noexcept {
-    if (nits <= peak) return nits;
-    const auto excess = nits - peak;
-    return peak - peak * 0.25f * std::exp(-excess / std::max(peak, 1.0f));
+float ToneToPeakNits(const float nits, const float peak) noexcept {
+    const auto knee = peak * 0.75f;
+    if (nits <= knee) return nits;
+    return knee + (peak - knee) *
+        (1.0f - std::exp(-(nits - knee) / std::max(peak - knee, 1.0f)));
+}
+
+float ReinhardHdrToSdrNits(const float nits, const float sourcePeak,
+    const float paperWhite, const float targetPeak) noexcept {
+    const auto reference = std::max(paperWhite, 1.0f);
+    const auto white = std::max(sourcePeak / reference, 1.0f);
+    const auto normalized = std::max(nits, 0.0f) / reference;
+    return targetPeak * normalized * (1.0f + normalized / (white * white)) /
+        (1.0f + normalized);
+}
+
+struct Float3 { float r, g, b; };
+
+Float3 ScaleToPeak(const Float3 value, const float peak) noexcept {
+    const auto maximum = std::max({value.r, value.g, value.b});
+    if (maximum <= 1.0e-6f) return value;
+    const auto scale = ToneToPeakNits(maximum, peak) / maximum;
+    return {value.r * scale, value.g * scale, value.b * scale};
+}
+
+Float3 MapHdrToSdr(const Float3 value, const float sourcePeak,
+    const float paperWhite, const float targetPeak) noexcept {
+    const auto maximum = std::max({value.r, value.g, value.b});
+    if (maximum <= 1.0e-6f) return value;
+    const auto scale = ReinhardHdrToSdrNits(maximum, sourcePeak, paperWhite, targetPeak) / maximum;
+    return {value.r * scale, value.g * scale, value.b * scale};
 }
 
 constexpr const char* VertexShaderSource = R"(
@@ -157,9 +189,19 @@ float ToneOne(float value,float peak) {
     float knee=peak*0.75;
     return value<=knee?value:knee+(peak-knee)*(1.0-exp(-(value-knee)/max(peak-knee,1.0)));
 }
-float3 Tone(float3 nits,float peak) {
+float3 ToneToPeak(float3 nits,float peak) {
     float maximum=max(max(nits.r,nits.g),nits.b);
     return maximum<=0.000001?nits:nits*(ToneOne(maximum,peak)/maximum);
+}
+float ReinhardHdrToSdrOne(float value,float sourcePeak,float paperWhite,float targetPeak) {
+    float reference=max(paperWhite,1.0);
+    float white=max(sourcePeak/reference,1.0);
+    float normalized=max(value,0.0)/reference;
+    return targetPeak*normalized*(1.0+normalized/(white*white))/(1.0+normalized);
+}
+float3 ToneHdrToSdr(float3 nits,float sourcePeak,float paperWhite,float targetPeak) {
+    float maximum=max(max(nits.r,nits.g),nits.b);
+    return maximum<=0.000001?nits:nits*(ReinhardHdrToSdrOne(maximum,sourcePeak,paperWhite,targetPeak)/maximum);
 }
 float3 ReadSource(float2 uv) {
     if(InputLayout==0)return Source.Sample(LinearSampler,uv).rgb;
@@ -186,12 +228,12 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
         return float4(rgb,1);
     }
     float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):ToLinear709(rgb)*PaperWhite);
-    if(ColorMode==2){ if(Source2020==0)nits=To2020(nits); return float4(NitsToPq(Tone(nits,1000.0)),1); }
+    if(ColorMode==2){ if(Source2020==0)nits=To2020(nits); return float4(NitsToPq(ToneToPeak(nits,1000.0)),1); }
     if(Source2020!=0)nits=To709(nits);
-    // SDR paper white must reach the configured SDR peak.  Applying an additional
-    // 0.75 multiplier here made a second switch back to SDR visibly too dark.
-    nits*=SdrPeak/max(PaperWhite,1.0);
-    return float4(ToBt709(Tone(nits,SdrPeak)/SdrPeak),1);
+    // HDR is display-referred.  Compress it before the SDR OETF instead of
+    // scaling HDR diffuse white directly to clipping white; that old scaling
+    // lifted most mid-tones and left almost no highlight headroom.
+    return float4(ToBt709(ToneHdrToSdr(nits,HdrPeak,PaperWhite,SdrPeak)/SdrPeak),1);
 })";
 
 constexpr const char* TimedTextPixelShaderSource = R"(
@@ -215,6 +257,33 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     if(ColorMode==2)straight=NitsToPq(To2020(ToLinear709(straight)*PaperWhite));
     return float4(straight*value.a,value.a);
 })";
+
+constexpr const char* TimedTextSpriteVertexShaderSource = R"(
+struct InstanceData { float4 destination; float4 uv; };
+StructuredBuffer<InstanceData> Instances : register(t1);
+struct Output { float4 position : SV_Position; float2 uv : TEXCOORD0; };
+Output main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
+    static const float2 corners[6] = {
+        float2(0,0), float2(1,0), float2(0,1),
+        float2(0,1), float2(1,0), float2(1,1)
+    };
+    InstanceData instance = Instances[instanceId];
+    float2 corner = corners[vertexId];
+    Output output;
+    output.position = float4(lerp(instance.destination.xy, instance.destination.zw, corner), 0, 1);
+    output.uv = lerp(instance.uv.xy, instance.uv.zw, corner);
+    return output;
+})";
+
+constexpr const char* TimedTextSpritePixelShaderSource = R"(
+Texture2D<float4> Atlas : register(t0);
+SamplerState LinearSampler : register(s0);
+float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    return Atlas.Sample(LinearSampler, uv);
+})";
+
+constexpr std::uint32_t TimedTextAtlasSize = 4096;
+constexpr std::uint32_t MaximumTimedTextSprites = 512;
 
 struct ShaderSettings {
     std::uint32_t colorMode, transfer, source2020, reserved;
@@ -245,6 +314,25 @@ InputDescription DescribeInput(const AVPixelFormat format) noexcept {
     default:
         return {};
     }
+}
+
+float ResolveSourcePeakNits(const AVFrame* frame, const float fallback, const float paperWhite) noexcept {
+    auto peak = fallback;
+    const auto* lightSideData = av_frame_get_side_data(frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+    if (lightSideData != nullptr && lightSideData->size >= sizeof(AVContentLightMetadata)) {
+        const auto* light = reinterpret_cast<const AVContentLightMetadata*>(lightSideData->data);
+        if (light->MaxCLL > 0) peak = static_cast<float>(light->MaxCLL);
+    } else {
+        const auto* masteringSideData = av_frame_get_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+        if (masteringSideData != nullptr && masteringSideData->size >= sizeof(AVMasteringDisplayMetadata)) {
+            const auto* mastering = reinterpret_cast<const AVMasteringDisplayMetadata*>(masteringSideData->data);
+            if (mastering->has_luminance) {
+                const auto masteringPeak = static_cast<float>(av_q2d(mastering->max_luminance));
+                if (std::isfinite(masteringPeak) && masteringPeak > 0.0f) peak = masteringPeak;
+            }
+        }
+    }
+    return std::clamp(peak, std::max(paperWhite, 1.0f), 10000.0f);
 }
 
 void YuvCoefficients(const AVColorSpace colorSpace, const int width, float& kr, float& kb) noexcept {
@@ -280,6 +368,89 @@ DWRITE_PARAGRAPH_ALIGNMENT ToParagraphAlignment(const FFF3FPTimedTextAlignment v
     default: return DWRITE_PARAGRAPH_ALIGNMENT_NEAR;
     }
 }
+
+template <typename T>
+void HashTimedText(std::uint64_t& hash, const T& value) noexcept {
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(&value);
+    for (std::size_t index = 0; index < sizeof(T); ++index) {
+        hash ^= bytes[index];
+        hash *= 1099511628211ull;
+    }
+}
+
+std::uint64_t TimedTextLayoutKey(const TimedTextRenderCommand& command,
+    const D2D1_RECT_F& destination, const float fontSize) noexcept {
+    std::uint64_t hash = 1469598103934665603ull;
+    HashTimedText(hash, command.contentId);
+    if (command.content) HashTimedText(hash, command.content->identity);
+    HashTimedText(hash, std::bit_cast<std::uint32_t>(fontSize));
+    HashTimedText(hash, std::bit_cast<std::uint32_t>(destination.right - destination.left));
+    HashTimedText(hash, std::bit_cast<std::uint32_t>(destination.bottom - destination.top));
+    HashTimedText(hash, static_cast<std::uint32_t>(command.flags));
+    HashTimedText(hash, static_cast<std::uint32_t>(command.horizontalAlignment));
+    HashTimedText(hash, static_cast<std::uint32_t>(command.verticalAlignment));
+    return hash == 0 ? 1 : hash;
+}
+
+std::uint64_t TimedTextSpriteKey(const TimedTextRenderCommand& command,
+    const D2D1_RECT_F& destination, const float fontSize, const float outline) noexcept {
+    auto hash = TimedTextLayoutKey(command, destination, fontSize);
+    HashTimedText(hash, command.foregroundArgb);
+    HashTimedText(hash, command.outlineArgb);
+    HashTimedText(hash, std::bit_cast<std::uint32_t>(outline));
+    return hash == 0 ? 1 : hash;
+}
+}
+
+FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept {
+    if (transform.size < sizeof(transform) || transform.version != 1 ||
+        transform.colorMode > FFF3FPColorMode::MapToHdr ||
+        transform.transfer > FFF3FPColorTransfer::Hlg || transform.source2020 > 1 ||
+        !std::isfinite(transform.inputRed) || !std::isfinite(transform.inputGreen) ||
+        !std::isfinite(transform.inputBlue) || !std::isfinite(transform.sdrPeakNits) ||
+        transform.sdrPeakNits <= 0.0f || !std::isfinite(transform.sourcePeakNits) ||
+        transform.sourcePeakNits <= 0.0f || transform.sourcePeakNits > 10000.0f ||
+        !std::isfinite(transform.paperWhiteNits) || transform.paperWhiteNits <= 0.0f)
+        return FFFResult::InvalidArgument;
+
+    Float3 rgb{transform.inputRed, transform.inputGreen, transform.inputBlue};
+    if (transform.colorMode != FFF3FPColorMode::RawHdrAsSdr) {
+        if (transform.colorMode == FFF3FPColorMode::MapToSdr &&
+            transform.transfer == FFF3FPColorTransfer::SdrBt709) {
+            if (transform.source2020 != 0) {
+                rgb = {Bt709ToLinear(rgb.r), Bt709ToLinear(rgb.g), Bt709ToLinear(rgb.b)};
+                Convert2020To709(rgb.r, rgb.g, rgb.b);
+                rgb = {LinearToBt709(rgb.r), LinearToBt709(rgb.g), LinearToBt709(rgb.b)};
+            }
+        } else {
+            Float3 nits{};
+            if (transform.transfer == FFF3FPColorTransfer::Pq)
+                nits = {PqToNits(rgb.r), PqToNits(rgb.g), PqToNits(rgb.b)};
+            else if (transform.transfer == FFF3FPColorTransfer::Hlg)
+                nits = {HlgToNits(rgb.r), HlgToNits(rgb.g), HlgToNits(rgb.b)};
+            else
+                nits = {Bt709ToLinear(rgb.r) * transform.paperWhiteNits,
+                    Bt709ToLinear(rgb.g) * transform.paperWhiteNits,
+                    Bt709ToLinear(rgb.b) * transform.paperWhiteNits};
+
+            if (transform.colorMode == FFF3FPColorMode::MapToHdr) {
+                if (transform.source2020 == 0) Convert709To2020(nits.r, nits.g, nits.b);
+                nits = ScaleToPeak(nits, TrueHdrOutputPeakNits);
+                rgb = {NitsToPq(nits.r), NitsToPq(nits.g), NitsToPq(nits.b)};
+            } else {
+                if (transform.source2020 != 0) Convert2020To709(nits.r, nits.g, nits.b);
+                nits = MapHdrToSdr(nits, transform.sourcePeakNits,
+                    transform.paperWhiteNits, transform.sdrPeakNits);
+                rgb = {LinearToBt709(nits.r / transform.sdrPeakNits),
+                    LinearToBt709(nits.g / transform.sdrPeakNits),
+                    LinearToBt709(nits.b / transform.sdrPeakNits)};
+            }
+        }
+    }
+    transform.outputRed = Clamp01(rgb.r);
+    transform.outputGreen = Clamp01(rgb.g);
+    transform.outputBlue = Clamp01(rgb.b);
+    return FFFResult::Success;
 }
 
 PlayerVideoRenderer::PlayerVideoRenderer() noexcept
@@ -287,21 +458,35 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
       vertexShader_(nullptr), pixelShader_(nullptr), timedTextPixelShader_(nullptr), sampler_(nullptr), constants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
       videoBaseTexture_(nullptr), videoBaseTarget_(nullptr),
-      timedTextTexture_(nullptr), timedTextView_(nullptr), timedTextBlend_(nullptr),
-      d2dFactory_(nullptr), d2dDevice_(nullptr), d2dContext_(nullptr), d2dTarget_(nullptr),
+      timedTextTextures_{nullptr, nullptr}, timedTextTargets_{nullptr, nullptr},
+      timedTextViews_{nullptr, nullptr}, timedTextPipelineQueries_{nullptr, nullptr},
+      timedTextBlend_(nullptr),
+      timedTextAtlasTexture_(nullptr), timedTextAtlasView_(nullptr),
+      timedTextSpriteVertexShader_(nullptr), timedTextSpritePixelShader_(nullptr),
+      timedTextSpriteInstanceBuffer_(nullptr), timedTextSpriteInstanceView_(nullptr),
+      d2dFactory_(nullptr), d2dDevice_(nullptr), d2dContext_(nullptr), d2dTargets_{nullptr, nullptr},
+      d2dAtlasTarget_(nullptr),
       writeFactory_(nullptr), scaler_(nullptr),
       swapWidth_(0), swapHeight_(0), swapHdr_(false), sourceWidth_(0), sourceHeight_(0),
       sourceInputLayout_(UINT32_MAX), sourceBitDepth_(0),
       requestedMode_(FFF3FPColorMode::MapToSdr), actualMode_(FFF3FPColorMode::MapToSdr),
       sdrPeakNits_(100.0f), hdrPeakNits_(TrueHdrOutputPeakNits),
-      paperWhiteNits_(203.0f), timedTextRenderedSequence_(0), timedTextRenderedCommandCount_(0),
-      timedTextWidth_(0), timedTextHeight_(0), timedTextPresentCount_(0) {}
+      paperWhiteNits_(203.0f), sourcePeakNits_(100.0f),
+      timedTextThreadStop_(false), presentationGeneration_(0), presentationFrameRate_(60.0f),
+      timedTextRenderedSequences_{0, 0}, timedTextRenderedCommandCounts_{0, 0},
+      timedTextWidths_{0, 0}, timedTextHeights_{0, 0}, timedTextPresentCounts_{0, 0},
+      backBufferAcquisitionCount_(0),
+      timedTextPipelineQueryInFlight_{false, false},
+      timedTextCompositePixelInvocations_{0, 0},
+      timedTextAtlasX_(0), timedTextAtlasY_(0), timedTextAtlasRowHeight_(0),
+      timedTextSpriteCacheHits_(0), timedTextSpriteCacheMisses_(0) {}
 
 PlayerVideoRenderer::~PlayerVideoRenderer() { Close(); }
 
 FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     if (window != nullptr && !IsWindow(window)) return FFFResult::InvalidArgument;
+    if (window == window_) return FFFResult::Success;
     if (swapChain_ != nullptr) { swapChain_->Release(); swapChain_ = nullptr; }
     window_ = window;
     swapWidth_ = swapHeight_ = 0;
@@ -332,8 +517,24 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
         fallbackReason_ = "The target display or Windows Advanced Color mode does not support true HDR output.";
     }
     if (swapChain_ != nullptr && swapHdr_ != (actualMode_ == FFF3FPColorMode::MapToHdr)) {
-        swapChain_->Release(); swapChain_ = nullptr; swapWidth_ = swapHeight_ = 0;
+        const auto result = ReconfigureSwapChain(actualMode_ == FFF3FPColorMode::MapToHdr);
+        if (result != FFFResult::Success) return result;
     }
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
+    std::lock_guard deviceLock(deviceMutex_);
+    // Commit the public mode only after DXGI has returned the retained swap
+    // chain to BGRA/BT.709 and removed HDR10 metadata. Reporting SDR while an
+    // old PQ chain is still active would make the next SDR frame invalid.
+    if (swapChain_ != nullptr && swapHdr_) {
+        const auto result = ReconfigureSwapChain(false);
+        if (result != FFFResult::Success) return result;
+    }
+    requestedMode_ = FFF3FPColorMode::MapToSdr;
+    actualMode_ = FFF3FPColorMode::MapToSdr;
+    fallbackReason_.clear();
     return FFFResult::Success;
 }
 
@@ -383,8 +584,10 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
             actualMode_ = nextMode;
             fallbackReason_ = nextMode == requestedMode_ ? std::string{} :
                 "The target display or Windows Advanced Color mode does not support true HDR output.";
-            if (swapChain_ != nullptr) { swapChain_->Release(); swapChain_ = nullptr; }
-            swapWidth_ = swapHeight_ = 0;
+            if (swapChain_ != nullptr) {
+                const auto modeResult = ReconfigureSwapChain(nextMode == FFF3FPColorMode::MapToHdr);
+                if (modeResult != FFFResult::Success) return modeResult;
+            }
         }
     }
     const auto deviceResult = EnsureDevice();
@@ -394,15 +597,24 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     width = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(client.right - client.left));
     height = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(client.bottom - client.top));
     const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
+    if (swapChain_ != nullptr && hdr != swapHdr_) {
+        const auto modeResult = ReconfigureSwapChain(hdr);
+        if (modeResult != FFFResult::Success) return modeResult;
+    }
     if (swapChain_ != nullptr && width == swapWidth_ && height == swapHeight_ && hdr == swapHdr_) return FFFResult::Success;
     if (swapChain_ != nullptr && hdr == swapHdr_) {
         context_->ClearState();
-        if (SUCCEEDED(swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0))) {
+        const auto resize = swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+        if (SUCCEEDED(resize)) {
             swapWidth_ = width; swapHeight_ = height;
             ReleaseTimedTextResources(); ReleaseVideoBaseResources();
             return FFFResult::Success;
         }
-        swapChain_->Release(); swapChain_ = nullptr;
+        std::ostringstream message;
+        message << "Could not resize the playback swap chain (HRESULT 0x" << std::hex
+                << static_cast<std::uint32_t>(resize) << ").";
+        SetError(message.str());
+        return FFFResult::DeviceFailure;
     }
     ComPtr<IDXGIDevice> dxgiDevice;
     ComPtr<IDXGIAdapter> adapter;
@@ -420,9 +632,16 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     ComPtr<IDXGISwapChain1> chain1;
     const auto result = factory->CreateSwapChainForHwnd(device_, window_, &description, nullptr, nullptr, &chain1);
     if (FAILED(result) || FAILED(chain1->QueryInterface(IID_PPV_ARGS(&swapChain_)))) {
-        SetError("Could not create the playback swap chain."); return FFFResult::DeviceFailure;
+        std::ostringstream message;
+        message << "Could not create the playback swap chain (HRESULT 0x" << std::hex
+                << static_cast<std::uint32_t>(result) << ").";
+        SetError(message.str()); return FFFResult::DeviceFailure;
     }
     swapWidth_ = width; swapHeight_ = height; swapHdr_ = hdr;
+    // Keep at most one complete composite queued. The presentation thread may
+    // wait here, but decode and managed layer production retain only their
+    // latest state instead of building latency or exposing partial frames.
+    swapChain_->SetMaximumFrameLatency(1);
     ReleaseTimedTextResources(); ReleaseVideoBaseResources();
     if (hdr) {
         UINT support = 0;
@@ -431,13 +650,74 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
             FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
             fallbackReason_ = "The swap chain rejected the Rec.2020 PQ color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
-            swapChain_->Release(); swapChain_ = nullptr;
-            return EnsureSwapChain(width, height);
+            const auto fallbackResult = ReconfigureSwapChain(false);
+            return fallbackResult;
         }
         SetHdrMetadata();
     } else {
         swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
     }
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr) noexcept {
+    if (swapChain_ == nullptr || hdr == swapHdr_) return FFFResult::Success;
+    if (context_ != nullptr) { context_->ClearState(); context_->Flush(); }
+    ReleaseTimedTextResources();
+    ReleaseVideoBaseResources();
+    const auto format = hdr ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
+    const auto resize = swapChain_->ResizeBuffers(0, std::max(1u, swapWidth_),
+        std::max(1u, swapHeight_), format, 0);
+    if (FAILED(resize)) {
+        std::ostringstream message;
+        message << "Could not reconfigure the playback swap chain (HRESULT 0x" << std::hex
+                << static_cast<std::uint32_t>(resize) << ").";
+        SetError(message.str());
+        return FFFResult::DeviceFailure;
+    }
+    swapHdr_ = hdr;
+    if (hdr) {
+        UINT support = 0;
+        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) ||
+            (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
+            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
+            // HDR capability can change while a window moves between monitors.
+            // Keep the same HWND/flip chain, but atomically fall back to the SDR
+            // format instead of leaving an R10 buffer with an ambiguous space.
+            fallbackReason_ = "The reconfigured swap chain rejected the Rec.2020 PQ color space.";
+            actualMode_ = FFF3FPColorMode::MapToSdr;
+            return ReconfigureSwapChain(false);
+        }
+        SetHdrMetadata();
+    } else {
+        // ResizeBuffers does not define application HDR metadata lifetime. Clear
+        // it explicitly whenever the retained chain becomes SDR, including a
+        // HDR-to-SDR media switch on the same HWND.
+        swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+        if (FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709))) {
+            SetError("The reconfigured swap chain rejected the Rec.709 SDR color space.");
+            return FFFResult::DeviceFailure;
+        }
+    }
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::AcquireBackBufferTarget(ID3D11Texture2D** buffer,
+    ID3D11RenderTargetView** target) noexcept {
+    if (buffer == nullptr || target == nullptr) return FFFResult::InvalidArgument;
+    *buffer = nullptr; *target = nullptr;
+    if (swapChain_ == nullptr || device_ == nullptr) return FFFResult::InvalidState;
+    // D3D11 flip-model exposes the current writable buffer through logical
+    // index 0. Its physical identity changes after Present, so neither this
+    // texture nor its RTV may be cached across presentation cycles.
+    if (FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(buffer))) ||
+        FAILED(device_->CreateRenderTargetView(*buffer, nullptr, target))) {
+        if (*target != nullptr) { (*target)->Release(); *target = nullptr; }
+        if (*buffer != nullptr) { (*buffer)->Release(); *buffer = nullptr; }
+        SetError("Could not acquire the current playback back-buffer render target.");
+        return FFFResult::DeviceFailure;
+    }
+    ++backBufferAcquisitionCount_;
     return FFFResult::Success;
 }
 
@@ -516,11 +796,30 @@ FFFResult PlayerVideoRenderer::EnsureVideoBaseResources() noexcept {
     return FFFResult::Success;
 }
 
-FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer) noexcept {
+FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
+    const TimedTextLayerSlot slot) noexcept {
     try {
-        std::lock_guard lock(timedTextMutex_);
-        if (layer.sequence == 0) layer.sequence = timedTextLayer_.sequence + 1;
-        timedTextLayer_ = std::move(layer);
+        const auto slotIndex = static_cast<std::size_t>(slot);
+        if (slotIndex >= ARRAYSIZE(timedTextLayers_)) return FFFResult::InvalidArgument;
+        auto retained = std::make_shared<TimedTextRenderLayer>(std::move(layer));
+        {
+            std::lock_guard lock(timedTextMutex_);
+            if (!timedTextThread_.joinable()) {
+                timedTextThreadStop_ = false;
+                timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
+            }
+            if (retained->sequence == 0)
+                retained->sequence = timedTextLayers_[slotIndex]
+                    ? timedTextLayers_[slotIndex]->sequence + 1 : 1;
+            if (slot == TimedTextLayerSlot::Danmaku ||
+                timedTextLayers_[static_cast<std::size_t>(TimedTextLayerSlot::Danmaku)] == nullptr)
+                presentationFrameRate_ = std::clamp(retained->targetFrameRate, 1.0f, 240.0f);
+            timedTextLayers_[slotIndex] = std::move(retained);
+            ++presentationGeneration_;
+        }
+        // Submission is intentionally publish-and-wake only. The UI timer must
+        // never wait for 4K conversion, the D3D immediate-context lock or DXGI.
+        timedTextCondition_.notify_one();
         return FFFResult::Success;
     } catch (...) {
         SetError("Could not retain the timed-text command layer.");
@@ -528,30 +827,83 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer) noe
     }
 }
 
-FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept {
+void PlayerVideoRenderer::TimedTextThread() noexcept {
+    std::uint64_t observedPresentationGeneration = 0;
+    auto nextPresentation = std::chrono::steady_clock::time_point::min();
+    for (;;) {
+        float frameRate = 60.0f;
+        {
+            std::unique_lock lock(timedTextMutex_);
+            timedTextCondition_.wait(lock, [this, &observedPresentationGeneration] {
+                return timedTextThreadStop_ ||
+                    presentationGeneration_ != observedPresentationGeneration;
+            });
+            if (timedTextThreadStop_) return;
+
+            // Notifications publish only latest state. Coalesce every video and
+            // layer update received before the next configured presentation slot.
+            // The stop predicate remains responsive while ordinary notifications
+            // cannot pull a frame ahead of its stable cadence.
+            if (const auto now = std::chrono::steady_clock::now();
+                nextPresentation != std::chrono::steady_clock::time_point::min() &&
+                now < nextPresentation) {
+                timedTextCondition_.wait_until(lock, nextPresentation,
+                    [this] { return timedTextThreadStop_; });
+                if (timedTextThreadStop_) return;
+            }
+            observedPresentationGeneration = presentationGeneration_;
+            frameRate = presentationFrameRate_;
+        }
+        const auto presentationStart = std::chrono::steady_clock::now();
+        const auto result = PresentTimedText();
+        if (result != FFFResult::Success)
+            SetError("The independent timed-text presenter could not compose the latest layer.");
+        nextPresentation = presentationStart + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(1.0 / std::clamp(static_cast<double>(frameRate), 1.0, 240.0)));
+    }
+}
+
+void PlayerVideoRenderer::StopTimedTextThread() noexcept {
+    {
+        std::lock_guard lock(timedTextMutex_);
+        timedTextThreadStop_ = true;
+    }
+    timedTextCondition_.notify_all();
+    if (timedTextThread_.joinable()) timedTextThread_.join();
+}
+
+FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
+    const TimedTextLayerSlot slot) noexcept {
+    const auto slotIndex = static_cast<std::size_t>(slot);
+    if (slotIndex >= ARRAYSIZE(timedTextLayers_)) return FFFResult::InvalidArgument;
     std::lock_guard deviceLock(deviceMutex_);
     if (status.size < sizeof(FFF3FPTimedTextStatus) || status.version != 1)
         return FFFResult::InvalidArgument;
     {
         std::lock_guard lock(timedTextMutex_);
         status.size = sizeof(status); status.version = 1;
-        status.submittedSequence = timedTextLayer_.sequence;
-        status.renderedSequence = timedTextRenderedSequence_;
-        status.commandCount = timedTextRenderedCommandCount_;
-        status.canvasWidth = timedTextWidth_; status.canvasHeight = timedTextHeight_;
-        status.reserved = timedTextPresentCount_; status.visiblePixelCount = 0;
+        status.submittedSequence = timedTextLayers_[slotIndex] ? timedTextLayers_[slotIndex]->sequence : 0;
+        status.renderedSequence = timedTextRenderedSequences_[slotIndex];
+        status.commandCount = timedTextRenderedCommandCounts_[slotIndex];
+        status.canvasWidth = timedTextWidths_[slotIndex]; status.canvasHeight = timedTextHeights_[slotIndex];
+        status.reserved = timedTextPresentCounts_[slotIndex]; status.visiblePixelCount = 0;
+        status.spriteCacheHits = timedTextSpriteCacheHits_;
+        status.spriteCacheMisses = timedTextSpriteCacheMisses_;
+        status.backBufferAcquisitionCount = backBufferAcquisitionCount_;
+        status.compositePixelShaderInvocations =
+            timedTextCompositePixelInvocations_[slotIndex];
     }
     if (status.submittedSequence != status.renderedSequence || status.commandCount == 0 ||
-        timedTextTexture_ == nullptr || device_ == nullptr || context_ == nullptr)
+        timedTextTextures_[slotIndex] == nullptr || device_ == nullptr || context_ == nullptr)
         return FFFResult::Success;
     D3D11_TEXTURE2D_DESC description{};
-    timedTextTexture_->GetDesc(&description);
+    timedTextTextures_[slotIndex]->GetDesc(&description);
     description.Usage = D3D11_USAGE_STAGING;
     description.BindFlags = 0; description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     description.MiscFlags = 0;
     ComPtr<ID3D11Texture2D> staging;
     if (FAILED(device_->CreateTexture2D(&description, nullptr, &staging))) return FFFResult::DeviceFailure;
-    context_->CopyResource(staging.Get(), timedTextTexture_);
+    context_->CopyResource(staging.Get(), timedTextTextures_[slotIndex]);
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return FFFResult::DeviceFailure;
     std::uint64_t visible = 0;
@@ -568,7 +920,8 @@ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status)
 
 FFFResult PlayerVideoRenderer::EnsureTimedTextResources() noexcept {
     if (swapWidth_ == 0 || swapHeight_ == 0) return FFFResult::Success;
-    if (timedTextTexture_ != nullptr && timedTextWidth_ == swapWidth_ && timedTextHeight_ == swapHeight_)
+    if (timedTextTextures_[0] != nullptr && timedTextTextures_[1] != nullptr &&
+        timedTextWidths_[0] == swapWidth_ && timedTextHeights_[0] == swapHeight_)
         return FFFResult::Success;
     ReleaseTimedTextResources();
     if (d2dFactory_ == nullptr && FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -590,18 +943,78 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources() noexcept {
     texture.MipLevels = texture.ArraySize = 1; texture.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     texture.SampleDesc.Count = 1; texture.Usage = D3D11_USAGE_DEFAULT;
     texture.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(device_->CreateTexture2D(&texture, nullptr, &timedTextTexture_)) ||
-        FAILED(device_->CreateShaderResourceView(timedTextTexture_, nullptr, &timedTextView_))) {
-        SetError("Could not create the GPU timed-text surface."); return FFFResult::DeviceFailure;
+    for (std::size_t index = 0; index < ARRAYSIZE(timedTextTextures_); ++index) {
+        if (FAILED(device_->CreateTexture2D(&texture, nullptr, &timedTextTextures_[index])) ||
+            FAILED(device_->CreateRenderTargetView(timedTextTextures_[index], nullptr,
+                &timedTextTargets_[index])) ||
+            FAILED(device_->CreateShaderResourceView(timedTextTextures_[index], nullptr,
+                &timedTextViews_[index]))) {
+            SetError("Could not create the independent subtitle/danmaku surfaces.");
+            return FFFResult::DeviceFailure;
+        }
     }
-    ComPtr<IDXGISurface> surface;
-    if (FAILED(timedTextTexture_->QueryInterface(IID_PPV_ARGS(&surface)))) {
+    D3D11_QUERY_DESC pipelineQuery{};
+    pipelineQuery.Query = D3D11_QUERY_PIPELINE_STATISTICS;
+    for (auto*& query : timedTextPipelineQueries_) {
+        if (FAILED(device_->CreateQuery(&pipelineQuery, &query))) {
+            SetError("Could not create timed-text composite pipeline diagnostics.");
+            return FFFResult::DeviceFailure;
+        }
+    }
+    texture.Width = texture.Height = TimedTextAtlasSize;
+    if (FAILED(device_->CreateTexture2D(&texture, nullptr, &timedTextAtlasTexture_)) ||
+        FAILED(device_->CreateShaderResourceView(timedTextAtlasTexture_, nullptr, &timedTextAtlasView_))) {
+        SetError("Could not create the GPU timed-text sprite atlas."); return FFFResult::DeviceFailure;
+    }
+    ComPtr<IDXGISurface> surfaces[2];
+    ComPtr<IDXGISurface> atlasSurface;
+    if (FAILED(timedTextAtlasTexture_->QueryInterface(IID_PPV_ARGS(&atlasSurface)))) {
         SetError("Could not expose the GPU timed-text surface to Direct2D."); return FFFResult::DeviceFailure;
     }
     const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
-    if (FAILED(d2dContext_->CreateBitmapFromDxgiSurface(surface.Get(), &properties, &d2dTarget_))) {
-        SetError("Could not make the GPU timed-text surface a Direct2D target."); return FFFResult::DeviceFailure;
+    for (std::size_t index = 0; index < ARRAYSIZE(timedTextTextures_); ++index) {
+        if (FAILED(timedTextTextures_[index]->QueryInterface(IID_PPV_ARGS(&surfaces[index]))) ||
+            FAILED(d2dContext_->CreateBitmapFromDxgiSurface(surfaces[index].Get(), &properties,
+                &d2dTargets_[index]))) {
+            SetError("Could not bind the independent subtitle/danmaku surfaces to Direct2D.");
+            return FFFResult::DeviceFailure;
+        }
+    }
+    if (FAILED(d2dContext_->CreateBitmapFromDxgiSurface(atlasSurface.Get(), &properties, &d2dAtlasTarget_))) {
+        SetError("Could not make the GPU timed-text surfaces Direct2D targets."); return FFFResult::DeviceFailure;
+    }
+    ComPtr<ID3DBlob> spriteVertexCode, spritePixelCode, shaderErrors;
+    if (FAILED(D3DCompile(TimedTextSpriteVertexShaderSource,
+            std::strlen(TimedTextSpriteVertexShaderSource), nullptr, nullptr, nullptr,
+            "main", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &spriteVertexCode, &shaderErrors)) ||
+        FAILED(D3DCompile(TimedTextSpritePixelShaderSource,
+            std::strlen(TimedTextSpritePixelShaderSource), nullptr, nullptr, nullptr,
+            "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &spritePixelCode, &shaderErrors)) ||
+        FAILED(device_->CreateVertexShader(spriteVertexCode->GetBufferPointer(),
+            spriteVertexCode->GetBufferSize(), nullptr, &timedTextSpriteVertexShader_)) ||
+        FAILED(device_->CreatePixelShader(spritePixelCode->GetBufferPointer(),
+            spritePixelCode->GetBufferSize(), nullptr, &timedTextSpritePixelShader_))) {
+        SetError(shaderErrors ? static_cast<const char*>(shaderErrors->GetBufferPointer()) :
+            "Could not create the timed-text sprite shaders.");
+        return FFFResult::DeviceFailure;
+    }
+    D3D11_BUFFER_DESC instanceBuffer{};
+    instanceBuffer.ByteWidth = sizeof(TimedTextSpriteInstance) * 4096;
+    instanceBuffer.Usage = D3D11_USAGE_DYNAMIC;
+    instanceBuffer.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    instanceBuffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    instanceBuffer.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    instanceBuffer.StructureByteStride = sizeof(TimedTextSpriteInstance);
+    D3D11_SHADER_RESOURCE_VIEW_DESC instanceView{};
+    instanceView.Format = DXGI_FORMAT_UNKNOWN;
+    instanceView.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+    instanceView.Buffer.NumElements = 4096;
+    if (FAILED(device_->CreateBuffer(&instanceBuffer, nullptr, &timedTextSpriteInstanceBuffer_)) ||
+        FAILED(device_->CreateShaderResourceView(timedTextSpriteInstanceBuffer_, &instanceView,
+            &timedTextSpriteInstanceView_))) {
+        SetError("Could not create the timed-text sprite instance buffer.");
+        return FFFResult::DeviceFailure;
     }
     D3D11_BLEND_DESC blend{};
     blend.RenderTarget[0].BlendEnable = TRUE;
@@ -615,35 +1028,216 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources() noexcept {
     if (FAILED(device_->CreateBlendState(&blend, &timedTextBlend_))) {
         SetError("Could not create the GPU timed-text blend state."); return FFFResult::DeviceFailure;
     }
-    timedTextWidth_ = swapWidth_; timedTextHeight_ = swapHeight_;
+    d2dContext_->SetTarget(d2dAtlasTarget_);
+    d2dContext_->BeginDraw();
+    d2dContext_->Clear(D2D1::ColorF(0, 0));
+    const auto atlasEnd = d2dContext_->EndDraw();
+    d2dContext_->SetTarget(nullptr);
+    if (FAILED(atlasEnd)) {
+        SetError("Could not initialize the timed-text sprite atlas.");
+        return FFFResult::DeviceFailure;
+    }
+    timedTextAtlasX_ = timedTextAtlasY_ = timedTextAtlasRowHeight_ = 0;
+    timedTextSpriteInstances_.reserve(4096);
+    for (std::size_t index = 0; index < ARRAYSIZE(timedTextTextures_); ++index) {
+        timedTextWidths_[index] = swapWidth_;
+        timedTextHeights_[index] = swapHeight_;
+    }
     return FFFResult::Success;
 }
 
-FFFResult PlayerVideoRenderer::DrawTimedText() noexcept {
-    TimedTextRenderLayer layer;
+FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noexcept {
+    const auto slotIndex = static_cast<std::size_t>(slot);
+    if (slotIndex >= ARRAYSIZE(timedTextLayers_)) return FFFResult::InvalidArgument;
+    std::shared_ptr<const TimedTextRenderLayer> layer;
     {
         std::lock_guard lock(timedTextMutex_);
-        if (timedTextLayer_.sequence == timedTextRenderedSequence_) return FFFResult::Success;
-        try { layer = timedTextLayer_; }
-        catch (...) { SetError("Could not snapshot the timed-text command layer."); return FFFResult::NativeFailure; }
+        if (!timedTextLayers_[slotIndex] ||
+            timedTextLayers_[slotIndex]->sequence == timedTextRenderedSequences_[slotIndex])
+            return FFFResult::Success;
+        layer = timedTextLayers_[slotIndex];
     }
-    if (layer.commands.empty() && timedTextTexture_ == nullptr) {
+    if (layer->commands.empty() && timedTextTextures_[slotIndex] == nullptr) {
         std::lock_guard lock(timedTextMutex_);
-        timedTextRenderedSequence_ = layer.sequence;
-        timedTextRenderedCommandCount_ = 0;
-        timedTextWidth_ = swapWidth_; timedTextHeight_ = swapHeight_;
+        timedTextRenderedSequences_[slotIndex] = layer->sequence;
+        timedTextRenderedCommandCounts_[slotIndex] = 0;
+        timedTextWidths_[slotIndex] = swapWidth_; timedTextHeights_[slotIndex] = swapHeight_;
         return FFFResult::Success;
     }
     const auto resourceResult = EnsureTimedTextResources();
     if (resourceResult != FFFResult::Success) return resourceResult;
-    d2dContext_->SetTarget(d2dTarget_);
     d2dContext_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     d2dContext_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    const auto scaleX = layer->canvasWidth == 0 ? 1.0f : static_cast<float>(swapWidth_) / layer->canvasWidth;
+    const auto scaleY = layer->canvasHeight == 0 ? 1.0f : static_cast<float>(swapHeight_) / layer->canvasHeight;
+    const auto getBrush = [this](const std::uint32_t argb) noexcept -> ID2D1SolidColorBrush* {
+        const auto existing = timedTextBrushes_.find(argb);
+        if (existing != timedTextBrushes_.end()) return existing->second;
+        ID2D1SolidColorBrush* brush = nullptr;
+        if (FAILED(d2dContext_->CreateSolidColorBrush(ToD2dColor(argb), &brush))) return nullptr;
+        timedTextBrushes_.emplace(argb, brush);
+        return brush;
+    };
+    const auto getLayout = [this](const TimedTextRenderCommand& command,
+        const D2D1_RECT_F& destination, const float fontSize) noexcept -> IDWriteTextLayout* {
+        const auto weight = (static_cast<std::uint32_t>(command.flags) &
+            static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Bold)) != 0
+            ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL;
+        const auto style = (static_cast<std::uint32_t>(command.flags) &
+            static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Italic)) != 0
+            ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;
+        const auto layoutKey = TimedTextLayoutKey(command, destination, fontSize);
+        const auto existing = timedTextLayouts_.find(layoutKey);
+        if (existing != timedTextLayouts_.end()) return existing->second;
+        ComPtr<IDWriteTextFormat> format;
+        if (!command.content || FAILED(writeFactory_->CreateTextFormat(command.content->fontFamily.c_str(), nullptr, weight, style,
+            DWRITE_FONT_STRETCH_NORMAL, fontSize, L"", &format))) return nullptr;
+        format->SetTextAlignment(ToTextAlignment(command.horizontalAlignment));
+        format->SetParagraphAlignment(ToParagraphAlignment(command.verticalAlignment));
+        // The managed scheduler already measured the run. A second wrapping
+        // decision in DirectWrite can intermittently move/clip the last glyph.
+        format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(writeFactory_->CreateTextLayout(command.content->text.c_str(),
+            static_cast<UINT32>(command.content->text.size()), format.Get(),
+            std::max(destination.right - destination.left, 1.0f),
+            std::max(destination.bottom - destination.top, 1.0f), &layout))) return nullptr;
+        if ((static_cast<std::uint32_t>(command.flags) & static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Underline)) != 0)
+            layout->SetUnderline(TRUE, DWRITE_TEXT_RANGE{0, static_cast<UINT32>(command.content->text.size())});
+        if ((static_cast<std::uint32_t>(command.flags) & static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Strikeout)) != 0)
+            layout->SetStrikethrough(TRUE, DWRITE_TEXT_RANGE{0, static_cast<UINT32>(command.content->text.size())});
+        constexpr std::size_t MaximumCachedLayouts = 512;
+        while (timedTextLayoutOrder_.size() >= MaximumCachedLayouts) {
+            const auto oldest = timedTextLayoutOrder_.front();
+            timedTextLayoutOrder_.pop_front();
+            const auto entry = timedTextLayouts_.find(oldest);
+            if (entry != timedTextLayouts_.end()) {
+                entry->second->Release();
+                timedTextLayouts_.erase(entry);
+            }
+        }
+        auto* retained = layout.Detach();
+        timedTextLayouts_.emplace(layoutKey, retained);
+        timedTextLayoutOrder_.push_back(layoutKey);
+        return retained;
+    };
+    const auto drawLayout = [&getBrush, this](const TimedTextRenderCommand& command,
+        IDWriteTextLayout* layout, const D2D1_POINT_2F origin, const float outline) noexcept {
+        if (layout == nullptr) return;
+        constexpr auto textOptions = D2D1_DRAW_TEXT_OPTIONS_NO_SNAP;
+        if (outline > 0 && (command.outlineArgb >> 24) != 0) {
+            if (auto* outlineBrush = getBrush(command.outlineArgb); outlineBrush != nullptr) {
+                const auto radius = std::max(1, static_cast<int>(std::ceil(outline)));
+                constexpr int directions[][2] = {{-1,0},{1,0},{0,-1},{0,1}};
+                for (const auto& direction : directions)
+                    d2dContext_->DrawTextLayout(D2D1::Point2F(origin.x + direction[0] * radius,
+                        origin.y + direction[1] * radius), layout, outlineBrush, textOptions);
+            }
+        }
+        if ((command.foregroundArgb >> 24) != 0) {
+            if (auto* foreground = getBrush(command.foregroundArgb); foreground != nullptr)
+                d2dContext_->DrawTextLayout(origin, layout, foreground, textOptions);
+        }
+    };
+
+    struct PendingSprite {
+        const TimedTextRenderCommand* command = nullptr;
+        IDWriteTextLayout* layout = nullptr;
+        std::uint64_t key = 0;
+        TimedTextSprite sprite{};
+        float outline = 0;
+    };
+    std::vector<PendingSprite> pendingSprites;
+    pendingSprites.reserve(layer->commands.size());
+    const auto clearAtlas = [this]() noexcept -> bool {
+        timedTextSprites_.clear();
+        timedTextAtlasX_ = timedTextAtlasY_ = timedTextAtlasRowHeight_ = 0;
+        d2dContext_->SetTarget(d2dAtlasTarget_);
+        d2dContext_->BeginDraw();
+        d2dContext_->Clear(D2D1::ColorF(0, 0));
+        const auto result = d2dContext_->EndDraw();
+        d2dContext_->SetTarget(nullptr);
+        return SUCCEEDED(result);
+    };
+    const auto buildPendingSprites = [&](const bool stopWhenFull) noexcept -> bool {
+        pendingSprites.clear();
+        for (const auto& command : layer->commands) {
+            if (command.type != FFF3FPTimedTextCommandType::Text || command.contentId == 0 ||
+                command.horizontalAlignment != FFF3FPTimedTextAlignment::Near ||
+                command.verticalAlignment != FFF3FPTimedTextAlignment::Near) continue;
+            const auto destination = D2D1::RectF(command.x * scaleX, command.y * scaleY,
+                (command.x + command.width) * scaleX, (command.y + command.height) * scaleY);
+            const auto fontSize = std::max(command.fontSize * scaleY, 1.0f);
+            const auto outline = std::max(command.outlineWidth * (scaleX + scaleY) * 0.5f, 0.0f);
+            const auto key = TimedTextSpriteKey(command, destination, fontSize, outline);
+            if (timedTextSprites_.contains(key)) continue;
+            if (timedTextSprites_.size() + pendingSprites.size() >= MaximumTimedTextSprites)
+                return !stopWhenFull;
+            auto* layout = getLayout(command, destination, fontSize);
+            if (layout == nullptr) continue;
+            const auto padding = static_cast<float>(std::ceil(outline) + 4.0f);
+            const auto width = std::max(1u, static_cast<std::uint32_t>(std::ceil(
+                destination.right - destination.left + padding * 2.0f)));
+            const auto height = std::max(1u, static_cast<std::uint32_t>(std::ceil(
+                destination.bottom - destination.top + padding * 2.0f)));
+            if (width > TimedTextAtlasSize || height > TimedTextAtlasSize) continue;
+            if (timedTextAtlasX_ + width > TimedTextAtlasSize) {
+                timedTextAtlasX_ = 0;
+                timedTextAtlasY_ += timedTextAtlasRowHeight_;
+                timedTextAtlasRowHeight_ = 0;
+            }
+            if (timedTextAtlasY_ + height > TimedTextAtlasSize)
+                return !stopWhenFull;
+            TimedTextSprite sprite{static_cast<float>(timedTextAtlasX_),
+                static_cast<float>(timedTextAtlasY_), padding,
+                static_cast<float>(width), static_cast<float>(height)};
+            timedTextAtlasX_ += width;
+            timedTextAtlasRowHeight_ = std::max(timedTextAtlasRowHeight_, height);
+            pendingSprites.push_back(PendingSprite{&command, layout, key, sprite, outline});
+        }
+        return true;
+    };
+
+    // Rasterize new strings into one GPU atlas. If the bounded atlas fills, it
+    // is rebuilt from the currently visible set; old off-screen content never
+    // forces unbounded GPU memory growth.
+    if (!buildPendingSprites(true)) {
+        if (!clearAtlas()) {
+            SetError("Direct2D could not reset the timed-text sprite atlas.");
+            return FFFResult::DeviceFailure;
+        }
+        buildPendingSprites(false);
+    }
+    if (!pendingSprites.empty()) {
+        d2dContext_->SetTarget(d2dAtlasTarget_);
+        d2dContext_->BeginDraw();
+        for (const auto& pending : pendingSprites) {
+            const auto& sprite = pending.sprite;
+            const auto clip = D2D1::RectF(sprite.atlasX, sprite.atlasY,
+                sprite.atlasX + sprite.width, sprite.atlasY + sprite.height);
+            d2dContext_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            drawLayout(*pending.command, pending.layout,
+                D2D1::Point2F(sprite.atlasX + sprite.padding,
+                    sprite.atlasY + sprite.padding), pending.outline);
+            d2dContext_->PopAxisAlignedClip();
+        }
+        const auto atlasEnd = d2dContext_->EndDraw();
+        d2dContext_->SetTarget(nullptr);
+        if (FAILED(atlasEnd)) {
+            SetError("Direct2D could not rasterize the timed-text sprite atlas.");
+            return FFFResult::DeviceFailure;
+        }
+        for (const auto& pending : pendingSprites) {
+            timedTextSprites_[pending.key] = pending.sprite;
+            ++timedTextSpriteCacheMisses_;
+        }
+    }
+
+    timedTextSpriteInstances_.clear();
+    d2dContext_->SetTarget(d2dTargets_[slotIndex]);
     d2dContext_->BeginDraw();
     d2dContext_->Clear(D2D1::ColorF(0, 0));
-    const auto scaleX = layer.canvasWidth == 0 ? 1.0f : static_cast<float>(swapWidth_) / layer.canvasWidth;
-    const auto scaleY = layer.canvasHeight == 0 ? 1.0f : static_cast<float>(swapHeight_) / layer.canvasHeight;
-    for (const auto& command : layer.commands) {
+    for (const auto& command : layer->commands) {
         const auto destination = D2D1::RectF(command.x * scaleX, command.y * scaleY,
             (command.x + command.width) * scaleX, (command.y + command.height) * scaleY);
         if (command.type == FFF3FPTimedTextCommandType::Bitmap) {
@@ -658,70 +1252,120 @@ FFFResult PlayerVideoRenderer::DrawTimedText() noexcept {
                     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             continue;
         }
-        ComPtr<IDWriteTextFormat> format;
-        const auto weight = (static_cast<std::uint32_t>(command.flags) &
-            static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Bold)) != 0
-            ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL;
-        const auto style = (static_cast<std::uint32_t>(command.flags) &
-            static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Italic)) != 0
-            ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;
         const auto fontSize = std::max(command.fontSize * scaleY, 1.0f);
-        if (FAILED(writeFactory_->CreateTextFormat(command.fontFamily.c_str(), nullptr, weight, style,
-            DWRITE_FONT_STRETCH_NORMAL, fontSize, L"", &format))) continue;
-        format->SetTextAlignment(ToTextAlignment(command.horizontalAlignment));
-        format->SetParagraphAlignment(ToParagraphAlignment(command.verticalAlignment));
-        format->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-        ComPtr<IDWriteTextLayout> layout;
-        if (FAILED(writeFactory_->CreateTextLayout(command.text.c_str(),
-            static_cast<UINT32>(command.text.size()), format.Get(),
-            std::max(destination.right - destination.left, 1.0f),
-            std::max(destination.bottom - destination.top, 1.0f), &layout))) continue;
-        if ((static_cast<std::uint32_t>(command.flags) & static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Underline)) != 0)
-            layout->SetUnderline(TRUE, DWRITE_TEXT_RANGE{0, static_cast<UINT32>(command.text.size())});
-        if ((static_cast<std::uint32_t>(command.flags) & static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Strikeout)) != 0)
-            layout->SetStrikethrough(TRUE, DWRITE_TEXT_RANGE{0, static_cast<UINT32>(command.text.size())});
-        const auto origin = D2D1::Point2F(destination.left, destination.top);
         const auto outline = std::max(command.outlineWidth * (scaleX + scaleY) * 0.5f, 0.0f);
-        const auto textOptions = static_cast<D2D1_DRAW_TEXT_OPTIONS>(
-            D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP);
-        if (outline > 0 && (command.outlineArgb >> 24) != 0) {
-            ComPtr<ID2D1SolidColorBrush> outlineBrush;
-            if (SUCCEEDED(d2dContext_->CreateSolidColorBrush(ToD2dColor(command.outlineArgb), &outlineBrush))) {
-                const auto radius = std::max(1, static_cast<int>(std::ceil(outline)));
-                constexpr int directions[][2] = {{-1,0},{1,0},{0,-1},{0,1}};
-                for (const auto& direction : directions)
-                    d2dContext_->DrawTextLayout(D2D1::Point2F(origin.x + direction[0] * radius,
-                        origin.y + direction[1] * radius), layout.Get(), outlineBrush.Get(),
-                        textOptions);
+        if (command.contentId != 0 &&
+            command.horizontalAlignment == FFF3FPTimedTextAlignment::Near &&
+            command.verticalAlignment == FFF3FPTimedTextAlignment::Near) {
+            const auto spriteKey = TimedTextSpriteKey(command, destination, fontSize, outline);
+            const auto sprite = timedTextSprites_.find(spriteKey);
+            if (sprite != timedTextSprites_.end()) {
+                ++timedTextSpriteCacheHits_;
+                const auto left = destination.left - sprite->second.padding;
+                const auto top = destination.top - sprite->second.padding;
+                const auto right = left + sprite->second.width;
+                const auto bottom = top + sprite->second.height;
+                TimedTextSpriteInstance instance{};
+                instance.destination[0] = left * 2.0f / swapWidth_ - 1.0f;
+                instance.destination[1] = 1.0f - top * 2.0f / swapHeight_;
+                instance.destination[2] = right * 2.0f / swapWidth_ - 1.0f;
+                instance.destination[3] = 1.0f - bottom * 2.0f / swapHeight_;
+                instance.uv[0] = sprite->second.atlasX / TimedTextAtlasSize;
+                instance.uv[1] = sprite->second.atlasY / TimedTextAtlasSize;
+                instance.uv[2] = (sprite->second.atlasX + sprite->second.width) / TimedTextAtlasSize;
+                instance.uv[3] = (sprite->second.atlasY + sprite->second.height) / TimedTextAtlasSize;
+                timedTextSpriteInstances_.push_back(instance);
+                continue;
             }
         }
-        if ((command.foregroundArgb >> 24) != 0) {
-            ComPtr<ID2D1SolidColorBrush> foreground;
-            if (SUCCEEDED(d2dContext_->CreateSolidColorBrush(ToD2dColor(command.foregroundArgb), &foreground)))
-                d2dContext_->DrawTextLayout(origin, layout.Get(), foreground.Get(), textOptions);
-        }
+        auto* layout = getLayout(command, destination, fontSize);
+        drawLayout(command, layout, D2D1::Point2F(destination.left, destination.top), outline);
     }
     const auto end = d2dContext_->EndDraw();
     d2dContext_->SetTarget(nullptr);
     if (FAILED(end)) { SetError("Direct2D could not render the timed-text layer."); return FFFResult::DeviceFailure; }
+    if (!timedTextSpriteInstances_.empty()) {
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(context_->Map(timedTextSpriteInstanceBuffer_, 0,
+            D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+            SetError("Could not update the timed-text sprite instances.");
+            return FFFResult::DeviceFailure;
+        }
+        std::memcpy(mapped.pData, timedTextSpriteInstances_.data(),
+            timedTextSpriteInstances_.size() * sizeof(TimedTextSpriteInstance));
+        context_->Unmap(timedTextSpriteInstanceBuffer_, 0);
+        constexpr float blendFactor[] = {0, 0, 0, 0};
+        D3D11_VIEWPORT viewport{0, 0, static_cast<float>(swapWidth_),
+            static_cast<float>(swapHeight_), 0, 1};
+        context_->OMSetRenderTargets(1, &timedTextTargets_[slotIndex], nullptr);
+        context_->OMSetBlendState(timedTextBlend_, blendFactor, UINT_MAX);
+        context_->RSSetViewports(1, &viewport);
+        context_->IASetInputLayout(nullptr);
+        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context_->VSSetShader(timedTextSpriteVertexShader_, nullptr, 0);
+        context_->VSSetShaderResources(1, 1, &timedTextSpriteInstanceView_);
+        context_->PSSetShader(timedTextSpritePixelShader_, nullptr, 0);
+        context_->PSSetShaderResources(0, 1, &timedTextAtlasView_);
+        context_->PSSetSamplers(0, 1, &sampler_);
+        context_->DrawInstanced(6, static_cast<UINT>(timedTextSpriteInstances_.size()), 0, 0);
+        ID3D11ShaderResourceView* nullView = nullptr;
+        context_->VSSetShaderResources(1, 1, &nullView);
+        context_->PSSetShaderResources(0, 1, &nullView);
+        context_->OMSetRenderTargets(0, nullptr, nullptr);
+        context_->OMSetBlendState(nullptr, blendFactor, UINT_MAX);
+    }
     {
         std::lock_guard lock(timedTextMutex_);
-        timedTextRenderedSequence_ = layer.sequence;
-        timedTextRenderedCommandCount_ = static_cast<std::uint32_t>(layer.commands.size());
-        if (timedTextRenderedCommandCount_ > 0) ++timedTextPresentCount_;
+        timedTextRenderedSequences_[slotIndex] = layer->sequence;
+        timedTextRenderedCommandCounts_[slotIndex] = static_cast<std::uint32_t>(layer->commands.size());
     }
     return FFFResult::Success;
 }
 
-void PlayerVideoRenderer::CompositeTimedText(ID3D11RenderTargetView* target) noexcept {
-    if (timedTextView_ == nullptr || timedTextRenderedCommandCount_ == 0) return;
-    ID3D11ShaderResourceView* views[] = {timedTextView_, nullptr, nullptr};
+void PlayerVideoRenderer::CompositeTimedText(ID3D11RenderTargetView* target,
+    const TimedTextLayerSlot slot) noexcept {
+    const auto slotIndex = static_cast<std::size_t>(slot);
+    if (slotIndex >= ARRAYSIZE(timedTextViews_) || timedTextViews_[slotIndex] == nullptr ||
+        timedTextRenderedCommandCounts_[slotIndex] == 0) return;
+    ID3D11ShaderResourceView* views[] = {timedTextViews_[slotIndex], nullptr, nullptr};
     constexpr float blendFactor[] = {0, 0, 0, 0};
+    D3D11_VIEWPORT viewport{0, 0, static_cast<float>(swapWidth_),
+        static_cast<float>(swapHeight_), 0, 1};
+    // This is a complete pipeline boundary, not a continuation of the layer
+    // redraw above. Danmaku sprite batching leaves an instanced vertex shader
+    // bound; using that shader after its instance SRV is detached produces no
+    // valid fullscreen triangle and makes both overlay layers disappear until
+    // some unrelated video draw happens to restore the old state.
     context_->OMSetRenderTargets(1, &target, nullptr);
     context_->OMSetBlendState(timedTextBlend_, blendFactor, UINT_MAX);
+    context_->RSSetViewports(1, &viewport);
+    context_->IASetInputLayout(nullptr);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->VSSetShader(vertexShader_, nullptr, 0);
     context_->PSSetShader(timedTextPixelShader_, nullptr, 0);
+    context_->PSSetConstantBuffers(0, 1, &constants_);
     context_->PSSetShaderResources(0, ARRAYSIZE(views), views);
+    context_->PSSetSamplers(0, 1, &sampler_);
+    auto measurePipeline = false;
+    if (timedTextPipelineQueries_[slotIndex] != nullptr) {
+        if (!timedTextPipelineQueryInFlight_[slotIndex]) {
+            measurePipeline = true;
+        } else {
+            D3D11_QUERY_DATA_PIPELINE_STATISTICS statistics{};
+            if (context_->GetData(timedTextPipelineQueries_[slotIndex], &statistics,
+                    sizeof(statistics), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) {
+                timedTextCompositePixelInvocations_[slotIndex] += statistics.PSInvocations;
+                timedTextPipelineQueryInFlight_[slotIndex] = false;
+                measurePipeline = true;
+            }
+        }
+        if (measurePipeline) context_->Begin(timedTextPipelineQueries_[slotIndex]);
+    }
     context_->Draw(3, 0);
+    if (measurePipeline) {
+        context_->End(timedTextPipelineQueries_[slotIndex]);
+        timedTextPipelineQueryInFlight_[slotIndex] = true;
+    }
     ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
     context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
     context_->OMSetBlendState(nullptr, blendFactor, UINT_MAX);
@@ -729,17 +1373,49 @@ void PlayerVideoRenderer::CompositeTimedText(ID3D11RenderTargetView* target) noe
 
 void PlayerVideoRenderer::ReleaseTimedTextResources() noexcept {
     if (d2dContext_ != nullptr) d2dContext_->SetTarget(nullptr);
-    if (d2dTarget_ != nullptr) { d2dTarget_->Release(); d2dTarget_ = nullptr; }
+    for (auto& [key, layout] : timedTextLayouts_) if (layout != nullptr) layout->Release();
+    timedTextLayouts_.clear();
+    timedTextLayoutOrder_.clear();
+    for (auto& [color, brush] : timedTextBrushes_) if (brush != nullptr) brush->Release();
+    timedTextBrushes_.clear();
+    timedTextSprites_.clear();
+    timedTextSpriteInstances_.clear();
+    timedTextAtlasX_ = timedTextAtlasY_ = timedTextAtlasRowHeight_ = 0;
+    timedTextSpriteCacheHits_ = timedTextSpriteCacheMisses_ = 0;
+    if (d2dAtlasTarget_ != nullptr) { d2dAtlasTarget_->Release(); d2dAtlasTarget_ = nullptr; }
+    for (auto*& target : d2dTargets_) {
+        if (target != nullptr) { target->Release(); target = nullptr; }
+    }
     if (d2dContext_ != nullptr) { d2dContext_->Release(); d2dContext_ = nullptr; }
     if (d2dDevice_ != nullptr) { d2dDevice_->Release(); d2dDevice_ = nullptr; }
+    if (timedTextSpriteInstanceView_ != nullptr) { timedTextSpriteInstanceView_->Release(); timedTextSpriteInstanceView_ = nullptr; }
+    if (timedTextSpriteInstanceBuffer_ != nullptr) { timedTextSpriteInstanceBuffer_->Release(); timedTextSpriteInstanceBuffer_ = nullptr; }
+    if (timedTextSpritePixelShader_ != nullptr) { timedTextSpritePixelShader_->Release(); timedTextSpritePixelShader_ = nullptr; }
+    if (timedTextSpriteVertexShader_ != nullptr) { timedTextSpriteVertexShader_->Release(); timedTextSpriteVertexShader_ = nullptr; }
+    if (timedTextAtlasView_ != nullptr) { timedTextAtlasView_->Release(); timedTextAtlasView_ = nullptr; }
+    if (timedTextAtlasTexture_ != nullptr) { timedTextAtlasTexture_->Release(); timedTextAtlasTexture_ = nullptr; }
     if (timedTextBlend_ != nullptr) { timedTextBlend_->Release(); timedTextBlend_ = nullptr; }
-    if (timedTextView_ != nullptr) { timedTextView_->Release(); timedTextView_ = nullptr; }
-    if (timedTextTexture_ != nullptr) { timedTextTexture_->Release(); timedTextTexture_ = nullptr; }
+    for (auto*& query : timedTextPipelineQueries_) {
+        if (query != nullptr) { query->Release(); query = nullptr; }
+    }
+    for (auto*& view : timedTextViews_) {
+        if (view != nullptr) { view->Release(); view = nullptr; }
+    }
+    for (auto*& target : timedTextTargets_) {
+        if (target != nullptr) { target->Release(); target = nullptr; }
+    }
+    for (auto*& texture : timedTextTextures_) {
+        if (texture != nullptr) { texture->Release(); texture = nullptr; }
+    }
     {
         std::lock_guard lock(timedTextMutex_);
-        timedTextWidth_ = timedTextHeight_ = 0;
-        timedTextRenderedSequence_ = 0;
-        timedTextRenderedCommandCount_ = 0;
+        for (std::size_t index = 0; index < ARRAYSIZE(timedTextLayers_); ++index) {
+            timedTextWidths_[index] = timedTextHeights_[index] = 0;
+            timedTextRenderedSequences_[index] = 0;
+            timedTextRenderedCommandCounts_[index] = 0;
+            timedTextPipelineQueryInFlight_[index] = false;
+            timedTextCompositePixelInvocations_[index] = 0;
+        }
     }
 }
 
@@ -763,25 +1439,15 @@ void PlayerVideoRenderer::SetHdrMetadata() noexcept {
 }
 
 FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
-    std::lock_guard deviceLock(deviceMutex_);
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
-    if (window_ == nullptr) return FFFResult::Success;
-    const auto chainResult = EnsureSwapChain(frame->width, frame->height);
-    if (chainResult != FFFResult::Success) return chainResult;
     const auto width = static_cast<std::uint32_t>(frame->width);
     const auto height = static_cast<std::uint32_t>(frame->height);
     auto input = DescribeInput(static_cast<AVPixelFormat>(frame->format));
     const auto directYuv = input.layout != 0;
-    const auto pipelineResult = EnsurePipeline(width, height, input.layout, input.bitDepth);
-    if (pipelineResult != FFFResult::Success) return pipelineResult;
-    const auto baseResult = EnsureVideoBaseResources();
-    if (baseResult != FFFResult::Success) return baseResult;
-    if (directYuv) {
-        context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, frame->data[0], frame->linesize[0], 0);
-        context_->UpdateSubresource(sourceTextures_[1], 0, nullptr, frame->data[1], frame->linesize[1], 0);
-        if (input.layout == 1)
-            context_->UpdateSubresource(sourceTextures_[2], 0, nullptr, frame->data[2], frame->linesize[2], 0);
-    } else {
+    if (!directYuv) {
+        // CPU pixel conversion does not touch D3D state. Keeping it outside the
+        // immediate-context critical section lets the 60 Hz overlay presenter
+        // continue moving cached text while a 4K software frame is converted.
         scaler_ = sws_getCachedContext(scaler_, frame->width, frame->height,
             static_cast<AVPixelFormat>(frame->format), frame->width, frame->height, AV_PIX_FMT_RGBA64LE,
             SWS_BILINEAR | SWS_ACCURATE_RND, nullptr, nullptr, nullptr);
@@ -800,17 +1466,32 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
         if (sws_scale(scaler_, frame->data, frame->linesize, 0, frame->height, outputData, outputLines) <= 0) {
             SetError("FFmpeg could not convert the decoded video frame."); return FFFResult::FfmpegFailure;
         }
+    }
+    std::lock_guard deviceLock(deviceMutex_);
+    if (window_ == nullptr) return FFFResult::Success;
+    const auto chainResult = EnsureSwapChain(frame->width, frame->height);
+    if (chainResult != FFFResult::Success) return chainResult;
+    const auto pipelineResult = EnsurePipeline(width, height, input.layout, input.bitDepth);
+    if (pipelineResult != FFFResult::Success) return pipelineResult;
+    const auto baseResult = EnsureVideoBaseResources();
+    if (baseResult != FFFResult::Success) return baseResult;
+    if (directYuv) {
+        context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, frame->data[0], frame->linesize[0], 0);
+        context_->UpdateSubresource(sourceTextures_[1], 0, nullptr, frame->data[1], frame->linesize[1], 0);
+        if (input.layout == 1)
+            context_->UpdateSubresource(sourceTextures_[2], 0, nullptr, frame->data[2], frame->linesize[2], 0);
+    } else {
         context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, rgba64_.data(), width * 8, 0);
     }
-    ComPtr<ID3D11Texture2D> backBuffer;
-    if (FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer)))) return FFFResult::DeviceFailure;
-    ComPtr<ID3D11RenderTargetView> target;
-    if (FAILED(device_->CreateRenderTargetView(backBuffer.Get(), nullptr, &target))) return FFFResult::DeviceFailure;
     ShaderSettings settings{};
     settings.colorMode = static_cast<std::uint32_t>(actualMode_);
     settings.transfer = frame->color_trc == AVCOL_TRC_SMPTE2084 ? 1u : (frame->color_trc == AVCOL_TRC_ARIB_STD_B67 ? 2u : 0u);
     settings.source2020 = IsRec2020(frame) ? 1u : 0u;
-    settings.sdrPeak = sdrPeakNits_; settings.hdrPeak = hdrPeakNits_; settings.paperWhite = paperWhiteNits_;
+    settings.sdrPeak = sdrPeakNits_;
+    settings.hdrPeak = settings.transfer == 0 ? sdrPeakNits_ :
+        ResolveSourcePeakNits(frame, hdrPeakNits_, paperWhiteNits_);
+    sourcePeakNits_ = settings.hdrPeak;
+    settings.paperWhite = paperWhiteNits_;
     settings.sourceWidth = static_cast<float>(width); settings.sourceHeight = static_cast<float>(height);
     settings.outputWidth = static_cast<float>(swapWidth_); settings.outputHeight = static_cast<float>(swapHeight_);
     settings.inputLayout = input.layout; settings.sampleScale = input.sampleScale;
@@ -836,21 +1517,48 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
     ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
     context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
-    context_->CopyResource(backBuffer.Get(), videoBaseTexture_);
-    const auto timedTextResult = DrawTimedText();
-    if (timedTextResult != FFFResult::Success) {
-        context_->OMSetRenderTargets(0, nullptr, nullptr);
-        return timedTextResult;
+    // Once the composition thread exists it is the sole swap-chain presenter.
+    // Video decoding only publishes a retained GPU base and wakes that owner;
+    // two independent Present callers can otherwise alternate or drop complete
+    // subtitle/danmaku composites in the flip queue.
+    bool compositionThreadActive = false;
+    {
+        std::lock_guard lock(timedTextMutex_);
+        compositionThreadActive = timedTextThread_.joinable() && !timedTextThreadStop_;
+        if (compositionThreadActive) ++presentationGeneration_;
     }
-    CompositeTimedText(target.Get());
+    if (compositionThreadActive) {
+        timedTextCondition_.notify_one();
+        return FFFResult::Success;
+    }
+    ComPtr<ID3D11Texture2D> backBuffer;
+    ComPtr<ID3D11RenderTargetView> backBufferTarget;
+    const auto targetResult = AcquireBackBufferTarget(
+        backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
+    if (targetResult != FFFResult::Success) return targetResult;
+    context_->CopyResource(backBuffer.Get(), videoBaseTexture_);
+    const auto danmakuResult = DrawTimedText(TimedTextLayerSlot::Danmaku);
+    const auto subtitleResult = danmakuResult == FFFResult::Success
+        ? DrawTimedText(TimedTextLayerSlot::Subtitle) : danmakuResult;
+    if (subtitleResult != FFFResult::Success) {
+        context_->OMSetRenderTargets(0, nullptr, nullptr);
+        return subtitleResult;
+    }
+    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Danmaku);
+    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Subtitle);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
-    // Playback timing is driven by the media clock.  Waiting for vblank here holds
-    // the session worker and can starve the independent 60 Hz timed-text presents.
-    const auto present = swapChain_->Present(0, 0);
+    const auto present = swapChain_->Present(1, 0);
     if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET) {
         SetError("The D3D11 playback device was removed."); return FFFResult::DeviceFailure;
     }
     if (FAILED(present)) return FFFResult::DeviceFailure;
+    {
+        std::lock_guard lock(timedTextMutex_);
+        for (std::size_t index = 0; index < ARRAYSIZE(timedTextPresentCounts_); ++index) {
+            if (timedTextRenderedCommandCounts_[index] == 0) continue;
+            ++timedTextPresentCounts_[index];
+        }
+    }
     return FFFResult::Success;
 }
 
@@ -858,32 +1566,46 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     if (swapChain_ == nullptr || videoBaseTexture_ == nullptr) return FFFResult::Success;
     ComPtr<ID3D11Texture2D> backBuffer;
-    if (FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer)))) return FFFResult::DeviceFailure;
-    ComPtr<ID3D11RenderTargetView> target;
-    if (FAILED(device_->CreateRenderTargetView(backBuffer.Get(), nullptr, &target))) return FFFResult::DeviceFailure;
+    ComPtr<ID3D11RenderTargetView> backBufferTarget;
+    const auto targetResult = AcquireBackBufferTarget(
+        backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
+    if (targetResult != FFFResult::Success) return targetResult;
     context_->CopyResource(backBuffer.Get(), videoBaseTexture_);
-    const auto timedTextResult = DrawTimedText();
-    if (timedTextResult != FFFResult::Success) return timedTextResult;
-    CompositeTimedText(target.Get());
+    const auto danmakuResult = DrawTimedText(TimedTextLayerSlot::Danmaku);
+    if (danmakuResult != FFFResult::Success) return danmakuResult;
+    const auto subtitleResult = DrawTimedText(TimedTextLayerSlot::Subtitle);
+    if (subtitleResult != FFFResult::Success) return subtitleResult;
+    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Danmaku);
+    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Subtitle);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
-    const auto present = swapChain_->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
-    if (present == DXGI_ERROR_WAS_STILL_DRAWING) return FFFResult::Success;
+    // This thread is the only presenter after timed text is enabled. Bind each
+    // complete composite to a display refresh boundary so independent video and
+    // layer notifications cannot add up into irregular unsynchronised flips.
+    // A high-refresh display still accepts higher configured danmaku rates.
+    const auto present = swapChain_->Present(1, 0);
     if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET) {
         SetError("The D3D11 playback device was removed."); return FFFResult::DeviceFailure;
     }
     if (FAILED(present)) return FFFResult::DeviceFailure;
+    {
+        std::lock_guard lock(timedTextMutex_);
+        for (std::size_t index = 0; index < ARRAYSIZE(timedTextPresentCounts_); ++index) {
+            if (timedTextRenderedCommandCounts_[index] == 0) continue;
+            ++timedTextPresentCounts_[index];
+        }
+    }
     return FFFResult::Success;
 }
 
 void PlayerVideoRenderer::ClearSurface() noexcept {
     if (context_ != nullptr && device_ != nullptr && swapChain_ != nullptr) {
         ComPtr<ID3D11Texture2D> backBuffer;
-        ComPtr<ID3D11RenderTargetView> target;
-        if (SUCCEEDED(swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer))) &&
-            SUCCEEDED(device_->CreateRenderTargetView(backBuffer.Get(), nullptr, &target))) {
+        ComPtr<ID3D11RenderTargetView> backBufferTarget;
+        if (AcquireBackBufferTarget(backBuffer.GetAddressOf(),
+                backBufferTarget.GetAddressOf()) == FFFResult::Success) {
             constexpr float black[] = {0, 0, 0, 1};
-            context_->OMSetRenderTargets(1, target.GetAddressOf(), nullptr);
-            context_->ClearRenderTargetView(target.Get(), black);
+            context_->OMSetRenderTargets(1, backBufferTarget.GetAddressOf(), nullptr);
+            context_->ClearRenderTargetView(backBufferTarget.Get(), black);
             context_->OMSetRenderTargets(0, nullptr, nullptr);
             context_->Flush();
             swapChain_->Present(0, 0);
@@ -893,7 +1615,39 @@ void PlayerVideoRenderer::ClearSurface() noexcept {
         InvalidateRect(window_, nullptr, TRUE);
 }
 
+void PlayerVideoRenderer::ResetMedia() noexcept {
+    std::lock_guard deviceLock(deviceMutex_);
+    ClearSurface();
+    // A queued composition wake must not be able to restore the previous
+    // media's retained base after ClearSurface during same-session replacement.
+    ReleaseVideoBaseResources();
+    if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
+    for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
+        if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
+        if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
+    }
+    sourceWidth_ = sourceHeight_ = 0;
+    sourceInputLayout_ = UINT32_MAX;
+    sourceBitDepth_ = 0;
+    sourcePeakNits_ = sdrPeakNits_;
+    rgba64_.clear();
+    {
+        std::lock_guard lock(timedTextMutex_);
+        ++presentationGeneration_;
+        for (std::size_t index = 0; index < ARRAYSIZE(timedTextLayers_); ++index) {
+            timedTextLayers_[index].reset();
+            timedTextRenderedSequences_[index] = 0;
+            timedTextRenderedCommandCounts_[index] = 0;
+            timedTextPresentCounts_[index] = 0;
+        }
+    }
+    timedTextCondition_.notify_one();
+}
+
 void PlayerVideoRenderer::Close() noexcept {
+    // Join before taking deviceMutex_: the presenter may already be waiting in
+    // PresentTimedText and must be allowed to leave that critical section.
+    StopTimedTextThread();
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
@@ -903,9 +1657,15 @@ void PlayerVideoRenderer::Close() noexcept {
     if (d2dFactory_ != nullptr) { d2dFactory_->Release(); d2dFactory_ = nullptr; }
     {
         std::lock_guard lock(timedTextMutex_);
-        timedTextLayer_ = {};
-        timedTextPresentCount_ = 0;
+        for (std::size_t index = 0; index < ARRAYSIZE(timedTextLayers_); ++index) {
+            timedTextLayers_[index].reset();
+            timedTextPresentCounts_[index] = 0;
+        }
     }
+    // Flip-model swap chains are exclusive per HWND. Unbind and submit every
+    // outstanding D3D reference before releasing the chain, otherwise an
+    // immediate same-window media reopen can fail CreateSwapChainForHwnd.
+    if (context_ != nullptr) { context_->ClearState(); context_->Flush(); }
     if (swapChain_ != nullptr) { swapChain_->Release(); swapChain_ = nullptr; }
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
@@ -923,6 +1683,9 @@ void PlayerVideoRenderer::Close() noexcept {
 }
 
 FFF3FPColorMode PlayerVideoRenderer::ActualColorMode() const noexcept { return actualMode_; }
+float PlayerVideoRenderer::SourcePeakNits() const noexcept { return sourcePeakNits_; }
 std::string PlayerVideoRenderer::FallbackReason() const { return fallbackReason_; }
-std::string PlayerVideoRenderer::LastError() const { return lastError_; }
-void PlayerVideoRenderer::SetError(std::string message) noexcept { try { lastError_ = std::move(message); } catch (...) {} }
+std::string PlayerVideoRenderer::LastError() const { std::lock_guard lock(errorMutex_); return lastError_; }
+void PlayerVideoRenderer::SetError(std::string message) noexcept {
+    try { std::lock_guard lock(errorMutex_); lastError_ = std::move(message); } catch (...) {}
+}

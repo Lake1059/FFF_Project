@@ -13,6 +13,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 struct AVCodecContext;
@@ -49,6 +50,7 @@ public:
     FFFResult SetTimedTextLayer(const FFF3FPTimedTextLayer& layer) noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept;
+    FFFResult GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
 
@@ -59,7 +61,8 @@ private:
     void PumpPlayback() noexcept;
     void PumpExternalAudio() noexcept;
     void DoOpen(std::string pathUtf8) noexcept;
-    void DoClose(FFF3FPState finalState = FFF3FPState::Closed) noexcept;
+    void DoClose(FFF3FPState finalState = FFF3FPState::Closed,
+        bool preserveVideoOutput = false) noexcept;
     void DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1,
         bool exact = true) noexcept;
     void DecodeUntilSeekTarget() noexcept;
@@ -84,6 +87,7 @@ private:
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
     void QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, std::int32_t streamIndex) noexcept;
+    void UpdateAudioDiagnostics() noexcept;
     void FlushAtEnd() noexcept;
     void PublishSnapshot() noexcept;
     void SetState(FFF3FPState state, const char* operation = nullptr) noexcept;
@@ -92,6 +96,8 @@ private:
     void Emit(FFF3FPEvent eventType, const std::string& detailJson) const noexcept;
     void RebuildMediaInfo() noexcept;
     std::int64_t ClockPosition() const noexcept;
+    void PublishPlaybackClock(std::int64_t position100ns,
+        std::int64_t limit100ns) const noexcept;
     void ResetClock(std::int64_t position100ns) noexcept;
     static bool NormalizeLocalPath(const char* pathUtf8, std::string& normalized,
         std::string& error) noexcept;
@@ -102,11 +108,21 @@ private:
     mutable std::mutex mutex_;
     mutable std::mutex snapshotMutex_;
     mutable std::mutex errorMutex_;
+    mutable std::mutex timedTextContentMutex_;
     std::condition_variable commandCondition_;
     std::deque<Command> commands_;
     std::thread worker_;
     std::atomic<bool> terminate_;
     AVFormatContext* format_;
+    // These objects belong exclusively to the session worker.  FFmpeg permits
+    // reuse after av_packet_unref/av_frame_unref, avoiding per-packet heap churn
+    // on both the audio and video decode paths.
+    AVPacket* playbackPacket_;
+    AVPacket* externalAudioPacket_;
+    AVFrame* videoDecodeFrame_;
+    AVFrame* videoTransferFrame_;
+    AVFrame* audioDecodeFrame_;
+    AVFrame* externalAudioDecodeFrame_;
     AVCodecContext* videoDecoder_;
     AVCodecContext* audioDecoder_;
     std::int32_t videoStream_;
@@ -130,6 +146,9 @@ private:
     std::atomic<std::int64_t> clockOriginPosition100ns_;
     std::atomic<std::int64_t> clockOriginQpc_;
     mutable std::atomic<std::int64_t> playbackPosition100ns_;
+    mutable std::atomic<std::int64_t> playbackClockSampleQpc_;
+    mutable std::atomic<std::int64_t> playbackClockLimit100ns_;
+    mutable std::atomic<std::uint64_t> playbackClockSequence_;
     std::atomic<FFF3FPState> state_;
     std::int64_t qpcFrequency_;
     std::int64_t seekTarget100ns_;
@@ -138,6 +157,11 @@ private:
     std::int64_t lastVideoFrameDuration100ns_;
     std::vector<std::int64_t> framePtsIndex_;
     std::deque<AVFrame*> videoFrameQueue_;
+    std::vector<AVFrame*> videoFramePool_;
     AVFrame* displayedFrame_;
     bool draining_;
+    // Stable danmaku content is interned by contentId+UTF-8 hash. Position-only
+    // layers then share immutable strings instead of allocating 100 wstrings at
+    // every 60 Hz submission.
+    std::unordered_map<std::uint64_t, std::shared_ptr<const TimedTextRenderCommand::TextContent>> timedTextContentCache_;
 };

@@ -82,21 +82,33 @@ Public NotInheritable Class 播放器控制器
 
     Public ReadOnly Property 当前字幕 As 外部字幕轨道
         Get
-            Return 当前外部字幕
+            Return Volatile.Read(当前外部字幕)
         End Get
     End Property
 
     Public ReadOnly Property 当前弹幕 As 弹幕资料库
         Get
-            Return 当前弹幕资料库
+            Return Volatile.Read(当前弹幕资料库)
         End Get
     End Property
 
-    Friend Sub 提交定时文字图层(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令), 序号 As ULong)
+    Friend Sub 提交定时文字图层(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令),
+                          序号 As ULong, 目标帧率 As Single)
         Dim 目标 = 会话
         If 已释放 OrElse 目标 Is Nothing Then Return
         Try
-            目标.设置定时文字图层(画布大小, 命令, 序号)
+            目标.设置定时文字图层(画布大小, 命令, 序号, 目标帧率)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
+    Friend Sub 提交弹幕图层(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令),
+                        序号 As ULong, 目标帧率 As Single)
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return
+        Try
+            目标.设置弹幕图层(画布大小, 命令, 序号, 目标帧率)
         Catch ex As ObjectDisposedException
         Catch ex As 播放器异常
         End Try
@@ -105,6 +117,16 @@ Public NotInheritable Class 播放器控制器
     Friend Function 读取定时文字状态() As 定时文字状态
         Try
             Return 会话?.当前定时文字状态
+        Catch ex As ObjectDisposedException
+            Return Nothing
+        Catch ex As 播放器异常
+            Return Nothing
+        End Try
+    End Function
+
+    Friend Function 读取弹幕状态() As 定时文字状态
+        Try
+            Return 会话?.当前弹幕状态
         Catch ex As ObjectDisposedException
             Return Nothing
         Catch ex As 播放器异常
@@ -126,6 +148,100 @@ Public NotInheritable Class 播放器控制器
         If 已释放 OrElse String.IsNullOrWhiteSpace(路径) OrElse Not File.Exists(路径) Then Return
         切换媒体会话(Path.GetFullPath(路径), 当前解码器, TimeSpan.Zero, True, -1, -1)
     End Sub
+
+    ''' <summary>
+    ''' 在不重建媒体会话、不改变播放位置的前提下替换外部字幕。新文件先在
+    ''' 后台完整解析，成功后才交换轨道；加载失败期间旧字幕始终保持可用。
+    ''' </summary>
+    Public Sub 替换字幕(路径 As String)
+        If 已释放 OrElse String.IsNullOrWhiteSpace(路径) Then Return
+        If Not 是否有媒体 Then
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数("请先播放媒体，再加载外部字幕。", "无法加载字幕"))
+            Return
+        End If
+        If Not File.Exists(路径) OrElse Not 外部字幕自动加载器.是支持的字幕文件(路径) Then
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数("仅可加载存在的 SRT、ASS、SSA 或 SUP 字幕文件。", "无法加载字幕"))
+            Return
+        End If
+        Dim 本次取消 As New CancellationTokenSource()
+        Dim 上次取消 = Interlocked.Exchange(字幕加载取消, 本次取消)
+        上次取消?.Cancel()
+        Dim 媒体路径 = 当前文件路径
+        Dim 忽略 = 替换字幕Async(Path.GetFullPath(路径), 媒体路径, 本次取消)
+    End Sub
+
+    Private Async Function 替换字幕Async(字幕路径 As String, 媒体路径 As String,
+                                       本次取消 As CancellationTokenSource) As Task
+        Dim 候选轨道 As 外部字幕轨道 = Nothing
+        Try
+            候选轨道 = Await 外部字幕自动加载器.加载字幕Async(字幕路径, 本次取消.Token)
+            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
+                Not ReferenceEquals(字幕加载取消, 本次取消) OrElse
+                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
+            ' Interlocked documents the publication contract for test hosts that
+            ' do not provide a UI SynchronizationContext. In the application the
+            ' continuation and renderer timer are additionally serialized by UI.
+            Dim 待释放 = Interlocked.Exchange(当前外部字幕, 候选轨道)
+            候选轨道 = Nothing
+            待释放?.释放()
+            RaiseEvent 外部字幕已加载(Me,
+                New 播放器字幕事件参数(当前外部字幕.路径, 当前外部字幕.格式))
+        Catch ex As OperationCanceledException
+            ' A newer manual choice, media replacement or shutdown superseded it.
+        Catch ex As Exception
+            If Not 已释放 AndAlso Not 本次取消.IsCancellationRequested Then
+                RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法加载字幕"))
+            End If
+        Finally
+            候选轨道?.释放()
+            If ReferenceEquals(字幕加载取消, 本次取消) Then 字幕加载取消 = Nothing
+            本次取消.Dispose()
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' 在不重建媒体会话、不改变播放位置的前提下替换 XML 弹幕。候选文件必须先在
+    ''' 后台完整解析；解析失败或请求被后续操作取代时，当前弹幕资料库保持不变。
+    ''' </summary>
+    Public Sub 替换弹幕(路径 As String)
+        If 已释放 OrElse String.IsNullOrWhiteSpace(路径) Then Return
+        If Not 是否有媒体 Then
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数("请先播放媒体，再加载外部弹幕。", "无法加载弹幕"))
+            Return
+        End If
+        If Not File.Exists(路径) OrElse Not 弹幕自动加载器.是支持的弹幕文件(路径) Then
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数("仅可加载存在的 B 站 XML 弹幕文件。", "无法加载弹幕"))
+            Return
+        End If
+        Dim 本次取消 As New CancellationTokenSource()
+        Dim 上次取消 = Interlocked.Exchange(弹幕加载取消, 本次取消)
+        上次取消?.Cancel()
+        Dim 媒体路径 = 当前文件路径
+        Dim 忽略 = 替换弹幕Async(Path.GetFullPath(路径), 媒体路径, 本次取消)
+    End Sub
+
+    Private Async Function 替换弹幕Async(弹幕路径 As String, 媒体路径 As String,
+                                      本次取消 As CancellationTokenSource) As Task
+        Try
+            Dim 候选资料库 = Await 弹幕自动加载器.加载弹幕Async(弹幕路径, 本次取消.Token)
+            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
+                Not ReferenceEquals(弹幕加载取消, 本次取消) OrElse
+                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
+            ' 原子发布只能发生在完整解析和媒体身份复核之后。不得预先清空旧资料库，
+            ' 否则大文件解析、损坏 XML 或连续拖入会让正在显示的弹幕瞬间消失。
+            Interlocked.Exchange(当前弹幕资料库, 候选资料库)
+            RaiseEvent 外部弹幕已加载(Me, New 播放器弹幕事件参数(弹幕路径, 候选资料库.数量))
+        Catch ex As OperationCanceledException
+            ' 更新的手动选择、媒体替换或关闭操作已经取代本次请求。
+        Catch ex As Exception
+            If Not 已释放 AndAlso Not 本次取消.IsCancellationRequested Then
+                RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法加载弹幕"))
+            End If
+        Finally
+            If ReferenceEquals(弹幕加载取消, 本次取消) Then 弹幕加载取消 = Nothing
+            本次取消.Dispose()
+        End Try
+    End Function
 
     Public Sub 切换播放暂停()
         Dim 目标 = 会话
@@ -264,7 +380,12 @@ Public NotInheritable Class 播放器控制器
             正在切换会话 = True
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
 
-            候选会话 = 创建会话(解码器)
+            ' 色彩输出是片源状态，不是全局播放器状态。仅重建同一片源（例如切换
+            ' 解码器）时保留用户选择；打开另一文件必须先以 SDR 映射启动，避免
+            ' 上一个 HDR 文件的 PQ/BT.2020 交换链泄漏到 SDR 文件。
+            Dim 候选色彩输出 = If(String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase),
+                                当前色彩输出, 色彩输出模式.映射到SDR)
+            候选会话 = 创建会话(解码器, 候选色彩输出)
             候选会话.设置音量(当前音量, 已静音)
             Await 候选会话.打开Async(路径, 此次取消.Token)
             此次取消.Token.ThrowIfCancellationRequested()
@@ -284,10 +405,14 @@ Public NotInheritable Class 播放器控制器
             候选会话 = Nothing
             当前文件路径 = 路径
             当前解码器 = 解码器
+            当前色彩输出 = 候选色彩输出
             添加会话事件(会话)
             重绑输出窗口()
             If 恢复播放 Then 会话.播放()
 
+            ' “媒体已打开”是可操作边界。事件处理器可能立即切换色彩、音轨或跳转，
+            ' 因而不能等到 Finally 才清除切换标记，否则首个操作会被静默忽略。
+            正在切换会话 = False
             RaiseEvent 媒体已打开(Me, New 播放器媒体事件参数(当前文件路径, 媒体信息, 快照))
             If Not 保留当前字幕 Then
                 开始自动加载字幕(当前文件路径)
@@ -310,10 +435,10 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Function
 
-    Private Function 创建会话(解码器 As 解码模式) As 播放器会话
+    Private Function 创建会话(解码器 As 解码模式, 色彩模式 As 色彩输出模式) As 播放器会话
         Return New 播放器会话(New 播放器配置 With {
             .解码器 = 解码器,
-            .色彩模式 = 当前色彩输出,
+            .色彩模式 = 色彩模式,
             .SDR峰值尼特 = SDR峰值尼特,
             .HDR峰值尼特 = HDR峰值尼特,
             .SDR纸白尼特 = SDR纸白尼特,
@@ -395,8 +520,9 @@ Public NotInheritable Class 播放器控制器
                 Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
             If 候选轨道 Is Nothing Then Return
 
-            当前外部字幕 = 候选轨道
+            Dim 待释放 = Interlocked.Exchange(当前外部字幕, 候选轨道)
             候选轨道 = Nothing
+            待释放?.释放()
             RaiseEvent 外部字幕已加载(Me, New 播放器字幕事件参数(当前外部字幕.路径, 当前外部字幕.格式))
         Catch ex As OperationCanceledException
             ' 新媒体、停止或关闭会取消尚未完成的自动加载。
@@ -412,8 +538,7 @@ Public NotInheritable Class 播放器控制器
     Private Sub 释放当前字幕()
         Dim 取消源 = Interlocked.Exchange(字幕加载取消, Nothing)
         取消源?.Cancel()
-        Dim 待释放 = 当前外部字幕
-        当前外部字幕 = Nothing
+        Dim 待释放 = Interlocked.Exchange(当前外部字幕, Nothing)
         待释放?.释放()
     End Sub
 
@@ -428,9 +553,10 @@ Public NotInheritable Class 播放器控制器
         Try
             Dim 候选资料库 = Await 弹幕自动加载器.尝试加载同名弹幕Async(媒体路径, 本次取消.Token)
             If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
+                Not ReferenceEquals(弹幕加载取消, 本次取消) OrElse
                 Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) OrElse
                 候选资料库 Is Nothing Then Return
-            当前弹幕资料库 = 候选资料库
+            Interlocked.Exchange(当前弹幕资料库, 候选资料库)
             RaiseEvent 外部弹幕已加载(Me, New 播放器弹幕事件参数(
                 Path.ChangeExtension(媒体路径, ".xml"), 候选资料库.数量))
         Catch ex As OperationCanceledException
@@ -446,7 +572,7 @@ Public NotInheritable Class 播放器控制器
     Private Sub 释放当前弹幕()
         Dim 取消源 = Interlocked.Exchange(弹幕加载取消, Nothing)
         取消源?.Cancel()
-        当前弹幕资料库 = Nothing
+        Interlocked.Exchange(当前弹幕资料库, Nothing)
     End Sub
 
     Private Sub 释放当前会话(Optional 保留已加载字幕 As Boolean = False)

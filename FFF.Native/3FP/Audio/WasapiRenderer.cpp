@@ -10,7 +10,9 @@ extern "C" {
 }
 
 #include <avrt.h>
+#include <array>
 #include <cmath>
+#include <cstring>
 
 using Microsoft::WRL::ComPtr;
 
@@ -27,15 +29,35 @@ std::uint32_t ChannelMask(const WAVEFORMATEX* format) noexcept {
         return reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format)->dwChannelMask;
     return 0;
 }
+
+std::int64_t QpcNow100ns() noexcept {
+    static const std::int64_t frequency = [] {
+        LARGE_INTEGER value{};
+        QueryPerformanceFrequency(&value);
+        return value.QuadPart;
+    }();
+    LARGE_INTEGER value{};
+    QueryPerformanceCounter(&value);
+    if (frequency <= 0) return 0;
+    const auto seconds = value.QuadPart / frequency;
+    const auto remainder = value.QuadPart % frequency;
+    return seconds * 10'000'000 + remainder * 10'000'000 / frequency;
+}
 }
 
 PlayerWasapiRenderer::PlayerWasapiRenderer(std::wstring endpointId)
     : endpointId_(std::move(endpointId)), stopEvent_(nullptr), sampleEvent_(nullptr),
-      initializationFinished_(false), initializationResult_(FFFResult::InvalidState), resampler_(nullptr),
+      initializationFinished_(false), initializationResult_(FFFResult::InvalidState), queueReadOffset_(0),
+      resampler_(nullptr),
+      inputChannelLayout_{}, inputSampleRate_(0), inputSampleFormat_(-1),
       outputSampleRate_(0), outputChannels_(0), outputBlockAlign_(0), outputBitsPerSample_(0),
       outputChannelMask_(0), outputFloat_(false), volume_(1.0f), muted_(false), running_(false),
       paused_(true), resetRequested_(false), resetPosition100ns_(0), clockPosition100ns_(0),
-      pendingMediaFrames_(0), playedMediaFrames_(0), submittedTimelineFrames_(0) {}
+      clockSampleQpc100ns_(0), clockLimitPosition100ns_(0), clockEpoch_(0),
+      pendingMediaFrames_(0), playedMediaFrames_(0), underrunCount_(0),
+      hasSubmittedAudio_(false), timelineAnchored_(false), producedTimelineFrames_(0),
+      timestampJitterCount_(0), discontinuityCount_(0), insertedSilenceFrames_(0),
+      droppedOverlapFrames_(0) {}
 
 PlayerWasapiRenderer::~PlayerWasapiRenderer() { Stop(); }
 
@@ -60,12 +82,27 @@ void PlayerWasapiRenderer::Stop() noexcept {
     if (sampleEvent_ != nullptr) { CloseHandle(sampleEvent_); sampleEvent_ = nullptr; }
     if (stopEvent_ != nullptr) { CloseHandle(stopEvent_); stopEvent_ = nullptr; }
     if (resampler_ != nullptr) { swr_free(&resampler_); }
-    std::lock_guard lock(mutex_); queue_.clear(); pendingMediaFrames_ = 0;
+    av_channel_layout_uninit(&inputChannelLayout_);
+    inputSampleRate_ = 0; inputSampleFormat_ = -1;
+    std::lock_guard lock(mutex_);
+    queue_.clear(); queueReadOffset_ = 0; converted_.clear(); pendingMediaFrames_ = 0;
 }
 
 FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame) noexcept {
-    if (resampler_ != nullptr) return FFFResult::Success;
+    const auto inputFormat = static_cast<std::int32_t>(frame->format);
+    if (resampler_ != nullptr && inputSampleRate_ == frame->sample_rate &&
+        inputSampleFormat_ == inputFormat &&
+        av_channel_layout_compare(&inputChannelLayout_, &frame->ch_layout) == 0)
+        return FFFResult::Success;
     if (outputSampleRate_ == 0 || outputChannels_ == 0) return FFFResult::InvalidState;
+    // Track the complete FFmpeg layout contract, not merely channel count. A
+    // stream can switch between layouts with the same number of channels.
+    if (resampler_ != nullptr) swr_free(&resampler_);
+    av_channel_layout_uninit(&inputChannelLayout_);
+    if (av_channel_layout_copy(&inputChannelLayout_, &frame->ch_layout) < 0)
+        return FFFResult::FfmpegFailure;
+    inputSampleRate_ = frame->sample_rate;
+    inputSampleFormat_ = inputFormat;
     AVChannelLayout outputLayout{};
     av_channel_layout_default(&outputLayout, outputChannels_);
     const auto outputFormat = outputFloat_ ? AV_SAMPLE_FMT_FLT :
@@ -76,6 +113,8 @@ FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame) noexcept {
     av_channel_layout_uninit(&outputLayout);
     if (result < 0 || resampler_ == nullptr || swr_init(resampler_) < 0) {
         if (resampler_ != nullptr) swr_free(&resampler_);
+        av_channel_layout_uninit(&inputChannelLayout_);
+        inputSampleRate_ = 0; inputSampleFormat_ = -1;
         SetError("FFmpeg could not initialize the WASAPI resampler.");
         return FFFResult::FfmpegFailure;
     }
@@ -84,34 +123,61 @@ FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame) noexcept {
 
 FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t position100ns) noexcept {
     if (frame == nullptr || frame->nb_samples <= 0) return FFFResult::InvalidArgument;
-    std::lock_guard lock(mutex_);
+    // Enqueue, reset and volume changes are serialized by PlayerSession's worker.
+    // Do not take the PCM queue mutex while resampling or applying gain: the
+    // WASAPI event thread must be able to take that mutex every device period.
     const auto ensured = EnsureResampler(frame);
     if (ensured != FFFResult::Success) return ensured;
     const auto resetPosition = resetPosition100ns_.load();
     const auto signedStartFrame = position100ns == AV_NOPTS_VALUE
-        ? static_cast<std::int64_t>(submittedTimelineFrames_)
+        ? static_cast<std::int64_t>(producedTimelineFrames_)
         : av_rescale_rnd(position100ns - resetPosition, outputSampleRate_, 10'000'000, AV_ROUND_NEAR_INF);
-    const auto preRollFrames = static_cast<std::uint64_t>(std::max<std::int64_t>(0, -signedStartFrame));
-    const auto requestedStartFrame = static_cast<std::uint64_t>(std::max<std::int64_t>(0, signedStartFrame));
-    const auto overlapFrames = submittedTimelineFrames_ > requestedStartFrame
-        ? submittedTimelineFrames_ - requestedStartFrame : 0;
+    std::uint64_t preRollFrames = 0;
+    std::uint64_t gapFrames = 0;
+    std::uint64_t overlapFrames = 0;
+    if (!timelineAnchored_) {
+        // The first decoded frame establishes the post-seek media anchor. Only
+        // this path may trim preroll or synthesize leading silence.
+        preRollFrames = static_cast<std::uint64_t>(std::max<std::int64_t>(0, -signedStartFrame));
+        gapFrames = static_cast<std::uint64_t>(std::max<std::int64_t>(0, signedStartFrame));
+        timelineAnchored_ = true;
+    } else if (position100ns != AV_NOPTS_VALUE) {
+        const auto delta = signedStartFrame - static_cast<std::int64_t>(producedTimelineFrames_);
+        // 100 ms separates packet timestamp rounding and resampler phase from a
+        // genuine edit/discontinuity. Small deltas are diagnostic only: decoded
+        // samples stay bit-contiguous. A large jump is repaired once at the edit.
+        const auto discontinuityThreshold = std::max<std::int64_t>(1, outputSampleRate_ / 10);
+        if (std::abs(delta) < discontinuityThreshold) {
+            if (delta != 0) ++timestampJitterCount_;
+        } else {
+            ++discontinuityCount_;
+            if (delta > 0) {
+                gapFrames = static_cast<std::uint64_t>(delta);
+                insertedSilenceFrames_ += gapFrames;
+            } else {
+                overlapFrames = static_cast<std::uint64_t>(-delta);
+                droppedOverlapFrames_ += overlapFrames;
+            }
+        }
+    }
     const auto skipSamples = static_cast<int>(std::min<std::int64_t>(frame->nb_samples,
         av_rescale_rnd(preRollFrames + overlapFrames, frame->sample_rate,
             outputSampleRate_, AV_ROUND_UP)));
     if (skipSamples >= frame->nb_samples) return FFFResult::Success;
-    const auto gapFrames = requestedStartFrame > submittedTimelineFrames_
-        ? requestedStartFrame - submittedTimelineFrames_ : 0;
     const auto inputSamples = frame->nb_samples - skipSamples;
     const auto capacity = swr_get_out_samples(resampler_, inputSamples);
     if (capacity <= 0) return FFFResult::FfmpegFailure;
-    std::vector<std::uint8_t> converted(static_cast<std::size_t>(capacity) * outputBlockAlign_);
-    std::uint8_t* output[] = { converted.data() };
+    converted_.resize(static_cast<std::size_t>(capacity) * outputBlockAlign_);
+    std::uint8_t* output[] = { converted_.data() };
     const auto inputFormat = static_cast<AVSampleFormat>(frame->format);
     const auto bytesPerSample = av_get_bytes_per_sample(inputFormat);
     if (bytesPerSample <= 0) return FFFResult::FfmpegFailure;
     const auto planar = av_sample_fmt_is_planar(inputFormat) != 0;
     const auto inputPlanes = planar ? frame->ch_layout.nb_channels : 1;
-    std::vector<const std::uint8_t*> input(static_cast<std::size_t>(inputPlanes));
+    // FFmpeg audio layouts have a bounded channel count.  Stack storage avoids a
+    // heap allocation for every decoded audio frame.
+    if (inputPlanes <= 0 || inputPlanes > 64) return FFFResult::NotSupported;
+    std::array<const std::uint8_t*, 64> input{};
     for (int plane = 0; plane < inputPlanes; ++plane) {
         const auto byteOffset = static_cast<std::size_t>(skipSamples) * bytesPerSample *
             (planar ? 1 : frame->ch_layout.nb_channels);
@@ -119,48 +185,122 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
     }
     const auto frames = swr_convert(resampler_, output, capacity, input.data(), inputSamples);
     if (frames < 0) { SetError("FFmpeg failed to resample decoded audio."); return FFFResult::FfmpegFailure; }
-    converted.resize(static_cast<std::size_t>(frames) * outputBlockAlign_);
+    converted_.resize(static_cast<std::size_t>(frames) * outputBlockAlign_);
     const auto gain = muted_ ? 0.0f : volume_;
-    if (outputFloat_) {
-        auto* samples = reinterpret_cast<float*>(converted.data());
-        for (std::size_t index = 0; index < converted.size() / sizeof(float); ++index) samples[index] *= gain;
-    } else if (outputBitsPerSample_ == 16) {
-        auto* samples = reinterpret_cast<std::int16_t*>(converted.data());
-        for (std::size_t index = 0; index < converted.size() / sizeof(std::int16_t); ++index)
+    if (gain == 0.0f) {
+        std::memset(converted_.data(), 0, converted_.size());
+    } else if (gain != 1.0f && outputFloat_) {
+        auto* samples = reinterpret_cast<float*>(converted_.data());
+        for (std::size_t index = 0; index < converted_.size() / sizeof(float); ++index) samples[index] *= gain;
+    } else if (gain != 1.0f && outputBitsPerSample_ == 16) {
+        auto* samples = reinterpret_cast<std::int16_t*>(converted_.data());
+        for (std::size_t index = 0; index < converted_.size() / sizeof(std::int16_t); ++index)
             samples[index] = static_cast<std::int16_t>(std::lround(samples[index] * gain));
-    } else {
-        auto* samples = reinterpret_cast<std::int32_t*>(converted.data());
-        for (std::size_t index = 0; index < converted.size() / sizeof(std::int32_t); ++index)
+    } else if (gain != 1.0f) {
+        auto* samples = reinterpret_cast<std::int32_t*>(converted_.data());
+        for (std::size_t index = 0; index < converted_.size() / sizeof(std::int32_t); ++index)
             samples[index] = static_cast<std::int32_t>(std::llround(samples[index] * gain));
     }
     const auto gapBytes = static_cast<std::size_t>(gapFrames) * outputBlockAlign_;
     const auto maximumBytes = static_cast<std::size_t>(outputSampleRate_) * outputBlockAlign_ * 4;
-    if (queue_.size() + gapBytes + converted.size() > maximumBytes) return FFFResult::BufferTooSmall;
+    std::lock_guard lock(mutex_);
+    if (queueReadOffset_ == queue_.size()) {
+        queue_.clear();
+        queueReadOffset_ = 0;
+    } else if (queueReadOffset_ > 0 &&
+        (queueReadOffset_ >= queue_.size() / 2 || queue_.size() + gapBytes + converted_.size() > maximumBytes)) {
+        queue_.erase(queue_.begin(), queue_.begin() + static_cast<std::ptrdiff_t>(queueReadOffset_));
+        queueReadOffset_ = 0;
+    }
+    const auto queuedBytes = queue_.size() - queueReadOffset_;
+    if (queuedBytes + gapBytes + converted_.size() > maximumBytes) return FFFResult::BufferTooSmall;
     queue_.insert(queue_.end(), gapBytes, 0);
-    queue_.insert(queue_.end(), converted.begin(), converted.end());
-    submittedTimelineFrames_ += gapFrames + static_cast<std::uint64_t>(frames);
+    queue_.insert(queue_.end(), converted_.begin(), converted_.end());
+    producedTimelineFrames_ += gapFrames + static_cast<std::uint64_t>(frames);
+    if (frames > 0) hasSubmittedAudio_ = true;
+    if (sampleEvent_ != nullptr) SetEvent(sampleEvent_);
     return FFFResult::Success;
 }
 
 void PlayerWasapiRenderer::SetPaused(const bool paused) noexcept {
+    const auto now = QpcNow100ns();
+    {
+        std::lock_guard lock(clockMutex_);
+        if (clockSampleQpc100ns_ > 0 && now > clockSampleQpc100ns_) {
+            const auto elapsed = now - clockSampleQpc100ns_;
+            clockPosition100ns_ += std::min(elapsed,
+                std::max<std::int64_t>(0, clockLimitPosition100ns_ - clockPosition100ns_));
+        }
+        // On resume the old QPC sample includes the entire paused duration.
+        // Re-anchor it without advancing media; on pause this freezes the most
+        // recent interpolated device position until the event thread confirms it.
+        clockSampleQpc100ns_ = now;
+    }
     paused_ = paused;
+    if (sampleEvent_ != nullptr) SetEvent(sampleEvent_);
 }
 void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
-    { std::lock_guard lock(mutex_); queue_.clear(); submittedTimelineFrames_ = 0;
-      if (resampler_ != nullptr) swr_close(resampler_), swr_init(resampler_); }
+    {
+        std::lock_guard lock(mutex_);
+        queue_.clear(); queueReadOffset_ = 0; timelineAnchored_ = false; producedTimelineFrames_ = 0;
+    }
+    // A seek can also follow an audio-stream switch.  Recreating on the next
+    // input frame keeps the resampler's source layout/rate contract correct.
+    if (resampler_ != nullptr) swr_free(&resampler_);
+    av_channel_layout_uninit(&inputChannelLayout_);
+    inputSampleRate_ = 0; inputSampleFormat_ = -1;
     pendingMediaFrames_ = 0; resetPosition100ns_ = position100ns;
-    playedMediaFrames_ = 0; clockPosition100ns_ = position100ns; resetRequested_ = true;
+    playedMediaFrames_ = 0;
+    {
+        std::lock_guard lock(clockMutex_);
+        ++clockEpoch_;
+        clockPosition100ns_ = position100ns;
+        clockSampleQpc100ns_ = 0;
+        clockLimitPosition100ns_ = position100ns;
+    }
+    resetRequested_ = true;
+    underrunCount_ = 0; hasSubmittedAudio_ = false;
+    timestampJitterCount_ = 0; discontinuityCount_ = 0;
+    insertedSilenceFrames_ = 0; droppedOverlapFrames_ = 0;
+    if (sampleEvent_ != nullptr) SetEvent(sampleEvent_);
 }
 void PlayerWasapiRenderer::SetVolume(const float volume, const bool muted) noexcept {
-    std::lock_guard lock(mutex_); volume_ = std::clamp(volume, 0.0f, 1.0f); muted_ = muted;
+    volume_ = std::clamp(volume, 0.0f, 1.0f); muted_ = muted;
 }
-std::int64_t PlayerWasapiRenderer::Position100ns() const noexcept { return clockPosition100ns_.load(); }
+std::int64_t PlayerWasapiRenderer::Position100ns() const noexcept {
+    std::int64_t position = 0;
+    std::int64_t sampleQpc = 0;
+    std::int64_t limit = 0;
+    {
+        std::lock_guard lock(clockMutex_);
+        position = clockPosition100ns_;
+        sampleQpc = clockSampleQpc100ns_;
+        limit = clockLimitPosition100ns_;
+    }
+    if (!running_.load() || paused_.load() || sampleQpc <= 0) return position;
+    const auto now = QpcNow100ns();
+    if (now <= sampleQpc) return position;
+    return position + std::min(now - sampleQpc, std::max<std::int64_t>(0, limit - position));
+}
+std::int64_t PlayerWasapiRenderer::TimelineLimit100ns() const noexcept {
+    if (outputSampleRate_ == 0) return resetPosition100ns_.load();
+    // Called by the sole PCM producer. Unlike Buffered100ns, this endpoint does
+    // not depend on the event thread's last padding sample and therefore cannot
+    // overrun the decoded timeline during a starvation edge.
+    return resetPosition100ns_.load() + static_cast<std::int64_t>(
+        producedTimelineFrames_ * 10'000'000 / outputSampleRate_);
+}
 std::int64_t PlayerWasapiRenderer::Buffered100ns() const noexcept {
     std::lock_guard lock(mutex_);
     if (outputSampleRate_ == 0 || outputBlockAlign_ == 0) return 0;
-    const auto frames = queue_.size() / outputBlockAlign_ + pendingMediaFrames_.load();
+    const auto frames = (queue_.size() - queueReadOffset_) / outputBlockAlign_ + pendingMediaFrames_.load();
     return static_cast<std::int64_t>(frames) * 10'000'000 / outputSampleRate_;
 }
+std::uint64_t PlayerWasapiRenderer::UnderrunCount() const noexcept { return underrunCount_.load(); }
+std::uint64_t PlayerWasapiRenderer::TimestampJitterCount() const noexcept { return timestampJitterCount_.load(); }
+std::uint64_t PlayerWasapiRenderer::DiscontinuityCount() const noexcept { return discontinuityCount_.load(); }
+std::uint64_t PlayerWasapiRenderer::InsertedSilenceFrames() const noexcept { return insertedSilenceFrames_.load(); }
+std::uint64_t PlayerWasapiRenderer::DroppedOverlapFrames() const noexcept { return droppedOverlapFrames_.load(); }
 std::string PlayerWasapiRenderer::LastError() const { std::lock_guard lock(errorMutex_); return lastError_; }
 void PlayerWasapiRenderer::SetError(std::string message) noexcept { try { std::lock_guard lock(errorMutex_); lastError_ = std::move(message); } catch (...) {} }
 
@@ -205,57 +345,119 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         initializationResult_ = FFFResult::Success; initializationFinished_ = true;
     }
     initializedCondition_.notify_all();
+    UINT64 clockFrequency = 0;
+    if (FAILED(clock->GetFrequency(&clockFrequency)) || clockFrequency == 0) {
+        fail("Could not query the WASAPI device clock frequency."); CoTaskMemFree(format);
+        if (uninitialize) CoUninitialize(); return;
+    }
     CoTaskMemFree(format); format = nullptr;
-    client->Start();
-    bool clientPaused = false;
-    UINT32 previousPadding = 0;
+    bool clientStarted = false;
+    bool starved = false;
+    bool clockAnchorValid = false;
+    UINT64 clockAnchorDevicePosition = 0;
+    std::uint64_t deviceSubmittedFrames = 0;
+    std::uint64_t activeClockEpoch = 0;
+    {
+        std::lock_guard lock(clockMutex_);
+        activeClockEpoch = clockEpoch_;
+    }
+    auto updateMediaClock = [&]() noexcept {
+        if (!clockAnchorValid || outputSampleRate_ == 0) return;
+        UINT64 devicePosition = 0;
+        UINT64 qpcPosition100ns = 0;
+        if (FAILED(clock->GetPosition(&devicePosition, &qpcPosition100ns))) return;
+        const auto elapsedUnits = devicePosition > clockAnchorDevicePosition
+            ? devicePosition - clockAnchorDevicePosition : 0;
+        const auto elapsedFrames = static_cast<std::uint64_t>(
+            static_cast<long double>(elapsedUnits) * outputSampleRate_ / clockFrequency);
+        const auto playedFrames = std::min(deviceSubmittedFrames, elapsedFrames);
+        std::lock_guard lock(clockMutex_);
+        if (activeClockEpoch != clockEpoch_) return;
+        playedMediaFrames_ = playedFrames;
+        pendingMediaFrames_ = deviceSubmittedFrames - playedFrames;
+        const auto resetPosition = resetPosition100ns_.load();
+        clockPosition100ns_ = resetPosition +
+            static_cast<std::int64_t>(playedFrames * 10'000'000 / outputSampleRate_);
+        clockLimitPosition100ns_ = resetPosition +
+            static_cast<std::int64_t>(deviceSubmittedFrames * 10'000'000 / outputSampleRate_);
+        clockSampleQpc100ns_ = qpcPosition100ns != 0
+            ? static_cast<std::int64_t>(qpcPosition100ns) : QpcNow100ns();
+    };
     HANDLE events[] = { stopEvent_, sampleEvent_ };
     while (WaitForMultipleObjects(2, events, FALSE, 100) != WAIT_OBJECT_0) {
         if (resetRequested_.exchange(false)) {
-            client->Stop(); client->Reset();
-            clientPaused = paused_.load();
-            if (!clientPaused) client->Start();
-            previousPadding = 0; pendingMediaFrames_ = 0; playedMediaFrames_ = 0;
+            if (clientStarted) client->Stop();
+            client->Reset(); clientStarted = false;
+            clockAnchorValid = false; clockAnchorDevicePosition = 0; deviceSubmittedFrames = 0;
+            pendingMediaFrames_ = 0; playedMediaFrames_ = 0;
+            {
+                std::lock_guard lock(clockMutex_);
+                activeClockEpoch = clockEpoch_;
+            }
+            starved = false;
         }
         const auto shouldPause = paused_.load();
-        if (shouldPause != clientPaused) {
-            if (shouldPause) client->Stop(); else client->Start();
-            clientPaused = shouldPause;
+        if (shouldPause && clientStarted) {
+            client->Stop();
+            clientStarted = false;
         }
-        if (clientPaused) continue;
+        updateMediaClock();
         UINT32 padding = 0;
         if (FAILED(client->GetCurrentPadding(&padding))) continue;
-        const auto playedFrames = previousPadding > padding ? previousPadding - padding : 0;
-        const auto pendingFrames = pendingMediaFrames_.load();
-        playedMediaFrames_ += std::min<std::uint64_t>(pendingFrames, playedFrames);
-        pendingMediaFrames_ = pendingFrames > playedFrames ? pendingFrames - playedFrames : 0;
-        if (outputSampleRate_ > 0) {
-            clockPosition100ns_ = resetPosition100ns_.load() +
-                static_cast<std::int64_t>(playedMediaFrames_.load() * 10'000'000 / outputSampleRate_);
+        if (padding >= bufferFrames) {
+            if (!shouldPause && !clientStarted && SUCCEEDED(client->Start())) clientStarted = true;
+            continue;
         }
-        if (padding >= bufferFrames) { previousPadding = padding; continue; }
         const auto wantedFrames = bufferFrames - padding;
         std::size_t copied = 0;
+        UINT32 renderedFrames = 0;
+        BYTE* destination = nullptr;
         {
+            // Keep reset and consumption atomic with respect to the PCM bytes;
+            // otherwise Reset could clear the queue between GetBuffer and copy.
             std::lock_guard lock(mutex_);
             copied = std::min<std::size_t>(static_cast<std::size_t>(wantedFrames) * outputBlockAlign_,
-                queue_.size());
+                queue_.size() - queueReadOffset_);
+            renderedFrames = static_cast<UINT32>(copied / outputBlockAlign_);
+            if (renderedFrames == 0) {
+                if (!shouldPause && clientStarted && hasSubmittedAudio_.load() && padding == 0 && !starved) {
+                    ++underrunCount_;
+                    starved = true;
+                }
+                continue;
+            }
+            starved = false;
+            copied = static_cast<std::size_t>(renderedFrames) * outputBlockAlign_;
+            if (FAILED(renderer->GetBuffer(renderedFrames, &destination))) continue;
+            std::memcpy(destination, queue_.data() + queueReadOffset_, copied);
+            queueReadOffset_ += copied;
         }
-        const auto renderedFrames = static_cast<UINT32>(copied / outputBlockAlign_);
-        if (renderedFrames == 0) { previousPadding = padding; continue; }
-        BYTE* destination = nullptr;
-        if (FAILED(renderer->GetBuffer(renderedFrames, &destination))) continue;
-        {
-            std::lock_guard lock(mutex_);
-            copied = std::min<std::size_t>(static_cast<std::size_t>(renderedFrames) * outputBlockAlign_,
-                queue_.size());
-            for (std::size_t index = 0; index < copied; ++index) { destination[index] = queue_.front(); queue_.pop_front(); }
+        UINT64 anchorCandidate = 0;
+        bool hasAnchorCandidate = false;
+        if (!clockAnchorValid) {
+            UINT64 devicePosition = 0;
+            if (SUCCEEDED(clock->GetPosition(&devicePosition, nullptr))) {
+                anchorCandidate = devicePosition + static_cast<UINT64>(
+                    static_cast<long double>(padding) * clockFrequency / outputSampleRate_);
+                hasAnchorCandidate = true;
+            }
         }
-        renderer->ReleaseBuffer(renderedFrames, 0);
-        pendingMediaFrames_ += copied / outputBlockAlign_;
-        previousPadding = padding + renderedFrames;
+        if (SUCCEEDED(renderer->ReleaseBuffer(renderedFrames, 0))) {
+            std::lock_guard lock(clockMutex_);
+            if (activeClockEpoch == clockEpoch_) {
+                if (!clockAnchorValid && hasAnchorCandidate) {
+                    clockAnchorDevicePosition = anchorCandidate;
+                    clockAnchorValid = true;
+                }
+                deviceSubmittedFrames += renderedFrames;
+                pendingMediaFrames_ = deviceSubmittedFrames - playedMediaFrames_.load();
+                clockLimitPosition100ns_ = resetPosition100ns_.load() +
+                    static_cast<std::int64_t>(deviceSubmittedFrames * 10'000'000 / outputSampleRate_);
+            }
+            if (!shouldPause && !clientStarted && SUCCEEDED(client->Start())) clientStarted = true;
+        }
     }
-    client->Stop();
+    if (clientStarted) client->Stop();
     running_ = false;
     if (uninitialize) CoUninitialize();
 }

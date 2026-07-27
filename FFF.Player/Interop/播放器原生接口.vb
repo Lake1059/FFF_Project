@@ -55,7 +55,15 @@ Friend Structure 原生播放器快照
     Public 已呈现视频帧数 As ULong
     Public 已丢弃视频帧数 As ULong
     Public 视频队列帧数 As UInteger
-    Public 保留 As UInteger
+    Public 源峰值尼特 As UInteger
+    Public 已解码音频帧数 As ULong
+    Public 音频位置100纳秒 As Long
+    Public 音频缓冲100纳秒 As Long
+    Public 音频欠载次数 As ULong
+    Public 音频时间戳抖动帧数 As ULong
+    Public 音频不连续次数 As ULong
+    Public 音频插入静音帧数 As ULong
+    Public 音频丢弃重叠帧数 As ULong
 End Structure
 
 <Flags>
@@ -105,6 +113,11 @@ Friend Enum 原生定时文字对齐 As UInteger
     靠后 = 2
 End Enum
 
+Friend Enum 原生定时文字图层槽位 As UInteger
+    字幕 = 0
+    弹幕 = 1
+End Enum
+
 <StructLayout(LayoutKind.Sequential)>
 Friend Structure 原生定时文字命令
     Public 大小 As UInteger
@@ -138,9 +151,11 @@ Friend Structure 原生定时文字图层
     Public 画布宽度 As UInteger
     Public 画布高度 As UInteger
     Public 命令数 As UInteger
-    Public 保留 As UInteger
+    Public 图层槽位 As 原生定时文字图层槽位
     Public 序号 As ULong
     Public 命令 As IntPtr
+    Public 目标帧率 As Single
+    Public 保留2 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -154,6 +169,10 @@ Friend Structure 原生定时文字状态
     Public 画布高度 As UInteger
     Public 图层呈现帧数 As UInteger
     Public 可见像素数 As ULong
+    Public 精灵缓存命中次数 As ULong
+    Public 精灵缓存未命中次数 As ULong
+    Public 后备缓冲获取次数 As ULong
+    Public 合成像素着色器调用次数 As ULong
 End Structure
 
 Friend NotInheritable Class 播放器原生句柄
@@ -260,6 +279,9 @@ Friend Module 播放器原生接口
 
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl)>
     Friend Function FFF3FP_GetTimedTextStatus(播放器 As 播放器原生句柄, ByRef 状态 As 原生定时文字状态) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl)>
+    Friend Function FFF3FP_GetDanmakuStatus(播放器 As 播放器原生句柄, ByRef 状态 As 原生定时文字状态) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetMediaInfo(播放器 As 播放器原生句柄, 输出UTF8 As IntPtr, 输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果

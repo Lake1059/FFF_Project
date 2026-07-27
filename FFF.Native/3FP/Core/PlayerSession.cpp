@@ -18,6 +18,26 @@ extern "C" {
 
 namespace {
 constexpr std::int64_t TicksPerSecond = 10'000'000;
+constexpr std::size_t MaxQueuedVideoFrames = 8;
+
+std::uint64_t TimedTextContentKey(const std::uint64_t contentId, const char* text,
+    const char* fontFamily) noexcept {
+    std::uint64_t hash = 1469598103934665603ull;
+    const auto append = [&hash](const char* value) noexcept {
+        for (auto* current = reinterpret_cast<const unsigned char*>(value); *current != 0; ++current) {
+            hash ^= *current;
+            hash *= 1099511628211ull;
+        }
+        hash ^= 0xffu;
+        hash *= 1099511628211ull;
+    };
+    for (std::size_t index = 0; index < sizeof(contentId); ++index) {
+        hash ^= reinterpret_cast<const std::uint8_t*>(&contentId)[index];
+        hash *= 1099511628211ull;
+    }
+    append(text); append(fontFamily);
+    return hash == 0 ? 1 : hash;
+}
 
 std::string EscapeJson(const std::string& value) {
     std::ostringstream output;
@@ -157,15 +177,18 @@ const char* MediaTypeName(const AVMediaType type) noexcept {
 PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
     : decodeMode_(configuration.decodeMode), callback_(configuration.eventCallback),
       callbackContext_(configuration.eventCallbackContext), terminate_(false), format_(nullptr),
+      playbackPacket_(nullptr), externalAudioPacket_(nullptr), videoDecodeFrame_(nullptr),
+      videoTransferFrame_(nullptr), audioDecodeFrame_(nullptr), externalAudioDecodeFrame_(nullptr),
       videoDecoder_(nullptr), audioDecoder_(nullptr), videoStream_(-1),
       audioStream_(-1), coverArtStream_(-1), coverArtFrame_(nullptr), externalFormat_(nullptr), externalAudioDecoder_(nullptr),
       externalAudioStream_(-1), externalAudioOffset100ns_(0), volume_(1.0f), muted_(false),
       clockOriginPosition100ns_(0), clockOriginQpc_(0), playbackPosition100ns_(0),
+      playbackClockSampleQpc_(0), playbackClockLimit100ns_(0), playbackClockSequence_(0),
       state_(FFF3FPState::Idle), qpcFrequency_(0), seekTarget100ns_(-1), seekTargetFrame_(-1),
       keyframeSeekPending_(false), lastVideoFrameDuration100ns_(0),
       displayedFrame_(nullptr), draining_(false) {
     snapshot_ = {};
-    snapshot_.size = sizeof(snapshot_); snapshot_.version = 2; snapshot_.state = FFF3FPState::Idle;
+    snapshot_.size = sizeof(snapshot_); snapshot_.version = 3; snapshot_.state = FFF3FPState::Idle;
     snapshot_.decodeMode = configuration.decodeMode; snapshot_.requestedColorMode = configuration.colorMode;
     snapshot_.actualColorMode = FFF3FPColorMode::MapToSdr; snapshot_.frameIndex = -1;
     snapshot_.framePts = AV_NOPTS_VALUE; snapshot_.selectedVideoStream = -1; snapshot_.selectedAudioStream = -1;
@@ -239,22 +262,80 @@ FFFResult PlayerSession::LoadExternalAudio(const char* path, const std::int32_t 
     std::string normalized, error; if (!NormalizeLocalPath(path, normalized, error)) return FFFResult::InvalidArgument;
     Enqueue([this, value = std::move(normalized), index, offset] { DoLoadExternalAudio(value, index, offset); }); return FFFResult::Success;
 }
-FFFResult PlayerSession::ClearExternalAudio() noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this] { if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); if (externalFormat_) avformat_close_input(&externalFormat_); externalAudioStream_ = -1; externalAudioPath_.clear(); snapshot_.isExternalAudio = 0; if (audioRenderer_) audioRenderer_->Reset(snapshot_.position100ns); PublishSnapshot(); Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"clear-external-audio\"}"); }); return FFFResult::Success; }
+FFFResult PlayerSession::ClearExternalAudio() noexcept {
+    const auto state = state_.load();
+    if (state != FFF3FPState::Ready && state != FFF3FPState::Playing &&
+        state != FFF3FPState::Paused && state != FFF3FPState::Ended)
+        return FFFResult::InvalidState;
+    Enqueue([this] {
+        const auto position = state_.load() == FFF3FPState::Playing
+            ? ClockPosition() : snapshot_.position100ns;
+        if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_);
+        if (externalFormat_) avformat_close_input(&externalFormat_);
+        externalAudioStream_ = -1;
+        externalAudioPath_.clear();
+        snapshot_.isExternalAudio = 0;
+        // Main-container audio packets were intentionally skipped while the
+        // external track was active. A full seek is required to put demux,
+        // video, audio and the resampler back on one timeline.
+        DoSeek(position);
+        Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"clear-external-audio\"}");
+    });
+    return FFFResult::Success;
+}
 FFFResult PlayerSession::SetExternalAudioOffset(const std::int64_t offset) noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, offset] { externalAudioOffset100ns_ = offset; snapshot_.externalAudioOffset100ns = offset; if (externalFormat_) DoSeek(snapshot_.position100ns); else PublishSnapshot(); }); return FFFResult::Success; }
-FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sdr, const float hdr, const float paper) noexcept { if (mode > FFF3FPColorMode::MapToHdr || !std::isfinite(sdr) || sdr <= 0 || !std::isfinite(hdr) || hdr <= 0 || hdr > 10000 || !std::isfinite(paper) || paper <= 0) return FFFResult::InvalidArgument; Enqueue([this, mode, sdr, hdr, paper] { snapshot_.requestedColorMode = mode; const auto previous = snapshot_.actualColorMode; const auto result = videoRenderer_.SetColorMode(mode, sdr, hdr, paper); if (result != FFFResult::Success) { Fail(result, "The color output configuration is invalid.", "color-mode"); return; } const auto* frame = displayedFrame_ != nullptr ? displayedFrame_ : coverArtFrame_; if (frame != nullptr && videoRenderer_.Render(frame) != FFFResult::Success) { Fail(FFFResult::DeviceFailure, videoRenderer_.LastError(), "redraw"); return; } snapshot_.actualColorMode = videoRenderer_.ActualColorMode(); PublishSnapshot(); std::ostringstream json; json << "{\"requested\":" << static_cast<unsigned>(mode) << ",\"actual\":" << static_cast<unsigned>(snapshot_.actualColorMode) << ",\"reason\":\"" << EscapeJson(videoRenderer_.FallbackReason()) << "\"}"; if (previous != snapshot_.actualColorMode || mode != snapshot_.actualColorMode) Emit(FFF3FPEvent::ColorModeChanged, json.str()); }); return FFFResult::Success; }
+FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sdr, const float hdr, const float paper) noexcept {
+    if (mode > FFF3FPColorMode::MapToHdr || !std::isfinite(sdr) || sdr <= 0 ||
+        !std::isfinite(hdr) || hdr <= 0 || hdr > 10000 || !std::isfinite(paper) || paper <= 0)
+        return FFFResult::InvalidArgument;
+    Enqueue([this, mode, sdr, hdr, paper] {
+        const auto forceSdr = mode == FFF3FPColorMode::MapToHdr && snapshot_.isHdrSource == 0;
+        const auto effectiveMode = forceSdr ? FFF3FPColorMode::MapToSdr : mode;
+        snapshot_.requestedColorMode = effectiveMode;
+        const auto previous = snapshot_.actualColorMode;
+        const auto result = videoRenderer_.SetColorMode(effectiveMode, sdr, hdr, paper);
+        if (result != FFFResult::Success) { Fail(result, "The color output configuration is invalid.", "color-mode"); return; }
+        const auto* frame = displayedFrame_ != nullptr ? displayedFrame_ : coverArtFrame_;
+        if (frame != nullptr && videoRenderer_.Render(frame) != FFFResult::Success) {
+            Fail(FFFResult::DeviceFailure, videoRenderer_.LastError(), "redraw"); return;
+        }
+        snapshot_.actualColorMode = videoRenderer_.ActualColorMode();
+        PublishSnapshot();
+        const auto reason = forceSdr ? "True HDR output is only available for HDR source video."
+            : videoRenderer_.FallbackReason();
+        std::ostringstream json;
+        json << "{\"requested\":" << static_cast<unsigned>(effectiveMode)
+            << ",\"actual\":" << static_cast<unsigned>(snapshot_.actualColorMode)
+            << ",\"reason\":\"" << EscapeJson(reason) << "\"}";
+        if (previous != snapshot_.actualColorMode || effectiveMode != snapshot_.actualColorMode || forceSdr)
+            Emit(FFF3FPEvent::ColorModeChanged, json.str());
+    });
+    return FFFResult::Success;
+}
 FFFResult PlayerSession::SetOutputWindow(void* window) noexcept { if (window != nullptr && !IsWindow(static_cast<HWND>(window))) return FFFResult::InvalidArgument; Enqueue([this, window] { const auto result = videoRenderer_.SetWindow(static_cast<HWND>(window)); if (result != FFFResult::Success) { Fail(result, "The playback window handle is invalid.", "output-window"); return; } const auto* frame = displayedFrame_ != nullptr ? displayedFrame_ : coverArtFrame_; if (frame != nullptr && videoRenderer_.Render(frame) != FFFResult::Success) Fail(FFFResult::DeviceFailure, videoRenderer_.LastError(), "redraw"); }); return FFFResult::Success; }
 FFFResult PlayerSession::SetAudioEndpoint(const char* endpoint) noexcept { const auto value = endpoint == nullptr ? std::wstring{} : FromUtf8(endpoint); Enqueue([this, value] { audioEndpointId_ = value; if (audioRenderer_) { const auto paused = snapshot_.state != FFF3FPState::Playing; audioRenderer_->Stop(); audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_); const auto result = audioRenderer_->Start(); if (result != FFFResult::Success) { Fail(result, audioRenderer_->LastError(), "audio-endpoint"); return; } audioRenderer_->SetVolume(volume_, muted_); audioRenderer_->Reset(snapshot_.position100ns); audioRenderer_->SetPaused(paused); Emit(FFF3FPEvent::DeviceChanged, "{\"type\":\"audio\"}"); } }); return FFFResult::Success; }
 FFFResult PlayerSession::SetVolume(const float volume, const bool muted) noexcept { if (!std::isfinite(volume) || volume < 0 || volume > 1) return FFFResult::InvalidArgument; Enqueue([this, volume, muted] { volume_ = volume; muted_ = muted; if (audioRenderer_) audioRenderer_->SetVolume(volume_, muted_); }); return FFFResult::Success; }
 
 FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) noexcept {
-    if (input.size < sizeof(FFF3FPTimedTextLayer) || input.version != 1 ||
+    constexpr auto legacyLayerSize = offsetof(FFF3FPTimedTextLayer, targetFrameRate);
+    const auto targetFrameRate = input.size >= sizeof(FFF3FPTimedTextLayer)
+        ? input.targetFrameRate : 60.0f;
+    if (input.size < legacyLayerSize || input.version != 1 ||
         input.canvasWidth == 0 || input.canvasHeight == 0 || input.commandCount > 4096 ||
+        input.layerSlot > static_cast<std::uint32_t>(TimedTextLayerSlot::Danmaku) ||
+        !std::isfinite(targetFrameRate) || targetFrameRate < 1.0f || targetFrameRate > 240.0f ||
         (input.commandCount != 0 && input.commands == nullptr)) return FFFResult::InvalidArgument;
     try {
+        std::lock_guard contentLock(timedTextContentMutex_);
+        const auto state = state_.load();
+        if (state != FFF3FPState::Ready && state != FFF3FPState::Playing &&
+            state != FFF3FPState::Paused && state != FFF3FPState::Ended)
+            return FFFResult::InvalidState;
         TimedTextRenderLayer layer;
         layer.canvasWidth = input.canvasWidth;
         layer.canvasHeight = input.canvasHeight;
         layer.sequence = input.sequence;
+        layer.targetFrameRate = targetFrameRate;
         layer.commands.reserve(input.commandCount);
         for (std::uint32_t index = 0; index < input.commandCount; ++index) {
             const auto& source = input.commands[index];
@@ -276,9 +357,28 @@ FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) no
                     !std::isfinite(source.outlineWidth) || source.outlineWidth < 0 ||
                     source.horizontalAlignment > FFF3FPTimedTextAlignment::Far ||
                     source.verticalAlignment > FFF3FPTimedTextAlignment::Far ||
-                    !FromUtf8Strict(source.textUtf8, command.text) || command.text.empty() ||
-                    !FromUtf8Strict(source.fontFamilyUtf8, command.fontFamily)) return FFFResult::InvalidArgument;
-                if (command.fontFamily.empty()) command.fontFamily = L"Segoe UI";
+                    source.fontFamilyUtf8 == nullptr) return FFFResult::InvalidArgument;
+                const auto key = source.contentId == 0 ? 0 :
+                    TimedTextContentKey(source.contentId, source.textUtf8, source.fontFamilyUtf8);
+                if (key != 0) {
+                    const auto cached = timedTextContentCache_.find(key);
+                    if (cached != timedTextContentCache_.end()) command.content = cached->second;
+                }
+                if (!command.content) {
+                    auto content = std::make_shared<TimedTextRenderCommand::TextContent>();
+                    content->identity = TimedTextContentKey(source.contentId,
+                        source.textUtf8, source.fontFamilyUtf8);
+                    if (!FromUtf8Strict(source.textUtf8, content->text) || content->text.empty() ||
+                        !FromUtf8Strict(source.fontFamilyUtf8, content->fontFamily)) return FFFResult::InvalidArgument;
+                    if (content->fontFamily.empty()) content->fontFamily = L"Segoe UI";
+                    command.content = content;
+                    if (key != 0) {
+                        constexpr std::size_t MaximumTimedTextContents = 512;
+                        if (timedTextContentCache_.size() >= MaximumTimedTextContents)
+                            timedTextContentCache_.clear();
+                        timedTextContentCache_[key] = std::move(content);
+                    }
+                }
             } else {
                 const auto required = static_cast<std::uint64_t>(source.bitmapStride) * source.bitmapHeight;
                 if (source.bitmapBgra == nullptr || source.bitmapWidth == 0 || source.bitmapHeight == 0 ||
@@ -294,29 +394,47 @@ FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) no
         }
         // Timed text has its own high-precision 60 Hz producer. Routing it through
         // the decode command queue coalesced frames whenever video work was busy.
-        const auto result = videoRenderer_.SetTimedTextLayer(std::move(layer));
+        const auto result = videoRenderer_.SetTimedTextLayer(std::move(layer),
+            static_cast<TimedTextLayerSlot>(input.layerSlot));
         if (result != FFFResult::Success) {
             ReportError(result, videoRenderer_.LastError(), "timed-text");
             return result;
-        }
-        const auto presentResult = videoRenderer_.PresentTimedText();
-        if (presentResult != FFFResult::Success) {
-            ReportError(presentResult, videoRenderer_.LastError(), "timed-text-redraw");
-            return presentResult;
         }
         return FFFResult::Success;
     } catch (...) { return FFFResult::NativeFailure; }
 }
 
 FFFResult PlayerSession::GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept {
-    return videoRenderer_.GetTimedTextStatus(status);
+    return videoRenderer_.GetTimedTextStatus(status, TimedTextLayerSlot::Subtitle);
+}
+
+FFFResult PlayerSession::GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcept {
+    return videoRenderer_.GetTimedTextStatus(status, TimedTextLayerSlot::Danmaku);
 }
 
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
-    if (output.size < sizeof(FFF3FPSnapshot) || output.version != 2) return FFFResult::InvalidArgument;
+    if (output.size < sizeof(FFF3FPSnapshot) || output.version != 3) return FFFResult::InvalidArgument;
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
     if (output.state == FFF3FPState::Playing) {
-        output.position100ns = playbackPosition100ns_.load();
+        std::uint64_t firstSequence = 0;
+        std::uint64_t secondSequence = 0;
+        std::int64_t sampledPosition = 0;
+        std::int64_t sampledQpc = 0;
+        std::int64_t limit = 0;
+        do {
+            firstSequence = playbackClockSequence_.load(std::memory_order_acquire);
+            if ((firstSequence & 1u) != 0) continue;
+            sampledPosition = playbackPosition100ns_.load(std::memory_order_relaxed);
+            sampledQpc = playbackClockSampleQpc_.load(std::memory_order_relaxed);
+            limit = playbackClockLimit100ns_.load(std::memory_order_relaxed);
+            secondSequence = playbackClockSequence_.load(std::memory_order_acquire);
+        } while (firstSequence != secondSequence || (secondSequence & 1u) != 0);
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        const auto elapsed = sampledQpc > 0 && now.QuadPart > sampledQpc && qpcFrequency_ > 0
+            ? (now.QuadPart - sampledQpc) * TicksPerSecond / qpcFrequency_ : 0;
+        output.position100ns = sampledPosition + std::min(elapsed,
+            std::max<std::int64_t>(0, limit - sampledPosition));
         if (output.duration100ns > 0) output.position100ns = std::min(output.position100ns, output.duration100ns);
     }
     return FFFResult::Success;
@@ -452,7 +570,9 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
 }
 
 void PlayerSession::DoOpen(std::string path) noexcept {
-    DoClose(FFF3FPState::Opening);
+    // Keep the flip-model chain for a same-HWND media switch. DXGI can reject
+    // an immediate replacement while the previous chain is still retiring.
+    DoClose(FFF3FPState::Opening, true);
     std::string openError;
     const auto openResult = OpenFormat(path, &format_, openError);
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
@@ -478,6 +598,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         const auto result = LoadCoverArt();
         if (result != FFFResult::Success) { Fail(result, "Could not decode or render the attached cover art.", "cover-art"); return; }
     }
+    bool forcedSdrOutput = false;
     {
         std::lock_guard lock(mutex_);
         snapshot_.duration100ns = format_->duration > 0 && !IsLoopAwareImageDemuxer(format_->iformat)
@@ -487,12 +608,26 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
         if (videoStream_ >= 0) { snapshot_.videoWidth = videoDecoder_->width; snapshot_.videoHeight = videoDecoder_->height; const auto* parameters = format_->streams[videoStream_]->codecpar; snapshot_.isHdrSource = parameters->color_trc == AVCOL_TRC_SMPTE2084 || parameters->color_trc == AVCOL_TRC_ARIB_STD_B67; }
         else if (coverArtFrame_ != nullptr) { snapshot_.videoWidth = coverArtFrame_->width; snapshot_.videoHeight = coverArtFrame_->height; snapshot_.isHdrSource = 0; }
+        if (snapshot_.isHdrSource == 0 && snapshot_.requestedColorMode == FFF3FPColorMode::MapToHdr) {
+            snapshot_.requestedColorMode = FFF3FPColorMode::MapToSdr;
+            forcedSdrOutput = true;
+        }
+    }
+    if (forcedSdrOutput) {
+        const auto resetResult = videoRenderer_.ForceSdrOutputForSdrSource();
+        if (resetResult != FFFResult::Success) {
+            Fail(resetResult, videoRenderer_.LastError(), "sdr-output-reset");
+            return;
+        }
+        snapshot_.actualColorMode = videoRenderer_.ActualColorMode();
     }
     framePtsIndex_.clear(); seekTarget100ns_ = -1; seekTargetFrame_ = -1; keyframeSeekPending_ = false;
     lastVideoFrameDuration100ns_ = 0; draining_ = false;
     RebuildMediaInfo(); SetState(FFF3FPState::Ready, "open");
     Emit(FFF3FPEvent::OpenCompleted, "{\"success\":true}");
-    if (snapshot_.requestedColorMode == FFF3FPColorMode::MapToHdr && snapshot_.actualColorMode != snapshot_.requestedColorMode)
+    if (forcedSdrOutput)
+        Emit(FFF3FPEvent::ColorModeChanged, "{\"requested\":0,\"actual\":0,\"reason\":\"True HDR output is only available for HDR source video.\"}");
+    else if (snapshot_.requestedColorMode == FFF3FPColorMode::MapToHdr && snapshot_.actualColorMode != snapshot_.requestedColorMode)
         Emit(FFF3FPEvent::ColorModeChanged, "{\"requested\":2,\"actual\":0,\"reason\":\"" + EscapeJson(videoRenderer_.FallbackReason()) + "\"}");
 }
 
@@ -525,19 +660,19 @@ FFFResult PlayerSession::ProbeHardwareVideo(AVFormatContext* owner, AVCodecConte
 
 void PlayerSession::PumpPlayback() noexcept {
     if (format_ == nullptr) { SetState(FFF3FPState::Failed); return; }
-    playbackPosition100ns_.store(ClockPosition());
+    ClockPosition();
     if (PumpVideoPresentation()) return;
     if (videoStream_ < 0 && audioRenderer_ && audioRenderer_->Buffered100ns() > TicksPerSecond) { Sleep(2); return; }
     if (!draining_ && externalFormat_ != nullptr && audioRenderer_ && audioRenderer_->Buffered100ns() < 5'000'000) PumpExternalAudio();
-    AVPacket* packet = av_packet_alloc();
-    if (packet == nullptr) { Fail(FFFResult::NativeFailure, "Could not allocate a playback packet."); return; }
-    const auto result = av_read_frame(format_, packet);
+    if (playbackPacket_ == nullptr) playbackPacket_ = av_packet_alloc();
+    if (playbackPacket_ == nullptr) { Fail(FFFResult::NativeFailure, "Could not allocate a playback packet."); return; }
+    const auto result = av_read_frame(format_, playbackPacket_);
     if (result < 0) {
-        av_packet_free(&packet); FlushAtEnd(); return;
+        av_packet_unref(playbackPacket_); FlushAtEnd(); return;
     }
-    if (packet->stream_index == videoStream_) DecodePacket(videoDecoder_, packet, true, format_);
-    else if (packet->stream_index == audioStream_ && externalFormat_ == nullptr) DecodePacket(audioDecoder_, packet, false, format_);
-    av_packet_free(&packet);
+    if (playbackPacket_->stream_index == videoStream_) DecodePacket(videoDecoder_, playbackPacket_, true, format_);
+    else if (playbackPacket_->stream_index == audioStream_ && externalFormat_ == nullptr) DecodePacket(audioDecoder_, playbackPacket_, false, format_);
+    av_packet_unref(playbackPacket_);
 }
 
 FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet, const bool video,
@@ -545,8 +680,12 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
     if (decoder == nullptr) return FFFResult::Success;
     if (packet != nullptr && packet->size == 0 && packet->side_data_elems == 0)
         return FFFResult::Success;
-    AVFrame* frame = av_frame_alloc();
-    if (frame == nullptr) return FFFResult::NativeFailure;
+    AVFrame*& reusableFrame = video ? videoDecodeFrame_ :
+        (owner == externalFormat_ ? externalAudioDecodeFrame_ : audioDecodeFrame_);
+    if (reusableFrame == nullptr) reusableFrame = av_frame_alloc();
+    if (reusableFrame == nullptr) return FFFResult::NativeFailure;
+    auto* frame = reusableFrame;
+    av_frame_unref(frame);
     const auto handleFrame = [this, video, owner, decoder](AVFrame* decoded) {
         if (video) {
             const auto seeking = seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_;
@@ -566,7 +705,6 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
     if (result == AVERROR(EAGAIN)) {
         const auto receiveResult = receiveFrames();
         if (receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF) {
-            av_frame_free(&frame);
             Fail(FFFResult::FfmpegFailure, "Decoder failed while making room for a packet: " +
                 FfmpegError(receiveResult));
             return FFFResult::FfmpegFailure;
@@ -574,12 +712,10 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
         result = avcodec_send_packet(decoder, packet);
     }
     if (result < 0 && result != AVERROR_EOF) {
-        av_frame_free(&frame);
         Fail(FFFResult::FfmpegFailure, "Decoder rejected packet: " + FfmpegError(result));
         return FFFResult::FfmpegFailure;
     }
     result = receiveFrames();
-    av_frame_free(&frame);
     return result == AVERROR(EAGAIN) || result == AVERROR_EOF ? FFFResult::Success : FFFResult::FfmpegFailure;
 }
 
@@ -591,20 +727,32 @@ bool PlayerSession::PumpVideoPresentation() noexcept {
     if (position <= now + 20'000) {
         videoFrameQueue_.pop_front();
         PresentVideoFrame(frame, format_);
-        av_frame_free(&frame);
+        av_frame_unref(frame);
+        videoFramePool_.push_back(frame);
         return true;
     }
-    if (videoFrameQueue_.size() >= 12) {
+    // Leave one slot for the next compressed packet: a decoder may emit more
+    // than one reordered frame from a single avcodec_send_packet call.
+    if (videoFrameQueue_.size() >= MaxQueuedVideoFrames - 1) {
         std::unique_lock lock(mutex_);
-        if (commands_.empty() && !terminate_) commandCondition_.wait_for(lock, std::chrono::milliseconds(1));
+        // The media clock owns presentation.  Once the bounded queue is full,
+        // sleep until its front frame becomes due (or a command arrives) instead
+        // of polling every millisecond and spending an idle core on look-ahead.
+        const auto wait100ns = std::max<std::int64_t>(0, position - now - 20'000);
+        const auto waitMilliseconds = std::clamp<std::int64_t>((wait100ns + 9'999) / 10'000, 1, 20);
+        if (commands_.empty() && !terminate_)
+            commandCondition_.wait_for(lock, std::chrono::milliseconds(waitMilliseconds));
         return true;
     }
     return false;
 }
 
 void PlayerSession::QueueVideoFrame(AVFrame* frame) noexcept {
-    auto* queued = av_frame_clone(frame);
-    if (queued == nullptr) {
+    AVFrame* queued = nullptr;
+    if (videoFramePool_.empty()) queued = av_frame_alloc();
+    else { queued = videoFramePool_.back(); videoFramePool_.pop_back(); }
+    if (queued == nullptr || av_frame_ref(queued, frame) < 0) {
+        if (queued != nullptr) { av_frame_unref(queued); videoFramePool_.push_back(queued); }
         Fail(FFFResult::NativeFailure, "Could not queue the decoded video frame.", "decode");
         return;
     }
@@ -614,7 +762,10 @@ void PlayerSession::QueueVideoFrame(AVFrame* frame) noexcept {
 }
 
 void PlayerSession::ClearVideoQueue() noexcept {
-    for (auto*& frame : videoFrameQueue_) av_frame_free(&frame);
+    for (auto* frame : videoFrameQueue_) {
+        av_frame_unref(frame);
+        videoFramePool_.push_back(frame);
+    }
     videoFrameQueue_.clear();
     snapshot_.queuedVideoFrames = 0;
 }
@@ -669,23 +820,30 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     }
 
     AVFrame* renderFrame = frame;
-    AVFrame* transferred = nullptr;
     if (IsHardwareFrame(frame)) {
-        transferred = av_frame_alloc();
-        if (transferred == nullptr || av_hwframe_transfer_data(transferred, frame, 0) < 0) {
-            if (transferred) av_frame_free(&transferred); Fail(FFFResult::FfmpegFailure, "Could not transfer the hardware-decoded frame for presentation."); return;
+        if (videoTransferFrame_ == nullptr) videoTransferFrame_ = av_frame_alloc();
+        if (videoTransferFrame_ == nullptr) {
+            Fail(FFFResult::NativeFailure, "Could not allocate the reusable hardware-transfer frame.");
+            return;
         }
-        av_frame_copy_props(transferred, frame);
-        renderFrame = transferred;
+        av_frame_unref(videoTransferFrame_);
+        if (av_hwframe_transfer_data(videoTransferFrame_, frame, 0) < 0) {
+            Fail(FFFResult::FfmpegFailure, "Could not transfer the hardware-decoded frame for presentation.");
+            return;
+        }
+        av_frame_copy_props(videoTransferFrame_, frame);
+        renderFrame = videoTransferFrame_;
     }
     const auto previousColorMode = snapshot_.actualColorMode;
     const auto renderResult = videoRenderer_.Render(renderFrame);
-    AVFrame* displayed = renderResult == FFFResult::Success ? av_frame_clone(renderFrame) : nullptr;
-    if (transferred) av_frame_free(&transferred);
     if (renderResult != FFFResult::Success) { Fail(renderResult, videoRenderer_.LastError(), "render"); return; }
-    if (displayed == nullptr) { Fail(FFFResult::NativeFailure, "Could not retain the displayed video frame.", "render"); return; }
-    if (displayedFrame_ != nullptr) av_frame_free(&displayedFrame_);
-    displayedFrame_ = displayed;
+    if (displayedFrame_ == nullptr) displayedFrame_ = av_frame_alloc();
+    if (displayedFrame_ == nullptr) { Fail(FFFResult::NativeFailure, "Could not allocate the retained display frame.", "render"); return; }
+    av_frame_unref(displayedFrame_);
+    if (av_frame_ref(displayedFrame_, renderFrame) < 0) {
+        Fail(FFFResult::NativeFailure, "Could not retain the displayed video frame.", "render");
+        return;
+    }
     ++snapshot_.presentedVideoFrames;
     snapshot_.queuedVideoFrames = static_cast<std::uint32_t>(videoFrameQueue_.size());
     {
@@ -693,7 +851,9 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
         snapshot_.position100ns = position; snapshot_.frameIndex = nextIndex; snapshot_.framePts = pts;
         snapshot_.frameTimeBaseNumerator = stream->time_base.num; snapshot_.frameTimeBaseDenominator = stream->time_base.den;
         snapshot_.actualColorMode = videoRenderer_.ActualColorMode();
+        snapshot_.sourcePeakNits = static_cast<std::uint32_t>(std::lround(videoRenderer_.SourcePeakNits()));
     }
+    UpdateAudioDiagnostics();
     PublishSnapshot();
     if (snapshot_.actualColorMode != previousColorMode) {
         std::ostringstream json; json << "{\"requested\":" << static_cast<unsigned>(snapshot_.requestedColorMode)
@@ -718,19 +878,44 @@ void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, cons
     if (pts != AV_NOPTS_VALUE && seekTarget100ns_ >= 0) {
         if (position + av_rescale(frame->nb_samples, TicksPerSecond, frame->sample_rate) < seekTarget100ns_) return;
     }
+    ++snapshot_.decodedAudioFrames;
     const auto result = audioRenderer_->Enqueue(frame, position);
     if (result != FFFResult::Success && result != FFFResult::BufferTooSmall) Fail(result, audioRenderer_->LastError(), "audio-render");
+}
+
+void PlayerSession::UpdateAudioDiagnostics() noexcept {
+    if (audioRenderer_ == nullptr) {
+        snapshot_.audioPosition100ns = 0;
+        snapshot_.bufferedAudio100ns = 0;
+        snapshot_.audioUnderruns = 0;
+        snapshot_.audioTimestampJitterFrames = 0;
+        snapshot_.audioDiscontinuities = 0;
+        snapshot_.audioInsertedSilenceFrames = 0;
+        snapshot_.audioDroppedOverlapFrames = 0;
+        return;
+    }
+    snapshot_.audioPosition100ns = audioRenderer_->Position100ns();
+    snapshot_.bufferedAudio100ns = audioRenderer_->Buffered100ns();
+    snapshot_.audioUnderruns = audioRenderer_->UnderrunCount();
+    snapshot_.audioTimestampJitterFrames = audioRenderer_->TimestampJitterCount();
+    snapshot_.audioDiscontinuities = audioRenderer_->DiscontinuityCount();
+    snapshot_.audioInsertedSilenceFrames = audioRenderer_->InsertedSilenceFrames();
+    snapshot_.audioDroppedOverlapFrames = audioRenderer_->DroppedOverlapFrames();
 }
 
 void PlayerSession::PumpExternalAudio() noexcept {
     if (externalFormat_ == nullptr || externalAudioDecoder_ == nullptr) return;
     if (snapshot_.position100ns < externalAudioOffset100ns_) return;
-    AVPacket* packet = av_packet_alloc(); if (!packet) return;
-    while (av_read_frame(externalFormat_, packet) >= 0) {
-        if (packet->stream_index == externalAudioStream_) { DecodePacket(externalAudioDecoder_, packet, false, externalFormat_); av_packet_unref(packet); break; }
-        av_packet_unref(packet);
+    if (externalAudioPacket_ == nullptr) externalAudioPacket_ = av_packet_alloc();
+    if (externalAudioPacket_ == nullptr) return;
+    while (av_read_frame(externalFormat_, externalAudioPacket_) >= 0) {
+        if (externalAudioPacket_->stream_index == externalAudioStream_) {
+            DecodePacket(externalAudioDecoder_, externalAudioPacket_, false, externalFormat_);
+            av_packet_unref(externalAudioPacket_);
+            break;
+        }
+        av_packet_unref(externalAudioPacket_);
     }
-    av_packet_free(&packet);
 }
 
 void PlayerSession::FlushAtEnd() noexcept {
@@ -779,14 +964,14 @@ void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame
 
 void PlayerSession::DecodeUntilSeekTarget() noexcept {
     if (format_ == nullptr || videoDecoder_ == nullptr) return;
-    AVPacket* packet = av_packet_alloc();
-    if (packet == nullptr) return;
+    if (playbackPacket_ == nullptr) playbackPacket_ = av_packet_alloc();
+    if (playbackPacket_ == nullptr) return;
     while ((seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_) && !terminate_) {
-        if (av_read_frame(format_, packet) < 0) break;
-        if (packet->stream_index == videoStream_) DecodePacket(videoDecoder_, packet, true, format_);
-        av_packet_unref(packet);
+        if (av_read_frame(format_, playbackPacket_) < 0) break;
+        if (playbackPacket_->stream_index == videoStream_)
+            DecodePacket(videoDecoder_, playbackPacket_, true, format_);
+        av_packet_unref(playbackPacket_);
     }
-    av_packet_free(&packet);
 }
 
 void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) noexcept {
@@ -823,16 +1008,30 @@ void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t req
     Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"load-external-audio\",\"stream\":" + std::to_string(index) + "}");
 }
 
-void PlayerSession::DoClose(const FFF3FPState finalState) noexcept {
+void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVideoOutput) noexcept {
     if (audioRenderer_) { audioRenderer_->Stop(); audioRenderer_.reset(); }
-    videoRenderer_.Close();
+    // SetTimedTextLayer is intentionally callable outside the session command
+    // queue. Gate renderer teardown with its content lock so a final timer tick
+    // cannot restart the presenter while this close is joining it.
+    std::unique_lock contentLock(timedTextContentMutex_);
+    if (preserveVideoOutput) videoRenderer_.ResetMedia();
+    else videoRenderer_.Close();
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); if (externalFormat_) avformat_close_input(&externalFormat_);
     if (videoDecoder_) avcodec_free_context(&videoDecoder_); if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     if (coverArtFrame_) av_frame_free(&coverArtFrame_);
     if (displayedFrame_) av_frame_free(&displayedFrame_);
+    if (videoDecodeFrame_) av_frame_free(&videoDecodeFrame_);
+    if (videoTransferFrame_) av_frame_free(&videoTransferFrame_);
+    if (audioDecodeFrame_) av_frame_free(&audioDecodeFrame_);
+    if (externalAudioDecodeFrame_) av_frame_free(&externalAudioDecodeFrame_);
+    if (playbackPacket_) av_packet_free(&playbackPacket_);
+    if (externalAudioPacket_) av_packet_free(&externalAudioPacket_);
     ClearVideoQueue();
+    for (auto*& frame : videoFramePool_) av_frame_free(&frame);
+    videoFramePool_.clear();
     if (format_) avformat_close_input(&format_);
     videoStream_ = audioStream_ = coverArtStream_ = externalAudioStream_ = -1; externalAudioPath_.clear(); framePtsIndex_.clear();
+    timedTextContentCache_.clear();
     externalAudioOffset100ns_ = 0; seekTarget100ns_ = seekTargetFrame_ = -1;
     keyframeSeekPending_ = false; lastVideoFrameDuration100ns_ = 0; draining_ = false;
     {
@@ -841,8 +1040,17 @@ void PlayerSession::DoClose(const FFF3FPState finalState) noexcept {
         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
         snapshot_.isExternalAudio = 0; snapshot_.externalAudioOffset100ns = 0;
         snapshot_.decodedVideoFrames = snapshot_.presentedVideoFrames = snapshot_.droppedVideoFrames = 0;
-        snapshot_.queuedVideoFrames = 0;
-        snapshot_.actualColorMode = FFF3FPColorMode::MapToSdr; mediaInfoJson_.clear();
+        snapshot_.decodedAudioFrames = snapshot_.audioUnderruns = 0;
+        snapshot_.audioPosition100ns = snapshot_.bufferedAudio100ns = 0;
+        snapshot_.audioTimestampJitterFrames = snapshot_.audioDiscontinuities = 0;
+        snapshot_.audioInsertedSilenceFrames = snapshot_.audioDroppedOverlapFrames = 0;
+        snapshot_.queuedVideoFrames = 0; snapshot_.sourcePeakNits = 0;
+        // During same-HWND media replacement the flip chain is intentionally
+        // retained. Keep reporting its real mode while Opening; the next source
+        // commits SDR only after ForceSdrOutputForSdrSource has reconfigured DXGI.
+        snapshot_.actualColorMode = preserveVideoOutput
+            ? videoRenderer_.ActualColorMode() : FFF3FPColorMode::MapToSdr;
+        mediaInfoJson_.clear();
     }
     state_.store(finalState);
     PublishSnapshot();
@@ -858,12 +1066,19 @@ void PlayerSession::RebuildMediaInfo() noexcept {
     std::ostringstream json; json << "{\"format\":\"" << EscapeJson(format_->iformat ? format_->iformat->name : "")
         << "\",\"duration100ns\":" << snapshot_.duration100ns << ",\"streams\":[";
     for (unsigned index = 0; index < format_->nb_streams; ++index) {
-        if (index) json << ','; const auto* stream = format_->streams[index]; const auto* parameters = stream->codecpar;
+        if (index) json << ','; auto* stream = format_->streams[index]; const auto* parameters = stream->codecpar;
         const auto* descriptor = avcodec_descriptor_get(parameters->codec_id);
         json << "{\"index\":" << index << ",\"type\":\"" << MediaTypeName(parameters->codec_type)
              << "\",\"codec\":\"" << EscapeJson(descriptor ? descriptor->name : "unknown") << "\",\"timeBaseNumerator\":"
              << stream->time_base.num << ",\"timeBaseDenominator\":" << stream->time_base.den;
-        if (parameters->codec_type == AVMEDIA_TYPE_VIDEO) json << ",\"width\":" << parameters->width << ",\"height\":" << parameters->height << ",\"hdr\":" << ((parameters->color_trc == AVCOL_TRC_SMPTE2084 || parameters->color_trc == AVCOL_TRC_ARIB_STD_B67) ? "true" : "false") << ",\"attachedPicture\":" << ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0 ? "true" : "false");
+        if (parameters->codec_type == AVMEDIA_TYPE_VIDEO) {
+            const auto frameRate = av_guess_frame_rate(format_, stream, nullptr);
+            json << ",\"width\":" << parameters->width << ",\"height\":" << parameters->height
+                 << ",\"averageFrameRateNumerator\":" << frameRate.num
+                 << ",\"averageFrameRateDenominator\":" << frameRate.den
+                 << ",\"hdr\":" << ((parameters->color_trc == AVCOL_TRC_SMPTE2084 || parameters->color_trc == AVCOL_TRC_ARIB_STD_B67) ? "true" : "false")
+                 << ",\"attachedPicture\":" << ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0 ? "true" : "false");
+        }
         if (parameters->codec_type == AVMEDIA_TYPE_AUDIO) json << ",\"sampleRate\":" << parameters->sample_rate << ",\"channels\":" << parameters->ch_layout.nb_channels;
         AVDictionaryEntry* language = av_dict_get(stream->metadata, "language", nullptr, 0);
         AVDictionaryEntry* title = av_dict_get(stream->metadata, "title", nullptr, 0);
@@ -905,19 +1120,39 @@ void PlayerSession::Emit(const FFF3FPEvent event, const std::string& json) const
 std::int64_t PlayerSession::ClockPosition() const noexcept {
     if (audioRenderer_ && (audioStream_ >= 0 || externalAudioStream_ >= 0)) {
         const auto audioPosition = audioRenderer_->Position100ns();
+        const auto buffered = audioRenderer_->Buffered100ns();
         if (externalFormat_ == nullptr || audioPosition > clockOriginPosition100ns_.load() ||
-            audioRenderer_->Buffered100ns() > 0) {
-            playbackPosition100ns_.store(audioPosition);
+            buffered > 0) {
+            PublishPlaybackClock(audioPosition, audioRenderer_->TimelineLimit100ns());
             return audioPosition;
         }
     }
     LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
     const auto origin = clockOriginQpc_.load(); if (origin == 0 || qpcFrequency_ <= 0) return clockOriginPosition100ns_.load();
     const auto position = clockOriginPosition100ns_.load() + (now.QuadPart - origin) * TicksPerSecond / qpcFrequency_;
-    playbackPosition100ns_.store(position);
+    PublishPlaybackClock(position, snapshot_.duration100ns > 0
+        ? snapshot_.duration100ns : (std::numeric_limits<std::int64_t>::max)());
     return position;
 }
-void PlayerSession::ResetClock(const std::int64_t position) noexcept { LARGE_INTEGER now{}; QueryPerformanceCounter(&now); clockOriginPosition100ns_ = position; clockOriginQpc_ = now.QuadPart; playbackPosition100ns_ = position; }
+
+void PlayerSession::PublishPlaybackClock(const std::int64_t position,
+    const std::int64_t limit) const noexcept {
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    playbackClockSequence_.fetch_add(1, std::memory_order_acq_rel);
+    playbackPosition100ns_.store(position, std::memory_order_relaxed);
+    playbackClockLimit100ns_.store(std::max(position, limit), std::memory_order_relaxed);
+    playbackClockSampleQpc_.store(now.QuadPart, std::memory_order_relaxed);
+    playbackClockSequence_.fetch_add(1, std::memory_order_release);
+}
+
+void PlayerSession::ResetClock(const std::int64_t position) noexcept {
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    clockOriginPosition100ns_ = position;
+    clockOriginQpc_ = now.QuadPart;
+    PublishPlaybackClock(position, position);
+}
 
 void PlayerSession::PublishSnapshot() noexcept {
     std::lock_guard lock(snapshotMutex_);

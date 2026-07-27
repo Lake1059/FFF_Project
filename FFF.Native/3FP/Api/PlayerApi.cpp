@@ -1,11 +1,12 @@
 #include "pch.h"
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Core/PlayerSession.h"
+#include "3FP/Render/VideoRenderer.h"
 
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 2;
+constexpr std::uint32_t PlayerApiVersion = 3;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -61,6 +62,14 @@ FFFResult FFF3FP_GetTimedTextStatus(const FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept {
     return player && status ? static_cast<PlayerSession*>(player)->GetTimedTextStatus(*status)
         : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_GetDanmakuStatus(const FFF3FPHandle player,
+    FFF3FPTimedTextStatus* status) noexcept {
+    return player && status ? static_cast<PlayerSession*>(player)->GetDanmakuStatus(*status)
+        : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_EvaluateColorTransform(FFF3FPColorTransform* transform) noexcept {
+    return transform ? EvaluateVideoColorTransform(*transform) : FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_GetMediaInfo(const FFF3FPHandle player, char* output, const std::uint32_t size,
     std::uint32_t* required) noexcept { if (!player) return FFFResult::InvalidArgument; try { return CopyUtf8(static_cast<PlayerSession*>(player)->MediaInfo(), output, size, required); } catch (...) { return FFFResult::NativeFailure; } }
