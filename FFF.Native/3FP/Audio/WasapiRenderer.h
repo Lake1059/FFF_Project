@@ -10,6 +10,7 @@ extern "C" {
 #include <array>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -40,6 +41,11 @@ public:
     std::string LastError() const;
 
 private:
+    struct AudioChunk {
+        std::vector<std::uint8_t> bytes;
+        std::size_t offset = 0;
+        std::size_t silenceBytes = 0;
+    };
     void RenderThread() noexcept;
     FFFResult EnsureResampler(const AVFrame* frame) noexcept;
     void SetError(std::string message) noexcept;
@@ -54,11 +60,10 @@ private:
     std::condition_variable initializedCondition_;
     bool initializationFinished_;
     FFFResult initializationResult_;
-    // The player worker is the sole producer and the WASAPI thread is the sole
-    // consumer.  Keep the produced PCM contiguous and advance an offset instead
-    // of popping one byte at a time from a deque in the real-time callback.
-    std::vector<std::uint8_t> queue_;
-    std::size_t queueReadOffset_;
+    // Chunked SPSC queue avoids vector compaction and represents long edit gaps
+    // as logical silence instead of allocating several seconds of zero-filled PCM.
+    std::deque<AudioChunk> queue_;
+    std::size_t queuedBytes_;
     std::vector<std::uint8_t> converted_;
     SwrContext* resampler_;
     AVChannelLayout inputChannelLayout_;
@@ -70,8 +75,8 @@ private:
     std::uint16_t outputBitsPerSample_;
     std::uint32_t outputChannelMask_;
     bool outputFloat_;
-    float volume_;
-    bool muted_;
+    std::atomic<float> volume_;
+    std::atomic<bool> muted_;
     std::atomic<bool> running_;
     std::atomic<bool> paused_;
     std::atomic<bool> resetRequested_;

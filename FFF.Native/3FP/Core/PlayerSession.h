@@ -96,6 +96,7 @@ private:
     bool PumpVideoPresentation() noexcept;
     void QueueVideoFrame(AVFrame* frame) noexcept;
     void ClearVideoQueue() noexcept;
+    void ClearPendingPackets() noexcept;
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
     void QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, std::int32_t streamIndex) noexcept;
@@ -171,10 +172,15 @@ private:
     std::int64_t seekTargetFrame_;
     bool keyframeSeekPending_;
     std::int64_t lastVideoFrameDuration100ns_;
-    std::vector<std::int64_t> framePtsIndex_;
+    std::deque<std::int64_t> framePtsIndex_;
+    std::int64_t framePtsIndexBase_;
+    bool rebuildingFrameIndex_;
     std::deque<AVFrame*> videoFrameQueue_;
     std::vector<AVFrame*> videoFramePool_;
-    AVFrame* displayedFrame_;
+    std::deque<AVPacket*> pendingVideoPackets_;
+    std::size_t pendingVideoPacketBytes_;
+    std::deque<AVPacket*> pendingAudioPackets_;
+    std::size_t pendingAudioPacketBytes_;
     bool draining_;
     bool hardwareFallbackPending_;
     // Stable danmaku content is interned by contentId+UTF-8 hash. Position-only

@@ -3,6 +3,8 @@
 
 extern "C" {
 #include <libavutil/frame.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/pixdesc.h>
@@ -282,7 +284,8 @@ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     return Atlas.Sample(LinearSampler, uv);
 })";
 
-constexpr std::uint32_t TimedTextAtlasSize = 4096;
+constexpr std::uint32_t InitialTimedTextAtlasSize = 1024;
+constexpr std::uint32_t MaximumTimedTextAtlasSize = 4096;
 constexpr std::uint32_t MaximumTimedTextSprites = 512;
 
 struct ShaderSettings {
@@ -309,22 +312,42 @@ constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
         return {1, 8, 1.0f, 1, 1};
     case AV_PIX_FMT_YUV420P10LE:
         return {1, 10, 65535.0f / 1023.0f, 1, 1};
+    case AV_PIX_FMT_YUV420P12LE:
+        return {1, 12, 65535.0f / 4095.0f, 1, 1};
+    case AV_PIX_FMT_YUV420P16LE:
+        return {1, 16, 1.0f, 1, 1};
     case AV_PIX_FMT_YUV422P:
     case AV_PIX_FMT_YUVJ422P:
         return {1, 8, 1.0f, 1, 0};
     case AV_PIX_FMT_YUV422P10LE:
         return {1, 10, 65535.0f / 1023.0f, 1, 0};
+    case AV_PIX_FMT_YUV422P12LE:
+        return {1, 12, 65535.0f / 4095.0f, 1, 0};
+    case AV_PIX_FMT_YUV422P16LE:
+        return {1, 16, 1.0f, 1, 0};
     case AV_PIX_FMT_YUV444P:
     case AV_PIX_FMT_YUVJ444P:
         return {1, 8, 1.0f, 0, 0};
     case AV_PIX_FMT_YUV444P10LE:
         return {1, 10, 65535.0f / 1023.0f, 0, 0};
+    case AV_PIX_FMT_YUV444P12LE:
+        return {1, 12, 65535.0f / 4095.0f, 0, 0};
+    case AV_PIX_FMT_YUV444P16LE:
+        return {1, 16, 1.0f, 0, 0};
     case AV_PIX_FMT_NV12:
         return {2, 8, 1.0f, 1, 1};
     case AV_PIX_FMT_P010LE:
         return {2, 10, 1.0f, 1, 1};
+    case AV_PIX_FMT_P012LE:
+        return {2, 12, 1.0f, 1, 1};
+    case AV_PIX_FMT_P016LE:
+        return {2, 16, 1.0f, 1, 1};
     case AV_PIX_FMT_P210LE:
         return {2, 10, 1.0f, 1, 0};
+    case AV_PIX_FMT_P212LE:
+        return {2, 12, 1.0f, 1, 0};
+    case AV_PIX_FMT_P216LE:
+        return {2, 16, 1.0f, 1, 0};
     default:
         return {};
     }
@@ -490,7 +513,6 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), timedTextPixelShader_(nullptr), sampler_(nullptr), constants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
-      videoBaseTexture_(nullptr), videoBaseTarget_(nullptr),
       timedTextTextures_{nullptr, nullptr}, timedTextTargets_{nullptr, nullptr},
       timedTextViews_{nullptr, nullptr}, timedTextPipelineQueries_{nullptr, nullptr},
       timedTextBlend_(nullptr),
@@ -503,16 +525,23 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
       swapWidth_(0), swapHeight_(0), swapHdr_(false), sourceWidth_(0), sourceHeight_(0),
       sourceInputLayout_(UINT32_MAX), sourceBitDepth_(0),
       sourceChromaWidthShift_(0), sourceChromaHeightShift_(0),
+      sourceExternal_(false),
       requestedMode_(FFF3FPColorMode::MapToSdr), actualMode_(FFF3FPColorMode::MapToSdr),
       sdrPeakNits_(100.0f), hdrPeakNits_(TrueHdrOutputPeakNits),
       paperWhiteNits_(203.0f), sourcePeakNits_(100.0f),
-      timedTextThreadStop_(false), presentationGeneration_(0), presentationFrameRate_(60.0f),
+      timedTextThreadStop_(false), timedTextThreadRunning_(false),
+      presentationGeneration_(0), presentationFrameRate_(60.0f),
       timedTextRenderedSequences_{0, 0}, timedTextRenderedCommandCounts_{0, 0},
       timedTextWidths_{0, 0}, timedTextHeights_{0, 0}, timedTextPresentCounts_{0, 0},
       backBufferAcquisitionCount_(0),
       timedTextPipelineQueryInFlight_{false, false},
       timedTextCompositePixelInvocations_{0, 0},
+      hasCachedVideo_(false), videoGeneration_(0), presentedVideoGeneration_(0),
+      presentedVideoFrames_(0), coalescedVideoFrames_(0), swapChainPresents_(0),
+      presentWait100ns_(0), deviceLockWait100ns_(0), softwareConvert100ns_(0),
+      hdrMonitor_(nullptr), hdrSupportValid_(false), hdrSupported_(false),
       timedTextAtlasX_(0), timedTextAtlasY_(0), timedTextAtlasRowHeight_(0),
+      timedTextAtlasSize_(0), timedTextSpriteInstanceCapacity_(0),
       timedTextSpriteCacheHits_(0), timedTextSpriteCacheMisses_(0) {}
 
 PlayerVideoRenderer::~PlayerVideoRenderer() { Close(); }
@@ -521,8 +550,12 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     if (window != nullptr && !IsWindow(window)) return FFFResult::InvalidArgument;
     if (window == window_) return FFFResult::Success;
-    if (swapChain_ != nullptr) { swapChain_->Release(); swapChain_ = nullptr; }
+    if (swapChain_ != nullptr) {
+        std::lock_guard presentLock(presentMutex_);
+        swapChain_->Release(); swapChain_ = nullptr;
+    }
     window_ = window;
+    hdrSupportValid_ = false; hdrMonitor_ = nullptr;
     swapWidth_ = swapHeight_ = 0;
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
         fallbackReason_.clear();
@@ -577,7 +610,28 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
     const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0,
         D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
     D3D_FEATURE_LEVEL selected{};
-    const auto result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+    ComPtr<IDXGIAdapter1> selectedAdapter;
+    if (window_ != nullptr && IsWindow(window_)) {
+        const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+        ComPtr<IDXGIFactory6> factory;
+        if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+            for (UINT adapterIndex = 0; !selectedAdapter; ++adapterIndex) {
+                ComPtr<IDXGIAdapter1> candidate;
+                if (factory->EnumAdapters1(adapterIndex, &candidate) == DXGI_ERROR_NOT_FOUND) break;
+                for (UINT outputIndex = 0;; ++outputIndex) {
+                    ComPtr<IDXGIOutput> output;
+                    if (candidate->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) break;
+                    DXGI_OUTPUT_DESC description{};
+                    if (SUCCEEDED(output->GetDesc(&description)) && description.Monitor == monitor) {
+                        selectedAdapter = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    const auto result = D3D11CreateDevice(selectedAdapter.Get(), selectedAdapter
+        ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr,
         D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
         levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &device_, &selected, &context_);
     if (FAILED(result)) { SetError("Could not create the D3D11 playback device."); return FFFResult::DeviceFailure; }
@@ -588,9 +642,13 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
 
 bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
     if (window_ == nullptr || !IsWindow(window_)) return false;
+    const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    if (hdrSupportValid_ && monitor == hdrMonitor_) return hdrSupported_;
+    hdrMonitor_ = monitor;
+    hdrSupportValid_ = true;
+    hdrSupported_ = false;
     ComPtr<IDXGIFactory6> factory;
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
-    const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
     for (UINT adapterIndex = 0;; ++adapterIndex) {
         ComPtr<IDXGIAdapter1> adapter;
         if (factory->EnumAdapters1(adapterIndex, &adapter) == DXGI_ERROR_NOT_FOUND) break;
@@ -602,12 +660,35 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
             ComPtr<IDXGIOutput6> output6;
             DXGI_OUTPUT_DESC1 description1{};
             if (FAILED(output.As(&output6)) || FAILED(output6->GetDesc1(&description1))) return false;
-            return description1.BitsPerColor >= 10 &&
+            hdrSupported_ = description1.BitsPerColor >= 10 &&
                 (description1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ||
                  description1.ColorSpace == DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020);
+            return hdrSupported_;
         }
     }
     return false;
+}
+
+FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** output) noexcept {
+    if (output == nullptr) return FFFResult::InvalidArgument;
+    *output = nullptr;
+    std::lock_guard deviceLock(deviceMutex_);
+    const auto result = EnsureDevice();
+    if (result != FFFResult::Success) return result;
+    auto* reference = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+    if (reference == nullptr) return FFFResult::NativeFailure;
+    auto* hardware = reinterpret_cast<AVHWDeviceContext*>(reference->data);
+    auto* d3d = static_cast<AVD3D11VADeviceContext*>(hardware->hwctx);
+    device_->AddRef();
+    d3d->device = device_;
+    d3d->BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+    if (av_hwdevice_ctx_init(reference) < 0) {
+        av_buffer_unref(&reference);
+        SetError("FFmpeg could not bind hardware decoding to the playback D3D11 device.");
+        return FFFResult::NotSupported;
+    }
+    *output = reference;
+    return FFFResult::Success;
 }
 
 FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_t height) noexcept {
@@ -638,10 +719,11 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     if (swapChain_ != nullptr && width == swapWidth_ && height == swapHeight_ && hdr == swapHdr_) return FFFResult::Success;
     if (swapChain_ != nullptr && hdr == swapHdr_) {
         context_->ClearState();
+        std::lock_guard presentLock(presentMutex_);
         const auto resize = swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
         if (SUCCEEDED(resize)) {
             swapWidth_ = width; swapHeight_ = height;
-            ReleaseTimedTextResources(); ReleaseVideoBaseResources();
+            ReleaseTimedTextResources();
             return FFFResult::Success;
         }
         std::ostringstream message;
@@ -676,7 +758,7 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     // wait here, but decode and managed layer production retain only their
     // latest state instead of building latency or exposing partial frames.
     swapChain_->SetMaximumFrameLatency(1);
-    ReleaseTimedTextResources(); ReleaseVideoBaseResources();
+    ReleaseTimedTextResources();
     if (hdr) {
         UINT support = 0;
         if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) ||
@@ -698,8 +780,8 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr) noexcept {
     if (swapChain_ == nullptr || hdr == swapHdr_) return FFFResult::Success;
     if (context_ != nullptr) { context_->ClearState(); context_->Flush(); }
     ReleaseTimedTextResources();
-    ReleaseVideoBaseResources();
     const auto format = hdr ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
+    std::unique_lock presentLock(presentMutex_);
     const auto resize = swapChain_->ResizeBuffers(0, std::max(1u, swapWidth_),
         std::max(1u, swapHeight_), format, 0);
     if (FAILED(resize)) {
@@ -720,6 +802,7 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr) noexcept {
             // format instead of leaving an R10 buffer with an ambiguous space.
             fallbackReason_ = "The reconfigured swap chain rejected the Rec.2020 PQ color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
+            presentLock.unlock();
             return ReconfigureSwapChain(false);
         }
         SetHdrMetadata();
@@ -758,7 +841,7 @@ FFFResult PlayerVideoRenderer::AcquireBackBufferTarget(ID3D11Texture2D** buffer,
 FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     const std::uint32_t sourceHeight, const std::uint32_t inputLayout,
     const std::uint32_t bitDepth, const std::uint32_t chromaWidthShift,
-    const std::uint32_t chromaHeightShift) noexcept {
+    const std::uint32_t chromaHeightShift, const bool externalSource) noexcept {
     if (vertexShader_ == nullptr || pixelShader_ == nullptr || timedTextPixelShader_ == nullptr) {
         ComPtr<ID3DBlob> vertexCode, pixelCode, timedTextPixelCode, errors;
         if (FAILED(D3DCompile(VertexShaderSource, std::strlen(VertexShaderSource), nullptr, nullptr, nullptr,
@@ -783,7 +866,8 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             SetError("Could not create the presentation shader resources."); return FFFResult::DeviceFailure;
         }
     }
-    if (sourceTextures_[0] != nullptr && sourceWidth_ == sourceWidth && sourceHeight_ == sourceHeight &&
+    if (sourceTextures_[0] != nullptr && sourceExternal_ == externalSource &&
+        sourceWidth_ == sourceWidth && sourceHeight_ == sourceHeight &&
         sourceInputLayout_ == inputLayout && sourceBitDepth_ == bitDepth &&
         sourceChromaWidthShift_ == chromaWidthShift &&
         sourceChromaHeightShift_ == chromaHeightShift)
@@ -793,7 +877,35 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
     }
     const auto planeCount = inputLayout == 1 ? 3u : (inputLayout == 2 ? 2u : 1u);
-    for (std::uint32_t plane = 0; plane < planeCount; ++plane) {
+    if (externalSource) {
+        if (inputLayout != 2) {
+            SetError("The D3D11 decoder output is not a supported semiplanar surface.");
+            return FFFResult::NotSupported;
+        }
+        D3D11_TEXTURE2D_DESC texture{};
+        texture.Width = sourceWidth; texture.Height = sourceHeight;
+        texture.MipLevels = texture.ArraySize = 1;
+        texture.Format = bitDepth <= 8 ? DXGI_FORMAT_NV12 :
+            (bitDepth <= 10 ? DXGI_FORMAT_P010 : DXGI_FORMAT_P016);
+        texture.SampleDesc.Count = 1; texture.Usage = D3D11_USAGE_DEFAULT;
+        texture.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device_->CreateTexture2D(&texture, nullptr, &sourceTextures_[0]))) {
+            SetError("Could not create the retained hardware-decoded video surface.");
+            return FFFResult::NotSupported;
+        }
+        D3D11_SHADER_RESOURCE_VIEW_DESC luma{};
+        luma.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        luma.Texture2D.MipLevels = 1;
+        luma.Format = bitDepth > 8 ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+        auto chroma = luma;
+        chroma.Format = bitDepth > 8 ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
+        if (FAILED(device_->CreateShaderResourceView(sourceTextures_[0], &luma, &sourceViews_[0])) ||
+            FAILED(device_->CreateShaderResourceView(sourceTextures_[0], &chroma, &sourceViews_[1]))) {
+            SetError("The retained D3D11 video surface is not shader-readable.");
+            return FFFResult::NotSupported;
+        }
+    }
+    for (std::uint32_t plane = 0; plane < (externalSource ? 0u : planeCount); ++plane) {
         D3D11_TEXTURE2D_DESC texture{};
         texture.Width = plane == 0 ? sourceWidth :
             (sourceWidth + (1u << chromaWidthShift) - 1) >> chromaWidthShift;
@@ -813,27 +925,9 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     }
     sourceWidth_ = sourceWidth; sourceHeight_ = sourceHeight;
     sourceInputLayout_ = inputLayout; sourceBitDepth_ = bitDepth;
+    sourceExternal_ = externalSource;
     sourceChromaWidthShift_ = chromaWidthShift;
     sourceChromaHeightShift_ = chromaHeightShift;
-    return FFFResult::Success;
-}
-
-FFFResult PlayerVideoRenderer::EnsureVideoBaseResources() noexcept {
-    if (videoBaseTexture_ != nullptr && videoBaseTarget_ != nullptr) return FFFResult::Success;
-    ReleaseVideoBaseResources();
-    if (device_ == nullptr || swapWidth_ == 0 || swapHeight_ == 0) return FFFResult::InvalidState;
-    D3D11_TEXTURE2D_DESC texture{};
-    texture.Width = swapWidth_; texture.Height = swapHeight_;
-    texture.MipLevels = texture.ArraySize = 1;
-    texture.Format = swapHdr_ ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
-    texture.SampleDesc.Count = 1; texture.Usage = D3D11_USAGE_DEFAULT;
-    texture.BindFlags = D3D11_BIND_RENDER_TARGET;
-    if (FAILED(device_->CreateTexture2D(&texture, nullptr, &videoBaseTexture_)) ||
-        FAILED(device_->CreateRenderTargetView(videoBaseTexture_, nullptr, &videoBaseTarget_))) {
-        ReleaseVideoBaseResources();
-        SetError("Could not create the cached GPU video surface.");
-        return FFFResult::DeviceFailure;
-    }
     return FFFResult::Success;
 }
 
@@ -845,10 +939,6 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
         auto retained = std::make_shared<TimedTextRenderLayer>(std::move(layer));
         {
             std::lock_guard lock(timedTextMutex_);
-            if (!timedTextThread_.joinable()) {
-                timedTextThreadStop_ = false;
-                timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
-            }
             if (retained->sequence == 0)
                 retained->sequence = timedTextLayers_[slotIndex]
                     ? timedTextLayers_[slotIndex]->sequence + 1 : 1;
@@ -856,6 +946,17 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
                 timedTextLayers_[static_cast<std::size_t>(TimedTextLayerSlot::Danmaku)] == nullptr)
                 presentationFrameRate_ = std::clamp(retained->targetFrameRate, 1.0f, 240.0f);
             timedTextLayers_[slotIndex] = std::move(retained);
+            const auto hasVisibleLayer = std::any_of(std::begin(timedTextLayers_),
+                std::end(timedTextLayers_), [](const auto& item) {
+                    return item != nullptr && !item->commands.empty();
+                });
+            if (hasVisibleLayer) {
+                timedTextThreadRunning_ = true;
+                if (!timedTextThread_.joinable()) {
+                    timedTextThreadStop_ = false;
+                    timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
+                }
+            }
             ++presentationGeneration_;
         }
         // Submission is intentionally publish-and-wake only. The UI timer must
@@ -870,29 +971,42 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
 
 void PlayerVideoRenderer::TimedTextThread() noexcept {
     std::uint64_t observedPresentationGeneration = 0;
+    std::uint64_t observedVideoGeneration = 0;
     auto nextPresentation = std::chrono::steady_clock::time_point::min();
     for (;;) {
         float frameRate = 60.0f;
+        bool videoChanged = false;
         {
             std::unique_lock lock(timedTextMutex_);
-            timedTextCondition_.wait(lock, [this, &observedPresentationGeneration] {
+            timedTextCondition_.wait(lock, [this, &observedPresentationGeneration,
+                    &observedVideoGeneration] {
                 return timedTextThreadStop_ ||
-                    presentationGeneration_ != observedPresentationGeneration;
+                    presentationGeneration_ != observedPresentationGeneration ||
+                    (timedTextThreadRunning_ &&
+                        videoGeneration_.load() != observedVideoGeneration);
             });
             if (timedTextThreadStop_) return;
-
-            // Notifications publish only latest state. Coalesce every video and
-            // layer update received before the next configured presentation slot.
-            // The stop predicate remains responsive while ordinary notifications
-            // cannot pull a frame ahead of its stable cadence.
+            if (!timedTextThreadRunning_) {
+                observedPresentationGeneration = presentationGeneration_;
+                observedVideoGeneration = videoGeneration_.load();
+                continue;
+            }
+            videoChanged = videoGeneration_.load() != observedVideoGeneration;
+            // A new decoded frame is never held behind the overlay cadence. Static
+            // subtitle/danmaku updates are still coalesced to their requested rate.
             if (const auto now = std::chrono::steady_clock::now();
+                !videoChanged &&
                 nextPresentation != std::chrono::steady_clock::time_point::min() &&
                 now < nextPresentation) {
                 timedTextCondition_.wait_until(lock, nextPresentation,
-                    [this] { return timedTextThreadStop_; });
+                    [this, &observedVideoGeneration] {
+                        return timedTextThreadStop_ ||
+                            videoGeneration_.load() != observedVideoGeneration;
+                    });
                 if (timedTextThreadStop_) return;
             }
             observedPresentationGeneration = presentationGeneration_;
+            observedVideoGeneration = videoGeneration_.load();
             frameRate = presentationFrameRate_;
         }
         const auto presentationStart = std::chrono::steady_clock::now();
@@ -911,6 +1025,8 @@ void PlayerVideoRenderer::StopTimedTextThread() noexcept {
     }
     timedTextCondition_.notify_all();
     if (timedTextThread_.joinable()) timedTextThread_.join();
+    std::lock_guard lock(timedTextMutex_);
+    timedTextThreadRunning_ = false;
 }
 
 FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
@@ -937,6 +1053,12 @@ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
     if (status.submittedSequence != status.renderedSequence || status.commandCount == 0 ||
         timedTextTextures_[slotIndex] == nullptr || device_ == nullptr || context_ == nullptr)
         return FFFResult::Success;
+    if (timedTextPipelineQueries_[slotIndex] == nullptr) {
+        D3D11_QUERY_DESC query{}; query.Query = D3D11_QUERY_PIPELINE_STATISTICS;
+        // Pipeline statistics are diagnostic-only. Do not allocate or poll them
+        // during ordinary playback unless a caller explicitly requests status.
+        device_->CreateQuery(&query, &timedTextPipelineQueries_[slotIndex]);
+    }
     D3D11_TEXTURE2D_DESC description{};
     timedTextTextures_[slotIndex]->GetDesc(&description);
     description.Usage = D3D11_USAGE_STAGING;
@@ -959,12 +1081,14 @@ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
     return FFFResult::Success;
 }
 
-FFFResult PlayerVideoRenderer::EnsureTimedTextResources() noexcept {
+FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot slot) noexcept {
+    const auto slotIndex = static_cast<std::size_t>(slot);
+    if (slotIndex >= ARRAYSIZE(timedTextTextures_)) return FFFResult::InvalidArgument;
     if (swapWidth_ == 0 || swapHeight_ == 0) return FFFResult::Success;
-    if (timedTextTextures_[0] != nullptr && timedTextTextures_[1] != nullptr &&
-        timedTextWidths_[0] == swapWidth_ && timedTextHeights_[0] == swapHeight_)
+    if (timedTextTextures_[slotIndex] != nullptr &&
+        timedTextWidths_[slotIndex] == swapWidth_ && timedTextHeights_[slotIndex] == swapHeight_)
         return FFFResult::Success;
-    ReleaseTimedTextResources();
+    ReleaseTimedTextSlotResources(slot);
     if (d2dFactory_ == nullptr && FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
         IID_PPV_ARGS(&d2dFactory_)))) {
         SetError("Could not create the Direct2D timed-text factory."); return FFFResult::DeviceFailure;
@@ -973,117 +1097,139 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources() noexcept {
         __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&writeFactory_)))) {
         SetError("Could not create the DirectWrite timed-text factory."); return FFFResult::DeviceFailure;
     }
-    ComPtr<IDXGIDevice> dxgiDevice;
-    if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
-        FAILED(d2dFactory_->CreateDevice(dxgiDevice.Get(), &d2dDevice_)) ||
-        FAILED(d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &d2dContext_))) {
-        SetError("Could not bind Direct2D to the D3D11 playback device."); return FFFResult::DeviceFailure;
+    if (d2dContext_ == nullptr) {
+        ComPtr<IDXGIDevice> dxgiDevice;
+        if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
+            FAILED(d2dFactory_->CreateDevice(dxgiDevice.Get(), &d2dDevice_)) ||
+            FAILED(d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &d2dContext_))) {
+            SetError("Could not bind Direct2D to the D3D11 playback device."); return FFFResult::DeviceFailure;
+        }
     }
     D3D11_TEXTURE2D_DESC texture{};
     texture.Width = swapWidth_; texture.Height = swapHeight_;
     texture.MipLevels = texture.ArraySize = 1; texture.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     texture.SampleDesc.Count = 1; texture.Usage = D3D11_USAGE_DEFAULT;
     texture.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    for (std::size_t index = 0; index < ARRAYSIZE(timedTextTextures_); ++index) {
-        if (FAILED(device_->CreateTexture2D(&texture, nullptr, &timedTextTextures_[index])) ||
-            FAILED(device_->CreateRenderTargetView(timedTextTextures_[index], nullptr,
-                &timedTextTargets_[index])) ||
-            FAILED(device_->CreateShaderResourceView(timedTextTextures_[index], nullptr,
-                &timedTextViews_[index]))) {
-            SetError("Could not create the independent subtitle/danmaku surfaces.");
-            return FFFResult::DeviceFailure;
-        }
-    }
-    D3D11_QUERY_DESC pipelineQuery{};
-    pipelineQuery.Query = D3D11_QUERY_PIPELINE_STATISTICS;
-    for (auto*& query : timedTextPipelineQueries_) {
-        if (FAILED(device_->CreateQuery(&pipelineQuery, &query))) {
-            SetError("Could not create timed-text composite pipeline diagnostics.");
-            return FFFResult::DeviceFailure;
-        }
-    }
-    texture.Width = texture.Height = TimedTextAtlasSize;
-    if (FAILED(device_->CreateTexture2D(&texture, nullptr, &timedTextAtlasTexture_)) ||
-        FAILED(device_->CreateShaderResourceView(timedTextAtlasTexture_, nullptr, &timedTextAtlasView_))) {
-        SetError("Could not create the GPU timed-text sprite atlas."); return FFFResult::DeviceFailure;
-    }
-    ComPtr<IDXGISurface> surfaces[2];
-    ComPtr<IDXGISurface> atlasSurface;
-    if (FAILED(timedTextAtlasTexture_->QueryInterface(IID_PPV_ARGS(&atlasSurface)))) {
-        SetError("Could not expose the GPU timed-text surface to Direct2D."); return FFFResult::DeviceFailure;
-    }
-    const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
-    for (std::size_t index = 0; index < ARRAYSIZE(timedTextTextures_); ++index) {
-        if (FAILED(timedTextTextures_[index]->QueryInterface(IID_PPV_ARGS(&surfaces[index]))) ||
-            FAILED(d2dContext_->CreateBitmapFromDxgiSurface(surfaces[index].Get(), &properties,
-                &d2dTargets_[index]))) {
-            SetError("Could not bind the independent subtitle/danmaku surfaces to Direct2D.");
-            return FFFResult::DeviceFailure;
-        }
-    }
-    if (FAILED(d2dContext_->CreateBitmapFromDxgiSurface(atlasSurface.Get(), &properties, &d2dAtlasTarget_))) {
-        SetError("Could not make the GPU timed-text surfaces Direct2D targets."); return FFFResult::DeviceFailure;
-    }
-    ComPtr<ID3DBlob> spriteVertexCode, spritePixelCode, shaderErrors;
-    if (FAILED(D3DCompile(TimedTextSpriteVertexShaderSource,
-            std::strlen(TimedTextSpriteVertexShaderSource), nullptr, nullptr, nullptr,
-            "main", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &spriteVertexCode, &shaderErrors)) ||
-        FAILED(D3DCompile(TimedTextSpritePixelShaderSource,
-            std::strlen(TimedTextSpritePixelShaderSource), nullptr, nullptr, nullptr,
-            "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &spritePixelCode, &shaderErrors)) ||
-        FAILED(device_->CreateVertexShader(spriteVertexCode->GetBufferPointer(),
-            spriteVertexCode->GetBufferSize(), nullptr, &timedTextSpriteVertexShader_)) ||
-        FAILED(device_->CreatePixelShader(spritePixelCode->GetBufferPointer(),
-            spritePixelCode->GetBufferSize(), nullptr, &timedTextSpritePixelShader_))) {
-        SetError(shaderErrors ? static_cast<const char*>(shaderErrors->GetBufferPointer()) :
-            "Could not create the timed-text sprite shaders.");
+    if (FAILED(device_->CreateTexture2D(&texture, nullptr, &timedTextTextures_[slotIndex])) ||
+        FAILED(device_->CreateRenderTargetView(timedTextTextures_[slotIndex], nullptr,
+            &timedTextTargets_[slotIndex])) ||
+        FAILED(device_->CreateShaderResourceView(timedTextTextures_[slotIndex], nullptr,
+            &timedTextViews_[slotIndex]))) {
+        ReleaseTimedTextSlotResources(slot);
+        SetError("Could not create the requested subtitle/danmaku surface.");
         return FFFResult::DeviceFailure;
     }
-    D3D11_BUFFER_DESC instanceBuffer{};
-    instanceBuffer.ByteWidth = sizeof(TimedTextSpriteInstance) * 4096;
-    instanceBuffer.Usage = D3D11_USAGE_DYNAMIC;
-    instanceBuffer.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    instanceBuffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    instanceBuffer.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-    instanceBuffer.StructureByteStride = sizeof(TimedTextSpriteInstance);
-    D3D11_SHADER_RESOURCE_VIEW_DESC instanceView{};
-    instanceView.Format = DXGI_FORMAT_UNKNOWN;
-    instanceView.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-    instanceView.Buffer.NumElements = 4096;
-    if (FAILED(device_->CreateBuffer(&instanceBuffer, nullptr, &timedTextSpriteInstanceBuffer_)) ||
-        FAILED(device_->CreateShaderResourceView(timedTextSpriteInstanceBuffer_, &instanceView,
+    ComPtr<IDXGISurface> surface;
+    const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+    if (FAILED(timedTextTextures_[slotIndex]->QueryInterface(IID_PPV_ARGS(&surface))) ||
+        FAILED(d2dContext_->CreateBitmapFromDxgiSurface(surface.Get(), &properties,
+            &d2dTargets_[slotIndex]))) {
+        ReleaseTimedTextSlotResources(slot);
+        SetError("Could not bind the requested subtitle/danmaku surface to Direct2D.");
+        return FFFResult::DeviceFailure;
+    }
+    if (timedTextSpriteVertexShader_ == nullptr || timedTextSpritePixelShader_ == nullptr) {
+        ComPtr<ID3DBlob> spriteVertexCode, spritePixelCode, shaderErrors;
+        if (FAILED(D3DCompile(TimedTextSpriteVertexShaderSource,
+            std::strlen(TimedTextSpriteVertexShaderSource), nullptr, nullptr, nullptr,
+            "main", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &spriteVertexCode, &shaderErrors)) ||
+            FAILED(D3DCompile(TimedTextSpritePixelShaderSource,
+            std::strlen(TimedTextSpritePixelShaderSource), nullptr, nullptr, nullptr,
+            "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &spritePixelCode, &shaderErrors)) ||
+            FAILED(device_->CreateVertexShader(spriteVertexCode->GetBufferPointer(),
+            spriteVertexCode->GetBufferSize(), nullptr, &timedTextSpriteVertexShader_)) ||
+            FAILED(device_->CreatePixelShader(spritePixelCode->GetBufferPointer(),
+            spritePixelCode->GetBufferSize(), nullptr, &timedTextSpritePixelShader_))) {
+            SetError(shaderErrors ? static_cast<const char*>(shaderErrors->GetBufferPointer()) :
+                "Could not create the timed-text sprite shaders.");
+            return FFFResult::DeviceFailure;
+        }
+    }
+    if (timedTextBlend_ == nullptr) {
+        D3D11_BLEND_DESC blend{};
+        blend.RenderTarget[0].BlendEnable = TRUE;
+        blend.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+        blend.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+        blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        if (FAILED(device_->CreateBlendState(&blend, &timedTextBlend_))) {
+            SetError("Could not create the GPU timed-text blend state."); return FFFResult::DeviceFailure;
+        }
+    }
+    const auto atlasResult = EnsureTimedTextAtlas(InitialTimedTextAtlasSize);
+    if (atlasResult != FFFResult::Success) return atlasResult;
+    timedTextWidths_[slotIndex] = swapWidth_;
+    timedTextHeights_[slotIndex] = swapHeight_;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requestedSize) noexcept {
+    const auto size = std::clamp(requestedSize, InitialTimedTextAtlasSize,
+        MaximumTimedTextAtlasSize);
+    if (timedTextAtlasTexture_ != nullptr && timedTextAtlasSize_ >= size)
+        return FFFResult::Success;
+    if (d2dContext_ == nullptr || device_ == nullptr) return FFFResult::InvalidState;
+    if (d2dContext_ != nullptr) d2dContext_->SetTarget(nullptr);
+    if (d2dAtlasTarget_ != nullptr) { d2dAtlasTarget_->Release(); d2dAtlasTarget_ = nullptr; }
+    if (timedTextAtlasView_ != nullptr) { timedTextAtlasView_->Release(); timedTextAtlasView_ = nullptr; }
+    if (timedTextAtlasTexture_ != nullptr) { timedTextAtlasTexture_->Release(); timedTextAtlasTexture_ = nullptr; }
+    D3D11_TEXTURE2D_DESC texture{};
+    texture.Width = texture.Height = size; texture.MipLevels = texture.ArraySize = 1;
+    texture.Format = DXGI_FORMAT_B8G8R8A8_UNORM; texture.SampleDesc.Count = 1;
+    texture.Usage = D3D11_USAGE_DEFAULT;
+    texture.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device_->CreateTexture2D(&texture, nullptr, &timedTextAtlasTexture_)) ||
+        FAILED(device_->CreateShaderResourceView(timedTextAtlasTexture_, nullptr, &timedTextAtlasView_))) {
+        SetError("Could not create the GPU timed-text sprite atlas.");
+        return FFFResult::DeviceFailure;
+    }
+    ComPtr<IDXGISurface> surface;
+    const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+    if (FAILED(timedTextAtlasTexture_->QueryInterface(IID_PPV_ARGS(&surface))) ||
+        FAILED(d2dContext_->CreateBitmapFromDxgiSurface(surface.Get(), &properties, &d2dAtlasTarget_))) {
+        SetError("Could not expose the GPU timed-text atlas to Direct2D.");
+        return FFFResult::DeviceFailure;
+    }
+    d2dContext_->SetTarget(d2dAtlasTarget_); d2dContext_->BeginDraw();
+    d2dContext_->Clear(D2D1::ColorF(0, 0));
+    const auto end = d2dContext_->EndDraw(); d2dContext_->SetTarget(nullptr);
+    if (FAILED(end)) return FFFResult::DeviceFailure;
+    timedTextAtlasSize_ = size;
+    timedTextAtlasX_ = timedTextAtlasY_ = timedTextAtlasRowHeight_ = 0;
+    timedTextSprites_.clear();
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::EnsureTimedTextInstanceCapacity(const std::size_t count) noexcept {
+    if (count == 0 || count <= timedTextSpriteInstanceCapacity_) return FFFResult::Success;
+    const auto requested = static_cast<std::uint32_t>(std::min<std::size_t>(count, 4096));
+    auto capacity = std::max<std::uint32_t>(64, timedTextSpriteInstanceCapacity_);
+    while (capacity < requested) capacity = std::min<std::uint32_t>(capacity * 2, 4096);
+    if (timedTextSpriteInstanceView_ != nullptr) { timedTextSpriteInstanceView_->Release(); timedTextSpriteInstanceView_ = nullptr; }
+    if (timedTextSpriteInstanceBuffer_ != nullptr) { timedTextSpriteInstanceBuffer_->Release(); timedTextSpriteInstanceBuffer_ = nullptr; }
+    D3D11_BUFFER_DESC buffer{};
+    buffer.ByteWidth = sizeof(TimedTextSpriteInstance) * capacity;
+    buffer.Usage = D3D11_USAGE_DYNAMIC; buffer.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    buffer.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    buffer.StructureByteStride = sizeof(TimedTextSpriteInstance);
+    D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_UNKNOWN; view.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+    view.Buffer.NumElements = capacity;
+    if (FAILED(device_->CreateBuffer(&buffer, nullptr, &timedTextSpriteInstanceBuffer_)) ||
+        FAILED(device_->CreateShaderResourceView(timedTextSpriteInstanceBuffer_, &view,
             &timedTextSpriteInstanceView_))) {
         SetError("Could not create the timed-text sprite instance buffer.");
         return FFFResult::DeviceFailure;
     }
-    D3D11_BLEND_DESC blend{};
-    blend.RenderTarget[0].BlendEnable = TRUE;
-    blend.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
-    blend.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-    blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-    blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-    blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-    blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    if (FAILED(device_->CreateBlendState(&blend, &timedTextBlend_))) {
-        SetError("Could not create the GPU timed-text blend state."); return FFFResult::DeviceFailure;
-    }
-    d2dContext_->SetTarget(d2dAtlasTarget_);
-    d2dContext_->BeginDraw();
-    d2dContext_->Clear(D2D1::ColorF(0, 0));
-    const auto atlasEnd = d2dContext_->EndDraw();
-    d2dContext_->SetTarget(nullptr);
-    if (FAILED(atlasEnd)) {
-        SetError("Could not initialize the timed-text sprite atlas.");
-        return FFFResult::DeviceFailure;
-    }
-    timedTextAtlasX_ = timedTextAtlasY_ = timedTextAtlasRowHeight_ = 0;
-    timedTextSpriteInstances_.reserve(4096);
-    for (std::size_t index = 0; index < ARRAYSIZE(timedTextTextures_); ++index) {
-        timedTextWidths_[index] = swapWidth_;
-        timedTextHeights_[index] = swapHeight_;
-    }
+    timedTextSpriteInstanceCapacity_ = capacity;
+    timedTextSpriteInstances_.reserve(capacity);
     return FFFResult::Success;
 }
 
@@ -1098,14 +1244,15 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             return FFFResult::Success;
         layer = timedTextLayers_[slotIndex];
     }
-    if (layer->commands.empty() && timedTextTextures_[slotIndex] == nullptr) {
+    if (layer->commands.empty()) {
         std::lock_guard lock(timedTextMutex_);
         timedTextRenderedSequences_[slotIndex] = layer->sequence;
         timedTextRenderedCommandCounts_[slotIndex] = 0;
         timedTextWidths_[slotIndex] = swapWidth_; timedTextHeights_[slotIndex] = swapHeight_;
+        ReleaseTimedTextSlotResources(slot);
         return FFFResult::Success;
     }
-    const auto resourceResult = EnsureTimedTextResources();
+    const auto resourceResult = EnsureTimedTextResources(slot);
     if (resourceResult != FFFResult::Success) return resourceResult;
     d2dContext_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     d2dContext_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
@@ -1221,13 +1368,13 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
                 destination.right - destination.left + padding * 2.0f)));
             const auto height = std::max(1u, static_cast<std::uint32_t>(std::ceil(
                 destination.bottom - destination.top + padding * 2.0f)));
-            if (width > TimedTextAtlasSize || height > TimedTextAtlasSize) continue;
-            if (timedTextAtlasX_ + width > TimedTextAtlasSize) {
+            if (width > timedTextAtlasSize_ || height > timedTextAtlasSize_) continue;
+            if (timedTextAtlasX_ + width > timedTextAtlasSize_) {
                 timedTextAtlasX_ = 0;
                 timedTextAtlasY_ += timedTextAtlasRowHeight_;
                 timedTextAtlasRowHeight_ = 0;
             }
-            if (timedTextAtlasY_ + height > TimedTextAtlasSize)
+            if (timedTextAtlasY_ + height > timedTextAtlasSize_)
                 return !stopWhenFull;
             TimedTextSprite sprite{static_cast<float>(timedTextAtlasX_),
                 static_cast<float>(timedTextAtlasY_), padding,
@@ -1242,7 +1389,14 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     // Rasterize new strings into one GPU atlas. If the bounded atlas fills, it
     // is rebuilt from the currently visible set; old off-screen content never
     // forces unbounded GPU memory growth.
-    if (!buildPendingSprites(true)) {
+    auto pendingFit = buildPendingSprites(true);
+    while (!pendingFit && timedTextAtlasSize_ < MaximumTimedTextAtlasSize) {
+        const auto growResult = EnsureTimedTextAtlas(std::min(
+            timedTextAtlasSize_ * 2, MaximumTimedTextAtlasSize));
+        if (growResult != FFFResult::Success) return growResult;
+        pendingFit = buildPendingSprites(true);
+    }
+    if (!pendingFit) {
         if (!clearAtlas()) {
             SetError("Direct2D could not reset the timed-text sprite atlas.");
             return FFFResult::DeviceFailure;
@@ -1311,10 +1465,10 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
                 instance.destination[1] = 1.0f - top * 2.0f / swapHeight_;
                 instance.destination[2] = right * 2.0f / swapWidth_ - 1.0f;
                 instance.destination[3] = 1.0f - bottom * 2.0f / swapHeight_;
-                instance.uv[0] = sprite->second.atlasX / TimedTextAtlasSize;
-                instance.uv[1] = sprite->second.atlasY / TimedTextAtlasSize;
-                instance.uv[2] = (sprite->second.atlasX + sprite->second.width) / TimedTextAtlasSize;
-                instance.uv[3] = (sprite->second.atlasY + sprite->second.height) / TimedTextAtlasSize;
+                instance.uv[0] = sprite->second.atlasX / timedTextAtlasSize_;
+                instance.uv[1] = sprite->second.atlasY / timedTextAtlasSize_;
+                instance.uv[2] = (sprite->second.atlasX + sprite->second.width) / timedTextAtlasSize_;
+                instance.uv[3] = (sprite->second.atlasY + sprite->second.height) / timedTextAtlasSize_;
                 timedTextSpriteInstances_.push_back(instance);
                 continue;
             }
@@ -1326,6 +1480,9 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     d2dContext_->SetTarget(nullptr);
     if (FAILED(end)) { SetError("Direct2D could not render the timed-text layer."); return FFFResult::DeviceFailure; }
     if (!timedTextSpriteInstances_.empty()) {
+        const auto capacityResult = EnsureTimedTextInstanceCapacity(
+            timedTextSpriteInstances_.size());
+        if (capacityResult != FFFResult::Success) return capacityResult;
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (FAILED(context_->Map(timedTextSpriteInstanceBuffer_, 0,
             D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
@@ -1412,7 +1569,23 @@ void PlayerVideoRenderer::CompositeTimedText(ID3D11RenderTargetView* target,
     context_->OMSetBlendState(nullptr, blendFactor, UINT_MAX);
 }
 
-void PlayerVideoRenderer::ReleaseTimedTextResources() noexcept {
+void PlayerVideoRenderer::ReleaseTimedTextSlotResources(
+    const TimedTextLayerSlot slot) noexcept {
+    const auto index = static_cast<std::size_t>(slot);
+    if (index >= ARRAYSIZE(timedTextTextures_)) return;
+    if (d2dContext_ != nullptr) d2dContext_->SetTarget(nullptr);
+    if (d2dTargets_[index] != nullptr) { d2dTargets_[index]->Release(); d2dTargets_[index] = nullptr; }
+    if (timedTextPipelineQueries_[index] != nullptr) {
+        timedTextPipelineQueries_[index]->Release(); timedTextPipelineQueries_[index] = nullptr;
+    }
+    if (timedTextViews_[index] != nullptr) { timedTextViews_[index]->Release(); timedTextViews_[index] = nullptr; }
+    if (timedTextTargets_[index] != nullptr) { timedTextTargets_[index]->Release(); timedTextTargets_[index] = nullptr; }
+    if (timedTextTextures_[index] != nullptr) { timedTextTextures_[index]->Release(); timedTextTextures_[index] = nullptr; }
+    timedTextWidths_[index] = timedTextHeights_[index] = 0;
+    timedTextPipelineQueryInFlight_[index] = false;
+}
+
+void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedState) noexcept {
     if (d2dContext_ != nullptr) d2dContext_->SetTarget(nullptr);
     for (auto& [key, layout] : timedTextLayouts_) if (layout != nullptr) layout->Release();
     timedTextLayouts_.clear();
@@ -1422,11 +1595,12 @@ void PlayerVideoRenderer::ReleaseTimedTextResources() noexcept {
     timedTextSprites_.clear();
     timedTextSpriteInstances_.clear();
     timedTextAtlasX_ = timedTextAtlasY_ = timedTextAtlasRowHeight_ = 0;
+    timedTextAtlasSize_ = 0;
+    timedTextSpriteInstanceCapacity_ = 0;
     timedTextSpriteCacheHits_ = timedTextSpriteCacheMisses_ = 0;
     if (d2dAtlasTarget_ != nullptr) { d2dAtlasTarget_->Release(); d2dAtlasTarget_ = nullptr; }
-    for (auto*& target : d2dTargets_) {
-        if (target != nullptr) { target->Release(); target = nullptr; }
-    }
+    for (std::size_t index = 0; index < ARRAYSIZE(timedTextTextures_); ++index)
+        ReleaseTimedTextSlotResources(static_cast<TimedTextLayerSlot>(index));
     if (d2dContext_ != nullptr) { d2dContext_->Release(); d2dContext_ = nullptr; }
     if (d2dDevice_ != nullptr) { d2dDevice_->Release(); d2dDevice_ = nullptr; }
     if (timedTextSpriteInstanceView_ != nullptr) { timedTextSpriteInstanceView_->Release(); timedTextSpriteInstanceView_ = nullptr; }
@@ -1436,33 +1610,18 @@ void PlayerVideoRenderer::ReleaseTimedTextResources() noexcept {
     if (timedTextAtlasView_ != nullptr) { timedTextAtlasView_->Release(); timedTextAtlasView_ = nullptr; }
     if (timedTextAtlasTexture_ != nullptr) { timedTextAtlasTexture_->Release(); timedTextAtlasTexture_ = nullptr; }
     if (timedTextBlend_ != nullptr) { timedTextBlend_->Release(); timedTextBlend_ = nullptr; }
-    for (auto*& query : timedTextPipelineQueries_) {
-        if (query != nullptr) { query->Release(); query = nullptr; }
-    }
-    for (auto*& view : timedTextViews_) {
-        if (view != nullptr) { view->Release(); view = nullptr; }
-    }
-    for (auto*& target : timedTextTargets_) {
-        if (target != nullptr) { target->Release(); target = nullptr; }
-    }
-    for (auto*& texture : timedTextTextures_) {
-        if (texture != nullptr) { texture->Release(); texture = nullptr; }
-    }
     {
         std::lock_guard lock(timedTextMutex_);
         for (std::size_t index = 0; index < ARRAYSIZE(timedTextLayers_); ++index) {
             timedTextWidths_[index] = timedTextHeights_[index] = 0;
-            timedTextRenderedSequences_[index] = 0;
-            timedTextRenderedCommandCounts_[index] = 0;
+            if (resetRenderedState) {
+                timedTextRenderedSequences_[index] = 0;
+                timedTextRenderedCommandCounts_[index] = 0;
+            }
             timedTextPipelineQueryInFlight_[index] = false;
             timedTextCompositePixelInvocations_[index] = 0;
         }
     }
-}
-
-void PlayerVideoRenderer::ReleaseVideoBaseResources() noexcept {
-    if (videoBaseTarget_ != nullptr) { videoBaseTarget_->Release(); videoBaseTarget_ = nullptr; }
-    if (videoBaseTexture_ != nullptr) { videoBaseTexture_->Release(); videoBaseTexture_ = nullptr; }
 }
 
 void PlayerVideoRenderer::SetHdrMetadata() noexcept {
@@ -1484,8 +1643,14 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
     const auto width = static_cast<std::uint32_t>(frame->width);
     const auto height = static_cast<std::uint32_t>(frame->height);
     auto input = DescribeInput(static_cast<AVPixelFormat>(frame->format));
+    const auto d3d11Frame = frame->format == AV_PIX_FMT_D3D11;
+    if (d3d11Frame && frame->hw_frames_ctx != nullptr) {
+        const auto* frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
+        input = DescribeInput(frames->sw_format);
+    }
     const auto directYuv = input.layout != 0;
     if (!directYuv) {
+        const auto conversionStart = std::chrono::steady_clock::now();
         // CPU pixel conversion does not touch D3D state. Keeping it outside the
         // immediate-context critical section lets the 60 Hz overlay presenter
         // continue moving cached text while a 4K software frame is converted.
@@ -1507,17 +1672,36 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
         if (sws_scale(scaler_, frame->data, frame->linesize, 0, frame->height, outputData, outputLines) <= 0) {
             SetError("FFmpeg could not convert the decoded video frame."); return FFFResult::FfmpegFailure;
         }
+        softwareConvert100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+            std::chrono::nanoseconds>(std::chrono::steady_clock::now() - conversionStart).count() / 100));
     }
-    std::lock_guard deviceLock(deviceMutex_);
-    if (window_ == nullptr) return FFFResult::Success;
+    const auto deviceWaitStart = std::chrono::steady_clock::now();
+    std::unique_lock deviceLock(deviceMutex_);
+    deviceLockWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::nanoseconds>(std::chrono::steady_clock::now() - deviceWaitStart).count() / 100));
+    // Keep the logical render counter useful for headless/clip-mode sessions;
+    // swapChainPresents remains the separate counter for real DXGI presents.
+    if (window_ == nullptr) {
+        ++presentedVideoFrames_;
+        return FFFResult::Success;
+    }
     const auto chainResult = EnsureSwapChain(frame->width, frame->height);
     if (chainResult != FFFResult::Success) return chainResult;
     const auto pipelineResult = EnsurePipeline(width, height, input.layout, input.bitDepth,
-        input.chromaWidthShift, input.chromaHeightShift);
+        input.chromaWidthShift, input.chromaHeightShift, d3d11Frame);
     if (pipelineResult != FFFResult::Success) return pipelineResult;
-    const auto baseResult = EnsureVideoBaseResources();
-    if (baseResult != FFFResult::Success) return baseResult;
-    if (directYuv) {
+    if (d3d11Frame) {
+        auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
+        const auto slice = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
+        if (texture == nullptr || input.layout != 2) {
+            SetError("The shared D3D11 decoder produced an unsupported surface.");
+            return FFFResult::NotSupported;
+        }
+        // Decoder array slices are transient and are reused as soon as the AVFrame
+        // is released. Retain only one shader-readable GPU surface and copy the
+        // selected slice; this remains GPU-to-GPU and removes the full CPU transfer.
+        context_->CopySubresourceRegion(sourceTextures_[0], 0, 0, 0, 0, texture, slice, nullptr);
+    } else if (directYuv) {
         context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, frame->data[0], frame->linesize[0], 0);
         context_->UpdateSubresource(sourceTextures_[1], 0, nullptr, frame->data[1], frame->linesize[1], 0);
         if (input.layout == 1)
@@ -1549,9 +1733,55 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
         settings.cOffset = 0.5f; settings.cScale = 1.0f;
     }
     YuvCoefficients(frame->colorspace, frame->width, settings.kr, settings.kb);
-    context_->UpdateSubresource(constants_, 0, nullptr, &settings, 0, 0);
+    static_assert(sizeof(CachedVideoSettings) == sizeof(ShaderSettings));
+    std::memcpy(&cachedVideoSettings_, &settings, sizeof(settings));
+    hasCachedVideo_ = true;
+    const auto currentVideoGeneration = videoGeneration_.fetch_add(1) + 1;
+    {
+        std::lock_guard lock(timedTextMutex_);
+        if (!timedTextThread_.joinable()) {
+            timedTextThreadStop_ = false;
+            timedTextThreadRunning_ = true;
+            timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
+        } else {
+            timedTextThreadRunning_ = true;
+        }
+        ++presentationGeneration_;
+    }
+    deviceLock.unlock();
+    ++presentedVideoFrames_;
+    timedTextCondition_.notify_one();
+    (void)currentVideoGeneration;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::Redraw() noexcept {
+    {
+        std::lock_guard deviceLock(deviceMutex_);
+        if (!hasCachedVideo_ || window_ == nullptr) return FFFResult::Success;
+        const auto chainResult = EnsureSwapChain(sourceWidth_, sourceHeight_);
+        if (chainResult != FFFResult::Success) return chainResult;
+    }
+    {
+        std::lock_guard lock(timedTextMutex_);
+        if (!timedTextThread_.joinable()) {
+            timedTextThreadStop_ = false; timedTextThreadRunning_ = true;
+            timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
+        }
+        ++presentationGeneration_;
+    }
+    timedTextCondition_.notify_one();
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) noexcept {
+    if (!hasCachedVideo_ || target == nullptr) return FFFResult::InvalidState;
+    cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
+    cachedVideoSettings_.outputWidth = static_cast<float>(swapWidth_);
+    cachedVideoSettings_.outputHeight = static_cast<float>(swapHeight_);
+    context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
     D3D11_VIEWPORT viewport{0, 0, static_cast<float>(swapWidth_), static_cast<float>(swapHeight_), 0, 1};
-    context_->OMSetRenderTargets(1, &videoBaseTarget_, nullptr); context_->RSSetViewports(1, &viewport);
+    context_->OMSetRenderTargets(1, &target, nullptr); context_->RSSetViewports(1, &viewport);
     context_->IASetInputLayout(nullptr); context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(vertexShader_, nullptr, 0); context_->PSSetShader(pixelShader_, nullptr, 0);
     context_->PSSetConstantBuffers(0, 1, &constants_); context_->PSSetSamplers(0, 1, &sampler_);
@@ -1559,60 +1789,41 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
     ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
     context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
-    // Once the composition thread exists it is the sole swap-chain presenter.
-    // Video decoding only publishes a retained GPU base and wakes that owner;
-    // two independent Present callers can otherwise alternate or drop complete
-    // subtitle/danmaku composites in the flip queue.
-    bool compositionThreadActive = false;
-    {
-        std::lock_guard lock(timedTextMutex_);
-        compositionThreadActive = timedTextThread_.joinable() && !timedTextThreadStop_;
-        if (compositionThreadActive) ++presentationGeneration_;
-    }
-    if (compositionThreadActive) {
-        timedTextCondition_.notify_one();
-        return FFFResult::Success;
-    }
-    ComPtr<ID3D11Texture2D> backBuffer;
-    ComPtr<ID3D11RenderTargetView> backBufferTarget;
-    const auto targetResult = AcquireBackBufferTarget(
-        backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
-    if (targetResult != FFFResult::Success) return targetResult;
-    context_->CopyResource(backBuffer.Get(), videoBaseTexture_);
-    const auto danmakuResult = DrawTimedText(TimedTextLayerSlot::Danmaku);
-    const auto subtitleResult = danmakuResult == FFFResult::Success
-        ? DrawTimedText(TimedTextLayerSlot::Subtitle) : danmakuResult;
-    if (subtitleResult != FFFResult::Success) {
-        context_->OMSetRenderTargets(0, nullptr, nullptr);
-        return subtitleResult;
-    }
-    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Danmaku);
-    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Subtitle);
-    context_->OMSetRenderTargets(0, nullptr, nullptr);
-    const auto present = swapChain_->Present(1, 0);
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
+    const std::uint64_t renderedVideoGeneration) noexcept {
+    if (chain == nullptr) return FFFResult::InvalidState;
+    const auto start = std::chrono::steady_clock::now();
+    const auto present = chain->Present(1, 0);
+    presentWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count() / 100));
     if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET) {
         SetError("The D3D11 playback device was removed."); return FFFResult::DeviceFailure;
     }
     if (FAILED(present)) return FFFResult::DeviceFailure;
-    {
-        std::lock_guard lock(timedTextMutex_);
-        for (std::size_t index = 0; index < ARRAYSIZE(timedTextPresentCounts_); ++index) {
-            if (timedTextRenderedCommandCounts_[index] == 0) continue;
-            ++timedTextPresentCounts_[index];
-        }
-    }
+    ++swapChainPresents_;
+    const auto previous = presentedVideoGeneration_.exchange(renderedVideoGeneration);
+    if (renderedVideoGeneration > previous + 1)
+        coalescedVideoFrames_.fetch_add(renderedVideoGeneration - previous - 1);
+    std::lock_guard lock(timedTextMutex_);
+    for (std::size_t index = 0; index < ARRAYSIZE(timedTextPresentCounts_); ++index)
+        if (timedTextRenderedCommandCounts_[index] != 0) ++timedTextPresentCounts_[index];
     return FFFResult::Success;
 }
 
 FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
-    std::lock_guard deviceLock(deviceMutex_);
-    if (swapChain_ == nullptr || videoBaseTexture_ == nullptr) return FFFResult::Success;
+    std::unique_lock deviceLock(deviceMutex_);
+    if (swapChain_ == nullptr || !hasCachedVideo_) return FFFResult::Success;
+    std::unique_lock presentLock(presentMutex_);
     ComPtr<ID3D11Texture2D> backBuffer;
     ComPtr<ID3D11RenderTargetView> backBufferTarget;
     const auto targetResult = AcquireBackBufferTarget(
         backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
     if (targetResult != FFFResult::Success) return targetResult;
-    context_->CopyResource(backBuffer.Get(), videoBaseTexture_);
+    const auto drawResult = DrawCachedVideo(backBufferTarget.Get());
+    if (drawResult != FFFResult::Success) return drawResult;
     const auto danmakuResult = DrawTimedText(TimedTextLayerSlot::Danmaku);
     if (danmakuResult != FFFResult::Success) return danmakuResult;
     const auto subtitleResult = DrawTimedText(TimedTextLayerSlot::Subtitle);
@@ -1620,22 +1831,26 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Danmaku);
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Subtitle);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
-    // This thread is the only presenter after timed text is enabled. Bind each
-    // complete composite to a display refresh boundary so independent video and
-    // layer notifications cannot add up into irregular unsynchronised flips.
-    // A high-refresh display still accepts higher configured danmaku rates.
-    const auto present = swapChain_->Present(1, 0);
-    if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET) {
-        SetError("The D3D11 playback device was removed."); return FFFResult::DeviceFailure;
-    }
-    if (FAILED(present)) return FFFResult::DeviceFailure;
-    {
-        std::lock_guard lock(timedTextMutex_);
-        for (std::size_t index = 0; index < ARRAYSIZE(timedTextPresentCounts_); ++index) {
-            if (timedTextRenderedCommandCounts_[index] == 0) continue;
-            ++timedTextPresentCounts_[index];
+    const auto generation = videoGeneration_.load();
+    ComPtr<IDXGISwapChain4> retainedChain = swapChain_;
+    deviceLock.unlock();
+    const auto result = PresentCurrentFrame(retainedChain.Get(), generation);
+    if (result != FFFResult::Success) return result;
+    // Empty layers no longer need full-size GPU surfaces. Release them after the
+    // clearing composite reached the display, preserving the submitted sequence.
+    presentLock.unlock();
+    deviceLock.lock();
+    auto allEmpty = true;
+    for (std::size_t index = 0; index < ARRAYSIZE(timedTextLayers_); ++index) {
+        bool empty = false;
+        {
+            std::lock_guard lock(timedTextMutex_);
+            empty = timedTextLayers_[index] == nullptr || timedTextLayers_[index]->commands.empty();
         }
+        if (empty) ReleaseTimedTextSlotResources(static_cast<TimedTextLayerSlot>(index));
+        else allEmpty = false;
     }
+    if (allEmpty && timedTextAtlasTexture_ != nullptr) ReleaseTimedTextResources(false);
     return FFFResult::Success;
 }
 
@@ -1650,6 +1865,7 @@ void PlayerVideoRenderer::ClearSurface() noexcept {
             context_->ClearRenderTargetView(backBufferTarget.Get(), black);
             context_->OMSetRenderTargets(0, nullptr, nullptr);
             context_->Flush();
+            std::lock_guard presentLock(presentMutex_);
             swapChain_->Present(0, 0);
         }
     }
@@ -1658,11 +1874,9 @@ void PlayerVideoRenderer::ClearSurface() noexcept {
 }
 
 void PlayerVideoRenderer::ResetMedia() noexcept {
+    StopTimedTextThread();
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
-    // A queued composition wake must not be able to restore the previous
-    // media's retained base after ClearSurface during same-session replacement.
-    ReleaseVideoBaseResources();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
@@ -1673,7 +1887,12 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     sourceBitDepth_ = 0;
     sourceChromaWidthShift_ = sourceChromaHeightShift_ = 0;
     sourcePeakNits_ = sdrPeakNits_;
-    rgba64_.clear();
+    rgba64_.clear(); rgba64_.shrink_to_fit();
+    hasCachedVideo_ = false; sourceExternal_ = false;
+    videoGeneration_.store(0); presentedVideoGeneration_.store(0);
+    presentedVideoFrames_.store(0); coalescedVideoFrames_.store(0);
+    swapChainPresents_.store(0); presentWait100ns_.store(0);
+    deviceLockWait100ns_.store(0); softwareConvert100ns_.store(0);
     {
         std::lock_guard lock(timedTextMutex_);
         ++presentationGeneration_;
@@ -1695,7 +1914,6 @@ void PlayerVideoRenderer::Close() noexcept {
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
     ReleaseTimedTextResources();
-    ReleaseVideoBaseResources();
     if (writeFactory_ != nullptr) { writeFactory_->Release(); writeFactory_ = nullptr; }
     if (d2dFactory_ != nullptr) { d2dFactory_->Release(); d2dFactory_ = nullptr; }
     {
@@ -1709,7 +1927,10 @@ void PlayerVideoRenderer::Close() noexcept {
     // outstanding D3D reference before releasing the chain, otherwise an
     // immediate same-window media reopen can fail CreateSwapChainForHwnd.
     if (context_ != nullptr) { context_->ClearState(); context_->Flush(); }
-    if (swapChain_ != nullptr) { swapChain_->Release(); swapChain_ = nullptr; }
+    if (swapChain_ != nullptr) {
+        std::lock_guard presentLock(presentMutex_);
+        swapChain_->Release(); swapChain_ = nullptr;
+    }
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
         if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
@@ -1728,6 +1949,12 @@ void PlayerVideoRenderer::Close() noexcept {
 
 FFF3FPColorMode PlayerVideoRenderer::ActualColorMode() const noexcept { return actualMode_; }
 float PlayerVideoRenderer::SourcePeakNits() const noexcept { return sourcePeakNits_; }
+std::uint64_t PlayerVideoRenderer::PresentedVideoFrames() const noexcept { return presentedVideoFrames_.load(); }
+std::uint64_t PlayerVideoRenderer::CoalescedVideoFrames() const noexcept { return coalescedVideoFrames_.load(); }
+std::uint64_t PlayerVideoRenderer::SwapChainPresents() const noexcept { return swapChainPresents_.load(); }
+std::uint64_t PlayerVideoRenderer::PresentWait100ns() const noexcept { return presentWait100ns_.load(); }
+std::uint64_t PlayerVideoRenderer::DeviceLockWait100ns() const noexcept { return deviceLockWait100ns_.load(); }
+std::uint64_t PlayerVideoRenderer::SoftwareConvert100ns() const noexcept { return softwareConvert100ns_.load(); }
 std::string PlayerVideoRenderer::FallbackReason() const { return fallbackReason_; }
 std::string PlayerVideoRenderer::LastError() const { std::lock_guard lock(errorMutex_); return lastError_; }
 void PlayerVideoRenderer::SetError(std::string message) noexcept {

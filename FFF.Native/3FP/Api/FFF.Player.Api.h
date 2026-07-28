@@ -97,6 +97,16 @@ struct FFF3FPSnapshot {
     std::uint64_t audioDiscontinuities;
     std::uint64_t audioInsertedSilenceFrames;
     std::uint64_t audioDroppedOverlapFrames;
+    // API v4 diagnostics. `presentedVideoFrames` counts decoded frames accepted
+    // by the renderer (including headless/clip-mode sessions); `swapChainPresents`
+    // is the count of actual successful DXGI presents.
+    std::uint64_t coalescedVideoFrames;
+    std::uint64_t audioRejectedFrames;
+    std::uint64_t swapChainPresents;
+    std::uint64_t presentWait100ns;
+    std::uint64_t deviceLockWait100ns;
+    std::uint64_t hardwareTransfer100ns;
+    std::uint64_t softwareConvert100ns;
 };
 
 using FFF3FPHandle = void*;

@@ -48,6 +48,13 @@ Friend Module Program
                 Console.WriteLine("剪辑模式键盘焦点与出入点保留回归通过。")
                 Return 0
             End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--empty-layer-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 调度视频路径 = Path.GetFullPath(参数(1))
+                检查文件(调度视频路径)
+                测试空图层与真实呈现调度(调度视频路径)
+                Console.WriteLine("空图层、真实 Present 计数与音频背压回归通过。")
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--ass-render-benchmark", StringComparison.OrdinalIgnoreCase) Then
                 测试ASS渲染性能()
                 Return 0
@@ -105,6 +112,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --vcb-ass-regression <视频> <字幕.ass>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --clip-step-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --clip-focus-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --empty-layer-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --gpu-decode-matrix <视频目录>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --ass-render-benchmark")
                 Return 2
@@ -139,6 +147,68 @@ Friend Module Program
             Return 1
         End Try
     End Function
+
+    Private Sub 测试空图层与真实呈现调度(视频路径 As String)
+        Using 输出窗口 As New Form With {
+            .ClientSize = New Drawing.Size(640, 360), .ShowInTaskbar = False,
+            .FormBorderStyle = FormBorderStyle.None, .StartPosition = FormStartPosition.Manual,
+            .Location = New Drawing.Point(-32000, -32000)}
+            Dim 输出句柄 = 输出窗口.Handle
+            Using 会话 As New 播放器会话(New 播放器配置 With {
+                .解码器 = 解码模式.CPU, .输出窗口句柄 = 输出句柄,
+                .色彩模式 = 色彩输出模式.映射到SDR})
+                会话.设置音量(0.0F, True)
+                会话.打开Async(视频路径).GetAwaiter().GetResult()
+                会话.播放()
+                Dim 预热 = Stopwatch.StartNew()
+                Do
+                    Application.DoEvents()
+                    Dim 快照 = 会话.当前快照
+                    If 快照.已呈现视频帧数 >= 3UL Then Exit Do
+                    If 快照.状态 = 播放状态.失败 Then Throw New InvalidOperationException("调度回归播放失败。")
+                    If 预热.Elapsed >= TimeSpan.FromSeconds(15) Then
+                        Throw New TimeoutException($"等待真实视频 Present 超时：状态 {快照.状态}，" &
+                            $"呈现/解码/队列 {快照.已呈现视频帧数}/{快照.已解码视频帧数}/{快照.视频队列帧数}，" &
+                            $"位置 {快照.播放位置.TotalSeconds:F2}s，音频缓冲 {快照.音频缓冲时长.TotalMilliseconds:F0}ms。")
+                    End If
+                    Thread.Sleep(5)
+                Loop
+                会话.暂停()
+                等待状态(会话, 播放状态.已暂停, TimeSpan.FromSeconds(3))
+                Thread.Sleep(100)
+                Dim 空命令 = Array.Empty(Of 定时文字命令)()
+                Dim 呈现前 = 会话.当前快照
+                会话.设置定时文字图层(New Size(640, 360), 空命令, 1UL, 60.0F)
+                会话.设置弹幕图层(New Size(640, 360), 空命令, 1UL, 60.0F)
+                Dim 收敛 = Stopwatch.StartNew()
+                Do
+                    Application.DoEvents()
+                    Dim 字幕状态 = 会话.当前定时文字状态
+                    Dim 弹幕状态 = 会话.当前弹幕状态
+                    If 字幕状态.已绘制序号 = 1UL AndAlso 弹幕状态.已绘制序号 = 1UL Then Exit Do
+                    If 收敛.Elapsed >= TimeSpan.FromSeconds(3) Then Throw New TimeoutException("空图层没有收敛。")
+                    Thread.Sleep(5)
+                Loop
+                ' 已绘制序号在 GPU 命令录制后即可更新；再等待一次交换链边界，
+                ' 将最后一个清空帧与“空闲时仍持续 Present”区分开。
+                Thread.Sleep(200)
+                Application.DoEvents()
+                Dim 空图层后 = 会话.当前快照
+                Thread.Sleep(500)
+                Application.DoEvents()
+                Dim 静置后 = 会话.当前快照
+                断言(静置后.交换链呈现次数 = 空图层后.交换链呈现次数,
+                   $"空字幕/弹幕仍在后台持续 Present：{空图层后.交换链呈现次数}→{静置后.交换链呈现次数}。")
+                断言(空图层后.交换链呈现次数 <= 呈现前.交换链呈现次数 + 2UL,
+                   "两个空图层产生了多余的独立交换链帧。")
+                断言(静置后.交换链呈现次数 >= 静置后.已呈现视频帧数,
+                   "真实视频呈现计数超过交换链成功 Present 次数。")
+                断言(静置后.音频拒绝帧数 = 0UL,
+                   $"音频生产者拒绝了 {静置后.音频拒绝帧数} 帧。")
+                断言(静置后.视频队列帧数 <= 8, "视频时间背压超过 8 帧硬上限。")
+            End Using
+        End Using
+    End Sub
 
     Private Sub 测试ASS渲染性能()
         测试ASS半透明像素(Path.GetTempPath())
@@ -278,7 +348,13 @@ Friend Module Program
 
             Dim 游标 = 返回帧
             Dim 连续倒退次数 = 0
-            While 游标.播放位置 > TimeSpan.FromMilliseconds(20) AndAlso 连续倒退次数 < 300
+            ' Keep this boundary regression valid for the supplied source's
+            ' frame rate instead of assuming that 300 presses reaches zero.
+            Dim 估计单帧秒 = If(返回帧.帧时间基分母 > 0 AndAlso 当前帧.原始帧PTS > 上一帧.原始帧PTS,
+                Math.Max(0.0001R, (当前帧.原始帧PTS - 上一帧.原始帧PTS) *
+                    CDbl(返回帧.帧时间基分子) / 返回帧.帧时间基分母), 1.0R / 24.0R)
+            Dim 最大连续倒退次数 = Math.Max(300, CInt(Math.Ceiling(返回帧.播放位置.TotalSeconds / 估计单帧秒)) + 8)
+            While 游标.播放位置 > TimeSpan.FromMilliseconds(20) AndAlso 连续倒退次数 < 最大连续倒退次数
                 Dim 倒退前PTS = 游标.原始帧PTS
                 Dim 倒退前位置 = 游标.播放位置
                 会话.上一帧()
@@ -1391,9 +1467,9 @@ Friend Module Program
         End While
         Dim 最终图层呈现数 = 会话.当前弹幕状态.图层呈现帧数
         Dim 图层呈现帧率 = (CULng(最终图层呈现数) - 初始图层呈现数) / 帧率计时.Elapsed.TotalSeconds
-        断言(图层呈现帧率 >= 55.0 AndAlso 图层呈现帧率 <= 65.0,
-           $"弹幕图层实际呈现为 {图层呈现帧率:F2} FPS，偏离 60 FPS 目标。")
-        Console.WriteLine($"GPU 弹幕实际呈现：{图层呈现帧率:F2} FPS（视频源 {目标帧率:F2} FPS）。")
+        断言(图层呈现帧率 >= 55.0 AndAlso 图层呈现帧率 <= 90.0,
+           $"弹幕最终合成呈现为 {图层呈现帧率:F2} FPS，超出独立动态图层与视频更新的合理范围。")
+        Console.WriteLine($"GPU 弹幕最终合成呈现：{图层呈现帧率:F2} FPS（视频源 {目标帧率:F2} FPS，动态图层目标 60 FPS）。")
     End Sub
 
     Private Sub 等待状态(会话 As 播放器会话, 目标 As 播放状态, 超时 As TimeSpan)
@@ -1422,6 +1498,7 @@ Friend Module Program
         Dim 首音频不连续次数 = 首快照.音频不连续次数
         Dim 首音频插入静音帧数 = 首快照.音频插入静音帧数
         Dim 首音频丢弃重叠帧数 = 首快照.音频丢弃重叠帧数
+        Dim 首音频拒绝帧数 = 首快照.音频拒绝帧数
         Dim 首图层状态 = If(画面控件 Is Nothing, Nothing,
                          If(图层状态提供器 Is Nothing, 会话.当前定时文字状态, 图层状态提供器()))
         Dim 首图层呈现数 = If(首图层状态 Is Nothing, 0UL, CULng(首图层状态.图层呈现帧数))
@@ -1527,6 +1604,7 @@ Friend Module Program
             .音频不连续次数 = CLng(末快照.音频不连续次数 - 首音频不连续次数),
             .音频插入静音帧数 = CLng(末快照.音频插入静音帧数 - 首音频插入静音帧数),
             .音频丢弃重叠帧数 = CLng(末快照.音频丢弃重叠帧数 - 首音频丢弃重叠帧数),
+            .音频拒绝帧数 = CLng(末快照.音频拒绝帧数 - 首音频拒绝帧数),
             .图层呈现帧率 = CDbl(图层呈现数) / 测量时长秒,
             .图层提交帧率 = If(末图层状态 Is Nothing, 0.0,
                            CDbl(末图层状态.已提交序号 - 首图层提交序号) / 测量时长秒),
@@ -1580,9 +1658,10 @@ Friend Module Program
            $"{阶段}视频队列超过 8 帧的有界合同：{结果.最大视频队列帧数}。")
         If 验证图层 Then
             ' 这是 100 条同时移动且带描边文字的上限压力，远高于产品默认 5 行；
-            ' GPU 精灵批处理和独立媒体时钟仍须维持 55–65 FPS。
-            断言(结果.图层呈现帧率 >= 55.0 AndAlso 结果.图层呈现帧率 <= 65.0,
-               $"{阶段}字幕/弹幕图层呈现率异常：{结果.图层呈现帧率:F2} FPS。")
+            ' 动态图层目标 60 FPS，视频更新也可在独立 Present 中及时到达，因此
+            ' 最终合成帧率允许落在 55–90 FPS，而不会把视频锁死在 60 Hz。
+            断言(结果.图层呈现帧率 >= 55.0 AndAlso 结果.图层呈现帧率 <= 90.0,
+               $"{阶段}字幕/弹幕最终合成呈现率异常：{结果.图层呈现帧率:F2} FPS。")
             断言(结果.精灵缓存命中次数 > 0 AndAlso 结果.精灵缓存未命中次数 <= 5,
                $"{阶段}滚动文字没有复用 GPU 精灵：命中/未命中 " &
                $"{结果.精灵缓存命中次数}/{结果.精灵缓存未命中次数}。")
@@ -1595,6 +1674,8 @@ Friend Module Program
            $"{阶段}音频缓冲没有建立：{结果.平均音频缓冲毫秒:F1} ms。")
         断言(结果.音频欠载次数 <= 1,
            $"{阶段}音频出现 {结果.音频欠载次数} 次欠载。")
+        断言(结果.音频拒绝帧数 = 0,
+           $"{阶段}因背压拒绝了 {结果.音频拒绝帧数} 个已解码音频帧。")
         断言(结果.平均音画差毫秒 <= 350.0 AndAlso 结果.最大音画差毫秒 <= 650.0,
            $"{阶段}音频/视频时钟差过大：{结果.平均音画差毫秒:F1}/{结果.最大音画差毫秒:F1} ms。")
     End Sub
@@ -1628,6 +1709,7 @@ Friend Module Program
         Public Property 音频不连续次数 As Long
         Public Property 音频插入静音帧数 As Long
         Public Property 音频丢弃重叠帧数 As Long
+        Public Property 音频拒绝帧数 As Long
         Public Property 图层呈现帧率 As Double
         Public Property 图层提交帧率 As Double
         Public Property 精灵缓存命中次数 As Long

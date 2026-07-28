@@ -84,6 +84,13 @@ Public NotInheritable Class 播放器快照
         音频不连续次数 = 值.音频不连续次数
         音频插入静音帧数 = 值.音频插入静音帧数
         音频丢弃重叠帧数 = 值.音频丢弃重叠帧数
+        已合并视频帧数 = 值.已合并视频帧数
+        音频拒绝帧数 = 值.音频拒绝帧数
+        交换链呈现次数 = 值.交换链呈现次数
+        呈现等待时长 = TimeSpan.FromTicks(CLng(Math.Min(值.呈现等待100纳秒, CULng(Long.MaxValue))))
+        设备锁等待时长 = TimeSpan.FromTicks(CLng(Math.Min(值.设备锁等待100纳秒, CULng(Long.MaxValue))))
+        硬件传输时长 = TimeSpan.FromTicks(CLng(Math.Min(值.硬件传输100纳秒, CULng(Long.MaxValue))))
+        软件转换时长 = TimeSpan.FromTicks(CLng(Math.Min(值.软件转换100纳秒, CULng(Long.MaxValue))))
     End Sub
 
     Public ReadOnly Property 状态 As 播放状态
@@ -116,6 +123,13 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 音频不连续次数 As ULong
     Public ReadOnly Property 音频插入静音帧数 As ULong
     Public ReadOnly Property 音频丢弃重叠帧数 As ULong
+    Public ReadOnly Property 已合并视频帧数 As ULong
+    Public ReadOnly Property 音频拒绝帧数 As ULong
+    Public ReadOnly Property 交换链呈现次数 As ULong
+    Public ReadOnly Property 呈现等待时长 As TimeSpan
+    Public ReadOnly Property 设备锁等待时长 As TimeSpan
+    Public ReadOnly Property 硬件传输时长 As TimeSpan
+    Public ReadOnly Property 软件转换时长 As TimeSpan
 End Class
 
 Public Enum 定时文字对齐

@@ -3,6 +3,7 @@
 #include "3FP/Api/FFF.Player.Api.h"
 
 #include <cstdint>
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -13,6 +14,7 @@
 #include <vector>
 
 struct AVFrame;
+struct AVBufferRef;
 struct SwsContext;
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -85,6 +87,8 @@ public:
         float hdrPeakNits, float paperWhiteNits) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
     FFFResult Render(const AVFrame* frame) noexcept;
+    FFFResult Redraw() noexcept;
+    FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     FFFResult PresentTimedText() noexcept;
     FFFResult SetTimedTextLayer(TimedTextRenderLayer layer, TimedTextLayerSlot slot) noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status, TimedTextLayerSlot slot) noexcept;
@@ -93,6 +97,12 @@ public:
 
     FFF3FPColorMode ActualColorMode() const noexcept;
     float SourcePeakNits() const noexcept;
+    std::uint64_t PresentedVideoFrames() const noexcept;
+    std::uint64_t CoalescedVideoFrames() const noexcept;
+    std::uint64_t SwapChainPresents() const noexcept;
+    std::uint64_t PresentWait100ns() const noexcept;
+    std::uint64_t DeviceLockWait100ns() const noexcept;
+    std::uint64_t SoftwareConvert100ns() const noexcept;
     std::string FallbackReason() const;
     std::string LastError() const;
 
@@ -114,17 +124,30 @@ private:
     FFFResult ReconfigureSwapChain(bool hdr) noexcept;
     FFFResult EnsurePipeline(std::uint32_t sourceWidth, std::uint32_t sourceHeight,
         std::uint32_t inputLayout, std::uint32_t bitDepth,
-        std::uint32_t chromaWidthShift, std::uint32_t chromaHeightShift) noexcept;
+        std::uint32_t chromaWidthShift, std::uint32_t chromaHeightShift,
+        bool externalSource = false) noexcept;
     FFFResult AcquireBackBufferTarget(ID3D11Texture2D** buffer,
         ID3D11RenderTargetView** target) noexcept;
-    FFFResult EnsureVideoBaseResources() noexcept;
-    FFFResult EnsureTimedTextResources() noexcept;
+    struct CachedVideoSettings {
+        std::uint32_t colorMode = 0, transfer = 0, source2020 = 0, reserved = 0;
+        float sdrPeak = 100, hdrPeak = 100, paperWhite = 203, reserved2 = 0;
+        float sourceWidth = 0, sourceHeight = 0, outputWidth = 0, outputHeight = 0;
+        std::uint32_t inputLayout = 0;
+        float sampleScale = 1, yOffset = 0, yScale = 1;
+        float cOffset = 0.5f, cScale = 1, kr = 0.2126f, kb = 0.0722f;
+    };
+    FFFResult EnsureTimedTextResources(TimedTextLayerSlot slot) noexcept;
+    FFFResult EnsureTimedTextAtlas(std::uint32_t size) noexcept;
+    FFFResult EnsureTimedTextInstanceCapacity(std::size_t count) noexcept;
+    FFFResult DrawCachedVideo(ID3D11RenderTargetView* target) noexcept;
+    FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
+        std::uint64_t renderedVideoGeneration) noexcept;
     FFFResult DrawTimedText(TimedTextLayerSlot slot) noexcept;
     void TimedTextThread() noexcept;
     void StopTimedTextThread() noexcept;
     void CompositeTimedText(ID3D11RenderTargetView* target, TimedTextLayerSlot slot) noexcept;
-    void ReleaseTimedTextResources() noexcept;
-    void ReleaseVideoBaseResources() noexcept;
+    void ReleaseTimedTextSlotResources(TimedTextLayerSlot slot) noexcept;
+    void ReleaseTimedTextResources(bool resetRenderedState = true) noexcept;
     bool OutputSupportsHdr() noexcept;
     void SetHdrMetadata() noexcept;
     void ClearSurface() noexcept;
@@ -141,8 +164,6 @@ private:
     ID3D11Buffer* constants_;
     ID3D11Texture2D* sourceTextures_[3];
     ID3D11ShaderResourceView* sourceViews_[3];
-    ID3D11Texture2D* videoBaseTexture_;
-    ID3D11RenderTargetView* videoBaseTarget_;
     ID3D11Texture2D* timedTextTextures_[2];
     ID3D11RenderTargetView* timedTextTargets_[2];
     ID3D11ShaderResourceView* timedTextViews_[2];
@@ -170,6 +191,7 @@ private:
     std::uint32_t sourceBitDepth_;
     std::uint32_t sourceChromaWidthShift_;
     std::uint32_t sourceChromaHeightShift_;
+    bool sourceExternal_;
     FFF3FPColorMode requestedMode_;
     FFF3FPColorMode actualMode_;
     float sdrPeakNits_;
@@ -178,10 +200,12 @@ private:
     float sourcePeakNits_;
     std::vector<std::uint8_t> rgba64_;
     mutable std::mutex deviceMutex_;
+    mutable std::mutex presentMutex_;
     mutable std::mutex timedTextMutex_;
     std::condition_variable timedTextCondition_;
     std::thread timedTextThread_;
     bool timedTextThreadStop_;
+    bool timedTextThreadRunning_;
     std::uint64_t presentationGeneration_;
     float presentationFrameRate_;
     // The producer publishes an immutable layer and renderers retain a shared
@@ -200,6 +224,19 @@ private:
     std::uint64_t backBufferAcquisitionCount_;
     bool timedTextPipelineQueryInFlight_[2];
     std::uint64_t timedTextCompositePixelInvocations_[2];
+    CachedVideoSettings cachedVideoSettings_;
+    bool hasCachedVideo_;
+    std::atomic<std::uint64_t> videoGeneration_;
+    std::atomic<std::uint64_t> presentedVideoGeneration_;
+    std::atomic<std::uint64_t> presentedVideoFrames_;
+    std::atomic<std::uint64_t> coalescedVideoFrames_;
+    std::atomic<std::uint64_t> swapChainPresents_;
+    std::atomic<std::uint64_t> presentWait100ns_;
+    std::atomic<std::uint64_t> deviceLockWait100ns_;
+    std::atomic<std::uint64_t> softwareConvert100ns_;
+    HMONITOR hdrMonitor_;
+    bool hdrSupportValid_;
+    bool hdrSupported_;
     // Bounded caches are keyed by the immutable command content contract.  The
     // UI only changes coordinates for scrolling danmaku, so rebuilding a text
     // layout and two brushes at 60 Hz is unnecessary.
@@ -211,6 +248,8 @@ private:
     std::uint32_t timedTextAtlasX_;
     std::uint32_t timedTextAtlasY_;
     std::uint32_t timedTextAtlasRowHeight_;
+    std::uint32_t timedTextAtlasSize_;
+    std::uint32_t timedTextSpriteInstanceCapacity_;
     std::uint64_t timedTextSpriteCacheHits_;
     std::uint64_t timedTextSpriteCacheMisses_;
     mutable std::mutex errorMutex_;

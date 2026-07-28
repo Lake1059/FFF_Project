@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 3;
+constexpr std::uint32_t PlayerApiVersion = 4;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {

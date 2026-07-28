@@ -47,7 +47,7 @@ std::int64_t QpcNow100ns() noexcept {
 
 PlayerWasapiRenderer::PlayerWasapiRenderer(std::wstring endpointId)
     : endpointId_(std::move(endpointId)), stopEvent_(nullptr), sampleEvent_(nullptr),
-      initializationFinished_(false), initializationResult_(FFFResult::InvalidState), queueReadOffset_(0),
+      initializationFinished_(false), initializationResult_(FFFResult::InvalidState), queuedBytes_(0),
       resampler_(nullptr),
       inputChannelLayout_{}, inputSampleRate_(0), inputSampleFormat_(-1),
       outputSampleRate_(0), outputChannels_(0), outputBlockAlign_(0), outputBitsPerSample_(0),
@@ -85,7 +85,7 @@ void PlayerWasapiRenderer::Stop() noexcept {
     av_channel_layout_uninit(&inputChannelLayout_);
     inputSampleRate_ = 0; inputSampleFormat_ = -1;
     std::lock_guard lock(mutex_);
-    queue_.clear(); queueReadOffset_ = 0; converted_.clear(); pendingMediaFrames_ = 0;
+    queue_.clear(); queuedBytes_ = 0; converted_.clear(); converted_.shrink_to_fit(); pendingMediaFrames_ = 0;
 }
 
 FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame) noexcept {
@@ -186,7 +186,7 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
     const auto frames = swr_convert(resampler_, output, capacity, input.data(), inputSamples);
     if (frames < 0) { SetError("FFmpeg failed to resample decoded audio."); return FFFResult::FfmpegFailure; }
     converted_.resize(static_cast<std::size_t>(frames) * outputBlockAlign_);
-    const auto gain = muted_ ? 0.0f : volume_;
+    const auto gain = muted_.load() ? 0.0f : volume_.load();
     if (gain == 0.0f) {
         std::memset(converted_.data(), 0, converted_.size());
     } else if (gain != 1.0f && outputFloat_) {
@@ -202,20 +202,15 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
             samples[index] = static_cast<std::int32_t>(std::llround(samples[index] * gain));
     }
     const auto gapBytes = static_cast<std::size_t>(gapFrames) * outputBlockAlign_;
-    const auto maximumBytes = static_cast<std::size_t>(outputSampleRate_) * outputBlockAlign_ * 4;
     std::lock_guard lock(mutex_);
-    if (queueReadOffset_ == queue_.size()) {
-        queue_.clear();
-        queueReadOffset_ = 0;
-    } else if (queueReadOffset_ > 0 &&
-        (queueReadOffset_ >= queue_.size() / 2 || queue_.size() + gapBytes + converted_.size() > maximumBytes)) {
-        queue_.erase(queue_.begin(), queue_.begin() + static_cast<std::ptrdiff_t>(queueReadOffset_));
-        queueReadOffset_ = 0;
-    }
-    const auto queuedBytes = queue_.size() - queueReadOffset_;
-    if (queuedBytes + gapBytes + converted_.size() > maximumBytes) return FFFResult::BufferTooSmall;
-    queue_.insert(queue_.end(), gapBytes, 0);
-    queue_.insert(queue_.end(), converted_.begin(), converted_.end());
+    // PlayerSession throttles production by media time. Keep the current decoded
+    // frame intact even when a codec emits a burst; rejecting after resampling
+    // would advance the resampler/timeline and silently create an audible hole.
+    AudioChunk chunk;
+    chunk.silenceBytes = gapBytes;
+    chunk.bytes = converted_;
+    queuedBytes_ += gapBytes + chunk.bytes.size();
+    queue_.push_back(std::move(chunk));
     producedTimelineFrames_ += gapFrames + static_cast<std::uint64_t>(frames);
     if (frames > 0) hasSubmittedAudio_ = true;
     if (sampleEvent_ != nullptr) SetEvent(sampleEvent_);
@@ -242,7 +237,7 @@ void PlayerWasapiRenderer::SetPaused(const bool paused) noexcept {
 void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
     {
         std::lock_guard lock(mutex_);
-        queue_.clear(); queueReadOffset_ = 0; timelineAnchored_ = false; producedTimelineFrames_ = 0;
+        queue_.clear(); queuedBytes_ = 0; timelineAnchored_ = false; producedTimelineFrames_ = 0;
     }
     // A seek can also follow an audio-stream switch.  Recreating on the next
     // input frame keeps the resampler's source layout/rate contract correct.
@@ -265,7 +260,7 @@ void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
     if (sampleEvent_ != nullptr) SetEvent(sampleEvent_);
 }
 void PlayerWasapiRenderer::SetVolume(const float volume, const bool muted) noexcept {
-    volume_ = std::clamp(volume, 0.0f, 1.0f); muted_ = muted;
+    volume_.store(std::clamp(volume, 0.0f, 1.0f)); muted_.store(muted);
 }
 std::int64_t PlayerWasapiRenderer::Position100ns() const noexcept {
     std::int64_t position = 0;
@@ -293,7 +288,7 @@ std::int64_t PlayerWasapiRenderer::TimelineLimit100ns() const noexcept {
 std::int64_t PlayerWasapiRenderer::Buffered100ns() const noexcept {
     std::lock_guard lock(mutex_);
     if (outputSampleRate_ == 0 || outputBlockAlign_ == 0) return 0;
-    const auto frames = (queue_.size() - queueReadOffset_) / outputBlockAlign_ + pendingMediaFrames_.load();
+    const auto frames = queuedBytes_ / outputBlockAlign_ + pendingMediaFrames_.load();
     return static_cast<std::int64_t>(frames) * 10'000'000 / outputSampleRate_;
 }
 std::uint64_t PlayerWasapiRenderer::UnderrunCount() const noexcept { return underrunCount_.load(); }
@@ -417,7 +412,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             // otherwise Reset could clear the queue between GetBuffer and copy.
             std::lock_guard lock(mutex_);
             copied = std::min<std::size_t>(static_cast<std::size_t>(wantedFrames) * outputBlockAlign_,
-                queue_.size() - queueReadOffset_);
+                queuedBytes_);
             renderedFrames = static_cast<UINT32>(copied / outputBlockAlign_);
             if (renderedFrames == 0) {
                 if (!shouldPause && clientStarted && hasSubmittedAudio_.load() && padding == 0 && !starved) {
@@ -429,8 +424,23 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             starved = false;
             copied = static_cast<std::size_t>(renderedFrames) * outputBlockAlign_;
             if (FAILED(renderer->GetBuffer(renderedFrames, &destination))) continue;
-            std::memcpy(destination, queue_.data() + queueReadOffset_, copied);
-            queueReadOffset_ += copied;
+            auto remaining = copied;
+            auto* write = destination;
+            while (remaining > 0 && !queue_.empty()) {
+                auto& chunk = queue_.front();
+                const auto silence = std::min(remaining, chunk.silenceBytes);
+                if (silence > 0) {
+                    std::memset(write, 0, silence);
+                    chunk.silenceBytes -= silence; write += silence; remaining -= silence;
+                }
+                if (remaining > 0 && chunk.offset < chunk.bytes.size()) {
+                    const auto bytes = std::min(remaining, chunk.bytes.size() - chunk.offset);
+                    std::memcpy(write, chunk.bytes.data() + chunk.offset, bytes);
+                    chunk.offset += bytes; write += bytes; remaining -= bytes;
+                }
+                if (chunk.silenceBytes == 0 && chunk.offset == chunk.bytes.size()) queue_.pop_front();
+            }
+            queuedBytes_ -= copied;
         }
         UINT64 anchorCandidate = 0;
         bool hasAnchorCandidate = false;

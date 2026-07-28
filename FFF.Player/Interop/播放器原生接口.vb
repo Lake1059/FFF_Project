@@ -64,6 +64,13 @@ Friend Structure 原生播放器快照
     Public 音频不连续次数 As ULong
     Public 音频插入静音帧数 As ULong
     Public 音频丢弃重叠帧数 As ULong
+    Public 已合并视频帧数 As ULong
+    Public 音频拒绝帧数 As ULong
+    Public 交换链呈现次数 As ULong
+    Public 呈现等待100纳秒 As ULong
+    Public 设备锁等待100纳秒 As ULong
+    Public 硬件传输100纳秒 As ULong
+    Public 软件转换100纳秒 As ULong
 End Structure
 
 <Flags>
