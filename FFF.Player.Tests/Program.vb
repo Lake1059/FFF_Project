@@ -1,7 +1,9 @@
 Imports System.Diagnostics
 Imports System.Drawing
 Imports System.IO
+Imports System.Reflection
 Imports System.Runtime.InteropServices
+Imports System.Text
 Imports System.Threading
 Imports System.Windows.Forms
 Imports FFF.Player
@@ -36,6 +38,29 @@ Friend Module Program
     <STAThread>
     Public Function Main(参数 As String()) As Integer
         Try
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--gpu-decode-matrix", StringComparison.OrdinalIgnoreCase) Then
+                测试GPU解码矩阵(Path.GetFullPath(参数(1)))
+                Console.WriteLine("GPU 解码规格接受与 CPU 回退矩阵通过。")
+                Return 0
+            End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--clip-focus-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试剪辑模式焦点()
+                Console.WriteLine("剪辑模式键盘焦点与出入点保留回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--ass-render-benchmark", StringComparison.OrdinalIgnoreCase) Then
+                测试ASS渲染性能()
+                Return 0
+            End If
+            If 参数.Length = 3 AndAlso String.Equals(参数(0), "--vcb-ass-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim ASS视频路径 = Path.GetFullPath(参数(1))
+                Dim ASS字幕路径 = Path.GetFullPath(参数(2))
+                检查文件(ASS视频路径)
+                检查文件(ASS字幕路径)
+                测试ASS特效字幕(ASS视频路径, ASS字幕路径)
+                Console.WriteLine("ASS/SSA libass 特效、媒体字体与资源释放回归全部通过。")
+                Return 0
+            End If
             If 参数.Length = 3 AndAlso String.Equals(参数(0), "--targeted-regression", StringComparison.OrdinalIgnoreCase) Then
                 Dim 专项视频路径 = Path.GetFullPath(参数(1))
                 Dim 专项SUP路径 = Path.GetFullPath(参数(2))
@@ -65,11 +90,23 @@ Friend Module Program
                 Console.WriteLine("SDR/HDR 色彩回归测试全部通过。")
                 Return 0
             End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--clip-step-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 逐帧视频路径 = Path.GetFullPath(参数(1))
+                检查文件(逐帧视频路径)
+                测试剪辑区间逐帧(逐帧视频路径)
+                Console.WriteLine("剪辑区间前后逐帧回归通过。")
+                Return 0
+            End If
             If 参数.Length < 2 Then
                 Console.Error.WriteLine("用法: FFF.Player.Tests <视频.mp4> <弹幕.xml> [字幕.ass] [字幕.srt]")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --color-regression <SDR视频> <HDR视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --performance-regression <SDR视频> <HDR视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --targeted-regression <视频> <字幕.sup>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --vcb-ass-regression <视频> <字幕.ass>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --clip-step-regression <视频>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --clip-focus-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --gpu-decode-matrix <视频目录>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --ass-render-benchmark")
                 Return 2
             End If
             Dim 视频路径 = Path.GetFullPath(参数(0))
@@ -102,6 +139,348 @@ Friend Module Program
             Return 1
         End Try
     End Function
+
+    Private Sub 测试ASS渲染性能()
+        测试ASS半透明像素(Path.GetTempPath())
+        Dim 临时路径 = Path.Combine(Path.GetTempPath(),
+            "fff-player-ass-render-benchmark-" & Guid.NewGuid().ToString("N") & ".ass")
+        Dim 脚本 = String.Join(vbLf, {
+            "[Script Info]",
+            "ScriptType: v4.00+",
+            "PlayResX: 3840",
+            "PlayResY: 2160",
+            "[V4+ Styles]",
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+            "Style: Default,Arial,96,&H80FFFFFF,&H80FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,1,3,2,7,0,0,0,1",
+            "[Events]",
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+            "Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,{\move(1320,900,1620,900,0,10000)\blur3\p1}m 0 0 l 1200 0 1200 300 0 300{\p0}"})
+        Try
+            File.WriteAllText(临时路径, 脚本, New UTF8Encoding(False))
+            Using 生成器 As New ASS特效字幕帧生成器(临时路径, Path.GetTempPath())
+                Dim 预热 = 生成器.生成帧(TimeSpan.Zero, 3840, 2160)
+                Dim 样本 As New List(Of Double)(180)
+                Dim 内容变化数 = 0
+                Dim 上一内容标识 As ULong = 0
+                For index = 0 To 179
+                    Dim 时间 = TimeSpan.FromTicks(CLng(index * TimeSpan.TicksPerSecond / 60.0R))
+                    Dim 开始 = Stopwatch.GetTimestamp()
+                    Dim 帧 = 生成器.生成帧(时间, 3840, 2160)
+                    Dim 毫秒 = (Stopwatch.GetTimestamp() - 开始) * 1000.0R / Stopwatch.Frequency
+                    If 帧 Is Nothing OrElse 帧.像素BGRA.Length = 0 Then
+                        Throw New InvalidOperationException("ASS 基准没有生成字幕位图。")
+                    End If
+                    If Not 是预乘BGRA(帧.像素BGRA) Then
+                        Throw New InvalidOperationException("ASS 基准输出不是预乘 BGRA。")
+                    End If
+                    If 上一内容标识 <> 0 AndAlso 上一内容标识 <> 帧.内容标识 Then 内容变化数 += 1
+                    上一内容标识 = 帧.内容标识
+                    样本.Add(毫秒)
+                Next
+                Dim 排序 = 样本.OrderBy(Function(x) x).ToArray()
+                Dim 平均 = 样本.Average()
+                Dim P95 = 排序(Math.Min(排序.Length - 1, CInt(Math.Floor(排序.Length * 0.95R))))
+                Dim 最大 = 排序(排序.Length - 1)
+                Console.WriteLine($"ASS 4K 局部遮罩基准：平均 {平均:F2} ms，P95 {P95:F2} ms，最大 {最大:F2} ms，" &
+                                  $"理论 {1000.0R / 平均:F1} FPS，内容变化 {内容变化数}/{样本.Count - 1}。")
+            End Using
+        Finally
+            If File.Exists(临时路径) Then File.Delete(临时路径)
+        End Try
+    End Sub
+
+    Private Sub 测试剪辑模式焦点()
+        Using 窗口 As New Form1 With {.ShowInTaskbar = False, .Opacity = 0}
+            窗口.Show()
+            Application.DoEvents()
+            Dim 标志 = BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic
+            Dim 窗口类型 = GetType(Form1)
+            Dim 切换处理 = 窗口类型.GetMethod("MB_剪辑区间模式_Click", 标志)
+            Dim 画面字段 = 窗口类型.GetField("画面控件", 标志)
+            Dim 模式字段 = 窗口类型.GetField("剪辑区间模式已启用", 标志)
+            Dim 模式按钮 = 窗口.Controls.Find("MB_剪辑区间模式", True).FirstOrDefault()
+            断言(切换处理 IsNot Nothing AndAlso 画面字段 IsNot Nothing AndAlso
+                   模式字段 IsNot Nothing AndAlso 模式按钮 IsNot Nothing,
+               "无法取得剪辑模式焦点测试所需的窗口控件。")
+            Dim 画面 = DirectCast(画面字段.GetValue(窗口), Control)
+            断言(画面 IsNot Nothing, "播放器画面尚未在窗口加载时创建。")
+
+            断言(Not 模式按钮.TabStop, "剪辑模式按钮仍参与键盘焦点导航。")
+            For Each 预期模式 In {True, False}
+                模式按钮.Focus()
+                切换处理.Invoke(窗口, {窗口, EventArgs.Empty})
+                Application.DoEvents()
+                断言(CBool(模式字段.GetValue(窗口)) = 预期模式,
+                   "剪辑模式字段没有在按钮点击时立即更新。")
+                断言(画面.CanFocus AndAlso 画面.Focused AndAlso ReferenceEquals(窗口.ActiveControl, 画面),
+                   "切换剪辑模式后，键盘焦点没有立即返回视频画面。")
+            Next
+
+            Dim 时间轴字段 = 窗口类型.GetField("剪辑区间进度条", 标志)
+            Dim 媒体打开处理 = 窗口类型.GetMethod("播放控制器_媒体已打开", 标志)
+            断言(时间轴字段 IsNot Nothing AndAlso 媒体打开处理 IsNot Nothing,
+               "无法取得剪辑区间保留测试所需的窗口成员。")
+            Dim 时间轴 = 时间轴字段.GetValue(窗口)
+            Dim 时间轴类型 = 时间轴.GetType()
+            Dim 更新播放状态 = 时间轴类型.GetMethod("更新播放状态", 标志)
+            Dim 设为入点 = 时间轴类型.GetMethod("设为入点", 标志)
+            Dim 设为出点 = 时间轴类型.GetMethod("设为出点", 标志)
+            Dim 入点属性 = 时间轴类型.GetProperty("入点", 标志)
+            Dim 出点属性 = 时间轴类型.GetProperty("出点", 标志)
+            断言(更新播放状态 IsNot Nothing AndAlso 设为入点 IsNot Nothing AndAlso
+                   设为出点 IsNot Nothing AndAlso 入点属性 IsNot Nothing AndAlso 出点属性 IsNot Nothing,
+               "剪辑时间轴成员不完整。")
+
+            Dim 入点 = TimeSpan.FromSeconds(2)
+            Dim 出点 = TimeSpan.FromSeconds(8)
+            更新播放状态.Invoke(时间轴, {TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10)})
+            设为入点.Invoke(时间轴, {入点})
+            设为出点.Invoke(时间轴, {出点})
+            媒体打开处理.Invoke(窗口,
+                {窗口, New 播放器媒体事件参数("same.mp4", Nothing, Nothing, True)})
+            断言(DirectCast(入点属性.GetValue(时间轴), TimeSpan) = 入点 AndAlso
+                   DirectCast(出点属性.GetValue(时间轴), TimeSpan) = 出点,
+               "同一媒体切换解码模式后没有保留出入点。")
+
+            媒体打开处理.Invoke(窗口,
+                {窗口, New 播放器媒体事件参数("other.mp4", Nothing, Nothing, False)})
+            断言(入点属性.GetValue(时间轴) Is Nothing AndAlso 出点属性.GetValue(时间轴) Is Nothing,
+               "真正打开另一媒体时没有清除出入点。")
+            窗口.Close()
+        End Using
+    End Sub
+
+    Private Sub 测试剪辑区间逐帧(视频路径 As String)
+        Using 会话 As New 播放器会话(New 播放器配置 With {.解码器 = 解码模式.CPU})
+            会话.设置音量(0.0F, True)
+            会话.打开Async(视频路径).GetAwaiter().GetResult()
+            Dim 初始 = 会话.当前快照
+            Dim 目标位置 = TimeSpan.FromTicks(Math.Max(TimeSpan.FromSeconds(1).Ticks, 初始.总时长.Ticks \ 2))
+            If 目标位置 >= 初始.总时长 Then 目标位置 = TimeSpan.FromTicks(初始.总时长.Ticks \ 2)
+            Dim 跳转前呈现帧数 = 初始.已呈现视频帧数
+            会话.跳转(目标位置)
+            Dim 当前帧 = 等待快照(会话,
+                Function(x) x.原始帧PTS <> Long.MinValue AndAlso x.已呈现视频帧数 > 跳转前呈现帧数 AndAlso
+                            Math.Abs((x.播放位置 - 目标位置).TotalMilliseconds) < 100.0,
+                "跳转到逐帧测试位置")
+
+            会话.上一帧()
+            Dim 上一帧 = 等待快照(会话,
+                Function(x) x.状态 = 播放状态.已暂停 AndAlso x.原始帧PTS < 当前帧.原始帧PTS,
+                "倒退一帧")
+            会话.下一帧()
+            Dim 返回帧 = 等待快照(会话,
+                Function(x) x.状态 = 播放状态.已暂停 AndAlso x.原始帧PTS > 上一帧.原始帧PTS,
+                "前进一帧")
+            断言(返回帧.原始帧PTS = 当前帧.原始帧PTS,
+               $"倒退再前进没有返回原帧：{当前帧.原始帧PTS} → {上一帧.原始帧PTS} → {返回帧.原始帧PTS}。")
+            Console.WriteLine($"逐帧 PTS：{当前帧.原始帧PTS} → {上一帧.原始帧PTS} → {返回帧.原始帧PTS}")
+
+            Dim 游标 = 返回帧
+            Dim 连续倒退次数 = 0
+            While 游标.播放位置 > TimeSpan.FromMilliseconds(20) AndAlso 连续倒退次数 < 300
+                Dim 倒退前PTS = 游标.原始帧PTS
+                Dim 倒退前位置 = 游标.播放位置
+                会话.上一帧()
+                游标 = 等待快照(会话,
+                    Function(x) x.状态 = 播放状态.已暂停 AndAlso x.原始帧PTS < 倒退前PTS AndAlso
+                                x.播放位置 < 倒退前位置,
+                    $"连续倒退第 {连续倒退次数 + 1} 帧")
+                连续倒退次数 += 1
+            End While
+            断言(游标.播放位置 <= TimeSpan.FromMilliseconds(20),
+               $"连续倒退 {连续倒退次数} 帧后停在 {游标.播放位置.TotalSeconds:F3}s。")
+            Console.WriteLine($"连续倒退 {连续倒退次数} 帧到 {游标.播放位置.TotalSeconds:F3}s。")
+
+            Dim 突发起点 = TimeSpan.FromTicks(初始.总时长.Ticks * 2 \ 5)
+            会话.跳转(突发起点)
+            等待快照(会话,
+                Function(x) Math.Abs((x.播放位置 - 突发起点).TotalMilliseconds) < 100.0,
+                "跳转到突发逐帧测试位置")
+
+            Using 跳转完成 As New ManualResetEventSlim(False)
+                Dim 完成处理 As EventHandler(Of 播放器事件参数) =
+                    Sub(sender, e)
+                        If e.详情JSON.Contains("""operation"":""seek""", StringComparison.Ordinal) Then
+                            跳转完成.Set()
+                        End If
+                    End Sub
+                AddHandler 会话.操作完成, 完成处理
+                Try
+                    Dim 响应计时 = Stopwatch.StartNew()
+                    For 索引 = 1 To 1000
+                        会话.上一帧()
+                    Next
+                    会话.跳转(TimeSpan.FromTicks(初始.总时长.Ticks \ 3))
+                    断言(跳转完成.Wait(TimeSpan.FromSeconds(5)),
+                       "突发逐帧请求阻塞了后续跳转，逐帧命令队列可能仍在无界增长。")
+                    Console.WriteLine($"1000 次突发倒退后的跳转响应：{响应计时.Elapsed.TotalMilliseconds:F0} ms。")
+
+                    跳转完成.Reset()
+                    响应计时.Restart()
+                    For 索引 = 1 To 1000
+                        会话.上一关键帧()
+                    Next
+                    会话.跳转(TimeSpan.FromTicks(初始.总时长.Ticks \ 4))
+                    断言(跳转完成.Wait(TimeSpan.FromSeconds(5)),
+                       "突发关键帧请求阻塞了后续跳转，导航命令队列可能仍在无界增长。")
+                    Console.WriteLine($"1000 次突发关键帧倒退后的跳转响应：{响应计时.Elapsed.TotalMilliseconds:F0} ms。")
+                Finally
+                    RemoveHandler 会话.操作完成, 完成处理
+                End Try
+            End Using
+        End Using
+    End Sub
+
+    Private Function 等待快照(会话 As 播放器会话, 条件 As Func(Of 播放器快照, Boolean), 操作 As String) As 播放器快照
+        Dim 计时 = Stopwatch.StartNew()
+        Do
+            Application.DoEvents()
+            Dim 快照 = 会话.当前快照
+            If 条件(快照) Then Return 快照
+            If 快照.状态 = 播放状态.失败 Then Throw New InvalidOperationException($"{操作}时播放器失败。")
+            If 计时.Elapsed >= TimeSpan.FromSeconds(10) Then
+                Throw New TimeoutException($"等待{操作}超时：位置 {快照.播放位置.TotalSeconds:F3}s，PTS {快照.原始帧PTS}。")
+            End If
+            Thread.Sleep(5)
+        Loop
+    End Function
+
+    Private Sub 测试GPU解码矩阵(目录 As String)
+        If Not Directory.Exists(目录) Then Throw New DirectoryNotFoundException(目录)
+        Dim 视频 = Directory.EnumerateFiles(目录).
+            Where(Function(x) {".mp4", ".mkv", ".mov", ".webm"}.
+                Contains(Path.GetExtension(x), StringComparer.OrdinalIgnoreCase)).
+            OrderBy(Function(x) x, StringComparer.OrdinalIgnoreCase).
+            ToArray()
+        断言(视频.Length > 0, $"GPU 解码矩阵目录没有视频：{目录}")
+
+        Using 输出窗口 As New Form With {
+            .ClientSize = New Drawing.Size(320, 180),
+            .FormBorderStyle = FormBorderStyle.FixedToolWindow,
+            .ShowInTaskbar = False,
+            .StartPosition = FormStartPosition.Manual,
+            .Location = New Drawing.Point(-10000, -10000)
+        }
+            输出窗口.Show()
+            Application.DoEvents()
+            For Each 路径 In 视频
+                Using 会话 As New 播放器会话(New 播放器配置 With {
+                    .解码器 = 解码模式.GPU,
+                    .色彩模式 = 色彩输出模式.映射到SDR,
+                    .输出窗口句柄 = 输出窗口.Handle
+                })
+                    会话.设置音量(0.0F, True)
+                    会话.打开Async(路径).GetAwaiter().GetResult()
+                    Dim 打开快照 = 会话.当前快照
+                    断言(打开快照.解码器 = 解码模式.GPU OrElse 打开快照.解码器 = 解码模式.CPU,
+                       $"{Path.GetFileName(路径)} 返回了无效解码模式。")
+                    会话.播放()
+                    Dim 解码快照 = 等待快照(会话,
+                        Function(x) x.已解码视频帧数 > 0 AndAlso x.已呈现视频帧数 > 0,
+                        $"{Path.GetFileName(路径)} 首帧")
+                    Console.WriteLine($"{Path.GetFileName(路径)}：{解码快照.解码器}，" &
+                                      $"解码 {解码快照.已解码视频帧数} 帧，呈现 {解码快照.已呈现视频帧数} 帧")
+                End Using
+            Next
+        End Using
+    End Sub
+
+    Private Sub 测试ASS特效字幕(视频路径 As String, ASS路径 As String)
+        Dim 字体目录 = ASS媒体字体发现器.查找字体目录(视频路径)
+        断言(字体目录.Any(Function(x) String.Equals(Path.GetFileName(x), "Fonts", StringComparison.OrdinalIgnoreCase)),
+           "没有发现视频目录下的 Fonts 文件夹。")
+
+        Dim 已释放生成器 As ASS特效字幕帧生成器
+        Using 轨道 = 外部字幕自动加载器.加载字幕(ASS路径, 视频路径)
+            断言(轨道.ASS特效生成器 IsNot Nothing, "ASS 轨道没有使用 libass。")
+            已释放生成器 = 轨道.ASS特效生成器
+            断言(已释放生成器.生成帧(TimeSpan.Zero, 1280, 720) Is Nothing,
+               "无字幕时刻没有生成透明清空帧。")
+            Dim OP帧 = 已释放生成器.生成帧(TimeSpan.FromSeconds(97), 1280, 720)
+            断言(OP帧 IsNot Nothing AndAlso OP帧.像素BGRA.Length > 0,
+               "OP 的模糊、定位字幕没有生成位图。")
+            断言(是预乘BGRA(OP帧.像素BGRA), "libass 位图没有转换为 Direct2D 所需的预乘 BGRA。")
+            测试ASS半透明像素(视频路径)
+            Using 画面 As New 播放器画面控件()
+                Using 呈现器 As New 播放器定时文字图层呈现器(画面, Function() Nothing,
+                    Function() 轨道, Sub(size, commands, sequence, frameRate) Return)
+                    Dim 命令 = 呈现器.生成命令(New Size(1280, 720), 1280UI, 720UI,
+                        TimeSpan.FromSeconds(97), 轨道)
+                    断言(命令.Count = 1 AndAlso 命令(0).是位图 AndAlso 命令(0).位图像素BGRA.Length > 0,
+                       "ASS 特效帧没有进入独立 GPU 字幕图层。")
+                End Using
+            End Using
+
+            Dim 淡入前 = 已释放生成器.生成帧(TimeSpan.FromSeconds(1227.2), 1280, 720)
+            Dim 淡入中 = 已释放生成器.生成帧(TimeSpan.FromSeconds(1227.25), 1280, 720)
+            Dim 淡入后 = 已释放生成器.生成帧(TimeSpan.FromSeconds(1227.35), 1280, 720)
+            断言(淡入前 Is Nothing AndAlso 淡入中 IsNot Nothing AndAlso 淡入后 IsNot Nothing AndAlso
+               淡入中.内容标识 <> 淡入后.内容标识,
+               "ASS 的 fad/blur 动画没有随媒体时间更新。")
+        End Using
+        Dim 已释放 = False
+        Try
+            已释放生成器.生成帧(TimeSpan.Zero, 1280, 720)
+        Catch ex As ObjectDisposedException
+            已释放 = True
+        End Try
+        断言(已释放, "ASS 轨道释放后原生 libass 句柄仍可使用。")
+        Dim 字体文件 = Directory.EnumerateFiles(字体目录.First()).First(
+            Function(x) {".ttf", ".otf", ".ttc"}.Contains(Path.GetExtension(x), StringComparer.OrdinalIgnoreCase))
+        Using 字体流 = New FileStream(字体文件, FileMode.Open, FileAccess.Read, FileShare.None)
+            断言(字体流.Length > 0, "释放 libass 后字体文件不可读取。")
+        End Using
+        Console.WriteLine($"ASS 字体目录：{String.Join("；", 字体目录)}")
+    End Sub
+
+    Private Function 是预乘BGRA(像素 As Byte()) As Boolean
+        For index = 0 To 像素.Length - 4 Step 4
+            Dim alpha = 像素(index + 3)
+            If 像素(index) > alpha OrElse 像素(index + 1) > alpha OrElse 像素(index + 2) > alpha Then Return False
+        Next
+        Return True
+    End Function
+
+    Private Sub 测试ASS半透明像素(媒体路径 As String)
+        Dim 临时路径 = Path.Combine(Path.GetTempPath(),
+            "fff-player-ass-alpha-" & Guid.NewGuid().ToString("N") & ".ass")
+        Dim 脚本 = String.Join(vbLf, {
+            "[Script Info]",
+            "ScriptType: v4.00+",
+            "PlayResX: 320",
+            "PlayResY: 180",
+            "",
+            "[V4+ Styles]",
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+            "Style: Default,Arial,48,&H80FFFFFF,&H80FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1",
+            "",
+            "[Events]",
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+            "Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,{\p1}m 80 50 l 240 50 240 130 80 130{\p0}"})
+        Try
+            File.WriteAllText(临时路径, 脚本, New UTF8Encoding(False))
+            Using 生成器 As New ASS特效字幕帧生成器(临时路径, 媒体路径)
+                Dim 帧 = 生成器.生成帧(TimeSpan.FromSeconds(1), 320, 180)
+                断言(帧 IsNot Nothing AndAlso 帧.像素BGRA.Length > 0,
+                   "半透明 ASS 测试没有生成位图。")
+                Dim 最大Alpha索引 = 3
+                For index = 7 To 帧.像素BGRA.Length - 1 Step 4
+                    If 帧.像素BGRA(index) > 帧.像素BGRA(最大Alpha索引) Then 最大Alpha索引 = index
+                Next
+                Dim alpha = CInt(帧.像素BGRA(最大Alpha索引))
+                Dim blue = CInt(帧.像素BGRA(最大Alpha索引 - 3))
+                Dim green = CInt(帧.像素BGRA(最大Alpha索引 - 2))
+                Dim red = CInt(帧.像素BGRA(最大Alpha索引 - 1))
+                断言(alpha >= 120 AndAlso alpha <= 132 AndAlso
+                   blue >= alpha - 16 AndAlso green >= alpha - 16 AndAlso red >= alpha - 16 AndAlso
+                   blue <= alpha AndAlso green <= alpha AndAlso red <= alpha,
+                   $"半透明 ASS 像素发生重复预乘：BGRA={blue},{green},{red},{alpha}。")
+            End Using
+        Finally
+            If File.Exists(临时路径) Then File.Delete(临时路径)
+        End Try
+    End Sub
 
     Private Sub 测试音频规格回归(视频路径 As String)
         Using 会话 As New 播放器会话(New 播放器配置 With {
@@ -528,7 +907,7 @@ Friend Module Program
         Using reader As New StringReader(内容)
             Dim document = SRT字幕解析器.解析(reader)
             Return New 外部字幕轨道("internal-performance.srt", 外部字幕格式.SRT,
-                New SRT字幕帧生成器(document, New SRT字幕样式()), Nothing, Nothing)
+                New SRT字幕帧生成器(document, New SRT字幕样式()), Nothing)
         End Using
     End Function
 
@@ -758,21 +1137,13 @@ Friend Module Program
     End Sub
 
     Private Sub 测试字幕(视频路径 As String, ASS路径 As String, SRT路径 As String)
-        Dim ASS文档 = ASS字幕解析器.解析文件(ASS路径)
         Dim SRT文档 = SRT字幕解析器.解析文件(SRT路径)
-        断言(ASS文档.提示.Count = 2015, $"ASS 条目数异常：{ASS文档.提示.Count}。")
         断言(SRT文档.提示.Count = 2384, $"SRT 条目数异常：{SRT文档.提示.Count}。")
 
         Dim 区域 = 视频显示区域.计算(1280, 720, 96.0F, 3840, 2160)
-        Dim ASS绘制项 As New List(Of ASS字幕绘制项)()
         Dim SRT绘制项 As New List(Of SRT字幕绘制项)()
-        Dim ASS生成器 As New ASS字幕帧生成器(ASS文档)
         Dim SRT生成器 As New SRT字幕帧生成器(SRT文档, New SRT字幕样式())
-        ASS生成器.生成帧(TimeSpan.FromSeconds(75.5), 区域, ASS绘制项)
         SRT生成器.生成帧(TimeSpan.FromSeconds(75.5), 区域, SRT绘制项)
-        断言(ASS绘制项.Count > 0 AndAlso ASS绘制项.Any(
-               Function(x) x.提示.片段.Any(Function(y) Not String.IsNullOrWhiteSpace(y.文本))),
-               "ASS 在 1:15.5 没有生成可见文本。")
         断言(SRT绘制项.Count > 0 AndAlso SRT绘制项.Any(
                Function(x) x.行.Any(Function(y) Not String.IsNullOrWhiteSpace(y.文本))),
                "SRT 在 1:15.5 没有生成可见文本。")
@@ -781,13 +1152,13 @@ Friend Module Program
             Using 呈现器 As New 播放器定时文字图层呈现器(画面控件, Function() Nothing,
                                                         Function() Nothing,
                                                         Sub(size, commands, sequence, frameRate) Return)
-                Using ASS轨道 As New 外部字幕轨道(ASS路径, 外部字幕格式.ASS, Nothing,
-                                                New ASS字幕帧生成器(ASS文档), Nothing)
-                    断言(统计字幕命令(呈现器, ASS轨道) > 0, "ASS 没有生成 GPU 文字命令。")
+                Using ASS轨道 = 外部字幕自动加载器.加载字幕(ASS路径, 视频路径)
+                    断言(ASS轨道.ASS特效生成器 IsNot Nothing, "ASS 没有创建 libass 渲染器。")
+                    断言(统计字幕命令(呈现器, ASS轨道) > 0, "ASS 没有生成 GPU 特效位图命令。")
                 End Using
                 Using SRT轨道 As New 外部字幕轨道(SRT路径, 外部字幕格式.SRT,
                                                 New SRT字幕帧生成器(SRT文档, New SRT字幕样式()),
-                                                Nothing, Nothing)
+                                                Nothing)
                     断言(统计字幕命令(呈现器, SRT轨道) > 0, "SRT 没有生成 GPU 文字命令。")
                 End Using
             End Using
@@ -798,7 +1169,7 @@ Friend Module Program
             断言(自动轨道 IsNot Nothing, "后台字幕加载器没有找到同名字幕。")
             断言(自动轨道.格式 = 外部字幕格式.SRT, "后台字幕加载优先级没有选择 SRT。")
         End Using
-        Console.WriteLine($"字幕：ASS {ASS文档.提示.Count} 条，SRT {SRT文档.提示.Count} 条，后台加载与 1:15.5 帧生成通过。")
+        Console.WriteLine($"字幕：ASS libass 特效位图、SRT {SRT文档.提示.Count} 条，后台加载与 1:15.5 帧生成通过。")
     End Sub
 
     Private Function 统计字幕命令(呈现器 As 播放器定时文字图层呈现器,
@@ -829,13 +1200,9 @@ Friend Module Program
                     Case ".srt"
                         Dim 文档 = SRT字幕解析器.解析文件(字幕路径)
                         字幕轨道 = New 外部字幕轨道(字幕路径, 外部字幕格式.SRT,
-                            New SRT字幕帧生成器(文档, New SRT字幕样式()), Nothing, Nothing)
+                            New SRT字幕帧生成器(文档, New SRT字幕样式()), Nothing)
                     Case ".ass", ".ssa"
-                        Dim 文档 = ASS字幕解析器.解析文件(字幕路径)
-                        Dim 格式 = If(Path.GetExtension(字幕路径).Equals(".ssa", StringComparison.OrdinalIgnoreCase),
-                                    外部字幕格式.SSA, 外部字幕格式.ASS)
-                        字幕轨道 = New 外部字幕轨道(字幕路径, 格式, Nothing,
-                            New ASS字幕帧生成器(文档), Nothing)
+                        字幕轨道 = 外部字幕自动加载器.加载字幕(字幕路径, 视频路径)
                     Case Else
                         Throw New NotSupportedException($"测试不支持字幕格式：{字幕路径}")
                 End Select

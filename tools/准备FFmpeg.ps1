@@ -47,7 +47,26 @@ function Get-VisualCppTool {
         return $command.Source
     }
 
-    throw "$Name was not found in VCToolsInstallDir or PATH. Run this script from a Visual Studio Developer PowerShell or Developer Command Prompt."
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
+        $installations = @(& $vswhere -prerelease -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json |
+            ConvertFrom-Json)
+        $preview = $installations | Where-Object { $_.isPrerelease } |
+            Sort-Object installationVersion -Descending | Select-Object -First 1
+        if ($null -ne $preview) {
+            $versionFile = Join-Path $preview.installationPath "VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt"
+            if (Test-Path -LiteralPath $versionFile -PathType Leaf) {
+                $version = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+                $candidate = Join-Path $preview.installationPath "VC\Tools\MSVC\$version\bin\Hostx64\x64\$Name"
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                    return [IO.Path]::GetFullPath($candidate)
+                }
+            }
+        }
+    }
+
+    throw "$Name was not found in Visual Studio Preview, VCToolsInstallDir, or PATH."
 }
 
 function Get-RuntimeDll {

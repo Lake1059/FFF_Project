@@ -174,7 +174,7 @@ Public NotInheritable Class 播放器控制器
                                        本次取消 As CancellationTokenSource) As Task
         Dim 候选轨道 As 外部字幕轨道 = Nothing
         Try
-            候选轨道 = Await 外部字幕自动加载器.加载字幕Async(字幕路径, 本次取消.Token)
+            候选轨道 = Await 外部字幕自动加载器.加载字幕Async(字幕路径, 媒体路径, 本次取消.Token)
             If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
                 Not ReferenceEquals(字幕加载取消, 本次取消) OrElse
                 Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
@@ -282,6 +282,47 @@ Public NotInheritable Class 播放器控制器
             If 新位置 < TimeSpan.Zero Then 新位置 = TimeSpan.Zero
             If 快照.总时长 > TimeSpan.Zero Then 新位置 = 最小时间(新位置, 快照.总时长)
             目标.跳转(新位置)
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
+    Public Sub 跳转到位置(位置 As TimeSpan)
+        Dim 目标 = 会话
+        If 目标 Is Nothing OrElse 正在切换会话 OrElse 位置 < TimeSpan.Zero Then Return
+
+        Try
+            Dim 快照 = 目标.当前快照
+            If 可操作(快照.状态) AndAlso 快照.总时长 > TimeSpan.Zero Then
+                目标.跳转(最小时间(位置, 快照.总时长))
+            End If
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
+    Public Sub 逐帧(方向 As Integer)
+        If 方向 <> -1 AndAlso 方向 <> 1 Then Throw New ArgumentOutOfRangeException(NameOf(方向))
+        Dim 目标 = 会话
+        If 目标 Is Nothing OrElse 正在切换会话 Then Return
+
+        Try
+            Dim 快照 = 目标.当前快照
+            If 可操作(快照.状态) AndAlso 快照.当前视频流 >= 0 Then
+                If 方向 < 0 Then 目标.上一帧() Else 目标.下一帧()
+            End If
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
+    Public Sub 跳转到相邻关键帧(方向 As Integer)
+        If 方向 <> -1 AndAlso 方向 <> 1 Then Throw New ArgumentOutOfRangeException(NameOf(方向))
+        Dim 目标 = 会话
+        If 目标 Is Nothing OrElse 正在切换会话 Then Return
+
+        Try
+            Dim 快照 = 目标.当前快照
+            If 可操作(快照.状态) AndAlso 快照.当前视频流 >= 0 Then
+                If 方向 < 0 Then 目标.上一关键帧() Else 目标.下一关键帧()
+            End If
         Catch ex As 播放器异常
         End Try
     End Sub
@@ -404,7 +445,7 @@ Public NotInheritable Class 播放器控制器
             会话 = 候选会话
             候选会话 = Nothing
             当前文件路径 = 路径
-            当前解码器 = 解码器
+            当前解码器 = 快照.解码器
             当前色彩输出 = 候选色彩输出
             添加会话事件(会话)
             重绑输出窗口()
@@ -413,7 +454,8 @@ Public NotInheritable Class 播放器控制器
             ' “媒体已打开”是可操作边界。事件处理器可能立即切换色彩、音轨或跳转，
             ' 因而不能等到 Finally 才清除切换标记，否则首个操作会被静默忽略。
             正在切换会话 = False
-            RaiseEvent 媒体已打开(Me, New 播放器媒体事件参数(当前文件路径, 媒体信息, 快照))
+            RaiseEvent 媒体已打开(Me,
+                New 播放器媒体事件参数(当前文件路径, 媒体信息, 快照, 保留当前字幕))
             If Not 保留当前字幕 Then
                 开始自动加载字幕(当前文件路径)
                 开始自动加载弹幕(当前文件路径)
@@ -461,6 +503,7 @@ Public NotInheritable Class 播放器控制器
         AddHandler 目标.状态变化, AddressOf 会话_状态变化
         AddHandler 目标.打开完成, AddressOf 会话_打开完成
         AddHandler 目标.色彩模式变化, AddressOf 会话_色彩模式变化
+        AddHandler 目标.设备变化, AddressOf 会话_设备变化
         AddHandler 目标.错误, AddressOf 会话_错误
     End Sub
 
@@ -468,6 +511,7 @@ Public NotInheritable Class 播放器控制器
         RemoveHandler 目标.状态变化, AddressOf 会话_状态变化
         RemoveHandler 目标.打开完成, AddressOf 会话_打开完成
         RemoveHandler 目标.色彩模式变化, AddressOf 会话_色彩模式变化
+        RemoveHandler 目标.设备变化, AddressOf 会话_设备变化
         RemoveHandler 目标.错误, AddressOf 会话_错误
     End Sub
 
@@ -478,7 +522,8 @@ Public NotInheritable Class 播放器控制器
     Private Sub 会话_打开完成(sender As Object, e As 播放器事件参数)
         If sender IsNot 会话 Then Return
         Try
-            RaiseEvent 媒体已打开(Me, New 播放器媒体事件参数(当前文件路径, 会话.当前媒体信息, 会话.当前快照))
+            RaiseEvent 媒体已打开(Me,
+                New 播放器媒体事件参数(当前文件路径, 会话.当前媒体信息, 会话.当前快照, False))
         Catch ex As 播放器异常
         End Try
     End Sub
@@ -490,6 +535,13 @@ Public NotInheritable Class 播放器控制器
         If 快照 IsNot Nothing AndAlso 快照.是HDR源 Then
             RaiseEvent HDR输出状态已确认(Me, New 播放器HDR状态事件参数(取得HDR模式说明(快照)))
         End If
+    End Sub
+
+    Private Sub 会话_设备变化(sender As Object, e As 播放器事件参数)
+        If sender IsNot 会话 Then Return
+        Dim 快照 = 安全读取快照()
+        If 快照 IsNot Nothing Then 当前解码器 = 快照.解码器
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
     End Sub
 
     Private Sub 会话_错误(sender As Object, e As 播放器事件参数)
@@ -526,6 +578,11 @@ Public NotInheritable Class 播放器控制器
             RaiseEvent 外部字幕已加载(Me, New 播放器字幕事件参数(当前外部字幕.路径, 当前外部字幕.格式))
         Catch ex As OperationCanceledException
             ' 新媒体、停止或关闭会取消尚未完成的自动加载。
+        Catch ex As NotSupportedException
+            If Not 已释放 AndAlso Not 本次取消.IsCancellationRequested AndAlso
+                String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then
+                RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "字幕不受支持"))
+            End If
         Catch
             ' 外部字幕是可选资源，加载失败不影响媒体播放。
         Finally
@@ -647,15 +704,18 @@ End Class
 Public NotInheritable Class 播放器媒体事件参数
     Inherits EventArgs
 
-    Public Sub New(文件路径 As String, 媒体信息 As 媒体信息, 快照 As 播放器快照)
+    Public Sub New(文件路径 As String, 媒体信息 As 媒体信息, 快照 As 播放器快照,
+                   保留剪辑区间 As Boolean)
         Me.文件路径 = 文件路径
         Me.媒体信息 = 媒体信息
         Me.快照 = 快照
+        Me.保留剪辑区间 = 保留剪辑区间
     End Sub
 
     Public ReadOnly Property 文件路径 As String
     Public ReadOnly Property 媒体信息 As 媒体信息
     Public ReadOnly Property 快照 As 播放器快照
+    Public ReadOnly Property 保留剪辑区间 As Boolean
 End Class
 
 Public NotInheritable Class 播放器错误事件参数

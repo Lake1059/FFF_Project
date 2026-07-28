@@ -14,6 +14,8 @@ Friend NotInheritable Class 播放器界面呈现器
     Private ReadOnly 进度条 As LakeUI.ExcellentTrackBar
     Private ReadOnly 音量条 As LakeUI.ExcellentTrackBar
     Private ReadOnly 播放暂停按钮 As LakeUI.ModernButton
+    Private ReadOnly 播放图标 As Image
+    Private ReadOnly 暂停图标 As Image
     Private ReadOnly 解码按钮 As LakeUI.ModernButton
     Private ReadOnly HDR按钮 As LakeUI.ModernButton
     Private ReadOnly 视频编码按钮 As LakeUI.ModernButton
@@ -26,6 +28,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private ReadOnly 音频编码占位 As Control
     Private ReadOnly 声道数占位 As Control
     Private ReadOnly 画面控件 As 播放器画面控件
+    Private ReadOnly 剪辑区间进度条 As 剪辑区间进度条控件
     Private ReadOnly 快照提供器 As Func(Of 播放器快照)
     Private ReadOnly 正在切换提供器 As Func(Of Boolean)
     Private ReadOnly 解码器提供器 As Func(Of 解码模式)
@@ -36,10 +39,13 @@ Friend NotInheritable Class 播放器界面呈现器
     Private 正在拖动进度条 As Boolean
     Private 有媒体快照 As Boolean
     Private 已释放 As Boolean
+    Private 剪辑区间模式已启用 As Boolean
 
     Friend Sub New(进度条 As LakeUI.ExcellentTrackBar,
                    音量条 As LakeUI.ExcellentTrackBar,
                    播放暂停按钮 As LakeUI.ModernButton,
+                   播放图标 As Image,
+                   暂停图标 As Image,
                    解码按钮 As LakeUI.ModernButton,
                    HDR按钮 As LakeUI.ModernButton,
                    视频编码按钮 As LakeUI.ModernButton,
@@ -52,6 +58,7 @@ Friend NotInheritable Class 播放器界面呈现器
                    音频编码占位 As Control,
                    声道数占位 As Control,
                    画面控件 As 播放器画面控件,
+                   剪辑区间进度条 As 剪辑区间进度条控件,
                    快照提供器 As Func(Of 播放器快照),
                    正在切换提供器 As Func(Of Boolean),
                    解码器提供器 As Func(Of 解码模式),
@@ -59,6 +66,8 @@ Friend NotInheritable Class 播放器界面呈现器
         Me.进度条 = 进度条
         Me.音量条 = 音量条
         Me.播放暂停按钮 = 播放暂停按钮
+        Me.播放图标 = 播放图标
+        Me.暂停图标 = 暂停图标
         Me.解码按钮 = 解码按钮
         Me.HDR按钮 = HDR按钮
         Me.视频编码按钮 = 视频编码按钮
@@ -71,6 +80,7 @@ Friend NotInheritable Class 播放器界面呈现器
         Me.音频编码占位 = 音频编码占位
         Me.声道数占位 = 声道数占位
         Me.画面控件 = 画面控件
+        Me.剪辑区间进度条 = 剪辑区间进度条
         Me.快照提供器 = 快照提供器
         Me.正在切换提供器 = 正在切换提供器
         Me.解码器提供器 = 解码器提供器
@@ -126,9 +136,10 @@ Friend NotInheritable Class 播放器界面呈现器
             Try
                 If 快照.总时长 > TimeSpan.Zero Then
                     Dim 最大值 = 快照.总时长.TotalMilliseconds
-                    进度条.Minimum = 0
-                    进度条.Maximum = 最大值
-                    进度条.Value = Math.Clamp(快照.播放位置.TotalMilliseconds, 0, 最大值)
+                    If 进度条.Minimum <> 0 Then 进度条.Minimum = 0
+                    If 进度条.Maximum <> 最大值 Then 进度条.Maximum = 最大值
+                    Dim 新值 = Math.Clamp(快照.播放位置.TotalMilliseconds, 0, 最大值)
+                    If 进度条.Value <> 新值 Then 进度条.Value = 新值
                 Else
                     重置媒体进度条()
                 End If
@@ -137,6 +148,7 @@ Friend NotInheritable Class 播放器界面呈现器
             End Try
             设置时间戳文本(快照.播放位置, 快照.总时长)
         End If
+        剪辑区间进度条?.更新播放状态(快照.播放位置, 快照.总时长)
         刷新HDR按钮(快照)
     End Sub
 
@@ -172,8 +184,20 @@ Friend NotInheritable Class 播放器界面呈现器
         有媒体快照 = False
         重置媒体进度条()
         设置时间戳文本(TimeSpan.Zero, TimeSpan.Zero)
+        剪辑区间进度条?.清除媒体()
         更新媒体信息(Nothing, Nothing)
         更新播放按钮(播放状态.空闲)
+    End Sub
+
+    Friend Sub 设置剪辑区间模式(启用 As Boolean)
+        If 已释放 Then Return
+        剪辑区间模式已启用 = 启用
+        Dim 快照 = 快照提供器()
+        If 快照 Is Nothing Then
+            设置时间戳文本(TimeSpan.Zero, TimeSpan.Zero)
+        Else
+            设置时间戳文本(快照.播放位置, 快照.总时长)
+        End If
     End Sub
 
     Friend Sub 更新Dpi()
@@ -242,7 +266,9 @@ Friend NotInheritable Class 播放器界面呈现器
     End Function
 
     Private Sub 更新播放按钮(状态 As 播放状态)
-        播放暂停按钮.Text = If(状态 = 播放状态.正在播放, "⏸️", "▶️")
+        Dim 图标 = If(状态 = 播放状态.正在播放, 暂停图标, 播放图标)
+        If Not ReferenceEquals(播放暂停按钮.BackImage, 图标) Then 播放暂停按钮.BackImage = 图标
+        If 播放暂停按钮.Text.Length > 0 Then 播放暂停按钮.Text = String.Empty
     End Sub
 
     Private Sub 重置媒体进度条()
@@ -324,7 +350,7 @@ Friend NotInheritable Class 播放器界面呈现器
 
     Private Sub 设置时间戳文本(当前位置 As TimeSpan, 总时长 As TimeSpan)
         Dim 精度 = 取得时间戳精度(当前位置, 总时长)
-        Dim HTML = $"{格式化彩色时长(当前位置, 精度)}<font color=""#AAB0B9""> / </font>{格式化彩色时长(总时长, 精度)}"
+        Dim HTML = $"{格式化彩色时长(当前位置, 精度, 剪辑区间模式已启用)}<font color=""#AAB0B9""> / </font>{格式化彩色时长(总时长, 精度)}"
         设置自适应文本(时间标签, HTML)
     End Sub
 
@@ -335,7 +361,8 @@ Friend NotInheritable Class 播放器界面呈现器
         Return 时间戳精度.秒
     End Function
 
-    Private Shared Function 格式化彩色时长(时长 As TimeSpan, 精度 As 时间戳精度) As String
+    Private Shared Function 格式化彩色时长(时长 As TimeSpan, 精度 As 时间戳精度,
+                                             Optional 显示毫秒 As Boolean = False) As String
         If 时长 < TimeSpan.Zero Then 时长 = TimeSpan.Zero
         Dim 小时 = CLng(Math.Floor(时长.TotalHours))
         Dim 分钟 = 时长.Minutes
@@ -344,13 +371,17 @@ Friend NotInheritable Class 播放器界面呈现器
         Const 分钟颜色 = "#87B7ED"
         Const 秒颜色 = "#83BF9B"
         Const 冒号颜色 = "#E0A667"
+        Const 小数颜色 = "#D2C084"
+        Dim 小数 = If(显示毫秒,
+            $"<font color=""{冒号颜色}"">.</font><font color=""{小数颜色}"">{时长.Milliseconds:000}</font>",
+            String.Empty)
         Select Case 精度
             Case 时间戳精度.小时
-                Return $"<font color=""{小时颜色}"">{小时:00}</font><font color=""{冒号颜色}"">:</font><font color=""{分钟颜色}"">{分钟:00}</font><font color=""{冒号颜色}"">:</font><font color=""{秒颜色}"">{秒:00}</font>"
+                Return $"<font color=""{小时颜色}"">{小时:00}</font><font color=""{冒号颜色}"">:</font><font color=""{分钟颜色}"">{分钟:00}</font><font color=""{冒号颜色}"">:</font><font color=""{秒颜色}"">{秒:00}</font>{小数}"
             Case 时间戳精度.分钟
-                Return $"<font color=""{分钟颜色}"">{分钟:00}</font><font color=""{冒号颜色}"">:</font><font color=""{秒颜色}"">{秒:00}</font>"
+                Return $"<font color=""{分钟颜色}"">{分钟:00}</font><font color=""{冒号颜色}"">:</font><font color=""{秒颜色}"">{秒:00}</font>{小数}"
             Case Else
-                Return $"<font color=""{秒颜色}"">{秒:00}</font>"
+                Return $"<font color=""{秒颜色}"">{秒:00}</font>{小数}"
         End Select
     End Function
 

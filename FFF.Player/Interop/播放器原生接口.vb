@@ -206,6 +206,20 @@ Friend NotInheritable Class 位图字幕原生句柄
     End Function
 End Class
 
+Friend NotInheritable Class ASS字幕原生句柄
+    Inherits SafeHandleZeroOrMinusOneIsInvalid
+
+    Friend Sub New(原生指针 As IntPtr)
+        MyBase.New(True)
+        SetHandle(原生指针)
+    End Sub
+
+    Protected Overrides Function ReleaseHandle() As Boolean
+        播放器原生接口.FFF3FP_DestroyAssSubtitle(handle)
+        Return True
+    End Function
+End Class
+
 Friend Module 播放器原生接口
     Friend Const 动态库名称 As String = "FFF.Native.dll"
 
@@ -241,6 +255,9 @@ Friend Module 播放器原生接口
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_StepFrame(播放器 As 播放器原生句柄, 方向 As Integer) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_StepKeyframe(播放器 As 播放器原生句柄, 方向 As Integer) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SelectVideoStream(播放器 As 播放器原生句柄, 流索引 As Integer) As 原生播放器结果
@@ -309,5 +326,24 @@ Friend Module 播放器原生接口
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Sub FFF3FP_DestroyBitmapSubtitle(解码器 As IntPtr)
+    End Sub
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_OpenAssSubtitle(路径UTF8 As IntPtr, 字体目录UTF8 As IntPtr, ByRef 渲染器 As IntPtr) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_RenderAssSubtitle(渲染器 As ASS字幕原生句柄, 位置100纳秒 As Long,
+                                             画布宽度 As Integer, 画布高度 As Integer,
+                                             ByRef 帧 As 原生位图字幕帧) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_CopyAssSubtitlePixels(渲染器 As ASS字幕原生句柄, 输出 As IntPtr,
+                                                 输出大小 As UInteger) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetAssSubtitleLastError(渲染器 As ASS字幕原生句柄, 输出UTF8 As IntPtr,
+                                                   输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Sub FFF3FP_DestroyAssSubtitle(渲染器 As IntPtr)
     End Sub
 End Module

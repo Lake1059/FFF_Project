@@ -101,6 +101,7 @@ struct FFF3FPSnapshot {
 
 using FFF3FPHandle = void*;
 using FFF3FPBitmapSubtitleHandle = void*;
+using FFF3FPAssSubtitleHandle = void*;
 
 enum class FFF3FPBitmapSubtitleFlags : std::uint32_t {
     None = 0,
@@ -245,6 +246,7 @@ FFF3FP_API FFFResult FFF3FP_Seek(FFF3FPHandle player, std::int64_t position100ns
 FFF3FP_API FFFResult FFF3FP_SeekKeyframe(FFF3FPHandle player, std::int64_t position100ns) noexcept;
 FFF3FP_API FFFResult FFF3FP_SeekFrame(FFF3FPHandle player, std::int64_t frameIndex) noexcept;
 FFF3FP_API FFFResult FFF3FP_StepFrame(FFF3FPHandle player, std::int32_t direction) noexcept;
+FFF3FP_API FFFResult FFF3FP_StepKeyframe(FFF3FPHandle player, std::int32_t direction) noexcept;
 FFF3FP_API FFFResult FFF3FP_SelectVideoStream(FFF3FPHandle player,
     std::int32_t streamIndex) noexcept;
 FFF3FP_API FFFResult FFF3FP_SelectAudioStream(FFF3FPHandle player,
@@ -285,3 +287,16 @@ FFF3FP_API FFFResult FFF3FP_SeekBitmapSubtitle(FFF3FPBitmapSubtitleHandle decode
 FFF3FP_API FFFResult FFF3FP_GetBitmapSubtitleLastError(FFF3FPBitmapSubtitleHandle decoder,
     char* outputUtf8, std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 FFF3FP_API void FFF3FP_DestroyBitmapSubtitle(FFF3FPBitmapSubtitleHandle decoder) noexcept;
+
+// Renders ASS/SSA directly from libass image masks. Font directories are
+// separated by LF; every TTF/OTF/TTC is loaded into this renderer's library.
+FFF3FP_API FFFResult FFF3FP_OpenAssSubtitle(const char* localPathUtf8,
+    const char* fontDirectoriesUtf8, FFF3FPAssSubtitleHandle* renderer) noexcept;
+FFF3FP_API FFFResult FFF3FP_RenderAssSubtitle(FFF3FPAssSubtitleHandle renderer,
+    std::int64_t position100ns, std::int32_t canvasWidth, std::int32_t canvasHeight,
+    FFF3FPBitmapSubtitleFrame* frame) noexcept;
+FFF3FP_API FFFResult FFF3FP_CopyAssSubtitlePixels(FFF3FPAssSubtitleHandle renderer,
+    void* output, std::uint32_t outputSize) noexcept;
+FFF3FP_API FFFResult FFF3FP_GetAssSubtitleLastError(FFF3FPAssSubtitleHandle renderer,
+    char* outputUtf8, std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
+FFF3FP_API void FFF3FP_DestroyAssSubtitle(FFF3FPAssSubtitleHandle renderer) noexcept;

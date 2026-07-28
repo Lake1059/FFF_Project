@@ -1,0 +1,8 @@
+{
+  "name": "3f-project",
+  "version-string": "1.0.0",
+  "builtin-baseline": "e03dc9b29710050cd1018bc5674688108658d327",
+  "dependencies": [
+    "libass"
+  ]
+}

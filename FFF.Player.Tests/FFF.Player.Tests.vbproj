@@ -10,6 +10,14 @@
     <StartupObject>Program</StartupObject>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <LibassRuntimeDirectory>$(MSBuildProjectDirectory)\..\third_party\vcpkg_installed\x64-windows\debug\bin</LibassRuntimeDirectory>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' != 'Debug'">
+    <LibassRuntimeDirectory>$(MSBuildProjectDirectory)\..\third_party\vcpkg_installed\x64-windows\bin</LibassRuntimeDirectory>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\FFF.Player\FFF.Player.vbproj" />
     <ProductNative Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" />
@@ -19,13 +27,16 @@
     <DevelopmentRuntime Include="..\runtime\swresample*.dll" />
     <DevelopmentRuntime Include="..\runtime\swscale*.dll" />
     <DevelopmentRuntime Include="..\runtime\avfilter*.dll" />
+    <LibassMainRuntime Include="$(LibassRuntimeDirectory)\ass-*.dll" />
+    <LibassRuntime Include="@(LibassMainRuntime);$(LibassRuntimeDirectory)\brotlicommon.dll;$(LibassRuntimeDirectory)\brotlidec.dll;$(LibassRuntimeDirectory)\fribidi-0.dll;$(LibassRuntimeDirectory)\harfbuzz.dll" />
+    <LibassRuntime Include="$(LibassRuntimeDirectory)\bz2d.dll;$(LibassRuntimeDirectory)\freetyped.dll;$(LibassRuntimeDirectory)\libpng16d.dll;$(LibassRuntimeDirectory)\zd.dll" Condition="'$(Configuration)' == 'Debug'" />
+    <LibassRuntime Include="$(LibassRuntimeDirectory)\bz2.dll;$(LibassRuntimeDirectory)\freetype.dll;$(LibassRuntimeDirectory)\libpng16.dll;$(LibassRuntimeDirectory)\z.dll" Condition="'$(Configuration)' != 'Debug'" />
   </ItemGroup>
 
   <Target Name="CopyNativeRuntime" AfterTargets="Build">
-    <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')"
-           Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
-    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime)" DestinationFolder="$(OutDir)"
-          SkipUnchangedFiles="true" />
+    <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
+    <Error Condition="'@(LibassMainRuntime)' == ''" Text="缺少 libass 运行库；请先运行 tools\准备Libass.ps1。" />
+    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime);@(LibassRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

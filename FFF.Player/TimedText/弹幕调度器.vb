@@ -22,8 +22,8 @@ End Class
 
 Public NotInheritable Class 弹幕显示配置
     ''' <summary>当前未提供交互设置，因此这里是播放器启用弹幕时的默认配置。</summary>
-    Public Property 字体 As String = "Microsoft YaHei"
-    Public Property 字号 As Single = 32.0F
+    Public Property 字体 As String = "Microsoft YaHei UI"
+    Public Property 字号 As Single = 36
     Public Property 使用源字号 As Boolean
     Public Property 使用源颜色 As Boolean = True
     Public Property 颜色ARGB As UInteger = &HFFFFFFFFUI

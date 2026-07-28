@@ -17,6 +17,7 @@
 #include <vector>
 
 struct AVCodecContext;
+struct AVCodec;
 struct AVFormatContext;
 struct AVFrame;
 struct AVPacket;
@@ -36,6 +37,7 @@ public:
     FFFResult SeekKeyframe(std::int64_t position100ns) noexcept;
     FFFResult SeekFrame(std::int64_t frameIndex) noexcept;
     FFFResult StepFrame(std::int32_t direction) noexcept;
+    FFFResult StepKeyframe(std::int32_t direction) noexcept;
     FFFResult SelectVideoStream(std::int32_t streamIndex) noexcept;
     FFFResult SelectAudioStream(std::int32_t streamIndex) noexcept;
     FFFResult LoadExternalAudio(const char* localPathUtf8, std::int32_t streamIndex,
@@ -56,7 +58,15 @@ public:
 
 private:
     using Command = std::function<void()>;
+    enum class StepOperation {
+        Frame,
+        Keyframe
+    };
     void Enqueue(Command command) noexcept;
+    FFFResult ScheduleStep(StepOperation operation, std::int32_t direction) noexcept;
+    void ProcessStep() noexcept;
+    void DoStepFrame(std::int32_t direction);
+    void DoStepKeyframe(std::int32_t direction);
     void Worker() noexcept;
     void PumpPlayback() noexcept;
     void PumpExternalAudio() noexcept;
@@ -73,9 +83,11 @@ private:
         std::string& error) noexcept;
     FFFResult OpenDecoder(AVFormatContext* format, std::int32_t streamIndex, bool video,
         AVCodecContext** decoder, std::int32_t hardwareDeviceType = -1,
-        std::int32_t* hardwarePixelFormat = nullptr, bool useConfiguredHardware = true) noexcept;
+        std::int32_t* hardwarePixelFormat = nullptr, bool useConfiguredHardware = true,
+        const AVCodec* codecOverride = nullptr) noexcept;
     FFFResult OpenHardwareVideoDecoder(AVFormatContext* format, std::int32_t streamIndex,
         AVCodecContext** decoder) noexcept;
+    FFFResult FallbackToSoftwareVideoDecoder(const char* reason) noexcept;
     FFFResult LoadCoverArt() noexcept;
     FFFResult ProbeHardwareVideo(AVFormatContext* format, AVCodecContext* decoder,
         std::int32_t streamIndex, std::int32_t hardwarePixelFormat) noexcept;
@@ -111,6 +123,10 @@ private:
     mutable std::mutex timedTextContentMutex_;
     std::condition_variable commandCondition_;
     std::deque<Command> commands_;
+    bool stepScheduled_;
+    bool stepRepeatRequested_;
+    StepOperation pendingStepOperation_;
+    std::int32_t pendingStepDirection_;
     std::thread worker_;
     std::atomic<bool> terminate_;
     AVFormatContext* format_;
@@ -160,6 +176,7 @@ private:
     std::vector<AVFrame*> videoFramePool_;
     AVFrame* displayedFrame_;
     bool draining_;
+    bool hardwareFallbackPending_;
     // Stable danmaku content is interned by contentId+UTF-8 hash. Position-only
     // layers then share immutable strings instead of allocating 100 wstrings at
     // every 60 Hz submission.

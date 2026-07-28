@@ -22,7 +22,6 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     Private ReadOnly 弹幕配置 As 弹幕显示配置
     Private ReadOnly 图层内容 As 定时文字图层内容
     Private ReadOnly SRT绘制项 As New List(Of SRT字幕绘制项)()
-    Private ReadOnly ASS绘制项 As New List(Of ASS字幕绘制项)()
     Private ReadOnly SUP绘制项 As New List(Of SUP字幕绘制项)(1)
     Private ReadOnly 弹幕绘制项 As New List(Of 弹幕绘制项)(100)
     Private ReadOnly 图层命令 As New List(Of 定时文字命令)()
@@ -157,7 +156,7 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
                     Case 外部字幕格式.SRT
                         生成SRT命令(字幕.SRT生成器, 播放位置, 区域)
                     Case 外部字幕格式.ASS, 外部字幕格式.SSA
-                        生成ASS命令(字幕.ASS生成器, 播放位置, 区域)
+                        生成ASS特效命令(字幕.ASS特效生成器, 播放位置, 区域)
                     Case 外部字幕格式.SUP
                         生成SUP命令(字幕.SUP生成器, 播放位置, 区域)
                 End Select
@@ -265,32 +264,22 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         Next
     End Sub
 
-    Private Sub 生成ASS命令(生成器 As ASS字幕帧生成器, 时间 As TimeSpan, 区域 As 视频显示区域)
-        If 生成器 Is Nothing Then Return
-        ASS绘制项.Clear()
-        生成器.生成帧(时间, 区域, ASS绘制项)
-        For Each 项 In ASS绘制项
-            Dim 文本 = String.Concat(项.提示.片段.Select(Function(x) x.文本))
-            If String.IsNullOrWhiteSpace(文本) Then Continue For
-            Dim 样式 = 项.基础样式
-            Dim 左边距 = If(项.提示.左边距 > 0, 项.提示.左边距, 样式.左边距) * 项.脚本到像素水平缩放
-            Dim 右边距 = If(项.提示.右边距 > 0, 项.提示.右边距, 样式.右边距) * 项.脚本到像素水平缩放
-            Dim 垂直边距 = If(项.提示.垂直边距 > 0, 项.提示.垂直边距, 样式.垂直边距) * 项.脚本到像素垂直缩放
-            Dim 文本区域 = New RectangleF(区域.X像素 + 左边距, 区域.Y像素 + 垂直边距,
-                Math.Max(1.0F, 区域.宽度像素 - 左边距 - 右边距),
-                Math.Max(1.0F, 区域.高度像素 - 垂直边距 * 2.0F))
-            Dim flags = 定时文字样式.无
-            If 样式.粗体 Then flags = flags Or 定时文字样式.粗体
-            If 样式.斜体 Then flags = flags Or 定时文字样式.斜体
-            If 样式.下划线 Then flags = flags Or 定时文字样式.下划线
-            If 样式.删除线 Then flags = flags Or 定时文字样式.删除线
-            Dim 描边宽度 = Math.Max(0.0F, 样式.描边宽度 *
-                (项.脚本到像素水平缩放 + 项.脚本到像素垂直缩放) * 0.5F)
-            添加文字命令(文本, 样式.字体,
-                Math.Max(1.0F, 样式.字号 * 项.脚本到像素垂直缩放), 文本区域,
-                样式.主颜色ARGB, 样式.描边颜色ARGB, 描边宽度,
-                获取ASS水平对齐(样式.对齐方式), 获取ASS垂直对齐(样式.对齐方式), flags)
-        Next
+    Private Sub 生成ASS特效命令(生成器 As ASS特效字幕帧生成器, 时间 As TimeSpan,
+                            区域 As 视频显示区域)
+        If 生成器 Is Nothing OrElse 区域.宽度像素 <= 0 OrElse 区域.高度像素 <= 0 Then Return
+        ' libass 的画布应匹配最终显示区域，而不是源视频分辨率。4K 视频在
+        ' 1080p 窗口播放时继续生成 4K 字幕，只会增加滤镜、扫描和跨边界复制成本，
+        ' 最终仍会被 GPU 缩回 1080p。
+        Dim 画布宽度 = Math.Max(1, CInt(Math.Round(区域.宽度像素, MidpointRounding.AwayFromZero)))
+        Dim 画布高度 = Math.Max(1, CInt(Math.Round(区域.高度像素, MidpointRounding.AwayFromZero)))
+        Dim 帧 = 生成器.生成帧(时间, 画布宽度, 画布高度)
+        If 帧 Is Nothing OrElse 帧.像素BGRA.Length = 0 OrElse 帧.宽度 <= 0 OrElse 帧.高度 <= 0 OrElse
+            帧.画布宽度 <= 0 OrElse 帧.画布高度 <= 0 Then Return
+        Dim 水平缩放 = 区域.宽度像素 / 帧.画布宽度
+        Dim 垂直缩放 = 区域.高度像素 / 帧.画布高度
+        添加位图命令(帧.像素BGRA, 帧.宽度, 帧.高度, 帧.行跨度,
+            New RectangleF(区域.X像素 + 帧.X * 水平缩放, 区域.Y像素 + 帧.Y * 垂直缩放,
+                           帧.宽度 * 水平缩放, 帧.高度 * 垂直缩放), 帧.内容标识)
     End Sub
 
     Private Sub 生成SUP命令(生成器 As SUP字幕帧生成器, 时间 As TimeSpan, 区域 As 视频显示区域)
@@ -358,22 +347,6 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         command.设置位图(像素BGRA, 位图宽度, 位图高度, 行跨度, 区域, 内容标识)
         图层命令.Add(command)
     End Sub
-
-    Private Shared Function 获取ASS水平对齐(对齐方式 As Integer) As 定时文字对齐
-        Select Case 对齐方式
-            Case 1, 4, 7 : Return 定时文字对齐.靠前
-            Case 3, 6, 9 : Return 定时文字对齐.靠后
-            Case Else : Return 定时文字对齐.居中
-        End Select
-    End Function
-
-    Private Shared Function 获取ASS垂直对齐(对齐方式 As Integer) As 定时文字对齐
-        Select Case 对齐方式
-            Case 7, 8, 9 : Return 定时文字对齐.靠前
-            Case 4, 5, 6 : Return 定时文字对齐.居中
-            Case Else : Return 定时文字对齐.靠后
-        End Select
-    End Function
 
     Public Sub 释放() Implements IDisposable.Dispose
         SyncLock 生命周期锁

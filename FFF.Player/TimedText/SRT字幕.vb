@@ -48,7 +48,7 @@ End Class
 Public NotInheritable Class SRT字幕样式
     Public Property 中文字体 As String = "Microsoft YaHei UI"
     Public Property 拉丁字体 As String = "Segoe UI"
-    Public Property 字号 As Single = 42.0F
+    Public Property 字号 As Single = 48
     Public Property 颜色ARGB As UInteger = &HFFFFFFFFUI
     Public Property 描边颜色ARGB As UInteger = &HC0000000UI
     Public Property 描边宽度 As Single = 2.0F

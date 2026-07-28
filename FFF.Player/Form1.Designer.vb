@@ -67,6 +67,26 @@ Partial Class Form1
         ETB_音量条 = New LakeUI.ExcellentTrackBar()
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MP_剪辑区间操作容器 = New LakeUI.ModernPanel()
+        P_剪辑区间进度条容器 = New Panel()
+        JustEmptyControl17 = New LakeUI.JustEmptyControl()
+        P_剪辑区间按钮容器 = New Panel()
+        MB_传给3FUI = New LakeUI.ModernButton()
+        JustEmptyControl24 = New LakeUI.JustEmptyControl()
+        MB_前进到关键帧 = New LakeUI.ModernButton()
+        JustEmptyControl23 = New LakeUI.JustEmptyControl()
+        MB_进一帧 = New LakeUI.ModernButton()
+        JustEmptyControl22 = New LakeUI.JustEmptyControl()
+        MB_设为出点 = New LakeUI.ModernButton()
+        JustEmptyControl21 = New LakeUI.JustEmptyControl()
+        MB_去出点 = New LakeUI.ModernButton()
+        JustEmptyControl20 = New LakeUI.JustEmptyControl()
+        MB_去入点 = New LakeUI.ModernButton()
+        JustEmptyControl16 = New LakeUI.JustEmptyControl()
+        MB_设为入点 = New LakeUI.ModernButton()
+        JustEmptyControl15 = New LakeUI.JustEmptyControl()
+        MB_后退一帧 = New LakeUI.ModernButton()
+        JustEmptyControl14 = New LakeUI.JustEmptyControl()
+        MB_后退到关键帧 = New LakeUI.ModernButton()
         JustEmptyControl2 = New LakeUI.JustEmptyControl()
         MP_DX视频容器 = New Panel()
         Panel1.SuspendLayout()
@@ -75,11 +95,12 @@ Partial Class Form1
         Panel4.SuspendLayout()
         Panel2.SuspendLayout()
         MP_剪辑区间操作容器.SuspendLayout()
+        P_剪辑区间按钮容器.SuspendLayout()
         MP_DX视频容器.SuspendLayout()
         SuspendLayout()
-        '
+        ' 
         ' ThisIsYourWindow1
-        '
+        ' 
         ThisIsYourWindow1.BackdropNoiseScale = 0.5F
         ThisIsYourWindow1.BackdropTintColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
         ThisIsYourWindow1.BackdropTintInactiveColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
@@ -87,44 +108,46 @@ Partial Class Form1
         ThisIsYourWindow1.BorderInactiveColor = Color.Gray
         ThisIsYourWindow1.ButtonCornerRadius = 5
         ThisIsYourWindow1.ButtonGlyphLineWidth = 2F
-        ThisIsYourWindow1.ButtonPadding = New Padding(0, 5, 5, 5)
+        ThisIsYourWindow1.ButtonPadding = New Padding(5, 0, 0, 0)
         ThisIsYourWindow1.ButtonWidth = 40
-        ThisIsYourWindow1.CaptionBackColor = Color.FromArgb(CByte(48), CByte(48), CByte(48))
         ThisIsYourWindow1.CaptionButtonGlyphColor = Color.FromArgb(CByte(200), CByte(200), CByte(200))
         ThisIsYourWindow1.CaptionButtonHoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         ThisIsYourWindow1.CaptionButtonPressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         ThisIsYourWindow1.CaptionControl = Panel1
-        ThisIsYourWindow1.CaptionHeight = 42
-        ThisIsYourWindow1.CaptionInactiveBackColor = Color.FromArgb(CByte(48), CByte(48), CByte(48))
+        ThisIsYourWindow1.CaptionHeight = 43
+        ThisIsYourWindow1.CaptionInactiveBackColor = Color.FromArgb(CByte(32), CByte(32), CByte(32))
+        ThisIsYourWindow1.CaptionPadding = New Padding(5)
         ThisIsYourWindow1.CloseButtonGlyphColor = Color.FromArgb(CByte(200), CByte(200), CByte(200))
-        ThisIsYourWindow1.IconPaddingLeft = 10
+        ThisIsYourWindow1.IconPadding = New Padding(3, 0, 8, 0)
         ThisIsYourWindow1.IconSize = 26
         ThisIsYourWindow1.LayerShadowResizeFullArea = True
         ThisIsYourWindow1.ShadowMode = LakeUI.ThisIsYourWindow.ShadowModeEnum.Layer
         ThisIsYourWindow1.TitleAlign = LakeUI.ThisIsYourWindow.TitleAlignEnum.Center
         ThisIsYourWindow1.TitleForeColor = Color.Silver
         ThisIsYourWindow1.TitleInactiveForeColor = Color.DarkGray
-        '
+        ' 
         ' Panel1
-        '
+        ' 
         Panel1.BackColor = Color.Transparent
         Panel1.Controls.Add(MB_1)
         Panel1.Location = New Point(42, 48)
         Panel1.Name = "Panel1"
-        Panel1.Padding = New Padding(0, 4, 0, 4)
+        Panel1.Padding = New Padding(0, 1, 0, 1)
         Panel1.Size = New Size(100, 42)
         Panel1.TabIndex = 1
+        ' 
         ' MB_1
+        ' 
         MB_1.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_1.BorderRadius = 10
         MB_1.BorderSize = 0
         MB_1.Dock = DockStyle.Fill
         MB_1.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_1.Location = New Point(0, 4)
+        MB_1.Location = New Point(0, 1)
         MB_1.Margin = New Padding(2)
         MB_1.Name = "MB_1"
         MB_1.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_1.Size = New Size(100, 34)
+        MB_1.Size = New Size(100, 40)
         MB_1.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_1.TabIndex = 12
         MB_1.Text = "FFF.Player"
@@ -328,11 +351,12 @@ Partial Class Form1
         MB_选择流.Location = New Point(636, 0)
         MB_选择流.Margin = New Padding(2)
         MB_选择流.Name = "MB_选择流"
+        MB_选择流.Padding = New Padding(11)
         MB_选择流.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_选择流.Size = New Size(40, 40)
         MB_选择流.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_选择流.TabIndex = 54
-        MB_选择流.Text = "📀"
+        MB_选择流.Text = ""
         ' 
         ' JustEmptyControl18
         ' 
@@ -353,11 +377,12 @@ Partial Class Form1
         MB_查看当前媒体信息.Location = New Point(678, 0)
         MB_查看当前媒体信息.Margin = New Padding(2)
         MB_查看当前媒体信息.Name = "MB_查看当前媒体信息"
+        MB_查看当前媒体信息.Padding = New Padding(11)
         MB_查看当前媒体信息.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_查看当前媒体信息.Size = New Size(40, 40)
         MB_查看当前媒体信息.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_查看当前媒体信息.TabIndex = 52
-        MB_查看当前媒体信息.Text = "📄"
+        MB_查看当前媒体信息.Text = ""
         ' 
         ' JustEmptyControl13
         ' 
@@ -378,11 +403,12 @@ Partial Class Form1
         MB_剪辑区间模式.Location = New Point(720, 0)
         MB_剪辑区间模式.Margin = New Padding(2)
         MB_剪辑区间模式.Name = "MB_剪辑区间模式"
+        MB_剪辑区间模式.Padding = New Padding(11)
         MB_剪辑区间模式.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_剪辑区间模式.Size = New Size(40, 40)
         MB_剪辑区间模式.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_剪辑区间模式.TabIndex = 49
-        MB_剪辑区间模式.Text = "✂️"
+        MB_剪辑区间模式.Text = ""
         ' 
         ' JustEmptyControl12
         ' 
@@ -403,11 +429,12 @@ Partial Class Form1
         MB_播放列表.Location = New Point(762, 0)
         MB_播放列表.Margin = New Padding(2)
         MB_播放列表.Name = "MB_播放列表"
+        MB_播放列表.Padding = New Padding(10)
         MB_播放列表.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_播放列表.Size = New Size(40, 40)
         MB_播放列表.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_播放列表.TabIndex = 47
-        MB_播放列表.Text = "💽"
+        MB_播放列表.Text = ""
         ' 
         ' JustEmptyControl11
         ' 
@@ -428,11 +455,12 @@ Partial Class Form1
         MB_软件设置.Location = New Point(804, 0)
         MB_软件设置.Margin = New Padding(2)
         MB_软件设置.Name = "MB_软件设置"
+        MB_软件设置.Padding = New Padding(10)
         MB_软件设置.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_软件设置.Size = New Size(40, 40)
         MB_软件设置.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_软件设置.TabIndex = 45
-        MB_软件设置.Text = "⚙️"
+        MB_软件设置.Text = ""
         ' 
         ' JustEmptyControl10
         ' 
@@ -475,11 +503,12 @@ Partial Class Form1
         MB_打开文件.Location = New Point(168, 0)
         MB_打开文件.Margin = New Padding(2)
         MB_打开文件.Name = "MB_打开文件"
+        MB_打开文件.Padding = New Padding(10)
         MB_打开文件.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_打开文件.Size = New Size(40, 40)
         MB_打开文件.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_打开文件.TabIndex = 41
-        MB_打开文件.Text = "⏏️"
+        MB_打开文件.Text = ""
         ' 
         ' JustEmptyControl8
         ' 
@@ -500,11 +529,12 @@ Partial Class Form1
         MB_快进或下一个.Location = New Point(126, 0)
         MB_快进或下一个.Margin = New Padding(2)
         MB_快进或下一个.Name = "MB_快进或下一个"
+        MB_快进或下一个.Padding = New Padding(10)
         MB_快进或下一个.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_快进或下一个.Size = New Size(40, 40)
         MB_快进或下一个.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_快进或下一个.TabIndex = 39
-        MB_快进或下一个.Text = "⏩"
+        MB_快进或下一个.Text = ""
         ' 
         ' JustEmptyControl7
         ' 
@@ -525,11 +555,12 @@ Partial Class Form1
         MB_倒退或上一个.Location = New Point(84, 0)
         MB_倒退或上一个.Margin = New Padding(2)
         MB_倒退或上一个.Name = "MB_倒退或上一个"
+        MB_倒退或上一个.Padding = New Padding(10)
         MB_倒退或上一个.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_倒退或上一个.Size = New Size(40, 40)
         MB_倒退或上一个.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_倒退或上一个.TabIndex = 37
-        MB_倒退或上一个.Text = "⏪"
+        MB_倒退或上一个.Text = ""
         ' 
         ' JustEmptyControl6
         ' 
@@ -550,11 +581,12 @@ Partial Class Form1
         MB_停止.Location = New Point(42, 0)
         MB_停止.Margin = New Padding(2)
         MB_停止.Name = "MB_停止"
+        MB_停止.Padding = New Padding(10)
         MB_停止.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_停止.Size = New Size(40, 40)
         MB_停止.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_停止.TabIndex = 35
-        MB_停止.Text = "🔳"
+        MB_停止.Text = ""
         ' 
         ' JustEmptyControl5
         ' 
@@ -575,11 +607,12 @@ Partial Class Form1
         MB_播放和暂停.Location = New Point(0, 0)
         MB_播放和暂停.Margin = New Padding(2)
         MB_播放和暂停.Name = "MB_播放和暂停"
+        MB_播放和暂停.Padding = New Padding(8)
         MB_播放和暂停.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_播放和暂停.Size = New Size(40, 40)
         MB_播放和暂停.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_播放和暂停.TabIndex = 33
-        MB_播放和暂停.Text = "▶️"
+        MB_播放和暂停.Text = ""
         ' 
         ' JustEmptyControl3
         ' 
@@ -672,13 +705,275 @@ Partial Class Form1
         ' 
         MP_剪辑区间操作容器.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MP_剪辑区间操作容器.BorderSize = 0
+        MP_剪辑区间操作容器.Controls.Add(P_剪辑区间进度条容器)
+        MP_剪辑区间操作容器.Controls.Add(JustEmptyControl17)
+        MP_剪辑区间操作容器.Controls.Add(P_剪辑区间按钮容器)
         MP_剪辑区间操作容器.Controls.Add(JustEmptyControl2)
         MP_剪辑区间操作容器.Dock = DockStyle.Bottom
-        MP_剪辑区间操作容器.Location = New Point(0, 415)
+        MP_剪辑区间操作容器.Location = New Point(0, 386)
         MP_剪辑区间操作容器.Name = "MP_剪辑区间操作容器"
-        MP_剪辑区间操作容器.Size = New Size(844, 31)
+        MP_剪辑区间操作容器.Size = New Size(844, 60)
         MP_剪辑区间操作容器.TabIndex = 1
         MP_剪辑区间操作容器.Visible = False
+        ' 
+        ' P_剪辑区间进度条容器
+        ' 
+        P_剪辑区间进度条容器.Dock = DockStyle.Fill
+        P_剪辑区间进度条容器.Location = New Point(0, 35)
+        P_剪辑区间进度条容器.Name = "P_剪辑区间进度条容器"
+        P_剪辑区间进度条容器.Size = New Size(844, 25)
+        P_剪辑区间进度条容器.TabIndex = 2
+        ' 
+        ' JustEmptyControl17
+        ' 
+        JustEmptyControl17.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
+        JustEmptyControl17.Dock = DockStyle.Top
+        JustEmptyControl17.Location = New Point(0, 33)
+        JustEmptyControl17.Name = "JustEmptyControl17"
+        JustEmptyControl17.Size = New Size(844, 2)
+        JustEmptyControl17.TabIndex = 31
+        ' 
+        ' P_剪辑区间按钮容器
+        ' 
+        P_剪辑区间按钮容器.BackColor = Color.Transparent
+        P_剪辑区间按钮容器.Controls.Add(MB_传给3FUI)
+        P_剪辑区间按钮容器.Controls.Add(JustEmptyControl24)
+        P_剪辑区间按钮容器.Controls.Add(MB_前进到关键帧)
+        P_剪辑区间按钮容器.Controls.Add(JustEmptyControl23)
+        P_剪辑区间按钮容器.Controls.Add(MB_进一帧)
+        P_剪辑区间按钮容器.Controls.Add(JustEmptyControl22)
+        P_剪辑区间按钮容器.Controls.Add(MB_设为出点)
+        P_剪辑区间按钮容器.Controls.Add(JustEmptyControl21)
+        P_剪辑区间按钮容器.Controls.Add(MB_去出点)
+        P_剪辑区间按钮容器.Controls.Add(JustEmptyControl20)
+        P_剪辑区间按钮容器.Controls.Add(MB_去入点)
+        P_剪辑区间按钮容器.Controls.Add(JustEmptyControl16)
+        P_剪辑区间按钮容器.Controls.Add(MB_设为入点)
+        P_剪辑区间按钮容器.Controls.Add(JustEmptyControl15)
+        P_剪辑区间按钮容器.Controls.Add(MB_后退一帧)
+        P_剪辑区间按钮容器.Controls.Add(JustEmptyControl14)
+        P_剪辑区间按钮容器.Controls.Add(MB_后退到关键帧)
+        P_剪辑区间按钮容器.Dock = DockStyle.Top
+        P_剪辑区间按钮容器.Location = New Point(0, 1)
+        P_剪辑区间按钮容器.Name = "P_剪辑区间按钮容器"
+        P_剪辑区间按钮容器.Size = New Size(844, 32)
+        P_剪辑区间按钮容器.TabIndex = 1
+        ' 
+        ' MB_传给3FUI
+        ' 
+        MB_传给3FUI.BackColor = Color.Transparent
+        MB_传给3FUI.BackColor1 = Color.Transparent
+        MB_传给3FUI.BorderSize = 0
+        MB_传给3FUI.Dock = DockStyle.Fill
+        MB_传给3FUI.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_传给3FUI.Location = New Point(672, 0)
+        MB_传给3FUI.Margin = New Padding(2)
+        MB_传给3FUI.Name = "MB_传给3FUI"
+        MB_传给3FUI.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_传给3FUI.Size = New Size(172, 32)
+        MB_传给3FUI.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_传给3FUI.TabIndex = 44
+        MB_传给3FUI.Text = "传给 3FUI"
+        ' 
+        ' JustEmptyControl24
+        ' 
+        JustEmptyControl24.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
+        JustEmptyControl24.Dock = DockStyle.Left
+        JustEmptyControl24.Location = New Point(670, 0)
+        JustEmptyControl24.Name = "JustEmptyControl24"
+        JustEmptyControl24.Size = New Size(2, 32)
+        JustEmptyControl24.TabIndex = 55
+        ' 
+        ' MB_前进到关键帧
+        ' 
+        MB_前进到关键帧.BackColor = Color.Transparent
+        MB_前进到关键帧.BackColor1 = Color.Transparent
+        MB_前进到关键帧.BorderSize = 0
+        MB_前进到关键帧.Dock = DockStyle.Left
+        MB_前进到关键帧.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_前进到关键帧.Location = New Point(588, 0)
+        MB_前进到关键帧.Margin = New Padding(2)
+        MB_前进到关键帧.Name = "MB_前进到关键帧"
+        MB_前进到关键帧.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_前进到关键帧.Size = New Size(82, 32)
+        MB_前进到关键帧.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_前进到关键帧.TabIndex = 54
+        MB_前进到关键帧.Text = "关键帧 ▶️"
+        ' 
+        ' JustEmptyControl23
+        ' 
+        JustEmptyControl23.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
+        JustEmptyControl23.Dock = DockStyle.Left
+        JustEmptyControl23.Location = New Point(586, 0)
+        JustEmptyControl23.Name = "JustEmptyControl23"
+        JustEmptyControl23.Size = New Size(2, 32)
+        JustEmptyControl23.TabIndex = 53
+        ' 
+        ' MB_进一帧
+        ' 
+        MB_进一帧.BackColor = Color.Transparent
+        MB_进一帧.BackColor1 = Color.Transparent
+        MB_进一帧.BorderSize = 0
+        MB_进一帧.Dock = DockStyle.Left
+        MB_进一帧.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_进一帧.Location = New Point(504, 0)
+        MB_进一帧.Margin = New Padding(2)
+        MB_进一帧.Name = "MB_进一帧"
+        MB_进一帧.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_进一帧.Size = New Size(82, 32)
+        MB_进一帧.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_进一帧.TabIndex = 52
+        MB_进一帧.Text = "进一帧 ▶️"
+        ' 
+        ' JustEmptyControl22
+        ' 
+        JustEmptyControl22.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
+        JustEmptyControl22.Dock = DockStyle.Left
+        JustEmptyControl22.Location = New Point(502, 0)
+        JustEmptyControl22.Name = "JustEmptyControl22"
+        JustEmptyControl22.Size = New Size(2, 32)
+        JustEmptyControl22.TabIndex = 51
+        ' 
+        ' MB_设为出点
+        ' 
+        MB_设为出点.BackColor = Color.Transparent
+        MB_设为出点.BackColor1 = Color.Transparent
+        MB_设为出点.BorderSize = 0
+        MB_设为出点.Dock = DockStyle.Left
+        MB_设为出点.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_设为出点.Location = New Point(420, 0)
+        MB_设为出点.Margin = New Padding(2)
+        MB_设为出点.Name = "MB_设为出点"
+        MB_设为出点.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_设为出点.Size = New Size(82, 32)
+        MB_设为出点.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_设为出点.TabIndex = 50
+        MB_设为出点.Text = "设为出点"
+        ' 
+        ' JustEmptyControl21
+        ' 
+        JustEmptyControl21.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
+        JustEmptyControl21.Dock = DockStyle.Left
+        JustEmptyControl21.Location = New Point(418, 0)
+        JustEmptyControl21.Name = "JustEmptyControl21"
+        JustEmptyControl21.Size = New Size(2, 32)
+        JustEmptyControl21.TabIndex = 49
+        ' 
+        ' MB_去出点
+        ' 
+        MB_去出点.BackColor = Color.Transparent
+        MB_去出点.BackColor1 = Color.Transparent
+        MB_去出点.BorderSize = 0
+        MB_去出点.Dock = DockStyle.Left
+        MB_去出点.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_去出点.Location = New Point(336, 0)
+        MB_去出点.Margin = New Padding(2)
+        MB_去出点.Name = "MB_去出点"
+        MB_去出点.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_去出点.Size = New Size(82, 32)
+        MB_去出点.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_去出点.TabIndex = 48
+        MB_去出点.Text = "去出点"
+        ' 
+        ' JustEmptyControl20
+        ' 
+        JustEmptyControl20.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
+        JustEmptyControl20.Dock = DockStyle.Left
+        JustEmptyControl20.Location = New Point(334, 0)
+        JustEmptyControl20.Name = "JustEmptyControl20"
+        JustEmptyControl20.Size = New Size(2, 32)
+        JustEmptyControl20.TabIndex = 47
+        ' 
+        ' MB_去入点
+        ' 
+        MB_去入点.BackColor = Color.Transparent
+        MB_去入点.BackColor1 = Color.Transparent
+        MB_去入点.BorderSize = 0
+        MB_去入点.Dock = DockStyle.Left
+        MB_去入点.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_去入点.Location = New Point(252, 0)
+        MB_去入点.Margin = New Padding(2)
+        MB_去入点.Name = "MB_去入点"
+        MB_去入点.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_去入点.Size = New Size(82, 32)
+        MB_去入点.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_去入点.TabIndex = 46
+        MB_去入点.Text = "去入点"
+        ' 
+        ' JustEmptyControl16
+        ' 
+        JustEmptyControl16.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
+        JustEmptyControl16.Dock = DockStyle.Left
+        JustEmptyControl16.Location = New Point(250, 0)
+        JustEmptyControl16.Name = "JustEmptyControl16"
+        JustEmptyControl16.Size = New Size(2, 32)
+        JustEmptyControl16.TabIndex = 43
+        ' 
+        ' MB_设为入点
+        ' 
+        MB_设为入点.BackColor = Color.Transparent
+        MB_设为入点.BackColor1 = Color.Transparent
+        MB_设为入点.BorderSize = 0
+        MB_设为入点.Dock = DockStyle.Left
+        MB_设为入点.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_设为入点.Location = New Point(168, 0)
+        MB_设为入点.Margin = New Padding(2)
+        MB_设为入点.Name = "MB_设为入点"
+        MB_设为入点.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_设为入点.Size = New Size(82, 32)
+        MB_设为入点.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_设为入点.TabIndex = 42
+        MB_设为入点.Text = "设为入点"
+        ' 
+        ' JustEmptyControl15
+        ' 
+        JustEmptyControl15.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
+        JustEmptyControl15.Dock = DockStyle.Left
+        JustEmptyControl15.Location = New Point(166, 0)
+        JustEmptyControl15.Name = "JustEmptyControl15"
+        JustEmptyControl15.Size = New Size(2, 32)
+        JustEmptyControl15.TabIndex = 41
+        ' 
+        ' MB_后退一帧
+        ' 
+        MB_后退一帧.BackColor = Color.Transparent
+        MB_后退一帧.BackColor1 = Color.Transparent
+        MB_后退一帧.BorderSize = 0
+        MB_后退一帧.Dock = DockStyle.Left
+        MB_后退一帧.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_后退一帧.Location = New Point(84, 0)
+        MB_后退一帧.Margin = New Padding(2)
+        MB_后退一帧.Name = "MB_后退一帧"
+        MB_后退一帧.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_后退一帧.Size = New Size(82, 32)
+        MB_后退一帧.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_后退一帧.TabIndex = 36
+        MB_后退一帧.Text = "◀️ 退一帧"
+        ' 
+        ' JustEmptyControl14
+        ' 
+        JustEmptyControl14.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
+        JustEmptyControl14.Dock = DockStyle.Left
+        JustEmptyControl14.Location = New Point(82, 0)
+        JustEmptyControl14.Name = "JustEmptyControl14"
+        JustEmptyControl14.Size = New Size(2, 32)
+        JustEmptyControl14.TabIndex = 35
+        ' 
+        ' MB_后退到关键帧
+        ' 
+        MB_后退到关键帧.BackColor = Color.Transparent
+        MB_后退到关键帧.BackColor1 = Color.Transparent
+        MB_后退到关键帧.BorderSize = 0
+        MB_后退到关键帧.Dock = DockStyle.Left
+        MB_后退到关键帧.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_后退到关键帧.Location = New Point(0, 0)
+        MB_后退到关键帧.Margin = New Padding(2)
+        MB_后退到关键帧.Name = "MB_后退到关键帧"
+        MB_后退到关键帧.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_后退到关键帧.Size = New Size(82, 32)
+        MB_后退到关键帧.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_后退到关键帧.TabIndex = 34
+        MB_后退到关键帧.Text = "◀️ 关键帧"
         ' 
         ' JustEmptyControl2
         ' 
@@ -695,7 +990,7 @@ Partial Class Form1
         MP_DX视频容器.Dock = DockStyle.Fill
         MP_DX视频容器.Location = New Point(0, 0)
         MP_DX视频容器.Name = "MP_DX视频容器"
-        MP_DX视频容器.Size = New Size(844, 415)
+        MP_DX视频容器.Size = New Size(844, 386)
         MP_DX视频容器.TabIndex = 2
         ' 
         ' Form1
@@ -718,6 +1013,7 @@ Partial Class Form1
         Panel4.ResumeLayout(False)
         Panel2.ResumeLayout(False)
         MP_剪辑区间操作容器.ResumeLayout(False)
+        P_剪辑区间按钮容器.ResumeLayout(False)
         MP_DX视频容器.ResumeLayout(False)
         ResumeLayout(False)
     End Sub
@@ -768,5 +1064,25 @@ Partial Class Form1
     Friend WithEvents MB_选择流 As LakeUI.ModernButton
     Friend WithEvents Panel1 As Panel
     Friend WithEvents MB_1 As LakeUI.ModernButton
+    Friend WithEvents P_剪辑区间进度条容器 As Panel
+    Friend WithEvents P_剪辑区间按钮容器 As Panel
+    Friend WithEvents JustEmptyControl16 As LakeUI.JustEmptyControl
+    Friend WithEvents MB_设为入点 As LakeUI.ModernButton
+    Friend WithEvents JustEmptyControl15 As LakeUI.JustEmptyControl
+    Friend WithEvents MB_后退一帧 As LakeUI.ModernButton
+    Friend WithEvents JustEmptyControl14 As LakeUI.JustEmptyControl
+    Friend WithEvents MB_后退到关键帧 As LakeUI.ModernButton
+    Friend WithEvents MB_传给3FUI As LakeUI.ModernButton
+    Friend WithEvents JustEmptyControl24 As LakeUI.JustEmptyControl
+    Friend WithEvents MB_前进到关键帧 As LakeUI.ModernButton
+    Friend WithEvents JustEmptyControl23 As LakeUI.JustEmptyControl
+    Friend WithEvents MB_进一帧 As LakeUI.ModernButton
+    Friend WithEvents JustEmptyControl22 As LakeUI.JustEmptyControl
+    Friend WithEvents MB_设为出点 As LakeUI.ModernButton
+    Friend WithEvents JustEmptyControl21 As LakeUI.JustEmptyControl
+    Friend WithEvents MB_去出点 As LakeUI.ModernButton
+    Friend WithEvents JustEmptyControl20 As LakeUI.JustEmptyControl
+    Friend WithEvents MB_去入点 As LakeUI.ModernButton
+    Friend WithEvents JustEmptyControl17 As LakeUI.JustEmptyControl
 
 End Class

@@ -41,6 +41,7 @@ FFFResult FFF3FP_Seek(const FFF3FPHandle player, const std::int64_t position) no
 FFFResult FFF3FP_SeekKeyframe(const FFF3FPHandle player, const std::int64_t position) noexcept { return player ? static_cast<PlayerSession*>(player)->SeekKeyframe(position) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SeekFrame(const FFF3FPHandle player, const std::int64_t frame) noexcept { return player ? static_cast<PlayerSession*>(player)->SeekFrame(frame) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_StepFrame(const FFF3FPHandle player, const std::int32_t direction) noexcept { return player ? static_cast<PlayerSession*>(player)->StepFrame(direction) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_StepKeyframe(const FFF3FPHandle player, const std::int32_t direction) noexcept { return player ? static_cast<PlayerSession*>(player)->StepKeyframe(direction) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SelectVideoStream(const FFF3FPHandle player, const std::int32_t stream) noexcept { return player ? static_cast<PlayerSession*>(player)->SelectVideoStream(stream) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SelectAudioStream(const FFF3FPHandle player, const std::int32_t stream) noexcept { return player ? static_cast<PlayerSession*>(player)->SelectAudioStream(stream) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_LoadExternalAudio(const FFF3FPHandle player, const char* path, const std::int32_t stream,

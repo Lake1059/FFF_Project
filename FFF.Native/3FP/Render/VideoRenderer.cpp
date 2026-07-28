@@ -298,23 +298,56 @@ struct InputDescription {
     std::uint32_t layout = 0;
     std::uint32_t bitDepth = 16;
     float sampleScale = 1.0f;
+    std::uint32_t chromaWidthShift = 0;
+    std::uint32_t chromaHeightShift = 0;
 };
 
-InputDescription DescribeInput(const AVPixelFormat format) noexcept {
+constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
     switch (format) {
     case AV_PIX_FMT_YUV420P:
     case AV_PIX_FMT_YUVJ420P:
-        return {1, 8, 1.0f};
+        return {1, 8, 1.0f, 1, 1};
     case AV_PIX_FMT_YUV420P10LE:
-        return {1, 10, 65535.0f / 1023.0f};
+        return {1, 10, 65535.0f / 1023.0f, 1, 1};
+    case AV_PIX_FMT_YUV422P:
+    case AV_PIX_FMT_YUVJ422P:
+        return {1, 8, 1.0f, 1, 0};
+    case AV_PIX_FMT_YUV422P10LE:
+        return {1, 10, 65535.0f / 1023.0f, 1, 0};
+    case AV_PIX_FMT_YUV444P:
+    case AV_PIX_FMT_YUVJ444P:
+        return {1, 8, 1.0f, 0, 0};
+    case AV_PIX_FMT_YUV444P10LE:
+        return {1, 10, 65535.0f / 1023.0f, 0, 0};
     case AV_PIX_FMT_NV12:
-        return {2, 8, 1.0f};
+        return {2, 8, 1.0f, 1, 1};
     case AV_PIX_FMT_P010LE:
-        return {2, 10, 1.0f};
+        return {2, 10, 1.0f, 1, 1};
+    case AV_PIX_FMT_P210LE:
+        return {2, 10, 1.0f, 1, 0};
     default:
         return {};
     }
 }
+
+static_assert(DescribeInput(AV_PIX_FMT_YUV420P).layout == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV420P).bitDepth == 8 &&
+    DescribeInput(AV_PIX_FMT_YUV420P).chromaWidthShift == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV420P).chromaHeightShift == 1);
+static_assert(DescribeInput(AV_PIX_FMT_YUV420P10LE).layout == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV420P10LE).bitDepth == 10);
+static_assert(DescribeInput(AV_PIX_FMT_YUV422P).layout == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV422P).bitDepth == 8 &&
+    DescribeInput(AV_PIX_FMT_YUV422P).chromaWidthShift == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV422P).chromaHeightShift == 0);
+static_assert(DescribeInput(AV_PIX_FMT_YUV422P10LE).layout == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV422P10LE).bitDepth == 10);
+static_assert(DescribeInput(AV_PIX_FMT_YUV444P).layout == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV444P).bitDepth == 8 &&
+    DescribeInput(AV_PIX_FMT_YUV444P).chromaWidthShift == 0 &&
+    DescribeInput(AV_PIX_FMT_YUV444P).chromaHeightShift == 0);
+static_assert(DescribeInput(AV_PIX_FMT_YUV444P10LE).layout == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV444P10LE).bitDepth == 10);
 
 float ResolveSourcePeakNits(const AVFrame* frame, const float fallback, const float paperWhite) noexcept {
     auto peak = fallback;
@@ -469,6 +502,7 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
       writeFactory_(nullptr), scaler_(nullptr),
       swapWidth_(0), swapHeight_(0), swapHdr_(false), sourceWidth_(0), sourceHeight_(0),
       sourceInputLayout_(UINT32_MAX), sourceBitDepth_(0),
+      sourceChromaWidthShift_(0), sourceChromaHeightShift_(0),
       requestedMode_(FFF3FPColorMode::MapToSdr), actualMode_(FFF3FPColorMode::MapToSdr),
       sdrPeakNits_(100.0f), hdrPeakNits_(TrueHdrOutputPeakNits),
       paperWhiteNits_(203.0f), sourcePeakNits_(100.0f),
@@ -723,7 +757,8 @@ FFFResult PlayerVideoRenderer::AcquireBackBufferTarget(ID3D11Texture2D** buffer,
 
 FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     const std::uint32_t sourceHeight, const std::uint32_t inputLayout,
-    const std::uint32_t bitDepth) noexcept {
+    const std::uint32_t bitDepth, const std::uint32_t chromaWidthShift,
+    const std::uint32_t chromaHeightShift) noexcept {
     if (vertexShader_ == nullptr || pixelShader_ == nullptr || timedTextPixelShader_ == nullptr) {
         ComPtr<ID3DBlob> vertexCode, pixelCode, timedTextPixelCode, errors;
         if (FAILED(D3DCompile(VertexShaderSource, std::strlen(VertexShaderSource), nullptr, nullptr, nullptr,
@@ -749,7 +784,9 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         }
     }
     if (sourceTextures_[0] != nullptr && sourceWidth_ == sourceWidth && sourceHeight_ == sourceHeight &&
-        sourceInputLayout_ == inputLayout && sourceBitDepth_ == bitDepth)
+        sourceInputLayout_ == inputLayout && sourceBitDepth_ == bitDepth &&
+        sourceChromaWidthShift_ == chromaWidthShift &&
+        sourceChromaHeightShift_ == chromaHeightShift)
         return FFFResult::Success;
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
@@ -758,8 +795,10 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     const auto planeCount = inputLayout == 1 ? 3u : (inputLayout == 2 ? 2u : 1u);
     for (std::uint32_t plane = 0; plane < planeCount; ++plane) {
         D3D11_TEXTURE2D_DESC texture{};
-        texture.Width = plane == 0 ? sourceWidth : (sourceWidth + 1) / 2;
-        texture.Height = plane == 0 ? sourceHeight : (sourceHeight + 1) / 2;
+        texture.Width = plane == 0 ? sourceWidth :
+            (sourceWidth + (1u << chromaWidthShift) - 1) >> chromaWidthShift;
+        texture.Height = plane == 0 ? sourceHeight :
+            (sourceHeight + (1u << chromaHeightShift) - 1) >> chromaHeightShift;
         texture.MipLevels = texture.ArraySize = 1;
         if (inputLayout == 0) texture.Format = DXGI_FORMAT_R16G16B16A16_UNORM;
         else if (inputLayout == 2 && plane == 1)
@@ -774,6 +813,8 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     }
     sourceWidth_ = sourceWidth; sourceHeight_ = sourceHeight;
     sourceInputLayout_ = inputLayout; sourceBitDepth_ = bitDepth;
+    sourceChromaWidthShift_ = chromaWidthShift;
+    sourceChromaHeightShift_ = chromaHeightShift;
     return FFFResult::Success;
 }
 
@@ -1471,7 +1512,8 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
     if (window_ == nullptr) return FFFResult::Success;
     const auto chainResult = EnsureSwapChain(frame->width, frame->height);
     if (chainResult != FFFResult::Success) return chainResult;
-    const auto pipelineResult = EnsurePipeline(width, height, input.layout, input.bitDepth);
+    const auto pipelineResult = EnsurePipeline(width, height, input.layout, input.bitDepth,
+        input.chromaWidthShift, input.chromaHeightShift);
     if (pipelineResult != FFFResult::Success) return pipelineResult;
     const auto baseResult = EnsureVideoBaseResources();
     if (baseResult != FFFResult::Success) return baseResult;
@@ -1629,6 +1671,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     sourceWidth_ = sourceHeight_ = 0;
     sourceInputLayout_ = UINT32_MAX;
     sourceBitDepth_ = 0;
+    sourceChromaWidthShift_ = sourceChromaHeightShift_ = 0;
     sourcePeakNits_ = sdrPeakNits_;
     rgba64_.clear();
     {
@@ -1680,6 +1723,7 @@ void PlayerVideoRenderer::Close() noexcept {
     if (device_ != nullptr) { device_->Release(); device_ = nullptr; }
     rgba64_.clear(); swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
     sourceInputLayout_ = UINT32_MAX; sourceBitDepth_ = 0;
+    sourceChromaWidthShift_ = sourceChromaHeightShift_ = 0;
 }
 
 FFF3FPColorMode PlayerVideoRenderer::ActualColorMode() const noexcept { return actualMode_; }

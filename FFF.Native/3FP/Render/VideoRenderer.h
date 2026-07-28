@@ -113,7 +113,8 @@ private:
     FFFResult EnsureSwapChain(std::uint32_t width, std::uint32_t height) noexcept;
     FFFResult ReconfigureSwapChain(bool hdr) noexcept;
     FFFResult EnsurePipeline(std::uint32_t sourceWidth, std::uint32_t sourceHeight,
-        std::uint32_t inputLayout, std::uint32_t bitDepth) noexcept;
+        std::uint32_t inputLayout, std::uint32_t bitDepth,
+        std::uint32_t chromaWidthShift, std::uint32_t chromaHeightShift) noexcept;
     FFFResult AcquireBackBufferTarget(ID3D11Texture2D** buffer,
         ID3D11RenderTargetView** target) noexcept;
     FFFResult EnsureVideoBaseResources() noexcept;
@@ -167,6 +168,8 @@ private:
     std::uint32_t sourceHeight_;
     std::uint32_t sourceInputLayout_;
     std::uint32_t sourceBitDepth_;
+    std::uint32_t sourceChromaWidthShift_;
+    std::uint32_t sourceChromaHeightShift_;
     FFF3FPColorMode requestedMode_;
     FFF3FPColorMode actualMode_;
     float sdrPeakNits_;

@@ -35,5 +35,8 @@
     <ClCompile Include="3FP\Subtitle\BitmapSubtitleDecoder.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

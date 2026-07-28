@@ -25,6 +25,14 @@
 	  <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <LibassRuntimeDirectory>$(MSBuildProjectDirectory)\..\third_party\vcpkg_installed\x64-windows\debug\bin</LibassRuntimeDirectory>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' != 'Debug'">
+    <LibassRuntimeDirectory>$(MSBuildProjectDirectory)\..\third_party\vcpkg_installed\x64-windows\bin</LibassRuntimeDirectory>
+  </PropertyGroup>
+
   <ItemGroup>
     <Import Include="System.Data" />
     <Import Include="System.Drawing" />
@@ -39,13 +47,32 @@
     <DevelopmentRuntime Include="..\runtime\swresample*.dll" />
     <DevelopmentRuntime Include="..\runtime\swscale*.dll" />
     <DevelopmentRuntime Include="..\runtime\avfilter*.dll" />
+    <LibassMainRuntime Include="$(LibassRuntimeDirectory)\ass-*.dll" />
+    <LibassRuntime Include="@(LibassMainRuntime);$(LibassRuntimeDirectory)\brotlicommon.dll;$(LibassRuntimeDirectory)\brotlidec.dll;$(LibassRuntimeDirectory)\fribidi-0.dll;$(LibassRuntimeDirectory)\harfbuzz.dll" />
+    <LibassRuntime Include="$(LibassRuntimeDirectory)\bz2d.dll;$(LibassRuntimeDirectory)\freetyped.dll;$(LibassRuntimeDirectory)\libpng16d.dll;$(LibassRuntimeDirectory)\zd.dll" Condition="'$(Configuration)' == 'Debug'" />
+    <LibassRuntime Include="$(LibassRuntimeDirectory)\bz2.dll;$(LibassRuntimeDirectory)\freetype.dll;$(LibassRuntimeDirectory)\libpng16.dll;$(LibassRuntimeDirectory)\z.dll" Condition="'$(Configuration)' != 'Debug'" />
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Svg" Version="3.4.8" />
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectX" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\播放器按钮\播放.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Play.svg" />
+    <EmbeddedResource Include="Resources\播放器按钮\暂停.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Pause.svg" />
+    <EmbeddedResource Include="Resources\播放器按钮\停止.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Stop.svg" />
+    <EmbeddedResource Include="Resources\播放器按钮\倒退或上一个.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Previous.svg" />
+    <EmbeddedResource Include="Resources\播放器按钮\前进或下一个.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Next.svg" />
+    <EmbeddedResource Include="Resources\播放器按钮\打开.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Open.svg" />
+    <EmbeddedResource Include="Resources\播放器按钮\设置.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Settings.svg" />
+    <EmbeddedResource Include="Resources\播放器按钮\播放列表.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Playlist.svg" />
+    <EmbeddedResource Include="Resources\播放器按钮\剪辑区间.svg" LogicalName="FFF.Player.Resources.PlayerButtons.ClipRange.svg" />
+    <EmbeddedResource Include="Resources\播放器按钮\元数据.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Metadata.svg" />
+    <EmbeddedResource Include="Resources\播放器按钮\流选择.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Streams.svg" />
   </ItemGroup>
 
   <ItemGroup>
@@ -57,15 +84,20 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
     </Content>
+    <Content Include="@(LibassRuntime)" Link="%(Filename)%(Extension)">
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
   </ItemGroup>
 
   <Target Name="CopyNativeRuntime" AfterTargets="Build">
     <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
-    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Error Condition="'@(LibassMainRuntime)' == ''" Text="缺少 libass 运行库；请先运行 tools\准备Libass.ps1。" />
+    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime);@(LibassRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 
   <Target Name="CopyProductNativeToPublish" AfterTargets="Publish" Condition="'$(PublishSingleFile)' != 'true'">
-    <Copy SourceFiles="@(ProductNative)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime);@(LibassRuntime)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
   </Target>
 
   <ItemGroup>

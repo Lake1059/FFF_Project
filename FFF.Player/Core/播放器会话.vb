@@ -148,6 +148,12 @@ Public NotInheritable Class 播放器会话
     Public Sub 下一帧()
         检查结果(播放器原生接口.FFF3FP_StepFrame(取得句柄(), 1))
     End Sub
+    Public Sub 上一关键帧()
+        检查结果(播放器原生接口.FFF3FP_StepKeyframe(取得句柄(), -1))
+    End Sub
+    Public Sub 下一关键帧()
+        检查结果(播放器原生接口.FFF3FP_StepKeyframe(取得句柄(), 1))
+    End Sub
     Public Sub 选择视频流(索引 As Integer)
         检查结果(播放器原生接口.FFF3FP_SelectVideoStream(取得句柄(), 索引))
     End Sub

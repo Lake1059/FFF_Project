@@ -23,16 +23,16 @@ Partial Class Form1
     <System.Diagnostics.DebuggerStepThrough()>
     Private Sub InitializeComponent()
         components = New ComponentModel.Container()
-        Dim ModernTabPage1 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage2 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage3 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage4 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage5 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage6 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage7 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage8 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage9 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage10 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage11 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage12 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage13 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage14 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage15 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage16 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage17 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage18 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage19 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage20 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         ModernTabListControl1 = New LakeUI.ModernTabListControl()
         ThisIsYourWindow1 = New LakeUI.ThisIsYourWindow(components)
         SuspendLayout()
@@ -41,27 +41,27 @@ Partial Class Form1
         ' 
         ModernTabListControl1.ContentBackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ModernTabListControl1.Dock = DockStyle.Fill
-        ModernTabPage1.IsDescription = True
-        ModernTabPage1.Text = "3FR 单源录制器"
-        ModernTabPage2.Text = "总控台"
-        ModernTabPage3.IsSeparator = True
-        ModernTabPage4.Text = "输出设置"
-        ModernTabPage5.Text = "视频参数"
-        ModernTabPage6.Text = "音频参数"
-        ModernTabPage7.IsSeparator = True
-        ModernTabPage8.Text = "软件设置"
-        ModernTabPage9.Text = "个性化"
-        ModernTabPage10.Text = "支持者"
-        ModernTabListControl1.Items.Add(ModernTabPage1)
-        ModernTabListControl1.Items.Add(ModernTabPage2)
-        ModernTabListControl1.Items.Add(ModernTabPage3)
-        ModernTabListControl1.Items.Add(ModernTabPage4)
-        ModernTabListControl1.Items.Add(ModernTabPage5)
-        ModernTabListControl1.Items.Add(ModernTabPage6)
-        ModernTabListControl1.Items.Add(ModernTabPage7)
-        ModernTabListControl1.Items.Add(ModernTabPage8)
-        ModernTabListControl1.Items.Add(ModernTabPage9)
-        ModernTabListControl1.Items.Add(ModernTabPage10)
+        ModernTabPage11.IsDescription = True
+        ModernTabPage11.Text = "3FR 单源录制器"
+        ModernTabPage12.Text = "总控台"
+        ModernTabPage13.IsSeparator = True
+        ModernTabPage14.Text = "输出设置"
+        ModernTabPage15.Text = "视频参数"
+        ModernTabPage16.Text = "音频参数"
+        ModernTabPage17.IsSeparator = True
+        ModernTabPage18.Text = "软件设置"
+        ModernTabPage19.Text = "个性化"
+        ModernTabPage20.Text = "支持者"
+        ModernTabListControl1.Items.Add(ModernTabPage11)
+        ModernTabListControl1.Items.Add(ModernTabPage12)
+        ModernTabListControl1.Items.Add(ModernTabPage13)
+        ModernTabListControl1.Items.Add(ModernTabPage14)
+        ModernTabListControl1.Items.Add(ModernTabPage15)
+        ModernTabListControl1.Items.Add(ModernTabPage16)
+        ModernTabListControl1.Items.Add(ModernTabPage17)
+        ModernTabListControl1.Items.Add(ModernTabPage18)
+        ModernTabListControl1.Items.Add(ModernTabPage19)
+        ModernTabListControl1.Items.Add(ModernTabPage20)
         ModernTabListControl1.Location = New Point(0, 0)
         ModernTabListControl1.Name = "ModernTabListControl1"
         ModernTabListControl1.ScrollBarThumbColor = Color.FromArgb(CByte(40), CByte(200), CByte(200), CByte(200))
@@ -84,16 +84,18 @@ Partial Class Form1
         ThisIsYourWindow1.BorderInactiveColor = Color.Gray
         ThisIsYourWindow1.ButtonCornerRadius = 5
         ThisIsYourWindow1.ButtonGlyphLineWidth = 2F
-        ThisIsYourWindow1.ButtonPadding = New Padding(0, 5, 5, 5)
+        ThisIsYourWindow1.ButtonPadding = New Padding(5, 0, 0, 0)
         ThisIsYourWindow1.ButtonWidth = 40
         ThisIsYourWindow1.CaptionBackColor = Color.FromArgb(CByte(48), CByte(48), CByte(48))
+        ThisIsYourWindow1.CaptionBottomLineHeight = 0
         ThisIsYourWindow1.CaptionButtonGlyphColor = Color.FromArgb(CByte(200), CByte(200), CByte(200))
         ThisIsYourWindow1.CaptionButtonHoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         ThisIsYourWindow1.CaptionButtonPressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        ThisIsYourWindow1.CaptionHeight = 42
+        ThisIsYourWindow1.CaptionHeight = 43
         ThisIsYourWindow1.CaptionInactiveBackColor = Color.FromArgb(CByte(48), CByte(48), CByte(48))
+        ThisIsYourWindow1.CaptionPadding = New Padding(5)
         ThisIsYourWindow1.CloseButtonGlyphColor = Color.FromArgb(CByte(200), CByte(200), CByte(200))
-        ThisIsYourWindow1.IconPaddingLeft = 10
+        ThisIsYourWindow1.IconPadding = New Padding(3, 0, 8, 0)
         ThisIsYourWindow1.IconSize = 26
         ThisIsYourWindow1.LayerShadowResizeFullArea = True
         ThisIsYourWindow1.ShadowMode = LakeUI.ThisIsYourWindow.ShadowModeEnum.Layer

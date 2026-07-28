@@ -76,6 +76,7 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Platform)'=='x64'">
     <TargetName>FFF.Native</TargetName>
+    <LibassRoot>$(ProjectDir)..\third_party\vcpkg_installed\x64-windows</LibassRoot>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -126,16 +127,16 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;d2d1.lib;dwrite.lib;ole32.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <DelayLoadDLLs>avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;swscale-10.dll;avfilter-12.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(LibassRoot)\debug\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;d2d1.lib;dwrite.lib;ole32.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>ass-9.dll;avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;swscale-10.dll;avfilter-12.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -152,16 +153,16 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;d2d1.lib;dwrite.lib;ole32.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <DelayLoadDLLs>avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;swscale-10.dll;avfilter-12.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(LibassRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;d2d1.lib;dwrite.lib;ole32.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>ass-9.dll;avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;swscale-10.dll;avfilter-12.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -188,6 +189,7 @@
     <ClCompile Include="3FP\Audio\WasapiRenderer.cpp" />
     <ClCompile Include="3FP\Core\PlayerSession.cpp" />
     <ClCompile Include="3FP\Render\VideoRenderer.cpp" />
+    <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp" />
     <ClCompile Include="3FP\Subtitle\BitmapSubtitleDecoder.cpp" />
     <ClCompile Include="3FR\Api\NativeApi.cpp" />
     <ClCompile Include="3FR\Audio\AudioTrackEncoder.cpp" />

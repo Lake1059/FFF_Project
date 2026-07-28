@@ -3,8 +3,9 @@
 3FP 的托管入口是 `播放器会话`。调用方必须明确选择 `解码模式.CPU` 或
 `解码模式.GPU`，并把用于呈现的 HWND 写入 `播放器配置.输出窗口句柄`，也可以在
 窗口创建后调用 `设置输出窗口`。播放器不提供网络协议、设备输入、管道或视频帧服务器。
-GPU 模式优先使用 D3D11VA；对 D3D11VA 未暴露的 4:4:4 等格式，可使用 FFmpeg 的
-CUDA/NVDEC 硬件后端。两种后端都会验证实际硬件帧，失败时不会静默回退 CPU。
+GPU 模式会依次尝试 FFmpeg 暴露的 CUDA/NVDEC 与 D3D11VA 解码器，并以实际硬件帧验证驱动支持；
+AVC/HEVC 的 4:2:0、4:2:2、4:4:4 和 AV1 的 4:2:0 均不在播放器侧按规格预先拒绝，8bit/10bit
+同样交给 GPU 与驱动实际判定。硬件后端明确拒绝或在播放中失效时，会自动回退 CPU 解码并继续播放。
 
 静态图片按单帧媒体处理，多帧图片按各帧 PTS 播放；GIF、APNG、Animated WebP 和
 Animated JPEG XL 会遵循文件内的循环次数。纯音频中的 `attached_pic` 不作为时间轴
@@ -31,9 +32,10 @@ SDR 片源在 `映射到SDR` 中保持其 BT.709 码值，不经过 HDR 纸白�
 
 `播放列表` 负责同目录相似命名扫描、自然排序和本地 M3U8 导入导出；
 `播放列表控制器` 可把播放结束事件连接到顺序、循环或随机播放策略。字幕流会出现在
-媒体信息中；`TimedText` 目录已经提供与 UI 解耦的 SRT、SSA/ASS、SUP/PGS、B站 XML 解析或解码、
-时间索引、过滤、搜索、相对尺寸缩放、弹幕轨道调度和逐帧绘制指令。UI 呈现器提交逐帧命令，
-Native D3D11/DirectWrite 层负责栅格化和合成，详见 `TimedText/README.md`。
+媒体信息中；`TimedText` 目录已经提供与 UI 解耦的 SRT 解析、SUP/PGS 解码、B站 XML 解析、
+时间索引、过滤、搜索、相对尺寸缩放、弹幕轨道调度和逐帧绘制指令。ASS/SSA 直接使用 libass
+的局部 Alpha 遮罩，不再经过 FFmpeg 全画布滤镜，也不回退简化文字解析。
+UI 呈现器提交逐帧命令，Native D3D11/DirectWrite 层负责栅格化和合成，详见 `TimedText/README.md`。
 
 性能相关资源有明确所有权：FFmpeg packet、解码 frame、硬件回读 frame 和最多 8 帧的视频队列
 外壳只归播放工作线程复用。WASAPI 以解码样本数维护连续 PCM 时间线：首帧、Seek 和真实的
@@ -80,6 +82,9 @@ UI 应把自己的 `SynchronizationContext` 写入 `播放器配置.事件同步
 FFF.Player.Tests --color-regression <SDR视频> <HDR视频>
 FFF.Player.Tests --performance-regression <SDR视频> <HDR视频>
 FFF.Player.Tests --targeted-regression <视频> <字幕.sup>
+FFF.Player.Tests --vcb-ass-regression <视频> <字幕.ass>
+FFF.Player.Tests --gpu-decode-matrix <视频目录>
+FFF.Player.Tests --ass-render-benchmark
 ```
 
 色彩回归覆盖 SDR 码值直通、PQ 数值映射和 HDR→SDR 换片；性能回归固定覆盖 CPU 解码、呈现、
@@ -87,7 +92,8 @@ FFF.Player.Tests --targeted-regression <视频> <字幕.sup>
 恢复内置音轨。专项回归验证连续 AAC PCM 在开头和 1000 秒 Seek 后都不会误补零/裁样，
 并验证 SUP/SRT/ASS/SSA 字幕与 XML 弹幕的播放中原子替换及损坏文件回退。
 
-构建依赖由 `tools/准备FFmpeg.ps1` 固定到同一 FFmpeg commit。运行时需要
-`avcodec`、`avformat`、`avutil`、`swresample`、`swscale`、`avfilter` 和
-`FFF.Native`。正式发布可使用 `tools/发布3FP单文件.ps1`；单文件不包含 FFmpeg DLL，
-用户需要把同一套兼容 ABI 的 Shared FFmpeg DLL 放在程序目录或可搜索路径中，并可整体替换版本。
+`tools/构建3FP.ps1` 使用当前 Visual Studio 预览版准备 libass，并构建 Native、Player 和测试项目；
+FFmpeg 依赖由 `tools/准备FFmpeg.ps1` 固定到同一 commit。运行时需要 `avcodec`、`avformat`、`avutil`、
+`swresample`、`swscale`、`avfilter`、`FFF.Native` 以及 libass。正式发布可使用
+`tools/发布3FP单文件.ps1`：FFF.Native 和 libass 运行库会进入单文件，FFmpeg DLL 仍保持外置，
+用户可把同一套兼容 ABI 的 Shared FFmpeg DLL 放在程序目录或可搜索路径中并整体替换版本。
