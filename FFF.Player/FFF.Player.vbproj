@@ -23,6 +23,7 @@
 	  <PlatformTarget>x64</PlatformTarget>
 	  <Prefer32Bit>false</Prefer32Bit>
 	  <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+	  <ApplicationIcon>ICO.ico</ApplicationIcon>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
@@ -111,6 +112,7 @@
     <Compile Include="UI\播放器画面控件.vb">
       <SubType>Code</SubType>
     </Compile>
+    <Content Include="ICO.ico" />
     <Compile Update="My Project\Application.Designer.vb">
       <DesignTime>True</DesignTime>
       <AutoGen>True</AutoGen>

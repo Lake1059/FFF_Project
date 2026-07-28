@@ -6,12 +6,13 @@ extern HMODULE g_fffNativeModule;
 
 namespace {
 
-struct FfmpegModule {
+struct DelayLoadedModule {
     const char* importName;
     const wchar_t* filePrefix;
 };
 
-constexpr FfmpegModule Modules[] = {
+constexpr DelayLoadedModule Modules[] = {
+    { "ass-9.dll", L"ass" },
     { "avcodec-63.dll", L"avcodec" },
     { "avformat-63.dll", L"avformat" },
     { "avutil-61.dll", L"avutil" },

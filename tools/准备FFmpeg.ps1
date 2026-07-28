@@ -16,6 +16,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "Resolve-Toolchain.ps1")
 $ThirdPartyDirectory = Join-Path $ProjectRoot "third_party\ffmpeg"
 $IncludeDirectory = Join-Path $ThirdPartyDirectory "include"
 $LibraryDirectory = Join-Path $ThirdPartyDirectory "lib\x64"
@@ -30,44 +31,6 @@ $RuntimeFiles = @(
     @{ ImportName = "swscale-10"; Prefix = "swscale" },
     @{ ImportName = "avfilter-12"; Prefix = "avfilter" }
 )
-
-function Get-VisualCppTool {
-    param([Parameter(Mandatory = $true)] [string]$Name)
-
-    if (-not [string]::IsNullOrWhiteSpace($env:VCToolsInstallDir)) {
-        $candidate = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\$Name"
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return [IO.Path]::GetFullPath($candidate)
-        }
-    }
-
-    $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($null -ne $command) {
-        return $command.Source
-    }
-
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-    if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
-        $installations = @(& $vswhere -prerelease -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json |
-            ConvertFrom-Json)
-        $preview = $installations | Where-Object { $_.isPrerelease } |
-            Sort-Object installationVersion -Descending | Select-Object -First 1
-        if ($null -ne $preview) {
-            $versionFile = Join-Path $preview.installationPath "VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt"
-            if (Test-Path -LiteralPath $versionFile -PathType Leaf) {
-                $version = (Get-Content -LiteralPath $versionFile -Raw).Trim()
-                $candidate = Join-Path $preview.installationPath "VC\Tools\MSVC\$version\bin\Hostx64\x64\$Name"
-                if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-                    return [IO.Path]::GetFullPath($candidate)
-                }
-            }
-        }
-    }
-
-    throw "$Name was not found in Visual Studio Preview, VCToolsInstallDir, or PATH."
-}
 
 function Get-RuntimeDll {
     param(
@@ -86,13 +49,18 @@ function Get-RuntimeDll {
 }
 
 function Invoke-Git {
-    param([Parameter(Mandatory = $true)] [string[]]$Arguments)
+    param(
+        [Parameter(Mandatory = $true)] [string]$Executable,
+        [Parameter(Mandatory = $true)] [string[]]$Arguments
+    )
 
-    & git @Arguments
+    & $Executable @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Git command failed: git $($Arguments -join ' ')"
+        throw "Git command failed: $Executable $($Arguments -join ' ')"
     }
 }
+
+$Git = Get-GitTool
 
 if ([string]::IsNullOrWhiteSpace($RuntimeSource)) {
     New-Item -ItemType Directory -Force -Path $DownloadDirectory | Out-Null
@@ -119,15 +87,15 @@ if (-not (Test-Path -LiteralPath $RuntimeSource -PathType Container)) {
 }
 
 if (-not (Test-Path -LiteralPath $SourceDirectory)) {
-    Invoke-Git -Arguments @("clone", "https://github.com/FFmpeg/FFmpeg.git", $SourceDirectory)
+    Invoke-Git -Executable $Git -Arguments @("clone", "https://github.com/FFmpeg/FFmpeg.git", $SourceDirectory)
 }
-$currentCommit = (& git -C $SourceDirectory rev-parse HEAD).Trim()
+$currentCommit = (& $Git -C $SourceDirectory rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) {
     throw "Could not read the FFmpeg source revision in $SourceDirectory"
 }
 if ($currentCommit -ne $PinnedCommit) {
-    Invoke-Git -Arguments @("-C", $SourceDirectory, "fetch", "origin", $PinnedCommit)
-    Invoke-Git -Arguments @("-C", $SourceDirectory, "checkout", "--detach", $PinnedCommit)
+    Invoke-Git -Executable $Git -Arguments @("-C", $SourceDirectory, "fetch", "origin", $PinnedCommit)
+    Invoke-Git -Executable $Git -Arguments @("-C", $SourceDirectory, "checkout", "--detach", $PinnedCommit)
 }
 
 New-Item -ItemType Directory -Force -Path $IncludeDirectory, $LibraryDirectory, $RuntimeDirectory | Out-Null

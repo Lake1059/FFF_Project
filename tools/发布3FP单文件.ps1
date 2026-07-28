@@ -13,17 +13,13 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $ProjectRoot $OutputDirectory
 }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
-$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw "vswhere.exe was not found." }
-$installations = @(& $vswhere -prerelease -products * `
-    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json)
-$VisualStudioDirectory = ($installations | Where-Object { $_.isPrerelease } |
-    Sort-Object installationVersion -Descending | Select-Object -First 1).installationPath
-if ([string]::IsNullOrWhiteSpace($VisualStudioDirectory)) { throw "Visual Studio Preview with C++ tools was not found." }
-$MSBuild = Join-Path $VisualStudioDirectory "MSBuild\Current\Bin\amd64\MSBuild.exe"
-if (-not (Test-Path -LiteralPath $MSBuild)) { throw "Visual Studio Preview x64 MSBuild was not found: $MSBuild" }
-
-& (Join-Path $ScriptDirectory "Prepare-Libass.ps1") -VisualStudioDirectory $VisualStudioDirectory
+. (Join-Path $ScriptDirectory "Resolve-Toolchain.ps1")
+$MSBuild = Get-MSBuildTool
+$DotNet = Get-DotNetTool
+$LibassReadyMarker = Join-Path $ProjectRoot "third_party\vcpkg_installed\x64-windows\share\3f-project\libass-ready.txt"
+if (-not (Test-Path -LiteralPath $LibassReadyMarker -PathType Leaf)) {
+    throw "libass is not prepared. Run the *Libass.ps1 preparation script in tools first."
+}
 
 & $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }
@@ -32,7 +28,7 @@ $StagingDirectory = Join-Path ([IO.Path]::GetTempPath()) ("3FP-publish-" + [Guid
 $PendingExecutable = $null
 try {
     New-Item -ItemType Directory -Path $StagingDirectory | Out-Null
-    dotnet publish (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
+    & $DotNet publish (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
         -c $Configuration -r win-x64 --self-contained false -o $StagingDirectory `
         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
         -p:DebugType=None -p:DebugSymbols=false

@@ -23,6 +23,7 @@ Partial Class Form1
     <System.Diagnostics.DebuggerStepThrough()>
     Private Sub InitializeComponent()
         components = New ComponentModel.Container()
+        Dim resources As System.ComponentModel.ComponentResourceManager = New System.ComponentModel.ComponentResourceManager(GetType(Form1))
         ThisIsYourWindow1 = New LakeUI.ThisIsYourWindow(components)
         Panel1 = New Panel()
         MB_1 = New LakeUI.ModernButton()
@@ -1004,6 +1005,7 @@ Partial Class Form1
         Controls.Add(ModernPanel1)
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver
+        Icon = CType(resources.GetObject("$this.Icon"), Icon)
         Name = "Form1"
         StartPosition = FormStartPosition.CenterScreen
         Text = "FFF.Player"

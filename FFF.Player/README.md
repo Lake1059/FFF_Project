@@ -92,7 +92,8 @@ FFF.Player.Tests --ass-render-benchmark
 恢复内置音轨。专项回归验证连续 AAC PCM 在开头和 1000 秒 Seek 后都不会误补零/裁样，
 并验证 SUP/SRT/ASS/SSA 字幕与 XML 弹幕的播放中原子替换及损坏文件回退。
 
-`tools/构建3FP.ps1` 使用当前 Visual Studio 预览版准备 libass，并构建 Native、Player 和测试项目；
+`tools/构建3FP.ps1` 优先使用环境中的工具，其次使用正式版 Visual Studio，最后回退到预览版，
+并准备 libass、构建 Native、Player 和测试项目；
 FFmpeg 依赖由 `tools/准备FFmpeg.ps1` 固定到同一 commit。运行时需要 `avcodec`、`avformat`、`avutil`、
 `swresample`、`swscale`、`avfilter`、`FFF.Native` 以及 libass。正式发布可使用
 `tools/发布3FP单文件.ps1`：FFF.Native 和 libass 运行库会进入单文件，FFmpeg DLL 仍保持外置，
