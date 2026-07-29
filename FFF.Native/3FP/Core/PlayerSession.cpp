@@ -3,12 +3,17 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/codec_desc.h>
+#include <libavcodec/packet.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/dict.h>
+#include <libavutil/samplefmt.h>
 }
 
 #include <filesystem>
@@ -64,6 +69,42 @@ std::string EscapeJson(const std::string& value) {
         }
     }
     return output.str();
+}
+
+void AppendDictionaryJson(std::ostringstream& json, const AVDictionary* dictionary) {
+    json << '{';
+    bool first = true;
+    const AVDictionaryEntry* entry = nullptr;
+    while ((entry = av_dict_get(dictionary, "", entry, AV_DICT_IGNORE_SUFFIX)) != nullptr) {
+        if (!first) json << ',';
+        first = false;
+        json << '"' << EscapeJson(entry->key ? entry->key : "") << "\":\""
+             << EscapeJson(entry->value ? entry->value : "") << '"';
+    }
+    json << '}';
+}
+
+std::string ChannelLayoutName(const AVChannelLayout& layout) {
+    char text[256]{};
+    return av_channel_layout_describe(&layout, text, sizeof(text)) >= 0 ? text : std::string{};
+}
+
+std::string CodecTagName(const std::uint32_t tag) {
+    if (tag == 0) return {};
+    std::string fourcc;
+    fourcc.reserve(4);
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+        const auto character = static_cast<unsigned char>((tag >> shift) & 0xffu);
+        if (character < 0x20 || character > 0x7e) {
+            fourcc.clear();
+            break;
+        }
+        fourcc.push_back(static_cast<char>(character));
+    }
+    if (!fourcc.empty()) return fourcc;
+    std::ostringstream value;
+    value << "0x" << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << tag;
+    return value.str();
 }
 
 std::string FfmpegError(const int error) {
@@ -169,6 +210,21 @@ const char* MediaTypeName(const AVMediaType type) noexcept {
     switch (type) { case AVMEDIA_TYPE_VIDEO: return "video"; case AVMEDIA_TYPE_AUDIO: return "audio";
     case AVMEDIA_TYPE_SUBTITLE: return "subtitle"; default: return "other"; }
 }
+
+int PixelFormatBitDepth(const AVPixelFormat format) noexcept {
+    const auto* descriptor = av_pix_fmt_desc_get(format);
+    return descriptor != nullptr && descriptor->nb_components > 0 ? descriptor->comp[0].depth : 0;
+}
+
+std::string HardwareAccelerationName(const AVCodecContext* decoder) {
+    if (decoder == nullptr || decoder->hw_device_ctx == nullptr || decoder->hw_device_ctx->data == nullptr)
+        return {};
+    const auto* context = reinterpret_cast<const AVHWDeviceContext*>(decoder->hw_device_ctx->data);
+    const auto* type = av_hwdevice_get_type_name(context->type);
+    if (type == nullptr) return {};
+    if (context->type == AV_HWDEVICE_TYPE_D3D11VA) return "DXVA (D3D11VA)";
+    return type;
+}
 }
 
 PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
@@ -178,7 +234,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       videoTransferFrame_(nullptr), audioDecodeFrame_(nullptr), externalAudioDecodeFrame_(nullptr),
       videoDecoder_(nullptr), audioDecoder_(nullptr), videoStream_(-1),
       audioStream_(-1), coverArtStream_(-1), coverArtFrame_(nullptr), externalFormat_(nullptr), externalAudioDecoder_(nullptr),
-      externalAudioStream_(-1), externalAudioOffset100ns_(0), volume_(1.0f), muted_(false),
+       externalAudioStream_(-1), externalAudioOffset100ns_(0), audioExclusive_(false), volume_(1.0f), muted_(false),
       clockOriginPosition100ns_(0), clockOriginQpc_(0), playbackPosition100ns_(0),
       playbackClockSampleQpc_(0), playbackClockLimit100ns_(0), playbackClockSequence_(0),
       state_(FFF3FPState::Idle), qpcFrequency_(0), seekTarget100ns_(-1), seekTargetFrame_(-1),
@@ -187,9 +243,12 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       rebuildingFrameIndex_(false),
       stepScheduled_(false), stepRepeatRequested_(false), pendingStepOperation_(StepOperation::Frame),
       pendingStepDirection_(0), pendingVideoPacketBytes_(0), pendingAudioPacketBytes_(0),
-      draining_(false), hardwareFallbackPending_(false) {
+      videoBitRateDuration100ns_(0), audioBitRateDuration100ns_(0),
+      videoBitRateBytes_(0), audioBitRateBytes_(0),
+      draining_(false), hardwareFallbackPending_(false), internalAudioFailurePending_(false),
+      internalAudioFailureResult_(FFFResult::Success), internalAudioDecodeErrorCount_(0) {
     snapshot_ = {};
-    snapshot_.size = sizeof(snapshot_); snapshot_.version = 4; snapshot_.state = FFF3FPState::Idle;
+    snapshot_.size = sizeof(snapshot_); snapshot_.version = 5; snapshot_.state = FFF3FPState::Idle;
     snapshot_.decodeMode = configuration.decodeMode; snapshot_.requestedColorMode = configuration.colorMode;
     snapshot_.actualColorMode = FFF3FPColorMode::MapToSdr; snapshot_.frameIndex = -1;
     snapshot_.framePts = AV_NOPTS_VALUE; snapshot_.selectedVideoStream = -1; snapshot_.selectedAudioStream = -1;
@@ -549,7 +608,55 @@ FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sd
     return FFFResult::Success;
 }
 FFFResult PlayerSession::SetOutputWindow(void* window) noexcept { if (window != nullptr && !IsWindow(static_cast<HWND>(window))) return FFFResult::InvalidArgument; Enqueue([this, window] { const auto result = videoRenderer_.SetWindow(static_cast<HWND>(window)); if (result != FFFResult::Success) { Fail(result, "The playback window handle is invalid.", "output-window"); return; } if (videoRenderer_.Redraw() != FFFResult::Success) Fail(FFFResult::DeviceFailure, videoRenderer_.LastError(), "redraw"); }); return FFFResult::Success; }
-FFFResult PlayerSession::SetAudioEndpoint(const char* endpoint) noexcept { const auto value = endpoint == nullptr ? std::wstring{} : FromUtf8(endpoint); Enqueue([this, value] { audioEndpointId_ = value; if (audioRenderer_) { const auto paused = snapshot_.state != FFF3FPState::Playing; audioRenderer_->Stop(); audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_); const auto result = audioRenderer_->Start(); if (result != FFFResult::Success) { Fail(result, audioRenderer_->LastError(), "audio-endpoint"); return; } audioRenderer_->SetVolume(volume_, muted_); audioRenderer_->Reset(snapshot_.position100ns); audioRenderer_->SetPaused(paused); Emit(FFF3FPEvent::DeviceChanged, "{\"type\":\"audio\"}"); } }); return FFFResult::Success; }
+FFFResult PlayerSession::SetAudioEndpoint(const char* endpoint) noexcept { const auto value = endpoint == nullptr ? std::wstring{} : FromUtf8(endpoint); Enqueue([this, value] { audioEndpointId_ = value; if (audioRenderer_) { const auto paused = snapshot_.state != FFF3FPState::Playing; audioRenderer_->Stop(); audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_); const auto result = audioRenderer_->Start(); if (result != FFFResult::Success) { Fail(result, audioRenderer_->LastError(), "audio-endpoint"); return; } audioRenderer_->SetVolume(volume_, muted_); audioRenderer_->Reset(snapshot_.position100ns); audioRenderer_->SetPaused(paused); RebuildMediaInfo(); Emit(FFF3FPEvent::DeviceChanged, "{\"type\":\"audio\"}"); } }); return FFFResult::Success; }
+FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
+    const auto state = state_.load();
+    if (state != FFF3FPState::Ready && state != FFF3FPState::Playing &&
+        state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState;
+    Enqueue([this, exclusive] {
+        if (audioExclusive_ == exclusive) return;
+        if (!audioRenderer_) {
+            audioExclusive_ = exclusive;
+            Emit(FFF3FPEvent::DeviceChanged, std::string("{\"type\":\"audio\",\"exclusive\":") +
+                (exclusive ? "true}" : "false}"));
+            return;
+        }
+        const auto paused = snapshot_.state != FFF3FPState::Playing;
+        const auto position = ClockPosition();
+        snapshot_.position100ns = position;
+        if (audioRenderer_) audioRenderer_->Stop();
+        auto replacement = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, exclusive);
+        const auto result = replacement->Start();
+        if (result != FFFResult::Success) {
+            const auto message = replacement->LastError();
+            // Restore the previous renderer so an unsupported exclusive format
+            // cannot turn a working session into a silent session.
+            replacement->Stop();
+            audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_);
+            if (audioRenderer_->Start() == FFFResult::Success) {
+                audioRenderer_->SetVolume(volume_, muted_);
+                audioRenderer_->Reset(position);
+                audioRenderer_->SetPaused(paused);
+                RebuildMediaInfo();
+            }
+            Emit(FFF3FPEvent::DeviceChanged, std::string("{\"type\":\"audio\",\"exclusive\":") +
+                (audioExclusive_ ? "true}" : "false}"));
+            ReportError(result, message.empty() ? "The selected endpoint rejected exclusive mode." : message,
+                "audio-exclusive-mode");
+            return;
+        }
+        audioRenderer_ = std::move(replacement);
+        audioExclusive_ = exclusive;
+        audioRenderer_->SetVolume(volume_, muted_);
+        audioRenderer_->Reset(position);
+        audioRenderer_->SetPaused(paused);
+        DoSeek(position);
+        RebuildMediaInfo();
+        Emit(FFF3FPEvent::DeviceChanged, std::string("{\"type\":\"audio\",\"exclusive\":") +
+            (exclusive ? "true}" : "false}"));
+    });
+    return FFFResult::Success;
+}
 FFFResult PlayerSession::SetVolume(const float volume, const bool muted) noexcept { if (!std::isfinite(volume) || volume < 0 || volume > 1) return FFFResult::InvalidArgument; Enqueue([this, volume, muted] { volume_ = volume; muted_ = muted; if (audioRenderer_) audioRenderer_->SetVolume(volume_, muted_); }); return FFFResult::Success; }
 
 FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) noexcept {
@@ -558,7 +665,7 @@ FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) no
         ? input.targetFrameRate : 60.0f;
     if (input.size < legacyLayerSize || input.version != 1 ||
         input.canvasWidth == 0 || input.canvasHeight == 0 || input.commandCount > 4096 ||
-        input.layerSlot > static_cast<std::uint32_t>(TimedTextLayerSlot::Danmaku) ||
+        input.layerSlot > static_cast<std::uint32_t>(TimedTextLayerSlot::PlayerInformation) ||
         !std::isfinite(targetFrameRate) || targetFrameRate < 1.0f || targetFrameRate > 240.0f ||
         (input.commandCount != 0 && input.commands == nullptr)) return FFFResult::InvalidArgument;
     try {
@@ -649,7 +756,7 @@ FFFResult PlayerSession::GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcep
 }
 
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
-    if (output.size < sizeof(FFF3FPSnapshot) || output.version != 4) return FFFResult::InvalidArgument;
+    if (output.size < sizeof(FFF3FPSnapshot) || output.version != 5) return FFFResult::InvalidArgument;
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
     // Presentation completes asynchronously on the dedicated swap-chain owner;
     // expose its live counters even if no later decode-frame snapshot was needed.
@@ -659,6 +766,7 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     output.presentWait100ns = videoRenderer_.PresentWait100ns();
     output.deviceLockWait100ns = videoRenderer_.DeviceLockWait100ns();
     output.softwareConvert100ns = videoRenderer_.SoftwareConvert100ns();
+    output.videoOutputBitDepth = videoRenderer_.OutputBitDepth();
     if (output.state == FFF3FPState::Playing) {
         std::uint64_t firstSequence = 0;
         std::uint64_t secondSequence = 0;
@@ -864,7 +972,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     }
     if (audioStream_ >= 0 && OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success) audioStream_ = -1;
     if (audioStream_ >= 0) {
-        audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_);
+        audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_);
         const auto result = audioRenderer_->Start();
         if (result != FFFResult::Success) { Fail(result, audioRenderer_->LastError(), "open-audio"); return; }
         audioRenderer_->SetVolume(volume_, muted_);
@@ -1024,6 +1132,7 @@ void PlayerSession::PumpPlayback() noexcept {
         if (!pendingVideoPackets_.empty() || !pendingAudioPackets_.empty()) { Sleep(1); return; }
         FlushAtEnd(); return;
     }
+    TrackPacketBitRate(playbackPacket_, format_);
     if (playbackPacket_->stream_index == videoStream_) {
         if (videoSaturated()) {
             auto* retained = av_packet_clone(playbackPacket_);
@@ -1078,7 +1187,7 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
         while ((receiveResult = avcodec_receive_frame(decoder, frame)) >= 0) {
             handleFrame(frame);
             av_frame_unref(frame);
-            if (hardwareFallbackPending_) break;
+            if (hardwareFallbackPending_ || internalAudioFailurePending_) break;
         }
         return receiveResult;
     };
@@ -1093,12 +1202,22 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
                 Fail(fallbackResult, "Could not fall back to CPU decoding after a GPU frame-transfer failure.");
             return fallbackResult;
         }
+        if (!video && owner == format_ && internalAudioFailurePending_) {
+            const auto failureResult = internalAudioFailureResult_;
+            auto message = audioRenderer_ ? audioRenderer_->LastError() : std::string{};
+            DisableFailedInternalAudio(failureResult,
+                message.empty() ? "The selected audio track could not be rendered." : std::move(message));
+            return failureResult;
+        }
         if (receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF) {
             if (video && snapshot_.decodeMode == FFF3FPDecodeMode::Gpu &&
                 FallbackToSoftwareVideoDecoder("The GPU stopped decoding the video stream; playback continued with CPU decoding.") == FFFResult::Success)
                 return FFFResult::Success;
-            Fail(FFFResult::FfmpegFailure, "Decoder failed while making room for a packet: " +
-                FfmpegError(receiveResult));
+            const auto message = std::string(video
+                ? "Video decoder failed while making room for a packet: "
+                : "Audio decoder failed while making room for a packet: ") + FfmpegError(receiveResult);
+            if (!video && owner == format_) HandleInternalAudioDecodeFailure(FFFResult::FfmpegFailure, message);
+            else Fail(FFFResult::FfmpegFailure, message);
             return FFFResult::FfmpegFailure;
         }
         result = avcodec_send_packet(decoder, packet);
@@ -1107,10 +1226,19 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
         if (video && snapshot_.decodeMode == FFF3FPDecodeMode::Gpu &&
             FallbackToSoftwareVideoDecoder("The GPU rejected a video packet; playback continued with CPU decoding.") == FFFResult::Success)
             return FFFResult::Success;
-        Fail(FFFResult::FfmpegFailure, "Decoder rejected packet: " + FfmpegError(result));
+        const auto message = "Decoder rejected packet: " + FfmpegError(result);
+        if (!video && owner == format_) HandleInternalAudioDecodeFailure(FFFResult::FfmpegFailure, message);
+        else Fail(FFFResult::FfmpegFailure, message);
         return FFFResult::FfmpegFailure;
     }
     result = receiveFrames();
+    if (!video && owner == format_ && internalAudioFailurePending_) {
+        const auto failureResult = internalAudioFailureResult_;
+        auto message = audioRenderer_ ? audioRenderer_->LastError() : std::string{};
+        DisableFailedInternalAudio(failureResult,
+            message.empty() ? "The selected audio track could not be rendered." : std::move(message));
+        return failureResult;
+    }
     if (hardwareFallbackPending_) {
         hardwareFallbackPending_ = false;
         const auto fallbackResult = FallbackToSoftwareVideoDecoder(
@@ -1123,6 +1251,11 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
         snapshot_.decodeMode == FFF3FPDecodeMode::Gpu &&
         FallbackToSoftwareVideoDecoder("The GPU stopped decoding the video stream; playback continued with CPU decoding.") == FFFResult::Success)
         return FFFResult::Success;
+    if (result != AVERROR(EAGAIN) && result != AVERROR_EOF && !video && owner == format_) {
+        HandleInternalAudioDecodeFailure(FFFResult::FfmpegFailure,
+            "The selected audio track stopped decoding: " + FfmpegError(result));
+        return FFFResult::FfmpegFailure;
+    }
     return result == AVERROR(EAGAIN) || result == AVERROR_EOF ? FFFResult::Success : FFFResult::FfmpegFailure;
 }
 
@@ -1299,6 +1432,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
         renderFrame = videoTransferFrame_;
     }
     const auto previousColorMode = snapshot_.actualColorMode;
+    const auto firstFrameForMedia = snapshot_.framePts == AV_NOPTS_VALUE;
     const auto renderResult = videoRenderer_.Render(renderFrame);
     if (renderResult != FFFResult::Success) {
         if (renderResult == FFFResult::NotSupported &&
@@ -1316,6 +1450,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     snapshot_.sourcePeakNits = static_cast<std::uint32_t>(std::lround(videoRenderer_.SourcePeakNits()));
     UpdateAudioDiagnostics();
     PublishSnapshot();
+    if (firstFrameForMedia) RebuildMediaInfo();
     if (snapshot_.actualColorMode != previousColorMode) {
         std::ostringstream json; json << "{\"requested\":" << static_cast<unsigned>(snapshot_.requestedColorMode)
             << ",\"actual\":" << static_cast<unsigned>(snapshot_.actualColorMode) << ",\"reason\":\""
@@ -1342,8 +1477,59 @@ void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, cons
     }
     ++snapshot_.decodedAudioFrames;
     const auto result = audioRenderer_->Enqueue(frame, position);
+    if (result == FFFResult::Success && owner == format_) internalAudioDecodeErrorCount_ = 0;
     if (result == FFFResult::BufferTooSmall) ++snapshot_.audioRejectedFrames;
-    else if (result != FFFResult::Success) Fail(result, audioRenderer_->LastError(), "audio-render");
+    else if (result != FFFResult::Success) {
+        if (owner == format_) {
+            internalAudioFailureResult_ = result;
+            internalAudioFailurePending_ = true;
+        } else {
+            Fail(result, audioRenderer_->LastError(), "audio-render");
+        }
+    }
+}
+
+bool PlayerSession::HandleInternalAudioDecodeFailure(const FFFResult result, std::string message) noexcept {
+    // A stream switch seeks on the video timeline. MPEG-TS can land on a partial
+    // DTS/AC-3 access unit before the next audio sync word; reject that boundary
+    // packet and let the decoder lock onto subsequent complete packets.
+    if (++internalAudioDecodeErrorCount_ < 32) {
+        if (audioDecoder_ != nullptr) avcodec_flush_buffers(audioDecoder_);
+        return false;
+    }
+    DisableFailedInternalAudio(result, std::move(message));
+    return true;
+}
+
+void PlayerSession::DisableFailedInternalAudio(const FFFResult result, std::string message) noexcept {
+    try {
+        const auto failedStream = audioStream_;
+        const auto position = std::max<std::int64_t>(0, snapshot_.position100ns);
+        if (audioDecoder_ != nullptr) avcodec_free_context(&audioDecoder_);
+        if (audioDecodeFrame_ != nullptr) av_frame_unref(audioDecodeFrame_);
+        audioStream_ = -1;
+        snapshot_.selectedAudioStream = -1;
+        internalAudioFailurePending_ = false;
+        internalAudioFailureResult_ = FFFResult::Success;
+        internalAudioDecodeErrorCount_ = 0;
+        for (auto*& packet : pendingAudioPackets_) av_packet_free(&packet);
+        pendingAudioPackets_.clear();
+        pendingAudioPacketBytes_ = 0;
+        if (audioRenderer_) audioRenderer_->Reset(position);
+        ResetClock(position);
+        UpdateAudioDiagnostics();
+        PublishSnapshot();
+        if (message.empty()) message = "The selected audio track failed.";
+        message += " Playback continued without this audio track; select another track to restore audio.";
+        ReportError(result, std::move(message), "audio-track");
+        Emit(FFF3FPEvent::OperationCompleted,
+            "{\"operation\":\"disable-failed-audio\",\"stream\":" +
+            std::to_string(failedStream) + "}");
+    } catch (...) {
+        ReportError(FFFResult::NativeFailure,
+            "The failed audio track could not be disabled cleanly, but the playback session remains available.",
+            "audio-track");
+    }
 }
 
 void PlayerSession::UpdateAudioDiagnostics() noexcept {
@@ -1366,6 +1552,57 @@ void PlayerSession::UpdateAudioDiagnostics() noexcept {
     snapshot_.audioDroppedOverlapFrames = audioRenderer_->DroppedOverlapFrames();
 }
 
+void PlayerSession::ResetBitRateTracking() noexcept {
+    videoBitRateSamples_.clear();
+    audioBitRateSamples_.clear();
+    videoBitRateDuration100ns_ = audioBitRateDuration100ns_ = 0;
+    videoBitRateBytes_ = audioBitRateBytes_ = 0;
+    snapshot_.videoBitRate = snapshot_.audioBitRate = 0;
+}
+
+void PlayerSession::TrackPacketBitRate(const AVPacket* packet, AVFormatContext* owner) noexcept {
+    if (packet == nullptr || owner == nullptr || packet->size <= 0 ||
+        packet->stream_index < 0 || packet->stream_index >= static_cast<int>(owner->nb_streams)) return;
+    const auto* stream = owner->streams[packet->stream_index];
+    if (stream == nullptr || stream->codecpar == nullptr) return;
+    const bool video = stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
+    const bool audio = stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO;
+    if ((!video || packet->stream_index != videoStream_) &&
+        (!audio || (owner == format_ && packet->stream_index != audioStream_) ||
+            (owner == externalFormat_ && packet->stream_index != externalAudioStream_))) return;
+
+    auto duration = packet->duration > 0
+        ? av_rescale_q(packet->duration, stream->time_base, AVRational{1, static_cast<int>(TicksPerSecond)}) : 0;
+    if (duration <= 0 && video) {
+        const auto rate = av_guess_frame_rate(owner, const_cast<AVStream*>(stream), nullptr);
+        if (rate.num > 0 && rate.den > 0)
+            duration = av_rescale_q(1, av_inv_q(rate), AVRational{1, static_cast<int>(TicksPerSecond)});
+    }
+    if (duration <= 0 && audio && stream->codecpar->sample_rate > 0 && stream->codecpar->frame_size > 0)
+        duration = av_rescale_q(stream->codecpar->frame_size,
+            AVRational{1, stream->codecpar->sample_rate}, AVRational{1, static_cast<int>(TicksPerSecond)});
+    if (duration <= 0) return;
+    duration = std::clamp<std::int64_t>(duration, 1, 10 * TicksPerSecond);
+
+    auto& samples = video ? videoBitRateSamples_ : audioBitRateSamples_;
+    auto& totalDuration = video ? videoBitRateDuration100ns_ : audioBitRateDuration100ns_;
+    auto& totalBytes = video ? videoBitRateBytes_ : audioBitRateBytes_;
+    samples.push_back({duration, static_cast<std::uint32_t>(packet->size)});
+    totalDuration += duration;
+    totalBytes += static_cast<std::uint32_t>(packet->size);
+    while (totalDuration > TicksPerSecond && samples.size() > 1) {
+        const auto old = samples.front(); samples.pop_front();
+        totalDuration -= old.duration100ns;
+        totalBytes -= old.bytes;
+    }
+    const auto rate = totalDuration > 0
+        ? static_cast<std::uint64_t>(std::min<long double>(
+            static_cast<long double>(std::numeric_limits<std::uint64_t>::max()),
+            static_cast<long double>(totalBytes) * 8.0L * TicksPerSecond / totalDuration)) : 0;
+    if (video) snapshot_.videoBitRate = rate; else snapshot_.audioBitRate = rate;
+    PublishSnapshot();
+}
+
 void PlayerSession::PumpExternalAudio() noexcept {
     if (externalFormat_ == nullptr || externalAudioDecoder_ == nullptr) return;
     if (snapshot_.position100ns < externalAudioOffset100ns_) return;
@@ -1373,6 +1610,7 @@ void PlayerSession::PumpExternalAudio() noexcept {
     if (externalAudioPacket_ == nullptr) return;
     while (av_read_frame(externalFormat_, externalAudioPacket_) >= 0) {
         if (externalAudioPacket_->stream_index == externalAudioStream_) {
+            TrackPacketBitRate(externalAudioPacket_, externalFormat_);
             DecodePacket(externalAudioDecoder_, externalAudioPacket_, false, externalFormat_);
             av_packet_unref(externalAudioPacket_);
             break;
@@ -1405,9 +1643,15 @@ void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame
     const auto referenceStream = videoStream_ >= 0 ? videoStream_ : audioStream_;
     auto timestamp = av_rescale_q(position, AVRational{1, static_cast<int>(TicksPerSecond)}, format_->streams[referenceStream]->time_base);
     if (format_->streams[referenceStream]->start_time != AV_NOPTS_VALUE) timestamp += format_->streams[referenceStream]->start_time;
-    if (av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD) < 0) { Fail(FFFResult::FfmpegFailure, "FFmpeg could not seek to the requested position.", "seek"); return; }
+    if (av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD) < 0) {
+        ReportError(FFFResult::FfmpegFailure,
+            "FFmpeg could not seek to the requested position; playback remained active.", "seek");
+        return;
+    }
     ClearVideoQueue();
+    ResetBitRateTracking();
     if (videoDecoder_) avcodec_flush_buffers(videoDecoder_); if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
+    internalAudioDecodeErrorCount_ = 0;
     seekTarget100ns_ = position; seekTargetFrame_ = targetFrame;
     keyframeSeekPending_ = !exact && videoStream_ >= 0; draining_ = false;
     lastVideoFrameDuration100ns_ = 0;
@@ -1444,6 +1688,7 @@ void PlayerSession::DecodeUntilSeekTarget() noexcept {
             }
             break;
         }
+        TrackPacketBitRate(playbackPacket_, format_);
         if (playbackPacket_->stream_index == videoStream_)
             DecodePacket(videoDecoder_, playbackPacket_, true, format_);
         av_packet_unref(playbackPacket_);
@@ -1467,7 +1712,13 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
     }
     if (result != FFFResult::Success) { ReportError(result, "Could not open the selected media stream.", "select-stream"); return; }
     if (video) { if (videoDecoder_) avcodec_free_context(&videoDecoder_); videoDecoder_ = replacement; videoStream_ = index; snapshot_.selectedVideoStream = index; framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false; }
-    else { if (audioDecoder_) avcodec_free_context(&audioDecoder_); audioDecoder_ = replacement; audioStream_ = index; snapshot_.selectedAudioStream = index; }
+    else {
+        if (audioDecoder_) avcodec_free_context(&audioDecoder_);
+        audioDecoder_ = replacement; audioStream_ = index; snapshot_.selectedAudioStream = index;
+        internalAudioFailurePending_ = false;
+        internalAudioFailureResult_ = FFFResult::Success;
+        internalAudioDecodeErrorCount_ = 0;
+    }
     DoSeek(snapshot_.position100ns); RebuildMediaInfo();
     if (video && snapshot_.decodeMode != previousDecodeMode)
         Emit(FFF3FPEvent::DeviceChanged,
@@ -1486,7 +1737,7 @@ void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t req
     AVCodecContext* replacementDecoder = nullptr;
     const auto result = OpenDecoder(replacementFormat, index, false, &replacementDecoder);
     if (result != FFFResult::Success) { avformat_close_input(&replacementFormat); ReportError(result, "Could not open the external audio stream.", "external-audio"); return; }
-    if (!audioRenderer_) { audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_); if (audioRenderer_->Start() != FFFResult::Success) { avcodec_free_context(&replacementDecoder); avformat_close_input(&replacementFormat); ReportError(FFFResult::DeviceFailure, audioRenderer_->LastError(), "external-audio"); audioRenderer_.reset(); return; } audioRenderer_->SetVolume(volume_, muted_); }
+    if (!audioRenderer_) { audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_); if (audioRenderer_->Start() != FFFResult::Success) { avcodec_free_context(&replacementDecoder); avformat_close_input(&replacementFormat); ReportError(FFFResult::DeviceFailure, audioRenderer_->LastError(), "external-audio"); audioRenderer_.reset(); return; } audioRenderer_->SetVolume(volume_, muted_); }
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); if (externalFormat_) avformat_close_input(&externalFormat_);
     externalFormat_ = replacementFormat; externalAudioDecoder_ = replacementDecoder; externalAudioStream_ = index;
     externalAudioOffset100ns_ = offset; externalAudioPath_ = std::move(path);
@@ -1521,6 +1772,10 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     externalAudioOffset100ns_ = 0; seekTarget100ns_ = seekTargetFrame_ = -1;
     keyframeSeekPending_ = false; lastVideoFrameDuration100ns_ = 0; draining_ = false;
     hardwareFallbackPending_ = false;
+    internalAudioFailurePending_ = false;
+    internalAudioFailureResult_ = FFFResult::Success;
+    internalAudioDecodeErrorCount_ = 0;
+    ResetBitRateTracking();
     {
         std::lock_guard lock(mutex_); snapshot_.state = finalState; snapshot_.position100ns = 0; snapshot_.duration100ns = 0;
         snapshot_.frameIndex = -1; snapshot_.selectedVideoStream = -1; snapshot_.selectedAudioStream = -1;
@@ -1535,6 +1790,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
         snapshot_.swapChainPresents = snapshot_.presentWait100ns = 0;
         snapshot_.deviceLockWait100ns = snapshot_.hardwareTransfer100ns = 0;
         snapshot_.softwareConvert100ns = 0;
+        snapshot_.videoBitRate = snapshot_.audioBitRate = 0;
         snapshot_.queuedVideoFrames = 0; snapshot_.sourcePeakNits = 0;
         // During same-HWND media replacement the flip chain is intentionally
         // retained. Keep reporting its real mode while Opening; the next source
@@ -1554,23 +1810,213 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
 
 void PlayerSession::RebuildMediaInfo() noexcept {
     if (!format_) return;
-    std::ostringstream json; json << "{\"format\":\"" << EscapeJson(format_->iformat ? format_->iformat->name : "")
-        << "\",\"duration100ns\":" << snapshot_.duration100ns << ",\"streams\":[";
+    std::ostringstream json;
+    const auto formatName = format_->iformat && format_->iformat->name ? format_->iformat->name : "";
+    const auto formatLongName = format_->iformat && format_->iformat->long_name ? format_->iformat->long_name : "";
+    const auto* majorBrand = av_dict_get(format_->metadata, "major_brand", nullptr, 0);
+    const auto* compatibleBrands = av_dict_get(format_->metadata, "compatible_brands", nullptr, 0);
+    json << "{\"format\":\"" << EscapeJson(formatName)
+        << "\",\"formatLongName\":\"" << EscapeJson(formatLongName)
+        << "\",\"formatCodecId\":\"" << EscapeJson(majorBrand ? majorBrand->value : "")
+        << "\",\"compatibleBrands\":\"" << EscapeJson(compatibleBrands ? compatibleBrands->value : "")
+        << "\",\"duration100ns\":" << snapshot_.duration100ns
+        << ",\"startTime100ns\":" << (format_->start_time == AV_NOPTS_VALUE ? 0 :
+            av_rescale_q(format_->start_time, AV_TIME_BASE_Q, AVRational{1, static_cast<int>(TicksPerSecond)}))
+        << ",\"bitRate\":" << std::max<std::int64_t>(0, format_->bit_rate)
+        << ",\"fileSize\":" << std::max<std::int64_t>(0, format_->pb ? avio_size(format_->pb) : 0)
+        << ",\"probeScore\":" << format_->probe_score
+        << ",\"metadata\":";
+    AppendDictionaryJson(json, format_->metadata);
+    json << ",\"streams\":[";
     for (unsigned index = 0; index < format_->nb_streams; ++index) {
-        if (index) json << ','; auto* stream = format_->streams[index]; const auto* parameters = stream->codecpar;
+        if (index) json << ',';
+        auto* stream = format_->streams[index];
+        const auto* parameters = stream->codecpar;
         const auto* descriptor = avcodec_descriptor_get(parameters->codec_id);
+        const auto frameRate = av_guess_frame_rate(format_, stream, nullptr);
+        const auto nominalFrameRate = stream->r_frame_rate.num > 0 && stream->r_frame_rate.den > 0
+            ? stream->r_frame_rate : frameRate;
+        const auto sampleAspect = av_guess_sample_aspect_ratio(format_, stream, nullptr);
+        const auto displayAspect = (sampleAspect.num > 0 && sampleAspect.den > 0)
+            ? av_mul_q(AVRational{std::max(1, parameters->width), std::max(1, parameters->height)}, sampleAspect)
+            : AVRational{std::max(1, parameters->width), std::max(1, parameters->height)};
+        const auto streamBitRate = std::max<std::int64_t>(0, parameters->bit_rate);
+        std::int64_t streamSize = 0;
+        if (streamBitRate > 0 && stream->duration != AV_NOPTS_VALUE && stream->time_base.den != 0) {
+            const auto seconds = static_cast<long double>(stream->duration) * stream->time_base.num / stream->time_base.den;
+            const auto bytes = seconds > 0 ? seconds * streamBitRate / 8.0L : 0.0L;
+            streamSize = bytes >= static_cast<long double>(INT64_MAX) ? INT64_MAX :
+                static_cast<std::int64_t>(std::llround(std::max(0.0L, bytes)));
+        }
+        const auto* pixelDescriptor = parameters->codec_type == AVMEDIA_TYPE_VIDEO
+            ? av_pix_fmt_desc_get(static_cast<AVPixelFormat>(parameters->format)) : nullptr;
+        const auto sourceBitDepth = pixelDescriptor == nullptr ? parameters->bits_per_raw_sample :
+            std::max(parameters->bits_per_raw_sample, PixelFormatBitDepth(static_cast<AVPixelFormat>(parameters->format)));
+        const auto isLossless = descriptor != nullptr &&
+            (descriptor->props & AV_CODEC_PROP_LOSSLESS) != 0 && (descriptor->props & AV_CODEC_PROP_LOSSY) == 0;
         json << "{\"index\":" << index << ",\"type\":\"" << MediaTypeName(parameters->codec_type)
-             << "\",\"codec\":\"" << EscapeJson(descriptor ? descriptor->name : "unknown") << "\",\"timeBaseNumerator\":"
-             << stream->time_base.num << ",\"timeBaseDenominator\":" << stream->time_base.den;
+             << "\",\"streamId\":" << stream->id
+             << ",\"codec\":\"" << EscapeJson(descriptor ? descriptor->name : "unknown")
+             << "\",\"codecLongName\":\"" << EscapeJson(descriptor && descriptor->long_name ? descriptor->long_name : "")
+             << "\",\"codecTag\":\"" << EscapeJson(CodecTagName(parameters->codec_tag))
+             << "\",\"timeBaseNumerator\":"
+             << stream->time_base.num << ",\"timeBaseDenominator\":" << stream->time_base.den
+             << ",\"bitRate\":" << streamBitRate
+             << ",\"streamSize\":" << streamSize
+             << ",\"lossless\":" << (isLossless ? "true" : "false")
+             << ",\"startTime100ns\":" << (stream->start_time == AV_NOPTS_VALUE ? 0 :
+                 av_rescale_q(stream->start_time, stream->time_base, AVRational{1, static_cast<int>(TicksPerSecond)}))
+             << ",\"duration100ns\":" << (stream->duration == AV_NOPTS_VALUE ? 0 :
+                 av_rescale_q(stream->duration, stream->time_base, AVRational{1, static_cast<int>(TicksPerSecond)}))
+             << ",\"frames\":" << std::max<std::int64_t>(0, stream->nb_frames)
+             << ",\"extradataSize\":" << std::max(0, parameters->extradata_size)
+             << ",\"default\":" << ((stream->disposition & AV_DISPOSITION_DEFAULT) != 0 ? "true" : "false")
+             << ",\"forced\":" << ((stream->disposition & AV_DISPOSITION_FORCED) != 0 ? "true" : "false")
+             << ",\"disposition\":\"";
+        std::vector<std::string> dispositions;
+        const auto addDisposition = [&](const int flag, const char* name) {
+            if ((stream->disposition & flag) != 0) dispositions.emplace_back(name);
+        };
+        addDisposition(AV_DISPOSITION_DEFAULT, "default"); addDisposition(AV_DISPOSITION_DUB, "dub");
+        addDisposition(AV_DISPOSITION_ORIGINAL, "original"); addDisposition(AV_DISPOSITION_COMMENT, "comment");
+        addDisposition(AV_DISPOSITION_LYRICS, "lyrics"); addDisposition(AV_DISPOSITION_KARAOKE, "karaoke");
+        addDisposition(AV_DISPOSITION_FORCED, "forced"); addDisposition(AV_DISPOSITION_HEARING_IMPAIRED, "hearing_impaired");
+        addDisposition(AV_DISPOSITION_VISUAL_IMPAIRED, "visual_impaired"); addDisposition(AV_DISPOSITION_CLEAN_EFFECTS, "clean_effects");
+        addDisposition(AV_DISPOSITION_ATTACHED_PIC, "attached_pic"); addDisposition(AV_DISPOSITION_TIMED_THUMBNAILS, "timed_thumbnails");
+        for (std::size_t item = 0; item < dispositions.size(); ++item) {
+            if (item) json << ',';
+            json << EscapeJson(dispositions[item]);
+        }
+        json << "\",\"metadata\":";
+        AppendDictionaryJson(json, stream->metadata);
+        const auto* profile = avcodec_profile_name(parameters->codec_id, parameters->profile);
+        if (profile != nullptr) json << ",\"profile\":\"" << EscapeJson(profile) << "\"";
         if (parameters->codec_type == AVMEDIA_TYPE_VIDEO) {
-            const auto frameRate = av_guess_frame_rate(format_, stream, nullptr);
             json << ",\"width\":" << parameters->width << ",\"height\":" << parameters->height
                  << ",\"averageFrameRateNumerator\":" << frameRate.num
                  << ",\"averageFrameRateDenominator\":" << frameRate.den
-                 << ",\"hdr\":" << ((parameters->color_trc == AVCOL_TRC_SMPTE2084 || parameters->color_trc == AVCOL_TRC_ARIB_STD_B67) ? "true" : "false")
-                 << ",\"attachedPicture\":" << ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0 ? "true" : "false");
+                 << ",\"nominalFrameRateNumerator\":" << nominalFrameRate.num
+                 << ",\"nominalFrameRateDenominator\":" << nominalFrameRate.den
+                 << ",\"frameRateMode\":\"" <<
+                    (av_cmp_q(frameRate, nominalFrameRate) == 0 ? "constant" : "variable") << "\""
+                 << ",\"sampleAspectNumerator\":" << sampleAspect.num
+                 << ",\"sampleAspectDenominator\":" << sampleAspect.den
+                 << ",\"displayAspectNumerator\":" << displayAspect.num
+                 << ",\"displayAspectDenominator\":" << displayAspect.den
+                  << ",\"hdr\":" << ((parameters->color_trc == AVCOL_TRC_SMPTE2084 || parameters->color_trc == AVCOL_TRC_ARIB_STD_B67) ? "true" : "false")
+                  << ",\"attachedPicture\":" << ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0 ? "true" : "false");
+            const auto pixelFormat = static_cast<AVPixelFormat>(parameters->format);
+            const auto* pixelFormatName = av_get_pix_fmt_name(pixelFormat);
+            if (pixelFormatName != nullptr)
+                json << ",\"pixelFormat\":\"" << EscapeJson(pixelFormatName) << "\"";
+            const auto sourceBitDepth = std::max(parameters->bits_per_raw_sample,
+                PixelFormatBitDepth(pixelFormat));
+            if (sourceBitDepth > 0)
+                json << ",\"bitDepth\":" << sourceBitDepth;
+            const bool rgb = pixelDescriptor != nullptr && (pixelDescriptor->flags & AV_PIX_FMT_FLAG_RGB) != 0;
+            const auto colorModel = pixelDescriptor == nullptr ? "" :
+                (rgb ? (pixelDescriptor->nb_components == 1 ? "灰度" : "RGB") : "YUV");
+            std::string chromaSubsampling;
+            if (pixelDescriptor != nullptr && !rgb) {
+                if (pixelDescriptor->log2_chroma_w == 1 && pixelDescriptor->log2_chroma_h == 1) chromaSubsampling = "4:2:0";
+                else if (pixelDescriptor->log2_chroma_w == 1 && pixelDescriptor->log2_chroma_h == 0) chromaSubsampling = "4:2:2";
+                else if (pixelDescriptor->log2_chroma_w == 0 && pixelDescriptor->log2_chroma_h == 0) chromaSubsampling = "4:4:4";
+            }
+            json << ",\"colorModel\":\"" << EscapeJson(colorModel)
+                 << "\",\"chromaSubsampling\":\"" << EscapeJson(chromaSubsampling) << "\"";
+            if (static_cast<std::int32_t>(index) == videoStream_ && videoDecoder_ != nullptr) {
+                const auto decoderFormat = videoDecoder_->pix_fmt;
+                const auto decoderSurfaceFormat = videoDecoder_->sw_pix_fmt;
+                const auto* decoderFormatName = av_get_pix_fmt_name(decoderFormat);
+                const auto* decoderSurfaceName = av_get_pix_fmt_name(decoderSurfaceFormat);
+                if (decoderFormatName != nullptr)
+                    json << ",\"decoderPixelFormat\":\"" << EscapeJson(decoderFormatName) << "\"";
+                if (decoderSurfaceName != nullptr)
+                    json << ",\"decoderSurfaceFormat\":\"" << EscapeJson(decoderSurfaceName) << "\"";
+                const auto decoderBitDepth = PixelFormatBitDepth(
+                    decoderSurfaceFormat != AV_PIX_FMT_NONE ? decoderSurfaceFormat : decoderFormat);
+                if (decoderBitDepth > 0) json << ",\"decoderBitDepth\":" << decoderBitDepth;
+                const auto acceleration = HardwareAccelerationName(videoDecoder_);
+                if (!acceleration.empty())
+                    json << ",\"hardwareAcceleration\":\"" << EscapeJson(acceleration) << "\"";
+            }
+            json << ",\"colorRange\":" << parameters->color_range
+                 << ",\"colorSpace\":" << parameters->color_space
+                 << ",\"colorPrimaries\":" << parameters->color_primaries
+                 << ",\"colorTransfer\":" << parameters->color_trc
+                 << ",\"chromaLocation\":" << parameters->chroma_location
+                 << ",\"fieldOrder\":" << parameters->field_order
+                 << ",\"level\":" << parameters->level;
+            const auto* masteringData = av_packet_side_data_get(parameters->coded_side_data,
+                parameters->nb_coded_side_data, AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
+            const auto* lightData = av_packet_side_data_get(parameters->coded_side_data,
+                parameters->nb_coded_side_data, AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
+            std::string hdrFormat;
+            if (parameters->color_trc == AVCOL_TRC_SMPTE2084)
+                hdrFormat = masteringData != nullptr ? "SMPTE ST 2086, HDR10 兼容" : "HDR10 / PQ";
+            else if (parameters->color_trc == AVCOL_TRC_ARIB_STD_B67)
+                hdrFormat = "HLG";
+            json << ",\"hdrFormat\":\"" << EscapeJson(hdrFormat) << "\"";
+            if (masteringData != nullptr && masteringData->size >= sizeof(AVMasteringDisplayMetadata)) {
+                const auto* mastering = reinterpret_cast<const AVMasteringDisplayMetadata*>(masteringData->data);
+                std::string primaries;
+                if (mastering->has_primaries) {
+                    const auto redX = av_q2d(mastering->display_primaries[0][0]);
+                    const auto redY = av_q2d(mastering->display_primaries[0][1]);
+                    const auto greenX = av_q2d(mastering->display_primaries[1][0]);
+                    const auto greenY = av_q2d(mastering->display_primaries[1][1]);
+                    if (std::abs(redX - 0.68) < 0.015 && std::abs(redY - 0.32) < 0.015 &&
+                        std::abs(greenX - 0.265) < 0.015 && std::abs(greenY - 0.69) < 0.015) primaries = "Display P3";
+                    else primaries = "自定义";
+                }
+                json << ",\"masteringPrimaries\":\"" << EscapeJson(primaries) << "\"";
+                if (mastering->has_luminance)
+                    json << ",\"masteringMinLuminance\":" << std::setprecision(12) << av_q2d(mastering->min_luminance)
+                         << ",\"masteringMaxLuminance\":" << std::setprecision(12) << av_q2d(mastering->max_luminance);
+            }
+            if (lightData != nullptr && lightData->size >= sizeof(AVContentLightMetadata)) {
+                const auto* light = reinterpret_cast<const AVContentLightMetadata*>(lightData->data);
+                json << ",\"maxCLL\":" << light->MaxCLL << ",\"maxFALL\":" << light->MaxFALL;
+            }
+            const char* codecConfiguration = nullptr;
+            if (parameters->codec_id == AV_CODEC_ID_AV1) codecConfiguration = "av1C";
+            else if (parameters->codec_id == AV_CODEC_ID_H264) codecConfiguration = "avcC";
+            else if (parameters->codec_id == AV_CODEC_ID_HEVC) codecConfiguration = "hvcC";
+            if (codecConfiguration != nullptr)
+                json << ",\"codecConfigurationBox\":\"" << codecConfiguration << "\"";
         }
-        if (parameters->codec_type == AVMEDIA_TYPE_AUDIO) json << ",\"sampleRate\":" << parameters->sample_rate << ",\"channels\":" << parameters->ch_layout.nb_channels;
+        if (parameters->codec_type == AVMEDIA_TYPE_AUDIO) {
+            const auto* sampleFormat = av_get_sample_fmt_name(static_cast<AVSampleFormat>(parameters->format));
+            json << ",\"sampleRate\":" << parameters->sample_rate << ",\"channels\":" << parameters->ch_layout.nb_channels
+                 << ",\"channelLayout\":\"" << EscapeJson(ChannelLayoutName(parameters->ch_layout)) << "\""
+                 << ",\"sampleFormat\":\"" << EscapeJson(sampleFormat ? sampleFormat : "") << "\""
+                 << ",\"bitsPerCodedSample\":" << parameters->bits_per_coded_sample
+                 << ",\"frameSize\":" << parameters->frame_size
+                 << ",\"initialPadding\":" << parameters->initial_padding
+                 << ",\"trailingPadding\":" << parameters->trailing_padding
+                 << ",\"seekPreroll\":" << parameters->seek_preroll;
+            const auto rawBits = std::max(parameters->bits_per_raw_sample, parameters->bits_per_coded_sample);
+            json << ",\"rawSampleBits\":" << rawBits
+                 << ",\"compressionMode\":\"" << (isLossless ? "无损" : "有损") << "\"";
+            if (parameters->codec_id == AV_CODEC_ID_FLAC && parameters->extradata != nullptr && parameters->extradata_size >= 16) {
+                static constexpr char Hex[] = "0123456789ABCDEF";
+                std::string md5;
+                md5.reserve(32);
+                for (int byte = parameters->extradata_size - 16; byte < parameters->extradata_size; ++byte) {
+                    md5.push_back(Hex[parameters->extradata[byte] >> 4]);
+                    md5.push_back(Hex[parameters->extradata[byte] & 0x0f]);
+                }
+                json << ",\"md5\":\"" << md5 << "\"";
+            }
+            if (static_cast<std::int32_t>(index) == audioStream_ && audioRenderer_ != nullptr) {
+                const auto validBits = audioRenderer_->OutputValidBitsPerSample();
+                json << ",\"outputSampleRate\":" << audioRenderer_->OutputSampleRate()
+                     << ",\"outputChannels\":" << audioRenderer_->OutputChannels()
+                     << ",\"outputBitsPerSample\":" << audioRenderer_->OutputBitsPerSample()
+                     << ",\"outputValidBitsPerSample\":" << validBits
+                     << ",\"outputFloat\":" << (audioRenderer_->OutputIsFloat() ? "true" : "false");
+            }
+        }
         AVDictionaryEntry* language = av_dict_get(stream->metadata, "language", nullptr, 0);
         AVDictionaryEntry* title = av_dict_get(stream->metadata, "title", nullptr, 0);
         json << ",\"language\":\"" << EscapeJson(language ? language->value : "") << "\",\"title\":\"" << EscapeJson(title ? title->value : "") << "\"}";

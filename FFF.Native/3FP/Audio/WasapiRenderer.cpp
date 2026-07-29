@@ -45,12 +45,13 @@ std::int64_t QpcNow100ns() noexcept {
 }
 }
 
-PlayerWasapiRenderer::PlayerWasapiRenderer(std::wstring endpointId)
-    : endpointId_(std::move(endpointId)), stopEvent_(nullptr), sampleEvent_(nullptr),
+PlayerWasapiRenderer::PlayerWasapiRenderer(std::wstring endpointId, const bool exclusive)
+    : endpointId_(std::move(endpointId)), exclusive_(exclusive), stopEvent_(nullptr), sampleEvent_(nullptr),
       initializationFinished_(false), initializationResult_(FFFResult::InvalidState), queuedBytes_(0),
       resampler_(nullptr),
       inputChannelLayout_{}, inputSampleRate_(0), inputSampleFormat_(-1),
       outputSampleRate_(0), outputChannels_(0), outputBlockAlign_(0), outputBitsPerSample_(0),
+      outputValidBitsPerSample_(0),
       outputChannelMask_(0), outputFloat_(false), volume_(1.0f), muted_(false), running_(false),
       paused_(true), resetRequested_(false), resetPosition100ns_(0), clockPosition100ns_(0),
       clockSampleQpc100ns_(0), clockLimitPosition100ns_(0), clockEpoch_(0),
@@ -84,6 +85,8 @@ void PlayerWasapiRenderer::Stop() noexcept {
     if (resampler_ != nullptr) { swr_free(&resampler_); }
     av_channel_layout_uninit(&inputChannelLayout_);
     inputSampleRate_ = 0; inputSampleFormat_ = -1;
+    outputSampleRate_ = 0; outputChannels_ = 0; outputBlockAlign_ = 0;
+    outputBitsPerSample_ = outputValidBitsPerSample_ = 0;
     std::lock_guard lock(mutex_);
     queue_.clear(); queuedBytes_ = 0; converted_.clear(); converted_.shrink_to_fit(); pendingMediaFrames_ = 0;
 }
@@ -296,6 +299,11 @@ std::uint64_t PlayerWasapiRenderer::TimestampJitterCount() const noexcept { retu
 std::uint64_t PlayerWasapiRenderer::DiscontinuityCount() const noexcept { return discontinuityCount_.load(); }
 std::uint64_t PlayerWasapiRenderer::InsertedSilenceFrames() const noexcept { return insertedSilenceFrames_.load(); }
 std::uint64_t PlayerWasapiRenderer::DroppedOverlapFrames() const noexcept { return droppedOverlapFrames_.load(); }
+std::uint32_t PlayerWasapiRenderer::OutputSampleRate() const noexcept { std::lock_guard lock(mutex_); return outputSampleRate_; }
+std::uint16_t PlayerWasapiRenderer::OutputChannels() const noexcept { std::lock_guard lock(mutex_); return outputChannels_; }
+std::uint16_t PlayerWasapiRenderer::OutputBitsPerSample() const noexcept { std::lock_guard lock(mutex_); return outputBitsPerSample_; }
+std::uint16_t PlayerWasapiRenderer::OutputValidBitsPerSample() const noexcept { std::lock_guard lock(mutex_); return outputValidBitsPerSample_; }
+bool PlayerWasapiRenderer::OutputIsFloat() const noexcept { std::lock_guard lock(mutex_); return outputFloat_; }
 std::string PlayerWasapiRenderer::LastError() const { std::lock_guard lock(errorMutex_); return lastError_; }
 void PlayerWasapiRenderer::SetError(std::string message) noexcept { try { std::lock_guard lock(errorMutex_); lastError_ = std::move(message); } catch (...) {} }
 
@@ -309,8 +317,8 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
     ComPtr<IAudioClock> clock;
     WAVEFORMATEX* format = nullptr;
     UINT32 bufferFrames = 0;
-    auto fail = [&](const char* message) {
-        SetError(message);
+    auto fail = [&](std::string message) {
+        SetError(std::move(message));
         { std::lock_guard lock(mutex_); initializationResult_ = FFFResult::DeviceFailure; initializationFinished_ = true; }
         initializedCondition_.notify_all();
     };
@@ -323,20 +331,108 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         fail("Could not open the selected WASAPI playback endpoint.");
         if (uninitialize) CoUninitialize(); return;
     }
-    const REFERENCE_TIME duration = 1'000'000;
-    if (FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
-        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-        duration, 0, format, nullptr)) || FAILED(client->SetEventHandle(sampleEvent_)) ||
-        FAILED(client->GetBufferSize(&bufferFrames)) || FAILED(client->GetService(IID_PPV_ARGS(&renderer))) ||
-        FAILED(client->GetService(IID_PPV_ARGS(&clock)))) {
-        fail("Could not initialize event-driven WASAPI playback."); CoTaskMemFree(format);
+    // Shared mode lets the engine perform conversion and resampling.  Exclusive
+    // mode deliberately bypasses that mixer: the device must accept the exact
+    // endpoint format and the client owns the complete hardware period.
+    WAVEFORMATEX* activeFormat = format;
+    WAVEFORMATEXTENSIBLE exclusiveCandidate{};
+    REFERENCE_TIME bufferDuration = 1'000'000;
+    REFERENCE_TIME periodicity = 0;
+    DWORD streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    AUDCLNT_SHAREMODE shareMode = AUDCLNT_SHAREMODE_SHARED;
+    if (exclusive_) {
+        const bool nativeFormatSupported = SUCCEEDED(client->IsFormatSupported(
+            AUDCLNT_SHAREMODE_EXCLUSIVE, activeFormat, nullptr)) &&
+            (activeFormat->wBitsPerSample == 16 || activeFormat->wBitsPerSample == 32);
+        if (!nativeFormatSupported) {
+            const auto tryFormat = [&](const std::uint32_t sampleRate, const std::uint16_t containerBits,
+                const std::uint16_t validBits, const bool floatingPoint) noexcept {
+                exclusiveCandidate = {};
+                exclusiveCandidate.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+                exclusiveCandidate.Format.nChannels = format->nChannels;
+                exclusiveCandidate.Format.nSamplesPerSec = sampleRate;
+                exclusiveCandidate.Format.wBitsPerSample = containerBits;
+                exclusiveCandidate.Format.nBlockAlign = static_cast<WORD>(exclusiveCandidate.Format.nChannels * containerBits / 8);
+                exclusiveCandidate.Format.nAvgBytesPerSec = sampleRate * exclusiveCandidate.Format.nBlockAlign;
+                exclusiveCandidate.Format.cbSize = 22;
+                exclusiveCandidate.Samples.wValidBitsPerSample = validBits;
+                exclusiveCandidate.dwChannelMask = ChannelMask(format);
+                if (exclusiveCandidate.dwChannelMask == 0) {
+                    if (format->nChannels == 1) exclusiveCandidate.dwChannelMask = KSAUDIO_SPEAKER_MONO;
+                    else if (format->nChannels == 2) exclusiveCandidate.dwChannelMask = KSAUDIO_SPEAKER_STEREO;
+                    else if (format->nChannels == 6) exclusiveCandidate.dwChannelMask = KSAUDIO_SPEAKER_5POINT1;
+                    else if (format->nChannels == 8) exclusiveCandidate.dwChannelMask = KSAUDIO_SPEAKER_7POINT1;
+                }
+                exclusiveCandidate.SubFormat = floatingPoint ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT : KSDATAFORMAT_SUBTYPE_PCM;
+                return SUCCEEDED(client->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE,
+                    &exclusiveCandidate.Format, nullptr));
+            };
+            const std::uint32_t sampleRates[] = {format->nSamplesPerSec, 192'000, 176'400,
+                96'000, 88'200, 48'000, 44'100};
+            bool supported = false;
+            for (const auto sampleRate : sampleRates) {
+                if (sampleRate == 0) continue;
+                if (tryFormat(sampleRate, 32, 32, true) || tryFormat(sampleRate, 32, 32, false) ||
+                    tryFormat(sampleRate, 32, 24, false) || tryFormat(sampleRate, 16, 16, false)) {
+                    activeFormat = &exclusiveCandidate.Format;
+                    supported = true;
+                    break;
+                }
+            }
+            if (!supported) {
+                fail("The selected endpoint does not accept an exclusive-mode PCM format.");
+                CoTaskMemFree(format); if (uninitialize) CoUninitialize(); return;
+            }
+        }
+        REFERENCE_TIME defaultPeriod = 0;
+        REFERENCE_TIME minimumPeriod = 0;
+        if (FAILED(client->GetDevicePeriod(&defaultPeriod, &minimumPeriod))) {
+            fail("Could not query the selected endpoint's exclusive-mode period.");
+            CoTaskMemFree(format); if (uninitialize) CoUninitialize(); return;
+        }
+        bufferDuration = defaultPeriod > 0 ? defaultPeriod : minimumPeriod;
+        periodicity = bufferDuration;
+        streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        shareMode = AUDCLNT_SHAREMODE_EXCLUSIVE;
+    }
+    HRESULT initializeResult = client->Initialize(shareMode, streamFlags, bufferDuration, periodicity, activeFormat, nullptr);
+    // Exclusive event-driven clients must use a whole number of device frames.
+    // Many endpoints report a period that rounds differently at 44.1/96 kHz and
+    // return AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED on the first Initialize call.
+    if (exclusive_ && initializeResult == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
+        UINT32 alignedFrames = 0;
+        const auto sampleRate = activeFormat->nSamplesPerSec;
+        if (sampleRate > 0 && SUCCEEDED(client->GetBufferSize(&alignedFrames)) && alignedFrames > 0) {
+            const auto alignedDuration = static_cast<REFERENCE_TIME>(
+                (10'000'000.0L * alignedFrames / sampleRate) + 0.5L);
+            client.Reset();
+            if (SUCCEEDED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &client)))
+                initializeResult = client->Initialize(shareMode, streamFlags, alignedDuration,
+                    alignedDuration, activeFormat, nullptr);
+        }
+    }
+    auto wasapiResult = initializeResult;
+    if (SUCCEEDED(wasapiResult)) wasapiResult = client->SetEventHandle(sampleEvent_);
+    if (SUCCEEDED(wasapiResult)) wasapiResult = client->GetBufferSize(&bufferFrames);
+    if (SUCCEEDED(wasapiResult)) wasapiResult = client->GetService(IID_PPV_ARGS(&renderer));
+    if (SUCCEEDED(wasapiResult)) wasapiResult = client->GetService(IID_PPV_ARGS(&clock));
+    if (FAILED(wasapiResult)) {
+        std::ostringstream message;
+        message << (exclusive_ ? "Could not initialize exclusive WASAPI playback for the selected endpoint"
+            : "Could not initialize event-driven WASAPI playback")
+            << " (HRESULT 0x" << std::hex << static_cast<std::uint32_t>(wasapiResult) << ").";
+        fail(message.str()); CoTaskMemFree(format);
         if (uninitialize) CoUninitialize(); return;
     }
     {
         std::lock_guard lock(mutex_);
-        outputSampleRate_ = format->nSamplesPerSec; outputChannels_ = format->nChannels;
-        outputBlockAlign_ = format->nBlockAlign; outputBitsPerSample_ = format->wBitsPerSample;
-        outputChannelMask_ = ChannelMask(format); outputFloat_ = IsFloatWaveFormat(format);
+        outputSampleRate_ = activeFormat->nSamplesPerSec; outputChannels_ = activeFormat->nChannels;
+        outputBlockAlign_ = activeFormat->nBlockAlign; outputBitsPerSample_ = activeFormat->wBitsPerSample;
+        outputValidBitsPerSample_ = activeFormat->wBitsPerSample;
+        if (activeFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE && activeFormat->cbSize >= 22)
+            outputValidBitsPerSample_ = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(activeFormat)->Samples.wValidBitsPerSample;
+        outputChannelMask_ = ChannelMask(activeFormat); outputFloat_ = IsFloatWaveFormat(activeFormat);
         initializationResult_ = FFFResult::Success; initializationFinished_ = true;
     }
     initializedCondition_.notify_all();
@@ -399,11 +495,12 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         updateMediaClock();
         UINT32 padding = 0;
         if (FAILED(client->GetCurrentPadding(&padding))) continue;
+        if (exclusive_ && padding != 0) continue;
         if (padding >= bufferFrames) {
             if (!shouldPause && !clientStarted && SUCCEEDED(client->Start())) clientStarted = true;
             continue;
         }
-        const auto wantedFrames = bufferFrames - padding;
+        const auto wantedFrames = exclusive_ ? bufferFrames : bufferFrames - padding;
         std::size_t copied = 0;
         UINT32 renderedFrames = 0;
         BYTE* destination = nullptr;
@@ -423,6 +520,10 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             }
             starved = false;
             copied = static_cast<std::size_t>(renderedFrames) * outputBlockAlign_;
+            // Exclusive event-driven render clients accept exactly one complete
+            // endpoint buffer per callback. Preserve the real queued-byte count,
+            // then silence-fill the unused tail when the final packet is short.
+            if (exclusive_) renderedFrames = wantedFrames;
             if (FAILED(renderer->GetBuffer(renderedFrames, &destination))) continue;
             auto remaining = copied;
             auto* write = destination;
@@ -440,6 +541,8 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
                 }
                 if (chunk.silenceBytes == 0 && chunk.offset == chunk.bytes.size()) queue_.pop_front();
             }
+            const auto submittedBytes = static_cast<std::size_t>(renderedFrames) * outputBlockAlign_;
+            if (submittedBytes > copied) std::memset(destination + copied, 0, submittedBytes - copied);
             queuedBytes_ -= copied;
         }
         UINT64 anchorCandidate = 0;
@@ -468,6 +571,8 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         }
     }
     if (clientStarted) client->Stop();
+    client->Reset();
+    renderer.Reset(); clock.Reset(); client.Reset(); device.Reset(); enumerator.Reset();
     running_ = false;
     if (uninitialize) CoUninitialize();
 }

@@ -1,7 +1,7 @@
 Imports System.IO
 Imports System.Threading
 
-''' <summary>同名外部字幕的已加载资源。原生字幕渲染器必须随播放会话释放。</summary>
+''' <summary>外部或内嵌字幕的已加载资源。原生字幕渲染器必须随播放会话释放。</summary>
 Public NotInheritable Class 外部字幕轨道
     Implements IDisposable
 
@@ -11,19 +11,33 @@ Public NotInheritable Class 外部字幕轨道
 
     Friend Sub New(路径 As String, 格式 As 外部字幕格式, SRT As SRT字幕帧生成器,
                    SUP As SUP字幕帧生成器,
-                   Optional ASS特效 As ASS特效字幕帧生成器 = Nothing)
+                   Optional ASS特效 As ASS特效字幕帧生成器 = Nothing,
+                   Optional 流索引 As Integer = -1,
+                   Optional 是内嵌 As Boolean = False)
         Me.路径 = 路径
         Me.格式 = 格式
         SRT生成器 = SRT
         SUP生成器 = SUP
         ASS特效生成器 = ASS特效
+        Me.流索引 = 流索引
+        Me.是内嵌 = 是内嵌
     End Sub
 
     Public ReadOnly Property 路径 As String
     Public ReadOnly Property 格式 As 外部字幕格式
+    Public ReadOnly Property 流索引 As Integer
+    Public ReadOnly Property 是内嵌 As Boolean
     Public ReadOnly Property SRT生成器 As SRT字幕帧生成器
     Public ReadOnly Property SUP生成器 As SUP字幕帧生成器
     Friend ReadOnly Property ASS特效生成器 As ASS特效字幕帧生成器
+
+    ''' <summary>文本字幕可精确计数；由原生按需解码的 ASS/SUP 则返回 -1。</summary>
+    Public ReadOnly Property 条目数 As Integer
+        Get
+            If SRT生成器 IsNot Nothing Then Return SRT生成器.条目数
+            Return -1
+        End Get
+    End Property
 
     ''' <summary>
     ''' 定时文字在后台线程读取轨道。替换操作先停止新租约，最后一个读者退出后
@@ -65,13 +79,26 @@ Public Enum 外部字幕格式
     SUP
 End Enum
 
-''' <summary>按固定优先级找到并预加载与媒体文件同名的外部字幕。</summary>
+''' <summary>无需预先打开即可展示在流选择器中的外部字幕。</summary>
+Public NotInheritable Class 外部字幕候选
+    Friend Sub New(路径 As String, 格式 As 外部字幕格式)
+        Me.路径 = 路径
+        Me.格式 = 格式
+    End Sub
+
+    Public ReadOnly Property 路径 As String
+    Public ReadOnly Property 格式 As 外部字幕格式
+End Class
+
+''' <summary>按固定后缀优先级扫描并加载与媒体文件对应的外部字幕。</summary>
 Public NotInheritable Class 外部字幕自动加载器
     Private Shared ReadOnly 候选项 As (扩展名 As String, 格式 As 外部字幕格式)() = {
         (".srt", 外部字幕格式.SRT),
         (".ass", 外部字幕格式.ASS),
         (".ssa", 外部字幕格式.SSA),
         (".sup", 外部字幕格式.SUP)}
+    Private Shared ReadOnly 位图字幕编码 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+        "hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
 
     Private Sub New()
     End Sub
@@ -80,6 +107,12 @@ Public NotInheritable Class 外部字幕自动加载器
                                               取消令牌 As CancellationToken) As Task(Of 外部字幕轨道)
         ArgumentException.ThrowIfNullOrWhiteSpace(媒体路径)
         Return Task.Run(Function() 尝试加载同名字幕(媒体路径, 取消令牌), 取消令牌)
+    End Function
+
+    Public Shared Function 扫描同名字幕Async(媒体路径 As String,
+                                         取消令牌 As CancellationToken) As Task(Of IReadOnlyList(Of 外部字幕候选))
+        ArgumentException.ThrowIfNullOrWhiteSpace(媒体路径)
+        Return Task.Run(Function() 扫描同名字幕(媒体路径, 取消令牌), 取消令牌)
     End Function
 
     Public Shared Function 是支持的字幕文件(路径 As String) As Boolean
@@ -150,19 +183,104 @@ Public NotInheritable Class 外部字幕自动加载器
         End Select
     End Function
 
+    ''' <summary>从媒体容器中完整加载指定字幕流；加载完成前不会影响当前字幕。</summary>
+    Public Shared Function 加载内嵌字幕(媒体路径 As String, 流 As 媒体流信息,
+                                  Optional 取消令牌 As CancellationToken = Nothing) As 外部字幕轨道
+        ArgumentException.ThrowIfNullOrWhiteSpace(媒体路径)
+        ArgumentNullException.ThrowIfNull(流)
+        If Not String.Equals(流.类型, "subtitle", StringComparison.OrdinalIgnoreCase) OrElse 流.索引 < 0 Then
+            Throw New ArgumentException("指定流不是有效的内嵌字幕。", NameOf(流))
+        End If
+        Dim 完整路径 = Path.GetFullPath(媒体路径)
+        If Not File.Exists(完整路径) Then Throw New FileNotFoundException("媒体文件不存在。", 完整路径)
+        取消令牌.ThrowIfCancellationRequested()
+
+        If 位图字幕编码.Contains(流.编码) Then
+            Dim 生成器 = New SUP字幕帧生成器(完整路径, 流.索引)
+            Try
+                取消令牌.ThrowIfCancellationRequested()
+                Return New 外部字幕轨道(完整路径, 外部字幕格式.SUP, Nothing, 生成器,
+                    流索引:=流.索引, 是内嵌:=True)
+            Catch
+                生成器.Dispose()
+                Throw
+            End Try
+        End If
+
+        Dim 特效生成器 As ASS特效字幕帧生成器 = Nothing
+        Try
+            特效生成器 = New ASS特效字幕帧生成器(完整路径, 完整路径, 流.索引)
+            取消令牌.ThrowIfCancellationRequested()
+            Return New 外部字幕轨道(完整路径, 外部字幕格式.ASS, Nothing, Nothing,
+                特效生成器, 流.索引, True)
+        Catch
+            特效生成器?.Dispose()
+            Throw
+        End Try
+    End Function
+
     ''' <summary>
-    ''' 返回首个可成功解析的同名字幕；文件不存在或解析失败时继续尝试下一种优先级。
+    ''' 扫描媒体同目录内的对应字幕。除完全同名文件外，也接受
+    ''' “媒体名.语言/版本.后缀”的常见命名，并按 SRT、ASS、SSA、SUP 排序。
+    ''' </summary>
+    Public Shared Function 扫描同名字幕(媒体路径 As String,
+                                    Optional 取消令牌 As CancellationToken = Nothing) As IReadOnlyList(Of 外部字幕候选)
+        ArgumentException.ThrowIfNullOrWhiteSpace(媒体路径)
+        Dim 完整媒体路径 = Path.GetFullPath(媒体路径)
+        Dim 目录 = Path.GetDirectoryName(完整媒体路径)
+        If String.IsNullOrEmpty(目录) OrElse Not Directory.Exists(目录) Then
+            Return Array.Empty(Of 外部字幕候选)()
+        End If
+
+        Dim 媒体名 = Path.GetFileNameWithoutExtension(完整媒体路径)
+        Dim 带分隔符前缀 = 媒体名 & "."
+        Dim 已发现路径 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim 结果 As New List(Of 外部字幕候选)()
+
+        For Each 文件路径 In Directory.EnumerateFiles(目录)
+            取消令牌.ThrowIfCancellationRequested()
+            Dim 格式 As 外部字幕格式
+            If Not 尝试取得格式(Path.GetExtension(文件路径), 格式) Then Continue For
+
+            Dim 字幕名 = Path.GetFileNameWithoutExtension(文件路径)
+            If Not String.Equals(字幕名, 媒体名, StringComparison.OrdinalIgnoreCase) AndAlso
+                Not 字幕名.StartsWith(带分隔符前缀, StringComparison.OrdinalIgnoreCase) Then Continue For
+
+            Dim 完整字幕路径 = Path.GetFullPath(文件路径)
+            If 已发现路径.Add(完整字幕路径) Then 结果.Add(New 外部字幕候选(完整字幕路径, 格式))
+        Next
+
+        Return 结果.OrderBy(Function(x) CInt(x.格式)).
+            ThenBy(Function(x) If(String.Equals(Path.GetFileNameWithoutExtension(x.路径), 媒体名,
+                                                StringComparison.OrdinalIgnoreCase), 0, 1)).
+            ThenBy(Function(x) Path.GetFileName(x.路径), StringComparer.OrdinalIgnoreCase).
+            ToArray()
+    End Function
+
+    ''' <summary>
+    ''' 返回首个可成功解析的对应字幕；解析失败时继续尝试下一项，但扫描结果仍可供菜单展示。
     ''' </summary>
     Public Shared Function 尝试加载同名字幕(媒体路径 As String,
                                          Optional 取消令牌 As CancellationToken = Nothing) As 外部字幕轨道
         ArgumentException.ThrowIfNullOrWhiteSpace(媒体路径)
-        Dim 基础路径 = Path.Combine(Path.GetDirectoryName(媒体路径), Path.GetFileNameWithoutExtension(媒体路径))
-        For Each 候选 In 候选项
+        Return 尝试加载候选字幕(扫描同名字幕(媒体路径, 取消令牌), 媒体路径, 取消令牌)
+    End Function
+
+    Friend Shared Function 尝试加载候选字幕Async(候选字幕 As IReadOnlyList(Of 外部字幕候选),
+                                              媒体路径 As String,
+                                              取消令牌 As CancellationToken) As Task(Of 外部字幕轨道)
+        ArgumentNullException.ThrowIfNull(候选字幕)
+        ArgumentException.ThrowIfNullOrWhiteSpace(媒体路径)
+        Return Task.Run(Function() 尝试加载候选字幕(候选字幕, 媒体路径, 取消令牌), 取消令牌)
+    End Function
+
+    Private Shared Function 尝试加载候选字幕(候选字幕 As IReadOnlyList(Of 外部字幕候选),
+                                         媒体路径 As String,
+                                         取消令牌 As CancellationToken) As 外部字幕轨道
+        For Each 候选 In 候选字幕
             取消令牌.ThrowIfCancellationRequested()
-            Dim 字幕路径 = 基础路径 & 候选.扩展名
-            If Not File.Exists(字幕路径) Then Continue For
             Try
-                Return 加载字幕(字幕路径, 媒体路径, 取消令牌)
+                Return 加载字幕(候选.路径, 媒体路径, 取消令牌)
             Catch ex As OperationCanceledException
                 Throw
             Catch ex As NotSupportedException

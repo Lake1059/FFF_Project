@@ -48,6 +48,7 @@ public:
         float hdrPeakNits, float paperWhiteNits) noexcept;
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;
+    FFFResult SetAudioExclusiveMode(bool exclusive) noexcept;
     FFFResult SetVolume(float volume, bool muted) noexcept;
     FFFResult SetTimedTextLayer(const FFF3FPTimedTextLayer& layer) noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
@@ -100,7 +101,11 @@ private:
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
     void QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, std::int32_t streamIndex) noexcept;
+    bool HandleInternalAudioDecodeFailure(FFFResult result, std::string message) noexcept;
+    void DisableFailedInternalAudio(FFFResult result, std::string message) noexcept;
     void UpdateAudioDiagnostics() noexcept;
+    void TrackPacketBitRate(const AVPacket* packet, AVFormatContext* owner) noexcept;
+    void ResetBitRateTracking() noexcept;
     void FlushAtEnd() noexcept;
     void PublishSnapshot() noexcept;
     void SetState(FFF3FPState state, const char* operation = nullptr) noexcept;
@@ -154,6 +159,7 @@ private:
     std::unique_ptr<PlayerWasapiRenderer> audioRenderer_;
     PlayerVideoRenderer videoRenderer_;
     std::wstring audioEndpointId_;
+    bool audioExclusive_;
     float volume_;
     bool muted_;
     FFF3FPSnapshot snapshot_;
@@ -181,8 +187,21 @@ private:
     std::size_t pendingVideoPacketBytes_;
     std::deque<AVPacket*> pendingAudioPackets_;
     std::size_t pendingAudioPacketBytes_;
+    struct BitRateSample {
+        std::int64_t duration100ns;
+        std::uint32_t bytes;
+    };
+    std::deque<BitRateSample> videoBitRateSamples_;
+    std::deque<BitRateSample> audioBitRateSamples_;
+    std::int64_t videoBitRateDuration100ns_;
+    std::int64_t audioBitRateDuration100ns_;
+    std::uint64_t videoBitRateBytes_;
+    std::uint64_t audioBitRateBytes_;
     bool draining_;
     bool hardwareFallbackPending_;
+    bool internalAudioFailurePending_;
+    FFFResult internalAudioFailureResult_;
+    std::uint32_t internalAudioDecodeErrorCount_;
     // Stable danmaku content is interned by contentId+UTF-8 hash. Position-only
     // layers then share immutable strings instead of allocating 100 wstrings at
     // every 60 Hz submission.

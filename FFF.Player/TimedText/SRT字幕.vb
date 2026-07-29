@@ -112,6 +112,12 @@ Public NotInheritable Class SRT字幕帧生成器
         样式 = 样式值
     End Sub
 
+    Public ReadOnly Property 条目数 As Integer
+        Get
+            Return 文档.提示.Count
+        End Get
+    End Property
+
     Public Sub 生成帧(时间 As TimeSpan, 区域 As 视频显示区域, 结果 As ICollection(Of SRT字幕绘制项))
         ArgumentNullException.ThrowIfNull(结果)
         样式.验证()

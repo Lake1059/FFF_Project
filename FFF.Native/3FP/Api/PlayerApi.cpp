@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 4;
+constexpr std::uint32_t PlayerApiVersion = 5;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -52,6 +52,10 @@ FFFResult FFF3FP_SetColorMode(const FFF3FPHandle player, const FFF3FPColorMode m
     const float hdr, const float paper) noexcept { return player ? static_cast<PlayerSession*>(player)->SetColorMode(mode, sdr, hdr, paper) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetAudioEndpoint(const FFF3FPHandle player, const char* endpoint) noexcept { return player ? static_cast<PlayerSession*>(player)->SetAudioEndpoint(endpoint) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_SetAudioExclusiveMode(const FFF3FPHandle player, const std::uint32_t exclusive) noexcept {
+    return player && exclusive <= 1 ? static_cast<PlayerSession*>(player)->SetAudioExclusiveMode(exclusive != 0)
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_SetVolume(const FFF3FPHandle player, const float volume, const std::uint32_t muted) noexcept { return player ? static_cast<PlayerSession*>(player)->SetVolume(volume, muted != 0) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetTimedTextLayer(const FFF3FPHandle player,
     const FFF3FPTimedTextLayer* layer) noexcept {

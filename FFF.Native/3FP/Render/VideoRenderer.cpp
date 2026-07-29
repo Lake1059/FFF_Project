@@ -24,6 +24,17 @@ using Microsoft::WRL::ComPtr;
 namespace {
 constexpr float TrueHdrOutputPeakNits = 1000.0f;
 
+constexpr std::uint32_t OutputBitDepthForSource(const std::uint32_t sourceBitDepth,
+    const bool hdr) noexcept {
+    // HDR10 uses a 10-bit PQ swap chain. Higher-precision sources use the
+    // 16-bit float scRGB path in both SDR and HDR mode; ordinary 9/10-bit
+    // video uses RGB10A2 and 8-bit content stays on BGRA8.
+    if (sourceBitDepth > 10) return 16;
+    if (hdr) return 10;
+    if (sourceBitDepth > 8) return 10;
+    return 8;
+}
+
 float Clamp01(const float value) noexcept { return std::clamp(value, 0.0f, 1.0f); }
 
 int ToSwsColorSpace(const AVColorSpace colorSpace, const int width) noexcept {
@@ -224,18 +235,26 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     if(outputAspect>sourceAspect){ float scale=sourceAspect/outputAspect; if(abs(uv.x-0.5)>scale*0.5)return float4(0,0,0,1); sampleUv.x=(uv.x-0.5)/scale+0.5; }
     else { float scale=outputAspect/sourceAspect; if(abs(uv.y-0.5)>scale*0.5)return float4(0,0,0,1); sampleUv.y=(uv.y-0.5)/scale+0.5; }
     float3 rgb=ReadSource(sampleUv);
-    if(ColorMode==1)return float4(rgb,1);
+    if(ColorMode==1)return float4(Reserved!=0?ToLinear709(rgb):rgb,1);
     if(ColorMode==0&&Transfer==0){
         if(Source2020!=0)rgb=ToBt709(To709(ToLinear709(rgb)));
-        return float4(rgb,1);
+        return float4(Reserved!=0?ToLinear709(rgb):rgb,1);
     }
     float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):ToLinear709(rgb)*PaperWhite);
-    if(ColorMode==2){ if(Source2020==0)nits=To2020(nits); return float4(NitsToPq(ToneToPeak(nits,1000.0)),1); }
+    if(ColorMode==2){
+        if(Reserved!=0){
+            if(Source2020!=0)nits=To709(nits);
+            return float4(ToneToPeak(nits,1000.0)/80.0,1);
+        }
+        if(Source2020==0)nits=To2020(nits);
+        return float4(NitsToPq(ToneToPeak(nits,1000.0)),1);
+    }
     if(Source2020!=0)nits=To709(nits);
     // HDR is display-referred.  Compress it before the SDR OETF instead of
     // scaling HDR diffuse white directly to clipping white; that old scaling
     // lifted most mid-tones and left almost no highlight headroom.
-    return float4(ToBt709(ToneHdrToSdr(nits,HdrPeak,PaperWhite,SdrPeak)/SdrPeak),1);
+    float3 sdr=ToBt709(ToneHdrToSdr(nits,HdrPeak,PaperWhite,SdrPeak)/SdrPeak);
+    return float4(Reserved!=0?ToLinear709(sdr):sdr,1);
 })";
 
 constexpr const char* TimedTextPixelShaderSource = R"(
@@ -256,7 +275,10 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     float4 value=Overlay.Sample(LinearSampler,uv);
     if(value.a<=0.000001)return 0;
     float3 straight=value.rgb/value.a;
-    if(ColorMode==2)straight=NitsToPq(To2020(ToLinear709(straight)*PaperWhite));
+    if(ColorMode==2)straight=Reserved!=0
+        ? ToLinear709(straight)*(PaperWhite/80.0)
+        : NitsToPq(To2020(ToLinear709(straight)*PaperWhite));
+    else if(Reserved!=0)straight=ToLinear709(straight);
     return float4(straight*value.a,value.a);
 })";
 
@@ -513,16 +535,16 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), timedTextPixelShader_(nullptr), sampler_(nullptr), constants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
-      timedTextTextures_{nullptr, nullptr}, timedTextTargets_{nullptr, nullptr},
-      timedTextViews_{nullptr, nullptr}, timedTextPipelineQueries_{nullptr, nullptr},
+      timedTextTextures_{nullptr, nullptr, nullptr}, timedTextTargets_{nullptr, nullptr, nullptr},
+      timedTextViews_{nullptr, nullptr, nullptr}, timedTextPipelineQueries_{nullptr, nullptr, nullptr},
       timedTextBlend_(nullptr),
       timedTextAtlasTexture_(nullptr), timedTextAtlasView_(nullptr),
       timedTextSpriteVertexShader_(nullptr), timedTextSpritePixelShader_(nullptr),
       timedTextSpriteInstanceBuffer_(nullptr), timedTextSpriteInstanceView_(nullptr),
-      d2dFactory_(nullptr), d2dDevice_(nullptr), d2dContext_(nullptr), d2dTargets_{nullptr, nullptr},
+      d2dFactory_(nullptr), d2dDevice_(nullptr), d2dContext_(nullptr), d2dTargets_{nullptr, nullptr, nullptr},
       d2dAtlasTarget_(nullptr),
       writeFactory_(nullptr), scaler_(nullptr),
-      swapWidth_(0), swapHeight_(0), swapHdr_(false), sourceWidth_(0), sourceHeight_(0),
+      swapWidth_(0), swapHeight_(0), swapHdr_(false), swapOutputBits_(8), sourceWidth_(0), sourceHeight_(0),
       sourceInputLayout_(UINT32_MAX), sourceBitDepth_(0),
       sourceChromaWidthShift_(0), sourceChromaHeightShift_(0),
       sourceExternal_(false),
@@ -531,15 +553,16 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
       paperWhiteNits_(203.0f), sourcePeakNits_(100.0f),
       timedTextThreadStop_(false), timedTextThreadRunning_(false),
       presentationGeneration_(0), presentationFrameRate_(60.0f),
-      timedTextRenderedSequences_{0, 0}, timedTextRenderedCommandCounts_{0, 0},
-      timedTextWidths_{0, 0}, timedTextHeights_{0, 0}, timedTextPresentCounts_{0, 0},
+      timedTextRenderedSequences_{0, 0, 0}, timedTextRenderedCommandCounts_{0, 0, 0},
+      timedTextWidths_{0, 0, 0}, timedTextHeights_{0, 0, 0}, timedTextPresentCounts_{0, 0, 0},
       backBufferAcquisitionCount_(0),
-      timedTextPipelineQueryInFlight_{false, false},
-      timedTextCompositePixelInvocations_{0, 0},
+      timedTextPipelineQueryInFlight_{false, false, false},
+      timedTextCompositePixelInvocations_{0, 0, 0},
       hasCachedVideo_(false), videoGeneration_(0), presentedVideoGeneration_(0),
       presentedVideoFrames_(0), coalescedVideoFrames_(0), swapChainPresents_(0),
       presentWait100ns_(0), deviceLockWait100ns_(0), softwareConvert100ns_(0),
-      hdrMonitor_(nullptr), hdrSupportValid_(false), hdrSupported_(false),
+       hdrMonitor_(nullptr), hdrSupportValid_(false), hdrSupported_(false),
+       scRgbMonitor_(nullptr), scRgbSupportValid_(false), scRgbSupported_(false),
       timedTextAtlasX_(0), timedTextAtlasY_(0), timedTextAtlasRowHeight_(0),
       timedTextAtlasSize_(0), timedTextSpriteInstanceCapacity_(0),
       timedTextSpriteCacheHits_(0), timedTextSpriteCacheMisses_(0) {}
@@ -556,7 +579,9 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     }
     window_ = window;
     hdrSupportValid_ = false; hdrMonitor_ = nullptr;
+    scRgbSupportValid_ = false; scRgbSupported_ = false; scRgbMonitor_ = nullptr;
     swapWidth_ = swapHeight_ = 0;
+    swapHdr_ = false; swapOutputBits_ = 8;
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
         fallbackReason_.clear();
         actualMode_ = OutputSupportsHdr() ? FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
@@ -583,8 +608,10 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
         actualMode_ = FFF3FPColorMode::MapToSdr;
         fallbackReason_ = "The target display or Windows Advanced Color mode does not support true HDR output.";
     }
-    if (swapChain_ != nullptr && swapHdr_ != (actualMode_ == FFF3FPColorMode::MapToHdr)) {
-        const auto result = ReconfigureSwapChain(actualMode_ == FFF3FPColorMode::MapToHdr);
+    const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
+    const auto outputBits = PreferredOutputBitDepth(sourceBitDepth_, hdr);
+    if (swapChain_ != nullptr && (swapHdr_ != hdr || swapOutputBits_ != outputBits)) {
+        const auto result = ReconfigureSwapChain(hdr, outputBits);
         if (result != FFFResult::Success) return result;
     }
     return FFFResult::Success;
@@ -593,10 +620,10 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
 FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     // Commit the public mode only after DXGI has returned the retained swap
-    // chain to BGRA/BT.709 and removed HDR10 metadata. Reporting SDR while an
-    // old PQ chain is still active would make the next SDR frame invalid.
+    // chain to an SDR color space and removed HDR10 metadata. Reporting SDR
+    // while an old PQ chain is still active would make the next frame invalid.
     if (swapChain_ != nullptr && swapHdr_) {
-        const auto result = ReconfigureSwapChain(false);
+        const auto result = ReconfigureSwapChain(false, PreferredOutputBitDepth(sourceBitDepth_, false));
         if (result != FFFResult::Success) return result;
     }
     requestedMode_ = FFF3FPColorMode::MapToSdr;
@@ -640,9 +667,28 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
     return FFFResult::Success;
 }
 
+std::uint32_t PlayerVideoRenderer::PreferredOutputBitDepth(
+    const std::uint32_t sourceBitDepth, const bool hdr) noexcept {
+    const auto requested = OutputBitDepthForSource(sourceBitDepth, hdr);
+    if (requested < 16) return requested;
+    const auto monitor = window_ != nullptr && IsWindow(window_)
+        ? MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST) : nullptr;
+    if (monitor != scRgbMonitor_) {
+        scRgbMonitor_ = monitor;
+        scRgbSupportValid_ = false;
+        scRgbSupported_ = false;
+    }
+    return scRgbSupportValid_ && !scRgbSupported_ ? 10u : requested;
+}
+
 bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
     if (window_ == nullptr || !IsWindow(window_)) return false;
     const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    if (monitor != scRgbMonitor_) {
+        scRgbMonitor_ = monitor;
+        scRgbSupportValid_ = false;
+        scRgbSupported_ = false;
+    }
     if (hdrSupportValid_ && monitor == hdrMonitor_) return hdrSupported_;
     hdrMonitor_ = monitor;
     hdrSupportValid_ = true;
@@ -691,7 +737,8 @@ FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** ou
     return FFFResult::Success;
 }
 
-FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_t height) noexcept {
+FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_t height,
+    const std::uint32_t sourceBitDepth) noexcept {
     if (window_ == nullptr) return FFFResult::Success;
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
         const auto nextMode = OutputSupportsHdr() ? FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
@@ -700,7 +747,9 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
             fallbackReason_ = nextMode == requestedMode_ ? std::string{} :
                 "The target display or Windows Advanced Color mode does not support true HDR output.";
             if (swapChain_ != nullptr) {
-                const auto modeResult = ReconfigureSwapChain(nextMode == FFF3FPColorMode::MapToHdr);
+                const auto modeResult = ReconfigureSwapChain(
+                    nextMode == FFF3FPColorMode::MapToHdr,
+                    PreferredOutputBitDepth(sourceBitDepth, nextMode == FFF3FPColorMode::MapToHdr));
                 if (modeResult != FFFResult::Success) return modeResult;
             }
         }
@@ -712,12 +761,14 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     width = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(client.right - client.left));
     height = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(client.bottom - client.top));
     const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
-    if (swapChain_ != nullptr && hdr != swapHdr_) {
-        const auto modeResult = ReconfigureSwapChain(hdr);
+    const auto outputBits = PreferredOutputBitDepth(sourceBitDepth, hdr);
+    if (swapChain_ != nullptr && (hdr != swapHdr_ || outputBits != swapOutputBits_)) {
+        const auto modeResult = ReconfigureSwapChain(hdr, outputBits);
         if (modeResult != FFFResult::Success) return modeResult;
     }
-    if (swapChain_ != nullptr && width == swapWidth_ && height == swapHeight_ && hdr == swapHdr_) return FFFResult::Success;
-    if (swapChain_ != nullptr && hdr == swapHdr_) {
+    if (swapChain_ != nullptr && width == swapWidth_ && height == swapHeight_ &&
+        hdr == swapHdr_ && outputBits == swapOutputBits_) return FFFResult::Success;
+    if (swapChain_ != nullptr && hdr == swapHdr_ && outputBits == swapOutputBits_) {
         context_->ClearState();
         std::lock_guard presentLock(presentMutex_);
         const auto resize = swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
@@ -741,7 +792,8 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     }
     DXGI_SWAP_CHAIN_DESC1 description{};
     description.Width = width; description.Height = height;
-    description.Format = hdr ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.Format = outputBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+        (outputBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM);
     description.SampleDesc.Count = 1; description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     description.BufferCount = 2; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_STRETCH;
@@ -753,34 +805,50 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
                 << static_cast<std::uint32_t>(result) << ").";
         SetError(message.str()); return FFFResult::DeviceFailure;
     }
-    swapWidth_ = width; swapHeight_ = height; swapHdr_ = hdr;
+    swapWidth_ = width; swapHeight_ = height; swapHdr_ = hdr; swapOutputBits_ = outputBits;
     // Keep at most one complete composite queued. The presentation thread may
     // wait here, but decode and managed layer production retain only their
     // latest state instead of building latency or exposing partial frames.
     swapChain_->SetMaximumFrameLatency(1);
     ReleaseTimedTextResources();
-    if (hdr) {
+    if (hdr && outputBits < 16) {
         UINT support = 0;
         if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) ||
             (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
             FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
             fallbackReason_ = "The swap chain rejected the Rec.2020 PQ color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
-            const auto fallbackResult = ReconfigureSwapChain(false);
+            const auto fallbackResult = ReconfigureSwapChain(false,
+                PreferredOutputBitDepth(sourceBitDepth, false));
             return fallbackResult;
         }
         SetHdrMetadata();
+    } else if (outputBits >= 16) {
+        UINT support = 0;
+        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) ||
+            (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
+            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
+            fallbackReason_ = "The swap chain rejected the scRGB float color space.";
+            scRgbSupportValid_ = true; scRgbSupported_ = false;
+            swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+            return hdr ? ReconfigureSwapChain(true, 10) :
+                ReconfigureSwapChain(false, sourceBitDepth > 8 ? 10 : 8);
+        }
+        scRgbSupportValid_ = true; scRgbSupported_ = true;
+        swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
     } else {
         swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
     }
     return FFFResult::Success;
 }
 
-FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr) noexcept {
-    if (swapChain_ == nullptr || hdr == swapHdr_) return FFFResult::Success;
+FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::uint32_t outputBits) noexcept {
+    const auto formatBits = hdr ? std::max(10u, outputBits) : outputBits;
+    if (swapChain_ == nullptr || (hdr == swapHdr_ && formatBits == swapOutputBits_)) return FFFResult::Success;
     if (context_ != nullptr) { context_->ClearState(); context_->Flush(); }
     ReleaseTimedTextResources();
-    const auto format = hdr ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
+    const auto format = formatBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+        (formatBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM);
     std::unique_lock presentLock(presentMutex_);
     const auto resize = swapChain_->ResizeBuffers(0, std::max(1u, swapWidth_),
         std::max(1u, swapHeight_), format, 0);
@@ -791,21 +859,36 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr) noexcept {
         SetError(message.str());
         return FFFResult::DeviceFailure;
     }
-    swapHdr_ = hdr;
-    if (hdr) {
+    swapHdr_ = hdr; swapOutputBits_ = formatBits;
+    if (hdr && formatBits < 16) {
         UINT support = 0;
         if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) ||
             (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
             FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
             // HDR capability can change while a window moves between monitors.
-            // Keep the same HWND/flip chain, but atomically fall back to the SDR
-            // format instead of leaving an R10 buffer with an ambiguous space.
+            // Keep the same HWND/flip chain, but atomically fall back to the
+            // next supported HDR/SDR format instead of leaving an ambiguous one.
             fallbackReason_ = "The reconfigured swap chain rejected the Rec.2020 PQ color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
             presentLock.unlock();
-            return ReconfigureSwapChain(false);
+            return ReconfigureSwapChain(false,
+                PreferredOutputBitDepth(sourceBitDepth_, false));
         }
         SetHdrMetadata();
+    } else if (formatBits >= 16) {
+        UINT support = 0;
+        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) ||
+            (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
+            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
+            fallbackReason_ = "The reconfigured swap chain rejected the scRGB float color space.";
+            scRgbSupportValid_ = true; scRgbSupported_ = false;
+            swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+            presentLock.unlock();
+            return hdr ? ReconfigureSwapChain(true, 10) :
+                ReconfigureSwapChain(false, sourceBitDepth_ > 8 ? 10 : 8);
+        }
+        scRgbSupportValid_ = true; scRgbSupported_ = true;
+        swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
     } else {
         // ResizeBuffers does not define application HDR metadata lifetime. Clear
         // it explicitly whenever the retained chain becomes SDR, including a
@@ -942,10 +1025,13 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
             if (retained->sequence == 0)
                 retained->sequence = timedTextLayers_[slotIndex]
                     ? timedTextLayers_[slotIndex]->sequence + 1 : 1;
-            if (slot == TimedTextLayerSlot::Danmaku ||
-                timedTextLayers_[static_cast<std::size_t>(TimedTextLayerSlot::Danmaku)] == nullptr)
-                presentationFrameRate_ = std::clamp(retained->targetFrameRate, 1.0f, 240.0f);
             timedTextLayers_[slotIndex] = std::move(retained);
+            presentationFrameRate_ = 1.0f;
+            for (const auto& item : timedTextLayers_) {
+                if (item != nullptr && !item->commands.empty())
+                    presentationFrameRate_ = std::max(presentationFrameRate_,
+                        std::clamp(item->targetFrameRate, 1.0f, 240.0f));
+            }
             const auto hasVisibleLayer = std::any_of(std::begin(timedTextLayers_),
                 std::end(timedTextLayers_), [](const auto& item) {
                     return item != nullptr && !item->commands.empty();
@@ -1685,7 +1771,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
         ++presentedVideoFrames_;
         return FFFResult::Success;
     }
-    const auto chainResult = EnsureSwapChain(frame->width, frame->height);
+    const auto chainResult = EnsureSwapChain(frame->width, frame->height, input.bitDepth);
     if (chainResult != FFFResult::Success) return chainResult;
     const auto pipelineResult = EnsurePipeline(width, height, input.layout, input.bitDepth,
         input.chromaWidthShift, input.chromaHeightShift, d3d11Frame);
@@ -1711,6 +1797,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
     }
     ShaderSettings settings{};
     settings.colorMode = static_cast<std::uint32_t>(actualMode_);
+    settings.reserved = swapOutputBits_ >= 16 ? 1u : 0u;
     settings.transfer = frame->color_trc == AVCOL_TRC_SMPTE2084 ? 1u : (frame->color_trc == AVCOL_TRC_ARIB_STD_B67 ? 2u : 0u);
     settings.source2020 = IsRec2020(frame) ? 1u : 0u;
     settings.sdrPeak = sdrPeakNits_;
@@ -1759,7 +1846,7 @@ FFFResult PlayerVideoRenderer::Redraw() noexcept {
     {
         std::lock_guard deviceLock(deviceMutex_);
         if (!hasCachedVideo_ || window_ == nullptr) return FFFResult::Success;
-        const auto chainResult = EnsureSwapChain(sourceWidth_, sourceHeight_);
+        const auto chainResult = EnsureSwapChain(sourceWidth_, sourceHeight_, sourceBitDepth_);
         if (chainResult != FFFResult::Success) return chainResult;
     }
     {
@@ -1777,6 +1864,7 @@ FFFResult PlayerVideoRenderer::Redraw() noexcept {
 FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) noexcept {
     if (!hasCachedVideo_ || target == nullptr) return FFFResult::InvalidState;
     cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
+    cachedVideoSettings_.reserved = swapOutputBits_ >= 16 ? 1u : 0u;
     cachedVideoSettings_.outputWidth = static_cast<float>(swapWidth_);
     cachedVideoSettings_.outputHeight = static_cast<float>(swapHeight_);
     context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
@@ -1828,8 +1916,11 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     if (danmakuResult != FFFResult::Success) return danmakuResult;
     const auto subtitleResult = DrawTimedText(TimedTextLayerSlot::Subtitle);
     if (subtitleResult != FFFResult::Success) return subtitleResult;
+    const auto informationResult = DrawTimedText(TimedTextLayerSlot::PlayerInformation);
+    if (informationResult != FFFResult::Success) return informationResult;
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Danmaku);
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Subtitle);
+    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::PlayerInformation);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     const auto generation = videoGeneration_.load();
     ComPtr<IDXGISwapChain4> retainedChain = swapChain_;
@@ -1943,6 +2034,7 @@ void PlayerVideoRenderer::Close() noexcept {
     if (context_ != nullptr) { context_->Release(); context_ = nullptr; }
     if (device_ != nullptr) { device_->Release(); device_ = nullptr; }
     rgba64_.clear(); swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
+    swapHdr_ = false; swapOutputBits_ = 8;
     sourceInputLayout_ = UINT32_MAX; sourceBitDepth_ = 0;
     sourceChromaWidthShift_ = sourceChromaHeightShift_ = 0;
 }
@@ -1955,6 +2047,10 @@ std::uint64_t PlayerVideoRenderer::SwapChainPresents() const noexcept { return s
 std::uint64_t PlayerVideoRenderer::PresentWait100ns() const noexcept { return presentWait100ns_.load(); }
 std::uint64_t PlayerVideoRenderer::DeviceLockWait100ns() const noexcept { return deviceLockWait100ns_.load(); }
 std::uint64_t PlayerVideoRenderer::SoftwareConvert100ns() const noexcept { return softwareConvert100ns_.load(); }
+std::uint32_t PlayerVideoRenderer::OutputBitDepth() const noexcept {
+    std::lock_guard lock(deviceMutex_);
+    return swapOutputBits_;
+}
 std::string PlayerVideoRenderer::FallbackReason() const { return fallbackReason_; }
 std::string PlayerVideoRenderer::LastError() const { std::lock_guard lock(errorMutex_); return lastError_; }
 void PlayerVideoRenderer::SetError(std::string message) noexcept {

@@ -23,6 +23,11 @@ Partial Class Form1
     <System.Diagnostics.DebuggerStepThrough()>
     Private Sub InitializeComponent()
         components = New ComponentModel.Container()
+        Dim ModernMenuItem1 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem2 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem3 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem4 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem5 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
         Dim resources As System.ComponentModel.ComponentResourceManager = New System.ComponentModel.ComponentResourceManager(GetType(Form1))
         ThisIsYourWindow1 = New LakeUI.ThisIsYourWindow(components)
         Panel1 = New Panel()
@@ -90,6 +95,7 @@ Partial Class Form1
         MB_后退到关键帧 = New LakeUI.ModernButton()
         JustEmptyControl2 = New LakeUI.JustEmptyControl()
         MP_DX视频容器 = New Panel()
+        MCB_流选择器 = New LakeUI.ModernContextMenu()
         Panel1.SuspendLayout()
         ModernPanel1.SuspendLayout()
         Panel3.SuspendLayout()
@@ -225,9 +231,11 @@ Partial Class Form1
         MB_当前声道数显示.BorderRadius = 5
         MB_当前声道数显示.Dock = DockStyle.Left
         MB_当前声道数显示.Font = New Font("Microsoft YaHei UI", 9F)
+        MB_当前声道数显示.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
         MB_当前声道数显示.Location = New Point(190, 8)
         MB_当前声道数显示.Margin = New Padding(2)
         MB_当前声道数显示.Name = "MB_当前声道数显示"
+        MB_当前声道数显示.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_当前声道数显示.Size = New Size(40, 24)
         MB_当前声道数显示.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_当前声道数显示.TabIndex = 40
@@ -841,6 +849,7 @@ Partial Class Form1
         MB_设为出点.BackColor1 = Color.Transparent
         MB_设为出点.BorderSize = 0
         MB_设为出点.Dock = DockStyle.Left
+        MB_设为出点.ForeColor = Color.Goldenrod
         MB_设为出点.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
         MB_设为出点.Location = New Point(420, 0)
         MB_设为出点.Margin = New Padding(2)
@@ -866,6 +875,7 @@ Partial Class Form1
         MB_去出点.BackColor1 = Color.Transparent
         MB_去出点.BorderSize = 0
         MB_去出点.Dock = DockStyle.Left
+        MB_去出点.ForeColor = Color.CornflowerBlue
         MB_去出点.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
         MB_去出点.Location = New Point(336, 0)
         MB_去出点.Margin = New Padding(2)
@@ -891,6 +901,7 @@ Partial Class Form1
         MB_去入点.BackColor1 = Color.Transparent
         MB_去入点.BorderSize = 0
         MB_去入点.Dock = DockStyle.Left
+        MB_去入点.ForeColor = Color.CornflowerBlue
         MB_去入点.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
         MB_去入点.Location = New Point(252, 0)
         MB_去入点.Margin = New Padding(2)
@@ -916,6 +927,7 @@ Partial Class Form1
         MB_设为入点.BackColor1 = Color.Transparent
         MB_设为入点.BorderSize = 0
         MB_设为入点.Dock = DockStyle.Left
+        MB_设为入点.ForeColor = Color.Goldenrod
         MB_设为入点.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
         MB_设为入点.Location = New Point(168, 0)
         MB_设为入点.Margin = New Padding(2)
@@ -993,6 +1005,43 @@ Partial Class Form1
         MP_DX视频容器.Name = "MP_DX视频容器"
         MP_DX视频容器.Size = New Size(844, 386)
         MP_DX视频容器.TabIndex = 2
+        ' 
+        ' MCB_流选择器
+        ' 
+        MCB_流选择器.AnimationFPS = 120
+        MCB_流选择器.BackdropBlurPasses = 2
+        MCB_流选择器.BackdropBlurRadius = 30
+        MCB_流选择器.BackdropMode = LakeUI.ModernContextMenu.BackdropModeEnum.Auto
+        MCB_流选择器.BackdropNoiseOpacity = CByte(0)
+        MCB_流选择器.BackdropTintColor = Color.FromArgb(CByte(120), CByte(0), CByte(0), CByte(0))
+        MCB_流选择器.BorderColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCB_流选择器.CheckMarkSize = 12
+        MCB_流选择器.DescriptionFont = New Font("Microsoft YaHei UI", 9F)
+        MCB_流选择器.HoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCB_流选择器.HoverRadius = 5
+        MCB_流选择器.IconSize = 0
+        MCB_流选择器.ItemHeight = 26
+        MCB_流选择器.ItemPadding = New Padding(10, 0, 10, 0)
+        ModernMenuItem1.Font = Nothing
+        ModernMenuItem1.Text = "视频流"
+        ModernMenuItem2.Font = Nothing
+        ModernMenuItem2.IsSeparator = True
+        ModernMenuItem3.Font = Nothing
+        ModernMenuItem3.Text = "音频流"
+        ModernMenuItem4.Font = Nothing
+        ModernMenuItem4.IsSeparator = True
+        ModernMenuItem5.Font = Nothing
+        ModernMenuItem5.Text = "字幕流"
+        MCB_流选择器.Items.Add(ModernMenuItem1)
+        MCB_流选择器.Items.Add(ModernMenuItem2)
+        MCB_流选择器.Items.Add(ModernMenuItem3)
+        MCB_流选择器.Items.Add(ModernMenuItem4)
+        MCB_流选择器.Items.Add(ModernMenuItem5)
+        MCB_流选择器.MenuFont = New Font("Microsoft YaHei UI", 10F)
+        MCB_流选择器.MenuPadding = New Padding(10)
+        MCB_流选择器.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCB_流选择器.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCB_流选择器.SeparatorHeight = 10
         ' 
         ' Form1
         ' 
@@ -1086,5 +1135,6 @@ Partial Class Form1
     Friend WithEvents JustEmptyControl20 As LakeUI.JustEmptyControl
     Friend WithEvents MB_去入点 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl17 As LakeUI.JustEmptyControl
+    Friend WithEvents MCB_流选择器 As LakeUI.ModernContextMenu
 
 End Class

@@ -72,7 +72,7 @@ Friend NotInheritable Class ASS特效字幕帧生成器
     Private 像素缓冲 As Byte() = Array.Empty(Of Byte)()
     Private 已释放 As Boolean
 
-    Public Sub New(字幕路径 As String, 媒体路径 As String)
+    Public Sub New(字幕路径 As String, 媒体路径 As String, Optional 流索引 As Integer = -1)
         ArgumentException.ThrowIfNullOrWhiteSpace(字幕路径)
         Dim 完整字幕路径 = Path.GetFullPath(字幕路径)
         Dim 字体目录 = ASS媒体字体发现器.查找字体目录(媒体路径)
@@ -80,13 +80,14 @@ Friend NotInheritable Class ASS特效字幕帧生成器
         Dim 字体目录指针 = Marshal.StringToCoTaskMemUTF8(String.Join(vbLf, 字体目录))
         Dim 原生指针 = IntPtr.Zero
         Try
-            Dim 结果 = 播放器原生接口.FFF3FP_OpenAssSubtitle(路径指针, 字体目录指针, 原生指针)
+            Dim 结果 = 播放器原生接口.FFF3FP_OpenAssSubtitle(
+                路径指针, 字体目录指针, 流索引, 原生指针)
             If 原生指针 <> IntPtr.Zero Then 句柄 = New ASS字幕原生句柄(原生指针)
             If 结果 <> 原生播放器结果.成功 Then
-                Dim 消息 = If(句柄 Is Nothing, "无法打开 ASS/SSA 特效字幕。", 读取错误())
+                Dim 消息 = If(句柄 Is Nothing, "无法打开文字字幕。", 读取错误())
                 句柄?.Dispose()
                 If 结果 = 原生播放器结果.不支持 Then
-                    Throw New NotSupportedException("当前原生运行库不支持 ASS/SSA 特效字幕。")
+                    Throw New NotSupportedException("当前原生运行库不支持此文字字幕。")
                 End If
                 Throw New InvalidOperationException(消息)
             End If

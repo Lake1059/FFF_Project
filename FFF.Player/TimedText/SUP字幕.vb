@@ -14,6 +14,7 @@ Public NotInheritable Class SUP字幕事件
         像素BGRA = pixels
         是清除事件 = (info.标志 And 原生位图字幕标志.清除) <> 0
         是强制字幕 = (info.标志 And 原生位图字幕标志.强制) <> 0
+        仍需读取 = (info.标志 And 原生位图字幕标志.仍需读取) <> 0
         序号 = info.序号
     End Sub
 
@@ -29,6 +30,7 @@ Public NotInheritable Class SUP字幕事件
     Public ReadOnly Property 像素BGRA As Byte()
     Public ReadOnly Property 是清除事件 As Boolean
     Public ReadOnly Property 是强制字幕 As Boolean
+    Public ReadOnly Property 仍需读取 As Boolean
     Public ReadOnly Property 序号 As Long
 End Class
 
@@ -61,6 +63,9 @@ Public NotInheritable Class SUP字幕解码器
             .大小 = CUInt(Marshal.SizeOf(Of 原生位图字幕帧)()), .版本 = 1UI}
         检查结果(播放器原生接口.FFF3FP_ReadBitmapSubtitle(句柄, info))
         If (info.标志 And 原生位图字幕标志.流结束) <> 0 Then Return Nothing
+        If (info.标志 And 原生位图字幕标志.仍需读取) <> 0 Then
+            Return New SUP字幕事件(info, Array.Empty(Of Byte)())
+        End If
         Dim pixels = If(info.像素字节数 = 0, Array.Empty(Of Byte)(), New Byte(CInt(info.像素字节数) - 1) {})
         Dim pinned As GCHandle
         Try
@@ -147,6 +152,8 @@ Public NotInheritable Class SUP字幕帧生成器
         ArgumentNullException.ThrowIfNull(结果)
         If 时间 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(时间))
         If 上次时间 = TimeSpan.MinValue OrElse 时间 < 上次时间 OrElse 时间 - 上次时间 > TimeSpan.FromSeconds(2) Then
+            ' PGS 的图像对象与调色板可能早于当前显示集。跳转后必须从目标前方
+            ' 预读一段时间，才能恢复完整解码状态以及跨越目标点的活动字幕。
             Dim replayStart = If(时间 > TimeSpan.FromSeconds(30), 时间 - TimeSpan.FromSeconds(30), TimeSpan.Zero)
             解码器.跳转(replayStart)
             当前事件 = Nothing
@@ -154,8 +161,7 @@ Public NotInheritable Class SUP字幕帧生成器
             流已结束 = False
         End If
         If 下一事件 Is Nothing AndAlso Not 流已结束 Then
-            下一事件 = 解码器.读取下一事件()
-            流已结束 = 下一事件 Is Nothing
+            读取下一批次()
         End If
         While 下一事件 IsNot Nothing AndAlso 下一事件.开始时间 <= 时间
             If 下一事件.是清除事件 Then
@@ -163,8 +169,8 @@ Public NotInheritable Class SUP字幕帧生成器
             Else
                 当前事件 = 下一事件
             End If
-            下一事件 = 解码器.读取下一事件()
-            流已结束 = 下一事件 Is Nothing
+            下一事件 = Nothing
+            If Not 流已结束 Then 读取下一批次()
         End While
         If 当前事件 IsNot Nothing AndAlso 当前事件.结束时间 > TimeSpan.Zero AndAlso 当前事件.结束时间 <= 时间 Then 当前事件 = Nothing
         If 当前事件 IsNot Nothing AndAlso 当前事件.画布宽度 > 0 AndAlso 当前事件.画布高度 > 0 Then
@@ -175,6 +181,15 @@ Public NotInheritable Class SUP字幕帧生成器
                 当前事件.宽度 * scaleX, 当前事件.高度 * scaleY))
         End If
         上次时间 = 时间
+    End Sub
+
+    Private Sub 读取下一批次()
+        Dim 事件 = 解码器.读取下一事件()
+        If 事件 Is Nothing Then
+            流已结束 = True
+        ElseIf Not 事件.仍需读取 Then
+            下一事件 = 事件
+        End If
     End Sub
 
     Public Sub Dispose() Implements IDisposable.Dispose

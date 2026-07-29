@@ -73,6 +73,7 @@ struct TimedTextRenderLayer {
 enum class TimedTextLayerSlot : std::uint32_t {
     Subtitle = 0,
     Danmaku = 1,
+    PlayerInformation = 2,
 };
 
 FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept;
@@ -103,6 +104,7 @@ public:
     std::uint64_t PresentWait100ns() const noexcept;
     std::uint64_t DeviceLockWait100ns() const noexcept;
     std::uint64_t SoftwareConvert100ns() const noexcept;
+    std::uint32_t OutputBitDepth() const noexcept;
     std::string FallbackReason() const;
     std::string LastError() const;
 
@@ -120,8 +122,10 @@ private:
     };
 
     FFFResult EnsureDevice() noexcept;
-    FFFResult EnsureSwapChain(std::uint32_t width, std::uint32_t height) noexcept;
-    FFFResult ReconfigureSwapChain(bool hdr) noexcept;
+    std::uint32_t PreferredOutputBitDepth(std::uint32_t sourceBitDepth, bool hdr) noexcept;
+    FFFResult EnsureSwapChain(std::uint32_t width, std::uint32_t height,
+        std::uint32_t sourceBitDepth) noexcept;
+    FFFResult ReconfigureSwapChain(bool hdr, std::uint32_t outputBits) noexcept;
     FFFResult EnsurePipeline(std::uint32_t sourceWidth, std::uint32_t sourceHeight,
         std::uint32_t inputLayout, std::uint32_t bitDepth,
         std::uint32_t chromaWidthShift, std::uint32_t chromaHeightShift,
@@ -164,10 +168,10 @@ private:
     ID3D11Buffer* constants_;
     ID3D11Texture2D* sourceTextures_[3];
     ID3D11ShaderResourceView* sourceViews_[3];
-    ID3D11Texture2D* timedTextTextures_[2];
-    ID3D11RenderTargetView* timedTextTargets_[2];
-    ID3D11ShaderResourceView* timedTextViews_[2];
-    ID3D11Query* timedTextPipelineQueries_[2];
+    ID3D11Texture2D* timedTextTextures_[3];
+    ID3D11RenderTargetView* timedTextTargets_[3];
+    ID3D11ShaderResourceView* timedTextViews_[3];
+    ID3D11Query* timedTextPipelineQueries_[3];
     ID3D11BlendState* timedTextBlend_;
     ID3D11Texture2D* timedTextAtlasTexture_;
     ID3D11ShaderResourceView* timedTextAtlasView_;
@@ -178,13 +182,14 @@ private:
     ID2D1Factory1* d2dFactory_;
     ID2D1Device* d2dDevice_;
     ID2D1DeviceContext* d2dContext_;
-    ID2D1Bitmap1* d2dTargets_[2];
+    ID2D1Bitmap1* d2dTargets_[3];
     ID2D1Bitmap1* d2dAtlasTarget_;
     IDWriteFactory* writeFactory_;
     SwsContext* scaler_;
     std::uint32_t swapWidth_;
     std::uint32_t swapHeight_;
     bool swapHdr_;
+    std::uint32_t swapOutputBits_;
     std::uint32_t sourceWidth_;
     std::uint32_t sourceHeight_;
     std::uint32_t sourceInputLayout_;
@@ -211,19 +216,20 @@ private:
     // The producer publishes an immutable layer and renderers retain a shared
     // snapshot. This keeps the timed-text mutex short without copying every
     // command and string again on the video/present thread.
-    // Subtitle and danmaku have independent producers and render surfaces.
-    // Composite order is fixed to video -> danmaku -> subtitle.
-    std::shared_ptr<const TimedTextRenderLayer> timedTextLayers_[2];
-    std::uint64_t timedTextRenderedSequences_[2];
-    std::uint32_t timedTextRenderedCommandCounts_[2];
-    std::uint32_t timedTextWidths_[2];
-    std::uint32_t timedTextHeights_[2];
+    // Subtitle, danmaku and player information have independent producers and
+    // render surfaces. Player information is always the topmost GPU layer.
+    // Composite order is fixed to video -> danmaku -> subtitle -> information.
+    std::shared_ptr<const TimedTextRenderLayer> timedTextLayers_[3];
+    std::uint64_t timedTextRenderedSequences_[3];
+    std::uint32_t timedTextRenderedCommandCounts_[3];
+    std::uint32_t timedTextWidths_[3];
+    std::uint32_t timedTextHeights_[3];
     // Counts successful final swap-chain presents that included each visible
     // layer. A texture redraw is not a presentation and must not advance this.
-    std::uint32_t timedTextPresentCounts_[2];
+    std::uint32_t timedTextPresentCounts_[3];
     std::uint64_t backBufferAcquisitionCount_;
-    bool timedTextPipelineQueryInFlight_[2];
-    std::uint64_t timedTextCompositePixelInvocations_[2];
+    bool timedTextPipelineQueryInFlight_[3];
+    std::uint64_t timedTextCompositePixelInvocations_[3];
     CachedVideoSettings cachedVideoSettings_;
     bool hasCachedVideo_;
     std::atomic<std::uint64_t> videoGeneration_;
@@ -237,6 +243,9 @@ private:
     HMONITOR hdrMonitor_;
     bool hdrSupportValid_;
     bool hdrSupported_;
+    HMONITOR scRgbMonitor_;
+    bool scRgbSupportValid_;
+    bool scRgbSupported_;
     // Bounded caches are keyed by the immutable command content contract.  The
     // UI only changes coordinates for scrolling danmaku, so rebuilding a text
     // layout and two brushes at 60 Hz is unnecessary.

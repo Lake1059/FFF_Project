@@ -13,6 +13,7 @@ extern "C" {
 namespace {
 constexpr std::uint32_t ApiVersion = 1;
 constexpr std::int64_t TicksPerSecond = 10'000'000;
+constexpr int MaximumPacketsPerRead = 4096;
 
 std::string FfmpegError(const int error) {
     char buffer[AV_ERROR_MAX_STRING_SIZE]{};
@@ -32,13 +33,28 @@ public:
         try { path_ = path; } catch (...) { return FFFResult::NativeFailure; }
         const auto openResult = avformat_open_input(&format_, path, nullptr, nullptr);
         if (openResult < 0) return Fail("Could not open the bitmap subtitle: " + FfmpegError(openResult));
-        const auto infoResult = avformat_find_stream_info(format_, nullptr);
-        if (infoResult < 0) return Fail("Could not inspect the bitmap subtitle: " + FfmpegError(infoResult));
+        const auto requestedStreamReady = requestedStream >= 0 &&
+            requestedStream < static_cast<std::int32_t>(format_->nb_streams) &&
+            format_->streams[requestedStream]->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE &&
+            format_->streams[requestedStream]->codecpar->codec_id != AV_CODEC_ID_NONE;
+        if (!requestedStreamReady) {
+            const auto infoResult = avformat_find_stream_info(format_, nullptr);
+            if (infoResult < 0) return Fail("Could not inspect the bitmap subtitle: " + FfmpegError(infoResult));
+        }
         streamIndex_ = requestedStream;
         if (streamIndex_ < 0) streamIndex_ = av_find_best_stream(format_, AVMEDIA_TYPE_SUBTITLE, -1, -1, nullptr, 0);
         if (streamIndex_ < 0 || streamIndex_ >= static_cast<std::int32_t>(format_->nb_streams) ||
             format_->streams[streamIndex_]->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE)
             return Fail("The file does not contain the requested subtitle stream.", FFFResult::InvalidArgument);
+        auto timelineStream = av_find_best_stream(format_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (timelineStream < 0)
+            timelineStream = av_find_best_stream(format_, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+        if (timelineStream >= 0) {
+            const auto* reference = format_->streams[timelineStream];
+            if (reference->start_time != AV_NOPTS_VALUE)
+                timelineOrigin100ns_ = av_rescale_q(reference->start_time, reference->time_base,
+                    AVRational{1, static_cast<int>(TicksPerSecond)});
+        }
         const auto codecId = format_->streams[streamIndex_]->codecpar->codec_id;
         if (codecId != AV_CODEC_ID_HDMV_PGS_SUBTITLE && codecId != AV_CODEC_ID_DVD_SUBTITLE &&
             codecId != AV_CODEC_ID_DVB_SUBTITLE && codecId != AV_CODEC_ID_XSUB)
@@ -63,16 +79,25 @@ public:
         output = {};
         output.size = sizeof(FFF3FPBitmapSubtitleFrame);
         output.version = ApiVersion;
+        int inspectedPackets = 0;
         for (;;) {
-            const auto readResult = hasBufferedPacket_ ? 0 : av_read_frame(format_, packet_);
-            hasBufferedPacket_ = false;
+            const auto readResult = av_read_frame(format_, packet_);
             if (readResult == AVERROR_EOF) {
                 output.flags = FFF3FPBitmapSubtitleFlags::EndOfStream;
                 output.sequence = sequence_;
                 return FFFResult::Success;
             }
             if (readResult < 0) return Fail("Could not read the bitmap subtitle: " + FfmpegError(readResult));
-            if (packet_->stream_index != streamIndex_) { av_packet_unref(packet_); continue; }
+            ++inspectedPackets;
+            if (packet_->stream_index != streamIndex_) {
+                av_packet_unref(packet_);
+                if (inspectedPackets >= MaximumPacketsPerRead) {
+                    output.flags = FFF3FPBitmapSubtitleFlags::MoreData;
+                    output.sequence = sequence_;
+                    return FFFResult::Success;
+                }
+                continue;
+            }
 
             const auto packetPts = packet_->pts;
             AVSubtitle subtitle{};
@@ -80,7 +105,14 @@ public:
             const auto decodeResult = avcodec_decode_subtitle2(codec_, &subtitle, &gotSubtitle, packet_);
             av_packet_unref(packet_);
             if (decodeResult < 0) return Fail("Could not decode the bitmap subtitle: " + FfmpegError(decodeResult));
-            if (!gotSubtitle) continue;
+            if (!gotSubtitle) {
+                if (inspectedPackets >= MaximumPacketsPerRead) {
+                    output.flags = FFF3FPBitmapSubtitleFlags::MoreData;
+                    output.sequence = sequence_;
+                    return FFFResult::Success;
+                }
+                continue;
+            }
             const auto result = BuildFrame(subtitle, packetPts, output);
             avsubtitle_free(&subtitle);
             return result;
@@ -98,20 +130,24 @@ public:
     FFFResult Seek(const std::int64_t position) noexcept {
         if (position < 0) return FFFResult::InvalidArgument;
         const auto* stream = format_->streams[streamIndex_];
-        const auto timestamp = av_rescale_q(position, AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base);
-        const auto result = av_seek_frame(format_, streamIndex_, timestamp, AVSEEK_FLAG_BACKWARD);
+        const auto absolutePosition = position + timelineOrigin100ns_;
+        auto globalTimestamp = av_rescale_q(absolutePosition,
+            AVRational{1, static_cast<int>(TicksPerSecond)}, AV_TIME_BASE_Q);
+        if (format_->start_time != AV_NOPTS_VALUE)
+            globalTimestamp = std::max(globalTimestamp, format_->start_time);
+        auto result = avformat_seek_file(format_, -1, INT64_MIN, globalTimestamp,
+            globalTimestamp, AVSEEK_FLAG_BACKWARD);
         if (result < 0) {
-            const auto savedPath = path_;
-            const auto savedStream = streamIndex_;
-            Close();
-            hasPending_ = false;
-            pixels_.clear();
-            const auto openResult = Open(savedPath.c_str(), savedStream);
-            return openResult == FFFResult::Success ? FastForward(position) : openResult;
+            auto streamTimestamp = av_rescale_q(absolutePosition,
+                AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base);
+            if (stream->start_time != AV_NOPTS_VALUE)
+                streamTimestamp = std::max(streamTimestamp, stream->start_time);
+            result = av_seek_frame(format_, streamIndex_, streamTimestamp, AVSEEK_FLAG_BACKWARD);
         }
+        if (result < 0) return Fail("Could not seek the bitmap subtitle: " + FfmpegError(result));
         avcodec_flush_buffers(codec_);
+        avformat_flush(format_);
         av_packet_unref(packet_);
-        hasBufferedPacket_ = false;
         pixels_.clear();
         hasPending_ = false;
         return FFFResult::Success;
@@ -120,32 +156,6 @@ public:
     const std::string& LastError() const noexcept { return lastError_; }
 
 private:
-    FFFResult FastForward(const std::int64_t position) noexcept {
-        if (position <= 0) return FFFResult::Success;
-        const auto* stream = format_->streams[streamIndex_];
-        for (;;) {
-            const auto readResult = av_read_frame(format_, packet_);
-            if (readResult == AVERROR_EOF) return FFFResult::Success;
-            if (readResult < 0) return Fail("Could not fast-forward the bitmap subtitle: " + FfmpegError(readResult));
-            if (packet_->stream_index != streamIndex_) { av_packet_unref(packet_); continue; }
-            const auto pts = packet_->pts != AV_NOPTS_VALUE ? packet_->pts : packet_->dts;
-            if (pts != AV_NOPTS_VALUE) {
-                const auto packetPosition = av_rescale_q(pts, stream->time_base,
-                    AVRational{1, static_cast<int>(TicksPerSecond)});
-                if (packetPosition >= position) {
-                    hasBufferedPacket_ = true;
-                    return FFFResult::Success;
-                }
-            }
-            AVSubtitle subtitle{};
-            int gotSubtitle = 0;
-            const auto decodeResult = avcodec_decode_subtitle2(codec_, &subtitle, &gotSubtitle, packet_);
-            av_packet_unref(packet_);
-            if (decodeResult < 0) return Fail("Could not fast-forward the bitmap subtitle decoder: " + FfmpegError(decodeResult));
-            if (gotSubtitle) avsubtitle_free(&subtitle);
-        }
-    }
-
     FFFResult BuildFrame(const AVSubtitle& subtitle, const std::int64_t packetPts,
         FFF3FPBitmapSubtitleFrame& output) noexcept {
         try {
@@ -155,6 +165,7 @@ private:
                 base = av_rescale_q(subtitle.pts, AVRational{1, AV_TIME_BASE}, AVRational{1, static_cast<int>(TicksPerSecond)});
             else if (packetPts != AV_NOPTS_VALUE)
                 base = av_rescale_q(packetPts, stream->time_base, AVRational{1, static_cast<int>(TicksPerSecond)});
+            base -= timelineOrigin100ns_;
             output.start100ns = std::max<std::int64_t>(0, base + static_cast<std::int64_t>(subtitle.start_display_time) * 10'000);
             if (subtitle.end_display_time > subtitle.start_display_time && subtitle.end_display_time != UINT32_MAX)
                 output.end100ns = std::max(output.start100ns,
@@ -232,7 +243,6 @@ private:
         if (codec_ != nullptr) avcodec_free_context(&codec_);
         if (format_ != nullptr) avformat_close_input(&format_);
         pixels_.clear();
-        hasBufferedPacket_ = false;
     }
 
     std::string path_;
@@ -241,10 +251,10 @@ private:
     AVCodecContext* codec_{};
     AVPacket* packet_{};
     std::int32_t streamIndex_{-1};
+    std::int64_t timelineOrigin100ns_{};
     std::int64_t sequence_{};
     std::vector<std::uint8_t> pixels_;
     bool hasPending_{};
-    bool hasBufferedPacket_{};
 };
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,

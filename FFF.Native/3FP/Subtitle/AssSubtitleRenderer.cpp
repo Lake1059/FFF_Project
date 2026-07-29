@@ -3,6 +3,13 @@
 
 #include <ass/ass.h>
 
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/avutil.h>
+#include <libavutil/error.h>
+}
+
 #include <array>
 #include <cstdarg>
 #include <cstdio>
@@ -14,6 +21,12 @@
 namespace {
 constexpr std::uint32_t ApiVersion = 1;
 constexpr std::int64_t TicksPerMillisecond = 10'000;
+
+std::string FfmpegError(const int error) {
+    char buffer[AV_ERROR_MAX_STRING_SIZE]{};
+    return av_strerror(error, buffer, sizeof(buffer)) == 0
+        ? buffer : "FFmpeg error " + std::to_string(error);
+}
 
 std::wstring Utf8ToWide(const std::string& value) {
     if (value.empty()) return {};
@@ -65,7 +78,8 @@ public:
     AssSubtitleRenderer(const AssSubtitleRenderer&) = delete;
     AssSubtitleRenderer& operator=(const AssSubtitleRenderer&) = delete;
 
-    FFFResult Open(const char* path, const char* fontDirectories) noexcept {
+    FFFResult Open(const char* path, const char* fontDirectories,
+        const std::int32_t requestedStream) noexcept {
         if (path == nullptr || *path == '\0') return FFFResult::InvalidArgument;
         try {
             const auto widePath = Utf8ToWide(path);
@@ -81,10 +95,14 @@ public:
             ParseFontDirectories(fontDirectories);
             AddMediaFonts();
 
-            auto script = ReadFile(std::filesystem::path(widePath));
-            if (script.empty()) return Fail("The ASS subtitle file is empty.");
             lastLibassMessage_.clear();
-            track_ = ass_read_memory(library_, script.data(), script.size(), nullptr);
+            if (requestedStream >= 0) {
+                track_ = ReadContainerTrack(path, requestedStream);
+            } else {
+                auto script = ReadFile(std::filesystem::path(widePath));
+                if (script.empty()) return Fail("The ASS subtitle file is empty.");
+                track_ = ass_read_memory(library_, script.data(), script.size(), nullptr);
+            }
             if (track_ == nullptr)
                 return Fail("Could not parse the ASS subtitle." + LibassDetail());
 
@@ -152,6 +170,141 @@ public:
     const std::string& LastError() const noexcept { return lastError_; }
 
 private:
+    ASS_Track* ReadContainerTrack(const char* path, const std::int32_t requestedStream) {
+        AVFormatContext* format = nullptr;
+        AVCodecContext* decoder = nullptr;
+        AVPacket* packet = nullptr;
+        ASS_Track* track = nullptr;
+        const auto cleanup = [&] {
+            if (packet != nullptr) av_packet_free(&packet);
+            if (decoder != nullptr) avcodec_free_context(&decoder);
+            if (format != nullptr) avformat_close_input(&format);
+        };
+
+        try {
+            auto result = avformat_open_input(&format, path, nullptr, nullptr);
+            if (result < 0)
+                throw std::runtime_error("Could not open the subtitle container: " + FfmpegError(result));
+            result = avformat_find_stream_info(format, nullptr);
+            if (result < 0)
+                throw std::runtime_error("Could not inspect subtitle streams: " + FfmpegError(result));
+            if (requestedStream < 0 || requestedStream >= static_cast<std::int32_t>(format->nb_streams) ||
+                format->streams[requestedStream]->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE)
+                throw std::runtime_error("The requested embedded subtitle stream does not exist.");
+
+            auto* stream = format->streams[requestedStream];
+            std::int64_t timelineOriginMilliseconds = 0;
+            auto timelineStream = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+            if (timelineStream < 0)
+                timelineStream = av_find_best_stream(format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+            if (timelineStream >= 0) {
+                const auto* reference = format->streams[timelineStream];
+                if (reference->start_time != AV_NOPTS_VALUE)
+                    timelineOriginMilliseconds = av_rescale_q(reference->start_time,
+                        reference->time_base, AVRational{1, 1000});
+            }
+            const auto* codec = avcodec_find_decoder(stream->codecpar->codec_id);
+            if (codec == nullptr)
+                throw std::runtime_error("FFmpeg has no decoder for the embedded subtitle stream.");
+            decoder = avcodec_alloc_context3(codec);
+            if (decoder == nullptr)
+                throw std::runtime_error("Could not allocate the embedded subtitle decoder.");
+            result = avcodec_parameters_to_context(decoder, stream->codecpar);
+            if (result < 0)
+                throw std::runtime_error("Could not configure the embedded subtitle decoder: " + FfmpegError(result));
+            result = avcodec_open2(decoder, codec, nullptr);
+            if (result < 0)
+                throw std::runtime_error("Could not start the embedded subtitle decoder: " + FfmpegError(result));
+
+            track = ass_new_track(library_);
+            if (track == nullptr) throw std::runtime_error("Could not allocate a libass subtitle track.");
+            if (stream->codecpar->codec_id == AV_CODEC_ID_ASS || stream->codecpar->codec_id == AV_CODEC_ID_SSA) {
+                if (stream->codecpar->extradata != nullptr && stream->codecpar->extradata_size > 0)
+                    ass_process_codec_private(track,
+                        reinterpret_cast<char*>(stream->codecpar->extradata),
+                        stream->codecpar->extradata_size);
+            } else {
+                static constexpr char DefaultHeader[] =
+                    "[Script Info]\nScriptType: v4.00+\nPlayResX: 384\nPlayResY: 288\n"
+                    "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+                    "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, "
+                    "Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                    "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,18,1\n"
+                    "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+                ass_process_data(track, const_cast<char*>(DefaultHeader),
+                    static_cast<int>(sizeof(DefaultHeader) - 1));
+            }
+
+            packet = av_packet_alloc();
+            if (packet == nullptr) throw std::runtime_error("Could not allocate a subtitle packet.");
+            std::int64_t eventOrder = 0;
+            while ((result = av_read_frame(format, packet)) >= 0) {
+                if (packet->stream_index != requestedStream) {
+                    av_packet_unref(packet);
+                    continue;
+                }
+
+                const auto packetPts = packet->pts;
+                const auto packetDuration = packet->duration;
+                AVSubtitle subtitle{};
+                int gotSubtitle = 0;
+                const auto decodeResult = avcodec_decode_subtitle2(decoder, &subtitle, &gotSubtitle, packet);
+                av_packet_unref(packet);
+                if (decodeResult < 0) {
+                    avsubtitle_free(&subtitle);
+                    throw std::runtime_error("Could not decode an embedded subtitle packet: " +
+                        FfmpegError(decodeResult));
+                }
+                if (!gotSubtitle) continue;
+
+                std::int64_t baseMilliseconds = 0;
+                if (subtitle.pts != AV_NOPTS_VALUE)
+                    baseMilliseconds = subtitle.pts / 1000;
+                else if (packetPts != AV_NOPTS_VALUE)
+                    baseMilliseconds = av_rescale_q(packetPts, stream->time_base, AVRational{1, 1000});
+                const auto startMilliseconds = std::max<std::int64_t>(0,
+                    baseMilliseconds - timelineOriginMilliseconds + subtitle.start_display_time);
+                auto durationMilliseconds = subtitle.end_display_time > subtitle.start_display_time &&
+                    subtitle.end_display_time != UINT32_MAX
+                    ? static_cast<std::int64_t>(subtitle.end_display_time - subtitle.start_display_time)
+                    : (packetDuration > 0
+                        ? av_rescale_q(packetDuration, stream->time_base, AVRational{1, 1000})
+                        : 5000);
+                durationMilliseconds = std::max<std::int64_t>(1, durationMilliseconds);
+
+                for (unsigned index = 0; index < subtitle.num_rects; ++index) {
+                    const auto* rectangle = subtitle.rects[index];
+                    if (rectangle == nullptr) continue;
+                    if (rectangle->ass != nullptr && *rectangle->ass != '\0') {
+                        ass_process_chunk(track, rectangle->ass,
+                            static_cast<int>(std::strlen(rectangle->ass)),
+                            startMilliseconds, durationMilliseconds);
+                    } else if (rectangle->text != nullptr && *rectangle->text != '\0') {
+                        std::string text;
+                        for (const char* current = rectangle->text; *current != '\0'; ++current) {
+                            if (*current == '\r') continue;
+                            if (*current == '\n') text += "\\N";
+                            else text += *current;
+                        }
+                        auto chunk = std::to_string(eventOrder++) + ",0,Default,,0,0,0,," + text;
+                        ass_process_chunk(track, chunk.data(), static_cast<int>(chunk.size()),
+                            startMilliseconds, durationMilliseconds);
+                    }
+                }
+                avsubtitle_free(&subtitle);
+            }
+            if (result != AVERROR_EOF)
+                throw std::runtime_error("Could not finish reading embedded subtitles: " + FfmpegError(result));
+
+            cleanup();
+            return track;
+        } catch (...) {
+            cleanup();
+            if (track != nullptr) ass_free_track(track);
+            throw;
+        }
+    }
+
     static void AssMessageCallback(const int level, const char* format, va_list arguments,
         void* data) noexcept {
         if (data == nullptr || format == nullptr || level > 2) return;
@@ -362,12 +515,12 @@ FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t o
 }
 
 FFFResult FFF3FP_OpenAssSubtitle(const char* path, const char* fontDirectories,
-    FFF3FPAssSubtitleHandle* output) noexcept {
+    const std::int32_t stream, FFF3FPAssSubtitleHandle* output) noexcept {
     if (output == nullptr) return FFFResult::InvalidArgument;
     *output = nullptr;
     try {
         auto renderer = std::make_unique<AssSubtitleRenderer>();
-        const auto result = renderer->Open(path, fontDirectories);
+        const auto result = renderer->Open(path, fontDirectories, stream);
         *output = renderer.release();
         return result;
     } catch (...) { return FFFResult::NativeFailure; }

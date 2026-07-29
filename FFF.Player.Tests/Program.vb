@@ -43,9 +43,48 @@ Friend Module Program
                 Console.WriteLine("GPU 解码规格接受与 CPU 回退矩阵通过。")
                 Return 0
             End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--stream-selector-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 流媒体路径 = Path.GetFullPath(参数(1))
+                检查文件(流媒体路径)
+                测试流选择器后端(流媒体路径)
+                Console.WriteLine("流元数据、音轨切换、内嵌字幕加载和外部字幕扫描回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--external-subtitle-scan-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试外部字幕扫描顺序()
+                Console.WriteLine("外部字幕完整扫描、同名过滤和后缀优先级回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--track-switch-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 轨道媒体路径 = Path.GetFullPath(参数(1))
+                检查文件(轨道媒体路径)
+                测试全部音轨切换(轨道媒体路径)
+                测试内嵌字幕切换延迟(轨道媒体路径)
+                Console.WriteLine("全部音轨播放中切换与内嵌字幕延迟回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--subtitle-switch-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 字幕媒体路径 = Path.GetFullPath(参数(1))
+                检查文件(字幕媒体路径)
+                测试内嵌字幕切换延迟(字幕媒体路径)
+                Console.WriteLine("内嵌字幕切换延迟回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--sup-timeline-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim SUP路径 = Path.GetFullPath(参数(1))
+                检查文件(SUP路径)
+                测试SUP时间轴(SUP路径)
+                Console.WriteLine("SUP 原始 PTS 与跳转后时间轴回归通过。")
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--clip-focus-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试剪辑模式焦点()
                 Console.WriteLine("剪辑模式键盘焦点与出入点保留回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--volume-interaction-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试音量交互()
+                Console.WriteLine("音量滑块、画面滚轮与操作提示合并回归通过。")
                 Return 0
             End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--empty-layer-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -112,8 +151,14 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --vcb-ass-regression <视频> <字幕.ass>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --clip-step-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --clip-focus-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --volume-interaction-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --empty-layer-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --gpu-decode-matrix <视频目录>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --stream-selector-regression <多流媒体>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --external-subtitle-scan-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --track-switch-regression <多音轨媒体>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --subtitle-switch-regression <多字幕媒体>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --sup-timeline-regression <字幕.sup>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --ass-render-benchmark")
                 Return 2
             End If
@@ -147,6 +192,264 @@ Friend Module Program
             Return 1
         End Try
     End Function
+
+    Private Sub 测试SUP时间轴(SUP路径 As String)
+        Dim header(5) As Byte
+        Using stream = New FileStream(SUP路径, FileMode.Open, FileAccess.Read, FileShare.Read)
+            断言(stream.Read(header, 0, header.Length) = header.Length AndAlso
+               header(0) = AscW("P"c) AndAlso header(1) = AscW("G"c),
+               "测试文件不是有效的 PGS SUP 字幕。")
+        End Using
+        Dim pts90k = (CULng(header(2)) << 24) Or (CULng(header(3)) << 16) Or
+                     (CULng(header(4)) << 8) Or header(5)
+        Dim expected = TimeSpan.FromTicks(CLng(pts90k * CULng(TimeSpan.TicksPerSecond) \ 90000UL))
+
+        Using decoder As New SUP字幕解码器(SUP路径)
+            Dim first = 读取首个SUP事件(decoder)
+            断言(first IsNot Nothing AndAlso Math.Abs((first.开始时间 - expected).TotalMilliseconds) <= 2.0,
+               $"SUP 首条事件被错误归零或偏移：文件 PTS {expected:c}，解码结果 {If(first Is Nothing, "无", first.开始时间.ToString("c"))}。")
+            decoder.跳转(TimeSpan.Zero)
+            Dim afterSeek = 读取首个SUP事件(decoder)
+            断言(afterSeek IsNot Nothing AndAlso Math.Abs((afterSeek.开始时间 - expected).TotalMilliseconds) <= 2.0,
+               "SUP 跳转到零点后没有恢复原始时间轴。")
+        End Using
+    End Sub
+
+    Private Function 读取首个SUP事件(decoder As SUP字幕解码器) As SUP字幕事件
+        For attempt = 0 To 255
+            Dim item = decoder.读取下一事件()
+            If item Is Nothing Then Return Nothing
+            If Not item.仍需读取 AndAlso Not item.是清除事件 Then Return item
+        Next
+        Throw New InvalidOperationException("SUP 字幕在限定读取次数内没有产生显示事件。")
+    End Function
+
+    Private Sub 测试流选择器后端(媒体路径 As String)
+        Using 会话 As New 播放器会话(New 播放器配置 With {
+            .解码器 = 解码模式.CPU,
+            .输出窗口句柄 = IntPtr.Zero
+        })
+            会话.打开Async(媒体路径).GetAwaiter().GetResult()
+            Dim 信息 = 会话.当前媒体信息
+            Dim 快照 = 会话.当前快照
+            断言(信息 IsNot Nothing, "没有返回媒体流信息。")
+
+            Dim 视频流 = 信息.流.Where(Function(x) x.类型 = "video" AndAlso Not x.是封面图).ToArray()
+            Dim 音频流 = 信息.流.Where(Function(x) x.类型 = "audio").ToArray()
+            Dim 字幕流 = 信息.流.Where(Function(x) x.类型 = "subtitle").ToArray()
+            断言(视频流.Length > 0 AndAlso 音频流.Length > 1 AndAlso 字幕流.Length > 0,
+               $"测试媒体流数量不足：视频/音频/字幕 {视频流.Length}/{音频流.Length}/{字幕流.Length}。")
+            断言(Not String.IsNullOrWhiteSpace(视频流(0).像素格式), "视频流缺少像素格式。")
+            断言(Not String.IsNullOrWhiteSpace(字幕流(0).语言) AndAlso
+               Not String.IsNullOrWhiteSpace(字幕流(0).标题), "字幕流缺少语言或标题元数据。")
+
+            Dim 目标音频 = 音频流.First(Function(x) x.索引 <> 快照.当前音频流)
+            会话.选择音频流(目标音频.索引)
+            Dim 计时 = Stopwatch.StartNew()
+            Do
+                Application.DoEvents()
+                If 会话.当前快照.当前音频流 = 目标音频.索引 Then Exit Do
+                If 计时.Elapsed > TimeSpan.FromSeconds(5) Then Throw New TimeoutException("切换音频流超时。")
+                Thread.Sleep(5)
+            Loop
+
+            Using 字幕 = 外部字幕自动加载器.加载内嵌字幕(
+                媒体路径, 字幕流(0), CancellationToken.None)
+                断言(字幕.是内嵌 AndAlso 字幕.流索引 = 字幕流(0).索引,
+                   "内嵌字幕轨道没有保留来源流索引。")
+                If 字幕.ASS特效生成器 IsNot Nothing Then
+                    Dim 帧 = 字幕.ASS特效生成器.生成帧(TimeSpan.FromMilliseconds(500), 640, 360)
+                    断言(帧 IsNot Nothing AndAlso 帧.像素BGRA.Length > 0,
+                       "内嵌文字字幕没有生成可见 libass 位图。")
+                End If
+            End Using
+        End Using
+        测试外部字幕扫描顺序()
+    End Sub
+
+    Private Sub 测试外部字幕扫描顺序()
+        Dim 临时目录 = Path.Combine(Path.GetTempPath(), "3FP-subtitle-scan-" & Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(临时目录)
+        Try
+            Dim 媒体路径 = Path.Combine(临时目录, "演示.mkv")
+            File.WriteAllBytes(媒体路径, Array.Empty(Of Byte)())
+            Dim 字幕文件 = {
+                "演示.zh-Hans.srt", "演示.commentary.ass", "演示.sup",
+                "演示.ssa", "演示.en.srt", "演示.srt",
+                "演示2.srt", "其他.ass"}
+            For Each 文件名 In 字幕文件
+                File.WriteAllText(Path.Combine(临时目录, 文件名), String.Empty)
+            Next
+
+            Dim 实际 = 外部字幕自动加载器.扫描同名字幕(媒体路径).
+                Select(Function(x) Path.GetFileName(x.路径)).ToArray()
+            Dim 预期 = {
+                "演示.srt", "演示.en.srt", "演示.zh-Hans.srt",
+                "演示.commentary.ass", "演示.ssa", "演示.sup"}
+            断言(实际.SequenceEqual(预期, StringComparer.OrdinalIgnoreCase),
+               $"外部字幕扫描顺序异常：{String.Join("、", 实际)}。")
+        Finally
+            If Directory.Exists(临时目录) Then Directory.Delete(临时目录, True)
+        End Try
+    End Sub
+
+    Private Sub 测试全部音轨切换(媒体路径 As String)
+        Dim 音轨 As 媒体流信息()
+        Using 探测会话 As New 播放器会话(New 播放器配置 With {
+            .解码器 = 解码模式.CPU, .输出窗口句柄 = IntPtr.Zero})
+            探测会话.打开Async(媒体路径).GetAwaiter().GetResult()
+            音轨 = 探测会话.当前媒体信息.流.Where(Function(x) x.类型 = "audio").ToArray()
+        End Using
+        断言(音轨.Length > 0, "测试媒体不包含音轨。")
+
+        Dim 失败 As New List(Of String)()
+        Using 输出窗口 As New Form With {
+            .ClientSize = New Drawing.Size(640, 360), .ShowInTaskbar = False,
+            .FormBorderStyle = FormBorderStyle.None, .StartPosition = FormStartPosition.Manual,
+            .Location = New Drawing.Point(-32000, -32000)}
+            Dim 输出句柄 = 输出窗口.Handle
+            输出窗口.Show()
+            Application.DoEvents()
+
+            For Each 音频流 In 音轨
+                Dim 错误详情 = String.Empty
+                Using 会话 As New 播放器会话(New 播放器配置 With {
+                    .解码器 = 解码模式.CPU, .输出窗口句柄 = 输出句柄})
+                    AddHandler 会话.错误, Sub(sender, e) 错误详情 = e.详情JSON
+                    会话.设置音量(0.0F, True)
+                    会话.打开Async(媒体路径).GetAwaiter().GetResult()
+                    会话.播放()
+                    Dim 预热 = Stopwatch.StartNew()
+                    Do
+                        Application.DoEvents()
+                        Dim 快照 = 会话.当前快照
+                        If 快照.已解码音频帧数 > 0 OrElse 快照.状态 = 播放状态.失败 Then Exit Do
+                        If 预热.Elapsed >= TimeSpan.FromSeconds(5) Then Exit Do
+                        Thread.Sleep(5)
+                    Loop
+
+                    Dim 切换开始 = Stopwatch.StartNew()
+                    If 会话.当前快照.当前音频流 <> 音频流.索引 Then 会话.选择音频流(音频流.索引)
+                    Dim 已恢复音频 As Boolean
+                    Do
+                        Application.DoEvents()
+                        Dim 快照 = 会话.当前快照
+                        已恢复音频 = 快照.当前音频流 = 音频流.索引 AndAlso
+                            快照.已解码音频帧数 > 0 AndAlso 快照.音频缓冲时长 > TimeSpan.Zero AndAlso
+                            快照.状态 <> 播放状态.失败
+                        If 已恢复音频 OrElse 快照.状态 = 播放状态.失败 Then Exit Do
+                        If 切换开始.Elapsed >= TimeSpan.FromSeconds(8) Then Exit Do
+                        Thread.Sleep(5)
+                    Loop
+
+                    Dim 末快照 = 会话.当前快照
+                    Dim 说明 = $"#{音频流.索引} {音频流.编码} {音频流.采样率} Hz/{音频流.声道数} ch"
+                    If 已恢复音频 Then
+                        Console.WriteLine($"音轨 {说明}：{切换开始.Elapsed.TotalMilliseconds:F0} ms")
+                    Else
+                        Dim 失败说明 = $"{说明}，状态 {末快照.状态}，选中 {末快照.当前音频流}，错误 {错误详情}"
+                        Console.WriteLine($"音轨失败：{失败说明}")
+                        失败.Add(失败说明)
+                    End If
+                End Using
+            Next
+
+            Using 会话 As New 播放器会话(New 播放器配置 With {
+                .解码器 = 解码模式.CPU, .输出窗口句柄 = 输出句柄})
+                Dim 错误详情 = String.Empty
+                AddHandler 会话.错误, Sub(sender, e) 错误详情 = e.详情JSON
+                会话.设置音量(0.0F, True)
+                会话.打开Async(媒体路径).GetAwaiter().GetResult()
+                会话.播放()
+                For Each 音频流 In 音轨
+                    Dim 基线 = 会话.当前快照.已解码音频帧数
+                    Dim 切换开始 = Stopwatch.StartNew()
+                    If 会话.当前快照.当前音频流 <> 音频流.索引 Then 会话.选择音频流(音频流.索引)
+                    Dim 已恢复音频 As Boolean
+                    Do
+                        Application.DoEvents()
+                        Dim 快照 = 会话.当前快照
+                        已恢复音频 = 快照.当前音频流 = 音频流.索引 AndAlso
+                            快照.已解码音频帧数 > 基线 AndAlso 快照.音频缓冲时长 > TimeSpan.Zero AndAlso
+                            快照.状态 <> 播放状态.失败
+                        If 已恢复音频 OrElse 快照.状态 = 播放状态.失败 Then Exit Do
+                        If 切换开始.Elapsed >= TimeSpan.FromSeconds(8) Then Exit Do
+                        Thread.Sleep(5)
+                    Loop
+                    If 已恢复音频 Then
+                        Console.WriteLine($"连续音轨 #{音频流.索引}：{切换开始.Elapsed.TotalMilliseconds:F0} ms")
+                    Else
+                        Dim 快照 = 会话.当前快照
+                        失败.Add($"连续切换 #{音频流.索引} 失败，状态 {快照.状态}，" &
+                               $"选中 {快照.当前音频流}，错误 {错误详情}")
+                        Exit For
+                    End If
+                Next
+
+                If 失败.Count = 0 AndAlso 音轨.Length > 1 Then
+                    Dim 基线 = 会话.当前快照.已解码音频帧数
+                    For Each 音频流 In 音轨
+                        会话.选择音频流(音频流.索引)
+                    Next
+                    Dim 最后音轨 = 音轨.Last().索引
+                    Dim 快速切换 = Stopwatch.StartNew()
+                    Dim 已恢复音频 As Boolean
+                    Do
+                        Application.DoEvents()
+                        Dim 快照 = 会话.当前快照
+                        已恢复音频 = 快照.当前音频流 = 最后音轨 AndAlso
+                            快照.已解码音频帧数 > 基线 AndAlso 快照.音频缓冲时长 > TimeSpan.Zero AndAlso
+                            快照.状态 <> 播放状态.失败
+                        If 已恢复音频 OrElse 快照.状态 = 播放状态.失败 Then Exit Do
+                        If 快速切换.Elapsed >= TimeSpan.FromSeconds(8) Then Exit Do
+                        Thread.Sleep(5)
+                    Loop
+                    If 已恢复音频 Then
+                        Console.WriteLine($"连续音轨快速排队至 #{最后音轨}：{快速切换.Elapsed.TotalMilliseconds:F0} ms")
+                    Else
+                        Dim 快照 = 会话.当前快照
+                        失败.Add($"快速排队切换失败，状态 {快照.状态}，选中 {快照.当前音频流}，错误 {错误详情}")
+                    End If
+                End If
+            End Using
+        End Using
+        断言(失败.Count = 0, $"{失败.Count} 条音轨切换失败：{String.Join(Environment.NewLine, 失败)}")
+    End Sub
+
+    Private Sub 测试内嵌字幕切换延迟(媒体路径 As String)
+        Dim 字幕流 As 媒体流信息()
+        Dim 媒体时长 As TimeSpan
+        Using 会话 As New 播放器会话(New 播放器配置 With {
+            .解码器 = 解码模式.CPU, .输出窗口句柄 = IntPtr.Zero})
+            会话.打开Async(媒体路径).GetAwaiter().GetResult()
+            Dim 信息 = 会话.当前媒体信息
+            字幕流 = 信息.流.Where(Function(x) x.类型 = "subtitle").ToArray()
+            媒体时长 = 信息.时长
+        End Using
+        断言(字幕流.Length > 0, "测试媒体不包含字幕轨道。")
+
+        Dim 测试位置 = If(媒体时长 > TimeSpan.FromMinutes(2),
+                        TimeSpan.FromTicks(CLng(媒体时长.Ticks / 2)), TimeSpan.FromMinutes(1))
+        Dim 待测流 = {字幕流.First(), 字幕流.Last()}.
+            GroupBy(Function(x) x.索引).Select(Function(x) x.First()).ToArray()
+        Dim 区域 = 视频显示区域.计算(1280, 720, 96.0F, 3840, 2160)
+        For Each 流 In 待测流
+            Dim 打开计时 = Stopwatch.StartNew()
+            Using 字幕 = 外部字幕自动加载器.加载内嵌字幕(媒体路径, 流, CancellationToken.None)
+                打开计时.Stop()
+                Dim 生成计时 = Stopwatch.StartNew()
+                Dim 绘制项 As New List(Of SUP字幕绘制项)()
+                字幕.SUP生成器.生成帧(测试位置, 区域, 绘制项)
+                生成计时.Stop()
+                断言(打开计时.Elapsed < TimeSpan.FromSeconds(2),
+                   $"字幕 #{流.索引} 打开耗时 {打开计时.Elapsed.TotalMilliseconds:F0} ms。")
+                断言(生成计时.Elapsed < TimeSpan.FromSeconds(2),
+                   $"字幕 #{流.索引} 定位耗时 {生成计时.Elapsed.TotalMilliseconds:F0} ms。")
+                Console.WriteLine($"字幕 #{流.索引} {流.编码}：打开 {打开计时.Elapsed.TotalMilliseconds:F0} ms，" &
+                                  $"定位 {测试位置:c} 用时 {生成计时.Elapsed.TotalMilliseconds:F0} ms")
+            End Using
+        Next
+    End Sub
 
     Private Sub 测试空图层与真实呈现调度(视频路径 As String)
         Using 输出窗口 As New Form With {
@@ -316,6 +619,52 @@ Friend Module Program
                 {窗口, New 播放器媒体事件参数("other.mp4", Nothing, Nothing, False)})
             断言(入点属性.GetValue(时间轴) Is Nothing AndAlso 出点属性.GetValue(时间轴) Is Nothing,
                "真正打开另一媒体时没有清除出入点。")
+            窗口.Close()
+        End Using
+    End Sub
+
+    Private Sub 测试音量交互()
+        Using 窗口 As New Form1 With {.ShowInTaskbar = False, .Opacity = 0}
+            窗口.Show()
+            Application.DoEvents()
+
+            Dim 标志 = BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic
+            Dim 窗口类型 = GetType(Form1)
+            Dim 画面 = DirectCast(窗口类型.GetField("画面控件", 标志)?.GetValue(窗口), 播放器画面控件)
+            Dim 控制器 = DirectCast(窗口类型.GetField("播放控制器", 标志)?.GetValue(窗口), 播放器控制器)
+            Dim 信息呈现器 = DirectCast(窗口类型.GetField("信息图层呈现器", 标志)?.GetValue(窗口), 播放器信息图层呈现器)
+            Dim 音量条 = 窗口.Controls.Find("ETB_音量条", True).FirstOrDefault()
+            断言(画面 IsNot Nothing AndAlso 控制器 IsNot Nothing AndAlso 信息呈现器 IsNot Nothing AndAlso 音量条 IsNot Nothing,
+               "无法取得音量交互测试所需的窗口成员。")
+            Dim 音量值属性 = 音量条.GetType().GetProperty("Value", 标志)
+            断言(音量值属性 IsNot Nothing, "音量控件没有可用的 Value 属性。")
+
+            For Each 百分比 In {40, 35, 30, 25}
+                音量值属性.SetValue(音量条, CDbl(百分比))
+            Next
+            Application.DoEvents()
+            断言(Math.Abs(控制器.音量 - 0.25F) < 0.0001F, "滑块音量没有同步到播放器控制器。")
+
+            Dim 消息字段 = 信息呈现器.GetType().GetField("操作消息列表", 标志)
+            Dim 消息 = TryCast(消息字段?.GetValue(信息呈现器), System.Collections.IList)
+            断言(消息 IsNot Nothing AndAlso 消息.Count = 1, "连续调整音量生成了重复操作提示。")
+            Dim 文本字段 = 消息(0).GetType().GetField("文本", 标志)
+            断言(String.Equals(CStr(文本字段?.GetValue(消息(0))), "音量 25%", StringComparison.Ordinal),
+               "连续调整音量后没有保留最新提示。")
+
+            Dim 滚轮处理 = GetType(播放器画面控件).GetMethod("OnMouseWheel", 标志)
+            断言(滚轮处理 IsNot Nothing, "无法取得画面滚轮处理入口。")
+            滚轮处理.Invoke(画面, {New MouseEventArgs(MouseButtons.None, 0, 0, 0, 60)})
+            断言(CInt(音量值属性.GetValue(音量条)) = 25, "不足一格的高精度滚轮输入被提前应用。")
+            滚轮处理.Invoke(画面, {New MouseEventArgs(MouseButtons.None, 0, 0, 0, 60)})
+            Application.DoEvents()
+            断言(CInt(音量值属性.GetValue(音量条)) = 30 AndAlso Math.Abs(控制器.音量 - 0.3F) < 0.0001F,
+               "画面滚轮没有按每格 5% 调整音量。")
+            断言(消息.Count = 1 AndAlso String.Equals(CStr(文本字段.GetValue(消息(0))), "音量 30%", StringComparison.Ordinal),
+               "滚轮调整没有复用并更新音量提示。")
+            信息呈现器.显示操作信息("重复提示")
+            信息呈现器.显示操作信息("重复提示")
+            断言(消息.Count = 2, "完全相同的操作提示没有自动合并。")
             窗口.Close()
         End Using
     End Sub

@@ -23,6 +23,11 @@ Public Enum 播放状态 As UInteger
     已关闭 = 7
 End Enum
 
+Public Enum WASAPI共享模式
+    共享
+    独占
+End Enum
+
 Public Enum 播放器事件类型 As UInteger
     状态变化 = 1
     打开完成 = 2
@@ -91,6 +96,9 @@ Public NotInheritable Class 播放器快照
         设备锁等待时长 = TimeSpan.FromTicks(CLng(Math.Min(值.设备锁等待100纳秒, CULng(Long.MaxValue))))
         硬件传输时长 = TimeSpan.FromTicks(CLng(Math.Min(值.硬件传输100纳秒, CULng(Long.MaxValue))))
         软件转换时长 = TimeSpan.FromTicks(CLng(Math.Min(值.软件转换100纳秒, CULng(Long.MaxValue))))
+        视频实时比特率 = 值.视频实时比特率
+        音频实时比特率 = 值.音频实时比特率
+        视频输出位深度 = CInt(值.视频输出位深度)
     End Sub
 
     Public ReadOnly Property 状态 As 播放状态
@@ -130,6 +138,9 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 设备锁等待时长 As TimeSpan
     Public ReadOnly Property 硬件传输时长 As TimeSpan
     Public ReadOnly Property 软件转换时长 As TimeSpan
+    Public ReadOnly Property 视频实时比特率 As ULong
+    Public ReadOnly Property 音频实时比特率 As ULong
+    Public ReadOnly Property 视频输出位深度 As Integer
 End Class
 
 Public Enum 定时文字对齐
@@ -282,8 +293,24 @@ End Class
 Public NotInheritable Class 媒体信息
     <JsonPropertyName("format")>
     Public Property 格式 As String = String.Empty
+    <JsonPropertyName("formatLongName")>
+    Public Property 格式全名 As String = String.Empty
+    <JsonPropertyName("formatCodecId")>
+    Public Property 格式编码ID As String = String.Empty
+    <JsonPropertyName("compatibleBrands")>
+    Public Property 兼容品牌 As String = String.Empty
     <JsonPropertyName("duration100ns")>
     Public Property 时长100纳秒 As Long
+    <JsonPropertyName("startTime100ns")>
+    Public Property 开始时间100纳秒 As Long
+    <JsonPropertyName("bitRate")>
+    Public Property 比特率 As Long
+    <JsonPropertyName("fileSize")>
+    Public Property 文件大小 As Long
+    <JsonPropertyName("probeScore")>
+    Public Property 探测可信度 As Integer
+    <JsonPropertyName("metadata")>
+    Public Property 元数据 As Dictionary(Of String, String) = New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
     <JsonPropertyName("streams")>
     Public Property 流 As List(Of 媒体流信息) = New List(Of 媒体流信息)()
     <JsonIgnore>
@@ -297,14 +324,44 @@ End Class
 Public NotInheritable Class 媒体流信息
     <JsonPropertyName("index")>
     Public Property 索引 As Integer
+    <JsonPropertyName("streamId")>
+    Public Property 流ID As Integer
     <JsonPropertyName("type")>
     Public Property 类型 As String = String.Empty
     <JsonPropertyName("codec")>
     Public Property 编码 As String = String.Empty
+    <JsonPropertyName("codecLongName")>
+    Public Property 编码全名 As String = String.Empty
+    <JsonPropertyName("codecTag")>
+    Public Property 编码标签 As String = String.Empty
     <JsonPropertyName("timeBaseNumerator")>
     Public Property 时间基分子 As Integer
     <JsonPropertyName("timeBaseDenominator")>
     Public Property 时间基分母 As Integer
+    <JsonPropertyName("bitRate")>
+    Public Property 比特率 As Long
+    <JsonPropertyName("streamSize")>
+    Public Property 流大小 As Long
+    <JsonPropertyName("lossless")>
+    Public Property 无损 As Boolean
+    <JsonPropertyName("startTime100ns")>
+    Public Property 开始时间100纳秒 As Long
+    <JsonPropertyName("duration100ns")>
+    Public Property 时长100纳秒 As Long
+    <JsonPropertyName("frames")>
+    Public Property 帧数 As Long
+    <JsonPropertyName("extradataSize")>
+    Public Property 编码附加数据字节数 As Integer
+    <JsonPropertyName("default")>
+    Public Property 是默认流 As Boolean
+    <JsonPropertyName("forced")>
+    Public Property 是强制流 As Boolean
+    <JsonPropertyName("disposition")>
+    Public Property 特性 As String = String.Empty
+    <JsonPropertyName("metadata")>
+    Public Property 元数据 As Dictionary(Of String, String) = New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+    <JsonPropertyName("profile")>
+    Public Property 配置档次 As String = String.Empty
     <JsonPropertyName("width")>
     Public Property 宽度 As Integer
     <JsonPropertyName("height")>
@@ -313,20 +370,114 @@ Public NotInheritable Class 媒体流信息
     Public Property 平均帧率分子 As Integer
     <JsonPropertyName("averageFrameRateDenominator")>
     Public Property 平均帧率分母 As Integer
+    <JsonPropertyName("nominalFrameRateNumerator")>
+    Public Property 标称帧率分子 As Integer
+    <JsonPropertyName("nominalFrameRateDenominator")>
+    Public Property 标称帧率分母 As Integer
+    <JsonPropertyName("frameRateMode")>
+    Public Property 帧率模式 As String = String.Empty
+    <JsonPropertyName("sampleAspectNumerator")>
+    Public Property 采样宽高比分子 As Integer
+    <JsonPropertyName("sampleAspectDenominator")>
+    Public Property 采样宽高比分母 As Integer
+    <JsonPropertyName("displayAspectNumerator")>
+    Public Property 显示宽高比分子 As Integer
+    <JsonPropertyName("displayAspectDenominator")>
+    Public Property 显示宽高比分母 As Integer
     <JsonIgnore>
     Public ReadOnly Property 平均帧率 As Double
         Get
             Return If(平均帧率分母 > 0, CDbl(平均帧率分子) / 平均帧率分母, 0.0R)
         End Get
     End Property
+    <JsonIgnore>
+    Public ReadOnly Property 标称帧率 As Double
+        Get
+            Return If(标称帧率分母 > 0, CDbl(标称帧率分子) / 标称帧率分母, 0.0R)
+        End Get
+    End Property
     <JsonPropertyName("hdr")>
     Public Property 是HDR As Boolean
     <JsonPropertyName("attachedPicture")>
     Public Property 是封面图 As Boolean
+    <JsonPropertyName("pixelFormat")>
+    Public Property 像素格式 As String = String.Empty
+    <JsonPropertyName("colorModel")>
+    Public Property 色彩模型 As String = String.Empty
+    <JsonPropertyName("chromaSubsampling")>
+    Public Property 色度抽样 As String = String.Empty
+    <JsonPropertyName("bitDepth")>
+    Public Property 位深度 As Integer
+    <JsonPropertyName("decoderPixelFormat")>
+    Public Property 解码输出像素格式 As String = String.Empty
+    <JsonPropertyName("decoderSurfaceFormat")>
+    Public Property 解码表面像素格式 As String = String.Empty
+    <JsonPropertyName("decoderBitDepth")>
+    Public Property 解码输出位深度 As Integer
+    <JsonPropertyName("hardwareAcceleration")>
+    Public Property 硬件加速 As String = String.Empty
+    <JsonPropertyName("colorRange")>
+    Public Property 色彩范围 As Integer
+    <JsonPropertyName("colorSpace")>
+    Public Property 色彩空间 As Integer
+    <JsonPropertyName("colorPrimaries")>
+    Public Property 色彩原色 As Integer
+    <JsonPropertyName("colorTransfer")>
+    Public Property 色彩传递 As Integer
+    <JsonPropertyName("chromaLocation")>
+    Public Property 色度位置 As Integer
+    <JsonPropertyName("fieldOrder")>
+    Public Property 场序 As Integer
+    <JsonPropertyName("level")>
+    Public Property 编码级别 As Integer
+    <JsonPropertyName("hdrFormat")>
+    Public Property HDR格式 As String = String.Empty
+    <JsonPropertyName("masteringPrimaries")>
+    Public Property 主显示器色域 As String = String.Empty
+    <JsonPropertyName("masteringMinLuminance")>
+    Public Property 主显示器最小亮度 As Double
+    <JsonPropertyName("masteringMaxLuminance")>
+    Public Property 主显示器最大亮度 As Double
+    <JsonPropertyName("maxCLL")>
+    Public Property 最大内容光照 As Integer
+    <JsonPropertyName("maxFALL")>
+    Public Property 最大帧平均光照 As Integer
+    <JsonPropertyName("codecConfigurationBox")>
+    Public Property 编码配置盒 As String = String.Empty
     <JsonPropertyName("sampleRate")>
     Public Property 采样率 As Integer
     <JsonPropertyName("channels")>
     Public Property 声道数 As Integer
+    <JsonPropertyName("channelLayout")>
+    Public Property 声道布局 As String = String.Empty
+    <JsonPropertyName("sampleFormat")>
+    Public Property 采样格式 As String = String.Empty
+    <JsonPropertyName("bitsPerCodedSample")>
+    Public Property 编码采样位数 As Integer
+    <JsonPropertyName("rawSampleBits")>
+    Public Property 原始采样位数 As Integer
+    <JsonPropertyName("compressionMode")>
+    Public Property 压缩模式 As String = String.Empty
+    <JsonPropertyName("md5")>
+    Public Property 未压缩内容MD5 As String = String.Empty
+    <JsonPropertyName("frameSize")>
+    Public Property 每帧采样数 As Integer
+    <JsonPropertyName("initialPadding")>
+    Public Property 起始填充采样数 As Integer
+    <JsonPropertyName("trailingPadding")>
+    Public Property 末尾填充采样数 As Integer
+    <JsonPropertyName("seekPreroll")>
+    Public Property 跳转预卷采样数 As Integer
+    <JsonPropertyName("outputSampleRate")>
+    Public Property 输出采样率 As Integer
+    <JsonPropertyName("outputChannels")>
+    Public Property 输出声道数 As Integer
+    <JsonPropertyName("outputBitsPerSample")>
+    Public Property 输出采样位数 As Integer
+    <JsonPropertyName("outputValidBitsPerSample")>
+    Public Property 输出有效采样位数 As Integer
+    <JsonPropertyName("outputFloat")>
+    Public Property 输出浮点 As Boolean
     <JsonPropertyName("language")>
     Public Property 语言 As String = String.Empty
     <JsonPropertyName("title")>

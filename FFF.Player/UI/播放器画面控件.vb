@@ -34,10 +34,12 @@ Friend NotInheritable Class 播放器画面控件
         AddHandler 视频输出窗口.DragEnter, AddressOf 文件_DragEnter
         AddHandler 视频输出窗口.DragDrop, AddressOf 文件_DragDrop
         AddHandler 视频输出窗口.MouseDown, AddressOf 视频输出窗口_MouseDown
+        AddHandler 视频输出窗口.MouseWheel, AddressOf 视频输出窗口_MouseWheel
     End Sub
 
     Friend Event 输出窗口创建 As EventHandler
     Friend Event 文件拖入 As EventHandler(Of 播放器文件拖入事件参数)
+    Friend Event 音量滚轮 As EventHandler(Of MouseEventArgs)
 
     <Browsable(False)>
     Friend ReadOnly Property 输出窗口句柄 As IntPtr
@@ -58,6 +60,15 @@ Friend NotInheritable Class 播放器画面控件
             宿主窗口.WindowState <> FormWindowState.Normal Then Return
         ReleaseCapture()
         SendMessage(宿主窗口.Handle, WM_NCLBUTTONDOWN, CType(HTCAPTION, IntPtr), IntPtr.Zero)
+    End Sub
+
+    Protected Overrides Sub OnMouseWheel(e As MouseEventArgs)
+        MyBase.OnMouseWheel(e)
+        RaiseEvent 音量滚轮(Me, e)
+    End Sub
+
+    Private Sub 视频输出窗口_MouseWheel(sender As Object, e As MouseEventArgs)
+        RaiseEvent 音量滚轮(Me, e)
     End Sub
 
     Private Sub 文件_DragEnter(sender As Object, e As DragEventArgs)

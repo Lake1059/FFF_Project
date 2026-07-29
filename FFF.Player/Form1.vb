@@ -11,12 +11,16 @@ Public Class Form1
     Private 窗口布局控制器 As 播放器窗口布局控制器
     Private 字幕图层呈现器 As 播放器定时文字图层呈现器
     Private 弹幕图层呈现器 As 播放器定时文字图层呈现器
+    Private 信息图层呈现器 As 播放器信息图层呈现器
     Private 剪辑区间进度条 As 剪辑区间进度条控件
+    Private 流选择器 As 播放器流选择器
     Private 按钮图标 As 播放器按钮图标资源
+    Private 当前弹幕路径 As String = String.Empty
     Private 正在关闭 As Boolean
     Private 剪辑区间模式已启用 As Boolean
 
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Outline
         ThisIsYourWindow1.Attach(Me)
         KeyPreview = True
         MB_剪辑区间模式.TabStop = False
@@ -35,6 +39,8 @@ Public Class Form1
         校正剪辑按钮宽度()
 
         播放控制器 = New 播放器控制器(Function() 画面控件.输出窗口句柄, SynchronizationContext.Current)
+        更新WASAPI按钮()
+        流选择器 = New 播放器流选择器(Me, MP_DX视频容器, MCB_流选择器, 播放控制器)
         界面呈现器 = 创建界面呈现器()
         字幕图层呈现器 = New 播放器定时文字图层呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
@@ -44,6 +50,12 @@ Public Class Form1
             AddressOf 播放控制器.安全读取快照, Function() Nothing,
             AddressOf 播放控制器.提交弹幕图层, Function() 播放控制器.当前弹幕,
             Nothing, 定时文字图层内容.仅弹幕)
+        信息图层呈现器 = New 播放器信息图层呈现器(画面控件,
+            AddressOf 播放控制器.安全读取快照, AddressOf 播放控制器.安全读取媒体信息,
+            Function() 播放控制器.当前媒体路径, Function() 播放控制器.当前字幕,
+            Function() 播放控制器.当前弹幕, AddressOf 播放控制器.读取定时文字状态,
+            AddressOf 播放控制器.读取弹幕状态, Function() 当前弹幕路径,
+            Function() 播放控制器.WASAPI模式, AddressOf 播放控制器.提交播放器信息图层)
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
 
@@ -52,6 +64,7 @@ Public Class Form1
         AddHandler 播放控制器.播放错误, AddressOf 播放控制器_播放错误
         AddHandler 播放控制器.HDR输出状态已确认, AddressOf 播放控制器_HDR输出状态已确认
         AddHandler 播放控制器.外部字幕已加载, AddressOf 播放控制器_外部字幕已加载
+        AddHandler 播放控制器.字幕选择已变化, AddressOf 播放控制器_字幕选择已变化
         AddHandler 播放控制器.外部弹幕已加载, AddressOf 播放控制器_外部弹幕已加载
         AddHandler 界面呈现器.请求跳转到关键帧, AddressOf 界面呈现器_请求跳转到关键帧
         AddHandler 界面呈现器.音量已变更, AddressOf 界面呈现器_音量已变更
@@ -96,8 +109,10 @@ Public Class Form1
         正在关闭 = True
         窗口布局控制器?.释放()
         界面呈现器?.释放()
+        信息图层呈现器?.释放()
         弹幕图层呈现器?.释放()
         字幕图层呈现器?.释放()
+        流选择器?.Dispose()
         播放控制器?.释放()
         播放器按钮图标资源.清除(MB_播放和暂停, MB_停止, MB_倒退或上一个, MB_快进或下一个,
             MB_打开文件, MB_软件设置, MB_播放列表, MB_剪辑区间模式, MB_查看当前媒体信息, MB_选择流)
@@ -145,13 +160,18 @@ Public Class Form1
     End Sub
 
     Private Sub 播放控制器_状态已变化(sender As Object, e As EventArgs)
-        If Not 正在关闭 Then 界面呈现器.刷新()
+        If Not 正在关闭 Then
+            界面呈现器.刷新()
+            更新WASAPI按钮()
+        End If
     End Sub
 
     Private Sub 播放控制器_媒体已打开(sender As Object, e As 播放器媒体事件参数)
         If 正在关闭 Then Return
+        当前弹幕路径 = String.Empty
         字幕图层呈现器?.使图层失效()
         弹幕图层呈现器?.使图层失效()
+        信息图层呈现器?.使内容失效()
         If Not e.保留剪辑区间 Then 剪辑区间进度条?.清除媒体()
         Text = Path.GetFileName(e.文件路径)
         界面呈现器.更新媒体信息(e.媒体信息, e.快照)
@@ -165,19 +185,71 @@ Public Class Form1
     End Sub
 
     Private Sub 播放控制器_HDR输出状态已确认(sender As Object, e As 播放器HDR状态事件参数)
-        If Not 正在关闭 Then LakeUI.ExFloatingTip(MB_HDR模式, e.说明)
+        If Not 正在关闭 Then 信息图层呈现器?.显示操作信息(e.说明, &HFF69DF8BUI)
     End Sub
 
     Private Sub 播放控制器_外部字幕已加载(sender As Object, e As 播放器字幕事件参数)
         If 正在关闭 Then Return
         字幕图层呈现器?.使图层失效()
-        LakeUI.ExFloatingTip(MB_查看当前媒体信息, $"已加载 {e.格式} 字幕")
+        信息图层呈现器?.显示操作信息($"已加载 {e.格式.ToString().ToUpperInvariant()} 字幕 · {Path.GetFileName(e.路径)}", &HFF55E7EAUI)
+        信息图层呈现器?.使内容失效()
+    End Sub
+
+    Private Sub 播放控制器_字幕选择已变化(sender As Object, e As EventArgs)
+        If Not 正在关闭 Then
+            字幕图层呈现器?.使图层失效()
+            信息图层呈现器?.使内容失效()
+        End If
+    End Sub
+
+    Private Sub MB_选择流_Click(sender As Object, e As EventArgs) Handles MB_选择流.Click
+        If Not 正在关闭 Then 流选择器?.显示()
+    End Sub
+
+    Private Sub MB_查看当前媒体信息_Click(sender As Object, e As EventArgs) Handles MB_查看当前媒体信息.Click
+        If 正在关闭 Then Return
+        显示媒体信息窗口()
+    End Sub
+
+    Private Sub 显示媒体信息窗口()
+        Dim 窗口 As New Form媒体信息(
+            AddressOf 播放控制器.安全读取媒体信息,
+            AddressOf 播放控制器.安全读取快照,
+            AddressOf 播放控制器.读取定时文字状态,
+            AddressOf 播放控制器.读取弹幕状态,
+            Function() 播放控制器.当前字幕,
+            Function() 播放控制器.当前弹幕,
+            Function() 播放控制器.WASAPI模式,
+            Function() 画面控件.ClientSize)
+        窗口.Location = 窗口.居中于(Bounds)
+        窗口.Show(Me)
+    End Sub
+
+    Private Sub 切换媒体信息层()
+        Dim 可见 = 信息图层呈现器 IsNot Nothing AndAlso 信息图层呈现器.切换调试信息()
+        MB_查看当前媒体信息.BackColor1 = If(可见, Color.FromArgb(40, 220, 220, 220), Color.Transparent)
+        If 画面控件 IsNot Nothing AndAlso 画面控件.CanFocus Then 画面控件.Focus()
+    End Sub
+
+    Private Sub MB_当前声道数显示_Click(sender As Object, e As EventArgs) Handles MB_当前声道数显示.Click
+        If 正在关闭 OrElse Not 播放控制器.是否有媒体 Then Return
+        Dim 原模式 = 播放控制器.WASAPI模式
+        播放控制器.切换WASAPI模式()
+        信息图层呈现器?.显示操作信息(If(原模式 = WASAPI共享模式.共享,
+            "正在切换到 WASAPI 独占模式", "正在切换到 WASAPI 共享模式"), &HFFFFA85AUI)
+    End Sub
+
+    Private Sub 更新WASAPI按钮()
+        If 播放控制器 Is Nothing Then Return
+        MB_当前声道数显示.ForeColor = If(播放控制器.WASAPI模式 = WASAPI共享模式.独占, Color.IndianRed, Color.Silver)
     End Sub
 
     Private Sub 播放控制器_外部弹幕已加载(sender As Object, e As 播放器弹幕事件参数)
         If 正在关闭 Then Return
+        当前弹幕路径 = e.路径
         弹幕图层呈现器?.使图层失效()
-        LakeUI.ExFloatingTip(MB_查看当前媒体信息, $"已加载 {e.数量} 条弹幕")
+        信息图层呈现器?.显示操作信息($"已加载 {e.数量:N0} 条弹幕 · {Path.GetFileName(e.路径)}", &HFFFFA85AUI)
+        信息图层呈现器?.使内容失效()
     End Sub
 
     Private Sub 界面呈现器_请求跳转到关键帧(sender As Object, e As 播放器跳转请求事件参数)
@@ -186,6 +258,7 @@ Public Class Form1
 
     Private Sub 界面呈现器_音量已变更(sender As Object, e As 播放器音量事件参数)
         播放控制器.设置音量(e.音量)
+        信息图层呈现器?.显示操作信息($"音量 {界面呈现器.音量百分比}%", &HFFF0D35DUI, "音量")
     End Sub
 
     Private Sub MB_播放和暂停_Click(sender As Object, e As EventArgs) Handles MB_播放和暂停.Click
@@ -209,7 +282,7 @@ Public Class Form1
 
     Private Sub MB_软件解码或硬件解码_Click(sender As Object, e As EventArgs) Handles MB_软件解码或硬件解码.Click
         Dim 模式 = 播放控制器.切换解码器()
-        If Not String.IsNullOrEmpty(模式) Then LakeUI.ExFloatingTip(MB_软件解码或硬件解码, $"{模式} 解码")
+        If Not String.IsNullOrEmpty(模式) Then 信息图层呈现器?.显示操作信息($"{模式} 解码", &HFFFF62B0UI)
     End Sub
 
     Private Sub MB_HDR模式_Click(sender As Object, e As EventArgs) Handles MB_HDR模式.Click
@@ -364,6 +437,10 @@ Public Class Form1
     End Sub
 
     Protected Overrides Function ProcessDialogKey(keyData As Keys) As Boolean
+        If keyData = Keys.Tab AndAlso Not 正在关闭 Then
+            切换媒体信息层()
+            Return True
+        End If
         If 处理方向键快捷键(keyData) Then Return True
         Return MyBase.ProcessDialogKey(keyData)
     End Function
@@ -380,7 +457,8 @@ Public Class Form1
                 MB_停止_Click(MB_停止, EventArgs.Empty)
             Case Keys.M
                 播放控制器.切换静音()
-                LakeUI.ExFloatingTip(ETB_音量条, If(播放控制器.静音, "已静音", $"音量 {界面呈现器.音量百分比}%"))
+                信息图层呈现器?.显示操作信息(If(播放控制器.静音,
+                    "已静音", $"音量 {界面呈现器.音量百分比}%"), &HFFF0D35DUI, "音量")
             Case Else
                 Return MyBase.ProcessCmdKey(msg, keyData)
         End Select
@@ -412,14 +490,11 @@ Public Class Form1
             Case Keys.Up, Keys.Down
                 If 修饰键 <> Keys.None Then Return False
                 Dim 增量 = If(按键 = Keys.Up, 5, -5)
-                显示音量提示(界面呈现器.调整音量(增量))
+                界面呈现器.调整音量(增量)
             Case Else
                 Return False
         End Select
         Return True
     End Function
 
-    Private Sub 显示音量提示(百分比 As Integer)
-        LakeUI.ExFloatingTip(ETB_音量条, $"音量 {百分比}%")
-    End Sub
 End Class

@@ -29,7 +29,7 @@ Public NotInheritable Class 播放器会话
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
         配置.验证()
-        If 播放器原生接口.FFF3FP_GetApiVersion() <> 4UI Then Throw New InvalidOperationException("FFF.Native 的 3FP API 版本不兼容。")
+        If 播放器原生接口.FFF3FP_GetApiVersion() <> 5UI Then Throw New InvalidOperationException("FFF.Native 的 3FP API 版本不兼容。")
         同步上下文 = 配置.事件同步上下文
         Dim 状态 = New 回调状态()
         Dim 回调句柄 = GCHandle.Alloc(状态)
@@ -37,7 +37,7 @@ Public NotInheritable Class 播放器会话
         Try
             If Not String.IsNullOrEmpty(配置.音频端点标识) Then 端点指针 = Marshal.StringToCoTaskMemUTF8(配置.音频端点标识)
             Dim 原生配置 As New 原生播放器配置 With {
-                .大小 = CUInt(Marshal.SizeOf(Of 原生播放器配置)()), .版本 = 4UI,
+                .大小 = CUInt(Marshal.SizeOf(Of 原生播放器配置)()), .版本 = 5UI,
                 .输出窗口 = 配置.输出窗口句柄, .解码器 = CUInt(配置.解码器),
                 .色彩模式 = CUInt(配置.色彩模式), .SDR峰值 = 配置.SDR峰值尼特,
                 .HDR峰值 = 配置.HDR峰值尼特, .SDR纸白 = 配置.SDR纸白尼特,
@@ -178,6 +178,9 @@ Public NotInheritable Class 播放器会话
     Public Sub 设置音频端点(端点标识 As String)
         调用路径(AddressOf 播放器原生接口.FFF3FP_SetAudioEndpoint, If(端点标识, String.Empty))
     End Sub
+    Public Sub 设置WASAPI独占模式(独占 As Boolean)
+        检查结果(播放器原生接口.FFF3FP_SetAudioExclusiveMode(取得句柄(), If(独占, 1UI, 0UI)))
+    End Sub
     Public Sub 设置音量(音量 As Single, Optional 静音 As Boolean = False)
         If Not Single.IsFinite(音量) OrElse 音量 < 0 OrElse 音量 > 1 Then Throw New ArgumentOutOfRangeException(NameOf(音量))
         检查结果(播放器原生接口.FFF3FP_SetVolume(取得句柄(), 音量, If(静音, 1UI, 0UI)))
@@ -191,6 +194,11 @@ Public NotInheritable Class 播放器会话
     Public Sub 设置弹幕图层(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令),
                          序号 As ULong, 目标帧率 As Single)
         设置定时文字图层核心(画布大小, 命令, 序号, 目标帧率, 原生定时文字图层槽位.弹幕)
+    End Sub
+
+    Public Sub 设置播放器信息图层(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令),
+                              序号 As ULong, 目标帧率 As Single)
+        设置定时文字图层核心(画布大小, 命令, 序号, 目标帧率, 原生定时文字图层槽位.播放器信息)
     End Sub
 
     Private Sub 设置定时文字图层核心(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令),
@@ -299,7 +307,7 @@ Public NotInheritable Class 播放器会话
 
     Public ReadOnly Property 当前快照 As 播放器快照
         Get
-            Dim 值 As New 原生播放器快照 With {.大小 = CUInt(Marshal.SizeOf(Of 原生播放器快照)()), .版本 = 4UI}
+            Dim 值 As New 原生播放器快照 With {.大小 = CUInt(Marshal.SizeOf(Of 原生播放器快照)()), .版本 = 5UI}
             检查结果(播放器原生接口.FFF3FP_GetSnapshot(取得句柄(), 值))
             Return New 播放器快照(值)
         End Get

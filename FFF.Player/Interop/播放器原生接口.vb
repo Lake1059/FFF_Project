@@ -71,6 +71,9 @@ Friend Structure 原生播放器快照
     Public 设备锁等待100纳秒 As ULong
     Public 硬件传输100纳秒 As ULong
     Public 软件转换100纳秒 As ULong
+    Public 视频实时比特率 As ULong
+    Public 音频实时比特率 As ULong
+    Public 视频输出位深度 As UInteger
 End Structure
 
 <Flags>
@@ -79,6 +82,7 @@ Friend Enum 原生位图字幕标志 As UInteger
     清除 = 1
     流结束 = 2
     强制 = 4
+    仍需读取 = 8
 End Enum
 
 <StructLayout(LayoutKind.Sequential)>
@@ -123,6 +127,7 @@ End Enum
 Friend Enum 原生定时文字图层槽位 As UInteger
     字幕 = 0
     弹幕 = 1
+    播放器信息 = 2
 End Enum
 
 <StructLayout(LayoutKind.Sequential)>
@@ -291,6 +296,9 @@ Friend Module 播放器原生接口
     Friend Function FFF3FP_SetAudioEndpoint(播放器 As 播放器原生句柄, 端点UTF8 As IntPtr) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetAudioExclusiveMode(播放器 As 播放器原生句柄, 独占 As UInteger) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetVolume(播放器 As 播放器原生句柄, 音量 As Single, 静音 As UInteger) As 原生播放器结果
     End Function
 
@@ -335,7 +343,8 @@ Friend Module 播放器原生接口
     Friend Sub FFF3FP_DestroyBitmapSubtitle(解码器 As IntPtr)
     End Sub
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
-    Friend Function FFF3FP_OpenAssSubtitle(路径UTF8 As IntPtr, 字体目录UTF8 As IntPtr, ByRef 渲染器 As IntPtr) As 原生播放器结果
+    Friend Function FFF3FP_OpenAssSubtitle(路径UTF8 As IntPtr, 字体目录UTF8 As IntPtr,
+                                            流索引 As Integer, ByRef 渲染器 As IntPtr) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_RenderAssSubtitle(渲染器 As ASS字幕原生句柄, 位置100纳秒 As Long,

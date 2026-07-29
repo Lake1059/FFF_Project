@@ -21,7 +21,7 @@ struct SwrContext;
 
 class PlayerWasapiRenderer final {
 public:
-    explicit PlayerWasapiRenderer(std::wstring endpointId);
+    explicit PlayerWasapiRenderer(std::wstring endpointId, bool exclusive = false);
     ~PlayerWasapiRenderer();
 
     FFFResult Start() noexcept;
@@ -38,6 +38,11 @@ public:
     std::uint64_t DiscontinuityCount() const noexcept;
     std::uint64_t InsertedSilenceFrames() const noexcept;
     std::uint64_t DroppedOverlapFrames() const noexcept;
+    std::uint32_t OutputSampleRate() const noexcept;
+    std::uint16_t OutputChannels() const noexcept;
+    std::uint16_t OutputBitsPerSample() const noexcept;
+    std::uint16_t OutputValidBitsPerSample() const noexcept;
+    bool OutputIsFloat() const noexcept;
     std::string LastError() const;
 
 private:
@@ -51,6 +56,7 @@ private:
     void SetError(std::string message) noexcept;
 
     std::wstring endpointId_;
+    bool exclusive_;
     HANDLE stopEvent_;
     HANDLE sampleEvent_;
     std::thread thread_;
@@ -73,6 +79,7 @@ private:
     std::uint16_t outputChannels_;
     std::uint16_t outputBlockAlign_;
     std::uint16_t outputBitsPerSample_;
+    std::uint16_t outputValidBitsPerSample_;
     std::uint32_t outputChannelMask_;
     bool outputFloat_;
     std::atomic<float> volume_;

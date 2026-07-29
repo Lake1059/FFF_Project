@@ -21,11 +21,16 @@ Public NotInheritable Class 播放器控制器
     Private 会话操作取消 As CancellationTokenSource
     Private 字幕加载取消 As CancellationTokenSource
     Private 弹幕加载取消 As CancellationTokenSource
-    Private 当前外部字幕 As 外部字幕轨道
+    Private 当前字幕轨道 As 外部字幕轨道
+    Private 已导入外部字幕 As 外部字幕轨道
+    Private 外部字幕候选快照 As 外部字幕候选() = Array.Empty(Of 外部字幕候选)()
+    Private 当前内嵌字幕 As 外部字幕轨道
+    Private 当前字幕来源索引 As Integer = -2
     Private 当前弹幕资料库 As 弹幕资料库
     Private 当前文件路径 As String = String.Empty
     Private 当前解码器 As 解码模式 = 解码模式.CPU
     Private 当前色彩输出 As 色彩输出模式 = 色彩输出模式.映射到SDR
+    Private 当前WASAPI模式 As WASAPI共享模式 = WASAPI共享模式.共享
     Private 当前音量 As Single = 1.0F
     Private 已静音 As Boolean
     Private 正在切换会话 As Boolean
@@ -42,6 +47,7 @@ Public NotInheritable Class 播放器控制器
     Public Event 播放错误 As EventHandler(Of 播放器错误事件参数)
     Public Event HDR输出状态已确认 As EventHandler(Of 播放器HDR状态事件参数)
     Public Event 外部字幕已加载 As EventHandler(Of 播放器字幕事件参数)
+    Public Event 字幕选择已变化 As EventHandler
     Public Event 外部弹幕已加载 As EventHandler(Of 播放器弹幕事件参数)
 
     Public ReadOnly Property 解码器 As 解码模式
@@ -68,6 +74,12 @@ Public NotInheritable Class 播放器控制器
         End Get
     End Property
 
+    Public ReadOnly Property WASAPI模式 As WASAPI共享模式
+        Get
+            Return 当前WASAPI模式
+        End Get
+    End Property
+
     Public ReadOnly Property 是否正在切换 As Boolean
         Get
             Return 正在切换会话
@@ -82,7 +94,32 @@ Public NotInheritable Class 播放器控制器
 
     Public ReadOnly Property 当前字幕 As 外部字幕轨道
         Get
-            Return Volatile.Read(当前外部字幕)
+            Return Volatile.Read(当前字幕轨道)
+        End Get
+    End Property
+
+    Public ReadOnly Property 已导入字幕 As 外部字幕轨道
+        Get
+            Return Volatile.Read(已导入外部字幕)
+        End Get
+    End Property
+
+    Public ReadOnly Property 可用外部字幕 As IReadOnlyList(Of 外部字幕候选)
+        Get
+            Return Volatile.Read(外部字幕候选快照)
+        End Get
+    End Property
+
+    ''' <summary>-2 表示关闭，-1 表示外部字幕，非负数表示内嵌字幕流索引。</summary>
+    Public ReadOnly Property 当前字幕流索引 As Integer
+        Get
+            Return Volatile.Read(当前字幕来源索引)
+        End Get
+    End Property
+
+    Public ReadOnly Property 当前媒体路径 As String
+        Get
+            Return 当前文件路径
         End Get
     End Property
 
@@ -114,6 +151,17 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    Friend Sub 提交播放器信息图层(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令),
+                              序号 As ULong, 目标帧率 As Single)
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return
+        Try
+            目标.设置播放器信息图层(画布大小, 命令, 序号, 目标帧率)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
     Friend Function 读取定时文字状态() As 定时文字状态
         Try
             Return 会话?.当前定时文字状态
@@ -137,6 +185,16 @@ Public NotInheritable Class 播放器控制器
     Public Function 安全读取快照() As 播放器快照
         Try
             Return 会话?.当前快照
+        Catch ex As ObjectDisposedException
+            Return Nothing
+        Catch ex As 播放器异常
+            Return Nothing
+        End Try
+    End Function
+
+    Public Function 安全读取媒体信息() As 媒体信息
+        Try
+            Return 会话?.当前媒体信息
         Catch ex As ObjectDisposedException
             Return Nothing
         Catch ex As 播放器异常
@@ -181,16 +239,97 @@ Public NotInheritable Class 播放器控制器
             ' Interlocked documents the publication contract for test hosts that
             ' do not provide a UI SynchronizationContext. In the application the
             ' continuation and renderer timer are additionally serialized by UI.
-            Dim 待释放 = Interlocked.Exchange(当前外部字幕, 候选轨道)
+            添加外部字幕候选(候选轨道.路径, 候选轨道.格式)
+            发布外部字幕(候选轨道)
             候选轨道 = Nothing
-            待释放?.释放()
             RaiseEvent 外部字幕已加载(Me,
-                New 播放器字幕事件参数(当前外部字幕.路径, 当前外部字幕.格式))
+                New 播放器字幕事件参数(已导入外部字幕.路径, 已导入外部字幕.格式))
         Catch ex As OperationCanceledException
             ' A newer manual choice, media replacement or shutdown superseded it.
         Catch ex As Exception
             If Not 已释放 AndAlso Not 本次取消.IsCancellationRequested Then
                 RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法加载字幕"))
+            End If
+        Finally
+            候选轨道?.释放()
+            If ReferenceEquals(字幕加载取消, 本次取消) Then 字幕加载取消 = Nothing
+            本次取消.Dispose()
+        End Try
+    End Function
+
+    Public Sub 关闭字幕()
+        If 已释放 Then Return
+        取消字幕加载()
+        Dim 待释放内嵌 = Interlocked.Exchange(当前内嵌字幕, Nothing)
+        Interlocked.Exchange(当前字幕轨道, Nothing)
+        Volatile.Write(当前字幕来源索引, -2)
+        待释放内嵌?.释放()
+        RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
+    End Sub
+
+    Public Sub 选择外部字幕()
+        If 已释放 Then Return
+        Dim 外部 = Volatile.Read(已导入外部字幕)
+        If 外部 Is Nothing Then Return
+        取消字幕加载()
+        Dim 待释放内嵌 = Interlocked.Exchange(当前内嵌字幕, Nothing)
+        Interlocked.Exchange(当前字幕轨道, 外部)
+        Volatile.Write(当前字幕来源索引, -1)
+        待释放内嵌?.释放()
+        RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
+    End Sub
+
+    Public Sub 选择外部字幕(路径 As String)
+        If 已释放 OrElse String.IsNullOrWhiteSpace(路径) Then Return
+        Dim 完整路径 = Path.GetFullPath(路径)
+        Dim 已加载 = Volatile.Read(已导入外部字幕)
+        If 已加载 IsNot Nothing AndAlso
+            String.Equals(已加载.路径, 完整路径, StringComparison.OrdinalIgnoreCase) Then
+            选择外部字幕()
+        Else
+            替换字幕(完整路径)
+        End If
+    End Sub
+
+    Public Sub 选择内嵌字幕(流索引 As Integer)
+        If 已释放 OrElse 正在切换会话 OrElse 流索引 < 0 Then Return
+        Dim 信息 = 安全读取媒体信息()
+        Dim 字幕流 = 信息?.流.FirstOrDefault(
+            Function(x) x.索引 = 流索引 AndAlso String.Equals(x.类型, "subtitle", StringComparison.OrdinalIgnoreCase))
+        If 字幕流 Is Nothing OrElse String.IsNullOrWhiteSpace(当前文件路径) Then Return
+        If 当前字幕流索引 = 流索引 AndAlso Volatile.Read(当前内嵌字幕) IsNot Nothing Then Return
+
+        Dim 本次取消 As New CancellationTokenSource()
+        Dim 上次取消 = Interlocked.Exchange(字幕加载取消, 本次取消)
+        上次取消?.Cancel()
+        Dim 媒体路径 = 当前文件路径
+        Dim 忽略 = 选择内嵌字幕Async(媒体路径, 字幕流, 本次取消)
+    End Sub
+
+    Private Async Function 选择内嵌字幕Async(媒体路径 As String, 字幕流 As 媒体流信息,
+                                          本次取消 As CancellationTokenSource) As Task
+        Dim 候选轨道 As 外部字幕轨道 = Nothing
+        Try
+            候选轨道 = Await Task.Run(
+                Function() 外部字幕自动加载器.加载内嵌字幕(媒体路径, 字幕流, 本次取消.Token),
+                本次取消.Token)
+            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
+                Not ReferenceEquals(字幕加载取消, 本次取消) OrElse
+                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
+
+            Dim 待释放 = Interlocked.Exchange(当前内嵌字幕, 候选轨道)
+            Interlocked.Exchange(当前字幕轨道, 候选轨道)
+            Volatile.Write(当前字幕来源索引, 字幕流.索引)
+            候选轨道 = Nothing
+            待释放?.释放()
+            RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
+            RaiseEvent 状态已变化(Me, EventArgs.Empty)
+        Catch ex As OperationCanceledException
+        Catch ex As Exception
+            If Not 已释放 AndAlso Not 本次取消.IsCancellationRequested Then
+                RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法加载内嵌字幕"))
             End If
         Finally
             候选轨道?.释放()
@@ -340,6 +479,36 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    Public Sub 选择视频流(流索引 As Integer)
+        Dim 目标 = 会话
+        If 已释放 OrElse 正在切换会话 OrElse 目标 Is Nothing Then Return
+        Try
+            Dim 信息 = 目标.当前媒体信息
+            Dim 快照 = 目标.当前快照
+            If Not 可操作(快照.状态) OrElse 快照.当前视频流 = 流索引 OrElse
+                信息 Is Nothing OrElse Not 信息.流.Any(
+                    Function(x) x.索引 = 流索引 AndAlso x.类型 = "video" AndAlso Not x.是封面图) Then Return
+            目标.选择视频流(流索引)
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法切换视频流"))
+        End Try
+    End Sub
+
+    Public Sub 选择音频流(流索引 As Integer)
+        Dim 目标 = 会话
+        If 已释放 OrElse 正在切换会话 OrElse 目标 Is Nothing Then Return
+        Try
+            Dim 信息 = 目标.当前媒体信息
+            Dim 快照 = 目标.当前快照
+            If Not 可操作(快照.状态) OrElse 快照.当前音频流 = 流索引 OrElse
+                信息 Is Nothing OrElse Not 信息.流.Any(
+                    Function(x) x.索引 = 流索引 AndAlso x.类型 = "audio") Then Return
+            目标.选择音频流(流索引)
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法切换音频流"))
+        End Try
+    End Sub
+
     Public Sub 设置音量(音量值 As Single)
         当前音量 = Math.Clamp(音量值, 0.0F, 1.0F)
         If 当前音量 > 0 Then 已静音 = False
@@ -394,6 +563,20 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    ''' <summary>切换端点共享/独占模式。原生层仅重建音频渲染器，保留当前媒体和流选择。</summary>
+    Public Sub 切换WASAPI模式()
+        Dim 目标 = 会话
+        Dim 快照 = 安全读取快照()
+        If 已释放 OrElse 正在切换会话 OrElse 目标 Is Nothing OrElse 快照 Is Nothing OrElse
+            Not 可操作(快照.状态) Then Return
+        Dim 新模式 = If(当前WASAPI模式 = WASAPI共享模式.共享, WASAPI共享模式.独占, WASAPI共享模式.共享)
+        Try
+            目标.设置WASAPI独占模式(新模式 = WASAPI共享模式.独占)
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法切换 WASAPI 模式"))
+        End Try
+    End Sub
+
     Private Sub 切换媒体会话(路径 As String, 解码器 As 解码模式, 恢复位置 As TimeSpan,
                               恢复播放 As Boolean, 视频流 As Integer, 音频流 As Integer,
                               Optional 保留已加载字幕 As Boolean = False)
@@ -430,7 +613,6 @@ Public NotInheritable Class 播放器控制器
             候选会话.设置音量(当前音量, 已静音)
             Await 候选会话.打开Async(路径, 此次取消.Token)
             此次取消.Token.ThrowIfCancellationRequested()
-
             Dim 初始快照 = 候选会话.当前快照
             Dim 媒体信息 = 候选会话.当前媒体信息
             恢复流选择(候选会话, 媒体信息, 视频流, 音频流)
@@ -448,6 +630,7 @@ Public NotInheritable Class 播放器控制器
             当前解码器 = 快照.解码器
             当前色彩输出 = 候选色彩输出
             添加会话事件(会话)
+            If 当前WASAPI模式 = WASAPI共享模式.独占 Then 会话.设置WASAPI独占模式(True)
             重绑输出窗口()
             If 恢复播放 Then 会话.播放()
 
@@ -502,6 +685,7 @@ Public NotInheritable Class 播放器控制器
     Private Sub 添加会话事件(目标 As 播放器会话)
         AddHandler 目标.状态变化, AddressOf 会话_状态变化
         AddHandler 目标.打开完成, AddressOf 会话_打开完成
+        AddHandler 目标.操作完成, AddressOf 会话_操作完成
         AddHandler 目标.色彩模式变化, AddressOf 会话_色彩模式变化
         AddHandler 目标.设备变化, AddressOf 会话_设备变化
         AddHandler 目标.错误, AddressOf 会话_错误
@@ -510,6 +694,7 @@ Public NotInheritable Class 播放器控制器
     Private Sub 移除会话事件(目标 As 播放器会话)
         RemoveHandler 目标.状态变化, AddressOf 会话_状态变化
         RemoveHandler 目标.打开完成, AddressOf 会话_打开完成
+        RemoveHandler 目标.操作完成, AddressOf 会话_操作完成
         RemoveHandler 目标.色彩模式变化, AddressOf 会话_色彩模式变化
         RemoveHandler 目标.设备变化, AddressOf 会话_设备变化
         RemoveHandler 目标.错误, AddressOf 会话_错误
@@ -528,6 +713,10 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    Private Sub 会话_操作完成(sender As Object, e As 播放器事件参数)
+        If sender Is 会话 Then RaiseEvent 状态已变化(Me, EventArgs.Empty)
+    End Sub
+
     Private Sub 会话_色彩模式变化(sender As Object, e As 播放器事件参数)
         If sender IsNot 会话 Then Return
         RaiseEvent 状态已变化(Me, EventArgs.Empty)
@@ -541,6 +730,15 @@ Public NotInheritable Class 播放器控制器
         If sender IsNot 会话 Then Return
         Dim 快照 = 安全读取快照()
         If 快照 IsNot Nothing Then 当前解码器 = 快照.解码器
+        Try
+            Using 文档 = JsonDocument.Parse(e.详情JSON)
+                Dim 独占 As JsonElement
+                If 文档.RootElement.TryGetProperty("exclusive", 独占) Then
+                    当前WASAPI模式 = If(独占.GetBoolean(), WASAPI共享模式.独占, WASAPI共享模式.共享)
+                End If
+            End Using
+        Catch
+        End Try
         RaiseEvent 状态已变化(Me, EventArgs.Empty)
     End Sub
 
@@ -567,15 +765,24 @@ Public NotInheritable Class 播放器控制器
     Private Async Function 自动加载同名字幕Async(媒体路径 As String, 本次取消 As CancellationTokenSource) As Task
         Dim 候选轨道 As 外部字幕轨道 = Nothing
         Try
-            候选轨道 = Await 外部字幕自动加载器.尝试加载同名字幕Async(媒体路径, 本次取消.Token)
+            Dim 候选字幕 = Await 外部字幕自动加载器.扫描同名字幕Async(媒体路径, 本次取消.Token)
             If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
+                Not ReferenceEquals(字幕加载取消, 本次取消) OrElse
+                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
+            发布外部字幕候选(候选字幕)
+            If 候选字幕.Count = 0 Then Return
+
+            候选轨道 = Await 外部字幕自动加载器.尝试加载候选字幕Async(
+                候选字幕, 媒体路径, 本次取消.Token)
+            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
+                Not ReferenceEquals(字幕加载取消, 本次取消) OrElse
                 Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
             If 候选轨道 Is Nothing Then Return
 
-            Dim 待释放 = Interlocked.Exchange(当前外部字幕, 候选轨道)
+            发布外部字幕(候选轨道)
             候选轨道 = Nothing
-            待释放?.释放()
-            RaiseEvent 外部字幕已加载(Me, New 播放器字幕事件参数(当前外部字幕.路径, 当前外部字幕.格式))
+            RaiseEvent 外部字幕已加载(Me,
+                New 播放器字幕事件参数(已导入外部字幕.路径, 已导入外部字幕.格式))
         Catch ex As OperationCanceledException
             ' 新媒体、停止或关闭会取消尚未完成的自动加载。
         Catch ex As NotSupportedException
@@ -592,11 +799,50 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Function
 
-    Private Sub 释放当前字幕()
+    Private Sub 发布外部字幕(轨道 As 外部字幕轨道)
+        ArgumentNullException.ThrowIfNull(轨道)
+        Dim 旧外部 = Interlocked.Exchange(已导入外部字幕, 轨道)
+        Dim 旧内嵌 = Interlocked.Exchange(当前内嵌字幕, Nothing)
+        Interlocked.Exchange(当前字幕轨道, 轨道)
+        Volatile.Write(当前字幕来源索引, -1)
+        旧内嵌?.释放()
+        旧外部?.释放()
+        RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
+    End Sub
+
+    Private Sub 发布外部字幕候选(候选字幕 As IEnumerable(Of 外部字幕候选))
+        ArgumentNullException.ThrowIfNull(候选字幕)
+        Volatile.Write(外部字幕候选快照, 候选字幕.ToArray())
+        RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
+    End Sub
+
+    Private Sub 添加外部字幕候选(路径 As String, 格式 As 外部字幕格式)
+        Dim 完整路径 = Path.GetFullPath(路径)
+        Dim 当前候选 = Volatile.Read(外部字幕候选快照)
+        If 当前候选.Any(Function(x) String.Equals(x.路径, 完整路径, StringComparison.OrdinalIgnoreCase)) Then Return
+        Dim 新候选(当前候选.Length) As 外部字幕候选
+        Array.Copy(当前候选, 新候选, 当前候选.Length)
+        新候选(新候选.Length - 1) = New 外部字幕候选(完整路径, 格式)
+        Volatile.Write(外部字幕候选快照, 新候选)
+    End Sub
+
+    Private Sub 取消字幕加载()
         Dim 取消源 = Interlocked.Exchange(字幕加载取消, Nothing)
         取消源?.Cancel()
-        Dim 待释放 = Interlocked.Exchange(当前外部字幕, Nothing)
-        待释放?.释放()
+    End Sub
+
+    Private Sub 释放当前字幕()
+        取消字幕加载()
+        Dim 当前 = Interlocked.Exchange(当前字幕轨道, Nothing)
+        Dim 外部 = Interlocked.Exchange(已导入外部字幕, Nothing)
+        Volatile.Write(外部字幕候选快照, Array.Empty(Of 外部字幕候选)())
+        Dim 内嵌 = Interlocked.Exchange(当前内嵌字幕, Nothing)
+        Volatile.Write(当前字幕来源索引, -2)
+        当前?.释放()
+        外部?.释放()
+        内嵌?.释放()
     End Sub
 
     Private Sub 开始自动加载弹幕(媒体路径 As String)

@@ -97,7 +97,7 @@ struct FFF3FPSnapshot {
     std::uint64_t audioDiscontinuities;
     std::uint64_t audioInsertedSilenceFrames;
     std::uint64_t audioDroppedOverlapFrames;
-    // API v4 diagnostics. `presentedVideoFrames` counts decoded frames accepted
+    // API v5 diagnostics. `presentedVideoFrames` counts decoded frames accepted
     // by the renderer (including headless/clip-mode sessions); `swapChainPresents`
     // is the count of actual successful DXGI presents.
     std::uint64_t coalescedVideoFrames;
@@ -107,6 +107,13 @@ struct FFF3FPSnapshot {
     std::uint64_t deviceLockWait100ns;
     std::uint64_t hardwareTransfer100ns;
     std::uint64_t softwareConvert100ns;
+    // Rolling packet-rate estimates for the currently selected streams.
+    // These are media-time rates, not the container's static bit_rate field.
+    std::uint64_t videoBitRate;
+    std::uint64_t audioBitRate;
+    // Actual swap-chain precision after renderer/device capability fallback.
+    // 8 = BGRA8, 10 = RGB10A2, 16 = scRGB R16G16B16A16_FLOAT.
+    std::uint32_t videoOutputBitDepth;
 };
 
 using FFF3FPHandle = void*;
@@ -118,6 +125,7 @@ enum class FFF3FPBitmapSubtitleFlags : std::uint32_t {
     Clear = 1,
     EndOfStream = 2,
     Forced = 4,
+    MoreData = 8,
 };
 
 struct FFF3FPBitmapSubtitleFrame {
@@ -188,8 +196,9 @@ struct FFF3FPTimedTextLayer {
     std::uint32_t canvasWidth;
     std::uint32_t canvasHeight;
     std::uint32_t commandCount;
-    // 0 = subtitle, 1 = danmaku. Kept in the original reserved field so the
-    // version-1 ABI remains stable while the two producers become independent.
+    // 0 = subtitle, 1 = danmaku, 2 = player information. Kept in the original
+    // reserved field so the version-1 ABI remains stable while the producers
+    // remain independent.
     std::uint32_t layerSlot;
     std::uint64_t sequence;
     const FFF3FPTimedTextCommand* commands;
@@ -271,6 +280,10 @@ FFF3FP_API FFFResult FFF3FP_SetColorMode(FFF3FPHandle player, FFF3FPColorMode mo
 FFF3FP_API FFFResult FFF3FP_SetOutputWindow(FFF3FPHandle player, void* outputWindow) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetAudioEndpoint(FFF3FPHandle player,
     const char* endpointIdUtf8) noexcept;
+// Recreates only the WASAPI renderer.  The media session and its selected
+// streams stay intact; playback resumes at the current media position.
+FFF3FP_API FFFResult FFF3FP_SetAudioExclusiveMode(FFF3FPHandle player,
+    std::uint32_t exclusive) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetVolume(FFF3FPHandle player, float volume, std::uint32_t muted) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetTimedTextLayer(FFF3FPHandle player,
     const FFF3FPTimedTextLayer* layer) noexcept;
@@ -301,7 +314,8 @@ FFF3FP_API void FFF3FP_DestroyBitmapSubtitle(FFF3FPBitmapSubtitleHandle decoder)
 // Renders ASS/SSA directly from libass image masks. Font directories are
 // separated by LF; every TTF/OTF/TTC is loaded into this renderer's library.
 FFF3FP_API FFFResult FFF3FP_OpenAssSubtitle(const char* localPathUtf8,
-    const char* fontDirectoriesUtf8, FFF3FPAssSubtitleHandle* renderer) noexcept;
+    const char* fontDirectoriesUtf8, std::int32_t streamIndex,
+    FFF3FPAssSubtitleHandle* renderer) noexcept;
 FFF3FP_API FFFResult FFF3FP_RenderAssSubtitle(FFF3FPAssSubtitleHandle renderer,
     std::int64_t position100ns, std::int32_t canvasWidth, std::int32_t canvasHeight,
     FFF3FPBitmapSubtitleFrame* frame) noexcept;

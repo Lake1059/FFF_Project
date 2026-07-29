@@ -40,6 +40,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private 有媒体快照 As Boolean
     Private 已释放 As Boolean
     Private 剪辑区间模式已启用 As Boolean
+    Private 滚轮余量 As Integer
 
     Friend Sub New(进度条 As LakeUI.ExcellentTrackBar,
                    音量条 As LakeUI.ExcellentTrackBar,
@@ -98,6 +99,7 @@ Friend NotInheritable Class 播放器界面呈现器
         AddHandler 进度条.MouseUp, AddressOf 进度条_MouseUp
         AddHandler 进度条.ValueChanged, AddressOf 进度条_ValueChanged
         AddHandler 音量条.ValueChanged, AddressOf 音量条_ValueChanged
+        AddHandler 画面控件.音量滚轮, AddressOf 画面控件_音量滚轮
         AddHandler 刷新计时器.Tick, AddressOf 刷新计时器_Tick
 
         更新全部自适应宽度()
@@ -204,13 +206,8 @@ Friend NotInheritable Class 播放器界面呈现器
         更新全部自适应宽度()
     End Sub
 
-    Friend Function 调整音量(增量 As Integer) As Integer
+    Friend Sub 调整音量(增量 As Integer)
         音量条.Value = Math.Clamp(音量条.Value + 增量, 0, 100)
-        Return 音量百分比
-    End Function
-
-    Friend Sub 设置音量(百分比 As Integer)
-        音量条.Value = Math.Clamp(百分比, 0, 100)
     End Sub
 
     Private Sub 配置控件()
@@ -251,6 +248,15 @@ Friend NotInheritable Class 播放器界面呈现器
     Private Sub 音量条_ValueChanged(sender As Object, e As EventArgs)
         If 已释放 Then Return
         RaiseEvent 音量已变更(Me, New 播放器音量事件参数(CSng(音量条.Value / 100.0F)))
+    End Sub
+
+    Private Sub 画面控件_音量滚轮(sender As Object, e As MouseEventArgs)
+        If 已释放 OrElse e.Delta = 0 Then Return
+        滚轮余量 += e.Delta
+        Dim 刻度 = 滚轮余量 \ 120
+        If 刻度 = 0 Then Return
+        滚轮余量 -= 刻度 * 120
+        调整音量(刻度 * 5)
     End Sub
 
     Private Sub 请求跳转()
@@ -393,6 +399,7 @@ Friend NotInheritable Class 播放器界面呈现器
         RemoveHandler 进度条.MouseUp, AddressOf 进度条_MouseUp
         RemoveHandler 进度条.ValueChanged, AddressOf 进度条_ValueChanged
         RemoveHandler 音量条.ValueChanged, AddressOf 音量条_ValueChanged
+        RemoveHandler 画面控件.音量滚轮, AddressOf 画面控件_音量滚轮
         RemoveHandler 刷新计时器.Tick, AddressOf 刷新计时器_Tick
         刷新计时器.Dispose()
     End Sub
