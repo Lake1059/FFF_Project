@@ -11,6 +11,8 @@ Imports FFF.Player
 Friend Module Program
     Private Const 测量秒数 As Double = 12.0
     Private Const 目标帧率 As Double = 24000.0 / 1001.0
+    Private Const 音频缓冲平均上限毫秒 As Double = 200.0
+    Private Const 音频缓冲峰值上限毫秒 As Double = 300.0
 
     <StructLayout(LayoutKind.Sequential)>
     Private Structure 原生色彩变换
@@ -61,6 +63,18 @@ Friend Module Program
     <STAThread>
     Public Function Main(参数 As String()) As Integer
         Try
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--audio-latency-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试音频延迟回归()
+                Console.WriteLine("无画面 PCM 音频延迟与欠载回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--audio-cover-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 音频路径 = Path.GetFullPath(参数(1))
+                检查文件(音频路径)
+                测试纯音频封面回归(音频路径)
+                Console.WriteLine("纯音频封面无窗口打开与延迟绑定回归通过。")
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--timed-text-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试定时文字精确渲染合同()
                 Console.WriteLine("弹幕边界、连续小数位移、Seek、外描边与阴影精确诊断通过。")
@@ -178,6 +192,8 @@ Friend Module Program
             End If
             If 参数.Length < 2 Then
                 Console.Error.WriteLine("用法: FFF.Player.Tests <视频.mp4> <弹幕.xml> [字幕.ass] [字幕.srt]")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --audio-latency-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --audio-cover-regression <带内嵌封面的纯音频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --color-regression <SDR视频> <HDR视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --performance-regression <SDR视频> <HDR视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --targeted-regression <视频> <字幕.sup>")
@@ -717,6 +733,7 @@ Friend Module Program
     Private Sub 测试信息层交互与文本()
         测试信息层精确文本()
         测试媒体信息按钮左右键()
+        测试媒体信息响度数据源()
     End Sub
 
     Private Sub 测试信息层精确文本()
@@ -827,6 +844,26 @@ Friend Module Program
             Application.DoEvents()
             断言(Not CBool(可见字段.GetValue(呈现器)), "第二次右键没有关闭播放器信息层。")
             窗口.Close()
+        End Using
+    End Sub
+
+    Private Sub 测试媒体信息响度数据源()
+        Using 窗口 As New Form媒体信息(audioPeakProvider:=
+            Function() New Single() {1.0F, 0.1F, 0.01F})
+            Dim 标志 = BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic
+            Dim 刷新入口 = GetType(Form媒体信息).GetMethod("刷新响度条", 标志)
+            断言(刷新入口 IsNot Nothing, "无法取得媒体信息响度刷新入口。")
+            刷新入口.Invoke(窗口, Nothing)
+            Dim 期望 = {0, -20, -40, -60}
+            Dim 字段名 = {"EPB_L", "EPB_R", "EPB_C", "EPB_LFE"}
+            For index = 0 To 字段名.Length - 1
+                Dim 进度条 = GetType(Form媒体信息).GetProperty(字段名(index), 标志)?.GetValue(窗口)
+                Dim 数值属性 = 进度条?.GetType().GetProperty("Value", 标志)
+                Dim 实际值 = If(数值属性 Is Nothing, Integer.MinValue,
+                    Convert.ToInt32(数值属性.GetValue(进度条)))
+                断言(实际值 = 期望(index),
+                   $"媒体信息响度条 {字段名(index)} 没有使用 PCM 峰值数据源：{实际值}，期望 {期望(index)}。")
+            Next
         End Using
     End Sub
 
@@ -1094,6 +1131,244 @@ Friend Module Program
                               $"补零/裁样 {跳转结果.音频插入静音帧数}/{跳转结果.音频丢弃重叠帧数}")
             验证连续PCM结果(跳转结果, "《你的名字》1000 秒跳转")
         End Using
+    End Sub
+
+    Private Sub 测试音频延迟回归()
+        Dim 临时路径 = Path.Combine(Path.GetTempPath(),
+            "fff-player-audio-latency-" & Guid.NewGuid().ToString("N") & ".wav")
+        Dim 换片路径 = Path.Combine(Path.GetTempPath(),
+            "fff-player-audio-switch-" & Guid.NewGuid().ToString("N") & ".wav")
+        Try
+            创建音频延迟测试文件(临时路径)
+            File.Copy(临时路径, 换片路径)
+            Using 会话 As New 播放器会话(New 播放器配置 With {
+                .解码器 = 解码模式.CPU,
+                .色彩模式 = 色彩输出模式.映射到SDR,
+                .SDR峰值尼特 = 100.0F,
+                .HDR峰值尼特 = 1000.0F,
+                .SDR纸白尼特 = 203.0F
+            })
+                ' -54 dB 左右，能检出输出 PCM 峰值而不会产生明显测试声。
+                会话.设置音量(0.002F, False)
+                会话.打开Async(临时路径).GetAwaiter().GetResult()
+                会话.播放()
+                等待音频预热(会话, TimeSpan.FromMilliseconds(500), TimeSpan.FromSeconds(10))
+                验证音频峰值(会话, "WASAPI 共享")
+                Dim 共享结果 = 采样播放(会话, 4.0, Nothing)
+                验证纯音频结果(共享结果, "WASAPI 共享")
+
+                切换到独占模式(会话)
+                ' 同模式请求也必须确认，控制器的异步换片依赖这一幂等事件合同。
+                切换到独占模式(会话)
+                Dim 独占目标 = 会话.当前快照.播放位置 + TimeSpan.FromMilliseconds(500)
+                等待音频预热(会话, 独占目标, TimeSpan.FromSeconds(10))
+                验证音频峰值(会话, "WASAPI 独占")
+                Dim 独占结果 = 采样播放(会话, 4.0, Nothing)
+                验证纯音频结果(独占结果, "WASAPI 独占")
+            End Using
+            测试控制器独占换片(临时路径, 换片路径)
+        Finally
+            If File.Exists(临时路径) Then File.Delete(临时路径)
+            If File.Exists(换片路径) Then File.Delete(换片路径)
+        End Try
+    End Sub
+
+    Private Sub 测试控制器独占换片(音频路径 As String, 换片路径 As String)
+        Using 控制器 As New 播放器控制器(Function() IntPtr.Zero, Nothing)
+            控制器.设置音量(0.0F)
+            打开并等待(控制器, 音频路径)
+            控制器.切换WASAPI模式()
+            等待控制器WASAPI模式(控制器, WASAPI共享模式.独占)
+
+            ' 打开不同路径必须经过控制器的候选会话；旧会话此时仍持有独占端点。
+            打开并等待(控制器, 换片路径)
+            等待控制器WASAPI模式(控制器, WASAPI共享模式.独占)
+            Dim 计时 = Stopwatch.StartNew()
+            Do
+                Application.DoEvents()
+                Dim 快照 = 控制器.安全读取快照()
+                If 快照 IsNot Nothing AndAlso 快照.状态 = 播放状态.正在播放 AndAlso
+                    快照.播放位置 >= TimeSpan.FromMilliseconds(500) AndAlso
+                    快照.已解码音频帧数 > 0 Then Exit Do
+                If 计时.Elapsed >= TimeSpan.FromSeconds(10) Then
+                    Throw New TimeoutException($"独占换片后播放没有推进：" &
+                        $"{If(快照 Is Nothing, "无快照", $"{快照.状态} / {快照.播放位置.TotalMilliseconds:F1} ms")}。")
+                End If
+                Thread.Sleep(5)
+            Loop
+            Console.WriteLine("WASAPI 独占状态下控制器换片后保持独占并正常推进。")
+        End Using
+    End Sub
+
+    Private Sub 等待控制器WASAPI模式(控制器 As 播放器控制器, 期望 As WASAPI共享模式)
+        Dim 计时 = Stopwatch.StartNew()
+        Do
+            Application.DoEvents()
+            If 控制器.WASAPI模式 = 期望 Then Return
+            If 计时.Elapsed >= TimeSpan.FromSeconds(10) Then
+                Throw New TimeoutException($"等待控制器 WASAPI 模式 {期望} 超时。")
+            End If
+            Thread.Sleep(5)
+        Loop
+    End Sub
+
+    Private Sub 测试纯音频封面回归(音频路径 As String)
+        Using 会话 As New 播放器会话(New 播放器配置 With {
+            .解码器 = 解码模式.CPU,
+            .色彩模式 = 色彩输出模式.映射到SDR,
+            .SDR峰值尼特 = 100.0F,
+            .HDR峰值尼特 = 1000.0F,
+            .SDR纸白尼特 = 203.0F,
+            .输出窗口句柄 = IntPtr.Zero
+        })
+            会话.设置音量(0.0F, True)
+            会话.打开Async(音频路径).GetAwaiter().GetResult()
+
+            Dim 信息 = 会话.当前媒体信息
+            Dim 封面流 = 信息.流.FirstOrDefault(Function(x) x.类型 = "video" AndAlso x.是封面图)
+            断言(信息.流.Any(Function(x) x.类型 = "audio"), "封面回归输入没有音频流。")
+            断言(Not 信息.流.Any(Function(x) x.类型 = "video" AndAlso Not x.是封面图),
+               "封面回归输入包含普通视频流，不是纯音频媒体。")
+            断言(封面流 IsNot Nothing, "纯音频媒体没有识别出 attached picture 封面流。")
+            断言(封面流.宽度 > 0 AndAlso 封面流.高度 > 0,
+               $"封面流尺寸无效：{封面流.宽度}×{封面流.高度}。")
+
+            Dim 无窗口快照 = 会话.当前快照
+            断言(无窗口快照.视频宽度 = CUInt(封面流.宽度) AndAlso
+                   无窗口快照.视频高度 = CUInt(封面流.高度),
+               $"封面解码尺寸与流信息不一致：{无窗口快照.视频宽度}×{无窗口快照.视频高度} / " &
+               $"{封面流.宽度}×{封面流.高度}。")
+            断言(无窗口快照.交换链呈现次数 = 0,
+               $"无窗口打开阶段错误创建了交换链呈现：{无窗口快照.交换链呈现次数}。")
+
+            Using 隐藏窗口 As New Form With {
+                .ClientSize = New Drawing.Size(320, 320),
+                .FormBorderStyle = FormBorderStyle.FixedToolWindow,
+                .ShowInTaskbar = False,
+                .StartPosition = FormStartPosition.Manual,
+                .Location = New Drawing.Point(-10000, -10000)
+            }
+                Dim 隐藏句柄 = 隐藏窗口.Handle
+                会话.设置输出窗口(隐藏句柄)
+                Dim 呈现快照 = 等待快照(会话,
+                    Function(x) x.交换链呈现次数 > 无窗口快照.交换链呈现次数,
+                    "纯音频封面绑定隐藏 HWND 后的交换链呈现")
+                断言(呈现快照.视频宽度 = CUInt(封面流.宽度) AndAlso
+                       呈现快照.视频高度 = CUInt(封面流.高度),
+                   "绑定输出窗口后丢失了封面尺寸。")
+                Console.WriteLine($"封面流 {封面流.编码} {封面流.宽度}×{封面流.高度}，" &
+                                  $"交换链呈现 {无窗口快照.交换链呈现次数}→{呈现快照.交换链呈现次数}")
+                会话.设置输出窗口(IntPtr.Zero)
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 创建音频延迟测试文件(路径 As String)
+        Const 采样率 As Integer = 48000
+        Const 声道数 As Integer = 2
+        Const 位深 As Integer = 16
+        Const 秒数 As Integer = 24
+        Const 频率 As Double = 997.0
+        Dim 块对齐 = 声道数 * 位深 \ 8
+        Dim 数据字节数 = 采样率 * 块对齐 * 秒数
+        Using 流 = File.Create(路径)
+            Using 写入器 As New BinaryWriter(流, Encoding.ASCII, False)
+                写入器.Write(Encoding.ASCII.GetBytes("RIFF"))
+                写入器.Write(36 + 数据字节数)
+                写入器.Write(Encoding.ASCII.GetBytes("WAVE"))
+                写入器.Write(Encoding.ASCII.GetBytes("fmt "))
+                写入器.Write(16)
+                写入器.Write(CShort(1))
+                写入器.Write(CShort(声道数))
+                写入器.Write(采样率)
+                写入器.Write(采样率 * 块对齐)
+                写入器.Write(CShort(块对齐))
+                写入器.Write(CShort(位深))
+                写入器.Write(Encoding.ASCII.GetBytes("data"))
+                写入器.Write(数据字节数)
+                For 样本 = 0 To 采样率 * 秒数 - 1
+                    Dim 波形 = Math.Sin(2.0R * Math.PI * 频率 * 样本 / 采样率)
+                    写入器.Write(CShort(Math.Round(Short.MaxValue * 0.8R * 波形)))
+                    写入器.Write(CShort(Math.Round(Short.MaxValue * 0.4R * 波形)))
+                Next
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 等待音频预热(会话 As 播放器会话, 目标位置 As TimeSpan, 超时 As TimeSpan)
+        Dim 计时 = Stopwatch.StartNew()
+        Do
+            Dim 快照 = 会话.当前快照
+            If 快照.状态 = 播放状态.失败 Then
+                Throw New InvalidOperationException($"播放器在音频预热阶段失败：{会话.最后错误消息}")
+            End If
+            If 快照.播放位置 >= 目标位置 AndAlso 快照.已解码音频帧数 > 0 AndAlso
+                快照.音频缓冲时长 > TimeSpan.Zero Then Return
+            If 计时.Elapsed >= 超时 Then
+                Throw New TimeoutException($"音频播放预热超时：状态 {快照.状态}，" &
+                    $"位置 {快照.播放位置.TotalMilliseconds:F1} ms，缓冲 {快照.音频缓冲时长.TotalMilliseconds:F1} ms，" &
+                    $"解码帧 {快照.已解码音频帧数}，欠载 {快照.音频欠载次数}，错误 {会话.最后错误消息}。")
+            End If
+            Thread.Sleep(5)
+        Loop
+    End Sub
+
+    Private Sub 切换到独占模式(会话 As 播放器会话)
+        Using 完成 As New ManualResetEventSlim(False)
+            Dim 已独占 As Boolean
+            Dim 错误详情 As String = Nothing
+            Dim 设备处理 As EventHandler(Of 播放器事件参数) =
+                Sub(sender, e)
+                    If e.详情JSON.Contains("""exclusive"":true", StringComparison.Ordinal) Then
+                        已独占 = True : 完成.Set()
+                    ElseIf e.详情JSON.Contains("""exclusive"":false", StringComparison.Ordinal) Then
+                        完成.Set()
+                    End If
+                End Sub
+            Dim 错误处理 As EventHandler(Of 播放器事件参数) =
+                Sub(sender, e)
+                    If e.详情JSON.Contains("audio-exclusive-mode", StringComparison.Ordinal) Then
+                        错误详情 = e.详情JSON : 完成.Set()
+                    End If
+                End Sub
+            AddHandler 会话.设备变化, 设备处理
+            AddHandler 会话.错误, 错误处理
+            Try
+                会话.设置WASAPI独占模式(True)
+                If Not 完成.Wait(TimeSpan.FromSeconds(10)) Then Throw New TimeoutException("切换 WASAPI 独占模式超时。")
+                断言(已独占, $"WASAPI 独占模式未建立：{If(错误详情, 会话.最后错误消息)}")
+            Finally
+                RemoveHandler 会话.设备变化, 设备处理
+                RemoveHandler 会话.错误, 错误处理
+            End Try
+        End Using
+    End Sub
+
+    Private Sub 验证音频峰值(会话 As 播放器会话, 阶段 As String)
+        Dim 计时 = Stopwatch.StartNew()
+        Dim 峰值 As Single() = Array.Empty(Of Single)()
+        Do
+            峰值 = 会话.读取音频峰值()
+            If 峰值.Length > 0 AndAlso 峰值.Max() > 0.0005F Then Exit Do
+            If 计时.Elapsed >= TimeSpan.FromSeconds(3) Then Exit Do
+            Thread.Sleep(5)
+        Loop
+        断言(峰值.Length > 0, $"{阶段}没有上报输出声道。")
+        断言(峰值.All(Function(x) Single.IsFinite(x) AndAlso x >= 0.0F AndAlso x <= 1.0F),
+           $"{阶段}上报了无效音频峰值。")
+        断言(峰值.Max() > 0.0005F, $"{阶段}没有从实际提交的 PCM 取得响度：{String.Join(", ", 峰值.Select(Function(x) x.ToString("F6")))}。")
+        Console.WriteLine($"{阶段}峰值：{String.Join("/", 峰值.Select(Function(x) x.ToString("F6")))}")
+    End Sub
+
+    Private Sub 验证纯音频结果(结果 As 播放测量结果, 阶段 As String)
+        验证音频缓冲结果(结果, 阶段)
+        断言(结果.音频欠载次数 = 0, $"{阶段}纯音频稳定播放出现了 {结果.音频欠载次数} 次欠载。")
+        断言(结果.播放速度 >= 0.97 AndAlso 结果.播放速度 <= 1.03,
+           $"{阶段}纯音频时钟速度异常：{结果.播放速度:F4}x。")
+        Console.WriteLine($"{阶段}：时钟 {结果.播放速度:F4}x，缓冲均值/最小/最大 " &
+                          $"{结果.平均音频缓冲毫秒:F1}/{结果.最小音频缓冲毫秒:F1}/" &
+                          $"{结果.最大音频缓冲毫秒:F1} ms，音频帧 {结果.已解码音频帧数}、" &
+                          $"欠载 {结果.音频欠载次数}")
     End Sub
 
     Private Sub 验证连续PCM结果(结果 As 播放测量结果, 阶段 As String)
@@ -2351,14 +2626,22 @@ Friend Module Program
         End If
     End Sub
 
-    Private Sub 验证音频结果(结果 As 播放测量结果, 阶段 As String)
+    Private Sub 验证音频缓冲结果(结果 As 播放测量结果, 阶段 As String)
         断言(结果.已解码音频帧数 > 0, $"{阶段}没有解码任何音频帧。")
         断言(结果.平均音频缓冲毫秒 > 5.0,
            $"{阶段}音频缓冲没有建立：{结果.平均音频缓冲毫秒:F1} ms。")
+        断言(结果.平均音频缓冲毫秒 <= 音频缓冲平均上限毫秒,
+           $"{阶段}平均音频延迟过高：{结果.平均音频缓冲毫秒:F1} ms。")
+        断言(结果.最大音频缓冲毫秒 <= 音频缓冲峰值上限毫秒,
+           $"{阶段}峰值音频延迟过高：{结果.最大音频缓冲毫秒:F1} ms。")
         断言(结果.音频欠载次数 <= 1,
            $"{阶段}音频出现 {结果.音频欠载次数} 次欠载。")
         断言(结果.音频拒绝帧数 = 0,
            $"{阶段}因背压拒绝了 {结果.音频拒绝帧数} 个已解码音频帧。")
+    End Sub
+
+    Private Sub 验证音频结果(结果 As 播放测量结果, 阶段 As String)
+        验证音频缓冲结果(结果, 阶段)
         断言(结果.平均音画差毫秒 <= 350.0 AndAlso 结果.最大音画差毫秒 <= 650.0,
            $"{阶段}音频/视频时钟差过大：{结果.平均音画差毫秒:F1}/{结果.最大音画差毫秒:F1} ms。")
     End Sub

@@ -10,10 +10,10 @@ Public Class Form媒体信息
     Private ReadOnly 获取弹幕 As Func(Of 弹幕资料库)
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
     Private ReadOnly 获取输出尺寸 As Func(Of Size)
+    Private ReadOnly 获取音频峰值 As Func(Of Single())
     Private ReadOnly 刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 200}
     Private ReadOnly 响度刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 67}
     Private ReadOnly 帧率刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 1000}
-    Private 响度计 As 播放器音频响度计
     Private 上次视频帧次数 As ULong
     Private 上次采样时钟 As Long
     Private 最近实际帧率 As Double
@@ -26,18 +26,20 @@ Public Class Form媒体信息
                    Optional subtitleProvider As Func(Of 外部字幕轨道) = Nothing,
                    Optional danmakuProvider As Func(Of 弹幕资料库) = Nothing,
                    Optional wasapiProvider As Func(Of WASAPI共享模式) = Nothing,
-                   Optional outputSizeProvider As Func(Of Size) = Nothing)
+                   Optional outputSizeProvider As Func(Of Size) = Nothing,
+                   Optional audioPeakProvider As Func(Of Single()) = Nothing)
         InitializeComponent()
         获取媒体 = mediaProvider : 获取快照 = snapshotProvider
         获取字幕状态 = subtitleStatusProvider : 获取弹幕状态 = danmakuStatusProvider
         获取字幕 = subtitleProvider : 获取弹幕 = danmakuProvider
         获取WASAPI模式 = wasapiProvider : 获取输出尺寸 = outputSizeProvider
+        获取音频峰值 = audioPeakProvider
     End Sub
 
     Private Sub Form媒体信息_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         Form1.ThisIsYourWindow1.Attach(Me)
         If UltraDetailListView1.Columns.Count > 0 Then UltraDetailListView1.Columns(0).Text = "媒体参数"
-        调整左栏宽度() : 调整列表列宽() : 重置响度条() : 刷新响度计() : 刷新()
+        调整左栏宽度() : 调整列表列宽() : 重置响度条() : 刷新()
         ' 在启动一秒定时器前先建立基线，这样首个 Tick 就能给出完整的一秒统计值。
         更新实际帧率(安全获取(获取快照))
         AddHandler 刷新定时器.Tick, AddressOf 刷新定时器_Tick
@@ -52,7 +54,6 @@ Public Class Form媒体信息
         刷新定时器.Stop() : 刷新定时器.Dispose()
         响度刷新定时器.Stop() : 响度刷新定时器.Dispose()
         帧率刷新定时器.Stop() : 帧率刷新定时器.Dispose()
-        响度计?.释放() : 响度计 = Nothing
     End Sub
 
     Private Sub Form媒体信息_SizeChanged(sender As Object, e As EventArgs) Handles MyBase.SizeChanged
@@ -104,11 +105,6 @@ Public Class Form媒体信息
         HtmlColorLabel6.Text = 标签("音频实时比特率", 比特率(If(快照 Is Nothing, 0UL, 快照.音频实时比特率)), "#CDB6EA")
     End Sub
 
-    Private Sub 刷新响度计()
-        响度计?.释放() : 响度计 = Nothing
-        Try : 响度计 = 播放器音频响度计.创建默认设备() : Catch : End Try
-    End Sub
-
     Private Sub 重置响度条()
         For Each bar In {EPB_L, EPB_R, EPB_C, EPB_LFE, EPB_SL, EPB_SR, EPB_BL, EPB_BR}
             bar.Minimum = -60 : bar.Maximum = 0 : bar.Value = -60
@@ -116,8 +112,7 @@ Public Class Form媒体信息
     End Sub
 
     Private Sub 刷新响度条()
-        Dim peaks As Single() = Nothing
-        Try : peaks = 响度计?.读取() : Catch : End Try
+        Dim peaks = 安全获取(获取音频峰值)
         Dim bars = {EPB_L, EPB_R, EPB_C, EPB_LFE, EPB_SL, EPB_SR, EPB_BL, EPB_BR}
         For i = 0 To bars.Length - 1
             Dim peak = If(peaks IsNot Nothing AndAlso i < peaks.Length, peaks(i), 0.0F)

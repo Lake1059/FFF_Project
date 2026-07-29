@@ -9,7 +9,9 @@ AVC/HEVC 的 4:2:0、4:2:2、4:4:4 和 AV1 的 4:2:0 均不在播放器侧按规
 
 静态图片按单帧媒体处理，多帧图片按各帧 PTS 播放；GIF、APNG、Animated WebP 和
 Animated JPEG XL 会遵循文件内的循环次数。纯音频中的 `attached_pic` 不作为时间轴
-视频流或播放主时钟，而是单独解码为静态封面，由 D3D11 呈现器保持宽高比绘制。
+视频流或播放主时钟，而是单独解码为静态封面，由 D3D11 呈现器保持宽高比绘制。媒体可以先在
+无窗口模式下打开；播放器会保留已解码的封面帧，并在之后首次绑定有效 HWND 时重新提交，
+不要求调用方为了封面改变打开顺序。
 
 色彩输出包含 `映射到SDR`、`原始HDR按SDR呈现` 和 `峰值映射HDR`。请求真实 HDR
 但目标显示器或 Windows Advanced Color 不可用时，实际模式自动降级为 SDR，并通过
@@ -45,6 +47,14 @@ UI 呈现器提交逐帧命令，Native D3D11/DirectWrite 层负责栅格化和�
 保持硬件时钟权威，也为 60 Hz 以上的文字运动提供连续媒体时间。采样率、样本格式或完整声道
 布局变化会重建重采样器。外部音轨启用期间主容器音频包会被跳过，因此清除外部音轨
 必须对主容器执行完整 Seek，同时复位视频、音频、重采样器和时钟，不能只关闭外部解码器。
+应用 PCM 与已经提交给设备的 PCM 合计以 120 ms 为目标；共享模式按设备周期申请 30–50 ms
+端点缓冲。回归合同要求稳定播放时平均缓冲不超过 200 ms、峰值不超过 300 ms，并且不能欠载。
+共享与独占模式使用分离的控制事件和设备事件；独占设备每次回调只写一个完整端点周期。
+独占状态下打开另一媒体时，控制器先把旧会话临时切回共享以释放端点；候选媒体打开成功后
+释放旧会话，并把新会话恢复到用户选择的独占模式。候选打开失败或取消时则恢复旧会话独占，
+因此调用方不需要先手工切回共享模式。
+信息页响度直接统计实际提交给 WASAPI 的每声道 PCM 峰值，不依赖系统混音器的
+`IAudioMeterInformation`，所以独占模式绕过混音器后仍能持续取得响度。
 
 定时文字 P/Invoke 的 UTF-8 指针和位图固定地址只在同步调用期间有效，Native 必须在返回前保留；
 托管侧容量和 UTF-8 指针缓存均有界。稳定文字按 `内容标识+UTF-8` 驻留为共享不可变内容，并一次
@@ -79,6 +89,8 @@ UI 应把自己的 `SynchronizationContext` 写入 `播放器配置.事件同步
 内部回归测试不采集画面。先构建 Release x64 的 `FFF.Native` 和 `FFF.Player.Tests`，再运行：
 
 ```text
+FFF.Player.Tests --audio-latency-regression
+FFF.Player.Tests --audio-cover-regression <带内嵌封面的纯音频>
 FFF.Player.Tests --color-regression <SDR视频> <HDR视频>
 FFF.Player.Tests --performance-regression <SDR视频> <HDR视频>
 FFF.Player.Tests --targeted-regression <视频> <字幕.sup>
@@ -88,6 +100,8 @@ FFF.Player.Tests --ass-render-benchmark
 FFF.Player.Tests --timed-text-regression
 ```
 
+音频延迟回归自生成双声道 PCM，在完全无画面条件下覆盖共享/独占时钟、缓冲、欠载和每声道响度；
+封面回归先无窗口打开纯音频，再绑定一个不显示的 HWND，只检查封面流、尺寸和交换链呈现计数。
 色彩回归覆盖 SDR 码值直通、PQ 数值映射和 HDR→SDR 换片；性能回归固定覆盖 CPU 解码、呈现、
 独立字幕层/100 条同时移动弹幕层、至少 55 FPS 的弹幕合同、音频缓冲、外部音轨偏移、Seek 和
 恢复内置音轨。专项回归验证连续 AAC PCM 在开头和 1000 秒 Seek 后都不会误补零/裁样，

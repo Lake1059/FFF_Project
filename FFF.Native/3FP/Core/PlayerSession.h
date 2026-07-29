@@ -52,6 +52,7 @@ public:
     FFFResult SetVolume(float volume, bool muted) noexcept;
     FFFResult SetTimedTextLayer(const FFF3FPTimedTextLayer& layer) noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
+    FFFResult GetAudioPeakLevels(FFF3FPAudioPeakLevels& levels) const noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept;
     FFFResult GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcept;
     std::string MediaInfo() const;
@@ -156,6 +157,7 @@ private:
     std::int32_t externalAudioStream_;
     std::int64_t externalAudioOffset100ns_;
     std::string externalAudioPath_;
+    PlayerAudioRuntimeState audioRuntimeState_;
     std::unique_ptr<PlayerWasapiRenderer> audioRenderer_;
     PlayerVideoRenderer videoRenderer_;
     std::wstring audioEndpointId_;

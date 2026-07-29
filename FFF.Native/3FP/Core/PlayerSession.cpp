@@ -26,7 +26,10 @@ constexpr std::int64_t TicksPerSecond = 10'000'000;
 constexpr std::size_t MaxQueuedVideoFrames = 8;
 constexpr std::size_t MinimumQueuedVideoFrames = 3;
 constexpr std::int64_t TargetVideoLookAhead100ns = 1'500'000;
-constexpr std::int64_t TargetAudioBuffer100ns = 5'000'000;
+// Buffered100ns includes both application PCM and samples already submitted to
+// WASAPI.  Keep the complete audible queue short so seek, stream/volume changes
+// and the information overlay reflect a low-latency local playback pipeline.
+constexpr std::int64_t TargetAudioBuffer100ns = 1'200'000;
 constexpr std::size_t MaximumIndexedVideoFrames = 32'768;
 constexpr std::size_t MaximumPendingVideoPackets = 64;
 constexpr std::size_t MaximumPendingVideoPacketBytes = 16 * 1024 * 1024;
@@ -607,14 +610,35 @@ FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sd
     });
     return FFFResult::Success;
 }
-FFFResult PlayerSession::SetOutputWindow(void* window) noexcept { if (window != nullptr && !IsWindow(static_cast<HWND>(window))) return FFFResult::InvalidArgument; Enqueue([this, window] { const auto result = videoRenderer_.SetWindow(static_cast<HWND>(window)); if (result != FFFResult::Success) { Fail(result, "The playback window handle is invalid.", "output-window"); return; } if (videoRenderer_.Redraw() != FFFResult::Success) Fail(FFFResult::DeviceFailure, videoRenderer_.LastError(), "redraw"); }); return FFFResult::Success; }
-FFFResult PlayerSession::SetAudioEndpoint(const char* endpoint) noexcept { const auto value = endpoint == nullptr ? std::wstring{} : FromUtf8(endpoint); Enqueue([this, value] { audioEndpointId_ = value; if (audioRenderer_) { const auto paused = snapshot_.state != FFF3FPState::Playing; audioRenderer_->Stop(); audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_); const auto result = audioRenderer_->Start(); if (result != FFFResult::Success) { Fail(result, audioRenderer_->LastError(), "audio-endpoint"); return; } audioRenderer_->SetVolume(volume_, muted_); audioRenderer_->Reset(snapshot_.position100ns); audioRenderer_->SetPaused(paused); RebuildMediaInfo(); Emit(FFF3FPEvent::DeviceChanged, "{\"type\":\"audio\"}"); } }); return FFFResult::Success; }
+FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
+    if (window != nullptr && !IsWindow(static_cast<HWND>(window))) return FFFResult::InvalidArgument;
+    Enqueue([this, window] {
+        const auto result = videoRenderer_.SetWindow(static_cast<HWND>(window));
+        if (result != FFFResult::Success) {
+            Fail(result, "The playback window handle is invalid.", "output-window");
+            return;
+        }
+        // Audio media is opened before the controller binds its final HWND.
+        // Headless Render intentionally owns no GPU cache, so submit the retained
+        // attached picture once when a real target first becomes available.
+        const auto redrawResult = coverArtFrame_ != nullptr && videoStream_ < 0 && window != nullptr
+            ? videoRenderer_.Render(coverArtFrame_) : videoRenderer_.Redraw();
+        if (redrawResult != FFFResult::Success)
+            Fail(FFFResult::DeviceFailure, videoRenderer_.LastError(), "redraw");
+    });
+    return FFFResult::Success;
+}
+FFFResult PlayerSession::SetAudioEndpoint(const char* endpoint) noexcept { const auto value = endpoint == nullptr ? std::wstring{} : FromUtf8(endpoint); Enqueue([this, value] { audioEndpointId_ = value; if (audioRenderer_) { const auto paused = snapshot_.state != FFF3FPState::Playing; audioRenderer_->Stop(); audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_, &audioRuntimeState_); const auto result = audioRenderer_->Start(); if (result != FFFResult::Success) { Fail(result, audioRenderer_->LastError(), "audio-endpoint"); return; } audioRenderer_->SetVolume(volume_, muted_); audioRenderer_->Reset(snapshot_.position100ns); audioRenderer_->SetPaused(paused); RebuildMediaInfo(); Emit(FFF3FPEvent::DeviceChanged, "{\"type\":\"audio\"}"); } }); return FFFResult::Success; }
 FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
     const auto state = state_.load();
     if (state != FFF3FPState::Ready && state != FFF3FPState::Playing &&
         state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState;
     Enqueue([this, exclusive] {
-        if (audioExclusive_ == exclusive) return;
+        if (audioExclusive_ == exclusive) {
+            Emit(FFF3FPEvent::DeviceChanged, std::string("{\"type\":\"audio\",\"exclusive\":") +
+                (exclusive ? "true}" : "false}"));
+            return;
+        }
         if (!audioRenderer_) {
             audioExclusive_ = exclusive;
             Emit(FFF3FPEvent::DeviceChanged, std::string("{\"type\":\"audio\",\"exclusive\":") +
@@ -624,15 +648,17 @@ FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
         const auto paused = snapshot_.state != FFF3FPState::Playing;
         const auto position = ClockPosition();
         snapshot_.position100ns = position;
-        if (audioRenderer_) audioRenderer_->Stop();
-        auto replacement = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, exclusive);
+        audioRenderer_.reset();
+        auto replacement = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, exclusive,
+            &audioRuntimeState_);
         const auto result = replacement->Start();
         if (result != FFFResult::Success) {
             const auto message = replacement->LastError();
             // Restore the previous renderer so an unsupported exclusive format
             // cannot turn a working session into a silent session.
             replacement->Stop();
-            audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_);
+            audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_,
+                &audioRuntimeState_);
             if (audioRenderer_->Start() == FFFResult::Success) {
                 audioRenderer_->SetVolume(volume_, muted_);
                 audioRenderer_->Reset(position);
@@ -796,6 +822,25 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
             std::max<std::int64_t>(0, limit - sampledPosition));
         if (output.duration100ns > 0) output.position100ns = std::min(output.position100ns, output.duration100ns);
     }
+    output.bufferedAudio100ns = audioRuntimeState_.buffered100ns.load(std::memory_order_relaxed);
+    output.audioUnderruns = audioRuntimeState_.underruns.load(std::memory_order_relaxed);
+    output.audioTimestampJitterFrames = audioRuntimeState_.timestampJitterFrames.load(std::memory_order_relaxed);
+    output.audioDiscontinuities = audioRuntimeState_.discontinuities.load(std::memory_order_relaxed);
+    output.audioInsertedSilenceFrames = audioRuntimeState_.insertedSilenceFrames.load(std::memory_order_relaxed);
+    output.audioDroppedOverlapFrames = audioRuntimeState_.droppedOverlapFrames.load(std::memory_order_relaxed);
+    if (output.selectedAudioStream >= 0 || output.isExternalAudio != 0)
+        output.audioPosition100ns = output.position100ns;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerSession::GetAudioPeakLevels(FFF3FPAudioPeakLevels& output) const noexcept {
+    if (output.size < sizeof(FFF3FPAudioPeakLevels) || output.version != 1)
+        return FFFResult::InvalidArgument;
+    output.channelCount = 0;
+    output.reserved = 0;
+    std::fill(std::begin(output.values), std::end(output.values), 0.0f);
+    output.channelCount = audioRuntimeState_.Copy(output.values,
+        static_cast<std::uint32_t>(std::size(output.values)));
     return FFFResult::Success;
 }
 std::string PlayerSession::MediaInfo() const { std::lock_guard lock(mutex_); return mediaInfoJson_; }
@@ -979,7 +1024,8 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     }
     if (audioStream_ >= 0 && OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success) audioStream_ = -1;
     if (audioStream_ >= 0) {
-        audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_);
+        audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_,
+            &audioRuntimeState_);
         const auto result = audioRenderer_->Start();
         if (result != FFFResult::Success) { Fail(result, audioRenderer_->LastError(), "open-audio"); return; }
         audioRenderer_->SetVolume(volume_, muted_);
@@ -1745,7 +1791,7 @@ void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t req
     AVCodecContext* replacementDecoder = nullptr;
     const auto result = OpenDecoder(replacementFormat, index, false, &replacementDecoder);
     if (result != FFFResult::Success) { avformat_close_input(&replacementFormat); ReportError(result, "Could not open the external audio stream.", "external-audio"); return; }
-    if (!audioRenderer_) { audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_); if (audioRenderer_->Start() != FFFResult::Success) { avcodec_free_context(&replacementDecoder); avformat_close_input(&replacementFormat); ReportError(FFFResult::DeviceFailure, audioRenderer_->LastError(), "external-audio"); audioRenderer_.reset(); return; } audioRenderer_->SetVolume(volume_, muted_); }
+    if (!audioRenderer_) { audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_, &audioRuntimeState_); if (audioRenderer_->Start() != FFFResult::Success) { avcodec_free_context(&replacementDecoder); avformat_close_input(&replacementFormat); ReportError(FFFResult::DeviceFailure, audioRenderer_->LastError(), "external-audio"); audioRenderer_.reset(); return; } audioRenderer_->SetVolume(volume_, muted_); }
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); if (externalFormat_) avformat_close_input(&externalFormat_);
     externalFormat_ = replacementFormat; externalAudioDecoder_ = replacementDecoder; externalAudioStream_ = index;
     externalAudioOffset100ns_ = offset; externalAudioPath_ = std::move(path);

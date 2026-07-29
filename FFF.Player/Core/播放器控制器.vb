@@ -192,6 +192,16 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Function
 
+    Friend Function 读取音频峰值() As Single()
+        Try
+            Return If(会话?.读取音频峰值(), Array.Empty(Of Single)())
+        Catch ex As ObjectDisposedException
+            Return Array.Empty(Of Single)()
+        Catch ex As 播放器异常
+            Return Array.Empty(Of Single)()
+        End Try
+    End Function
+
     Public Function 安全读取媒体信息() As 媒体信息
         Try
             Return 会话?.当前媒体信息
@@ -572,6 +582,10 @@ Public NotInheritable Class 播放器控制器
         Dim 新模式 = If(当前WASAPI模式 = WASAPI共享模式.共享, WASAPI共享模式.独占, WASAPI共享模式.共享)
         Try
             目标.设置WASAPI独占模式(新模式 = WASAPI共享模式.独占)
+            ' 这是用户的目标模式。先同步记录，设备事件会在成功或回退后
+            ' 再校正实际模式，也避免紧接着打开文件时仍按旧共享状态处理。
+            当前WASAPI模式 = 新模式
+            RaiseEvent 状态已变化(Me, EventArgs.Empty)
         Catch ex As 播放器异常
             RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法切换 WASAPI 模式"))
         End Try
@@ -599,10 +613,24 @@ Public NotInheritable Class 播放器控制器
         End Try
 
         Dim 候选会话 As 播放器会话 = Nothing
+        Dim 原会话 = 会话
+        Dim 保留WASAPI模式 = 当前WASAPI模式
+        Dim 已临时释放独占 = False
+        Dim 打开异常 As Exception = Nothing
         Try
-            If 已释放 OrElse 此次取消.IsCancellationRequested Then Return
-            正在切换会话 = True
-            RaiseEvent 状态已变化(Me, EventArgs.Empty)
+            Try
+                If 已释放 OrElse 此次取消.IsCancellationRequested Then Return
+                正在切换会话 = True
+                RaiseEvent 状态已变化(Me, EventArgs.Empty)
+
+                ' Windows 不允许另一个客户端在当前端点仍被旧会话独占时初始化。
+                ' 先让旧会话回到共享以保留其媒体作为失败回退；候选成功后释放
+                ' 旧会话，再把新会话切回用户选择的独占模式。
+                If 保留WASAPI模式 = WASAPI共享模式.独占 AndAlso 原会话 IsNot Nothing Then
+                    Await 设置会话WASAPI模式Async(原会话, False, 此次取消.Token)
+                    已临时释放独占 = True
+                    当前WASAPI模式 = 保留WASAPI模式
+                End If
 
             ' 色彩输出是片源状态，不是全局播放器状态。仅重建同一片源（例如切换
             ' 解码器）时保留用户选择；打开另一文件必须先以 SDR 映射启动，避免
@@ -624,13 +652,25 @@ Public NotInheritable Class 播放器控制器
             Dim 保留当前字幕 = 保留已加载字幕 AndAlso
                 String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase)
             释放当前会话(保留当前字幕)
+            已临时释放独占 = False
             会话 = 候选会话
             候选会话 = Nothing
             当前文件路径 = 路径
             当前解码器 = 快照.解码器
             当前色彩输出 = 候选色彩输出
             添加会话事件(会话)
-            If 当前WASAPI模式 = WASAPI共享模式.独占 Then 会话.设置WASAPI独占模式(True)
+            If 保留WASAPI模式 = WASAPI共享模式.独占 Then
+                Try
+                    Await 设置会话WASAPI模式Async(会话, True, 此次取消.Token)
+                Catch ex As 播放器异常
+                    ' 原生层已经恢复共享模式并通过会话错误事件报告原因；
+                    ' 新媒体仍可继续按共享模式播放。
+                Catch ex As TimeoutException
+                    ' 模式确认超时不应阻止已经打开的新媒体继续播放。
+                    RaiseEvent 播放错误(Me,
+                        New 播放器错误事件参数(ex.Message, "无法确认 WASAPI 独占模式"))
+                End Try
+            End If
             重绑输出窗口()
             If 恢复播放 Then 会话.播放()
 
@@ -644,11 +684,15 @@ Public NotInheritable Class 播放器控制器
                 开始自动加载弹幕(当前文件路径)
             End If
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
-        Catch ex As OperationCanceledException
-            ' 新请求或停止操作会主动取消当前打开过程。
-        Catch ex As Exception
-            If Not 已释放 AndAlso Not 此次取消.IsCancellationRequested Then
-                RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法播放媒体"))
+            Catch ex As OperationCanceledException
+                ' 新请求或停止操作会主动取消当前打开过程。
+            Catch ex As Exception
+                打开异常 = ex
+            End Try
+            If 已临时释放独占 Then Await 尝试恢复独占Async(原会话)
+            If 打开异常 IsNot Nothing AndAlso Not 已释放 AndAlso
+                Not 此次取消.IsCancellationRequested Then
+                RaiseEvent 播放错误(Me, New 播放器错误事件参数(打开异常.Message, "无法播放媒体"))
             End If
         Finally
             候选会话?.释放()
@@ -657,6 +701,53 @@ Public NotInheritable Class 播放器控制器
             If ReferenceEquals(会话操作取消, 此次取消) Then 会话操作取消 = Nothing
             此次取消.Dispose()
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
+        End Try
+    End Function
+
+    Private Async Function 设置会话WASAPI模式Async(目标 As 播放器会话, 独占 As Boolean,
+                                                   取消标记 As CancellationToken) As Task
+        Dim 完成源 As New TaskCompletionSource(Of Boolean)(TaskCreationOptions.RunContinuationsAsynchronously)
+        Dim 设备处理 As EventHandler(Of 播放器事件参数) =
+            Sub(sender, e)
+                Try
+                    Using 文档 = JsonDocument.Parse(e.详情JSON)
+                        Dim 模式值 As JsonElement
+                        If 文档.RootElement.TryGetProperty("exclusive", 模式值) AndAlso
+                            模式值.GetBoolean() = 独占 Then 完成源.TrySetResult(True)
+                    End Using
+                Catch
+                End Try
+            End Sub
+        Dim 错误处理 As EventHandler(Of 播放器事件参数) =
+            Sub(sender, e)
+                If e.详情JSON.Contains("audio-exclusive-mode", StringComparison.Ordinal) Then
+                    完成源.TrySetException(New 播放器异常(-1, 读取事件消息(e.详情JSON)))
+                End If
+            End Sub
+        AddHandler 目标.设备变化, 设备处理
+        AddHandler 目标.错误, 错误处理
+        Using 超时源 = CancellationTokenSource.CreateLinkedTokenSource(取消标记)
+            超时源.CancelAfter(TimeSpan.FromSeconds(10))
+            Using 取消注册 = 超时源.Token.Register(Sub() 完成源.TrySetCanceled(超时源.Token))
+                Try
+                    目标.设置WASAPI独占模式(独占)
+                    Await 完成源.Task
+                Catch ex As OperationCanceledException When Not 取消标记.IsCancellationRequested
+                    Throw New TimeoutException("等待 WASAPI 模式切换超时。", ex)
+                Finally
+                    RemoveHandler 目标.设备变化, 设备处理
+                    RemoveHandler 目标.错误, 错误处理
+                End Try
+            End Using
+        End Using
+    End Function
+
+    Private Async Function 尝试恢复独占Async(目标 As 播放器会话) As Task
+        If 已释放 OrElse 目标 Is Nothing OrElse Not ReferenceEquals(会话, 目标) Then Return
+        Try
+            Await 设置会话WASAPI模式Async(目标, True, CancellationToken.None)
+        Catch
+            ' 保留原媒体优先；设备拒绝恢复独占时由原生错误事件报告并留在共享。
         End Try
     End Function
 

@@ -78,6 +78,22 @@ Friend Structure 原生播放器快照
     Public 时间轴代次 As ULong
 End Structure
 
+<StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生音频峰值
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 声道数 As UInteger
+    Public 保留 As UInteger
+    Public 峰值1 As Single
+    Public 峰值2 As Single
+    Public 峰值3 As Single
+    Public 峰值4 As Single
+    Public 峰值5 As Single
+    Public 峰值6 As Single
+    Public 峰值7 As Single
+    Public 峰值8 As Single
+End Structure
+
 <Flags>
 Friend Enum 原生位图字幕标志 As UInteger
     无 = 0
@@ -313,6 +329,9 @@ Friend Module 播放器原生接口
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetSnapshot(播放器 As 播放器原生句柄, ByRef 快照 As 原生播放器快照) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetAudioPeakLevels(播放器 As 播放器原生句柄, ByRef 峰值 As 原生音频峰值) As 原生播放器结果
     End Function
 
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl)>

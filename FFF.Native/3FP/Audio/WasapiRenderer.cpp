@@ -45,8 +45,10 @@ std::int64_t QpcNow100ns() noexcept {
 }
 }
 
-PlayerWasapiRenderer::PlayerWasapiRenderer(std::wstring endpointId, const bool exclusive)
-    : endpointId_(std::move(endpointId)), exclusive_(exclusive), stopEvent_(nullptr), sampleEvent_(nullptr),
+PlayerWasapiRenderer::PlayerWasapiRenderer(std::wstring endpointId, const bool exclusive,
+    PlayerAudioRuntimeState* const runtimeState)
+    : endpointId_(std::move(endpointId)), exclusive_(exclusive), runtimeState_(runtimeState),
+      stopEvent_(nullptr), sampleEvent_(nullptr), controlEvent_(nullptr),
       initializationFinished_(false), initializationResult_(FFFResult::InvalidState), queuedBytes_(0),
       resampler_(nullptr),
       inputChannelLayout_{}, inputSampleRate_(0), inputSampleFormat_(-1),
@@ -66,7 +68,8 @@ FFFResult PlayerWasapiRenderer::Start() noexcept {
     if (running_.exchange(true)) return FFFResult::Success;
     stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     sampleEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (stopEvent_ == nullptr || sampleEvent_ == nullptr) {
+    controlEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (stopEvent_ == nullptr || sampleEvent_ == nullptr || controlEvent_ == nullptr) {
         running_ = false; SetError("Could not create WASAPI playback events."); return FFFResult::DeviceFailure;
     }
     try { thread_ = std::thread(&PlayerWasapiRenderer::RenderThread, this); }
@@ -77,9 +80,12 @@ FFFResult PlayerWasapiRenderer::Start() noexcept {
 }
 
 void PlayerWasapiRenderer::Stop() noexcept {
+    const auto hadResources = thread_.joinable() || stopEvent_ != nullptr ||
+        sampleEvent_ != nullptr || controlEvent_ != nullptr || resampler_ != nullptr;
     if (stopEvent_ != nullptr) SetEvent(stopEvent_);
     if (thread_.joinable()) thread_.join();
     running_ = false;
+    if (controlEvent_ != nullptr) { CloseHandle(controlEvent_); controlEvent_ = nullptr; }
     if (sampleEvent_ != nullptr) { CloseHandle(sampleEvent_); sampleEvent_ = nullptr; }
     if (stopEvent_ != nullptr) { CloseHandle(stopEvent_); stopEvent_ = nullptr; }
     if (resampler_ != nullptr) { swr_free(&resampler_); }
@@ -87,6 +93,7 @@ void PlayerWasapiRenderer::Stop() noexcept {
     inputSampleRate_ = 0; inputSampleFormat_ = -1;
     outputSampleRate_ = 0; outputChannels_ = 0; outputBlockAlign_ = 0;
     outputBitsPerSample_ = outputValidBitsPerSample_ = 0;
+    if (hadResources && runtimeState_ != nullptr) runtimeState_->ClearAll();
     std::lock_guard lock(mutex_);
     queue_.clear(); queuedBytes_ = 0; converted_.clear(); converted_.shrink_to_fit(); pendingMediaFrames_ = 0;
 }
@@ -166,7 +173,10 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
     const auto skipSamples = static_cast<int>(std::min<std::int64_t>(frame->nb_samples,
         av_rescale_rnd(preRollFrames + overlapFrames, frame->sample_rate,
             outputSampleRate_, AV_ROUND_UP)));
-    if (skipSamples >= frame->nb_samples) return FFFResult::Success;
+    if (skipSamples >= frame->nb_samples) {
+        PublishRuntimeDiagnostics();
+        return FFFResult::Success;
+    }
     const auto inputSamples = frame->nb_samples - skipSamples;
     const auto capacity = swr_get_out_samples(resampler_, inputSamples);
     if (capacity <= 0) return FFFResult::FfmpegFailure;
@@ -205,18 +215,21 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
             samples[index] = static_cast<std::int32_t>(std::llround(samples[index] * gain));
     }
     const auto gapBytes = static_cast<std::size_t>(gapFrames) * outputBlockAlign_;
-    std::lock_guard lock(mutex_);
-    // PlayerSession throttles production by media time. Keep the current decoded
-    // frame intact even when a codec emits a burst; rejecting after resampling
-    // would advance the resampler/timeline and silently create an audible hole.
-    AudioChunk chunk;
-    chunk.silenceBytes = gapBytes;
-    chunk.bytes = converted_;
-    queuedBytes_ += gapBytes + chunk.bytes.size();
-    queue_.push_back(std::move(chunk));
-    producedTimelineFrames_ += gapFrames + static_cast<std::uint64_t>(frames);
-    if (frames > 0) hasSubmittedAudio_ = true;
-    if (sampleEvent_ != nullptr) SetEvent(sampleEvent_);
+    {
+        std::lock_guard lock(mutex_);
+        // PlayerSession throttles production by media time. Keep the current decoded
+        // frame intact even when a codec emits a burst; rejecting after resampling
+        // would advance the resampler/timeline and silently create an audible hole.
+        AudioChunk chunk;
+        chunk.silenceBytes = gapBytes;
+        chunk.bytes = converted_;
+        queuedBytes_ += gapBytes + chunk.bytes.size();
+        queue_.push_back(std::move(chunk));
+        producedTimelineFrames_ += gapFrames + static_cast<std::uint64_t>(frames);
+        if (frames > 0) hasSubmittedAudio_ = true;
+    }
+    PublishRuntimeDiagnostics();
+    if (controlEvent_ != nullptr) SetEvent(controlEvent_);
     return FFFResult::Success;
 }
 
@@ -235,7 +248,8 @@ void PlayerWasapiRenderer::SetPaused(const bool paused) noexcept {
         clockSampleQpc100ns_ = now;
     }
     paused_ = paused;
-    if (sampleEvent_ != nullptr) SetEvent(sampleEvent_);
+    if (paused && runtimeState_ != nullptr) runtimeState_->ClearValues();
+    if (controlEvent_ != nullptr) SetEvent(controlEvent_);
 }
 void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
     {
@@ -260,7 +274,8 @@ void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
     underrunCount_ = 0; hasSubmittedAudio_ = false;
     timestampJitterCount_ = 0; discontinuityCount_ = 0;
     insertedSilenceFrames_ = 0; droppedOverlapFrames_ = 0;
-    if (sampleEvent_ != nullptr) SetEvent(sampleEvent_);
+    if (runtimeState_ != nullptr) runtimeState_->ResetDiagnostics();
+    if (controlEvent_ != nullptr) SetEvent(controlEvent_);
 }
 void PlayerWasapiRenderer::SetVolume(const float volume, const bool muted) noexcept {
     volume_.store(std::clamp(volume, 0.0f, 1.0f)); muted_.store(muted);
@@ -307,6 +322,48 @@ bool PlayerWasapiRenderer::OutputIsFloat() const noexcept { std::lock_guard lock
 std::string PlayerWasapiRenderer::LastError() const { std::lock_guard lock(errorMutex_); return lastError_; }
 void PlayerWasapiRenderer::SetError(std::string message) noexcept { try { std::lock_guard lock(errorMutex_); lastError_ = std::move(message); } catch (...) {} }
 
+void PlayerWasapiRenderer::UpdatePeakLevels(const std::uint8_t* const samples,
+    const std::uint32_t frames) noexcept {
+    if (runtimeState_ == nullptr || samples == nullptr || frames == 0 || outputChannels_ == 0) return;
+    const auto channels = std::min<std::uint32_t>(outputChannels_, PlayerAudioRuntimeState::MaximumChannels);
+    std::array<float, PlayerAudioRuntimeState::MaximumChannels> peaks{};
+    const auto sampleCount = static_cast<std::size_t>(frames) * outputChannels_;
+    if (outputFloat_) {
+        const auto* values = reinterpret_cast<const float*>(samples);
+        for (std::size_t index = 0; index < sampleCount; ++index) {
+            const auto value = std::isfinite(values[index]) ? std::abs(values[index]) : 0.0f;
+            const auto channel = static_cast<std::uint32_t>(index % outputChannels_);
+            if (channel < channels) peaks[channel] = std::max(peaks[channel], value);
+        }
+    } else if (outputBitsPerSample_ == 16) {
+        const auto* values = reinterpret_cast<const std::int16_t*>(samples);
+        for (std::size_t index = 0; index < sampleCount; ++index) {
+            const auto magnitude = static_cast<float>(std::abs(static_cast<std::int32_t>(values[index]))) / 32768.0f;
+            const auto channel = static_cast<std::uint32_t>(index % outputChannels_);
+            if (channel < channels) peaks[channel] = std::max(peaks[channel], magnitude);
+        }
+    } else {
+        const auto* values = reinterpret_cast<const std::int32_t*>(samples);
+        for (std::size_t index = 0; index < sampleCount; ++index) {
+            const auto magnitude = static_cast<float>(std::abs(static_cast<std::int64_t>(values[index]))) / 2147483648.0f;
+            const auto channel = static_cast<std::uint32_t>(index % outputChannels_);
+            if (channel < channels) peaks[channel] = std::max(peaks[channel], magnitude);
+        }
+    }
+    for (std::uint32_t channel = 0; channel < channels; ++channel)
+        runtimeState_->values[channel].store(std::clamp(peaks[channel], 0.0f, 1.0f), std::memory_order_relaxed);
+}
+
+void PlayerWasapiRenderer::PublishRuntimeDiagnostics() noexcept {
+    if (runtimeState_ == nullptr) return;
+    runtimeState_->buffered100ns.store(Buffered100ns(), std::memory_order_relaxed);
+    runtimeState_->underruns.store(underrunCount_.load(), std::memory_order_relaxed);
+    runtimeState_->timestampJitterFrames.store(timestampJitterCount_.load(), std::memory_order_relaxed);
+    runtimeState_->discontinuities.store(discontinuityCount_.load(), std::memory_order_relaxed);
+    runtimeState_->insertedSilenceFrames.store(insertedSilenceFrames_.load(), std::memory_order_relaxed);
+    runtimeState_->droppedOverlapFrames.store(droppedOverlapFrames_.load(), std::memory_order_relaxed);
+}
+
 void PlayerWasapiRenderer::RenderThread() noexcept {
     const auto comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool uninitialize = SUCCEEDED(comResult);
@@ -336,11 +393,21 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
     // endpoint format and the client owns the complete hardware period.
     WAVEFORMATEX* activeFormat = format;
     WAVEFORMATEXTENSIBLE exclusiveCandidate{};
-    REFERENCE_TIME bufferDuration = 1'000'000;
+    // Legacy shared-mode IAudioClient still lets us request a buffer duration.
+    // Three engine periods absorb normal scheduling jitter without making the
+    // device queue dominate the end-to-end playback latency.
+    REFERENCE_TIME bufferDuration = 500'000;
     REFERENCE_TIME periodicity = 0;
     DWORD streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
         AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
     AUDCLNT_SHAREMODE shareMode = AUDCLNT_SHAREMODE_SHARED;
+    REFERENCE_TIME sharedDefaultPeriod = 0;
+    REFERENCE_TIME sharedMinimumPeriod = 0;
+    if (SUCCEEDED(client->GetDevicePeriod(&sharedDefaultPeriod, &sharedMinimumPeriod)) &&
+        sharedDefaultPeriod > 0) {
+        bufferDuration = std::clamp(sharedDefaultPeriod * 3,
+            static_cast<REFERENCE_TIME>(300'000), static_cast<REFERENCE_TIME>(500'000));
+    }
     if (exclusive_) {
         const bool nativeFormatSupported = SUCCEEDED(client->IsFormatSupported(
             AUDCLNT_SHAREMODE_EXCLUSIVE, activeFormat, nullptr)) &&
@@ -435,6 +502,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         outputChannelMask_ = ChannelMask(activeFormat); outputFloat_ = IsFloatWaveFormat(activeFormat);
         initializationResult_ = FFFResult::Success; initializationFinished_ = true;
     }
+    if (runtimeState_ != nullptr) runtimeState_->SetChannels(activeFormat->nChannels);
     initializedCondition_.notify_all();
     UINT64 clockFrequency = 0;
     if (FAILED(clock->GetFrequency(&clockFrequency)) || clockFrequency == 0) {
@@ -443,6 +511,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
     }
     CoTaskMemFree(format); format = nullptr;
     bool clientStarted = false;
+    bool exclusiveBufferPrimed = false;
     bool starved = false;
     bool clockAnchorValid = false;
     UINT64 clockAnchorDevicePosition = 0;
@@ -474,11 +543,19 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         clockSampleQpc100ns_ = qpcPosition100ns != 0
             ? static_cast<std::int64_t>(qpcPosition100ns) : QpcNow100ns();
     };
-    HANDLE events[] = { stopEvent_, sampleEvent_ };
-    while (WaitForMultipleObjects(2, events, FALSE, 100) != WAIT_OBJECT_0) {
+    HANDLE events[] = { stopEvent_, sampleEvent_, controlEvent_ };
+    for (;;) {
+        const auto waitResult = WaitForMultipleObjects(3, events, FALSE, 100);
+        if (waitResult == WAIT_OBJECT_0 || waitResult == WAIT_FAILED) break;
+        const auto deviceEvent = waitResult == WAIT_OBJECT_0 + 1;
+        // In exclusive event mode the callback means that the complete endpoint
+        // buffer has become writable. Producer/control wakeups must never be
+        // mistaken for that notification.
+        if (exclusive_ && deviceEvent) exclusiveBufferPrimed = false;
         if (resetRequested_.exchange(false)) {
             if (clientStarted) client->Stop();
             client->Reset(); clientStarted = false;
+            exclusiveBufferPrimed = false;
             clockAnchorValid = false; clockAnchorDevicePosition = 0; deviceSubmittedFrames = 0;
             pendingMediaFrames_ = 0; playedMediaFrames_ = 0;
             {
@@ -493,16 +570,30 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             clientStarted = false;
         }
         updateMediaClock();
+        PublishRuntimeDiagnostics();
+        if (exclusive_) {
+            if (shouldPause) continue;
+            if (!clientStarted && exclusiveBufferPrimed) {
+                if (SUCCEEDED(client->Start())) clientStarted = true;
+                continue;
+            }
+            // Before Start, a control wakeup may prefill the empty endpoint.
+            // Once running, only a real WASAPI callback grants another buffer.
+            if (clientStarted && !deviceEvent) continue;
+        }
         UINT32 padding = 0;
-        if (FAILED(client->GetCurrentPadding(&padding))) continue;
-        if (exclusive_ && padding != 0) continue;
-        if (padding >= bufferFrames) {
+        // An exclusive event means one complete endpoint buffer is available.
+        // GetCurrentPadding describes the buffer still owned by the endpoint and
+        // must not be used as the shared-mode writable-frame gate here.
+        if (!exclusive_ && FAILED(client->GetCurrentPadding(&padding))) continue;
+        if (!exclusive_ && padding >= bufferFrames) {
             if (!shouldPause && !clientStarted && SUCCEEDED(client->Start())) clientStarted = true;
             continue;
         }
         const auto wantedFrames = exclusive_ ? bufferFrames : bufferFrames - padding;
         std::size_t copied = 0;
         UINT32 renderedFrames = 0;
+        UINT32 mediaFrames = 0;
         BYTE* destination = nullptr;
         {
             // Keep reset and consumption atomic with respect to the PCM bytes;
@@ -511,15 +602,24 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             copied = std::min<std::size_t>(static_cast<std::size_t>(wantedFrames) * outputBlockAlign_,
                 queuedBytes_);
             renderedFrames = static_cast<UINT32>(copied / outputBlockAlign_);
-            if (renderedFrames == 0) {
+            if (renderedFrames == 0 && (!exclusive_ || !clientStarted || !deviceEvent)) {
                 if (!shouldPause && clientStarted && hasSubmittedAudio_.load() && padding == 0 && !starved) {
                     ++underrunCount_;
                     starved = true;
                 }
+                if (padding == 0 && runtimeState_ != nullptr) runtimeState_->ClearValues();
+                if (runtimeState_ != nullptr)
+                    runtimeState_->underruns.store(underrunCount_.load(), std::memory_order_relaxed);
                 continue;
             }
-            starved = false;
+            if (renderedFrames == 0) {
+                if (hasSubmittedAudio_.load() && !starved) ++underrunCount_;
+                starved = true;
+            } else {
+                starved = false;
+            }
             copied = static_cast<std::size_t>(renderedFrames) * outputBlockAlign_;
+            mediaFrames = renderedFrames;
             // Exclusive event-driven render clients accept exactly one complete
             // endpoint buffer per callback. Preserve the real queued-byte count,
             // then silence-fill the unused tail when the final packet is short.
@@ -545,6 +645,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             if (submittedBytes > copied) std::memset(destination + copied, 0, submittedBytes - copied);
             queuedBytes_ -= copied;
         }
+        UpdatePeakLevels(destination, renderedFrames);
         UINT64 anchorCandidate = 0;
         bool hasAnchorCandidate = false;
         if (!clockAnchorValid) {
@@ -556,19 +657,21 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             }
         }
         if (SUCCEEDED(renderer->ReleaseBuffer(renderedFrames, 0))) {
+            if (exclusive_) exclusiveBufferPrimed = true;
             std::lock_guard lock(clockMutex_);
             if (activeClockEpoch == clockEpoch_) {
                 if (!clockAnchorValid && hasAnchorCandidate) {
                     clockAnchorDevicePosition = anchorCandidate;
                     clockAnchorValid = true;
                 }
-                deviceSubmittedFrames += renderedFrames;
+                deviceSubmittedFrames += mediaFrames;
                 pendingMediaFrames_ = deviceSubmittedFrames - playedMediaFrames_.load();
                 clockLimitPosition100ns_ = resetPosition100ns_.load() +
                     static_cast<std::int64_t>(deviceSubmittedFrames * 10'000'000 / outputSampleRate_);
             }
             if (!shouldPause && !clientStarted && SUCCEEDED(client->Start())) clientStarted = true;
         }
+        PublishRuntimeDiagnostics();
     }
     if (clientStarted) client->Stop();
     client->Reset();

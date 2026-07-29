@@ -120,6 +120,14 @@ struct FFF3FPSnapshot {
     std::uint64_t timelineGeneration;
 };
 
+struct FFF3FPAudioPeakLevels {
+    std::uint32_t size;
+    std::uint32_t version;
+    std::uint32_t channelCount;
+    std::uint32_t reserved;
+    float values[8];
+};
+
 using FFF3FPHandle = void*;
 using FFF3FPBitmapSubtitleHandle = void*;
 using FFF3FPAssSubtitleHandle = void*;
@@ -316,6 +324,8 @@ FFF3FP_API FFFResult FFF3FP_SetVolume(FFF3FPHandle player, float volume, std::ui
 FFF3FP_API FFFResult FFF3FP_SetTimedTextLayer(FFF3FPHandle player,
     const FFF3FPTimedTextLayer* layer) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetSnapshot(FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept;
+FFF3FP_API FFFResult FFF3FP_GetAudioPeakLevels(FFF3FPHandle player,
+    FFF3FPAudioPeakLevels* levels) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetTimedTextStatus(FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetDanmakuStatus(FFF3FPHandle player,

@@ -238,7 +238,8 @@ Public Class Form1
             Function() 播放控制器.当前字幕,
             Function() 播放控制器.当前弹幕,
             Function() 播放控制器.WASAPI模式,
-            Function() 画面控件.ClientSize)
+            Function() 画面控件.ClientSize,
+            AddressOf 播放控制器.读取音频峰值)
         窗口.Location = 窗口.居中于(Bounds)
         窗口.Show(Me)
     End Sub

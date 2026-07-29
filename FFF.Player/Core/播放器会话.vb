@@ -315,6 +315,17 @@ Public NotInheritable Class 播放器会话
         End Get
     End Property
 
+    Public Function 读取音频峰值() As Single()
+        Dim 值 As New 原生音频峰值 With {
+            .大小 = CUInt(Marshal.SizeOf(Of 原生音频峰值)()), .版本 = 1UI}
+        检查结果(播放器原生接口.FFF3FP_GetAudioPeakLevels(取得句柄(), 值))
+        Dim 全部 = {值.峰值1, 值.峰值2, 值.峰值3, 值.峰值4,
+                   值.峰值5, 值.峰值6, 值.峰值7, 值.峰值8}
+        If 值.声道数 = 0 Then Return Array.Empty(Of Single)()
+        Array.Resize(全部, Math.Min(CInt(值.声道数), 全部.Length))
+        Return 全部
+    End Function
+
     Public ReadOnly Property 当前媒体信息 As 媒体信息
         Get
             Dim JSON = 读取原生文本(AddressOf 播放器原生接口.FFF3FP_GetMediaInfo)

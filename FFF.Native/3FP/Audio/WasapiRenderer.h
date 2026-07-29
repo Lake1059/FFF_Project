@@ -6,6 +6,7 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 }
 
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <condition_variable>
@@ -19,9 +20,57 @@ extern "C" {
 struct AVFrame;
 struct SwrContext;
 
+struct PlayerAudioRuntimeState final {
+    static constexpr std::uint32_t MaximumChannels = 8;
+
+    PlayerAudioRuntimeState() noexcept { ClearAll(); }
+
+    void SetChannels(const std::uint32_t channels) noexcept {
+        for (auto& value : values) value.store(0.0f, std::memory_order_relaxed);
+        channelCount.store(std::min(channels, MaximumChannels), std::memory_order_release);
+    }
+
+    void ClearValues() noexcept {
+        for (auto& value : values) value.store(0.0f, std::memory_order_relaxed);
+    }
+
+    void ResetDiagnostics() noexcept {
+        buffered100ns.store(0, std::memory_order_relaxed);
+        underruns.store(0, std::memory_order_relaxed);
+        timestampJitterFrames.store(0, std::memory_order_relaxed);
+        discontinuities.store(0, std::memory_order_relaxed);
+        insertedSilenceFrames.store(0, std::memory_order_relaxed);
+        droppedOverlapFrames.store(0, std::memory_order_relaxed);
+        ClearValues();
+    }
+
+    void ClearAll() noexcept {
+        SetChannels(0);
+        ResetDiagnostics();
+    }
+
+    std::uint32_t Copy(float* output, const std::uint32_t capacity) const noexcept {
+        const auto count = std::min({channelCount.load(std::memory_order_acquire),
+            capacity, MaximumChannels});
+        for (std::uint32_t index = 0; index < count; ++index)
+            output[index] = values[index].load(std::memory_order_relaxed);
+        return count;
+    }
+
+    std::atomic<std::uint32_t> channelCount{0};
+    std::array<std::atomic<float>, MaximumChannels> values{};
+    std::atomic<std::int64_t> buffered100ns{0};
+    std::atomic<std::uint64_t> underruns{0};
+    std::atomic<std::uint64_t> timestampJitterFrames{0};
+    std::atomic<std::uint64_t> discontinuities{0};
+    std::atomic<std::uint64_t> insertedSilenceFrames{0};
+    std::atomic<std::uint64_t> droppedOverlapFrames{0};
+};
+
 class PlayerWasapiRenderer final {
 public:
-    explicit PlayerWasapiRenderer(std::wstring endpointId, bool exclusive = false);
+    explicit PlayerWasapiRenderer(std::wstring endpointId, bool exclusive = false,
+        PlayerAudioRuntimeState* runtimeState = nullptr);
     ~PlayerWasapiRenderer();
 
     FFFResult Start() noexcept;
@@ -53,12 +102,16 @@ private:
     };
     void RenderThread() noexcept;
     FFFResult EnsureResampler(const AVFrame* frame) noexcept;
+    void UpdatePeakLevels(const std::uint8_t* samples, std::uint32_t frames) noexcept;
+    void PublishRuntimeDiagnostics() noexcept;
     void SetError(std::string message) noexcept;
 
     std::wstring endpointId_;
     bool exclusive_;
+    PlayerAudioRuntimeState* runtimeState_;
     HANDLE stopEvent_;
     HANDLE sampleEvent_;
+    HANDLE controlEvent_;
     std::thread thread_;
     mutable std::mutex mutex_;
     mutable std::mutex clockMutex_;
