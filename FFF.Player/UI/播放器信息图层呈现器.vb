@@ -54,7 +54,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取弹幕 As Func(Of 弹幕资料库)
     Private ReadOnly 获取字幕状态 As Func(Of 定时文字状态)
     Private ReadOnly 获取弹幕状态 As Func(Of 定时文字状态)
-    Private ReadOnly 获取弹幕路径 As Func(Of String)
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
     Private ReadOnly 刷新定时器 As System.Windows.Forms.Timer
@@ -67,8 +66,10 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private 上次图层签名 As ULong
     Private 图层签名有效 As Boolean
     Private 上次视频帧次数 As ULong
+    Private 上次总丢帧数 As ULong
     Private 上次帧率采样时钟 As Long
     Private 最近实际帧率 As Double
+    Private 最近实时丢帧数 As ULong
     Private 已释放 As Boolean
 
     Friend Sub New(画面 As 播放器画面控件,
@@ -79,7 +80,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
                    弹幕提供器 As Func(Of 弹幕资料库),
                    字幕状态提供器 As Func(Of 定时文字状态),
                    弹幕状态提供器 As Func(Of 定时文字状态),
-                   弹幕路径提供器 As Func(Of String),
                    WASAPI模式提供器 As Func(Of WASAPI共享模式),
                    图层提交器 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single))
         ArgumentNullException.ThrowIfNull(画面)
@@ -91,7 +91,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取快照 = 快照提供器 : 获取媒体信息 = 媒体信息提供器 : 获取媒体路径 = 媒体路径提供器
         获取字幕 = 字幕提供器 : 获取弹幕 = 弹幕提供器
         获取字幕状态 = 字幕状态提供器 : 获取弹幕状态 = 弹幕状态提供器
-        获取弹幕路径 = 弹幕路径提供器 : 获取WASAPI模式 = WASAPI模式提供器
+        获取WASAPI模式 = WASAPI模式提供器
         提交图层 = 图层提交器
         刷新定时器 = New System.Windows.Forms.Timer With {.Interval = 200}
         AddHandler 刷新定时器.Tick, AddressOf 刷新定时器_Tick
@@ -170,8 +170,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim DPI缩放 = Math.Max(0.5F, 画面控件.DeviceDpi / 96.0F)
         Dim 边距 = 16.0F * DPI缩放
         Dim 行高 = Math.Max(18.0F * DPI缩放, 普通字体.GetHeight(图形) + 3.0F * DPI缩放)
-        Dim 信息宽度 = Math.Min(画布.Width - 边距 * 2.0F,
-                            Math.Max(320.0F * DPI缩放, 画布.Width * 0.72F))
+        Dim 信息宽度 = Math.Max(1.0F, 画布.Width - 边距 * 2.0F)
         Dim 信息 = 安全获取(获取媒体信息)
         Dim 媒体路径 = 安全获取(获取媒体路径)
         Dim 行 = 创建调试行(信息, 快照, 媒体路径)
@@ -199,37 +198,42 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 文件名 = 安全文件名(媒体路径)
         Dim 百分比 = If(快照.总时长 > TimeSpan.Zero,
                     Math.Clamp(快照.播放位置.TotalMilliseconds / 快照.总时长.TotalMilliseconds * 100.0R, 0, 100), 0)
-        结果.Add(配对行("文件名：", 空值(文件名), 黄色))
-        结果.Add(New 信息行(0,
-            New 文本段("当前时间：", 标签颜色),
-            New 文本段($"{格式化时间(快照.播放位置)} / {格式化时间(快照.总时长)} ({百分比:0}%)", 青色),
-            New 文本段($"  ·  {播放状态文本(快照.状态)}", 绿色)))
+        结果.Add(配对行("文件名：", 空值(文件名, "?"), 黄色))
+        结果.Add(配对行("时间戳：",
+            $"{格式化时间(快照.播放位置)} / {格式化时间(快照.总时长)} ({百分比:0}%)", 青色))
 
         If 视频 IsNot Nothing Then
-            Dim 解码器 = If(String.IsNullOrWhiteSpace(视频.硬件加速),
-                         If(快照.解码器 = 解码模式.GPU, "GPU", "CPU"), 视频.硬件加速)
-            结果.Add(配对行("视频解码器：", $"{视频.编码.ToUpperInvariant()}  ·  {解码器}", 品红, 8))
+            Dim 解码器 = If(快照.解码器 = 解码模式.GPU, "GPU",
+                         If(快照.解码器 = 解码模式.CPU, "CPU", "?"))
+            结果.Add(配对行("视频：", $"{空值(视频.编码, "?").ToUpperInvariant()} - {解码器}", 品红, 8))
             结果.Add(配对行("输入：", 视频输入(视频), 紫色))
-            结果.Add(配对行("格式：", 视频色彩(视频), 蓝色))
-            结果.Add(配对行("输出：", 视频输出(视频, 快照), 绿色))
-            结果.Add(配对行("渲染：", $"{画面控件.ClientSize.Width}×{画面控件.ClientSize.Height}  ·  {最近实际帧率:0.00} fps  ·  队列 {快照.视频队列帧数}  ·  丢帧 {快照.已丢弃视频帧数:N0}", 黄色))
+            结果.Add(配对行("色彩：", 视频色彩(视频), 蓝色))
+            结果.Add(配对行("输出：", 视频输出(快照, 画面控件.ClientSize), 绿色))
+            结果.Add(配对行("渲染：", 视频渲染(快照), 黄色))
         End If
 
         If 音频 IsNot Nothing Then
             Dim WASAPI = 安全获取(获取WASAPI模式)
-            结果.Add(配对行("音频解码器：", $"{音频.编码.ToUpperInvariant()}  ·  WASAPI {WASAPI}", 品红, 8))
+            结果.Add(配对行("音频：", $"{空值(音频.编码, "?").ToUpperInvariant()} - WASAPI {WASAPI}", 品红, 8))
             结果.Add(配对行("输入：", 音频输入(音频), 紫色))
-            结果.Add(配对行("输出：", 音频输出(音频), 绿色))
+            结果.Add(配对行("输出：", 音频输出(音频, 快照), 绿色))
         End If
 
-        Dim 字幕文本 = If(字幕 Is Nothing, "未加载",
-            $"{字幕.格式.ToString().ToUpperInvariant()}  ·  {字幕来源(字幕)}  ·  {字幕条目(字幕)}  ·  当前渲染 {If(字幕状态 Is Nothing, 0, 字幕状态.命令数):N0}")
-        Dim 弹幕路径 = 安全获取(获取弹幕路径)
-        Dim 弹幕文本 = If(弹幕 Is Nothing, "未加载",
-            $"B站 XML  ·  {空值(安全文件名(弹幕路径), "已加载")}  ·  {弹幕.数量:N0} 条  ·  当前渲染 {If(弹幕状态 Is Nothing, 0, 弹幕状态.命令数):N0}")
+        Dim 字幕文本 = $"{If(字幕 Is Nothing, "未加载", 字幕.格式.ToString().ToUpperInvariant())}" &
+            $"   总数量 {If(字幕 Is Nothing, "0", 字幕条目数(字幕))}" &
+            $"   当前正在渲染 {If(字幕状态 Is Nothing, 0, 字幕状态.命令数):N0}"
+        Dim 弹幕文本 = $"{If(弹幕 Is Nothing, "未加载", "哔哩哔哩 XML")}" &
+            $"   总数量 {If(弹幕 Is Nothing, 0, 弹幕.数量):N0}" &
+            $"   当前正在渲染 {If(弹幕状态 Is Nothing, 0, 弹幕状态.命令数):N0}"
         结果.Add(配对行("字幕：", 字幕文本, 青色, 8))
         结果.Add(配对行("弹幕：", 弹幕文本, 橙色))
         Return 结果
+    End Function
+
+    Friend Function 读取调试文本行(信息 As 媒体信息, 快照 As 播放器快照,
+                                媒体路径 As String) As IReadOnlyList(Of String)
+        Return 创建调试行(信息, 快照, 媒体路径).
+            Select(Function(行) String.Concat(行.文本段.Select(Function(段) 段.文本))).ToArray()
     End Function
 
     Private Sub 构建操作消息(图形 As Graphics, 画布 As Size)
@@ -303,60 +307,85 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 当前时钟 = Stopwatch.GetTimestamp()
         If 快照 Is Nothing OrElse 快照.状态 <> 播放状态.正在播放 Then
             上次视频帧次数 = If(快照 Is Nothing, 0UL, 快照.已呈现视频帧数)
-            上次帧率采样时钟 = 当前时钟 : 最近实际帧率 = 0
+            上次总丢帧数 = If(快照 Is Nothing, 0UL, 计算总丢帧数(快照))
+            上次帧率采样时钟 = 当前时钟 : 最近实际帧率 = 0 : 最近实时丢帧数 = 0
             Return
         End If
         If 上次帧率采样时钟 = 0 Then
-            上次视频帧次数 = 快照.已呈现视频帧数 : 上次帧率采样时钟 = 当前时钟
+            上次视频帧次数 = 快照.已呈现视频帧数
+            上次总丢帧数 = 计算总丢帧数(快照)
+            上次帧率采样时钟 = 当前时钟
             Return
         End If
         Dim 已过秒数 = CDbl(当前时钟 - 上次帧率采样时钟) / Stopwatch.Frequency
         If 已过秒数 < 0.85R Then Return
         最近实际帧率 = If(快照.已呈现视频帧数 >= 上次视频帧次数,
             (快照.已呈现视频帧数 - 上次视频帧次数) / 已过秒数, 0)
-        上次视频帧次数 = 快照.已呈现视频帧数 : 上次帧率采样时钟 = 当前时钟
+        Dim 总丢帧 = 计算总丢帧数(快照)
+        最近实时丢帧数 = If(总丢帧 >= 上次总丢帧数, 总丢帧 - 上次总丢帧数, 0UL)
+        上次视频帧次数 = 快照.已呈现视频帧数
+        上次总丢帧数 = 总丢帧
+        上次帧率采样时钟 = 当前时钟
     End Sub
 
     Private Shared Function 视频输入(流 As 媒体流信息) As String
-        Dim 位深 = If(流.位深度 > 0, $"  ·  {流.位深度} bit", String.Empty)
-        Return $"{空值(流.像素格式).ToUpperInvariant()}  ·  {流.宽度}×{流.高度}  ·  {流.平均帧率:0.###} fps{位深}  ·  {格式化比特率(流.比特率)}"
+        Dim 分辨率 = If(流.宽度 > 0 AndAlso 流.高度 > 0, $"{流.宽度}x{流.高度}", "?")
+        Dim 帧率 = If(流.平均帧率 > 0, $"{流.平均帧率:0.###}fps", "?")
+        Return $"格式 {空值(流.像素格式, "?").ToUpperInvariant()}" &
+            $"   分辨率 {分辨率}   帧率 {帧率}   平均码率 {格式化比特率(流.比特率)}"
     End Function
 
     Private Shared Function 视频色彩(流 As 媒体流信息) As String
-        Dim HDR = If(String.IsNullOrWhiteSpace(流.HDR格式), If(流.是HDR, "HDR", "SDR"), 流.HDR格式)
-        Return $"{空值(流.色度抽样)}  ·  {色彩范围(流.色彩范围)}  ·  {色彩原色(流.色彩原色)} / {色彩传递(流.色彩传递)} / {色彩空间(流.色彩空间)}  ·  {HDR}"
+        Return $"采样 {格式化色度抽样(流.色度抽样)}" &
+            $"   颜色矩阵 {色彩空间(流.色彩空间)}" &
+            $"   色域 {色彩原色(流.色彩原色)}" &
+            $"   传输特性 {色彩传递(流.色彩传递)}" &
+            $"   范围 {色彩范围(流.色彩范围)}"
     End Function
 
-    Private Shared Function 视频输出(流 As 媒体流信息, 快照 As 播放器快照) As String
-        Dim 表面 = 空值(流.解码表面像素格式, 流.解码输出像素格式)
-        Dim 位深 = If(快照.视频输出位深度 > 0, $"{快照.视频输出位深度} bit", "—")
-        Return $"{表面.ToUpperInvariant()}  ·  {位深}  ·  {色彩模式文本(快照.实际色彩模式)}"
+    Private Shared Function 视频输出(快照 As 播放器快照, 输出大小 As Size) As String
+        Dim 分辨率 = If(输出大小.Width > 0 AndAlso 输出大小.Height > 0,
+                     $"{输出大小.Width}x{输出大小.Height}", "?")
+        Return $"格式 {视频输出格式(快照.视频输出位深度)}" &
+            $"   分辨率 {分辨率}   色彩模式 {色彩模式文本(快照.实际色彩模式)}"
+    End Function
+
+    Private Function 视频渲染(快照 As 播放器快照) As String
+        Dim 帧率 = If(最近实际帧率 > 0, $"{最近实际帧率:0.00}fps", "?")
+        Return $"帧率 {帧率}   缓冲池 {快照.视频队列帧数}帧" &
+            $"   实时丢帧 {最近实时丢帧数:N0}   总丢帧 {计算总丢帧数(快照):N0}"
+    End Function
+
+    Private Shared Function 计算总丢帧数(快照 As 播放器快照) As ULong
+        If ULong.MaxValue - 快照.已丢弃视频帧数 < 快照.已合并视频帧数 Then Return ULong.MaxValue
+        Return 快照.已丢弃视频帧数 + 快照.已合并视频帧数
     End Function
 
     Private Shared Function 音频输入(流 As 媒体流信息) As String
         Dim 位深 = If(流.原始采样位数 > 0, 流.原始采样位数, 流.编码采样位数)
-        Return $"{空值(流.采样格式).ToUpperInvariant()}  ·  {流.采样率:N0} Hz  ·  {流.声道数} 声道  ·  {If(位深 > 0, 位深 & " bit", "—")}  ·  {格式化比特率(流.比特率)}"
+        Return $"采样 {If(流.采样率 > 0, 流.采样率 & "Hz", "?")}" &
+            $"   位深 {If(位深 > 0, 位深 & "bit", "?")}" &
+            $"   声道数 {If(流.声道数 > 0, 流.声道数.ToString(), "?")}" &
+            $"   平均码率 {格式化比特率(流.比特率)}"
     End Function
 
-    Private Shared Function 音频输出(流 As 媒体流信息) As String
+    Private Shared Function 音频输出(流 As 媒体流信息, 快照 As 播放器快照) As String
         Dim 采样率 = If(流.输出采样率 > 0, 流.输出采样率, 流.采样率)
         Dim 声道 = If(流.输出声道数 > 0, 流.输出声道数, 流.声道数)
         Dim 位深 = If(流.输出有效采样位数 > 0, 流.输出有效采样位数, 流.输出采样位数)
-        Dim 格式 = If(流.输出浮点, "Float PCM", "PCM")
-        Return $"{格式}  ·  {采样率:N0} Hz  ·  {声道} 声道  ·  {If(位深 > 0, 位深 & " bit", "—")}"
+        Dim 格式 = If(流.输出浮点, "FLOAT PCM", "PCM")
+        Return $"格式 {格式}   采样 {If(采样率 > 0, 采样率 & "Hz", "?")}" &
+            $"   位深 {If(位深 > 0, 位深 & "bit", "?")}" &
+            $"   声道数 {If(声道 > 0, 声道.ToString(), "?")}" &
+            $"   实时延迟 {快照.音频缓冲时长.TotalMilliseconds:0.0}ms"
     End Function
 
-    Private Shared Function 字幕来源(字幕 As 外部字幕轨道) As String
-        If 字幕.是内嵌 Then Return $"内嵌流 #{字幕.流索引}"
-        Return 空值(安全文件名(字幕.路径), "外部字幕")
-    End Function
-
-    Private Shared Function 字幕条目(字幕 As 外部字幕轨道) As String
-        Return If(字幕.条目数 >= 0, $"{字幕.条目数:N0} 条", "按需解码")
+    Private Shared Function 字幕条目数(字幕 As 外部字幕轨道) As String
+        Return If(字幕.条目数 >= 0, 字幕.条目数.ToString("N0"), "?")
     End Function
 
     Private Shared Function 格式化比特率(值 As Long) As String
-        If 值 <= 0 Then Return "—"
+        If 值 <= 0 Then Return "?"
         If 值 >= 1_000_000 Then Return $"{值 / 1_000_000.0R:0.##} Mbps"
         Return $"{值 / 1000.0R:0.##} kbps"
     End Function
@@ -364,17 +393,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private Shared Function 格式化时间(值 As TimeSpan) As String
         If 值 < TimeSpan.Zero Then 值 = TimeSpan.Zero
         Return $"{CInt(Math.Floor(值.TotalHours)):00}:{值.Minutes:00}:{值.Seconds:00}"
-    End Function
-
-    Private Shared Function 播放状态文本(状态 As 播放状态) As String
-        Select Case 状态
-            Case 播放状态.正在播放 : Return "播放中"
-            Case 播放状态.已暂停 : Return "已暂停"
-            Case 播放状态.播放结束 : Return "播放结束"
-            Case 播放状态.就绪 : Return "就绪"
-            Case 播放状态.正在打开 : Return "正在打开"
-            Case Else : Return 状态.ToString()
-        End Select
     End Function
 
     Private Shared Function 色彩模式文本(模式 As 色彩输出模式) As String
@@ -386,35 +404,48 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Function
 
     Private Shared Function 色彩范围(值 As Integer) As String
-        Return If(值 = 1, "tv", If(值 = 2, "pc", "range?"))
+        Return If(值 = 1, "Limited", If(值 = 2, "Full", "?"))
     End Function
 
     Private Shared Function 色彩原色(值 As Integer) As String
         Select Case 值
-            Case 1 : Return "bt709"
-            Case 9 : Return "bt2020"
-            Case 12 : Return "smpte432"
-            Case Else : Return "primaries?"
+            Case 1 : Return "BT.709"
+            Case 9 : Return "BT.2020"
+            Case 12 : Return "P3-D65"
+            Case Else : Return "?"
         End Select
     End Function
 
     Private Shared Function 色彩传递(值 As Integer) As String
         Select Case 值
-            Case 1 : Return "bt709"
+            Case 1 : Return "BT.709"
             Case 13 : Return "sRGB"
-            Case 16 : Return "smpte2084"
+            Case 16 : Return "PQ"
             Case 18 : Return "HLG"
-            Case Else : Return "transfer?"
+            Case Else : Return "?"
         End Select
     End Function
 
     Private Shared Function 色彩空间(值 As Integer) As String
         Select Case 值
-            Case 1 : Return "bt709"
-            Case 5, 6 : Return "bt601"
-            Case 9 : Return "bt2020nc"
-            Case 10 : Return "bt2020c"
-            Case Else : Return "matrix?"
+            Case 1 : Return "BT.709"
+            Case 5, 6 : Return "BT.601"
+            Case 9, 10 : Return "BT.2020"
+            Case Else : Return "?"
+        End Select
+    End Function
+
+    Private Shared Function 格式化色度抽样(值 As String) As String
+        If String.IsNullOrWhiteSpace(值) Then Return "?"
+        Return 值.Replace(":"c, String.Empty).Replace("-"c, String.Empty).Replace(" "c, String.Empty)
+    End Function
+
+    Private Shared Function 视频输出格式(位深 As Integer) As String
+        Select Case 位深
+            Case 8 : Return "BGRA8 (8bit)"
+            Case 10 : Return "RGB10A2 (10bit)"
+            Case 16 : Return "RGBA16F (16bit)"
+            Case Else : Return "?"
         End Select
     End Function
 

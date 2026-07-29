@@ -31,13 +31,41 @@ Friend Module Program
         Public 输出蓝 As Single
     End Structure
 
+    <StructLayout(LayoutKind.Sequential)>
+    Private Structure 原生定时文字栅格诊断
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 描边宽度 As Single
+        Public 阴影X偏移 As Single
+        Public 阴影Y偏移 As Single
+        Public 几何笔宽 As Single
+        Public 左外扩 As Single
+        Public 上外扩 As Single
+        Public 右外扩 As Single
+        Public 下外扩 As Single
+        Public 阴影角度 As Single
+        Public 自然对称渲染 As UInteger
+        Public 灰度抗锯齿 As UInteger
+        Public 禁用像素吸附 As UInteger
+        Public 仅向外描边 As UInteger
+    End Structure
+
     <DllImport("FFF.Native.dll", CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Private Function FFF3FP_EvaluateColorTransform(ByRef 变换 As 原生色彩变换) As Integer
+    End Function
+
+    <DllImport("FFF.Native.dll", CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Private Function FFF3FP_EvaluateTimedTextRasterization(ByRef 诊断 As 原生定时文字栅格诊断) As Integer
     End Function
 
     <STAThread>
     Public Function Main(参数 As String()) As Integer
         Try
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--timed-text-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试定时文字精确渲染合同()
+                Console.WriteLine("弹幕边界、连续小数位移、Seek、外描边与阴影精确诊断通过。")
+                Return 0
+            End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--gpu-decode-matrix", StringComparison.OrdinalIgnoreCase) Then
                 测试GPU解码矩阵(Path.GetFullPath(参数(1)))
                 Console.WriteLine("GPU 解码规格接受与 CPU 回退矩阵通过。")
@@ -85,6 +113,11 @@ Friend Module Program
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--volume-interaction-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试音量交互()
                 Console.WriteLine("音量滑块、画面滚轮与操作提示合并回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--information-overlay-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试信息层交互与文本()
+                Console.WriteLine("媒体信息按钮左右键与信息层逐字段精确回归通过。")
                 Return 0
             End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--empty-layer-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -152,6 +185,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --clip-step-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --clip-focus-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --volume-interaction-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --information-overlay-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --empty-layer-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --gpu-decode-matrix <视频目录>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --stream-selector-regression <多流媒体>")
@@ -160,6 +194,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --subtitle-switch-regression <多字幕媒体>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sup-timeline-regression <字幕.sup>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --ass-render-benchmark")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --timed-text-regression")
                 Return 2
             End If
             Dim 视频路径 = Path.GetFullPath(参数(0))
@@ -568,32 +603,44 @@ Friend Module Program
             Application.DoEvents()
             Dim 标志 = BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic
             Dim 窗口类型 = GetType(Form1)
-            Dim 切换处理 = 窗口类型.GetMethod("MB_剪辑区间模式_Click", 标志)
             Dim 画面字段 = 窗口类型.GetField("画面控件", 标志)
-            Dim 模式字段 = 窗口类型.GetField("剪辑区间模式已启用", 标志)
+            Dim 控制器字段 = 窗口类型.GetField("剪辑区间控制器", 标志)
             Dim 模式按钮 = 窗口.Controls.Find("MB_剪辑区间模式", True).FirstOrDefault()
-            断言(切换处理 IsNot Nothing AndAlso 画面字段 IsNot Nothing AndAlso
-                   模式字段 IsNot Nothing AndAlso 模式按钮 IsNot Nothing,
-               "无法取得剪辑模式焦点测试所需的窗口控件。")
+            断言(画面字段 IsNot Nothing AndAlso 控制器字段 IsNot Nothing AndAlso 模式按钮 IsNot Nothing,
+                "无法取得剪辑模式焦点测试所需的窗口控件。")
             Dim 画面 = DirectCast(画面字段.GetValue(窗口), Control)
+            Dim 控制器 = DirectCast(控制器字段.GetValue(窗口), 播放器剪辑区间控制器)
             断言(画面 IsNot Nothing, "播放器画面尚未在窗口加载时创建。")
+            断言(控制器 IsNot Nothing, "独立剪辑区间控制器尚未创建。")
+            断言(窗口类型.GetField("剪辑区间模式已启用", 标志) Is Nothing AndAlso
+                   窗口类型.GetField("剪辑区间进度条", 标志) Is Nothing AndAlso
+                   窗口类型.GetMethod("MB_剪辑区间模式_Click", 标志) Is Nothing,
+                "剪辑区间状态或按钮处理仍残留在 Form1。")
 
             断言(Not 模式按钮.TabStop, "剪辑模式按钮仍参与键盘焦点导航。")
+            Dim 点击入口 = 模式按钮.GetType().GetMethod("OnClick", 标志)
+            Dim 方向键入口 = 窗口类型.GetMethod("处理方向键快捷键", 标志)
+            Dim 界面呈现器 = DirectCast(窗口类型.GetField("界面呈现器", 标志)?.GetValue(窗口), 播放器界面呈现器)
+            Dim 精确时间戳字段 = GetType(播放器界面呈现器).GetField("显示精确时间戳", 标志)
+            断言(点击入口 IsNot Nothing AndAlso 方向键入口 IsNot Nothing AndAlso
+                   界面呈现器 IsNot Nothing AndAlso 精确时间戳字段 IsNot Nothing,
+                "无法验证剪辑模式 AddHandler 或时间戳事件绑定。")
             For Each 预期模式 In {True, False}
                 模式按钮.Focus()
-                切换处理.Invoke(窗口, {窗口, EventArgs.Empty})
+                点击入口.Invoke(模式按钮, {EventArgs.Empty})
                 Application.DoEvents()
-                断言(CBool(模式字段.GetValue(窗口)) = 预期模式,
-                   "剪辑模式字段没有在按钮点击时立即更新。")
+                断言(控制器.模式已启用 = 预期模式,
+                   "AddHandler 没有在按钮点击时更新独立剪辑模式。")
+                断言(CBool(精确时间戳字段.GetValue(界面呈现器)) = 预期模式,
+                   "剪辑模式变化事件没有同步时间戳精度。")
+                Dim 剪辑快捷键已处理 = CBool(方向键入口.Invoke(窗口, {Keys.Control Or Keys.Left}))
+                断言(剪辑快捷键已处理 = 预期模式,
+                    "方向键入口没有通过 AddHandler 按剪辑模式接管关键帧快捷键。")
                 断言(画面.CanFocus AndAlso 画面.Focused AndAlso ReferenceEquals(窗口.ActiveControl, 画面),
-                   "切换剪辑模式后，键盘焦点没有立即返回视频画面。")
+                    "切换剪辑模式后，键盘焦点没有立即返回视频画面。")
             Next
 
-            Dim 时间轴字段 = 窗口类型.GetField("剪辑区间进度条", 标志)
-            Dim 媒体打开处理 = 窗口类型.GetMethod("播放控制器_媒体已打开", 标志)
-            断言(时间轴字段 IsNot Nothing AndAlso 媒体打开处理 IsNot Nothing,
-               "无法取得剪辑区间保留测试所需的窗口成员。")
-            Dim 时间轴 = 时间轴字段.GetValue(窗口)
+            Dim 时间轴 = 控制器.进度条
             Dim 时间轴类型 = 时间轴.GetType()
             Dim 更新播放状态 = 时间轴类型.GetMethod("更新播放状态", 标志)
             Dim 设为入点 = 时间轴类型.GetMethod("设为入点", 标志)
@@ -609,16 +656,14 @@ Friend Module Program
             更新播放状态.Invoke(时间轴, {TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10)})
             设为入点.Invoke(时间轴, {入点})
             设为出点.Invoke(时间轴, {出点})
-            媒体打开处理.Invoke(窗口,
-                {窗口, New 播放器媒体事件参数("same.mp4", Nothing, Nothing, True)})
+            控制器.媒体已打开(窗口, New 播放器媒体事件参数("same.mp4", Nothing, Nothing, True))
             断言(DirectCast(入点属性.GetValue(时间轴), TimeSpan) = 入点 AndAlso
                    DirectCast(出点属性.GetValue(时间轴), TimeSpan) = 出点,
-               "同一媒体切换解码模式后没有保留出入点。")
+                "同一媒体切换解码模式后没有保留出入点。")
 
-            媒体打开处理.Invoke(窗口,
-                {窗口, New 播放器媒体事件参数("other.mp4", Nothing, Nothing, False)})
+            控制器.媒体已打开(窗口, New 播放器媒体事件参数("other.mp4", Nothing, Nothing, False))
             断言(入点属性.GetValue(时间轴) Is Nothing AndAlso 出点属性.GetValue(时间轴) Is Nothing,
-               "真正打开另一媒体时没有清除出入点。")
+                "真正打开另一媒体时没有清除出入点。")
             窗口.Close()
         End Using
     End Sub
@@ -665,6 +710,122 @@ Friend Module Program
             信息呈现器.显示操作信息("重复提示")
             信息呈现器.显示操作信息("重复提示")
             断言(消息.Count = 2, "完全相同的操作提示没有自动合并。")
+            窗口.Close()
+        End Using
+    End Sub
+
+    Private Sub 测试信息层交互与文本()
+        测试信息层精确文本()
+        测试媒体信息按钮左右键()
+    End Sub
+
+    Private Sub 测试信息层精确文本()
+        Dim 文档 = SRT字幕解析器.解析(New StringReader(
+            "1" & vbCrLf & "00:00:01,000 --> 00:00:02,000" & vbCrLf & "一" & vbCrLf & vbCrLf &
+            "2" & vbCrLf & "00:00:03,000 --> 00:00:04,000" & vbCrLf & "二"))
+        Using 字幕 As New 外部字幕轨道("C:\diagnostic\secret.srt", 外部字幕格式.SRT,
+            New SRT字幕帧生成器(文档, New SRT字幕样式()), Nothing)
+            Dim 弹幕 As New 弹幕资料库({
+                New 弹幕项目(TimeSpan.FromSeconds(1), 弹幕类型.常规滚动, 1, 25, &HFFFFFFFFUI,
+                    0, 0, "a", 1, "一"),
+                New 弹幕项目(TimeSpan.FromSeconds(2), 弹幕类型.常规滚动, 1, 25, &HFFFFFFFFUI,
+                    0, 0, "b", 2, "二")})
+            Dim 字幕状态 As New 定时文字状态(New 原生定时文字状态 With {.命令数 = 1UI})
+            Dim 弹幕状态 As New 定时文字状态(New 原生定时文字状态 With {.命令数 = 2UI})
+            Dim 信息 As New 媒体信息()
+            信息.流.Add(New 媒体流信息 With {
+                .索引 = 0, .类型 = "video", .编码 = "av1", .像素格式 = "yuv420p10le",
+                .宽度 = 1920, .高度 = 1080, .平均帧率分子 = 24000, .平均帧率分母 = 1001,
+                .比特率 = 5_000_000, .色度抽样 = "4:2:0", .色彩空间 = 9,
+                .色彩原色 = 9, .色彩传递 = 16, .色彩范围 = 1})
+            信息.流.Add(New 媒体流信息 With {
+                .索引 = 1, .类型 = "audio", .编码 = "flac", .采样率 = 48000,
+                .原始采样位数 = 24, .声道数 = 2, .比特率 = 1_411_200,
+                .输出采样率 = 48000, .输出有效采样位数 = 32, .输出声道数 = 2,
+                .输出浮点 = True})
+            Dim 快照 As New 播放器快照(New 原生播放器快照 With {
+                .状态 = CUInt(播放状态.正在播放), .解码器 = CUInt(解码模式.CPU),
+                .实际色彩模式 = CUInt(色彩输出模式.映射到SDR),
+                .位置100纳秒 = TimeSpan.FromHours(1).Ticks + TimeSpan.FromMinutes(2).Ticks + TimeSpan.FromSeconds(3).Ticks,
+                .时长100纳秒 = TimeSpan.FromHours(2).Ticks, .当前视频流 = 0, .当前音频流 = 1,
+                .视频队列帧数 = 3UI, .已丢弃视频帧数 = 7UL, .已合并视频帧数 = 5UL,
+                .视频输出位深度 = 10UI,
+                .音频缓冲100纳秒 = TimeSpan.FromMilliseconds(25).Ticks})
+
+            Using 画面 As New 播放器画面控件 With {.ClientSize = New Size(2560, 1440)}
+                Using 呈现器 As New 播放器信息图层呈现器(画面,
+                    Function() 快照, Function() 信息, Function() "C:\media\movie.mkv",
+                    Function() 字幕, Function() 弹幕, Function() 字幕状态, Function() 弹幕状态,
+                    Function() WASAPI共享模式.独占,
+                    Sub(size, commands, sequence, frameRate) Return)
+                    Dim 标志 = BindingFlags.Instance Or BindingFlags.NonPublic
+                    GetType(播放器信息图层呈现器).GetField("最近实际帧率", 标志).SetValue(呈现器, 23.976R)
+                    GetType(播放器信息图层呈现器).GetField("最近实时丢帧数", 标志).SetValue(呈现器, 2UL)
+                    Dim 实际 = 呈现器.读取调试文本行(信息, 快照, "C:\media\movie.mkv")
+                    Dim 预期 As String() = {
+                        "文件名：movie.mkv",
+                        "时间戳：01:02:03 / 02:00:00 (52%)",
+                        "视频：AV1 - CPU",
+                        "输入：格式 YUV420P10LE   分辨率 1920x1080   帧率 23.976fps   平均码率 5 Mbps",
+                        "色彩：采样 420   颜色矩阵 BT.2020   色域 BT.2020   传输特性 PQ   范围 Limited",
+                        "输出：格式 RGB10A2 (10bit)   分辨率 2560x1440   色彩模式 映射 SDR",
+                        "渲染：帧率 23.98fps   缓冲池 3帧   实时丢帧 2   总丢帧 12",
+                        "音频：FLAC - WASAPI 独占",
+                        "输入：采样 48000Hz   位深 24bit   声道数 2   平均码率 1.41 Mbps",
+                        "输出：格式 FLOAT PCM   采样 48000Hz   位深 32bit   声道数 2   实时延迟 25.0ms",
+                        "字幕：SRT   总数量 2   当前正在渲染 1",
+                        "弹幕：哔哩哔哩 XML   总数量 2   当前正在渲染 2"}
+                    断言(实际.SequenceEqual(预期),
+                       "信息层逐字段文本不符合中文标签、三空格分隔或字段白名单。" & vbCrLf &
+                       String.Join(vbCrLf, 实际))
+                    断言(Not 实际.Any(Function(x) x.Contains("secret.srt", StringComparison.OrdinalIgnoreCase) OrElse
+                                               x.Contains("secret.xml", StringComparison.OrdinalIgnoreCase) OrElse
+                                               x.Contains("·", StringComparison.Ordinal)),
+                       "信息层仍泄漏字幕/弹幕文件名或使用旧分隔符。")
+                End Using
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 测试媒体信息按钮左右键()
+        Using 窗口 As New Form1 With {.ShowInTaskbar = False, .Opacity = 0}
+            窗口.Show()
+            Application.DoEvents()
+            Dim 标志 = BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic
+            Dim 按钮 = 窗口.Controls.Find("MB_查看当前媒体信息", True).FirstOrDefault()
+            Dim 画面 = DirectCast(GetType(Form1).GetField("画面控件", 标志)?.GetValue(窗口), Control)
+            Dim 呈现器 = DirectCast(GetType(Form1).GetField("信息图层呈现器", 标志)?.GetValue(窗口),
+                               播放器信息图层呈现器)
+            Dim 点击入口 = 按钮?.GetType().GetMethod("OnMouseClick", 标志)
+            Dim 可见字段 = GetType(播放器信息图层呈现器).GetField("调试可见", 标志)
+            Dim 背景属性 = 按钮?.GetType().GetProperty("BackColor1", 标志)
+            断言(按钮 IsNot Nothing AndAlso 画面 IsNot Nothing AndAlso 呈现器 IsNot Nothing AndAlso
+                   点击入口 IsNot Nothing AndAlso 可见字段 IsNot Nothing AndAlso 背景属性 IsNot Nothing,
+                "无法取得媒体信息按钮左右键回归所需成员。")
+
+            Dim 原窗口数 = Application.OpenForms.OfType(Of Form媒体信息)().Count()
+            点击入口.Invoke(按钮, {New MouseEventArgs(MouseButtons.Left, 1, 4, 4, 0)})
+            Application.DoEvents()
+            Dim 已打开窗口 = Application.OpenForms.OfType(Of Form媒体信息)().ToArray()
+            断言(已打开窗口.Length = 原窗口数 + 1, "左键没有且仅没有打开一个媒体信息窗口。")
+            断言(Not CBool(可见字段.GetValue(呈现器)), "左键错误切换了播放器信息层。")
+            For Each 媒体窗口 In 已打开窗口
+                媒体窗口.Close()
+            Next
+            Application.DoEvents()
+
+            点击入口.Invoke(按钮, {New MouseEventArgs(MouseButtons.Right, 1, 4, 4, 0)})
+            Application.DoEvents()
+            断言(CBool(可见字段.GetValue(呈现器)), "右键没有打开播放器信息层。")
+            断言(DirectCast(背景属性.GetValue(按钮), Color).ToArgb() = Color.Transparent.ToArgb(),
+               "打开信息层后媒体信息按钮仍显示焦点背景色。")
+            断言(Application.OpenForms.OfType(Of Form媒体信息)().Count() = 原窗口数,
+               "右键错误打开了媒体信息窗口。")
+            断言(画面.CanFocus AndAlso 画面.Focused, "右键切换信息层后焦点没有返回视频画面。")
+
+            点击入口.Invoke(按钮, {New MouseEventArgs(MouseButtons.Right, 1, 4, 4, 0)})
+            Application.DoEvents()
+            断言(Not CBool(可见字段.GetValue(呈现器)), "第二次右键没有关闭播放器信息层。")
             窗口.Close()
         End Using
     End Sub
@@ -1318,7 +1479,7 @@ Friend Module Program
 
     Private Function 创建性能弹幕资料库() As 弹幕资料库
         Dim items = Enumerable.Range(0, 100).Select(
-            Function(index) New 弹幕项目(TimeSpan.Zero,
+            Function(index) New 弹幕项目(TimeSpan.FromSeconds(2),
                 弹幕类型.常规滚动, 1, 25.0F,
                 &HFFFFFFFFUI, 0, 0, "performance", index + 1,
                 $"弹幕压力 {index + 1:000} / danmaku performance"))
@@ -1453,6 +1614,172 @@ Friend Module Program
         Loop
     End Sub
 
+    Private Sub 测试定时文字精确渲染合同()
+        测试完整画布弹幕边界()
+        测试连续小数位移()
+        测试跳转不回溯弹幕()
+        测试文字效果命令与原生合同()
+        断言(播放器定时文字图层呈现器.计算刷新间隔毫秒(60) = 16 AndAlso
+           播放器定时文字图层呈现器.计算刷新间隔毫秒(120) = 8 AndAlso
+           播放器定时文字图层呈现器.计算刷新间隔毫秒(144) = 6,
+           "整数毫秒唤醒周期低于目标刷新率。")
+    End Sub
+
+    Private Sub 测试完整画布弹幕边界()
+        Dim 配置 As New 弹幕显示配置 With {
+            .基准视频高度 = 720.0F, .滚动速度 = 5000.0F,
+            .字号 = 36.0F, .描边宽度 = 1.0F, .阴影偏移 = 1.5F}
+        Dim 项目 As New 弹幕项目(TimeSpan.Zero, 弹幕类型.常规滚动, 1, 25.0F,
+            &HFFFFFFFFUI, 0, 0, "diagnostic", 1, "完整画布边界 diagnostic")
+        Dim 资料库 As New 弹幕资料库({项目})
+        Using 控件 As New 播放器画面控件()
+            Using 呈现器 As New 播放器定时文字图层呈现器(控件, Function() Nothing,
+                Function() Nothing, Sub(size, commands, sequence, frameRate) Return,
+                Function() 资料库, 配置, 定时文字图层内容.仅弹幕)
+                Dim 开始命令 = 呈现器.生成命令(New Size(1600, 720), 720UI, 720UI,
+                    TimeSpan.Zero, Nothing, 96.0F).Single()
+                Dim 开始X = 开始命令.X
+                Dim 文字宽度 = 开始命令.宽度
+                断言(Math.Abs(开始X - 1601.0F) < 0.01F,
+                   $"弹幕没有从完整 1600 px 画布外开始：X={开始X:F3}。")
+                Dim 高DPI开始X = 呈现器.生成命令(New Size(1600, 720), 720UI, 720UI,
+                    TimeSpan.Zero, Nothing, 144.0F).Single().X
+                断言(Math.Abs(高DPI开始X - 1601.0F) < 0.01F,
+                   $"150% DPI 下弹幕画布没有保持物理客户区宽度：X={高DPI开始X:F3}。")
+
+                Dim 黑边中X = 呈现器.生成命令(New Size(1600, 720), 720UI, 720UI,
+                    TimeSpan.FromMilliseconds(50), Nothing, 96.0F).Single().X
+                Const 视频右边界 As Single = 1160.0F
+                断言(黑边中X > 视频右边界 AndAlso 黑边中X < 1600.0F,
+                   $"弹幕没有连续穿过右侧可见黑边：X={黑边中X:F3}，视频右边界={视频右边界:F3}。")
+
+                Dim 左外扩 = 配置.描边宽度
+                Dim 右外扩 = 配置.描边宽度 + 配置.阴影偏移
+                Dim 结束秒 = (1600.0F + 文字宽度 + 左外扩 + 右外扩) / 配置.滚动速度
+                Dim 采样秒 = 0.1R
+                While 采样秒 < 结束秒 - 0.00002R
+                    呈现器.生成命令(New Size(1600, 720), 720UI, 720UI,
+                        TimeSpan.FromSeconds(采样秒), Nothing, 96.0F)
+                    采样秒 += 0.05R
+                End While
+                Dim 消失前 = 呈现器.生成命令(New Size(1600, 720), 720UI, 720UI,
+                    TimeSpan.FromSeconds(结束秒 - 0.00001R), Nothing, 96.0F)
+                断言(消失前.Count = 1 AndAlso
+                   消失前(0).X + 消失前(0).宽度 + 右外扩 > -0.1F,
+                   "弹幕在全部文字效果离开画布前被提前销毁。")
+                Dim 消失后 = 呈现器.生成命令(New Size(1600, 720), 720UI, 720UI,
+                    TimeSpan.FromSeconds(结束秒 + 0.00001R), Nothing, 96.0F)
+                断言(消失后.Count = 0, "弹幕全部离开画布后仍被保留。")
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 测试连续小数位移()
+        Dim 配置 As New 弹幕显示配置 With {
+            .基准视频高度 = 1080.0F, .滚动速度 = 181.3F, .目标帧率 = 60.0F}
+        Dim 资料库 As New 弹幕资料库({New 弹幕项目(TimeSpan.Zero, 弹幕类型.常规滚动,
+            1, 25.0F, &HFFFFFFFFUI, 0, 0, "diagnostic", 2, "小数位移")})
+        Dim 调度器 As New 弹幕调度器(资料库, 配置)
+        Dim 区域 As New 视频显示区域(0, 0, 1920, 1080, 1, 96)
+        Dim 结果 As New List(Of 弹幕绘制项)(1)
+        调度器.生成帧(TimeSpan.Zero, 区域, 结果)
+        结果.Clear()
+        调度器.生成帧(TimeSpan.FromMilliseconds(10), 区域, 结果)
+        Dim 十毫秒X = 结果.Single().X像素
+        Dim 十毫秒帧 = 调度器.当前帧序号
+        结果.Clear()
+        调度器.生成帧(TimeSpan.FromMilliseconds(14), 区域, 结果)
+        Dim 十四毫秒X = 结果.Single().X像素
+        Dim 十四毫秒帧 = 调度器.当前帧序号
+        Dim 实际位移 = 十毫秒X - 十四毫秒X
+        Dim 预期位移 = 配置.滚动速度 * 0.004F
+        断言(十毫秒帧 = 十四毫秒帧,
+           "诊断采样没有落在同一个传统量化帧，无法检出位置量化。")
+        断言(Math.Abs(实际位移 - 预期位移) < 0.001F,
+           $"弹幕位置仍被帧格量化：{实际位移:F6}/{预期位移:F6} px。")
+        断言(Math.Abs(十四毫秒X - MathF.Round(十四毫秒X)) > 0.001F,
+           $"弹幕 X 坐标被整数化：{十四毫秒X:F6}。")
+    End Sub
+
+    Private Sub 测试跳转不回溯弹幕()
+        Dim 配置 As New 弹幕显示配置 With {.基准视频高度 = 1080, .滚动速度 = 10.0F}
+        Dim 旧项目 As New 弹幕项目(TimeSpan.FromSeconds(1), 弹幕类型.常规滚动,
+            1, 25, &HFFFFFFFFUI, 0, 0, "diagnostic", 10, "跳转前旧弹幕")
+        Dim 新项目 As New 弹幕项目(TimeSpan.FromSeconds(5.2), 弹幕类型.常规滚动,
+            1, 25, &HFFFFFFFFUI, 0, 0, "diagnostic", 11, "跳转后的弹幕")
+        Dim 调度器 As New 弹幕调度器(New 弹幕资料库({旧项目, 新项目}), 配置)
+        Dim 区域 As New 视频显示区域(0, 0, 1920, 1080, 1, 96)
+        Dim 结果 As New List(Of 弹幕绘制项)()
+        调度器.生成帧(TimeSpan.FromSeconds(1), 区域, 结果)
+        断言(结果.Count = 1 AndAlso 结果(0).项目.弹幕编号 = 10, "跳转前测试弹幕未进入活动状态。")
+        结果.Clear()
+        调度器.生成帧(TimeSpan.FromSeconds(5), 区域, 结果)
+        断言(结果.Count = 0, "Seek 后仍回溯并恢复了当前位置之前的弹幕。")
+        结果.Clear()
+        调度器.生成帧(TimeSpan.FromSeconds(5.2), 区域, 结果)
+        断言(结果.Count = 1 AndAlso 结果(0).项目.弹幕编号 = 11,
+           "Seek 后没有从当前位置继续读取新弹幕。")
+
+        ' 时间轴代次来自实际完成的原生 DoSeek；即使只前跳 10 ms，也不能靠阈值漏判。
+        Dim 小幅新项目 As New 弹幕项目(TimeSpan.FromSeconds(1.02), 弹幕类型.常规滚动,
+            1, 25, &HFFFFFFFFUI, 0, 0, "diagnostic", 12, "小幅跳转后的弹幕")
+        Dim 小幅资料库 As New 弹幕资料库({旧项目, 小幅新项目})
+        Using 控件 As New 播放器画面控件()
+            Using 呈现器 As New 播放器定时文字图层呈现器(控件, Function() Nothing,
+                Function() Nothing, Sub(size, commands, sequence, frameRate) Return,
+                Function() 小幅资料库, 配置, 定时文字图层内容.仅弹幕)
+                Dim 跳转前 = 呈现器.生成命令(New Size(1920, 1080), 1920UI, 1080UI,
+                    TimeSpan.FromSeconds(1), Nothing, 96.0F, 7UL)
+                断言(跳转前.Count = 1, "小幅 Seek 诊断没有建立旧弹幕状态。")
+                Dim 跳转后 = 呈现器.生成命令(New Size(1920, 1080), 1920UI, 1080UI,
+                    TimeSpan.FromSeconds(1.01), Nothing, 96.0F, 8UL)
+                断言(跳转后.Count = 0, "时间轴代次变化后仍保留了小幅 Seek 前的弹幕。")
+                Dim 新弹幕 = 呈现器.生成命令(New Size(1920, 1080), 1920UI, 1080UI,
+                    TimeSpan.FromSeconds(1.02), Nothing, 96.0F, 8UL)
+                断言(新弹幕.Count = 1 AndAlso 新弹幕(0).文本 = 小幅新项目.文本,
+                   "小幅 Seek 后没有从新位置继续读取弹幕。")
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 测试文字效果命令与原生合同()
+        Const SRT内容 = "1" & vbLf & "00:00:00,000 --> 00:00:02,000" & vbLf & "SRT quality diagnostic" & vbLf
+        Dim 文档 = SRT字幕解析器.解析(New StringReader(SRT内容))
+        Dim 样式 As New SRT字幕样式()
+        Using 轨道 As New 外部字幕轨道("diagnostic.srt", 外部字幕格式.SRT,
+            New SRT字幕帧生成器(文档, 样式), Nothing)
+            Using 控件 As New 播放器画面控件()
+                Using 呈现器 As New 播放器定时文字图层呈现器(控件, Function() Nothing,
+                    Function() 轨道, Sub(size, commands, sequence, frameRate) Return,
+                    图层内容:=定时文字图层内容.仅字幕)
+                    Dim 命令 = 呈现器.生成命令(New Size(1920, 1080), 1920UI, 1080UI,
+                        TimeSpan.FromMilliseconds(500), 轨道, 96.0F).Single()
+                    断言(命令.描边宽度 = 样式.描边宽度 AndAlso
+                       命令.阴影色ARGB = 样式.阴影颜色ARGB AndAlso
+                       命令.阴影X偏移 = 样式.阴影偏移 AndAlso 命令.阴影Y偏移 = 样式.阴影偏移,
+                       "SRT 最高质量文字效果没有完整进入生产命令。")
+                End Using
+            End Using
+        End Using
+
+        Dim 诊断 As New 原生定时文字栅格诊断 With {
+            .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字栅格诊断)()), .版本 = 1,
+            .描边宽度 = 1.25F, .阴影X偏移 = 2.0F, .阴影Y偏移 = 2.0F}
+        断言(FFF3FP_EvaluateTimedTextRasterization(诊断) = 0, "原生定时文字栅格诊断调用失败。")
+        断言(Math.Abs(诊断.几何笔宽 - 2.5F) < 0.0001F AndAlso 诊断.仅向外描边 = 1,
+           $"描边不是最终可见宽度 1.25 px 的纯外描边：笔宽={诊断.几何笔宽:F3}。")
+        断言(Math.Abs(诊断.左外扩 - 1.25F) < 0.0001F AndAlso
+           Math.Abs(诊断.上外扩 - 1.25F) < 0.0001F AndAlso
+           Math.Abs(诊断.右外扩 - 3.25F) < 0.0001F AndAlso
+           Math.Abs(诊断.下外扩 - 3.25F) < 0.0001F,
+           "描边和阴影的精确外扩边界不正确。")
+        断言(Math.Abs(诊断.阴影角度 - 45.0F) < 0.001F,
+           $"默认阴影不是 45 度：{诊断.阴影角度:F4} 度。")
+        断言(诊断.自然对称渲染 = 1 AndAlso 诊断.灰度抗锯齿 = 1 AndAlso
+           诊断.禁用像素吸附 = 1,
+           "原生文字没有启用自然对称渲染、灰度抗锯齿或小数像素定位。")
+    End Sub
+
     Private Function 测试弹幕(视频路径 As String, 资料库 As 弹幕资料库) As TimeSpan
         断言(资料库 IsNot Nothing AndAlso 资料库.数量 > 0, "弹幕 XML 没有解析出任何条目。")
         Dim 自动加载资料库 = 弹幕自动加载器.尝试加载同名弹幕Async(视频路径, CancellationToken.None).
@@ -1461,10 +1788,10 @@ Friend Module Program
            "打开媒体时没有加载同名 XML 弹幕。")
         Dim 配置 As New 弹幕显示配置()
         断言(配置.同屏最大数量 = 100, "弹幕默认同屏上限不是 100。")
-        断言(配置.字号 = 32.0F, "弹幕默认基础字号不是 32。")
+        断言(配置.字号 = 36.0F, "弹幕默认基础字号不是 36。")
         断言(配置.常规滚动最大行数 = 5, "弹幕默认显示行数上限不是 5。")
         断言(配置.顶部最大行数 = 5, "顶部弹幕默认显示行数上限不是 5。")
-        断言(String.Equals(配置.字体, "Microsoft YaHei", StringComparison.Ordinal), "弹幕默认字体不是微软雅黑。")
+        断言(String.Equals(配置.字体, "Microsoft YaHei UI", StringComparison.Ordinal), "弹幕默认字体不是微软雅黑 UI。")
         断言(配置.目标帧率 = 60.0F, "弹幕默认帧率不是 60 FPS。")
 
         Dim 区域 = 视频显示区域.计算(1280, 720, 96.0F, 3840, 2160)
@@ -1474,9 +1801,11 @@ Friend Module Program
         For Each 项 In 资料库.项目
             If (项.类型 And 弹幕类型.常用) = 0 Then Continue For
             绘制项.Clear()
-            调度器.生成帧(项.出现时间 + TimeSpan.FromMilliseconds(250), 区域, 绘制项)
+            调度器.生成帧(项.出现时间, 区域, 绘制项)
             If 绘制项.Count = 0 Then Continue For
-            测试位置 = 项.出现时间 + TimeSpan.FromMilliseconds(250)
+            绘制项.Clear()
+            调度器.生成帧(项.出现时间 + TimeSpan.FromMilliseconds(50), 区域, 绘制项)
+            测试位置 = 项.出现时间 + TimeSpan.FromMilliseconds(50)
             Exit For
         Next
         断言(测试位置 > TimeSpan.Zero OrElse 绘制项.Count > 0, "没有生成可显示的基础弹幕。")
@@ -1488,7 +1817,7 @@ Friend Module Program
         测试弹幕行数上限(配置)
         测试弹幕相对缩放(配置)
         测试小尺寸滚动连续性(配置)
-        Console.WriteLine($"弹幕：{资料库.数量} 条，默认 100 条/5 行/32 号微软雅黑/60 FPS，" &
+        Console.WriteLine($"弹幕：{资料库.数量} 条，默认 100 条/5 行/36 号微软雅黑 UI/60 FPS，" &
                           $"{绘制项.Count} 条基础弹幕在 {测试位置.TotalSeconds:F3}s 的调度通过。")
         Return 测试位置
     End Function
@@ -1497,7 +1826,7 @@ Friend Module Program
         Dim 区域 = 视频显示区域.计算(1920, 1080, 96.0F, 1920, 1080)
         For Each 类型 In {弹幕类型.常规滚动, 弹幕类型.顶部}
             Dim 密集项目 = Enumerable.Range(1, 20).Select(
-                Function(index) New 弹幕项目(TimeSpan.Zero, 类型, 5, 25.0F,
+                Function(index) New 弹幕项目(TimeSpan.FromMilliseconds(100), 类型, 5, 25.0F,
                     &HFFFFFFFFUI, 0, 0, "test", index, $"密集弹幕 {index}"))
             Dim 调度器 As New 弹幕调度器(New 弹幕资料库(密集项目), 配置)
             Dim 绘制项 As New List(Of 弹幕绘制项)()
@@ -1508,16 +1837,17 @@ Friend Module Program
     End Sub
 
     Private Sub 测试小尺寸滚动连续性(配置 As 弹幕显示配置)
-        Dim 资料库 As New 弹幕资料库({New 弹幕项目(TimeSpan.Zero, 弹幕类型.常规滚动, 5, 25.0F,
+        Dim 开始时间 = TimeSpan.FromSeconds(1)
+        Dim 资料库 As New 弹幕资料库({New 弹幕项目(开始时间, 弹幕类型.常规滚动, 5, 25.0F,
             &HFFFFFFFFUI, 0, 0, "test", 1, "小尺寸连续滚动测试")})
         For Each 高度 In {360, 720, 1080, 2160}
             Dim 区域 = 视频显示区域.计算(CInt(高度 * 16.0 / 9.0), 高度, 96.0F, 1920, 1080)
             Dim 调度器 As New 弹幕调度器(资料库, 配置)
             Dim 上一X As Single = Single.NaN
             Dim 预期步长 = 配置.滚动速度 * 区域.高度像素 / 配置.基准视频高度 / 配置.目标帧率
-            For 帧 = 1 To 120
+            For 帧 = 0 To 120
                 Dim 绘制项 As New List(Of 弹幕绘制项)(1)
-                调度器.生成帧(TimeSpan.FromSeconds(帧 / CDbl(配置.目标帧率)), 区域, 绘制项)
+                调度器.生成帧(开始时间 + TimeSpan.FromSeconds(帧 / CDbl(配置.目标帧率)), 区域, 绘制项)
                 断言(绘制项.Count = 1, $"{高度} 高度的连续滚动测试丢失了第 {帧} 帧。")
                 If Single.IsFinite(上一X) Then
                     Dim 实际步长 = 上一X - 绘制项(0).X像素
@@ -1530,7 +1860,7 @@ Friend Module Program
     End Sub
 
     Private Sub 测试弹幕相对缩放(配置 As 弹幕显示配置)
-        Dim 单条资料库 As New 弹幕资料库({New 弹幕项目(TimeSpan.Zero, 弹幕类型.顶部, 5, 25.0F,
+        Dim 单条资料库 As New 弹幕资料库({New 弹幕项目(TimeSpan.FromMilliseconds(100), 弹幕类型.顶部, 5, 25.0F,
             &HFFFFFFFFUI, 0, 0, "test", 1, "DPI 缩放测试")})
         Using 画面控件 As New 播放器画面控件()
             Using 呈现器 As New 播放器定时文字图层呈现器(画面控件, Function() Nothing,
@@ -1544,18 +1874,22 @@ Friend Module Program
                     TimeSpan.FromMilliseconds(100), Nothing, 144.0F).Single()
                 Dim 四K命令 = 呈现器.生成命令(New Size(3840, 2160), 3840UI, 2160UI,
                     TimeSpan.FromMilliseconds(100), Nothing, 192.0F).Single()
-                断言(Math.Abs(七百二十命令.字号 - (32.0F * 2.0F / 3.0F)) < 0.01F AndAlso
-                   Math.Abs(一千零八十命令.字号 - 32.0F) < 0.01F AndAlso
-                   Math.Abs(高DPI命令.字号 - 32.0F) < 0.01F AndAlso
-                   Math.Abs(四K命令.字号 - 64.0F) < 0.01F,
+                断言(Math.Abs(七百二十命令.字号 - 24.0F) < 0.01F AndAlso
+                   Math.Abs(一千零八十命令.字号 - 36.0F) < 0.01F AndAlso
+                   Math.Abs(高DPI命令.字号 - 36.0F) < 0.01F AndAlso
+                   Math.Abs(四K命令.字号 - 72.0F) < 0.01F,
                    $"弹幕 DPI/视频相对字号异常：{七百二十命令.字号:F2}/" &
                    $"{一千零八十命令.字号:F2}/{高DPI命令.字号:F2}/{四K命令.字号:F2}。")
-                断言(一千零八十命令.描边色ARGB = &H80000000UI AndAlso
+                断言(一千零八十命令.描边色ARGB = 配置.描边颜色ARGB AndAlso
                    Math.Abs(一千零八十命令.描边宽度 - 1.0F) < 0.01F,
-                   "弹幕浅描边没有按 32 号基准生成。")
+                   "弹幕外描边没有按默认字号基准生成。")
+                断言(一千零八十命令.阴影色ARGB = 配置.阴影颜色ARGB AndAlso
+                   Math.Abs(一千零八十命令.阴影X偏移 - 配置.阴影偏移) < 0.01F AndAlso
+                   Math.Abs(一千零八十命令.阴影Y偏移 - 配置.阴影偏移) < 0.01F,
+                   "弹幕默认 45 度阴影没有进入文字命令。")
                 呈现器.目标帧率 = 120
                 断言(配置.目标帧率 = 120.0F,
-                   "弹幕高刷选项没有同步更新调度器的媒体时间量化频率。")
+                   "弹幕高刷选项没有同步更新调度器和原生呈现节奏。")
                 呈现器.目标帧率 = 60
             End Using
         End Using

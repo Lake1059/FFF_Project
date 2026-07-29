@@ -682,7 +682,8 @@ FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) no
         layer.commands.reserve(input.commandCount);
         for (std::uint32_t index = 0; index < input.commandCount; ++index) {
             const auto& source = input.commands[index];
-            if (source.size < sizeof(FFF3FPTimedTextCommand) || source.version != 1 ||
+            constexpr auto legacyCommandSize = offsetof(FFF3FPTimedTextCommand, shadowArgb);
+            if (source.size < legacyCommandSize || source.version != 1 ||
                 source.type < FFF3FPTimedTextCommandType::Text || source.type > FFF3FPTimedTextCommandType::Bitmap ||
                 !std::isfinite(source.x) || !std::isfinite(source.y) || !std::isfinite(source.width) ||
                 !std::isfinite(source.height) || source.width <= 0 || source.height <= 0)
@@ -692,12 +693,18 @@ FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) no
             command.x = source.x; command.y = source.y; command.width = source.width; command.height = source.height;
             command.foregroundArgb = source.foregroundArgb; command.outlineArgb = source.outlineArgb;
             command.fontSize = source.fontSize; command.outlineWidth = source.outlineWidth;
+            if (source.size >= sizeof(FFF3FPTimedTextCommand)) {
+                command.shadowArgb = source.shadowArgb;
+                command.shadowOffsetX = source.shadowOffsetX;
+                command.shadowOffsetY = source.shadowOffsetY;
+            }
             command.horizontalAlignment = source.horizontalAlignment;
             command.verticalAlignment = source.verticalAlignment;
             command.contentId = source.contentId;
             if (source.type == FFF3FPTimedTextCommandType::Text) {
                 if (source.textUtf8 == nullptr || !std::isfinite(source.fontSize) || source.fontSize <= 0 ||
                     !std::isfinite(source.outlineWidth) || source.outlineWidth < 0 ||
+                    !std::isfinite(command.shadowOffsetX) || !std::isfinite(command.shadowOffsetY) ||
                     source.horizontalAlignment > FFF3FPTimedTextAlignment::Far ||
                     source.verticalAlignment > FFF3FPTimedTextAlignment::Far ||
                     source.fontFamilyUtf8 == nullptr) return FFFResult::InvalidArgument;
@@ -756,7 +763,7 @@ FFFResult PlayerSession::GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcep
 }
 
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
-    if (output.size < sizeof(FFF3FPSnapshot) || output.version != 5) return FFFResult::InvalidArgument;
+    if (output.size < sizeof(FFF3FPSnapshot) || output.version != 6) return FFFResult::InvalidArgument;
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
     // Presentation completes asynchronously on the dedicated swap-chain owner;
     // expose its live counters even if no later decode-frame snapshot was needed.
@@ -1657,8 +1664,9 @@ void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame
     lastVideoFrameDuration100ns_ = 0;
     snapshot_.position100ns = position;
     snapshot_.frameIndex = targetFrame >= 0 && position > 0 ? targetFrame - 1 : -1;
-    PublishSnapshot();
+    ++snapshot_.timelineGeneration;
     ResetClock(position); if (audioRenderer_) audioRenderer_->Reset(position);
+    PublishSnapshot();
     if (externalFormat_ && externalAudioStream_ >= 0) {
         auto externalPosition = std::max<std::int64_t>(0, position - externalAudioOffset100ns_);
         auto* stream = externalFormat_->streams[externalAudioStream_];

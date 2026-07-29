@@ -114,6 +114,10 @@ struct FFF3FPSnapshot {
     // Actual swap-chain precision after renderer/device capability fallback.
     // 8 = BGRA8, 10 = RGB10A2, 16 = scRGB R16G16B16A16_FLOAT.
     std::uint32_t videoOutputBitDepth;
+    std::uint32_t reserved2;
+    // Advances only after a real demuxer seek succeeds and the new media
+    // position has been published. Overlay producers use it to discard old state.
+    std::uint64_t timelineGeneration;
 };
 
 using FFF3FPHandle = void*;
@@ -188,6 +192,30 @@ struct FFF3FPTimedTextCommand {
     std::uint32_t bitmapStride;
     std::uint32_t bitmapBytes;
     std::uint64_t contentId;
+    // Optional version-1 tail. outlineWidth is the final visible distance
+    // outside the filled glyph; the renderer uses a 2x centered geometry pen.
+    std::uint32_t shadowArgb;
+    float shadowOffsetX;
+    float shadowOffsetY;
+    std::uint32_t reserved;
+};
+
+struct FFF3FPTimedTextRasterizationProbe {
+    std::uint32_t size;
+    std::uint32_t version;
+    float outlineWidth;
+    float shadowOffsetX;
+    float shadowOffsetY;
+    float geometryStrokeWidth;
+    float effectLeft;
+    float effectTop;
+    float effectRight;
+    float effectBottom;
+    float shadowAngleDegrees;
+    std::uint32_t naturalSymmetricRendering;
+    std::uint32_t grayscaleAntialiasing;
+    std::uint32_t pixelSnappingDisabled;
+    std::uint32_t outlineIsExternal;
 };
 
 struct FFF3FPTimedTextLayer {
@@ -293,6 +321,8 @@ FFF3FP_API FFFResult FFF3FP_GetTimedTextStatus(FFF3FPHandle player,
 FFF3FP_API FFFResult FFF3FP_GetDanmakuStatus(FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept;
 FFF3FP_API FFFResult FFF3FP_EvaluateColorTransform(FFF3FPColorTransform* transform) noexcept;
+FFF3FP_API FFFResult FFF3FP_EvaluateTimedTextRasterization(
+    FFF3FPTimedTextRasterizationProbe* probe) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetMediaInfo(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,

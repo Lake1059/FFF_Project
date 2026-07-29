@@ -471,13 +471,131 @@ std::uint64_t TimedTextLayoutKey(const TimedTextRenderCommand& command,
 }
 
 std::uint64_t TimedTextSpriteKey(const TimedTextRenderCommand& command,
-    const D2D1_RECT_F& destination, const float fontSize, const float outline) noexcept {
+    const D2D1_RECT_F& destination, const float fontSize, const float outline,
+    const float shadowX, const float shadowY) noexcept {
     auto hash = TimedTextLayoutKey(command, destination, fontSize);
     HashTimedText(hash, command.foregroundArgb);
     HashTimedText(hash, command.outlineArgb);
+    HashTimedText(hash, command.shadowArgb);
     HashTimedText(hash, std::bit_cast<std::uint32_t>(outline));
+    HashTimedText(hash, std::bit_cast<std::uint32_t>(shadowX));
+    HashTimedText(hash, std::bit_cast<std::uint32_t>(shadowY));
     return hash == 0 ? 1 : hash;
 }
+
+struct TimedTextEffectExtents {
+    float left = 0, top = 0, right = 0, bottom = 0;
+};
+
+TimedTextEffectExtents DescribeTimedTextEffects(const float outline,
+    const float shadowX, const float shadowY, const bool hasShadow) noexcept {
+    TimedTextEffectExtents result{outline, outline, outline, outline};
+    if (hasShadow) {
+        result.left += std::max(-shadowX, 0.0f);
+        result.top += std::max(-shadowY, 0.0f);
+        result.right += std::max(shadowX, 0.0f);
+        result.bottom += std::max(shadowY, 0.0f);
+    }
+    return result;
+}
+
+class TimedTextEffectRenderer final : public IDWriteTextRenderer {
+public:
+    TimedTextEffectRenderer(ID2D1Factory1* factory, ID2D1DeviceContext* context,
+        ID2D1Brush* outlineBrush, ID2D1Brush* shadowBrush, const float outline,
+        const float shadowX, const float shadowY) noexcept
+        : factory_(factory), context_(context), outlineBrush_(outlineBrush),
+          shadowBrush_(shadowBrush), outline_(outline), shadowX_(shadowX), shadowY_(shadowY) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (object == nullptr) return E_POINTER;
+        *object = nullptr;
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IDWritePixelSnapping) ||
+            iid == __uuidof(IDWriteTextRenderer)) {
+            *object = static_cast<IDWriteTextRenderer*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const auto remaining = --references_;
+        if (remaining == 0) delete this;
+        return remaining;
+    }
+    HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*, BOOL* disabled) override {
+        if (disabled == nullptr) return E_POINTER;
+        *disabled = TRUE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*, DWRITE_MATRIX* transform) override {
+        if (transform == nullptr) return E_POINTER;
+        D2D1_MATRIX_3X2_F value{};
+        context_->GetTransform(&value);
+        transform->m11 = value._11; transform->m12 = value._12;
+        transform->m21 = value._21; transform->m22 = value._22;
+        transform->dx = value._31; transform->dy = value._32;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT* pixelsPerDip) override {
+        if (pixelsPerDip == nullptr) return E_POINTER;
+        *pixelsPerDip = 1.0f;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*, FLOAT baselineX, FLOAT baselineY,
+        DWRITE_MEASURING_MODE, const DWRITE_GLYPH_RUN* glyphRun,
+        const DWRITE_GLYPH_RUN_DESCRIPTION*, IUnknown*) override {
+        if (glyphRun == nullptr || glyphRun->fontFace == nullptr || glyphRun->glyphCount == 0)
+            return S_OK;
+        ComPtr<ID2D1PathGeometry> path;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(factory_->CreatePathGeometry(&path)) || FAILED(path->Open(&sink))) return E_FAIL;
+        const auto outlineResult = glyphRun->fontFace->GetGlyphRunOutline(glyphRun->fontEmSize,
+            glyphRun->glyphIndices, glyphRun->glyphAdvances, glyphRun->glyphOffsets,
+            glyphRun->glyphCount, glyphRun->isSideways,
+            (glyphRun->bidiLevel & 1u) != 0, sink.Get());
+        const auto closeResult = sink->Close();
+        if (FAILED(outlineResult) || FAILED(closeResult)) return E_FAIL;
+        if (shadowBrush_ != nullptr) {
+            DrawEffect(path.Get(), baselineX + shadowX_, baselineY + shadowY_,
+                shadowBrush_, true);
+        }
+        if (outlineBrush_ != nullptr && outline_ > 0.0f) {
+            DrawEffect(path.Get(), baselineX, baselineY, outlineBrush_, false);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT, FLOAT,
+        const DWRITE_UNDERLINE*, IUnknown*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT, FLOAT,
+        const DWRITE_STRIKETHROUGH*, IUnknown*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT, IDWriteInlineObject*,
+        BOOL, BOOL, IUnknown*) override { return S_OK; }
+
+private:
+    void DrawEffect(ID2D1Geometry* path, const float x, const float y,
+        ID2D1Brush* brush, const bool fill) noexcept {
+        ComPtr<ID2D1TransformedGeometry> transformed;
+        if (FAILED(factory_->CreateTransformedGeometry(path,
+            D2D1::Matrix3x2F::Translation(x, y), &transformed))) return;
+        if (fill) context_->FillGeometry(transformed.Get(), brush);
+        if (outline_ > 0.0f) {
+            // D2D strokes are centered. Drawing a 2x stroke before the glyph fill
+            // leaves exactly outline_ pixels visible outside the final glyph.
+            context_->DrawGeometry(transformed.Get(), brush, outline_ * 2.0f);
+        }
+    }
+
+    std::atomic<ULONG> references_{1};
+    ID2D1Factory1* factory_;
+    ID2D1DeviceContext* context_;
+    ID2D1Brush* outlineBrush_;
+    ID2D1Brush* shadowBrush_;
+    float outline_;
+    float shadowX_;
+    float shadowY_;
+};
 }
 
 FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept {
@@ -531,6 +649,26 @@ FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept 
     return FFFResult::Success;
 }
 
+FFFResult EvaluateTimedTextRasterization(FFF3FPTimedTextRasterizationProbe& probe) noexcept {
+    if (probe.size < sizeof(probe) || probe.version != 1 ||
+        !std::isfinite(probe.outlineWidth) || probe.outlineWidth < 0.0f ||
+        !std::isfinite(probe.shadowOffsetX) || !std::isfinite(probe.shadowOffsetY))
+        return FFFResult::InvalidArgument;
+    const auto extents = DescribeTimedTextEffects(probe.outlineWidth,
+        probe.shadowOffsetX, probe.shadowOffsetY, true);
+    probe.geometryStrokeWidth = probe.outlineWidth * 2.0f;
+    probe.effectLeft = extents.left; probe.effectTop = extents.top;
+    probe.effectRight = extents.right; probe.effectBottom = extents.bottom;
+    constexpr float radiansToDegrees = 57.29577951308232f;
+    probe.shadowAngleDegrees = std::atan2(probe.shadowOffsetY,
+        probe.shadowOffsetX) * radiansToDegrees;
+    probe.naturalSymmetricRendering = 1;
+    probe.grayscaleAntialiasing = 1;
+    probe.pixelSnappingDisabled = 1;
+    probe.outlineIsExternal = 1;
+    return FFFResult::Success;
+}
+
 PlayerVideoRenderer::PlayerVideoRenderer() noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), timedTextPixelShader_(nullptr), sampler_(nullptr), constants_(nullptr),
@@ -543,7 +681,7 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
       timedTextSpriteInstanceBuffer_(nullptr), timedTextSpriteInstanceView_(nullptr),
       d2dFactory_(nullptr), d2dDevice_(nullptr), d2dContext_(nullptr), d2dTargets_{nullptr, nullptr, nullptr},
       d2dAtlasTarget_(nullptr),
-      writeFactory_(nullptr), scaler_(nullptr),
+      writeFactory_(nullptr), timedTextRenderingParams_(nullptr), scaler_(nullptr),
       swapWidth_(0), swapHeight_(0), swapHdr_(false), swapOutputBits_(8), sourceWidth_(0), sourceHeight_(0),
       sourceInputLayout_(UINT32_MAX), sourceBitDepth_(0),
       sourceChromaWidthShift_(0), sourceChromaHeightShift_(0),
@@ -1183,6 +1321,16 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
         __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&writeFactory_)))) {
         SetError("Could not create the DirectWrite timed-text factory."); return FFFResult::DeviceFailure;
     }
+    if (timedTextRenderingParams_ == nullptr) {
+        ComPtr<IDWriteRenderingParams> defaults;
+        if (FAILED(writeFactory_->CreateRenderingParams(&defaults)) ||
+            FAILED(writeFactory_->CreateCustomRenderingParams(defaults->GetGamma(),
+                defaults->GetEnhancedContrast(), 0.0f, DWRITE_PIXEL_GEOMETRY_FLAT,
+                DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, &timedTextRenderingParams_))) {
+            SetError("Could not create high-quality timed-text rendering parameters.");
+            return FFFResult::DeviceFailure;
+        }
+    }
     if (d2dContext_ == nullptr) {
         ComPtr<IDXGIDevice> dxgiDevice;
         if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
@@ -1342,6 +1490,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     if (resourceResult != FFFResult::Success) return resourceResult;
     d2dContext_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     d2dContext_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    d2dContext_->SetTextRenderingParams(timedTextRenderingParams_);
     const auto scaleX = layer->canvasWidth == 0 ? 1.0f : static_cast<float>(swapWidth_) / layer->canvasWidth;
     const auto scaleY = layer->canvasHeight == 0 ? 1.0f : static_cast<float>(swapHeight_) / layer->canvasHeight;
     const auto getBrush = [this](const std::uint32_t argb) noexcept -> ID2D1SolidColorBrush* {
@@ -1396,21 +1545,25 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         return retained;
     };
     const auto drawLayout = [&getBrush, this](const TimedTextRenderCommand& command,
-        IDWriteTextLayout* layout, const D2D1_POINT_2F origin, const float outline) noexcept {
+        IDWriteTextLayout* layout, const D2D1_POINT_2F origin, const float outline,
+        const float shadowX, const float shadowY) noexcept {
         if (layout == nullptr) return;
-        constexpr auto textOptions = D2D1_DRAW_TEXT_OPTIONS_NO_SNAP;
-        if (outline > 0 && (command.outlineArgb >> 24) != 0) {
-            if (auto* outlineBrush = getBrush(command.outlineArgb); outlineBrush != nullptr) {
-                const auto radius = std::max(1, static_cast<int>(std::ceil(outline)));
-                constexpr int directions[][2] = {{-1,0},{1,0},{0,-1},{0,1}};
-                for (const auto& direction : directions)
-                    d2dContext_->DrawTextLayout(D2D1::Point2F(origin.x + direction[0] * radius,
-                        origin.y + direction[1] * radius), layout, outlineBrush, textOptions);
+        auto* outlineBrush = outline > 0.0f && (command.outlineArgb >> 24) != 0
+            ? getBrush(command.outlineArgb) : nullptr;
+        auto* shadowBrush = (command.shadowArgb >> 24) != 0
+            ? getBrush(command.shadowArgb) : nullptr;
+        if (outlineBrush != nullptr || shadowBrush != nullptr) {
+            auto* effects = new (std::nothrow) TimedTextEffectRenderer(d2dFactory_, d2dContext_,
+                outlineBrush, shadowBrush, outline, shadowX, shadowY);
+            if (effects != nullptr) {
+                layout->Draw(nullptr, effects, origin.x, origin.y);
+                effects->Release();
             }
         }
         if ((command.foregroundArgb >> 24) != 0) {
             if (auto* foreground = getBrush(command.foregroundArgb); foreground != nullptr)
-                d2dContext_->DrawTextLayout(origin, layout, foreground, textOptions);
+                d2dContext_->DrawTextLayout(origin, layout, foreground,
+                    D2D1_DRAW_TEXT_OPTIONS_NO_SNAP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
         }
     };
 
@@ -1420,6 +1573,8 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         std::uint64_t key = 0;
         TimedTextSprite sprite{};
         float outline = 0;
+        float shadowX = 0;
+        float shadowY = 0;
     };
     std::vector<PendingSprite> pendingSprites;
     pendingSprites.reserve(layer->commands.size());
@@ -1443,13 +1598,19 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
                 (command.x + command.width) * scaleX, (command.y + command.height) * scaleY);
             const auto fontSize = std::max(command.fontSize * scaleY, 1.0f);
             const auto outline = std::max(command.outlineWidth * (scaleX + scaleY) * 0.5f, 0.0f);
-            const auto key = TimedTextSpriteKey(command, destination, fontSize, outline);
+            const auto shadowX = command.shadowOffsetX * scaleX;
+            const auto shadowY = command.shadowOffsetY * scaleY;
+            const auto key = TimedTextSpriteKey(command, destination, fontSize, outline,
+                shadowX, shadowY);
             if (timedTextSprites_.contains(key)) continue;
             if (timedTextSprites_.size() + pendingSprites.size() >= MaximumTimedTextSprites)
                 return !stopWhenFull;
             auto* layout = getLayout(command, destination, fontSize);
             if (layout == nullptr) continue;
-            const auto padding = static_cast<float>(std::ceil(outline) + 4.0f);
+            const auto extents = DescribeTimedTextEffects(outline, shadowX, shadowY,
+                (command.shadowArgb >> 24) != 0);
+            const auto padding = static_cast<float>(std::ceil(std::max(
+                {extents.left, extents.top, extents.right, extents.bottom})) + 2.0f);
             const auto width = std::max(1u, static_cast<std::uint32_t>(std::ceil(
                 destination.right - destination.left + padding * 2.0f)));
             const auto height = std::max(1u, static_cast<std::uint32_t>(std::ceil(
@@ -1467,7 +1628,8 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
                 static_cast<float>(width), static_cast<float>(height)};
             timedTextAtlasX_ += width;
             timedTextAtlasRowHeight_ = std::max(timedTextAtlasRowHeight_, height);
-            pendingSprites.push_back(PendingSprite{&command, layout, key, sprite, outline});
+            pendingSprites.push_back(PendingSprite{&command, layout, key, sprite, outline,
+                shadowX, shadowY});
         }
         return true;
     };
@@ -1499,7 +1661,8 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             d2dContext_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
             drawLayout(*pending.command, pending.layout,
                 D2D1::Point2F(sprite.atlasX + sprite.padding,
-                    sprite.atlasY + sprite.padding), pending.outline);
+                    sprite.atlasY + sprite.padding), pending.outline,
+                pending.shadowX, pending.shadowY);
             d2dContext_->PopAxisAlignedClip();
         }
         const auto atlasEnd = d2dContext_->EndDraw();
@@ -1535,10 +1698,13 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         }
         const auto fontSize = std::max(command.fontSize * scaleY, 1.0f);
         const auto outline = std::max(command.outlineWidth * (scaleX + scaleY) * 0.5f, 0.0f);
+        const auto shadowX = command.shadowOffsetX * scaleX;
+        const auto shadowY = command.shadowOffsetY * scaleY;
         if (command.contentId != 0 &&
             command.horizontalAlignment == FFF3FPTimedTextAlignment::Near &&
             command.verticalAlignment == FFF3FPTimedTextAlignment::Near) {
-            const auto spriteKey = TimedTextSpriteKey(command, destination, fontSize, outline);
+            const auto spriteKey = TimedTextSpriteKey(command, destination, fontSize, outline,
+                shadowX, shadowY);
             const auto sprite = timedTextSprites_.find(spriteKey);
             if (sprite != timedTextSprites_.end()) {
                 ++timedTextSpriteCacheHits_;
@@ -1560,7 +1726,8 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             }
         }
         auto* layout = getLayout(command, destination, fontSize);
-        drawLayout(command, layout, D2D1::Point2F(destination.left, destination.top), outline);
+        drawLayout(command, layout, D2D1::Point2F(destination.left, destination.top),
+            outline, shadowX, shadowY);
     }
     const auto end = d2dContext_->EndDraw();
     d2dContext_->SetTarget(nullptr);
@@ -1684,6 +1851,9 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
     timedTextAtlasSize_ = 0;
     timedTextSpriteInstanceCapacity_ = 0;
     timedTextSpriteCacheHits_ = timedTextSpriteCacheMisses_ = 0;
+    if (timedTextRenderingParams_ != nullptr) {
+        timedTextRenderingParams_->Release(); timedTextRenderingParams_ = nullptr;
+    }
     if (d2dAtlasTarget_ != nullptr) { d2dAtlasTarget_->Release(); d2dAtlasTarget_ = nullptr; }
     for (std::size_t index = 0; index < ARRAYSIZE(timedTextTextures_); ++index)
         ReleaseTimedTextSlotResources(static_cast<TimedTextLayerSlot>(index));

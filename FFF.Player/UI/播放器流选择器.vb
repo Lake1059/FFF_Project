@@ -100,7 +100,7 @@ Friend NotInheritable Class 播放器流选择器
     End Sub
 
     Private Sub 添加标题(名称 As String, 数量 As Integer)
-        菜单.Items.Add(创建说明项($"{名称}  {数量}"))
+        菜单.Items.Add(创建说明项($"{名称} - {数量}"))
     End Sub
 
     Private Shared Function 创建说明项(文本 As String) As LakeUI.ModernContextMenu.ModernMenuItem

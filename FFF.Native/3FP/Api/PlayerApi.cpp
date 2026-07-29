@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 5;
+constexpr std::uint32_t PlayerApiVersion = 6;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -75,6 +75,10 @@ FFFResult FFF3FP_GetDanmakuStatus(const FFF3FPHandle player,
 }
 FFFResult FFF3FP_EvaluateColorTransform(FFF3FPColorTransform* transform) noexcept {
     return transform ? EvaluateVideoColorTransform(*transform) : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_EvaluateTimedTextRasterization(
+    FFF3FPTimedTextRasterizationProbe* probe) noexcept {
+    return probe ? EvaluateTimedTextRasterization(*probe) : FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_GetMediaInfo(const FFF3FPHandle player, char* output, const std::uint32_t size,
     std::uint32_t* required) noexcept { if (!player) return FFFResult::InvalidArgument; try { return CopyUtf8(static_cast<PlayerSession*>(player)->MediaInfo(), output, size, required); } catch (...) { return FFFResult::NativeFailure; } }

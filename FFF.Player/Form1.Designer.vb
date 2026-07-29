@@ -1009,11 +1009,9 @@ Partial Class Form1
         ' MCB_流选择器
         ' 
         MCB_流选择器.AnimationFPS = 120
-        MCB_流选择器.BackdropBlurPasses = 2
         MCB_流选择器.BackdropBlurRadius = 30
         MCB_流选择器.BackdropMode = LakeUI.ModernContextMenu.BackdropModeEnum.Auto
-        MCB_流选择器.BackdropNoiseOpacity = CByte(0)
-        MCB_流选择器.BackdropTintColor = Color.FromArgb(CByte(120), CByte(0), CByte(0), CByte(0))
+        MCB_流选择器.BackdropTintColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
         MCB_流选择器.BorderColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         MCB_流选择器.CheckMarkSize = 12
         MCB_流选择器.DescriptionFont = New Font("Microsoft YaHei UI", 9F)

@@ -35,6 +35,7 @@ struct ID2D1Bitmap1;
 struct ID2D1SolidColorBrush;
 struct IDWriteFactory;
 struct IDWriteTextLayout;
+struct IDWriteRenderingParams;
 
 struct TimedTextRenderCommand {
     FFF3FPTimedTextCommandType type = FFF3FPTimedTextCommandType::Text;
@@ -47,6 +48,9 @@ struct TimedTextRenderCommand {
     std::uint32_t outlineArgb = 0;
     float fontSize = 0;
     float outlineWidth = 0;
+    std::uint32_t shadowArgb = 0;
+    float shadowOffsetX = 0;
+    float shadowOffsetY = 0;
     FFF3FPTimedTextAlignment horizontalAlignment = FFF3FPTimedTextAlignment::Near;
     FFF3FPTimedTextAlignment verticalAlignment = FFF3FPTimedTextAlignment::Near;
     struct TextContent {
@@ -77,6 +81,7 @@ enum class TimedTextLayerSlot : std::uint32_t {
 };
 
 FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept;
+FFFResult EvaluateTimedTextRasterization(FFF3FPTimedTextRasterizationProbe& probe) noexcept;
 
 class PlayerVideoRenderer final {
 public:
@@ -185,6 +190,7 @@ private:
     ID2D1Bitmap1* d2dTargets_[3];
     ID2D1Bitmap1* d2dAtlasTarget_;
     IDWriteFactory* writeFactory_;
+    IDWriteRenderingParams* timedTextRenderingParams_;
     SwsContext* scaler_;
     std::uint32_t swapWidth_;
     std::uint32_t swapHeight_;

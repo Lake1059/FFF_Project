@@ -37,6 +37,8 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     Private 缓存客户区高度 As Integer
     Private 缓存DPI位元 As Integer
     Private 图层签名有效标志 As Integer
+    Private 上一时间轴代次 As ULong
+    Private 时间轴代次有效 As Boolean
     Private ReadOnly 生命周期锁 As New Object()
     Private ReadOnly 刷新空闲 As New ManualResetEventSlim(True)
     Private 活动刷新数 As Integer
@@ -89,8 +91,8 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
             If 当前目标帧率 = value Then Return
             当前目标帧率 = value
             If 图层内容 <> 定时文字图层内容.仅字幕 Then
-                ' 单一公开属性同时定义唤醒频率和媒体时间量化频率；否则未来
-                ' 120 Hz 选项会每两个 Tick 生成一次相同的 60 Hz 位置。
+                ' 单一公开属性同时定义托管唤醒和原生呈现节奏；位置本身始终
+                ' 使用连续媒体时钟，不随目标帧率量化。
                 弹幕配置.目标帧率 = value
             End If
             更新刷新间隔()
@@ -111,7 +113,7 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
                 客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return
             Dim 字幕 = If(图层内容 = 定时文字图层内容.仅弹幕, Nothing, 字幕提供器())
             提交当前帧(客户区大小, 快照.视频宽度, 快照.视频高度,
-                     快照.播放位置, 字幕, DPI)
+                     快照.播放位置, 字幕, DPI, 快照.时间轴代次)
         Finally
             SyncLock 生命周期锁
                 活动刷新数 -= 1
@@ -131,15 +133,20 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     End Sub
 
     Private Sub 更新刷新间隔()
-        ' 弹幕帧率属于此实例，不依赖视频或字幕刷新率。整数毫秒只负责唤醒；
-        ' 位置始终由连续媒体时钟按目标帧率量化，因此 90/120/144 Hz 可独立开放。
-        刷新计时器.Interval = Math.Max(1, CInt(Math.Round(
-            1000.0R / 当前目标帧率, MidpointRounding.AwayFromZero)))
+        ' 60 Hz 若四舍五入为 17 ms，上限只有 58.82 Hz，并会周期性错过一帧。
+        ' 计时器略快唤醒，最终原生呈现器仍按目标帧率合并提交。
+        刷新计时器.Interval = 计算刷新间隔毫秒(当前目标帧率)
     End Sub
+
+    Friend Shared Function 计算刷新间隔毫秒(目标帧率 As Integer) As Integer
+        If 目标帧率 < 1 OrElse 目标帧率 > 240 Then Throw New ArgumentOutOfRangeException(NameOf(目标帧率))
+        Return Math.Max(1, CInt(Math.Floor(1000.0R / 目标帧率)))
+    End Function
 
     Friend Function 生成命令(客户区大小 As Size, 视频宽度 As UInteger, 视频高度 As UInteger,
                          播放位置 As TimeSpan, 字幕 As 外部字幕轨道,
-                         Optional DPI As Single = 96.0F) As IReadOnlyList(Of 定时文字命令)
+                         Optional DPI As Single = 96.0F,
+                         Optional 时间轴代次 As ULong = 0) As IReadOnlyList(Of 定时文字命令)
         图层命令.Clear()
         命令对象使用数 = 0
         If Volatile.Read(已释放标志) <> 0 OrElse 视频宽度 = 0 OrElse 视频高度 = 0 OrElse
@@ -165,7 +172,15 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
             End Try
         End If
         If 图层内容 <> 定时文字图层内容.仅字幕 Then
-            生成弹幕命令(弹幕提供器?.Invoke(), 播放位置, 区域)
+            If 时间轴代次有效 AndAlso 时间轴代次 <> 上一时间轴代次 Then
+                当前弹幕调度器?.重置()
+            End If
+            上一时间轴代次 = 时间轴代次
+            时间轴代次有效 = True
+            ' 横向穿过整个透明图层；字号、行高和上下边距仍以视频高度缩放。
+            Dim 弹幕区域 As New 视频显示区域(0.0F, 区域.Y像素, 客户区大小.Width,
+                区域.高度像素, 区域.缩放系数, 区域.DPI)
+            生成弹幕命令(弹幕提供器?.Invoke(), 播放位置, 弹幕区域)
         End If
         If 图层内容 <> 定时文字图层内容.仅弹幕 Then
             RaiseEvent 绘制扩展定时文字(Me,
@@ -176,9 +191,11 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
 
     Friend Sub 提交当前帧(客户区大小 As Size, 视频宽度 As UInteger, 视频高度 As UInteger,
                        播放位置 As TimeSpan, 字幕 As 外部字幕轨道,
-                       Optional DPI As Single = 96.0F)
+                       Optional DPI As Single = 96.0F,
+                       Optional 时间轴代次 As ULong = 0)
         Try
-            Dim commands = 生成命令(客户区大小, 视频宽度, 视频高度, 播放位置, 字幕, DPI)
+            Dim commands = 生成命令(客户区大小, 视频宽度, 视频高度, 播放位置, 字幕,
+                DPI, 时间轴代次)
             Dim signature = 计算图层签名(客户区大小, commands)
             If Volatile.Read(图层签名有效标志) <> 0 AndAlso signature = 上次图层签名 Then Return
             上次图层签名 = signature
@@ -222,6 +239,9 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
                 混合签名(hash, BitConverter.SingleToUInt32Bits(item.描边宽度))
                 混合签名(hash, item.前景色ARGB)
                 混合签名(hash, item.描边色ARGB)
+                混合签名(hash, item.阴影色ARGB)
+                混合签名(hash, BitConverter.SingleToUInt32Bits(item.阴影X偏移))
+                混合签名(hash, BitConverter.SingleToUInt32Bits(item.阴影Y偏移))
                 混合签名(hash, CULng(item.样式))
                 混合签名(hash, CULng(item.水平对齐))
                 混合签名(hash, CULng(item.垂直对齐))
@@ -258,7 +278,9 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
                 添加文字命令(行.文本, 行.字体, 行.字号像素,
                     New RectangleF(区域.X像素, y, 区域.宽度像素, 行高 + 4.0F),
                     行.颜色ARGB, 行.描边颜色ARGB, 行.描边宽度像素,
-                    定时文字对齐.居中, 定时文字对齐.靠前)
+                    定时文字对齐.居中, 定时文字对齐.靠前,
+                    阴影色ARGB:=行.阴影颜色ARGB,
+                    阴影X偏移:=行.阴影偏移像素, 阴影Y偏移:=行.阴影偏移像素)
                 y += 行高 + 项.行间距像素
             Next
         Next
@@ -312,8 +334,12 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
             If String.IsNullOrWhiteSpace(项.项目.文本) Then Continue For
             添加文字命令(项.项目.文本, 项.字体, 项.字号像素,
                 New RectangleF(项.X像素, 项.Y像素, Math.Max(1.0F, 项.宽度像素), Math.Max(1.0F, 项.高度像素)),
-                项.颜色ARGB, &H80000000UI, Math.Max(0.5F, 项.字号像素 / 32.0F),
-                定时文字对齐.靠前, 定时文字对齐.靠前)
+                项.颜色ARGB, 弹幕配置.描边颜色ARGB,
+                弹幕配置.描边宽度 * 项.字号像素 / 弹幕配置.字号,
+                定时文字对齐.靠前, 定时文字对齐.靠前,
+                阴影色ARGB:=弹幕配置.阴影颜色ARGB,
+                阴影X偏移:=弹幕配置.阴影偏移 * 项.字号像素 / 弹幕配置.字号,
+                阴影Y偏移:=弹幕配置.阴影偏移 * 项.字号像素 / 弹幕配置.字号)
         Next
     End Sub
 
@@ -334,10 +360,14 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
                           描边色ARGB As UInteger, 描边宽度 As Single,
                           水平对齐 As 定时文字对齐, 垂直对齐 As 定时文字对齐,
                           Optional 样式 As 定时文字样式 = 定时文字样式.无,
-                          Optional 内容标识 As ULong = 0)
+                          Optional 内容标识 As ULong = 0,
+                          Optional 阴影色ARGB As UInteger = 0,
+                          Optional 阴影X偏移 As Single = 0,
+                          Optional 阴影Y偏移 As Single = 0)
         Dim command = 取得复用命令()
         command.设置文字(文本, 字体, 字号, 区域, 前景色ARGB, 描边色ARGB, 描边宽度,
-                     水平对齐, 垂直对齐, 样式, 内容标识)
+                     水平对齐, 垂直对齐, 样式, 内容标识,
+                     阴影色ARGB, 阴影X偏移, 阴影Y偏移)
         图层命令.Add(command)
     End Sub
 

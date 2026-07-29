@@ -52,6 +52,9 @@ Public NotInheritable Class SRT字幕样式
     Public Property 颜色ARGB As UInteger = &HFFFFFFFFUI
     Public Property 描边颜色ARGB As UInteger = &HC0000000UI
     Public Property 描边宽度 As Single = 2.0F
+    Public Property 阴影颜色ARGB As UInteger = &H70000000UI
+    ''' <summary>基准分辨率下向右下方 45 度投影时，X/Y 轴各自的偏移。</summary>
+    Public Property 阴影偏移 As Single = 2.0F
     Public Property 行间距 As Single = 8.0F
     Public Property 底部边距 As Single = 54.0F
     Public Property 基准视频高度 As Single = 1080.0F
@@ -61,6 +64,7 @@ Public NotInheritable Class SRT字幕样式
         If String.IsNullOrWhiteSpace(拉丁字体) Then Throw New ArgumentException("拉丁字体不能为空。", NameOf(拉丁字体))
         If Not Single.IsFinite(字号) OrElse 字号 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(字号))
         If Not Single.IsFinite(描边宽度) OrElse 描边宽度 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(描边宽度))
+        If Not Single.IsFinite(阴影偏移) OrElse 阴影偏移 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(阴影偏移))
         If Not Single.IsFinite(行间距) OrElse 行间距 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(行间距))
         If Not Single.IsFinite(底部边距) OrElse 底部边距 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(底部边距))
         If Not Single.IsFinite(基准视频高度) OrElse 基准视频高度 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(基准视频高度))
@@ -68,13 +72,17 @@ Public NotInheritable Class SRT字幕样式
 End Class
 
 Public NotInheritable Class SRT字幕绘制行
-    Friend Sub New(文本值 As String, 字体值 As String, 字号像素值 As Single, 颜色值 As UInteger, 描边颜色值 As UInteger, 描边宽度像素值 As Single)
+    Friend Sub New(文本值 As String, 字体值 As String, 字号像素值 As Single,
+                   颜色值 As UInteger, 描边颜色值 As UInteger, 描边宽度像素值 As Single,
+                   阴影颜色值 As UInteger, 阴影偏移像素值 As Single)
         文本 = 文本值
         字体 = 字体值
         字号像素 = 字号像素值
         颜色ARGB = 颜色值
         描边颜色ARGB = 描边颜色值
         描边宽度像素 = 描边宽度像素值
+        阴影颜色ARGB = 阴影颜色值
+        阴影偏移像素 = 阴影偏移像素值
     End Sub
     Public ReadOnly Property 文本 As String
     Public ReadOnly Property 字体 As String
@@ -82,6 +90,8 @@ Public NotInheritable Class SRT字幕绘制行
     Public ReadOnly Property 颜色ARGB As UInteger
     Public ReadOnly Property 描边颜色ARGB As UInteger
     Public ReadOnly Property 描边宽度像素 As Single
+    Public ReadOnly Property 阴影颜色ARGB As UInteger
+    Public ReadOnly Property 阴影偏移像素 As Single
 End Class
 
 Public NotInheritable Class SRT字幕绘制项
@@ -129,7 +139,8 @@ Public NotInheritable Class SRT字幕帧生成器
             For Each line In cue.行
                 Dim fontName = If(line.语言 = 字幕语言类型.拉丁, 样式.拉丁字体, 样式.中文字体)
                 lines.Add(New SRT字幕绘制行(line.文本, fontName, 样式.字号 * scale,
-                                             样式.颜色ARGB, 样式.描边颜色ARGB, 样式.描边宽度 * scale))
+                                             样式.颜色ARGB, 样式.描边颜色ARGB, 样式.描边宽度 * scale,
+                                             样式.阴影颜色ARGB, 样式.阴影偏移 * scale))
             Next
             结果.Add(New SRT字幕绘制项(cue, lines, 区域.X像素 + 区域.宽度像素 * 0.5F,
                                         区域.Y像素 + 区域.高度像素 - 样式.底部边距 * scale,

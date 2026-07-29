@@ -28,7 +28,6 @@ Friend NotInheritable Class 播放器界面呈现器
     Private ReadOnly 音频编码占位 As Control
     Private ReadOnly 声道数占位 As Control
     Private ReadOnly 画面控件 As 播放器画面控件
-    Private ReadOnly 剪辑区间进度条 As 剪辑区间进度条控件
     Private ReadOnly 快照提供器 As Func(Of 播放器快照)
     Private ReadOnly 正在切换提供器 As Func(Of Boolean)
     Private ReadOnly 解码器提供器 As Func(Of 解码模式)
@@ -39,7 +38,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private 正在拖动进度条 As Boolean
     Private 有媒体快照 As Boolean
     Private 已释放 As Boolean
-    Private 剪辑区间模式已启用 As Boolean
+    Private 显示精确时间戳 As Boolean
     Private 滚轮余量 As Integer
 
     Friend Sub New(进度条 As LakeUI.ExcellentTrackBar,
@@ -59,7 +58,6 @@ Friend NotInheritable Class 播放器界面呈现器
                    音频编码占位 As Control,
                    声道数占位 As Control,
                    画面控件 As 播放器画面控件,
-                   剪辑区间进度条 As 剪辑区间进度条控件,
                    快照提供器 As Func(Of 播放器快照),
                    正在切换提供器 As Func(Of Boolean),
                    解码器提供器 As Func(Of 解码模式),
@@ -81,7 +79,6 @@ Friend NotInheritable Class 播放器界面呈现器
         Me.音频编码占位 = 音频编码占位
         Me.声道数占位 = 声道数占位
         Me.画面控件 = 画面控件
-        Me.剪辑区间进度条 = 剪辑区间进度条
         Me.快照提供器 = 快照提供器
         Me.正在切换提供器 = 正在切换提供器
         Me.解码器提供器 = 解码器提供器
@@ -111,6 +108,7 @@ Friend NotInheritable Class 播放器界面呈现器
 
     Friend Event 请求跳转到关键帧 As EventHandler(Of 播放器跳转请求事件参数)
     Friend Event 音量已变更 As EventHandler(Of 播放器音量事件参数)
+    Friend Event 播放状态已刷新 As EventHandler
 
     Friend ReadOnly Property 音量百分比 As Integer
         Get
@@ -150,8 +148,8 @@ Friend NotInheritable Class 播放器界面呈现器
             End Try
             设置时间戳文本(快照.播放位置, 快照.总时长)
         End If
-        剪辑区间进度条?.更新播放状态(快照.播放位置, 快照.总时长)
         刷新HDR按钮(快照)
+        RaiseEvent 播放状态已刷新(Me, EventArgs.Empty)
     End Sub
 
     Friend Sub 更新媒体信息(信息 As 媒体信息, 快照 As 播放器快照)
@@ -186,14 +184,14 @@ Friend NotInheritable Class 播放器界面呈现器
         有媒体快照 = False
         重置媒体进度条()
         设置时间戳文本(TimeSpan.Zero, TimeSpan.Zero)
-        剪辑区间进度条?.清除媒体()
         更新媒体信息(Nothing, Nothing)
         更新播放按钮(播放状态.空闲)
+        RaiseEvent 播放状态已刷新(Me, EventArgs.Empty)
     End Sub
 
-    Friend Sub 设置剪辑区间模式(启用 As Boolean)
+    Friend Sub 设置精确时间戳(启用 As Boolean)
         If 已释放 Then Return
-        剪辑区间模式已启用 = 启用
+        显示精确时间戳 = 启用
         Dim 快照 = 快照提供器()
         If 快照 Is Nothing Then
             设置时间戳文本(TimeSpan.Zero, TimeSpan.Zero)
@@ -356,7 +354,7 @@ Friend NotInheritable Class 播放器界面呈现器
 
     Private Sub 设置时间戳文本(当前位置 As TimeSpan, 总时长 As TimeSpan)
         Dim 精度 = 取得时间戳精度(当前位置, 总时长)
-        Dim HTML = $"{格式化彩色时长(当前位置, 精度, 剪辑区间模式已启用)}<font color=""#AAB0B9""> / </font>{格式化彩色时长(总时长, 精度)}"
+        Dim HTML = $"{格式化彩色时长(当前位置, 精度, 显示精确时间戳)}<font color=""#AAB0B9""> / </font>{格式化彩色时长(总时长, 精度)}"
         设置自适应文本(时间标签, HTML)
     End Sub
 

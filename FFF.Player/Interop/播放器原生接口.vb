@@ -74,6 +74,8 @@ Friend Structure 原生播放器快照
     Public 视频实时比特率 As ULong
     Public 音频实时比特率 As ULong
     Public 视频输出位深度 As UInteger
+    Public 保留2 As UInteger
+    Public 时间轴代次 As ULong
 End Structure
 
 <Flags>
@@ -154,6 +156,10 @@ Friend Structure 原生定时文字命令
     Public 位图行跨度 As UInteger
     Public 位图字节数 As UInteger
     Public 内容标识 As ULong
+    Public 阴影色ARGB As UInteger
+    Public 阴影X偏移 As Single
+    Public 阴影Y偏移 As Single
+    Public 保留 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>

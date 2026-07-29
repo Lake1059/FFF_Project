@@ -99,6 +99,7 @@ Public NotInheritable Class 播放器快照
         视频实时比特率 = 值.视频实时比特率
         音频实时比特率 = 值.音频实时比特率
         视频输出位深度 = CInt(值.视频输出位深度)
+        时间轴代次 = 值.时间轴代次
     End Sub
 
     Public ReadOnly Property 状态 As 播放状态
@@ -141,6 +142,7 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 视频实时比特率 As ULong
     Public ReadOnly Property 音频实时比特率 As ULong
     Public ReadOnly Property 视频输出位深度 As Integer
+    Public ReadOnly Property 时间轴代次 As ULong
 End Class
 
 Public Enum 定时文字对齐
@@ -175,6 +177,9 @@ Public NotInheritable Class 定时文字命令
     Public Property 前景色ARGB As UInteger = &HFFFFFFFFUI
     Public Property 描边色ARGB As UInteger = &HFF000000UI
     Public Property 描边宽度 As Single
+    Public Property 阴影色ARGB As UInteger
+    Public Property 阴影X偏移 As Single
+    Public Property 阴影Y偏移 As Single
     Public Property X As Single
     Public Property Y As Single
     Public Property 宽度 As Single
@@ -188,10 +193,14 @@ Public NotInheritable Class 定时文字命令
                                   描边色ARGB As UInteger, 描边宽度 As Single,
                                   水平对齐 As 定时文字对齐, 垂直对齐 As 定时文字对齐,
                                   Optional 样式 As 定时文字样式 = 定时文字样式.无,
-                                  Optional 内容标识 As ULong = 0) As 定时文字命令
+                                  Optional 内容标识 As ULong = 0,
+                                  Optional 阴影色ARGB As UInteger = 0,
+                                  Optional 阴影X偏移 As Single = 0,
+                                  Optional 阴影Y偏移 As Single = 0) As 定时文字命令
         Dim result As New 定时文字命令()
         result.设置文字(文本, 字体, 字号, 区域, 前景色ARGB, 描边色ARGB, 描边宽度,
-                    水平对齐, 垂直对齐, 样式, 内容标识)
+                    水平对齐, 垂直对齐, 样式, 内容标识,
+                    阴影色ARGB, 阴影X偏移, 阴影Y偏移)
         Return result
     End Function
 
@@ -199,7 +208,10 @@ Public NotInheritable Class 定时文字命令
                       区域 As RectangleF, 前景色值 As UInteger, 描边色值 As UInteger,
                       描边宽度值 As Single, 水平对齐值 As 定时文字对齐,
                       垂直对齐值 As 定时文字对齐, 样式值 As 定时文字样式,
-                      Optional 内容标识值 As ULong = 0)
+                      Optional 内容标识值 As ULong = 0,
+                      Optional 阴影色值 As UInteger = 0,
+                      Optional 阴影X值 As Single = 0,
+                      Optional 阴影Y值 As Single = 0)
         是位图 = False
         位图像素BGRA = Nothing
         位图宽度 = 0 : 位图高度 = 0 : 位图行跨度 = 0
@@ -208,6 +220,7 @@ Public NotInheritable Class 定时文字命令
         字号 = 字号值
         X = 区域.X : Y = 区域.Y : 宽度 = 区域.Width : 高度 = 区域.Height
         前景色ARGB = 前景色值 : 描边色ARGB = 描边色值 : 描边宽度 = 描边宽度值
+        阴影色ARGB = 阴影色值 : 阴影X偏移 = 阴影X值 : 阴影Y偏移 = 阴影Y值
         水平对齐 = 水平对齐值 : 垂直对齐 = 垂直对齐值 : 样式 = 样式值
         内容标识 = If(内容标识值 <> 0, 内容标识值, 计算文字内容标识(文本, 字体))
     End Sub
@@ -247,6 +260,7 @@ Public NotInheritable Class 定时文字命令
         ' 被位图命令无谓保活，也避免以后新增原生字段时读到陈旧状态。
         文本 = String.Empty : 字体 = String.Empty : 字号 = 0
         前景色ARGB = 0 : 描边色ARGB = 0 : 描边宽度 = 0
+        阴影色ARGB = 0 : 阴影X偏移 = 0 : 阴影Y偏移 = 0
         水平对齐 = 定时文字对齐.靠前 : 垂直对齐 = 定时文字对齐.靠前
         样式 = 定时文字样式.无
         内容标识 = 内容标识值
