@@ -6,6 +6,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -89,7 +90,7 @@ FFFResult EvaluateTimedTextRasterization(FFF3FPTimedTextRasterizationProbe& prob
 
 class PlayerVideoRenderer final {
 public:
-    PlayerVideoRenderer() noexcept;
+    explicit PlayerVideoRenderer(std::function<void()> recoveryCallback = {}) noexcept;
     ~PlayerVideoRenderer();
 
     FFFResult SetWindow(HWND window) noexcept;
@@ -103,6 +104,9 @@ public:
     FFFResult ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept;
     FFFResult SetTimedTextLayer(TimedTextRenderLayer layer, TimedTextLayerSlot slot) noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status, TimedTextLayerSlot slot) noexcept;
+    bool DeviceRecoveryRequested() const noexcept;
+    bool RequestRecoveryIfDeviceLost() noexcept;
+    FFFResult RecreateDeviceResources() noexcept;
     void ResetMedia() noexcept;
     void Close() noexcept;
 
@@ -180,6 +184,8 @@ private:
     bool OutputSupportsHdr() noexcept;
     void SetHdrMetadata() noexcept;
     void ClearSurface() noexcept;
+    void ReleaseDeviceObjects() noexcept;
+    void RequestDeviceRecovery(long result, const char* operation) noexcept;
     void SetError(std::string message) noexcept;
 
     HWND window_;
@@ -286,6 +292,8 @@ private:
     std::atomic<std::uint64_t> presentWait100ns_;
     std::atomic<std::uint64_t> deviceLockWait100ns_;
     std::atomic<std::uint64_t> softwareConvert100ns_;
+    std::atomic<bool> deviceRecoveryRequested_;
+    std::function<void()> recoveryCallback_;
     HMONITOR hdrMonitor_;
     bool hdrSupportValid_;
     bool hdrSupported_;

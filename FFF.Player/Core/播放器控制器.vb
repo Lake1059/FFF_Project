@@ -45,6 +45,7 @@ Public NotInheritable Class 播放器控制器
     Public Event 状态已变化 As EventHandler
     Public Event 媒体已打开 As EventHandler(Of 播放器媒体事件参数)
     Public Event 播放错误 As EventHandler(Of 播放器错误事件参数)
+    Public Event 操作提示 As EventHandler(Of 播放器操作提示事件参数)
     Public Event HDR输出状态已确认 As EventHandler(Of 播放器HDR状态事件参数)
     Public Event 外部字幕已加载 As EventHandler(Of 播放器字幕事件参数)
     Public Event 字幕选择已变化 As EventHandler
@@ -821,15 +822,31 @@ Public NotInheritable Class 播放器控制器
         If sender IsNot 会话 Then Return
         Dim 快照 = 安全读取快照()
         If 快照 IsNot Nothing Then 当前解码器 = 快照.解码器
+        Dim 解码回退 = False
+        Dim 回退原因 As String = String.Empty
         Try
             Using 文档 = JsonDocument.Parse(e.详情JSON)
                 Dim 独占 As JsonElement
                 If 文档.RootElement.TryGetProperty("exclusive", 独占) Then
                     当前WASAPI模式 = If(独占.GetBoolean(), WASAPI共享模式.独占, WASAPI共享模式.共享)
                 End If
+                Dim 回退 As JsonElement
+                If 文档.RootElement.TryGetProperty("fallback", 回退) Then
+                    解码回退 = 回退.GetBoolean()
+                ElseIf 文档.RootElement.TryGetProperty("hardwareFallback", 回退) Then
+                    解码回退 = 回退.GetBoolean()
+                End If
+                Dim 原因 As JsonElement
+                If 解码回退 AndAlso 文档.RootElement.TryGetProperty("reason", 原因) AndAlso
+                    原因.ValueKind = JsonValueKind.String Then 回退原因 = 原因.GetString()
             End Using
         Catch
         End Try
+        If 解码回退 Then
+            Dim 说明 = "GPU 解码已回退到 CPU"
+            If Not String.IsNullOrWhiteSpace(回退原因) Then 说明 &= $"：{回退原因.Trim()}"
+            RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(说明))
+        End If
         RaiseEvent 状态已变化(Me, EventArgs.Empty)
     End Sub
 
@@ -1065,6 +1082,16 @@ Public NotInheritable Class 播放器错误事件参数
 
     Public ReadOnly Property 消息 As String
     Public ReadOnly Property 标题 As String
+End Class
+
+Public NotInheritable Class 播放器操作提示事件参数
+    Inherits EventArgs
+
+    Public Sub New(说明 As String)
+        Me.说明 = If(说明, String.Empty)
+    End Sub
+
+    Public ReadOnly Property 说明 As String
 End Class
 
 Public NotInheritable Class 播放器HDR状态事件参数

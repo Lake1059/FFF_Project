@@ -734,7 +734,7 @@ FFFResult EvaluateTimedTextRasterization(FFF3FPTimedTextRasterizationProbe& prob
     return FFFResult::Success;
 }
 
-PlayerVideoRenderer::PlayerVideoRenderer() noexcept
+PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), timedTextPixelShader_(nullptr), sampler_(nullptr),
       constants_(nullptr),
@@ -776,6 +776,7 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
       hasCachedVideo_(false), videoGeneration_(0), presentedVideoGeneration_(0),
       presentedVideoFrames_(0), coalescedVideoFrames_(0), swapChainPresents_(0),
       presentWait100ns_(0), deviceLockWait100ns_(0), softwareConvert100ns_(0),
+      deviceRecoveryRequested_(false), recoveryCallback_(std::move(recoveryCallback)),
        hdrMonitor_(nullptr), hdrSupportValid_(false), hdrSupported_(false),
       timedTextAtlasX_(0), timedTextAtlasY_(0), timedTextAtlasRowHeight_(0),
       timedTextAtlasSize_(0), timedTextSpriteInstanceCapacity_(0),
@@ -1523,9 +1524,11 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
     for (;;) {
         float frameRate = 60.0f;
         bool videoChanged = false;
+        bool devicePollOnly = false;
         {
             std::unique_lock lock(timedTextMutex_);
-            timedTextCondition_.wait(lock, [this, &observedPresentationGeneration,
+            const auto signaled = timedTextCondition_.wait_for(lock,
+                std::chrono::milliseconds(500), [this, &observedPresentationGeneration,
                     &observedVideoGeneration] {
                 return timedTextThreadStop_ ||
                     presentationGeneration_ != observedPresentationGeneration ||
@@ -1533,33 +1536,44 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
                         videoGeneration_.load() != observedVideoGeneration);
             });
             if (timedTextThreadStop_) return;
+            if (!signaled) {
+                devicePollOnly = true;
+            }
             if (!timedTextThreadRunning_) {
                 observedPresentationGeneration = presentationGeneration_;
                 observedVideoGeneration = videoGeneration_.load();
                 continue;
             }
-            videoChanged = videoGeneration_.load() != observedVideoGeneration;
-            // A new decoded frame is never held behind the overlay cadence. Static
-            // subtitle/danmaku updates are still coalesced to their requested rate.
-            if (const auto now = std::chrono::steady_clock::now();
-                !videoChanged &&
-                nextPresentation != std::chrono::steady_clock::time_point::min() &&
-                now < nextPresentation) {
-                timedTextCondition_.wait_until(lock, nextPresentation,
-                    [this, &observedVideoGeneration] {
-                        return timedTextThreadStop_ ||
-                            videoGeneration_.load() != observedVideoGeneration;
-                    });
-                if (timedTextThreadStop_) return;
+            if (!devicePollOnly) {
+                videoChanged = videoGeneration_.load() != observedVideoGeneration;
+                // A new decoded frame is never held behind the overlay cadence. Static
+                // subtitle/danmaku updates are still coalesced to their requested rate.
+                if (const auto now = std::chrono::steady_clock::now();
+                    !videoChanged &&
+                    nextPresentation != std::chrono::steady_clock::time_point::min() &&
+                    now < nextPresentation) {
+                    timedTextCondition_.wait_until(lock, nextPresentation,
+                        [this, &observedVideoGeneration] {
+                            return timedTextThreadStop_ ||
+                                videoGeneration_.load() != observedVideoGeneration;
+                        });
+                    if (timedTextThreadStop_) return;
+                }
+                observedPresentationGeneration = presentationGeneration_;
+                observedVideoGeneration = videoGeneration_.load();
+                frameRate = presentationFrameRate_;
             }
-            observedPresentationGeneration = presentationGeneration_;
-            observedVideoGeneration = videoGeneration_.load();
-            frameRate = presentationFrameRate_;
+        }
+        if (devicePollOnly) {
+            RequestRecoveryIfDeviceLost();
+            continue;
         }
         const auto presentationStart = std::chrono::steady_clock::now();
         const auto result = PresentTimedText();
-        if (result != FFFResult::Success)
+        if (result != FFFResult::Success) {
+            if (result == FFFResult::DeviceFailure && RequestRecoveryIfDeviceLost()) continue;
             SetError("The independent timed-text presenter could not compose the latest layer.");
+        }
         nextPresentation = presentationStart + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::duration<double>(1.0 / std::clamp(static_cast<double>(frameRate), 1.0, 240.0)));
     }
@@ -1756,7 +1770,11 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requeste
     d2dContext_->SetTarget(d2dAtlasTarget_); d2dContext_->BeginDraw();
     d2dContext_->Clear(D2D1::ColorF(0, 0));
     const auto end = d2dContext_->EndDraw(); d2dContext_->SetTarget(nullptr);
-    if (FAILED(end)) return FFFResult::DeviceFailure;
+    if (FAILED(end)) {
+        if (end == D2DERR_RECREATE_TARGET)
+            RequestDeviceRecovery(end, "Direct2D target recreation");
+        return FFFResult::DeviceFailure;
+    }
     timedTextAtlasSize_ = size;
     timedTextAtlasX_ = timedTextAtlasY_ = timedTextAtlasRowHeight_ = 0;
     timedTextSprites_.clear();
@@ -2054,7 +2072,12 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     }
     const auto end = d2dContext_->EndDraw();
     d2dContext_->SetTarget(nullptr);
-    if (FAILED(end)) { SetError("Direct2D could not render the timed-text layer."); return FFFResult::DeviceFailure; }
+    if (FAILED(end)) {
+        if (end == D2DERR_RECREATE_TARGET)
+            RequestDeviceRecovery(end, "Direct2D timed-text rendering");
+        SetError("Direct2D could not render the timed-text layer.");
+        return FFFResult::DeviceFailure;
+    }
     if (!timedTextSpriteInstances_.empty()) {
         const auto capacityResult = EnsureTimedTextInstanceCapacity(
             timedTextSpriteInstances_.size());
@@ -2487,10 +2510,18 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     const auto present = chain->Present(1, 0);
     presentWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
         std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count() / 100));
-    if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET) {
-        SetError("The D3D11 playback device was removed."); return FFFResult::DeviceFailure;
+    if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET ||
+        present == DXGI_ERROR_DEVICE_HUNG || present == DXGI_ERROR_DRIVER_INTERNAL_ERROR) {
+        RequestDeviceRecovery(present, "DXGI presentation");
+        return FFFResult::DeviceFailure;
     }
-    if (FAILED(present)) return FFFResult::DeviceFailure;
+    if (FAILED(present)) {
+        std::ostringstream message;
+        message << "Could not present the playback swap chain (HRESULT 0x" << std::hex
+                << static_cast<std::uint32_t>(present) << ").";
+        SetError(message.str());
+        return FFFResult::DeviceFailure;
+    }
     ++swapChainPresents_;
     const auto previous = presentedVideoGeneration_.exchange(renderedVideoGeneration);
     if (renderedVideoGeneration > previous + 1)
@@ -2564,6 +2595,86 @@ void PlayerVideoRenderer::ClearSurface() noexcept {
         InvalidateRect(window_, nullptr, TRUE);
 }
 
+bool PlayerVideoRenderer::DeviceRecoveryRequested() const noexcept {
+    return deviceRecoveryRequested_.load(std::memory_order_acquire);
+}
+
+void PlayerVideoRenderer::RequestDeviceRecovery(const long result,
+    const char* operation) noexcept {
+    try {
+        std::ostringstream message;
+        message << (operation == nullptr ? "The playback graphics device failed" : operation)
+                << " requested graphics resource reconstruction (HRESULT 0x" << std::hex
+                << static_cast<std::uint32_t>(result) << ").";
+        SetError(message.str());
+        if (!deviceRecoveryRequested_.exchange(true, std::memory_order_acq_rel) && recoveryCallback_)
+            recoveryCallback_();
+    } catch (...) {
+        deviceRecoveryRequested_.store(true, std::memory_order_release);
+        try { if (recoveryCallback_) recoveryCallback_(); } catch (...) {}
+    }
+}
+
+bool PlayerVideoRenderer::RequestRecoveryIfDeviceLost() noexcept {
+    if (DeviceRecoveryRequested()) return true;
+    HRESULT reason = S_OK;
+    {
+        std::lock_guard deviceLock(deviceMutex_);
+        if (device_ == nullptr) return false;
+        reason = device_->GetDeviceRemovedReason();
+    }
+    if (SUCCEEDED(reason)) return false;
+    RequestDeviceRecovery(reason, "D3D11 device removal");
+    return true;
+}
+
+void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
+    ReleaseVideoProcessor();
+    ReleaseVideoProcessorInputSurface();
+    ReleaseTimedTextResources();
+    if (context_ != nullptr &&
+        (device_ == nullptr || SUCCEEDED(device_->GetDeviceRemovedReason()))) {
+        context_->ClearState();
+        context_->Flush();
+    }
+    if (swapChain_ != nullptr) {
+        std::lock_guard presentLock(presentMutex_);
+        swapChain_->Release();
+        swapChain_ = nullptr;
+    }
+    for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
+        if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
+        if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
+    }
+    if (constants_ != nullptr) { constants_->Release(); constants_ = nullptr; }
+    if (sampler_ != nullptr) { sampler_->Release(); sampler_ = nullptr; }
+    if (pixelShader_ != nullptr) { pixelShader_->Release(); pixelShader_ = nullptr; }
+    if (timedTextPixelShader_ != nullptr) { timedTextPixelShader_->Release(); timedTextPixelShader_ = nullptr; }
+    if (vertexShader_ != nullptr) { vertexShader_->Release(); vertexShader_ = nullptr; }
+    if (context_ != nullptr) { context_->Release(); context_ = nullptr; }
+    if (device_ != nullptr) { device_->Release(); device_ = nullptr; }
+    swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
+    swapHdr_ = false;
+    swapOutputBits_ = 8;
+    sourceInputLayout_ = UINT32_MAX;
+    sourceBitDepth_ = 0;
+    sourceChromaWidthShift_ = sourceChromaHeightShift_ = 0;
+    sourceExternal_ = false;
+    hasCachedVideo_ = false;
+    hdrMonitor_ = nullptr;
+    hdrSupportValid_ = false;
+}
+
+FFFResult PlayerVideoRenderer::RecreateDeviceResources() noexcept {
+    StopTimedTextThread();
+    std::lock_guard deviceLock(deviceMutex_);
+    ReleaseDeviceObjects();
+    const auto result = EnsureDevice();
+    if (result == FFFResult::Success)
+        deviceRecoveryRequested_.store(false, std::memory_order_release);
+    return result;
+}
+
 void PlayerVideoRenderer::ResetMedia() noexcept {
     StopTimedTextThread();
     std::lock_guard deviceLock(deviceMutex_);
@@ -2612,9 +2723,7 @@ void PlayerVideoRenderer::Close() noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
-    ReleaseVideoProcessor();
-    ReleaseVideoProcessorInputSurface();
-    ReleaseTimedTextResources();
+    ReleaseDeviceObjects();
     if (writeFactory_ != nullptr) { writeFactory_->Release(); writeFactory_ = nullptr; }
     if (d2dFactory_ != nullptr) { d2dFactory_->Release(); d2dFactory_ = nullptr; }
     {
@@ -2624,30 +2733,8 @@ void PlayerVideoRenderer::Close() noexcept {
             timedTextPresentCounts_[index] = 0;
         }
     }
-    // Flip-model swap chains are exclusive per HWND. Unbind and submit every
-    // outstanding D3D reference before releasing the chain, otherwise an
-    // immediate same-window media reopen can fail CreateSwapChainForHwnd.
-    if (context_ != nullptr) { context_->ClearState(); context_->Flush(); }
-    if (swapChain_ != nullptr) {
-        std::lock_guard presentLock(presentMutex_);
-        swapChain_->Release(); swapChain_ = nullptr;
-    }
-    for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
-        if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
-        if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
-    }
-    if (constants_ != nullptr) { constants_->Release(); constants_ = nullptr; }
-    if (sampler_ != nullptr) { sampler_->Release(); sampler_ = nullptr; }
-    if (pixelShader_ != nullptr) { pixelShader_->Release(); pixelShader_ = nullptr; }
-    if (timedTextPixelShader_ != nullptr) { timedTextPixelShader_->Release(); timedTextPixelShader_ = nullptr; }
-    if (vertexShader_ != nullptr) { vertexShader_->Release(); vertexShader_ = nullptr; }
-    if (context_ != nullptr) { context_->Release(); context_ = nullptr; }
-    if (device_ != nullptr) { device_->Release(); device_ = nullptr; }
     std::vector<std::uint8_t>().swap(convertedRgb_);
-    swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
-    swapHdr_ = false; swapOutputBits_ = 8;
-    sourceInputLayout_ = UINT32_MAX; sourceBitDepth_ = 0;
-    sourceChromaWidthShift_ = sourceChromaHeightShift_ = 0;
+    deviceRecoveryRequested_.store(false, std::memory_order_release);
 }
 
 FFF3FPColorMode PlayerVideoRenderer::ActualColorMode() const noexcept { return actualMode_; }

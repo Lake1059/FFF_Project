@@ -67,6 +67,7 @@ private:
     };
     void Enqueue(Command command) noexcept;
     void NotifyAudioRestart() noexcept;
+    void NotifyVideoRecovery() noexcept;
     FFFResult ScheduleStep(StepOperation operation, std::int32_t direction) noexcept;
     void ProcessStep() noexcept;
     void DoStepFrame(std::int32_t direction);
@@ -86,15 +87,17 @@ private:
     FFFResult RecreateAudioRenderer(const std::wstring& endpointId, bool exclusive,
         bool paused, std::string& error) noexcept;
     bool RecoverAudioDevice() noexcept;
+    bool RecoverVideoDevice() noexcept;
     FFFResult OpenFormat(const std::string& pathUtf8, AVFormatContext** format,
         std::string& error) noexcept;
     FFFResult OpenDecoder(AVFormatContext* format, std::int32_t streamIndex, bool video,
         AVCodecContext** decoder, std::int32_t hardwareDeviceType = -1,
         std::int32_t* hardwarePixelFormat = nullptr, bool useConfiguredHardware = true,
-        const AVCodec* codecOverride = nullptr) noexcept;
+        const AVCodec* codecOverride = nullptr, std::string* failureReason = nullptr) noexcept;
     FFFResult OpenHardwareVideoDecoder(AVFormatContext* format, std::int32_t streamIndex,
-        AVCodecContext** decoder) noexcept;
+        AVCodecContext** decoder, std::string* failureReason = nullptr) noexcept;
     FFFResult FallbackToSoftwareVideoDecoder(const char* reason) noexcept;
+    FFFResult DecodeInitialStillImage() noexcept;
     FFFResult LoadCoverArt() noexcept;
     FFFResult ProbeHardwareVideo(AVFormatContext* format, AVCodecContext* decoder,
         std::int32_t streamIndex, std::int32_t hardwarePixelFormat) noexcept;
@@ -111,6 +114,7 @@ private:
     void DisableFailedInternalAudio(FFFResult result, std::string message) noexcept;
     void UpdateAudioDiagnostics() noexcept;
     void TrackPacketBitRate(const AVPacket* packet, AVFormatContext* owner) noexcept;
+    void UpdateBitRateForPosition(std::int64_t position100ns) noexcept;
     void ResetBitRateTracking() noexcept;
     void FlushAtEnd() noexcept;
     void PublishSnapshot() noexcept;
@@ -157,6 +161,7 @@ private:
     std::int32_t audioStream_;
     std::int32_t coverArtStream_;
     AVFrame* coverArtFrame_;
+    AVFrame* stillImageFrame_;
     AVFormatContext* externalFormat_;
     AVCodecContext* externalAudioDecoder_;
     std::int32_t externalAudioStream_;
@@ -194,18 +199,17 @@ private:
     std::size_t pendingVideoPacketBytes_;
     std::deque<AVPacket*> pendingAudioPackets_;
     std::size_t pendingAudioPacketBytes_;
-    struct BitRateSample {
-        std::int64_t duration100ns;
-        std::uint32_t bytes;
+    struct BitRateBucket {
+        std::int64_t secondIndex;
+        std::uint64_t bytes;
     };
-    std::deque<BitRateSample> videoBitRateSamples_;
-    std::deque<BitRateSample> audioBitRateSamples_;
-    std::int64_t videoBitRateDuration100ns_;
-    std::int64_t audioBitRateDuration100ns_;
-    std::uint64_t videoBitRateBytes_;
-    std::uint64_t audioBitRateBytes_;
+    std::deque<BitRateBucket> videoBitRateBuckets_;
+    std::deque<BitRateBucket> audioBitRateBuckets_;
+    std::int64_t publishedBitRateSecond_;
     bool draining_;
+    bool staticImage_;
     bool hardwareFallbackPending_;
+    std::string pendingHardwareFallbackReason_;
     bool internalAudioFailurePending_;
     FFFResult internalAudioFailureResult_;
     std::uint32_t internalAudioDecodeErrorCount_;

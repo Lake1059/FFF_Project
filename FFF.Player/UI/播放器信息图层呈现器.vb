@@ -34,8 +34,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Friend ReadOnly 文本段 As 文本段()
     End Class
 
-    Private Shared ReadOnly 全屏遮罩像素 As Byte() = {0, 0, 0, 184}
-    Private Shared ReadOnly 消息背景像素 As Byte() = {0, 0, 0, 120}
+    Private Shared ReadOnly 全屏遮罩像素 As Byte() = {0, 0, 0, 160}
+    Private Shared ReadOnly 消息背景像素 As Byte() = {0, 0, 0, 160}
     Private Const 标签颜色 As UInteger = &HFFE8E8E8UI
     Private Const 次要颜色 As UInteger = &HFFB8B8B8UI
     Private Const 青色 As UInteger = &HFF55E7EAUI
@@ -56,7 +56,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取弹幕状态 As Func(Of 定时文字状态)
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
-    Private ReadOnly 刷新定时器 As System.Windows.Forms.Timer
+    Private ReadOnly 刷新定时器 As LakeUI.PrecisionTimer
     Private ReadOnly 普通字体 As New Font("Microsoft YaHei UI", 11.0F, FontStyle.Regular, GraphicsUnit.Point)
     Private ReadOnly 操作消息列表 As New List(Of 操作消息)()
     Private ReadOnly 图层命令 As New List(Of 定时文字命令)(32)
@@ -93,7 +93,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取字幕状态 = 字幕状态提供器 : 获取弹幕状态 = 弹幕状态提供器
         获取WASAPI模式 = WASAPI模式提供器
         提交图层 = 图层提交器
-        刷新定时器 = New System.Windows.Forms.Timer With {.Interval = 200}
+        刷新定时器 = New LakeUI.PrecisionTimer With {.Interval = 200}
         AddHandler 刷新定时器.Tick, AddressOf 刷新定时器_Tick
         AddHandler 画面控件.ClientSizeChanged, AddressOf 画面大小已变化
     End Sub
@@ -213,7 +213,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             Dim 视频概要 = If(String.IsNullOrEmpty(编码), 解码器,
                            If(String.IsNullOrEmpty(解码器), 编码, $"{编码} - {解码器}"))
             添加配对行如果有值(结果, "视频：", 视频概要, 品红, 8)
-            添加配对行如果有值(结果, "输入：", 视频输入(视频), 紫色)
+            添加配对行如果有值(结果, "输入：", 视频输入(视频, 快照.视频实时比特率), 紫色)
             添加配对行如果有值(结果, "色彩：", 视频色彩(视频), 蓝色)
             添加配对行如果有值(结果, "输出：", 视频输出(快照, 画面控件.ClientSize), 绿色)
             添加配对行如果有值(结果, "渲染：", 视频渲染(快照), 黄色)
@@ -226,18 +226,17 @@ Friend NotInheritable Class 播放器信息图层呈现器
             Dim 音频概要 = If(String.IsNullOrEmpty(编码), $"WASAPI {WASAPI}",
                            $"{编码} - WASAPI {WASAPI}")
             添加配对行如果有值(结果, "音频：", 音频概要, 品红, 8)
-            添加配对行如果有值(结果, "输入：", 音频输入(音频), 紫色)
+            添加配对行如果有值(结果, "输入：", 音频输入(音频, 快照.音频实时比特率), 紫色)
             添加配对行如果有值(结果, "输出：", 音频输出(音频, 快照), 绿色)
         End If
 
-        Dim 字幕文本 = 合并字段(
-            If(字幕 Is Nothing, "未加载", 字幕.格式.ToString().ToUpperInvariant()),
-            $"总数量 {If(字幕 Is Nothing, "0", 字幕条目数(字幕))}",
-            If(字幕状态 Is Nothing, String.Empty, $"当前正在渲染 {字幕状态.命令数:N0}"))
-        Dim 弹幕文本 = 合并字段(
-            If(弹幕 Is Nothing, "未加载", "哔哩哔哩 XML"),
-            $"总数量 {If(弹幕 Is Nothing, 0, 弹幕.数量):N0}",
-            If(弹幕状态 Is Nothing, String.Empty, $"当前正在渲染 {弹幕状态.命令数:N0}"))
+        Dim 字幕文本 = If(字幕 Is Nothing, "未加载", 合并字段(
+            字幕.格式.ToString().ToUpperInvariant(),
+            $"总数量 {字幕条目数(字幕)}",
+            If(字幕状态 Is Nothing, String.Empty, $"当前正在渲染 {字幕状态.命令数:N0}")))
+        Dim 弹幕文本 = If(弹幕 Is Nothing, "未加载", 合并字段(
+            "哔哩哔哩 XML", $"总数量 {弹幕.数量:N0}",
+            If(弹幕状态 Is Nothing, String.Empty, $"当前正在渲染 {弹幕状态.命令数:N0}")))
         结果.Add(配对行("字幕：", 字幕文本, 青色, 8))
         结果.Add(配对行("弹幕：", 弹幕文本, 橙色))
         Return 结果
@@ -255,15 +254,14 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 边距 = 16.0F * DPI缩放
         Dim 水平内边距 = 12.0F * DPI缩放, 垂直内边距 = 7.0F * DPI缩放
         Dim 行高 = Math.Max(18.0F * DPI缩放, 普通字体.GetHeight(图形) + 2.0F * DPI缩放)
-        Dim 最大文本宽度 = Math.Max(120.0F * DPI缩放, 画布.Width * 0.46F - 水平内边距 * 2.0F)
+        Dim 背景宽度 = Math.Max(1.0F, 画布.Width - 边距 * 2.0F)
+        Dim 最大文本宽度 = Math.Max(1.0F, 背景宽度 - 水平内边距 * 2.0F)
         Dim y = 画布.Height - 边距
         For index = 操作消息列表.Count - 1 To 0 Step -1
             Dim 消息 = 操作消息列表(index)
             Dim 文本 = 拟合文本(图形, 消息.文本, 普通字体, 最大文本宽度)
             Dim 文本宽度 = 测量文本(图形, 文本, 普通字体)
             Dim 背景高度 = 行高 + 垂直内边距 * 2.0F
-            Dim 背景宽度 = Math.Min(最大文本宽度 + 水平内边距 * 2.0F,
-                              文本宽度 + 水平内边距 * 2.0F)
             y -= 背景高度
             图层命令.Add(定时文字命令.创建位图(消息背景像素, 1, 1, 4,
                 New RectangleF(边距, y, 背景宽度, 背景高度), 2UL))
@@ -352,13 +350,13 @@ Friend NotInheritable Class 播放器信息图层呈现器
         上次帧率采样时钟 = 当前时钟
     End Sub
 
-    Private Shared Function 视频输入(流 As 媒体流信息) As String
+    Private Shared Function 视频输入(流 As 媒体流信息, 实时比特率 As ULong) As String
         Return 合并字段(
             If(String.IsNullOrWhiteSpace(流.像素格式), String.Empty,
                $"格式 {流.像素格式.ToUpperInvariant()}"),
             If(流.宽度 > 0 AndAlso 流.高度 > 0, $"分辨率 {流.宽度}x{流.高度}", String.Empty),
             If(流.平均帧率 > 0, $"帧率 {流.平均帧率:0.###}fps", String.Empty),
-            If(流.比特率 > 0, $"平均码率 {格式化比特率(流.比特率)}", String.Empty))
+            If(实时比特率 > 0, $"实时码率 {格式化比特率(实时比特率)}", String.Empty))
     End Function
 
     Private Shared Function 视频色彩(流 As 媒体流信息) As String
@@ -397,13 +395,13 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return 快照.已丢弃视频帧数 + 快照.已合并视频帧数
     End Function
 
-    Private Shared Function 音频输入(流 As 媒体流信息) As String
+    Private Shared Function 音频输入(流 As 媒体流信息, 实时比特率 As ULong) As String
         Dim 位深 = If(流.原始采样位数 > 0, 流.原始采样位数, 流.编码采样位数)
         Return 合并字段(
             If(流.采样率 > 0, $"采样 {流.采样率}Hz", String.Empty),
             If(位深 > 0, $"位深 {位深}bit", String.Empty),
             If(流.声道数 > 0, $"声道数 {流.声道数}", String.Empty),
-            If(流.比特率 > 0, $"平均码率 {格式化比特率(流.比特率)}", String.Empty))
+            If(实时比特率 > 0, $"实时码率 {格式化比特率(实时比特率)}", String.Empty))
     End Function
 
     Private Shared Function 音频输出(流 As 媒体流信息, 快照 As 播放器快照) As String
@@ -415,11 +413,11 @@ Friend NotInheritable Class 播放器信息图层呈现器
                        流.输出有效采样位数 > 0 OrElse 流.输出采样率 > 0 OrElse
                        流.输出声道数 > 0 OrElse 采样率 > 0 OrElse 声道 > 0
         Return 合并字段(
-            If(有输出格式, $"格式 {格式}", String.Empty),
+            If(有输出格式, $"{格式}", String.Empty),
             If(采样率 > 0, $"采样 {采样率}Hz", String.Empty),
             If(位深 > 0, $"位深 {位深}bit", String.Empty),
             If(声道 > 0, $"声道数 {声道}", String.Empty),
-            $"实时延迟 {快照.音频缓冲时长.TotalMilliseconds:0.0}ms")
+            $"实时延迟 {快照.音频缓冲时长.TotalMilliseconds:0}ms")
     End Function
 
     Private Shared Function 字幕条目数(字幕 As 外部字幕轨道) As String
@@ -429,6 +427,12 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private Shared Function 格式化比特率(值 As Long) As String
         If 值 <= 0 Then Return String.Empty
         If 值 >= 1_000_000 Then Return $"{值 / 1_000_000.0R:0.##} Mbps"
+        Return $"{值 / 1000.0R:0.##} kbps"
+    End Function
+
+    Private Shared Function 格式化比特率(值 As ULong) As String
+        If 值 = 0 Then Return String.Empty
+        If 值 >= 1_000_000UL Then Return $"{值 / 1_000_000.0R:0.##} Mbps"
         Return $"{值 / 1000.0R:0.##} kbps"
     End Function
 

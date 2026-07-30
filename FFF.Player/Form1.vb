@@ -60,6 +60,7 @@ Public Class Form1
         AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开
         AddHandler 播放控制器.媒体已打开, AddressOf 剪辑区间控制器.媒体已打开
         AddHandler 播放控制器.播放错误, AddressOf 播放控制器_播放错误
+        AddHandler 播放控制器.操作提示, AddressOf 播放控制器_操作提示
         AddHandler 播放控制器.HDR输出状态已确认, AddressOf 播放控制器_HDR输出状态已确认
         AddHandler 播放控制器.外部字幕已加载, AddressOf 播放控制器_外部字幕已加载
         AddHandler 播放控制器.字幕选择已变化, AddressOf 播放控制器_字幕选择已变化
@@ -197,6 +198,12 @@ Public Class Form1
         End If
     End Sub
 
+    Private Sub 播放控制器_操作提示(sender As Object, e As 播放器操作提示事件参数)
+        If Not 正在关闭 Then
+            信息图层呈现器?.显示操作信息(e.说明, &HFFF0D35DUI, "解码回退")
+        End If
+    End Sub
+
     Private Sub 播放控制器_HDR输出状态已确认(sender As Object, e As 播放器HDR状态事件参数)
         If Not 正在关闭 Then 信息图层呈现器?.显示操作信息(e.说明, &HFF69DF8BUI)
     End Sub
@@ -253,10 +260,29 @@ Public Class Form1
     Private Sub MB_当前声道数显示_Click(sender As Object, e As EventArgs) Handles MB_当前声道数显示.Click
         If 正在关闭 OrElse Not 播放控制器.是否有媒体 Then Return
         Dim 原模式 = 播放控制器.WASAPI模式
+        If 原模式 = WASAPI共享模式.共享 AndAlso Not 确认切换到WASAPI独占模式() Then Return
+        If 正在关闭 OrElse Not 播放控制器.是否有媒体 OrElse 播放控制器.WASAPI模式 <> 原模式 Then Return
         播放控制器.切换WASAPI模式()
         信息图层呈现器?.显示操作信息(If(原模式 = WASAPI共享模式.共享,
             "正在切换到 WASAPI 独占模式", "正在切换到 WASAPI 共享模式"), &HFFFFA85AUI)
     End Sub
+
+    Private Function 确认切换到WASAPI独占模式() As Boolean
+        Dim 内容 = String.Join(vbCrLf, {String.Empty,
+            "是否切换到 WASAPI 独占模式？",
+            String.Empty,
+            "独占模式直通设备，能提供理论最佳音质，但也有诸多要求和限制：",
+            String.Empty,
+            "1. 无法通过系统控制输出音量，请调整你的硬件设备旋钮或按键。",
+            "2. 再次提醒，如果您正戴着耳机，请立刻取下！",
+            "3. 其他应用无法发出任何声音，可能导致您错过重要事项。",
+            "4. 如果已经有应用占用了，则本应用会失败。",
+            "5. 安装在系统中的音效软件无法在独占模式工作。",
+            "6. 硬件设备必须支持对应的音频输出规格才能正常工作。"})
+        Return LakeUI.ExOverlayMsgBox(Me, 内容,
+            MsgBoxStyle.YesNo Or MsgBoxStyle.DefaultButton2,
+            "如果您正戴着耳机，请立即取下！⚠️⚠️⚠️") = MsgBoxResult.Yes
+    End Function
 
     Private Sub 更新WASAPI按钮()
         If 播放控制器 Is Nothing Then Return

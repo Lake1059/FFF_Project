@@ -109,6 +109,13 @@ Friend Module Program
                 Console.WriteLine("SDR 图像后缓冲与桌面截取像素回归通过。")
                 Return 0
             End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--static-image-open-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 图像路径 = Path.GetFullPath(参数(1))
+                检查文件(图像路径)
+                测试图片打开首帧(图像路径)
+                Console.WriteLine("GPU 配置下图片打开即显示首帧回归通过。")
+                Return 0
+            End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--stream-selector-regression", StringComparison.OrdinalIgnoreCase) Then
                 Dim 流媒体路径 = Path.GetFullPath(参数(1))
                 检查文件(流媒体路径)
@@ -231,6 +238,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --video-scaling-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sdr-pixel-regression <视频> <参考图.png>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sdr-desktop-regression <参考图.png>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --static-image-open-regression <图片>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --stream-selector-regression <多流媒体>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --external-subtitle-scan-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --track-switch-regression <多音轨媒体>")
@@ -582,8 +590,8 @@ Friend Module Program
                    $"空字幕/弹幕仍在后台持续 Present：{空图层后.交换链呈现次数}→{静置后.交换链呈现次数}。")
                 断言(空图层后.交换链呈现次数 <= 呈现前.交换链呈现次数 + 2UL,
                    "两个空图层产生了多余的独立交换链帧。")
-                断言(静置后.交换链呈现次数 >= 静置后.已呈现视频帧数,
-                   "真实视频呈现计数超过交换链成功 Present 次数。")
+                断言(静置后.交换链呈现次数 + 静置后.已合并视频帧数 >= 静置后.已呈现视频帧数,
+                   "真实视频提交既未成功 Present，也未计入合并帧。")
                 断言(静置后.音频拒绝帧数 = 0UL,
                    $"音频生产者拒绝了 {静置后.音频拒绝帧数} 帧。")
                 断言(静置后.视频队列帧数 <= 8, "视频时间背压超过 8 帧硬上限。")
@@ -753,6 +761,12 @@ Friend Module Program
             信息呈现器.显示操作信息("重复提示")
             信息呈现器.显示操作信息("重复提示")
             断言(消息.Count = 2, "完全相同的操作提示没有自动合并。")
+            Dim 命令字段 = 信息呈现器.GetType().GetField("图层命令", 标志)
+            Dim 命令 = DirectCast(命令字段?.GetValue(信息呈现器), IEnumerable(Of 定时文字命令)).
+                Where(Function(x) CBool(GetType(定时文字命令).GetProperty("是位图", 标志)?.GetValue(x))).ToArray()
+            断言(命令.Length > 0 AndAlso 命令.All(
+                Function(x) Math.Abs(x.X - (画面.ClientSize.Width - x.X - x.宽度)) < 1.0F),
+                "操作提示背景没有保持左右一致的边距并延伸到右侧。")
             窗口.Close()
         End Using
     End Sub
@@ -796,8 +810,9 @@ Friend Module Program
                 .实际色彩模式 = CUInt(色彩输出模式.映射到SDR),
                 .位置100纳秒 = TimeSpan.FromHours(1).Ticks + TimeSpan.FromMinutes(2).Ticks + TimeSpan.FromSeconds(3).Ticks,
                 .时长100纳秒 = TimeSpan.FromHours(2).Ticks, .当前视频流 = 0, .当前音频流 = 1,
-                .视频队列帧数 = 3UI, .已丢弃视频帧数 = 7UL, .已合并视频帧数 = 5UL,
-                .视频输出位深度 = 10UI,
+                 .视频队列帧数 = 3UI, .已丢弃视频帧数 = 7UL, .已合并视频帧数 = 5UL,
+                 .视频实时比特率 = 5_000_000UL, .音频实时比特率 = 1_411_200UL,
+                 .视频输出位深度 = 10UI,
                 .音频缓冲100纳秒 = TimeSpan.FromMilliseconds(25).Ticks})
 
             Using 画面 As New 播放器画面控件 With {.ClientSize = New Size(2560, 1440)}
@@ -815,13 +830,13 @@ Friend Module Program
                         "文件名：movie.mkv",
                         "时间戳：01:02:03 / 02:00:00 (52%)",
                         "视频：AV1 - CPU",
-                        "输入：格式 YUV420P10LE   分辨率 1920x1080   帧率 23.976fps   平均码率 5 Mbps",
+                        "输入：格式 YUV420P10LE   分辨率 1920x1080   帧率 23.976fps   实时码率 5 Mbps",
                         "色彩：采样 420   颜色矩阵 BT.2020   色域 BT.2020   传输特性 PQ   范围 Limited",
                         "输出：格式 RGB10A2 (10bit)   分辨率 2560x1440   色彩模式 映射 SDR",
                         "渲染：帧率 23.98fps   缓冲池 3帧   实时丢帧 2   总丢帧 12",
                         "音频：FLAC - WASAPI 独占",
-                        "输入：采样 48000Hz   位深 24bit   声道数 2   平均码率 1.41 Mbps",
-                        "输出：格式 FLOAT PCM   采样 48000Hz   位深 32bit   声道数 2   实时延迟 25.0ms",
+                        "输入：采样 48000Hz   位深 24bit   声道数 2   实时码率 1.41 Mbps",
+                        "输出：FLOAT PCM   采样 48000Hz   位深 32bit   声道数 2   实时延迟 25ms",
                         "字幕：SRT   总数量 2   当前正在渲染 1",
                         "弹幕：哔哩哔哩 XML   总数量 2   当前正在渲染 2"}
                     断言(实际.SequenceEqual(预期),
@@ -848,6 +863,15 @@ Friend Module Program
                         Dim 缺失行 = 呈现器.读取调试文本行(缺失信息, 缺失快照, String.Empty)
                         断言(缺失行.Contains("字幕：ASS   总数量 按需解码"),
                            "特效字幕总数量没有显示为按需解码。")
+                        断言(缺失行.Contains("弹幕：未加载"),
+                           "未加载弹幕没有收敛为单一状态条目。")
+                        当前字幕 = Nothing
+                        Dim 全未加载行 = 呈现器.读取调试文本行(缺失信息, 缺失快照, String.Empty)
+                        断言(全未加载行.Contains("字幕：未加载") AndAlso
+                               Not 全未加载行.Any(Function(x) x.StartsWith("字幕：", StringComparison.Ordinal) AndAlso
+                                   (x.Contains("总数量", StringComparison.Ordinal) OrElse
+                                    x.Contains("当前正在渲染", StringComparison.Ordinal))),
+                           "未加载字幕仍显示了数量或渲染条目。")
                         断言(Not 缺失行.Any(Function(x) x.Contains("?", StringComparison.Ordinal) OrElse
                                                      x.StartsWith("文件名：", StringComparison.Ordinal) OrElse
                                                      x.StartsWith("输入：", StringComparison.Ordinal) OrElse
@@ -1097,6 +1121,28 @@ Friend Module Program
                 断言(VP快照.解码器 = 解码模式.GPU, "测试视频没有保持 D3D11VA 解码。")
                 断言(VP快照.视频缩放 = 视频缩放模式.D3D11视频处理器,
                    "自动管线没有在受支持的 D3D11VA 输入上激活 Video Processor。")
+                Dim 第一秒 = 等待快照(会话,
+                    Function(x) x.播放位置 >= TimeSpan.FromSeconds(1.1) AndAlso
+                        x.视频实时比特率 > 0 AndAlso x.音频实时比特率 > 0,
+                    "整秒实时音视频码率")
+                Dim 秒索引 = CInt(Math.Floor(第一秒.播放位置.TotalSeconds))
+                Dim 视频码率 = 第一秒.视频实时比特率
+                Dim 音频码率 = 第一秒.音频实时比特率
+                Do
+                    Dim 同秒快照 = 会话.当前快照
+                    If CInt(Math.Floor(同秒快照.播放位置.TotalSeconds)) <> 秒索引 Then Exit Do
+                    断言(同秒快照.解码器 = 解码模式.GPU,
+                       "样例视频在持续播放期间自动回退到了 CPU。")
+                    断言(同秒快照.视频实时比特率 = 视频码率 AndAlso
+                           同秒快照.音频实时比特率 = 音频码率,
+                       "实时码率在同一播放秒内发生了变化。")
+                    Thread.Sleep(10)
+                Loop
+                Dim 后续快照 = 等待快照(会话,
+                    Function(x) x.播放位置 >= TimeSpan.FromSeconds(4.1),
+                    "样例 GPU 持续解码")
+                断言(后续快照.解码器 = 解码模式.GPU,
+                   "样例视频在持续播放期间自动回退到了 CPU。")
             End Using
 
             Using 会话 As New 播放器会话(New 播放器配置 With {
@@ -1156,7 +1202,7 @@ Friend Module Program
 
                 Dim CPU值 As Integer() = Nothing
                 Using 会话 As New 播放器会话(New 播放器配置 With {
-                    .解码器 = 解码模式.CPU,
+                    .解码器 = 解码模式.GPU,
                     .色彩模式 = 色彩输出模式.映射到SDR,
                     .输出窗口句柄 = 输出窗口.Handle
                 })
@@ -1216,9 +1262,8 @@ Friend Module Program
                 })
                     会话.设置音量(0.0F, True)
                     会话.打开Async(图像路径).GetAwaiter().GetResult()
-                    会话.播放()
                     等待快照(会话, Function(x) x.交换链呈现次数 > 0,
-                             "SDR 图像桌面像素帧")
+                             "SDR 图像打开后首帧")
                     Dim 后缓冲值 = 读取视频像素平均值(会话, 采样点)
 
                     Thread.Sleep(100)
@@ -1238,6 +1283,33 @@ Friend Module Program
                            "SDR 图像在 Windows HDR 桌面合成后发生色值改变。")
                     End Using
                 End Using
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 测试图片打开首帧(图像路径 As String)
+        Using 输出窗口 As New Form With {
+            .ClientSize = New Drawing.Size(640, 360),
+            .FormBorderStyle = FormBorderStyle.FixedToolWindow,
+            .ShowInTaskbar = False,
+            .StartPosition = FormStartPosition.Manual,
+            .Location = New Drawing.Point(-10000, -10000)
+        }
+            输出窗口.Show()
+            Application.DoEvents()
+            Using 会话 As New 播放器会话(New 播放器配置 With {
+                .解码器 = 解码模式.GPU,
+                .色彩模式 = 色彩输出模式.映射到SDR,
+                .输出窗口句柄 = 输出窗口.Handle
+            })
+                会话.设置音量(0.0F, True)
+                会话.打开Async(图像路径).GetAwaiter().GetResult()
+                Dim 快照 = 等待快照(会话,
+                    Function(x) x.状态 = 播放状态.就绪 AndAlso
+                        x.交换链呈现次数 > 0 AndAlso x.已呈现视频帧数 > 0,
+                    "图片打开后首帧")
+                断言(快照.解码器 = 解码模式.CPU,
+                   "静态图片没有使用稳定的软件首帧解码路径。")
             End Using
         End Using
     End Sub
