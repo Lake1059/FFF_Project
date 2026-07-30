@@ -1425,6 +1425,23 @@ Friend Module Program
                 Dim 共享结果 = 采样播放(会话, 4.0, Nothing)
                 验证纯音频结果(共享结果, "WASAPI 共享")
 
+                ' 空端点表示继续跟随 Windows 默认设备。即使默认设备标识没有变化，
+                ' 这也覆盖与系统热切换相同的渲染器重建和媒体时钟重锚路径。
+                Using 已重建 As New ManualResetEventSlim(False)
+                    Dim 设备处理 As EventHandler(Of 播放器事件参数) =
+                        Sub(sender, e) 已重建.Set()
+                    AddHandler 会话.设备变化, 设备处理
+                    Try
+                        Dim 恢复目标 = 会话.当前快照.播放位置 + TimeSpan.FromMilliseconds(500)
+                        会话.设置音频端点(Nothing)
+                        断言(已重建.Wait(TimeSpan.FromSeconds(10)), "切回 Windows 默认音频端点超时。")
+                        等待音频预热(会话, 恢复目标, TimeSpan.FromSeconds(10))
+                        验证音频峰值(会话, "WASAPI 默认端点重建")
+                    Finally
+                        RemoveHandler 会话.设备变化, 设备处理
+                    End Try
+                End Using
+
                 切换到独占模式(会话)
                 ' 同模式请求也必须确认，控制器的异步换片依赖这一幂等事件合同。
                 切换到独占模式(会话)

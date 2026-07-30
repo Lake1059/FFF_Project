@@ -2583,7 +2583,9 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     sourceChromaLocation_ = AVCHROMA_LOC_UNSPECIFIED;
     sourceFullRange_ = sourceInterlaced_ = false;
     sourcePeakNits_ = sdrPeakNits_;
-    convertedRgb_.clear(); convertedRgb_.shrink_to_fit();
+    // A same-window media switch reuses this staging allocation. Releasing its
+    // capacity here only forces the next software-decoded frame to allocate it again.
+    convertedRgb_.clear();
     hasCachedVideo_ = false; sourceExternal_ = false;
     actualVideoScalingMode_.store(FFF3FPVideoScalingMode::D3D11VideoProcessor);
     videoGeneration_.store(0); presentedVideoGeneration_.store(0);
@@ -2641,7 +2643,8 @@ void PlayerVideoRenderer::Close() noexcept {
     if (vertexShader_ != nullptr) { vertexShader_->Release(); vertexShader_ = nullptr; }
     if (context_ != nullptr) { context_->Release(); context_ = nullptr; }
     if (device_ != nullptr) { device_->Release(); device_ = nullptr; }
-    convertedRgb_.clear(); swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
+    std::vector<std::uint8_t>().swap(convertedRgb_);
+    swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
     swapHdr_ = false; swapOutputBits_ = 8;
     sourceInputLayout_ = UINT32_MAX; sourceBitDepth_ = 0;
     sourceChromaWidthShift_ = sourceChromaHeightShift_ = 0;

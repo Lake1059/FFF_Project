@@ -130,9 +130,11 @@ Public NotInheritable Class B站弹幕解析器
             .IgnoreProcessingInstructions = True,
             .IgnoreWhitespace = True,
             .CloseInput = True}
-        Dim stream = New FileStream(路径, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.SequentialScan)
-        Using reader = XmlReader.Create(stream, settings)
-            Return 解析(reader)
+        Using stream = New FileStream(路径, FileMode.Open, FileAccess.Read, FileShare.Read,
+                                      128 * 1024, FileOptions.SequentialScan)
+            Using reader = XmlReader.Create(stream, settings)
+                Return 解析(reader)
+            End Using
         End Using
     End Function
 

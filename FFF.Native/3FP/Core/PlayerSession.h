@@ -66,6 +66,7 @@ private:
         Keyframe
     };
     void Enqueue(Command command) noexcept;
+    void NotifyAudioRestart() noexcept;
     FFFResult ScheduleStep(StepOperation operation, std::int32_t direction) noexcept;
     void ProcessStep() noexcept;
     void DoStepFrame(std::int32_t direction);
@@ -82,6 +83,9 @@ private:
     void DoSelectStream(std::int32_t streamIndex, bool video) noexcept;
     void DoLoadExternalAudio(std::string pathUtf8, std::int32_t streamIndex,
         std::int64_t offset100ns) noexcept;
+    FFFResult RecreateAudioRenderer(const std::wstring& endpointId, bool exclusive,
+        bool paused, std::string& error) noexcept;
+    bool RecoverAudioDevice() noexcept;
     FFFResult OpenFormat(const std::string& pathUtf8, AVFormatContext** format,
         std::string& error) noexcept;
     FFFResult OpenDecoder(AVFormatContext* format, std::int32_t streamIndex, bool video,

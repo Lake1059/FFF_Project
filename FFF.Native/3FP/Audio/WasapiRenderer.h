@@ -12,6 +12,7 @@ extern "C" {
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -70,7 +71,8 @@ struct PlayerAudioRuntimeState final {
 class PlayerWasapiRenderer final {
 public:
     explicit PlayerWasapiRenderer(std::wstring endpointId, bool exclusive = false,
-        PlayerAudioRuntimeState* runtimeState = nullptr);
+        PlayerAudioRuntimeState* runtimeState = nullptr,
+        std::function<void()> restartCallback = {});
     ~PlayerWasapiRenderer();
 
     FFFResult Start() noexcept;
@@ -92,6 +94,7 @@ public:
     std::uint16_t OutputBitsPerSample() const noexcept;
     std::uint16_t OutputValidBitsPerSample() const noexcept;
     bool OutputIsFloat() const noexcept;
+    bool RestartRequested() const noexcept;
     std::string LastError() const;
 
 private:
@@ -104,11 +107,14 @@ private:
     FFFResult EnsureResampler(const AVFrame* frame) noexcept;
     void UpdatePeakLevels(const std::uint8_t* samples, std::uint32_t frames) noexcept;
     void PublishRuntimeDiagnostics() noexcept;
+    void RequestRestart(std::string message) noexcept;
+    void CloseEvents() noexcept;
     void SetError(std::string message) noexcept;
 
     std::wstring endpointId_;
     bool exclusive_;
     PlayerAudioRuntimeState* runtimeState_;
+    std::function<void()> restartCallback_;
     HANDLE stopEvent_;
     HANDLE sampleEvent_;
     HANDLE controlEvent_;
@@ -122,8 +128,8 @@ private:
     // Chunked SPSC queue avoids vector compaction and represents long edit gaps
     // as logical silence instead of allocating several seconds of zero-filled PCM.
     std::deque<AudioChunk> queue_;
+    std::deque<std::vector<std::uint8_t>> reusableBuffers_;
     std::size_t queuedBytes_;
-    std::vector<std::uint8_t> converted_;
     SwrContext* resampler_;
     AVChannelLayout inputChannelLayout_;
     std::int32_t inputSampleRate_;
@@ -133,13 +139,13 @@ private:
     std::uint16_t outputBlockAlign_;
     std::uint16_t outputBitsPerSample_;
     std::uint16_t outputValidBitsPerSample_;
-    std::uint32_t outputChannelMask_;
     bool outputFloat_;
     std::atomic<float> volume_;
     std::atomic<bool> muted_;
     std::atomic<bool> running_;
     std::atomic<bool> paused_;
     std::atomic<bool> resetRequested_;
+    std::atomic<bool> restartRequested_;
     std::atomic<std::int64_t> resetPosition100ns_;
     // IAudioClock is sampled on the event thread. Readers interpolate between
     // samples with the correlated QPC timestamp, but never beyond audio that

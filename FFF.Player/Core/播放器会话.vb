@@ -177,7 +177,16 @@ Public NotInheritable Class 播放器会话
         检查结果(播放器原生接口.FFF3FP_SetOutputWindow(取得句柄(), 窗口句柄))
     End Sub
     Public Sub 设置音频端点(端点标识 As String)
-        调用路径(AddressOf 播放器原生接口.FFF3FP_SetAudioEndpoint, If(端点标识, String.Empty))
+        Dim 指针 = IntPtr.Zero
+        Try
+            If Not String.IsNullOrWhiteSpace(端点标识) Then
+                指针 = Marshal.StringToCoTaskMemUTF8(端点标识)
+            End If
+            ' 空指针是原生 API 的“跟随 Windows 默认输出设备”契约。
+            检查结果(播放器原生接口.FFF3FP_SetAudioEndpoint(取得句柄(), 指针))
+        Finally
+            If 指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(指针)
+        End Try
     End Sub
     Public Sub 设置WASAPI独占模式(独占 As Boolean)
         检查结果(播放器原生接口.FFF3FP_SetAudioExclusiveMode(取得句柄(), If(独占, 1UI, 0UI)))

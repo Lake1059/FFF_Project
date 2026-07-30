@@ -276,6 +276,11 @@ void PlayerSession::Enqueue(Command command) noexcept {
     catch (...) { ReportError(FFFResult::NativeFailure, "Could not queue the playback command."); }
 }
 
+void PlayerSession::NotifyAudioRestart() noexcept {
+    std::lock_guard lock(mutex_);
+    commandCondition_.notify_one();
+}
+
 FFFResult PlayerSession::Open(const char* path) noexcept {
     std::string normalized, error;
     if (!NormalizeLocalPath(path, normalized, error)) { ReportError(FFFResult::InvalidArgument, std::move(error), "open"); return FFFResult::InvalidArgument; }
@@ -628,7 +633,102 @@ FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
     });
     return FFFResult::Success;
 }
-FFFResult PlayerSession::SetAudioEndpoint(const char* endpoint) noexcept { const auto value = endpoint == nullptr ? std::wstring{} : FromUtf8(endpoint); Enqueue([this, value] { audioEndpointId_ = value; if (audioRenderer_) { const auto paused = snapshot_.state != FFF3FPState::Playing; audioRenderer_->Stop(); audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_, &audioRuntimeState_); const auto result = audioRenderer_->Start(); if (result != FFFResult::Success) { Fail(result, audioRenderer_->LastError(), "audio-endpoint"); return; } audioRenderer_->SetVolume(volume_, muted_); audioRenderer_->Reset(snapshot_.position100ns); audioRenderer_->SetPaused(paused); RebuildMediaInfo(); Emit(FFF3FPEvent::DeviceChanged, "{\"type\":\"audio\"}"); } }); return FFFResult::Success; }
+FFFResult PlayerSession::RecreateAudioRenderer(const std::wstring& endpointId,
+    const bool exclusive, const bool paused, std::string& error) noexcept {
+    try {
+        audioRenderer_.reset();
+        auto replacement = std::make_unique<PlayerWasapiRenderer>(endpointId, exclusive,
+            &audioRuntimeState_, [this] { NotifyAudioRestart(); });
+        const auto result = replacement->Start();
+        if (result != FFFResult::Success) {
+            error = replacement->LastError();
+            return result;
+        }
+        replacement->SetVolume(volume_, muted_);
+        replacement->SetPaused(paused);
+        audioRenderer_ = std::move(replacement);
+        return FFFResult::Success;
+    } catch (...) {
+        error = "Could not allocate a replacement WASAPI renderer.";
+        return FFFResult::NativeFailure;
+    }
+}
+
+bool PlayerSession::RecoverAudioDevice() noexcept {
+    if (!audioRenderer_ || !audioRenderer_->RestartRequested()) return false;
+    const auto paused = snapshot_.state != FFF3FPState::Playing;
+    const auto position = std::max<std::int64_t>(0, ClockPosition());
+    auto reason = audioRenderer_->LastError();
+    std::string error;
+    auto result = RecreateAudioRenderer(audioEndpointId_, audioExclusive_, paused, error);
+    auto exclusiveError = std::string{};
+    bool fellBackToShared = false;
+    if (result != FFFResult::Success && audioExclusive_) {
+        exclusiveError = std::move(error);
+        result = RecreateAudioRenderer(audioEndpointId_, false, paused, error);
+        if (result == FFFResult::Success) {
+            audioExclusive_ = false;
+            fellBackToShared = true;
+        }
+    }
+    if (result != FFFResult::Success) {
+        Fail(result, error.empty() ? "Could not reopen the Windows audio output device." :
+            std::move(error), "audio-device-recovery");
+        return true;
+    }
+    snapshot_.position100ns = position;
+    DoSeek(position);
+    RebuildMediaInfo();
+    Emit(FFF3FPEvent::DeviceChanged,
+        "{\"type\":\"audio\",\"recovered\":true,\"exclusive\":" +
+        std::string(audioExclusive_ ? "true" : "false") + ",\"reason\":\"" +
+        EscapeJson(reason.empty() ? "The Windows audio output device changed." : reason) + "\"}");
+    if (fellBackToShared) {
+        ReportError(FFFResult::DeviceFailure,
+            exclusiveError.empty() ?
+                "The new audio device does not support the active exclusive format; playback continued in shared mode." :
+                exclusiveError + " Playback continued in shared mode.",
+            "audio-device-recovery");
+    }
+    return true;
+}
+
+FFFResult PlayerSession::SetAudioEndpoint(const char* endpoint) noexcept {
+    const auto value = endpoint == nullptr ? std::wstring{} : FromUtf8(endpoint);
+    Enqueue([this, value] {
+        if (!audioRenderer_) {
+            audioEndpointId_ = value;
+            return;
+        }
+        const auto previousEndpoint = audioEndpointId_;
+        const auto paused = snapshot_.state != FFF3FPState::Playing;
+        const auto position = std::max<std::int64_t>(0, ClockPosition());
+        std::string error;
+        const auto result = RecreateAudioRenderer(value, audioExclusive_, paused, error);
+        if (result != FFFResult::Success) {
+            std::string restoreError;
+            if (RecreateAudioRenderer(previousEndpoint, audioExclusive_, paused, restoreError) ==
+                FFFResult::Success) {
+                DoSeek(position);
+                RebuildMediaInfo();
+                ReportError(result, error.empty() ? "Could not open the selected audio endpoint." :
+                    std::move(error), "audio-endpoint");
+            } else {
+                Fail(result, restoreError.empty() ? "Could not restore the previous audio endpoint." :
+                    std::move(restoreError), "audio-endpoint");
+            }
+            return;
+        }
+        audioEndpointId_ = value;
+        snapshot_.position100ns = position;
+        DoSeek(position);
+        RebuildMediaInfo();
+        Emit(FFF3FPEvent::DeviceChanged,
+            std::string("{\"type\":\"audio\",\"default\":") +
+            (audioEndpointId_.empty() ? "true}" : "false}"));
+    });
+    return FFFResult::Success;
+}
 FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
     const auto state = state_.load();
     if (state != FFF3FPState::Ready && state != FFF3FPState::Playing &&
@@ -646,24 +746,22 @@ FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
             return;
         }
         const auto paused = snapshot_.state != FFF3FPState::Playing;
-        const auto position = ClockPosition();
+        const auto position = std::max<std::int64_t>(0, ClockPosition());
         snapshot_.position100ns = position;
-        audioRenderer_.reset();
-        auto replacement = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, exclusive,
-            &audioRuntimeState_);
-        const auto result = replacement->Start();
+        std::string message;
+        const auto result = RecreateAudioRenderer(audioEndpointId_, exclusive, paused, message);
         if (result != FFFResult::Success) {
-            const auto message = replacement->LastError();
             // Restore the previous renderer so an unsupported exclusive format
             // cannot turn a working session into a silent session.
-            replacement->Stop();
-            audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_,
-                &audioRuntimeState_);
-            if (audioRenderer_->Start() == FFFResult::Success) {
-                audioRenderer_->SetVolume(volume_, muted_);
-                audioRenderer_->Reset(position);
-                audioRenderer_->SetPaused(paused);
+            std::string restoreError;
+            if (RecreateAudioRenderer(audioEndpointId_, audioExclusive_, paused, restoreError) ==
+                FFFResult::Success) {
+                DoSeek(position);
                 RebuildMediaInfo();
+            } else {
+                Fail(result, restoreError.empty() ? "Could not restore shared-mode audio playback." :
+                    std::move(restoreError), "audio-exclusive-mode");
+                return;
             }
             Emit(FFF3FPEvent::DeviceChanged, std::string("{\"type\":\"audio\",\"exclusive\":") +
                 (audioExclusive_ ? "true}" : "false}"));
@@ -671,11 +769,7 @@ FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
                 "audio-exclusive-mode");
             return;
         }
-        audioRenderer_ = std::move(replacement);
         audioExclusive_ = exclusive;
-        audioRenderer_->SetVolume(volume_, muted_);
-        audioRenderer_->Reset(position);
-        audioRenderer_->SetPaused(paused);
         DoSeek(position);
         RebuildMediaInfo();
         Emit(FFF3FPEvent::DeviceChanged, std::string("{\"type\":\"audio\",\"exclusive\":") +
@@ -857,12 +951,16 @@ void PlayerSession::Worker() noexcept {
         {
             std::unique_lock lock(mutex_);
             if (commands_.empty() && state_.load() != FFF3FPState::Playing)
-                commandCondition_.wait(lock, [this] { return terminate_ || !commands_.empty() || state_.load() == FFF3FPState::Playing; });
+                commandCondition_.wait(lock, [this] {
+                    return terminate_ || !commands_.empty() ||
+                        state_.load() == FFF3FPState::Playing ||
+                        (audioRenderer_ && audioRenderer_->RestartRequested());
+                });
             if (terminate_) break;
             if (!commands_.empty()) { command = std::move(commands_.front()); commands_.pop_front(); }
         }
         if (command) { try { command(); } catch (...) { Fail(FFFResult::NativeFailure, "An unhandled player command exception occurred."); } }
-        else PumpPlayback();
+        else if (!RecoverAudioDevice() && state_.load() == FFF3FPState::Playing) PumpPlayback();
     }
     DoClose(FFF3FPState::Closed);
 }
@@ -1029,12 +1127,12 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     }
     if (audioStream_ >= 0 && OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success) audioStream_ = -1;
     if (audioStream_ >= 0) {
-        audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_,
-            &audioRuntimeState_);
-        const auto result = audioRenderer_->Start();
-        if (result != FFFResult::Success) { Fail(result, audioRenderer_->LastError(), "open-audio"); return; }
-        audioRenderer_->SetVolume(volume_, muted_);
-        audioRenderer_->SetPaused(true);
+        std::string audioError;
+        const auto result = RecreateAudioRenderer(audioEndpointId_, audioExclusive_, true, audioError);
+        if (result != FFFResult::Success) {
+            Fail(result, std::move(audioError), "open-audio");
+            return;
+        }
     }
     if (videoStream_ < 0 && coverArtStream_ >= 0) {
         const auto result = LoadCoverArt();
@@ -1802,7 +1900,17 @@ void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t req
     AVCodecContext* replacementDecoder = nullptr;
     const auto result = OpenDecoder(replacementFormat, index, false, &replacementDecoder);
     if (result != FFFResult::Success) { avformat_close_input(&replacementFormat); ReportError(result, "Could not open the external audio stream.", "external-audio"); return; }
-    if (!audioRenderer_) { audioRenderer_ = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, audioExclusive_, &audioRuntimeState_); if (audioRenderer_->Start() != FFFResult::Success) { avcodec_free_context(&replacementDecoder); avformat_close_input(&replacementFormat); ReportError(FFFResult::DeviceFailure, audioRenderer_->LastError(), "external-audio"); audioRenderer_.reset(); return; } audioRenderer_->SetVolume(volume_, muted_); }
+    if (!audioRenderer_) {
+        std::string audioError;
+        const auto audioResult = RecreateAudioRenderer(audioEndpointId_, audioExclusive_,
+            snapshot_.state != FFF3FPState::Playing, audioError);
+        if (audioResult != FFFResult::Success) {
+            avcodec_free_context(&replacementDecoder);
+            avformat_close_input(&replacementFormat);
+            ReportError(audioResult, std::move(audioError), "external-audio");
+            return;
+        }
+    }
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); if (externalFormat_) avformat_close_input(&externalFormat_);
     externalFormat_ = replacementFormat; externalAudioDecoder_ = replacementDecoder; externalAudioStream_ = index;
     externalAudioOffset100ns_ = offset; externalAudioPath_ = std::move(path);
