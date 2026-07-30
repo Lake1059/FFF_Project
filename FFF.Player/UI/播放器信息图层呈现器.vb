@@ -198,33 +198,46 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 文件名 = 安全文件名(媒体路径)
         Dim 百分比 = If(快照.总时长 > TimeSpan.Zero,
                     Math.Clamp(快照.播放位置.TotalMilliseconds / 快照.总时长.TotalMilliseconds * 100.0R, 0, 100), 0)
-        结果.Add(配对行("文件名：", 空值(文件名, "?"), 黄色))
-        结果.Add(配对行("时间戳：",
-            $"{格式化时间(快照.播放位置)} / {格式化时间(快照.总时长)} ({百分比:0}%)", 青色))
+        添加配对行如果有值(结果, "文件名：", 文件名, 黄色)
+        Dim 时间戳 = 格式化时间(快照.播放位置)
+        If 快照.总时长 > TimeSpan.Zero Then
+            时间戳 &= $" / {格式化时间(快照.总时长)} ({百分比:0}%)"
+        End If
+        结果.Add(配对行("时间戳：", 时间戳, 青色))
 
         If 视频 IsNot Nothing Then
             Dim 解码器 = If(快照.解码器 = 解码模式.GPU, "GPU",
-                         If(快照.解码器 = 解码模式.CPU, "CPU", "?"))
-            结果.Add(配对行("视频：", $"{空值(视频.编码, "?").ToUpperInvariant()} - {解码器}", 品红, 8))
-            结果.Add(配对行("输入：", 视频输入(视频), 紫色))
-            结果.Add(配对行("色彩：", 视频色彩(视频), 蓝色))
-            结果.Add(配对行("输出：", 视频输出(快照, 画面控件.ClientSize), 绿色))
-            结果.Add(配对行("渲染：", 视频渲染(快照), 黄色))
+                         If(快照.解码器 = 解码模式.CPU, "CPU", String.Empty))
+            Dim 编码 = If(String.IsNullOrWhiteSpace(视频.编码), String.Empty,
+                        视频.编码.ToUpperInvariant())
+            Dim 视频概要 = If(String.IsNullOrEmpty(编码), 解码器,
+                           If(String.IsNullOrEmpty(解码器), 编码, $"{编码} - {解码器}"))
+            添加配对行如果有值(结果, "视频：", 视频概要, 品红, 8)
+            添加配对行如果有值(结果, "输入：", 视频输入(视频), 紫色)
+            添加配对行如果有值(结果, "色彩：", 视频色彩(视频), 蓝色)
+            添加配对行如果有值(结果, "输出：", 视频输出(快照, 画面控件.ClientSize), 绿色)
+            添加配对行如果有值(结果, "渲染：", 视频渲染(快照), 黄色)
         End If
 
         If 音频 IsNot Nothing Then
             Dim WASAPI = 安全获取(获取WASAPI模式)
-            结果.Add(配对行("音频：", $"{空值(音频.编码, "?").ToUpperInvariant()} - WASAPI {WASAPI}", 品红, 8))
-            结果.Add(配对行("输入：", 音频输入(音频), 紫色))
-            结果.Add(配对行("输出：", 音频输出(音频, 快照), 绿色))
+            Dim 编码 = If(String.IsNullOrWhiteSpace(音频.编码), String.Empty,
+                        音频.编码.ToUpperInvariant())
+            Dim 音频概要 = If(String.IsNullOrEmpty(编码), $"WASAPI {WASAPI}",
+                           $"{编码} - WASAPI {WASAPI}")
+            添加配对行如果有值(结果, "音频：", 音频概要, 品红, 8)
+            添加配对行如果有值(结果, "输入：", 音频输入(音频), 紫色)
+            添加配对行如果有值(结果, "输出：", 音频输出(音频, 快照), 绿色)
         End If
 
-        Dim 字幕文本 = $"{If(字幕 Is Nothing, "未加载", 字幕.格式.ToString().ToUpperInvariant())}" &
-            $"   总数量 {If(字幕 Is Nothing, "0", 字幕条目数(字幕))}" &
-            $"   当前正在渲染 {If(字幕状态 Is Nothing, 0, 字幕状态.命令数):N0}"
-        Dim 弹幕文本 = $"{If(弹幕 Is Nothing, "未加载", "哔哩哔哩 XML")}" &
-            $"   总数量 {If(弹幕 Is Nothing, 0, 弹幕.数量):N0}" &
-            $"   当前正在渲染 {If(弹幕状态 Is Nothing, 0, 弹幕状态.命令数):N0}"
+        Dim 字幕文本 = 合并字段(
+            If(字幕 Is Nothing, "未加载", 字幕.格式.ToString().ToUpperInvariant()),
+            $"总数量 {If(字幕 Is Nothing, "0", 字幕条目数(字幕))}",
+            If(字幕状态 Is Nothing, String.Empty, $"当前正在渲染 {字幕状态.命令数:N0}"))
+        Dim 弹幕文本 = 合并字段(
+            If(弹幕 Is Nothing, "未加载", "哔哩哔哩 XML"),
+            $"总数量 {If(弹幕 Is Nothing, 0, 弹幕.数量):N0}",
+            If(弹幕状态 Is Nothing, String.Empty, $"当前正在渲染 {弹幕状态.命令数:N0}"))
         结果.Add(配对行("字幕：", 字幕文本, 青色, 8))
         结果.Add(配对行("弹幕：", 弹幕文本, 橙色))
         Return 结果
@@ -296,6 +309,17 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return New 信息行(空隙前, New 文本段(标签, 标签颜色), New 文本段(值, 值颜色))
     End Function
 
+    Private Shared Sub 添加配对行如果有值(结果 As List(Of 信息行), 标签 As String,
+                                      值 As String, 值颜色 As UInteger,
+                                      Optional 空隙前 As Single = 0)
+        If String.IsNullOrWhiteSpace(值) Then Return
+        结果.Add(配对行(标签, 值, 值颜色, 空隙前))
+    End Sub
+
+    Private Shared Function 合并字段(ParamArray 字段 As String()) As String
+        Return String.Join("   ", 字段.Where(Function(x) Not String.IsNullOrWhiteSpace(x)))
+    End Function
+
     Private Shared Function 查找流(信息 As 媒体信息, 快照 As 播放器快照, 类型 As String) As 媒体流信息
         If 信息 Is Nothing Then Return Nothing
         Dim 当前索引 = If(类型 = "video", 快照.当前视频流, 快照.当前音频流)
@@ -329,31 +353,43 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Sub
 
     Private Shared Function 视频输入(流 As 媒体流信息) As String
-        Dim 分辨率 = If(流.宽度 > 0 AndAlso 流.高度 > 0, $"{流.宽度}x{流.高度}", "?")
-        Dim 帧率 = If(流.平均帧率 > 0, $"{流.平均帧率:0.###}fps", "?")
-        Return $"格式 {空值(流.像素格式, "?").ToUpperInvariant()}" &
-            $"   分辨率 {分辨率}   帧率 {帧率}   平均码率 {格式化比特率(流.比特率)}"
+        Return 合并字段(
+            If(String.IsNullOrWhiteSpace(流.像素格式), String.Empty,
+               $"格式 {流.像素格式.ToUpperInvariant()}"),
+            If(流.宽度 > 0 AndAlso 流.高度 > 0, $"分辨率 {流.宽度}x{流.高度}", String.Empty),
+            If(流.平均帧率 > 0, $"帧率 {流.平均帧率:0.###}fps", String.Empty),
+            If(流.比特率 > 0, $"平均码率 {格式化比特率(流.比特率)}", String.Empty))
     End Function
 
     Private Shared Function 视频色彩(流 As 媒体流信息) As String
-        Return $"采样 {格式化色度抽样(流.色度抽样)}" &
-            $"   颜色矩阵 {色彩空间(流.色彩空间)}" &
-            $"   色域 {色彩原色(流.色彩原色)}" &
-            $"   传输特性 {色彩传递(流.色彩传递)}" &
-            $"   范围 {色彩范围(流.色彩范围)}"
+        Dim 采样 = 格式化色度抽样(流.色度抽样)
+        Dim 矩阵 = 色彩空间(流.色彩空间)
+        Dim 色域 = 色彩原色(流.色彩原色)
+        Dim 传输 = 色彩传递(流.色彩传递)
+        Dim 范围 = 色彩范围(流.色彩范围)
+        Return 合并字段(
+            If(String.IsNullOrEmpty(采样), String.Empty, $"采样 {采样}"),
+            If(String.IsNullOrEmpty(矩阵), String.Empty, $"颜色矩阵 {矩阵}"),
+            If(String.IsNullOrEmpty(色域), String.Empty, $"色域 {色域}"),
+            If(String.IsNullOrEmpty(传输), String.Empty, $"传输特性 {传输}"),
+            If(String.IsNullOrEmpty(范围), String.Empty, $"范围 {范围}"))
     End Function
 
     Private Shared Function 视频输出(快照 As 播放器快照, 输出大小 As Size) As String
-        Dim 分辨率 = If(输出大小.Width > 0 AndAlso 输出大小.Height > 0,
-                     $"{输出大小.Width}x{输出大小.Height}", "?")
-        Return $"格式 {视频输出格式(快照.视频输出位深度)}" &
-            $"   分辨率 {分辨率}   色彩模式 {色彩模式文本(快照.实际色彩模式)}"
+        Dim 格式 = 视频输出格式(快照.视频输出位深度)
+        Return 合并字段(
+            If(String.IsNullOrEmpty(格式), String.Empty, $"格式 {格式}"),
+            If(输出大小.Width > 0 AndAlso 输出大小.Height > 0,
+               $"分辨率 {输出大小.Width}x{输出大小.Height}", String.Empty),
+            $"色彩模式 {色彩模式文本(快照.实际色彩模式)}")
     End Function
 
     Private Function 视频渲染(快照 As 播放器快照) As String
-        Dim 帧率 = If(最近实际帧率 > 0, $"{最近实际帧率:0.00}fps", "?")
-        Return $"帧率 {帧率}   缓冲池 {快照.视频队列帧数}帧" &
-            $"   实时丢帧 {最近实时丢帧数:N0}   总丢帧 {计算总丢帧数(快照):N0}"
+        Return 合并字段(
+            If(最近实际帧率 > 0, $"帧率 {最近实际帧率:0.00}fps", String.Empty),
+            $"缓冲池 {快照.视频队列帧数}帧",
+            $"实时丢帧 {最近实时丢帧数:N0}",
+            $"总丢帧 {计算总丢帧数(快照):N0}")
     End Function
 
     Private Shared Function 计算总丢帧数(快照 As 播放器快照) As ULong
@@ -363,10 +399,11 @@ Friend NotInheritable Class 播放器信息图层呈现器
 
     Private Shared Function 音频输入(流 As 媒体流信息) As String
         Dim 位深 = If(流.原始采样位数 > 0, 流.原始采样位数, 流.编码采样位数)
-        Return $"采样 {If(流.采样率 > 0, 流.采样率 & "Hz", "?")}" &
-            $"   位深 {If(位深 > 0, 位深 & "bit", "?")}" &
-            $"   声道数 {If(流.声道数 > 0, 流.声道数.ToString(), "?")}" &
-            $"   平均码率 {格式化比特率(流.比特率)}"
+        Return 合并字段(
+            If(流.采样率 > 0, $"采样 {流.采样率}Hz", String.Empty),
+            If(位深 > 0, $"位深 {位深}bit", String.Empty),
+            If(流.声道数 > 0, $"声道数 {流.声道数}", String.Empty),
+            If(流.比特率 > 0, $"平均码率 {格式化比特率(流.比特率)}", String.Empty))
     End Function
 
     Private Shared Function 音频输出(流 As 媒体流信息, 快照 As 播放器快照) As String
@@ -374,18 +411,23 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 声道 = If(流.输出声道数 > 0, 流.输出声道数, 流.声道数)
         Dim 位深 = If(流.输出有效采样位数 > 0, 流.输出有效采样位数, 流.输出采样位数)
         Dim 格式 = If(流.输出浮点, "FLOAT PCM", "PCM")
-        Return $"格式 {格式}   采样 {If(采样率 > 0, 采样率 & "Hz", "?")}" &
-            $"   位深 {If(位深 > 0, 位深 & "bit", "?")}" &
-            $"   声道数 {If(声道 > 0, 声道.ToString(), "?")}" &
-            $"   实时延迟 {快照.音频缓冲时长.TotalMilliseconds:0.0}ms"
+        Dim 有输出格式 = 流.输出浮点 OrElse 流.输出采样位数 > 0 OrElse
+                       流.输出有效采样位数 > 0 OrElse 流.输出采样率 > 0 OrElse
+                       流.输出声道数 > 0 OrElse 采样率 > 0 OrElse 声道 > 0
+        Return 合并字段(
+            If(有输出格式, $"格式 {格式}", String.Empty),
+            If(采样率 > 0, $"采样 {采样率}Hz", String.Empty),
+            If(位深 > 0, $"位深 {位深}bit", String.Empty),
+            If(声道 > 0, $"声道数 {声道}", String.Empty),
+            $"实时延迟 {快照.音频缓冲时长.TotalMilliseconds:0.0}ms")
     End Function
 
     Private Shared Function 字幕条目数(字幕 As 外部字幕轨道) As String
-        Return If(字幕.条目数 >= 0, 字幕.条目数.ToString("N0"), "?")
+        Return If(字幕.条目数 >= 0, 字幕.条目数.ToString("N0"), "按需解码")
     End Function
 
     Private Shared Function 格式化比特率(值 As Long) As String
-        If 值 <= 0 Then Return "?"
+        If 值 <= 0 Then Return String.Empty
         If 值 >= 1_000_000 Then Return $"{值 / 1_000_000.0R:0.##} Mbps"
         Return $"{值 / 1000.0R:0.##} kbps"
     End Function
@@ -404,7 +446,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Function
 
     Private Shared Function 色彩范围(值 As Integer) As String
-        Return If(值 = 1, "Limited", If(值 = 2, "Full", "?"))
+        Return If(值 = 1, "Limited", If(值 = 2, "Full", String.Empty))
     End Function
 
     Private Shared Function 色彩原色(值 As Integer) As String
@@ -412,7 +454,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             Case 1 : Return "BT.709"
             Case 9 : Return "BT.2020"
             Case 12 : Return "P3-D65"
-            Case Else : Return "?"
+            Case Else : Return String.Empty
         End Select
     End Function
 
@@ -422,7 +464,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             Case 13 : Return "sRGB"
             Case 16 : Return "PQ"
             Case 18 : Return "HLG"
-            Case Else : Return "?"
+            Case Else : Return String.Empty
         End Select
     End Function
 
@@ -431,12 +473,12 @@ Friend NotInheritable Class 播放器信息图层呈现器
             Case 1 : Return "BT.709"
             Case 5, 6 : Return "BT.601"
             Case 9, 10 : Return "BT.2020"
-            Case Else : Return "?"
+            Case Else : Return String.Empty
         End Select
     End Function
 
     Private Shared Function 格式化色度抽样(值 As String) As String
-        If String.IsNullOrWhiteSpace(值) Then Return "?"
+        If String.IsNullOrWhiteSpace(值) Then Return String.Empty
         Return 值.Replace(":"c, String.Empty).Replace("-"c, String.Empty).Replace(" "c, String.Empty)
     End Function
 
@@ -444,8 +486,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Select Case 位深
             Case 8 : Return "BGRA8 (8bit)"
             Case 10 : Return "RGB10A2 (10bit)"
-            Case 16 : Return "RGBA16F (16bit)"
-            Case Else : Return "?"
+            Case Else : Return String.Empty
         End Select
     End Function
 
@@ -488,10 +529,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Catch
             Return 路径
         End Try
-    End Function
-
-    Private Shared Function 空值(值 As String, Optional 后备 As String = "—") As String
-        Return If(String.IsNullOrWhiteSpace(值), 后备, 值)
     End Function
 
     Private Shared Function 计算图层签名(画布 As Size, 命令 As IReadOnlyList(Of 定时文字命令)) As ULong

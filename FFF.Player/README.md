@@ -30,7 +30,17 @@ SDR 片源在 `映射到SDR` 中保持其 BT.709 码值，不经过 HDR 纸白�
 [BT.2100](https://www.itu.int/rec/R-REC-BT.2100) 和
 [BT.2408](https://www.itu.int/rec/R-REC-BT.2408)。Windows 输出遵循
 [Microsoft Advanced Color 交换链契约](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/high-dynamic-range)：
-真实 HDR 使用 R10G10B10A2 与显式 PQ/BT.2020 色彩空间；SDR 使用 BGRA 与 BT.709。
+真实 HDR 使用 R10G10B10A2 与显式 PQ/BT.2020 色彩空间；SDR 使用默认桌面合同的
+BGRA8/RGB10A2。播放器不读取 ICC 或 Windows SDR 白电平，也不在 shader 中补偿显示设置；
+ICC、HDR 校准和 SDR 亮度映射只由 DWM 在窗口合成时应用一次。
+
+`读取视频输出原始像素` 从当前 D3D11 后缓冲复制 1x1 像素，返回 BGRA8、
+RGB10A2 的原始通道值。它用于将渲染器数字输出与 ICC、DWM 及屏幕截图
+完全分离；窗口化 `Present` 仍必须遵守 Windows 显示色彩契约，后缓冲回读不是物理显示校准。
+
+视频输出统一使用 D3D11 Video Processor：兼容的 D3D11VA NV12/P010 SDR 表面直接进入 VP；
+RGB 图片、CPU 解码及需要 HDR tone mapping 的帧先由 shader 在源分辨率完成格式、色度或色彩处理，
+再以 RGB 表面进入 VP。空间缩放只发生在 VP 中，不提供 Shader 缩放回退；VP 不可用时明确报错。
 
 `播放列表` 负责同目录相似命名扫描、自然排序和本地 M3U8 导入导出；
 `播放列表控制器` 可把播放结束事件连接到顺序、循环或随机播放策略。字幕流会出现在
@@ -96,6 +106,8 @@ FFF.Player.Tests --performance-regression <SDR视频> <HDR视频>
 FFF.Player.Tests --targeted-regression <视频> <字幕.sup>
 FFF.Player.Tests --vcb-ass-regression <视频> <字幕.ass>
 FFF.Player.Tests --gpu-decode-matrix <视频目录>
+FFF.Player.Tests --video-scaling-regression <视频>
+FFF.Player.Tests --sdr-pixel-regression <视频> <参考图.png>
 FFF.Player.Tests --ass-render-benchmark
 FFF.Player.Tests --timed-text-regression
 ```

@@ -299,8 +299,7 @@ Public Class Form1
     End Sub
 
     Private Sub MB_软件解码或硬件解码_Click(sender As Object, e As EventArgs) Handles MB_软件解码或硬件解码.Click
-        Dim 模式 = 播放控制器.切换解码器()
-        If Not String.IsNullOrEmpty(模式) Then 信息图层呈现器?.显示操作信息($"{模式} 解码", &HFFFF62B0UI)
+        播放控制器.切换解码器()
     End Sub
 
     Private Sub MB_HDR模式_Click(sender As Object, e As EventArgs) Handles MB_HDR模式.Click

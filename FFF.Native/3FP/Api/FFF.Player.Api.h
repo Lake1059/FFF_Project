@@ -17,6 +17,11 @@ enum class FFF3FPColorMode : std::uint32_t {
     MapToHdr = 2,
 };
 
+enum class FFF3FPVideoScalingMode : std::uint32_t {
+    Shader = 0,
+    D3D11VideoProcessor = 1,
+};
+
 enum class FFF3FPColorTransfer : std::uint32_t {
     SdrBt709 = 0,
     Pq = 1,
@@ -112,9 +117,11 @@ struct FFF3FPSnapshot {
     std::uint64_t videoBitRate;
     std::uint64_t audioBitRate;
     // Actual swap-chain precision after renderer/device capability fallback.
-    // 8 = BGRA8, 10 = RGB10A2, 16 = scRGB R16G16B16A16_FLOAT.
+    // 8 = BGRA8, 10 = RGB10A2.
     std::uint32_t videoOutputBitDepth;
-    std::uint32_t reserved2;
+    // The path used for the most recently rendered frame. The renderer selects
+    // this automatically from the decoded surface and output requirements.
+    FFF3FPVideoScalingMode videoScalingMode;
     // Advances only after a real demuxer seek succeeds and the new media
     // position has been published. Overlay producers use it to discard old state.
     std::uint64_t timelineGeneration;
@@ -283,6 +290,23 @@ struct FFF3FPColorTransform {
     float outputBlue;
 };
 
+// Reads one pixel from the current video-only back buffer before desktop color
+// management. Intended for renderer regression tests and diagnostics.
+struct FFF3FPVideoPixelProbe {
+    std::uint32_t size;
+    std::uint32_t version;
+    std::uint32_t x;
+    std::uint32_t y;
+    float red;
+    float green;
+    float blue;
+    float alpha;
+    FFF3FPVideoScalingMode scalingMode;
+    std::uint32_t outputBitDepth;
+    FFF3FPColorMode colorMode;
+    std::uint32_t reserved;
+};
+
 #ifdef FFFNATIVE_EXPORTS
 #define FFF3FP_API extern "C" __declspec(dllexport)
 #else
@@ -324,6 +348,8 @@ FFF3FP_API FFFResult FFF3FP_SetVolume(FFF3FPHandle player, float volume, std::ui
 FFF3FP_API FFFResult FFF3FP_SetTimedTextLayer(FFF3FPHandle player,
     const FFF3FPTimedTextLayer* layer) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetSnapshot(FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept;
+FFF3FP_API FFFResult FFF3FP_ReadVideoPixel(FFF3FPHandle player,
+    FFF3FPVideoPixelProbe* probe) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetAudioPeakLevels(FFF3FPHandle player,
     FFF3FPAudioPeakLevels* levels) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetTimedTextStatus(FFF3FPHandle player,

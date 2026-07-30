@@ -476,9 +476,8 @@ Public Class Form媒体信息
         If stream Is Nothing Then Return "—"
         Dim sourceBits = If(stream.位深度 > 0, stream.位深度, stream.解码输出位深度)
         Dim outputBits = If(snapshot Is Nothing OrElse snapshot.视频输出位深度 <= 0,
-            If(sourceBits > 10, 16, If(sourceBits > 8, 10, 8)), snapshot.视频输出位深度)
+            If(sourceBits > 8, 10, 8), snapshot.视频输出位深度)
         Dim hdr = snapshot IsNot Nothing AndAlso snapshot.实际色彩模式 = 色彩输出模式.峰值映射HDR
-        If outputBits >= 16 Then Return $"scRGB(16bit 浮点) | {(If(hdr, "HDR 线性", "SDR"))}"
         If outputBits >= 10 Then Return $"RGB10A2(10bit) | {(If(hdr, "HDR PQ", "SDR"))}"
         Return $"BGRA8(8bit) | {(If(hdr, "HDR 转 SDR", "SDR"))}"
     End Function

@@ -52,6 +52,7 @@ public:
     FFFResult SetVolume(float volume, bool muted) noexcept;
     FFFResult SetTimedTextLayer(const FFF3FPTimedTextLayer& layer) noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
+    FFFResult ReadVideoPixel(FFF3FPVideoPixelProbe& probe) noexcept;
     FFFResult GetAudioPeakLevels(FFF3FPAudioPeakLevels& levels) const noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept;
     FFFResult GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcept;

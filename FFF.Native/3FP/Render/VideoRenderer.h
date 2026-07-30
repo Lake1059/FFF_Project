@@ -25,6 +25,10 @@ struct ID3D11Buffer;
 struct ID3D11Texture2D;
 struct ID3D11RenderTargetView;
 struct ID3D11ShaderResourceView;
+struct ID3D11VideoDevice;
+struct ID3D11VideoContext;
+struct ID3D11VideoProcessorEnumerator;
+struct ID3D11VideoProcessor;
 struct ID3D11BlendState;
 struct ID3D11Query;
 struct IDXGISwapChain4;
@@ -96,6 +100,7 @@ public:
     FFFResult Redraw() noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     FFFResult PresentTimedText() noexcept;
+    FFFResult ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept;
     FFFResult SetTimedTextLayer(TimedTextRenderLayer layer, TimedTextLayerSlot slot) noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status, TimedTextLayerSlot slot) noexcept;
     void ResetMedia() noexcept;
@@ -110,6 +115,7 @@ public:
     std::uint64_t DeviceLockWait100ns() const noexcept;
     std::uint64_t SoftwareConvert100ns() const noexcept;
     std::uint32_t OutputBitDepth() const noexcept;
+    FFF3FPVideoScalingMode ActualVideoScalingMode() const noexcept;
     std::string FallbackReason() const;
     std::string LastError() const;
 
@@ -130,11 +136,24 @@ private:
     std::uint32_t PreferredOutputBitDepth(std::uint32_t sourceBitDepth, bool hdr) noexcept;
     FFFResult EnsureSwapChain(std::uint32_t width, std::uint32_t height,
         std::uint32_t sourceBitDepth) noexcept;
+    FFFResult CreateSwapChain(std::uint32_t width, std::uint32_t height,
+        bool hdr, std::uint32_t outputBits) noexcept;
     FFFResult ReconfigureSwapChain(bool hdr, std::uint32_t outputBits) noexcept;
     FFFResult EnsurePipeline(std::uint32_t sourceWidth, std::uint32_t sourceHeight,
         std::uint32_t inputLayout, std::uint32_t bitDepth,
         std::uint32_t chromaWidthShift, std::uint32_t chromaHeightShift,
         bool externalSource = false) noexcept;
+    FFFResult EnsureVideoProcessor(ID3D11Texture2D* inputTexture,
+        ID3D11Texture2D* outputTexture, std::uint32_t inputColorSpace,
+        std::uint32_t outputColorSpace) noexcept;
+    FFFResult EnsureVideoProcessorInputSurface(std::uint32_t format) noexcept;
+    FFFResult RenderVideoProcessorInput() noexcept;
+    FFFResult DrawWithVideoProcessor(ID3D11Texture2D* inputTexture,
+        ID3D11Texture2D* outputTexture, const RECT& destination,
+        std::uint32_t inputColorSpace, std::uint32_t outputColorSpace) noexcept;
+    bool CanUseDirectVideoProcessor() const noexcept;
+    void ReleaseVideoProcessor() noexcept;
+    void ReleaseVideoProcessorInputSurface() noexcept;
     FFFResult AcquireBackBufferTarget(ID3D11Texture2D** buffer,
         ID3D11RenderTargetView** target) noexcept;
     struct CachedVideoSettings {
@@ -144,6 +163,7 @@ private:
         std::uint32_t inputLayout = 0;
         float sampleScale = 1, yOffset = 0, yScale = 1;
         float cOffset = 0.5f, cScale = 1, kr = 0.2126f, kb = 0.0722f;
+        float chromaOffsetX = 0, chromaOffsetY = 0, padding1 = 0, padding2 = 0;
     };
     FFFResult EnsureTimedTextResources(TimedTextLayerSlot slot) noexcept;
     FFFResult EnsureTimedTextAtlas(std::uint32_t size) noexcept;
@@ -173,6 +193,12 @@ private:
     ID3D11Buffer* constants_;
     ID3D11Texture2D* sourceTextures_[3];
     ID3D11ShaderResourceView* sourceViews_[3];
+    ID3D11VideoDevice* videoDevice_;
+    ID3D11VideoContext* videoContext_;
+    ID3D11VideoProcessorEnumerator* videoProcessorEnumerator_;
+    ID3D11VideoProcessor* videoProcessor_;
+    ID3D11Texture2D* videoProcessorRenderTexture_;
+    ID3D11RenderTargetView* videoProcessorRenderTarget_;
     ID3D11Texture2D* timedTextTextures_[3];
     ID3D11RenderTargetView* timedTextTargets_[3];
     ID3D11ShaderResourceView* timedTextViews_[3];
@@ -203,13 +229,27 @@ private:
     std::uint32_t sourceChromaWidthShift_;
     std::uint32_t sourceChromaHeightShift_;
     bool sourceExternal_;
+    std::uint32_t videoProcessorInputFormat_;
+    std::uint32_t videoProcessorOutputFormat_;
+    std::uint32_t videoProcessorInputColorSpace_;
+    std::uint32_t videoProcessorOutputColorSpace_;
+    std::uint32_t videoProcessorInputWidth_;
+    std::uint32_t videoProcessorInputHeight_;
+    std::uint32_t videoProcessorOutputWidth_;
+    std::uint32_t videoProcessorOutputHeight_;
+    bool videoProcessorConfigurationFailed_;
+    int sourceColorSpace_;
+    int sourceChromaLocation_;
+    bool sourceFullRange_;
+    bool sourceInterlaced_;
+    std::atomic<FFF3FPVideoScalingMode> actualVideoScalingMode_;
     FFF3FPColorMode requestedMode_;
     FFF3FPColorMode actualMode_;
     float sdrPeakNits_;
     float hdrPeakNits_;
     float paperWhiteNits_;
     float sourcePeakNits_;
-    std::vector<std::uint8_t> rgba64_;
+    std::vector<std::uint8_t> convertedRgb_;
     mutable std::mutex deviceMutex_;
     mutable std::mutex presentMutex_;
     mutable std::mutex timedTextMutex_;
@@ -249,9 +289,6 @@ private:
     HMONITOR hdrMonitor_;
     bool hdrSupportValid_;
     bool hdrSupported_;
-    HMONITOR scRgbMonitor_;
-    bool scRgbSupportValid_;
-    bool scRgbSupported_;
     // Bounded caches are keyed by the immutable command content contract.  The
     // UI only changes coordinates for scrolling danmaku, so rebuilding a text
     // layout and two brushes at 60 Hz is unnecessary.

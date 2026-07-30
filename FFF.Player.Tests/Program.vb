@@ -62,6 +62,7 @@ Friend Module Program
 
     <STAThread>
     Public Function Main(参数 As String()) As Integer
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2)
         Try
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--audio-latency-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试音频延迟回归()
@@ -83,6 +84,29 @@ Friend Module Program
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--gpu-decode-matrix", StringComparison.OrdinalIgnoreCase) Then
                 测试GPU解码矩阵(Path.GetFullPath(参数(1)))
                 Console.WriteLine("GPU 解码规格接受与 CPU 回退矩阵通过。")
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--video-scaling-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 缩放测试路径 = Path.GetFullPath(参数(1))
+                检查文件(缩放测试路径)
+                测试视频缩放路径(缩放测试路径)
+                Console.WriteLine("GPU 与 CPU 解码统一 D3D11 Video Processor 路径通过。")
+                Return 0
+            End If
+            If 参数.Length = 3 AndAlso String.Equals(参数(0), "--sdr-pixel-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 媒体路径 = Path.GetFullPath(参数(1))
+                Dim 参考图路径 = Path.GetFullPath(参数(2))
+                检查文件(媒体路径)
+                检查文件(参考图路径)
+                测试SDR灰阶像素(媒体路径, 参考图路径)
+                Console.WriteLine("SDR GPU 与 CPU 的 VP 像素回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--sdr-desktop-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 图像路径 = Path.GetFullPath(参数(1))
+                检查文件(图像路径)
+                测试SDR桌面像素(图像路径)
+                Console.WriteLine("SDR 图像后缓冲与桌面截取像素回归通过。")
                 Return 0
             End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--stream-selector-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -204,6 +228,9 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --information-overlay-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --empty-layer-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --gpu-decode-matrix <视频目录>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --video-scaling-regression <视频>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --sdr-pixel-regression <视频> <参考图.png>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --sdr-desktop-regression <参考图.png>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --stream-selector-regression <多流媒体>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --external-subtitle-scan-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --track-switch-regression <多音轨媒体>")
@@ -749,6 +776,10 @@ Friend Module Program
                     0, 0, "b", 2, "二")})
             Dim 字幕状态 As New 定时文字状态(New 原生定时文字状态 With {.命令数 = 1UI})
             Dim 弹幕状态 As New 定时文字状态(New 原生定时文字状态 With {.命令数 = 2UI})
+            Dim 当前字幕 As 外部字幕轨道 = 字幕
+            Dim 当前弹幕 As 弹幕资料库 = 弹幕
+            Dim 当前字幕状态 As 定时文字状态 = 字幕状态
+            Dim 当前弹幕状态 As 定时文字状态 = 弹幕状态
             Dim 信息 As New 媒体信息()
             信息.流.Add(New 媒体流信息 With {
                 .索引 = 0, .类型 = "video", .编码 = "av1", .像素格式 = "yuv420p10le",
@@ -772,7 +803,8 @@ Friend Module Program
             Using 画面 As New 播放器画面控件 With {.ClientSize = New Size(2560, 1440)}
                 Using 呈现器 As New 播放器信息图层呈现器(画面,
                     Function() 快照, Function() 信息, Function() "C:\media\movie.mkv",
-                    Function() 字幕, Function() 弹幕, Function() 字幕状态, Function() 弹幕状态,
+                    Function() 当前字幕, Function() 当前弹幕,
+                    Function() 当前字幕状态, Function() 当前弹幕状态,
                     Function() WASAPI共享模式.独占,
                     Sub(size, commands, sequence, frameRate) Return)
                     Dim 标志 = BindingFlags.Instance Or BindingFlags.NonPublic
@@ -799,6 +831,31 @@ Friend Module Program
                                                x.Contains("secret.xml", StringComparison.OrdinalIgnoreCase) OrElse
                                                x.Contains("·", StringComparison.Ordinal)),
                        "信息层仍泄漏字幕/弹幕文件名或使用旧分隔符。")
+
+                    Using 按需字幕 As New 外部字幕轨道("C:\diagnostic\effect.ass",
+                        外部字幕格式.ASS, Nothing, Nothing)
+                        当前字幕 = 按需字幕
+                        当前弹幕 = Nothing
+                        当前字幕状态 = Nothing
+                        当前弹幕状态 = Nothing
+                        Dim 缺失信息 As New 媒体信息()
+                        缺失信息.流.Add(New 媒体流信息 With {.索引 = 0, .类型 = "video"})
+                        缺失信息.流.Add(New 媒体流信息 With {.索引 = 1, .类型 = "audio"})
+                        Dim 缺失快照 As New 播放器快照(New 原生播放器快照 With {
+                            .解码器 = CUInt(解码模式.CPU),
+                            .实际色彩模式 = CUInt(色彩输出模式.映射到SDR),
+                            .当前视频流 = 0, .当前音频流 = 1})
+                        Dim 缺失行 = 呈现器.读取调试文本行(缺失信息, 缺失快照, String.Empty)
+                        断言(缺失行.Contains("字幕：ASS   总数量 按需解码"),
+                           "特效字幕总数量没有显示为按需解码。")
+                        断言(Not 缺失行.Any(Function(x) x.Contains("?", StringComparison.Ordinal) OrElse
+                                                     x.StartsWith("文件名：", StringComparison.Ordinal) OrElse
+                                                     x.StartsWith("输入：", StringComparison.Ordinal) OrElse
+                                                     x.StartsWith("色彩：", StringComparison.Ordinal) OrElse
+                                                     x.Contains("当前正在渲染", StringComparison.Ordinal)),
+                           "信息层仍显示无法获取的字段或空条目。" & vbCrLf &
+                           String.Join(vbCrLf, 缺失行))
+                    End Using
                 End Using
             End Using
         End Using
@@ -811,14 +868,18 @@ Friend Module Program
             Dim 标志 = BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic
             Dim 按钮 = 窗口.Controls.Find("MB_查看当前媒体信息", True).FirstOrDefault()
             Dim 画面 = DirectCast(GetType(Form1).GetField("画面控件", 标志)?.GetValue(窗口), Control)
+            Dim 控制器 = DirectCast(GetType(Form1).GetField("播放控制器", 标志)?.GetValue(窗口),
+                                播放器控制器)
             Dim 呈现器 = DirectCast(GetType(Form1).GetField("信息图层呈现器", 标志)?.GetValue(窗口),
                                播放器信息图层呈现器)
             Dim 点击入口 = 按钮?.GetType().GetMethod("OnMouseClick", 标志)
             Dim 可见字段 = GetType(播放器信息图层呈现器).GetField("调试可见", 标志)
             Dim 背景属性 = 按钮?.GetType().GetProperty("BackColor1", 标志)
-            断言(按钮 IsNot Nothing AndAlso 画面 IsNot Nothing AndAlso 呈现器 IsNot Nothing AndAlso
+            断言(按钮 IsNot Nothing AndAlso 画面 IsNot Nothing AndAlso 控制器 IsNot Nothing AndAlso
+                   呈现器 IsNot Nothing AndAlso
                    点击入口 IsNot Nothing AndAlso 可见字段 IsNot Nothing AndAlso 背景属性 IsNot Nothing,
                 "无法取得媒体信息按钮左右键回归所需成员。")
+            断言(控制器.解码器 = 解码模式.CPU, "播放器主窗口没有默认使用 CPU 解码。")
 
             Dim 原窗口数 = Application.OpenForms.OfType(Of Form媒体信息)().Count()
             点击入口.Invoke(按钮, {New MouseEventArgs(MouseButtons.Left, 1, 4, 4, 0)})
@@ -1008,6 +1069,213 @@ Friend Module Program
             Next
         End Using
     End Sub
+
+    Private Sub 测试视频缩放路径(视频路径 As String)
+        Using 输出窗口 As New Form With {
+            .ClientSize = New Drawing.Size(960, 540),
+            .FormBorderStyle = FormBorderStyle.FixedToolWindow,
+            .ShowInTaskbar = False,
+            .StartPosition = FormStartPosition.Manual,
+            .Location = New Drawing.Point(-10000, -10000)
+        }
+            输出窗口.Show()
+            Application.DoEvents()
+            Using 会话 As New 播放器会话(New 播放器配置 With {
+                .解码器 = 解码模式.GPU,
+                .色彩模式 = 色彩输出模式.映射到SDR,
+                .输出窗口句柄 = 输出窗口.Handle
+            })
+                会话.设置音量(0.0F, True)
+                会话.打开Async(视频路径).GetAwaiter().GetResult()
+                会话.播放()
+                Dim VP快照 = 等待快照(会话, Function(x) x.交换链呈现次数 > 0,
+                                   "视频自动渲染首帧")
+                Console.WriteLine($"首帧：解码 {VP快照.解码器}，路径 {VP快照.视频缩放}")
+                If VP快照.视频缩放 <> 视频缩放模式.D3D11视频处理器 Then
+                    Console.WriteLine($"VP 回退：{会话.最后错误消息}")
+                End If
+                断言(VP快照.解码器 = 解码模式.GPU, "测试视频没有保持 D3D11VA 解码。")
+                断言(VP快照.视频缩放 = 视频缩放模式.D3D11视频处理器,
+                   "自动管线没有在受支持的 D3D11VA 输入上激活 Video Processor。")
+            End Using
+
+            Using 会话 As New 播放器会话(New 播放器配置 With {
+                .解码器 = 解码模式.CPU,
+                .色彩模式 = 色彩输出模式.映射到SDR,
+                .输出窗口句柄 = 输出窗口.Handle
+            })
+                会话.设置音量(0.0F, True)
+                会话.打开Async(视频路径).GetAwaiter().GetResult()
+                会话.播放()
+                Dim CPU快照 = 等待快照(会话,
+                    Function(x) x.交换链呈现次数 > 0 AndAlso
+                        x.视频缩放 = 视频缩放模式.D3D11视频处理器,
+                    "CPU 解码的 VP 路径")
+                断言(CPU快照.解码器 = 解码模式.CPU, "CPU VP 测试意外改变了解码器。")
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 测试SDR灰阶像素(视频路径 As String, 参考图路径 As String)
+        Using 参考图 As New Bitmap(参考图路径)
+            断言(参考图.Width = 1280 AndAlso 参考图.Height = 720,
+               $"SDR 像素回归要求 1280x720 参考图，实际为 {参考图.Width}x{参考图.Height}。")
+            Dim 采样点 = {
+                New Point(10, 10), New Point(300, 100), New Point(640, 100),
+                New Point(900, 100), New Point(1270, 700)}
+            Dim 参考值 = 读取像素平均值(参考图, 采样点)
+            断言(参考值.All(Function(value) value = 128),
+               $"参考图灰阶采样不是 RGB 128：{String.Join(",", 参考值)}。")
+
+            Using 输出窗口 As New Form With {
+                .ClientSize = New Drawing.Size(1280, 720),
+                .FormBorderStyle = FormBorderStyle.None,
+                .ShowInTaskbar = False,
+                .StartPosition = FormStartPosition.Manual,
+                .Location = New Point(-10000, -10000)
+            }
+                输出窗口.Show()
+                Application.DoEvents()
+                Dim GPU值 As Integer() = Nothing
+                Using 会话 As New 播放器会话(New 播放器配置 With {
+                    .解码器 = 解码模式.GPU,
+                    .色彩模式 = 色彩输出模式.映射到SDR,
+                    .输出窗口句柄 = 输出窗口.Handle
+                })
+                    会话.设置音量(0.0F, True)
+                    会话.打开Async(视频路径).GetAwaiter().GetResult()
+                    会话.播放()
+                    Dim GPU快照 = 等待快照(会话,
+                        Function(x) x.交换链呈现次数 > 1 AndAlso
+                            x.视频缩放 = 视频缩放模式.D3D11视频处理器,
+                        "SDR 自动 VP 像素帧")
+                    断言(GPU快照.解码器 = 解码模式.GPU,
+                       "SDR 像素测试片没有保持 GPU 解码。")
+                    GPU值 = 读取视频像素平均值(会话, 采样点)
+                End Using
+
+                Dim CPU值 As Integer() = Nothing
+                Using 会话 As New 播放器会话(New 播放器配置 With {
+                    .解码器 = 解码模式.CPU,
+                    .色彩模式 = 色彩输出模式.映射到SDR,
+                    .输出窗口句柄 = 输出窗口.Handle
+                })
+                    会话.设置音量(0.0F, True)
+                    会话.打开Async(视频路径).GetAwaiter().GetResult()
+                    会话.播放()
+                    Dim 快照 = 等待快照(会话,
+                        Function(x) x.交换链呈现次数 > 1 AndAlso
+                            x.视频缩放 = 视频缩放模式.D3D11视频处理器,
+                        "SDR CPU VP 像素帧")
+                    断言(快照.解码器 = 解码模式.CPU,
+                       "SDR CPU 像素测试意外改变了解码器。")
+                    CPU值 = 读取视频像素平均值(会话, 采样点)
+                End Using
+                Console.WriteLine($"灰阶 RGB：文件 {String.Join(",", 参考值)}；" &
+                                  $"GPU VP {String.Join(",", GPU值)}；" &
+                                  $"CPU VP {String.Join(",", CPU值)}")
+                断言(最大通道差(参考值, GPU值) <= 1,
+                   "D3D11 Video Processor 改变了 SDR 灰阶码值。")
+                断言(最大通道差(参考值, CPU值) <= 1,
+                   "CPU VP 改变了 SDR 灰阶码值。")
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 测试SDR桌面像素(图像路径 As String)
+        Dim 采样点 = {
+            New Point(10, 10), New Point(300, 100), New Point(640, 100),
+            New Point(900, 100), New Point(1270, 700)}
+        Dim 参考值 As Integer()
+        Using 参考图 As New Bitmap(图像路径)
+            断言(参考图.Size = New Drawing.Size(1280, 720),
+               $"SDR 桌面像素回归要求 1280x720 参考图，实际为 {参考图.Width}x{参考图.Height}。")
+            参考值 = 读取像素平均值(参考图, 采样点)
+        End Using
+
+        Dim 屏幕边界 = Screen.PrimaryScreen.Bounds
+        Dim 屏幕左上 = New Point(
+            屏幕边界.Left + (屏幕边界.Width - 1280) \ 2,
+            屏幕边界.Top + (屏幕边界.Height - 720) \ 2)
+        Using 输出窗口 As New Form With {
+            .ClientSize = New Drawing.Size(1280, 720),
+            .FormBorderStyle = FormBorderStyle.None,
+            .ShowInTaskbar = True,
+            .StartPosition = FormStartPosition.Manual,
+            .Location = 屏幕左上
+        }
+            Using 视频窗口 As New Panel With {.Dock = DockStyle.Fill, .BackColor = Color.Black}
+                输出窗口.Controls.Add(视频窗口)
+                输出窗口.Show()
+                输出窗口.BringToFront()
+                Application.DoEvents()
+                Using 会话 As New 播放器会话(New 播放器配置 With {
+                    .解码器 = 解码模式.CPU,
+                    .色彩模式 = 色彩输出模式.映射到SDR,
+                    .输出窗口句柄 = 视频窗口.Handle
+                })
+                    会话.设置音量(0.0F, True)
+                    会话.打开Async(图像路径).GetAwaiter().GetResult()
+                    会话.播放()
+                    等待快照(会话, Function(x) x.交换链呈现次数 > 0,
+                             "SDR 图像桌面像素帧")
+                    Dim 后缓冲值 = 读取视频像素平均值(会话, 采样点)
+
+                    Thread.Sleep(100)
+                    Application.DoEvents()
+                    Using 桌面截取 As New Bitmap(1280, 720, Imaging.PixelFormat.Format32bppArgb)
+                        Using 绘图 = Graphics.FromImage(桌面截取)
+                            绘图.CopyFromScreen(视频窗口.PointToScreen(Point.Empty), Point.Empty,
+                                               桌面截取.Size, CopyPixelOperation.SourceCopy)
+                        End Using
+                        Dim 桌面值 = 读取像素平均值(桌面截取, 采样点)
+                        Console.WriteLine($"SDR 图像灰阶：原图 {String.Join(",", 参考值)}；" &
+                                          $"D3D11后缓冲 {String.Join(",", 后缓冲值)}；" &
+                                          $"桌面截取 {String.Join(",", 桌面值)}")
+                        断言(最大通道差(参考值, 后缓冲值) = 0,
+                           "SDR 图像在应用 D3D11 后缓冲内已发生色值改变。")
+                        断言(最大通道差(参考值, 桌面值) = 0,
+                           "SDR 图像在 Windows HDR 桌面合成后发生色值改变。")
+                    End Using
+                End Using
+            End Using
+        End Using
+    End Sub
+
+    Private Function 读取视频像素平均值(会话 As 播放器会话, 采样点 As Point()) As Integer()
+        Dim 总红 As Integer
+        Dim 总绿 As Integer
+        Dim 总蓝 As Integer
+        For Each 点 In 采样点
+            Dim 像素 = 会话.读取视频输出像素(点.X, 点.Y)
+            总红 += 像素.R
+            总绿 += 像素.G
+            总蓝 += 像素.B
+        Next
+        Return {CInt(Math.Round(总红 / CDbl(采样点.Length))),
+                CInt(Math.Round(总绿 / CDbl(采样点.Length))),
+                CInt(Math.Round(总蓝 / CDbl(采样点.Length)))}
+    End Function
+
+    Private Function 读取像素平均值(图像 As Bitmap, 采样点 As Point()) As Integer()
+        Dim 总红 As Integer
+        Dim 总绿 As Integer
+        Dim 总蓝 As Integer
+        For Each 点 In 采样点
+            Dim 像素 = 图像.GetPixel(点.X, 点.Y)
+            总红 += 像素.R
+            总绿 += 像素.G
+            总蓝 += 像素.B
+        Next
+        Return {CInt(Math.Round(总红 / CDbl(采样点.Length))),
+                CInt(Math.Round(总绿 / CDbl(采样点.Length))),
+                CInt(Math.Round(总蓝 / CDbl(采样点.Length)))}
+    End Function
+
+    Private Function 最大通道差(预期 As Integer(), 实际 As Integer()) As Integer
+        Return Enumerable.Range(0, Math.Min(预期.Length, 实际.Length)).
+            Max(Function(index) Math.Abs(预期(index) - 实际(index)))
+    End Function
 
     Private Sub 测试ASS特效字幕(视频路径 As String, ASS路径 As String)
         Dim 字体目录 = ASS媒体字体发现器.查找字体目录(视频路径)

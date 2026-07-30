@@ -800,6 +800,7 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     output.deviceLockWait100ns = videoRenderer_.DeviceLockWait100ns();
     output.softwareConvert100ns = videoRenderer_.SoftwareConvert100ns();
     output.videoOutputBitDepth = videoRenderer_.OutputBitDepth();
+    output.videoScalingMode = videoRenderer_.ActualVideoScalingMode();
     if (output.state == FFF3FPState::Playing) {
         std::uint64_t firstSequence = 0;
         std::uint64_t secondSequence = 0;
@@ -831,6 +832,10 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     if (output.selectedAudioStream >= 0 || output.isExternalAudio != 0)
         output.audioPosition100ns = output.position100ns;
     return FFFResult::Success;
+}
+
+FFFResult PlayerSession::ReadVideoPixel(FFF3FPVideoPixelProbe& probe) noexcept {
+    return videoRenderer_.ReadPixel(probe);
 }
 
 FFFResult PlayerSession::GetAudioPeakLevels(FFF3FPAudioPeakLevels& output) const noexcept {
@@ -1677,6 +1682,12 @@ void PlayerSession::FlushAtEnd() noexcept {
         draining_ = true;
         if (videoDecoder_) DecodePacket(videoDecoder_, nullptr, true, format_);
         if (audioDecoder_ && externalFormat_ == nullptr) DecodePacket(audioDecoder_, nullptr, false, format_);
+    }
+    // Some single-frame image decoders publish their only frame while draining.
+    // Do not enter Ended before that queued frame has reached the renderer.
+    if (!videoFrameQueue_.empty()) {
+        if (!PumpVideoPresentation()) Sleep(1);
+        return;
     }
     if (audioRenderer_ && audioRenderer_->Buffered100ns() > 0) { Sleep(2); return; }
     auto endPosition = snapshot_.position100ns;

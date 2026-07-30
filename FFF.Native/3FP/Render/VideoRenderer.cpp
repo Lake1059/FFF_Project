@@ -26,10 +26,9 @@ constexpr float TrueHdrOutputPeakNits = 1000.0f;
 
 constexpr std::uint32_t OutputBitDepthForSource(const std::uint32_t sourceBitDepth,
     const bool hdr) noexcept {
-    // HDR10 uses a 10-bit PQ swap chain. Higher-precision sources use the
-    // 16-bit float scRGB path in both SDR and HDR mode; ordinary 9/10-bit
-    // video uses RGB10A2 and 8-bit content stays on BGRA8.
-    if (sourceBitDepth > 10) return 16;
+    // Match the mainstream MPC Video Renderer contract: floating point is an
+    // internal processing format, never an SDR desktop swap-chain format.
+    // DWM can then apply the Windows HDR SDR-white setting exactly once.
     if (hdr) return 10;
     if (sourceBitDepth > 8) return 10;
     return 8;
@@ -66,6 +65,21 @@ bool IsFullRange(const AVFrame* frame) noexcept {
 bool IsRec2020(const AVFrame* frame) noexcept {
     return frame->color_primaries == AVCOL_PRI_BT2020 ||
         frame->colorspace == AVCOL_SPC_BT2020_NCL || frame->colorspace == AVCOL_SPC_BT2020_CL;
+}
+
+DXGI_COLOR_SPACE_TYPE VideoProcessorInputColorSpace(const int colorSpace,
+    const bool fullRange, const std::uint32_t width) noexcept {
+    if (colorSpace == AVCOL_SPC_BT2020_NCL || colorSpace == AVCOL_SPC_BT2020_CL) {
+        return fullRange ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020 :
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020;
+    }
+    if (colorSpace == AVCOL_SPC_BT709 ||
+        (colorSpace == AVCOL_SPC_UNSPECIFIED && width >= 1280)) {
+        return fullRange ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709 :
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
+    }
+    return fullRange ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601 :
+        DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601;
 }
 
 float PqToNits(float value) noexcept {
@@ -173,6 +187,7 @@ cbuffer Settings : register(b0) {
     float SourceWidth; float SourceHeight; float OutputWidth; float OutputHeight;
     uint InputLayout; float SampleScale; float YOffset; float YScale;
     float COffset; float CScale; float Kr; float Kb;
+    float2 ChromaOffset; float2 Padding;
 };
 Texture2D<float4> Source : register(t0);
 Texture2D<float4> ChromaU : register(t1);
@@ -218,10 +233,11 @@ float3 ToneHdrToSdr(float3 nits,float sourcePeak,float paperWhite,float targetPe
 }
 float3 ReadSource(float2 uv) {
     if(InputLayout==0)return Source.Sample(LinearSampler,uv).rgb;
+    float2 chromaUv=uv+ChromaOffset;
     float y=Source.Sample(LinearSampler,uv).r*SampleScale;
     float2 chroma=InputLayout==1
-        ?float2(ChromaU.Sample(LinearSampler,uv).r,ChromaV.Sample(LinearSampler,uv).r)*SampleScale
-        :ChromaU.Sample(LinearSampler,uv).rg*SampleScale;
+        ?float2(ChromaU.Sample(LinearSampler,chromaUv).r,ChromaV.Sample(LinearSampler,chromaUv).r)*SampleScale
+        :ChromaU.Sample(LinearSampler,chromaUv).rg*SampleScale;
     y=(y-YOffset)*YScale;
     chroma=(chroma-COffset)*CScale;
     float kg=1.0-Kr-Kb;
@@ -230,22 +246,14 @@ float3 ReadSource(float2 uv) {
         y+(2.0-2.0*Kb)*chroma.x);
 }
 float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
-    float sourceAspect=SourceWidth/SourceHeight, outputAspect=OutputWidth/OutputHeight;
-    float2 sampleUv=uv;
-    if(outputAspect>sourceAspect){ float scale=sourceAspect/outputAspect; if(abs(uv.x-0.5)>scale*0.5)return float4(0,0,0,1); sampleUv.x=(uv.x-0.5)/scale+0.5; }
-    else { float scale=outputAspect/sourceAspect; if(abs(uv.y-0.5)>scale*0.5)return float4(0,0,0,1); sampleUv.y=(uv.y-0.5)/scale+0.5; }
-    float3 rgb=ReadSource(sampleUv);
-    if(ColorMode==1)return float4(Reserved!=0?ToLinear709(rgb):rgb,1);
+    float3 rgb=ReadSource(uv);
+    if(ColorMode==1)return float4(rgb,1);
     if(ColorMode==0&&Transfer==0){
         if(Source2020!=0)rgb=ToBt709(To709(ToLinear709(rgb)));
-        return float4(Reserved!=0?ToLinear709(rgb):rgb,1);
+        return float4(rgb,1);
     }
     float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):ToLinear709(rgb)*PaperWhite);
     if(ColorMode==2){
-        if(Reserved!=0){
-            if(Source2020!=0)nits=To709(nits);
-            return float4(ToneToPeak(nits,1000.0)/80.0,1);
-        }
         if(Source2020==0)nits=To2020(nits);
         return float4(NitsToPq(ToneToPeak(nits,1000.0)),1);
     }
@@ -254,7 +262,7 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     // scaling HDR diffuse white directly to clipping white; that old scaling
     // lifted most mid-tones and left almost no highlight headroom.
     float3 sdr=ToBt709(ToneHdrToSdr(nits,HdrPeak,PaperWhite,SdrPeak)/SdrPeak);
-    return float4(Reserved!=0?ToLinear709(sdr):sdr,1);
+    return float4(sdr,1);
 })";
 
 constexpr const char* TimedTextPixelShaderSource = R"(
@@ -275,10 +283,7 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     float4 value=Overlay.Sample(LinearSampler,uv);
     if(value.a<=0.000001)return 0;
     float3 straight=value.rgb/value.a;
-    if(ColorMode==2)straight=Reserved!=0
-        ? ToLinear709(straight)*(PaperWhite/80.0)
-        : NitsToPq(To2020(ToLinear709(straight)*PaperWhite));
-    else if(Reserved!=0)straight=ToLinear709(straight);
+    if(ColorMode==2)straight=NitsToPq(To2020(ToLinear709(straight)*PaperWhite));
     return float4(straight*value.a,value.a);
 })";
 
@@ -317,7 +322,38 @@ struct ShaderSettings {
     std::uint32_t inputLayout;
     float sampleScale, yOffset, yScale;
     float cOffset, cScale, kr, kb;
+    float chromaOffsetX, chromaOffsetY, padding1, padding2;
 };
+
+struct VideoDestination {
+    std::uint32_t x, y, width, height;
+};
+
+constexpr VideoDestination CalculateVideoDestination(const std::uint32_t sourceWidth,
+    const std::uint32_t sourceHeight, const std::uint32_t outputWidth,
+    const std::uint32_t outputHeight) noexcept {
+    if (sourceWidth == 0 || sourceHeight == 0 || outputWidth == 0 || outputHeight == 0)
+        return {0, 0, 1, 1};
+    std::uint32_t width = outputWidth;
+    std::uint32_t height = outputHeight;
+    if (static_cast<std::uint64_t>(outputWidth) * sourceHeight <=
+        static_cast<std::uint64_t>(outputHeight) * sourceWidth) {
+        height = std::max(1u, static_cast<std::uint32_t>((
+            static_cast<std::uint64_t>(outputWidth) * sourceHeight + sourceWidth / 2) / sourceWidth));
+    } else {
+        width = std::max(1u, static_cast<std::uint32_t>((
+            static_cast<std::uint64_t>(outputHeight) * sourceWidth + sourceHeight / 2) / sourceHeight));
+    }
+    width = std::min(width, outputWidth);
+    height = std::min(height, outputHeight);
+    return {(outputWidth - width) / 2, (outputHeight - height) / 2, width, height};
+}
+
+static_assert(CalculateVideoDestination(1920, 1080, 1280, 1024).width == 1280 &&
+    CalculateVideoDestination(1920, 1080, 1280, 1024).height == 720 &&
+    CalculateVideoDestination(1920, 1080, 1280, 1024).y == 152);
+static_assert(CalculateVideoDestination(1080, 1920, 1920, 1080).width == 608 &&
+    CalculateVideoDestination(1080, 1920, 1920, 1080).x == 656);
 
 struct InputDescription {
     std::uint32_t layout = 0;
@@ -393,6 +429,35 @@ static_assert(DescribeInput(AV_PIX_FMT_YUV444P).layout == 1 &&
     DescribeInput(AV_PIX_FMT_YUV444P).chromaHeightShift == 0);
 static_assert(DescribeInput(AV_PIX_FMT_YUV444P10LE).layout == 1 &&
     DescribeInput(AV_PIX_FMT_YUV444P10LE).bitDepth == 10);
+
+constexpr int ChromaOffsetNumerator256(const std::uint32_t shift,
+    const int position256) noexcept {
+    return shift == 0 ? 0 : static_cast<int>(((1u << shift) - 1u) * 128u) - position256;
+}
+
+static_assert(ChromaOffsetNumerator256(1, 0) == 128);
+static_assert(ChromaOffsetNumerator256(1, 128) == 0);
+static_assert(ChromaOffsetNumerator256(1, 256) == -128);
+
+void ResolveChromaOffset(const AVFrame* frame, const InputDescription& input,
+    const AVChromaLocation chromaLocation,
+    float& offsetX, float& offsetY) noexcept {
+    offsetX = offsetY = 0.0f;
+    if (frame == nullptr || input.layout == 0 || chromaLocation == AVCHROMA_LOC_UNSPECIFIED)
+        return;
+    int positionX = 0;
+    int positionY = 0;
+    if (av_chroma_location_enum_to_pos(&positionX, &positionY, chromaLocation) < 0)
+        return;
+    if (input.chromaWidthShift != 0 && frame->width > 0) {
+        offsetX = static_cast<float>(ChromaOffsetNumerator256(input.chromaWidthShift, positionX)) /
+            (256.0f * static_cast<float>(frame->width));
+    }
+    if (input.chromaHeightShift != 0 && frame->height > 0) {
+        offsetY = static_cast<float>(ChromaOffsetNumerator256(input.chromaHeightShift, positionY)) /
+            (256.0f * static_cast<float>(frame->height));
+    }
+}
 
 float ResolveSourcePeakNits(const AVFrame* frame, const float fallback, const float paperWhite) noexcept {
     auto peak = fallback;
@@ -671,8 +736,12 @@ FFFResult EvaluateTimedTextRasterization(FFF3FPTimedTextRasterizationProbe& prob
 
 PlayerVideoRenderer::PlayerVideoRenderer() noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
-      vertexShader_(nullptr), pixelShader_(nullptr), timedTextPixelShader_(nullptr), sampler_(nullptr), constants_(nullptr),
+      vertexShader_(nullptr), pixelShader_(nullptr), timedTextPixelShader_(nullptr), sampler_(nullptr),
+      constants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
+      videoDevice_(nullptr), videoContext_(nullptr), videoProcessorEnumerator_(nullptr),
+      videoProcessor_(nullptr), videoProcessorRenderTexture_(nullptr),
+      videoProcessorRenderTarget_(nullptr),
       timedTextTextures_{nullptr, nullptr, nullptr}, timedTextTargets_{nullptr, nullptr, nullptr},
       timedTextViews_{nullptr, nullptr, nullptr}, timedTextPipelineQueries_{nullptr, nullptr, nullptr},
       timedTextBlend_(nullptr),
@@ -685,7 +754,15 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
       swapWidth_(0), swapHeight_(0), swapHdr_(false), swapOutputBits_(8), sourceWidth_(0), sourceHeight_(0),
       sourceInputLayout_(UINT32_MAX), sourceBitDepth_(0),
       sourceChromaWidthShift_(0), sourceChromaHeightShift_(0),
-      sourceExternal_(false),
+      sourceExternal_(false), videoProcessorInputFormat_(DXGI_FORMAT_UNKNOWN),
+      videoProcessorOutputFormat_(DXGI_FORMAT_UNKNOWN),
+      videoProcessorInputColorSpace_(DXGI_COLOR_SPACE_CUSTOM),
+      videoProcessorOutputColorSpace_(DXGI_COLOR_SPACE_CUSTOM), videoProcessorInputWidth_(0),
+      videoProcessorInputHeight_(0), videoProcessorOutputWidth_(0),
+      videoProcessorOutputHeight_(0), videoProcessorConfigurationFailed_(false),
+      sourceColorSpace_(AVCOL_SPC_UNSPECIFIED), sourceChromaLocation_(AVCHROMA_LOC_UNSPECIFIED),
+      sourceFullRange_(false), sourceInterlaced_(false),
+      actualVideoScalingMode_(FFF3FPVideoScalingMode::D3D11VideoProcessor),
       requestedMode_(FFF3FPColorMode::MapToSdr), actualMode_(FFF3FPColorMode::MapToSdr),
       sdrPeakNits_(100.0f), hdrPeakNits_(TrueHdrOutputPeakNits),
       paperWhiteNits_(203.0f), sourcePeakNits_(100.0f),
@@ -700,7 +777,6 @@ PlayerVideoRenderer::PlayerVideoRenderer() noexcept
       presentedVideoFrames_(0), coalescedVideoFrames_(0), swapChainPresents_(0),
       presentWait100ns_(0), deviceLockWait100ns_(0), softwareConvert100ns_(0),
        hdrMonitor_(nullptr), hdrSupportValid_(false), hdrSupported_(false),
-       scRgbMonitor_(nullptr), scRgbSupportValid_(false), scRgbSupported_(false),
       timedTextAtlasX_(0), timedTextAtlasY_(0), timedTextAtlasRowHeight_(0),
       timedTextAtlasSize_(0), timedTextSpriteInstanceCapacity_(0),
       timedTextSpriteCacheHits_(0), timedTextSpriteCacheMisses_(0) {}
@@ -717,7 +793,6 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     }
     window_ = window;
     hdrSupportValid_ = false; hdrMonitor_ = nullptr;
-    scRgbSupportValid_ = false; scRgbSupported_ = false; scRgbMonitor_ = nullptr;
     swapWidth_ = swapHeight_ = 0;
     swapHdr_ = false; swapOutputBits_ = 8;
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
@@ -757,22 +832,19 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
 
 FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
     std::lock_guard deviceLock(deviceMutex_);
-    // Commit the public mode only after DXGI has returned the retained swap
-    // chain to an SDR color space and removed HDR10 metadata. Reporting SDR
-    // while an old PQ chain is still active would make the next frame invalid.
+    requestedMode_ = FFF3FPColorMode::MapToSdr;
+    actualMode_ = FFF3FPColorMode::MapToSdr;
     if (swapChain_ != nullptr && swapHdr_) {
         const auto result = ReconfigureSwapChain(false, PreferredOutputBitDepth(sourceBitDepth_, false));
         if (result != FFFResult::Success) return result;
     }
-    requestedMode_ = FFF3FPColorMode::MapToSdr;
-    actualMode_ = FFF3FPColorMode::MapToSdr;
     fallbackReason_.clear();
     return FFFResult::Success;
 }
 
 FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
     if (device_ != nullptr) return FFFResult::Success;
-    const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0,
+    const D3D_FEATURE_LEVEL levels[] = {
         D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
     D3D_FEATURE_LEVEL selected{};
     ComPtr<IDXGIAdapter1> selectedAdapter;
@@ -797,7 +869,7 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
     }
     const auto result = D3D11CreateDevice(selectedAdapter.Get(), selectedAdapter
         ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr,
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
         levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &device_, &selected, &context_);
     if (FAILED(result)) { SetError("Could not create the D3D11 playback device."); return FFFResult::DeviceFailure; }
     ComPtr<ID3D11Multithread> multithread;
@@ -807,26 +879,12 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
 
 std::uint32_t PlayerVideoRenderer::PreferredOutputBitDepth(
     const std::uint32_t sourceBitDepth, const bool hdr) noexcept {
-    const auto requested = OutputBitDepthForSource(sourceBitDepth, hdr);
-    if (requested < 16) return requested;
-    const auto monitor = window_ != nullptr && IsWindow(window_)
-        ? MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST) : nullptr;
-    if (monitor != scRgbMonitor_) {
-        scRgbMonitor_ = monitor;
-        scRgbSupportValid_ = false;
-        scRgbSupported_ = false;
-    }
-    return scRgbSupportValid_ && !scRgbSupported_ ? 10u : requested;
+    return OutputBitDepthForSource(sourceBitDepth, hdr);
 }
 
 bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
     if (window_ == nullptr || !IsWindow(window_)) return false;
     const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
-    if (monitor != scRgbMonitor_) {
-        scRgbMonitor_ = monitor;
-        scRgbSupportValid_ = false;
-        scRgbSupported_ = false;
-    }
     if (hdrSupportValid_ && monitor == hdrMonitor_) return hdrSupported_;
     hdrMonitor_ = monitor;
     hdrSupportValid_ = true;
@@ -921,6 +979,11 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
         SetError(message.str());
         return FFFResult::DeviceFailure;
     }
+    return CreateSwapChain(width, height, hdr, outputBits);
+}
+
+FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
+    const std::uint32_t height, const bool hdr, const std::uint32_t outputBits) noexcept {
     ComPtr<IDXGIDevice> dxgiDevice;
     ComPtr<IDXGIAdapter> adapter;
     ComPtr<IDXGIFactory2> factory;
@@ -930,11 +993,11 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     }
     DXGI_SWAP_CHAIN_DESC1 description{};
     description.Width = width; description.Height = height;
-    description.Format = outputBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
-        (outputBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM);
+    description.Format = outputBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
+        DXGI_FORMAT_B8G8R8A8_UNORM;
     description.SampleDesc.Count = 1; description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     description.BufferCount = 2; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_STRETCH;
+    description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_NONE;
     ComPtr<IDXGISwapChain1> chain1;
     const auto result = factory->CreateSwapChainForHwnd(device_, window_, &description, nullptr, nullptr, &chain1);
     if (FAILED(result) || FAILED(chain1->QueryInterface(IID_PPV_ARGS(&swapChain_)))) {
@@ -944,39 +1007,33 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
         SetError(message.str()); return FFFResult::DeviceFailure;
     }
     swapWidth_ = width; swapHeight_ = height; swapHdr_ = hdr; swapOutputBits_ = outputBits;
-    // Keep at most one complete composite queued. The presentation thread may
-    // wait here, but decode and managed layer production retain only their
-    // latest state instead of building latency or exposing partial frames.
-    swapChain_->SetMaximumFrameLatency(1);
     ReleaseTimedTextResources();
-    if (hdr && outputBits < 16) {
+    if (hdr) {
         UINT support = 0;
         if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) ||
             (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
             FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
             fallbackReason_ = "The swap chain rejected the Rec.2020 PQ color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
-            const auto fallbackResult = ReconfigureSwapChain(false,
-                PreferredOutputBitDepth(sourceBitDepth, false));
-            return fallbackResult;
+            swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+            swapChain_->Release();
+            swapChain_ = nullptr;
+            swapWidth_ = swapHeight_ = 0;
+            swapHdr_ = false;
+            swapOutputBits_ = 8;
+            return CreateSwapChain(width, height, false,
+                PreferredOutputBitDepth(sourceBitDepth_, false));
         }
         SetHdrMetadata();
-    } else if (outputBits >= 16) {
-        UINT support = 0;
-        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) ||
-            (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
-            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
-            fallbackReason_ = "The swap chain rejected the scRGB float color space.";
-            scRgbSupportValid_ = true; scRgbSupported_ = false;
-            swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-            return hdr ? ReconfigureSwapChain(true, 10) :
-                ReconfigureSwapChain(false, sourceBitDepth > 8 ? 10 : 8);
-        }
-        scRgbSupportValid_ = true; scRgbSupported_ = true;
-        swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
     } else {
-        swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        // Keep a newly-created SDR swap chain on DXGI's default SDR contract.
+        // Do not call SetColorSpace1 or SetHDRMetaData, even with NONE: either
+        // call opts the window into an explicit Advanced Color presentation
+        // contract instead of the ordinary SDR desktop path.
     }
+    // Keep at most one complete composite queued. Decode and managed overlay
+    // production retain only their latest state while Present is waiting.
+    swapChain_->SetMaximumFrameLatency(1);
     return FFFResult::Success;
 }
 
@@ -985,8 +1042,20 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
     if (swapChain_ == nullptr || (hdr == swapHdr_ && formatBits == swapOutputBits_)) return FFFResult::Success;
     if (context_ != nullptr) { context_->ClearState(); context_->Flush(); }
     ReleaseTimedTextResources();
-    const auto format = formatBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
-        (formatBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM);
+    if (hdr != swapHdr_) {
+        const auto width = std::max(1u, swapWidth_);
+        const auto height = std::max(1u, swapHeight_);
+        std::lock_guard presentLock(presentMutex_);
+        swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+        swapChain_->Release();
+        swapChain_ = nullptr;
+        swapWidth_ = swapHeight_ = 0;
+        swapHdr_ = false;
+        swapOutputBits_ = 8;
+        return CreateSwapChain(width, height, hdr, formatBits);
+    }
+    const auto format = formatBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
+        DXGI_FORMAT_B8G8R8A8_UNORM;
     std::unique_lock presentLock(presentMutex_);
     const auto resize = swapChain_->ResizeBuffers(0, std::max(1u, swapWidth_),
         std::max(1u, swapHeight_), format, 0);
@@ -998,44 +1067,29 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
         return FFFResult::DeviceFailure;
     }
     swapHdr_ = hdr; swapOutputBits_ = formatBits;
-    if (hdr && formatBits < 16) {
+    if (hdr) {
         UINT support = 0;
         if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) ||
             (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
             FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
-            // HDR capability can change while a window moves between monitors.
-            // Keep the same HWND/flip chain, but atomically fall back to the
-            // next supported HDR/SDR format instead of leaving an ambiguous one.
             fallbackReason_ = "The reconfigured swap chain rejected the Rec.2020 PQ color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
+            swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+            swapChain_->Release();
+            swapChain_ = nullptr;
+            const auto width = std::max(1u, swapWidth_);
+            const auto height = std::max(1u, swapHeight_);
+            swapWidth_ = swapHeight_ = 0;
+            swapHdr_ = false;
+            swapOutputBits_ = 8;
             presentLock.unlock();
-            return ReconfigureSwapChain(false,
+            return CreateSwapChain(width, height, false,
                 PreferredOutputBitDepth(sourceBitDepth_, false));
         }
         SetHdrMetadata();
-    } else if (formatBits >= 16) {
-        UINT support = 0;
-        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) ||
-            (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
-            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
-            fallbackReason_ = "The reconfigured swap chain rejected the scRGB float color space.";
-            scRgbSupportValid_ = true; scRgbSupported_ = false;
-            swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-            presentLock.unlock();
-            return hdr ? ReconfigureSwapChain(true, 10) :
-                ReconfigureSwapChain(false, sourceBitDepth_ > 8 ? 10 : 8);
-        }
-        scRgbSupportValid_ = true; scRgbSupported_ = true;
-        swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
     } else {
-        // ResizeBuffers does not define application HDR metadata lifetime. Clear
-        // it explicitly whenever the retained chain becomes SDR, including a
-        // HDR-to-SDR media switch on the same HWND.
-        swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-        if (FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709))) {
-            SetError("The reconfigured swap chain rejected the Rec.709 SDR color space.");
-            return FFFResult::DeviceFailure;
-        }
+        // This branch only changes precision within an already-SDR chain. Keep
+        // the implicit SDR contract untouched.
     }
     return FFFResult::Success;
 }
@@ -1070,11 +1124,12 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             FAILED(D3DCompile(PixelShaderSource, std::strlen(PixelShaderSource), nullptr, nullptr, nullptr,
                 "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixelCode, &errors)) ||
             FAILED(D3DCompile(TimedTextPixelShaderSource, std::strlen(TimedTextPixelShaderSource), nullptr, nullptr, nullptr,
-                "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &timedTextPixelCode, &errors)) ||
+            "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &timedTextPixelCode, &errors)) ||
             FAILED(device_->CreateVertexShader(vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr, &vertexShader_)) ||
             FAILED(device_->CreatePixelShader(pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr, &pixelShader_)) ||
             FAILED(device_->CreatePixelShader(timedTextPixelCode->GetBufferPointer(), timedTextPixelCode->GetBufferSize(), nullptr, &timedTextPixelShader_))) {
-            SetError(errors ? static_cast<const char*>(errors->GetBufferPointer()) : "Could not create the HDR presentation shaders.");
+            SetError(errors ? static_cast<const char*>(errors->GetBufferPointer()) :
+                "Could not create the playback presentation shaders.");
             return FFFResult::DeviceFailure;
         }
         D3D11_SAMPLER_DESC sampler{};
@@ -1083,7 +1138,8 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         sampler.MaxLOD = D3D11_FLOAT32_MAX;
         D3D11_BUFFER_DESC buffer{};
         buffer.ByteWidth = sizeof(ShaderSettings); buffer.Usage = D3D11_USAGE_DEFAULT; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        if (FAILED(device_->CreateSamplerState(&sampler, &sampler_)) || FAILED(device_->CreateBuffer(&buffer, nullptr, &constants_))) {
+        if (FAILED(device_->CreateSamplerState(&sampler, &sampler_)) ||
+            FAILED(device_->CreateBuffer(&buffer, nullptr, &constants_))) {
             SetError("Could not create the presentation shader resources."); return FFFResult::DeviceFailure;
         }
     }
@@ -1109,19 +1165,37 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         texture.Format = bitDepth <= 8 ? DXGI_FORMAT_NV12 :
             (bitDepth <= 10 ? DXGI_FORMAT_P010 : DXGI_FORMAT_P016);
         texture.SampleDesc.Count = 1; texture.Usage = D3D11_USAGE_DEFAULT;
-        texture.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(device_->CreateTexture2D(&texture, nullptr, &sourceTextures_[0]))) {
-            SetError("Could not create the retained hardware-decoded video surface.");
-            return FFFResult::NotSupported;
-        }
         D3D11_SHADER_RESOURCE_VIEW_DESC luma{};
         luma.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         luma.Texture2D.MipLevels = 1;
         luma.Format = bitDepth > 8 ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
         auto chroma = luma;
         chroma.Format = bitDepth > 8 ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
-        if (FAILED(device_->CreateShaderResourceView(sourceTextures_[0], &luma, &sourceViews_[0])) ||
-            FAILED(device_->CreateShaderResourceView(sourceTextures_[0], &chroma, &sourceViews_[1]))) {
+        const auto createRetainedSurface = [&](const UINT bindFlags) noexcept {
+            texture.BindFlags = bindFlags;
+            if (FAILED(device_->CreateTexture2D(&texture, nullptr, &sourceTextures_[0])) ||
+                FAILED(device_->CreateShaderResourceView(
+                    sourceTextures_[0], &luma, &sourceViews_[0])) ||
+                FAILED(device_->CreateShaderResourceView(
+                    sourceTextures_[0], &chroma, &sourceViews_[1]))) {
+                if (sourceViews_[1] != nullptr) {
+                    sourceViews_[1]->Release();
+                    sourceViews_[1] = nullptr;
+                }
+                if (sourceViews_[0] != nullptr) {
+                    sourceViews_[0]->Release();
+                    sourceViews_[0] = nullptr;
+                }
+                if (sourceTextures_[0] != nullptr) {
+                    sourceTextures_[0]->Release();
+                    sourceTextures_[0] = nullptr;
+                }
+                return false;
+            }
+            return true;
+        };
+        if (!createRetainedSurface(D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER) &&
+            !createRetainedSurface(D3D11_BIND_SHADER_RESOURCE)) {
             SetError("The retained D3D11 video surface is not shader-readable.");
             return FFFResult::NotSupported;
         }
@@ -1133,7 +1207,8 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         texture.Height = plane == 0 ? sourceHeight :
             (sourceHeight + (1u << chromaHeightShift) - 1) >> chromaHeightShift;
         texture.MipLevels = texture.ArraySize = 1;
-        if (inputLayout == 0) texture.Format = DXGI_FORMAT_R16G16B16A16_UNORM;
+        if (inputLayout == 0) texture.Format = bitDepth <= 8 ?
+            DXGI_FORMAT_B8G8R8A8_UNORM : DXGI_FORMAT_R16G16B16A16_UNORM;
         else if (inputLayout == 2 && plane == 1)
             texture.Format = bitDepth > 8 ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
         else texture.Format = bitDepth > 8 ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
@@ -1150,6 +1225,254 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     sourceChromaWidthShift_ = chromaWidthShift;
     sourceChromaHeightShift_ = chromaHeightShift;
     return FFFResult::Success;
+}
+
+bool PlayerVideoRenderer::CanUseDirectVideoProcessor() const noexcept {
+    if (!sourceExternal_ || sourceInputLayout_ != 2 || sourceTextures_[0] == nullptr ||
+        sourceBitDepth_ > 10 || sourceInterlaced_ ||
+        sourceChromaLocation_ != AVCHROMA_LOC_LEFT ||
+        cachedVideoSettings_.transfer != 0 || actualMode_ != FFF3FPColorMode::MapToSdr ||
+        swapOutputBits_ > 10)
+        return false;
+    D3D11_TEXTURE2D_DESC inputDescription{};
+    sourceTextures_[0]->GetDesc(&inputDescription);
+    return (inputDescription.BindFlags & D3D11_BIND_DECODER) != 0;
+}
+
+FFFResult PlayerVideoRenderer::EnsureVideoProcessor(ID3D11Texture2D* inputTexture,
+    ID3D11Texture2D* outputTexture, const std::uint32_t inputColorSpace,
+    const std::uint32_t outputColorSpace) noexcept {
+    if (inputTexture == nullptr || outputTexture == nullptr ||
+        device_ == nullptr || context_ == nullptr)
+        return FFFResult::NotSupported;
+    D3D11_TEXTURE2D_DESC inputDescription{};
+    D3D11_TEXTURE2D_DESC outputDescription{};
+    inputTexture->GetDesc(&inputDescription);
+    outputTexture->GetDesc(&outputDescription);
+    if (inputDescription.ArraySize != 1 || outputDescription.ArraySize != 1)
+        return FFFResult::NotSupported;
+    const auto sameConfiguration = videoProcessorInputFormat_ == inputDescription.Format &&
+        videoProcessorOutputFormat_ == outputDescription.Format &&
+        videoProcessorInputColorSpace_ == inputColorSpace &&
+        videoProcessorOutputColorSpace_ == outputColorSpace &&
+        videoProcessorInputWidth_ == inputDescription.Width &&
+        videoProcessorInputHeight_ == inputDescription.Height &&
+        videoProcessorOutputWidth_ == outputDescription.Width &&
+        videoProcessorOutputHeight_ == outputDescription.Height;
+    if (sameConfiguration) {
+        if (videoProcessorConfigurationFailed_) return FFFResult::NotSupported;
+        if (videoProcessor_ != nullptr && videoProcessorEnumerator_ != nullptr &&
+            videoDevice_ != nullptr && videoContext_ != nullptr)
+            return FFFResult::Success;
+    }
+
+    ReleaseVideoProcessor();
+    videoProcessorInputFormat_ = inputDescription.Format;
+    videoProcessorOutputFormat_ = outputDescription.Format;
+    videoProcessorInputColorSpace_ = inputColorSpace;
+    videoProcessorOutputColorSpace_ = outputColorSpace;
+    videoProcessorInputWidth_ = inputDescription.Width;
+    videoProcessorInputHeight_ = inputDescription.Height;
+    videoProcessorOutputWidth_ = outputDescription.Width;
+    videoProcessorOutputHeight_ = outputDescription.Height;
+    const auto fail = [this]() noexcept {
+        videoProcessorConfigurationFailed_ = true;
+        return FFFResult::NotSupported;
+    };
+
+    ComPtr<ID3D11VideoDevice> videoDevice;
+    ComPtr<ID3D11VideoContext> videoContext;
+    ComPtr<ID3D11VideoContext1> videoContext1;
+    if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&videoDevice))) ||
+        FAILED(context_->QueryInterface(IID_PPV_ARGS(&videoContext))) ||
+        FAILED(context_->QueryInterface(IID_PPV_ARGS(&videoContext1))))
+        return fail();
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+    content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    content.InputFrameRate = {60, 1};
+    content.InputWidth = inputDescription.Width;
+    content.InputHeight = inputDescription.Height;
+    content.OutputFrameRate = content.InputFrameRate;
+    content.OutputWidth = outputDescription.Width;
+    content.OutputHeight = outputDescription.Height;
+    content.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
+    ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
+    if (FAILED(videoDevice->CreateVideoProcessorEnumerator(&content, &enumerator)))
+        return fail();
+
+    UINT inputSupport = 0;
+    UINT outputSupport = 0;
+    if (FAILED(enumerator->CheckVideoProcessorFormat(inputDescription.Format, &inputSupport)) ||
+        FAILED(enumerator->CheckVideoProcessorFormat(outputDescription.Format, &outputSupport)) ||
+        (inputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0 ||
+        (outputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0)
+        return fail();
+    ComPtr<ID3D11VideoProcessorEnumerator1> enumerator1;
+    BOOL conversionSupported = FALSE;
+    if (FAILED(enumerator.As(&enumerator1)) ||
+        FAILED(enumerator1->CheckVideoProcessorFormatConversion(inputDescription.Format,
+            static_cast<DXGI_COLOR_SPACE_TYPE>(inputColorSpace), outputDescription.Format,
+            static_cast<DXGI_COLOR_SPACE_TYPE>(outputColorSpace), &conversionSupported)) ||
+        !conversionSupported)
+        return fail();
+
+    ComPtr<ID3D11VideoProcessor> processor;
+    if (FAILED(videoDevice->CreateVideoProcessor(enumerator.Get(), 0, &processor)))
+        return fail();
+    videoContext->VideoProcessorSetStreamFrameFormat(processor.Get(), 0,
+        D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+    // Driver auto-processing may silently add sharpening, noise reduction or
+    // skin-tone changes. Keep only the explicitly configured scaler and color
+    // conversion so VP output remains a reproducible rendering contract.
+    videoContext->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
+    videoContext1->VideoProcessorSetStreamColorSpace1(processor.Get(), 0,
+        static_cast<DXGI_COLOR_SPACE_TYPE>(inputColorSpace));
+    videoContext1->VideoProcessorSetOutputColorSpace1(processor.Get(),
+        static_cast<DXGI_COLOR_SPACE_TYPE>(outputColorSpace));
+    D3D11_VIDEO_COLOR background{};
+    background.RGBA.A = 1.0f;
+    videoContext->VideoProcessorSetOutputBackgroundColor(processor.Get(), FALSE, &background);
+
+    videoDevice_ = videoDevice.Detach();
+    videoContext_ = videoContext.Detach();
+    videoProcessorEnumerator_ = enumerator.Detach();
+    videoProcessor_ = processor.Detach();
+    videoProcessorConfigurationFailed_ = false;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::EnsureVideoProcessorInputSurface(
+    const std::uint32_t format) noexcept {
+    if (device_ == nullptr || sourceWidth_ == 0 || sourceHeight_ == 0)
+        return FFFResult::InvalidState;
+    if (videoProcessorRenderTexture_ != nullptr && videoProcessorRenderTarget_ != nullptr) {
+        D3D11_TEXTURE2D_DESC retained{};
+        videoProcessorRenderTexture_->GetDesc(&retained);
+        if (retained.Width == sourceWidth_ && retained.Height == sourceHeight_ &&
+            retained.Format == static_cast<DXGI_FORMAT>(format))
+            return FFFResult::Success;
+    }
+
+    ReleaseVideoProcessorInputSurface();
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = sourceWidth_;
+    description.Height = sourceHeight_;
+    description.MipLevels = description.ArraySize = 1;
+    description.Format = static_cast<DXGI_FORMAT>(format);
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_DEFAULT;
+    description.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(device_->CreateTexture2D(&description, nullptr,
+            &videoProcessorRenderTexture_)) ||
+        FAILED(device_->CreateRenderTargetView(videoProcessorRenderTexture_, nullptr,
+            &videoProcessorRenderTarget_))) {
+        ReleaseVideoProcessorInputSurface();
+        SetError("Could not create the source-size video conversion surface.");
+        return FFFResult::DeviceFailure;
+    }
+
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::RenderVideoProcessorInput() noexcept {
+    if (videoProcessorRenderTexture_ == nullptr || videoProcessorRenderTarget_ == nullptr ||
+        context_ == nullptr)
+        return FFFResult::InvalidState;
+
+    cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
+    cachedVideoSettings_.reserved = 0;
+    cachedVideoSettings_.outputWidth = static_cast<float>(sourceWidth_);
+    cachedVideoSettings_.outputHeight = static_cast<float>(sourceHeight_);
+    context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
+    context_->OMSetRenderTargets(1, &videoProcessorRenderTarget_, nullptr);
+    const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(sourceWidth_),
+        static_cast<float>(sourceHeight_), 0.0f, 1.0f};
+    context_->RSSetViewports(1, &viewport);
+    context_->IASetInputLayout(nullptr);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->VSSetShader(vertexShader_, nullptr, 0);
+    context_->PSSetShader(pixelShader_, nullptr, 0);
+    context_->PSSetConstantBuffers(0, 1, &constants_);
+    context_->PSSetSamplers(0, 1, &sampler_);
+    context_->PSSetShaderResources(0, ARRAYSIZE(sourceViews_), sourceViews_);
+    context_->Draw(3, 0);
+    ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
+    context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::DrawWithVideoProcessor(ID3D11Texture2D* inputTexture,
+    ID3D11Texture2D* outputTexture, const RECT& destination,
+    const std::uint32_t inputColorSpace, const std::uint32_t outputColorSpace) noexcept {
+    const auto ensure = EnsureVideoProcessor(inputTexture, outputTexture,
+        inputColorSpace, outputColorSpace);
+    if (ensure != FFFResult::Success) return ensure;
+
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDescription{};
+    inputDescription.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    inputDescription.Texture2D.MipSlice = 0;
+    inputDescription.Texture2D.ArraySlice = 0;
+    ComPtr<ID3D11VideoProcessorInputView> inputView;
+    if (FAILED(videoDevice_->CreateVideoProcessorInputView(inputTexture,
+        videoProcessorEnumerator_, &inputDescription, &inputView))) {
+        videoProcessorConfigurationFailed_ = true;
+        return FFFResult::NotSupported;
+    }
+
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputDescription{};
+    outputDescription.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    outputDescription.Texture2D.MipSlice = 0;
+    ComPtr<ID3D11VideoProcessorOutputView> outputView;
+    if (FAILED(videoDevice_->CreateVideoProcessorOutputView(outputTexture,
+        videoProcessorEnumerator_, &outputDescription, &outputView))) {
+        videoProcessorConfigurationFailed_ = true;
+        return FFFResult::NotSupported;
+    }
+
+    D3D11_TEXTURE2D_DESC inputTextureDescription{};
+    inputTexture->GetDesc(&inputTextureDescription);
+    const RECT source{0, 0, static_cast<LONG>(inputTextureDescription.Width),
+        static_cast<LONG>(inputTextureDescription.Height)};
+    videoContext_->VideoProcessorSetStreamSourceRect(videoProcessor_, 0, TRUE, &source);
+    videoContext_->VideoProcessorSetStreamDestRect(videoProcessor_, 0, TRUE, &destination);
+    D3D11_VIDEO_PROCESSOR_STREAM stream{};
+    stream.Enable = TRUE;
+    stream.OutputIndex = 0;
+    stream.InputFrameOrField = 0;
+    stream.pInputSurface = inputView.Get();
+    if (FAILED(videoContext_->VideoProcessorBlt(
+        videoProcessor_, outputView.Get(), 0, 1, &stream))) {
+        videoProcessorConfigurationFailed_ = true;
+        return FFFResult::NotSupported;
+    }
+    return FFFResult::Success;
+}
+
+void PlayerVideoRenderer::ReleaseVideoProcessor() noexcept {
+    if (videoProcessor_ != nullptr) { videoProcessor_->Release(); videoProcessor_ = nullptr; }
+    if (videoProcessorEnumerator_ != nullptr) {
+        videoProcessorEnumerator_->Release(); videoProcessorEnumerator_ = nullptr;
+    }
+    if (videoContext_ != nullptr) { videoContext_->Release(); videoContext_ = nullptr; }
+    if (videoDevice_ != nullptr) { videoDevice_->Release(); videoDevice_ = nullptr; }
+    videoProcessorInputFormat_ = videoProcessorOutputFormat_ = DXGI_FORMAT_UNKNOWN;
+    videoProcessorInputColorSpace_ = videoProcessorOutputColorSpace_ = DXGI_COLOR_SPACE_CUSTOM;
+    videoProcessorInputWidth_ = videoProcessorInputHeight_ = 0;
+    videoProcessorOutputWidth_ = videoProcessorOutputHeight_ = 0;
+    videoProcessorConfigurationFailed_ = false;
+}
+
+void PlayerVideoRenderer::ReleaseVideoProcessorInputSurface() noexcept {
+    if (videoProcessorRenderTarget_ != nullptr) {
+        videoProcessorRenderTarget_->Release();
+        videoProcessorRenderTarget_ = nullptr;
+    }
+    if (videoProcessorRenderTexture_ != nullptr) {
+        videoProcessorRenderTexture_->Release();
+        videoProcessorRenderTexture_ = nullptr;
+    }
 }
 
 FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
@@ -1906,12 +2229,18 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
     }
     const auto directYuv = input.layout != 0;
     if (!directYuv) {
+        const auto* sourceDescriptor = av_pix_fmt_desc_get(
+            static_cast<AVPixelFormat>(frame->format));
+        if (sourceDescriptor != nullptr && sourceDescriptor->nb_components > 0)
+            input.bitDepth = std::max(8, sourceDescriptor->comp[0].depth);
         const auto conversionStart = std::chrono::steady_clock::now();
         // CPU pixel conversion does not touch D3D state. Keeping it outside the
         // immediate-context critical section lets the 60 Hz overlay presenter
         // continue moving cached text while a 4K software frame is converted.
+        const auto convertedFormat = input.bitDepth <= 8 ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGBA64LE;
+        const auto bytesPerPixel = input.bitDepth <= 8 ? 4u : 8u;
         scaler_ = sws_getCachedContext(scaler_, frame->width, frame->height,
-            static_cast<AVPixelFormat>(frame->format), frame->width, frame->height, AV_PIX_FMT_RGBA64LE,
+            static_cast<AVPixelFormat>(frame->format), frame->width, frame->height, convertedFormat,
             SWS_BILINEAR | SWS_ACCURATE_RND, nullptr, nullptr, nullptr);
         if (scaler_ == nullptr) { SetError("FFmpeg could not create the video conversion context."); return FFFResult::FfmpegFailure; }
         const auto* sourceCoefficients = sws_getCoefficients(ToSwsColorSpace(frame->colorspace, frame->width));
@@ -1922,9 +2251,9 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
             SetError("FFmpeg could not configure the frame color matrix and range.");
             return FFFResult::FfmpegFailure;
         }
-        rgba64_.resize(static_cast<std::size_t>(width) * height * 8);
-        std::uint8_t* outputData[] = { rgba64_.data(), nullptr, nullptr, nullptr };
-        int outputLines[] = { static_cast<int>(width * 8), 0, 0, 0 };
+        convertedRgb_.resize(static_cast<std::size_t>(width) * height * bytesPerPixel);
+        std::uint8_t* outputData[] = { convertedRgb_.data(), nullptr, nullptr, nullptr };
+        int outputLines[] = { static_cast<int>(width * bytesPerPixel), 0, 0, 0 };
         if (sws_scale(scaler_, frame->data, frame->linesize, 0, frame->height, outputData, outputLines) <= 0) {
             SetError("FFmpeg could not convert the decoded video frame."); return FFFResult::FfmpegFailure;
         }
@@ -1963,11 +2292,13 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
         if (input.layout == 1)
             context_->UpdateSubresource(sourceTextures_[2], 0, nullptr, frame->data[2], frame->linesize[2], 0);
     } else {
-        context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, rgba64_.data(), width * 8, 0);
+        const auto bytesPerPixel = input.bitDepth <= 8 ? 4u : 8u;
+        context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, convertedRgb_.data(),
+            width * bytesPerPixel, 0);
     }
     ShaderSettings settings{};
     settings.colorMode = static_cast<std::uint32_t>(actualMode_);
-    settings.reserved = swapOutputBits_ >= 16 ? 1u : 0u;
+    settings.reserved = 0;
     settings.transfer = frame->color_trc == AVCOL_TRC_SMPTE2084 ? 1u : (frame->color_trc == AVCOL_TRC_ARIB_STD_B67 ? 2u : 0u);
     settings.source2020 = IsRec2020(frame) ? 1u : 0u;
     settings.sdrPeak = sdrPeakNits_;
@@ -1990,6 +2321,17 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
         settings.cOffset = 0.5f; settings.cScale = 1.0f;
     }
     YuvCoefficients(frame->colorspace, frame->width, settings.kr, settings.kb);
+    // DXGI exposes NV12/P010 processor color spaces with left chroma siting.
+    // Hardware-decoded surfaces without bitstream siting metadata follow that
+    // API convention so VP and shader A/B paths sample the same phase.
+    const auto chromaLocation = d3d11Frame && frame->chroma_location == AVCHROMA_LOC_UNSPECIFIED
+        ? AVCHROMA_LOC_LEFT : frame->chroma_location;
+    ResolveChromaOffset(frame, input, chromaLocation,
+        settings.chromaOffsetX, settings.chromaOffsetY);
+    sourceColorSpace_ = frame->colorspace;
+    sourceChromaLocation_ = chromaLocation;
+    sourceFullRange_ = IsFullRange(frame);
+    sourceInterlaced_ = (frame->flags & AV_FRAME_FLAG_INTERLACED) != 0;
     static_assert(sizeof(CachedVideoSettings) == sizeof(ShaderSettings));
     std::memcpy(&cachedVideoSettings_, &settings, sizeof(settings));
     hasCachedVideo_ = true;
@@ -2033,20 +2375,108 @@ FFFResult PlayerVideoRenderer::Redraw() noexcept {
 
 FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) noexcept {
     if (!hasCachedVideo_ || target == nullptr) return FFFResult::InvalidState;
-    cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
-    cachedVideoSettings_.reserved = swapOutputBits_ >= 16 ? 1u : 0u;
-    cachedVideoSettings_.outputWidth = static_cast<float>(swapWidth_);
-    cachedVideoSettings_.outputHeight = static_cast<float>(swapHeight_);
-    context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
-    D3D11_VIEWPORT viewport{0, 0, static_cast<float>(swapWidth_), static_cast<float>(swapHeight_), 0, 1};
-    context_->OMSetRenderTargets(1, &target, nullptr); context_->RSSetViewports(1, &viewport);
-    context_->IASetInputLayout(nullptr); context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context_->VSSetShader(vertexShader_, nullptr, 0); context_->PSSetShader(pixelShader_, nullptr, 0);
-    context_->PSSetConstantBuffers(0, 1, &constants_); context_->PSSetSamplers(0, 1, &sampler_);
-    context_->PSSetShaderResources(0, ARRAYSIZE(sourceViews_), sourceViews_); context_->Draw(3, 0);
-    ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
-    context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
+    const auto destination = CalculateVideoDestination(sourceWidth_, sourceHeight_,
+        swapWidth_, swapHeight_);
+    constexpr float black[] = {0, 0, 0, 1};
+    context_->ClearRenderTargetView(target, black);
+    ComPtr<ID3D11Resource> outputResource;
+    ComPtr<ID3D11Texture2D> outputTexture;
+    target->GetResource(&outputResource);
+    if (outputResource != nullptr) outputResource.As(&outputTexture);
+    const RECT destinationRect{static_cast<LONG>(destination.x), static_cast<LONG>(destination.y),
+        static_cast<LONG>(destination.x + destination.width),
+        static_cast<LONG>(destination.y + destination.height)};
     context_->OMSetRenderTargets(0, nullptr, nullptr);
+    if (outputTexture == nullptr) {
+        SetError("Could not resolve the playback back buffer for video processing.");
+        return FFFResult::DeviceFailure;
+    }
+
+    constexpr auto sdrRgbColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    constexpr auto hdrRgbColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    const auto outputColorSpace = actualMode_ == FFF3FPColorMode::MapToHdr
+        ? hdrRgbColorSpace : sdrRgbColorSpace;
+    if (CanUseDirectVideoProcessor()) {
+        const auto directInputColorSpace = VideoProcessorInputColorSpace(sourceColorSpace_,
+            sourceFullRange_, sourceWidth_);
+        if (DrawWithVideoProcessor(sourceTextures_[0], outputTexture.Get(), destinationRect,
+                directInputColorSpace, outputColorSpace) == FFFResult::Success) {
+            actualVideoScalingMode_.store(FFF3FPVideoScalingMode::D3D11VideoProcessor);
+            return FFFResult::Success;
+        }
+    }
+
+    D3D11_TEXTURE2D_DESC outputDescription{};
+    outputTexture->GetDesc(&outputDescription);
+    const auto surfaceResult = EnsureVideoProcessorInputSurface(outputDescription.Format);
+    if (surfaceResult != FFFResult::Success) return surfaceResult;
+    const auto conversionResult = RenderVideoProcessorInput();
+    if (conversionResult != FFFResult::Success) return conversionResult;
+    if (DrawWithVideoProcessor(videoProcessorRenderTexture_, outputTexture.Get(), destinationRect,
+            outputColorSpace, outputColorSpace) == FFFResult::Success) {
+        actualVideoScalingMode_.store(FFF3FPVideoScalingMode::D3D11VideoProcessor);
+        return FFFResult::Success;
+    }
+    SetError("The D3D11 video processor could not present the converted RGB frame.");
+    return FFFResult::NotSupported;
+}
+
+FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept {
+    if (probe.version != 1 || probe.size < sizeof(FFF3FPVideoPixelProbe))
+        return FFFResult::InvalidArgument;
+    std::lock_guard deviceLock(deviceMutex_);
+    if (!hasCachedVideo_ || swapChain_ == nullptr || device_ == nullptr || context_ == nullptr ||
+        probe.x >= swapWidth_ || probe.y >= swapHeight_)
+        return FFFResult::InvalidState;
+    std::lock_guard presentLock(presentMutex_);
+    ComPtr<ID3D11Texture2D> backBuffer;
+    ComPtr<ID3D11RenderTargetView> target;
+    const auto targetResult = AcquireBackBufferTarget(
+        backBuffer.GetAddressOf(), target.GetAddressOf());
+    if (targetResult != FFFResult::Success) return targetResult;
+    const auto drawResult = DrawCachedVideo(target.Get());
+    if (drawResult != FFFResult::Success) return drawResult;
+
+    D3D11_TEXTURE2D_DESC description{};
+    backBuffer->GetDesc(&description);
+    if (description.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        description.Format != DXGI_FORMAT_R10G10B10A2_UNORM)
+        return FFFResult::NotSupported;
+    description.Width = description.Height = 1;
+    description.MipLevels = description.ArraySize = 1;
+    description.Usage = D3D11_USAGE_STAGING;
+    description.BindFlags = 0;
+    description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    description.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(device_->CreateTexture2D(&description, nullptr, &staging)))
+        return FFFResult::DeviceFailure;
+    const D3D11_BOX source{probe.x, probe.y, 0, probe.x + 1, probe.y + 1, 1};
+    context_->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, backBuffer.Get(), 0, &source);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+        return FFFResult::DeviceFailure;
+    if (description.Format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+        const auto* bgra = static_cast<const std::uint8_t*>(mapped.pData);
+        constexpr float scale = 1.0f / 255.0f;
+        probe.red = bgra[2] * scale;
+        probe.green = bgra[1] * scale;
+        probe.blue = bgra[0] * scale;
+        probe.alpha = bgra[3] * scale;
+    } else if (description.Format == DXGI_FORMAT_R10G10B10A2_UNORM) {
+        std::uint32_t packed = 0;
+        std::memcpy(&packed, mapped.pData, sizeof(packed));
+        constexpr float rgbScale = 1.0f / 1023.0f;
+        probe.red = static_cast<float>(packed & 0x3ffu) * rgbScale;
+        probe.green = static_cast<float>((packed >> 10) & 0x3ffu) * rgbScale;
+        probe.blue = static_cast<float>((packed >> 20) & 0x3ffu) * rgbScale;
+        probe.alpha = static_cast<float>((packed >> 30) & 0x3u) / 3.0f;
+    }
+    context_->Unmap(staging.Get(), 0);
+    probe.scalingMode = actualVideoScalingMode_.load();
+    probe.outputBitDepth = swapOutputBits_;
+    probe.colorMode = actualMode_;
+    probe.reserved = 0;
     return FFFResult::Success;
 }
 
@@ -2139,6 +2569,8 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
+    ReleaseVideoProcessor();
+    ReleaseVideoProcessorInputSurface();
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
         if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
@@ -2147,9 +2579,13 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     sourceInputLayout_ = UINT32_MAX;
     sourceBitDepth_ = 0;
     sourceChromaWidthShift_ = sourceChromaHeightShift_ = 0;
+    sourceColorSpace_ = AVCOL_SPC_UNSPECIFIED;
+    sourceChromaLocation_ = AVCHROMA_LOC_UNSPECIFIED;
+    sourceFullRange_ = sourceInterlaced_ = false;
     sourcePeakNits_ = sdrPeakNits_;
-    rgba64_.clear(); rgba64_.shrink_to_fit();
+    convertedRgb_.clear(); convertedRgb_.shrink_to_fit();
     hasCachedVideo_ = false; sourceExternal_ = false;
+    actualVideoScalingMode_.store(FFF3FPVideoScalingMode::D3D11VideoProcessor);
     videoGeneration_.store(0); presentedVideoGeneration_.store(0);
     presentedVideoFrames_.store(0); coalescedVideoFrames_.store(0);
     swapChainPresents_.store(0); presentWait100ns_.store(0);
@@ -2174,6 +2610,8 @@ void PlayerVideoRenderer::Close() noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
+    ReleaseVideoProcessor();
+    ReleaseVideoProcessorInputSurface();
     ReleaseTimedTextResources();
     if (writeFactory_ != nullptr) { writeFactory_->Release(); writeFactory_ = nullptr; }
     if (d2dFactory_ != nullptr) { d2dFactory_->Release(); d2dFactory_ = nullptr; }
@@ -2203,7 +2641,7 @@ void PlayerVideoRenderer::Close() noexcept {
     if (vertexShader_ != nullptr) { vertexShader_->Release(); vertexShader_ = nullptr; }
     if (context_ != nullptr) { context_->Release(); context_ = nullptr; }
     if (device_ != nullptr) { device_->Release(); device_ = nullptr; }
-    rgba64_.clear(); swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
+    convertedRgb_.clear(); swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
     swapHdr_ = false; swapOutputBits_ = 8;
     sourceInputLayout_ = UINT32_MAX; sourceBitDepth_ = 0;
     sourceChromaWidthShift_ = sourceChromaHeightShift_ = 0;
@@ -2220,6 +2658,9 @@ std::uint64_t PlayerVideoRenderer::SoftwareConvert100ns() const noexcept { retur
 std::uint32_t PlayerVideoRenderer::OutputBitDepth() const noexcept {
     std::lock_guard lock(deviceMutex_);
     return swapOutputBits_;
+}
+FFF3FPVideoScalingMode PlayerVideoRenderer::ActualVideoScalingMode() const noexcept {
+    return actualVideoScalingMode_.load();
 }
 std::string PlayerVideoRenderer::FallbackReason() const { return fallbackReason_; }
 std::string PlayerVideoRenderer::LastError() const { std::lock_guard lock(errorMutex_); return lastError_; }

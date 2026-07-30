@@ -63,6 +63,11 @@ FFFResult FFF3FP_SetTimedTextLayer(const FFF3FPHandle player,
         : FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_GetSnapshot(const FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept { return player && snapshot ? static_cast<PlayerSession*>(player)->GetSnapshot(*snapshot) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_ReadVideoPixel(const FFF3FPHandle player,
+    FFF3FPVideoPixelProbe* probe) noexcept {
+    return player && probe ? static_cast<PlayerSession*>(player)->ReadVideoPixel(*probe) :
+        FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_GetAudioPeakLevels(const FFF3FPHandle player,
     FFF3FPAudioPeakLevels* levels) noexcept {
     return player && levels ? static_cast<PlayerSession*>(player)->GetAudioPeakLevels(*levels)

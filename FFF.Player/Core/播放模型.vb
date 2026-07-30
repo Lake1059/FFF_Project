@@ -12,6 +12,11 @@ Public Enum 色彩输出模式 As UInteger
     峰值映射HDR = 2
 End Enum
 
+Public Enum 视频缩放模式 As UInteger
+    着色器 = 0
+    D3D11视频处理器 = 1
+End Enum
+
 Public Enum 播放状态 As UInteger
     空闲 = 0
     正在打开 = 1
@@ -57,6 +62,26 @@ Public NotInheritable Class 播放器配置
     End Sub
 End Class
 
+Public Structure 视频输出原始像素
+    Friend Sub New(值 As 原生视频像素探针)
+        红 = 值.红
+        绿 = 值.绿
+        蓝 = 值.蓝
+        Alpha = 值.Alpha
+        缩放模式 = CType(值.视频缩放模式, 视频缩放模式)
+        输出位深度 = CInt(值.输出位深度)
+        色彩模式 = CType(值.色彩模式, 色彩输出模式)
+    End Sub
+
+    Public ReadOnly Property 红 As Single
+    Public ReadOnly Property 绿 As Single
+    Public ReadOnly Property 蓝 As Single
+    Public ReadOnly Property Alpha As Single
+    Public ReadOnly Property 缩放模式 As 视频缩放模式
+    Public ReadOnly Property 输出位深度 As Integer
+    Public ReadOnly Property 色彩模式 As 色彩输出模式
+End Structure
+
 Public NotInheritable Class 播放器快照
     Friend Sub New(值 As 原生播放器快照)
         状态 = CType(值.状态, 播放状态)
@@ -99,6 +124,7 @@ Public NotInheritable Class 播放器快照
         视频实时比特率 = 值.视频实时比特率
         音频实时比特率 = 值.音频实时比特率
         视频输出位深度 = CInt(值.视频输出位深度)
+        视频缩放 = CType(值.视频缩放模式, 视频缩放模式)
         时间轴代次 = 值.时间轴代次
     End Sub
 
@@ -142,6 +168,7 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 视频实时比特率 As ULong
     Public ReadOnly Property 音频实时比特率 As ULong
     Public ReadOnly Property 视频输出位深度 As Integer
+    Public ReadOnly Property 视频缩放 As 视频缩放模式
     Public ReadOnly Property 时间轴代次 As ULong
 End Class
 

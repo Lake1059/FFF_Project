@@ -74,8 +74,24 @@ Friend Structure 原生播放器快照
     Public 视频实时比特率 As ULong
     Public 音频实时比特率 As ULong
     Public 视频输出位深度 As UInteger
-    Public 保留2 As UInteger
+    Public 视频缩放模式 As UInteger
     Public 时间轴代次 As ULong
+End Structure
+
+<StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生视频像素探针
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public X As UInteger
+    Public Y As UInteger
+    Public 红 As Single
+    Public 绿 As Single
+    Public 蓝 As Single
+    Public Alpha As Single
+    Public 视频缩放模式 As UInteger
+    Public 输出位深度 As UInteger
+    Public 色彩模式 As UInteger
+    Public 保留 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -329,6 +345,9 @@ Friend Module 播放器原生接口
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetSnapshot(播放器 As 播放器原生句柄, ByRef 快照 As 原生播放器快照) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_ReadVideoPixel(播放器 As 播放器原生句柄, ByRef 探针 As 原生视频像素探针) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetAudioPeakLevels(播放器 As 播放器原生句柄, ByRef 峰值 As 原生音频峰值) As 原生播放器结果

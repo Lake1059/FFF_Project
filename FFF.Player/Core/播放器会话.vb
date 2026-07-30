@@ -1,5 +1,6 @@
 Imports System.Runtime.InteropServices
 Imports System.Collections.Concurrent
+Imports System.Drawing
 Imports System.Text.Json
 Imports System.Threading
 
@@ -314,6 +315,24 @@ Public NotInheritable Class 播放器会话
             Return New 播放器快照(值)
         End Get
     End Property
+
+    Public Function 读取视频输出原始像素(X As Integer, Y As Integer) As 视频输出原始像素
+        If X < 0 Then Throw New ArgumentOutOfRangeException(NameOf(X))
+        If Y < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Y))
+        Dim 值 As New 原生视频像素探针 With {
+            .大小 = CUInt(Marshal.SizeOf(Of 原生视频像素探针)()),
+            .版本 = 1UI, .X = CUInt(X), .Y = CUInt(Y)}
+        检查结果(播放器原生接口.FFF3FP_ReadVideoPixel(取得句柄(), 值))
+        Return New 视频输出原始像素(值)
+    End Function
+
+    Public Function 读取视频输出像素(X As Integer, Y As Integer) As Color
+        Dim 值 = 读取视频输出原始像素(X, Y)
+        Dim 转换 As Func(Of Single, Integer) =
+            Function(channel) CInt(Math.Round(Math.Clamp(channel, 0.0F, 1.0F) * 255.0F))
+        Return Color.FromArgb(转换(值.Alpha), 转换(值.红),
+                              转换(值.绿), 转换(值.蓝))
+    End Function
 
     Public Function 读取音频峰值() As Single()
         Dim 值 As New 原生音频峰值 With {
