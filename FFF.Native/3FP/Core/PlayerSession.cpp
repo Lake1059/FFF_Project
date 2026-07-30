@@ -36,6 +36,85 @@ constexpr std::size_t MaximumPendingVideoPacketBytes = 16 * 1024 * 1024;
 constexpr std::size_t MaximumPendingAudioPackets = 512;
 constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
 
+bool ReadLeb128(const std::uint8_t* data, const std::size_t size,
+    std::size_t& offset, std::uint64_t& value) noexcept {
+    value = 0;
+    for (unsigned shift = 0; shift < 56 && offset < size; shift += 7) {
+        const auto current = data[offset++];
+        value |= static_cast<std::uint64_t>(current & 0x7f) << shift;
+        if ((current & 0x80) == 0) return true;
+    }
+    return false;
+}
+
+void FilterAv1HardwareTimecodeMetadata(const AVCodecContext* decoder,
+    AVPacket* packet) noexcept {
+    if (decoder == nullptr || packet == nullptr || packet->data == nullptr || packet->size <= 0 ||
+        decoder->codec_id != AV_CODEC_ID_AV1 || decoder->hw_device_ctx == nullptr) return;
+
+    auto* source = packet->data;
+    const auto sourceSize = static_cast<std::size_t>(packet->size);
+    const auto readObu = [&source, sourceSize](std::size_t& offset, std::size_t& obuStart,
+        std::size_t& obuEnd, bool& remove) noexcept {
+        obuStart = offset;
+        const auto header = source[offset++];
+        if ((header & 0x81) != 0) return false;
+        const auto type = static_cast<unsigned>((header >> 3) & 0x0f);
+        const auto hasExtension = (header & 0x04) != 0;
+        const auto hasSize = (header & 0x02) != 0;
+        if (hasExtension) {
+            if (offset >= sourceSize) return false;
+            ++offset;
+        }
+        if (!hasSize) return false;
+        std::uint64_t payloadSize = 0;
+        if (!ReadLeb128(source, sourceSize, offset, payloadSize) ||
+            payloadSize > sourceSize - offset) return false;
+        const auto payloadStart = offset;
+        obuEnd = offset + static_cast<std::size_t>(payloadSize);
+        remove = false;
+        if (type == 5 && payloadSize > 0) {
+            std::size_t metadataOffset = payloadStart;
+            std::uint64_t metadataType = 0;
+            // NVIDIA's AV1 encoder can emit metadata_type=5 timecode OBUs that
+            // libdav1d tolerates but FFmpeg's hardware parsers reject. Timecode
+            // is not needed for presentation; retain every other metadata type,
+            // including HDR CLL/MDCV and ITU-T T.35 dynamic metadata.
+            remove = ReadLeb128(source, obuEnd, metadataOffset, metadataType) && metadataType == 5;
+        }
+        offset = obuEnd;
+        return true;
+    };
+
+    std::size_t read = 0;
+    std::size_t filteredSize = 0;
+    bool removedTimecode = false;
+    while (read < sourceSize) {
+        std::size_t obuStart = 0;
+        std::size_t obuEnd = 0;
+        bool remove = false;
+        if (!readObu(read, obuStart, obuEnd, remove)) return;
+        if (remove) removedTimecode = true;
+        else filteredSize += obuEnd - obuStart;
+    }
+    if (!removedTimecode || filteredSize == 0 || filteredSize > static_cast<std::size_t>(INT_MAX)) return;
+    if (av_packet_make_writable(packet) < 0) return;
+    source = packet->data;
+    read = 0;
+    std::size_t write = 0;
+    while (read < sourceSize) {
+        std::size_t obuStart = 0;
+        std::size_t obuEnd = 0;
+        bool remove = false;
+        if (!readObu(read, obuStart, obuEnd, remove)) return;
+        if (remove) continue;
+        const auto obuSize = obuEnd - obuStart;
+        std::memmove(packet->data + write, source + obuStart, obuSize);
+        write += obuSize;
+    }
+    av_shrink_packet(packet, static_cast<int>(filteredSize));
+}
+
 std::uint64_t TimedTextContentKey(const std::uint64_t contentId, const char* text,
     const char* fontFamily) noexcept {
     std::uint64_t hash = 1469598103934665603ull;
@@ -303,8 +382,29 @@ FFFResult PlayerSession::Open(const char* path) noexcept {
     Emit(FFF3FPEvent::StateChanged, "{\"state\":1}");
     Enqueue([this, value = std::move(normalized)] { DoOpen(value); }); return FFFResult::Success;
 }
-FFFResult PlayerSession::Play() noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this] { const auto current = state_.load(); if (current == FFF3FPState::Ended) DoSeek(0); ResetClock(snapshot_.position100ns); if (audioRenderer_) audioRenderer_->SetPaused(false); SetState(FFF3FPState::Playing, "play"); }); return FFFResult::Success; }
-FFFResult PlayerSession::Pause() noexcept { if (state_.load() != FFF3FPState::Playing) return FFFResult::InvalidState; Enqueue([this] { snapshot_.position100ns = ClockPosition(); if (audioRenderer_) audioRenderer_->SetPaused(true); SetState(FFF3FPState::Paused, "pause"); }); return FFFResult::Success; }
+FFFResult PlayerSession::Play() noexcept {
+    const auto state = state_.load();
+    if (state != FFF3FPState::Ready && state != FFF3FPState::Paused &&
+        state != FFF3FPState::Ended) return FFFResult::InvalidState;
+    Enqueue([this] {
+        const auto current = state_.load();
+        if (current == FFF3FPState::Ended) DoSeek(0);
+        if (ResumeAudioRenderer() != FFFResult::Success) return;
+        ResetClock(snapshot_.position100ns);
+        if (audioRenderer_) audioRenderer_->SetPaused(false);
+        SetState(FFF3FPState::Playing, "play");
+    });
+    return FFFResult::Success;
+}
+FFFResult PlayerSession::Pause() noexcept {
+    if (state_.load() != FFF3FPState::Playing) return FFFResult::InvalidState;
+    Enqueue([this] {
+        snapshot_.position100ns = ClockPosition();
+        SuspendAudioRenderer(true);
+        SetState(FFF3FPState::Paused, "pause");
+    });
+    return FFFResult::Success;
+}
 FFFResult PlayerSession::Stop() noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this] { DoClose(FFF3FPState::Idle); }); return FFFResult::Success; }
 FFFResult PlayerSession::Close() noexcept { Enqueue([this] { DoClose(); }); return FFFResult::Success; }
 FFFResult PlayerSession::Seek(const std::int64_t value) noexcept { if (value < 0) return FFFResult::InvalidArgument; const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, value] { DoSeek(value); if (state_.load() != FFF3FPState::Playing) DecodeUntilSeekTarget(); Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":" + std::to_string(snapshot_.position100ns) + "}"); }); return FFFResult::Success; }
@@ -428,7 +528,7 @@ void PlayerSession::ProcessStep() noexcept {
 
 void PlayerSession::DoStepFrame(const std::int32_t direction) {
     if (format_ == nullptr || videoStream_ < 0 || videoDecoder_ == nullptr) return;
-    if (audioRenderer_) audioRenderer_->SetPaused(true);
+    SuspendAudioRenderer(true);
     auto* stream = format_->streams[videoStream_];
     const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
     const auto originalPosition = snapshot_.position100ns;
@@ -520,7 +620,7 @@ FFFResult PlayerSession::StepKeyframe(const std::int32_t direction) noexcept {
 
 void PlayerSession::DoStepKeyframe(const std::int32_t direction) {
     if (format_ == nullptr || videoStream_ < 0 || videoDecoder_ == nullptr) return;
-    if (audioRenderer_) audioRenderer_->SetPaused(true);
+    SuspendAudioRenderer(true);
     if ((direction < 0 && snapshot_.position100ns <= 0) ||
         (direction > 0 && snapshot_.duration100ns > 0 &&
             snapshot_.position100ns >= snapshot_.duration100ns)) {
@@ -678,6 +778,59 @@ FFFResult PlayerSession::RecreateAudioRenderer(const std::wstring& endpointId,
     }
 }
 
+void PlayerSession::SuspendAudioRenderer(const bool releaseExclusive) noexcept {
+    if (!audioRenderer_) return;
+    audioRenderer_->SetPaused(true);
+    if (releaseExclusive && audioExclusive_) {
+        audioRenderer_->Stop();
+        audioRenderer_.reset();
+        audioRuntimeState_.ClearValues();
+    }
+}
+
+FFFResult PlayerSession::ResumeAudioRenderer() noexcept {
+    if (audioRenderer_ || (audioDecoder_ == nullptr && externalAudioDecoder_ == nullptr))
+        return FFFResult::Success;
+    const auto position = std::max<std::int64_t>(0, snapshot_.position100ns);
+    std::string error;
+    auto result = RecreateAudioRenderer(audioEndpointId_, audioExclusive_, true, error);
+    auto exclusiveError = std::string{};
+    bool fellBackToShared = false;
+    if (result != FFFResult::Success && audioExclusive_) {
+        exclusiveError = std::move(error);
+        result = RecreateAudioRenderer(audioEndpointId_, false, true, error);
+        if (result == FFFResult::Success) {
+            audioExclusive_ = false;
+            fellBackToShared = true;
+        }
+    }
+    if (result != FFFResult::Success) {
+        // A system-level exclusive owner also blocks shared Initialize. Keep
+        // the media session playable on its video/QPC clock and remember the
+        // user's effective mode as shared instead of failing the whole file.
+        audioExclusive_ = false;
+        const auto reason = error.empty()
+            ? std::string("The Windows audio output device is currently unavailable.")
+            : std::move(error);
+        RebuildMediaInfo();
+        Emit(FFF3FPEvent::DeviceChanged,
+            "{\"type\":\"audio\",\"exclusive\":false,\"audioUnavailable\":true,\"reason\":\"" +
+            EscapeJson(reason + " The media continued in shared mode without audio output.") + "\"}");
+        return FFFResult::Success;
+    }
+    DoSeek(position);
+    RebuildMediaInfo();
+    if (fellBackToShared) {
+        const auto reason = exclusiveError.empty()
+            ? std::string("The audio endpoint is already in use or rejected exclusive mode.")
+            : std::move(exclusiveError);
+        Emit(FFF3FPEvent::DeviceChanged,
+            "{\"type\":\"audio\",\"exclusive\":false,\"exclusiveFallback\":true,\"reason\":\"" +
+            EscapeJson(reason + " Playback continued in shared mode.") + "\"}");
+    }
+    return FFFResult::Success;
+}
+
 bool PlayerSession::RecoverAudioDevice() noexcept {
     if (!audioRenderer_ || !audioRenderer_->RestartRequested()) return false;
     const auto paused = snapshot_.state != FFF3FPState::Playing;
@@ -733,7 +886,7 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
             stream->time_base, AVRational{1, static_cast<int>(TicksPerSecond)}));
     }
     const auto reason = videoRenderer_.LastError();
-    if (audioRenderer_) audioRenderer_->SetPaused(true);
+    SuspendAudioRenderer(false);
 
     ClearVideoQueue();
     if (videoDecodeFrame_ != nullptr) av_frame_unref(videoDecodeFrame_);
@@ -867,8 +1020,19 @@ FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
         state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState;
     Enqueue([this, exclusive] {
         if (audioExclusive_ == exclusive) {
+            if (exclusive && snapshot_.state != FFF3FPState::Playing)
+                SuspendAudioRenderer(true);
             Emit(FFF3FPEvent::DeviceChanged, std::string("{\"type\":\"audio\",\"exclusive\":") +
                 (exclusive ? "true}" : "false}"));
+            return;
+        }
+        if (exclusive && snapshot_.state != FFF3FPState::Playing) {
+            // Exclusive mode is a preference while paused. Do not reserve the
+            // endpoint until playback actually starts.
+            audioExclusive_ = true;
+            SuspendAudioRenderer(true);
+            Emit(FFF3FPEvent::DeviceChanged,
+                "{\"type\":\"audio\",\"exclusive\":true,\"releasedWhilePaused\":true}");
             return;
         }
         if (!audioRenderer_) {
@@ -895,10 +1059,19 @@ FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
                     std::move(restoreError), "audio-exclusive-mode");
                 return;
             }
-            Emit(FFF3FPEvent::DeviceChanged, std::string("{\"type\":\"audio\",\"exclusive\":") +
-                (audioExclusive_ ? "true}" : "false}"));
-            ReportError(result, message.empty() ? "The selected endpoint rejected exclusive mode." : message,
-                "audio-exclusive-mode");
+            if (exclusive) {
+                const auto reason = message.empty()
+                    ? std::string("The selected endpoint rejected exclusive mode.")
+                    : std::move(message);
+                Emit(FFF3FPEvent::DeviceChanged,
+                    "{\"type\":\"audio\",\"exclusive\":false,\"exclusiveFallback\":true,\"reason\":\"" +
+                    EscapeJson(reason + " Playback continued in shared mode.") + "\"}");
+            } else {
+                Emit(FFF3FPEvent::DeviceChanged, std::string("{\"type\":\"audio\",\"exclusive\":") +
+                    (audioExclusive_ ? "true}" : "false}"));
+                ReportError(result, message.empty() ? "The selected endpoint rejected shared mode." : message,
+                    "audio-exclusive-mode");
+            }
             return;
         }
         audioExclusive_ = exclusive;
@@ -1305,12 +1478,14 @@ void PlayerSession::DoOpen(std::string path) noexcept {
             snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
     }
     if (audioStream_ >= 0 && OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success) audioStream_ = -1;
-    if (audioStream_ >= 0) {
+    if (audioStream_ >= 0 && !audioExclusive_) {
         std::string audioError;
         const auto result = RecreateAudioRenderer(audioEndpointId_, audioExclusive_, true, audioError);
         if (result != FFFResult::Success) {
-            Fail(result, std::move(audioError), "open-audio");
-            return;
+            // The endpoint may currently be held in system-level exclusive
+            // mode. Opening the media must still succeed; Play retries the
+            // shared renderer and publishes a user-facing availability notice.
+            audioRenderer_.reset();
         }
     }
     if (videoStream_ < 0 && coverArtStream_ >= 0) {
@@ -1409,6 +1584,7 @@ FFFResult PlayerSession::ProbeHardwareVideo(AVFormatContext* owner, AVCodecConte
     while (videoPacketCount < 512 && (readResult = av_read_frame(owner, packet)) >= 0) {
         if (packet->stream_index != streamIndex) { av_packet_unref(packet); continue; }
         ++videoPacketCount;
+        FilterAv1HardwareTimecodeMetadata(decoder, packet);
         auto decodeResult = avcodec_send_packet(decoder, packet);
         av_packet_unref(packet);
         if (decodeResult < 0 && decodeResult != AVERROR(EAGAIN)) break;
@@ -1461,6 +1637,18 @@ void PlayerSession::PumpPlayback() noexcept {
     if (format_ == nullptr) { SetState(FFF3FPState::Failed); return; }
     UpdateBitRateForPosition(ClockPosition());
     if (PumpVideoPresentation()) return;
+    if (videoStream_ < 0 && audioStream_ >= 0 && !audioRenderer_) {
+        // Windows can block both shared and exclusive initialization while a
+        // different process owns the endpoint. Keep audio-only media on its
+        // normal wall clock instead of draining the entire file immediately.
+        snapshot_.position100ns = std::min(ClockPosition(), snapshot_.duration100ns);
+        PublishSnapshot();
+        if (snapshot_.duration100ns > 0 && snapshot_.position100ns >= snapshot_.duration100ns)
+            FlushAtEnd();
+        else
+            Sleep(10);
+        return;
+    }
     const auto audioBuffered = audioRenderer_ ? audioRenderer_->Buffered100ns() : 0;
     const auto videoSaturated = [&] {
         if (videoFrameQueue_.empty()) return false;
@@ -1569,6 +1757,7 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
         }
         return receiveResult;
     };
+    if (video) FilterAv1HardwareTimecodeMetadata(decoder, packet);
     auto result = avcodec_send_packet(decoder, packet);
     if (result == AVERROR(EAGAIN)) {
         const auto receiveResult = receiveFrames();
@@ -2063,7 +2252,7 @@ void PlayerSession::FlushAtEnd() noexcept {
     snapshot_.duration100ns = std::max(snapshot_.duration100ns, endPosition);
     snapshot_.position100ns = snapshot_.duration100ns;
     RebuildMediaInfo();
-    if (audioRenderer_) audioRenderer_->SetPaused(true);
+    SuspendAudioRenderer(true);
     SetState(FFF3FPState::Ended, "end"); Emit(FFF3FPEvent::PlaybackEnded, "{}");
 }
 
@@ -2168,7 +2357,7 @@ void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t req
     AVCodecContext* replacementDecoder = nullptr;
     const auto result = OpenDecoder(replacementFormat, index, false, &replacementDecoder);
     if (result != FFFResult::Success) { avformat_close_input(&replacementFormat); ReportError(result, "Could not open the external audio stream.", "external-audio"); return; }
-    if (!audioRenderer_) {
+    if (!audioRenderer_ && (!audioExclusive_ || snapshot_.state == FFF3FPState::Playing)) {
         std::string audioError;
         const auto audioResult = RecreateAudioRenderer(audioEndpointId_, audioExclusive_,
             snapshot_.state != FFF3FPState::Playing, audioError);
@@ -2479,7 +2668,7 @@ void PlayerSession::SetState(const FFF3FPState state, const char* operation) noe
 }
 
 void PlayerSession::Fail(const FFFResult result, std::string message, const char* operation) noexcept {
-    try { if (audioRenderer_) audioRenderer_->SetPaused(true); snapshot_.state = FFF3FPState::Failed; state_.store(FFF3FPState::Failed); PublishSnapshot();
+    try { SuspendAudioRenderer(true); snapshot_.state = FFF3FPState::Failed; state_.store(FFF3FPState::Failed); PublishSnapshot();
         ReportError(result, std::move(message), operation); }
     catch (...) {}
 }

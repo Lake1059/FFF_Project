@@ -1,5 +1,3 @@
-Imports System.Diagnostics
-
 ''' <summary>播放器的实时诊断与完整媒体元数据视图。</summary>
 Public Class Form媒体信息
     Private ReadOnly 获取媒体 As Func(Of 媒体信息)

@@ -1043,7 +1043,11 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
     if (swapChain_ == nullptr || (hdr == swapHdr_ && formatBits == swapOutputBits_)) return FFFResult::Success;
     if (context_ != nullptr) { context_->ClearState(); context_->Flush(); }
     ReleaseTimedTextResources();
-    if (hdr != swapHdr_) {
+    // Enter HDR by resizing the existing flip chain. Replacing an actively
+    // presented HWND chain can leave the first PQ Present waiting indefinitely
+    // in DWM. Leaving HDR still requires a fresh chain so the window returns to
+    // DXGI's implicit SDR desktop contract instead of retaining Advanced Color.
+    if (!hdr && swapHdr_) {
         const auto width = std::max(1u, swapWidth_);
         const auto height = std::max(1u, swapHeight_);
         std::lock_guard presentLock(presentMutex_);
@@ -1376,19 +1380,17 @@ FFFResult PlayerVideoRenderer::EnsureVideoProcessorInputSurface(
     return FFFResult::Success;
 }
 
-FFFResult PlayerVideoRenderer::RenderVideoProcessorInput() noexcept {
-    if (videoProcessorRenderTexture_ == nullptr || videoProcessorRenderTarget_ == nullptr ||
-        context_ == nullptr)
-        return FFFResult::InvalidState;
-
+FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
+    const float x, const float y, const float width, const float height) noexcept {
+    if (target == nullptr || context_ == nullptr || width <= 0.0f || height <= 0.0f)
+        return FFFResult::InvalidArgument;
     cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
     cachedVideoSettings_.reserved = 0;
-    cachedVideoSettings_.outputWidth = static_cast<float>(sourceWidth_);
-    cachedVideoSettings_.outputHeight = static_cast<float>(sourceHeight_);
+    cachedVideoSettings_.outputWidth = width;
+    cachedVideoSettings_.outputHeight = height;
     context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
-    context_->OMSetRenderTargets(1, &videoProcessorRenderTarget_, nullptr);
-    const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(sourceWidth_),
-        static_cast<float>(sourceHeight_), 0.0f, 1.0f};
+    context_->OMSetRenderTargets(1, &target, nullptr);
+    const D3D11_VIEWPORT viewport{x, y, width, height, 0.0f, 1.0f};
     context_->RSSetViewports(1, &viewport);
     context_->IASetInputLayout(nullptr);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1402,6 +1404,14 @@ FFFResult PlayerVideoRenderer::RenderVideoProcessorInput() noexcept {
     context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::RenderVideoProcessorInput() noexcept {
+    if (videoProcessorRenderTexture_ == nullptr || videoProcessorRenderTarget_ == nullptr ||
+        context_ == nullptr)
+        return FFFResult::InvalidState;
+    return DrawWithShader(videoProcessorRenderTarget_, 0.0f, 0.0f,
+        static_cast<float>(sourceWidth_), static_cast<float>(sourceHeight_));
 }
 
 FFFResult PlayerVideoRenderer::DrawWithVideoProcessor(ID3D11Texture2D* inputTexture,
@@ -2402,6 +2412,18 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         swapWidth_, swapHeight_);
     constexpr float black[] = {0, 0, 0, 1};
     context_->ClearRenderTargetView(target, black);
+    // Some drivers accept the PQ RGB Video Processor conversion but never
+    // complete the queued work, leaving Present blocked while audio continues.
+    // The color shader already produces final Rec.2020/PQ values, so write them
+    // directly to the 10-bit HDR back buffer and scale with the shader sampler.
+    if (actualMode_ == FFF3FPColorMode::MapToHdr) {
+        const auto result = DrawWithShader(target, static_cast<float>(destination.x),
+            static_cast<float>(destination.y), static_cast<float>(destination.width),
+            static_cast<float>(destination.height));
+        if (result == FFFResult::Success)
+            actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
+        return result;
+    }
     ComPtr<ID3D11Resource> outputResource;
     ComPtr<ID3D11Texture2D> outputTexture;
     target->GetResource(&outputResource);
@@ -2558,6 +2580,13 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     deviceLock.unlock();
     const auto result = PresentCurrentFrame(retainedChain.Get(), generation);
     if (result != FFFResult::Success) return result;
+    // A format/color-space switch destroys and recreates the flip-model chain.
+    // Drop every reference to the old chain and its back buffer before handing
+    // presentMutex_ to the reconfiguration path. Otherwise CreateSwapChainForHwnd
+    // can wait for these references while this thread waits for deviceMutex_.
+    backBufferTarget.Reset();
+    backBuffer.Reset();
+    retainedChain.Reset();
     // Empty layers no longer need full-size GPU surfaces. Release them after the
     // clearing composite reached the display, preserving the submitted sequence.
     presentLock.unlock();

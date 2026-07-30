@@ -379,7 +379,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             If(String.IsNullOrEmpty(格式), String.Empty, $"格式 {格式}"),
             If(输出大小.Width > 0 AndAlso 输出大小.Height > 0,
                $"分辨率 {输出大小.Width}x{输出大小.Height}", String.Empty),
-            $"色彩模式 {色彩模式文本(快照.实际色彩模式)}")
+            $"色彩模式 {色彩模式文本(快照.实际色彩模式, 快照.是HDR源)}")
     End Function
 
     Private Function 视频渲染(快照 As 播放器快照) As String
@@ -441,11 +441,11 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return $"{CInt(Math.Floor(值.TotalHours)):00}:{值.Minutes:00}:{值.Seconds:00}"
     End Function
 
-    Private Shared Function 色彩模式文本(模式 As 色彩输出模式) As String
+    Private Shared Function 色彩模式文本(模式 As 色彩输出模式, 是HDR源 As Boolean) As String
         Select Case 模式
             Case 色彩输出模式.峰值映射HDR : Return "真实 HDR 高亮"
             Case 色彩输出模式.原始HDR按SDR呈现 : Return "原始 HDR 灰"
-            Case Else : Return "映射 SDR"
+            Case Else : Return If(是HDR源, "映射 SDR", "SDR")
         End Select
     End Function
 

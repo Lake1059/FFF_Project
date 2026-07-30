@@ -38,9 +38,10 @@ ICC、HDR 校准和 SDR 亮度映射只由 DWM 在窗口合成时应用一次。
 RGB10A2 的原始通道值。它用于将渲染器数字输出与 ICC、DWM 及屏幕截图
 完全分离；窗口化 `Present` 仍必须遵守 Windows 显示色彩契约，后缓冲回读不是物理显示校准。
 
-视频输出统一使用 D3D11 Video Processor：兼容的 D3D11VA NV12/P010 SDR 表面直接进入 VP；
-RGB 图片、CPU 解码及需要 HDR tone mapping 的帧先由 shader 在源分辨率完成格式、色度或色彩处理，
-再以 RGB 表面进入 VP。空间缩放只发生在 VP 中，不提供 Shader 缩放回退；VP 不可用时明确报错。
+SDR 视频输出统一使用 D3D11 Video Processor：兼容的 D3D11VA NV12/P010 表面直接进入 VP；
+RGB 图片、CPU 解码及需要 HDR→SDR tone mapping 的帧先由 shader 在源分辨率完成格式、色度或色彩处理，
+再以 RGB 表面进入 VP。真实 HDR 由 shader 直接写入 10-bit PQ 后缓冲，避开部分驱动在 PQ RGB VP
+转换后无法完成 Present 的问题；该路径使用双线性采样保持宽高比缩放。
 
 `播放列表` 负责同目录相似命名扫描、自然排序和本地 M3U8 导入导出；
 `播放列表控制器` 可把播放结束事件连接到顺序、循环或随机播放策略。字幕流会出现在
@@ -102,6 +103,7 @@ UI 应把自己的 `SynchronizationContext` 写入 `播放器配置.事件同步
 FFF.Player.Tests --audio-latency-regression
 FFF.Player.Tests --audio-cover-regression <带内嵌封面的纯音频>
 FFF.Player.Tests --color-regression <SDR视频> <HDR视频>
+FFF.Player.Tests --hdr-switch-regression <HDR视频>
 FFF.Player.Tests --performance-regression <SDR视频> <HDR视频>
 FFF.Player.Tests --targeted-regression <视频> <字幕.sup>
 FFF.Player.Tests --vcb-ass-regression <视频> <字幕.ass>
@@ -114,7 +116,8 @@ FFF.Player.Tests --timed-text-regression
 
 音频延迟回归自生成双声道 PCM，在完全无画面条件下覆盖共享/独占时钟、缓冲、欠载和每声道响度；
 封面回归先无窗口打开纯音频，再绑定一个不显示的 HWND，只检查封面流、尺寸和交换链呈现计数。
-色彩回归覆盖 SDR 码值直通、PQ 数值映射和 HDR→SDR 换片；性能回归固定覆盖 CPU 解码、呈现、
+色彩回归覆盖 SDR 码值直通、PQ 数值映射和 HDR→SDR 换片；HDR 切换回归在真实窗口中验证
+播放期间的 SDR→10-bit PQ→SDR 交换链切换、视频出帧和文字图层持续合成；性能回归固定覆盖 CPU 解码、呈现、
 独立字幕层/100 条同时移动弹幕层、至少 55 FPS 的弹幕合同、音频缓冲、外部音轨偏移、Seek 和
 恢复内置音轨。专项回归验证连续 AAC PCM 在开头和 1000 秒 Seek 后都不会误补零/裁样，
 并验证 SUP/SRT/ASS/SSA 字幕与 XML 弹幕的播放中原子替换及损坏文件回退。

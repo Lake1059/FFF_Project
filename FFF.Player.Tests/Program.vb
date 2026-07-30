@@ -172,6 +172,13 @@ Friend Module Program
                 Console.WriteLine("空图层、真实 Present 计数与音频背压回归通过。")
                 Return 0
             End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--hdr-switch-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim HDR视频路径 = Path.GetFullPath(参数(1))
+                检查文件(HDR视频路径)
+                测试播放中HDR交换链切换(HDR视频路径)
+                Console.WriteLine("播放中 HDR/SDR 交换链切换与定时文字图层持续呈现回归通过。")
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--ass-render-benchmark", StringComparison.OrdinalIgnoreCase) Then
                 测试ASS渲染性能()
                 Return 0
@@ -234,6 +241,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --volume-interaction-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --information-overlay-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --empty-layer-regression <视频>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --hdr-switch-regression <HDR视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --gpu-decode-matrix <视频目录>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --video-scaling-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sdr-pixel-regression <视频> <参考图.png>")
@@ -599,6 +607,207 @@ Friend Module Program
         End Using
     End Sub
 
+    Private Sub 测试播放中HDR交换链切换(视频路径 As String)
+        Using 输出窗口 As New Form With {
+            .ClientSize = New Drawing.Size(960, 540), .ShowInTaskbar = False,
+            .FormBorderStyle = FormBorderStyle.FixedToolWindow,
+            .StartPosition = FormStartPosition.CenterScreen,
+            .WindowState = FormWindowState.Maximized}
+            Using 画面控件 As New 播放器画面控件 With {.Dock = DockStyle.Fill}
+                输出窗口.Controls.Add(画面控件)
+                输出窗口.Show()
+                Application.DoEvents()
+                Using 会话 As New 播放器会话(New 播放器配置 With {
+                    .解码器 = 解码模式.GPU, .输出窗口句柄 = 画面控件.输出窗口句柄,
+                    .色彩模式 = 色彩输出模式.映射到SDR,
+                    .SDR峰值尼特 = 100.0F, .HDR峰值尼特 = 1000.0F,
+                    .SDR纸白尼特 = 203.0F})
+                    会话.设置音量(0.0F, True)
+                    会话.打开Async(视频路径).GetAwaiter().GetResult()
+                    断言(会话.当前快照.是HDR源, "HDR 切换回归样本没有被识别为 HDR。")
+                    Dim 信息命令 = 定时文字命令.创建文字(
+                        "HDR switch regression", "Microsoft YaHei", 24.0F,
+                        New RectangleF(24.0F, 24.0F, 480.0F, 56.0F),
+                        &HFFFFFFFFUI, &HFF000000UI, 1.0F,
+                        定时文字对齐.靠前, 定时文字对齐.靠前)
+                    Dim 图层画布 = 画面控件.ClientSize
+                    会话.设置定时文字图层(图层画布, {信息命令}, 1UL, 60.0F)
+                    会话.设置弹幕图层(图层画布, {信息命令}, 1UL, 60.0F)
+                    会话.设置播放器信息图层(图层画布, {信息命令}, 1UL, 60.0F)
+                    会话.播放()
+                    Dim SDR快照 = 等待快照(会话,
+                        Function(x) x.交换链呈现次数 >= 3UL AndAlso x.已呈现视频帧数 >= 3UL,
+                        "HDR 样本的 SDR 映射预热")
+
+                    会话.设置色彩模式(色彩输出模式.峰值映射HDR, 100.0F, 1000.0F, 203.0F)
+                    Dim HDR快照 = 等待快照(会话,
+                        Function(x) x.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
+                            x.视频输出位深度 >= 10 AndAlso
+                            x.交换链呈现次数 > SDR快照.交换链呈现次数 AndAlso
+                            x.已呈现视频帧数 > SDR快照.已呈现视频帧数,
+                        "播放中切换到真实 HDR 后继续呈现")
+                    Dim HDR图层状态 = 会话.当前定时文字状态
+                    Dim HDR弹幕状态 = 会话.当前弹幕状态
+                    断言(HDR图层状态.已绘制序号 = 1UL AndAlso HDR图层状态.命令数 = 1 AndAlso
+                           HDR弹幕状态.已绘制序号 = 1UL AndAlso HDR弹幕状态.命令数 = 1,
+                       "切换到真实 HDR 后字幕或弹幕图层没有完成合成。")
+                    Dim HDR持续计时 = Stopwatch.StartNew()
+                    Dim 图层序号 = 2UL
+                    Dim 下次图层秒数 = 0.0R
+                    While HDR持续计时.Elapsed < TimeSpan.FromSeconds(2)
+                        If HDR持续计时.Elapsed.TotalSeconds >= 下次图层秒数 Then
+                            Dim 移动命令 = 定时文字命令.创建文字(
+                                "HDR switch regression", "Microsoft YaHei", 24.0F,
+                                New RectangleF(24.0F + CSng((图层序号 Mod 120UL) * 2UL),
+                                    24.0F, 480.0F, 56.0F),
+                                &HFFFFFFFFUI, &HFF000000UI, 1.0F,
+                                定时文字对齐.靠前, 定时文字对齐.靠前)
+                            会话.设置定时文字图层(图层画布, {移动命令}, 图层序号, 60.0F)
+                            会话.设置弹幕图层(图层画布, {移动命令}, 图层序号, 60.0F)
+                            会话.设置播放器信息图层(图层画布, {移动命令}, 图层序号, 60.0F)
+                            图层序号 += 1UL
+                            下次图层秒数 += 1.0R / 60.0R
+                        End If
+                        Application.DoEvents()
+                        Thread.Sleep(1)
+                    End While
+                    Dim HDR持续快照 = 会话.当前快照
+                    断言(HDR持续快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
+                           HDR持续快照.交换链呈现次数 >= HDR快照.交换链呈现次数 + 60UL AndAlso
+                           HDR持续快照.已呈现视频帧数 >= HDR快照.已呈现视频帧数 + 24UL,
+                       $"真实 HDR 大窗口/动态图层持续呈现不足：视频帧/Present " &
+                       $"{HDR快照.已呈现视频帧数}→{HDR持续快照.已呈现视频帧数}/" &
+                       $"{HDR快照.交换链呈现次数}→{HDR持续快照.交换链呈现次数}。")
+                    Dim HDR持续图层状态 = 会话.当前定时文字状态
+                    Dim HDR持续弹幕状态 = 会话.当前弹幕状态
+                    断言(HDR持续图层状态.已绘制序号 = 图层序号 - 1UL AndAlso
+                           HDR持续弹幕状态.已绘制序号 = 图层序号 - 1UL AndAlso
+                           HDR持续图层状态.图层呈现帧数 >= HDR图层状态.图层呈现帧数 + 60UI AndAlso
+                           HDR持续弹幕状态.图层呈现帧数 >= HDR弹幕状态.图层呈现帧数 + 60UI,
+                       "真实 HDR 大窗口内字幕或弹幕图层停止更新。")
+
+                    会话.设置色彩模式(色彩输出模式.映射到SDR, 100.0F, 1000.0F, 203.0F)
+                    Dim 恢复快照 = 等待快照(会话,
+                        Function(x) x.实际色彩模式 = 色彩输出模式.映射到SDR AndAlso
+                            x.交换链呈现次数 > HDR持续快照.交换链呈现次数 AndAlso
+                            x.已呈现视频帧数 > HDR持续快照.已呈现视频帧数,
+                        "从真实 HDR 切回 SDR 后继续呈现")
+                    Console.WriteLine($"HDR 切换：视频帧 {SDR快照.已呈现视频帧数}→{HDR持续快照.已呈现视频帧数}→{恢复快照.已呈现视频帧数}，" &
+                                      $"交换链 Present {SDR快照.交换链呈现次数}→{HDR持续快照.交换链呈现次数}→{恢复快照.交换链呈现次数}。")
+                End Using
+            End Using
+        End Using
+        测试完整播放器HDR持续呈现(视频路径)
+    End Sub
+
+    Private Sub 测试完整播放器HDR持续呈现(视频路径 As String)
+        Using 窗口 As New Form1 With {
+            .ShowInTaskbar = False,
+            .StartPosition = FormStartPosition.CenterScreen,
+            .WindowState = FormWindowState.Maximized}
+            窗口.Show()
+            Dim 标志 = BindingFlags.Instance Or BindingFlags.NonPublic
+            Dim 控制器 = DirectCast(GetType(Form1).GetField("播放控制器", 标志)?.GetValue(窗口), 播放器控制器)
+            Dim 信息呈现器 = DirectCast(GetType(Form1).GetField("信息图层呈现器", 标志)?.GetValue(窗口), 播放器信息图层呈现器)
+            Dim 画面 = DirectCast(GetType(Form1).GetField("画面控件", 标志)?.GetValue(窗口), 播放器画面控件)
+            断言(控制器 IsNot Nothing AndAlso 信息呈现器 IsNot Nothing AndAlso 画面 IsNot Nothing,
+               "无法取得完整播放器 HDR 回归所需的控制器、信息图层或画面控件。")
+            控制器.设置音量(0.0F)
+            Dim SDR快照 = 等待控制器快照(控制器,
+                Function(x) x.是HDR源 AndAlso x.状态 = 播放状态.正在播放 AndAlso
+                    x.实际色彩模式 = 色彩输出模式.映射到SDR AndAlso x.交换链呈现次数 >= 3UL,
+                "完整播放器打开 HDR 样本")
+            断言(String.Equals(Path.GetFullPath(控制器.当前媒体路径), Path.GetFullPath(视频路径),
+                              StringComparison.OrdinalIgnoreCase),
+               "完整播放器没有打开 HDR 切换回归指定的样本。")
+            信息呈现器.切换调试信息()
+
+            控制器.切换HDR模式()
+            等待控制器快照(控制器,
+                Function(x) x.实际色彩模式 = 色彩输出模式.原始HDR按SDR呈现,
+                "完整播放器切换到原始 HDR")
+            控制器.切换HDR模式()
+            Dim HDR快照 = 等待控制器快照(控制器,
+                Function(x) x.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
+                    x.视频输出位深度 >= 10 AndAlso x.交换链呈现次数 > SDR快照.交换链呈现次数,
+                "完整播放器切换到真实 HDR")
+
+            Using HDR屏幕首帧 = 捕获控件屏幕(画面)
+            Dim 持续计时 = Stopwatch.StartNew()
+            While 持续计时.Elapsed < TimeSpan.FromSeconds(2)
+                Application.DoEvents()
+                Thread.Sleep(1)
+            End While
+            Using HDR屏幕末帧 = 捕获控件屏幕(画面)
+                Dim 变化采样数 = 计算屏幕变化采样数(HDR屏幕首帧, HDR屏幕末帧)
+                断言(变化采样数 >= 100,
+                   $"完整播放器在真实 HDR 中的桌面合成画面冻结，仅 {变化采样数} 个采样点发生变化。")
+                Console.WriteLine($"完整播放器真实 HDR 屏幕变化采样：{变化采样数}。")
+            End Using
+            Dim HDR持续快照 = 控制器.安全读取快照()
+            断言(HDR持续快照 IsNot Nothing AndAlso
+                   HDR持续快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
+                   HDR持续快照.已呈现视频帧数 >= HDR快照.已呈现视频帧数 + 24UL AndAlso
+                   HDR持续快照.交换链呈现次数 >= HDR快照.交换链呈现次数 + 24UL,
+               $"完整播放器在真实 HDR 中停止呈现：视频帧/Present " &
+               $"{HDR快照.已呈现视频帧数}→{HDR持续快照?.已呈现视频帧数}/" &
+               $"{HDR快照.交换链呈现次数}→{HDR持续快照?.交换链呈现次数}。")
+
+            控制器.切换HDR模式()
+            等待控制器快照(控制器,
+                Function(x) x.实际色彩模式 = 色彩输出模式.映射到SDR AndAlso
+                    x.交换链呈现次数 > HDR持续快照.交换链呈现次数,
+                "完整播放器从真实 HDR 切回 SDR")
+            窗口.Close()
+            End Using
+        End Using
+    End Sub
+
+    Private Function 捕获控件屏幕(控件 As Control) As Bitmap
+        Dim 大小 = 控件.ClientSize
+        Dim 结果 As New Bitmap(Math.Max(1, 大小.Width), Math.Max(1, 大小.Height))
+        Using 绘图 = Graphics.FromImage(结果)
+            绘图.CopyFromScreen(控件.PointToScreen(Point.Empty), Point.Empty, 结果.Size,
+                              CopyPixelOperation.SourceCopy)
+        End Using
+        Return 结果
+    End Function
+
+    Private Function 计算屏幕变化采样数(首帧 As Bitmap, 末帧 As Bitmap) As Integer
+        Dim 宽度 = Math.Min(首帧.Width, 末帧.Width)
+        Dim 高度 = Math.Min(首帧.Height, 末帧.Height)
+        Dim 变化数 = 0
+        For y = 2 To 高度 - 1 Step 4
+            For x = 2 To 宽度 - 1 Step 4
+                Dim a = 首帧.GetPixel(x, y)
+                Dim b = 末帧.GetPixel(x, y)
+                If Math.Abs(CInt(a.R) - CInt(b.R)) + Math.Abs(CInt(a.G) - CInt(b.G)) +
+                   Math.Abs(CInt(a.B) - CInt(b.B)) >= 12 Then 变化数 += 1
+            Next
+        Next
+        Return 变化数
+    End Function
+
+    Private Function 等待控制器快照(控制器 As 播放器控制器,
+                                条件 As Func(Of 播放器快照, Boolean),
+                                操作 As String) As 播放器快照
+        Dim 计时 = Stopwatch.StartNew()
+        Do
+            Application.DoEvents()
+            Dim 快照 = 控制器.安全读取快照()
+            If 快照 IsNot Nothing AndAlso 条件(快照) Then Return 快照
+            If 快照 IsNot Nothing AndAlso 快照.状态 = 播放状态.失败 Then
+                Throw New InvalidOperationException($"{操作}时播放器失败。")
+            End If
+            If 计时.Elapsed >= TimeSpan.FromSeconds(15) Then
+                Throw New TimeoutException($"等待{操作}超时：状态 {快照?.状态}，" &
+                    $"色彩 {快照?.请求色彩模式}/{快照?.实际色彩模式}，" &
+                    $"视频帧/Present {快照?.已呈现视频帧数}/{快照?.交换链呈现次数}。")
+            End If
+            Thread.Sleep(5)
+        Loop
+    End Function
+
     Private Sub 测试ASS渲染性能()
         测试ASS半透明像素(Path.GetTempPath())
         Dim 临时路径 = Path.Combine(Path.GetTempPath(),
@@ -808,6 +1017,7 @@ Friend Module Program
             Dim 快照 As New 播放器快照(New 原生播放器快照 With {
                 .状态 = CUInt(播放状态.正在播放), .解码器 = CUInt(解码模式.CPU),
                 .实际色彩模式 = CUInt(色彩输出模式.映射到SDR),
+                .是HDR源 = 1UI,
                 .位置100纳秒 = TimeSpan.FromHours(1).Ticks + TimeSpan.FromMinutes(2).Ticks + TimeSpan.FromSeconds(3).Ticks,
                 .时长100纳秒 = TimeSpan.FromHours(2).Ticks, .当前视频流 = 0, .当前音频流 = 1,
                  .视频队列帧数 = 3UI, .已丢弃视频帧数 = 7UL, .已合并视频帧数 = 5UL,
@@ -843,9 +1053,16 @@ Friend Module Program
                        "信息层逐字段文本不符合中文标签、三空格分隔或字段白名单。" & vbCrLf &
                        String.Join(vbCrLf, 实际))
                     断言(Not 实际.Any(Function(x) x.Contains("secret.srt", StringComparison.OrdinalIgnoreCase) OrElse
-                                               x.Contains("secret.xml", StringComparison.OrdinalIgnoreCase) OrElse
-                                               x.Contains("·", StringComparison.Ordinal)),
-                       "信息层仍泄漏字幕/弹幕文件名或使用旧分隔符。")
+                                                x.Contains("secret.xml", StringComparison.OrdinalIgnoreCase) OrElse
+                                                x.Contains("·", StringComparison.Ordinal)),
+                        "信息层仍泄漏字幕/弹幕文件名或使用旧分隔符。")
+                    Dim 色彩模式方法 = GetType(播放器信息图层呈现器).GetMethod(
+                        "色彩模式文本", BindingFlags.Static Or BindingFlags.NonPublic)
+                    断言(String.Equals(CStr(色彩模式方法?.Invoke(Nothing,
+                        New Object() {色彩输出模式.映射到SDR, False})), "SDR", StringComparison.Ordinal) AndAlso
+                        String.Equals(CStr(色彩模式方法?.Invoke(Nothing,
+                        New Object() {色彩输出模式.映射到SDR, True})), "映射 SDR", StringComparison.Ordinal),
+                        "信息层没有区分 SDR 片源与 HDR→SDR 映射。")
 
                     Using 按需字幕 As New 外部字幕轨道("C:\diagnostic\effect.ass",
                         外部字幕格式.ASS, Nothing, Nothing)
@@ -1048,7 +1265,10 @@ Friend Module Program
             If 条件(快照) Then Return 快照
             If 快照.状态 = 播放状态.失败 Then Throw New InvalidOperationException($"{操作}时播放器失败。")
             If 计时.Elapsed >= TimeSpan.FromSeconds(10) Then
-                Throw New TimeoutException($"等待{操作}超时：位置 {快照.播放位置.TotalSeconds:F3}s，PTS {快照.原始帧PTS}。")
+                Throw New TimeoutException($"等待{操作}超时：位置 {快照.播放位置.TotalSeconds:F3}s，PTS {快照.原始帧PTS}，" &
+                    $"色彩 {快照.请求色彩模式}/{快照.实际色彩模式}/{快照.视频输出位深度}bit，" &
+                    $"视频帧/Present {快照.已呈现视频帧数}/{快照.交换链呈现次数}，" &
+                    $"原生错误：{会话.最后错误消息}")
             End If
             Thread.Sleep(5)
         Loop
@@ -1522,12 +1742,103 @@ Friend Module Program
                 验证音频峰值(会话, "WASAPI 独占")
                 Dim 独占结果 = 采样播放(会话, 4.0, Nothing)
                 验证纯音频结果(独占结果, "WASAPI 独占")
+                测试独占暂停释放与恢复(会话, 换片路径)
             End Using
+            测试音频端点不可用仍可播放(临时路径)
             测试控制器独占换片(临时路径, 换片路径)
         Finally
             If File.Exists(临时路径) Then File.Delete(临时路径)
             If File.Exists(换片路径) Then File.Delete(换片路径)
         End Try
+    End Sub
+
+    Private Sub 测试音频端点不可用仍可播放(音频路径 As String)
+        Using 会话 As New 播放器会话(New 播放器配置 With {.解码器 = 解码模式.CPU})
+            Dim 已提示不可用 As Boolean
+            Dim 收到错误 As Boolean
+            Dim 设备处理 As EventHandler(Of 播放器事件参数) =
+                Sub(sender, e)
+                    If e.详情JSON.Contains("""audioUnavailable"":true", StringComparison.Ordinal) AndAlso
+                        e.详情JSON.Contains("""exclusive"":false", StringComparison.Ordinal) Then
+                        已提示不可用 = True
+                    End If
+                End Sub
+            Dim 错误处理 As EventHandler(Of 播放器事件参数) =
+                Sub(sender, e) 收到错误 = True
+            AddHandler 会话.设备变化, 设备处理
+            AddHandler 会话.错误, 错误处理
+            Try
+                会话.设置音频端点("{FFF-PLAYER-REGRESSION-MISSING-ENDPOINT}")
+                会话.打开Async(音频路径).GetAwaiter().GetResult()
+                会话.播放()
+                等待快照(会话,
+                    Function(x) x.状态 = 播放状态.正在播放 AndAlso
+                        x.播放位置 >= TimeSpan.FromMilliseconds(150),
+                    "音频端点不可用时继续播放")
+                断言(已提示不可用, "音频端点不可用时没有发布共享模式提示事件。")
+                断言(Not 收到错误, "音频端点不可用时仍把可继续的媒体会话报告为播放错误。")
+            Finally
+                RemoveHandler 会话.设备变化, 设备处理
+                RemoveHandler 会话.错误, 错误处理
+            End Try
+        End Using
+        Console.WriteLine("音频端点不可用时媒体按共享模式继续推进，并仅发布提示事件。")
+    End Sub
+
+    Private Sub 测试独占暂停释放与恢复(会话 As 播放器会话, 音频路径 As String)
+        会话.暂停()
+        Dim 暂停快照 = 等待快照(会话, Function(x) x.状态 = 播放状态.已暂停,
+                           "WASAPI 独占暂停")
+        Dim 暂停位置 = 暂停快照.播放位置
+        Thread.Sleep(150)
+        断言(Math.Abs((会话.当前快照.播放位置 - 暂停位置).TotalMilliseconds) < 30,
+           "独占暂停后媒体时钟仍在推进。")
+
+        Dim 竞争会话已回退 As Boolean
+        Using 竞争会话 As New 播放器会话(New 播放器配置 With {
+            .解码器 = 解码模式.CPU,
+            .色彩模式 = 色彩输出模式.映射到SDR
+        })
+            Dim 设备处理 As EventHandler(Of 播放器事件参数) =
+                Sub(sender, e)
+                    If e.详情JSON.Contains("""exclusiveFallback"":true", StringComparison.Ordinal) Then
+                        竞争会话已回退 = True
+                    End If
+                End Sub
+            AddHandler 竞争会话.设备变化, 设备处理
+            Try
+                竞争会话.设置音量(0.0F, True)
+                竞争会话.打开Async(音频路径).GetAwaiter().GetResult()
+                切换到独占模式(竞争会话)
+                竞争会话.播放()
+                等待音频预热(竞争会话, TimeSpan.FromMilliseconds(400), TimeSpan.FromSeconds(10))
+                断言(Not 竞争会话已回退,
+                   "主会话暂停后仍占用 WASAPI 独占端点，竞争会话被迫回退到共享模式。")
+                竞争会话.暂停()
+                等待快照(竞争会话, Function(x) x.状态 = 播放状态.已暂停,
+                    "竞争会话释放 WASAPI 独占")
+            Finally
+                RemoveHandler 竞争会话.设备变化, 设备处理
+            End Try
+        End Using
+
+        Dim 恢复已回退 As Boolean
+        Dim 恢复处理 As EventHandler(Of 播放器事件参数) =
+            Sub(sender, e)
+                If e.详情JSON.Contains("""exclusiveFallback"":true", StringComparison.Ordinal) Then
+                    恢复已回退 = True
+                End If
+            End Sub
+        AddHandler 会话.设备变化, 恢复处理
+        Try
+            会话.播放()
+            等待音频预热(会话, 暂停位置 + TimeSpan.FromMilliseconds(400), TimeSpan.FromSeconds(10))
+            断言(Not 恢复已回退, "独占暂停恢复时意外回退到了共享模式。")
+            验证音频峰值(会话, "WASAPI 独占暂停恢复")
+        Finally
+            RemoveHandler 会话.设备变化, 恢复处理
+        End Try
+        Console.WriteLine("WASAPI 独占暂停释放端点，并在继续播放时成功重新独占。")
     End Sub
 
     Private Sub 测试控制器独占换片(音频路径 As String, 换片路径 As String)

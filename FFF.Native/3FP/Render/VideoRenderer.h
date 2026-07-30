@@ -152,6 +152,8 @@ private:
         std::uint32_t outputColorSpace) noexcept;
     FFFResult EnsureVideoProcessorInputSurface(std::uint32_t format) noexcept;
     FFFResult RenderVideoProcessorInput() noexcept;
+    FFFResult DrawWithShader(ID3D11RenderTargetView* target, float x, float y,
+        float width, float height) noexcept;
     FFFResult DrawWithVideoProcessor(ID3D11Texture2D* inputTexture,
         ID3D11Texture2D* outputTexture, const RECT& destination,
         std::uint32_t inputColorSpace, std::uint32_t outputColorSpace) noexcept;

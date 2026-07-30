@@ -549,8 +549,12 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
     if (SUCCEEDED(wasapiResult)) wasapiResult = client->GetService(IID_PPV_ARGS(&clock));
     if (FAILED(wasapiResult)) {
         std::ostringstream message;
-        message << (exclusive_ ? "Could not initialize exclusive WASAPI playback for the selected endpoint"
-            : "Could not initialize event-driven WASAPI playback")
+        if (exclusive_ && wasapiResult == AUDCLNT_E_DEVICE_IN_USE)
+            message << "Another application already has exclusive control of the selected audio endpoint";
+        else
+            message << (exclusive_ ? "Could not initialize exclusive WASAPI playback for the selected endpoint"
+                : "Could not initialize event-driven WASAPI playback");
+        message
             << " (HRESULT 0x" << std::hex << static_cast<std::uint32_t>(wasapiResult) << ").";
         fail(message.str());
         return;

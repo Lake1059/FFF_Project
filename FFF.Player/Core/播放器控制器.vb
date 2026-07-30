@@ -715,6 +715,15 @@ Public NotInheritable Class 播放器控制器
                         Dim 模式值 As JsonElement
                         If 文档.RootElement.TryGetProperty("exclusive", 模式值) AndAlso
                             模式值.GetBoolean() = 独占 Then 完成源.TrySetResult(True)
+                        Dim 回退值 As JsonElement
+                        If 独占 AndAlso 文档.RootElement.TryGetProperty("exclusiveFallback", 回退值) AndAlso
+                            回退值.GetBoolean() Then
+                            Dim 原因值 As JsonElement
+                            Dim 原因 = If(文档.RootElement.TryGetProperty("reason", 原因值) AndAlso
+                                        原因值.ValueKind = JsonValueKind.String,
+                                        原因值.GetString(), "音频端点拒绝了独占模式，已继续使用共享模式。")
+                            完成源.TrySetException(New 播放器异常(-1, 原因))
+                        End If
                     End Using
                 Catch
                 End Try
@@ -824,6 +833,10 @@ Public NotInheritable Class 播放器控制器
         If 快照 IsNot Nothing Then 当前解码器 = 快照.解码器
         Dim 解码回退 = False
         Dim 回退原因 As String = String.Empty
+        Dim 独占回退 = False
+        Dim 独占回退原因 As String = String.Empty
+        Dim 音频不可用 = False
+        Dim 音频不可用原因 As String = String.Empty
         Try
             Using 文档 = JsonDocument.Parse(e.详情JSON)
                 Dim 独占 As JsonElement
@@ -839,6 +852,18 @@ Public NotInheritable Class 播放器控制器
                 Dim 原因 As JsonElement
                 If 解码回退 AndAlso 文档.RootElement.TryGetProperty("reason", 原因) AndAlso
                     原因.ValueKind = JsonValueKind.String Then 回退原因 = 原因.GetString()
+                Dim 独占回退值 As JsonElement
+                If 文档.RootElement.TryGetProperty("exclusiveFallback", 独占回退值) Then
+                    独占回退 = 独占回退值.GetBoolean()
+                End If
+                If 独占回退 AndAlso 文档.RootElement.TryGetProperty("reason", 原因) AndAlso
+                    原因.ValueKind = JsonValueKind.String Then 独占回退原因 = 原因.GetString()
+                Dim 音频不可用值 As JsonElement
+                If 文档.RootElement.TryGetProperty("audioUnavailable", 音频不可用值) Then
+                    音频不可用 = 音频不可用值.GetBoolean()
+                End If
+                If 音频不可用 AndAlso 文档.RootElement.TryGetProperty("reason", 原因) AndAlso
+                    原因.ValueKind = JsonValueKind.String Then 音频不可用原因 = 原因.GetString()
             End Using
         Catch
         End Try
@@ -846,6 +871,18 @@ Public NotInheritable Class 播放器控制器
             Dim 说明 = "GPU 解码已回退到 CPU"
             If Not String.IsNullOrWhiteSpace(回退原因) Then 说明 &= $"：{回退原因.Trim()}"
             RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(说明))
+        End If
+        If 独占回退 Then
+            Dim 说明 = "音频设备当前无法使用独占模式，已切换到 WASAPI 共享模式继续播放。"
+            If Not String.IsNullOrWhiteSpace(独占回退原因) Then 说明 &= $"{vbCrLf}{vbCrLf}{独占回退原因.Trim()}"
+            RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(
+                说明, True, "WASAPI 独占模式不可用"))
+        End If
+        If 音频不可用 Then
+            Dim 说明 = "音频设备正被其他应用独占。媒体已按 WASAPI 共享模式继续播放，但设备释放前暂时无声。"
+            If Not String.IsNullOrWhiteSpace(音频不可用原因) Then 说明 &= $"{vbCrLf}{vbCrLf}{音频不可用原因.Trim()}"
+            RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(
+                说明, True, "音频设备暂不可用"))
         End If
         RaiseEvent 状态已变化(Me, EventArgs.Empty)
     End Sub
@@ -1087,11 +1124,16 @@ End Class
 Public NotInheritable Class 播放器操作提示事件参数
     Inherits EventArgs
 
-    Public Sub New(说明 As String)
+    Public Sub New(说明 As String, Optional 弹出提示 As Boolean = False,
+                   Optional 标题 As String = "播放提示")
         Me.说明 = If(说明, String.Empty)
+        Me.弹出提示 = 弹出提示
+        Me.标题 = If(标题, "播放提示")
     End Sub
 
     Public ReadOnly Property 说明 As String
+    Public ReadOnly Property 弹出提示 As Boolean
+    Public ReadOnly Property 标题 As String
 End Class
 
 Public NotInheritable Class 播放器HDR状态事件参数

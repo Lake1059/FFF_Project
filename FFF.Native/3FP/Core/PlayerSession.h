@@ -86,6 +86,8 @@ private:
         std::int64_t offset100ns) noexcept;
     FFFResult RecreateAudioRenderer(const std::wstring& endpointId, bool exclusive,
         bool paused, std::string& error) noexcept;
+    void SuspendAudioRenderer(bool releaseExclusive) noexcept;
+    FFFResult ResumeAudioRenderer() noexcept;
     bool RecoverAudioDevice() noexcept;
     bool RecoverVideoDevice() noexcept;
     FFFResult OpenFormat(const std::string& pathUtf8, AVFormatContext** format,

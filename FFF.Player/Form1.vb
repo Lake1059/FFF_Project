@@ -199,7 +199,10 @@ Public Class Form1
     End Sub
 
     Private Sub 播放控制器_操作提示(sender As Object, e As 播放器操作提示事件参数)
-        If Not 正在关闭 Then
+        If 正在关闭 Then Return
+        If e.弹出提示 Then
+            LakeUI.ExOverlayMsgBox(Me, e.说明, MsgBoxStyle.Exclamation Or MsgBoxStyle.OkOnly, e.标题)
+        Else
             信息图层呈现器?.显示操作信息(e.说明, &HFFF0D35DUI, "解码回退")
         End If
     End Sub
@@ -248,7 +251,7 @@ Public Class Form1
             Function() 画面控件.ClientSize,
             AddressOf 播放控制器.读取音频峰值)
         窗口.Location = 窗口.居中于(Bounds)
-        窗口.Show(Me)
+        窗口.Show()
     End Sub
 
     Private Sub 切换媒体信息层()
