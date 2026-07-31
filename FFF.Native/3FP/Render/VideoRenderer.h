@@ -281,6 +281,7 @@ private:
     std::shared_ptr<const TimedTextRenderLayer> timedTextLayers_[3];
     std::uint64_t timedTextRenderedSequences_[3];
     std::uint32_t timedTextRenderedCommandCounts_[3];
+    bool timedTextRenderedHdrHighlights_[3];
     std::uint32_t timedTextWidths_[3];
     std::uint32_t timedTextHeights_[3];
     // Counts successful final swap-chain presents that included each visible

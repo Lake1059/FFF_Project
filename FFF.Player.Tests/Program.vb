@@ -722,8 +722,11 @@ Friend Module Program
                         New RectangleF(24.0F, 24.0F, 480.0F, 56.0F),
                         &HFFFFFFFFUI, &HFF000000UI, 1.0F,
                         定时文字对齐.靠前, 定时文字对齐.靠前)
+                    Dim SUP高亮命令 = 定时文字命令.创建位图(
+                        New Byte() {255, 255, 255, 255}, 1, 1, 4,
+                        New RectangleF(540.0F, 24.0F, 120.0F, 56.0F), HDR高亮:=True)
                     Dim 图层画布 = 画面控件.ClientSize
-                    会话.设置定时文字图层(图层画布, {信息命令}, 1UL, 60.0F)
+                    会话.设置定时文字图层(图层画布, {SUP高亮命令}, 1UL, 60.0F)
                     会话.设置弹幕图层(图层画布, {信息命令}, 1UL, 60.0F)
                     会话.设置播放器信息图层(图层画布, {信息命令}, 1UL, 60.0F)
                     会话.播放()
@@ -823,6 +826,13 @@ Friend Module Program
                 Function(x) x.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
                     x.视频输出位深度 >= 10 AndAlso x.交换链呈现次数 > SDR快照.交换链呈现次数,
                 "完整播放器切换到真实 HDR")
+            If HDR快照.显示器峰值尼特 > 0UI Then
+                断言(HDR快照.HDR有效目标峰值尼特 = HDR快照.显示器峰值尼特,
+                   $"自动 HDR 目标没有使用 Windows 显示器峰值：" &
+                   $"显示器 {HDR快照.显示器峰值尼特}，实际映射 {HDR快照.HDR有效目标峰值尼特} 尼特。")
+            End If
+            Console.WriteLine($"Windows HDR 峰值/实际映射：" &
+                              $"{HDR快照.显示器峰值尼特}/{HDR快照.HDR有效目标峰值尼特} 尼特。")
 
             Using HDR屏幕首帧 = 捕获控件屏幕(画面)
             Dim 持续计时 = Stopwatch.StartNew()
@@ -1065,9 +1075,10 @@ Friend Module Program
             Dim 命令字段 = 信息呈现器.GetType().GetField("图层命令", 标志)
             Dim 命令 = DirectCast(命令字段?.GetValue(信息呈现器), IEnumerable(Of 定时文字命令)).
                 Where(Function(x) CBool(GetType(定时文字命令).GetProperty("是位图", 标志)?.GetValue(x))).ToArray()
-            断言(命令.Length > 0 AndAlso 命令.All(
-                Function(x) Math.Abs(x.X - (画面.ClientSize.Width - x.X - x.宽度)) < 1.0F),
-                "操作提示背景没有保持左右一致的边距并延伸到右侧。")
+            断言(命令.Length > 0 AndAlso
+                   命令.All(Function(x) x.X >= 0 AndAlso x.X + x.宽度 <= 画面.ClientSize.Width) AndAlso
+                   命令.Any(Function(x) x.宽度 < 画面.ClientSize.Width - 32.0F),
+                "操作提示背景没有按文字收缩，或短提示仍然强制占满整行。")
             窗口.Close()
         End Using
     End Sub
@@ -1137,7 +1148,7 @@ Friend Module Program
                         "视频：AV1 - CPU",
                         "输入：格式 YUV420P10LE   分辨率 1920x1080   帧率 23.976fps   实时码率 5 Mbps",
                         "色彩：采样 420   颜色矩阵 BT.2020   色域 BT.2020   传输特性 PQ   范围 Limited",
-                        "HDR：HDR10+   逐帧动态元数据   源峰值 1,242→目标 750 nit",
+                        "HDR：HDR10+   逐帧动态元数据",
                         "输出：格式 RGB10A2 (10bit)   分辨率 2560x1440   色彩模式 映射 SDR",
                         "渲染：帧率 23.98fps   缓冲池 3帧   实时丢帧 2   总丢帧 12",
                         "音频：FLAC - WASAPI 独占",
@@ -1148,6 +1159,22 @@ Friend Module Program
                     断言(实际.SequenceEqual(预期),
                        "信息层逐字段文本不符合中文标签、三空格分隔或字段白名单。" & vbCrLf &
                        String.Join(vbCrLf, 实际))
+                    Dim 真实HDR快照 As New 播放器快照(New 原生播放器快照 With {
+                        .实际色彩模式 = CUInt(色彩输出模式.峰值映射HDR), .是HDR源 = 1UI,
+                        .HDR格式 = CUInt(HDR格式.HDR10Plus), .动态HDR元数据有效 = 1UI,
+                        .源峰值尼特 = 1242UI, .HDR有效目标峰值尼特 = 750UI})
+                    Dim 真实HDR行 = 呈现器.读取调试文本行(信息, 真实HDR快照, "C:\media\movie.mkv")
+                    断言(真实HDR行.Any(Function(x) x = "HDR：HDR10+   逐帧动态元数据   源峰值 1242尼特   实际映射 750尼特"),
+                       "真实 HDR 高亮模式没有显示源峰值与实际映射。")
+                    Dim 灰HDR快照 As New 播放器快照(New 原生播放器快照 With {
+                        .实际色彩模式 = CUInt(色彩输出模式.原始HDR按SDR呈现), .是HDR源 = 1UI,
+                        .HDR格式 = CUInt(HDR格式.HDR10Plus), .动态HDR元数据有效 = 1UI,
+                        .源峰值尼特 = 1242UI, .HDR有效目标峰值尼特 = 750UI})
+                    Dim 灰HDR行 = 呈现器.读取调试文本行(信息, 灰HDR快照, "C:\media\movie.mkv")
+                    断言(灰HDR行.Any(Function(x) x = "HDR：HDR10+   逐帧动态元数据") AndAlso
+                           Not 灰HDR行.Any(Function(x) x.Contains("源峰值", StringComparison.Ordinal) OrElse
+                                               x.Contains("实际映射", StringComparison.Ordinal)),
+                       "原始 HDR 按 SDR 呈现模式不应显示亮度映射条目。")
                     断言(Not 实际.Any(Function(x) x.Contains("secret.srt", StringComparison.OrdinalIgnoreCase) OrElse
                                                 x.Contains("secret.xml", StringComparison.OrdinalIgnoreCase) OrElse
                                                 x.Contains("·", StringComparison.Ordinal)),
@@ -2294,6 +2321,13 @@ Friend Module Program
             断言(控制器.色彩模式 = 色彩输出模式.峰值映射HDR,
                "测试前置条件失败：HDR 样本没有切换到真实 HDR 请求。")
 
+            打开并等待(控制器, HDR路径)
+            Dim 继承HDR快照 = 控制器.安全读取快照()
+            断言(继承HDR快照 IsNot Nothing AndAlso 继承HDR快照.是HDR源 AndAlso
+                   控制器.色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
+                   继承HDR快照.请求色彩模式 = 色彩输出模式.峰值映射HDR,
+                "打开新的 HDR 媒体后没有继承真实 HDR 输出策略。")
+
             打开并等待(控制器, SDR路径)
             Dim SDR快照 = 控制器.安全读取快照()
             断言(SDR快照 IsNot Nothing AndAlso Not SDR快照.是HDR源, "SDR 样本被错误识别为 HDR。")
@@ -2301,6 +2335,13 @@ Friend Module Program
                SDR快照.请求色彩模式 = 色彩输出模式.映射到SDR AndAlso
                SDR快照.实际色彩模式 = 色彩输出模式.映射到SDR,
                "HDR→SDR 换片后仍沿用了 PQ/BT.2020 真实 HDR 输出状态。")
+
+            打开并等待(控制器, HDR路径)
+            Dim SDR后HDR快照 = 控制器.安全读取快照()
+            断言(SDR后HDR快照 IsNot Nothing AndAlso SDR后HDR快照.是HDR源 AndAlso
+                   控制器.色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
+                   SDR后HDR快照.请求色彩模式 = 色彩输出模式.峰值映射HDR,
+                "播放 SDR 后再次打开 HDR 没有恢复上次选择的真实 HDR 策略。")
         End Using
 
         Console.WriteLine($"内部色彩状态：SDR {SDR源峰值} nit，HDR MaxCLL {HDR源峰值} nit；HDR→SDR 换片已回到 BT.709 SDR。")
@@ -2784,6 +2825,14 @@ Friend Module Program
     End Sub
 
     Private Sub 测试文字效果命令与原生合同()
+        Dim 普通位图 = 定时文字命令.创建位图(New Byte() {255, 255, 255, 255}, 1, 1, 4,
+            New RectangleF(0, 0, 1, 1))
+        Dim HDR高亮位图 = 定时文字命令.创建位图(New Byte() {255, 255, 255, 255}, 1, 1, 4,
+            New RectangleF(0, 0, 1, 1), HDR高亮:=True)
+        断言(普通位图.样式 = 定时文字样式.无 AndAlso
+               HDR高亮位图.样式 = 定时文字样式.HDR高亮位图,
+            "SUP HDR 高亮标记污染了普通 ASS/信息位图，或没有进入位图命令。")
+
         Const SRT内容 = "1" & vbLf & "00:00:00,000 --> 00:00:02,000" & vbLf & "SRT quality diagnostic" & vbLf
         Dim 文档 = SRT字幕解析器.解析(New StringReader(SRT内容))
         Dim 样式 As New SRT字幕样式()

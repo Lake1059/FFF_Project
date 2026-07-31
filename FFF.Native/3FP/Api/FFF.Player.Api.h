@@ -227,6 +227,7 @@ enum class FFF3FPTimedTextFlags : std::uint32_t {
     Italic = 2,
     Underline = 4,
     Strikeout = 8,
+    HdrHighlightBitmap = 16,
 };
 
 enum class FFF3FPTimedTextAlignment : std::uint32_t {

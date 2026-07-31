@@ -1,8 +1,18 @@
 Imports System.IO
+Imports System.Runtime.InteropServices
 Imports System.Threading
 
 Public Class Form1
     Private Const 跳转秒数 As Integer = 5
+    Private Shared ReadOnly 核心文件名称 As String() = {
+        "FFF.Native.dll",
+        "avcodec-63.dll",
+        "avfilter-12.dll",
+        "avformat-63.dll",
+        "avutil-61.dll",
+        "swresample-7.dll",
+        "swscale-10.dll"
+    }
 
     Private 画面控件 As 播放器画面控件
     Private 播放控制器 As 播放器控制器
@@ -12,10 +22,13 @@ Public Class Form1
     Private 弹幕图层呈现器 As 播放器定时文字图层呈现器
     Private 信息图层呈现器 As 播放器信息图层呈现器
     Private 剪辑区间控制器 As 播放器剪辑区间控制器
+    Private 全屏交互控制器 As 播放器全屏交互控制器
     Private 流选择器 As 播放器流选择器
     Private 按钮图标 As 播放器按钮图标资源
     Private 当前弹幕路径 As String = String.Empty
     Private 正在关闭 As Boolean
+    Private 核心文件检查通过 As Boolean
+    Private 核心文件错误说明 As String = String.Empty
 
     Private Event 方向键快捷键已请求 As KeyEventHandler
 
@@ -24,6 +37,17 @@ Public Class Form1
         ThisIsYourWindow1.Attach(Me)
         KeyPreview = True
         MinimumSize = New Size(875, 500)
+
+        Dim 缺失文件 = 核心文件名称.Where(Function(文件名) Not 可以加载核心文件(文件名)).ToArray()
+        If 缺失文件.Length > 0 Then
+            核心文件错误说明 = String.Join(vbCrLf, {
+                "以下播放器核心文件缺失或无法加载：",
+                String.Empty,
+                String.Join(vbCrLf, 缺失文件.Select(Function(文件名) $"  {文件名}")),
+                String.Empty,
+                "请将完整且同一份的 Shared FFmpeg 的 DLL 放到程序目录或环境变量后重新启动。"})
+            Return
+        End If
 
         按钮图标 = 播放器按钮图标资源.加载()
         配置播放器按钮图标()
@@ -55,7 +79,10 @@ Public Class Form1
             AddressOf 播放控制器.提交播放器信息图层)
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
+        全屏交互控制器 = New 播放器全屏交互控制器(Me, 画面控件,
+            ModernPanel1, MP_剪辑区间操作容器, Function() 剪辑区间控制器.模式已启用)
 
+        AddHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         AddHandler 播放控制器.状态已变化, AddressOf 播放控制器_状态已变化
         AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开
         AddHandler 播放控制器.媒体已打开, AddressOf 剪辑区间控制器.媒体已打开
@@ -68,8 +95,7 @@ Public Class Form1
         AddHandler 界面呈现器.请求跳转到关键帧, AddressOf 界面呈现器_请求跳转到关键帧
         AddHandler 界面呈现器.音量已变更, AddressOf 界面呈现器_音量已变更
         AddHandler 界面呈现器.播放状态已刷新, AddressOf 剪辑区间控制器.播放状态已刷新
-        AddHandler 剪辑区间控制器.模式已变化,
-            Sub(s, args) 界面呈现器.设置精确时间戳(args.已启用)
+        AddHandler 剪辑区间控制器.模式已变化, AddressOf 剪辑区间控制器_模式已变化
         AddHandler MB_剪辑区间模式.Click, AddressOf 剪辑区间控制器.切换模式
         AddHandler P_剪辑区间按钮容器.SizeChanged, AddressOf 剪辑区间控制器.按钮容器大小已变化
         AddHandler 剪辑区间控制器.进度条.请求跳转, AddressOf 剪辑区间控制器.进度条请求跳转
@@ -85,7 +111,21 @@ Public Class Form1
         AddHandler MB_停止.Click, AddressOf 剪辑区间控制器.停止已点击
         AddHandler 方向键快捷键已请求, AddressOf 剪辑区间控制器.处理方向键快捷键
         界面呈现器.启动()
+        核心文件检查通过 = True
     End Sub
+
+    Private Shared Function 可以加载核心文件(文件名 As String) As Boolean
+        Dim 句柄 = IntPtr.Zero
+        Try
+            Return NativeLibrary.TryLoad(文件名, GetType(Form1).Assembly, Nothing, 句柄)
+        Catch ex As BadImageFormatException
+            Return False
+        Catch ex As DllNotFoundException
+            Return False
+        Finally
+            If 句柄 <> IntPtr.Zero Then NativeLibrary.Free(句柄)
+        End Try
+    End Function
 
     Private Function 创建界面呈现器() As 播放器界面呈现器
         Return New 播放器界面呈现器(
@@ -115,6 +155,15 @@ Public Class Form1
     End Sub
 
     Private Sub Form1_Shown(sender As Object, e As EventArgs) Handles Me.Shown
+        If Not 核心文件检查通过 Then
+            BeginInvoke(Sub()
+                            LakeUI.ExOverlayMsgBox(Me, 核心文件错误说明,
+                                MsgBoxStyle.Critical Or MsgBoxStyle.OkOnly, "播放器核心文件缺失")
+                            Close()
+                        End Sub)
+            Return
+        End If
+
         BeginInvoke(New MethodInvoker(AddressOf 窗口布局控制器.校正初始视频比例))
         Dim 启动文件 = Environment.GetCommandLineArgs().Skip(1).FirstOrDefault(Function(x) File.Exists(x))
         If Not String.IsNullOrEmpty(启动文件) Then BeginInvoke(Sub() 打开或替换文件(启动文件))
@@ -122,6 +171,8 @@ Public Class Form1
 
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
         正在关闭 = True
+        RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
+        全屏交互控制器?.Dispose()
         窗口布局控制器?.释放()
         界面呈现器?.释放()
         信息图层呈现器?.释放()
@@ -134,11 +185,21 @@ Public Class Form1
         按钮图标?.Dispose()
     End Sub
 
+    Private Sub ThisIsYourWindow1_FullScreenChanged(
+        sender As Object, e As LakeUI.ThisIsYourWindow.FullScreenChangedEventArgs)
+        If e.HostForm Is Me AndAlso Not 正在关闭 Then 全屏交互控制器?.设置全屏状态(e.IsFullScreen)
+    End Sub
+
+    Private Sub 剪辑区间控制器_模式已变化(sender As Object, e As 剪辑区间模式变化事件参数)
+        界面呈现器.设置精确时间戳(e.已启用)
+        全屏交互控制器?.剪辑区间模式已变化()
+    End Sub
+
     Private Sub MB_打开文件_Click(sender As Object, e As EventArgs) Handles MB_打开文件.Click
         If 正在关闭 Then Return
         Using 对话框 As New OpenFileDialog With {
             .CheckFileExists = True,
-            .Filter = "媒体、字幕或弹幕文件|*.3gp;*.aac;*.ape;*.avi;*.flac;*.flv;*.gif;*.jxl;*.m2ts;*.m4a;*.m4v;*.mka;*.mkv;*.mov;*.mp3;*.mp4;*.mpeg;*.mpg;*.ogg;*.opus;*.png;*.ts;*.wav;*.webm;*.webp;*.wmv;*.srt;*.ass;*.ssa;*.sup;*.xml|字幕文件|*.srt;*.ass;*.ssa;*.sup|弹幕文件|*.xml|所有文件|*.*",
+            .Filter = "所有文件|*.*",
             .RestoreDirectory = True,
             .Title = "打开媒体或替换字幕/弹幕"
         }
@@ -270,21 +331,23 @@ Public Class Form1
             "正在切换到 WASAPI 独占模式", "正在切换到 WASAPI 共享模式"), &HFFFFA85AUI)
     End Sub
 
+    <CodeAnalysis.SuppressMessage("Performance", "CA1861:不要将常量数组作为参数", Justification:="<挂起>")>
     Private Function 确认切换到WASAPI独占模式() As Boolean
         Dim 内容 = String.Join(vbCrLf, {String.Empty,
             "是否切换到 WASAPI 独占模式？",
             String.Empty,
             "独占模式直通设备，能提供理论最佳音质，但也有诸多要求和限制：",
             String.Empty,
-            "1. 无法通过系统控制输出音量，请调整你的硬件设备旋钮或按键。",
-            "2. 再次提醒，如果您正戴着耳机，请立刻取下！",
-            "3. 其他应用无法发出任何声音，可能导致您错过重要事项。",
-            "4. 如果已经有应用占用了，则本应用会失败。",
-            "5. 安装在系统中的音效软件无法在独占模式工作。",
-            "6. 硬件设备必须支持对应的音频输出规格才能正常工作。"})
+            "1. 再次提醒，如果您正戴着耳机，请立刻取下！",
+            "2. 无法通过系统控制输出音量，请调整硬件设备旋钮或按键",
+            "3. 其他应用无法发出任何声音，可能导致您错过重要事项",
+            "4. 如果已经有应用占用了，则本应用会失败",
+            "5. 安装在系统中的音效软件无法在独占模式工作",
+            "6. 硬件设备必须支持对应的音频输出规格才能正常工作"})
         Return LakeUI.ExOverlayMsgBox(Me, 内容,
-            MsgBoxStyle.YesNo Or MsgBoxStyle.DefaultButton2,
-            "如果您正戴着耳机，请立即取下！⚠️⚠️⚠️") = MsgBoxResult.Yes
+            {"我已取下耳机并确认切换独占模式", "现在不"},
+            "如果您正戴着耳机，请立即取下！",
+            MsgBoxStyle.Exclamation, 1) = 0
     End Function
 
     Private Sub 更新WASAPI按钮()

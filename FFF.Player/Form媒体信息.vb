@@ -163,10 +163,12 @@ Public Class Form媒体信息
                     添加条目如果有值(group, "HDR 处理路径", 流.HDR处理说明)
                     If 快照 IsNot Nothing AndAlso 快照.当前视频流 = 流.索引 Then
                         添加条目(group, "动态 HDR 元数据", If(快照.动态HDR元数据有效, "逐帧有效", "无或未用于输出"))
-                        If 快照.显示器峰值尼特 > 0 Then
-                            添加条目(group, "HDR 显示范围", $"峰值 {快照.显示器峰值尼特:N0} cd/m²，全屏 {快照.显示器全屏峰值尼特:N0} cd/m²")
+                        If 快照.实际色彩模式 = 色彩输出模式.峰值映射HDR Then
+                            If 快照.显示器峰值尼特 > 0 Then
+                                添加条目(group, "HDR 显示范围", $"峰值 {快照.显示器峰值尼特:0} cd/m²，全屏 {快照.显示器全屏峰值尼特:0} cd/m²")
+                            End If
+                            If 快照.HDR有效目标峰值尼特 > 0 Then 添加条目(group, "HDR 有效目标", $"{快照.HDR有效目标峰值尼特:0} cd/m²")
                         End If
-                        If 快照.HDR有效目标峰值尼特 > 0 Then 添加条目(group, "HDR 有效目标", $"{快照.HDR有效目标峰值尼特:N0} cd/m²")
                         If 快照.HDR回退有效 Then
                             Dim 回退说明 = If(快照.杜比视界增强层类型 = 杜比视界增强层类型.FEL,
                                 "HDR10 兼容输出（未使用 RPU，FEL 已忽略）",

@@ -14,6 +14,9 @@ extern "C" {
 
 #include <d3dcompiler.h>
 #include <d2d1helper.h>
+#include <roapi.h>
+#include <windows.graphics.display.h>
+#include <windows.graphics.display.interop.h>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -22,6 +25,43 @@ extern "C" {
 using Microsoft::WRL::ComPtr;
 
 namespace {
+bool ReadWindowsDisplayLuminance(const HMONITOR monitor,
+    HdrDisplayCapabilities& capabilities) noexcept {
+    if (monitor == nullptr) return false;
+    const auto initializeResult = RoInitialize(RO_INIT_MULTITHREADED);
+    const auto shouldUninitialize = SUCCEEDED(initializeResult);
+    bool read = false;
+    do {
+        HSTRING_HEADER classHeader{};
+        HSTRING className = nullptr;
+        if (FAILED(WindowsCreateStringReference(
+                RuntimeClass_Windows_Graphics_Display_DisplayInformation,
+                ARRAYSIZE(RuntimeClass_Windows_Graphics_Display_DisplayInformation) - 1,
+                &classHeader, &className))) break;
+        ComPtr<IDisplayInformationStaticsInterop> statics;
+        if (FAILED(RoGetActivationFactory(className, IID_PPV_ARGS(&statics)))) break;
+        ComPtr<ABI::Windows::Graphics::Display::IDisplayInformation5> information;
+        if (FAILED(statics->GetForMonitor(monitor, IID_PPV_ARGS(&information)))) break;
+        ComPtr<ABI::Windows::Graphics::Display::IAdvancedColorInfo> color;
+        if (FAILED(information->GetAdvancedColorInfo(&color)) || color == nullptr) break;
+        float minimum = 0.0f;
+        float maximum = 0.0f;
+        float fullFrame = 0.0f;
+        if (FAILED(color->get_MinLuminanceInNits(&minimum)) ||
+            FAILED(color->get_MaxLuminanceInNits(&maximum)) ||
+            FAILED(color->get_MaxAverageFullFrameLuminanceInNits(&fullFrame))) break;
+        if (!std::isfinite(maximum) || maximum <= 0.0f) break;
+        capabilities.maximumNits = maximum;
+        if (std::isfinite(minimum) && minimum >= 0.0f)
+            capabilities.minimumNits = minimum;
+        if (std::isfinite(fullFrame) && fullFrame > 0.0f)
+            capabilities.maximumFullFrameNits = fullFrame;
+        read = true;
+    } while (false);
+    if (shouldUninitialize) RoUninitialize();
+    return read;
+}
+
 // ABI-v1 test probe has no display target field. Runtime rendering uses
 // HdrProcessor::targetPeakNits; keep the legacy probe deterministic.
 constexpr float ColorTransformProbeTargetPeakNits = 1000.0f;
@@ -268,7 +308,7 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
 
 constexpr const char* TimedTextPixelShaderSource = R"(
 cbuffer Settings : register(b0) {
-    uint ColorMode; uint Transfer; uint Source2020; uint Reserved;
+    uint ColorMode; uint Transfer; uint Source2020; uint OverlayHdrHighlight;
     float SdrPeak; float HdrPeak; float PaperWhite; float TargetPeak;
 };
 Texture2D<float4> Overlay : register(t0);
@@ -284,7 +324,10 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     float4 value=Overlay.Sample(LinearSampler,uv);
     if(value.a<=0.000001)return 0;
     float3 straight=value.rgb/value.a;
-    if(ColorMode==2)straight=NitsToPq(To2020(ToLinear709(straight)*PaperWhite));
+    if(ColorMode==2){
+        float overlayPeak=OverlayHdrHighlight!=0?TargetPeak:PaperWhite;
+        straight=NitsToPq(To2020(ToLinear709(straight)*overlayPeak));
+    }
     return float4(straight*value.a,value.a);
 })";
 
@@ -773,6 +816,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       timedTextThreadStop_(false), timedTextThreadRunning_(false),
       presentationGeneration_(0), presentationFrameRate_(60.0f),
       timedTextRenderedSequences_{0, 0, 0}, timedTextRenderedCommandCounts_{0, 0, 0},
+      timedTextRenderedHdrHighlights_{false, false, false},
       timedTextWidths_{0, 0, 0}, timedTextHeights_{0, 0, 0}, timedTextPresentCounts_{0, 0, 0},
       backBufferAcquisitionCount_(0),
       timedTextPipelineQueryInFlight_{false, false, false},
@@ -905,13 +949,23 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
         return false;
     }
     const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
-    if (hdrSupportValid_ && monitor == hdrMonitor_) return hdrSupported_;
+    const auto previousMonitor = hdrMonitor_;
+    const auto previousCapabilities = hdrProcessor_.State().display;
+    const auto preservePrevious = hdrSupportValid_ && previousMonitor == monitor;
     hdrMonitor_ = monitor;
     hdrSupportValid_ = true;
     hdrSupported_ = false;
-    hdrProcessor_.SetDisplayCapabilities({});
     ComPtr<IDXGIFactory6> factory;
-    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+        if (preservePrevious) {
+            hdrSupported_ = previousCapabilities.supported;
+            hdrProcessor_.SetDisplayCapabilities(previousCapabilities);
+            return hdrSupported_ && (hdrPeakNits_ > 0.0f ||
+                previousCapabilities.maximumNits > 0.0f);
+        }
+        hdrProcessor_.SetDisplayCapabilities({});
+        return false;
+    }
     for (UINT adapterIndex = 0;; ++adapterIndex) {
         ComPtr<IDXGIAdapter1> adapter;
         if (factory->EnumAdapters1(adapterIndex, &adapter) == DXGI_ERROR_NOT_FOUND) break;
@@ -922,15 +976,48 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
             if (FAILED(output->GetDesc(&description)) || description.Monitor != monitor) continue;
             ComPtr<IDXGIOutput6> output6;
             DXGI_OUTPUT_DESC1 description1{};
-            if (FAILED(output.As(&output6)) || FAILED(output6->GetDesc1(&description1))) return false;
+            if (FAILED(output.As(&output6)) || FAILED(output6->GetDesc1(&description1))) {
+                if (preservePrevious) {
+                    hdrSupported_ = previousCapabilities.supported;
+                    hdrProcessor_.SetDisplayCapabilities(previousCapabilities);
+                    return hdrSupported_ && (hdrPeakNits_ > 0.0f ||
+                        previousCapabilities.maximumNits > 0.0f);
+                }
+                hdrProcessor_.SetDisplayCapabilities({});
+                return false;
+            }
             hdrSupported_ = description1.BitsPerColor >= 10 &&
                 (description1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ||
                  description1.ColorSpace == DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020);
-            hdrProcessor_.SetDisplayCapabilities({hdrSupported_, description1.MinLuminance,
-                description1.MaxLuminance, description1.MaxFullFrameLuminance});
-            return hdrSupported_;
+            HdrDisplayCapabilities capabilities{hdrSupported_, description1.MinLuminance,
+                description1.MaxLuminance, description1.MaxFullFrameLuminance};
+            // AdvancedColorInfo reflects the active Windows HDR calibration
+            // shown in Settings. Some drivers leave the DXGI luminance fields
+            // empty even though Advanced Color is active.
+            if (!ReadWindowsDisplayLuminance(monitor, capabilities) && preservePrevious &&
+                previousCapabilities.maximumNits > 0.0f) {
+                // AdvancedColorInfo can briefly fail while Windows reapplies HDR
+                // calibration. Keep the last value for this same monitor instead
+                // of dropping to the generic 1000-nit fallback.
+                capabilities.minimumNits = previousCapabilities.minimumNits;
+                capabilities.maximumNits = previousCapabilities.maximumNits;
+                capabilities.maximumFullFrameNits = previousCapabilities.maximumFullFrameNits;
+            }
+            hdrProcessor_.SetDisplayCapabilities(capabilities);
+            const auto hasDisplayPeak = capabilities.maximumNits > 0.0f;
+            // With automatic target selection, do not enter the HDR swap chain
+            // until Windows has supplied a calibrated luminance. Otherwise the
+            // first click can briefly present at the generic 1000-nit fallback.
+            return hdrSupported_ && (hdrPeakNits_ > 0.0f || hasDisplayPeak);
         }
     }
+    if (preservePrevious) {
+        hdrSupported_ = previousCapabilities.supported;
+        hdrProcessor_.SetDisplayCapabilities(previousCapabilities);
+        return hdrSupported_ && (hdrPeakNits_ > 0.0f ||
+            previousCapabilities.maximumNits > 0.0f);
+    }
+    hdrProcessor_.SetDisplayCapabilities({});
     return false;
 }
 
@@ -1856,6 +1943,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         std::lock_guard lock(timedTextMutex_);
         timedTextRenderedSequences_[slotIndex] = layer->sequence;
         timedTextRenderedCommandCounts_[slotIndex] = 0;
+        timedTextRenderedHdrHighlights_[slotIndex] = false;
         timedTextWidths_[slotIndex] = swapWidth_; timedTextHeights_[slotIndex] = swapHeight_;
         ReleaseTimedTextSlotResources(slot);
         return FFFResult::Success;
@@ -2153,6 +2241,12 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         std::lock_guard lock(timedTextMutex_);
         timedTextRenderedSequences_[slotIndex] = layer->sequence;
         timedTextRenderedCommandCounts_[slotIndex] = static_cast<std::uint32_t>(layer->commands.size());
+        timedTextRenderedHdrHighlights_[slotIndex] = std::all_of(layer->commands.begin(),
+            layer->commands.end(), [](const TimedTextRenderCommand& command) noexcept {
+                return command.type == FFF3FPTimedTextCommandType::Bitmap &&
+                    (static_cast<std::uint32_t>(command.flags) &
+                     static_cast<std::uint32_t>(FFF3FPTimedTextFlags::HdrHighlightBitmap)) != 0;
+            });
     }
     return FFFResult::Success;
 }
@@ -2178,6 +2272,10 @@ void PlayerVideoRenderer::CompositeTimedText(ID3D11RenderTargetView* target,
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(vertexShader_, nullptr, 0);
     context_->PSSetShader(timedTextPixelShader_, nullptr, 0);
+    auto overlaySettings = cachedVideoSettings_;
+    overlaySettings.colorMode = static_cast<std::uint32_t>(actualMode_);
+    overlaySettings.reserved = timedTextRenderedHdrHighlights_[slotIndex] ? 1u : 0u;
+    context_->UpdateSubresource(constants_, 0, nullptr, &overlaySettings, 0, 0);
     context_->PSSetConstantBuffers(0, 1, &constants_);
     context_->PSSetShaderResources(0, ARRAYSIZE(views), views);
     context_->PSSetSamplers(0, 1, &sampler_);
@@ -2219,6 +2317,7 @@ void PlayerVideoRenderer::ReleaseTimedTextSlotResources(
     if (timedTextTargets_[index] != nullptr) { timedTextTargets_[index]->Release(); timedTextTargets_[index] = nullptr; }
     if (timedTextTextures_[index] != nullptr) { timedTextTextures_[index]->Release(); timedTextTextures_[index] = nullptr; }
     timedTextWidths_[index] = timedTextHeights_[index] = 0;
+    timedTextRenderedHdrHighlights_[index] = false;
     timedTextPipelineQueryInFlight_[index] = false;
 }
 
@@ -2257,6 +2356,7 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
             if (resetRenderedState) {
                 timedTextRenderedSequences_[index] = 0;
                 timedTextRenderedCommandCounts_[index] = 0;
+                timedTextRenderedHdrHighlights_[index] = false;
             }
             timedTextPipelineQueryInFlight_[index] = false;
             timedTextCompositePixelInvocations_[index] = 0;
@@ -2769,6 +2869,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
             timedTextLayers_[index].reset();
             timedTextRenderedSequences_[index] = 0;
             timedTextRenderedCommandCounts_[index] = 0;
+            timedTextRenderedHdrHighlights_[index] = false;
             timedTextPresentCounts_[index] = 0;
         }
     }

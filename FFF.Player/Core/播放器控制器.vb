@@ -30,6 +30,7 @@ Public NotInheritable Class 播放器控制器
     Private 当前文件路径 As String = String.Empty
     Private 当前解码器 As 解码模式 = 解码模式.CPU
     Private 当前色彩输出 As 色彩输出模式 = 色彩输出模式.映射到SDR
+    Private HDR色彩输出偏好 As 色彩输出模式 = 色彩输出模式.映射到SDR
     Private 当前WASAPI模式 As WASAPI共享模式 = WASAPI共享模式.共享
     Private 当前音量 As Single = 1.0F
     Private 已静音 As Boolean
@@ -557,6 +558,7 @@ Public NotInheritable Class 播放器控制器
         Try
             目标.设置色彩模式(新模式, SDR峰值尼特, HDR峰值尼特, SDR纸白尼特)
             当前色彩输出 = 新模式
+            HDR色彩输出偏好 = 新模式
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
             ' 设置色彩模式会排入原生播放线程；此刻的快照仍可能是切换前的 SDR 状态。
             ' 等待色彩模式变化事件后，再基于新快照给出最终提示，避免把已成功的 HDR 误报为回退。
@@ -633,11 +635,11 @@ Public NotInheritable Class 播放器控制器
                     当前WASAPI模式 = 保留WASAPI模式
                 End If
 
-            ' 色彩输出是片源状态，不是全局播放器状态。仅重建同一片源（例如切换
-            ' 解码器）时保留用户选择；打开另一文件必须先以 SDR 映射启动，避免
-            ' 上一个 HDR 文件的 PQ/BT.2020 交换链泄漏到 SDR 文件。
-            Dim 候选色彩输出 = If(String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase),
-                                当前色彩输出, 色彩输出模式.映射到SDR)
+            ' HDR 输出策略属于播放器偏好。新片源沿用该策略；如果新片源是
+            ' SDR，会由播放器会话按源类型安全地收敛回 SDR 映射。
+            Dim 候选色彩输出 = If(
+                String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase),
+                当前色彩输出, HDR色彩输出偏好)
             候选会话 = 创建会话(解码器, 候选色彩输出)
             候选会话.设置音量(当前音量, 已静音)
             Await 候选会话.打开Async(路径, 此次取消.Token)
@@ -658,7 +660,7 @@ Public NotInheritable Class 播放器控制器
             候选会话 = Nothing
             当前文件路径 = 路径
             当前解码器 = 快照.解码器
-            当前色彩输出 = 候选色彩输出
+            当前色彩输出 = 快照.请求色彩模式
             添加会话事件(会话)
             If 保留WASAPI模式 = WASAPI共享模式.独占 Then
                 Try
@@ -1068,7 +1070,7 @@ Public NotInheritable Class 播放器控制器
                 Return "原始 HDR 按 SDR 呈现"
             Case 色彩输出模式.峰值映射HDR
                 Return If(快照.实际色彩模式 = 色彩输出模式.峰值映射HDR,
-                    $"{HDR规格文本(快照)} 真实高亮（目标 {快照.HDR有效目标峰值尼特:N0} nit）",
+                    $"{HDR规格文本(快照)} 真实高亮",
                     "HDR 目标不可用，已映射到 SDR")
             Case Else
                 Return String.Empty

@@ -240,6 +240,7 @@ Public Enum 定时文字样式
     斜体 = 2
     下划线 = 4
     删除线 = 8
+    HDR高亮位图 = 16
 End Enum
 
 Public NotInheritable Class 定时文字命令
@@ -324,16 +325,18 @@ Public NotInheritable Class 定时文字命令
     End Sub
 
     Public Shared Function 创建位图(像素BGRA As Byte(), 位图宽度 As Integer, 位图高度 As Integer,
-                                  行跨度 As Integer, 区域 As RectangleF,
-                                  Optional 内容标识 As ULong = 0) As 定时文字命令
+                                   行跨度 As Integer, 区域 As RectangleF,
+                                   Optional 内容标识 As ULong = 0,
+                                   Optional HDR高亮 As Boolean = False) As 定时文字命令
         ArgumentNullException.ThrowIfNull(像素BGRA)
         Dim result As New 定时文字命令()
-        result.设置位图(像素BGRA, 位图宽度, 位图高度, 行跨度, 区域, 内容标识)
+        result.设置位图(像素BGRA, 位图宽度, 位图高度, 行跨度, 区域, 内容标识, HDR高亮)
         Return result
     End Function
 
     Friend Sub 设置位图(像素BGRA As Byte(), 位图宽度值 As Integer, 位图高度值 As Integer,
-                      行跨度值 As Integer, 区域 As RectangleF, 内容标识值 As ULong)
+                       行跨度值 As Integer, 区域 As RectangleF, 内容标识值 As ULong,
+                       Optional HDR高亮值 As Boolean = False)
         ArgumentNullException.ThrowIfNull(像素BGRA)
         是位图 = True : 位图像素BGRA = 像素BGRA
         位图宽度 = 位图宽度值 : 位图高度 = 位图高度值 : 位图行跨度 = 行跨度值
@@ -344,7 +347,7 @@ Public NotInheritable Class 定时文字命令
         前景色ARGB = 0 : 描边色ARGB = 0 : 描边宽度 = 0
         阴影色ARGB = 0 : 阴影X偏移 = 0 : 阴影Y偏移 = 0
         水平对齐 = 定时文字对齐.靠前 : 垂直对齐 = 定时文字对齐.靠前
-        样式 = 定时文字样式.无
+        样式 = If(HDR高亮值, 定时文字样式.HDR高亮位图, 定时文字样式.无)
         内容标识 = 内容标识值
     End Sub
 End Class

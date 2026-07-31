@@ -129,6 +129,7 @@ Partial Class Form1
         ThisIsYourWindow1.IconSize = 26
         ThisIsYourWindow1.LayerShadowResizeFullArea = True
         ThisIsYourWindow1.ShadowMode = LakeUI.ThisIsYourWindow.ShadowModeEnum.Layer
+        ThisIsYourWindow1.ShowFullScreenButton = True
         ThisIsYourWindow1.TitleAlign = LakeUI.ThisIsYourWindow.TitleAlignEnum.Center
         ThisIsYourWindow1.TitleForeColor = Color.Silver
         ThisIsYourWindow1.TitleInactiveForeColor = Color.DarkGray
@@ -1009,12 +1010,15 @@ Partial Class Form1
         ' MCB_流选择器
         ' 
         MCB_流选择器.AnimationFPS = 120
+        MCB_流选择器.BackColor = Color.Transparent
+        MCB_流选择器.BackColor1 = Color.FromArgb(CByte(200), CByte(0), CByte(0), CByte(0))
         MCB_流选择器.BackdropBlurRadius = 30
-        MCB_流选择器.BackdropMode = LakeUI.ModernContextMenu.BackdropModeEnum.Auto
-        MCB_流选择器.BackdropTintColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
-        MCB_流选择器.BorderColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCB_流选择器.BackdropNoiseOpacity = CByte(0)
+        MCB_流选择器.BackdropTintColor = Color.FromArgb(CByte(180), CByte(0), CByte(0), CByte(0))
+        MCB_流选择器.BorderSize = 0
         MCB_流选择器.CheckMarkSize = 12
         MCB_流选择器.DescriptionFont = New Font("Microsoft YaHei UI", 9F)
+        MCB_流选择器.DescriptionForeColor = Color.YellowGreen
         MCB_流选择器.HoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCB_流选择器.HoverRadius = 5
         MCB_流选择器.IconSize = 0

@@ -314,7 +314,7 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
                 事件.高度 <= 0 OrElse 事件.行跨度 < 事件.宽度 * 4 Then Continue For
             添加位图命令(事件.像素BGRA, 事件.宽度, 事件.高度,
                 事件.行跨度, New RectangleF(项.X像素, 项.Y像素, 项.宽度像素, 项.高度像素),
-                CULng(Math.Max(0, 事件.序号)))
+                CULng(Math.Max(0, 事件.序号)), HDR高亮:=True)
         Next
     End Sub
 
@@ -372,9 +372,10 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     End Sub
 
     Private Sub 添加位图命令(像素BGRA As Byte(), 位图宽度 As Integer, 位图高度 As Integer,
-                          行跨度 As Integer, 区域 As RectangleF, 内容标识 As ULong)
+                           行跨度 As Integer, 区域 As RectangleF, 内容标识 As ULong,
+                           Optional HDR高亮 As Boolean = False)
         Dim command = 取得复用命令()
-        command.设置位图(像素BGRA, 位图宽度, 位图高度, 行跨度, 区域, 内容标识)
+        command.设置位图(像素BGRA, 位图宽度, 位图高度, 行跨度, 区域, 内容标识, HDR高亮)
         图层命令.Add(command)
     End Sub
 

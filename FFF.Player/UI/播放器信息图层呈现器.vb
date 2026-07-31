@@ -263,9 +263,13 @@ Friend NotInheritable Class 播放器信息图层呈现器
             Dim 文本 = 拟合文本(图形, 消息.文本, 普通字体, 最大文本宽度)
             Dim 文本宽度 = 测量文本(图形, 文本, 普通字体)
             Dim 背景高度 = 行高 + 垂直内边距 * 2.0F
+            ' Short operation messages keep a compact background; long text is
+            ' fitted first and may grow to the existing full-width limit.
+            Dim 当前背景宽度 = Math.Min(背景宽度,
+                Math.Max(1.0F, 文本宽度 + 水平内边距 * 2.0F))
             y -= 背景高度
             图层命令.Add(定时文字命令.创建位图(消息背景像素, 1, 1, 4,
-                New RectangleF(边距, y, 背景宽度, 背景高度), 2UL))
+                New RectangleF(边距, y, 当前背景宽度, 背景高度), 2UL))
             图层命令.Add(创建文字命令(文本, 普通字体, 消息.颜色,
                 New RectangleF(边距 + 水平内边距, y + 垂直内边距,
                                Math.Max(1.0F, 文本宽度 + 2.0F), 行高), 画面控件.DeviceDpi))
@@ -389,8 +393,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 杜比 = If(快照.HDR规格 = HDR格式.杜比视界 AndAlso 快照.杜比视界配置档次 > 0,
             $"P{快照.杜比视界配置档次} L{快照.杜比视界级别} {杜比层文本(快照)}", String.Empty)
         Dim 动态 = If(快照.动态HDR元数据有效, "逐帧动态元数据", String.Empty)
-        Dim 亮度 = If(快照.HDR有效目标峰值尼特 > 0,
-            $"源峰值 {快照.源峰值尼特:N0}→目标 {快照.HDR有效目标峰值尼特:N0} nit", String.Empty)
+        Dim 亮度 = If(快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
+                       快照.HDR有效目标峰值尼特 > 0,
+            $"源峰值 {快照.源峰值尼特:0}尼特   实际映射 {快照.HDR有效目标峰值尼特:0}尼特", String.Empty)
         Dim 回退 = If(快照.HDR回退有效,
             If(快照.杜比视界增强层类型 = 杜比视界增强层类型.FEL,
                "HDR10 兼容输出（FEL 已忽略）", "HDR10 兼容输出"), String.Empty)

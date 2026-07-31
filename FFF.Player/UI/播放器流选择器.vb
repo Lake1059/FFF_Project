@@ -92,10 +92,6 @@ Friend NotInheritable Class 播放器流选择器
             菜单.Items.Add(项)
         Next
 
-        Dim 导入项 = 创建流项("导入外部字幕…", False)
-        导入项.ForeColor = Color.CornflowerBlue
-        AddHandler 导入项.Click, AddressOf 导入外部字幕
-        菜单.Items.Add(导入项)
         居中显示()
     End Sub
 
@@ -117,18 +113,6 @@ Friend NotInheritable Class 播放器流选择器
     Private Shared Function 创建流项(文本 As String, 已选择 As Boolean) As LakeUI.ModernContextMenu.ModernMenuItem
         Return New LakeUI.ModernContextMenu.ModernMenuItem(文本) With {.Checked = 已选择}
     End Function
-
-    Private Sub 导入外部字幕(sender As Object, e As EventArgs)
-        If Not 播放控制器.是否有媒体 Then Return
-        Using 对话框 As New OpenFileDialog With {
-            .CheckFileExists = True,
-            .Filter = "字幕文件|*.srt;*.ass;*.ssa;*.sup|所有文件|*.*",
-            .RestoreDirectory = True,
-            .Title = "导入外部字幕"
-        }
-            If 对话框.ShowDialog(所属窗体) = DialogResult.OK Then 播放控制器.替换字幕(对话框.FileName)
-        End Using
-    End Sub
 
     Private Shared Function 格式化视频流(流 As 媒体流信息) As String
         Dim 参数 As New List(Of String) From {编码名称(流.编码, 流.配置档次)}
