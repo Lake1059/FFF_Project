@@ -10,6 +10,7 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/imgutils.h>
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/dict.h>
@@ -18,6 +19,7 @@ extern "C" {
 
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <cmath>
 #include <chrono>
 
@@ -25,6 +27,9 @@ namespace {
 constexpr std::int64_t TicksPerSecond = 10'000'000;
 constexpr std::size_t MaxQueuedVideoFrames = 8;
 constexpr std::size_t MinimumQueuedVideoFrames = 3;
+constexpr std::size_t MinimumMemoryBoundVideoFrames = 2;
+constexpr std::size_t DecodedVideoQueueBudgetBytes = 128 * 1024 * 1024;
+constexpr std::uint32_t MaximumSoftwareDecoderThreads = 8;
 constexpr std::int64_t TargetVideoLookAhead100ns = 1'500'000;
 // Buffered100ns includes both application PCM and samples already submitted to
 // WASAPI.  Keep the complete audible queue short so seek, stream/volume changes
@@ -35,6 +40,52 @@ constexpr std::size_t MaximumPendingVideoPackets = 64;
 constexpr std::size_t MaximumPendingVideoPacketBytes = 16 * 1024 * 1024;
 constexpr std::size_t MaximumPendingAudioPackets = 512;
 constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
+
+std::size_t EstimateDecodedFrameBytes(const AVFrame* frame) noexcept {
+    if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return 0;
+    auto format = static_cast<AVPixelFormat>(frame->format);
+    if (frame->hw_frames_ctx != nullptr) {
+        const auto* frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
+        if (frames != nullptr) format = frames->sw_format;
+    }
+    const auto size = av_image_get_buffer_size(format, frame->width, frame->height, 1);
+    if (size > 0) return static_cast<std::size_t>(size);
+    const auto pixels = static_cast<std::uint64_t>(frame->width) * frame->height;
+    return static_cast<std::size_t>(std::min<std::uint64_t>(
+        pixels * 4u, std::numeric_limits<std::size_t>::max()));
+}
+
+std::size_t VideoFrameQueueLimit(const std::deque<AVFrame*>& queue) noexcept {
+    if (queue.empty()) return MaxQueuedVideoFrames;
+    const auto bytesPerFrame = EstimateDecodedFrameBytes(queue.back());
+    if (bytesPerFrame == 0) return MaxQueuedVideoFrames;
+    const auto memoryBound = DecodedVideoQueueBudgetBytes / bytesPerFrame;
+    return std::clamp(memoryBound, MinimumMemoryBoundVideoFrames, MaxQueuedVideoFrames);
+}
+
+void ApplyHdrState(FFF3FPSnapshot& snapshot, const HdrFrameState& hdr) noexcept {
+    const auto toUnsigned = [](const float value, const float scale = 1.0f) {
+        if (!std::isfinite(value) || value <= 0.0f) return 0u;
+        return static_cast<std::uint32_t>(std::lround(std::min(
+            static_cast<double>(value) * scale,
+            static_cast<double>(std::numeric_limits<std::uint32_t>::max()))));
+    };
+    snapshot.hdrFormat = hdr.format;
+    snapshot.compatibleHdrFormats = hdr.compatibility;
+    snapshot.hdrProcessingPath = hdr.processingPath;
+    snapshot.dolbyVisionProfile = hdr.dolbyVisionProfile;
+    snapshot.dolbyVisionLevel = hdr.dolbyVisionLevel;
+    snapshot.hasDolbyVisionRpu = hdr.hasRpu ? 1u : 0u;
+    snapshot.hasDolbyVisionEnhancementLayer = hdr.hasEnhancementLayer ? 1u : 0u;
+    snapshot.dolbyVisionEnhancementLayer = hdr.enhancementLayer;
+    snapshot.dynamicHdrMetadataActive = hdr.dynamicMetadata ? 1u : 0u;
+    snapshot.hdrFallbackActive = hdr.fallback ? 1u : 0u;
+    snapshot.displayMinLuminanceMilliNits = toUnsigned(hdr.display.minimumNits, 1000.0f);
+    snapshot.displayPeakNits = toUnsigned(hdr.display.maximumNits);
+    snapshot.displayFullFramePeakNits = toUnsigned(hdr.display.maximumFullFrameNits);
+    snapshot.effectiveTargetPeakNits = toUnsigned(hdr.targetPeakNits);
+    snapshot.isHdrSource = hdr.format == FFF3FPHdrFormat::Sdr ? 0u : 1u;
+}
 
 bool ReadLeb128(const std::uint8_t* data, const std::size_t size,
     std::size_t& offset, std::uint64_t& value) noexcept {
@@ -340,7 +391,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       draining_(false), staticImage_(false), hardwareFallbackPending_(false), internalAudioFailurePending_(false),
       internalAudioFailureResult_(FFFResult::Success), internalAudioDecodeErrorCount_(0) {
     snapshot_ = {};
-    snapshot_.size = sizeof(snapshot_); snapshot_.version = 5; snapshot_.state = FFF3FPState::Idle;
+    snapshot_.size = sizeof(snapshot_); snapshot_.version = 7; snapshot_.state = FFF3FPState::Idle;
     snapshot_.decodeMode = configuration.decodeMode; snapshot_.requestedColorMode = configuration.colorMode;
     snapshot_.actualColorMode = FFF3FPColorMode::MapToSdr; snapshot_.frameIndex = -1;
     snapshot_.framePts = AV_NOPTS_VALUE; snapshot_.selectedVideoStream = -1; snapshot_.selectedAudioStream = -1;
@@ -704,7 +755,7 @@ FFFResult PlayerSession::ClearExternalAudio() noexcept {
 FFFResult PlayerSession::SetExternalAudioOffset(const std::int64_t offset) noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, offset] { externalAudioOffset100ns_ = offset; snapshot_.externalAudioOffset100ns = offset; if (externalFormat_) DoSeek(snapshot_.position100ns); else PublishSnapshot(); }); return FFFResult::Success; }
 FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sdr, const float hdr, const float paper) noexcept {
     if (mode > FFF3FPColorMode::MapToHdr || !std::isfinite(sdr) || sdr <= 0 ||
-        !std::isfinite(hdr) || hdr <= 0 || hdr > 10000 || !std::isfinite(paper) || paper <= 0)
+        !std::isfinite(hdr) || hdr < 0 || hdr > 10000 || !std::isfinite(paper) || paper <= 0)
         return FFFResult::InvalidArgument;
     Enqueue([this, mode, sdr, hdr, paper] {
         const auto forceSdr = mode == FFF3FPColorMode::MapToHdr && snapshot_.isHdrSource == 0;
@@ -1188,7 +1239,7 @@ FFFResult PlayerSession::GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcep
 }
 
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
-    if (output.size < sizeof(FFF3FPSnapshot) || output.version != 6) return FFFResult::InvalidArgument;
+    if (output.size < sizeof(FFF3FPSnapshot) || output.version != 7) return FFFResult::InvalidArgument;
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
     // Presentation completes asynchronously on the dedicated swap-chain owner;
     // expose its live counters even if no later decode-frame snapshot was needed.
@@ -1332,15 +1383,16 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
     auto result = avcodec_parameters_to_context(context, stream->codecpar);
     context->pkt_timebase = stream->time_base;
     if (result >= 0 && video && !hardwareRequested) {
-        context->thread_count = 0;
+        const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+        context->thread_count = static_cast<int>(std::min(
+            hardwareThreads, MaximumSoftwareDecoderThreads));
         context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     }
     if (result >= 0 && hardwareRequested) {
-        // AV1 and deeply reordered streams retain several reference surfaces
-        // while the presentation queue owns up to eight more. FFmpeg's default
-        // fixed D3D11VA pool (12 on this AV1 path) otherwise exhausts after a
-        // few seconds and incorrectly triggers software fallback.
-        context->extra_hw_frames = std::max(context->extra_hw_frames, 16);
+        // The decoder already allocates its codec-specific DPB. Extra surfaces
+        // only cover the bounded presentation queue plus in-flight copies.
+        context->extra_hw_frames = std::max(context->extra_hw_frames,
+            static_cast<int>(MaxQueuedVideoFrames + 2));
         AVBufferRef* hardwareDevice = nullptr;
         if (deviceType == AV_HWDEVICE_TYPE_D3D11VA) {
             const auto shared = videoRenderer_.CreateD3D11HardwareDeviceContext(&hardwareDevice);
@@ -1478,6 +1530,8 @@ void PlayerSession::DoOpen(std::string path) noexcept {
             snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
     }
     if (audioStream_ >= 0 && OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success) audioStream_ = -1;
+    videoRenderer_.ConfigureHdrStream(videoStream_ >= 0 ?
+        format_->streams[videoStream_]->codecpar : nullptr);
     if (audioStream_ >= 0 && !audioExclusive_) {
         std::string audioError;
         const auto result = RecreateAudioRenderer(audioEndpointId_, audioExclusive_, true, audioError);
@@ -1500,7 +1554,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         snapshot_.position100ns = 0; snapshot_.frameIndex = -1; snapshot_.framePts = AV_NOPTS_VALUE;
         snapshot_.selectedVideoStream = videoStream_; snapshot_.selectedAudioStream = audioStream_;
         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
-        if (videoStream_ >= 0) { snapshot_.videoWidth = videoDecoder_->width; snapshot_.videoHeight = videoDecoder_->height; const auto* parameters = format_->streams[videoStream_]->codecpar; snapshot_.isHdrSource = parameters->color_trc == AVCOL_TRC_SMPTE2084 || parameters->color_trc == AVCOL_TRC_ARIB_STD_B67; }
+        if (videoStream_ >= 0) { snapshot_.videoWidth = videoDecoder_->width; snapshot_.videoHeight = videoDecoder_->height; ApplyHdrState(snapshot_, videoRenderer_.HdrState()); }
         else if (coverArtFrame_ != nullptr) { snapshot_.videoWidth = coverArtFrame_->width; snapshot_.videoHeight = coverArtFrame_->height; snapshot_.isHdrSource = 0; }
         if (snapshot_.isHdrSource == 0 && snapshot_.requestedColorMode == FFF3FPColorMode::MapToHdr) {
             snapshot_.requestedColorMode = FFF3FPColorMode::MapToSdr;
@@ -1653,7 +1707,8 @@ void PlayerSession::PumpPlayback() noexcept {
     const auto videoSaturated = [&] {
         if (videoFrameQueue_.empty()) return false;
         const auto lookAhead = VideoFramePosition(videoFrameQueue_.back()) - ClockPosition();
-        return videoFrameQueue_.size() >= MaxQueuedVideoFrames - 1 ||
+        const auto queueLimit = VideoFrameQueueLimit(videoFrameQueue_);
+        return videoFrameQueue_.size() >= std::max<std::size_t>(1, queueLimit - 1) ||
             (videoFrameQueue_.size() >= MinimumQueuedVideoFrames &&
                 lookAhead >= TargetVideoLookAhead100ns);
     };
@@ -1858,7 +1913,8 @@ bool PlayerSession::PumpVideoPresentation() noexcept {
         return true;
     }
     const auto lookAhead = VideoFramePosition(videoFrameQueue_.back()) - now;
-    const auto saturated = videoFrameQueue_.size() >= MaxQueuedVideoFrames - 1 ||
+    const auto queueLimit = VideoFrameQueueLimit(videoFrameQueue_);
+    const auto saturated = videoFrameQueue_.size() >= std::max<std::size_t>(1, queueLimit - 1) ||
         (videoFrameQueue_.size() >= MinimumQueuedVideoFrames &&
             lookAhead >= TargetVideoLookAhead100ns);
     // Continue demuxing toward audio while video is ahead, retaining compressed
@@ -2050,6 +2106,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     snapshot_.frameTimeBaseDenominator = stream->time_base.den;
     snapshot_.actualColorMode = videoRenderer_.ActualColorMode();
     snapshot_.sourcePeakNits = static_cast<std::uint32_t>(std::lround(videoRenderer_.SourcePeakNits()));
+    ApplyHdrState(snapshot_, videoRenderer_.HdrState());
     UpdateAudioDiagnostics();
     PublishSnapshot();
     if (firstFrameForMedia) RebuildMediaInfo();
@@ -2331,7 +2388,7 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         snapshot_.decodeMode = decodeMode_;
     }
     if (result != FFFResult::Success) { ReportError(result, "Could not open the selected media stream.", "select-stream"); return; }
-    if (video) { if (videoDecoder_) avcodec_free_context(&videoDecoder_); videoDecoder_ = replacement; videoStream_ = index; snapshot_.selectedVideoStream = index; framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false; }
+    if (video) { if (videoDecoder_) avcodec_free_context(&videoDecoder_); videoDecoder_ = replacement; videoStream_ = index; snapshot_.selectedVideoStream = index; videoRenderer_.ConfigureHdrStream(format_->streams[index]->codecpar); ApplyHdrState(snapshot_, videoRenderer_.HdrState()); framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false; }
     else {
         if (audioDecoder_) avcodec_free_context(&audioDecoder_);
         audioDecoder_ = replacement; audioStream_ = index; snapshot_.selectedAudioStream = index;
@@ -2425,6 +2482,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
         snapshot_.softwareConvert100ns = 0;
         snapshot_.videoBitRate = snapshot_.audioBitRate = 0;
         snapshot_.queuedVideoFrames = 0; snapshot_.sourcePeakNits = 0;
+        ApplyHdrState(snapshot_, {});
         // During same-HWND media replacement the flip chain is intentionally
         // retained. Keep reporting its real mode while Opening; the next source
         // commits SDR only after ForceSdrOutputForSdrSource has reconfigured DXGI.
@@ -2536,7 +2594,12 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                  << ",\"sampleAspectDenominator\":" << sampleAspect.den
                  << ",\"displayAspectNumerator\":" << displayAspect.num
                  << ",\"displayAspectDenominator\":" << displayAspect.den
-                  << ",\"hdr\":" << ((parameters->color_trc == AVCOL_TRC_SMPTE2084 || parameters->color_trc == AVCOL_TRC_ARIB_STD_B67) ? "true" : "false")
+                  << ",\"hdr\":" << ((parameters->color_trc == AVCOL_TRC_SMPTE2084 ||
+                    parameters->color_trc == AVCOL_TRC_ARIB_STD_B67 ||
+                    av_packet_side_data_get(parameters->coded_side_data,
+                        parameters->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF) != nullptr ||
+                    av_packet_side_data_get(parameters->coded_side_data,
+                        parameters->nb_coded_side_data, AV_PKT_DATA_DYNAMIC_HDR10_PLUS) != nullptr) ? "true" : "false")
                   << ",\"attachedPicture\":" << ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0 ? "true" : "false");
             const auto pixelFormat = static_cast<AVPixelFormat>(parameters->format);
             const auto* pixelFormatName = av_get_pix_fmt_name(pixelFormat);
@@ -2584,12 +2647,20 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                 parameters->nb_coded_side_data, AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
             const auto* lightData = av_packet_side_data_get(parameters->coded_side_data,
                 parameters->nb_coded_side_data, AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
-            std::string hdrFormat;
-            if (parameters->color_trc == AVCOL_TRC_SMPTE2084)
-                hdrFormat = masteringData != nullptr ? "SMPTE ST 2086, HDR10 兼容" : "HDR10 / PQ";
-            else if (parameters->color_trc == AVCOL_TRC_ARIB_STD_B67)
-                hdrFormat = "HLG";
-            json << ",\"hdrFormat\":\"" << EscapeJson(hdrFormat) << "\"";
+            HdrProcessor streamHdr;
+            streamHdr.ConfigureStream(parameters);
+            const auto hdr = static_cast<std::int32_t>(index) == videoStream_
+                ? videoRenderer_.HdrState() : streamHdr.State();
+            json << ",\"hdrFormat\":\"" << EscapeJson(HdrProcessor::FormatName(hdr.format)) << "\""
+                 << ",\"hdrCompatibility\":\"" << EscapeJson(HdrProcessor::CompatibilityNames(hdr.compatibility)) << "\""
+                 << ",\"hdrProcessingPath\":\"" << EscapeJson(HdrProcessor::ProcessingPathName(hdr.processingPath)) << "\""
+                 << ",\"dolbyVisionProfile\":" << hdr.dolbyVisionProfile
+                 << ",\"dolbyVisionLevel\":" << hdr.dolbyVisionLevel
+                 << ",\"dolbyVisionRpu\":" << (hdr.hasRpu ? "true" : "false")
+                 << ",\"dolbyVisionEnhancementLayer\":\""
+                 << EscapeJson(HdrProcessor::EnhancementLayerName(hdr.enhancementLayer)) << "\""
+                 << ",\"hdrFallback\":" << (hdr.fallback ? "true" : "false")
+                 << ",\"dynamicHdrMetadata\":" << (hdr.dynamicMetadata ? "true" : "false");
             if (masteringData != nullptr && masteringData->size >= sizeof(AVMasteringDisplayMetadata)) {
                 const auto* mastering = reinterpret_cast<const AVMasteringDisplayMetadata*>(masteringData->data);
                 std::string primaries;

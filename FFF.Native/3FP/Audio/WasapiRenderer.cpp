@@ -17,7 +17,8 @@ extern "C" {
 using Microsoft::WRL::ComPtr;
 
 namespace {
-constexpr std::size_t MaximumReusableAudioBuffers = 32;
+constexpr std::size_t MaximumReusableAudioBuffers = 8;
+constexpr std::size_t MaximumReusableAudioBufferBytes = 1024 * 1024;
 
 class ComInitialization final {
 public:
@@ -767,7 +768,8 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
                     chunk.offset += bytes; write += bytes; remaining -= bytes;
                 }
                 if (chunk.silenceBytes == 0 && chunk.offset == chunk.bytes.size()) {
-                    if (reusableBuffers_.size() < MaximumReusableAudioBuffers) {
+                    if (chunk.bytes.capacity() <= MaximumReusableAudioBufferBytes &&
+                        reusableBuffers_.size() < MaximumReusableAudioBuffers) {
                         chunk.bytes.clear();
                         reusableBuffers_.push_back(std::move(chunk.bytes));
                     }

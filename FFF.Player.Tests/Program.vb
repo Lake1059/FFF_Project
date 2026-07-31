@@ -34,6 +34,31 @@ Friend Module Program
     End Structure
 
     <StructLayout(LayoutKind.Sequential)>
+    Private Structure 原生HDR处理探针
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 传递函数 As UInteger
+        Public 杜比配置档次 As UInteger
+        Public 杜比级别 As UInteger
+        Public 杜比兼容标识 As UInteger
+        Public 有RPU As UInteger
+        Public 有增强层 As UInteger
+        Public 杜比残差 As UInteger
+        Public 有HDR10Plus As UInteger
+        Public 有HDRVivid As UInteger
+        Public 显示峰值 As Single
+        Public 显示全屏峰值 As Single
+        Public 目标峰值覆盖 As Single
+        Public 输出格式 As UInteger
+        Public 输出兼容格式 As UInteger
+        Public 输出处理路径 As UInteger
+        Public 输出增强层 As UInteger
+        Public 输出动态元数据 As UInteger
+        Public 输出回退 As UInteger
+        Public 输出目标峰值 As UInteger
+    End Structure
+
+    <StructLayout(LayoutKind.Sequential)>
     Private Structure 原生定时文字栅格诊断
         Public 大小 As UInteger
         Public 版本 As UInteger
@@ -57,6 +82,10 @@ Friend Module Program
     End Function
 
     <DllImport("FFF.Native.dll", CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Private Function FFF3FP_EvaluateHdrProcessing(ByRef 探针 As 原生HDR处理探针) As Integer
+    End Function
+
+    <DllImport("FFF.Native.dll", CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Private Function FFF3FP_EvaluateTimedTextRasterization(ByRef 诊断 As 原生定时文字栅格诊断) As Integer
     End Function
 
@@ -64,6 +93,11 @@ Friend Module Program
     Public Function Main(参数 As String()) As Integer
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2)
         Try
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--hdr-processing-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试HDR规格处理策略()
+                Console.WriteLine("HDR10/HDR10+/HLG/Vivid、Dolby Profile/FEL 回退与显示峰值策略通过。")
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--audio-latency-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试音频延迟回归()
                 Console.WriteLine("无画面 PCM 音频延迟与欠载回归通过。")
@@ -242,6 +276,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --information-overlay-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --empty-layer-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --hdr-switch-regression <HDR视频>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --hdr-processing-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --gpu-decode-matrix <视频目录>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --video-scaling-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sdr-pixel-regression <视频> <参考图.png>")
@@ -285,6 +320,63 @@ Friend Module Program
             Console.Error.WriteLine($"测试失败：{ex.Message}")
             Return 1
         End Try
+    End Function
+
+    Private Sub 测试HDR规格处理策略()
+        Dim P5 = 执行HDR探针(1UI, 5UI, 9UI, 0UI, True, False, 0UI, False, False, 720.0F, 0.0F)
+        断言(P5.输出格式 = 4UI AndAlso P5.输出处理路径 = 4UI AndAlso
+           P5.输出兼容格式 = 4UI AndAlso P5.输出回退 = 1UI AndAlso
+           P5.输出动态元数据 = 0UI,
+           "Dolby Vision P5 没有进入未授权 HDR10 受限回退。")
+
+        Dim P7MEL = 执行HDR探针(1UI, 7UI, 6UI, 1UI, True, True, 1UI, False, False, 720.0F, 0.0F)
+        断言(P7MEL.输出格式 = 4UI AndAlso P7MEL.输出处理路径 = 4UI AndAlso
+           P7MEL.输出增强层 = 1UI AndAlso P7MEL.输出回退 = 1UI AndAlso
+           P7MEL.输出动态元数据 = 0UI AndAlso (P7MEL.输出兼容格式 And 1UI) <> 0,
+           "Dolby Vision P7 MEL 没有使用 HDR10 基础层回退。")
+
+        Dim P7FEL = 执行HDR探针(1UI, 7UI, 6UI, 1UI, True, True, 2UI, False, False, 720.0F, 0.0F)
+        断言(P7FEL.输出处理路径 = 5UI AndAlso P7FEL.输出增强层 = 2UI AndAlso
+           P7FEL.输出回退 = 1UI AndAlso P7FEL.输出动态元数据 = 0UI,
+           "Dolby Vision P7 FEL 没有明确报告 BL 基础层回退。")
+
+        Dim P81 = 执行HDR探针(1UI, 8UI, 6UI, 1UI, True, False, 0UI, False, False, 720.0F, 0.0F)
+        断言((P81.输出兼容格式 And 1UI) <> 0 AndAlso P81.输出处理路径 = 4UI AndAlso
+           P81.输出回退 = 1UI AndAlso P81.输出动态元数据 = 0UI,
+           "Dolby Vision P8.1 没有识别 HDR10 兼容基础层。")
+
+        Dim P84 = 执行HDR探针(2UI, 8UI, 6UI, 4UI, True, False, 0UI, False, False, 720.0F, 0.0F)
+        断言((P84.输出兼容格式 And 2UI) <> 0 AndAlso (P84.输出兼容格式 And 1UI) = 0 AndAlso
+           P84.输出处理路径 = 4UI AndAlso P84.输出回退 = 1UI AndAlso
+           P84.输出动态元数据 = 0UI,
+           "Dolby Vision P8.4 没有识别 HLG 兼容基础层。")
+
+        Dim HDR10Plus = 执行HDR探针(1UI, 0UI, 0UI, 0UI, False, False, 0UI, True, False, 720.0F, 0.0F)
+        断言(HDR10Plus.输出格式 = 2UI AndAlso HDR10Plus.输出处理路径 = 2UI AndAlso
+           HDR10Plus.输出动态元数据 = 1UI AndAlso HDR10Plus.输出目标峰值 = 720UI,
+           "HDR10+ 动态元数据或自动显示峰值策略错误。")
+
+        Dim Vivid覆盖 = 执行HDR探针(1UI, 0UI, 0UI, 0UI, False, False, 0UI, False, True, 720.0F, 1250.0F)
+        断言(Vivid覆盖.输出格式 = 5UI AndAlso Vivid覆盖.输出处理路径 = 6UI AndAlso
+           Vivid覆盖.输出动态元数据 = 1UI AndAlso Vivid覆盖.输出目标峰值 = 1250UI,
+           "HDR Vivid 或用户目标峰值覆盖策略错误。")
+    End Sub
+
+    Private Function 执行HDR探针(传递 As UInteger, 配置档次 As UInteger, 级别 As UInteger,
+                             兼容标识 As UInteger, RPU As Boolean, 增强层 As Boolean,
+                             残差 As UInteger, HDR10Plus As Boolean, Vivid As Boolean,
+                             显示峰值 As Single, 覆盖 As Single) As 原生HDR处理探针
+        Dim 探针 As New 原生HDR处理探针 With {
+            .大小 = CUInt(Marshal.SizeOf(Of 原生HDR处理探针)()), .版本 = 1UI,
+            .传递函数 = 传递, .杜比配置档次 = 配置档次, .杜比级别 = 级别,
+            .杜比兼容标识 = 兼容标识, .有RPU = If(RPU, 1UI, 0UI),
+            .有增强层 = If(增强层, 1UI, 0UI), .杜比残差 = 残差,
+            .有HDR10Plus = If(HDR10Plus, 1UI, 0UI), .有HDRVivid = If(Vivid, 1UI, 0UI),
+            .显示峰值 = 显示峰值, .显示全屏峰值 = 显示峰值 * 0.6F,
+            .目标峰值覆盖 = 覆盖}
+        Dim 结果 = FFF3FP_EvaluateHdrProcessing(探针)
+        断言(结果 = 0, $"原生 HDR 处理探针失败：{结果}。")
+        Return 探针
     End Function
 
     Private Sub 测试SUP时间轴(SUP路径 As String)
@@ -1008,7 +1100,8 @@ Friend Module Program
                 .索引 = 0, .类型 = "video", .编码 = "av1", .像素格式 = "yuv420p10le",
                 .宽度 = 1920, .高度 = 1080, .平均帧率分子 = 24000, .平均帧率分母 = 1001,
                 .比特率 = 5_000_000, .色度抽样 = "4:2:0", .色彩空间 = 9,
-                .色彩原色 = 9, .色彩传递 = 16, .色彩范围 = 1})
+                .色彩原色 = 9, .色彩传递 = 16, .色彩范围 = 1,
+                .是HDR = True, .HDR格式 = "HDR10+", .HDR兼容规格 = "HDR10"})
             信息.流.Add(New 媒体流信息 With {
                 .索引 = 1, .类型 = "audio", .编码 = "flac", .采样率 = 48000,
                 .原始采样位数 = 24, .声道数 = 2, .比特率 = 1_411_200,
@@ -1022,7 +1115,9 @@ Friend Module Program
                 .时长100纳秒 = TimeSpan.FromHours(2).Ticks, .当前视频流 = 0, .当前音频流 = 1,
                  .视频队列帧数 = 3UI, .已丢弃视频帧数 = 7UL, .已合并视频帧数 = 5UL,
                  .视频实时比特率 = 5_000_000UL, .音频实时比特率 = 1_411_200UL,
-                 .视频输出位深度 = 10UI,
+                .视频输出位深度 = 10UI,
+                .HDR格式 = CUInt(HDR格式.HDR10Plus), .动态HDR元数据有效 = 1UI,
+                .源峰值尼特 = 1242UI, .HDR有效目标峰值尼特 = 750UI,
                 .音频缓冲100纳秒 = TimeSpan.FromMilliseconds(25).Ticks})
 
             Using 画面 As New 播放器画面控件 With {.ClientSize = New Size(2560, 1440)}
@@ -1042,6 +1137,7 @@ Friend Module Program
                         "视频：AV1 - CPU",
                         "输入：格式 YUV420P10LE   分辨率 1920x1080   帧率 23.976fps   实时码率 5 Mbps",
                         "色彩：采样 420   颜色矩阵 BT.2020   色域 BT.2020   传输特性 PQ   范围 Limited",
+                        "HDR：HDR10+   逐帧动态元数据   源峰值 1,242→目标 750 nit",
                         "输出：格式 RGB10A2 (10bit)   分辨率 2560x1440   色彩模式 映射 SDR",
                         "渲染：帧率 23.98fps   缓冲池 3帧   实时丢帧 2   总丢帧 12",
                         "音频：FLAC - WASAPI 独占",
@@ -1058,10 +1154,12 @@ Friend Module Program
                         "信息层仍泄漏字幕/弹幕文件名或使用旧分隔符。")
                     Dim 色彩模式方法 = GetType(播放器信息图层呈现器).GetMethod(
                         "色彩模式文本", BindingFlags.Static Or BindingFlags.NonPublic)
+                    Dim SDR快照 As New 播放器快照(New 原生播放器快照 With {
+                        .实际色彩模式 = CUInt(色彩输出模式.映射到SDR)})
                     断言(String.Equals(CStr(色彩模式方法?.Invoke(Nothing,
-                        New Object() {色彩输出模式.映射到SDR, False})), "SDR", StringComparison.Ordinal) AndAlso
+                        New Object() {SDR快照})), "SDR", StringComparison.Ordinal) AndAlso
                         String.Equals(CStr(色彩模式方法?.Invoke(Nothing,
-                        New Object() {色彩输出模式.映射到SDR, True})), "映射 SDR", StringComparison.Ordinal),
+                        New Object() {快照})), "映射 SDR", StringComparison.Ordinal),
                         "信息层没有区分 SDR 片源与 HDR→SDR 映射。")
 
                     Using 按需字幕 As New 外部字幕轨道("C:\diagnostic\effect.ass",

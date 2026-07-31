@@ -17,6 +17,32 @@ Public Enum 视频缩放模式 As UInteger
     D3D11视频处理器 = 1
 End Enum
 
+Public Enum HDR格式 As UInteger
+    SDR = 0
+    HDR10 = 1
+    HDR10Plus = 2
+    HLG = 3
+    杜比视界 = 4
+    HDRVivid = 5
+End Enum
+
+Public Enum HDR处理路径 As UInteger
+    无 = 0
+    HDR10静态元数据 = 1
+    HDR10Plus动态映射 = 2
+    HLG显示器映射 = 3
+    杜比视界兼容基础层回退 = 4
+    杜比视界FEL基础层回退 = 5
+    HDRVivid动态映射 = 6
+End Enum
+
+Public Enum 杜比视界增强层类型 As UInteger
+    无 = 0
+    MEL = 1
+    FEL = 2
+    未知 = 3
+End Enum
+
 Public Enum 播放状态 As UInteger
     空闲 = 0
     正在打开 = 1
@@ -47,7 +73,8 @@ Public NotInheritable Class 播放器配置
     Public Property 解码器 As 解码模式
     Public Property 色彩模式 As 色彩输出模式 = 色彩输出模式.映射到SDR
     Public Property SDR峰值尼特 As Single = 100.0F
-    Public Property HDR峰值尼特 As Single = 1000.0F
+    ' 0 = 自动使用显示器能力；正值由未来的用户峰值设置覆盖。
+    Public Property HDR峰值尼特 As Single = 0.0F
     Public Property SDR纸白尼特 As Single = 203.0F
     Public Property 输出窗口句柄 As IntPtr
     Public Property 音频端点标识 As String = String.Empty
@@ -57,7 +84,7 @@ Public NotInheritable Class 播放器配置
         If 解码器 = 解码模式.未指定 Then Throw New ArgumentException("必须由调用方明确选择 CPU 或 GPU 解码。", NameOf(解码器))
         If 解码器 <> 解码模式.CPU AndAlso 解码器 <> 解码模式.GPU Then Throw New ArgumentOutOfRangeException(NameOf(解码器))
         If SDR峰值尼特 <= 0 OrElse Not Single.IsFinite(SDR峰值尼特) Then Throw New ArgumentOutOfRangeException(NameOf(SDR峰值尼特))
-        If HDR峰值尼特 <= 0 OrElse HDR峰值尼特 > 10000 OrElse Not Single.IsFinite(HDR峰值尼特) Then Throw New ArgumentOutOfRangeException(NameOf(HDR峰值尼特))
+        If HDR峰值尼特 < 0 OrElse HDR峰值尼特 > 10000 OrElse Not Single.IsFinite(HDR峰值尼特) Then Throw New ArgumentOutOfRangeException(NameOf(HDR峰值尼特))
         If SDR纸白尼特 <= 0 OrElse Not Single.IsFinite(SDR纸白尼特) Then Throw New ArgumentOutOfRangeException(NameOf(SDR纸白尼特))
     End Sub
 End Class
@@ -126,6 +153,20 @@ Public NotInheritable Class 播放器快照
         视频输出位深度 = CInt(值.视频输出位深度)
         视频缩放 = CType(值.视频缩放模式, 视频缩放模式)
         时间轴代次 = 值.时间轴代次
+        HDR规格 = CType(值.HDR格式, HDR格式)
+        兼容HDR规格 = 值.兼容HDR格式
+        HDR处理路径 = CType(值.HDR处理路径, HDR处理路径)
+        杜比视界配置档次 = CInt(值.杜比视界配置档次)
+        杜比视界级别 = CInt(值.杜比视界级别)
+        有杜比视界RPU = 值.有杜比视界RPU <> 0
+        有杜比视界增强层 = 值.有杜比视界增强层 <> 0
+        杜比视界增强层类型 = CType(值.杜比视界增强层类型, 杜比视界增强层类型)
+        动态HDR元数据有效 = 值.动态HDR元数据有效 <> 0
+        HDR回退有效 = 值.HDR回退有效 <> 0
+        显示器最小亮度 = 值.显示器最小亮度毫尼特 / 1000.0F
+        显示器峰值尼特 = 值.显示器峰值尼特
+        显示器全屏峰值尼特 = 值.显示器全屏峰值尼特
+        HDR有效目标峰值尼特 = 值.HDR有效目标峰值尼特
     End Sub
 
     Public ReadOnly Property 状态 As 播放状态
@@ -170,6 +211,20 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 视频输出位深度 As Integer
     Public ReadOnly Property 视频缩放 As 视频缩放模式
     Public ReadOnly Property 时间轴代次 As ULong
+    Public ReadOnly Property HDR规格 As HDR格式
+    Public ReadOnly Property 兼容HDR规格 As UInteger
+    Public ReadOnly Property HDR处理路径 As HDR处理路径
+    Public ReadOnly Property 杜比视界配置档次 As Integer
+    Public ReadOnly Property 杜比视界级别 As Integer
+    Public ReadOnly Property 有杜比视界RPU As Boolean
+    Public ReadOnly Property 有杜比视界增强层 As Boolean
+    Public ReadOnly Property 杜比视界增强层类型 As 杜比视界增强层类型
+    Public ReadOnly Property 动态HDR元数据有效 As Boolean
+    Public ReadOnly Property HDR回退有效 As Boolean
+    Public ReadOnly Property 显示器最小亮度 As Single
+    Public ReadOnly Property 显示器峰值尼特 As UInteger
+    Public ReadOnly Property 显示器全屏峰值尼特 As UInteger
+    Public ReadOnly Property HDR有效目标峰值尼特 As UInteger
 End Class
 
 Public Enum 定时文字对齐
@@ -473,6 +528,22 @@ Public NotInheritable Class 媒体流信息
     Public Property 编码级别 As Integer
     <JsonPropertyName("hdrFormat")>
     Public Property HDR格式 As String = String.Empty
+    <JsonPropertyName("hdrCompatibility")>
+    Public Property HDR兼容规格 As String = String.Empty
+    <JsonPropertyName("hdrProcessingPath")>
+    Public Property HDR处理说明 As String = String.Empty
+    <JsonPropertyName("dolbyVisionProfile")>
+    Public Property 杜比视界配置档次 As Integer
+    <JsonPropertyName("dolbyVisionLevel")>
+    Public Property 杜比视界级别 As Integer
+    <JsonPropertyName("dolbyVisionRpu")>
+    Public Property 有杜比视界RPU As Boolean
+    <JsonPropertyName("dolbyVisionEnhancementLayer")>
+    Public Property 杜比视界增强层 As String = String.Empty
+    <JsonPropertyName("hdrFallback")>
+    Public Property HDR回退 As Boolean
+    <JsonPropertyName("dynamicHdrMetadata")>
+    Public Property 动态HDR元数据 As Boolean
     <JsonPropertyName("masteringPrimaries")>
     Public Property 主显示器色域 As String = String.Empty
     <JsonPropertyName("masteringMinLuminance")>

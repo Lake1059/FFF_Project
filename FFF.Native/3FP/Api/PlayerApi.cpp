@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 6;
+constexpr std::uint32_t PlayerApiVersion = 7;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -20,12 +20,16 @@ FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t o
 
 std::uint32_t FFF3FP_GetApiVersion() noexcept { return PlayerApiVersion; }
 
+FFFResult FFF3FP_EvaluateHdrProcessing(FFF3FPHdrProcessingProbe* probe) noexcept {
+    return probe == nullptr ? FFFResult::InvalidArgument : HdrProcessor::EvaluateProbe(*probe);
+}
+
 FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration, FFF3FPHandle* player) noexcept {
     if (configuration == nullptr || player == nullptr || configuration->size < sizeof(FFF3FPConfiguration) ||
         configuration->version != PlayerApiVersion || configuration->decodeMode == FFF3FPDecodeMode::Unspecified ||
         configuration->decodeMode > FFF3FPDecodeMode::D3D11 || configuration->colorMode > FFF3FPColorMode::MapToHdr ||
         !std::isfinite(configuration->sdrPeakNits) || configuration->sdrPeakNits <= 0 ||
-        !std::isfinite(configuration->hdrPeakNits) || configuration->hdrPeakNits <= 0 ||
+        !std::isfinite(configuration->hdrPeakNits) || configuration->hdrPeakNits < 0 ||
         configuration->hdrPeakNits > 10000 || !std::isfinite(configuration->sdrPaperWhiteNits) ||
         configuration->sdrPaperWhiteNits <= 0) return FFFResult::InvalidArgument;
     try { *player = new PlayerSession(*configuration); return FFFResult::Success; }

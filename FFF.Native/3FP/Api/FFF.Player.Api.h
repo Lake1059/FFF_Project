@@ -28,6 +28,40 @@ enum class FFF3FPColorTransfer : std::uint32_t {
     Hlg = 2,
 };
 
+enum class FFF3FPHdrFormat : std::uint32_t {
+    Sdr = 0,
+    Hdr10 = 1,
+    Hdr10Plus = 2,
+    Hlg = 3,
+    DolbyVision = 4,
+    HdrVivid = 5,
+};
+
+enum class FFF3FPHdrCompatibility : std::uint32_t {
+    None = 0,
+    Hdr10 = 1u << 0,
+    Hlg = 1u << 1,
+    DolbyVision = 1u << 2,
+    HdrVivid = 1u << 3,
+};
+
+enum class FFF3FPHdrProcessingPath : std::uint32_t {
+    None = 0,
+    StaticHdr10 = 1,
+    Hdr10PlusDynamic = 2,
+    HlgDisplayMapped = 3,
+    DolbyVisionHdr10Fallback = 4,
+    DolbyVisionFelFallback = 5,
+    HdrVividDynamic = 6,
+};
+
+enum class FFF3FPDolbyVisionEnhancementLayer : std::uint32_t {
+    None = 0,
+    Mel = 1,
+    Fel = 2,
+    Unknown = 3,
+};
+
 enum class FFF3FPState : std::uint32_t {
     Idle = 0,
     Opening = 1,
@@ -125,6 +159,23 @@ struct FFF3FPSnapshot {
     // Advances only after a real demuxer seek succeeds and the new media
     // position has been published. Overlay producers use it to discard old state.
     std::uint64_t timelineGeneration;
+    // API v7 HDR diagnostics. Dynamic metadata is copied into renderer-owned
+    // state before the decoded AVFrame is released, so these values always
+    // describe the cached/presented frame rather than the next decoded frame.
+    FFF3FPHdrFormat hdrFormat;
+    std::uint32_t compatibleHdrFormats;
+    FFF3FPHdrProcessingPath hdrProcessingPath;
+    std::uint32_t dolbyVisionProfile;
+    std::uint32_t dolbyVisionLevel;
+    std::uint32_t hasDolbyVisionRpu;
+    std::uint32_t hasDolbyVisionEnhancementLayer;
+    FFF3FPDolbyVisionEnhancementLayer dolbyVisionEnhancementLayer;
+    std::uint32_t dynamicHdrMetadataActive;
+    std::uint32_t hdrFallbackActive;
+    std::uint32_t displayMinLuminanceMilliNits;
+    std::uint32_t displayPeakNits;
+    std::uint32_t displayFullFramePeakNits;
+    std::uint32_t effectiveTargetPeakNits;
 };
 
 struct FFF3FPAudioPeakLevels {
@@ -290,6 +341,32 @@ struct FFF3FPColorTransform {
     float outputBlue;
 };
 
+// Deterministic ABI-v1 probe for HDR classification and luminance policy.
+// Dolby residual: 0=unknown/not present, 1=MEL, 2=FEL.
+struct FFF3FPHdrProcessingProbe {
+    std::uint32_t size;
+    std::uint32_t version;
+    FFF3FPColorTransfer transfer;
+    std::uint32_t dolbyVisionProfile;
+    std::uint32_t dolbyVisionLevel;
+    std::uint32_t dolbyVisionCompatibilityId;
+    std::uint32_t dolbyVisionRpu;
+    std::uint32_t dolbyVisionEnhancementLayer;
+    std::uint32_t dolbyVisionResidual;
+    std::uint32_t hdr10PlusMetadata;
+    std::uint32_t hdrVividMetadata;
+    float displayPeakNits;
+    float displayFullFramePeakNits;
+    float targetPeakOverrideNits;
+    FFF3FPHdrFormat outputFormat;
+    std::uint32_t outputCompatibility;
+    FFF3FPHdrProcessingPath outputProcessingPath;
+    FFF3FPDolbyVisionEnhancementLayer outputEnhancementLayer;
+    std::uint32_t outputDynamicMetadata;
+    std::uint32_t outputFallback;
+    std::uint32_t outputTargetPeakNits;
+};
+
 // Reads one pixel from the current video-only back buffer before desktop color
 // management. Intended for renderer regression tests and diagnostics.
 struct FFF3FPVideoPixelProbe {
@@ -357,6 +434,8 @@ FFF3FP_API FFFResult FFF3FP_GetTimedTextStatus(FFF3FPHandle player,
 FFF3FP_API FFFResult FFF3FP_GetDanmakuStatus(FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept;
 FFF3FP_API FFFResult FFF3FP_EvaluateColorTransform(FFF3FPColorTransform* transform) noexcept;
+FFF3FP_API FFFResult FFF3FP_EvaluateHdrProcessing(
+    FFF3FPHdrProcessingProbe* probe) noexcept;
 FFF3FP_API FFFResult FFF3FP_EvaluateTimedTextRasterization(
     FFF3FPTimedTextRasterizationProbe* probe) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetMediaInfo(FFF3FPHandle player, char* outputUtf8,

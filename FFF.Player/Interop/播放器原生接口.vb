@@ -76,6 +76,20 @@ Friend Structure 原生播放器快照
     Public 视频输出位深度 As UInteger
     Public 视频缩放模式 As UInteger
     Public 时间轴代次 As ULong
+    Public HDR格式 As UInteger
+    Public 兼容HDR格式 As UInteger
+    Public HDR处理路径 As UInteger
+    Public 杜比视界配置档次 As UInteger
+    Public 杜比视界级别 As UInteger
+    Public 有杜比视界RPU As UInteger
+    Public 有杜比视界增强层 As UInteger
+    Public 杜比视界增强层类型 As UInteger
+    Public 动态HDR元数据有效 As UInteger
+    Public HDR回退有效 As UInteger
+    Public 显示器最小亮度毫尼特 As UInteger
+    Public 显示器峰值尼特 As UInteger
+    Public 显示器全屏峰值尼特 As UInteger
+    Public HDR有效目标峰值尼特 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>

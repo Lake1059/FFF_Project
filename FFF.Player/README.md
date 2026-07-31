@@ -51,7 +51,9 @@ RGB 图片、CPU 解码及需要 HDR→SDR tone mapping 的帧先由 shader 在�
 UI 呈现器提交逐帧命令，Native D3D11/DirectWrite 层负责栅格化和合成，详见 `TimedText/README.md`。
 
 性能相关资源有明确所有权：FFmpeg packet、解码 frame、硬件回读 frame 和最多 8 帧的视频队列
-外壳只归播放工作线程复用。WASAPI 以解码样本数维护连续 PCM 时间线：首帧、Seek 和真实的
+外壳只归播放工作线程复用。高位深或超高分辨率帧会进一步受 128 MiB 解码队列预算约束；软件
+解码最多使用 8 个线程，D3D11 额外表面只覆盖呈现队列与在途复制，避免按 CPU 核心数或固定大
+表面池扩大常驻内存。WASAPI 以解码样本数维护连续 PCM 时间线：首帧、Seek 和真实的
 100 ms 以上断点才使用 PTS 锚定或修复，普通 VBR/AAC 时间基量化只计入诊断，禁止逐帧补静音
 或裁样。播放位置取自 `IAudioClock`，而不是根据两次 padding 差值猜测；设备事件之间用
 `IAudioClock` 关联的 QPC 采样点连续外推，但绝不越过已经提交给 WASAPI 的 PCM 末端。这样既

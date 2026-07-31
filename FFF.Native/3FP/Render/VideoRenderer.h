@@ -1,6 +1,7 @@
 #pragma once
 
 #include "3FP/Api/FFF.Player.Api.h"
+#include "3FP/Hdr/HdrProcessor.h"
 
 #include <cstdint>
 #include <atomic>
@@ -15,6 +16,7 @@
 #include <vector>
 
 struct AVFrame;
+struct AVCodecParameters;
 struct AVBufferRef;
 struct SwsContext;
 struct ID3D11Device;
@@ -97,6 +99,7 @@ public:
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
+    void ConfigureHdrStream(const AVCodecParameters* parameters) noexcept;
     FFFResult Render(const AVFrame* frame) noexcept;
     FFFResult Redraw() noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
@@ -112,6 +115,7 @@ public:
 
     FFF3FPColorMode ActualColorMode() const noexcept;
     float SourcePeakNits() const noexcept;
+    HdrFrameState HdrState() const noexcept;
     std::uint64_t PresentedVideoFrames() const noexcept;
     std::uint64_t CoalescedVideoFrames() const noexcept;
     std::uint64_t SwapChainPresents() const noexcept;
@@ -164,7 +168,7 @@ private:
         ID3D11RenderTargetView** target) noexcept;
     struct CachedVideoSettings {
         std::uint32_t colorMode = 0, transfer = 0, source2020 = 0, reserved = 0;
-        float sdrPeak = 100, hdrPeak = 100, paperWhite = 203, reserved2 = 0;
+        float sdrPeak = 100, hdrPeak = 100, paperWhite = 203, targetPeak = 1000;
         float sourceWidth = 0, sourceHeight = 0, outputWidth = 0, outputHeight = 0;
         std::uint32_t inputLayout = 0;
         float sampleScale = 1, yOffset = 0, yScale = 1;
@@ -257,6 +261,7 @@ private:
     float hdrPeakNits_;
     float paperWhiteNits_;
     float sourcePeakNits_;
+    HdrProcessor hdrProcessor_;
     std::vector<std::uint8_t> convertedRgb_;
     mutable std::mutex deviceMutex_;
     mutable std::mutex presentMutex_;

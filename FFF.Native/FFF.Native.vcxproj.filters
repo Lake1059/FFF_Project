@@ -21,6 +21,9 @@
     <ClInclude Include="pch.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="3FP\Hdr\HdrProcessor.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -36,6 +39,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Hdr\HdrProcessor.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

@@ -215,6 +215,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             添加配对行如果有值(结果, "视频：", 视频概要, 品红, 8)
             添加配对行如果有值(结果, "输入：", 视频输入(视频, 快照.视频实时比特率), 紫色)
             添加配对行如果有值(结果, "色彩：", 视频色彩(视频), 蓝色)
+            添加配对行如果有值(结果, "HDR：", 视频HDR(视频, 快照), 橙色)
             添加配对行如果有值(结果, "输出：", 视频输出(快照, 画面控件.ClientSize), 绿色)
             添加配对行如果有值(结果, "渲染：", 视频渲染(快照), 黄色)
         End If
@@ -379,7 +380,38 @@ Friend NotInheritable Class 播放器信息图层呈现器
             If(String.IsNullOrEmpty(格式), String.Empty, $"格式 {格式}"),
             If(输出大小.Width > 0 AndAlso 输出大小.Height > 0,
                $"分辨率 {输出大小.Width}x{输出大小.Height}", String.Empty),
-            $"色彩模式 {色彩模式文本(快照.实际色彩模式, 快照.是HDR源)}")
+            $"色彩模式 {色彩模式文本(快照)}")
+    End Function
+
+    Private Shared Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照) As String
+        If Not 快照.是HDR源 AndAlso Not 流.是HDR Then Return String.Empty
+        Dim 规格 = HDR规格文本(快照.HDR规格, 流.HDR格式)
+        Dim 杜比 = If(快照.HDR规格 = HDR格式.杜比视界 AndAlso 快照.杜比视界配置档次 > 0,
+            $"P{快照.杜比视界配置档次} L{快照.杜比视界级别} {杜比层文本(快照)}", String.Empty)
+        Dim 动态 = If(快照.动态HDR元数据有效, "逐帧动态元数据", String.Empty)
+        Dim 亮度 = If(快照.HDR有效目标峰值尼特 > 0,
+            $"源峰值 {快照.源峰值尼特:N0}→目标 {快照.HDR有效目标峰值尼特:N0} nit", String.Empty)
+        Dim 回退 = If(快照.HDR回退有效,
+            If(快照.杜比视界增强层类型 = 杜比视界增强层类型.FEL,
+               "HDR10 兼容输出（FEL 已忽略）", "HDR10 兼容输出"), String.Empty)
+        Return 合并字段(规格, 杜比, 动态, 亮度, 回退)
+    End Function
+
+    Private Shared Function HDR规格文本(规格 As HDR格式, 媒体文本 As String) As String
+        Select Case 规格
+            Case HDR格式.HDR10 : Return "HDR10"
+            Case HDR格式.HDR10Plus : Return "HDR10+"
+            Case HDR格式.HLG : Return "HLG"
+            Case HDR格式.杜比视界 : Return "Dolby Vision 源"
+            Case HDR格式.HDRVivid : Return "HDR Vivid"
+            Case Else : Return 媒体文本
+        End Select
+    End Function
+
+    Private Shared Function 杜比层文本(快照 As 播放器快照) As String
+        Dim 文本 = If(快照.有杜比视界RPU, "BL+RPU", "BL")
+        If 快照.有杜比视界增强层 Then 文本 &= $"+EL({快照.杜比视界增强层类型})"
+        Return 文本
     End Function
 
     Private Function 视频渲染(快照 As 播放器快照) As String
@@ -441,11 +473,12 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return $"{CInt(Math.Floor(值.TotalHours)):00}:{值.Minutes:00}:{值.Seconds:00}"
     End Function
 
-    Private Shared Function 色彩模式文本(模式 As 色彩输出模式, 是HDR源 As Boolean) As String
-        Select Case 模式
-            Case 色彩输出模式.峰值映射HDR : Return "真实 HDR 高亮"
+    Private Shared Function 色彩模式文本(快照 As 播放器快照) As String
+        Select Case 快照.实际色彩模式
+            Case 色彩输出模式.峰值映射HDR
+                Return $"{HDR规格文本(快照.HDR规格, "HDR")} 真实高亮"
             Case 色彩输出模式.原始HDR按SDR呈现 : Return "原始 HDR 灰"
-            Case Else : Return If(是HDR源, "映射 SDR", "SDR")
+            Case Else : Return If(快照.是HDR源, "映射 SDR", "SDR")
         End Select
     End Function
 

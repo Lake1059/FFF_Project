@@ -172,6 +172,7 @@
     <ClInclude Include="3FP\Api\FFF.Player.Api.h" />
     <ClInclude Include="3FP\Audio\WasapiRenderer.h" />
     <ClInclude Include="3FP\Core\PlayerSession.h" />
+    <ClInclude Include="3FP\Hdr\HdrProcessor.h" />
     <ClInclude Include="3FP\Render\VideoRenderer.h" />
     <ClInclude Include="3FR\Api\FFF.Native.Api.h" />
     <ClInclude Include="3FR\Audio\AudioTrackEncoder.h" />
@@ -188,6 +189,7 @@
     <ClCompile Include="3FP\Api\PlayerApi.cpp" />
     <ClCompile Include="3FP\Audio\WasapiRenderer.cpp" />
     <ClCompile Include="3FP\Core\PlayerSession.cpp" />
+    <ClCompile Include="3FP\Hdr\HdrProcessor.cpp" />
     <ClCompile Include="3FP\Render\VideoRenderer.cpp" />
     <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp" />
     <ClCompile Include="3FP\Subtitle\BitmapSubtitleDecoder.cpp" />

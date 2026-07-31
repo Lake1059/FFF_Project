@@ -10,7 +10,7 @@ Public NotInheritable Class 播放器控制器
     Implements IDisposable
 
     Private Const SDR峰值尼特 As Single = 100.0F
-    Private Const HDR峰值尼特 As Single = 1000.0F
+    Private Const HDR峰值尼特 As Single = 0.0F
     Private Const SDR纸白尼特 As Single = 203.0F
 
     Private ReadOnly 输出窗口提供器 As Func(Of IntPtr)
@@ -1067,9 +1067,21 @@ Public NotInheritable Class 播放器控制器
             Case 色彩输出模式.原始HDR按SDR呈现
                 Return "原始 HDR 按 SDR 呈现"
             Case 色彩输出模式.峰值映射HDR
-                Return If(快照.实际色彩模式 = 色彩输出模式.峰值映射HDR, "1000 nit 真实 HDR 输出", "HDR 目标不可用，已映射到 SDR")
+                Return If(快照.实际色彩模式 = 色彩输出模式.峰值映射HDR,
+                    $"{HDR规格文本(快照)} 真实高亮（目标 {快照.HDR有效目标峰值尼特:N0} nit）",
+                    "HDR 目标不可用，已映射到 SDR")
             Case Else
                 Return String.Empty
+        End Select
+    End Function
+
+    Private Shared Function HDR规格文本(快照 As 播放器快照) As String
+        Select Case 快照.HDR规格
+            Case HDR格式.HDR10Plus : Return "HDR10+"
+            Case HDR格式.HLG : Return "HLG"
+            Case HDR格式.杜比视界 : Return "Dolby Vision 基础层→HDR10"
+            Case HDR格式.HDRVivid : Return "HDR Vivid"
+            Case Else : Return "HDR10"
         End Select
     End Function
 
