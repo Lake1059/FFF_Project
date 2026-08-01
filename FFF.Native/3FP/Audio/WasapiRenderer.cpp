@@ -246,9 +246,9 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
     // heap allocation for every decoded audio frame.
     if (inputPlanes <= 0 || inputPlanes > 64) return FFFResult::NotSupported;
     std::array<const std::uint8_t*, 64> input{};
+    const auto byteOffset = static_cast<std::size_t>(skipSamples) * bytesPerSample *
+        (planar ? 1 : frame->ch_layout.nb_channels);
     for (int plane = 0; plane < inputPlanes; ++plane) {
-        const auto byteOffset = static_cast<std::size_t>(skipSamples) * bytesPerSample *
-            (planar ? 1 : frame->ch_layout.nb_channels);
         input[plane] = frame->extended_data[plane] + byteOffset;
     }
     const auto frames = swr_convert(resampler_, output, capacity, input.data(), inputSamples);

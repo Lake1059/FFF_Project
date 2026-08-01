@@ -17,7 +17,13 @@ Public NotInheritable Class 播放器会话
     Private ReadOnly 释放取消源 As New CancellationTokenSource()
     Private ReadOnly 待处理事件 As New ConcurrentQueue(Of 播放器事件参数)()
     Private Const 定时文字UTF8缓存上限 As Integer = 2048
+    Private Shared ReadOnly 原生播放器配置大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生播放器配置)())
     Private Shared ReadOnly 原生定时文字命令大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生定时文字命令)())
+    Private Shared ReadOnly 原生定时文字图层大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生定时文字图层)())
+    Private Shared ReadOnly 原生定时文字状态大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生定时文字状态)())
+    Private Shared ReadOnly 原生播放器快照大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生播放器快照)())
+    Private Shared ReadOnly 原生视频像素探针大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生视频像素探针)())
+    Private Shared ReadOnly 原生音频峰值大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生音频峰值)())
     Private ReadOnly 定时文字提交锁 As New Object()
     Private ReadOnly 定时文字UTF8缓存 As New Dictionary(Of String, IntPtr)(StringComparer.Ordinal)
     Private ReadOnly 定时文字临时指针 As New List(Of IntPtr)()
@@ -38,7 +44,7 @@ Public NotInheritable Class 播放器会话
         Try
             If Not String.IsNullOrEmpty(配置.音频端点标识) Then 端点指针 = Marshal.StringToCoTaskMemUTF8(配置.音频端点标识)
             Dim 原生配置 As New 原生播放器配置 With {
-                .大小 = CUInt(Marshal.SizeOf(Of 原生播放器配置)()), .版本 = 7UI,
+                .大小 = 原生播放器配置大小, .版本 = 7UI,
                 .输出窗口 = 配置.输出窗口句柄, .解码器 = CUInt(配置.解码器),
                 .色彩模式 = CUInt(配置.色彩模式), .SDR峰值 = 配置.SDR峰值尼特,
                 .HDR峰值 = 配置.HDR峰值尼特, .SDR纸白 = 配置.SDR纸白尼特,
@@ -257,7 +263,7 @@ Public NotInheritable Class 播放器会话
                     定时文字原生缓冲(index) = value
                 Next
                 Dim layer As New 原生定时文字图层 With {
-                    .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字图层)()), .版本 = 1UI,
+                    .大小 = 原生定时文字图层大小, .版本 = 1UI,
                     .画布宽度 = CUInt(画布大小.Width), .画布高度 = CUInt(画布大小.Height),
                     .命令数 = CUInt(命令.Count), .图层槽位 = 图层槽位, .序号 = 序号,
                     .命令 = If(命令.Count = 0, IntPtr.Zero, 定时文字原生缓冲句柄.AddrOfPinnedObject()),
@@ -302,7 +308,7 @@ Public NotInheritable Class 播放器会话
     Public ReadOnly Property 当前定时文字状态 As 定时文字状态
         Get
             Dim 值 As New 原生定时文字状态 With {
-                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字状态)()), .版本 = 1UI}
+                .大小 = 原生定时文字状态大小, .版本 = 1UI}
             检查结果(播放器原生接口.FFF3FP_GetTimedTextStatus(取得句柄(), 值))
             Return New 定时文字状态(值)
         End Get
@@ -311,7 +317,7 @@ Public NotInheritable Class 播放器会话
     Public ReadOnly Property 当前弹幕状态 As 定时文字状态
         Get
             Dim 值 As New 原生定时文字状态 With {
-                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字状态)()), .版本 = 1UI}
+                .大小 = 原生定时文字状态大小, .版本 = 1UI}
             检查结果(播放器原生接口.FFF3FP_GetDanmakuStatus(取得句柄(), 值))
             Return New 定时文字状态(值)
         End Get
@@ -319,7 +325,7 @@ Public NotInheritable Class 播放器会话
 
     Public ReadOnly Property 当前快照 As 播放器快照
         Get
-            Dim 值 As New 原生播放器快照 With {.大小 = CUInt(Marshal.SizeOf(Of 原生播放器快照)()), .版本 = 7UI}
+            Dim 值 As New 原生播放器快照 With {.大小 = 原生播放器快照大小, .版本 = 7UI}
             检查结果(播放器原生接口.FFF3FP_GetSnapshot(取得句柄(), 值))
             Return New 播放器快照(值)
         End Get
@@ -329,7 +335,7 @@ Public NotInheritable Class 播放器会话
         If X < 0 Then Throw New ArgumentOutOfRangeException(NameOf(X))
         If Y < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Y))
         Dim 值 As New 原生视频像素探针 With {
-            .大小 = CUInt(Marshal.SizeOf(Of 原生视频像素探针)()),
+            .大小 = 原生视频像素探针大小,
             .版本 = 1UI, .X = CUInt(X), .Y = CUInt(Y)}
         检查结果(播放器原生接口.FFF3FP_ReadVideoPixel(取得句柄(), 值))
         Return New 视频输出原始像素(值)
@@ -337,21 +343,30 @@ Public NotInheritable Class 播放器会话
 
     Public Function 读取视频输出像素(X As Integer, Y As Integer) As Color
         Dim 值 = 读取视频输出原始像素(X, Y)
-        Dim 转换 As Func(Of Single, Integer) =
-            Function(channel) CInt(Math.Round(Math.Clamp(channel, 0.0F, 1.0F) * 255.0F))
-        Return Color.FromArgb(转换(值.Alpha), 转换(值.红),
-                              转换(值.绿), 转换(值.蓝))
+        Return Color.FromArgb(通道到字节(值.Alpha), 通道到字节(值.红),
+                              通道到字节(值.绿), 通道到字节(值.蓝))
+    End Function
+
+    Private Shared Function 通道到字节(值 As Single) As Integer
+        Return CInt(Math.Round(Math.Clamp(值, 0.0F, 1.0F) * 255.0F))
     End Function
 
     Public Function 读取音频峰值() As Single()
         Dim 值 As New 原生音频峰值 With {
-            .大小 = CUInt(Marshal.SizeOf(Of 原生音频峰值)()), .版本 = 1UI}
+            .大小 = 原生音频峰值大小, .版本 = 1UI}
         检查结果(播放器原生接口.FFF3FP_GetAudioPeakLevels(取得句柄(), 值))
-        Dim 全部 = {值.峰值1, 值.峰值2, 值.峰值3, 值.峰值4,
-                   值.峰值5, 值.峰值6, 值.峰值7, 值.峰值8}
-        If 值.声道数 = 0 Then Return Array.Empty(Of Single)()
-        Array.Resize(全部, Math.Min(CInt(值.声道数), 全部.Length))
-        Return 全部
+        Dim 数量 = Math.Min(CInt(值.声道数), 8)
+        If 数量 = 0 Then Return Array.Empty(Of Single)()
+        Dim 结果(数量 - 1) As Single
+        结果(0) = 值.峰值1
+        If 数量 > 1 Then 结果(1) = 值.峰值2
+        If 数量 > 2 Then 结果(2) = 值.峰值3
+        If 数量 > 3 Then 结果(3) = 值.峰值4
+        If 数量 > 4 Then 结果(4) = 值.峰值5
+        If 数量 > 5 Then 结果(5) = 值.峰值6
+        If 数量 > 6 Then 结果(6) = 值.峰值7
+        If 数量 > 7 Then 结果(7) = 值.峰值8
+        Return 结果
     End Function
 
     Public ReadOnly Property 当前媒体信息 As 媒体信息

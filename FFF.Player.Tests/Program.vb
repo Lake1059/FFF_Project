@@ -1100,8 +1100,8 @@ Friend Module Program
                     0, 0, "a", 1, "一"),
                 New 弹幕项目(TimeSpan.FromSeconds(2), 弹幕类型.常规滚动, 1, 25, &HFFFFFFFFUI,
                     0, 0, "b", 2, "二")})
-            Dim 字幕状态 As New 定时文字状态(New 原生定时文字状态 With {.命令数 = 1UI})
-            Dim 弹幕状态 As New 定时文字状态(New 原生定时文字状态 With {.命令数 = 2UI})
+            Dim 字幕状态 As New 定时文字状态(New 原生定时文字状态 With {.命令数 = 1001UI})
+            Dim 弹幕状态 As New 定时文字状态(New 原生定时文字状态 With {.命令数 = 2002UI})
             Dim 当前字幕 As 外部字幕轨道 = 字幕
             Dim 当前弹幕 As 弹幕资料库 = 弹幕
             Dim 当前字幕状态 As 定时文字状态 = 字幕状态
@@ -1124,7 +1124,7 @@ Friend Module Program
                 .是HDR源 = 1UI,
                 .位置100纳秒 = TimeSpan.FromHours(1).Ticks + TimeSpan.FromMinutes(2).Ticks + TimeSpan.FromSeconds(3).Ticks,
                 .时长100纳秒 = TimeSpan.FromHours(2).Ticks, .当前视频流 = 0, .当前音频流 = 1,
-                 .视频队列帧数 = 3UI, .已丢弃视频帧数 = 7UL, .已合并视频帧数 = 5UL,
+                 .视频队列帧数 = 3UI, .已丢弃视频帧数 = 7000UL, .已合并视频帧数 = 5000UL,
                  .视频实时比特率 = 5_000_000UL, .音频实时比特率 = 1_411_200UL,
                 .视频输出位深度 = 10UI,
                 .HDR格式 = CUInt(HDR格式.HDR10Plus), .动态HDR元数据有效 = 1UI,
@@ -1140,7 +1140,7 @@ Friend Module Program
                     Sub(size, commands, sequence, frameRate) Return)
                     Dim 标志 = BindingFlags.Instance Or BindingFlags.NonPublic
                     GetType(播放器信息图层呈现器).GetField("最近实际帧率", 标志).SetValue(呈现器, 23.976R)
-                    GetType(播放器信息图层呈现器).GetField("最近实时丢帧数", 标志).SetValue(呈现器, 2UL)
+                    GetType(播放器信息图层呈现器).GetField("最近实时丢帧数", 标志).SetValue(呈现器, 2345UL)
                     Dim 实际 = 呈现器.读取调试文本行(信息, 快照, "C:\media\movie.mkv")
                     Dim 预期 As String() = {
                         "文件名：movie.mkv",
@@ -1150,15 +1150,17 @@ Friend Module Program
                         "色彩：采样 420   颜色矩阵 BT.2020   色域 BT.2020   传输特性 PQ   范围 Limited",
                         "HDR：HDR10+   逐帧动态元数据",
                         "输出：格式 RGB10A2 (10bit)   分辨率 2560x1440   色彩模式 映射 SDR",
-                        "渲染：帧率 23.98fps   缓冲池 3帧   实时丢帧 2   总丢帧 12",
+                        "渲染：帧率 23.98fps   缓冲池 3帧   实时丢帧 2345   总丢帧 12000",
                         "音频：FLAC - WASAPI 独占",
                         "输入：采样 48000Hz   位深 24bit   声道数 2   实时码率 1.41 Mbps",
                         "输出：FLOAT PCM   采样 48000Hz   位深 32bit   声道数 2   实时延迟 25ms",
-                        "字幕：SRT   总数量 2   当前正在渲染 1",
-                        "弹幕：哔哩哔哩 XML   总数量 2   当前正在渲染 2"}
+                        "字幕：SRT   总数量 2   当前正在渲染 1001",
+                        "弹幕：哔哩哔哩 XML   总数量 2   当前正在渲染 2002"}
                     断言(实际.SequenceEqual(预期),
-                       "信息层逐字段文本不符合中文标签、三空格分隔或字段白名单。" & vbCrLf &
-                       String.Join(vbCrLf, 实际))
+                        "信息层逐字段文本不符合中文标签、三空格分隔或字段白名单。" & vbCrLf &
+                        String.Join(vbCrLf, 实际))
+                    断言(Not 实际.Any(Function(x) x.Contains(","c)),
+                       "信息层数值仍包含英文千分符。")
                     Dim 真实HDR快照 As New 播放器快照(New 原生播放器快照 With {
                         .实际色彩模式 = CUInt(色彩输出模式.峰值映射HDR), .是HDR源 = 1UI,
                         .HDR格式 = CUInt(HDR格式.HDR10Plus), .动态HDR元数据有效 = 1UI,

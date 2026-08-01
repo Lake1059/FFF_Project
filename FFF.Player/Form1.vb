@@ -4,14 +4,14 @@ Imports System.Threading
 
 Public Class Form1
     Private Const 跳转秒数 As Integer = 5
-    Private Shared ReadOnly 核心文件名称 As String() = {
-        "FFF.Native.dll",
-        "avcodec-63.dll",
-        "avfilter-12.dll",
-        "avformat-63.dll",
-        "avutil-61.dll",
-        "swresample-7.dll",
-        "swscale-10.dll"
+    Private Shared ReadOnly 核心文件名称 As String() = {"FFF.Native.dll"}
+    Private Shared ReadOnly FFmpeg核心文件前缀 As String() = {
+        "avcodec",
+        "avfilter",
+        "avformat",
+        "avutil",
+        "swresample",
+        "swscale"
     }
 
     Private 画面控件 As 播放器画面控件
@@ -38,7 +38,11 @@ Public Class Form1
         KeyPreview = True
         MinimumSize = New Size(875, 500)
 
-        Dim 缺失文件 = 核心文件名称.Where(Function(文件名) Not 可以加载核心文件(文件名)).ToArray()
+        Dim 缺失文件 = 核心文件名称.Where(Function(文件名) Not 可以加载核心文件(文件名)).
+            Concat(FFmpeg核心文件前缀.
+                Where(Function(前缀) Not 可以加载核心文件(前缀)).
+                Select(Function(前缀) $"{前缀}.dll 或 {前缀}-数字.dll")).
+            ToArray()
         If 缺失文件.Length > 0 Then
             核心文件错误说明 = String.Join(vbCrLf, {
                 "以下播放器核心文件缺失或无法加载：",
@@ -115,8 +119,22 @@ Public Class Form1
     End Sub
 
     Private Shared Function 可以加载核心文件(文件名 As String) As Boolean
+        If FFmpeg核心文件前缀.Any(Function(前缀) String.Equals(前缀, 文件名, StringComparison.OrdinalIgnoreCase)) Then
+            For Each 候选路径 In 枚举可加载核心文件(文件名)
+                If 尝试加载核心文件(候选路径) Then Return True
+            Next
+            Return False
+        End If
+
+        Return 尝试加载核心文件(文件名)
+    End Function
+
+    Private Shared Function 尝试加载核心文件(文件名 As String) As Boolean
         Dim 句柄 = IntPtr.Zero
         Try
+            If Path.IsPathFullyQualified(文件名) Then
+                Return NativeLibrary.TryLoad(文件名, 句柄)
+            End If
             Return NativeLibrary.TryLoad(文件名, GetType(Form1).Assembly, Nothing, 句柄)
         Catch ex As BadImageFormatException
             Return False
@@ -125,6 +143,62 @@ Public Class Form1
         Finally
             If 句柄 <> IntPtr.Zero Then NativeLibrary.Free(句柄)
         End Try
+    End Function
+
+    Private Shared Iterator Function 枚举可加载核心文件(前缀 As String) As IEnumerable(Of String)
+        Dim 已检查目录 As New List(Of String)
+        Dim 目录列表 As New List(Of String) From {AppContext.BaseDirectory}
+        Dim 程序集目录 = Path.GetDirectoryName(GetType(Form1).Assembly.Location)
+        If Not String.IsNullOrWhiteSpace(程序集目录) Then 目录列表.Add(程序集目录)
+
+        Dim 环境路径 = Environment.GetEnvironmentVariable("PATH")
+        If Not String.IsNullOrWhiteSpace(环境路径) Then
+            目录列表.AddRange(环境路径.Split(Path.PathSeparator).
+                Select(Function(目录) 目录.Trim().Trim(""""c)).
+                Where(Function(目录) Not String.IsNullOrWhiteSpace(目录)))
+        End If
+
+        For Each 目录 In 目录列表
+            Dim 完整目录 As String
+            Try
+                完整目录 = Path.GetFullPath(目录)
+                If 完整目录.Length > 1 Then
+                    完整目录 = 完整目录.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                End If
+            Catch ex As Exception
+                Continue For
+            End Try
+            If 已检查目录.Any(Function(已检查) String.Equals(已检查, 完整目录, StringComparison.OrdinalIgnoreCase)) Then Continue For
+            已检查目录.Add(完整目录)
+
+            Dim 候选文件 As IEnumerable(Of String)
+            Try
+                候选文件 = Directory.EnumerateFiles(完整目录, 前缀 & "*.dll", SearchOption.TopDirectoryOnly).
+                    Where(Function(路径) 是支持的核心文件名(Path.GetFileName(路径), 前缀)).
+                    OrderByDescending(Function(路径) String.Equals(Path.GetFileName(路径), 前缀 & ".dll", StringComparison.OrdinalIgnoreCase)).
+                    ThenBy(Function(路径) Path.GetFileName(路径), StringComparer.OrdinalIgnoreCase).
+                    ToArray()
+            Catch ex As IOException
+                Continue For
+            Catch ex As UnauthorizedAccessException
+                Continue For
+            End Try
+
+            For Each 候选路径 In 候选文件
+                Yield 候选路径
+            Next
+        Next
+    End Function
+
+    Private Shared Function 是支持的核心文件名(文件名 As String, 前缀 As String) As Boolean
+        If String.IsNullOrEmpty(文件名) OrElse
+            Not 文件名.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) OrElse
+            Not 文件名.StartsWith(前缀, StringComparison.OrdinalIgnoreCase) Then Return False
+
+        Dim 后缀 = 文件名.Substring(前缀.Length, 文件名.Length - 前缀.Length - 4)
+        If 后缀.Length = 0 Then Return True
+        If Not 后缀.StartsWith("-", StringComparison.Ordinal) OrElse 后缀.Length = 1 Then Return False
+        Return 后缀.Skip(1).All(Function(字符) 字符 >= "0"c AndAlso 字符 <= "9"c)
     End Function
 
     Private Function 创建界面呈现器() As 播放器界面呈现器
@@ -359,7 +433,7 @@ Public Class Form1
         If 正在关闭 Then Return
         当前弹幕路径 = e.路径
         弹幕图层呈现器?.使图层失效()
-        信息图层呈现器?.显示操作信息($"已加载 {e.数量:N0} 条弹幕 · {Path.GetFileName(e.路径)}", &HFFFFA85AUI)
+        信息图层呈现器?.显示操作信息($"已加载 {e.数量} 条弹幕 · {Path.GetFileName(e.路径)}", &HFFFFA85AUI)
         信息图层呈现器?.使内容失效()
     End Sub
 
@@ -453,4 +527,11 @@ Public Class Form1
         Return True
     End Function
 
+    Private Sub MB_播放列表_Click(sender As Object, e As EventArgs) Handles MB_播放列表.Click
+
+    End Sub
+
+    Private Sub MB_软件设置_Click(sender As Object, e As EventArgs) Handles MB_软件设置.Click
+        Form设置.Show()
+    End Sub
 End Class

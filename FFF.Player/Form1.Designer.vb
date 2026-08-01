@@ -115,8 +115,7 @@ Partial Class Form1
         ThisIsYourWindow1.BorderInactiveColor = Color.Gray
         ThisIsYourWindow1.ButtonCornerRadius = 5
         ThisIsYourWindow1.ButtonGlyphLineWidth = 2F
-        ThisIsYourWindow1.ButtonPadding = New Padding(5, 0, 0, 0)
-        ThisIsYourWindow1.ButtonWidth = 40
+        ThisIsYourWindow1.ButtonWidth = 35
         ThisIsYourWindow1.CaptionButtonGlyphColor = Color.FromArgb(CByte(200), CByte(200), CByte(200))
         ThisIsYourWindow1.CaptionButtonHoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         ThisIsYourWindow1.CaptionButtonPressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))

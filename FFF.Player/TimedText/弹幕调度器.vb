@@ -179,6 +179,9 @@ Public NotInheritable Class 弹幕调度器
         ' 帧序号只用于诊断。位置直接使用连续媒体时钟，避免 17 ms 唤醒与
         ' 16.667 ms 帧格之间周期性产生一帧停顿、下一帧双倍位移。
         Dim seconds = 时间.TotalSeconds
+        Dim 滚动速度 = 实际滚动速度(区域)
+        Dim 顶部边距 = 实际顶部边距(区域)
+        Dim 行间距 = 配置.行间距 * 区域.高度像素 / 配置.基准视频高度
         Dim 最大连续间隔 = Math.Max(0.25R, 4.0R / 配置.目标帧率)
         Dim discontinuity = Not Double.IsFinite(上一时间秒) OrElse
             seconds < 上一时间秒 OrElse seconds - 上一时间秒 > 最大连续间隔
@@ -192,18 +195,19 @@ Public NotInheritable Class 弹幕调度器
             Select Case active.项目.类型
                 Case 弹幕类型.常规滚动
                     x = 区域.X像素 + 区域.宽度像素 + active.左外扩 -
-                        CSng((seconds - active.开始秒) * 实际滚动速度(区域))
-                    y = 区域.Y像素 + 实际顶部边距(区域) + active.行号 * 实际行高(active.字号, 区域)
+                        CSng((seconds - active.开始秒) * 滚动速度)
+                    y = 区域.Y像素 + 顶部边距 + active.行号 * (active.字号 * 1.2F + 行间距)
                 Case 弹幕类型.逆向滚动
                     x = 区域.X像素 - active.宽度 - active.右外扩 +
-                        CSng((seconds - active.开始秒) * 实际滚动速度(区域))
-                    y = 区域.Y像素 + 实际顶部边距(区域) + active.行号 * 实际行高(active.字号, 区域)
+                        CSng((seconds - active.开始秒) * 滚动速度)
+                    y = 区域.Y像素 + 顶部边距 + active.行号 * (active.字号 * 1.2F + 行间距)
                 Case 弹幕类型.顶部
                     x = 区域.X像素 + (区域.宽度像素 - active.宽度) * 0.5F
-                    y = 区域.Y像素 + 实际顶部边距(区域) + active.行号 * 实际行高(active.字号, 区域)
+                    y = 区域.Y像素 + 顶部边距 + active.行号 * (active.字号 * 1.2F + 行间距)
                 Case 弹幕类型.底部
                     x = 区域.X像素 + (区域.宽度像素 - active.宽度) * 0.5F
-                    y = 区域.Y像素 + 区域.高度像素 - 实际顶部边距(区域) - (active.行号 + 1) * 实际行高(active.字号, 区域)
+                    y = 区域.Y像素 + 区域.高度像素 - 顶部边距 -
+                        (active.行号 + 1) * (active.字号 * 1.2F + 行间距)
                 Case Else
                     Continue For
             End Select
@@ -269,21 +273,22 @@ Public NotInheritable Class 弹幕调度器
     End Sub
 
     Private Function 查找可用行(type As 弹幕类型, maxLines As Integer, seconds As Double,
-                               newWidth As Single, newLeftExtent As Single,
-                               newRightExtent As Single, area As 视频显示区域) As Integer
+                                newWidth As Single, newLeftExtent As Single,
+                                newRightExtent As Single, area As 视频显示区域) As Integer
         Dim gap = Math.Max(8.0F, 配置.行间距 * area.高度像素 / 配置.基准视频高度)
+        Dim 滚动速度 = 实际滚动速度(area)
         For lane = 0 To maxLines - 1
             Dim available = True
             For Each active In 活动列表
                 If active.行号 <> lane OrElse active.项目.类型 <> type OrElse active.结束秒 <= seconds Then Continue For
                 If type = 弹幕类型.常规滚动 Then
                     Dim previousX = area.X像素 + area.宽度像素 + active.左外扩 -
-                        CSng((seconds - active.开始秒) * 实际滚动速度(area))
+                        CSng((seconds - active.开始秒) * 滚动速度)
                     If previousX + active.宽度 + active.右外扩 + gap + newLeftExtent >
                         area.X像素 + area.宽度像素 Then available = False : Exit For
                 ElseIf type = 弹幕类型.逆向滚动 Then
                     Dim previousX = area.X像素 - active.宽度 - active.右外扩 +
-                        CSng((seconds - active.开始秒) * 实际滚动速度(area))
+                        CSng((seconds - active.开始秒) * 滚动速度)
                     If previousX - active.左外扩 - gap - newRightExtent < area.X像素 Then available = False : Exit For
                 Else
                     available = False

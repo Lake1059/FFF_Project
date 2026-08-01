@@ -139,6 +139,15 @@ private:
         float destination[4]{};
         float uv[4]{};
     };
+    struct PendingTimedTextSprite {
+        std::size_t commandIndex = 0;
+        IDWriteTextLayout* layout = nullptr;
+        std::uint64_t key = 0;
+        TimedTextSprite sprite{};
+        float outline = 0;
+        float shadowX = 0;
+        float shadowY = 0;
+    };
 
     FFFResult EnsureDevice() noexcept;
     std::uint32_t PreferredOutputBitDepth(std::uint32_t sourceBitDepth, bool hdr) noexcept;
@@ -312,6 +321,7 @@ private:
     std::deque<std::uint64_t> timedTextLayoutOrder_;
     std::unordered_map<std::uint32_t, ID2D1SolidColorBrush*> timedTextBrushes_;
     std::unordered_map<std::uint64_t, TimedTextSprite> timedTextSprites_;
+    std::vector<PendingTimedTextSprite> timedTextPendingSprites_;
     std::vector<TimedTextSpriteInstance> timedTextSpriteInstances_;
     std::uint32_t timedTextAtlasX_;
     std::uint32_t timedTextAtlasY_;

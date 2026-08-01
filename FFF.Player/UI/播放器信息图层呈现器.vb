@@ -58,6 +58,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
     Private ReadOnly 刷新定时器 As LakeUI.PrecisionTimer
     Private ReadOnly 普通字体 As New Font("Microsoft YaHei UI", 11.0F, FontStyle.Regular, GraphicsUnit.Point)
+    Private ReadOnly 文本测量格式 As StringFormat
     Private ReadOnly 操作消息列表 As New List(Of 操作消息)()
     Private ReadOnly 图层命令 As New List(Of 定时文字命令)(32)
 
@@ -93,6 +94,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取字幕状态 = 字幕状态提供器 : 获取弹幕状态 = 弹幕状态提供器
         获取WASAPI模式 = WASAPI模式提供器
         提交图层 = 图层提交器
+        文本测量格式 = DirectCast(StringFormat.GenericTypographic.Clone(), StringFormat)
+        文本测量格式.FormatFlags = 文本测量格式.FormatFlags Or
+            StringFormatFlags.MeasureTrailingSpaces Or StringFormatFlags.NoWrap
         刷新定时器 = New LakeUI.PrecisionTimer With {.Interval = 200}
         AddHandler 刷新定时器.Tick, AddressOf 刷新定时器_Tick
         AddHandler 画面控件.ClientSizeChanged, AddressOf 画面大小已变化
@@ -185,7 +189,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Sub
 
     Private Function 创建调试行(信息 As 媒体信息, 快照 As 播放器快照, 媒体路径 As String) As List(Of 信息行)
-        Dim 结果 As New List(Of 信息行)()
+        Dim 结果 As New List(Of 信息行)(14)
         If 信息 Is Nothing OrElse 快照 Is Nothing Then
             结果.Add(New 信息行(0, New 文本段("尚未打开媒体", 次要颜色)))
             Return 结果
@@ -234,19 +238,32 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 字幕文本 = If(字幕 Is Nothing, "未加载", 合并字段(
             字幕.格式.ToString().ToUpperInvariant(),
             $"总数量 {字幕条目数(字幕)}",
-            If(字幕状态 Is Nothing, String.Empty, $"当前正在渲染 {字幕状态.命令数:N0}")))
+            If(字幕状态 Is Nothing, String.Empty, $"当前正在渲染 {字幕状态.命令数}")))
         Dim 弹幕文本 = If(弹幕 Is Nothing, "未加载", 合并字段(
-            "哔哩哔哩 XML", $"总数量 {弹幕.数量:N0}",
-            If(弹幕状态 Is Nothing, String.Empty, $"当前正在渲染 {弹幕状态.命令数:N0}")))
+            "哔哩哔哩 XML", $"总数量 {弹幕.数量}",
+            If(弹幕状态 Is Nothing, String.Empty, $"当前正在渲染 {弹幕状态.命令数}")))
         结果.Add(配对行("字幕：", 字幕文本, 青色, 8))
         结果.Add(配对行("弹幕：", 弹幕文本, 橙色))
         Return 结果
     End Function
 
     Friend Function 读取调试文本行(信息 As 媒体信息, 快照 As 播放器快照,
-                                媒体路径 As String) As IReadOnlyList(Of String)
-        Return 创建调试行(信息, 快照, 媒体路径).
-            Select(Function(行) String.Concat(行.文本段.Select(Function(段) 段.文本))).ToArray()
+                                 媒体路径 As String) As IReadOnlyList(Of String)
+        Dim 行 = 创建调试行(信息, 快照, 媒体路径)
+        Dim 结果(行.Count - 1) As String
+        For 行索引 = 0 To 行.Count - 1
+            Dim 段 = 行(行索引).文本段
+            If 段.Length = 1 Then
+                结果(行索引) = 段(0).文本
+            Else
+                Dim 文本 As New Text.StringBuilder()
+                For 段索引 = 0 To 段.Length - 1
+                    文本.Append(段(段索引).文本)
+                Next
+                结果(行索引) = 文本.ToString()
+            End If
+        Next
+        Return 结果
     End Function
 
     Private Sub 构建操作消息(图形 As Graphics, 画布 As Size)
@@ -320,7 +337,13 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Sub
 
     Private Shared Function 合并字段(ParamArray 字段 As String()) As String
-        Return String.Join("   ", 字段.Where(Function(x) Not String.IsNullOrWhiteSpace(x)))
+        Dim 有效数量 = 0
+        For Each 值 In 字段
+            If String.IsNullOrWhiteSpace(值) Then Continue For
+            字段(有效数量) = 值
+            有效数量 += 1
+        Next
+        Return If(有效数量 = 0, String.Empty, String.Join("   ", 字段, 0, 有效数量))
     End Function
 
     Private Shared Function 查找流(信息 As 媒体信息, 快照 As 播放器快照, 类型 As String) As 媒体流信息
@@ -423,8 +446,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return 合并字段(
             If(最近实际帧率 > 0, $"帧率 {最近实际帧率:0.00}fps", String.Empty),
             $"缓冲池 {快照.视频队列帧数}帧",
-            $"实时丢帧 {最近实时丢帧数:N0}",
-            $"总丢帧 {计算总丢帧数(快照):N0}")
+            $"实时丢帧 {最近实时丢帧数}",
+            $"总丢帧 {计算总丢帧数(快照)}")
     End Function
 
     Private Shared Function 计算总丢帧数(快照 As 播放器快照) As ULong
@@ -450,7 +473,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
                        流.输出有效采样位数 > 0 OrElse 流.输出采样率 > 0 OrElse
                        流.输出声道数 > 0 OrElse 采样率 > 0 OrElse 声道 > 0
         Return 合并字段(
-            If(有输出格式, $"{格式}", String.Empty),
+            If(有输出格式, 格式, String.Empty),
             If(采样率 > 0, $"采样 {采样率}Hz", String.Empty),
             If(位深 > 0, $"位深 {位深}bit", String.Empty),
             If(声道 > 0, $"声道数 {声道}", String.Empty),
@@ -458,7 +481,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Function
 
     Private Shared Function 字幕条目数(字幕 As 外部字幕轨道) As String
-        Return If(字幕.条目数 >= 0, 字幕.条目数.ToString("N0"), "按需解码")
+        Return If(字幕.条目数 >= 0, 字幕.条目数.ToString(), "按需解码")
     End Function
 
     Private Shared Function 格式化比特率(值 As Long) As String
@@ -532,15 +555,12 @@ Friend NotInheritable Class 播放器信息图层呈现器
         End Select
     End Function
 
-    Private Shared Function 测量文本(图形 As Graphics, 文本 As String, 字体 As Font) As Single
+    Private Function 测量文本(图形 As Graphics, 文本 As String, 字体 As Font) As Single
         If String.IsNullOrEmpty(文本) Then Return 0
-        Using 格式 = StringFormat.GenericTypographic.Clone()
-            格式.FormatFlags = 格式.FormatFlags Or StringFormatFlags.MeasureTrailingSpaces Or StringFormatFlags.NoWrap
-            Return 图形.MeasureString(文本, 字体, Integer.MaxValue, 格式).Width
-        End Using
+        Return 图形.MeasureString(文本, 字体, Integer.MaxValue, 文本测量格式).Width
     End Function
 
-    Private Shared Function 拟合文本(图形 As Graphics, 文本 As String, 字体 As Font, 最大宽度 As Single) As String
+    Private Function 拟合文本(图形 As Graphics, 文本 As String, 字体 As Font, 最大宽度 As Single) As String
         If String.IsNullOrEmpty(文本) OrElse 测量文本(图形, 文本, 字体) <= 最大宽度 Then Return 文本
         Const 省略号 = "..."
         Dim 低 = 0, 高 = 文本.Length
@@ -607,7 +627,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             提交图层(画布, Array.Empty(Of 定时文字命令)(), 图层序号, 10.0F)
         Catch
         End Try
-        刷新定时器.Dispose() : 普通字体.Dispose()
+        刷新定时器.Dispose() : 文本测量格式.Dispose() : 普通字体.Dispose()
         GC.SuppressFinalize(Me)
     End Sub
 End Class

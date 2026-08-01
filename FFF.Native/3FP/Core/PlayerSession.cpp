@@ -1335,9 +1335,13 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
     auto result = avformat_open_input(output, path.c_str(), nullptr, &options);
     av_dict_free(&options);
     if (result < 0) { error = "Could not open local media: " + FfmpegError(result); return FFFResult::FfmpegFailure; }
-    if ((*output)->iformat == nullptr ||
-        std::string((*output)->iformat->name).find("hls") != std::string::npos ||
-        std::string((*output)->iformat->name).find("dash") != std::string::npos) {
+    if ((*output)->iformat == nullptr) {
+        avformat_close_input(output); error = "Network and virtual-device demuxers are disabled."; return FFFResult::NotSupported;
+    }
+    const std::string_view demuxerName(
+        (*output)->iformat->name == nullptr ? "" : (*output)->iformat->name);
+    if (demuxerName.find("hls") != std::string_view::npos ||
+        demuxerName.find("dash") != std::string_view::npos) {
         avformat_close_input(output); error = "Network and virtual-device demuxers are disabled."; return FFFResult::NotSupported;
     }
     result = avformat_find_stream_info(*output, nullptr);

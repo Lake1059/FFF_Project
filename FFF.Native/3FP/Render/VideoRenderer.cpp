@@ -1609,15 +1609,14 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
                     ? timedTextLayers_[slotIndex]->sequence + 1 : 1;
             timedTextLayers_[slotIndex] = std::move(retained);
             presentationFrameRate_ = 1.0f;
+            bool hasVisibleLayer = false;
             for (const auto& item : timedTextLayers_) {
-                if (item != nullptr && !item->commands.empty())
+                if (item != nullptr && !item->commands.empty()) {
+                    hasVisibleLayer = true;
                     presentationFrameRate_ = std::max(presentationFrameRate_,
                         std::clamp(item->targetFrameRate, 1.0f, 240.0f));
+                }
             }
-            const auto hasVisibleLayer = std::any_of(std::begin(timedTextLayers_),
-                std::end(timedTextLayers_), [](const auto& item) {
-                    return item != nullptr && !item->commands.empty();
-                });
             if (hasVisibleLayer) {
                 timedTextThreadRunning_ = true;
                 if (!timedTextThread_.joinable()) {
@@ -2034,16 +2033,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         }
     };
 
-    struct PendingSprite {
-        const TimedTextRenderCommand* command = nullptr;
-        IDWriteTextLayout* layout = nullptr;
-        std::uint64_t key = 0;
-        TimedTextSprite sprite{};
-        float outline = 0;
-        float shadowX = 0;
-        float shadowY = 0;
-    };
-    std::vector<PendingSprite> pendingSprites;
+    auto& pendingSprites = timedTextPendingSprites_;
     pendingSprites.reserve(layer->commands.size());
     const auto clearAtlas = [this]() noexcept -> bool {
         timedTextSprites_.clear();
@@ -2057,7 +2047,8 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     };
     const auto buildPendingSprites = [&](const bool stopWhenFull) noexcept -> bool {
         pendingSprites.clear();
-        for (const auto& command : layer->commands) {
+        for (std::size_t commandIndex = 0; commandIndex < layer->commands.size(); ++commandIndex) {
+            const auto& command = layer->commands[commandIndex];
             if (command.type != FFF3FPTimedTextCommandType::Text || command.contentId == 0 ||
                 command.horizontalAlignment != FFF3FPTimedTextAlignment::Near ||
                 command.verticalAlignment != FFF3FPTimedTextAlignment::Near) continue;
@@ -2095,7 +2086,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
                 static_cast<float>(width), static_cast<float>(height)};
             timedTextAtlasX_ += width;
             timedTextAtlasRowHeight_ = std::max(timedTextAtlasRowHeight_, height);
-            pendingSprites.push_back(PendingSprite{&command, layout, key, sprite, outline,
+            pendingSprites.push_back(PendingTimedTextSprite{commandIndex, layout, key, sprite, outline,
                 shadowX, shadowY});
         }
         return true;
@@ -2122,11 +2113,12 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         d2dContext_->SetTarget(d2dAtlasTarget_);
         d2dContext_->BeginDraw();
         for (const auto& pending : pendingSprites) {
+            const auto& command = layer->commands[pending.commandIndex];
             const auto& sprite = pending.sprite;
             const auto clip = D2D1::RectF(sprite.atlasX, sprite.atlasY,
                 sprite.atlasX + sprite.width, sprite.atlasY + sprite.height);
             d2dContext_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
-            drawLayout(*pending.command, pending.layout,
+            drawLayout(command, pending.layout,
                 D2D1::Point2F(sprite.atlasX + sprite.padding,
                     sprite.atlasY + sprite.padding), pending.outline,
                 pending.shadowX, pending.shadowY);

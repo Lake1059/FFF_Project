@@ -9,6 +9,7 @@ Public Class Form媒体信息
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
     Private ReadOnly 获取输出尺寸 As Func(Of Size)
     Private ReadOnly 获取音频峰值 As Func(Of Single())
+    Private ReadOnly 响度条 As LakeUI.ExcellentProgressBar()
     Private ReadOnly 刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 200}
     Private ReadOnly 响度刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 67}
     Private ReadOnly 帧率刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 1000}
@@ -27,6 +28,7 @@ Public Class Form媒体信息
                    Optional outputSizeProvider As Func(Of Size) = Nothing,
                    Optional audioPeakProvider As Func(Of Single()) = Nothing)
         InitializeComponent()
+        响度条 = {EPB_L, EPB_R, EPB_C, EPB_LFE, EPB_SL, EPB_SR, EPB_BL, EPB_BR}
         获取媒体 = mediaProvider : 获取快照 = snapshotProvider
         获取字幕状态 = subtitleStatusProvider : 获取弹幕状态 = danmakuStatusProvider
         获取字幕 = subtitleProvider : 获取弹幕 = danmakuProvider
@@ -76,11 +78,11 @@ Public Class Form媒体信息
         刷新概要(信息, 快照)
         Dim 字幕 = 安全获取(获取字幕), 弹幕 = 安全获取(获取弹幕)
         Dim 字幕状态 = 安全获取(获取字幕状态), 弹幕状态 = 安全获取(获取弹幕状态)
-        HtmlColorLabel7.Text = 标签("已加载字幕条目数", If(字幕 Is Nothing, "未加载", If(字幕.条目数 >= 0, 字幕.条目数.ToString("N0"), "按需解码")), "#B7D7F0")
-        HtmlColorLabel14.Text = 标签("正在渲染的字幕数量", If(字幕状态 Is Nothing, "0", 字幕状态.命令数.ToString("N0")), "#9ED7C5")
+        HtmlColorLabel7.Text = 标签("已加载字幕条目数", If(字幕 Is Nothing, "未加载", If(字幕.条目数 >= 0, 字幕.条目数.ToString(), "按需解码")), "#B7D7F0")
+        HtmlColorLabel14.Text = 标签("正在渲染的字幕数量", If(字幕状态 Is Nothing, "0", 字幕状态.命令数.ToString()), "#9ED7C5")
         HtmlColorLabel8.Text = 标签("平均渲染延迟", 图层延迟(字幕状态), "#CDB6EA")
-        HtmlColorLabel12.Text = 标签("已加载弹幕条目数", If(弹幕 Is Nothing, "未加载", 弹幕.数量.ToString("N0")), "#B7D7F0")
-        HtmlColorLabel13.Text = 标签("正在渲染的弹幕数量", If(弹幕状态 Is Nothing, "0", 弹幕状态.命令数.ToString("N0")), "#9ED7C5")
+        HtmlColorLabel12.Text = 标签("已加载弹幕条目数", If(弹幕 Is Nothing, "未加载", 弹幕.数量.ToString()), "#B7D7F0")
+        HtmlColorLabel13.Text = 标签("正在渲染的弹幕数量", If(弹幕状态 Is Nothing, "0", 弹幕状态.命令数.ToString()), "#9ED7C5")
         HtmlColorLabel11.Text = 标签("平均渲染延迟", 图层延迟(弹幕状态), "#CDB6EA")
         刷新列表(信息, 快照)
     End Sub
@@ -104,17 +106,16 @@ Public Class Form媒体信息
     End Sub
 
     Private Sub 重置响度条()
-        For Each bar In {EPB_L, EPB_R, EPB_C, EPB_LFE, EPB_SL, EPB_SR, EPB_BL, EPB_BR}
+        For Each bar In 响度条
             bar.Minimum = -60 : bar.Maximum = 0 : bar.Value = -60
         Next
     End Sub
 
     Private Sub 刷新响度条()
         Dim peaks = 安全获取(获取音频峰值)
-        Dim bars = {EPB_L, EPB_R, EPB_C, EPB_LFE, EPB_SL, EPB_SR, EPB_BL, EPB_BR}
-        For i = 0 To bars.Length - 1
+        For i = 0 To 响度条.Length - 1
             Dim peak = If(peaks IsNot Nothing AndAlso i < peaks.Length, peaks(i), 0.0F)
-            bars(i).Value = CInt(Math.Clamp(20.0 * Math.Log10(Math.Clamp(peak, 0.000001F, 1.0F)), -60.0, 0.0))
+            响度条(i).Value = CInt(Math.Clamp(20.0 * Math.Log10(Math.Clamp(peak, 0.000001F, 1.0F)), -60.0, 0.0))
         Next
     End Sub
 
@@ -199,8 +200,8 @@ Public Class Form媒体信息
                     添加条目(group, "矩阵系数", 色彩空间(流.色彩空间))
                     添加条目如果有值(group, "主显示器色域", 流.主显示器色域)
                     If 流.主显示器最大亮度 > 0 Then 添加条目(group, "主显示器亮度", $"最小 {流.主显示器最小亮度:0.####} cd/m²，最大 {流.主显示器最大亮度:0.##} cd/m²")
-                    If 流.最大内容光照 > 0 Then 添加条目(group, "最大内容光照", $"{流.最大内容光照:N0} cd/m²")
-                    If 流.最大帧平均光照 > 0 Then 添加条目(group, "最大帧平均光照", $"{流.最大帧平均光照:N0} cd/m²")
+                    If 流.最大内容光照 > 0 Then 添加条目(group, "最大内容光照", $"{流.最大内容光照} cd/m²")
+                    If 流.最大帧平均光照 > 0 Then 添加条目(group, "最大帧平均光照", $"{流.最大帧平均光照} cd/m²")
                     添加条目如果有值(group, "编码配置盒", 流.编码配置盒)
                 Else
                     添加条目(group, "ID", If(流.流ID >= 0, 流.流ID.ToString(), 流.索引.ToString()))
