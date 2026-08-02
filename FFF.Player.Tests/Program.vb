@@ -98,6 +98,11 @@ Friend Module Program
                 Console.WriteLine("HDR10/HDR10+/HLG/Vivid、Dolby Profile/FEL 回退与显示峰值策略通过。")
                 Return 0
             End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--bt2390-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试BT2390数值映射()
+                Console.WriteLine("BT.2390 EETF 暗部保留、连续性、单调性与峰值映射通过。")
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--audio-latency-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试音频延迟回归()
                 Console.WriteLine("无画面 PCM 音频延迟与欠载回归通过。")
@@ -124,7 +129,7 @@ Friend Module Program
                 Dim 缩放测试路径 = Path.GetFullPath(参数(1))
                 检查文件(缩放测试路径)
                 测试视频缩放路径(缩放测试路径)
-                Console.WriteLine("GPU 与 CPU 解码统一 D3D11 Video Processor 路径通过。")
+                Console.WriteLine("GPU 与 CPU 解码统一自有高质量缩放路径通过。")
                 Return 0
             End If
             If 参数.Length = 3 AndAlso String.Equals(参数(0), "--sdr-pixel-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -133,7 +138,7 @@ Friend Module Program
                 检查文件(媒体路径)
                 检查文件(参考图路径)
                 测试SDR灰阶像素(媒体路径, 参考图路径)
-                Console.WriteLine("SDR GPU 与 CPU 的 VP 像素回归通过。")
+                Console.WriteLine("SDR GPU 与 CPU 的自有缩放像素回归通过。")
                 Return 0
             End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--sdr-desktop-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -277,6 +282,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --empty-layer-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --hdr-switch-regression <HDR视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --hdr-processing-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --bt2390-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --gpu-decode-matrix <视频目录>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --video-scaling-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sdr-pixel-regression <视频> <参考图.png>")
@@ -1390,7 +1396,9 @@ Friend Module Program
             Application.DoEvents()
             Dim 快照 = 会话.当前快照
             If 条件(快照) Then Return 快照
-            If 快照.状态 = 播放状态.失败 Then Throw New InvalidOperationException($"{操作}时播放器失败。")
+            If 快照.状态 = 播放状态.失败 Then
+                Throw New InvalidOperationException($"{操作}时播放器失败：{会话.最后错误消息}")
+            End If
             If 计时.Elapsed >= TimeSpan.FromSeconds(10) Then
                 Throw New TimeoutException($"等待{操作}超时：位置 {快照.播放位置.TotalSeconds:F3}s，PTS {快照.原始帧PTS}，" &
                     $"色彩 {快照.请求色彩模式}/{快照.实际色彩模式}/{快照.视频输出位深度}bit，" &
@@ -1462,12 +1470,9 @@ Friend Module Program
                 Dim VP快照 = 等待快照(会话, Function(x) x.交换链呈现次数 > 0,
                                    "视频自动渲染首帧")
                 Console.WriteLine($"首帧：解码 {VP快照.解码器}，路径 {VP快照.视频缩放}")
-                If VP快照.视频缩放 <> 视频缩放模式.D3D11视频处理器 Then
-                    Console.WriteLine($"VP 回退：{会话.最后错误消息}")
-                End If
                 断言(VP快照.解码器 = 解码模式.GPU, "测试视频没有保持 D3D11VA 解码。")
-                断言(VP快照.视频缩放 = 视频缩放模式.D3D11视频处理器,
-                   "自动管线没有在受支持的 D3D11VA 输入上激活 Video Processor。")
+                断言(VP快照.视频缩放 = 视频缩放模式.着色器,
+                   "高质量管线没有在受支持的 D3D11VA 输入上激活自有缩放着色器。")
                 Dim 第一秒 = 等待快照(会话,
                     Function(x) x.播放位置 >= TimeSpan.FromSeconds(1.1) AndAlso
                         x.视频实时比特率 > 0 AndAlso x.音频实时比特率 > 0,
@@ -1502,9 +1507,9 @@ Friend Module Program
                 会话.播放()
                 Dim CPU快照 = 等待快照(会话,
                     Function(x) x.交换链呈现次数 > 0 AndAlso
-                        x.视频缩放 = 视频缩放模式.D3D11视频处理器,
-                    "CPU 解码的 VP 路径")
-                断言(CPU快照.解码器 = 解码模式.CPU, "CPU VP 测试意外改变了解码器。")
+                        x.视频缩放 = 视频缩放模式.着色器,
+                    "CPU 解码的自有缩放路径")
+                断言(CPU快照.解码器 = 解码模式.CPU, "CPU 高质量缩放测试意外改变了解码器。")
             End Using
         End Using
     End Sub
@@ -1540,8 +1545,8 @@ Friend Module Program
                     会话.播放()
                     Dim GPU快照 = 等待快照(会话,
                         Function(x) x.交换链呈现次数 > 1 AndAlso
-                            x.视频缩放 = 视频缩放模式.D3D11视频处理器,
-                        "SDR 自动 VP 像素帧")
+                            x.视频缩放 = 视频缩放模式.着色器,
+                        "SDR 自有缩放像素帧")
                     断言(GPU快照.解码器 = 解码模式.GPU,
                        "SDR 像素测试片没有保持 GPU 解码。")
                     GPU值 = 读取视频像素平均值(会话, 采样点)
@@ -1549,7 +1554,7 @@ Friend Module Program
 
                 Dim CPU值 As Integer() = Nothing
                 Using 会话 As New 播放器会话(New 播放器配置 With {
-                    .解码器 = 解码模式.GPU,
+                    .解码器 = 解码模式.CPU,
                     .色彩模式 = 色彩输出模式.映射到SDR,
                     .输出窗口句柄 = 输出窗口.Handle
                 })
@@ -1558,19 +1563,19 @@ Friend Module Program
                     会话.播放()
                     Dim 快照 = 等待快照(会话,
                         Function(x) x.交换链呈现次数 > 1 AndAlso
-                            x.视频缩放 = 视频缩放模式.D3D11视频处理器,
-                        "SDR CPU VP 像素帧")
+                            x.视频缩放 = 视频缩放模式.着色器,
+                        "SDR CPU 自有缩放像素帧")
                     断言(快照.解码器 = 解码模式.CPU,
                        "SDR CPU 像素测试意外改变了解码器。")
                     CPU值 = 读取视频像素平均值(会话, 采样点)
                 End Using
                 Console.WriteLine($"灰阶 RGB：文件 {String.Join(",", 参考值)}；" &
-                                  $"GPU VP {String.Join(",", GPU值)}；" &
-                                  $"CPU VP {String.Join(",", CPU值)}")
+                                  $"GPU shader {String.Join(",", GPU值)}；" &
+                                  $"CPU shader {String.Join(",", CPU值)}")
                 断言(最大通道差(参考值, GPU值) <= 1,
-                   "D3D11 Video Processor 改变了 SDR 灰阶码值。")
+                   "GPU 自有缩放路径改变了 SDR 灰阶码值。")
                 断言(最大通道差(参考值, CPU值) <= 1,
-                   "CPU VP 改变了 SDR 灰阶码值。")
+                   "CPU 自有缩放路径改变了 SDR 灰阶码值。")
             End Using
         End Using
     End Sub
@@ -2372,17 +2377,48 @@ Friend Module Program
            Math.Abs(SDR.输出蓝 - 1.0F) < 0.0001F,
            "纯 SDR→SDR 路径改变了 BT.709 码值。")
 
-        Dim 一百尼特 = 执行色彩变换(0UI, 1UI, PQ码值(100.0F), PQ码值(100.0F), PQ码值(100.0F), 1242.0F, 203.0F)
-        Dim 纸白 = 执行色彩变换(0UI, 1UI, PQ码值(203.0F), PQ码值(203.0F), PQ码值(203.0F), 1242.0F, 203.0F)
-        Dim 峰值 = 执行色彩变换(0UI, 1UI, PQ码值(1242.0F), PQ码值(1242.0F), PQ码值(1242.0F), 1242.0F, 203.0F)
-        断言(一百尼特.输出红 > 0.5F AndAlso 一百尼特.输出红 < 纸白.输出红,
-           "HDR→SDR 中间调没有保持单调且合理的亮度。")
-        断言(纸白.输出红 >= 0.68F AndAlso 纸白.输出红 <= 0.76F,
-           $"HDR 203 nit 纸白被推得过亮：SDR 码值 {纸白.输出红:F4}。")
-        断言(峰值.输出红 >= 0.995F AndAlso 峰值.输出红 <= 1.0F,
-           $"HDR MaxCLL 没有映射到 SDR 峰值：{峰值.输出红:F4}。")
-        Console.WriteLine($"数值映射：PQ 100/203/1242 nit → SDR {一百尼特.输出红:F4}/{纸白.输出红:F4}/{峰值.输出红:F4}。")
+        测试BT2390数值映射()
     End Sub
+
+    Private Sub 测试BT2390数值映射()
+        Const 源峰值 As Single = 1242.0F
+        Const 目标峰值 As Single = 100.0F
+        Dim 源峰值PQ = PQ码值(源峰值)
+        Dim 目标峰值PQ = PQ码值(目标峰值)
+        Dim 归一目标 = 目标峰值PQ / 源峰值PQ
+        Dim 拐点信号 = Math.Clamp(1.5F * 归一目标 - 0.5F, 0.0F, 1.0F)
+        Dim 拐点尼特 = PQ尼特(拐点信号 * 源峰值PQ)
+        Dim 暗部尼特 = Math.Max(1.0F, 拐点尼特 * 0.5F)
+
+        Dim 暗部 = 执行色彩变换(0UI, 1UI, PQ码值(暗部尼特), PQ码值(暗部尼特),
+                              PQ码值(暗部尼特), 源峰值, 203.0F)
+        Dim 暗部预期 = BT709码值(暗部尼特 / 目标峰值)
+        断言(Math.Abs(暗部.输出红 - 暗部预期) < 0.0005F,
+           $"BT.2390 拐点以下改变了绝对亮度：{暗部尼特:F3} nit → {暗部.输出红:F5}，预期 {暗部预期:F5}。")
+
+        Dim 拐点前 = 执行灰阶PQ变换(拐点尼特 * 0.999F, 源峰值)
+        Dim 拐点后 = 执行灰阶PQ变换(拐点尼特 * 1.001F, 源峰值)
+        断言(拐点后 >= 拐点前 AndAlso 拐点后 - 拐点前 < 0.002F,
+           $"BT.2390 拐点不连续：{拐点前:F6} → {拐点后:F6}。")
+
+        Dim 上一个 = -1.0F
+        For Each 尼特 In {0.0F, 1.0F, 5.0F, 10.0F, 25.0F, 50.0F, 100.0F,
+                         203.0F, 400.0F, 800.0F, 源峰值}
+            Dim 当前 = 执行灰阶PQ变换(尼特, 源峰值)
+            断言(当前 >= 上一个 AndAlso 当前 >= 0.0F AndAlso 当前 <= 1.00001F,
+               $"BT.2390 曲线非单调或越界：{尼特:F1} nit → {当前:F6}。")
+            上一个 = 当前
+        Next
+        断言(上一个 >= 0.9999F AndAlso 上一个 <= 1.00001F,
+           $"BT.2390 没有把源峰值映射到 SDR 峰值：{上一个:F6}。")
+        Console.WriteLine($"BT.2390：knee {拐点尼特:F2} nit；暗部 {暗部尼特:F2} nit 保持；" &
+                          $"源峰值 {源峰值:F0} nit → SDR {上一个:F4}。")
+    End Sub
+
+    Private Function 执行灰阶PQ变换(尼特 As Single, 源峰值 As Single) As Single
+        Dim 码值 = PQ码值(尼特)
+        Return 执行色彩变换(0UI, 1UI, 码值, 码值, 码值, 源峰值, 203.0F).输出红
+    End Function
 
     Private Function 执行色彩变换(模式 As UInteger, 传递函数 As UInteger,
                               红 As Single, 绿 As Single, 蓝 As Single,
@@ -2412,6 +2448,23 @@ Friend Module Program
         Const c3 As Double = 2392.0 / 128.0
         Dim 线性 = Math.Pow(Math.Clamp(CDbl(尼特) / 10000.0, 0.0, 1.0), m1)
         Return CSng(Math.Pow((c1 + c2 * 线性) / (1.0 + c3 * 线性), m2))
+    End Function
+
+    Private Function PQ尼特(码值 As Single) As Single
+        Const m1 As Double = 2610.0 / 16384.0
+        Const m2 As Double = 2523.0 / 32.0
+        Const c1 As Double = 3424.0 / 4096.0
+        Const c2 As Double = 2413.0 / 128.0
+        Const c3 As Double = 2392.0 / 128.0
+        Dim 幂 = Math.Pow(Math.Clamp(CDbl(码值), 0.0, 1.0), 1.0 / m2)
+        Return CSng(10000.0 * Math.Pow(Math.Max(幂 - c1, 0.0) /
+            Math.Max(c2 - c3 * 幂, 0.000001), 1.0 / m1))
+    End Function
+
+    Private Function BT709码值(线性值 As Single) As Single
+        线性值 = Math.Max(线性值, 0.0F)
+        Return Math.Clamp(If(线性值 < 0.018F, 4.5F * 线性值,
+            1.099F * CSng(Math.Pow(线性值, 0.45)) - 0.099F), 0.0F, 1.0F)
     End Function
 
     Private Function 读取源峰值(路径 As String, 应为HDR As Boolean) As UInteger

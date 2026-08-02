@@ -211,6 +211,8 @@ private:
     ID3D11PixelShader* pixelShader_;
     ID3D11PixelShader* timedTextPixelShader_;
     ID3D11SamplerState* sampler_;
+    ID3D11SamplerState* pointSampler_;
+    ID3D11SamplerState* anisotropicSampler_;
     ID3D11Buffer* constants_;
     ID3D11Texture2D* sourceTextures_[3];
     ID3D11ShaderResourceView* sourceViews_[3];

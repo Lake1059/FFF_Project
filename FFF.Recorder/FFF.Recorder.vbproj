@@ -14,15 +14,16 @@
 	<!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
 	<Authors>1059 Studio</Authors>
 	<Company>1059 Studio</Company>
-	<AssemblyVersion>2026.7.25</AssemblyVersion>
-	<FileVersion>2026.7.25</FileVersion>
-	<Version>2026.7.25</Version>
+	<AssemblyVersion>2026.8.2</AssemblyVersion>
+	<FileVersion>2026.8.2</FileVersion>
+	<Version>2026.8.2</Version>
 	<SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
 	<Title>FFF.Recorder</Title>
 	<ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
 	<ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
 	<PlatformTarget>x64</PlatformTarget>
 	<Prefer32Bit>false</Prefer32Bit>
+	<ApplicationIcon>ICO.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -32,6 +33,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Remove="Assets\SP_默认背景图.jpg" />
     <EmbeddedResource Include="Assets\Shaders\缩放RGBA.cso" LogicalName="FFF.Recorder.Shaders.ScaleRgba.cso" />
     <EmbeddedResource Include="Assets\Shaders\全屏三角形.cso" LogicalName="FFF.Recorder.Shaders.FullscreenTriangle.cso" />
     <EmbeddedResource Include="Assets\Shaders\复制到BGRA.cso" LogicalName="FFF.Recorder.Shaders.CopyBgra.cso" />
@@ -51,10 +53,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FFF.Native\FFF.Native.vcxproj"
-                      Condition="'$(MSBuildRuntimeType)' != 'Core'"
-                      ReferenceOutputAssembly="false"
-                      SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\FFF.Native\FFF.Native.vcxproj" Condition="'$(MSBuildRuntimeType)' != 'Core'" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(PublishSingleFile)' == 'true'">

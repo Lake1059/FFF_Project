@@ -5,12 +5,12 @@ cbuffer ScalingConstants : register(b0)
     float4 SourceRect;
     float ReferenceWhiteNits;
     float TargetPeakNits;
+    float SourcePeakNits;
     float Exposure;
-    float HighlightCompression;
+    float ReservedToneMap;
     float Saturation;
     uint Rotation;
     uint HighQualityScaling;
-    uint Reserved;
 };
 
 Texture2D<float4> SourceTexture : register(t0);

@@ -8,4 +8,5 @@
   <Project Path="FFF.Player/FFF.Player.vbproj" Id="0b22364a-f9b7-4e3f-8a14-706b859aa98b" />
   <Project Path="FFF.Player.Tests/FFF.Player.Tests.vbproj" />
   <Project Path="FFF.Recorder/FFF.Recorder.vbproj" />
+  <Project Path="FFF.Recorder.Tests/FFF.Recorder.Tests.vbproj" />
 </Solution>

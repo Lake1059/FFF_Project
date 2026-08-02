@@ -186,13 +186,31 @@ float ToneToPeakNits(const float nits, const float peak) noexcept {
         (1.0f - std::exp(-(nits - knee) / std::max(peak - knee, 1.0f)));
 }
 
-float ReinhardHdrToSdrNits(const float nits, const float sourcePeak,
-    const float paperWhite, const float targetPeak) noexcept {
-    const auto reference = std::max(paperWhite, 1.0f);
-    const auto white = std::max(sourcePeak / reference, 1.0f);
-    const auto normalized = std::max(nits, 0.0f) / reference;
-    return targetPeak * normalized * (1.0f + normalized / (white * white)) /
-        (1.0f + normalized);
+float Bt2390HdrToSdrNits(const float nits, const float sourcePeak,
+    const float targetPeak) noexcept {
+    const auto sourceMaximum = std::max(sourcePeak, 1.0f);
+    const auto targetMaximum = std::clamp(targetPeak, 1.0f, sourceMaximum);
+    const auto sourcePq = NitsToPq(sourceMaximum);
+    const auto targetPq = NitsToPq(targetMaximum);
+    if (sourcePq <= 1.0e-6f || targetPq >= sourcePq)
+        return std::clamp(nits, 0.0f, targetMaximum);
+
+    const auto normalizedTarget = targetPq / sourcePq;
+    const auto knee = std::clamp(1.5f * normalizedTarget - 0.5f, 0.0f, 1.0f);
+    const auto signal = std::clamp(NitsToPq(std::max(nits, 0.0f)) / sourcePq,
+        0.0f, 1.0f);
+    auto mapped = signal;
+    if (signal > knee && knee < 1.0f) {
+        const auto t = (signal - knee) / (1.0f - knee);
+        const auto t2 = t * t;
+        const auto t3 = t2 * t;
+        const auto h00 = 2.0f * t3 - 3.0f * t2 + 1.0f;
+        const auto h10 = t3 - 2.0f * t2 + t;
+        const auto h01 = -2.0f * t3 + 3.0f * t2;
+        mapped = h00 * knee + h10 * (1.0f - knee) +
+            h01 * normalizedTarget;
+    }
+    return std::clamp(PqToNits(mapped * sourcePq), 0.0f, targetMaximum);
 }
 
 struct Float3 { float r, g, b; };
@@ -205,10 +223,10 @@ Float3 ScaleToPeak(const Float3 value, const float peak) noexcept {
 }
 
 Float3 MapHdrToSdr(const Float3 value, const float sourcePeak,
-    const float paperWhite, const float targetPeak) noexcept {
+    const float targetPeak) noexcept {
     const auto maximum = std::max({value.r, value.g, value.b});
     if (maximum <= 1.0e-6f) return value;
-    const auto scale = ReinhardHdrToSdrNits(maximum, sourcePeak, paperWhite, targetPeak) / maximum;
+    const auto scale = Bt2390HdrToSdrNits(maximum, sourcePeak, targetPeak) / maximum;
     return {value.r * scale, value.g * scale, value.b * scale};
 }
 
@@ -234,6 +252,8 @@ Texture2D<float4> Source : register(t0);
 Texture2D<float4> ChromaU : register(t1);
 Texture2D<float4> ChromaV : register(t2);
 SamplerState LinearSampler : register(s0);
+SamplerState PointSampler : register(s1);
+SamplerState AnisotropicSampler : register(s2);
 float3 PqToNits(float3 v) {
     const float m1=2610.0/16384.0, m2=2523.0/32.0, c1=3424.0/4096.0, c2=2413.0/128.0, c3=2392.0/128.0;
     v=pow(saturate(v),1.0/m2); return 10000.0*pow(max(v-c1,0.0)/max(c2-c3*v,0.000001),1.0/m1);
@@ -262,23 +282,82 @@ float3 ToneToPeak(float3 nits,float peak) {
     float maximum=max(max(nits.r,nits.g),nits.b);
     return maximum<=0.000001?nits:nits*(ToneOne(maximum,peak)/maximum);
 }
-float ReinhardHdrToSdrOne(float value,float sourcePeak,float paperWhite,float targetPeak) {
-    float reference=max(paperWhite,1.0);
-    float white=max(sourcePeak/reference,1.0);
-    float normalized=max(value,0.0)/reference;
-    return targetPeak*normalized*(1.0+normalized/(white*white))/(1.0+normalized);
+float Bt2390HdrToSdrOne(float value,float sourcePeak,float targetPeak) {
+    float sourceMaximum=max(sourcePeak,1.0);
+    float targetMaximum=clamp(targetPeak,1.0,sourceMaximum);
+    float sourcePq=NitsToPq(sourceMaximum.xxx).r;
+    float targetPq=NitsToPq(targetMaximum.xxx).r;
+    if(sourcePq<=0.000001||targetPq>=sourcePq)
+        return clamp(value,0.0,targetMaximum);
+    float normalizedTarget=targetPq/sourcePq;
+    float knee=clamp(1.5*normalizedTarget-0.5,0.0,1.0);
+    float signal=clamp(NitsToPq(max(value,0.0).xxx).r/sourcePq,0.0,1.0);
+    if(signal<=knee||knee>=1.0)return clamp(value,0.0,targetMaximum);
+    float t=(signal-knee)/(1.0-knee);
+    float t2=t*t,t3=t2*t;
+    float mapped=(2.0*t3-3.0*t2+1.0)*knee+
+        (t3-2.0*t2+t)*(1.0-knee)+(-2.0*t3+3.0*t2)*normalizedTarget;
+    return min(PqToNits((mapped*sourcePq).xxx).r,targetMaximum);
 }
-float3 ToneHdrToSdr(float3 nits,float sourcePeak,float paperWhite,float targetPeak) {
+float3 ToneHdrToSdr(float3 nits,float sourcePeak,float targetPeak) {
     float maximum=max(max(nits.r,nits.g),nits.b);
-    return maximum<=0.000001?nits:nits*(ReinhardHdrToSdrOne(maximum,sourcePeak,paperWhite,targetPeak)/maximum);
+    return maximum<=0.000001?nits:nits*(Bt2390HdrToSdrOne(maximum,sourcePeak,targetPeak)/maximum);
+}
+float Sinc(float value) {
+    value=abs(value);
+    if(value<0.00001)return 1.0;
+    const float angle=3.14159265359*value;
+    return sin(angle)/angle;
+}
+float Lanczos3Weight(float value) {
+    value=abs(value);
+    return value>=3.0?0.0:Sinc(value)*Sinc(value/3.0);
+}
+float4 LoadClamped(Texture2D<float4> sourceTexture,int2 coordinate,uint2 dimensions) {
+    return sourceTexture.Load(int3(clamp(coordinate,int2(0,0),int2(dimensions)-1),0));
+}
+float4 SampleLanczos3(Texture2D<float4> sourceTexture,float2 uv,uint2 dimensions) {
+    float2 position=uv*float2(dimensions)-0.5;
+    int2 origin=int2(floor(position));
+    float2 fraction=position-float2(origin);
+    float4 total=0.0;
+    float weightTotal=0.0;
+    [unroll] for(int y=-2;y<=3;++y) {
+        const float wy=Lanczos3Weight(float(y)-fraction.y);
+        [unroll] for(int x=-2;x<=3;++x) {
+            const float weight=wy*Lanczos3Weight(float(x)-fraction.x);
+            total+=LoadClamped(sourceTexture,origin+int2(x,y),dimensions)*weight;
+            weightTotal+=weight;
+        }
+    }
+    const float4 filtered=total/max(abs(weightTotal),0.000001);
+    // Clamp the negative Lanczos lobes to the local bilinear footprint.  This
+    // retains edge detail without creating bright or dark halos around lines.
+    const float4 a=LoadClamped(sourceTexture,origin,dimensions);
+    const float4 b=LoadClamped(sourceTexture,origin+int2(1,0),dimensions);
+    const float4 c=LoadClamped(sourceTexture,origin+int2(0,1),dimensions);
+    const float4 d=LoadClamped(sourceTexture,origin+int2(1,1),dimensions);
+    return clamp(filtered,min(min(a,b),min(c,d)),max(max(a,b),max(c,d)));
+}
+float4 SampleVideo(Texture2D<float4> sourceTexture,float2 uv) {
+    uint width,height;
+    sourceTexture.GetDimensions(width,height);
+    const uint2 dimensions=uint2(width,height);
+    if(abs(OutputWidth-float(width))<0.01&&abs(OutputHeight-float(height))<0.01)
+        return sourceTexture.SampleLevel(PointSampler,uv,0);
+    // Hardware anisotropic filtering is the appropriate minification kernel;
+    // Lanczos3 preserves line detail when the image is enlarged.
+    if(OutputWidth<=float(width)&&OutputHeight<=float(height))
+        return sourceTexture.Sample(AnisotropicSampler,uv);
+    return SampleLanczos3(sourceTexture,uv,dimensions);
 }
 float3 ReadSource(float2 uv) {
-    if(InputLayout==0)return Source.Sample(LinearSampler,uv).rgb;
+    if(InputLayout==0)return SampleVideo(Source,uv).rgb;
     float2 chromaUv=uv+ChromaOffset;
-    float y=Source.Sample(LinearSampler,uv).r*SampleScale;
+    float y=SampleVideo(Source,uv).r*SampleScale;
     float2 chroma=InputLayout==1
-        ?float2(ChromaU.Sample(LinearSampler,chromaUv).r,ChromaV.Sample(LinearSampler,chromaUv).r)*SampleScale
-        :ChromaU.Sample(LinearSampler,chromaUv).rg*SampleScale;
+        ?float2(SampleVideo(ChromaU,chromaUv).r,SampleVideo(ChromaV,chromaUv).r)*SampleScale
+        :SampleVideo(ChromaU,chromaUv).rg*SampleScale;
     y=(y-YOffset)*YScale;
     chroma=(chroma-COffset)*CScale;
     float kg=1.0-Kr-Kb;
@@ -299,10 +378,9 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
         return float4(NitsToPq(ToneToPeak(nits,TargetPeak)),1);
     }
     if(Source2020!=0)nits=To709(nits);
-    // HDR is display-referred.  Compress it before the SDR OETF instead of
-    // scaling HDR diffuse white directly to clipping white; that old scaling
-    // lifted most mid-tones and left almost no highlight headroom.
-    float3 sdr=ToBt709(ToneHdrToSdr(nits,HdrPeak,PaperWhite,SdrPeak)/SdrPeak);
+    // BT.2390 operates in the perceptually uniform PQ domain. The source peak
+    // reaches SDR peak while values below its adaptive knee remain unchanged.
+    float3 sdr=ToBt709(ToneHdrToSdr(nits,HdrPeak,SdrPeak)/SdrPeak);
     return float4(sdr,1);
 })";
 
@@ -748,7 +826,7 @@ FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept 
             } else {
                 if (transform.source2020 != 0) Convert2020To709(nits.r, nits.g, nits.b);
                 nits = MapHdrToSdr(nits, transform.sourcePeakNits,
-                    transform.paperWhiteNits, transform.sdrPeakNits);
+                    transform.sdrPeakNits);
                 rgb = {LinearToBt709(nits.r / transform.sdrPeakNits),
                     LinearToBt709(nits.g / transform.sdrPeakNits),
                     LinearToBt709(nits.b / transform.sdrPeakNits)};
@@ -784,6 +862,7 @@ FFFResult EvaluateTimedTextRasterization(FFF3FPTimedTextRasterizationProbe& prob
 PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), timedTextPixelShader_(nullptr), sampler_(nullptr),
+      pointSampler_(nullptr), anisotropicSampler_(nullptr),
       constants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
       videoDevice_(nullptr), videoContext_(nullptr), videoProcessorEnumerator_(nullptr),
@@ -1231,7 +1310,9 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     const std::uint32_t sourceHeight, const std::uint32_t inputLayout,
     const std::uint32_t bitDepth, const std::uint32_t chromaWidthShift,
     const std::uint32_t chromaHeightShift, const bool externalSource) noexcept {
-    if (vertexShader_ == nullptr || pixelShader_ == nullptr || timedTextPixelShader_ == nullptr) {
+    if (vertexShader_ == nullptr || pixelShader_ == nullptr || timedTextPixelShader_ == nullptr ||
+        sampler_ == nullptr || pointSampler_ == nullptr || anisotropicSampler_ == nullptr ||
+        constants_ == nullptr) {
         ComPtr<ID3DBlob> vertexCode, pixelCode, timedTextPixelCode, errors;
         if (FAILED(D3DCompile(VertexShaderSource, std::strlen(VertexShaderSource), nullptr, nullptr, nullptr,
             "main", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vertexCode, &errors)) ||
@@ -1250,9 +1331,16 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         sampler.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
         sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
         sampler.MaxLOD = D3D11_FLOAT32_MAX;
+        D3D11_SAMPLER_DESC pointSampler = sampler;
+        pointSampler.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        D3D11_SAMPLER_DESC anisotropicSampler = sampler;
+        anisotropicSampler.Filter = D3D11_FILTER_ANISOTROPIC;
+        anisotropicSampler.MaxAnisotropy = 16;
         D3D11_BUFFER_DESC buffer{};
         buffer.ByteWidth = sizeof(ShaderSettings); buffer.Usage = D3D11_USAGE_DEFAULT; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         if (FAILED(device_->CreateSamplerState(&sampler, &sampler_)) ||
+            FAILED(device_->CreateSamplerState(&pointSampler, &pointSampler_)) ||
+            FAILED(device_->CreateSamplerState(&anisotropicSampler, &anisotropicSampler_)) ||
             FAILED(device_->CreateBuffer(&buffer, nullptr, &constants_))) {
             SetError("Could not create the presentation shader resources."); return FFFResult::DeviceFailure;
         }
@@ -1507,7 +1595,8 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     context_->VSSetShader(vertexShader_, nullptr, 0);
     context_->PSSetShader(pixelShader_, nullptr, 0);
     context_->PSSetConstantBuffers(0, 1, &constants_);
-    context_->PSSetSamplers(0, 1, &sampler_);
+    ID3D11SamplerState* samplers[] = {sampler_, pointSampler_, anisotropicSampler_};
+    context_->PSSetSamplers(0, ARRAYSIZE(samplers), samplers);
     context_->PSSetShaderResources(0, ARRAYSIZE(sourceViews_), sourceViews_);
     context_->Draw(3, 0);
     ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
@@ -2533,58 +2622,16 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         swapWidth_, swapHeight_);
     constexpr float black[] = {0, 0, 0, 1};
     context_->ClearRenderTargetView(target, black);
-    // Some drivers accept the PQ RGB Video Processor conversion but never
-    // complete the queued work, leaving Present blocked while audio continues.
-    // The color shader already produces final Rec.2020/PQ values, so write them
-    // directly to the 10-bit HDR back buffer and scale with the shader sampler.
-    if (actualMode_ == FFF3FPColorMode::MapToHdr) {
-        const auto result = DrawWithShader(target, static_cast<float>(destination.x),
-            static_cast<float>(destination.y), static_cast<float>(destination.width),
-            static_cast<float>(destination.height));
-        if (result == FFFResult::Success)
-            actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
-        return result;
-    }
-    ComPtr<ID3D11Resource> outputResource;
-    ComPtr<ID3D11Texture2D> outputTexture;
-    target->GetResource(&outputResource);
-    if (outputResource != nullptr) outputResource.As(&outputTexture);
-    const RECT destinationRect{static_cast<LONG>(destination.x), static_cast<LONG>(destination.y),
-        static_cast<LONG>(destination.x + destination.width),
-        static_cast<LONG>(destination.y + destination.height)};
-    context_->OMSetRenderTargets(0, nullptr, nullptr);
-    if (outputTexture == nullptr) {
-        SetError("Could not resolve the playback back buffer for video processing.");
-        return FFFResult::DeviceFailure;
-    }
-
-    constexpr auto sdrRgbColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-    constexpr auto hdrRgbColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-    const auto outputColorSpace = actualMode_ == FFF3FPColorMode::MapToHdr
-        ? hdrRgbColorSpace : sdrRgbColorSpace;
-    if (CanUseDirectVideoProcessor()) {
-        const auto directInputColorSpace = VideoProcessorInputColorSpace(sourceColorSpace_,
-            sourceFullRange_, sourceWidth_);
-        if (DrawWithVideoProcessor(sourceTextures_[0], outputTexture.Get(), destinationRect,
-                directInputColorSpace, outputColorSpace) == FFFResult::Success) {
-            actualVideoScalingMode_.store(FFF3FPVideoScalingMode::D3D11VideoProcessor);
-            return FFFResult::Success;
-        }
-    }
-
-    D3D11_TEXTURE2D_DESC outputDescription{};
-    outputTexture->GetDesc(&outputDescription);
-    const auto surfaceResult = EnsureVideoProcessorInputSurface(outputDescription.Format);
-    if (surfaceResult != FFFResult::Success) return surfaceResult;
-    const auto conversionResult = RenderVideoProcessorInput();
-    if (conversionResult != FFFResult::Success) return conversionResult;
-    if (DrawWithVideoProcessor(videoProcessorRenderTexture_, outputTexture.Get(), destinationRect,
-            outputColorSpace, outputColorSpace) == FFFResult::Success) {
-        actualVideoScalingMode_.store(FFF3FPVideoScalingMode::D3D11VideoProcessor);
-        return FFFResult::Success;
-    }
-    SetError("The D3D11 video processor could not present the converted RGB frame.");
-    return FFFResult::NotSupported;
+    // Rendering all inputs through the same shader removes the CPU/GPU
+    // scaler discrepancy.  SDR still writes ordinary Rec.709 code values to
+    // the implicit SDR swap-chain contract, so DWM remains the sole owner of
+    // the Windows HDR SDR-white adjustment.
+    const auto result = DrawWithShader(target, static_cast<float>(destination.x),
+        static_cast<float>(destination.y), static_cast<float>(destination.width),
+        static_cast<float>(destination.height));
+    if (result == FFFResult::Success)
+        actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
+    return result;
 }
 
 FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept {
@@ -2797,6 +2844,8 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
         if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
     }
     if (constants_ != nullptr) { constants_->Release(); constants_ = nullptr; }
+    if (anisotropicSampler_ != nullptr) { anisotropicSampler_->Release(); anisotropicSampler_ = nullptr; }
+    if (pointSampler_ != nullptr) { pointSampler_->Release(); pointSampler_ = nullptr; }
     if (sampler_ != nullptr) { sampler_->Release(); sampler_ = nullptr; }
     if (pixelShader_ != nullptr) { pixelShader_->Release(); pixelShader_ = nullptr; }
     if (timedTextPixelShader_ != nullptr) { timedTextPixelShader_->Release(); timedTextPixelShader_ = nullptr; }

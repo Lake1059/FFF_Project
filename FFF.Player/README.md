@@ -19,11 +19,12 @@ Animated JPEG XL 会遵循文件内的循环次数。纯音频中的 `attached_p
 
 SDR 片源在 `映射到SDR` 中保持其 BT.709 码值，不经过 HDR 纸白缩放。HDR→SDR 会先
 转换到绝对亮度和 Rec.709，再按帧的 MaxCLL（无此元数据时使用母版峰值或配置回退值）执行
-保高光的 Reinhard 压缩；`播放器快照.源峰值尼特` 可用于诊断实际采用的峰值。HDR 的输出模式
+PQ 感知域的 BT.2390 EETF；`播放器快照.源峰值尼特` 可用于诊断实际采用的峰值。HDR 的输出模式
 只属于当前片源：HDR 后打开 SDR 时，必须先把保留的交换链改回 BGRA/BT.709 并清除 HDR10
 元数据，成功后才提交 SDR 状态；重配失败会终止打开，绝不把 SDR 帧送入旧 PQ/BT.2020 链。
-默认 100 nit 是 HDR→SDR 的目标峰值，不会乘到纯 SDR 码值上；203 nit 只作为 HDR 漫反射白
-映射支点。PQ 按 BT.2100/ST 2084 的绝对亮度解码，HLG 单独按其系统传递函数处理。
+默认 100 nit 是 HDR→SDR 的目标峰值，不会乘到纯 SDR 码值上；BT.2390 的自适应拐点由
+源峰值和目标峰值在 PQ 域共同决定。203 nit 纸白只用于 SDR→真实 HDR 映射。PQ 按
+BT.2100/ST 2084 的绝对亮度解码，HLG 单独按其系统传递函数处理。
 
 色彩处理依据 [ITU-R BT.709](https://www.itu.int/rec/R-REC-BT.709)、
 [BT.1886](https://www.itu.int/rec/R-REC-BT.1886)、
@@ -38,10 +39,10 @@ ICC、HDR 校准和 SDR 亮度映射只由 DWM 在窗口合成时应用一次。
 RGB10A2 的原始通道值。它用于将渲染器数字输出与 ICC、DWM 及屏幕截图
 完全分离；窗口化 `Present` 仍必须遵守 Windows 显示色彩契约，后缓冲回读不是物理显示校准。
 
-SDR 视频输出统一使用 D3D11 Video Processor：兼容的 D3D11VA NV12/P010 表面直接进入 VP；
-RGB 图片、CPU 解码及需要 HDR→SDR tone mapping 的帧先由 shader 在源分辨率完成格式、色度或色彩处理，
-再以 RGB 表面进入 VP。真实 HDR 由 shader 直接写入 10-bit PQ 后缓冲，避开部分驱动在 PQ RGB VP
-转换后无法完成 Present 的问题；该路径使用双线性采样保持宽高比缩放。
+SDR 与 HDR 视频输出统一使用自有 D3D11 shader：D3D11VA NV12/P010 表面保留在 GPU，CPU
+解码帧上传后与之共用同一套格式、色度、色彩和缩放逻辑。1:1 使用精确采样，放大使用带
+anti-ringing 限制的 Lanczos3，缩小使用 16x 各向异性过滤。SDR shader 直接写入默认 SDR
+交换链；真实 HDR shader 直接写入 10-bit PQ 后缓冲。
 
 `播放列表` 负责同目录相似命名扫描、自然排序和本地 M3U8 导入导出；
 `播放列表控制器` 可把播放结束事件连接到顺序、循环或随机播放策略。字幕流会出现在

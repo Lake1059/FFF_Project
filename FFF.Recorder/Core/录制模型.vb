@@ -141,7 +141,9 @@ Public NotInheritable Class 视频处理配置
     Public Property 裁剪底边 As UInteger
     Public Property 参考白尼特 As Single = 80.0F
     Public Property 目标峰值尼特 As Single = 1000.0F
+    Public Property 源峰值尼特 As Single = 1000.0F
     Public Property 曝光 As Single
+    ' Retained for preset compatibility; BT.2390 derives its knee from source/target peaks.
     Public Property 高光压缩 As Single = 0.25F
     Public Property 饱和度 As Single = 1.0F
 
@@ -152,6 +154,7 @@ Public NotInheritable Class 视频处理配置
         ' WGC 的 scRGB 约定是 1.0=80 nit；OBS 会按 SDRWhite/80 映射到 Rec.2100 PQ，
         ' 因而 HDR 输出必须把用户选择的 SDR 白电平作为 PQ 转换参考白。
         参考白尼特 = If(HDR输出, SDR白电平, 80.0F)
+        源峰值尼特 = Math.Max(HDR标称峰值, 1.0F)
     End Sub
 
     Public Sub 验证()
@@ -159,6 +162,9 @@ Public NotInheritable Class 视频处理配置
         If Not 输出HDR10 Then 目标峰值尼特 = Math.Min(目标峰值尼特, 1000.0F)
         If 参考白尼特 <= 0 OrElse 目标峰值尼特 < 参考白尼特 Then
             Throw New ArgumentOutOfRangeException(NameOf(目标峰值尼特), "目标峰值必须不低于参考白。")
+        End If
+        If 源峰值尼特 <= 0 OrElse 源峰值尼特 > 10000.0F Then
+            Throw New ArgumentOutOfRangeException(NameOf(源峰值尼特), "源峰值必须在 0 到 10000 nit 之间。")
         End If
         If 高光压缩 < 0 OrElse 高光压缩 > 1 Then Throw New ArgumentOutOfRangeException(NameOf(高光压缩))
         If 饱和度 < 0 OrElse 饱和度 > 4 Then Throw New ArgumentOutOfRangeException(NameOf(饱和度))

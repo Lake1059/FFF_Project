@@ -62,12 +62,12 @@ Public NotInheritable Class 视频处理器
         Public 源高度比例 As Single
         Public 参考白尼特 As Single
         Public 目标峰值尼特 As Single
+        Public 源峰值尼特 As Single
         Public 曝光 As Single
-        Public 高光压缩 As Single
+        Public 保留三 As Single
         Public 饱和度 As Single
         Public 旋转 As UInteger
         Public 高质量缩放 As UInteger
-        Public 保留四 As UInteger
     End Structure
 
     Private ReadOnly 图形 As 图形设备
@@ -84,8 +84,8 @@ Public NotInheritable Class 视频处理器
     Private ReadOnly 裁剪底边值 As UInteger
     Private ReadOnly 参考白尼特值 As Single
     Private ReadOnly 目标峰值尼特值 As Single
+    Private ReadOnly 源峰值尼特值 As Single
     Private ReadOnly 曝光值 As Single
-    Private ReadOnly 高光压缩值 As Single
     Private ReadOnly 饱和度值 As Single
     Private ReadOnly SDR计算着色器 As ID3D11ComputeShader
     Private ReadOnly HDR计算着色器 As ID3D11ComputeShader
@@ -124,8 +124,8 @@ Public NotInheritable Class 视频处理器
         裁剪底边值 = 配置.裁剪底边
         参考白尼特值 = 配置.参考白尼特
         目标峰值尼特值 = 配置.目标峰值尼特
+        源峰值尼特值 = 配置.源峰值尼特
         曝光值 = 配置.曝光
-        高光压缩值 = 配置.高光压缩
         饱和度值 = 配置.饱和度
         SDR计算着色器 = 图形.设备.CreateComputeShader(读取着色器("FFF.Recorder.Shaders.ScaleRgba.cso"), Nothing)
         HDR计算着色器 = 图形.设备.CreateComputeShader(读取着色器("FFF.Recorder.Shaders.HdrToPq.cso"), Nothing)
@@ -135,7 +135,11 @@ Public NotInheritable Class 视频处理器
         Dim 采样描述 As New SamplerDescription(Filter.MinMagMipLinear, TextureAddressMode.Clamp,
             0.0F, 1UI, ComparisonFunction.Never, 0.0F, Single.MaxValue)
         线性采样器 = 图形.设备.CreateSamplerState(采样描述)
-        Dim 缓冲描述 As New BufferDescription(CUInt(Marshal.SizeOf(Of 缩放常量)()), BindFlags.ConstantBuffer,
+        Dim 常量字节数 = CUInt(Marshal.SizeOf(Of 缩放常量)())
+        If (常量字节数 And 15UI) <> 0 Then
+            Throw New InvalidOperationException($"视频处理常量缓冲大小 {常量字节数} 不是 16 字节的整数倍。")
+        End If
+        Dim 缓冲描述 As New BufferDescription(常量字节数, BindFlags.ConstantBuffer,
             ResourceUsage.Default, CpuAccessFlags.None, ResourceOptionFlags.None, 0)
         常量缓冲区 = 图形.设备.CreateBuffer(缓冲描述, IntPtr.Zero)
         中间纹理池 = New D3D11纹理池(图形, 8)
@@ -155,7 +159,7 @@ Public NotInheritable Class 视频处理器
         Optional 参考白尼特 As Single = 80.0F, Optional 源峰值尼特 As Single = 1000.0F) As 视频处理器
         Return New 视频处理器(图形设备, New 视频处理配置 With {
             .输出宽度 = 输出宽度, .输出高度 = 输出高度, .允许HDR转SDR = True,
-            .参考白尼特 = 参考白尼特, .目标峰值尼特 = 源峰值尼特
+            .参考白尼特 = 参考白尼特, .目标峰值尼特 = 参考白尼特, .源峰值尼特 = 源峰值尼特
         })
     End Function
 
@@ -299,7 +303,7 @@ Public NotInheritable Class 视频处理器
                 .目标宽度 = 目标宽, .目标高度 = 目标高,
                 .源左边比例 = 源左, .源顶边比例 = 源顶, .源宽度比例 = 源宽比例, .源高度比例 = 源高比例,
                 .参考白尼特 = 参考白尼特值, .目标峰值尼特 = 目标峰值尼特值,
-                .曝光 = 曝光值, .高光压缩 = 高光压缩值, .饱和度 = 饱和度值,
+                .源峰值尼特 = 源峰值尼特值, .曝光 = 曝光值, .保留三 = 0.0F, .饱和度 = 饱和度值,
                 .旋转 = CUInt(旋转方式), .高质量缩放 = If(高质量缩放值, 1UI, 0UI)
             }
             Dim 本次着色器 = If(输入HDR, If(输出HDR模式, HDR计算着色器, 色调映射着色器), SDR计算着色器)

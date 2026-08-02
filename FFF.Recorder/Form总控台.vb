@@ -432,9 +432,13 @@ Public Class Form总控台
     End Sub
 
     Friend Sub 显示录制统计(统计 As 录制统计)
-        Dim 总帧数 = 统计.已提交帧数 + 统计.已丢弃帧数
-        HtmlColorLabel1.Text = $"总帧数：{总帧数}<br>已丢帧：{统计.已丢弃帧数}<br>重复帧：{统计.已重复帧数}<br>视频体积：{格式化体积(统计.视频字节数)}<br>音频体积：{格式化体积(统计.音频字节数)}"
+        HtmlColorLabel1.Text = 生成录制统计文本(统计)
     End Sub
+
+    Friend Shared Function 生成录制统计文本(统计 As 录制统计) As String
+        ' 已提交帧数包含重复帧；丢弃帧没有进入输出文件，不能计入总帧数。
+        Return $"总帧数：{统计.已提交帧数}<br>已丢帧：{统计.已丢弃帧数}<br>重复帧：{统计.已重复帧数}<br>视频体积：{格式化体积(统计.视频字节数)}<br>音频体积：{格式化体积(统计.音频字节数)}"
+    End Function
 
     Private Sub 刷新响度计()
         当前响度计?.释放()

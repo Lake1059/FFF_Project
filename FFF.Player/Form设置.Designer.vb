@@ -22,17 +22,15 @@ Partial Class Form设置
     '不要使用代码编辑器修改它。
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
-        Dim ModernTabPage12 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage13 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage14 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage15 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage16 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage17 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage18 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage19 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage20 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage21 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
-        Dim ModernTabPage22 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage1 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage2 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage3 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage4 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage5 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage6 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage7 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage8 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage9 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         ModernTabListControl1 = New LakeUI.ModernTabListControl()
         SuspendLayout()
         ' 
@@ -40,28 +38,24 @@ Partial Class Form设置
         ' 
         ModernTabListControl1.ContentBackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ModernTabListControl1.Dock = DockStyle.Fill
-        ModernTabPage12.Text = "FFF.Player"
-        ModernTabPage13.Text = "个性化"
-        ModernTabPage14.Text = "支持者"
-        ModernTabPage15.IsSeparator = True
-        ModernTabPage16.Text = "界面尺寸"
-        ModernTabPage17.Text = "播放策略"
-        ModernTabPage18.Text = "HDR"
-        ModernTabPage19.Text = "字幕"
-        ModernTabPage20.Text = "弹幕"
-        ModernTabPage21.Text = "响度标准化"
-        ModernTabPage22.Text = "快捷键"
-        ModernTabListControl1.Items.Add(ModernTabPage12)
-        ModernTabListControl1.Items.Add(ModernTabPage13)
-        ModernTabListControl1.Items.Add(ModernTabPage14)
-        ModernTabListControl1.Items.Add(ModernTabPage15)
-        ModernTabListControl1.Items.Add(ModernTabPage16)
-        ModernTabListControl1.Items.Add(ModernTabPage17)
-        ModernTabListControl1.Items.Add(ModernTabPage18)
-        ModernTabListControl1.Items.Add(ModernTabPage19)
-        ModernTabListControl1.Items.Add(ModernTabPage20)
-        ModernTabListControl1.Items.Add(ModernTabPage21)
-        ModernTabListControl1.Items.Add(ModernTabPage22)
+        ModernTabPage1.Text = "FFF.Player"
+        ModernTabPage2.Text = "个性化"
+        ModernTabPage3.Text = "支持者"
+        ModernTabPage4.IsSeparator = True
+        ModernTabPage5.Text = "尺寸"
+        ModernTabPage6.Text = "HDR"
+        ModernTabPage7.Text = "字幕"
+        ModernTabPage8.Text = "弹幕"
+        ModernTabPage9.Text = "快捷键"
+        ModernTabListControl1.Items.Add(ModernTabPage1)
+        ModernTabListControl1.Items.Add(ModernTabPage2)
+        ModernTabListControl1.Items.Add(ModernTabPage3)
+        ModernTabListControl1.Items.Add(ModernTabPage4)
+        ModernTabListControl1.Items.Add(ModernTabPage5)
+        ModernTabListControl1.Items.Add(ModernTabPage6)
+        ModernTabListControl1.Items.Add(ModernTabPage7)
+        ModernTabListControl1.Items.Add(ModernTabPage8)
+        ModernTabListControl1.Items.Add(ModernTabPage9)
         ModernTabListControl1.Location = New Point(0, 0)
         ModernTabListControl1.Name = "ModernTabListControl1"
         ModernTabListControl1.ScrollBarThumbColor = Color.FromArgb(CByte(40), CByte(200), CByte(200), CByte(200))
