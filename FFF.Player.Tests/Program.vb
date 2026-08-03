@@ -217,6 +217,18 @@ Friend Module Program
                 Console.WriteLine("音量滑块、画面滚轮与操作提示合并回归通过。")
                 Return 0
             End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--unknown-duration-progress-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试未知时长进度条()
+                Console.WriteLine("未知时长进度推进、已知范围回拖与总时长恢复回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--unknown-duration-media-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 无时间轴媒体路径 = Path.GetFullPath(参数(1))
+                检查文件(无时间轴媒体路径)
+                测试无时间轴媒体播放(无时间轴媒体路径)
+                Console.WriteLine("无时间轴媒体的合成时钟与播放进度回归通过。")
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--information-overlay-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试信息层交互与文本()
                 Console.WriteLine("媒体信息按钮左右键与信息层逐字段精确回归通过。")
@@ -298,6 +310,8 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --clip-step-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --clip-focus-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --volume-interaction-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --unknown-duration-progress-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --unknown-duration-media-regression <无时间轴视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --information-overlay-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --empty-layer-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --hdr-switch-regression <HDR视频>")
@@ -1106,6 +1120,123 @@ Friend Module Program
                    命令.Any(Function(x) x.宽度 < 画面.ClientSize.Width - 32.0F),
                 "操作提示背景没有按文字收缩，或短提示仍然强制占满整行。")
             窗口.Close()
+        End Using
+    End Sub
+
+    Private Sub 测试未知时长进度条()
+        Dim 当前快照 As 播放器快照 = Nothing
+        Using 进度条 As New LakeUI.ExcellentTrackBar(),
+              音量条 As New LakeUI.ExcellentTrackBar(),
+              播放按钮 As New LakeUI.ModernButton(),
+              解码按钮 As New LakeUI.ModernButton(),
+              HDR按钮 As New LakeUI.ModernButton(),
+              视频编码按钮 As New LakeUI.ModernButton(),
+              音频编码按钮 As New LakeUI.ModernButton(),
+              声道数按钮 As New LakeUI.ModernButton(),
+              时间标签 As New LakeUI.HtmlColorLabel(),
+              状态栏 As New Panel(),
+              HDR占位 As New Panel(),
+              视频编码占位 As New Panel(),
+              音频编码占位 As New Panel(),
+              声道数占位 As New Panel(),
+              画面 As New 播放器画面控件(),
+              播放图标 As New Bitmap(1, 1),
+              暂停图标 As New Bitmap(1, 1),
+              呈现器 As New 播放器界面呈现器(进度条, 音量条, 播放按钮,
+                  播放图标, 暂停图标, 解码按钮, HDR按钮, 视频编码按钮,
+                  音频编码按钮, 声道数按钮, 时间标签, 状态栏, HDR占位,
+                  视频编码占位, 音频编码占位, 声道数占位, 画面,
+                  Function() 当前快照, Function() False, Function() 解码模式.CPU,
+                  Function() 色彩输出模式.映射到SDR)
+
+            当前快照 = 创建进度条快照(TimeSpan.FromSeconds(65), TimeSpan.Zero)
+            呈现器.媒体已打开(False)
+            呈现器.刷新()
+            断言(Math.Abs(进度条.Maximum - 65_000) < 0.5 AndAlso
+                   Math.Abs(进度条.Value - 65_000) < 0.5,
+                "未知时长媒体没有按当前播放位置扩展进度范围。")
+            断言(时间标签.Text.Contains("--:--", StringComparison.Ordinal),
+                "未知总时长没有使用占位时间显示。")
+
+            当前快照 = 创建进度条快照(TimeSpan.FromSeconds(20), TimeSpan.Zero)
+            呈现器.刷新()
+            断言(Math.Abs(进度条.Maximum - 65_000) < 0.5 AndAlso
+                   Math.Abs(进度条.Value - 20_000) < 0.5,
+                "回到较早位置后没有保留已经确认的可回拖范围。")
+
+            当前快照 = 创建进度条快照(TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(120))
+            呈现器.刷新()
+            断言(Math.Abs(进度条.Maximum - 120_000) < 0.5 AndAlso
+                   Math.Abs(进度条.Value - 20_000) < 0.5 AndAlso
+                   Not 时间标签.Text.Contains("--", StringComparison.Ordinal),
+                "取得总时长后没有恢复标准进度条范围。")
+
+            呈现器.清除媒体()
+            断言(进度条.Maximum = 0 AndAlso 进度条.Value = 0 AndAlso
+                   Not 时间标签.Text.Contains("--", StringComparison.Ordinal),
+                "清除媒体后没有重置未知时长进度状态。")
+        End Using
+    End Sub
+
+    Private Function 创建进度条快照(位置 As TimeSpan, 时长 As TimeSpan) As 播放器快照
+        Return New 播放器快照(New 原生播放器快照 With {
+            .状态 = CUInt(播放状态.已暂停),
+            .位置100纳秒 = 位置.Ticks,
+            .时长100纳秒 = 时长.Ticks,
+            .当前视频流 = 0,
+            .当前音频流 = -1})
+    End Function
+
+    Private Sub 测试无时间轴媒体播放(媒体路径 As String)
+        Using 输出窗口 As New Form With {
+            .ClientSize = New Size(320, 180),
+            .ShowInTaskbar = False,
+            .FormBorderStyle = FormBorderStyle.None,
+            .StartPosition = FormStartPosition.Manual,
+            .Location = New Point(-10000, -10000)}
+            输出窗口.Show()
+            Application.DoEvents()
+            Using 会话 As New 播放器会话(New 播放器配置 With {
+                .解码器 = 解码模式.CPU,
+                .色彩模式 = 色彩输出模式.映射到SDR,
+                .输出窗口句柄 = 输出窗口.Handle})
+                会话.设置音量(0.0F, True)
+                会话.打开Async(媒体路径).GetAwaiter().GetResult()
+                断言(会话.当前快照.总时长 = TimeSpan.Zero,
+                    "回归样本意外包含总时长，未覆盖未知时长分支。")
+
+                Dim 播放计时 = Stopwatch.StartNew()
+                会话.播放()
+                Do
+                    Dim 快照 = 会话.当前快照
+                    If 快照.播放位置 >= TimeSpan.FromMilliseconds(750) Then Exit Do
+                    If 快照.状态 = 播放状态.播放结束 Then
+                        Throw New InvalidOperationException("无时间轴媒体在进度推进前已经结束。")
+                    End If
+                    If 播放计时.Elapsed >= TimeSpan.FromSeconds(3) Then
+                        Throw New TimeoutException("无时间轴媒体的播放位置没有随合成时钟推进。")
+                    End If
+                    Thread.Sleep(10)
+                Loop
+                断言(播放计时.Elapsed >= TimeSpan.FromMilliseconds(500),
+                    "无时间轴媒体仍以解码速度瞬间排空，而非按合成时间戳播放。")
+
+                Dim 跳转前代次 = 会话.当前快照.时间轴代次
+                会话.跳转(TimeSpan.FromMilliseconds(200))
+                Dim 跳转等待 = Stopwatch.StartNew()
+                Do While 会话.当前快照.时间轴代次 = 跳转前代次 AndAlso
+                         跳转等待.Elapsed < TimeSpan.FromSeconds(2)
+                    Thread.Sleep(10)
+                Loop
+                断言(会话.当前快照.时间轴代次 > 跳转前代次,
+                    "无时间轴媒体没有接受已播放范围内的回拖。")
+
+                等待状态(会话, 播放状态.播放结束, TimeSpan.FromSeconds(10))
+                Dim 结束快照 = 会话.当前快照
+                断言(结束快照.总时长 >= TimeSpan.FromSeconds(1) AndAlso
+                       结束快照.播放位置 = 结束快照.总时长,
+                    $"播放结束后没有用实际解码时间线补全总时长：位置 {结束快照.播放位置:c}，时长 {结束快照.总时长:c}。")
+            End Using
         End Using
     End Sub
 

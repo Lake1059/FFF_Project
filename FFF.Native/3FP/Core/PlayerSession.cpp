@@ -325,6 +325,45 @@ bool IsStaticImageDemuxer(const AVInputFormat* inputFormat) noexcept {
         (name.size() > 5 && name.ends_with("_pipe"));
 }
 
+std::int64_t EstimateDuration100ns(const AVFormatContext* format) noexcept {
+    if (format == nullptr) return 0;
+    if (format->duration > 0)
+        return av_rescale(format->duration, 10, 1);
+
+    std::int64_t streamDuration = 0;
+    std::int64_t streamBitRate = 0;
+    for (unsigned index = 0; index < format->nb_streams; ++index) {
+        const auto* stream = format->streams[index];
+        const auto* parameters = stream->codecpar;
+        if (parameters->codec_type != AVMEDIA_TYPE_VIDEO &&
+            parameters->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+        if ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0) continue;
+
+        if (stream->duration > 0 && stream->duration != AV_NOPTS_VALUE &&
+            stream->time_base.num > 0 && stream->time_base.den > 0) {
+            streamDuration = std::max(streamDuration,
+                av_rescale_q(stream->duration, stream->time_base,
+                    AVRational{1, static_cast<int>(TicksPerSecond)}));
+        } else if (parameters->codec_type == AVMEDIA_TYPE_VIDEO && stream->nb_frames > 0) {
+            const auto frameRate = stream->avg_frame_rate.num > 0 && stream->avg_frame_rate.den > 0
+                ? stream->avg_frame_rate : stream->r_frame_rate;
+            if (frameRate.num > 0 && frameRate.den > 0) {
+                streamDuration = std::max(streamDuration,
+                    av_rescale_q(stream->nb_frames, av_inv_q(frameRate),
+                        AVRational{1, static_cast<int>(TicksPerSecond)}));
+            }
+        }
+        if (parameters->bit_rate > 0)
+            streamBitRate += parameters->bit_rate;
+    }
+    if (streamDuration > 0) return streamDuration;
+
+    const auto fileSize = format->pb == nullptr ? 0 : avio_size(format->pb);
+    const auto bitRate = format->bit_rate > 0 ? format->bit_rate : streamBitRate;
+    if (fileSize <= 0 || bitRate <= 0) return 0;
+    return av_rescale(fileSize, 8 * TicksPerSecond, bitRate);
+}
+
 std::int32_t FindTimedVideoStream(AVFormatContext* format) noexcept {
     if (format == nullptr) return -1;
     const auto best = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
@@ -382,7 +421,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       clockOriginPosition100ns_(0), clockOriginQpc_(0), playbackPosition100ns_(0),
       playbackClockSampleQpc_(0), playbackClockLimit100ns_(0), playbackClockSequence_(0),
       state_(FFF3FPState::Idle), qpcFrequency_(0), seekTarget100ns_(-1), seekTargetFrame_(-1),
-      keyframeSeekPending_(false), lastVideoFrameDuration100ns_(0),
+      keyframeSeekPending_(false), lastVideoFrameDuration100ns_(0), nextUntimedVideoPosition100ns_(0),
       framePtsIndexBase_(0),
       rebuildingFrameIndex_(false),
       stepScheduled_(false), stepRepeatRequested_(false), pendingStepOperation_(StepOperation::Frame),
@@ -1597,8 +1636,8 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     bool forcedSdrOutput = false;
     {
         std::lock_guard lock(mutex_);
-        snapshot_.duration100ns = format_->duration > 0 && !IsLoopAwareImageDemuxer(format_->iformat)
-            ? av_rescale(format_->duration, 10, 1) : 0;
+        snapshot_.duration100ns = IsLoopAwareImageDemuxer(format_->iformat)
+            ? 0 : EstimateDuration100ns(format_);
         snapshot_.position100ns = 0; snapshot_.frameIndex = -1; snapshot_.framePts = AV_NOPTS_VALUE;
         snapshot_.selectedVideoStream = videoStream_; snapshot_.selectedAudioStream = audioStream_;
         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
@@ -1619,7 +1658,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     }
     framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false;
     seekTarget100ns_ = -1; seekTargetFrame_ = -1; keyframeSeekPending_ = false;
-    lastVideoFrameDuration100ns_ = 0; draining_ = false;
+    lastVideoFrameDuration100ns_ = 0; nextUntimedVideoPosition100ns_ = 0; draining_ = false;
     if (staticImage_) {
         const auto imageResult = DecodeInitialStillImage();
         if (imageResult != FFFResult::Success) {
@@ -1846,6 +1885,7 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
     av_frame_unref(frame);
     const auto handleFrame = [this, video, owner](AVFrame* decoded) {
         if (video) {
+            NormalizeVideoFrameTimestamp(decoded);
             const auto seeking = seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_;
             if (state_.load() == FFF3FPState::Playing && !seeking) QueueVideoFrame(decoded);
             else PresentVideoFrame(decoded, owner);
@@ -2017,6 +2057,44 @@ void PlayerSession::ClearPendingPackets() noexcept {
     for (auto*& packet : pendingAudioPackets_) av_packet_free(&packet);
     pendingAudioPackets_.clear();
     pendingAudioPacketBytes_ = 0;
+}
+
+void PlayerSession::NormalizeVideoFrameTimestamp(AVFrame* frame) noexcept {
+    if (frame == nullptr || format_ == nullptr || videoStream_ < 0) return;
+    auto* stream = format_->streams[videoStream_];
+    const auto originalPts = frame->best_effort_timestamp == AV_NOPTS_VALUE
+        ? frame->pts : frame->best_effort_timestamp;
+    std::int64_t duration = 0;
+    if (frame->duration > 0) {
+        duration = av_rescale_q(frame->duration, stream->time_base,
+            AVRational{1, static_cast<int>(TicksPerSecond)});
+    } else {
+        const auto frameRate = stream->avg_frame_rate.num > 0 && stream->avg_frame_rate.den > 0
+            ? stream->avg_frame_rate : stream->r_frame_rate;
+        if (frameRate.num > 0 && frameRate.den > 0) {
+            duration = av_rescale_q(1, av_inv_q(frameRate),
+                AVRational{1, static_cast<int>(TicksPerSecond)});
+        }
+    }
+    // Raw elementary streams commonly carry neither PTS nor duration metadata.
+    // A 25 fps fallback keeps their presentation clock monotonic until the
+    // demuxer or decoder exposes a better cadence.
+    if (duration <= 0) duration = TicksPerSecond / 25;
+
+    const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
+    if (originalPts == AV_NOPTS_VALUE) {
+        const auto position = std::max<std::int64_t>(0, nextUntimedVideoPosition100ns_);
+        const auto timestamp = av_rescale_q(position,
+            AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base) + start;
+        frame->pts = timestamp;
+        frame->best_effort_timestamp = timestamp;
+        nextUntimedVideoPosition100ns_ = position + duration;
+        return;
+    }
+
+    const auto position = av_rescale_q(originalPts - start, stream->time_base,
+        AVRational{1, static_cast<int>(TicksPerSecond)});
+    nextUntimedVideoPosition100ns_ = std::max(nextUntimedVideoPosition100ns_, position + duration);
 }
 
 std::int64_t PlayerSession::VideoFramePosition(const AVFrame* frame) const noexcept {
@@ -2364,10 +2442,29 @@ void PlayerSession::FlushAtEnd() noexcept {
 void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame,
     const bool exact) noexcept {
     if (!format_) return; position = std::clamp<std::int64_t>(position, 0, snapshot_.duration100ns > 0 ? snapshot_.duration100ns : position);
+    auto decodeStartPosition = position;
     const auto referenceStream = videoStream_ >= 0 ? videoStream_ : audioStream_;
     auto timestamp = av_rescale_q(position, AVRational{1, static_cast<int>(TicksPerSecond)}, format_->streams[referenceStream]->time_base);
     if (format_->streams[referenceStream]->start_time != AV_NOPTS_VALUE) timestamp += format_->streams[referenceStream]->start_time;
-    if (av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD) < 0) {
+    auto seekResult = av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD);
+    if (seekResult < 0 && format_->pb != nullptr &&
+        (format_->pb->seekable & AVIO_SEEKABLE_NORMAL) != 0) {
+        const auto fileSize = avio_size(format_->pb);
+        const auto timelineExtent = snapshot_.duration100ns > 0
+            ? snapshot_.duration100ns
+            : std::max(nextUntimedVideoPosition100ns_, snapshot_.position100ns);
+        const auto byteExtent = snapshot_.duration100ns > 0
+            ? fileSize : std::min(fileSize, avio_tell(format_->pb));
+        if (timelineExtent > 0 && byteExtent > 0) {
+            constexpr std::int64_t ByteSeekPreroll = 16ll * 1024 * 1024;
+            const auto estimatedBytePosition = av_rescale(position, byteExtent, timelineExtent);
+            const auto bytePosition = std::max<std::int64_t>(0, estimatedBytePosition - ByteSeekPreroll);
+            seekResult = av_seek_frame(format_, -1, bytePosition, AVSEEK_FLAG_BYTE);
+            if (seekResult >= 0)
+                decodeStartPosition = av_rescale(bytePosition, timelineExtent, byteExtent);
+        }
+    }
+    if (seekResult < 0) {
         ReportError(FFFResult::FfmpegFailure,
             "FFmpeg could not seek to the requested position; playback remained active.", "seek");
         return;
@@ -2379,6 +2476,7 @@ void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame
     seekTarget100ns_ = position; seekTargetFrame_ = targetFrame;
     keyframeSeekPending_ = !exact && videoStream_ >= 0; draining_ = false;
     lastVideoFrameDuration100ns_ = 0;
+    nextUntimedVideoPosition100ns_ = decodeStartPosition;
     snapshot_.position100ns = position;
     snapshot_.frameIndex = targetFrame >= 0 && position > 0 ? targetFrame - 1 : -1;
     ++snapshot_.timelineGeneration;
@@ -2506,7 +2604,8 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     videoStream_ = audioStream_ = coverArtStream_ = externalAudioStream_ = -1; externalAudioPath_.clear(); framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false;
     timedTextContentCache_.clear();
     externalAudioOffset100ns_ = 0; seekTarget100ns_ = seekTargetFrame_ = -1;
-    keyframeSeekPending_ = false; lastVideoFrameDuration100ns_ = 0; draining_ = false;
+    keyframeSeekPending_ = false; lastVideoFrameDuration100ns_ = 0;
+    nextUntimedVideoPosition100ns_ = 0; draining_ = false;
     staticImage_ = false;
     hardwareFallbackPending_ = false;
     pendingHardwareFallbackReason_.clear();

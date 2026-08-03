@@ -110,6 +110,7 @@ private:
     void QueueVideoFrame(AVFrame* frame) noexcept;
     void ClearVideoQueue() noexcept;
     void ClearPendingPackets() noexcept;
+    void NormalizeVideoFrameTimestamp(AVFrame* frame) noexcept;
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
     void QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, std::int32_t streamIndex) noexcept;
@@ -193,6 +194,7 @@ private:
     std::int64_t seekTargetFrame_;
     bool keyframeSeekPending_;
     std::int64_t lastVideoFrameDuration100ns_;
+    std::int64_t nextUntimedVideoPosition100ns_;
     std::deque<std::int64_t> framePtsIndex_;
     std::int64_t framePtsIndexBase_;
     bool rebuildingFrameIndex_;

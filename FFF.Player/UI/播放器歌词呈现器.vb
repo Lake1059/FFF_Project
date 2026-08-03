@@ -9,15 +9,15 @@ Friend NotInheritable Class 播放器歌词呈现器
     Private Const 普通歌词字体 As String = "Microsoft YaHei UI"
     Private Const 当前歌词字体 As String = "Microsoft YaHei UI"
     Private Const 普通歌词字号DIP As Single = 18.0F
-    Private Const 当前歌词字号DIP As Single = 24.0F
-    Private Const 歌词行高DIP As Single = 24.0F
-    Private Const 歌词组间距DIP As Single = 12.0F
+    Private Const 当前歌词字号DIP As Single = 22.0F
+    Private Const 歌词行高DIP As Single = 22.0F
+    Private Const 歌词组间距DIP As Single = 10.0F
     Private Const 普通歌词描边宽度DIP As Single = 1.0F
     Private Const 当前歌词描边宽度DIP As Single = 1.2F
     Private Const 歌词阴影X偏移DIP As Single = 1.0F
     Private Const 歌词阴影Y偏移DIP As Single = 1.0F
-    Private Const 当前歌词切入过渡毫秒 As Single = 240.0F
-    Private Const 当前歌词切出过渡毫秒 As Single = 240.0F
+    Private Const 当前歌词切入过渡毫秒 As Single = 300.0F
+    Private Const 当前歌词切出过渡毫秒 As Single = 300.0F
     Private Const 平滑滚动开始比例 As Single = 0.68F
     Private Const 平滑滚动持续比例 As Single = 0.32F
     Private Const 前后可见歌词组数 As Integer = 7
@@ -38,11 +38,11 @@ Friend NotInheritable Class 播放器歌词呈现器
 
     Private Shared ReadOnly 当前歌词颜色 As UInteger = RGB(255, 255, 255)
     Private Shared ReadOnly 相邻歌词颜色 As UInteger = ARGB(200, 255, 255, 255)
-    Private Shared ReadOnly 次相邻歌词颜色 As UInteger = ARGB(180, 255, 255, 255)
+    Private Shared ReadOnly 次相邻歌词颜色 As UInteger = ARGB(160, 255, 255, 255)
     Private Shared ReadOnly 远端歌词颜色 As UInteger = ARGB(120, 255, 255, 255)
     Private Shared ReadOnly 歌词描边颜色 As UInteger = ARGB(120, 0, 0, 0)
     Private Shared ReadOnly 歌词阴影颜色 As UInteger = ARGB(120, 0, 0, 0)
-    Private Shared ReadOnly 封面毛玻璃遮罩颜色 As UInteger = ARGB(100, 0, 0, 0)
+    Private Shared ReadOnly 封面毛玻璃遮罩颜色 As UInteger = ARGB(120, 0, 0, 0)
     Private Shared ReadOnly 呈现设置 As New 歌词呈现设置(
         封面毛玻璃半径, 封面毛玻璃次数, 封面毛玻璃下采样倍率, 封面毛玻璃遮罩颜色,
         封面区域宽度百分比, 歌词区域宽度百分比,

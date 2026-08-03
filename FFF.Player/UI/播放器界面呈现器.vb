@@ -40,6 +40,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private 已释放 As Boolean
     Private 显示精确时间戳 As Boolean
     Private 滚轮余量 As Integer
+    Private 未知时长已知上限毫秒 As Double
 
     Friend Sub New(进度条 As LakeUI.ExcellentTrackBar,
                    音量条 As LakeUI.ExcellentTrackBar,
@@ -135,13 +136,21 @@ Friend NotInheritable Class 播放器界面呈现器
             正在更新进度条 = True
             Try
                 If 快照.总时长 > TimeSpan.Zero Then
+                    未知时长已知上限毫秒 = 0
                     Dim 最大值 = 快照.总时长.TotalMilliseconds
                     If 进度条.Minimum <> 0 Then 进度条.Minimum = 0
                     If 进度条.Maximum <> 最大值 Then 进度条.Maximum = 最大值
                     Dim 新值 = Math.Clamp(快照.播放位置.TotalMilliseconds, 0, 最大值)
                     If 进度条.Value <> 新值 Then 进度条.Value = 新值
                 Else
-                    重置媒体进度条()
+                    Dim 当前位置 = Math.Max(0, 快照.播放位置.TotalMilliseconds)
+                    未知时长已知上限毫秒 = Math.Max(未知时长已知上限毫秒, 当前位置)
+                    If 进度条.Minimum <> 0 Then 进度条.Minimum = 0
+                    If 进度条.Maximum <> 未知时长已知上限毫秒 Then
+                        进度条.Maximum = 未知时长已知上限毫秒
+                    End If
+                    Dim 新值 = Math.Min(当前位置, 未知时长已知上限毫秒)
+                    If 进度条.Value <> 新值 Then 进度条.Value = 新值
                 End If
             Finally
                 正在更新进度条 = False
@@ -178,6 +187,10 @@ Friend NotInheritable Class 播放器界面呈现器
         End Try
 
         刷新HDR按钮(快照)
+    End Sub
+
+    Friend Sub 媒体已打开(保留当前范围 As Boolean)
+        If Not 保留当前范围 Then 未知时长已知上限毫秒 = 0
     End Sub
 
     Friend Sub 清除媒体()
@@ -266,7 +279,9 @@ Friend NotInheritable Class 播放器界面呈现器
     Private Function 进度条可调整() As Boolean
         If 进度条.Maximum <= 进度条.Minimum OrElse 正在切换提供器() Then Return False
         Dim 快照 = 快照提供器()
-        Return 快照 IsNot Nothing AndAlso 快照.总时长 > TimeSpan.Zero AndAlso 播放器控制器.可操作(快照.状态)
+        Return 快照 IsNot Nothing AndAlso
+            (快照.总时长 > TimeSpan.Zero OrElse 未知时长已知上限毫秒 > 0) AndAlso
+            播放器控制器.可操作(快照.状态)
     End Function
 
     Private Sub 更新播放按钮(状态 As 播放状态)
@@ -278,6 +293,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private Sub 重置媒体进度条()
         正在更新进度条 = True
         Try
+            未知时长已知上限毫秒 = 0
             进度条.Minimum = 0
             进度条.Maximum = 0
             进度条.Value = 0
@@ -354,9 +370,23 @@ Friend NotInheritable Class 播放器界面呈现器
 
     Private Sub 设置时间戳文本(当前位置 As TimeSpan, 总时长 As TimeSpan)
         Dim 精度 = 取得时间戳精度(当前位置, 总时长)
-        Dim HTML = $"{格式化彩色时长(当前位置, 精度, 显示精确时间戳)}<font color=""#AAB0B9""> / </font>{格式化彩色时长(总时长, 精度)}"
+        Dim 总时长文本 = If(总时长 > TimeSpan.Zero OrElse Not 有媒体快照,
+            格式化彩色时长(总时长, 精度), 格式化未知时长(精度))
+        Dim HTML = $"{格式化彩色时长(当前位置, 精度, 显示精确时间戳)}<font color=""#AAB0B9""> / </font>{总时长文本}"
         设置自适应文本(时间标签, HTML)
     End Sub
+
+    Private Shared Function 格式化未知时长(精度 As 时间戳精度) As String
+        Const 未知颜色 = "#AAB0B9"
+        Select Case 精度
+            Case 时间戳精度.小时
+                Return $"<font color=""{未知颜色}"">--:--:--</font>"
+            Case 时间戳精度.分钟
+                Return $"<font color=""{未知颜色}"">--:--</font>"
+            Case Else
+                Return $"<font color=""{未知颜色}"">--</font>"
+        End Select
+    End Function
 
     Private Shared Function 取得时间戳精度(当前位置 As TimeSpan, 总时长 As TimeSpan) As 时间戳精度
         Dim 最大时长 = If(当前位置 >= 总时长, 当前位置, 总时长)
