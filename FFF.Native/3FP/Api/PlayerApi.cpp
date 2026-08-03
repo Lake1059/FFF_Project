@@ -87,6 +87,11 @@ FFFResult FFF3FP_GetDanmakuStatus(const FFF3FPHandle player,
     return player && status ? static_cast<PlayerSession*>(player)->GetDanmakuStatus(*status)
         : FFFResult::InvalidArgument;
 }
+FFFResult FFF3FP_GetLyricsStatus(const FFF3FPHandle player,
+    FFF3FPTimedTextStatus* status) noexcept {
+    return player && status ? static_cast<PlayerSession*>(player)->GetLyricsStatus(*status)
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_EvaluateColorTransform(FFF3FPColorTransform* transform) noexcept {
     return transform ? EvaluateVideoColorTransform(*transform) : FFFResult::InvalidArgument;
 }

@@ -800,7 +800,7 @@ FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
         // Headless Render intentionally owns no GPU cache, so submit the retained
         // attached picture once when a real target first becomes available.
         const auto redrawResult = coverArtFrame_ != nullptr && videoStream_ < 0 && window != nullptr
-            ? videoRenderer_.Render(coverArtFrame_) : videoRenderer_.Redraw();
+            ? videoRenderer_.Render(coverArtFrame_, true, true) : videoRenderer_.Redraw();
         if (redrawResult == FFFResult::DeviceFailure &&
             videoRenderer_.RequestRecoveryIfDeviceLost()) return;
         if (redrawResult != FFFResult::Success)
@@ -988,7 +988,7 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
             !staticImage_ && !hardwareFallback
             ? FFF3FPDecodeMode::Gpu : FFF3FPDecodeMode::Cpu;
         if (staticImage_ && stillImageFrame_ != nullptr) {
-            const auto renderResult = videoRenderer_.Render(stillImageFrame_);
+            const auto renderResult = videoRenderer_.Render(stillImageFrame_, true);
             if (renderResult != FFFResult::Success) {
                 if (renderResult == FFFResult::DeviceFailure &&
                     videoRenderer_.RequestRecoveryIfDeviceLost()) return true;
@@ -1002,7 +1002,7 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
         if (videoRenderer_.DeviceRecoveryRequested() || state_.load() == FFF3FPState::Failed)
             return true;
     } else if (coverArtFrame_ != nullptr) {
-        const auto renderResult = videoRenderer_.Render(coverArtFrame_);
+        const auto renderResult = videoRenderer_.Render(coverArtFrame_, true, true);
         if (renderResult != FFFResult::Success) {
             if (renderResult == FFFResult::DeviceFailure &&
                 videoRenderer_.RequestRecoveryIfDeviceLost()) return true;
@@ -1137,11 +1137,15 @@ FFFResult PlayerSession::SetVolume(const float volume, const bool muted) noexcep
 
 FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) noexcept {
     constexpr auto legacyLayerSize = offsetof(FFF3FPTimedTextLayer, targetFrameRate);
-    const auto targetFrameRate = input.size >= sizeof(FFF3FPTimedTextLayer)
+    constexpr auto frameRateLayerSize = offsetof(FFF3FPTimedTextLayer,
+        coverBackdropBlurRadius);
+    constexpr auto legacyLyricsLayerSize = offsetof(FFF3FPTimedTextLayer,
+        coverRightPaddingPercentage);
+    const auto targetFrameRate = input.size >= frameRateLayerSize
         ? input.targetFrameRate : 60.0f;
     if (input.size < legacyLayerSize || input.version != 1 ||
         input.canvasWidth == 0 || input.canvasHeight == 0 || input.commandCount > 4096 ||
-        input.layerSlot > static_cast<std::uint32_t>(TimedTextLayerSlot::PlayerInformation) ||
+        input.layerSlot > static_cast<std::uint32_t>(TimedTextLayerSlot::Lyrics) ||
         !std::isfinite(targetFrameRate) || targetFrameRate < 1.0f || targetFrameRate > 240.0f ||
         (input.commandCount != 0 && input.commands == nullptr)) return FFFResult::InvalidArgument;
     try {
@@ -1155,6 +1159,42 @@ FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) no
         layer.canvasHeight = input.canvasHeight;
         layer.sequence = input.sequence;
         layer.targetFrameRate = targetFrameRate;
+        if (input.layerSlot == static_cast<std::uint32_t>(TimedTextLayerSlot::Lyrics) &&
+            input.size >= legacyLyricsLayerSize) {
+            const auto coverRightPaddingPercentage =
+                input.size >= sizeof(FFF3FPTimedTextLayer)
+                ? input.coverRightPaddingPercentage
+                : input.coverHorizontalPaddingPercentage;
+            if (!std::isfinite(input.coverBackdropBlurRadius) ||
+                input.coverBackdropBlurRadius < 1.0f || input.coverBackdropBlurRadius > 96.0f ||
+                input.coverBackdropBlurPasses > 5 ||
+                input.coverBackdropDownsampleFactor < 1 ||
+                input.coverBackdropDownsampleFactor > 16 ||
+                !std::isfinite(input.coverRegionWidthPercentage) ||
+                !std::isfinite(input.lyricsRegionWidthPercentage) ||
+                input.coverRegionWidthPercentage <= 0.0f ||
+                input.lyricsRegionWidthPercentage <= 0.0f ||
+                !std::isfinite(input.coverHorizontalPaddingPercentage) ||
+                !std::isfinite(coverRightPaddingPercentage) ||
+                !std::isfinite(input.coverVerticalPaddingPercentage) ||
+                input.coverHorizontalPaddingPercentage < 0.0f ||
+                input.coverHorizontalPaddingPercentage >= 50.0f ||
+                coverRightPaddingPercentage < 0.0f ||
+                coverRightPaddingPercentage >= 50.0f ||
+                input.coverVerticalPaddingPercentage < 0.0f ||
+                input.coverVerticalPaddingPercentage >= 50.0f)
+                return FFFResult::InvalidArgument;
+            layer.coverBackdropBlurRadius = input.coverBackdropBlurRadius;
+            layer.coverBackdropBlurPasses = input.coverBackdropBlurPasses;
+            layer.coverBackdropDownsampleFactor = input.coverBackdropDownsampleFactor;
+            layer.coverBackdropTintArgb = input.coverBackdropTintArgb;
+            layer.coverRegionWidthPercentage = input.coverRegionWidthPercentage;
+            layer.lyricsRegionWidthPercentage = input.lyricsRegionWidthPercentage;
+            layer.coverLeftPaddingPercentage =
+                input.coverHorizontalPaddingPercentage;
+            layer.coverRightPaddingPercentage = coverRightPaddingPercentage;
+            layer.coverVerticalPaddingPercentage = input.coverVerticalPaddingPercentage;
+        }
         layer.commands.reserve(input.commandCount);
         for (std::uint32_t index = 0; index < input.commandCount; ++index) {
             const auto& source = input.commands[index];
@@ -1236,6 +1276,10 @@ FFFResult PlayerSession::GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexc
 
 FFFResult PlayerSession::GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcept {
     return videoRenderer_.GetTimedTextStatus(status, TimedTextLayerSlot::Danmaku);
+}
+
+FFFResult PlayerSession::GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept {
+    return videoRenderer_.GetTimedTextStatus(status, TimedTextLayerSlot::Lyrics);
 }
 
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
@@ -1448,7 +1492,7 @@ FFFResult PlayerSession::LoadCoverArt() noexcept {
         if (coverArtFrame_ != nullptr) av_frame_free(&coverArtFrame_);
         coverArtFrame_ = av_frame_clone(frame);
         if (coverArtFrame_ == nullptr) result = FFFResult::NativeFailure;
-        else result = videoRenderer_.Render(coverArtFrame_);
+        else result = videoRenderer_.Render(coverArtFrame_, true, true);
     }
     av_frame_free(&frame);
     avcodec_free_context(&decoder);
@@ -2090,7 +2134,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
             return;
         }
     }
-    const auto renderResult = videoRenderer_.Render(renderFrame);
+    const auto renderResult = videoRenderer_.Render(renderFrame, staticImage_ && owner == format_);
     if (renderResult != FFFResult::Success) {
         if (renderResult == FFFResult::DeviceFailure &&
             videoRenderer_.RequestRecoveryIfDeviceLost()) return;

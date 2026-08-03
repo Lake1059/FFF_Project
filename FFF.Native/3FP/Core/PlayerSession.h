@@ -56,6 +56,7 @@ public:
     FFFResult GetAudioPeakLevels(FFF3FPAudioPeakLevels& levels) const noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept;
     FFFResult GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcept;
+    FFFResult GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
 

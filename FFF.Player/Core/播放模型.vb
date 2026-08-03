@@ -243,6 +243,34 @@ Public Enum 定时文字样式
     HDR高亮位图 = 16
 End Enum
 
+Public Structure 歌词呈现设置
+    Public Sub New(模糊半径值 As Single, 模糊次数值 As Integer,
+                   下采样倍率值 As Integer, 遮罩颜色ARGB值 As UInteger,
+                   封面区域宽度百分比值 As Single, 歌词区域宽度百分比值 As Single,
+                   封面左内边距百分比值 As Single, 封面右内边距百分比值 As Single,
+                   封面垂直内边距百分比值 As Single)
+        模糊半径 = 模糊半径值
+        模糊次数 = 模糊次数值
+        下采样倍率 = 下采样倍率值
+        遮罩颜色ARGB = 遮罩颜色ARGB值
+        封面区域宽度百分比 = 封面区域宽度百分比值
+        歌词区域宽度百分比 = 歌词区域宽度百分比值
+        封面左内边距百分比 = 封面左内边距百分比值
+        封面右内边距百分比 = 封面右内边距百分比值
+        封面垂直内边距百分比 = 封面垂直内边距百分比值
+    End Sub
+
+    Public Property 模糊半径 As Single
+    Public Property 模糊次数 As Integer
+    Public Property 下采样倍率 As Integer
+    Public Property 遮罩颜色ARGB As UInteger
+    Public Property 封面区域宽度百分比 As Single
+    Public Property 歌词区域宽度百分比 As Single
+    Public Property 封面左内边距百分比 As Single
+    Public Property 封面右内边距百分比 As Single
+    Public Property 封面垂直内边距百分比 As Single
+End Structure
+
 Public NotInheritable Class 定时文字命令
     Friend Sub New()
     End Sub

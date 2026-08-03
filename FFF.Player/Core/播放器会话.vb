@@ -217,9 +217,35 @@ Public NotInheritable Class 播放器会话
         设置定时文字图层核心(画布大小, 命令, 序号, 目标帧率, 原生定时文字图层槽位.播放器信息)
     End Sub
 
+    Public Sub 设置歌词图层(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令),
+                       序号 As ULong, 目标帧率 As Single, 呈现设置 As 歌词呈现设置)
+        If Not Single.IsFinite(呈现设置.模糊半径) OrElse 呈现设置.模糊半径 < 1.0F OrElse
+            呈现设置.模糊半径 > 96.0F OrElse 呈现设置.模糊次数 < 0 OrElse
+            呈现设置.模糊次数 > 5 OrElse 呈现设置.下采样倍率 < 1 OrElse
+            呈现设置.下采样倍率 > 16 OrElse
+            Not Single.IsFinite(呈现设置.封面区域宽度百分比) OrElse
+            Not Single.IsFinite(呈现设置.歌词区域宽度百分比) OrElse
+            呈现设置.封面区域宽度百分比 <= 0.0F OrElse
+            呈现设置.歌词区域宽度百分比 <= 0.0F OrElse
+            Not Single.IsFinite(呈现设置.封面左内边距百分比) OrElse
+            Not Single.IsFinite(呈现设置.封面右内边距百分比) OrElse
+            Not Single.IsFinite(呈现设置.封面垂直内边距百分比) OrElse
+            呈现设置.封面左内边距百分比 < 0.0F OrElse
+            呈现设置.封面左内边距百分比 >= 50.0F OrElse
+            呈现设置.封面右内边距百分比 < 0.0F OrElse
+            呈现设置.封面右内边距百分比 >= 50.0F OrElse
+            呈现设置.封面垂直内边距百分比 < 0.0F OrElse
+            呈现设置.封面垂直内边距百分比 >= 50.0F Then
+            Throw New ArgumentOutOfRangeException(NameOf(呈现设置))
+        End If
+        设置定时文字图层核心(画布大小, 命令, 序号, 目标帧率,
+                            原生定时文字图层槽位.歌词, 呈现设置)
+    End Sub
+
     Private Sub 设置定时文字图层核心(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令),
                                 序号 As ULong, 目标帧率 As Single,
-                                图层槽位 As 原生定时文字图层槽位)
+                                图层槽位 As 原生定时文字图层槽位,
+                                Optional 呈现设置 As 歌词呈现设置? = Nothing)
         If 画布大小.Width <= 0 OrElse 画布大小.Height <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(画布大小))
         If Not Single.IsFinite(目标帧率) OrElse 目标帧率 < 1.0F OrElse 目标帧率 > 240.0F Then
             Throw New ArgumentOutOfRangeException(NameOf(目标帧率))
@@ -268,6 +294,18 @@ Public NotInheritable Class 播放器会话
                     .命令数 = CUInt(命令.Count), .图层槽位 = 图层槽位, .序号 = 序号,
                     .命令 = If(命令.Count = 0, IntPtr.Zero, 定时文字原生缓冲句柄.AddrOfPinnedObject()),
                     .目标帧率 = 目标帧率}
+                If 呈现设置.HasValue Then
+                    Dim settings = 呈现设置.Value
+                    layer.封面毛玻璃半径 = settings.模糊半径
+                    layer.封面毛玻璃次数 = CUInt(settings.模糊次数)
+                    layer.封面毛玻璃下采样倍率 = CUInt(settings.下采样倍率)
+                    layer.封面毛玻璃遮罩颜色ARGB = settings.遮罩颜色ARGB
+                    layer.封面区域宽度百分比 = settings.封面区域宽度百分比
+                    layer.歌词区域宽度百分比 = settings.歌词区域宽度百分比
+                    layer.封面区域左内边距百分比 = settings.封面左内边距百分比
+                    layer.封面区域垂直内边距百分比 = settings.封面垂直内边距百分比
+                    layer.封面区域右内边距百分比 = settings.封面右内边距百分比
+                End If
                 检查结果(播放器原生接口.FFF3FP_SetTimedTextLayer(取得句柄(), layer))
             Finally
                 For Each pinned In 定时文字位图固定句柄
@@ -319,6 +357,15 @@ Public NotInheritable Class 播放器会话
             Dim 值 As New 原生定时文字状态 With {
                 .大小 = 原生定时文字状态大小, .版本 = 1UI}
             检查结果(播放器原生接口.FFF3FP_GetDanmakuStatus(取得句柄(), 值))
+            Return New 定时文字状态(值)
+        End Get
+    End Property
+
+    Public ReadOnly Property 当前歌词状态 As 定时文字状态
+        Get
+            Dim 值 As New 原生定时文字状态 With {
+                .大小 = 原生定时文字状态大小, .版本 = 1UI}
+            检查结果(播放器原生接口.FFF3FP_GetLyricsStatus(取得句柄(), 值))
             Return New 定时文字状态(值)
         End Get
     End Property

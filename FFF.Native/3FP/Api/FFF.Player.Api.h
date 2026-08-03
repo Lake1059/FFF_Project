@@ -291,9 +291,9 @@ struct FFF3FPTimedTextLayer {
     std::uint32_t canvasWidth;
     std::uint32_t canvasHeight;
     std::uint32_t commandCount;
-    // 0 = subtitle, 1 = danmaku, 2 = player information. Kept in the original
-    // reserved field so the version-1 ABI remains stable while the producers
-    // remain independent.
+    // 0 = subtitle, 1 = danmaku, 2 = player information, 3 = lyrics. Kept in
+    // the original reserved field so the version-1 ABI remains stable while
+    // the producers remain independent.
     std::uint32_t layerSlot;
     std::uint64_t sequence;
     const FFF3FPTimedTextCommand* commands;
@@ -301,6 +301,19 @@ struct FFF3FPTimedTextLayer {
     // treated as 60 Hz; current callers publish the layer's independent pace.
     float targetFrameRate;
     std::uint32_t reserved2;
+    // Optional lyrics presentation tail. Values use logical percentages so
+    // managed layout and the native cover renderer share one configuration.
+    float coverBackdropBlurRadius;
+    std::uint32_t coverBackdropBlurPasses;
+    std::uint32_t coverBackdropDownsampleFactor;
+    std::uint32_t coverBackdropTintArgb;
+    float coverRegionWidthPercentage;
+    float lyricsRegionWidthPercentage;
+    // Legacy horizontal padding now represents the left inset. The optional
+    // tail below adds an independent right inset without changing old fields.
+    float coverHorizontalPaddingPercentage;
+    float coverVerticalPaddingPercentage;
+    float coverRightPaddingPercentage;
 };
 
 struct FFF3FPTimedTextStatus {
@@ -433,6 +446,8 @@ FFF3FP_API FFFResult FFF3FP_GetAudioPeakLevels(FFF3FPHandle player,
 FFF3FP_API FFFResult FFF3FP_GetTimedTextStatus(FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetDanmakuStatus(FFF3FPHandle player,
+    FFF3FPTimedTextStatus* status) noexcept;
+FFF3FP_API FFFResult FFF3FP_GetLyricsStatus(FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept;
 FFF3FP_API FFFResult FFF3FP_EvaluateColorTransform(FFF3FPColorTransform* transform) noexcept;
 FFF3FP_API FFFResult FFF3FP_EvaluateHdrProcessing(

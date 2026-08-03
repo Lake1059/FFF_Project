@@ -39,6 +39,7 @@ struct ID2D1Factory1;
 struct ID2D1Device;
 struct ID2D1DeviceContext;
 struct ID2D1Bitmap1;
+struct ID2D1Effect;
 struct ID2D1SolidColorBrush;
 struct IDWriteFactory;
 struct IDWriteTextLayout;
@@ -78,6 +79,15 @@ struct TimedTextRenderLayer {
     std::uint32_t canvasHeight = 0;
     std::uint64_t sequence = 0;
     float targetFrameRate = 60.0f;
+    float coverBackdropBlurRadius = 30.0f;
+    std::uint32_t coverBackdropBlurPasses = 3;
+    std::uint32_t coverBackdropDownsampleFactor = 4;
+    std::uint32_t coverBackdropTintArgb = 0x78000000u;
+    float coverRegionWidthPercentage = 50.0f;
+    float lyricsRegionWidthPercentage = 50.0f;
+    float coverLeftPaddingPercentage = 7.5f;
+    float coverRightPaddingPercentage = 0.0f;
+    float coverVerticalPaddingPercentage = 7.5f;
     std::vector<TimedTextRenderCommand> commands;
 };
 
@@ -85,6 +95,7 @@ enum class TimedTextLayerSlot : std::uint32_t {
     Subtitle = 0,
     Danmaku = 1,
     PlayerInformation = 2,
+    Lyrics = 3,
 };
 
 FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept;
@@ -100,7 +111,8 @@ public:
         float hdrPeakNits, float paperWhiteNits) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
     void ConfigureHdrStream(const AVCodecParameters* parameters) noexcept;
-    FFFResult Render(const AVFrame* frame) noexcept;
+    FFFResult Render(const AVFrame* frame, bool limitToNativeSize = false,
+        bool coverArt = false) noexcept;
     FFFResult Redraw() noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     FFFResult PresentTimedText() noexcept;
@@ -128,6 +140,11 @@ public:
     std::string LastError() const;
 
 private:
+    enum class CoverBackdropRenderResult {
+        Complete,
+        Deferred,
+        Failed,
+    };
     struct TimedTextSprite {
         float atlasX = 0;
         float atlasY = 0;
@@ -166,7 +183,7 @@ private:
     FFFResult EnsureVideoProcessorInputSurface(std::uint32_t format) noexcept;
     FFFResult RenderVideoProcessorInput() noexcept;
     FFFResult DrawWithShader(ID3D11RenderTargetView* target, float x, float y,
-        float width, float height) noexcept;
+        float width, float height, std::uint32_t effect = 0) noexcept;
     FFFResult DrawWithVideoProcessor(ID3D11Texture2D* inputTexture,
         ID3D11Texture2D* outputTexture, const RECT& destination,
         std::uint32_t inputColorSpace, std::uint32_t outputColorSpace) noexcept;
@@ -185,8 +202,17 @@ private:
         float chromaOffsetX = 0, chromaOffsetY = 0, padding1 = 0, padding2 = 0;
     };
     FFFResult EnsureTimedTextResources(TimedTextLayerSlot slot) noexcept;
+    FFFResult EnsureD2DContext() noexcept;
     FFFResult EnsureTimedTextAtlas(std::uint32_t size) noexcept;
     FFFResult EnsureTimedTextInstanceCapacity(std::size_t count) noexcept;
+    FFFResult EnsureCoverBackdropResources() noexcept;
+    FFFResult DrawCoverBackdrop(ID3D11RenderTargetView* target) noexcept;
+    FFFResult RenderCoverBackdropCache() noexcept;
+    CoverBackdropRenderResult TryRenderCoverBackdropCache() noexcept;
+    void RequestCoverBackdropRender(bool force = false) noexcept;
+    void CoverBackdropThread() noexcept;
+    void StopCoverBackdropThread() noexcept;
+    void ReleaseCoverBackdropResources() noexcept;
     FFFResult DrawCachedVideo(ID3D11RenderTargetView* target) noexcept;
     FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
         std::uint64_t renderedVideoGeneration) noexcept;
@@ -209,6 +235,7 @@ private:
     IDXGISwapChain4* swapChain_;
     ID3D11VertexShader* vertexShader_;
     ID3D11PixelShader* pixelShader_;
+    ID3D11PixelShader* coverBackdropPixelShader_;
     ID3D11PixelShader* timedTextPixelShader_;
     ID3D11SamplerState* sampler_;
     ID3D11SamplerState* pointSampler_;
@@ -222,10 +249,14 @@ private:
     ID3D11VideoProcessor* videoProcessor_;
     ID3D11Texture2D* videoProcessorRenderTexture_;
     ID3D11RenderTargetView* videoProcessorRenderTarget_;
-    ID3D11Texture2D* timedTextTextures_[3];
-    ID3D11RenderTargetView* timedTextTargets_[3];
-    ID3D11ShaderResourceView* timedTextViews_[3];
-    ID3D11Query* timedTextPipelineQueries_[3];
+    ID3D11Texture2D* coverBackdropTexture_;
+    ID3D11ShaderResourceView* coverBackdropView_;
+    ID3D11Texture2D* coverBackdropSourceTexture_;
+    ID3D11RenderTargetView* coverBackdropSourceTarget_;
+    ID3D11Texture2D* timedTextTextures_[4];
+    ID3D11RenderTargetView* timedTextTargets_[4];
+    ID3D11ShaderResourceView* timedTextViews_[4];
+    ID3D11Query* timedTextPipelineQueries_[4];
     ID3D11BlendState* timedTextBlend_;
     ID3D11Texture2D* timedTextAtlasTexture_;
     ID3D11ShaderResourceView* timedTextAtlasView_;
@@ -236,7 +267,10 @@ private:
     ID2D1Factory1* d2dFactory_;
     ID2D1Device* d2dDevice_;
     ID2D1DeviceContext* d2dContext_;
-    ID2D1Bitmap1* d2dTargets_[3];
+    ID2D1Bitmap1* d2dCoverBackdropSource_;
+    ID2D1Bitmap1* d2dCoverBackdropTarget_;
+    ID2D1Effect* coverBackdropBlurEffect_;
+    ID2D1Bitmap1* d2dTargets_[4];
     ID2D1Bitmap1* d2dAtlasTarget_;
     IDWriteFactory* writeFactory_;
     IDWriteRenderingParams* timedTextRenderingParams_;
@@ -252,6 +286,12 @@ private:
     std::uint32_t sourceChromaWidthShift_;
     std::uint32_t sourceChromaHeightShift_;
     bool sourceExternal_;
+    bool sourceLimitedToNativeSize_;
+    bool sourceCoverArt_;
+    std::uint32_t coverBackdropWidth_;
+    std::uint32_t coverBackdropHeight_;
+    std::uint64_t coverBackdropVideoGeneration_;
+    std::uint64_t coverBackdropAppliedBlurSettingsGeneration_;
     std::uint32_t videoProcessorInputFormat_;
     std::uint32_t videoProcessorOutputFormat_;
     std::uint32_t videoProcessorInputColorSpace_;
@@ -277,30 +317,36 @@ private:
     mutable std::mutex deviceMutex_;
     mutable std::mutex presentMutex_;
     mutable std::mutex timedTextMutex_;
+    mutable std::mutex coverBackdropThreadMutex_;
     std::condition_variable timedTextCondition_;
+    std::condition_variable coverBackdropCondition_;
     std::thread timedTextThread_;
+    std::thread coverBackdropThread_;
     bool timedTextThreadStop_;
     bool timedTextThreadRunning_;
+    bool coverBackdropThreadStop_;
+    bool coverBackdropRequestPending_;
+    std::uint64_t coverBackdropRequestGeneration_;
     std::uint64_t presentationGeneration_;
     float presentationFrameRate_;
     // The producer publishes an immutable layer and renderers retain a shared
     // snapshot. This keeps the timed-text mutex short without copying every
     // command and string again on the video/present thread.
-    // Subtitle, danmaku and player information have independent producers and
+    // Subtitle, danmaku, lyrics and player information have independent producers and
     // render surfaces. Player information is always the topmost GPU layer.
-    // Composite order is fixed to video -> danmaku -> subtitle -> information.
-    std::shared_ptr<const TimedTextRenderLayer> timedTextLayers_[3];
-    std::uint64_t timedTextRenderedSequences_[3];
-    std::uint32_t timedTextRenderedCommandCounts_[3];
-    bool timedTextRenderedHdrHighlights_[3];
-    std::uint32_t timedTextWidths_[3];
-    std::uint32_t timedTextHeights_[3];
+    // Composite order is fixed to video -> danmaku -> subtitle -> lyrics -> information.
+    std::shared_ptr<const TimedTextRenderLayer> timedTextLayers_[4];
+    std::uint64_t timedTextRenderedSequences_[4];
+    std::uint32_t timedTextRenderedCommandCounts_[4];
+    bool timedTextRenderedHdrHighlights_[4];
+    std::uint32_t timedTextWidths_[4];
+    std::uint32_t timedTextHeights_[4];
     // Counts successful final swap-chain presents that included each visible
     // layer. A texture redraw is not a presentation and must not advance this.
-    std::uint32_t timedTextPresentCounts_[3];
+    std::uint32_t timedTextPresentCounts_[4];
     std::uint64_t backBufferAcquisitionCount_;
-    bool timedTextPipelineQueryInFlight_[3];
-    std::uint64_t timedTextCompositePixelInvocations_[3];
+    bool timedTextPipelineQueryInFlight_[4];
+    std::uint64_t timedTextCompositePixelInvocations_[4];
     CachedVideoSettings cachedVideoSettings_;
     bool hasCachedVideo_;
     std::atomic<std::uint64_t> videoGeneration_;
@@ -311,6 +357,18 @@ private:
     std::atomic<std::uint64_t> presentWait100ns_;
     std::atomic<std::uint64_t> deviceLockWait100ns_;
     std::atomic<std::uint64_t> softwareConvert100ns_;
+    std::atomic<std::uint32_t> playbackWorkPending_;
+    std::atomic<bool> lyricsLayoutEnabled_;
+    std::atomic<std::uint32_t> coverBackdropBlurRadiusBits_;
+    std::atomic<std::uint32_t> coverBackdropBlurPasses_;
+    std::atomic<std::uint32_t> coverBackdropDownsampleFactor_;
+    std::atomic<std::uint32_t> coverBackdropTintArgb_;
+    std::atomic<std::uint32_t> coverRegionWidthPercentageBits_;
+    std::atomic<std::uint32_t> lyricsRegionWidthPercentageBits_;
+    std::atomic<std::uint32_t> coverLeftPaddingPercentageBits_;
+    std::atomic<std::uint32_t> coverRightPaddingPercentageBits_;
+    std::atomic<std::uint32_t> coverVerticalPaddingPercentageBits_;
+    std::atomic<std::uint64_t> coverBackdropBlurSettingsGeneration_;
     std::atomic<bool> deviceRecoveryRequested_;
     std::function<void()> recoveryCallback_;
     HMONITOR hdrMonitor_;

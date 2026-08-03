@@ -21,12 +21,16 @@ Public NotInheritable Class 播放器控制器
     Private 会话操作取消 As CancellationTokenSource
     Private 字幕加载取消 As CancellationTokenSource
     Private 弹幕加载取消 As CancellationTokenSource
+    Private 歌词加载取消 As CancellationTokenSource
     Private 当前字幕轨道 As 外部字幕轨道
     Private 已导入外部字幕 As 外部字幕轨道
     Private 外部字幕候选快照 As 外部字幕候选() = Array.Empty(Of 外部字幕候选)()
     Private 当前内嵌字幕 As 外部字幕轨道
     Private 当前字幕来源索引 As Integer = -2
     Private 当前弹幕资料库 As 弹幕资料库
+    Private 当前歌词资料 As LRC歌词资料
+    Private 当前媒体是纯音频 As Boolean
+    Private 当前音乐包含封面 As Boolean
     Private 当前文件路径 As String = String.Empty
     Private 当前解码器 As 解码模式 = 解码模式.CPU
     Private 当前色彩输出 As 色彩输出模式 = 色彩输出模式.映射到SDR
@@ -51,6 +55,7 @@ Public NotInheritable Class 播放器控制器
     Public Event 外部字幕已加载 As EventHandler(Of 播放器字幕事件参数)
     Public Event 字幕选择已变化 As EventHandler
     Public Event 外部弹幕已加载 As EventHandler(Of 播放器弹幕事件参数)
+    Public Event 外部歌词已加载 As EventHandler(Of 播放器歌词事件参数)
 
     Public ReadOnly Property 解码器 As 解码模式
         Get
@@ -131,6 +136,18 @@ Public NotInheritable Class 播放器控制器
         End Get
     End Property
 
+    Public ReadOnly Property 当前歌词 As LRC歌词资料
+        Get
+            Return Volatile.Read(当前歌词资料)
+        End Get
+    End Property
+
+    Public ReadOnly Property 当前音乐有封面 As Boolean
+        Get
+            Return Volatile.Read(当前音乐包含封面)
+        End Get
+    End Property
+
     Friend Sub 提交定时文字图层(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令),
                           序号 As ULong, 目标帧率 As Single)
         Dim 目标 = 会话
@@ -163,6 +180,19 @@ Public NotInheritable Class 播放器控制器
         Catch ex As 播放器异常
         End Try
     End Sub
+
+    Friend Function 提交歌词图层(画布大小 As Size, 命令 As IReadOnlyList(Of 定时文字命令),
+                            序号 As ULong, 目标帧率 As Single, 呈现设置 As 歌词呈现设置) As Boolean
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return False
+        Try
+            目标.设置歌词图层(画布大小, 命令, 序号, 目标帧率, 呈现设置)
+            Return True
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+        Return False
+    End Function
 
     Friend Function 读取定时文字状态() As 定时文字状态
         Try
@@ -390,6 +420,56 @@ Public NotInheritable Class 播放器控制器
             End If
         Finally
             If ReferenceEquals(弹幕加载取消, 本次取消) Then 弹幕加载取消 = Nothing
+            本次取消.Dispose()
+        End Try
+    End Function
+
+    Public Sub 替换歌词(路径 As String)
+        If 已释放 OrElse String.IsNullOrWhiteSpace(路径) Then Return
+        If Not 是否有媒体 Then
+            RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(
+                "请先播放纯音频媒体，再加载 LRC 外挂歌词。", True, "无法加载歌词"))
+            Return
+        End If
+        If Not Volatile.Read(当前媒体是纯音频) Then
+            RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(
+                "LRC 外挂歌词仅支持纯音频媒体。", True, "不支持此操作"))
+            Return
+        End If
+        If Not File.Exists(路径) OrElse Not LRC歌词自动加载器.是支持的歌词文件(路径) Then
+            RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(
+                "仅可加载存在的 LRC 歌词文件。", True, "无法加载歌词"))
+            Return
+        End If
+        Dim 本次取消 As New CancellationTokenSource()
+        Dim 上次取消 = Interlocked.Exchange(歌词加载取消, 本次取消)
+        上次取消?.Cancel()
+        Dim 媒体路径 = 当前文件路径
+        Dim 忽略 = 替换歌词Async(Path.GetFullPath(路径), 媒体路径, 本次取消)
+    End Sub
+
+    Private Async Function 替换歌词Async(歌词路径 As String, 媒体路径 As String,
+                                      本次取消 As CancellationTokenSource) As Task
+        Try
+            Dim candidate = Await LRC歌词自动加载器.加载歌词Async(歌词路径, 本次取消.Token)
+            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
+                Not ReferenceEquals(歌词加载取消, 本次取消) OrElse
+                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
+            Interlocked.Exchange(当前歌词资料, candidate)
+            RaiseEvent 外部歌词已加载(Me, New 播放器歌词事件参数(candidate.路径, candidate.条目.Count))
+        Catch ex As OperationCanceledException
+        Catch ex As NotSupportedException
+            If Not 已释放 AndAlso Not 本次取消.IsCancellationRequested Then
+                RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(
+                    ex.Message, True, "不支持此歌词"))
+            End If
+        Catch ex As Exception
+            If Not 已释放 AndAlso Not 本次取消.IsCancellationRequested Then
+                RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(
+                    ex.Message, True, "无法加载歌词"))
+            End If
+        Finally
+            If ReferenceEquals(歌词加载取消, 本次取消) Then 歌词加载取消 = Nothing
             本次取消.Dispose()
         End Try
     End Function
@@ -646,6 +726,13 @@ Public NotInheritable Class 播放器控制器
             此次取消.Token.ThrowIfCancellationRequested()
             Dim 初始快照 = 候选会话.当前快照
             Dim 媒体信息 = 候选会话.当前媒体信息
+            Dim 候选是纯音频 = 媒体信息.流.Any(
+                Function(x) String.Equals(x.类型, "audio", StringComparison.OrdinalIgnoreCase)) AndAlso
+                Not 媒体信息.流.Any(
+                    Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso
+                                Not x.是封面图)
+            Dim 候选包含封面 = 候选是纯音频 AndAlso 媒体信息.流.Any(
+                Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso x.是封面图)
             恢复流选择(候选会话, 媒体信息, 视频流, 音频流)
             If 恢复位置 > TimeSpan.Zero Then
                 候选会话.跳转(If(初始快照.总时长 > TimeSpan.Zero, 最小时间(恢复位置, 初始快照.总时长), 恢复位置))
@@ -659,6 +746,8 @@ Public NotInheritable Class 播放器控制器
             会话 = 候选会话
             候选会话 = Nothing
             当前文件路径 = 路径
+            Volatile.Write(当前媒体是纯音频, 候选是纯音频)
+            Volatile.Write(当前音乐包含封面, 候选包含封面)
             当前解码器 = 快照.解码器
             当前色彩输出 = 快照.请求色彩模式
             添加会话事件(会话)
@@ -685,6 +774,7 @@ Public NotInheritable Class 播放器控制器
             If Not 保留当前字幕 Then
                 开始自动加载字幕(当前文件路径)
                 开始自动加载弹幕(当前文件路径)
+                开始自动加载歌词(当前文件路径)
             End If
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
             Catch ex As OperationCanceledException
@@ -1025,14 +1115,55 @@ Public NotInheritable Class 播放器控制器
         Interlocked.Exchange(当前弹幕资料库, Nothing)
     End Sub
 
+    Private Sub 开始自动加载歌词(媒体路径 As String)
+        释放当前歌词()
+        If Not Volatile.Read(当前媒体是纯音频) Then Return
+        Dim 本次取消 As New CancellationTokenSource()
+        歌词加载取消 = 本次取消
+        Dim 忽略 = 自动加载同名歌词Async(媒体路径, 本次取消)
+    End Sub
+
+    Private Async Function 自动加载同名歌词Async(媒体路径 As String,
+                                            本次取消 As CancellationTokenSource) As Task
+        Try
+            Dim candidate = Await LRC歌词自动加载器.尝试加载同名歌词Async(媒体路径, 本次取消.Token)
+            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
+                Not ReferenceEquals(歌词加载取消, 本次取消) OrElse
+                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) OrElse
+                candidate Is Nothing Then Return
+            Interlocked.Exchange(当前歌词资料, candidate)
+            RaiseEvent 外部歌词已加载(Me, New 播放器歌词事件参数(candidate.路径, candidate.条目.Count))
+        Catch ex As OperationCanceledException
+        Catch ex As NotSupportedException
+            If Not 已释放 AndAlso Not 本次取消.IsCancellationRequested Then
+                RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(
+                    ex.Message, True, "不支持此歌词"))
+            End If
+        Catch
+            ' 同名歌词是可选资源；无法读取时不影响音频播放。
+        Finally
+            If ReferenceEquals(歌词加载取消, 本次取消) Then 歌词加载取消 = Nothing
+            本次取消.Dispose()
+        End Try
+    End Function
+
+    Private Sub 释放当前歌词()
+        Dim 取消源 = Interlocked.Exchange(歌词加载取消, Nothing)
+        取消源?.Cancel()
+        Interlocked.Exchange(当前歌词资料, Nothing)
+    End Sub
+
     Private Sub 释放当前会话(Optional 保留已加载字幕 As Boolean = False)
         If Not 保留已加载字幕 Then
             释放当前字幕()
             释放当前弹幕()
+            释放当前歌词()
         End If
         Dim 待释放 = 会话
         会话 = Nothing
         当前文件路径 = String.Empty
+        Volatile.Write(当前媒体是纯音频, False)
+        Volatile.Write(当前音乐包含封面, False)
         If 待释放 Is Nothing Then Return
 
         移除会话事件(待释放)
@@ -1170,4 +1301,16 @@ Public NotInheritable Class 播放器字幕事件参数
 
     Public ReadOnly Property 路径 As String
     Public ReadOnly Property 格式 As 外部字幕格式
+End Class
+
+Public NotInheritable Class 播放器歌词事件参数
+    Inherits EventArgs
+
+    Public Sub New(路径值 As String, 条目数值 As Integer)
+        路径 = If(路径值, String.Empty)
+        条目数 = Math.Max(0, 条目数值)
+    End Sub
+
+    Public ReadOnly Property 路径 As String
+    Public ReadOnly Property 条目数 As Integer
 End Class

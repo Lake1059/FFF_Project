@@ -115,6 +115,24 @@ Friend Module Program
                 Console.WriteLine("纯音频封面无窗口打开与延迟绑定回归通过。")
                 Return 0
             End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--cover-backdrop-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 音频路径 = Path.GetFullPath(参数(1))
+                检查文件(音频路径)
+                测试封面模糊背景(音频路径)
+                Console.WriteLine("音乐封面全画布模糊背景与黑色遮罩回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 4 AndAlso String.Equals(参数(0), "--lyrics-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 歌词路径 = Path.GetFullPath(参数(1))
+                Dim 封面音频路径 = Path.GetFullPath(参数(2))
+                Dim 无封面音频路径 = Path.GetFullPath(参数(3))
+                检查文件(歌词路径)
+                检查文件(封面音频路径)
+                检查文件(无封面音频路径)
+                测试LRC歌词回归(歌词路径, 封面音频路径, 无封面音频路径)
+                Console.WriteLine("LRC 解析、多语言分组、平滑滚动及有无封面布局回归通过。")
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--timed-text-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试定时文字精确渲染合同()
                 Console.WriteLine("弹幕边界、连续小数位移、Seek、外描边与阴影精确诊断通过。")
@@ -271,6 +289,8 @@ Friend Module Program
                 Console.Error.WriteLine("用法: FFF.Player.Tests <视频.mp4> <弹幕.xml> [字幕.ass] [字幕.srt]")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --audio-latency-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --audio-cover-regression <带内嵌封面的纯音频>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --cover-backdrop-regression <带 0xC80000 纯色封面的音频>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --lyrics-regression <歌词.lrc> <带封面音频> <无封面音频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --color-regression <SDR视频> <HDR视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --performance-regression <SDR视频> <HDR视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --targeted-regression <视频> <字幕.sup>")
@@ -1662,6 +1682,16 @@ Friend Module Program
                     "图片打开后首帧")
                 断言(快照.解码器 = 解码模式.CPU,
                    "静态图片没有使用稳定的软件首帧解码路径。")
+                Dim 输出尺寸 = 输出窗口.ClientSize
+                If 快照.视频宽度 <= CUInt(输出尺寸.Width) AndAlso
+                   快照.视频高度 <= CUInt(输出尺寸.Height) AndAlso
+                   (快照.视频宽度 < CUInt(输出尺寸.Width) OrElse
+                    快照.视频高度 < CUInt(输出尺寸.Height)) Then
+                    Dim 角落像素 = 会话.读取视频输出像素(0, 0)
+                    断言(角落像素.R = 0 AndAlso 角落像素.G = 0 AndAlso 角落像素.B = 0,
+                       $"小尺寸图片没有按原始尺寸居中，输出左上角为 " &
+                       $"RGB({角落像素.R},{角落像素.G},{角落像素.B})。")
+                End If
             End Using
         End Using
     End Sub
@@ -2059,6 +2089,204 @@ Friend Module Program
                 Console.WriteLine($"封面流 {封面流.编码} {封面流.宽度}×{封面流.高度}，" &
                                   $"交换链呈现 {无窗口快照.交换链呈现次数}→{呈现快照.交换链呈现次数}")
                 会话.设置输出窗口(IntPtr.Zero)
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 测试LRC歌词回归(歌词路径 As String, 封面音频路径 As String,
+                           无封面音频路径 As String)
+        Dim 样例 = LRC歌词解析器.解析文件(歌词路径)
+        断言(样例.条目.Count = 40, $"样例 LRC 条目数量错误：{样例.条目.Count}。")
+        断言(样例.条目(0).开始时间 = TimeSpan.FromMilliseconds(28805) AndAlso
+               样例.条目(0).文本.Single().Contains("頑張れ", StringComparison.Ordinal),
+               "样例 LRC 首条毫秒时间或正文解析错误。")
+        断言(样例.条目.Where(Function(x) x.文本.All(Function(text) String.IsNullOrEmpty(text))).Count() = 8,
+               "样例 LRC 空节奏行没有保留。")
+
+        Dim 多语言文本 = String.Join(vbLf, {
+            "[ar:ignored]", "[00:01.2][00:02.34]原文<00:01.50>",
+            "[00:01.200]Translation", "[00:03]", "metadata without timing"})
+        Dim 多语言 = LRC歌词解析器.解析(New StringReader(多语言文本))
+        断言(多语言.条目.Count = 3, "一行多时间标签没有展开为独立时间组。")
+        断言(多语言.条目(0).文本.SequenceEqual({"原文", "Translation"}),
+               "相同时间戳的多语言歌词没有按文件顺序合并。")
+        断言(多语言.条目(1).开始时间 = TimeSpan.FromMilliseconds(2340),
+               "两位小数 LRC 时间没有按百分之一秒解析。")
+        断言(多语言.条目(2).文本.Single() = String.Empty,
+               "带时间戳的空正文没有保留为节奏间隔。")
+        Try
+            LRC歌词解析器.解析(New StringReader("[ar:no timeline]"))
+            Throw New InvalidOperationException("无时间轴 LRC 没有被拒绝。")
+        Catch ex As NotSupportedException
+        End Try
+
+        Dim scanDirectory = Path.Combine(Path.GetTempPath(),
+            "fff-player-lyrics-scan-" & Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(scanDirectory)
+        Try
+            Dim mediaPath = Path.Combine(scanDirectory, "song.mp3")
+            Dim exactLyricsPath = Path.Combine(scanDirectory, "song.lrc")
+            File.WriteAllBytes(mediaPath, Array.Empty(Of Byte)())
+            File.WriteAllText(Path.Combine(scanDirectory, "song.translation.lrc"),
+                              "[00:01.00]不应被扫描", New UTF8Encoding(False))
+            Dim noMatch = LRC歌词自动加载器.尝试加载同名歌词Async(
+                mediaPath, CancellationToken.None).GetAwaiter().GetResult()
+            断言(noMatch Is Nothing, "歌词自动扫描误用了非同名 LRC 文件。")
+            File.WriteAllText(exactLyricsPath, "[00:01.00]同名歌词", New UTF8Encoding(False))
+            Dim exactMatch = LRC歌词自动加载器.尝试加载同名歌词Async(
+                mediaPath, CancellationToken.None).GetAwaiter().GetResult()
+            断言(exactMatch IsNot Nothing AndAlso
+                   String.Equals(exactMatch.路径, exactLyricsPath, StringComparison.OrdinalIgnoreCase),
+                   "歌词自动扫描没有加载同目录的同名 LRC 文件。")
+        Finally
+            If Directory.Exists(scanDirectory) Then Directory.Delete(scanDirectory, True)
+        End Try
+
+        Dim regionWithCover = 播放器歌词呈现器.计算歌词区域(New Size(800, 400), True)
+        Dim regionWithoutCover = 播放器歌词呈现器.计算歌词区域(New Size(800, 400), False)
+        断言(regionWithCover.Left >= 400 AndAlso regionWithCover.Right <= 800,
+               "有封面歌词区域没有限制在右半区。")
+        断言(Math.Abs((regionWithCover.Left - 400.0F) - (800.0F - regionWithCover.Right)) < 0.01F AndAlso
+               regionWithCover.Right < 800.0F,
+               "有封面歌词区域的左右内边距不对称。")
+        断言(regionWithoutCover.Left < 100 AndAlso regionWithoutCover.Right > 700,
+               "无封面歌词区域没有覆盖完整渲染区域。")
+
+        Using control As New 播放器画面控件 With {.Size = New Size(800, 400)}
+            Using renderer As New 播放器歌词呈现器(control, Function() Nothing,
+                Function() Nothing, Function() False, Function(a, b, c, d, e) True)
+                Dim current = renderer.生成命令(New Size(800, 400),
+                    TimeSpan.FromMilliseconds(1200), 多语言, False)
+                断言(current.Count >= 2 AndAlso
+                       current.Where(Function(x) x.前景色ARGB = &HFFFFFFFFUI).Count() = 2,
+                       "同时间多语言歌词没有整体高亮。")
+                Dim originalY = current.First(Function(x) x.文本 = "原文").Y
+                Dim translationY = current.First(Function(x) x.文本 = "Translation").Y
+                断言(translationY - originalY > 24.0F,
+                       "同一歌词组内的多语言行没有应用歌词组间距。")
+                Dim enteringSize = current.First(Function(x) x.文本 = "原文").字号
+                Dim beforeScroll = originalY
+                断言(current.Where(Function(x) x.前景色ARGB = &HFFFFFFFFUI).
+                           All(Function(x) x.样式 = 定时文字样式.无),
+                       "当前歌词仍然使用了粗体样式。")
+                Dim activeSize = renderer.生成命令(New Size(800, 400),
+                    TimeSpan.FromMilliseconds(1500), 多语言, False).
+                    First(Function(x) x.文本 = "原文").字号
+                Dim exitingSize = renderer.生成命令(New Size(800, 400),
+                    TimeSpan.FromMilliseconds(2250), 多语言, False).
+                    First(Function(x) x.文本 = "原文").字号
+                断言(activeSize > enteringSize AndAlso exitingSize < activeSize,
+                       "当前歌词字号没有执行平滑的切入和切出过渡。")
+                Dim scrolling = renderer.生成命令(New Size(800, 400),
+                    TimeSpan.FromMilliseconds(2100), 多语言, False)
+                Dim afterScroll = scrolling.First(Function(x) x.文本 = "原文").Y
+                断言(afterScroll < beforeScroll, "歌词没有在下一时间组到来前平滑上移。")
+
+                Const longChinese = "这是一句用于验证歌词区域自动换行能力的非常长的中文歌词而且不能丢失任何一个字符"
+                Dim longChineseLyrics = LRC歌词解析器.解析(
+                    New StringReader($"[00:01.00]{longChinese}"))
+                Dim wrappedChinese = renderer.生成命令(New Size(800, 400),
+                    TimeSpan.FromMilliseconds(1200), longChineseLyrics, True).ToArray()
+                断言(wrappedChinese.Length > 1 AndAlso
+                       String.Concat(wrappedChinese.Select(Function(x) x.文本)) = longChinese,
+                       "长中文歌词没有完整地自动换行。")
+                断言(wrappedChinese.All(Function(x) x.X >= regionWithCover.Left AndAlso
+                                                   x.X + x.宽度 <= regionWithCover.Right),
+                       "换行后的歌词命令越过了右侧歌词区域。")
+                Dim longEnglishLyrics = LRC歌词解析器.解析(New StringReader(
+                    "[00:01.00]This is an intentionally long English lyric that should wrap at spaces"))
+                Dim wrappedEnglish = renderer.生成命令(New Size(800, 400),
+                    TimeSpan.FromMilliseconds(1200), longEnglishLyrics, True).ToArray()
+                断言(wrappedEnglish.Length > 1 AndAlso
+                       wrappedEnglish.All(Function(x) Not x.文本.StartsWith(" ", StringComparison.Ordinal)),
+                       "长英文歌词没有在单词边界正常换行。")
+            End Using
+        End Using
+
+        测试歌词GPU布局(封面音频路径, 样例, True)
+        测试歌词GPU布局(无封面音频路径, 样例, False)
+    End Sub
+
+    Private Sub 测试封面模糊背景(音频路径 As String)
+        Using window As New Form With {
+            .ClientSize = New Size(800, 400), .FormBorderStyle = FormBorderStyle.FixedToolWindow,
+            .ShowInTaskbar = False, .StartPosition = FormStartPosition.Manual,
+            .Location = New Point(-10000, -10000)}
+            window.Show()
+            Application.DoEvents()
+            Using session As New 播放器会话(New 播放器配置 With {
+                .解码器 = 解码模式.CPU, .色彩模式 = 色彩输出模式.映射到SDR,
+                .输出窗口句柄 = window.Handle})
+                session.设置音量(0.0F, True)
+                session.打开Async(音频路径).GetAwaiter().GetResult()
+                Dim info = session.当前媒体信息
+                断言(info.流.Any(Function(x) x.类型 = "video" AndAlso x.是封面图),
+                       "封面背景测试媒体不包含封面流。")
+                等待快照(session, Function(x) x.交换链呈现次数 > 0, "封面背景首帧")
+                Dim backdrop As Color
+                Dim backdropTimer = Stopwatch.StartNew()
+                Do
+                    backdrop = session.读取视频输出像素(10, 10)
+                    If backdrop.R >= 80 AndAlso backdrop.R <= 130 AndAlso
+                       backdrop.G <= 10 AndAlso backdrop.B <= 10 Then Exit Do
+                    If backdropTimer.Elapsed >= TimeSpan.FromSeconds(3) Then Exit Do
+                    Thread.Sleep(20)
+                Loop
+                Dim foreground = session.读取视频输出像素(400, 200)
+                断言(backdrop.R >= 80 AndAlso backdrop.R <= 130 AndAlso
+                       backdrop.G <= 10 AndAlso backdrop.B <= 10,
+                       $"封面背景没有应用 ARGB(120,0,0,0) 遮罩：" &
+                       $"RGB({backdrop.R},{backdrop.G},{backdrop.B})。")
+                断言(foreground.R >= 180 AndAlso foreground.R <= 220 AndAlso
+                       foreground.R >= backdrop.R + 60 AndAlso
+                       foreground.G <= 10 AndAlso foreground.B <= 10,
+                       $"前景封面被背景模糊或遮罩影响：" &
+                       $"RGB({foreground.R},{foreground.G},{foreground.B})。")
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 测试歌词GPU布局(音频路径 As String, 歌词 As LRC歌词资料, 期望封面 As Boolean)
+        Using window As New Form With {
+            .ClientSize = New Size(800, 400), .FormBorderStyle = FormBorderStyle.FixedToolWindow,
+            .ShowInTaskbar = False, .StartPosition = FormStartPosition.Manual,
+            .Location = New Point(-10000, -10000)}
+            window.Show()
+            Application.DoEvents()
+            Using session As New 播放器会话(New 播放器配置 With {
+                .解码器 = 解码模式.CPU, .色彩模式 = 色彩输出模式.映射到SDR,
+                .输出窗口句柄 = window.Handle})
+                session.设置音量(0.0F, True)
+                session.打开Async(音频路径).GetAwaiter().GetResult()
+                Dim info = session.当前媒体信息
+                Dim hasCover = info.流.Any(Function(x) x.类型 = "video" AndAlso x.是封面图)
+                断言(hasCover = 期望封面, "歌词布局测试媒体的封面状态与预期不符。")
+                Using control As New 播放器画面控件 With {.Size = window.ClientSize}
+                    Using renderer As New 播放器歌词呈现器(control, Function() Nothing,
+                        Function() Nothing, Function() hasCover, Function(a, b, c, d, e) True)
+                        Dim commands = renderer.生成命令(window.ClientSize,
+                            TimeSpan.FromMilliseconds(28805), 歌词, hasCover)
+                        If hasCover Then
+                            断言(commands.All(Function(x) x.X >= window.ClientSize.Width \ 2 AndAlso
+                                                   x.X + x.宽度 <= window.ClientSize.Width),
+                               "封面+歌词布局存在越过右半区的歌词命令。")
+                        End If
+                        session.设置歌词图层(window.ClientSize, commands, 1UL, 60.0F,
+                            New 歌词呈现设置(30.0F, 3, 4, &H78000000UI,
+                                50.0F, 50.0F, 7.5F, 0.0F, 7.5F))
+                    End Using
+                End Using
+                Dim timer = Stopwatch.StartNew()
+                Dim state As 定时文字状态 = Nothing
+                Do
+                    state = session.当前歌词状态
+                    If state.已绘制序号 = 1UL AndAlso state.命令数 > 0 AndAlso
+                       state.可见像素数 > 0 AndAlso session.当前快照.交换链呈现次数 > 0 Then Exit Do
+                    If timer.Elapsed >= TimeSpan.FromSeconds(10) Then
+                        Throw New TimeoutException("歌词 GPU 图层没有完成栅格化与呈现。")
+                    End If
+                    Thread.Sleep(10)
+                Loop
             End Using
         End Using
     End Sub

@@ -177,6 +177,7 @@ Friend Enum 原生定时文字图层槽位 As UInteger
     字幕 = 0
     弹幕 = 1
     播放器信息 = 2
+    歌词 = 3
 End Enum
 
 <StructLayout(LayoutKind.Sequential)>
@@ -221,6 +222,15 @@ Friend Structure 原生定时文字图层
     Public 命令 As IntPtr
     Public 目标帧率 As Single
     Public 保留2 As UInteger
+    Public 封面毛玻璃半径 As Single
+    Public 封面毛玻璃次数 As UInteger
+    Public 封面毛玻璃下采样倍率 As UInteger
+    Public 封面毛玻璃遮罩颜色ARGB As UInteger
+    Public 封面区域宽度百分比 As Single
+    Public 歌词区域宽度百分比 As Single
+    Public 封面区域左内边距百分比 As Single
+    Public 封面区域垂直内边距百分比 As Single
+    Public 封面区域右内边距百分比 As Single
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -373,6 +383,9 @@ Friend Module 播放器原生接口
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl)>
     Friend Function FFF3FP_GetDanmakuStatus(播放器 As 播放器原生句柄, ByRef 状态 As 原生定时文字状态) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl)>
+    Friend Function FFF3FP_GetLyricsStatus(播放器 As 播放器原生句柄, ByRef 状态 As 原生定时文字状态) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetMediaInfo(播放器 As 播放器原生句柄, 输出UTF8 As IntPtr, 输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果

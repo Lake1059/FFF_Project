@@ -20,6 +20,7 @@ Public Class Form1
     Private 窗口布局控制器 As 播放器窗口布局控制器
     Private 字幕图层呈现器 As 播放器定时文字图层呈现器
     Private 弹幕图层呈现器 As 播放器定时文字图层呈现器
+    Private 歌词图层呈现器 As 播放器歌词呈现器
     Private 信息图层呈现器 As 播放器信息图层呈现器
     Private 剪辑区间控制器 As 播放器剪辑区间控制器
     Private 全屏交互控制器 As 播放器全屏交互控制器
@@ -75,6 +76,9 @@ Public Class Form1
             AddressOf 播放控制器.安全读取快照, Function() Nothing,
             AddressOf 播放控制器.提交弹幕图层, Function() 播放控制器.当前弹幕,
             Nothing, 定时文字图层内容.仅弹幕)
+        歌词图层呈现器 = New 播放器歌词呈现器(画面控件,
+            AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前歌词,
+            Function() 播放控制器.当前音乐有封面, AddressOf 播放控制器.提交歌词图层)
         信息图层呈现器 = New 播放器信息图层呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, AddressOf 播放控制器.安全读取媒体信息,
             Function() 播放控制器.当前媒体路径, Function() 播放控制器.当前字幕,
@@ -96,6 +100,7 @@ Public Class Form1
         AddHandler 播放控制器.外部字幕已加载, AddressOf 播放控制器_外部字幕已加载
         AddHandler 播放控制器.字幕选择已变化, AddressOf 播放控制器_字幕选择已变化
         AddHandler 播放控制器.外部弹幕已加载, AddressOf 播放控制器_外部弹幕已加载
+        AddHandler 播放控制器.外部歌词已加载, AddressOf 播放控制器_外部歌词已加载
         AddHandler 界面呈现器.请求跳转到关键帧, AddressOf 界面呈现器_请求跳转到关键帧
         AddHandler 界面呈现器.音量已变更, AddressOf 界面呈现器_音量已变更
         AddHandler 界面呈现器.播放状态已刷新, AddressOf 剪辑区间控制器.播放状态已刷新
@@ -250,6 +255,7 @@ Public Class Form1
         窗口布局控制器?.释放()
         界面呈现器?.释放()
         信息图层呈现器?.释放()
+        歌词图层呈现器?.Dispose()
         弹幕图层呈现器?.释放()
         字幕图层呈现器?.释放()
         流选择器?.Dispose()
@@ -275,7 +281,7 @@ Public Class Form1
             .CheckFileExists = True,
             .Filter = "所有文件|*.*",
             .RestoreDirectory = True,
-            .Title = "打开媒体或替换字幕/弹幕"
+            .Title = "打开媒体或替换歌词/字幕/弹幕"
         }
             If 对话框.ShowDialog(Me) = DialogResult.OK Then 打开或替换文件(对话框.FileName)
         End Using
@@ -286,21 +292,27 @@ Public Class Form1
         If 存在的文件.Length = 0 Then Return
         Dim 路径 As String
         If 播放控制器.是否有媒体 Then
-            路径 = 存在的文件.FirstOrDefault(AddressOf 外部字幕自动加载器.是支持的字幕文件)
+            路径 = 存在的文件.FirstOrDefault(AddressOf LRC歌词自动加载器.是支持的歌词文件)
+            If String.IsNullOrEmpty(路径) Then
+                路径 = 存在的文件.FirstOrDefault(AddressOf 外部字幕自动加载器.是支持的字幕文件)
+            End If
             If String.IsNullOrEmpty(路径) Then
                 路径 = 存在的文件.FirstOrDefault(AddressOf 弹幕自动加载器.是支持的弹幕文件)
             End If
         Else
             路径 = 存在的文件.FirstOrDefault(
                 Function(x) Not 外部字幕自动加载器.是支持的字幕文件(x) AndAlso
-                            Not 弹幕自动加载器.是支持的弹幕文件(x))
+                            Not 弹幕自动加载器.是支持的弹幕文件(x) AndAlso
+                            Not LRC歌词自动加载器.是支持的歌词文件(x))
         End If
         If String.IsNullOrEmpty(路径) Then 路径 = 存在的文件(0)
         打开或替换文件(路径)
     End Sub
 
     Private Sub 打开或替换文件(路径 As String)
-        If 外部字幕自动加载器.是支持的字幕文件(路径) Then
+        If LRC歌词自动加载器.是支持的歌词文件(路径) Then
+            播放控制器.替换歌词(路径)
+        ElseIf 外部字幕自动加载器.是支持的字幕文件(路径) Then
             播放控制器.替换字幕(路径)
         ElseIf 弹幕自动加载器.是支持的弹幕文件(路径) Then
             播放控制器.替换弹幕(路径)
@@ -321,6 +333,7 @@ Public Class Form1
         当前弹幕路径 = String.Empty
         字幕图层呈现器?.使图层失效()
         弹幕图层呈现器?.使图层失效()
+        歌词图层呈现器?.使图层失效()
         信息图层呈现器?.使内容失效()
         Text = Path.GetFileName(e.文件路径)
         界面呈现器.更新媒体信息(e.媒体信息, e.快照)
@@ -435,6 +448,13 @@ Public Class Form1
         弹幕图层呈现器?.使图层失效()
         信息图层呈现器?.显示操作信息($"已加载 {e.数量} 条弹幕 · {Path.GetFileName(e.路径)}", &HFFFFA85AUI)
         信息图层呈现器?.使内容失效()
+    End Sub
+
+    Private Sub 播放控制器_外部歌词已加载(sender As Object, e As 播放器歌词事件参数)
+        If 正在关闭 Then Return
+        歌词图层呈现器?.使图层失效()
+        信息图层呈现器?.显示操作信息(
+            $"已加载 {e.条目数} 组 LRC 歌词 · {Path.GetFileName(e.路径)}", &HFF55E7EAUI)
     End Sub
 
     Private Sub 界面呈现器_请求跳转到关键帧(sender As Object, e As 播放器跳转请求事件参数)

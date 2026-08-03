@@ -13,6 +13,7 @@ extern "C" {
 }
 
 #include <d3dcompiler.h>
+#include <d2d1effects.h>
 #include <d2d1helper.h>
 #include <roapi.h>
 #include <windows.graphics.display.h>
@@ -365,8 +366,35 @@ float3 ReadSource(float2 uv) {
         y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
         y+(2.0-2.0*Kb)*chroma.x);
 }
+float3 ReadSourceLinear(float2 uv) {
+    if(InputLayout==0)return Source.Sample(LinearSampler,uv).rgb;
+    float2 chromaUv=uv+ChromaOffset;
+    float y=Source.Sample(LinearSampler,uv).r*SampleScale;
+    float2 chroma=InputLayout==1
+        ?float2(ChromaU.Sample(LinearSampler,chromaUv).r,
+                ChromaV.Sample(LinearSampler,chromaUv).r)*SampleScale
+        :ChromaU.Sample(LinearSampler,chromaUv).rg*SampleScale;
+    y=(y-YOffset)*YScale;
+    chroma=(chroma-COffset)*CScale;
+    float kg=1.0-Kr-Kb;
+    return float3(y+(2.0-2.0*Kr)*chroma.y,
+        y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
+        y+(2.0-2.0*Kb)*chroma.x);
+}
+float2 CoverFillUv(float2 uv) {
+    float sourceAspect=SourceWidth/max(SourceHeight,1.0);
+    float outputAspect=OutputWidth/max(OutputHeight,1.0);
+    if(sourceAspect>outputAspect)
+        uv.x=(uv.x-0.5)*(outputAspect/sourceAspect)+0.5;
+    else
+        uv.y=(uv.y-0.5)*(sourceAspect/outputAspect)+0.5;
+    return uv;
+}
+float3 ReadCoverBackdrop(float2 uv) {
+    return ReadSourceLinear(CoverFillUv(uv));
+}
 float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
-    float3 rgb=ReadSource(uv);
+    float3 rgb=Reserved==1?ReadCoverBackdrop(uv):ReadSource(uv);
     if(ColorMode==1)return float4(rgb,1);
     if(ColorMode==0&&Transfer==0){
         if(Source2020!=0)rgb=ToBt709(To709(ToLinear709(rgb)));
@@ -382,6 +410,19 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     // reaches SDR peak while values below its adaptive knee remain unchanged.
     float3 sdr=ToBt709(ToneHdrToSdr(nits,HdrPeak,SdrPeak)/SdrPeak);
     return float4(sdr,1);
+})";
+
+constexpr const char* CoverBackdropPixelShaderSource = R"(
+cbuffer Settings : register(b0) {
+    uint ColorMode; uint Transfer; uint Source2020; uint TintArgb;
+};
+Texture2D<float4> Backdrop : register(t0);
+SamplerState LinearSampler : register(s0);
+float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
+    float4 color=Backdrop.Sample(LinearSampler,uv);
+    float4 tint=float4(float3((TintArgb>>16)&255u,(TintArgb>>8)&255u,TintArgb&255u),
+                       float((TintArgb>>24)&255u))/255.0;
+    return float4(lerp(color.rgb,tint.rgb,tint.a),color.a);
 })";
 
 constexpr const char* TimedTextPixelShaderSource = R"(
@@ -434,6 +475,7 @@ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 })";
 
 constexpr std::uint32_t InitialTimedTextAtlasSize = 1024;
+constexpr std::uint32_t CoverBackdropEffect = 1;
 // Start at 4 MiB and grow only when the visible text set cannot fit. The
 // 4096 ceiling preserves the existing 100-item danmaku cache contract without
 // making the 64 MiB allocation resident during ordinary subtitle playback.
@@ -470,9 +512,12 @@ struct VideoDestination {
 
 constexpr VideoDestination CalculateVideoDestination(const std::uint32_t sourceWidth,
     const std::uint32_t sourceHeight, const std::uint32_t outputWidth,
-    const std::uint32_t outputHeight) noexcept {
+    const std::uint32_t outputHeight, const bool limitToNativeSize = false) noexcept {
     if (sourceWidth == 0 || sourceHeight == 0 || outputWidth == 0 || outputHeight == 0)
         return {0, 0, 1, 1};
+    if (limitToNativeSize && sourceWidth <= outputWidth && sourceHeight <= outputHeight)
+        return {(outputWidth - sourceWidth) / 2, (outputHeight - sourceHeight) / 2,
+            sourceWidth, sourceHeight};
     std::uint32_t width = outputWidth;
     std::uint32_t height = outputHeight;
     if (static_cast<std::uint64_t>(outputWidth) * sourceHeight <=
@@ -488,11 +533,48 @@ constexpr VideoDestination CalculateVideoDestination(const std::uint32_t sourceW
     return {(outputWidth - width) / 2, (outputHeight - height) / 2, width, height};
 }
 
+constexpr VideoDestination CalculateLyricsCoverDestination(const std::uint32_t sourceWidth,
+    const std::uint32_t sourceHeight, const std::uint32_t outputWidth,
+    const std::uint32_t outputHeight, const float coverWidthPercentage,
+    const float lyricsWidthPercentage, const float leftPaddingPercentage,
+    const float rightPaddingPercentage,
+    const float verticalPaddingPercentage) noexcept {
+    const auto totalWidthPercentage = std::max(0.0001f,
+        coverWidthPercentage + lyricsWidthPercentage);
+    const auto regionWidth = std::max(1u, static_cast<std::uint32_t>(
+        outputWidth * coverWidthPercentage / totalWidthPercentage + 0.5f));
+    const auto leftPadding = std::min(regionWidth / 2,
+        static_cast<std::uint32_t>(
+            regionWidth * leftPaddingPercentage / 100.0f + 0.5f));
+    const auto rightPadding = std::min(regionWidth / 2,
+        static_cast<std::uint32_t>(
+            regionWidth * rightPaddingPercentage / 100.0f + 0.5f));
+    const auto verticalPadding = std::min(outputHeight / 2,
+        static_cast<std::uint32_t>(
+            outputHeight * verticalPaddingPercentage / 100.0f + 0.5f));
+    const auto innerWidth = std::max(1u, regionWidth - leftPadding - rightPadding);
+    const auto innerHeight = std::max(1u, outputHeight - verticalPadding * 2);
+    const auto inner = CalculateVideoDestination(sourceWidth, sourceHeight,
+        innerWidth, innerHeight, true);
+    return {regionWidth - rightPadding - inner.width, verticalPadding + inner.y,
+        inner.width, inner.height};
+}
+
 static_assert(CalculateVideoDestination(1920, 1080, 1280, 1024).width == 1280 &&
     CalculateVideoDestination(1920, 1080, 1280, 1024).height == 720 &&
     CalculateVideoDestination(1920, 1080, 1280, 1024).y == 152);
 static_assert(CalculateVideoDestination(1080, 1920, 1920, 1080).width == 608 &&
     CalculateVideoDestination(1080, 1920, 1920, 1080).x == 656);
+static_assert(CalculateVideoDestination(640, 360, 1920, 1080, true).width == 640 &&
+    CalculateVideoDestination(640, 360, 1920, 1080, true).height == 360 &&
+    CalculateVideoDestination(640, 360, 1920, 1080, true).x == 640 &&
+    CalculateVideoDestination(640, 360, 1920, 1080, true).y == 360);
+static_assert(CalculateVideoDestination(2560, 1440, 1920, 1080, true).width == 1920 &&
+    CalculateVideoDestination(2560, 1440, 1920, 1080, true).height == 1080);
+static_assert(CalculateLyricsCoverDestination(512, 512, 800, 400,
+    50.0f, 50.0f, 7.5f, 0.0f, 7.5f).x == 60 &&
+    CalculateLyricsCoverDestination(512, 512, 800, 400,
+    50.0f, 50.0f, 7.5f, 0.0f, 7.5f).width == 340);
 
 struct InputDescription {
     std::uint32_t layout = 0;
@@ -861,26 +943,38 @@ FFFResult EvaluateTimedTextRasterization(FFF3FPTimedTextRasterizationProbe& prob
 
 PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
-      vertexShader_(nullptr), pixelShader_(nullptr), timedTextPixelShader_(nullptr), sampler_(nullptr),
+      vertexShader_(nullptr), pixelShader_(nullptr), coverBackdropPixelShader_(nullptr),
+      timedTextPixelShader_(nullptr), sampler_(nullptr),
       pointSampler_(nullptr), anisotropicSampler_(nullptr),
       constants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
       videoDevice_(nullptr), videoContext_(nullptr), videoProcessorEnumerator_(nullptr),
       videoProcessor_(nullptr), videoProcessorRenderTexture_(nullptr),
       videoProcessorRenderTarget_(nullptr),
-      timedTextTextures_{nullptr, nullptr, nullptr}, timedTextTargets_{nullptr, nullptr, nullptr},
-      timedTextViews_{nullptr, nullptr, nullptr}, timedTextPipelineQueries_{nullptr, nullptr, nullptr},
+      coverBackdropTexture_(nullptr), coverBackdropView_(nullptr),
+      coverBackdropSourceTexture_(nullptr), coverBackdropSourceTarget_(nullptr),
+      timedTextTextures_{nullptr, nullptr, nullptr, nullptr},
+      timedTextTargets_{nullptr, nullptr, nullptr, nullptr},
+      timedTextViews_{nullptr, nullptr, nullptr, nullptr},
+      timedTextPipelineQueries_{nullptr, nullptr, nullptr, nullptr},
       timedTextBlend_(nullptr),
       timedTextAtlasTexture_(nullptr), timedTextAtlasView_(nullptr),
       timedTextSpriteVertexShader_(nullptr), timedTextSpritePixelShader_(nullptr),
       timedTextSpriteInstanceBuffer_(nullptr), timedTextSpriteInstanceView_(nullptr),
-      d2dFactory_(nullptr), d2dDevice_(nullptr), d2dContext_(nullptr), d2dTargets_{nullptr, nullptr, nullptr},
+      d2dFactory_(nullptr), d2dDevice_(nullptr), d2dContext_(nullptr),
+      d2dCoverBackdropSource_(nullptr), d2dCoverBackdropTarget_(nullptr),
+      coverBackdropBlurEffect_(nullptr),
+      d2dTargets_{nullptr, nullptr, nullptr, nullptr},
       d2dAtlasTarget_(nullptr),
       writeFactory_(nullptr), timedTextRenderingParams_(nullptr), scaler_(nullptr),
       swapWidth_(0), swapHeight_(0), swapHdr_(false), swapOutputBits_(8), sourceWidth_(0), sourceHeight_(0),
       sourceInputLayout_(UINT32_MAX), sourceBitDepth_(0),
       sourceChromaWidthShift_(0), sourceChromaHeightShift_(0),
-      sourceExternal_(false), videoProcessorInputFormat_(DXGI_FORMAT_UNKNOWN),
+      sourceExternal_(false), sourceLimitedToNativeSize_(false), sourceCoverArt_(false),
+      coverBackdropWidth_(0), coverBackdropHeight_(0),
+      coverBackdropVideoGeneration_(0),
+      coverBackdropAppliedBlurSettingsGeneration_(0),
+      videoProcessorInputFormat_(DXGI_FORMAT_UNKNOWN),
       videoProcessorOutputFormat_(DXGI_FORMAT_UNKNOWN),
       videoProcessorInputColorSpace_(DXGI_COLOR_SPACE_CUSTOM),
       videoProcessorOutputColorSpace_(DXGI_COLOR_SPACE_CUSTOM), videoProcessorInputWidth_(0),
@@ -893,16 +987,30 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       sdrPeakNits_(100.0f), hdrPeakNits_(0.0f),
       paperWhiteNits_(203.0f), sourcePeakNits_(100.0f),
       timedTextThreadStop_(false), timedTextThreadRunning_(false),
+      coverBackdropThreadStop_(false), coverBackdropRequestPending_(false),
+      coverBackdropRequestGeneration_(0),
       presentationGeneration_(0), presentationFrameRate_(60.0f),
-      timedTextRenderedSequences_{0, 0, 0}, timedTextRenderedCommandCounts_{0, 0, 0},
-      timedTextRenderedHdrHighlights_{false, false, false},
-      timedTextWidths_{0, 0, 0}, timedTextHeights_{0, 0, 0}, timedTextPresentCounts_{0, 0, 0},
+      timedTextRenderedSequences_{0, 0, 0, 0}, timedTextRenderedCommandCounts_{0, 0, 0, 0},
+      timedTextRenderedHdrHighlights_{false, false, false, false},
+      timedTextWidths_{0, 0, 0, 0}, timedTextHeights_{0, 0, 0, 0},
+      timedTextPresentCounts_{0, 0, 0, 0},
       backBufferAcquisitionCount_(0),
-      timedTextPipelineQueryInFlight_{false, false, false},
-      timedTextCompositePixelInvocations_{0, 0, 0},
+      timedTextPipelineQueryInFlight_{false, false, false, false},
+      timedTextCompositePixelInvocations_{0, 0, 0, 0},
       hasCachedVideo_(false), videoGeneration_(0), presentedVideoGeneration_(0),
       presentedVideoFrames_(0), coalescedVideoFrames_(0), swapChainPresents_(0),
       presentWait100ns_(0), deviceLockWait100ns_(0), softwareConvert100ns_(0),
+      playbackWorkPending_(0),
+      lyricsLayoutEnabled_(false),
+      coverBackdropBlurRadiusBits_(std::bit_cast<std::uint32_t>(30.0f)),
+      coverBackdropBlurPasses_(3), coverBackdropDownsampleFactor_(4),
+      coverBackdropTintArgb_(0x78000000u),
+      coverRegionWidthPercentageBits_(std::bit_cast<std::uint32_t>(50.0f)),
+      lyricsRegionWidthPercentageBits_(std::bit_cast<std::uint32_t>(50.0f)),
+      coverLeftPaddingPercentageBits_(std::bit_cast<std::uint32_t>(7.5f)),
+      coverRightPaddingPercentageBits_(std::bit_cast<std::uint32_t>(0.0f)),
+      coverVerticalPaddingPercentageBits_(std::bit_cast<std::uint32_t>(7.5f)),
+      coverBackdropBlurSettingsGeneration_(1),
       deviceRecoveryRequested_(false), recoveryCallback_(std::move(recoveryCallback)),
        hdrMonitor_(nullptr), hdrSupportValid_(false), hdrSupported_(false),
       timedTextAtlasX_(0), timedTextAtlasY_(0), timedTextAtlasRowHeight_(0),
@@ -1310,18 +1418,27 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     const std::uint32_t sourceHeight, const std::uint32_t inputLayout,
     const std::uint32_t bitDepth, const std::uint32_t chromaWidthShift,
     const std::uint32_t chromaHeightShift, const bool externalSource) noexcept {
-    if (vertexShader_ == nullptr || pixelShader_ == nullptr || timedTextPixelShader_ == nullptr ||
+    if (vertexShader_ == nullptr || pixelShader_ == nullptr ||
+        coverBackdropPixelShader_ == nullptr || timedTextPixelShader_ == nullptr ||
         sampler_ == nullptr || pointSampler_ == nullptr || anisotropicSampler_ == nullptr ||
         constants_ == nullptr) {
-        ComPtr<ID3DBlob> vertexCode, pixelCode, timedTextPixelCode, errors;
+        ComPtr<ID3DBlob> vertexCode, pixelCode, coverBackdropPixelCode,
+            timedTextPixelCode, errors;
         if (FAILED(D3DCompile(VertexShaderSource, std::strlen(VertexShaderSource), nullptr, nullptr, nullptr,
             "main", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vertexCode, &errors)) ||
             FAILED(D3DCompile(PixelShaderSource, std::strlen(PixelShaderSource), nullptr, nullptr, nullptr,
                 "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixelCode, &errors)) ||
+            FAILED(D3DCompile(CoverBackdropPixelShaderSource,
+                std::strlen(CoverBackdropPixelShaderSource), nullptr, nullptr, nullptr,
+                "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                &coverBackdropPixelCode, &errors)) ||
             FAILED(D3DCompile(TimedTextPixelShaderSource, std::strlen(TimedTextPixelShaderSource), nullptr, nullptr, nullptr,
             "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &timedTextPixelCode, &errors)) ||
             FAILED(device_->CreateVertexShader(vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr, &vertexShader_)) ||
             FAILED(device_->CreatePixelShader(pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr, &pixelShader_)) ||
+            FAILED(device_->CreatePixelShader(coverBackdropPixelCode->GetBufferPointer(),
+                coverBackdropPixelCode->GetBufferSize(), nullptr,
+                &coverBackdropPixelShader_)) ||
             FAILED(device_->CreatePixelShader(timedTextPixelCode->GetBufferPointer(), timedTextPixelCode->GetBufferSize(), nullptr, &timedTextPixelShader_))) {
             SetError(errors ? static_cast<const char*>(errors->GetBufferPointer()) :
                 "Could not create the playback presentation shaders.");
@@ -1579,11 +1696,12 @@ FFFResult PlayerVideoRenderer::EnsureVideoProcessorInputSurface(
 }
 
 FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
-    const float x, const float y, const float width, const float height) noexcept {
+    const float x, const float y, const float width, const float height,
+    const std::uint32_t effect) noexcept {
     if (target == nullptr || context_ == nullptr || width <= 0.0f || height <= 0.0f)
         return FFFResult::InvalidArgument;
     cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
-    cachedVideoSettings_.reserved = 0;
+    cachedVideoSettings_.reserved = effect;
     cachedVideoSettings_.outputWidth = width;
     cachedVideoSettings_.outputHeight = height;
     context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
@@ -1691,6 +1809,39 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
         const auto slotIndex = static_cast<std::size_t>(slot);
         if (slotIndex >= ARRAYSIZE(timedTextLayers_)) return FFFResult::InvalidArgument;
         auto retained = std::make_shared<TimedTextRenderLayer>(std::move(layer));
+        if (slot == TimedTextLayerSlot::Lyrics) {
+            lyricsLayoutEnabled_.store(!retained->commands.empty(), std::memory_order_release);
+            bool blurSettingsChanged = false;
+            const auto publishBlurSetting = [&blurSettingsChanged](auto& destination,
+                const auto value) noexcept {
+                if (destination.exchange(value, std::memory_order_acq_rel) != value)
+                    blurSettingsChanged = true;
+            };
+            publishBlurSetting(coverBackdropBlurRadiusBits_,
+                std::bit_cast<std::uint32_t>(retained->coverBackdropBlurRadius));
+            publishBlurSetting(coverBackdropBlurPasses_, retained->coverBackdropBlurPasses);
+            publishBlurSetting(coverBackdropDownsampleFactor_, retained->coverBackdropDownsampleFactor);
+            coverBackdropTintArgb_.store(retained->coverBackdropTintArgb,
+                std::memory_order_release);
+            coverRegionWidthPercentageBits_.store(
+                std::bit_cast<std::uint32_t>(retained->coverRegionWidthPercentage),
+                std::memory_order_release);
+            lyricsRegionWidthPercentageBits_.store(
+                std::bit_cast<std::uint32_t>(retained->lyricsRegionWidthPercentage),
+                std::memory_order_release);
+            coverLeftPaddingPercentageBits_.store(
+                std::bit_cast<std::uint32_t>(retained->coverLeftPaddingPercentage),
+                std::memory_order_release);
+            coverRightPaddingPercentageBits_.store(
+                std::bit_cast<std::uint32_t>(retained->coverRightPaddingPercentage),
+                std::memory_order_release);
+            coverVerticalPaddingPercentageBits_.store(
+                std::bit_cast<std::uint32_t>(retained->coverVerticalPaddingPercentage),
+                std::memory_order_release);
+            if (blurSettingsChanged)
+                coverBackdropBlurSettingsGeneration_.fetch_add(1, std::memory_order_acq_rel);
+            if (blurSettingsChanged) RequestCoverBackdropRender(true);
+        }
         {
             std::lock_guard lock(timedTextMutex_);
             if (retained->sequence == 0)
@@ -1850,6 +2001,29 @@ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
     return FFFResult::Success;
 }
 
+FFFResult PlayerVideoRenderer::EnsureD2DContext() noexcept {
+    if (device_ == nullptr) return FFFResult::InvalidState;
+    // The deferred cover backdrop worker and timed-text presenter share the
+    // device context under deviceMutex_. Use a multithreaded factory so the
+    // resource remains valid when ownership moves between those threads.
+    if (d2dFactory_ == nullptr && FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED,
+        IID_PPV_ARGS(&d2dFactory_)))) {
+        SetError("Could not create the Direct2D rendering factory.");
+        return FFFResult::DeviceFailure;
+    }
+    if (d2dContext_ == nullptr) {
+        ComPtr<IDXGIDevice> dxgiDevice;
+        if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
+            FAILED(d2dFactory_->CreateDevice(dxgiDevice.Get(), &d2dDevice_)) ||
+            FAILED(d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+                &d2dContext_))) {
+            SetError("Could not bind Direct2D to the D3D11 playback device.");
+            return FFFResult::DeviceFailure;
+        }
+    }
+    return FFFResult::Success;
+}
+
 FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot slot) noexcept {
     const auto slotIndex = static_cast<std::size_t>(slot);
     if (slotIndex >= ARRAYSIZE(timedTextTextures_)) return FFFResult::InvalidArgument;
@@ -1858,10 +2032,8 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
         timedTextWidths_[slotIndex] == swapWidth_ && timedTextHeights_[slotIndex] == swapHeight_)
         return FFFResult::Success;
     ReleaseTimedTextSlotResources(slot);
-    if (d2dFactory_ == nullptr && FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
-        IID_PPV_ARGS(&d2dFactory_)))) {
-        SetError("Could not create the Direct2D timed-text factory."); return FFFResult::DeviceFailure;
-    }
+    const auto d2dResult = EnsureD2DContext();
+    if (d2dResult != FFFResult::Success) return d2dResult;
     if (writeFactory_ == nullptr && FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
         __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&writeFactory_)))) {
         SetError("Could not create the DirectWrite timed-text factory."); return FFFResult::DeviceFailure;
@@ -1874,14 +2046,6 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
                 DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, &timedTextRenderingParams_))) {
             SetError("Could not create high-quality timed-text rendering parameters.");
             return FFFResult::DeviceFailure;
-        }
-    }
-    if (d2dContext_ == nullptr) {
-        ComPtr<IDXGIDevice> dxgiDevice;
-        if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
-            FAILED(d2dFactory_->CreateDevice(dxgiDevice.Get(), &d2dDevice_)) ||
-            FAILED(d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &d2dContext_))) {
-            SetError("Could not bind Direct2D to the D3D11 playback device."); return FFFResult::DeviceFailure;
         }
     }
     D3D11_TEXTURE2D_DESC texture{};
@@ -2421,8 +2585,11 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
     if (d2dAtlasTarget_ != nullptr) { d2dAtlasTarget_->Release(); d2dAtlasTarget_ = nullptr; }
     for (std::size_t index = 0; index < ARRAYSIZE(timedTextTextures_); ++index)
         ReleaseTimedTextSlotResources(static_cast<TimedTextLayerSlot>(index));
-    if (d2dContext_ != nullptr) { d2dContext_->Release(); d2dContext_ = nullptr; }
-    if (d2dDevice_ != nullptr) { d2dDevice_->Release(); d2dDevice_ = nullptr; }
+    if (d2dCoverBackdropSource_ == nullptr && d2dCoverBackdropTarget_ == nullptr &&
+        coverBackdropBlurEffect_ == nullptr) {
+        if (d2dContext_ != nullptr) { d2dContext_->Release(); d2dContext_ = nullptr; }
+        if (d2dDevice_ != nullptr) { d2dDevice_->Release(); d2dDevice_ = nullptr; }
+    }
     if (timedTextSpriteInstanceView_ != nullptr) { timedTextSpriteInstanceView_->Release(); timedTextSpriteInstanceView_ = nullptr; }
     if (timedTextSpriteInstanceBuffer_ != nullptr) { timedTextSpriteInstanceBuffer_->Release(); timedTextSpriteInstanceBuffer_ = nullptr; }
     if (timedTextSpritePixelShader_ != nullptr) { timedTextSpritePixelShader_->Release(); timedTextSpritePixelShader_ = nullptr; }
@@ -2452,8 +2619,16 @@ void PlayerVideoRenderer::SetHdrMetadata() noexcept {
     swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(metadata), &metadata);
 }
 
-FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
+FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNativeSize,
+    const bool coverArt) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
+    struct PlaybackWorkGuard final {
+        std::atomic<std::uint32_t>& pending;
+        explicit PlaybackWorkGuard(std::atomic<std::uint32_t>& value) noexcept : pending(value) {
+            pending.fetch_add(1, std::memory_order_acq_rel);
+        }
+        ~PlaybackWorkGuard() { pending.fetch_sub(1, std::memory_order_acq_rel); }
+    } playbackWorkGuard(playbackWorkPending_);
     const auto width = static_cast<std::uint32_t>(frame->width);
     const auto height = static_cast<std::uint32_t>(frame->height);
     const auto hdrState = hdrProcessor_.ProcessFrame(
@@ -2577,8 +2752,11 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
     sourceInterlaced_ = (frame->flags & AV_FRAME_FLAG_INTERLACED) != 0;
     static_assert(sizeof(CachedVideoSettings) == sizeof(ShaderSettings));
     std::memcpy(&cachedVideoSettings_, &settings, sizeof(settings));
+    sourceLimitedToNativeSize_ = limitToNativeSize;
+    sourceCoverArt_ = coverArt;
     hasCachedVideo_ = true;
-    const auto currentVideoGeneration = videoGeneration_.fetch_add(1) + 1;
+    videoGeneration_.fetch_add(1);
+    if (coverArt) RequestCoverBackdropRender();
     {
         std::lock_guard lock(timedTextMutex_);
         if (!timedTextThread_.joinable()) {
@@ -2593,7 +2771,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame) noexcept {
     deviceLock.unlock();
     ++presentedVideoFrames_;
     timedTextCondition_.notify_one();
-    (void)currentVideoGeneration;
     return FFFResult::Success;
 }
 
@@ -2616,12 +2793,309 @@ FFFResult PlayerVideoRenderer::Redraw() noexcept {
     return FFFResult::Success;
 }
 
+void PlayerVideoRenderer::ReleaseCoverBackdropResources() noexcept {
+    if (d2dContext_ != nullptr) d2dContext_->SetTarget(nullptr);
+    if (coverBackdropBlurEffect_ != nullptr) {
+        coverBackdropBlurEffect_->SetInput(0, nullptr);
+        coverBackdropBlurEffect_->Release(); coverBackdropBlurEffect_ = nullptr;
+    }
+    if (d2dCoverBackdropTarget_ != nullptr) {
+        d2dCoverBackdropTarget_->Release(); d2dCoverBackdropTarget_ = nullptr;
+    }
+    if (d2dCoverBackdropSource_ != nullptr) {
+        d2dCoverBackdropSource_->Release(); d2dCoverBackdropSource_ = nullptr;
+    }
+    if (coverBackdropSourceTarget_ != nullptr) {
+        coverBackdropSourceTarget_->Release(); coverBackdropSourceTarget_ = nullptr;
+    }
+    if (coverBackdropSourceTexture_ != nullptr) {
+        coverBackdropSourceTexture_->Release(); coverBackdropSourceTexture_ = nullptr;
+    }
+    if (coverBackdropView_ != nullptr) {
+        coverBackdropView_->Release(); coverBackdropView_ = nullptr;
+    }
+    if (coverBackdropTexture_ != nullptr) {
+        coverBackdropTexture_->Release(); coverBackdropTexture_ = nullptr;
+    }
+    coverBackdropWidth_ = coverBackdropHeight_ = 0;
+    coverBackdropVideoGeneration_ = 0;
+    coverBackdropAppliedBlurSettingsGeneration_ = 0;
+}
+
+FFFResult PlayerVideoRenderer::EnsureCoverBackdropResources() noexcept {
+    if (device_ == nullptr || swapWidth_ == 0 || swapHeight_ == 0)
+        return FFFResult::InvalidState;
+    const auto blurSettingsGeneration =
+        coverBackdropBlurSettingsGeneration_.load(std::memory_order_acquire);
+    const auto downsampleFactor = std::max(1u,
+        coverBackdropDownsampleFactor_.load(std::memory_order_acquire));
+    const auto width = std::max(1u, (swapWidth_ + downsampleFactor - 1) /
+        downsampleFactor);
+    const auto height = std::max(1u, (swapHeight_ + downsampleFactor - 1) /
+        downsampleFactor);
+    const auto format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (coverBackdropTexture_ != nullptr && width == coverBackdropWidth_ &&
+        height == coverBackdropHeight_ &&
+        blurSettingsGeneration == coverBackdropAppliedBlurSettingsGeneration_)
+        return FFFResult::Success;
+
+    ReleaseCoverBackdropResources();
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = width; description.Height = height;
+    description.MipLevels = description.ArraySize = 1;
+    description.Format = format; description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_DEFAULT;
+    description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device_->CreateTexture2D(&description, nullptr,
+            &coverBackdropSourceTexture_)) ||
+        FAILED(device_->CreateRenderTargetView(coverBackdropSourceTexture_, nullptr,
+            &coverBackdropSourceTarget_)) ||
+        FAILED(device_->CreateTexture2D(&description, nullptr, &coverBackdropTexture_)) ||
+        FAILED(device_->CreateShaderResourceView(coverBackdropTexture_, nullptr,
+            &coverBackdropView_))) {
+        ReleaseCoverBackdropResources();
+        SetError("Could not create the blurred cover backdrop resources.");
+        return FFFResult::DeviceFailure;
+    }
+    const auto d2dResult = EnsureD2DContext();
+    if (d2dResult != FFFResult::Success) {
+        ReleaseCoverBackdropResources();
+        return d2dResult;
+    }
+    const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+        D2D1::PixelFormat(format, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
+    ComPtr<IDXGISurface> sourceSurface;
+    ComPtr<IDXGISurface> targetSurface;
+    if (FAILED(coverBackdropSourceTexture_->QueryInterface(IID_PPV_ARGS(&sourceSurface))) ||
+        FAILED(coverBackdropTexture_->QueryInterface(IID_PPV_ARGS(&targetSurface))) ||
+        FAILED(d2dContext_->CreateBitmapFromDxgiSurface(sourceSurface.Get(), &properties,
+            &d2dCoverBackdropSource_)) ||
+        FAILED(d2dContext_->CreateBitmapFromDxgiSurface(targetSurface.Get(), &properties,
+            &d2dCoverBackdropTarget_)) ||
+        FAILED(d2dContext_->CreateEffect(CLSID_D2D1GaussianBlur,
+            &coverBackdropBlurEffect_))) {
+        ReleaseCoverBackdropResources();
+        SetError("Could not create the LakeUI Gaussian cover backdrop resources.");
+        return FFFResult::DeviceFailure;
+    }
+    coverBackdropBlurEffect_->SetInput(0, d2dCoverBackdropSource_);
+    // LakeUI converts repeated box-blur radius to a single Gaussian sigma.
+    const auto configuredRadius = std::bit_cast<float>(
+        coverBackdropBlurRadiusBits_.load(std::memory_order_acquire));
+    const auto configuredPasses =
+        coverBackdropBlurPasses_.load(std::memory_order_acquire);
+    const auto radius = configuredRadius / static_cast<float>(downsampleFactor);
+    const auto sigma = std::sqrt(static_cast<float>(std::max(1u, configuredPasses))) *
+        radius / std::sqrt(3.0f);
+    coverBackdropBlurEffect_->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+        std::max(0.1f, sigma));
+    coverBackdropBlurEffect_->SetValue(D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION,
+        D2D1_GAUSSIANBLUR_OPTIMIZATION_BALANCED);
+    coverBackdropBlurEffect_->SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE,
+        D2D1_BORDER_MODE_HARD);
+    coverBackdropWidth_ = width; coverBackdropHeight_ = height;
+    coverBackdropAppliedBlurSettingsGeneration_ = blurSettingsGeneration;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::RenderCoverBackdropCache() noexcept {
+    if (!sourceCoverArt_ || !hasCachedVideo_) return FFFResult::Success;
+    const auto resourceResult = EnsureCoverBackdropResources();
+    if (resourceResult != FFFResult::Success) return resourceResult;
+    const auto videoGeneration = videoGeneration_.load(std::memory_order_acquire);
+    if (coverBackdropVideoGeneration_ == videoGeneration) return FFFResult::Success;
+    const auto sourceResult = DrawWithShader(coverBackdropSourceTarget_, 0.0f, 0.0f,
+        static_cast<float>(coverBackdropWidth_), static_cast<float>(coverBackdropHeight_),
+        CoverBackdropEffect);
+    if (sourceResult != FFFResult::Success) return sourceResult;
+
+    d2dContext_->SetTarget(d2dCoverBackdropTarget_);
+    d2dContext_->SetTransform(D2D1::Matrix3x2F::Identity());
+    d2dContext_->BeginDraw();
+    d2dContext_->Clear(D2D1::ColorF(0, 0));
+    if (coverBackdropBlurPasses_.load(std::memory_order_acquire) > 0)
+        d2dContext_->DrawImage(coverBackdropBlurEffect_);
+    else
+        d2dContext_->DrawImage(d2dCoverBackdropSource_);
+    const auto blurResult = d2dContext_->EndDraw();
+    d2dContext_->SetTarget(nullptr);
+    if (FAILED(blurResult)) {
+        SetError("LakeUI Gaussian cover backdrop rendering failed.");
+        return FFFResult::DeviceFailure;
+    }
+    coverBackdropVideoGeneration_ = videoGeneration;
+    return FFFResult::Success;
+}
+
+PlayerVideoRenderer::CoverBackdropRenderResult
+PlayerVideoRenderer::TryRenderCoverBackdropCache() noexcept {
+    if (playbackWorkPending_.load(std::memory_order_acquire) != 0)
+        return CoverBackdropRenderResult::Deferred;
+    std::unique_lock deviceLock(deviceMutex_, std::try_to_lock);
+    if (!deviceLock.owns_lock()) return CoverBackdropRenderResult::Deferred;
+    if (playbackWorkPending_.load(std::memory_order_acquire) != 0)
+        return CoverBackdropRenderResult::Deferred;
+    const auto wasReady = coverBackdropTexture_ != nullptr &&
+        coverBackdropVideoGeneration_ == videoGeneration_.load(std::memory_order_acquire) &&
+        coverBackdropAppliedBlurSettingsGeneration_ ==
+            coverBackdropBlurSettingsGeneration_.load(std::memory_order_acquire);
+    const auto result = RenderCoverBackdropCache();
+    if (result != FFFResult::Success) return CoverBackdropRenderResult::Failed;
+    const auto ready = sourceCoverArt_ && coverBackdropTexture_ != nullptr &&
+        coverBackdropVideoGeneration_ == videoGeneration_.load(std::memory_order_acquire);
+    deviceLock.unlock();
+    if (ready && !wasReady) {
+        {
+            std::lock_guard lock(timedTextMutex_);
+            ++presentationGeneration_;
+        }
+        timedTextCondition_.notify_one();
+    }
+    return CoverBackdropRenderResult::Complete;
+}
+
+void PlayerVideoRenderer::RequestCoverBackdropRender(const bool force) noexcept {
+    try {
+        {
+            std::lock_guard lock(coverBackdropThreadMutex_);
+            if (coverBackdropThreadStop_) return;
+            if (coverBackdropRequestPending_ && !force) return;
+            coverBackdropRequestPending_ = true;
+            ++coverBackdropRequestGeneration_;
+            if (!coverBackdropThread_.joinable()) {
+                coverBackdropThreadStop_ = false;
+                coverBackdropThread_ = std::thread(
+                    &PlayerVideoRenderer::CoverBackdropThread, this);
+            }
+        }
+        coverBackdropCondition_.notify_one();
+    } catch (...) {
+        std::lock_guard lock(coverBackdropThreadMutex_);
+        coverBackdropRequestPending_ = false;
+        SetError("Could not start the deferred cover backdrop renderer.");
+    }
+}
+
+void PlayerVideoRenderer::CoverBackdropThread() noexcept {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    std::uint64_t observedRequest = 0;
+    for (;;) {
+        std::uint64_t request = 0;
+        {
+            std::unique_lock lock(coverBackdropThreadMutex_);
+            coverBackdropCondition_.wait(lock, [this, &observedRequest] {
+                return coverBackdropThreadStop_ ||
+                    coverBackdropRequestGeneration_ != observedRequest;
+            });
+            if (coverBackdropThreadStop_) return;
+            request = coverBackdropRequestGeneration_;
+            const auto changed = coverBackdropCondition_.wait_for(lock,
+                std::chrono::milliseconds(120), [this, request] {
+                    return coverBackdropThreadStop_ ||
+                        coverBackdropRequestGeneration_ != request;
+                });
+            if (coverBackdropThreadStop_) return;
+            if (changed) continue;
+        }
+        for (;;) {
+            const auto result = TryRenderCoverBackdropCache();
+            if (result != CoverBackdropRenderResult::Deferred) {
+                {
+                    std::lock_guard lock(coverBackdropThreadMutex_);
+                    observedRequest = request;
+                    if (coverBackdropRequestGeneration_ == request)
+                        coverBackdropRequestPending_ = false;
+                }
+                if (result == CoverBackdropRenderResult::Failed)
+                    RequestRecoveryIfDeviceLost();
+                break;
+            }
+            std::unique_lock lock(coverBackdropThreadMutex_);
+            const auto changed = coverBackdropCondition_.wait_for(lock,
+                std::chrono::milliseconds(16), [this, request] {
+                    return coverBackdropThreadStop_ ||
+                        coverBackdropRequestGeneration_ != request;
+                });
+            if (coverBackdropThreadStop_) return;
+            if (changed) break;
+        }
+    }
+}
+
+void PlayerVideoRenderer::StopCoverBackdropThread() noexcept {
+    {
+        std::lock_guard lock(coverBackdropThreadMutex_);
+        coverBackdropThreadStop_ = true;
+    }
+    coverBackdropCondition_.notify_all();
+    if (coverBackdropThread_.joinable()) coverBackdropThread_.join();
+    std::lock_guard lock(coverBackdropThreadMutex_);
+    coverBackdropThreadStop_ = false;
+    coverBackdropRequestPending_ = false;
+}
+
+FFFResult PlayerVideoRenderer::DrawCoverBackdrop(ID3D11RenderTargetView* target) noexcept {
+    if (target == nullptr || context_ == nullptr) return FFFResult::InvalidArgument;
+    // Keep the last completed cache visible while a newer frame, resize or
+    // blur configuration is being rendered in the deferred worker. The video
+    // frame must never flash to a plain black backdrop just because the newer
+    // cache has not finished yet.
+    if (coverBackdropTexture_ == nullptr || coverBackdropView_ == nullptr ||
+        coverBackdropWidth_ == 0 || coverBackdropHeight_ == 0) {
+        RequestCoverBackdropRender();
+        return FFFResult::Success;
+    }
+
+    constexpr float blendFactor[] = {0, 0, 0, 0};
+    context_->OMSetRenderTargets(1, &target, nullptr);
+    context_->OMSetBlendState(nullptr, blendFactor, UINT_MAX);
+    const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(swapWidth_),
+        static_cast<float>(swapHeight_), 0.0f, 1.0f};
+    context_->RSSetViewports(1, &viewport);
+    context_->IASetInputLayout(nullptr);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->VSSetShader(vertexShader_, nullptr, 0);
+    context_->PSSetShader(coverBackdropPixelShader_, nullptr, 0);
+    cachedVideoSettings_.reserved =
+        coverBackdropTintArgb_.load(std::memory_order_acquire);
+    context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
+    context_->PSSetConstantBuffers(0, 1, &constants_);
+    context_->PSSetSamplers(0, 1, &sampler_);
+    ID3D11ShaderResourceView* views[] = {coverBackdropView_, nullptr, nullptr};
+    context_->PSSetShaderResources(0, ARRAYSIZE(views), views);
+    context_->Draw(3, 0);
+    ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
+    context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
+    return FFFResult::Success;
+}
+
 FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) noexcept {
     if (!hasCachedVideo_ || target == nullptr) return FFFResult::InvalidState;
-    const auto destination = CalculateVideoDestination(sourceWidth_, sourceHeight_,
-        swapWidth_, swapHeight_);
+    VideoDestination destination{};
+    if (lyricsLayoutEnabled_.load(std::memory_order_acquire) && sourceLimitedToNativeSize_) {
+        destination = CalculateLyricsCoverDestination(sourceWidth_, sourceHeight_,
+            swapWidth_, swapHeight_,
+            std::bit_cast<float>(coverRegionWidthPercentageBits_.load(
+                std::memory_order_acquire)),
+            std::bit_cast<float>(lyricsRegionWidthPercentageBits_.load(
+                std::memory_order_acquire)),
+            std::bit_cast<float>(coverLeftPaddingPercentageBits_.load(
+                std::memory_order_acquire)),
+            std::bit_cast<float>(coverRightPaddingPercentageBits_.load(
+                std::memory_order_acquire)),
+            std::bit_cast<float>(coverVerticalPaddingPercentageBits_.load(
+                std::memory_order_acquire)));
+    } else {
+        destination = CalculateVideoDestination(sourceWidth_, sourceHeight_, swapWidth_,
+            swapHeight_, sourceLimitedToNativeSize_);
+    }
     constexpr float black[] = {0, 0, 0, 1};
     context_->ClearRenderTargetView(target, black);
+    if (sourceCoverArt_) {
+        const auto backdropResult = DrawCoverBackdrop(target);
+        if (backdropResult != FFFResult::Success) return backdropResult;
+    }
     // Rendering all inputs through the same shader removes the CPU/GPU
     // scaler discrepancy.  SDR still writes ordinary Rec.709 code values to
     // the implicit SDR swap-chain contract, so DWM remains the sole owner of
@@ -2724,23 +3198,46 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
 
 FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     std::unique_lock deviceLock(deviceMutex_);
-    if (swapChain_ == nullptr || !hasCachedVideo_) return FFFResult::Success;
+    const auto lyricsLayout = lyricsLayoutEnabled_.load(std::memory_order_acquire);
+    if (window_ == nullptr || (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout))
+        return FFFResult::Success;
+    const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : 1,
+        hasCachedVideo_ ? sourceHeight_ : 1, hasCachedVideo_ ? sourceBitDepth_ : 8);
+    if (chainResult != FFFResult::Success || swapChain_ == nullptr) return chainResult;
+    if (!hasCachedVideo_) {
+        const auto pipelineResult = EnsurePipeline(1, 1, 0, 8, 0, 0, false);
+        if (pipelineResult != FFFResult::Success) return pipelineResult;
+        cachedVideoSettings_ = {};
+        cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
+        cachedVideoSettings_.sdrPeak = sdrPeakNits_;
+        cachedVideoSettings_.hdrPeak = sdrPeakNits_;
+        cachedVideoSettings_.paperWhite = paperWhiteNits_;
+        cachedVideoSettings_.targetPeak = hdrPeakNits_ > 0.0f ? hdrPeakNits_ : paperWhiteNits_;
+    }
     std::unique_lock presentLock(presentMutex_);
     ComPtr<ID3D11Texture2D> backBuffer;
     ComPtr<ID3D11RenderTargetView> backBufferTarget;
     const auto targetResult = AcquireBackBufferTarget(
         backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
     if (targetResult != FFFResult::Success) return targetResult;
-    const auto drawResult = DrawCachedVideo(backBufferTarget.Get());
-    if (drawResult != FFFResult::Success) return drawResult;
+    if (hasCachedVideo_) {
+        const auto drawResult = DrawCachedVideo(backBufferTarget.Get());
+        if (drawResult != FFFResult::Success) return drawResult;
+    } else {
+        constexpr float black[] = {0, 0, 0, 1};
+        context_->ClearRenderTargetView(backBufferTarget.Get(), black);
+    }
     const auto danmakuResult = DrawTimedText(TimedTextLayerSlot::Danmaku);
     if (danmakuResult != FFFResult::Success) return danmakuResult;
     const auto subtitleResult = DrawTimedText(TimedTextLayerSlot::Subtitle);
     if (subtitleResult != FFFResult::Success) return subtitleResult;
+    const auto lyricsResult = DrawTimedText(TimedTextLayerSlot::Lyrics);
+    if (lyricsResult != FFFResult::Success) return lyricsResult;
     const auto informationResult = DrawTimedText(TimedTextLayerSlot::PlayerInformation);
     if (informationResult != FFFResult::Success) return informationResult;
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Danmaku);
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Subtitle);
+    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Lyrics);
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::PlayerInformation);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     const auto generation = videoGeneration_.load();
@@ -2828,6 +3325,7 @@ bool PlayerVideoRenderer::RequestRecoveryIfDeviceLost() noexcept {
 void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseVideoProcessor();
     ReleaseVideoProcessorInputSurface();
+    ReleaseCoverBackdropResources();
     ReleaseTimedTextResources();
     if (context_ != nullptr &&
         (device_ == nullptr || SUCCEEDED(device_->GetDeviceRemovedReason()))) {
@@ -2848,6 +3346,9 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     if (pointSampler_ != nullptr) { pointSampler_->Release(); pointSampler_ = nullptr; }
     if (sampler_ != nullptr) { sampler_->Release(); sampler_ = nullptr; }
     if (pixelShader_ != nullptr) { pixelShader_->Release(); pixelShader_ = nullptr; }
+    if (coverBackdropPixelShader_ != nullptr) {
+        coverBackdropPixelShader_->Release(); coverBackdropPixelShader_ = nullptr;
+    }
     if (timedTextPixelShader_ != nullptr) { timedTextPixelShader_->Release(); timedTextPixelShader_ = nullptr; }
     if (vertexShader_ != nullptr) { vertexShader_->Release(); vertexShader_ = nullptr; }
     if (context_ != nullptr) { context_->Release(); context_ = nullptr; }
@@ -2859,12 +3360,15 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     sourceBitDepth_ = 0;
     sourceChromaWidthShift_ = sourceChromaHeightShift_ = 0;
     sourceExternal_ = false;
+    sourceLimitedToNativeSize_ = false;
+    sourceCoverArt_ = false;
     hasCachedVideo_ = false;
     hdrMonitor_ = nullptr;
     hdrSupportValid_ = false;
 }
 
 FFFResult PlayerVideoRenderer::RecreateDeviceResources() noexcept {
+    StopCoverBackdropThread();
     StopTimedTextThread();
     std::lock_guard deviceLock(deviceMutex_);
     ReleaseDeviceObjects();
@@ -2875,12 +3379,14 @@ FFFResult PlayerVideoRenderer::RecreateDeviceResources() noexcept {
 }
 
 void PlayerVideoRenderer::ResetMedia() noexcept {
+    StopCoverBackdropThread();
     StopTimedTextThread();
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
     ReleaseVideoProcessor();
     ReleaseVideoProcessorInputSurface();
+    ReleaseCoverBackdropResources();
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
         if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
@@ -2897,7 +3403,9 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     // A previous 8K/RGBA64 source can leave hundreds of MiB in this staging
     // vector. Media replacement is already a pipeline boundary, so release it.
     std::vector<std::uint8_t>().swap(convertedRgb_);
-    hasCachedVideo_ = false; sourceExternal_ = false;
+    hasCachedVideo_ = false; sourceExternal_ = false; sourceLimitedToNativeSize_ = false;
+    sourceCoverArt_ = false;
+    lyricsLayoutEnabled_.store(false, std::memory_order_release);
     actualVideoScalingMode_.store(FFF3FPVideoScalingMode::D3D11VideoProcessor);
     videoGeneration_.store(0); presentedVideoGeneration_.store(0);
     presentedVideoFrames_.store(0); coalescedVideoFrames_.store(0);
@@ -2920,6 +3428,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
 void PlayerVideoRenderer::Close() noexcept {
     // Join before taking deviceMutex_: the presenter may already be waiting in
     // PresentTimedText and must be allowed to leave that critical section.
+    StopCoverBackdropThread();
     StopTimedTextThread();
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
