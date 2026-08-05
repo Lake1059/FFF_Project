@@ -42,11 +42,11 @@ Partial Class Form设置
         ModernTabPage2.Text = "个性化"
         ModernTabPage3.Text = "支持者"
         ModernTabPage4.IsSeparator = True
-        ModernTabPage5.Text = "尺寸"
+        ModernTabPage5.Text = "界面与尺寸"
         ModernTabPage6.Text = "HDR"
         ModernTabPage7.Text = "字幕"
         ModernTabPage8.Text = "弹幕"
-        ModernTabPage9.Text = "快捷键"
+        ModernTabPage9.Text = "音乐与歌词"
         ModernTabListControl1.Items.Add(ModernTabPage1)
         ModernTabListControl1.Items.Add(ModernTabPage2)
         ModernTabListControl1.Items.Add(ModernTabPage3)
@@ -62,7 +62,7 @@ Partial Class Form设置
         ModernTabListControl1.ScrollBarThumbHoverColor = Color.FromArgb(CByte(80), CByte(200), CByte(200), CByte(200))
         ModernTabListControl1.ScrollBarTrackColor = Color.FromArgb(CByte(20), CByte(200), CByte(200), CByte(200))
         ModernTabListControl1.SeparatorColor = Color.FromArgb(CByte(80), CByte(200), CByte(200), CByte(200))
-        ModernTabListControl1.Size = New Size(784, 561)
+        ModernTabListControl1.Size = New Size(784, 461)
         ModernTabListControl1.TabIndex = 1
         ModernTabListControl1.TabItemHeight = 30
         ModernTabListControl1.TabItemHoverBackColor = Color.FromArgb(CByte(40), CByte(200), CByte(200), CByte(200))
@@ -74,13 +74,13 @@ Partial Class Form设置
         AutoScaleDimensions = New SizeF(96F, 96F)
         AutoScaleMode = AutoScaleMode.Dpi
         BackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))
-        ClientSize = New Size(784, 561)
+        ClientSize = New Size(784, 461)
         Controls.Add(ModernTabListControl1)
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver
         MaximizeBox = False
         MinimizeBox = False
-        MinimumSize = New Size(800, 600)
+        MinimumSize = New Size(800, 500)
         Name = "Form设置"
         ShowInTaskbar = False
         Text = "设置"

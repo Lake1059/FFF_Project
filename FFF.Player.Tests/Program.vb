@@ -138,6 +138,13 @@ Friend Module Program
                 Console.WriteLine("弹幕边界、连续小数位移、Seek、外描边与阴影精确诊断通过。")
                 Return 0
             End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--settings-size-visibility-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试自定义初始尺寸可见性()
+                测试自定义HDR峰值可见性()
+                测试字幕弹幕设置与字号单位()
+                Console.WriteLine("尺寸、HDR、字幕/弹幕设置接线及字号 point 单位回归通过。")
+                Return 0
+            End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--gpu-decode-matrix", StringComparison.OrdinalIgnoreCase) Then
                 测试GPU解码矩阵(Path.GetFullPath(参数(1)))
                 Console.WriteLine("GPU 解码规格接受与 CPU 回退矩阵通过。")
@@ -329,6 +336,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sup-timeline-regression <字幕.sup>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --ass-render-benchmark")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --timed-text-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --settings-size-visibility-regression")
                 Return 2
             End If
             Dim 视频路径 = Path.GetFullPath(参数(0))
@@ -362,7 +370,134 @@ Friend Module Program
         End Try
     End Function
 
+    Private Sub 测试自定义初始尺寸可见性()
+        Dim 原尺寸选项 = 设置.实例对象.初始画面尺寸选项
+        Try
+            Using 页面 As New Form设置_界面与尺寸 With {.ShowInTaskbar = False, .Opacity = 0}
+                页面.Show()
+                Application.DoEvents()
+                Dim 尺寸选项 = DirectCast(页面.Controls.Find("MCB_初始画面尺寸选项", True).FirstOrDefault(),
+                                      LakeUI.ModernComboBox)
+                Dim 宽度输入框 = 页面.Controls.Find("MTB_自定义初始画面尺寸宽度", True).FirstOrDefault()
+                Dim 高度输入框 = 页面.Controls.Find("MTB_自定义初始画面尺寸高度", True).FirstOrDefault()
+                Dim 第一间隔 = 页面.Controls.Find("JustEmptyControl1", True).FirstOrDefault()
+                Dim 第二间隔 = 页面.Controls.Find("JustEmptyControl2", True).FirstOrDefault()
+                断言(尺寸选项 IsNot Nothing AndAlso 宽度输入框 IsNot Nothing AndAlso 高度输入框 IsNot Nothing AndAlso
+                       第一间隔 IsNot Nothing AndAlso 第二间隔 IsNot Nothing,
+                   "无法取得初始画面尺寸设置控件。")
+
+                尺寸选项.SelectedIndex = 1
+                Application.DoEvents()
+                断言(Not 宽度输入框.Visible AndAlso Not 高度输入框.Visible AndAlso
+                       Not 第一间隔.Visible AndAlso Not 第二间隔.Visible,
+                   "选择预设尺寸后自定义宽高输入框或间隔仍然可见。")
+
+                尺寸选项.SelectedIndex = 0
+                Application.DoEvents()
+                断言(宽度输入框.Visible AndAlso 高度输入框.Visible AndAlso
+                       第一间隔.Visible AndAlso 第二间隔.Visible,
+                   "选择自定义尺寸后宽高输入框或间隔没有显示。")
+            End Using
+        Finally
+            设置.实例对象.初始画面尺寸选项 = 原尺寸选项
+        End Try
+    End Sub
+
+    Private Sub 测试自定义HDR峰值可见性()
+        Dim 原峰值选项 = 设置.实例对象.HDR峰值亮度选项
+        Try
+            Using 页面 As New Form设置_HDR With {.ShowInTaskbar = False, .Opacity = 0}
+                页面.Show()
+                Application.DoEvents()
+                Dim 峰值选项 = DirectCast(页面.Controls.Find("MCB_真实HDR峰值亮度选项", True).FirstOrDefault(),
+                                       LakeUI.ModernComboBox)
+                Dim 峰值输入框 = 页面.Controls.Find("MTB_自定义真实HDR峰值亮度", True).FirstOrDefault()
+                Dim 峰值间隔 = 页面.Controls.Find("JustEmptyControl1", True).FirstOrDefault()
+                断言(峰值选项 IsNot Nothing AndAlso 峰值输入框 IsNot Nothing AndAlso 峰值间隔 IsNot Nothing,
+                   "无法取得 HDR 峰值亮度设置控件。")
+
+                峰值选项.SelectedIndex = 0
+                Application.DoEvents()
+                断言(Not 峰值输入框.Visible AndAlso Not 峰值间隔.Visible,
+                   "选择 HDR 预设后自定义峰值输入框或间隔仍然可见。")
+
+                峰值选项.SelectedIndex = 1
+                Application.DoEvents()
+                断言(峰值输入框.Visible AndAlso 峰值间隔.Visible,
+                   "选择自定义 HDR 峰值后输入框或间隔没有显示。")
+            End Using
+        Finally
+            设置.实例对象.HDR峰值亮度选项 = 原峰值选项
+        End Try
+    End Sub
+
+    Private Sub 测试字幕弹幕设置与字号单位()
+        Dim 原设置 = 设置.实例对象
+        设置.实例对象 = New 设置()
+        Try
+            Using Pixel字体 As New Font("Microsoft YaHei UI", 64.0F, FontStyle.Bold, GraphicsUnit.Pixel)
+                Dim 字体名称 = String.Empty
+                Dim 字号 = 0.0F
+                Dim 样式 = 0
+                字体控制.写入选择结果(Pixel字体, 字体名称, 字号, 样式)
+                断言(Math.Abs(字号 - Pixel字体.SizeInPoints) < 0.001F AndAlso
+                       Math.Abs(字号 - Pixel字体.Size) > 1.0F,
+                   $"Pixel 字体仍按 Size 持久化：{Pixel字体.Size:F3}px -> {字号:F3}pt。")
+                断言(样式 = CInt(FontStyle.Bold), "字体样式没有从字体对话框结果写回。")
+            End Using
+
+            Using 字幕页 As New Form设置_字幕()
+                字幕页.初始化页面()
+                Dim 不透明度 = DirectCast(字幕页.Controls.Find("ETB_字幕不透明度", True).Single(), LakeUI.ExcellentTrackBar)
+                Dim 描边 = DirectCast(字幕页.Controls.Find("MCB_字幕描边样式", True).Single(), LakeUI.ModernComboBox)
+                Dim 阴影 = DirectCast(字幕页.Controls.Find("MCB_字幕阴影样式", True).Single(), LakeUI.ModernComboBox)
+                不透明度.Value = 137
+                描边.SelectedIndex = 2
+                阴影.SelectedIndex = 0
+                断言(设置.实例对象.字幕不透明度 = 137 AndAlso
+                       设置.实例对象.字幕描边样式 = 2 AndAlso 设置.实例对象.字幕阴影样式 = 0,
+                   "字幕页新增的不透明度、描边或阴影设置没有写入配置。")
+            End Using
+
+            Using 弹幕页 As New Form设置_弹幕()
+                弹幕页.初始化页面()
+                Dim 不透明度 = DirectCast(弹幕页.Controls.Find("ETB_弹幕不透明度", True).Single(), LakeUI.ExcellentTrackBar)
+                Dim 最大数量 = DirectCast(弹幕页.Controls.Find("ETB_弹幕最大渲染数量", True).Single(), LakeUI.ExcellentTrackBar)
+                Dim 底部开关 = DirectCast(弹幕页.Controls.Find("MCK_是否渲染底部弹幕", True).Single(), LakeUI.ModernCheckBox)
+                不透明度.Value = 149
+                最大数量.Value = 77
+                底部开关.Checked = False
+                断言(设置.实例对象.弹幕不透明度 = 149 AndAlso
+                       设置.实例对象.弹幕最大渲染数量 = 77 AndAlso
+                       Not 设置.实例对象.渲染底部弹幕,
+                   "弹幕页新增设置没有写入配置。")
+            End Using
+
+            Dim 字幕配置 = 设置.实例对象.创建SRT字幕样式()
+            Dim 弹幕配置 = 设置.实例对象.创建弹幕显示配置()
+            断言((字幕配置.第一行颜色ARGB >> 24) = 137UI AndAlso 字幕配置.描边宽度 = 4.0F AndAlso
+                   字幕配置.阴影颜色ARGB = 0UI,
+               "字幕设置没有进入实际渲染样式。")
+            断言(弹幕配置.不透明度 = 149 AndAlso 弹幕配置.同屏最大数量 = 77 AndAlso
+                   (弹幕配置.启用类型 And 弹幕类型.底部) = 0,
+               "弹幕设置没有进入实际调度/渲染配置。")
+            断言((设置.应用不透明度(&HC0000000UI, 128) >> 24) = 96UI,
+               "全局不透明度没有按源 alpha 成比例合成。")
+        Finally
+            设置.实例对象 = 原设置
+        End Try
+    End Sub
+
     Private Sub 测试HDR规格处理策略()
+        Using 控制器 As New 播放器控制器(Function() IntPtr.Zero, Nothing)
+            控制器.设置HDR峰值亮度(2000.0F)
+            断言(控制器.取得HDR输出峰值参数(色彩输出模式.映射到SDR) = 0.0F AndAlso
+                   控制器.取得HDR输出峰值参数(色彩输出模式.原始HDR按SDR呈现) = 0.0F,
+               "真实 HDR 峰值设置泄漏到了 SDR 映射路径。")
+            断言(控制器.取得HDR输出峰值参数(色彩输出模式.峰值映射HDR) = 2000.0F,
+               "真实 HDR 输出没有使用用户设置的目标峰值。")
+        End Using
+
         Dim P5 = 执行HDR探针(1UI, 5UI, 9UI, 0UI, True, False, 0UI, False, False, 720.0F, 0.0F)
         断言(P5.输出格式 = 4UI AndAlso P5.输出处理路径 = 4UI AndAlso
            P5.输出兼容格式 = 4UI AndAlso P5.输出回退 = 1UI AndAlso
@@ -1404,7 +1539,9 @@ Friend Module Program
                    呈现器 IsNot Nothing AndAlso
                    点击入口 IsNot Nothing AndAlso 可见字段 IsNot Nothing AndAlso 背景属性 IsNot Nothing,
                 "无法取得媒体信息按钮左右键回归所需成员。")
-            断言(控制器.解码器 = 解码模式.CPU, "播放器主窗口没有默认使用 CPU 解码。")
+            Dim 已保存解码方式 = CType(设置.实例对象.解码方式, 解码模式)
+            断言(控制器.解码器 = 已保存解码方式 AndAlso 控制器.解码器偏好 = 已保存解码方式,
+               "播放器主窗口没有沿用已保存的解码方式。")
 
             Dim 原窗口数 = Application.OpenForms.OfType(Of Form媒体信息)().Count()
             点击入口.Invoke(按钮, {New MouseEventArgs(MouseButtons.Left, 1, 4, 4, 0)})
@@ -3249,7 +3386,7 @@ Friend Module Program
 
         Const SRT内容 = "1" & vbLf & "00:00:00,000 --> 00:00:02,000" & vbLf & "SRT quality diagnostic" & vbLf
         Dim 文档 = SRT字幕解析器.解析(New StringReader(SRT内容))
-        Dim 样式 As New SRT字幕样式()
+        Dim 样式 As New SRT字幕样式 With {.底部边距 = 0.0F}
         Using 轨道 As New 外部字幕轨道("diagnostic.srt", 外部字幕格式.SRT,
             New SRT字幕帧生成器(文档, 样式), Nothing)
             Using 控件 As New 播放器画面控件()
@@ -3261,7 +3398,20 @@ Friend Module Program
                     断言(命令.描边宽度 = 样式.描边宽度 AndAlso
                        命令.阴影色ARGB = 样式.阴影颜色ARGB AndAlso
                        命令.阴影X偏移 = 样式.阴影偏移 AndAlso 命令.阴影Y偏移 = 样式.阴影偏移,
-                       "SRT 最高质量文字效果没有完整进入生产命令。")
+                        "SRT 最高质量文字效果没有完整进入生产命令。")
+                    Dim 测量 As New 原生定时文字测量 With {
+                        .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字测量)()), .版本 = 1UI}
+                    Dim 测量结果 = 播放器原生接口.FFF3FP_MeasureTimedText(
+                        命令.文本, 命令.字体, 命令.字号,
+                        CType(命令.样式, 原生定时文字标志), 命令.宽度,
+                        命令.描边宽度, 命令.阴影X偏移, 命令.阴影Y偏移,
+                        If((命令.阴影色ARGB >> 24) <> 0UI, 1UI, 0UI), 测量)
+                    断言(测量结果 = 原生播放器结果.成功 AndAlso 测量.布局高度 > 0 AndAlso
+                           测量.可见底部 > 测量.布局高度,
+                       "DirectWrite 字幕布局或最终可见底边测量无效。")
+                    Dim 最终可见底边 = 命令.Y + 测量.可见底部
+                    断言(Math.Abs(最终可见底边 - 1080.0F) < 0.01F,
+                       $"字幕底部距离 0 时最终可见像素没有贴齐画布：{最终可见底边:F3}px。")
                 End Using
             End Using
         End Using

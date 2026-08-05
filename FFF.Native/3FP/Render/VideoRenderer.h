@@ -100,6 +100,10 @@ enum class TimedTextLayerSlot : std::uint32_t {
 
 FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept;
 FFFResult EvaluateTimedTextRasterization(FFF3FPTimedTextRasterizationProbe& probe) noexcept;
+FFFResult MeasureTimedText(const char* textUtf8, const char* fontFamilyUtf8,
+    float fontSize, FFF3FPTimedTextFlags flags, float maxWidth, float outlineWidth,
+    float shadowOffsetX, float shadowOffsetY, bool shadowEnabled,
+    FFF3FPTimedTextMeasurement& measurement) noexcept;
 
 class PlayerVideoRenderer final {
 public:

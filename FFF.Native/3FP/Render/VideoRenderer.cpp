@@ -20,6 +20,7 @@ extern "C" {
 #include <windows.graphics.display.interop.h>
 #include <bit>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstring>
 
@@ -227,6 +228,9 @@ Float3 MapHdrToSdr(const Float3 value, const float sourcePeak,
     const float targetPeak) noexcept {
     const auto maximum = std::max({value.r, value.g, value.b});
     if (maximum <= 1.0e-6f) return value;
+    // Preserve the source chromatic ratios: BT.2390 supplies one luminance
+    // scale. Do not add a post-curve white clamp here; it changes the mapping
+    // strategy and can turn compressed high-code regions into visible blocks.
     const auto scale = Bt2390HdrToSdrNits(maximum, sourcePeak, targetPeak) / maximum;
     return {value.r * scale, value.g * scale, value.b * scale};
 }
@@ -714,6 +718,60 @@ DWRITE_PARAGRAPH_ALIGNMENT ToParagraphAlignment(const FFF3FPTimedTextAlignment v
     }
 }
 
+bool TimedTextUtf8ToWide(const char* value, std::wstring& result) noexcept {
+    if (value == nullptr) return false;
+    try {
+        const auto bytes = std::strlen(value);
+        if (bytes > INT_MAX) return false;
+        if (bytes == 0) { result.clear(); return true; }
+        const auto count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value,
+            static_cast<int>(bytes), nullptr, 0);
+        if (count <= 0) return false;
+        result.resize(static_cast<std::size_t>(count));
+        return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value,
+            static_cast<int>(bytes), result.data(), count) == count;
+    } catch (...) {
+        return false;
+    }
+}
+
+HRESULT CreateTimedTextLayout(IDWriteFactory* factory, const std::wstring& text,
+    const std::wstring& fontFamily, const float fontSize,
+    const FFF3FPTimedTextFlags flags, const FFF3FPTimedTextAlignment horizontalAlignment,
+    const FFF3FPTimedTextAlignment verticalAlignment, const float width,
+    const float height, IDWriteTextLayout** output) noexcept {
+    if (factory == nullptr || output == nullptr || fontFamily.empty() ||
+        !std::isfinite(fontSize) || fontSize <= 0.0f || !std::isfinite(width) ||
+        width <= 0.0f || !std::isfinite(height) || height <= 0.0f)
+        return E_INVALIDARG;
+    *output = nullptr;
+    const auto flagBits = static_cast<std::uint32_t>(flags);
+    const auto weight = (flagBits & static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Bold)) != 0
+        ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL;
+    const auto style = (flagBits & static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Italic)) != 0
+        ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;
+    ComPtr<IDWriteTextFormat> format;
+    auto result = factory->CreateTextFormat(fontFamily.c_str(), nullptr, weight, style,
+        DWRITE_FONT_STRETCH_NORMAL, fontSize, L"", &format);
+    if (FAILED(result)) return result;
+    if (FAILED(result = format->SetTextAlignment(ToTextAlignment(horizontalAlignment))) ||
+        FAILED(result = format->SetParagraphAlignment(ToParagraphAlignment(verticalAlignment))) ||
+        // Managed code owns wrapping and line splitting. Measurement and drawing
+        // must never make independent wrapping decisions for the same command.
+        FAILED(result = format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP))) return result;
+    ComPtr<IDWriteTextLayout> layout;
+    result = factory->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
+        format.Get(), width, height, &layout);
+    if (FAILED(result)) return result;
+    const DWRITE_TEXT_RANGE range{0, static_cast<UINT32>(text.size())};
+    if ((flagBits & static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Underline)) != 0 &&
+        FAILED(result = layout->SetUnderline(TRUE, range))) return result;
+    if ((flagBits & static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Strikeout)) != 0 &&
+        FAILED(result = layout->SetStrikethrough(TRUE, range))) return result;
+    *output = layout.Detach();
+    return S_OK;
+}
+
 template <typename T>
 void HashTimedText(std::uint64_t& hash, const T& value) noexcept {
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(&value);
@@ -941,6 +999,50 @@ FFFResult EvaluateTimedTextRasterization(FFF3FPTimedTextRasterizationProbe& prob
     return FFFResult::Success;
 }
 
+FFFResult MeasureTimedText(const char* textUtf8, const char* fontFamilyUtf8,
+    const float fontSize, const FFF3FPTimedTextFlags flags, const float maxWidth,
+    const float outlineWidth, const float shadowOffsetX, const float shadowOffsetY,
+    const bool shadowEnabled, FFF3FPTimedTextMeasurement& measurement) noexcept {
+    if (measurement.size < sizeof(measurement) || measurement.version != 1 ||
+        textUtf8 == nullptr || fontFamilyUtf8 == nullptr ||
+        !std::isfinite(fontSize) || fontSize <= 0.0f ||
+        !std::isfinite(maxWidth) || maxWidth <= 0.0f ||
+        !std::isfinite(outlineWidth) || outlineWidth < 0.0f ||
+        !std::isfinite(shadowOffsetX) || !std::isfinite(shadowOffsetY))
+        return FFFResult::InvalidArgument;
+    std::wstring text, fontFamily;
+    if (!TimedTextUtf8ToWide(textUtf8, text) || !TimedTextUtf8ToWide(fontFamilyUtf8, fontFamily) ||
+        fontFamily.empty()) return FFFResult::InvalidArgument;
+    try {
+        ComPtr<IDWriteFactory> factory;
+        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+            reinterpret_cast<IUnknown**>(factory.GetAddressOf())))) return FFFResult::DeviceFailure;
+        ComPtr<IDWriteTextLayout> layout;
+        // First discover DirectWrite's natural single-line box, then constrain
+        // the production-equivalent layout to that exact height before reading
+        // overhangs. A large arbitrary layout height would make bottom overhang
+        // relative to the wrong box and recreate the subtitle clipping bug.
+        if (FAILED(CreateTimedTextLayout(factory.Get(), text, fontFamily, fontSize, flags,
+            FFF3FPTimedTextAlignment::Center, FFF3FPTimedTextAlignment::Near,
+            maxWidth, 65536.0f, &layout))) return FFFResult::DeviceFailure;
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED(layout->GetMetrics(&metrics)) || !std::isfinite(metrics.height) ||
+            metrics.height <= 0.0f || FAILED(layout->SetMaxHeight(metrics.height)) ||
+            FAILED(layout->GetMetrics(&metrics))) return FFFResult::DeviceFailure;
+        DWRITE_OVERHANG_METRICS overhang{};
+        if (FAILED(layout->GetOverhangMetrics(&overhang))) return FFFResult::DeviceFailure;
+        const auto extents = DescribeTimedTextEffects(outlineWidth, shadowOffsetX,
+            shadowOffsetY, shadowEnabled);
+        measurement.layoutHeight = metrics.height;
+        measurement.visibleTop = metrics.top - std::max(overhang.top, 0.0f) - extents.top;
+        measurement.visibleBottom = metrics.top + metrics.height +
+            std::max(overhang.bottom, 0.0f) + extents.bottom;
+        return FFFResult::Success;
+    } catch (...) {
+        return FFFResult::NativeFailure;
+    }
+}
+
 PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), coverBackdropPixelShader_(nullptr),
@@ -1058,6 +1160,8 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
         actualMode_ = FFF3FPColorMode::MapToSdr;
         fallbackReason_ = "The target display or Windows Advanced Color mode does not support true HDR output.";
     }
+    // hdrPeakNits_ is an output-display override, never the source mastering
+    // peak. SDR callers pass zero; source peak metadata is configured per frame.
     hdrProcessor_.SetTargetPeakOverride(hdrPeakNits_);
     if (hasCachedVideo_)
         cachedVideoSettings_.targetPeak = hdrProcessor_.State().targetPeakNits;
@@ -2222,32 +2326,15 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     };
     const auto getLayout = [this](const TimedTextRenderCommand& command,
         const D2D1_RECT_F& destination, const float fontSize) noexcept -> IDWriteTextLayout* {
-        const auto weight = (static_cast<std::uint32_t>(command.flags) &
-            static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Bold)) != 0
-            ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL;
-        const auto style = (static_cast<std::uint32_t>(command.flags) &
-            static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Italic)) != 0
-            ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;
         const auto layoutKey = TimedTextLayoutKey(command, destination, fontSize);
         const auto existing = timedTextLayouts_.find(layoutKey);
         if (existing != timedTextLayouts_.end()) return existing->second;
-        ComPtr<IDWriteTextFormat> format;
-        if (!command.content || FAILED(writeFactory_->CreateTextFormat(command.content->fontFamily.c_str(), nullptr, weight, style,
-            DWRITE_FONT_STRETCH_NORMAL, fontSize, L"", &format))) return nullptr;
-        format->SetTextAlignment(ToTextAlignment(command.horizontalAlignment));
-        format->SetParagraphAlignment(ToParagraphAlignment(command.verticalAlignment));
-        // The managed scheduler already measured the run. A second wrapping
-        // decision in DirectWrite can intermittently move/clip the last glyph.
-        format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         ComPtr<IDWriteTextLayout> layout;
-        if (FAILED(writeFactory_->CreateTextLayout(command.content->text.c_str(),
-            static_cast<UINT32>(command.content->text.size()), format.Get(),
+        if (!command.content || FAILED(CreateTimedTextLayout(writeFactory_, command.content->text,
+            command.content->fontFamily, fontSize, command.flags, command.horizontalAlignment,
+            command.verticalAlignment,
             std::max(destination.right - destination.left, 1.0f),
             std::max(destination.bottom - destination.top, 1.0f), &layout))) return nullptr;
-        if ((static_cast<std::uint32_t>(command.flags) & static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Underline)) != 0)
-            layout->SetUnderline(TRUE, DWRITE_TEXT_RANGE{0, static_cast<UINT32>(command.content->text.size())});
-        if ((static_cast<std::uint32_t>(command.flags) & static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Strikeout)) != 0)
-            layout->SetStrikethrough(TRUE, DWRITE_TEXT_RANGE{0, static_cast<UINT32>(command.content->text.size())});
         constexpr std::size_t MaximumCachedLayouts = 512;
         while (timedTextLayoutOrder_.size() >= MaximumCachedLayouts) {
             const auto oldest = timedTextLayoutOrder_.front();

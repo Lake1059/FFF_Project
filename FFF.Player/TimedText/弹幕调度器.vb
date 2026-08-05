@@ -43,12 +43,13 @@ Public NotInheritable Class 默认弹幕文本测量器
 End Class
 
 Public NotInheritable Class 弹幕显示配置
-    ''' <summary>当前未提供交互设置，因此这里是播放器启用弹幕时的默认配置。</summary>
     Public Property 字体 As String = "Microsoft YaHei UI"
     Public Property 字号 As Single = 36
+    Public Property 字体样式 As FontStyle = System.Drawing.FontStyle.Regular
     Public Property 使用源字号 As Boolean
     Public Property 使用源颜色 As Boolean = True
     Public Property 颜色ARGB As UInteger = &HFFFFFFFFUI
+    Public Property 不透明度 As Integer = 255
     Public Property 滚动速度 As Single = 180.0F
     Public Property 目标帧率 As Single = 60.0F
     Public Property 同屏最大数量 As Integer = 100
@@ -64,10 +65,14 @@ Public NotInheritable Class 弹幕显示配置
     Public Property 阴影颜色ARGB As UInteger = &H70000000UI
     ''' <summary>在默认字号下向右下方 45 度投影时，X/Y 轴各自的偏移。</summary>
     Public Property 阴影偏移 As Single = 1.5F
+    Public Property 行内前后间距 As Single = 8.0F
+    Public Property 尺寸缩放方式 As Integer
+    Public Property 启用类型 As 弹幕类型 = 弹幕类型.常用
 
     Friend Sub 验证()
         If String.IsNullOrWhiteSpace(字体) Then Throw New ArgumentException("弹幕字体不能为空。", NameOf(字体))
         If Not Single.IsFinite(字号) OrElse 字号 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(字号))
+        If 不透明度 < 0 OrElse 不透明度 > 255 Then Throw New ArgumentOutOfRangeException(NameOf(不透明度))
         If Not Single.IsFinite(滚动速度) OrElse 滚动速度 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(滚动速度))
         If Not Single.IsFinite(目标帧率) OrElse 目标帧率 < 1 OrElse 目标帧率 > 240 Then Throw New ArgumentOutOfRangeException(NameOf(目标帧率))
         If 同屏最大数量 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(同屏最大数量))
@@ -79,6 +84,8 @@ Public NotInheritable Class 弹幕显示配置
         If Not Single.IsFinite(基准视频高度) OrElse 基准视频高度 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(基准视频高度))
         If Not Single.IsFinite(描边宽度) OrElse 描边宽度 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(描边宽度))
         If Not Single.IsFinite(阴影偏移) OrElse 阴影偏移 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(阴影偏移))
+        If Not Single.IsFinite(行内前后间距) OrElse 行内前后间距 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(行内前后间距))
+        If 尺寸缩放方式 < 0 OrElse 尺寸缩放方式 > 3 Then Throw New ArgumentOutOfRangeException(NameOf(尺寸缩放方式))
     End Sub
 End Class
 
@@ -138,7 +145,7 @@ Public NotInheritable Class 弹幕调度器
         settings.验证()
         资料库 = database
         配置 = settings
-        过滤器 = If(filter, New 弹幕过滤配置().创建快照())
+        过滤器 = If(filter, New 弹幕过滤配置 With {.启用类型 = 配置.启用类型}.创建快照())
         测量器 = If(measurer, New 默认弹幕文本测量器())
     End Sub
 
@@ -171,9 +178,11 @@ Public NotInheritable Class 弹幕调度器
         signature = HashCode.Combine(signature, 配置.目标帧率, 配置.同屏最大数量, 配置.常规滚动最大行数, 配置.顶部最大行数,
                                      配置.行间距, 配置.顶部边距, 配置.固定弹幕持续秒数)
         signature = HashCode.Combine(signature, 配置.基准视频高度)
-        signature = HashCode.Combine(signature, 配置.使用源颜色, 配置.颜色ARGB)
+        signature = HashCode.Combine(signature, 配置.使用源颜色, 配置.颜色ARGB, 配置.不透明度)
         signature = HashCode.Combine(signature, 配置.描边颜色ARGB, 配置.描边宽度,
                                      配置.阴影颜色ARGB, 配置.阴影偏移)
+        signature = HashCode.Combine(signature, 配置.字体样式, 配置.行内前后间距,
+                                     配置.尺寸缩放方式, 配置.启用类型)
         Dim frame = CLng(Math.Round(时间.TotalSeconds * 配置.目标帧率,
                                    MidpointRounding.AwayFromZero))
         ' 帧序号只用于诊断。位置直接使用连续媒体时钟，避免 17 ms 唤醒与
@@ -181,11 +190,14 @@ Public NotInheritable Class 弹幕调度器
         Dim seconds = 时间.TotalSeconds
         Dim 滚动速度 = 实际滚动速度(区域)
         Dim 顶部边距 = 实际顶部边距(区域)
-        Dim 行间距 = 配置.行间距 * 区域.高度像素 / 配置.基准视频高度
+        Dim 行间距 = 配置.行间距 * 区域.缩放系数
         Dim 最大连续间隔 = Math.Max(0.25R, 4.0R / 配置.目标帧率)
         Dim discontinuity = Not Double.IsFinite(上一时间秒) OrElse
             seconds < 上一时间秒 OrElse seconds - 上一时间秒 > 最大连续间隔
-        If signature <> 上一签名 Then discontinuity = True
+        If signature <> 上一签名 Then
+            discontinuity = True
+            过滤器 = New 弹幕过滤配置 With {.启用类型 = 配置.启用类型}.创建快照()
+        End If
         If discontinuity Then 从当前位置重置(时间, seconds, 区域)
         清除过期(seconds)
         推进到(seconds, 区域)
@@ -242,7 +254,7 @@ Public NotInheritable Class 弹幕调度器
     End Sub
 
     Private Sub 尝试加入(item As 弹幕项目, area As 视频显示区域)
-        Dim scale = area.高度像素 / 配置.基准视频高度
+        Dim scale = area.缩放系数
         Dim fontSize = 配置.字号 * scale
         If 配置.使用源字号 Then fontSize *= item.原始字号 / 25.0F
         Dim height = fontSize * 1.2F
@@ -268,14 +280,14 @@ Public NotInheritable Class 弹幕调度器
         活动列表.Add(New 活动项 With {
             .项目 = item, .开始秒 = startSeconds, .结束秒 = startSeconds + duration, .行号 = lane,
             .宽度 = width, .高度 = height, .字号 = fontSize,
-            .颜色 = If(配置.使用源颜色, item.颜色ARGB, 配置.颜色ARGB),
+            .颜色 = 设置.应用不透明度(If(配置.使用源颜色, item.颜色ARGB, 配置.颜色ARGB), 配置.不透明度),
             .左外扩 = leftExtent, .右外扩 = rightExtent})
     End Sub
 
     Private Function 查找可用行(type As 弹幕类型, maxLines As Integer, seconds As Double,
                                 newWidth As Single, newLeftExtent As Single,
                                 newRightExtent As Single, area As 视频显示区域) As Integer
-        Dim gap = Math.Max(8.0F, 配置.行间距 * area.高度像素 / 配置.基准视频高度)
+        Dim gap = Math.Max(0.0F, 配置.行内前后间距 * area.缩放系数)
         Dim 滚动速度 = 实际滚动速度(area)
         For lane = 0 To maxLines - 1
             Dim available = True
@@ -315,14 +327,14 @@ Public NotInheritable Class 弹幕调度器
     End Sub
 
     Private Function 实际滚动速度(area As 视频显示区域) As Single
-        Return 配置.滚动速度 * area.高度像素 / 配置.基准视频高度
+        Return 配置.滚动速度 * area.缩放系数
     End Function
 
     Private Function 实际顶部边距(area As 视频显示区域) As Single
-        Return 配置.顶部边距 * area.高度像素 / 配置.基准视频高度
+        Return 配置.顶部边距 * area.缩放系数
     End Function
 
     Private Function 实际行高(fontSize As Single, area As 视频显示区域) As Single
-        Return fontSize * 1.2F + 配置.行间距 * area.高度像素 / 配置.基准视频高度
+        Return fontSize * 1.2F + 配置.行间距 * area.缩放系数
     End Function
 End Class

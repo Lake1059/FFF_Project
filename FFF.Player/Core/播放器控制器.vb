@@ -10,7 +10,7 @@ Public NotInheritable Class 播放器控制器
     Implements IDisposable
 
     Private Const SDR峰值尼特 As Single = 100.0F
-    Private Const HDR峰值尼特 As Single = 0.0F
+    Private 当前HDR输出峰值尼特 As Single = 0.0F
     Private Const SDR纸白尼特 As Single = 203.0F
 
     Private ReadOnly 输出窗口提供器 As Func(Of IntPtr)
@@ -33,6 +33,7 @@ Public NotInheritable Class 播放器控制器
     Private 当前音乐包含封面 As Boolean
     Private 当前文件路径 As String = String.Empty
     Private 当前解码器 As 解码模式 = 解码模式.CPU
+    Private 用户解码器偏好 As 解码模式 = 解码模式.CPU
     Private 当前色彩输出 As 色彩输出模式 = 色彩输出模式.映射到SDR
     Private HDR色彩输出偏好 As 色彩输出模式 = 色彩输出模式.映射到SDR
     Private 当前WASAPI模式 As WASAPI共享模式 = WASAPI共享模式.共享
@@ -41,10 +42,16 @@ Public NotInheritable Class 播放器控制器
     Private 正在切换会话 As Boolean
     Private 已释放 As Boolean
 
-    Public Sub New(输出窗口提供器 As Func(Of IntPtr), 事件同步上下文 As SynchronizationContext)
+    Public Sub New(输出窗口提供器 As Func(Of IntPtr), 事件同步上下文 As SynchronizationContext,
+                   Optional 初始解码器 As 解码模式 = 解码模式.CPU)
         ArgumentNullException.ThrowIfNull(输出窗口提供器)
+        If 初始解码器 <> 解码模式.CPU AndAlso 初始解码器 <> 解码模式.GPU Then
+            Throw New ArgumentOutOfRangeException(NameOf(初始解码器))
+        End If
         Me.输出窗口提供器 = 输出窗口提供器
         Me.事件同步上下文 = 事件同步上下文
+        当前解码器 = 初始解码器
+        用户解码器偏好 = 初始解码器
     End Sub
 
     Public Event 状态已变化 As EventHandler
@@ -60,6 +67,12 @@ Public NotInheritable Class 播放器控制器
     Public ReadOnly Property 解码器 As 解码模式
         Get
             Return 当前解码器
+        End Get
+    End Property
+
+    Public ReadOnly Property 解码器偏好 As 解码模式
+        Get
+            Return 用户解码器偏好
         End Get
     End Property
 
@@ -246,7 +259,7 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 打开媒体(路径 As String)
         If 已释放 OrElse String.IsNullOrWhiteSpace(路径) OrElse Not File.Exists(路径) Then Return
-        切换媒体会话(Path.GetFullPath(路径), 当前解码器, TimeSpan.Zero, True, -1, -1)
+        切换媒体会话(Path.GetFullPath(路径), 用户解码器偏好, TimeSpan.Zero, True, -1, -1)
     End Sub
 
     ''' <summary>
@@ -614,8 +627,9 @@ Public NotInheritable Class 播放器控制器
 
     Public Function 切换解码器() As String
         If 已释放 OrElse 正在切换会话 Then Return String.Empty
-        Dim 新解码器 = If(当前解码器 = 解码模式.CPU, 解码模式.GPU, 解码模式.CPU)
+        Dim 新解码器 = If(用户解码器偏好 = 解码模式.CPU, 解码模式.GPU, 解码模式.CPU)
         If 会话 Is Nothing OrElse String.IsNullOrEmpty(当前文件路径) Then
+            用户解码器偏好 = 新解码器
             当前解码器 = 新解码器
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
             Return 解码器说明(当前解码器)
@@ -623,6 +637,7 @@ Public NotInheritable Class 播放器控制器
 
         Dim 快照 = 安全读取快照()
         If 快照 Is Nothing Then Return String.Empty
+        用户解码器偏好 = 新解码器
         切换媒体会话(当前文件路径, 新解码器, 快照.播放位置,
             快照.状态 = 播放状态.正在播放, 快照.当前视频流, 快照.当前音频流, True)
         Return 解码器说明(新解码器)
@@ -636,7 +651,7 @@ Public NotInheritable Class 播放器控制器
 
         Dim 新模式 = CType((CInt(当前色彩输出) + 1) Mod 3, 色彩输出模式)
         Try
-            目标.设置色彩模式(新模式, SDR峰值尼特, HDR峰值尼特, SDR纸白尼特)
+            目标.设置色彩模式(新模式, SDR峰值尼特, 取得HDR输出峰值参数(新模式), SDR纸白尼特)
             当前色彩输出 = 新模式
             HDR色彩输出偏好 = 新模式
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
@@ -644,6 +659,22 @@ Public NotInheritable Class 播放器控制器
             ' 等待色彩模式变化事件后，再基于新快照给出最终提示，避免把已成功的 HDR 误报为回退。
         Catch ex As 播放器异常
             RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法切换 HDR 模式"))
+        End Try
+    End Sub
+
+    Public Sub 设置HDR峰值亮度(value As Single)
+        If Not Single.IsFinite(value) OrElse value < 0 OrElse value > 10000 Then
+            Throw New ArgumentOutOfRangeException(NameOf(value))
+        End If
+        当前HDR输出峰值尼特 = value
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing OrElse 当前色彩输出 <> 色彩输出模式.峰值映射HDR Then Return
+        Try
+            目标.设置色彩模式(当前色彩输出, SDR峰值尼特,
+                         取得HDR输出峰值参数(当前色彩输出), SDR纸白尼特)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用 HDR 峰值亮度"))
         End Try
     End Sub
 
@@ -858,11 +889,18 @@ Public NotInheritable Class 播放器控制器
             .解码器 = 解码器,
             .色彩模式 = 色彩模式,
             .SDR峰值尼特 = SDR峰值尼特,
-            .HDR峰值尼特 = HDR峰值尼特,
+            .HDR峰值尼特 = 取得HDR输出峰值参数(色彩模式),
             .SDR纸白尼特 = SDR纸白尼特,
             .输出窗口句柄 = IntPtr.Zero,
             .事件同步上下文 = 事件同步上下文
         })
+    End Function
+
+    Friend Function 取得HDR输出峰值参数(色彩模式 As 色彩输出模式) As Single
+        ' 这是托管/原生色彩管线的单位和所有权边界：该值描述 HDR 交换链的
+        ' 目标显示峰值，不是 HDR 源峰值，更不能参与 HDR -> SDR 的 BT.2390 映射。
+        If 色彩模式 = 色彩输出模式.峰值映射HDR Then Return 当前HDR输出峰值尼特
+        Return 0.0F
     End Function
 
     Private Sub 恢复流选择(目标 As 播放器会话, 信息 As 媒体信息, 视频流 As Integer, 音频流 As Integer)

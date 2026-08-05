@@ -1,3 +1,4 @@
+Imports System.Runtime.InteropServices
 Imports System.Threading
 
 Friend Enum 定时文字图层内容
@@ -19,9 +20,11 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     Private ReadOnly 字幕提供器 As Func(Of 外部字幕轨道)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
     Private ReadOnly 弹幕提供器 As Func(Of 弹幕资料库)
-    Private ReadOnly 弹幕配置 As 弹幕显示配置
+    Private 弹幕配置 As 弹幕显示配置
     Private ReadOnly 图层内容 As 定时文字图层内容
     Private ReadOnly SRT绘制项 As New List(Of SRT字幕绘制项)()
+    Private ReadOnly SRT行测量 As New List(Of 字幕行测量结果)()
+    Private ReadOnly SRT测量缓存 As New Dictionary(Of 字幕行测量键, 字幕行测量结果)()
     Private ReadOnly SUP绘制项 As New List(Of SUP字幕绘制项)(1)
     Private ReadOnly 弹幕绘制项 As New List(Of 弹幕绘制项)(100)
     Private ReadOnly 图层命令 As New List(Of 定时文字命令)()
@@ -40,9 +43,61 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     Private 上一时间轴代次 As ULong
     Private 时间轴代次有效 As Boolean
     Private ReadOnly 生命周期锁 As New Object()
+    Private ReadOnly 弹幕配置锁 As New Object()
     Private ReadOnly 刷新空闲 As New ManualResetEventSlim(True)
     Private 活动刷新数 As Integer
     Private 已释放标志 As Integer
+
+    Private Structure 字幕行测量键
+        Implements IEquatable(Of 字幕行测量键)
+
+        Public Sub New(文本值 As String, 字体值 As String, 字号值 As Single, 样式值 As FontStyle,
+                       宽度值 As Single, 描边值 As Single, 阴影值 As Single, 阴影有效值 As Boolean)
+            文本 = 文本值
+            字体 = 字体值
+            字号位元 = BitConverter.SingleToInt32Bits(字号值)
+            样式 = CInt(样式值)
+            宽度位元 = BitConverter.SingleToInt32Bits(宽度值)
+            描边位元 = BitConverter.SingleToInt32Bits(描边值)
+            阴影位元 = BitConverter.SingleToInt32Bits(阴影值)
+            阴影有效 = 阴影有效值
+        End Sub
+
+        Private ReadOnly 文本 As String
+        Private ReadOnly 字体 As String
+        Private ReadOnly 字号位元 As Integer
+        Private ReadOnly 样式 As Integer
+        Private ReadOnly 宽度位元 As Integer
+        Private ReadOnly 描边位元 As Integer
+        Private ReadOnly 阴影位元 As Integer
+        Private ReadOnly 阴影有效 As Boolean
+
+        Public Overloads Function Equals(other As 字幕行测量键) As Boolean Implements IEquatable(Of 字幕行测量键).Equals
+            Return String.Equals(文本, other.文本, StringComparison.Ordinal) AndAlso
+                String.Equals(字体, other.字体, StringComparison.Ordinal) AndAlso
+                字号位元 = other.字号位元 AndAlso 样式 = other.样式 AndAlso
+                宽度位元 = other.宽度位元 AndAlso 描边位元 = other.描边位元 AndAlso
+                阴影位元 = other.阴影位元 AndAlso 阴影有效 = other.阴影有效
+        End Function
+
+        Public Overrides Function Equals(obj As Object) As Boolean
+            Return TypeOf obj Is 字幕行测量键 AndAlso Equals(DirectCast(obj, 字幕行测量键))
+        End Function
+
+        Public Overrides Function GetHashCode() As Integer
+            Dim hash = HashCode.Combine(文本, 字体, 字号位元, 样式, 宽度位元, 描边位元, 阴影位元)
+            Return HashCode.Combine(hash, 阴影有效)
+        End Function
+    End Structure
+
+    Private Structure 字幕行测量结果
+        Public Sub New(布局高度值 As Single, 可见底部值 As Single)
+            布局高度 = 布局高度值
+            可见底部 = 可见底部值
+        End Sub
+        Public ReadOnly 布局高度 As Single
+        Public ReadOnly 可见底部 As Single
+    End Structure
 
     Friend Sub New(画面控件 As 播放器画面控件, 快照提供器 As Func(Of 播放器快照),
                    字幕提供器 As Func(Of 外部字幕轨道),
@@ -172,15 +227,23 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
             End Try
         End If
         If 图层内容 <> 定时文字图层内容.仅字幕 Then
-            If 时间轴代次有效 AndAlso 时间轴代次 <> 上一时间轴代次 Then
-                当前弹幕调度器?.重置()
-            End If
-            上一时间轴代次 = 时间轴代次
-            时间轴代次有效 = True
-            ' 横向穿过整个透明图层；字号、行高和上下边距仍以视频高度缩放。
-            Dim 弹幕区域 As New 视频显示区域(0.0F, 区域.Y像素, 客户区大小.Width,
-                区域.高度像素, 区域.缩放系数, 区域.DPI)
-            生成弹幕命令(弹幕提供器?.Invoke(), 播放位置, 弹幕区域)
+            SyncLock 弹幕配置锁
+                If 时间轴代次有效 AndAlso 时间轴代次 <> 上一时间轴代次 Then
+                    当前弹幕调度器?.重置()
+                End If
+                上一时间轴代次 = 时间轴代次
+                时间轴代次有效 = True
+                ' 横向穿过整个透明图层；字号、行高和上下边距仍以视频高度缩放。
+                Dim 弹幕缩放 = 区域.高度像素 / 弹幕配置.基准视频高度
+                Select Case 弹幕配置.尺寸缩放方式
+                    Case 1 : 弹幕缩放 = 客户区大小.Width / 1920.0F
+                    Case 2 : 弹幕缩放 = 客户区大小.Height / 弹幕配置.基准视频高度
+                    Case 3 : 弹幕缩放 = 1.0F
+                End Select
+                Dim 弹幕区域 As New 视频显示区域(0.0F, 区域.Y像素, 客户区大小.Width,
+                    区域.高度像素, 弹幕缩放, 区域.DPI)
+                生成弹幕命令(弹幕提供器?.Invoke(), 播放位置, 弹幕区域)
+            End SyncLock
         End If
         If 图层内容 <> 定时文字图层内容.仅弹幕 Then
             RaiseEvent 绘制扩展定时文字(Me,
@@ -209,6 +272,20 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
 
     Friend Sub 使图层失效()
         Volatile.Write(图层签名有效标志, 0)
+    End Sub
+
+    Friend Sub 应用弹幕设置(value As 弹幕显示配置)
+        If 图层内容 = 定时文字图层内容.仅字幕 Then Return
+        ArgumentNullException.ThrowIfNull(value)
+        value.验证()
+        SyncLock 弹幕配置锁
+            弹幕配置 = value
+            当前目标帧率 = CInt(Math.Round(value.目标帧率, MidpointRounding.AwayFromZero))
+            当前弹幕调度器 = Nothing
+            当前弹幕资料库 = Nothing
+        End SyncLock
+        更新刷新间隔()
+        使图层失效()
     End Sub
 
     Private Shared Function 计算图层签名(画布大小 As Size,
@@ -268,23 +345,61 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     Private Sub 生成SRT命令(生成器 As SRT字幕帧生成器, 时间 As TimeSpan, 区域 As 视频显示区域)
         If 生成器 Is Nothing Then Return
         SRT绘制项.Clear()
-        生成器.生成帧(时间, 区域, SRT绘制项)
+        生成器.生成帧(时间, 区域, SRT绘制项, 缓存客户区宽度, 缓存客户区高度)
         For Each 项 In SRT绘制项
-            Dim 总高度 = 项.行.Sum(Function(行) 行.字号像素 * 1.24F)
-            If 项.行.Count > 1 Then 总高度 += 项.行间距像素 * (项.行.Count - 1)
-            Dim y = 项.Y底部像素 - 总高度
+            SRT行测量.Clear()
             For Each 行 In 项.行
-                Dim 行高 = 行.字号像素 * 1.24F
+                SRT行测量.Add(测量字幕行(行, 区域.宽度像素))
+            Next
+            If SRT行测量.Count = 0 Then Continue For
+            Dim 总高度 = SRT行测量.Sum(Function(测量) 测量.布局高度)
+            If 项.行.Count > 1 Then 总高度 += 项.行间距像素 * (项.行.Count - 1)
+            ' 底部边距针对最终可见像素，不是字号经验系数。这里的布局高度、字形
+            ' overhang、描边和阴影均来自渲染所调用的同一个 DirectWrite 布局函数。
+            Dim 最后一行测量 = SRT行测量(SRT行测量.Count - 1)
+            总高度 += Math.Max(最后一行测量.可见底部 - 最后一行测量.布局高度, 0.0F)
+            Dim y = 项.Y底部像素 - 总高度
+            For 行索引 = 0 To 项.行.Count - 1
+                Dim 行 = 项.行(行索引)
+                Dim 行高 = SRT行测量(行索引).布局高度
                 添加文字命令(行.文本, 行.字体, 行.字号像素,
-                    New RectangleF(区域.X像素, y, 区域.宽度像素, 行高 + 4.0F),
+                    New RectangleF(区域.X像素, y, 区域.宽度像素, 行高),
                     行.颜色ARGB, 行.描边颜色ARGB, 行.描边宽度像素,
                     定时文字对齐.居中, 定时文字对齐.靠前,
                     阴影色ARGB:=行.阴影颜色ARGB,
+                    样式:=CType(行.字体样式, 定时文字样式),
                     阴影X偏移:=行.阴影偏移像素, 阴影Y偏移:=行.阴影偏移像素)
                 y += 行高 + 项.行间距像素
             Next
         Next
     End Sub
+
+    Private Function 测量字幕行(行 As SRT字幕绘制行, 最大宽度 As Single) As 字幕行测量结果
+        Dim 有描边 = 行.描边宽度像素 > 0 AndAlso (行.描边颜色ARGB >> 24) <> 0UI
+        Dim 有阴影 = (行.阴影颜色ARGB >> 24) <> 0UI
+        Dim 实际描边 = If(有描边, 行.描边宽度像素, 0.0F)
+        Dim 限定宽度 = Math.Max(最大宽度, 1.0F)
+        Dim 键 As New 字幕行测量键(行.文本, 行.字体, 行.字号像素, 行.字体样式,
+                              限定宽度, 实际描边, 行.阴影偏移像素, 有阴影)
+        Dim 已有 As 字幕行测量结果
+        If SRT测量缓存.TryGetValue(键, 已有) Then Return 已有
+
+        Dim 原生 As New 原生定时文字测量 With {
+            .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字测量)()), .版本 = 1UI
+        }
+        Dim 结果 = 播放器原生接口.FFF3FP_MeasureTimedText(
+            行.文本, 行.字体, 行.字号像素, CType(行.字体样式, 原生定时文字标志),
+            限定宽度, 实际描边, 行.阴影偏移像素, 行.阴影偏移像素,
+            If(有阴影, 1UI, 0UI), 原生)
+        If 结果 <> 原生播放器结果.成功 OrElse Not Single.IsFinite(原生.布局高度) OrElse
+            原生.布局高度 <= 0 OrElse Not Single.IsFinite(原生.可见底部) Then
+            Throw New InvalidOperationException($"DirectWrite 无法测量字幕行（{结果}）。")
+        End If
+        已有 = New 字幕行测量结果(原生.布局高度, 原生.可见底部)
+        If SRT测量缓存.Count >= 1024 Then SRT测量缓存.Clear()
+        SRT测量缓存.Add(键, 已有)
+        Return 已有
+    End Function
 
     Private Sub 生成ASS特效命令(生成器 As ASS特效字幕帧生成器, 时间 As TimeSpan,
                             区域 As 视频显示区域)
@@ -337,6 +452,7 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
                 项.颜色ARGB, 弹幕配置.描边颜色ARGB,
                 弹幕配置.描边宽度 * 项.字号像素 / 弹幕配置.字号,
                 定时文字对齐.靠前, 定时文字对齐.靠前,
+                样式:=CType(弹幕配置.字体样式, 定时文字样式),
                 阴影色ARGB:=弹幕配置.阴影颜色ARGB,
                 阴影X偏移:=弹幕配置.阴影偏移 * 项.字号像素 / 弹幕配置.字号,
                 阴影Y偏移:=弹幕配置.阴影偏移 * 项.字号像素 / 弹幕配置.字号)

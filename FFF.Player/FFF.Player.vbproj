@@ -77,7 +77,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FFF.Native\FFF.Native.vcxproj" Condition="'$(MSBuildRuntimeType)' != 'Core'" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\FFF.Native\FFF.Native.vcxproj" Condition="'$(MSBuildRuntimeType)' != 'Core'" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true">
+      <!-- FFF.Native has no AnyCPU configuration. Pin this edge so a direct
+           managed-project build cannot silently leave an older x64 DLL in OutDir. -->
+      <SetPlatform>Platform=x64</SetPlatform>
+    </ProjectReference>
   </ItemGroup>
 
   <ItemGroup Condition="'$(PublishSingleFile)' == 'true'">

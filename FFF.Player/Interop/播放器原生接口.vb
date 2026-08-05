@@ -211,6 +211,15 @@ Friend Structure 原生定时文字命令
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生定时文字测量
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 布局高度 As Single
+    Public 可见顶部 As Single
+    Public 可见底部 As Single
+End Structure
+
+<StructLayout(LayoutKind.Sequential)>
 Friend Structure 原生定时文字图层
     Public 大小 As UInteger
     Public 版本 As UInteger
@@ -386,6 +395,14 @@ Friend Module 播放器原生接口
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl)>
     Friend Function FFF3FP_GetLyricsStatus(播放器 As 播放器原生句柄, ByRef 状态 As 原生定时文字状态) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_MeasureTimedText(
+        <MarshalAs(UnmanagedType.LPUTF8Str)> 文本UTF8 As String,
+        <MarshalAs(UnmanagedType.LPUTF8Str)> 字体UTF8 As String,
+        字号 As Single, 标志 As 原生定时文字标志, 最大宽度 As Single,
+        描边宽度 As Single, 阴影X偏移 As Single, 阴影Y偏移 As Single,
+        阴影有效 As UInteger, ByRef 测量 As 原生定时文字测量) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetMediaInfo(播放器 As 播放器原生句柄, 输出UTF8 As IntPtr, 输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果

@@ -3,6 +3,7 @@ Imports System.Runtime.InteropServices
 Imports System.Threading
 
 Public Class Form1
+    Public Shared Property 当前主窗体 As Form1
     Private Const 跳转秒数 As Integer = 5
     Private Shared ReadOnly 核心文件名称 As String() = {"FFF.Native.dll"}
     Private Shared ReadOnly FFmpeg核心文件前缀 As String() = {
@@ -26,6 +27,7 @@ Public Class Form1
     Private 全屏交互控制器 As 播放器全屏交互控制器
     Private 流选择器 As 播放器流选择器
     Private 按钮图标 As 播放器按钮图标资源
+    Private 设置窗口 As Form设置
     Private 当前弹幕路径 As String = String.Empty
     Private 正在关闭 As Boolean
     Private 核心文件检查通过 As Boolean
@@ -34,10 +36,17 @@ Public Class Form1
     Private Event 方向键快捷键已请求 As KeyEventHandler
 
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        当前主窗体 = Me
         LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Outline
         ThisIsYourWindow1.Attach(Me)
         KeyPreview = True
         MinimumSize = New Size(875, 500)
+        更新弹幕按钮可见性()
+        SP加载器.启动时加载()
+        设置.启动时加载设置()
+        字体控制.更新所有控件字体属性()
+        设置.应用SP个性化设置()
+        设置.加载SP自定义图标()
 
         Dim 缺失文件 = 核心文件名称.Where(Function(文件名) Not 可以加载核心文件(文件名)).
             Concat(FFmpeg核心文件前缀.
@@ -61,7 +70,10 @@ Public Class Form1
         MP_DX视频容器.Controls.Add(画面控件)
         AddHandler 画面控件.文件拖入, AddressOf 画面控件_文件拖入
 
-        播放控制器 = New 播放器控制器(Function() 画面控件.输出窗口句柄, SynchronizationContext.Current)
+        播放控制器 = New 播放器控制器(
+            Function() 画面控件.输出窗口句柄, SynchronizationContext.Current,
+            CType(设置.实例对象.解码方式, 解码模式))
+        播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
         剪辑区间控制器 = New 播放器剪辑区间控制器(播放控制器, 画面控件,
             MB_剪辑区间模式, MP_剪辑区间操作容器, P_剪辑区间进度条容器,
             P_剪辑区间按钮容器, MB_传给3FUI)
@@ -74,11 +86,14 @@ Public Class Form1
             定时文字图层内容.仅字幕)
         弹幕图层呈现器 = New 播放器定时文字图层呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, Function() Nothing,
-            AddressOf 播放控制器.提交弹幕图层, Function() 播放控制器.当前弹幕,
-            Nothing, 定时文字图层内容.仅弹幕)
+            AddressOf 播放控制器.提交弹幕图层,
+            Function() If(设置.实例对象.弹幕已启用, 播放控制器.当前弹幕, Nothing),
+            设置.实例对象.创建弹幕显示配置(), 定时文字图层内容.仅弹幕)
         歌词图层呈现器 = New 播放器歌词呈现器(画面控件,
-            AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前歌词,
-            Function() 播放控制器.当前音乐有封面, AddressOf 播放控制器.提交歌词图层)
+            AddressOf 播放控制器.安全读取快照,
+            Function() If(设置.实例对象.启用歌词支持, 播放控制器.当前歌词, Nothing),
+            Function() 设置.实例对象.渲染封面图 AndAlso 播放控制器.当前音乐有封面,
+            AddressOf 播放控制器.提交歌词图层, AddressOf 创建歌词呈现设置)
         信息图层呈现器 = New 播放器信息图层呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, AddressOf 播放控制器.安全读取媒体信息,
             Function() 播放控制器.当前媒体路径, Function() 播放控制器.当前字幕,
@@ -120,6 +135,7 @@ Public Class Form1
         AddHandler MB_停止.Click, AddressOf 剪辑区间控制器.停止已点击
         AddHandler 方向键快捷键已请求, AddressOf 剪辑区间控制器.处理方向键快捷键
         界面呈现器.启动()
+        更新弹幕按钮状态()
         核心文件检查通过 = True
     End Sub
 
@@ -243,13 +259,14 @@ Public Class Form1
             Return
         End If
 
-        BeginInvoke(New MethodInvoker(AddressOf 窗口布局控制器.校正初始视频比例))
+        BeginInvoke(Sub() 窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸()))
         Dim 启动文件 = Environment.GetCommandLineArgs().Skip(1).FirstOrDefault(Function(x) File.Exists(x))
         If Not String.IsNullOrEmpty(启动文件) Then BeginInvoke(Sub() 打开或替换文件(启动文件))
     End Sub
 
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
         正在关闭 = True
+        设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
         窗口布局控制器?.释放()
@@ -263,6 +280,8 @@ Public Class Form1
         播放器按钮图标资源.清除(MB_播放和暂停, MB_停止, MB_倒退或上一个, MB_快进或下一个,
             MB_打开文件, MB_软件设置, MB_播放列表, MB_剪辑区间模式, MB_查看当前媒体信息, MB_选择流)
         按钮图标?.Dispose()
+        设置.释放SP资源()
+        当前主窗体 = Nothing
     End Sub
 
     Private Sub ThisIsYourWindow1_FullScreenChanged(
@@ -331,6 +350,7 @@ Public Class Form1
     Private Sub 播放控制器_媒体已打开(sender As Object, e As 播放器媒体事件参数)
         If 正在关闭 Then Return
         当前弹幕路径 = String.Empty
+        更新弹幕按钮可见性()
         字幕图层呈现器?.使图层失效()
         弹幕图层呈现器?.使图层失效()
         歌词图层呈现器?.使图层失效()
@@ -446,9 +466,56 @@ Public Class Form1
     Private Sub 播放控制器_外部弹幕已加载(sender As Object, e As 播放器弹幕事件参数)
         If 正在关闭 Then Return
         当前弹幕路径 = e.路径
+        更新弹幕按钮可见性()
         弹幕图层呈现器?.使图层失效()
         信息图层呈现器?.显示操作信息($"已加载 {e.数量} 条弹幕 · {Path.GetFileName(e.路径)}", &HFFFFA85AUI)
         信息图层呈现器?.使内容失效()
+    End Sub
+
+    Friend Sub 应用HDR峰值设置()
+        播放控制器?.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
+    End Sub
+
+    Friend Sub 应用字幕设置()
+        播放控制器?.当前字幕?.SRT生成器?.设置样式(设置.实例对象.创建SRT字幕样式())
+        字幕图层呈现器?.使图层失效()
+    End Sub
+
+    Friend Sub 应用弹幕设置()
+        弹幕图层呈现器?.应用弹幕设置(设置.实例对象.创建弹幕显示配置())
+        更新弹幕按钮状态()
+    End Sub
+
+    Friend Sub 应用歌词设置()
+        歌词图层呈现器?.使图层失效()
+    End Sub
+
+    Private Function 创建歌词呈现设置() As 歌词呈现设置
+        Return New 歌词呈现设置(20.0F,
+            If(设置.实例对象.渲染封面图毛玻璃背景, 5, 0), 4, &H78000000UI,
+            40.0F, 60.0F, 20.0F, 0.0F, 7.5F)
+    End Function
+
+    Private Sub 更新弹幕按钮状态()
+        MB_弹幕开关.ForeColor = If(设置.实例对象.弹幕已启用,
+                                  Color.FromArgb(251, 114, 153), Color.Silver)
+    End Sub
+
+    Private Sub 更新弹幕按钮可见性()
+        Dim 当前弹幕 = 播放控制器?.当前弹幕
+        Dim 有可用弹幕 = 当前弹幕 IsNot Nothing AndAlso 当前弹幕.数量 > 0
+        MB_弹幕开关.Visible = 有可用弹幕
+        JEC_弹幕开关前面的空白占位.Visible = 有可用弹幕
+    End Sub
+
+    Private Sub MB_弹幕开关_Click(sender As Object, e As EventArgs) Handles MB_弹幕开关.Click
+        设置.实例对象.弹幕已启用 = Not 设置.实例对象.弹幕已启用
+        弹幕图层呈现器?.使图层失效()
+        更新弹幕按钮状态()
+    End Sub
+
+    Friend Sub 设置窗口应用字体(fontName As String)
+        设置窗口?.应用字体(fontName)
     End Sub
 
     Private Sub 播放控制器_外部歌词已加载(sender As Object, e As 播放器歌词事件参数)
@@ -486,7 +553,9 @@ Public Class Form1
     End Sub
 
     Private Sub MB_软件解码或硬件解码_Click(sender As Object, e As EventArgs) Handles MB_软件解码或硬件解码.Click
-        播放控制器.切换解码器()
+        If Not String.IsNullOrEmpty(播放控制器.切换解码器()) Then
+            设置.实例对象.解码方式 = CInt(播放控制器.解码器偏好)
+        End If
     End Sub
 
     Private Sub MB_HDR模式_Click(sender As Object, e As EventArgs) Handles MB_HDR模式.Click
@@ -553,6 +622,7 @@ Public Class Form1
     End Sub
 
     Private Sub MB_软件设置_Click(sender As Object, e As EventArgs) Handles MB_软件设置.Click
-        Form设置.Show()
+        If 设置窗口 Is Nothing OrElse 设置窗口.IsDisposed Then 设置窗口 = New Form设置()
+        设置窗口.显示窗口(Me)
     End Sub
 End Class

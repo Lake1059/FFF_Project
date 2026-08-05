@@ -35,6 +35,8 @@ Partial Class Form1
         ModernPanel1 = New LakeUI.ModernPanel()
         Panel3 = New Panel()
         Panel4 = New Panel()
+        MB_弹幕开关 = New LakeUI.ModernButton()
+        JEC_弹幕开关前面的空白占位 = New LakeUI.JustEmptyControl()
         MB_当前声道数显示 = New LakeUI.ModernButton()
         JEC_当前声道数显示前面的空白占位 = New LakeUI.JustEmptyControl()
         MB_当前音频编码显示 = New LakeUI.ModernButton()
@@ -168,9 +170,9 @@ Partial Class Form1
         ModernPanel1.Controls.Add(Panel2)
         ModernPanel1.Controls.Add(JustEmptyControl1)
         ModernPanel1.Dock = DockStyle.Bottom
-        ModernPanel1.Location = New Point(0, 446)
+        ModernPanel1.Location = New Point(0, 513)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Size = New Size(844, 65)
+        ModernPanel1.Size = New Size(883, 65)
         ModernPanel1.TabIndex = 0
         ' 
         ' Panel3
@@ -202,11 +204,13 @@ Partial Class Form1
         Panel3.Dock = DockStyle.Fill
         Panel3.Location = New Point(0, 25)
         Panel3.Name = "Panel3"
-        Panel3.Size = New Size(844, 40)
+        Panel3.Size = New Size(883, 40)
         Panel3.TabIndex = 33
         ' 
         ' Panel4
         ' 
+        Panel4.Controls.Add(MB_弹幕开关)
+        Panel4.Controls.Add(JEC_弹幕开关前面的空白占位)
         Panel4.Controls.Add(MB_当前声道数显示)
         Panel4.Controls.Add(JEC_当前声道数显示前面的空白占位)
         Panel4.Controls.Add(MB_当前音频编码显示)
@@ -220,8 +224,36 @@ Partial Class Form1
         Panel4.Location = New Point(362, 0)
         Panel4.Name = "Panel4"
         Panel4.Padding = New Padding(10, 8, 10, 8)
-        Panel4.Size = New Size(272, 40)
+        Panel4.Size = New Size(311, 40)
         Panel4.TabIndex = 51
+        ' 
+        ' MB_弹幕开关
+        ' 
+        MB_弹幕开关.BackColor = Color.Transparent
+        MB_弹幕开关.BackColor1 = Color.FromArgb(CByte(40), CByte(0), CByte(0), CByte(0))
+        MB_弹幕开关.BorderColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_弹幕开关.BorderRadius = 5
+        MB_弹幕开关.Dock = DockStyle.Left
+        MB_弹幕开关.Font = New Font("Microsoft YaHei UI", 9F)
+        MB_弹幕开关.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_弹幕开关.Location = New Point(235, 8)
+        MB_弹幕开关.Margin = New Padding(2)
+        MB_弹幕开关.Name = "MB_弹幕开关"
+        MB_弹幕开关.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_弹幕开关.Size = New Size(40, 24)
+        MB_弹幕开关.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_弹幕开关.TabIndex = 44
+        MB_弹幕开关.Text = "弹幕"
+        MB_弹幕开关.Visible = False
+        ' 
+        ' JEC_弹幕开关前面的空白占位
+        ' 
+        JEC_弹幕开关前面的空白占位.Dock = DockStyle.Left
+        JEC_弹幕开关前面的空白占位.Location = New Point(230, 8)
+        JEC_弹幕开关前面的空白占位.Name = "JEC_弹幕开关前面的空白占位"
+        JEC_弹幕开关前面的空白占位.Size = New Size(5, 24)
+        JEC_弹幕开关前面的空白占位.TabIndex = 43
+        JEC_弹幕开关前面的空白占位.Visible = False
         ' 
         ' MB_当前声道数显示
         ' 
@@ -345,7 +377,7 @@ Partial Class Form1
         ' 
         JustEmptyControl19.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
         JustEmptyControl19.Dock = DockStyle.Right
-        JustEmptyControl19.Location = New Point(634, 0)
+        JustEmptyControl19.Location = New Point(673, 0)
         JustEmptyControl19.Name = "JustEmptyControl19"
         JustEmptyControl19.Size = New Size(2, 40)
         JustEmptyControl19.TabIndex = 55
@@ -357,7 +389,7 @@ Partial Class Form1
         MB_选择流.BorderSize = 0
         MB_选择流.Dock = DockStyle.Right
         MB_选择流.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
-        MB_选择流.Location = New Point(636, 0)
+        MB_选择流.Location = New Point(675, 0)
         MB_选择流.Margin = New Padding(2)
         MB_选择流.Name = "MB_选择流"
         MB_选择流.Padding = New Padding(11)
@@ -371,7 +403,7 @@ Partial Class Form1
         ' 
         JustEmptyControl18.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
         JustEmptyControl18.Dock = DockStyle.Right
-        JustEmptyControl18.Location = New Point(676, 0)
+        JustEmptyControl18.Location = New Point(715, 0)
         JustEmptyControl18.Name = "JustEmptyControl18"
         JustEmptyControl18.Size = New Size(2, 40)
         JustEmptyControl18.TabIndex = 53
@@ -383,7 +415,7 @@ Partial Class Form1
         MB_查看当前媒体信息.BorderSize = 0
         MB_查看当前媒体信息.Dock = DockStyle.Right
         MB_查看当前媒体信息.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
-        MB_查看当前媒体信息.Location = New Point(678, 0)
+        MB_查看当前媒体信息.Location = New Point(717, 0)
         MB_查看当前媒体信息.Margin = New Padding(2)
         MB_查看当前媒体信息.Name = "MB_查看当前媒体信息"
         MB_查看当前媒体信息.Padding = New Padding(11)
@@ -397,7 +429,7 @@ Partial Class Form1
         ' 
         JustEmptyControl13.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
         JustEmptyControl13.Dock = DockStyle.Right
-        JustEmptyControl13.Location = New Point(718, 0)
+        JustEmptyControl13.Location = New Point(757, 0)
         JustEmptyControl13.Name = "JustEmptyControl13"
         JustEmptyControl13.Size = New Size(2, 40)
         JustEmptyControl13.TabIndex = 50
@@ -409,7 +441,7 @@ Partial Class Form1
         MB_剪辑区间模式.BorderSize = 0
         MB_剪辑区间模式.Dock = DockStyle.Right
         MB_剪辑区间模式.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
-        MB_剪辑区间模式.Location = New Point(720, 0)
+        MB_剪辑区间模式.Location = New Point(759, 0)
         MB_剪辑区间模式.Margin = New Padding(2)
         MB_剪辑区间模式.Name = "MB_剪辑区间模式"
         MB_剪辑区间模式.Padding = New Padding(11)
@@ -423,7 +455,7 @@ Partial Class Form1
         ' 
         JustEmptyControl12.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
         JustEmptyControl12.Dock = DockStyle.Right
-        JustEmptyControl12.Location = New Point(760, 0)
+        JustEmptyControl12.Location = New Point(799, 0)
         JustEmptyControl12.Name = "JustEmptyControl12"
         JustEmptyControl12.Size = New Size(2, 40)
         JustEmptyControl12.TabIndex = 48
@@ -435,7 +467,7 @@ Partial Class Form1
         MB_播放列表.BorderSize = 0
         MB_播放列表.Dock = DockStyle.Right
         MB_播放列表.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
-        MB_播放列表.Location = New Point(762, 0)
+        MB_播放列表.Location = New Point(801, 0)
         MB_播放列表.Margin = New Padding(2)
         MB_播放列表.Name = "MB_播放列表"
         MB_播放列表.Padding = New Padding(10)
@@ -449,7 +481,7 @@ Partial Class Form1
         ' 
         JustEmptyControl11.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
         JustEmptyControl11.Dock = DockStyle.Right
-        JustEmptyControl11.Location = New Point(802, 0)
+        JustEmptyControl11.Location = New Point(841, 0)
         JustEmptyControl11.Name = "JustEmptyControl11"
         JustEmptyControl11.Size = New Size(2, 40)
         JustEmptyControl11.TabIndex = 46
@@ -461,7 +493,7 @@ Partial Class Form1
         MB_软件设置.BorderSize = 0
         MB_软件设置.Dock = DockStyle.Right
         MB_软件设置.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
-        MB_软件设置.Location = New Point(804, 0)
+        MB_软件设置.Location = New Point(843, 0)
         MB_软件设置.Margin = New Padding(2)
         MB_软件设置.Name = "MB_软件设置"
         MB_软件设置.Padding = New Padding(10)
@@ -629,7 +661,7 @@ Partial Class Form1
         JustEmptyControl3.Dock = DockStyle.Top
         JustEmptyControl3.Location = New Point(0, 23)
         JustEmptyControl3.Name = "JustEmptyControl3"
-        JustEmptyControl3.Size = New Size(844, 2)
+        JustEmptyControl3.Size = New Size(883, 2)
         JustEmptyControl3.TabIndex = 30
         ' 
         ' Panel2
@@ -641,14 +673,14 @@ Partial Class Form1
         Panel2.Dock = DockStyle.Top
         Panel2.Location = New Point(0, 1)
         Panel2.Name = "Panel2"
-        Panel2.Size = New Size(844, 22)
+        Panel2.Size = New Size(883, 22)
         Panel2.TabIndex = 31
         ' 
         ' JustEmptyControl4
         ' 
         JustEmptyControl4.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
         JustEmptyControl4.Dock = DockStyle.Right
-        JustEmptyControl4.Location = New Point(732, 0)
+        JustEmptyControl4.Location = New Point(771, 0)
         JustEmptyControl4.Name = "JustEmptyControl4"
         JustEmptyControl4.Size = New Size(2, 22)
         JustEmptyControl4.TabIndex = 32
@@ -664,7 +696,7 @@ Partial Class Form1
         ETB_媒体进度条.Margin = New Padding(2, 2, 2, 2)
         ETB_媒体进度条.Name = "ETB_媒体进度条"
         ETB_媒体进度条.Padding = New Padding(8, 0, 8, 0)
-        ETB_媒体进度条.Size = New Size(734, 22)
+        ETB_媒体进度条.Size = New Size(773, 22)
         ETB_媒体进度条.TabIndex = 30
         ETB_媒体进度条.ThumbBorderWidth = 0
         ETB_媒体进度条.ThumbColor = Color.FromArgb(CByte(220), CByte(255), CByte(255), CByte(255))
@@ -684,7 +716,7 @@ Partial Class Form1
         ETB_音量条.LabelColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_音量条.LabelLineColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_音量条.LabelLineLength = 16
-        ETB_音量条.Location = New Point(734, 0)
+        ETB_音量条.Location = New Point(773, 0)
         ETB_音量条.Margin = New Padding(2, 2, 2, 2)
         ETB_音量条.Name = "ETB_音量条"
         ETB_音量条.Padding = New Padding(8, 0, 8, 0)
@@ -707,7 +739,7 @@ Partial Class Form1
         JustEmptyControl1.Dock = DockStyle.Top
         JustEmptyControl1.Location = New Point(0, 0)
         JustEmptyControl1.Name = "JustEmptyControl1"
-        JustEmptyControl1.Size = New Size(844, 1)
+        JustEmptyControl1.Size = New Size(883, 1)
         JustEmptyControl1.TabIndex = 1
         ' 
         ' MP_剪辑区间操作容器
@@ -719,9 +751,9 @@ Partial Class Form1
         MP_剪辑区间操作容器.Controls.Add(P_剪辑区间按钮容器)
         MP_剪辑区间操作容器.Controls.Add(JustEmptyControl2)
         MP_剪辑区间操作容器.Dock = DockStyle.Bottom
-        MP_剪辑区间操作容器.Location = New Point(0, 386)
+        MP_剪辑区间操作容器.Location = New Point(0, 453)
         MP_剪辑区间操作容器.Name = "MP_剪辑区间操作容器"
-        MP_剪辑区间操作容器.Size = New Size(844, 60)
+        MP_剪辑区间操作容器.Size = New Size(883, 60)
         MP_剪辑区间操作容器.TabIndex = 1
         MP_剪辑区间操作容器.Visible = False
         ' 
@@ -730,7 +762,7 @@ Partial Class Form1
         P_剪辑区间进度条容器.Dock = DockStyle.Fill
         P_剪辑区间进度条容器.Location = New Point(0, 35)
         P_剪辑区间进度条容器.Name = "P_剪辑区间进度条容器"
-        P_剪辑区间进度条容器.Size = New Size(844, 25)
+        P_剪辑区间进度条容器.Size = New Size(883, 25)
         P_剪辑区间进度条容器.TabIndex = 2
         ' 
         ' JustEmptyControl17
@@ -739,7 +771,7 @@ Partial Class Form1
         JustEmptyControl17.Dock = DockStyle.Top
         JustEmptyControl17.Location = New Point(0, 33)
         JustEmptyControl17.Name = "JustEmptyControl17"
-        JustEmptyControl17.Size = New Size(844, 2)
+        JustEmptyControl17.Size = New Size(883, 2)
         JustEmptyControl17.TabIndex = 31
         ' 
         ' P_剪辑区间按钮容器
@@ -765,7 +797,7 @@ Partial Class Form1
         P_剪辑区间按钮容器.Dock = DockStyle.Top
         P_剪辑区间按钮容器.Location = New Point(0, 1)
         P_剪辑区间按钮容器.Name = "P_剪辑区间按钮容器"
-        P_剪辑区间按钮容器.Size = New Size(844, 32)
+        P_剪辑区间按钮容器.Size = New Size(883, 32)
         P_剪辑区间按钮容器.TabIndex = 1
         ' 
         ' MB_传给3FUI
@@ -779,7 +811,7 @@ Partial Class Form1
         MB_传给3FUI.Margin = New Padding(2)
         MB_传给3FUI.Name = "MB_传给3FUI"
         MB_传给3FUI.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MB_传给3FUI.Size = New Size(172, 32)
+        MB_传给3FUI.Size = New Size(211, 32)
         MB_传给3FUI.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_传给3FUI.TabIndex = 44
         MB_传给3FUI.Text = "传给 3FUI"
@@ -994,7 +1026,7 @@ Partial Class Form1
         JustEmptyControl2.Dock = DockStyle.Top
         JustEmptyControl2.Location = New Point(0, 0)
         JustEmptyControl2.Name = "JustEmptyControl2"
-        JustEmptyControl2.Size = New Size(844, 1)
+        JustEmptyControl2.Size = New Size(883, 1)
         JustEmptyControl2.TabIndex = 0
         ' 
         ' MP_DX视频容器
@@ -1003,7 +1035,7 @@ Partial Class Form1
         MP_DX视频容器.Dock = DockStyle.Fill
         MP_DX视频容器.Location = New Point(0, 0)
         MP_DX视频容器.Name = "MP_DX视频容器"
-        MP_DX视频容器.Size = New Size(844, 386)
+        MP_DX视频容器.Size = New Size(883, 453)
         MP_DX视频容器.TabIndex = 2
         ' 
         ' MCB_流选择器
@@ -1049,7 +1081,7 @@ Partial Class Form1
         AutoScaleDimensions = New SizeF(96F, 96F)
         AutoScaleMode = AutoScaleMode.Dpi
         BackColor = Color.Black
-        ClientSize = New Size(844, 511)
+        ClientSize = New Size(883, 578)
         Controls.Add(MP_DX视频容器)
         Controls.Add(MP_剪辑区间操作容器)
         Controls.Add(ModernPanel1)
@@ -1137,5 +1169,7 @@ Partial Class Form1
     Friend WithEvents MB_去入点 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl17 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_流选择器 As LakeUI.ModernContextMenu
+    Friend WithEvents MB_弹幕开关 As LakeUI.ModernButton
+    Friend WithEvents JEC_弹幕开关前面的空白占位 As LakeUI.JustEmptyControl
 
 End Class

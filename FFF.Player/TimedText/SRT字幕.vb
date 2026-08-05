@@ -58,6 +58,19 @@ Public NotInheritable Class SRT字幕样式
     Public Property 行间距 As Single = 8.0F
     Public Property 底部边距 As Single = 54.0F
     Public Property 基准视频高度 As Single = 1080.0F
+    Public Property 第一行字体 As String = String.Empty
+    Public Property 第一行字号 As Single?
+    Public Property 第一行字体样式 As FontStyle?
+    Public Property 第一行颜色ARGB As UInteger?
+    Public Property 第二行字体 As String = String.Empty
+    Public Property 第二行字号 As Single?
+    Public Property 第二行字体样式 As FontStyle?
+    Public Property 第二行颜色ARGB As UInteger?
+    Public Property 其他行字体 As String = String.Empty
+    Public Property 其他行字号 As Single?
+    Public Property 其他行字体样式 As FontStyle?
+    Public Property 底部对齐方式 As Integer
+    Public Property 尺寸缩放方式 As Integer
 
     Friend Sub 验证()
         If String.IsNullOrWhiteSpace(中文字体) Then Throw New ArgumentException("中文字体不能为空。", NameOf(中文字体))
@@ -68,13 +81,19 @@ Public NotInheritable Class SRT字幕样式
         If Not Single.IsFinite(行间距) OrElse 行间距 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(行间距))
         If Not Single.IsFinite(底部边距) OrElse 底部边距 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(底部边距))
         If Not Single.IsFinite(基准视频高度) OrElse 基准视频高度 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(基准视频高度))
+        If 第一行字号.HasValue AndAlso (Not Single.IsFinite(第一行字号.Value) OrElse 第一行字号.Value <= 0) Then Throw New ArgumentOutOfRangeException(NameOf(第一行字号))
+        If 第二行字号.HasValue AndAlso (Not Single.IsFinite(第二行字号.Value) OrElse 第二行字号.Value <= 0) Then Throw New ArgumentOutOfRangeException(NameOf(第二行字号))
+        If 其他行字号.HasValue AndAlso (Not Single.IsFinite(其他行字号.Value) OrElse 其他行字号.Value <= 0) Then Throw New ArgumentOutOfRangeException(NameOf(其他行字号))
+        If 底部对齐方式 < 0 OrElse 底部对齐方式 > 1 Then Throw New ArgumentOutOfRangeException(NameOf(底部对齐方式))
+        If 尺寸缩放方式 < 0 OrElse 尺寸缩放方式 > 3 Then Throw New ArgumentOutOfRangeException(NameOf(尺寸缩放方式))
     End Sub
 End Class
 
 Public NotInheritable Class SRT字幕绘制行
     Friend Sub New(文本值 As String, 字体值 As String, 字号像素值 As Single,
                    颜色值 As UInteger, 描边颜色值 As UInteger, 描边宽度像素值 As Single,
-                   阴影颜色值 As UInteger, 阴影偏移像素值 As Single)
+                   阴影颜色值 As UInteger, 阴影偏移像素值 As Single,
+                   Optional 字体样式值 As FontStyle = FontStyle.Regular)
         文本 = 文本值
         字体 = 字体值
         字号像素 = 字号像素值
@@ -83,6 +102,7 @@ Public NotInheritable Class SRT字幕绘制行
         描边宽度像素 = 描边宽度像素值
         阴影颜色ARGB = 阴影颜色值
         阴影偏移像素 = 阴影偏移像素值
+        字体样式 = 字体样式值
     End Sub
     Public ReadOnly Property 文本 As String
     Public ReadOnly Property 字体 As String
@@ -92,6 +112,7 @@ Public NotInheritable Class SRT字幕绘制行
     Public ReadOnly Property 描边宽度像素 As Single
     Public ReadOnly Property 阴影颜色ARGB As UInteger
     Public ReadOnly Property 阴影偏移像素 As Single
+    Public ReadOnly Property 字体样式 As FontStyle
 End Class
 
 Public NotInheritable Class SRT字幕绘制项
@@ -111,7 +132,7 @@ End Class
 
 Public NotInheritable Class SRT字幕帧生成器
     Private ReadOnly 文档 As SRT字幕文档
-    Private ReadOnly 样式 As SRT字幕样式
+    Private 样式 As SRT字幕样式
     Private ReadOnly 活动提示 As New List(Of SRT字幕提示)()
 
     Public Sub New(文档值 As SRT字幕文档, 样式值 As SRT字幕样式)
@@ -128,23 +149,58 @@ Public NotInheritable Class SRT字幕帧生成器
         End Get
     End Property
 
-    Public Sub 生成帧(时间 As TimeSpan, 区域 As 视频显示区域, 结果 As ICollection(Of SRT字幕绘制项))
+    Public Sub 设置样式(value As SRT字幕样式)
+        ArgumentNullException.ThrowIfNull(value)
+        value.验证()
+        Threading.Volatile.Write(样式, value)
+    End Sub
+
+    Public Sub 生成帧(时间 As TimeSpan, 区域 As 视频显示区域, 结果 As ICollection(Of SRT字幕绘制项),
+                  Optional 画布宽度 As Single = 0.0F, Optional 画布高度 As Single = 0.0F)
         ArgumentNullException.ThrowIfNull(结果)
-        样式.验证()
+        Dim 当前样式 = Threading.Volatile.Read(样式)
+        当前样式.验证()
         活动提示.Clear()
         文档.索引.查询时刻(时间, 活动提示)
-        Dim scale = 区域.高度像素 / 样式.基准视频高度
+        Dim scale As Single
+        Select Case 当前样式.尺寸缩放方式
+            Case 1 : scale = If(画布宽度 > 0, 画布宽度 / 1920.0F, 区域.缩放系数)
+            Case 2 : scale = If(画布高度 > 0, 画布高度 / 当前样式.基准视频高度, 区域.缩放系数)
+            Case 3 : scale = 1.0F
+            Case Else : scale = 区域.高度像素 / 当前样式.基准视频高度
+        End Select
         For Each cue In 活动提示
             Dim lines As New List(Of SRT字幕绘制行)(cue.行.Count)
-            For Each line In cue.行
-                Dim fontName = If(line.语言 = 字幕语言类型.拉丁, 样式.拉丁字体, 样式.中文字体)
-                lines.Add(New SRT字幕绘制行(line.文本, fontName, 样式.字号 * scale,
-                                             样式.颜色ARGB, 样式.描边颜色ARGB, 样式.描边宽度 * scale,
-                                             样式.阴影颜色ARGB, 样式.阴影偏移 * scale))
+            For lineIndex = 0 To cue.行.Count - 1
+                Dim line = cue.行(lineIndex)
+                Dim fallbackFont = If(line.语言 = 字幕语言类型.拉丁, 当前样式.拉丁字体, 当前样式.中文字体)
+                Dim fontName As String, fontSize As Single, fontStyle As FontStyle, color As UInteger
+                Select Case lineIndex
+                    Case 0
+                        fontName = If(String.IsNullOrWhiteSpace(当前样式.第一行字体), fallbackFont, 当前样式.第一行字体)
+                        fontSize = 当前样式.第一行字号.GetValueOrDefault(当前样式.字号)
+                        fontStyle = 当前样式.第一行字体样式.GetValueOrDefault(FontStyle.Regular)
+                        color = 当前样式.第一行颜色ARGB.GetValueOrDefault(当前样式.颜色ARGB)
+                    Case 1
+                        fontName = If(String.IsNullOrWhiteSpace(当前样式.第二行字体), fallbackFont, 当前样式.第二行字体)
+                        fontSize = 当前样式.第二行字号.GetValueOrDefault(当前样式.字号)
+                        fontStyle = 当前样式.第二行字体样式.GetValueOrDefault(FontStyle.Regular)
+                        color = 当前样式.第二行颜色ARGB.GetValueOrDefault(当前样式.颜色ARGB)
+                    Case Else
+                        fontName = If(String.IsNullOrWhiteSpace(当前样式.其他行字体), fallbackFont, 当前样式.其他行字体)
+                        fontSize = 当前样式.其他行字号.GetValueOrDefault(当前样式.字号)
+                        fontStyle = 当前样式.其他行字体样式.GetValueOrDefault(FontStyle.Regular)
+                        color = 当前样式.颜色ARGB
+                End Select
+                lines.Add(New SRT字幕绘制行(line.文本, fontName, fontSize * scale,
+                                             color, 当前样式.描边颜色ARGB, 当前样式.描边宽度 * scale,
+                                             当前样式.阴影颜色ARGB, 当前样式.阴影偏移 * scale, fontStyle))
             Next
+            Dim bottom = If(当前样式.底部对齐方式 = 1 AndAlso 画布高度 > 0,
+                            画布高度, 区域.Y像素 + 区域.高度像素)
             结果.Add(New SRT字幕绘制项(cue, lines, 区域.X像素 + 区域.宽度像素 * 0.5F,
-                                        区域.Y像素 + 区域.高度像素 - 样式.底部边距 * scale,
-                                        样式.行间距 * scale))
+                                        bottom - 当前样式.底部边距 * scale,
+                                        当前样式.行间距 * scale))
         Next
     End Sub
 End Class

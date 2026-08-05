@@ -43,7 +43,7 @@ Friend NotInheritable Class 播放器歌词呈现器
     Private Shared ReadOnly 歌词描边颜色 As UInteger = ARGB(120, 0, 0, 0)
     Private Shared ReadOnly 歌词阴影颜色 As UInteger = ARGB(120, 0, 0, 0)
     Private Shared ReadOnly 封面毛玻璃遮罩颜色 As UInteger = ARGB(120, 0, 0, 0)
-    Private Shared ReadOnly 呈现设置 As New 歌词呈现设置(
+    Private Shared ReadOnly 默认呈现设置 As New 歌词呈现设置(
         封面毛玻璃半径, 封面毛玻璃次数, 封面毛玻璃下采样倍率, 封面毛玻璃遮罩颜色,
         封面区域宽度百分比, 歌词区域宽度百分比,
         封面区域左内边距百分比, 封面区域右内边距百分比,
@@ -59,6 +59,7 @@ Friend NotInheritable Class 播放器歌词呈现器
     Private ReadOnly 封面状态提供器 As Func(Of Boolean)
     Private ReadOnly 提交图层 As Func(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single,
         歌词呈现设置, Boolean)
+    Private ReadOnly 呈现设置提供器 As Func(Of 歌词呈现设置)
     Private ReadOnly 图层命令 As New List(Of 定时文字命令)(32)
     Private ReadOnly 命令对象池 As New List(Of 定时文字命令)(32)
     Private ReadOnly 字体缓存 As New Dictionary(
@@ -81,7 +82,8 @@ Friend NotInheritable Class 播放器歌词呈现器
     Friend Sub New(画面控件值 As 播放器画面控件, 快照提供器值 As Func(Of 播放器快照),
                    歌词提供器值 As Func(Of LRC歌词资料), 封面状态提供器值 As Func(Of Boolean),
                    提交图层值 As Func(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single,
-                       歌词呈现设置, Boolean))
+                       歌词呈现设置, Boolean),
+                   Optional 呈现设置提供器值 As Func(Of 歌词呈现设置) = Nothing)
         ArgumentNullException.ThrowIfNull(画面控件值)
         ArgumentNullException.ThrowIfNull(快照提供器值)
         ArgumentNullException.ThrowIfNull(歌词提供器值)
@@ -92,6 +94,7 @@ Friend NotInheritable Class 播放器歌词呈现器
         歌词提供器 = 歌词提供器值
         封面状态提供器 = 封面状态提供器值
         提交图层 = 提交图层值
+        呈现设置提供器 = If(呈现设置提供器值, Function() 默认呈现设置)
         刷新计时器 = New LakeUI.PrecisionTimer With {
             .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
             .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop,
@@ -399,10 +402,11 @@ Friend NotInheritable Class 播放器歌词呈现器
                        歌词 As LRC歌词资料, 有封面 As Boolean, DPI As Single)
         Try
             Dim commands = 生成命令(客户区大小, 播放位置, 歌词, 有封面, DPI)
-            Dim signature = 计算图层签名(客户区大小, 有封面, commands, 呈现设置)
+            Dim 当前呈现设置 = 呈现设置提供器()
+            Dim signature = 计算图层签名(客户区大小, 有封面, commands, 当前呈现设置)
             If Volatile.Read(图层签名有效标志) <> 0 AndAlso signature = 上次图层签名 Then Return
             Dim nextSequence = 图层序号 + 1UL
-            If Not 提交图层(客户区大小, commands, nextSequence, CSng(目标帧率), 呈现设置) Then Return
+            If Not 提交图层(客户区大小, commands, nextSequence, CSng(目标帧率), 当前呈现设置) Then Return
             图层序号 = nextSequence
             上次图层签名 = signature
             Volatile.Write(图层签名有效标志, 1)

@@ -157,7 +157,7 @@ Public NotInheritable Class 外部字幕自动加载器
                 Dim 文档 = SRT字幕解析器.解析文件(完整路径)
                 取消令牌.ThrowIfCancellationRequested()
                 Return New 外部字幕轨道(完整路径, 格式,
-                    New SRT字幕帧生成器(文档, New SRT字幕样式()), Nothing)
+                    New SRT字幕帧生成器(文档, 设置.实例对象.创建SRT字幕样式()), Nothing)
             Case 外部字幕格式.ASS, 外部字幕格式.SSA
                 Dim 特效生成器 As ASS特效字幕帧生成器 = Nothing
                 Try
