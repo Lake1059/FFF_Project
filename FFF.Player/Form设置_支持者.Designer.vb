@@ -25,9 +25,8 @@ Partial Class Form设置_支持者
         ModernPanel1 = New LakeUI.ModernPanel()
         MemberWall1 = New LakeUI.MemberWall()
         Panel4 = New Panel()
-        ModernButton5 = New LakeUI.ModernButton()
-        JustEmptyControl5 = New LakeUI.JustEmptyControl()
         ModernTextBox1 = New LakeUI.ModernTextBox()
+        JustEmptyControl5 = New LakeUI.JustEmptyControl()
         JustEmptyControl4 = New LakeUI.JustEmptyControl()
         ModernButton4 = New LakeUI.ModernButton()
         JustEmptyControl3 = New LakeUI.JustEmptyControl()
@@ -36,6 +35,7 @@ Partial Class Form设置_支持者
         ModernButton2 = New LakeUI.ModernButton()
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         ModernButton1 = New LakeUI.ModernButton()
+        ModernButton5 = New LakeUI.ModernButton()
         HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
         ModernPanel1.SuspendLayout()
         Panel4.SuspendLayout()
@@ -68,7 +68,6 @@ Partial Class Form设置_支持者
         MemberWall1.Dock = DockStyle.Fill
         MemberWall1.Location = New Point(20, 99)
         MemberWall1.Name = "MemberWall1"
-        MemberWall1.Padding = New Padding(10)
         MemberWall1.ScrollBarThumbColor = Color.FromArgb(CByte(40), CByte(200), CByte(200), CByte(200))
         MemberWall1.ScrollBarThumbHoverColor = Color.FromArgb(CByte(80), CByte(200), CByte(200), CByte(200))
         MemberWall1.ScrollBarTrackColor = Color.FromArgb(CByte(20), CByte(200), CByte(200), CByte(200))
@@ -95,30 +94,6 @@ Partial Class Form设置_支持者
         Panel4.Size = New Size(614, 62)
         Panel4.TabIndex = 132
         ' 
-        ' ModernButton5
-        ' 
-        ModernButton5.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        ModernButton5.BorderRadius = 10
-        ModernButton5.BorderSize = 0
-        ModernButton5.Dock = DockStyle.Right
-        ModernButton5.ForeColor = Color.Gainsboro
-        ModernButton5.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        ModernButton5.Location = New Point(544, 10)
-        ModernButton5.Margin = New Padding(2)
-        ModernButton5.Name = "ModernButton5"
-        ModernButton5.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        ModernButton5.Size = New Size(70, 32)
-        ModernButton5.TabIndex = 13
-        ModernButton5.Text = "搜索"
-        ' 
-        ' JustEmptyControl5
-        ' 
-        JustEmptyControl5.Dock = DockStyle.Right
-        JustEmptyControl5.Location = New Point(534, 10)
-        JustEmptyControl5.Name = "JustEmptyControl5"
-        JustEmptyControl5.Size = New Size(10, 32)
-        JustEmptyControl5.TabIndex = 14
-        ' 
         ' ModernTextBox1
         ' 
         ModernTextBox1.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
@@ -136,6 +111,14 @@ Partial Class Form设置_支持者
         ModernTextBox1.TabIndex = 12
         ModernTextBox1.WaterText = "搜索支持者"
         ModernTextBox1.WaterTextForeColor = Color.DarkGray
+        ' 
+        ' JustEmptyControl5
+        ' 
+        JustEmptyControl5.Dock = DockStyle.Right
+        JustEmptyControl5.Location = New Point(534, 10)
+        JustEmptyControl5.Name = "JustEmptyControl5"
+        JustEmptyControl5.Size = New Size(10, 32)
+        JustEmptyControl5.TabIndex = 14
         ' 
         ' JustEmptyControl4
         ' 
@@ -232,6 +215,22 @@ Partial Class Form设置_支持者
         ModernButton1.Size = New Size(70, 32)
         ModernButton1.TabIndex = 5
         ModernButton1.Text = "全部"
+        ' 
+        ' ModernButton5
+        ' 
+        ModernButton5.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        ModernButton5.BorderRadius = 10
+        ModernButton5.BorderSize = 0
+        ModernButton5.Dock = DockStyle.Right
+        ModernButton5.ForeColor = Color.Gainsboro
+        ModernButton5.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        ModernButton5.Location = New Point(544, 10)
+        ModernButton5.Margin = New Padding(2)
+        ModernButton5.Name = "ModernButton5"
+        ModernButton5.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        ModernButton5.Size = New Size(70, 32)
+        ModernButton5.TabIndex = 13
+        ModernButton5.Text = "搜索"
         ' 
         ' HtmlColorLabel2
         ' 

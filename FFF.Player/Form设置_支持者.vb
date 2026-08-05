@@ -1,7 +1,7 @@
 Imports LakeUI
 
 Public Class Form设置_支持者
-    Private Shared ReadOnly 付费支持者列表 As New List(Of String) From {"Avec"}
+    Private Shared ReadOnly 付费支持者列表 As New List(Of String) From {""}
     Private Shared ReadOnly 赠送支持者列表 As New List(Of String) From {
         "格里芬指挥官|#39C5BB", "陆耀YSNX462 (FFBOX最严厉的父亲)|#66FF66",
         "Celery (酒吧点蛋炒饭的)|#21AEFF", "哈哈6662333 (坏点子大师/""网""管)|#FF9633",
