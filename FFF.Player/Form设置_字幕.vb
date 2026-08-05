@@ -3,6 +3,15 @@ Imports LakeUI
 Public Class Form设置_字幕
     Private 正在初始化 As Boolean
 
+    Public Sub New()
+        正在初始化 = True
+        Try
+            InitializeComponent()
+        Finally
+            正在初始化 = False
+        End Try
+    End Sub
+
     Friend Sub 初始化页面()
         正在初始化 = True
         Try

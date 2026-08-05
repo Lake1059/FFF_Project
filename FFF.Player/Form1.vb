@@ -73,6 +73,7 @@ Public Class Form1
         播放控制器 = New 播放器控制器(
             Function() 画面控件.输出窗口句柄, SynchronizationContext.Current,
             CType(设置.实例对象.解码方式, 解码模式))
+        播放控制器.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
         播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
         剪辑区间控制器 = New 播放器剪辑区间控制器(播放控制器, 画面控件,
             MB_剪辑区间模式, MP_剪辑区间操作容器, P_剪辑区间进度条容器,
@@ -476,6 +477,10 @@ Public Class Form1
         播放控制器?.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
     End Sub
 
+    Friend Sub 应用SDR亮度设置()
+        播放控制器?.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
+    End Sub
+
     Friend Sub 应用字幕设置()
         播放控制器?.当前字幕?.SRT生成器?.设置样式(设置.实例对象.创建SRT字幕样式())
         字幕图层呈现器?.使图层失效()
@@ -623,6 +628,6 @@ Public Class Form1
 
     Private Sub MB_软件设置_Click(sender As Object, e As EventArgs) Handles MB_软件设置.Click
         If 设置窗口 Is Nothing OrElse 设置窗口.IsDisposed Then 设置窗口 = New Form设置()
-        设置窗口.显示窗口(Me)
+        设置窗口.显示窗口()
     End Sub
 End Class

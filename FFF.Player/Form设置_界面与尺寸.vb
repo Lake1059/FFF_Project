@@ -2,7 +2,12 @@ Public Class Form设置_界面与尺寸
     Private 正在初始化 As Boolean
 
     Public Sub New()
-        InitializeComponent()
+        正在初始化 = True
+        Try
+            InitializeComponent()
+        Finally
+            正在初始化 = False
+        End Try
         更新自定义尺寸控件状态()
     End Sub
 

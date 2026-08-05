@@ -12,6 +12,7 @@ Public Class 设置
     Public Property 解码方式 As 解码模式 = 解码模式.CPU
     Public Property HDR峰值亮度选项 As Integer = 0
     Public Property HDR峰值亮度 As Integer = 0
+    Public Property HDR映射SDR参考亮度 As Integer = 250
 
     Public Property 字幕第一行字体 As String = "Microsoft YaHei UI"
     Public Property 字幕第一行字号 As Single = 48.0F
@@ -122,6 +123,7 @@ Public Class 设置
         End If
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
+        HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)
         规范化字幕字体(字幕第一行字体, 字幕第一行字号, 字幕第一行样式)
         规范化字幕字体(字幕第二行字体, 字幕第二行字号, 字幕第二行样式)
         规范化字幕字体(字幕其他行字体, 字幕其他行字号, 字幕其他行样式)

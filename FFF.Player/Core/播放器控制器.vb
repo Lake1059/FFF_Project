@@ -9,7 +9,8 @@ Imports System.Threading
 Public NotInheritable Class 播放器控制器
     Implements IDisposable
 
-    Private Const SDR峰值尼特 As Single = 100.0F
+    Private Const 默认SDR峰值尼特 As Single = 100.0F
+    Private 当前SDR峰值尼特 As Single = 默认SDR峰值尼特
     Private 当前HDR输出峰值尼特 As Single = 0.0F
     Private Const SDR纸白尼特 As Single = 203.0F
 
@@ -33,6 +34,7 @@ Public NotInheritable Class 播放器控制器
     Private 当前音乐包含封面 As Boolean
     Private 当前文件路径 As String = String.Empty
     Private 当前解码器 As 解码模式 = 解码模式.CPU
+    Private 当前会话解码器配置 As 解码模式 = 解码模式.CPU
     Private 用户解码器偏好 As 解码模式 = 解码模式.CPU
     Private 当前色彩输出 As 色彩输出模式 = 色彩输出模式.映射到SDR
     Private HDR色彩输出偏好 As 色彩输出模式 = 色彩输出模式.映射到SDR
@@ -651,7 +653,7 @@ Public NotInheritable Class 播放器控制器
 
         Dim 新模式 = CType((CInt(当前色彩输出) + 1) Mod 3, 色彩输出模式)
         Try
-            目标.设置色彩模式(新模式, SDR峰值尼特, 取得HDR输出峰值参数(新模式), SDR纸白尼特)
+            目标.设置色彩模式(新模式, 当前SDR峰值尼特, 取得HDR输出峰值参数(新模式), SDR纸白尼特)
             当前色彩输出 = 新模式
             HDR色彩输出偏好 = 新模式
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
@@ -670,11 +672,27 @@ Public NotInheritable Class 播放器控制器
         Dim 目标 = 会话
         If 已释放 OrElse 目标 Is Nothing OrElse 当前色彩输出 <> 色彩输出模式.峰值映射HDR Then Return
         Try
-            目标.设置色彩模式(当前色彩输出, SDR峰值尼特,
+            目标.设置色彩模式(当前色彩输出, 当前SDR峰值尼特,
                          取得HDR输出峰值参数(当前色彩输出), SDR纸白尼特)
         Catch ex As ObjectDisposedException
         Catch ex As 播放器异常
             RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用 HDR 峰值亮度"))
+        End Try
+    End Sub
+
+    Public Sub 设置SDR峰值亮度(value As Single)
+        If Not Single.IsFinite(value) OrElse value <= 0 OrElse value > 10000 Then
+            Throw New ArgumentOutOfRangeException(NameOf(value))
+        End If
+        当前SDR峰值尼特 = value
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return
+        Try
+            目标.设置色彩模式(当前色彩输出, 当前SDR峰值尼特,
+                         取得HDR输出峰值参数(当前色彩输出), SDR纸白尼特)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用 SDR 映射亮度"))
         End Try
     End Sub
 
@@ -737,9 +755,100 @@ Public NotInheritable Class 播放器控制器
                 正在切换会话 = True
                 RaiseEvent 状态已变化(Me, EventArgs.Empty)
 
+                ' 同一解码配置下原生会话支持原位重开。它会在自己的命令队列中
+                ' 先关闭旧媒体并保留输出链，避免候选会话和音频设备重复初始化。
+                If 原会话 IsNot Nothing AndAlso 当前会话解码器配置 = 解码器 Then
+                    Dim 原位事件已移除 = False
+                    Dim 原位目标色彩输出 = If(
+                        String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase),
+                        当前色彩输出, HDR色彩输出偏好)
+                    Try
+                        Try
+                            原会话.暂停()
+                        Catch ex As 播放器异常
+                        End Try
+                        移除会话事件(原会话)
+                        原位事件已移除 = True
+                        Await 原会话.打开Async(路径, 此次取消.Token)
+                        此次取消.Token.ThrowIfCancellationRequested()
+
+                        Dim 原位初始快照 = 原会话.当前快照
+                        Dim 原位媒体信息 = 原会话.当前媒体信息
+                        Dim 原位请求色彩输出 = 原位初始快照.请求色彩模式
+                        If 原位初始快照.是HDR源 AndAlso
+                            原位请求色彩输出 <> 原位目标色彩输出 Then
+                            原会话.设置色彩模式(原位目标色彩输出, 当前SDR峰值尼特,
+                                           取得HDR输出峰值参数(原位目标色彩输出), SDR纸白尼特)
+                            原位请求色彩输出 = 原位目标色彩输出
+                        End If
+                        Dim 原位是纯音频 = 原位媒体信息.流.Any(
+                            Function(x) String.Equals(x.类型, "audio", StringComparison.OrdinalIgnoreCase)) AndAlso
+                            Not 原位媒体信息.流.Any(
+                                Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso
+                                            Not x.是封面图)
+                        Dim 原位包含封面 = 原位是纯音频 AndAlso 原位媒体信息.流.Any(
+                            Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso x.是封面图)
+                        恢复流选择(原会话, 原位媒体信息, 视频流, 音频流)
+                        If 恢复位置 > TimeSpan.Zero Then
+                            原会话.跳转(If(原位初始快照.总时长 > TimeSpan.Zero,
+                                          最小时间(恢复位置, 原位初始快照.总时长), 恢复位置))
+                        End If
+                        Dim 原位快照 = 原会话.当前快照
+                        Dim 原位保留当前字幕 = 保留已加载字幕 AndAlso
+                            String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase)
+                        If Not 原位保留当前字幕 Then
+                            释放当前字幕()
+                            释放当前弹幕()
+                            释放当前歌词()
+                        End If
+                        会话 = 原会话
+                        当前文件路径 = 路径
+                        Volatile.Write(当前媒体是纯音频, 原位是纯音频)
+                        Volatile.Write(当前音乐包含封面, 原位包含封面)
+                        当前解码器 = 原位快照.解码器
+                        当前色彩输出 = 原位请求色彩输出
+                        添加会话事件(原会话)
+                        原位事件已移除 = False
+                        重绑输出窗口()
+                        If 恢复播放 Then 会话.播放()
+
+                        正在切换会话 = False
+                        RaiseEvent 媒体已打开(Me,
+                            New 播放器媒体事件参数(当前文件路径, 原位媒体信息, 原位快照, 原位保留当前字幕))
+                        If Not 原位保留当前字幕 Then
+                            开始自动加载字幕(当前文件路径)
+                            开始自动加载弹幕(当前文件路径)
+                            开始自动加载歌词(当前文件路径)
+                        End If
+                        RaiseEvent 状态已变化(Me, EventArgs.Empty)
+                        Return
+                    Catch ex As OperationCanceledException
+                        If ReferenceEquals(会话, 原会话) Then 释放当前会话()
+                        Return
+                    Catch ex As Exception
+                        If ReferenceEquals(会话, 原会话) Then 释放当前会话()
+                        If Not 已释放 AndAlso Not 此次取消.IsCancellationRequested Then
+                            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法播放媒体"))
+                        End If
+                        Return
+                    Finally
+                        If 原位事件已移除 AndAlso ReferenceEquals(会话, 原会话) Then
+                            添加会话事件(原会话)
+                        End If
+                    End Try
+                End If
+
                 ' Windows 不允许另一个客户端在当前端点仍被旧会话独占时初始化。
                 ' 先让旧会话回到共享以保留其媒体作为失败回退；候选成功后释放
                 ' 旧会话，再把新会话切回用户选择的独占模式。
+                If 原会话 IsNot Nothing Then
+                    Try
+                        ' 先停止旧音频。暂停命令会排在后续 WASAPI 重建之前，
+                        ' 避免切解码器时黑屏期间残留一帧旧声音。
+                        原会话.暂停()
+                    Catch ex As 播放器异常
+                    End Try
+                End If
                 If 保留WASAPI模式 = WASAPI共享模式.独占 AndAlso 原会话 IsNot Nothing Then
                     Await 设置会话WASAPI模式Async(原会话, False, 此次取消.Token)
                     已临时释放独占 = True
@@ -779,6 +888,7 @@ Public NotInheritable Class 播放器控制器
             当前文件路径 = 路径
             Volatile.Write(当前媒体是纯音频, 候选是纯音频)
             Volatile.Write(当前音乐包含封面, 候选包含封面)
+            当前会话解码器配置 = 解码器
             当前解码器 = 快照.解码器
             当前色彩输出 = 快照.请求色彩模式
             添加会话事件(会话)
@@ -814,6 +924,13 @@ Public NotInheritable Class 播放器控制器
                 打开异常 = ex
             End Try
             If 已临时释放独占 Then Await 尝试恢复独占Async(原会话)
+            If 打开异常 IsNot Nothing AndAlso 恢复播放 AndAlso
+                Not 已释放 AndAlso ReferenceEquals(会话, 原会话) Then
+                Try
+                    原会话.播放()
+                Catch ex As 播放器异常
+                End Try
+            End If
             If 打开异常 IsNot Nothing AndAlso Not 已释放 AndAlso
                 Not 此次取消.IsCancellationRequested Then
                 RaiseEvent 播放错误(Me, New 播放器错误事件参数(打开异常.Message, "无法播放媒体"))
@@ -888,7 +1005,7 @@ Public NotInheritable Class 播放器控制器
         Return New 播放器会话(New 播放器配置 With {
             .解码器 = 解码器,
             .色彩模式 = 色彩模式,
-            .SDR峰值尼特 = SDR峰值尼特,
+            .SDR峰值尼特 = 当前SDR峰值尼特,
             .HDR峰值尼特 = 取得HDR输出峰值参数(色彩模式),
             .SDR纸白尼特 = SDR纸白尼特,
             .输出窗口句柄 = IntPtr.Zero,

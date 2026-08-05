@@ -64,9 +64,6 @@ bool ReadWindowsDisplayLuminance(const HMONITOR monitor,
     return read;
 }
 
-// ABI-v1 test probe has no display target field. Runtime rendering uses
-// HdrProcessor::targetPeakNits; keep the legacy probe deterministic.
-constexpr float ColorTransformProbeTargetPeakNits = 1000.0f;
 constexpr std::uint32_t OutputBitDepthForSource(const std::uint32_t sourceBitDepth,
     const bool hdr) noexcept {
     // Match the mainstream MPC Video Renderer contract: floating point is an
@@ -181,26 +178,18 @@ void Convert709To2020(float& r, float& g, float& b) noexcept {
     r = nr; g = ng; b = nb;
 }
 
-float ToneToPeakNits(const float nits, const float peak) noexcept {
-    const auto knee = peak * 0.75f;
-    if (nits <= knee) return nits;
-    return knee + (peak - knee) *
-        (1.0f - std::exp(-(nits - knee) / std::max(peak - knee, 1.0f)));
-}
-
-float Bt2390HdrToSdrNits(const float nits, const float sourcePeak,
+float Bt2390HdrToSdrPq(const float pq, const float sourcePeak,
     const float targetPeak) noexcept {
     const auto sourceMaximum = std::max(sourcePeak, 1.0f);
     const auto targetMaximum = std::clamp(targetPeak, 1.0f, sourceMaximum);
     const auto sourcePq = NitsToPq(sourceMaximum);
     const auto targetPq = NitsToPq(targetMaximum);
     if (sourcePq <= 1.0e-6f || targetPq >= sourcePq)
-        return std::clamp(nits, 0.0f, targetMaximum);
+        return std::clamp(pq, 0.0f, targetPq);
 
     const auto normalizedTarget = targetPq / sourcePq;
     const auto knee = std::clamp(1.5f * normalizedTarget - 0.5f, 0.0f, 1.0f);
-    const auto signal = std::clamp(NitsToPq(std::max(nits, 0.0f)) / sourcePq,
-        0.0f, 1.0f);
+    const auto signal = std::clamp(pq / sourcePq, 0.0f, 1.0f);
     auto mapped = signal;
     if (signal > knee && knee < 1.0f) {
         const auto t = (signal - knee) / (1.0f - knee);
@@ -212,27 +201,59 @@ float Bt2390HdrToSdrNits(const float nits, const float sourcePeak,
         mapped = h00 * knee + h10 * (1.0f - knee) +
             h01 * normalizedTarget;
     }
-    return std::clamp(PqToNits(mapped * sourcePq), 0.0f, targetMaximum);
+    return std::clamp(mapped * sourcePq, 0.0f, targetPq);
 }
 
 struct Float3 { float r, g, b; };
 
-Float3 ScaleToPeak(const Float3 value, const float peak) noexcept {
-    const auto maximum = std::max({value.r, value.g, value.b});
-    if (maximum <= 1.0e-6f) return value;
-    const auto scale = ToneToPeakNits(maximum, peak) / maximum;
-    return {value.r * scale, value.g * scale, value.b * scale};
+Float3 Linear2020NitsToIpt(const Float3 value) noexcept {
+    const Float3 lms{
+        0.4120363867f * value.r + 0.5239119120f * value.g + 0.0640549816f * value.b,
+        0.1666602187f * value.r + 0.7203952135f * value.g + 0.1129461230f * value.b,
+        0.0241123586f * value.r + 0.0754749627f * value.g + 0.9004079374f * value.b};
+    const Float3 lmsPq{NitsToPq(lms.r), NitsToPq(lms.g), NitsToPq(lms.b)};
+    return {
+        0.4000f * lmsPq.r + 0.4000f * lmsPq.g + 0.2000f * lmsPq.b,
+        4.4550f * lmsPq.r - 4.8510f * lmsPq.g + 0.3960f * lmsPq.b,
+        0.8056f * lmsPq.r + 0.3572f * lmsPq.g - 1.1628f * lmsPq.b};
 }
 
-Float3 MapHdrToSdr(const Float3 value, const float sourcePeak,
+Float3 IptToLinear2020Nits(const Float3 value) noexcept {
+    const Float3 lmsPq{
+        value.r + 0.0975689f * value.g + 0.205226f * value.b,
+        value.r - 0.1138760f * value.g + 0.133217f * value.b,
+        value.r + 0.0326151f * value.g - 0.676887f * value.b};
+    const Float3 lms{PqToNits(lmsPq.r), PqToNits(lmsPq.g), PqToNits(lmsPq.b)};
+    return {
+        3.4368148291f * lms.r - 2.5067738012f * lms.g + 0.0699519280f * lms.b,
+        -0.7910582378f * lms.r + 1.9836016695f * lms.g - 0.1925448343f * lms.b,
+        -0.0257268061f * lms.r - 0.0991417663f * lms.g + 1.1248741444f * lms.b};
+}
+
+float IptChromaHull(const float intensity) noexcept {
+    return ((intensity - 6.0f) * intensity + 9.0f) * intensity;
+}
+
+Float3 MapHdrToSdr(const Float3 rec2020Nits, const float sourcePeak,
     const float targetPeak) noexcept {
-    const auto maximum = std::max({value.r, value.g, value.b});
-    if (maximum <= 1.0e-6f) return value;
-    // Preserve the source chromatic ratios: BT.2390 supplies one luminance
-    // scale. Do not add a post-curve white clamp here; it changes the mapping
-    // strategy and can turn compressed high-code regions into visible blocks.
-    const auto scale = Bt2390HdrToSdrNits(maximum, sourcePeak, targetPeak) / maximum;
-    return {value.r * scale, value.g * scale, value.b * scale};
+    auto ipt = Linear2020NitsToIpt(rec2020Nits);
+    const auto originalIntensity = ipt.r;
+    const auto mappedIntensity = Bt2390HdrToSdrPq(
+        originalIntensity, sourcePeak, targetPeak);
+    ipt.r = mappedIntensity;
+    if (originalIntensity <= 1.0e-6f || mappedIntensity <= 1.0e-6f) {
+        ipt.g = ipt.b = 0.0f;
+    } else {
+        // Reducing IPT intensity must not increase P/I or T/I saturation. The
+        // destination hull can impose an even tighter chroma limit.
+        const auto chromaScale = std::clamp(std::min(
+            mappedIntensity / originalIntensity,
+            IptChromaHull(mappedIntensity) /
+                std::max(IptChromaHull(originalIntensity), 1.0e-6f)), 0.0f, 1.0f);
+        ipt.g *= chromaScale;
+        ipt.b *= chromaScale;
+    }
+    return IptToLinear2020Nits(ipt);
 }
 
 constexpr const char* VertexShaderSource = R"(
@@ -273,40 +294,68 @@ float HlgOne(float v) {
     return 1000.0*pow(max(scene,0.0),1.2);
 }
 float3 HlgToNits(float3 v) { return float3(HlgOne(v.r),HlgOne(v.g),HlgOne(v.b)); }
-float LinearOne(float v) { return v<0.081 ? v/4.5 : pow((v+0.099)/1.099,1.0/0.45); }
+float LinearOne(float v) { v=saturate(v); return v<0.081 ? v/4.5 : pow((v+0.099)/1.099,1.0/0.45); }
 float3 ToLinear709(float3 v) { return float3(LinearOne(v.r),LinearOne(v.g),LinearOne(v.b)); }
 float BtOne(float v) { v=max(v,0.0); return saturate(v<0.018 ? 4.5*v : 1.099*pow(v,0.45)-0.099); }
 float3 ToBt709(float3 v) { return float3(BtOne(v.r),BtOne(v.g),BtOne(v.b)); }
 float3 To2020(float3 v) { return mul(float3x3(0.627404,0.329283,0.043313, 0.069097,0.919540,0.011362, 0.016392,0.088013,0.895595),v); }
 float3 To709(float3 v) { return mul(float3x3(1.660491,-0.587641,-0.072850, -0.124550,1.132900,-0.008349, -0.018151,-0.100579,1.118730),v); }
-float ToneOne(float value,float peak) {
-    float knee=peak*0.75;
-    return value<=knee?value:knee+(peak-knee)*(1.0-exp(-(value-knee)/max(peak-knee,1.0)));
-}
-float3 ToneToPeak(float3 nits,float peak) {
-    float maximum=max(max(nits.r,nits.g),nits.b);
-    return maximum<=0.000001?nits:nits*(ToneOne(maximum,peak)/maximum);
-}
-float Bt2390HdrToSdrOne(float value,float sourcePeak,float targetPeak) {
+float Bt2390HdrToSdrPq(float value,float sourcePeak,float targetPeak) {
     float sourceMaximum=max(sourcePeak,1.0);
     float targetMaximum=clamp(targetPeak,1.0,sourceMaximum);
     float sourcePq=NitsToPq(sourceMaximum.xxx).r;
     float targetPq=NitsToPq(targetMaximum.xxx).r;
     if(sourcePq<=0.000001||targetPq>=sourcePq)
-        return clamp(value,0.0,targetMaximum);
+        return clamp(value,0.0,targetPq);
     float normalizedTarget=targetPq/sourcePq;
     float knee=clamp(1.5*normalizedTarget-0.5,0.0,1.0);
-    float signal=clamp(NitsToPq(max(value,0.0).xxx).r/sourcePq,0.0,1.0);
-    if(signal<=knee||knee>=1.0)return clamp(value,0.0,targetMaximum);
+    float signal=clamp(value/sourcePq,0.0,1.0);
+    if(signal<=knee||knee>=1.0)return clamp(value,0.0,targetPq);
     float t=(signal-knee)/(1.0-knee);
     float t2=t*t,t3=t2*t;
     float mapped=(2.0*t3-3.0*t2+1.0)*knee+
         (t3-2.0*t2+t)*(1.0-knee)+(-2.0*t3+3.0*t2)*normalizedTarget;
-    return min(PqToNits((mapped*sourcePq).xxx).r,targetMaximum);
+    return min(mapped*sourcePq,targetPq);
 }
-float3 ToneHdrToSdr(float3 nits,float sourcePeak,float targetPeak) {
-    float maximum=max(max(nits.r,nits.g),nits.b);
-    return maximum<=0.000001?nits:nits*(Bt2390HdrToSdrOne(maximum,sourcePeak,targetPeak)/maximum);
+float3 Linear2020NitsToIpt(float3 value) {
+    float3 lms=mul(float3x3(
+        0.4120363867,0.5239119120,0.0640549816,
+        0.1666602187,0.7203952135,0.1129461230,
+        0.0241123586,0.0754749627,0.9004079374),value);
+    float3 lmsPq=NitsToPq(lms);
+    return mul(float3x3(
+        0.4000,0.4000,0.2000,
+        4.4550,-4.8510,0.3960,
+        0.8056,0.3572,-1.1628),lmsPq);
+}
+float3 IptToLinear2020Nits(float3 value) {
+    float3 lmsPq=mul(float3x3(
+        1.0,0.0975689,0.205226,
+        1.0,-0.1138760,0.133217,
+        1.0,0.0326151,-0.676887),value);
+    float3 lms=PqToNits(lmsPq);
+    return mul(float3x3(
+        3.4368148291,-2.5067738012,0.0699519280,
+        -0.7910582378,1.9836016695,-0.1925448343,
+        -0.0257268061,-0.0991417663,1.1248741444),lms);
+}
+float IptChromaHull(float intensity) {
+    return ((intensity-6.0)*intensity+9.0)*intensity;
+}
+float3 ToneHdrToSdr(float3 rec2020Nits,float sourcePeak,float targetPeak) {
+    float3 ipt=Linear2020NitsToIpt(rec2020Nits);
+    float originalIntensity=ipt.x;
+    float mappedIntensity=Bt2390HdrToSdrPq(originalIntensity,sourcePeak,targetPeak);
+    ipt.x=mappedIntensity;
+    if(originalIntensity<=0.000001||mappedIntensity<=0.000001) {
+        ipt.yz=0.0;
+    } else {
+        float2 hull=float2(IptChromaHull(originalIntensity),IptChromaHull(mappedIntensity));
+        float chromaScale=saturate(min(mappedIntensity/originalIntensity,
+            hull.y/max(hull.x,0.000001)));
+        ipt.yz*=chromaScale;
+    }
+    return IptToLinear2020Nits(ipt);
 }
 float Sinc(float value) {
     value=abs(value);
@@ -350,8 +399,8 @@ float4 SampleVideo(Texture2D<float4> sourceTexture,float2 uv) {
     const uint2 dimensions=uint2(width,height);
     if(abs(OutputWidth-float(width))<0.01&&abs(OutputHeight-float(height))<0.01)
         return sourceTexture.SampleLevel(PointSampler,uv,0);
-    // Hardware anisotropic filtering is the appropriate minification kernel;
-    // Lanczos3 preserves line detail when the image is enlarged.
+    // Hardware anisotropic filtering is intended for minification; keep the
+    // deterministic Lanczos reconstruction for enlargement.
     if(OutputWidth<=float(width)&&OutputHeight<=float(height))
         return sourceTexture.Sample(AnisotropicSampler,uv);
     return SampleLanczos3(sourceTexture,uv,dimensions);
@@ -404,15 +453,17 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
         if(Source2020!=0)rgb=ToBt709(To709(ToLinear709(rgb)));
         return float4(rgb,1);
     }
+    // PQ/Rec.2020 already matches the HDR swap-chain contract exactly.
+    if(ColorMode==2&&Transfer==1&&Source2020!=0)return float4(rgb,1);
     float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):ToLinear709(rgb)*PaperWhite);
     if(ColorMode==2){
         if(Source2020==0)nits=To2020(nits);
-        return float4(NitsToPq(ToneToPeak(nits,TargetPeak)),1);
+        return float4(NitsToPq(nits),1);
     }
-    if(Source2020!=0)nits=To709(nits);
-    // BT.2390 operates in the perceptually uniform PQ domain. The source peak
-    // reaches SDR peak while values below its adaptive knee remain unchanged.
-    float3 sdr=ToBt709(ToneHdrToSdr(nits,HdrPeak,SdrPeak)/SdrPeak);
+    if(Source2020==0)nits=To2020(nits);
+    // BT.2390 operates on IPT intensity before Rec.2020-to-Rec.709 gamut
+    // conversion. Chroma follows the reduced IPT gamut hull.
+    float3 sdr=ToBt709(To709(ToneHdrToSdr(nits,HdrPeak,SdrPeak))/SdrPeak);
     return float4(sdr,1);
 })";
 
@@ -436,7 +487,7 @@ cbuffer Settings : register(b0) {
 };
 Texture2D<float4> Overlay : register(t0);
 SamplerState LinearSampler : register(s0);
-float LinearOne(float v) { return v<0.081 ? v/4.5 : pow((v+0.099)/1.099,1.0/0.45); }
+float LinearOne(float v) { v=saturate(v); return v<0.081 ? v/4.5 : pow((v+0.099)/1.099,1.0/0.45); }
 float3 ToLinear709(float3 v) { return float3(LinearOne(v.r),LinearOne(v.g),LinearOne(v.b)); }
 float3 To2020(float3 v) { return mul(float3x3(0.627404,0.329283,0.043313, 0.069097,0.919540,0.011362, 0.016392,0.088013,0.895595),v); }
 float3 NitsToPq(float3 v) {
@@ -620,15 +671,15 @@ constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
     case AV_PIX_FMT_NV12:
         return {2, 8, 1.0f, 1, 1};
     case AV_PIX_FMT_P010LE:
-        return {2, 10, 1.0f, 1, 1};
+        return {2, 10, 65535.0f / 65472.0f, 1, 1};
     case AV_PIX_FMT_P012LE:
-        return {2, 12, 1.0f, 1, 1};
+        return {2, 12, 65535.0f / 65520.0f, 1, 1};
     case AV_PIX_FMT_P016LE:
         return {2, 16, 1.0f, 1, 1};
     case AV_PIX_FMT_P210LE:
-        return {2, 10, 1.0f, 1, 0};
+        return {2, 10, 65535.0f / 65472.0f, 1, 0};
     case AV_PIX_FMT_P212LE:
-        return {2, 12, 1.0f, 1, 0};
+        return {2, 12, 65535.0f / 65520.0f, 1, 0};
     case AV_PIX_FMT_P216LE:
         return {2, 16, 1.0f, 1, 0};
     default:
@@ -654,6 +705,10 @@ static_assert(DescribeInput(AV_PIX_FMT_YUV444P).layout == 1 &&
     DescribeInput(AV_PIX_FMT_YUV444P).chromaHeightShift == 0);
 static_assert(DescribeInput(AV_PIX_FMT_YUV444P10LE).layout == 1 &&
     DescribeInput(AV_PIX_FMT_YUV444P10LE).bitDepth == 10);
+static_assert(DescribeInput(AV_PIX_FMT_P010LE).sampleScale == 65535.0f / 65472.0f &&
+    DescribeInput(AV_PIX_FMT_P012LE).sampleScale == 65535.0f / 65520.0f &&
+    DescribeInput(AV_PIX_FMT_P210LE).sampleScale == 65535.0f / 65472.0f &&
+    DescribeInput(AV_PIX_FMT_P212LE).sampleScale == 65535.0f / 65520.0f);
 
 constexpr int ChromaOffsetNumerator256(const std::uint32_t shift,
     const int position256) noexcept {
@@ -960,13 +1015,19 @@ FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept 
                     Bt709ToLinear(rgb.b) * transform.paperWhiteNits};
 
             if (transform.colorMode == FFF3FPColorMode::MapToHdr) {
-                if (transform.source2020 == 0) Convert709To2020(nits.r, nits.g, nits.b);
-                nits = ScaleToPeak(nits, ColorTransformProbeTargetPeakNits);
-                rgb = {NitsToPq(nits.r), NitsToPq(nits.g), NitsToPq(nits.b)};
+                if (transform.transfer == FFF3FPColorTransfer::Pq &&
+                    transform.source2020 != 0) {
+                    rgb = {transform.inputRed, transform.inputGreen, transform.inputBlue};
+                } else {
+                    if (transform.source2020 == 0)
+                        Convert709To2020(nits.r, nits.g, nits.b);
+                    rgb = {NitsToPq(nits.r), NitsToPq(nits.g), NitsToPq(nits.b)};
+                }
             } else {
-                if (transform.source2020 != 0) Convert2020To709(nits.r, nits.g, nits.b);
+                if (transform.source2020 == 0) Convert709To2020(nits.r, nits.g, nits.b);
                 nits = MapHdrToSdr(nits, transform.sourcePeakNits,
                     transform.sdrPeakNits);
+                Convert2020To709(nits.r, nits.g, nits.b);
                 rgb = {LinearToBt709(nits.r / transform.sdrPeakNits),
                     LinearToBt709(nits.g / transform.sdrPeakNits),
                     LinearToBt709(nits.b / transform.sdrPeakNits)};
@@ -2807,7 +2868,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
     settings.source2020 = hdrState.format != FFF3FPHdrFormat::Sdr || IsRec2020(frame) ? 1u : 0u;
     settings.sdrPeak = sdrPeakNits_;
-    settings.hdrPeak = settings.transfer == 0 ? sdrPeakNits_ : hdrState.sourcePeakNits;
+    settings.hdrPeak = settings.transfer == 0 ? 100.0f : hdrState.sourcePeakNits;
     sourcePeakNits_ = settings.hdrPeak;
     settings.paperWhite = paperWhiteNits_;
     settings.targetPeak = hdrState.targetPeakNits;
@@ -3485,7 +3546,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     sourceColorSpace_ = AVCOL_SPC_UNSPECIFIED;
     sourceChromaLocation_ = AVCHROMA_LOC_UNSPECIFIED;
     sourceFullRange_ = sourceInterlaced_ = false;
-    sourcePeakNits_ = sdrPeakNits_;
+    sourcePeakNits_ = 100.0f;
     hdrProcessor_.Reset();
     // A previous 8K/RGBA64 source can leave hundreds of MiB in this staging
     // vector. Media replacement is already a pipeline boundary, so release it.

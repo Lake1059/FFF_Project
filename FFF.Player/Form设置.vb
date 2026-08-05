@@ -10,7 +10,7 @@ Public Class Form设置
 
     Private Sub Form设置_Load(sender As Object, e As EventArgs) Handles Me.Load
         Form1.ThisIsYourWindow1.Attach(Me)
-        Dim 主窗体 = TryCast(Owner, Form1)
+        Dim 主窗体 = Form1.当前主窗体
         If 主窗体 IsNot Nothing Then
             Icon = 主窗体.Icon
         End If
@@ -26,7 +26,7 @@ Public Class Form设置
         应用字体(设置.实例对象.字体)
     End Sub
 
-    Friend Sub 显示窗口(ownerForm As Form1)
+    Friend Sub 显示窗口()
         If Visible Then
             初始化所有页面()
             Activate()
@@ -34,7 +34,7 @@ Public Class Form设置
             Return
         End If
         If IsHandleCreated Then 初始化所有页面()
-        Show(ownerForm)
+        Show()
     End Sub
 
     Private Sub Form设置_Shown(sender As Object, e As EventArgs) Handles Me.Shown

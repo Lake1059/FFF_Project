@@ -252,21 +252,21 @@ bool HdrProcessor::RequiresMetadataAwareShader() const noexcept {
 void HdrProcessor::BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) const noexcept {
     const auto state = State();
     std::memset(&metadata, 0, sizeof(metadata));
-    // The shader output contract is always Rec.2020/PQ, regardless of the
-    // source HDR specification. Advertise the actual display-mapped range.
+    // The shader output contract is always Rec.2020/PQ. PQ sources pass through
+    // without display-peak compression, so metadata must describe the source
+    // signal rather than the target monitor.
     metadata.RedPrimary[0] = 35400; metadata.RedPrimary[1] = 14600;
     metadata.GreenPrimary[0] = 8500; metadata.GreenPrimary[1] = 39850;
     metadata.BluePrimary[0] = 6550; metadata.BluePrimary[1] = 2300;
     metadata.WhitePoint[0] = 15635; metadata.WhitePoint[1] = 16450;
-    const auto peak = std::clamp(state.targetPeakNits, 1.0f, 10000.0f);
-    const auto minimum = std::clamp(state.display.minimumNits, 0.0f, peak);
-    metadata.MaxMasteringLuminance = static_cast<UINT>(std::lround(peak * 10000.0f));
-    metadata.MinMasteringLuminance = static_cast<UINT>(std::lround(minimum * 10000.0f));
+    const auto peak = std::clamp(state.sourcePeakNits, 1.0f, 10000.0f);
+    // DXGI uses nits for maximum mastering luminance and 0.0001 nit units only
+    // for minimum mastering luminance. The source minimum is not retained.
+    metadata.MaxMasteringLuminance = static_cast<UINT>(std::lround(peak));
+    metadata.MinMasteringLuminance = 0;
     metadata.MaxContentLightLevel = static_cast<USHORT>(std::lround(std::min(peak, 65535.0f)));
-    const auto fullFrame = state.display.maximumFullFrameNits > 0.0f ?
-        std::min(state.display.maximumFullFrameNits, peak) : peak;
-    metadata.MaxFrameAverageLightLevel = static_cast<USHORT>(
-        std::lround(std::min(fullFrame, 65535.0f)));
+    // Zero is the HDR10 "unknown" value; display ABL is not content MaxFALL.
+    metadata.MaxFrameAverageLightLevel = 0;
 }
 
 float HdrProcessor::ResolveTargetPeak(const float overrideNits,

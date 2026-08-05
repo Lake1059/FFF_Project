@@ -1004,9 +1004,9 @@ Friend Module Program
             If HDR快照.显示器峰值尼特 > 0UI Then
                 断言(HDR快照.HDR有效目标峰值尼特 = HDR快照.显示器峰值尼特,
                    $"自动 HDR 目标没有使用 Windows 显示器峰值：" &
-                   $"显示器 {HDR快照.显示器峰值尼特}，实际映射 {HDR快照.HDR有效目标峰值尼特} 尼特。")
+                   $"显示器 {HDR快照.显示器峰值尼特}，显示目标 {HDR快照.HDR有效目标峰值尼特} 尼特。")
             End If
-            Console.WriteLine($"Windows HDR 峰值/实际映射：" &
+            Console.WriteLine($"Windows HDR 峰值/显示目标：" &
                               $"{HDR快照.显示器峰值尼特}/{HDR快照.HDR有效目标峰值尼特} 尼特。")
 
             Using HDR屏幕首帧 = 捕获控件屏幕(画面)
@@ -1458,8 +1458,8 @@ Friend Module Program
                         .HDR格式 = CUInt(HDR格式.HDR10Plus), .动态HDR元数据有效 = 1UI,
                         .源峰值尼特 = 1242UI, .HDR有效目标峰值尼特 = 750UI})
                     Dim 真实HDR行 = 呈现器.读取调试文本行(信息, 真实HDR快照, "C:\media\movie.mkv")
-                    断言(真实HDR行.Any(Function(x) x = "HDR：HDR10+   逐帧动态元数据   源峰值 1242尼特   实际映射 750尼特"),
-                       "真实 HDR 高亮模式没有显示源峰值与实际映射。")
+                    断言(真实HDR行.Any(Function(x) x = "HDR：HDR10+   逐帧动态元数据   源峰值 1242尼特   显示目标 750尼特"),
+                       "真实 HDR 高亮模式没有显示源峰值与显示目标。")
                     Dim 灰HDR快照 As New 播放器快照(New 原生播放器快照 With {
                         .实际色彩模式 = CUInt(色彩输出模式.原始HDR按SDR呈现), .是HDR源 = 1UI,
                         .HDR格式 = CUInt(HDR格式.HDR10Plus), .动态HDR元数据有效 = 1UI,
@@ -1467,7 +1467,7 @@ Friend Module Program
                     Dim 灰HDR行 = 呈现器.读取调试文本行(信息, 灰HDR快照, "C:\media\movie.mkv")
                     断言(灰HDR行.Any(Function(x) x = "HDR：HDR10+   逐帧动态元数据") AndAlso
                            Not 灰HDR行.Any(Function(x) x.Contains("源峰值", StringComparison.Ordinal) OrElse
-                                               x.Contains("实际映射", StringComparison.Ordinal)),
+                                               x.Contains("显示目标", StringComparison.Ordinal)),
                        "原始 HDR 按 SDR 呈现模式不应显示亮度映射条目。")
                     断言(Not 实际.Any(Function(x) x.Contains("secret.srt", StringComparison.OrdinalIgnoreCase) OrElse
                                                 x.Contains("secret.xml", StringComparison.OrdinalIgnoreCase) OrElse

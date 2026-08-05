@@ -23,12 +23,16 @@ Partial Class Form设置_HDR
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
+        Panel1 = New Panel()
+        ETB_HDR映射SDR亮度 = New LakeUI.ExcellentTrackBar()
+        HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
         Panel2 = New Panel()
         MTB_自定义真实HDR峰值亮度 = New LakeUI.ModernTextBox()
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MCB_真实HDR峰值亮度选项 = New LakeUI.ModernComboBox()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
         ModernPanel1.SuspendLayout()
+        Panel1.SuspendLayout()
         Panel2.SuspendLayout()
         SuspendLayout()
         ' 
@@ -36,6 +40,8 @@ Partial Class Form设置_HDR
         ' 
         ModernPanel1.BackColor1 = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ModernPanel1.BorderSize = 0
+        ModernPanel1.Controls.Add(Panel1)
+        ModernPanel1.Controls.Add(HtmlColorLabel2)
         ModernPanel1.Controls.Add(Panel2)
         ModernPanel1.Controls.Add(HtmlColorLabel1)
         ModernPanel1.Dock = DockStyle.Fill
@@ -44,6 +50,54 @@ Partial Class Form设置_HDR
         ModernPanel1.Padding = New Padding(20)
         ModernPanel1.Size = New Size(697, 494)
         ModernPanel1.TabIndex = 0
+        ' 
+        ' Panel1
+        ' 
+        Panel1.Controls.Add(ETB_HDR映射SDR亮度)
+        Panel1.Dock = DockStyle.Top
+        Panel1.Location = New Point(20, 128)
+        Panel1.Name = "Panel1"
+        Panel1.Padding = New Padding(0, 10, 0, 0)
+        Panel1.Size = New Size(657, 42)
+        Panel1.TabIndex = 19
+        ' 
+        ' ETB_HDR映射SDR亮度
+        ' 
+        ETB_HDR映射SDR亮度.BackColor = Color.Transparent
+        ETB_HDR映射SDR亮度.Dock = DockStyle.Fill
+        ETB_HDR映射SDR亮度.LabelColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        ETB_HDR映射SDR亮度.LabelLineColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        ETB_HDR映射SDR亮度.LabelLineLength = 16
+        ETB_HDR映射SDR亮度.Location = New Point(0, 10)
+        ETB_HDR映射SDR亮度.Margin = New Padding(2, 2, 2, 2)
+        ETB_HDR映射SDR亮度.Maximum = 500R
+        ETB_HDR映射SDR亮度.Minimum = 1R
+        ETB_HDR映射SDR亮度.Name = "ETB_HDR映射SDR亮度"
+        ETB_HDR映射SDR亮度.Size = New Size(657, 32)
+        ETB_HDR映射SDR亮度.TabIndex = 30
+        ETB_HDR映射SDR亮度.ThumbBorderWidth = 0
+        ETB_HDR映射SDR亮度.ThumbColor = Color.OliveDrab
+        ETB_HDR映射SDR亮度.ThumbHeight = 28
+        ETB_HDR映射SDR亮度.ThumbTextDecimalPlaces = 0
+        ETB_HDR映射SDR亮度.ThumbTextMode = LakeUI.ExcellentTrackBar.ThumbTextModeEnum.Value
+        ETB_HDR映射SDR亮度.ThumbWidth = 38
+        ETB_HDR映射SDR亮度.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        ETB_HDR映射SDR亮度.TrackFillColor = Color.Transparent
+        ETB_HDR映射SDR亮度.Value = 250R
+        ' 
+        ' HtmlColorLabel2
+        ' 
+        HtmlColorLabel2.AutoSize = True
+        HtmlColorLabel2.AutoSizeMode = AutoSizeMode.GrowAndShrink
+        HtmlColorLabel2.Dock = DockStyle.Top
+        HtmlColorLabel2.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        HtmlColorLabel2.Location = New Point(20, 85)
+        HtmlColorLabel2.Margin = New Padding(2)
+        HtmlColorLabel2.Name = "HtmlColorLabel2"
+        HtmlColorLabel2.Padding = New Padding(0, 20, 0, 0)
+        HtmlColorLabel2.Size = New Size(657, 43)
+        HtmlColorLabel2.TabIndex = 18
+        HtmlColorLabel2.Text = "<span style=""font-size:13; color:Silver"">映射 SDR 参考亮度</span>   仅影响 HDR 片源的映射 SDR 模式"
         ' 
         ' Panel2
         ' 
@@ -130,7 +184,7 @@ Partial Class Form设置_HDR
         HtmlColorLabel1.Name = "HtmlColorLabel1"
         HtmlColorLabel1.Size = New Size(657, 23)
         HtmlColorLabel1.TabIndex = 16
-        HtmlColorLabel1.Text = "<span style=""font-size:13; color:Silver"">真实 HDR 峰值亮度</span>"
+        HtmlColorLabel1.Text = "<span style=""font-size:13; color:Silver"">真实 HDR 峰值亮度</span>   仅影响 HDR 片源的真实 HDR 模式"
         ' 
         ' Form设置_HDR
         ' 
@@ -145,6 +199,7 @@ Partial Class Form设置_HDR
         Text = "Form设置_HDR"
         ModernPanel1.ResumeLayout(False)
         ModernPanel1.PerformLayout()
+        Panel1.ResumeLayout(False)
         Panel2.ResumeLayout(False)
         ResumeLayout(False)
     End Sub
@@ -155,4 +210,7 @@ Partial Class Form设置_HDR
     Friend WithEvents JustEmptyControl1 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_真实HDR峰值亮度选项 As LakeUI.ModernComboBox
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
+    Friend WithEvents Panel1 As Panel
+    Friend WithEvents HtmlColorLabel2 As LakeUI.HtmlColorLabel
+    Friend WithEvents ETB_HDR映射SDR亮度 As LakeUI.ExcellentTrackBar
 End Class

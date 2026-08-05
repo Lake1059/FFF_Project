@@ -12,7 +12,6 @@ Public Class Form设置_支持者
     Friend Sub 初始化页面()
         If 已初始化 Then Return
         已初始化 = True
-        显示列表(True, True)
     End Sub
 
     Private Sub 显示列表(显示付费 As Boolean, 显示赠送 As Boolean)
@@ -59,5 +58,9 @@ Public Class Form设置_支持者
 
     Private Sub ModernTextBox1_KeyDown(sender As Object, e As KeyEventArgs) Handles ModernTextBox1.KeyDown
         If e.KeyCode = Keys.Enter Then MemberWall1.Search(ModernTextBox1.Text)
+    End Sub
+
+    Private Sub Form设置_支持者_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+
     End Sub
 End Class

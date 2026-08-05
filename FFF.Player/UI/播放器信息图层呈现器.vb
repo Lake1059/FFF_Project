@@ -418,7 +418,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 动态 = If(快照.动态HDR元数据有效, "逐帧动态元数据", String.Empty)
         Dim 亮度 = If(快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
                        快照.HDR有效目标峰值尼特 > 0,
-            $"源峰值 {快照.源峰值尼特:0}尼特   实际映射 {快照.HDR有效目标峰值尼特:0}尼特", String.Empty)
+            $"源峰值 {快照.源峰值尼特:0}尼特   显示目标 {快照.HDR有效目标峰值尼特:0}尼特", String.Empty)
         Dim 回退 = If(快照.HDR回退有效,
             If(快照.杜比视界增强层类型 = 杜比视界增强层类型.FEL,
                "HDR10 兼容输出（FEL 已忽略）", "HDR10 兼容输出"), String.Empty)
