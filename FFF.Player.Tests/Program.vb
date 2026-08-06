@@ -139,10 +139,11 @@ Friend Module Program
                 Return 0
             End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--settings-size-visibility-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试初始画面尺寸DPI缩放()
                 测试自定义初始尺寸可见性()
                 测试自定义HDR峰值可见性()
                 测试字幕弹幕设置与字号单位()
-                Console.WriteLine("尺寸、HDR、字幕/弹幕设置接线及字号 point 单位回归通过。")
+                Console.WriteLine("DPI 尺寸、设置控件布局、HDR、字幕/弹幕设置接线及字号 point 单位回归通过。")
                 Return 0
             End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--gpu-decode-matrix", StringComparison.OrdinalIgnoreCase) Then
@@ -370,6 +371,44 @@ Friend Module Program
         End Try
     End Function
 
+    Private Sub 测试初始画面尺寸DPI缩放()
+        Dim 默认设置 = New 设置()
+        断言(默认设置.初始画面尺寸选项 = 2 AndAlso
+               默认设置.取得初始画面尺寸() = New Size(854, 480),
+           "初始画面尺寸默认值不是 854x480。")
+
+        Dim 逻辑尺寸 = New Size(1366, 768)
+        断言(播放器窗口布局控制器.按DPI缩放画面尺寸(逻辑尺寸, 96) = 逻辑尺寸,
+           "100% DPI 下初始画面尺寸不应变化。")
+        断言(播放器窗口布局控制器.按DPI缩放画面尺寸(逻辑尺寸, 120) = New Size(1708, 960),
+           "125% DPI 下初始画面尺寸换算或取整错误。")
+        断言(播放器窗口布局控制器.按DPI缩放画面尺寸(逻辑尺寸, 144) = New Size(2049, 1152),
+           "150% DPI 下初始画面尺寸换算错误。")
+        断言(播放器窗口布局控制器.按DPI缩放画面尺寸(逻辑尺寸, 192) = New Size(2732, 1536),
+           "200% DPI 下初始画面尺寸换算错误。")
+        Dim 副屏工作区 = New Rectangle(-1920, 40, 1920, 1040)
+        断言(播放器窗口布局控制器.计算工作区居中边界(New Size(854, 480), 副屏工作区) =
+               New Rectangle(-1387, 320, 854, 480),
+           "最终窗口没有在目标屏幕工作区内居中。")
+
+        Dim 原尺寸选项 = 设置.实例对象.初始画面尺寸选项
+        Try
+            Dim 预设期望 = {
+                (索引:=1, 尺寸:=New Size(640, 360)),
+                (索引:=2, 尺寸:=New Size(854, 480)),
+                (索引:=3, 尺寸:=New Size(960, 540)),
+                (索引:=4, 尺寸:=New Size(1024, 576))
+            }
+            For Each 预设 In 预设期望
+                设置.实例对象.初始画面尺寸选项 = 预设.索引
+                断言(设置.实例对象.取得初始画面尺寸() = 预设.尺寸,
+                   $"初始画面尺寸预设 {预设.索引} 映射错误。")
+            Next
+        Finally
+            设置.实例对象.初始画面尺寸选项 = 原尺寸选项
+        End Try
+    End Sub
+
     Private Sub 测试自定义初始尺寸可见性()
         Dim 原尺寸选项 = 设置.实例对象.初始画面尺寸选项
         Try
@@ -385,9 +424,17 @@ Friend Module Program
                 断言(尺寸选项 IsNot Nothing AndAlso 宽度输入框 IsNot Nothing AndAlso 高度输入框 IsNot Nothing AndAlso
                        第一间隔 IsNot Nothing AndAlso 第二间隔 IsNot Nothing,
                    "无法取得初始画面尺寸设置控件。")
+                断言(尺寸选项.Items.Count = 10 AndAlso
+                       尺寸选项.Items(1).ToString() = "640x360" AndAlso
+                       尺寸选项.Items(2).ToString() = "854x480" AndAlso
+                       尺寸选项.Items(3).ToString() = "960x540" AndAlso
+                       尺寸选项.Items(4).ToString() = "1024x576",
+                   "初始画面尺寸下拉框的小尺寸预设或排列顺序错误。")
 
                 尺寸选项.SelectedIndex = 1
                 Application.DoEvents()
+                断言(设置.实例对象.初始画面尺寸选项 = 1,
+                   "640x360 下拉项没有写入对应的预设编号。")
                 断言(Not 宽度输入框.Visible AndAlso Not 高度输入框.Visible AndAlso
                        Not 第一间隔.Visible AndAlso Not 第二间隔.Visible,
                    "选择预设尺寸后自定义宽高输入框或间隔仍然可见。")
@@ -397,6 +444,13 @@ Friend Module Program
                 断言(宽度输入框.Visible AndAlso 高度输入框.Visible AndAlso
                        第一间隔.Visible AndAlso 第二间隔.Visible,
                    "选择自定义尺寸后宽高输入框或间隔没有显示。")
+                断言(尺寸选项.Right = 第一间隔.Left AndAlso
+                       第一间隔.Right = 宽度输入框.Left AndAlso
+                       宽度输入框.Right = 第二间隔.Left AndAlso
+                       第二间隔.Right = 高度输入框.Left,
+                   $"自定义尺寸控件重显后的 Dock 顺序错误：选项={尺寸选项.Bounds}，" &
+                   $"间隔1={第一间隔.Bounds}，宽度={宽度输入框.Bounds}，" &
+                   $"间隔2={第二间隔.Bounds}，高度={高度输入框.Bounds}。")
             End Using
         Finally
             设置.实例对象.初始画面尺寸选项 = 原尺寸选项

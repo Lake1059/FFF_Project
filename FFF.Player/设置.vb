@@ -6,7 +6,7 @@ Public Class 设置
     Public Shared Property 实例对象 As New 设置()
 
     Public Property 字体 As String = SystemFonts.DefaultFont.FontFamily.Name
-    Public Property 初始画面尺寸选项 As Integer = 1
+    Public Property 初始画面尺寸选项 As Integer = 2
     Public Property 自定义初始画面宽度 As Integer = 1024
     Public Property 自定义初始画面高度 As Integer = 576
     Public Property 解码方式 As 解码模式 = 解码模式.CPU
@@ -115,7 +115,7 @@ Public Class 设置
 
     Public Sub 规范化()
         字体 = 规范字体(字体, SystemFonts.DefaultFont.FontFamily.Name)
-        初始画面尺寸选项 = Math.Clamp(初始画面尺寸选项, 0, 6)
+        初始画面尺寸选项 = Math.Clamp(初始画面尺寸选项, 0, 9)
         自定义初始画面宽度 = Math.Clamp(自定义初始画面宽度, 320, 7680)
         自定义初始画面高度 = Math.Clamp(自定义初始画面高度, 180, 4320)
         If 解码方式 <> CInt(解码模式.CPU) AndAlso 解码方式 <> CInt(解码模式.GPU) Then
@@ -175,7 +175,8 @@ Public Class 设置
     End Function
 
     Public Function 取得初始画面尺寸() As Size
-        Dim 预设 = {Size.Empty, New Size(1024, 576), New Size(1366, 768), New Size(1600, 900),
+        Dim 预设 = {Size.Empty, New Size(640, 360), New Size(854, 480), New Size(960, 540),
+                    New Size(1024, 576), New Size(1366, 768), New Size(1600, 900),
                     New Size(1920, 1080), New Size(2560, 1440), New Size(3840, 2160)}
         If 初始画面尺寸选项 = 0 Then Return New Size(自定义初始画面宽度, 自定义初始画面高度)
         Return 预设(初始画面尺寸选项)

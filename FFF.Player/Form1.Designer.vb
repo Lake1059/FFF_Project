@@ -98,6 +98,7 @@ Partial Class Form1
         JustEmptyControl2 = New LakeUI.JustEmptyControl()
         MP_DX视频容器 = New Panel()
         MCB_流选择器 = New LakeUI.ModernContextMenu()
+        MCB_标题栏菜单 = New LakeUI.ModernContextMenu()
         Panel1.SuspendLayout()
         ModernPanel1.SuspendLayout()
         Panel3.SuspendLayout()
@@ -1076,6 +1077,29 @@ Partial Class Form1
         MCB_流选择器.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         MCB_流选择器.SeparatorHeight = 10
         ' 
+        ' MCB_标题栏菜单
+        ' 
+        MCB_标题栏菜单.AnimationFPS = 120
+        MCB_标题栏菜单.BackColor = Color.Transparent
+        MCB_标题栏菜单.BackColor1 = Color.FromArgb(CByte(200), CByte(0), CByte(0), CByte(0))
+        MCB_标题栏菜单.BackdropBlurRadius = 30
+        MCB_标题栏菜单.BackdropNoiseOpacity = CByte(0)
+        MCB_标题栏菜单.BackdropTintColor = Color.FromArgb(CByte(180), CByte(0), CByte(0), CByte(0))
+        MCB_标题栏菜单.BorderSize = 0
+        MCB_标题栏菜单.CheckMarkSize = 12
+        MCB_标题栏菜单.DescriptionFont = New Font("Microsoft YaHei UI", 9F)
+        MCB_标题栏菜单.DescriptionForeColor = Color.YellowGreen
+        MCB_标题栏菜单.HoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCB_标题栏菜单.HoverRadius = 5
+        MCB_标题栏菜单.IconSize = 0
+        MCB_标题栏菜单.ItemHeight = 26
+        MCB_标题栏菜单.ItemPadding = New Padding(10, 0, 10, 0)
+        MCB_标题栏菜单.MenuFont = New Font("Microsoft YaHei UI", 10F)
+        MCB_标题栏菜单.MenuPadding = New Padding(10)
+        MCB_标题栏菜单.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCB_标题栏菜单.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCB_标题栏菜单.SeparatorHeight = 10
+        ' 
         ' Form1
         ' 
         AutoScaleDimensions = New SizeF(96F, 96F)
@@ -1171,5 +1195,6 @@ Partial Class Form1
     Friend WithEvents MCB_流选择器 As LakeUI.ModernContextMenu
     Friend WithEvents MB_弹幕开关 As LakeUI.ModernButton
     Friend WithEvents JEC_弹幕开关前面的空白占位 As LakeUI.JustEmptyControl
+    Friend WithEvents MCB_标题栏菜单 As LakeUI.ModernContextMenu
 
 End Class

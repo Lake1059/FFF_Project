@@ -137,6 +137,8 @@ Public Class Form1
         AddHandler 方向键快捷键已请求, AddressOf 剪辑区间控制器.处理方向键快捷键
         界面呈现器.启动()
         更新弹幕按钮状态()
+        PerformLayout()
+        窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
         核心文件检查通过 = True
     End Sub
 
@@ -260,7 +262,6 @@ Public Class Form1
             Return
         End If
 
-        BeginInvoke(Sub() 窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸()))
         Dim 启动文件 = Environment.GetCommandLineArgs().Skip(1).FirstOrDefault(Function(x) File.Exists(x))
         If Not String.IsNullOrEmpty(启动文件) Then BeginInvoke(Sub() 打开或替换文件(启动文件))
     End Sub

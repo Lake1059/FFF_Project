@@ -13,6 +13,51 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="3FR">
+      <UniqueIdentifier>{4acdc552-3c4b-46bf-a561-151e28875317}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FP">
+      <UniqueIdentifier>{c3b17e33-e2a9-44ff-81d0-2ed4a929dbae}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FP\Api">
+      <UniqueIdentifier>{bf1c4040-a364-4b79-95dc-76e0b56d0d04}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FP\Audio">
+      <UniqueIdentifier>{a0ec69fd-07a2-45a7-bbe5-a1d75283099c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FP\Core">
+      <UniqueIdentifier>{774e6ff6-694a-4d50-9e87-1906fd1f1bfd}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FP\Hdr">
+      <UniqueIdentifier>{fc3d3da0-5d9b-4560-8a87-81be6d30e501}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FP\Render">
+      <UniqueIdentifier>{30b1418b-c1cb-42e7-90d2-40de01e186a4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FP\Subtitle">
+      <UniqueIdentifier>{78d6dce7-80fe-42ce-b996-4c12d76f4e5a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FR\Api">
+      <UniqueIdentifier>{96dc549f-0ab1-4e0f-b853-a8c41e54a8fe}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FR\Audio">
+      <UniqueIdentifier>{03bf8222-fe85-432f-b04d-a235f7f6a7f7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FR\Core">
+      <UniqueIdentifier>{3f03b70f-1501-4e72-b0d5-aa360cdac3fa}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FR\Ffmpeg">
+      <UniqueIdentifier>{c67179c2-1948-4996-bca4-1dd6116f8920}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FR\Timeline">
+      <UniqueIdentifier>{906bca06-e5f5-44f4-9f33-8133c03424b9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shared">
+      <UniqueIdentifier>{93519a40-c784-4927-9bf6-2600ea547292}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shared\Ffmpeg">
+      <UniqueIdentifier>{73292c76-803f-4ea6-b54a-78c7a841de9b}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h">
@@ -22,7 +67,43 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="3FP\Hdr\HdrProcessor.h">
-      <Filter>头文件</Filter>
+      <Filter>3FP\Hdr</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Api\FFF.Player.Api.h">
+      <Filter>3FP\Api</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Audio\WasapiRenderer.h">
+      <Filter>3FP\Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Core\PlayerSession.h">
+      <Filter>3FP\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Render\VideoRenderer.h">
+      <Filter>3FP\Render</Filter>
+    </ClInclude>
+    <ClInclude Include="3FR\Api\FFF.Native.Api.h">
+      <Filter>3FR\Api</Filter>
+    </ClInclude>
+    <ClInclude Include="3FR\Audio\AudioTrackEncoder.h">
+      <Filter>3FR\Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="3FR\Audio\AudioMixer.h">
+      <Filter>3FR\Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="3FR\Audio\AudioTypes.h">
+      <Filter>3FR\Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="3FR\Audio\WasapiCapture.h">
+      <Filter>3FR\Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="3FR\Core\Session.h">
+      <Filter>3FR\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="3FR\Ffmpeg\VideoMuxer.h">
+      <Filter>3FR\Ffmpeg</Filter>
+    </ClInclude>
+    <ClInclude Include="3FR\Timeline\QpcTimeline.h">
+      <Filter>3FR\Timeline</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -33,16 +114,49 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="Shared\Ffmpeg\FfmpegRuntime.cpp">
-      <Filter>源文件</Filter>
+      <Filter>Shared\Ffmpeg</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Subtitle\BitmapSubtitleDecoder.cpp">
-      <Filter>源文件</Filter>
+      <Filter>3FP\Subtitle</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp">
-      <Filter>源文件</Filter>
+      <Filter>3FP\Subtitle</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp">
-      <Filter>源文件</Filter>
+      <Filter>3FP\Hdr</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Api\PlayerApi.cpp">
+      <Filter>3FP\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Audio\WasapiRenderer.cpp">
+      <Filter>3FP\Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Core\PlayerSession.cpp">
+      <Filter>3FP\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Render\VideoRenderer.cpp">
+      <Filter>3FP\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="3FR\Api\NativeApi.cpp">
+      <Filter>3FR\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="3FR\Audio\AudioTrackEncoder.cpp">
+      <Filter>3FR\Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="3FR\Audio\AudioMixer.cpp">
+      <Filter>3FR\Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="3FR\Audio\WasapiCapture.cpp">
+      <Filter>3FR\Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="3FR\Core\Session.cpp">
+      <Filter>3FR\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="3FR\Ffmpeg\VideoMuxer.cpp">
+      <Filter>3FR\Ffmpeg</Filter>
+    </ClCompile>
+    <ClCompile Include="3FR\Timeline\QpcTimeline.cpp">
+      <Filter>3FR\Timeline</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

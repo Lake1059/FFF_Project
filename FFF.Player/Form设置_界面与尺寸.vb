@@ -61,9 +61,31 @@ Public Class Form设置_界面与尺寸
 
     Private Sub 更新自定义尺寸控件状态()
         Dim 显示自定义尺寸 = MCB_初始画面尺寸选项.SelectedIndex = 0
-        MTB_自定义初始画面尺寸宽度.Visible = 显示自定义尺寸
-        MTB_自定义初始画面尺寸高度.Visible = 显示自定义尺寸
-        JustEmptyControl1.Visible = 显示自定义尺寸
-        JustEmptyControl2.Visible = 显示自定义尺寸
+        Dim 停靠顺序 As Control() = {
+            MTB_自定义初始画面尺寸高度,
+            JustEmptyControl2,
+            MTB_自定义初始画面尺寸宽度,
+            JustEmptyControl1,
+            MCB_初始画面尺寸选项
+        }
+        Dim 自定义尺寸控件 As Control() = {
+            JustEmptyControl1,
+            MTB_自定义初始画面尺寸宽度,
+            JustEmptyControl2,
+            MTB_自定义初始画面尺寸高度
+        }
+
+        Panel2.SuspendLayout()
+        Try
+            For Each 控件 In 自定义尺寸控件
+                控件.Visible = 显示自定义尺寸
+            Next
+            ' LakeUI 控件显隐会改变 Z 顺序；显隐后需连同 JEC 间隔恢复 DockStyle.Left 的反向停靠顺序。
+            For index = 0 To 停靠顺序.Length - 1
+                Panel2.Controls.SetChildIndex(停靠顺序(index), index)
+            Next
+        Finally
+            Panel2.ResumeLayout(True)
+        End Try
     End Sub
 End Class

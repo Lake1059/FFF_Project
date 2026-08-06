@@ -73,14 +73,14 @@ Partial Class Form设置_界面与尺寸
         MCB_全局字体.DropDownBackdropBlurRadius = 30
         MCB_全局字体.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
         MCB_全局字体.DropDownHoverColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
-        MCB_全局字体.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
         MCB_全局字体.DropDownPadding = New Padding(10)
         MCB_全局字体.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MCB_全局字体.DropDownSelectedForeColor = Color.White
         MCB_全局字体.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCB_全局字体.LineHeight = 22
         MCB_全局字体.Location = New Point(0, 10)
         MCB_全局字体.Margin = New Padding(2, 2, 2, 2)
-        MCB_全局字体.MaxDropDownItems = 12
+        MCB_全局字体.MaxDropDownItems = 16
         MCB_全局字体.Name = "MCB_全局字体"
         MCB_全局字体.Padding = New Padding(10, 0, 10, 0)
         MCB_全局字体.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
@@ -185,6 +185,9 @@ Partial Class Form设置_界面与尺寸
         MCB_初始画面尺寸选项.DropDownSelectedForeColor = Color.White
         MCB_初始画面尺寸选项.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCB_初始画面尺寸选项.Items.Add("自定义")
+        MCB_初始画面尺寸选项.Items.Add("640x360")
+        MCB_初始画面尺寸选项.Items.Add("854x480")
+        MCB_初始画面尺寸选项.Items.Add("960x540")
         MCB_初始画面尺寸选项.Items.Add("1024x576")
         MCB_初始画面尺寸选项.Items.Add("1366x768")
         MCB_初始画面尺寸选项.Items.Add("1600x900")
@@ -214,7 +217,7 @@ Partial Class Form设置_界面与尺寸
         HtmlColorLabel1.Name = "HtmlColorLabel1"
         HtmlColorLabel1.Size = New Size(660, 23)
         HtmlColorLabel1.TabIndex = 14
-        HtmlColorLabel1.Text = "<span style=""font-size:13; color:Silver"">初始画面尺寸</span>   每次启动软件后视频渲染区域的尺寸，不会跟随 DPI 缩放"
+        HtmlColorLabel1.Text = "<span style=""font-size:13; color:Silver"">初始画面尺寸</span>   每次启动软件后视频渲染区域的尺寸，会跟随 DPI 缩放"
         ' 
         ' Form设置_界面与尺寸
         ' 

@@ -22,8 +22,10 @@ Partial Class Form设置_个性化
     '不要使用代码编辑器修改它。
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
-        Dim ToolTipEntry3 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry1 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
         ModernPanel1 = New LakeUI.ModernPanel()
+        Panel1 = New Panel()
+        MB_选择背景图 = New LakeUI.ModernButton()
         Panel5 = New Panel()
         MCB_噪点颗粒 = New LakeUI.ModernComboBox()
         JustEmptyControl5 = New LakeUI.JustEmptyControl()
@@ -46,15 +48,13 @@ Partial Class Form设置_个性化
         MB_前往购买 = New LakeUI.ModernButton()
         HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
-        Panel1 = New Panel()
-        MB_选择背景图 = New LakeUI.ModernButton()
         ModernPanel1.SuspendLayout()
+        Panel1.SuspendLayout()
         Panel5.SuspendLayout()
         Panel3.SuspendLayout()
         Panel2.SuspendLayout()
         ModernPanel2.SuspendLayout()
         Panel4.SuspendLayout()
-        Panel1.SuspendLayout()
         SuspendLayout()
         ' 
         ' ModernPanel1
@@ -74,6 +74,31 @@ Partial Class Form设置_个性化
         ModernPanel1.Padding = New Padding(20)
         ModernPanel1.Size = New Size(681, 450)
         ModernPanel1.TabIndex = 1
+        ' 
+        ' Panel1
+        ' 
+        Panel1.Controls.Add(MB_选择背景图)
+        Panel1.Dock = DockStyle.Top
+        Panel1.Location = New Point(20, 377)
+        Panel1.Name = "Panel1"
+        Panel1.Padding = New Padding(0, 10, 0, 0)
+        Panel1.Size = New Size(641, 42)
+        Panel1.TabIndex = 32
+        ' 
+        ' MB_选择背景图
+        ' 
+        MB_选择背景图.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_选择背景图.BorderRadius = 10
+        MB_选择背景图.BorderSize = 0
+        MB_选择背景图.Dock = DockStyle.Left
+        MB_选择背景图.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MB_选择背景图.Location = New Point(0, 10)
+        MB_选择背景图.Margin = New Padding(2)
+        MB_选择背景图.Name = "MB_选择背景图"
+        MB_选择背景图.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MB_选择背景图.Size = New Size(150, 32)
+        MB_选择背景图.TabIndex = 14
+        MB_选择背景图.Text = "选择背景图"
         ' 
         ' Panel5
         ' 
@@ -144,9 +169,9 @@ Partial Class Form设置_个性化
         MCB_背景来源.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCB_背景来源.Items.Add("背景图（推荐）")
         MCB_背景来源.Items.Add("窗口穿透")
-        ToolTipEntry3.ItemText = "窗口穿透"
-        ToolTipEntry3.ToolTipText = "受限于 WinForms 的性能限制和特性，窗口穿透不会实时更新，仅依靠事件触发来更新，且子控件也是这样"
-        MCB_背景来源.ItemToolTips.AddRange(New LakeUI.ModernComboBox.ToolTipEntry() {ToolTipEntry3})
+        ToolTipEntry1.ItemText = "窗口穿透"
+        ToolTipEntry1.ToolTipText = "受限于 WinForms 的性能限制和特性，窗口穿透不会实时更新，仅依靠事件触发来更新，且子控件也是这样"
+        MCB_背景来源.ItemToolTips.AddRange(New LakeUI.ModernComboBox.ToolTipEntry() {ToolTipEntry1})
         MCB_背景来源.Location = New Point(160, 10)
         MCB_背景来源.Margin = New Padding(2, 2, 2, 2)
         MCB_背景来源.Name = "MCB_背景来源"
@@ -410,7 +435,7 @@ Partial Class Form设置_个性化
         HtmlColorLabel2.Name = "HtmlColorLabel2"
         HtmlColorLabel2.Size = New Size(601, 34)
         HtmlColorLabel2.TabIndex = 12
-        HtmlColorLabel2.Text = "3FP 支持者内容包仅提供个性化功能，播放功能完全免费<br>作为 3FR 的付费支持者，您可以提供一个支持者信息，我会在下一次更新时硬编码到 3FP"
+        HtmlColorLabel2.Text = "3FP 支持者内容包仅提供个性化功能，播放功能完全免费<br>作为 3FP 的付费支持者，您可以提供一个支持者信息，我会在下一次更新时硬编码到 3FP"
         ' 
         ' HtmlColorLabel1
         ' 
@@ -426,31 +451,6 @@ Partial Class Form设置_个性化
         HtmlColorLabel1.TabIndex = 11
         HtmlColorLabel1.Text = "购买 FFF.Player Supporter Pack 以解锁个性化设置"
         ' 
-        ' Panel1
-        ' 
-        Panel1.Controls.Add(MB_选择背景图)
-        Panel1.Dock = DockStyle.Top
-        Panel1.Location = New Point(20, 377)
-        Panel1.Name = "Panel1"
-        Panel1.Padding = New Padding(0, 10, 0, 0)
-        Panel1.Size = New Size(641, 42)
-        Panel1.TabIndex = 32
-        ' 
-        ' MB_选择背景图
-        ' 
-        MB_选择背景图.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MB_选择背景图.BorderRadius = 10
-        MB_选择背景图.BorderSize = 0
-        MB_选择背景图.Dock = DockStyle.Left
-        MB_选择背景图.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_选择背景图.Location = New Point(0, 10)
-        MB_选择背景图.Margin = New Padding(2)
-        MB_选择背景图.Name = "MB_选择背景图"
-        MB_选择背景图.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_选择背景图.Size = New Size(150, 32)
-        MB_选择背景图.TabIndex = 14
-        MB_选择背景图.Text = "选择背景图"
-        ' 
         ' Form设置_个性化
         ' 
         AutoScaleDimensions = New SizeF(96F, 96F)
@@ -464,6 +464,7 @@ Partial Class Form设置_个性化
         Text = "Form设置_个性化"
         ModernPanel1.ResumeLayout(False)
         ModernPanel1.PerformLayout()
+        Panel1.ResumeLayout(False)
         Panel5.ResumeLayout(False)
         Panel3.ResumeLayout(False)
         Panel2.ResumeLayout(False)
@@ -471,7 +472,6 @@ Partial Class Form设置_个性化
         ModernPanel2.PerformLayout()
         Panel4.ResumeLayout(False)
         Panel4.PerformLayout()
-        Panel1.ResumeLayout(False)
         ResumeLayout(False)
     End Sub
 

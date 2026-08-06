@@ -55,17 +55,46 @@ Friend NotInheritable Class 播放器窗口布局控制器
     Friend Sub 应用初始画面尺寸(目标画面大小 As Size)
         If 已释放 OrElse 已校正启动视频比例 OrElse 窗体.IsDisposed OrElse Not 窗体.IsHandleCreated OrElse
             目标画面大小.Width <= 0 OrElse 目标画面大小.Height <= 0 Then Return
+        窗体.PerformLayout()
+        Dim 目标画面设备大小 = 按DPI缩放画面尺寸(目标画面大小, 窗体.DeviceDpi)
         Dim 客户区非视频宽度 = Math.Max(0, 窗体.ClientSize.Width - 视频容器.ClientSize.Width)
         Dim 客户区非视频高度 = Math.Max(0, 窗体.ClientSize.Height - 视频容器.ClientSize.Height)
         Dim 非客户区宽度 = Math.Max(0, 窗体.Width - 窗体.ClientSize.Width)
         Dim 非客户区高度 = Math.Max(0, 窗体.Height - 窗体.ClientSize.Height)
-        Dim 目标宽度 = 目标画面大小.Width + 客户区非视频宽度 + 非客户区宽度
-        Dim 目标高度 = 目标画面大小.Height + 客户区非视频高度 + 非客户区高度
+        Dim 目标宽度 = 目标画面设备大小.Width + 客户区非视频宽度 + 非客户区宽度
+        Dim 目标高度 = 目标画面设备大小.Height + 客户区非视频高度 + 非客户区高度
         Dim workingArea = Screen.FromControl(窗体).WorkingArea
-        窗体.Size = New Size(Math.Clamp(目标宽度, 窗体.MinimumSize.Width, workingArea.Width),
-                            Math.Clamp(目标高度, 窗体.MinimumSize.Height, workingArea.Height))
+        Dim 最终大小 = New Size(Math.Clamp(目标宽度, 窗体.MinimumSize.Width, workingArea.Width),
+                               Math.Clamp(目标高度, 窗体.MinimumSize.Height, workingArea.Height))
+        窗体.StartPosition = FormStartPosition.Manual
+        窗体.Bounds = 计算工作区居中边界(最终大小, workingArea)
         已校正启动视频比例 = True
     End Sub
+
+    Friend Shared Function 按DPI缩放画面尺寸(逻辑画面大小 As Size, DPI As Integer) As Size
+        If 逻辑画面大小.Width <= 0 OrElse 逻辑画面大小.Height <= 0 Then
+            Throw New ArgumentOutOfRangeException(NameOf(逻辑画面大小))
+        End If
+        If DPI <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(DPI))
+
+        Const 基准DPI As Double = 96.0R
+        Return New Size(
+            CInt(Math.Round(逻辑画面大小.Width * DPI / 基准DPI, MidpointRounding.AwayFromZero)),
+            CInt(Math.Round(逻辑画面大小.Height * DPI / 基准DPI, MidpointRounding.AwayFromZero)))
+    End Function
+
+    Friend Shared Function 计算工作区居中边界(窗口大小 As Size, 工作区 As Rectangle) As Rectangle
+        If 窗口大小.Width <= 0 OrElse 窗口大小.Height <= 0 Then
+            Throw New ArgumentOutOfRangeException(NameOf(窗口大小))
+        End If
+        If 工作区.Width <= 0 OrElse 工作区.Height <= 0 Then
+            Throw New ArgumentOutOfRangeException(NameOf(工作区))
+        End If
+
+        Dim x = 工作区.Left + (工作区.Width - 窗口大小.Width) \ 2
+        Dim y = 工作区.Top + (工作区.Height - 窗口大小.Height) \ 2
+        Return New Rectangle(New Point(x, y), 窗口大小)
+    End Function
 
     Private Sub 输出窗口已创建(sender As Object, e As EventArgs)
         If Not 已释放 Then 重绑输出窗口()
