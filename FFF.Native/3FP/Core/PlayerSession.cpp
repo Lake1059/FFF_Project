@@ -495,6 +495,68 @@ FFFResult PlayerSession::Pause() noexcept {
     });
     return FFFResult::Success;
 }
+
+FFFResult PlayerSession::DiscardAudioOutput() noexcept {
+    const auto currentState = state_.load();
+    if (currentState != FFF3FPState::Ready && currentState != FFF3FPState::Playing &&
+        currentState != FFF3FPState::Paused && currentState != FFF3FPState::Ended)
+        return FFFResult::InvalidState;
+
+    struct Completion final {
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool finished = false;
+        FFFResult result = FFFResult::NativeFailure;
+    };
+
+    auto completion = std::make_shared<Completion>();
+    try {
+        {
+            std::lock_guard lock(mutex_);
+            if (terminate_) return FFFResult::InvalidState;
+            commands_.push_back([this, completion] {
+                auto result = FFFResult::Success;
+                try {
+                    const auto state = state_.load();
+                    if (state == FFF3FPState::Playing)
+                        snapshot_.position100ns = ClockPosition();
+                    if (audioRenderer_) {
+                        audioRenderer_->Stop();
+                        audioRenderer_.reset();
+                    }
+                    audioRuntimeState_.ClearValues();
+                    ResetClock(std::max<std::int64_t>(0, snapshot_.position100ns));
+                    UpdateAudioDiagnostics();
+                    if (state == FFF3FPState::Playing) SetState(FFF3FPState::Paused, "pause");
+                    else PublishSnapshot();
+                } catch (...) {
+                    result = FFFResult::NativeFailure;
+                }
+                {
+                    std::lock_guard completionLock(completion->mutex);
+                    completion->result = result;
+                    completion->finished = true;
+                }
+                completion->condition.notify_one();
+            });
+        }
+        commandCondition_.notify_one();
+        std::unique_lock completionLock(completion->mutex);
+        if (!completion->condition.wait_for(completionLock, std::chrono::seconds(5),
+            [&completion] { return completion->finished; })) {
+            ReportError(FFFResult::NativeFailure,
+                "Timed out while stopping the previous audio output.", "discard-audio");
+            return FFFResult::NativeFailure;
+        }
+        if (completion->result != FFFResult::Success)
+            ReportError(completion->result, "Could not stop the previous audio output.", "discard-audio");
+        return completion->result;
+    } catch (...) {
+        ReportError(FFFResult::NativeFailure,
+            "Could not queue the previous audio output for stopping.", "discard-audio");
+        return FFFResult::NativeFailure;
+    }
+}
 FFFResult PlayerSession::Stop() noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this] { DoClose(FFF3FPState::Idle); }); return FFFResult::Success; }
 FFFResult PlayerSession::Close() noexcept { Enqueue([this] { DoClose(); }); return FFFResult::Success; }
 FFFResult PlayerSession::Seek(const std::int64_t value) noexcept { if (value < 0) return FFFResult::InvalidArgument; const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, value] { DoSeek(value); if (state_.load() != FFF3FPState::Playing) DecodeUntilSeekTarget(); Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":" + std::to_string(snapshot_.position100ns) + "}"); }); return FFFResult::Success; }

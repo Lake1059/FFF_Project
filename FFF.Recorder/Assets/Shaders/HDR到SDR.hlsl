@@ -98,12 +98,13 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float sourceNits = luminance * ReferenceWhiteNits;
     float mappedNits = Bt2390HdrToSdrNits(sourceNits,
         SourcePeakNits * exposureScale, TargetPeakNits);
-    float targetLinear = mappedNits / 100.0;
-    float3 toneMapped = linear709 * (targetLinear / luminance);
+    float targetLinear = mappedNits / max(TargetPeakNits, 1.0);
+    float scale = luminance > 0.000001 ? targetLinear / luminance : 0.0;
+    float3 toneMapped = linear709 * scale;
     float mappedLuminance = dot(toneMapped, float3(0.2126, 0.7152, 0.0722));
     toneMapped = max(lerp(mappedLuminance.xxx, toneMapped, Saturation), 0.0);
     float maxOutput = max(max(toneMapped.r, toneMapped.g), toneMapped.b);
-    float outputLimit = max(TargetPeakNits / 100.0, 0.0001);
+    float outputLimit = 1.0;
     toneMapped *= min(1.0, outputLimit / max(maxOutput, 0.0001));
     OutputTexture[pixel] = float4(Bt709Encode(toneMapped.r), Bt709Encode(toneMapped.g), Bt709Encode(toneMapped.b), 1.0);
 }

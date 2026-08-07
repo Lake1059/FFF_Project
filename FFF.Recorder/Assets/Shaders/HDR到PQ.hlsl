@@ -63,6 +63,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     linear2020.g = dot(linear709, float3(0.0690970, 0.9195400, 0.0113612));
     linear2020.b = dot(linear709, float3(0.0163916, 0.0880132, 0.8955950));
     linear2020 = max(linear2020, 0.0);
-    float3 nits = linear2020 * ReferenceWhiteNits * exp2(Exposure);
+    float peakNits = max(TargetPeakNits, ReferenceWhiteNits);
+    float3 nits = min(linear2020 * ReferenceWhiteNits * exp2(Exposure), peakNits.xxx);
     OutputTexture[pixel] = float4(EncodePq(nits.r), EncodePq(nits.g), EncodePq(nits.b), 1.0);
 }

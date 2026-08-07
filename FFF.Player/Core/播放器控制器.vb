@@ -764,7 +764,7 @@ Public NotInheritable Class 播放器控制器
                         当前色彩输出, HDR色彩输出偏好)
                     Try
                         Try
-                            原会话.暂停()
+                            Await Task.Run(Sub() 原会话.丢弃音频输出())
                         Catch ex As 播放器异常
                         End Try
                         移除会话事件(原会话)
@@ -843,9 +843,8 @@ Public NotInheritable Class 播放器控制器
                 ' 旧会话，再把新会话切回用户选择的独占模式。
                 If 原会话 IsNot Nothing Then
                     Try
-                        ' 先停止旧音频。暂停命令会排在后续 WASAPI 重建之前，
-                        ' 避免切解码器时黑屏期间残留一帧旧声音。
-                        原会话.暂停()
+                        ' 先同步丢弃旧音频端的设备缓冲，避免切解码器时黑屏期间残留一帧旧声音。
+                        Await Task.Run(Sub() 原会话.丢弃音频输出())
                     Catch ex As 播放器异常
                     End Try
                 End If

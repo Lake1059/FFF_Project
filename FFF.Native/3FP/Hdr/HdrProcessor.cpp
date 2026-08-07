@@ -26,6 +26,16 @@ float ValidPeak(const double value) noexcept {
         static_cast<float>(std::clamp(value, 1.0, 10000.0)) : 0.0f;
 }
 
+float ValidLuminance(const double value) noexcept {
+    return std::isfinite(value) && value > 0.0 ?
+        static_cast<float>(std::clamp(value, 0.0, 10000.0)) : 0.0f;
+}
+
+float ValidChromaticity(const double value) noexcept {
+    return std::isfinite(value) && value >= 0.0 && value <= 1.0 ?
+        static_cast<float>(value) : 0.0f;
+}
+
 float PqCodeToNits(const std::uint16_t code) noexcept {
     constexpr double m1 = 2610.0 / 16384.0;
     constexpr double m2 = 2523.0 / 32.0;
@@ -61,22 +71,109 @@ void ClassifyDolbyVision(const AVDOVIDecoderConfigurationRecord* configuration,
     state.fallback = true;
 }
 
-float ResolveStaticSourcePeak(const AVFrame* frame, const float fallback) noexcept {
-    const auto* lightData = av_frame_get_side_data(frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
-    if (lightData != nullptr && lightData->size >= sizeof(AVContentLightMetadata)) {
-        const auto* light = reinterpret_cast<const AVContentLightMetadata*>(lightData->data);
-        if (light->MaxCLL > 0) return ValidPeak(light->MaxCLL);
-    }
-    const auto* masteringData = av_frame_get_side_data(
-        frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
-    if (masteringData != nullptr && masteringData->size >= sizeof(AVMasteringDisplayMetadata)) {
-        const auto* mastering = reinterpret_cast<const AVMasteringDisplayMetadata*>(masteringData->data);
-        if (mastering->has_luminance) {
-            const auto peak = ValidPeak(av_q2d(mastering->max_luminance));
-            if (peak > 0.0f) return peak;
+void ApplyContentLightMetadata(const AVContentLightMetadata* light,
+    HdrStaticMetadata& metadata) noexcept {
+    if (light == nullptr) return;
+    const auto maxContent = ValidPeak(light->MaxCLL);
+    const auto maxAverage = ValidLuminance(light->MaxFALL);
+    if (maxContent <= 0.0f && maxAverage <= 0.0f) return;
+    metadata.hasContentLight = true;
+    if (maxContent > 0.0f)
+        metadata.maximumContentLightLevelNits = maxContent;
+    if (maxAverage > 0.0f)
+        metadata.maximumFrameAverageLightLevelNits = maxAverage;
+}
+
+void ApplyMasteringDisplayMetadata(const AVMasteringDisplayMetadata* mastering,
+    HdrStaticMetadata& metadata) noexcept {
+    if (mastering == nullptr) return;
+    if (mastering->has_primaries) {
+        const auto redX = ValidChromaticity(av_q2d(mastering->display_primaries[0][0]));
+        const auto redY = ValidChromaticity(av_q2d(mastering->display_primaries[0][1]));
+        const auto greenX = ValidChromaticity(av_q2d(mastering->display_primaries[1][0]));
+        const auto greenY = ValidChromaticity(av_q2d(mastering->display_primaries[1][1]));
+        const auto blueX = ValidChromaticity(av_q2d(mastering->display_primaries[2][0]));
+        const auto blueY = ValidChromaticity(av_q2d(mastering->display_primaries[2][1]));
+        const auto whiteX = ValidChromaticity(av_q2d(mastering->white_point[0]));
+        const auto whiteY = ValidChromaticity(av_q2d(mastering->white_point[1]));
+        if (redX > 0.0f && redY > 0.0f && greenX > 0.0f && greenY > 0.0f &&
+            blueX > 0.0f && blueY > 0.0f && whiteX > 0.0f && whiteY > 0.0f) {
+            metadata.hasPrimaries = true;
+            metadata.redX = redX; metadata.redY = redY;
+            metadata.greenX = greenX; metadata.greenY = greenY;
+            metadata.blueX = blueX; metadata.blueY = blueY;
+            metadata.whiteX = whiteX; metadata.whiteY = whiteY;
         }
     }
-    return fallback;
+    if (mastering->has_luminance) {
+        const auto minimum = ValidLuminance(av_q2d(mastering->min_luminance));
+        const auto maximum = ValidPeak(av_q2d(mastering->max_luminance));
+        if (maximum > 0.0f) {
+            metadata.hasLuminance = true;
+            metadata.minimumLuminanceNits = minimum;
+            metadata.maximumMasteringLuminanceNits = maximum;
+        }
+    }
+}
+
+void ApplyFrameStaticMetadata(const AVFrame* frame, HdrStaticMetadata& metadata) noexcept {
+    if (frame == nullptr) return;
+    if (const auto* lightData = av_frame_get_side_data(frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+        lightData != nullptr && lightData->size >= sizeof(AVContentLightMetadata)) {
+        ApplyContentLightMetadata(
+            reinterpret_cast<const AVContentLightMetadata*>(lightData->data), metadata);
+    }
+    if (const auto* masteringData = av_frame_get_side_data(
+            frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+        masteringData != nullptr && masteringData->size >= sizeof(AVMasteringDisplayMetadata)) {
+        ApplyMasteringDisplayMetadata(
+            reinterpret_cast<const AVMasteringDisplayMetadata*>(masteringData->data), metadata);
+    }
+}
+
+void ApplyStreamStaticMetadata(const AVCodecParameters* parameters,
+    HdrStaticMetadata& metadata) noexcept {
+    if (parameters == nullptr) return;
+    if (const auto* lightData = av_packet_side_data_get(parameters->coded_side_data,
+            parameters->nb_coded_side_data, AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
+        lightData != nullptr && lightData->size >= sizeof(AVContentLightMetadata)) {
+        ApplyContentLightMetadata(
+            reinterpret_cast<const AVContentLightMetadata*>(lightData->data), metadata);
+    }
+    if (const auto* masteringData = av_packet_side_data_get(parameters->coded_side_data,
+            parameters->nb_coded_side_data, AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
+        masteringData != nullptr && masteringData->size >= sizeof(AVMasteringDisplayMetadata)) {
+        ApplyMasteringDisplayMetadata(
+            reinterpret_cast<const AVMasteringDisplayMetadata*>(masteringData->data), metadata);
+    }
+}
+
+float StaticSourcePeak(const HdrStaticMetadata& metadata) noexcept {
+    if (metadata.maximumContentLightLevelNits > 0.0f)
+        return metadata.maximumContentLightLevelNits;
+    if (metadata.maximumMasteringLuminanceNits > 0.0f)
+        return metadata.maximumMasteringLuminanceNits;
+    return 0.0f;
+}
+
+std::uint16_t DxgiChromaticity(const float value) noexcept {
+    return static_cast<std::uint16_t>(std::lround(
+        std::clamp(value, 0.0f, 1.0f) * 50000.0f));
+}
+
+std::uint32_t DxgiNits(const float value) noexcept {
+    return static_cast<std::uint32_t>(std::lround(
+        std::clamp(value, 0.0f, 10000.0f)));
+}
+
+std::uint32_t DxgiMinNits(const float value) noexcept {
+    return static_cast<std::uint32_t>(std::lround(
+        std::clamp(value, 0.0f, 6.5535f) * 10000.0f));
+}
+
+std::uint16_t DxgiContentLight(const float value) noexcept {
+    return static_cast<std::uint16_t>(std::lround(
+        std::clamp(value, 0.0f, 65535.0f)));
 }
 }
 
@@ -105,6 +202,13 @@ void HdrProcessor::ConfigureStream(const AVCodecParameters* parameters) noexcept
             next.processingPath = FFF3FPHdrProcessingPath::StaticHdr10;
             next.sourcePeakNits = 1000.0f;
         }
+        ApplyStreamStaticMetadata(parameters, next.staticMetadata);
+        if (next.format != FFF3FPHdrFormat::Sdr) {
+            if (const auto staticPeak = StaticSourcePeak(next.staticMetadata);
+                staticPeak > 0.0f) {
+                next.sourcePeakNits = staticPeak;
+            }
+        }
     }
     std::lock_guard lock(mutex_);
     next.display = frameState_.display;
@@ -126,6 +230,7 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         return frameState_;
     }
 
+    auto dynamicSourcePeak = false;
     if (next.format == FFF3FPHdrFormat::Sdr) {
         if (frame->color_trc == AVCOL_TRC_ARIB_STD_B67) {
             next.format = FFF3FPHdrFormat::Hlg;
@@ -150,7 +255,10 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         next.dynamicMetadata = true;
         if (vivid->num_windows > 0) {
             const auto peak = ValidPeak(av_q2d(vivid->params[0].maximum_maxrgb) * 10000.0);
-            if (peak > 0.0f) next.sourcePeakNits = peak;
+            if (peak > 0.0f) {
+                next.sourcePeakNits = peak;
+                dynamicSourcePeak = true;
+            }
         }
     } else if (const auto* doviData = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
         doviData != nullptr && doviData->size >= sizeof(AVDOVIMetadata)) {
@@ -177,10 +285,16 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         }
         if (const auto* level1 = av_dovi_find_level(metadata, 1); level1 != nullptr) {
             const auto peak = PqCodeToNits(level1->l1.max_pq);
-            if (peak > 0.0f) next.sourcePeakNits = peak;
+            if (peak > 0.0f) {
+                next.sourcePeakNits = peak;
+                dynamicSourcePeak = true;
+            }
         } else if (const auto* color = av_dovi_get_color(metadata); color != nullptr) {
             const auto peak = PqCodeToNits(color->source_max_pq);
-            if (peak > 0.0f) next.sourcePeakNits = peak;
+            if (peak > 0.0f) {
+                next.sourcePeakNits = peak;
+                dynamicSourcePeak = true;
+            }
         }
     } else if (const auto* plusData = av_frame_get_side_data(frame, AV_FRAME_DATA_DYNAMIC_HDR_PLUS);
         plusData != nullptr && plusData->size >= sizeof(AVDynamicHDRPlus)) {
@@ -195,12 +309,21 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
             for (const auto& channel : window.maxscl)
                 maximum = std::max(maximum, av_q2d(channel));
             const auto peak = ValidPeak(maximum * 10000.0);
-            if (peak > 0.0f) next.sourcePeakNits = peak;
+            if (peak > 0.0f) {
+                next.sourcePeakNits = peak;
+                dynamicSourcePeak = true;
+            }
         }
     }
 
     if (next.format != FFF3FPHdrFormat::Sdr) {
-        next.sourcePeakNits = ResolveStaticSourcePeak(frame, next.sourcePeakNits);
+        ApplyFrameStaticMetadata(frame, next.staticMetadata);
+        if (!dynamicSourcePeak) {
+            if (const auto staticPeak = StaticSourcePeak(next.staticMetadata);
+                staticPeak > 0.0f) {
+                next.sourcePeakNits = staticPeak;
+            }
+        }
         next.sourcePeakNits = std::clamp(next.sourcePeakNits,
             std::max(1.0f, paperWhiteNits), 10000.0f);
     }
@@ -253,20 +376,29 @@ void HdrProcessor::BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) con
     const auto state = State();
     std::memset(&metadata, 0, sizeof(metadata));
     // The shader output contract is always Rec.2020/PQ. PQ sources pass through
-    // without display-peak compression, so metadata must describe the source
-    // signal rather than the target monitor.
-    metadata.RedPrimary[0] = 35400; metadata.RedPrimary[1] = 14600;
-    metadata.GreenPrimary[0] = 8500; metadata.GreenPrimary[1] = 39850;
-    metadata.BluePrimary[0] = 6550; metadata.BluePrimary[1] = 2300;
-    metadata.WhitePoint[0] = 15635; metadata.WhitePoint[1] = 16450;
-    const auto peak = std::clamp(state.sourcePeakNits, 1.0f, 10000.0f);
-    // DXGI uses nits for maximum mastering luminance and 0.0001 nit units only
-    // for minimum mastering luminance. The source minimum is not retained.
-    metadata.MaxMasteringLuminance = static_cast<UINT>(std::lround(peak));
-    metadata.MinMasteringLuminance = 0;
-    metadata.MaxContentLightLevel = static_cast<USHORT>(std::lround(std::min(peak, 65535.0f)));
-    // Zero is the HDR10 "unknown" value; display ABL is not content MaxFALL.
-    metadata.MaxFrameAverageLightLevel = 0;
+    // without display-peak compression, so luminance metadata must describe the
+    // source signal rather than the target monitor. Keep mastering luminance and
+    // MaxCLL separate: HDR->SDR uses MaxCLL as a tone-map bound, but HDR10
+    // metadata expects the actual mastering display peak when it is present.
+    const auto& source = state.staticMetadata;
+    metadata.RedPrimary[0] = DxgiChromaticity(source.redX);
+    metadata.RedPrimary[1] = DxgiChromaticity(source.redY);
+    metadata.GreenPrimary[0] = DxgiChromaticity(source.greenX);
+    metadata.GreenPrimary[1] = DxgiChromaticity(source.greenY);
+    metadata.BluePrimary[0] = DxgiChromaticity(source.blueX);
+    metadata.BluePrimary[1] = DxgiChromaticity(source.blueY);
+    metadata.WhitePoint[0] = DxgiChromaticity(source.whiteX);
+    metadata.WhitePoint[1] = DxgiChromaticity(source.whiteY);
+    const auto contentPeak = std::clamp(state.sourcePeakNits, 1.0f, 10000.0f);
+    const auto masteringPeak = source.maximumMasteringLuminanceNits > 0.0f ?
+        source.maximumMasteringLuminanceNits : contentPeak;
+    const auto maxCll = source.maximumContentLightLevelNits > 0.0f ?
+        source.maximumContentLightLevelNits : contentPeak;
+    metadata.MaxMasteringLuminance = DxgiNits(masteringPeak);
+    metadata.MinMasteringLuminance = DxgiMinNits(source.minimumLuminanceNits);
+    metadata.MaxContentLightLevel = DxgiContentLight(maxCll);
+    metadata.MaxFrameAverageLightLevel =
+        DxgiContentLight(source.maximumFrameAverageLightLevelNits);
 }
 
 float HdrProcessor::ResolveTargetPeak(const float overrideNits,

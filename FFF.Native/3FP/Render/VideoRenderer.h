@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -378,6 +379,8 @@ private:
     HMONITOR hdrMonitor_;
     bool hdrSupportValid_;
     bool hdrSupported_;
+    std::chrono::steady_clock::time_point hdrSupportCheckedAt_;
+    bool hdrSwapChainRejected_;
     // Bounded caches are keyed by the immutable command content contract.  The
     // UI only changes coordinates for scrolling danmaku, so rebuilding a text
     // layout and two brushes at 60 Hz is unnecessary.

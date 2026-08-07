@@ -31,6 +31,7 @@ public:
     FFFResult Open(const char* localPathUtf8) noexcept;
     FFFResult Play() noexcept;
     FFFResult Pause() noexcept;
+    FFFResult DiscardAudioOutput() noexcept;
     FFFResult Stop() noexcept;
     FFFResult Close() noexcept;
     FFFResult Seek(std::int64_t position100ns) noexcept;

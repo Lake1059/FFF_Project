@@ -323,6 +323,9 @@ Friend Module 播放器原生接口
     Friend Function FFF3FP_Pause(播放器 As 播放器原生句柄) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_DiscardAudioOutput(播放器 As 播放器原生句柄) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_Stop(播放器 As 播放器原生句柄) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>

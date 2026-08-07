@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 8;
+constexpr std::uint32_t PlayerApiVersion = 9;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -39,6 +39,7 @@ FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration, FFF3FPHandle* 
 FFFResult FFF3FP_Open(const FFF3FPHandle player, const char* path) noexcept { return player ? static_cast<PlayerSession*>(player)->Open(path) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_Play(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->Play() : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_Pause(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->Pause() : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_DiscardAudioOutput(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->DiscardAudioOutput() : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_Stop(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->Stop() : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_Close(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->Close() : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_Seek(const FFF3FPHandle player, const std::int64_t position) noexcept { return player ? static_cast<PlayerSession*>(player)->Seek(position) : FFFResult::InvalidArgument; }

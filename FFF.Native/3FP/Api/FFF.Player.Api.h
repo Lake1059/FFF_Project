@@ -420,6 +420,9 @@ FFF3FP_API FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration,
 FFF3FP_API FFFResult FFF3FP_Open(FFF3FPHandle player, const char* localPathUtf8) noexcept;
 FFF3FP_API FFFResult FFF3FP_Play(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Pause(FFF3FPHandle player) noexcept;
+// Synchronously stops the current audio renderer and discards already-submitted
+// endpoint buffers. Intended for media/session replacement, not normal pause.
+FFF3FP_API FFFResult FFF3FP_DiscardAudioOutput(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Stop(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Close(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Seek(FFF3FPHandle player, std::int64_t position100ns) noexcept;

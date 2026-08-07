@@ -30,9 +30,14 @@ Friend Module Program
                 断言(文档.RootElement.GetProperty("passed").GetBoolean(), "原生录制基础自检失败。")
             End Using
             测试总控台帧数统计()
+            测试HDR目标峰值不低于参考白()
 
             Using 图形 = 图形设备.创建默认设备()
+                测试固定帧率落后时重复补帧(图形)
+                测试可变帧率提交时间戳覆盖(图形)
                 测试SDR处理(图形)
+                测试HDR到PQ峰值钳制(图形)
+                测试BT2390高SDR白电平(图形)
                 测试HDR到PQ录制链路(图形, 输出目录)
                 测试BT2390录制链路(图形, 输出目录)
             End Using
@@ -58,6 +63,15 @@ Friend Module Program
             $"总控台的丢帧或重复帧统计错误：{文本}")
     End Sub
 
+    Private Sub 测试HDR目标峰值不低于参考白()
+        Dim 配置 As New 视频处理配置()
+        配置.设置色彩模式(True, 500.0F, 400.0F)
+        配置.验证()
+        断言(配置.参考白尼特 = 500.0F, $"HDR 参考白异常：{配置.参考白尼特}。")
+        断言(配置.目标峰值尼特 = 500.0F, $"HDR 目标峰值没有覆盖参考白：{配置.目标峰值尼特}。")
+        断言(配置.源峰值尼特 = 500.0F, $"HDR 源峰值没有与实际峰值一致：{配置.源峰值尼特}。")
+    End Sub
+
     Private Sub 测试SDR处理(图形 As 图形设备)
         Dim 配置 As New 视频处理配置 With {
             .输出宽度 = 测试宽度, .输出高度 = 测试高度, .高质量缩放 = True
@@ -75,6 +89,89 @@ Friend Module Program
         End Using
     End Sub
 
+    Private Sub 测试固定帧率落后时重复补帧(图形 As 图形设备)
+        Dim 提交记录 As New List(Of (时间戳 As Long, 重复 As Boolean))
+        Dim 已报告丢帧 As UInteger
+        Dim 提交 As Action(Of IntPtr, Long, UInteger, Boolean) =
+            Sub(纹理指针, 时间戳, 数组索引, 重复帧)
+                SyncLock 提交记录
+                    提交记录.Add((时间戳, 重复帧))
+                End SyncLock
+            End Sub
+        Dim 报告丢帧 As Action(Of UInteger) =
+            Sub(帧数)
+                已报告丢帧 += 帧数
+            End Sub
+
+        Using 源纹理 = 创建测试纹理(图形, Format.B8G8R8A8_UNorm, 0.2F, 0.3F, 0.4F)
+            Dim 起始时间 = Stopwatch.GetTimestamp() - Stopwatch.Frequency \ 2
+            Using 调度器 As New 固定帧率调度器(提交, 报告丢帧, 30UI, 1UI)
+                调度器.开始(起始时间)
+                调度器.提交帧(New 处理后视频帧(源纹理, Nothing, 起始时间, False, AddressOf 忽略纹理回收))
+                Dim 截止 = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 2L
+                Do
+                    SyncLock 提交记录
+                        If 提交记录.Count >= 10 Then Exit Do
+                    End SyncLock
+                    Threading.Thread.Sleep(5)
+                Loop While Stopwatch.GetTimestamp() < 截止
+                调度器.停止()
+            End Using
+        End Using
+
+        Dim 快照 As (时间戳 As Long, 重复 As Boolean)()
+        SyncLock 提交记录
+            快照 = 提交记录.ToArray()
+        End SyncLock
+        断言(快照.Length >= 10, $"CFR 落后追赶时没有补足固定输出 tick，只提交了 {快照.Length} 帧。")
+        断言(Not 快照(0).重复, "CFR 首帧不应标记为重复帧。")
+        断言(快照.Skip(1).All(Function(记录) 记录.重复), "CFR 落后补帧应使用上一帧标记为重复帧。")
+        For 索引 = 1 To 快照.Length - 1
+            断言(快照(索引).时间戳 > 快照(索引 - 1).时间戳, "CFR 补帧时间戳必须严格递增。")
+        Next
+        断言(已报告丢帧 = 0UI, $"CFR 落后补帧不应报告输出丢帧：{已报告丢帧}。")
+    End Sub
+
+    Private Sub 测试可变帧率提交时间戳覆盖(图形 As 图形设备)
+        Dim 提交记录 As New List(Of (时间戳 As Long, 重复 As Boolean))
+        Dim 提交 As Action(Of IntPtr, Long, UInteger, Boolean) =
+            Sub(纹理指针, 时间戳, 数组索引, 重复帧)
+                SyncLock 提交记录
+                    提交记录.Add((时间戳, 重复帧))
+                End SyncLock
+            End Sub
+        Dim 报告丢帧 As Action(Of UInteger) = Sub(帧数)
+                                         End Sub
+
+        Dim 预期时间戳 As Long
+        Using 源纹理 = 创建测试纹理(图形, Format.B8G8R8A8_UNorm, 0.2F, 0.3F, 0.4F)
+            Dim 源时间戳 = Stopwatch.GetTimestamp() - Stopwatch.Frequency
+            预期时间戳 = Stopwatch.GetTimestamp()
+            Using 编码器 As New 可变帧率编码器(提交, 报告丢帧)
+                编码器.开始()
+                编码器.提交帧(New 处理后视频帧(源纹理, Nothing, 源时间戳, False, AddressOf 忽略纹理回收),
+                    预期时间戳)
+                Dim 截止 = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 2L
+                Do
+                    SyncLock 提交记录
+                        If 提交记录.Count >= 1 Then Exit Do
+                    End SyncLock
+                    Threading.Thread.Sleep(5)
+                Loop While Stopwatch.GetTimestamp() < 截止
+                编码器.停止()
+            End Using
+        End Using
+
+        Dim 快照 As (时间戳 As Long, 重复 As Boolean)()
+        SyncLock 提交记录
+            快照 = 提交记录.ToArray()
+        End SyncLock
+        断言(快照.Length = 1, $"VFR 时间戳覆盖测试提交帧数异常：{快照.Length}。")
+        断言(快照(0).时间戳 = 预期时间戳,
+            $"VFR 首帧没有使用会话启动后的提交时间戳：实际 {快照(0).时间戳}，预期 {预期时间戳}。")
+        断言(Not 快照(0).重复, "VFR 不应把正常首帧标记为重复帧。")
+    End Sub
+
     Private Sub 测试HDR到PQ录制链路(图形 As 图形设备, 输出目录 As String)
         Dim 配置 As New 视频处理配置 With {
             .输出宽度 = 测试宽度, .输出高度 = 测试高度, .高质量缩放 = True
@@ -89,6 +186,53 @@ Friend Module Program
                         验证处理输出(图形, 输出帧, Format.R10G10B10A2_UNorm, "HDR 到 PQ")
                         测试真实录制会话(图形, 处理器, 输出帧, 输出目录,
                             "hdr10-functional", "R16G16B16A16_FLOAT -> Rec.2100 PQ R10G10B10A2")
+                    End Using
+                End Using
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 测试HDR到PQ峰值钳制(图形 As 图形设备)
+        Dim 配置 As New 视频处理配置 With {
+            .输出宽度 = 测试宽度, .输出高度 = 测试高度, .高质量缩放 = True
+        }
+        配置.设置色彩模式(True, 203.0F, 1000.0F)
+        Using 处理器 As New 视频处理器(图形, 配置)
+            Using 源纹理 = 创建测试纹理(图形, Format.R16G16B16A16_Float, 100.0F, 100.0F, 100.0F)
+                Using 捕获帧 As New 显示器捕获帧(源纹理, Stopwatch.GetTimestamp(), True,
+                    视频旋转方式.不旋转, AddressOf 忽略纹理回收)
+                    Using 输出帧 = 处理器.处理帧(捕获帧)
+                        Dim 像素 = 验证处理输出(图形, 输出帧, Format.R10G10B10A2_UNorm, "HDR 到 PQ 峰值钳制")
+                        Dim 红 = CInt(像素 And &H3FFUI)
+                        Dim 绿 = CInt((像素 >> 10) And &H3FFUI)
+                        Dim 蓝 = CInt((像素 >> 20) And &H3FFUI)
+                        断言(New Integer() {红, 绿, 蓝}.All(Function(分量) 分量 > 0 AndAlso 分量 < 1000),
+                            $"HDR 到 PQ 未按目标峰值钳制：R={红}, G={绿}, B={蓝}。")
+                    End Using
+                End Using
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 测试BT2390高SDR白电平(图形 As 图形设备)
+        Dim 视频配置 As New 视频处理配置 With {
+            .输出宽度 = 测试宽度, .输出高度 = 测试高度, .高质量缩放 = True
+        }
+        视频配置.设置色彩模式(False, 300.0F, 1000.0F)
+
+        Using 处理器 As New 视频处理器(图形, 视频配置)
+            Using 源纹理 = 创建测试纹理(图形, Format.R16G16B16A16_Float, 2.0F, 2.0F, 2.0F)
+                Using 捕获帧 As New 显示器捕获帧(源纹理, Stopwatch.GetTimestamp(), True,
+                    视频旋转方式.不旋转, AddressOf 忽略纹理回收)
+                    Using 输出帧 = 处理器.处理帧(捕获帧)
+                        Dim 像素 = 验证处理输出(图形, 输出帧, Format.B8G8R8A8_UNorm, "BT.2390 高 SDR 白电平")
+                        Dim 蓝 = CInt(像素 And &HFFUI)
+                        Dim 绿 = CInt((像素 >> 8) And &HFFUI)
+                        Dim 红 = CInt((像素 >> 16) And &HFFUI)
+                        Dim 最大 = Math.Max(红, Math.Max(绿, 蓝))
+                        Dim 最小 = Math.Min(红, Math.Min(绿, 蓝))
+                        断言(最小 > 0 AndAlso 最大 < 250,
+                            $"BT.2390 高 SDR 白电平输出被剪切：R={红}, G={绿}, B={蓝}。")
                     End Using
                 End Using
             End Using

@@ -17,6 +17,24 @@ struct HdrDisplayCapabilities {
     float maximumFullFrameNits = 0.0f;
 };
 
+struct HdrStaticMetadata {
+    bool hasPrimaries = false;
+    bool hasLuminance = false;
+    bool hasContentLight = false;
+    float redX = 0.708f;
+    float redY = 0.292f;
+    float greenX = 0.170f;
+    float greenY = 0.797f;
+    float blueX = 0.131f;
+    float blueY = 0.046f;
+    float whiteX = 0.3127f;
+    float whiteY = 0.3290f;
+    float minimumLuminanceNits = 0.0f;
+    float maximumMasteringLuminanceNits = 0.0f;
+    float maximumContentLightLevelNits = 0.0f;
+    float maximumFrameAverageLightLevelNits = 0.0f;
+};
+
 struct HdrFrameState {
     FFF3FPHdrFormat format = FFF3FPHdrFormat::Sdr;
     std::uint32_t compatibility = 0;
@@ -31,6 +49,7 @@ struct HdrFrameState {
     bool fallback = false;
     float sourcePeakNits = 100.0f;
     float targetPeakNits = 1000.0f;
+    HdrStaticMetadata staticMetadata;
     HdrDisplayCapabilities display;
 };
 

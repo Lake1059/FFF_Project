@@ -202,6 +202,7 @@ Public NotInheritable Class 录制控制器
 
         Try
             会话.开始()
+            Dim 首帧提交时间戳 = Stopwatch.GetTimestamp()
             Dim 首帧 As 处理后视频帧
             SyncLock 同步锁
                 已开始值 = True
@@ -210,9 +211,9 @@ Public NotInheritable Class 录制控制器
                 首帧 = 待提交首帧
                 待提交首帧 = Nothing
             End SyncLock
-            调度器?.开始(Stopwatch.GetTimestamp())
+            调度器?.开始(首帧提交时间戳)
             动态编码器?.开始()
-            提交处理帧(首帧)
+            提交处理帧(首帧, 首帧提交时间戳)
             If 显示器捕获 IsNot Nothing Then
                 显示器线程 = New Thread(AddressOf 运行显示器捕获) With {
                     .IsBackground = True,
@@ -467,16 +468,17 @@ Public NotInheritable Class 录制控制器
         触发失败(参数.异常)
     End Sub
 
-    Private Sub 提交处理帧(帧 As 处理后视频帧)
+    Private Sub 提交处理帧(帧 As 处理后视频帧, Optional 提交QPC时间戳 As Long = 0)
         If 调度器 IsNot Nothing Then
             调度器.提交帧(帧)
             Return
         End If
-        If Not 应提交动态帧(帧.QPC时间戳) Then
+        If 提交QPC时间戳 <= 0 Then 提交QPC时间戳 = 帧.QPC时间戳
+        If Not 应提交动态帧(提交QPC时间戳) Then
             帧.释放()
             Return
         End If
-        动态编码器.提交帧(帧)
+        动态编码器.提交帧(帧, 提交QPC时间戳)
     End Sub
 
     Private Function 应提交动态帧(QPC时间戳 As Long) As Boolean

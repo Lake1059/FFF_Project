@@ -3,8 +3,12 @@ Imports System.Threading
 
 Friend Module 录制统计助手
     Friend Sub 安全报告丢帧(会话 As 录制会话, Optional 数量 As UInteger = 1UI)
+        安全报告丢帧(Sub(帧数) 会话.报告丢弃视频帧(帧数), 数量)
+    End Sub
+
+    Friend Sub 安全报告丢帧(报告丢帧 As Action(Of UInteger), Optional 数量 As UInteger = 1UI)
         Try
-            会话.报告丢弃视频帧(数量)
+            报告丢帧.Invoke(数量)
         Catch
             ' 统计上报可能与暂停/停止交错，不能因此中断实时线程。
         End Try
@@ -24,7 +28,8 @@ End Class
 Public NotInheritable Class 固定帧率调度器
     Implements IDisposable
 
-    Private ReadOnly 会话 As 录制会话
+    Private ReadOnly 提交视频纹理 As Action(Of IntPtr, Long, UInteger, Boolean)
+    Private ReadOnly 报告丢弃视频帧 As Action(Of UInteger)
     Private ReadOnly 帧率分子 As UInteger
     Private ReadOnly 帧率分母 As UInteger
     Private ReadOnly 同步锁 As New Object
@@ -44,7 +49,21 @@ Public NotInheritable Class 固定帧率调度器
         If 输出帧率分子 = 0 OrElse 输出帧率分母 = 0 Then
             Throw New ArgumentOutOfRangeException(NameOf(输出帧率分子), "输出帧率必须大于零。")
         End If
-        会话 = 录制会话
+        提交视频纹理 = Sub(纹理指针, 时间戳, 数组索引, 重复帧) 录制会话.提交视频纹理(纹理指针, 时间戳, 数组索引, 重复帧)
+        报告丢弃视频帧 = Sub(帧数) 录制会话.报告丢弃视频帧(帧数)
+        帧率分子 = 输出帧率分子
+        帧率分母 = 输出帧率分母
+    End Sub
+
+    Friend Sub New(提交视频 As Action(Of IntPtr, Long, UInteger, Boolean),
+        报告丢帧 As Action(Of UInteger), 输出帧率分子 As UInteger, 输出帧率分母 As UInteger)
+        ArgumentNullException.ThrowIfNull(提交视频)
+        ArgumentNullException.ThrowIfNull(报告丢帧)
+        If 输出帧率分子 = 0 OrElse 输出帧率分母 = 0 Then
+            Throw New ArgumentOutOfRangeException(NameOf(输出帧率分子), "输出帧率必须大于零。")
+        End If
+        提交视频纹理 = 提交视频
+        报告丢弃视频帧 = 报告丢帧
         帧率分子 = 输出帧率分子
         帧率分母 = 输出帧率分母
     End Sub
@@ -168,33 +187,23 @@ Public NotInheritable Class 固定帧率调度器
                 End If
 
                 Dim 待提交 As 处理后视频帧
-                Dim 使用新帧 As Boolean
+                Dim 使用新帧 As Boolean = False
                 SyncLock 同步锁
-                    使用新帧 = 最新帧 IsNot Nothing
-                    If 最新帧 IsNot Nothing Then
+                    If 最新帧 IsNot Nothing AndAlso
+                        (当前帧 Is Nothing OrElse 最新帧.QPC时间戳 <= 下个Tick) Then
                         当前帧?.释放()
                         当前帧 = 最新帧
                         最新帧 = Nothing
+                        使用新帧 = True
                     End If
                     待提交 = 当前帧
                 End SyncLock
                 If 待提交 IsNot Nothing Then
                     Dim 重复帧 = Not 使用新帧
-                    会话.提交视频纹理(待提交.原生纹理指针, 下个Tick, 0UI, 重复帧)
+                    提交视频纹理.Invoke(待提交.原生纹理指针, 下个Tick, 0UI, 重复帧)
                 End If
 
                 推进Tick(下个Tick, 累计余数, 基础步长, 余数步长)
-
-                ' 编码时间超过一个帧周期时不突发补交过期帧。突发追赶会持续挤占 GPU，
-                ' 形成 OBS 所称的 encoding lag；跳到首个未来 tick 可让流水线恢复实时状态。
-                Dim 跳过数量 As UInteger
-                Dim 编码后时间 = Stopwatch.GetTimestamp()
-                While 下个Tick <= 编码后时间 AndAlso
-                    (Not 正在停止 OrElse 下个Tick <= 截止时间戳)
-                    推进Tick(下个Tick, 累计余数, 基础步长, 余数步长)
-                    跳过数量 += 1UI
-                End While
-                If 跳过数量 > 0 Then 安全报告丢帧(会话, 跳过数量)
             Loop
         Catch 错误 As Exception
             RaiseEvent 调度失败(Me, New 帧率调度错误事件参数(错误))
@@ -223,10 +232,12 @@ End Class
 Public NotInheritable Class 可变帧率编码器
     Implements IDisposable
 
-    Private ReadOnly 会话 As 录制会话
+    Private ReadOnly 提交视频纹理 As Action(Of IntPtr, Long, UInteger, Boolean)
+    Private ReadOnly 报告丢弃视频帧 As Action(Of UInteger)
     Private ReadOnly 同步锁 As New Object
     Private ReadOnly 唤醒事件 As New AutoResetEvent(False)
     Private 最新帧 As 处理后视频帧
+    Private 最新帧时间戳 As Long
     Private 工作线程 As Thread
     Private 请求停止 As Boolean
     Private 已启动 As Boolean
@@ -234,7 +245,16 @@ Public NotInheritable Class 可变帧率编码器
 
     Public Sub New(录制会话 As 录制会话)
         ArgumentNullException.ThrowIfNull(录制会话)
-        会话 = 录制会话
+        提交视频纹理 = Sub(纹理指针, 时间戳, 数组索引, 重复帧) 录制会话.提交视频纹理(纹理指针, 时间戳, 数组索引, 重复帧)
+        报告丢弃视频帧 = Sub(帧数) 录制会话.报告丢弃视频帧(帧数)
+    End Sub
+
+    Friend Sub New(提交视频 As Action(Of IntPtr, Long, UInteger, Boolean),
+        报告丢帧 As Action(Of UInteger))
+        ArgumentNullException.ThrowIfNull(提交视频)
+        ArgumentNullException.ThrowIfNull(报告丢帧)
+        提交视频纹理 = 提交视频
+        报告丢弃视频帧 = 报告丢帧
     End Sub
 
     Public Event 编码失败 As EventHandler(Of 帧率调度错误事件参数)
@@ -254,9 +274,10 @@ Public NotInheritable Class 可变帧率编码器
         End SyncLock
     End Sub
 
-    Public Sub 提交帧(帧 As 处理后视频帧)
+    Public Sub 提交帧(帧 As 处理后视频帧, Optional 提交QPC时间戳 As Long = 0)
         ArgumentNullException.ThrowIfNull(帧)
         确保未释放()
+        If 提交QPC时间戳 <= 0 Then 提交QPC时间戳 = 帧.QPC时间戳
         Dim 丢弃一帧 As Boolean
         SyncLock 同步锁
             If Not 已启动 OrElse 请求停止 Then
@@ -268,8 +289,9 @@ Public NotInheritable Class 可变帧率编码器
                 丢弃一帧 = True
             End If
             最新帧 = 帧
+            最新帧时间戳 = 提交QPC时间戳
         End SyncLock
-        If 丢弃一帧 Then 安全报告丢帧(会话)
+        If 丢弃一帧 Then 安全报告丢帧(报告丢弃视频帧)
         唤醒事件.Set()
     End Sub
 
@@ -285,6 +307,7 @@ Public NotInheritable Class 可变帧率编码器
         SyncLock 同步锁
             最新帧?.释放()
             最新帧 = Nothing
+            最新帧时间戳 = 0
             工作线程 = Nothing
             已启动 = False
         End SyncLock
@@ -294,10 +317,13 @@ Public NotInheritable Class 可变帧率编码器
         Try
             Do
                 Dim 待编码 As 处理后视频帧 = Nothing
+                Dim 待编码时间戳 As Long = 0
                 SyncLock 同步锁
                     If 最新帧 IsNot Nothing Then
                         待编码 = 最新帧
+                        待编码时间戳 = 最新帧时间戳
                         最新帧 = Nothing
+                        最新帧时间戳 = 0
                     ElseIf 请求停止 Then
                         Exit Do
                     End If
@@ -307,7 +333,7 @@ Public NotInheritable Class 可变帧率编码器
                     Continue Do
                 End If
                 Try
-                    会话.提交视频纹理(待编码.原生纹理指针, 待编码.QPC时间戳, 0UI, False)
+                    提交视频纹理.Invoke(待编码.原生纹理指针, 待编码时间戳, 0UI, False)
                 Finally
                     待编码.释放()
                 End Try

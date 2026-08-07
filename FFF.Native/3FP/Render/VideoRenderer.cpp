@@ -76,7 +76,38 @@ constexpr std::uint32_t OutputBitDepthForSource(const std::uint32_t sourceBitDep
 
 float Clamp01(const float value) noexcept { return std::clamp(value, 0.0f, 1.0f); }
 
-int ToSwsColorSpace(const AVColorSpace colorSpace, const int width) noexcept {
+constexpr bool IsBt2020ColorSpace(const AVColorSpace colorSpace) noexcept {
+    return colorSpace == AVCOL_SPC_BT2020_NCL || colorSpace == AVCOL_SPC_BT2020_CL;
+}
+
+constexpr bool IsJpegFullRangeFormat(const AVPixelFormat format) noexcept {
+    switch (format) {
+    case AV_PIX_FMT_YUVJ420P:
+    case AV_PIX_FMT_YUVJ422P:
+    case AV_PIX_FMT_YUVJ444P:
+    case AV_PIX_FMT_YUVJ440P:
+    case AV_PIX_FMT_YUVJ411P:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static_assert(IsJpegFullRangeFormat(AV_PIX_FMT_YUVJ420P) &&
+    !IsJpegFullRangeFormat(AV_PIX_FMT_YUV420P));
+
+constexpr float FullRangeChromaOffset(const std::uint32_t bitDepth) noexcept {
+    return bitDepth == 0 ? 0.5f :
+        static_cast<float>(1u << (bitDepth - 1u)) /
+        static_cast<float>((1u << bitDepth) - 1u);
+}
+
+static_assert(FullRangeChromaOffset(8) > 0.501f && FullRangeChromaOffset(8) < 0.502f &&
+    FullRangeChromaOffset(10) > 0.500f && FullRangeChromaOffset(10) < 0.501f);
+
+int ToSwsColorSpace(const AVFrame* frame, const bool rec2020Fallback) noexcept {
+    const auto colorSpace = frame != nullptr ? frame->colorspace : AVCOL_SPC_UNSPECIFIED;
+    const auto width = frame != nullptr ? frame->width : 0;
     switch (colorSpace) {
     case AVCOL_SPC_BT2020_NCL:
     case AVCOL_SPC_BT2020_CL:
@@ -91,6 +122,7 @@ int ToSwsColorSpace(const AVColorSpace colorSpace, const int width) noexcept {
     case AVCOL_SPC_SMPTE170M:
         return SWS_CS_ITU601;
     default:
+        if (rec2020Fallback) return SWS_CS_BT2020;
         // Untagged HD/UHD sources conventionally use Rec.709; SD uses Rec.601.
         return width >= 1280 ? SWS_CS_ITU709 : SWS_CS_ITU601;
     }
@@ -98,18 +130,19 @@ int ToSwsColorSpace(const AVColorSpace colorSpace, const int width) noexcept {
 
 bool IsFullRange(const AVFrame* frame) noexcept {
     if (frame->color_range == AVCOL_RANGE_JPEG) return true;
+    if (IsJpegFullRangeFormat(static_cast<AVPixelFormat>(frame->format))) return true;
     const auto* descriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format));
     return descriptor != nullptr && (descriptor->flags & AV_PIX_FMT_FLAG_RGB) != 0;
 }
 
 bool IsRec2020(const AVFrame* frame) noexcept {
     return frame->color_primaries == AVCOL_PRI_BT2020 ||
-        frame->colorspace == AVCOL_SPC_BT2020_NCL || frame->colorspace == AVCOL_SPC_BT2020_CL;
+        IsBt2020ColorSpace(frame->colorspace);
 }
 
 DXGI_COLOR_SPACE_TYPE VideoProcessorInputColorSpace(const int colorSpace,
     const bool fullRange, const std::uint32_t width) noexcept {
-    if (colorSpace == AVCOL_SPC_BT2020_NCL || colorSpace == AVCOL_SPC_BT2020_CL) {
+    if (IsBt2020ColorSpace(static_cast<AVColorSpace>(colorSpace))) {
         return fullRange ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020 :
             DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020;
     }
@@ -538,6 +571,7 @@ constexpr std::uint32_t MaximumTimedTextAtlasSize = 4096;
 constexpr std::uint32_t MaximumTimedTextSprites = 512;
 constexpr std::size_t MaximumTimedTextBrushes = 256;
 constexpr std::size_t VideoConversionBufferSlackBytes = 32 * 1024 * 1024;
+constexpr auto HdrSupportProbeCacheDuration = std::chrono::milliseconds(750);
 
 void ResizeVideoConversionBuffer(std::vector<std::uint8_t>& buffer,
     const std::size_t requiredBytes) {
@@ -739,8 +773,12 @@ void ResolveChromaOffset(const AVFrame* frame, const InputDescription& input,
     }
 }
 
-void YuvCoefficients(const AVColorSpace colorSpace, const int width, float& kr, float& kb) noexcept {
-    if (colorSpace == AVCOL_SPC_BT2020_NCL || colorSpace == AVCOL_SPC_BT2020_CL) {
+void YuvCoefficients(const AVFrame* frame, const bool rec2020Fallback,
+    float& kr, float& kb) noexcept {
+    const auto colorSpace = frame != nullptr ? frame->colorspace : AVCOL_SPC_UNSPECIFIED;
+    const auto width = frame != nullptr ? frame->width : 0;
+    if (IsBt2020ColorSpace(colorSpace) ||
+        (colorSpace == AVCOL_SPC_UNSPECIFIED && rec2020Fallback)) {
         kr = 0.2627f; kb = 0.0593f;
     } else if (colorSpace == AVCOL_SPC_BT709 || (colorSpace == AVCOL_SPC_UNSPECIFIED && width >= 1280)) {
         kr = 0.2126f; kb = 0.0722f;
@@ -1176,6 +1214,8 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       coverBackdropBlurSettingsGeneration_(1),
       deviceRecoveryRequested_(false), recoveryCallback_(std::move(recoveryCallback)),
        hdrMonitor_(nullptr), hdrSupportValid_(false), hdrSupported_(false),
+      hdrSupportCheckedAt_(std::chrono::steady_clock::time_point::min()),
+      hdrSwapChainRejected_(false),
       timedTextAtlasX_(0), timedTextAtlasY_(0), timedTextAtlasRowHeight_(0),
       timedTextAtlasSize_(0), timedTextSpriteInstanceCapacity_(0),
       timedTextSpriteCacheHits_(0), timedTextSpriteCacheMisses_(0) {}
@@ -1192,13 +1232,20 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     }
     window_ = window;
     hdrSupportValid_ = false; hdrMonitor_ = nullptr;
+    hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
+    hdrSwapChainRejected_ = false;
     swapWidth_ = swapHeight_ = 0;
     swapHdr_ = false; swapOutputBits_ = 8;
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
         fallbackReason_.clear();
-        actualMode_ = OutputSupportsHdr() ? FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
-        if (actualMode_ != requestedMode_)
-            fallbackReason_ = "The target display or Windows Advanced Color mode does not support true HDR output.";
+        const auto sourceHdr = hdrProcessor_.IsHdrSource();
+        actualMode_ = sourceHdr && OutputSupportsHdr() ?
+            FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
+        if (actualMode_ != requestedMode_) {
+            fallbackReason_ = sourceHdr ?
+                "The target display or Windows Advanced Color mode does not support true HDR output." :
+                "True HDR output is only available for HDR source video.";
+        }
     }
     return FFFResult::Success;
 }
@@ -1217,15 +1264,25 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
     paperWhiteNits_ = paperWhiteNits;
     fallbackReason_.clear();
     actualMode_ = requestedMode_;
-    if (requestedMode_ == FFF3FPColorMode::MapToHdr && !OutputSupportsHdr()) {
-        actualMode_ = FFF3FPColorMode::MapToSdr;
-        fallbackReason_ = "The target display or Windows Advanced Color mode does not support true HDR output.";
+    hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
+    hdrSwapChainRejected_ = false;
+    if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
+        const auto sourceHdr = hdrProcessor_.IsHdrSource();
+        if (!sourceHdr || !OutputSupportsHdr()) {
+            actualMode_ = FFF3FPColorMode::MapToSdr;
+            fallbackReason_ = sourceHdr ?
+                "The target display or Windows Advanced Color mode does not support true HDR output." :
+                "True HDR output is only available for HDR source video.";
+        }
     }
     // hdrPeakNits_ is an output-display override, never the source mastering
     // peak. SDR callers pass zero; source peak metadata is configured per frame.
     hdrProcessor_.SetTargetPeakOverride(hdrPeakNits_);
-    if (hasCachedVideo_)
+    if (hasCachedVideo_) {
+        cachedVideoSettings_.sdrPeak = sdrPeakNits_;
+        cachedVideoSettings_.paperWhite = paperWhiteNits_;
         cachedVideoSettings_.targetPeak = hdrProcessor_.State().targetPeakNits;
+    }
     const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
     const auto outputBits = PreferredOutputBitDepth(sourceBitDepth_, hdr);
     if (swapChain_ != nullptr && (swapHdr_ != hdr || swapOutputBits_ != outputBits)) {
@@ -1296,24 +1353,34 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
     if (window_ == nullptr || !IsWindow(window_)) {
         hdrSupportValid_ = false;
         hdrMonitor_ = nullptr;
+        hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
+        hdrSwapChainRejected_ = false;
         hdrSupported_ = false;
         hdrProcessor_.SetDisplayCapabilities({});
         return false;
     }
     const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    const auto now = std::chrono::steady_clock::now();
     const auto previousMonitor = hdrMonitor_;
     const auto previousCapabilities = hdrProcessor_.State().display;
     const auto preservePrevious = hdrSupportValid_ && previousMonitor == monitor;
+    const auto cachedUsable = [this](const HdrDisplayCapabilities& capabilities) noexcept {
+        return hdrSupported_ && (hdrPeakNits_ > 0.0f || capabilities.maximumNits > 0.0f);
+    };
+    if (!preservePrevious) hdrSwapChainRejected_ = false;
+    if (preservePrevious && hdrSwapChainRejected_) return false;
+    if (preservePrevious && now - hdrSupportCheckedAt_ < HdrSupportProbeCacheDuration)
+        return cachedUsable(previousCapabilities);
     hdrMonitor_ = monitor;
     hdrSupportValid_ = true;
+    hdrSupportCheckedAt_ = now;
     hdrSupported_ = false;
     ComPtr<IDXGIFactory6> factory;
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
         if (preservePrevious) {
             hdrSupported_ = previousCapabilities.supported;
             hdrProcessor_.SetDisplayCapabilities(previousCapabilities);
-            return hdrSupported_ && (hdrPeakNits_ > 0.0f ||
-                previousCapabilities.maximumNits > 0.0f);
+            return cachedUsable(previousCapabilities);
         }
         hdrProcessor_.SetDisplayCapabilities({});
         return false;
@@ -1332,8 +1399,7 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
                 if (preservePrevious) {
                     hdrSupported_ = previousCapabilities.supported;
                     hdrProcessor_.SetDisplayCapabilities(previousCapabilities);
-                    return hdrSupported_ && (hdrPeakNits_ > 0.0f ||
-                        previousCapabilities.maximumNits > 0.0f);
+                    return cachedUsable(previousCapabilities);
                 }
                 hdrProcessor_.SetDisplayCapabilities({});
                 return false;
@@ -1366,8 +1432,7 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
     if (preservePrevious) {
         hdrSupported_ = previousCapabilities.supported;
         hdrProcessor_.SetDisplayCapabilities(previousCapabilities);
-        return hdrSupported_ && (hdrPeakNits_ > 0.0f ||
-            previousCapabilities.maximumNits > 0.0f);
+        return cachedUsable(previousCapabilities);
     }
     hdrProcessor_.SetDisplayCapabilities({});
     return false;
@@ -1399,11 +1464,15 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     const std::uint32_t sourceBitDepth) noexcept {
     if (window_ == nullptr) return FFFResult::Success;
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
-        const auto nextMode = OutputSupportsHdr() ? FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
+        const auto sourceHdr = hdrProcessor_.IsHdrSource();
+        const auto nextMode = sourceHdr && OutputSupportsHdr() ?
+            FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
+        const auto reason = sourceHdr ?
+            "The target display or Windows Advanced Color mode does not support true HDR output." :
+            "True HDR output is only available for HDR source video.";
+        fallbackReason_ = nextMode == requestedMode_ ? std::string{} : reason;
         if (nextMode != actualMode_) {
             actualMode_ = nextMode;
-            fallbackReason_ = nextMode == requestedMode_ ? std::string{} :
-                "The target display or Windows Advanced Color mode does not support true HDR output.";
             if (swapChain_ != nullptr) {
                 const auto modeResult = ReconfigureSwapChain(
                     nextMode == FFF3FPColorMode::MapToHdr,
@@ -1477,6 +1546,8 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
             FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
             fallbackReason_ = "The swap chain rejected the Rec.2020 PQ color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
+            hdrSwapChainRejected_ = true;
+            hdrSupportCheckedAt_ = std::chrono::steady_clock::now();
             swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
             swapChain_->Release();
             swapChain_ = nullptr;
@@ -1486,6 +1557,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
             return CreateSwapChain(width, height, false,
                 PreferredOutputBitDepth(sourceBitDepth_, false));
         }
+        hdrSwapChainRejected_ = false;
         SetHdrMetadata();
     } else {
         // Keep a newly-created SDR swap chain on DXGI's default SDR contract.
@@ -1540,6 +1612,8 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
             FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
             fallbackReason_ = "The reconfigured swap chain rejected the Rec.2020 PQ color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
+            hdrSwapChainRejected_ = true;
+            hdrSupportCheckedAt_ = std::chrono::steady_clock::now();
             swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
             swapChain_->Release();
             swapChain_ = nullptr;
@@ -1552,6 +1626,7 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
             return CreateSwapChain(width, height, false,
                 PreferredOutputBitDepth(sourceBitDepth_, false));
         }
+        hdrSwapChainRejected_ = false;
         SetHdrMetadata();
     } else {
         // This branch only changes precision within an already-SDR chain. Keep
@@ -2781,6 +2856,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     const auto height = static_cast<std::uint32_t>(frame->height);
     const auto hdrState = hdrProcessor_.ProcessFrame(
         frame, hdrPeakNits_, paperWhiteNits_);
+    const auto source2020 = hdrState.format != FFF3FPHdrFormat::Sdr || IsRec2020(frame);
     auto input = DescribeInput(static_cast<AVPixelFormat>(frame->format));
     const auto d3d11Frame = frame->format == AV_PIX_FMT_D3D11;
     if (d3d11Frame && frame->hw_frames_ctx != nullptr) {
@@ -2803,7 +2879,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
             static_cast<AVPixelFormat>(frame->format), frame->width, frame->height, convertedFormat,
             SWS_BILINEAR | SWS_ACCURATE_RND, nullptr, nullptr, nullptr);
         if (scaler_ == nullptr) { SetError("FFmpeg could not create the video conversion context."); return FFFResult::FfmpegFailure; }
-        const auto* sourceCoefficients = sws_getCoefficients(ToSwsColorSpace(frame->colorspace, frame->width));
+        const auto* sourceCoefficients = sws_getCoefficients(ToSwsColorSpace(frame, source2020));
         const auto* destinationCoefficients = sws_getCoefficients(SWS_CS_ITU709);
         if (sourceCoefficients == nullptr || destinationCoefficients == nullptr ||
             sws_setColorspaceDetails(scaler_, sourceCoefficients, IsFullRange(frame) ? 1 : 0,
@@ -2866,7 +2942,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         (hdrState.format == FFF3FPHdrFormat::DolbyVision &&
          (hdrState.compatibility & hlgCompatibility) != 0) ? 2u :
         (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
-    settings.source2020 = hdrState.format != FFF3FPHdrFormat::Sdr || IsRec2020(frame) ? 1u : 0u;
+    settings.source2020 = source2020 ? 1u : 0u;
     settings.sdrPeak = sdrPeakNits_;
     settings.hdrPeak = settings.transfer == 0 ? 100.0f : hdrState.sourcePeakNits;
     sourcePeakNits_ = settings.hdrPeak;
@@ -2884,9 +2960,10 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         settings.cScale = maximum / static_cast<float>(224u << shift);
     } else {
         settings.yOffset = 0.0f; settings.yScale = 1.0f;
-        settings.cOffset = 0.5f; settings.cScale = 1.0f;
+        settings.cOffset = FullRangeChromaOffset(input.bitDepth);
+        settings.cScale = 1.0f;
     }
-    YuvCoefficients(frame->colorspace, frame->width, settings.kr, settings.kb);
+    YuvCoefficients(frame, source2020, settings.kr, settings.kb);
     // DXGI exposes NV12/P010 processor color spaces with left chroma siting.
     // Hardware-decoded surfaces without bitstream siting metadata follow that
     // API convention so VP and shader A/B paths sample the same phase.
@@ -3360,7 +3437,7 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
         cachedVideoSettings_.sdrPeak = sdrPeakNits_;
         cachedVideoSettings_.hdrPeak = sdrPeakNits_;
         cachedVideoSettings_.paperWhite = paperWhiteNits_;
-        cachedVideoSettings_.targetPeak = hdrPeakNits_ > 0.0f ? hdrPeakNits_ : paperWhiteNits_;
+        cachedVideoSettings_.targetPeak = hdrProcessor_.State().targetPeakNits;
     }
     std::unique_lock presentLock(presentMutex_);
     ComPtr<ID3D11Texture2D> backBuffer;
@@ -3513,6 +3590,8 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     hasCachedVideo_ = false;
     hdrMonitor_ = nullptr;
     hdrSupportValid_ = false;
+    hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
+    hdrSwapChainRejected_ = false;
 }
 
 FFFResult PlayerVideoRenderer::RecreateDeviceResources() noexcept {

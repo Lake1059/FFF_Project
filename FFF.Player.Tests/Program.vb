@@ -2200,6 +2200,11 @@ Friend Module Program
                 验证音频峰值(会话, "WASAPI 共享")
                 Dim 共享结果 = 采样播放(会话, 4.0, Nothing)
                 验证纯音频结果(共享结果, "WASAPI 共享")
+                测试切换前音频丢弃(会话)
+                会话.播放()
+                Dim 丢弃恢复目标 = 会话.当前快照.播放位置 + TimeSpan.FromMilliseconds(500)
+                等待音频预热(会话, 丢弃恢复目标, TimeSpan.FromSeconds(10))
+                验证音频峰值(会话, "切换前音频丢弃后恢复")
 
                 ' 空端点表示继续跟随 Windows 默认设备。即使默认设备标识没有变化，
                 ' 这也覆盖与系统热切换相同的渲染器重建和媒体时钟重锚路径。
@@ -2234,6 +2239,26 @@ Friend Module Program
             If File.Exists(临时路径) Then File.Delete(临时路径)
             If File.Exists(换片路径) Then File.Delete(换片路径)
         End Try
+    End Sub
+
+    Private Sub 测试切换前音频丢弃(会话 As 播放器会话)
+        Dim 丢弃前 = 等待快照(会话,
+            Function(x) x.状态 = 播放状态.正在播放 AndAlso x.音频缓冲时长 > TimeSpan.Zero,
+            "切换前音频丢弃预热")
+        会话.丢弃音频输出()
+        Dim 丢弃后 = 等待快照(会话,
+            Function(x) x.状态 = 播放状态.已暂停 AndAlso x.音频缓冲时长 = TimeSpan.Zero,
+            "切换前音频输出丢弃")
+        Dim 峰值 = 会话.读取音频峰值()
+        断言(峰值.Length = 0 OrElse 峰值.All(Function(x) x <= 0.000001F),
+           $"切换前音频丢弃后仍有 PCM 峰值：{String.Join(", ", 峰值.Select(Function(x) x.ToString("F6")))}。")
+        Thread.Sleep(150)
+        Dim 静置 = 会话.当前快照
+        断言(静置.状态 = 播放状态.已暂停 AndAlso 静置.音频缓冲时长 = TimeSpan.Zero AndAlso
+               Math.Abs((静置.播放位置 - 丢弃后.播放位置).TotalMilliseconds) < 30,
+           "切换前音频丢弃后旧会话仍在推进或保留设备缓冲。")
+        Console.WriteLine($"切换前音频丢弃：位置 {丢弃前.播放位置.TotalMilliseconds:F0} → " &
+                          $"{丢弃后.播放位置.TotalMilliseconds:F0} ms，缓冲已清零。")
     End Sub
 
     Private Sub 测试音频端点不可用仍可播放(音频路径 As String)

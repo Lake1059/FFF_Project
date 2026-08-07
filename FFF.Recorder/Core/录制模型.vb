@@ -148,13 +148,14 @@ Public NotInheritable Class 视频处理配置
     Public Property 饱和度 As Single = 1.0F
 
     Public Sub 设置色彩模式(HDR输出 As Boolean, SDR白电平 As Single, HDR标称峰值 As Single)
+        Dim 规范HDR峰值 = Math.Max(HDR标称峰值, If(HDR输出, SDR白电平, 1.0F))
         输出HDR10 = HDR输出
         允许HDR转SDR = Not HDR输出
-        目标峰值尼特 = If(HDR输出, HDR标称峰值, SDR白电平)
+        目标峰值尼特 = If(HDR输出, 规范HDR峰值, SDR白电平)
         ' WGC 的 scRGB 约定是 1.0=80 nit；OBS 会按 SDRWhite/80 映射到 Rec.2100 PQ，
         ' 因而 HDR 输出必须把用户选择的 SDR 白电平作为 PQ 转换参考白。
         参考白尼特 = If(HDR输出, SDR白电平, 80.0F)
-        源峰值尼特 = Math.Max(HDR标称峰值, 1.0F)
+        源峰值尼特 = Math.Max(规范HDR峰值, 1.0F)
     End Sub
 
     Public Sub 验证()
