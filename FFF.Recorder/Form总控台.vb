@@ -205,7 +205,7 @@ Public Class Form总控台
         设置.实例对象.音频源键 = If(项目 Is Nothing, String.Empty, 项目.标识)
         刷新响度计()
         Dim 端点 = If(项目 Is Nothing OrElse 项目.默认设备, 获取默认音频端点(), 项目.标识)
-        If Not String.IsNullOrWhiteSpace(端点) Then 录制交互.同步录制音频端点(端点)
+        If Not String.IsNullOrWhiteSpace(端点) Then 录制交互.同步录制音频端点(端点, True)
     End Sub
 
     Private Sub MCB_视频源_DropDownOpened(sender As Object, e As EventArgs) Handles MCB_视频源.DropDownOpened

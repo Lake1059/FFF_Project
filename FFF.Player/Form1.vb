@@ -5,6 +5,7 @@ Imports System.Threading
 Public Class Form1
     Public Shared Property 当前主窗体 As Form1
     Private Const 跳转秒数 As Integer = 5
+    Private Const HDR操作提示键 As String = "HDR模式"
     Private Shared ReadOnly 核心文件名称 As String() = {"FFF.Native.dll"}
     Private Shared ReadOnly FFmpeg核心文件前缀 As String() = {
         "avcodec",
@@ -80,6 +81,7 @@ Public Class Form1
             P_剪辑区间按钮容器, MB_传给3FUI)
         更新WASAPI按钮()
         流选择器 = New 播放器流选择器(Me, MP_DX视频容器, MCB_流选择器, 播放控制器)
+        流选择器.应用全局字体(设置.实例对象.字体)
         界面呈现器 = 创建界面呈现器()
         字幕图层呈现器 = New 播放器定时文字图层呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
@@ -101,6 +103,7 @@ Public Class Form1
             Function() 播放控制器.当前弹幕, AddressOf 播放控制器.读取定时文字状态,
             AddressOf 播放控制器.读取弹幕状态, Function() 播放控制器.WASAPI模式,
             AddressOf 播放控制器.提交播放器信息图层)
+        信息图层呈现器.应用全局字体(设置.实例对象.字体)
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
         全屏交互控制器 = New 播放器全屏交互控制器(Me, 画面控件,
@@ -379,7 +382,7 @@ Public Class Form1
     End Sub
 
     Private Sub 播放控制器_HDR输出状态已确认(sender As Object, e As 播放器HDR状态事件参数)
-        If Not 正在关闭 Then 信息图层呈现器?.显示操作信息(e.说明, &HFF69DF8BUI)
+        If Not 正在关闭 Then 信息图层呈现器?.显示操作信息(e.说明, &HFF69DF8BUI, HDR操作提示键)
     End Sub
 
     Private Sub 播放控制器_外部字幕已加载(sender As Object, e As 播放器字幕事件参数)
@@ -521,6 +524,8 @@ Public Class Form1
     End Sub
 
     Friend Sub 设置窗口应用字体(fontName As String)
+        信息图层呈现器?.应用全局字体(fontName)
+        流选择器?.应用全局字体(fontName)
         设置窗口?.应用字体(fontName)
     End Sub
 

@@ -269,11 +269,11 @@ Public NotInheritable Class 录制控制器
         End SyncLock
     End Sub
 
-    Public Sub 切换系统音频端点(端点标识 As String)
+    Public Sub 切换系统音频端点(端点标识 As String, Optional 强制刷新 As Boolean = False)
         确保未释放()
         SyncLock 同步锁
             If Not 已开始值 OrElse 已停止值 Then Throw New InvalidOperationException("当前状态不能切换音频设备。")
-            会话.切换系统音频端点(端点标识)
+            会话.切换系统音频端点(端点标识, 强制刷新)
             配置值.系统音频端点标识 = 端点标识
         End SyncLock
     End Sub

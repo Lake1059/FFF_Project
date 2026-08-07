@@ -1346,6 +1346,11 @@ Friend Module Program
                 "未知时长媒体没有按当前播放位置扩展进度范围。")
             断言(时间标签.Text.Contains("--:--", StringComparison.Ordinal),
                 "未知总时长没有使用占位时间显示。")
+            Dim 信息 As New 媒体信息()
+            信息.流.Add(New 媒体流信息 With {.索引 = 0, .类型 = "video", .编码 = "h264"})
+            呈现器.更新媒体信息(信息, 当前快照)
+            断言(String.Equals(视频编码按钮.Text, "AVC", StringComparison.Ordinal),
+               $"H.264 视频编码按钮没有显示为 AVC：{视频编码按钮.Text}。")
 
             当前快照 = 创建进度条快照(TimeSpan.FromSeconds(20), TimeSpan.Zero)
             呈现器.刷新()
@@ -1431,9 +1436,82 @@ Friend Module Program
 
     Private Sub 测试信息层交互与文本()
         测试信息层精确文本()
+        测试信息层全局字体与HDR提示合并()
         测试媒体信息按钮左右键()
         测试媒体信息响度数据源()
     End Sub
+
+    Private Sub 测试信息层全局字体与HDR提示合并()
+        Using 窗口 As New Form1 With {.ShowInTaskbar = False, .Opacity = 0}
+            窗口.Show()
+            Application.DoEvents()
+            Dim 标志 = BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic
+            Dim 呈现器 = DirectCast(GetType(Form1).GetField("信息图层呈现器", 标志)?.GetValue(窗口),
+                               播放器信息图层呈现器)
+            Dim 画面 = DirectCast(GetType(Form1).GetField("画面控件", 标志)?.GetValue(窗口), Control)
+            断言(呈现器 IsNot Nothing AndAlso 画面 IsNot Nothing, "无法取得信息图层呈现器或画面控件。")
+
+            Dim 原字体 = 设置.实例对象.字体
+            Dim 测试字体 = 选择可用测试字体("Microsoft YaHei UI")
+            断言(Not String.IsNullOrWhiteSpace(测试字体), "没有可用的全局字体可测试信息层。")
+            Try
+                设置.实例对象.字体 = 测试字体
+                字体控制.更新所有控件字体属性()
+                Application.DoEvents()
+
+                呈现器.切换调试信息()
+                呈现器.显示操作信息("字体提示", &HFFF0D35DUI, "字体测试")
+                Dim 命令字段 = GetType(播放器信息图层呈现器).GetField("图层命令", 标志)
+                Dim 文字命令 = DirectCast(命令字段?.GetValue(呈现器), IEnumerable(Of 定时文字命令)).
+                    Where(Function(x) Not x.是位图).ToArray()
+                断言(文字命令.Length >= 2, "信息层没有同时生成实时信息和操作提示文字命令。")
+                断言(文字命令.All(Function(x) String.Equals(x.字体, 测试字体, StringComparison.CurrentCultureIgnoreCase)),
+                   "信息层实时信息或操作提示没有使用设置中的全局字体。")
+                Dim 预期字号 = CSng(11.0F * Math.Max(1, 画面.DeviceDpi) / 72.0F)
+                断言(文字命令.All(Function(x) Math.Abs(x.字号 - 预期字号) < 0.01F AndAlso
+                                           x.样式 = 定时文字样式.无),
+                   "信息层接入全局字体时误改了字号或字形。")
+
+                Dim HDR状态入口 = GetType(Form1).GetMethod("播放控制器_HDR输出状态已确认", 标志)
+                断言(HDR状态入口 IsNot Nothing, "无法取得 HDR 状态提示入口。")
+                HDR状态入口.Invoke(窗口, {Nothing, New 播放器HDR状态事件参数("HDR 映射到 SDR")})
+                HDR状态入口.Invoke(窗口, {Nothing, New 播放器HDR状态事件参数("HDR10 真实高亮")})
+                Dim 消息字段 = GetType(播放器信息图层呈现器).GetField("操作消息列表", 标志)
+                Dim 消息 = TryCast(消息字段?.GetValue(呈现器), System.Collections.IList)
+                断言(消息 IsNot Nothing AndAlso 消息.Count > 0, "HDR 模式提示没有进入信息层。")
+                Dim 文本字段 = 消息(0).GetType().GetField("文本", 标志)
+                Dim 操作键字段 = 消息(0).GetType().GetField("操作键", 标志)
+                Dim HDR消息 = 消息.Cast(Of Object)().
+                    Where(Function(x) String.Equals(CStr(操作键字段?.GetValue(x)), "HDR模式", StringComparison.Ordinal)).
+                    ToArray()
+                断言(HDR消息.Length = 1, "连续 HDR 模式提示没有合并成一个。")
+                断言(String.Equals(CStr(文本字段?.GetValue(HDR消息(0))), "HDR10 真实高亮", StringComparison.Ordinal),
+                   "HDR 模式提示没有保留最新内容或稳定合并键。")
+            Finally
+                设置.实例对象.字体 = 原字体
+                字体控制.更新所有控件字体属性()
+                窗口.Close()
+            End Try
+        End Using
+    End Sub
+
+    Private Function 选择可用测试字体(ParamArray 排除字体 As String()) As String
+        Dim 候选 = {"Consolas", "Segoe UI", "Arial", "Tahoma", "Microsoft YaHei UI"}.
+            Concat(FontFamily.Families.Select(Function(f) f.Name)).
+            Distinct(StringComparer.CurrentCultureIgnoreCase)
+        For Each 字体名称 In 候选
+            Try
+                Using 字体 As New Font(字体名称, 11.0F, FontStyle.Regular, GraphicsUnit.Point)
+                    Dim 实际字体 = 字体.FontFamily.Name
+                    If 排除字体.Any(Function(x) String.Equals(x, 实际字体,
+                                                        StringComparison.CurrentCultureIgnoreCase)) Then Continue For
+                    Return 实际字体
+                End Using
+            Catch
+            End Try
+        Next
+        Return String.Empty
+    End Function
 
     Private Sub 测试信息层精确文本()
         Dim 文档 = SRT字幕解析器.解析(New StringReader(

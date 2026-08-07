@@ -125,13 +125,26 @@ FFFResult AudioTrackEncoder::Encode(const std::uint8_t* data, const std::uint32_
     if (resamplerResult != FFFResult::Success) return resamplerResult;
 
     const auto queuedEnd = nextPresentationSample_ + av_audio_fifo_size(fifo_);
-    const auto timelineError = targetPresentationSample - queuedEnd;
+    const auto trustedTargetSample = (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0 ?
+        queuedEnd : targetPresentationSample;
+    const auto timelineError = trustedTargetSample - queuedEnd;
     timelineErrorSamples_.store(timelineError);
     compensationPpm_.store(0);
     const auto outputSampleRate = codecContext_->sample_rate;
+    std::int64_t dropConvertedSamples = 0;
     if (timelineError > outputSampleRate / 10) {
-        const auto silenceResult = AppendSilence(static_cast<std::int32_t>(std::min<std::int64_t>(timelineError, outputSampleRate)));
-        if (silenceResult != FFFResult::Success) return silenceResult;
+        auto remainingSilence = timelineError;
+        while (remainingSilence > 0) {
+            const auto silenceSamples = static_cast<std::int32_t>(
+                std::min<std::int64_t>(remainingSilence, outputSampleRate));
+            const auto silenceResult = AppendSilence(silenceSamples);
+            if (silenceResult != FFFResult::Success) return silenceResult;
+            const auto encodedSilence = EncodeAvailableFrames(false);
+            if (encodedSilence != FFFResult::Success) return encodedSilence;
+            remainingSilence -= silenceSamples;
+        }
+    } else if (timelineError < -outputSampleRate / 10) {
+        dropConvertedSamples = -timelineError;
     } else if (std::abs(timelineError) > 2) {
         const auto compensation = static_cast<int>(std::clamp<std::int64_t>(timelineError, -10, 10));
         swr_set_compensation(resampler_, compensation, outputSampleRate);
@@ -171,8 +184,29 @@ FFFResult AudioTrackEncoder::Encode(const std::uint8_t* data, const std::uint32_
         return FFFResult::FfmpegFailure;
     }
     ApplyGain(convertedBuffer_, convertedSamples);
-    if (av_audio_fifo_realloc(fifo_, av_audio_fifo_size(fifo_) + convertedSamples) < 0 ||
-        av_audio_fifo_write(fifo_, reinterpret_cast<void**>(convertedBuffer_), convertedSamples) < convertedSamples) {
+    const auto skippedSamples = static_cast<int>(
+        std::min<std::int64_t>(dropConvertedSamples, convertedSamples));
+    const auto writableSamples = convertedSamples - skippedSamples;
+    if (writableSamples <= 0) return EncodeAvailableFrames(false);
+    std::vector<std::uint8_t*> writeBuffer;
+    std::uint8_t** sourceBuffer = convertedBuffer_;
+    if (skippedSamples > 0) {
+        const auto channels = codecContext_->ch_layout.nb_channels;
+        const auto bytesPerSample = av_get_bytes_per_sample(codecContext_->sample_fmt);
+        const bool planar = av_sample_fmt_is_planar(codecContext_->sample_fmt) != 0;
+        writeBuffer.resize(static_cast<std::size_t>(planar ? channels : 1));
+        if (planar) {
+            for (int channel = 0; channel < channels; ++channel)
+                writeBuffer[static_cast<std::size_t>(channel)] =
+                    convertedBuffer_[channel] + static_cast<std::size_t>(skippedSamples) * bytesPerSample;
+        } else {
+            writeBuffer[0] = convertedBuffer_[0] +
+                static_cast<std::size_t>(skippedSamples) * bytesPerSample * channels;
+        }
+        sourceBuffer = writeBuffer.data();
+    }
+    if (av_audio_fifo_realloc(fifo_, av_audio_fifo_size(fifo_) + writableSamples) < 0 ||
+        av_audio_fifo_write(fifo_, reinterpret_cast<void**>(sourceBuffer), writableSamples) < writableSamples) {
         lastError_ = "Could not append converted samples to the AAC FIFO.";
         return FFFResult::FfmpegFailure;
     }

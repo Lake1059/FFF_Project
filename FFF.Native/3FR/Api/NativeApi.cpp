@@ -386,6 +386,12 @@ FFFResult FFF_SwitchSystemAudioEndpoint(const FFFSessionHandle session,
         static_cast<RecorderSession*>(session)->SwitchSystemAudioEndpoint(endpointIdUtf8);
 }
 
+FFFResult FFF_RefreshSystemAudioEndpoint(const FFFSessionHandle session,
+    const char* endpointIdUtf8) noexcept {
+    return session == nullptr ? FFFResult::InvalidArgument :
+        static_cast<RecorderSession*>(session)->RefreshSystemAudioEndpoint(endpointIdUtf8);
+}
+
 // 请求正常终止转换。编码模块接入后，此调用负责排空编码器并完整写入 Matroska trailer。
 FFFResult FFF_StopSession(const FFFSessionHandle session) noexcept {
     return session == nullptr ? FFFResult::InvalidArgument : static_cast<RecorderSession*>(session)->Stop();

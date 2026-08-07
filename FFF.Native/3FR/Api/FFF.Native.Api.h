@@ -171,6 +171,9 @@ FFF_API FFFResult FFF_SplitSession(FFFSessionHandle session, const char* outputP
 // 在同一媒体时间线和 Matroska 音轨内重建系统音频回环捕获器，用于默认播放设备变化。
 FFF_API FFFResult FFF_SwitchSystemAudioEndpoint(FFFSessionHandle session,
     const char* endpointIdUtf8) noexcept;
+// 强制重建当前系统音频回环捕获器，即使端点标识未变化。
+FFF_API FFFResult FFF_RefreshSystemAudioEndpoint(FFFSessionHandle session,
+    const char* endpointIdUtf8) noexcept;
 // 正常停止采集、排空编码与写队列并写 Matroska trailer；重复停止保持幂等。
 FFF_API FFFResult FFF_StopSession(FFFSessionHandle session) noexcept;
 // 紧急丢弃待写数据并释放资源，允许输出缺少正常 trailer。

@@ -45,6 +45,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private Const 蓝色 As UInteger = &HFF75A7FFUI
     Private Const 紫色 As UInteger = &HFFC58CFFUI
     Private Const 橙色 As UInteger = &HFFFFA85AUI
+    Private Const 默认信息字体 As String = "Microsoft YaHei UI"
+    Private Const 信息字号 As Single = 11.0F
 
     Private ReadOnly 画面控件 As 播放器画面控件
     Private ReadOnly 获取快照 As Func(Of 播放器快照)
@@ -57,7 +59,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
     Private ReadOnly 刷新定时器 As LakeUI.PrecisionTimer
-    Private ReadOnly 普通字体 As New Font("Microsoft YaHei UI", 11.0F, FontStyle.Regular, GraphicsUnit.Point)
+    Private 普通字体 As New Font(默认信息字体, 信息字号, FontStyle.Regular, GraphicsUnit.Point)
+    Private 普通字体名称 As String = 默认信息字体
     Private ReadOnly 文本测量格式 As StringFormat
     Private ReadOnly 操作消息列表 As New List(Of 操作消息)()
     Private ReadOnly 图层命令 As New List(Of 定时文字命令)(32)
@@ -110,6 +113,24 @@ Friend NotInheritable Class 播放器信息图层呈现器
         If Not 调试可见 AndAlso 操作消息列表.Count = 0 Then 刷新定时器.Stop()
         Return 调试可见
     End Function
+
+    Friend Sub 应用全局字体(fontName As String)
+        If 已释放 Then Return
+        Dim 新字体名称 = 规范信息字体名称(fontName)
+        Dim 新字体 = 创建信息字体(新字体名称, 普通字体)
+        If String.Equals(普通字体名称, 新字体名称, StringComparison.CurrentCultureIgnoreCase) AndAlso
+           String.Equals(普通字体.Name, 新字体.Name,
+                         StringComparison.CurrentCultureIgnoreCase) Then
+            新字体.Dispose()
+            Return
+        End If
+
+        Dim 旧字体 = 普通字体
+        普通字体 = 新字体
+        普通字体名称 = 新字体名称
+        旧字体.Dispose()
+        使内容失效()
+    End Sub
 
     Friend Sub 显示操作信息(文本 As String, Optional 颜色 As UInteger = 黄色,
                           Optional 操作键 As String = Nothing)
@@ -287,7 +308,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             y -= 背景高度
             图层命令.Add(定时文字命令.创建位图(消息背景像素, 1, 1, 4,
                 New RectangleF(边距, y, 当前背景宽度, 背景高度), 2UL))
-            图层命令.Add(创建文字命令(文本, 普通字体, 消息.颜色,
+            图层命令.Add(创建文字命令(文本, 普通字体名称, 普通字体, 消息.颜色,
                 New RectangleF(边距 + 水平内边距, y + 垂直内边距,
                                Math.Max(1.0F, 文本宽度 + 2.0F), 行高), 画面控件.DeviceDpi))
             y -= 6.0F * DPI缩放
@@ -311,17 +332,34 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim x = 左边界
         For index = 0 To 段.Length - 1
             If String.IsNullOrEmpty(段(index).文本) Then Continue For
-            图层命令.Add(创建文字命令(段(index).文本, 普通字体, 段(index).颜色,
+            图层命令.Add(创建文字命令(段(index).文本, 普通字体名称, 普通字体, 段(index).颜色,
                 New RectangleF(x, y, Math.Max(1.0F, 宽度(index) + 2.0F), 行高), DPI))
             x += 宽度(index)
         Next
     End Sub
 
-    Private Shared Function 创建文字命令(文本 As String, 字体 As Font, 颜色 As UInteger,
+    Private Shared Function 创建文字命令(文本 As String, 字体名称 As String, 字体 As Font, 颜色 As UInteger,
                                       区域 As RectangleF, DPI As Integer) As 定时文字命令
         Dim 字号像素 = CSng(字体.SizeInPoints * Math.Max(1, DPI) / 72.0F)
-        Return 定时文字命令.创建文字(文本, 字体.FontFamily.Name, 字号像素, 区域, 颜色,
+        Return 定时文字命令.创建文字(文本, 规范信息字体名称(字体名称), 字号像素, 区域, 颜色,
             &HFF000000UI, 0, 定时文字对齐.靠前, 定时文字对齐.靠前, 定时文字样式.无)
+    End Function
+
+    Private Shared Function 创建信息字体(fontName As String, 当前字体 As Font) As Font
+        Dim 字体名称 = 规范信息字体名称(fontName)
+        Try
+            Return New Font(字体名称, 当前字体.SizeInPoints, 当前字体.Style, GraphicsUnit.Point)
+        Catch
+            Try
+                Return New Font(默认信息字体, 当前字体.SizeInPoints, 当前字体.Style, GraphicsUnit.Point)
+            Catch
+                Return New Font(SystemFonts.DefaultFont.FontFamily, 当前字体.SizeInPoints, 当前字体.Style, GraphicsUnit.Point)
+            End Try
+        End Try
+    End Function
+
+    Private Shared Function 规范信息字体名称(fontName As String) As String
+        Return If(String.IsNullOrWhiteSpace(fontName), 默认信息字体, fontName.Trim())
     End Function
 
     Private Shared Function 配对行(标签 As String, 值 As String, 值颜色 As UInteger,

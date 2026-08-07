@@ -272,15 +272,16 @@ Public Module 录制交互
         End Try
     End Function
 
-    Friend Sub 同步录制音频端点(端点标识 As String)
-        If 当前控制器 Is Nothing OrElse Not 当前控制器.已开始 OrElse String.IsNullOrWhiteSpace(端点标识) Then Return
-        If String.Equals(当前录制音频端点, 端点标识, StringComparison.Ordinal) Then Return
+    Friend Sub 同步录制音频端点(端点标识 As String, Optional 强制刷新 As Boolean = False)
+        If 当前控制器 Is Nothing OrElse Not 当前控制器.已开始 OrElse 是否正在停止 OrElse
+            String.IsNullOrWhiteSpace(端点标识) Then Return
+        If Not 强制刷新 AndAlso String.Equals(当前录制音频端点, 端点标识, StringComparison.Ordinal) Then Return
         Try
-            当前控制器.切换系统音频端点(端点标识)
+            当前控制器.切换系统音频端点(端点标识, 强制刷新)
             当前录制音频端点 = 端点标识
-            写日志("播放设备已切换，录制时间线保持连续。")
+            写日志(If(强制刷新, "播放设备已重载，录制时间线已重新接续。", "播放设备已切换，录制时间线保持连续。"))
         Catch ex As Exception
-            写日志($"切换播放设备失败：{ex.Message}")
+            写日志($"{If(强制刷新, "重建", "切换")}播放设备失败：{ex.Message}")
         End Try
     End Sub
 
@@ -405,7 +406,8 @@ Public Module 录制交互
                               Select Case e.事件名称.ToLowerInvariant()
                                   Case "start", "pause", "resume", "stop", "split",
                                        "controller_paused", "controller_resumed",
-                                       "system_audio_endpoint_switched", "recording_controller_failed"
+                                       "system_audio_endpoint_switched", "system_audio_endpoint_refreshed",
+                                       "recording_controller_failed"
                                       Return
                                   Case "encoder_initialization_failed"
                                       写日志($"视频编码器初始化失败：{消息}")
@@ -415,6 +417,11 @@ Public Module 录制交互
                                       写日志($"音频编码失败：{消息}")
                                   Case "audio_device_failed"
                                       写日志($"音频设备异常：{消息}")
+                                      Dim 端点 = If(Form总控台.当前音频源条目 Is Nothing OrElse Form总控台.当前音频源条目.默认设备,
+                                          获取默认音频端点(), 当前录制音频端点)
+                                      If Not String.IsNullOrWhiteSpace(端点) Then
+                                          同步录制音频端点(端点, True)
+                                      End If
                                   Case "dxgi_access_lost_rebuilt"
                                       写日志($"显示画面捕获中断后已自动恢复。{格式化可选诊断消息(消息)}")
                                   Case "wgc_resize"

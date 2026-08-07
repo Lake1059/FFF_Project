@@ -211,13 +211,16 @@ Public NotInheritable Class 录制会话
         End Try
     End Sub
 
-    Public Sub 切换系统音频端点(端点标识 As String)
+    Public Sub 切换系统音频端点(端点标识 As String, Optional 强制刷新 As Boolean = False)
         确保未释放()
         If String.IsNullOrWhiteSpace(端点标识) Then Throw New ArgumentException("音频端点标识不能为空。", NameOf(端点标识))
         Dim 标识指针 = Marshal.StringToCoTaskMemUTF8(端点标识)
         Try
-            录制引擎.检查结果(原生接口.FFF_SwitchSystemAudioEndpoint(句柄, 标识指针),
-                读取最后错误("切换系统音频设备失败。"))
+            Dim 结果 = If(强制刷新,
+                原生接口.FFF_RefreshSystemAudioEndpoint(句柄, 标识指针),
+                原生接口.FFF_SwitchSystemAudioEndpoint(句柄, 标识指针))
+            录制引擎.检查结果(结果,
+                读取最后错误(If(强制刷新, "重建系统音频设备失败。", "切换系统音频设备失败。")))
         Finally
             Marshal.FreeCoTaskMem(标识指针)
         End Try

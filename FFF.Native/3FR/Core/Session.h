@@ -38,6 +38,7 @@ public:
     FFFResult Resume(std::int64_t qpcTimestamp) noexcept;
     FFFResult Split(const char* outputPathUtf8) noexcept;
     FFFResult SwitchSystemAudioEndpoint(const char* endpointIdUtf8) noexcept;
+    FFFResult RefreshSystemAudioEndpoint(const char* endpointIdUtf8) noexcept;
     // 停止采集、排空音视频编码器和异步写队列并写正常 trailer；重复停止保持成功。
     FFFResult Stop() noexcept;
     // 紧急丢弃待写包并释放资源，允许输出文件缺少正常 trailer。
@@ -54,6 +55,7 @@ private:
     void WriteDiagnostic(const char* eventName, const std::string& detail = {}) noexcept;
     // 在音频线程停止后复制设备统计及编码补偿值，使会话清理后仍可读取最终快照。
     void CollectAudioStatistics() noexcept;
+    FFFResult ReplaceSystemAudioEndpoint(const char* endpointIdUtf8, bool forceRestart) noexcept;
     // 用设备报告的 100 ns QPC 首末位置计算累计音频采样时长误差，结果单位为微秒。
     static std::int64_t CalculateAudioDriftMicroseconds(const WasapiCaptureStatistics& statistics) noexcept;
     FFFResult CreateAudioCapture(const std::string& endpointId, bool loopback, std::size_t trackIndex,

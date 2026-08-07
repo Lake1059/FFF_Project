@@ -199,6 +199,10 @@ Friend Module 原生接口
     End Function
 
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF_RefreshSystemAudioEndpoint(会话 As 原生会话句柄, 端点标识UTF8 As IntPtr) As 原生结果
+    End Function
+
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF_StopSession(会话 As 原生会话句柄) As 原生结果
     End Function
 

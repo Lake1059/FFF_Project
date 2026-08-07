@@ -77,6 +77,7 @@ private:
     void Worker() noexcept;
     void PumpPlayback() noexcept;
     void PumpExternalAudio() noexcept;
+    bool ShouldDelayAudioUntilVideoFrame() const noexcept;
     void DoOpen(std::string pathUtf8) noexcept;
     void DoClose(FFF3FPState finalState = FFF3FPState::Closed,
         bool preserveVideoOutput = false) noexcept;
@@ -199,6 +200,7 @@ private:
     std::deque<std::int64_t> framePtsIndex_;
     std::int64_t framePtsIndexBase_;
     bool rebuildingFrameIndex_;
+    bool audioBlockedUntilVideoFrame_;
     std::deque<AVFrame*> videoFrameQueue_;
     std::vector<AVFrame*> videoFramePool_;
     std::deque<AVPacket*> pendingVideoPackets_;

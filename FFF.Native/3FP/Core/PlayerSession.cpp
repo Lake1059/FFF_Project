@@ -424,6 +424,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       keyframeSeekPending_(false), lastVideoFrameDuration100ns_(0), nextUntimedVideoPosition100ns_(0),
       framePtsIndexBase_(0),
       rebuildingFrameIndex_(false),
+      audioBlockedUntilVideoFrame_(false),
       stepScheduled_(false), stepRepeatRequested_(false), pendingStepOperation_(StepOperation::Frame),
       pendingStepDirection_(0), pendingVideoPacketBytes_(0), pendingAudioPacketBytes_(0),
       publishedBitRateSecond_(-1),
@@ -462,6 +463,10 @@ void PlayerSession::NotifyAudioRestart() noexcept {
 
 void PlayerSession::NotifyVideoRecovery() noexcept {
     commandCondition_.notify_one();
+}
+
+bool PlayerSession::ShouldDelayAudioUntilVideoFrame() const noexcept {
+    return audioBlockedUntilVideoFrame_ && videoStream_ >= 0;
 }
 
 FFFResult PlayerSession::Open(const char* path) noexcept {
@@ -1721,6 +1726,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false;
     seekTarget100ns_ = -1; seekTargetFrame_ = -1; keyframeSeekPending_ = false;
     lastVideoFrameDuration100ns_ = 0; nextUntimedVideoPosition100ns_ = 0; draining_ = false;
+    audioBlockedUntilVideoFrame_ = videoStream_ >= 0;
     if (staticImage_) {
         const auto imageResult = DecodeInitialStillImage();
         if (imageResult != FFFResult::Success) {
@@ -1853,6 +1859,7 @@ void PlayerSession::PumpPlayback() noexcept {
         return;
     }
     const auto audioBuffered = audioRenderer_ ? audioRenderer_->Buffered100ns() : 0;
+    const auto delayAudioUntilVideo = audioRenderer_ && ShouldDelayAudioUntilVideoFrame();
     const auto videoSaturated = [&] {
         if (videoFrameQueue_.empty()) return false;
         const auto lookAhead = VideoFramePosition(videoFrameQueue_.back()) - ClockPosition();
@@ -1861,7 +1868,8 @@ void PlayerSession::PumpPlayback() noexcept {
             (videoFrameQueue_.size() >= MinimumQueuedVideoFrames &&
                 lookAhead >= TargetVideoLookAhead100ns);
     };
-    if (!pendingAudioPackets_.empty() && audioBuffered < TargetAudioBuffer100ns) {
+    if (!delayAudioUntilVideo && !pendingAudioPackets_.empty() &&
+        audioBuffered < TargetAudioBuffer100ns) {
         auto* packet = pendingAudioPackets_.front();
         pendingAudioPackets_.pop_front();
         pendingAudioPacketBytes_ -= static_cast<std::size_t>(std::max(packet->size, 0));
@@ -1878,7 +1886,7 @@ void PlayerSession::PumpPlayback() noexcept {
         return;
     }
     if (videoStream_ < 0 && audioRenderer_ && audioBuffered >= TargetAudioBuffer100ns) { Sleep(2); return; }
-    if (!draining_ && externalFormat_ != nullptr && audioRenderer_ &&
+    if (!draining_ && externalFormat_ != nullptr && audioRenderer_ && !delayAudioUntilVideo &&
         audioBuffered < TargetAudioBuffer100ns) PumpExternalAudio();
     const auto videoPacketsFull = pendingVideoPackets_.size() >= MaximumPendingVideoPackets ||
         pendingVideoPacketBytes_ >= MaximumPendingVideoPacketBytes;
@@ -1899,6 +1907,8 @@ void PlayerSession::PumpPlayback() noexcept {
     const auto result = av_read_frame(format_, playbackPacket_);
     if (result < 0) {
         av_packet_unref(playbackPacket_);
+        if (delayAudioUntilVideo && pendingVideoPackets_.empty() && videoFrameQueue_.empty())
+            audioBlockedUntilVideoFrame_ = false;
         if (!pendingVideoPackets_.empty() || !pendingAudioPackets_.empty()) { Sleep(1); return; }
         FlushAtEnd(); return;
     }
@@ -1918,7 +1928,12 @@ void PlayerSession::PumpPlayback() noexcept {
         }
     }
     else if (playbackPacket_->stream_index == audioStream_ && externalFormat_ == nullptr) {
-        if (audioRenderer_ && audioBuffered >= TargetAudioBuffer100ns) {
+        if (audioRenderer_ && (delayAudioUntilVideo || audioBuffered >= TargetAudioBuffer100ns)) {
+            if (delayAudioUntilVideo && audioPacketsFull) {
+                DecodePacket(audioDecoder_, playbackPacket_, false, format_);
+                av_packet_unref(playbackPacket_);
+                return;
+            }
             auto* retained = av_packet_clone(playbackPacket_);
             if (retained == nullptr) {
                 av_packet_unref(playbackPacket_);
@@ -2298,6 +2313,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     UpdateAudioDiagnostics();
     PublishSnapshot();
     if (firstFrameForMedia) RebuildMediaInfo();
+    audioBlockedUntilVideoFrame_ = false;
     if (snapshot_.actualColorMode != previousColorMode) {
         std::ostringstream json; json << "{\"requested\":" << static_cast<unsigned>(snapshot_.requestedColorMode)
             << ",\"actual\":" << static_cast<unsigned>(snapshot_.actualColorMode) << ",\"reason\":\""
@@ -2310,6 +2326,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
 
 void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, const std::int32_t streamIndex) noexcept {
     if (!audioRenderer_ || streamIndex < 0) return;
+    if (ShouldDelayAudioUntilVideoFrame()) return;
     auto* stream = owner->streams[streamIndex];
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
     auto position = AV_NOPTS_VALUE;
@@ -2463,6 +2480,7 @@ void PlayerSession::UpdateBitRateForPosition(const std::int64_t position) noexce
 
 void PlayerSession::PumpExternalAudio() noexcept {
     if (externalFormat_ == nullptr || externalAudioDecoder_ == nullptr) return;
+    if (ShouldDelayAudioUntilVideoFrame()) return;
     if (snapshot_.position100ns < externalAudioOffset100ns_) return;
     if (externalAudioPacket_ == nullptr) externalAudioPacket_ = av_packet_alloc();
     if (externalAudioPacket_ == nullptr) return;
@@ -2481,6 +2499,8 @@ void PlayerSession::FlushAtEnd() noexcept {
     if (!draining_) {
         draining_ = true;
         if (videoDecoder_) DecodePacket(videoDecoder_, nullptr, true, format_);
+        if (audioBlockedUntilVideoFrame_ && videoFrameQueue_.empty())
+            audioBlockedUntilVideoFrame_ = false;
         if (audioDecoder_ && externalFormat_ == nullptr) DecodePacket(audioDecoder_, nullptr, false, format_);
     }
     // Some single-frame image decoders publish their only frame while draining.
@@ -2537,6 +2557,7 @@ void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame
     internalAudioDecodeErrorCount_ = 0;
     seekTarget100ns_ = position; seekTargetFrame_ = targetFrame;
     keyframeSeekPending_ = !exact && videoStream_ >= 0; draining_ = false;
+    audioBlockedUntilVideoFrame_ = videoStream_ >= 0;
     lastVideoFrameDuration100ns_ = 0;
     nextUntimedVideoPosition100ns_ = decodeStartPosition;
     snapshot_.position100ns = position;
@@ -2669,6 +2690,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     keyframeSeekPending_ = false; lastVideoFrameDuration100ns_ = 0;
     nextUntimedVideoPosition100ns_ = 0; draining_ = false;
     staticImage_ = false;
+    audioBlockedUntilVideoFrame_ = false;
     hardwareFallbackPending_ = false;
     pendingHardwareFallbackReason_.clear();
     internalAudioFailurePending_ = false;

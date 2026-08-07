@@ -18,11 +18,15 @@ extern "C" {
 #include <roapi.h>
 #include <windows.graphics.display.h>
 #include <windows.graphics.display.interop.h>
+#include <algorithm>
 #include <bit>
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cwctype>
 #include <cstring>
+#include <mutex>
+#include <string_view>
 
 using Microsoft::WRL::ComPtr;
 
@@ -828,6 +832,263 @@ bool TimedTextUtf8ToWide(const char* value, std::wstring& result) noexcept {
     }
 }
 
+struct ResolvedTimedTextFont {
+    std::wstring family;
+    DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_NORMAL;
+    DWRITE_FONT_STYLE style = DWRITE_FONT_STYLE_NORMAL;
+    DWRITE_FONT_STRETCH stretch = DWRITE_FONT_STRETCH_NORMAL;
+};
+
+struct TimedTextFontResolveCacheEntry {
+    std::wstring family;
+    DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_NORMAL;
+    DWRITE_FONT_STYLE style = DWRITE_FONT_STYLE_NORMAL;
+    DWRITE_FONT_STRETCH stretch = DWRITE_FONT_STRETCH_NORMAL;
+    ResolvedTimedTextFont resolved;
+    std::uint64_t lastUsed = 0;
+};
+
+std::mutex g_timedTextFontResolveMutex;
+std::vector<TimedTextFontResolveCacheEntry> g_timedTextFontResolveCache;
+std::uint64_t g_timedTextFontResolveClock = 0;
+constexpr std::size_t MaximumTimedTextFontResolveCacheEntries = 64;
+
+ResolvedTimedTextFont CreateFallbackTimedTextFont(const std::wstring& family,
+    DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style,
+    DWRITE_FONT_STRETCH stretch) {
+    ResolvedTimedTextFont result;
+    result.family = family;
+    result.weight = static_cast<int>(weight) <= 0 ? DWRITE_FONT_WEIGHT_NORMAL : weight;
+    result.style = style;
+    result.stretch = stretch == DWRITE_FONT_STRETCH_UNDEFINED
+        ? DWRITE_FONT_STRETCH_NORMAL : stretch;
+    return result;
+}
+
+void TrimOuterWhitespace(std::wstring& value) noexcept {
+    std::size_t first = 0;
+    while (first < value.size() && std::iswspace(value[first])) ++first;
+    std::size_t last = value.size();
+    while (last > first && std::iswspace(value[last - 1])) --last;
+    if (last < value.size()) value.erase(last);
+    if (first > 0) value.erase(0, first);
+}
+
+void TrimTrailingFontSeparators(std::wstring& value) noexcept {
+    while (!value.empty() && (value.back() == L' ' || value.back() == L'-'))
+        value.pop_back();
+}
+
+bool EqualOrdinalIgnoreCase(const std::wstring& left,
+    const std::wstring& right) noexcept {
+    if (left.size() != right.size()) return false;
+    if (left.size() > static_cast<std::size_t>(INT_MAX)) return false;
+    return CompareStringOrdinal(left.c_str(), static_cast<int>(left.size()),
+        right.c_str(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+}
+
+bool EndsWithOrdinalIgnoreCase(const std::wstring& value,
+    const std::wstring& token) noexcept {
+    if (token.empty() || value.size() < token.size() ||
+        token.size() > static_cast<std::size_t>(INT_MAX)) return false;
+    return CompareStringOrdinal(value.c_str() + value.size() - token.size(),
+        static_cast<int>(token.size()), token.c_str(),
+        static_cast<int>(token.size()), TRUE) == CSTR_EQUAL;
+}
+
+bool ConsumeSuffix(std::wstring& value, const std::wstring_view suffix) noexcept {
+    try {
+        std::wstring token;
+        token.reserve(suffix.size() + 1);
+        token.push_back(L' ');
+        token.append(suffix.data(), suffix.size());
+        if (!EndsWithOrdinalIgnoreCase(value, token)) {
+            token[0] = L'-';
+            if (!EndsWithOrdinalIgnoreCase(value, token)) return false;
+        }
+        value.erase(value.size() - token.size());
+        TrimTrailingFontSeparators(value);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool ConsumeKnownFontNameSuffix(std::wstring& familyName,
+    ResolvedTimedTextFont& resolved) noexcept {
+    if (ConsumeSuffix(familyName, L"ExtraBlack") || ConsumeSuffix(familyName, L"UltraBlack") ||
+        ConsumeSuffix(familyName, L"Extra Black") || ConsumeSuffix(familyName, L"Ultra Black")) {
+        resolved.weight = DWRITE_FONT_WEIGHT_EXTRA_BLACK;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"ExtraBold") || ConsumeSuffix(familyName, L"UltraBold") ||
+        ConsumeSuffix(familyName, L"Extra Bold") || ConsumeSuffix(familyName, L"Ultra Bold")) {
+        resolved.weight = DWRITE_FONT_WEIGHT_EXTRA_BOLD;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"DemiBold") || ConsumeSuffix(familyName, L"SemiBold") ||
+        ConsumeSuffix(familyName, L"Demi Bold") || ConsumeSuffix(familyName, L"Semi Bold")) {
+        resolved.weight = DWRITE_FONT_WEIGHT_DEMI_BOLD;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"ExtraLight") || ConsumeSuffix(familyName, L"UltraLight") ||
+        ConsumeSuffix(familyName, L"Extra Light") || ConsumeSuffix(familyName, L"Ultra Light")) {
+        resolved.weight = DWRITE_FONT_WEIGHT_EXTRA_LIGHT;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"SemiLight") || ConsumeSuffix(familyName, L"Semi Light")) {
+        resolved.weight = DWRITE_FONT_WEIGHT_SEMI_LIGHT;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"Bold")) {
+        resolved.weight = DWRITE_FONT_WEIGHT_BOLD;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"Medium")) {
+        resolved.weight = DWRITE_FONT_WEIGHT_MEDIUM;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"Regular") || ConsumeSuffix(familyName, L"Normal")) {
+        resolved.weight = DWRITE_FONT_WEIGHT_NORMAL;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"Light")) {
+        resolved.weight = DWRITE_FONT_WEIGHT_LIGHT;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"Thin")) {
+        resolved.weight = DWRITE_FONT_WEIGHT_THIN;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"Black") || ConsumeSuffix(familyName, L"Heavy")) {
+        resolved.weight = DWRITE_FONT_WEIGHT_BLACK;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"Italic")) {
+        resolved.style = DWRITE_FONT_STYLE_ITALIC;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"Oblique")) {
+        resolved.style = DWRITE_FONT_STYLE_OBLIQUE;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"UltraCondensed") ||
+        ConsumeSuffix(familyName, L"Ultra Condensed")) {
+        resolved.stretch = DWRITE_FONT_STRETCH_ULTRA_CONDENSED;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"ExtraCondensed") ||
+        ConsumeSuffix(familyName, L"Extra Condensed")) {
+        resolved.stretch = DWRITE_FONT_STRETCH_EXTRA_CONDENSED;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"SemiCondensed") ||
+        ConsumeSuffix(familyName, L"Semi Condensed")) {
+        resolved.stretch = DWRITE_FONT_STRETCH_SEMI_CONDENSED;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"Condensed")) {
+        resolved.stretch = DWRITE_FONT_STRETCH_CONDENSED;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"UltraExpanded") ||
+        ConsumeSuffix(familyName, L"Ultra Expanded")) {
+        resolved.stretch = DWRITE_FONT_STRETCH_ULTRA_EXPANDED;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"ExtraExpanded") ||
+        ConsumeSuffix(familyName, L"Extra Expanded")) {
+        resolved.stretch = DWRITE_FONT_STRETCH_EXTRA_EXPANDED;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"SemiExpanded") ||
+        ConsumeSuffix(familyName, L"Semi Expanded")) {
+        resolved.stretch = DWRITE_FONT_STRETCH_SEMI_EXPANDED;
+        return true;
+    }
+    if (ConsumeSuffix(familyName, L"Expanded")) {
+        resolved.stretch = DWRITE_FONT_STRETCH_EXPANDED;
+        return true;
+    }
+    return false;
+}
+
+bool DWriteFamilyExists(IDWriteFactory* factory, const std::wstring& familyName) noexcept {
+    if (factory == nullptr || familyName.empty()) return false;
+    try {
+        ComPtr<IDWriteFontCollection> collection;
+        if (FAILED(factory->GetSystemFontCollection(collection.GetAddressOf(), FALSE)) ||
+            collection == nullptr)
+            return false;
+        UINT32 index = 0;
+        BOOL exists = FALSE;
+        return SUCCEEDED(collection->FindFamilyName(familyName.c_str(), &index, &exists)) &&
+            exists != FALSE;
+    } catch (...) {
+        return false;
+    }
+}
+
+ResolvedTimedTextFont ResolveTimedTextFontNameUncached(IDWriteFactory* factory,
+    const ResolvedTimedTextFont& fallback) {
+    if (fallback.family.empty() || DWriteFamilyExists(factory, fallback.family))
+        return fallback;
+
+    auto candidate = fallback;
+    auto familyName = fallback.family;
+    TrimOuterWhitespace(familyName);
+
+    bool changed = false;
+    do {
+        changed = ConsumeKnownFontNameSuffix(familyName, candidate);
+    } while (changed && !familyName.empty());
+
+    if (!familyName.empty() && !EqualOrdinalIgnoreCase(familyName, fallback.family) &&
+        DWriteFamilyExists(factory, familyName)) {
+        candidate.family = std::move(familyName);
+        return candidate;
+    }
+    return fallback;
+}
+
+ResolvedTimedTextFont ResolveTimedTextFont(IDWriteFactory* factory,
+    const std::wstring& family, const DWRITE_FONT_WEIGHT weight,
+    const DWRITE_FONT_STYLE style, const DWRITE_FONT_STRETCH stretch) noexcept {
+    try {
+        const auto fallback = CreateFallbackTimedTextFont(family, weight, style, stretch);
+        {
+            std::lock_guard lock(g_timedTextFontResolveMutex);
+            for (auto& entry : g_timedTextFontResolveCache) {
+                if (entry.weight == fallback.weight && entry.style == fallback.style &&
+                    entry.stretch == fallback.stretch &&
+                    EqualOrdinalIgnoreCase(entry.family, fallback.family)) {
+                    entry.lastUsed = ++g_timedTextFontResolveClock;
+                    return entry.resolved;
+                }
+            }
+        }
+
+        const auto resolved = ResolveTimedTextFontNameUncached(factory, fallback);
+        {
+            std::lock_guard lock(g_timedTextFontResolveMutex);
+            if (g_timedTextFontResolveCache.size() >= MaximumTimedTextFontResolveCacheEntries &&
+                !g_timedTextFontResolveCache.empty()) {
+                const auto oldest = std::min_element(g_timedTextFontResolveCache.begin(),
+                    g_timedTextFontResolveCache.end(),
+                    [](const auto& left, const auto& right) {
+                        return left.lastUsed < right.lastUsed;
+                    });
+                g_timedTextFontResolveCache.erase(oldest);
+            }
+            g_timedTextFontResolveCache.push_back({fallback.family, fallback.weight,
+                fallback.style, fallback.stretch, resolved, ++g_timedTextFontResolveClock});
+        }
+        return resolved;
+    } catch (...) {
+        return CreateFallbackTimedTextFont(family, weight, style, stretch);
+    }
+}
+
 HRESULT CreateTimedTextLayout(IDWriteFactory* factory, const std::wstring& text,
     const std::wstring& fontFamily, const float fontSize,
     const FFF3FPTimedTextFlags flags, const FFF3FPTimedTextAlignment horizontalAlignment,
@@ -843,9 +1104,11 @@ HRESULT CreateTimedTextLayout(IDWriteFactory* factory, const std::wstring& text,
         ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL;
     const auto style = (flagBits & static_cast<std::uint32_t>(FFF3FPTimedTextFlags::Italic)) != 0
         ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;
+    const auto resolvedFont = ResolveTimedTextFont(factory, fontFamily, weight, style,
+        DWRITE_FONT_STRETCH_NORMAL);
     ComPtr<IDWriteTextFormat> format;
-    auto result = factory->CreateTextFormat(fontFamily.c_str(), nullptr, weight, style,
-        DWRITE_FONT_STRETCH_NORMAL, fontSize, L"", &format);
+    auto result = factory->CreateTextFormat(resolvedFont.family.c_str(), nullptr,
+        resolvedFont.weight, resolvedFont.style, resolvedFont.stretch, fontSize, L"", &format);
     if (FAILED(result)) return result;
     if (FAILED(result = format->SetTextAlignment(ToTextAlignment(horizontalAlignment))) ||
         FAILED(result = format->SetParagraphAlignment(ToParagraphAlignment(verticalAlignment))) ||

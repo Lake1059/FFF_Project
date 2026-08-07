@@ -36,7 +36,10 @@ FFFResult AudioMixer::Encode(const std::size_t sourceIndex, const std::uint8_t* 
     auto& source = sources_[sourceIndex];
     const auto ensured = EnsureResampler(source, inputFormat);
     if (ensured != FFFResult::Success) return ensured;
-    const auto error = targetPresentationSample - source.endSample;
+    const bool timestampError = (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0;
+    const auto appendTargetSample = timestampError ?
+        (source.seenPacket ? source.endSample : nextMixedSample_) : targetPresentationSample;
+    const auto error = appendTargetSample - source.endSample;
     source.timelineErrorSamples = error;
     source.compensationPpm = 0;
     if (source.seenPacket && std::abs(error) > 2 && std::abs(error) <= 4'800) {
@@ -64,7 +67,7 @@ FFFResult AudioMixer::Encode(const std::size_t sourceIndex, const std::uint8_t* 
         return FFFResult::FfmpegFailure;
     }
     const auto convertedSize = static_cast<std::size_t>(convertedCount) * 2;
-    std::int64_t appendAt = targetPresentationSample;
+    std::int64_t appendAt = appendTargetSample;
     std::size_t inputOffset = 0;
     if (!source.seenPacket) {
         source.baseSample = appendAt;
@@ -72,9 +75,16 @@ FFFResult AudioMixer::Encode(const std::size_t sourceIndex, const std::uint8_t* 
         source.seenPacket = true;
     }
     if (appendAt > source.endSample) {
-        const auto gap = std::min<std::int64_t>(appendAt - source.endSample, 48'000);
-        source.samples.insert(source.samples.end(), static_cast<std::size_t>(gap) * 2, 0.0F);
-        source.endSample += gap;
+        if (source.endSample < nextMixedSample_) {
+            source.samples.clear();
+            source.baseSample = nextMixedSample_;
+            source.endSample = nextMixedSample_;
+        }
+        while (appendAt > source.endSample) {
+            const auto gap = std::min<std::int64_t>(appendAt - source.endSample, 48'000);
+            source.samples.insert(source.samples.end(), static_cast<std::size_t>(gap) * 2, 0.0F);
+            source.endSample += gap;
+        }
     } else if (appendAt < source.endSample) {
         const auto overlap = std::min<std::int64_t>(source.endSample - appendAt, convertedCount);
         inputOffset = static_cast<std::size_t>(overlap) * 2;

@@ -177,7 +177,7 @@ Friend NotInheritable Class 播放器界面呈现器
             设置配对可见(音频编码按钮, 音频编码占位, 音频流 IsNot Nothing)
             设置配对可见(声道数按钮, 声道数占位, 音频流 IsNot Nothing AndAlso 音频流.声道数 > 0)
 
-            If 视频流 IsNot Nothing Then 设置自适应文本(视频编码按钮, 视频流.编码.ToUpperInvariant())
+            If 视频流 IsNot Nothing Then 设置自适应文本(视频编码按钮, 格式化视频编码(视频流.编码))
             If 音频流 IsNot Nothing Then
                 设置自适应文本(音频编码按钮, 音频流.编码.ToUpperInvariant())
                 设置自适应文本(声道数按钮, 格式化声道数(音频流.声道数))
@@ -365,6 +365,15 @@ Friend NotInheritable Class 播放器界面呈现器
             Case 6 : Return "5.1"
             Case 8 : Return "7.1"
             Case Else : Return $"{声道数}ch"
+        End Select
+    End Function
+
+    Private Shared Function 格式化视频编码(编码 As String) As String
+        Select Case If(编码, String.Empty).Trim().ToLowerInvariant()
+            Case "h264", "avc", "avc1"
+                Return "AVC"
+            Case Else
+                Return If(String.IsNullOrWhiteSpace(编码), String.Empty, 编码.Trim().ToUpperInvariant())
         End Select
     End Function
 

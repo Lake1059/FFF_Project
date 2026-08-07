@@ -41,7 +41,8 @@ Public NotInheritable Class 字体控制
     Friend Shared Sub 写入选择结果(选中字体 As Font, ByRef 字体名称 As String,
                               ByRef 字号 As Single, ByRef 字体样式 As Integer)
         ArgumentNullException.ThrowIfNull(选中字体)
-        字体名称 = 选中字体.FontFamily.Name
+        字体名称 = If(String.IsNullOrWhiteSpace(选中字体.Name),
+                  选中字体.FontFamily.Name, 选中字体.Name)
         ' Font.Size 使用 Font.Unit，ModernFontDialog 返回 Pixel 字体时 48pt 会约为
         ' 64px。持久化边界只能读取 SizeInPoints，否则每次打开对话框都会再次放大。
         字号 = Math.Clamp(选中字体.SizeInPoints, 8.0F, 200.0F)
@@ -65,7 +66,7 @@ Public NotInheritable Class 字体控制
             Dim 字体属性 = 控件.GetType().GetProperty("Font", BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic)
             If 字体属性 Is Nothing OrElse Not 字体属性.CanWrite Then Return
             Dim 当前字体 = 控件.Font
-            Dim 新字体 As New Font(字体名称, 当前字体.Size, 当前字体.Style)
+            Dim 新字体 As New Font(字体名称, 当前字体.Size, 当前字体.Style, 当前字体.Unit)
             字体属性.SetValue(控件, 新字体)
         Catch
         End Try

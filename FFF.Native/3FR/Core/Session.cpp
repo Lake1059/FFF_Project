@@ -393,6 +393,15 @@ FFFResult RecorderSession::Split(const char* outputPathUtf8) noexcept {
 }
 
 FFFResult RecorderSession::SwitchSystemAudioEndpoint(const char* endpointIdUtf8) noexcept {
+    return ReplaceSystemAudioEndpoint(endpointIdUtf8, false);
+}
+
+FFFResult RecorderSession::RefreshSystemAudioEndpoint(const char* endpointIdUtf8) noexcept {
+    return ReplaceSystemAudioEndpoint(endpointIdUtf8, true);
+}
+
+FFFResult RecorderSession::ReplaceSystemAudioEndpoint(const char* endpointIdUtf8,
+    const bool forceRestart) noexcept {
     if (endpointIdUtf8 == nullptr || *endpointIdUtf8 == '\0') return FFFResult::InvalidArgument;
     std::unique_ptr<WasapiCapture> previousCapture;
     {
@@ -400,7 +409,7 @@ FFFResult RecorderSession::SwitchSystemAudioEndpoint(const char* endpointIdUtf8)
         const auto state = state_.load();
         if ((state != FFFSessionState::Running && state != FFFSessionState::Paused) ||
             systemAudioEndpointId_.empty() || audioCaptures_.empty()) return FFFResult::InvalidState;
-        if (systemAudioEndpointId_ == endpointIdUtf8) return FFFResult::Success;
+        if (!forceRestart && systemAudioEndpointId_ == endpointIdUtf8) return FFFResult::Success;
         previousCapture = std::move(audioCaptures_.front());
         audioCaptures_.erase(audioCaptures_.begin());
     }
@@ -422,7 +431,8 @@ FFFResult RecorderSession::SwitchSystemAudioEndpoint(const char* endpointIdUtf8)
         completedAudioStatistics_.clear();
         completedAudioTimelineErrors_.clear();
         completedAudioCompensationPpm_.clear();
-        WriteDiagnostic("system_audio_endpoint_switched", "\"endpoint\":\"" +
+        WriteDiagnostic(forceRestart ? "system_audio_endpoint_refreshed" :
+            "system_audio_endpoint_switched", "\"endpoint\":\"" +
             EscapeDiagnosticJson(systemAudioEndpointId_) + "\"");
     }
     return FFFResult::Success;
