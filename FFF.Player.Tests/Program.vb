@@ -256,6 +256,13 @@ Friend Module Program
                 Console.WriteLine("播放中 HDR/SDR 交换链切换与定时文字图层持续呈现回归通过。")
                 Return 0
             End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--decoder-switch-audio-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 门控视频路径 = Path.GetFullPath(参数(1))
+                检查文件(门控视频路径)
+                测试解码切换可见首帧音频门控(门控视频路径)
+                Console.WriteLine("CPU/GPU 候选会话在可见首帧前保持音频门控回归通过。")
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--ass-render-benchmark", StringComparison.OrdinalIgnoreCase) Then
                 测试ASS渲染性能()
                 Return 0
@@ -323,6 +330,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --information-overlay-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --empty-layer-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --hdr-switch-regression <HDR视频>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --decoder-switch-audio-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --hdr-processing-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --bt2390-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --gpu-decode-matrix <视频目录>")
@@ -1365,6 +1373,37 @@ Friend Module Program
                    Not 时间标签.Text.Contains("--", StringComparison.Ordinal),
                 "取得总时长后没有恢复标准进度条范围。")
 
+            Dim 时间字体名称 = 选择可用测试字体()
+            断言(Not String.IsNullOrWhiteSpace(时间字体名称), "没有可用的时间戳宽度测试字体。")
+            Dim 原时间字体 = 时间标签.Font
+            Using 时间字体 As New Font(时间字体名称, 11.0F, FontStyle.Regular, GraphicsUnit.Point)
+                Try
+                    时间标签.Font = 时间字体
+                    呈现器.更新Dpi()
+                    断言(Not 时间标签.AutoSize,
+                        "时间标签仍会在手动测量后按实际数字自动收缩。")
+                    Dim 测量文本方法 = GetType(播放器界面呈现器).GetMethod("创建时间戳测量文本",
+                        BindingFlags.Static Or BindingFlags.NonPublic)
+                    断言(测量文本方法 IsNot Nothing, "无法取得时间戳测量文本生成器。")
+                    当前快照 = 创建进度条快照(TimeSpan.FromSeconds(11), TimeSpan.FromSeconds(120))
+                    呈现器.刷新()
+                    Dim 十一秒宽度 = 时间标签.Width
+                    Dim 十一秒测量文本 = CStr(测量文本方法.Invoke(Nothing, {时间标签.Text}))
+                    断言(十一秒宽度 = 时间标签.GetPreferredSizeForText(十一秒测量文本, Size.Empty).Width,
+                        "时间标签最终宽度没有使用数字归零后的测量结果。")
+                    断言(时间标签.Text.Contains(">11</font>", StringComparison.Ordinal),
+                        "时间戳测量副本污染了实际显示文本。")
+                    当前快照 = 创建进度条快照(TimeSpan.FromSeconds(58), TimeSpan.FromSeconds(120))
+                    呈现器.刷新()
+                    断言(时间标签.Width = 十一秒宽度,
+                        $"非等宽数字仍改变时间戳区域宽度：{十一秒宽度} -> {时间标签.Width}。")
+                    断言(时间标签.Text.Contains(">58</font>", StringComparison.Ordinal),
+                        "时间戳显示的数字被替换成了测量用的 0。")
+                Finally
+                    时间标签.Font = 原时间字体
+                End Try
+            End Using
+
             呈现器.清除媒体()
             断言(进度条.Maximum = 0 AndAlso 进度条.Value = 0 AndAlso
                    Not 时间标签.Text.Contains("--", StringComparison.Ordinal),
@@ -1471,6 +1510,15 @@ Friend Module Program
                 断言(文字命令.All(Function(x) Math.Abs(x.字号 - 预期字号) < 0.01F AndAlso
                                            x.样式 = 定时文字样式.无),
                    "信息层接入全局字体时误改了字号或字形。")
+                For Each 命令 In 文字命令
+                    Dim 原生宽度 As Single
+                    Dim 结果 = 播放器原生接口.FFF3FP_MeasureTimedTextWidth(
+                        命令.文本, 命令.字体, 命令.字号, 原生定时文字标志.无, 原生宽度)
+                    断言(结果 = 原生播放器结果.成功 AndAlso Single.IsFinite(原生宽度) AndAlso
+                           命令.宽度 + 0.01F >= 原生宽度,
+                       $"信息层命令宽度小于最终 DirectWrite 字形：{命令.字体} / {命令.文本} / " &
+                       $"{命令.宽度:F3} < {原生宽度:F3}。")
+                Next
 
                 Dim HDR状态入口 = GetType(Form1).GetMethod("播放控制器_HDR输出状态已确认", 标志)
                 断言(HDR状态入口 IsNot Nothing, "无法取得 HDR 状态提示入口。")
@@ -1496,6 +1544,18 @@ Friend Module Program
     End Sub
 
     Private Function 选择可用测试字体(ParamArray 排除字体 As String()) As String
+        Dim MiSansMedium路径 = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts),
+                                         "MiSans-Medium.ttf")
+        If File.Exists(MiSansMedium路径) Then
+            Try
+                Using 字体 As New Font("MiSans Medium", 11.0F, FontStyle.Regular, GraphicsUnit.Point)
+                    If 字体.FontFamily.Name.Contains("MiSans", StringComparison.OrdinalIgnoreCase) Then
+                        Return "MiSans Medium"
+                    End If
+                End Using
+            Catch
+            End Try
+        End If
         Dim 候选 = {"Consolas", "Segoe UI", "Arial", "Tahoma", "Microsoft YaHei UI"}.
             Concat(FontFamily.Families.Select(Function(f) f.Name)).
             Distinct(StringComparer.CurrentCultureIgnoreCase)
@@ -1512,6 +1572,67 @@ Friend Module Program
         Next
         Return String.Empty
     End Function
+
+    Private Sub 测试解码切换可见首帧音频门控(视频路径 As String)
+        For Each 模式 In {解码模式.CPU, 解码模式.GPU}
+            Using 输出窗口 As New Form With {
+                .ClientSize = New Size(640, 360), .ShowInTaskbar = False,
+                .FormBorderStyle = FormBorderStyle.None,
+                .StartPosition = FormStartPosition.Manual,
+                .Location = New Point(-32000, -32000)}
+                输出窗口.Show()
+                Application.DoEvents()
+                Using 会话 As New 播放器会话(New 播放器配置 With {
+                    .解码器 = 模式, .输出窗口句柄 = IntPtr.Zero,
+                    .色彩模式 = 色彩输出模式.映射到SDR})
+                    会话.设置音量(0.0F, True)
+                    会话.打开Async(视频路径).GetAwaiter().GetResult()
+                    Dim 打开快照 = 会话.当前快照
+                    断言(打开快照.当前视频流 >= 0 AndAlso 打开快照.当前音频流 >= 0,
+                       $"{模式} 首帧音频门控样本必须同时包含视频和音频。")
+                    If 打开快照.总时长 > TimeSpan.FromMinutes(2) Then
+                        会话.跳转(TimeSpan.FromTicks(打开快照.总时长.Ticks \ 3))
+                    End If
+                    会话.设置输出窗口(输出窗口.Handle)
+                    会话.播放()
+
+                    Dim 计时 = Stopwatch.StartNew()
+                    Dim 已观察门控 As Boolean
+                    Dim 首次Present As 播放器快照 = Nothing
+                    Do
+                        Application.DoEvents()
+                        Dim 快照 = 会话.当前快照
+                        If 快照.状态 = 播放状态.失败 Then
+                            Throw New InvalidOperationException($"{模式} 首帧音频门控播放失败：{会话.最后错误消息}")
+                        End If
+                        If 快照.交换链呈现次数 = 0UL Then
+                            已观察门控 = True
+                            断言(快照.已解码音频帧数 = 0UL AndAlso
+                                   快照.音频缓冲时长 = TimeSpan.Zero,
+                               $"{模式} 在首次 DXGI Present 前已经解码或缓冲音频：" &
+                               $"帧 {快照.已解码音频帧数}，缓冲 {快照.音频缓冲时长.TotalMilliseconds:F1} ms。")
+                        Else
+                            首次Present = 快照
+                            Exit Do
+                        End If
+                        If 计时.Elapsed >= TimeSpan.FromSeconds(30) Then
+                            Throw New TimeoutException($"等待{模式}候选会话首次可见帧超时。")
+                        End If
+                        Thread.Sleep(1)
+                    Loop
+                    断言(已观察门控 AndAlso 首次Present IsNot Nothing,
+                       $"{模式} 没有覆盖首次 Present 前的音频门控窗口。")
+                    Dim 音频恢复 = 等待快照(会话,
+                        Function(x) x.交换链呈现次数 > 0UL AndAlso x.已解码音频帧数 > 0UL AndAlso
+                            x.音频缓冲时长 > TimeSpan.Zero,
+                        $"{模式} 首帧后的音频恢复")
+                    Console.WriteLine($"{模式} 首帧门控：Present {首次Present.交换链呈现次数}，" &
+                                      $"恢复音频帧/缓冲 {音频恢复.已解码音频帧数}/" &
+                                      $"{音频恢复.音频缓冲时长.TotalMilliseconds:F1} ms。")
+                End Using
+            End Using
+        Next
+    End Sub
 
     Private Sub 测试信息层精确文本()
         Dim 文档 = SRT字幕解析器.解析(New StringReader(

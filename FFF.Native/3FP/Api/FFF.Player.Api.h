@@ -471,6 +471,10 @@ FFF3FP_API FFFResult FFF3FP_MeasureTimedText(const char* textUtf8,
     const char* fontFamilyUtf8, float fontSize, FFF3FPTimedTextFlags flags,
     float maxWidth, float outlineWidth, float shadowOffsetX, float shadowOffsetY,
     std::uint32_t shadowEnabled, FFF3FPTimedTextMeasurement* measurement) noexcept;
+// Returns the natural single-line DirectWrite width used by text commands.
+FFF3FP_API FFFResult FFF3FP_MeasureTimedTextWidth(const char* textUtf8,
+    const char* fontFamilyUtf8, float fontSize, FFF3FPTimedTextFlags flags,
+    float* width) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetMediaInfo(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,

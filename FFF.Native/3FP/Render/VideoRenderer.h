@@ -105,6 +105,8 @@ FFFResult MeasureTimedText(const char* textUtf8, const char* fontFamilyUtf8,
     float fontSize, FFF3FPTimedTextFlags flags, float maxWidth, float outlineWidth,
     float shadowOffsetX, float shadowOffsetY, bool shadowEnabled,
     FFF3FPTimedTextMeasurement& measurement) noexcept;
+FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8,
+    float fontSize, FFF3FPTimedTextFlags flags, float& width) noexcept;
 
 class PlayerVideoRenderer final {
 public:
@@ -136,6 +138,9 @@ public:
     std::uint64_t PresentedVideoFrames() const noexcept;
     std::uint64_t CoalescedVideoFrames() const noexcept;
     std::uint64_t SwapChainPresents() const noexcept;
+    std::uint64_t SubmittedVideoGeneration() const noexcept;
+    std::uint64_t PresentedVideoGeneration() const noexcept;
+    bool HasOutputWindow() const noexcept;
     std::uint64_t PresentWait100ns() const noexcept;
     std::uint64_t DeviceLockWait100ns() const noexcept;
     std::uint64_t SoftwareConvert100ns() const noexcept;

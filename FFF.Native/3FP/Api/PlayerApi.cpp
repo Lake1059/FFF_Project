@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 9;
+constexpr std::uint32_t PlayerApiVersion = 10;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -107,6 +107,11 @@ FFFResult FFF3FP_MeasureTimedText(const char* textUtf8, const char* fontFamilyUt
     return measurement ? MeasureTimedText(textUtf8, fontFamilyUtf8, fontSize, flags,
         maxWidth, outlineWidth, shadowOffsetX, shadowOffsetY, shadowEnabled != 0,
         *measurement) : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8,
+    const float fontSize, const FFF3FPTimedTextFlags flags, float* width) noexcept {
+    return width ? MeasureTimedTextWidth(textUtf8, fontFamilyUtf8, fontSize, flags, *width) :
+        FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_GetMediaInfo(const FFF3FPHandle player, char* output, const std::uint32_t size,
     std::uint32_t* required) noexcept { if (!player) return FFFResult::InvalidArgument; try { return CopyUtf8(static_cast<PlayerSession*>(player)->MediaInfo(), output, size, required); } catch (...) { return FFFResult::NativeFailure; } }

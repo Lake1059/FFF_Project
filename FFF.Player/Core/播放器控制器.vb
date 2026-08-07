@@ -763,10 +763,7 @@ Public NotInheritable Class 播放器控制器
                         String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase),
                         当前色彩输出, HDR色彩输出偏好)
                     Try
-                        Try
-                            Await Task.Run(Sub() 原会话.丢弃音频输出())
-                        Catch ex As 播放器异常
-                        End Try
+                        Await Task.Run(Sub() 原会话.丢弃音频输出())
                         移除会话事件(原会话)
                         原位事件已移除 = True
                         Await 原会话.打开Async(路径, 此次取消.Token)
@@ -842,11 +839,11 @@ Public NotInheritable Class 播放器控制器
                 ' 先让旧会话回到共享以保留其媒体作为失败回退；候选成功后释放
                 ' 旧会话，再把新会话切回用户选择的独占模式。
                 If 原会话 IsNot Nothing Then
-                    Try
-                        ' 先同步丢弃旧音频端的设备缓冲，避免切解码器时黑屏期间残留一帧旧声音。
-                        Await Task.Run(Sub() 原会话.丢弃音频输出())
-                    Catch ex As 播放器异常
-                    End Try
+                    ' This is the transition boundary: do not create another
+                    ' endpoint client until the old device buffer is confirmed
+                    ' stopped. A failed discard aborts the switch instead of
+                    ' allowing old and new audio to overlap.
+                    Await Task.Run(Sub() 原会话.丢弃音频输出())
                 End If
                 If 保留WASAPI模式 = WASAPI共享模式.独占 AndAlso 原会话 IsNot Nothing Then
                     Await 设置会话WASAPI模式Async(原会话, False, 此次取消.Token)

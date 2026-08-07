@@ -408,6 +408,12 @@ Friend Module 播放器原生接口
         阴影有效 As UInteger, ByRef 测量 As 原生定时文字测量) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_MeasureTimedTextWidth(
+        <MarshalAs(UnmanagedType.LPUTF8Str)> 文本UTF8 As String,
+        <MarshalAs(UnmanagedType.LPUTF8Str)> 字体UTF8 As String,
+        字号 As Single, 标志 As 原生定时文字标志, ByRef 宽度 As Single) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetMediaInfo(播放器 As 播放器原生句柄, 输出UTF8 As IntPtr, 输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>

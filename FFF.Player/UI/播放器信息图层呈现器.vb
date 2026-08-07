@@ -1,5 +1,6 @@
 Imports System.Diagnostics
 Imports System.IO
+Imports System.Globalization
 
 ''' <summary>
 ''' 在独立的最顶层 GPU 槽位中呈现播放器信息。调试信息固定在左上角，
@@ -61,6 +62,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 刷新定时器 As LakeUI.PrecisionTimer
     Private 普通字体 As New Font(默认信息字体, 信息字号, FontStyle.Regular, GraphicsUnit.Point)
     Private 普通字体名称 As String = 默认信息字体
+    Private ReadOnly 原生宽度缓存 As New Dictionary(Of String, Single)(StringComparer.Ordinal)
     Private ReadOnly 文本测量格式 As StringFormat
     Private ReadOnly 操作消息列表 As New List(Of 操作消息)()
     Private ReadOnly 图层命令 As New List(Of 定时文字命令)(32)
@@ -128,6 +130,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 旧字体 = 普通字体
         普通字体 = 新字体
         普通字体名称 = 新字体名称
+        原生宽度缓存.Clear()
         旧字体.Dispose()
         使内容失效()
     End Sub
@@ -595,6 +598,23 @@ Friend NotInheritable Class 播放器信息图层呈现器
 
     Private Function 测量文本(图形 As Graphics, 文本 As String, 字体 As Font) As Single
         If String.IsNullOrEmpty(文本) Then Return 0
+        ' The command is rendered by DirectWrite. Measure with the same native
+        ' font-variant resolver so names such as "MiSans Medium" cannot be
+        ' narrower in GDI+ than the glyph run finally drawn.
+        Dim 原生字号 = CSng(字体.SizeInPoints * Math.Max(1, 画面控件.DeviceDpi) / 72.0F)
+        Dim 缓存键 = String.Concat(普通字体名称, ChrW(0), 文本, ChrW(0),
+                                  BitConverter.SingleToUInt32Bits(原生字号).ToString("X8", CultureInfo.InvariantCulture))
+        Dim 缓存宽度 As Single
+        If 原生宽度缓存.TryGetValue(缓存键, 缓存宽度) Then Return 缓存宽度
+        Dim 原生宽度 As Single = 0
+        If Single.IsFinite(原生字号) AndAlso 原生字号 > 0 AndAlso
+            播放器原生接口.FFF3FP_MeasureTimedTextWidth(
+                文本, 普通字体名称, 原生字号, 原生定时文字标志.无, 原生宽度) = 原生播放器结果.成功 AndAlso
+            Single.IsFinite(原生宽度) AndAlso 原生宽度 >= 0 Then
+            If 原生宽度缓存.Count >= 512 Then 原生宽度缓存.Remove(原生宽度缓存.Keys.First())
+            原生宽度缓存(缓存键) = 原生宽度
+            Return 原生宽度
+        End If
         Return 图形.MeasureString(文本, 字体, Integer.MaxValue, 文本测量格式).Width
     End Function
 

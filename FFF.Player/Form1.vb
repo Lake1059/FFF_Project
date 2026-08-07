@@ -524,6 +524,7 @@ Public Class Form1
     End Sub
 
     Friend Sub 设置窗口应用字体(fontName As String)
+        界面呈现器?.更新字体()
         信息图层呈现器?.应用全局字体(fontName)
         流选择器?.应用全局字体(fontName)
         设置窗口?.应用字体(fontName)

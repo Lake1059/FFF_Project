@@ -1405,6 +1405,55 @@ FFFResult MeasureTimedText(const char* textUtf8, const char* fontFamilyUtf8,
     }
 }
 
+FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8,
+    const float fontSize, const FFF3FPTimedTextFlags flags, float& width) noexcept {
+    if (textUtf8 == nullptr || fontFamilyUtf8 == nullptr ||
+        !std::isfinite(fontSize) || fontSize <= 0.0f) return FFFResult::InvalidArgument;
+    std::wstring text, fontFamily;
+    if (!TimedTextUtf8ToWide(textUtf8, text) || !TimedTextUtf8ToWide(fontFamilyUtf8, fontFamily) ||
+        fontFamily.empty()) return FFFResult::InvalidArgument;
+    try {
+        ComPtr<IDWriteFactory> factory;
+        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+            reinterpret_cast<IUnknown**>(factory.GetAddressOf()))) || factory == nullptr)
+            return FFFResult::DeviceFailure;
+        ComPtr<IDWriteTextLayout> layout;
+        // No wrapping is used by all timed-text commands. A finite oversized
+        // layout keeps DirectWrite's natural advance width available without
+        // allowing a long information line to create a second line.
+        if (FAILED(CreateTimedTextLayout(factory.Get(), text, fontFamily, fontSize, flags,
+            FFF3FPTimedTextAlignment::Near, FFF3FPTimedTextAlignment::Near,
+            65536.0f, 65536.0f, &layout))) return FFFResult::DeviceFailure;
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED(layout->GetMetrics(&metrics)))
+            return FFFResult::DeviceFailure;
+        const auto naturalWidth = std::max(metrics.width, metrics.widthIncludingTrailingWhitespace);
+        if (!std::isfinite(naturalWidth) || naturalWidth < 0.0f)
+            return FFFResult::NativeFailure;
+        if (naturalWidth == 0.0f) {
+            width = 0.0f;
+            return FFFResult::Success;
+        }
+        // Overhang metrics are relative to the layout box. Read them once more
+        // after constraining that box to the natural no-wrap width; querying a
+        // 65536 DIP box makes an ordinary right overhang look like empty space.
+        if (FAILED(layout->SetMaxWidth(naturalWidth))) return FFFResult::DeviceFailure;
+        if (FAILED(layout->GetMetrics(&metrics))) return FFFResult::DeviceFailure;
+        DWRITE_OVERHANG_METRICS overhang{};
+        if (FAILED(layout->GetOverhangMetrics(&overhang)))
+            return FFFResult::DeviceFailure;
+        const auto advance = std::max(metrics.width, metrics.widthIncludingTrailingWhitespace);
+        const auto left = std::max(0.0f, overhang.left);
+        const auto right = std::max(0.0f, overhang.right);
+        const auto measured = advance + left + right;
+        if (!std::isfinite(measured) || measured < 0.0f) return FFFResult::NativeFailure;
+        width = measured;
+        return FFFResult::Success;
+    } catch (...) {
+        return FFFResult::NativeFailure;
+    }
+}
+
 PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), coverBackdropPixelShader_(nullptr),
@@ -1494,6 +1543,10 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
         swapChain_->Release(); swapChain_ = nullptr;
     }
     window_ = window;
+    // A generation presented to the previous HWND says nothing about the new
+    // swap chain. Reset only the acknowledgement; submitted video remains
+    // cached and will be presented again by Redraw.
+    presentedVideoGeneration_.store(0, std::memory_order_release);
     hdrSupportValid_ = false; hdrMonitor_ = nullptr;
     hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
     hdrSwapChainRejected_ = false;
@@ -3676,7 +3729,7 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     }
     ++swapChainPresents_;
     const auto previous = presentedVideoGeneration_.exchange(renderedVideoGeneration);
-    if (renderedVideoGeneration > previous + 1)
+    if (previous != 0 && renderedVideoGeneration > previous + 1)
         coalescedVideoFrames_.fetch_add(renderedVideoGeneration - previous - 1);
     std::lock_guard lock(timedTextMutex_);
     for (std::size_t index = 0; index < ARRAYSIZE(timedTextPresentCounts_); ++index)
@@ -3943,6 +3996,12 @@ HdrFrameState PlayerVideoRenderer::HdrState() const noexcept { return hdrProcess
 std::uint64_t PlayerVideoRenderer::PresentedVideoFrames() const noexcept { return presentedVideoFrames_.load(); }
 std::uint64_t PlayerVideoRenderer::CoalescedVideoFrames() const noexcept { return coalescedVideoFrames_.load(); }
 std::uint64_t PlayerVideoRenderer::SwapChainPresents() const noexcept { return swapChainPresents_.load(); }
+std::uint64_t PlayerVideoRenderer::SubmittedVideoGeneration() const noexcept { return videoGeneration_.load(); }
+std::uint64_t PlayerVideoRenderer::PresentedVideoGeneration() const noexcept { return presentedVideoGeneration_.load(); }
+bool PlayerVideoRenderer::HasOutputWindow() const noexcept {
+    std::lock_guard lock(deviceMutex_);
+    return window_ != nullptr && IsWindow(window_);
+}
 std::uint64_t PlayerVideoRenderer::PresentWait100ns() const noexcept { return presentWait100ns_.load(); }
 std::uint64_t PlayerVideoRenderer::DeviceLockWait100ns() const noexcept { return deviceLockWait100ns_.load(); }
 std::uint64_t PlayerVideoRenderer::SoftwareConvert100ns() const noexcept { return softwareConvert100ns_.load(); }

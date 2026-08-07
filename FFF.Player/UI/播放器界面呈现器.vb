@@ -41,6 +41,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private 显示精确时间戳 As Boolean
     Private 滚轮余量 As Integer
     Private 未知时长已知上限毫秒 As Double
+    Private 上次时间戳测量文本 As String
 
     Friend Sub New(进度条 As LakeUI.ExcellentTrackBar,
                    音量条 As LakeUI.ExcellentTrackBar,
@@ -92,7 +93,7 @@ Friend NotInheritable Class 播放器界面呈现器
         }
 
         配置控件()
-        时间标签.AutoSize = True
+        时间标签.AutoSize = False
         AddHandler 进度条.MouseDown, AddressOf 进度条_MouseDown
         AddHandler 进度条.MouseUp, AddressOf 进度条_MouseUp
         AddHandler 进度条.ValueChanged, AddressOf 进度条_ValueChanged
@@ -217,6 +218,10 @@ Friend NotInheritable Class 播放器界面呈现器
         更新全部自适应宽度()
     End Sub
 
+    Friend Sub 更新字体()
+        更新全部自适应宽度()
+    End Sub
+
     Friend Sub 调整音量(增量 As Integer)
         音量条.Value = Math.Clamp(音量条.Value + 增量, 0, 100)
     End Sub
@@ -326,7 +331,7 @@ Friend NotInheritable Class 播放器界面呈现器
         For Each 按钮 In {解码按钮, HDR按钮, 视频编码按钮, 音频编码按钮, 声道数按钮}
             更新自适应宽度(按钮)
         Next
-        更新自适应宽度(时间标签)
+        更新时间戳自适应宽度(创建时间戳测量文本(时间标签.Text), True)
     End Sub
 
     Private Sub 设置自适应文本(控件 As Control, 文本 As String)
@@ -358,6 +363,12 @@ Friend NotInheritable Class 播放器界面呈现器
         控件.Width = Math.Max(1, 文本宽度 + 控件.Padding.Left + 控件.Padding.Right + 绘制保留宽度)
     End Sub
 
+    Private Sub 更新时间戳自适应宽度(测量文本 As String, Optional 强制 As Boolean = False)
+        If Not 强制 AndAlso String.Equals(上次时间戳测量文本, 测量文本, StringComparison.Ordinal) Then Return
+        时间标签.Width = Math.Max(1, 时间标签.GetPreferredSizeForText(测量文本, Size.Empty).Width)
+        上次时间戳测量文本 = 测量文本
+    End Sub
+
     Private Shared Function 格式化声道数(声道数 As Integer) As String
         Select Case 声道数
             Case 1 : Return "1.0"
@@ -382,8 +393,28 @@ Friend NotInheritable Class 播放器界面呈现器
         Dim 总时长文本 = If(总时长 > TimeSpan.Zero OrElse Not 有媒体快照,
             格式化彩色时长(总时长, 精度), 格式化未知时长(精度))
         Dim HTML = $"{格式化彩色时长(当前位置, 精度, 显示精确时间戳)}<font color=""#AAB0B9""> / </font>{总时长文本}"
-        设置自适应文本(时间标签, HTML)
+        If 时间标签.Text <> HTML Then 时间标签.Text = HTML
+        更新时间戳自适应宽度(创建时间戳测量文本(HTML))
     End Sub
+
+    Private Shared Function 创建时间戳测量文本(HTML As String) As String
+        If String.IsNullOrEmpty(HTML) Then Return If(HTML, String.Empty)
+        Dim 字符 = HTML.ToCharArray()
+        Dim 在标签内 As Boolean
+        For 索引 As Integer = 0 To 字符.Length - 1
+            Select Case 字符(索引)
+                Case "<"c
+                    在标签内 = True
+                Case ">"c
+                    在标签内 = False
+                Case Else
+                    If Not 在标签内 AndAlso 字符(索引) >= "0"c AndAlso 字符(索引) <= "9"c Then
+                        字符(索引) = "0"c
+                    End If
+            End Select
+        Next
+        Return New String(字符)
+    End Function
 
     Private Shared Function 格式化未知时长(精度 As 时间戳精度) As String
         Const 未知颜色 = "#AAB0B9"
