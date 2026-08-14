@@ -637,4 +637,8 @@ Public Class Form1
         If 设置窗口 Is Nothing OrElse 设置窗口.IsDisposed Then 设置窗口 = New Form设置()
         设置窗口.显示窗口()
     End Sub
+
+    Private Sub MB_标题栏菜单按钮_Click(sender As Object, e As EventArgs) Handles MB_标题栏菜单按钮.Click
+        MCB_标题栏菜单.Show(MP_DX视频容器, New Point(0, 0))
+    End Sub
 End Class

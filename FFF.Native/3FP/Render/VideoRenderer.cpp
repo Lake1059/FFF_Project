@@ -574,6 +574,7 @@ constexpr std::uint32_t CoverBackdropEffect = 1;
 constexpr std::uint32_t MaximumTimedTextAtlasSize = 4096;
 constexpr std::uint32_t MaximumTimedTextSprites = 512;
 constexpr std::size_t MaximumTimedTextBrushes = 256;
+constexpr float TimedTextSoftShadowExtentFactor = 3.0f;
 constexpr std::size_t VideoConversionBufferSlackBytes = 32 * 1024 * 1024;
 constexpr auto HdrSupportProbeCacheDuration = std::chrono::milliseconds(750);
 
@@ -1174,13 +1175,21 @@ struct TimedTextEffectExtents {
 };
 
 TimedTextEffectExtents DescribeTimedTextEffects(const float outline,
-    const float shadowX, const float shadowY, const bool hasShadow) noexcept {
+    const float shadowX, const float shadowY, const bool hasShadow,
+    const bool softShadow = false) noexcept {
     TimedTextEffectExtents result{outline, outline, outline, outline};
     if (hasShadow) {
-        result.left += std::max(-shadowX, 0.0f);
-        result.top += std::max(-shadowY, 0.0f);
-        result.right += std::max(shadowX, 0.0f);
-        result.bottom += std::max(shadowY, 0.0f);
+        if (softShadow) {
+            const auto spread = std::max(std::abs(shadowX), std::abs(shadowY)) *
+                TimedTextSoftShadowExtentFactor;
+            result.left += spread; result.top += spread;
+            result.right += spread; result.bottom += spread;
+        } else {
+            result.left += std::max(-shadowX, 0.0f);
+            result.top += std::max(-shadowY, 0.0f);
+            result.right += std::max(shadowX, 0.0f);
+            result.bottom += std::max(shadowY, 0.0f);
+        }
     }
     return result;
 }
@@ -1393,8 +1402,11 @@ FFFResult MeasureTimedText(const char* textUtf8, const char* fontFamilyUtf8,
             FAILED(layout->GetMetrics(&metrics))) return FFFResult::DeviceFailure;
         DWRITE_OVERHANG_METRICS overhang{};
         if (FAILED(layout->GetOverhangMetrics(&overhang))) return FFFResult::DeviceFailure;
+        const auto flagBits = static_cast<std::uint32_t>(flags);
+        const auto softShadow = (flagBits &
+            static_cast<std::uint32_t>(FFF3FPTimedTextFlags::SoftShadow)) != 0;
         const auto extents = DescribeTimedTextEffects(outlineWidth, shadowOffsetX,
-            shadowOffsetY, shadowEnabled);
+            shadowOffsetY, shadowEnabled, softShadow);
         measurement.layoutHeight = metrics.height;
         measurement.visibleTop = metrics.top - std::max(overhang.top, 0.0f) - extents.top;
         measurement.visibleBottom = metrics.top + metrics.height +
@@ -1478,7 +1490,8 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       d2dCoverBackdropSource_(nullptr), d2dCoverBackdropTarget_(nullptr),
       coverBackdropBlurEffect_(nullptr),
       d2dTargets_{nullptr, nullptr, nullptr, nullptr},
-      d2dAtlasTarget_(nullptr),
+      d2dAtlasTarget_(nullptr), d2dTimedTextShadowTarget_(nullptr),
+      timedTextShadowBlurEffect_(nullptr),
       writeFactory_(nullptr), timedTextRenderingParams_(nullptr), scaler_(nullptr),
       swapWidth_(0), swapHeight_(0), swapHdr_(false), swapOutputBits_(8), sourceWidth_(0), sourceHeight_(0),
       sourceInputLayout_(UINT32_MAX), sourceBitDepth_(0),
@@ -2673,6 +2686,13 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requeste
         return FFFResult::Success;
     if (d2dContext_ == nullptr || device_ == nullptr) return FFFResult::InvalidState;
     if (d2dContext_ != nullptr) d2dContext_->SetTarget(nullptr);
+    if (timedTextShadowBlurEffect_ != nullptr) {
+        timedTextShadowBlurEffect_->SetInput(0, nullptr);
+        timedTextShadowBlurEffect_->Release(); timedTextShadowBlurEffect_ = nullptr;
+    }
+    if (d2dTimedTextShadowTarget_ != nullptr) {
+        d2dTimedTextShadowTarget_->Release(); d2dTimedTextShadowTarget_ = nullptr;
+    }
     if (d2dAtlasTarget_ != nullptr) { d2dAtlasTarget_->Release(); d2dAtlasTarget_ = nullptr; }
     if (timedTextAtlasView_ != nullptr) { timedTextAtlasView_->Release(); timedTextAtlasView_ = nullptr; }
     if (timedTextAtlasTexture_ != nullptr) { timedTextAtlasTexture_->Release(); timedTextAtlasTexture_ = nullptr; }
@@ -2690,11 +2710,23 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requeste
     const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
         96.0f, 96.0f);
+    const auto shadowProperties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
     if (FAILED(timedTextAtlasTexture_->QueryInterface(IID_PPV_ARGS(&surface))) ||
-        FAILED(d2dContext_->CreateBitmapFromDxgiSurface(surface.Get(), &properties, &d2dAtlasTarget_))) {
+        FAILED(d2dContext_->CreateBitmapFromDxgiSurface(surface.Get(), &properties, &d2dAtlasTarget_)) ||
+        FAILED(d2dContext_->CreateBitmap(D2D1::SizeU(size, size), nullptr, 0,
+            &shadowProperties, &d2dTimedTextShadowTarget_)) ||
+        FAILED(d2dContext_->CreateEffect(CLSID_D2D1GaussianBlur,
+            &timedTextShadowBlurEffect_))) {
         SetError("Could not expose the GPU timed-text atlas to Direct2D.");
         return FFFResult::DeviceFailure;
     }
+    timedTextShadowBlurEffect_->SetInput(0, d2dTimedTextShadowTarget_);
+    timedTextShadowBlurEffect_->SetValue(D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION,
+        D2D1_GAUSSIANBLUR_OPTIMIZATION_BALANCED);
+    timedTextShadowBlurEffect_->SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE,
+        D2D1_BORDER_MODE_SOFT);
     d2dContext_->SetTarget(d2dAtlasTarget_); d2dContext_->BeginDraw();
     d2dContext_->Clear(D2D1::ColorF(0, 0));
     const auto end = d2dContext_->EndDraw(); d2dContext_->SetTarget(nullptr);
@@ -2758,6 +2790,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     }
     const auto resourceResult = EnsureTimedTextResources(slot);
     if (resourceResult != FFFResult::Success) return resourceResult;
+    d2dContext_->SetTransform(D2D1::Matrix3x2F::Identity());
     d2dContext_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     d2dContext_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     d2dContext_->SetTextRenderingParams(timedTextRenderingParams_);
@@ -2802,13 +2835,22 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         timedTextLayoutOrder_.push_back(layoutKey);
         return retained;
     };
+    const auto usesSoftShadow = [](const TimedTextRenderCommand& command) noexcept {
+        return (static_cast<std::uint32_t>(command.flags) &
+            static_cast<std::uint32_t>(FFF3FPTimedTextFlags::SoftShadow)) != 0;
+    };
+    const auto softShadowDepth = [](const float shadowX, const float shadowY) noexcept {
+        return std::max(std::abs(shadowX), std::abs(shadowY));
+    };
     const auto drawLayout = [&getBrush, this](const TimedTextRenderCommand& command,
         IDWriteTextLayout* layout, const D2D1_POINT_2F origin, const float outline,
         const float shadowX, const float shadowY) noexcept {
         if (layout == nullptr) return;
+        const auto softShadow = (static_cast<std::uint32_t>(command.flags) &
+            static_cast<std::uint32_t>(FFF3FPTimedTextFlags::SoftShadow)) != 0;
         auto* outlineBrush = outline > 0.0f && (command.outlineArgb >> 24) != 0
             ? getBrush(command.outlineArgb) : nullptr;
-        auto* shadowBrush = (command.shadowArgb >> 24) != 0
+        auto* shadowBrush = !softShadow && (command.shadowArgb >> 24) != 0
             ? getBrush(command.shadowArgb) : nullptr;
         if (outlineBrush != nullptr || shadowBrush != nullptr) {
             auto* effects = new (std::nothrow) TimedTextEffectRenderer(d2dFactory_, d2dContext_,
@@ -2822,6 +2864,18 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             if (auto* foreground = getBrush(command.foregroundArgb); foreground != nullptr)
                 d2dContext_->DrawTextLayout(origin, layout, foreground,
                     D2D1_DRAW_TEXT_OPTIONS_NO_SNAP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        }
+    };
+    const auto drawSoftShadowMask = [&getBrush, this](const TimedTextRenderCommand& command,
+        IDWriteTextLayout* layout, const D2D1_POINT_2F origin, const float outline) noexcept {
+        if (layout == nullptr || (command.shadowArgb >> 24) == 0) return;
+        auto* shadowBrush = getBrush(command.shadowArgb);
+        if (shadowBrush == nullptr) return;
+        auto* effects = new (std::nothrow) TimedTextEffectRenderer(d2dFactory_, d2dContext_,
+            nullptr, shadowBrush, outline, 0.0f, 0.0f);
+        if (effects != nullptr) {
+            layout->Draw(nullptr, effects, origin.x, origin.y);
+            effects->Release();
         }
     };
 
@@ -2858,7 +2912,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             auto* layout = getLayout(command, destination, fontSize);
             if (layout == nullptr) continue;
             const auto extents = DescribeTimedTextEffects(outline, shadowX, shadowY,
-                (command.shadowArgb >> 24) != 0);
+                (command.shadowArgb >> 24) != 0, usesSoftShadow(command));
             const auto padding = static_cast<float>(std::ceil(std::max(
                 {extents.left, extents.top, extents.right, extents.bottom})) + 2.0f);
             const auto width = std::max(1u, static_cast<std::uint32_t>(std::ceil(
@@ -2902,6 +2956,53 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         buildPendingSprites(false);
     }
     if (!pendingSprites.empty()) {
+        std::vector<std::uint32_t> softShadowDepths;
+        for (const auto& pending : pendingSprites) {
+            const auto& command = layer->commands[pending.commandIndex];
+            if (!usesSoftShadow(command) || (command.shadowArgb >> 24) == 0) continue;
+            const auto depth = softShadowDepth(pending.shadowX, pending.shadowY);
+            if (depth <= 0.0f) continue;
+            const auto bits = std::bit_cast<std::uint32_t>(depth);
+            if (std::find(softShadowDepths.begin(), softShadowDepths.end(), bits) ==
+                softShadowDepths.end()) softShadowDepths.push_back(bits);
+        }
+        for (const auto depthBits : softShadowDepths) {
+            const auto depth = std::bit_cast<float>(depthBits);
+            d2dContext_->SetTarget(d2dTimedTextShadowTarget_);
+            d2dContext_->BeginDraw();
+            d2dContext_->Clear(D2D1::ColorF(0, 0));
+            for (const auto& pending : pendingSprites) {
+                const auto& command = layer->commands[pending.commandIndex];
+                if (!usesSoftShadow(command) || (command.shadowArgb >> 24) == 0 ||
+                    std::bit_cast<std::uint32_t>(softShadowDepth(
+                        pending.shadowX, pending.shadowY)) != depthBits) continue;
+                const auto& sprite = pending.sprite;
+                const auto clip = D2D1::RectF(sprite.atlasX, sprite.atlasY,
+                    sprite.atlasX + sprite.width, sprite.atlasY + sprite.height);
+                d2dContext_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+                drawSoftShadowMask(command, pending.layout,
+                    D2D1::Point2F(sprite.atlasX + sprite.padding,
+                        sprite.atlasY + sprite.padding), pending.outline);
+                d2dContext_->PopAxisAlignedClip();
+            }
+            const auto maskEnd = d2dContext_->EndDraw();
+            d2dContext_->SetTarget(nullptr);
+            if (FAILED(maskEnd)) {
+                SetError("Direct2D could not rasterize the timed-text soft-shadow mask.");
+                return FFFResult::DeviceFailure;
+            }
+            timedTextShadowBlurEffect_->SetValue(
+                D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, depth);
+            d2dContext_->SetTarget(d2dAtlasTarget_);
+            d2dContext_->BeginDraw();
+            d2dContext_->DrawImage(timedTextShadowBlurEffect_);
+            const auto blurEnd = d2dContext_->EndDraw();
+            d2dContext_->SetTarget(nullptr);
+            if (FAILED(blurEnd)) {
+                SetError("Direct2D could not blur the timed-text soft shadow.");
+                return FFFResult::DeviceFailure;
+            }
+        }
         d2dContext_->SetTarget(d2dAtlasTarget_);
         d2dContext_->BeginDraw();
         for (const auto& pending : pendingSprites) {
@@ -3120,6 +3221,13 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
     timedTextSpriteCacheHits_ = timedTextSpriteCacheMisses_ = 0;
     if (timedTextRenderingParams_ != nullptr) {
         timedTextRenderingParams_->Release(); timedTextRenderingParams_ = nullptr;
+    }
+    if (timedTextShadowBlurEffect_ != nullptr) {
+        timedTextShadowBlurEffect_->SetInput(0, nullptr);
+        timedTextShadowBlurEffect_->Release(); timedTextShadowBlurEffect_ = nullptr;
+    }
+    if (d2dTimedTextShadowTarget_ != nullptr) {
+        d2dTimedTextShadowTarget_->Release(); d2dTimedTextShadowTarget_ = nullptr;
     }
     if (d2dAtlasTarget_ != nullptr) { d2dAtlasTarget_->Release(); d2dAtlasTarget_ = nullptr; }
     for (std::size_t index = 0; index < ARRAYSIZE(timedTextTextures_); ++index)

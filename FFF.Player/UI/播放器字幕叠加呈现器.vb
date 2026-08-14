@@ -1,5 +1,6 @@
 Imports System.Runtime.InteropServices
 Imports System.Threading
+Imports Microsoft.Win32
 
 Friend Enum 定时文字图层内容
     合并
@@ -16,6 +17,7 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     Implements IDisposable
 
     Private ReadOnly 画面控件 As 播放器画面控件
+    Private ReadOnly 宿主窗体 As Form
     Private ReadOnly 快照提供器 As Func(Of 播放器快照)
     Private ReadOnly 字幕提供器 As Func(Of 外部字幕轨道)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
@@ -31,6 +33,7 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     Private ReadOnly 命令对象池 As New List(Of 定时文字命令)(128)
     Private ReadOnly 刷新计时器 As LakeUI.PrecisionTimer
     Private 当前目标帧率 As Integer = 60
+    Private 当前显示设备名称 As String = String.Empty
     Private 当前弹幕资料库 As 弹幕资料库
     Private 当前弹幕调度器 As 弹幕调度器
     Private 图层序号 As ULong
@@ -47,6 +50,21 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     Private ReadOnly 刷新空闲 As New ManualResetEventSlim(True)
     Private 活动刷新数 As Integer
     Private 已释放标志 As Integer
+
+    Private Const 垂直刷新率设备能力 As Integer = 116
+
+    <DllImport("gdi32.dll", CharSet:=CharSet.Unicode, SetLastError:=True)>
+    Private Shared Function CreateDC(驱动名称 As String, 设备名称 As String,
+                                     输出名称 As String, 初始化数据 As IntPtr) As IntPtr
+    End Function
+
+    <DllImport("gdi32.dll")>
+    Private Shared Function GetDeviceCaps(设备上下文 As IntPtr, 索引 As Integer) As Integer
+    End Function
+
+    <DllImport("gdi32.dll")>
+    Private Shared Function DeleteDC(设备上下文 As IntPtr) As Boolean
+    End Function
 
     Private Structure 字幕行测量键
         Implements IEquatable(Of 字幕行测量键)
@@ -110,6 +128,7 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         ArgumentNullException.ThrowIfNull(字幕提供器)
         ArgumentNullException.ThrowIfNull(提交图层)
         Me.画面控件 = 画面控件
+        宿主窗体 = 画面控件.FindForm()
         Me.快照提供器 = 快照提供器
         Me.字幕提供器 = 字幕提供器
         Me.提交图层 = 提交图层
@@ -117,8 +136,10 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         Me.弹幕配置 = If(弹幕配置, New 弹幕显示配置())
         Me.图层内容 = 图层内容
         Me.弹幕配置.验证()
-        If 图层内容 = 定时文字图层内容.仅弹幕 Then
-            当前目标帧率 = CInt(Math.Round(Me.弹幕配置.目标帧率, MidpointRounding.AwayFromZero))
+        If 图层内容 <> 定时文字图层内容.仅字幕 Then
+            当前显示设备名称 = Screen.FromControl(画面控件).DeviceName
+            当前目标帧率 = 计算自适应弹幕帧率(读取显示器刷新率(当前显示设备名称))
+            Me.弹幕配置.目标帧率 = 当前目标帧率
         End If
         刷新计时器 = New LakeUI.PrecisionTimer With {
             .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
@@ -130,6 +151,12 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         更新画面快照()
         AddHandler 画面控件.ClientSizeChanged, AddressOf 画面几何已变化
         AddHandler 画面控件.DpiChangedAfterParent, AddressOf 画面几何已变化
+        If 图层内容 <> 定时文字图层内容.仅字幕 Then
+            If 宿主窗体 IsNot Nothing Then
+                AddHandler 宿主窗体.LocationChanged, AddressOf 宿主位置已变化
+            End If
+            AddHandler SystemEvents.DisplaySettingsChanged, AddressOf 显示设置已变化
+        End If
         AddHandler 刷新计时器.Tick, AddressOf 刷新计时器_Tick
         更新刷新间隔()
         刷新计时器.Start()
@@ -139,18 +166,21 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
 
     Friend Property 目标帧率 As Integer
         Get
-            Return 当前目标帧率
+            Return Volatile.Read(当前目标帧率)
         End Get
         Set(value As Integer)
-            If value < 1 OrElse value > 240 Then Throw New ArgumentOutOfRangeException(NameOf(value))
-            If 当前目标帧率 = value Then Return
-            当前目标帧率 = value
-            If 图层内容 <> 定时文字图层内容.仅字幕 Then
-                ' 单一公开属性同时定义托管唤醒和原生呈现节奏；位置本身始终
-                ' 使用连续媒体时钟，不随目标帧率量化。
-                弹幕配置.目标帧率 = value
-            End If
+            If value < 1 OrElse value > 120 Then Throw New ArgumentOutOfRangeException(NameOf(value))
+            SyncLock 弹幕配置锁
+                If 当前目标帧率 = value Then Return
+                Volatile.Write(当前目标帧率, value)
+                If 图层内容 <> 定时文字图层内容.仅字幕 Then
+                    ' 单一公开属性同时定义托管唤醒和原生呈现节奏；位置本身始终
+                    ' 使用连续媒体时钟，不随目标帧率量化。
+                    弹幕配置.目标帧率 = value
+                End If
+            End SyncLock
             更新刷新间隔()
+            使图层失效()
         End Set
     End Property
 
@@ -179,7 +209,51 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
 
     Private Sub 画面几何已变化(sender As Object, e As EventArgs)
         更新画面快照()
+        更新自适应弹幕帧率(False)
     End Sub
+
+    Private Sub 宿主位置已变化(sender As Object, e As EventArgs)
+        更新自适应弹幕帧率(False)
+    End Sub
+
+    Private Sub 显示设置已变化(sender As Object, e As EventArgs)
+        If Volatile.Read(已释放标志) <> 0 Then Return
+        If 画面控件.IsHandleCreated AndAlso 画面控件.InvokeRequired Then
+            Try
+                画面控件.BeginInvoke(Sub() 更新自适应弹幕帧率(True))
+            Catch ex As InvalidOperationException
+            End Try
+            Return
+        End If
+        更新自适应弹幕帧率(True)
+    End Sub
+
+    Private Sub 更新自适应弹幕帧率(强制读取 As Boolean)
+        If 图层内容 = 定时文字图层内容.仅字幕 OrElse Volatile.Read(已释放标志) <> 0 Then Return
+        Dim 设备名称 = Screen.FromControl(画面控件).DeviceName
+        If Not 强制读取 AndAlso String.Equals(设备名称, 当前显示设备名称,
+            StringComparison.OrdinalIgnoreCase) Then Return
+        Dim 新帧率 = 计算自适应弹幕帧率(读取显示器刷新率(设备名称))
+        当前显示设备名称 = 设备名称
+        If 当前目标帧率 = 新帧率 Then Return
+        目标帧率 = 新帧率
+    End Sub
+
+    Friend Shared Function 计算自适应弹幕帧率(显示器刷新率 As Integer) As Integer
+        If 显示器刷新率 <= 1 Then Return 60
+        Return Math.Clamp(显示器刷新率, 1, 120)
+    End Function
+
+    Friend Shared Function 读取显示器刷新率(设备名称 As String) As Integer
+        If String.IsNullOrWhiteSpace(设备名称) Then Return 0
+        Dim 设备上下文 = CreateDC(设备名称, Nothing, Nothing, IntPtr.Zero)
+        If 设备上下文 = IntPtr.Zero Then Return 0
+        Try
+            Return GetDeviceCaps(设备上下文, 垂直刷新率设备能力)
+        Finally
+            DeleteDC(设备上下文)
+        End Try
+    End Function
 
     Private Sub 更新画面快照()
         Volatile.Write(缓存客户区宽度, 画面控件.ClientSize.Width)
@@ -190,7 +264,7 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     Private Sub 更新刷新间隔()
         ' 60 Hz 若四舍五入为 17 ms，上限只有 58.82 Hz，并会周期性错过一帧。
         ' 计时器略快唤醒，最终原生呈现器仍按目标帧率合并提交。
-        刷新计时器.Interval = 计算刷新间隔毫秒(当前目标帧率)
+        刷新计时器.Interval = 计算刷新间隔毫秒(Volatile.Read(当前目标帧率))
     End Sub
 
     Friend Shared Function 计算刷新间隔毫秒(目标帧率 As Integer) As Integer
@@ -264,7 +338,7 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
             上次图层签名 = signature
             Volatile.Write(图层签名有效标志, 1)
             图层序号 += 1UL
-            提交图层(客户区大小, commands, 图层序号, CSng(当前目标帧率))
+            提交图层(客户区大小, commands, 图层序号, CSng(Volatile.Read(当前目标帧率)))
         Catch
             ' 定时文字是可选图层；异常不能影响视频呈现。
         End Try
@@ -279,10 +353,9 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         ArgumentNullException.ThrowIfNull(value)
         value.验证()
         SyncLock 弹幕配置锁
+            value.目标帧率 = Volatile.Read(当前目标帧率)
             弹幕配置 = value
-            当前目标帧率 = CInt(Math.Round(value.目标帧率, MidpointRounding.AwayFromZero))
-            当前弹幕调度器 = Nothing
-            当前弹幕资料库 = Nothing
+            当前弹幕调度器?.应用配置(value)
         End SyncLock
         更新刷新间隔()
         使图层失效()
@@ -452,10 +525,10 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
                 项.颜色ARGB, 弹幕配置.描边颜色ARGB,
                 弹幕配置.描边宽度 * 项.字号像素 / 弹幕配置.字号,
                 定时文字对齐.靠前, 定时文字对齐.靠前,
-                样式:=CType(弹幕配置.字体样式, 定时文字样式),
+                样式:=CType(弹幕配置.字体样式, 定时文字样式) Or 定时文字样式.软阴影,
                 阴影色ARGB:=弹幕配置.阴影颜色ARGB,
-                阴影X偏移:=弹幕配置.阴影偏移 * 项.字号像素 / 弹幕配置.字号,
-                阴影Y偏移:=弹幕配置.阴影偏移 * 项.字号像素 / 弹幕配置.字号)
+                阴影X偏移:=弹幕配置.阴影深度 * 项.字号像素 / 弹幕配置.字号,
+                阴影Y偏移:=弹幕配置.阴影深度 * 项.字号像素 / 弹幕配置.字号)
         Next
     End Sub
 
@@ -508,11 +581,18 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         刷新计时器.Dispose()
         RemoveHandler 画面控件.ClientSizeChanged, AddressOf 画面几何已变化
         RemoveHandler 画面控件.DpiChangedAfterParent, AddressOf 画面几何已变化
+        If 图层内容 <> 定时文字图层内容.仅字幕 Then
+            If 宿主窗体 IsNot Nothing Then
+                RemoveHandler 宿主窗体.LocationChanged, AddressOf 宿主位置已变化
+            End If
+            RemoveHandler SystemEvents.DisplaySettingsChanged, AddressOf 显示设置已变化
+        End If
         Try
             图层序号 += 1UL
             提交图层(New Size(Math.Max(1, 画面控件.ClientSize.Width),
                                Math.Max(1, 画面控件.ClientSize.Height)),
-                   Array.Empty(Of 定时文字命令)(), 图层序号, CSng(当前目标帧率))
+                   Array.Empty(Of 定时文字命令)(), 图层序号,
+                   CSng(Volatile.Read(当前目标帧率)))
         Catch
         End Try
         刷新空闲.Dispose()

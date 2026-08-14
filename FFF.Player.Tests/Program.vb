@@ -135,7 +135,7 @@ Friend Module Program
             End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--timed-text-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试定时文字精确渲染合同()
-                Console.WriteLine("弹幕边界、连续小数位移、Seek、外描边与阴影精确诊断通过。")
+                Console.WriteLine("弹幕边界、连续小数位移、Seek、外描边与软阴影精确诊断通过。")
                 Return 0
             End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--settings-size-visibility-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -526,6 +526,12 @@ Friend Module Program
                 Dim 不透明度 = DirectCast(弹幕页.Controls.Find("ETB_弹幕不透明度", True).Single(), LakeUI.ExcellentTrackBar)
                 Dim 最大数量 = DirectCast(弹幕页.Controls.Find("ETB_弹幕最大渲染数量", True).Single(), LakeUI.ExcellentTrackBar)
                 Dim 底部开关 = DirectCast(弹幕页.Controls.Find("MCK_是否渲染底部弹幕", True).Single(), LakeUI.ModernCheckBox)
+                Dim 阴影 = DirectCast(弹幕页.Controls.Find("MCB_弹幕阴影样式", True).Single(), LakeUI.ModernComboBox)
+                断言(阴影.Items.Count = 3 AndAlso
+                       阴影.Items(0).ToString() = "不使用阴影" AndAlso
+                       阴影.Items(1).ToString() = "使用基础阴影" AndAlso
+                       阴影.Items(2).ToString() = "使用更深阴影",
+                    "弹幕阴影下拉框文案没有保持原有表述。")
                 不透明度.Value = 149
                 最大数量.Value = 77
                 底部开关.Checked = False
@@ -902,16 +908,33 @@ Friend Module Program
                 会话.暂停()
                 等待状态(会话, 播放状态.已暂停, TimeSpan.FromSeconds(3))
                 Thread.Sleep(100)
+                Dim 软阴影命令 = 定时文字命令.创建文字(
+                    "soft shadow GPU regression", "Microsoft YaHei UI", 36.0F,
+                    New RectangleF(80.0F, 80.0F, 480.0F, 64.0F), &HFFFFFFFFUI,
+                    &HFF000000UI, 1.0F, 定时文字对齐.靠前, 定时文字对齐.靠前,
+                    样式:=定时文字样式.软阴影, 阴影色ARGB:=&H90000000UI,
+                    阴影X偏移:=3.0F, 阴影Y偏移:=3.0F)
+                会话.设置弹幕图层(New Size(640, 360), {软阴影命令}, 1UL, 60.0F)
+                Dim 阴影收敛 = Stopwatch.StartNew()
+                Do
+                    Application.DoEvents()
+                    Dim 弹幕状态 = 会话.当前弹幕状态
+                    If 弹幕状态.已绘制序号 = 1UL AndAlso 弹幕状态.命令数 = 1 Then Exit Do
+                    If 阴影收敛.Elapsed >= TimeSpan.FromSeconds(3) Then
+                        Throw New TimeoutException("GPU 弹幕软阴影图层没有完成栅格化。")
+                    End If
+                    Thread.Sleep(5)
+                Loop
                 Dim 空命令 = Array.Empty(Of 定时文字命令)()
                 Dim 呈现前 = 会话.当前快照
                 会话.设置定时文字图层(New Size(640, 360), 空命令, 1UL, 60.0F)
-                会话.设置弹幕图层(New Size(640, 360), 空命令, 1UL, 60.0F)
+                会话.设置弹幕图层(New Size(640, 360), 空命令, 2UL, 60.0F)
                 Dim 收敛 = Stopwatch.StartNew()
                 Do
                     Application.DoEvents()
                     Dim 字幕状态 = 会话.当前定时文字状态
                     Dim 弹幕状态 = 会话.当前弹幕状态
-                    If 字幕状态.已绘制序号 = 1UL AndAlso 弹幕状态.已绘制序号 = 1UL Then Exit Do
+                    If 字幕状态.已绘制序号 = 1UL AndAlso 弹幕状态.已绘制序号 = 2UL Then Exit Do
                     If 收敛.Elapsed >= TimeSpan.FromSeconds(3) Then Throw New TimeoutException("空图层没有收敛。")
                     Thread.Sleep(5)
                 Loop
@@ -3528,6 +3551,8 @@ Friend Module Program
     Private Sub 测试定时文字精确渲染合同()
         测试完整画布弹幕边界()
         测试连续小数位移()
+        测试弹幕设置与尺寸热更新()
+        测试弹幕自适应帧率()
         测试跳转不回溯弹幕()
         测试文字效果命令与原生合同()
         断言(播放器定时文字图层呈现器.计算刷新间隔毫秒(60) = 16 AndAlso
@@ -3536,10 +3561,96 @@ Friend Module Program
            "整数毫秒唤醒周期低于目标刷新率。")
     End Sub
 
+    Private Sub 测试弹幕自适应帧率()
+        断言(播放器定时文字图层呈现器.计算自适应弹幕帧率(0) = 60 AndAlso
+               播放器定时文字图层呈现器.计算自适应弹幕帧率(1) = 60 AndAlso
+               播放器定时文字图层呈现器.计算自适应弹幕帧率(48) = 48 AndAlso
+               播放器定时文字图层呈现器.计算自适应弹幕帧率(60) = 60 AndAlso
+               播放器定时文字图层呈现器.计算自适应弹幕帧率(120) = 120 AndAlso
+               播放器定时文字图层呈现器.计算自适应弹幕帧率(240) = 120,
+            "弹幕自适应帧率的回退值或 120 FPS 上限不正确。")
+
+        Using 窗口 As New Form With {.ClientSize = New Size(640, 360), .ShowInTaskbar = False}
+            Using 控件 As New 播放器画面控件 With {.Dock = DockStyle.Fill}
+                窗口.Controls.Add(控件)
+                Dim 设备名称 = Screen.FromControl(控件).DeviceName
+                Dim 显示器刷新率 = 播放器定时文字图层呈现器.读取显示器刷新率(设备名称)
+                Dim 预期帧率 = 播放器定时文字图层呈现器.计算自适应弹幕帧率(显示器刷新率)
+                Dim 配置 As New 弹幕显示配置 With {.目标帧率 = 30.0F}
+                Dim 已提交帧率 As Single
+                Using 呈现器 As New 播放器定时文字图层呈现器(控件, Function() Nothing,
+                    Function() Nothing,
+                    Sub(size, commands, sequence, frameRate) 已提交帧率 = frameRate,
+                    Function() Nothing, 配置, 定时文字图层内容.仅弹幕)
+                    断言(呈现器.目标帧率 = 预期帧率 AndAlso 配置.目标帧率 = 预期帧率,
+                        $"弹幕没有采用当前显示器刷新率：设备 {设备名称}，读取 {显示器刷新率} Hz，" &
+                        $"目标 {呈现器.目标帧率} FPS。")
+                    呈现器.提交当前帧(New Size(640, 360), 1920UI, 1080UI,
+                        TimeSpan.Zero, Nothing, 96.0F)
+                    断言(Math.Abs(已提交帧率 - 预期帧率) < 0.01F,
+                        "显示器自适应帧率没有进入原生弹幕图层提交。")
+                    Dim 新配置 As New 弹幕显示配置 With {.目标帧率 = 30.0F}
+                    呈现器.应用弹幕设置(新配置)
+                    断言(新配置.目标帧率 = 预期帧率,
+                        "重新应用弹幕设置覆盖了显示器自适应帧率。")
+                End Using
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 测试弹幕设置与尺寸热更新()
+        Dim 开始时间 = TimeSpan.FromSeconds(1)
+        Dim 滚动项目 As New 弹幕项目(开始时间, 弹幕类型.常规滚动,
+            1, 25.0F, &HFFFFFFFFUI, 0, 0, "diagnostic", 20, "热更新滚动弹幕")
+        Dim 顶部项目 As New 弹幕项目(开始时间, 弹幕类型.顶部,
+            5, 25.0F, &HFFFFFFFFUI, 0, 0, "diagnostic", 21, "热更新顶部弹幕")
+        Dim 资料库 As New 弹幕资料库({滚动项目, 顶部项目})
+        Dim 初始配置 As New 弹幕显示配置 With {
+            .基准视频高度 = 1080.0F, .字号 = 36.0F, .滚动速度 = 180.0F,
+            .启用类型 = 弹幕类型.常规滚动 Or 弹幕类型.顶部}
+
+        Using 控件 As New 播放器画面控件()
+            Using 呈现器 As New 播放器定时文字图层呈现器(控件, Function() Nothing,
+                Function() Nothing, Sub(size, commands, sequence, frameRate) Return,
+                Function() 资料库, 初始配置, 定时文字图层内容.仅弹幕)
+                Dim 初始命令 = 呈现器.生成命令(New Size(1920, 1080), 1920UI, 1080UI,
+                    开始时间, Nothing, 96.0F)
+                断言(初始命令.Count = 2, "弹幕热更新诊断没有建立初始活动项。")
+
+                Dim 缩放后命令 = 呈现器.生成命令(New Size(1280, 720), 1920UI, 1080UI,
+                    开始时间 + TimeSpan.FromMilliseconds(10), Nothing, 96.0F)
+                断言(缩放后命令.Count = 2,
+                    "视频渲染区域尺寸变化清空了正在显示的弹幕。")
+                断言(缩放后命令.All(Function(command) Math.Abs(command.字号 - 24.0F) < 0.01F),
+                    "视频渲染区域尺寸变化后没有即时更新活动弹幕字号。")
+
+                Dim 新配置 As New 弹幕显示配置 With {
+                    .基准视频高度 = 1080.0F, .字号 = 48.0F, .滚动速度 = 360.0F,
+                    .使用源颜色 = False, .颜色ARGB = &HFF20C060UI, .不透明度 = 128,
+                    .字体样式 = FontStyle.Bold, .启用类型 = 弹幕类型.常规滚动}
+                呈现器.应用弹幕设置(新配置)
+                Dim 设置后命令 = 呈现器.生成命令(New Size(1280, 720), 1920UI, 1080UI,
+                    开始时间 + TimeSpan.FromMilliseconds(20), Nothing, 96.0F)
+                断言(设置后命令.Count = 1 AndAlso 设置后命令(0).文本 = 滚动项目.文本,
+                    "应用弹幕设置时没有保留仍满足新配置的活动弹幕。")
+                断言(Math.Abs(设置后命令(0).字号 - 32.0F) < 0.01F AndAlso
+                       设置后命令(0).前景色ARGB = &H8020C060UI,
+                    "字号、颜色或不透明度没有即时应用到活动弹幕。")
+                Dim 设置后X = 设置后命令(0).X
+
+                Dim 下一帧命令 = 呈现器.生成命令(New Size(1280, 720), 1920UI, 1080UI,
+                    开始时间 + TimeSpan.FromMilliseconds(30), Nothing, 96.0F)
+                断言(下一帧命令.Count = 1 AndAlso
+                       Math.Abs((设置后X - 下一帧命令(0).X) - 2.4F) < 0.01F,
+                    "滚动速度更新后活动弹幕没有按新速度连续移动。")
+            End Using
+        End Using
+    End Sub
+
     Private Sub 测试完整画布弹幕边界()
         Dim 配置 As New 弹幕显示配置 With {
             .基准视频高度 = 720.0F, .滚动速度 = 5000.0F,
-            .字号 = 36.0F, .描边宽度 = 1.0F, .阴影偏移 = 1.5F}
+            .字号 = 36.0F, .描边宽度 = 1.0F, .阴影深度 = 1.5F}
         Dim 项目 As New 弹幕项目(TimeSpan.Zero, 弹幕类型.常规滚动, 1, 25.0F,
             &HFFFFFFFFUI, 0, 0, "diagnostic", 1, "完整画布边界 diagnostic")
         Dim 资料库 As New 弹幕资料库({项目})
@@ -3551,11 +3662,11 @@ Friend Module Program
                     TimeSpan.Zero, Nothing, 96.0F).Single()
                 Dim 开始X = 开始命令.X
                 Dim 文字宽度 = 开始命令.宽度
-                断言(Math.Abs(开始X - 1601.0F) < 0.01F,
+                断言(Math.Abs(开始X - 1605.5F) < 0.01F,
                    $"弹幕没有从完整 1600 px 画布外开始：X={开始X:F3}。")
                 Dim 高DPI开始X = 呈现器.生成命令(New Size(1600, 720), 720UI, 720UI,
                     TimeSpan.Zero, Nothing, 144.0F).Single().X
-                断言(Math.Abs(高DPI开始X - 1601.0F) < 0.01F,
+                断言(Math.Abs(高DPI开始X - 1605.5F) < 0.01F,
                    $"150% DPI 下弹幕画布没有保持物理客户区宽度：X={高DPI开始X:F3}。")
 
                 Dim 黑边中X = 呈现器.生成命令(New Size(1600, 720), 720UI, 720UI,
@@ -3564,8 +3675,9 @@ Friend Module Program
                 断言(黑边中X > 视频右边界 AndAlso 黑边中X < 1600.0F,
                    $"弹幕没有连续穿过右侧可见黑边：X={黑边中X:F3}，视频右边界={视频右边界:F3}。")
 
-                Dim 左外扩 = 配置.描边宽度
-                Dim 右外扩 = 配置.描边宽度 + 配置.阴影偏移
+                Dim 阴影外扩 = 配置.阴影深度 * 弹幕显示配置.软阴影扩散倍数
+                Dim 左外扩 = 配置.描边宽度 + 阴影外扩
+                Dim 右外扩 = 配置.描边宽度 + 阴影外扩
                 Dim 结束秒 = (1600.0F + 文字宽度 + 左外扩 + 右外扩) / 配置.滚动速度
                 Dim 采样秒 = 0.1R
                 While 采样秒 < 结束秒 - 0.00002R
@@ -3816,13 +3928,10 @@ Friend Module Program
                    Math.Abs(一千零八十命令.描边宽度 - 1.0F) < 0.01F,
                    "弹幕外描边没有按默认字号基准生成。")
                 断言(一千零八十命令.阴影色ARGB = 配置.阴影颜色ARGB AndAlso
-                   Math.Abs(一千零八十命令.阴影X偏移 - 配置.阴影偏移) < 0.01F AndAlso
-                   Math.Abs(一千零八十命令.阴影Y偏移 - 配置.阴影偏移) < 0.01F,
-                   "弹幕默认 45 度阴影没有进入文字命令。")
-                呈现器.目标帧率 = 120
-                断言(配置.目标帧率 = 120.0F,
-                   "弹幕高刷选项没有同步更新调度器和原生呈现节奏。")
-                呈现器.目标帧率 = 60
+                   Math.Abs(一千零八十命令.阴影X偏移 - 配置.阴影深度) < 0.01F AndAlso
+                   Math.Abs(一千零八十命令.阴影Y偏移 - 配置.阴影深度) < 0.01F AndAlso
+                   (一千零八十命令.样式 And 定时文字样式.软阴影) <> 0,
+                   "弹幕软阴影深度或呈现标志没有进入文字命令。")
             End Using
         End Using
     End Sub

@@ -14,9 +14,9 @@
 	  <!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
 	  <Authors>1059 Studio</Authors>
 	  <Company>1059 Studio</Company>
-	  <AssemblyVersion>2026.8.7</AssemblyVersion>
-	  <FileVersion>2026.8.7</FileVersion>
-	  <Version>2026.8.7</Version>
+	  <AssemblyVersion>2026.8.14</AssemblyVersion>
+	  <FileVersion>2026.8.14</FileVersion>
+	  <Version>2026.8.14</Version>
 	  <Title>FFF.Player</Title>
 	  <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
 	  <ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>

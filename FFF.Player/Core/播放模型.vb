@@ -241,6 +241,7 @@ Public Enum 定时文字样式
     下划线 = 4
     删除线 = 8
     HDR高亮位图 = 16
+    软阴影 = 32
 End Enum
 
 Public Structure 歌词呈现设置

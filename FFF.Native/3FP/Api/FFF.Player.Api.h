@@ -228,6 +228,8 @@ enum class FFF3FPTimedTextFlags : std::uint32_t {
     Underline = 4,
     Strikeout = 8,
     HdrHighlightBitmap = 16,
+    // shadowOffsetX/Y carry the Gaussian standard deviation when this flag is set.
+    SoftShadow = 32,
 };
 
 enum class FFF3FPTimedTextAlignment : std::uint32_t {

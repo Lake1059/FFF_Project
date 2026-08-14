@@ -282,6 +282,8 @@ private:
     ID2D1Effect* coverBackdropBlurEffect_;
     ID2D1Bitmap1* d2dTargets_[4];
     ID2D1Bitmap1* d2dAtlasTarget_;
+    ID2D1Bitmap1* d2dTimedTextShadowTarget_;
+    ID2D1Effect* timedTextShadowBlurEffect_;
     IDWriteFactory* writeFactory_;
     IDWriteRenderingParams* timedTextRenderingParams_;
     SwsContext* scaler_;

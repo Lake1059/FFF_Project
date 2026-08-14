@@ -165,6 +165,7 @@ Friend Enum 原生定时文字标志 As UInteger
     下划线 = 4
     删除线 = 8
     HDR高亮位图 = 16
+    软阴影 = 32
 End Enum
 
 Friend Enum 原生定时文字对齐 As UInteger

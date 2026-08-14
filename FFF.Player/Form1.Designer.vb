@@ -28,10 +28,13 @@ Partial Class Form1
         Dim ModernMenuItem3 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
         Dim ModernMenuItem4 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
         Dim ModernMenuItem5 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem6 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem7 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem8 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
         Dim resources As System.ComponentModel.ComponentResourceManager = New System.ComponentModel.ComponentResourceManager(GetType(Form1))
         ThisIsYourWindow1 = New LakeUI.ThisIsYourWindow(components)
         Panel1 = New Panel()
-        MB_1 = New LakeUI.ModernButton()
+        MB_标题栏菜单按钮 = New LakeUI.ModernButton()
         ModernPanel1 = New LakeUI.ModernPanel()
         Panel3 = New Panel()
         Panel4 = New Panel()
@@ -111,6 +114,7 @@ Partial Class Form1
         ' 
         ' ThisIsYourWindow1
         ' 
+        ThisIsYourWindow1.BackdropFrameRate = 0
         ThisIsYourWindow1.BackdropNoiseScale = 0.5F
         ThisIsYourWindow1.BackdropTintColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
         ThisIsYourWindow1.BackdropTintInactiveColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
@@ -139,28 +143,28 @@ Partial Class Form1
         ' Panel1
         ' 
         Panel1.BackColor = Color.Transparent
-        Panel1.Controls.Add(MB_1)
+        Panel1.Controls.Add(MB_标题栏菜单按钮)
         Panel1.Location = New Point(42, 48)
         Panel1.Name = "Panel1"
         Panel1.Padding = New Padding(0, 1, 0, 1)
         Panel1.Size = New Size(100, 42)
         Panel1.TabIndex = 1
         ' 
-        ' MB_1
+        ' MB_标题栏菜单按钮
         ' 
-        MB_1.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MB_1.BorderRadius = 10
-        MB_1.BorderSize = 0
-        MB_1.Dock = DockStyle.Fill
-        MB_1.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_1.Location = New Point(0, 1)
-        MB_1.Margin = New Padding(2)
-        MB_1.Name = "MB_1"
-        MB_1.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_1.Size = New Size(100, 40)
-        MB_1.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        MB_1.TabIndex = 12
-        MB_1.Text = "FFF.Player"
+        MB_标题栏菜单按钮.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_标题栏菜单按钮.BorderRadius = 10
+        MB_标题栏菜单按钮.BorderSize = 0
+        MB_标题栏菜单按钮.Dock = DockStyle.Fill
+        MB_标题栏菜单按钮.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MB_标题栏菜单按钮.Location = New Point(0, 1)
+        MB_标题栏菜单按钮.Margin = New Padding(2)
+        MB_标题栏菜单按钮.Name = "MB_标题栏菜单按钮"
+        MB_标题栏菜单按钮.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MB_标题栏菜单按钮.Size = New Size(100, 40)
+        MB_标题栏菜单按钮.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_标题栏菜单按钮.TabIndex = 12
+        MB_标题栏菜单按钮.Text = "FFF.Player"
         ' 
         ' ModernPanel1
         ' 
@@ -1081,19 +1085,27 @@ Partial Class Form1
         ' 
         MCB_标题栏菜单.AnimationFPS = 120
         MCB_标题栏菜单.BackColor = Color.Transparent
-        MCB_标题栏菜单.BackColor1 = Color.FromArgb(CByte(200), CByte(0), CByte(0), CByte(0))
         MCB_标题栏菜单.BackdropBlurRadius = 30
+        MCB_标题栏菜单.BackdropMode = LakeUI.ModernContextMenu.BackdropModeEnum.Auto
         MCB_标题栏菜单.BackdropNoiseOpacity = CByte(0)
-        MCB_标题栏菜单.BackdropTintColor = Color.FromArgb(CByte(180), CByte(0), CByte(0), CByte(0))
+        MCB_标题栏菜单.BackdropTintColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
         MCB_标题栏菜单.BorderSize = 0
-        MCB_标题栏菜单.CheckMarkSize = 12
         MCB_标题栏菜单.DescriptionFont = New Font("Microsoft YaHei UI", 9F)
         MCB_标题栏菜单.DescriptionForeColor = Color.YellowGreen
         MCB_标题栏菜单.HoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCB_标题栏菜单.HoverRadius = 5
         MCB_标题栏菜单.IconSize = 0
-        MCB_标题栏菜单.ItemHeight = 26
+        MCB_标题栏菜单.ItemHeight = 28
         MCB_标题栏菜单.ItemPadding = New Padding(10, 0, 10, 0)
+        ModernMenuItem6.Font = Nothing
+        ModernMenuItem6.Text = "调整渲染区域大小"
+        ModernMenuItem7.Font = Nothing
+        ModernMenuItem7.Text = "截取当前图像"
+        ModernMenuItem8.Font = Nothing
+        ModernMenuItem8.Text = "调整流延迟"
+        MCB_标题栏菜单.Items.Add(ModernMenuItem6)
+        MCB_标题栏菜单.Items.Add(ModernMenuItem7)
+        MCB_标题栏菜单.Items.Add(ModernMenuItem8)
         MCB_标题栏菜单.MenuFont = New Font("Microsoft YaHei UI", 10F)
         MCB_标题栏菜单.MenuPadding = New Padding(10)
         MCB_标题栏菜单.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
@@ -1171,7 +1183,7 @@ Partial Class Form1
     Friend WithEvents JustEmptyControl19 As LakeUI.JustEmptyControl
     Friend WithEvents MB_选择流 As LakeUI.ModernButton
     Friend WithEvents Panel1 As Panel
-    Friend WithEvents MB_1 As LakeUI.ModernButton
+    Friend WithEvents MB_标题栏菜单按钮 As LakeUI.ModernButton
     Friend WithEvents P_剪辑区间进度条容器 As Panel
     Friend WithEvents P_剪辑区间按钮容器 As Panel
     Friend WithEvents JustEmptyControl16 As LakeUI.JustEmptyControl
