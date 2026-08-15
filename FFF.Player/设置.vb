@@ -53,6 +53,13 @@ Public Class 设置
     Public Property 渲染封面图毛玻璃背景 As Boolean = True
     Public Property 渲染封面图 As Boolean = True
 
+    Public Property 关联常见视频 As Boolean = False
+    Public Property 关联不常见视频 As Boolean = False
+    Public Property 关联老旧视频 As Boolean = False
+    Public Property 关联常见音频 As Boolean = False
+    Public Property 关联不常见音频 As Boolean = False
+    Public Property 关联老旧音频 As Boolean = False
+
     Public Property SP_窗口边框颜色_A As Integer = 255
     Public Property SP_窗口边框颜色_R As Integer = Color.Gray.R
     Public Property SP_窗口边框颜色_G As Integer = Color.Gray.G

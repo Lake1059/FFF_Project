@@ -31,7 +31,21 @@ Partial Class Form1
         Dim ModernMenuItem6 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
         Dim ModernMenuItem7 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
         Dim ModernMenuItem8 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem9 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem10 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem11 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem12 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem13 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem14 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem15 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem16 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem17 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem18 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem19 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem20 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
+        Dim ModernMenuItem21 As LakeUI.ModernContextMenu.ModernMenuItem = New LakeUI.ModernContextMenu.ModernMenuItem()
         Dim resources As System.ComponentModel.ComponentResourceManager = New System.ComponentModel.ComponentResourceManager(GetType(Form1))
+        MCM_调整渲染区域大小 = New LakeUI.ModernContextMenu()
         ThisIsYourWindow1 = New LakeUI.ThisIsYourWindow(components)
         Panel1 = New Panel()
         MB_标题栏菜单按钮 = New LakeUI.ModernButton()
@@ -100,8 +114,9 @@ Partial Class Form1
         MB_后退到关键帧 = New LakeUI.ModernButton()
         JustEmptyControl2 = New LakeUI.JustEmptyControl()
         MP_DX视频容器 = New Panel()
-        MCB_流选择器 = New LakeUI.ModernContextMenu()
-        MCB_标题栏菜单 = New LakeUI.ModernContextMenu()
+        MCM_流选择器 = New LakeUI.ModernContextMenu()
+        MCM_标题栏菜单 = New LakeUI.ModernContextMenu()
+        MCM_截取当前画面 = New LakeUI.ModernContextMenu()
         Panel1.SuspendLayout()
         ModernPanel1.SuspendLayout()
         Panel3.SuspendLayout()
@@ -111,6 +126,61 @@ Partial Class Form1
         P_剪辑区间按钮容器.SuspendLayout()
         MP_DX视频容器.SuspendLayout()
         SuspendLayout()
+        ' 
+        ' MCM_调整渲染区域大小
+        ' 
+        MCM_调整渲染区域大小.AnimationFPS = 120
+        MCM_调整渲染区域大小.BackColor = Color.Transparent
+        MCM_调整渲染区域大小.BackdropBlurRadius = 30
+        MCM_调整渲染区域大小.BackdropMode = LakeUI.ModernContextMenu.BackdropModeEnum.Auto
+        MCM_调整渲染区域大小.BackdropNoiseOpacity = CByte(0)
+        MCM_调整渲染区域大小.BackdropTintColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
+        MCM_调整渲染区域大小.BorderSize = 0
+        MCM_调整渲染区域大小.DescriptionFont = New Font("Microsoft YaHei UI", 9F)
+        MCM_调整渲染区域大小.DescriptionForeColor = Color.YellowGreen
+        MCM_调整渲染区域大小.HoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCM_调整渲染区域大小.HoverRadius = 5
+        MCM_调整渲染区域大小.IconSize = 0
+        MCM_调整渲染区域大小.ItemHeight = 28
+        MCM_调整渲染区域大小.ItemPadding = New Padding(10, 0, 10, 0)
+        ModernMenuItem1.Font = Nothing
+        ModernMenuItem1.Text = "设置的初始值"
+        ModernMenuItem2.Font = Nothing
+        ModernMenuItem2.Text = "原始视频"
+        ModernMenuItem3.Font = Nothing
+        ModernMenuItem3.Text = "原始宽度 50%"
+        ModernMenuItem4.Font = Nothing
+        ModernMenuItem4.Text = "原始高度 50%"
+        ModernMenuItem5.Font = Nothing
+        ModernMenuItem5.IsSeparator = True
+        ModernMenuItem6.Font = Nothing
+        ModernMenuItem6.Text = "宽度 1024 比例 16:9"
+        ModernMenuItem7.Font = Nothing
+        ModernMenuItem7.Text = "宽度 1280 比例 16:9"
+        ModernMenuItem8.Font = Nothing
+        ModernMenuItem8.Text = "宽度 1600 比例 16:9"
+        ModernMenuItem9.Font = Nothing
+        ModernMenuItem9.Text = "宽度 1920 比例 16:9"
+        ModernMenuItem10.Font = Nothing
+        ModernMenuItem10.Text = "宽度 2560 比例 16:9"
+        ModernMenuItem11.Font = Nothing
+        ModernMenuItem11.Text = "宽度 3840 比例 16:9"
+        MCM_调整渲染区域大小.Items.Add(ModernMenuItem1)
+        MCM_调整渲染区域大小.Items.Add(ModernMenuItem2)
+        MCM_调整渲染区域大小.Items.Add(ModernMenuItem3)
+        MCM_调整渲染区域大小.Items.Add(ModernMenuItem4)
+        MCM_调整渲染区域大小.Items.Add(ModernMenuItem5)
+        MCM_调整渲染区域大小.Items.Add(ModernMenuItem6)
+        MCM_调整渲染区域大小.Items.Add(ModernMenuItem7)
+        MCM_调整渲染区域大小.Items.Add(ModernMenuItem8)
+        MCM_调整渲染区域大小.Items.Add(ModernMenuItem9)
+        MCM_调整渲染区域大小.Items.Add(ModernMenuItem10)
+        MCM_调整渲染区域大小.Items.Add(ModernMenuItem11)
+        MCM_调整渲染区域大小.MenuFont = New Font("Microsoft YaHei UI", 10F)
+        MCM_调整渲染区域大小.MenuPadding = New Padding(10)
+        MCM_调整渲染区域大小.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCM_调整渲染区域大小.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCM_调整渲染区域大小.SeparatorHeight = 10
         ' 
         ' ThisIsYourWindow1
         ' 
@@ -1043,74 +1113,104 @@ Partial Class Form1
         MP_DX视频容器.Size = New Size(883, 453)
         MP_DX视频容器.TabIndex = 2
         ' 
-        ' MCB_流选择器
+        ' MCM_流选择器
         ' 
-        MCB_流选择器.AnimationFPS = 120
-        MCB_流选择器.BackColor = Color.Transparent
-        MCB_流选择器.BackColor1 = Color.FromArgb(CByte(200), CByte(0), CByte(0), CByte(0))
-        MCB_流选择器.BackdropBlurRadius = 30
-        MCB_流选择器.BackdropNoiseOpacity = CByte(0)
-        MCB_流选择器.BackdropTintColor = Color.FromArgb(CByte(180), CByte(0), CByte(0), CByte(0))
-        MCB_流选择器.BorderSize = 0
-        MCB_流选择器.CheckMarkSize = 12
-        MCB_流选择器.DescriptionFont = New Font("Microsoft YaHei UI", 9F)
-        MCB_流选择器.DescriptionForeColor = Color.YellowGreen
-        MCB_流选择器.HoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_流选择器.HoverRadius = 5
-        MCB_流选择器.IconSize = 0
-        MCB_流选择器.ItemHeight = 26
-        MCB_流选择器.ItemPadding = New Padding(10, 0, 10, 0)
-        ModernMenuItem1.Font = Nothing
-        ModernMenuItem1.Text = "视频流"
-        ModernMenuItem2.Font = Nothing
-        ModernMenuItem2.IsSeparator = True
-        ModernMenuItem3.Font = Nothing
-        ModernMenuItem3.Text = "音频流"
-        ModernMenuItem4.Font = Nothing
-        ModernMenuItem4.IsSeparator = True
-        ModernMenuItem5.Font = Nothing
-        ModernMenuItem5.Text = "字幕流"
-        MCB_流选择器.Items.Add(ModernMenuItem1)
-        MCB_流选择器.Items.Add(ModernMenuItem2)
-        MCB_流选择器.Items.Add(ModernMenuItem3)
-        MCB_流选择器.Items.Add(ModernMenuItem4)
-        MCB_流选择器.Items.Add(ModernMenuItem5)
-        MCB_流选择器.MenuFont = New Font("Microsoft YaHei UI", 10F)
-        MCB_流选择器.MenuPadding = New Padding(10)
-        MCB_流选择器.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MCB_流选择器.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MCB_流选择器.SeparatorHeight = 10
+        MCM_流选择器.AnimationFPS = 120
+        MCM_流选择器.BackColor = Color.Transparent
+        MCM_流选择器.BackColor1 = Color.FromArgb(CByte(200), CByte(0), CByte(0), CByte(0))
+        MCM_流选择器.BackdropBlurRadius = 30
+        MCM_流选择器.BackdropNoiseOpacity = CByte(0)
+        MCM_流选择器.BackdropTintColor = Color.FromArgb(CByte(180), CByte(0), CByte(0), CByte(0))
+        MCM_流选择器.BorderSize = 0
+        MCM_流选择器.CheckMarkSize = 12
+        MCM_流选择器.DescriptionFont = New Font("Microsoft YaHei UI", 9F)
+        MCM_流选择器.DescriptionForeColor = Color.YellowGreen
+        MCM_流选择器.HoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCM_流选择器.HoverRadius = 5
+        MCM_流选择器.IconSize = 0
+        MCM_流选择器.ItemHeight = 26
+        MCM_流选择器.ItemPadding = New Padding(10, 0, 10, 0)
+        ModernMenuItem12.Font = Nothing
+        ModernMenuItem12.Text = "视频流"
+        ModernMenuItem13.Font = Nothing
+        ModernMenuItem13.IsSeparator = True
+        ModernMenuItem14.Font = Nothing
+        ModernMenuItem14.Text = "音频流"
+        ModernMenuItem15.Font = Nothing
+        ModernMenuItem15.IsSeparator = True
+        ModernMenuItem16.Font = Nothing
+        ModernMenuItem16.Text = "字幕流"
+        MCM_流选择器.Items.Add(ModernMenuItem12)
+        MCM_流选择器.Items.Add(ModernMenuItem13)
+        MCM_流选择器.Items.Add(ModernMenuItem14)
+        MCM_流选择器.Items.Add(ModernMenuItem15)
+        MCM_流选择器.Items.Add(ModernMenuItem16)
+        MCM_流选择器.MenuFont = New Font("Microsoft YaHei UI", 10F)
+        MCM_流选择器.MenuPadding = New Padding(10)
+        MCM_流选择器.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCM_流选择器.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCM_流选择器.SeparatorHeight = 10
         ' 
-        ' MCB_标题栏菜单
+        ' MCM_标题栏菜单
         ' 
-        MCB_标题栏菜单.AnimationFPS = 120
-        MCB_标题栏菜单.BackColor = Color.Transparent
-        MCB_标题栏菜单.BackdropBlurRadius = 30
-        MCB_标题栏菜单.BackdropMode = LakeUI.ModernContextMenu.BackdropModeEnum.Auto
-        MCB_标题栏菜单.BackdropNoiseOpacity = CByte(0)
-        MCB_标题栏菜单.BackdropTintColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
-        MCB_标题栏菜单.BorderSize = 0
-        MCB_标题栏菜单.DescriptionFont = New Font("Microsoft YaHei UI", 9F)
-        MCB_标题栏菜单.DescriptionForeColor = Color.YellowGreen
-        MCB_标题栏菜单.HoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_标题栏菜单.HoverRadius = 5
-        MCB_标题栏菜单.IconSize = 0
-        MCB_标题栏菜单.ItemHeight = 28
-        MCB_标题栏菜单.ItemPadding = New Padding(10, 0, 10, 0)
-        ModernMenuItem6.Font = Nothing
-        ModernMenuItem6.Text = "调整渲染区域大小"
-        ModernMenuItem7.Font = Nothing
-        ModernMenuItem7.Text = "截取当前图像"
-        ModernMenuItem8.Font = Nothing
-        ModernMenuItem8.Text = "调整流延迟"
-        MCB_标题栏菜单.Items.Add(ModernMenuItem6)
-        MCB_标题栏菜单.Items.Add(ModernMenuItem7)
-        MCB_标题栏菜单.Items.Add(ModernMenuItem8)
-        MCB_标题栏菜单.MenuFont = New Font("Microsoft YaHei UI", 10F)
-        MCB_标题栏菜单.MenuPadding = New Padding(10)
-        MCB_标题栏菜单.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MCB_标题栏菜单.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MCB_标题栏菜单.SeparatorHeight = 10
+        MCM_标题栏菜单.AnimationFPS = 120
+        MCM_标题栏菜单.BackColor = Color.Transparent
+        MCM_标题栏菜单.BackdropBlurRadius = 30
+        MCM_标题栏菜单.BackdropMode = LakeUI.ModernContextMenu.BackdropModeEnum.Auto
+        MCM_标题栏菜单.BackdropNoiseOpacity = CByte(0)
+        MCM_标题栏菜单.BackdropTintColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
+        MCM_标题栏菜单.BorderSize = 0
+        MCM_标题栏菜单.DescriptionFont = New Font("Microsoft YaHei UI", 9F)
+        MCM_标题栏菜单.DescriptionForeColor = Color.YellowGreen
+        MCM_标题栏菜单.HoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCM_标题栏菜单.HoverRadius = 5
+        MCM_标题栏菜单.IconSize = 0
+        MCM_标题栏菜单.ItemHeight = 28
+        MCM_标题栏菜单.ItemPadding = New Padding(10, 0, 10, 0)
+        ModernMenuItem17.Font = Nothing
+        ModernMenuItem17.SubMenu = MCM_调整渲染区域大小
+        ModernMenuItem17.Text = "调整渲染区域大小"
+        ModernMenuItem18.Font = Nothing
+        ModernMenuItem18.SubMenu = MCM_截取当前画面
+        ModernMenuItem18.Text = "截取当前画面"
+        MCM_标题栏菜单.Items.Add(ModernMenuItem17)
+        MCM_标题栏菜单.Items.Add(ModernMenuItem18)
+        MCM_标题栏菜单.MenuFont = New Font("Microsoft YaHei UI", 10F)
+        MCM_标题栏菜单.MenuPadding = New Padding(10)
+        MCM_标题栏菜单.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCM_标题栏菜单.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCM_标题栏菜单.SeparatorHeight = 10
+        ' 
+        ' MCM_截取当前画面
+        ' 
+        MCM_截取当前画面.AnimationFPS = 120
+        MCM_截取当前画面.BackColor = Color.Transparent
+        MCM_截取当前画面.BackdropBlurRadius = 30
+        MCM_截取当前画面.BackdropMode = LakeUI.ModernContextMenu.BackdropModeEnum.Auto
+        MCM_截取当前画面.BackdropNoiseOpacity = CByte(0)
+        MCM_截取当前画面.BackdropTintColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
+        MCM_截取当前画面.BorderSize = 0
+        MCM_截取当前画面.DescriptionFont = New Font("Microsoft YaHei UI", 9F)
+        MCM_截取当前画面.DescriptionForeColor = Color.YellowGreen
+        MCM_截取当前画面.HoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCM_截取当前画面.HoverRadius = 5
+        MCM_截取当前画面.IconSize = 0
+        MCM_截取当前画面.ItemHeight = 28
+        MCM_截取当前画面.ItemPadding = New Padding(10, 0, 10, 0)
+        ModernMenuItem19.Font = Nothing
+        ModernMenuItem19.Text = "剪贴板：原始画面"
+        ModernMenuItem20.Font = Nothing
+        ModernMenuItem20.Text = "剪贴板：实际渲染"
+        ModernMenuItem21.Font = Nothing
+        ModernMenuItem21.Text = "原始画面保存到当前目录"
+        MCM_截取当前画面.Items.Add(ModernMenuItem19)
+        MCM_截取当前画面.Items.Add(ModernMenuItem20)
+        MCM_截取当前画面.Items.Add(ModernMenuItem21)
+        MCM_截取当前画面.MenuFont = New Font("Microsoft YaHei UI", 10F)
+        MCM_截取当前画面.MenuPadding = New Padding(10)
+        MCM_截取当前画面.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCM_截取当前画面.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MCM_截取当前画面.SeparatorHeight = 10
         ' 
         ' Form1
         ' 
@@ -1204,9 +1304,11 @@ Partial Class Form1
     Friend WithEvents JustEmptyControl20 As LakeUI.JustEmptyControl
     Friend WithEvents MB_去入点 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl17 As LakeUI.JustEmptyControl
-    Friend WithEvents MCB_流选择器 As LakeUI.ModernContextMenu
+    Friend WithEvents MCM_流选择器 As LakeUI.ModernContextMenu
     Friend WithEvents MB_弹幕开关 As LakeUI.ModernButton
     Friend WithEvents JEC_弹幕开关前面的空白占位 As LakeUI.JustEmptyControl
-    Friend WithEvents MCB_标题栏菜单 As LakeUI.ModernContextMenu
+    Friend WithEvents MCM_标题栏菜单 As LakeUI.ModernContextMenu
+    Friend WithEvents MCM_调整渲染区域大小 As LakeUI.ModernContextMenu
+    Friend WithEvents MCM_截取当前画面 As LakeUI.ModernContextMenu
 
 End Class

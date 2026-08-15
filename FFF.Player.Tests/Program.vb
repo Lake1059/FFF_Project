@@ -7,6 +7,7 @@ Imports System.Text
 Imports System.Threading
 Imports System.Windows.Forms
 Imports FFF.Player
+Imports Microsoft.Win32
 
 Friend Module Program
     Private Const 测量秒数 As Double = 12.0
@@ -146,6 +147,11 @@ Friend Module Program
                 Console.WriteLine("DPI 尺寸、设置控件布局、HDR、字幕/弹幕设置接线及字号 point 单位回归通过。")
                 Return 0
             End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--file-association-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试文件关联注册表()
+                Console.WriteLine("文件关联分组、程序路径更新及原关联恢复回归通过。")
+                Return 0
+            End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--gpu-decode-matrix", StringComparison.OrdinalIgnoreCase) Then
                 测试GPU解码矩阵(Path.GetFullPath(参数(1)))
                 Console.WriteLine("GPU 解码规格接受与 CPU 回退矩阵通过。")
@@ -267,6 +273,19 @@ Friend Module Program
                 测试ASS渲染性能()
                 Return 0
             End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--ass-encoding-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试ASS编码兼容()
+                Console.WriteLine("ASS 的 Unicode 与常见旧式代码页统一转 UTF-8 回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 3 AndAlso String.Equals(参数(0), "--ass-file-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim ASS字幕路径 = Path.GetFullPath(参数(1))
+                Dim 时间毫秒 = Long.Parse(参数(2), Globalization.CultureInfo.InvariantCulture)
+                检查文件(ASS字幕路径)
+                测试ASS文件(ASS字幕路径, TimeSpan.FromMilliseconds(时间毫秒))
+                Console.WriteLine("指定 ASS 文件已成功打开并在目标时间生成字幕帧。")
+                Return 0
+            End If
             If 参数.Length = 3 AndAlso String.Equals(参数(0), "--vcb-ass-regression", StringComparison.OrdinalIgnoreCase) Then
                 Dim ASS视频路径 = Path.GetFullPath(参数(1))
                 Dim ASS字幕路径 = Path.GetFullPath(参数(2))
@@ -344,8 +363,11 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --subtitle-switch-regression <多字幕媒体>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sup-timeline-regression <字幕.sup>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --ass-render-benchmark")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --ass-encoding-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --ass-file-regression <字幕.ass> <时间毫秒>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --timed-text-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --settings-size-visibility-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --file-association-regression")
                 Return 2
             End If
             Dim 视频路径 = Path.GetFullPath(参数(0))
@@ -378,6 +400,149 @@ Friend Module Program
             Return 1
         End Try
     End Function
+
+    Private Sub 测试文件关联注册表()
+        Dim 默认设置 As New 设置()
+        断言(Not 默认设置.关联常见视频 AndAlso Not 默认设置.关联不常见视频 AndAlso
+               Not 默认设置.关联老旧视频 AndAlso Not 默认设置.关联常见音频 AndAlso
+               Not 默认设置.关联不常见音频 AndAlso Not 默认设置.关联老旧音频,
+               "文件关联默认值不是全部关闭。")
+        断言(文件关联管理器.取得扩展名(文件关联类别.常见视频).Contains(".mp4") AndAlso
+               文件关联管理器.取得扩展名(文件关联类别.常见音频).Contains(".mp3") AndAlso
+               文件关联管理器.取得扩展名(文件关联类别.老旧视频).Contains(".rmvb") AndAlso
+               文件关联管理器.取得扩展名(文件关联类别.老旧音频).Contains(".wma"),
+               "文件关联扩展名没有按媒体类型和常用程度分组。")
+        Using page As New Form设置_文件关联()
+            page.PerformLayout()
+            Dim checkBoxes = {page.MCK_关联常见视频, page.MCK_关联不常见视频, page.MCK_关联老旧视频,
+                              page.MCK_关联常见音频, page.MCK_关联不常见音频, page.MCK_关联老旧音频}
+            断言(checkBoxes.All(Function(x) Not String.IsNullOrWhiteSpace(x.SubText)),
+                   "文件关联页没有在运行时填写扩展名副文本。")
+            断言(checkBoxes.All(Function(x) Not x.Checked), "文件关联页的复选框不是默认全部关闭。")
+            断言(checkBoxes.All(Function(x) x.Height > 34), "扩展名副文本没有撑开文件关联选项高度。")
+        End Using
+
+        Dim testRoot = "Software\1059 Studio\FFF.Player.Tests-" & Guid.NewGuid().ToString("N")
+        Dim classesRoot = testRoot & "\Classes"
+        Dim applicationRoot = testRoot & "\Application"
+        Dim registeredApplications = testRoot & "\RegisteredApplications"
+        Dim locations As New 文件关联注册表位置(classesRoot, applicationRoot, registeredApplications)
+        Dim executablePath = Environment.ProcessPath
+        If String.IsNullOrWhiteSpace(executablePath) Then executablePath = Assembly.GetExecutingAssembly().Location
+        断言(String.Equals(Form1.取得命令行文件({"不存在的文件", executablePath}),
+                           Path.GetFullPath(executablePath), StringComparison.OrdinalIgnoreCase),
+               "关联启动参数没有筛选出第一个存在的本地文件。")
+        Dim testApplication As New FFF.Player.My.MyApplication()
+        testApplication.记录初次启动命令行({"不存在的文件", executablePath})
+        断言(String.Equals(testApplication.取出待处理启动文件(), Path.GetFullPath(executablePath),
+                           StringComparison.OrdinalIgnoreCase) AndAlso
+               String.IsNullOrEmpty(testApplication.取出待处理启动文件()),
+               "ApplicationEvents 没有接入或正确消费初次启动文件。")
+
+        Try
+            Using extensionKey = Registry.CurrentUser.CreateSubKey(classesRoot & "\.mp4", True)
+                extensionKey.SetValue(String.Empty, "Previous.Player", RegistryValueKind.String)
+                extensionKey.SetValue("Content Type", "application/x-previous", RegistryValueKind.String)
+                extensionKey.SetValue("PerceivedType", "document", RegistryValueKind.String)
+            End Using
+            Using iconKey = Registry.CurrentUser.CreateSubKey(classesRoot & "\FFF.Player.mp4\DefaultIcon", True)
+                iconKey.SetValue(String.Empty, "stale.ico,0", RegistryValueKind.String)
+            End Using
+            Using iconKey = Registry.CurrentUser.CreateSubKey(
+                    classesRoot & "\Applications\FFF.Player.exe\DefaultIcon", True)
+                iconKey.SetValue(String.Empty, "stale.ico,0", RegistryValueKind.String)
+            End Using
+            Using capabilities = Registry.CurrentUser.CreateSubKey(applicationRoot & "\Capabilities", True)
+                capabilities.SetValue("ApplicationIcon", "stale.ico,0", RegistryValueKind.String)
+            End Using
+            Using thumbnailKey = Registry.CurrentUser.CreateSubKey(
+                    classesRoot & "\.mp4\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}", True)
+                thumbnailKey.SetValue(String.Empty, "{9DBD2C50-62AD-11D0-B806-00C04FD706EC}", RegistryValueKind.String)
+            End Using
+            Using backup = Registry.CurrentUser.CreateSubKey(
+                    applicationRoot & "\FileAssociationBackups\mp4", True)
+                backup.SetValue("ThumbnailProvider.Captured", 1, RegistryValueKind.DWord)
+                backup.SetValue("ThumbnailProvider.Exists", 0, RegistryValueKind.DWord)
+            End Using
+            Dim enabled As New 文件关联选项 With {.关联常见视频 = True}
+            文件关联管理器.同步用于测试(enabled, executablePath, locations)
+            Using extensionKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\.mp4")
+                断言(String.Equals(CStr(extensionKey.GetValue(String.Empty)), "FFF.Player.mp4", StringComparison.Ordinal),
+                       "启用后没有写入 MP4 ProgID。")
+                断言(String.Equals(CStr(extensionKey.GetValue("Content Type")), "video/mp4", StringComparison.Ordinal),
+                       "启用后没有写入 MP4 媒体类型。")
+                断言(String.Equals(CStr(extensionKey.GetValue("PerceivedType")), "video", StringComparison.Ordinal),
+                       "启用后没有写入视频感知类型。")
+            End Using
+            Using commandKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\FFF.Player.mp4\shell\open\command")
+                断言(String.Equals(CStr(commandKey.GetValue(String.Empty)), $"""{Path.GetFullPath(executablePath)}"" ""%1""",
+                                     StringComparison.OrdinalIgnoreCase),
+                       "打开命令没有指向当前程序路径。")
+            End Using
+            Using applicationKey = Registry.CurrentUser.OpenSubKey(
+                    classesRoot & "\Applications\FFF.Player.exe\shell\open\command")
+                断言(applicationKey IsNot Nothing AndAlso
+                       String.Equals(CStr(applicationKey.GetValue(String.Empty)),
+                                     $"""{Path.GetFullPath(executablePath)}"" ""%1""",
+                                     StringComparison.OrdinalIgnoreCase),
+                       "播放器没有注册标准的打开方式命令。")
+            End Using
+            Using supportedTypes = Registry.CurrentUser.OpenSubKey(
+                    classesRoot & "\Applications\FFF.Player.exe\SupportedTypes")
+                断言(supportedTypes IsNot Nothing AndAlso supportedTypes.GetValueNames().Contains(".mp4"),
+                       "播放器的打开方式注册没有声明已启用的扩展名。")
+            End Using
+            断言(Registry.CurrentUser.OpenSubKey(classesRoot & "\FFF.Player.mp4\DefaultIcon") Is Nothing,
+                   "启用关联后仍保留 ProgID 图标设置。")
+            断言(Registry.CurrentUser.OpenSubKey(
+                       classesRoot & "\Applications\FFF.Player.exe\DefaultIcon") Is Nothing,
+                   "启用关联后仍保留应用图标设置。")
+            Using capabilities = Registry.CurrentUser.OpenSubKey(applicationRoot & "\Capabilities")
+                断言(Not capabilities.GetValueNames().Contains("ApplicationIcon"),
+                       "默认应用能力中仍保留图标设置。")
+            End Using
+            Using thumbnailKey = Registry.CurrentUser.OpenSubKey(
+                    classesRoot & "\.mp4\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}")
+                断言(thumbnailKey IsNot Nothing AndAlso thumbnailKey.GetValue(String.Empty) Is Nothing,
+                       "启用关联后仍保留缩略图处理器设置。")
+            End Using
+            Using registered = Registry.CurrentUser.OpenSubKey(registeredApplications)
+                断言(String.Equals(CStr(registered.GetValue("FFF.Player")), locations.CapabilitiesRoot,
+                                     StringComparison.OrdinalIgnoreCase),
+                       "播放器没有注册到 Windows 默认应用列表。")
+            End Using
+
+            Dim secondExecutable = Path.Combine(Environment.SystemDirectory, "cmd.exe")
+            文件关联管理器.同步用于测试(enabled, secondExecutable, locations)
+            Using commandKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\FFF.Player.mp4\shell\open\command")
+                断言(String.Equals(CStr(commandKey.GetValue(String.Empty)), $"""{secondExecutable}"" ""%1""",
+                                     StringComparison.OrdinalIgnoreCase),
+                       "程序路径变化后没有修复打开命令。")
+            End Using
+
+            文件关联管理器.同步用于测试(New 文件关联选项(), secondExecutable, locations)
+            Using extensionKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\.mp4")
+                断言(String.Equals(CStr(extensionKey.GetValue(String.Empty)), "Previous.Player", StringComparison.Ordinal),
+                       "取消关联后没有恢复原 ProgID。")
+                断言(String.Equals(CStr(extensionKey.GetValue("Content Type")), "application/x-previous", StringComparison.Ordinal),
+                       "取消关联后没有恢复原媒体类型。")
+                断言(String.Equals(CStr(extensionKey.GetValue("PerceivedType")), "document", StringComparison.Ordinal),
+                       "取消关联后没有恢复原感知类型。")
+            End Using
+            Using progIdKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\FFF.Player.mp4")
+                断言(progIdKey Is Nothing, "取消关联后仍残留本程序的 ProgID。")
+            End Using
+            Using capabilities = Registry.CurrentUser.OpenSubKey(locations.CapabilitiesRoot)
+                断言(capabilities Is Nothing, "全部取消关联后仍残留默认应用能力注册。")
+            End Using
+            Using applicationKey = Registry.CurrentUser.OpenSubKey(
+                    classesRoot & "\Applications\FFF.Player.exe")
+                断言(applicationKey Is Nothing, "全部取消关联后仍残留打开方式注册。")
+            End Using
+        Finally
+            Registry.CurrentUser.DeleteSubKeyTree(testRoot, False)
+        End Try
+    End Sub
 
     Private Sub 测试初始画面尺寸DPI缩放()
         Dim 默认设置 = New 设置()
@@ -2269,6 +2434,66 @@ Friend Module Program
                 CInt(Math.Round(总绿 / CDbl(采样点.Length))),
                 CInt(Math.Round(总蓝 / CDbl(采样点.Length)))}
     End Function
+
+    Private Sub 测试ASS编码兼容()
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance)
+        Dim 临时目录 = Path.Combine(Path.GetTempPath(), "fff-player-ass-encoding-" & Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(临时目录)
+        Dim 脚本模板 = String.Join(vbLf, {
+            "[Script Info]",
+            "Title: {TEST_TEXT}",
+            "ScriptType: v4.00+",
+            "PlayResX: 320",
+            "PlayResY: 180",
+            "",
+            "[V4+ Styles]",
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+            "Style: Default,Arial,32,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1",
+            "",
+            "[Events]",
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+            "Comment: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,{TEST_TEXT}",
+            "Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,{\p1}m 80 50 l 240 50 240 130 80 130{\p0}"})
+        Const Unicode测试文本 = "编码兼容 Café 日本語 한국어"
+        Dim 编码样本 As (名称 As String, 编码 As Encoding, 测试文本 As String)() = {
+            ("utf8", New UTF8Encoding(False, True), Unicode测试文本),
+            ("utf8-bom", New UTF8Encoding(True, True), Unicode测试文本),
+            ("utf16-le", New UnicodeEncoding(False, True, True), Unicode测试文本),
+            ("utf16-le-nobom", New UnicodeEncoding(False, False, True), Unicode测试文本),
+            ("utf16-be", New UnicodeEncoding(True, True, True), Unicode测试文本),
+            ("utf16-be-nobom", New UnicodeEncoding(True, False, True), Unicode测试文本),
+            ("utf32-le", New UTF32Encoding(False, True, True), Unicode测试文本),
+            ("utf32-le-nobom", New UTF32Encoding(False, False, True), Unicode测试文本),
+            ("utf32-be", New UTF32Encoding(True, True, True), Unicode测试文本),
+            ("utf32-be-nobom", New UTF32Encoding(True, False, True), Unicode测试文本),
+            ("gb18030", Encoding.GetEncoding(54936, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback), "简体中文编码检测"),
+            ("big5", Encoding.GetEncoding(950, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback), "繁體中文編碼檢測"),
+            ("shift-jis", Encoding.GetEncoding(932, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback), "日本語エンコーディング"),
+            ("korean", Encoding.GetEncoding(949, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback), "한국어 인코딩"),
+            ("windows-1252", Encoding.GetEncoding(1252, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback), "Café déjà vu")}
+        Try
+            For Each 样本 In 编码样本
+                Dim 路径 = Path.Combine(临时目录, 样本.名称 & ".ass")
+                File.WriteAllText(路径, 脚本模板.Replace("{TEST_TEXT}", 样本.测试文本), 样本.编码)
+                Using 生成器 As New ASS特效字幕帧生成器(路径, 临时目录)
+                    Dim 帧 = 生成器.生成帧(TimeSpan.FromSeconds(1), 320, 180)
+                    断言(帧 IsNot Nothing AndAlso 帧.像素BGRA.Length > 0,
+                       $"{样本.名称} ASS 没有生成字幕帧。")
+                End Using
+            Next
+        Finally
+            Directory.Delete(临时目录, True)
+        End Try
+    End Sub
+
+    Private Sub 测试ASS文件(字幕路径 As String, 时间 As TimeSpan)
+        Using 轨道 = 外部字幕自动加载器.加载字幕(字幕路径, 字幕路径)
+            断言(轨道.ASS特效生成器 IsNot Nothing, "播放器没有把 ASS 文件交给 libass 加载。")
+            Dim 帧 = 轨道.ASS特效生成器.生成帧(时间, 1280, 720)
+            断言(帧 IsNot Nothing AndAlso 帧.像素BGRA.Length > 0,
+               $"ASS 在 {时间.TotalMilliseconds:F0} 毫秒没有生成可见字幕帧。")
+        End Using
+    End Sub
 
     Private Function 最大通道差(预期 As Integer(), 实际 As Integer()) As Integer
         Return Enumerable.Range(0, Math.Min(预期.Length, 实际.Length)).

@@ -25,6 +25,7 @@ Public NotInheritable Class 播放列表
         ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".webm", ".flv", ".ts", ".m2ts", ".mts",
         ".mpg", ".mpeg", ".vob", ".ogv", ".3gp", ".3g2", ".rm", ".rmvb", ".asf", ".divx",
         ".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".ape", ".ac3", ".eac3", ".dts", ".mka",
+        ".wv", ".tak", ".aif", ".aiff", ".amr", ".au", ".ra", ".tta", ".mpc",
         ".png", ".jpg", ".jpeg", ".gif", ".apng", ".webp", ".jxl", ".bmp", ".tif", ".tiff"
     }
     Private Shared ReadOnly 末尾数字 As New Regex("^(?<prefix>.*?)(?<number>\d+)(?<suffix>\D*)$", RegexOptions.Compiled Or RegexOptions.CultureInvariant)

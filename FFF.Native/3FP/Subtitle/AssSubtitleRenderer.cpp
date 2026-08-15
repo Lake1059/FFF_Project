@@ -2,6 +2,7 @@
 #include "3FP/Api/FFF.Player.Api.h"
 
 #include <ass/ass.h>
+#include <mlang.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -71,6 +72,181 @@ std::vector<char> ReadFile(const std::filesystem::path& path) {
     return result;
 }
 
+enum class UnicodeEncoding {
+    None,
+    Utf16Le,
+    Utf16Be,
+    Utf32Le,
+    Utf32Be
+};
+
+std::uint8_t ByteAt(const std::vector<char>& value, const std::size_t index) noexcept {
+    return static_cast<std::uint8_t>(value[index]);
+}
+
+UnicodeEncoding DetectBomlessUnicode(const std::vector<char>& script) noexcept {
+    const auto sampleSize = std::min<std::size_t>(script.size(), 4096);
+    const auto quads = sampleSize / 4;
+    if (quads >= 4) {
+        std::array<std::size_t, 4> zeroCounts{};
+        for (std::size_t index = 0; index < quads * 4; ++index)
+            if (script[index] == '\0') ++zeroCounts[index % 4];
+        const auto mostlyZero = [quads](const std::size_t count) { return count * 5 >= quads * 4; };
+        if (mostlyZero(zeroCounts[2]) && mostlyZero(zeroCounts[3])) return UnicodeEncoding::Utf32Le;
+        if (mostlyZero(zeroCounts[0]) && mostlyZero(zeroCounts[1])) return UnicodeEncoding::Utf32Be;
+    }
+
+    const auto pairs = sampleSize / 2;
+    if (pairs >= 4) {
+        std::array<std::size_t, 2> zeroCounts{};
+        for (std::size_t index = 0; index < pairs * 2; ++index)
+            if (script[index] == '\0') ++zeroCounts[index % 2];
+        const auto mostlyZero = [pairs](const std::size_t count) { return count * 5 >= pairs * 3; };
+        const auto mostlyNonZero = [pairs](const std::size_t count) { return count * 5 <= pairs; };
+        if (mostlyNonZero(zeroCounts[0]) && mostlyZero(zeroCounts[1])) return UnicodeEncoding::Utf16Le;
+        if (mostlyZero(zeroCounts[0]) && mostlyNonZero(zeroCounts[1])) return UnicodeEncoding::Utf16Be;
+    }
+    return UnicodeEncoding::None;
+}
+
+std::wstring DecodeUtf16(const std::vector<char>& script, const std::size_t offset,
+    const bool littleEndian) {
+    if ((script.size() - offset) % 2 != 0)
+        throw std::runtime_error("The UTF-16 ASS subtitle has an incomplete code unit.");
+    std::wstring result;
+    result.reserve((script.size() - offset) / 2);
+    for (std::size_t index = offset; index < script.size(); index += 2) {
+        const auto first = ByteAt(script, index);
+        const auto second = ByteAt(script, index + 1);
+        result.push_back(static_cast<wchar_t>(littleEndian
+            ? static_cast<std::uint16_t>(first | (second << 8))
+            : static_cast<std::uint16_t>((first << 8) | second)));
+    }
+    return result;
+}
+
+std::wstring DecodeUtf32(const std::vector<char>& script, const std::size_t offset,
+    const bool littleEndian) {
+    if ((script.size() - offset) % 4 != 0)
+        throw std::runtime_error("The UTF-32 ASS subtitle has an incomplete code point.");
+    std::wstring result;
+    result.reserve((script.size() - offset) / 2);
+    for (std::size_t index = offset; index < script.size(); index += 4) {
+        std::uint32_t codePoint = 0;
+        if (littleEndian) {
+            codePoint = ByteAt(script, index) |
+                (static_cast<std::uint32_t>(ByteAt(script, index + 1)) << 8) |
+                (static_cast<std::uint32_t>(ByteAt(script, index + 2)) << 16) |
+                (static_cast<std::uint32_t>(ByteAt(script, index + 3)) << 24);
+        } else {
+            codePoint = (static_cast<std::uint32_t>(ByteAt(script, index)) << 24) |
+                (static_cast<std::uint32_t>(ByteAt(script, index + 1)) << 16) |
+                (static_cast<std::uint32_t>(ByteAt(script, index + 2)) << 8) |
+                ByteAt(script, index + 3);
+        }
+        if (codePoint > 0x10FFFF || (codePoint >= 0xD800 && codePoint <= 0xDFFF))
+            throw std::runtime_error("The UTF-32 ASS subtitle contains an invalid code point.");
+        if (codePoint <= 0xFFFF) {
+            result.push_back(static_cast<wchar_t>(codePoint));
+        } else {
+            codePoint -= 0x10000;
+            result.push_back(static_cast<wchar_t>(0xD800 + (codePoint >> 10)));
+            result.push_back(static_cast<wchar_t>(0xDC00 + (codePoint & 0x3FF)));
+        }
+    }
+    return result;
+}
+
+class ScopedComInitialization final {
+public:
+    ScopedComInitialization() noexcept : result_(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {}
+    ~ScopedComInitialization() { if (SUCCEEDED(result_)) CoUninitialize(); }
+    bool IsAvailable() const noexcept { return SUCCEEDED(result_) || result_ == RPC_E_CHANGED_MODE; }
+private:
+    HRESULT result_;
+};
+
+std::wstring DetectAndDecodeLegacyText(std::vector<char>& script) {
+    ScopedComInitialization com;
+    if (!com.IsAvailable()) return {};
+    Microsoft::WRL::ComPtr<IMultiLanguage2> multiLanguage;
+    if (FAILED(CoCreateInstance(CLSID_CMultiLanguage, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(multiLanguage.ReleaseAndGetAddressOf())))) return {};
+
+    std::array<DetectEncodingInfo, 10> candidates{};
+    auto sourceSize = static_cast<int>(script.size());
+    auto candidateCount = static_cast<int>(candidates.size());
+    if (FAILED(multiLanguage->DetectInputCodepage(MLDETECTCP_NONE, GetACP(), script.data(),
+        &sourceSize, candidates.data(), &candidateCount))) return {};
+
+    for (int index = 0; index < candidateCount; ++index) {
+        const auto codePage = candidates[index].nCodePage;
+        if (codePage == CP_UTF8 || codePage == CP_UTF7 || codePage == 1200 || codePage == 1201 ||
+            codePage == 12000 || codePage == 12001) continue;
+        DWORD mode = 0;
+        auto inputSize = static_cast<UINT>(script.size());
+        auto outputSize = static_cast<UINT>(script.size() + 1);
+        std::wstring result(outputSize, L'\0');
+        const auto conversion = multiLanguage->ConvertStringToUnicode(&mode, codePage, script.data(),
+            &inputSize, result.data(), &outputSize);
+        if (SUCCEEDED(conversion) && inputSize == script.size()) {
+            result.resize(outputSize);
+            return result;
+        }
+    }
+    return {};
+}
+
+std::vector<char> NormalizeAssScriptEncoding(std::vector<char> script) {
+    if (script.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        throw std::runtime_error("The ASS subtitle file is too large to convert.");
+
+    UnicodeEncoding encoding = UnicodeEncoding::None;
+    std::size_t offset = 0;
+    bool hasUtf8Bom = false;
+    if (script.size() >= 4 && ByteAt(script, 0) == 0xFF && ByteAt(script, 1) == 0xFE &&
+        ByteAt(script, 2) == 0x00 && ByteAt(script, 3) == 0x00) {
+        encoding = UnicodeEncoding::Utf32Le;
+        offset = 4;
+    } else if (script.size() >= 4 && ByteAt(script, 0) == 0x00 && ByteAt(script, 1) == 0x00 &&
+        ByteAt(script, 2) == 0xFE && ByteAt(script, 3) == 0xFF) {
+        encoding = UnicodeEncoding::Utf32Be;
+        offset = 4;
+    } else if (script.size() >= 3 && ByteAt(script, 0) == 0xEF && ByteAt(script, 1) == 0xBB &&
+        ByteAt(script, 2) == 0xBF) {
+        script.erase(script.begin(), script.begin() + 3);
+        hasUtf8Bom = true;
+    } else if (script.size() >= 2 && ByteAt(script, 0) == 0xFF && ByteAt(script, 1) == 0xFE) {
+        encoding = UnicodeEncoding::Utf16Le;
+        offset = 2;
+    } else if (script.size() >= 2 && ByteAt(script, 0) == 0xFE && ByteAt(script, 1) == 0xFF) {
+        encoding = UnicodeEncoding::Utf16Be;
+        offset = 2;
+    } else {
+        encoding = DetectBomlessUnicode(script);
+    }
+
+    std::wstring wide;
+    switch (encoding) {
+    case UnicodeEncoding::Utf16Le: wide = DecodeUtf16(script, offset, true); break;
+    case UnicodeEncoding::Utf16Be: wide = DecodeUtf16(script, offset, false); break;
+    case UnicodeEncoding::Utf32Le: wide = DecodeUtf32(script, offset, true); break;
+    case UnicodeEncoding::Utf32Be: wide = DecodeUtf32(script, offset, false); break;
+    case UnicodeEncoding::None: break;
+    }
+    if (encoding == UnicodeEncoding::None) {
+        const std::string utf8(script.begin(), script.end());
+        wide = Utf8ToWide(utf8);
+        if (wide.empty() && !script.empty() && !hasUtf8Bom) wide = DetectAndDecodeLegacyText(script);
+    }
+    if (wide.empty() && !script.empty())
+        throw std::runtime_error("Could not determine the ASS subtitle text encoding.");
+    auto utf8 = WideToUtf8(wide);
+    if (utf8.empty() && !wide.empty())
+        throw std::runtime_error("The ASS subtitle contains invalid Unicode text.");
+    return std::vector<char>(utf8.begin(), utf8.end());
+}
+
 class AssSubtitleRenderer final {
 public:
     AssSubtitleRenderer() = default;
@@ -99,7 +275,7 @@ public:
             if (requestedStream >= 0) {
                 track_ = ReadContainerTrack(path, requestedStream);
             } else {
-                auto script = ReadFile(std::filesystem::path(widePath));
+                auto script = NormalizeAssScriptEncoding(ReadFile(std::filesystem::path(widePath)));
                 if (script.empty()) return Fail("The ASS subtitle file is empty.");
                 track_ = ass_read_memory(library_, script.data(), script.size(), nullptr);
             }

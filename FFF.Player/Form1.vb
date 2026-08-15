@@ -27,9 +27,11 @@ Public Class Form1
     Private 剪辑区间控制器 As 播放器剪辑区间控制器
     Private 全屏交互控制器 As 播放器全屏交互控制器
     Private 流选择器 As 播放器流选择器
+    Private 画面菜单控制器 As 播放器画面菜单控制器
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
     Private 当前弹幕路径 As String = String.Empty
+    Private 待打开外部文件 As String = String.Empty
     Private 正在关闭 As Boolean
     Private 核心文件检查通过 As Boolean
     Private 核心文件错误说明 As String = String.Empty
@@ -45,6 +47,7 @@ Public Class Form1
         更新弹幕按钮可见性()
         SP加载器.启动时加载()
         设置.启动时加载设置()
+        文件关联管理器.启动后台同步(文件关联选项.从设置(设置.实例对象))
         字体控制.更新所有控件字体属性()
         设置.应用SP个性化设置()
         设置.加载SP自定义图标()
@@ -80,7 +83,7 @@ Public Class Form1
             MB_剪辑区间模式, MP_剪辑区间操作容器, P_剪辑区间进度条容器,
             P_剪辑区间按钮容器, MB_传给3FUI)
         更新WASAPI按钮()
-        流选择器 = New 播放器流选择器(Me, MP_DX视频容器, MCB_流选择器, 播放控制器)
+        流选择器 = New 播放器流选择器(Me, MP_DX视频容器, MCM_流选择器, 播放控制器)
         流选择器.应用全局字体(设置.实例对象.字体)
         界面呈现器 = 创建界面呈现器()
         字幕图层呈现器 = New 播放器定时文字图层呈现器(画面控件,
@@ -106,6 +109,13 @@ Public Class Form1
         信息图层呈现器.应用全局字体(设置.实例对象.字体)
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
+        画面菜单控制器 = New 播放器画面菜单控制器(
+            Me, 画面控件, MCM_标题栏菜单, MCM_调整渲染区域大小, MCM_截取当前画面,
+            窗口布局控制器, AddressOf 播放控制器.安全读取快照,
+            Function() 设置.实例对象.取得初始画面尺寸(),
+            Function() 播放控制器.当前媒体路径,
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI))
+        画面菜单控制器.应用全局字体(设置.实例对象.字体)
         全屏交互控制器 = New 播放器全屏交互控制器(Me, 画面控件,
             ModernPanel1, MP_剪辑区间操作容器, Function() 剪辑区间控制器.模式已启用)
 
@@ -265,8 +275,10 @@ Public Class Form1
             Return
         End If
 
-        Dim 启动文件 = Environment.GetCommandLineArgs().Skip(1).FirstOrDefault(Function(x) File.Exists(x))
-        If Not String.IsNullOrEmpty(启动文件) Then BeginInvoke(Sub() 打开或替换文件(启动文件))
+        Dim 启动文件 = My.Application.取出待处理启动文件()
+        Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
+        待打开外部文件 = String.Empty
+        If Not String.IsNullOrEmpty(请求文件) Then BeginInvoke(Sub() 打开外部文件(请求文件))
     End Sub
 
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
@@ -274,6 +286,7 @@ Public Class Form1
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
+        画面菜单控制器?.Dispose()
         窗口布局控制器?.释放()
         界面呈现器?.释放()
         信息图层呈现器?.释放()
@@ -331,6 +344,35 @@ Public Class Form1
         End If
         If String.IsNullOrEmpty(路径) Then 路径 = 存在的文件(0)
         打开或替换文件(路径)
+    End Sub
+
+    Friend Sub 打开命令行文件(参数 As IEnumerable(Of String))
+        Dim 文件路径 = 取得命令行文件(参数)
+        If String.IsNullOrEmpty(文件路径) OrElse 正在关闭 Then Return
+        If InvokeRequired Then
+            BeginInvoke(Sub() 打开命令行文件({文件路径}))
+            Return
+        End If
+        打开外部文件(文件路径)
+    End Sub
+
+    Friend Shared Function 取得命令行文件(参数 As IEnumerable(Of String)) As String
+        If 参数 Is Nothing Then Return String.Empty
+        Dim 文件路径 = 参数.FirstOrDefault(Function(x) Not String.IsNullOrWhiteSpace(x) AndAlso File.Exists(x))
+        Return If(String.IsNullOrEmpty(文件路径), String.Empty, Path.GetFullPath(文件路径))
+    End Function
+
+    Private Sub 打开外部文件(文件路径 As String)
+        If 正在关闭 OrElse String.IsNullOrEmpty(文件路径) Then Return
+        If Not 核心文件检查通过 OrElse 播放控制器 Is Nothing Then
+            待打开外部文件 = 文件路径
+            Return
+        End If
+        If WindowState = FormWindowState.Minimized Then WindowState = FormWindowState.Normal
+        If Not Visible Then Show()
+        Activate()
+        BringToFront()
+        打开或替换文件(文件路径)
     End Sub
 
     Private Sub 打开或替换文件(路径 As String)
@@ -527,6 +569,7 @@ Public Class Form1
         界面呈现器?.更新字体()
         信息图层呈现器?.应用全局字体(fontName)
         流选择器?.应用全局字体(fontName)
+        画面菜单控制器?.应用全局字体(fontName)
         设置窗口?.应用字体(fontName)
     End Sub
 
@@ -639,6 +682,6 @@ Public Class Form1
     End Sub
 
     Private Sub MB_标题栏菜单按钮_Click(sender As Object, e As EventArgs) Handles MB_标题栏菜单按钮.Click
-        MCB_标题栏菜单.Show(MP_DX视频容器, New Point(0, 0))
+        MCM_标题栏菜单.Show(MP_DX视频容器, New Point(0, 0))
     End Sub
 End Class

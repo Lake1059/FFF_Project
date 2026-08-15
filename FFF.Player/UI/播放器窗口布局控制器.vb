@@ -55,6 +55,18 @@ Friend NotInheritable Class 播放器窗口布局控制器
     Friend Sub 应用初始画面尺寸(目标画面大小 As Size)
         If 已释放 OrElse 已校正启动视频比例 OrElse 窗体.IsDisposed OrElse Not 窗体.IsHandleCreated OrElse
             目标画面大小.Width <= 0 OrElse 目标画面大小.Height <= 0 Then Return
+        应用画面尺寸(目标画面大小)
+        已校正启动视频比例 = True
+    End Sub
+
+    Friend Sub 调整画面尺寸(目标画面大小 As Size)
+        If 已释放 OrElse 窗体.IsDisposed OrElse Not 窗体.IsHandleCreated OrElse
+            目标画面大小.Width <= 0 OrElse 目标画面大小.Height <= 0 Then Return
+        If 窗体.WindowState <> FormWindowState.Normal Then 窗体.WindowState = FormWindowState.Normal
+        应用画面尺寸(目标画面大小)
+    End Sub
+
+    Private Sub 应用画面尺寸(目标画面大小 As Size)
         窗体.PerformLayout()
         Dim 目标画面设备大小 = 按DPI缩放画面尺寸(目标画面大小, 窗体.DeviceDpi)
         Dim 客户区非视频宽度 = Math.Max(0, 窗体.ClientSize.Width - 视频容器.ClientSize.Width)
@@ -68,7 +80,6 @@ Friend NotInheritable Class 播放器窗口布局控制器
                                Math.Clamp(目标高度, 窗体.MinimumSize.Height, workingArea.Height))
         窗体.StartPosition = FormStartPosition.Manual
         窗体.Bounds = 计算工作区居中边界(最终大小, workingArea)
-        已校正启动视频比例 = True
     End Sub
 
     Friend Shared Function 按DPI缩放画面尺寸(逻辑画面大小 As Size, DPI As Integer) As Size
