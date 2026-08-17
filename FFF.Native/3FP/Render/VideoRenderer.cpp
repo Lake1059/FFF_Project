@@ -548,36 +548,6 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
 }
 )";
 
-constexpr const char* UnsharpMaskShaderSource = R"(
-cbuffer UnsharpConstants : register(b0) {
-    float Strength;
-    float Threshold;
-    float2 Padding;
-};
-Texture2D<float> Source : register(t0);
-RWTexture2D<float> Target : register(u0);
-[numthreads(16,16,1)]
-void main(uint3 dtid:SV_DispatchThreadID) {
-    uint2 pos=dtid.xy;
-    uint width,height;
-    Source.GetDimensions(width,height);
-    if(pos.x>=width||pos.y>=height)return;
-    const float kernel[3]={1.0/16.0,2.0/16.0,1.0/16.0};
-    float total=0.0;
-    [unroll] for(int dy=-1;dy<=1;++dy) {
-        const int y=clamp(int(pos.y)+dy,0,int(height)-1);
-        [unroll] for(int dx=-1;dx<=1;++dx) {
-            const int x=clamp(int(pos.x)+dx,0,int(width)-1);
-            total+=Source.Load(int3(x,y,0))*kernel[dy+1]*kernel[dx+1];
-        }
-    }
-    const float original=Source.Load(int3(pos,0));
-    const float diff=abs(original-total);
-    const float amount=diff>Threshold?Strength:0.0;
-    Target[pos]=original+(original-total)*amount;
-}
-)";
-
 constexpr const char* CoverBackdropPixelShaderSource = R"(
 cbuffer Settings : register(b0) {
     uint ColorMode; uint Transfer; uint Source2020; uint TintArgb;
@@ -677,11 +647,6 @@ struct ShaderSettings {
 struct ScaleShaderSettings {
     float sourceWidth, sourceHeight, destinationWidth, destinationHeight;
     std::uint32_t axis, filter;
-    float padding1, padding2;
-};
-
-struct UnsharpConstants {
-    float strength, threshold;
     float padding1, padding2;
 };
 static_assert(sizeof(ScaleShaderSettings) == 32);
@@ -2546,37 +2511,6 @@ FFFResult PlayerVideoRenderer::ExecuteScalePass(ID3D11ShaderResourceView* source
     context_->PSSetShaderResources(0, 1, &nullView);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     return FFFResult::Success;
-}
-
-FFFResult PlayerVideoRenderer::ExecuteUnsharpMask(ID3D11ShaderResourceView* source,
-    const std::uint32_t width, const std::uint32_t height,
-    ID3D11UnorderedAccessView* target) noexcept {
-    if (source == nullptr || target == nullptr || context_ == nullptr ||
-        unsharpMaskShader_ == nullptr || unsharpConstants_ == nullptr)
-        return FFFResult::InvalidState;
-    const UnsharpConstants settings{0.5f, 0.02f, 0.0f, 0.0f};
-    context_->UpdateSubresource(unsharpConstants_, 0, nullptr, &settings, 0, 0);
-    context_->CSSetShader(unsharpMaskShader_, nullptr, 0);
-    context_->CSSetConstantBuffers(0, 1, &unsharpConstants_);
-    context_->CSSetShaderResources(0, 1, &source);
-    context_->CSSetUnorderedAccessViews(0, 1, &target, nullptr);
-    const auto groupX = (width + 15u) / 16u;
-    const auto groupY = (height + 15u) / 16u;
-    context_->Dispatch(groupX, groupY, 1);
-    ID3D11UnorderedAccessView* nullUav = nullptr;
-    ID3D11ShaderResourceView* nullSrv = nullptr;
-    context_->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
-    context_->CSSetShaderResources(0, 1, &nullSrv);
-    context_->CSSetShader(nullptr, nullptr, 0);
-    return FFFResult::Success;
-}
-
-void PlayerVideoRenderer::ReleaseUnsharpResources() noexcept {
-    if (unsharpTempUav_ != nullptr) { unsharpTempUav_->Release(); unsharpTempUav_ = nullptr; }
-    if (unsharpTempView_ != nullptr) { unsharpTempView_->Release(); unsharpTempView_ = nullptr; }
-    if (unsharpTempTexture_ != nullptr) { unsharpTempTexture_->Release(); unsharpTempTexture_ = nullptr; }
-    if (unsharpConstants_ != nullptr) { unsharpConstants_->Release(); unsharpConstants_ = nullptr; }
-    if (unsharpMaskShader_ != nullptr) { unsharpMaskShader_->Release(); unsharpMaskShader_ = nullptr; }
 }
 
 FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidth,
