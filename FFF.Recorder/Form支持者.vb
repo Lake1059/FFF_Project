@@ -3,7 +3,7 @@
 Public Class Form支持者
 
     Public Shared ReadOnly 付费支持者列表 As New List(Of String) From {
-        "Avec", "落叶清风"
+        "Avec", "落叶清风", "简风|#613E33"
     }
     Public Shared ReadOnly 赠送支持者列表 As New List(Of String) From {
         "格里芬指挥官|#39C5BB",
