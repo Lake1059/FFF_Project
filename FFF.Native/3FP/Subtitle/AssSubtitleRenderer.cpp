@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Api/FFF.Player.Api.h"
+#include "Shared/Ffmpeg/SharedFileInput.h"
 
 #include <ass/ass.h>
 #include <mlang.h>
@@ -305,6 +306,7 @@ public:
             return FFFResult::InvalidArgument;
         try {
             const auto geometryChanged = width != canvasWidth_ || height != canvasHeight_;
+            auto contentChanged = geometryChanged || !hasRenderedFrame_;
             if (geometryChanged) {
                 ass_set_frame_size(renderer_, width, height);
                 ass_set_storage_size(renderer_, width, height);
@@ -317,12 +319,21 @@ public:
                 int changed = 0;
                 const auto timestamp = position / TicksPerMillisecond;
                 ASS_Image* images = ass_render_frame(renderer_, track_, timestamp, &changed);
-                if (geometryChanged || changed != 0 || !hasRenderedFrame_)
+                if (geometryChanged || changed != 0 || !hasRenderedFrame_) {
                     Composite(images);
+                    contentChanged = true;
+                }
                 lastPosition_ = position;
                 hasRenderedFrame_ = true;
             }
             FillOutput(output, position);
+            if (!contentChanged) {
+                output.flags = static_cast<FFF3FPBitmapSubtitleFlags>(
+                    static_cast<std::uint32_t>(output.flags) |
+                    static_cast<std::uint32_t>(FFF3FPBitmapSubtitleFlags::Unchanged));
+            }
+            // Keep Copy valid for callers that do not yet use the additive
+            // Unchanged flag; updated callers can skip the transfer entirely.
             hasPendingCopy_ = true;
             return FFFResult::Success;
         } catch (const std::bad_alloc&) {
@@ -348,6 +359,7 @@ public:
 private:
     ASS_Track* ReadContainerTrack(const char* path, const std::int32_t requestedStream) {
         AVFormatContext* format = nullptr;
+        std::unique_ptr<SharedFileInput> sharedInput;
         AVCodecContext* decoder = nullptr;
         AVPacket* packet = nullptr;
         ASS_Track* track = nullptr;
@@ -355,9 +367,19 @@ private:
             if (packet != nullptr) av_packet_free(&packet);
             if (decoder != nullptr) avcodec_free_context(&decoder);
             if (format != nullptr) avformat_close_input(&format);
+            sharedInput.reset();
         };
 
         try {
+            std::string openError;
+            sharedInput = SharedFileInput::Open(path, openError);
+            if (sharedInput == nullptr)
+                throw std::runtime_error(openError);
+            format = avformat_alloc_context();
+            if (format == nullptr)
+                throw std::runtime_error("Could not allocate the subtitle input context.");
+            format->pb = sharedInput->Context();
+            format->flags |= AVFMT_FLAG_CUSTOM_IO;
             auto result = avformat_open_input(&format, path, nullptr, nullptr);
             if (result < 0)
                 throw std::runtime_error("Could not open the subtitle container: " + FfmpegError(result));

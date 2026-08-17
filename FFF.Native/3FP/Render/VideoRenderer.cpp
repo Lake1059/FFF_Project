@@ -43,7 +43,7 @@ bool ReadWindowsDisplayLuminance(const HMONITOR monitor,
         if (FAILED(WindowsCreateStringReference(
                 RuntimeClass_Windows_Graphics_Display_DisplayInformation,
                 ARRAYSIZE(RuntimeClass_Windows_Graphics_Display_DisplayInformation) - 1,
-                &classHeader, &className))) break;
+                &classHeader, &className)) || className == nullptr) break;
         ComPtr<IDisplayInformationStaticsInterop> statics;
         if (FAILED(RoGetActivationFactory(className, IID_PPV_ARGS(&statics)))) break;
         ComPtr<ABI::Windows::Graphics::Display::IDisplayInformation5> information;

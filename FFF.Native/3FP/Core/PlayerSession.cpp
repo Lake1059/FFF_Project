@@ -458,7 +458,6 @@ void PlayerSession::Enqueue(Command command) noexcept {
 }
 
 void PlayerSession::NotifyAudioRestart() noexcept {
-    std::lock_guard lock(mutex_);
     commandCondition_.notify_one();
 }
 
@@ -926,7 +925,7 @@ FFFResult PlayerSession::ClearExternalAudio() noexcept {
         const auto position = state_.load() == FFF3FPState::Playing
             ? ClockPosition() : snapshot_.position100ns;
         if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_);
-        if (externalFormat_) avformat_close_input(&externalFormat_);
+        CloseFormat(&externalFormat_, externalFormatIo_);
         externalAudioStream_ = -1;
         externalAudioPath_.clear();
         snapshot_.isExternalAudio = 0;
@@ -1574,26 +1573,53 @@ void PlayerSession::Worker() noexcept {
 }
 
 FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** output,
-    std::string& error) noexcept {
+    std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept {
     AVDictionary* options = nullptr;
     av_dict_set(&options, "protocol_whitelist", "file,crypto,data", 0);
     av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
     av_dict_set(&options, "ignore_loop", "0", 0);
+    io = SharedFileInput::Open(path.c_str(), error);
+    if (io == nullptr) {
+        av_dict_free(&options);
+        return FFFResult::NativeFailure;
+    }
+    auto* context = avformat_alloc_context();
+    if (context == nullptr) {
+        av_dict_free(&options);
+        io.reset();
+        error = "Could not allocate the FFmpeg input context.";
+        return FFFResult::NativeFailure;
+    }
+    context->pb = io->Context();
+    context->flags |= AVFMT_FLAG_CUSTOM_IO;
+    *output = context;
     auto result = avformat_open_input(output, path.c_str(), nullptr, &options);
     av_dict_free(&options);
-    if (result < 0) { error = "Could not open local media: " + FfmpegError(result); return FFFResult::FfmpegFailure; }
+    if (result < 0) {
+        if (*output != nullptr) avformat_free_context(*output);
+        *output = nullptr;
+        io.reset();
+        error = "Could not open local media: " + FfmpegError(result);
+        return FFFResult::FfmpegFailure;
+    }
     if ((*output)->iformat == nullptr) {
-        avformat_close_input(output); error = "Network and virtual-device demuxers are disabled."; return FFFResult::NotSupported;
+        CloseFormat(output, io); error = "Network and virtual-device demuxers are disabled."; return FFFResult::NotSupported;
     }
     const std::string_view demuxerName(
         (*output)->iformat->name == nullptr ? "" : (*output)->iformat->name);
     if (demuxerName.find("hls") != std::string_view::npos ||
         demuxerName.find("dash") != std::string_view::npos) {
-        avformat_close_input(output); error = "Network and virtual-device demuxers are disabled."; return FFFResult::NotSupported;
+        CloseFormat(output, io); error = "Network and virtual-device demuxers are disabled."; return FFFResult::NotSupported;
     }
     result = avformat_find_stream_info(*output, nullptr);
-    if (result < 0) { avformat_close_input(output); error = "Could not read media streams: " + FfmpegError(result); return FFFResult::FfmpegFailure; }
+    if (result < 0) { CloseFormat(output, io); error = "Could not read media streams: " + FfmpegError(result); return FFFResult::FfmpegFailure; }
     return FFFResult::Success;
+}
+
+void PlayerSession::CloseFormat(AVFormatContext** format,
+    std::unique_ptr<SharedFileInput>& io) noexcept {
+    if (format != nullptr && *format != nullptr) avformat_close_input(format);
+    io.reset();
 }
 
 FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t index, const bool video,
@@ -1755,7 +1781,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // an immediate replacement while the previous chain is still retiring.
     DoClose(FFF3FPState::Opening, true);
     std::string openError;
-    const auto openResult = OpenFormat(path, &format_, openError);
+    const auto openResult = OpenFormat(path, &format_, formatIo_, openError);
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
     videoStream_ = FindTimedVideoStream(format_);
     staticImage_ = videoStream_ >= 0 && IsStaticImageDemuxer(format_->iformat);
@@ -2739,27 +2765,29 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
 
 void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t requestedIndex, const std::int64_t offset) noexcept {
     AVFormatContext* replacementFormat = nullptr;
+    std::unique_ptr<SharedFileInput> replacementIo;
     std::string openError;
-    const auto openResult = OpenFormat(path, &replacementFormat, openError);
+    const auto openResult = OpenFormat(path, &replacementFormat, replacementIo, openError);
     if (openResult != FFFResult::Success) { ReportError(openResult, std::move(openError), "external-audio"); return; }
     auto index = requestedIndex;
     if (index < 0) index = av_find_best_stream(replacementFormat, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
     AVCodecContext* replacementDecoder = nullptr;
     const auto result = OpenDecoder(replacementFormat, index, false, &replacementDecoder);
-    if (result != FFFResult::Success) { avformat_close_input(&replacementFormat); ReportError(result, "Could not open the external audio stream.", "external-audio"); return; }
+    if (result != FFFResult::Success) { CloseFormat(&replacementFormat, replacementIo); ReportError(result, "Could not open the external audio stream.", "external-audio"); return; }
     if (!audioRenderer_ && (!audioExclusive_ || snapshot_.state == FFF3FPState::Playing)) {
         std::string audioError;
         const auto audioResult = RecreateAudioRenderer(audioEndpointId_, audioExclusive_,
             snapshot_.state != FFF3FPState::Playing, audioError);
         if (audioResult != FFFResult::Success) {
             avcodec_free_context(&replacementDecoder);
-            avformat_close_input(&replacementFormat);
+            CloseFormat(&replacementFormat, replacementIo);
             ReportError(audioResult, std::move(audioError), "external-audio");
             return;
         }
     }
-    if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); if (externalFormat_) avformat_close_input(&externalFormat_);
+    if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); CloseFormat(&externalFormat_, externalFormatIo_);
     externalFormat_ = replacementFormat; externalAudioDecoder_ = replacementDecoder; externalAudioStream_ = index;
+    externalFormatIo_ = std::move(replacementIo);
     externalAudioOffset100ns_ = offset; externalAudioPath_ = std::move(path);
     snapshot_.isExternalAudio = 1; snapshot_.externalAudioOffset100ns = offset; DoSeek(snapshot_.position100ns);
     ApplyAudioPlaybackPause(snapshot_.state == FFF3FPState::Playing);
@@ -2774,7 +2802,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     std::unique_lock contentLock(timedTextContentMutex_);
     if (preserveVideoOutput) videoRenderer_.ResetMedia();
     else videoRenderer_.Close();
-    if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); if (externalFormat_) avformat_close_input(&externalFormat_);
+    if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); CloseFormat(&externalFormat_, externalFormatIo_);
     if (videoDecoder_) avcodec_free_context(&videoDecoder_); if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     if (coverArtFrame_) av_frame_free(&coverArtFrame_);
     if (stillImageFrame_) av_frame_free(&stillImageFrame_);
@@ -2787,7 +2815,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     ClearVideoQueue();
     for (auto*& frame : videoFramePool_) av_frame_free(&frame);
     videoFramePool_.clear();
-    if (format_) avformat_close_input(&format_);
+    CloseFormat(&format_, formatIo_);
     videoStream_ = audioStream_ = coverArtStream_ = externalAudioStream_ = -1; externalAudioPath_.clear(); framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false;
     timedTextContentCache_.clear();
     externalAudioOffset100ns_ = 0; seekTarget100ns_ = seekTargetFrame_ = -1;

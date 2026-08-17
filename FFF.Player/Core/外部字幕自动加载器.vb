@@ -283,8 +283,6 @@ Public NotInheritable Class 外部字幕自动加载器
                 Return 加载字幕(候选.路径, 媒体路径, 取消令牌)
             Catch ex As OperationCanceledException
                 Throw
-            Catch ex As NotSupportedException
-                Throw
             Catch
                 ' 损坏的高优先级字幕不阻止后续格式被自动使用。
             End Try

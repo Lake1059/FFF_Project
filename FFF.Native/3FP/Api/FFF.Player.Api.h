@@ -196,6 +196,7 @@ enum class FFF3FPBitmapSubtitleFlags : std::uint32_t {
     EndOfStream = 2,
     Forced = 4,
     MoreData = 8,
+    Unchanged = 16,
 };
 
 struct FFF3FPBitmapSubtitleFrame {

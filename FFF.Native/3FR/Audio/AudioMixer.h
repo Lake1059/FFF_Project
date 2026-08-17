@@ -34,15 +34,15 @@ public:
 
 private:
     struct SourceState {
-        SwrContext* resampler;
-        WasapiSampleFormat format;
+        SwrContext* resampler{};
+        WasapiSampleFormat format{};
         std::deque<float> samples;
-        std::int64_t baseSample;
-        std::int64_t endSample;
-        bool initialized;
-        bool seenPacket;
-        std::int64_t timelineErrorSamples;
-        std::int32_t compensationPpm;
+        std::int64_t baseSample{};
+        std::int64_t endSample{};
+        bool initialized{};
+        bool seenPacket{};
+        std::int64_t timelineErrorSamples{};
+        std::int32_t compensationPpm{};
     };
 
     // 首包时创建到 48 kHz stereo float 的重采样器；运行中输入格式变化会明确失败。

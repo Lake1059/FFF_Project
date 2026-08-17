@@ -105,6 +105,9 @@
     <ClInclude Include="3FR\Timeline\QpcTimeline.h">
       <Filter>3FR\Timeline</Filter>
     </ClInclude>
+    <ClInclude Include="Shared\Ffmpeg\SharedFileInput.h">
+      <Filter>Shared\Ffmpeg</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -114,6 +117,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="Shared\Ffmpeg\FfmpegRuntime.cpp">
+      <Filter>Shared\Ffmpeg</Filter>
+    </ClCompile>
+    <ClCompile Include="Shared\Ffmpeg\SharedFileInput.cpp">
       <Filter>Shared\Ffmpeg</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Subtitle\BitmapSubtitleDecoder.cpp">

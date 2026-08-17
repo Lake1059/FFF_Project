@@ -109,6 +109,11 @@ Friend Module Program
                 Console.WriteLine("无画面 PCM 音频延迟与欠载回归通过。")
                 Return 0
             End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--shared-audio-file-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试音乐文件共享打开()
+                Console.WriteLine("音乐文件共享打开、播放中改名和删除回归通过。")
+                Return 0
+            End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--audio-cover-regression", StringComparison.OrdinalIgnoreCase) Then
                 Dim 音频路径 = Path.GetFullPath(参数(1))
                 检查文件(音频路径)
@@ -144,6 +149,7 @@ Friend Module Program
                 测试自定义初始尺寸可见性()
                 测试自定义HDR峰值可见性()
                 测试字幕弹幕设置与字号单位()
+                测试设置窗口玻璃背景()
                 Console.WriteLine("DPI 尺寸、设置控件布局、HDR、字幕/弹幕设置接线及字号 point 单位回归通过。")
                 Return 0
             End If
@@ -234,6 +240,11 @@ Friend Module Program
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--unknown-duration-progress-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试未知时长进度条()
                 Console.WriteLine("未知时长进度推进、已知范围回拖与总时长恢复回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--logic-audit-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试逻辑审计合同()
+                Console.WriteLine("未知时长跳转与播放列表状态通知回归通过。")
                 Return 0
             End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--unknown-duration-media-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -334,6 +345,7 @@ Friend Module Program
             If 参数.Length < 2 Then
                 Console.Error.WriteLine("用法: FFF.Player.Tests <视频.mp4> <弹幕.xml> [字幕.ass] [字幕.srt]")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --audio-latency-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --shared-audio-file-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --audio-cover-regression <带内嵌封面的纯音频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --cover-backdrop-regression <带 0xC80000 纯色封面的音频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --lyrics-regression <歌词.lrc> <带封面音频> <无封面音频>")
@@ -345,6 +357,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --clip-focus-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --volume-interaction-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --unknown-duration-progress-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --logic-audit-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --unknown-duration-media-regression <无时间轴视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --information-overlay-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --empty-layer-regression <视频>")
@@ -563,6 +576,13 @@ Friend Module Program
         断言(播放器窗口布局控制器.计算工作区居中边界(New Size(854, 480), 副屏工作区) =
                New Rectangle(-1387, 320, 854, 480),
            "最终窗口没有在目标屏幕工作区内居中。")
+        Dim 原始画面 = New Size(1920, 1080)
+        断言(播放器画面菜单控制器.解析目标画面尺寸("宽度 1024 原比例", 原始画面, Size.Empty) =
+               New Size(1024, 576),
+           "宽度原比例菜单没有按原始画面比例计算高度。")
+        断言(播放器画面菜单控制器.解析目标画面尺寸("高度 720 原比例", 原始画面, Size.Empty) =
+               New Size(1280, 720),
+           "高度原比例菜单没有按原始画面比例计算宽度。")
 
         Dim 原尺寸选项 = 设置.实例对象.初始画面尺寸选项
         Try
@@ -628,6 +648,27 @@ Friend Module Program
         Finally
             设置.实例对象.初始画面尺寸选项 = 原尺寸选项
         End Try
+    End Sub
+
+    Private Sub 测试设置窗口玻璃背景()
+        Using 窗口 As New Form设置()
+            Dim 标志 = BindingFlags.Instance Or BindingFlags.NonPublic
+            Dim 页面 = TryCast(GetType(Form设置).GetField("关于页面", 标志)?.GetValue(窗口), Form)
+            断言(页面 IsNot Nothing, "无法取得设置页面。")
+            Dim 根面板 = 页面.Controls.Cast(Of Control)().OfType(Of LakeUI.ModernPanel)().
+                FirstOrDefault(Function(x) x.Dock = DockStyle.Fill)
+            断言(根面板 IsNot Nothing, "无法取得设置页面的根面板。")
+
+            窗口.应用玻璃背景(True)
+            断言(窗口.ModernTabListControl1.ContentBackColor = Color.Transparent AndAlso
+                   根面板.BackColor1 = Color.Transparent AndAlso ReferenceEquals(根面板.BackgroundSource, 窗口),
+                "设置窗口启用 SP 玻璃后仍有不透明页面背景。")
+
+            窗口.应用玻璃背景(False)
+            断言(窗口.ModernTabListControl1.ContentBackColor = Color.FromArgb(24, 24, 24) AndAlso
+                   根面板.BackColor1 = Color.FromArgb(24, 24, 24) AndAlso 根面板.BackgroundSource Is Nothing,
+                "设置窗口关闭 SP 玻璃后没有恢复普通背景。")
+        End Using
     End Sub
 
     Private Sub 测试自定义HDR峰值可见性()
@@ -1599,6 +1640,108 @@ Friend Module Program
         End Using
     End Sub
 
+    Private Sub 测试逻辑审计合同()
+        Dim 请求位置 = TimeSpan.FromSeconds(65)
+        断言(播放器控制器.限定跳转位置(请求位置, TimeSpan.Zero) = 请求位置,
+            "未知时长媒体的跳转位置被错误阻止或裁剪。")
+        断言(播放器控制器.限定跳转位置(请求位置, TimeSpan.FromSeconds(30)) = TimeSpan.FromSeconds(30),
+            "已知时长媒体的跳转位置没有裁剪到媒体末尾。")
+
+        Dim 临时目录 = Path.Combine(Path.GetTempPath(),
+            "fff-player-playlist-audit-" & Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(临时目录)
+        Try
+            Dim 第一项路径 = Path.Combine(临时目录, "episode1.mp4")
+            Dim 第二项路径 = Path.Combine(临时目录, "episode2.mp4")
+            File.WriteAllBytes(第一项路径, Array.Empty(Of Byte)())
+            File.WriteAllBytes(第二项路径, Array.Empty(Of Byte)())
+            Dim 列表 As New 播放列表 With {.播放模式 = 列表播放模式.顺序播放}
+            列表.添加(第一项路径)
+            列表.添加(第二项路径)
+            列表.选择(0)
+            Dim 通知次数 = 0
+            AddHandler 列表.列表变化, Sub() 通知次数 += 1
+
+            Dim 下一项 = 列表.移动到播放结束后的项目()
+            断言(下一项 IsNot Nothing AndAlso 列表.当前索引 = 1 AndAlso 通知次数 = 1,
+                "顺序自动前进没有发布当前项变化。")
+            断言(列表.移动到播放结束后的项目() Is Nothing AndAlso 通知次数 = 1,
+                "顺序播放到末尾时发布了虚假的当前项变化。")
+
+            列表.播放模式 = 列表播放模式.列表循环
+            下一项 = 列表.移动到播放结束后的项目()
+            断言(下一项 IsNot Nothing AndAlso 列表.当前索引 = 0 AndAlso 通知次数 = 2,
+                "列表循环没有发布回到首项的状态变化。")
+            列表.播放模式 = 列表播放模式.单项循环
+            列表.移动到播放结束后的项目()
+            断言(通知次数 = 2, "单项循环在当前项未变化时发布了冗余通知。")
+
+            列表.选择(1)
+            Dim 当前路径 = 列表.当前项目.路径
+            列表.按路径顺序重排({第二项路径, 第一项路径})
+            断言(列表.当前索引 = 0 AndAlso
+                   String.Equals(列表.当前项目.路径, 当前路径, StringComparison.OrdinalIgnoreCase),
+                "拖动重排后当前媒体随索引漂移。")
+            断言(列表.移动到相邻项目(-1) Is Nothing AndAlso 列表.当前索引 = 0,
+                "位于列表首项时仍错误地移动到了上一个项目。")
+            断言(列表.移动到相邻项目(1)?.路径 = 第一项路径 AndAlso 列表.当前索引 = 1,
+                "下一个项目没有按列表物理顺序移动。")
+            断言(列表.移动到相邻项目(1) Is Nothing AndAlso 列表.当前索引 = 1,
+                "位于列表末项时仍错误地移动到了下一个项目。")
+            Using 列表窗口 As New Form播放列表()
+                Dim 播放路径 = 第二项路径
+                列表窗口.连接(列表, Sub(index) 列表.选择(index), Function() 播放路径)
+                断言(列表窗口.UltraDetailListView1.Items.Select(Function(x) x.SubItems(0).Text).
+                        SequenceEqual({"episode2.mp4", "episode1.mp4"}),
+                    "播放列表界面没有仅显示文件名或没有保持内部顺序。")
+                断言(列表窗口.UltraDetailListView1.Items(0).SubItems(0).ForeColor = Color.YellowGreen AndAlso
+                       列表窗口.UltraDetailListView1.Items(1).SubItems(0).ForeColor = Color.Empty,
+                    "正在播放项没有使用 YellowGreen，或非播放项颜色被改写。")
+                列表窗口.UltraDetailListView1.SelectedIndex = 1
+                列表.选择(0)
+                断言(列表窗口.UltraDetailListView1.SelectedIndex = 1,
+                    "内部当前项变化错误地覆盖了用户在列表框中的选择。")
+                播放路径 = String.Empty
+                列表窗口.更新正在播放项()
+                断言(列表窗口.UltraDetailListView1.Items.All(Function(x) x.SubItems(0).ForeColor = Color.Empty),
+                    "停止播放后仍保留正在播放项颜色。")
+            End Using
+
+            Dim 拖入目录 = Path.Combine(临时目录, "drag")
+            Dim 子目录 = Path.Combine(拖入目录, "nested")
+            Directory.CreateDirectory(子目录)
+            Dim 顶层媒体 = Path.Combine(拖入目录, "top.mp4")
+            File.WriteAllBytes(顶层媒体, Array.Empty(Of Byte)())
+            File.WriteAllText(Path.Combine(拖入目录, "note.txt"), "not media")
+            File.WriteAllBytes(Path.Combine(子目录, "child.mp4"), Array.Empty(Of Byte)())
+            断言(Form播放列表.枚举拖入媒体({拖入目录}).
+                    SequenceEqual({顶层媒体}, StringComparer.OrdinalIgnoreCase),
+                "拖入文件夹时没有只扫描顶层媒体文件。")
+            断言(Form播放列表.计算贴靠边界(New Rectangle(100, 80, 900, 600), 500) =
+                    New Rectangle(1000, 80, 500, 600),
+                "播放列表窗口没有贴靠主窗口右侧并保持相同的 Y 轴和高度。")
+            断言(Form播放列表.计算居中边界(New Rectangle(100, 80, 1200, 800), New Size(500, 500)) =
+                    New Rectangle(450, 230, 500, 500),
+                "最大化或全屏时播放列表窗口没有在主窗口中央显示。")
+            断言(Form播放列表.计算列表列宽(580, 0, 0, 10, 120) = 568,
+                "播放列表列宽没有使用与控件一致的 DPI 圆角取整。")
+
+            Dim M3U8路径 = Path.Combine(临时目录, "order.m3u8")
+            列表.导出M3U8(M3U8路径)
+            Dim 导入列表 As New 播放列表()
+            导入列表.导入M3U8(M3U8路径)
+            断言(导入列表.取得项目().Select(Function(x) x.路径).
+                    SequenceEqual({第二项路径, 第一项路径}, StringComparer.OrdinalIgnoreCase),
+                "M3U8 保存或加载没有保留播放列表顺序。")
+            导入列表.选择(0)
+            导入列表.移除(0)
+            断言(导入列表.当前索引 = -1,
+                "移除当前媒体后误把相邻列表项当成当前媒体。")
+        Finally
+            If Directory.Exists(临时目录) Then Directory.Delete(临时目录, True)
+        End Try
+    End Sub
+
     Private Function 创建进度条快照(位置 As TimeSpan, 时长 As TimeSpan) As 播放器快照
         Return New 播放器快照(New 原生播放器快照 With {
             .状态 = CUInt(播放状态.已暂停),
@@ -2479,6 +2622,9 @@ Friend Module Program
                     Dim 帧 = 生成器.生成帧(TimeSpan.FromSeconds(1), 320, 180)
                     断言(帧 IsNot Nothing AndAlso 帧.像素BGRA.Length > 0,
                        $"{样本.名称} ASS 没有生成字幕帧。")
+                    Dim 重复帧 = 生成器.生成帧(TimeSpan.FromSeconds(1), 320, 180)
+                    断言(ReferenceEquals(帧, 重复帧),
+                       $"{样本.名称} ASS 未复用内容未变化的位图帧。")
                 End Using
             Next
         Finally
@@ -2885,6 +3031,68 @@ Friend Module Program
                 会话.设置输出窗口(IntPtr.Zero)
             End Using
         End Using
+    End Sub
+
+    Private Sub 测试音乐文件共享打开()
+        Dim 临时目录 = Path.Combine(Path.GetTempPath(),
+            "fff-player-shared-audio-" & Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(临时目录)
+        Dim 原路径 = Path.Combine(临时目录, "shared-audio.wav")
+        Dim 新路径 = Path.Combine(临时目录, "renamed-audio.wav")
+        Const 采样率 = 48_000
+        Const 声道数 = 2
+        Const 位深 = 16
+        Const 秒数 = 5
+        Dim 音频字节数 = 采样率 * 声道数 * (位深 \ 8) * 秒数
+        Try
+            Using writer As New BinaryWriter(File.Create(原路径), Encoding.UTF8, False)
+                writer.Write(Encoding.ASCII.GetBytes("RIFF"))
+                writer.Write(36 + 音频字节数)
+                writer.Write(Encoding.ASCII.GetBytes("WAVEfmt "))
+                writer.Write(16)
+                writer.Write(CShort(1))
+                writer.Write(CShort(声道数))
+                writer.Write(采样率)
+                writer.Write(采样率 * 声道数 * (位深 \ 8))
+                writer.Write(CShort(声道数 * (位深 \ 8)))
+                writer.Write(CShort(位深))
+                writer.Write(Encoding.ASCII.GetBytes("data"))
+                writer.Write(音频字节数)
+                writer.Write(New Byte(音频字节数 - 1) {})
+            End Using
+
+            Using 会话 As New 播放器会话(New 播放器配置 With {
+                .解码器 = 解码模式.CPU,
+                .色彩模式 = 色彩输出模式.映射到SDR,
+                .SDR峰值尼特 = 100.0F,
+                .HDR峰值尼特 = 1000.0F,
+                .SDR纸白尼特 = 203.0F,
+                .输出窗口句柄 = IntPtr.Zero
+            })
+                会话.设置音量(0.0F, True)
+                会话.打开Async(原路径).GetAwaiter().GetResult()
+                断言(会话.当前媒体信息.流.Any(Function(x) x.类型 = "audio"),
+                    "共享打开回归生成的 WAV 没有识别出音频流。")
+                会话.播放()
+                等待状态(会话, 播放状态.正在播放, TimeSpan.FromSeconds(3))
+
+                File.Move(原路径, 新路径)
+                Using 可写流 As New FileStream(新路径, FileMode.Open, FileAccess.ReadWrite,
+                    FileShare.ReadWrite Or FileShare.Delete)
+                    断言(可写流.Length > 44, "共享打开的音乐文件无法同时取得写访问。")
+                End Using
+                File.Delete(新路径)
+
+                等待快照(会话,
+                    Function(x) x.已解码音频帧数 > 0 AndAlso
+                                x.播放位置 >= TimeSpan.FromMilliseconds(100),
+                    "音乐文件删除后的连续播放")
+            End Using
+        Finally
+            If File.Exists(原路径) Then File.Delete(原路径)
+            If File.Exists(新路径) Then File.Delete(新路径)
+            If Directory.Exists(临时目录) Then Directory.Delete(临时目录)
+        End Try
     End Sub
 
     Private Sub 测试LRC歌词回归(歌词路径 As String, 封面音频路径 As String,

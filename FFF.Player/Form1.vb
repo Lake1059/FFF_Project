@@ -30,6 +30,8 @@ Public Class Form1
     Private 画面菜单控制器 As 播放器画面菜单控制器
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
+    Private ReadOnly 播放列表数据 As New 播放列表 With {.播放模式 = 列表播放模式.顺序播放}
+    Private 播放列表窗口 As Form播放列表
     Private 当前弹幕路径 As String = String.Empty
     Private 待打开外部文件 As String = String.Empty
     Private 正在关闭 As Boolean
@@ -86,6 +88,8 @@ Public Class Form1
         流选择器 = New 播放器流选择器(Me, MP_DX视频容器, MCM_流选择器, 播放控制器)
         流选择器.应用全局字体(设置.实例对象.字体)
         界面呈现器 = 创建界面呈现器()
+        界面呈现器.设置音量百分比(设置.实例对象.音量百分比)
+        播放控制器.设置音量(CSng(设置.实例对象.音量百分比 / 100.0F))
         字幕图层呈现器 = New 播放器定时文字图层呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
             AddressOf 播放控制器.提交定时文字图层, Nothing, Nothing,
@@ -122,6 +126,7 @@ Public Class Form1
         AddHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         AddHandler 播放控制器.状态已变化, AddressOf 播放控制器_状态已变化
         AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开
+        AddHandler 播放控制器.播放结束, AddressOf 播放控制器_播放结束
         AddHandler 播放控制器.媒体已打开, AddressOf 剪辑区间控制器.媒体已打开
         AddHandler 播放控制器.播放错误, AddressOf 播放控制器_播放错误
         AddHandler 播放控制器.操作提示, AddressOf 播放控制器_操作提示
@@ -294,6 +299,7 @@ Public Class Form1
         弹幕图层呈现器?.释放()
         字幕图层呈现器?.释放()
         流选择器?.Dispose()
+        播放列表窗口?.Dispose()
         播放控制器?.释放()
         播放器按钮图标资源.清除(MB_播放和暂停, MB_停止, MB_倒退或上一个, MB_快进或下一个,
             MB_打开文件, MB_软件设置, MB_播放列表, MB_剪辑区间模式, MB_查看当前媒体信息, MB_选择流)
@@ -383,6 +389,7 @@ Public Class Form1
         ElseIf 弹幕自动加载器.是支持的弹幕文件(路径) Then
             播放控制器.替换弹幕(路径)
         Else
+            播放列表数据.从媒体创建并扫描相似文件(路径)
             播放控制器.打开媒体(路径)
         End If
     End Sub
@@ -396,6 +403,8 @@ Public Class Form1
 
     Private Sub 播放控制器_媒体已打开(sender As Object, e As 播放器媒体事件参数)
         If 正在关闭 Then Return
+        播放列表数据.选择路径(e.文件路径)
+        播放列表窗口?.更新正在播放项()
         当前弹幕路径 = String.Empty
         更新弹幕按钮可见性()
         字幕图层呈现器?.使图层失效()
@@ -406,6 +415,12 @@ Public Class Form1
         界面呈现器.媒体已打开(e.保留剪辑区间)
         界面呈现器.更新媒体信息(e.媒体信息, e.快照)
         界面呈现器.刷新()
+    End Sub
+
+    Private Sub 播放控制器_播放结束(sender As Object, e As EventArgs)
+        If 正在关闭 Then Return
+        Dim 下一项 = 播放列表数据.移动到播放结束后的项目()
+        If 下一项 IsNot Nothing Then 播放控制器.打开媒体(下一项.路径)
     End Sub
 
     Private Sub 播放控制器_播放错误(sender As Object, e As 播放器错误事件参数)
@@ -571,6 +586,11 @@ Public Class Form1
         流选择器?.应用全局字体(fontName)
         画面菜单控制器?.应用全局字体(fontName)
         设置窗口?.应用字体(fontName)
+        播放列表窗口?.应用字体(fontName)
+    End Sub
+
+    Friend Sub 应用设置窗口玻璃背景(启用 As Boolean)
+        设置窗口?.应用玻璃背景(启用)
     End Sub
 
     Private Sub 播放控制器_外部歌词已加载(sender As Object, e As 播放器歌词事件参数)
@@ -585,6 +605,7 @@ Public Class Form1
     End Sub
 
     Private Sub 界面呈现器_音量已变更(sender As Object, e As 播放器音量事件参数)
+        设置.实例对象.音量百分比 = 界面呈现器.音量百分比
         播放控制器.设置音量(e.音量)
         信息图层呈现器?.显示操作信息($"音量 {界面呈现器.音量百分比}%", &HFFF0D35DUI, "音量")
     End Sub
@@ -595,16 +616,30 @@ Public Class Form1
 
     Private Sub MB_停止_Click(sender As Object, e As EventArgs) Handles MB_停止.Click
         播放控制器.停止()
+        当前弹幕路径 = String.Empty
+        更新弹幕按钮可见性()
+        播放列表窗口?.更新正在播放项()
         Text = "FFF.Player"
         界面呈现器.清除媒体()
     End Sub
 
-    Private Sub MB_倒退或上一个_Click(sender As Object, e As EventArgs) Handles MB_倒退或上一个.Click
-        播放控制器.相对跳转(-跳转秒数)
+    Private Sub MB_倒退或上一个_MouseClick(sender As Object, e As MouseEventArgs) Handles MB_倒退或上一个.MouseClick
+        Select Case e.Button
+            Case MouseButtons.Left : 播放控制器.相对跳转(-跳转秒数)
+            Case MouseButtons.Right : 播放相邻项目(-1)
+        End Select
     End Sub
 
-    Private Sub MB_快进或下一个_Click(sender As Object, e As EventArgs) Handles MB_快进或下一个.Click
-        播放控制器.相对跳转(跳转秒数)
+    Private Sub MB_快进或下一个_MouseClick(sender As Object, e As MouseEventArgs) Handles MB_快进或下一个.MouseClick
+        Select Case e.Button
+            Case MouseButtons.Left : 播放控制器.相对跳转(跳转秒数)
+            Case MouseButtons.Right : 播放相邻项目(1)
+        End Select
+    End Sub
+
+    Private Sub 播放相邻项目(方向 As Integer)
+        Dim 项目 = 播放列表数据.移动到相邻项目(方向)
+        If 项目 IsNot Nothing Then 播放控制器.打开媒体(项目.路径)
     End Sub
 
     Private Sub MB_软件解码或硬件解码_Click(sender As Object, e As EventArgs) Handles MB_软件解码或硬件解码.Click
@@ -673,7 +708,20 @@ Public Class Form1
     End Function
 
     Private Sub MB_播放列表_Click(sender As Object, e As EventArgs) Handles MB_播放列表.Click
+        If 正在关闭 Then Return
+        If 播放列表窗口 Is Nothing OrElse 播放列表窗口.IsDisposed Then
+            播放列表窗口 = New Form播放列表()
+            播放列表窗口.连接(播放列表数据, AddressOf 播放列表请求播放,
+                         Function() If(播放控制器?.当前媒体路径, String.Empty))
+        End If
+        播放列表窗口.显示窗口(Me)
+    End Sub
 
+    Private Sub 播放列表请求播放(索引 As Integer)
+        If 正在关闭 OrElse 索引 < 0 OrElse 索引 >= 播放列表数据.数量 Then Return
+        播放列表数据.选择(索引)
+        Dim 项目 = 播放列表数据.当前项目
+        If 项目 IsNot Nothing Then 播放控制器.打开媒体(项目.路径)
     End Sub
 
     Private Sub MB_软件设置_Click(sender As Object, e As EventArgs) Handles MB_软件设置.Click

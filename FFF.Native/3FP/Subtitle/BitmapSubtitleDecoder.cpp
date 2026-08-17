@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Api/FFF.Player.Api.h"
+#include "Shared/Ffmpeg/SharedFileInput.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -31,6 +32,12 @@ public:
     FFFResult Open(const char* path, const std::int32_t requestedStream) noexcept {
         if (path == nullptr || *path == '\0') return FFFResult::InvalidArgument;
         try { path_ = path; } catch (...) { return FFFResult::NativeFailure; }
+        sharedInput_ = SharedFileInput::Open(path, lastError_);
+        if (sharedInput_ == nullptr) return FFFResult::NativeFailure;
+        format_ = avformat_alloc_context();
+        if (format_ == nullptr) return Fail("Could not allocate the bitmap subtitle input context.");
+        format_->pb = sharedInput_->Context();
+        format_->flags |= AVFMT_FLAG_CUSTOM_IO;
         const auto openResult = avformat_open_input(&format_, path, nullptr, nullptr);
         if (openResult < 0) return Fail("Could not open the bitmap subtitle: " + FfmpegError(openResult));
         const auto requestedStreamReady = requestedStream >= 0 &&
@@ -242,12 +249,14 @@ private:
         if (packet_ != nullptr) av_packet_free(&packet_);
         if (codec_ != nullptr) avcodec_free_context(&codec_);
         if (format_ != nullptr) avformat_close_input(&format_);
+        sharedInput_.reset();
         pixels_.clear();
     }
 
     std::string path_;
     std::string lastError_;
     AVFormatContext* format_{};
+    std::unique_ptr<SharedFileInput> sharedInput_;
     AVCodecContext* codec_{};
     AVPacket* packet_{};
     std::int32_t streamIndex_{-1};

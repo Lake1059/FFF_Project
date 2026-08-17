@@ -68,6 +68,7 @@ Partial Class Form设置_支持者
         MemberWall1.Dock = DockStyle.Fill
         MemberWall1.Location = New Point(20, 99)
         MemberWall1.Name = "MemberWall1"
+        MemberWall1.Padding = New Padding(10)
         MemberWall1.ScrollBarThumbColor = Color.FromArgb(CByte(40), CByte(200), CByte(200), CByte(200))
         MemberWall1.ScrollBarThumbHoverColor = Color.FromArgb(CByte(80), CByte(200), CByte(200), CByte(200))
         MemberWall1.ScrollBarTrackColor = Color.FromArgb(CByte(20), CByte(200), CByte(200), CByte(200))
@@ -243,7 +244,7 @@ Partial Class Form设置_支持者
         HtmlColorLabel2.Name = "HtmlColorLabel2"
         HtmlColorLabel2.Size = New Size(614, 17)
         HtmlColorLabel2.TabIndex = 131
-        HtmlColorLabel2.Text = "感谢所有向 3FR 的开发工作提供资金支持和技术支持的用户"
+        HtmlColorLabel2.Text = "感谢所有向 3FP 的开发工作提供资金支持和技术支持的用户"
         ' 
         ' Form设置_支持者
         ' 

@@ -118,6 +118,9 @@ Public NotInheritable Class 播放器会话
                 End If
                 清理()
             End Sub)
+        ' Register may invoke the callback synchronously when cancellation races
+        ' with registration. Do not enqueue an open after the task has completed.
+        If Volatile.Read(已结束) <> 0 Then Return 完成源.Task
         Try
             打开(本地路径)
         Catch

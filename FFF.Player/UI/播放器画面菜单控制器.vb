@@ -14,6 +14,9 @@ Friend NotInheritable Class 播放器画面菜单控制器
     Private Shared ReadOnly 固定宽度格式 As New Regex(
         "^宽度\s+(?<width>\d+)\s+比例\s+(?<x>\d+)\s*:\s*(?<y>\d+)$",
         RegexOptions.CultureInvariant Or RegexOptions.Compiled)
+    Private Shared ReadOnly 原比例尺寸格式 As New Regex(
+        "^(?<axis>宽度|高度)\s+(?<value>\d+)\s+原比例$",
+        RegexOptions.CultureInvariant Or RegexOptions.Compiled)
 
     Private ReadOnly 宿主窗口 As Form
     Private ReadOnly 画面控件 As 播放器画面控件
@@ -223,6 +226,17 @@ Friend NotInheritable Class 播放器画面菜单控制器
                 Dim 缩放 = 百分比 / 100.0R
                 Return New Size(Math.Max(1, CInt(Math.Round(原始尺寸.Width * 缩放))),
                                 Math.Max(1, CInt(Math.Round(原始尺寸.Height * 缩放))))
+            End If
+        End If
+
+        Dim 原比例匹配 = 原比例尺寸格式.Match(If(菜单文字, String.Empty).Trim())
+        If 原比例匹配.Success AndAlso 原始尺寸.Width > 0 AndAlso 原始尺寸.Height > 0 Then
+            Dim 值 As Integer
+            If Integer.TryParse(原比例匹配.Groups("value").Value, 值) AndAlso 值 > 0 Then
+                If String.Equals(原比例匹配.Groups("axis").Value, "宽度", StringComparison.Ordinal) Then
+                    Return New Size(值, Math.Max(1, CInt(Math.Round(CDbl(值) * 原始尺寸.Height / 原始尺寸.Width))))
+                End If
+                Return New Size(Math.Max(1, CInt(Math.Round(CDbl(值) * 原始尺寸.Width / 原始尺寸.Height))), 值)
             End If
         End If
 

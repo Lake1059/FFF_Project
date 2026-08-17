@@ -3,6 +3,7 @@
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Audio/WasapiRenderer.h"
 #include "3FP/Render/VideoRenderer.h"
+#include "Shared/Ffmpeg/SharedFileInput.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -99,7 +100,9 @@ private:
     bool RecoverAudioDevice() noexcept;
     bool RecoverVideoDevice() noexcept;
     FFFResult OpenFormat(const std::string& pathUtf8, AVFormatContext** format,
-        std::string& error) noexcept;
+        std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept;
+    void CloseFormat(AVFormatContext** format,
+        std::unique_ptr<SharedFileInput>& io) noexcept;
     FFFResult OpenDecoder(AVFormatContext* format, std::int32_t streamIndex, bool video,
         AVCodecContext** decoder, std::int32_t hardwareDeviceType = -1,
         std::int32_t* hardwarePixelFormat = nullptr, bool useConfiguredHardware = true,
@@ -157,6 +160,7 @@ private:
     std::thread worker_;
     std::atomic<bool> terminate_;
     AVFormatContext* format_;
+    std::unique_ptr<SharedFileInput> formatIo_;
     // These objects belong exclusively to the session worker.  FFmpeg permits
     // reuse after av_packet_unref/av_frame_unref, avoiding per-packet heap churn
     // on both the audio and video decode paths.
@@ -174,6 +178,7 @@ private:
     AVFrame* coverArtFrame_;
     AVFrame* stillImageFrame_;
     AVFormatContext* externalFormat_;
+    std::unique_ptr<SharedFileInput> externalFormatIo_;
     AVCodecContext* externalAudioDecoder_;
     std::int32_t externalAudioStream_;
     std::int64_t externalAudioOffset100ns_;

@@ -118,6 +118,11 @@ Friend NotInheritable Class 播放器界面呈现器
         End Get
     End Property
 
+    Friend Sub 设置音量百分比(百分比 As Integer)
+        If 已释放 Then Return
+        音量条.Value = Math.Clamp(百分比, 0, 100)
+    End Sub
+
     Friend Sub 启动()
         If Not 已释放 Then 刷新计时器.Start()
     End Sub

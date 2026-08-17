@@ -13,6 +13,7 @@ Public Class 设置
     Public Property HDR峰值亮度选项 As Integer = 0
     Public Property HDR峰值亮度 As Integer = 0
     Public Property HDR映射SDR参考亮度 As Integer = 250
+    Public Property 音量百分比 As Integer = 100
 
     Public Property 字幕第一行字体 As String = "Microsoft YaHei UI"
     Public Property 字幕第一行字号 As Single = 48.0F
@@ -131,6 +132,7 @@ Public Class 设置
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
         HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)
+        音量百分比 = Math.Clamp(音量百分比, 0, 100)
         规范化字幕字体(字幕第一行字体, 字幕第一行字号, 字幕第一行样式)
         规范化字幕字体(字幕第二行字体, 字幕第二行字号, 字幕第二行样式)
         规范化字幕字体(字幕其他行字体, 字幕其他行字号, 字幕其他行样式)
@@ -269,13 +271,23 @@ Public Class 设置
                 窗口.BackdropNoiseOpacity = If(实例对象.SP_毛玻璃噪点颗粒 = 1, 18,
                                                 If(实例对象.SP_毛玻璃噪点颗粒 = 2, 36, 0))
         End Select
+        Form1.当前主窗体.应用设置窗口玻璃背景(实例对象.SP_毛玻璃模式 > 0)
     End Sub
 
     Public Shared Sub 加载SP自定义图标()
         If Not SP_UnLock OrElse Form1.当前主窗体 Is Nothing OrElse Not File.Exists(自定义图标路径) Then Return
-        Dim image = 加载图片副本(自定义图标路径)
-        Dim newIcon = 从图片创建图标(image)
-        image.Dispose()
+        Dim newIcon As Icon
+        Try
+            Using image = 加载图片副本(自定义图标路径)
+                newIcon = 从图片创建图标(image)
+            End Using
+        Catch ex As Exception When TypeOf ex Is ArgumentException OrElse
+                                   TypeOf ex Is IOException OrElse
+                                   TypeOf ex Is UnauthorizedAccessException OrElse
+                                   TypeOf ex Is OutOfMemoryException OrElse
+                                   TypeOf ex Is Runtime.InteropServices.ExternalException
+            Return
+        End Try
         Dim oldIcon = 当前自有图标
         当前自有图标 = newIcon
         Form1.当前主窗体.Icon = newIcon
@@ -284,7 +296,16 @@ Public Class 设置
 
     Public Shared Sub 加载SP自定义背景图()
         If Not SP_UnLock OrElse Form1.当前主窗体 Is Nothing OrElse Not File.Exists(自定义背景图路径) Then Return
-        Dim newImage = 加载图片副本(自定义背景图路径)
+        Dim newImage As Image
+        Try
+            newImage = 加载图片副本(自定义背景图路径)
+        Catch ex As Exception When TypeOf ex Is ArgumentException OrElse
+                                   TypeOf ex Is IOException OrElse
+                                   TypeOf ex Is UnauthorizedAccessException OrElse
+                                   TypeOf ex Is OutOfMemoryException OrElse
+                                   TypeOf ex Is Runtime.InteropServices.ExternalException
+            Return
+        End Try
         Dim oldImage = 当前自有背景图
         当前自有背景图 = newImage
         Form1.当前主窗体.ThisIsYourWindow1.BackdropImage = newImage

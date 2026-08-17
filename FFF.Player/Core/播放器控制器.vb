@@ -58,6 +58,7 @@ Public NotInheritable Class 播放器控制器
 
     Public Event 状态已变化 As EventHandler
     Public Event 媒体已打开 As EventHandler(Of 播放器媒体事件参数)
+    Public Event 播放结束 As EventHandler
     Public Event 播放错误 As EventHandler(Of 播放器错误事件参数)
     Public Event 操作提示 As EventHandler(Of 播放器操作提示事件参数)
     Public Event HDR输出状态已确认 As EventHandler(Of 播放器HDR状态事件参数)
@@ -538,12 +539,17 @@ Public NotInheritable Class 播放器控制器
 
         Try
             Dim 快照 = 目标.当前快照
-            If 可操作(快照.状态) AndAlso 快照.总时长 > TimeSpan.Zero Then
-                目标.跳转(最小时间(位置, 快照.总时长))
+            If 可操作(快照.状态) Then
+                目标.跳转(限定跳转位置(位置, 快照.总时长))
             End If
         Catch ex As 播放器异常
         End Try
     End Sub
+
+    Friend Shared Function 限定跳转位置(位置 As TimeSpan, 总时长 As TimeSpan) As TimeSpan
+        If 位置 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(位置))
+        Return If(总时长 > TimeSpan.Zero, 最小时间(位置, 总时长), 位置)
+    End Function
 
     Public Sub 逐帧(方向 As Integer)
         If 方向 <> -1 AndAlso 方向 <> 1 Then Throw New ArgumentOutOfRangeException(NameOf(方向))
@@ -1030,6 +1036,7 @@ Public NotInheritable Class 播放器控制器
         AddHandler 目标.状态变化, AddressOf 会话_状态变化
         AddHandler 目标.打开完成, AddressOf 会话_打开完成
         AddHandler 目标.操作完成, AddressOf 会话_操作完成
+        AddHandler 目标.播放结束, AddressOf 会话_播放结束
         AddHandler 目标.色彩模式变化, AddressOf 会话_色彩模式变化
         AddHandler 目标.设备变化, AddressOf 会话_设备变化
         AddHandler 目标.错误, AddressOf 会话_错误
@@ -1039,6 +1046,7 @@ Public NotInheritable Class 播放器控制器
         RemoveHandler 目标.状态变化, AddressOf 会话_状态变化
         RemoveHandler 目标.打开完成, AddressOf 会话_打开完成
         RemoveHandler 目标.操作完成, AddressOf 会话_操作完成
+        RemoveHandler 目标.播放结束, AddressOf 会话_播放结束
         RemoveHandler 目标.色彩模式变化, AddressOf 会话_色彩模式变化
         RemoveHandler 目标.设备变化, AddressOf 会话_设备变化
         RemoveHandler 目标.错误, AddressOf 会话_错误
@@ -1059,6 +1067,10 @@ Public NotInheritable Class 播放器控制器
 
     Private Sub 会话_操作完成(sender As Object, e As 播放器事件参数)
         If sender Is 会话 Then RaiseEvent 状态已变化(Me, EventArgs.Empty)
+    End Sub
+
+    Private Sub 会话_播放结束(sender As Object, e As 播放器事件参数)
+        If sender Is 会话 Then RaiseEvent 播放结束(Me, EventArgs.Empty)
     End Sub
 
     Private Sub 会话_色彩模式变化(sender As Object, e As 播放器事件参数)

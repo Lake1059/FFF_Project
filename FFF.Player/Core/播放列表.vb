@@ -78,13 +78,12 @@ Public NotInheritable Class 播放列表
     Public Sub 移除(索引 As Integer)
         SyncLock 项目
             If 索引 < 0 OrElse 索引 >= 项目.Count Then Throw New ArgumentOutOfRangeException(NameOf(索引))
+            Dim 移除当前项目 = 当前值 = 索引
             项目.RemoveAt(索引)
-            If 项目.Count = 0 Then
+            If 项目.Count = 0 OrElse 移除当前项目 Then
                 当前值 = -1
             ElseIf 当前值 > 索引 Then
                 当前值 -= 1
-            ElseIf 当前值 >= 项目.Count Then
-                当前值 = 项目.Count - 1
             End If
         End SyncLock
         RaiseEvent 列表变化(Me, EventArgs.Empty)
@@ -103,6 +102,25 @@ Public NotInheritable Class 播放列表
         RaiseEvent 列表变化(Me, EventArgs.Empty)
     End Sub
 
+    Public Sub 按路径顺序重排(路径顺序 As IEnumerable(Of String))
+        ArgumentNullException.ThrowIfNull(路径顺序)
+        Dim 新顺序 = 路径顺序.Select(Function(x) IO.Path.GetFullPath(x)).ToArray()
+        SyncLock 项目
+            If 新顺序.Length <> 项目.Count Then Throw New ArgumentException("新顺序必须包含播放列表中的全部项目。", NameOf(路径顺序))
+            Dim 原项目 = 项目.ToDictionary(Function(x) x.路径, StringComparer.OrdinalIgnoreCase)
+            If 新顺序.Distinct(StringComparer.OrdinalIgnoreCase).Count() <> 新顺序.Length OrElse
+                新顺序.Any(Function(x) Not 原项目.ContainsKey(x)) Then
+                Throw New ArgumentException("新顺序中的项目与当前播放列表不一致。", NameOf(路径顺序))
+            End If
+            Dim 当前路径 = If(当前值 >= 0 AndAlso 当前值 < 项目.Count, 项目(当前值).路径, Nothing)
+            项目.Clear()
+            项目.AddRange(新顺序.Select(Function(x) 原项目(x)))
+            当前值 = If(当前路径 Is Nothing, -1,
+                     项目.FindIndex(Function(x) String.Equals(x.路径, 当前路径, StringComparison.OrdinalIgnoreCase)))
+        End SyncLock
+        RaiseEvent 列表变化(Me, EventArgs.Empty)
+    End Sub
+
     Public Sub 选择(索引 As Integer)
         SyncLock 项目
             If 索引 < 0 OrElse 索引 >= 项目.Count Then Throw New ArgumentOutOfRangeException(NameOf(索引))
@@ -110,6 +128,20 @@ Public NotInheritable Class 播放列表
         End SyncLock
         RaiseEvent 列表变化(Me, EventArgs.Empty)
     End Sub
+
+    Public Function 选择路径(本地路径 As String) As Boolean
+        If String.IsNullOrWhiteSpace(本地路径) Then Return False
+        Dim 完整路径 = IO.Path.GetFullPath(本地路径)
+        Dim 已变化 As Boolean
+        SyncLock 项目
+            Dim 索引 = 项目.FindIndex(Function(x) String.Equals(x.路径, 完整路径, StringComparison.OrdinalIgnoreCase))
+            If 索引 < 0 Then Return False
+            已变化 = 当前值 <> 索引
+            当前值 = 索引
+        End SyncLock
+        If 已变化 Then RaiseEvent 列表变化(Me, EventArgs.Empty)
+        Return True
+    End Function
 
     Public Sub 清空()
         SyncLock 项目
@@ -172,14 +204,18 @@ Public NotInheritable Class 播放列表
             If Not 新列表.Any(Function(x) String.Equals(x.路径, 值.路径, StringComparison.OrdinalIgnoreCase)) Then 新列表.Add(值)
         Next
         SyncLock 项目
+            Dim 当前路径 = If(当前值 >= 0 AndAlso 当前值 < 项目.Count, 项目(当前值).路径, Nothing)
             项目.Clear()
             项目.AddRange(新列表)
-            当前值 = If(项目.Count > 0, 0, -1)
+            当前值 = If(当前路径 Is Nothing, -1,
+                     项目.FindIndex(Function(x) String.Equals(x.路径, 当前路径, StringComparison.OrdinalIgnoreCase)))
         End SyncLock
         RaiseEvent 列表变化(Me, EventArgs.Empty)
     End Sub
 
     Public Function 移动到播放结束后的项目() As 播放列表项
+        Dim 结果 As 播放列表项 = Nothing
+        Dim 当前项已变化 As Boolean
         SyncLock 项目
             If 当前值 < 0 OrElse 项目.Count = 0 Then Return Nothing
             Select Case 播放模式
@@ -190,8 +226,10 @@ Public NotInheritable Class 播放列表
                 Case 列表播放模式.顺序播放
                     If 当前值 + 1 >= 项目.Count Then Return Nothing
                     当前值 += 1
+                    当前项已变化 = True
                 Case 列表播放模式.列表循环
                     当前值 = (当前值 + 1) Mod 项目.Count
+                    当前项已变化 = 项目.Count > 1
                 Case 列表播放模式.随机播放
                     If 项目.Count > 1 Then
                         Dim 下一个 As Integer
@@ -199,10 +237,31 @@ Public NotInheritable Class 播放列表
                             下一个 = Random.Shared.Next(项目.Count)
                         Loop While 下一个 = 当前值
                         当前值 = 下一个
+                        当前项已变化 = True
                     End If
             End Select
-            Return 项目(当前值)
+            结果 = 项目(当前值)
         End SyncLock
+        If 当前项已变化 Then RaiseEvent 列表变化(Me, EventArgs.Empty)
+        Return 结果
+    End Function
+
+    Public Function 移动到相邻项目(方向 As Integer) As 播放列表项
+        If 方向 <> -1 AndAlso 方向 <> 1 Then Throw New ArgumentOutOfRangeException(NameOf(方向))
+        Dim 结果 As 播放列表项
+        SyncLock 项目
+            If 项目.Count = 0 Then Return Nothing
+            Dim 目标索引 = If(当前值 < 0, If(方向 > 0, 0, 项目.Count - 1), 当前值 + 方向)
+            If 目标索引 < 0 OrElse 目标索引 >= 项目.Count Then Return Nothing
+            当前值 = 目标索引
+            结果 = 项目(当前值)
+        End SyncLock
+        RaiseEvent 列表变化(Me, EventArgs.Empty)
+        Return 结果
+    End Function
+
+    Friend Shared Function 是支持的媒体文件(路径 As String) As Boolean
+        Return Not String.IsNullOrWhiteSpace(路径) AndAlso 媒体扩展名.Contains(IO.Path.GetExtension(路径))
     End Function
 
     Friend Shared Function 规范本地文件(值 As String) As String

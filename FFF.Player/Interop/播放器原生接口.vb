@@ -131,6 +131,7 @@ Friend Enum 原生位图字幕标志 As UInteger
     流结束 = 2
     强制 = 4
     仍需读取 = 8
+    未变化 = 16
 End Enum
 
 <StructLayout(LayoutKind.Sequential)>

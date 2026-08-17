@@ -66,6 +66,7 @@ Public NotInheritable Class SUP字幕解码器
         If (info.标志 And 原生位图字幕标志.仍需读取) <> 0 Then
             Return New SUP字幕事件(info, Array.Empty(Of Byte)())
         End If
+        If info.像素字节数 > Integer.MaxValue Then Throw New InvalidOperationException("SUP 字幕帧过大。")
         Dim pixels = If(info.像素字节数 = 0, Array.Empty(Of Byte)(), New Byte(CInt(info.像素字节数) - 1) {})
         Dim pinned As GCHandle
         Try

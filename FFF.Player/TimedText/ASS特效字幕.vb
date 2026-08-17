@@ -70,6 +70,7 @@ Friend NotInheritable Class ASS特效字幕帧生成器
 
     Private ReadOnly 句柄 As ASS字幕原生句柄
     Private 像素缓冲 As Byte() = Array.Empty(Of Byte)()
+    Private 上一帧 As ASS特效字幕帧
     Private 已释放 As Boolean
 
     Public Sub New(字幕路径 As String, 媒体路径 As String, Optional 流索引 As Integer = -1)
@@ -105,8 +106,10 @@ Friend NotInheritable Class ASS特效字幕帧生成器
             .大小 = CUInt(Marshal.SizeOf(Of 原生位图字幕帧)()), .版本 = 1UI}
         检查结果(播放器原生接口.FFF3FP_RenderAssSubtitle(
             句柄, 时间.Ticks, 画布宽度, 画布高度, 信息))
+        If (信息.标志 And 原生位图字幕标志.未变化) <> 0 Then Return 上一帧
         If 信息.像素字节数 = 0 OrElse (信息.标志 And 原生位图字幕标志.清除) <> 0 Then
             检查结果(播放器原生接口.FFF3FP_CopyAssSubtitlePixels(句柄, IntPtr.Zero, 0UI))
+            上一帧 = Nothing
             Return Nothing
         End If
         If 信息.像素字节数 > Integer.MaxValue Then Throw New InvalidOperationException("ASS 特效字幕帧过大。")
@@ -119,13 +122,15 @@ Friend NotInheritable Class ASS特效字幕帧生成器
         Finally
             If 固定句柄.IsAllocated Then 固定句柄.Free()
         End Try
-        Return New ASS特效字幕帧(信息, 像素缓冲)
+        上一帧 = New ASS特效字幕帧(信息, 像素缓冲)
+        Return 上一帧
     End Function
 
     Public Sub Dispose() Implements IDisposable.Dispose
         If 已释放 Then Return
         已释放 = True
         句柄.Dispose()
+        上一帧 = Nothing
         像素缓冲 = Array.Empty(Of Byte)()
         GC.SuppressFinalize(Me)
     End Sub

@@ -14,9 +14,7 @@ extern "C" {
 // 生命周期更长；本类只借用它。每个源的 deque 保存 48 kHz stereo 交错 float，并以绝对样本索引定位。
 AudioMixer::AudioMixer(AudioTrackEncoder* outputTrack, std::vector<float> sourceGains)
     : outputTrack_(outputTrack), sources_(sourceGains.size()), sourceGains_(std::move(sourceGains)),
-      nextMixedSample_(0) {
-    for (auto& source : sources_) source = { nullptr, {}, {}, 0, 0, false, false, 0, 0 };
-}
+      nextMixedSample_(0) {}
 
 // 释放每个输入源的 SwrContext。已混合的 AAC FIFO 归 outputTrack 管理；析构不隐式 Finish，
 // 正常停止必须由 VideoMuxer 先调用本类 Finish 再排空 AAC 编码器。

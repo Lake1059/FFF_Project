@@ -106,6 +106,7 @@ UI 应把自己的 `SynchronizationContext` 写入 `播放器配置.事件同步
 
 ```text
 FFF.Player.Tests --audio-latency-regression
+FFF.Player.Tests --shared-audio-file-regression
 FFF.Player.Tests --audio-cover-regression <带内嵌封面的纯音频>
 FFF.Player.Tests --color-regression <SDR视频> <HDR视频>
 FFF.Player.Tests --hdr-switch-regression <HDR视频>
@@ -120,6 +121,7 @@ FFF.Player.Tests --timed-text-regression
 ```
 
 音频延迟回归自生成双声道 PCM，在完全无画面条件下覆盖共享/独占时钟、缓冲、欠载和每声道响度；
+音乐文件共享回归自生成 WAV，并验证播放中仍可改名、取得写访问和删除；
 封面回归先无窗口打开纯音频，再绑定一个不显示的 HWND，只检查封面流、尺寸和交换链呈现计数。
 色彩回归覆盖 SDR 码值直通、PQ 数值映射和 HDR→SDR 换片；HDR 切换回归在真实窗口中验证
 播放期间的 SDR→10-bit PQ→SDR 交换链切换、视频出帧和文字图层持续合成；性能回归固定覆盖 CPU 解码、呈现、

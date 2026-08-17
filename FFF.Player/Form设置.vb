@@ -25,6 +25,7 @@ Public Class Form设置
         ModernTabListControl1.Items(8).BoundControl = 音乐与歌词页面
         ModernTabListControl1.Items(9).BoundControl = 文件关联页面
         If 主窗体 IsNot Nothing Then Location = Me.居中于(主窗体.Bounds)
+        应用玻璃背景(SP_UnLock AndAlso 设置.实例对象.SP_毛玻璃模式 > 0)
         应用字体(设置.实例对象.字体)
     End Sub
 
@@ -62,6 +63,22 @@ Public Class Form设置
             Dim 排除 = If(ReferenceEquals(页面, 界面与尺寸页面),
                         New Control() {界面与尺寸页面.MCB_全局字体}, Nothing)
             字体控制.设置控件字体(fontName, 页面, 排除, True)
+        Next
+    End Sub
+
+    Friend Sub 应用玻璃背景(启用 As Boolean)
+        Dim 背景颜色 = If(启用, Color.Transparent, Color.FromArgb(24, 24, 24))
+        ModernTabListControl1.BackColor = 背景颜色
+        ModernTabListControl1.TabStripBackColor = 背景颜色
+        ModernTabListControl1.ContentBackColor = 背景颜色
+        For Each 页面 In {关于页面, 个性化页面, 支持者页面, 界面与尺寸页面,
+                         HDR页面, 字幕页面, 弹幕页面, 音乐与歌词页面, 文件关联页面}
+            Dim 根面板 = DirectCast(页面, Form).Controls.Cast(Of Control)().OfType(Of LakeUI.ModernPanel)().
+                FirstOrDefault(Function(x) x.Dock = DockStyle.Fill)
+            If 根面板 Is Nothing Then Continue For
+            根面板.BackColor = 背景颜色
+            根面板.BackColor1 = 背景颜色
+            根面板.BackgroundSource = If(启用, Me, Nothing)
         Next
     End Sub
 
