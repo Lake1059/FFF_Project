@@ -70,10 +70,11 @@ bool ReadWindowsDisplayLuminance(const HMONITOR monitor,
 
 constexpr std::uint32_t OutputBitDepthForSource(const std::uint32_t sourceBitDepth,
     const bool hdr) noexcept {
-    // Match the mainstream MPC Video Renderer contract: floating point is an
-    // internal processing format, never an SDR desktop swap-chain format.
-    // DWM can then apply the Windows HDR SDR-white setting exactly once.
-    if (hdr) return 10;
+    // HDR output uses a 16-bit scRGB floating-point swap chain (linear
+    // Rec.709 primaries, 1.0 = 80 nits) so the display's tone mapper receives
+    // full-precision linear light. Floating point is never used for SDR so DWM
+    // applies the Windows HDR SDR-white adjustment exactly once.
+    if (hdr) return 16;
     if (sourceBitDepth > 8) return 10;
     return 8;
 }
@@ -485,12 +486,12 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
         if(Source2020!=0)rgb=ToBt709(To709(ToLinear709(rgb)));
         return float4(rgb,1);
     }
-    // PQ/Rec.2020 already matches the HDR swap-chain contract exactly.
-    if(ColorMode==2&&Transfer==1&&Source2020!=0)return float4(rgb,1);
     float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):ToLinear709(rgb)*PaperWhite);
     if(ColorMode==2){
-        if(Source2020==0)nits=To2020(nits);
-        return float4(NitsToPq(nits),1);
+        // scRGB swap-chain contract: linear Rec.709 primaries, 1.0 = 80 nits.
+        // Tone mapping is delegated to the display via the HDR metadata.
+        float3 rec709Nits=Source2020==0?nits:To709(nits);
+        return float4(rec709Nits/80.0,1);
     }
     if(Source2020==0)nits=To2020(nits);
     // BT.2390 operates on IPT intensity before Rec.2020-to-Rec.709 gamut
@@ -1554,8 +1555,8 @@ FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8
 PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), coverBackdropPixelShader_(nullptr),
-      timedTextPixelShader_(nullptr), scalePixelShader_(nullptr),
-      sampler_(nullptr), pointSampler_(nullptr), constants_(nullptr), scaleConstants_(nullptr),
+      timedTextPixelShader_(nullptr), scalePixelShader_(nullptr), sampler_(nullptr),
+      pointSampler_(nullptr), constants_(nullptr), scaleConstants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
       scaledVideoGeneration_(UINT64_MAX), scaledOutputWidth_(0), scaledOutputHeight_(0),
       scaledSourceViews_{nullptr, nullptr, nullptr},
@@ -1968,8 +1969,9 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     }
     DXGI_SWAP_CHAIN_DESC1 description{};
     description.Width = width; description.Height = height;
-    description.Format = outputBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
-        DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.Format = outputBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+        (outputBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
+            DXGI_FORMAT_B8G8R8A8_UNORM);
     description.SampleDesc.Count = 1; description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     description.BufferCount = 2; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_NONE;
@@ -1985,10 +1987,10 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     ReleaseTimedTextResources();
     if (hdr) {
         UINT support = 0;
-        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) ||
+        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) ||
             (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
-            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
-            fallbackReason_ = "The swap chain rejected the Rec.2020 PQ color space.";
+            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
+            fallbackReason_ = "The swap chain rejected the scRGB color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
             hdrSwapChainRejected_ = true;
             hdrSupportCheckedAt_ = std::chrono::steady_clock::now();
@@ -2016,7 +2018,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
 }
 
 FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::uint32_t outputBits) noexcept {
-    const auto formatBits = hdr ? std::max(10u, outputBits) : outputBits;
+    const auto formatBits = hdr ? std::max(16u, outputBits) : outputBits;
     if (swapChain_ == nullptr || (hdr == swapHdr_ && formatBits == swapOutputBits_)) return FFFResult::Success;
     if (context_ != nullptr) { context_->ClearState(); context_->Flush(); }
     ReleaseTimedTextResources();
@@ -2036,8 +2038,9 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
         swapOutputBits_ = 8;
         return CreateSwapChain(width, height, hdr, formatBits);
     }
-    const auto format = formatBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
-        DXGI_FORMAT_B8G8R8A8_UNORM;
+    const auto format = formatBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+        (formatBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
+            DXGI_FORMAT_B8G8R8A8_UNORM);
     std::unique_lock presentLock(presentMutex_);
     const auto resize = swapChain_->ResizeBuffers(0, std::max(1u, swapWidth_),
         std::max(1u, swapHeight_), format, 0);
@@ -2051,10 +2054,10 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
     swapHdr_ = hdr; swapOutputBits_ = formatBits;
     if (hdr) {
         UINT support = 0;
-        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) ||
+        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) ||
             (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
-            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
-            fallbackReason_ = "The reconfigured swap chain rejected the Rec.2020 PQ color space.";
+            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
+            fallbackReason_ = "The reconfigured swap chain rejected the scRGB color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
             hdrSwapChainRejected_ = true;
             hdrSupportCheckedAt_ = std::chrono::steady_clock::now();
@@ -2632,7 +2635,6 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
         }
         scaledSourceViews_[plane] = currentView;
     }
-
     scaledVideoGeneration_ = generation;
     scaledOutputWidth_ = outputWidth;
     scaledOutputHeight_ = outputHeight;
@@ -4150,7 +4152,8 @@ FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept 
     D3D11_TEXTURE2D_DESC description{};
     backBuffer->GetDesc(&description);
     if (description.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
-        description.Format != DXGI_FORMAT_R10G10B10A2_UNORM)
+        description.Format != DXGI_FORMAT_R10G10B10A2_UNORM &&
+        description.Format != DXGI_FORMAT_R16G16B16A16_FLOAT)
         return FFFResult::NotSupported;
     description.Width = description.Height = 1;
     description.MipLevels = description.ArraySize = 1;
@@ -4181,6 +4184,13 @@ FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept 
         probe.green = static_cast<float>((packed >> 10) & 0x3ffu) * rgbScale;
         probe.blue = static_cast<float>((packed >> 20) & 0x3ffu) * rgbScale;
         probe.alpha = static_cast<float>((packed >> 30) & 0x3u) / 3.0f;
+    } else if (description.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        // scRGB linear output (1.0 = 80 nits); report raw linear values.
+        const auto* rgba = static_cast<const float*>(mapped.pData);
+        probe.red = rgba[0];
+        probe.green = rgba[1];
+        probe.blue = rgba[2];
+        probe.alpha = rgba[3];
     }
     context_->Unmap(staging.Get(), 0);
     probe.scalingMode = actualVideoScalingMode_.load();
@@ -4351,7 +4361,6 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseCoverBackdropResources();
     ReleaseTimedTextResources();
     ReleaseScaleResources();
-
     if (context_ != nullptr &&
         (device_ == nullptr || SUCCEEDED(device_->GetDeviceRemovedReason()))) {
         context_->ClearState();

@@ -375,11 +375,14 @@ bool HdrProcessor::RequiresMetadataAwareShader() const noexcept {
 void HdrProcessor::BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) const noexcept {
     const auto state = State();
     std::memset(&metadata, 0, sizeof(metadata));
-    // The shader output contract is always Rec.2020/PQ. PQ sources pass through
-    // without display-peak compression, so luminance metadata must describe the
-    // source signal rather than the target monitor. Keep mastering luminance and
-    // MaxCLL separate: HDR->SDR uses MaxCLL as a tone-map bound, but HDR10
-    // metadata expects the actual mastering display peak when it is present.
+    // The HDR swap chain is 16-bit scRGB (linear Rec.709 primaries, 1.0 = 80
+    // nits). The shader converts the source to linear Rec.709, but the HDR10
+    // metadata primaries still describe the *source* mastering display (usually
+    // Rec.2020) rather than the output signal: DWM's scRGB compositor consumes
+    // the luminance fields for tone mapping while the primaries document the
+    // content. Keep mastering luminance and MaxCLL separate: HDR->SDR uses
+    // MaxCLL as a tone-map bound, but HDR10 metadata expects the actual
+    // mastering display peak when it is present.
     const auto& source = state.staticMetadata;
     metadata.RedPrimary[0] = DxgiChromaticity(source.redX);
     metadata.RedPrimary[1] = DxgiChromaticity(source.redY);
