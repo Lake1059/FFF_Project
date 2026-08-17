@@ -2501,24 +2501,10 @@ FFFResult PlayerVideoRenderer::EnsurePlaneScaleChain(const std::size_t plane,
 
 FFFResult PlayerVideoRenderer::ExecuteScalePass(ID3D11ShaderResourceView* source,
     const std::uint32_t sourceWidth, const std::uint32_t sourceHeight,
-    const ScalePassResource& pass) noexcept {
+    const ScalePassResource& pass, const std::uint32_t filter) noexcept {
     if (source == nullptr || pass.target == nullptr || context_ == nullptr ||
         scalePixelShader_ == nullptr || scaleConstants_ == nullptr)
         return FFFResult::InvalidState;
-    const float scale = pass.axis == 0 ?
-        static_cast<float>(pass.width) / static_cast<float>(sourceWidth) :
-        static_cast<float>(pass.height) / static_cast<float>(sourceHeight);
-    // 智能缩放算法选择:
-    //   scale < 0.25 → Area (Filter=2, 大比例缩小防混叠)
-    //   0.25 ≤ scale < 1.0 → Bicubic (Filter=0, 中等缩小平滑)
-    //   scale ≥ 1.0 → Lanczos-3 (Filter=1, 放大/等尺寸高保真)
-    unsigned int filter = 0u;
-    if (scale >= 1.0f)
-        filter = 1u;
-    else if (scale >= 0.25f)
-        filter = 0u;
-    else
-        filter = 2u;
     const ScaleShaderSettings settings{
         static_cast<float>(sourceWidth), static_cast<float>(sourceHeight),
         static_cast<float>(pass.width), static_cast<float>(pass.height),
@@ -2604,11 +2590,24 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
             targetWidth, targetHeight, static_cast<std::uint32_t>(format));
         if (ensure != FFFResult::Success) return ensure;
 
+        // Select the reconstruction filter once for the whole chain. The
+        // decision uses the overall downsample ratio (display area / source)
+        // rather than any single pass's instantaneous ratio, which the
+        // halving chain keeps near 0.5. Heavy downscales use an area-average
+        // (box) filter for anti-aliasing; otherwise honour the user's
+        // scaling-quality preference (Lanczos-3 for high quality, bicubic
+        // for balanced).
+        const float scaleX = static_cast<float>(targetWidth) / static_cast<float>(planeWidth);
+        const float scaleY = static_cast<float>(targetHeight) / static_cast<float>(planeHeight);
+        const std::uint32_t filter = std::min(scaleX, scaleY) < 0.25f ? 2u :
+            (scalingQuality_ == FFF3FPVideoScalingQuality::HighQuality ? 1u : 0u);
+
         auto* currentView = sourceViews_[plane];
         auto currentWidth = planeWidth;
         auto currentHeight = planeHeight;
         for (const auto& pass : planeScaleChains_[plane].passes) {
-            const auto execute = ExecuteScalePass(currentView, currentWidth, currentHeight, pass);
+            const auto execute = ExecuteScalePass(currentView, currentWidth, currentHeight,
+                pass, filter);
             if (execute != FFFResult::Success) return execute;
             currentView = pass.view;
             currentWidth = pass.width;

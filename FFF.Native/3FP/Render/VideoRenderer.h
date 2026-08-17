@@ -219,7 +219,7 @@ private:
         std::uint32_t targetHeight, std::uint32_t format) noexcept;
     FFFResult ExecuteScalePass(ID3D11ShaderResourceView* source,
         std::uint32_t sourceWidth, std::uint32_t sourceHeight,
-        const ScalePassResource& pass) noexcept;
+        const ScalePassResource& pass, std::uint32_t filter) noexcept;
     FFFResult ExecuteUnsharpMask(ID3D11ShaderResourceView* source,
         std::uint32_t width, std::uint32_t height,
         ID3D11UnorderedAccessView* target) noexcept;
