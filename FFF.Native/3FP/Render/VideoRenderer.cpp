@@ -1554,8 +1554,8 @@ FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8
 PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), coverBackdropPixelShader_(nullptr),
-      timedTextPixelShader_(nullptr), scalePixelShader_(nullptr), sampler_(nullptr),
-      pointSampler_(nullptr), constants_(nullptr), scaleConstants_(nullptr),
+      timedTextPixelShader_(nullptr), scalePixelShader_(nullptr),
+      sampler_(nullptr), pointSampler_(nullptr), constants_(nullptr), scaleConstants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
       scaledVideoGeneration_(UINT64_MAX), scaledOutputWidth_(0), scaledOutputHeight_(0),
       scaledSourceViews_{nullptr, nullptr, nullptr},
@@ -1599,6 +1599,9 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       requestedMode_(FFF3FPColorMode::MapToSdr), actualMode_(FFF3FPColorMode::MapToSdr),
       sdrPeakNits_(100.0f), hdrPeakNits_(0.0f),
       paperWhiteNits_(203.0f), sourcePeakNits_(100.0f),
+      viewZoomBits_(std::bit_cast<float>(1.0f)),
+      viewPanXBits_(std::bit_cast<float>(0.0f)),
+      viewPanYBits_(std::bit_cast<float>(0.0f)),
       timedTextThreadStop_(false), timedTextThreadRunning_(false),
       coverBackdropThreadStop_(false), coverBackdropRequestPending_(false),
       coverBackdropRequestGeneration_(0),
@@ -1674,6 +1677,20 @@ FFFResult PlayerVideoRenderer::SetScalingQuality(
     if (scalingQuality_ == quality) return FFFResult::Success;
     scalingQuality_ = quality;
     scaledVideoGeneration_ = UINT64_MAX;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::SetViewTransform(const float zoom,
+    const float panX, const float panY) noexcept {
+    if (!std::isfinite(zoom) || zoom <= 0.0f || !std::isfinite(panX) || !std::isfinite(panY))
+        return FFFResult::InvalidArgument;
+    std::lock_guard deviceLock(deviceMutex_);
+    const auto zoomClamped = std::clamp(zoom, 0.05f, 64.0f);
+    const auto panXClamped = std::clamp(panX, -1.0f, 1.0f);
+    const auto panYClamped = std::clamp(panY, -1.0f, 1.0f);
+    viewZoomBits_.store(std::bit_cast<float>(zoomClamped), std::memory_order_relaxed);
+    viewPanXBits_.store(std::bit_cast<float>(panXClamped), std::memory_order_relaxed);
+    viewPanYBits_.store(std::bit_cast<float>(panYClamped), std::memory_order_relaxed);
     return FFFResult::Success;
 }
 
@@ -2615,6 +2632,7 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
         }
         scaledSourceViews_[plane] = currentView;
     }
+
     scaledVideoGeneration_ = generation;
     scaledOutputWidth_ = outputWidth;
     scaledOutputHeight_ = outputHeight;
@@ -4069,6 +4087,28 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         destination = CalculateVideoDestination(sourceWidth_, sourceHeight_, swapWidth_,
             swapHeight_, sourceLimitedToNativeSize_);
     }
+    // Apply the view transform (zoom + pan) around the destination center.
+    // Zoom scales the fitted video box; pan offsets are normalized to the
+    // unzoomed box and clamped so the zoomed view always covers the fitted box.
+    const auto zoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire));
+    const auto panX = std::bit_cast<float>(viewPanXBits_.load(std::memory_order_acquire));
+    const auto panY = std::bit_cast<float>(viewPanYBits_.load(std::memory_order_acquire));
+    if (zoom > 1.0001f) {
+        const float zoomedWidth = destination.width * zoom;
+        const float zoomedHeight = destination.height * zoom;
+        const float maxPanX = (zoomedWidth - destination.width) / (2.0f * destination.width);
+        const float maxPanY = (zoomedHeight - destination.height) / (2.0f * destination.height);
+        const float offsetX = panX * std::max(maxPanX, 0.0f) * destination.width;
+        const float offsetY = panY * std::max(maxPanY, 0.0f) * destination.height;
+        destination.x = static_cast<std::uint32_t>(
+            std::max(0.0f, static_cast<float>(destination.x) +
+                (destination.width - zoomedWidth) / 2.0f - offsetX));
+        destination.y = static_cast<std::uint32_t>(
+            std::max(0.0f, static_cast<float>(destination.y) +
+                (destination.height - zoomedHeight) / 2.0f - offsetY));
+        destination.width = static_cast<std::uint32_t>(zoomedWidth);
+        destination.height = static_cast<std::uint32_t>(zoomedHeight);
+    }
     ID3D11ShaderResourceView* presentationViews[3]{};
     const auto scaleResult = PrepareScaledVideo(destination.width, destination.height,
         presentationViews);
@@ -4311,6 +4351,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseCoverBackdropResources();
     ReleaseTimedTextResources();
     ReleaseScaleResources();
+
     if (context_ != nullptr &&
         (device_ == nullptr || SUCCEEDED(device_->GetDeviceRemovedReason()))) {
         context_->ClearState();

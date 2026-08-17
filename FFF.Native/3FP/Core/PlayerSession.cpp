@@ -1010,6 +1010,20 @@ FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
     });
     return FFFResult::Success;
 }
+FFFResult PlayerSession::SetViewTransform(const float zoom, const float panX,
+    const float panY) noexcept {
+    if (!std::isfinite(zoom) || zoom <= 0.0f || !std::isfinite(panX) || !std::isfinite(panY))
+        return FFFResult::InvalidArgument;
+    Enqueue([this, zoom, panX, panY] {
+        const auto result = videoRenderer_.SetViewTransform(zoom, panX, panY);
+        if (result != FFFResult::Success) return;
+        const auto redrawResult = videoRenderer_.Redraw();
+        if (redrawResult != FFFResult::Success &&
+            redrawResult != FFFResult::InvalidState &&
+            videoRenderer_.RequestRecoveryIfDeviceLost()) return;
+    });
+    return FFFResult::Success;
+}
 FFFResult PlayerSession::RecreateAudioRenderer(const std::wstring& endpointId,
     const bool exclusive, const bool paused, std::string& error) noexcept {
     try {

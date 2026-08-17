@@ -115,6 +115,7 @@ public:
 
     FFFResult SetWindow(HWND window) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
+    FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
@@ -366,6 +367,11 @@ private:
     float sdrPeakNits_;
     float hdrPeakNits_;
     float paperWhiteNits_;
+    // View transform (zoom + pan) applied when composing the video into the
+    // swap chain. Normalized pan in [-1,1] relative to the unzoomed video box.
+    std::atomic<float> viewZoomBits_;
+    std::atomic<float> viewPanXBits_;
+    std::atomic<float> viewPanYBits_;
     float sourcePeakNits_;
     HdrProcessor hdrProcessor_;
     std::vector<std::uint8_t> convertedRgb_;
