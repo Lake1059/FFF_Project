@@ -44,7 +44,7 @@ Friend NotInheritable Class 播放器剪辑区间控制器
         按钮容器 = 按钮容器值
         传递按钮 = 传递按钮值
         模式按钮.TabStop = False
-        进度条 = New 剪辑区间进度条控件 With {.Dock = DockStyle.Fill}
+        进度条 = New 剪辑区间进度条控件 With {.Dock = DockStyle.Fill, .BackColor = Color.Transparent}
         进度条容器.Controls.Add(进度条)
         校正按钮宽度()
     End Sub

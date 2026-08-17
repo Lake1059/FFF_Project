@@ -38,6 +38,7 @@ Public Class Form媒体信息
 
     Private Sub Form媒体信息_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         Form1.ThisIsYourWindow1.Attach(Me)
+        字体控制.设置控件字体(设置.实例对象.字体, Me, Nothing, True)
         If UltraDetailListView1.Columns.Count > 0 Then UltraDetailListView1.Columns(0).Text = "媒体参数"
         调整左栏宽度() : 调整列表列宽() : 重置响度条() : 刷新()
         ' 在启动一秒定时器前先建立基线，这样首个 Tick 就能给出完整的一秒统计值。

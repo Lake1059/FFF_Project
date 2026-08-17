@@ -1469,6 +1469,8 @@ Friend Module Program
             Next
 
             Dim 时间轴 = 控制器.进度条
+            断言(时间轴.BackColor = Color.Transparent,
+                "剪辑时间轴没有应用透明背景色。")
             Dim 时间轴类型 = 时间轴.GetType()
             Dim 更新播放状态 = 时间轴类型.GetMethod("更新播放状态", 标志)
             Dim 设为入点 = 时间轴类型.GetMethod("设为入点", 标志)
@@ -2133,6 +2135,9 @@ Friend Module Program
             Dim 已打开窗口 = Application.OpenForms.OfType(Of Form媒体信息)().ToArray()
             断言(已打开窗口.Length = 原窗口数 + 1, "左键没有且仅没有打开一个媒体信息窗口。")
             断言(Not CBool(可见字段.GetValue(呈现器)), "左键错误切换了播放器信息层。")
+            断言(已打开窗口.All(Function(x) String.Equals(x.Font.Name, 设置.实例对象.字体,
+                                                          StringComparison.OrdinalIgnoreCase)),
+                "媒体信息窗口加载时没有应用全局字体。")
             For Each 媒体窗口 In 已打开窗口
                 媒体窗口.Close()
             Next

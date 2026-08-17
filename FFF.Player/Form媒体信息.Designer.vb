@@ -78,7 +78,8 @@ Partial Class Form媒体信息
         ' 
         ' ModernPanel1
         ' 
-        ModernPanel1.BackColor1 = Color.FromArgb(CByte(24), CByte(24), CByte(24))
+        ModernPanel1.BackColor = Color.Transparent
+        ModernPanel1.BackColor1 = Color.Transparent
         ModernPanel1.BorderSize = 0
         ModernPanel1.Controls.Add(Panel2)
         ModernPanel1.Controls.Add(Panel1)
@@ -90,6 +91,7 @@ Partial Class Form媒体信息
         ' 
         ' Panel2
         ' 
+        Panel2.BackColor = Color.Transparent
         Panel2.Controls.Add(UltraDetailListView1)
         Panel2.Dock = DockStyle.Fill
         Panel2.Location = New Point(361, 0)
@@ -121,6 +123,9 @@ Partial Class Form媒体信息
         UltraDetailListView1.Margin = New Padding(2, 2, 2, 2)
         UltraDetailListView1.Name = "UltraDetailListView1"
         UltraDetailListView1.Padding = New Padding(10, 0, 0, 0)
+        UltraDetailListView1.ScrollBarThumbColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.ScrollBarThumbHoverColor = Color.FromArgb(CByte(120), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.ScrollBarTrackColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
         UltraDetailListView1.SelectionRectBorderColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         UltraDetailListView1.SelectionRectFillColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         UltraDetailListView1.Size = New Size(413, 601)
@@ -128,6 +133,7 @@ Partial Class Form媒体信息
         ' 
         ' Panel1
         ' 
+        Panel1.BackColor = Color.Transparent
         Panel1.Controls.Add(ModernPanel3)
         Panel1.Controls.Add(JustEmptyControl2)
         Panel1.Controls.Add(ModernPanel4)
@@ -153,10 +159,10 @@ Partial Class Form媒体信息
         ModernPanel3.Controls.Add(HtmlColorLabel9)
         ModernPanel3.Controls.Add(HtmlColorLabel10)
         ModernPanel3.Dock = DockStyle.Fill
-        ModernPanel3.Location = New Point(10, 196)
+        ModernPanel3.Location = New Point(10, 178)
         ModernPanel3.Name = "ModernPanel3"
         ModernPanel3.Padding = New Padding(10)
-        ModernPanel3.Size = New Size(341, 193)
+        ModernPanel3.Size = New Size(341, 229)
         ModernPanel3.TabIndex = 2
         ' 
         ' Panel3
@@ -178,9 +184,9 @@ Partial Class Form媒体信息
         Panel3.Controls.Add(JustEmptyControl3)
         Panel3.Controls.Add(EPB_L)
         Panel3.Dock = DockStyle.Fill
-        Panel3.Location = New Point(15, 120)
+        Panel3.Location = New Point(15, 108)
         Panel3.Name = "Panel3"
-        Panel3.Size = New Size(310, 57)
+        Panel3.Size = New Size(310, 105)
         Panel3.TabIndex = 5
         ' 
         ' EPB_BR
@@ -203,7 +209,7 @@ Partial Class Form媒体信息
         EPB_BR.Minimum = -60
         EPB_BR.Name = "EPB_BR"
         EPB_BR.Orientation = LakeUI.ExcellentProgressBar.BarOrientationEnum.Vertical
-        EPB_BR.Size = New Size(30, 57)
+        EPB_BR.Size = New Size(30, 105)
         EPB_BR.TabIndex = 63
         EPB_BR.Text = "BR"
         EPB_BR.TextAlign = ContentAlignment.BottomCenter
@@ -217,7 +223,7 @@ Partial Class Form媒体信息
         JustEmptyControl10.Dock = DockStyle.Left
         JustEmptyControl10.Location = New Point(270, 0)
         JustEmptyControl10.Name = "JustEmptyControl10"
-        JustEmptyControl10.Size = New Size(10, 57)
+        JustEmptyControl10.Size = New Size(10, 105)
         JustEmptyControl10.TabIndex = 62
         ' 
         ' EPB_BL
@@ -240,7 +246,7 @@ Partial Class Form媒体信息
         EPB_BL.Minimum = -60
         EPB_BL.Name = "EPB_BL"
         EPB_BL.Orientation = LakeUI.ExcellentProgressBar.BarOrientationEnum.Vertical
-        EPB_BL.Size = New Size(30, 57)
+        EPB_BL.Size = New Size(30, 105)
         EPB_BL.TabIndex = 61
         EPB_BL.Text = "BL"
         EPB_BL.TextAlign = ContentAlignment.BottomCenter
@@ -254,7 +260,7 @@ Partial Class Form媒体信息
         JustEmptyControl9.Dock = DockStyle.Left
         JustEmptyControl9.Location = New Point(230, 0)
         JustEmptyControl9.Name = "JustEmptyControl9"
-        JustEmptyControl9.Size = New Size(10, 57)
+        JustEmptyControl9.Size = New Size(10, 105)
         JustEmptyControl9.TabIndex = 60
         ' 
         ' EPB_SR
@@ -277,7 +283,7 @@ Partial Class Form媒体信息
         EPB_SR.Minimum = -60
         EPB_SR.Name = "EPB_SR"
         EPB_SR.Orientation = LakeUI.ExcellentProgressBar.BarOrientationEnum.Vertical
-        EPB_SR.Size = New Size(30, 57)
+        EPB_SR.Size = New Size(30, 105)
         EPB_SR.TabIndex = 59
         EPB_SR.Text = "SR"
         EPB_SR.TextAlign = ContentAlignment.BottomCenter
@@ -291,7 +297,7 @@ Partial Class Form媒体信息
         JustEmptyControl7.Dock = DockStyle.Left
         JustEmptyControl7.Location = New Point(190, 0)
         JustEmptyControl7.Name = "JustEmptyControl7"
-        JustEmptyControl7.Size = New Size(10, 57)
+        JustEmptyControl7.Size = New Size(10, 105)
         JustEmptyControl7.TabIndex = 58
         ' 
         ' EPB_SL
@@ -314,7 +320,7 @@ Partial Class Form媒体信息
         EPB_SL.Minimum = -60
         EPB_SL.Name = "EPB_SL"
         EPB_SL.Orientation = LakeUI.ExcellentProgressBar.BarOrientationEnum.Vertical
-        EPB_SL.Size = New Size(30, 57)
+        EPB_SL.Size = New Size(30, 105)
         EPB_SL.TabIndex = 57
         EPB_SL.Text = "SL"
         EPB_SL.TextAlign = ContentAlignment.BottomCenter
@@ -328,7 +334,7 @@ Partial Class Form媒体信息
         JustEmptyControl6.Dock = DockStyle.Left
         JustEmptyControl6.Location = New Point(150, 0)
         JustEmptyControl6.Name = "JustEmptyControl6"
-        JustEmptyControl6.Size = New Size(10, 57)
+        JustEmptyControl6.Size = New Size(10, 105)
         JustEmptyControl6.TabIndex = 56
         ' 
         ' EPB_LFE
@@ -351,7 +357,7 @@ Partial Class Form媒体信息
         EPB_LFE.Minimum = -60
         EPB_LFE.Name = "EPB_LFE"
         EPB_LFE.Orientation = LakeUI.ExcellentProgressBar.BarOrientationEnum.Vertical
-        EPB_LFE.Size = New Size(30, 57)
+        EPB_LFE.Size = New Size(30, 105)
         EPB_LFE.TabIndex = 55
         EPB_LFE.Text = "LFE"
         EPB_LFE.TextAlign = ContentAlignment.BottomCenter
@@ -365,7 +371,7 @@ Partial Class Form媒体信息
         JustEmptyControl5.Dock = DockStyle.Left
         JustEmptyControl5.Location = New Point(110, 0)
         JustEmptyControl5.Name = "JustEmptyControl5"
-        JustEmptyControl5.Size = New Size(10, 57)
+        JustEmptyControl5.Size = New Size(10, 105)
         JustEmptyControl5.TabIndex = 54
         ' 
         ' EPB_C
@@ -388,7 +394,7 @@ Partial Class Form媒体信息
         EPB_C.Minimum = -60
         EPB_C.Name = "EPB_C"
         EPB_C.Orientation = LakeUI.ExcellentProgressBar.BarOrientationEnum.Vertical
-        EPB_C.Size = New Size(30, 57)
+        EPB_C.Size = New Size(30, 105)
         EPB_C.TabIndex = 53
         EPB_C.Text = "C"
         EPB_C.TextAlign = ContentAlignment.BottomCenter
@@ -402,7 +408,7 @@ Partial Class Form媒体信息
         JustEmptyControl4.Dock = DockStyle.Left
         JustEmptyControl4.Location = New Point(70, 0)
         JustEmptyControl4.Name = "JustEmptyControl4"
-        JustEmptyControl4.Size = New Size(10, 57)
+        JustEmptyControl4.Size = New Size(10, 105)
         JustEmptyControl4.TabIndex = 52
         ' 
         ' EPB_R
@@ -425,7 +431,7 @@ Partial Class Form媒体信息
         EPB_R.Minimum = -60
         EPB_R.Name = "EPB_R"
         EPB_R.Orientation = LakeUI.ExcellentProgressBar.BarOrientationEnum.Vertical
-        EPB_R.Size = New Size(30, 57)
+        EPB_R.Size = New Size(30, 105)
         EPB_R.TabIndex = 51
         EPB_R.Text = "R"
         EPB_R.TextAlign = ContentAlignment.BottomCenter
@@ -439,7 +445,7 @@ Partial Class Form媒体信息
         JustEmptyControl3.Dock = DockStyle.Left
         JustEmptyControl3.Location = New Point(30, 0)
         JustEmptyControl3.Name = "JustEmptyControl3"
-        JustEmptyControl3.Size = New Size(10, 57)
+        JustEmptyControl3.Size = New Size(10, 105)
         JustEmptyControl3.TabIndex = 50
         ' 
         ' EPB_L
@@ -462,7 +468,7 @@ Partial Class Form媒体信息
         EPB_L.Minimum = -60
         EPB_L.Name = "EPB_L"
         EPB_L.Orientation = LakeUI.ExcellentProgressBar.BarOrientationEnum.Vertical
-        EPB_L.Size = New Size(30, 57)
+        EPB_L.Size = New Size(30, 105)
         EPB_L.TabIndex = 49
         EPB_L.Text = "L"
         EPB_L.TextAlign = ContentAlignment.BottomCenter
@@ -476,11 +482,11 @@ Partial Class Form媒体信息
         HtmlColorLabel6.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel6.BackColor = Color.Transparent
         HtmlColorLabel6.Dock = DockStyle.Top
-        HtmlColorLabel6.Location = New Point(15, 90)
+        HtmlColorLabel6.Location = New Point(15, 81)
         HtmlColorLabel6.Margin = New Padding(2)
         HtmlColorLabel6.Name = "HtmlColorLabel6"
         HtmlColorLabel6.Padding = New Padding(0, 0, 0, 10)
-        HtmlColorLabel6.Size = New Size(310, 30)
+        HtmlColorLabel6.Size = New Size(310, 27)
         HtmlColorLabel6.TabIndex = 4
         HtmlColorLabel6.Text = "实时比特率："
         ' 
@@ -490,11 +496,11 @@ Partial Class Form媒体信息
         HtmlColorLabel15.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel15.BackColor = Color.Transparent
         HtmlColorLabel15.Dock = DockStyle.Top
-        HtmlColorLabel15.Location = New Point(15, 65)
+        HtmlColorLabel15.Location = New Point(15, 59)
         HtmlColorLabel15.Margin = New Padding(2)
         HtmlColorLabel15.Name = "HtmlColorLabel15"
         HtmlColorLabel15.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel15.Size = New Size(310, 25)
+        HtmlColorLabel15.Size = New Size(310, 22)
         HtmlColorLabel15.TabIndex = 6
         HtmlColorLabel15.Text = "输出格式"
         ' 
@@ -504,11 +510,11 @@ Partial Class Form媒体信息
         HtmlColorLabel9.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel9.BackColor = Color.Transparent
         HtmlColorLabel9.Dock = DockStyle.Top
-        HtmlColorLabel9.Location = New Point(15, 40)
+        HtmlColorLabel9.Location = New Point(15, 37)
         HtmlColorLabel9.Margin = New Padding(2)
         HtmlColorLabel9.Name = "HtmlColorLabel9"
         HtmlColorLabel9.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel9.Size = New Size(310, 25)
+        HtmlColorLabel9.Size = New Size(310, 22)
         HtmlColorLabel9.TabIndex = 1
         HtmlColorLabel9.Text = "输入格式"
         ' 
@@ -522,14 +528,14 @@ Partial Class Form媒体信息
         HtmlColorLabel10.Margin = New Padding(2)
         HtmlColorLabel10.Name = "HtmlColorLabel10"
         HtmlColorLabel10.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel10.Size = New Size(310, 25)
+        HtmlColorLabel10.Size = New Size(310, 22)
         HtmlColorLabel10.TabIndex = 0
         HtmlColorLabel10.Text = "音频编码 - WASAPI 共享/独占"
         ' 
         ' JustEmptyControl2
         ' 
         JustEmptyControl2.Dock = DockStyle.Bottom
-        JustEmptyControl2.Location = New Point(10, 389)
+        JustEmptyControl2.Location = New Point(10, 407)
         JustEmptyControl2.Name = "JustEmptyControl2"
         JustEmptyControl2.Size = New Size(341, 10)
         JustEmptyControl2.TabIndex = 3
@@ -544,10 +550,10 @@ Partial Class Form媒体信息
         ModernPanel4.Controls.Add(HtmlColorLabel14)
         ModernPanel4.Controls.Add(HtmlColorLabel7)
         ModernPanel4.Dock = DockStyle.Bottom
-        ModernPanel4.Location = New Point(10, 399)
+        ModernPanel4.Location = New Point(10, 417)
         ModernPanel4.Name = "ModernPanel4"
         ModernPanel4.Padding = New Padding(10)
-        ModernPanel4.Size = New Size(341, 101)
+        ModernPanel4.Size = New Size(341, 92)
         ModernPanel4.TabIndex = 4
         ' 
         ' HtmlColorLabel8
@@ -556,10 +562,10 @@ Partial Class Form媒体信息
         HtmlColorLabel8.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel8.BackColor = Color.Transparent
         HtmlColorLabel8.Dock = DockStyle.Top
-        HtmlColorLabel8.Location = New Point(15, 65)
+        HtmlColorLabel8.Location = New Point(15, 59)
         HtmlColorLabel8.Margin = New Padding(2)
         HtmlColorLabel8.Name = "HtmlColorLabel8"
-        HtmlColorLabel8.Size = New Size(310, 20)
+        HtmlColorLabel8.Size = New Size(310, 17)
         HtmlColorLabel8.TabIndex = 2
         HtmlColorLabel8.Text = "平均渲染延迟"
         ' 
@@ -569,11 +575,11 @@ Partial Class Form媒体信息
         HtmlColorLabel14.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel14.BackColor = Color.Transparent
         HtmlColorLabel14.Dock = DockStyle.Top
-        HtmlColorLabel14.Location = New Point(15, 40)
+        HtmlColorLabel14.Location = New Point(15, 37)
         HtmlColorLabel14.Margin = New Padding(2)
         HtmlColorLabel14.Name = "HtmlColorLabel14"
         HtmlColorLabel14.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel14.Size = New Size(310, 25)
+        HtmlColorLabel14.Size = New Size(310, 22)
         HtmlColorLabel14.TabIndex = 3
         HtmlColorLabel14.Text = "正在渲染的字幕数量"
         ' 
@@ -587,14 +593,14 @@ Partial Class Form媒体信息
         HtmlColorLabel7.Margin = New Padding(2)
         HtmlColorLabel7.Name = "HtmlColorLabel7"
         HtmlColorLabel7.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel7.Size = New Size(310, 25)
+        HtmlColorLabel7.Size = New Size(310, 22)
         HtmlColorLabel7.TabIndex = 1
         HtmlColorLabel7.Text = "已加载字幕条目数"
         ' 
         ' JustEmptyControl1
         ' 
         JustEmptyControl1.Dock = DockStyle.Top
-        JustEmptyControl1.Location = New Point(10, 186)
+        JustEmptyControl1.Location = New Point(10, 168)
         JustEmptyControl1.Name = "JustEmptyControl1"
         JustEmptyControl1.Size = New Size(341, 10)
         JustEmptyControl1.TabIndex = 1
@@ -615,7 +621,7 @@ Partial Class Form媒体信息
         ModernPanel2.Location = New Point(10, 10)
         ModernPanel2.Name = "ModernPanel2"
         ModernPanel2.Padding = New Padding(10)
-        ModernPanel2.Size = New Size(341, 176)
+        ModernPanel2.Size = New Size(341, 158)
         ModernPanel2.TabIndex = 0
         ' 
         ' HtmlColorLabel5
@@ -624,10 +630,10 @@ Partial Class Form媒体信息
         HtmlColorLabel5.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel5.BackColor = Color.Transparent
         HtmlColorLabel5.Dock = DockStyle.Top
-        HtmlColorLabel5.Location = New Point(15, 140)
+        HtmlColorLabel5.Location = New Point(15, 125)
         HtmlColorLabel5.Margin = New Padding(2)
         HtmlColorLabel5.Name = "HtmlColorLabel5"
-        HtmlColorLabel5.Size = New Size(310, 20)
+        HtmlColorLabel5.Size = New Size(310, 17)
         HtmlColorLabel5.TabIndex = 4
         HtmlColorLabel5.Text = "实时比特率"
         ' 
@@ -637,11 +643,11 @@ Partial Class Form媒体信息
         HtmlColorLabel4.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel4.BackColor = Color.Transparent
         HtmlColorLabel4.Dock = DockStyle.Top
-        HtmlColorLabel4.Location = New Point(15, 115)
+        HtmlColorLabel4.Location = New Point(15, 103)
         HtmlColorLabel4.Margin = New Padding(2)
         HtmlColorLabel4.Name = "HtmlColorLabel4"
         HtmlColorLabel4.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel4.Size = New Size(310, 25)
+        HtmlColorLabel4.Size = New Size(310, 22)
         HtmlColorLabel4.TabIndex = 3
         HtmlColorLabel4.Text = "输入帧率 - 当前实际渲染帧率"
         ' 
@@ -651,11 +657,11 @@ Partial Class Form媒体信息
         HtmlColorLabel3.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel3.BackColor = Color.Transparent
         HtmlColorLabel3.Dock = DockStyle.Top
-        HtmlColorLabel3.Location = New Point(15, 90)
+        HtmlColorLabel3.Location = New Point(15, 81)
         HtmlColorLabel3.Margin = New Padding(2)
         HtmlColorLabel3.Name = "HtmlColorLabel3"
         HtmlColorLabel3.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel3.Size = New Size(310, 25)
+        HtmlColorLabel3.Size = New Size(310, 22)
         HtmlColorLabel3.TabIndex = 2
         HtmlColorLabel3.Text = "输入分辨率 - 当前实际渲染分辨率"
         ' 
@@ -665,11 +671,11 @@ Partial Class Form媒体信息
         HtmlColorLabel16.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel16.BackColor = Color.Transparent
         HtmlColorLabel16.Dock = DockStyle.Top
-        HtmlColorLabel16.Location = New Point(15, 65)
+        HtmlColorLabel16.Location = New Point(15, 59)
         HtmlColorLabel16.Margin = New Padding(2)
         HtmlColorLabel16.Name = "HtmlColorLabel16"
         HtmlColorLabel16.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel16.Size = New Size(310, 25)
+        HtmlColorLabel16.Size = New Size(310, 22)
         HtmlColorLabel16.TabIndex = 5
         HtmlColorLabel16.Text = "输出格式"
         ' 
@@ -679,11 +685,11 @@ Partial Class Form媒体信息
         HtmlColorLabel2.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel2.BackColor = Color.Transparent
         HtmlColorLabel2.Dock = DockStyle.Top
-        HtmlColorLabel2.Location = New Point(15, 40)
+        HtmlColorLabel2.Location = New Point(15, 37)
         HtmlColorLabel2.Margin = New Padding(2)
         HtmlColorLabel2.Name = "HtmlColorLabel2"
         HtmlColorLabel2.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel2.Size = New Size(310, 25)
+        HtmlColorLabel2.Size = New Size(310, 22)
         HtmlColorLabel2.TabIndex = 1
         HtmlColorLabel2.Text = "输入格式"
         ' 
@@ -697,14 +703,14 @@ Partial Class Form媒体信息
         HtmlColorLabel1.Margin = New Padding(2)
         HtmlColorLabel1.Name = "HtmlColorLabel1"
         HtmlColorLabel1.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel1.Size = New Size(310, 25)
+        HtmlColorLabel1.Size = New Size(310, 22)
         HtmlColorLabel1.TabIndex = 0
         HtmlColorLabel1.Text = "视频解码器"
         ' 
         ' JustEmptyControl8
         ' 
         JustEmptyControl8.Dock = DockStyle.Bottom
-        JustEmptyControl8.Location = New Point(10, 500)
+        JustEmptyControl8.Location = New Point(10, 509)
         JustEmptyControl8.Name = "JustEmptyControl8"
         JustEmptyControl8.Size = New Size(341, 10)
         JustEmptyControl8.TabIndex = 5
@@ -719,10 +725,10 @@ Partial Class Form媒体信息
         ModernPanel5.Controls.Add(HtmlColorLabel13)
         ModernPanel5.Controls.Add(HtmlColorLabel12)
         ModernPanel5.Dock = DockStyle.Bottom
-        ModernPanel5.Location = New Point(10, 510)
+        ModernPanel5.Location = New Point(10, 519)
         ModernPanel5.Name = "ModernPanel5"
         ModernPanel5.Padding = New Padding(10)
-        ModernPanel5.Size = New Size(341, 101)
+        ModernPanel5.Size = New Size(341, 92)
         ModernPanel5.TabIndex = 6
         ' 
         ' HtmlColorLabel11
@@ -731,10 +737,10 @@ Partial Class Form媒体信息
         HtmlColorLabel11.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel11.BackColor = Color.Transparent
         HtmlColorLabel11.Dock = DockStyle.Top
-        HtmlColorLabel11.Location = New Point(15, 65)
+        HtmlColorLabel11.Location = New Point(15, 59)
         HtmlColorLabel11.Margin = New Padding(2)
         HtmlColorLabel11.Name = "HtmlColorLabel11"
-        HtmlColorLabel11.Size = New Size(310, 20)
+        HtmlColorLabel11.Size = New Size(310, 17)
         HtmlColorLabel11.TabIndex = 4
         HtmlColorLabel11.Text = "平均渲染延迟"
         ' 
@@ -744,11 +750,11 @@ Partial Class Form媒体信息
         HtmlColorLabel13.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel13.BackColor = Color.Transparent
         HtmlColorLabel13.Dock = DockStyle.Top
-        HtmlColorLabel13.Location = New Point(15, 40)
+        HtmlColorLabel13.Location = New Point(15, 37)
         HtmlColorLabel13.Margin = New Padding(2)
         HtmlColorLabel13.Name = "HtmlColorLabel13"
         HtmlColorLabel13.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel13.Size = New Size(310, 25)
+        HtmlColorLabel13.Size = New Size(310, 22)
         HtmlColorLabel13.TabIndex = 5
         HtmlColorLabel13.Text = "正在渲染的弹幕数量"
         ' 
@@ -762,7 +768,7 @@ Partial Class Form媒体信息
         HtmlColorLabel12.Margin = New Padding(2)
         HtmlColorLabel12.Name = "HtmlColorLabel12"
         HtmlColorLabel12.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel12.Size = New Size(310, 25)
+        HtmlColorLabel12.Size = New Size(310, 22)
         HtmlColorLabel12.TabIndex = 3
         HtmlColorLabel12.Text = "已加载弹幕条目数"
         ' 

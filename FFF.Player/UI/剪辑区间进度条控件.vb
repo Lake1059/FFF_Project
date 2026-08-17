@@ -17,7 +17,8 @@ Friend NotInheritable Class 剪辑区间进度条控件
 
     Friend Sub New()
         SetStyle(ControlStyles.UserPaint Or ControlStyles.AllPaintingInWmPaint Or
-                 ControlStyles.OptimizedDoubleBuffer Or ControlStyles.ResizeRedraw, True)
+                 ControlStyles.OptimizedDoubleBuffer Or ControlStyles.ResizeRedraw Or
+                 ControlStyles.SupportsTransparentBackColor, True)
         Font = New Font("Microsoft YaHei UI", 9.0F)
         ForeColor = Color.Silver
         BackColor = Color.FromArgb(40, 40, 40)
@@ -70,7 +71,7 @@ Friend NotInheritable Class 剪辑区间进度条控件
     End Sub
 
     Protected Overrides Sub OnPaintBackground(e As PaintEventArgs)
-        ' D3D 呈现会完整覆盖本控件；不先走 GDI 背景擦除，避免拖动时闪烁。
+        MyBase.OnPaintBackground(e)
     End Sub
 
     Protected Overrides Sub OnPaint(e As PaintEventArgs)
@@ -83,7 +84,7 @@ Friend NotInheritable Class 剪辑区间进度条控件
         Dim 宽度 = CSng(ClientSize.Width)
         Dim 高度 = CSng(ClientSize.Height)
         Dim 全区域 As New RectangleF(0.0F, 0.0F, 宽度, 高度)
-        context.FillRectangle(全区域, Color.FromArgb(40, 40, 40))
+        If BackColor.A > 0 Then context.FillRectangle(全区域, BackColor)
 
         If 媒体总时长 <= TimeSpan.Zero Then
             context.DrawText("打开媒体后可设置剪辑区间", Font, Color.Gray, 全区域,

@@ -73,11 +73,12 @@ Partial Class Form设置_界面与尺寸
         MCB_全局字体.DropDownBackdropBlurRadius = 30
         MCB_全局字体.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
         MCB_全局字体.DropDownHoverColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MCB_全局字体.DropDownItemHeight = 26
+        MCB_全局字体.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
         MCB_全局字体.DropDownPadding = New Padding(10)
         MCB_全局字体.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MCB_全局字体.DropDownSelectedForeColor = Color.White
         MCB_全局字体.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_全局字体.LineHeight = 22
         MCB_全局字体.Location = New Point(0, 10)
         MCB_全局字体.Margin = New Padding(2, 2, 2, 2)
         MCB_全局字体.MaxDropDownItems = 16
