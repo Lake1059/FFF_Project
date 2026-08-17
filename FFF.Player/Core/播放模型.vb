@@ -17,6 +17,11 @@ Public Enum 视频缩放模式 As UInteger
     D3D11视频处理器 = 1
 End Enum
 
+Public Enum 视频缩放质量 As UInteger
+    均衡 = 0
+    高画质 = 1
+End Enum
+
 Public Enum HDR格式 As UInteger
     SDR = 0
     HDR10 = 1
@@ -76,6 +81,7 @@ Public NotInheritable Class 播放器配置
     ' 0 = 自动使用显示器能力；正值由未来的用户峰值设置覆盖。
     Public Property HDR峰值尼特 As Single = 0.0F
     Public Property SDR纸白尼特 As Single = 203.0F
+    Public Property 缩放质量 As 视频缩放质量 = 视频缩放质量.高画质
     Public Property 输出窗口句柄 As IntPtr
     Public Property 音频端点标识 As String = String.Empty
     Public Property 事件同步上下文 As Threading.SynchronizationContext
@@ -86,6 +92,7 @@ Public NotInheritable Class 播放器配置
         If SDR峰值尼特 <= 0 OrElse Not Single.IsFinite(SDR峰值尼特) Then Throw New ArgumentOutOfRangeException(NameOf(SDR峰值尼特))
         If HDR峰值尼特 < 0 OrElse HDR峰值尼特 > 10000 OrElse Not Single.IsFinite(HDR峰值尼特) Then Throw New ArgumentOutOfRangeException(NameOf(HDR峰值尼特))
         If SDR纸白尼特 <= 0 OrElse Not Single.IsFinite(SDR纸白尼特) Then Throw New ArgumentOutOfRangeException(NameOf(SDR纸白尼特))
+        If 缩放质量 <> 视频缩放质量.均衡 AndAlso 缩放质量 <> 视频缩放质量.高画质 Then Throw New ArgumentOutOfRangeException(NameOf(缩放质量))
     End Sub
 End Class
 

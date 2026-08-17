@@ -33,15 +33,21 @@ Partial Class Form设置_界面与尺寸
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MCB_初始画面尺寸选项 = New LakeUI.ModernComboBox()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
+        Panel3 = New Panel()
+        MCB_视频缩放质量 = New LakeUI.ModernComboBox()
+        HtmlColorLabel3 = New LakeUI.HtmlColorLabel()
         ModernPanel1.SuspendLayout()
         Panel1.SuspendLayout()
         Panel2.SuspendLayout()
+        Panel3.SuspendLayout()
         SuspendLayout()
         ' 
         ' ModernPanel1
         ' 
         ModernPanel1.BackColor1 = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ModernPanel1.BorderSize = 0
+        ModernPanel1.Controls.Add(Panel3)
+        ModernPanel1.Controls.Add(HtmlColorLabel3)
         ModernPanel1.Controls.Add(Panel1)
         ModernPanel1.Controls.Add(HtmlColorLabel2)
         ModernPanel1.Controls.Add(Panel2)
@@ -219,6 +225,60 @@ Partial Class Form设置_界面与尺寸
         HtmlColorLabel1.Size = New Size(660, 23)
         HtmlColorLabel1.TabIndex = 14
         HtmlColorLabel1.Text = "<span style=""font-size:13; color:Silver"">初始画面尺寸</span>   每次启动软件后视频渲染区域的尺寸，会跟随 DPI 缩放"
+        '
+        ' Panel3
+        '
+        Panel3.Controls.Add(MCB_视频缩放质量)
+        Panel3.Dock = DockStyle.Top
+        Panel3.Location = New Point(20, 213)
+        Panel3.Name = "Panel3"
+        Panel3.Padding = New Padding(0, 10, 0, 0)
+        Panel3.Size = New Size(660, 42)
+        Panel3.TabIndex = 19
+        '
+        ' MCB_视频缩放质量
+        '
+        MCB_视频缩放质量.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_视频缩放质量.BorderRadius = 10
+        MCB_视频缩放质量.BorderSize = 0
+        MCB_视频缩放质量.Dock = DockStyle.Left
+        MCB_视频缩放质量.DropDownBackdropBlurPasses = 2
+        MCB_视频缩放质量.DropDownBackdropBlurRadius = 30
+        MCB_视频缩放质量.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_视频缩放质量.DropDownHoverColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MCB_视频缩放质量.DropDownItemHeight = 26
+        MCB_视频缩放质量.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_视频缩放质量.DropDownPadding = New Padding(10)
+        MCB_视频缩放质量.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_视频缩放质量.DropDownSelectedForeColor = Color.White
+        MCB_视频缩放质量.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCB_视频缩放质量.Items.Add("均衡（Hermite）")
+        MCB_视频缩放质量.Items.Add("高画质（Lanczos3）")
+        MCB_视频缩放质量.Location = New Point(0, 10)
+        MCB_视频缩放质量.Margin = New Padding(2)
+        MCB_视频缩放质量.Name = "MCB_视频缩放质量"
+        MCB_视频缩放质量.Padding = New Padding(10, 0, 10, 0)
+        MCB_视频缩放质量.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_视频缩放质量.Size = New Size(260, 32)
+        MCB_视频缩放质量.TabIndex = 0
+        MCB_视频缩放质量.ToolTipGap = -1
+        MCB_视频缩放质量.ToolTipMaxWidth = 350
+        MCB_视频缩放质量.ToolTipPadding = New Padding(15)
+        MCB_视频缩放质量.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        '
+        ' HtmlColorLabel3
+        '
+        HtmlColorLabel3.AutoSize = True
+        HtmlColorLabel3.AutoSizeMode = AutoSizeMode.GrowAndShrink
+        HtmlColorLabel3.Dock = DockStyle.Top
+        HtmlColorLabel3.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        HtmlColorLabel3.Location = New Point(20, 170)
+        HtmlColorLabel3.Margin = New Padding(2)
+        HtmlColorLabel3.Name = "HtmlColorLabel3"
+        HtmlColorLabel3.Padding = New Padding(0, 20, 0, 0)
+        HtmlColorLabel3.Size = New Size(660, 43)
+        HtmlColorLabel3.TabIndex = 18
+        HtmlColorLabel3.Text = "<span style=""font-size:13; color:Silver"">视频缩放质量</span>"
         ' 
         ' Form设置_界面与尺寸
         ' 
@@ -235,6 +295,7 @@ Partial Class Form设置_界面与尺寸
         ModernPanel1.PerformLayout()
         Panel1.ResumeLayout(False)
         Panel2.ResumeLayout(False)
+        Panel3.ResumeLayout(False)
         ResumeLayout(False)
     End Sub
 
@@ -249,4 +310,7 @@ Partial Class Form设置_界面与尺寸
     Friend WithEvents HtmlColorLabel2 As LakeUI.HtmlColorLabel
     Friend WithEvents Panel1 As Panel
     Friend WithEvents MCB_全局字体 As LakeUI.ModernComboBox
+    Friend WithEvents Panel3 As Panel
+    Friend WithEvents MCB_视频缩放质量 As LakeUI.ModernComboBox
+    Friend WithEvents HtmlColorLabel3 As LakeUI.HtmlColorLabel
 End Class

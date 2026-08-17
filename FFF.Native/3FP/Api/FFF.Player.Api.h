@@ -22,6 +22,11 @@ enum class FFF3FPVideoScalingMode : std::uint32_t {
     D3D11VideoProcessor = 1,
 };
 
+enum class FFF3FPVideoScalingQuality : std::uint32_t {
+    Balanced = 0,
+    HighQuality = 1,
+};
+
 enum class FFF3FPColorTransfer : std::uint32_t {
     SdrBt709 = 0,
     Pq = 1,
@@ -98,6 +103,7 @@ struct FFF3FPConfiguration {
     const char* audioEndpointIdUtf8;
     FFF3FPEventCallback eventCallback;
     void* eventCallbackContext;
+    FFF3FPVideoScalingQuality videoScalingQuality;
 };
 
 struct FFF3FPSnapshot {

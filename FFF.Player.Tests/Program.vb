@@ -170,6 +170,11 @@ Friend Module Program
                 Console.WriteLine("GPU 与 CPU 解码统一自有高质量缩放路径通过。")
                 Return 0
             End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--scaling-frequency-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试高频缩放低通()
+                Console.WriteLine("Hermite/Lanczos3 多级缩放的高频低通回归通过。")
+                Return 0
+            End If
             If 参数.Length = 3 AndAlso String.Equals(参数(0), "--sdr-pixel-regression", StringComparison.OrdinalIgnoreCase) Then
                 Dim 媒体路径 = Path.GetFullPath(参数(1))
                 Dim 参考图路径 = Path.GetFullPath(参数(2))
@@ -2339,6 +2344,7 @@ Friend Module Program
             Using 会话 As New 播放器会话(New 播放器配置 With {
                 .解码器 = 解码模式.GPU,
                 .色彩模式 = 色彩输出模式.映射到SDR,
+                .缩放质量 = 视频缩放质量.高画质,
                 .输出窗口句柄 = 输出窗口.Handle
             })
                 会话.设置音量(0.0F, True)
@@ -2377,6 +2383,7 @@ Friend Module Program
             Using 会话 As New 播放器会话(New 播放器配置 With {
                 .解码器 = 解码模式.CPU,
                 .色彩模式 = 色彩输出模式.映射到SDR,
+                .缩放质量 = 视频缩放质量.均衡,
                 .输出窗口句柄 = 输出窗口.Handle
             })
                 会话.设置音量(0.0F, True)
@@ -2389,6 +2396,78 @@ Friend Module Program
                 断言(CPU快照.解码器 = 解码模式.CPU, "CPU 高质量缩放测试意外改变了解码器。")
             End Using
         End Using
+    End Sub
+
+    Private Sub 测试高频缩放低通()
+        Dim 路径 = Path.Combine(Path.GetTempPath(), $"3fp-scaling-{Guid.NewGuid():N}.png")
+        Try
+            Const 来源边长 = 1024
+            Using 图像 As New Bitmap(来源边长, 来源边长, Imaging.PixelFormat.Format32bppArgb)
+                Dim 数据 = 图像.LockBits(New Rectangle(0, 0, 来源边长, 来源边长),
+                    Imaging.ImageLockMode.WriteOnly, Imaging.PixelFormat.Format32bppArgb)
+                Try
+                    Dim 像素(Math.Abs(数据.Stride) * 来源边长 - 1) As Byte
+                    For y = 0 To 来源边长 - 1
+                        For x = 0 To 来源边长 - 1
+                            Dim 值 As Byte = If(((x Xor y) And 1) = 0, CByte(0), CByte(255))
+                            Dim 索引 = y * Math.Abs(数据.Stride) + x * 4
+                            像素(索引) = 值
+                            像素(索引 + 1) = 值
+                            像素(索引 + 2) = 值
+                            像素(索引 + 3) = 255
+                        Next
+                    Next
+                    Marshal.Copy(像素, 0, 数据.Scan0, 像素.Length)
+                Finally
+                    图像.UnlockBits(数据)
+                End Try
+                图像.Save(路径, Imaging.ImageFormat.Png)
+            End Using
+
+            For Each 质量 In {视频缩放质量.均衡, 视频缩放质量.高画质}
+                Using 输出窗口 As New Form With {
+                    .ClientSize = New Drawing.Size(257, 257),
+                    .FormBorderStyle = FormBorderStyle.FixedToolWindow,
+                    .ShowInTaskbar = False,
+                    .StartPosition = FormStartPosition.Manual,
+                    .Location = New Drawing.Point(-10000, -10000)
+                }
+                    输出窗口.Show()
+                    Application.DoEvents()
+                    Using 会话 As New 播放器会话(New 播放器配置 With {
+                        .解码器 = 解码模式.CPU,
+                        .色彩模式 = 色彩输出模式.映射到SDR,
+                        .缩放质量 = 质量,
+                        .输出窗口句柄 = 输出窗口.Handle
+                    })
+                        会话.打开Async(路径).GetAwaiter().GetResult()
+                        Dim 快照 = 等待快照(会话,
+                            Function(x) x.交换链呈现次数 > 0 AndAlso
+                                x.视频缩放 = 视频缩放模式.着色器,
+                            $"{质量}高频缩放")
+                        Dim 亮度 As New List(Of Integer)()
+                        For y = 16 To 240 Step 16
+                            For x = 16 To 240 Step 16
+                                Dim 像素 = 会话.读取视频输出像素(x, y)
+                                亮度.Add(CInt(Math.Round((CDbl(像素.R) + 像素.G + 像素.B) / 3.0R)))
+                            Next
+                        Next
+                        Dim 平均 = 亮度.Average()
+                        Dim 波动 = 亮度.Max() - 亮度.Min()
+                        Console.WriteLine($"{质量} 1px 棋盘格：平均 {平均:F1}，范围 {亮度.Min()}-{亮度.Max()}")
+                        断言(平均 >= 118.0 AndAlso 平均 <= 137.0,
+                           $"{质量}没有把超出目标 Nyquist 的棋盘格收敛到中灰：{平均:F1}。")
+                        断言(波动 <= 12,
+                           $"{质量}高频缩放仍有明显空间混叠：范围 {亮度.Min()}-{亮度.Max()}。")
+                    End Using
+                End Using
+            Next
+        Finally
+            Try
+                If File.Exists(路径) Then File.Delete(路径)
+            Catch
+            End Try
+        End Try
     End Sub
 
     Private Sub 测试SDR灰阶像素(视频路径 As String, 参考图路径 As String)

@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 10;
+constexpr std::uint32_t PlayerApiVersion = 11;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -28,6 +28,7 @@ FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration, FFF3FPHandle* 
     if (configuration == nullptr || player == nullptr || configuration->size < sizeof(FFF3FPConfiguration) ||
         configuration->version != PlayerApiVersion || configuration->decodeMode == FFF3FPDecodeMode::Unspecified ||
         configuration->decodeMode > FFF3FPDecodeMode::D3D11 || configuration->colorMode > FFF3FPColorMode::MapToHdr ||
+        configuration->videoScalingQuality > FFF3FPVideoScalingQuality::HighQuality ||
         !std::isfinite(configuration->sdrPeakNits) || configuration->sdrPeakNits <= 0 ||
         !std::isfinite(configuration->hdrPeakNits) || configuration->hdrPeakNits < 0 ||
         configuration->hdrPeakNits > 10000 || !std::isfinite(configuration->sdrPaperWhiteNits) ||

@@ -316,7 +316,6 @@ Texture2D<float4> ChromaU : register(t1);
 Texture2D<float4> ChromaV : register(t2);
 SamplerState LinearSampler : register(s0);
 SamplerState PointSampler : register(s1);
-SamplerState AnisotropicSampler : register(s2);
 float3 PqToNits(float3 v) {
     const float m1=2610.0/16384.0, m2=2523.0/32.0, c1=3424.0/4096.0, c2=2413.0/128.0, c3=2392.0/128.0;
     v=pow(saturate(v),1.0/m2); return 10000.0*pow(max(v-c1,0.0)/max(c2-c3*v,0.000001),1.0/m1);
@@ -436,10 +435,6 @@ float4 SampleVideo(Texture2D<float4> sourceTexture,float2 uv) {
     const uint2 dimensions=uint2(width,height);
     if(abs(OutputWidth-float(width))<0.01&&abs(OutputHeight-float(height))<0.01)
         return sourceTexture.SampleLevel(PointSampler,uv,0);
-    // Hardware anisotropic filtering is intended for minification; keep the
-    // deterministic Lanczos reconstruction for enlargement.
-    if(OutputWidth<=float(width)&&OutputHeight<=float(height))
-        return sourceTexture.Sample(AnisotropicSampler,uv);
     return SampleLanczos3(sourceTexture,uv,dimensions);
 }
 float3 ReadSource(float2 uv) {
@@ -503,6 +498,52 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     float3 sdr=ToBt709(To709(ToneHdrToSdr(nits,HdrPeak,SdrPeak))/SdrPeak);
     return float4(sdr,1);
 })";
+
+constexpr const char* ScalePixelShaderSource = R"(
+cbuffer ScaleSettings : register(b0) {
+    float2 SourceSize;
+    float2 DestinationSize;
+    uint Axis;
+    uint Filter;
+    float2 Padding;
+};
+Texture2D<float4> ScaleSource : register(t0);
+float Sinc(float value) {
+    value=abs(value);
+    if(value<0.00001)return 1.0;
+    const float angle=3.14159265359*value;
+    return sin(angle)/angle;
+}
+float ScaleWeight(float value) {
+    value=abs(value);
+    if(Filter==0)
+        return value>=1.0?0.0:((2.0*value-3.0)*value*value+1.0);
+    return value>=3.0?0.0:Sinc(value)*Sinc(value/3.0);
+}
+float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
+    const int2 outputPixel=int2(position.xy);
+    const float sourceExtent=Axis==0?SourceSize.x:SourceSize.y;
+    const float destinationExtent=Axis==0?DestinationSize.x:DestinationSize.y;
+    const float scale=min(destinationExtent/sourceExtent,1.0);
+    const float radius=Filter==0?1.0:3.0;
+    const float support=radius/max(scale,0.000001);
+    const float sourcePosition=((Axis==0?float(outputPixel.x):float(outputPixel.y))+0.5)
+        *sourceExtent/destinationExtent-0.5;
+    const int first=int(ceil(sourcePosition-support));
+    const int last=int(floor(sourcePosition+support));
+    const int2 maximum=int2(SourceSize)-1;
+    float4 total=0.0;
+    float weightTotal=0.0;
+    [loop] for(int sampleIndex=first;sampleIndex<=last;++sampleIndex) {
+        const float weight=ScaleWeight((float(sampleIndex)-sourcePosition)*scale);
+        int2 coordinate=outputPixel;
+        if(Axis==0)coordinate.x=sampleIndex;else coordinate.y=sampleIndex;
+        total+=ScaleSource.Load(int3(clamp(coordinate,int2(0,0),maximum),0))*weight;
+        weightTotal+=weight;
+    }
+    return total/max(abs(weightTotal),0.000001);
+}
+)";
 
 constexpr const char* CoverBackdropPixelShaderSource = R"(
 cbuffer Settings : register(b0) {
@@ -599,6 +640,13 @@ struct ShaderSettings {
     float cOffset, cScale, kr, kb;
     float chromaOffsetX, chromaOffsetY, padding1, padding2;
 };
+
+struct ScaleShaderSettings {
+    float sourceWidth, sourceHeight, destinationWidth, destinationHeight;
+    std::uint32_t axis, filter;
+    float padding1, padding2;
+};
+static_assert(sizeof(ScaleShaderSettings) == 32);
 
 struct VideoDestination {
     std::uint32_t x, y, width, height;
@@ -1469,10 +1517,11 @@ FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8
 PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), coverBackdropPixelShader_(nullptr),
-      timedTextPixelShader_(nullptr), sampler_(nullptr),
-      pointSampler_(nullptr), anisotropicSampler_(nullptr),
-      constants_(nullptr),
+      timedTextPixelShader_(nullptr), scalePixelShader_(nullptr), sampler_(nullptr),
+      pointSampler_(nullptr), constants_(nullptr), scaleConstants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
+      scaledVideoGeneration_(UINT64_MAX), scaledOutputWidth_(0), scaledOutputHeight_(0),
+      scaledSourceViews_{nullptr, nullptr, nullptr},
       videoDevice_(nullptr), videoContext_(nullptr), videoProcessorEnumerator_(nullptr),
       videoProcessor_(nullptr), videoProcessorRenderTexture_(nullptr),
       videoProcessorRenderTarget_(nullptr),
@@ -1509,6 +1558,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       sourceColorSpace_(AVCOL_SPC_UNSPECIFIED), sourceChromaLocation_(AVCHROMA_LOC_UNSPECIFIED),
       sourceFullRange_(false), sourceInterlaced_(false),
       actualVideoScalingMode_(FFF3FPVideoScalingMode::D3D11VideoProcessor),
+      scalingQuality_(FFF3FPVideoScalingQuality::HighQuality),
       requestedMode_(FFF3FPColorMode::MapToSdr), actualMode_(FFF3FPColorMode::MapToSdr),
       sdrPeakNits_(100.0f), hdrPeakNits_(0.0f),
       paperWhiteNits_(203.0f), sourcePeakNits_(100.0f),
@@ -1576,6 +1626,17 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
                 "True HDR output is only available for HDR source video.";
         }
     }
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::SetScalingQuality(
+    const FFF3FPVideoScalingQuality quality) noexcept {
+    if (quality > FFF3FPVideoScalingQuality::HighQuality)
+        return FFFResult::InvalidArgument;
+    std::lock_guard deviceLock(deviceMutex_);
+    if (scalingQuality_ == quality) return FFFResult::Success;
+    scalingQuality_ = quality;
+    scaledVideoGeneration_ = UINT64_MAX;
     return FFFResult::Success;
 }
 
@@ -1987,16 +2048,19 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     const std::uint32_t sourceHeight, const std::uint32_t inputLayout,
     const std::uint32_t bitDepth, const std::uint32_t chromaWidthShift,
     const std::uint32_t chromaHeightShift, const bool externalSource) noexcept {
-    if (vertexShader_ == nullptr || pixelShader_ == nullptr ||
+    if (vertexShader_ == nullptr || pixelShader_ == nullptr || scalePixelShader_ == nullptr ||
         coverBackdropPixelShader_ == nullptr || timedTextPixelShader_ == nullptr ||
-        sampler_ == nullptr || pointSampler_ == nullptr || anisotropicSampler_ == nullptr ||
-        constants_ == nullptr) {
-        ComPtr<ID3DBlob> vertexCode, pixelCode, coverBackdropPixelCode,
+        sampler_ == nullptr || pointSampler_ == nullptr ||
+        constants_ == nullptr || scaleConstants_ == nullptr) {
+        ComPtr<ID3DBlob> vertexCode, pixelCode, scalePixelCode, coverBackdropPixelCode,
             timedTextPixelCode, errors;
         if (FAILED(D3DCompile(VertexShaderSource, std::strlen(VertexShaderSource), nullptr, nullptr, nullptr,
             "main", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vertexCode, &errors)) ||
             FAILED(D3DCompile(PixelShaderSource, std::strlen(PixelShaderSource), nullptr, nullptr, nullptr,
                 "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixelCode, &errors)) ||
+            FAILED(D3DCompile(ScalePixelShaderSource, std::strlen(ScalePixelShaderSource),
+                nullptr, nullptr, nullptr, "main", "ps_5_0",
+                D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &scalePixelCode, &errors)) ||
             FAILED(D3DCompile(CoverBackdropPixelShaderSource,
                 std::strlen(CoverBackdropPixelShaderSource), nullptr, nullptr, nullptr,
                 "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
@@ -2005,6 +2069,8 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &timedTextPixelCode, &errors)) ||
             FAILED(device_->CreateVertexShader(vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr, &vertexShader_)) ||
             FAILED(device_->CreatePixelShader(pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr, &pixelShader_)) ||
+            FAILED(device_->CreatePixelShader(scalePixelCode->GetBufferPointer(),
+                scalePixelCode->GetBufferSize(), nullptr, &scalePixelShader_)) ||
             FAILED(device_->CreatePixelShader(coverBackdropPixelCode->GetBufferPointer(),
                 coverBackdropPixelCode->GetBufferSize(), nullptr,
                 &coverBackdropPixelShader_)) ||
@@ -2019,15 +2085,14 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         sampler.MaxLOD = D3D11_FLOAT32_MAX;
         D3D11_SAMPLER_DESC pointSampler = sampler;
         pointSampler.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-        D3D11_SAMPLER_DESC anisotropicSampler = sampler;
-        anisotropicSampler.Filter = D3D11_FILTER_ANISOTROPIC;
-        anisotropicSampler.MaxAnisotropy = 16;
         D3D11_BUFFER_DESC buffer{};
         buffer.ByteWidth = sizeof(ShaderSettings); buffer.Usage = D3D11_USAGE_DEFAULT; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_BUFFER_DESC scaleBuffer = buffer;
+        scaleBuffer.ByteWidth = sizeof(ScaleShaderSettings);
         if (FAILED(device_->CreateSamplerState(&sampler, &sampler_)) ||
             FAILED(device_->CreateSamplerState(&pointSampler, &pointSampler_)) ||
-            FAILED(device_->CreateSamplerState(&anisotropicSampler, &anisotropicSampler_)) ||
-            FAILED(device_->CreateBuffer(&buffer, nullptr, &constants_))) {
+            FAILED(device_->CreateBuffer(&buffer, nullptr, &constants_)) ||
+            FAILED(device_->CreateBuffer(&scaleBuffer, nullptr, &scaleConstants_))) {
             SetError("Could not create the presentation shader resources."); return FFFResult::DeviceFailure;
         }
     }
@@ -2041,6 +2106,7 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
         if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
     }
+    ReleaseScaleResources();
     const auto planeCount = inputLayout == 1 ? 3u : (inputLayout == 2 ? 2u : 1u);
     if (externalSource) {
         if (inputLayout != 2) {
@@ -2266,7 +2332,7 @@ FFFResult PlayerVideoRenderer::EnsureVideoProcessorInputSurface(
 
 FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     const float x, const float y, const float width, const float height,
-    const std::uint32_t effect) noexcept {
+    const std::uint32_t effect, ID3D11ShaderResourceView* const* sourceViews) noexcept {
     if (target == nullptr || context_ == nullptr || width <= 0.0f || height <= 0.0f)
         return FFFResult::InvalidArgument;
     cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
@@ -2282,13 +2348,196 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     context_->VSSetShader(vertexShader_, nullptr, 0);
     context_->PSSetShader(pixelShader_, nullptr, 0);
     context_->PSSetConstantBuffers(0, 1, &constants_);
-    ID3D11SamplerState* samplers[] = {sampler_, pointSampler_, anisotropicSampler_};
+    ID3D11SamplerState* samplers[] = {sampler_, pointSampler_};
     context_->PSSetSamplers(0, ARRAYSIZE(samplers), samplers);
-    context_->PSSetShaderResources(0, ARRAYSIZE(sourceViews_), sourceViews_);
+    auto* views = sourceViews != nullptr ? sourceViews : sourceViews_;
+    context_->PSSetShaderResources(0, ARRAYSIZE(sourceViews_), views);
     context_->Draw(3, 0);
     ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
     context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
+    return FFFResult::Success;
+}
+
+void PlayerVideoRenderer::ReleaseScaleResources() noexcept {
+    for (auto& chain : planeScaleChains_) {
+        for (auto& pass : chain.passes) {
+            if (pass.view != nullptr) { pass.view->Release(); pass.view = nullptr; }
+            if (pass.target != nullptr) { pass.target->Release(); pass.target = nullptr; }
+            if (pass.texture != nullptr) { pass.texture->Release(); pass.texture = nullptr; }
+        }
+        chain = {};
+    }
+    scaledVideoGeneration_ = UINT64_MAX;
+    scaledOutputWidth_ = scaledOutputHeight_ = 0;
+    for (auto& view : scaledSourceViews_) view = nullptr;
+}
+
+FFFResult PlayerVideoRenderer::EnsurePlaneScaleChain(const std::size_t plane,
+    const std::uint32_t sourceWidth, const std::uint32_t sourceHeight,
+    const std::uint32_t targetWidth, const std::uint32_t targetHeight,
+    const std::uint32_t format) noexcept {
+    if (plane >= ARRAYSIZE(planeScaleChains_) || sourceWidth == 0 || sourceHeight == 0 ||
+        targetWidth == 0 || targetHeight == 0 || targetWidth > sourceWidth ||
+        targetHeight > sourceHeight)
+        return FFFResult::InvalidArgument;
+    auto& chain = planeScaleChains_[plane];
+    if (chain.sourceWidth == sourceWidth && chain.sourceHeight == sourceHeight &&
+        chain.targetWidth == targetWidth && chain.targetHeight == targetHeight &&
+        chain.format == format)
+        return FFFResult::Success;
+
+    for (auto& pass : chain.passes) {
+        if (pass.view != nullptr) pass.view->Release();
+        if (pass.target != nullptr) pass.target->Release();
+        if (pass.texture != nullptr) pass.texture->Release();
+    }
+    chain = {};
+    chain.sourceWidth = sourceWidth;
+    chain.sourceHeight = sourceHeight;
+    chain.targetWidth = targetWidth;
+    chain.targetHeight = targetHeight;
+    chain.format = format;
+
+    const auto addPass = [&](const std::uint32_t width, const std::uint32_t height,
+        const std::uint32_t axis) noexcept -> bool {
+        ScalePassResource pass{};
+        pass.width = width;
+        pass.height = height;
+        pass.axis = axis;
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = width;
+        description.Height = height;
+        description.MipLevels = description.ArraySize = 1;
+        description.Format = static_cast<DXGI_FORMAT>(format);
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device_->CreateTexture2D(&description, nullptr, &pass.texture)) ||
+            FAILED(device_->CreateRenderTargetView(pass.texture, nullptr, &pass.target)) ||
+            FAILED(device_->CreateShaderResourceView(pass.texture, nullptr, &pass.view))) {
+            if (pass.view != nullptr) pass.view->Release();
+            if (pass.target != nullptr) pass.target->Release();
+            if (pass.texture != nullptr) pass.texture->Release();
+            return false;
+        }
+        chain.passes.push_back(pass);
+        return true;
+    };
+
+    auto width = sourceWidth;
+    auto height = sourceHeight;
+    while (width > targetWidth || height > targetHeight) {
+        const auto nextWidth = width > targetWidth ?
+            std::max(targetWidth, (width + 1) / 2) : width;
+        const auto nextHeight = height > targetHeight ?
+            std::max(targetHeight, (height + 1) / 2) : height;
+        const auto horizontalFirst =
+            static_cast<std::uint64_t>(nextWidth) * height <=
+            static_cast<std::uint64_t>(width) * nextHeight;
+        if (horizontalFirst) {
+            if (nextWidth != width && !addPass(nextWidth, height, 0)) {
+                ReleaseScaleResources();
+                return FFFResult::DeviceFailure;
+            }
+            width = nextWidth;
+            if (nextHeight != height && !addPass(width, nextHeight, 1)) {
+                ReleaseScaleResources();
+                return FFFResult::DeviceFailure;
+            }
+            height = nextHeight;
+        } else {
+            if (nextHeight != height && !addPass(width, nextHeight, 1)) {
+                ReleaseScaleResources();
+                return FFFResult::DeviceFailure;
+            }
+            height = nextHeight;
+            if (nextWidth != width && !addPass(nextWidth, height, 0)) {
+                ReleaseScaleResources();
+                return FFFResult::DeviceFailure;
+            }
+            width = nextWidth;
+        }
+    }
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::ExecuteScalePass(ID3D11ShaderResourceView* source,
+    const std::uint32_t sourceWidth, const std::uint32_t sourceHeight,
+    const ScalePassResource& pass) noexcept {
+    if (source == nullptr || pass.target == nullptr || context_ == nullptr ||
+        scalePixelShader_ == nullptr || scaleConstants_ == nullptr)
+        return FFFResult::InvalidState;
+    const ScaleShaderSettings settings{
+        static_cast<float>(sourceWidth), static_cast<float>(sourceHeight),
+        static_cast<float>(pass.width), static_cast<float>(pass.height),
+        pass.axis, scalingQuality_ == FFF3FPVideoScalingQuality::HighQuality ? 1u : 0u,
+        0.0f, 0.0f};
+    context_->UpdateSubresource(scaleConstants_, 0, nullptr, &settings, 0, 0);
+    context_->OMSetRenderTargets(1, &pass.target, nullptr);
+    const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(pass.width),
+        static_cast<float>(pass.height), 0.0f, 1.0f};
+    context_->RSSetViewports(1, &viewport);
+    context_->IASetInputLayout(nullptr);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->VSSetShader(vertexShader_, nullptr, 0);
+    context_->PSSetShader(scalePixelShader_, nullptr, 0);
+    context_->PSSetConstantBuffers(0, 1, &scaleConstants_);
+    context_->PSSetShaderResources(0, 1, &source);
+    context_->Draw(3, 0);
+    ID3D11ShaderResourceView* nullView = nullptr;
+    context_->PSSetShaderResources(0, 1, &nullView);
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidth,
+    const std::uint32_t outputHeight, ID3D11ShaderResourceView** views) noexcept {
+    if (views == nullptr || outputWidth == 0 || outputHeight == 0)
+        return FFFResult::InvalidArgument;
+    const auto generation = videoGeneration_.load(std::memory_order_acquire);
+    if (scaledVideoGeneration_ == generation && scaledOutputWidth_ == outputWidth &&
+        scaledOutputHeight_ == outputHeight) {
+        std::copy(std::begin(scaledSourceViews_), std::end(scaledSourceViews_), views);
+        return FFFResult::Success;
+    }
+
+    const auto planeCount = sourceInputLayout_ == 1 ? 3u :
+        (sourceInputLayout_ == 2 ? 2u : 1u);
+    for (std::size_t plane = 0; plane < ARRAYSIZE(sourceViews_); ++plane) {
+        if (plane >= planeCount || sourceViews_[plane] == nullptr) {
+            scaledSourceViews_[plane] = nullptr;
+            continue;
+        }
+        const auto planeWidth = plane == 0 ? sourceWidth_ :
+            (sourceWidth_ + (1u << sourceChromaWidthShift_) - 1) >> sourceChromaWidthShift_;
+        const auto planeHeight = plane == 0 ? sourceHeight_ :
+            (sourceHeight_ + (1u << sourceChromaHeightShift_) - 1) >> sourceChromaHeightShift_;
+        const auto targetWidth = std::min(planeWidth, outputWidth);
+        const auto targetHeight = std::min(planeHeight, outputHeight);
+        const auto format = sourceInputLayout_ == 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+            (sourceInputLayout_ == 2 && plane == 1 ? DXGI_FORMAT_R16G16_FLOAT :
+                DXGI_FORMAT_R16_FLOAT);
+        const auto ensure = EnsurePlaneScaleChain(plane, planeWidth, planeHeight,
+            targetWidth, targetHeight, static_cast<std::uint32_t>(format));
+        if (ensure != FFFResult::Success) return ensure;
+
+        auto* currentView = sourceViews_[plane];
+        auto currentWidth = planeWidth;
+        auto currentHeight = planeHeight;
+        for (const auto& pass : planeScaleChains_[plane].passes) {
+            const auto execute = ExecuteScalePass(currentView, currentWidth, currentHeight, pass);
+            if (execute != FFFResult::Success) return execute;
+            currentView = pass.view;
+            currentWidth = pass.width;
+            currentHeight = pass.height;
+        }
+        scaledSourceViews_[plane] = currentView;
+    }
+    scaledVideoGeneration_ = generation;
+    scaledOutputWidth_ = outputWidth;
+    scaledOutputHeight_ = outputHeight;
+    std::copy(std::begin(scaledSourceViews_), std::end(scaledSourceViews_), views);
     return FFFResult::Success;
 }
 
@@ -3739,6 +3988,10 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         destination = CalculateVideoDestination(sourceWidth_, sourceHeight_, swapWidth_,
             swapHeight_, sourceLimitedToNativeSize_);
     }
+    ID3D11ShaderResourceView* presentationViews[3]{};
+    const auto scaleResult = PrepareScaledVideo(destination.width, destination.height,
+        presentationViews);
+    if (scaleResult != FFFResult::Success) return scaleResult;
     constexpr float black[] = {0, 0, 0, 1};
     context_->ClearRenderTargetView(target, black);
     if (sourceCoverArt_) {
@@ -3751,7 +4004,7 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
     // the Windows HDR SDR-white adjustment.
     const auto result = DrawWithShader(target, static_cast<float>(destination.x),
         static_cast<float>(destination.y), static_cast<float>(destination.width),
-        static_cast<float>(destination.height));
+        static_cast<float>(destination.height), 0, presentationViews);
     if (result == FFFResult::Success)
         actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
     return result;
@@ -3976,6 +4229,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseVideoProcessorInputSurface();
     ReleaseCoverBackdropResources();
     ReleaseTimedTextResources();
+    ReleaseScaleResources();
     if (context_ != nullptr &&
         (device_ == nullptr || SUCCEEDED(device_->GetDeviceRemovedReason()))) {
         context_->ClearState();
@@ -3991,10 +4245,11 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
         if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
     }
     if (constants_ != nullptr) { constants_->Release(); constants_ = nullptr; }
-    if (anisotropicSampler_ != nullptr) { anisotropicSampler_->Release(); anisotropicSampler_ = nullptr; }
+    if (scaleConstants_ != nullptr) { scaleConstants_->Release(); scaleConstants_ = nullptr; }
     if (pointSampler_ != nullptr) { pointSampler_->Release(); pointSampler_ = nullptr; }
     if (sampler_ != nullptr) { sampler_->Release(); sampler_ = nullptr; }
     if (pixelShader_ != nullptr) { pixelShader_->Release(); pixelShader_ = nullptr; }
+    if (scalePixelShader_ != nullptr) { scalePixelShader_->Release(); scalePixelShader_ = nullptr; }
     if (coverBackdropPixelShader_ != nullptr) {
         coverBackdropPixelShader_->Release(); coverBackdropPixelShader_ = nullptr;
     }
@@ -4038,6 +4293,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     ReleaseVideoProcessor();
     ReleaseVideoProcessorInputSurface();
     ReleaseCoverBackdropResources();
+    ReleaseScaleResources();
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
         if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }

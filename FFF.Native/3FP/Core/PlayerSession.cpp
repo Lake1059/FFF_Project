@@ -439,6 +439,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
     LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency); qpcFrequency_ = frequency.QuadPart;
     if (configuration.audioEndpointIdUtf8 != nullptr) audioEndpointId_ = FromUtf8(configuration.audioEndpointIdUtf8);
     videoRenderer_.SetWindow(static_cast<HWND>(configuration.outputWindow));
+    videoRenderer_.SetScalingQuality(configuration.videoScalingQuality);
     videoRenderer_.SetColorMode(configuration.colorMode, configuration.sdrPeakNits,
         configuration.hdrPeakNits, configuration.sdrPaperWhiteNits);
     snapshot_.actualColorMode = videoRenderer_.ActualColorMode();

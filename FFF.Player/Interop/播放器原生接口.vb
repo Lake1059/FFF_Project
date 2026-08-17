@@ -28,6 +28,7 @@ Friend Structure 原生播放器配置
     Public 音频端点UTF8 As IntPtr
     Public 回调 As IntPtr
     Public 回调上下文 As IntPtr
+    Public 视频缩放质量 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>

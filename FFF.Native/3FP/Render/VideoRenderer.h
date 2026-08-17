@@ -114,6 +114,7 @@ public:
     ~PlayerVideoRenderer();
 
     FFFResult SetWindow(HWND window) noexcept;
+    FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
@@ -175,6 +176,22 @@ private:
         float shadowX = 0;
         float shadowY = 0;
     };
+    struct ScalePassResource {
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        std::uint32_t axis = 0;
+        ID3D11Texture2D* texture = nullptr;
+        ID3D11RenderTargetView* target = nullptr;
+        ID3D11ShaderResourceView* view = nullptr;
+    };
+    struct PlaneScaleChain {
+        std::uint32_t sourceWidth = 0;
+        std::uint32_t sourceHeight = 0;
+        std::uint32_t targetWidth = 0;
+        std::uint32_t targetHeight = 0;
+        std::uint32_t format = 0;
+        std::vector<ScalePassResource> passes;
+    };
 
     FFFResult EnsureDevice() noexcept;
     std::uint32_t PreferredOutputBitDepth(std::uint32_t sourceBitDepth, bool hdr) noexcept;
@@ -193,7 +210,17 @@ private:
     FFFResult EnsureVideoProcessorInputSurface(std::uint32_t format) noexcept;
     FFFResult RenderVideoProcessorInput() noexcept;
     FFFResult DrawWithShader(ID3D11RenderTargetView* target, float x, float y,
-        float width, float height, std::uint32_t effect = 0) noexcept;
+        float width, float height, std::uint32_t effect = 0,
+        ID3D11ShaderResourceView* const* sourceViews = nullptr) noexcept;
+    FFFResult PrepareScaledVideo(std::uint32_t outputWidth, std::uint32_t outputHeight,
+        ID3D11ShaderResourceView** views) noexcept;
+    FFFResult EnsurePlaneScaleChain(std::size_t plane, std::uint32_t sourceWidth,
+        std::uint32_t sourceHeight, std::uint32_t targetWidth,
+        std::uint32_t targetHeight, std::uint32_t format) noexcept;
+    FFFResult ExecuteScalePass(ID3D11ShaderResourceView* source,
+        std::uint32_t sourceWidth, std::uint32_t sourceHeight,
+        const ScalePassResource& pass) noexcept;
+    void ReleaseScaleResources() noexcept;
     FFFResult DrawWithVideoProcessor(ID3D11Texture2D* inputTexture,
         ID3D11Texture2D* outputTexture, const RECT& destination,
         std::uint32_t inputColorSpace, std::uint32_t outputColorSpace) noexcept;
@@ -247,12 +274,18 @@ private:
     ID3D11PixelShader* pixelShader_;
     ID3D11PixelShader* coverBackdropPixelShader_;
     ID3D11PixelShader* timedTextPixelShader_;
+    ID3D11PixelShader* scalePixelShader_;
     ID3D11SamplerState* sampler_;
     ID3D11SamplerState* pointSampler_;
-    ID3D11SamplerState* anisotropicSampler_;
     ID3D11Buffer* constants_;
+    ID3D11Buffer* scaleConstants_;
     ID3D11Texture2D* sourceTextures_[3];
     ID3D11ShaderResourceView* sourceViews_[3];
+    PlaneScaleChain planeScaleChains_[3];
+    std::uint64_t scaledVideoGeneration_;
+    std::uint32_t scaledOutputWidth_;
+    std::uint32_t scaledOutputHeight_;
+    ID3D11ShaderResourceView* scaledSourceViews_[3];
     ID3D11VideoDevice* videoDevice_;
     ID3D11VideoContext* videoContext_;
     ID3D11VideoProcessorEnumerator* videoProcessorEnumerator_;
@@ -318,6 +351,7 @@ private:
     bool sourceFullRange_;
     bool sourceInterlaced_;
     std::atomic<FFF3FPVideoScalingMode> actualVideoScalingMode_;
+    FFF3FPVideoScalingQuality scalingQuality_;
     FFF3FPColorMode requestedMode_;
     FFF3FPColorMode actualMode_;
     float sdrPeakNits_;

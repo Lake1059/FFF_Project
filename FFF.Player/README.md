@@ -43,7 +43,8 @@ RGB10A2 的原始通道值。它用于将渲染器数字输出与 ICC、DWM 及�
 
 SDR 与 HDR 视频输出统一使用自有 D3D11 shader：D3D11VA NV12/P010 表面保留在 GPU，CPU
 解码帧上传后与之共用同一套格式、色度、色彩和缩放逻辑。1:1 使用精确采样，放大和缩小
-统一使用带 anti-ringing 限制的 Lanczos3。SDR shader 直接写入默认 SDR 交换链；真实 HDR
+视频缩放使用按平面尺寸计算的多级两遍低通管线：均衡档采用倍率感知 Hermite，高画质档采用
+倍率感知 Lanczos3；超过 2 倍时自动拆成多个不超过 2 倍的阶段。SDR shader 直接写入默认 SDR 交换链；真实 HDR
 shader 直接写入 10-bit PQ 后缓冲。
 
 `播放列表` 负责同目录相似命名扫描、自然排序和本地 M3U8 导入导出；

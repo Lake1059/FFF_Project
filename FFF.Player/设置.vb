@@ -10,6 +10,7 @@ Public Class 设置
     Public Property 自定义初始画面宽度 As Integer = 1024
     Public Property 自定义初始画面高度 As Integer = 576
     Public Property 解码方式 As 解码模式 = 解码模式.CPU
+    Public Property 视频缩放质量选项 As Integer = CInt(视频缩放质量.高画质)
     Public Property HDR峰值亮度选项 As Integer = 0
     Public Property HDR峰值亮度 As Integer = 0
     Public Property HDR映射SDR参考亮度 As Integer = 250
@@ -129,6 +130,7 @@ Public Class 设置
         If 解码方式 <> CInt(解码模式.CPU) AndAlso 解码方式 <> CInt(解码模式.GPU) Then
             解码方式 = CInt(解码模式.CPU)
         End If
+        视频缩放质量选项 = Math.Clamp(视频缩放质量选项, 0, 1)
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
         HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)

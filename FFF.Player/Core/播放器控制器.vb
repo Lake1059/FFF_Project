@@ -1010,6 +1010,7 @@ Public NotInheritable Class 播放器控制器
             .SDR峰值尼特 = 当前SDR峰值尼特,
             .HDR峰值尼特 = 取得HDR输出峰值参数(色彩模式),
             .SDR纸白尼特 = SDR纸白尼特,
+            .缩放质量 = CType(设置.实例对象.视频缩放质量选项, 视频缩放质量),
             .输出窗口句柄 = IntPtr.Zero,
             .事件同步上下文 = 事件同步上下文
         })

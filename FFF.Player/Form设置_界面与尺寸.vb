@@ -30,10 +30,16 @@ Public Class Form设置_界面与尺寸
             MCB_初始画面尺寸选项.SelectedIndex = 设置.实例对象.初始画面尺寸选项
             MTB_自定义初始画面尺寸宽度.Text = 设置.实例对象.自定义初始画面宽度.ToString()
             MTB_自定义初始画面尺寸高度.Text = 设置.实例对象.自定义初始画面高度.ToString()
+            MCB_视频缩放质量.SelectedIndex = 设置.实例对象.视频缩放质量选项
             更新自定义尺寸控件状态()
         Finally
             正在初始化 = False
         End Try
+    End Sub
+
+    Private Sub MCB_视频缩放质量_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_视频缩放质量.SelectedIndexChanged
+        If 正在初始化 OrElse MCB_视频缩放质量.SelectedIndex < 0 Then Return
+        设置.实例对象.视频缩放质量选项 = MCB_视频缩放质量.SelectedIndex
     End Sub
 
     Private Sub MCB_全局字体_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_全局字体.SelectedIndexChanged
