@@ -274,11 +274,29 @@
         If 宿主 Is Nothing OrElse 宿主.IsDisposed Then Return
         StartPosition = FormStartPosition.Manual
         If 宿主.WindowState = FormWindowState.Maximized OrElse Form1.ThisIsYourWindow1.IsFullScreen(宿主) Then
-            Bounds = 计算居中边界(宿主.Bounds, Size)
+            Bounds = 计算居中显示边界(宿主.Bounds, Width, MinimumSize.Height)
         Else
-            Bounds = 计算贴靠边界(宿主.Bounds, Width)
+            Bounds = 计算普通窗口边界(宿主.Bounds, Width, MinimumSize.Height,
+                                     Screen.FromControl(宿主).WorkingArea)
         End If
     End Sub
+
+    Friend Shared Function 计算普通窗口边界(宿主边界 As Rectangle, 窗口宽度 As Integer, 最小窗口高度 As Integer,
+                                      屏幕工作区 As Rectangle) As Rectangle
+        If 屏幕工作区.Width <= 0 OrElse 屏幕工作区.Height <= 0 Then
+            Throw New ArgumentOutOfRangeException(NameOf(屏幕工作区))
+        End If
+        Dim 贴靠边界 = 计算贴靠边界(宿主边界, 窗口宽度)
+        If 贴靠边界.Right <= 屏幕工作区.Right Then Return 贴靠边界
+        Return 计算居中显示边界(宿主边界, 窗口宽度, 最小窗口高度)
+    End Function
+
+    Friend Shared Function 计算居中显示边界(宿主边界 As Rectangle, 窗口宽度 As Integer,
+                                      最小窗口高度 As Integer) As Rectangle
+        If 最小窗口高度 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(最小窗口高度))
+        Dim 窗口高度 = Math.Max(最小窗口高度, 宿主边界.Height * 3 \ 4)
+        Return 计算居中边界(宿主边界, New Size(窗口宽度, 窗口高度))
+    End Function
 
     Friend Shared Function 计算贴靠边界(宿主边界 As Rectangle, 窗口宽度 As Integer) As Rectangle
         If 宿主边界.Width <= 0 OrElse 宿主边界.Height <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(宿主边界))
