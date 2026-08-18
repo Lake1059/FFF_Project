@@ -552,13 +552,23 @@ constexpr const char* CoverBackdropPixelShaderSource = R"(
 cbuffer Settings : register(b0) {
     uint ColorMode; uint Transfer; uint Source2020; uint TintArgb;
     float SdrPeak; float HdrPeak; float PaperWhite; float TargetPeak;
+    float SourceWidth; float SourceHeight; float OutputWidth; float OutputHeight;
 };
 Texture2D<float4> Backdrop : register(t0);
 SamplerState LinearSampler : register(s0);
 float LinearOne(float v) { v=saturate(v); return v<0.081 ? v/4.5 : pow((v+0.099)/1.099,1.0/0.45); }
 float3 ToLinear709(float3 v) { return float3(LinearOne(v.r),LinearOne(v.g),LinearOne(v.b)); }
+float2 CoverFillUv(float2 uv) {
+    const float sourceAspect=SourceWidth/max(SourceHeight,1.0);
+    const float outputAspect=OutputWidth/max(OutputHeight,1.0);
+    if(sourceAspect>outputAspect)
+        uv.x=(uv.x-0.5)*(outputAspect/sourceAspect)+0.5;
+    else
+        uv.y=(uv.y-0.5)*(sourceAspect/outputAspect)+0.5;
+    return uv;
+}
 float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
-    float4 color=Backdrop.Sample(LinearSampler,uv);
+    float4 color=Backdrop.Sample(LinearSampler,CoverFillUv(uv));
     float4 tint=float4(float3((TintArgb>>16)&255u,(TintArgb>>8)&255u,TintArgb&255u),
                        float((TintArgb>>24)&255u))/255.0;
     if(ColorMode==2){
@@ -4085,6 +4095,14 @@ FFFResult PlayerVideoRenderer::DrawCoverBackdrop(ID3D11RenderTargetView* target)
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(vertexShader_, nullptr, 0);
     context_->PSSetShader(coverBackdropPixelShader_, nullptr, 0);
+    const auto sourceWidth = cachedVideoSettings_.sourceWidth;
+    const auto sourceHeight = cachedVideoSettings_.sourceHeight;
+    const auto outputWidth = cachedVideoSettings_.outputWidth;
+    const auto outputHeight = cachedVideoSettings_.outputHeight;
+    cachedVideoSettings_.sourceWidth = static_cast<float>(coverBackdropWidth_);
+    cachedVideoSettings_.sourceHeight = static_cast<float>(coverBackdropHeight_);
+    cachedVideoSettings_.outputWidth = static_cast<float>(swapWidth_);
+    cachedVideoSettings_.outputHeight = static_cast<float>(swapHeight_);
     cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
     cachedVideoSettings_.reserved =
         coverBackdropTintArgb_.load(std::memory_order_acquire);
@@ -4097,6 +4115,10 @@ FFFResult PlayerVideoRenderer::DrawCoverBackdrop(ID3D11RenderTargetView* target)
     ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
     context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
+    cachedVideoSettings_.sourceWidth = sourceWidth;
+    cachedVideoSettings_.sourceHeight = sourceHeight;
+    cachedVideoSettings_.outputWidth = outputWidth;
+    cachedVideoSettings_.outputHeight = outputHeight;
     return FFFResult::Success;
 }
 

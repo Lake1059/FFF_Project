@@ -138,6 +138,10 @@ private:
     void Fail(FFFResult result, std::string message, const char* operation = nullptr) noexcept;
     void Emit(FFF3FPEvent eventType, const std::string& detailJson) const noexcept;
     void RebuildMediaInfo() noexcept;
+    std::int64_t TimelineOrigin100ns(const AVFormatContext* owner) const noexcept;
+    std::int64_t StreamTimestampPosition100ns(const AVFormatContext* owner,
+        std::int32_t streamIndex, std::int64_t timestamp) const noexcept;
+    bool ShouldGateAudioAtVideoStart() const noexcept;
     std::int64_t ClockPosition() const noexcept;
     void PublishPlaybackClock(std::int64_t position100ns,
         std::int64_t limit100ns) const noexcept;

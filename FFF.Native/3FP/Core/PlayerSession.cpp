@@ -467,11 +467,55 @@ void PlayerSession::NotifyVideoRecovery() noexcept {
 }
 
 bool PlayerSession::ShouldDelayAudioUntilVideoFrame() const noexcept {
-    return audioBlockedUntilVideoFrame_ && videoStream_ >= 0;
+    return audioBlockedUntilVideoFrame_ && ShouldGateAudioAtVideoStart();
+}
+
+std::int64_t PlayerSession::TimelineOrigin100ns(const AVFormatContext* owner) const noexcept {
+    if (owner == nullptr) return 0;
+    if (owner->start_time != AV_NOPTS_VALUE)
+        return av_rescale_q(owner->start_time, AV_TIME_BASE_Q,
+            AVRational{1, static_cast<int>(TicksPerSecond)});
+
+    // Some raw/transport demuxers do not publish a format start. Use the
+    // earliest stream timestamp so selected audio and video still share one
+    // media origin instead of silently acquiring a stream-dependent offset.
+    std::int64_t origin = AV_NOPTS_VALUE;
+    for (unsigned index = 0; index < owner->nb_streams; ++index) {
+        const auto* stream = owner->streams[index];
+        if (stream == nullptr || stream->start_time == AV_NOPTS_VALUE) continue;
+        const auto value = av_rescale_q(stream->start_time, stream->time_base,
+            AVRational{1, static_cast<int>(TicksPerSecond)});
+        origin = origin == AV_NOPTS_VALUE ? value : std::min(origin, value);
+    }
+    return origin == AV_NOPTS_VALUE ? 0 : origin;
+}
+
+std::int64_t PlayerSession::StreamTimestampPosition100ns(const AVFormatContext* owner,
+    const std::int32_t streamIndex, const std::int64_t timestamp) const noexcept {
+    if (owner == nullptr || streamIndex < 0 ||
+        streamIndex >= static_cast<std::int32_t>(owner->nb_streams) ||
+        timestamp == AV_NOPTS_VALUE) return AV_NOPTS_VALUE;
+    const auto* stream = owner->streams[streamIndex];
+    if (stream == nullptr) return AV_NOPTS_VALUE;
+    return av_rescale_q(timestamp, stream->time_base,
+        AVRational{1, static_cast<int>(TicksPerSecond)}) - TimelineOrigin100ns(owner);
+}
+
+bool PlayerSession::ShouldGateAudioAtVideoStart() const noexcept {
+    if (format_ == nullptr || videoStream_ < 0 ||
+        videoStream_ >= static_cast<std::int32_t>(format_->nb_streams)) return false;
+    const auto* stream = format_->streams[videoStream_];
+    if (stream == nullptr || stream->start_time == AV_NOPTS_VALUE) return true;
+    const auto start = av_rescale_q(stream->start_time, stream->time_base,
+        AVRational{1, static_cast<int>(TicksPerSecond)});
+    // If the first video timestamp is materially later than the common media
+    // origin, audio is valid before the first picture and must not be gated.
+    constexpr std::int64_t GateTolerance100ns = 100'000;
+    return start - TimelineOrigin100ns(format_) <= GateTolerance100ns;
 }
 
 void PlayerSession::ArmAudioUntilVideoFrame() noexcept {
-    audioBlockedUntilVideoFrame_ = videoStream_ >= 0;
+    audioBlockedUntilVideoFrame_ = ShouldGateAudioAtVideoStart();
     audioUnblockVideoGeneration_ = 0;
     audioResumePendingAfterVideoFrame_ = audioBlockedUntilVideoFrame_ &&
         state_.load() == FFF3FPState::Playing;
@@ -666,10 +710,8 @@ FFFResult PlayerSession::SeekFrame(const std::int64_t value) noexcept {
     Enqueue([this, value] {
         const auto end = framePtsIndexBase_ + static_cast<std::int64_t>(framePtsIndex_.size());
         if (value >= framePtsIndexBase_ && value < end) {
-            const auto* stream = format_->streams[videoStream_];
-            const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
-            DoSeek(av_rescale_q(framePtsIndex_[static_cast<std::size_t>(value - framePtsIndexBase_)] - start,
-                stream->time_base, AVRational{1, static_cast<int>(TicksPerSecond)}), value);
+            DoSeek(StreamTimestampPosition100ns(format_, videoStream_,
+                framePtsIndex_[static_cast<std::size_t>(value - framePtsIndexBase_)]), value);
         } else {
             // Preserve exact frame navigation outside the bounded index window.
             // Rebuild the sparse rolling index from the stream start while decoding.
@@ -767,12 +809,11 @@ void PlayerSession::DoStepFrame(const std::int32_t direction) {
     if (format_ == nullptr || videoStream_ < 0 || videoDecoder_ == nullptr) return;
     SuspendAudioRenderer(true);
     auto* stream = format_->streams[videoStream_];
-    const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
     const auto originalPosition = snapshot_.position100ns;
     auto currentPts = snapshot_.framePts;
     if (currentPts == AV_NOPTS_VALUE) {
-        currentPts = av_rescale_q(originalPosition,
-            AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base) + start;
+        currentPts = av_rescale_q(originalPosition + TimelineOrigin100ns(format_),
+            AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base);
     }
 
     // Repeated key messages at the media boundary must not trigger an expensive
@@ -799,8 +840,7 @@ void PlayerSession::DoStepFrame(const std::int32_t direction) {
     }
 
     if (targetPts != AV_NOPTS_VALUE) {
-        targetPosition = av_rescale_q(targetPts - start, stream->time_base,
-            AVRational{1, static_cast<int>(TicksPerSecond)});
+        targetPosition = StreamTimestampPosition100ns(format_, videoStream_, targetPts);
     } else {
         auto frameQuantum = lastVideoFrameDuration100ns_;
         if (frameQuantum <= 0) {
@@ -829,8 +869,7 @@ void PlayerSession::DoStepFrame(const std::int32_t direction) {
         if (previous != framePtsIndex_.begin()) {
             const auto strictPreviousPts = *--previous;
             const auto strictPreviousPosition = std::max<std::int64_t>(0,
-                av_rescale_q(strictPreviousPts - start, stream->time_base,
-                    AVRational{1, static_cast<int>(TicksPerSecond)}));
+                StreamTimestampPosition100ns(format_, videoStream_, strictPreviousPts));
             DoSeek(strictPreviousPosition);
             DecodeUntilSeekTarget();
         }
@@ -870,11 +909,10 @@ void PlayerSession::DoStepKeyframe(const std::int32_t direction) {
     }
 
     auto* stream = format_->streams[videoStream_];
-    const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
     auto currentTimestamp = snapshot_.framePts;
     if (currentTimestamp == AV_NOPTS_VALUE) {
-        currentTimestamp = av_rescale_q(snapshot_.position100ns,
-            AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base) + start;
+        currentTimestamp = av_rescale_q(snapshot_.position100ns + TimelineOrigin100ns(format_),
+            AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base);
     }
     const auto searchTimestamp = currentTimestamp + direction;
     const auto flags = direction < 0 ? AVSEEK_FLAG_BACKWARD : 0;
@@ -883,8 +921,7 @@ void PlayerSession::DoStepKeyframe(const std::int32_t direction) {
 
     if (entry != nullptr) {
         const auto targetPosition = std::max<std::int64_t>(0,
-            av_rescale_q(entry->timestamp - start, stream->time_base,
-                AVRational{1, static_cast<int>(TicksPerSecond)}));
+            StreamTimestampPosition100ns(format_, videoStream_, entry->timestamp));
         DoSeek(targetPosition, -1, false);
     } else {
         if (av_seek_frame(format_, videoStream_, searchTimestamp, flags) < 0) {
@@ -1148,10 +1185,8 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
     auto redrawPosition = resumePosition;
     if (previousState == FFF3FPState::Ended && format_ != nullptr && videoStream_ >= 0 &&
         snapshot_.framePts != AV_NOPTS_VALUE) {
-        const auto* stream = format_->streams[videoStream_];
-        const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
-        redrawPosition = std::max<std::int64_t>(0, av_rescale_q(snapshot_.framePts - start,
-            stream->time_base, AVRational{1, static_cast<int>(TicksPerSecond)}));
+        redrawPosition = std::max<std::int64_t>(0,
+            StreamTimestampPosition100ns(format_, videoStream_, snapshot_.framePts));
     }
     const auto reason = videoRenderer_.LastError();
     SuspendAudioRenderer(false);
@@ -2299,38 +2334,34 @@ void PlayerSession::NormalizeVideoFrameTimestamp(AVFrame* frame) noexcept {
     // demuxer or decoder exposes a better cadence.
     if (duration <= 0) duration = TicksPerSecond / 25;
 
-    const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
     if (originalPts == AV_NOPTS_VALUE) {
         const auto position = std::max<std::int64_t>(0, nextUntimedVideoPosition100ns_);
         const auto timestamp = av_rescale_q(position,
-            AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base) + start;
+            AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base) +
+            av_rescale_q(TimelineOrigin100ns(format_),
+                AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base);
         frame->pts = timestamp;
         frame->best_effort_timestamp = timestamp;
         nextUntimedVideoPosition100ns_ = position + duration;
         return;
     }
 
-    const auto position = av_rescale_q(originalPts - start, stream->time_base,
-        AVRational{1, static_cast<int>(TicksPerSecond)});
+    const auto position = StreamTimestampPosition100ns(format_, videoStream_, originalPts);
     nextUntimedVideoPosition100ns_ = std::max(nextUntimedVideoPosition100ns_, position + duration);
 }
 
 std::int64_t PlayerSession::VideoFramePosition(const AVFrame* frame) const noexcept {
     if (frame == nullptr || format_ == nullptr || videoStream_ < 0) return snapshot_.position100ns;
-    const auto* stream = format_->streams[videoStream_];
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
     if (pts == AV_NOPTS_VALUE) return snapshot_.position100ns;
-    const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
-    return av_rescale_q(pts - start, stream->time_base,
-        AVRational{1, static_cast<int>(TicksPerSecond)});
+    return StreamTimestampPosition100ns(format_, videoStream_, pts);
 }
 
 void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept {
     auto* stream = owner->streams[videoStream_];
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
-    const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
     const auto position = pts == AV_NOPTS_VALUE ? snapshot_.position100ns :
-        av_rescale_q(pts - start, stream->time_base, AVRational{1, static_cast<int>(TicksPerSecond)});
+        StreamTimestampPosition100ns(owner, videoStream_, pts);
     if (frame->duration > 0) {
         lastVideoFrameDuration100ns_ = av_rescale_q(frame->duration, stream->time_base,
             AVRational{1, static_cast<int>(TicksPerSecond)});
@@ -2476,9 +2507,7 @@ void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, cons
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
     auto position = AV_NOPTS_VALUE;
     if (pts != AV_NOPTS_VALUE) {
-        const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
-        position = av_rescale_q(pts - start, stream->time_base,
-            AVRational{1, static_cast<int>(TicksPerSecond)});
+        position = StreamTimestampPosition100ns(owner, streamIndex, pts);
         if (owner == externalFormat_) position += externalAudioOffset100ns_;
     }
     if (pts != AV_NOPTS_VALUE && seekTarget100ns_ >= 0) {
@@ -2581,9 +2610,7 @@ void PlayerSession::TrackPacketBitRate(const AVPacket* packet, AVFormatContext* 
 
     const auto timestamp = packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
     if (timestamp == AV_NOPTS_VALUE) return;
-    const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
-    auto position = av_rescale_q(timestamp - start, stream->time_base,
-        AVRational{1, static_cast<int>(TicksPerSecond)});
+    auto position = StreamTimestampPosition100ns(owner, packet->stream_index, timestamp);
     if (owner == externalFormat_) position += externalAudioOffset100ns_;
     const auto second = std::max<std::int64_t>(0, position) / TicksPerSecond;
     auto& buckets = video ? videoBitRateBuckets_ : audioBitRateBuckets_;
@@ -2671,8 +2698,9 @@ void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame
     if (!format_) return; position = std::clamp<std::int64_t>(position, 0, snapshot_.duration100ns > 0 ? snapshot_.duration100ns : position);
     auto decodeStartPosition = position;
     const auto referenceStream = videoStream_ >= 0 ? videoStream_ : audioStream_;
-    auto timestamp = av_rescale_q(position, AVRational{1, static_cast<int>(TicksPerSecond)}, format_->streams[referenceStream]->time_base);
-    if (format_->streams[referenceStream]->start_time != AV_NOPTS_VALUE) timestamp += format_->streams[referenceStream]->start_time;
+    auto timestamp = av_rescale_q(position + TimelineOrigin100ns(format_),
+        AVRational{1, static_cast<int>(TicksPerSecond)},
+        format_->streams[referenceStream]->time_base);
     auto seekResult = av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD);
     if (seekResult < 0 && format_->pb != nullptr &&
         (format_->pb->seekable & AVIO_SEEKABLE_NORMAL) != 0) {
@@ -2713,8 +2741,8 @@ void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame
     if (externalFormat_ && externalAudioStream_ >= 0) {
         auto externalPosition = std::max<std::int64_t>(0, position - externalAudioOffset100ns_);
         auto* stream = externalFormat_->streams[externalAudioStream_];
-        auto externalTimestamp = av_rescale_q(externalPosition, AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base);
-        if (stream->start_time != AV_NOPTS_VALUE) externalTimestamp += stream->start_time;
+        auto externalTimestamp = av_rescale_q(externalPosition + TimelineOrigin100ns(externalFormat_),
+            AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base);
         av_seek_frame(externalFormat_, externalAudioStream_, externalTimestamp, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(externalAudioDecoder_);
     }
