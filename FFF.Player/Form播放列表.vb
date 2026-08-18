@@ -68,6 +68,12 @@
         UltraDetailListView1.Columns(0).Width = 计算列表列宽(
             UltraDetailListView1.ClientSize.Width, UltraDetailListView1.Padding.Horizontal,
             UltraDetailListView1.BorderSize, UltraDetailListView1.BorderRadius, DPI)
+        ' 列表视图左右分区：左半区拖动排序，右半区框选。
+        ' DragSelectZoneWidth 以 96 DPI 逻辑像素存储，控件内部会按当前 DPI 缩放，
+        ' 因此按 ClientSize（物理像素）的一半除以 DPI 比例换算，保证右半区宽度随窗口变化。
+        Dim DPI比例 = CSng(DPI) / 96.0F
+        UltraDetailListView1.DragSelectZoneWidth = Math.Max(40,
+            CInt(UltraDetailListView1.ClientSize.Width / 2.0F / DPI比例))
     End Sub
 
     Friend Shared Function 计算列表列宽(客户区宽度 As Integer, 水平内边距 As Integer,

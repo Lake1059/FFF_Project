@@ -57,6 +57,11 @@ FFFResult FFF3FP_SetExternalAudioOffset(const FFF3FPHandle player, const std::in
 FFFResult FFF3FP_SetColorMode(const FFF3FPHandle player, const FFF3FPColorMode mode, const float sdr,
     const float hdr, const float paper) noexcept { return player ? static_cast<PlayerSession*>(player)->SetColorMode(mode, sdr, hdr, paper) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_SetViewTransform(const FFF3FPHandle player, const float zoom,
+    const float panX, const float panY) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetViewTransform(zoom, panX, panY)
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_SetAudioEndpoint(const FFF3FPHandle player, const char* endpoint) noexcept { return player ? static_cast<PlayerSession*>(player)->SetAudioEndpoint(endpoint) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetAudioExclusiveMode(const FFF3FPHandle player, const std::uint32_t exclusive) noexcept {
     return player && exclusive <= 1 ? static_cast<PlayerSession*>(player)->SetAudioExclusiveMode(exclusive != 0)

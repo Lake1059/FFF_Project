@@ -115,6 +115,7 @@ public:
 
     FFFResult SetWindow(HWND window) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
+    FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
@@ -219,11 +220,7 @@ private:
         std::uint32_t targetHeight, std::uint32_t format) noexcept;
     FFFResult ExecuteScalePass(ID3D11ShaderResourceView* source,
         std::uint32_t sourceWidth, std::uint32_t sourceHeight,
-        const ScalePassResource& pass) noexcept;
-    FFFResult ExecuteUnsharpMask(ID3D11ShaderResourceView* source,
-        std::uint32_t width, std::uint32_t height,
-        ID3D11UnorderedAccessView* target) noexcept;
-    void ReleaseUnsharpResources() noexcept;
+        const ScalePassResource& pass, std::uint32_t filter) noexcept;
     void ReleaseScaleResources() noexcept;
     FFFResult DrawWithVideoProcessor(ID3D11Texture2D* inputTexture,
         ID3D11Texture2D* outputTexture, const RECT& destination,
@@ -279,15 +276,10 @@ private:
     ID3D11PixelShader* coverBackdropPixelShader_;
     ID3D11PixelShader* timedTextPixelShader_;
     ID3D11PixelShader* scalePixelShader_;
-    ID3D11ComputeShader* unsharpMaskShader_;
     ID3D11SamplerState* sampler_;
     ID3D11SamplerState* pointSampler_;
     ID3D11Buffer* constants_;
     ID3D11Buffer* scaleConstants_;
-    ID3D11Buffer* unsharpConstants_;
-    ID3D11Texture2D* unsharpTempTexture_;
-    ID3D11ShaderResourceView* unsharpTempView_;
-    ID3D11UnorderedAccessView* unsharpTempUav_;
     ID3D11Texture2D* sourceTextures_[3];
     ID3D11ShaderResourceView* sourceViews_[3];
     PlaneScaleChain planeScaleChains_[3];
@@ -366,6 +358,11 @@ private:
     float sdrPeakNits_;
     float hdrPeakNits_;
     float paperWhiteNits_;
+    // View transform (zoom + pan) applied when composing the video into the
+    // swap chain. Normalized pan in [-1,1] relative to the unzoomed video box.
+    std::atomic<float> viewZoomBits_;
+    std::atomic<float> viewPanXBits_;
+    std::atomic<float> viewPanYBits_;
     float sourcePeakNits_;
     HdrProcessor hdrProcessor_;
     std::vector<std::uint8_t> convertedRgb_;

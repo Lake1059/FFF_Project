@@ -70,10 +70,11 @@ bool ReadWindowsDisplayLuminance(const HMONITOR monitor,
 
 constexpr std::uint32_t OutputBitDepthForSource(const std::uint32_t sourceBitDepth,
     const bool hdr) noexcept {
-    // Match the mainstream MPC Video Renderer contract: floating point is an
-    // internal processing format, never an SDR desktop swap-chain format.
-    // DWM can then apply the Windows HDR SDR-white setting exactly once.
-    if (hdr) return 10;
+    // HDR output uses a 16-bit scRGB floating-point swap chain (linear
+    // Rec.709 primaries, 1.0 = 80 nits) so the display's tone mapper receives
+    // full-precision linear light. Floating point is never used for SDR so DWM
+    // applies the Windows HDR SDR-white adjustment exactly once.
+    if (hdr) return 16;
     if (sourceBitDepth > 8) return 10;
     return 8;
 }
@@ -485,12 +486,12 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
         if(Source2020!=0)rgb=ToBt709(To709(ToLinear709(rgb)));
         return float4(rgb,1);
     }
-    // PQ/Rec.2020 already matches the HDR swap-chain contract exactly.
-    if(ColorMode==2&&Transfer==1&&Source2020!=0)return float4(rgb,1);
     float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):ToLinear709(rgb)*PaperWhite);
     if(ColorMode==2){
-        if(Source2020==0)nits=To2020(nits);
-        return float4(NitsToPq(nits),1);
+        // scRGB swap-chain contract: linear Rec.709 primaries, 1.0 = 80 nits.
+        // Tone mapping is delegated to the display via the HDR metadata.
+        float3 rec709Nits=Source2020==0?nits:To709(nits);
+        return float4(rec709Nits/80.0,1);
     }
     if(Source2020==0)nits=To2020(nits);
     // BT.2390 operates on IPT intensity before Rec.2020-to-Rec.709 gamut
@@ -544,36 +545,6 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
         weightTotal+=weight;
     }
     return total/max(abs(weightTotal),0.000001);
-}
-)";
-
-constexpr const char* UnsharpMaskShaderSource = R"(
-cbuffer UnsharpConstants : register(b0) {
-    float Strength;
-    float Threshold;
-    float2 Padding;
-};
-Texture2D<float> Source : register(t0);
-RWTexture2D<float> Target : register(u0);
-[numthreads(16,16,1)]
-void main(uint3 dtid:SV_DispatchThreadID) {
-    uint2 pos=dtid.xy;
-    uint width,height;
-    Source.GetDimensions(width,height);
-    if(pos.x>=width||pos.y>=height)return;
-    const float kernel[3]={1.0/16.0,2.0/16.0,1.0/16.0};
-    float total=0.0;
-    [unroll] for(int dy=-1;dy<=1;++dy) {
-        const int y=clamp(int(pos.y)+dy,0,int(height)-1);
-        [unroll] for(int dx=-1;dx<=1;++dx) {
-            const int x=clamp(int(pos.x)+dx,0,int(width)-1);
-            total+=Source.Load(int3(x,y,0))*kernel[dy+1]*kernel[dx+1];
-        }
-    }
-    const float original=Source.Load(int3(pos,0));
-    const float diff=abs(original-total);
-    const float amount=diff>Threshold?Strength:0.0;
-    Target[pos]=original+(original-total)*amount;
 }
 )";
 
@@ -676,11 +647,6 @@ struct ShaderSettings {
 struct ScaleShaderSettings {
     float sourceWidth, sourceHeight, destinationWidth, destinationHeight;
     std::uint32_t axis, filter;
-    float padding1, padding2;
-};
-
-struct UnsharpConstants {
-    float strength, threshold;
     float padding1, padding2;
 };
 static_assert(sizeof(ScaleShaderSettings) == 32);
@@ -1599,6 +1565,9 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       requestedMode_(FFF3FPColorMode::MapToSdr), actualMode_(FFF3FPColorMode::MapToSdr),
       sdrPeakNits_(100.0f), hdrPeakNits_(0.0f),
       paperWhiteNits_(203.0f), sourcePeakNits_(100.0f),
+      viewZoomBits_(std::bit_cast<float>(1.0f)),
+      viewPanXBits_(std::bit_cast<float>(0.0f)),
+      viewPanYBits_(std::bit_cast<float>(0.0f)),
       timedTextThreadStop_(false), timedTextThreadRunning_(false),
       coverBackdropThreadStop_(false), coverBackdropRequestPending_(false),
       coverBackdropRequestGeneration_(0),
@@ -1674,6 +1643,20 @@ FFFResult PlayerVideoRenderer::SetScalingQuality(
     if (scalingQuality_ == quality) return FFFResult::Success;
     scalingQuality_ = quality;
     scaledVideoGeneration_ = UINT64_MAX;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::SetViewTransform(const float zoom,
+    const float panX, const float panY) noexcept {
+    if (!std::isfinite(zoom) || zoom <= 0.0f || !std::isfinite(panX) || !std::isfinite(panY))
+        return FFFResult::InvalidArgument;
+    std::lock_guard deviceLock(deviceMutex_);
+    const auto zoomClamped = std::clamp(zoom, 0.05f, 64.0f);
+    const auto panXClamped = std::clamp(panX, -1.0f, 1.0f);
+    const auto panYClamped = std::clamp(panY, -1.0f, 1.0f);
+    viewZoomBits_.store(std::bit_cast<float>(zoomClamped), std::memory_order_relaxed);
+    viewPanXBits_.store(std::bit_cast<float>(panXClamped), std::memory_order_relaxed);
+    viewPanYBits_.store(std::bit_cast<float>(panYClamped), std::memory_order_relaxed);
     return FFFResult::Success;
 }
 
@@ -1951,8 +1934,9 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     }
     DXGI_SWAP_CHAIN_DESC1 description{};
     description.Width = width; description.Height = height;
-    description.Format = outputBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
-        DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.Format = outputBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+        (outputBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
+            DXGI_FORMAT_B8G8R8A8_UNORM);
     description.SampleDesc.Count = 1; description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     description.BufferCount = 2; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_NONE;
@@ -1968,10 +1952,10 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     ReleaseTimedTextResources();
     if (hdr) {
         UINT support = 0;
-        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) ||
+        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) ||
             (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
-            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
-            fallbackReason_ = "The swap chain rejected the Rec.2020 PQ color space.";
+            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
+            fallbackReason_ = "The swap chain rejected the scRGB color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
             hdrSwapChainRejected_ = true;
             hdrSupportCheckedAt_ = std::chrono::steady_clock::now();
@@ -1999,7 +1983,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
 }
 
 FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::uint32_t outputBits) noexcept {
-    const auto formatBits = hdr ? std::max(10u, outputBits) : outputBits;
+    const auto formatBits = hdr ? std::max(16u, outputBits) : outputBits;
     if (swapChain_ == nullptr || (hdr == swapHdr_ && formatBits == swapOutputBits_)) return FFFResult::Success;
     if (context_ != nullptr) { context_->ClearState(); context_->Flush(); }
     ReleaseTimedTextResources();
@@ -2019,8 +2003,9 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
         swapOutputBits_ = 8;
         return CreateSwapChain(width, height, hdr, formatBits);
     }
-    const auto format = formatBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
-        DXGI_FORMAT_B8G8R8A8_UNORM;
+    const auto format = formatBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+        (formatBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
+            DXGI_FORMAT_B8G8R8A8_UNORM);
     std::unique_lock presentLock(presentMutex_);
     const auto resize = swapChain_->ResizeBuffers(0, std::max(1u, swapWidth_),
         std::max(1u, swapHeight_), format, 0);
@@ -2034,10 +2019,10 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
     swapHdr_ = hdr; swapOutputBits_ = formatBits;
     if (hdr) {
         UINT support = 0;
-        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) ||
+        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) ||
             (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
-            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020))) {
-            fallbackReason_ = "The reconfigured swap chain rejected the Rec.2020 PQ color space.";
+            FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
+            fallbackReason_ = "The reconfigured swap chain rejected the scRGB color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
             hdrSwapChainRejected_ = true;
             hdrSupportCheckedAt_ = std::chrono::steady_clock::now();
@@ -2501,24 +2486,10 @@ FFFResult PlayerVideoRenderer::EnsurePlaneScaleChain(const std::size_t plane,
 
 FFFResult PlayerVideoRenderer::ExecuteScalePass(ID3D11ShaderResourceView* source,
     const std::uint32_t sourceWidth, const std::uint32_t sourceHeight,
-    const ScalePassResource& pass) noexcept {
+    const ScalePassResource& pass, const std::uint32_t filter) noexcept {
     if (source == nullptr || pass.target == nullptr || context_ == nullptr ||
         scalePixelShader_ == nullptr || scaleConstants_ == nullptr)
         return FFFResult::InvalidState;
-    const float scale = pass.axis == 0 ?
-        static_cast<float>(pass.width) / static_cast<float>(sourceWidth) :
-        static_cast<float>(pass.height) / static_cast<float>(sourceHeight);
-    // 智能缩放算法选择:
-    //   scale < 0.25 → Area (Filter=2, 大比例缩小防混叠)
-    //   0.25 ≤ scale < 1.0 → Bicubic (Filter=0, 中等缩小平滑)
-    //   scale ≥ 1.0 → Lanczos-3 (Filter=1, 放大/等尺寸高保真)
-    unsigned int filter = 0u;
-    if (scale >= 1.0f)
-        filter = 1u;
-    else if (scale >= 0.25f)
-        filter = 0u;
-    else
-        filter = 2u;
     const ScaleShaderSettings settings{
         static_cast<float>(sourceWidth), static_cast<float>(sourceHeight),
         static_cast<float>(pass.width), static_cast<float>(pass.height),
@@ -2540,37 +2511,6 @@ FFFResult PlayerVideoRenderer::ExecuteScalePass(ID3D11ShaderResourceView* source
     context_->PSSetShaderResources(0, 1, &nullView);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     return FFFResult::Success;
-}
-
-FFFResult PlayerVideoRenderer::ExecuteUnsharpMask(ID3D11ShaderResourceView* source,
-    const std::uint32_t width, const std::uint32_t height,
-    ID3D11UnorderedAccessView* target) noexcept {
-    if (source == nullptr || target == nullptr || context_ == nullptr ||
-        unsharpMaskShader_ == nullptr || unsharpConstants_ == nullptr)
-        return FFFResult::InvalidState;
-    const UnsharpConstants settings{0.5f, 0.02f, 0.0f, 0.0f};
-    context_->UpdateSubresource(unsharpConstants_, 0, nullptr, &settings, 0, 0);
-    context_->CSSetShader(unsharpMaskShader_, nullptr, 0);
-    context_->CSSetConstantBuffers(0, 1, &unsharpConstants_);
-    context_->CSSetShaderResources(0, 1, &source);
-    context_->CSSetUnorderedAccessViews(0, 1, &target, nullptr);
-    const auto groupX = (width + 15u) / 16u;
-    const auto groupY = (height + 15u) / 16u;
-    context_->Dispatch(groupX, groupY, 1);
-    ID3D11UnorderedAccessView* nullUav = nullptr;
-    ID3D11ShaderResourceView* nullSrv = nullptr;
-    context_->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
-    context_->CSSetShaderResources(0, 1, &nullSrv);
-    context_->CSSetShader(nullptr, nullptr, 0);
-    return FFFResult::Success;
-}
-
-void PlayerVideoRenderer::ReleaseUnsharpResources() noexcept {
-    if (unsharpTempUav_ != nullptr) { unsharpTempUav_->Release(); unsharpTempUav_ = nullptr; }
-    if (unsharpTempView_ != nullptr) { unsharpTempView_->Release(); unsharpTempView_ = nullptr; }
-    if (unsharpTempTexture_ != nullptr) { unsharpTempTexture_->Release(); unsharpTempTexture_ = nullptr; }
-    if (unsharpConstants_ != nullptr) { unsharpConstants_->Release(); unsharpConstants_ = nullptr; }
-    if (unsharpMaskShader_ != nullptr) { unsharpMaskShader_->Release(); unsharpMaskShader_ = nullptr; }
 }
 
 FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidth,
@@ -2604,11 +2544,24 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
             targetWidth, targetHeight, static_cast<std::uint32_t>(format));
         if (ensure != FFFResult::Success) return ensure;
 
+        // Select the reconstruction filter once for the whole chain. The
+        // decision uses the overall downsample ratio (display area / source)
+        // rather than any single pass's instantaneous ratio, which the
+        // halving chain keeps near 0.5. Heavy downscales use an area-average
+        // (box) filter for anti-aliasing; otherwise honour the user's
+        // scaling-quality preference (Lanczos-3 for high quality, bicubic
+        // for balanced).
+        const float scaleX = static_cast<float>(targetWidth) / static_cast<float>(planeWidth);
+        const float scaleY = static_cast<float>(targetHeight) / static_cast<float>(planeHeight);
+        const std::uint32_t filter = std::min(scaleX, scaleY) < 0.25f ? 2u :
+            (scalingQuality_ == FFF3FPVideoScalingQuality::HighQuality ? 1u : 0u);
+
         auto* currentView = sourceViews_[plane];
         auto currentWidth = planeWidth;
         auto currentHeight = planeHeight;
         for (const auto& pass : planeScaleChains_[plane].passes) {
-            const auto execute = ExecuteScalePass(currentView, currentWidth, currentHeight, pass);
+            const auto execute = ExecuteScalePass(currentView, currentWidth, currentHeight,
+                pass, filter);
             if (execute != FFFResult::Success) return execute;
             currentView = pass.view;
             currentWidth = pass.width;
@@ -4070,6 +4023,28 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         destination = CalculateVideoDestination(sourceWidth_, sourceHeight_, swapWidth_,
             swapHeight_, sourceLimitedToNativeSize_);
     }
+    // Apply the view transform (zoom + pan) around the destination center.
+    // Zoom scales the fitted video box; pan offsets are normalized to the
+    // unzoomed box and clamped so the zoomed view always covers the fitted box.
+    const auto zoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire));
+    const auto panX = std::bit_cast<float>(viewPanXBits_.load(std::memory_order_acquire));
+    const auto panY = std::bit_cast<float>(viewPanYBits_.load(std::memory_order_acquire));
+    if (zoom > 1.0001f) {
+        const float zoomedWidth = destination.width * zoom;
+        const float zoomedHeight = destination.height * zoom;
+        const float maxPanX = (zoomedWidth - destination.width) / (2.0f * destination.width);
+        const float maxPanY = (zoomedHeight - destination.height) / (2.0f * destination.height);
+        const float offsetX = panX * std::max(maxPanX, 0.0f) * destination.width;
+        const float offsetY = panY * std::max(maxPanY, 0.0f) * destination.height;
+        destination.x = static_cast<std::uint32_t>(
+            std::max(0.0f, static_cast<float>(destination.x) +
+                (destination.width - zoomedWidth) / 2.0f - offsetX));
+        destination.y = static_cast<std::uint32_t>(
+            std::max(0.0f, static_cast<float>(destination.y) +
+                (destination.height - zoomedHeight) / 2.0f - offsetY));
+        destination.width = static_cast<std::uint32_t>(zoomedWidth);
+        destination.height = static_cast<std::uint32_t>(zoomedHeight);
+    }
     ID3D11ShaderResourceView* presentationViews[3]{};
     const auto scaleResult = PrepareScaledVideo(destination.width, destination.height,
         presentationViews);
@@ -4111,7 +4086,8 @@ FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept 
     D3D11_TEXTURE2D_DESC description{};
     backBuffer->GetDesc(&description);
     if (description.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
-        description.Format != DXGI_FORMAT_R10G10B10A2_UNORM)
+        description.Format != DXGI_FORMAT_R10G10B10A2_UNORM &&
+        description.Format != DXGI_FORMAT_R16G16B16A16_FLOAT)
         return FFFResult::NotSupported;
     description.Width = description.Height = 1;
     description.MipLevels = description.ArraySize = 1;
@@ -4142,6 +4118,13 @@ FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept 
         probe.green = static_cast<float>((packed >> 10) & 0x3ffu) * rgbScale;
         probe.blue = static_cast<float>((packed >> 20) & 0x3ffu) * rgbScale;
         probe.alpha = static_cast<float>((packed >> 30) & 0x3u) / 3.0f;
+    } else if (description.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        // scRGB linear output (1.0 = 80 nits); report raw linear values.
+        const auto* rgba = static_cast<const float*>(mapped.pData);
+        probe.red = rgba[0];
+        probe.green = rgba[1];
+        probe.blue = rgba[2];
+        probe.alpha = rgba[3];
     }
     context_->Unmap(staging.Get(), 0);
     probe.scalingMode = actualVideoScalingMode_.load();
