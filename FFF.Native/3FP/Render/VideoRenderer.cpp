@@ -551,13 +551,26 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
 constexpr const char* CoverBackdropPixelShaderSource = R"(
 cbuffer Settings : register(b0) {
     uint ColorMode; uint Transfer; uint Source2020; uint TintArgb;
+    float SdrPeak; float HdrPeak; float PaperWhite; float TargetPeak;
 };
 Texture2D<float4> Backdrop : register(t0);
 SamplerState LinearSampler : register(s0);
+float LinearOne(float v) { v=saturate(v); return v<0.081 ? v/4.5 : pow((v+0.099)/1.099,1.0/0.45); }
+float3 ToLinear709(float3 v) { return float3(LinearOne(v.r),LinearOne(v.g),LinearOne(v.b)); }
 float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     float4 color=Backdrop.Sample(LinearSampler,uv);
     float4 tint=float4(float3((TintArgb>>16)&255u,(TintArgb>>8)&255u,TintArgb&255u),
                        float((TintArgb>>24)&255u))/255.0;
+    if(ColorMode==2){
+        // scRGB swap-chain contract: linear Rec.709 primaries, 1.0 = 80 nits.
+        // The backdrop cache is an 8-bit UNORM texture that already holds the
+        // main shader's scRGB output (clamped to [0,1] when written). Blend it
+        // directly; only the sRGB tint needs linearization and conversion to
+        // scRGB so both operands share the same scale before lerp.
+        float3 tintScRgb=ToLinear709(tint.rgb)*(PaperWhite/80.0);
+        float3 result=lerp(color.rgb,tintScRgb,tint.a);
+        return float4(result,color.a);
+    }
     return float4(lerp(color.rgb,tint.rgb,tint.a),color.a);
 })";
 
@@ -570,18 +583,14 @@ Texture2D<float4> Overlay : register(t0);
 SamplerState LinearSampler : register(s0);
 float LinearOne(float v) { v=saturate(v); return v<0.081 ? v/4.5 : pow((v+0.099)/1.099,1.0/0.45); }
 float3 ToLinear709(float3 v) { return float3(LinearOne(v.r),LinearOne(v.g),LinearOne(v.b)); }
-float3 To2020(float3 v) { return mul(float3x3(0.627404,0.329283,0.043313, 0.069097,0.919540,0.011362, 0.016392,0.088013,0.895595),v); }
-float3 NitsToPq(float3 v) {
-    const float m1=2610.0/16384.0, m2=2523.0/32.0, c1=3424.0/4096.0, c2=2413.0/128.0, c3=2392.0/128.0;
-    v=pow(saturate(v/10000.0),m1); return pow((c1+c2*v)/(1.0+c3*v),m2);
-}
 float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     float4 value=Overlay.Sample(LinearSampler,uv);
     if(value.a<=0.000001)return 0;
     float3 straight=value.rgb/value.a;
     if(ColorMode==2){
         float overlayPeak=OverlayHdrHighlight!=0?TargetPeak:PaperWhite;
-        straight=NitsToPq(To2020(ToLinear709(straight)*overlayPeak));
+        // scRGB swap-chain contract: linear Rec.709 primaries, 1.0 = 80 nits.
+        straight=ToLinear709(straight)*(overlayPeak/80.0);
     }
     return float4(straight*value.a,value.a);
 })";
@@ -3989,6 +3998,7 @@ FFFResult PlayerVideoRenderer::DrawCoverBackdrop(ID3D11RenderTargetView* target)
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(vertexShader_, nullptr, 0);
     context_->PSSetShader(coverBackdropPixelShader_, nullptr, 0);
+    cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
     cachedVideoSettings_.reserved =
         coverBackdropTintArgb_.load(std::memory_order_acquire);
     context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
