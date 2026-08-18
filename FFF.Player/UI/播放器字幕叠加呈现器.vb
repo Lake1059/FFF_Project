@@ -431,14 +431,40 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
             ' overhang、描边和阴影均来自渲染所调用的同一个 DirectWrite 布局函数。
             Dim 最后一行测量 = SRT行测量(SRT行测量.Count - 1)
             总高度 += Math.Max(最后一行测量.可见底部 - 最后一行测量.布局高度, 0.0F)
-            Dim y = 项.Y底部像素 - 总高度
+            Dim y As Single
+            Dim 命令X = 区域.X像素
+            Dim 命令宽度 = 区域.宽度像素
+            Dim 命令水平对齐 = 定时文字对齐.居中
+            Dim 命令垂直对齐 = 定时文字对齐.靠前
+            If 项.使用定位 Then
+                Select Case 项.水平对齐
+                    Case 定时文字对齐.靠前
+                        命令X = 项.X中心像素
+                    Case 定时文字对齐.居中
+                        命令X = 项.X中心像素 - 区域.宽度像素 * 0.5F
+                    Case Else
+                        命令X = 项.X中心像素 - 区域.宽度像素
+                End Select
+                命令水平对齐 = 项.水平对齐
+                命令垂直对齐 = 项.垂直对齐
+                Select Case 命令垂直对齐
+                    Case 定时文字对齐.靠前
+                        y = 项.Y底部像素
+                    Case 定时文字对齐.居中
+                        y = 项.Y底部像素 - 总高度 * 0.5F
+                    Case 定时文字对齐.靠后
+                        y = 项.Y底部像素 - 总高度
+                End Select
+            Else
+                y = 项.Y底部像素 - 总高度
+            End If
             For 行索引 = 0 To 项.行.Count - 1
                 Dim 行 = 项.行(行索引)
                 Dim 行高 = SRT行测量(行索引).布局高度
                 添加文字命令(行.文本, 行.字体, 行.字号像素,
-                    New RectangleF(区域.X像素, y, 区域.宽度像素, 行高),
+                    New RectangleF(命令X, y, 命令宽度, 行高),
                     行.颜色ARGB, 行.描边颜色ARGB, 行.描边宽度像素,
-                    定时文字对齐.居中, 定时文字对齐.靠前,
+                    命令水平对齐, 命令垂直对齐,
                     阴影色ARGB:=行.阴影颜色ARGB,
                     样式:=CType(行.字体样式, 定时文字样式),
                     阴影X偏移:=行.阴影偏移像素, 阴影Y偏移:=行.阴影偏移像素)

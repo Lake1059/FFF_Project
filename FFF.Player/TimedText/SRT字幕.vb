@@ -1,6 +1,7 @@
 Imports System.Globalization
 Imports System.IO
 Imports System.Text
+Imports System.Text.RegularExpressions
 
 Public Enum 字幕语言类型
     未知 = 0
@@ -21,12 +22,17 @@ End Class
 Public NotInheritable Class SRT字幕提示
     Implements I时间轴项目
 
-    Friend Sub New(编号值 As Integer, 开始值 As TimeSpan, 结束值 As TimeSpan, 原始文本值 As String, 行值 As IReadOnlyList(Of 字幕文本行))
+    Friend Sub New(编号值 As Integer, 开始值 As TimeSpan, 结束值 As TimeSpan, 原始文本值 As String, 行值 As IReadOnlyList(Of 字幕文本行),
+                   Optional 定位X值 As Single? = Nothing, Optional 定位Y值 As Single? = Nothing,
+                   Optional ASS对齐值 As Integer = 0)
         编号 = 编号值
         开始时间 = 开始值
         结束时间 = 结束值
         原始文本 = 原始文本值
         行 = 行值
+        定位X = 定位X值
+        定位Y = 定位Y值
+        ASS对齐 = ASS对齐值
     End Sub
 
     Public ReadOnly Property 编号 As Integer
@@ -34,6 +40,11 @@ Public NotInheritable Class SRT字幕提示
     Public ReadOnly Property 结束时间 As TimeSpan Implements I时间轴项目.结束时间
     Public ReadOnly Property 原始文本 As String
     Public ReadOnly Property 行 As IReadOnlyList(Of 字幕文本行)
+    ''' <summary>ASS pos 坐标，使用兼容默认脚本画布；没有定位标签时为空。</summary>
+    Public ReadOnly Property 定位X As Single?
+    Public ReadOnly Property 定位Y As Single?
+    ''' <summary>ASS an 对齐编号（1-9）；零表示未指定。</summary>
+    Public ReadOnly Property ASS对齐 As Integer
 End Class
 
 Public NotInheritable Class SRT字幕文档
@@ -116,21 +127,31 @@ Public NotInheritable Class SRT字幕绘制行
 End Class
 
 Public NotInheritable Class SRT字幕绘制项
-    Friend Sub New(提示值 As SRT字幕提示, 行值 As IReadOnlyList(Of SRT字幕绘制行), x值 As Single, y值 As Single, 行间距值 As Single)
+    Friend Sub New(提示值 As SRT字幕提示, 行值 As IReadOnlyList(Of SRT字幕绘制行), x值 As Single, y值 As Single, 行间距值 As Single,
+                   Optional 使用定位值 As Boolean = False, Optional 水平对齐值 As 定时文字对齐 = 定时文字对齐.居中,
+                   Optional 垂直对齐值 As 定时文字对齐 = 定时文字对齐.靠前)
         提示 = 提示值
         行 = 行值
         X中心像素 = x值
         Y底部像素 = y值
         行间距像素 = 行间距值
+        使用定位 = 使用定位值
+        水平对齐 = 水平对齐值
+        垂直对齐 = 垂直对齐值
     End Sub
     Public ReadOnly Property 提示 As SRT字幕提示
     Public ReadOnly Property 行 As IReadOnlyList(Of SRT字幕绘制行)
     Public ReadOnly Property X中心像素 As Single
     Public ReadOnly Property Y底部像素 As Single
     Public ReadOnly Property 行间距像素 As Single
+    Public ReadOnly Property 使用定位 As Boolean
+    Public ReadOnly Property 水平对齐 As 定时文字对齐
+    Public ReadOnly Property 垂直对齐 As 定时文字对齐
 End Class
 
 Public NotInheritable Class SRT字幕帧生成器
+    Private Const ASS默认画布宽度 As Single = 384.0F
+    Private Const ASS默认画布高度 As Single = 288.0F
     Private ReadOnly 文档 As SRT字幕文档
     Private 样式 As SRT字幕样式
     Private ReadOnly 活动提示 As New List(Of SRT字幕提示)()
@@ -196,18 +217,58 @@ Public NotInheritable Class SRT字幕帧生成器
                                              color, 当前样式.描边颜色ARGB, 当前样式.描边宽度 * scale,
                                              当前样式.阴影颜色ARGB, 当前样式.阴影偏移 * scale, fontStyle))
             Next
-            Dim bottom = If(当前样式.底部对齐方式 = 1 AndAlso 画布高度 > 0,
-                            画布高度, 区域.Y像素 + 区域.高度像素)
-            结果.Add(New SRT字幕绘制项(cue, lines, 区域.X像素 + 区域.宽度像素 * 0.5F,
-                                        bottom - 当前样式.底部边距 * scale,
-                                        当前样式.行间距 * scale))
+            Dim 使用定位 = cue.定位X.HasValue AndAlso cue.定位Y.HasValue
+            Dim x = 区域.X像素 + 区域.宽度像素 * 0.5F
+            Dim y As Single
+            Dim 水平对齐 = 定时文字对齐.居中
+            Dim 垂直对齐 = 定时文字对齐.靠前
+            If 使用定位 Then
+                x = 区域.X像素 + cue.定位X.Value / ASS默认画布宽度 * 区域.宽度像素
+                y = 区域.Y像素 + cue.定位Y.Value / ASS默认画布高度 * 区域.高度像素
+                取得ASS对齐(cue.ASS对齐, 水平对齐, 垂直对齐)
+            Else
+                Dim bottom = If(当前样式.底部对齐方式 = 1 AndAlso 画布高度 > 0,
+                                画布高度, 区域.Y像素 + 区域.高度像素)
+                y = bottom - 当前样式.底部边距 * scale
+            End If
+            结果.Add(New SRT字幕绘制项(cue, lines, x, y,
+                                        当前样式.行间距 * scale, 使用定位,
+                                        水平对齐, 垂直对齐))
         Next
+    End Sub
+
+    Private Shared Sub 取得ASS对齐(对齐编号 As Integer, ByRef 水平 As 定时文字对齐,
+                               ByRef 垂直 As 定时文字对齐)
+        Select Case 对齐编号
+            Case 1, 4, 7
+                水平 = 定时文字对齐.靠前
+            Case 2, 5, 8
+                水平 = 定时文字对齐.居中
+            Case 3, 6, 9
+                水平 = 定时文字对齐.靠后
+            Case Else
+                水平 = 定时文字对齐.居中
+        End Select
+        Select Case 对齐编号
+            Case 1, 2, 3
+                垂直 = 定时文字对齐.靠后
+            Case 4, 5, 6
+                垂直 = 定时文字对齐.居中
+            Case 7, 8, 9
+                垂直 = 定时文字对齐.靠前
+            Case Else
+                垂直 = 定时文字对齐.靠后
+        End Select
     End Sub
 End Class
 
 Public NotInheritable Class SRT字幕解析器
     Private Sub New()
     End Sub
+
+    Private Shared ReadOnly 内嵌标签正则 As New Regex("\{([^}]*)\}", RegexOptions.Compiled)
+    Private Shared ReadOnly 位置正则 As New Regex("\\pos\s*\(\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*\)", RegexOptions.Compiled Or RegexOptions.IgnoreCase)
+    Private Shared ReadOnly 对齐正则 As New Regex("\\an\s*([1-9])", RegexOptions.Compiled Or RegexOptions.IgnoreCase)
 
     Public Shared Function 解析文件(路径 As String) As SRT字幕文档
         ArgumentException.ThrowIfNullOrWhiteSpace(路径)
@@ -261,12 +322,21 @@ Public NotInheritable Class SRT字幕解析器
 
         Dim raw = String.Join(vbLf, block.Skip(timingIndex + 1))
         Dim lines As New List(Of 字幕文本行)()
+        Dim 定位X As Single? = Nothing
+        Dim 定位Y As Single? = Nothing
+        Dim ASS对齐 As Integer
         For i = timingIndex + 1 To block.Count - 1
-            Dim text = 清理显示文本(block(i))
+            Dim rawText = block(i)
+            Dim 行定位X As Single?, 行定位Y As Single?, 行ASS对齐 As Integer
+            解析内嵌定位(rawText, 行定位X, 行定位Y, 行ASS对齐)
+            If Not 定位X.HasValue AndAlso 行定位X.HasValue Then 定位X = 行定位X
+            If Not 定位Y.HasValue AndAlso 行定位Y.HasValue Then 定位Y = 行定位Y
+            If ASS对齐 = 0 AndAlso 行ASS对齐 <> 0 Then ASS对齐 = 行ASS对齐
+            Dim text = 清理显示文本(rawText)
             If text.Length > 0 Then lines.Add(New 字幕文本行(text, 检测语言(text)))
         Next
         If lines.Count = 0 Then Return Nothing
-        Return New SRT字幕提示(number, startValue, endValue, raw, lines.AsReadOnly())
+        Return New SRT字幕提示(number, startValue, endValue, raw, lines.AsReadOnly(), 定位X, 定位Y, ASS对齐)
     End Function
 
     Private Shared Function 尝试解析时间(value As String, ByRef result As TimeSpan) As Boolean
@@ -305,6 +375,26 @@ Public NotInheritable Class SRT字幕解析器
         End While
         Return System.Net.WebUtility.HtmlDecode(builder.ToString()).Trim()
     End Function
+
+    Private Shared Sub 解析内嵌定位(value As String, ByRef x As Single?, ByRef y As Single?, ByRef align As Integer)
+        For Each tagMatch As Match In 内嵌标签正则.Matches(value)
+            Dim tags = tagMatch.Groups(1).Value
+            Dim position = 位置正则.Match(tags)
+            If position.Success Then
+                Dim parsedX As Single, parsedY As Single
+                If Single.TryParse(position.Groups(1).Value, NumberStyles.Float, CultureInfo.InvariantCulture, parsedX) AndAlso
+                   Single.TryParse(position.Groups(2).Value, NumberStyles.Float, CultureInfo.InvariantCulture, parsedY) AndAlso
+                   Single.IsFinite(parsedX) AndAlso Single.IsFinite(parsedY) Then
+                    x = parsedX
+                    y = parsedY
+                End If
+            End If
+            Dim alignment = 对齐正则.Match(tags)
+            If alignment.Success Then
+                Integer.TryParse(alignment.Groups(1).Value, NumberStyles.None, CultureInfo.InvariantCulture, align)
+            End If
+        Next
+    End Sub
 
     Private Shared Function 检测语言(value As String) As 字幕语言类型
         Dim hasCjk = False

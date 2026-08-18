@@ -1,4 +1,5 @@
 Imports System.Runtime.InteropServices
+Imports System.Drawing
 
 Public NotInheritable Class SUP字幕事件
     Friend Sub New(info As 原生位图字幕帧, pixels As Byte())
@@ -175,14 +176,39 @@ Public NotInheritable Class SUP字幕帧生成器
         End While
         If 当前事件 IsNot Nothing AndAlso 当前事件.结束时间 > TimeSpan.Zero AndAlso 当前事件.结束时间 <= 时间 Then 当前事件 = Nothing
         If 当前事件 IsNot Nothing AndAlso 当前事件.画布宽度 > 0 AndAlso 当前事件.画布高度 > 0 Then
-            Dim scaleX = 区域.宽度像素 / 当前事件.画布宽度
-            Dim scaleY = 区域.高度像素 / 当前事件.画布高度
-            结果.Add(New SUP字幕绘制项(当前事件,
-                区域.X像素 + 当前事件.X * scaleX, 区域.Y像素 + 当前事件.Y * scaleY,
-                当前事件.宽度 * scaleX, 当前事件.高度 * scaleY))
+            Dim 绘制区域 = 计算绘制区域(当前事件, 区域)
+            If 绘制区域.Width > 0 AndAlso 绘制区域.Height > 0 Then
+                结果.Add(New SUP字幕绘制项(当前事件,
+                    绘制区域.X, 绘制区域.Y, 绘制区域.Width, 绘制区域.Height))
+            End If
         End If
         上次时间 = 时间
     End Sub
+
+    ''' <summary>
+    ''' 将 PGS 画布等比适配到视频区域。PGS 画布通常固定为 16:9；
+    ''' 宽屏视频的显示区域可能更宽，分别缩放 X/Y 会把位图压扁。
+    ''' </summary>
+    Friend Shared Function 计算绘制区域(事件 As SUP字幕事件, 区域 As 视频显示区域) As RectangleF
+        If 事件 Is Nothing OrElse 事件.画布宽度 <= 0 OrElse 事件.画布高度 <= 0 OrElse
+            事件.宽度 <= 0 OrElse 事件.高度 <= 0 OrElse 区域.宽度像素 <= 0 OrElse 区域.高度像素 <= 0 Then
+            Return RectangleF.Empty
+        End If
+
+        Dim scale = Math.Min(区域.宽度像素 / CSng(事件.画布宽度),
+                             区域.高度像素 / CSng(事件.画布高度))
+        If Not Single.IsFinite(scale) OrElse scale <= 0 Then Return RectangleF.Empty
+
+        Dim scaledCanvasWidth = 事件.画布宽度 * scale
+        Dim scaledCanvasHeight = 事件.画布高度 * scale
+        Dim offsetX = (区域.宽度像素 - scaledCanvasWidth) * 0.5F
+        Dim offsetY = (区域.高度像素 - scaledCanvasHeight) * 0.5F
+        Return New RectangleF(
+            区域.X像素 + offsetX + 事件.X * scale,
+            区域.Y像素 + offsetY + 事件.Y * scale,
+            事件.宽度 * scale,
+            事件.高度 * scale)
+    End Function
 
     Private Sub 读取下一批次()
         Dim 事件 = 解码器.读取下一事件()

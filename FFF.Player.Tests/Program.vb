@@ -237,6 +237,19 @@ Friend Module Program
                 Console.WriteLine("SUP 原始 PTS 与跳转后时间轴回归通过。")
                 Return 0
             End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--sup-aspect-ratio-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试SUP宽屏比例()
+                Console.WriteLine("SUP 宽屏视频等比映射回归通过。")
+                Return 0
+            End If
+            If (参数.Length = 1 OrElse 参数.Length = 2) AndAlso
+               String.Equals(参数(0), "--srt-position-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 定位字幕路径 = If(参数.Length = 2, Path.GetFullPath(参数(1)), Nothing)
+                If Not String.IsNullOrWhiteSpace(定位字幕路径) Then 检查文件(定位字幕路径)
+                测试SRT内嵌定位(定位字幕路径)
+                Console.WriteLine("SRT ASS 内嵌对齐/定位回归通过。")
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--clip-focus-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试剪辑模式焦点()
                 Console.WriteLine("剪辑模式键盘焦点与出入点保留回归通过。")
@@ -386,6 +399,8 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --track-switch-regression <多音轨媒体>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --subtitle-switch-regression <多字幕媒体>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sup-timeline-regression <字幕.sup>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --sup-aspect-ratio-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --srt-position-regression [字幕.srt]")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --ass-render-benchmark")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --ass-encoding-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --ass-file-regression <字幕.ass> <时间毫秒>")
@@ -858,6 +873,77 @@ Friend Module Program
             Dim afterSeek = 读取首个SUP事件(decoder)
             断言(afterSeek IsNot Nothing AndAlso Math.Abs((afterSeek.开始时间 - expected).TotalMilliseconds) <= 2.0,
                "SUP 跳转到零点后没有恢复原始时间轴。")
+        End Using
+    End Sub
+
+    Private Sub 测试SUP宽屏比例()
+        Dim info As New 原生位图字幕帧 With {
+            .画布宽度 = 1920, .画布高度 = 1080,
+            .X = 480, .Y = 820, .宽度 = 960, .高度 = 120}
+        Dim 事件 As New SUP字幕事件(info, Array.Empty(Of Byte)())
+        Dim 区域 As New 视频显示区域(0.0F, 0.0F, 1920.0F, 800.0F, 1.0F, 96.0F)
+        Dim 绘制区域 = SUP字幕帧生成器.计算绘制区域(事件, 区域)
+
+        断言(绘制区域.Width > 0 AndAlso 绘制区域.Height > 0,
+           "宽屏区域没有生成有效的 SUP 绘制矩形。")
+        断言(Math.Abs(绘制区域.Width / 绘制区域.Height - info.宽度 / CSng(info.高度)) < 0.001F,
+           $"宽屏 SUP 位图被非等比缩放：{绘制区域.Width:F3}x{绘制区域.Height:F3}。")
+        断言(Math.Abs(绘制区域.Height - info.高度 * (区域.高度像素 / info.画布高度)) < 0.001F,
+           "宽屏 SUP 没有按等比适配视频高度。")
+        断言(绘制区域.Left >= 区域.X像素 AndAlso 绘制区域.Right <= 区域.X像素 + 区域.宽度像素 AndAlso
+             绘制区域.Top >= 区域.Y像素 AndAlso 绘制区域.Bottom <= 区域.Y像素 + 区域.高度像素,
+             "宽屏 SUP 绘制矩形越过视频显示区域。")
+    End Sub
+
+    Private Sub 测试SRT内嵌定位(Optional SRT路径 As String = Nothing)
+        Dim 文档 = If(String.IsNullOrWhiteSpace(SRT路径),
+            SRT字幕解析器.解析(New StringReader(
+                "1" & vbLf & "00:00:01,000 --> 00:00:03,000" & vbLf &
+                "普通底部字幕" & vbLf & vbLf &
+                "2" & vbLf & "00:00:01,000 --> 00:00:03,000" & vbLf &
+                "{\an3}{\pos(374,247)}极化是早期船体主要防御方式" & vbLf)),
+            SRT字幕解析器.解析文件(SRT路径))
+        Dim 目标 = 文档.提示.FirstOrDefault(
+            Function(x) x.原始文本.Contains("\pos(374,247)", StringComparison.Ordinal) AndAlso
+                        x.原始文本.Contains("极化是早期船体主要防御方式", StringComparison.Ordinal))
+        断言(目标 IsNot Nothing, "SRT 没有识别出带 \pos 的定位字幕。")
+        断言(目标.行.Count = 1 AndAlso 目标.行(0).文本 = "极化是早期船体主要防御方式",
+           "SRT 定位标签没有从最终文字中移除，或误删了字幕内容。")
+        断言(目标.定位X.HasValue AndAlso 目标.定位Y.HasValue AndAlso
+             Math.Abs(目标.定位X.Value - 374.0F) < 0.001F AndAlso
+             Math.Abs(目标.定位Y.Value - 247.0F) < 0.001F AndAlso 目标.ASS对齐 = 3,
+           "SRT 没有正确解析 \an3/\pos(374,247)。")
+
+        Dim 区域 = 视频显示区域.计算(1920, 1080, 96.0F, 1920, 1080)
+        Dim 生成器 As New SRT字幕帧生成器(文档, New SRT字幕样式 With {.底部边距 = 0.0F})
+        Dim 绘制项 As New List(Of SRT字幕绘制项)()
+        生成器.生成帧(目标.开始时间 + TimeSpan.FromMilliseconds(100), 区域, 绘制项, 1920, 1080)
+        Dim 定位项 = 绘制项.FirstOrDefault(Function(x) x.提示.编号 = 目标.编号)
+        断言(定位项 IsNot Nothing AndAlso 定位项.使用定位 AndAlso
+             Math.Abs(定位项.X中心像素 - 374.0F / 384.0F * 区域.宽度像素) < 0.001F AndAlso
+             Math.Abs(定位项.Y底部像素 - 247.0F / 288.0F * 区域.高度像素) < 0.001F AndAlso
+             定位项.水平对齐 = 定时文字对齐.靠后 AndAlso 定位项.垂直对齐 = 定时文字对齐.靠后,
+           "SRT 定位字幕没有保留坐标和右下锚点，可能会与默认底部字幕重叠。")
+
+        Using 轨道 As New 外部字幕轨道(If(SRT路径, "position-diagnostic.srt"), 外部字幕格式.SRT, 生成器, Nothing)
+            Using 控件 As New 播放器画面控件()
+                Using 呈现器 As New 播放器定时文字图层呈现器(控件, Function() Nothing,
+                    Function() 轨道, Sub(size, commands, sequence, frameRate) Return,
+                    图层内容:=定时文字图层内容.仅字幕)
+                    Dim 命令 = 呈现器.生成命令(New Size(1920, 1080), 1920UI, 1080UI,
+                        目标.开始时间 + TimeSpan.FromMilliseconds(100), 轨道, 96.0F)
+                    Dim 定位命令 = 命令.FirstOrDefault(
+                        Function(x) x.文本 = "极化是早期船体主要防御方式")
+                    断言(定位命令 IsNot Nothing AndAlso
+                         定位命令.水平对齐 = 定时文字对齐.靠后 AndAlso
+                         定位命令.垂直对齐 = 定时文字对齐.靠后 AndAlso
+                         Math.Abs(定位命令.X + 定位命令.宽度 - 374.0F / 384.0F * 区域.宽度像素) < 0.001F,
+                       "SRT 定位没有进入最终文字命令，目标字幕仍可能落在默认底部区域。")
+                    断言(命令.Any(Function(x) x.文本 <> 定位命令.文本 AndAlso
+                                      x.Y > 定位命令.Y + 定位命令.高度),
+                       "回归样例没有同时覆盖默认底部字幕与上方定位字幕。")
+                End Using
+            End Using
         End Using
     End Sub
 
