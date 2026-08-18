@@ -592,6 +592,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Select Case 位深
             Case 8 : Return "BGRA8 (8bit)"
             Case 10 : Return "RGB10A2 (10bit)"
+            Case 16 : Return "scRGB FP16 (16bit)"
             Case Else : Return String.Empty
         End Select
     End Function

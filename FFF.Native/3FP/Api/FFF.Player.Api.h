@@ -157,7 +157,7 @@ struct FFF3FPSnapshot {
     std::uint64_t videoBitRate;
     std::uint64_t audioBitRate;
     // Actual swap-chain precision after renderer/device capability fallback.
-    // 8 = BGRA8, 10 = RGB10A2.
+    // 8 = BGRA8, 10 = RGB10A2, 16 = R16G16B16A16_FLOAT scRGB.
     std::uint32_t videoOutputBitDepth;
     // The path used for the most recently rendered frame. The renderer selects
     // this automatically from the decoded surface and output requirements.
@@ -355,7 +355,8 @@ struct FFF3FPTimedTextStatus {
 
 // Numeric probe for the production color transform.  This is deliberately
 // independent of a swap chain so automated tests can verify luminance anchors
-// without judging screenshots by eye.
+// without judging screenshots by eye. HDR/scRGB outputs are linear values and
+// may exceed 1.0 (1.0 represents 80 nits).
 struct FFF3FPColorTransform {
     std::uint32_t size;
     std::uint32_t version;

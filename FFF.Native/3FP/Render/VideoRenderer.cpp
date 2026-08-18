@@ -563,10 +563,10 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
                        float((TintArgb>>24)&255u))/255.0;
     if(ColorMode==2){
         // scRGB swap-chain contract: linear Rec.709 primaries, 1.0 = 80 nits.
-        // The backdrop cache is an 8-bit UNORM texture that already holds the
-        // main shader's scRGB output (clamped to [0,1] when written). Blend it
-        // directly; only the sRGB tint needs linearization and conversion to
-        // scRGB so both operands share the same scale before lerp.
+        // The backdrop cache is FP16 and already holds the main shader's
+        // linear scRGB output. Blend it directly; only the sRGB tint needs
+        // linearization and conversion to scRGB so both operands share the
+        // same scale before lerp.
         float3 tintScRgb=ToLinear709(tint.rgb)*(PaperWhite/80.0);
         float3 result=lerp(color.rgb,tintScRgb,tint.a);
         return float4(result,color.a);
@@ -576,7 +576,7 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
 
 constexpr const char* TimedTextPixelShaderSource = R"(
 cbuffer Settings : register(b0) {
-    uint ColorMode; uint Transfer; uint Source2020; uint OverlayHdrHighlight;
+    uint ColorMode; uint Transfer; uint Source2020; uint OverlayFlags;
     float SdrPeak; float HdrPeak; float PaperWhite; float TargetPeak;
 };
 Texture2D<float4> Overlay : register(t0);
@@ -588,9 +588,14 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     if(value.a<=0.000001)return 0;
     float3 straight=value.rgb/value.a;
     if(ColorMode==2){
-        float overlayPeak=OverlayHdrHighlight!=0?TargetPeak:PaperWhite;
-        // scRGB swap-chain contract: linear Rec.709 primaries, 1.0 = 80 nits.
-        straight=ToLinear709(straight)*(overlayPeak/80.0);
+        float overlayPeak=(OverlayFlags&1u)!=0?TargetPeak:PaperWhite;
+        // Bit 1 denotes an FP16 linear overlay surface.  When it is clear the
+        // legacy premultiplied B8G8R8A8_UNORM surface needs an explicit
+        // transfer decode; HDR FP16 layers are already linearized by D2D.
+        if((OverlayFlags&2u)!=0)
+            straight*=overlayPeak/80.0;
+        else
+            straight=ToLinear709(straight)*(overlayPeak/80.0);
     }
     return float4(straight*value.a,value.a);
 })";
@@ -713,6 +718,48 @@ constexpr VideoDestination CalculateLyricsCoverDestination(const std::uint32_t s
     return {regionWidth - rightPadding - inner.width, verticalPadding + inner.y,
         inner.width, inner.height};
 }
+
+struct CoverBackdropCacheSize {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+};
+
+// The backdrop is blurred once at a content-defined resolution.  Keeping a
+// bounded source-relative size avoids making the blur depend on the current
+// swap-chain or lyrics region, while preventing unusually large cover frames
+// from allocating unbounded FP16 surfaces.
+constexpr std::uint32_t MaximumCoverBackdropDimension = 2048;
+
+constexpr CoverBackdropCacheSize CalculateCoverBackdropCacheSize(
+    const std::uint32_t sourceWidth, const std::uint32_t sourceHeight,
+    const std::uint32_t downsampleFactor) noexcept {
+    if (sourceWidth == 0 || sourceHeight == 0) return {};
+    const auto factor = std::max(1u, downsampleFactor);
+    auto width = std::max(1u, static_cast<std::uint32_t>(
+        (static_cast<std::uint64_t>(sourceWidth) + factor - 1) / factor));
+    auto height = std::max(1u, static_cast<std::uint32_t>(
+        (static_cast<std::uint64_t>(sourceHeight) + factor - 1) / factor));
+    if (width <= MaximumCoverBackdropDimension && height <= MaximumCoverBackdropDimension)
+        return {width, height};
+
+    if (width >= height) {
+        height = std::max(1u, static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(height) * MaximumCoverBackdropDimension +
+                width / 2) / width));
+        width = MaximumCoverBackdropDimension;
+    } else {
+        width = std::max(1u, static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(width) * MaximumCoverBackdropDimension +
+                height / 2) / height));
+        height = MaximumCoverBackdropDimension;
+    }
+    return {width, height};
+}
+
+static_assert(CalculateCoverBackdropCacheSize(1000, 1000, 4).width == 250 &&
+    CalculateCoverBackdropCacheSize(1000, 1000, 4).height == 250);
+static_assert(CalculateCoverBackdropCacheSize(8192, 4096, 1).width == 2048 &&
+    CalculateCoverBackdropCacheSize(8192, 4096, 1).height == 1024);
 
 static_assert(CalculateVideoDestination(1920, 1080, 1280, 1024).width == 1280 &&
     CalculateVideoDestination(1920, 1080, 1280, 1024).height == 720 &&
@@ -852,11 +899,14 @@ void YuvCoefficients(const AVFrame* frame, const bool rec2020Fallback,
     }
 }
 
-D2D1_COLOR_F ToD2dColor(const std::uint32_t argb) noexcept {
+D2D1_COLOR_F ToD2dColor(const std::uint32_t argb, const bool linear) noexcept {
     constexpr float scale = 1.0f / 255.0f;
-    return D2D1::ColorF(static_cast<float>((argb >> 16) & 0xff) * scale,
-        static_cast<float>((argb >> 8) & 0xff) * scale,
-        static_cast<float>(argb & 0xff) * scale,
+    const auto red = static_cast<float>((argb >> 16) & 0xff) * scale;
+    const auto green = static_cast<float>((argb >> 8) & 0xff) * scale;
+    const auto blue = static_cast<float>(argb & 0xff) * scale;
+    return D2D1::ColorF(linear ? Bt709ToLinear(red) : red,
+        linear ? Bt709ToLinear(green) : green,
+        linear ? Bt709ToLinear(blue) : blue,
         static_cast<float>((argb >> 24) & 0xff) * scale);
 }
 
@@ -1385,14 +1435,14 @@ FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept 
                     Bt709ToLinear(rgb.b) * transform.paperWhiteNits};
 
             if (transform.colorMode == FFF3FPColorMode::MapToHdr) {
-                if (transform.transfer == FFF3FPColorTransfer::Pq &&
-                    transform.source2020 != 0) {
-                    rgb = {transform.inputRed, transform.inputGreen, transform.inputBlue};
-                } else {
-                    if (transform.source2020 == 0)
-                        Convert709To2020(nits.r, nits.g, nits.b);
-                    rgb = {NitsToPq(nits.r), NitsToPq(nits.g), NitsToPq(nits.b)};
-                }
+                // The HDR swap chain is FP16 scRGB (linear Rec.709, 1.0 =
+                // 80 nits). Keep this diagnostic in the same contract as the
+                // production shader instead of returning the legacy PQ code.
+                if (transform.source2020 != 0)
+                    Convert2020To709(nits.r, nits.g, nits.b);
+                rgb = {std::max(0.0f, nits.r / 80.0f),
+                    std::max(0.0f, nits.g / 80.0f),
+                    std::max(0.0f, nits.b / 80.0f)};
             } else {
                 if (transform.source2020 == 0) Convert709To2020(nits.r, nits.g, nits.b);
                 nits = MapHdrToSdr(nits, transform.sourcePeakNits,
@@ -1404,9 +1454,15 @@ FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept 
             }
         }
     }
-    transform.outputRed = Clamp01(rgb.r);
-    transform.outputGreen = Clamp01(rgb.g);
-    transform.outputBlue = Clamp01(rgb.b);
+    if (transform.colorMode == FFF3FPColorMode::MapToHdr) {
+        transform.outputRed = rgb.r;
+        transform.outputGreen = rgb.g;
+        transform.outputBlue = rgb.b;
+    } else {
+        transform.outputRed = Clamp01(rgb.r);
+        transform.outputGreen = Clamp01(rgb.g);
+        transform.outputBlue = Clamp01(rgb.b);
+    }
     return FFFResult::Success;
 }
 
@@ -1545,6 +1601,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       timedTextPipelineQueries_{nullptr, nullptr, nullptr, nullptr},
       timedTextBlend_(nullptr),
       timedTextAtlasTexture_(nullptr), timedTextAtlasView_(nullptr),
+      timedTextResourcesHdr_(false), timedTextAtlasHdr_(false),
       timedTextSpriteVertexShader_(nullptr), timedTextSpritePixelShader_(nullptr),
       timedTextSpriteInstanceBuffer_(nullptr), timedTextSpriteInstanceView_(nullptr),
       d2dFactory_(nullptr), d2dDevice_(nullptr), d2dContext_(nullptr),
@@ -1996,6 +2053,10 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
     if (swapChain_ == nullptr || (hdr == swapHdr_ && formatBits == swapOutputBits_)) return FFFResult::Success;
     if (context_ != nullptr) { context_->ClearState(); context_->Flush(); }
     ReleaseTimedTextResources();
+    // The cache stores the main shader's encoded contract.  A mode/format
+    // switch therefore requires one fresh render even when the video
+    // generation itself did not change.
+    coverBackdropVideoGeneration_ = 0;
     // Enter HDR by resizing the existing flip chain. Replacing an actively
     // presented HWND chain can leave the first PQ Present waiting indefinitely
     // in DWM. Leaving HDR still requires a fresh chain so the window returns to
@@ -2890,8 +2951,10 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
     const auto slotIndex = static_cast<std::size_t>(slot);
     if (slotIndex >= ARRAYSIZE(timedTextTextures_)) return FFFResult::InvalidArgument;
     if (swapWidth_ == 0 || swapHeight_ == 0) return FFFResult::Success;
+    const bool hdrLinear = actualMode_ == FFF3FPColorMode::MapToHdr;
     if (timedTextTextures_[slotIndex] != nullptr &&
-        timedTextWidths_[slotIndex] == swapWidth_ && timedTextHeights_[slotIndex] == swapHeight_)
+        timedTextWidths_[slotIndex] == swapWidth_ && timedTextHeights_[slotIndex] == swapHeight_ &&
+        timedTextResourcesHdr_ == hdrLinear)
         return FFFResult::Success;
     ReleaseTimedTextSlotResources(slot);
     const auto d2dResult = EnsureD2DContext();
@@ -2912,7 +2975,8 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
     }
     D3D11_TEXTURE2D_DESC texture{};
     texture.Width = swapWidth_; texture.Height = swapHeight_;
-    texture.MipLevels = texture.ArraySize = 1; texture.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    texture.MipLevels = texture.ArraySize = 1;
+    texture.Format = hdrLinear ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
     texture.SampleDesc.Count = 1; texture.Usage = D3D11_USAGE_DEFAULT;
     texture.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(device_->CreateTexture2D(&texture, nullptr, &timedTextTextures_[slotIndex])) ||
@@ -2926,7 +2990,7 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
     }
     ComPtr<IDXGISurface> surface;
     const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+        D2D1::PixelFormat(texture.Format, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
     if (FAILED(timedTextTextures_[slotIndex]->QueryInterface(IID_PPV_ARGS(&surface))) ||
         FAILED(d2dContext_->CreateBitmapFromDxgiSurface(surface.Get(), &properties,
             &d2dTargets_[slotIndex]))) {
@@ -2967,6 +3031,7 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
     }
     const auto atlasResult = EnsureTimedTextAtlas(InitialTimedTextAtlasSize);
     if (atlasResult != FFFResult::Success) return atlasResult;
+    timedTextResourcesHdr_ = hdrLinear;
     timedTextWidths_[slotIndex] = swapWidth_;
     timedTextHeights_[slotIndex] = swapHeight_;
     return FFFResult::Success;
@@ -2975,7 +3040,9 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
 FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requestedSize) noexcept {
     const auto size = std::clamp(requestedSize, InitialTimedTextAtlasSize,
         MaximumTimedTextAtlasSize);
-    if (timedTextAtlasTexture_ != nullptr && timedTextAtlasSize_ >= size)
+    const bool hdrLinear = actualMode_ == FFF3FPColorMode::MapToHdr;
+    if (timedTextAtlasTexture_ != nullptr && timedTextAtlasSize_ >= size &&
+        timedTextAtlasHdr_ == hdrLinear)
         return FFFResult::Success;
     if (d2dContext_ == nullptr || device_ == nullptr) return FFFResult::InvalidState;
     if (d2dContext_ != nullptr) d2dContext_->SetTarget(nullptr);
@@ -2991,7 +3058,8 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requeste
     if (timedTextAtlasTexture_ != nullptr) { timedTextAtlasTexture_->Release(); timedTextAtlasTexture_ = nullptr; }
     D3D11_TEXTURE2D_DESC texture{};
     texture.Width = texture.Height = size; texture.MipLevels = texture.ArraySize = 1;
-    texture.Format = DXGI_FORMAT_B8G8R8A8_UNORM; texture.SampleDesc.Count = 1;
+    texture.Format = hdrLinear ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+    texture.SampleDesc.Count = 1;
     texture.Usage = D3D11_USAGE_DEFAULT;
     texture.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(device_->CreateTexture2D(&texture, nullptr, &timedTextAtlasTexture_)) ||
@@ -3001,10 +3069,10 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requeste
     }
     ComPtr<IDXGISurface> surface;
     const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        D2D1::PixelFormat(texture.Format, D2D1_ALPHA_MODE_PREMULTIPLIED),
         96.0f, 96.0f);
     const auto shadowProperties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        D2D1::PixelFormat(texture.Format, D2D1_ALPHA_MODE_PREMULTIPLIED),
         96.0f, 96.0f);
     if (FAILED(timedTextAtlasTexture_->QueryInterface(IID_PPV_ARGS(&surface))) ||
         FAILED(d2dContext_->CreateBitmapFromDxgiSurface(surface.Get(), &properties, &d2dAtlasTarget_)) ||
@@ -3029,6 +3097,7 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requeste
         return FFFResult::DeviceFailure;
     }
     timedTextAtlasSize_ = size;
+    timedTextAtlasHdr_ = hdrLinear;
     timedTextAtlasX_ = timedTextAtlasY_ = timedTextAtlasRowHeight_ = 0;
     timedTextSprites_.clear();
     return FFFResult::Success;
@@ -3087,6 +3156,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     d2dContext_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     d2dContext_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     d2dContext_->SetTextRenderingParams(timedTextRenderingParams_);
+    const bool hdrLinear = actualMode_ == FFF3FPColorMode::MapToHdr;
     const auto scaleX = layer->canvasWidth == 0 ? 1.0f : static_cast<float>(swapWidth_) / layer->canvasWidth;
     const auto scaleY = layer->canvasHeight == 0 ? 1.0f : static_cast<float>(swapHeight_) / layer->canvasHeight;
     if (timedTextBrushes_.size() >= MaximumTimedTextBrushes) {
@@ -3094,11 +3164,11 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             if (brush != nullptr) brush->Release();
         timedTextBrushes_.clear();
     }
-    const auto getBrush = [this](const std::uint32_t argb) noexcept -> ID2D1SolidColorBrush* {
+    const auto getBrush = [this, hdrLinear](const std::uint32_t argb) noexcept -> ID2D1SolidColorBrush* {
         const auto existing = timedTextBrushes_.find(argb);
         if (existing != timedTextBrushes_.end()) return existing->second;
         ID2D1SolidColorBrush* brush = nullptr;
-        if (FAILED(d2dContext_->CreateSolidColorBrush(ToD2dColor(argb), &brush))) return nullptr;
+        if (FAILED(d2dContext_->CreateSolidColorBrush(ToD2dColor(argb, hdrLinear), &brush))) return nullptr;
         timedTextBrushes_.emplace(argb, brush);
         return brush;
     };
@@ -3331,7 +3401,12 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             (command.x + command.width) * scaleX, (command.y + command.height) * scaleY);
         if (command.type == FFF3FPTimedTextCommandType::Bitmap) {
             D2D1_BITMAP_PROPERTIES properties{};
-            properties.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+            // Bitmap subtitle frames are premultiplied sRGB.  HDR timed-text
+            // targets are linear FP16, so let Direct2D perform the source
+            // transfer conversion at this boundary instead of decoding the
+            // same bytes again in the fullscreen shader.
+            properties.pixelFormat = D2D1::PixelFormat(
+                hdrLinear ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM,
                 D2D1_ALPHA_MODE_PREMULTIPLIED);
             properties.dpiX = properties.dpiY = 96.0f;
             ComPtr<ID2D1Bitmap> bitmap;
@@ -3452,7 +3527,8 @@ void PlayerVideoRenderer::CompositeTimedText(ID3D11RenderTargetView* target,
     context_->PSSetShader(timedTextPixelShader_, nullptr, 0);
     auto overlaySettings = cachedVideoSettings_;
     overlaySettings.colorMode = static_cast<std::uint32_t>(actualMode_);
-    overlaySettings.reserved = timedTextRenderedHdrHighlights_[slotIndex] ? 1u : 0u;
+    overlaySettings.reserved = (timedTextRenderedHdrHighlights_[slotIndex] ? 1u : 0u) |
+        (actualMode_ == FFF3FPColorMode::MapToHdr ? 2u : 0u);
     context_->UpdateSubresource(constants_, 0, nullptr, &overlaySettings, 0, 0);
     context_->PSSetConstantBuffers(0, 1, &constants_);
     context_->PSSetShaderResources(0, ARRAYSIZE(views), views);
@@ -3536,6 +3612,8 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
     if (timedTextSpriteVertexShader_ != nullptr) { timedTextSpriteVertexShader_->Release(); timedTextSpriteVertexShader_ = nullptr; }
     if (timedTextAtlasView_ != nullptr) { timedTextAtlasView_->Release(); timedTextAtlasView_ = nullptr; }
     if (timedTextAtlasTexture_ != nullptr) { timedTextAtlasTexture_->Release(); timedTextAtlasTexture_ = nullptr; }
+    timedTextAtlasHdr_ = false;
+    timedTextResourcesHdr_ = false;
     if (timedTextBlend_ != nullptr) { timedTextBlend_->Release(); timedTextBlend_ = nullptr; }
     {
         std::lock_guard lock(timedTextMutex_);
@@ -3765,17 +3843,23 @@ void PlayerVideoRenderer::ReleaseCoverBackdropResources() noexcept {
 }
 
 FFFResult PlayerVideoRenderer::EnsureCoverBackdropResources() noexcept {
-    if (device_ == nullptr || swapWidth_ == 0 || swapHeight_ == 0)
+    if (device_ == nullptr || sourceWidth_ == 0 || sourceHeight_ == 0)
         return FFFResult::InvalidState;
     const auto blurSettingsGeneration =
         coverBackdropBlurSettingsGeneration_.load(std::memory_order_acquire);
     const auto downsampleFactor = std::max(1u,
         coverBackdropDownsampleFactor_.load(std::memory_order_acquire));
-    const auto width = std::max(1u, (swapWidth_ + downsampleFactor - 1) /
-        downsampleFactor);
-    const auto height = std::max(1u, (swapHeight_ + downsampleFactor - 1) /
-        downsampleFactor);
-    const auto format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    const auto cacheSize = CalculateCoverBackdropCacheSize(
+        sourceWidth_, sourceHeight_, downsampleFactor);
+    const auto width = cacheSize.width;
+    const auto height = cacheSize.height;
+    if (width == 0 || height == 0) return FFFResult::InvalidState;
+    // The cache receives the main shader's output at a fixed source-relative
+    // size. FP16 is required here because scRGB values above 1.0 represent
+    // real HDR luminance and must survive the blur passes without UNORM
+    // clamping. DrawCoverBackdrop() linearly scales this completed texture to
+    // the current output region; swap-chain dimensions never enter this key.
+    const auto format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     if (coverBackdropTexture_ != nullptr && width == coverBackdropWidth_ &&
         height == coverBackdropHeight_ &&
         blurSettingsGeneration == coverBackdropAppliedBlurSettingsGeneration_)
@@ -3826,7 +3910,10 @@ FFFResult PlayerVideoRenderer::EnsureCoverBackdropResources() noexcept {
         coverBackdropBlurRadiusBits_.load(std::memory_order_acquire));
     const auto configuredPasses =
         coverBackdropBlurPasses_.load(std::memory_order_acquire);
-    const auto radius = configuredRadius / static_cast<float>(downsampleFactor);
+    const auto cacheScale = std::max(
+        static_cast<float>(sourceWidth_) / static_cast<float>(width),
+        static_cast<float>(sourceHeight_) / static_cast<float>(height));
+    const auto radius = configuredRadius / std::max(cacheScale, 1.0f);
     const auto sigma = std::sqrt(static_cast<float>(std::max(1u, configuredPasses))) *
         radius / std::sqrt(3.0f);
     coverBackdropBlurEffect_->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
@@ -3978,8 +4065,8 @@ void PlayerVideoRenderer::StopCoverBackdropThread() noexcept {
 
 FFFResult PlayerVideoRenderer::DrawCoverBackdrop(ID3D11RenderTargetView* target) noexcept {
     if (target == nullptr || context_ == nullptr) return FFFResult::InvalidArgument;
-    // Keep the last completed cache visible while a newer frame, resize or
-    // blur configuration is being rendered in the deferred worker. The video
+    // Keep the last completed cache visible while a newer frame or blur
+    // configuration is being rendered in the deferred worker. The video
     // frame must never flash to a plain black backdrop just because the newer
     // cache has not finished yet.
     if (coverBackdropTexture_ == nullptr || coverBackdropView_ == nullptr ||

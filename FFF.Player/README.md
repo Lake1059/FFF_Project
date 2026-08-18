@@ -24,8 +24,8 @@ SDR 片源在 `映射到SDR` 中保持其 BT.709 码值，不经过 HDR 纸白�
 只属于当前片源：HDR 后打开 SDR 时，必须先把保留的交换链改回 BGRA/BT.709 并清除 HDR10
 元数据，成功后才提交 SDR 状态；重配失败会终止打开，绝不把 SDR 帧送入旧 PQ/BT.2020 链。
 默认 100 nit 是 HDR→SDR 的显示目标峰值，可在 HDR 设置中调整，不会乘到纯 SDR 码值上；BT.2390 的自适应拐点由
-源峰值和目标峰值在 PQ 域共同决定。PQ/Rec.2020 在真实 HDR 中保持原信号，不再执行逐像素
-峰值压缩，并把源内容范围写入 HDR10 元数据；HLG 只转换为 Rec.2020/PQ。203 nit 纸白用于
+源峰值和目标峰值在 PQ 域共同决定。PQ/Rec.2020 在真实 HDR 中转换到线性 scRGB，不再执行逐像素
+峰值压缩，并把源内容范围写入 HDR10 元数据；HLG 同样转换到线性 scRGB。203 nit 纸白用于
 真实 HDR 中的 SDR 文字和图形，超过面板能力的内容由系统和显示设备处理。
 
 色彩处理依据 [ITU-R BT.709](https://www.itu.int/rec/R-REC-BT.709)、
@@ -33,19 +33,20 @@ SDR 片源在 `映射到SDR` 中保持其 BT.709 码值，不经过 HDR 纸白�
 [BT.2100](https://www.itu.int/rec/R-REC-BT.2100) 和
 [BT.2408](https://www.itu.int/rec/R-REC-BT.2408)。Windows 输出遵循
 [Microsoft Advanced Color 交换链契约](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/high-dynamic-range)：
-真实 HDR 使用 R10G10B10A2 与显式 PQ/BT.2020 色彩空间；SDR 使用默认桌面合同的
-BGRA8/RGB10A2。播放器不读取 ICC 或 Windows SDR 白电平，也不在 shader 中补偿显示设置；
+真实 HDR 使用 R16G16B16A16_FLOAT 的线性 scRGB（Rec.709，1.0 = 80 nit）；覆盖层在 HDR
+时使用同一线性 FP16 中间面，SDR 仍使用默认桌面合同的 BGRA8/RGB10A2。播放器不读取
+ICC 或 Windows SDR 白电平，也不在 shader 中补偿显示设置；
 ICC、HDR 校准和 SDR 亮度映射只由 DWM 在窗口合成时应用一次。
 
 `读取视频输出原始像素` 从当前 D3D11 后缓冲复制 1x1 像素，返回 BGRA8、
-RGB10A2 的原始通道值。它用于将渲染器数字输出与 ICC、DWM 及屏幕截图
+RGB10A2 或 scRGB FP16 的原始通道值。它用于将渲染器数字输出与 ICC、DWM 及屏幕截图
 完全分离；窗口化 `Present` 仍必须遵守 Windows 显示色彩契约，后缓冲回读不是物理显示校准。
 
 SDR 与 HDR 视频输出统一使用自有 D3D11 shader：D3D11VA NV12/P010 表面保留在 GPU，CPU
 解码帧上传后与之共用同一套格式、色度、色彩和缩放逻辑。1:1 使用精确采样，放大和缩小
 视频缩放使用按平面尺寸计算的多级两遍低通管线：均衡档采用倍率感知 Hermite，高画质档采用
 倍率感知 Lanczos3；超过 2 倍时自动拆成多个不超过 2 倍的阶段。SDR shader 直接写入默认 SDR 交换链；真实 HDR
-shader 直接写入 10-bit PQ 后缓冲。
+shader 直接写入线性 scRGB FP16 后缓冲。
 
 `播放列表` 负责同目录相似命名扫描、自然排序和本地 M3U8 导入导出；
 `播放列表控制器` 可把播放结束事件连接到顺序、循环或随机播放策略。字幕流会出现在
@@ -124,8 +125,8 @@ FFF.Player.Tests --timed-text-regression
 音频延迟回归自生成双声道 PCM，在完全无画面条件下覆盖共享/独占时钟、缓冲、欠载和每声道响度；
 音乐文件共享回归自生成 WAV，并验证播放中仍可改名、取得写访问和删除；
 封面回归先无窗口打开纯音频，再绑定一个不显示的 HWND，只检查封面流、尺寸和交换链呈现计数。
-色彩回归覆盖 SDR 码值直通、PQ 数值映射和 HDR→SDR 换片；HDR 切换回归在真实窗口中验证
-播放期间的 SDR→10-bit PQ→SDR 交换链切换、视频出帧和文字图层持续合成；性能回归固定覆盖 CPU 解码、呈现、
+色彩回归覆盖 SDR 码值直通、HDR/scRGB 覆盖层锚点、PQ 数值映射和 HDR→SDR 换片；HDR 切换回归在真实窗口中验证
+播放期间的 SDR→scRGB FP16→SDR 交换链切换、视频出帧和文字图层持续合成；性能回归固定覆盖 CPU 解码、呈现、
 独立字幕层/100 条同时移动弹幕层、至少 55 FPS 的弹幕合同、音频缓冲、外部音轨偏移、Seek 和
 恢复内置音轨。专项回归验证连续 AAC PCM 在开头和 1000 秒 Seek 后都不会误补零/裁样，
 并验证 SUP/SRT/ASS/SSA 字幕与 XML 弹幕的播放中原子替换及损坏文件回退。

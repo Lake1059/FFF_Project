@@ -304,6 +304,8 @@ private:
     ID3D11BlendState* timedTextBlend_;
     ID3D11Texture2D* timedTextAtlasTexture_;
     ID3D11ShaderResourceView* timedTextAtlasView_;
+    bool timedTextResourcesHdr_;
+    bool timedTextAtlasHdr_;
     ID3D11VertexShader* timedTextSpriteVertexShader_;
     ID3D11PixelShader* timedTextSpritePixelShader_;
     ID3D11Buffer* timedTextSpriteInstanceBuffer_;

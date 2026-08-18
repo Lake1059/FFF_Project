@@ -104,6 +104,11 @@ Friend Module Program
                 Console.WriteLine("BT.2390 EETF 暗部保留、连续性、单调性与峰值映射通过。")
                 Return 0
             End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--overlay-color-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试数值色彩映射()
+                Console.WriteLine("SDR 直通与 HDR 覆盖层 scRGB 数值锚点通过。")
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--audio-latency-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试音频延迟回归()
                 Console.WriteLine("无画面 PCM 音频延迟与欠载回归通过。")
@@ -370,6 +375,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --decoder-switch-audio-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --hdr-processing-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --bt2390-regression")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --overlay-color-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --gpu-decode-matrix <视频目录>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --video-scaling-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sdr-pixel-regression <视频> <参考图.png>")
@@ -3701,6 +3707,11 @@ Friend Module Program
            Math.Abs(SDR.输出绿 - 0.5F) < 0.0001F AndAlso
            Math.Abs(SDR.输出蓝 - 1.0F) < 0.0001F,
            "纯 SDR→SDR 路径改变了 BT.709 码值。")
+
+        Dim HDR覆盖层 = 执行色彩变换(2UI, 0UI, 1.0F, 0.5F, 0.0F, 1000.0F, 203.0F)
+        断言(Math.Abs(HDR覆盖层.输出红 - 203.0F / 80.0F) < 0.0001F AndAlso
+           HDR覆盖层.输出绿 > 0.0F AndAlso HDR覆盖层.输出蓝 = 0.0F,
+           "真实 HDR 覆盖层没有输出线性 scRGB（1.0 = 80 nit）。")
 
         测试BT2390数值映射()
     End Sub
