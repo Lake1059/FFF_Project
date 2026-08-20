@@ -47,7 +47,7 @@ public:
     FFFResult ClearExternalAudio() noexcept;
     FFFResult SetExternalAudioOffset(std::int64_t offset100ns) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
-        float hdrPeakNits, float paperWhiteNits) noexcept;
+        float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;

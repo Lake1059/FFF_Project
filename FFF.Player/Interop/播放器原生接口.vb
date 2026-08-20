@@ -29,6 +29,7 @@ Friend Structure 原生播放器配置
     Public 回调 As IntPtr
     Public 回调上下文 As IntPtr
     Public 视频缩放质量 As UInteger
+    Public 强制HDR输出 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -365,7 +366,7 @@ Friend Module 播放器原生接口
     Friend Function FFF3FP_SetExternalAudioOffset(播放器 As 播放器原生句柄, 偏移100纳秒 As Long) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
-    Friend Function FFF3FP_SetColorMode(播放器 As 播放器原生句柄, 模式 As UInteger, SDR峰值 As Single, HDR峰值 As Single, SDR纸白 As Single) As 原生播放器结果
+    Friend Function FFF3FP_SetColorMode(播放器 As 播放器原生句柄, 模式 As UInteger, SDR峰值 As Single, HDR峰值 As Single, SDR纸白 As Single, 强制HDR输出 As UInteger) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetOutputWindow(播放器 As 播放器原生句柄, 窗口 As IntPtr) As 原生播放器结果

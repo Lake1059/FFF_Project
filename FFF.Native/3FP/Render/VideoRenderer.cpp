@@ -1671,6 +1671,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       coverBackdropBlurSettingsGeneration_(1),
       deviceRecoveryRequested_(false), recoveryCallback_(std::move(recoveryCallback)),
        hdrMonitor_(nullptr), hdrSupportValid_(false), hdrSupported_(false),
+      forceHdrOutput_(false),
       hdrSupportCheckedAt_(std::chrono::steady_clock::time_point::min()),
       hdrSwapChainRejected_(false),
       timedTextAtlasX_(0), timedTextAtlasY_(0), timedTextAtlasRowHeight_(0),
@@ -1737,7 +1738,7 @@ FFFResult PlayerVideoRenderer::SetViewTransform(const float zoom,
 }
 
 FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const float sdrPeakNits,
-    const float hdrPeakNits, const float paperWhiteNits) noexcept {
+    const float hdrPeakNits, const float paperWhiteNits, const bool forceHdrOutput) noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     if (mode > FFF3FPColorMode::MapToHdr || !std::isfinite(sdrPeakNits) || sdrPeakNits <= 0.0f ||
         !std::isfinite(hdrPeakNits) || hdrPeakNits < 0.0f || hdrPeakNits > 10000.0f ||
@@ -1748,6 +1749,7 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
     // future user setting and intentionally override the monitor descriptor.
     hdrPeakNits_ = hdrPeakNits;
     paperWhiteNits_ = paperWhiteNits;
+    forceHdrOutput_ = forceHdrOutput;
     fallbackReason_.clear();
     actualMode_ = requestedMode_;
     hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
@@ -1850,8 +1852,8 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
     const auto previousMonitor = hdrMonitor_;
     const auto previousCapabilities = hdrProcessor_.State().display;
     const auto preservePrevious = hdrSupportValid_ && previousMonitor == monitor;
-    const auto cachedUsable = [this](const HdrDisplayCapabilities& capabilities) noexcept {
-        return hdrSupported_ && (hdrPeakNits_ > 0.0f || capabilities.maximumNits > 0.0f);
+    const auto cachedUsable = [this](const HdrDisplayCapabilities&) noexcept {
+        return forceHdrOutput_ || hdrSupported_;
     };
     if (!preservePrevious) hdrSwapChainRejected_ = false;
     if (preservePrevious && hdrSwapChainRejected_) return false;
@@ -1869,7 +1871,7 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
             return cachedUsable(previousCapabilities);
         }
         hdrProcessor_.SetDisplayCapabilities({});
-        return false;
+        return forceHdrOutput_;
     }
     for (UINT adapterIndex = 0;; ++adapterIndex) {
         ComPtr<IDXGIAdapter1> adapter;
@@ -1888,7 +1890,7 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
                     return cachedUsable(previousCapabilities);
                 }
                 hdrProcessor_.SetDisplayCapabilities({});
-                return false;
+                return forceHdrOutput_;
             }
             hdrSupported_ = description1.BitsPerColor >= 10 &&
                 (description1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ||
@@ -1908,11 +1910,11 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
                 capabilities.maximumFullFrameNits = previousCapabilities.maximumFullFrameNits;
             }
             hdrProcessor_.SetDisplayCapabilities(capabilities);
-            const auto hasDisplayPeak = capabilities.maximumNits > 0.0f;
-            // With automatic target selection, do not enter the HDR swap chain
-            // until Windows has supplied a calibrated luminance. Otherwise the
-            // first click can briefly present at the generic 1000-nit fallback.
-            return hdrSupported_ && (hdrPeakNits_ > 0.0f || hasDisplayPeak);
+            // Several TVs correctly expose the active 10-bit/PQ desktop but
+            // leave every luminance field at zero. The HDR processor already
+            // owns a conservative 1000-nit fallback for that case, so missing
+            // luminance must not block the actual scRGB swap-chain attempt.
+            return forceHdrOutput_ || hdrSupported_;
         }
     }
     if (preservePrevious) {
@@ -1921,7 +1923,7 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
         return cachedUsable(previousCapabilities);
     }
     hdrProcessor_.SetDisplayCapabilities({});
-    return false;
+    return forceHdrOutput_;
 }
 
 FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** output) noexcept {
@@ -2028,8 +2030,10 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     ReleaseTimedTextResources();
     if (hdr) {
         UINT support = 0;
-        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) ||
-            (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
+        const auto supportResult = swapChain_->CheckColorSpaceSupport(
+            DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support);
+        if ((!forceHdrOutput_ && (FAILED(supportResult) ||
+             (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0)) ||
             FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
             fallbackReason_ = "The swap chain rejected the scRGB color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;
@@ -2099,8 +2103,10 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
     swapHdr_ = hdr; swapOutputBits_ = formatBits;
     if (hdr) {
         UINT support = 0;
-        if (FAILED(swapChain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) ||
-            (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
+        const auto supportResult = swapChain_->CheckColorSpaceSupport(
+            DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support);
+        if ((!forceHdrOutput_ && (FAILED(supportResult) ||
+             (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0)) ||
             FAILED(swapChain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
             fallbackReason_ = "The reconfigured swap chain rejected the scRGB color space.";
             actualMode_ = FFF3FPColorMode::MapToSdr;

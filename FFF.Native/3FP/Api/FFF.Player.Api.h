@@ -104,6 +104,7 @@ struct FFF3FPConfiguration {
     FFF3FPEventCallback eventCallback;
     void* eventCallbackContext;
     FFF3FPVideoScalingQuality videoScalingQuality;
+    std::uint32_t forceHdrOutput;
 };
 
 struct FFF3FPSnapshot {
@@ -450,7 +451,8 @@ FFF3FP_API FFFResult FFF3FP_ClearExternalAudio(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetExternalAudioOffset(FFF3FPHandle player,
     std::int64_t offset100ns) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetColorMode(FFF3FPHandle player, FFF3FPColorMode mode,
-    float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits) noexcept;
+    float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits,
+    std::uint32_t forceHdrOutput) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetOutputWindow(FFF3FPHandle player, void* outputWindow) noexcept;
 // View transform for frame inspection: zoom scales the fitted video box
 // (1.0 = fit, >1 = magnify), panX/panY are normalized offsets in [-1,1]

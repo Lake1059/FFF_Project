@@ -38,6 +38,7 @@ Public NotInheritable Class 播放器控制器
     Private 用户解码器偏好 As 解码模式 = 解码模式.CPU
     Private 当前色彩输出 As 色彩输出模式 = 色彩输出模式.映射到SDR
     Private HDR色彩输出偏好 As 色彩输出模式 = 色彩输出模式.映射到SDR
+    Private 强制HDR输出 As Boolean
     Private 当前WASAPI模式 As WASAPI共享模式 = WASAPI共享模式.共享
     Private 当前音量 As Single = 1.0F
     Private 已静音 As Boolean
@@ -659,7 +660,8 @@ Public NotInheritable Class 播放器控制器
 
         Dim 新模式 = CType((CInt(当前色彩输出) + 1) Mod 3, 色彩输出模式)
         Try
-            目标.设置色彩模式(新模式, 当前SDR峰值尼特, 取得HDR输出峰值参数(新模式), SDR纸白尼特)
+            目标.设置色彩模式(新模式, 当前SDR峰值尼特, 取得HDR输出峰值参数(新模式),
+                         SDR纸白尼特, 强制HDR输出)
             当前色彩输出 = 新模式
             HDR色彩输出偏好 = 新模式
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
@@ -667,6 +669,23 @@ Public NotInheritable Class 播放器控制器
             ' 等待色彩模式变化事件后，再基于新快照给出最终提示，避免把已成功的 HDR 误报为回退。
         Catch ex As 播放器异常
             RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法切换 HDR 模式"))
+        End Try
+    End Sub
+
+    Public Sub 强制开启HDR模式()
+        Dim 目标 = 会话
+        Dim 快照 = 安全读取快照()
+        If 已释放 OrElse 正在切换会话 OrElse 目标 Is Nothing OrElse 快照 Is Nothing OrElse
+            Not 可操作(快照.状态) OrElse Not 快照.是HDR源 OrElse
+            当前色彩输出 <> 色彩输出模式.峰值映射HDR OrElse 强制HDR输出 Then Return
+
+        强制HDR输出 = True
+        Try
+            目标.设置色彩模式(色彩输出模式.峰值映射HDR, 当前SDR峰值尼特,
+                         取得HDR输出峰值参数(色彩输出模式.峰值映射HDR), SDR纸白尼特, True)
+        Catch ex As 播放器异常
+            强制HDR输出 = False
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法强制开启 HDR 模式"))
         End Try
     End Sub
 
@@ -679,7 +698,7 @@ Public NotInheritable Class 播放器控制器
         If 已释放 OrElse 目标 Is Nothing OrElse 当前色彩输出 <> 色彩输出模式.峰值映射HDR Then Return
         Try
             目标.设置色彩模式(当前色彩输出, 当前SDR峰值尼特,
-                         取得HDR输出峰值参数(当前色彩输出), SDR纸白尼特)
+                         取得HDR输出峰值参数(当前色彩输出), SDR纸白尼特, 强制HDR输出)
         Catch ex As ObjectDisposedException
         Catch ex As 播放器异常
             RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用 HDR 峰值亮度"))
@@ -695,7 +714,7 @@ Public NotInheritable Class 播放器控制器
         If 已释放 OrElse 目标 Is Nothing Then Return
         Try
             目标.设置色彩模式(当前色彩输出, 当前SDR峰值尼特,
-                         取得HDR输出峰值参数(当前色彩输出), SDR纸白尼特)
+                         取得HDR输出峰值参数(当前色彩输出), SDR纸白尼特, 强制HDR输出)
         Catch ex As ObjectDisposedException
         Catch ex As 播放器异常
             RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用 SDR 映射亮度"))
@@ -781,7 +800,7 @@ Public NotInheritable Class 播放器控制器
                         If 原位初始快照.是HDR源 AndAlso
                             原位请求色彩输出 <> 原位目标色彩输出 Then
                             原会话.设置色彩模式(原位目标色彩输出, 当前SDR峰值尼特,
-                                           取得HDR输出峰值参数(原位目标色彩输出), SDR纸白尼特)
+                                取得HDR输出峰值参数(原位目标色彩输出), SDR纸白尼特, 强制HDR输出)
                             原位请求色彩输出 = 原位目标色彩输出
                         End If
                         Dim 原位是纯音频 = 原位媒体信息.流.Any(
@@ -1010,6 +1029,7 @@ Public NotInheritable Class 播放器控制器
             .SDR峰值尼特 = 当前SDR峰值尼特,
             .HDR峰值尼特 = 取得HDR输出峰值参数(色彩模式),
             .SDR纸白尼特 = SDR纸白尼特,
+            .强制HDR输出 = 强制HDR输出,
             .缩放质量 = CType(设置.实例对象.视频缩放质量选项, 视频缩放质量),
             .输出窗口句柄 = IntPtr.Zero,
             .事件同步上下文 = 事件同步上下文
@@ -1079,7 +1099,10 @@ Public NotInheritable Class 播放器控制器
         RaiseEvent 状态已变化(Me, EventArgs.Empty)
         Dim 快照 = 安全读取快照()
         If 快照 IsNot Nothing AndAlso 快照.是HDR源 Then
-            RaiseEvent HDR输出状态已确认(Me, New 播放器HDR状态事件参数(取得HDR模式说明(快照)))
+            Dim 可以强制开启 = 当前色彩输出 = 色彩输出模式.峰值映射HDR AndAlso
+                快照.实际色彩模式 <> 色彩输出模式.峰值映射HDR AndAlso Not 强制HDR输出
+            RaiseEvent HDR输出状态已确认(Me,
+                New 播放器HDR状态事件参数(取得HDR模式说明(快照), 可以强制开启))
         End If
     End Sub
 
@@ -1376,7 +1399,7 @@ Public NotInheritable Class 播放器控制器
         Select Case 快照.HDR规格
             Case HDR格式.HDR10Plus : Return "HDR10+"
             Case HDR格式.HLG : Return "HLG"
-            Case HDR格式.杜比视界 : Return "Dolby Vision 基础层→HDR10"
+            Case HDR格式.杜比视界 : Return "Dolby Vision 基础层 → HDR10"
             Case HDR格式.HDRVivid : Return "HDR Vivid"
             Case Else : Return "HDR10"
         End Select
@@ -1448,11 +1471,13 @@ End Class
 Public NotInheritable Class 播放器HDR状态事件参数
     Inherits EventArgs
 
-    Public Sub New(说明 As String)
+    Public Sub New(说明 As String, Optional 可以强制开启 As Boolean = False)
         Me.说明 = 说明
+        Me.可以强制开启 = 可以强制开启
     End Sub
 
     Public ReadOnly Property 说明 As String
+    Public ReadOnly Property 可以强制开启 As Boolean
 End Class
 
 Public NotInheritable Class 播放器字幕事件参数

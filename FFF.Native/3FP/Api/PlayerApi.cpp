@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 11;
+constexpr std::uint32_t PlayerApiVersion = 12;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -29,6 +29,7 @@ FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration, FFF3FPHandle* 
         configuration->version != PlayerApiVersion || configuration->decodeMode == FFF3FPDecodeMode::Unspecified ||
         configuration->decodeMode > FFF3FPDecodeMode::D3D11 || configuration->colorMode > FFF3FPColorMode::MapToHdr ||
         configuration->videoScalingQuality > FFF3FPVideoScalingQuality::HighQuality ||
+        configuration->forceHdrOutput > 1 ||
         !std::isfinite(configuration->sdrPeakNits) || configuration->sdrPeakNits <= 0 ||
         !std::isfinite(configuration->hdrPeakNits) || configuration->hdrPeakNits < 0 ||
         configuration->hdrPeakNits > 10000 || !std::isfinite(configuration->sdrPaperWhiteNits) ||
@@ -55,7 +56,11 @@ FFFResult FFF3FP_LoadExternalAudio(const FFF3FPHandle player, const char* path, 
 FFFResult FFF3FP_ClearExternalAudio(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->ClearExternalAudio() : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetExternalAudioOffset(const FFF3FPHandle player, const std::int64_t offset) noexcept { return player ? static_cast<PlayerSession*>(player)->SetExternalAudioOffset(offset) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetColorMode(const FFF3FPHandle player, const FFF3FPColorMode mode, const float sdr,
-    const float hdr, const float paper) noexcept { return player ? static_cast<PlayerSession*>(player)->SetColorMode(mode, sdr, hdr, paper) : FFFResult::InvalidArgument; }
+    const float hdr, const float paper, const std::uint32_t forceHdr) noexcept {
+    return player && forceHdr <= 1 ?
+        static_cast<PlayerSession*>(player)->SetColorMode(mode, sdr, hdr, paper, forceHdr != 0) :
+        FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetViewTransform(const FFF3FPHandle player, const float zoom,
     const float panX, const float panY) noexcept {

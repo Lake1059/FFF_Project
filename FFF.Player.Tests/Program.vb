@@ -831,6 +831,10 @@ Friend Module Program
            HDR10Plus.输出动态元数据 = 1UI AndAlso HDR10Plus.输出目标峰值 = 720UI,
            "HDR10+ 动态元数据或自动显示峰值策略错误。")
 
+        Dim 缺失电视亮度 = 执行HDR探针(1UI, 0UI, 0UI, 0UI, False, False, 0UI, False, False, 0.0F, 0.0F)
+        断言(缺失电视亮度.输出目标峰值 = 1000UI,
+           "显示设备未报告亮度时没有使用 1000 nit 的 HDR 安全回退。")
+
         Dim Vivid覆盖 = 执行HDR探针(1UI, 0UI, 0UI, 0UI, False, False, 0UI, False, True, 720.0F, 1250.0F)
         断言(Vivid覆盖.输出格式 = 5UI AndAlso Vivid覆盖.输出处理路径 = 6UI AndAlso
            Vivid覆盖.输出动态元数据 = 1UI AndAlso Vivid覆盖.输出目标峰值 = 1250UI,
@@ -1963,6 +1967,10 @@ Friend Module Program
 
                 Dim HDR状态入口 = GetType(Form1).GetMethod("播放控制器_HDR输出状态已确认", 标志)
                 断言(HDR状态入口 IsNot Nothing, "无法取得 HDR 状态提示入口。")
+                Dim HDR回退事件 = New 播放器HDR状态事件参数("HDR 目标不可用，已映射到 SDR", True)
+                断言(HDR回退事件.可以强制开启 AndAlso
+                   String.Equals(HDR回退事件.说明, "HDR 目标不可用，已映射到 SDR", StringComparison.Ordinal),
+                   "HDR 回退事件没有保留强制开启选项。")
                 HDR状态入口.Invoke(窗口, {Nothing, New 播放器HDR状态事件参数("HDR 映射到 SDR")})
                 HDR状态入口.Invoke(窗口, {Nothing, New 播放器HDR状态事件参数("HDR10 真实高亮")})
                 Dim 消息字段 = GetType(播放器信息图层呈现器).GetField("操作消息列表", 标志)

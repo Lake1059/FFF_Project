@@ -37,6 +37,8 @@ Public Class Form1
     Private 正在关闭 As Boolean
     Private 核心文件检查通过 As Boolean
     Private 核心文件错误说明 As String = String.Empty
+    Private 正在显示HDR强制确认 As Boolean
+    Private 已跳过HDR强制确认 As Boolean
 
     Private Event 方向键快捷键已请求 As KeyEventHandler
 
@@ -438,8 +440,27 @@ Public Class Form1
         End If
     End Sub
 
+    <CodeAnalysis.SuppressMessage("Performance", "CA1861:不要将常量数组作为参数", Justification:="<挂起>")>
     Private Sub 播放控制器_HDR输出状态已确认(sender As Object, e As 播放器HDR状态事件参数)
-        If Not 正在关闭 Then 信息图层呈现器?.显示操作信息(e.说明, &HFF69DF8BUI, HDR操作提示键)
+        If 正在关闭 Then Return
+        信息图层呈现器?.显示操作信息(e.说明, &HFF69DF8BUI, HDR操作提示键)
+        If Not e.可以强制开启 OrElse 正在显示HDR强制确认 OrElse 已跳过HDR强制确认 Then Return
+
+        正在显示HDR强制确认 = True
+        Try
+            Dim 内容 = "Windows 未将当前显示设备报告为可用的 HDR 输出。部分智能电视不会向 Windows 提供完整、规范的 HDR 能力信息。可以尝试忽略检测结果强行创建真实 HDR 高亮输出。强制开启可能出现颜色异常、亮度错误或短暂黑屏；如果驱动拒绝 scRGB 色彩空间，播放器仍会自动回退到 SDR。"
+            Dim 结果 = LakeUI.ExOverlayMsgBox(Me, 内容,
+                {"忽略检测并强制开启", "保持 SDR"},
+                "当前显示设备未报告 HDR 支持",
+                MsgBoxStyle.Exclamation, 1)
+            If 结果 = 0 AndAlso Not 正在关闭 Then
+                播放控制器.强制开启HDR模式()
+            Else
+                已跳过HDR强制确认 = True
+            End If
+        Finally
+            正在显示HDR强制确认 = False
+        End Try
     End Sub
 
     Private Sub 播放控制器_外部字幕已加载(sender As Object, e As 播放器字幕事件参数)
@@ -649,6 +670,7 @@ Public Class Form1
     End Sub
 
     Private Sub MB_HDR模式_Click(sender As Object, e As EventArgs) Handles MB_HDR模式.Click
+        已跳过HDR强制确认 = False
         播放控制器.切换HDR模式()
     End Sub
 

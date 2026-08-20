@@ -117,7 +117,7 @@ public:
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
-        float hdrPeakNits, float paperWhiteNits) noexcept;
+        float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput = false) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
     void ConfigureHdrStream(const AVCodecParameters* parameters) noexcept;
     FFFResult Render(const AVFrame* frame, bool limitToNativeSize = false,
@@ -428,6 +428,7 @@ private:
     HMONITOR hdrMonitor_;
     bool hdrSupportValid_;
     bool hdrSupported_;
+    bool forceHdrOutput_;
     std::chrono::steady_clock::time_point hdrSupportCheckedAt_;
     bool hdrSwapChainRejected_;
     // Bounded caches are keyed by the immutable command content contract.  The

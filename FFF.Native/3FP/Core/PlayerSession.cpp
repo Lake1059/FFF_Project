@@ -441,7 +441,8 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
     videoRenderer_.SetWindow(static_cast<HWND>(configuration.outputWindow));
     videoRenderer_.SetScalingQuality(configuration.videoScalingQuality);
     videoRenderer_.SetColorMode(configuration.colorMode, configuration.sdrPeakNits,
-        configuration.hdrPeakNits, configuration.sdrPaperWhiteNits);
+        configuration.hdrPeakNits, configuration.sdrPaperWhiteNits,
+        configuration.forceHdrOutput != 0);
     snapshot_.actualColorMode = videoRenderer_.ActualColorMode();
     publishedSnapshot_ = snapshot_;
     worker_ = std::thread(&PlayerSession::Worker, this);
@@ -976,16 +977,18 @@ FFFResult PlayerSession::ClearExternalAudio() noexcept {
     return FFFResult::Success;
 }
 FFFResult PlayerSession::SetExternalAudioOffset(const std::int64_t offset) noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, offset] { externalAudioOffset100ns_ = offset; snapshot_.externalAudioOffset100ns = offset; if (externalFormat_) DoSeek(snapshot_.position100ns); else PublishSnapshot(); }); return FFFResult::Success; }
-FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sdr, const float hdr, const float paper) noexcept {
+FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sdr, const float hdr,
+    const float paper, const bool forceHdrOutput) noexcept {
     if (mode > FFF3FPColorMode::MapToHdr || !std::isfinite(sdr) || sdr <= 0 ||
         !std::isfinite(hdr) || hdr < 0 || hdr > 10000 || !std::isfinite(paper) || paper <= 0)
         return FFFResult::InvalidArgument;
-    Enqueue([this, mode, sdr, hdr, paper] {
+    Enqueue([this, mode, sdr, hdr, paper, forceHdrOutput] {
         const auto forceSdr = mode == FFF3FPColorMode::MapToHdr && snapshot_.isHdrSource == 0;
         const auto effectiveMode = forceSdr ? FFF3FPColorMode::MapToSdr : mode;
         snapshot_.requestedColorMode = effectiveMode;
         const auto previous = snapshot_.actualColorMode;
-        const auto result = videoRenderer_.SetColorMode(effectiveMode, sdr, hdr, paper);
+        const auto result = videoRenderer_.SetColorMode(
+            effectiveMode, sdr, hdr, paper, forceHdrOutput);
         if (result != FFFResult::Success) {
             if (result == FFFResult::DeviceFailure &&
                 videoRenderer_.RequestRecoveryIfDeviceLost()) return;

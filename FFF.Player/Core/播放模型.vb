@@ -81,6 +81,7 @@ Public NotInheritable Class 播放器配置
     ' 0 = 自动使用显示器能力；正值由未来的用户峰值设置覆盖。
     Public Property HDR峰值尼特 As Single = 0.0F
     Public Property SDR纸白尼特 As Single = 203.0F
+    Public Property 强制HDR输出 As Boolean
     Public Property 缩放质量 As 视频缩放质量 = 视频缩放质量.高画质
     Public Property 输出窗口句柄 As IntPtr
     Public Property 音频端点标识 As String = String.Empty
