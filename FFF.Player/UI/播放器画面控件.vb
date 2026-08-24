@@ -45,6 +45,7 @@ Friend NotInheritable Class 播放器画面控件
     Friend Event 输出窗口创建 As EventHandler
     Friend Event 文件拖入 As EventHandler(Of 播放器文件拖入事件参数)
     Friend Event 音量滚轮 As EventHandler(Of MouseEventArgs)
+    Friend Event 全景视场角滚轮 As EventHandler(Of MouseEventArgs)
     Friend Event 全景视角拖动 As EventHandler(Of 播放器360视角拖动事件参数)
 
     <Browsable(False), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)>
@@ -110,6 +111,7 @@ Friend NotInheritable Class 播放器画面控件
 
     Private Sub 视频输出窗口_MouseWheel(sender As Object, e As MouseEventArgs)
         RaiseEvent 音量滚轮(Me, e)
+        RaiseEvent 全景视场角滚轮(Me, e)
     End Sub
 
     Private Sub 文件_DragEnter(sender As Object, e As DragEventArgs)

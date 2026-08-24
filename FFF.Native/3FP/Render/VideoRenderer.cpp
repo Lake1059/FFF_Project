@@ -4277,7 +4277,7 @@ FFFResult PlayerVideoRenderer::Set360View(const bool enabled, const float yaw,
         std::memory_order_relaxed);
     view360PitchBits_.store(std::bit_cast<float>(std::clamp(pitch, -89.0f, 89.0f)),
         std::memory_order_relaxed);
-    view360FovYBits_.store(std::bit_cast<float>(std::clamp(fovY, 30.0f, 120.0f)),
+    view360FovYBits_.store(std::bit_cast<float>(std::clamp(fovY, 30.0f, 90.0f)),
         std::memory_order_relaxed);
     // Publish the enable flag last so an acquire load observes this complete
     // yaw/pitch/FOV tuple rather than a partially updated camera state.
@@ -4694,6 +4694,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     projection360Enabled_.store(0, std::memory_order_release);
     view360YawBits_.store(std::bit_cast<float>(0.0f), std::memory_order_relaxed);
     view360PitchBits_.store(std::bit_cast<float>(0.0f), std::memory_order_relaxed);
+    view360FovYBits_.store(std::bit_cast<float>(90.0f), std::memory_order_relaxed);
     lyricsLayoutEnabled_.store(false, std::memory_order_release);
     actualVideoScalingMode_.store(FFF3FPVideoScalingMode::D3D11VideoProcessor);
     videoGeneration_.store(0); presentedVideoGeneration_.store(0);

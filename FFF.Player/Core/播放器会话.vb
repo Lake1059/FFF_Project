@@ -196,13 +196,13 @@ Public NotInheritable Class 播放器会话
         检查结果(播放器原生接口.FFF3FP_SetOutputWindow(取得句柄(), 窗口句柄))
     End Sub
     Public Sub 设置360视角(启用 As Boolean, 水平角度 As Single, 垂直角度 As Single,
-                       Optional 垂直视场角 As Single = 90.0F)
+                       Optional 视场角 As Single = 90.0F)
         If Not Single.IsFinite(水平角度) OrElse Not Single.IsFinite(垂直角度) OrElse
-            Not Single.IsFinite(垂直视场角) OrElse 垂直视场角 <= 0 Then
-            Throw New ArgumentOutOfRangeException(NameOf(垂直视场角))
+            Not Single.IsFinite(视场角) OrElse 视场角 <= 0 Then
+            Throw New ArgumentOutOfRangeException(NameOf(视场角))
         End If
         检查结果(播放器原生接口.FFF3FP_Set360View(取得句柄(), If(启用, 1UI, 0UI),
-                                                水平角度, 垂直角度, 垂直视场角))
+                                                水平角度, 垂直角度, 视场角))
     End Sub
     Public Sub 设置音频端点(端点标识 As String)
         Dim 指针 = IntPtr.Zero

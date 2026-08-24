@@ -8,9 +8,11 @@ Friend NotInheritable Class 播放器360视角控制器
     Private Const WM_SYSKEYDOWN As Integer = &H104
     Private Const WM_SYSKEYUP As Integer = &H105
     Private Const 键盘转速 As Single = 90.0F
+    Private Const 视场角调整刻度 As Single = 1.0F
     Private Const 鼠标每像素角度 As Single = 0.18F
     Private Const 最大垂直角度 As Single = 89.0F
-    Private Const 垂直视场角 As Single = 90.0F
+    Private Const 最小视场角 As Single = 30.0F
+    Private Const 最大视场角 As Single = 90.0F
     ' A short critically-damped spring adds a little acceleration/deceleration
     ' weight without bringing back the long 160 ms camera lag that looked like
     ' ghosting during fast turns.
@@ -32,7 +34,7 @@ Friend NotInheritable Class 播放器360视角控制器
     Private ReadOnly 按键刷新计时器 As Timer
     Private ReadOnly 计时器 As Stopwatch = Stopwatch.StartNew()
     Private ReadOnly 已按下方向键 As New HashSet(Of Keys)
-
+    Private 视场角滚轮余量 As Integer
     Private 有可用视频 As Boolean
     Private 当前媒体是图片 As Boolean
     Private 上次刷新秒数 As Double
@@ -42,6 +44,7 @@ Friend NotInheritable Class 播放器360视角控制器
     Private 实际垂直角度 As Single
     Private 水平角速度 As Single
     Private 垂直角速度 As Single
+    Private 视场角 As Single = 最大视场角
     Private 已释放 As Boolean
 
     Friend Sub New(宿主窗口值 As Form, 画面控件值 As 播放器画面控件,
@@ -65,6 +68,7 @@ Friend NotInheritable Class 播放器360视角控制器
         AddHandler 模式菜单项.Click, AddressOf 模式菜单项_Click
         AddHandler 按键刷新计时器.Tick, AddressOf 按键刷新计时器_Tick
         AddHandler 画面控件.全景视角拖动, AddressOf 画面控件_全景视角拖动
+        AddHandler 画面控件.全景视场角滚轮, AddressOf 画面控件_全景视场角滚轮
         Application.AddMessageFilter(Me)
     End Sub
 
@@ -77,6 +81,7 @@ Friend NotInheritable Class 播放器360视角控制器
     Friend Sub 媒体已打开(文件路径 As String, 信息 As 媒体信息, 快照 As 播放器快照)
         If 已释放 Then Return
         已按下方向键.Clear()
+        视场角滚轮余量 = 0
         按键刷新计时器.Stop()
         当前媒体是图片 = 信息 IsNot Nothing AndAlso 信息.是静态图片
         Dim 有视频流 = 快照 IsNot Nothing AndAlso 快照.当前视频流 >= 0
@@ -127,7 +132,9 @@ Friend NotInheritable Class 播放器360视角控制器
         模式菜单项.Checked = 启用
         画面控件.全景交互已启用 = 启用
         已按下方向键.Clear()
+        视场角滚轮余量 = 0
         If 启用 Then
+            视场角 = Math.Clamp(设置.实例对象.视角360视场角, 最小视场角, 最大视场角)
             重置视角(False, True)
             上次刷新秒数 = 计时器.Elapsed.TotalSeconds
             按键刷新计时器.Start()
@@ -165,14 +172,24 @@ Friend NotInheritable Class 播放器360视角控制器
         End If
         Dim 方向键 = 规范化方向键(按键)
         If 方向键 = Keys.None Then Return False
-        If m.Msg = WM_KEYDOWN OrElse m.Msg = WM_SYSKEYDOWN Then
+        Dim 是按下 = m.Msg = WM_KEYDOWN OrElse m.Msg = WM_SYSKEYDOWN
+        If Not 是按下 Then
+            已按下方向键.Remove(方向键)
+            Return True
+        End If
+
+        Dim 修饰键 = Control.ModifierKeys And Keys.Modifiers
+        If 修饰键 = Keys.Control Then
+            已按下方向键.Remove(方向键)
+            调整视场角(计算视场角调整(方向键, 修饰键))
+        ElseIf 修饰键 = Keys.None Then
             已按下方向键.Add(方向键)
             If Not 按键刷新计时器.Enabled Then
                 上次刷新秒数 = 计时器.Elapsed.TotalSeconds
                 按键刷新计时器.Start()
             End If
         Else
-            已按下方向键.Remove(方向键)
+            Return False
         End If
         Return True
     End Function
@@ -184,6 +201,33 @@ Friend NotInheritable Class 播放器360视角控制器
             Case Else : Return Keys.None
         End Select
     End Function
+
+    Friend Shared Function 计算视场角调整(按键 As Keys, 修饰键 As Keys) As Single
+        If 修饰键 <> Keys.Control Then Return 0.0F
+        Select Case 按键
+            Case Keys.A, Keys.Left, Keys.S, Keys.Down : Return -视场角调整刻度
+            Case Keys.D, Keys.Right, Keys.W, Keys.Up : Return 视场角调整刻度
+            Case Else : Return 0.0F
+        End Select
+    End Function
+
+    Private Sub 调整视场角(调整量 As Single)
+        视场角 = Math.Clamp(视场角 + 调整量,
+                            最小视场角, 最大视场角)
+        设置.实例对象.视角360视场角 = 视场角
+        提交视角()
+        操作提示($"视场角：{视场角:0}°")
+    End Sub
+
+    Private Sub 画面控件_全景视场角滚轮(sender As Object, e As MouseEventArgs)
+        If 已释放 OrElse Not 模式已启用 OrElse e.Delta = 0 OrElse
+            (Control.ModifierKeys And Keys.Control) <> Keys.Control Then Return
+        视场角滚轮余量 += e.Delta
+        Dim 刻度 = 视场角滚轮余量 \ 120
+        If 刻度 = 0 Then Return
+        视场角滚轮余量 -= 刻度 * 120
+        调整视场角(-刻度)
+    End Sub
 
     Private Sub 按键刷新计时器_Tick(sender As Object, e As EventArgs)
         Dim 当前秒数 = 计时器.Elapsed.TotalSeconds
@@ -230,7 +274,7 @@ Friend NotInheritable Class 播放器360视角控制器
             目标水平角度 = 实际水平角度 +
                 MathF.IEEERemainder(目标水平角度 - 实际水平角度, 360.0F)
         End If
-        应用视角(模式已启用, 实际水平角度, 实际垂直角度, 垂直视场角)
+        应用视角(模式已启用, 实际水平角度, 实际垂直角度, 视场角)
     End Sub
 
     Friend Shared Function 计算方向向量(按键 As ISet(Of Keys)) As PointF
@@ -262,6 +306,7 @@ Friend NotInheritable Class 播放器360视角控制器
         RemoveHandler 模式菜单项.Click, AddressOf 模式菜单项_Click
         RemoveHandler 按键刷新计时器.Tick, AddressOf 按键刷新计时器_Tick
         RemoveHandler 画面控件.全景视角拖动, AddressOf 画面控件_全景视角拖动
+        RemoveHandler 画面控件.全景视场角滚轮, AddressOf 画面控件_全景视场角滚轮
         按键刷新计时器.Dispose()
         画面控件.全景交互已启用 = False
     End Sub

@@ -16,6 +16,9 @@ Public Class 设置
     Public Property HDR映射SDR参考亮度 As Integer = 250
     Public Property 音量百分比 As Integer = 100
 
+    ' 360°视场角由快捷键调整；该字段没有对应的设置控件，但仍随设置文件持久化。
+    Public Property 视角360视场角 As Single = 90.0F
+
     Public Property 字幕第一行字体 As String = "Microsoft YaHei UI"
     Public Property 字幕第一行字号 As Single = 48.0F
     Public Property 字幕第一行样式 As Integer = CInt(FontStyle.Regular)
@@ -135,6 +138,8 @@ Public Class 设置
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
         HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)
         音量百分比 = Math.Clamp(音量百分比, 0, 100)
+        If Not Single.IsFinite(视角360视场角) Then 视角360视场角 = 90.0F
+        视角360视场角 = Math.Clamp(视角360视场角, 30.0F, 90.0F)
         规范化字幕字体(字幕第一行字体, 字幕第一行字号, 字幕第一行样式)
         规范化字幕字体(字幕第二行字体, 字幕第二行字号, 字幕第二行样式)
         规范化字幕字体(字幕其他行字体, 字幕其他行字号, 字幕其他行样式)

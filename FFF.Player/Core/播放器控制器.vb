@@ -33,6 +33,7 @@ Public NotInheritable Class 播放器控制器
     Private 当前媒体是纯音频 As Boolean
     Private 当前音乐包含封面 As Boolean
     Private 当前文件路径 As String = String.Empty
+    Private 最后打开文件路径 As String = String.Empty
     Private 当前解码器 As 解码模式 = 解码模式.CPU
     Private 当前会话解码器配置 As 解码模式 = 解码模式.CPU
     Private 用户解码器偏好 As 解码模式 = 解码模式.CPU
@@ -262,11 +263,11 @@ Public NotInheritable Class 播放器控制器
     End Function
 
     Friend Sub 设置360视角(启用 As Boolean, 水平角度 As Single, 垂直角度 As Single,
-                       Optional 垂直视场角 As Single = 90.0F)
+                       Optional 视场角 As Single = 90.0F)
         Dim 目标 = 会话
         If 已释放 OrElse 目标 Is Nothing Then Return
         Try
-            目标.设置360视角(启用, 水平角度, 垂直角度, 垂直视场角)
+            目标.设置360视角(启用, 水平角度, 垂直角度, 视场角)
         Catch ex As ObjectDisposedException
         Catch ex As 播放器异常
         End Try
@@ -504,7 +505,11 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 切换播放暂停()
         Dim 目标 = 会话
-        If 目标 Is Nothing OrElse 正在切换会话 Then Return
+        If 正在切换会话 Then Return
+        If 目标 Is Nothing Then
+            If File.Exists(最后打开文件路径) Then 打开媒体(最后打开文件路径)
+            Return
+        End If
 
         Try
             Dim 快照 = 目标.当前快照
@@ -836,6 +841,7 @@ Public NotInheritable Class 播放器控制器
                         End If
                         会话 = 原会话
                         当前文件路径 = 路径
+                        最后打开文件路径 = 路径
                         Volatile.Write(当前媒体是纯音频, 原位是纯音频)
                         Volatile.Write(当前音乐包含封面, 原位包含封面)
                         当前解码器 = 原位快照.解码器
@@ -887,69 +893,70 @@ Public NotInheritable Class 播放器控制器
                     当前WASAPI模式 = 保留WASAPI模式
                 End If
 
-            ' HDR 输出策略属于播放器偏好。新片源沿用该策略；如果新片源是
-            ' SDR，会由播放器会话按源类型安全地收敛回 SDR 映射。
-            Dim 候选色彩输出 = If(
+                ' HDR 输出策略属于播放器偏好。新片源沿用该策略；如果新片源是
+                ' SDR，会由播放器会话按源类型安全地收敛回 SDR 映射。
+                Dim 候选色彩输出 = If(
                 String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase),
                 当前色彩输出, HDR色彩输出偏好)
-            候选会话 = 创建会话(解码器, 候选色彩输出)
-            候选会话.设置音量(当前音量, 已静音)
-            Await 候选会话.打开Async(路径, 此次取消.Token)
-            此次取消.Token.ThrowIfCancellationRequested()
-            Dim 初始快照 = 候选会话.当前快照
-            Dim 媒体信息 = 候选会话.当前媒体信息
-            Dim 候选是纯音频 = 媒体信息.流.Any(
+                候选会话 = 创建会话(解码器, 候选色彩输出)
+                候选会话.设置音量(当前音量, 已静音)
+                Await 候选会话.打开Async(路径, 此次取消.Token)
+                此次取消.Token.ThrowIfCancellationRequested()
+                Dim 初始快照 = 候选会话.当前快照
+                Dim 媒体信息 = 候选会话.当前媒体信息
+                Dim 候选是纯音频 = 媒体信息.流.Any(
                 Function(x) String.Equals(x.类型, "audio", StringComparison.OrdinalIgnoreCase)) AndAlso
                 Not 媒体信息.流.Any(
                     Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso
                                 Not x.是封面图)
-            Dim 候选包含封面 = 候选是纯音频 AndAlso 媒体信息.流.Any(
+                Dim 候选包含封面 = 候选是纯音频 AndAlso 媒体信息.流.Any(
                 Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso x.是封面图)
-            恢复流选择(候选会话, 媒体信息, 视频流, 音频流)
-            If 恢复位置 > TimeSpan.Zero Then
-                候选会话.跳转(If(初始快照.总时长 > TimeSpan.Zero, 最小时间(恢复位置, 初始快照.总时长), 恢复位置))
-            End If
-            Dim 快照 = 候选会话.当前快照
+                恢复流选择(候选会话, 媒体信息, 视频流, 音频流)
+                If 恢复位置 > TimeSpan.Zero Then
+                    候选会话.跳转(If(初始快照.总时长 > TimeSpan.Zero, 最小时间(恢复位置, 初始快照.总时长), 恢复位置))
+                End If
+                Dim 快照 = 候选会话.当前快照
 
-            Dim 保留当前字幕 = 保留已加载字幕 AndAlso
+                Dim 保留当前字幕 = 保留已加载字幕 AndAlso
                 String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase)
-            释放当前会话(保留当前字幕)
-            已临时释放独占 = False
-            会话 = 候选会话
-            候选会话 = Nothing
-            当前文件路径 = 路径
-            Volatile.Write(当前媒体是纯音频, 候选是纯音频)
-            Volatile.Write(当前音乐包含封面, 候选包含封面)
-            当前会话解码器配置 = 解码器
-            当前解码器 = 快照.解码器
-            当前色彩输出 = 快照.请求色彩模式
-            添加会话事件(会话)
-            If 保留WASAPI模式 = WASAPI共享模式.独占 Then
-                Try
-                    Await 设置会话WASAPI模式Async(会话, True, 此次取消.Token)
-                Catch ex As 播放器异常
-                    ' 原生层已经恢复共享模式并通过会话错误事件报告原因；
-                    ' 新媒体仍可继续按共享模式播放。
-                Catch ex As TimeoutException
-                    ' 模式确认超时不应阻止已经打开的新媒体继续播放。
-                    RaiseEvent 播放错误(Me,
+                释放当前会话(保留当前字幕)
+                已临时释放独占 = False
+                会话 = 候选会话
+                候选会话 = Nothing
+                当前文件路径 = 路径
+                最后打开文件路径 = 路径
+                Volatile.Write(当前媒体是纯音频, 候选是纯音频)
+                Volatile.Write(当前音乐包含封面, 候选包含封面)
+                当前会话解码器配置 = 解码器
+                当前解码器 = 快照.解码器
+                当前色彩输出 = 快照.请求色彩模式
+                添加会话事件(会话)
+                If 保留WASAPI模式 = WASAPI共享模式.独占 Then
+                    Try
+                        Await 设置会话WASAPI模式Async(会话, True, 此次取消.Token)
+                    Catch ex As 播放器异常
+                        ' 原生层已经恢复共享模式并通过会话错误事件报告原因；
+                        ' 新媒体仍可继续按共享模式播放。
+                    Catch ex As TimeoutException
+                        ' 模式确认超时不应阻止已经打开的新媒体继续播放。
+                        RaiseEvent 播放错误(Me,
                         New 播放器错误事件参数(ex.Message, "无法确认 WASAPI 独占模式"))
-                End Try
-            End If
-            重绑输出窗口()
-            If 恢复播放 Then 会话.播放()
+                    End Try
+                End If
+                重绑输出窗口()
+                If 恢复播放 Then 会话.播放()
 
-            ' “媒体已打开”是可操作边界。事件处理器可能立即切换色彩、音轨或跳转，
-            ' 因而不能等到 Finally 才清除切换标记，否则首个操作会被静默忽略。
-            正在切换会话 = False
-            RaiseEvent 媒体已打开(Me,
+                ' “媒体已打开”是可操作边界。事件处理器可能立即切换色彩、音轨或跳转，
+                ' 因而不能等到 Finally 才清除切换标记，否则首个操作会被静默忽略。
+                正在切换会话 = False
+                RaiseEvent 媒体已打开(Me,
                 New 播放器媒体事件参数(当前文件路径, 媒体信息, 快照, 保留当前字幕))
-            If Not 保留当前字幕 Then
-                开始自动加载字幕(当前文件路径)
-                开始自动加载弹幕(当前文件路径)
-                开始自动加载歌词(当前文件路径)
-            End If
-            RaiseEvent 状态已变化(Me, EventArgs.Empty)
+                If Not 保留当前字幕 Then
+                    开始自动加载字幕(当前文件路径)
+                    开始自动加载弹幕(当前文件路径)
+                    开始自动加载歌词(当前文件路径)
+                End If
+                RaiseEvent 状态已变化(Me, EventArgs.Empty)
             Catch ex As OperationCanceledException
                 ' 新请求或停止操作会主动取消当前打开过程。
             Catch ex As Exception

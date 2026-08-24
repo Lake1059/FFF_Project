@@ -116,7 +116,7 @@ Friend Module Program
             End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--shared-audio-file-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试音乐文件共享打开()
-                Console.WriteLine("音乐文件共享打开、播放中改名和删除回归通过。")
+                Console.WriteLine("停止后重播、音乐文件共享打开、播放中改名和删除回归通过。")
                 Return 0
             End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--audio-cover-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -262,7 +262,7 @@ Friend Module Program
             End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--360-interaction-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试360识别与交互数学()
-                Console.WriteLine("360°识别、图片排除、八方向与平滑阻尼回归通过。")
+                Console.WriteLine("360°识别、图片排除、角度设置边界与平滑阻尼回归通过。")
                 Return 0
             End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--360-projection-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -1695,15 +1695,24 @@ Friend Module Program
         断言(Not 播放器360视角控制器.是360视频(信息, 快照),
             "普通静态图片被误识别为 360°图片。")
 
-        Dim 左上 = 播放器360视角控制器.计算方向向量(New HashSet(Of Keys) From {Keys.Left, Keys.Up})
-        Dim 右上 = 播放器360视角控制器.计算方向向量(New HashSet(Of Keys) From {Keys.D, Keys.W})
-        Dim 对消 = 播放器360视角控制器.计算方向向量(New HashSet(Of Keys) From {Keys.A, Keys.D})
-        Dim 对角分量 = CSng(1.0R / Math.Sqrt(2.0R))
-        断言(Math.Abs(左上.X + 对角分量) < 0.0001F AndAlso
-               Math.Abs(左上.Y - 对角分量) < 0.0001F AndAlso
-               Math.Abs(右上.X - 对角分量) < 0.0001F AndAlso
-               Math.Abs(右上.Y - 对角分量) < 0.0001F AndAlso 对消.IsEmpty,
-            "相邻方向键没有归一化为 45°方向，或相反方向没有正确对消。")
+        Dim 角度设置 As New 设置 With {.视角360视场角 = 120.0F}
+        角度设置.规范化()
+        断言(角度设置.视角360视场角 = 90.0F,
+            "360°视场角没有限制在 30°～90°。")
+        Using 设置文档 = System.Text.Json.JsonDocument.Parse(
+            System.Text.Json.JsonSerializer.Serialize(角度设置))
+            断言(设置文档.RootElement.GetProperty("视角360视场角").GetSingle() = 90.0F,
+                "360°视场角没有写入设置 JSON。")
+        End Using
+
+        断言(播放器360视角控制器.计算方向向量(New HashSet(Of Keys) From {Keys.Left, Keys.Up}).X < 0 AndAlso
+               播放器360视角控制器.计算方向向量(New HashSet(Of Keys) From {Keys.Left, Keys.Up}).Y > 0,
+            "无修饰方向键没有保留原有连续转向逻辑。")
+        Dim 视场角左 = 播放器360视角控制器.计算视场角调整(Keys.Left, Keys.Control)
+        Dim 视场角上 = 播放器360视角控制器.计算视场角调整(Keys.W, Keys.Control)
+        断言(视场角左 = -1.0F AndAlso 视场角上 = 1.0F AndAlso
+               播放器360视角控制器.计算视场角调整(Keys.Left, Keys.None) = 0.0F,
+            "Ctrl 视场角快捷键没有按 1°刻度生效，或无 Ctrl 时错误接管了方向键。")
 
         Dim 当前值 As Single
         Dim 当前速度 As Single
@@ -3507,6 +3516,35 @@ Friend Module Program
                 writer.Write(Encoding.ASCII.GetBytes("data"))
                 writer.Write(音频字节数)
                 writer.Write(New Byte(音频字节数 - 1) {})
+            End Using
+
+            Using 控制器 As New 播放器控制器(Function() IntPtr.Zero, Nothing)
+                打开并等待(控制器, 原路径)
+                控制器.停止()
+                断言(Not 控制器.是否有媒体, "停止后当前媒体会话没有释放。")
+                Using 已重开 As New ManualResetEventSlim(False)
+                    Dim 重开处理 As EventHandler(Of 播放器媒体事件参数) =
+                        Sub(sender, e)
+                            If String.Equals(e.文件路径, 原路径, StringComparison.OrdinalIgnoreCase) Then 已重开.Set()
+                        End Sub
+                    AddHandler 控制器.媒体已打开, 重开处理
+                    Try
+                        控制器.切换播放暂停()
+                        Dim 计时 = Stopwatch.StartNew()
+                        Do Until 已重开.IsSet
+                            Application.DoEvents()
+                            If 计时.Elapsed >= TimeSpan.FromSeconds(30) Then
+                                Throw New TimeoutException("停止后执行播放没有重新打开最后一个文件。")
+                            End If
+                            Thread.Sleep(5)
+                        Loop
+                    Finally
+                        RemoveHandler 控制器.媒体已打开, 重开处理
+                    End Try
+                End Using
+                断言(控制器.是否有媒体 AndAlso
+                       String.Equals(控制器.当前媒体路径, 原路径, StringComparison.OrdinalIgnoreCase),
+                    "停止后执行播放没有恢复最后成功打开的文件。")
             End Using
 
             Using 会话 As New 播放器会话(New 播放器配置 With {

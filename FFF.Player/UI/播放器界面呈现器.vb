@@ -272,7 +272,8 @@ Friend NotInheritable Class 播放器界面呈现器
     End Sub
 
     Private Sub 画面控件_音量滚轮(sender As Object, e As MouseEventArgs)
-        If 已释放 OrElse e.Delta = 0 Then Return
+        If 已释放 OrElse e.Delta = 0 OrElse
+            (Control.ModifierKeys And Keys.Control) = Keys.Control Then Return
         滚轮余量 += e.Delta
         Dim 刻度 = 滚轮余量 \ 120
         If 刻度 = 0 Then Return

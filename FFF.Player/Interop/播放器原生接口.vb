@@ -374,7 +374,7 @@ Friend Module 播放器原生接口
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_Set360View(播放器 As 播放器原生句柄, 启用 As UInteger,
                                       水平角度 As Single, 垂直角度 As Single,
-                                      垂直视场角 As Single) As 原生播放器结果
+                                      视场角 As Single) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetAudioEndpoint(播放器 As 播放器原生句柄, 端点UTF8 As IntPtr) As 原生播放器结果
