@@ -36,9 +36,9 @@ Public NotInheritable Class 播放器会话
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
         配置.验证()
-        ' 强制 HDR 输出及此前的渲染合同从 API 12 起才完整。这里必须在创建
+        ' 360°投影、强制 HDR 输出及此前的渲染合同从 API 13 起才完整。这里必须在创建
         ' 会话前失败，不能让输出目录中的旧 DLL 继续播放出错误颜色。
-        If 播放器原生接口.FFF3FP_GetApiVersion() <> 12UI Then Throw New InvalidOperationException("FFF.Native 的 3FP API 版本不兼容。")
+        If 播放器原生接口.FFF3FP_GetApiVersion() <> 13UI Then Throw New InvalidOperationException("FFF.Native 的 3FP API 版本不兼容。")
         同步上下文 = 配置.事件同步上下文
         Dim 状态 = New 回调状态()
         Dim 回调句柄 = GCHandle.Alloc(状态)
@@ -46,7 +46,7 @@ Public NotInheritable Class 播放器会话
         Try
             If Not String.IsNullOrEmpty(配置.音频端点标识) Then 端点指针 = Marshal.StringToCoTaskMemUTF8(配置.音频端点标识)
             Dim 原生配置 As New 原生播放器配置 With {
-                .大小 = 原生播放器配置大小, .版本 = 12UI,
+                .大小 = 原生播放器配置大小, .版本 = 13UI,
                 .输出窗口 = 配置.输出窗口句柄, .解码器 = CUInt(配置.解码器),
                 .色彩模式 = CUInt(配置.色彩模式), .SDR峰值 = 配置.SDR峰值尼特,
                 .HDR峰值 = 配置.HDR峰值尼特, .SDR纸白 = 配置.SDR纸白尼特,
@@ -194,6 +194,15 @@ Public NotInheritable Class 播放器会话
     End Sub
     Public Sub 设置输出窗口(窗口句柄 As IntPtr)
         检查结果(播放器原生接口.FFF3FP_SetOutputWindow(取得句柄(), 窗口句柄))
+    End Sub
+    Public Sub 设置360视角(启用 As Boolean, 水平角度 As Single, 垂直角度 As Single,
+                       Optional 垂直视场角 As Single = 90.0F)
+        If Not Single.IsFinite(水平角度) OrElse Not Single.IsFinite(垂直角度) OrElse
+            Not Single.IsFinite(垂直视场角) OrElse 垂直视场角 <= 0 Then
+            Throw New ArgumentOutOfRangeException(NameOf(垂直视场角))
+        End If
+        检查结果(播放器原生接口.FFF3FP_Set360View(取得句柄(), If(启用, 1UI, 0UI),
+                                                水平角度, 垂直角度, 垂直视场角))
     End Sub
     Public Sub 设置音频端点(端点标识 As String)
         Dim 指针 = IntPtr.Zero

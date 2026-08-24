@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 12;
+constexpr std::uint32_t PlayerApiVersion = 13;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -66,6 +66,12 @@ FFFResult FFF3FP_SetViewTransform(const FFF3FPHandle player, const float zoom,
     const float panX, const float panY) noexcept {
     return player ? static_cast<PlayerSession*>(player)->SetViewTransform(zoom, panX, panY)
         : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_Set360View(const FFF3FPHandle player, const std::uint32_t enabled,
+    const float yaw, const float pitch, const float fovY) noexcept {
+    return player && enabled <= 1 ?
+        static_cast<PlayerSession*>(player)->Set360View(enabled != 0, yaw, pitch, fovY) :
+        FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_SetAudioEndpoint(const FFF3FPHandle player, const char* endpoint) noexcept { return player ? static_cast<PlayerSession*>(player)->SetAudioEndpoint(endpoint) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetAudioExclusiveMode(const FFF3FPHandle player, const std::uint32_t exclusive) noexcept {

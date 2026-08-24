@@ -28,6 +28,7 @@ Public Class Form1
     Private 全屏交互控制器 As 播放器全屏交互控制器
     Private 流选择器 As 播放器流选择器
     Private 画面菜单控制器 As 播放器画面菜单控制器
+    Private 视角360控制器 As 播放器360视角控制器
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
     Private ReadOnly 播放列表数据 As New 播放列表 With {.播放模式 = 列表播放模式.顺序播放}
@@ -121,6 +122,12 @@ Public Class Form1
             Function() 设置.实例对象.取得初始画面尺寸(),
             Function() 播放控制器.当前媒体路径,
             Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI))
+        视角360控制器 = New 播放器360视角控制器(
+            Me, 画面控件, MCM_标题栏菜单,
+            Sub(启用, 水平角度, 垂直角度, 视场角)
+                播放控制器.设置360视角(启用, 水平角度, 垂直角度, 视场角)
+            End Sub,
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "360°视频"))
         画面菜单控制器.应用全局字体(设置.实例对象.字体)
         全屏交互控制器 = New 播放器全屏交互控制器(Me, 画面控件,
             ModernPanel1, MP_剪辑区间操作容器, Function() 剪辑区间控制器.模式已启用)
@@ -293,6 +300,7 @@ Public Class Form1
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
+        视角360控制器?.Dispose()
         画面菜单控制器?.Dispose()
         窗口布局控制器?.释放()
         界面呈现器?.释放()
@@ -416,6 +424,7 @@ Public Class Form1
         Text = Path.GetFileName(e.文件路径)
         界面呈现器.媒体已打开(e.保留剪辑区间)
         界面呈现器.更新媒体信息(e.媒体信息, e.快照)
+        视角360控制器?.媒体已打开(e.文件路径, e.媒体信息, e.快照)
         界面呈现器.刷新()
     End Sub
 
@@ -695,7 +704,7 @@ Public Class Form1
                 MB_打开文件_Click(MB_打开文件, EventArgs.Empty)
             Case Keys.Space, Keys.MediaPlayPause
                 播放控制器.切换播放暂停()
-            Case Keys.S, Keys.MediaStop
+            Case Keys.MediaStop
                 MB_停止_Click(MB_停止, EventArgs.Empty)
             Case Keys.M
                 播放控制器.切换静音()

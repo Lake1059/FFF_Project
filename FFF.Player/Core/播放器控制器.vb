@@ -261,6 +261,17 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Function
 
+    Friend Sub 设置360视角(启用 As Boolean, 水平角度 As Single, 垂直角度 As Single,
+                       Optional 垂直视场角 As Single = 90.0F)
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return
+        Try
+            目标.设置360视角(启用, 水平角度, 垂直角度, 垂直视场角)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
     Public Sub 打开媒体(路径 As String)
         If 已释放 OrElse String.IsNullOrWhiteSpace(路径) OrElse Not File.Exists(路径) Then Return
         切换媒体会话(Path.GetFullPath(路径), 用户解码器偏好, TimeSpan.Zero, True, -1, -1)

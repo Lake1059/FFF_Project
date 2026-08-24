@@ -116,6 +116,7 @@ public:
     FFFResult SetWindow(HWND window) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
+    FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput = false) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
@@ -238,6 +239,9 @@ private:
         float sampleScale = 1, yOffset = 0, yScale = 1;
         float cOffset = 0.5f, cScale = 1, kr = 0.2126f, kb = 0.0722f;
         float chromaOffsetX = 0, chromaOffsetY = 0, padding1 = 0, padding2 = 0;
+        std::uint32_t projection360 = 0;
+        float viewYaw = 0, viewPitch = 0, viewFovY = 90;
+        float viewAspect = 1, padding3 = 0, padding4 = 0, padding5 = 0;
     };
     FFFResult EnsureTimedTextResources(TimedTextLayerSlot slot) noexcept;
     FFFResult EnsureD2DContext() noexcept;
@@ -278,6 +282,7 @@ private:
     ID3D11PixelShader* scalePixelShader_;
     ID3D11SamplerState* sampler_;
     ID3D11SamplerState* pointSampler_;
+    ID3D11SamplerState* panoramaSampler_;
     ID3D11Buffer* constants_;
     ID3D11Buffer* scaleConstants_;
     ID3D11Texture2D* sourceTextures_[3];
@@ -365,6 +370,11 @@ private:
     std::atomic<float> viewZoomBits_;
     std::atomic<float> viewPanXBits_;
     std::atomic<float> viewPanYBits_;
+    std::atomic<std::uint32_t> projection360Enabled_;
+    std::atomic<bool> view360RedrawPending_;
+    std::atomic<float> view360YawBits_;
+    std::atomic<float> view360PitchBits_;
+    std::atomic<float> view360FovYBits_;
     float sourcePeakNits_;
     HdrProcessor hdrProcessor_;
     std::vector<std::uint8_t> convertedRgb_;

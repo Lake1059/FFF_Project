@@ -50,6 +50,7 @@ public:
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
+    FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;
     FFFResult SetAudioExclusiveMode(bool exclusive) noexcept;
     FFFResult SetVolume(float volume, bool muted) noexcept;

@@ -31,6 +31,23 @@ extern "C" {
 using Microsoft::WRL::ComPtr;
 
 namespace {
+float DetectDisplayRefreshRate(const HWND window) noexcept {
+    // Pace camera redraws to the monitor hosting the playback window.  A
+    // 120 Hz ceiling keeps high-refresh displays responsive without creating
+    // an unbounded presentation queue on faster panels.
+    if (window == nullptr) return 60.0f;
+    const auto monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+    if (monitor == nullptr) return 60.0f;
+    MONITORINFOEXW monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo)) return 60.0f;
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (!EnumDisplaySettingsExW(monitorInfo.szDevice, ENUM_CURRENT_SETTINGS, &mode, 0) ||
+        mode.dmDisplayFrequency < 2) return 60.0f;
+    return std::clamp(static_cast<float>(mode.dmDisplayFrequency), 60.0f, 120.0f);
+}
+
 bool ReadWindowsDisplayLuminance(const HMONITOR monitor,
     HdrDisplayCapabilities& capabilities) noexcept {
     if (monitor == nullptr) return false;
@@ -311,12 +328,15 @@ cbuffer Settings : register(b0) {
     uint InputLayout; float SampleScale; float YOffset; float YScale;
     float COffset; float CScale; float Kr; float Kb;
     float2 ChromaOffset; float2 Padding;
+    uint Projection360; float ViewYaw; float ViewPitch; float ViewFovY;
+    float ViewAspect; float3 ViewPadding;
 };
 Texture2D<float4> Source : register(t0);
 Texture2D<float4> ChromaU : register(t1);
 Texture2D<float4> ChromaV : register(t2);
 SamplerState LinearSampler : register(s0);
 SamplerState PointSampler : register(s1);
+SamplerState PanoramaSampler : register(s2);
 float3 PqToNits(float3 v) {
     const float m1=2610.0/16384.0, m2=2523.0/32.0, c1=3424.0/4096.0, c2=2413.0/128.0, c3=2392.0/128.0;
     v=pow(saturate(v),1.0/m2); return 10000.0*pow(max(v-c1,0.0)/max(c2-c3*v,0.000001),1.0/m1);
@@ -430,6 +450,41 @@ float4 SampleLanczos3(Texture2D<float4> sourceTexture,float2 uv,uint2 dimensions
     const float4 d=LoadClamped(sourceTexture,origin+int2(1,1),dimensions);
     return clamp(filtered,min(min(a,b),min(c,d)),max(max(a,b),max(c,d)));
 }
+int WrapPanoramaX(int coordinate,uint width) {
+    int wrapped=coordinate%int(width);
+    return wrapped<0?wrapped+int(width):wrapped;
+}
+float4 LoadPanorama(Texture2D<float4> sourceTexture,int2 coordinate,uint2 dimensions) {
+    int2 wrapped=int2(WrapPanoramaX(coordinate.x,dimensions.x),
+        clamp(coordinate.y,0,int(dimensions.y)-1));
+    return sourceTexture.Load(int3(wrapped,0));
+}
+float4 SampleLanczos3Panorama(Texture2D<float4> sourceTexture,float2 uv,uint2 dimensions) {
+    float2 position=float2(frac(uv.x),saturate(uv.y))*float2(dimensions)-0.5;
+    int2 origin=int2(floor(position));
+    float2 fraction=position-float2(origin);
+    float4 total=0.0;
+    float weightTotal=0.0;
+    [unroll] for(int y=-2;y<=3;++y) {
+        const float wy=Lanczos3Weight(float(y)-fraction.y);
+        [unroll] for(int x=-2;x<=3;++x) {
+            const float weight=wy*Lanczos3Weight(float(x)-fraction.x);
+            total+=LoadPanorama(sourceTexture,origin+int2(x,y),dimensions)*weight;
+            weightTotal+=weight;
+        }
+    }
+    const float4 filtered=total/max(abs(weightTotal),0.000001);
+    const float4 a=LoadPanorama(sourceTexture,origin,dimensions);
+    const float4 b=LoadPanorama(sourceTexture,origin+int2(1,0),dimensions);
+    const float4 c=LoadPanorama(sourceTexture,origin+int2(0,1),dimensions);
+    const float4 d=LoadPanorama(sourceTexture,origin+int2(1,1),dimensions);
+    return clamp(filtered,min(min(a,b),min(c,d)),max(max(a,b),max(c,d)));
+}
+float4 SamplePanorama(Texture2D<float4> sourceTexture,float2 uv) {
+    uint width,height;
+    sourceTexture.GetDimensions(width,height);
+    return SampleLanczos3Panorama(sourceTexture,uv,uint2(width,height));
+}
 float4 SampleVideo(Texture2D<float4> sourceTexture,float2 uv) {
     uint width,height;
     sourceTexture.GetDimensions(width,height);
@@ -479,8 +534,45 @@ float2 CoverFillUv(float2 uv) {
 float3 ReadCoverBackdrop(float2 uv) {
     return ReadSourceLinear(CoverFillUv(uv));
 }
+float3 ReadSourcePanorama(float2 uv) {
+    if(InputLayout==0)return SamplePanorama(Source,uv).rgb;
+    float2 chromaUv=uv+ChromaOffset;
+    float y=SamplePanorama(Source,uv).r*SampleScale;
+    float2 chroma=InputLayout==1
+        ?float2(SamplePanorama(ChromaU,chromaUv).r,
+                SamplePanorama(ChromaV,chromaUv).r)*SampleScale
+        :SamplePanorama(ChromaU,chromaUv).rg*SampleScale;
+    y=(y-YOffset)*YScale;
+    chroma=(chroma-COffset)*CScale;
+    float kg=1.0-Kr-Kb;
+    return float3(y+(2.0-2.0*Kr)*chroma.y,
+        y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
+        y+(2.0-2.0*Kb)*chroma.x);
+}
+float2 EquirectangularUv(float2 uv) {
+    const float radiansPerDegree=0.0174532925199433;
+    const float tangent=tan(ViewFovY*radiansPerDegree*0.5);
+    float3 direction=normalize(float3(
+        (uv.x*2.0-1.0)*tangent*ViewAspect,
+        (1.0-uv.y*2.0)*tangent,
+        1.0));
+    const float pitch=ViewPitch*radiansPerDegree;
+    const float pitchCos=cos(pitch),pitchSin=sin(pitch);
+    direction=float3(direction.x,
+        direction.y*pitchCos+direction.z*pitchSin,
+        -direction.y*pitchSin+direction.z*pitchCos);
+    const float yaw=ViewYaw*radiansPerDegree;
+    const float yawCos=cos(yaw),yawSin=sin(yaw);
+    direction=float3(direction.x*yawCos+direction.z*yawSin,
+        direction.y,-direction.x*yawSin+direction.z*yawCos);
+    const float longitude=atan2(direction.x,direction.z);
+    const float latitude=asin(clamp(direction.y,-1.0,1.0));
+    return float2(frac(longitude/6.283185307179586+0.5),
+        saturate(0.5-latitude/3.141592653589793));
+}
 float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
-    float3 rgb=Reserved==1?ReadCoverBackdrop(uv):ReadSource(uv);
+    float3 rgb=Reserved==1?ReadCoverBackdrop(uv):
+        (Projection360!=0?ReadSourcePanorama(EquirectangularUv(uv)):ReadSource(uv));
     if(ColorMode==1)return float4(rgb,1);
     if(ColorMode==0&&Transfer==0){
         if(Source2020!=0)rgb=ToBt709(To709(ToLinear709(rgb)));
@@ -666,6 +758,9 @@ struct ShaderSettings {
     float sampleScale, yOffset, yScale;
     float cOffset, cScale, kr, kb;
     float chromaOffsetX, chromaOffsetY, padding1, padding2;
+    std::uint32_t projection360;
+    float viewYaw, viewPitch, viewFovY;
+    float viewAspect, padding3, padding4, padding5;
 };
 
 struct ScaleShaderSettings {
@@ -1596,7 +1691,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), coverBackdropPixelShader_(nullptr),
       timedTextPixelShader_(nullptr), scalePixelShader_(nullptr), sampler_(nullptr),
-      pointSampler_(nullptr), constants_(nullptr), scaleConstants_(nullptr),
+      pointSampler_(nullptr), panoramaSampler_(nullptr), constants_(nullptr), scaleConstants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
       scaledVideoGeneration_(UINT64_MAX), scaledOutputWidth_(0), scaledOutputHeight_(0),
       scaledSourceViews_{nullptr, nullptr, nullptr},
@@ -1644,6 +1739,11 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       viewZoomBits_(std::bit_cast<float>(1.0f)),
       viewPanXBits_(std::bit_cast<float>(0.0f)),
       viewPanYBits_(std::bit_cast<float>(0.0f)),
+      projection360Enabled_(0),
+      view360RedrawPending_(false),
+      view360YawBits_(std::bit_cast<float>(0.0f)),
+      view360PitchBits_(std::bit_cast<float>(0.0f)),
+      view360FovYBits_(std::bit_cast<float>(90.0f)),
       timedTextThreadStop_(false), timedTextThreadRunning_(false),
       coverBackdropThreadStop_(false), coverBackdropRequestPending_(false),
       coverBackdropRequestGeneration_(0),
@@ -1683,12 +1783,27 @@ PlayerVideoRenderer::~PlayerVideoRenderer() { Close(); }
 FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     if (window != nullptr && !IsWindow(window)) return FFFResult::InvalidArgument;
-    if (window == window_) return FFFResult::Success;
+    if (window == window_) {
+        // The same HWND can move between monitors while the player remains
+        // open. Refresh the pacing contract and wake the presenter so a
+        // 120 Hz monitor is picked up without rebuilding the media session.
+        {
+            std::lock_guard lock(timedTextMutex_);
+            presentationFrameRate_ = DetectDisplayRefreshRate(window_);
+            ++presentationGeneration_;
+        }
+        timedTextCondition_.notify_one();
+        return FFFResult::Success;
+    }
     if (swapChain_ != nullptr) {
         std::lock_guard presentLock(presentMutex_);
         swapChain_->Release(); swapChain_ = nullptr;
     }
     window_ = window;
+    {
+        std::lock_guard lock(timedTextMutex_);
+        presentationFrameRate_ = DetectDisplayRefreshRate(window_);
+    }
     // A generation presented to the previous HWND says nothing about the new
     // swap chain. Reset only the acknowledgement; submitted video remains
     // cached and will be presented again by Redraw.
@@ -2059,6 +2174,10 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     // Keep at most one complete composite queued. Decode and managed overlay
     // production retain only their latest state while Present is waiting.
     swapChain_->SetMaximumFrameLatency(1);
+    {
+        std::lock_guard lock(timedTextMutex_);
+        presentationFrameRate_ = DetectDisplayRefreshRate(window_);
+    }
     return FFFResult::Success;
 }
 
@@ -2158,7 +2277,7 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     const std::uint32_t chromaHeightShift, const bool externalSource) noexcept {
     if (vertexShader_ == nullptr || pixelShader_ == nullptr || scalePixelShader_ == nullptr ||
         coverBackdropPixelShader_ == nullptr || timedTextPixelShader_ == nullptr ||
-        sampler_ == nullptr || pointSampler_ == nullptr ||
+        sampler_ == nullptr || pointSampler_ == nullptr || panoramaSampler_ == nullptr ||
         constants_ == nullptr || scaleConstants_ == nullptr) {
         ComPtr<ID3DBlob> vertexCode, pixelCode, scalePixelCode, coverBackdropPixelCode,
             timedTextPixelCode, errors;
@@ -2193,12 +2312,15 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         sampler.MaxLOD = D3D11_FLOAT32_MAX;
         D3D11_SAMPLER_DESC pointSampler = sampler;
         pointSampler.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        D3D11_SAMPLER_DESC panoramaSampler = sampler;
+        panoramaSampler.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
         D3D11_BUFFER_DESC buffer{};
         buffer.ByteWidth = sizeof(ShaderSettings); buffer.Usage = D3D11_USAGE_DEFAULT; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         D3D11_BUFFER_DESC scaleBuffer = buffer;
         scaleBuffer.ByteWidth = sizeof(ScaleShaderSettings);
         if (FAILED(device_->CreateSamplerState(&sampler, &sampler_)) ||
             FAILED(device_->CreateSamplerState(&pointSampler, &pointSampler_)) ||
+            FAILED(device_->CreateSamplerState(&panoramaSampler, &panoramaSampler_)) ||
             FAILED(device_->CreateBuffer(&buffer, nullptr, &constants_)) ||
             FAILED(device_->CreateBuffer(&scaleBuffer, nullptr, &scaleConstants_))) {
             SetError("Could not create the presentation shader resources."); return FFFResult::DeviceFailure;
@@ -2447,6 +2569,16 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     cachedVideoSettings_.reserved = effect;
     cachedVideoSettings_.outputWidth = width;
     cachedVideoSettings_.outputHeight = height;
+    const auto projection360 = effect == 0 ?
+        projection360Enabled_.load(std::memory_order_acquire) : 0u;
+    cachedVideoSettings_.projection360 = projection360;
+    cachedVideoSettings_.viewYaw = std::bit_cast<float>(
+        view360YawBits_.load(std::memory_order_acquire));
+    cachedVideoSettings_.viewPitch = std::bit_cast<float>(
+        view360PitchBits_.load(std::memory_order_acquire));
+    cachedVideoSettings_.viewFovY = std::bit_cast<float>(
+        view360FovYBits_.load(std::memory_order_acquire));
+    cachedVideoSettings_.viewAspect = width / height;
     context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
     context_->OMSetRenderTargets(1, &target, nullptr);
     const D3D11_VIEWPORT viewport{x, y, width, height, 0.0f, 1.0f};
@@ -2456,7 +2588,7 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     context_->VSSetShader(vertexShader_, nullptr, 0);
     context_->PSSetShader(pixelShader_, nullptr, 0);
     context_->PSSetConstantBuffers(0, 1, &constants_);
-    ID3D11SamplerState* samplers[] = {sampler_, pointSampler_};
+    ID3D11SamplerState* samplers[] = {sampler_, pointSampler_, panoramaSampler_};
     context_->PSSetSamplers(0, ARRAYSIZE(samplers), samplers);
     auto* views = sourceViews != nullptr ? sourceViews : sourceViews_;
     context_->PSSetShaderResources(0, ARRAYSIZE(sourceViews_), views);
@@ -2787,7 +2919,7 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
                 retained->sequence = timedTextLayers_[slotIndex]
                     ? timedTextLayers_[slotIndex]->sequence + 1 : 1;
             timedTextLayers_[slotIndex] = std::move(retained);
-            presentationFrameRate_ = 1.0f;
+            presentationFrameRate_ = DetectDisplayRefreshRate(window_);
             bool hasVisibleLayer = false;
             for (const auto& item : timedTextLayers_) {
                 if (item != nullptr && !item->commands.empty()) {
@@ -2844,10 +2976,14 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
             }
             if (!devicePollOnly) {
                 videoChanged = videoGeneration_.load() != observedVideoGeneration;
+                const auto cameraLive = projection360Enabled_.load(std::memory_order_acquire) != 0;
                 // A new decoded frame is never held behind the overlay cadence. Static
                 // subtitle/danmaku updates are still coalesced to their requested rate.
+                // A live 360 camera follows the same rule as decoded video: submit
+                // the newest view immediately and let the swap-chain frame-latency
+                // contract pace it to the physical display (including 120 Hz).
                 if (const auto now = std::chrono::steady_clock::now();
-                    !videoChanged &&
+                    !videoChanged && !cameraLive &&
                     nextPresentation != std::chrono::steady_clock::time_point::min() &&
                     now < nextPresentation) {
                     timedTextCondition_.wait_until(lock, nextPresentation,
@@ -4128,8 +4264,38 @@ FFFResult PlayerVideoRenderer::DrawCoverBackdrop(ID3D11RenderTargetView* target)
     return FFFResult::Success;
 }
 
+FFFResult PlayerVideoRenderer::Set360View(const bool enabled, const float yaw,
+    const float pitch, const float fovY) noexcept {
+    if (!std::isfinite(yaw) || !std::isfinite(pitch) ||
+        !std::isfinite(fovY) || fovY <= 0.0f)
+        return FFFResult::InvalidArgument;
+    view360YawBits_.store(std::bit_cast<float>(std::remainder(yaw, 360.0f)),
+        std::memory_order_relaxed);
+    view360PitchBits_.store(std::bit_cast<float>(std::clamp(pitch, -89.0f, 89.0f)),
+        std::memory_order_relaxed);
+    view360FovYBits_.store(std::bit_cast<float>(std::clamp(fovY, 30.0f, 120.0f)),
+        std::memory_order_relaxed);
+    // Publish the enable flag last so an acquire load observes this complete
+    // yaw/pitch/FOV tuple rather than a partially updated camera state.
+    projection360Enabled_.store(enabled ? 1u : 0u, std::memory_order_release);
+    // View changes are lightweight state updates. Wake the presentation thread
+    // directly instead of forcing every mouse sample through the playback
+    // worker queue, where it can accumulate behind decode work.
+    // Coalesce high-frequency mouse samples into one wake-up per pending
+    // presentation. The presenter always reads the latest camera tuple.
+    if (!view360RedrawPending_.exchange(true, std::memory_order_acq_rel)) {
+        {
+            std::lock_guard lock(timedTextMutex_);
+            ++presentationGeneration_;
+        }
+        timedTextCondition_.notify_one();
+    }
+    return FFFResult::Success;
+}
+
 FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) noexcept {
     if (!hasCachedVideo_ || target == nullptr) return FFFResult::InvalidState;
+    const auto projection360 = projection360Enabled_.load(std::memory_order_acquire) != 0;
     VideoDestination destination{};
     if (lyricsLayoutEnabled_.load(std::memory_order_acquire) && sourceLimitedToNativeSize_) {
         destination = CalculateLyricsCoverDestination(sourceWidth_, sourceHeight_,
@@ -4144,6 +4310,8 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
                 std::memory_order_acquire)),
             std::bit_cast<float>(coverVerticalPaddingPercentageBits_.load(
                 std::memory_order_acquire)));
+    } else if (projection360) {
+        destination = {0, 0, swapWidth_, swapHeight_};
     } else {
         destination = CalculateVideoDestination(sourceWidth_, sourceHeight_, swapWidth_,
             swapHeight_, sourceLimitedToNativeSize_);
@@ -4154,7 +4322,7 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
     const auto zoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire));
     const auto panX = std::bit_cast<float>(viewPanXBits_.load(std::memory_order_acquire));
     const auto panY = std::bit_cast<float>(viewPanYBits_.load(std::memory_order_acquire));
-    if (zoom > 1.0001f) {
+    if (!projection360 && zoom > 1.0001f) {
         const float zoomedWidth = destination.width * zoom;
         const float zoomedHeight = destination.height * zoom;
         const float maxPanX = (zoomedWidth - destination.width) / (2.0f * destination.width);
@@ -4171,9 +4339,17 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         destination.height = static_cast<std::uint32_t>(zoomedHeight);
     }
     ID3D11ShaderResourceView* presentationViews[3]{};
-    const auto scaleResult = PrepareScaledVideo(destination.width, destination.height,
-        presentationViews);
-    if (scaleResult != FFFResult::Success) return scaleResult;
+    if (projection360) {
+        // The panorama projection is view-dependent. Scaling the equirectangular
+        // image to the window first throws away source detail (and can distort
+        // its 2:1 aspect ratio), especially in small windows. Sample the native
+        // source planes directly in the projection shader instead.
+        std::copy(std::begin(sourceViews_), std::end(sourceViews_), presentationViews);
+    } else {
+        const auto scaleResult = PrepareScaledVideo(destination.width, destination.height,
+            presentationViews);
+        if (scaleResult != FFFResult::Success) return scaleResult;
+    }
     constexpr float black[] = {0, 0, 0, 1};
     context_->ClearRenderTargetView(target, black);
     if (sourceCoverArt_) {
@@ -4263,6 +4439,10 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     const std::uint64_t renderedVideoGeneration) noexcept {
     if (chain == nullptr) return FFFResult::InvalidState;
     const auto start = std::chrono::steady_clock::now();
+    // Camera redraws are submitted immediately, but the final flip must land
+    // on a display refresh boundary. Present(0) permits scan-out tearing that
+    // looks like a trailing duplicate during a fast yaw; SyncInterval=1 keeps
+    // the latest complete projection intact at both 60 and 120 Hz.
     const auto present = chain->Present(1, 0);
     presentWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
         std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count() / 100));
@@ -4296,6 +4476,9 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : 1,
         hasCachedVideo_ ? sourceHeight_ : 1, hasCachedVideo_ ? sourceBitDepth_ : 8);
     if (chainResult != FFFResult::Success || swapChain_ == nullptr) return chainResult;
+    // Clear before drawing so an input arriving during this frame can publish a
+    // fresh generation instead of being hidden by the current presentation.
+    view360RedrawPending_.store(false, std::memory_order_release);
     if (!hasCachedVideo_) {
         const auto pipelineResult = EnsurePipeline(1, 1, 0, 8, 0, 0, false);
         if (pipelineResult != FFFResult::Success) return pipelineResult;
@@ -4437,6 +4620,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     if (constants_ != nullptr) { constants_->Release(); constants_ = nullptr; }
     if (scaleConstants_ != nullptr) { scaleConstants_->Release(); scaleConstants_ = nullptr; }
     if (pointSampler_ != nullptr) { pointSampler_->Release(); pointSampler_ = nullptr; }
+    if (panoramaSampler_ != nullptr) { panoramaSampler_->Release(); panoramaSampler_ = nullptr; }
     if (sampler_ != nullptr) { sampler_->Release(); sampler_ = nullptr; }
     if (pixelShader_ != nullptr) { pixelShader_->Release(); pixelShader_ = nullptr; }
     if (scalePixelShader_ != nullptr) { scalePixelShader_->Release(); scalePixelShader_ = nullptr; }
@@ -4502,6 +4686,9 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     std::vector<std::uint8_t>().swap(convertedRgb_);
     hasCachedVideo_ = false; sourceExternal_ = false; sourceLimitedToNativeSize_ = false;
     sourceCoverArt_ = false;
+    projection360Enabled_.store(0, std::memory_order_release);
+    view360YawBits_.store(std::bit_cast<float>(0.0f), std::memory_order_relaxed);
+    view360PitchBits_.store(std::bit_cast<float>(0.0f), std::memory_order_relaxed);
     lyricsLayoutEnabled_.store(false, std::memory_order_release);
     actualVideoScalingMode_.store(FFF3FPVideoScalingMode::D3D11VideoProcessor);
     videoGeneration_.store(0); presentedVideoGeneration_.store(0);

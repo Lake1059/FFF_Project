@@ -12,6 +12,7 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/mastering_display_metadata.h>
+#include <libavutil/spherical.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/dict.h>
 #include <libavutil/samplefmt.h>
@@ -1063,6 +1064,16 @@ FFFResult PlayerSession::SetViewTransform(const float zoom, const float panX,
             videoRenderer_.RequestRecoveryIfDeviceLost()) return;
     });
     return FFFResult::Success;
+}
+FFFResult PlayerSession::Set360View(const bool enabled, const float yaw,
+    const float pitch, const float fovY) noexcept {
+    if (!std::isfinite(yaw) || !std::isfinite(pitch) ||
+        !std::isfinite(fovY) || fovY <= 0.0f)
+        return FFFResult::InvalidArgument;
+    // Camera motion is high-frequency input. Publish it directly to the
+    // renderer's atomic view state; queuing one command per mouse/timer sample
+    // causes visible latency when the playback worker is busy decoding.
+    return videoRenderer_.Set360View(enabled, yaw, pitch, fovY);
 }
 FFFResult PlayerSession::RecreateAudioRenderer(const std::wstring& endpointId,
     const bool exclusive, const bool paused, std::string& error) noexcept {
@@ -2927,6 +2938,7 @@ void PlayerSession::RebuildMediaInfo() noexcept {
         << ",\"bitRate\":" << std::max<std::int64_t>(0, format_->bit_rate)
         << ",\"fileSize\":" << std::max<std::int64_t>(0, format_->pb ? avio_size(format_->pb) : 0)
         << ",\"probeScore\":" << format_->probe_score
+        << ",\"staticImage\":" << (staticImage_ ? "true" : "false")
         << ",\"metadata\":";
     AppendDictionaryJson(json, format_->metadata);
     json << ",\"streams\":[";
@@ -3012,6 +3024,14 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                     av_packet_side_data_get(parameters->coded_side_data,
                         parameters->nb_coded_side_data, AV_PKT_DATA_DYNAMIC_HDR10_PLUS) != nullptr) ? "true" : "false")
                   << ",\"attachedPicture\":" << ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0 ? "true" : "false");
+            const auto* sphericalData = av_packet_side_data_get(parameters->coded_side_data,
+                parameters->nb_coded_side_data, AV_PKT_DATA_SPHERICAL);
+            if (sphericalData != nullptr && sphericalData->size >= sizeof(AVSphericalMapping)) {
+                const auto* spherical = reinterpret_cast<const AVSphericalMapping*>(sphericalData->data);
+                const auto* projectionName = av_spherical_projection_name(spherical->projection);
+                if (projectionName != nullptr)
+                    json << ",\"projection\":\"" << EscapeJson(projectionName) << "\"";
+            }
             const auto pixelFormat = static_cast<AVPixelFormat>(parameters->format);
             const auto* pixelFormatName = av_get_pix_fmt_name(pixelFormat);
             if (pixelFormatName != nullptr)

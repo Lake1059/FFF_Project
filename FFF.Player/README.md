@@ -118,6 +118,9 @@ FFF.Player.Tests --vcb-ass-regression <视频> <字幕.ass>
 FFF.Player.Tests --gpu-decode-matrix <视频目录>
 FFF.Player.Tests --video-scaling-regression <视频>
 FFF.Player.Tests --sdr-pixel-regression <视频> <参考图.png>
+FFF.Player.Tests --360-interaction-regression
+FFF.Player.Tests --360-projection-regression
+FFF.Player.Tests --360-performance-probe <360视频>
 FFF.Player.Tests --ass-render-benchmark
 FFF.Player.Tests --timed-text-regression
 ```

@@ -260,6 +260,23 @@ Friend Module Program
                 Console.WriteLine("音量滑块、画面滚轮与操作提示合并回归通过。")
                 Return 0
             End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--360-interaction-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试360识别与交互数学()
+                Console.WriteLine("360°识别、图片排除、八方向与平滑阻尼回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--360-projection-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试360球面投影()
+                Console.WriteLine("360°等距柱状投影与视角旋转像素回归通过。")
+                Return 0
+            End If
+            If (参数.Length = 1 OrElse 参数.Length = 2) AndAlso
+               String.Equals(参数(0), "--360-performance-probe", StringComparison.OrdinalIgnoreCase) Then
+                Dim 探针路径 = If(参数.Length = 2, Path.GetFullPath(参数(1)), Nothing)
+                If Not String.IsNullOrWhiteSpace(探针路径) Then 检查文件(探针路径)
+                测试360性能探针(探针路径)
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--unknown-duration-progress-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试未知时长进度条()
                 Console.WriteLine("未知时长进度推进、已知范围回拖与总时长恢复回归通过。")
@@ -1651,6 +1668,242 @@ Friend Module Program
             窗口.Close()
         End Using
     End Sub
+
+    Private Sub 测试360识别与交互数学()
+        Dim 快照 = New 播放器快照(New 原生播放器快照 With {.当前视频流 = 0})
+        Dim 视频流 As New 媒体流信息 With {
+            .索引 = 0, .类型 = "video", .宽度 = 3840, .高度 = 1920
+        }
+        Dim 信息 As New 媒体信息()
+        信息.流.Add(视频流)
+        断言(播放器360视角控制器.是360视频(信息, 快照), "2:1 视频没有被自动识别为 360°视频。")
+
+        视频流.宽度 = 1920
+        视频流.高度 = 1080
+        断言(Not 播放器360视角控制器.是360视频(信息, 快照), "普通 16:9 视频被误识别为 360°视频。")
+        视频流.元数据("projection") = "equirectangular"
+        断言(播放器360视角控制器.是360视频(信息, 快照), "等距柱状投影元数据没有被识别。")
+        视频流.元数据.Clear()
+        视频流.投影 = "equirectangular"
+        断言(播放器360视角控制器.是360视频(信息, 快照), "FFmpeg 球面投影 side-data 没有被识别。")
+        信息.是静态图片 = True
+        断言(播放器360视角控制器.是360视频(信息, 快照),
+            "不依赖文件后缀的 360°静态图片没有被识别。")
+        视频流.宽度 = 1920
+        视频流.高度 = 1080
+        视频流.投影 = String.Empty
+        断言(Not 播放器360视角控制器.是360视频(信息, 快照),
+            "普通静态图片被误识别为 360°图片。")
+
+        Dim 左上 = 播放器360视角控制器.计算方向向量(New HashSet(Of Keys) From {Keys.Left, Keys.Up})
+        Dim 右上 = 播放器360视角控制器.计算方向向量(New HashSet(Of Keys) From {Keys.D, Keys.W})
+        Dim 对消 = 播放器360视角控制器.计算方向向量(New HashSet(Of Keys) From {Keys.A, Keys.D})
+        Dim 对角分量 = CSng(1.0R / Math.Sqrt(2.0R))
+        断言(Math.Abs(左上.X + 对角分量) < 0.0001F AndAlso
+               Math.Abs(左上.Y - 对角分量) < 0.0001F AndAlso
+               Math.Abs(右上.X - 对角分量) < 0.0001F AndAlso
+               Math.Abs(右上.Y - 对角分量) < 0.0001F AndAlso 对消.IsEmpty,
+            "相邻方向键没有归一化为 45°方向，或相反方向没有正确对消。")
+
+        Dim 当前值 As Single
+        Dim 当前速度 As Single
+        Dim 第一步 = 播放器360视角控制器.平滑阻尼(当前值, 90.0F, 当前速度, 1.0F / 60.0F)
+        断言(第一步 > 0 AndAlso 第一步 < 90.0F, "阻尼曲线首帧发生跳变。")
+        当前值 = 第一步
+        Dim 上一步 = 当前值
+        For i = 1 To 180
+            当前值 = 播放器360视角控制器.平滑阻尼(当前值, 90.0F, 当前速度, 1.0F / 60.0F)
+            断言(当前值 >= 上一步 AndAlso 当前值 <= 90.001F, "阻尼曲线没有单调收敛。")
+            上一步 = 当前值
+        Next
+        断言(Math.Abs(当前值 - 90.0F) < 0.01F AndAlso Math.Abs(当前速度) < 0.1F,
+            "阻尼曲线没有在合理时间内收敛到目标视角。")
+    End Sub
+
+    Private Sub 测试360球面投影()
+        Dim 路径 = Path.Combine(Path.GetTempPath(), $"3fp-360-{Guid.NewGuid():N}.png")
+        Try
+            Using 图像 As New Bitmap(512, 256, Imaging.PixelFormat.Format32bppArgb)
+                For y = 0 To 图像.Height - 1
+                    For x = 0 To 图像.Width - 1
+                        图像.SetPixel(x, y, Color.FromArgb(
+                            CInt(Math.Round(x * 255.0R / (图像.Width - 1))),
+                            CInt(Math.Round(y * 255.0R / (图像.Height - 1))), 0))
+                    Next
+                Next
+                图像.Save(路径, Imaging.ImageFormat.Png)
+            End Using
+
+            Using 输出窗口 As New Form With {
+                .ClientSize = New Size(400, 200),
+                .FormBorderStyle = FormBorderStyle.FixedToolWindow,
+                .ShowInTaskbar = False,
+                .StartPosition = FormStartPosition.Manual,
+                .Location = New Point(-10000, -10000)
+            }
+                输出窗口.Show()
+                Application.DoEvents()
+                Using 会话 As New 播放器会话(New 播放器配置 With {
+                    .解码器 = 解码模式.CPU,
+                    .色彩模式 = 色彩输出模式.映射到SDR,
+                    .输出窗口句柄 = 输出窗口.Handle
+                })
+                    会话.打开Async(路径).GetAwaiter().GetResult()
+                    Dim 初始 = 等待快照(会话, Function(x) x.交换链呈现次数 > 0, "360°投影初始帧")
+
+                    会话.设置360视角(True, 0, 0, 90)
+                    Dim 正前呈现 = 等待快照(会话,
+                        Function(x) x.交换链呈现次数 > 初始.交换链呈现次数, "360°正前方重绘")
+                    Dim 正前 = 会话.读取视频输出像素(200, 100)
+
+                    会话.设置360视角(True, 90, 0, 90)
+                    Dim 右转呈现 = 等待快照(会话,
+                        Function(x) x.交换链呈现次数 > 正前呈现.交换链呈现次数, "360°水平旋转重绘")
+                    Dim 右转 = 会话.读取视频输出像素(200, 100)
+
+                    会话.设置360视角(True, 0, 45, 90)
+                    等待快照(会话,
+                        Function(x) x.交换链呈现次数 > 右转呈现.交换链呈现次数, "360°垂直旋转重绘")
+                    Dim 抬头 = 会话.读取视频输出像素(200, 100)
+
+                    断言(Math.Abs(CInt(正前.R) - 128) <= 5 AndAlso Math.Abs(CInt(正前.G) - 128) <= 5,
+                        $"360°正前方采样错误：RGB({正前.R},{正前.G},{正前.B})。")
+                    断言(右转.R >= 正前.R + 55 AndAlso Math.Abs(CInt(右转.G) - CInt(正前.G)) <= 5,
+                        $"360°水平旋转没有沿经度采样：正前 {正前.R}/{正前.G}，右转 {右转.R}/{右转.G}。")
+                    断言(Math.Abs(CInt(抬头.R) - CInt(正前.R)) <= 5 AndAlso 抬头.G <= 正前.G - 55,
+                        $"360°垂直旋转没有沿纬度采样：正前 {正前.R}/{正前.G}，抬头 {抬头.R}/{抬头.G}。")
+                End Using
+            End Using
+        Finally
+            Try
+                File.Delete(路径)
+            Catch
+            End Try
+        End Try
+    End Sub
+
+    Private Sub 测试360性能探针(Optional 输入路径 As String = Nothing)
+        Dim 路径 = 输入路径
+        Dim 是临时文件 = String.IsNullOrWhiteSpace(路径)
+        If 是临时文件 Then 路径 = Path.Combine(Path.GetTempPath(), $"3fp-360-probe-{Guid.NewGuid():N}.png")
+        Try
+            If 是临时文件 Then
+                Using 图像 As New Bitmap(2048, 1024, Imaging.PixelFormat.Format32bppArgb)
+                    Using 画笔 = Graphics.FromImage(图像)
+                        画笔.Clear(Color.Black)
+                        For x = 0 To 图像.Width - 1 Step 32
+                            Using 笔 As New Pen(If((x \ 32) Mod 2 = 0, Color.White, Color.DarkBlue), 2.0F)
+                                画笔.DrawLine(笔, x, 0, x, 图像.Height)
+                            End Using
+                        Next
+                        For y = 0 To 图像.Height - 1 Step 32
+                            Using 笔 As New Pen(If((y \ 32) Mod 2 = 0, Color.White, Color.DarkRed), 2.0F)
+                                画笔.DrawLine(笔, 0, y, 图像.Width, y)
+                            End Using
+                        Next
+                    End Using
+                    图像.Save(路径, Imaging.ImageFormat.Png)
+                End Using
+            End If
+
+            For Each 尺寸 In {New Size(640, 360), New Size(1920, 1080)}
+                测量360性能窗口(路径, 尺寸, False)
+                测量360性能窗口(路径, 尺寸, True)
+            Next
+        Finally
+            If 是临时文件 Then
+                Try
+                    File.Delete(路径)
+                Catch
+                End Try
+            End If
+        End Try
+    End Sub
+
+    Private Sub 测量360性能窗口(路径 As String, 尺寸 As Size, 启用360 As Boolean)
+        Using 输出窗口 As New Form With {
+            .ClientSize = 尺寸,
+            .FormBorderStyle = FormBorderStyle.FixedToolWindow,
+            .ShowInTaskbar = True,
+            .StartPosition = FormStartPosition.Manual,
+            .Location = New Point(20, 20),
+            .Text = $"3FP 360°性能探针 {尺寸.Width}x{尺寸.Height}"
+        }
+            输出窗口.Show()
+            Application.DoEvents()
+            Using 会话 As New 播放器会话(New 播放器配置 With {
+                .解码器 = 解码模式.CPU,
+                .色彩模式 = 色彩输出模式.映射到SDR,
+                .输出窗口句柄 = 输出窗口.Handle
+            })
+                会话.打开Async(路径).GetAwaiter().GetResult()
+                ' 视频需要先进入播放状态才能提交首个解码帧；暂停后再测量，
+                ' 将解码吞吐与视角重绘成本分离。
+                会话.播放()
+                Dim 初始 = 等待快照(会话, Function(x) x.交换链呈现次数 > 0, $"360°性能探针 {尺寸.Width}x{尺寸.Height} 首帧")
+                会话.暂停()
+                等待状态(会话, 播放状态.已暂停, TimeSpan.FromSeconds(3))
+                会话.设置360视角(启用360, 0, 0, 90)
+                Dim 进程 = Process.GetCurrentProcess()
+                进程.Refresh()
+                Dim CPU起点 = 进程.TotalProcessorTime
+                Dim 调用次数 = 0
+                Dim 调用总微秒 As Double
+                Dim 呈现间隔 = New List(Of Double)()
+                Dim 上次呈现数 = 初始.交换链呈现次数
+                Dim 上次呈现时间 = Stopwatch.GetTimestamp()
+                Dim 计时 = Stopwatch.StartNew()
+                While 计时.Elapsed < TimeSpan.FromSeconds(4)
+                    Application.DoEvents()
+                    Dim 角度 = CSng(计时.Elapsed.TotalSeconds * 90.0R)
+                    Dim 调用计时 = Stopwatch.StartNew()
+                    会话.设置360视角(启用360, 角度, CSng(Math.Sin(计时.Elapsed.TotalSeconds) * 12.0R), 90)
+                    调用计时.Stop()
+                    调用次数 += 1
+                    调用总微秒 += 调用计时.Elapsed.TotalMilliseconds * 1000.0R
+                    Dim 快照 = 会话.当前快照
+                    If 快照.交换链呈现次数 > 上次呈现数 Then
+                        Dim 当前时间 = Stopwatch.GetTimestamp()
+                        呈现间隔.Add((当前时间 - 上次呈现时间) * 1000.0R / Stopwatch.Frequency)
+                        上次呈现时间 = 当前时间
+                        上次呈现数 = 快照.交换链呈现次数
+                    End If
+                    Thread.Sleep(1)
+                End While
+                计时.Stop()
+                Dim 末尾 = 会话.当前快照
+                进程.Refresh()
+                Dim CPU毫秒 = (进程.TotalProcessorTime - CPU起点).TotalMilliseconds
+                Dim 呈现数 = CInt(末尾.交换链呈现次数 - 初始.交换链呈现次数)
+                Dim 测量毫秒 = 计时.Elapsed.TotalMilliseconds
+                Dim 呈现等待毫秒 = (末尾.呈现等待时长 - 初始.呈现等待时长).TotalMilliseconds
+                Dim 设备锁等待毫秒 = (末尾.设备锁等待时长 - 初始.设备锁等待时长).TotalMilliseconds
+                Dim 平均调用微秒 = If(调用次数 = 0, 0, 调用总微秒 / 调用次数)
+                Dim 排序间隔 = 呈现间隔.OrderBy(Function(x) x).ToArray()
+                Dim P50 = 计算百分位(排序间隔, 0.5R)
+                Dim P95 = 计算百分位(排序间隔, 0.95R)
+                Dim 最大间隔 = If(排序间隔.Length = 0, 0, 排序间隔(排序间隔.Length - 1))
+                Dim 实际帧率 = 呈现数 / Math.Max(测量毫秒 / 1000.0R, 0.001R)
+                Console.WriteLine($"360°探针 {尺寸.Width}x{尺寸.Height} {(If(启用360, "全景", "普通"))}：" &
+                                  $"Present {实际帧率:F1} fps，" &
+                                  $"间隔 P50/P95/最大 {P50:F2}/{P95:F2}/{最大间隔:F2} ms，" &
+                                  $"API {平均调用微秒:F2} us，" &
+                                  $"Present等待 {呈现等待毫秒:F1} ms，设备锁等待 {设备锁等待毫秒:F1} ms，" &
+                                  $"进程CPU {CPU毫秒 / Math.Max(测量毫秒, 1.0R) / Environment.ProcessorCount * 100.0R:F1}%")
+                If 启用360 Then
+                    断言(实际帧率 >= 60.0R,
+                        $"360°视角呈现帧率低于 60 FPS：{实际帧率:F1}。")
+                End If
+            End Using
+            输出窗口.Close()
+        End Using
+    End Sub
+
+    Private Function 计算百分位(排序样本 As Double(), 百分比 As Double) As Double
+        If 排序样本 Is Nothing OrElse 排序样本.Length = 0 Then Return 0
+        Dim 索引 = CInt(Math.Round((排序样本.Length - 1) * Math.Clamp(百分比, 0.0R, 1.0R)))
+        Return 排序样本(Math.Clamp(索引, 0, 排序样本.Length - 1))
+    End Function
 
     Private Sub 测试未知时长进度条()
         Dim 当前快照 As 播放器快照 = Nothing

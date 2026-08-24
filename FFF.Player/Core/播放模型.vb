@@ -445,6 +445,8 @@ Public NotInheritable Class 媒体信息
     Public Property 文件大小 As Long
     <JsonPropertyName("probeScore")>
     Public Property 探测可信度 As Integer
+    <JsonPropertyName("staticImage")>
+    Public Property 是静态图片 As Boolean
     <JsonPropertyName("metadata")>
     Public Property 元数据 As Dictionary(Of String, String) = New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
     <JsonPropertyName("streams")>
@@ -536,6 +538,8 @@ Public NotInheritable Class 媒体流信息
     Public Property 是HDR As Boolean
     <JsonPropertyName("attachedPicture")>
     Public Property 是封面图 As Boolean
+    <JsonPropertyName("projection")>
+    Public Property 投影 As String = String.Empty
     <JsonPropertyName("pixelFormat")>
     Public Property 像素格式 As String = String.Empty
     <JsonPropertyName("colorModel")>

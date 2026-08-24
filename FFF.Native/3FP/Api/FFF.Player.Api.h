@@ -459,6 +459,10 @@ FFF3FP_API FFFResult FFF3FP_SetOutputWindow(FFF3FPHandle player, void* outputWin
 // relative to the unzoomed box.
 FFF3FP_API FFFResult FFF3FP_SetViewTransform(FFF3FPHandle player,
     float zoom, float panX, float panY) noexcept;
+// Equirectangular 360-degree video projection. yaw/pitch/fovY use degrees;
+// pitch is clamped by the renderer so the horizon never rolls or flips.
+FFF3FP_API FFFResult FFF3FP_Set360View(FFF3FPHandle player,
+    std::uint32_t enabled, float yaw, float pitch, float fovY) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetAudioEndpoint(FFF3FPHandle player,
     const char* endpointIdUtf8) noexcept;
 // Recreates only the WASAPI renderer.  The media session and its selected
