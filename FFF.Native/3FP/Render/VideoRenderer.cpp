@@ -2107,6 +2107,7 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
             ReleaseTimedTextResources();
             return FFFResult::Success;
         }
+        if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
         std::ostringstream message;
         message << "Could not resize the playback swap chain (HRESULT 0x" << std::hex
                 << static_cast<std::uint32_t>(resize) << ").";
@@ -2123,6 +2124,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     ComPtr<IDXGIFactory2> factory;
     if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
         FAILED(dxgiDevice->GetAdapter(&adapter)) || FAILED(adapter->GetParent(IID_PPV_ARGS(&factory)))) {
+        if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
         SetError("Could not obtain the DXGI playback factory."); return FFFResult::DeviceFailure;
     }
     DXGI_SWAP_CHAIN_DESC1 description{};
@@ -2136,6 +2138,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     ComPtr<IDXGISwapChain1> chain1;
     const auto result = factory->CreateSwapChainForHwnd(device_, window_, &description, nullptr, nullptr, &chain1);
     if (FAILED(result) || FAILED(chain1->QueryInterface(IID_PPV_ARGS(&swapChain_)))) {
+        if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
         std::ostringstream message;
         message << "Could not create the playback swap chain (HRESULT 0x" << std::hex
                 << static_cast<std::uint32_t>(result) << ").";
@@ -2213,6 +2216,7 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
     const auto resize = swapChain_->ResizeBuffers(0, std::max(1u, swapWidth_),
         std::max(1u, swapHeight_), format, 0);
     if (FAILED(resize)) {
+        if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
         std::ostringstream message;
         message << "Could not reconfigure the playback swap chain (HRESULT 0x" << std::hex
                 << static_cast<std::uint32_t>(resize) << ").";
@@ -4585,13 +4589,14 @@ void PlayerVideoRenderer::RequestDeviceRecovery(const long result,
 }
 
 bool PlayerVideoRenderer::RequestRecoveryIfDeviceLost() noexcept {
-    if (DeviceRecoveryRequested()) return true;
-    HRESULT reason = S_OK;
-    {
-        std::lock_guard deviceLock(deviceMutex_);
-        if (device_ == nullptr) return false;
-        reason = device_->GetDeviceRemovedReason();
-    }
+    std::lock_guard deviceLock(deviceMutex_);
+    return RequestRecoveryIfDeviceLostLocked();
+}
+
+bool PlayerVideoRenderer::RequestRecoveryIfDeviceLostLocked() noexcept {
+    if (deviceRecoveryRequested_.load(std::memory_order_acquire)) return true;
+    if (device_ == nullptr) return false;
+    const auto reason = device_->GetDeviceRemovedReason();
     if (SUCCEEDED(reason)) return false;
     RequestDeviceRecovery(reason, "D3D11 device removal");
     return true;

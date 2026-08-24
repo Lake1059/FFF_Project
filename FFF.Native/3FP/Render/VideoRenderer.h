@@ -269,6 +269,7 @@ private:
     void ClearSurface() noexcept;
     void ReleaseDeviceObjects() noexcept;
     void RequestDeviceRecovery(long result, const char* operation) noexcept;
+    bool RequestRecoveryIfDeviceLostLocked() noexcept;
     void SetError(std::string message) noexcept;
 
     HWND window_;
