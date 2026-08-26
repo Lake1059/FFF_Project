@@ -95,8 +95,6 @@ Public NotInheritable Class 窗口捕获器
     Private 当前尺寸 As Windows.Graphics.SizeInt32
     Private 已启动 As Boolean
     Private 已释放 As Boolean
-    Private 已收到有效帧 As Boolean
-    Private 报告脏区域 As Boolean
     Private 诊断会话 As 录制会话
 
     Private Sub New(设备 As 图形设备, 项目 As GraphicsCaptureItem, Direct3D设备 As IDirect3DDevice,
@@ -199,12 +197,9 @@ Public NotInheritable Class 窗口捕获器
         帧池 = Direct3D11CaptureFramePool.CreateFreeThreaded(WinRT设备, 像素格式, 缓冲数, 当前尺寸)
         捕获会话 = 帧池.CreateCaptureSession(捕获项目)
         捕获会话.IsCursorCaptureEnabled = 捕获光标
-        报告脏区域 = Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent(
-            "Windows.Graphics.Capture.GraphicsCaptureSession", "DirtyRegionMode") AndAlso
-            Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent(
-                "Windows.Graphics.Capture.Direct3D11CaptureFrame", "DirtyRegions")
-        If 报告脏区域 Then 捕获会话.DirtyRegionMode = GraphicsCaptureDirtyRegionMode.ReportOnly
-        已收到有效帧 = False
+        ' DirtyRegionMode.ReportOnly is unreliable for independent-flip/fullscreen HDR content:
+        ' FrameArrived can carry a new frame with an empty dirty-region list, so the
+        ' recording path intentionally does not inspect dirty regions at all.
         AddHandler 帧池.FrameArrived, AddressOf 处理帧到达
         AddHandler 捕获项目.Closed, AddressOf 处理捕获关闭
         捕获会话.StartCapture()
@@ -247,15 +242,12 @@ Public NotInheritable Class 窗口捕获器
                 If 系统帧 Is Nothing Then Return
                 Dim 新尺寸 = 系统帧.ContentSize
                 Dim 尺寸已变化 = 新尺寸.Width <> 当前尺寸.Width OrElse 新尺寸.Height <> 当前尺寸.Height
-                If 报告脏区域 AndAlso 已收到有效帧 AndAlso Not 尺寸已变化 AndAlso
-                    系统帧.DirtyRegions.Count = 0 Then Return
                 Using 源纹理 = 取得D3D11纹理(系统帧.Surface)
                     Dim 实际HDR = 源纹理.Description.Format = Format.R16G16B16A16_Float
                     If 使用HDR AndAlso Not 实际HDR Then
                         Throw New InvalidOperationException("WGC 未返回 FP16/scRGB 帧，不能把本次捕获标记为 HDR。")
                     End If
                     Dim 时间戳 = 转换系统相对时间(系统帧.SystemRelativeTime)
-                    已收到有效帧 = True
                     If 直接使用帧纹理 Then
                         ' 事件在当前 FrameArrived 回调中同步执行，渲染完成后才离开
                         ' Using 范围，因此可以安全地直接采样 WGC 表面，省掉一次 CopyResource。

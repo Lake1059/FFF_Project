@@ -34,6 +34,7 @@ Friend Module Program
 
             Using 图形 = 图形设备.创建默认设备()
                 测试固定帧率落后时重复补帧(图形)
+                测试固定帧率接纳稍晚到达帧(图形)
                 测试可变帧率提交时间戳覆盖(图形)
                 测试SDR处理(图形)
                 测试HDR到PQ峰值钳制(图形)
@@ -130,6 +131,42 @@ Friend Module Program
             断言(快照(索引).时间戳 > 快照(索引 - 1).时间戳, "CFR 补帧时间戳必须严格递增。")
         Next
         断言(已报告丢帧 = 0UI, $"CFR 落后补帧不应报告输出丢帧：{已报告丢帧}。")
+    End Sub
+
+    Private Sub 测试固定帧率接纳稍晚到达帧(图形 As 图形设备)
+        Dim 提交记录 As New List(Of (时间戳 As Long, 重复 As Boolean))
+        Dim 提交 As Action(Of IntPtr, Long, UInteger, Boolean) =
+            Sub(纹理指针, 时间戳, 数组索引, 重复帧)
+                SyncLock 提交记录
+                    提交记录.Add((时间戳, 重复帧))
+                End SyncLock
+            End Sub
+        Dim 报告丢帧 As Action(Of UInteger) = Sub(帧数)
+                                             End Sub
+
+        Using 源纹理 = 创建测试纹理(图形, Format.B8G8R8A8_UNorm, 0.4F, 0.3F, 0.2F)
+            Dim 起始时间 = Stopwatch.GetTimestamp()
+            Using 调度器 As New 固定帧率调度器(提交, 报告丢帧, 60UI, 1UI)
+                调度器.开始(起始时间)
+                Dim 晚到时间戳 = 起始时间 + Stopwatch.Frequency \ 20L
+                调度器.提交帧(New 处理后视频帧(源纹理, Nothing, 晚到时间戳, False, AddressOf 忽略纹理回收))
+                Dim 截止 = Stopwatch.GetTimestamp() + Stopwatch.Frequency
+                Do
+                    SyncLock 提交记录
+                        If 提交记录.Count >= 1 Then Exit Do
+                    End SyncLock
+                    Threading.Thread.Sleep(2)
+                Loop While Stopwatch.GetTimestamp() < 截止
+                调度器.停止()
+            End Using
+        End Using
+
+        Dim 快照 As (时间戳 As Long, 重复 As Boolean)()
+        SyncLock 提交记录
+            快照 = 提交记录.ToArray()
+        End SyncLock
+        断言(快照.Length >= 1, "CFR 没有接纳已到达但时间戳略晚的帧。")
+        断言(Not 快照(0).重复, "CFR 接纳首个稍晚到达帧时不应标记为重复帧。")
     End Sub
 
     Private Sub 测试可变帧率提交时间戳覆盖(图形 As 图形设备)

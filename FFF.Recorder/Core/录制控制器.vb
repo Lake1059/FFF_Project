@@ -362,7 +362,10 @@ Public NotInheritable Class 录制控制器
                 Using 帧 = 显示器捕获.捕获一帧(50UI)
                     If 帧 Is Nothing Then Continue Do
                     Dim 处理帧 = 处理器.处理帧(帧)
-                    If 处理帧 Is Nothing Then Continue Do
+                    If 处理帧 Is Nothing Then
+                        安全报告丢帧(会话)
+                        Continue Do
+                    End If
                     通知预览(处理帧)
                     SyncLock 同步锁
                         ' 状态复核与提交必须原子化；否则暂停可能在取帧和提交之间停掉调度器。
@@ -413,7 +416,10 @@ Public NotInheritable Class 录制控制器
                 End If
                 Using 原始帧
                     Dim 处理帧 = 处理器.处理帧(原始帧)
-                    If 处理帧 Is Nothing Then Continue Do
+                    If 处理帧 Is Nothing Then
+                        安全报告丢帧(会话)
+                        Continue Do
+                    End If
                     通知预览(处理帧)
                     SyncLock 同步锁
                         If Not 已开始值 Then

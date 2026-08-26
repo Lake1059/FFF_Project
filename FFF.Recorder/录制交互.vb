@@ -31,6 +31,10 @@ Public Module 录制交互
     Private 暂停开始计数 As Long
     Private 累计暂停计数 As Long
     Private 正在停止任务 As Task
+    Private ReadOnly 预览同步锁 As New Object
+    Private 待预览帧 As 处理后视频帧
+    Private 待预览图形 As 图形设备
+    Private 预览消费已排队 As Boolean
 
     Public ReadOnly Property 是否录制中 As Boolean
         Get
@@ -292,6 +296,7 @@ Public Module 录制交互
 
     Private Sub 清理控制器(Optional 待清理控制器 As 录制控制器 = Nothing)
         If 待清理控制器 IsNot Nothing AndAlso Not ReferenceEquals(当前控制器, 待清理控制器) Then Return
+        清理预览队列()
         If 当前控制器 IsNot Nothing Then
             Try
                 Form总控台.显示录制统计(当前控制器.读取统计())
@@ -308,6 +313,17 @@ Public Module 录制交互
         录制开始计数 = 0
         暂停开始计数 = 0
         累计暂停计数 = 0
+    End Sub
+
+    Private Sub 清理预览队列()
+        Dim 待释放 As 处理后视频帧 = Nothing
+        SyncLock 预览同步锁
+            待释放 = 待预览帧
+            待预览帧 = Nothing
+            待预览图形 = Nothing
+            预览消费已排队 = False
+        End SyncLock
+        待释放?.释放()
     End Sub
 
     Private Function 获取默认音频端点() As String
@@ -396,7 +412,81 @@ Public Module 录制交互
     End Sub
 
     Private Sub 处理录制预览帧(sender As Object, e As 处理后视频帧事件参数)
-        Form总控台.预览?.提交GPU帧(e.图形设备, e.帧)
+        If e Is Nothing OrElse e.帧 Is Nothing OrElse Form总控台.预览 Is Nothing Then Return
+        Dim 引用帧 As 处理后视频帧
+        Try
+            引用帧 = e.帧.创建引用()
+        Catch
+            Return
+        End Try
+        Dim 丢弃帧 As 处理后视频帧 = Nothing
+        Dim 需要排队 As Boolean
+        SyncLock 预览同步锁
+            丢弃帧 = 待预览帧
+            待预览帧 = 引用帧
+            待预览图形 = e.图形设备
+            If Not 预览消费已排队 Then
+                预览消费已排队 = True
+                需要排队 = True
+            End If
+        End SyncLock
+        丢弃帧?.释放()
+        If 需要排队 Then 排队预览消费()
+    End Sub
+
+    Private Sub 排队预览消费()
+        Dim 窗体 = 当前主窗体
+        If 窗体 Is Nothing OrElse 窗体.IsDisposed OrElse Not 窗体.IsHandleCreated Then
+            Dim 待释放 As 处理后视频帧 = Nothing
+            SyncLock 预览同步锁
+                待释放 = 待预览帧
+                待预览帧 = Nothing
+                预览消费已排队 = False
+            End SyncLock
+            待释放?.释放()
+            Return
+        End If
+        Try
+            窗体.BeginInvoke(CType(AddressOf 消费预览帧, MethodInvoker))
+        Catch
+            Dim 待释放 As 处理后视频帧 = Nothing
+            SyncLock 预览同步锁
+                待释放 = 待预览帧
+                待预览帧 = Nothing
+                预览消费已排队 = False
+            End SyncLock
+            待释放?.释放()
+        End Try
+    End Sub
+
+    Private Sub 消费预览帧()
+        Dim 帧 As 处理后视频帧 = Nothing
+        Dim 图形 As 图形设备 = Nothing
+        SyncLock 预览同步锁
+            帧 = 待预览帧
+            图形 = 待预览图形
+            待预览帧 = Nothing
+            待预览图形 = Nothing
+        End SyncLock
+        If 帧 Is Nothing Then
+            SyncLock 预览同步锁
+                预览消费已排队 = False
+            End SyncLock
+            Return
+        End If
+        Try
+            Form总控台.预览?.提交GPU帧(图形, 帧)
+        Catch
+        Finally
+            帧.释放()
+        End Try
+
+        Dim 继续排队 As Boolean
+        SyncLock 预览同步锁
+            继续排队 = 待预览帧 IsNot Nothing
+            If Not 继续排队 Then 预览消费已排队 = False
+        End SyncLock
+        If 继续排队 Then 排队预览消费()
     End Sub
 
     Private Sub 诊断事件(sender As Object, e As 录制诊断事件参数)

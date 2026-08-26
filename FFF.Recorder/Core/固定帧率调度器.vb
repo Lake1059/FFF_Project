@@ -189,8 +189,14 @@ Public NotInheritable Class 固定帧率调度器
                 Dim 待提交 As 处理后视频帧
                 Dim 使用新帧 As Boolean = False
                 SyncLock 同步锁
-                    If 最新帧 IsNot Nothing AndAlso
-                        (当前帧 Is Nothing OrElse 最新帧.QPC时间戳 <= 下个Tick) Then
+                    ' The capture timestamp can legitimately be a few milliseconds
+                    ' ahead of the output tick because WGC delivery and GPU
+                    ' processing happen asynchronously.  Gating on QPC here lets
+                    ' the single-slot queue overwrite every frame before it is
+                    ' considered usable, producing long visible freezes.  A frame
+                    ' that has arrived is the newest real frame available for this
+                    ' tick; when none has arrived we intentionally repeat 当前帧.
+                    If 最新帧 IsNot Nothing Then
                         当前帧?.释放()
                         当前帧 = 最新帧
                         最新帧 = Nothing

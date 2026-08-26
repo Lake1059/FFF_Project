@@ -1,6 +1,7 @@
 Imports System.Reflection
 Imports System.Runtime.InteropServices
 Imports System.Collections.Concurrent
+Imports System.Threading
 Imports Vortice.Direct3D
 Imports Vortice.Direct3D11
 Imports Vortice.DXGI
@@ -8,19 +9,51 @@ Imports Vortice.DXGI
 Public NotInheritable Class 处理后视频帧
     Implements IDisposable
 
-    Friend ReadOnly 纹理 As ID3D11Texture2D
+    Private NotInheritable Class 纹理租约
+        Friend ReadOnly 纹理 As ID3D11Texture2D
+        Friend ReadOnly 预览视图 As ID3D11ShaderResourceView
+        Private ReadOnly 回收纹理 As Action(Of ID3D11Texture2D)
+        Private 引用计数 As Integer = 1
+
+        Friend Sub New(自有纹理 As ID3D11Texture2D, 自有预览视图 As ID3D11ShaderResourceView,
+            回收操作 As Action(Of ID3D11Texture2D))
+            纹理 = 自有纹理
+            预览视图 = 自有预览视图
+            回收纹理 = 回收操作
+        End Sub
+
+        Friend Sub 添加引用()
+            Interlocked.Increment(引用计数)
+        End Sub
+
+        Friend Sub 释放()
+            If Interlocked.Decrement(引用计数) = 0 Then 回收纹理(纹理)
+        End Sub
+    End Class
+
+    Friend ReadOnly Property 纹理 As ID3D11Texture2D
+        Get
+            Return 租约.纹理
+        End Get
+    End Property
     Friend ReadOnly 预览视图 As ID3D11ShaderResourceView
-    Private ReadOnly 回收纹理 As Action(Of ID3D11Texture2D)
+    Private ReadOnly 租约 As 纹理租约
     Private 已释放 As Boolean
 
     Friend Sub New(自有纹理 As ID3D11Texture2D, 自有预览视图 As ID3D11ShaderResourceView,
         时间戳 As Long, HDR输出 As Boolean,
         回收操作 As Action(Of ID3D11Texture2D))
-        纹理 = 自有纹理
+        租约 = New 纹理租约(自有纹理, 自有预览视图, 回收操作)
         预览视图 = 自有预览视图
         QPC时间戳 = 时间戳
         是HDR输出 = HDR输出
-        回收纹理 = 回收操作
+    End Sub
+
+    Private Sub New(共享租约 As 纹理租约, 时间戳 As Long, HDR输出 As Boolean)
+        租约 = 共享租约
+        预览视图 = 共享租约.预览视图
+        QPC时间戳 = 时间戳
+        是HDR输出 = HDR输出
     End Sub
 
     Public ReadOnly Property 原生纹理指针 As IntPtr
@@ -33,9 +66,15 @@ Public NotInheritable Class 处理后视频帧
     Public ReadOnly Property QPC时间戳 As Long
     Public ReadOnly Property 是HDR输出 As Boolean
 
+    Friend Function 创建引用() As 处理后视频帧
+        If 已释放 Then Throw New ObjectDisposedException(NameOf(处理后视频帧))
+        租约.添加引用()
+        Return New 处理后视频帧(租约, QPC时间戳, 是HDR输出)
+    End Function
+
     Public Sub 释放() Implements IDisposable.Dispose
         If 已释放 Then Return
-        回收纹理(纹理)
+        租约.释放()
         已释放 = True
         GC.SuppressFinalize(Me)
     End Sub
