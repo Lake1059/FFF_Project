@@ -114,8 +114,6 @@ private:
     FFFResult FallbackToSoftwareVideoDecoder(const char* reason) noexcept;
     FFFResult DecodeInitialStillImage() noexcept;
     FFFResult LoadCoverArt() noexcept;
-    FFFResult ProbeHardwareVideo(AVFormatContext* format, AVCodecContext* decoder,
-        std::int32_t streamIndex, std::int32_t hardwarePixelFormat) noexcept;
     FFFResult DecodePacket(AVCodecContext* decoder, AVPacket* packet, bool video,
         AVFormatContext* owner) noexcept;
     bool PumpVideoPresentation() noexcept;

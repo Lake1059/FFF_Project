@@ -173,6 +173,7 @@
     <ClInclude Include="3FP\Audio\WasapiRenderer.h" />
     <ClInclude Include="3FP\Core\PlayerSession.h" />
     <ClInclude Include="3FP\Hdr\HdrProcessor.h" />
+    <ClInclude Include="3FP\Render\ShaderBytecode.h" />
     <ClInclude Include="3FP\Render\VideoRenderer.h" />
     <ClInclude Include="3FR\Api\FFF.Native.Api.h" />
     <ClInclude Include="3FR\Audio\AudioTrackEncoder.h" />

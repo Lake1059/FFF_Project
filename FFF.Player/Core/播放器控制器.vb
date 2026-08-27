@@ -275,8 +275,15 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 打开媒体(路径 As String)
         If 已释放 OrElse String.IsNullOrWhiteSpace(路径) OrElse Not File.Exists(路径) Then Return
-        切换媒体会话(Path.GetFullPath(路径), 用户解码器偏好, TimeSpan.Zero, True, -1, -1)
+        启动后台任务(打开媒体Async(路径))
     End Sub
+
+    Public Function 打开媒体Async(路径 As String) As Task
+        If 已释放 OrElse String.IsNullOrWhiteSpace(路径) OrElse Not File.Exists(路径) Then
+            Return Task.CompletedTask
+        End If
+        Return 切换媒体会话Async(Path.GetFullPath(路径), 用户解码器偏好, TimeSpan.Zero, True, -1, -1, False)
+    End Function
 
     ''' <summary>
     ''' 在不重建媒体会话、不改变播放位置的前提下替换外部字幕。新文件先在
@@ -767,7 +774,22 @@ Public NotInheritable Class 播放器控制器
     Private Sub 切换媒体会话(路径 As String, 解码器 As 解码模式, 恢复位置 As TimeSpan,
                               恢复播放 As Boolean, 视频流 As Integer, 音频流 As Integer,
                               Optional 保留已加载字幕 As Boolean = False)
-        Dim 忽略 = 切换媒体会话Async(路径, 解码器, 恢复位置, 恢复播放, 视频流, 音频流, 保留已加载字幕)
+        启动后台任务(切换媒体会话Async(路径, 解码器, 恢复位置, 恢复播放, 视频流, 音频流, 保留已加载字幕))
+    End Sub
+
+    Private Shared Sub 启动后台任务(任务 As Task)
+        If 任务 Is Nothing Then Return
+        If 任务.IsCompleted Then
+            Dim 忽略 = 任务.Exception
+            Return
+        End If
+        Dim 忽略继续 = 任务.ContinueWith(
+            Sub(t)
+                Dim 忽略 = t.Exception
+            End Sub,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default)
     End Sub
 
     Private Async Function 切换媒体会话Async(路径 As String, 解码器 As 解码模式, 恢复位置 As TimeSpan,
@@ -790,6 +812,7 @@ Public NotInheritable Class 播放器控制器
         Dim 保留WASAPI模式 = 当前WASAPI模式
         Dim 已临时释放独占 = False
         Dim 打开异常 As Exception = Nothing
+        Dim 视频缩放质量值 = CType(设置.实例对象.视频缩放质量选项, 视频缩放质量)
         Try
             Try
                 If 已释放 OrElse 此次取消.IsCancellationRequested Then Return
@@ -898,7 +921,9 @@ Public NotInheritable Class 播放器控制器
                 Dim 候选色彩输出 = If(
                 String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase),
                 当前色彩输出, HDR色彩输出偏好)
-                候选会话 = 创建会话(解码器, 候选色彩输出)
+                候选会话 = Await Task.Run(
+                    Function() 创建会话(解码器, 候选色彩输出, 视频缩放质量值),
+                    此次取消.Token)
                 候选会话.设置音量(当前音量, 已静音)
                 Await 候选会话.打开Async(路径, 此次取消.Token)
                 此次取消.Token.ThrowIfCancellationRequested()
@@ -1040,7 +1065,8 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Function
 
-    Private Function 创建会话(解码器 As 解码模式, 色彩模式 As 色彩输出模式) As 播放器会话
+    Private Function 创建会话(解码器 As 解码模式, 色彩模式 As 色彩输出模式,
+                            缩放质量 As 视频缩放质量) As 播放器会话
         Return New 播放器会话(New 播放器配置 With {
             .解码器 = 解码器,
             .色彩模式 = 色彩模式,
@@ -1048,7 +1074,7 @@ Public NotInheritable Class 播放器控制器
             .HDR峰值尼特 = 取得HDR输出峰值参数(色彩模式),
             .SDR纸白尼特 = SDR纸白尼特,
             .强制HDR输出 = 强制HDR输出,
-            .缩放质量 = CType(设置.实例对象.视频缩放质量选项, 视频缩放质量),
+            .缩放质量 = 缩放质量,
             .输出窗口句柄 = IntPtr.Zero,
             .事件同步上下文 = 事件同步上下文
         })

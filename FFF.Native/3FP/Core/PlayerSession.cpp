@@ -1823,16 +1823,12 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
                     if (!candidateFailure.empty()) lastFailure = std::move(candidateFailure);
                     continue;
                 }
-                const auto probeResult = ProbeHardwareVideo(owner, candidate, index, hardwareFormat);
-                if (probeResult == FFFResult::Success) {
-                    *output = candidate;
-                    return FFFResult::Success;
-                }
-                const auto* backendName = av_hwdevice_get_type_name(backend);
-                lastFailure = "Hardware decoder " + std::string(codec->name == nullptr ? "unknown" : codec->name) +
-                    " opened with " + (backendName == nullptr ? std::string("unknown backend") : backendName) +
-                    " but did not produce the required hardware frame format.";
-                avcodec_free_context(&candidate);
+                // Do not pre-decode media here. The first real packet validates
+                // the selected hardware format through SelectHardwareFormat;
+                // DecodePacket already falls back to software decoding when the
+                // driver rejects it.
+                *output = candidate;
+                return FFFResult::Success;
             }
         }
     }
@@ -1870,7 +1866,10 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         if (staticImage_ && decodeMode_ == FFF3FPDecodeMode::D3D11)
             snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
     }
-    if (audioStream_ >= 0 && OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success) audioStream_ = -1;
+    if (audioStream_ >= 0) {
+        if (OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success)
+            audioStream_ = -1;
+    }
     videoRenderer_.ConfigureHdrStream(videoStream_ >= 0 ?
         format_->streams[videoStream_]->codecpar : nullptr);
     if (audioStream_ >= 0 && !audioExclusive_) {
@@ -1966,45 +1965,6 @@ FFFResult PlayerSession::DecodeInitialStillImage() noexcept {
     if (state_.load() == FFF3FPState::Failed) return FFFResult::DeviceFailure;
     return videoRenderer_.PresentedVideoFrames() > before
         ? FFFResult::Success : FFFResult::FfmpegFailure;
-}
-
-FFFResult PlayerSession::ProbeHardwareVideo(AVFormatContext* owner, AVCodecContext* decoder,
-    const std::int32_t streamIndex, const std::int32_t hardwarePixelFormat) noexcept {
-    if (owner == nullptr || decoder == nullptr || streamIndex < 0) return FFFResult::InvalidState;
-    AVPacket* packet = av_packet_alloc();
-    AVFrame* frame = av_frame_alloc();
-    if (packet == nullptr || frame == nullptr) { av_packet_free(&packet); av_frame_free(&frame); return FFFResult::NativeFailure; }
-    FFFResult result = FFFResult::NotSupported;
-    int videoPacketCount = 0;
-    int readResult = 0;
-    while (videoPacketCount < 512 && (readResult = av_read_frame(owner, packet)) >= 0) {
-        if (packet->stream_index != streamIndex) { av_packet_unref(packet); continue; }
-        ++videoPacketCount;
-        FilterAv1HardwareTimecodeMetadata(decoder, packet);
-        auto decodeResult = avcodec_send_packet(decoder, packet);
-        av_packet_unref(packet);
-        if (decodeResult < 0 && decodeResult != AVERROR(EAGAIN)) break;
-        while ((decodeResult = avcodec_receive_frame(decoder, frame)) >= 0) {
-            result = frame->format == hardwarePixelFormat ? FFFResult::Success : FFFResult::NotSupported;
-            av_frame_unref(frame); break;
-        }
-        if (result == FFFResult::Success) break;
-        if (decodeResult < 0 && decodeResult != AVERROR(EAGAIN)) break;
-    }
-    if (result != FFFResult::Success && readResult < 0) {
-        avcodec_send_packet(decoder, nullptr);
-        while (avcodec_receive_frame(decoder, frame) >= 0) {
-            result = frame->format == hardwarePixelFormat ? FFFResult::Success : FFFResult::NotSupported;
-            av_frame_unref(frame);
-            if (result == FFFResult::Success) break;
-        }
-    }
-    av_packet_free(&packet); av_frame_free(&frame);
-    const auto* stream = owner->streams[streamIndex];
-    const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
-    av_seek_frame(owner, streamIndex, start, AVSEEK_FLAG_BACKWARD);
-    avcodec_flush_buffers(decoder);
-    return result;
 }
 
 FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noexcept {
@@ -3170,7 +3130,8 @@ void PlayerSession::SetState(const FFF3FPState state, const char* operation) noe
 }
 
 void PlayerSession::Fail(const FFFResult result, std::string message, const char* operation) noexcept {
-    try { SuspendAudioRenderer(true); snapshot_.state = FFF3FPState::Failed; state_.store(FFF3FPState::Failed); PublishSnapshot();
+    try {
+        SuspendAudioRenderer(true); snapshot_.state = FFF3FPState::Failed; state_.store(FFF3FPState::Failed); PublishSnapshot();
         ReportError(result, std::move(message), operation); }
     catch (...) {}
 }

@@ -1,6 +1,7 @@
 Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Threading
+Imports System.Threading.Tasks
 
 Public Class Form1
     Public Shared Property 当前主窗体 As Form1
@@ -35,6 +36,7 @@ Public Class Form1
     Private 播放列表窗口 As Form播放列表
     Private 当前弹幕路径 As String = String.Empty
     Private 待打开外部文件 As String = String.Empty
+    Private 待选中播放列表路径 As String = String.Empty
     Private 正在关闭 As Boolean
     Private 核心文件检查通过 As Boolean
     Private 核心文件错误说明 As String = String.Empty
@@ -56,6 +58,7 @@ Public Class Form1
         字体控制.更新所有控件字体属性()
         设置.应用SP个性化设置()
         设置.加载SP自定义图标()
+        AddHandler 播放列表数据.列表变化, AddressOf 播放列表数据_列表变化
 
         Dim 缺失文件 = 核心文件名称.Where(Function(文件名) Not 可以加载核心文件(文件名)).
             Concat(FFmpeg核心文件前缀.
@@ -399,7 +402,7 @@ Public Class Form1
         ElseIf 弹幕自动加载器.是支持的弹幕文件(路径) Then
             播放控制器.替换弹幕(路径)
         Else
-            播放列表数据.从媒体创建并扫描相似文件(路径)
+            启动后台任务(播放列表数据.从媒体创建并扫描相似文件Async(路径))
             播放控制器.打开媒体(路径)
         End If
     End Sub
@@ -413,7 +416,11 @@ Public Class Form1
 
     Private Sub 播放控制器_媒体已打开(sender As Object, e As 播放器媒体事件参数)
         If 正在关闭 Then Return
-        播放列表数据.选择路径(e.文件路径)
+        If Not 播放列表数据.选择路径(e.文件路径) Then
+            待选中播放列表路径 = e.文件路径
+        Else
+            待选中播放列表路径 = String.Empty
+        End If
         播放列表窗口?.更新正在播放项()
         当前弹幕路径 = String.Empty
         更新弹幕按钮可见性()
@@ -753,6 +760,34 @@ Public Class Form1
         播放列表数据.选择(索引)
         Dim 项目 = 播放列表数据.当前项目
         If 项目 IsNot Nothing Then 播放控制器.打开媒体(项目.路径)
+    End Sub
+
+    Private Sub 播放列表数据_列表变化(sender As Object, e As EventArgs)
+        If 正在关闭 Then Return
+        If InvokeRequired Then
+            BeginInvoke(Sub() 播放列表数据_列表变化(sender, e))
+            Return
+        End If
+        If String.IsNullOrEmpty(待选中播放列表路径) Then Return
+        If 播放列表数据.选择路径(待选中播放列表路径) Then
+            待选中播放列表路径 = String.Empty
+            播放列表窗口?.更新正在播放项()
+        End If
+    End Sub
+
+    Private Shared Sub 启动后台任务(任务 As Task)
+        If 任务 Is Nothing Then Return
+        If 任务.IsCompleted Then
+            Dim 忽略 = 任务.Exception
+            Return
+        End If
+        Dim 忽略继续 = 任务.ContinueWith(
+            Sub(t)
+                Dim 忽略 = t.Exception
+            End Sub,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default)
     End Sub
 
     Private Sub MB_软件设置_Click(sender As Object, e As EventArgs) Handles MB_软件设置.Click

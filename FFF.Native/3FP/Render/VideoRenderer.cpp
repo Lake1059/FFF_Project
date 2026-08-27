@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Render/VideoRenderer.h"
+#include "3FP/Render/ShaderBytecode.h"
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -12,7 +13,6 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
-#include <d3dcompiler.h>
 #include <d2d1effects.h>
 #include <d2d1helper.h>
 #include <roapi.h>
@@ -1813,16 +1813,15 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     hdrSwapChainRejected_ = false;
     swapWidth_ = swapHeight_ = 0;
     swapHdr_ = false; swapOutputBits_ = 8;
+    // Do not enumerate DXGI outputs while the managed player object is being
+    // constructed. HDR capability is resolved lazily by EnsureSwapChain on
+    // the native worker/presenter path.
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
-        fallbackReason_.clear();
         const auto sourceHdr = hdrProcessor_.IsHdrSource();
-        actualMode_ = sourceHdr && OutputSupportsHdr() ?
-            FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
-        if (actualMode_ != requestedMode_) {
-            fallbackReason_ = sourceHdr ?
-                "The target display or Windows Advanced Color mode does not support true HDR output." :
-                "True HDR output is only available for HDR source video.";
-        }
+        actualMode_ = sourceHdr ? FFF3FPColorMode::MapToHdr :
+            FFF3FPColorMode::MapToSdr;
+        fallbackReason_ = sourceHdr ? std::string{} :
+            "True HDR output is only available for HDR source video.";
     }
     return FFFResult::Success;
 }
@@ -1869,14 +1868,12 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
     actualMode_ = requestedMode_;
     hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
     hdrSwapChainRejected_ = false;
-    if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
-        const auto sourceHdr = hdrProcessor_.IsHdrSource();
-        if (!sourceHdr || !OutputSupportsHdr()) {
-            actualMode_ = FFF3FPColorMode::MapToSdr;
-            fallbackReason_ = sourceHdr ?
-                "The target display or Windows Advanced Color mode does not support true HDR output." :
-                "True HDR output is only available for HDR source video.";
-        }
+    // The output capability probe is intentionally deferred until the first
+    // swap-chain creation, which is owned by the native media worker.
+    if (requestedMode_ == FFF3FPColorMode::MapToHdr &&
+        !hdrProcessor_.IsHdrSource()) {
+        actualMode_ = FFF3FPColorMode::MapToSdr;
+        fallbackReason_ = "True HDR output is only available for HDR source video.";
     }
     // hdrPeakNits_ is an output-display override, never the source mastering
     // peak. SDR callers pass zero; source peak metadata is configured per frame.
@@ -2283,31 +2280,19 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         coverBackdropPixelShader_ == nullptr || timedTextPixelShader_ == nullptr ||
         sampler_ == nullptr || pointSampler_ == nullptr || panoramaSampler_ == nullptr ||
         constants_ == nullptr || scaleConstants_ == nullptr) {
-        ComPtr<ID3DBlob> vertexCode, pixelCode, scalePixelCode, coverBackdropPixelCode,
-            timedTextPixelCode, errors;
-        if (FAILED(D3DCompile(VertexShaderSource, std::strlen(VertexShaderSource), nullptr, nullptr, nullptr,
-            "main", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vertexCode, &errors)) ||
-            FAILED(D3DCompile(PixelShaderSource, std::strlen(PixelShaderSource), nullptr, nullptr, nullptr,
-                "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixelCode, &errors)) ||
-            FAILED(D3DCompile(ScalePixelShaderSource, std::strlen(ScalePixelShaderSource),
-                nullptr, nullptr, nullptr, "main", "ps_5_0",
-                D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &scalePixelCode, &errors)) ||
-            FAILED(D3DCompile(CoverBackdropPixelShaderSource,
-                std::strlen(CoverBackdropPixelShaderSource), nullptr, nullptr, nullptr,
-                "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-                &coverBackdropPixelCode, &errors)) ||
-            FAILED(D3DCompile(TimedTextPixelShaderSource, std::strlen(TimedTextPixelShaderSource), nullptr, nullptr, nullptr,
-            "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &timedTextPixelCode, &errors)) ||
-            FAILED(device_->CreateVertexShader(vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr, &vertexShader_)) ||
-            FAILED(device_->CreatePixelShader(pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr, &pixelShader_)) ||
-            FAILED(device_->CreatePixelShader(scalePixelCode->GetBufferPointer(),
-                scalePixelCode->GetBufferSize(), nullptr, &scalePixelShader_)) ||
-            FAILED(device_->CreatePixelShader(coverBackdropPixelCode->GetBufferPointer(),
-                coverBackdropPixelCode->GetBufferSize(), nullptr,
+        if (FAILED(device_->CreateVertexShader(FFFVertexShaderBytecode,
+                sizeof(FFFVertexShaderBytecode), nullptr, &vertexShader_)) ||
+            FAILED(device_->CreatePixelShader(FFFPixelShaderBytecode,
+                sizeof(FFFPixelShaderBytecode), nullptr, &pixelShader_)) ||
+            FAILED(device_->CreatePixelShader(FFFScalePixelShaderBytecode,
+                sizeof(FFFScalePixelShaderBytecode), nullptr, &scalePixelShader_)) ||
+            FAILED(device_->CreatePixelShader(FFFCoverBackdropPixelShaderBytecode,
+                sizeof(FFFCoverBackdropPixelShaderBytecode), nullptr,
                 &coverBackdropPixelShader_)) ||
-            FAILED(device_->CreatePixelShader(timedTextPixelCode->GetBufferPointer(), timedTextPixelCode->GetBufferSize(), nullptr, &timedTextPixelShader_))) {
-            SetError(errors ? static_cast<const char*>(errors->GetBufferPointer()) :
-                "Could not create the playback presentation shaders.");
+            FAILED(device_->CreatePixelShader(FFFTimedTextPixelShaderBytecode,
+                sizeof(FFFTimedTextPixelShaderBytecode), nullptr,
+                &timedTextPixelShader_))) {
+            SetError("Could not create the precompiled playback presentation shaders.");
             return FFFResult::DeviceFailure;
         }
         D3D11_SAMPLER_DESC sampler{};
@@ -3035,6 +3020,7 @@ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
     std::lock_guard deviceLock(deviceMutex_);
     if (status.size < sizeof(FFF3FPTimedTextStatus) || status.version != 1)
         return FFFResult::InvalidArgument;
+    D3D11_TEXTURE2D_DESC description{};
     {
         std::lock_guard lock(timedTextMutex_);
         status.size = sizeof(status); status.version = 1;
@@ -3045,7 +3031,8 @@ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
         status.reserved = timedTextPresentCounts_[slotIndex]; status.visiblePixelCount = 0;
         status.spriteCacheHits = timedTextSpriteCacheHits_;
         status.spriteCacheMisses = timedTextSpriteCacheMisses_;
-        status.backBufferAcquisitionCount = backBufferAcquisitionCount_;
+        status.backBufferAcquisitionCount = backBufferAcquisitionCount_.load(
+            std::memory_order_acquire);
         status.compositePixelShaderInvocations =
             timedTextCompositePixelInvocations_[slotIndex];
     }
@@ -3058,7 +3045,6 @@ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
         // during ordinary playback unless a caller explicitly requests status.
         device_->CreateQuery(&query, &timedTextPipelineQueries_[slotIndex]);
     }
-    D3D11_TEXTURE2D_DESC description{};
     timedTextTextures_[slotIndex]->GetDesc(&description);
     description.Usage = D3D11_USAGE_STAGING;
     description.BindFlags = 0; description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -3155,19 +3141,13 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
         return FFFResult::DeviceFailure;
     }
     if (timedTextSpriteVertexShader_ == nullptr || timedTextSpritePixelShader_ == nullptr) {
-        ComPtr<ID3DBlob> spriteVertexCode, spritePixelCode, shaderErrors;
-        if (FAILED(D3DCompile(TimedTextSpriteVertexShaderSource,
-            std::strlen(TimedTextSpriteVertexShaderSource), nullptr, nullptr, nullptr,
-            "main", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &spriteVertexCode, &shaderErrors)) ||
-            FAILED(D3DCompile(TimedTextSpritePixelShaderSource,
-            std::strlen(TimedTextSpritePixelShaderSource), nullptr, nullptr, nullptr,
-            "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &spritePixelCode, &shaderErrors)) ||
-            FAILED(device_->CreateVertexShader(spriteVertexCode->GetBufferPointer(),
-            spriteVertexCode->GetBufferSize(), nullptr, &timedTextSpriteVertexShader_)) ||
-            FAILED(device_->CreatePixelShader(spritePixelCode->GetBufferPointer(),
-            spritePixelCode->GetBufferSize(), nullptr, &timedTextSpritePixelShader_))) {
-            SetError(shaderErrors ? static_cast<const char*>(shaderErrors->GetBufferPointer()) :
-                "Could not create the timed-text sprite shaders.");
+        if (FAILED(device_->CreateVertexShader(FFFTimedTextSpriteVertexShaderBytecode,
+                sizeof(FFFTimedTextSpriteVertexShaderBytecode), nullptr,
+                &timedTextSpriteVertexShader_)) ||
+            FAILED(device_->CreatePixelShader(FFFTimedTextSpritePixelShaderBytecode,
+                sizeof(FFFTimedTextSpritePixelShaderBytecode), nullptr,
+                &timedTextSpritePixelShader_))) {
+            SetError("Could not create the precompiled timed-text sprite shaders.");
             return FFFResult::DeviceFailure;
         }
     }
@@ -4753,8 +4733,7 @@ std::uint64_t PlayerVideoRenderer::PresentWait100ns() const noexcept { return pr
 std::uint64_t PlayerVideoRenderer::DeviceLockWait100ns() const noexcept { return deviceLockWait100ns_.load(); }
 std::uint64_t PlayerVideoRenderer::SoftwareConvert100ns() const noexcept { return softwareConvert100ns_.load(); }
 std::uint32_t PlayerVideoRenderer::OutputBitDepth() const noexcept {
-    std::lock_guard lock(deviceMutex_);
-    return swapOutputBits_;
+    return swapOutputBits_.load(std::memory_order_acquire);
 }
 FFF3FPVideoScalingMode PlayerVideoRenderer::ActualVideoScalingMode() const noexcept {
     return actualVideoScalingMode_.load();

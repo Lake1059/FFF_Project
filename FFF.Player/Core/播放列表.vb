@@ -2,6 +2,8 @@ Imports System.Globalization
 Imports System.IO
 Imports System.Text
 Imports System.Text.RegularExpressions
+Imports System.Threading
+Imports System.Threading.Tasks
 
 Public Enum 列表播放模式
     播完停止 = 0
@@ -151,13 +153,16 @@ Public NotInheritable Class 播放列表
         RaiseEvent 列表变化(Me, EventArgs.Empty)
     End Sub
 
-    Public Sub 从媒体创建并扫描相似文件(本地路径 As String)
+    Public Sub 从媒体创建并扫描相似文件(本地路径 As String,
+                                   Optional 取消令牌 As CancellationToken = Nothing)
+        取消令牌.ThrowIfCancellationRequested()
         Dim 当前路径 = 规范本地文件(本地路径)
         Dim 当前名称 = IO.Path.GetFileNameWithoutExtension(当前路径)
         Dim 签名 = 取得系列签名(当前名称)
         Dim 新列表 As New List(Of 播放列表项)()
         If 签名 IsNot Nothing Then
             For Each 文件 In IO.Directory.EnumerateFiles(IO.Path.GetDirectoryName(当前路径))
+                取消令牌.ThrowIfCancellationRequested()
                 If Not 媒体扩展名.Contains(IO.Path.GetExtension(文件)) Then Continue For
                 If String.Equals(取得系列签名(IO.Path.GetFileNameWithoutExtension(文件)), 签名, StringComparison.OrdinalIgnoreCase) Then
                     Try
@@ -169,6 +174,7 @@ Public NotInheritable Class 播放列表
         End If
         If Not 新列表.Any(Function(x) String.Equals(x.路径, 当前路径, StringComparison.OrdinalIgnoreCase)) Then 新列表.Add(New 播放列表项(当前路径))
         新列表.Sort(Function(a, b) 自然文件名比较器.实例.Compare(IO.Path.GetFileName(a.路径), IO.Path.GetFileName(b.路径)))
+        取消令牌.ThrowIfCancellationRequested()
         SyncLock 项目
             项目.Clear()
             项目.AddRange(新列表)
@@ -176,6 +182,11 @@ Public NotInheritable Class 播放列表
         End SyncLock
         RaiseEvent 列表变化(Me, EventArgs.Empty)
     End Sub
+
+    Public Function 从媒体创建并扫描相似文件Async(本地路径 As String,
+                                                 Optional 取消令牌 As CancellationToken = Nothing) As Task
+        Return Task.Run(Sub() 从媒体创建并扫描相似文件(本地路径, 取消令牌), 取消令牌)
+    End Function
 
     Public Sub 导出M3U8(列表路径 As String)
         ArgumentException.ThrowIfNullOrWhiteSpace(列表路径)

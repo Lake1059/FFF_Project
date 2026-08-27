@@ -332,7 +332,7 @@ private:
     std::uint32_t swapWidth_;
     std::uint32_t swapHeight_;
     bool swapHdr_;
-    std::uint32_t swapOutputBits_;
+    std::atomic<std::uint32_t> swapOutputBits_;
     std::uint32_t sourceWidth_;
     std::uint32_t sourceHeight_;
     std::uint32_t sourceInputLayout_;
@@ -409,7 +409,7 @@ private:
     // Counts successful final swap-chain presents that included each visible
     // layer. A texture redraw is not a presentation and must not advance this.
     std::uint32_t timedTextPresentCounts_[4];
-    std::uint64_t backBufferAcquisitionCount_;
+    std::atomic<std::uint64_t> backBufferAcquisitionCount_;
     bool timedTextPipelineQueryInFlight_[4];
     std::uint64_t timedTextCompositePixelInvocations_[4];
     CachedVideoSettings cachedVideoSettings_;
