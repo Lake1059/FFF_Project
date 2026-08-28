@@ -28,6 +28,8 @@ Friend NotInheritable Class 播放器画面菜单控制器
     Private ReadOnly 初始画面尺寸提供器 As Func(Of Size)
     Private ReadOnly 当前媒体路径提供器 As Func(Of String)
     Private ReadOnly 操作提示 As Action(Of String)
+    Private ReadOnly RTX菜单项 As LakeUI.ModernContextMenu.ModernMenuItem
+    Private ReadOnly RTX切换处理器 As Action(Of Boolean)
     Private 已释放 As Boolean
 
     Friend Sub New(宿主窗口值 As Form,
@@ -39,7 +41,9 @@ Friend NotInheritable Class 播放器画面菜单控制器
                    快照提供器值 As Func(Of 播放器快照),
                    初始画面尺寸提供器值 As Func(Of Size),
                    当前媒体路径提供器值 As Func(Of String),
-                   操作提示值 As Action(Of String))
+                   操作提示值 As Action(Of String),
+                   Optional RTX菜单项值 As LakeUI.ModernContextMenu.ModernMenuItem = Nothing,
+                   Optional RTX切换处理器值 As Action(Of Boolean) = Nothing)
         ArgumentNullException.ThrowIfNull(宿主窗口值)
         ArgumentNullException.ThrowIfNull(画面控件值)
         ArgumentNullException.ThrowIfNull(标题栏菜单值)
@@ -61,6 +65,8 @@ Friend NotInheritable Class 播放器画面菜单控制器
         初始画面尺寸提供器 = 初始画面尺寸提供器值
         当前媒体路径提供器 = 当前媒体路径提供器值
         操作提示 = 操作提示值
+        RTX菜单项 = RTX菜单项值
+        RTX切换处理器 = RTX切换处理器值
 
         挂接菜单()
     End Sub
@@ -93,6 +99,14 @@ Friend NotInheritable Class 播放器画面菜单控制器
                 AddHandler 菜单项.Click, AddressOf 截图菜单项_Click
             End If
         Next
+        If RTX菜单项 IsNot Nothing AndAlso RTX切换处理器 IsNot Nothing Then
+            AddHandler RTX菜单项.Click, AddressOf RTX菜单项_Click
+        End If
+    End Sub
+
+    Private Sub RTX菜单项_Click(sender As Object, e As EventArgs)
+        If 已释放 OrElse RTX切换处理器 Is Nothing Then Return
+        RTX切换处理器(If(RTX菜单项 Is Nothing, False, RTX菜单项.Checked))
     End Sub
 
     Private Sub 尺寸菜单项_Click(sender As Object, e As EventArgs)
@@ -315,5 +329,8 @@ Friend NotInheritable Class 播放器画面菜单控制器
         For Each 菜单项 In 截图菜单.Items
             RemoveHandler 菜单项.Click, AddressOf 截图菜单项_Click
         Next
+        If RTX菜单项 IsNot Nothing Then
+            RemoveHandler RTX菜单项.Click, AddressOf RTX菜单项_Click
+        End If
     End Sub
 End Class

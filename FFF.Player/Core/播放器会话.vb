@@ -21,6 +21,7 @@ Public NotInheritable Class 播放器会话
     Private Shared ReadOnly 原生定时文字命令大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生定时文字命令)())
     Private Shared ReadOnly 原生定时文字图层大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生定时文字图层)())
     Private Shared ReadOnly 原生定时文字状态大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生定时文字状态)())
+    Private Shared ReadOnly 原生RTX视频状态大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生RTX视频状态)())
     Private Shared ReadOnly 原生播放器快照大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生播放器快照)())
     Private Shared ReadOnly 原生视频像素探针大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生视频像素探针)())
     Private Shared ReadOnly 原生音频峰值大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生音频峰值)())
@@ -32,6 +33,7 @@ Public NotInheritable Class 播放器会话
     Private 定时文字原生缓冲句柄 As GCHandle
     Private 已释放 As Integer
     Private 事件排程中 As Integer
+    Private RTX视频增强已请求值 As Boolean
 
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
@@ -192,6 +194,34 @@ Public NotInheritable Class 播放器会话
                                                   HDR峰值尼特, SDR纸白尼特,
                                                   If(强制HDR输出, 1UI, 0UI)))
     End Sub
+    Public Sub 设置RTX视频增强(启用 As Boolean)
+        检查结果(播放器原生接口.FFF3FP_SetRtxVideoEnabled(取得句柄(), If(启用, 1UI, 0UI)))
+        RTX视频增强已请求值 = 启用
+    End Sub
+    Public ReadOnly Property RTX视频增强已请求 As Boolean
+        Get
+            Return RTX视频增强已请求值
+        End Get
+    End Property
+    Friend Function 读取RTX视频状态() As 原生RTX视频状态
+        Dim 状态 As New 原生RTX视频状态 With {.大小 = 原生RTX视频状态大小, .版本 = 1UI}
+        检查结果(播放器原生接口.FFF3FP_GetRtxVideoStatus(取得句柄(), 状态))
+        Return 状态
+    End Function
+    Friend ReadOnly Property RTX视频状态 As 原生RTX视频状态
+        Get
+            Return 读取RTX视频状态()
+        End Get
+    End Property
+    Public Function 安全读取RTX状态() As RTX视频状态
+        Try
+            Return New RTX视频状态(读取RTX视频状态())
+        Catch ex As ObjectDisposedException
+            Return Nothing
+        Catch ex As 播放器异常
+            Return Nothing
+        End Try
+    End Function
     Public Sub 设置输出窗口(窗口句柄 As IntPtr)
         检查结果(播放器原生接口.FFF3FP_SetOutputWindow(取得句柄(), 窗口句柄))
     End Sub
@@ -451,6 +481,22 @@ Public NotInheritable Class 播放器会话
             Return 读取原生文本(AddressOf 播放器原生接口.FFF3FP_GetLastError)
         End Get
     End Property
+
+    Friend ReadOnly Property RTX视频错误 As String
+        Get
+            Return 读取原生文本(AddressOf 播放器原生接口.FFF3FP_GetRtxVideoError)
+        End Get
+    End Property
+
+    Friend Function 安全读取RTX错误() As String
+        Try
+            Return RTX视频错误
+        Catch ex As ObjectDisposedException
+            Return String.Empty
+        Catch ex As 播放器异常
+            Return String.Empty
+        End Try
+    End Function
 
     Public Sub 释放() Implements IDisposable.Dispose
         If Interlocked.Exchange(已释放, 1) <> 0 Then Return

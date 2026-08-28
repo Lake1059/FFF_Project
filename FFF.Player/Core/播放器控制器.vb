@@ -1,4 +1,5 @@
 Imports System.IO
+Imports System.Runtime.InteropServices
 Imports System.Text.Json
 Imports System.Threading
 
@@ -40,6 +41,7 @@ Public NotInheritable Class 播放器控制器
     Private 当前色彩输出 As 色彩输出模式 = 色彩输出模式.映射到SDR
     Private HDR色彩输出偏好 As 色彩输出模式 = 色彩输出模式.映射到SDR
     Private 强制HDR输出 As Boolean
+    Private 当前RTX视频已启用 As Boolean
     Private 当前WASAPI模式 As WASAPI共享模式 = WASAPI共享模式.共享
     Private 当前音量 As Single = 1.0F
     Private 已静音 As Boolean
@@ -86,6 +88,42 @@ Public NotInheritable Class 播放器控制器
             Return 当前色彩输出
         End Get
     End Property
+
+    Public ReadOnly Property RTX视频增强已请求 As Boolean
+        Get
+            Return 当前RTX视频已启用
+        End Get
+    End Property
+
+    Public ReadOnly Property RTX视频状态 As RTX视频状态
+        Get
+            Try
+                Return 会话?.安全读取RTX状态()
+            Catch ex As ObjectDisposedException
+                Return Nothing
+            End Try
+        End Get
+    End Property
+
+    Public Function 安全读取RTX状态() As RTX视频状态
+        Try
+            Return 会话?.安全读取RTX状态()
+        Catch ex As ObjectDisposedException
+            Return Nothing
+        Catch ex As 播放器异常
+            Return Nothing
+        End Try
+    End Function
+
+    Public Function 安全读取RTX错误() As String
+        Try
+            Return 会话?.安全读取RTX错误()
+        Catch ex As ObjectDisposedException
+            Return String.Empty
+        Catch ex As 播放器异常
+            Return String.Empty
+        End Try
+    End Function
 
     Public ReadOnly Property 音量 As Single
         Get
@@ -277,6 +315,35 @@ Public NotInheritable Class 播放器控制器
         If 已释放 OrElse String.IsNullOrWhiteSpace(路径) OrElse Not File.Exists(路径) Then Return
         启动后台任务(打开媒体Async(路径))
     End Sub
+
+    Friend Sub 设置RTX视频增强(启用 As Boolean)
+        If 已释放 Then Return
+        当前RTX视频已启用 = 启用
+        Dim 目标 = 会话
+        If 目标 Is Nothing OrElse 正在切换会话 Then
+            RaiseEvent 状态已变化(Me, EventArgs.Empty)
+            Return
+        End If
+        Try
+            目标.设置RTX视频增强(启用)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法切换 RTX 视频增强"))
+        End Try
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
+    End Sub
+
+    Friend Function 读取RTX视频状态() As 原生RTX视频状态
+        Dim 状态 As New 原生RTX视频状态 With {
+            .大小 = CUInt(Marshal.SizeOf(Of 原生RTX视频状态)()), .版本 = 1UI}
+        Try
+            If 会话 IsNot Nothing Then Return 会话.读取RTX视频状态()
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+        状态.请求已启用 = If(当前RTX视频已启用, 1UI, 0UI)
+        Return 状态
+    End Function
 
     Public Function 打开媒体Async(路径 As String) As Task
         If 已释放 OrElse String.IsNullOrWhiteSpace(路径) OrElse Not File.Exists(路径) Then
@@ -1067,7 +1134,7 @@ Public NotInheritable Class 播放器控制器
 
     Private Function 创建会话(解码器 As 解码模式, 色彩模式 As 色彩输出模式,
                             缩放质量 As 视频缩放质量) As 播放器会话
-        Return New 播放器会话(New 播放器配置 With {
+        Dim 新会话 = New 播放器会话(New 播放器配置 With {
             .解码器 = 解码器,
             .色彩模式 = 色彩模式,
             .SDR峰值尼特 = 当前SDR峰值尼特,
@@ -1078,6 +1145,8 @@ Public NotInheritable Class 播放器控制器
             .输出窗口句柄 = IntPtr.Zero,
             .事件同步上下文 = 事件同步上下文
         })
+        If 当前RTX视频已启用 Then 新会话.设置RTX视频增强(True)
+        Return 新会话
     End Function
 
     Friend Function 取得HDR输出峰值参数(色彩模式 As 色彩输出模式) As Single

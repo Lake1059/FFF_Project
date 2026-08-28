@@ -50,6 +50,7 @@ Partial Class Form1
         Dim resources As System.ComponentModel.ComponentResourceManager = New System.ComponentModel.ComponentResourceManager(GetType(Form1))
         MCM_调整渲染区域大小 = New LakeUI.ModernContextMenu()
         MCM_截取当前画面 = New LakeUI.ModernContextMenu()
+        MMI_启用RTX视频增强 = New LakeUI.ModernContextMenu.ModernMenuItem()
         ThisIsYourWindow1 = New LakeUI.ThisIsYourWindow(components)
         Panel1 = New Panel()
         MB_标题栏菜单按钮 = New LakeUI.ModernButton()
@@ -1219,8 +1220,14 @@ Partial Class Form1
         ModernMenuItem24.Font = Nothing
         ModernMenuItem24.SubMenu = MCM_截取当前画面
         ModernMenuItem24.Text = "截取当前画面"
+        MMI_启用RTX视频增强.Font = Nothing
+        MMI_启用RTX视频增强.Text = "启用 RTX 视频增强"
+        MMI_启用RTX视频增强.ToggleCheckOnClick = True
+        MMI_启用RTX视频增强.CloseOnClick = True
+        MMI_启用RTX视频增强.Checked = False
         MCM_标题栏菜单.Items.Add(ModernMenuItem23)
         MCM_标题栏菜单.Items.Add(ModernMenuItem24)
+        MCM_标题栏菜单.Items.Add(MMI_启用RTX视频增强)
         MCM_标题栏菜单.MenuFont = New Font("Microsoft YaHei UI", 10F)
         MCM_标题栏菜单.MenuPadding = New Padding(10)
         MCM_标题栏菜单.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
@@ -1325,5 +1332,6 @@ Partial Class Form1
     Friend WithEvents MCM_标题栏菜单 As LakeUI.ModernContextMenu
     Friend WithEvents MCM_调整渲染区域大小 As LakeUI.ModernContextMenu
     Friend WithEvents MCM_截取当前画面 As LakeUI.ModernContextMenu
+    Friend WithEvents MMI_启用RTX视频增强 As LakeUI.ModernContextMenu.ModernMenuItem
 
 End Class

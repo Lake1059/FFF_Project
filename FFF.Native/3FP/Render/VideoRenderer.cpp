@@ -15,6 +15,7 @@ extern "C" {
 
 #include <d2d1effects.h>
 #include <d2d1helper.h>
+#include <d3dcompiler.h>
 #include <roapi.h>
 #include <windows.graphics.display.h>
 #include <windows.graphics.display.interop.h>
@@ -318,6 +319,13 @@ Output main(uint id : SV_VertexID) {
     value.uv = float2((id << 1) & 2, id & 2);
     value.position = float4(value.uv * float2(2, -2) + float2(-1, 1), 0, 1);
     return value;
+})";
+
+constexpr const char* RtxTexturePixelShaderSource = R"(
+Texture2D<float4> Source : register(t0);
+SamplerState LinearSampler : register(s0);
+float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    return Source.SampleLevel(LinearSampler, uv, 0);
 })";
 
 constexpr const char* PixelShaderSource = R"(
@@ -728,6 +736,7 @@ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 
 constexpr std::uint32_t InitialTimedTextAtlasSize = 1024;
 constexpr std::uint32_t CoverBackdropEffect = 1;
+constexpr std::uint32_t RtxInputEffect = 2;
 // Start at 4 MiB and grow only when the visible text set cannot fit. The
 // 4096 ceiling preserves the existing 100-item danmaku cache contract without
 // making the 64 MiB allocation resident during ordinary subtitle playback.
@@ -1690,7 +1699,7 @@ FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8
 PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), coverBackdropPixelShader_(nullptr),
-      timedTextPixelShader_(nullptr), scalePixelShader_(nullptr), sampler_(nullptr),
+      timedTextPixelShader_(nullptr), scalePixelShader_(nullptr), rtxTexturePixelShader_(nullptr), sampler_(nullptr),
       pointSampler_(nullptr), panoramaSampler_(nullptr), constants_(nullptr), scaleConstants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
       scaledVideoGeneration_(UINT64_MAX), scaledOutputWidth_(0), scaledOutputHeight_(0),
@@ -1698,6 +1707,11 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       videoDevice_(nullptr), videoContext_(nullptr), videoProcessorEnumerator_(nullptr),
       videoProcessor_(nullptr), videoProcessorRenderTexture_(nullptr),
       videoProcessorRenderTarget_(nullptr),
+      rtxVideoProcessor_(nullptr), rtxInputTexture_(nullptr),
+      rtxInputTarget_(nullptr), rtxInputWidth_(0), rtxInputHeight_(0),
+      rtxInputFormat_(DXGI_FORMAT_UNKNOWN), rtxEnabled_(false),
+      hasCachedRtxVideo_(false), rtxCacheAttempted_(false), rtxCacheKey_(0),
+      rtxRouteGeneration_(0), rtxCacheHits_(0), rtxCacheMisses_(0),
       coverBackdropTexture_(nullptr), coverBackdropView_(nullptr),
       coverBackdropSourceTexture_(nullptr), coverBackdropSourceTarget_(nullptr),
       timedTextTextures_{nullptr, nullptr, nullptr, nullptr},
@@ -1770,8 +1784,9 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       coverVerticalPaddingPercentageBits_(std::bit_cast<std::uint32_t>(7.5f)),
       coverBackdropBlurSettingsGeneration_(1),
       deviceRecoveryRequested_(false), recoveryCallback_(std::move(recoveryCallback)),
-       hdrMonitor_(nullptr), hdrSupportValid_(false), hdrSupported_(false),
+      hdrMonitor_(nullptr), hdrSupportValid_(false), hdrSupported_(false),
       forceHdrOutput_(false),
+      rtxHdrOutputRequested_(false),
       hdrSupportCheckedAt_(std::chrono::steady_clock::time_point::min()),
       hdrSwapChainRejected_(false),
       timedTextAtlasX_(0), timedTextAtlasY_(0), timedTextAtlasRowHeight_(0),
@@ -1813,6 +1828,8 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     hdrSwapChainRejected_ = false;
     swapWidth_ = swapHeight_ = 0;
     swapHdr_ = false; swapOutputBits_ = 8;
+    ++rtxRouteGeneration_;
+    InvalidateRtxCache();
     // Do not enumerate DXGI outputs while the managed player object is being
     // constructed. HDR capability is resolved lazily by EnsureSwapChain on
     // the native worker/presenter path.
@@ -1883,7 +1900,10 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
         cachedVideoSettings_.paperWhite = paperWhiteNits_;
         cachedVideoSettings_.targetPeak = hdrProcessor_.State().targetPeakNits;
     }
-    const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
+    ++rtxRouteGeneration_;
+    InvalidateRtxCache();
+    const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr ||
+        (rtxHdrOutputRequested_ && !hdrProcessor_.IsHdrSource());
     const auto outputBits = PreferredOutputBitDepth(sourceBitDepth_, hdr);
     if (swapChain_ != nullptr && (swapHdr_ != hdr || swapOutputBits_ != outputBits)) {
         const auto result = ReconfigureSwapChain(hdr, outputBits);
@@ -1901,11 +1921,21 @@ FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     requestedMode_ = FFF3FPColorMode::MapToSdr;
     actualMode_ = FFF3FPColorMode::MapToSdr;
-    if (swapChain_ != nullptr && swapHdr_) {
+    // A media-session reset uses this method to restore the public SDR color
+    // mode. If RTX remains requested, its independent HDR presentation
+    // contract must stay in place for the new SDR source.
+    const auto keepRtxHdr = rtxHdrOutputRequested_ && !hdrProcessor_.IsHdrSource();
+    if (swapChain_ != nullptr && swapHdr_ && !keepRtxHdr) {
         const auto result = ReconfigureSwapChain(false, PreferredOutputBitDepth(sourceBitDepth_, false));
         if (result != FFFResult::Success) return result;
     }
+    if (swapChain_ != nullptr && keepRtxHdr) {
+        const auto result = EnsureSwapChain(swapWidth_, swapHeight_, sourceBitDepth_);
+        if (result != FFFResult::Success) return result;
+    }
     fallbackReason_.clear();
+    ++rtxRouteGeneration_;
+    InvalidateRtxCache();
     return FFFResult::Success;
 }
 
@@ -2063,9 +2093,13 @@ FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** ou
 FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_t height,
     const std::uint32_t sourceBitDepth) noexcept {
     if (window_ == nullptr) return FFFResult::Success;
+    const auto sourceHdr = hdrProcessor_.IsHdrSource();
+    const auto rtxHdrRequested = rtxHdrOutputRequested_ && !sourceHdr && !sourceCoverArt_;
+    const auto hdrOutputRequested = requestedMode_ == FFF3FPColorMode::MapToHdr ||
+        rtxHdrRequested;
+    const auto hdrOutputSupported = hdrOutputRequested && OutputSupportsHdr();
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
-        const auto sourceHdr = hdrProcessor_.IsHdrSource();
-        const auto nextMode = sourceHdr && OutputSupportsHdr() ?
+        const auto nextMode = sourceHdr && hdrOutputSupported ?
             FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
         const auto reason = sourceHdr ?
             "The target display or Windows Advanced Color mode does not support true HDR output." :
@@ -2087,7 +2121,8 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     if (!GetClientRect(window_, &client)) return FFFResult::DeviceFailure;
     width = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(client.right - client.left));
     height = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(client.bottom - client.top));
-    const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
+    const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr ||
+        (rtxHdrRequested && hdrOutputSupported);
     const auto outputBits = PreferredOutputBitDepth(sourceBitDepth, hdr);
     if (swapChain_ != nullptr && (hdr != swapHdr_ || outputBits != swapOutputBits_)) {
         const auto modeResult = ReconfigureSwapChain(hdr, outputBits);
@@ -2101,6 +2136,8 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
         const auto resize = swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
         if (SUCCEEDED(resize)) {
             swapWidth_ = width; swapHeight_ = height;
+            ++rtxRouteGeneration_;
+            InvalidateRtxCache();
             ReleaseTimedTextResources();
             return FFFResult::Success;
         }
@@ -2179,6 +2216,64 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         presentationFrameRate_ = DetectDisplayRefreshRate(window_);
     }
     return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::SetRtxVideoEnabled(const bool enabled) noexcept {
+    {
+        std::lock_guard deviceLock(deviceMutex_);
+        if (rtxEnabled_ == enabled) return FFFResult::Success;
+        rtxEnabled_ = enabled;
+        rtxHdrOutputRequested_ = enabled;
+        ++rtxRouteGeneration_;
+        InvalidateRtxCache();
+        if (!enabled) {
+            rtxVideoProcessor_.reset();
+            ReleaseRtxInput();
+        }
+        if (hasCachedVideo_ && window_ != nullptr) {
+            const auto chainResult = EnsureSwapChain(sourceWidth_, sourceHeight_, sourceBitDepth_);
+            if (chainResult != FFFResult::Success) return chainResult;
+        }
+        {
+            std::lock_guard lock(timedTextMutex_);
+            ++presentationGeneration_;
+        }
+    }
+    timedTextCondition_.notify_one();
+    return FFFResult::Success;
+}
+
+bool PlayerVideoRenderer::RtxVideoEnabled() const noexcept {
+    std::lock_guard lock(deviceMutex_);
+    return rtxEnabled_;
+}
+
+FFF3FPRtxVideoStatus PlayerVideoRenderer::RtxVideoStatus() const noexcept {
+    std::lock_guard lock(deviceMutex_);
+    FFF3FPRtxVideoStatus output{};
+    output.size = sizeof(output);
+    output.version = 1;
+    output.requestedEnabled = rtxEnabled_ ? 1u : 0u;
+    if (rtxVideoProcessor_ != nullptr) {
+        const auto status = rtxVideoProcessor_->Status();
+        output.initialized = status.initialized ? 1u : 0u;
+        output.vsrAvailable = status.vsrAvailable ? 1u : 0u;
+        output.trueHdrAvailable = status.trueHdrAvailable ? 1u : 0u;
+        output.evaluatedFrames = status.evaluateCount;
+        output.evaluation100ns = status.lastEvaluate100ns;
+        output.activePath = static_cast<std::uint32_t>(status.path);
+    }
+    output.active = hasCachedRtxVideo_ ? 1u : 0u;
+    output.fallbackActive = rtxEnabled_ && hasCachedVideo_ && !hasCachedRtxVideo_ ? 1u : 0u;
+    output.cacheHits = rtxCacheHits_;
+    output.cacheMisses = rtxCacheMisses_;
+    return output;
+}
+
+std::string PlayerVideoRenderer::RtxVideoError() const {
+    std::lock_guard lock(deviceMutex_);
+    if (!rtxEnabled_ || rtxVideoProcessor_ == nullptr) return {};
+    return rtxVideoProcessor_->Status().lastError;
 }
 
 FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::uint32_t outputBits) noexcept {
@@ -2315,6 +2410,20 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             SetError("Could not create the presentation shader resources."); return FFFResult::DeviceFailure;
         }
     }
+    if (rtxEnabled_ && rtxTexturePixelShader_ == nullptr) {
+        ComPtr<ID3DBlob> bytecode;
+        ComPtr<ID3DBlob> errors;
+        const auto compileResult = D3DCompile(RtxTexturePixelShaderSource,
+            std::strlen(RtxTexturePixelShaderSource), "3fp-rtx-texture", nullptr,
+            nullptr, "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+            &bytecode, &errors);
+        if (FAILED(compileResult) || bytecode == nullptr ||
+            FAILED(device_->CreatePixelShader(bytecode->GetBufferPointer(),
+                bytecode->GetBufferSize(), nullptr, &rtxTexturePixelShader_))) {
+            SetError("Could not create the RTX texture presentation shader.");
+            return FFFResult::DeviceFailure;
+        }
+    }
     if (sourceTextures_[0] != nullptr && sourceExternal_ == externalSource &&
         sourceWidth_ == sourceWidth && sourceHeight_ == sourceHeight &&
         sourceInputLayout_ == inputLayout && sourceBitDepth_ == bitDepth &&
@@ -2405,7 +2514,7 @@ bool PlayerVideoRenderer::CanUseDirectVideoProcessor() const noexcept {
     if (!sourceExternal_ || sourceInputLayout_ != 2 || sourceTextures_[0] == nullptr ||
         sourceBitDepth_ > 10 || sourceInterlaced_ ||
         sourceChromaLocation_ != AVCHROMA_LOC_LEFT ||
-        cachedVideoSettings_.transfer != 0 || actualMode_ != FFF3FPColorMode::MapToSdr ||
+        cachedVideoSettings_.transfer != 0 || swapHdr_ || actualMode_ != FFF3FPColorMode::MapToSdr ||
         swapOutputBits_ > 10)
         return false;
     D3D11_TEXTURE2D_DESC inputDescription{};
@@ -2554,7 +2663,10 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     const std::uint32_t effect, ID3D11ShaderResourceView* const* sourceViews) noexcept {
     if (target == nullptr || context_ == nullptr || width <= 0.0f || height <= 0.0f)
         return FFFResult::InvalidArgument;
-    cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
+    cachedVideoSettings_.colorMode = effect == RtxInputEffect
+        ? static_cast<std::uint32_t>(FFF3FPColorMode::MapToSdr)
+        : static_cast<std::uint32_t>(swapHdr_ ? FFF3FPColorMode::MapToHdr : actualMode_);
+    if (effect == RtxInputEffect) cachedVideoSettings_.transfer = 0;
     cachedVideoSettings_.reserved = effect;
     cachedVideoSettings_.outputWidth = width;
     cachedVideoSettings_.outputHeight = height;
@@ -2586,6 +2698,205 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::EnsureRtxInput(const std::uint32_t width,
+    const std::uint32_t height, const DXGI_FORMAT format) noexcept {
+    if (device_ == nullptr || width == 0 || height == 0 ||
+        (format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+         format != DXGI_FORMAT_R10G10B10A2_UNORM))
+        return FFFResult::InvalidArgument;
+    if (rtxInputTexture_ != nullptr && rtxInputTarget_ != nullptr &&
+        rtxInputWidth_ == width && rtxInputHeight_ == height &&
+        rtxInputFormat_ == format)
+        return FFFResult::Success;
+    if (rtxInputTarget_ != nullptr) {
+        rtxInputTarget_->Release();
+        rtxInputTarget_ = nullptr;
+    }
+    if (rtxInputTexture_ != nullptr) {
+        rtxInputTexture_->Release();
+        rtxInputTexture_ = nullptr;
+    }
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = width;
+    description.Height = height;
+    description.MipLevels = description.ArraySize = 1;
+    description.Format = format;
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_DEFAULT;
+    description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(device_->CreateTexture2D(&description, nullptr, &rtxInputTexture_)) ||
+        FAILED(device_->CreateRenderTargetView(rtxInputTexture_, nullptr,
+            &rtxInputTarget_))) {
+        if (rtxInputTarget_ != nullptr) {
+            rtxInputTarget_->Release();
+            rtxInputTarget_ = nullptr;
+        }
+        if (rtxInputTexture_ != nullptr) {
+            rtxInputTexture_->Release();
+            rtxInputTexture_ = nullptr;
+        }
+        rtxInputWidth_ = rtxInputHeight_ = 0;
+        rtxInputFormat_ = DXGI_FORMAT_UNKNOWN;
+        SetError("Could not create the RTX RGB input texture.");
+        return FFFResult::DeviceFailure;
+    }
+    rtxInputWidth_ = width;
+    rtxInputHeight_ = height;
+    rtxInputFormat_ = format;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::DrawRtxTexture(ID3D11RenderTargetView* target,
+    ID3D11ShaderResourceView* source, const std::uint32_t sourceWidth,
+    const std::uint32_t sourceHeight, const float x, const float y,
+    const float width, const float height) noexcept {
+    if (target == nullptr || source == nullptr || rtxTexturePixelShader_ == nullptr ||
+        vertexShader_ == nullptr || context_ == nullptr || sourceWidth == 0 ||
+        sourceHeight == 0 || width <= 0.0f || height <= 0.0f)
+        return FFFResult::InvalidArgument;
+    const ScaleShaderSettings settings{
+        static_cast<float>(sourceWidth), static_cast<float>(sourceHeight),
+        width, height, 0, 0, 0.0f, 0.0f};
+    context_->UpdateSubresource(scaleConstants_, 0, nullptr, &settings, 0, 0);
+    context_->OMSetRenderTargets(1, &target, nullptr);
+    const D3D11_VIEWPORT viewport{x, y, width, height, 0.0f, 1.0f};
+    context_->RSSetViewports(1, &viewport);
+    context_->IASetInputLayout(nullptr);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->VSSetShader(vertexShader_, nullptr, 0);
+    context_->PSSetShader(rtxTexturePixelShader_, nullptr, 0);
+    context_->PSSetConstantBuffers(0, 1, &scaleConstants_);
+    context_->PSSetSamplers(0, 1, &sampler_);
+    context_->PSSetShaderResources(0, 1, &source);
+    context_->Draw(3, 0);
+    ID3D11ShaderResourceView* nullView = nullptr;
+    context_->PSSetShaderResources(0, 1, &nullView);
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
+    return FFFResult::Success;
+}
+
+void PlayerVideoRenderer::InvalidateRtxCache() noexcept {
+    hasCachedRtxVideo_ = false;
+    rtxCacheAttempted_ = false;
+    rtxCacheKey_ = 0;
+    if (rtxVideoProcessor_ != nullptr) rtxVideoProcessor_->Invalidate();
+}
+
+void PlayerVideoRenderer::ReleaseRtxInput() noexcept {
+    if (rtxInputTarget_ != nullptr) {
+        rtxInputTarget_->Release();
+        rtxInputTarget_ = nullptr;
+    }
+    if (rtxInputTexture_ != nullptr) {
+        rtxInputTexture_->Release();
+        rtxInputTexture_ = nullptr;
+    }
+    rtxInputWidth_ = rtxInputHeight_ = 0;
+    rtxInputFormat_ = DXGI_FORMAT_UNKNOWN;
+}
+
+FFFResult PlayerVideoRenderer::EnsureRtxResultForCurrentVideo(
+    const std::uint32_t outputWidth, const std::uint32_t outputHeight) noexcept {
+    if (!rtxEnabled_) return FFFResult::NotSupported;
+    try {
+        if (rtxVideoProcessor_ == nullptr)
+            rtxVideoProcessor_ = std::make_unique<RtxVideoProcessor>();
+    } catch (...) {
+        SetError("Could not allocate the RTX video processor.");
+        return FFFResult::NativeFailure;
+    }
+    if (!hasCachedVideo_) {
+        rtxVideoProcessor_->SetDecisionReason("等待视频帧。");
+        return FFFResult::NotSupported;
+    }
+    if (sourceCoverArt_) {
+        rtxVideoProcessor_->SetDecisionReason("封面图不进入 RTX 视频增强路径。");
+        InvalidateRtxCache();
+        return FFFResult::NotSupported;
+    }
+    if (projection360Enabled_.load(std::memory_order_acquire) != 0) {
+        rtxVideoProcessor_->SetDecisionReason("360°视频不进入 RTX 视频增强路径。");
+        InvalidateRtxCache();
+        return FFFResult::NotSupported;
+    }
+    if (outputWidth == 0 || outputHeight == 0 || sourceWidth_ == 0 ||
+        sourceHeight_ == 0) {
+        rtxVideoProcessor_->SetDecisionReason("当前视频或输出尺寸无效。");
+        InvalidateRtxCache();
+        return FFFResult::NotSupported;
+    }
+    if (sourceBitDepth_ > 10) {
+        rtxVideoProcessor_->SetDecisionReason("输入位深超过 RTX 视频增强支持范围。");
+        InvalidateRtxCache();
+        return FFFResult::NotSupported;
+    }
+    if (hdrProcessor_.IsHdrSource()) {
+        rtxVideoProcessor_->SetDecisionReason("HDR 源保持原有 HDR 渲染路径，不重复处理。");
+        if (hasCachedRtxVideo_ || (rtxVideoProcessor_ != nullptr &&
+                rtxVideoProcessor_->HasResult()))
+            InvalidateRtxCache();
+        return FFFResult::NotSupported;
+    }
+    // VSR is also useful as a restoration/sharpening pass at native size.  The
+    // SDK does not accept a downscale target, so keep the AI output at least
+    // source-sized and fit it into a smaller presentation rectangle later.
+    const bool runVsr = true;
+    // TrueHDR consumes SDR RGB and emits an HDR texture.  HDR source frames
+    // remain entirely on the existing HdrProcessor path to avoid a second PQ/
+    // HLG conversion or altered HDR metadata.
+    const bool runTrueHdr = swapHdr_ && !hdrProcessor_.IsHdrSource();
+    // RTX Video SDK's portable D3D11 contract is 8-bit RGBA input. Convert
+    // higher-bit-depth decoder output through the presentation shader instead
+    // of handing NGX a format that some driver releases reject.
+    const auto inputFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    const auto outputFormat = runTrueHdr
+        ? (swapOutputBits_.load(std::memory_order_acquire) >= 16
+            ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM)
+        : inputFormat;
+    const auto processedWidth = runVsr ? std::max(outputWidth, sourceWidth_) : sourceWidth_;
+    const auto processedHeight = runVsr ? std::max(outputHeight, sourceHeight_) : sourceHeight_;
+    // The explicit route generation is advanced for every submitted frame and
+    // toggle. This prevents a same-sized replacement frame from reusing the
+    // previous AI result while keeping redraws cache-only.
+    std::uint64_t key = rtxRouteGeneration_;
+    const auto mix = [&key](const std::uint64_t value) noexcept {
+        key ^= value + 0x9e3779b97f4a7c15ull + (key << 6) + (key >> 2);
+    };
+    mix(sourceWidth_); mix(sourceHeight_); mix(outputWidth); mix(outputHeight);
+    mix(static_cast<std::uint32_t>(inputFormat));
+    mix(static_cast<std::uint32_t>(outputFormat));
+    mix(runVsr ? 1u : 0u); mix(runTrueHdr ? 1u : 0u);
+    mix(swapHdr_ ? 1u : 0u);
+    mix(static_cast<std::uint64_t>(std::lround(
+        std::max(0.0f, hdrProcessor_.State().targetPeakNits))));
+    if (rtxCacheAttempted_ && rtxCacheKey_ == key) {
+        ++rtxCacheHits_;
+        return hasCachedRtxVideo_ ? FFFResult::Success : FFFResult::NotSupported;
+    }
+    rtxCacheKey_ = key;
+    rtxCacheAttempted_ = true;
+    hasCachedRtxVideo_ = false;
+    ++rtxCacheMisses_;
+    const auto inputResult = EnsureRtxInput(sourceWidth_, sourceHeight_, inputFormat);
+    if (inputResult != FFFResult::Success) return inputResult;
+    const auto savedSettings = cachedVideoSettings_;
+    const auto inputDraw = DrawWithShader(rtxInputTarget_, 0.0f, 0.0f,
+        static_cast<float>(sourceWidth_), static_cast<float>(sourceHeight_),
+        RtxInputEffect, sourceViews_);
+    cachedVideoSettings_ = savedSettings;
+    context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
+    if (inputDraw != FFFResult::Success) return inputDraw;
+    const auto state = hdrProcessor_.State();
+    const auto peak = state.targetPeakNits > 0.0f && std::isfinite(state.targetPeakNits)
+        ? static_cast<std::uint32_t>(std::lround(state.targetPeakNits)) : 1000u;
+    const auto evaluate = rtxVideoProcessor_->Evaluate(device_, context_,
+        rtxInputTexture_, sourceWidth_, sourceHeight_, inputFormat,
+        processedWidth, processedHeight, outputFormat, runVsr, runTrueHdr, peak);
+    if (evaluate != FFFResult::Success) return evaluate;
+    hasCachedRtxVideo_ = rtxVideoProcessor_->HasResult();
+    return hasCachedRtxVideo_ ? FFFResult::Success : FFFResult::NotSupported;
 }
 
 void PlayerVideoRenderer::ReleaseScaleResources() noexcept {
@@ -3093,7 +3404,7 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
     const auto slotIndex = static_cast<std::size_t>(slot);
     if (slotIndex >= ARRAYSIZE(timedTextTextures_)) return FFFResult::InvalidArgument;
     if (swapWidth_ == 0 || swapHeight_ == 0) return FFFResult::Success;
-    const bool hdrLinear = actualMode_ == FFF3FPColorMode::MapToHdr;
+    const bool hdrLinear = swapHdr_;
     if (timedTextTextures_[slotIndex] != nullptr &&
         timedTextWidths_[slotIndex] == swapWidth_ && timedTextHeights_[slotIndex] == swapHeight_ &&
         timedTextResourcesHdr_ == hdrLinear)
@@ -3176,7 +3487,7 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
 FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requestedSize) noexcept {
     const auto size = std::clamp(requestedSize, InitialTimedTextAtlasSize,
         MaximumTimedTextAtlasSize);
-    const bool hdrLinear = actualMode_ == FFF3FPColorMode::MapToHdr;
+    const bool hdrLinear = swapHdr_;
     if (timedTextAtlasTexture_ != nullptr && timedTextAtlasSize_ >= size &&
         timedTextAtlasHdr_ == hdrLinear)
         return FFFResult::Success;
@@ -3292,7 +3603,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     d2dContext_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     d2dContext_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     d2dContext_->SetTextRenderingParams(timedTextRenderingParams_);
-    const bool hdrLinear = actualMode_ == FFF3FPColorMode::MapToHdr;
+    const bool hdrLinear = swapHdr_;
     const auto scaleX = layer->canvasWidth == 0 ? 1.0f : static_cast<float>(swapWidth_) / layer->canvasWidth;
     const auto scaleY = layer->canvasHeight == 0 ? 1.0f : static_cast<float>(swapHeight_) / layer->canvasHeight;
     if (timedTextBrushes_.size() >= MaximumTimedTextBrushes) {
@@ -3662,9 +3973,10 @@ void PlayerVideoRenderer::CompositeTimedText(ID3D11RenderTargetView* target,
     context_->VSSetShader(vertexShader_, nullptr, 0);
     context_->PSSetShader(timedTextPixelShader_, nullptr, 0);
     auto overlaySettings = cachedVideoSettings_;
-    overlaySettings.colorMode = static_cast<std::uint32_t>(actualMode_);
+    overlaySettings.colorMode = static_cast<std::uint32_t>(
+        swapHdr_ ? FFF3FPColorMode::MapToHdr : actualMode_);
     overlaySettings.reserved = (timedTextRenderedHdrHighlights_[slotIndex] ? 1u : 0u) |
-        (actualMode_ == FFF3FPColorMode::MapToHdr ? 2u : 0u);
+        (swapHdr_ ? 2u : 0u);
     context_->UpdateSubresource(constants_, 0, nullptr, &overlaySettings, 0, 0);
     context_->PSSetConstantBuffers(0, 1, &constants_);
     context_->PSSetShaderResources(0, ARRAYSIZE(views), views);
@@ -3866,7 +4178,8 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
             width * bytesPerPixel, 0);
     }
     ShaderSettings settings{};
-    settings.colorMode = static_cast<std::uint32_t>(actualMode_);
+    settings.colorMode = static_cast<std::uint32_t>(
+        swapHdr_ ? FFF3FPColorMode::MapToHdr : actualMode_);
     settings.reserved = 0;
     const auto hlgCompatibility = static_cast<std::uint32_t>(FFF3FPHdrCompatibility::Hlg);
     settings.transfer = hdrState.format == FFF3FPHdrFormat::Hlg ||
@@ -3911,6 +4224,16 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     sourceLimitedToNativeSize_ = limitToNativeSize;
     sourceCoverArt_ = coverArt;
     hasCachedVideo_ = true;
+    if (rtxEnabled_) {
+        ++rtxRouteGeneration_;
+        InvalidateRtxCache();
+        const auto destination = CalculateVideoDestination(width, height,
+            swapWidth_, swapHeight_, limitToNativeSize);
+        // RTX is an optional presentation stage. Any ordinary SDK/resource
+        // failure is deliberately contained here; the source cache remains
+        // valid and DrawCachedVideo will use the existing shader path.
+        (void)EnsureRtxResultForCurrentVideo(destination.width, destination.height);
+    }
     videoGeneration_.fetch_add(1);
     if (coverArt) RequestCoverBackdropRender();
     {
@@ -4229,7 +4552,8 @@ FFFResult PlayerVideoRenderer::DrawCoverBackdrop(ID3D11RenderTargetView* target)
     cachedVideoSettings_.sourceHeight = static_cast<float>(coverBackdropHeight_);
     cachedVideoSettings_.outputWidth = static_cast<float>(swapWidth_);
     cachedVideoSettings_.outputHeight = static_cast<float>(swapHeight_);
-    cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
+    cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(
+        swapHdr_ ? FFF3FPColorMode::MapToHdr : actualMode_);
     cachedVideoSettings_.reserved =
         coverBackdropTintArgb_.load(std::memory_order_acquire);
     context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
@@ -4300,6 +4624,8 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         destination = CalculateVideoDestination(sourceWidth_, sourceHeight_, swapWidth_,
             swapHeight_, sourceLimitedToNativeSize_);
     }
+    const auto rtxOutputWidth = destination.width;
+    const auto rtxOutputHeight = destination.height;
     // Apply the view transform (zoom + pan) around the destination center.
     // Zoom scales the fitted video box; pan offsets are normalized to the
     // unzoomed box and clamped so the zoomed view always covers the fitted box.
@@ -4322,8 +4648,15 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         destination.width = static_cast<std::uint32_t>(zoomedWidth);
         destination.height = static_cast<std::uint32_t>(zoomedHeight);
     }
+    const auto rtxResult = projection360 ? FFFResult::NotSupported :
+        EnsureRtxResultForCurrentVideo(rtxOutputWidth, rtxOutputHeight);
+    const bool useRtx = rtxResult == FFFResult::Success && hasCachedRtxVideo_ &&
+        rtxVideoProcessor_ != nullptr && rtxVideoProcessor_->ResultView() != nullptr;
     ID3D11ShaderResourceView* presentationViews[3]{};
-    if (projection360) {
+    if (useRtx) {
+        // The RTX result is already an RGB texture. It must bypass the YUV
+        // conversion shader and is sampled only during final composition.
+    } else if (projection360) {
         // The panorama projection is view-dependent. Scaling the equirectangular
         // image to the window first throws away source detail (and can distort
         // its 2:1 aspect ratio), especially in small windows. Sample the native
@@ -4344,9 +4677,14 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
     // scaler discrepancy.  SDR still writes ordinary Rec.709 code values to
     // the implicit SDR swap-chain contract, so DWM remains the sole owner of
     // the Windows HDR SDR-white adjustment.
-    const auto result = DrawWithShader(target, static_cast<float>(destination.x),
-        static_cast<float>(destination.y), static_cast<float>(destination.width),
-        static_cast<float>(destination.height), 0, presentationViews);
+    const auto result = useRtx
+        ? DrawRtxTexture(target, rtxVideoProcessor_->ResultView(),
+            rtxVideoProcessor_->ResultWidth(), rtxVideoProcessor_->ResultHeight(),
+            static_cast<float>(destination.x), static_cast<float>(destination.y),
+            static_cast<float>(destination.width), static_cast<float>(destination.height))
+        : DrawWithShader(target, static_cast<float>(destination.x),
+            static_cast<float>(destination.y), static_cast<float>(destination.width),
+            static_cast<float>(destination.height), 0, presentationViews);
     if (result == FFFResult::Success)
         actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
     return result;
@@ -4467,7 +4805,8 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
         const auto pipelineResult = EnsurePipeline(1, 1, 0, 8, 0, 0, false);
         if (pipelineResult != FFFResult::Success) return pipelineResult;
         cachedVideoSettings_ = {};
-        cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
+        cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(
+            swapHdr_ ? FFF3FPColorMode::MapToHdr : actualMode_);
         cachedVideoSettings_.sdrPeak = sdrPeakNits_;
         cachedVideoSettings_.hdrPeak = sdrPeakNits_;
         cachedVideoSettings_.paperWhite = paperWhiteNits_;
@@ -4583,6 +4922,9 @@ bool PlayerVideoRenderer::RequestRecoveryIfDeviceLostLocked() noexcept {
 }
 
 void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
+    if (rtxVideoProcessor_ != nullptr) rtxVideoProcessor_->ReleaseDeviceObjects();
+    ReleaseRtxInput();
+    InvalidateRtxCache();
     ReleaseVideoProcessor();
     ReleaseVideoProcessorInputSurface();
     ReleaseCoverBackdropResources();
@@ -4609,6 +4951,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     if (sampler_ != nullptr) { sampler_->Release(); sampler_ = nullptr; }
     if (pixelShader_ != nullptr) { pixelShader_->Release(); pixelShader_ = nullptr; }
     if (scalePixelShader_ != nullptr) { scalePixelShader_->Release(); scalePixelShader_ = nullptr; }
+    if (rtxTexturePixelShader_ != nullptr) { rtxTexturePixelShader_->Release(); rtxTexturePixelShader_ = nullptr; }
     if (coverBackdropPixelShader_ != nullptr) {
         coverBackdropPixelShader_->Release(); coverBackdropPixelShader_ = nullptr;
     }
@@ -4651,6 +4994,10 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
     ReleaseVideoProcessor();
     ReleaseVideoProcessorInputSurface();
+    if (rtxVideoProcessor_ != nullptr) rtxVideoProcessor_->Invalidate(true);
+    ReleaseRtxInput();
+    ++rtxRouteGeneration_;
+    InvalidateRtxCache();
     ReleaseCoverBackdropResources();
     ReleaseScaleResources();
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {

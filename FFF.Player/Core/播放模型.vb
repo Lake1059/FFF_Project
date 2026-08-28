@@ -12,6 +12,13 @@ Public Enum 色彩输出模式 As UInteger
     峰值映射HDR = 2
 End Enum
 
+Public Enum RTX视频路径 As UInteger
+    无 = 0
+    VSR = 1
+    TrueHDR = 2
+    VSR后TrueHDR = 3
+End Enum
+
 Public Enum 视频缩放模式 As UInteger
     着色器 = 0
     D3D11视频处理器 = 1
@@ -412,6 +419,34 @@ Public NotInheritable Class 定时文字状态
     Public ReadOnly Property 精灵缓存未命中次数 As ULong
     Public ReadOnly Property 后备缓冲获取次数 As ULong
     Public ReadOnly Property 合成像素着色器调用次数 As ULong
+End Class
+
+Public NotInheritable Class RTX视频状态
+    Friend Sub New(值 As 原生RTX视频状态)
+        请求已启用 = 值.请求已启用 <> 0
+        已初始化 = 值.已初始化 <> 0
+        VSR可用 = 值.VSR可用 <> 0
+        TrueHDR可用 = 值.TrueHDR可用 <> 0
+        当前启用 = 值.当前启用 <> 0
+        正在回退 = 值.正在回退 <> 0
+        当前路径 = CType(值.当前路径, RTX视频路径)
+        已评估帧数 = 值.已评估帧数
+        缓存命中次数 = 值.缓存命中次数
+        缓存未命中次数 = 值.缓存未命中次数
+        评估耗时100纳秒 = 值.评估耗时100纳秒
+    End Sub
+
+    Public ReadOnly Property 请求已启用 As Boolean
+    Public ReadOnly Property 已初始化 As Boolean
+    Public ReadOnly Property VSR可用 As Boolean
+    Public ReadOnly Property TrueHDR可用 As Boolean
+    Public ReadOnly Property 当前启用 As Boolean
+    Public ReadOnly Property 正在回退 As Boolean
+    Public ReadOnly Property 当前路径 As RTX视频路径
+    Public ReadOnly Property 已评估帧数 As ULong
+    Public ReadOnly Property 缓存命中次数 As ULong
+    Public ReadOnly Property 缓存未命中次数 As ULong
+    Public ReadOnly Property 评估耗时100纳秒 As ULong
 End Class
 
 Public NotInheritable Class 播放器弹幕事件参数

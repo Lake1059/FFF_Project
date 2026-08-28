@@ -2,6 +2,7 @@
 
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Hdr/HdrProcessor.h"
+#include "3FP/Render/RtxVideoProcessor.h"
 
 #include <cstdint>
 #include <atomic>
@@ -115,6 +116,10 @@ public:
 
     FFFResult SetWindow(HWND window) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
+    FFFResult SetRtxVideoEnabled(bool enabled) noexcept;
+    bool RtxVideoEnabled() const noexcept;
+    FFF3FPRtxVideoStatus RtxVideoStatus() const noexcept;
+    std::string RtxVideoError() const;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
@@ -214,6 +219,16 @@ private:
     FFFResult DrawWithShader(ID3D11RenderTargetView* target, float x, float y,
         float width, float height, std::uint32_t effect = 0,
         ID3D11ShaderResourceView* const* sourceViews = nullptr) noexcept;
+    FFFResult EnsureRtxInput(std::uint32_t width, std::uint32_t height,
+        DXGI_FORMAT format) noexcept;
+    FFFResult DrawRtxTexture(ID3D11RenderTargetView* target,
+        ID3D11ShaderResourceView* source, std::uint32_t sourceWidth,
+        std::uint32_t sourceHeight, float x, float y, float width,
+        float height) noexcept;
+    FFFResult EnsureRtxResultForCurrentVideo(std::uint32_t outputWidth,
+        std::uint32_t outputHeight) noexcept;
+    void ReleaseRtxInput() noexcept;
+    void InvalidateRtxCache() noexcept;
     FFFResult PrepareScaledVideo(std::uint32_t outputWidth, std::uint32_t outputHeight,
         ID3D11ShaderResourceView** views) noexcept;
     FFFResult EnsurePlaneScaleChain(std::size_t plane, std::uint32_t sourceWidth,
@@ -281,6 +296,7 @@ private:
     ID3D11PixelShader* coverBackdropPixelShader_;
     ID3D11PixelShader* timedTextPixelShader_;
     ID3D11PixelShader* scalePixelShader_;
+    ID3D11PixelShader* rtxTexturePixelShader_;
     ID3D11SamplerState* sampler_;
     ID3D11SamplerState* pointSampler_;
     ID3D11SamplerState* panoramaSampler_;
@@ -299,6 +315,19 @@ private:
     ID3D11VideoProcessor* videoProcessor_;
     ID3D11Texture2D* videoProcessorRenderTexture_;
     ID3D11RenderTargetView* videoProcessorRenderTarget_;
+    std::unique_ptr<RtxVideoProcessor> rtxVideoProcessor_;
+    ID3D11Texture2D* rtxInputTexture_;
+    ID3D11RenderTargetView* rtxInputTarget_;
+    std::uint32_t rtxInputWidth_;
+    std::uint32_t rtxInputHeight_;
+    DXGI_FORMAT rtxInputFormat_;
+    bool rtxEnabled_;
+    bool hasCachedRtxVideo_;
+    bool rtxCacheAttempted_;
+    std::uint64_t rtxCacheKey_;
+    std::uint64_t rtxRouteGeneration_;
+    std::uint64_t rtxCacheHits_;
+    std::uint64_t rtxCacheMisses_;
     ID3D11Texture2D* coverBackdropTexture_;
     ID3D11ShaderResourceView* coverBackdropView_;
     ID3D11Texture2D* coverBackdropSourceTexture_;
@@ -440,6 +469,9 @@ private:
     bool hdrSupportValid_;
     bool hdrSupported_;
     bool forceHdrOutput_;
+    // RTX may request an HDR presentation contract for an SDR source without
+    // changing the public FFF3FPColorMode snapshot semantics.
+    bool rtxHdrOutputRequested_;
     std::chrono::steady_clock::time_point hdrSupportCheckedAt_;
     bool hdrSwapChainRejected_;
     // Bounded caches are keyed by the immutable command content contract.  The

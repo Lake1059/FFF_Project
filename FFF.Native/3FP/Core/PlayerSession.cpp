@@ -1015,6 +1015,38 @@ FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sd
     });
     return FFFResult::Success;
 }
+FFFResult PlayerSession::SetRtxVideoEnabled(const bool enabled) noexcept {
+    Enqueue([this, enabled] {
+        const auto result = videoRenderer_.SetRtxVideoEnabled(enabled);
+        if (result != FFFResult::Success) {
+            Fail(result, videoRenderer_.LastError(), "rtx-video");
+            return;
+        }
+        const auto redrawResult = videoRenderer_.Redraw();
+        if (redrawResult == FFFResult::DeviceFailure &&
+            videoRenderer_.RequestRecoveryIfDeviceLost()) return;
+        if (redrawResult != FFFResult::Success &&
+            redrawResult != FFFResult::InvalidState) {
+            Fail(redrawResult, videoRenderer_.LastError(), "rtx-video-redraw");
+            return;
+        }
+        PublishSnapshot();
+    });
+    return FFFResult::Success;
+}
+
+FFFResult PlayerSession::GetRtxVideoStatus(FFF3FPRtxVideoStatus& status) const noexcept {
+    if (status.version != 1 || status.size < sizeof(FFF3FPRtxVideoStatus))
+        return FFFResult::InvalidArgument;
+    status = videoRenderer_.RtxVideoStatus();
+    status.size = sizeof(FFF3FPRtxVideoStatus);
+    status.version = 1;
+    return FFFResult::Success;
+}
+
+std::string PlayerSession::RtxVideoError() const {
+    return videoRenderer_.RtxVideoError();
+}
 FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
     if (window != nullptr && !IsWindow(static_cast<HWND>(window))) return FFFResult::InvalidArgument;
     Enqueue([this, window] {

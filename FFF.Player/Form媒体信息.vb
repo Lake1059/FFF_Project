@@ -1,3 +1,5 @@
+Imports System.Globalization
+
 ''' <summary>播放器的实时诊断与完整媒体元数据视图。</summary>
 Public Class Form媒体信息
     Private ReadOnly 获取媒体 As Func(Of 媒体信息)
@@ -9,6 +11,8 @@ Public Class Form媒体信息
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
     Private ReadOnly 获取输出尺寸 As Func(Of Size)
     Private ReadOnly 获取音频峰值 As Func(Of Single())
+    Private ReadOnly 获取RTX状态 As Func(Of RTX视频状态)
+    Private ReadOnly 获取RTX错误 As Func(Of String)
     Private ReadOnly 响度条 As LakeUI.ExcellentProgressBar()
     Private ReadOnly 刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 200}
     Private ReadOnly 响度刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 67}
@@ -26,14 +30,17 @@ Public Class Form媒体信息
                    Optional danmakuProvider As Func(Of 弹幕资料库) = Nothing,
                    Optional wasapiProvider As Func(Of WASAPI共享模式) = Nothing,
                    Optional outputSizeProvider As Func(Of Size) = Nothing,
-                   Optional audioPeakProvider As Func(Of Single()) = Nothing)
+                   Optional audioPeakProvider As Func(Of Single()) = Nothing,
+                   Optional rtxStatusProvider As Func(Of RTX视频状态) = Nothing,
+                   Optional rtxErrorProvider As Func(Of String) = Nothing)
         InitializeComponent()
         响度条 = {EPB_L, EPB_R, EPB_C, EPB_LFE, EPB_SL, EPB_SR, EPB_BL, EPB_BR}
         获取媒体 = mediaProvider : 获取快照 = snapshotProvider
         获取字幕状态 = subtitleStatusProvider : 获取弹幕状态 = danmakuStatusProvider
         获取字幕 = subtitleProvider : 获取弹幕 = danmakuProvider
         获取WASAPI模式 = wasapiProvider : 获取输出尺寸 = outputSizeProvider
-        获取音频峰值 = audioPeakProvider
+        获取音频峰值 = audioPeakProvider : 获取RTX状态 = rtxStatusProvider
+        获取RTX错误 = rtxErrorProvider
     End Sub
 
     Private Sub Form媒体信息_Load(sender As Object, e As EventArgs) Handles MyBase.Load
@@ -123,7 +130,11 @@ Public Class Form媒体信息
     Private Sub 刷新列表(信息 As 媒体信息, 快照 As 播放器快照)
         Dim HDR签名 = If(快照 Is Nothing, String.Empty,
             $"{快照.HDR规格}:{快照.HDR处理路径}:{快照.动态HDR元数据有效}:{快照.HDR回退有效}:{快照.显示器峰值尼特}:{快照.HDR有效目标峰值尼特}")
-        Dim 签名 = If(信息 Is Nothing, "", $"{信息.格式}|{信息.文件大小}|{信息.时长100纳秒}|{HDR签名}|{String.Join(";", 信息.流.Select(Function(x) $"{x.索引}:{x.流ID}:{x.编码}:{x.比特率}:{x.流大小}:{x.位深度}:{x.标称帧率分子}/{x.标称帧率分母}:{x.HDR格式}:{x.HDR兼容规格}:{x.HDR处理说明}:{x.主显示器色域}:{x.最大内容光照}:{x.原始采样位数}:{x.未压缩内容MD5}"))}")
+        Dim RTX状态 = 安全获取(获取RTX状态)
+        Dim RTX错误 = 安全获取(获取RTX错误)
+        Dim RTX签名 = If(RTX状态 Is Nothing, String.Empty,
+            $"{RTX状态.请求已启用}:{RTX状态.已初始化}:{RTX状态.VSR可用}:{RTX状态.TrueHDR可用}:{RTX状态.当前启用}:{RTX状态.正在回退}:{RTX状态.当前路径}:{RTX状态.已评估帧数}:{RTX状态.缓存命中次数}:{RTX状态.缓存未命中次数}:{RTX错误}")
+        Dim 签名 = If(信息 Is Nothing, "", $"{信息.格式}|{信息.文件大小}|{信息.时长100纳秒}|{HDR签名}|{RTX签名}|{String.Join(";", 信息.流.Select(Function(x) $"{x.索引}:{x.流ID}:{x.编码}:{x.比特率}:{x.流大小}:{x.位深度}:{x.标称帧率分子}/{x.标称帧率分母}:{x.HDR格式}:{x.HDR兼容规格}:{x.HDR处理说明}:{x.主显示器色域}:{x.最大内容光照}:{x.原始采样位数}:{x.未压缩内容MD5}"))}")
         If 签名 = 元数据签名 Then Return
         元数据签名 = 签名
         UltraDetailListView1.BeginUpdate()
@@ -222,6 +233,20 @@ Public Class Form媒体信息
                     添加条目如果有值(group, "未压缩内容 MD5", 流.未压缩内容MD5)
                 End If
             Next
+            添加分组("rtx", "RTX 视频增强")
+            If RTX状态 Is Nothing Then
+                添加条目("rtx", "状态", "尚未建立播放器会话")
+            Else
+                添加条目("rtx", "请求", If(RTX状态.请求已启用, "已启用", "未启用"))
+                添加条目("rtx", "当前路径", RTX路径文本(RTX状态.当前路径))
+                添加条目("rtx", "当前帧", If(RTX状态.当前启用, "已使用 RTX 结果", "回退原有渲染"))
+                添加条目("rtx", "NGX 初始化", If(RTX状态.已初始化, "成功", "未初始化"))
+                添加条目("rtx", "VSR 能力", If(RTX状态.VSR可用, "可用", "不可用"))
+                添加条目("rtx", "TrueHDR 能力", If(RTX状态.TrueHDR可用, "可用", "不可用"))
+                添加条目("rtx", "已评估帧数", RTX状态.已评估帧数.ToString(CultureInfo.InvariantCulture))
+                添加条目("rtx", "缓存命中/未命中", $"{RTX状态.缓存命中次数}/{RTX状态.缓存未命中次数}")
+                添加条目("rtx", "最近原因", If(String.IsNullOrWhiteSpace(RTX错误), "无", RTX错误))
+            End If
         Finally
             UltraDetailListView1.EndUpdate() : UltraDetailListView1.RefreshItems()
         End Try
@@ -230,6 +255,15 @@ Public Class Form媒体信息
     Private Sub 添加分组(name As String, text As String)
         UltraDetailListView1.Groups.Add(New LakeUI.UltraDetailListView.ListGroup(name, text))
     End Sub
+
+    Private Shared Function RTX路径文本(路径 As RTX视频路径) As String
+        Select Case 路径
+            Case RTX视频路径.VSR : Return "VSR"
+            Case RTX视频路径.TrueHDR : Return "TrueHDR"
+            Case RTX视频路径.VSR后TrueHDR : Return "VSR → TrueHDR"
+            Case Else : Return "无"
+        End Select
+    End Function
 
     Private Shared Function 合并杜比层信息(流 As 媒体流信息) As String
         Dim 结构 = If(流.有杜比视界RPU, "BL+RPU", "BL")

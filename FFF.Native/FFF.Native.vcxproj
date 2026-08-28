@@ -77,6 +77,14 @@
   <PropertyGroup Condition="'$(Platform)'=='x64'">
     <TargetName>FFF.Native</TargetName>
     <LibassRoot>$(ProjectDir)..\third_party\vcpkg_installed\x64-windows</LibassRoot>
+    <RtxVideoEnabled Condition="'$(RtxVideoEnabled)' == ''">0</RtxVideoEnabled>
+    <RtxVideoSdkRoot Condition="'$(RtxVideoSdkRoot)' == '' and Exists('$(ProjectDir)..\tools\RTX\include\nvsdk_ngx.h') and Exists('$(ProjectDir)..\tools\RTX\lib\Windows\x64\nvsdk_ngx_d.lib') and Exists('$(ProjectDir)..\tools\RTX\lib\Windows\x64\nvsdk_ngx_d_dbg.lib')">$(ProjectDir)..\tools\RTX</RtxVideoSdkRoot>
+    <RtxVideoSdkRoot Condition="'$(RtxVideoSdkRoot)' == ''">$(NV_RTX_VIDEO_SDK)</RtxVideoSdkRoot>
+    <RtxVideoApplicationId Condition="'$(RtxVideoApplicationId)' == ''">0</RtxVideoApplicationId>
+    <RtxVideoSdkInclude Condition="'$(RtxVideoEnabled)' == '1' and '$(RtxVideoSdkRoot)' != ''">$(RtxVideoSdkRoot)\include</RtxVideoSdkInclude>
+    <RtxVideoSdkLibraryDirectory Condition="'$(RtxVideoEnabled)' == '1' and '$(RtxVideoSdkRoot)' != ''">$(RtxVideoSdkRoot)\lib\Windows\x64</RtxVideoSdkLibraryDirectory>
+    <RtxVideoSdkLibrary Condition="'$(RtxVideoEnabled)' == '1' and '$(Configuration)' == 'Debug'">nvsdk_ngx_d_dbg.lib</RtxVideoSdkLibrary>
+    <RtxVideoSdkLibrary Condition="'$(RtxVideoEnabled)' == '1' and '$(Configuration)' == 'Release'">nvsdk_ngx_d.lib</RtxVideoSdkLibrary>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -122,20 +130,20 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;FFF_ENABLE_RTX_VIDEO=$(RtxVideoEnabled);FFF_RTX_VIDEO_APPLICATION_ID=$(RtxVideoApplicationId);%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(LibassRoot)\include;$(RtxVideoSdkInclude);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(LibassRoot)\debug\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(LibassRoot)\debug\lib;$(RtxVideoSdkLibraryDirectory);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(RtxVideoSdkLibrary);ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>ass-9.dll;avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;swscale-10.dll;avfilter-12.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
@@ -148,20 +156,20 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;FFF_ENABLE_RTX_VIDEO=$(RtxVideoEnabled);FFF_RTX_VIDEO_APPLICATION_ID=$(RtxVideoApplicationId);%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(LibassRoot)\include;$(RtxVideoSdkInclude);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(LibassRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(LibassRoot)\lib;$(RtxVideoSdkLibraryDirectory);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(RtxVideoSdkLibrary);ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>ass-9.dll;avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;swscale-10.dll;avfilter-12.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
@@ -174,6 +182,7 @@
     <ClInclude Include="3FP\Core\PlayerSession.h" />
     <ClInclude Include="3FP\Hdr\HdrProcessor.h" />
     <ClInclude Include="3FP\Render\ShaderBytecode.h" />
+    <ClInclude Include="3FP\Render\RtxVideoProcessor.h" />
     <ClInclude Include="3FP\Render\VideoRenderer.h" />
     <ClInclude Include="3FR\Api\FFF.Native.Api.h" />
     <ClInclude Include="3FR\Audio\AudioTrackEncoder.h" />
@@ -193,6 +202,7 @@
     <ClCompile Include="3FP\Core\PlayerSession.cpp" />
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp" />
     <ClCompile Include="3FP\Render\VideoRenderer.cpp" />
+    <ClCompile Include="3FP\Render\RtxVideoProcessor.cpp" />
     <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp" />
     <ClCompile Include="3FP\Subtitle\BitmapSubtitleDecoder.cpp" />
     <ClCompile Include="3FR\Api\NativeApi.cpp" />
