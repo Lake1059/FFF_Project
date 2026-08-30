@@ -2711,7 +2711,10 @@ void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame
     snapshot_.frameIndex = targetFrame >= 0 && position > 0 ? targetFrame - 1 : -1;
     ++snapshot_.timelineGeneration;
     ResetClock(position); if (audioRenderer_) audioRenderer_->Reset(position);
-    PublishSnapshot();
+    if (state_.load() == FFF3FPState::Ended)
+        SetState(FFF3FPState::Paused, "seek");
+    else
+        PublishSnapshot();
     if (externalFormat_ && externalAudioStream_ >= 0) {
         auto externalPosition = std::max<std::int64_t>(0, position - externalAudioOffset100ns_);
         auto* stream = externalFormat_->streams[externalAudioStream_];

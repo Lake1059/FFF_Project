@@ -888,8 +888,7 @@ Partial Class Form1
         ' 
         ' P_剪辑区间进度条容器
         ' 
-        P_剪辑区间进度条容器.BackColor = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
-        P_剪辑区间进度条容器.BackColor1 = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
+        P_剪辑区间进度条容器.BackColor1 = Color.FromArgb(CByte(120), CByte(0), CByte(0), CByte(0))
         P_剪辑区间进度条容器.BorderSize = 0
         P_剪辑区间进度条容器.Dock = DockStyle.Fill
         P_剪辑区间进度条容器.Location = New Point(0, 35)

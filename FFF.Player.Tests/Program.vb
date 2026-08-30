@@ -1589,6 +1589,8 @@ Friend Module Program
             Dim 时间轴 = 控制器.进度条
             断言(时间轴.BackColor = Color.Transparent,
                 "剪辑时间轴没有应用透明背景色。")
+            断言(TypeOf 时间轴 Is LakeUI.V5_IGpuPresentationSource,
+                "剪辑时间轴没有接入 LakeUI V5 GPU 呈现路径。")
             Dim 时间轴类型 = 时间轴.GetType()
             Dim 更新播放状态 = 时间轴类型.GetMethod("更新播放状态", 标志)
             Dim 设为入点 = 时间轴类型.GetMethod("设为入点", 标志)
