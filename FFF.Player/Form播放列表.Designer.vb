@@ -25,7 +25,7 @@ Partial Class Form播放列表
         Dim ListColumn1 As LakeUI.UltraDetailListView.ListColumn = New LakeUI.UltraDetailListView.ListColumn()
         ModernPanel1 = New LakeUI.ModernPanel()
         UltraDetailListView1 = New LakeUI.UltraDetailListView()
-        Panel1 = New Panel()
+        Panel1 = New LakeUI.ModernPanel()
         MCB_播放模式 = New LakeUI.ModernComboBox()
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MB_定位 = New LakeUI.ModernButton()
@@ -90,6 +90,9 @@ Partial Class Form播放列表
         ' 
         ' Panel1
         ' 
+        Panel1.BackColor = Color.Transparent
+        Panel1.BackColor1 = Color.Transparent
+        Panel1.BorderSize = 0
         Panel1.Controls.Add(MCB_播放模式)
         Panel1.Controls.Add(JustEmptyControl1)
         Panel1.Controls.Add(MB_定位)
@@ -277,7 +280,7 @@ Partial Class Form播放列表
     End Sub
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
-    Friend WithEvents Panel1 As Panel
+    Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents JustEmptyControl4 As LakeUI.JustEmptyControl
     Friend WithEvents MB_移除 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl2 As LakeUI.JustEmptyControl

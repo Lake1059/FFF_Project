@@ -18,7 +18,7 @@ Friend NotInheritable Class 播放器剪辑区间控制器
     Private ReadOnly 画面控件 As 播放器画面控件
     Private ReadOnly 模式按钮 As LakeUI.ModernButton
     Private ReadOnly 操作容器 As Control
-    Private ReadOnly 按钮容器 As Panel
+    Private ReadOnly 按钮容器 As LakeUI.ModernPanel
     Private ReadOnly 传递按钮 As LakeUI.ModernButton
     Private 当前模式已启用 As Boolean
     Private 已有媒体快照 As Boolean
@@ -28,7 +28,7 @@ Friend NotInheritable Class 播放器剪辑区间控制器
                    模式按钮值 As LakeUI.ModernButton,
                    操作容器值 As Control,
                    进度条容器 As Control,
-                   按钮容器值 As Panel,
+                   按钮容器值 As LakeUI.ModernPanel,
                    传递按钮值 As LakeUI.ModernButton)
         ArgumentNullException.ThrowIfNull(播放控制器值)
         ArgumentNullException.ThrowIfNull(画面控件值)

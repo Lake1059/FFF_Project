@@ -23,40 +23,40 @@ Partial Class Form设置_字幕
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
-        Panel7 = New Panel()
+        Panel7 = New LakeUI.ModernPanel()
         HtmlColorLabel8 = New LakeUI.HtmlColorLabel()
         MCB_尺寸缩放方式 = New LakeUI.ModernComboBox()
-        Panel6 = New Panel()
+        Panel6 = New LakeUI.ModernPanel()
         MB_重置其他位置样式 = New LakeUI.ModernButton()
         JustEmptyControl3 = New LakeUI.JustEmptyControl()
         MB_设置其他位置字体样式 = New LakeUI.ModernButton()
-        Panel5 = New Panel()
+        Panel5 = New LakeUI.ModernPanel()
         HtmlColorLabel6 = New LakeUI.HtmlColorLabel()
         MCB_底部对齐方式 = New LakeUI.ModernComboBox()
-        Panel4 = New Panel()
+        Panel4 = New LakeUI.ModernPanel()
         HtmlColorLabel5 = New LakeUI.HtmlColorLabel()
         ETB_字幕底部间距 = New LakeUI.ExcellentTrackBar()
-        Panel3 = New Panel()
+        Panel3 = New LakeUI.ModernPanel()
         HtmlColorLabel4 = New LakeUI.HtmlColorLabel()
         ETB_字幕行间距 = New LakeUI.ExcellentTrackBar()
-        Panel2 = New Panel()
+        Panel2 = New LakeUI.ModernPanel()
         MB_重置第二行样式和颜色 = New LakeUI.ModernButton()
         JustEmptyControl5 = New LakeUI.JustEmptyControl()
         MB_设置第二行文字颜色 = New LakeUI.ModernButton()
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MB_设置第二行字体样式 = New LakeUI.ModernButton()
-        Panel1 = New Panel()
+        Panel1 = New LakeUI.ModernPanel()
         MB_重置第一行样式和颜色 = New LakeUI.ModernButton()
         JustEmptyControl4 = New LakeUI.JustEmptyControl()
         MB_设置第一行文字颜色 = New LakeUI.ModernButton()
         JustEmptyControl2 = New LakeUI.JustEmptyControl()
         MB_设置第一行字体样式 = New LakeUI.ModernButton()
         HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
-        Panel8 = New Panel()
+        Panel8 = New LakeUI.ModernPanel()
         MCB_字幕阴影样式 = New LakeUI.ModernComboBox()
         JustEmptyControl6 = New LakeUI.JustEmptyControl()
         MCB_字幕描边样式 = New LakeUI.ModernComboBox()
-        Panel9 = New Panel()
+        Panel9 = New LakeUI.ModernPanel()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
         ETB_字幕不透明度 = New LakeUI.ExcellentTrackBar()
         ModernPanel1.SuspendLayout()
@@ -94,6 +94,9 @@ Partial Class Form设置_字幕
         ' 
         ' Panel7
         ' 
+        Panel7.BackColor = Color.Transparent
+        Panel7.BackColor1 = Color.Transparent
+        Panel7.BorderSize = 0
         Panel7.Controls.Add(HtmlColorLabel8)
         Panel7.Controls.Add(MCB_尺寸缩放方式)
         Panel7.Dock = DockStyle.Top
@@ -150,6 +153,9 @@ Partial Class Form设置_字幕
         ' 
         ' Panel6
         ' 
+        Panel6.BackColor = Color.Transparent
+        Panel6.BackColor1 = Color.Transparent
+        Panel6.BorderSize = 0
         Panel6.Controls.Add(MB_重置其他位置样式)
         Panel6.Controls.Add(JustEmptyControl3)
         Panel6.Controls.Add(MB_设置其他位置字体样式)
@@ -200,6 +206,9 @@ Partial Class Form设置_字幕
         ' 
         ' Panel5
         ' 
+        Panel5.BackColor = Color.Transparent
+        Panel5.BackColor1 = Color.Transparent
+        Panel5.BorderSize = 0
         Panel5.Controls.Add(HtmlColorLabel6)
         Panel5.Controls.Add(MCB_底部对齐方式)
         Panel5.Dock = DockStyle.Top
@@ -254,6 +263,9 @@ Partial Class Form设置_字幕
         ' 
         ' Panel4
         ' 
+        Panel4.BackColor = Color.Transparent
+        Panel4.BackColor1 = Color.Transparent
+        Panel4.BorderSize = 0
         Panel4.Controls.Add(HtmlColorLabel5)
         Panel4.Controls.Add(ETB_字幕底部间距)
         Panel4.Dock = DockStyle.Top
@@ -301,6 +313,9 @@ Partial Class Form设置_字幕
         ' 
         ' Panel3
         ' 
+        Panel3.BackColor = Color.Transparent
+        Panel3.BackColor1 = Color.Transparent
+        Panel3.BorderSize = 0
         Panel3.Controls.Add(HtmlColorLabel4)
         Panel3.Controls.Add(ETB_字幕行间距)
         Panel3.Dock = DockStyle.Top
@@ -349,6 +364,9 @@ Partial Class Form设置_字幕
         ' 
         ' Panel2
         ' 
+        Panel2.BackColor = Color.Transparent
+        Panel2.BackColor1 = Color.Transparent
+        Panel2.BorderSize = 0
         Panel2.Controls.Add(MB_重置第二行样式和颜色)
         Panel2.Controls.Add(JustEmptyControl5)
         Panel2.Controls.Add(MB_设置第二行文字颜色)
@@ -424,6 +442,9 @@ Partial Class Form设置_字幕
         ' 
         ' Panel1
         ' 
+        Panel1.BackColor = Color.Transparent
+        Panel1.BackColor1 = Color.Transparent
+        Panel1.BorderSize = 0
         Panel1.Controls.Add(MB_重置第一行样式和颜色)
         Panel1.Controls.Add(JustEmptyControl4)
         Panel1.Controls.Add(MB_设置第一行文字颜色)
@@ -512,6 +533,9 @@ Partial Class Form设置_字幕
         ' 
         ' Panel8
         ' 
+        Panel8.BackColor = Color.Transparent
+        Panel8.BackColor1 = Color.Transparent
+        Panel8.BorderSize = 0
         Panel8.Controls.Add(MCB_字幕阴影样式)
         Panel8.Controls.Add(JustEmptyControl6)
         Panel8.Controls.Add(MCB_字幕描边样式)
@@ -594,6 +618,9 @@ Partial Class Form设置_字幕
         ' 
         ' Panel9
         ' 
+        Panel9.BackColor = Color.Transparent
+        Panel9.BackColor1 = Color.Transparent
+        Panel9.BorderSize = 0
         Panel9.Controls.Add(HtmlColorLabel1)
         Panel9.Controls.Add(ETB_字幕不透明度)
         Panel9.Dock = DockStyle.Top
@@ -672,26 +699,26 @@ Partial Class Form设置_字幕
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel2 As LakeUI.HtmlColorLabel
-    Friend WithEvents Panel1 As Panel
+    Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents MB_重置第一行样式和颜色 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl2 As LakeUI.JustEmptyControl
     Friend WithEvents MB_设置第一行字体样式 As LakeUI.ModernButton
-    Friend WithEvents Panel2 As Panel
+    Friend WithEvents Panel2 As LakeUI.ModernPanel
     Friend WithEvents MB_重置第二行样式和颜色 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl1 As LakeUI.JustEmptyControl
     Friend WithEvents MB_设置第二行字体样式 As LakeUI.ModernButton
-    Friend WithEvents Panel3 As Panel
+    Friend WithEvents Panel3 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel4 As LakeUI.HtmlColorLabel
-    Friend WithEvents Panel4 As Panel
+    Friend WithEvents Panel4 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel5 As LakeUI.HtmlColorLabel
-    Friend WithEvents Panel5 As Panel
+    Friend WithEvents Panel5 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel6 As LakeUI.HtmlColorLabel
     Friend WithEvents MCB_底部对齐方式 As LakeUI.ModernComboBox
-    Friend WithEvents Panel6 As Panel
+    Friend WithEvents Panel6 As LakeUI.ModernPanel
     Friend WithEvents MB_重置其他位置样式 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl3 As LakeUI.JustEmptyControl
     Friend WithEvents MB_设置其他位置字体样式 As LakeUI.ModernButton
-    Friend WithEvents Panel7 As Panel
+    Friend WithEvents Panel7 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel8 As LakeUI.HtmlColorLabel
     Friend WithEvents MCB_尺寸缩放方式 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl5 As LakeUI.JustEmptyControl
@@ -700,11 +727,11 @@ Partial Class Form设置_字幕
     Friend WithEvents MB_设置第一行文字颜色 As LakeUI.ModernButton
     Friend WithEvents ETB_字幕行间距 As LakeUI.ExcellentTrackBar
     Friend WithEvents ETB_字幕底部间距 As LakeUI.ExcellentTrackBar
-    Friend WithEvents Panel8 As Panel
+    Friend WithEvents Panel8 As LakeUI.ModernPanel
     Friend WithEvents MCB_字幕阴影样式 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl6 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_字幕描边样式 As LakeUI.ModernComboBox
-    Friend WithEvents Panel9 As Panel
+    Friend WithEvents Panel9 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents ETB_字幕不透明度 As LakeUI.ExcellentTrackBar
 End Class

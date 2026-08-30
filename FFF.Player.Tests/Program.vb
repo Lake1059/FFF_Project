@@ -175,13 +175,6 @@ Friend Module Program
                 Console.WriteLine("GPU 与 CPU 解码统一自有高质量缩放路径通过。")
                 Return 0
             End If
-            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--rtx-regression", StringComparison.OrdinalIgnoreCase) Then
-                Dim RTX测试路径 = Path.GetFullPath(参数(1))
-                检查文件(RTX测试路径)
-                测试RTX视频状态(RTX测试路径)
-                Console.WriteLine("RTX 视频增强状态与回退原因诊断通过。")
-                Return 0
-            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--scaling-frequency-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试高频缩放低通()
                 Console.WriteLine("Hermite/Lanczos3 多级缩放的高频低通回归通过。")
@@ -1290,53 +1283,6 @@ Friend Module Program
         End Using
     End Sub
 
-    Private Sub 测试RTX视频状态(视频路径 As String)
-        Using 窗口 As New Form1 With {
-            .ShowInTaskbar = False,
-            .StartPosition = FormStartPosition.Manual,
-            .Location = New Drawing.Point(-32000, -32000),
-            .ClientSize = New Drawing.Size(640, 360)}
-            窗口.Show()
-            Application.DoEvents()
-            Dim 标志 = BindingFlags.Instance Or BindingFlags.NonPublic
-            Dim 控制器 = DirectCast(GetType(Form1).GetField("播放控制器", 标志)?.GetValue(窗口), 播放器控制器)
-            断言(控制器 IsNot Nothing, "无法取得 RTX 回归所需的播放器控制器。")
-            控制器.设置音量(0.0F)
-            控制器.打开媒体(视频路径)
-            控制器.设置RTX视频增强(True)
-            Dim 计时 = Stopwatch.StartNew()
-            Dim 最后状态 As RTX视频状态 = Nothing
-            Do
-                Application.DoEvents()
-                最后状态 = 控制器.安全读取RTX状态()
-                Dim 快照 = 控制器.安全读取快照()
-                If 快照 IsNot Nothing AndAlso 快照.已呈现视频帧数 >= 3UL Then Exit Do
-                If 快照 IsNot Nothing AndAlso 快照.状态 = 播放状态.失败 Then
-                    Throw New InvalidOperationException("RTX 回归播放失败。")
-                End If
-                If 计时.Elapsed >= TimeSpan.FromSeconds(30) Then
-                    Throw New TimeoutException("等待 RTX 回归首帧超时。")
-                End If
-                Thread.Sleep(5)
-            Loop
-            最后状态 = 控制器.安全读取RTX状态()
-            Dim 错误 = 控制器.安全读取RTX错误()
-            断言(最后状态 IsNot Nothing AndAlso 最后状态.请求已启用,
-               "RTX 回归没有保留启用请求。")
-            If 最后状态.当前启用 Then
-                断言(最后状态.当前路径 <> RTX视频路径.无 AndAlso 最后状态.已评估帧数 > 0UL,
-                   "RTX 回归报告已使用，但没有有效路径或评估帧数。")
-            Else
-                断言(Not String.IsNullOrWhiteSpace(错误),
-                   "RTX 回归回退时没有提供失败原因。")
-            End If
-            Console.WriteLine($"RTX requested={最后状态.请求已启用}, initialized={最后状态.已初始化}, " &
-                              $"VSR={最后状态.VSR可用}, TrueHDR={最后状态.TrueHDR可用}, " &
-                              $"active={最后状态.当前启用}, path={最后状态.当前路径}, " &
-                              $"evaluated={最后状态.已评估帧数}, reason={错误}")
-        End Using
-    End Sub
-
     Private Sub 测试播放中HDR交换链切换(视频路径 As String)
         Using 输出窗口 As New Form With {
             .ClientSize = New Drawing.Size(960, 540), .ShowInTaskbar = False,
@@ -1445,11 +1391,7 @@ Friend Module Program
             Dim 画面 = DirectCast(GetType(Form1).GetField("画面控件", 标志)?.GetValue(窗口), 播放器画面控件)
             断言(控制器 IsNot Nothing AndAlso 信息呈现器 IsNot Nothing AndAlso 画面 IsNot Nothing,
                "无法取得完整播放器 HDR 回归所需的控制器、信息图层或画面控件。")
-            ' 自动化测试没有交互用户；跳过显示器 HDR 能力不足时的强制输出确认框。
-            Dim HDR确认字段 = GetType(Form1).GetField("已跳过HDR强制确认", 标志)
-            HDR确认字段?.SetValue(窗口, True)
             控制器.设置音量(0.0F)
-            控制器.打开媒体(视频路径)
             Dim SDR快照 = 等待控制器快照(控制器,
                 Function(x) x.是HDR源 AndAlso x.状态 = 播放状态.正在播放 AndAlso
                     x.实际色彩模式 = 色彩输出模式.映射到SDR AndAlso x.交换链呈现次数 >= 3UL,

@@ -12,13 +12,6 @@ Friend Enum 原生播放器结果 As Integer
     不支持 = -7
 End Enum
 
-Friend Enum 原生RTX视频路径 As UInteger
-    无 = 0
-    VSR = 1
-    TrueHDR = 2
-    VSR后TrueHDR = 3
-End Enum
-
 <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
 Friend Delegate Sub 原生播放器回调(上下文 As IntPtr, 事件类型 As UInteger, 详情UTF8 As IntPtr)
 
@@ -270,24 +263,6 @@ Friend Structure 原生定时文字状态
     Public 合成像素着色器调用次数 As ULong
 End Structure
 
-<StructLayout(LayoutKind.Sequential)>
-Friend Structure 原生RTX视频状态
-    Public 大小 As UInteger
-    Public 版本 As UInteger
-    Public 请求已启用 As UInteger
-    Public 已初始化 As UInteger
-    Public VSR可用 As UInteger
-    Public TrueHDR可用 As UInteger
-    Public 当前启用 As UInteger
-    Public 当前路径 As 原生RTX视频路径
-    Public 正在回退 As UInteger
-    Public 保留 As UInteger
-    Public 已评估帧数 As ULong
-    Public 缓存命中次数 As ULong
-    Public 缓存未命中次数 As ULong
-    Public 评估耗时100纳秒 As ULong
-End Structure
-
 Friend NotInheritable Class 播放器原生句柄
     Inherits SafeHandleZeroOrMinusOneIsInvalid
     Private 回调句柄 As GCHandle
@@ -392,16 +367,6 @@ Friend Module 播放器原生接口
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetColorMode(播放器 As 播放器原生句柄, 模式 As UInteger, SDR峰值 As Single, HDR峰值 As Single, SDR纸白 As Single, 强制HDR输出 As UInteger) As 原生播放器结果
-    End Function
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
-    Friend Function FFF3FP_SetRtxVideoEnabled(播放器 As 播放器原生句柄, 启用 As UInteger) As 原生播放器结果
-    End Function
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
-    Friend Function FFF3FP_GetRtxVideoStatus(播放器 As 播放器原生句柄, ByRef 状态 As 原生RTX视频状态) As 原生播放器结果
-    End Function
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
-    Friend Function FFF3FP_GetRtxVideoError(播放器 As 播放器原生句柄, 输出UTF8 As IntPtr,
-                                              输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetOutputWindow(播放器 As 播放器原生句柄, 窗口 As IntPtr) As 原生播放器结果

@@ -24,7 +24,7 @@ Partial Class Form设置_支持者
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
         MemberWall1 = New LakeUI.MemberWall()
-        Panel4 = New Panel()
+        Panel4 = New LakeUI.ModernPanel()
         ModernTextBox1 = New LakeUI.ModernTextBox()
         JustEmptyControl5 = New LakeUI.JustEmptyControl()
         JustEmptyControl4 = New LakeUI.JustEmptyControl()
@@ -77,6 +77,9 @@ Partial Class Form设置_支持者
         ' 
         ' Panel4
         ' 
+        Panel4.BackColor = Color.Transparent
+        Panel4.BackColor1 = Color.Transparent
+        Panel4.BorderSize = 0
         Panel4.Controls.Add(ModernTextBox1)
         Panel4.Controls.Add(JustEmptyControl5)
         Panel4.Controls.Add(JustEmptyControl4)
@@ -265,7 +268,7 @@ Partial Class Form设置_支持者
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
     Friend WithEvents MemberWall1 As LakeUI.MemberWall
-    Friend WithEvents Panel4 As Panel
+    Friend WithEvents Panel4 As LakeUI.ModernPanel
     Friend WithEvents ModernButton5 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl5 As LakeUI.JustEmptyControl
     Friend WithEvents ModernTextBox1 As LakeUI.ModernTextBox

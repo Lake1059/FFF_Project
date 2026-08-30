@@ -58,8 +58,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取字幕状态 As Func(Of 定时文字状态)
     Private ReadOnly 获取弹幕状态 As Func(Of 定时文字状态)
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
-    Private ReadOnly 获取RTX状态 As Func(Of RTX视频状态)
-    Private ReadOnly 获取RTX错误 As Func(Of String)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
     Private ReadOnly 刷新定时器 As LakeUI.PrecisionTimer
     Private 普通字体 As New Font(默认信息字体, 信息字号, FontStyle.Regular, GraphicsUnit.Point)
@@ -89,9 +87,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
                    字幕状态提供器 As Func(Of 定时文字状态),
                    弹幕状态提供器 As Func(Of 定时文字状态),
                    WASAPI模式提供器 As Func(Of WASAPI共享模式),
-                   图层提交器 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single),
-                   Optional RTX状态提供器 As Func(Of RTX视频状态) = Nothing,
-                   Optional RTX错误提供器 As Func(Of String) = Nothing)
+                   图层提交器 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single))
         ArgumentNullException.ThrowIfNull(画面)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(媒体信息提供器)
@@ -102,7 +98,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取字幕 = 字幕提供器 : 获取弹幕 = 弹幕提供器
         获取字幕状态 = 字幕状态提供器 : 获取弹幕状态 = 弹幕状态提供器
         获取WASAPI模式 = WASAPI模式提供器
-        获取RTX状态 = RTX状态提供器 : 获取RTX错误 = RTX错误提供器
         提交图层 = 图层提交器
         文本测量格式 = DirectCast(StringFormat.GenericTypographic.Clone(), StringFormat)
         文本测量格式.FormatFlags = 文本测量格式.FormatFlags Or
@@ -253,15 +248,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
             添加配对行如果有值(结果, "渲染：", 视频渲染(快照), 黄色)
         End If
 
-        Dim RTX状态 = 安全获取(获取RTX状态)
-        If RTX状态 IsNot Nothing AndAlso RTX状态.请求已启用 Then
-            Dim 路径 = RTX路径文本(RTX状态.当前路径)
-            Dim 状态文本 = If(RTX状态.当前启用, "已使用", "回退")
-            Dim 原因 = 安全获取(获取RTX错误)
-            If String.IsNullOrWhiteSpace(原因) Then 原因 = "无"
-            结果.Add(配对行("RTX：", 合并字段(状态文本, 路径, $"评估 {RTX状态.已评估帧数}", 原因), 绿色, 8))
-        End If
-
         If 音频 IsNot Nothing Then
             Dim WASAPI = 安全获取(获取WASAPI模式)
             Dim 编码 = If(String.IsNullOrWhiteSpace(音频.编码), String.Empty,
@@ -283,15 +269,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
         结果.Add(配对行("字幕：", 字幕文本, 青色, 8))
         结果.Add(配对行("弹幕：", 弹幕文本, 橙色))
         Return 结果
-    End Function
-
-    Private Shared Function RTX路径文本(路径 As RTX视频路径) As String
-        Select Case 路径
-            Case RTX视频路径.VSR : Return "VSR"
-            Case RTX视频路径.TrueHDR : Return "TrueHDR"
-            Case RTX视频路径.VSR后TrueHDR : Return "VSR → TrueHDR"
-            Case Else : Return "无"
-        End Select
     End Function
 
     Friend Function 读取调试文本行(信息 As 媒体信息, 快照 As 播放器快照,

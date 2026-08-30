@@ -23,10 +23,10 @@ Partial Class Form设置_HDR
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
-        Panel1 = New Panel()
+        Panel1 = New LakeUI.ModernPanel()
         ETB_HDR映射SDR亮度 = New LakeUI.ExcellentTrackBar()
         HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
-        Panel2 = New Panel()
+        Panel2 = New LakeUI.ModernPanel()
         MTB_自定义真实HDR峰值亮度 = New LakeUI.ModernTextBox()
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MCB_真实HDR峰值亮度选项 = New LakeUI.ModernComboBox()
@@ -53,6 +53,9 @@ Partial Class Form设置_HDR
         ' 
         ' Panel1
         ' 
+        Panel1.BackColor = Color.Transparent
+        Panel1.BackColor1 = Color.Transparent
+        Panel1.BorderSize = 0
         Panel1.Controls.Add(ETB_HDR映射SDR亮度)
         Panel1.Dock = DockStyle.Top
         Panel1.Location = New Point(20, 128)
@@ -101,6 +104,9 @@ Partial Class Form设置_HDR
         ' 
         ' Panel2
         ' 
+        Panel2.BackColor = Color.Transparent
+        Panel2.BackColor1 = Color.Transparent
+        Panel2.BorderSize = 0
         Panel2.Controls.Add(MTB_自定义真实HDR峰值亮度)
         Panel2.Controls.Add(JustEmptyControl1)
         Panel2.Controls.Add(MCB_真实HDR峰值亮度选项)
@@ -205,12 +211,12 @@ Partial Class Form设置_HDR
     End Sub
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
-    Friend WithEvents Panel2 As Panel
+    Friend WithEvents Panel2 As LakeUI.ModernPanel
     Friend WithEvents MTB_自定义真实HDR峰值亮度 As LakeUI.ModernTextBox
     Friend WithEvents JustEmptyControl1 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_真实HDR峰值亮度选项 As LakeUI.ModernComboBox
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
-    Friend WithEvents Panel1 As Panel
+    Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel2 As LakeUI.HtmlColorLabel
     Friend WithEvents ETB_HDR映射SDR亮度 As LakeUI.ExcellentTrackBar
 End Class

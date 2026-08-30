@@ -22,7 +22,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private ReadOnly 音频编码按钮 As LakeUI.ModernButton
     Private ReadOnly 声道数按钮 As LakeUI.ModernButton
     Private ReadOnly 时间标签 As LakeUI.HtmlColorLabel
-    Private ReadOnly 状态栏 As Panel
+    Private ReadOnly 状态栏 As LakeUI.ModernPanel
     Private ReadOnly HDR占位 As Control
     Private ReadOnly 视频编码占位 As Control
     Private ReadOnly 音频编码占位 As Control
@@ -54,7 +54,7 @@ Friend NotInheritable Class 播放器界面呈现器
                    音频编码按钮 As LakeUI.ModernButton,
                    声道数按钮 As LakeUI.ModernButton,
                    时间标签 As LakeUI.HtmlColorLabel,
-                   状态栏 As Panel,
+                   状态栏 As LakeUI.ModernPanel,
                    HDR占位 As Control,
                    视频编码占位 As Control,
                    音频编码占位 As Control,

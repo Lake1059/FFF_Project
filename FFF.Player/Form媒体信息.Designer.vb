@@ -24,11 +24,11 @@ Partial Class Form媒体信息
     Private Sub InitializeComponent()
         Dim ListColumn1 As LakeUI.UltraDetailListView.ListColumn = New LakeUI.UltraDetailListView.ListColumn()
         ModernPanel1 = New LakeUI.ModernPanel()
-        Panel2 = New Panel()
+        Panel2 = New LakeUI.ModernPanel()
         UltraDetailListView1 = New LakeUI.UltraDetailListView()
-        Panel1 = New Panel()
+        Panel1 = New LakeUI.ModernPanel()
         ModernPanel3 = New LakeUI.ModernPanel()
-        Panel3 = New Panel()
+        Panel3 = New LakeUI.ModernPanel()
         EPB_BR = New LakeUI.ExcellentProgressBar()
         JustEmptyControl10 = New LakeUI.JustEmptyControl()
         EPB_BL = New LakeUI.ExcellentProgressBar()
@@ -91,6 +91,8 @@ Partial Class Form媒体信息
         ' 
         ' Panel2
         ' 
+        Panel2.BackColor1 = Color.Transparent
+        Panel2.BorderSize = 0
         Panel2.BackColor = Color.Transparent
         Panel2.Controls.Add(UltraDetailListView1)
         Panel2.Dock = DockStyle.Fill
@@ -133,6 +135,8 @@ Partial Class Form媒体信息
         ' 
         ' Panel1
         ' 
+        Panel1.BackColor1 = Color.Transparent
+        Panel1.BorderSize = 0
         Panel1.BackColor = Color.Transparent
         Panel1.Controls.Add(ModernPanel3)
         Panel1.Controls.Add(JustEmptyControl2)
@@ -167,6 +171,8 @@ Partial Class Form媒体信息
         ' 
         ' Panel3
         ' 
+        Panel3.BackColor1 = Color.Transparent
+        Panel3.BorderSize = 0
         Panel3.BackColor = Color.Transparent
         Panel3.Controls.Add(EPB_BR)
         Panel3.Controls.Add(JustEmptyControl10)
@@ -806,8 +812,8 @@ Partial Class Form媒体信息
     End Sub
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
-    Friend WithEvents Panel2 As Panel
-    Friend WithEvents Panel1 As Panel
+    Friend WithEvents Panel2 As LakeUI.ModernPanel
+    Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents ModernPanel2 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents HtmlColorLabel5 As LakeUI.HtmlColorLabel
@@ -821,7 +827,7 @@ Partial Class Form媒体信息
     Friend WithEvents JustEmptyControl1 As LakeUI.JustEmptyControl
     Friend WithEvents JustEmptyControl2 As LakeUI.JustEmptyControl
     Friend WithEvents ModernPanel4 As LakeUI.ModernPanel
-    Friend WithEvents Panel3 As Panel
+    Friend WithEvents Panel3 As LakeUI.ModernPanel
     Friend WithEvents EPB_BR As LakeUI.ExcellentProgressBar
     Friend WithEvents JustEmptyControl10 As LakeUI.JustEmptyControl
     Friend WithEvents EPB_BL As LakeUI.ExcellentProgressBar

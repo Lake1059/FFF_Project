@@ -6,7 +6,7 @@ Imports Vortice.DirectWrite
 ''' </summary>
 Friend NotInheritable Class 剪辑区间进度条控件
     Inherits Control
-    Implements LakeUI.V3_IGpuRenderable, LakeUI.V3_IGpuInvalidationSource
+    Implements LakeUI.D3D_IGpuRenderable, LakeUI.D3D_IGpuInvalidationSource
 
     Private 当前播放位置 As TimeSpan
     Private 媒体总时长 As TimeSpan
@@ -78,7 +78,7 @@ Friend NotInheritable Class 剪辑区间进度条控件
         If Not LakeUI.D3D_PaintBridge.PaintRenderable(e, Me, Me) Then MyBase.OnPaint(e)
     End Sub
 
-    Public Sub RenderGpu(context As LakeUI.D3D_PaintContext) Implements LakeUI.V3_IGpuRenderable.RenderGpu
+    Public Sub RenderGpu(context As LakeUI.D3D_PaintContext) Implements LakeUI.D3D_IGpuRenderable.RenderGpu
         If context Is Nothing OrElse ClientSize.Width <= 0 OrElse ClientSize.Height <= 0 Then Return
 
         Dim 宽度 = CSng(ClientSize.Width)
@@ -124,7 +124,7 @@ Friend NotInheritable Class 剪辑区间进度条控件
             Color.FromArgb(200, 200, 200))
     End Sub
 
-    Public Function GetRenderBounds() As Rectangle Implements LakeUI.V3_IGpuInvalidationSource.GetRenderBounds
+    Public Function GetRenderBounds() As Rectangle Implements LakeUI.D3D_IGpuInvalidationSource.GetRenderBounds
         Return New Rectangle(Point.Empty, Size)
     End Function
 

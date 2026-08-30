@@ -2,7 +2,6 @@
 
 #include "3FR/Api/FFF.Native.Api.h"
 
-#include <cstddef>
 #include <cstdint>
 
 enum class FFF3FPDecodeMode : std::uint32_t {
@@ -193,30 +192,6 @@ struct FFF3FPAudioPeakLevels {
     std::uint32_t reserved;
     float values[8];
 };
-
-// Optional RTX Video renderer diagnostics. Kept separate from the existing
-// configuration and snapshot structures so API 13 layouts remain unchanged.
-struct FFF3FPRtxVideoStatus {
-    std::uint32_t size;
-    std::uint32_t version;
-    std::uint32_t requestedEnabled;
-    std::uint32_t initialized;
-    std::uint32_t vsrAvailable;
-    std::uint32_t trueHdrAvailable;
-    std::uint32_t active;
-    std::uint32_t activePath;
-    std::uint32_t fallbackActive;
-    std::uint32_t reserved;
-    std::uint64_t evaluatedFrames;
-    std::uint64_t cacheHits;
-    std::uint64_t cacheMisses;
-    std::uint64_t evaluation100ns;
-};
-
-// Keep the native contract explicit: the managed Sequential layout relies on
-// the four 64-bit counters starting immediately after the ten 32-bit fields.
-static_assert(offsetof(FFF3FPRtxVideoStatus, evaluatedFrames) == 40);
-static_assert(sizeof(FFF3FPRtxVideoStatus) == 72);
 
 using FFF3FPHandle = void*;
 using FFF3FPBitmapSubtitleHandle = void*;
@@ -478,12 +453,6 @@ FFF3FP_API FFFResult FFF3FP_SetExternalAudioOffset(FFF3FPHandle player,
 FFF3FP_API FFFResult FFF3FP_SetColorMode(FFF3FPHandle player, FFF3FPColorMode mode,
     float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits,
     std::uint32_t forceHdrOutput) noexcept;
-FFF3FP_API FFFResult FFF3FP_SetRtxVideoEnabled(FFF3FPHandle player,
-    std::uint32_t enabled) noexcept;
-FFF3FP_API FFFResult FFF3FP_GetRtxVideoStatus(FFF3FPHandle player,
-    FFF3FPRtxVideoStatus* status) noexcept;
-FFF3FP_API FFFResult FFF3FP_GetRtxVideoError(FFF3FPHandle player, char* outputUtf8,
-    std::uint32_t size, std::uint32_t* required) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetOutputWindow(FFF3FPHandle player, void* outputWindow) noexcept;
 // View transform for frame inspection: zoom scales the fitted video box
 // (1.0 = fit, >1 = magnify), panX/panY are normalized offsets in [-1,1]

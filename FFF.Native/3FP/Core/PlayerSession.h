@@ -48,9 +48,6 @@ public:
     FFFResult SetExternalAudioOffset(std::int64_t offset100ns) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
-    FFFResult SetRtxVideoEnabled(bool enabled) noexcept;
-    FFFResult GetRtxVideoStatus(FFF3FPRtxVideoStatus& status) const noexcept;
-    std::string RtxVideoError() const;
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;

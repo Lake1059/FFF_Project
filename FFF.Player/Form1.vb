@@ -115,9 +115,7 @@ Public Class Form1
             Function() 播放控制器.当前媒体路径, Function() 播放控制器.当前字幕,
             Function() 播放控制器.当前弹幕, AddressOf 播放控制器.读取定时文字状态,
             AddressOf 播放控制器.读取弹幕状态, Function() 播放控制器.WASAPI模式,
-            AddressOf 播放控制器.提交播放器信息图层,
-            AddressOf 播放控制器.安全读取RTX状态,
-            AddressOf 播放控制器.安全读取RTX错误)
+            AddressOf 播放控制器.提交播放器信息图层)
         信息图层呈现器.应用全局字体(设置.实例对象.字体)
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
@@ -126,9 +124,7 @@ Public Class Form1
             窗口布局控制器, AddressOf 播放控制器.安全读取快照,
             Function() 设置.实例对象.取得初始画面尺寸(),
             Function() 播放控制器.当前媒体路径,
-            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI),
-            MMI_启用RTX视频增强,
-            Sub(启用) 播放控制器.设置RTX视频增强(启用))
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI))
         视角360控制器 = New 播放器360视角控制器(
             Me, 画面控件, MCM_标题栏菜单,
             Sub(启用, 水平角度, 垂直角度, 视场角)
@@ -521,9 +517,7 @@ Public Class Form1
             Function() 播放控制器.当前弹幕,
             Function() 播放控制器.WASAPI模式,
             Function() 画面控件.ClientSize,
-            AddressOf 播放控制器.读取音频峰值,
-            AddressOf 播放控制器.安全读取RTX状态,
-            AddressOf 播放控制器.安全读取RTX错误)
+            AddressOf 播放控制器.读取音频峰值)
         窗口.Location = 窗口.居中于(Bounds)
         窗口.Show()
     End Sub
@@ -804,5 +798,4 @@ Public Class Form1
     Private Sub MB_标题栏菜单按钮_Click(sender As Object, e As EventArgs) Handles MB_标题栏菜单按钮.Click
         MCM_标题栏菜单.Show(MP_DX视频容器, New Point(0, 0))
     End Sub
-
 End Class

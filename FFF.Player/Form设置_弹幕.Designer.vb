@@ -23,35 +23,35 @@ Partial Class Form设置_弹幕
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
-        Panel8 = New Panel()
+        Panel8 = New LakeUI.ModernPanel()
         HtmlColorLabel8 = New LakeUI.HtmlColorLabel()
         MCB_弹幕尺寸缩放方式 = New LakeUI.ModernComboBox()
-        Panel7 = New Panel()
+        Panel7 = New LakeUI.ModernPanel()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
         ETB_弹幕滚动速度 = New LakeUI.ExcellentTrackBar()
-        Panel6 = New Panel()
+        Panel6 = New LakeUI.ModernPanel()
         HtmlColorLabel5 = New LakeUI.HtmlColorLabel()
         ETB_弹幕行内前后间距 = New LakeUI.ExcellentTrackBar()
-        Panel5 = New Panel()
+        Panel5 = New LakeUI.ModernPanel()
         HtmlColorLabel3 = New LakeUI.HtmlColorLabel()
         ETB_弹幕最大渲染数量 = New LakeUI.ExcellentTrackBar()
-        Panel4 = New Panel()
+        Panel4 = New LakeUI.ModernPanel()
         HtmlColorLabel4 = New LakeUI.HtmlColorLabel()
         ETB_弹幕最大行数 = New LakeUI.ExcellentTrackBar()
-        Panel3 = New Panel()
+        Panel3 = New LakeUI.ModernPanel()
         MCK_是否渲染底部弹幕 = New LakeUI.ModernCheckBox()
         MCK_是否渲染顶部弹幕 = New LakeUI.ModernCheckBox()
         MCK_是否渲染常规滚动弹幕 = New LakeUI.ModernCheckBox()
-        Panel2 = New Panel()
+        Panel2 = New LakeUI.ModernPanel()
         MCB_弹幕阴影样式 = New LakeUI.ModernComboBox()
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MCB_弹幕描边样式 = New LakeUI.ModernComboBox()
-        Panel1 = New Panel()
+        Panel1 = New LakeUI.ModernPanel()
         MB_重置弹幕字体样式 = New LakeUI.ModernButton()
         JustEmptyControl2 = New LakeUI.JustEmptyControl()
         MB_设置弹幕字体样式 = New LakeUI.ModernButton()
         HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
-        Panel9 = New Panel()
+        Panel9 = New LakeUI.ModernPanel()
         HtmlColorLabel6 = New LakeUI.HtmlColorLabel()
         ETB_弹幕不透明度 = New LakeUI.ExcellentTrackBar()
         ModernPanel1.SuspendLayout()
@@ -89,6 +89,9 @@ Partial Class Form设置_弹幕
         ' 
         ' Panel8
         ' 
+        Panel8.BackColor = Color.Transparent
+        Panel8.BackColor1 = Color.Transparent
+        Panel8.BorderSize = 0
         Panel8.Controls.Add(HtmlColorLabel8)
         Panel8.Controls.Add(MCB_弹幕尺寸缩放方式)
         Panel8.Dock = DockStyle.Top
@@ -145,6 +148,9 @@ Partial Class Form设置_弹幕
         ' 
         ' Panel7
         ' 
+        Panel7.BackColor = Color.Transparent
+        Panel7.BackColor1 = Color.Transparent
+        Panel7.BorderSize = 0
         Panel7.Controls.Add(HtmlColorLabel1)
         Panel7.Controls.Add(ETB_弹幕滚动速度)
         Panel7.Dock = DockStyle.Top
@@ -192,6 +198,9 @@ Partial Class Form设置_弹幕
         ' 
         ' Panel6
         ' 
+        Panel6.BackColor = Color.Transparent
+        Panel6.BackColor1 = Color.Transparent
+        Panel6.BorderSize = 0
         Panel6.Controls.Add(HtmlColorLabel5)
         Panel6.Controls.Add(ETB_弹幕行内前后间距)
         Panel6.Dock = DockStyle.Top
@@ -239,6 +248,9 @@ Partial Class Form设置_弹幕
         ' 
         ' Panel5
         ' 
+        Panel5.BackColor = Color.Transparent
+        Panel5.BackColor1 = Color.Transparent
+        Panel5.BorderSize = 0
         Panel5.Controls.Add(HtmlColorLabel3)
         Panel5.Controls.Add(ETB_弹幕最大渲染数量)
         Panel5.Dock = DockStyle.Top
@@ -287,6 +299,9 @@ Partial Class Form设置_弹幕
         ' 
         ' Panel4
         ' 
+        Panel4.BackColor = Color.Transparent
+        Panel4.BackColor1 = Color.Transparent
+        Panel4.BorderSize = 0
         Panel4.Controls.Add(HtmlColorLabel4)
         Panel4.Controls.Add(ETB_弹幕最大行数)
         Panel4.Dock = DockStyle.Top
@@ -335,6 +350,9 @@ Partial Class Form设置_弹幕
         ' 
         ' Panel3
         ' 
+        Panel3.BackColor = Color.Transparent
+        Panel3.BackColor1 = Color.Transparent
+        Panel3.BorderSize = 0
         Panel3.Controls.Add(MCK_是否渲染底部弹幕)
         Panel3.Controls.Add(MCK_是否渲染顶部弹幕)
         Panel3.Controls.Add(MCK_是否渲染常规滚动弹幕)
@@ -404,6 +422,9 @@ Partial Class Form设置_弹幕
         ' 
         ' Panel2
         ' 
+        Panel2.BackColor = Color.Transparent
+        Panel2.BackColor1 = Color.Transparent
+        Panel2.BorderSize = 0
         Panel2.Controls.Add(MCB_弹幕阴影样式)
         Panel2.Controls.Add(JustEmptyControl1)
         Panel2.Controls.Add(MCB_弹幕描边样式)
@@ -486,6 +507,9 @@ Partial Class Form设置_弹幕
         ' 
         ' Panel1
         ' 
+        Panel1.BackColor = Color.Transparent
+        Panel1.BackColor1 = Color.Transparent
+        Panel1.BorderSize = 0
         Panel1.Controls.Add(MB_重置弹幕字体样式)
         Panel1.Controls.Add(JustEmptyControl2)
         Panel1.Controls.Add(MB_设置弹幕字体样式)
@@ -549,6 +573,9 @@ Partial Class Form设置_弹幕
         ' 
         ' Panel9
         ' 
+        Panel9.BackColor = Color.Transparent
+        Panel9.BackColor1 = Color.Transparent
+        Panel9.BorderSize = 0
         Panel9.Controls.Add(HtmlColorLabel6)
         Panel9.Controls.Add(ETB_弹幕不透明度)
         Panel9.Dock = DockStyle.Top
@@ -628,34 +655,34 @@ Partial Class Form设置_弹幕
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel2 As LakeUI.HtmlColorLabel
-    Friend WithEvents Panel1 As Panel
+    Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents MB_重置弹幕字体样式 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl2 As LakeUI.JustEmptyControl
     Friend WithEvents MB_设置弹幕字体样式 As LakeUI.ModernButton
-    Friend WithEvents Panel3 As Panel
-    Friend WithEvents Panel2 As Panel
+    Friend WithEvents Panel3 As LakeUI.ModernPanel
+    Friend WithEvents Panel2 As LakeUI.ModernPanel
     Friend WithEvents MCK_是否渲染常规滚动弹幕 As LakeUI.ModernCheckBox
     Friend WithEvents MCK_是否渲染底部弹幕 As LakeUI.ModernCheckBox
     Friend WithEvents MCK_是否渲染顶部弹幕 As LakeUI.ModernCheckBox
     Friend WithEvents MCB_弹幕阴影样式 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl1 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_弹幕描边样式 As LakeUI.ModernComboBox
-    Friend WithEvents Panel4 As Panel
+    Friend WithEvents Panel4 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel4 As LakeUI.HtmlColorLabel
     Friend WithEvents ETB_弹幕最大行数 As LakeUI.ExcellentTrackBar
-    Friend WithEvents Panel6 As Panel
+    Friend WithEvents Panel6 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel5 As LakeUI.HtmlColorLabel
     Friend WithEvents ETB_弹幕行内前后间距 As LakeUI.ExcellentTrackBar
-    Friend WithEvents Panel5 As Panel
+    Friend WithEvents Panel5 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel3 As LakeUI.HtmlColorLabel
     Friend WithEvents ETB_弹幕最大渲染数量 As LakeUI.ExcellentTrackBar
-    Friend WithEvents Panel7 As Panel
+    Friend WithEvents Panel7 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents ETB_弹幕滚动速度 As LakeUI.ExcellentTrackBar
-    Friend WithEvents Panel8 As Panel
+    Friend WithEvents Panel8 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel8 As LakeUI.HtmlColorLabel
     Friend WithEvents MCB_弹幕尺寸缩放方式 As LakeUI.ModernComboBox
-    Friend WithEvents Panel9 As Panel
+    Friend WithEvents Panel9 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel6 As LakeUI.HtmlColorLabel
     Friend WithEvents ETB_弹幕不透明度 As LakeUI.ExcellentTrackBar
 End Class

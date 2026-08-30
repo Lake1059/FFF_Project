@@ -41,11 +41,6 @@ bld/
 /*.exe
 tools/*.exe
 
-# RTX Video SDK build/runtime payloads are supplied outside Git.
-tools/RTX/*.dll
-tools/RTX/include/
-tools/RTX/lib/
-
 publish/
 runtime/
 third_party/

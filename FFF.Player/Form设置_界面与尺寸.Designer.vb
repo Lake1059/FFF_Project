@@ -23,13 +23,13 @@ Partial Class Form设置_界面与尺寸
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
-        Panel3 = New Panel()
+        Panel3 = New LakeUI.ModernPanel()
         MCB_视频缩放质量 = New LakeUI.ModernComboBox()
         HtmlColorLabel3 = New LakeUI.HtmlColorLabel()
-        Panel1 = New Panel()
+        Panel1 = New LakeUI.ModernPanel()
         MCB_全局字体 = New LakeUI.ModernComboBox()
         HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
-        Panel2 = New Panel()
+        Panel2 = New LakeUI.ModernPanel()
         MTB_自定义初始画面尺寸高度 = New LakeUI.ModernTextBox()
         JustEmptyControl2 = New LakeUI.JustEmptyControl()
         MTB_自定义初始画面尺寸宽度 = New LakeUI.ModernTextBox()
@@ -61,6 +61,9 @@ Partial Class Form设置_界面与尺寸
         ' 
         ' Panel3
         ' 
+        Panel3.BackColor = Color.Transparent
+        Panel3.BackColor1 = Color.Transparent
+        Panel3.BorderSize = 0
         Panel3.Controls.Add(MCB_视频缩放质量)
         Panel3.Dock = DockStyle.Top
         Panel3.Location = New Point(20, 213)
@@ -114,6 +117,9 @@ Partial Class Form设置_界面与尺寸
         ' 
         ' Panel1
         ' 
+        Panel1.BackColor = Color.Transparent
+        Panel1.BackColor1 = Color.Transparent
+        Panel1.BorderSize = 0
         Panel1.Controls.Add(MCB_全局字体)
         Panel1.Dock = DockStyle.Top
         Panel1.Location = New Point(20, 128)
@@ -167,6 +173,9 @@ Partial Class Form设置_界面与尺寸
         ' 
         ' Panel2
         ' 
+        Panel2.BackColor = Color.Transparent
+        Panel2.BackColor1 = Color.Transparent
+        Panel2.BorderSize = 0
         Panel2.Controls.Add(MTB_自定义初始画面尺寸高度)
         Panel2.Controls.Add(JustEmptyControl2)
         Panel2.Controls.Add(MTB_自定义初始画面尺寸宽度)
@@ -299,7 +308,7 @@ Partial Class Form设置_界面与尺寸
     End Sub
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
-    Friend WithEvents Panel2 As Panel
+    Friend WithEvents Panel2 As LakeUI.ModernPanel
     Friend WithEvents MCB_初始画面尺寸选项 As LakeUI.ModernComboBox
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents MTB_自定义初始画面尺寸高度 As LakeUI.ModernTextBox
@@ -307,9 +316,9 @@ Partial Class Form设置_界面与尺寸
     Friend WithEvents MTB_自定义初始画面尺寸宽度 As LakeUI.ModernTextBox
     Friend WithEvents JustEmptyControl1 As LakeUI.JustEmptyControl
     Friend WithEvents HtmlColorLabel2 As LakeUI.HtmlColorLabel
-    Friend WithEvents Panel1 As Panel
+    Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents MCB_全局字体 As LakeUI.ModernComboBox
-    Friend WithEvents Panel3 As Panel
+    Friend WithEvents Panel3 As LakeUI.ModernPanel
     Friend WithEvents MCB_视频缩放质量 As LakeUI.ModernComboBox
     Friend WithEvents HtmlColorLabel3 As LakeUI.HtmlColorLabel
 End Class
