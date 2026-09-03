@@ -55,7 +55,7 @@ Partial Class Form设置_界面与尺寸
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(20)
+        ModernPanel1.Padding = New Padding(10, 20, 20, 20)
         ModernPanel1.Size = New Size(700, 539)
         ModernPanel1.TabIndex = 0
         ' 
@@ -66,10 +66,10 @@ Partial Class Form设置_界面与尺寸
         Panel3.BorderSize = 0
         Panel3.Controls.Add(MCB_视频缩放质量)
         Panel3.Dock = DockStyle.Top
-        Panel3.Location = New Point(20, 213)
+        Panel3.Location = New Point(10, 213)
         Panel3.Name = "Panel3"
         Panel3.Padding = New Padding(0, 10, 0, 0)
-        Panel3.Size = New Size(660, 42)
+        Panel3.Size = New Size(670, 42)
         Panel3.TabIndex = 19
         ' 
         ' MCB_视频缩放质量
@@ -107,11 +107,11 @@ Partial Class Form设置_界面与尺寸
         HtmlColorLabel3.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel3.Dock = DockStyle.Top
         HtmlColorLabel3.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        HtmlColorLabel3.Location = New Point(20, 170)
+        HtmlColorLabel3.Location = New Point(10, 170)
         HtmlColorLabel3.Margin = New Padding(2)
         HtmlColorLabel3.Name = "HtmlColorLabel3"
         HtmlColorLabel3.Padding = New Padding(0, 20, 0, 0)
-        HtmlColorLabel3.Size = New Size(660, 43)
+        HtmlColorLabel3.Size = New Size(670, 43)
         HtmlColorLabel3.TabIndex = 18
         HtmlColorLabel3.Text = "<span style=""font-size:13; color:Silver"">视频缩放质量</span>"
         ' 
@@ -122,10 +122,10 @@ Partial Class Form设置_界面与尺寸
         Panel1.BorderSize = 0
         Panel1.Controls.Add(MCB_全局字体)
         Panel1.Dock = DockStyle.Top
-        Panel1.Location = New Point(20, 128)
+        Panel1.Location = New Point(10, 128)
         Panel1.Name = "Panel1"
         Panel1.Padding = New Padding(0, 10, 0, 0)
-        Panel1.Size = New Size(660, 42)
+        Panel1.Size = New Size(670, 42)
         Panel1.TabIndex = 17
         ' 
         ' MCB_全局字体
@@ -163,11 +163,11 @@ Partial Class Form设置_界面与尺寸
         HtmlColorLabel2.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel2.Dock = DockStyle.Top
         HtmlColorLabel2.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        HtmlColorLabel2.Location = New Point(20, 85)
+        HtmlColorLabel2.Location = New Point(10, 85)
         HtmlColorLabel2.Margin = New Padding(2)
         HtmlColorLabel2.Name = "HtmlColorLabel2"
         HtmlColorLabel2.Padding = New Padding(0, 20, 0, 0)
-        HtmlColorLabel2.Size = New Size(660, 43)
+        HtmlColorLabel2.Size = New Size(670, 43)
         HtmlColorLabel2.TabIndex = 16
         HtmlColorLabel2.Text = "<span style=""font-size:13; color:Silver"">全局字体</span>"
         ' 
@@ -182,10 +182,10 @@ Partial Class Form设置_界面与尺寸
         Panel2.Controls.Add(JustEmptyControl1)
         Panel2.Controls.Add(MCB_初始画面尺寸选项)
         Panel2.Dock = DockStyle.Top
-        Panel2.Location = New Point(20, 43)
+        Panel2.Location = New Point(10, 43)
         Panel2.Name = "Panel2"
         Panel2.Padding = New Padding(0, 10, 0, 0)
-        Panel2.Size = New Size(660, 42)
+        Panel2.Size = New Size(670, 42)
         Panel2.TabIndex = 15
         ' 
         ' MTB_自定义初始画面尺寸高度
@@ -281,10 +281,10 @@ Partial Class Form设置_界面与尺寸
         HtmlColorLabel1.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel1.Dock = DockStyle.Top
         HtmlColorLabel1.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        HtmlColorLabel1.Location = New Point(20, 20)
+        HtmlColorLabel1.Location = New Point(10, 20)
         HtmlColorLabel1.Margin = New Padding(2)
         HtmlColorLabel1.Name = "HtmlColorLabel1"
-        HtmlColorLabel1.Size = New Size(660, 23)
+        HtmlColorLabel1.Size = New Size(670, 23)
         HtmlColorLabel1.TabIndex = 14
         HtmlColorLabel1.Text = "<span style=""font-size:13; color:Silver"">初始画面尺寸</span>   每次启动软件后视频渲染区域的尺寸，会跟随 DPI 缩放"
         ' 

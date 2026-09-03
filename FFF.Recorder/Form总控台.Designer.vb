@@ -26,18 +26,18 @@ Partial Class Form总控台
         ModernPanel5 = New LakeUI.ModernPanel()
         MTB_执行日志 = New LakeUI.ModernTextBox()
         MCK_防误触模式 = New LakeUI.ModernCheckBox()
-        Panel1 = New Panel()
+        Panel1 = New LakeUI.ModernPanel()
         MB_启动或暂停或继续录制 = New LakeUI.ModernButton()
         JustEmptyControl13 = New LakeUI.JustEmptyControl()
         MB_分割 = New LakeUI.ModernButton()
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MB_结束 = New LakeUI.ModernButton()
         JustEmptyControl11 = New LakeUI.JustEmptyControl()
-        Panel2 = New Panel()
+        Panel2 = New LakeUI.ModernPanel()
         ModernPanel4 = New LakeUI.ModernPanel()
         JustEmptyControl2 = New LakeUI.JustEmptyControl()
         ModernPanel2 = New LakeUI.ModernPanel()
-        Panel3 = New Panel()
+        Panel3 = New LakeUI.ModernPanel()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
         JustEmptyControl15 = New LakeUI.JustEmptyControl()
         EPB_BR = New LakeUI.ExcellentProgressBar()
@@ -78,6 +78,7 @@ Partial Class Form总控台
         ModernPanel1.Controls.Add(Panel2)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
+        ModernPanel1.BackColor = Color.Transparent
         ModernPanel1.Name = "ModernPanel1"
         ModernPanel1.Padding = New Padding(20)
         ModernPanel1.Size = New Size(831, 564)
@@ -93,6 +94,7 @@ Partial Class Form总控台
         ModernPanel5.Controls.Add(Panel1)
         ModernPanel5.Dock = DockStyle.Fill
         ModernPanel5.Location = New Point(492, 20)
+        ModernPanel5.BackColor = Color.Transparent
         ModernPanel5.Name = "ModernPanel5"
         ModernPanel5.Padding = New Padding(10)
         ModernPanel5.Size = New Size(319, 524)
@@ -151,6 +153,9 @@ Partial Class Form总控台
         Panel1.Controls.Add(MB_结束)
         Panel1.Dock = DockStyle.Bottom
         Panel1.Location = New Point(15, 449)
+        Panel1.BackColor1 = Color.Transparent
+        Panel1.BorderSize = 0
+        Panel1.Padding = Padding.Empty
         Panel1.Name = "Panel1"
         Panel1.Size = New Size(289, 60)
         Panel1.TabIndex = 0
@@ -243,6 +248,10 @@ Partial Class Form总控台
         Panel2.Controls.Add(ModernPanel2)
         Panel2.Dock = DockStyle.Left
         Panel2.Location = New Point(20, 20)
+        Panel2.BackColor = Color.Transparent
+        Panel2.BackColor1 = Color.Transparent
+        Panel2.BorderSize = 0
+        Panel2.Padding = Padding.Empty
         Panel2.Name = "Panel2"
         Panel2.Size = New Size(457, 524)
         Panel2.TabIndex = 1
@@ -254,6 +263,7 @@ Partial Class Form总控台
         ModernPanel4.BorderSize = 0
         ModernPanel4.Dock = DockStyle.Fill
         ModernPanel4.Location = New Point(0, 0)
+        ModernPanel4.BackColor = Color.Transparent
         ModernPanel4.Name = "ModernPanel4"
         ModernPanel4.Padding = New Padding(10)
         ModernPanel4.Size = New Size(457, 248)
@@ -283,6 +293,7 @@ Partial Class Form总控台
         ModernPanel2.Controls.Add(MCB_视频捕获模式)
         ModernPanel2.Dock = DockStyle.Bottom
         ModernPanel2.Location = New Point(0, 263)
+        ModernPanel2.BackColor = Color.Transparent
         ModernPanel2.Name = "ModernPanel2"
         ModernPanel2.Padding = New Padding(10)
         ModernPanel2.Size = New Size(457, 261)
@@ -310,6 +321,9 @@ Partial Class Form总控台
         Panel3.Controls.Add(EPB_L)
         Panel3.Dock = DockStyle.Top
         Panel3.Location = New Point(15, 146)
+        Panel3.BackColor1 = Color.Transparent
+        Panel3.BorderSize = 0
+        Panel3.Padding = Padding.Empty
         Panel3.Name = "Panel3"
         Panel3.Size = New Size(427, 100)
         Panel3.TabIndex = 18
@@ -760,13 +774,13 @@ Partial Class Form总控台
     End Sub
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
-    Friend WithEvents Panel2 As Panel
+    Friend WithEvents Panel2 As LakeUI.ModernPanel
     Friend WithEvents ModernPanel2 As LakeUI.ModernPanel
     Friend WithEvents JustEmptyControl8 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_音频源 As LakeUI.ModernComboBox
     Friend WithEvents ModernPanel4 As LakeUI.ModernPanel
     Friend WithEvents JustEmptyControl2 As LakeUI.JustEmptyControl
-    Friend WithEvents Panel3 As Panel
+    Friend WithEvents Panel3 As LakeUI.ModernPanel
     Friend WithEvents EPB_L As LakeUI.ExcellentProgressBar
     Friend WithEvents EPB_BR As LakeUI.ExcellentProgressBar
     Friend WithEvents JustEmptyControl10 As LakeUI.JustEmptyControl
@@ -786,7 +800,7 @@ Partial Class Form总控台
     Friend WithEvents ModernPanel5 As LakeUI.ModernPanel
     Friend WithEvents JustEmptyControl12 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_视频源 As LakeUI.ModernComboBox
-    Friend WithEvents Panel1 As Panel
+    Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents MB_结束 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl1 As LakeUI.JustEmptyControl
     Friend WithEvents MB_启动或暂停或继续录制 As LakeUI.ModernButton

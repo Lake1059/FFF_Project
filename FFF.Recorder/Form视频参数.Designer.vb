@@ -24,19 +24,19 @@ Partial Class Form视频参数
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
         ModernPanel4 = New LakeUI.ModernPanel()
-        Panel5 = New Panel()
+        Panel5 = New LakeUI.ModernPanel()
         MCB_HDR最亮值 = New LakeUI.ModernComboBox()
         JustEmptyControl9 = New LakeUI.JustEmptyControl()
         MCB_SDR亮度 = New LakeUI.ModernComboBox()
         JustEmptyControl10 = New LakeUI.JustEmptyControl()
         MCB_色彩模式 = New LakeUI.ModernComboBox()
-        Panel6 = New Panel()
+        Panel6 = New LakeUI.ModernPanel()
         HtmlColorLabel8 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel7 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel9 = New LakeUI.HtmlColorLabel()
         JustEmptyControl6 = New LakeUI.JustEmptyControl()
         ModernPanel3 = New LakeUI.ModernPanel()
-        Panel7 = New Panel()
+        Panel7 = New LakeUI.ModernPanel()
         MCB_灰阶位深 = New LakeUI.ModernComboBox()
         JustEmptyControl7 = New LakeUI.JustEmptyControl()
         MCB_像素采样 = New LakeUI.ModernComboBox()
@@ -44,23 +44,23 @@ Partial Class Form视频参数
         MCB_录制帧率 = New LakeUI.ModernComboBox()
         JustEmptyControl13 = New LakeUI.JustEmptyControl()
         MCB_帧率模式 = New LakeUI.ModernComboBox()
-        Panel8 = New Panel()
+        Panel8 = New LakeUI.ModernPanel()
         HtmlColorLabel10 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel6 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel12 = New LakeUI.HtmlColorLabel()
-        Panel1 = New Panel()
+        Panel1 = New LakeUI.ModernPanel()
         MTB_自定义参数 = New LakeUI.ModernTextBox()
         JustEmptyControl12 = New LakeUI.JustEmptyControl()
         ETB_质量值 = New LakeUI.ExcellentTrackBar()
         JustEmptyControl5 = New LakeUI.JustEmptyControl()
         MCB_质量控制模式 = New LakeUI.ModernComboBox()
-        Panel3 = New Panel()
+        Panel3 = New LakeUI.ModernPanel()
         HtmlColorLabel5 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel3 = New LakeUI.HtmlColorLabel()
         JustEmptyControl4 = New LakeUI.JustEmptyControl()
         ModernPanel2 = New LakeUI.ModernPanel()
-        Panel9 = New Panel()
+        Panel9 = New LakeUI.ModernPanel()
         MCK_是否捕获鼠标 = New LakeUI.ModernCheckBox()
         JustEmptyControl8 = New LakeUI.JustEmptyControl()
         MCB_自定义高度 = New LakeUI.ModernComboBox()
@@ -68,11 +68,11 @@ Partial Class Form视频参数
         MCB_自定义宽度 = New LakeUI.ModernComboBox()
         JustEmptyControl15 = New LakeUI.JustEmptyControl()
         MCB_视频分辨率 = New LakeUI.ModernComboBox()
-        Panel10 = New Panel()
+        Panel10 = New LakeUI.ModernPanel()
         HtmlColorLabel11 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel4 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
-        Panel2 = New Panel()
+        Panel2 = New LakeUI.ModernPanel()
         MCB_场景优化 = New LakeUI.ModernComboBox()
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MCB_配置文件 = New LakeUI.ModernComboBox()
@@ -80,7 +80,7 @@ Partial Class Form视频参数
         MCB_编码预设 = New LakeUI.ModernComboBox()
         JustEmptyControl3 = New LakeUI.JustEmptyControl()
         MCB_视频编码器 = New LakeUI.ModernComboBox()
-        Panel4 = New Panel()
+        Panel4 = New LakeUI.ModernPanel()
         HCL_场景优化 = New LakeUI.HtmlColorLabel()
         HCL_配置文件 = New LakeUI.HtmlColorLabel()
         HCL_编码预设 = New LakeUI.HtmlColorLabel()
@@ -112,6 +112,7 @@ Partial Class Form视频参数
         ModernPanel1.Controls.Add(ModernPanel2)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
+        ModernPanel1.BackColor = Color.Transparent
         ModernPanel1.Name = "ModernPanel1"
         ModernPanel1.Padding = New Padding(20)
         ModernPanel1.Size = New Size(800, 543)
@@ -127,6 +128,7 @@ Partial Class Form视频参数
         ModernPanel4.Controls.Add(Panel6)
         ModernPanel4.Dock = DockStyle.Top
         ModernPanel4.Location = New Point(20, 368)
+        ModernPanel4.BackColor = Color.Transparent
         ModernPanel4.Name = "ModernPanel4"
         ModernPanel4.Padding = New Padding(10)
         ModernPanel4.Size = New Size(760, 87)
@@ -142,6 +144,9 @@ Partial Class Form视频参数
         Panel5.Controls.Add(MCB_色彩模式)
         Panel5.Dock = DockStyle.Top
         Panel5.Location = New Point(15, 40)
+        Panel5.BackColor1 = Color.Transparent
+        Panel5.BorderSize = 0
+        Panel5.Padding = Padding.Empty
         Panel5.Name = "Panel5"
         Panel5.Size = New Size(730, 32)
         Panel5.TabIndex = 13
@@ -255,6 +260,10 @@ Partial Class Form视频参数
         Panel6.Controls.Add(HtmlColorLabel9)
         Panel6.Dock = DockStyle.Top
         Panel6.Location = New Point(15, 15)
+        Panel6.BackColor = Color.Transparent
+        Panel6.BackColor1 = Color.Transparent
+        Panel6.BorderSize = 0
+        Panel6.Padding = Padding.Empty
         Panel6.Name = "Panel6"
         Panel6.Size = New Size(730, 25)
         Panel6.TabIndex = 12
@@ -312,6 +321,7 @@ Partial Class Form视频参数
         ModernPanel3.Controls.Add(Panel3)
         ModernPanel3.Dock = DockStyle.Top
         ModernPanel3.Location = New Point(20, 194)
+        ModernPanel3.BackColor = Color.Transparent
         ModernPanel3.Name = "ModernPanel3"
         ModernPanel3.Padding = New Padding(10)
         ModernPanel3.Size = New Size(760, 154)
@@ -329,6 +339,9 @@ Partial Class Form视频参数
         Panel7.Controls.Add(MCB_帧率模式)
         Panel7.Dock = DockStyle.Top
         Panel7.Location = New Point(15, 107)
+        Panel7.BackColor1 = Color.Transparent
+        Panel7.BorderSize = 0
+        Panel7.Padding = Padding.Empty
         Panel7.Name = "Panel7"
         Panel7.Size = New Size(730, 32)
         Panel7.TabIndex = 15
@@ -477,6 +490,9 @@ Partial Class Form视频参数
         Panel8.Controls.Add(HtmlColorLabel12)
         Panel8.Dock = DockStyle.Top
         Panel8.Location = New Point(15, 72)
+        Panel8.BackColor1 = Color.Transparent
+        Panel8.BorderSize = 0
+        Panel8.Padding = Padding.Empty
         Panel8.Name = "Panel8"
         Panel8.Padding = New Padding(0, 10, 0, 0)
         Panel8.Size = New Size(730, 35)
@@ -536,6 +552,9 @@ Partial Class Form视频参数
         Panel1.Controls.Add(MCB_质量控制模式)
         Panel1.Dock = DockStyle.Top
         Panel1.Location = New Point(15, 40)
+        Panel1.BackColor1 = Color.Transparent
+        Panel1.BorderSize = 0
+        Panel1.Padding = Padding.Empty
         Panel1.Name = "Panel1"
         Panel1.Size = New Size(730, 32)
         Panel1.TabIndex = 13
@@ -634,6 +653,9 @@ Partial Class Form视频参数
         Panel3.Controls.Add(HtmlColorLabel3)
         Panel3.Dock = DockStyle.Top
         Panel3.Location = New Point(15, 15)
+        Panel3.BackColor1 = Color.Transparent
+        Panel3.BorderSize = 0
+        Panel3.Padding = Padding.Empty
         Panel3.Name = "Panel3"
         Panel3.Size = New Size(730, 25)
         Panel3.TabIndex = 12
@@ -680,6 +702,7 @@ Partial Class Form视频参数
         ModernPanel2.Controls.Add(Panel4)
         ModernPanel2.Dock = DockStyle.Top
         ModernPanel2.Location = New Point(20, 20)
+        ModernPanel2.BackColor = Color.Transparent
         ModernPanel2.Name = "ModernPanel2"
         ModernPanel2.Padding = New Padding(10)
         ModernPanel2.Size = New Size(760, 154)
@@ -697,6 +720,10 @@ Partial Class Form视频参数
         Panel9.Controls.Add(MCB_视频分辨率)
         Panel9.Dock = DockStyle.Top
         Panel9.Location = New Point(15, 107)
+        Panel9.BackColor = Color.Transparent
+        Panel9.BackColor1 = Color.Transparent
+        Panel9.BorderSize = 0
+        Panel9.Padding = Padding.Empty
         Panel9.Name = "Panel9"
         Panel9.Size = New Size(730, 32)
         Panel9.TabIndex = 19
@@ -851,6 +878,9 @@ Partial Class Form视频参数
         Panel10.Controls.Add(HtmlColorLabel2)
         Panel10.Dock = DockStyle.Top
         Panel10.Location = New Point(15, 72)
+        Panel10.BackColor1 = Color.Transparent
+        Panel10.BorderSize = 0
+        Panel10.Padding = Padding.Empty
         Panel10.Name = "Panel10"
         Panel10.Padding = New Padding(0, 10, 0, 0)
         Panel10.Size = New Size(730, 35)
@@ -901,6 +931,9 @@ Partial Class Form视频参数
         Panel2.Controls.Add(MCB_视频编码器)
         Panel2.Dock = DockStyle.Top
         Panel2.Location = New Point(15, 40)
+        Panel2.BackColor1 = Color.Transparent
+        Panel2.BorderSize = 0
+        Panel2.Padding = Padding.Empty
         Panel2.Name = "Panel2"
         Panel2.Size = New Size(730, 32)
         Panel2.TabIndex = 13
@@ -1055,6 +1088,9 @@ Partial Class Form视频参数
         Panel4.Controls.Add(HCL_视频编码器)
         Panel4.Dock = DockStyle.Top
         Panel4.Location = New Point(15, 15)
+        Panel4.BackColor1 = Color.Transparent
+        Panel4.BorderSize = 0
+        Panel4.Padding = Padding.Empty
         Panel4.Name = "Panel4"
         Panel4.Size = New Size(730, 25)
         Panel4.TabIndex = 12
@@ -1134,7 +1170,7 @@ Partial Class Form视频参数
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
     Friend WithEvents ModernPanel2 As LakeUI.ModernPanel
-    Friend WithEvents Panel2 As Panel
+    Friend WithEvents Panel2 As LakeUI.ModernPanel
     Friend WithEvents MCB_视频编码器 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl2 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_配置文件 As LakeUI.ModernComboBox
@@ -1142,15 +1178,15 @@ Partial Class Form视频参数
     Friend WithEvents MCB_编码预设 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl1 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_场景优化 As LakeUI.ModernComboBox
-    Friend WithEvents Panel4 As Panel
+    Friend WithEvents Panel4 As LakeUI.ModernPanel
     Friend WithEvents HCL_视频编码器 As LakeUI.HtmlColorLabel
     Friend WithEvents HCL_编码预设 As LakeUI.HtmlColorLabel
     Friend WithEvents HCL_配置文件 As LakeUI.HtmlColorLabel
     Friend WithEvents HCL_场景优化 As LakeUI.HtmlColorLabel
     Friend WithEvents ModernPanel3 As LakeUI.ModernPanel
-    Friend WithEvents Panel1 As Panel
+    Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents MCB_质量控制模式 As LakeUI.ModernComboBox
-    Friend WithEvents Panel3 As Panel
+    Friend WithEvents Panel3 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel3 As LakeUI.HtmlColorLabel
     Friend WithEvents JustEmptyControl5 As LakeUI.JustEmptyControl
     Friend WithEvents ETB_质量值 As LakeUI.ExcellentTrackBar
@@ -1158,8 +1194,8 @@ Partial Class Form视频参数
     Friend WithEvents JustEmptyControl4 As LakeUI.JustEmptyControl
     Friend WithEvents HtmlColorLabel5 As LakeUI.HtmlColorLabel
     Friend WithEvents ModernPanel4 As LakeUI.ModernPanel
-    Friend WithEvents Panel5 As Panel
-    Friend WithEvents Panel6 As Panel
+    Friend WithEvents Panel5 As LakeUI.ModernPanel
+    Friend WithEvents Panel6 As LakeUI.ModernPanel
     Friend WithEvents JustEmptyControl6 As LakeUI.JustEmptyControl
     Friend WithEvents JustEmptyControl10 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_HDR最亮值 As LakeUI.ModernComboBox
@@ -1170,17 +1206,17 @@ Partial Class Form视频参数
     Friend WithEvents HtmlColorLabel7 As LakeUI.HtmlColorLabel
     Friend WithEvents MCB_色彩模式 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl12 As LakeUI.JustEmptyControl
-    Friend WithEvents Panel9 As Panel
+    Friend WithEvents Panel9 As LakeUI.ModernPanel
     Friend WithEvents MCB_自定义高度 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl14 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_自定义宽度 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl15 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_视频分辨率 As LakeUI.ModernComboBox
-    Friend WithEvents Panel10 As Panel
+    Friend WithEvents Panel10 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel11 As LakeUI.HtmlColorLabel
     Friend WithEvents HtmlColorLabel4 As LakeUI.HtmlColorLabel
     Friend WithEvents HtmlColorLabel2 As LakeUI.HtmlColorLabel
-    Friend WithEvents Panel7 As Panel
+    Friend WithEvents Panel7 As LakeUI.ModernPanel
     Friend WithEvents MCB_灰阶位深 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl7 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_像素采样 As LakeUI.ModernComboBox
@@ -1188,7 +1224,7 @@ Partial Class Form视频参数
     Friend WithEvents MCB_录制帧率 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl13 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_帧率模式 As LakeUI.ModernComboBox
-    Friend WithEvents Panel8 As Panel
+    Friend WithEvents Panel8 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel10 As LakeUI.HtmlColorLabel
     Friend WithEvents HtmlColorLabel6 As LakeUI.HtmlColorLabel
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel

@@ -14,9 +14,9 @@
 	<!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
 	<Authors>1059 Studio</Authors>
 	<Company>1059 Studio</Company>
-	<AssemblyVersion>2026.8.27</AssemblyVersion>
-	<FileVersion>2026.8.27</FileVersion>
-	<Version>2026.8.27</Version>
+	<AssemblyVersion>2026.9.3</AssemblyVersion>
+	<FileVersion>2026.9.3</FileVersion>
+	<Version>2026.9.3</Version>
 	<SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
 	<Title>FFF.Recorder</Title>
 	<ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>

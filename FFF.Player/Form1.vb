@@ -30,6 +30,7 @@ Public Class Form1
     Private 流选择器 As 播放器流选择器
     Private 画面菜单控制器 As 播放器画面菜单控制器
     Private 视角360控制器 As 播放器360视角控制器
+    Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
     Private ReadOnly 播放列表数据 As New 播放列表 With {.播放模式 = 列表播放模式.顺序播放}
@@ -85,6 +86,7 @@ Public Class Form1
         播放控制器 = New 播放器控制器(
             Function() 画面控件.输出窗口句柄, SynchronizationContext.Current,
             CType(设置.实例对象.解码方式, 解码模式))
+        显示器唤醒 = New 显示器唤醒请求()
         播放控制器.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
         播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
         剪辑区间控制器 = New 播放器剪辑区间控制器(播放控制器, 画面控件,
@@ -313,6 +315,7 @@ Public Class Form1
         字幕图层呈现器?.释放()
         流选择器?.Dispose()
         播放列表窗口?.Dispose()
+        显示器唤醒?.释放()
         播放控制器?.释放()
         播放器按钮图标资源.清除(MB_播放和暂停, MB_停止, MB_倒退或上一个, MB_快进或下一个,
             MB_打开文件, MB_软件设置, MB_播放列表, MB_剪辑区间模式, MB_查看当前媒体信息, MB_选择流)
@@ -409,6 +412,7 @@ Public Class Form1
 
     Private Sub 播放控制器_状态已变化(sender As Object, e As EventArgs)
         If Not 正在关闭 Then
+            显示器唤醒?.更新(播放控制器.安全读取快照())
             界面呈现器.刷新()
             更新WASAPI按钮()
         End If
@@ -416,6 +420,7 @@ Public Class Form1
 
     Private Sub 播放控制器_媒体已打开(sender As Object, e As 播放器媒体事件参数)
         If 正在关闭 Then Return
+        显示器唤醒?.更新(e.快照)
         If Not 播放列表数据.选择路径(e.文件路径) Then
             待选中播放列表路径 = e.文件路径
         Else

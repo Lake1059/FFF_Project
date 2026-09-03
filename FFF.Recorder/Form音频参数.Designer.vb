@@ -24,13 +24,13 @@ Partial Class Form音频参数
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
         ModernPanel5 = New LakeUI.ModernPanel()
-        Panel7 = New Panel()
+        Panel7 = New LakeUI.ModernPanel()
         MCB_采样率 = New LakeUI.ModernComboBox()
         JustEmptyControl11 = New LakeUI.JustEmptyControl()
         MCB_声道数 = New LakeUI.ModernComboBox()
         JustEmptyControl13 = New LakeUI.JustEmptyControl()
         MCB_音频编码器 = New LakeUI.ModernComboBox()
-        Panel8 = New Panel()
+        Panel8 = New LakeUI.ModernPanel()
         HtmlColorLabel6 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel12 = New LakeUI.HtmlColorLabel()
@@ -47,6 +47,7 @@ Partial Class Form音频参数
         ModernPanel1.Controls.Add(ModernPanel5)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
+        ModernPanel1.BackColor = Color.Transparent
         ModernPanel1.Name = "ModernPanel1"
         ModernPanel1.Padding = New Padding(20)
         ModernPanel1.Size = New Size(843, 512)
@@ -62,6 +63,7 @@ Partial Class Form音频参数
         ModernPanel5.Controls.Add(Panel8)
         ModernPanel5.Dock = DockStyle.Top
         ModernPanel5.Location = New Point(20, 20)
+        ModernPanel5.BackColor = Color.Transparent
         ModernPanel5.Name = "ModernPanel5"
         ModernPanel5.Padding = New Padding(10)
         ModernPanel5.Size = New Size(803, 87)
@@ -77,6 +79,9 @@ Partial Class Form音频参数
         Panel7.Controls.Add(MCB_音频编码器)
         Panel7.Dock = DockStyle.Top
         Panel7.Location = New Point(15, 40)
+        Panel7.BackColor1 = Color.Transparent
+        Panel7.BorderSize = 0
+        Panel7.Padding = Padding.Empty
         Panel7.Name = "Panel7"
         Panel7.Size = New Size(773, 32)
         Panel7.TabIndex = 13
@@ -201,6 +206,9 @@ Partial Class Form音频参数
         Panel8.Controls.Add(HtmlColorLabel12)
         Panel8.Dock = DockStyle.Top
         Panel8.Location = New Point(15, 15)
+        Panel8.BackColor1 = Color.Transparent
+        Panel8.BorderSize = 0
+        Panel8.Padding = Padding.Empty
         Panel8.Name = "Panel8"
         Panel8.Size = New Size(773, 25)
         Panel8.TabIndex = 12
@@ -259,13 +267,13 @@ Partial Class Form音频参数
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
     Friend WithEvents ModernPanel5 As LakeUI.ModernPanel
-    Friend WithEvents Panel7 As Panel
+    Friend WithEvents Panel7 As LakeUI.ModernPanel
     Friend WithEvents MCB_采样率 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl11 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_声道数 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl13 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_音频编码器 As LakeUI.ModernComboBox
-    Friend WithEvents Panel8 As Panel
+    Friend WithEvents Panel8 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel6 As LakeUI.HtmlColorLabel
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents HtmlColorLabel12 As LakeUI.HtmlColorLabel

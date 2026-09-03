@@ -24,30 +24,30 @@ Partial Class Form设置
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
         ModernPanel2 = New LakeUI.ModernPanel()
-        Panel5 = New Panel()
+        Panel5 = New LakeUI.ModernPanel()
         MB_清除切分文件快捷键 = New LakeUI.ModernButton()
         HtmlColorLabel7 = New LakeUI.HtmlColorLabel()
         MB_设定切分文件快捷键 = New LakeUI.ModernButton()
-        Panel4 = New Panel()
+        Panel4 = New LakeUI.ModernPanel()
         MB_清除停止录制快捷键 = New LakeUI.ModernButton()
         HtmlColorLabel6 = New LakeUI.HtmlColorLabel()
         MB_设定停止录制快捷键 = New LakeUI.ModernButton()
-        Panel3 = New Panel()
+        Panel3 = New LakeUI.ModernPanel()
         MB_清除继续录制快捷键 = New LakeUI.ModernButton()
         HtmlColorLabel5 = New LakeUI.HtmlColorLabel()
         MB_设定继续录制快捷键 = New LakeUI.ModernButton()
-        Panel2 = New Panel()
+        Panel2 = New LakeUI.ModernPanel()
         MB_清除暂停录制快捷键 = New LakeUI.ModernButton()
         HtmlColorLabel4 = New LakeUI.HtmlColorLabel()
         MB_设定暂停录制快捷键 = New LakeUI.ModernButton()
-        Panel1 = New Panel()
+        Panel1 = New LakeUI.ModernPanel()
         MB_清除开始录制快捷键 = New LakeUI.ModernButton()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
         MB_设定开始录制快捷键 = New LakeUI.ModernButton()
         HtmlColorLabel3 = New LakeUI.HtmlColorLabel()
         JustEmptyControl4 = New LakeUI.JustEmptyControl()
         ModernPanel5 = New LakeUI.ModernPanel()
-        Panel7 = New Panel()
+        Panel7 = New LakeUI.ModernPanel()
         MCB_全局字体 = New LakeUI.ModernComboBox()
         HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
         ModernPanel1.SuspendLayout()
@@ -70,6 +70,7 @@ Partial Class Form设置
         ModernPanel1.Controls.Add(ModernPanel5)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
+        ModernPanel1.BackColor = Color.Transparent
         ModernPanel1.Name = "ModernPanel1"
         ModernPanel1.Padding = New Padding(20)
         ModernPanel1.Size = New Size(800, 450)
@@ -89,6 +90,7 @@ Partial Class Form设置
         ModernPanel2.Controls.Add(HtmlColorLabel3)
         ModernPanel2.Dock = DockStyle.Top
         ModernPanel2.Location = New Point(20, 132)
+        ModernPanel2.BackColor = Color.Transparent
         ModernPanel2.Name = "ModernPanel2"
         ModernPanel2.Padding = New Padding(10)
         ModernPanel2.Size = New Size(760, 260)
@@ -102,6 +104,9 @@ Partial Class Form设置
         Panel5.Controls.Add(MB_设定切分文件快捷键)
         Panel5.Dock = DockStyle.Top
         Panel5.Location = New Point(15, 213)
+        Panel5.BackColor1 = Color.Transparent
+        Panel5.BorderSize = 0
+        Panel5.Padding = Padding.Empty
         Panel5.Name = "Panel5"
         Panel5.Size = New Size(730, 32)
         Panel5.TabIndex = 22
@@ -160,6 +165,8 @@ Partial Class Form设置
         Panel4.Controls.Add(MB_设定停止录制快捷键)
         Panel4.Dock = DockStyle.Top
         Panel4.Location = New Point(15, 171)
+        Panel4.BackColor1 = Color.Transparent
+        Panel4.BorderSize = 0
         Panel4.Name = "Panel4"
         Panel4.Padding = New Padding(0, 0, 0, 10)
         Panel4.Size = New Size(730, 42)
@@ -219,6 +226,8 @@ Partial Class Form设置
         Panel3.Controls.Add(MB_设定继续录制快捷键)
         Panel3.Dock = DockStyle.Top
         Panel3.Location = New Point(15, 129)
+        Panel3.BackColor1 = Color.Transparent
+        Panel3.BorderSize = 0
         Panel3.Name = "Panel3"
         Panel3.Padding = New Padding(0, 0, 0, 10)
         Panel3.Size = New Size(730, 42)
@@ -278,6 +287,8 @@ Partial Class Form设置
         Panel2.Controls.Add(MB_设定暂停录制快捷键)
         Panel2.Dock = DockStyle.Top
         Panel2.Location = New Point(15, 87)
+        Panel2.BackColor1 = Color.Transparent
+        Panel2.BorderSize = 0
         Panel2.Name = "Panel2"
         Panel2.Padding = New Padding(0, 0, 0, 10)
         Panel2.Size = New Size(730, 42)
@@ -337,6 +348,8 @@ Partial Class Form设置
         Panel1.Controls.Add(MB_设定开始录制快捷键)
         Panel1.Dock = DockStyle.Top
         Panel1.Location = New Point(15, 45)
+        Panel1.BackColor1 = Color.Transparent
+        Panel1.BorderSize = 0
         Panel1.Name = "Panel1"
         Panel1.Padding = New Padding(0, 0, 0, 10)
         Panel1.Size = New Size(730, 42)
@@ -420,6 +433,7 @@ Partial Class Form设置
         ModernPanel5.Controls.Add(HtmlColorLabel2)
         ModernPanel5.Dock = DockStyle.Top
         ModernPanel5.Location = New Point(20, 20)
+        ModernPanel5.BackColor = Color.Transparent
         ModernPanel5.Name = "ModernPanel5"
         ModernPanel5.Padding = New Padding(10)
         ModernPanel5.Size = New Size(760, 92)
@@ -431,6 +445,10 @@ Partial Class Form设置
         Panel7.Controls.Add(MCB_全局字体)
         Panel7.Dock = DockStyle.Top
         Panel7.Location = New Point(15, 45)
+        Panel7.BackColor = Color.Transparent
+        Panel7.BackColor1 = Color.Transparent
+        Panel7.BorderSize = 0
+        Panel7.Padding = Padding.Empty
         Panel7.Name = "Panel7"
         Panel7.Size = New Size(730, 32)
         Panel7.TabIndex = 13
@@ -504,29 +522,29 @@ Partial Class Form设置
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
     Friend WithEvents ModernPanel5 As LakeUI.ModernPanel
-    Friend WithEvents Panel7 As Panel
+    Friend WithEvents Panel7 As LakeUI.ModernPanel
     Friend WithEvents MCB_全局字体 As LakeUI.ModernComboBox
     Friend WithEvents HtmlColorLabel2 As LakeUI.HtmlColorLabel
     Friend WithEvents JustEmptyControl4 As LakeUI.JustEmptyControl
     Friend WithEvents ModernPanel2 As LakeUI.ModernPanel
-    Friend WithEvents Panel1 As Panel
+    Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents MB_设定开始录制快捷键 As LakeUI.ModernButton
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents MB_清除开始录制快捷键 As LakeUI.ModernButton
     Friend WithEvents HtmlColorLabel3 As LakeUI.HtmlColorLabel
-    Friend WithEvents Panel5 As Panel
+    Friend WithEvents Panel5 As LakeUI.ModernPanel
     Friend WithEvents MB_清除切分文件快捷键 As LakeUI.ModernButton
     Friend WithEvents HtmlColorLabel7 As LakeUI.HtmlColorLabel
     Friend WithEvents MB_设定切分文件快捷键 As LakeUI.ModernButton
-    Friend WithEvents Panel4 As Panel
+    Friend WithEvents Panel4 As LakeUI.ModernPanel
     Friend WithEvents MB_清除停止录制快捷键 As LakeUI.ModernButton
     Friend WithEvents HtmlColorLabel6 As LakeUI.HtmlColorLabel
     Friend WithEvents MB_设定停止录制快捷键 As LakeUI.ModernButton
-    Friend WithEvents Panel3 As Panel
+    Friend WithEvents Panel3 As LakeUI.ModernPanel
     Friend WithEvents MB_清除继续录制快捷键 As LakeUI.ModernButton
     Friend WithEvents HtmlColorLabel5 As LakeUI.HtmlColorLabel
     Friend WithEvents MB_设定继续录制快捷键 As LakeUI.ModernButton
-    Friend WithEvents Panel2 As Panel
+    Friend WithEvents Panel2 As LakeUI.ModernPanel
     Friend WithEvents MB_清除暂停录制快捷键 As LakeUI.ModernButton
     Friend WithEvents HtmlColorLabel4 As LakeUI.HtmlColorLabel
     Friend WithEvents MB_设定暂停录制快捷键 As LakeUI.ModernButton

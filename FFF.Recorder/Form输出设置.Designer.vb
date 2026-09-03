@@ -24,10 +24,10 @@ Partial Class Form输出设置
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
         ModernPanel5 = New LakeUI.ModernPanel()
-        Panel1 = New Panel()
+        Panel1 = New LakeUI.ModernPanel()
         MCB_自动命名方式 = New LakeUI.ModernComboBox()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
-        Panel7 = New Panel()
+        Panel7 = New LakeUI.ModernPanel()
         MCB_输出位置 = New LakeUI.ModernComboBox()
         HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
         ModernPanel1.SuspendLayout()
@@ -43,6 +43,7 @@ Partial Class Form输出设置
         ModernPanel1.Controls.Add(ModernPanel5)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
+        ModernPanel1.BackColor = Color.Transparent
         ModernPanel1.Name = "ModernPanel1"
         ModernPanel1.Padding = New Padding(20)
         ModernPanel1.Size = New Size(800, 450)
@@ -60,6 +61,7 @@ Partial Class Form输出设置
         ModernPanel5.Controls.Add(HtmlColorLabel2)
         ModernPanel5.Dock = DockStyle.Top
         ModernPanel5.Location = New Point(20, 20)
+        ModernPanel5.BackColor = Color.Transparent
         ModernPanel5.Name = "ModernPanel5"
         ModernPanel5.Padding = New Padding(10)
         ModernPanel5.Size = New Size(760, 159)
@@ -71,6 +73,9 @@ Partial Class Form输出设置
         Panel1.Controls.Add(MCB_自动命名方式)
         Panel1.Dock = DockStyle.Top
         Panel1.Location = New Point(15, 112)
+        Panel1.BackColor1 = Color.Transparent
+        Panel1.BorderSize = 0
+        Panel1.Padding = Padding.Empty
         Panel1.Name = "Panel1"
         Panel1.Size = New Size(730, 32)
         Panel1.TabIndex = 15
@@ -123,6 +128,9 @@ Partial Class Form输出设置
         Panel7.Controls.Add(MCB_输出位置)
         Panel7.Dock = DockStyle.Top
         Panel7.Location = New Point(15, 40)
+        Panel7.BackColor1 = Color.Transparent
+        Panel7.BorderSize = 0
+        Panel7.Padding = Padding.Empty
         Panel7.Name = "Panel7"
         Panel7.Size = New Size(730, 32)
         Panel7.TabIndex = 13
@@ -193,9 +201,9 @@ Partial Class Form输出设置
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
     Friend WithEvents ModernPanel5 As LakeUI.ModernPanel
-    Friend WithEvents Panel7 As Panel
+    Friend WithEvents Panel7 As LakeUI.ModernPanel
     Friend WithEvents MCB_输出位置 As LakeUI.ModernComboBox
-    Friend WithEvents Panel1 As Panel
+    Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents MCB_自动命名方式 As LakeUI.ModernComboBox
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents HtmlColorLabel2 As LakeUI.HtmlColorLabel

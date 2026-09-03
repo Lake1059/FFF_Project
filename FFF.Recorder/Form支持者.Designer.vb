@@ -24,7 +24,7 @@ Partial Class Form支持者
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
         MemberWall1 = New LakeUI.MemberWall()
-        Panel4 = New Panel()
+        Panel4 = New LakeUI.ModernPanel()
         ModernButton5 = New LakeUI.ModernButton()
         JustEmptyControl5 = New LakeUI.JustEmptyControl()
         ModernTextBox1 = New LakeUI.ModernTextBox()
@@ -50,6 +50,7 @@ Partial Class Form支持者
         ModernPanel1.Controls.Add(HtmlColorLabel2)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
+        ModernPanel1.BackColor = Color.Transparent
         ModernPanel1.Name = "ModernPanel1"
         ModernPanel1.Padding = New Padding(20)
         ModernPanel1.Size = New Size(800, 450)
@@ -90,6 +91,9 @@ Partial Class Form支持者
         Panel4.Controls.Add(ModernButton1)
         Panel4.Dock = DockStyle.Top
         Panel4.Location = New Point(20, 40)
+        Panel4.BackColor = Color.Transparent
+        Panel4.BackColor1 = Color.Transparent
+        Panel4.BorderSize = 0
         Panel4.Name = "Panel4"
         Panel4.Padding = New Padding(0, 10, 0, 20)
         Panel4.Size = New Size(760, 62)
@@ -265,7 +269,7 @@ Partial Class Form支持者
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
     Friend WithEvents MemberWall1 As LakeUI.MemberWall
-    Friend WithEvents Panel4 As Panel
+    Friend WithEvents Panel4 As LakeUI.ModernPanel
     Friend WithEvents ModernButton5 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl5 As LakeUI.JustEmptyControl
     Friend WithEvents ModernTextBox1 As LakeUI.ModernTextBox

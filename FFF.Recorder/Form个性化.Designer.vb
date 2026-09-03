@@ -25,23 +25,23 @@ Partial Class Form个性化
         Dim ToolTipEntry2 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
         ModernPanel1 = New LakeUI.ModernPanel()
         ModernPanel2 = New LakeUI.ModernPanel()
-        Panel4 = New Panel()
+        Panel4 = New LakeUI.ModernPanel()
         HtmlColorLabel8 = New LakeUI.HtmlColorLabel()
         MB_前往购买 = New LakeUI.ModernButton()
         HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
-        Panel2 = New Panel()
+        Panel2 = New LakeUI.ModernPanel()
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MB_窗口标题文字 = New LakeUI.ModernButton()
         HtmlColorLabel3 = New LakeUI.HtmlColorLabel()
         MB_图标 = New LakeUI.ModernButton()
-        Panel3 = New Panel()
+        Panel3 = New LakeUI.ModernPanel()
         MCB_边框宽度 = New LakeUI.ModernComboBox()
         JustEmptyControl8 = New LakeUI.JustEmptyControl()
         MB_分层阴影颜色 = New LakeUI.ModernButton()
         JustEmptyControl6 = New LakeUI.JustEmptyControl()
         MB_窗口边框颜色 = New LakeUI.ModernButton()
-        Panel5 = New Panel()
+        Panel5 = New LakeUI.ModernPanel()
         MCB_噪点颗粒 = New LakeUI.ModernComboBox()
         JustEmptyControl5 = New LakeUI.JustEmptyControl()
         MCB_背景来源 = New LakeUI.ModernComboBox()
@@ -70,6 +70,7 @@ Partial Class Form个性化
         ModernPanel1.Controls.Add(ModernPanel2)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
+        ModernPanel1.BackColor = Color.Transparent
         ModernPanel1.Name = "ModernPanel1"
         ModernPanel1.Padding = New Padding(20)
         ModernPanel1.Size = New Size(800, 483)
@@ -98,6 +99,9 @@ Partial Class Form个性化
         Panel4.Controls.Add(MB_前往购买)
         Panel4.Dock = DockStyle.Top
         Panel4.Location = New Point(20, 89)
+        Panel4.BackColor = Color.Transparent
+        Panel4.BackColor1 = Color.Transparent
+        Panel4.BorderSize = 0
         Panel4.Name = "Panel4"
         Panel4.Padding = New Padding(0, 10, 0, 0)
         Panel4.Size = New Size(720, 42)
@@ -168,6 +172,9 @@ Partial Class Form个性化
         Panel2.Controls.Add(MB_窗口标题文字)
         Panel2.Dock = DockStyle.Top
         Panel2.Location = New Point(20, 215)
+        Panel2.BackColor = Color.Transparent
+        Panel2.BackColor1 = Color.Transparent
+        Panel2.BorderSize = 0
         Panel2.Name = "Panel2"
         Panel2.Padding = New Padding(0, 10, 0, 0)
         Panel2.Size = New Size(760, 42)
@@ -234,6 +241,9 @@ Partial Class Form个性化
         Panel3.Controls.Add(MB_窗口边框颜色)
         Panel3.Dock = DockStyle.Top
         Panel3.Location = New Point(20, 257)
+        Panel3.BackColor = Color.Transparent
+        Panel3.BackColor1 = Color.Transparent
+        Panel3.BorderSize = 0
         Panel3.Name = "Panel3"
         Panel3.Padding = New Padding(0, 10, 0, 0)
         Panel3.Size = New Size(760, 42)
@@ -326,6 +336,9 @@ Partial Class Form个性化
         Panel5.Controls.Add(MCB_毛玻璃模式)
         Panel5.Dock = DockStyle.Top
         Panel5.Location = New Point(20, 349)
+        Panel5.BackColor = Color.Transparent
+        Panel5.BackColor1 = Color.Transparent
+        Panel5.BorderSize = 0
         Panel5.Name = "Panel5"
         Panel5.Padding = New Padding(0, 10, 0, 0)
         Panel5.Size = New Size(760, 42)
@@ -501,25 +514,25 @@ Partial Class Form个性化
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
     Friend WithEvents ModernPanel2 As LakeUI.ModernPanel
-    Friend WithEvents Panel4 As Panel
+    Friend WithEvents Panel4 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel8 As LakeUI.HtmlColorLabel
     Friend WithEvents MB_前往购买 As LakeUI.ModernButton
     Friend WithEvents HtmlColorLabel2 As LakeUI.HtmlColorLabel
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
-    Friend WithEvents Panel5 As Panel
+    Friend WithEvents Panel5 As LakeUI.ModernPanel
     Friend WithEvents MCB_噪点颗粒 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl5 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_背景来源 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl4 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_毛玻璃模式 As LakeUI.ModernComboBox
     Friend WithEvents HtmlColorLabel6 As LakeUI.HtmlColorLabel
-    Friend WithEvents Panel3 As Panel
+    Friend WithEvents Panel3 As LakeUI.ModernPanel
     Friend WithEvents MCB_边框宽度 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl8 As LakeUI.JustEmptyControl
     Friend WithEvents MB_分层阴影颜色 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl6 As LakeUI.JustEmptyControl
     Friend WithEvents MB_窗口边框颜色 As LakeUI.ModernButton
-    Friend WithEvents Panel2 As Panel
+    Friend WithEvents Panel2 As LakeUI.ModernPanel
     Friend WithEvents MB_图标 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl1 As LakeUI.JustEmptyControl
     Friend WithEvents MB_窗口标题文字 As LakeUI.ModernButton

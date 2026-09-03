@@ -39,7 +39,7 @@ Partial Class Form设置_音乐与歌词
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(20)
+        ModernPanel1.Padding = New Padding(10, 20, 20, 20)
         ModernPanel1.Size = New Size(598, 433)
         ModernPanel1.TabIndex = 0
         ' 
@@ -56,10 +56,10 @@ Partial Class Form设置_音乐与歌词
         MCK_是否启用歌词支持.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_是否启用歌词支持.Checked = True
         MCK_是否启用歌词支持.Dock = DockStyle.Top
-        MCK_是否启用歌词支持.Location = New Point(20, 88)
+        MCK_是否启用歌词支持.Location = New Point(10, 88)
         MCK_是否启用歌词支持.Name = "MCK_是否启用歌词支持"
         MCK_是否启用歌词支持.Padding = New Padding(0, 0, 0, 10)
-        MCK_是否启用歌词支持.Size = New Size(558, 34)
+        MCK_是否启用歌词支持.Size = New Size(568, 34)
         MCK_是否启用歌词支持.TabIndex = 31
         MCK_是否启用歌词支持.Text = "启用 LRC 歌词支持"
         ' 
@@ -76,10 +76,10 @@ Partial Class Form设置_音乐与歌词
         MCK_是否渲染封面图毛玻璃背景.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_是否渲染封面图毛玻璃背景.Checked = True
         MCK_是否渲染封面图毛玻璃背景.Dock = DockStyle.Top
-        MCK_是否渲染封面图毛玻璃背景.Location = New Point(20, 54)
+        MCK_是否渲染封面图毛玻璃背景.Location = New Point(10, 54)
         MCK_是否渲染封面图毛玻璃背景.Name = "MCK_是否渲染封面图毛玻璃背景"
         MCK_是否渲染封面图毛玻璃背景.Padding = New Padding(0, 0, 0, 10)
-        MCK_是否渲染封面图毛玻璃背景.Size = New Size(558, 34)
+        MCK_是否渲染封面图毛玻璃背景.Size = New Size(568, 34)
         MCK_是否渲染封面图毛玻璃背景.TabIndex = 30
         MCK_是否渲染封面图毛玻璃背景.Text = "渲染封面图毛玻璃背景"
         ' 
@@ -96,10 +96,10 @@ Partial Class Form设置_音乐与歌词
         MCK_是否渲染封面图.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_是否渲染封面图.Checked = True
         MCK_是否渲染封面图.Dock = DockStyle.Top
-        MCK_是否渲染封面图.Location = New Point(20, 20)
+        MCK_是否渲染封面图.Location = New Point(10, 20)
         MCK_是否渲染封面图.Name = "MCK_是否渲染封面图"
         MCK_是否渲染封面图.Padding = New Padding(0, 0, 0, 10)
-        MCK_是否渲染封面图.Size = New Size(558, 34)
+        MCK_是否渲染封面图.Size = New Size(568, 34)
         MCK_是否渲染封面图.TabIndex = 29
         MCK_是否渲染封面图.Text = "渲染封面图"
         ' 

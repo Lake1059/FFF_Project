@@ -98,14 +98,15 @@ Friend NotInheritable Class 播放器画面菜单控制器
     Private Sub 尺寸菜单项_Click(sender As Object, e As EventArgs)
         If 已释放 Then Return
         Dim 菜单项 = TryCast(sender, LakeUI.ModernContextMenu.ModernMenuItem)
+        Dim 菜单文字 = 读取菜单文字(菜单项)
         Dim 快照 = 安全读取快照()
         Dim 原始尺寸 = 取得原始画面尺寸(快照)
-        Dim 目标尺寸 = 解析目标画面尺寸(读取菜单文字(菜单项), 原始尺寸, 初始画面尺寸提供器())
+        Dim 目标尺寸 = 解析目标画面尺寸(菜单文字, 原始尺寸, 初始画面尺寸提供器())
         If 目标尺寸.IsEmpty Then
             显示错误("无法调整画面大小", "当前菜单选项无效，或媒体没有可用的视频画面。")
             Return
         End If
-        窗口布局控制器.调整画面尺寸(目标尺寸)
+        窗口布局控制器.调整画面尺寸(目标尺寸, 菜单尺寸使用物理像素(菜单文字))
     End Sub
 
     Private Sub 截图菜单项_Click(sender As Object, e As EventArgs)
@@ -251,6 +252,15 @@ Friend NotInheritable Class 播放器画面菜单控制器
             End If
         End If
         Return Size.Empty
+    End Function
+
+    Friend Shared Function 菜单尺寸使用物理像素(菜单文字 As String) As Boolean
+        Select Case If(菜单文字, String.Empty).Trim()
+            Case "原始视频", "原始宽度 50%", "原始高度 50%"
+                Return True
+            Case Else
+                Return False
+        End Select
     End Function
 
     Friend Shared Function 计算视频显示矩形(输出尺寸 As Size, 视频尺寸 As Size) As Rectangle

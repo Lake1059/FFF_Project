@@ -192,7 +192,7 @@ Partial Class Form1
         MCM_调整渲染区域大小.MenuPadding = New Padding(10)
         MCM_调整渲染区域大小.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         MCM_调整渲染区域大小.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MCM_调整渲染区域大小.SeparatorHeight = 10
+        MCM_调整渲染区域大小.SeparatorHeight = 20
         ' 
         ' MCM_截取当前画面
         ' 
@@ -223,7 +223,7 @@ Partial Class Form1
         MCM_截取当前画面.MenuPadding = New Padding(10)
         MCM_截取当前画面.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         MCM_截取当前画面.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MCM_截取当前画面.SeparatorHeight = 10
+        MCM_截取当前画面.SeparatorHeight = 20
         ' 
         ' ThisIsYourWindow1
         ' 
@@ -1210,7 +1210,7 @@ Partial Class Form1
         MCM_流选择器.MenuPadding = New Padding(10)
         MCM_流选择器.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         MCM_流选择器.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MCM_流选择器.SeparatorHeight = 10
+        MCM_流选择器.SeparatorHeight = 20
         ' 
         ' MCM_标题栏菜单
         ' 
@@ -1240,7 +1240,7 @@ Partial Class Form1
         MCM_标题栏菜单.MenuPadding = New Padding(10)
         MCM_标题栏菜单.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         MCM_标题栏菜单.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MCM_标题栏菜单.SeparatorHeight = 10
+        MCM_标题栏菜单.SeparatorHeight = 20
         ' 
         ' Form1
         ' 

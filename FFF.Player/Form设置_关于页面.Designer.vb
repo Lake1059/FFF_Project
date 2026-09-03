@@ -35,7 +35,7 @@ Partial Class Form设置_关于页面
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(20)
+        ModernPanel1.Padding = New Padding(10, 20, 20, 20)
         ModernPanel1.Size = New Size(580, 450)
         ModernPanel1.TabIndex = 0
         ' 
@@ -46,10 +46,10 @@ Partial Class Form设置_关于页面
         HtmlColorLabel1.Dock = DockStyle.Top
         HtmlColorLabel1.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         HtmlColorLabel1.LineSpacing = 3
-        HtmlColorLabel1.Location = New Point(20, 20)
+        HtmlColorLabel1.Location = New Point(10, 20)
         HtmlColorLabel1.Margin = New Padding(2)
         HtmlColorLabel1.Name = "HtmlColorLabel1"
-        HtmlColorLabel1.Size = New Size(540, 63)
+        HtmlColorLabel1.Size = New Size(550, 63)
         HtmlColorLabel1.TabIndex = 19
         HtmlColorLabel1.Text = "<span style=""font-size:13; color:Silver"">3FP 极简本地播放器</span><br>确保将 Shared FFmpeg 的所有 dll 放在程序目录或环境变量中才可正常播放<br>理论上编码是否支持取决于该版本的 FFmpeg 能否支持"
         ' 

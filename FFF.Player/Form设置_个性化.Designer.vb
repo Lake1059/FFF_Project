@@ -71,7 +71,7 @@ Partial Class Form设置_个性化
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(20)
+        ModernPanel1.Padding = New Padding(10, 20, 20, 20)
         ModernPanel1.Size = New Size(681, 450)
         ModernPanel1.TabIndex = 1
         ' 
@@ -82,10 +82,10 @@ Partial Class Form设置_个性化
         Panel1.BorderSize = 0
         Panel1.Controls.Add(MB_选择背景图)
         Panel1.Dock = DockStyle.Top
-        Panel1.Location = New Point(20, 377)
+        Panel1.Location = New Point(10, 377)
         Panel1.Name = "Panel1"
         Panel1.Padding = New Padding(0, 10, 0, 0)
-        Panel1.Size = New Size(641, 42)
+        Panel1.Size = New Size(651, 42)
         Panel1.TabIndex = 32
         ' 
         ' MB_选择背景图
@@ -114,10 +114,10 @@ Partial Class Form设置_个性化
         Panel5.Controls.Add(JustEmptyControl4)
         Panel5.Controls.Add(MCB_毛玻璃模式)
         Panel5.Dock = DockStyle.Top
-        Panel5.Location = New Point(20, 335)
+        Panel5.Location = New Point(10, 335)
         Panel5.Name = "Panel5"
         Panel5.Padding = New Padding(0, 10, 0, 0)
-        Panel5.Size = New Size(641, 42)
+        Panel5.Size = New Size(651, 42)
         Panel5.TabIndex = 30
         ' 
         ' MCB_噪点颗粒
@@ -234,11 +234,11 @@ Partial Class Form设置_个性化
         HtmlColorLabel6.AutoSize = True
         HtmlColorLabel6.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel6.Dock = DockStyle.Top
-        HtmlColorLabel6.Location = New Point(20, 291)
+        HtmlColorLabel6.Location = New Point(10, 291)
         HtmlColorLabel6.Margin = New Padding(2)
         HtmlColorLabel6.Name = "HtmlColorLabel6"
         HtmlColorLabel6.Padding = New Padding(0, 10, 0, 0)
-        HtmlColorLabel6.Size = New Size(641, 44)
+        HtmlColorLabel6.Size = New Size(651, 44)
         HtmlColorLabel6.TabIndex = 31
         HtmlColorLabel6.Text = "玻璃背景模式下将禁用部分控件的遮罩色以实现全透背景<br>玻璃背景将大幅增加内存和显存占用，并对 UI 性能产生影响，不建议低端 CPU 使用"
         ' 
@@ -253,10 +253,10 @@ Partial Class Form设置_个性化
         Panel3.Controls.Add(JustEmptyControl6)
         Panel3.Controls.Add(MB_窗口边框颜色)
         Panel3.Dock = DockStyle.Top
-        Panel3.Location = New Point(20, 249)
+        Panel3.Location = New Point(10, 249)
         Panel3.Name = "Panel3"
         Panel3.Padding = New Padding(0, 10, 0, 0)
-        Panel3.Size = New Size(641, 42)
+        Panel3.Size = New Size(651, 42)
         Panel3.TabIndex = 29
         ' 
         ' MCB_边框宽度
@@ -342,10 +342,10 @@ Partial Class Form设置_个性化
         Panel2.BorderSize = 0
         Panel2.Controls.Add(MB_图标)
         Panel2.Dock = DockStyle.Top
-        Panel2.Location = New Point(20, 207)
+        Panel2.Location = New Point(10, 207)
         Panel2.Name = "Panel2"
         Panel2.Padding = New Padding(0, 10, 0, 0)
-        Panel2.Size = New Size(641, 42)
+        Panel2.Size = New Size(651, 42)
         Panel2.TabIndex = 28
         ' 
         ' MB_图标
@@ -369,11 +369,11 @@ Partial Class Form设置_个性化
         HtmlColorLabel3.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel3.Dock = DockStyle.Top
         HtmlColorLabel3.Font = New Font("Microsoft YaHei UI", 13F)
-        HtmlColorLabel3.Location = New Point(20, 164)
+        HtmlColorLabel3.Location = New Point(10, 164)
         HtmlColorLabel3.Margin = New Padding(2)
         HtmlColorLabel3.Name = "HtmlColorLabel3"
         HtmlColorLabel3.Padding = New Padding(0, 20, 0, 0)
-        HtmlColorLabel3.Size = New Size(641, 43)
+        HtmlColorLabel3.Size = New Size(651, 43)
         HtmlColorLabel3.TabIndex = 27
         HtmlColorLabel3.Text = "可定制内容"
         ' 
@@ -388,10 +388,10 @@ Partial Class Form设置_个性化
         ModernPanel2.Controls.Add(HtmlColorLabel2)
         ModernPanel2.Controls.Add(HtmlColorLabel1)
         ModernPanel2.Dock = DockStyle.Top
-        ModernPanel2.Location = New Point(20, 20)
+        ModernPanel2.Location = New Point(10, 20)
         ModernPanel2.Name = "ModernPanel2"
         ModernPanel2.Padding = New Padding(10)
-        ModernPanel2.Size = New Size(641, 144)
+        ModernPanel2.Size = New Size(651, 144)
         ModernPanel2.TabIndex = 26
         ' 
         ' Panel4
@@ -405,7 +405,7 @@ Partial Class Form设置_个性化
         Panel4.Location = New Point(20, 82)
         Panel4.Name = "Panel4"
         Panel4.Padding = New Padding(0, 10, 0, 0)
-        Panel4.Size = New Size(601, 42)
+        Panel4.Size = New Size(611, 42)
         Panel4.TabIndex = 19
         ' 
         ' HtmlColorLabel8
@@ -418,7 +418,7 @@ Partial Class Form设置_个性化
         HtmlColorLabel8.Margin = New Padding(2)
         HtmlColorLabel8.Name = "HtmlColorLabel8"
         HtmlColorLabel8.Padding = New Padding(10, 0, 0, 0)
-        HtmlColorLabel8.Size = New Size(401, 32)
+        HtmlColorLabel8.Size = New Size(411, 32)
         HtmlColorLabel8.TabIndex = 25
         HtmlColorLabel8.Text = "未解锁状态下本页设置不会起作用"
         HtmlColorLabel8.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
@@ -448,7 +448,7 @@ Partial Class Form设置_个性化
         HtmlColorLabel2.Location = New Point(20, 48)
         HtmlColorLabel2.Margin = New Padding(2)
         HtmlColorLabel2.Name = "HtmlColorLabel2"
-        HtmlColorLabel2.Size = New Size(601, 34)
+        HtmlColorLabel2.Size = New Size(611, 34)
         HtmlColorLabel2.TabIndex = 12
         HtmlColorLabel2.Text = "3FP 支持者内容包仅提供个性化功能，播放功能完全免费<br>作为 3FP 的付费支持者，您可以提供一个支持者信息，我会在下一次更新时硬编码到 3FP"
         ' 
@@ -462,7 +462,7 @@ Partial Class Form设置_个性化
         HtmlColorLabel1.Margin = New Padding(2)
         HtmlColorLabel1.Name = "HtmlColorLabel1"
         HtmlColorLabel1.Padding = New Padding(0, 0, 0, 5)
-        HtmlColorLabel1.Size = New Size(601, 28)
+        HtmlColorLabel1.Size = New Size(611, 28)
         HtmlColorLabel1.TabIndex = 11
         HtmlColorLabel1.Text = "购买 FFF.Player Supporter Pack 以解锁个性化设置"
         ' 
