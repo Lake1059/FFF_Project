@@ -753,6 +753,16 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    Public Sub 设置窗口移动状态(启用 As Boolean)
+        If 已释放 OrElse 会话 Is Nothing Then Return
+        Try
+            会话.设置窗口移动状态(启用)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
+
     ''' <summary>切换端点共享/独占模式。原生层仅重建音频渲染器，保留当前媒体和流选择。</summary>
     Public Sub 切换WASAPI模式()
         Dim 目标 = 会话

@@ -1051,6 +1051,12 @@ FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
     });
     return FFFResult::Success;
 }
+
+FFFResult PlayerSession::SetInteractiveMove(const bool enabled) noexcept {
+    videoRenderer_.SetInteractiveMove(enabled);
+    return FFFResult::Success;
+}
+
 FFFResult PlayerSession::SetViewTransform(const float zoom, const float panX,
     const float panY) noexcept {
     if (!std::isfinite(zoom) || zoom <= 0.0f || !std::isfinite(panX) || !std::isfinite(panY))
@@ -2384,6 +2390,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     const auto frameDuration = std::max<std::int64_t>(0, lastVideoFrameDuration100ns_);
     const auto lateTolerance = std::max<std::int64_t>(frameDuration * 2, 500'000);
     if (state_.load() == FFF3FPState::Playing && !fulfillingSeek &&
+        !audioBlockedUntilVideoFrame_ &&
         position + lateTolerance < ClockPosition()) {
         snapshot_.frameIndex = nextIndex;
         ++snapshot_.droppedVideoFrames;

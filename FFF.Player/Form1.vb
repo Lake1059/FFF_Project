@@ -4,6 +4,8 @@ Imports System.Threading
 Imports System.Threading.Tasks
 
 Public Class Form1
+    Private Const WM_ENTERSIZEMOVE As Integer = &H231
+    Private Const WM_EXITSIZEMOVE As Integer = &H232
     Public Shared Property 当前主窗体 As Form1
     Private Const 跳转秒数 As Integer = 5
     Private Const HDR操作提示键 As String = "HDR模式"
@@ -45,6 +47,12 @@ Public Class Form1
     Private 已跳过HDR强制确认 As Boolean
 
     Private Event 方向键快捷键已请求 As KeyEventHandler
+
+    Protected Overrides Sub WndProc(ByRef m As Message)
+        If m.Msg = WM_ENTERSIZEMOVE Then 播放控制器?.设置窗口移动状态(True)
+        MyBase.WndProc(m)
+        If m.Msg = WM_EXITSIZEMOVE Then 播放控制器?.设置窗口移动状态(False)
+    End Sub
 
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         当前主窗体 = Me

@@ -454,6 +454,7 @@ FFF3FP_API FFFResult FFF3FP_SetColorMode(FFF3FPHandle player, FFF3FPColorMode mo
     float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits,
     std::uint32_t forceHdrOutput) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetOutputWindow(FFF3FPHandle player, void* outputWindow) noexcept;
+FFF3FP_API FFFResult FFF3FP_SetInteractiveMove(FFF3FPHandle player, std::uint32_t enabled) noexcept;
 // View transform for frame inspection: zoom scales the fitted video box
 // (1.0 = fit, >1 = magnify), panX/panY are normalized offsets in [-1,1]
 // relative to the unzoomed box.

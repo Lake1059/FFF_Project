@@ -114,6 +114,7 @@ public:
     ~PlayerVideoRenderer();
 
     FFFResult SetWindow(HWND window) noexcept;
+    void SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
@@ -332,6 +333,7 @@ private:
     std::uint32_t swapWidth_;
     std::uint32_t swapHeight_;
     bool swapHdr_;
+    bool swapAllowTearing_;
     std::atomic<std::uint32_t> swapOutputBits_;
     std::uint32_t sourceWidth_;
     std::uint32_t sourceHeight_;
@@ -423,6 +425,7 @@ private:
     std::atomic<std::uint64_t> deviceLockWait100ns_;
     std::atomic<std::uint64_t> softwareConvert100ns_;
     std::atomic<std::uint32_t> playbackWorkPending_;
+    std::atomic<bool> interactiveMove_;
     std::atomic<bool> lyricsLayoutEnabled_;
     std::atomic<std::uint32_t> coverBackdropBlurRadiusBits_;
     std::atomic<std::uint32_t> coverBackdropBlurPasses_;

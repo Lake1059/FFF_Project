@@ -518,7 +518,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             If(采样率 > 0, $"采样 {采样率}Hz", String.Empty),
             If(位深 > 0, $"位深 {位深}bit", String.Empty),
             If(声道 > 0, $"声道数 {声道}", String.Empty),
-            $"实时延迟 {快照.音频缓冲时长.TotalMilliseconds:0}ms")
+            $"缓冲区 {快照.音频缓冲时长.TotalMilliseconds:0}ms")
     End Function
 
     Private Shared Function 字幕条目数(字幕 As 外部字幕轨道) As String

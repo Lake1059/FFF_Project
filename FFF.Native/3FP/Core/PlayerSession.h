@@ -49,6 +49,7 @@ public:
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
+    FFFResult SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;

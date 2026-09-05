@@ -361,6 +361,10 @@ std::int64_t PlayerWasapiRenderer::TimelineLimit100ns() const noexcept {
 std::int64_t PlayerWasapiRenderer::Buffered100ns() const noexcept {
     std::lock_guard lock(mutex_);
     if (outputSampleRate_ == 0 || outputBlockAlign_ == 0) return 0;
+    // This is the amount of decoded PCM still ahead of the endpoint playback
+    // cursor: application PCM waiting to be submitted plus samples already
+    // owned by WASAPI. It is a queue lead/buffer duration, not hardware's
+    // fixed output latency.
     const auto frames = queuedBytes_ / outputBlockAlign_ + pendingMediaFrames_.load();
     return static_cast<std::int64_t>(frames) * 10'000'000 / outputSampleRate_;
 }

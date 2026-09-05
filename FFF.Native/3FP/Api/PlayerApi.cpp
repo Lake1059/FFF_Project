@@ -62,6 +62,10 @@ FFFResult FFF3FP_SetColorMode(const FFF3FPHandle player, const FFF3FPColorMode m
         FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_SetInteractiveMove(const FFF3FPHandle player, const std::uint32_t enabled) noexcept {
+    return player && enabled <= 1 ? static_cast<PlayerSession*>(player)->SetInteractiveMove(enabled != 0)
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_SetViewTransform(const FFF3FPHandle player, const float zoom,
     const float panX, const float panY) noexcept {
     return player ? static_cast<PlayerSession*>(player)->SetViewTransform(zoom, panX, panY)

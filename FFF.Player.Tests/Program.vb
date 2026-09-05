@@ -13,6 +13,22 @@ Friend Module Program
     Private Const 测量秒数 As Double = 12.0
     Private Const 目标帧率 As Double = 24000.0 / 1001.0
     Private Const 音频缓冲平均上限毫秒 As Double = 200.0
+    Private Const WM_ENTERSIZEMOVE As Integer = &H231
+    Private Const WM_EXITSIZEMOVE As Integer = &H232
+    Private Const SWP_NOSIZE As UInteger = &H1UI
+    Private Const SWP_NOZORDER As UInteger = &H4UI
+    Private Const SWP_NOACTIVATE As UInteger = &H10UI
+
+    <DllImport("user32.dll")>
+    Private Function SendMessage(窗口 As IntPtr, 消息 As Integer,
+                                 w参数 As IntPtr, l参数 As IntPtr) As IntPtr
+    End Function
+
+    <DllImport("user32.dll")>
+    Private Function SetWindowPos(窗口 As IntPtr, 插入位置 As IntPtr,
+                                  x As Integer, y As Integer, 宽度 As Integer, 高度 As Integer,
+                                  标志 As UInteger) As Boolean
+    End Function
     Private Const 音频缓冲峰值上限毫秒 As Double = 300.0
 
     <StructLayout(LayoutKind.Sequential)>
@@ -366,6 +382,12 @@ Friend Module Program
                 Console.WriteLine("解码、渲染、字幕/弹幕和音频性能回归全部通过。")
                 Return 0
             End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--window-move-performance-probe", StringComparison.OrdinalIgnoreCase) Then
+                Dim 移动探针视频路径 = Path.GetFullPath(参数(1))
+                检查文件(移动探针视频路径)
+                测试窗口移动性能探针(移动探针视频路径)
+                Return 0
+            End If
             If 参数.Length = 3 AndAlso String.Equals(参数(0), "--color-regression", StringComparison.OrdinalIgnoreCase) Then
                 Dim SDR路径 = Path.GetFullPath(参数(1))
                 Dim HDR路径 = Path.GetFullPath(参数(2))
@@ -391,6 +413,7 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --lyrics-regression <歌词.lrc> <带封面音频> <无封面音频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --color-regression <SDR视频> <HDR视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --performance-regression <SDR视频> <HDR视频>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --window-move-performance-probe <高帧率视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --targeted-regression <视频> <字幕.sup>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --vcb-ass-regression <视频> <字幕.ass>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --clip-step-regression <视频>")
@@ -1921,6 +1944,91 @@ Friend Module Program
             输出窗口.Close()
         End Using
     End Sub
+
+    Private Sub 测试窗口移动性能探针(路径 As String)
+        For Each 启用分层阴影 In {False, True}
+            Using 输出窗口 As New Form With {
+                .ClientSize = New Size(1280, 720),
+                .FormBorderStyle = FormBorderStyle.None,
+                .StartPosition = FormStartPosition.Manual,
+                .Location = New Point(80, 80),
+                .ShowInTaskbar = True,
+                .Text = "3FP 窗口移动性能探针"
+            }
+                Dim 标题栏 = New LakeUI.ThisIsYourWindow()
+                标题栏.ShadowMode = If(启用分层阴影,
+                                       LakeUI.ThisIsYourWindow.ShadowModeEnum.Layer,
+                                       LakeUI.ThisIsYourWindow.ShadowModeEnum.None)
+                标题栏.LayerShadowResizeFullArea = True
+                标题栏.Attach(输出窗口)
+                Dim 画面控件 As New 播放器画面控件 With {.Dock = DockStyle.Fill}
+                输出窗口.Controls.Add(画面控件)
+                输出窗口.Show()
+                Application.DoEvents()
+
+                Using 会话 As New 播放器会话(New 播放器配置 With {
+                    .解码器 = 解码模式.GPU,
+                    .色彩模式 = 色彩输出模式.映射到SDR,
+                    .输出窗口句柄 = 画面控件.输出窗口句柄
+                })
+                    会话.打开Async(路径).GetAwaiter().GetResult()
+                    会话.播放()
+                    等待快照(会话, Function(x) x.交换链呈现次数 >= 30,
+                             "窗口移动探针首帧")
+                    Thread.Sleep(1000)
+                    Application.DoEvents()
+
+                    Dim 静置 = 测量窗口移动阶段(会话, 输出窗口, False)
+                    Dim 移动 = 测量窗口移动阶段(会话, 输出窗口, True)
+                    Console.WriteLine($"窗口移动探针 shadow={启用分层阴影}: " &
+                                      $"静置 {静置.呈现帧率:F1} fps / 丢 {静置.丢弃帧数} / 合并 {静置.合并帧数}，" &
+                                      $"移动 {移动.呈现帧率:F1} fps / 丢 {移动.丢弃帧数} / 合并 {移动.合并帧数}，" &
+                                      $"Present等待 {移动.Present等待毫秒:F1} ms，设备锁等待 {移动.设备锁等待毫秒:F1} ms，" &
+                                      $"音频欠载 {移动.音频欠载次数}")
+                End Using
+                标题栏.Detach(输出窗口)
+                输出窗口.Close()
+            End Using
+        Next
+    End Sub
+
+    Private Function 测量窗口移动阶段(会话 As 播放器会话, 窗口 As Form,
+                                      移动窗口 As Boolean) As 窗口移动测量结果
+        Dim 初始 = 会话.当前快照
+        Dim 计时 = Stopwatch.StartNew()
+        SendMessage(窗口.Handle, WM_ENTERSIZEMOVE, IntPtr.Zero, IntPtr.Zero)
+        会话.设置窗口移动状态(移动窗口)
+        While 计时.Elapsed < TimeSpan.FromSeconds(3)
+            If 移动窗口 Then
+                Dim 位移 = CInt(计时.Elapsed.TotalMilliseconds / 8.0R)
+                SetWindowPos(窗口.Handle, IntPtr.Zero, 80 + 位移 Mod 360,
+                             80 + (位移 \ 3) Mod 160, 0, 0,
+                             SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE)
+            End If
+            Application.DoEvents()
+            Thread.Sleep(1)
+        End While
+        SendMessage(窗口.Handle, WM_EXITSIZEMOVE, IntPtr.Zero, IntPtr.Zero)
+        会话.设置窗口移动状态(False)
+        Dim 末尾 = 会话.当前快照
+        Return New 窗口移动测量结果 With {
+            .呈现帧率 = (末尾.交换链呈现次数 - 初始.交换链呈现次数) / Math.Max(计时.Elapsed.TotalSeconds, 0.001R),
+            .丢弃帧数 = CLng(末尾.已丢弃视频帧数 - 初始.已丢弃视频帧数),
+            .合并帧数 = CLng(末尾.已合并视频帧数 - 初始.已合并视频帧数),
+            .Present等待毫秒 = (末尾.呈现等待时长 - 初始.呈现等待时长).TotalMilliseconds,
+            .设备锁等待毫秒 = (末尾.设备锁等待时长 - 初始.设备锁等待时长).TotalMilliseconds,
+            .音频欠载次数 = CLng(末尾.音频欠载次数 - 初始.音频欠载次数)
+        }
+    End Function
+
+    Private NotInheritable Class 窗口移动测量结果
+        Public Property 呈现帧率 As Double
+        Public Property 丢弃帧数 As Long
+        Public Property 合并帧数 As Long
+        Public Property Present等待毫秒 As Double
+        Public Property 设备锁等待毫秒 As Double
+        Public Property 音频欠载次数 As Long
+    End Class
 
     Private Function 计算百分位(排序样本 As Double(), 百分比 As Double) As Double
         If 排序样本 Is Nothing OrElse 排序样本.Length = 0 Then Return 0

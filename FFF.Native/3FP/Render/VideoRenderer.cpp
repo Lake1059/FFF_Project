@@ -1716,7 +1716,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       d2dAtlasTarget_(nullptr), d2dTimedTextShadowTarget_(nullptr),
       timedTextShadowBlurEffect_(nullptr),
       writeFactory_(nullptr), timedTextRenderingParams_(nullptr), scaler_(nullptr),
-      swapWidth_(0), swapHeight_(0), swapHdr_(false), swapOutputBits_(8), sourceWidth_(0), sourceHeight_(0),
+      swapWidth_(0), swapHeight_(0), swapHdr_(false), swapAllowTearing_(false), swapOutputBits_(8), sourceWidth_(0), sourceHeight_(0),
       sourceInputLayout_(UINT32_MAX), sourceBitDepth_(0),
       sourceChromaWidthShift_(0), sourceChromaHeightShift_(0),
       sourceExternal_(false), sourceLimitedToNativeSize_(false), sourceCoverArt_(false),
@@ -1759,6 +1759,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       presentedVideoFrames_(0), coalescedVideoFrames_(0), swapChainPresents_(0),
       presentWait100ns_(0), deviceLockWait100ns_(0), softwareConvert100ns_(0),
       playbackWorkPending_(0),
+      interactiveMove_(false),
       lyricsLayoutEnabled_(false),
       coverBackdropBlurRadiusBits_(std::bit_cast<std::uint32_t>(30.0f)),
       coverBackdropBlurPasses_(3), coverBackdropDownsampleFactor_(4),
@@ -1813,6 +1814,7 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     hdrSwapChainRejected_ = false;
     swapWidth_ = swapHeight_ = 0;
     swapHdr_ = false; swapOutputBits_ = 8;
+    swapAllowTearing_ = false;
     // Do not enumerate DXGI outputs while the managed player object is being
     // constructed. HDR capability is resolved lazily by EnsureSwapChain on
     // the native worker/presenter path.
@@ -1824,6 +1826,10 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
             "True HDR output is only available for HDR source video.";
     }
     return FFFResult::Success;
+}
+
+void PlayerVideoRenderer::SetInteractiveMove(const bool enabled) noexcept {
+    interactiveMove_.store(enabled, std::memory_order_release);
 }
 
 FFFResult PlayerVideoRenderer::SetScalingQuality(
@@ -2085,8 +2091,14 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     if (deviceResult != FFFResult::Success) return deviceResult;
     RECT client{};
     if (!GetClientRect(window_, &client)) return FFFResult::DeviceFailure;
-    width = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(client.right - client.left));
-    height = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(client.bottom - client.top));
+    const auto clientWidth = client.right - client.left;
+    const auto clientHeight = client.bottom - client.top;
+    // A minimized window and some WM_SIZE/WM_WINDOWPOSCHANGED transitions
+    // temporarily expose a zero-sized client area. Flip-model swap chains do
+    // not need a 1x1 resize here; defer it until the window has a real size.
+    if (clientWidth <= 0 || clientHeight <= 0) return FFFResult::Success;
+    width = static_cast<std::uint32_t>(clientWidth);
+    height = static_cast<std::uint32_t>(clientHeight);
     const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
     const auto outputBits = PreferredOutputBitDepth(sourceBitDepth, hdr);
     if (swapChain_ != nullptr && (hdr != swapHdr_ || outputBits != swapOutputBits_)) {
@@ -2097,8 +2109,8 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
         hdr == swapHdr_ && outputBits == swapOutputBits_) return FFFResult::Success;
     if (swapChain_ != nullptr && hdr == swapHdr_ && outputBits == swapOutputBits_) {
         context_->ClearState();
-        std::lock_guard presentLock(presentMutex_);
-        const auto resize = swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+        const auto resizeFlags = swapAllowTearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
+        const auto resize = swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, resizeFlags);
         if (SUCCEEDED(resize)) {
             swapWidth_ = width; swapHeight_ = height;
             ReleaseTimedTextResources();
@@ -2124,6 +2136,11 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
         SetError("Could not obtain the DXGI playback factory."); return FFFResult::DeviceFailure;
     }
+    BOOL allowTearing = FALSE;
+    ComPtr<IDXGIFactory5> factory5;
+    if (SUCCEEDED(factory.As(&factory5)))
+        factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+            &allowTearing, sizeof(allowTearing));
     DXGI_SWAP_CHAIN_DESC1 description{};
     description.Width = width; description.Height = height;
     description.Format = outputBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
@@ -2132,6 +2149,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     description.SampleDesc.Count = 1; description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     description.BufferCount = 2; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_NONE;
+    description.Flags = allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
     ComPtr<IDXGISwapChain1> chain1;
     const auto result = factory->CreateSwapChainForHwnd(device_, window_, &description, nullptr, nullptr, &chain1);
     if (FAILED(result) || FAILED(chain1->QueryInterface(IID_PPV_ARGS(&swapChain_)))) {
@@ -2142,6 +2160,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         SetError(message.str()); return FFFResult::DeviceFailure;
     }
     swapWidth_ = width; swapHeight_ = height; swapHdr_ = hdr; swapOutputBits_ = outputBits;
+    swapAllowTearing_ = allowTearing != FALSE;
     ReleaseTimedTextResources();
     if (hdr) {
         UINT support = 0;
@@ -2209,9 +2228,9 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
     const auto format = formatBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
         (formatBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
             DXGI_FORMAT_B8G8R8A8_UNORM);
-    std::unique_lock presentLock(presentMutex_);
+    const auto resizeFlags = swapAllowTearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
     const auto resize = swapChain_->ResizeBuffers(0, std::max(1u, swapWidth_),
-        std::max(1u, swapHeight_), format, 0);
+        std::max(1u, swapHeight_), format, resizeFlags);
     if (FAILED(resize)) {
         if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
         std::ostringstream message;
@@ -2240,7 +2259,6 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
             swapWidth_ = swapHeight_ = 0;
             swapHdr_ = false;
             swapOutputBits_ = 8;
-            presentLock.unlock();
             return CreateSwapChain(width, height, false,
                 PreferredOutputBitDepth(sourceBitDepth_, false));
         }
@@ -3829,9 +3847,26 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
             std::chrono::nanoseconds>(std::chrono::steady_clock::now() - conversionStart).count() / 100));
     }
     const auto deviceWaitStart = std::chrono::steady_clock::now();
-    std::unique_lock deviceLock(deviceMutex_);
+    const auto interactiveMove = interactiveMove_.load(std::memory_order_acquire);
+    std::unique_lock deviceLock(deviceMutex_, std::defer_lock);
+    if (interactiveMove) (void)deviceLock.try_lock();
+    else deviceLock.lock();
     deviceLockWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
         std::chrono::nanoseconds>(std::chrono::steady_clock::now() - deviceWaitStart).count() / 100));
+    if (!deviceLock.owns_lock()) {
+        // The timed-text/presentation thread owns the immediate context. Do not
+        // make the playback worker wait behind it; the next decoded frame will
+        // supersede this one and audio can continue on schedule.
+        return FFFResult::Success;
+    }
+    std::unique_lock presentLock(presentMutex_, std::defer_lock);
+    if (interactiveMove) (void)presentLock.try_lock();
+    else presentLock.lock();
+    if (!presentLock.owns_lock()) {
+        // Present and ResizeBuffers must never overlap. Dropping this render is
+        // safe because the following decoded frame publishes the latest state.
+        return FFFResult::Success;
+    }
     // Keep the logical render counter useful for headless/clip-mode sessions;
     // swapChainPresents remains the separate counter for real DXGI presents.
     if (window_ == nullptr) {
@@ -3925,7 +3960,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         ++presentationGeneration_;
     }
     deviceLock.unlock();
-    ++presentedVideoFrames_;
     timedTextCondition_.notify_one();
     return FFFResult::Success;
 }
@@ -3934,6 +3968,7 @@ FFFResult PlayerVideoRenderer::Redraw() noexcept {
     {
         std::lock_guard deviceLock(deviceMutex_);
         if (!hasCachedVideo_ || window_ == nullptr) return FFFResult::Success;
+        std::lock_guard presentLock(presentMutex_);
         const auto chainResult = EnsureSwapChain(sourceWidth_, sourceHeight_, sourceBitDepth_);
         if (chainResult != FFFResult::Success) return chainResult;
     }
@@ -4423,13 +4458,18 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     const std::uint64_t renderedVideoGeneration) noexcept {
     if (chain == nullptr) return FFFResult::InvalidState;
     const auto start = std::chrono::steady_clock::now();
-    // Camera redraws are submitted immediately, but the final flip must land
-    // on a display refresh boundary. Present(0) permits scan-out tearing that
-    // looks like a trailing duplicate during a fast yaw; SyncInterval=1 keeps
-    // the latest complete projection intact at both 60 and 120 Hz.
-    const auto present = chain->Present(1, 0);
+    // Normal playback is synchronized to the display. During the native
+    // window-move loop, Present must not wait for DWM: that loop owns the UI
+    // thread's message pump and a blocking Present can starve audio and decode.
+    const auto interactiveMove = interactiveMove_.load(std::memory_order_acquire);
+    const auto present = interactiveMove
+        ? chain->Present(0, swapAllowTearing_ ?
+            (DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_DO_NOT_WAIT) : DXGI_PRESENT_DO_NOT_WAIT)
+        : chain->Present(1, 0);
     presentWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
         std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count() / 100));
+    if (present == DXGI_ERROR_WAS_STILL_DRAWING)
+        return FFFResult::Success;
     if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET ||
         present == DXGI_ERROR_DEVICE_HUNG || present == DXGI_ERROR_DRIVER_INTERNAL_ERROR) {
         RequestDeviceRecovery(present, "DXGI presentation");
@@ -4444,6 +4484,8 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     }
     ++swapChainPresents_;
     const auto previous = presentedVideoGeneration_.exchange(renderedVideoGeneration);
+    if (renderedVideoGeneration != 0 && renderedVideoGeneration != previous)
+        ++presentedVideoFrames_;
     if (previous != 0 && renderedVideoGeneration > previous + 1)
         coalescedVideoFrames_.fetch_add(renderedVideoGeneration - previous - 1);
     std::lock_guard lock(timedTextMutex_);

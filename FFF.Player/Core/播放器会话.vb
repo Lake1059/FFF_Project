@@ -195,6 +195,9 @@ Public NotInheritable Class 播放器会话
     Public Sub 设置输出窗口(窗口句柄 As IntPtr)
         检查结果(播放器原生接口.FFF3FP_SetOutputWindow(取得句柄(), 窗口句柄))
     End Sub
+    Public Sub 设置窗口移动状态(启用 As Boolean)
+        检查结果(播放器原生接口.FFF3FP_SetInteractiveMove(取得句柄(), If(启用, 1UI, 0UI)))
+    End Sub
     Public Sub 设置360视角(启用 As Boolean, 水平角度 As Single, 垂直角度 As Single,
                        Optional 视场角 As Single = 90.0F)
         If Not Single.IsFinite(水平角度) OrElse Not Single.IsFinite(垂直角度) OrElse
