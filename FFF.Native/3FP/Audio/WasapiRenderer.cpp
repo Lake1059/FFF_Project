@@ -80,11 +80,11 @@ PlayerWasapiRenderer::PlayerWasapiRenderer(std::wstring endpointId, const bool e
       inputChannelLayout_{}, inputSampleRate_(0), inputSampleFormat_(-1),
       outputSampleRate_(0), outputChannels_(0), outputBlockAlign_(0), outputBitsPerSample_(0),
       outputValidBitsPerSample_(0),
-      outputFloat_(false), volume_(1.0f), muted_(false), running_(false),
+      outputFloat_(false), volume_(1.0f), muted_(false), running_(false), clockRunning_(false),
       paused_(true), resetRequested_(false), restartRequested_(false), resetPosition100ns_(0), clockPosition100ns_(0),
       clockSampleQpc100ns_(0), clockLimitPosition100ns_(0), clockEpoch_(0),
       pendingMediaFrames_(0), playedMediaFrames_(0), underrunCount_(0),
-      hasSubmittedAudio_(false), timelineAnchored_(false), producedTimelineFrames_(0),
+      hasSubmittedAudio_(false), endOfStream_(false), timelineAnchored_(false), producedTimelineFrames_(0),
       timestampJitterCount_(0), discontinuityCount_(0), insertedSilenceFrames_(0),
       droppedOverlapFrames_(0) {}
 
@@ -128,6 +128,7 @@ void PlayerWasapiRenderer::Stop() noexcept {
     if (stopEvent_ != nullptr) SetEvent(stopEvent_);
     if (thread_.joinable()) thread_.join();
     running_ = false;
+    clockRunning_ = false;
     CloseEvents();
     if (resampler_ != nullptr) { swr_free(&resampler_); }
     av_channel_layout_uninit(&inputChannelLayout_);
@@ -180,6 +181,7 @@ FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame) noexcept {
 
 FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t position100ns) noexcept {
     if (frame == nullptr || frame->nb_samples <= 0) return FFFResult::InvalidArgument;
+    endOfStream_ = false;
     // Enqueue, reset and volume changes are serialized by PlayerSession's worker.
     // Do not take the PCM queue mutex while resampling or applying gain: the
     // WASAPI event thread must be able to take that mutex every device period.
@@ -254,6 +256,24 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
     const auto frames = swr_convert(resampler_, output, capacity, input.data(), inputSamples);
     if (frames < 0) { SetError("FFmpeg failed to resample decoded audio."); return FFFResult::FfmpegFailure; }
     converted.resize(static_cast<std::size_t>(frames) * outputBlockAlign_);
+    ApplyGain(converted);
+    const auto gapBytes = static_cast<std::size_t>(gapFrames) * outputBlockAlign_;
+    {
+        std::lock_guard lock(mutex_);
+        AudioChunk chunk;
+        chunk.silenceBytes = gapBytes;
+        chunk.bytes = std::move(converted);
+        queuedBytes_ += gapBytes + chunk.bytes.size();
+        queue_.push_back(std::move(chunk));
+        producedTimelineFrames_ += gapFrames + static_cast<std::uint64_t>(frames);
+        if (frames > 0) hasSubmittedAudio_ = true;
+    }
+    PublishRuntimeDiagnostics();
+    if (controlEvent_ != nullptr) SetEvent(controlEvent_);
+    return FFFResult::Success;
+}
+
+void PlayerWasapiRenderer::ApplyGain(std::vector<std::uint8_t>& converted) const noexcept {
     const auto gain = muted_.load() ? 0.0f : volume_.load();
     if (gain == 0.0f) {
         std::memset(converted.data(), 0, converted.size());
@@ -269,20 +289,33 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
         for (std::size_t index = 0; index < converted.size() / sizeof(std::int32_t); ++index)
             samples[index] = static_cast<std::int32_t>(std::llround(samples[index] * gain));
     }
-    const auto gapBytes = static_cast<std::size_t>(gapFrames) * outputBlockAlign_;
-    {
-        std::lock_guard lock(mutex_);
-        // PlayerSession throttles production by media time. Keep the current decoded
-        // frame intact even when a codec emits a burst; rejecting after resampling
-        // would advance the resampler/timeline and silently create an audible hole.
-        AudioChunk chunk;
-        chunk.silenceBytes = gapBytes;
-        chunk.bytes = std::move(converted);
-        queuedBytes_ += gapBytes + chunk.bytes.size();
-        queue_.push_back(std::move(chunk));
-        producedTimelineFrames_ += gapFrames + static_cast<std::uint64_t>(frames);
-        if (frames > 0) hasSubmittedAudio_ = true;
+}
+
+FFFResult PlayerWasapiRenderer::Finish() noexcept {
+    if (endOfStream_.load()) return FFFResult::Success;
+    try {
+        while (resampler_ != nullptr) {
+            const auto capacity = swr_get_out_samples(resampler_, 0);
+            if (capacity < 0) return FFFResult::FfmpegFailure;
+            if (capacity == 0) break;
+            AudioChunk chunk;
+            chunk.bytes.resize(static_cast<std::size_t>(capacity) * outputBlockAlign_);
+            std::uint8_t* output[] = {chunk.bytes.data()};
+            const auto frames = swr_convert(resampler_, output, capacity, nullptr, 0);
+            if (frames < 0) return FFFResult::FfmpegFailure;
+            if (frames == 0) break;
+            chunk.bytes.resize(static_cast<std::size_t>(frames) * outputBlockAlign_);
+            ApplyGain(chunk.bytes);
+            std::lock_guard lock(mutex_);
+            queuedBytes_ += chunk.bytes.size();
+            queue_.push_back(std::move(chunk));
+            producedTimelineFrames_ += static_cast<std::uint64_t>(frames);
+        }
+    } catch (...) {
+        SetError("Could not drain the audio resampler.");
+        return FFFResult::NativeFailure;
     }
+    endOfStream_ = true;
     PublishRuntimeDiagnostics();
     if (controlEvent_ != nullptr) SetEvent(controlEvent_);
     return FFFResult::Success;
@@ -292,7 +325,8 @@ void PlayerWasapiRenderer::SetPaused(const bool paused) noexcept {
     const auto now = QpcNow100ns();
     {
         std::lock_guard lock(clockMutex_);
-        if (clockSampleQpc100ns_ > 0 && now > clockSampleQpc100ns_) {
+        if (!paused_.load() && clockRunning_.load() &&
+            clockSampleQpc100ns_ > 0 && now > clockSampleQpc100ns_) {
             const auto elapsed = now - clockSampleQpc100ns_;
             clockPosition100ns_ += std::min(elapsed,
                 std::max<std::int64_t>(0, clockLimitPosition100ns_ - clockPosition100ns_));
@@ -326,7 +360,7 @@ void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
         clockLimitPosition100ns_ = position100ns;
     }
     resetRequested_ = true;
-    underrunCount_ = 0; hasSubmittedAudio_ = false;
+    underrunCount_ = 0; hasSubmittedAudio_ = false; endOfStream_ = false;
     timestampJitterCount_ = 0; discontinuityCount_ = 0;
     insertedSilenceFrames_ = 0; droppedOverlapFrames_ = 0;
     if (runtimeState_ != nullptr) runtimeState_->ResetDiagnostics();
@@ -345,18 +379,14 @@ std::int64_t PlayerWasapiRenderer::Position100ns() const noexcept {
         sampleQpc = clockSampleQpc100ns_;
         limit = clockLimitPosition100ns_;
     }
-    if (!running_.load() || paused_.load() || sampleQpc <= 0) return position;
+    if (!clockRunning_.load() || paused_.load() || sampleQpc <= 0) return position;
     const auto now = QpcNow100ns();
     if (now <= sampleQpc) return position;
     return position + std::min(now - sampleQpc, std::max<std::int64_t>(0, limit - position));
 }
 std::int64_t PlayerWasapiRenderer::TimelineLimit100ns() const noexcept {
-    if (outputSampleRate_ == 0) return resetPosition100ns_.load();
-    // Called by the sole PCM producer. Unlike Buffered100ns, this endpoint does
-    // not depend on the event thread's last padding sample and therefore cannot
-    // overrun the decoded timeline during a starvation edge.
-    return resetPosition100ns_.load() + static_cast<std::int64_t>(
-        producedTimelineFrames_ * 10'000'000 / outputSampleRate_);
+    std::lock_guard lock(clockMutex_);
+    return clockRunning_.load() && !paused_.load() ? clockLimitPosition100ns_ : clockPosition100ns_;
 }
 std::int64_t PlayerWasapiRenderer::Buffered100ns() const noexcept {
     std::lock_guard lock(mutex_);
@@ -588,6 +618,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
     }
     format.reset();
     bool clientStarted = false;
+    UINT64 clientStartDevicePosition = 0;
     bool exclusiveBufferPrimed = false;
     bool starved = false;
     bool clockAnchorValid = false;
@@ -599,7 +630,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         activeClockEpoch = clockEpoch_;
     }
     auto updateMediaClock = [&]() noexcept {
-        if (!clockAnchorValid || outputSampleRate_ == 0) return;
+        if (!clientStarted || !clockAnchorValid || outputSampleRate_ == 0) return;
         UINT64 devicePosition = 0;
         UINT64 qpcPosition100ns = 0;
         const auto positionResult = clock->GetPosition(&devicePosition, &qpcPosition100ns);
@@ -615,6 +646,8 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         const auto playedFrames = std::min(deviceSubmittedFrames, elapsedFrames);
         std::lock_guard lock(clockMutex_);
         if (activeClockEpoch != clockEpoch_) return;
+        const auto advancing = devicePosition > clientStartDevicePosition;
+        clockRunning_ = advancing;
         playedMediaFrames_ = playedFrames;
         pendingMediaFrames_ = deviceSubmittedFrames - playedFrames;
         const auto resetPosition = resetPosition100ns_.load();
@@ -622,8 +655,19 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             static_cast<std::int64_t>(playedFrames * 10'000'000 / outputSampleRate_);
         clockLimitPosition100ns_ = resetPosition +
             static_cast<std::int64_t>(deviceSubmittedFrames * 10'000'000 / outputSampleRate_);
-        clockSampleQpc100ns_ = qpcPosition100ns != 0
+        clockSampleQpc100ns_ = advancing && qpcPosition100ns != 0
             ? static_cast<std::int64_t>(qpcPosition100ns) : QpcNow100ns();
+    };
+    const auto startClient = [&]() noexcept {
+        clock->GetPosition(&clientStartDevicePosition, nullptr);
+        const auto result = client->Start();
+        if (SUCCEEDED(result)) {
+            std::lock_guard lock(clockMutex_);
+            clockSampleQpc100ns_ = QpcNow100ns();
+            clockRunning_ = false;
+            clientStarted = true;
+        }
+        return result;
     };
     HANDLE events[] = { stopEvent_, sampleEvent_, controlEvent_ };
     auto nextDefaultEndpointCheck100ns = QpcNow100ns();
@@ -653,6 +697,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         // mistaken for that notification.
         if (exclusive_ && deviceEvent) exclusiveBufferPrimed = false;
         if (resetRequested_.exchange(false)) {
+            clockRunning_ = false;
             if (clientStarted) client->Stop();
             const auto resetResult = client->Reset();
             if (IsAudioDeviceLost(resetResult)) {
@@ -672,6 +717,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         const auto shouldPause = paused_.load();
         if (shouldPause && clientStarted) {
             client->Stop();
+            clockRunning_ = false;
             clientStarted = false;
         }
         updateMediaClock();
@@ -680,7 +726,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         if (exclusive_) {
             if (shouldPause) continue;
             if (!clientStarted && exclusiveBufferPrimed) {
-                const auto startResult = client->Start();
+                const auto startResult = startClient();
                 if (SUCCEEDED(startResult)) clientStarted = true;
                 else if (IsAudioDeviceLost(startResult)) {
                     RequestRestart("The exclusive WASAPI output device could not resume.");
@@ -708,7 +754,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         }
         if (!exclusive_ && padding >= bufferFrames) {
             if (!shouldPause && !clientStarted) {
-                const auto startResult = client->Start();
+                const auto startResult = startClient();
                 if (SUCCEEDED(startResult)) clientStarted = true;
                 else if (IsAudioDeviceLost(startResult)) {
                     RequestRestart("The WASAPI output device could not start.");
@@ -716,6 +762,20 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
                 }
             }
             continue;
+        }
+        if (!exclusive_ && clientStarted && !shouldPause && padding == 0 && endOfStream_.load()) {
+            std::lock_guard queueLock(mutex_);
+            if (queuedBytes_ == 0) {
+                std::lock_guard clockLock(clockMutex_);
+                if (activeClockEpoch == clockEpoch_) {
+                    playedMediaFrames_ = deviceSubmittedFrames;
+                    pendingMediaFrames_ = 0;
+                    clockPosition100ns_ = resetPosition100ns_.load() +
+                        static_cast<std::int64_t>(deviceSubmittedFrames * 10'000'000 / outputSampleRate_);
+                    clockLimitPosition100ns_ = clockPosition100ns_;
+                    clockSampleQpc100ns_ = QpcNow100ns();
+                }
+            }
         }
         const auto wantedFrames = exclusive_ ? bufferFrames : bufferFrames - padding;
         std::size_t copied = 0;
@@ -730,7 +790,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
                 queuedBytes_);
             renderedFrames = static_cast<UINT32>(copied / outputBlockAlign_);
             if (renderedFrames == 0 && (!exclusive_ || !clientStarted || !deviceEvent)) {
-                if (!shouldPause && clientStarted && hasSubmittedAudio_.load() && padding == 0 && !starved) {
+                if (!shouldPause && clientStarted && hasSubmittedAudio_.load() && !endOfStream_.load() && padding == 0 && !starved) {
                     ++underrunCount_;
                     starved = true;
                 }
@@ -740,7 +800,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
                 continue;
             }
             if (renderedFrames == 0) {
-                if (hasSubmittedAudio_.load() && !starved) ++underrunCount_;
+                if (hasSubmittedAudio_.load() && !endOfStream_.load() && !starved) ++underrunCount_;
                 starved = true;
             } else {
                 starved = false;
@@ -783,6 +843,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             const auto submittedBytes = static_cast<std::size_t>(renderedFrames) * outputBlockAlign_;
             if (submittedBytes > copied) std::memset(destination + copied, 0, submittedBytes - copied);
             queuedBytes_ -= copied;
+            pendingMediaFrames_.fetch_add(mediaFrames);
         }
         UpdatePeakLevels(destination, renderedFrames);
         UINT64 anchorCandidate = 0;
@@ -798,24 +859,31 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         const auto releaseResult = renderer->ReleaseBuffer(renderedFrames, 0);
         if (SUCCEEDED(releaseResult)) {
             if (exclusive_) exclusiveBufferPrimed = true;
-            std::lock_guard lock(clockMutex_);
-            if (activeClockEpoch == clockEpoch_) {
-                if (!clockAnchorValid && hasAnchorCandidate) {
-                    clockAnchorDevicePosition = anchorCandidate;
-                    clockAnchorValid = true;
+            {
+                std::lock_guard lock(clockMutex_);
+                if (activeClockEpoch == clockEpoch_) {
+                    if (!clockAnchorValid && hasAnchorCandidate) {
+                        clockAnchorDevicePosition = anchorCandidate;
+                        clockAnchorValid = true;
+                    }
+                    deviceSubmittedFrames += mediaFrames;
+                    pendingMediaFrames_ = deviceSubmittedFrames - playedMediaFrames_.load();
+                    clockLimitPosition100ns_ = resetPosition100ns_.load() +
+                        static_cast<std::int64_t>(deviceSubmittedFrames * 10'000'000 / outputSampleRate_);
                 }
-                deviceSubmittedFrames += mediaFrames;
-                pendingMediaFrames_ = deviceSubmittedFrames - playedMediaFrames_.load();
-                clockLimitPosition100ns_ = resetPosition100ns_.load() +
-                    static_cast<std::int64_t>(deviceSubmittedFrames * 10'000'000 / outputSampleRate_);
             }
             if (!shouldPause && !clientStarted) {
-                const auto startResult = client->Start();
+                const auto startResult = startClient();
                 if (SUCCEEDED(startResult)) clientStarted = true;
                 else if (IsAudioDeviceLost(startResult))
                     RequestRestart("The WASAPI output device could not start after buffering audio.");
             }
-        } else if (IsAudioDeviceLost(releaseResult)) {
+        } else {
+            {
+                std::lock_guard lock(clockMutex_);
+                if (activeClockEpoch == clockEpoch_)
+                    pendingMediaFrames_ = deviceSubmittedFrames - playedMediaFrames_.load();
+            }
             RequestRestart("The WASAPI output device rejected a rendered audio buffer.");
         }
         if (restartRequested_.load()) break;

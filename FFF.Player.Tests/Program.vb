@@ -329,6 +329,18 @@ Friend Module Program
                 Console.WriteLine("播放中 HDR/SDR 交换链切换与定时文字图层持续呈现回归通过。")
                 Return 0
             End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--startup-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试启动连续呈现(Path.GetFullPath(参数(1)))
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--kernel-timeline-regression", StringComparison.OrdinalIgnoreCase) Then
+                内核时间轴测试.运行(Path.GetFullPath(参数(1)))
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--hdr-pixel-regression", StringComparison.OrdinalIgnoreCase) Then
+                内核时间轴测试.测试HDR像素回读(Path.GetFullPath(参数(1)))
+                Return 0
+            End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--decoder-switch-audio-regression", StringComparison.OrdinalIgnoreCase) Then
                 Dim 门控视频路径 = Path.GetFullPath(参数(1))
                 检查文件(门控视频路径)
@@ -430,6 +442,8 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --bt2390-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --overlay-color-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --gpu-decode-matrix <视频目录>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --startup-regression <视频>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --kernel-timeline-regression <测试样本目录>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --video-scaling-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sdr-pixel-regression <视频> <参考图.png>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --sdr-desktop-regression <参考图.png>")
@@ -2405,6 +2419,60 @@ Friend Module Program
         Next
         Return String.Empty
     End Function
+
+    Private Sub 测试启动连续呈现(视频路径 As String)
+        检查文件(视频路径)
+        Dim 失败 As New List(Of String)
+        For Each 模式 In {解码模式.CPU, 解码模式.GPU}
+            For 轮次 = 1 To 3
+                Using 输出窗口 As New Form With {
+                    .ClientSize = New Size(960, 540), .ShowInTaskbar = False,
+                    .StartPosition = FormStartPosition.Manual, .Location = New Point(50, 50),
+                    .Text = $"3FP 启动回归 {模式} #{轮次}"}
+                    输出窗口.Show()
+                    Application.DoEvents()
+                    Using 会话 As New 播放器会话(New 播放器配置 With {
+                        .解码器 = 模式, .输出窗口句柄 = If(轮次 = 2, IntPtr.Zero, 输出窗口.Handle),
+                        .色彩模式 = 色彩输出模式.映射到SDR})
+                        会话.设置音量(0.0F, True)
+                        会话.打开Async(视频路径).GetAwaiter().GetResult()
+                        If 轮次 = 2 Then 会话.设置输出窗口(输出窗口.Handle)
+                        If 轮次 = 3 Then 会话.设置WASAPI独占模式(True)
+                        Dim 计时 = Stopwatch.StartNew()
+                        Dim 首帧毫秒 As Double = -1
+                        Dim 末快照 = 会话.当前快照
+                        Dim 上次帧号 As Long = -1
+                        会话.播放()
+                        Do
+                            Application.DoEvents()
+                            末快照 = 会话.当前快照
+                            断言(末快照.状态 <> 播放状态.失败, 会话.最后错误消息)
+                            If 末快照.帧序号 <> 上次帧号 AndAlso 计时.Elapsed.TotalSeconds < 1.5 Then
+                                Console.WriteLine($"{模式} #{轮次} {计时.Elapsed.TotalMilliseconds:F1}ms " &
+                                    $"frame={末快照.帧序号} pts={末快照.原始帧PTS} " &
+                                    $"clock={末快照.播放位置.TotalMilliseconds:F1} " &
+                                    $"present={末快照.已呈现视频帧数} drop={末快照.已丢弃视频帧数} " &
+                                    $"coalesce={末快照.已合并视频帧数} audio={末快照.音频缓冲时长.TotalMilliseconds:F1}")
+                                上次帧号 = 末快照.帧序号
+                            End If
+                            If 首帧毫秒 < 0 AndAlso 末快照.已呈现视频帧数 > 0 Then 首帧毫秒 = 计时.Elapsed.TotalMilliseconds
+                            If 末快照.播放位置 >= TimeSpan.FromSeconds(4) OrElse 末快照.状态 = 播放状态.播放结束 Then Exit Do
+                            断言(计时.Elapsed < TimeSpan.FromSeconds(30), $"{模式} 启动时钟停滞。")
+                            Thread.Sleep(1)
+                        Loop
+                        Console.WriteLine($"STARTUP {模式} #{轮次}: first={首帧毫秒:F1}ms " &
+                            $"present={末快照.已呈现视频帧数} drop={末快照.已丢弃视频帧数} " &
+                            $"coalesce={末快照.已合并视频帧数} underrun={末快照.音频欠载次数}")
+                        If 首帧毫秒 < 0 OrElse 末快照.已丢弃视频帧数 <> 0 OrElse
+                            末快照.已合并视频帧数 <> 0 OrElse 末快照.音频欠载次数 <> 0 Then
+                            失败.Add($"{模式} #{轮次}: drop={末快照.已丢弃视频帧数}, coalesce={末快照.已合并视频帧数}, underrun={末快照.音频欠载次数}")
+                        End If
+                    End Using
+                End Using
+            Next
+        Next
+        断言(失败.Count = 0, String.Join(Environment.NewLine, 失败))
+    End Sub
 
     Private Sub 测试解码切换可见首帧音频门控(视频路径 As String)
         For Each 模式 In {解码模式.CPU, 解码模式.GPU}
@@ -4426,7 +4494,8 @@ Friend Module Program
                             Dim HDR结果 = 采样播放(会话, 6.0, 画面控件, 图层泵,
                                                  Function() 会话.当前弹幕状态)
                             Console.WriteLine($"HDR→SDR 联合压力：{格式化播放报告(HDR结果)}")
-                            验证性能结果(HDR结果, HDR帧率, "HDR→SDR 联合压力")
+                            验证性能结果(HDR结果, HDR帧率, "HDR→SDR 联合压力",
+                                   目标图层帧率:=弹幕呈现器.目标帧率)
 
                             会话.设置色彩模式(色彩输出模式.峰值映射HDR, 100.0F, 1000.0F, 203.0F)
                             等待色彩模式(会话, 色彩输出模式.峰值映射HDR)
@@ -4445,7 +4514,8 @@ Friend Module Program
                             Dim SDR结果 = 采样播放(会话, 6.0, 画面控件, 图层泵,
                                                  Function() 会话.当前弹幕状态)
                             Console.WriteLine($"SDR 联合压力：{格式化播放报告(SDR结果)}")
-                            验证性能结果(SDR结果, SDR帧率, "SDR 联合压力")
+                            验证性能结果(SDR结果, SDR帧率, "SDR 联合压力",
+                                   目标图层帧率:=弹幕呈现器.目标帧率)
 
                             测试音频切换与跳转(会话, SDR路径, SDR帧率, 画面控件, 图层泵,
                                            Function() 会话.当前弹幕状态)
@@ -4517,7 +4587,7 @@ Friend Module Program
                    "静态字幕或弹幕没有持续进入最终交换链合成帧。")
                 Dim 合成增量 = CULng(字幕状态.图层呈现帧数 - 字幕合成帧数)
                 Dim 获取增量 = 字幕状态.后备缓冲获取次数 - 后备缓冲获取次数
-                断言(获取增量 >= 合成增量 AndAlso 获取增量 <= 合成增量 + 1UL,
+                断言(Math.Abs(CLng(获取增量) - CLng(合成增量)) <= 1L,
                    $"最终合成没有逐帧重新获取 D3D11 flip-model 逻辑后备缓冲：" &
                    $"获取/合成 {获取增量}/{合成增量}。")
                 断言(字幕状态.合成像素着色器调用次数 > 0UL AndAlso
@@ -4595,6 +4665,7 @@ Friend Module Program
     End Sub
 
     Private Sub 测试定时文字精确渲染合同()
+        测试弹幕字体样式测量()
         测试完整画布弹幕边界()
         测试连续小数位移()
         测试弹幕设置与尺寸热更新()
@@ -4605,6 +4676,31 @@ Friend Module Program
            播放器定时文字图层呈现器.计算刷新间隔毫秒(120) = 8 AndAlso
            播放器定时文字图层呈现器.计算刷新间隔毫秒(144) = 6,
            "整数毫秒唤醒周期低于目标刷新率。")
+    End Sub
+
+    Private Sub 测试弹幕字体样式测量()
+        Dim 测量器 As New 默认弹幕文本测量器()
+        Const 文本 As String = "Bold italic edge fffffj"
+        Dim 普通宽度 = 测量器.测量宽度(文本, "Arial", 64.0F, FontStyle.Regular)
+        Dim 加粗宽度 = 测量器.测量宽度(文本, "Arial", 64.0F, FontStyle.Bold)
+        断言(加粗宽度 > 普通宽度 + 5.0F, "弹幕测量仍忽略粗体导致尾部被低估。")
+        Dim 别名宽度 = 测量器.测量宽度(文本, "Arial Bold", 64.0F, FontStyle.Regular)
+        断言(Math.Abs(别名宽度 - 加粗宽度) < 0.01F, "弹幕字体名称与原生渲染解析不一致。")
+        Dim 配置 As New 弹幕显示配置 With {
+            .字体 = "Arial", .字号 = 64.0F, .字体样式 = FontStyle.Bold Or FontStyle.Italic}
+        Dim 项目 As New 弹幕项目(TimeSpan.Zero, 弹幕类型.顶部,
+            5, 25.0F, &HFFFFFFFFUI, 0, 0, "diagnostic", 91, 文本)
+        Using 控件 As New 播放器画面控件()
+            Using 呈现器 As New 播放器定时文字图层呈现器(控件, Function() Nothing,
+                Function() Nothing, Sub(size, commands, sequence, frameRate) Return,
+                Function() New 弹幕资料库({项目}), 配置, 定时文字图层内容.仅弹幕)
+                Dim 命令 = 呈现器.生成命令(New Size(1920, 1080), 1920UI, 1080UI,
+                                         TimeSpan.Zero, Nothing, 96.0F)
+                断言(命令.Count = 1, "字体样式测量诊断未生成弹幕。")
+                Dim 预期 = 测量器.测量宽度(文本, 配置.字体, 命令(0).字号, 配置.字体样式)
+                断言(Math.Abs(命令(0).宽度 - 预期) < 0.01F, "调度器未使用实际字体样式测量。")
+            End Using
+        End Using
     End Sub
 
     Private Sub 测试弹幕自适应帧率()
@@ -5420,18 +5516,16 @@ Friend Module Program
     End Sub
 
     Private Sub 验证性能结果(结果 As 播放测量结果, 源帧率 As Double, 阶段 As String,
-                         Optional 验证图层 As Boolean = True)
+                         Optional 验证图层 As Boolean = True, Optional 目标图层帧率 As Double = 60.0)
         验证播放结果(结果, 阶段)
         断言(结果.实际呈现帧率 >= 源帧率 * 0.94,
            $"{阶段}没有跟上源帧率：{结果.实际呈现帧率:F2}/{源帧率:F2} fps。")
         断言(结果.最大视频队列帧数 <= 8,
            $"{阶段}视频队列超过 8 帧的有界合同：{结果.最大视频队列帧数}。")
         If 验证图层 Then
-            ' 这是 100 条同时移动且带描边文字的上限压力，远高于产品默认 5 行；
-            ' 动态图层目标 60 FPS，视频更新也可在独立 Present 中及时到达，因此
-            ' 最终合成帧率允许落在 55–90 FPS，而不会把视频锁死在 60 Hz。
-            断言(结果.图层呈现帧率 >= 55.0 AndAlso 结果.图层呈现帧率 <= 90.0,
-               $"{阶段}字幕/弹幕最终合成呈现率异常：{结果.图层呈现帧率:F2} FPS。")
+            断言(结果.图层呈现帧率 >= 目标图层帧率 * (55.0 / 60.0) AndAlso
+               结果.图层呈现帧率 <= 目标图层帧率 * 1.5,
+               $"{阶段}字幕/弹幕最终合成呈现率异常：{结果.图层呈现帧率:F2} FPS，目标 {目标图层帧率:F2} FPS。")
             断言(结果.精灵缓存命中次数 > 0 AndAlso 结果.精灵缓存未命中次数 <= 5,
                $"{阶段}滚动文字没有复用 GPU 精灵：命中/未命中 " &
                $"{结果.精灵缓存命中次数}/{结果.精灵缓存未命中次数}。")

@@ -123,7 +123,7 @@ public:
     FFFResult ForceSdrOutputForSdrSource() noexcept;
     void ConfigureHdrStream(const AVCodecParameters* parameters) noexcept;
     FFFResult Render(const AVFrame* frame, bool limitToNativeSize = false,
-        bool coverArt = false) noexcept;
+        bool coverArt = false, bool prepareOnly = false) noexcept;
     FFFResult Redraw() noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     FFFResult PresentTimedText() noexcept;
@@ -144,6 +144,7 @@ public:
     std::uint64_t SwapChainPresents() const noexcept;
     std::uint64_t SubmittedVideoGeneration() const noexcept;
     std::uint64_t PresentedVideoGeneration() const noexcept;
+    bool HasPendingVideoPresentation() const noexcept;
     bool HasOutputWindow() const noexcept;
     std::uint64_t PresentWait100ns() const noexcept;
     std::uint64_t DeviceLockWait100ns() const noexcept;
@@ -154,6 +155,7 @@ public:
     std::string LastError() const;
 
 private:
+    friend struct TimedTextAtlasRegression;
     enum class CoverBackdropRenderResult {
         Complete,
         Deferred,
@@ -162,7 +164,8 @@ private:
     struct TimedTextSprite {
         float atlasX = 0;
         float atlasY = 0;
-        float padding = 0;
+        float offsetX = 0;
+        float offsetY = 0;
         float width = 0;
         float height = 0;
     };
@@ -172,7 +175,7 @@ private:
     };
     struct PendingTimedTextSprite {
         std::size_t commandIndex = 0;
-        IDWriteTextLayout* layout = nullptr;
+        std::shared_ptr<IDWriteTextLayout> layout;
         std::uint64_t key = 0;
         TimedTextSprite sprite{};
         float outline = 0;
@@ -418,6 +421,7 @@ private:
     bool hasCachedVideo_;
     std::atomic<std::uint64_t> videoGeneration_;
     std::atomic<std::uint64_t> presentedVideoGeneration_;
+    std::atomic<std::uint64_t> countedVideoGeneration_;
     std::atomic<std::uint64_t> presentedVideoFrames_;
     std::atomic<std::uint64_t> coalescedVideoFrames_;
     std::atomic<std::uint64_t> swapChainPresents_;

@@ -80,6 +80,10 @@ private:
     void DoStepKeyframe(std::int32_t direction);
     void Worker() noexcept;
     void PumpPlayback() noexcept;
+    bool VideoQueueSaturated() const noexcept;
+    void TryCompletePlaybackPreroll() noexcept;
+    void UpdateDrainedAudioClock() noexcept;
+    void DrainInternalAudio() noexcept;
     void PumpExternalAudio() noexcept;
     bool ShouldDelayAudioUntilVideoFrame() const noexcept;
     void ArmAudioUntilVideoFrame() noexcept;
@@ -216,6 +220,7 @@ private:
     std::int64_t framePtsIndexBase_;
     bool rebuildingFrameIndex_;
     bool audioBlockedUntilVideoFrame_;
+    bool playbackPreroll_;
     std::uint64_t audioUnblockVideoGeneration_;
     bool audioResumePendingAfterVideoFrame_;
     std::deque<AVFrame*> videoFrameQueue_;
@@ -232,6 +237,10 @@ private:
     std::deque<BitRateBucket> audioBitRateBuckets_;
     std::int64_t publishedBitRateSecond_;
     bool draining_;
+    bool demuxEnded_;
+    bool audioDecoderDrained_;
+    bool externalAudioDrained_;
+    bool audioClockFinished_;
     bool staticImage_;
     bool hardwareFallbackPending_;
     std::string pendingHardwareFallbackReason_;

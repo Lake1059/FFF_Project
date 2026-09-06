@@ -13,9 +13,26 @@ Public NotInheritable Class 默认弹幕文本测量器
             Threading.LazyThreadSafetyMode.ExecutionAndPublication)
 
     Public Function 测量宽度(文本 As String, 字体 As String, 字号像素 As Single) As Single Implements I弹幕文本测量器.测量宽度
+        Return 测量宽度(文本, 字体, 字号像素, System.Drawing.FontStyle.Regular)
+    End Function
+
+    Public Function 测量宽度(文本 As String, 字体 As String, 字号像素 As Single,
+                         样式 As System.Drawing.FontStyle) As Single
         Try
-            Using format = DirectWrite工厂.Value.CreateTextFormat(字体, Nothing, FontWeight.Normal,
-                FontStyle.Normal, FontStretch.Normal, 字号像素, String.Empty)
+            Dim 标志 = CType(CInt(样式) And &HF, 原生定时文字标志)
+            Dim 原生宽度 As Single
+            If 播放器原生接口.FFF3FP_MeasureTimedTextWidth(文本, 字体, 字号像素, 标志,
+                                                      原生宽度) = 原生播放器结果.成功 AndAlso
+                Single.IsFinite(原生宽度) AndAlso 原生宽度 >= 0 Then
+                Return Math.Max(字号像素, 原生宽度)
+            End If
+        Catch
+        End Try
+        Try
+            Dim 字重 = If((样式 And System.Drawing.FontStyle.Bold) <> 0, FontWeight.Bold, FontWeight.Normal)
+            Dim 字形 = If((样式 And System.Drawing.FontStyle.Italic) <> 0, FontStyle.Italic, FontStyle.Normal)
+            Using format = DirectWrite工厂.Value.CreateTextFormat(字体, Nothing, 字重,
+                字形, FontStretch.Normal, 字号像素, String.Empty)
                 format.WordWrapping = WordWrapping.NoWrap
                 Using layout = DirectWrite工厂.Value.CreateTextLayout(文本, format, 131072.0F,
                     Math.Max(字号像素 * 4.0F, 1.0F))
@@ -323,7 +340,10 @@ Public NotInheritable Class 弹幕调度器
         If 配置.使用源字号 Then fontSize *= active.项目.原始字号 / 25.0F
         active.字号 = fontSize
         active.高度 = fontSize * 1.2F
-        active.宽度 = 测量器.测量宽度(active.项目.文本, 配置.字体, fontSize)
+        Dim 默认测量器 = TryCast(测量器, 默认弹幕文本测量器)
+        active.宽度 = If(默认测量器 IsNot Nothing,
+            默认测量器.测量宽度(active.项目.文本, 配置.字体, fontSize, 配置.字体样式),
+            测量器.测量宽度(active.项目.文本, 配置.字体, fontSize))
         Dim effectScale = fontSize / 配置.字号
         Dim outline = 配置.描边宽度 * effectScale
         Dim shadowSpread = If((配置.阴影颜色ARGB >> 24) <> 0UI,

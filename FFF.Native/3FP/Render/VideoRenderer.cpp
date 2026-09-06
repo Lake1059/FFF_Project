@@ -15,6 +15,7 @@ extern "C" {
 
 #include <d2d1effects.h>
 #include <d2d1helper.h>
+#include <DirectXPackedVector.h>
 #include <roapi.h>
 #include <windows.graphics.display.h>
 #include <windows.graphics.display.interop.h>
@@ -27,6 +28,7 @@ extern "C" {
 #include <cstring>
 #include <mutex>
 #include <string_view>
+#include <unordered_set>
 
 using Microsoft::WRL::ComPtr;
 
@@ -1354,7 +1356,7 @@ void HashTimedText(std::uint64_t& hash, const T& value) noexcept {
 }
 
 std::uint64_t TimedTextLayoutKey(const TimedTextRenderCommand& command,
-    const D2D1_RECT_F& destination, const float fontSize) noexcept {
+    const float width, const float height, const float fontSize) noexcept {
     std::uint64_t hash = 1469598103934665603ull;
     // The managed producer may assign a new content id while a scrolling item
     // is rebuilt. Cache the immutable glyph inputs instead of that transport id;
@@ -1364,8 +1366,8 @@ std::uint64_t TimedTextLayoutKey(const TimedTextRenderCommand& command,
         for (const auto value : command.content->fontFamily) HashTimedText(hash, value);
     }
     HashTimedText(hash, std::bit_cast<std::uint32_t>(fontSize));
-    HashTimedText(hash, std::bit_cast<std::uint32_t>(destination.right - destination.left));
-    HashTimedText(hash, std::bit_cast<std::uint32_t>(destination.bottom - destination.top));
+    HashTimedText(hash, std::bit_cast<std::uint32_t>(width));
+    HashTimedText(hash, std::bit_cast<std::uint32_t>(height));
     HashTimedText(hash, static_cast<std::uint32_t>(command.flags));
     HashTimedText(hash, static_cast<std::uint32_t>(command.horizontalAlignment));
     HashTimedText(hash, static_cast<std::uint32_t>(command.verticalAlignment));
@@ -1373,9 +1375,9 @@ std::uint64_t TimedTextLayoutKey(const TimedTextRenderCommand& command,
 }
 
 std::uint64_t TimedTextSpriteKey(const TimedTextRenderCommand& command,
-    const D2D1_RECT_F& destination, const float fontSize, const float outline,
+    const float width, const float height, const float fontSize, const float outline,
     const float shadowX, const float shadowY) noexcept {
-    auto hash = TimedTextLayoutKey(command, destination, fontSize);
+    auto hash = TimedTextLayoutKey(command, width, height, fontSize);
     HashTimedText(hash, command.foregroundArgb);
     HashTimedText(hash, command.outlineArgb);
     HashTimedText(hash, command.shadowArgb);
@@ -1413,9 +1415,10 @@ class TimedTextEffectRenderer final : public IDWriteTextRenderer {
 public:
     TimedTextEffectRenderer(ID2D1Factory1* factory, ID2D1DeviceContext* context,
         ID2D1Brush* outlineBrush, ID2D1Brush* shadowBrush, const float outline,
-        const float shadowX, const float shadowY) noexcept
+        const float shadowX, const float shadowY, D2D1_RECT_F* inkBounds = nullptr) noexcept
         : factory_(factory), context_(context), outlineBrush_(outlineBrush),
-          shadowBrush_(shadowBrush), outline_(outline), shadowX_(shadowX), shadowY_(shadowY) {}
+          shadowBrush_(shadowBrush), outline_(outline), shadowX_(shadowX), shadowY_(shadowY),
+          inkBounds_(inkBounds) {}
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
         if (object == nullptr) return E_POINTER;
@@ -1467,6 +1470,17 @@ public:
             (glyphRun->bidiLevel & 1u) != 0, sink.Get());
         const auto closeResult = sink->Close();
         if (FAILED(outlineResult) || FAILED(closeResult)) return E_FAIL;
+        if (inkBounds_ != nullptr) {
+            D2D1_RECT_F bounds{};
+            const auto result = path->GetWidenedBounds(outline_ * 2.0f, nullptr,
+                D2D1::Matrix3x2F::Translation(baselineX, baselineY), &bounds);
+            if (FAILED(result)) return result;
+            inkBounds_->left = std::min(inkBounds_->left, bounds.left);
+            inkBounds_->top = std::min(inkBounds_->top, bounds.top);
+            inkBounds_->right = std::max(inkBounds_->right, bounds.right);
+            inkBounds_->bottom = std::max(inkBounds_->bottom, bounds.bottom);
+            return S_OK;
+        }
         if (shadowBrush_ != nullptr) {
             DrawEffect(path.Get(), baselineX + shadowX_, baselineY + shadowY_,
                 shadowBrush_, true);
@@ -1505,6 +1519,7 @@ private:
     float outline_;
     float shadowX_;
     float shadowY_;
+    D2D1_RECT_F* inkBounds_;
 };
 }
 
@@ -1755,7 +1770,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       backBufferAcquisitionCount_(0),
       timedTextPipelineQueryInFlight_{false, false, false, false},
       timedTextCompositePixelInvocations_{0, 0, 0, 0},
-      hasCachedVideo_(false), videoGeneration_(0), presentedVideoGeneration_(0),
+      hasCachedVideo_(false), videoGeneration_(0), presentedVideoGeneration_(0), countedVideoGeneration_(0),
       presentedVideoFrames_(0), coalescedVideoFrames_(0), swapChainPresents_(0),
       presentWait100ns_(0), deviceLockWait100ns_(0), softwareConvert100ns_(0),
       playbackWorkPending_(0),
@@ -3326,17 +3341,18 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         timedTextBrushes_.emplace(argb, brush);
         return brush;
     };
-    const auto getLayout = [this](const TimedTextRenderCommand& command,
-        const D2D1_RECT_F& destination, const float fontSize) noexcept -> IDWriteTextLayout* {
-        const auto layoutKey = TimedTextLayoutKey(command, destination, fontSize);
+    const auto getLayout = [this, scaleX, scaleY](const TimedTextRenderCommand& command,
+        const float fontSize) noexcept -> IDWriteTextLayout* {
+        const auto width = std::max(command.width * scaleX, 1.0f);
+        const auto height = std::max(command.height * scaleY, 1.0f);
+        const auto layoutKey = TimedTextLayoutKey(command, width, height, fontSize);
         const auto existing = timedTextLayouts_.find(layoutKey);
         if (existing != timedTextLayouts_.end()) return existing->second;
         ComPtr<IDWriteTextLayout> layout;
         if (!command.content || FAILED(CreateTimedTextLayout(writeFactory_, command.content->text,
             command.content->fontFamily, fontSize, command.flags, command.horizontalAlignment,
             command.verticalAlignment,
-            std::max(destination.right - destination.left, 1.0f),
-            std::max(destination.bottom - destination.top, 1.0f), &layout))) return nullptr;
+            width, height, &layout))) return nullptr;
         constexpr std::size_t MaximumCachedLayouts = 512;
         while (timedTextLayoutOrder_.size() >= MaximumCachedLayouts) {
             const auto oldest = timedTextLayoutOrder_.front();
@@ -3410,33 +3426,52 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     };
     const auto buildPendingSprites = [&](const bool stopWhenFull) noexcept -> bool {
         pendingSprites.clear();
+        std::unordered_set<std::uint64_t> pendingKeys;
+        pendingKeys.reserve(std::min(layer->commands.size(),
+            static_cast<std::size_t>(MaximumTimedTextSprites)));
         for (std::size_t commandIndex = 0; commandIndex < layer->commands.size(); ++commandIndex) {
             const auto& command = layer->commands[commandIndex];
             if (command.type != FFF3FPTimedTextCommandType::Text || command.contentId == 0 ||
                 command.horizontalAlignment != FFF3FPTimedTextAlignment::Near ||
                 command.verticalAlignment != FFF3FPTimedTextAlignment::Near) continue;
-            const auto destination = D2D1::RectF(command.x * scaleX, command.y * scaleY,
-                (command.x + command.width) * scaleX, (command.y + command.height) * scaleY);
             const auto fontSize = std::max(command.fontSize * scaleY, 1.0f);
             const auto outline = std::max(command.outlineWidth * (scaleX + scaleY) * 0.5f, 0.0f);
             const auto shadowX = command.shadowOffsetX * scaleX;
             const auto shadowY = command.shadowOffsetY * scaleY;
-            const auto key = TimedTextSpriteKey(command, destination, fontSize, outline,
-                shadowX, shadowY);
-            if (timedTextSprites_.contains(key)) continue;
+            const auto key = TimedTextSpriteKey(command, std::max(command.width * scaleX, 1.0f),
+                std::max(command.height * scaleY, 1.0f), fontSize, outline, shadowX, shadowY);
+            if (timedTextSprites_.contains(key) || !pendingKeys.insert(key).second) continue;
             if (timedTextSprites_.size() + pendingSprites.size() >= MaximumTimedTextSprites)
                 return !stopWhenFull;
-            auto* layout = getLayout(command, destination, fontSize);
+            auto* layout = getLayout(command, fontSize);
             if (layout == nullptr) continue;
-            const auto extents = DescribeTimedTextEffects(outline, shadowX, shadowY,
+            DWRITE_OVERHANG_METRICS overhang{};
+            if (FAILED(layout->GetOverhangMetrics(&overhang))) continue;
+            auto inkBounds = D2D1::RectF(-overhang.left, -overhang.top,
+                layout->GetMaxWidth() + overhang.right, layout->GetMaxHeight() + overhang.bottom);
+            if (outline > 0.0f && ((command.outlineArgb | command.shadowArgb) >> 24) != 0) {
+                auto* boundsRenderer = new (std::nothrow) TimedTextEffectRenderer(
+                    d2dFactory_, d2dContext_, nullptr, nullptr, outline, 0.0f, 0.0f, &inkBounds);
+                if (boundsRenderer == nullptr) continue;
+                const auto boundsResult = layout->Draw(nullptr, boundsRenderer, 0.0f, 0.0f);
+                boundsRenderer->Release();
+                if (FAILED(boundsResult)) continue;
+            }
+            const auto extents = DescribeTimedTextEffects(0.0f, shadowX, shadowY,
                 (command.shadowArgb >> 24) != 0, usesSoftShadow(command));
-            const auto padding = static_cast<float>(std::ceil(std::max(
-                {extents.left, extents.top, extents.right, extents.bottom})) + 2.0f);
-            const auto width = std::max(1u, static_cast<std::uint32_t>(std::ceil(
-                destination.right - destination.left + padding * 2.0f)));
-            const auto height = std::max(1u, static_cast<std::uint32_t>(std::ceil(
-                destination.bottom - destination.top + padding * 2.0f)));
-            if (width > timedTextAtlasSize_ || height > timedTextAtlasSize_) continue;
+            const auto left = std::floor(inkBounds.left - extents.left) - 2.0f;
+            const auto top = std::floor(inkBounds.top - extents.top) - 2.0f;
+            const auto right = std::ceil(inkBounds.right + extents.right) + 2.0f;
+            const auto bottom = std::ceil(inkBounds.bottom + extents.bottom) + 2.0f;
+            const auto measuredWidth = right - left;
+            const auto measuredHeight = bottom - top;
+            if (!std::isfinite(measuredWidth) || !std::isfinite(measuredHeight) ||
+                measuredWidth <= 0.0f || measuredHeight <= 0.0f ||
+                measuredWidth > MaximumTimedTextAtlasSize || measuredHeight > MaximumTimedTextAtlasSize) continue;
+            if (measuredWidth > timedTextAtlasSize_ || measuredHeight > timedTextAtlasSize_)
+                return !stopWhenFull;
+            const auto width = static_cast<std::uint32_t>(measuredWidth);
+            const auto height = static_cast<std::uint32_t>(measuredHeight);
             if (timedTextAtlasX_ + width > timedTextAtlasSize_) {
                 timedTextAtlasX_ = 0;
                 timedTextAtlasY_ += timedTextAtlasRowHeight_;
@@ -3445,12 +3480,15 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             if (timedTextAtlasY_ + height > timedTextAtlasSize_)
                 return !stopWhenFull;
             TimedTextSprite sprite{static_cast<float>(timedTextAtlasX_),
-                static_cast<float>(timedTextAtlasY_), padding,
+                static_cast<float>(timedTextAtlasY_), left, top,
                 static_cast<float>(width), static_cast<float>(height)};
             timedTextAtlasX_ += width;
             timedTextAtlasRowHeight_ = std::max(timedTextAtlasRowHeight_, height);
-            pendingSprites.push_back(PendingTimedTextSprite{commandIndex, layout, key, sprite, outline,
-                shadowX, shadowY});
+            layout->AddRef();
+            pendingSprites.push_back(PendingTimedTextSprite{commandIndex,
+                std::shared_ptr<IDWriteTextLayout>(layout, [](IDWriteTextLayout* retained) {
+                    retained->Release();
+                }), key, sprite, outline, shadowX, shadowY});
         }
         return true;
     };
@@ -3473,6 +3511,19 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         buildPendingSprites(false);
     }
     if (!pendingSprites.empty()) {
+        d2dContext_->SetTarget(d2dAtlasTarget_);
+        d2dContext_->BeginDraw();
+        for (const auto& pending : pendingSprites) {
+            const auto& sprite = pending.sprite;
+            d2dContext_->PushAxisAlignedClip(D2D1::RectF(sprite.atlasX, sprite.atlasY,
+                sprite.atlasX + sprite.width, sprite.atlasY + sprite.height),
+                D2D1_ANTIALIAS_MODE_ALIASED);
+            d2dContext_->Clear(D2D1::ColorF(0, 0));
+            d2dContext_->PopAxisAlignedClip();
+        }
+        const auto clearEnd = d2dContext_->EndDraw();
+        d2dContext_->SetTarget(nullptr);
+        if (FAILED(clearEnd)) return FFFResult::DeviceFailure;
         std::vector<std::uint32_t> softShadowDepths;
         for (const auto& pending : pendingSprites) {
             const auto& command = layer->commands[pending.commandIndex];
@@ -3497,9 +3548,9 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
                 const auto clip = D2D1::RectF(sprite.atlasX, sprite.atlasY,
                     sprite.atlasX + sprite.width, sprite.atlasY + sprite.height);
                 d2dContext_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
-                drawSoftShadowMask(command, pending.layout,
-                    D2D1::Point2F(sprite.atlasX + sprite.padding,
-                        sprite.atlasY + sprite.padding), pending.outline);
+                drawSoftShadowMask(command, pending.layout.get(),
+                    D2D1::Point2F(sprite.atlasX - sprite.offsetX,
+                        sprite.atlasY - sprite.offsetY), pending.outline);
                 d2dContext_->PopAxisAlignedClip();
             }
             const auto maskEnd = d2dContext_->EndDraw();
@@ -3512,7 +3563,19 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
                 D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, depth);
             d2dContext_->SetTarget(d2dAtlasTarget_);
             d2dContext_->BeginDraw();
-            d2dContext_->DrawImage(timedTextShadowBlurEffect_);
+            for (const auto& pending : pendingSprites) {
+                const auto& command = layer->commands[pending.commandIndex];
+                if (!usesSoftShadow(command) || (command.shadowArgb >> 24) == 0 ||
+                    std::bit_cast<std::uint32_t>(softShadowDepth(
+                        pending.shadowX, pending.shadowY)) != depthBits) continue;
+                const auto& sprite = pending.sprite;
+                const auto clip = D2D1::RectF(sprite.atlasX + 1.0f, sprite.atlasY + 1.0f,
+                    sprite.atlasX + sprite.width - 1.0f, sprite.atlasY + sprite.height - 1.0f);
+                d2dContext_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+                d2dContext_->DrawImage(timedTextShadowBlurEffect_,
+                    D2D1::Point2F(clip.left, clip.top), clip);
+                d2dContext_->PopAxisAlignedClip();
+            }
             const auto blurEnd = d2dContext_->EndDraw();
             d2dContext_->SetTarget(nullptr);
             if (FAILED(blurEnd)) {
@@ -3525,12 +3588,12 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         for (const auto& pending : pendingSprites) {
             const auto& command = layer->commands[pending.commandIndex];
             const auto& sprite = pending.sprite;
-            const auto clip = D2D1::RectF(sprite.atlasX, sprite.atlasY,
-                sprite.atlasX + sprite.width, sprite.atlasY + sprite.height);
+            const auto clip = D2D1::RectF(sprite.atlasX + 1.0f, sprite.atlasY + 1.0f,
+                sprite.atlasX + sprite.width - 1.0f, sprite.atlasY + sprite.height - 1.0f);
             d2dContext_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
-            drawLayout(command, pending.layout,
-                D2D1::Point2F(sprite.atlasX + sprite.padding,
-                    sprite.atlasY + sprite.padding), pending.outline,
+            drawLayout(command, pending.layout.get(),
+                D2D1::Point2F(sprite.atlasX - sprite.offsetX,
+                    sprite.atlasY - sprite.offsetY), pending.outline,
                 pending.shadowX, pending.shadowY);
             d2dContext_->PopAxisAlignedClip();
         }
@@ -3544,6 +3607,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             timedTextSprites_[pending.key] = pending.sprite;
             ++timedTextSpriteCacheMisses_;
         }
+        pendingSprites.clear();
     }
 
     timedTextSpriteInstances_.clear();
@@ -3577,13 +3641,13 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         if (command.contentId != 0 &&
             command.horizontalAlignment == FFF3FPTimedTextAlignment::Near &&
             command.verticalAlignment == FFF3FPTimedTextAlignment::Near) {
-            const auto spriteKey = TimedTextSpriteKey(command, destination, fontSize, outline,
-                shadowX, shadowY);
+            const auto spriteKey = TimedTextSpriteKey(command, std::max(command.width * scaleX, 1.0f),
+                std::max(command.height * scaleY, 1.0f), fontSize, outline, shadowX, shadowY);
             const auto sprite = timedTextSprites_.find(spriteKey);
             if (sprite != timedTextSprites_.end()) {
                 ++timedTextSpriteCacheHits_;
-                const auto left = destination.left - sprite->second.padding;
-                const auto top = destination.top - sprite->second.padding;
+                const auto left = destination.left + sprite->second.offsetX;
+                const auto top = destination.top + sprite->second.offsetY;
                 const auto right = left + sprite->second.width;
                 const auto bottom = top + sprite->second.height;
                 TimedTextSpriteInstance instance{};
@@ -3599,7 +3663,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
                 continue;
             }
         }
-        auto* layout = getLayout(command, destination, fontSize);
+        auto* layout = getLayout(command, fontSize);
         drawLayout(command, layout, D2D1::Point2F(destination.left, destination.top),
             outline, shadowX, shadowY);
     }
@@ -3792,7 +3856,7 @@ void PlayerVideoRenderer::SetHdrMetadata() noexcept {
 }
 
 FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNativeSize,
-    const bool coverArt) noexcept {
+    const bool coverArt, const bool prepareOnly) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
     struct PlaybackWorkGuard final {
         std::atomic<std::uint32_t>& pending;
@@ -3945,6 +4009,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     std::memcpy(&cachedVideoSettings_, &settings, sizeof(settings));
     sourceLimitedToNativeSize_ = limitToNativeSize;
     sourceCoverArt_ = coverArt;
+    if (prepareOnly) return FFFResult::Success;
     hasCachedVideo_ = true;
     videoGeneration_.fetch_add(1);
     if (coverArt) RequestCoverBackdropRender();
@@ -4440,11 +4505,11 @@ FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept 
         probe.alpha = static_cast<float>((packed >> 30) & 0x3u) / 3.0f;
     } else if (description.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
         // scRGB linear output (1.0 = 80 nits); report raw linear values.
-        const auto* rgba = static_cast<const float*>(mapped.pData);
-        probe.red = rgba[0];
-        probe.green = rgba[1];
-        probe.blue = rgba[2];
-        probe.alpha = rgba[3];
+        const auto* rgba = static_cast<const DirectX::PackedVector::HALF*>(mapped.pData);
+        probe.red = DirectX::PackedVector::XMConvertHalfToFloat(rgba[0]);
+        probe.green = DirectX::PackedVector::XMConvertHalfToFloat(rgba[1]);
+        probe.blue = DirectX::PackedVector::XMConvertHalfToFloat(rgba[2]);
+        probe.alpha = DirectX::PackedVector::XMConvertHalfToFloat(rgba[3]);
     }
     context_->Unmap(staging.Get(), 0);
     probe.scalingMode = actualVideoScalingMode_.load();
@@ -4483,10 +4548,11 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
         return FFFResult::DeviceFailure;
     }
     ++swapChainPresents_;
-    const auto previous = presentedVideoGeneration_.exchange(renderedVideoGeneration);
+    presentedVideoGeneration_.store(renderedVideoGeneration);
+    const auto previous = countedVideoGeneration_.exchange(renderedVideoGeneration);
     if (renderedVideoGeneration != 0 && renderedVideoGeneration != previous)
         ++presentedVideoFrames_;
-    if (previous != 0 && renderedVideoGeneration > previous + 1)
+    if (renderedVideoGeneration > previous + 1)
         coalescedVideoFrames_.fetch_add(renderedVideoGeneration - previous - 1);
     std::lock_guard lock(timedTextMutex_);
     for (std::size_t index = 0; index < ARRAYSIZE(timedTextPresentCounts_); ++index)
@@ -4720,6 +4786,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     lyricsLayoutEnabled_.store(false, std::memory_order_release);
     actualVideoScalingMode_.store(FFF3FPVideoScalingMode::D3D11VideoProcessor);
     videoGeneration_.store(0); presentedVideoGeneration_.store(0);
+    countedVideoGeneration_.store(0);
     presentedVideoFrames_.store(0); coalescedVideoFrames_.store(0);
     swapChainPresents_.store(0); presentWait100ns_.store(0);
     deviceLockWait100ns_.store(0); softwareConvert100ns_.store(0);
@@ -4767,6 +4834,10 @@ std::uint64_t PlayerVideoRenderer::CoalescedVideoFrames() const noexcept { retur
 std::uint64_t PlayerVideoRenderer::SwapChainPresents() const noexcept { return swapChainPresents_.load(); }
 std::uint64_t PlayerVideoRenderer::SubmittedVideoGeneration() const noexcept { return videoGeneration_.load(); }
 std::uint64_t PlayerVideoRenderer::PresentedVideoGeneration() const noexcept { return presentedVideoGeneration_.load(); }
+bool PlayerVideoRenderer::HasPendingVideoPresentation() const noexcept {
+    return !interactiveMove_.load(std::memory_order_acquire) &&
+        videoGeneration_.load() > presentedVideoGeneration_.load() && HasOutputWindow();
+}
 bool PlayerVideoRenderer::HasOutputWindow() const noexcept {
     std::lock_guard lock(deviceMutex_);
     return window_ != nullptr && IsWindow(window_);
