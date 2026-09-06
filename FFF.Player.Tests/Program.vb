@@ -110,6 +110,14 @@ Friend Module Program
     Public Function Main(参数 As String()) As Integer
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2)
         Try
+            If 参数.Length = 2 AndAlso 参数(0) = "--shutdown-regression" Then
+                退出回归测试.运行(Path.GetFullPath(参数(1)))
+                Return 0
+            End If
+            If 参数.Length = 3 AndAlso 参数(0) = "--shutdown-child" Then
+                退出回归测试.运行子进程(参数(1), 参数(2))
+                Return 0
+            End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--hdr-processing-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试HDR规格处理策略()
                 Console.WriteLine("HDR10/HDR10+/HLG/Vivid、Dolby Profile/FEL 回退与显示峰值策略通过。")
@@ -398,6 +406,10 @@ Friend Module Program
                 Dim 移动探针视频路径 = Path.GetFullPath(参数(1))
                 检查文件(移动探针视频路径)
                 测试窗口移动性能探针(移动探针视频路径)
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--window-move-danmaku-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试窗口移动性能探针(Path.GetFullPath(参数(1)), True)
                 Return 0
             End If
             If 参数.Length = 3 AndAlso String.Equals(参数(0), "--color-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -1959,7 +1971,8 @@ Friend Module Program
         End Using
     End Sub
 
-    Private Sub 测试窗口移动性能探针(路径 As String)
+    Private Sub 测试窗口移动性能探针(路径 As String, Optional 启用弹幕 As Boolean = False)
+        Dim 测试通过 = True
         For Each 启用分层阴影 In {False, True}
             Using 输出窗口 As New Form With {
                 .ClientSize = New Size(1280, 720),
@@ -1985,9 +1998,19 @@ Friend Module Program
                     .色彩模式 = 色彩输出模式.映射到SDR,
                     .输出窗口句柄 = 画面控件.输出窗口句柄
                 })
+                    Dim 弹幕 = 创建性能弹幕资料库()
+                    Dim 配置 As New 弹幕显示配置 With {
+                        .字体 = "Microsoft YaHei", .字号 = 8.0F, .使用源字号 = False,
+                        .同屏最大数量 = 100, .常规滚动最大行数 = 100,
+                        .行间距 = 0.0F, .顶部边距 = 0.0F, .基准视频高度 = 1080.0F}
+                    Using 弹幕呈现器 As 播放器定时文字图层呈现器 = If(启用弹幕,
+                        New 播放器定时文字图层呈现器(画面控件, Function() 会话.当前快照,
+                            Function() Nothing, AddressOf 会话.设置弹幕图层, Function() 弹幕,
+                            配置, 定时文字图层内容.仅弹幕), Nothing)
                     会话.打开Async(路径).GetAwaiter().GetResult()
+                    会话.设置音量(0.0F, True)
                     会话.播放()
-                    等待快照(会话, Function(x) x.交换链呈现次数 >= 30,
+                    等待快照(会话, Function(x) x.已呈现视频帧数 >= 90,
                              "窗口移动探针首帧")
                     Thread.Sleep(1000)
                     Application.DoEvents()
@@ -1995,15 +2018,19 @@ Friend Module Program
                     Dim 静置 = 测量窗口移动阶段(会话, 输出窗口, False)
                     Dim 移动 = 测量窗口移动阶段(会话, 输出窗口, True)
                     Console.WriteLine($"窗口移动探针 shadow={启用分层阴影}: " &
-                                      $"静置 {静置.呈现帧率:F1} fps / 丢 {静置.丢弃帧数} / 合并 {静置.合并帧数}，" &
-                                      $"移动 {移动.呈现帧率:F1} fps / 丢 {移动.丢弃帧数} / 合并 {移动.合并帧数}，" &
+                                      $"静置视频 {静置.呈现帧率:F1} fps / 丢 {静置.丢弃帧数} / 合并 {静置.合并帧数}，" &
+                                      $"移动视频 {移动.呈现帧率:F1} fps / 刷新 {移动.刷新帧率:F1} fps / 丢 {移动.丢弃帧数} / 合并 {移动.合并帧数}，" &
                                       $"Present等待 {移动.Present等待毫秒:F1} ms，设备锁等待 {移动.设备锁等待毫秒:F1} ms，" &
                                       $"音频欠载 {移动.音频欠载次数}")
+                    测试通过 = 测试通过 AndAlso 移动.呈现帧率 >= 读取视频帧率(会话) * 0.94 AndAlso
+                        移动.丢弃帧数 <= 1 AndAlso 移动.合并帧数 <= 1 AndAlso 移动.音频欠载次数 = 0
+                    End Using
                 End Using
                 标题栏.Detach(输出窗口)
                 输出窗口.Close()
             End Using
         Next
+        If 启用弹幕 Then 断言(测试通过, "弹幕与窗口移动同时启用时实际视频掉帧。")
     End Sub
 
     Private Function 测量窗口移动阶段(会话 As 播放器会话, 窗口 As Form,
@@ -2026,7 +2053,8 @@ Friend Module Program
         会话.设置窗口移动状态(False)
         Dim 末尾 = 会话.当前快照
         Return New 窗口移动测量结果 With {
-            .呈现帧率 = (末尾.交换链呈现次数 - 初始.交换链呈现次数) / Math.Max(计时.Elapsed.TotalSeconds, 0.001R),
+            .呈现帧率 = (末尾.已呈现视频帧数 - 初始.已呈现视频帧数) / Math.Max(计时.Elapsed.TotalSeconds, 0.001R),
+            .刷新帧率 = (末尾.交换链呈现次数 - 初始.交换链呈现次数) / Math.Max(计时.Elapsed.TotalSeconds, 0.001R),
             .丢弃帧数 = CLng(末尾.已丢弃视频帧数 - 初始.已丢弃视频帧数),
             .合并帧数 = CLng(末尾.已合并视频帧数 - 初始.已合并视频帧数),
             .Present等待毫秒 = (末尾.呈现等待时长 - 初始.呈现等待时长).TotalMilliseconds,
@@ -2037,6 +2065,7 @@ Friend Module Program
 
     Private NotInheritable Class 窗口移动测量结果
         Public Property 呈现帧率 As Double
+        Public Property 刷新帧率 As Double
         Public Property 丢弃帧数 As Long
         Public Property 合并帧数 As Long
         Public Property Present等待毫秒 As Double
