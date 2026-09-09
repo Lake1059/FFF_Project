@@ -4,6 +4,7 @@ Imports System.Threading
 Imports System.Threading.Tasks
 
 Public Class Form1
+    Private 光盘控制器 As 播放器光盘控制器
     Private Const WM_ENTERSIZEMOVE As Integer = &H231
     Private Const WM_EXITSIZEMOVE As Integer = &H232
     Public Shared Property 当前主窗体 As Form1
@@ -142,6 +143,7 @@ Public Class Form1
             End Sub,
             Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "360°视频"))
         画面菜单控制器.应用全局字体(设置.实例对象.字体)
+        光盘控制器 = New 播放器光盘控制器(Me, 画面控件, 播放控制器, MCM_标题栏菜单)
         全屏交互控制器 = New 播放器全屏交互控制器(Me, 画面控件,
             ModernPanel1, MP_剪辑区间操作容器, Function() 剪辑区间控制器.模式已启用)
 
@@ -314,6 +316,7 @@ Public Class Form1
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
         视角360控制器?.Dispose()
+        光盘控制器?.Dispose()
         画面菜单控制器?.Dispose()
         窗口布局控制器?.释放()
         界面呈现器?.释放()
@@ -355,7 +358,7 @@ Public Class Form1
     End Sub
 
     Private Sub 画面控件_文件拖入(sender As Object, e As 播放器文件拖入事件参数)
-        Dim 存在的文件 = e.文件路径.Where(Function(x) File.Exists(x)).ToArray()
+        Dim 存在的文件 = e.文件路径.Where(AddressOf 光盘路径.媒体存在).ToArray()
         If 存在的文件.Length = 0 Then Return
         Dim 路径 As String
         If 播放控制器.是否有媒体 Then
@@ -388,7 +391,7 @@ Public Class Form1
 
     Friend Shared Function 取得命令行文件(参数 As IEnumerable(Of String)) As String
         If 参数 Is Nothing Then Return String.Empty
-        Dim 文件路径 = 参数.FirstOrDefault(Function(x) Not String.IsNullOrWhiteSpace(x) AndAlso File.Exists(x))
+        Dim 文件路径 = 参数.FirstOrDefault(AddressOf 光盘路径.媒体存在)
         Return If(String.IsNullOrEmpty(文件路径), String.Empty, Path.GetFullPath(文件路径))
     End Function
 
@@ -413,7 +416,7 @@ Public Class Form1
         ElseIf 弹幕自动加载器.是支持的弹幕文件(路径) Then
             播放控制器.替换弹幕(路径)
         Else
-            启动后台任务(播放列表数据.从媒体创建并扫描相似文件Async(路径))
+            If Not 光盘路径.是光盘路径(路径) Then 启动后台任务(播放列表数据.从媒体创建并扫描相似文件Async(路径))
             播放控制器.打开媒体(路径)
         End If
     End Sub
@@ -441,7 +444,8 @@ Public Class Form1
         弹幕图层呈现器?.使图层失效()
         歌词图层呈现器?.使图层失效()
         信息图层呈现器?.使内容失效()
-        Text = Path.GetFileName(e.文件路径)
+        Dim 光盘标题 = If(光盘路径.是光盘路径(e.文件路径) AndAlso Directory.Exists(e.文件路径), e.文件路径.TrimEnd("\"c, "/"c), Path.GetFileName(e.文件路径))
+        Text = 光盘标题
         界面呈现器.媒体已打开(e.保留剪辑区间)
         界面呈现器.更新媒体信息(e.媒体信息, e.快照)
         视角360控制器?.媒体已打开(e.文件路径, e.媒体信息, e.快照)
@@ -449,6 +453,7 @@ Public Class Form1
     End Sub
 
     Private Sub 播放控制器_播放结束(sender As Object, e As EventArgs)
+        If 光盘路径.是光盘路径(播放控制器.当前媒体路径) Then Return
         If 正在关闭 Then Return
         Dim 下一项 = 播放列表数据.移动到播放结束后的项目()
         If 下一项 IsNot Nothing Then 播放控制器.打开媒体(下一项.路径)
@@ -708,6 +713,7 @@ Public Class Form1
     End Sub
 
     Protected Overrides Function ProcessDialogKey(keyData As Keys) As Boolean
+        If 光盘控制器 IsNot Nothing AndAlso 光盘控制器.处理按键(keyData) Then Return True
         If keyData = Keys.Tab AndAlso Not 正在关闭 Then
             切换媒体信息层()
             Return True
@@ -718,6 +724,7 @@ Public Class Form1
 
     Protected Overrides Function ProcessCmdKey(ByRef msg As Message, keyData As Keys) As Boolean
         If 正在关闭 Then Return MyBase.ProcessCmdKey(msg, keyData)
+        If 光盘控制器 IsNot Nothing AndAlso 光盘控制器.处理按键(keyData) Then Return True
         If 处理方向键快捷键(keyData) Then Return True
         Select Case keyData
             Case Keys.Control Or Keys.O
@@ -809,6 +816,7 @@ Public Class Form1
     End Sub
 
     Private Sub MB_标题栏菜单按钮_Click(sender As Object, e As EventArgs) Handles MB_标题栏菜单按钮.Click
+        光盘控制器?.请求扫描光驱()
         MCM_标题栏菜单.Show(MP_DX视频容器, New Point(0, 0))
     End Sub
 End Class

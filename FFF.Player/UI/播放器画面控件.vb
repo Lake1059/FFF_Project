@@ -44,6 +44,10 @@ Friend NotInheritable Class 播放器画面控件
 
     Friend Event 输出窗口创建 As EventHandler
     Friend Event 文件拖入 As EventHandler(Of 播放器文件拖入事件参数)
+    <System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)>
+    Friend Property 光盘交互已启用 As Boolean
+    Friend Event 光盘鼠标移动 As EventHandler(Of MouseEventArgs)
+    Friend Event 光盘鼠标确认 As EventHandler(Of MouseEventArgs)
     Friend Event 音量滚轮 As EventHandler(Of MouseEventArgs)
     Friend Event 全景视场角滚轮 As EventHandler(Of MouseEventArgs)
     Friend Event 全景视角拖动 As EventHandler(Of 播放器360视角拖动事件参数)
@@ -76,6 +80,10 @@ Friend NotInheritable Class 播放器画面控件
         Dim 宿主窗口 = FindForm()
         宿主窗口?.Activate()
         Focus()
+        If 光盘交互已启用 AndAlso e.Button = MouseButtons.Left Then
+            RaiseEvent 光盘鼠标确认(sender, e)
+            Return
+        End If
         If 全景交互已启用 AndAlso e.Button = MouseButtons.Left Then
             正在拖动全景视角 = True
             上次全景拖动位置 = e.Location
@@ -89,6 +97,10 @@ Friend NotInheritable Class 播放器画面控件
     End Sub
 
     Private Sub 视频输出窗口_MouseMove(sender As Object, e As MouseEventArgs)
+        If 光盘交互已启用 Then
+            RaiseEvent 光盘鼠标移动(sender, e)
+            Return
+        End If
         If Not 正在拖动全景视角 OrElse Not 全景交互已启用 Then Return
         Dim 水平位移 = e.X - 上次全景拖动位置.X
         Dim 垂直位移 = e.Y - 上次全景拖动位置.Y

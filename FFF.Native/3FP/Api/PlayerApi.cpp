@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace {
-constexpr std::uint32_t PlayerApiVersion = 13;
+constexpr std::uint32_t PlayerApiVersion = 14;
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -39,6 +39,14 @@ FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration, FFF3FPHandle* 
 }
 
 FFFResult FFF3FP_Open(const FFF3FPHandle player, const char* path) noexcept { return player ? static_cast<PlayerSession*>(player)->Open(path) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_DiscNavigate(FFF3FPHandle player, int command, int value, int y) noexcept { return player ? static_cast<PlayerSession*>(player)->DiscNavigate(command, value, y) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_CopySdrFrame(FFF3FPHandle player, void* pixels, std::uint32_t capacity,
+    std::uint32_t* width, std::uint32_t* height, std::uint32_t discOnly) noexcept {
+    return player && width && height && discOnly <= 1 ? static_cast<PlayerSession*>(player)->CopySdrFrame(pixels, capacity, *width, *height, discOnly != 0) : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_GetDiscStatus(FFF3FPHandle player, char* output, std::uint32_t size, std::uint32_t* required) noexcept {
+    return player ? CopyUtf8(static_cast<PlayerSession*>(player)->DiscStatus(), output, size, required) : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_Play(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->Play() : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_Pause(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->Pause() : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_DiscardAudioOutput(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->DiscardAudioOutput() : FFFResult::InvalidArgument; }

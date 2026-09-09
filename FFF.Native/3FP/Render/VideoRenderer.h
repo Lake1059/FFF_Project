@@ -97,6 +97,7 @@ enum class TimedTextLayerSlot : std::uint32_t {
     Danmaku = 1,
     PlayerInformation = 2,
     Lyrics = 3,
+    Disc = 4,
 };
 
 FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept;
@@ -114,6 +115,7 @@ public:
     ~PlayerVideoRenderer();
 
     FFFResult SetWindow(HWND window) noexcept;
+    void SetDiscAspect(double aspect) noexcept { discAspect_.store(static_cast<float>(aspect)); }
     void SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
@@ -128,6 +130,8 @@ public:
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     FFFResult PresentTimedText() noexcept;
     FFFResult ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept;
+    FFFResult CopySdrFrame(void* pixels, std::uint32_t capacity, std::uint32_t& width,
+        std::uint32_t& height, bool discOnly) noexcept;
     FFFResult SetTimedTextLayer(TimedTextRenderLayer layer, TimedTextLayerSlot slot) noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status, TimedTextLayerSlot slot) noexcept;
     bool DeviceRecoveryRequested() const noexcept;
@@ -307,10 +311,10 @@ private:
     ID3D11ShaderResourceView* coverBackdropView_;
     ID3D11Texture2D* coverBackdropSourceTexture_;
     ID3D11RenderTargetView* coverBackdropSourceTarget_;
-    ID3D11Texture2D* timedTextTextures_[4];
-    ID3D11RenderTargetView* timedTextTargets_[4];
-    ID3D11ShaderResourceView* timedTextViews_[4];
-    ID3D11Query* timedTextPipelineQueries_[4];
+    ID3D11Texture2D* timedTextTextures_[5];
+    ID3D11RenderTargetView* timedTextTargets_[5];
+    ID3D11ShaderResourceView* timedTextViews_[5];
+    ID3D11Query* timedTextPipelineQueries_[5];
     ID3D11BlendState* timedTextBlend_;
     ID3D11Texture2D* timedTextAtlasTexture_;
     ID3D11ShaderResourceView* timedTextAtlasView_;
@@ -326,7 +330,7 @@ private:
     ID2D1Bitmap1* d2dCoverBackdropSource_;
     ID2D1Bitmap1* d2dCoverBackdropTarget_;
     ID2D1Effect* coverBackdropBlurEffect_;
-    ID2D1Bitmap1* d2dTargets_[4];
+    ID2D1Bitmap1* d2dTargets_[5];
     ID2D1Bitmap1* d2dAtlasTarget_;
     ID2D1Bitmap1* d2dTimedTextShadowTarget_;
     ID2D1Effect* timedTextShadowBlurEffect_;
@@ -404,19 +408,20 @@ private:
     // command and string again on the video/present thread.
     // Subtitle, danmaku, lyrics and player information have independent producers and
     // render surfaces. Player information is always the topmost GPU layer.
-    // Composite order is fixed to video -> danmaku -> subtitle -> lyrics -> information.
-    std::shared_ptr<const TimedTextRenderLayer> timedTextLayers_[4];
-    std::uint64_t timedTextRenderedSequences_[4];
-    std::uint32_t timedTextRenderedCommandCounts_[4];
-    bool timedTextRenderedHdrHighlights_[4];
-    std::uint32_t timedTextWidths_[4];
-    std::uint32_t timedTextHeights_[4];
+    // Composite order is video -> danmaku -> subtitle -> lyrics -> disc -> information.
+    std::shared_ptr<const TimedTextRenderLayer> timedTextLayers_[5];
+    std::uint64_t timedTextRenderedSequences_[5];
+    std::uint32_t timedTextRenderedCommandCounts_[5];
+    bool timedTextRenderedHdrHighlights_[5];
+    std::uint32_t timedTextWidths_[5];
+    std::uint32_t timedTextHeights_[5];
     // Counts successful final swap-chain presents that included each visible
     // layer. A texture redraw is not a presentation and must not advance this.
-    std::uint32_t timedTextPresentCounts_[4];
+    std::uint32_t timedTextPresentCounts_[5];
     std::atomic<std::uint64_t> backBufferAcquisitionCount_;
-    bool timedTextPipelineQueryInFlight_[4];
-    std::uint64_t timedTextCompositePixelInvocations_[4];
+    bool timedTextPipelineQueryInFlight_[5];
+    std::uint64_t timedTextCompositePixelInvocations_[5];
+    std::atomic<float> discAspect_{0};
     CachedVideoSettings cachedVideoSettings_;
     bool hasCachedVideo_;
     std::atomic<std::uint64_t> videoGeneration_;

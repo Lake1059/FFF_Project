@@ -170,6 +170,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="3FP\Api\FFF.Player.Api.h" />
+    <ClInclude Include="3FP\Disc\DiscInput.h" />
     <ClInclude Include="3FP\Audio\WasapiRenderer.h" />
     <ClInclude Include="3FP\Core\PlayerSession.h" />
     <ClInclude Include="3FP\Hdr\HdrProcessor.h" />
@@ -189,6 +190,8 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="3FP\Api\PlayerApi.cpp" />
+    <ClCompile Include="3FP\Disc\DiscInput.cpp" />
+    <ClCompile Include="3FP\Core\PlayerSessionDisc.cpp" />
     <ClCompile Include="3FP\Audio\WasapiRenderer.cpp" />
     <ClCompile Include="3FP\Core\PlayerSession.cpp" />
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp" />
@@ -212,6 +215,12 @@
     </ClCompile>
     <ClCompile Include="3FR\Timeline\QpcTimeline.cpp" />
   </ItemGroup>
+  <ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
+    <Link>
+      <AdditionalDependencies>dvdnav.lib;dvdread.lib;bluray.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>dvdnav-4.dll;dvdread-8.dll;bluray-3.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+    </Link>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

@@ -429,6 +429,10 @@ FFF3FP_API std::uint32_t FFF3FP_GetApiVersion() noexcept;
 FFF3FP_API FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration,
     FFF3FPHandle* player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Open(FFF3FPHandle player, const char* localPathUtf8) noexcept;
+FFF3FP_API FFFResult FFF3FP_DiscNavigate(FFF3FPHandle player, int command, int value, int y) noexcept;
+FFF3FP_API FFFResult FFF3FP_CopySdrFrame(FFF3FPHandle player, void* pixels, std::uint32_t capacity,
+    std::uint32_t* width, std::uint32_t* height, std::uint32_t discOnly) noexcept;
+FFF3FP_API FFFResult FFF3FP_GetDiscStatus(FFF3FPHandle player, char* output, std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 FFF3FP_API FFFResult FFF3FP_Play(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Pause(FFF3FPHandle player) noexcept;
 // Synchronously stops the current audio renderer and discards already-submitted

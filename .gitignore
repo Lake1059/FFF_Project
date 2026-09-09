@@ -75,6 +75,13 @@ BenchmarkDotNet.Artifacts/
 project.lock.json
 project.fragment.lock.json
 artifacts/
+artifacts/**
+*.log
+*.pdb
+*.ilk
+third_party/vcpkg_installed/
+runtime/
+publish/
 
 # ASP.NET Scaffolding
 ScaffoldingReadMe.txt

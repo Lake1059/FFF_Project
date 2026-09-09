@@ -1,0 +1,1 @@
+{"name":"libdvdnav","version-semver":"6.1.1","port-version":2,"description":"DVD navigation","license":"GPL-2.0-or-later","dependencies":["libdvdread",{"name":"vcpkg-make","host":true}]}

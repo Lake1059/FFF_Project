@@ -3731,6 +3731,13 @@ void PlayerVideoRenderer::CompositeTimedText(ID3D11RenderTargetView* target,
     constexpr float blendFactor[] = {0, 0, 0, 0};
     D3D11_VIEWPORT viewport{0, 0, static_cast<float>(swapWidth_),
         static_cast<float>(swapHeight_), 0, 1};
+    if (slot == TimedTextLayerSlot::Disc) {
+        const auto aspect = discAspect_.load();
+        const auto rect = CalculateVideoDestination(aspect > 0 ? static_cast<unsigned>(aspect * 10000) : sourceWidth_,
+            aspect > 0 ? 10000u : sourceHeight_, swapWidth_, swapHeight_);
+        viewport.TopLeftX = static_cast<float>(rect.x); viewport.TopLeftY = static_cast<float>(rect.y);
+        viewport.Width = static_cast<float>(rect.width); viewport.Height = static_cast<float>(rect.height);
+    }
     // This is a complete pipeline boundary, not a continuation of the layer
     // redraw above. Danmaku sprite batching leaves an instanced vertex shader
     // bound; using that shader after its instance SRV is detached produces no
@@ -4397,7 +4404,8 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
     } else if (projection360) {
         destination = {0, 0, swapWidth_, swapHeight_};
     } else {
-        destination = CalculateVideoDestination(sourceWidth_, sourceHeight_, swapWidth_,
+        const auto aspect = discAspect_.load();
+        destination = CalculateVideoDestination(aspect > 0 ? static_cast<unsigned>(sourceHeight_ * aspect + 0.5f) : sourceWidth_, sourceHeight_, swapWidth_,
             swapHeight_, sourceLimitedToNativeSize_);
     }
     // Apply the view transform (zoom + pan) around the destination center.
@@ -4602,9 +4610,12 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     if (lyricsResult != FFFResult::Success) return lyricsResult;
     const auto informationResult = DrawTimedText(TimedTextLayerSlot::PlayerInformation);
     if (informationResult != FFFResult::Success) return informationResult;
+    const auto discResult = DrawTimedText(TimedTextLayerSlot::Disc);
+    if (discResult != FFFResult::Success) return discResult;
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Danmaku);
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Subtitle);
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Lyrics);
+    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Disc);
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::PlayerInformation);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     const auto generation = videoGeneration_.load();
@@ -4837,6 +4848,44 @@ std::uint64_t PlayerVideoRenderer::PresentedVideoGeneration() const noexcept { r
 bool PlayerVideoRenderer::HasPendingVideoPresentation() const noexcept {
     return !interactiveMove_.load(std::memory_order_acquire) &&
         videoGeneration_.load() > presentedVideoGeneration_.load() && HasOutputWindow();
+}
+
+FFFResult PlayerVideoRenderer::CopySdrFrame(void* pixels, std::uint32_t capacity,
+    std::uint32_t& width, std::uint32_t& height, bool discOnly) noexcept {
+    std::lock_guard deviceLock(deviceMutex_);
+    if (!hasCachedVideo_ || !swapChain_ || !device_ || !context_) return FFFResult::InvalidState;
+    std::lock_guard presentLock(presentMutex_);
+    width = swapWidth_; height = swapHeight_;
+    const auto bytes = static_cast<std::uint64_t>(width) * height * 4;
+    if (!pixels || bytes > capacity) return FFFResult::BufferTooSmall;
+    ComPtr<ID3D11Texture2D> backBuffer;
+    ComPtr<ID3D11RenderTargetView> target;
+    auto result = AcquireBackBufferTarget(backBuffer.GetAddressOf(), target.GetAddressOf());
+    if (result != FFFResult::Success) return result;
+    D3D11_TEXTURE2D_DESC description{}; backBuffer->GetDesc(&description);
+    if (description.Format != DXGI_FORMAT_B8G8R8A8_UNORM) return FFFResult::NotSupported;
+    if (discOnly) { constexpr float clear[4]{}; context_->ClearRenderTargetView(target.Get(), clear); }
+    else { result = DrawCachedVideo(target.Get()); if (result != FFFResult::Success) return result; }
+    const TimedTextLayerSlot slots[] = {TimedTextLayerSlot::Danmaku, TimedTextLayerSlot::Subtitle,
+        TimedTextLayerSlot::Lyrics, TimedTextLayerSlot::Disc, TimedTextLayerSlot::PlayerInformation};
+    for (auto slot : slots) {
+        if (discOnly && slot != TimedTextLayerSlot::Disc) continue;
+        result = DrawTimedText(slot); if (result != FFFResult::Success) return result;
+        CompositeTimedText(target.Get(), slot);
+    }
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
+    description.Usage = D3D11_USAGE_STAGING; description.BindFlags = 0;
+    description.CPUAccessFlags = D3D11_CPU_ACCESS_READ; description.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(device_->CreateTexture2D(&description, nullptr, &staging))) return FFFResult::DeviceFailure;
+    context_->CopyResource(staging.Get(), backBuffer.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return FFFResult::DeviceFailure;
+    for (unsigned y = 0; y < height; ++y)
+        std::memcpy(static_cast<uint8_t*>(pixels) + static_cast<size_t>(y) * width * 4,
+            static_cast<const uint8_t*>(mapped.pData) + static_cast<size_t>(y) * mapped.RowPitch, width * 4);
+    context_->Unmap(staging.Get(), 0);
+    return FFFResult::Success;
 }
 bool PlayerVideoRenderer::HasOutputWindow() const noexcept {
     std::lock_guard lock(deviceMutex_);

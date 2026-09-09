@@ -60,6 +60,7 @@ Friend NotInheritable Class 播放器剪辑区间控制器
     End Property
 
     Friend Sub 切换模式(sender As Object, e As EventArgs)
+        If 播放控制器.读取光盘状态().已打开 Then Return
         当前模式已启用 = Not 当前模式已启用
         操作容器.Visible = 当前模式已启用
         模式按钮.BackColor1 = If(当前模式已启用,
@@ -112,6 +113,12 @@ Friend NotInheritable Class 播放器剪辑区间控制器
 
     Friend Sub 媒体已打开(sender As Object, e As 播放器媒体事件参数)
         If Not e.保留剪辑区间 Then 清除媒体()
+        If 光盘路径.是光盘路径(e.文件路径) AndAlso 当前模式已启用 Then
+            当前模式已启用 = False
+            操作容器.Visible = False
+            模式按钮.BackColor1 = Color.Transparent
+            RaiseEvent 模式已变化(Me, New 剪辑区间模式变化事件参数(False))
+        End If
     End Sub
 
     Friend Sub 播放状态已刷新(sender As Object, e As EventArgs)

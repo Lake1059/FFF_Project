@@ -20,6 +20,11 @@ $LibassReadyMarker = Join-Path $ProjectRoot "third_party\vcpkg_installed\x64-win
 if (-not (Test-Path -LiteralPath $LibassReadyMarker -PathType Leaf)) {
     throw "libass is not prepared. Run the *Libass.ps1 preparation script in tools first."
 }
+foreach ($library in @("dvdnav.lib", "dvdread.lib", "bluray.lib")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "third_party\vcpkg_installed\x64-windows\lib\$library"))) {
+        throw "Disc libraries are not prepared. Run tools/准备光盘库.ps1 first."
+    }
+}
 
 & $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }

@@ -12,6 +12,9 @@ struct DelayLoadedModule {
 };
 
 constexpr DelayLoadedModule Modules[] = {
+    { "dvdnav-4.dll", L"dvdnav" },
+    { "dvdread-8.dll", L"dvdread" },
+    { "bluray-3.dll", L"bluray" },
     { "ass-9.dll", L"ass" },
     { "avcodec-63.dll", L"avcodec" },
     { "avformat-63.dll", L"avformat" },

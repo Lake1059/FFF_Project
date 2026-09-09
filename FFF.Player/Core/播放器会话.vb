@@ -36,9 +36,9 @@ Public NotInheritable Class 播放器会话
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
         配置.验证()
-        ' 360°投影、强制 HDR 输出及此前的渲染合同从 API 13 起才完整。这里必须在创建
+        ' 光盘导航接口及此前的渲染合同从 API 14 起才完整。这里必须在创建
         ' 会话前失败，不能让输出目录中的旧 DLL 继续播放出错误颜色。
-        If 播放器原生接口.FFF3FP_GetApiVersion() <> 13UI Then Throw New InvalidOperationException("FFF.Native 的 3FP API 版本不兼容。")
+        If 播放器原生接口.FFF3FP_GetApiVersion() <> 14UI Then Throw New InvalidOperationException("FFF.Native 的 3FP API 版本不兼容。")
         同步上下文 = 配置.事件同步上下文
         Dim 状态 = New 回调状态()
         Dim 回调句柄 = GCHandle.Alloc(状态)
@@ -46,7 +46,7 @@ Public NotInheritable Class 播放器会话
         Try
             If Not String.IsNullOrEmpty(配置.音频端点标识) Then 端点指针 = Marshal.StringToCoTaskMemUTF8(配置.音频端点标识)
             Dim 原生配置 As New 原生播放器配置 With {
-                .大小 = 原生播放器配置大小, .版本 = 13UI,
+                .大小 = 原生播放器配置大小, .版本 = 14UI,
                 .输出窗口 = 配置.输出窗口句柄, .解码器 = CUInt(配置.解码器),
                 .色彩模式 = CUInt(配置.色彩模式), .SDR峰值 = 配置.SDR峰值尼特,
                 .HDR峰值 = 配置.HDR峰值尼特, .SDR纸白 = 配置.SDR纸白尼特,
@@ -454,6 +454,34 @@ Public NotInheritable Class 播放器会话
             Return 读取原生文本(AddressOf 播放器原生接口.FFF3FP_GetLastError)
         End Get
     End Property
+
+    Public ReadOnly Property 当前光盘状态 As 光盘状态
+        Get
+            Return JsonSerializer.Deserialize(Of 光盘状态)(读取原生文本(AddressOf 播放器原生接口.FFF3FP_GetDiscStatus))
+        End Get
+    End Property
+
+    Public Sub 光盘导航(命令 As 光盘命令, Optional 参数 As Integer = 0, Optional Y As Integer = 0)
+        检查结果(播放器原生接口.FFF3FP_DiscNavigate(取得句柄(), CInt(命令), 参数, Y))
+    End Sub
+
+    Public Function 读取SDR合成帧(Optional 仅光盘层 As Boolean = False) As Bitmap
+        Dim 宽, 高 As UInteger
+        Dim 模式 = If(仅光盘层, 1UI, 0UI)
+        Dim 结果 = 播放器原生接口.FFF3FP_CopySdrFrame(取得句柄(), IntPtr.Zero, 0, 宽, 高, 模式)
+        If 结果 <> 原生播放器结果.缓冲区不足 Then 检查结果(结果)
+        If 宽 = 0 OrElse 高 = 0 OrElse CULng(宽) * 高 > 16777216UL Then Throw New InvalidOperationException("帧尺寸无效。")
+        Dim 字节(CInt(CULng(宽) * 高 * 4) - 1) As Byte
+        Dim 固定 = GCHandle.Alloc(字节, GCHandleType.Pinned)
+        Try
+            检查结果(播放器原生接口.FFF3FP_CopySdrFrame(取得句柄(), 固定.AddrOfPinnedObject(), CUInt(字节.Length), 宽, 高, 模式))
+            Using 临时 As New Bitmap(CInt(宽), CInt(高), CInt(宽 * 4), Imaging.PixelFormat.Format32bppPArgb, 固定.AddrOfPinnedObject())
+                Return 临时.Clone(New Rectangle(0, 0, CInt(宽), CInt(高)), Imaging.PixelFormat.Format32bppPArgb)
+            End Using
+        Finally
+            固定.Free()
+        End Try
+    End Function
 
     Public Sub 释放() Implements IDisposable.Dispose
         If Interlocked.Exchange(已释放, 1) <> 0 Then Return

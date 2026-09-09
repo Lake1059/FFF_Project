@@ -1,0 +1,29 @@
+<Project>
+  <PropertyGroup>
+    <DiscRuntimeRoot>$(MSBuildThisFileDirectory)..\third_party\vcpkg_installed\x64-windows</DiscRuntimeRoot>
+    <DiscRuntimeDirectory Condition="'$(Configuration)'=='Debug'">$(DiscRuntimeRoot)\debug\bin</DiscRuntimeDirectory>
+    <DiscRuntimeDirectory Condition="'$(Configuration)'!='Debug'">$(DiscRuntimeRoot)\bin</DiscRuntimeDirectory>
+  </PropertyGroup>
+  <ItemGroup>
+    <DiscRuntime Include="$(DiscRuntimeDirectory)\dvdnav-4.dll;$(DiscRuntimeDirectory)\dvdread-8.dll;$(DiscRuntimeDirectory)\dvdcss-2.dll;$(DiscRuntimeDirectory)\bluray-3.dll;$(DiscRuntimeDirectory)\udfread-3.dll;$(DiscRuntimeDirectory)\libxml2.dll;$(DiscRuntimeDirectory)\iconv-2.dll;$(DiscRuntimeDirectory)\charset-1.dll" />
+    <EmbeddedResource Include="$(DiscRuntimeRoot)\share\libdvdnav\copyright" LogicalName="ThirdParty.Licenses.libdvdnav.txt" />
+    <EmbeddedResource Include="$(DiscRuntimeRoot)\share\libdvdread\copyright" LogicalName="ThirdParty.Licenses.libdvdread.txt" />
+    <EmbeddedResource Include="$(DiscRuntimeRoot)\share\libdvdcss\copyright" LogicalName="ThirdParty.Licenses.libdvdcss.txt" />
+    <EmbeddedResource Include="$(DiscRuntimeRoot)\share\libbluray\copyright" LogicalName="ThirdParty.Licenses.libbluray.txt" />
+    <EmbeddedResource Include="$(DiscRuntimeRoot)\share\libudfread\copyright" LogicalName="ThirdParty.Licenses.libudfread.txt" />
+    <EmbeddedResource Include="$(DiscRuntimeRoot)\share\libxml2\copyright" LogicalName="ThirdParty.Licenses.libxml2.txt" />
+    <EmbeddedResource Include="$(DiscRuntimeRoot)\share\libiconv\copyright" LogicalName="ThirdParty.Licenses.libiconv.txt" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(PublishSingleFile)'=='true'">
+    <Content Include="@(DiscRuntime)" Link="%(Filename)%(Extension)">
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+  <Target Name="CopyDiscRuntime" AfterTargets="Build">
+    <Copy SourceFiles="@(DiscRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="PublishDiscRuntime" AfterTargets="Publish" Condition="'$(PublishSingleFile)'!='true'">
+    <Copy SourceFiles="@(DiscRuntime)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

@@ -1,0 +1,1 @@
+{"name":"libdvdcss","version-semver":"1.5.0","port-version":1,"description":"DVD block access","license":"GPL-2.0-or-later","dependencies":[{"name":"vcpkg-tool-meson","host":true}]}

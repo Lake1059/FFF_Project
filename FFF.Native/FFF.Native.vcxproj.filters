@@ -28,6 +28,9 @@
     <Filter Include="3FP\Core">
       <UniqueIdentifier>{774e6ff6-694a-4d50-9e87-1906fd1f1bfd}</UniqueIdentifier>
     </Filter>
+    <Filter Include="3FP\Disc">
+      <UniqueIdentifier>{C156F4A9-55EC-44F0-BD20-41228DE82879}</UniqueIdentifier>
+    </Filter>
     <Filter Include="3FP\Hdr">
       <UniqueIdentifier>{fc3d3da0-5d9b-4560-8a87-81be6d30e501}</UniqueIdentifier>
     </Filter>
@@ -71,6 +74,9 @@
     </ClInclude>
     <ClInclude Include="3FP\Api\FFF.Player.Api.h">
       <Filter>3FP\Api</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Disc\DiscInput.h">
+      <Filter>3FP\Disc</Filter>
     </ClInclude>
     <ClInclude Include="3FP\Audio\WasapiRenderer.h">
       <Filter>3FP\Audio</Filter>
@@ -139,6 +145,12 @@
     </ClCompile>
     <ClCompile Include="3FP\Core\PlayerSession.cpp">
       <Filter>3FP\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Core\PlayerSessionDisc.cpp">
+      <Filter>3FP\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Disc\DiscInput.cpp">
+      <Filter>3FP\Disc</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Render\VideoRenderer.cpp">
       <Filter>3FP\Render</Filter>

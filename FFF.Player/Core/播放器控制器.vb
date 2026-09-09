@@ -274,12 +274,12 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Public Sub 打开媒体(路径 As String)
-        If 已释放 OrElse String.IsNullOrWhiteSpace(路径) OrElse Not File.Exists(路径) Then Return
+        If 已释放 OrElse Not 光盘路径.媒体存在(路径) Then Return
         启动后台任务(打开媒体Async(路径))
     End Sub
 
     Public Function 打开媒体Async(路径 As String) As Task
-        If 已释放 OrElse String.IsNullOrWhiteSpace(路径) OrElse Not File.Exists(路径) Then
+        If 已释放 OrElse Not 光盘路径.媒体存在(路径) Then
             Return Task.CompletedTask
         End If
         Return 切换媒体会话Async(Path.GetFullPath(路径), 用户解码器偏好, TimeSpan.Zero, True, -1, -1, False)
@@ -337,6 +337,7 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 关闭字幕()
         If 已释放 Then Return
+        If 读取光盘状态().已打开 Then 光盘导航(光盘命令.字幕, 0)
         取消字幕加载()
         Dim 待释放内嵌 = Interlocked.Exchange(当前内嵌字幕, Nothing)
         Interlocked.Exchange(当前字幕轨道, Nothing)
@@ -373,6 +374,15 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 选择内嵌字幕(流索引 As Integer)
         If 已释放 OrElse 正在切换会话 OrElse 流索引 < 0 Then Return
+        Dim 光盘 = 读取光盘状态()
+        If 光盘.已打开 Then
+            Dim 字幕信息 = 安全读取媒体信息()?.流.Where(Function(x) x.类型 = "subtitle").ToArray()
+            If 字幕信息 IsNot Nothing Then
+                Dim 编号 = Array.FindIndex(字幕信息, Function(x) x.索引 = 流索引)
+                If 编号 >= 0 Then 光盘导航(光盘命令.字幕, 编号 + 1)
+            End If
+            Return
+        End If
         Dim 信息 = 安全读取媒体信息()
         Dim 字幕流 = 信息?.流.FirstOrDefault(
             Function(x) x.索引 = 流索引 AndAlso String.Equals(x.类型, "subtitle", StringComparison.OrdinalIgnoreCase))
@@ -514,7 +524,7 @@ Public NotInheritable Class 播放器控制器
         Dim 目标 = 会话
         If 正在切换会话 Then Return
         If 目标 Is Nothing Then
-            If File.Exists(最后打开文件路径) Then 打开媒体(最后打开文件路径)
+            If 光盘路径.媒体存在(最后打开文件路径) Then 打开媒体(最后打开文件路径)
             Return
         End If
 
@@ -549,6 +559,7 @@ Public NotInheritable Class 播放器控制器
         Try
             Dim 快照 = 目标.当前快照
             If Not 可操作(快照.状态) Then Return
+            If 读取光盘状态().已打开 Then Return
             Dim 新位置 = 快照.播放位置 + TimeSpan.FromSeconds(秒数)
             If 新位置 < TimeSpan.Zero Then 新位置 = TimeSpan.Zero
             If 快照.总时长 > TimeSpan.Zero Then 新位置 = 最小时间(新位置, 快照.总时长)
@@ -564,6 +575,7 @@ Public NotInheritable Class 播放器控制器
         Try
             Dim 快照 = 目标.当前快照
             If 可操作(快照.状态) Then
+                If 读取光盘状态().已打开 Then Return
                 目标.跳转(限定跳转位置(位置, 快照.总时长))
             End If
         Catch ex As 播放器异常
@@ -574,6 +586,28 @@ Public NotInheritable Class 播放器控制器
         If 位置 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(位置))
         Return If(总时长 > TimeSpan.Zero, 最小时间(位置, 总时长), 位置)
     End Function
+
+    Public Function 读取光盘状态() As 光盘状态
+        Try
+            Return If(会话?.当前光盘状态, New 光盘状态())
+        Catch ex As ObjectDisposedException
+            Return New 光盘状态()
+        Catch ex As 播放器异常
+            Return New 光盘状态()
+        End Try
+    End Function
+
+    Public Sub 光盘导航(命令 As 光盘命令, Optional 参数 As Integer = 0, Optional Y As Integer = 0)
+        If 已释放 OrElse 正在切换会话 OrElse 会话 Is Nothing Then Return
+        Try
+            If Not 可操作(会话.当前快照.状态) Then Return
+            会话.光盘导航(命令, 参数, Y)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+            If 命令 = 光盘命令.鼠标移动 Then Return
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "光盘导航"))
+        End Try
+    End Sub
 
     Public Sub 逐帧(方向 As Integer)
         If 方向 <> -1 AndAlso 方向 <> 1 Then Throw New ArgumentOutOfRangeException(NameOf(方向))
@@ -610,7 +644,15 @@ Public NotInheritable Class 播放器控制器
         Try
             Dim 快照 = 目标.当前快照
             If 可操作(快照.状态) AndAlso 快照.总时长 > TimeSpan.Zero Then
-                目标.跳转到关键帧(位置)
+                If 读取光盘状态().已打开 Then
+                    目标.跳转(位置)
+                    Return
+                End If
+                If 目标.当前光盘状态.已打开 Then
+                    If Not 目标.当前光盘状态.菜单可见 Then 目标.跳转(位置)
+                Else
+                    目标.跳转到关键帧(位置)
+                End If
             End If
         Catch ex As 播放器异常
         End Try
@@ -636,6 +678,14 @@ Public NotInheritable Class 播放器控制器
         If 已释放 OrElse 正在切换会话 OrElse 目标 Is Nothing Then Return
         Try
             Dim 信息 = 目标.当前媒体信息
+            If 读取光盘状态().类型 = "bluray" Then
+                Dim 音轨 = 信息?.流.Where(Function(x) x.类型 = "audio").ToArray()
+                If 音轨 IsNot Nothing Then
+                    Dim 编号 = Array.FindIndex(音轨, Function(x) x.索引 = 流索引)
+                    If 编号 >= 0 Then 光盘导航(光盘命令.音轨, 编号 + 1)
+                End If
+                Return
+            End If
             Dim 快照 = 目标.当前快照
             If Not 可操作(快照.状态) OrElse 快照.当前音频流 = 流索引 OrElse
                 信息 Is Nothing OrElse Not 信息.流.Any(
@@ -819,6 +869,7 @@ Public NotInheritable Class 播放器控制器
 
         Dim 候选会话 As 播放器会话 = Nothing
         Dim 原会话 = 会话
+        Dim 原光盘状态 = If(原会话 Is Nothing, Nothing, 原会话.当前光盘状态)
         Dim 保留WASAPI模式 = 当前WASAPI模式
         Dim 已临时释放独占 = False
         Dim 打开异常 As Exception = Nothing
@@ -860,10 +911,7 @@ Public NotInheritable Class 播放器控制器
                         Dim 原位包含封面 = 原位是纯音频 AndAlso 原位媒体信息.流.Any(
                             Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso x.是封面图)
                         恢复流选择(原会话, 原位媒体信息, 视频流, 音频流)
-                        If 恢复位置 > TimeSpan.Zero Then
-                            原会话.跳转(If(原位初始快照.总时长 > TimeSpan.Zero,
-                                          最小时间(恢复位置, 原位初始快照.总时长), 恢复位置))
-                        End If
+                        Await 恢复媒体位置Async(原会话, 原光盘状态, 恢复位置, 原位初始快照.总时长, 此次取消.Token)
                         Dim 原位快照 = 原会话.当前快照
                         Dim 原位保留当前字幕 = 保留已加载字幕 AndAlso
                             String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase)
@@ -947,9 +995,7 @@ Public NotInheritable Class 播放器控制器
                 Dim 候选包含封面 = 候选是纯音频 AndAlso 媒体信息.流.Any(
                 Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso x.是封面图)
                 恢复流选择(候选会话, 媒体信息, 视频流, 音频流)
-                If 恢复位置 > TimeSpan.Zero Then
-                    候选会话.跳转(If(初始快照.总时长 > TimeSpan.Zero, 最小时间(恢复位置, 初始快照.总时长), 恢复位置))
-                End If
+                Await 恢复媒体位置Async(候选会话, 原光盘状态, 恢复位置, 初始快照.总时长, 此次取消.Token)
                 Dim 快照 = 候选会话.当前快照
 
                 Dim 保留当前字幕 = 保留已加载字幕 AndAlso
@@ -1234,6 +1280,7 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Private Sub 开始自动加载字幕(媒体路径 As String)
+        If 光盘路径.是光盘路径(媒体路径) Then Return
         释放当前字幕()
         Dim 本次取消 As New CancellationTokenSource()
         字幕加载取消 = 本次取消
@@ -1324,6 +1371,7 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Private Sub 开始自动加载弹幕(媒体路径 As String)
+        If 光盘路径.是光盘路径(媒体路径) Then Return
         释放当前弹幕()
         Dim 本次取消 As New CancellationTokenSource()
         弹幕加载取消 = 本次取消
@@ -1357,6 +1405,7 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Private Sub 开始自动加载歌词(媒体路径 As String)
+        If 光盘路径.是光盘路径(媒体路径) Then Return
         释放当前歌词()
         If Not Volatile.Read(当前媒体是纯音频) Then Return
         Dim 本次取消 As New CancellationTokenSource()
@@ -1461,6 +1510,38 @@ Public NotInheritable Class 播放器控制器
 
     Private Shared Function 最小时间(左 As TimeSpan, 右 As TimeSpan) As TimeSpan
         Return If(左 <= 右, 左, 右)
+    End Function
+
+    Private Shared Async Function 恢复媒体位置Async(目标 As 播放器会话, 原光盘 As 光盘状态,
+                                  恢复位置 As TimeSpan, 初始总时长 As TimeSpan,
+                                  取消 As CancellationToken) As Task
+        If 原光盘 IsNot Nothing AndAlso 原光盘.已打开 Then
+            If 原光盘.菜单可见 Then
+                目标.光盘导航(光盘命令.根菜单)
+                Return
+            End If
+            If 原光盘.当前标题 > 0 Then
+                目标.光盘导航(光盘命令.标题, 原光盘.当前标题)
+                For i = 1 To 100
+                    取消.ThrowIfCancellationRequested()
+                    If 目标.当前光盘状态.当前标题 = 原光盘.当前标题 Then Exit For
+                    Await Task.Delay(50, 取消)
+                Next
+                If 恢复位置 > TimeSpan.Zero Then
+                    目标.跳转(恢复位置)
+                    For i = 1 To 200
+                        取消.ThrowIfCancellationRequested()
+                        If 目标.当前快照.播放位置 + TimeSpan.FromSeconds(1) >= 恢复位置 Then Exit For
+                        Await Task.Delay(50, 取消)
+                    Next
+                End If
+                Return
+            End If
+        End If
+        If 恢复位置 > TimeSpan.Zero Then
+            目标.跳转(If(初始总时长 > TimeSpan.Zero,
+                         最小时间(恢复位置, 初始总时长), 恢复位置))
+        End If
     End Function
 
     Private Shared Function 读取事件消息(JSON As String) As String

@@ -1,5 +1,6 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+  <Import Project="..\tools\DiscRuntime.props" />
   <PropertyGroup>
       <OutputType>WinExe</OutputType>
       <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
@@ -14,9 +15,9 @@
       <!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
       <Authors>1059 Studio</Authors>
       <Company>1059 Studio</Company>
-      <AssemblyVersion>2026.9.6</AssemblyVersion>
-      <FileVersion>2026.9.6</FileVersion>
-      <Version>2026.9.6</Version>
+      <AssemblyVersion>2026.9.9</AssemblyVersion>
+      <FileVersion>2026.9.9</FileVersion>
+      <Version>2026.9.9</Version>
       <Title>FFF.Player</Title>
       <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
       <ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
@@ -102,7 +103,7 @@
   </Target>
 
   <Target Name="CopyProductNativeToPublish" AfterTargets="Publish" Condition="'$(PublishSingleFile)' != 'true'">
-    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime);@(LibassRuntime)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(ProductNative);@(LibassRuntime)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
   </Target>
 
   <ItemGroup>

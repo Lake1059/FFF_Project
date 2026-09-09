@@ -110,6 +110,26 @@ Friend Module Program
     Public Function Main(参数 As String()) As Integer
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2)
         Try
+            If 参数.Length = 3 AndAlso 参数(0) = "--disc-edge-regression" Then
+                光盘播放测试.边界回归(参数(1), 参数(2))
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso 参数(0) = "--disc-decoder-switch-regression" Then
+                光盘播放测试.解码切换回归(参数(1))
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso 参数(0) = "--disc-slider-regression" Then
+                光盘播放测试.滑条回归(参数(1))
+                Return 0
+            End If
+            If 参数.Length = 2 AndAlso 参数(0) = "--disc-publish-smoke" Then
+                光盘播放测试.发布探针(参数(1))
+                Return 0
+            End If
+            If 参数.Length = 3 AndAlso 参数(0) = "--disc-regression" Then
+                光盘播放测试.运行(参数(1), 参数(2))
+                Return 0
+            End If
             If 参数.Length = 2 AndAlso 参数(0) = "--shutdown-regression" Then
                 退出回归测试.运行(Path.GetFullPath(参数(1)))
                 Return 0
@@ -450,6 +470,9 @@ Friend Module Program
                 Console.Error.WriteLine("   或: FFF.Player.Tests --empty-layer-regression <视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --hdr-switch-regression <HDR视频>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --decoder-switch-audio-regression <视频>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --disc-edge-regression <DVD/蓝光路径> <输出目录>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --disc-decoder-switch-regression <DVD/蓝光路径>")
+                Console.Error.WriteLine("   或: FFF.Player.Tests --disc-regression <DVD/蓝光路径> <输出目录>")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --hdr-processing-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --bt2390-regression")
                 Console.Error.WriteLine("   或: FFF.Player.Tests --overlay-color-regression")

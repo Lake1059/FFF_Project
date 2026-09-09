@@ -73,7 +73,7 @@ try {
     }
     New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
     & $vcpkg install "--triplet=$Triplet" "--x-manifest-root=$ProjectRoot" "--x-install-root=$InstallRoot"
-    if ($LASTEXITCODE -ne 0) { throw "vcpkg could not prepare libass (exit code $LASTEXITCODE)." }
+    if ($LASTEXITCODE -ne 0) { throw "vcpkg could not prepare the native dependencies (exit code $LASTEXITCODE)." }
 }
 finally {
     $env:PATH = $originalPath
