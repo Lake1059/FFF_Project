@@ -1,12 +1,7 @@
 #include <windows.h>
-#ifndef BLURAY_ONLY
-#include <dvdnav/dvdnav.h>
-#endif
 #include <libbluray/bluray.h>
 #include <libbluray/overlay.h>
 #include <libbluray/keys.h>
-#include <dvdread/dvd_reader.h>
-#include <dvdread/ifo_read.h>
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -28,132 +23,7 @@ static void Overlay(void* context, const BD_OVERLAY* overlay) {
     if (overlay->plane == BD_OVERLAY_IG && overlay->cmd == BD_OVERLAY_DRAW) ++stats.draws;
 }
 
-#ifndef BLURAY_ONLY
-static int Dvd(const char* path) {
-    static_assert(sizeof(playback_type_t) == 1 && sizeof(title_info_t) == 12);
-    dvdnav_t* nav = nullptr;
-    if (dvdnav_open(&nav, path) != DVDNAV_STATUS_OK) return 10;
-    int titles = 0;
-    dvdnav_get_number_of_titles(nav, &titles);
-    std::printf("DVD titles=%d\n", titles);
-    dvdnav_set_readahead_flag(nav, 0);
-    std::vector<uint8_t> block(2048);
-    bool activated = false, titleAfterActivate = false;
-    unsigned blocks = 0, buttons = 0, activatedAtBlock = 0;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
-    for (unsigned i = 0; i < 300000 && std::chrono::steady_clock::now() < deadline; ++i) {
-        int event = 0, length = 0;
-        if (dvdnav_get_next_block(nav, block.data(), &event, &length) != DVDNAV_STATUS_OK) {
-            std::printf("DVD error=%s\n", dvdnav_err_to_string(nav));
-            break;
-        }
-        if (event == DVDNAV_BLOCK_OK) ++blocks;
-        if (event == DVDNAV_STILL_FRAME) dvdnav_still_skip(nav);
-        if (event == DVDNAV_WAIT) dvdnav_wait_skip(nav);
-        if (event == DVDNAV_STOP) break;
-        if (event == DVDNAV_NAV_PACKET) {
-            auto* pci = dvdnav_get_current_nav_pci(nav);
-            if (pci && pci->hli.hl_gi.btn_ns && !activated) {
-                buttons = pci->hli.hl_gi.btn_ns;
-                int current = 0;
-                dvdnav_get_current_highlight(nav, &current);
-                std::printf("DVD menu buttons=%u current=%d blocks=%u\n", buttons, current, blocks);
-                dvdnav_button_select(nav, pci, current > 0 ? current : 1);
-                activated = dvdnav_button_activate(nav, pci) == DVDNAV_STATUS_OK;
-                activatedAtBlock = blocks;
-            }
-        }
-        int title = 0, part = 0;
-        dvdnav_current_title_info(nav, &title, &part);
-        if (activated && title > 0 && blocks > activatedAtBlock + 200) {
-            std::printf("DVD activated title=%d chapter=%d blocks=%u\n", title, part, blocks);
-            titleAfterActivate = true;
-            break;
-        }
-    }
-    dvdnav_close(nav);
-    std::printf("DVD result buttons=%u activated=%d title_after=%d blocks=%u\n", buttons, activated, titleAfterActivate, blocks);
-    return buttons && activated && titleAfterActivate ? 0 : 11;
-}
-
-static int DvdFirstPlayDump(const char* path, const char* output) {
-    dvdnav_t* nav = nullptr;
-    if (dvdnav_open(&nav, path) != DVDNAV_STATUS_OK) return 12;
-    FILE* file = std::fopen(output, "wb");
-    if (!file) { dvdnav_close(nav); return 13; }
-    std::vector<uint8_t> block(2048);
-    unsigned blocks = 0, stills = 0, navPackets = 0;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-    for (unsigned i = 0; i < 100000 && std::chrono::steady_clock::now() < deadline; ++i) {
-        int event = 0, length = 0;
-        if (dvdnav_get_next_block(nav, block.data(), &event, &length) != DVDNAV_STATUS_OK) break;
-        if (event == DVDNAV_BLOCK_OK) { std::fwrite(block.data(), 1, length, file); ++blocks; }
-        else if (event == DVDNAV_STILL_FRAME) { ++stills; std::printf("FIRSTPLAY STILL %d seconds\n", reinterpret_cast<dvdnav_still_event_t*>(block.data())->length); dvdnav_still_skip(nav); }
-        else if (event == DVDNAV_NAV_PACKET) ++navPackets;
-        else if (event == DVDNAV_STOP) break;
-    }
-    std::fclose(file); dvdnav_close(nav);
-    std::printf("FIRSTPLAY blocks=%u nav=%u stills=%u dump=%s\n", blocks, navPackets, stills, output);
-    return blocks > 0 ? 0 : 14;
-}
-
-static int DvdIfoProbe(const char* path) {
-    auto* dvd = DVDOpen(path);
-    if (!dvd) return 30;
-    auto* ifo = ifoOpen(dvd, 0);
-    if (!ifo) { std::printf("IFO title0 unavailable\n"); DVDClose(dvd); return 31; }
-    if (!ifo->pgci_ut) { std::printf("IFO pgci missing first_play=%d\n", ifo->first_play_pgc != nullptr); ifoClose(ifo); DVDClose(dvd); return 32; }
-    std::printf("IFO VMG menu_lus=%u first_play=%d\n", ifo->pgci_ut->nr_of_lus, ifo->first_play_pgc != nullptr);
-    for (unsigned lu = 0; lu < ifo->pgci_ut->nr_of_lus; ++lu) {
-        auto* table = ifo->pgci_ut->lu[lu].pgcit;
-        if (!table) continue;
-        std::printf("IFO LU=%u pgcs=%u\n", lu, table->nr_of_pgci_srp);
-        for (unsigned i = 0; i < table->nr_of_pgci_srp; ++i) {
-            auto* pgc = table->pgci_srp[i].pgc;
-            if (!pgc) continue;
-            std::printf("IFO PGC=%u programs=%u cells=%u still=%u first=%u last=%u\n", i + 1,
-                pgc->nr_of_programs, pgc->nr_of_cells, pgc->still_time,
-                pgc->nr_of_cells ? pgc->cell_playback[0].first_sector : 0,
-                pgc->nr_of_cells ? pgc->cell_playback[pgc->nr_of_cells - 1].last_sector : 0);
-            for (unsigned c = 0; c < pgc->nr_of_cells; ++c) {
-                const auto& cell = pgc->cell_playback[c];
-                std::printf("IFO CELL=%u time=%u:%02u:%02u.%02u still=%u sectors=%u-%u\n", c + 1,
-                    cell.playback_time.hour, cell.playback_time.minute, cell.playback_time.second,
-                    cell.playback_time.frame_u, cell.still_time, cell.first_sector, cell.last_sector);
-            }
-        }
-    }
-    ifoClose(ifo); DVDClose(dvd); return 0;
-}
-
-static int DvdMenuVobDump(const char* path, const char* output) {
-    auto* dvd = DVDOpen(path); if (!dvd) return 40;
-    auto* file = DVDOpenFile(dvd, 1, DVD_READ_MENU_VOBS); if (!file) { DVDClose(dvd); return 41; }
-    const auto blocks = DVDFileSize(file);
-    std::vector<unsigned char> buffer(2048 * 256);
-    FILE* out = std::fopen(output, "wb"); if (!out) { DVDCloseFile(file); DVDClose(dvd); return 42; }
-    for (int offset = 0; offset < blocks; offset += 256) {
-        const auto count = std::min<int64_t>(256, blocks - offset);
-        const auto read = DVDReadBlocks(file, offset, static_cast<size_t>(count), buffer.data());
-        if (read <= 0) break;
-        std::fwrite(buffer.data(), 2048, static_cast<size_t>(read), out);
-    }
-    std::fclose(out); DVDCloseFile(file); DVDClose(dvd);
-    std::printf("MENU VOB blocks=%d output=%s\n", blocks, output); return 0;
-}
-
-static int DvdVmgCellDump(const char* path, const char* output, int first, int count) {
-    auto* dvd = DVDOpen(path); if (!dvd) return 50;
-    auto* file = DVDOpenFile(dvd, 0, DVD_READ_MENU_VOBS); if (!file) { DVDClose(dvd); return 51; }
-    std::vector<unsigned char> buffer(2048 * 256); FILE* out = std::fopen(output, "wb"); if (!out) return 52;
-    auto read = DVDReadBlocks(file, first, count, buffer.data());
-    if (read > 0) std::fwrite(buffer.data(), 2048, static_cast<size_t>(read), out);
-    std::fclose(out); DVDCloseFile(file); DVDClose(dvd);
-    std::printf("VMG cell first=%d count=%d read=%Id output=%s\n", first, count, read, output); return read > 0 ? 0 : 53;
-}
-#endif
-
-static int Bluray(const char* path) {
+static int ProbeBluRay(const char* path) {
     BLURAY* bd = bd_open(path, nullptr);
     if (!bd) return 20;
     const auto* info = bd_get_disc_info(bd);
@@ -182,8 +52,7 @@ static int Bluray(const char* path) {
     int activationResult = -1;
     const auto start = std::chrono::steady_clock::now();
     for (unsigned i = 0; play && i < 200000; ++i) {
-        const auto elapsed = std::chrono::steady_clock::now() - start;
-        if (elapsed > std::chrono::seconds(45)) break;
+        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(45)) break;
         BD_EVENT event{};
         int read = bd_read_ext(bd, buffer.data(), static_cast<int>(buffer.size()), &event);
         if (event.event) {
@@ -219,14 +88,7 @@ static int Bluray(const char* path) {
 
 int wmain(int argc, wchar_t** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    if (argc < 3 || argc > 6) return 2;
+    if (argc != 3 || std::wstring(argv[1]) != L"bluray") return 2;
     const auto path = Utf8(argv[2]);
-#ifndef BLURAY_ONLY
-    if (std::wstring(argv[1]) == L"dvd-menu-vob") return DvdMenuVobDump(path.c_str(), Utf8(argv[3]).c_str());
-    if (std::wstring(argv[1]) == L"dvd-vmg-cell") return DvdVmgCellDump(path.c_str(), Utf8(argv[3]).c_str(), _wtoi(argv[4]), _wtoi(argv[5]));
-    if (std::wstring(argv[1]) == L"dvd-ifo") return DvdIfoProbe(path.c_str());
-    if (std::wstring(argv[1]) == L"dvd") return Dvd(path.c_str());
-    if (std::wstring(argv[1]) == L"dvd-firstplay") return DvdFirstPlayDump(path.c_str(), Utf8(argv[3]).c_str());
-#endif
-    return Bluray(path.c_str());
+    return ProbeBluRay(path.c_str());
 }

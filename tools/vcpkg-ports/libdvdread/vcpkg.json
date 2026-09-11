@@ -1,1 +1,0 @@
-{"name":"libdvdread","version-semver":"6.1.3","port-version":2,"description":"DVD reading","license":"GPL-2.0-or-later","dependencies":["dirent","libdvdcss",{"name":"vcpkg-make","host":true}]}

@@ -98,7 +98,7 @@ Public NotInheritable Class 外部字幕自动加载器
         (".ssa", 外部字幕格式.SSA),
         (".sup", 外部字幕格式.SUP)}
     Private Shared ReadOnly 位图字幕编码 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-        "hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
+        "hdmv_pgs_subtitle", "dvb_subtitle", "xsub"}
 
     Private Sub New()
     End Sub

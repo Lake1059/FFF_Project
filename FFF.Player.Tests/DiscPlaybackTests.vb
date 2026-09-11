@@ -24,7 +24,7 @@ Friend Module 光盘播放测试
             控制器.切换解码器()
             等待(Function() Not 控制器.是否正在切换 AndAlso 控制器.读取光盘状态().当前标题 = 1, 30, "disc title decoder switch")
             Dim 切换后 = 控制器.安全读取快照().播放位置
-            If 切换后 < 切换前 - TimeSpan.FromSeconds(3) Then Throw New Exception($"Decoder switch restarted DVD first play: {切换前.TotalSeconds:F1}s -> {切换后.TotalSeconds:F1}s.")
+            If 切换后 < 切换前 - TimeSpan.FromSeconds(3) Then Throw New Exception($"Decoder switch restarted Blu-ray playback: {切换前.TotalSeconds:F1}s -> {切换后.TotalSeconds:F1}s.")
             控制器.光盘导航(光盘命令.根菜单)
             等待(Function() 控制器.读取光盘状态().菜单可见, 20, "disc menu before decoder switch")
             控制器.切换解码器()
@@ -47,39 +47,30 @@ Friend Module 光盘播放测试
             等待(Function() 打开.IsCompleted, 20, "edge open")
             打开.GetAwaiter().GetResult()
             播放器.设置音量(0, True) : 播放器.播放()
-            Dim 是DVD = 播放器.当前光盘状态.类型 = "dvd"
             If Environment.GetEnvironmentVariable("FFF_DISC_EARLY_MENU") = "1" Then
                 等待时间(0.5)
                 播放器.光盘导航(光盘命令.根菜单)
             End If
-            For i = 1 To If(是DVD, 45, 20)
+            For i = 1 To 20
                 等待时间(1)
                 Dim 状态 = 播放器.当前光盘状态
                 Console.WriteLine($"EDGE t={i} menu={状态.菜单可见} hold={状态.正在等待} title={状态.当前标题} seq={状态.图形代次} state={播放器.当前快照.状态}")
                 If 播放器.当前快照.状态 = 播放状态.失败 Then Throw New Exception(播放器.最后错误消息)
                 If 错误 <> "" Then Throw New Exception(错误)
-                If (是DVD AndAlso (i = 8 OrElse i = 12 OrElse i = 20 OrElse i = 40)) OrElse (Not 是DVD AndAlso i = 15) Then
+                If i = 15 Then
                     Using 图 = 播放器.读取SDR合成帧()
                         图.Save(Path.Combine(输出目录, $"frame-{i}.png"), ImageFormat.Png)
-                        If 是DVD AndAlso i = 12 AndAlso Environment.GetEnvironmentVariable("FFF_DISC_EARLY_MENU") <> "1" Then
-                            Dim 像素 = 帧字节(图)
-                            If 像素.Where(Function(v, n) n Mod 4 <> 3).Count(Function(v) v > 30) < 图.Width * 图.Height \ 10 Then Throw New Exception("Copyright still is blank.")
-                        End If
                     End Using
                 End If
-                If 状态.菜单可见 AndAlso i = If(是DVD AndAlso Environment.GetEnvironmentVariable("FFF_DISC_EARLY_MENU") <> "1", 30, 15) Then
+                If 状态.菜单可见 AndAlso i = 15 Then
                     Dim 之前 As Byte()
                     Using 图 = 播放器.读取SDR合成帧(True)
                         之前 = 帧字节(图)
                         图.Save(Path.Combine(输出目录, "focus-before.png"), ImageFormat.Png)
                     End Using
-                    播放器.光盘导航(光盘命令.鼠标移动, If(是DVD, 230, 800), If(是DVD, 150, 950))
-                    If Not 是DVD Then
-                        播放器.光盘导航(光盘命令.鼠标确认, 800, 950)
-                        播放器.光盘导航(光盘命令.鼠标确认, 800, 950)
-                    Else
-                        播放器.光盘导航(光盘命令.下)
-                    End If
+                    播放器.光盘导航(光盘命令.鼠标移动, 800, 950)
+                    播放器.光盘导航(光盘命令.鼠标确认, 800, 950)
+                    播放器.光盘导航(光盘命令.鼠标确认, 800, 950)
                     等待时间(0.5)
                     Using 图 = 播放器.读取SDR合成帧(True)
                         图.Save(Path.Combine(输出目录, "focus-after.png"), ImageFormat.Png)
@@ -87,10 +78,8 @@ Friend Module 光盘播放测试
                         If 之前.SequenceEqual(帧字节(图)) Then Throw New Exception("Menu focus did not move.")
                     End Using
                     If Not 播放器.当前光盘状态.菜单可见 Then Throw New Exception("Menu focus navigation left menu unexpectedly.")
-                    If Not 是DVD Then
-                        播放器.光盘导航(光盘命令.鼠标确认, 850, 800)
-                        等待时间(1)
-                    End If
+                    播放器.光盘导航(光盘命令.鼠标确认, 850, 800)
+                    等待时间(1)
                 End If
             Next
             If 错误 <> "" Then Throw New Exception(错误)
@@ -129,7 +118,7 @@ Friend Module 光盘播放测试
             等待(Function() 播放器.当前快照.已呈现视频帧数 > 5, 20, "published frames")
             Dim 缓存目录 = Environment.GetEnvironmentVariable("DOTNET_BUNDLE_EXTRACT_BASE_DIR")
             If String.IsNullOrEmpty(缓存目录) Then Throw New Exception("Set the bundle extraction directory for this probe.")
-            Dim 名称 = If(播放器.当前光盘状态.类型 = "dvd", "dvdnav-4.dll", "bluray-3.dll")
+            Dim 名称 = "bluray-3.dll"
             Dim 模块 = Process.GetCurrentProcess().Modules.Cast(Of ProcessModule)().ToArray()
             For Each 库 In {"FFF.Native.dll", 名称}
                 Dim 项 = 模块.Single(Function(m) String.Equals(m.ModuleName, 库, StringComparison.OrdinalIgnoreCase))
@@ -165,13 +154,7 @@ Friend Module 光盘播放测试
                 While 表.Elapsed.TotalSeconds < 12
                     Application.DoEvents() : Thread.Sleep(10)
                 End While
-                If 播放器.当前光盘状态.类型 = "dvd" Then
-                    等待(Function() 播放器.当前光盘状态.当前标题 = 1, 45, "DVD first play")
-                    等待时间(2)
-                    播放器.光盘导航(光盘命令.根菜单)
-                Else
-                    等待(Function() 播放器.当前光盘状态.菜单可见, 20, "automatic Blu-ray menu")
-                End If
+                等待(Function() 播放器.当前光盘状态.菜单可见, 20, "automatic Blu-ray menu")
                 等待(Function() 播放器.当前光盘状态.菜单可见 AndAlso 播放器.当前光盘状态.图形代次 > 0, 60, "interactive menu")
                 Dim 菜单状态 = 播放器.当前光盘状态
                 Console.WriteLine("MENU " & System.Text.Json.JsonSerializer.Serialize(菜单状态))
@@ -197,17 +180,15 @@ Friend Module 光盘播放测试
                     图.Save(Path.Combine(输出目录, "menu-overlay-internal.png"), ImageFormat.Png)
                 End Using
                 If 有色像素 < 5 Then Throw New Exception("Disc menu back buffer is blank.")
-                Dim 是DVD = 菜单状态.类型 = "dvd"
-                播放器.光盘导航(If(是DVD, 光盘命令.下, 光盘命令.右))
+                播放器.光盘导航(光盘命令.右)
                 等待时间(0.3)
                 Using 图 = 播放器.读取SDR合成帧(True)
                     If 原图层.SequenceEqual(帧字节(图)) Then Throw New Exception("Menu highlight did not change.")
                     图.Save(Path.Combine(输出目录, "highlight-internal.png"), ImageFormat.Png)
                 End Using
-                播放器.光盘导航(If(是DVD, 光盘命令.上, 光盘命令.左))
+                播放器.光盘导航(光盘命令.左)
                 等待时间(0.3)
-                If Not 是DVD Then
-                    Dim 菜单代次 = 播放器.当前快照.时间轴代次
+                Dim 菜单代次 = 播放器.当前快照.时间轴代次
                     播放器.光盘导航(光盘命令.右)
                     等待时间(0.2)
                     播放器.光盘导航(光盘命令.确认)
@@ -224,9 +205,8 @@ Friend Module 光盘播放测试
                     If 错误 <> "" OrElse 播放器.当前快照.时间轴代次 <> 菜单代次 Then Throw New Exception("Submenu hover disrupted playback.")
                     播放器.光盘导航(光盘命令.鼠标确认, 1440, 875)
                     等待时间(0.3)
-                    播放器.光盘导航(光盘命令.鼠标移动, 500, 950)
-                    等待时间(0.2)
-                End If
+                播放器.光盘导航(光盘命令.鼠标移动, 500, 950)
+                等待时间(0.2)
                 Dim 之前 = 播放器.当前快照.已呈现视频帧数
                 播放器.光盘导航(光盘命令.确认)
                 等待(Function() Not 播放器.当前光盘状态.菜单可见 AndAlso 播放器.当前快照.已呈现视频帧数 > 之前 + 5, 30, "menu activation video")
@@ -249,8 +229,8 @@ Friend Module 光盘播放测试
                     图.Save(Path.Combine(输出目录, "menu-portrait-internal.png"), ImageFormat.Png)
                 End Using
                 Dim 鼠标前帧 = 播放器.当前快照.已呈现视频帧数
-                播放器.光盘导航(光盘命令.鼠标移动, If(是DVD, 200, 500), If(是DVD, 95, 950))
-                播放器.光盘导航(光盘命令.鼠标确认, If(是DVD, 200, 500), If(是DVD, 95, 950))
+                播放器.光盘导航(光盘命令.鼠标移动, 500, 950)
+                播放器.光盘导航(光盘命令.鼠标确认, 500, 950)
                 等待(Function() Not 播放器.当前光盘状态.菜单可见 AndAlso 播放器.当前快照.已呈现视频帧数 > 鼠标前帧 + 5, 20, "mouse activation")
                 If 播放器.当前快照.状态 = 播放状态.失败 Then Throw New Exception(错误)
                 If 错误 <> "" Then Throw New Exception("Disc navigation reported an error: " & 错误)

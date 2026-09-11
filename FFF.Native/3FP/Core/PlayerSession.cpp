@@ -1830,12 +1830,8 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
             hardwareThreads, MaximumSoftwareDecoderThreads));
         context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     }
-    if (disc_ && (disc_->Menu() || disc_->DvdStillCell()) && video &&
+    if (disc_ && disc_->Menu() && video &&
         stream->codecpar->codec_id == AV_CODEC_ID_MPEG2VIDEO) {
-        // DVD MPEG-2 is often mixed progressive/interlaced. Frame-threaded
-        // decoding can expose reordered fields as temporal jumps at VOBU
-        // boundaries; keep decode order deterministic and let the renderer
-        // inspect the per-frame field flags.
         context->flags |= AV_CODEC_FLAG_LOW_DELAY;
         context->thread_count = 1;
         context->thread_type = FF_THREAD_SLICE;
@@ -2483,10 +2479,6 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
     const auto position = pts == AV_NOPTS_VALUE ? snapshot_.position100ns :
         StreamTimestampPosition100ns(owner, videoStream_, pts);
-    if (disc_ && disc_->IsDvd() && GetEnvironmentVariableW(L"FFF_DISC_TRACE", nullptr, 0))
-        std::fprintf(stderr, "DISC present pts=%lld pos=%lld flags=%d interlaced=%d repeat=%d\n",
-            pts, position, frame->flags, (frame->flags & AV_FRAME_FLAG_INTERLACED) != 0,
-            frame->repeat_pict);
     if (frame->duration > 0) {
         lastVideoFrameDuration100ns_ = av_rescale_q(frame->duration, stream->time_base,
             AVRational{1, static_cast<int>(TicksPerSecond)});

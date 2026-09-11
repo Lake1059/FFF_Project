@@ -393,7 +393,6 @@ Friend NotInheritable Class 文件关联管理器
             New 文件类型定义(文件关联类别.不常见视频, ".ogv", "video/ogg", "video"),
             New 文件类型定义(文件关联类别.老旧视频, ".mpg", "video/mpeg", "video"),
             New 文件类型定义(文件关联类别.老旧视频, ".mpeg", "video/mpeg", "video"),
-            New 文件类型定义(文件关联类别.老旧视频, ".vob", "video/dvd", "video"),
             New 文件类型定义(文件关联类别.老旧视频, ".3gp", "video/3gpp", "video"),
             New 文件类型定义(文件关联类别.老旧视频, ".3g2", "video/3gpp2", "video"),
             New 文件类型定义(文件关联类别.老旧视频, ".rm", "video/vnd.rn-realvideo", "video"),

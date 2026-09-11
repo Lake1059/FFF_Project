@@ -197,7 +197,6 @@ Friend NotInheritable Class 播放器流选择器
             Case "webvtt" : 名称 = "WebVTT"
             Case "mov_text" : 名称 = "MOV_TEXT"
             Case "hdmv_pgs_subtitle" : 名称 = "PGS"
-            Case "dvd_subtitle" : 名称 = "VobSub"
             Case "dvb_subtitle" : 名称 = "DVB Subtitle"
             Case Else
                 Dim 原值 = If(编码, String.Empty).Trim()

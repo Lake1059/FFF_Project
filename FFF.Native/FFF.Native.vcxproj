@@ -217,8 +217,8 @@
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
     <Link>
-      <AdditionalDependencies>dvdnav.lib;dvdread.lib;bluray.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <DelayLoadDLLs>dvdnav-4.dll;dvdread-8.dll;bluray-3.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalDependencies>bluray.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>bluray-3.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

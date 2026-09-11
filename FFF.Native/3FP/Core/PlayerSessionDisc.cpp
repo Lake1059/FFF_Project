@@ -117,16 +117,15 @@ bool PlayerSession::ReopenDiscDemux() {
 bool PlayerSession::HoldDisc() {
     if (!disc_) return false;
     if (disc_->Still()) {
-        disc_->RestoreFirstPlayStill();
         PublishDisc();
         const auto redraw = videoRenderer_.Redraw();
         if (redraw != FFFResult::Success && redraw != FFFResult::InvalidState) {
-            Fail(redraw, videoRenderer_.LastError(), "dvd-still-redraw");
+            Fail(redraw, videoRenderer_.LastError(), "disc-still-redraw");
             return true;
         }
     }
     if (disc_->Still() && !videoFrameQueue_.empty()) {
-        // A finite DVD still is a presentation boundary. Keep the decoded
+        // A finite disc still is a presentation boundary. Keep the decoded
         // frame visible while the navigation VM waits; do not reopen the
         // demuxer or let the next VOBU replace it early.
         PumpVideoPresentation();

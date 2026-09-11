@@ -63,7 +63,7 @@ public:
                     AVRational{1, static_cast<int>(TicksPerSecond)});
         }
         const auto codecId = format_->streams[streamIndex_]->codecpar->codec_id;
-        if (codecId != AV_CODEC_ID_HDMV_PGS_SUBTITLE && codecId != AV_CODEC_ID_DVD_SUBTITLE &&
+        if (codecId != AV_CODEC_ID_HDMV_PGS_SUBTITLE &&
             codecId != AV_CODEC_ID_DVB_SUBTITLE && codecId != AV_CODEC_ID_XSUB)
             return Fail("The subtitle stream is not a supported bitmap format.", FFFResult::NotSupported);
         const auto* codec = avcodec_find_decoder(codecId);

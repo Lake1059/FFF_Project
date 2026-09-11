@@ -33,7 +33,7 @@ Public NotInheritable Class 光盘状态
     <JsonPropertyName("overlaySequence")> Public Property 图形代次 As ULong
     Public ReadOnly Property 已打开 As Boolean
         Get
-            Return 类型 = "dvd" OrElse 类型 = "bluray"
+            Return 类型 = "bluray"
         End Get
     End Property
 End Class
@@ -42,9 +42,7 @@ Public Module 光盘路径
     Public Function 是光盘路径(路径 As String) As Boolean
         If String.IsNullOrWhiteSpace(路径) Then Return False
         Dim 扩展名 = Path.GetExtension(路径)
-        Return String.Equals(扩展名, ".iso", StringComparison.OrdinalIgnoreCase) OrElse
-            String.Equals(扩展名, ".bdmv", StringComparison.OrdinalIgnoreCase) OrElse
-            String.Equals(扩展名, ".ifo", StringComparison.OrdinalIgnoreCase) OrElse Directory.Exists(路径)
+        Return String.Equals(扩展名, ".bdmv", StringComparison.OrdinalIgnoreCase) OrElse Directory.Exists(路径)
     End Function
     Public Function 媒体存在(路径 As String) As Boolean
         Return Not String.IsNullOrWhiteSpace(路径) AndAlso (File.Exists(路径) OrElse Directory.Exists(路径))

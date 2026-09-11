@@ -46,7 +46,7 @@ SSA/ASS 不再使用简化的托管解析和文字命令，也没有降级路径
 ## SUP / PGS 位图字幕
 
 `SUP字幕解码器` 使用 FFmpeg 的位图字幕解码 API。裸 `.sup` 的 HDMV PGS、容器内 PGS，以及
-FFmpeg 能输出 `SUBTITLE_BITMAP` 的 DVD、DVB 和 XSUB 流都走同一原生路径。每次只保留当前解码
+FFmpeg 能输出 `SUBTITLE_BITMAP` 的 DVB 和 XSUB 流都走同一原生路径。每次只保留当前解码
 事件，多个矩形合成为一个最小包围矩形，并转换为预乘 Alpha 的 BGRA8 像素。
 
 `SUP字幕帧生成器` 根据 PGS 画布坐标映射到 `视频显示区域`，所以黑边、窗口化、全屏和 DPI 变化

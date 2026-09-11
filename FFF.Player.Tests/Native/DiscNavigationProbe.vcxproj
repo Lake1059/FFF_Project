@@ -9,11 +9,7 @@
   <PropertyGroup><OutDir>$(ProjectDir)..\..\artifacts\disc-probe\</OutDir><IntDir>$(OutDir)obj\</IntDir><DiscLibraryRoot>$(ProjectDir)..\..\third_party\vcpkg_installed\x64-windows</DiscLibraryRoot></PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><LanguageStandard>stdcpp20</LanguageStandard><AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions><AdditionalIncludeDirectories>$(DiscLibraryRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary></ClCompile>
-    <Link><AdditionalLibraryDirectories>$(DiscLibraryRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>dvdnav.lib;dvdread.lib;bluray.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
-  </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(BlurayOnly)' == 'true'">
-    <ClCompile><PreprocessorDefinitions>BLURAY_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
-    <Link><AdditionalDependencies>bluray.lib</AdditionalDependencies></Link>
+    <Link><AdditionalLibraryDirectories>$(DiscLibraryRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>bluray.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="DiscNavigationProbe.cpp" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -10,10 +10,8 @@ struct AVFormatContext;
 struct AVPacket;
 struct AVIOContext;
 struct AVCodecContext;
-struct dvdnav_s;
 struct bluray;
 struct bd_overlay_s;
-struct DvdNavigationState;
 
 struct DiscBitmap {
     int width = 0, height = 0;
@@ -41,11 +39,6 @@ public:
     bool Ended() const { return ended_; }
     bool Failed() const { return failed_; }
     bool Menu() const { return menu_; }
-    bool IsDvd() const { return dvd_ != nullptr; }
-    bool DvdMenuDomain() const;
-    bool DvdStillCell() const;
-    const DiscBitmap& FirstPlayStill() const { return firstPlayStill_; }
-    void RestoreFirstPlayStill();
     bool RestartRequired() const { return restart_; }
     void AcknowledgeRestart() { restart_ = false; }
     std::int64_t Position() const;
@@ -67,16 +60,12 @@ private:
     int Read(std::uint8_t* buffer, int size);
     void HandleOverlay(const bd_overlay_s* overlay);
     void PublishGraphics();
-    void UpdateDvdHighlight();
-    void LoadFirstPlayStill(const std::string& path);
     void ResetSubtitleDecoder();
     void UpdateBluRayTitle(unsigned playlist);
     void HandleBluRayEvent(unsigned event, unsigned parameter);
     void PollBluRayNavigation();
     void Barrier(bool restart);
     std::atomic<bool>& cancel_;
-    dvdnav_s* dvd_ = nullptr;
-    std::unique_ptr<DvdNavigationState> dvdNavigation_;
     bluray* bd_ = nullptr;
     AVIOContext* io_ = nullptr;
     AVCodecContext* subtitleDecoder_ = nullptr;
@@ -91,14 +80,11 @@ private:
     unsigned playlist_ = 0;
     std::int64_t duration_ = 0;
     double aspect_ = 0;
-    std::uint32_t clut_[16]{};
     struct Plane { int width = 0, height = 0; bool visible = false;
         std::vector<std::uint8_t> indices; std::uint32_t palette[256]{}; } planes_[2];
     DiscBitmap graphics_;
-    DiscBitmap firstPlayStill_;
-    std::vector<std::uint8_t> dvdPixels_;
-    std::vector<std::uint8_t> dvdIndices_;
-    int dvdWidth_ = 720, dvdHeight_ = 480;
+    std::vector<std::uint8_t> subtitlePixels_;
+    int subtitleWidth_ = 1920, subtitleHeight_ = 1080;
     std::vector<std::int64_t> chapters_;
     int subtitleSelection_ = -1;
     int bluraySubtitle_ = 1;
