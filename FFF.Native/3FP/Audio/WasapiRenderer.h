@@ -105,7 +105,7 @@ private:
         std::size_t silenceBytes = 0;
     };
     void RenderThread() noexcept;
-    void ApplyGain(std::vector<std::uint8_t>& converted) const noexcept;
+    void ApplyGain(std::vector<std::uint8_t>& converted) noexcept;
     FFFResult EnsureResampler(const AVFrame* frame) noexcept;
     void UpdatePeakLevels(const std::uint8_t* samples, std::uint32_t frames) noexcept;
     void PublishRuntimeDiagnostics() noexcept;
@@ -170,6 +170,10 @@ private:
     // splice silence into valid AAC/VBR audio and audibly click.
     bool timelineAnchored_;
     std::uint64_t producedTimelineFrames_;
+    // Number of output frames still covered by the startup/seek de-click ramp.
+    // This is deliberately renderer-local so every device restart and seek has
+    // the same zero-to-signal boundary regardless of codec/container PTS.
+    std::uint32_t fadeInFramesRemaining_;
     std::atomic<std::uint64_t> timestampJitterCount_;
     std::atomic<std::uint64_t> discontinuityCount_;
     std::atomic<std::uint64_t> insertedSilenceFrames_;

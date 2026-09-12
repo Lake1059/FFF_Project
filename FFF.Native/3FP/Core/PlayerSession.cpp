@@ -2528,6 +2528,10 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     const auto lateTolerance = std::max<std::int64_t>(frameDuration * 2, 500'000);
     if (state_.load() == FFF3FPState::Playing && !fulfillingSeek &&
         !audioBlockedUntilVideoFrame_ &&
+        // Never discard the first decoded frame merely because the audio/device
+        // clock won the startup race. Until one frame is actually presented,
+        // waiting is preferable to creating a permanent opening-frame hole.
+        snapshot_.framePts != AV_NOPTS_VALUE &&
         position + lateTolerance < ClockPosition()) {
         snapshot_.frameIndex = nextIndex;
         ++snapshot_.droppedVideoFrames;

@@ -19,6 +19,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 constexpr std::size_t MaximumReusableAudioBuffers = 8;
 constexpr std::size_t MaximumReusableAudioBufferBytes = 1024 * 1024;
+constexpr std::uint32_t StartupFadeInMilliseconds = 5;
 
 class ComInitialization final {
 public:
@@ -85,6 +86,7 @@ PlayerWasapiRenderer::PlayerWasapiRenderer(std::wstring endpointId, const bool e
       clockSampleQpc100ns_(0), clockLimitPosition100ns_(0), clockEpoch_(0),
       pendingMediaFrames_(0), playedMediaFrames_(0), underrunCount_(0),
       hasSubmittedAudio_(false), endOfStream_(false), timelineAnchored_(false), producedTimelineFrames_(0),
+      fadeInFramesRemaining_(0),
       timestampJitterCount_(0), discontinuityCount_(0), insertedSilenceFrames_(0),
       droppedOverlapFrames_(0) {}
 
@@ -195,6 +197,9 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
     std::uint64_t gapFrames = 0;
     std::uint64_t overlapFrames = 0;
     if (!timelineAnchored_) {
+        if (fadeInFramesRemaining_ == 0 && outputSampleRate_ > 0)
+            fadeInFramesRemaining_ = std::max<std::uint32_t>(1,
+                outputSampleRate_ * StartupFadeInMilliseconds / 1000);
         // The first decoded frame establishes the post-seek media anchor. Only
         // this path may trim preroll or synthesize leading silence.
         preRollFrames = static_cast<std::uint64_t>(std::max<std::int64_t>(0, -signedStartFrame));
@@ -273,22 +278,55 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
     return FFFResult::Success;
 }
 
-void PlayerWasapiRenderer::ApplyGain(std::vector<std::uint8_t>& converted) const noexcept {
+void PlayerWasapiRenderer::ApplyGain(std::vector<std::uint8_t>& converted) noexcept {
     const auto gain = muted_.load() ? 0.0f : volume_.load();
+    const auto channels = static_cast<std::size_t>(std::max<std::uint16_t>(1, outputChannels_));
+    const auto bytesPerFrame = static_cast<std::size_t>(outputBlockAlign_);
+    const auto totalFrames = bytesPerFrame == 0 ? 0 : converted.size() / bytesPerFrame;
+    const auto fadeFrames = std::min<std::size_t>(fadeInFramesRemaining_, totalFrames);
+    const auto fadeTotalFrames = outputSampleRate_ == 0 ? 1u :
+        std::max<std::uint32_t>(1, outputSampleRate_ * StartupFadeInMilliseconds / 1000);
+    const auto fadeStartFrame = fadeTotalFrames - fadeInFramesRemaining_;
+    const auto applySampleGain = [&](const float sampleGain) noexcept {
+        if (outputFloat_) {
+            auto* samples = reinterpret_cast<float*>(converted.data());
+            for (std::size_t frame = 0; frame < totalFrames; ++frame) {
+                const auto ramp = frame < fadeFrames
+                    ? static_cast<float>(fadeStartFrame + frame + 1) / fadeTotalFrames
+                    : 1.0f;
+                const auto effective = sampleGain * std::min(ramp, 1.0f);
+                for (std::size_t channel = 0; channel < channels; ++channel)
+                    samples[frame * channels + channel] *= effective;
+            }
+        } else if (outputBitsPerSample_ == 16) {
+            auto* samples = reinterpret_cast<std::int16_t*>(converted.data());
+            for (std::size_t frame = 0; frame < totalFrames; ++frame) {
+                const auto ramp = frame < fadeFrames
+                    ? static_cast<float>(fadeStartFrame + frame + 1) / fadeTotalFrames
+                    : 1.0f;
+                const auto effective = sampleGain * std::min(ramp, 1.0f);
+                for (std::size_t channel = 0; channel < channels; ++channel)
+                    samples[frame * channels + channel] = static_cast<std::int16_t>(
+                        std::lround(samples[frame * channels + channel] * effective));
+            }
+        } else {
+            auto* samples = reinterpret_cast<std::int32_t*>(converted.data());
+            for (std::size_t frame = 0; frame < totalFrames; ++frame) {
+                const auto ramp = frame < fadeFrames
+                    ? static_cast<float>(fadeStartFrame + frame + 1) / fadeTotalFrames
+                    : 1.0f;
+                const auto effective = sampleGain * std::min(ramp, 1.0f);
+                for (std::size_t channel = 0; channel < channels; ++channel)
+                    samples[frame * channels + channel] = static_cast<std::int32_t>(
+                        std::llround(samples[frame * channels + channel] * effective));
+            }
+        }
+    };
+    if (totalFrames == 0) return;
     if (gain == 0.0f) {
         std::memset(converted.data(), 0, converted.size());
-    } else if (gain != 1.0f && outputFloat_) {
-        auto* samples = reinterpret_cast<float*>(converted.data());
-        for (std::size_t index = 0; index < converted.size() / sizeof(float); ++index) samples[index] *= gain;
-    } else if (gain != 1.0f && outputBitsPerSample_ == 16) {
-        auto* samples = reinterpret_cast<std::int16_t*>(converted.data());
-        for (std::size_t index = 0; index < converted.size() / sizeof(std::int16_t); ++index)
-            samples[index] = static_cast<std::int16_t>(std::lround(samples[index] * gain));
-    } else if (gain != 1.0f) {
-        auto* samples = reinterpret_cast<std::int32_t*>(converted.data());
-        for (std::size_t index = 0; index < converted.size() / sizeof(std::int32_t); ++index)
-            samples[index] = static_cast<std::int32_t>(std::llround(samples[index] * gain));
-    }
+    } else if (gain != 1.0f || fadeFrames > 0) applySampleGain(gain);
+    if (fadeFrames > 0) fadeInFramesRemaining_ -= static_cast<std::uint32_t>(fadeFrames);
 }
 
 FFFResult PlayerWasapiRenderer::Finish() noexcept {
@@ -344,6 +382,8 @@ void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
     {
         std::lock_guard lock(mutex_);
         queue_.clear(); queuedBytes_ = 0; timelineAnchored_ = false; producedTimelineFrames_ = 0;
+        fadeInFramesRemaining_ = outputSampleRate_ == 0 ? 0 :
+            std::max<std::uint32_t>(1, outputSampleRate_ * StartupFadeInMilliseconds / 1000);
     }
     // A seek can also follow an audio-stream switch.  Recreating on the next
     // input frame keeps the resampler's source layout/rate contract correct.
