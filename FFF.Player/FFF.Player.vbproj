@@ -15,9 +15,9 @@
       <!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
       <Authors>1059 Studio</Authors>
       <Company>1059 Studio</Company>
-      <AssemblyVersion>2026.9.12</AssemblyVersion>
-      <FileVersion>2026.9.12</FileVersion>
-      <Version>2026.9.12</Version>
+      <AssemblyVersion>2026.9.14</AssemblyVersion>
+      <FileVersion>2026.9.14</FileVersion>
+      <Version>2026.9.14</Version>
       <Title>FFF.Player</Title>
       <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
       <ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
@@ -59,6 +59,7 @@
     <PackageReference Include="Svg" Version="3.4.8" />
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DirectComposition" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectX" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
   </ItemGroup>
