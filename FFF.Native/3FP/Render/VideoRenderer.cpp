@@ -1907,6 +1907,9 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
     const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
     const auto outputBits = PreferredOutputBitDepth(sourceBitDepth_, hdr);
     if (swapChain_ != nullptr && (swapHdr_ != hdr || swapOutputBits_ != outputBits)) {
+        // Present and swap-chain reconfiguration must never overlap; hold
+        // presentMutex_ across the rewrite like the render paths do.
+        std::lock_guard presentLock(presentMutex_);
         const auto result = ReconfigureSwapChain(hdr, outputBits);
         if (result != FFFResult::Success) return result;
     }
@@ -1923,6 +1926,8 @@ FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
     requestedMode_ = FFF3FPColorMode::MapToSdr;
     actualMode_ = FFF3FPColorMode::MapToSdr;
     if (swapChain_ != nullptr && swapHdr_) {
+        // Same invariant as SetColorMode: hold presentMutex_ across the rewrite.
+        std::lock_guard presentLock(presentMutex_);
         const auto result = ReconfigureSwapChain(false, PreferredOutputBitDepth(sourceBitDepth_, false));
         if (result != FFFResult::Success) return result;
     }
@@ -2231,7 +2236,8 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr, const std::u
     if (!hdr && swapHdr_) {
         const auto width = std::max(1u, swapWidth_);
         const auto height = std::max(1u, swapHeight_);
-        std::lock_guard presentLock(presentMutex_);
+        // The caller holds presentMutex_ for the entire rewrite (see
+        // EnsureSwapChain/SetColorMode); do not relock it here.
         swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
         swapChain_->Release();
         swapChain_ = nullptr;
@@ -4573,6 +4579,10 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     const auto lyricsLayout = lyricsLayoutEnabled_.load(std::memory_order_acquire);
     if (window_ == nullptr || (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout))
         return FFFResult::Success;
+    // Hold both locks across EnsureSwapChain: it may resize or recreate the
+    // swap chain, and Present must never overlap that rewrite (the same
+    // invariant the main render path enforces).
+    std::unique_lock presentLock(presentMutex_);
     const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : 1,
         hasCachedVideo_ ? sourceHeight_ : 1, hasCachedVideo_ ? sourceBitDepth_ : 8);
     if (chainResult != FFFResult::Success || swapChain_ == nullptr) return chainResult;
@@ -4589,7 +4599,6 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
         cachedVideoSettings_.paperWhite = paperWhiteNits_;
         cachedVideoSettings_.targetPeak = hdrProcessor_.State().targetPeakNits;
     }
-    std::unique_lock presentLock(presentMutex_);
     ComPtr<ID3D11Texture2D> backBuffer;
     ComPtr<ID3D11RenderTargetView> backBufferTarget;
     const auto targetResult = AcquireBackBufferTarget(
@@ -4619,9 +4628,9 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::PlayerInformation);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     const auto generation = videoGeneration_.load();
-    ComPtr<IDXGISwapChain4> retainedChain = swapChain_;
-    deviceLock.unlock();
-    const auto result = PresentCurrentFrame(retainedChain.Get(), generation);
+    // Keep deviceMutex_ held across Present: releasing it here would let the
+    // reconfiguration path tear down the chain this frame is presenting.
+    const auto result = PresentCurrentFrame(swapChain_, generation);
     if (result != FFFResult::Success) return result;
     // A format/color-space switch destroys and recreates the flip-model chain.
     // Drop every reference to the old chain and its back buffer before handing
@@ -4629,11 +4638,9 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     // can wait for these references while this thread waits for deviceMutex_.
     backBufferTarget.Reset();
     backBuffer.Reset();
-    retainedChain.Reset();
     // Empty layers no longer need full-size GPU surfaces. Release them after the
     // clearing composite reached the display, preserving the submitted sequence.
     presentLock.unlock();
-    deviceLock.lock();
     auto allEmpty = true;
     for (std::size_t index = 0; index < ARRAYSIZE(timedTextLayers_); ++index) {
         bool empty = false;
@@ -4649,6 +4656,8 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
 }
 
 void PlayerVideoRenderer::ClearSurface() noexcept {
+    // Precondition: the caller holds deviceMutex_. Presenting here only needs
+    // presentMutex_; swapChain_ was already validated under deviceMutex_.
     if (context_ != nullptr && device_ != nullptr && swapChain_ != nullptr) {
         ComPtr<ID3D11Texture2D> backBuffer;
         ComPtr<ID3D11RenderTargetView> backBufferTarget;
