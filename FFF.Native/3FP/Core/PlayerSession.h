@@ -63,10 +63,16 @@ public:
     FFFResult SetTimedTextLayer(const FFF3FPTimedTextLayer& layer) noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
     FFFResult ReadVideoPixel(FFF3FPVideoPixelProbe& probe) noexcept;
+    // Batch pixel readback
+    FFFResult ReadVideoPixelRegion(std::uint32_t x, std::uint32_t y,
+        std::uint32_t width, std::uint32_t height, float* dst,
+        std::uint32_t dstFloatCount, std::uint32_t* outputBitDepth) noexcept;
     FFFResult GetAudioPeakLevels(FFF3FPAudioPeakLevels& levels) const noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept;
     FFFResult GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcept;
     FFFResult GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept;
+    // Render-target diagnostics
+    FFFResult GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
 
@@ -179,6 +185,12 @@ private:
     AVFormatContext* format_;
     std::unique_ptr<DiscInput> disc_;
     std::atomic<bool> discCancel_{false};
+    // Cross-thread mirror of "disc_ is live". disc_ is assigned in DoOpen() and
+    // reset in DoClose(), both on the worker thread, while FFF3FP_SetViewTransform
+    // runs on the caller's thread; reading the unique_ptr there is a data race
+    // (and a use-after-free window once the worker resets it). This flag is only
+    // ever tested for truth, never used to dereference disc_.
+    std::atomic<bool> discOpened_{false};
     std::string discStatus_ = "{}";
     std::uint64_t discGraphicsSequence_ = 0;
     std::int64_t discPositionOffset_ = 0;
