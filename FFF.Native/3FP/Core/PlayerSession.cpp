@@ -443,6 +443,9 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
     LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency); qpcFrequency_ = frequency.QuadPart;
     if (configuration.audioEndpointIdUtf8 != nullptr) audioEndpointId_ = FromUtf8(configuration.audioEndpointIdUtf8);
     videoRenderer_.SetWindow(static_cast<HWND>(configuration.outputWindow));
+    // Must be applied before the first EnsureDevice(),
+    // which happens lazily on the render path — hence here in the constructor.
+    videoRenderer_.SetPreferredAdapterIndex(configuration.preferredAdapterIndex);
     videoRenderer_.SetScalingQuality(configuration.videoScalingQuality);
     videoRenderer_.SetColorMode(configuration.colorMode, configuration.sdrPeakNits,
         configuration.hdrPeakNits, configuration.sdrPaperWhiteNits,
@@ -1154,15 +1157,22 @@ FFFResult PlayerSession::SetViewTransform(const float zoom, const float panX,
     const float panY) noexcept {
     if (!std::isfinite(zoom) || zoom <= 0.0f || !std::isfinite(panX) || !std::isfinite(panY))
         return FFFResult::InvalidArgument;
-    Enqueue([this, zoom, panX, panY] {
-        if (disc_) return;
-        const auto result = videoRenderer_.SetViewTransform(zoom, panX, panY);
-        if (result != FFFResult::Success) return;
-        const auto redrawResult = videoRenderer_.Redraw();
-        if (redrawResult != FFFResult::Success &&
-            redrawResult != FFFResult::InvalidState &&
-            videoRenderer_.RequestRecoveryIfDeviceLost()) return;
-    });
+    // Bypass the playback command queue. The old
+    // Enqueue path executed the transform on the Worker (decode) thread —
+    // during HD/HDR playback that thread is busy decoding for tens of ms, so
+    // the queued pan commands arrived late or never before the next frame
+    // upload wiped them (the "horizontal pan dead + stutter" bug).
+    // ViewTransform is three relaxed atomics inside the renderer; writing them
+    // from any thread is safe. Redraw only wakes the presenter via its fast
+    // path, which also does not contend with decode.
+    // Upstream 2026.9: guard disc playback (disc renderer has its own view path).
+    if (discOpened_.load(std::memory_order_acquire)) return FFFResult::Success;
+    const auto result = videoRenderer_.SetViewTransform(zoom, panX, panY);
+    if (result != FFFResult::Success) return result;
+    const auto redrawResult = videoRenderer_.Redraw();
+    if (redrawResult != FFFResult::Success &&
+        redrawResult != FFFResult::InvalidState &&
+        videoRenderer_.RequestRecoveryIfDeviceLost()) return redrawResult;
     return FFFResult::Success;
 }
 FFFResult PlayerSession::Set360View(const bool enabled, const float yaw,
@@ -1649,6 +1659,30 @@ FFFResult PlayerSession::GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept
     return videoRenderer_.GetTimedTextStatus(status, TimedTextLayerSlot::Lyrics);
 }
 
+// Forward to the renderer (RTInfo under deviceMutex_).
+FFFResult PlayerSession::GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept {
+    // Same contract as GetSnapshot: the caller declares the size and version of
+    // the struct it passes, so we never write past a smaller caller-side layout.
+    if (info.size < sizeof(FFF3FPRenderTargetInfo) || info.version != 1)
+        return FFFResult::InvalidArgument;
+    info.size = sizeof(info);
+    info.version = 1;
+    PlayerVideoRenderer::RenderTargetInfo rtInfo{};
+    const auto result = videoRenderer_.GetRenderTargetInfo(rtInfo);
+    if (result != FFFResult::Success) return result;
+    info.swapWidth = rtInfo.swapWidth;
+    info.swapHeight = rtInfo.swapHeight;
+    info.clientWidth = rtInfo.clientWidth;
+    info.clientHeight = rtInfo.clientHeight;
+    info.destX = rtInfo.destX;
+    info.destY = rtInfo.destY;
+    info.destWidth = rtInfo.destWidth;
+    info.destHeight = rtInfo.destHeight;
+    info.outputBitDepth = rtInfo.outputBitDepth;
+    info.hdr = rtInfo.hdr ? 1 : 0;
+    return FFFResult::Success;
+}
+
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     if (output.size < sizeof(FFF3FPSnapshot) || output.version != 8) return FFFResult::InvalidArgument;
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
@@ -1697,6 +1731,16 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
 
 FFFResult PlayerSession::ReadVideoPixel(FFF3FPVideoPixelProbe& probe) noexcept {
     const auto result = videoRenderer_.ReadPixel(probe);
+    if (result == FFFResult::DeviceFailure)
+        videoRenderer_.RequestRecoveryIfDeviceLost();
+    return result;
+}
+
+FFFResult PlayerSession::ReadVideoPixelRegion(const std::uint32_t x, const std::uint32_t y,
+    const std::uint32_t width, const std::uint32_t height, float* dst,
+    const std::uint32_t dstFloatCount, std::uint32_t* outputBitDepth) noexcept {
+    const auto result = videoRenderer_.ReadPixelRegion(
+        x, y, width, height, dst, dstFloatCount, outputBitDepth);
     if (result == FFFResult::DeviceFailure)
         videoRenderer_.RequestRecoveryIfDeviceLost();
     return result;
@@ -1954,7 +1998,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
             disc_ = std::make_unique<DiscInput>(discCancel_);
             if (!disc_->Open(path) || !disc_->OpenDemux(&format_)) {
                 openResult = FFFResult::NotSupported; openError = disc_->Error();
-            }
+            } else discOpened_.store(true, std::memory_order_release);
         } catch (...) { openResult = FFFResult::NativeFailure; openError = "Could not open the disc."; }
     } else openResult = OpenFormat(path, &format_, formatIo_, openError);
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
@@ -3021,7 +3065,9 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     ClearVideoQueue();
     for (auto*& frame : videoFramePool_) av_frame_free(&frame);
     videoFramePool_.clear();
-    if (disc_) { disc_->CloseDemux(&format_); disc_.reset(); }
+    // Publish "closed" before releasing, so no new caller-thread entry can
+    // observe the flag after the object is gone.
+    if (disc_) { discOpened_.store(false, std::memory_order_release); disc_->CloseDemux(&format_); disc_.reset(); }
     else CloseFormat(&format_, formatIo_);
     discPositionOffset_ = 0; discGraphicsSequence_ = 0; discDrained_ = false;
     discInvalidPackets_ = 0;

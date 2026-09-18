@@ -24,6 +24,7 @@ extern "C" {
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cwctype>
 #include <cstring>
 #include <mutex>
@@ -1843,6 +1844,19 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     return FFFResult::Success;
 }
 
+FFFResult PlayerVideoRenderer::SetPreferredAdapterIndex(const std::int32_t index) noexcept {
+    if (index < -1 || index > 15) return FFFResult::InvalidArgument;
+    std::lock_guard deviceLock(deviceMutex_);
+    preferredAdapterIndex_.store(index, std::memory_order_release);
+    // The preference is only consulted by EnsureDevice(), i.e. at device-creation
+    // time. We deliberately do not tear down an existing device here: that would
+    // force a swap-chain rebuild from an arbitrary call site, and
+    // ReleaseDeviceObjects() expects its caller to already hold deviceMutex_.
+    // In practice every caller sets this during session construction, when
+    // device_ is still null, so it is picked up by the first EnsureDevice().
+    return FFFResult::Success;
+}
+
 void PlayerVideoRenderer::SetInteractiveMove(const bool enabled) noexcept {
     interactiveMove_.store(enabled, std::memory_order_release);
 }
@@ -1941,7 +1955,20 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
         D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
     D3D_FEATURE_LEVEL selected{};
     ComPtr<IDXGIAdapter1> selectedAdapter;
-    if (window_ != nullptr && IsWindow(window_)) {
+    // An explicitly requested adapter outranks the
+    // monitor match. Any enumeration failure (bad index, no factory) leaves
+    // selectedAdapter null so the built-in policy below still runs — the caller
+    // never sees a hard failure just because a GPU preference could not be honoured.
+    const auto preferredAdapterIndex =
+        preferredAdapterIndex_.load(std::memory_order_acquire);
+    if (preferredAdapterIndex >= 0) {
+        ComPtr<IDXGIFactory6> preferredFactory;
+        if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&preferredFactory)))) {
+            preferredFactory->EnumAdapters1(
+                static_cast<UINT>(preferredAdapterIndex), &selectedAdapter);
+        }
+    }
+    if (!selectedAdapter && window_ != nullptr && IsWindow(window_)) {
         const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
         ComPtr<IDXGIFactory6> factory;
         if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
@@ -1965,6 +1992,35 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
         D3D11_CREATE_DEVICE_BGRA_SUPPORT,
         levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &device_, &selected, &context_);
     if (FAILED(result)) { SetError("Could not create the D3D11 playback device."); return FFFResult::DeviceFailure; }
+
+    // Diagnostic: report which adapter actually backs the device.
+    // Without this there is no way to tell from the outside whether a requested
+    // adapter index was honoured, silently ignored, or fell back to the default
+    // policy — the three cases are indistinguishable in behaviour on a machine
+    // where the default happens to be the same GPU.
+    // Deliberately OutputDebugStringA and not a log-callback extension: that
+    // keeps the diagnostic self-contained with no extra API surface to maintain.
+    {
+        ComPtr<IDXGIDevice> dxgiDevice;
+        ComPtr<IDXGIAdapter> adapter;
+        if (SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) &&
+            SUCCEEDED(dxgiDevice->GetAdapter(&adapter))) {
+            DXGI_ADAPTER_DESC desc{};
+            if (SUCCEEDED(adapter->GetDesc(&desc))) {
+                // Fixed-size stack buffer: EnsureDevice() is noexcept, so a
+                // std::string/std::to_string allocation here would turn an
+                // OutOfMemory into std::terminate instead of a returned error.
+                char line[192]{};
+                _snprintf_s(line, sizeof(line), _TRUNCATE,
+                    "FFF.Native: device adapter requested=%d vendor=0x%04x device=0x%04x luid=%ld:%lu\n",
+                    preferredAdapterIndex, desc.VendorId, desc.DeviceId,
+                    static_cast<long>(desc.AdapterLuid.HighPart),
+                    static_cast<unsigned long>(desc.AdapterLuid.LowPart));
+                OutputDebugStringA(line);
+            }
+        }
+    }
+
     ComPtr<ID3D11Multithread> multithread;
     if (SUCCEEDED(context_->QueryInterface(IID_PPV_ARGS(&multithread)))) multithread->SetMultithreadProtected(TRUE);
     return FFFResult::Success;
@@ -4361,6 +4417,33 @@ FFFResult PlayerVideoRenderer::DrawCoverBackdrop(ID3D11RenderTargetView* target)
     return FFFResult::Success;
 }
 
+FFFResult PlayerVideoRenderer::GetRenderTargetInfo(RenderTargetInfo& info) noexcept {
+    std::lock_guard lock(deviceMutex_);
+    info = {};
+    // Report "not ready" instead of an all-zero Success. A zeroed struct is
+    // indistinguishable from a real 0x0 target, and callers use these numbers to
+    // map pixel-probe coordinates, so a stale/zero swap size would silently
+    // produce wrong probe results rather than a diagnosable failure.
+    if (swapChain_ == nullptr || device_ == nullptr || context_ == nullptr)
+        return FFFResult::InvalidState;
+    info.swapWidth = swapWidth_;
+    info.swapHeight = swapHeight_;
+    info.outputBitDepth = swapOutputBits_.load(std::memory_order_relaxed);
+    info.hdr = swapHdr_;
+    if (window_ != nullptr && IsWindow(window_)) {
+        RECT client{};
+        if (GetClientRect(window_, &client)) {
+            info.clientWidth = static_cast<std::uint32_t>(client.right - client.left);
+            info.clientHeight = static_cast<std::uint32_t>(client.bottom - client.top);
+        }
+    }
+    info.destX = lastDestX_.load(std::memory_order_relaxed);
+    info.destY = lastDestY_.load(std::memory_order_relaxed);
+    info.destWidth = lastDestWidth_.load(std::memory_order_relaxed);
+    info.destHeight = lastDestHeight_.load(std::memory_order_relaxed);
+    return FFFResult::Success;
+}
+
 FFFResult PlayerVideoRenderer::Set360View(const bool enabled, const float yaw,
     const float pitch, const float fovY) noexcept {
     if (!std::isfinite(yaw) || !std::isfinite(pitch) ||
@@ -4461,8 +4544,14 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
     const auto result = DrawWithShader(target, static_cast<float>(destination.x),
         static_cast<float>(destination.y), static_cast<float>(destination.width),
         static_cast<float>(destination.height), 0, presentationViews);
-    if (result == FFFResult::Success)
+    if (result == FFFResult::Success) {
         actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
+        // Record the drawn rect for GetRenderTargetInfo.
+        lastDestX_.store(destination.x, std::memory_order_relaxed);
+        lastDestY_.store(destination.y, std::memory_order_relaxed);
+        lastDestWidth_.store(destination.width, std::memory_order_relaxed);
+        lastDestHeight_.store(destination.height, std::memory_order_relaxed);
+    }
     return result;
 }
 
@@ -4530,6 +4619,113 @@ FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept 
     probe.outputBitDepth = swapOutputBits_;
     probe.colorMode = actualMode_;
     probe.reserved = 0;
+    return FFFResult::Success;
+}
+
+// Batch pixel readback. One staging copy + one Map
+// replaces the per-pixel GPU round trip used by CapturePixelSampled (~14,400
+// serialized flushes for a 320px thumbnail). Returns normalized RGBA floats
+// (range [0,1], scRGB linear for 16-bit output) in row-major order.
+FFFResult PlayerVideoRenderer::ReadPixelRegion(const std::uint32_t x, const std::uint32_t y,
+    const std::uint32_t width, const std::uint32_t height, float* dst,
+    const std::uint32_t dstFloatCount, std::uint32_t* outputBitDepth) noexcept {
+    // Compare in 64-bit: width * height * 4 wraps around for large requests,
+    // which would otherwise let an undersized dst buffer pass this check.
+    if (dst == nullptr || width == 0 || height == 0 ||
+        dstFloatCount < static_cast<std::uint64_t>(width) * height * 4u)
+        return FFFResult::InvalidArgument;
+    std::lock_guard deviceLock(deviceMutex_);
+    if (!hasCachedVideo_ || swapChain_ == nullptr || device_ == nullptr || context_ == nullptr ||
+        x >= swapWidth_ || y >= swapHeight_)
+        return FFFResult::InvalidState;
+    // The header documents dst as a width x height row-major block. Truncating
+    // to the swapchain here used to return Success with a compact row pitch and
+    // untouched tail samples, which the caller cannot detect. Reject instead.
+    // Safe from underflow: x < swapWidth_ and y < swapHeight_ just above.
+    if (width > swapWidth_ - x || height > swapHeight_ - y)
+        return FFFResult::InvalidArgument;
+    std::lock_guard presentLock(presentMutex_);
+    ComPtr<ID3D11Texture2D> backBuffer;
+    ComPtr<ID3D11RenderTargetView> target;
+    const auto targetResult = AcquireBackBufferTarget(
+        backBuffer.GetAddressOf(), target.GetAddressOf());
+    if (targetResult != FFFResult::Success) return targetResult;
+    const auto drawResult = DrawCachedVideo(target.Get());
+    if (drawResult != FFFResult::Success) return drawResult;
+
+    D3D11_TEXTURE2D_DESC description{};
+    backBuffer->GetDesc(&description);
+    const auto sourceFormat = description.Format;
+    if (sourceFormat != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        sourceFormat != DXGI_FORMAT_R10G10B10A2_UNORM &&
+        sourceFormat != DXGI_FORMAT_R16G16B16A16_FLOAT)
+        return FFFResult::NotSupported;
+    // NOTE: this allocates a staging texture per call. Callers are expected to
+    // throttle (the managed side serialises thumbnail requests), so the cost is
+    // acceptable; caching it would add renderer state that must stay in sync
+    // with swap-chain resizes. If readback ever becomes hot, cache it keyed on
+    // (format, width, height) and invalidate on swap-chain re-creation.
+    // Equal to width/height: the bounds check above rejected larger regions.
+    const auto copyWidth = width;
+    const auto copyHeight = height;
+    D3D11_TEXTURE2D_DESC stagingDesc{};
+    stagingDesc.Width = copyWidth;
+    stagingDesc.Height = copyHeight;
+    stagingDesc.MipLevels = stagingDesc.ArraySize = 1;
+    stagingDesc.Format = sourceFormat;
+    stagingDesc.SampleDesc.Count = 1;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(device_->CreateTexture2D(&stagingDesc, nullptr, &staging)))
+        return FFFResult::DeviceFailure;
+    const D3D11_BOX source{x, y, 0, x + copyWidth, y + copyHeight, 1};
+    context_->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, backBuffer.Get(), 0, &source);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+        return FFFResult::DeviceFailure;
+    const auto* srcBytes = static_cast<const std::uint8_t*>(mapped.pData);
+    auto* out = dst;
+    for (std::uint32_t row = 0; row < copyHeight; ++row) {
+        const auto* rowPtr = srcBytes + static_cast<std::size_t>(row) * mapped.RowPitch;
+        if (sourceFormat == DXGI_FORMAT_B8G8R8A8_UNORM) {
+            const auto* bgra = rowPtr;
+            for (std::uint32_t col = 0; col < copyWidth; ++col) {
+                constexpr float scale = 1.0f / 255.0f;
+                out[0] = bgra[2] * scale;
+                out[1] = bgra[1] * scale;
+                out[2] = bgra[0] * scale;
+                out[3] = bgra[3] * scale;
+                bgra += 4; out += 4;
+            }
+        } else if (sourceFormat == DXGI_FORMAT_R10G10B10A2_UNORM) {
+            const auto* packed = reinterpret_cast<const std::uint32_t*>(rowPtr);
+            constexpr float rgbScale = 1.0f / 1023.0f;
+            for (std::uint32_t col = 0; col < copyWidth; ++col) {
+                const auto p = packed[col];
+                out[0] = static_cast<float>(p & 0x3ffu) * rgbScale;
+                out[1] = static_cast<float>((p >> 10) & 0x3ffu) * rgbScale;
+                out[2] = static_cast<float>((p >> 20) & 0x3ffu) * rgbScale;
+                out[3] = static_cast<float>((p >> 30) & 0x3u) / 3.0f;
+                out += 4;
+            }
+        } else { // R16G16B16A16_FLOAT: each channel is HALF (2 bytes), NOT float.
+            // Must convert like the single-pixel ReadPixel does. The previous code
+            // reinterpret_cast to float* and memcpy'd copyWidth*4*sizeof(float) bytes,
+            // which is 2x the real row size => wrong values AND out-of-bounds read.
+            const auto* rgba = reinterpret_cast<const DirectX::PackedVector::HALF*>(rowPtr);
+            for (std::uint32_t col = 0; col < copyWidth; ++col) {
+                out[0] = DirectX::PackedVector::XMConvertHalfToFloat(rgba[col * 4u + 0]);
+                out[1] = DirectX::PackedVector::XMConvertHalfToFloat(rgba[col * 4u + 1]);
+                out[2] = DirectX::PackedVector::XMConvertHalfToFloat(rgba[col * 4u + 2]);
+                out[3] = DirectX::PackedVector::XMConvertHalfToFloat(rgba[col * 4u + 3]);
+                out += 4;
+            }
+        }
+    }
+    context_->Unmap(staging.Get(), 0);
+    if (outputBitDepth != nullptr) *outputBitDepth = swapOutputBits_;
     return FFFResult::Success;
 }
 

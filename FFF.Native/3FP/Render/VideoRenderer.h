@@ -115,10 +115,34 @@ public:
     ~PlayerVideoRenderer();
 
     FFFResult SetWindow(HWND window) noexcept;
+    // Choose which DXGI adapter creates the D3D11 device.
+    // index = -1 (default) keeps the built-in policy: the adapter driving the monitor
+    // that contains the output window. index >= 0 is used as the argument of
+    // IDXGIFactory1::EnumAdapters1. Takes effect on the next device creation
+    // (EnsureDevice), including device-loss recovery.
+    // Out-of-range / non-enumerable indices silently fall back to the built-in policy.
+    FFFResult SetPreferredAdapterIndex(std::int32_t index) noexcept;
     void SetDiscAspect(double aspect) noexcept { discAspect_.store(static_cast<float>(aspect)); }
     void SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
+    // Render-target diagnostics for the managed API surface
+    // (PlayerApi exports FFF3FP_GetRenderTargetInfo). Reports the current
+    // swap-chain / client / video-destination sizes so the App can position
+    // overlays and map pixel-probe coordinates without guessing.
+    struct RenderTargetInfo {
+        std::uint32_t swapWidth = 0;
+        std::uint32_t swapHeight = 0;
+        std::uint32_t clientWidth = 0;
+        std::uint32_t clientHeight = 0;
+        std::uint32_t destX = 0;
+        std::uint32_t destY = 0;
+        std::uint32_t destWidth = 0;
+        std::uint32_t destHeight = 0;
+        std::uint32_t outputBitDepth = 0;
+        bool hdr = false;
+    };
+    FFFResult GetRenderTargetInfo(RenderTargetInfo& info) noexcept;
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput = false) noexcept;
@@ -130,6 +154,10 @@ public:
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     FFFResult PresentTimedText() noexcept;
     FFFResult ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept;
+    // Batch pixel readback (single GPU staging copy).
+    FFFResult ReadPixelRegion(std::uint32_t x, std::uint32_t y,
+        std::uint32_t width, std::uint32_t height, float* dst,
+        std::uint32_t dstFloatCount, std::uint32_t* outputBitDepth) noexcept;
     FFFResult CopySdrFrame(void* pixels, std::uint32_t capacity, std::uint32_t& width,
         std::uint32_t& height, bool discOnly) noexcept;
     FFFResult SetTimedTextLayer(TimedTextRenderLayer layer, TimedTextLayerSlot slot) noexcept;
@@ -281,6 +309,12 @@ private:
     void SetError(std::string message) noexcept;
 
     HWND window_;
+    // -1 = auto (adapter driving the window's monitor). See
+    // SetPreferredAdapterIndex. Atomic because it is written by
+    // SetPreferredAdapterIndex() (which any thread may call) and read by
+    // EnsureDevice() on the render path. The device is created lazily and
+    // re-created on device loss, so the preference must survive both.
+    std::atomic<std::int32_t> preferredAdapterIndex_{ -1 };
     ID3D11Device* device_;
     ID3D11DeviceContext* context_;
     IDXGISwapChain4* swapChain_;
@@ -342,6 +376,12 @@ private:
     bool swapHdr_;
     bool swapAllowTearing_;
     std::atomic<std::uint32_t> swapOutputBits_;
+    // Last drawn video destination rect (diagnostics),
+    // recorded by DrawCachedVideo after each successful shader draw.
+    std::atomic<std::uint32_t> lastDestX_{ 0 };
+    std::atomic<std::uint32_t> lastDestY_{ 0 };
+    std::atomic<std::uint32_t> lastDestWidth_{ 0 };
+    std::atomic<std::uint32_t> lastDestHeight_{ 0 };
     std::uint32_t sourceWidth_;
     std::uint32_t sourceHeight_;
     std::uint32_t sourceInputLayout_;
