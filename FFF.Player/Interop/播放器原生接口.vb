@@ -30,6 +30,9 @@ Friend Structure 原生播放器配置
     Public 回调上下文 As IntPtr
     Public 视频缩放质量 As UInteger
     Public 强制HDR输出 As UInteger
+    ' API 15 新增：指定由哪个 DXGI 适配器创建 D3D11 设备；-1 保持原有策略。
+    ' 必须追加在结构体末尾，否则字段偏移与内核不一致（结构体 72 -> 80 字节）。
+    Public 首选适配器索引 As Integer
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>

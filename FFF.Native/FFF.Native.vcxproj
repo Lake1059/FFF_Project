@@ -217,6 +217,9 @@
     </ClCompile>
     <ClCompile Include="3FR\Timeline\QpcTimeline.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="FFF.Native.rc" />
+  </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Platform)'=='x64'">
     <Link>
       <AdditionalDependencies>bluray.lib;%(AdditionalDependencies)</AdditionalDependencies>

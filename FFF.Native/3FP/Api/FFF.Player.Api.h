@@ -106,6 +106,16 @@ struct FFF3FPConfiguration {
     void* eventCallbackContext;
     FFF3FPVideoScalingQuality videoScalingQuality;
     std::uint32_t forceHdrOutput;
+    // Preferred DXGI adapter index for the D3D11 device.
+    // Use -1 (or any negative value) to keep the built-in policy: pick the adapter
+    // that drives the monitor containing the output window. The index matches
+    // IDXGIFactory1::EnumAdapters1 — the enumeration the managed side must use so
+    // both sides agree on "which adapter is #1".
+    // Out-of-range or failed enumeration falls back to the built-in policy.
+    // NOTE: 0 is a valid adapter index, NOT "unset". A host that leaves this
+    // field zeroed therefore pins playback to adapter #0 and silently overrides
+    // the monitor match, so every caller must initialise it to -1 explicitly.
+    std::int32_t preferredAdapterIndex = -1;
 };
 
 struct FFF3FPSnapshot {
@@ -483,6 +493,15 @@ FFF3FP_API FFFResult FFF3FP_SetTimedTextLayer(FFF3FPHandle player,
 FFF3FP_API FFFResult FFF3FP_GetSnapshot(FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept;
 FFF3FP_API FFFResult FFF3FP_ReadVideoPixel(FFF3FPHandle player,
     FFF3FPVideoPixelProbe* probe) noexcept;
+// Batch pixel readback. Samples a rectangular region
+// of the presented frame in ONE staging copy + Map instead of one GPU round
+// trip per pixel. dst receives w*h RGBA32F samples (row-major, premultiplied
+// order R,G,B,A), normalized exactly like FFF3FPVideoPixelProbe fields.
+// Returns the actual output bit depth via outputBitDepth.
+FFF3FP_API FFFResult FFF3FP_ReadVideoPixelRegion(FFF3FPHandle player,
+    std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint32_t height,
+    float* dst, std::uint32_t dstFloatCount,
+    std::uint32_t* outputBitDepth) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetAudioPeakLevels(FFF3FPHandle player,
     FFF3FPAudioPeakLevels* levels) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetTimedTextStatus(FFF3FPHandle player,
@@ -508,6 +527,28 @@ FFF3FP_API FFFResult FFF3FP_GetMediaInfo(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
+// Render-target diagnostics. RenderTargetInfo reports the
+// current swapchain/client/destination sizes (for App-side overlay positioning
+// and pixel-probe coordinate mapping).
+// Returns InvalidState when no swapchain exists yet (e.g. before the first
+// frame is presented); the contents of *info are then unspecified and must not
+// be interpreted as a 0x0 target.
+struct FFF3FPRenderTargetInfo {
+    std::uint32_t size;
+    std::uint32_t version; // == 1
+    std::uint32_t swapWidth;
+    std::uint32_t swapHeight;
+    std::uint32_t clientWidth;
+    std::uint32_t clientHeight;
+    std::uint32_t destX;
+    std::uint32_t destY;
+    std::uint32_t destWidth;
+    std::uint32_t destHeight;
+    std::uint32_t outputBitDepth;
+    std::uint32_t hdr;
+};
+FFF3FP_API FFFResult FFF3FP_GetRenderTargetInfo(FFF3FPHandle player,
+    FFF3FPRenderTargetInfo* info) noexcept;
 FFF3FP_API void FFF3FP_Destroy(FFF3FPHandle player) noexcept;
 
 FFF3FP_API FFFResult FFF3FP_OpenBitmapSubtitle(const char* localPathUtf8,
