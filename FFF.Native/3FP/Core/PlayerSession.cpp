@@ -3247,7 +3247,11 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                  << ",\"dolbyVisionEnhancementLayer\":\""
                  << EscapeJson(HdrProcessor::EnhancementLayerName(hdr.enhancementLayer)) << "\""
                  << ",\"hdrFallback\":" << (hdr.fallback ? "true" : "false")
-                 << ",\"dynamicHdrMetadata\":" << (hdr.dynamicMetadata ? "true" : "false");
+                 << ",\"dynamicHdrMetadata\":" << (hdr.dynamicMetadata ? "true" : "false")
+                 << ",\"externalColorExtensionAvailable\":"
+                 << (hdr.externalExtensionAvailable ? "true" : "false")
+                 << ",\"externalColorExtensionActive\":"
+                 << (hdr.externalExtensionActive ? "true" : "false");
             if (masteringData != nullptr && masteringData->size >= sizeof(AVMasteringDisplayMetadata)) {
                 const auto* mastering = reinterpret_cast<const AVMasteringDisplayMetadata*>(masteringData->data);
                 std::string primaries;

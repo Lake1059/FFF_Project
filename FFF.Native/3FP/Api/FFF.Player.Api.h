@@ -58,6 +58,7 @@ enum class FFF3FPHdrProcessingPath : std::uint32_t {
     DolbyVisionHdr10Fallback = 4,
     DolbyVisionFelFallback = 5,
     HdrVividDynamic = 6,
+    ExternalDynamic = 7,
 };
 
 enum class FFF3FPDolbyVisionEnhancementLayer : std::uint32_t {
@@ -426,6 +427,8 @@ struct FFF3FPVideoPixelProbe {
 #endif
 
 FFF3FP_API std::uint32_t FFF3FP_GetApiVersion() noexcept;
+FFF3FP_API std::int32_t FFF3FP_GetColorExtensionStatus() noexcept;
+FFF3FP_API FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept;
 FFF3FP_API FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration,
     FFF3FPHandle* player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Open(FFF3FPHandle player, const char* localPathUtf8) noexcept;

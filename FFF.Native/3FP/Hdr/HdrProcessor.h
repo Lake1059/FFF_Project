@@ -47,6 +47,8 @@ struct HdrFrameState {
         FFF3FPDolbyVisionEnhancementLayer::None;
     bool dynamicMetadata = false;
     bool fallback = false;
+    bool externalExtensionAvailable = false;
+    bool externalExtensionActive = false;
     float sourcePeakNits = 100.0f;
     float targetPeakNits = 1000.0f;
     HdrStaticMetadata staticMetadata;
@@ -66,6 +68,8 @@ public:
     void Reset() noexcept;
 
     HdrFrameState State() const noexcept;
+    void SetExtensionAvailability(bool available) noexcept;
+    void SetExtensionProcessing(float sourcePeakNits, bool active) noexcept;
     bool IsHdrSource() const noexcept;
     bool RequiresMetadataAwareShader() const noexcept;
     void BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) const noexcept;

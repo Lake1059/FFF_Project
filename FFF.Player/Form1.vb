@@ -36,6 +36,7 @@ Public Class Form1
     Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
+    Private 媒体信息窗口 As Form媒体信息
     Private ReadOnly 播放列表数据 As New 播放列表 With {.播放模式 = 列表播放模式.顺序播放}
     Private 播放列表窗口 As Form播放列表
     Private 当前弹幕路径 As String = String.Empty
@@ -304,6 +305,10 @@ Public Class Form1
             Return
         End If
 
+        ' The owner form is already visible here, so the optional test
+        ' authorization dialog is modal to the actual player window.
+        杜比视界测试授权.初始化(Me)
+
         Dim 启动文件 = My.Application.取出待处理启动文件()
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
         待打开外部文件 = String.Empty
@@ -325,6 +330,8 @@ Public Class Form1
         弹幕图层呈现器?.释放()
         字幕图层呈现器?.释放()
         流选择器?.Dispose()
+        媒体信息窗口?.Close()
+        媒体信息窗口 = Nothing
         播放列表窗口?.Dispose()
         显示器唤醒?.释放()
         播放控制器?.释放()
@@ -526,18 +533,29 @@ Public Class Form1
     End Sub
 
     Private Sub 显示媒体信息窗口()
-        Dim 窗口 As New Form媒体信息(
-            AddressOf 播放控制器.安全读取媒体信息,
-            AddressOf 播放控制器.安全读取快照,
-            AddressOf 播放控制器.读取定时文字状态,
-            AddressOf 播放控制器.读取弹幕状态,
-            Function() 播放控制器.当前字幕,
-            Function() 播放控制器.当前弹幕,
-            Function() 播放控制器.WASAPI模式,
-            Function() 画面控件.ClientSize,
-            AddressOf 播放控制器.读取音频峰值)
-        窗口.Location = 窗口.居中于(Bounds)
-        窗口.Show()
+        If 媒体信息窗口 Is Nothing OrElse 媒体信息窗口.IsDisposed Then
+            媒体信息窗口 = New Form媒体信息(
+                AddressOf 播放控制器.安全读取媒体信息,
+                AddressOf 播放控制器.安全读取快照,
+                AddressOf 播放控制器.读取定时文字状态,
+                AddressOf 播放控制器.读取弹幕状态,
+                Function() 播放控制器.当前字幕,
+                Function() 播放控制器.当前弹幕,
+                Function() 播放控制器.WASAPI模式,
+                Function() 画面控件.ClientSize,
+                AddressOf 播放控制器.读取音频峰值)
+            AddHandler 媒体信息窗口.FormClosed,
+                Sub(sender, args)
+                    If Object.ReferenceEquals(sender, 媒体信息窗口) Then 媒体信息窗口 = Nothing
+                End Sub
+        End If
+        媒体信息窗口.Location = 媒体信息窗口.居中于(Bounds)
+        If 媒体信息窗口.WindowState = FormWindowState.Minimized Then
+            媒体信息窗口.WindowState = FormWindowState.Normal
+        End If
+        If Not 媒体信息窗口.Visible Then 媒体信息窗口.Show(Me)
+        媒体信息窗口.Activate()
+        媒体信息窗口.BringToFront()
     End Sub
 
     Private Sub 切换媒体信息层()

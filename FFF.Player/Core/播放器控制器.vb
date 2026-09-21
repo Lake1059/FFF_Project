@@ -1502,7 +1502,9 @@ Public NotInheritable Class 播放器控制器
         Select Case 快照.HDR规格
             Case HDR格式.HDR10Plus : Return "HDR10+"
             Case HDR格式.HLG : Return "HLG"
-            Case HDR格式.杜比视界 : Return "Dolby Vision 基础层 → HDR10"
+            Case HDR格式.杜比视界
+                Return If(快照.HDR处理路径 = HDR处理路径.外部RPU处理,
+                    "Dolby Vision RPU → scRGB（测试）", "Dolby Vision 基础层 → HDR10")
             Case HDR格式.HDRVivid : Return "HDR Vivid"
             Case Else : Return "HDR10"
         End Select

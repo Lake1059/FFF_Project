@@ -286,6 +286,10 @@ private:
     IDXGISwapChain4* swapChain_;
     ID3D11VertexShader* vertexShader_;
     ID3D11PixelShader* pixelShader_;
+    ID3D11PixelShader* extensionShader_ = nullptr;
+    ID3D11Buffer* extensionConstants_ = nullptr;
+    bool extensionAttempted_ = false;
+    bool extensionEligible_ = false;
     ID3D11PixelShader* coverBackdropPixelShader_;
     ID3D11PixelShader* timedTextPixelShader_;
     ID3D11PixelShader* scalePixelShader_;

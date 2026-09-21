@@ -39,6 +39,7 @@ Public Enum HDR处理路径 As UInteger
     杜比视界兼容基础层回退 = 4
     杜比视界FEL基础层回退 = 5
     HDRVivid动态映射 = 6
+    外部RPU处理 = 7
 End Enum
 
 Public Enum 杜比视界增强层类型 As UInteger
@@ -588,6 +589,10 @@ Public NotInheritable Class 媒体流信息
     Public Property HDR回退 As Boolean
     <JsonPropertyName("dynamicHdrMetadata")>
     Public Property 动态HDR元数据 As Boolean
+    <JsonPropertyName("externalColorExtensionAvailable")>
+    Public Property 外部RPU扩展可用 As Boolean
+    <JsonPropertyName("externalColorExtensionActive")>
+    Public Property 外部RPU扩展已启用 As Boolean
     <JsonPropertyName("masteringPrimaries")>
     Public Property 主显示器色域 As String = String.Empty
     <JsonPropertyName("masteringMinLuminance")>

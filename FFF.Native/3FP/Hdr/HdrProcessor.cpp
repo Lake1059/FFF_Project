@@ -365,6 +365,50 @@ HdrFrameState HdrProcessor::State() const noexcept {
 
 bool HdrProcessor::IsHdrSource() const noexcept { return State().format != FFF3FPHdrFormat::Sdr; }
 
+void HdrProcessor::SetExtensionAvailability(const bool available) noexcept {
+    std::lock_guard lock(mutex_);
+    streamState_.externalExtensionAvailable = available;
+    frameState_.externalExtensionAvailable = available;
+    if (!available) {
+        streamState_.externalExtensionActive = false;
+        frameState_.externalExtensionActive = false;
+    }
+}
+
+void HdrProcessor::SetExtensionProcessing(const float sourcePeakNits, const bool active) noexcept {
+    std::lock_guard lock(mutex_);
+    streamState_.externalExtensionActive = active;
+    frameState_.externalExtensionActive = active;
+    if (!active) {
+        if (frameState_.processingPath == FFF3FPHdrProcessingPath::ExternalDynamic)
+            frameState_.dynamicMetadata = false;
+        if (streamState_.processingPath == FFF3FPHdrProcessingPath::ExternalDynamic)
+            streamState_.dynamicMetadata = false;
+        if (frameState_.format == FFF3FPHdrFormat::DolbyVision &&
+            frameState_.processingPath == FFF3FPHdrProcessingPath::ExternalDynamic) {
+            frameState_.processingPath = frameState_.hasEnhancementLayer &&
+                frameState_.enhancementLayer == FFF3FPDolbyVisionEnhancementLayer::Fel
+                ? FFF3FPHdrProcessingPath::DolbyVisionFelFallback
+                : FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback;
+            frameState_.fallback = true;
+        }
+        if (streamState_.format == FFF3FPHdrFormat::DolbyVision &&
+            streamState_.processingPath == FFF3FPHdrProcessingPath::ExternalDynamic) {
+            streamState_.processingPath = FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback;
+            streamState_.fallback = true;
+        }
+        return;
+    }
+    frameState_.processingPath = FFF3FPHdrProcessingPath::ExternalDynamic;
+    frameState_.dynamicMetadata = true;
+    frameState_.fallback = false;
+    streamState_.processingPath = FFF3FPHdrProcessingPath::ExternalDynamic;
+    streamState_.dynamicMetadata = true;
+    streamState_.fallback = false;
+    if (std::isfinite(sourcePeakNits) && sourcePeakNits > 0.0f)
+        frameState_.sourcePeakNits = std::clamp(sourcePeakNits, 1.0f, 10000.0f);
+}
+
 bool HdrProcessor::RequiresMetadataAwareShader() const noexcept {
     const auto state = State();
     return state.dynamicMetadata || state.format == FFF3FPHdrFormat::Hlg ||
@@ -432,6 +476,7 @@ const char* HdrProcessor::ProcessingPathName(const FFF3FPHdrProcessingPath path)
     case FFF3FPHdrProcessingPath::Hdr10PlusDynamic: return "HDR10+ metadata-guided display mapping";
     case FFF3FPHdrProcessingPath::HlgDisplayMapped: return "HLG display mapping";
     case FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback: return "Dolby Vision source -> HDR10-compatible fallback";
+    case FFF3FPHdrProcessingPath::ExternalDynamic: return "External RPU processing -> SDR/scRGB (experimental)";
     case FFF3FPHdrProcessingPath::DolbyVisionFelFallback: return "Dolby Vision BL -> HDR10 fallback (FEL ignored)";
     case FFF3FPHdrProcessingPath::HdrVividDynamic: return "HDR Vivid metadata-guided display mapping";
     default: return "None";

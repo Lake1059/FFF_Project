@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "3FP/Render/VideoRenderer.h"
 #include "3FP/Render/ShaderBytecode.h"
+#include "3FP/Render/ColorExtension.h"
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -502,6 +503,9 @@ float3 ReadSource(float2 uv) {
     float2 chroma=InputLayout==1
         ?float2(SampleVideo(ChromaU,chromaUv).r,SampleVideo(ChromaV,chromaUv).r)*SampleScale
         :SampleVideo(ChromaU,chromaUv).rg*SampleScale;
+#ifdef FFF_COLOR_EXTENSION
+    if(ExtensionEnabled!=0&&ColorMode!=1)return ExtensionDecode(float3(y,chroma));
+#endif
     y=(y-YOffset)*YScale;
     chroma=(chroma-COffset)*CScale;
     float kg=1.0-Kr-Kb;
@@ -517,6 +521,9 @@ float3 ReadSourceLinear(float2 uv) {
         ?float2(ChromaU.Sample(LinearSampler,chromaUv).r,
                 ChromaV.Sample(LinearSampler,chromaUv).r)*SampleScale
         :ChromaU.Sample(LinearSampler,chromaUv).rg*SampleScale;
+#ifdef FFF_COLOR_EXTENSION
+    if(ExtensionEnabled!=0&&ColorMode!=1)return ExtensionDecode(float3(y,chroma));
+#endif
     y=(y-YOffset)*YScale;
     chroma=(chroma-COffset)*CScale;
     float kg=1.0-Kr-Kb;
@@ -544,6 +551,9 @@ float3 ReadSourcePanorama(float2 uv) {
         ?float2(SamplePanorama(ChromaU,chromaUv).r,
                 SamplePanorama(ChromaV,chromaUv).r)*SampleScale
         :SamplePanorama(ChromaU,chromaUv).rg*SampleScale;
+#ifdef FFF_COLOR_EXTENSION
+    if(ExtensionEnabled!=0&&ColorMode!=1)return ExtensionDecode(float3(y,chroma));
+#endif
     y=(y-YOffset)*YScale;
     chroma=(chroma-COffset)*CScale;
     float kg=1.0-Kr-Kb;
@@ -1916,6 +1926,9 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
 
 void PlayerVideoRenderer::ConfigureHdrStream(const AVCodecParameters* parameters) noexcept {
     hdrProcessor_.ConfigureStream(parameters);
+    hdrProcessor_.SetExtensionAvailability(IsColorExtensionAuthorized());
+    extensionAttempted_ = false;
+    extensionEligible_ = false;
 }
 
 FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
@@ -2348,6 +2361,26 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             SetError("Could not create the presentation shader resources."); return FFFResult::DeviceFailure;
         }
     }
+    // Do not make ordinary SDR playback pay for private test shader setup.
+    // Stream classification is already updated by ProcessFrame before the
+    // pipeline is requested, and late RPU side data will retry on that frame.
+    if (!extensionAttempted_ && extensionEligible_) {
+        extensionAttempted_ = true;
+        if (const auto* api = GetColorExtension()) {
+            D3D11_BUFFER_DESC desc{};
+            desc.ByteWidth = api->constantsSize;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            const unsigned char zero[FFFColorExtensionCapacity]{};
+            D3D11_SUBRESOURCE_DATA initial{};
+            initial.pSysMem = zero;
+            if (FAILED(device_->CreatePixelShader(api->shaderBytecode,
+                    api->shaderBytecodeSize, nullptr, &extensionShader_)) ||
+                FAILED(device_->CreateBuffer(&desc, &initial, &extensionConstants_))) {
+                if (extensionShader_) { extensionShader_->Release(); extensionShader_ = nullptr; }
+            }
+        }
+    }
     if (sourceTextures_[0] != nullptr && sourceExternal_ == externalSource &&
         sourceWidth_ == sourceWidth && sourceHeight_ == sourceHeight &&
         sourceInputLayout_ == inputLayout && sourceBitDepth_ == bitDepth &&
@@ -2608,7 +2641,8 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     context_->IASetInputLayout(nullptr);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(vertexShader_, nullptr, 0);
-    context_->PSSetShader(pixelShader_, nullptr, 0);
+    context_->PSSetShader(extensionShader_ ? extensionShader_ : pixelShader_, nullptr, 0);
+    context_->PSSetConstantBuffers(1, 1, &extensionConstants_);
     context_->PSSetConstantBuffers(0, 1, &constants_);
     ID3D11SamplerState* samplers[] = {sampler_, pointSampler_, panoramaSampler_};
     context_->PSSetSamplers(0, ARRAYSIZE(samplers), samplers);
@@ -3876,6 +3910,8 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     const auto height = static_cast<std::uint32_t>(frame->height);
     const auto hdrState = hdrProcessor_.ProcessFrame(
         frame, hdrPeakNits_, paperWhiteNits_);
+    extensionEligible_ = hdrState.format == FFF3FPHdrFormat::DolbyVision &&
+        av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA) != nullptr;
     const auto source2020 = hdrState.format != FFF3FPHdrFormat::Sdr || IsRec2020(frame);
     auto input = DescribeInput(static_cast<AVPixelFormat>(frame->format));
     const auto d3d11Frame = frame->format == AV_PIX_FMT_D3D11;
@@ -3950,6 +3986,26 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     const auto pipelineResult = EnsurePipeline(width, height, input.layout, input.bitDepth,
         input.chromaWidthShift, input.chromaHeightShift, d3d11Frame);
     if (pipelineResult != FFFResult::Success) return pipelineResult;
+    if (extensionShader_ && extensionConstants_) {
+        FFFColorExtensionOutput output{};
+        output.size = sizeof(output);
+        bool applied = false;
+        const auto* metadata = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
+        if (directYuv && metadata && actualMode_ != FFF3FPColorMode::RawHdrAsSdr) {
+            const FFFColorExtensionInput request{sizeof(FFFColorExtensionInput),
+                FFFColorExtensionVersion, avutil_version(), hdrState.dolbyVisionProfile,
+                metadata->data, metadata->size};
+            applied = GetColorExtension()->prepare(&request, &output) != 0;
+        }
+        if (!applied) std::memset(output.constants, 0, sizeof(output.constants));
+        context_->UpdateSubresource(extensionConstants_, 0, nullptr, output.constants, 0, 0);
+        hdrProcessor_.SetExtensionProcessing(output.sourcePeakNits, applied);
+        if (applied) {
+            if (swapHdr_) SetHdrMetadata();
+        }
+    } else {
+        hdrProcessor_.SetExtensionProcessing(0.0f, false);
+    }
     if (d3d11Frame) {
         auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
         const auto slice = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
@@ -3981,7 +4037,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
     settings.source2020 = source2020 ? 1u : 0u;
     settings.sdrPeak = sdrPeakNits_;
-    settings.hdrPeak = settings.transfer == 0 ? 100.0f : hdrState.sourcePeakNits;
+    settings.hdrPeak = settings.transfer == 0 ? 100.0f : hdrProcessor_.State().sourcePeakNits;
     sourcePeakNits_ = settings.hdrPeak;
     settings.paperWhite = paperWhiteNits_;
     settings.targetPeak = hdrState.targetPeakNits;
@@ -4727,6 +4783,10 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     if (panoramaSampler_ != nullptr) { panoramaSampler_->Release(); panoramaSampler_ = nullptr; }
     if (sampler_ != nullptr) { sampler_->Release(); sampler_ = nullptr; }
     if (pixelShader_ != nullptr) { pixelShader_->Release(); pixelShader_ = nullptr; }
+    if (extensionShader_) { extensionShader_->Release(); extensionShader_ = nullptr; }
+    if (extensionConstants_) { extensionConstants_->Release(); extensionConstants_ = nullptr; }
+    extensionAttempted_ = false;
+    extensionEligible_ = false;
     if (scalePixelShader_ != nullptr) { scalePixelShader_->Release(); scalePixelShader_ = nullptr; }
     if (coverBackdropPixelShader_ != nullptr) {
         coverBackdropPixelShader_->Release(); coverBackdropPixelShader_ = nullptr;

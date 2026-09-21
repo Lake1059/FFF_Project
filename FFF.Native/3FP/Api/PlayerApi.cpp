@@ -2,6 +2,7 @@
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Render/VideoRenderer.h"
+#include "3FP/Render/ColorExtension.h"
 
 #include <cmath>
 
@@ -18,7 +19,23 @@ FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t o
 }
 }
 
-std::uint32_t FFF3FP_GetApiVersion() noexcept { return PlayerApiVersion; }
+std::uint32_t FFF3FP_GetApiVersion() noexcept {
+    (void)GetColorExtension();
+    return PlayerApiVersion;
+}
+
+std::int32_t FFF3FP_GetColorExtensionStatus() noexcept {
+    const auto* api = GetColorExtension();
+    return api == nullptr ? 0 : api->getAuthorizationStatus();
+}
+
+FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept {
+    const auto* api = GetColorExtension();
+    if (api == nullptr || codeUtf8 == nullptr)
+        return FFFResult::InvalidArgument;
+    return api->authenticate(codeUtf8) == 1
+        ? FFFResult::Success : FFFResult::NotSupported;
+}
 
 FFFResult FFF3FP_EvaluateHdrProcessing(FFF3FPHdrProcessingProbe* probe) noexcept {
     return probe == nullptr ? FFFResult::InvalidArgument : HdrProcessor::EvaluateProbe(*probe);

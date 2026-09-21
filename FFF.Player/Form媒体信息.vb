@@ -162,7 +162,16 @@ Public Class Form媒体信息
                         添加条目(group, "Dolby Vision", $"Profile {流.杜比视界配置档次} / Level {流.杜比视界级别}")
                         添加条目(group, "Dolby Vision 层结构", 合并杜比层信息(流))
                     End If
-                    添加条目如果有值(group, "HDR 处理路径", 流.HDR处理说明)
+                    添加条目如果有值(group, "HDR 处理路径",
+                        If(快照 IsNot Nothing AndAlso 快照.当前视频流 = 流.索引 AndAlso
+                           快照.HDR处理路径 = HDR处理路径.外部RPU处理,
+                           "外部 RPU 重塑 → SDR/scRGB（测试）",
+                           If(流.外部RPU扩展可用,
+                              "外部 RPU 扩展已加载，等待首帧（测试）", 流.HDR处理说明)))
+                    If 流.外部RPU扩展可用 Then
+                        添加条目(group, "Dolby Vision 测试扩展",
+                            If(流.外部RPU扩展已启用, "已启用", "已加载，尚未处理当前帧"))
+                    End If
                     If 快照 IsNot Nothing AndAlso 快照.当前视频流 = 流.索引 Then
                         添加条目(group, "动态 HDR 元数据", If(快照.动态HDR元数据有效, "逐帧有效", "无或未用于输出"))
                         If 快照.实际色彩模式 = 色彩输出模式.峰值映射HDR Then
@@ -171,13 +180,13 @@ Public Class Form媒体信息
                             End If
                             If 快照.HDR有效目标峰值尼特 > 0 Then 添加条目(group, "HDR 有效目标", $"{快照.HDR有效目标峰值尼特:0} cd/m²")
                         End If
-                        If 快照.HDR回退有效 Then
+                        If 快照.HDR回退有效 AndAlso Not 流.外部RPU扩展可用 Then
                             Dim 回退说明 = If(快照.杜比视界增强层类型 = 杜比视界增强层类型.FEL,
                                 "HDR10 兼容输出（未使用 RPU，FEL 已忽略）",
                                 "HDR10 兼容输出（未使用 RPU）")
                             添加条目(group, "HDR 回退", 回退说明)
                         End If
-                    ElseIf 流.HDR回退 Then
+                    ElseIf 流.HDR回退 AndAlso Not 流.外部RPU扩展可用 Then
                         添加条目(group, "HDR 回退", "是")
                     End If
                     添加条目(group, "编码 ID", 空值(流.编码标签, 流.编码))

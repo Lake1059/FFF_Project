@@ -15,9 +15,9 @@
       <!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
       <Authors>1059 Studio</Authors>
       <Company>1059 Studio</Company>
-      <AssemblyVersion>2026.9.14</AssemblyVersion>
-      <FileVersion>2026.9.14</FileVersion>
-      <Version>2026.9.14</Version>
+      <AssemblyVersion>2026.9.21</AssemblyVersion>
+      <FileVersion>2026.9.21</FileVersion>
+      <Version>2026.9.21</Version>
       <Title>FFF.Player</Title>
       <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
       <ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
@@ -96,6 +96,13 @@
       <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
     </Content>
   </ItemGroup>
+
+  <Target Name="RejectPrivateColorExtensionPublish" AfterTargets="ComputeFilesToPublish" BeforeTargets="GenerateSingleFileBundle">
+    <ItemGroup>
+      <PrivateColorExtension Include="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == 'FFF.DolbyVision.Test.dll'" />
+    </ItemGroup>
+    <Error Condition="'@(PrivateColorExtension)' != ''" Text="The private Dolby Vision test DLL must never be published or bundled." />
+  </Target>
 
   <Target Name="CopyNativeRuntime" AfterTargets="Build">
     <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />

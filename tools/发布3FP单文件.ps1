@@ -13,6 +13,9 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $ProjectRoot $OutputDirectory
 }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
+if (Test-Path -LiteralPath (Join-Path $OutputDirectory "FFF.DolbyVision.Test.dll")) {
+    throw "The release destination contains the private Dolby Vision test DLL. Use a clean release directory."
+}
 . (Join-Path $ScriptDirectory "Resolve-Toolchain.ps1")
 $MSBuild = Get-MSBuildTool
 $DotNet = Get-DotNetTool
