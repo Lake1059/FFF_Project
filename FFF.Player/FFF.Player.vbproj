@@ -122,6 +122,10 @@
 
   <ItemGroup>
     <Compile Remove="UI\播放器画面控件.vb" />
+    <EmbeddedResource Remove="F:\Git\3F_Project\tools\..\third_party\vcpkg_installed\x64-windows\share\libbluray\copyright" />
+    <EmbeddedResource Remove="F:\Git\3F_Project\tools\..\third_party\vcpkg_installed\x64-windows\share\libiconv\copyright" />
+    <EmbeddedResource Remove="F:\Git\3F_Project\tools\..\third_party\vcpkg_installed\x64-windows\share\libudfread\copyright" />
+    <EmbeddedResource Remove="F:\Git\3F_Project\tools\..\third_party\vcpkg_installed\x64-windows\share\libxml2\copyright" />
     <Compile Include="UI\播放器画面控件.vb">
       <SubType>Code</SubType>
     </Compile>

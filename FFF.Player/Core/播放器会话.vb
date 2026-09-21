@@ -45,6 +45,8 @@ Public NotInheritable Class 播放器会话
         Dim 端点指针 = IntPtr.Zero
         Try
             If Not String.IsNullOrEmpty(配置.音频端点标识) Then 端点指针 = Marshal.StringToCoTaskMemUTF8(配置.音频端点标识)
+            ' 首选适配器索引 -1 = 保持内核内置策略（按输出窗口所在显示器选卡）。
+            ' 0 是合法的适配器索引，不是"未设置"，因此必须显式赋值。
             Dim 原生配置 As New 原生播放器配置 With {
                 .大小 = 原生播放器配置大小, .版本 = 15UI,
                 .输出窗口 = 配置.输出窗口句柄, .解码器 = CUInt(配置.解码器),
@@ -55,8 +57,6 @@ Public NotInheritable Class 播放器会话
                 .回调上下文 = GCHandle.ToIntPtr(回调句柄),
                 .视频缩放质量 = CUInt(配置.缩放质量),
                 .强制HDR输出 = If(配置.强制HDR输出, 1UI, 0UI),
-                ' -1 = 保持内核内置策略（按输出窗口所在显示器选卡）。
-                ' 0 是合法的适配器索引，不是"未设置"，因此必须显式赋值。
                 .首选适配器索引 = -1
             }
             Dim 原生指针 = IntPtr.Zero
