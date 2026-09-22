@@ -365,17 +365,17 @@ std::int64_t EstimateDuration100ns(const AVFormatContext* format) noexcept {
     return av_rescale(fileSize, 8 * TicksPerSecond, bitRate);
 }
 
-std::int32_t FindTimedVideoStream(AVFormatContext* format) noexcept {
+std::int32_t FindDefaultOrFirstStream(AVFormatContext* format, AVMediaType type) noexcept {
     if (format == nullptr) return -1;
-    const auto best = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (best >= 0 && (format->streams[best]->disposition & AV_DISPOSITION_ATTACHED_PIC) == 0)
-        return best;
+    std::int32_t first = -1;
     for (unsigned index = 0; index < format->nb_streams; ++index) {
         const auto* stream = format->streams[index];
-        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
-            (stream->disposition & AV_DISPOSITION_ATTACHED_PIC) == 0) return static_cast<std::int32_t>(index);
+        if (stream->codecpar->codec_type != type ||
+            (type == AVMEDIA_TYPE_VIDEO && (stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0)) continue;
+        if (first < 0) first = static_cast<std::int32_t>(index);
+        if ((stream->disposition & AV_DISPOSITION_DEFAULT) != 0) return static_cast<std::int32_t>(index);
     }
-    return -1;
+    return first;
 }
 
 std::int32_t FindCoverArtStream(AVFormatContext* format) noexcept {
@@ -2002,10 +2002,10 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         } catch (...) { openResult = FFFResult::NativeFailure; openError = "Could not open the disc."; }
     } else openResult = OpenFormat(path, &format_, formatIo_, openError);
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
-    videoStream_ = FindTimedVideoStream(format_);
+    videoStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_VIDEO);
     staticImage_ = videoStream_ >= 0 && IsStaticImageDemuxer(format_->iformat);
     coverArtStream_ = FindCoverArtStream(format_);
-    audioStream_ = av_find_best_stream(format_, AVMEDIA_TYPE_AUDIO, -1, videoStream_, nullptr, 0);
+    audioStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_AUDIO);
     if (videoStream_ < 0 && audioStream_ < 0) { Fail(FFFResult::NotSupported, "The file contains no playable video or audio stream.", "open"); return; }
     snapshot_.decodeMode = decodeMode_;
     bool hardwareFallback = false;

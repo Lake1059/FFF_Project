@@ -30,6 +30,10 @@ Public NotInheritable Class 播放列表
         ".wv", ".tak", ".aif", ".aiff", ".amr", ".au", ".ra", ".tta", ".mpc",
         ".png", ".jpg", ".jpeg", ".gif", ".apng", ".webp", ".jxl", ".bmp", ".tif", ".tiff"
     }
+    Private Shared ReadOnly 视频扩展名 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+        ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".webm", ".flv", ".ts", ".m2ts", ".mts",
+        ".mpg", ".mpeg", ".vob", ".ogv", ".3gp", ".3g2", ".rm", ".rmvb", ".asf", ".divx"
+    }
     Private Shared ReadOnly 末尾数字 As New Regex("^(?<prefix>.*?)(?<number>\d+)(?<suffix>\D*)$", RegexOptions.Compiled Or RegexOptions.CultureInvariant)
     Private ReadOnly 项目 As New List(Of 播放列表项)()
     Private 当前值 As Integer = -1
@@ -73,6 +77,27 @@ Public NotInheritable Class 播放列表
             If 项目.Any(Function(x) String.Equals(x.路径, 新项目.路径, StringComparison.OrdinalIgnoreCase)) Then Return
             项目.Add(新项目)
             If 当前值 < 0 Then 当前值 = 0
+        End SyncLock
+        RaiseEvent 列表变化(Me, EventArgs.Empty)
+    End Sub
+
+    ''' <summary>按传入顺序批量追加本地媒体，并只发布一次列表变化事件。</summary>
+    Public Sub 添加多个(本地路径 As IEnumerable(Of String))
+        ArgumentNullException.ThrowIfNull(本地路径)
+        Dim 新项目 As New List(Of 播放列表项)()
+        Dim 已存在路径 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        SyncLock 项目
+            For Each 路径 In 本地路径
+                If String.IsNullOrWhiteSpace(路径) Then Continue For
+                Dim 项 As New 播放列表项(路径)
+                If 已存在路径.Add(项.路径) AndAlso
+                    Not 项目.Any(Function(x) String.Equals(x.路径, 项.路径, StringComparison.OrdinalIgnoreCase)) Then
+                    新项目.Add(项)
+                End If
+            Next
+            If 新项目.Count = 0 Then Return
+            项目.AddRange(新项目)
+            If 当前值 < 0 Then 当前值 = 项目.Count - 新项目.Count
         End SyncLock
         RaiseEvent 列表变化(Me, EventArgs.Empty)
     End Sub
@@ -159,11 +184,13 @@ Public NotInheritable Class 播放列表
         Dim 当前路径 = 规范本地文件(本地路径)
         Dim 当前名称 = IO.Path.GetFileNameWithoutExtension(当前路径)
         Dim 签名 = 取得系列签名(当前名称)
+        Dim 当前是视频文件 = 视频扩展名.Contains(IO.Path.GetExtension(当前路径))
         Dim 新列表 As New List(Of 播放列表项)()
         If 签名 IsNot Nothing Then
             For Each 文件 In IO.Directory.EnumerateFiles(IO.Path.GetDirectoryName(当前路径))
                 取消令牌.ThrowIfCancellationRequested()
                 If Not 媒体扩展名.Contains(IO.Path.GetExtension(文件)) Then Continue For
+                If 当前是视频文件 AndAlso 外部音频自动加载器.是支持的音频文件(文件) Then Continue For
                 If String.Equals(取得系列签名(IO.Path.GetFileNameWithoutExtension(文件)), 签名, StringComparison.OrdinalIgnoreCase) Then
                     Try
                         新列表.Add(New 播放列表项(文件))

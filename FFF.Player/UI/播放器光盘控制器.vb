@@ -7,7 +7,7 @@ Friend NotInheritable Class 播放器光盘控制器
     Private ReadOnly 画面 As 播放器画面控件
     Private ReadOnly 播放器 As 播放器控制器
     Private ReadOnly 菜单 As LakeUI.ModernContextMenu
-    Private ReadOnly 刷新计时器 As New Timer With {.Interval = 100}
+    Private ReadOnly 刷新计时器 As New Timer With {.Interval = 1000}
     Private 状态 As New 光盘状态()
     Private 上次鼠标提交 As Long
     Private 菜单项已显示 As Boolean
@@ -39,6 +39,7 @@ Friend NotInheritable Class 播放器光盘控制器
             .BorderSize = 菜单.BorderSize,
             .BackdropBlurRadius = 菜单.BackdropBlurRadius,
             .BackdropMode = 菜单.BackdropMode,
+            .BackdropNoiseOpacity = 菜单.BackdropNoiseOpacity,
             .BackdropTintColor = 菜单.BackdropTintColor,
             .HoverBackColor = 菜单.HoverBackColor,
             .HoverRadius = 菜单.HoverRadius,
@@ -62,13 +63,13 @@ Friend NotInheritable Class 播放器光盘控制器
                 Threading.Interlocked.Exchange(扫描中, 0)
                 If t.IsFaulted OrElse t.Result.Length = 0 Then Return
                 主窗体.BeginInvoke(Sub()
-                    光驱项.SubMenu.Items.Clear()
-                    For Each 项路径 In t.Result
-                        Dim 项 As New LakeUI.ModernContextMenu.ModernMenuItem(项路径)
-                        AddHandler 项.Click, Sub() 播放器.打开媒体(项路径)
-                        光驱项.SubMenu.Items.Add(项)
-                    Next
-                End Sub)
+                                    光驱项.SubMenu.Items.Clear()
+                                    For Each 项路径 In t.Result
+                                        Dim 项 As New LakeUI.ModernContextMenu.ModernMenuItem(项路径)
+                                        AddHandler 项.Click, Sub() 播放器.打开媒体(项路径)
+                                        光驱项.SubMenu.Items.Add(项)
+                                    Next
+                                End Sub)
             End Sub, TaskScheduler.FromCurrentSynchronizationContext())
     End Sub
 
@@ -79,11 +80,11 @@ Friend NotInheritable Class 播放器光盘控制器
 
     Private Sub 绑定命令(项 As LakeUI.ModernContextMenu.ModernMenuItem, 命令 As 光盘命令)
         Dim 操作 As Action = Sub()
-                                 播放器.光盘导航(命令)
-                             End Sub
+                               播放器.光盘导航(命令)
+                           End Sub
         AddHandler 项.Click, Sub(sender As Object, e As EventArgs)
-                                  操作()
-                              End Sub
+                                操作()
+                            End Sub
     End Sub
 
     Private Sub 刷新(sender As Object, e As EventArgs)

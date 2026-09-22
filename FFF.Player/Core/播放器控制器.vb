@@ -21,6 +21,7 @@ Public NotInheritable Class 播放器控制器
     Private 会话 As 播放器会话
     Private 会话操作取消 As CancellationTokenSource
     Private 字幕加载取消 As CancellationTokenSource
+    Private 外部音频加载取消 As CancellationTokenSource
     Private 弹幕加载取消 As CancellationTokenSource
     Private 歌词加载取消 As CancellationTokenSource
     Private 当前字幕轨道 As 外部字幕轨道
@@ -114,6 +115,17 @@ Public NotInheritable Class 播放器控制器
     Public ReadOnly Property 是否有媒体 As Boolean
         Get
             Return 会话 IsNot Nothing AndAlso Not String.IsNullOrEmpty(当前文件路径)
+        End Get
+    End Property
+
+    Public ReadOnly Property 当前媒体是视频 As Boolean
+        Get
+            If Not 是否有媒体 Then Return False
+            Dim 信息 = 安全读取媒体信息()
+            Return 信息 IsNot Nothing AndAlso 信息.流 IsNot Nothing AndAlso Not 信息.是静态图片 AndAlso
+                信息.流.Any(Function(x) x IsNot Nothing AndAlso
+                                      String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso
+                                      Not x.是封面图)
         End Get
     End Property
 
@@ -276,6 +288,26 @@ Public NotInheritable Class 播放器控制器
     Public Sub 打开媒体(路径 As String)
         If 已释放 OrElse Not 光盘路径.媒体存在(路径) Then Return
         启动后台任务(打开媒体Async(路径))
+    End Sub
+
+    ''' <summary>在当前视频时间线上加载 MKA 外挂音频。</summary>
+    Public Sub 加载外部音轨(路径 As String)
+        If 已释放 OrElse String.IsNullOrWhiteSpace(路径) Then Return
+        If Not 当前媒体是视频 Then Return
+        If Not File.Exists(路径) OrElse Not 外部音频自动加载器.是支持的音频文件(路径) Then
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(
+                "仅可加载存在的 MKA 外挂音频文件。", "无法加载外挂音频"))
+            Return
+        End If
+
+        取消外部音频加载()
+        Try
+            会话?.加载外部音轨(Path.GetFullPath(路径))
+        Catch ex As Exception
+            If Not 已释放 Then
+                RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法加载外挂音频"))
+            End If
+        End Try
     End Sub
 
     Public Function 打开媒体Async(路径 As String) As Task
@@ -855,6 +887,7 @@ Public NotInheritable Class 播放器控制器
     Private Async Function 切换媒体会话Async(路径 As String, 解码器 As 解码模式, 恢复位置 As TimeSpan,
                                               恢复播放 As Boolean, 视频流 As Integer, 音频流 As Integer,
                                               保留已加载字幕 As Boolean) As Task
+        取消外部音频加载()
         Dim 此次取消 As New CancellationTokenSource()
         Dim 上次取消 = Interlocked.Exchange(会话操作取消, 此次取消)
         上次取消?.Cancel()
@@ -935,6 +968,7 @@ Public NotInheritable Class 播放器控制器
                         正在切换会话 = False
                         RaiseEvent 媒体已打开(Me,
                             New 播放器媒体事件参数(当前文件路径, 原位媒体信息, 原位快照, 原位保留当前字幕))
+                        开始自动加载外部音频(当前文件路径)
                         If Not 原位保留当前字幕 Then
                             开始自动加载字幕(当前文件路径)
                             开始自动加载弹幕(当前文件路径)
@@ -1032,6 +1066,7 @@ Public NotInheritable Class 播放器控制器
                 正在切换会话 = False
                 RaiseEvent 媒体已打开(Me,
                 New 播放器媒体事件参数(当前文件路径, 媒体信息, 快照, 保留当前字幕))
+                开始自动加载外部音频(当前文件路径)
                 If Not 保留当前字幕 Then
                     开始自动加载字幕(当前文件路径)
                     开始自动加载弹幕(当前文件路径)
@@ -1142,6 +1177,40 @@ Public NotInheritable Class 播放器控制器
         If 色彩模式 = 色彩输出模式.峰值映射HDR Then Return 当前HDR输出峰值尼特
         Return 0.0F
     End Function
+
+    Private Sub 开始自动加载外部音频(媒体路径 As String)
+        取消外部音频加载()
+        If 光盘路径.是光盘路径(媒体路径) OrElse Not 当前媒体是视频 Then Return
+
+        Dim 本次取消 As New CancellationTokenSource()
+        外部音频加载取消 = 本次取消
+        Dim 忽略 = 自动加载同名外部音频Async(媒体路径, 本次取消)
+    End Sub
+
+    Private Async Function 自动加载同名外部音频Async(媒体路径 As String,
+                                                本次取消 As CancellationTokenSource) As Task
+        Try
+            Dim 候选音频 = Await 外部音频自动加载器.扫描同名音频Async(媒体路径, 本次取消.Token)
+            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
+                Not ReferenceEquals(外部音频加载取消, 本次取消) OrElse
+                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) OrElse
+                Not 当前媒体是视频 OrElse 候选音频.Count = 0 Then Return
+
+            会话?.加载外部音轨(候选音频(0))
+        Catch ex As OperationCanceledException
+            ' 新媒体、手动选择或关闭操作已经取代本次自动加载。
+        Catch
+            ' 同名外挂音频是可选资源；加载失败不影响媒体播放。
+        Finally
+            If ReferenceEquals(外部音频加载取消, 本次取消) Then 外部音频加载取消 = Nothing
+            本次取消.Dispose()
+        End Try
+    End Function
+
+    Private Sub 取消外部音频加载()
+        Dim 取消源 = Interlocked.Exchange(外部音频加载取消, Nothing)
+        取消源?.Cancel()
+    End Sub
 
     Private Sub 恢复流选择(目标 As 播放器会话, 信息 As 媒体信息, 视频流 As Integer, 音频流 As Integer)
         If 信息 Is Nothing Then Return
@@ -1295,6 +1364,13 @@ Public NotInheritable Class 播放器控制器
                 Not ReferenceEquals(字幕加载取消, 本次取消) OrElse
                 Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
             发布外部字幕候选(候选字幕)
+            Dim 内嵌字幕 = 安全读取媒体信息()?.流.
+                Where(Function(x) x.类型 = "subtitle").
+                OrderByDescending(Function(x) x.是默认流).FirstOrDefault()
+            If 内嵌字幕 IsNot Nothing Then
+                选择内嵌字幕(内嵌字幕.索引)
+                Return
+            End If
             If 候选字幕.Count = 0 Then Return
 
             候选轨道 = Await 外部字幕自动加载器.尝试加载候选字幕Async(
@@ -1444,6 +1520,7 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Private Sub 释放当前会话(Optional 保留已加载字幕 As Boolean = False)
+        取消外部音频加载()
         If Not 保留已加载字幕 Then
             释放当前字幕()
             释放当前弹幕()

@@ -167,7 +167,7 @@ Public Class Form媒体信息
                            快照.HDR处理路径 = HDR处理路径.外部RPU处理,
                            "外部 RPU 重塑 → SDR/scRGB（测试）",
                            If(流.外部RPU扩展可用,
-                              "外部 RPU 扩展已加载，等待首帧（测试）", 流.HDR处理说明)))
+                              "外部 RPU 扩展已加载，当前未启用处理（测试）", 流.HDR处理说明)))
                     If 流.外部RPU扩展可用 Then
                         添加条目(group, "Dolby Vision 测试扩展",
                             If(流.外部RPU扩展已启用, "已启用", "已加载，尚未处理当前帧"))

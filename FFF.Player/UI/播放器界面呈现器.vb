@@ -37,6 +37,9 @@ Friend NotInheritable Class 播放器界面呈现器
     Private 正在更新进度条 As Boolean
     Private 正在拖动进度条 As Boolean
     Private 有媒体快照 As Boolean
+    Private 当前媒体信息 As 媒体信息
+    Private 已显示视频流索引 As Integer = -1
+    Private 已显示音频流索引 As Integer = -1
     Private 已释放 As Boolean
     Private 显示精确时间戳 As Boolean
     Private 滚轮余量 As Integer
@@ -137,6 +140,11 @@ Friend NotInheritable Class 播放器界面呈现器
         End If
 
         有媒体快照 = True
+        ' 切流由原生工作线程异步完成，按实际快照刷新，不能在发出切流请求时提前更新。
+        If 当前媒体信息 IsNot Nothing AndAlso
+            (快照.当前视频流 <> 已显示视频流索引 OrElse 快照.当前音频流 <> 已显示音频流索引) Then
+            更新媒体信息(当前媒体信息, 快照)
+        End If
         更新播放按钮(快照.状态)
         If Not 正在拖动进度条 Then
             正在更新进度条 = True
@@ -168,6 +176,9 @@ Friend NotInheritable Class 播放器界面呈现器
     End Sub
 
     Friend Sub 更新媒体信息(信息 As 媒体信息, 快照 As 播放器快照)
+        当前媒体信息 = 信息
+        已显示视频流索引 = If(快照 Is Nothing, -1, 快照.当前视频流)
+        已显示音频流索引 = If(快照 Is Nothing, -1, 快照.当前音频流)
         Dim 视频流 As 媒体流信息 = Nothing
         Dim 音频流 As 媒体流信息 = Nothing
         If 信息 IsNot Nothing Then

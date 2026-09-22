@@ -87,12 +87,27 @@ Friend NotInheritable Class 文件关联管理器
 
     Friend Shared Sub 启动后台同步(选项 As 文件关联选项)
         ArgumentNullException.ThrowIfNull(选项)
+        ' 启动时全部未勾选表示用户没有委托播放器管理关联；不要清理
+        ' 其他播放器留下的关联。运行期间的取消操作仍通过同步全部Async
+        ' 显式执行注销和备份恢复。
+        If Not {选项.关联常见视频, 选项.关联不常见视频, 选项.关联老旧视频,
+                选项.关联常见音频, 选项.关联不常见音频, 选项.关联老旧音频}.Any(Function(x) x) Then
+            启动同步任务 = Task.CompletedTask
+            Return
+        End If
         启动同步任务 = 启动后台同步核心Async(选项)
     End Sub
 
     Private Shared Async Function 启动后台同步核心Async(选项 As 文件关联选项) As Task
         Try
-            Await 同步全部Async(选项).ConfigureAwait(False)
+            Await 同步门.WaitAsync().ConfigureAwait(False)
+            Try
+                ' 启动时只接管当前勾选的类别；未勾选的类别保留系统和其他
+                ' 播放器现状，只有运行期间的显式取消才执行注销恢复。
+                Await Task.Run(Sub() 同步核心(选项, 程序路径, 默认注册表位置, True, True)).ConfigureAwait(False)
+            Finally
+                同步门.Release()
+            End Try
         Catch ex As Exception
             Debug.WriteLine($"启动时同步文件关联失败：{ex}")
         End Try
@@ -114,7 +129,8 @@ Friend NotInheritable Class 文件关联管理器
     End Sub
 
     Private Shared Sub 同步核心(选项 As 文件关联选项, executablePath As String,
-                           注册表位置 As 文件关联注册表位置, 通知资源管理器 As Boolean)
+                           注册表位置 As 文件关联注册表位置, 通知资源管理器 As Boolean,
+                           Optional 仅同步已启用 As Boolean = False)
         ArgumentNullException.ThrowIfNull(选项)
         ArgumentNullException.ThrowIfNull(注册表位置)
         ArgumentException.ThrowIfNullOrWhiteSpace(executablePath)
@@ -125,14 +141,14 @@ Friend NotInheritable Class 文件关联管理器
         For Each 定义 In 文件类型
             If 选项.已启用(定义.类别) Then
                 有变更 = 注册文件类型(定义, 完整程序路径, 注册表位置) OrElse 有变更
-            Else
+            ElseIf Not 仅同步已启用 Then
                 有变更 = 注销文件类型(定义, 注册表位置) OrElse 有变更
             End If
         Next
 
         If 文件类型.Any(Function(x) 选项.已启用(x.类别)) Then
-            有变更 = 注册应用(选项, 完整程序路径, 注册表位置) OrElse 有变更
-        Else
+            有变更 = 注册应用(选项, 完整程序路径, 注册表位置, 仅同步已启用) OrElse 有变更
+        ElseIf Not 仅同步已启用 Then
             有变更 = 注销应用(注册表位置) OrElse 有变更
         End If
 
@@ -230,7 +246,8 @@ Friend NotInheritable Class 文件关联管理器
     End Function
 
     Private Shared Function 注册应用(选项 As 文件关联选项, executablePath As String,
-                                注册表位置 As 文件关联注册表位置) As Boolean
+                                注册表位置 As 文件关联注册表位置,
+                                Optional 保留未启用 As Boolean = False) As Boolean
         Dim 有变更 As Boolean
         Dim applicationPath = 注册表位置.ClassesRoot & "\Applications\" & 应用程序注册键名
         Using application = Registry.CurrentUser.CreateSubKey(applicationPath, True)
@@ -246,12 +263,14 @@ Friend NotInheritable Class 文件关联管理器
                         有变更 = True
                     End If
                 Next
-                For Each extension In supportedTypes.GetValueNames().Except(
-                        文件类型.Where(Function(x) 选项.已启用(x.类别)).Select(Function(x) x.扩展名),
-                        StringComparer.OrdinalIgnoreCase).ToArray()
-                    supportedTypes.DeleteValue(extension, False)
-                    有变更 = True
-                Next
+                If Not 保留未启用 Then
+                    For Each extension In supportedTypes.GetValueNames().Except(
+                            文件类型.Where(Function(x) 选项.已启用(x.类别)).Select(Function(x) x.扩展名),
+                            StringComparer.OrdinalIgnoreCase).ToArray()
+                        supportedTypes.DeleteValue(extension, False)
+                        有变更 = True
+                    Next
+                End If
             End Using
         End Using
         Using capabilities = Registry.CurrentUser.CreateSubKey(注册表位置.CapabilitiesRoot, True)

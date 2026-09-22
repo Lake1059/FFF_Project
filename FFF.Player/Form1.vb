@@ -357,33 +357,17 @@ Public Class Form1
         Using 对话框 As New OpenFileDialog With {
             .CheckFileExists = True,
             .Filter = "所有文件|*.*",
+            .Multiselect = True,
             .RestoreDirectory = True,
             .Title = "打开媒体或替换歌词/字幕/弹幕"
         }
-            If 对话框.ShowDialog(Me) = DialogResult.OK Then 打开或替换文件(对话框.FileName)
+            If 对话框.ShowDialog(Me) = DialogResult.OK Then 打开或替换文件(对话框.FileNames)
         End Using
     End Sub
 
     Private Sub 画面控件_文件拖入(sender As Object, e As 播放器文件拖入事件参数)
-        Dim 存在的文件 = e.文件路径.Where(AddressOf 光盘路径.媒体存在).ToArray()
-        If 存在的文件.Length = 0 Then Return
-        Dim 路径 As String
-        If 播放控制器.是否有媒体 Then
-            路径 = 存在的文件.FirstOrDefault(AddressOf LRC歌词自动加载器.是支持的歌词文件)
-            If String.IsNullOrEmpty(路径) Then
-                路径 = 存在的文件.FirstOrDefault(AddressOf 外部字幕自动加载器.是支持的字幕文件)
-            End If
-            If String.IsNullOrEmpty(路径) Then
-                路径 = 存在的文件.FirstOrDefault(AddressOf 弹幕自动加载器.是支持的弹幕文件)
-            End If
-        Else
-            路径 = 存在的文件.FirstOrDefault(
-                Function(x) Not 外部字幕自动加载器.是支持的字幕文件(x) AndAlso
-                            Not 弹幕自动加载器.是支持的弹幕文件(x) AndAlso
-                            Not LRC歌词自动加载器.是支持的歌词文件(x))
-        End If
-        If String.IsNullOrEmpty(路径) Then 路径 = 存在的文件(0)
-        打开或替换文件(路径)
+        If e Is Nothing OrElse e.文件路径 Is Nothing Then Return
+        打开或替换文件(e.文件路径)
     End Sub
 
     Friend Sub 打开命令行文件(参数 As IEnumerable(Of String))
@@ -415,13 +399,47 @@ Public Class Form1
         打开或替换文件(文件路径)
     End Sub
 
+    Private Sub 打开或替换文件(路径 As IEnumerable(Of String))
+        If 路径 Is Nothing Then Return
+        Dim 存在的文件 = 路径.Where(Function(x) Not String.IsNullOrWhiteSpace(x) AndAlso
+                                             光盘路径.媒体存在(x)).
+            Select(Function(x) Path.GetFullPath(x)).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToArray()
+        If 存在的文件.Length = 0 Then Return
+        If 存在的文件.Length > 1 Then
+            添加并打开多个媒体文件(存在的文件)
+            Return
+        End If
+        打开或替换单个文件(存在的文件(0))
+    End Sub
+
     Private Sub 打开或替换文件(路径 As String)
+        If String.IsNullOrWhiteSpace(路径) Then Return
+        打开或替换单个文件(Path.GetFullPath(路径))
+    End Sub
+
+    Private Sub 添加并打开多个媒体文件(路径 As IEnumerable(Of String))
+        Dim 媒体文件 = 路径.Where(Function(x) File.Exists(x) AndAlso
+                                      播放列表.是支持的媒体文件(x)).ToArray()
+        If 媒体文件.Length = 0 Then Return
+
+        播放列表数据.添加多个(媒体文件)
+        Dim 首个路径 = 媒体文件(0)
+        播放列表数据.选择路径(首个路径)
+        播放控制器.打开媒体(首个路径)
+    End Sub
+
+    Private Sub 打开或替换单个文件(路径 As String)
         If LRC歌词自动加载器.是支持的歌词文件(路径) Then
             播放控制器.替换歌词(路径)
         ElseIf 外部字幕自动加载器.是支持的字幕文件(路径) Then
             播放控制器.替换字幕(路径)
         ElseIf 弹幕自动加载器.是支持的弹幕文件(路径) Then
             播放控制器.替换弹幕(路径)
+        ElseIf 外部音频自动加载器.是支持的音频文件(路径) AndAlso
+            播放控制器.当前媒体是视频 Then
+            播放控制器.加载外部音轨(路径)
         Else
             If Not 光盘路径.是光盘路径(路径) Then 启动后台任务(播放列表数据.从媒体创建并扫描相似文件Async(路径))
             播放控制器.打开媒体(路径)
