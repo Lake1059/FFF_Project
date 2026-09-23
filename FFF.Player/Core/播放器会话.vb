@@ -428,7 +428,7 @@ Public NotInheritable Class 播放器会话
 
     Public Function 读取音频峰值() As Single()
         Dim 值 As New 原生音频峰值 With {
-            .大小 = 原生音频峰值大小, .版本 = 1UI}
+            .大小 = 原生音频峰值大小, .版本 = 2UI, .输入峰值 = New Single(7) {}}
         检查结果(播放器原生接口.FFF3FP_GetAudioPeakLevels(取得句柄(), 值))
         Dim 数量 = Math.Min(CInt(值.声道数), 8)
         If 数量 = 0 Then Return Array.Empty(Of Single)()
@@ -442,6 +442,15 @@ Public NotInheritable Class 播放器会话
         If 数量 > 6 Then 结果(6) = 值.峰值7
         If 数量 > 7 Then 结果(7) = 值.峰值8
         Return 结果
+    End Function
+
+    Public Function 读取输入音频峰值() As Single()
+        Dim 值 As New 原生音频峰值 With {
+            .大小 = 原生音频峰值大小, .版本 = 2UI, .输入峰值 = New Single(7) {}}
+        检查结果(播放器原生接口.FFF3FP_GetAudioPeakLevels(取得句柄(), 值))
+        Dim 数量 = Math.Min(CInt(值.输入声道数), 8)
+        If 数量 = 0 Then Return Array.Empty(Of Single)()
+        Return 值.输入峰值.Take(数量).ToArray()
     End Function
 
     Public ReadOnly Property 当前媒体信息 As 媒体信息

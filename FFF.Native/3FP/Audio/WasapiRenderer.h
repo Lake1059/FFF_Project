@@ -28,11 +28,14 @@ struct PlayerAudioRuntimeState final {
 
     void SetChannels(const std::uint32_t channels) noexcept {
         for (auto& value : values) value.store(0.0f, std::memory_order_relaxed);
+        for (auto& value : inputValues) value.store(0.0f, std::memory_order_relaxed);
+        inputChannelCount.store(0, std::memory_order_release);
         channelCount.store(std::min(channels, MaximumChannels), std::memory_order_release);
     }
 
     void ClearValues() noexcept {
         for (auto& value : values) value.store(0.0f, std::memory_order_relaxed);
+        for (auto& value : inputValues) value.store(0.0f, std::memory_order_relaxed);
     }
 
     void ResetDiagnostics() noexcept {
@@ -59,7 +62,9 @@ struct PlayerAudioRuntimeState final {
     }
 
     std::atomic<std::uint32_t> channelCount{0};
+    std::atomic<std::uint32_t> inputChannelCount{0};
     std::array<std::atomic<float>, MaximumChannels> values{};
+    std::array<std::atomic<float>, MaximumChannels> inputValues{};
     std::atomic<std::int64_t> buffered100ns{0};
     std::atomic<std::uint64_t> underruns{0};
     std::atomic<std::uint64_t> timestampJitterFrames{0};

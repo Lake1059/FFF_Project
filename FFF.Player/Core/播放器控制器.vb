@@ -1,4 +1,5 @@
 Imports System.IO
+Imports System.Runtime.InteropServices
 Imports System.Text.Json
 Imports System.Threading
 
@@ -617,6 +618,16 @@ Public NotInheritable Class 播放器控制器
     Friend Shared Function 限定跳转位置(位置 As TimeSpan, 总时长 As TimeSpan) As TimeSpan
         If 位置 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(位置))
         Return If(总时长 > TimeSpan.Zero, 最小时间(位置, 总时长), 位置)
+    End Function
+
+    Friend Function 读取输入音频峰值() As Single()
+        Try
+            Return If(会话?.读取输入音频峰值(), Array.Empty(Of Single)())
+        Catch ex As ObjectDisposedException
+            Return Array.Empty(Of Single)()
+        Catch ex As 播放器异常
+            Return Array.Empty(Of Single)()
+        End Try
     End Function
 
     Public Function 读取光盘状态() As 光盘状态
@@ -1586,10 +1597,14 @@ Public NotInheritable Class 播放器控制器
             Case HDR格式.HDR10Plus : Return "HDR10+"
             Case HDR格式.HLG : Return "HLG"
             Case HDR格式.杜比视界
-                Return If(快照.HDR处理路径 = HDR处理路径.外部RPU处理,
-                    "Dolby Vision RPU → scRGB（测试）",
-                    If(外部扩展可用, "Dolby Vision 外部 RPU 扩展已加载（测试）",
-                       "Dolby Vision 基础层 → HDR10"))
+                Dim statusCode = If(快照.HDR处理路径 = HDR处理路径.外部RPU处理, 1UI, 2UI)
+                Dim textKind = If(外部扩展可用, 1UI, 0UI)
+                Try
+                    Dim textPointer = FFF3FP_GetColorExtensionStatusText(statusCode, textKind)
+                    If textPointer <> IntPtr.Zero Then Return Marshal.PtrToStringUTF8(textPointer)
+                Catch
+                End Try
+                Return "Dolby Vision"
             Case HDR格式.HDRVivid : Return "HDR Vivid"
             Case Else : Return "HDR10"
         End Select

@@ -118,7 +118,7 @@ Friend Structure 原生音频峰值
     Public 大小 As UInteger
     Public 版本 As UInteger
     Public 声道数 As UInteger
-    Public 保留 As UInteger
+    Public 输入声道数 As UInteger
     Public 峰值1 As Single
     Public 峰值2 As Single
     Public 峰值3 As Single
@@ -127,6 +127,8 @@ Friend Structure 原生音频峰值
     Public 峰值6 As Single
     Public 峰值7 As Single
     Public 峰值8 As Single
+    <MarshalAs(UnmanagedType.ByValArray, SizeConst:=8)>
+    Public 输入峰值 As Single()
 End Structure
 
 <Flags>
@@ -314,9 +316,18 @@ End Class
 Friend Module 播放器原生接口
     Friend Const 动态库名称 As String = "FFF.Native.dll"
 
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Function 原生授权对话框回调(代码UTF8 As IntPtr, 容量 As UInteger) As Integer
+
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetApiVersion() As UInteger
     End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetColorExtensionStatusText(statusCode As UInteger, textKind As UInteger) As IntPtr
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Sub FFF3FP_SetColorExtensionAuthorizationPrompt(callback As 原生授权对话框回调)
+    End Sub
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_Create(ByRef 配置 As 原生播放器配置, ByRef 播放器 As IntPtr) As 原生播放器结果
     End Function

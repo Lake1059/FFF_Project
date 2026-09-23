@@ -23,6 +23,7 @@ inline const FFFColorExtensionApi* GetColorExtension() noexcept {
         if (!entry || !entry(FFFColorExtensionVersion, &result) ||
             result.size != sizeof(result) || result.version != FFFColorExtensionVersion ||
             !result.prepare || !result.getAuthorizationStatus || !result.authenticate ||
+            !result.getStatusText || !result.requestAuthorizationPrompt || !result.setAuthorizationPrompt ||
             !result.shaderBytecode || !result.shaderBytecodeSize ||
             result.shaderBytecodeSize > FFFColorExtensionBytecodeLimit ||
             !result.constantsSize || result.constantsSize > FFFColorExtensionCapacity ||

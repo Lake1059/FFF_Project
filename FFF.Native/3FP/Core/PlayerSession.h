@@ -143,6 +143,7 @@ private:
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
     void QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, std::int32_t streamIndex) noexcept;
+    void UpdateInputAudioPeakLevels(const AVFrame* frame) noexcept;
     bool HandleInternalAudioDecodeFailure(FFFResult result, std::string message) noexcept;
     void DisableFailedInternalAudio(FFFResult result, std::string message) noexcept;
     void UpdateAudioDiagnostics() noexcept;

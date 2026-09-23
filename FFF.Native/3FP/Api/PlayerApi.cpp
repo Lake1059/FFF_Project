@@ -23,13 +23,23 @@ FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t o
 }
 
 std::uint32_t FFF3FP_GetApiVersion() noexcept {
-    (void)GetColorExtension();
+    if (const auto* api = GetColorExtension()) api->requestAuthorizationPrompt();
     return PlayerApiVersion;
 }
 
 std::int32_t FFF3FP_GetColorExtensionStatus() noexcept {
     const auto* api = GetColorExtension();
     return api == nullptr ? 0 : api->getAuthorizationStatus();
+}
+
+const char* FFF3FP_GetColorExtensionStatusText(std::uint32_t state, std::uint32_t variant) noexcept {
+    const auto* api = GetColorExtension();
+    return api == nullptr ? nullptr : api->getStatusText(state, variant);
+}
+
+void FFF3FP_SetColorExtensionAuthorizationPrompt(
+    int (__cdecl* callback)(char*, std::uint32_t)) noexcept {
+    if (const auto* api = GetColorExtension()) api->setAuthorizationPrompt(callback);
 }
 
 FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept {

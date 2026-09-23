@@ -1747,13 +1747,23 @@ FFFResult PlayerSession::ReadVideoPixelRegion(const std::uint32_t x, const std::
 }
 
 FFFResult PlayerSession::GetAudioPeakLevels(FFF3FPAudioPeakLevels& output) const noexcept {
-    if (output.size < sizeof(FFF3FPAudioPeakLevels) || output.version != 1)
+    constexpr auto legacySize = offsetof(FFF3FPAudioPeakLevels, inputValues);
+    if ((output.version == 1 && output.size < legacySize) ||
+        (output.version == 2 && output.size < sizeof(FFF3FPAudioPeakLevels)) ||
+        (output.version != 1 && output.version != 2))
         return FFFResult::InvalidArgument;
     output.channelCount = 0;
-    output.reserved = 0;
+    output.inputChannelCount = 0;
     std::fill(std::begin(output.values), std::end(output.values), 0.0f);
     output.channelCount = audioRuntimeState_.Copy(output.values,
         static_cast<std::uint32_t>(std::size(output.values)));
+    if (output.version >= 2) {
+        output.inputChannelCount = std::min<std::uint32_t>(
+            audioRuntimeState_.inputChannelCount.load(std::memory_order_acquire),
+            static_cast<std::uint32_t>(std::size(output.inputValues)));
+        for (std::size_t index = 0; index < std::size(output.inputValues); ++index)
+            output.inputValues[index] = audioRuntimeState_.inputValues[index].load(std::memory_order_relaxed);
+    }
     return FFFResult::Success;
 }
 std::string PlayerSession::MediaInfo() const { std::lock_guard lock(mutex_); return mediaInfoJson_; }
@@ -2668,6 +2678,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
 
 void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, const std::int32_t streamIndex) noexcept {
     if (!audioRenderer_ || streamIndex < 0) return;
+    UpdateInputAudioPeakLevels(frame);
     if (ShouldDelayAudioUntilVideoFrame()) return;
     auto* stream = owner->streams[streamIndex];
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
@@ -2691,6 +2702,37 @@ void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, cons
             Fail(result, audioRenderer_->LastError(), "audio-render");
         }
     }
+}
+
+void PlayerSession::UpdateInputAudioPeakLevels(const AVFrame* frame) noexcept {
+    if (frame == nullptr || frame->ch_layout.nb_channels <= 0 || frame->nb_samples <= 0) return;
+    const auto channels = std::min<std::uint32_t>(
+        static_cast<std::uint32_t>(frame->ch_layout.nb_channels), PlayerAudioRuntimeState::MaximumChannels);
+    audioRuntimeState_.inputChannelCount.store(channels, std::memory_order_release);
+    std::array<float, PlayerAudioRuntimeState::MaximumChannels> peaks{};
+    const auto format = static_cast<AVSampleFormat>(frame->format);
+    const auto planar = av_sample_fmt_is_planar(format) != 0;
+    const auto packedFormat = planar ? av_get_packed_sample_fmt(format) : format;
+    for (std::uint32_t channel = 0; channel < channels; ++channel) {
+        const auto* data = frame->extended_data[planar ? channel : 0];
+        for (int sample = 0; sample < frame->nb_samples; ++sample) {
+            const auto index = planar ? sample : sample * frame->ch_layout.nb_channels + channel;
+            float value = 0.0f;
+            switch (packedFormat) {
+                case AV_SAMPLE_FMT_FLT: value = reinterpret_cast<const float*>(data)[index]; break;
+                case AV_SAMPLE_FMT_DBL: value = static_cast<float>(reinterpret_cast<const double*>(data)[index]); break;
+                case AV_SAMPLE_FMT_U8: value = (static_cast<int>(data[index]) - 128) / 128.0f; break;
+                case AV_SAMPLE_FMT_S16: value = reinterpret_cast<const std::int16_t*>(data)[index] / 32768.0f; break;
+                case AV_SAMPLE_FMT_S32: value = reinterpret_cast<const std::int32_t*>(data)[index] / 2147483648.0f; break;
+                default: break;
+            }
+            if (std::isfinite(value)) peaks[channel] = std::max(peaks[channel], std::abs(value));
+        }
+        audioRuntimeState_.inputValues[channel].store(std::clamp(peaks[channel], 0.0f, 1.0f),
+            std::memory_order_relaxed);
+    }
+    for (auto channel = channels; channel < PlayerAudioRuntimeState::MaximumChannels; ++channel)
+        audioRuntimeState_.inputValues[channel].store(0.0f, std::memory_order_relaxed);
 }
 
 bool PlayerSession::HandleInternalAudioDecodeFailure(const FFFResult result, std::string message) noexcept {

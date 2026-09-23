@@ -200,8 +200,9 @@ struct FFF3FPAudioPeakLevels {
     std::uint32_t size;
     std::uint32_t version;
     std::uint32_t channelCount;
-    std::uint32_t reserved;
+    std::uint32_t inputChannelCount;
     float values[8];
+    float inputValues[8];
 };
 
 using FFF3FPHandle = void*;
@@ -438,6 +439,8 @@ struct FFF3FPVideoPixelProbe {
 
 FFF3FP_API std::uint32_t FFF3FP_GetApiVersion() noexcept;
 FFF3FP_API std::int32_t FFF3FP_GetColorExtensionStatus() noexcept;
+FFF3FP_API const char* FFF3FP_GetColorExtensionStatusText(std::uint32_t state, std::uint32_t variant) noexcept;
+FFF3FP_API void FFF3FP_SetColorExtensionAuthorizationPrompt(int (__cdecl* callback)(char*, std::uint32_t)) noexcept;
 FFF3FP_API FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept;
 FFF3FP_API FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration,
     FFF3FPHandle* player) noexcept;

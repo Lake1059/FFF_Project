@@ -2,14 +2,12 @@
 Public Class Form媒体信息
     Private ReadOnly 获取媒体 As Func(Of 媒体信息)
     Private ReadOnly 获取快照 As Func(Of 播放器快照)
-    Private ReadOnly 获取字幕状态 As Func(Of 定时文字状态)
-    Private ReadOnly 获取弹幕状态 As Func(Of 定时文字状态)
-    Private ReadOnly 获取字幕 As Func(Of 外部字幕轨道)
-    Private ReadOnly 获取弹幕 As Func(Of 弹幕资料库)
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
     Private ReadOnly 获取输出尺寸 As Func(Of Size)
     Private ReadOnly 获取音频峰值 As Func(Of Single())
+    Private ReadOnly 获取输入音频峰值 As Func(Of Single())
     Private ReadOnly 响度条 As LakeUI.ExcellentProgressBar()
+    Private ReadOnly 输入响度条 As LakeUI.ExcellentProgressBar()
     Private ReadOnly 刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 200}
     Private ReadOnly 响度刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 67}
     Private ReadOnly 帧率刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 1000}
@@ -26,21 +24,22 @@ Public Class Form媒体信息
                    Optional danmakuProvider As Func(Of 弹幕资料库) = Nothing,
                    Optional wasapiProvider As Func(Of WASAPI共享模式) = Nothing,
                    Optional outputSizeProvider As Func(Of Size) = Nothing,
-                   Optional audioPeakProvider As Func(Of Single()) = Nothing)
+                   Optional audioPeakProvider As Func(Of Single()) = Nothing,
+                   Optional inputAudioPeakProvider As Func(Of Single()) = Nothing)
         InitializeComponent()
-        响度条 = {EPB_L, EPB_R, EPB_C, EPB_LFE, EPB_SL, EPB_SR, EPB_BL, EPB_BR}
+        响度条 = {输出EPB_L, 输出EPB_R, 输出EPB_C, 输出EPB_LFE, 输出EPB_SL, 输出EPB_SR, 输出EPB_BL, 输出EPB_BR}
+        输入响度条 = {输入EPB_L, 输入EPB_R, 输入EPB_C, 输入EPB_LFE, 输入EPB_SL, EPB_SR输入, 输入EPB_BL, 输入EPB_BR}
         获取媒体 = mediaProvider : 获取快照 = snapshotProvider
-        获取字幕状态 = subtitleStatusProvider : 获取弹幕状态 = danmakuStatusProvider
-        获取字幕 = subtitleProvider : 获取弹幕 = danmakuProvider
         获取WASAPI模式 = wasapiProvider : 获取输出尺寸 = outputSizeProvider
         获取音频峰值 = audioPeakProvider
+        获取输入音频峰值 = inputAudioPeakProvider
     End Sub
 
     Private Sub Form媒体信息_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         Form1.ThisIsYourWindow1.Attach(Me)
         字体控制.设置控件字体(设置.实例对象.字体, Me, Nothing, True)
         If UltraDetailListView1.Columns.Count > 0 Then UltraDetailListView1.Columns(0).Text = "媒体参数"
-        调整左栏宽度() : 调整列表列宽() : 重置响度条() : 刷新()
+        调整左栏宽度() : 调整列表列宽() : 调整响度计布局() : 重置响度条() : 刷新()
         ' 在启动一秒定时器前先建立基线，这样首个 Tick 就能给出完整的一秒统计值。
         更新实际帧率(安全获取(获取快照))
         AddHandler 刷新定时器.Tick, AddressOf 刷新定时器_Tick
@@ -59,6 +58,7 @@ Public Class Form媒体信息
 
     Private Sub Form媒体信息_SizeChanged(sender As Object, e As EventArgs) Handles MyBase.SizeChanged
         调整列表列宽()
+        调整响度计布局()
     End Sub
 
     Private Sub 刷新定时器_Tick(sender As Object, e As EventArgs)
@@ -77,14 +77,6 @@ Public Class Form媒体信息
         Dim 信息 = 安全获取(获取媒体)
         Dim 快照 = 安全获取(获取快照)
         刷新概要(信息, 快照)
-        Dim 字幕 = 安全获取(获取字幕), 弹幕 = 安全获取(获取弹幕)
-        Dim 字幕状态 = 安全获取(获取字幕状态), 弹幕状态 = 安全获取(获取弹幕状态)
-        HtmlColorLabel7.Text = 标签("已加载字幕条目数", If(字幕 Is Nothing, "未加载", If(字幕.条目数 >= 0, 字幕.条目数.ToString(), "按需解码")), "#B7D7F0")
-        HtmlColorLabel14.Text = 标签("正在渲染的字幕数量", If(字幕状态 Is Nothing, "0", 字幕状态.命令数.ToString()), "#9ED7C5")
-        HtmlColorLabel8.Text = 标签("平均渲染延迟", 图层延迟(字幕状态), "#CDB6EA")
-        HtmlColorLabel12.Text = 标签("已加载弹幕条目数", If(弹幕 Is Nothing, "未加载", 弹幕.数量.ToString()), "#B7D7F0")
-        HtmlColorLabel13.Text = 标签("正在渲染的弹幕数量", If(弹幕状态 Is Nothing, "0", 弹幕状态.命令数.ToString()), "#9ED7C5")
-        HtmlColorLabel11.Text = 标签("平均渲染延迟", 图层延迟(弹幕状态), "#CDB6EA")
         刷新列表(信息, 快照)
     End Sub
 
@@ -93,17 +85,17 @@ Public Class Form媒体信息
         Dim 输出 = 安全获取(获取输出尺寸)
         Dim 解码 = If(快照 Is Nothing, "—", If(快照.解码器 = 解码模式.GPU, "DXVA (D3D11VA)", "CPU"))
         If 视频 IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(视频.硬件加速) Then 解码 = 视频.硬件加速
-        HtmlColorLabel1.Text = 标签("视频解码器", If(视频 Is Nothing, "—", $"{视频.编码.ToUpperInvariant()} | {解码}"), "#C6D8FF")
-        HtmlColorLabel2.Text = 标签("输入格式", If(视频 Is Nothing, "—", 视频输入格式(视频)), "#B7D7F0")
-        HtmlColorLabel16.Text = 标签("输出格式", If(视频 Is Nothing, "—", 视频输出格式(视频, 快照)), "#9ED7C5")
-        HtmlColorLabel3.Text = 标签("分辨率", If(视频 Is Nothing, "—", $"输入 {分辨率(视频.宽度, 视频.高度)} → 渲染 {尺寸(输出)}"), "#F0D8A8")
-        HtmlColorLabel4.Text = 标签("帧率", If(视频 Is Nothing, "—", $"输入 {帧率(视频.平均帧率)} → 实际 {最近实际帧率:F2} fps"), "#B7D7F0")
-        HtmlColorLabel5.Text = 标签("视频实时比特率", 比特率(If(快照 Is Nothing, 0UL, 快照.视频实时比特率)), "#CDB6EA")
+        HCL_视频解码器.Text = 标签("视频解码器", If(视频 Is Nothing, "—", $"{视频.编码.ToUpperInvariant()} | {解码}"), "#C6D8FF")
+        HCL_视频输入格式.Text = 标签("输入格式", If(视频 Is Nothing, "—", 视频输入格式(视频)), "#B7D7F0")
+        HCL_视频输出格式.Text = 标签("输出格式", If(视频 Is Nothing, "—", 视频输出格式(视频, 快照)), "#9ED7C5")
+        HCL_视频输入分辨率和实际渲染.Text = 标签("分辨率", If(视频 Is Nothing, "—", $"输入 {分辨率(视频.宽度, 视频.高度)} → 渲染 {尺寸(输出)}"), "#F0D8A8")
+        HCL_视频输入帧率和实际渲染.Text = 标签("帧率", If(视频 Is Nothing, "—", $"输入 {帧率(视频.平均帧率)} → 实际 {最近实际帧率:F2} fps"), "#B7D7F0")
+        HCL_视频实时比特率.Text = 标签("视频实时比特率", 比特率(If(快照 Is Nothing, 0UL, 快照.视频实时比特率)), "#CDB6EA")
         Dim 模式 = If(获取WASAPI模式 Is Nothing, WASAPI共享模式.共享, 安全获取(获取WASAPI模式))
-        HtmlColorLabel10.Text = 标签("音频 WASAPI", If(音频 Is Nothing, $"— · {模式}", $"{音频.编码.ToUpperInvariant()} | {模式}"), If(模式 = WASAPI共享模式.独占, "IndianRed", "#9ED7C5"))
-        HtmlColorLabel9.Text = 标签("输入格式", If(音频 Is Nothing, "—", 音频输入格式(音频)), "#B7D7F0")
-        HtmlColorLabel15.Text = 标签("输出格式", If(音频 Is Nothing, "—", 音频输出格式(音频)), "#9ED7C5")
-        HtmlColorLabel6.Text = 标签("音频实时比特率", 比特率(If(快照 Is Nothing, 0UL, 快照.音频实时比特率)), "#CDB6EA")
+        HCL_音频编码.Text = 标签("音频 WASAPI", If(音频 Is Nothing, $"— · {模式}", $"{音频.编码.ToUpperInvariant()} | {模式}"), If(模式 = WASAPI共享模式.独占, "IndianRed", "#9ED7C5"))
+        HCL_音频输入格式.Text = 标签("输入格式", If(音频 Is Nothing, "—", 音频输入格式(音频)), "#B7D7F0")
+        HCL_音频输出格式.Text = 标签("输出格式", If(音频 Is Nothing, "—", 音频输出格式(音频)), "#9ED7C5")
+        HCL_音频实时比特率.Text = 标签("音频实时比特率", 比特率(If(快照 Is Nothing, 0UL, 快照.音频实时比特率)), "#CDB6EA")
     End Sub
 
     Private Sub 重置响度条()
@@ -114,10 +106,20 @@ Public Class Form媒体信息
 
     Private Sub 刷新响度条()
         Dim peaks = 安全获取(获取音频峰值)
+        Dim inputPeaks = 安全获取(获取输入音频峰值)
         For i = 0 To 响度条.Length - 1
             Dim peak = If(peaks IsNot Nothing AndAlso i < peaks.Length, peaks(i), 0.0F)
             响度条(i).Value = CInt(Math.Clamp(20.0 * Math.Log10(Math.Clamp(peak, 0.000001F, 1.0F)), -60.0, 0.0))
+            peak = If(inputPeaks IsNot Nothing AndAlso i < inputPeaks.Length, inputPeaks(i), 0.0F)
+            输入响度条(i).Value = CInt(Math.Clamp(20.0 * Math.Log10(Math.Clamp(peak, 0.000001F, 1.0F)), -60.0, 0.0))
         Next
+    End Sub
+
+    Private Sub 调整响度计布局()
+        If ModernPanel3 Is Nothing OrElse 输入音频响度计 Is Nothing OrElse 输出音频响度计 Is Nothing Then Return
+        ModernPanel3.PerformLayout()
+        输入音频响度计.Height = Math.Max(1, (输入音频响度计.Height + 输出音频响度计.Height) \ 2)
+        ModernPanel3.PerformLayout()
     End Sub
 
     Private Sub 刷新列表(信息 As 媒体信息, 快照 As 播放器快照)
@@ -169,7 +171,7 @@ Public Class Form媒体信息
                            If(流.外部RPU扩展可用,
                               "外部 RPU 扩展已加载，当前未启用处理（测试）", 流.HDR处理说明)))
                     If 流.外部RPU扩展可用 Then
-                        添加条目(group, "Dolby Vision 测试扩展",
+                        添加条目(group, "外部色彩扩展",
                             If(流.外部RPU扩展已启用, "已启用", "已加载，尚未处理当前帧"))
                     End If
                     If 快照 IsNot Nothing AndAlso 快照.当前视频流 = 流.索引 Then
@@ -257,10 +259,10 @@ Public Class Form媒体信息
         添加分组(group, groupText) : 添加条目(group, name, value)
     End Sub
     Private Sub 调整左栏宽度()
-        If Panel3 Is Nothing OrElse Panel3.ClientSize.Width <= 0 Then Return
-        Dim contentWidth = Panel3.Controls.OfType(Of Control)().Where(Function(x) x.Dock = DockStyle.Left).Sum(Function(x) x.Width)
+        If 输出音频响度计 Is Nothing OrElse 输出音频响度计.ClientSize.Width <= 0 Then Return
+        Dim contentWidth = 输出音频响度计.Controls.OfType(Of Control)().Where(Function(x) x.Dock = DockStyle.Left).Sum(Function(x) x.Width)
         If contentWidth <= 0 Then Return
-        Panel1.Width = Math.Max(Panel1.Padding.Horizontal + contentWidth, Panel1.Width + contentWidth - Panel3.ClientSize.Width)
+        Panel1.Width = Math.Max(Panel1.Padding.Horizontal + contentWidth, Panel1.Width + contentWidth - 输出音频响度计.ClientSize.Width)
         Panel1.MinimumSize = New Size(Panel1.Width, 0)
     End Sub
     Private Sub 调整列表列宽()
@@ -344,10 +346,6 @@ Public Class Form媒体信息
     End Function
     Private Shared Function 编码HTML(value As String) As String
         Return If(value, String.Empty).Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("""", "&quot;")
-    End Function
-    Private Shared Function 图层延迟(status As 定时文字状态) As String
-        If status Is Nothing OrElse status.已提交序号 <= status.已绘制序号 Then Return "< 1 ms"
-        Return $"{(status.已提交序号 - status.已绘制序号) * 1000.0R / 60.0R:F1} ms"
     End Function
     Private Shared Function 空值(value As String, Optional fallback As String = "—") As String
         Return If(String.IsNullOrWhiteSpace(value), fallback, value)

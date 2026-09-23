@@ -262,10 +262,14 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 字幕文本 = If(字幕 Is Nothing, "未加载", 合并字段(
             字幕.格式.ToString().ToUpperInvariant(),
             $"总数量 {字幕条目数(字幕)}",
-            If(字幕状态 Is Nothing, String.Empty, $"当前正在渲染 {字幕状态.命令数}")))
+            If(字幕状态 Is Nothing, String.Empty, $"正在渲染 {字幕状态.命令数}"),
+            $"延迟 {图层延迟(字幕状态)}"))
         Dim 弹幕文本 = If(弹幕 Is Nothing, "未加载", 合并字段(
             "哔哩哔哩 XML", $"总数量 {弹幕.数量}",
-            If(弹幕状态 Is Nothing, String.Empty, $"当前正在渲染 {弹幕状态.命令数}")))
+            If(弹幕状态 Is Nothing, String.Empty, $"正在渲染 {弹幕状态.命令数}"),
+            $"延迟 {图层延迟(弹幕状态)}"))
+        If 字幕 Is Nothing Then 字幕文本 &= $"   延迟 {图层延迟(字幕状态)}"
+        If 弹幕 Is Nothing Then 弹幕文本 &= $"   延迟 {图层延迟(弹幕状态)}"
         结果.Add(配对行("字幕：", 字幕文本, 青色, 8))
         结果.Add(配对行("弹幕：", 弹幕文本, 橙色))
         Return 结果
@@ -529,6 +533,11 @@ Friend NotInheritable Class 播放器信息图层呈现器
             If(位深 > 0, $"位深 {位深}bit", String.Empty),
             If(声道 > 0, $"声道数 {声道}", String.Empty),
             $"缓冲区 {快照.音频缓冲时长.TotalMilliseconds:0}ms")
+    End Function
+
+    Private Shared Function 图层延迟(状态 As 定时文字状态) As String
+        If 状态 Is Nothing OrElse 状态.已提交序号 <= 状态.已绘制序号 Then Return "<1ms"
+        Return $"{(状态.已提交序号 - 状态.已绘制序号) * 1000.0R / 60.0R:F1}ms"
     End Function
 
     Private Shared Function 字幕条目数(字幕 As 外部字幕轨道) As String
