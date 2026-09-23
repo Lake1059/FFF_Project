@@ -59,6 +59,16 @@ Public Class Form1
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         当前主窗体 = Me
         LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Outline
+        LakeUI.MessageDialogOptions.BackdropEnabled = True
+        LakeUI.MessageDialogOptions.BackdropMode = LakeUI.PopupBackdropMode.Auto
+        LakeUI.MessageDialogOptions.BackdropTintColor = Color.FromArgb(120, 0, 0, 0)
+        LakeUI.MessageDialogOptions.BackdropBlurRadius = 30
+        LakeUI.MessageDialogOptions.BackdropBlurPasses = 2
+        LakeUI.FloatingToolTipForm.BackdropEnabled = True
+        LakeUI.FloatingToolTipForm.BackdropMode = LakeUI.PopupBackdropMode.Auto
+        LakeUI.FloatingToolTipForm.BackdropTintColor = Color.FromArgb(120, 0, 0, 0)
+        LakeUI.FloatingToolTipForm.BackdropBlurRadius = 30
+        LakeUI.FloatingToolTipForm.BackdropBlurPasses = 2
         ThisIsYourWindow1.Attach(Me)
         KeyPreview = True
         MinimumSize = New Size(875, 500)

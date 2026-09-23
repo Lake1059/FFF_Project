@@ -247,6 +247,13 @@ Friend Module Program
                 Console.WriteLine("GPU 配置下图片打开即显示首帧回归通过。")
                 Return 0
             End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--chapter-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 章节媒体路径 = Path.GetFullPath(参数(1))
+                检查文件(章节媒体路径)
+                测试媒体章节(章节媒体路径)
+                Console.WriteLine("媒体章节标题、时间轴与章节跳转回归通过。")
+                Return 0
+            End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--stream-selector-regression", StringComparison.OrdinalIgnoreCase) Then
                 Dim 流媒体路径 = Path.GetFullPath(参数(1))
                 检查文件(流媒体路径)
@@ -1075,6 +1082,24 @@ Friend Module Program
         Next
         Throw New InvalidOperationException("SUP 字幕在限定读取次数内没有产生显示事件。")
     End Function
+
+    Private Sub 测试媒体章节(媒体路径 As String)
+        Using 会话 As New 播放器会话(New 播放器配置 With {
+            .解码器 = 解码模式.CPU,
+            .输出窗口句柄 = IntPtr.Zero
+        })
+            会话.打开Async(媒体路径).GetAwaiter().GetResult()
+            Dim 信息 = 会话.当前媒体信息
+            断言(信息 IsNot Nothing, "没有返回媒体信息。")
+            断言(信息.章节 IsNot Nothing AndAlso 信息.章节.Count > 0, "媒体没有返回章节数据。")
+            Dim 章节 = 信息.章节(0)
+            断言(Not String.IsNullOrWhiteSpace(章节.标题), "首个章节缺少标题。")
+            断言(章节.开始时间100纳秒 >= 0 AndAlso 章节.开始时间100纳秒 < 信息.时长100纳秒,
+               $"首个章节时间不在媒体时长内：{章节.开始时间100纳秒}/{信息.时长100纳秒}。")
+            会话.跳转(TimeSpan.FromTicks(章节.开始时间100纳秒))
+            Console.WriteLine($"共读取 {信息.章节.Count} 个章节；首章 ""{章节.标题}"" 位于 {TimeSpan.FromTicks(章节.开始时间100纳秒)}。")
+        End Using
+    End Sub
 
     Private Sub 测试流选择器后端(媒体路径 As String)
         Using 会话 As New 播放器会话(New 播放器配置 With {

@@ -816,6 +816,9 @@ Partial Class Form1
         ' ETB_媒体进度条
         ' 
         ETB_媒体进度条.BackColor = Color.Transparent
+        ETB_媒体进度条.ChapterMarkerColor = Color.Silver
+        ETB_媒体进度条.ChapterMarkerCornerStrength = 0.25F
+        ETB_媒体进度条.ChapterMarkerEdgeDistance = 1
         ETB_媒体进度条.Dock = DockStyle.Fill
         ETB_媒体进度条.LabelColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_媒体进度条.LabelLineColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))

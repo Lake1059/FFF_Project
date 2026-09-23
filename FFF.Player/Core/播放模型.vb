@@ -450,6 +450,8 @@ Public NotInheritable Class 媒体信息
     Public Property 是静态图片 As Boolean
     <JsonPropertyName("metadata")>
     Public Property 元数据 As Dictionary(Of String, String) = New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+    <JsonPropertyName("chapters")>
+    Public Property 章节 As List(Of 媒体章节信息) = New List(Of 媒体章节信息)()
     <JsonPropertyName("streams")>
     Public Property 流 As List(Of 媒体流信息) = New List(Of 媒体流信息)()
     <JsonIgnore>
@@ -458,6 +460,13 @@ Public NotInheritable Class 媒体信息
             Return TimeSpan.FromTicks(时长100纳秒)
         End Get
     End Property
+End Class
+
+Public NotInheritable Class 媒体章节信息
+    <JsonPropertyName("startTime100ns")>
+    Public Property 开始时间100纳秒 As Long
+    <JsonPropertyName("title")>
+    Public Property 标题 As String = String.Empty
 End Class
 
 Public NotInheritable Class 媒体流信息

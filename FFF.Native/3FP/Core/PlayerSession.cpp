@@ -3143,6 +3143,17 @@ void PlayerSession::RebuildMediaInfo() noexcept {
         << ",\"staticImage\":" << (staticImage_ ? "true" : "false")
         << ",\"metadata\":";
     AppendDictionaryJson(json, format_->metadata);
+    json << ",\"chapters\":[";
+    for (unsigned index = 0; index < format_->nb_chapters; ++index) {
+        if (index) json << ',';
+        const auto* chapter = format_->chapters[index];
+        const auto* title = av_dict_get(chapter->metadata, "title", nullptr, 0);
+        const auto start100ns = av_rescale_q(chapter->start, chapter->time_base,
+            AVRational{1, static_cast<int>(TicksPerSecond)}) - TimelineOrigin100ns(format_);
+        json << "{\"startTime100ns\":" << std::max<std::int64_t>(0, start100ns)
+            << ",\"title\":\"" << EscapeJson(title && title->value ? title->value : "") << "\"}";
+    }
+    json << ']';
     json << ",\"streams\":[";
     for (unsigned index = 0; index < format_->nb_streams; ++index) {
         if (index) json << ',';

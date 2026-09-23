@@ -177,6 +177,7 @@ Friend NotInheritable Class 播放器界面呈现器
 
     Friend Sub 更新媒体信息(信息 As 媒体信息, 快照 As 播放器快照)
         当前媒体信息 = 信息
+        更新章节标记(信息)
         已显示视频流索引 = If(快照 Is Nothing, -1, 快照.当前视频流)
         已显示音频流索引 = If(快照 Is Nothing, -1, 快照.当前音频流)
         Dim 视频流 As 媒体流信息 = Nothing
@@ -260,9 +261,30 @@ Friend NotInheritable Class 播放器界面呈现器
     End Sub
 
     Private Sub 进度条_MouseDown(sender As Object, e As MouseEventArgs)
-        If e.Button = MouseButtons.Left AndAlso 进度条可调整() Then 正在拖动进度条 = True
+        If e.Button <> MouseButtons.Left OrElse Not 进度条可调整() Then Return
+        Dim scale As Single = CSng(进度条.DeviceDpi / 96.0)
+        Dim width = 10.0F * scale
+        Dim height = 8.0F * scale
+        Dim distance = 2.0F * scale
+        For index = 进度条.ChapterMarkers.Count - 1 To 0 Step -1
+            Dim marker = 进度条.ChapterMarkers(index)
+            If Double.IsNaN(marker.Position) OrElse marker.Position < 进度条.Minimum OrElse marker.Position > 进度条.Maximum Then Continue For
+            Dim x = CSng(进度条.Padding.Left + (marker.Position - 进度条.Minimum) / (进度条.Maximum - 进度条.Minimum) * (进度条.ClientSize.Width - 进度条.Padding.Horizontal))
+            Dim rect As New RectangleF(x - width / 2.0F, distance, width, height)
+            If Not rect.Contains(e.Location) Then Continue For
+            正在拖动进度条 = False
+            正在更新进度条 = True
+            Try
+                进度条.Value = marker.Position
+            Finally
+                正在更新进度条 = False
+            End Try
+            RaiseEvent 请求跳转到关键帧(Me,
+                New 播放器跳转请求事件参数(TimeSpan.FromMilliseconds(进度条.Value)))
+            Return
+        Next
+        正在拖动进度条 = True
     End Sub
-
     Private Sub 进度条_MouseUp(sender As Object, e As MouseEventArgs)
         If e.Button <> MouseButtons.Left OrElse Not 正在拖动进度条 Then Return
         正在拖动进度条 = False
@@ -316,6 +338,7 @@ Friend NotInheritable Class 播放器界面呈现器
         正在更新进度条 = True
         Try
             未知时长已知上限毫秒 = 0
+            进度条.ClearChapterMarkers()
             进度条.Minimum = 0
             进度条.Maximum = 0
             进度条.Value = 0
@@ -325,6 +348,16 @@ Friend NotInheritable Class 播放器界面呈现器
         End Try
     End Sub
 
+    Private Sub 更新章节标记(信息 As 媒体信息)
+        进度条.ClearChapterMarkers()
+        If 信息 Is Nothing OrElse 信息.章节 Is Nothing Then Return
+        For Each 章节 In 信息.章节
+            Dim 位置 = TimeSpan.FromTicks(章节.开始时间100纳秒).TotalMilliseconds
+            If 位置 < 0 OrElse (信息.时长 > TimeSpan.Zero AndAlso 位置 > 信息.时长.TotalMilliseconds) Then Continue For
+            Dim 标题 = If(String.IsNullOrWhiteSpace(章节.标题), "未命名章节", 章节.标题)
+            进度条.AddChapterMarker(位置, 标题, LakeUI.ExcellentTrackBar.LabelSideEnum.TopOrLeft)
+        Next
+    End Sub
     Private Sub 更新解码按钮()
         设置自适应文本(解码按钮, If(解码器提供器() = 解码模式.GPU, "GPU", "CPU"))
     End Sub
