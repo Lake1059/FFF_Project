@@ -1561,6 +1561,12 @@ Public NotInheritable Class 播放器控制器
     End Function
 
     Private Function 取得HDR模式说明(快照 As 播放器快照) As String
+        Dim 外部扩展可用 = False
+        If 快照.HDR规格 = HDR格式.杜比视界 AndAlso 快照.HDR处理路径 <> HDR处理路径.外部RPU处理 Then
+            Dim 信息 = 安全读取媒体信息()
+            外部扩展可用 = 信息 IsNot Nothing AndAlso 信息.流.Any(
+                Function(流) 流.索引 = 快照.当前视频流 AndAlso 流.外部RPU扩展可用)
+        End If
         Select Case 当前色彩输出
             Case 色彩输出模式.映射到SDR
                 Return "HDR 映射到 SDR"
@@ -1568,20 +1574,22 @@ Public NotInheritable Class 播放器控制器
                 Return "原始 HDR 按 SDR 呈现"
             Case 色彩输出模式.峰值映射HDR
                 Return If(快照.实际色彩模式 = 色彩输出模式.峰值映射HDR,
-                    $"{HDR规格文本(快照)} 真实高亮",
+                    $"{HDR规格文本(快照, 外部扩展可用)} 真实高亮",
                     "HDR 目标不可用，已映射到 SDR")
             Case Else
                 Return String.Empty
         End Select
     End Function
 
-    Private Shared Function HDR规格文本(快照 As 播放器快照) As String
+    Private Shared Function HDR规格文本(快照 As 播放器快照, 外部扩展可用 As Boolean) As String
         Select Case 快照.HDR规格
             Case HDR格式.HDR10Plus : Return "HDR10+"
             Case HDR格式.HLG : Return "HLG"
             Case HDR格式.杜比视界
                 Return If(快照.HDR处理路径 = HDR处理路径.外部RPU处理,
-                    "Dolby Vision RPU → scRGB（测试）", "Dolby Vision 基础层 → HDR10")
+                    "Dolby Vision RPU → scRGB（测试）",
+                    If(外部扩展可用, "Dolby Vision 外部 RPU 扩展已加载（测试）",
+                       "Dolby Vision 基础层 → HDR10"))
             Case HDR格式.HDRVivid : Return "HDR Vivid"
             Case Else : Return "HDR10"
         End Select

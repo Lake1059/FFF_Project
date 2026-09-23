@@ -890,6 +890,21 @@ Friend Module Program
     End Sub
 
     Private Sub 测试HDR规格处理策略()
+        Dim HDR文本方法 = GetType(播放器控制器).GetMethod(
+            "HDR规格文本", BindingFlags.Static Or BindingFlags.NonPublic)
+        Dim DV回退快照 As New 播放器快照(New 原生播放器快照 With {
+            .HDR格式 = CUInt(HDR格式.杜比视界),
+            .HDR处理路径 = CUInt(HDR处理路径.杜比视界兼容基础层回退)})
+        Dim DV处理快照 As New 播放器快照(New 原生播放器快照 With {
+            .HDR格式 = CUInt(HDR格式.杜比视界),
+            .HDR处理路径 = CUInt(HDR处理路径.外部RPU处理)})
+        断言(String.Equals(CStr(HDR文本方法?.Invoke(Nothing, {DV回退快照, True})),
+            "Dolby Vision 外部 RPU 扩展已加载（测试）", StringComparison.Ordinal) AndAlso
+            String.Equals(CStr(HDR文本方法?.Invoke(Nothing, {DV回退快照, False})),
+            "Dolby Vision 基础层 → HDR10", StringComparison.Ordinal) AndAlso
+            String.Equals(CStr(HDR文本方法?.Invoke(Nothing, {DV处理快照, True})),
+            "Dolby Vision RPU → scRGB（测试）", StringComparison.Ordinal),
+            "Dolby Vision 操作提示未区分扩展已加载、实际处理与基础层回退。")
         Using 控制器 As New 播放器控制器(Function() IntPtr.Zero, Nothing)
             控制器.设置HDR峰值亮度(2000.0F)
             断言(控制器.取得HDR输出峰值参数(色彩输出模式.映射到SDR) = 0.0F AndAlso
