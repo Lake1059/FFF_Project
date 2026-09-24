@@ -2698,8 +2698,8 @@ Friend Module Program
                         "音频：FLAC - WASAPI 独占",
                         "输入：采样 48000Hz   位深 24bit   声道数 2   实时码率 1.41 Mbps",
                         "输出：FLOAT PCM   采样 48000Hz   位深 32bit   声道数 2   缓冲区 25ms",
-                        "字幕：SRT   总数量 2   当前正在渲染 1001   平均渲染延迟 < 1 ms",
-                        "弹幕：哔哩哔哩 XML   总数量 2   当前正在渲染 2002   平均渲染延迟 < 1 ms"}
+                        "字幕：SRT   总数量 2   正在渲染 1001   延迟 <1ms",
+                        "弹幕：哔哩哔哩 XML   总数量 2   正在渲染 2002   延迟 <1ms"}
                     断言(实际.SequenceEqual(预期),
                         "信息层逐字段文本不符合中文标签、三空格分隔或字段白名单。" & vbCrLf &
                         String.Join(vbCrLf, 实际))
@@ -2740,7 +2740,7 @@ Friend Module Program
                         当前字幕 = 按需字幕
                         当前弹幕 = Nothing
                         当前字幕状态 = Nothing
-                        当前弹幕状态 = Nothing
+                        当前弹幕状态 = 弹幕状态
                         Dim 缺失信息 As New 媒体信息()
                         缺失信息.流.Add(New 媒体流信息 With {.索引 = 0, .类型 = "video"})
                         缺失信息.流.Add(New 媒体流信息 With {.索引 = 1, .类型 = "audio"})
@@ -2749,14 +2749,15 @@ Friend Module Program
                             .实际色彩模式 = CUInt(色彩输出模式.映射到SDR),
                             .当前视频流 = 0, .当前音频流 = 1})
                         Dim 缺失行 = 呈现器.读取调试文本行(缺失信息, 缺失快照, String.Empty)
-                        断言(缺失行.Contains("字幕：ASS   总数量 按需解码   平均渲染延迟 < 1 ms") AndAlso
-                               缺失行.Contains("弹幕：未加载   平均渲染延迟 < 1 ms"),
-                           "未加载字幕/弹幕状态或其延迟没有显示在播放器信息层。")
+                        断言(缺失行.Contains("字幕：ASS   总数量 按需解码   延迟 <1ms") AndAlso
+                               缺失行.Contains("弹幕：未加载"),
+                           "已加载字幕的延迟或未加载弹幕的状态显示不正确。")
                         当前字幕 = Nothing
+                        当前字幕状态 = 字幕状态
                         Dim 全未加载行 = 呈现器.读取调试文本行(缺失信息, 缺失快照, String.Empty)
-                        断言(全未加载行.Contains("字幕：未加载   平均渲染延迟 < 1 ms") AndAlso
-                               全未加载行.Contains("弹幕：未加载   平均渲染延迟 < 1 ms"),
-                           "未加载字幕/弹幕仍应保留状态行并附带延迟。")
+                        断言(全未加载行.Contains("字幕：未加载") AndAlso
+                               全未加载行.Contains("弹幕：未加载"),
+                           "未加载字幕/弹幕应保留状态行且不显示延迟。")
                         断言(Not 缺失行.Any(Function(x) x.Contains("?", StringComparison.Ordinal) OrElse
                                                      x.StartsWith("文件名：", StringComparison.Ordinal) OrElse
                                                      x.StartsWith("输入：", StringComparison.Ordinal) OrElse

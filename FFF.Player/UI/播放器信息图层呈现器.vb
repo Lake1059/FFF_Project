@@ -268,8 +268,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
             "哔哩哔哩 XML", $"总数量 {弹幕.数量}",
             If(弹幕状态 Is Nothing, String.Empty, $"正在渲染 {弹幕状态.命令数}"),
             $"延迟 {图层延迟(弹幕状态)}"))
-        If 字幕 Is Nothing Then 字幕文本 &= $"   延迟 {图层延迟(字幕状态)}"
-        If 弹幕 Is Nothing Then 弹幕文本 &= $"   延迟 {图层延迟(弹幕状态)}"
         结果.Add(配对行("字幕：", 字幕文本, 青色, 8))
         结果.Add(配对行("弹幕：", 弹幕文本, 橙色))
         Return 结果
