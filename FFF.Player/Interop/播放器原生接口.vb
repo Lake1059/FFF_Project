@@ -316,6 +316,65 @@ End Class
 Friend Module 播放器原生接口
     Friend Const 动态库名称 As String = "FFF.Native.dll"
 
+    ' MKS 字幕容器探测：FFF3FP_ProbeSubtitleStreams 是纯新增导出（API 版本仍为 15），
+    ' 旧内核没有该入口点，因此不做静态导入，而是运行时解析并缓存；解析失败按
+    ' “无探测能力”降级（MKS 不自动加载，但绝不崩）。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 探测字幕流原型(路径UTF8 As IntPtr, 输出UTF8 As IntPtr,
+        输出大小 As UInteger, ByRef 必需大小 As UInteger) As 原生播放器结果
+
+    Private ReadOnly 探测字幕流函数 As 探测字幕流原型 = 解析探测字幕流()
+
+    Private Function 解析探测字幕流() As 探测字幕流原型
+        Dim 句柄 = IntPtr.Zero
+        Try
+            ' TryLoad 成功后不再 Free：进程持有内核库，保证函数指针生命周期。
+            If Not NativeLibrary.TryLoad(动态库名称, GetType(播放器原生接口).Assembly, Nothing, 句柄) OrElse
+                句柄 = IntPtr.Zero Then Return Nothing
+            Dim 地址 = NativeLibrary.GetExport(句柄, "FFF3FP_ProbeSubtitleStreams")
+            Return Marshal.GetDelegateForFunctionPointer(Of 探测字幕流原型)(地址)
+        Catch ex As EntryPointNotFoundException
+            Return Nothing
+        Catch ex As Exception
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>当前内核是否提供字幕流探测能力（旧内核返回 False）。</summary>
+    Friend ReadOnly Property 支持字幕流探测 As Boolean
+        Get
+            Return 探测字幕流函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>按路径探测字幕流，返回顶层 JSON；无探测能力或调用失败返回 Nothing。</summary>
+    Friend Function 探测字幕流JSON(本地路径 As String) As String
+        If String.IsNullOrWhiteSpace(本地路径) Then Return Nothing
+        Dim 函数 = 探测字幕流函数
+        If 函数 Is Nothing Then Return Nothing
+        Dim 路径指针 = IntPtr.Zero
+        Dim 输出指针 = IntPtr.Zero
+        Try
+            路径指针 = Marshal.StringToCoTaskMemUTF8(本地路径)
+            Dim 必需大小 As UInteger = 0
+            Dim 首次 = 函数(路径指针, IntPtr.Zero, 0UI, 必需大小)
+            If 首次 <> 原生播放器结果.成功 AndAlso 首次 <> 原生播放器结果.缓冲区不足 Then Return Nothing
+            ' 内核契约保证至少返回终止 NUL（required >= 1）；对违反契约的返回
+            ' 直接放弃，避免 AllocCoTaskMem 的未清零内存被当作字符串读越界
+            ' （与 播放器会话.读取原生文本 的 required <= 1 守卫同形）。
+            If 必需大小 <= 1UI Then Return Nothing
+            输出指针 = Marshal.AllocCoTaskMem(CInt(必需大小))
+            Dim 结果 = 函数(路径指针, 输出指针, 必需大小, 必需大小)
+            If 结果 <> 原生播放器结果.成功 Then Return Nothing
+            Return Marshal.PtrToStringUTF8(输出指针)
+        Catch ex As Exception
+            Return Nothing
+        Finally
+            If 输出指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(输出指针)
+            If 路径指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(路径指针)
+        End Try
+    End Function
+
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Friend Delegate Function 原生授权对话框回调(代码UTF8 As IntPtr, 容量 As UInteger) As Integer
 

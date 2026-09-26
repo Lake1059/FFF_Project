@@ -3,6 +3,7 @@
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Render/VideoRenderer.h"
 #include "3FP/Render/ColorExtension.h"
+#include "3FP/Subtitle/SubtitleProbe.h"
 
 #include <cmath>
 
@@ -188,6 +189,8 @@ FFFResult FFF3FP_GetMediaInfo(const FFF3FPHandle player, char* output, const std
     std::uint32_t* required) noexcept { if (!player) return FFFResult::InvalidArgument; try { return CopyUtf8(static_cast<PlayerSession*>(player)->MediaInfo(), output, size, required); } catch (...) { return FFFResult::NativeFailure; } }
 FFFResult FFF3FP_GetLastError(const FFF3FPHandle player, char* output, const std::uint32_t size,
     std::uint32_t* required) noexcept { if (!player) return FFFResult::InvalidArgument; try { return CopyUtf8(static_cast<PlayerSession*>(player)->LastError(), output, size, required); } catch (...) { return FFFResult::NativeFailure; } }
+FFFResult FFF3FP_ProbeSubtitleStreams(const char* localPathUtf8, char* output, const std::uint32_t size,
+    std::uint32_t* required) noexcept { try { return ProbeSubtitleStreams(localPathUtf8, output, size, required); } catch (...) { return FFFResult::NativeFailure; } }
 // Render-target diagnostics
 FFFResult FFF3FP_GetRenderTargetInfo(const FFF3FPHandle player,
     FFF3FPRenderTargetInfo* info) noexcept {

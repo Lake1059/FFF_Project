@@ -528,6 +528,14 @@ FFF3FP_API FFFResult FFF3FP_MeasureTimedTextWidth(const char* textUtf8,
     float* width) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetMediaInfo(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
+// Probes the subtitle streams of a container file without opening a playback
+// session. The JSON output reuses the stream shape of FFF3FP_GetMediaInfo and
+// adds a top-level startTimeSeconds (containers may carry a nonzero start
+// time; a standalone .mks has no reference stream to normalize against).
+// Success with an empty streams array means the file opened but has no
+// subtitle stream.
+FFF3FP_API FFFResult FFF3FP_ProbeSubtitleStreams(const char* localPathUtf8,
+    char* outputUtf8, std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 // Render-target diagnostics. RenderTargetInfo reports the

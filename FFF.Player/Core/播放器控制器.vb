@@ -321,36 +321,38 @@ Public NotInheritable Class 播放器控制器
     ''' <summary>
     ''' 在不重建媒体会话、不改变播放位置的前提下替换外部字幕。新文件先在
     ''' 后台完整解析，成功后才交换轨道；加载失败期间旧字幕始终保持可用。
+    ''' 字幕容器（MKS）可用 <paramref name="指定流索引"/> 精确选轨，-1 表示自动选轨。
     ''' </summary>
-    Public Sub 替换字幕(路径 As String)
+    Public Sub 替换字幕(路径 As String, Optional 指定流索引 As Integer = -1)
         If 已释放 OrElse String.IsNullOrWhiteSpace(路径) Then Return
         If Not 是否有媒体 Then
             RaiseEvent 播放错误(Me, New 播放器错误事件参数("请先播放媒体，再加载外部字幕。", "无法加载字幕"))
             Return
         End If
         If Not File.Exists(路径) OrElse Not 外部字幕自动加载器.是支持的字幕文件(路径) Then
-            RaiseEvent 播放错误(Me, New 播放器错误事件参数("仅可加载存在的 SRT、ASS、SSA 或 SUP 字幕文件。", "无法加载字幕"))
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数("仅可加载存在的 SRT、ASS、SSA、SUP 或 MKS 字幕文件。", "无法加载字幕"))
             Return
         End If
         Dim 本次取消 As New CancellationTokenSource()
         Dim 上次取消 = Interlocked.Exchange(字幕加载取消, 本次取消)
         上次取消?.Cancel()
         Dim 媒体路径 = 当前文件路径
-        Dim 忽略 = 替换字幕Async(Path.GetFullPath(路径), 媒体路径, 本次取消)
+        Dim 忽略 = 替换字幕Async(Path.GetFullPath(路径), 媒体路径, 本次取消, 指定流索引)
     End Sub
 
     Private Async Function 替换字幕Async(字幕路径 As String, 媒体路径 As String,
-                                       本次取消 As CancellationTokenSource) As Task
+                                       本次取消 As CancellationTokenSource,
+                                       指定流索引 As Integer) As Task
         Dim 候选轨道 As 外部字幕轨道 = Nothing
         Try
-            候选轨道 = Await 外部字幕自动加载器.加载字幕Async(字幕路径, 媒体路径, 本次取消.Token)
+            候选轨道 = Await 外部字幕自动加载器.加载字幕Async(字幕路径, 媒体路径, 本次取消.Token, 指定流索引)
             If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
                 Not ReferenceEquals(字幕加载取消, 本次取消) OrElse
                 Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
             ' Interlocked documents the publication contract for test hosts that
             ' do not provide a UI SynchronizationContext. In the application the
             ' continuation and renderer timer are additionally serialized by UI.
-            添加外部字幕候选(候选轨道.路径, 候选轨道.格式)
+            注册容器字幕轨候选(候选轨道)
             发布外部字幕(候选轨道)
             候选轨道 = Nothing
             RaiseEvent 外部字幕已加载(Me,
@@ -367,6 +369,25 @@ Public NotInheritable Class 播放器控制器
             本次取消.Dispose()
         End Try
     End Function
+
+    ''' <summary>
+    ''' 字幕容器（MKS）加载成功后，把容器内全部轨注册为候选（带轨信息）供菜单切轨；
+    ''' 同路径的文件级候选（轨索引 -1）已被轨级候选取代，一并移除避免菜单重复。
+    ''' </summary>
+    Private Sub 注册容器字幕轨候选(轨道 As 外部字幕轨道)
+        If 轨道.容器字幕轨 Is Nothing OrElse 轨道.容器字幕轨.Length = 0 Then
+            添加外部字幕候选(轨道.路径, 轨道.格式)
+            Return
+        End If
+        Dim 完整路径 = Path.GetFullPath(轨道.路径)
+        Dim 剩余 = Volatile.Read(外部字幕候选快照).Where(
+            Function(x) Not (String.Equals(x.路径, 完整路径, StringComparison.OrdinalIgnoreCase) AndAlso
+                             x.轨索引 < 0)).ToArray()
+        Volatile.Write(外部字幕候选快照, 剩余)
+        For Each 轨 In 轨道.容器字幕轨
+            添加外部字幕候选(轨道.路径, 轨道.格式, 轨)
+        Next
+    End Sub
 
     Public Sub 关闭字幕()
         If 已释放 Then Return
@@ -393,15 +414,21 @@ Public NotInheritable Class 播放器控制器
         RaiseEvent 状态已变化(Me, EventArgs.Empty)
     End Sub
 
-    Public Sub 选择外部字幕(路径 As String)
+    ''' <summary>选择外部字幕；字幕容器（MKS）可带轨索引切轨，-1 表示文件本身。</summary>
+    Public Sub 选择外部字幕(路径 As String, Optional 指定流索引 As Integer = -1)
         If 已释放 OrElse String.IsNullOrWhiteSpace(路径) Then Return
         Dim 完整路径 = Path.GetFullPath(路径)
         Dim 已加载 = Volatile.Read(已导入外部字幕)
         If 已加载 IsNot Nothing AndAlso
             String.Equals(已加载.路径, 完整路径, StringComparison.OrdinalIgnoreCase) Then
-            选择外部字幕()
+            ' 同一容器的另一条轨：重新加载并原子换轨。
+            If 指定流索引 >= 0 AndAlso 指定流索引 <> 已加载.流索引 Then
+                替换字幕(完整路径, 指定流索引)
+            Else
+                选择外部字幕()
+            End If
         Else
-            替换字幕(完整路径)
+            替换字幕(完整路径, 指定流索引)
         End If
     End Sub
 
@@ -1391,6 +1418,7 @@ Public NotInheritable Class 播放器控制器
                 Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
             If 候选轨道 Is Nothing Then Return
 
+            注册容器字幕轨候选(候选轨道)
             发布外部字幕(候选轨道)
             候选轨道 = Nothing
             RaiseEvent 外部字幕已加载(Me,
@@ -1430,13 +1458,16 @@ Public NotInheritable Class 播放器控制器
         RaiseEvent 状态已变化(Me, EventArgs.Empty)
     End Sub
 
-    Private Sub 添加外部字幕候选(路径 As String, 格式 As 外部字幕格式)
+    Private Sub 添加外部字幕候选(路径 As String, 格式 As 外部字幕格式,
+                              Optional 字幕轨 As 媒体流信息 = Nothing)
         Dim 完整路径 = Path.GetFullPath(路径)
         Dim 当前候选 = Volatile.Read(外部字幕候选快照)
-        If 当前候选.Any(Function(x) String.Equals(x.路径, 完整路径, StringComparison.OrdinalIgnoreCase)) Then Return
+        ' 同一路径的多条容器轨都要保留（MKS 多轨切轨），去重按 (路径, 轨索引)。
+        If 当前候选.Any(Function(x) String.Equals(x.路径, 完整路径, StringComparison.OrdinalIgnoreCase) AndAlso
+                        x.轨索引 = If(字幕轨?.索引, -1)) Then Return
         Dim 新候选(当前候选.Length) As 外部字幕候选
         Array.Copy(当前候选, 新候选, 当前候选.Length)
-        新候选(新候选.Length - 1) = New 外部字幕候选(完整路径, 格式)
+        新候选(新候选.Length - 1) = New 外部字幕候选(完整路径, 格式, 字幕轨)
         Volatile.Write(外部字幕候选快照, 新候选)
     End Sub
 
