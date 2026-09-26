@@ -295,6 +295,14 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
                         生成ASS特效命令(字幕.ASS特效生成器, 播放位置, 区域)
                     Case 外部字幕格式.SUP
                         生成SUP命令(字幕.SUP生成器, 播放位置, 区域)
+                    Case 外部字幕格式.MKS
+                        ' MKS 是字幕容器：位图轨由 SUP 生成器、文本轨由 ASS 特效
+                        ' 生成器承载，与 外部字幕自动加载器.分派字幕轨 的选型一致。
+                        If 字幕.SUP生成器 IsNot Nothing Then
+                            生成SUP命令(字幕.SUP生成器, 播放位置, 区域)
+                        Else
+                            生成ASS特效命令(字幕.ASS特效生成器, 播放位置, 区域)
+                        End If
                 End Select
             Finally
                 字幕.离开使用()

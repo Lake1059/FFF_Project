@@ -4,6 +4,7 @@ Imports System.IO
 Imports System.Reflection
 Imports System.Runtime.InteropServices
 Imports System.Text
+Imports System.Text.Json
 Imports System.Threading
 Imports System.Windows.Forms
 Imports FFF.Player
@@ -337,6 +338,11 @@ Friend Module Program
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--external-subtitle-scan-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试外部字幕扫描顺序()
                 Console.WriteLine("外部字幕完整扫描、同名过滤和后缀优先级回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--mks-subtitle-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试MKS字幕容器支持()
+                Console.WriteLine("MKS 字幕容器白名单、选轨、探测反序列化与容器加载回归通过。")
                 Return 0
             End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--track-switch-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -1554,6 +1560,117 @@ Friend Module Program
             End Using
         End Using
         测试外部字幕扫描顺序()
+    End Sub
+
+    ''' <summary>
+    ''' MKS 字幕容器（PR-2）回归：白名单跟随、选轨规则、探测 JSON 反序列化同构、
+    ''' 探测能力（旧内核必须降级为 False 而不是崩），以及真实样本的容器加载端到端。
+    ''' </summary>
+    Private Sub 测试MKS字幕容器支持()
+        ' ── 1) 白名单跟随 ──
+        断言(外部字幕自动加载器.是支持的字幕文件("x.mks"), "白名单缺少 .mks。")
+        断言(外部字幕自动加载器.是支持的字幕文件("X.MKS"), ".mks 判定应大小写不敏感。")
+        断言(Not 外部字幕自动加载器.是支持的字幕文件("x.mkv"), ".mkv 不应被当作字幕容器。")
+        断言(外部字幕自动加载器.是支持的字幕文件("x.srt") AndAlso
+             外部字幕自动加载器.是支持的字幕文件("x.sup"), "既有白名单不应受 .mks 影响而丢失。")
+
+        ' ── 2) 同名扫描跟随白名单 ──
+        Dim 临时目录 = Path.Combine(Path.GetTempPath(), "3FP-mks-scan-" & Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(临时目录)
+        Try
+            Dim 媒体路径 = Path.Combine(临时目录, "演示.mkv")
+            File.WriteAllBytes(媒体路径, Array.Empty(Of Byte)())
+            File.WriteAllBytes(Path.Combine(临时目录, "演示.chi.mks"), Array.Empty(Of Byte)())
+            Dim 扫描结果 = 外部字幕自动加载器.扫描同名字幕(媒体路径)
+            断言(扫描结果.Count = 1 AndAlso 扫描结果(0).格式 = 外部字幕格式.MKS,
+               "同名 .mks 应被扫描为 MKS 候选。")
+        Finally
+            Directory.Delete(临时目录, True)
+        End Try
+
+        ' ── 3) 选轨规则 ──
+        Dim 轨(2) As 媒体流信息
+        轨(0) = New 媒体流信息 With {.索引 = 0, .类型 = "subtitle", .编码 = "subrip"}
+        轨(1) = New 媒体流信息 With {.索引 = 1, .类型 = "subtitle", .编码 = "ass", .是默认流 = True}
+        轨(2) = New 媒体流信息 With {.索引 = 2, .类型 = "subtitle", .编码 = "subrip"}
+        断言(外部字幕自动加载器.选择字幕轨(轨, -1) Is 轨(1), "自动选轨应优先 default/forced 轨。")
+        断言(外部字幕自动加载器.选择字幕轨(轨, 2) Is 轨(2), "显式指定流索引应覆盖 default 轨。")
+        断言(外部字幕自动加载器.选择字幕轨(轨, 9) Is Nothing, "指定不存在的流索引应返回 Nothing。")
+        Dim 无默认 = {轨(0), 轨(2)}
+        断言(外部字幕自动加载器.选择字幕轨(无默认, -1) Is 轨(0), "无 default/forced 时应选第一条轨。")
+        断言(外部字幕自动加载器.选择字幕轨(Array.Empty(Of 媒体流信息)(), -1) Is Nothing,
+           "空轨列表应返回 Nothing。")
+
+        ' ── 4) 探测 JSON 反序列化同构（字段名与内核输出精确对应）──
+        Const 样例JSON As String = "{" &
+            """format"":""matroska,webm"",""formatLongName"":""Matroska / WebM""," +
+            """startTimeSeconds"":141.810000,""streams"":[{""index"":0,""type"":""subtitle""," +
+            """streamId"":0,""codec"":""ass"",""codecLongName"":"""",""codecTag"":""""," +
+            """timeBaseNumerator"":1,""timeBaseDenominator"":1000,""bitRate"":0,""streamSize"":0," +
+            """lossless"":false,""startTime100ns"":0,""duration100ns"":0,""frames"":0," +
+            """extradataSize"":7200,""default"":true,""forced"":false,""disposition"":""default""," +
+            """metadata"":{""language"":""eng"",""title"":""Full [Tarulia edit]""}," +
+            """language"":""eng"",""title"":""Full [Tarulia edit]""}]}"
+        Dim 探测结果 = JsonSerializer.Deserialize(Of 字幕流探测结果)(样例JSON)
+        断言(探测结果 IsNot Nothing AndAlso Math.Abs(探测结果.起始秒 - 141.81) < 0.000001,
+           "探测 JSON 的 startTimeSeconds 反序列化失败。")
+        断言(探测结果.流.Length = 1 AndAlso 探测结果.流(0).索引 = 0 AndAlso
+             探测结果.流(0).编码 = "ass" AndAlso 探测结果.流(0).语言 = "eng" AndAlso
+             探测结果.流(0).标题 = "Full [Tarulia edit]" AndAlso 探测结果.流(0).是默认流,
+           "探测 JSON 的流字段（index/codec/language/title/default）反序列化失败。")
+        断言(探测结果.流(0).元数据.ContainsKey("language"), "探测 JSON 的 metadata 字典反序列化失败。")
+
+        ' ── 5) 探测能力：带新内核必须可用；旧内核走降级（不崩）──
+        断言(播放器原生接口.支持字幕流探测,
+           "测试环境的 FFF.Native.dll 不提供字幕流探测（需同步新版内核 DLL）。")
+
+        ' ── 6) 真实样本端到端：探测 → 容器加载 → 渲染出非空位图 ──
+        Dim 样本路径 = "c:\PLAN\3FCompare\3fp\samples\media\mks\official\multi_sub_official.mks"
+        If File.Exists(样本路径) Then
+            Dim 容器探测 = 外部字幕自动加载器.探测字幕容器轨(样本路径)
+            断言(容器探测 IsNot Nothing AndAlso 容器探测.流.Length = 7,
+               "真实样本应探测到 7 条字幕轨。")
+            Dim 语言集合 = 容器探测.流.Select(Function(x) x.语言).ToArray()
+            断言(语言集合.Contains("chi") AndAlso 语言集合.Contains("eng") AndAlso
+                 语言集合.Contains("ger"),
+               $"真实样本的语言标签异常：{String.Join("、", 语言集合)}。")
+
+            Dim 容器轨道 = 外部字幕自动加载器.加载字幕(样本路径)
+            Try
+                断言(容器轨道 IsNot Nothing AndAlso 容器轨道.格式 = 外部字幕格式.MKS,
+                   "MKS 容器加载后的轨道格式应为 MKS。")
+                断言(容器轨道.容器字幕轨 IsNot Nothing AndAlso 容器轨道.容器字幕轨.Length = 7,
+                   "容器轨道应携带全部 7 条轨供多轨菜单注册。")
+                断言(容器轨道.流索引 >= 0, "MKS 轨道必须携带显式流索引（-1 在 ASS 路径必然失败）。")
+                If 容器轨道.SUP生成器 IsNot Nothing Then
+                    Dim 区域 As New 视频显示区域(0, 0, 1920, 1080, 1, 96)
+                    Dim 绘制项 As New List(Of SUP字幕绘制项)()
+                    容器轨道.SUP生成器.生成帧(TimeSpan.FromSeconds(2), 区域, 绘制项)
+                    断言(绘制项.Count > 0, "MKS 位图轨未渲染出绘制项。")
+                Else
+                    Dim 位图 = 容器轨道.ASS特效生成器.生成帧(TimeSpan.FromSeconds(2), 640, 360)
+                    断言(位图 IsNot Nothing AndAlso 位图.像素BGRA.Length > 0, "MKS 文本轨未渲染出位图。")
+                End If
+                ' 经生产渲染分派（播放器定时文字图层呈现器.生成命令）再验一次：
+                ' 直接调生成器会绕过 格式→生成器 的 Select Case 分派，MKS 分支缺失
+                ' 时此前就是被这种路径掩盖的（假绿）。
+                Using 控件 As New 播放器画面控件()
+                    Using 呈现器 As New 播放器定时文字图层呈现器(控件, Function() Nothing,
+                        Function() 容器轨道, Sub(size, commands, sequence, frameRate) Return,
+                        图层内容:=定时文字图层内容.仅字幕)
+                        Dim 分派命令 = 呈现器.生成命令(New Size(640, 360), 640UI, 360UI,
+                            TimeSpan.FromSeconds(2), 容器轨道, 96.0F)
+                        断言(分派命令.Any(Function(x) Not String.IsNullOrEmpty(x.文本) OrElse
+                                          x.宽度 > 0),
+                           "MKS 轨没有经渲染分派产出字幕命令（分派缺 MKS 分支）。")
+                    End Using
+                End Using
+            Finally
+                容器轨道.释放()
+            End Try
+        Else
+            Console.WriteLine("（跳过真实样本端到端：未找到 " & 样本路径 & "）")
+        End If
     End Sub
 
     Private Sub 测试外部字幕扫描顺序()
