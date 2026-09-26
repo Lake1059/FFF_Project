@@ -4118,10 +4118,31 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     settings.colorMode = static_cast<std::uint32_t>(actualMode_);
     settings.reserved = 0;
     const auto hlgCompatibility = static_cast<std::uint32_t>(FFF3FPHdrCompatibility::Hlg);
-    settings.transfer = hdrState.format == FFF3FPHdrFormat::Hlg ||
-        (hdrState.format == FFF3FPHdrFormat::DolbyVision &&
-         (hdrState.compatibility & hlgCompatibility) != 0) ? 2u :
-        (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
+    // The decode transfer function must follow the *pixels*, not the metadata
+    // classification. ST 2094 dynamic metadata (HDR10+, HDR Vivid) is defined
+    // for streams that keep their own encoding: metadata arriving later must
+    // not change how the samples are decoded. A "HLG signal + HDR Vivid
+    // metadata" stream decoded as PQ over-brightens its highlights by an order
+    // of magnitude (docs/21), and would flip transfer mid-playback.
+    //   1) Dolby Vision keeps its compatibility-layer decision: the RPU
+    //      remapping has its own semantics that a container trc cannot express.
+    //   2) Otherwise follow the frame's own color_trc when it declares one.
+    //   3) Fall back to the format-based inference for frames that declare
+    //      nothing (previous behaviour).
+    auto transferFromFrame = 0u;
+    const bool frameDeclaresTrc = frame != nullptr && frame->color_trc != AVCOL_TRC_UNSPECIFIED;
+    if (frameDeclaresTrc) {
+        transferFromFrame = frame->color_trc == AVCOL_TRC_ARIB_STD_B67 ? 2u :
+            frame->color_trc == AVCOL_TRC_SMPTE2084 ? 1u : 0u;
+    }
+    if (hdrState.format == FFF3FPHdrFormat::DolbyVision) {
+        settings.transfer = (hdrState.compatibility & hlgCompatibility) != 0 ? 2u : 1u;
+    } else if (hdrState.format != FFF3FPHdrFormat::Sdr && frameDeclaresTrc && transferFromFrame != 0u) {
+        settings.transfer = transferFromFrame;
+    } else {
+        settings.transfer = hdrState.format == FFF3FPHdrFormat::Hlg ? 2u :
+            (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
+    }
     settings.source2020 = source2020 ? 1u : 0u;
     settings.sdrPeak = sdrPeakNits_;
     settings.hdrPeak = settings.transfer == 0 ? 100.0f : hdrProcessor_.State().sourcePeakNits;
