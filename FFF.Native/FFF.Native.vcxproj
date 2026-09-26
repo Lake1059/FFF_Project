@@ -173,6 +173,7 @@
     <ClInclude Include="3FP\Disc\DiscInput.h" />
     <ClInclude Include="3FP\Audio\WasapiRenderer.h" />
     <ClInclude Include="3FP\Core\PlayerSession.h" />
+    <ClInclude Include="3FP\Subtitle\SubtitleProbe.h" />
     <ClInclude Include="3FP\Hdr\HdrProcessor.h" />
     <ClInclude Include="3FP\Render\ShaderBytecode.h" />
     <ClInclude Include="3FP\Render\ColorExtensionApi.h" />
@@ -199,6 +200,7 @@
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp" />
     <ClCompile Include="3FP\Render\VideoRenderer.cpp" />
     <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp" />
+    <ClCompile Include="3FP\Subtitle\SubtitleProbe.cpp" />
     <ClCompile Include="3FP\Subtitle\BitmapSubtitleDecoder.cpp" />
     <ClCompile Include="3FR\Api\NativeApi.cpp" />
     <ClCompile Include="3FR\Audio\AudioTrackEncoder.cpp" />
