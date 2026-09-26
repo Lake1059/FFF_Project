@@ -45,6 +45,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private 滚轮余量 As Integer
     Private 未知时长已知上限毫秒 As Double
     Private 上次时间戳测量文本 As String
+    Private 图片模式已启用 As Boolean
 
     Friend Sub New(进度条 As LakeUI.ExcellentTrackBar,
                    音量条 As LakeUI.ExcellentTrackBar,
@@ -146,6 +147,12 @@ Friend NotInheritable Class 播放器界面呈现器
             更新媒体信息(当前媒体信息, 快照)
         End If
         更新播放按钮(快照.状态)
+        ' 图片模式没有时间轴：进度条与时间戳都无意义，跳过它们的计算（控件本身已隐藏）。
+        If 图片模式已启用 Then
+            刷新HDR按钮(快照)
+            RaiseEvent 播放状态已刷新(Me, EventArgs.Empty)
+            Return
+        End If
         If Not 正在拖动进度条 Then
             正在更新进度条 = True
             Try
@@ -209,6 +216,16 @@ Friend NotInheritable Class 播放器界面呈现器
 
     Friend Sub 媒体已打开(保留当前范围 As Boolean)
         If Not 保留当前范围 Then 未知时长已知上限毫秒 = 0
+    End Sub
+
+    ''' <summary>图片模式：隐藏进度条、播放/暂停按钮与时间码。
+    ''' 只有静态图会进入该模式，动画图仍按视频处理，播放按钮不受影响。</summary>
+    Friend Sub 设置图片模式(启用 As Boolean)
+        If 已释放 OrElse 图片模式已启用 = 启用 Then Return
+        图片模式已启用 = 启用
+        进度条.Visible = Not 启用
+        播放暂停按钮.Visible = Not 启用
+        时间标签.Visible = Not 启用
     End Sub
 
     Friend Sub 清除媒体()

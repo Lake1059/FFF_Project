@@ -106,9 +106,68 @@ Friend Module Program
     Private Function FFF3FP_EvaluateTimedTextRasterization(ByRef 诊断 As 原生定时文字栅格诊断) As Integer
     End Function
 
+    ' ⚠⚠ 测试进程必须把自己的文件关联配置清空，否则会写掉用户的真机注册表。
+    '
+    ' 机制：Form1_Load（无参数、无沙箱）先调 设置.启动时加载设置()，再无条件调
+    ' 文件关联管理器.启动后台同步(...)，该路径直接写真机 HKCU。测试 exe 与宿主共用同一份
+    ' FFF.Player.Settings.json（在测试 bin 目录），于是「任何构造 Form1 的套件」
+    ' +「那份 Settings.json 里某个 关联*=true」⇒ 扫描期间就会把整档扩展名注册到用户机器上。
+    ' 【实测】control 组（摘掉本闸）跑 --clip-focus-regression，9 个扩展名全部被写成
+    ' FFF.Player.<ext>、并建出 ~78 个注册表键，与历史交接记录一致。
+    '
+    ' ⚠ 关键：**闸不能只清当前对象**——启动时加载设置() 会把 实例对象 整个替换成磁盘上读来的
+    ' 那一份（设置.vb:99 `实例对象 = 读取`），把清除结果丢掉。所以这里改成
+    ' **在内存里清 + 重定向设置文件路径到一份全 False 的临时副本**，
+    ' 保证任何时点的重新加载读到的都是"全未勾选"，从而 启动后台同步 在 `有已启用的类别` 处早退。
+    ' 只写临时文件，**绝不碰** 用户/播放器目录里真正的 Settings.json。
+    '
+    ' 例外：--file-association-live-toggle / --file-association-live-release 是刻意的真机开关，
+    ' 它们自己负责把现场原样收回（见 测试文件关联实机往返 的 Finally），故放行。
+    Private Sub 引导测试进程的文件关联(参数 As String())
+        Dim 开关 = If(参数 Is Nothing OrElse 参数.Length = 0, String.Empty,
+                      If(参数(0), String.Empty)).ToLowerInvariant()
+        If 开关 = "--file-association-live-toggle" OrElse 开关 = "--file-association-live-release" Then Return
+
+        ' ① 内存里清一遍（对"不重新加载设置"的路径已足够）
+        Dim 设置对象 = 设置.实例对象
+        If 设置对象 IsNot Nothing Then 清空关联选项(设置对象)
+
+        ' ② 重定向设置文件路径到临时全 False 副本，防住任何后续的 启动时加载设置()。
+        Dim 原路径 = 设置.设置文件路径
+        Try
+            Dim 临时路径 = Path.Combine(Path.GetTempPath(),
+                "FFF.Player.Tests.Settings." & Process.GetCurrentProcess().Id & ".json")
+            Dim 干净 As New 设置()
+            清空关联选项(干净)
+            File.WriteAllText(临时路径,
+                System.Text.Json.JsonSerializer.Serialize(干净, JsonSO),
+                System.Text.Encoding.UTF8)
+            设置.重定向设置文件路径(临时路径)
+            AddHandler AppDomain.CurrentDomain.ProcessExit,
+                Sub(sender, e)
+                    Try : File.Delete(临时路径) : Catch : End Try
+                End Sub
+        Catch ex As Exception
+            Console.Error.WriteLine($"引导：重定向设置文件失败，内存清除仍生效：{ex.Message}")
+        End Try
+    End Sub
+
+    Private Sub 清空关联选项(目标 As 设置)
+        目标.关联常见视频 = False
+        目标.关联不常见视频 = False
+        目标.关联老旧视频 = False
+        目标.关联常见音频 = False
+        目标.关联不常见音频 = False
+        目标.关联老旧音频 = False
+        目标.关联常见图片 = False
+        目标.关联不常见图片 = False
+        目标.关联老旧图片 = False
+    End Sub
+
     <STAThread>
     Public Function Main(参数 As String()) As Integer
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2)
+        引导测试进程的文件关联(参数)
         Try
             If 参数.Length = 3 AndAlso 参数(0) = "--disc-edge-regression" Then
                 光盘播放测试.边界回归(参数(1), 参数(2))
@@ -206,6 +265,20 @@ Friend Module Program
                 测试文件关联注册表()
                 Console.WriteLine("文件关联分组、程序路径更新及原关联恢复回归通过。")
                 Return 0
+            End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--image-extension-whitelist-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试图片扩展名白名单()
+                Console.WriteLine("图片模式扩展名白名单（含 JXR）回归通过。")
+                Return 0
+            End If
+            ' ⚠ 手动开关：写真机 HKCU，不在 run_host_tests.sh 的扫描清单里
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--file-association-live-toggle", StringComparison.OrdinalIgnoreCase) Then
+                Return 测试文件关联实机往返(参数(1).ToLowerInvariant())
+            End If
+            ' 只走"用户把勾全部取消"的运行时路径：注销受管扩展名并按备份恢复原值。
+            ' 用途：真机双击探针之后收尾——启动同步按设计不清理未勾选项，只有运行期间的显式取消才注销。
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--file-association-live-release", StringComparison.OrdinalIgnoreCase) Then
+                Return 测试文件关联实机释放(参数(1).ToLowerInvariant())
             End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--gpu-decode-matrix", StringComparison.OrdinalIgnoreCase) Then
                 测试GPU解码矩阵(Path.GetFullPath(参数(1)))
@@ -546,21 +619,72 @@ Friend Module Program
         Dim 默认设置 As New 设置()
         断言(Not 默认设置.关联常见视频 AndAlso Not 默认设置.关联不常见视频 AndAlso
                Not 默认设置.关联老旧视频 AndAlso Not 默认设置.关联常见音频 AndAlso
-               Not 默认设置.关联不常见音频 AndAlso Not 默认设置.关联老旧音频,
+               Not 默认设置.关联不常见音频 AndAlso Not 默认设置.关联老旧音频 AndAlso
+               Not 默认设置.关联常见图片 AndAlso Not 默认设置.关联不常见图片 AndAlso
+               Not 默认设置.关联老旧图片,
                "文件关联默认值不是全部关闭。")
         断言(文件关联管理器.取得扩展名(文件关联类别.常见视频).Contains(".mp4") AndAlso
                文件关联管理器.取得扩展名(文件关联类别.常见音频).Contains(".mp3") AndAlso
                文件关联管理器.取得扩展名(文件关联类别.老旧视频).Contains(".rmvb") AndAlso
-               文件关联管理器.取得扩展名(文件关联类别.老旧音频).Contains(".wma"),
+               文件关联管理器.取得扩展名(文件关联类别.老旧音频).Contains(".wma") AndAlso
+               文件关联管理器.取得扩展名(文件关联类别.常见图片).Contains(".png") AndAlso
+               文件关联管理器.取得扩展名(文件关联类别.老旧图片).Contains(".xbm"),
                "文件关联扩展名没有按媒体类型和常用程度分组。")
-        Using page As New Form设置_文件关联()
-            page.PerformLayout()
-            Dim checkBoxes = {page.MCK_关联常见视频, page.MCK_关联不常见视频, page.MCK_关联老旧视频,
-                              page.MCK_关联常见音频, page.MCK_关联不常见音频, page.MCK_关联老旧音频}
+        Dim 图片扩展名 = {文件关联类别.常见图片, 文件关联类别.不常见图片, 文件关联类别.老旧图片}.
+            SelectMany(Function(类别) 文件关联管理器.取得扩展名(类别)).ToArray()
+        断言(图片扩展名.Length = 39 AndAlso
+               图片扩展名.Length = 图片扩展名.Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+               "图片档扩展名数量异常或有重复项。")
+        ' 清单的承诺是"点开就能看"，所以入选判据是随包内核实测能呈现≥1帧，
+        ' 不是"FFmpeg 名义上有解码器"。下面四个实测打开后一帧不呈现（取证：tools/cover_probe.sh）。
+        断言(Not 图片扩展名.Contains(".dib") AndAlso Not 图片扩展名.Contains(".pcd") AndAlso
+               Not 图片扩展名.Contains(".fits") AndAlso Not 图片扩展名.Contains(".rgb"),
+               "图片清单混入了实测不能呈现的格式。")
+        ' 启动同步的"任一启用"判据必须覆盖每一个类别：漏判会让该类别的勾选
+        ' 只在运行期间有效，重启后关联静默失效（不写注册表、也不报错）。
+        断言(Not 文件关联管理器.有已启用的类别(New 文件关联选项()) AndAlso
+               文件关联管理器.有已启用的类别(New 文件关联选项 With {.关联常见图片 = True}) AndAlso
+               文件关联管理器.有已启用的类别(New 文件关联选项 With {.关联不常见图片 = True}) AndAlso
+               文件关联管理器.有已启用的类别(New 文件关联选项 With {.关联老旧图片 = True}) AndAlso
+               文件关联管理器.有已启用的类别(New 文件关联选项 With {.关联老旧音频 = True}),
+               "启动同步的启用判据漏掉了某些文件关联类别。")
+        ' 几何判据必须量**宿主里的页面**：独立构造时页面只有设计尺寸 554×419，面板窄一档
+        ' 就让扩展名副文本多换一行、行高由 62 涨到 75，量到的是一个永不出货的构型。
+        Using 宿主 As New Form设置() With {.ShowInTaskbar = False, .Opacity = 0}
+            宿主.Show()
+            Application.DoEvents()
+            宿主.ModernTabListControl1.SelectedIndex = 9
+            Application.DoEvents()
+            Dim 绑定标志 = BindingFlags.Instance Or BindingFlags.NonPublic
+            Dim 页面 = TryCast(GetType(Form设置).GetField("文件关联页面", 绑定标志)?.GetValue(宿主),
+                               Form设置_文件关联)
+            断言(页面 IsNot Nothing, "无法从设置窗口取得文件关联页面。")
+            Dim checkBoxes = {页面.MCK_关联常见视频, 页面.MCK_关联不常见视频, 页面.MCK_关联老旧视频,
+                              页面.MCK_关联常见音频, 页面.MCK_关联不常见音频, 页面.MCK_关联老旧音频,
+                              页面.MCK_关联常见图片, 页面.MCK_关联不常见图片, 页面.MCK_关联老旧图片}
             断言(checkBoxes.All(Function(x) Not String.IsNullOrWhiteSpace(x.SubText)),
                    "文件关联页没有在运行时填写扩展名副文本。")
             断言(checkBoxes.All(Function(x) Not x.Checked), "文件关联页的复选框不是默认全部关闭。")
             断言(checkBoxes.All(Function(x) x.Height > 34), "扩展名副文本没有撑开文件关联选项高度。")
+            ' 九行必须按 视频→音频→图片 自上而下堆叠且全部落在面板可视区内。
+            ' 顺序是硬期望：Dock=Top 下后加入面板的项靠上，所以图片三项必须先加入面板。
+            Dim 面板 = 页面.ModernPanel1
+            Dim 可视区 = 面板.DisplayRectangle
+            Dim 最底 = checkBoxes.Max(Function(x) x.Bottom)
+            Dim 余量 = 可视区.Bottom - 最底
+            Dim 实际序 = String.Join(",", checkBoxes.OrderBy(Function(x) x.Top).
+                                          Select(Function(x) x.Name))
+            Dim 期望序 = "MCK_关联常见视频,MCK_关联不常见视频,MCK_关联老旧视频," &
+                         "MCK_关联常见音频,MCK_关联不常见音频,MCK_关联老旧音频," &
+                         "MCK_关联常见图片,MCK_关联不常见图片,MCK_关联老旧图片"
+            Console.WriteLine($"文件关联页 {页面.Size}，面板可视区 {可视区}，九行最底 {最底}，余量 {余量}px")
+            断言(实际序 = 期望序,
+                   $"文件关联页的档位顺序不是 视频→音频→图片：实际 {实际序}。")
+            断言(checkBoxes.Zip(checkBoxes.OrderBy(Function(x) x.Top).Skip(1),
+                       Function(a, b) a.Bottom <= b.Top).All(Function(x) x),
+                   "文件关联选项互相重叠，说明没有按 Dock=Top 逐行堆叠。")
+            断言(checkBoxes.Min(Function(x) x.Top) >= 可视区.Top AndAlso 余量 >= 0,
+                   $"文件关联选项超出了设置页可视范围（可视区 {可视区}，最底 {最底}），末尾档位在界面上取不到。")
         End Using
 
         Dim testRoot = "Software\1059 Studio\FFF.Player.Tests-" & Guid.NewGuid().ToString("N")
@@ -584,6 +708,11 @@ Friend Module Program
             Using extensionKey = Registry.CurrentUser.CreateSubKey(classesRoot & "\.mp4", True)
                 extensionKey.SetValue(String.Empty, "Previous.Player", RegistryValueKind.String)
                 extensionKey.SetValue("Content Type", "application/x-previous", RegistryValueKind.String)
+                extensionKey.SetValue("PerceivedType", "document", RegistryValueKind.String)
+            End Using
+            Using extensionKey = Registry.CurrentUser.CreateSubKey(classesRoot & "\.png", True)
+                extensionKey.SetValue(String.Empty, "Previous.Image.Player", RegistryValueKind.String)
+                extensionKey.SetValue("Content Type", "application/x-previous-image", RegistryValueKind.String)
                 extensionKey.SetValue("PerceivedType", "document", RegistryValueKind.String)
             End Using
             Using iconKey = Registry.CurrentUser.CreateSubKey(classesRoot & "\FFF.Player.mp4\DefaultIcon", True)
@@ -661,6 +790,42 @@ Friend Module Program
                        "程序路径变化后没有修复打开命令。")
             End Using
 
+            ' 只启用图片档：写入走的是同一套注册逻辑，但感知类型/媒体类型/友好名
+            ' 是图片专属取值；同时视频档被取消勾选，必须把原关联还回去。
+            Dim imageEnabled As New 文件关联选项 With {.关联常见图片 = True}
+            文件关联管理器.同步用于测试(imageEnabled, executablePath, locations)
+            Using extensionKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\.png")
+                断言(String.Equals(CStr(extensionKey.GetValue(String.Empty)), "FFF.Player.png", StringComparison.Ordinal),
+                       "启用图片关联后没有写入 PNG ProgID。")
+                断言(String.Equals(CStr(extensionKey.GetValue("Content Type")), "image/png", StringComparison.Ordinal),
+                       "启用图片关联后没有写入 PNG 媒体类型。")
+                断言(String.Equals(CStr(extensionKey.GetValue("PerceivedType")), "image", StringComparison.Ordinal),
+                       "启用图片关联后没有写入图片感知类型。")
+            End Using
+            Using progIdKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\FFF.Player.png")
+                断言(progIdKey IsNot Nothing AndAlso
+                       String.Equals(CStr(progIdKey.GetValue(String.Empty)), "PNG 图片文件", StringComparison.Ordinal),
+                       "图片 ProgID 的友好类型名没有用「图片文件」。")
+            End Using
+            Using supportedTypes = Registry.CurrentUser.OpenSubKey(
+                    classesRoot & "\Applications\FFF.Player.exe\SupportedTypes")
+                断言(supportedTypes IsNot Nothing AndAlso supportedTypes.GetValueNames().Contains(".png") AndAlso
+                       Not supportedTypes.GetValueNames().Contains(".mp4"),
+                       "打开方式注册没有按已启用类别声明图片扩展名。")
+            End Using
+            Using capabilities = Registry.CurrentUser.OpenSubKey(applicationRoot & "\Capabilities\FileAssociations")
+                断言(capabilities IsNot Nothing AndAlso
+                       String.Equals(CStr(capabilities.GetValue(".png")), "FFF.Player.png", StringComparison.Ordinal),
+                       "默认应用能力里没有图片扩展名。")
+            End Using
+            Using extensionKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\.mp4")
+                断言(String.Equals(CStr(extensionKey.GetValue(String.Empty)), "Previous.Player", StringComparison.Ordinal),
+                       "改勾图片档后没有注销视频档的原关联。")
+            End Using
+            ' .apng 在沙箱 hive 里本就不存在 ⇒ 注销时必须连我们建的空键一起删掉，
+            ' 否则 HKCU 会留一个空键，把机器级（HKLM）的同名注册遮掉（真机实测复现过）。
+            断言(注册表键存在(classesRoot & "\.apng"), "启用图片档后没有建立 .apng 键。")
+
             文件关联管理器.同步用于测试(New 文件关联选项(), secondExecutable, locations)
             Using extensionKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\.mp4")
                 断言(String.Equals(CStr(extensionKey.GetValue(String.Empty)), "Previous.Player", StringComparison.Ordinal),
@@ -673,6 +838,19 @@ Friend Module Program
             Using progIdKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\FFF.Player.mp4")
                 断言(progIdKey Is Nothing, "取消关联后仍残留本程序的 ProgID。")
             End Using
+            Using extensionKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\.png")
+                断言(String.Equals(CStr(extensionKey.GetValue(String.Empty)), "Previous.Image.Player", StringComparison.Ordinal),
+                       "取消图片关联后没有恢复原 ProgID。")
+                断言(String.Equals(CStr(extensionKey.GetValue("Content Type")), "application/x-previous-image", StringComparison.Ordinal),
+                       "取消图片关联后没有恢复原媒体类型。")
+                断言(String.Equals(CStr(extensionKey.GetValue("PerceivedType")), "document", StringComparison.Ordinal),
+                       "取消图片关联后没有恢复原感知类型。")
+            End Using
+            Using progIdKey = Registry.CurrentUser.OpenSubKey(classesRoot & "\FFF.Player.png")
+                断言(progIdKey Is Nothing, "取消图片关联后仍残留本程序的 ProgID。")
+            End Using
+            断言(Not 注册表键存在(classesRoot & "\.apng"),
+                   "取消图片关联后残留 .apng 空键（我们建的键要我们自己收干净）。")
             Using capabilities = Registry.CurrentUser.OpenSubKey(locations.CapabilitiesRoot)
                 断言(capabilities Is Nothing, "全部取消关联后仍残留默认应用能力注册。")
             End Using
@@ -683,6 +861,234 @@ Friend Module Program
         Finally
             Registry.CurrentUser.DeleteSubKeyTree(testRoot, False)
         End Try
+    End Sub
+
+    '''图片模式扩展名白名单（`播放列表.图片扩展名`）的回归。
+    '''与 测试文件关联注册表 的分工：文件关联清单承诺"双击即看"（只收随包内核能呈现≥1帧的格式），
+    '''   而**图片模式清单只承诺"可被选中并交给解码器"**——两者判据不同，别混用。
+    '''   本测试盯的是：JXR 家族（`.jxr/.wdp/.hdp`）已被纳入图片模式，且「媒体扩展名 ⊇ 图片扩展名」不变式成立。
+    Private Sub 测试图片扩展名白名单()
+        ' ① JXR 家族必须在图片模式清单里，否则按目录浏览时这些文件根本不会列出来。
+        For Each 扩展名 In {".jxr", ".wdp", ".hdp"}
+            断言(播放列表.是图片文件("sample" & 扩展名),
+                   $"图片模式清单缺少 {扩展名}，JXR 文件在按目录浏览时不会被列为图片。")
+            断言(播放列表.是支持的媒体文件("sample" & 扩展名),
+                   $"媒体扩展名缺少 {扩展名}，与「媒体 ⊇ 图片」不变式矛盾。")
+        Next
+        ' ② 大小写不敏感（HashSet 用 OrdinalIgnoreCase，这里做端到端确认）。
+        断言(播放列表.是图片文件("SAMPLE.JXR") AndAlso 播放列表.是图片文件("Sample.Wdp"),
+               "图片模式清单的扩展名匹配不是大小写不敏感的。")
+        ' ③ 反向：未纳入的格式不能被误判为图片（防"顺手把通配放宽"）。
+        断言(Not 播放列表.是图片文件("sample.psd") AndAlso Not 播放列表.是图片文件("sample.txt"),
+               "未纳入的扩展名被误判为图片。")
+        ' ④ 既有格式一个都不能掉（防改 add-only 列表时手滑删行）。
+        For Each 扩展名 In {".png", ".jpg", ".jpeg", ".gif", ".apng", ".webp", ".jxl",
+                            ".bmp", ".tif", ".tiff", ".ico", ".avif", ".heic", ".heif"}
+            断言(播放列表.是图片文件("sample" & 扩展名), $"图片模式清单丢失了既有格式 {扩展名}。")
+        Next
+    End Sub
+
+    '''真机往返：拨动设置页里那个**真实的** CheckBox，让 HKCU 真被接管、再真被恢复。
+    '''与 测试文件关联注册表 的分工：那边在沙箱 hive 里逐项比对键值，够安全，但绕过了界面，
+    '''   证明不了 ① Handles 事件真的绑在这个控件上；② 真机里第三方（WPS 等）留下的值能否原样还回。
+    '''⚠ 本开关写**真机 HKCU**，所以刻意不进 run_host_tests.sh 的扫描清单，只能手动跑；
+    '''   无论成功失败都会恢复原勾选状态与 Settings.json 的原始字节。
+    Private Function 测试文件关联实机往返(扩展名 As String) As Integer
+        断言(文件关联管理器.取得扩展名(文件关联类别.常见图片).Contains(扩展名),
+               $"--file-association-live-toggle 只接受常见图片档的扩展名，收到 {扩展名}。")
+        Dim 设置文件 = Path.Combine(AppContext.BaseDirectory, "FFF.Player.Settings.json")
+        Dim 原设置文本 = If(File.Exists(设置文件), File.ReadAllText(设置文件), Nothing)
+        Dim 原勾选 = 设置.实例对象.关联常见图片
+        Dim 计时 = Stopwatch.StartNew()
+        Dim 宿主 As Form设置 = Nothing
+        Dim 接管前 As String = Nothing
+        Try
+            接管前 = 读取扩展名关联(扩展名)
+            Console.WriteLine($"接管前 {扩展名} :: {接管前}")
+            打点(计时, "读到接管前指纹")
+            ' 起跑态必须干净：若上次运行把该项留在接管状态，"恢复后 == 接管前"会被平凡满足，
+            ' 注销还没跑完就去查 ProgID ⇒ 假红（实测 .tiff 就这样红过一次）。
+            断言(Not 接管前.Contains("FFF.Player" & 扩展名),
+                   $"起跑时 {扩展名} 已被本程序接管：{接管前}。先跑 --file-association-live-release {扩展名}。")
+            ' 默认 Opacity=0 免闪窗；要留视觉证据时设 FA3FP_SHOT=1 让它不透明，
+            ' 外部再用 ui_probe.ps1 -Mode capture 按标题抓。
+            Dim 窗口不透明 = If(String.IsNullOrEmpty(Environment.GetEnvironmentVariable("FA3FP_SHOT")), 0.0, 1.0)
+            宿主 = New Form设置() With {.ShowInTaskbar = False, .Opacity = 窗口不透明}
+            With 宿主
+                .Show()
+                Application.DoEvents()
+                .ModernTabListControl1.SelectedIndex = 9
+                Application.DoEvents()
+                Console.WriteLine($"设置窗口 hwnd={宿主.Handle.ToInt64()} 标题='{宿主.Text}' 尺寸={宿主.Size}")
+                Dim 绑定标志 = BindingFlags.Instance Or BindingFlags.NonPublic
+                Dim 页面 = TryCast(GetType(Form设置).GetField("文件关联页面", 绑定标志)?.GetValue(宿主),
+                                   Form设置_文件关联)
+                断言(页面 IsNot Nothing, "取不到设置页的文件关联页面。")
+                Dim 复选 = 页面.MCK_关联常见图片
+                断言(复选 IsNot Nothing AndAlso Not 复选.Checked,
+                       $"进入设置页时「常见图片」档不是未勾选状态（当前 {If(复选 Is Nothing, "控件缺失", 复选.Checked.ToString())}），请先恢复再跑。")
+
+                复选.Checked = True
+                ' 等"整套值都落好"而不是只等扩展名键改指向：注册顺序是先写 <ext> 再建 ProgID 键，
+                ' 只判前者会稳定采到 name=(无) 的中间态（实测踩过一次，断言当场假失败）。
+                Dim 已完全接管 = Function() 读取扩展名关联(扩展名).Contains("FFF.Player" & 扩展名) AndAlso
+                                          读取ProgID友好名(扩展名).EndsWith("图片文件")
+                Dim 已接管 = 等待直到($"接管 {扩展名}", 10000, 已完全接管)
+                打点(计时, "勾选→接管完成")
+                Dim 接管后 = 读取扩展名关联(扩展名)
+                Console.WriteLine($"接管后 {扩展名} :: {接管后}")
+                断言(已接管, $"勾选「常见图片」后 {扩展名} 未被完整接管：{接管后}")
+                ' PerceivedType 的比较是大小写不敏感的（注册表值等于 用 OrdinalIgnoreCase）：
+                ' 本机 .tiff 原值是 WPS 写的 "Image"，我们判"已等价"就不再改写 ⇒ 断言也必须忽略大小写。
+                断言(接管后.ToLowerInvariant().Contains("pt=image"),
+                       $"接管后 {扩展名} 的感知类型不是 image：{接管后}")
+                断言(接管后.Contains("cmd=") AndAlso
+                       接管后.Split("|"c)(4).Contains("FFF.Player"),
+                       $"接管后打开命令没有指向本程序：{接管后}")
+                断言(设置.实例对象.关联常见图片, "勾选没有写进设置对象。")
+                断言(原设置文本 Is Nothing OrElse
+                       File.ReadAllText(设置文件).Contains("""" & "关联常见图片" & """: true"),
+                   "勾选没有落盘到 Settings.json。")
+
+                复选.Checked = False
+                Dim 已恢复 = 等待直到($"恢复 {扩展名}", 10000,
+                    Function() 读取扩展名关联(扩展名) = 接管前)
+                Dim 恢复后 = 读取扩展名关联(扩展名)
+                打点(计时, "取消→恢复完成")
+                Console.WriteLine($"恢复后 {扩展名} :: {恢复后}")
+                断言(已恢复, $"取消勾选后 {扩展名} 没回到接管前：期望 {接管前} 实际 {恢复后}")
+                断言(Not 设置.实例对象.关联常见图片, "取消勾选没有写回设置对象。")
+                断言(Not 注册表键存在("Software\Classes\FFF.Player" & 扩展名),
+                       "取消勾选后仍残留本程序的 ProgID。")
+                断言(Not 注册表键存在("Software\1059 Studio\FFF.Player\FileAssociationBackups\" &
+                                      扩展名.TrimStart("."c)),
+                       "取消勾选后仍残留该项的备份键。")
+                Console.WriteLine($"文件关联实机往返通过：{扩展名} 接管→恢复 与接管前逐字段一致。")
+            End With
+            Return 0
+        Catch ex As Exception
+            Console.Error.WriteLine($"文件关联实机往返失败：{ex.Message}")
+            Return 1
+        Finally
+            ' 拆窗必须先排空：关联同步是 Async Sub，注册表落值后它的续作仍排在 UI 线程的消息队列里；
+            ' 抢在那之前 Dispose 会永久挂死（实测 pump 通过、只睡不泵 与 不排空 都挂）。
+            排空消息(计时)
+            ' 半途判红也会把真机注册表留在"已接管"状态（实测 .tiff 那次就是这样），
+            ' 所以失败路径同样要把它还回去，否则用户机器上整档扩展名一直指向测试 exe。
+            If 接管前 IsNot Nothing AndAlso 读取扩展名关联(扩展名) <> 接管前 Then
+                Console.Error.WriteLine("收尾：注册表未回到接管前，执行释放。")
+                测试文件关联实机释放(扩展名)
+            End If
+            If 宿主 IsNot Nothing Then
+                ' 还原**必须在拆窗之前**：Dispose 期间若触发任何"关闭时保存"，落盘的会是未还原的内存态。
+                ' 这与上面那条注册表污染叠加，可能就是实测那次污染的成因之一（链条未完全钉死，故只作疑因）。
+                设置.实例对象.关联常见图片 = 原勾选
+                If 原设置文本 IsNot Nothing Then
+                    Try
+                        File.WriteAllText(设置文件, 原设置文本, System.Text.Encoding.UTF8)
+                    Catch ex As Exception
+                        Console.Error.WriteLine($"恢复 Settings.json 失败：{ex.Message}")
+                    End Try
+                End If
+                宿主.Dispose()
+                打点(计时, "设置窗口已释放")
+            Else
+                ' 宿主没构造成功（构造点之前就抛了）时仍要把设置对象还回去。
+                设置.实例对象.关联常见图片 = 原勾选
+                If 原设置文本 IsNot Nothing Then
+                    Try
+                        File.WriteAllText(设置文件, 原设置文本, System.Text.Encoding.UTF8)
+                    Catch ex As Exception
+                        Console.Error.WriteLine($"恢复 Settings.json 失败：{ex.Message}")
+                    End Try
+                End If
+            End If
+        End Try
+    End Function
+
+    '''真机收尾：以"用户把所有勾取消"的运行时语义注销全部受管扩展名，并按备份恢复原值。
+    Private Function 测试文件关联实机释放(扩展名 As String) As Integer
+        Try
+            Console.WriteLine($"释放前 {扩展名} :: {读取扩展名关联(扩展名)}")
+            Dim 任务 = 文件关联管理器.同步全部Async(New 文件关联选项())
+            Dim 完成 = 等待直到("注销全部受管扩展名", 20000, Function() 任务.IsCompleted)
+            If Not 完成 Then
+                Console.Error.WriteLine("注销任务未在 20s 内完成。")
+                Return 1
+            End If
+            If 任务.Exception IsNot Nothing Then
+                Console.Error.WriteLine($"注销抛出异常：{任务.Exception.GetBaseException().Message}")
+                Return 1
+            End If
+            Dim 现状 = 读取扩展名关联(扩展名)
+            Console.WriteLine($"释放后 {扩展名} :: {现状}")
+            断言(Not 现状.Contains("FFF.Player" & 扩展名), $"释放后 {扩展名} 仍指向本程序：{现状}")
+            断言(Not 注册表键存在("Software\Classes\FFF.Player" & 扩展名), "释放后仍残留本程序的 ProgID。")
+            Console.WriteLine($"文件关联实机释放完成：{扩展名} 已交还给 {现状.Split("|"c)(0)}")
+            Return 0
+        Catch ex As Exception
+            Console.Error.WriteLine($"文件关联实机释放失败：{ex.Message}")
+            Return 1
+        End Try
+    End Function
+
+    Private Function 读取扩展名关联(扩展名 As String) As String
+        Using k = Registry.CurrentUser.OpenSubKey("Software\Classes\" & 扩展名)
+            If k Is Nothing Then Return "(键缺失)"
+            Dim 打开命令 = "(无)"
+            Using c = Registry.CurrentUser.OpenSubKey("Software\Classes\FFF.Player" & 扩展名 & "\shell\open\command")
+                If c IsNot Nothing Then 打开命令 = CStr(c.GetValue(String.Empty))
+            End Using
+            Return $"default={k.GetValue(String.Empty)}|ct={k.GetValue("Content Type")}" &
+                   $"|pt={k.GetValue("PerceivedType")}|name={读取ProgID友好名(扩展名)}|cmd={打开命令}"
+        End Using
+    End Function
+
+    Private Function 读取ProgID友好名(扩展名 As String) As String
+        Using k = Registry.CurrentUser.OpenSubKey("Software\Classes\FFF.Player" & 扩展名)
+            Return If(k Is Nothing, "(无)", CStr(k.GetValue(String.Empty)))
+        End Using
+    End Function
+
+    Private Function 注册表键存在(相对路径 As String) As Boolean
+        Using k = Registry.CurrentUser.OpenSubKey(相对路径)
+            Return k IsNot Nothing
+        End Using
+    End Function
+
+    '''Async Sub 的事件处理器要等它跑完；不泵消息就只会读到"还没生效"的假阴性。
+    Private Function 等待直到(描述 As String, 超时毫秒 As Integer, 条件 As Func(Of Boolean)) As Boolean
+        Dim 截止 = DateTime.UtcNow.AddMilliseconds(超时毫秒)
+        Do
+            Application.DoEvents()
+            If 条件() Then Return True
+            Threading.Thread.Sleep(100)
+        Loop While DateTime.UtcNow < 截止
+        Console.WriteLine($"{描述} 在 {超时毫秒}ms 内未达成。")
+        Return False
+    End Function
+
+    Private Sub 打点(计时 As Stopwatch, 阶段 As String)
+        Console.WriteLine($"  [{计时.ElapsedMilliseconds,6}ms] {阶段}")
+    End Sub
+
+    '''拆窗前排空 UI 线程的消息队列。FA3FP_DRAIN=sleep|none 用来复现"抢在续作前 Dispose 会挂死"那一侧。
+    Private Sub 排空消息(计时 As Stopwatch)
+        Dim 排空设定 = Environment.GetEnvironmentVariable("FA3FP_DRAIN")
+        Dim 方式 = If(String.IsNullOrEmpty(排空设定), "pump", 排空设定.ToLowerInvariant())
+        Select Case 方式
+            Case "sleep"
+                Threading.Thread.Sleep(3000)
+            Case "none"
+                ' 故意不排空
+            Case Else
+                Dim 截止 = DateTime.UtcNow.AddSeconds(3)
+                Do
+                    Application.DoEvents()
+                    Threading.Thread.Sleep(50)
+                Loop While DateTime.UtcNow < 截止
+        End Select
+        打点(计时, $"已按 {方式} 排空")
     End Sub
 
     Private Sub 测试初始画面尺寸DPI缩放()
@@ -1826,6 +2232,22 @@ Friend Module Program
         视频流.投影 = String.Empty
         断言(Not 播放器360视角控制器.是360视频(信息, 快照),
             "普通静态图片被误识别为 360°图片。")
+
+        ' 图片模式与 360° 对同一素材必须互斥：两边共用 是360视频 这一个判据，
+        ' 谁也不能在对方认领时自动启用自己。
+        视频流.宽度 = 1920
+        视频流.高度 = 960
+        断言(播放器360视角控制器.是360视频(信息, 快照) AndAlso
+               Not 播放器图片浏览控制器.自动进入图片模式(信息, 快照),
+            "2:1 静态图片被 360° 与图片模式同时认领。")
+        视频流.高度 = 1080
+        断言(Not 播放器360视角控制器.是360视频(信息, 快照) AndAlso
+               播放器图片浏览控制器.自动进入图片模式(信息, 快照),
+            "普通静态图片没有自动进入图片模式。")
+        信息.是静态图片 = False
+        视频流.高度 = 960
+        断言(Not 播放器图片浏览控制器.自动进入图片模式(信息, 快照),
+            "2:1 视频被当成图片并自动进入图片模式。")
 
         Dim 角度设置 As New 设置 With {.视角360视场角 = 120.0F}
         角度设置.规范化()

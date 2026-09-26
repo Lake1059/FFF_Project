@@ -28,7 +28,14 @@ Public NotInheritable Class 播放列表
         ".mpg", ".mpeg", ".vob", ".ogv", ".3gp", ".3g2", ".rm", ".rmvb", ".asf", ".divx",
         ".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".ape", ".ac3", ".eac3", ".dts", ".mka",
         ".wv", ".tak", ".aif", ".aiff", ".amr", ".au", ".ra", ".tta", ".mpc",
-        ".png", ".jpg", ".jpeg", ".gif", ".apng", ".webp", ".jxl", ".bmp", ".tif", ".tiff"
+        ".png", ".jpg", ".jpeg", ".jpe", ".gif", ".apng", ".webp", ".jxl", ".bmp", ".tif", ".tiff",
+        ".ico", ".avif", ".heic", ".heif", ".jxr", ".wdp", ".hdp"
+    }
+    ' 图片模式：与 视频扩展名 平行的一份集合。看图要按目录建列表，
+    ' 而 视频扩展名 只用来判断"这是不是视频"，不能反过来当"是不是图片"用。
+    Private Shared ReadOnly 图片扩展名 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+        ".png", ".jpg", ".jpeg", ".jpe", ".gif", ".apng", ".webp", ".jxl", ".bmp", ".tif", ".tiff",
+        ".ico", ".avif", ".heic", ".heif", ".jxr", ".wdp", ".hdp"
     }
     Private Shared ReadOnly 视频扩展名 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
         ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".webm", ".flv", ".ts", ".m2ts", ".mts",
@@ -213,6 +220,51 @@ Public NotInheritable Class 播放列表
     Public Function 从媒体创建并扫描相似文件Async(本地路径 As String,
                                                  Optional 取消令牌 As CancellationToken = Nothing) As Task
         Return Task.Run(Sub() 从媒体创建并扫描相似文件(本地路径, 取消令牌), 取消令牌)
+    End Function
+
+    ''' <summary>图片模式：按扩展名判断是不是图片（不含视频与音频）。</summary>
+    Friend Shared Function 是图片文件(路径 As String) As Boolean
+        Return Not String.IsNullOrWhiteSpace(路径) AndAlso 图片扩展名.Contains(IO.Path.GetExtension(路径))
+    End Function
+
+    ''' <summary>图片模式：扫描同目录下的全部图片文件，自然排序，当前文件必在其中。
+    ''' 为什么不复用 从媒体创建并扫描相似文件：那个按"系列签名"匹配，
+    ''' IMG_0001.jpg 与 风景.jpg 签名不同，结果只剩自己，看图时根本翻不动。</summary>
+    Friend Shared Function 扫描同目录图片文件(本地路径 As String) As String()
+        Dim 当前路径 = 规范本地文件(本地路径)
+        If Not 是图片文件(当前路径) Then Return {当前路径}
+        Dim 目录 = IO.Path.GetDirectoryName(当前路径)
+        If String.IsNullOrEmpty(目录) Then Return {当前路径}
+        Dim 结果 As New List(Of String)()
+        For Each 文件 In IO.Directory.EnumerateFiles(目录)
+            If Not 是图片文件(文件) Then Continue For
+            Try
+                结果.Add(规范本地文件(文件))
+            Catch
+                ' 跳过重解析点 / 已消失的文件
+            End Try
+        Next
+        If Not 结果.Any(Function(x) String.Equals(x, 当前路径, StringComparison.OrdinalIgnoreCase)) Then
+            结果.Add(当前路径)
+        End If
+        结果.Sort(Function(a, b) 自然文件名比较器.实例.Compare(IO.Path.GetFileName(a), IO.Path.GetFileName(b)))
+        Return 结果.ToArray()
+    End Function
+
+    ''' <summary>图片模式：用同目录的图片重建播放列表，并把当前项定位到这张图。</summary>
+    Public Sub 用同目录图片替换(本地路径 As String)
+        Dim 文件 = 扫描同目录图片文件(本地路径)
+        SyncLock 项目
+            项目.Clear()
+            当前值 = -1
+        End SyncLock
+        添加多个(文件)
+        选择路径(本地路径)
+        RaiseEvent 列表变化(Me, EventArgs.Empty)
+    End Sub
+
+    Public Function 用同目录图片替换Async(本地路径 As String) As Task
+        Return Task.Run(Sub() 用同目录图片替换(本地路径))
     End Function
 
     Public Sub 导出M3U8(列表路径 As String)

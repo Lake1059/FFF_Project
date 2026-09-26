@@ -169,6 +169,11 @@ public:
     void Close() noexcept;
 
     FFF3FPColorMode ActualColorMode() const noexcept;
+    /// True when the current stream's primaries are wider than Rec.709
+    /// (BT.2020, DCI-P3, Display P3). Such sources need the scRGB output path
+    /// even when their transfer function is SDR, otherwise the extra colours
+    /// are clipped away.
+    bool IsWideGamutSource() const noexcept;
     float SourcePeakNits() const noexcept;
     HdrFrameState HdrState() const noexcept;
     std::uint64_t PresentedVideoFrames() const noexcept;
@@ -412,6 +417,10 @@ private:
     int sourceChromaLocation_;
     bool sourceFullRange_;
     bool sourceInterlaced_;
+    // Primaries wider than Rec.709 (BT.2020, DCI-P3, Display P3). Such sources
+    // cannot be represented by an SDR swap chain, so they are allowed onto the
+    // scRGB output path even though their transfer function is SDR.
+    std::atomic<bool> sourceWideGamut_;
     std::atomic<FFF3FPVideoScalingMode> actualVideoScalingMode_;
     FFF3FPVideoScalingQuality scalingQuality_;
     FFF3FPColorMode requestedMode_;

@@ -4,6 +4,9 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavcodec/codec_desc.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 #include <libavcodec/packet.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
@@ -13,8 +16,10 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/spherical.h>
+#include <libavutil/display.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/dict.h>
+#include <libavutil/opt.h>
 #include <libavutil/samplefmt.h>
 }
 
@@ -317,6 +322,48 @@ bool IsLoopAwareImageDemuxer(const AVInputFormat* inputFormat) noexcept {
     return name == "gif" || name == "apng" || name == "webp_anim" || name == "jpegxl_anim";
 }
 
+// FFmpeg's apng demuxer emits one malformed packet at every loop wrap-around: the
+// decoder rejects it with AVERROR(EINVAL) and produces no frame, so each pass
+// silently loses its first frame and the picture visibly stalls once per loop
+// (measured: 73 of 80 frames over 8s at 10 fps). The defect is inside FFmpeg —
+// the stock ffmpeg CLI drops the very same frames — so it cannot be fixed here.
+// What we can do is stop relying on the demuxer's own wrap-around for APNG and
+// use the same end-of-file rewind the timed image sequences (AVIF/HEIC) already
+// use: with ignore_loop the demuxer reaches EOF after one clean pass, and
+// FlushAtEnd() -> DoSeek(0) resets the decoder so frame 0 of the next pass is
+// decoded normally. Every other loop-aware demuxer (gif, webp_anim,
+// jpegxl_anim) wraps around cleanly and keeps its existing behaviour.
+bool DemuxerLosesFrameOnWrap(const AVInputFormat* inputFormat) noexcept {
+    if (inputFormat == nullptr || inputFormat->name == nullptr) return false;
+    return std::string_view(inputFormat->name) == "apng";
+}
+
+// Turns the demuxer's own wrap-around off for the formats whose wrap is broken,
+// so that the session's rewind at end of file (FlushAtEnd -> DoSeek(0)) is what
+// produces the next pass. Every loop-aware image demuxer accepts `ignore_loop`;
+// the value is set on the demuxer's private options after the file was opened,
+// which is early enough (no packet has been read yet) and does not depend on
+// knowing the format before opening.
+//   · apng      -> ignore_loop=1: the demuxer wrap loses a frame every pass, so
+//                  the session rewinds instead (docs/14 §7).
+//   · webp_anim -> ignore_loop=0: its av_seek_frame reports success but leaves the
+//                  demuxer unable to read further packets (measured 2026-09-26:
+//                  seek-then-read yields nothing, while a plain open decodes all
+//                  frames), so the session rewind would spin forever. Default
+//                  ignore_loop=true (single pass) makes Play() produce zero
+//                  presented frames; the demuxer's own wrap-around (ignore_loop=0,
+//                  the pre-docs/14 behaviour) is the only working loop for it.
+//   · gif/jpegxl_anim -> untouched: their default single pass + session rewind
+//                  works (gif verified: seekable, 30 frames over 3 loops).
+// Returns true when the option was successfully applied.
+bool ApplyLoopingOptions(AVFormatContext* format, const std::string_view demuxerName) noexcept {
+    if (format == nullptr) return true;
+    if (demuxerName == "apng") return av_opt_set_int(format->priv_data, "ignore_loop", 1, 0) >= 0;
+    if (demuxerName == "webp_anim") return av_opt_set_int(format->priv_data, "ignore_loop", 0, 0) >= 0;
+    return true;  // GIF/JXL: default single pass + the session rewind works.
+}
+
+
 bool IsStaticImageDemuxer(const AVInputFormat* inputFormat) noexcept {
     if (inputFormat == nullptr || inputFormat->name == nullptr) return false;
     const std::string_view name(inputFormat->name);
@@ -325,6 +372,35 @@ bool IsStaticImageDemuxer(const AVInputFormat* inputFormat) noexcept {
     return name == "image2" || name == "image2pipe" || name == "ico" ||
         (name.size() > 5 && name.ends_with("_pipe"));
 }
+
+// Whether a stream is a still image is decided by what the file actually
+// contains, not by which demuxer happened to claim it. Matching demuxer names
+// cannot keep up with FFmpeg: AVIF and HEIC are ISOBMFF files that the mov
+// demuxer opens, so they never matched "image2" / "*_pipe" and were handled as
+// timed video — no retained frame, a hardware decoder attempted, and a
+// one-frame timeline that ends immediately. A single frame with no notion of
+// looping is the signal that actually matters.
+// nb_frames is unknown (0) for many sources; those fall back to the demuxer
+// name so existing behaviour is preserved exactly.
+bool IsStillImage(const AVFormatContext* format, const std::int32_t streamIndex) noexcept {
+    if (format == nullptr || streamIndex < 0 ||
+        streamIndex >= static_cast<std::int32_t>(format->nb_streams)) return false;
+    // Animated image formats stay timed video even when they report one frame:
+    // they have a real timeline and are expected to play.
+    if (IsLoopAwareImageDemuxer(format->iformat)) return false;
+    const auto frameCount = format->streams[streamIndex]->nb_frames;
+    if (frameCount > 1) return false;  // image sequences and multi-frame sources are video
+    if (frameCount == 1) return true;
+    return IsStaticImageDemuxer(format->iformat);
+}
+
+// Largest still-image side the renderer can upload in one piece.
+// D3D11 guarantees D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION (16384) on feature
+// level 11 hardware; a still image becomes a single texture, so anything wider
+// or taller cannot be displayed at all. Rejecting up front turns a confusing
+// render failure into an actionable message. Only still images are checked —
+// video frames stay on the existing path unchanged.
+constexpr std::int32_t MaxStillImageDimension = 16384;
 
 std::int64_t EstimateDuration100ns(const AVFormatContext* format) noexcept {
     if (format == nullptr) return 0;
@@ -378,8 +454,53 @@ std::int32_t FindDefaultOrFirstStream(AVFormatContext* format, AVMediaType type)
     return first;
 }
 
-std::int32_t FindCoverArtStream(AVFormatContext* format) noexcept {
-    if (format == nullptr) return -1;
+// AVIF and HEIC image sequences keep the primary still item as the first video
+// stream and put the animation on a separate later track; ffmpeg marks neither
+// as default, so the ordinary selection would take the still item and the file
+// would look like a single-frame picture with no timeline. Return the track that
+// carries the animation instead, but only when that reading is unambiguous: the
+// container is one of the mov-family image sequences, the first video stream
+// holds a single frame, and another video stream holds more than one.
+std::int32_t FindAnimatedImageStream(AVFormatContext* format) noexcept {
+    if (format == nullptr || format->iformat == nullptr || format->iformat->name == nullptr) return -1;
+    const std::string_view demuxer(format->iformat->name);
+    if (demuxer.find("mov") == std::string_view::npos) return -1;
+    std::int32_t first = -1;
+    std::int32_t busiest = -1;
+    std::int64_t busiestFrames = 1;
+    for (unsigned index = 0; index < format->nb_streams; ++index) {
+        const auto* stream = format->streams[index];
+        if (stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO ||
+            (stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0) continue;
+        if (first < 0) first = static_cast<std::int32_t>(index);
+        if (stream->nb_frames > busiestFrames) {
+            busiestFrames = stream->nb_frames;
+            busiest = static_cast<std::int32_t>(index);
+        }
+    }
+    if (first < 0 || busiest < 0 || busiest == first) return -1;
+    if (format->streams[first]->nb_frames > 1) return -1;
+    return busiest;
+}
+
+// Whether a source must be rewound with DoSeek(0) at the end of every pass
+// instead of being allowed to loop inside the demuxer. This is decided by what
+// the file actually contains, not by the demuxer name: an AVIF/HEIC animation
+// lives on a secondary track of a mov file, so it has to be looked for
+// explicitly (exactly like `animatedImage_` in DoOpen), and APNG has to be taken
+// away from the broken demuxer wrap-around.
+//   · APNG        -> true: the demuxer wrap-around loses a frame every pass, so
+//                    the session opens it with ignore_loop and rewinds instead.
+//   · AVIF/HEIC   -> true: a timed sequence that must be turned into a loop.
+//   · GIF/WebP/JXL-> false: the demuxer loops cleanly and never reaches EOF.
+//   · plain video -> false: must keep ending, so hosts can advance.
+bool IsAnimatedImageSequence(AVFormatContext* format) noexcept {
+    if (format == nullptr) return false;
+    if (IsLoopAwareImageDemuxer(format->iformat)) return true;
+    return FindAnimatedImageStream(format) >= 0;
+}
+
+std::int32_t FindCoverArtStream(AVFormatContext* format) noexcept {    if (format == nullptr) return -1;
     for (unsigned index = 0; index < format->nb_streams; ++index) {
         const auto* stream = format->streams[index];
         if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
@@ -433,7 +554,8 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       publishedBitRateSecond_(-1),
       draining_(false), demuxEnded_(false), audioDecoderDrained_(false),
       externalAudioDrained_(false), audioClockFinished_(false),
-      staticImage_(false), hardwareFallbackPending_(false), internalAudioFailurePending_(false),
+      staticImage_(false), animatedImage_(false), sessionWrapLoop_(false), sessionWrapFailures_(0),
+      hardwareFallbackPending_(false), internalAudioFailurePending_(false),
       internalAudioFailureResult_(FFFResult::Success), internalAudioDecodeErrorCount_(0) {
     snapshot_ = {};
     snapshot_.size = sizeof(snapshot_); snapshot_.version = 8; snapshot_.state = FFF3FPState::Idle;
@@ -456,6 +578,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
 }
 
 PlayerSession::~PlayerSession() {
+    ReleasePrimariesCarrierFilter();
     discCancel_.store(true);
     { std::lock_guard lock(mutex_); terminate_ = true; commands_.clear(); }
     commandCondition_.notify_all();
@@ -525,7 +648,15 @@ bool PlayerSession::ShouldGateAudioAtVideoStart() const noexcept {
 }
 
 void PlayerSession::ArmAudioUntilVideoFrame() noexcept {
-    playbackPreroll_ = videoStream_ >= 0 && !staticImage_;
+    // An animated picture (a loop-aware image demuxer) has no audio track and no
+    // real timeline, and the picture mode opens it *stopped* so that its first
+    // frame is visible straight away. The preroll is only completed while the
+    // state is Playing (see TryCompletePlaybackPreroll), so arming it for such a
+    // file would leave PumpVideoPresentation blocked and the frame would never
+    // reach the screen: the window stays black until the user presses play.
+    // Only this arming site is relaxed - Play() still re-arms the preroll, so
+    // starting an animation behaves exactly like starting any other video.
+    playbackPreroll_ = videoStream_ >= 0 && !staticImage_ && !animatedImage_;
     audioBlockedUntilVideoFrame_ = ShouldGateAudioAtVideoStart();
     audioUnblockVideoGeneration_ = 0;
     audioResumePendingAfterVideoFrame_ = audioBlockedUntilVideoFrame_ &&
@@ -1077,12 +1208,17 @@ FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sd
         !std::isfinite(hdr) || hdr < 0 || hdr > 10000 || !std::isfinite(paper) || paper <= 0)
         return FFFResult::InvalidArgument;
     Enqueue([this, mode, sdr, hdr, paper, forceHdrOutput] {
-        const auto forceSdr = mode == FFF3FPColorMode::MapToHdr && snapshot_.isHdrSource == 0;
-        const auto effectiveMode = forceSdr ? FFF3FPColorMode::MapToSdr : mode;
-        snapshot_.requestedColorMode = effectiveMode;
+        // The gate is deliberately *not* applied here. At this point the stream may
+        // not be configured yet (SetColorMode commonly runs before Open reaches
+        // ConfigureHdrStream), so IsHdrSource()/IsWideGamutSource() can both read
+        // false for a source that is in fact HDR or wide gamut. Deciding now would
+        // silently rewrite the user's request — which is exactly how Display P3
+        // photos lost scRGB. Record the user's intent verbatim and let the
+        // renderer, plus the post-open re-evaluation, decide what is achievable.
+        snapshot_.requestedColorMode = mode;
         const auto previous = snapshot_.actualColorMode;
         const auto result = videoRenderer_.SetColorMode(
-            effectiveMode, sdr, hdr, paper, forceHdrOutput);
+            mode, sdr, hdr, paper, forceHdrOutput);
         if (result != FFFResult::Success) {
             if (result == FFFResult::DeviceFailure &&
                 videoRenderer_.RequestRecoveryIfDeviceLost()) return;
@@ -1097,13 +1233,12 @@ FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sd
         }
         snapshot_.actualColorMode = videoRenderer_.ActualColorMode();
         PublishSnapshot();
-        const auto reason = forceSdr ? "True HDR output is only available for HDR source video."
-            : videoRenderer_.FallbackReason();
+        const auto reason = videoRenderer_.FallbackReason();
         std::ostringstream json;
-        json << "{\"requested\":" << static_cast<unsigned>(effectiveMode)
+        json << "{\"requested\":" << static_cast<unsigned>(mode)
             << ",\"actual\":" << static_cast<unsigned>(snapshot_.actualColorMode)
             << ",\"reason\":\"" << EscapeJson(reason) << "\"}";
-        if (previous != snapshot_.actualColorMode || effectiveMode != snapshot_.actualColorMode || forceSdr)
+        if (previous != snapshot_.actualColorMode || mode != snapshot_.actualColorMode)
             Emit(FFF3FPEvent::ColorModeChanged, json.str());
     });
     return FFFResult::Success;
@@ -1796,7 +1931,6 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
     AVDictionary* options = nullptr;
     av_dict_set(&options, "protocol_whitelist", "file,crypto,data", 0);
     av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
-    av_dict_set(&options, "ignore_loop", "0", 0);
     io = SharedFileInput::Open(path.c_str(), error);
     if (io == nullptr) {
         av_dict_free(&options);
@@ -1829,6 +1963,17 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
     if (demuxerName.find("hls") != std::string_view::npos ||
         demuxerName.find("dash") != std::string_view::npos) {
         CloseFormat(output, io); error = "Network and virtual-device demuxers are disabled."; return FFFResult::NotSupported;
+    }
+    // The APNG demuxer only wraps cleanly at the *first* wrap-around; every one
+    // after it loses a frame (see DemuxerLosesFrameOnWrap). The session cannot
+    // rely on the demuxer for this format and has to rewind it at the end of
+    // each pass instead, which means its own wrap-around must be turned off.
+    // `ignore_loop` can be set on the demuxer's private options at any time
+    // before the first packet, and unlike the open-time dictionary this works
+    // for every caller of OpenFormat (an external audio file is a different
+    // demuxer and is deliberately left alone).
+    if (!ApplyLoopingOptions(*output, demuxerName)) {
+        CloseFormat(output, io); error = "The image demuxer could not be configured."; return FFFResult::FfmpegFailure;
     }
     result = avformat_find_stream_info(*output, nullptr);
     if (result < 0) { CloseFormat(output, io); error = "Could not read media streams: " + FfmpegError(result); return FFFResult::FfmpegFailure; }
@@ -2013,7 +2158,38 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     } else openResult = OpenFormat(path, &format_, formatIo_, openError);
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
     videoStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_VIDEO);
-    staticImage_ = videoStream_ >= 0 && IsStaticImageDemuxer(format_->iformat);
+    animatedImage_ = IsLoopAwareImageDemuxer(format_ != nullptr ? format_->iformat : nullptr);
+    // An AVIF/HEIC image sequence keeps its animation on a later track than the
+    // primary still item, so switch to that track before anything reads the
+    // frame count - otherwise the file is mistaken for a one-frame picture.
+    if (const auto animationStream = FindAnimatedImageStream(format_); animationStream >= 0) {
+        videoStream_ = animationStream;
+        animatedImage_ = true;
+    }
+    // With the streams known, decide how a loop is produced: the APNG demuxer
+    // loses a frame at every wrap-around (and the wrap-around has therefore
+    // already been disabled for it above), while a timed AVIF/HEIC sequence has
+    // to be rewound by the session. Both are turned into a loop by the same
+    // endless DoSeek(0) below, never by the host.
+    sessionWrapLoop_ = IsAnimatedImageSequence(format_);
+    staticImage_ = IsStillImage(format_, videoStream_);
+    // Still images are uploaded as one texture, so an oversized source can only
+    // fail later inside the renderer ("open-image" with an opaque reason).
+    // Reject it here with the real limit instead. Video is not checked here and
+    // keeps its existing behaviour.
+    if (staticImage_) {
+        const auto* imageParameters = format_->streams[videoStream_]->codecpar;
+        if (imageParameters->width > MaxStillImageDimension ||
+            imageParameters->height > MaxStillImageDimension) {
+            Fail(FFFResult::NotSupported,
+                "The still image is too large to display: " +
+                std::to_string(imageParameters->width) + "x" +
+                std::to_string(imageParameters->height) +
+                " exceeds the limit of " + std::to_string(MaxStillImageDimension) +
+                " pixels per side.", "open-image-size");
+            return;
+        }
+    }
     coverArtStream_ = FindCoverArtStream(format_);
     audioStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_AUDIO);
     if (videoStream_ < 0 && audioStream_ < 0) { Fail(FFFResult::NotSupported, "The file contains no playable video or audio stream.", "open"); return; }
@@ -2065,7 +2241,15 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
         if (videoStream_ >= 0) { snapshot_.videoWidth = videoDecoder_->width; snapshot_.videoHeight = videoDecoder_->height; ApplyHdrState(snapshot_, videoRenderer_.HdrState()); }
         else if (coverArtFrame_ != nullptr) { snapshot_.videoWidth = coverArtFrame_->width; snapshot_.videoHeight = coverArtFrame_->height; snapshot_.isHdrSource = 0; }
-        if (snapshot_.isHdrSource == 0 && snapshot_.requestedColorMode == FFF3FPColorMode::MapToHdr) {
+        // Only a request that is genuinely unachievable is downgraded. Widened
+        // primaries (Display P3 / DCI-P3) count as achievable: they need scRGB
+        // just as much as an HDR transfer function, because an SDR swap chain
+        // cannot hold colours outside Rec.709 and would clip them silently.
+        // The renderer re-checks this same condition in EnsureSwapChain, which is
+        // the actual arbiter of the swap-chain format; keeping the two in step
+        // means no re-application pass is needed here.
+        if (snapshot_.isHdrSource == 0 && !videoRenderer_.IsWideGamutSource() &&
+            snapshot_.requestedColorMode == FFF3FPColorMode::MapToHdr) {
             snapshot_.requestedColorMode = FFF3FPColorMode::MapToSdr;
             forcedSdrOutput = true;
         }
@@ -2082,14 +2266,31 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     seekTarget100ns_ = -1; seekTargetFrame_ = -1; keyframeSeekPending_ = false;
     lastVideoFrameDuration100ns_ = 0; nextUntimedVideoPosition100ns_ = 0; draining_ = false;
     ArmAudioUntilVideoFrame();
-    if (staticImage_) {
-        const auto imageResult = DecodeInitialStillImage();
+    // A still picture and an animated one both have to show a frame while the
+    // session is stopped: the first is what the host asked to look at, the second
+    // is meant to start paused on its first frame. Frames only reach the screen
+    // from the playback loop (PumpPlayback -> PumpVideoPresentation), which does
+    // not run while the session is merely Ready, and an animated picture is not
+    // drained on open either (it has more than one frame), so nothing would ever
+    // present it: the window would stay black until the user pressed play.
+    if (staticImage_ || animatedImage_) {
+        const auto imageResult = DecodeInitialFrame();
         if (imageResult != FFFResult::Success) {
-            Fail(imageResult, "Could not decode or render the still image during open.", "open-image");
+            Fail(imageResult, animatedImage_
+                ? "Could not decode or render the first frame of the animation during open."
+                : "Could not decode or render the still image during open.",
+                animatedImage_ ? "open-animation" : "open-image");
             return;
         }
     }
     RebuildMediaInfo(); SetState(FFF3FPState::Ready, "open");
+    // Publish the image details once, from the worker thread while the decoded
+    // frames (and their side data) are still owned by this one - GetImageInfo
+    // hands out this copy under snapshotMutex_ instead of touching them.
+    if (staticImage_ || animatedImage_) {
+        BuildImageInfo(publishedImageInfo_);
+        { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = true; }
+    }
     PublishDisc();
     Emit(FFF3FPEvent::OpenCompleted, "{\"success\":true}");
     if (staticImage_ && decodeMode_ == FFF3FPDecodeMode::D3D11)
@@ -2102,14 +2303,19 @@ void PlayerSession::DoOpen(std::string path) noexcept {
                 ? "The GPU rejected the video stream; playback is using CPU decoding."
                 : hardwareFailureReason) + "\"}");
     if (forcedSdrOutput)
-        Emit(FFF3FPEvent::ColorModeChanged, "{\"requested\":0,\"actual\":0,\"reason\":\"True HDR output is only available for HDR source video.\"}");
+        Emit(FFF3FPEvent::ColorModeChanged,
+            "{\"requested\":0,\"actual\":0,\"reason\":\"" +
+            EscapeJson(videoRenderer_.FallbackReason().empty()
+                ? std::string("True HDR output is only available for HDR or wide-gamut sources.")
+                : videoRenderer_.FallbackReason()) + "\"}");
     else if (snapshot_.requestedColorMode == FFF3FPColorMode::MapToHdr && snapshot_.actualColorMode != snapshot_.requestedColorMode)
         Emit(FFF3FPEvent::ColorModeChanged, "{\"requested\":2,\"actual\":0,\"reason\":\"" + EscapeJson(videoRenderer_.FallbackReason()) + "\"}");
 }
 
-FFFResult PlayerSession::DecodeInitialStillImage() noexcept {
-    if (!staticImage_ || format_ == nullptr || videoDecoder_ == nullptr || videoStream_ < 0)
+FFFResult PlayerSession::DecodeInitialFrame() noexcept {
+    if (format_ == nullptr || videoDecoder_ == nullptr || videoStream_ < 0)
         return FFFResult::InvalidState;
+    if (!staticImage_ && !animatedImage_) return FFFResult::InvalidState;
     if (playbackPacket_ == nullptr) playbackPacket_ = av_packet_alloc();
     if (playbackPacket_ == nullptr) return FFFResult::NativeFailure;
     const auto before = videoRenderer_.PresentedVideoFrames();
@@ -2622,22 +2828,36 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     }
     const auto previousColorMode = snapshot_.actualColorMode;
     const auto firstFrameForMedia = snapshot_.framePts == AV_NOPTS_VALUE;
+    // P3 -> BT.2020 runs **before** the frame is cached and rendered, so the
+    // retained recovery frame is already converted and a device-loss redraw
+    // does not lose the gamut again.
+    const AVFrame* frameToRender = renderFrame;
+    AVFrame* gamutConverted = nullptr;
+    if (staticImage_ && owner == format_ && NeedsPrimariesCarrier(renderFrame)) {
+        if (ConvertPrimariesToBt2020(renderFrame, &gamutConverted) == FFFResult::Success &&
+            gamutConverted != nullptr) {
+            frameToRender = gamutConverted;
+        }
+    }
     if (staticImage_ && owner == format_) {
         if (stillImageFrame_ == nullptr) stillImageFrame_ = av_frame_alloc();
         if (stillImageFrame_ == nullptr) {
             Fail(FFFResult::NativeFailure, "Could not retain the still-image frame for graphics recovery.");
+            if (gamutConverted != nullptr) av_frame_free(&gamutConverted);
             return;
         }
         av_frame_unref(stillImageFrame_);
-        const auto retainResult = av_frame_ref(stillImageFrame_, renderFrame);
+        const auto retainResult = av_frame_ref(stillImageFrame_, frameToRender);
         if (retainResult < 0) {
             Fail(FFFResult::NativeFailure,
                 "Could not retain the still-image frame for graphics recovery: " +
                 FfmpegError(retainResult));
+            if (gamutConverted != nullptr) av_frame_free(&gamutConverted);
             return;
         }
     }
-    const auto renderResult = videoRenderer_.Render(renderFrame, staticImage_ && owner == format_);
+    const auto renderResult = videoRenderer_.Render(frameToRender, staticImage_ && owner == format_);
+    if (gamutConverted != nullptr) av_frame_free(&gamutConverted);
     if (renderResult != FFFResult::Success) {
         if (renderResult == FFFResult::DeviceFailure &&
             videoRenderer_.RequestRecoveryIfDeviceLost()) return;
@@ -2886,6 +3106,189 @@ void PlayerSession::PumpExternalAudio() noexcept {
     av_packet_unref(externalAudioPacket_);
 }
 
+FFFResult PlayerSession::GetImageInfo(FFF3FPImageInfo& info) const noexcept {
+    if (info.size < sizeof(FFF3FPImageInfo) || info.version != 1) return FFFResult::InvalidArgument;
+    // The details were built on the worker thread while the media was opened;
+    // handing out that copy keeps the decoder-owned frames off the caller's
+    // thread (same contract as GetSnapshot).
+    { std::lock_guard lock(snapshotMutex_);
+      if (!hasPublishedImageInfo_) return FFFResult::InvalidState;
+      info = publishedImageInfo_; }
+    return FFFResult::Success;
+}
+
+void PlayerSession::BuildImageInfo(FFF3FPImageInfo& info) const noexcept {
+    if (format_ == nullptr || videoStream_ < 0) return;
+
+    const auto* stream = format_->streams[videoStream_];
+    const auto* parameters = stream->codecpar;
+
+    info.frameCount = stream->nb_frames > 0 ?
+        static_cast<std::int32_t>(stream->nb_frames) : -1;
+    // FFmpeg exposes no generic loop count; animated demuxers loop unless told
+    // otherwise, which OpenWithOptions is meant to cover.
+    info.loopCount = -1;
+
+    std::uint32_t flags = 0;
+    if (staticImage_) flags |= FFF3FP_IMAGE_FLAG_STATIC;
+    if (animatedImage_) flags |= FFF3FP_IMAGE_FLAG_ANIMATED;
+    if (stream->nb_frames > 1) flags |= FFF3FP_IMAGE_FLAG_MULTI_FRAME;
+
+    const auto* frame = stillImageFrame_ != nullptr ? stillImageFrame_ : videoDecodeFrame_;
+
+    // EXIF orientation arrives as a display matrix on the decoded frame.
+    // av_display_rotation_get returns NaN when there is no usable matrix, which
+    // stays reported as unknown rather than silently meaning "no rotation".
+    info.rotationQuarterTurns = 0xFFFFFFFFu;
+    if (frame != nullptr) {
+        const auto* matrix = av_frame_get_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX);
+        if (matrix != nullptr && matrix->size >= 9 * sizeof(std::int32_t)) {
+            const auto angle = av_display_rotation_get(
+                reinterpret_cast<const std::int32_t*>(matrix->data));
+            if (angle == angle) {
+                auto normalized = angle;
+                while (normalized < 0.0) normalized += 360.0;
+                while (normalized >= 360.0) normalized -= 360.0;
+                info.rotationQuarterTurns = static_cast<std::uint32_t>(normalized / 90.0 + 0.5) % 4u;
+                flags |= FFF3FP_IMAGE_FLAG_HAS_ROTATION;
+            }
+        }
+    }
+
+    // Prefer the decoded frame's pixel format, but fall back to the codec's when
+    // the frame carries none: a presented frame is unreffed afterwards, which
+    // resets its format to AV_PIX_FMT_NONE, and reading the flags off that would
+    // silently drop alpha (and misreport the bit depth).
+    const auto frameFormat = frame != nullptr ?
+        static_cast<AVPixelFormat>(frame->format) : AV_PIX_FMT_NONE;
+    const auto pixelFormat = frameFormat != AV_PIX_FMT_NONE ?
+        frameFormat : static_cast<AVPixelFormat>(parameters->format);
+    info.sourcePixelFormat = static_cast<std::int32_t>(pixelFormat);
+    info.sourceBitDepth = parameters->bits_per_raw_sample > 0 ?
+        static_cast<std::uint32_t>(parameters->bits_per_raw_sample) : 8u;
+    if (const auto* descriptor = av_pix_fmt_desc_get(pixelFormat)) {
+        if (descriptor->comp[0].depth > 0) info.sourceBitDepth = descriptor->comp[0].depth;
+        if ((descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0) flags |= FFF3FP_IMAGE_FLAG_HAS_ALPHA;
+    }
+
+    // ICC profiles arrive as frame side data from the codecs that embed them.
+    info.iccProfileSizeBytes = 0;
+    if (frame != nullptr) {
+        if (const auto* icc = av_frame_get_side_data(frame, AV_FRAME_DATA_ICC_PROFILE)) {
+            info.iccProfileSizeBytes = static_cast<std::uint32_t>(icc->size);
+            flags |= FFF3FP_IMAGE_FLAG_HAS_ICC;
+        }
+    }
+
+    // Colour description. The decoded frame is authoritative when it carries
+    // one; the container parameters are the fallback.
+    auto primaries = parameters->color_primaries;
+    auto colorSpace = parameters->color_space;
+    auto transfer = parameters->color_trc;
+    if (frame != nullptr) {
+        if (frame->color_primaries != AVCOL_PRI_UNSPECIFIED) primaries = frame->color_primaries;
+        if (frame->colorspace != AVCOL_SPC_UNSPECIFIED) colorSpace = frame->colorspace;
+        if (frame->color_trc != AVCOL_TRC_UNSPECIFIED) transfer = frame->color_trc;
+    }
+    info.colorPrimaries = primaries == AVCOL_PRI_UNSPECIFIED ? -1 : static_cast<std::int32_t>(primaries);
+    info.colorSpace = colorSpace == AVCOL_SPC_UNSPECIFIED ? -1 : static_cast<std::int32_t>(colorSpace);
+    info.colorTransfer = transfer == AVCOL_TRC_UNSPECIFIED ? -1 : static_cast<std::int32_t>(transfer);
+    // Wider than Rec.709 means the colour cannot survive an SDR swap chain.
+    if (primaries == AVCOL_PRI_BT2020 || primaries == AVCOL_PRI_SMPTE431 ||
+        primaries == AVCOL_PRI_SMPTE432) {
+        flags |= FFF3FP_IMAGE_FLAG_WIDE_GAMUT;
+    }
+
+    info.flags = flags;
+}
+
+namespace {
+
+// Display P3 and DCI-P3 fit inside BT.2020, so converting to BT.2020 carries
+// the gamut **without** clipping it — which is the whole point. Converting to
+// Rec.709 instead would throw the extra colours away.
+constexpr bool IsP3Primaries(const AVColorPrimaries primaries) noexcept {
+    return primaries == AVCOL_PRI_SMPTE431 || primaries == AVCOL_PRI_SMPTE432;
+}
+
+}  // namespace
+
+bool PlayerSession::NeedsPrimariesCarrier(const AVFrame* frame) const noexcept {
+    if (frame == nullptr) return false;
+    // BT.2020 sources already travel the shader's wide-gamut path untouched.
+    return IsP3Primaries(static_cast<AVColorPrimaries>(frame->color_primaries));
+}
+
+void PlayerSession::ReleasePrimariesCarrierFilter() noexcept {
+    if (gamutGraph_ != nullptr) {
+        avfilter_graph_free(&gamutGraph_);
+        gamutSource_ = nullptr;
+        gamutSink_ = nullptr;
+        gamutSourceWidth_ = 0;
+        gamutSourceHeight_ = 0;
+        gamutSourceFormat_ = -1;
+    }
+}
+
+FFFResult PlayerSession::ConvertPrimariesToBt2020(const AVFrame* input,
+    AVFrame** output) noexcept {
+    if (input == nullptr || output == nullptr) return FFFResult::InvalidArgument;
+    *output = nullptr;
+    if (input->width <= 0 || input->height <= 0) return FFFResult::InvalidState;
+
+    if (gamutGraph_ == nullptr || gamutSourceWidth_ != input->width ||
+        gamutSourceHeight_ != input->height || gamutSourceFormat_ != input->format) {
+        ReleasePrimariesCarrierFilter();
+        const auto* bufferSource = avfilter_get_by_name("buffer");
+        const auto* bufferSink = avfilter_get_by_name("buffersink");
+        const auto* zscale = avfilter_get_by_name("zscale");
+        if (bufferSource == nullptr || bufferSink == nullptr || zscale == nullptr)
+            return FFFResult::NotSupported;
+        auto* graph = avfilter_graph_alloc();
+        if (graph == nullptr) return FFFResult::NativeFailure;
+        char arguments[192];
+        std::snprintf(arguments, sizeof(arguments),
+            "video_size=%dx%d:pix_fmt=%d:time_base=1/25:pixel_aspect=1/1",
+            input->width, input->height, input->format);
+        AVFilterContext* source = nullptr;
+        AVFilterContext* sink = nullptr;
+        AVFilterContext* gamut = nullptr;
+        auto failed = false;
+        if (avfilter_graph_create_filter(&source, bufferSource, "in", arguments,
+                nullptr, graph) < 0) failed = true;
+        if (!failed && avfilter_graph_create_filter(&sink, bufferSink, "out",
+                nullptr, nullptr, graph) < 0) failed = true;
+        // zscale infers the input primaries from the frame and is told only the
+        // output: BT.2020, the gamut the shader already understands.
+        if (!failed && avfilter_graph_create_filter(&gamut, zscale, "gamut",
+                "primaries=bt2020", nullptr, graph) < 0) failed = true;
+        if (!failed && avfilter_link(source, 0, gamut, 0) < 0) failed = true;
+        if (!failed && avfilter_link(gamut, 0, sink, 0) < 0) failed = true;
+        if (!failed && avfilter_graph_config(graph, nullptr) < 0) failed = true;
+        if (failed) {
+            avfilter_graph_free(&graph);
+            return FFFResult::FfmpegFailure;
+        }
+        gamutGraph_ = graph;
+        gamutSource_ = source;
+        gamutSink_ = sink;
+        gamutSourceWidth_ = input->width;
+        gamutSourceHeight_ = input->height;
+        gamutSourceFormat_ = input->format;
+    }
+
+    if (av_buffersrc_add_frame_flags(gamutSource_, const_cast<AVFrame*>(input),
+            AV_BUFFERSRC_FLAG_KEEP_REF) < 0) return FFFResult::FfmpegFailure;
+    auto* converted = av_frame_alloc();
+    if (converted == nullptr) return FFFResult::NativeFailure;
+    if (av_buffersink_get_frame(gamutSink_, converted) < 0) {
+        av_frame_free(&converted);
+        return FFFResult::FfmpegFailure;
+    }
+    *output = converted;
+    return FFFResult::Success;
+}
+
 void PlayerSession::FlushAtEnd() noexcept {
     if (!draining_) {
         draining_ = true;
@@ -2920,6 +3323,48 @@ void PlayerSession::FlushAtEnd() noexcept {
         endPosition += lastVideoFrameDuration100ns_;
     if (audioRenderer_) endPosition = std::max(endPosition, audioRenderer_->Position100ns());
     if (!staticImage_ && ClockPosition() < endPosition) { Sleep(1); return; }
+    // A still image never "finishes playing": it has no timeline and its frame
+    // stays on screen. Entering Ended here only makes hosts treat a freshly
+    // opened picture as finished playback (auto-advance, loop, stop) and emits a
+    // PlaybackEnded that means nothing for a picture. Stay interactive instead —
+    // zoom, pan and switching pictures must keep working after the frame lands.
+    if (staticImage_) {
+        RebuildMediaInfo();
+        SuspendAudioRenderer(true);
+        if (state_.load() == FFF3FPState::Playing) SetState(FFF3FPState::Paused, "end-still-image");
+        return;
+    }
+    // An animated picture is meant to keep looping: finishing one pass is not a
+    // meaningful state for it, and hosts react to PlaybackEnded by advancing to
+    // the next file or stopping. Rewind and carry on instead.
+    //   · APNG and timed AVIF/HEIC sequences are opened with ignore_loop=1, so
+    //     they reach the end of the file after exactly one pass and rely on the
+    //     DoSeek(0) below. This is what removes the APNG stall: the broken
+    //     demuxer wrap-around never runs, and the seek resets the decoder so
+    //     frame 0 of the next pass is decoded normally.
+    //   · The remaining loop-aware demuxers (GIF/WebP/JXL) are opened with
+    //     ignore_loop=0, so they resupply frames on their own and rarely reach
+    //     here at all (sessionWrapLoop_ stays false for them).
+    // DoSeek clears the draining flag and resets the clock, so the loop continues
+    // without a visible gap: the last frame stays on screen until frame 0 lands.
+    if (sessionWrapLoop_) {
+        // The very first seek in a pass can still be refused while the demuxer
+        // is mid read-ahead; retry the rewind instead of failing the picture.
+        // A demuxer whose seek is broken (it reports success but supplies no
+        // packets afterwards) would spin here forever, so after enough failed
+        // rewinds the loop is abandoned and the picture ends like a video.
+        if (DoSeek(0) != FFFResult::Success) {
+            if (++sessionWrapFailures_ >= 8) {
+                sessionWrapLoop_ = false;  // fall through to the ended path below
+            } else {
+                return;
+            }
+        } else {
+            sessionWrapFailures_ = 0;
+            RebuildMediaInfo();
+            return;
+        }
+    }
     snapshot_.duration100ns = std::max(snapshot_.duration100ns, endPosition);
     snapshot_.position100ns = snapshot_.duration100ns;
     RebuildMediaInfo();
@@ -2927,15 +3372,22 @@ void PlayerSession::FlushAtEnd() noexcept {
     SetState(FFF3FPState::Ended, "end"); Emit(FFF3FPEvent::PlaybackEnded, "{}");
 }
 
-void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame,
+FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame,
     const bool exact) noexcept {
     if (disc_) {
-        if (!disc_->Seek(position)) { ReportError(FFFResult::NotSupported, "This disc position cannot be seeked.", "seek"); return; }
+        if (!disc_->Seek(position)) { ReportError(FFFResult::NotSupported, "This disc position cannot be seeked.", "seek"); return FFFResult::NotSupported; }
         if (ReopenDiscDemux() && state_.load() != FFF3FPState::Playing && videoStream_ >= 0)
             seekTarget100ns_ = discPositionOffset_;
-        return;
+        return FFFResult::Success;
     }
-    if (!format_) return; position = std::clamp<std::int64_t>(position, 0, snapshot_.duration100ns > 0 ? snapshot_.duration100ns : position);
+    if (!format_) return FFFResult::Success;
+    position = std::clamp<std::int64_t>(position, 0, snapshot_.duration100ns > 0 ? snapshot_.duration100ns : position);
+    // A still image has no timeline to move along, and the single-image
+    // demuxers (image2 and friends) are not seekable: av_seek_frame fails, the
+    // byte-position fallback fails too, and every attempt ends in ReportError.
+    // Hosts that poll or re-synchronise periodically therefore spam errors on
+    // any opened picture. Treat the request as a no-op that keeps the picture.
+    if (staticImage_) { PublishSnapshot(); return FFFResult::Success; }
     auto decodeStartPosition = position;
     const auto referenceStream = videoStream_ >= 0 ? videoStream_ : audioStream_;
     auto timestamp = av_rescale_q(position + TimelineOrigin100ns(format_),
@@ -2962,7 +3414,7 @@ void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame
     if (seekResult < 0) {
         ReportError(FFFResult::FfmpegFailure,
             "FFmpeg could not seek to the requested position; playback remained active.", "seek");
-        return;
+        return FFFResult::FfmpegFailure;
     }
     ClearVideoQueue();
     ResetBitRateTracking();
@@ -2990,6 +3442,7 @@ void PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame
         av_seek_frame(externalFormat_, externalAudioStream_, externalTimestamp, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(externalAudioDecoder_);
     }
+    return FFFResult::Success;
 }
 
 void PlayerSession::DecodeUntilSeekTarget() noexcept {
@@ -3097,6 +3550,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); CloseFormat(&externalFormat_, externalFormatIo_);
     if (videoDecoder_) avcodec_free_context(&videoDecoder_); if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     if (coverArtFrame_) av_frame_free(&coverArtFrame_);
+    ReleasePrimariesCarrierFilter();
     if (stillImageFrame_) av_frame_free(&stillImageFrame_);
     if (videoDecodeFrame_) av_frame_free(&videoDecodeFrame_);
     if (videoTransferFrame_) av_frame_free(&videoTransferFrame_);
@@ -3122,6 +3576,9 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     nextUntimedVideoPosition100ns_ = 0; draining_ = false;
     demuxEnded_ = audioDecoderDrained_ = externalAudioDrained_ = audioClockFinished_ = false;
     staticImage_ = false;
+    animatedImage_ = false;
+    sessionWrapLoop_ = false; sessionWrapFailures_ = 0;
+    { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = false; }
     audioBlockedUntilVideoFrame_ = false;
     playbackPreroll_ = false;
     audioUnblockVideoGeneration_ = 0;

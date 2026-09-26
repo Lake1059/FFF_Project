@@ -210,6 +210,30 @@ Public NotInheritable Class 播放器会话
         检查结果(播放器原生接口.FFF3FP_Set360View(取得句柄(), If(启用, 1UI, 0UI),
                                                 水平角度, 垂直角度, 视场角))
     End Sub
+
+    ''' <summary>图片模式：设置缩放与平移。缩放=1 表示适应窗口。</summary>
+    Public Sub 设置视图变换(缩放 As Single, 水平平移 As Single, 垂直平移 As Single)
+        If Not Single.IsFinite(缩放) OrElse 缩放 <= 0.0F OrElse
+            Not Single.IsFinite(水平平移) OrElse Not Single.IsFinite(垂直平移) Then
+            Throw New ArgumentOutOfRangeException(NameOf(缩放))
+        End If
+        检查结果(播放器原生接口.FFF3FP_SetViewTransform(取得句柄(), 缩放, 水平平移, 垂直平移))
+    End Sub
+
+    ''' <summary>图片模式：读取帧数、动画标志、EXIF 旋转、源格式位深、ICC 大小与色彩信息。
+    ''' 拿不到时返回 Nothing（旧内核没有该导出，或当前媒体不是图片）。
+    ''' ⚠ 必须是 Friend：返回类型 原生图片信息 是 Friend 类型，Public 成员不允许暴露它（BC30909）。</summary>
+    Friend Function 取图片信息() As 原生图片信息?
+        Dim 信息 As New 原生图片信息 With {
+            .大小 = CUInt(Marshal.SizeOf(GetType(原生图片信息))),
+            .版本 = 1UI
+        }
+        Dim 结果 = 播放器原生接口.FFF3FP_GetImageInfo(取得句柄(), 信息)
+        ' "不支持"是正常回落，不当作错误：调用方只关心"是不是动图"，读不到就按不是处理。
+        If 结果 = 原生播放器结果.不支持 Then Return Nothing
+        检查结果(结果)
+        Return 信息
+    End Function
     Public Sub 设置音频端点(端点标识 As String)
         Dim 指针 = IntPtr.Zero
         Try

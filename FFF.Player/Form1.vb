@@ -34,6 +34,7 @@ Public Class Form1
     Private 流选择器 As 播放器流选择器
     Private 画面菜单控制器 As 播放器画面菜单控制器
     Private 视角360控制器 As 播放器360视角控制器
+    Private 图片浏览控制器 As 播放器图片浏览控制器
     Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
@@ -154,6 +155,17 @@ Public Class Form1
                 播放控制器.设置360视角(启用, 水平角度, 垂直角度, 视场角)
             End Sub,
             Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "360°视频"))
+        图片浏览控制器 = New 播放器图片浏览控制器(
+            画面控件, MCM_标题栏菜单,
+            Sub(缩放, 水平平移, 垂直平移)
+                播放控制器.设置视图变换(缩放, 水平平移, 垂直平移)
+            End Sub,
+            Sub(方向) 播放相邻项目(方向),
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "图片"))
+        ' 图片模式通过 Form1 既有的 Handled 抢键机制接管 ←/→，
+        ' 视频模式那条"±5 秒跳转"分支不用改一个字。
+        AddHandler 方向键快捷键已请求, AddressOf 图片浏览控制器.处理方向键快捷键
+        AddHandler 图片浏览控制器.图片模式已变化, AddressOf 图片浏览控制器_图片模式已变化
         画面菜单控制器.应用全局字体(设置.实例对象.字体)
         光盘控制器 = New 播放器光盘控制器(Me, 画面控件, 播放控制器, MCM_标题栏菜单)
         全屏交互控制器 = New 播放器全屏交互控制器(Me, 画面控件,
@@ -348,6 +360,9 @@ Public Class Form1
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
         视角360控制器?.Dispose()
+        RemoveHandler 方向键快捷键已请求, AddressOf 图片浏览控制器.处理方向键快捷键
+        If 图片浏览控制器 IsNot Nothing Then RemoveHandler 图片浏览控制器.图片模式已变化, AddressOf 图片浏览控制器_图片模式已变化
+        图片浏览控制器?.Dispose()
         光盘控制器?.Dispose()
         画面菜单控制器?.Dispose()
         窗口布局控制器?.释放()
@@ -377,6 +392,10 @@ Public Class Form1
     Private Sub 剪辑区间控制器_模式已变化(sender As Object, e As 剪辑区间模式变化事件参数)
         界面呈现器.设置精确时间戳(e.已启用)
         全屏交互控制器?.剪辑区间模式已变化()
+    End Sub
+
+    Private Sub 图片浏览控制器_图片模式已变化(sender As Object, e As EventArgs)
+        界面呈现器?.设置图片模式(图片浏览控制器.图片模式已启用)
     End Sub
 
     Private Sub MB_打开文件_Click(sender As Object, e As EventArgs) Handles MB_打开文件.Click
@@ -468,7 +487,12 @@ Public Class Form1
             播放控制器.当前媒体是视频 Then
             播放控制器.加载外部音轨(路径)
         Else
-            If Not 光盘路径.是光盘路径(路径) Then 启动后台任务(播放列表数据.从媒体创建并扫描相似文件Async(路径))
+            If 播放列表.是图片文件(路径) Then
+                ' 图片按同目录建列表：系列签名匹配（视频用的那条）对图片会退化成只含自己。
+                启动后台任务(播放列表数据.用同目录图片替换Async(路径))
+            ElseIf Not 光盘路径.是光盘路径(路径) Then
+                启动后台任务(播放列表数据.从媒体创建并扫描相似文件Async(路径))
+            End If
             播放控制器.打开媒体(路径)
         End If
     End Sub
@@ -501,6 +525,8 @@ Public Class Form1
         界面呈现器.媒体已打开(e.保留剪辑区间)
         界面呈现器.更新媒体信息(e.媒体信息, e.快照)
         视角360控制器?.媒体已打开(e.文件路径, e.媒体信息, e.快照)
+        图片浏览控制器?.媒体已打开(e.媒体信息, e.快照)
+        界面呈现器.设置图片模式(图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.图片模式已启用)
         界面呈现器.刷新()
     End Sub
 

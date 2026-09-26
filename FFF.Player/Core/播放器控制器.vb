@@ -286,6 +286,46 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    ''' <summary>图片模式：缩放 + 平移（转发到会话层，失败静默）。</summary>
+    Friend Sub 设置视图变换(缩放 As Single, 水平平移 As Single, 垂直平移 As Single)
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return
+        Try
+            目标.设置视图变换(缩放, 水平平移, 垂直平移)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
+    ''' <summary>图片模式：读取图片信息（转发到会话层；失败或非图片返回 Nothing）。
+    ''' 预留：当前由探针与后续接线使用；若接线"动画图停首帧"（设计 G4），
+    ''' 判据必须是 <see cref="原生图片标志.动画"/> 标志且 <c>是静态图片</c>，
+    ''' 不得只看视频流/图片扩展名——否则视频会被误停首帧（视频回归点）。</summary>
+    Friend Function 取图片信息() As 原生图片信息?
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return Nothing
+        Try
+            Return 目标.取图片信息()
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+        Return Nothing
+    End Function
+
+    ''' <summary>动画图默认停首帧（设计 G4）：停住播放并回到第一帧。幂等，可重复调用。
+    ''' 预留：当前媒体打开流程未调用（动图打开即播放）；接线时必须以
+    ''' <see cref="取图片信息"/> 的动画标志为判据，并保留视频会话不触发的断言。</summary>
+    Friend Sub 停在首帧()
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return
+        Try
+            目标.暂停()
+            目标.跳转(TimeSpan.Zero)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
     Public Sub 打开媒体(路径 As String)
         If 已释放 OrElse Not 光盘路径.媒体存在(路径) Then Return
         启动后台任务(打开媒体Async(路径))

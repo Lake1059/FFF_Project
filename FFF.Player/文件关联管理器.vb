@@ -12,6 +12,9 @@ Friend Enum 文件关联类别
     常见音频
     不常见音频
     老旧音频
+    常见图片
+    不常见图片
+    老旧图片
 End Enum
 
 Friend NotInheritable Class 文件关联选项
@@ -21,6 +24,9 @@ Friend NotInheritable Class 文件关联选项
     Public Property 关联常见音频 As Boolean
     Public Property 关联不常见音频 As Boolean
     Public Property 关联老旧音频 As Boolean
+    Public Property 关联常见图片 As Boolean
+    Public Property 关联不常见图片 As Boolean
+    Public Property 关联老旧图片 As Boolean
 
     Friend Shared Function 从设置(值 As 设置) As 文件关联选项
         ArgumentNullException.ThrowIfNull(值)
@@ -30,7 +36,10 @@ Friend NotInheritable Class 文件关联选项
             .关联老旧视频 = 值.关联老旧视频,
             .关联常见音频 = 值.关联常见音频,
             .关联不常见音频 = 值.关联不常见音频,
-            .关联老旧音频 = 值.关联老旧音频
+            .关联老旧音频 = 值.关联老旧音频,
+            .关联常见图片 = 值.关联常见图片,
+            .关联不常见图片 = 值.关联不常见图片,
+            .关联老旧图片 = 值.关联老旧图片
         }
     End Function
 
@@ -42,6 +51,9 @@ Friend NotInheritable Class 文件关联选项
             Case 文件关联类别.常见音频 : Return 关联常见音频
             Case 文件关联类别.不常见音频 : Return 关联不常见音频
             Case 文件关联类别.老旧音频 : Return 关联老旧音频
+            Case 文件关联类别.常见图片 : Return 关联常见图片
+            Case 文件关联类别.不常见图片 : Return 关联不常见图片
+            Case 文件关联类别.老旧图片 : Return 关联老旧图片
             Case Else : Throw New ArgumentOutOfRangeException(NameOf(类别))
         End Select
     End Function
@@ -90,13 +102,19 @@ Friend NotInheritable Class 文件关联管理器
         ' 启动时全部未勾选表示用户没有委托播放器管理关联；不要清理
         ' 其他播放器留下的关联。运行期间的取消操作仍通过同步全部Async
         ' 显式执行注销和备份恢复。
-        If Not {选项.关联常见视频, 选项.关联不常见视频, 选项.关联老旧视频,
-                选项.关联常见音频, 选项.关联不常见音频, 选项.关联老旧音频}.Any(Function(x) x) Then
+        If Not 有已启用的类别(选项) Then
             启动同步任务 = Task.CompletedTask
             Return
         End If
         启动同步任务 = 启动后台同步核心Async(选项)
     End Sub
+
+    '''判据取自类别枚举，不取自逐个选项属性：后者新增类别时容易漏改，
+    '''漏改的后果是该类别的勾选只在运行期间有效、重启后静默失效。
+    Friend Shared Function 有已启用的类别(选项 As 文件关联选项) As Boolean
+        ArgumentNullException.ThrowIfNull(选项)
+        Return [Enum].GetValues(Of 文件关联类别)().Any(Function(类别) 选项.已启用(类别))
+    End Function
 
     Private Shared Async Function 启动后台同步核心Async(选项 As 文件关联选项) As Task
         Try
@@ -206,6 +224,7 @@ Friend NotInheritable Class 文件关联管理器
     Private Shared Function 注销文件类型(定义 As 文件类型定义,
                                     注册表位置 As 文件关联注册表位置) As Boolean
         Dim 有变更 As Boolean
+        Dim 键待删 As Boolean
         Dim extensionPath = 注册表位置.ClassesRoot & "\" & 定义.扩展名
         Using extensionKey = Registry.CurrentUser.OpenSubKey(extensionPath, True)
             If extensionKey IsNot Nothing Then
@@ -227,8 +246,27 @@ Friend NotInheritable Class 文件关联管理器
                                       系统属性缩略图处理器, 注册表位置) OrElse 有变更
                     End If
                 End Using
+                ' 注册时 CreateSubKey 建过 OpenWithProgids；值收干净后把空子键也删掉，
+                ' 否则扩展名键会因为剩一个空子键而删不干净。
+                For Each 子键名 In extensionKey.GetSubKeyNames().ToArray()
+                    If Not String.Equals(子键名, "OpenWithProgids", StringComparison.OrdinalIgnoreCase) Then Continue For
+                    Using 子键 = extensionKey.OpenSubKey(子键名, True)
+                        If 子键 IsNot Nothing AndAlso 子键.GetValueNames().Length = 0 AndAlso
+                           子键.GetSubKeyNames().Length = 0 Then
+                            extensionKey.DeleteSubKey(子键名, False)
+                            有变更 = True
+                        End If
+                    End Using
+                Next
+                键待删 = 键已空(extensionKey)
             End If
         End Using
+        ' 我们可能为本不存在的扩展名建过键（图片档里的 .apng 就是这样）。值都还原后若键已空，
+        ' 连键一起删：留在 HKCU 的空键会把机器级（HKLM）的同名注册遮掉。
+        If 键待删 AndAlso 注册表键存在(extensionPath) Then
+            Registry.CurrentUser.DeleteSubKeyTree(extensionPath, False)
+            有变更 = True
+        End If
 
         Dim progIdPath = 注册表位置.ClassesRoot & "\" & 定义.ProgId
         If 注册表键存在(progIdPath) Then
@@ -396,6 +434,28 @@ Friend NotInheritable Class 文件关联管理器
         End Using
     End Function
 
+    '''键上没有任何具名值、默认值为空、且没有带内容的子键 ⇒ 只剩一个空壳。
+    Private Shared Function 键已空(key As RegistryKey) As Boolean
+        If key Is Nothing Then Return False
+        If key.GetValueNames().Any(Function(name) name.Length > 0) Then Return False
+        Dim 默认值 = CStr(key.GetValue(String.Empty, String.Empty,
+                                  RegistryValueOptions.DoNotExpandEnvironmentNames))
+        If 默认值.Length > 0 Then Return False
+        For Each 子键名 In key.GetSubKeyNames()
+            Using 子键 = key.OpenSubKey(子键名)
+                If 子键 Is Nothing Then Continue For
+                If 子键.GetValueNames().Length > 0 OrElse 子键.GetSubKeyNames().Length > 0 Then Return False
+            End Using
+        Next
+        Return True
+    End Function
+
+    ' 列表顺序即设置页分组：视频 → 音频 → 图片，每档再按 常见 / 不常见 / 老旧 分级。
+    ' 图片三档全部默认不勾选（与视频/音频一致，由用户在设置页主动委托）。
+    ' 图片档的入选判据是「随包内核实测能打开且呈现≥1帧」（tools/cover_probe.sh），
+    ' 不是「FFmpeg 名义上有解码器」——实测不过的 .dib / .pcd 已按此判据排除。
+    ' ⚠ 分组说明只能写在函数上方：注释行会截断多行数组初始化器的隐式续行，
+    '   写在列表中间（上一项以逗号结尾之后）会报 BC30201/BC30035。
     Private Shared Function 创建文件类型() As IReadOnlyList(Of 文件类型定义)
         Return New 文件类型定义() {
             New 文件类型定义(文件关联类别.常见视频, ".mp4", "video/mp4", "video"),
@@ -439,7 +499,46 @@ Friend NotInheritable Class 文件关联管理器
             New 文件类型定义(文件关联类别.老旧音频, ".au", "audio/basic", "audio"),
             New 文件类型定义(文件关联类别.老旧音频, ".ra", "audio/vnd.rn-realaudio", "audio"),
             New 文件类型定义(文件关联类别.老旧音频, ".tta", "audio/x-tta", "audio"),
-            New 文件类型定义(文件关联类别.老旧音频, ".mpc", "audio/x-musepack", "audio")
+            New 文件类型定义(文件关联类别.老旧音频, ".mpc", "audio/x-musepack", "audio"),
+            New 文件类型定义(文件关联类别.常见图片, ".png", "image/png", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".jpg", "image/jpeg", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".jpeg", "image/jpeg", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".jpe", "image/jpeg", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".jfif", "image/jpeg", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".apng", "image/apng", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".bmp", "image/bmp", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".gif", "image/gif", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".webp", "image/webp", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".avif", "image/avif", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".ico", "image/x-icon", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".tiff", "image/tiff", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".tif", "image/tiff", "image"),
+            New 文件类型定义(文件关联类别.常见图片, ".heic", "image/heic", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".avifs", "image/avif", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".heif", "image/heif", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".jp2", "image/jp2", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".j2k", "image/jpx", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".j2c", "image/jpx", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".jxl", "image/jxl", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".cur", "image/x-icon", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".exr", "image/x-exr", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".hdr", "image/vnd.radiance", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".tga", "image/x-tga", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".pcx", "image/x-pcx", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".dds", "image/vnd.ms-dds", "image"),
+            New 文件类型定义(文件关联类别.不常见图片, ".qoi", "image/x-qoi", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".pnm", "image/x-portable-anymap", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".pbm", "image/x-portable-bitmap", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".pgm", "image/x-portable-graymap", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".ppm", "image/x-portable-pixmap", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".pam", "image/x-portable-anymap", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".xbm", "image/x-xbitmap", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".xpm", "image/x-xpixmap", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".xwd", "image/x-xwindowdump", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".dpx", "image/x-dpx", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".sun", "image/x-sun-raster", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".ras", "image/x-sun-raster", "image"),
+            New 文件类型定义(文件关联类别.老旧图片, ".sgi", "image/x-sgi-rgb", "image")
         }
     End Function
 
@@ -466,7 +565,11 @@ Friend NotInheritable Class 文件关联管理器
         End Property
         Friend ReadOnly Property 友好类型名称 As String
             Get
-                Return 扩展名.TrimStart("."c).ToUpperInvariant() & " 媒体文件"
+                Dim 是图片 = 类别 = 文件关联类别.常见图片 OrElse
+                               类别 = 文件关联类别.不常见图片 OrElse
+                               类别 = 文件关联类别.老旧图片
+                Dim 后缀 = If(是图片, "图片文件", "媒体文件")
+                Return 扩展名.TrimStart("."c).ToUpperInvariant() & " " & 后缀
             End Get
         End Property
     End Class

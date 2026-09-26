@@ -64,6 +64,9 @@ Public Class 设置
     Public Property 关联常见音频 As Boolean = False
     Public Property 关联不常见音频 As Boolean = False
     Public Property 关联老旧音频 As Boolean = False
+    Public Property 关联常见图片 As Boolean = False
+    Public Property 关联不常见图片 As Boolean = False
+    Public Property 关联老旧图片 As Boolean = False
 
     Public Property SP_窗口边框颜色_A As Integer = 255
     Public Property SP_窗口边框颜色_R As Integer = Color.Gray.R
@@ -78,7 +81,23 @@ Public Class 设置
     Public Property SP_毛玻璃背景来源 As Integer = -1
     Public Property SP_毛玻璃噪点颗粒 As Integer = -1
 
-    Private Shared ReadOnly 设置文件路径 As String = Path.Combine(程序目录, "FFF.Player.Settings.json")
+    Private Shared ReadOnly 默认设置文件路径 As String = Path.Combine(程序目录, "FFF.Player.Settings.json")
+    Private Shared 当前设置文件路径 As String = 默认设置文件路径
+
+    '''设置文件位置（可被自测重定向到临时副本）。生产路径下恒等于 exe 同目录的 FFF.Player.Settings.json。
+    Public Shared ReadOnly Property 设置文件路径 As String
+        Get
+            Return 当前设置文件路径
+        End Get
+    End Property
+
+    '''自测专用：把设置读写重定向到临时文件，避免测试进程改写用户的真实配置。
+    '''仅供测试脚手架调用；不在产品代码里调用它。
+    Friend Shared Sub 重定向设置文件路径(路径 As String)
+        ArgumentException.ThrowIfNullOrWhiteSpace(路径)
+        当前设置文件路径 = 路径
+    End Sub
+
     Public Shared ReadOnly 自定义图标路径 As String = Path.Combine(程序目录, "3FP_Icon")
     Public Shared ReadOnly 自定义背景图路径 As String = Path.Combine(程序目录, "3FP_BackImage")
     Private Shared 当前自有背景图 As Image
