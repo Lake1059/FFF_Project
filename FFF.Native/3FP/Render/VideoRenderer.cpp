@@ -4,6 +4,7 @@
 #include "3FP/Render/ColorExtension.h"
 
 extern "C" {
+#include <libavcodec/codec_par.h>
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
@@ -1763,6 +1764,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       sdrPeakNits_(100.0f), hdrPeakNits_(0.0f),
       paperWhiteNits_(203.0f), sourcePeakNits_(100.0f),
       viewZoomBits_(std::bit_cast<float>(1.0f)),
+      sourceWideGamut_(false),
       viewPanXBits_(std::bit_cast<float>(0.0f)),
       viewPanYBits_(std::bit_cast<float>(0.0f)),
       projection360Enabled_(0),
@@ -1844,12 +1846,17 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     // Do not enumerate DXGI outputs while the managed player object is being
     // constructed. HDR capability is resolved lazily by EnsureSwapChain on
     // the native worker/presenter path.
+    // Colour-mode gate. Kept identical to the one in SetColorMode: a widened
+    // primaries source needs scRGB too, so a missing wide-gamut term here would
+    // downgrade the mode behind the caller's back. (EnsureSwapChain re-checks
+    // before actually creating the swap chain.)
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
         const auto sourceHdr = hdrProcessor_.IsHdrSource();
-        actualMode_ = sourceHdr ? FFF3FPColorMode::MapToHdr :
+        const auto wideGamut = IsWideGamutSource();
+        actualMode_ = (sourceHdr || wideGamut) ? FFF3FPColorMode::MapToHdr :
             FFF3FPColorMode::MapToSdr;
-        fallbackReason_ = sourceHdr ? std::string{} :
-            "True HDR output is only available for HDR source video.";
+        fallbackReason_ = (sourceHdr || wideGamut) ? std::string{} :
+            "True HDR output is only available for HDR or wide-gamut sources.";
     }
     return FFFResult::Success;
 }
@@ -1915,10 +1922,13 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
     hdrSwapChainRejected_ = false;
     // The output capability probe is intentionally deferred until the first
     // swap-chain creation, which is owned by the native media worker.
+    // Widened primaries need the scRGB path just as much as an HDR transfer
+    // function does: an SDR swap chain cannot hold colours outside Rec.709, so
+    // sending a Display P3 photo down it silently clips the gamut back.
     if (requestedMode_ == FFF3FPColorMode::MapToHdr &&
-        !hdrProcessor_.IsHdrSource()) {
+        !hdrProcessor_.IsHdrSource() && !IsWideGamutSource()) {
         actualMode_ = FFF3FPColorMode::MapToSdr;
-        fallbackReason_ = "True HDR output is only available for HDR source video.";
+        fallbackReason_ = "True HDR output is only available for HDR or wide-gamut sources.";
     }
     // hdrPeakNits_ is an output-display override, never the source mastering
     // peak. SDR callers pass zero; source peak metadata is configured per frame.
@@ -1942,14 +1952,22 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
 }
 
 void PlayerVideoRenderer::ConfigureHdrStream(const AVCodecParameters* parameters) noexcept {
+    // Widened primaries are a property of the stream, not of the transfer
+    // function, and they decide whether an SDR swap chain can hold the picture
+    // at all. Record them here: the colour mode may be selected before any
+    // frame has been decoded.
+    const auto primaries = parameters != nullptr ?
+        parameters->color_primaries : AVCOL_PRI_UNSPECIFIED;
+    sourceWideGamut_.store(primaries == AVCOL_PRI_BT2020 ||
+        primaries == AVCOL_PRI_SMPTE431 || primaries == AVCOL_PRI_SMPTE432,
+        std::memory_order_release);
     hdrProcessor_.ConfigureStream(parameters);
     hdrProcessor_.SetExtensionAvailability(IsColorExtensionAuthorized());
     extensionAttempted_ = false;
     extensionEligible_ = false;
 }
 
-FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
-    std::lock_guard deviceLock(deviceMutex_);
+FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {    std::lock_guard deviceLock(deviceMutex_);
     requestedMode_ = FFF3FPColorMode::MapToSdr;
     actualMode_ = FFF3FPColorMode::MapToSdr;
     if (swapChain_ != nullptr && swapHdr_) {
@@ -2159,12 +2177,19 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     const std::uint32_t sourceBitDepth) noexcept {
     if (window_ == nullptr) return FFFResult::Success;
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
+        // A widened-primaries source needs the scRGB swap chain even when its
+        // transfer function is plain SDR: an 8-bit Rec.709 swap chain cannot
+        // represent Display P3 / DCI-P3 colours and would clip them silently.
+        // This is the final arbiter of the swap-chain format, so the wide-gamut
+        // case has to be honoured here and not only in SetColorMode.
         const auto sourceHdr = hdrProcessor_.IsHdrSource();
-        const auto nextMode = sourceHdr && OutputSupportsHdr() ?
+        const auto wideGamut = IsWideGamutSource();
+        const auto wantsHdrPath = sourceHdr || wideGamut;
+        const auto nextMode = wantsHdrPath && OutputSupportsHdr() ?
             FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
-        const auto reason = sourceHdr ?
+        const auto reason = wantsHdrPath ?
             "The target display or Windows Advanced Color mode does not support true HDR output." :
-            "True HDR output is only available for HDR source video.";
+            "True HDR output is only available for HDR or wide-gamut sources.";
         fallbackReason_ = nextMode == requestedMode_ ? std::string{} : reason;
         if (nextMode != actualMode_) {
             actualMode_ = nextMode;
@@ -4566,12 +4591,24 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         const float maxPanY = (zoomedHeight - destination.height) / (2.0f * destination.height);
         const float offsetX = panX * std::max(maxPanX, 0.0f) * destination.width;
         const float offsetY = panY * std::max(maxPanY, 0.0f) * destination.height;
-        destination.x = static_cast<std::uint32_t>(
-            std::max(0.0f, static_cast<float>(destination.x) +
-                (destination.width - zoomedWidth) / 2.0f - offsetX));
-        destination.y = static_cast<std::uint32_t>(
-            std::max(0.0f, static_cast<float>(destination.y) +
-                (destination.height - zoomedHeight) / 2.0f - offsetY));
+        // Clamp on **both** sides. The previous version clamped only at 0, so
+        // panning a magnified picture exposed black on the right/bottom edge
+        // while the left/top edge sat stuck against the window border — panning
+        // felt asymmetric and could drift the picture off the fitted box.
+        // The magnified rectangle must always cover the fitted box: that is
+        // exactly [fittedRight - zoomed, fittedLeft] on each axis.
+        const float centerX = static_cast<float>(destination.x) +
+            (static_cast<float>(destination.width) - zoomedWidth) / 2.0f - offsetX;
+        const float centerY = static_cast<float>(destination.y) +
+            (static_cast<float>(destination.height) - zoomedHeight) / 2.0f - offsetY;
+        const float minX = static_cast<float>(destination.x) +
+            static_cast<float>(destination.width) - zoomedWidth;
+        const float minY = static_cast<float>(destination.y) +
+            static_cast<float>(destination.height) - zoomedHeight;
+        destination.x = static_cast<std::uint32_t>(std::clamp(centerX, minX,
+            static_cast<float>(destination.x)));
+        destination.y = static_cast<std::uint32_t>(std::clamp(centerY, minY,
+            static_cast<float>(destination.y)));
         destination.width = static_cast<std::uint32_t>(zoomedWidth);
         destination.height = static_cast<std::uint32_t>(zoomedHeight);
     }
@@ -5103,6 +5140,9 @@ void PlayerVideoRenderer::Close() noexcept {
 }
 
 FFF3FPColorMode PlayerVideoRenderer::ActualColorMode() const noexcept { return actualMode_; }
+bool PlayerVideoRenderer::IsWideGamutSource() const noexcept {
+    return sourceWideGamut_.load(std::memory_order_acquire);
+}
 float PlayerVideoRenderer::SourcePeakNits() const noexcept { return sourcePeakNits_; }
 HdrFrameState PlayerVideoRenderer::HdrState() const noexcept { return hdrProcessor_.State(); }
 std::uint64_t PlayerVideoRenderer::PresentedVideoFrames() const noexcept { return presentedVideoFrames_.load(); }

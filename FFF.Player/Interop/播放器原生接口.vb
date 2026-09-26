@@ -98,6 +98,39 @@ Friend Structure 原生播放器快照
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生图片信息
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 帧数 As Integer              ' <0 未知
+    Public 循环次数 As Integer          ' 0=无限, -1=不循环, >0=次数; <0 未知
+    Public 标志 As UInteger             ' 原生图片标志.*
+    Public 旋转四分之一圈 As UInteger   ' 0..3；&HFFFFFFFF 未知
+    Public 源像素格式 As Integer
+    Public 源位深 As UInteger
+    Public ICC配置字节数 As UInteger
+    Public 色彩原色 As Integer
+    Public 色彩空间 As Integer
+    Public 色彩传递 As Integer
+    ' 与 C 侧 `std::uint32_t reserved[4]` 对齐。用四个独立字段而不是 ByValArray，
+    ' 免去数组封送与初始化要求，布局仍是连续的 16 字节。
+    Public 保留1 As UInteger
+    Public 保留2 As UInteger
+    Public 保留3 As UInteger
+    Public 保留4 As UInteger
+End Structure
+
+''' <summary>原生图片信息.标志 的取值（对应 C 侧 FFF3FP_IMAGE_FLAG_*）。</summary>
+Friend Module 原生图片标志
+    Public Const 静态 As UInteger = &H1UI
+    Public Const 动画 As UInteger = &H2UI
+    Public Const 多帧 As UInteger = &H4UI
+    Public Const 含透明 As UInteger = &H8UI
+    Public Const 含ICC As UInteger = &H10UI
+    Public Const 含旋转 As UInteger = &H20UI
+    Public Const 广色域 As UInteger = &H40UI
+End Module
+
+<StructLayout(LayoutKind.Sequential)>
 Friend Structure 原生视频像素探针
     Public 大小 As UInteger
     Public 版本 As UInteger
@@ -392,6 +425,17 @@ Friend Module 播放器原生接口
     Friend Function FFF3FP_Set360View(播放器 As 播放器原生句柄, 启用 As UInteger,
                                       水平角度 As Single, 垂直角度 As Single,
                                       视场角 As Single) As 原生播放器结果
+    End Function
+    ' 图片模式：缩放 + 平移。zoom=1 为适应窗口，pan 为相对未缩放画面的归一化偏移 [-1,1]。
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetViewTransform(播放器 As 播放器原生句柄,
+                                            缩放 As Single, 水平平移 As Single,
+                                            垂直平移 As Single) As 原生播放器结果
+    End Function
+    ' 图片信息（帧数/动画/EXIF 旋转/格式位深/ICC/alpha/色彩原色）。调用前必须填好 大小 与 版本。
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetImageInfo(播放器 As 播放器原生句柄,
+                                        ByRef 信息 As 原生图片信息) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetAudioEndpoint(播放器 As 播放器原生句柄, 端点UTF8 As IntPtr) As 原生播放器结果

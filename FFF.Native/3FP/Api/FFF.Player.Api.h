@@ -528,6 +528,42 @@ FFF3FP_API FFFResult FFF3FP_MeasureTimedTextWidth(const char* textUtf8,
     float* width) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetMediaInfo(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
+
+// Image information for picture viewing. Fields the source does not carry are
+// reported as "unknown" (negative, or 0xFFFFFFFF for rotation) rather than 0,
+// so callers must handle unknown explicitly instead of reading a default.
+struct FFF3FPImageInfo {
+    std::uint32_t size;                  // sizeof(FFF3FPImageInfo)
+    std::uint32_t version;               // 1
+    std::int32_t  frameCount;            // total frames; <0 unknown
+    std::int32_t  loopCount;             // 0 = infinite, -1 = not looping, >0 = count; <0 unknown
+    std::uint32_t flags;                 // FFF3FP_IMAGE_FLAG_*
+    std::uint32_t rotationQuarterTurns;  // 0..3 from EXIF orientation; 0xFFFFFFFF unknown
+    std::int32_t  sourcePixelFormat;     // AVPixelFormat as reported by FFmpeg
+    std::uint32_t sourceBitDepth;
+    std::uint32_t iccProfileSizeBytes;   // 0 when absent
+    std::int32_t  colorPrimaries;        // AVColorPrimaries; <0 unknown
+    std::int32_t  colorSpace;            // AVColorSpace; <0 unknown
+    std::int32_t  colorTransfer;         // AVColorTransfer; <0 unknown
+    std::uint32_t reserved[4];
+};
+
+#define FFF3FP_IMAGE_FLAG_STATIC       0x1u
+#define FFF3FP_IMAGE_FLAG_ANIMATED     0x2u
+#define FFF3FP_IMAGE_FLAG_MULTI_FRAME  0x4u
+#define FFF3FP_IMAGE_FLAG_HAS_ALPHA    0x8u
+#define FFF3FP_IMAGE_FLAG_HAS_ICC      0x10u
+#define FFF3FP_IMAGE_FLAG_HAS_ROTATION 0x20u
+// Source primaries wider than Rec.709 (BT.2020, DCI-P3, Display P3). Displaying
+// these without clipping requires the scRGB (HDR) output path; an SDR swap
+// chain cannot hold colours outside Rec.709.
+#define FFF3FP_IMAGE_FLAG_WIDE_GAMUT   0x40u
+
+// Report what a still or animated image actually contains: frame count, EXIF
+// rotation, pixel format / bit depth and whether an ICC profile is embedded.
+// Returns NotSupported on a native build predating this entry point, so hosts
+// degrade instead of failing.
+FFF3FP_API FFFResult FFF3FP_GetImageInfo(FFF3FPHandle player, FFF3FPImageInfo* info) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 // Render-target diagnostics. RenderTargetInfo reports the

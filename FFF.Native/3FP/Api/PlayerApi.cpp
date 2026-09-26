@@ -118,6 +118,10 @@ FFFResult FFF3FP_Set360View(const FFF3FPHandle player, const std::uint32_t enabl
         static_cast<PlayerSession*>(player)->Set360View(enabled != 0, yaw, pitch, fovY) :
         FFFResult::InvalidArgument;
 }
+FFFResult FFF3FP_GetImageInfo(const FFF3FPHandle player, FFF3FPImageInfo* info) noexcept {
+    return player && info ? static_cast<PlayerSession*>(player)->GetImageInfo(*info)
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_SetAudioEndpoint(const FFF3FPHandle player, const char* endpoint) noexcept { return player ? static_cast<PlayerSession*>(player)->SetAudioEndpoint(endpoint) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetAudioExclusiveMode(const FFF3FPHandle player, const std::uint32_t exclusive) noexcept {
     return player && exclusive <= 1 ? static_cast<PlayerSession*>(player)->SetAudioExclusiveMode(exclusive != 0)

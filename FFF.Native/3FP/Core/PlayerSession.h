@@ -24,6 +24,8 @@ struct AVFormatContext;
 struct AVFrame;
 struct AVPacket;
 struct AVBufferRef;
+struct AVFilterGraph;
+struct AVFilterContext;
 
 class PlayerSession final {
 public:
@@ -31,6 +33,14 @@ public:
     ~PlayerSession();
 
     FFFResult Open(const char* localPathUtf8) noexcept;
+    FFFResult GetImageInfo(FFF3FPImageInfo& info) const noexcept;
+
+    // Wide-gamut carrier: P3 sources are converted to BT.2020 once, because the
+    // shader only knows Rec.709 and Rec.2020, and an SDR swap chain cannot hold
+    // P3 at all. Still images only — video keeps its existing path.
+    bool NeedsPrimariesCarrier(const AVFrame* frame) const noexcept;
+    FFFResult ConvertPrimariesToBt2020(const AVFrame* input, AVFrame** output) noexcept;
+    void ReleasePrimariesCarrierFilter() noexcept;
     FFFResult DiscNavigate(int command, int value, int y) noexcept;
     std::string DiscStatus() const;
     FFFResult CopySdrFrame(void* pixels, std::uint32_t capacity, std::uint32_t& width,
@@ -108,7 +118,7 @@ private:
     bool HoldDisc();
     void DoClose(FFF3FPState finalState = FFF3FPState::Closed,
         bool preserveVideoOutput = false) noexcept;
-    void DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1,
+    FFFResult DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1,
         bool exact = true) noexcept;
     void DecodeUntilSeekTarget() noexcept;
     void DoSelectStream(std::int32_t streamIndex, bool video) noexcept;
@@ -131,7 +141,14 @@ private:
     FFFResult OpenHardwareVideoDecoder(AVFormatContext* format, std::int32_t streamIndex,
         AVCodecContext** decoder, std::string* failureReason = nullptr) noexcept;
     FFFResult FallbackToSoftwareVideoDecoder(const char* reason) noexcept;
-    FFFResult DecodeInitialStillImage() noexcept;
+    // Presents the first frame while the session stays stopped. Used for a still
+    // picture and for an animated one, both of which must show a frame without
+    // playback running; rewinds afterwards so play starts from the beginning.
+    FFFResult DecodeInitialFrame() noexcept;
+    // Fills `info` from the session state. Only ever runs on the worker thread
+    // (called at the end of DoOpen) because it reads decoder-owned frames; the
+    // public GetImageInfo hands out the published copy instead.
+    void BuildImageInfo(FFF3FPImageInfo& info) const noexcept;
     FFFResult LoadCoverArt() noexcept;
     FFFResult DecodePacket(AVCodecContext* decoder, AVPacket* packet, bool video,
         AVFormatContext* owner) noexcept;
@@ -215,6 +232,14 @@ private:
     std::int32_t coverArtStream_;
     AVFrame* coverArtFrame_;
     AVFrame* stillImageFrame_;
+    // Primaries-carrier filter graph (P3 -> BT.2020), built on demand for a
+    // single still image and kept until the next open.
+    AVFilterGraph* gamutGraph_ = nullptr;
+    AVFilterContext* gamutSource_ = nullptr;
+    AVFilterContext* gamutSink_ = nullptr;
+    int gamutSourceWidth_ = 0;
+    int gamutSourceHeight_ = 0;
+    int gamutSourceFormat_ = -1;
     AVFormatContext* externalFormat_;
     std::unique_ptr<SharedFileInput> externalFormatIo_;
     AVCodecContext* externalAudioDecoder_;
@@ -230,6 +255,11 @@ private:
     bool muted_;
     FFF3FPSnapshot snapshot_;
     FFF3FPSnapshot publishedSnapshot_;
+    // Image details for GetImageInfo, built once on the worker thread at the end
+    // of DoOpen and handed out under snapshotMutex_ - the decoder-owned frames
+    // the build reads must not be touched from the caller's thread.
+    bool hasPublishedImageInfo_ = false;
+    FFF3FPImageInfo publishedImageInfo_{};
     std::string mediaInfoJson_;
     std::string lastError_;
     std::atomic<std::int64_t> clockOriginPosition100ns_;
@@ -271,6 +301,22 @@ private:
     bool externalAudioDrained_;
     bool audioClockFinished_;
     bool staticImage_;
+    // A picture that moves: either a loop-aware image demuxer (GIF/APNG/WebP) or
+    // an image sequence carried by the mov demuxer (AVIF/HEIC). Such a file is
+    // not a still image, but it is still a picture: it must show its first frame
+    // while stopped and it must report the animated flag.
+    bool animatedImage_;
+    // Whether finishing one pass must be answered with DoSeek(0) from the
+    // session instead of the demuxer's own wrap-around. True for APNG (whose
+    // demuxer drops a frame at every wrap) and for timed AVIF/HEIC sequences;
+    // false for GIF/WebP/JXL, which loop inside the demuxer and never reach the
+    // end of the file. Set once the streams are known (DoOpen) and on every
+    // seek, so it must be reset when the session is closed/reused.
+    bool sessionWrapLoop_;
+    // Consecutive failed wrap-around seeks. A seek that is refused while the
+    // demuxer is still mid read-ahead must not turn a looping picture into a
+    // failed one; the next pump retries, so only a persistent failure escapes.
+    std::uint32_t sessionWrapFailures_;
     bool hardwareFallbackPending_;
     std::string pendingHardwareFallbackReason_;
     bool internalAudioFailurePending_;

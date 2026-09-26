@@ -141,7 +141,8 @@ Friend NotInheritable Class 播放器剪辑区间控制器
     End Sub
 
     Friend Sub 处理方向键快捷键(sender As Object, e As KeyEventArgs)
-        If Not 当前模式已启用 Then Return
+        ' 抢键机制：先注册的处理器（图片模式）已接管这次按键时不得再动作。
+        If e.Handled OrElse Not 当前模式已启用 Then Return
         Dim 按键 = e.KeyData And Keys.KeyCode
         If 按键 <> Keys.Left AndAlso 按键 <> Keys.Right Then Return
         Dim 方向 = If(按键 = Keys.Left, -1, 1)
