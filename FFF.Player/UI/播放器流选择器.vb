@@ -98,10 +98,12 @@ Friend NotInheritable Class 播放器流选择器
 
         For Each 字幕 In 外部字幕
             Dim 字幕路径 = 字幕.路径
+            Dim 字幕轨索引 = 字幕.轨索引
             Dim 已选择 = 当前字幕索引 = -1 AndAlso 当前字幕 IsNot Nothing AndAlso
-                String.Equals(当前字幕.路径, 字幕路径, StringComparison.OrdinalIgnoreCase)
+                String.Equals(当前字幕.路径, 字幕路径, StringComparison.OrdinalIgnoreCase) AndAlso
+                当前字幕.流索引 = 字幕轨索引
             Dim 项 = 创建流项(格式化外部字幕(字幕), 已选择)
-            AddHandler 项.Click, Sub() 播放控制器.选择外部字幕(字幕路径)
+            AddHandler 项.Click, Sub() 播放控制器.选择外部字幕(字幕路径, 字幕轨索引)
             菜单.Items.Add(项)
         Next
 
@@ -154,8 +156,15 @@ Friend NotInheritable Class 播放器流选择器
     End Function
 
     Private Shared Function 格式化外部字幕(字幕 As 外部字幕候选) As String
+        Dim 类型名 = 字幕.格式.ToString().ToUpperInvariant()
+        If 字幕.字幕轨 IsNot Nothing Then
+            ' 字幕容器（MKS）的轨：以语言/标题区分同文件内的多条轨。
+            Dim 参数 As New List(Of String) From {编码名称(字幕.字幕轨.编码, String.Empty)}
+            添加元数据(参数, 字幕.字幕轨)
+            Return $"外部  {类型名} · {String.Join(" | ", 参数)}"
+        End If
         Dim 文件名 = 缩短文本(Path.GetFileName(字幕.路径), 42)
-        Return $"外部  {字幕.格式.ToString().ToUpperInvariant()} · {文件名}"
+        Return $"外部  {类型名} · {文件名}"
     End Function
 
     Private Shared Sub 添加元数据(参数 As ICollection(Of String), 流 As 媒体流信息)

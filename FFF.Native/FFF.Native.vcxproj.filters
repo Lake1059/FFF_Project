@@ -84,6 +84,9 @@
     <ClInclude Include="3FP\Core\PlayerSession.h">
       <Filter>3FP\Core</Filter>
     </ClInclude>
+    <ClInclude Include="3FP\Subtitle\SubtitleProbe.h">
+      <Filter>3FP\Subtitle</Filter>
+    </ClInclude>
     <ClInclude Include="3FP\Render\VideoRenderer.h">
       <Filter>3FP\Render</Filter>
     </ClInclude>
@@ -132,6 +135,9 @@
       <Filter>3FP\Subtitle</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp">
+      <Filter>3FP\Subtitle</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Subtitle\SubtitleProbe.cpp">
       <Filter>3FP\Subtitle</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp">

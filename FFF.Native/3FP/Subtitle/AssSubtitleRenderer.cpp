@@ -13,6 +13,7 @@ extern "C" {
 }
 
 #include <array>
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <cwctype>
@@ -57,6 +58,31 @@ bool IsFontFile(const std::filesystem::path& path) {
     std::transform(extension.begin(), extension.end(), extension.begin(),
         [](const wchar_t value) { return static_cast<wchar_t>(std::towlower(value)); });
     return extension == L".ttf" || extension == L".otf" || extension == L".ttc";
+}
+
+// Container attachments (e.g. fonts embedded in an .mks) carry their kind in
+// the "mimetype" metadata and their name in the "filename" metadata. Font
+// MIMEs vary across muxers (application/x-truetype-font, font/ttf,
+// application/vnd.ms-opentype, ...) and some muxers fall back to
+// application/octet-stream, so a font MIME wins and otherwise the file name
+// extension decides (an .otf attachment typed application/vnd.ms-opentype
+// does not contain the "font" substring, yet is a font).
+bool IsFontAttachment(const char* mimetype, const std::string& filename) {
+    if (mimetype != nullptr && *mimetype != '\0') {
+        std::string value(mimetype);
+        std::transform(value.begin(), value.end(), value.begin(),
+            [](const char value) { return static_cast<char>(std::tolower(
+                static_cast<unsigned char>(value))); });
+        if (value.find("font") != std::string::npos ||
+            value.find("opentype") != std::string::npos ||
+            value.find("sfnt") != std::string::npos) return true;
+    }
+    if (filename.empty()) return false;
+    auto extension = std::filesystem::path(filename).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](const char value) { return static_cast<char>(std::tolower(
+            static_cast<unsigned char>(value))); });
+    return extension == ".ttf" || extension == ".otf" || extension == ".ttc";
 }
 
 std::vector<char> ReadFile(const std::filesystem::path& path) {
@@ -389,6 +415,29 @@ private:
             if (requestedStream < 0 || requestedStream >= static_cast<std::int32_t>(format->nb_streams) ||
                 format->streams[requestedStream]->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE)
                 throw std::runtime_error("The requested embedded subtitle stream does not exist.");
+
+            // Register fonts attached to the container before the track is
+            // parsed: libass resolves fonts while rendering, but the memory
+            // fonts must already be in the library by then. Real-world
+            // subtitle containers (e.g. anime .mks) routinely carry their
+            // fonts as attachments and rely on the player loading them; the
+            // renderer only reads fonts from fontDirectories_ otherwise.
+            for (unsigned attachment = 0; attachment < format->nb_streams; ++attachment) {
+                const auto* attached = format->streams[attachment];
+                if (attached == nullptr || attached->codecpar == nullptr ||
+                    attached->codecpar->codec_type != AVMEDIA_TYPE_ATTACHMENT ||
+                    attached->codecpar->extradata == nullptr || attached->codecpar->extradata_size <= 0)
+                    continue;
+                const auto* mimetype = av_dict_get(attached->metadata, "mimetype", nullptr, 0);
+                const auto* filenameEntry = av_dict_get(attached->metadata, "filename", nullptr, 0);
+                const std::string filename(filenameEntry != nullptr && filenameEntry->value != nullptr
+                    ? filenameEntry->value : "");
+                if (!IsFontAttachment(mimetype != nullptr ? mimetype->value : nullptr, filename))
+                    continue;
+                ass_add_font(library_, filename.empty() ? "attached-font" : filename.c_str(),
+                    reinterpret_cast<const char*>(attached->codecpar->extradata),
+                    attached->codecpar->extradata_size);
+            }
 
             auto* stream = format->streams[requestedStream];
             std::int64_t timelineOriginMilliseconds = 0;

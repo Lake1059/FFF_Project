@@ -654,6 +654,23 @@ Public NotInheritable Class 媒体流信息
     Public Property 标题 As String = String.Empty
 End Class
 
+''' <summary>
+''' FFF3FP_ProbeSubtitleStreams 的输出：容器顶层信息加与 <see cref="媒体信息.流"/>
+''' 同构的字幕轨列表（缺省的视频/音频专属字段保持默认值）。
+''' </summary>
+Public NotInheritable Class 字幕流探测结果
+    <JsonPropertyName("format")>
+    Public Property 容器格式 As String = String.Empty
+    <JsonPropertyName("formatLongName")>
+    Public Property 容器格式全名 As String = String.Empty
+    ''' <summary>容器起始时间（秒）。外挂字幕轨没有参考流可供归一化，
+    ''' 播放器可据此提示用户用字幕延迟修正非零起点。</summary>
+    <JsonPropertyName("startTimeSeconds")>
+    Public Property 起始秒 As Double
+    <JsonPropertyName("streams")>
+    Public Property 流 As 媒体流信息() = Array.Empty(Of 媒体流信息)()
+End Class
+
 Public NotInheritable Class 播放器事件参数
     Inherits EventArgs
     Friend Sub New(类型值 As 播放器事件类型, 详情值 As String)
