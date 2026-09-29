@@ -33,6 +33,11 @@ Friend Structure 原生播放器配置
     ' API 15 新增：指定由哪个 DXGI 适配器创建 D3D11 设备；-1 保持原有策略。
     ' 必须追加在结构体末尾，否则字段偏移与内核不一致（结构体 72 -> 80 字节）。
     Public 首选适配器索引 As Integer
+    ' API 16 新增：SDR 源的 scRGB 呈现策略。0 = 从不（历史行为），
+    ' 1 = 自动（显示器开 Advanced Color 时，位深 >8 或广色域的 SDR 源走 16bit scRGB 链）。
+    ' 同样必须追加在末尾：内核按 size >= sizeof(FFF3FPConfiguration) 校验，
+    ' 少这一个字段就是 80 < 84 ⇒ FFF3FP_Create 直接 InvalidArgument（会话根本起不来）。
+    Public SDRscRGB模式 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -349,7 +354,8 @@ End Class
 Friend Module 播放器原生接口
     Friend Const 动态库名称 As String = "FFF.Native.dll"
 
-    ' MKS 字幕容器探测：FFF3FP_ProbeSubtitleStreams 是纯新增导出（API 版本仍为 15），
+    ' MKS 字幕容器探测：FFF3FP_ProbeSubtitleStreams 是纯新增导出（它的加入不递增版本；
+    ' 当前版本 16 来自 FFF3FPConfiguration 的 sdrScRgbMode 字段），
     ' 旧内核没有该入口点，因此不做静态导入，而是运行时解析并缓存；解析失败按
     ' “无探测能力”降级（MKS 不自动加载，但绝不崩）。
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
@@ -490,6 +496,13 @@ Friend Module 播放器原生接口
     Friend Function FFF3FP_SetViewTransform(播放器 As 播放器原生句柄,
                                             缩放 As Single, 水平平移 As Single,
                                             垂直平移 As Single) As 原生播放器结果
+    End Function
+    ' 视口封顶：非 0 时适配盒不超过源原生尺寸，于是"缩放"变成绝对的 屏幕:视频 像素比
+    ' （缩放=1 即逐像素 1:1，窗口比源大时四周留黑边）。0 = 沿用"铺满窗口"的历史行为。
+    ' 静态导入即可：构造函数已硬拒 API 版本 ≠ 16，能建会话的内核必然带这个导出。
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetFitLimitToNative(播放器 As 播放器原生句柄,
+                                               开启 As UInteger) As 原生播放器结果
     End Function
     ' 图片信息（帧数/动画/EXIF 旋转/格式位深/ICC/alpha/色彩原色）。调用前必须填好 大小 与 版本。
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>

@@ -985,6 +985,17 @@ FFFResult VideoMuxer::Initialize(ID3D11Device* device, const std::string& output
         ReleaseResources(false);
         return FFFResult::InvalidArgument;
     }
+    if (mixAudioSources && audioSampleRate != 48000) {
+        // AudioMixer's internal timeline is hard-coded to 48 kHz (its
+        // targetPresentationSample semantics, deque bookkeeping and 100 ms wait
+        // window are all 48k-sample based), while Session feeds absolute
+        // positions scaled by audioSampleRate. A different rate desynchronizes
+        // audio by 48000/rate (~8.8% at 44.1k) and grows the mixer buffers
+        // without bound - reject the combination instead of recording garbage.
+        lastError_ = "Mixed audio requires audioSampleRate = 48000.";
+        ReleaseResources(false);
+        return FFFResult::InvalidArgument;
+    }
     const auto audioTrackCount = mixAudioSources ? 1U : audioSourceGains.size();
     audioTracks_.reserve(audioTrackCount);
     for (std::size_t trackIndex = 0; trackIndex < audioTrackCount; ++trackIndex) {

@@ -586,6 +586,9 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
     // which happens lazily on the render path — hence here in the constructor.
     videoRenderer_.SetPreferredAdapterIndex(configuration.preferredAdapterIndex);
     videoRenderer_.SetScalingQuality(configuration.videoScalingQuality);
+    // Applied before the colour mode: SetColorMode evaluates the scRGB gate and
+    // must already know the SDR presentation policy.
+    videoRenderer_.SetSdrScRgbMode(configuration.sdrScRgbMode);
     videoRenderer_.SetColorMode(configuration.colorMode, configuration.sdrPeakNits,
         configuration.hdrPeakNits, configuration.sdrPaperWhiteNits,
         configuration.forceHdrOutput != 0);
@@ -595,11 +598,15 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
 }
 
 PlayerSession::~PlayerSession() {
-    ReleasePrimariesCarrierFilter();
     discCancel_.store(true);
     { std::lock_guard lock(mutex_); terminate_ = true; commands_.clear(); }
     commandCondition_.notify_all();
     if (worker_.joinable()) worker_.join();
+    // Must run AFTER the join: the worker's P3 still-image path
+    // (ConvertPrimariesToBt2020) is still using the gamutGraph_ filter graph, so
+    // releasing it first would be a use-after-free. DoClose(Closed) on the worker's
+    // way out already released it; this call is the belt-and-braces no-op.
+    ReleasePrimariesCarrierFilter();
 }
 
 void PlayerSession::Enqueue(Command command) noexcept {
@@ -1222,6 +1229,12 @@ FFFResult PlayerSession::ClearExternalAudio() noexcept {
     return FFFResult::Success;
 }
 FFFResult PlayerSession::SetExternalAudioOffset(const std::int64_t offset) noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, offset] { externalAudioOffset100ns_ = offset; snapshot_.externalAudioOffset100ns = offset; if (externalFormat_) DoSeek(snapshot_.position100ns); else PublishSnapshot(); }); return FFFResult::Success; }
+FFFResult PlayerSession::SetPresentConfig(const bool enableTearing) noexcept {
+    // Pacing preference: safe in any state; the renderer applies it on the next
+    // present and remembers the request across device/chain re-creation.
+    Enqueue([this, enableTearing] { videoRenderer_.SetPresentConfig(enableTearing); });
+    return FFFResult::Success;
+}
 FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sdr, const float hdr,
     const float paper, const bool forceHdrOutput) noexcept {
     if (mode > FFF3FPColorMode::MapToHdr || !std::isfinite(sdr) || sdr <= 0 ||
@@ -1324,6 +1337,20 @@ FFFResult PlayerSession::SetViewTransform(const float zoom, const float panX,
     if (discOpened_.load(std::memory_order_acquire)) return FFFResult::Success;
     const auto result = videoRenderer_.SetViewTransform(zoom, panX, panY);
     if (result != FFFResult::Success) return result;
+    const auto redrawResult = videoRenderer_.Redraw();
+    if (redrawResult != FFFResult::Success &&
+        redrawResult != FFFResult::InvalidState &&
+        videoRenderer_.RequestRecoveryIfDeviceLost()) return redrawResult;
+    return FFFResult::Success;
+}
+FFFResult PlayerSession::SetFitLimitToNative(const bool enable) noexcept {
+    // Disc playback owns its own geometry (see SetViewTransform above), so refuse
+    // rather than report a Success that changes nothing.
+    if (discOpened_.load(std::memory_order_acquire)) return FFFResult::NotSupported;
+    const auto result = videoRenderer_.SetFitLimitToNative(enable);
+    if (result != FFFResult::Success) return result;
+    // Present again now: while paused there is no incoming frame to pick the new
+    // geometry up, and the App reads back Dest* right after this call.
     const auto redrawResult = videoRenderer_.Redraw();
     if (redrawResult != FFFResult::Success &&
         redrawResult != FFFResult::InvalidState &&
@@ -1819,10 +1846,13 @@ FFFResult PlayerSession::GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept
 FFFResult PlayerSession::GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept {
     // Same contract as GetSnapshot: the caller declares the size and version of
     // the struct it passes, so we never write past a smaller caller-side layout.
-    if (info.size < sizeof(FFF3FPRenderTargetInfo) || info.version != 1)
+    // v2 = destX/destY are signed. A v1 caller would read a negative origin as a huge
+    // unsigned value (silently wrong content), and v1/v2 share the same field widths so
+    // `size` cannot distinguish them ⇒ the only honest gate is the version number.
+    if (info.size < sizeof(FFF3FPRenderTargetInfo) || info.version != 2)
         return FFFResult::InvalidArgument;
     info.size = sizeof(info);
-    info.version = 1;
+    info.version = 2;
     PlayerVideoRenderer::RenderTargetInfo rtInfo{};
     const auto result = videoRenderer_.GetRenderTargetInfo(rtInfo);
     if (result != FFFResult::Success) return result;
@@ -1837,6 +1867,14 @@ FFFResult PlayerSession::GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexc
     info.outputBitDepth = rtInfo.outputBitDepth;
     info.hdr = rtInfo.hdr ? 1 : 0;
     return FFFResult::Success;
+}
+
+// Re-present the last cached frame on the presenter thread.
+FFFResult PlayerSession::Redraw() noexcept {
+    const auto result = videoRenderer_.Redraw();
+    if (result == FFFResult::DeviceFailure)
+        videoRenderer_.RequestRecoveryIfDeviceLost();
+    return result;
 }
 
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
@@ -4073,6 +4111,11 @@ void PlayerSession::SetState(const FFF3FPState state, const char* operation) noe
 }
 
 void PlayerSession::Fail(const FFFResult result, std::string message, const char* operation) noexcept {
+    try {
+        // Mirror every failure into the process log sink (FFF3FP_SetLogCallback).
+        extern void FFF3FP_KernelLogImpl(const char*) noexcept;
+        FFF3FP_KernelLogImpl(("FAIL: " + std::string(operation ? operation : "") + ": " + message).c_str());
+    } catch (...) {}
     try {
         SuspendAudioRenderer(true); snapshot_.state = FFF3FPState::Failed; state_.store(FFF3FPState::Failed); PublishSnapshot();
         ReportError(result, std::move(message), operation); }

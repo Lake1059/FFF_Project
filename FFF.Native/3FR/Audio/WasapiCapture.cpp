@@ -230,7 +230,18 @@ void WasapiCapture::CaptureThread() noexcept {
         HANDLE events[] = { stopEvent_, sampleEvent_ };
         while (WaitForMultipleObjects(2, events, FALSE, INFINITE) == WAIT_OBJECT_0 + 1) {
             UINT32 nextPacketFrames = 0;
-            while (SUCCEEDED(captureClient->GetNextPacketSize(&nextPacketFrames)) && nextPacketFrames > 0) {
+            while (true) {
+                // 设备失效（拔出/端点失效）最先表现为 GetNextPacketSize 失败。
+                // 旧行为把它藏在循环条件里静默退出外层等待 ⇒ 采集线程在
+                // WaitForMultipleObjects 上永久挂起、failureCallback 不触发、
+                // 音轨整段静音且零诊断。必须与 GetBuffer 失败同等显式处理。
+                result = captureClient->GetNextPacketSize(&nextPacketFrames);
+                if (FAILED(result)) {
+                    SetError("IAudioCaptureClient::GetNextPacketSize failed: " + std::to_string(result));
+                    SetEvent(stopEvent_);
+                    break;
+                }
+                if (nextPacketFrames == 0) break;
                 BYTE* data = nullptr;
                 UINT32 frameCount = 0;
                 DWORD flags = 0;
@@ -272,7 +283,7 @@ void WasapiCapture::CaptureThread() noexcept {
                     SetEvent(stopEvent_);
                     break;
                 }
-                captureClient->GetNextPacketSize(&nextPacketFrames);
+                // 下一包的 GetNextPacketSize 由循环开头显式调用（失败走上面的错误分支）。
             }
         }
     } catch (...) {

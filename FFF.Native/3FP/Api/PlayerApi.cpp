@@ -6,12 +6,18 @@
 #include "3FP/Subtitle/SubtitleProbe.h"
 
 #include <cmath>
+#include <atomic>
 
 namespace {
 // Bumped 14 -> 15 because FFF3FPConfiguration gained the preferredAdapterIndex
 // field. FFF3FP_Create rejects a mismatched version outright, so
 // every consumer of this header MUST be rebuilt and bumped in lockstep.
-constexpr std::uint32_t PlayerApiVersion = 15;
+// Bumped 15 -> 16 because FFF3FPConfiguration gained the sdrScRgbMode field.
+constexpr std::uint32_t PlayerApiVersion = 16;
+
+// Process-wide native log sink, installed through FFF3FP_SetLogCallback.
+std::atomic<FFF3FPLogCallback> g_logSink{nullptr};
+std::atomic<void*> g_logContext{nullptr};
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -51,6 +57,23 @@ FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept {
         ? FFFResult::Success : FFFResult::NotSupported;
 }
 
+// ---- Process-wide native log sink (public surface: FFF3FP_SetLogCallback) ----
+void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context) noexcept {
+    g_logContext.store(context, std::memory_order_release);
+    g_logSink.store(callback, std::memory_order_release);
+}
+
+// Internal sink invoker for kernel log lines. Deliberately a plain C++ symbol and not
+// FFF3FP_API: it stays out of the export table (the surface the ABI checks walk), and
+// in-module callers declare it locally (PlayerSession::Fail, PlayerVideoRenderer).
+void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept {
+    if (utf8Line == nullptr) return;
+    const auto sink = g_logSink.load(std::memory_order_acquire);
+    if (sink == nullptr) return;
+    const auto ctx = g_logContext.load(std::memory_order_acquire);
+    sink(ctx, utf8Line);
+}
+
 FFFResult FFF3FP_EvaluateHdrProcessing(FFF3FPHdrProcessingProbe* probe) noexcept {
     return probe == nullptr ? FFFResult::InvalidArgument : HdrProcessor::EvaluateProbe(*probe);
 }
@@ -61,6 +84,7 @@ FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration, FFF3FPHandle* 
         configuration->decodeMode > FFF3FPDecodeMode::D3D11 || configuration->colorMode > FFF3FPColorMode::MapToHdr ||
         configuration->videoScalingQuality > FFF3FPVideoScalingQuality::HighQuality ||
         configuration->forceHdrOutput > 1 ||
+        configuration->sdrScRgbMode > 1 ||
         // -1 = auto (adapter driving the window's monitor); 0..15 = DXGI index.
         // Callers are expected to clamp to the same range.
         configuration->preferredAdapterIndex < -1 || configuration->preferredAdapterIndex > 15 ||
@@ -103,6 +127,11 @@ FFFResult FFF3FP_SetColorMode(const FFF3FPHandle player, const FFF3FPColorMode m
         static_cast<PlayerSession*>(player)->SetColorMode(mode, sdr, hdr, paper, forceHdr != 0) :
         FFFResult::InvalidArgument;
 }
+FFFResult FFF3FP_SetPresentConfig(const FFF3FPHandle player, const std::uint32_t enableTearing) noexcept {
+    return player && enableTearing <= 1 ?
+        static_cast<PlayerSession*>(player)->SetPresentConfig(enableTearing != 0) :
+        FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetInteractiveMove(const FFF3FPHandle player, const std::uint32_t enabled) noexcept {
     return player && enabled <= 1 ? static_cast<PlayerSession*>(player)->SetInteractiveMove(enabled != 0)
@@ -112,6 +141,11 @@ FFFResult FFF3FP_SetViewTransform(const FFF3FPHandle player, const float zoom,
     const float panX, const float panY) noexcept {
     return player ? static_cast<PlayerSession*>(player)->SetViewTransform(zoom, panX, panY)
         : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_SetFitLimitToNative(const FFF3FPHandle player,
+    const std::uint32_t enable) noexcept {
+    if (player == nullptr || enable > 1) return FFFResult::InvalidArgument;
+    return static_cast<PlayerSession*>(player)->SetFitLimitToNative(enable != 0);
 }
 FFFResult FFF3FP_Set360View(const FFF3FPHandle player, const std::uint32_t enabled,
     const float yaw, const float pitch, const float fovY) noexcept {
@@ -157,6 +191,12 @@ FFFResult FFF3FP_GetAudioPeakLevels(const FFF3FPHandle player,
 FFFResult FFF3FP_GetTimedTextStatus(const FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept {
     return player && status ? static_cast<PlayerSession*>(player)->GetTimedTextStatus(*status)
+        : FFFResult::InvalidArgument;
+}
+// Re-present the last cached frame on the presenter thread (see the header note on
+// FFF3FP_Redraw for when the host is expected to call it).
+FFFResult FFF3FP_Redraw(const FFF3FPHandle player) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->Redraw()
         : FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_GetDanmakuStatus(const FFF3FPHandle player,

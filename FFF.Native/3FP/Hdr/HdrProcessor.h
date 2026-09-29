@@ -15,6 +15,12 @@ struct HdrDisplayCapabilities {
     float minimumNits = 0.0f;
     float maximumNits = 0.0f;
     float maximumFullFrameNits = 0.0f;
+    // Windows' "SDR content brightness": the luminance DWM maps an ordinary SDR
+    // window's white to while HDR is active (AdvancedColorInfo::SdrWhiteLevelInNits).
+    // 0 = not reported (older Windows, or Advanced Color off). An SDR source that
+    // is presented on the scRGB chain must be anchored here to land on the same
+    // luminance the classic SDR chain would have produced.
+    float sdrWhiteLevelNits = 0.0f;
 };
 
 struct HdrStaticMetadata {
