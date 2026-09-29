@@ -200,7 +200,7 @@ Friend Module Program
             End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--hdr-processing-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试HDR规格处理策略()
-                Console.WriteLine("HDR10/HDR10+/HLG/Vivid、Dolby Profile/FEL 回退与显示峰值策略通过。")
+                Console.WriteLine("HDR10/HDR10+/HLG/Vivid、杜比视界配置档次与 FEL 回退、显示峰值策略通过。")
                 Return 0
             End If
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--bt2390-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -1324,12 +1324,12 @@ Friend Module Program
             .HDR格式 = CUInt(HDR格式.杜比视界),
             .HDR处理路径 = CUInt(HDR处理路径.外部RPU处理)})
         断言(String.Equals(CStr(HDR文本方法?.Invoke(Nothing, {DV回退快照, True})),
-            "Dolby Vision", StringComparison.Ordinal) AndAlso
+            "杜比视界基础层兼容输出", StringComparison.Ordinal) AndAlso
             String.Equals(CStr(HDR文本方法?.Invoke(Nothing, {DV回退快照, False})),
-            "Dolby Vision", StringComparison.Ordinal) AndAlso
+            "杜比视界基础层兼容输出", StringComparison.Ordinal) AndAlso
             String.Equals(CStr(HDR文本方法?.Invoke(Nothing, {DV处理快照, True})),
-            "Dolby Vision", StringComparison.Ordinal),
-            "Dolby Vision 操作提示没有使用通用格式名称回退。")
+            "杜比视界基础层兼容输出", StringComparison.Ordinal),
+            "杜比视界操作提示没有使用基础层兼容输出文案。")
         Using 控制器 As New 播放器控制器(Function() IntPtr.Zero, Nothing)
             控制器.设置HDR峰值亮度(2000.0F)
             断言(控制器.取得HDR输出峰值参数(色彩输出模式.映射到SDR) = 0.0F AndAlso
@@ -1343,29 +1343,29 @@ Friend Module Program
         断言(P5.输出格式 = 4UI AndAlso P5.输出处理路径 = 4UI AndAlso
            P5.输出兼容格式 = 4UI AndAlso P5.输出回退 = 1UI AndAlso
            P5.输出动态元数据 = 0UI,
-           "Dolby Vision P5 没有进入未授权 HDR10 受限回退。")
+            "杜比视界 P5 没有进入基础层兼容回退。")
 
         Dim P7MEL = 执行HDR探针(1UI, 7UI, 6UI, 1UI, True, True, 1UI, False, False, 720.0F, 0.0F)
         断言(P7MEL.输出格式 = 4UI AndAlso P7MEL.输出处理路径 = 4UI AndAlso
            P7MEL.输出增强层 = 1UI AndAlso P7MEL.输出回退 = 1UI AndAlso
            P7MEL.输出动态元数据 = 0UI AndAlso (P7MEL.输出兼容格式 And 1UI) <> 0,
-           "Dolby Vision P7 MEL 没有使用 HDR10 基础层回退。")
+            "杜比视界 P7 MEL 没有使用基础层兼容回退。")
 
         Dim P7FEL = 执行HDR探针(1UI, 7UI, 6UI, 1UI, True, True, 2UI, False, False, 720.0F, 0.0F)
         断言(P7FEL.输出处理路径 = 5UI AndAlso P7FEL.输出增强层 = 2UI AndAlso
            P7FEL.输出回退 = 1UI AndAlso P7FEL.输出动态元数据 = 0UI,
-           "Dolby Vision P7 FEL 没有明确报告 BL 基础层回退。")
+            "杜比视界 P7 FEL 没有明确报告基础层回退。")
 
         Dim P81 = 执行HDR探针(1UI, 8UI, 6UI, 1UI, True, False, 0UI, False, False, 720.0F, 0.0F)
         断言((P81.输出兼容格式 And 1UI) <> 0 AndAlso P81.输出处理路径 = 4UI AndAlso
            P81.输出回退 = 1UI AndAlso P81.输出动态元数据 = 0UI,
-           "Dolby Vision P8.1 没有识别 HDR10 兼容基础层。")
+            "杜比视界 P8.1 没有识别 HDR10 兼容基础层。")
 
         Dim P84 = 执行HDR探针(2UI, 8UI, 6UI, 4UI, True, False, 0UI, False, False, 720.0F, 0.0F)
         断言((P84.输出兼容格式 And 2UI) <> 0 AndAlso (P84.输出兼容格式 And 1UI) = 0 AndAlso
            P84.输出处理路径 = 4UI AndAlso P84.输出回退 = 1UI AndAlso
            P84.输出动态元数据 = 0UI,
-           "Dolby Vision P8.4 没有识别 HLG 兼容基础层。")
+            "杜比视界 P8.4 没有识别 HLG 兼容基础层。")
 
         Dim HDR10Plus = 执行HDR探针(1UI, 0UI, 0UI, 0UI, False, False, 0UI, True, False, 720.0F, 0.0F)
         断言(HDR10Plus.输出格式 = 2UI AndAlso HDR10Plus.输出处理路径 = 2UI AndAlso

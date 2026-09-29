@@ -63,10 +63,9 @@ void ClassifyDolbyVision(const AVDOVIDecoderConfigurationRecord* configuration,
         state.compatibility |= Compatibility(FFF3FPHdrCompatibility::Hdr10);
     if (configuration->dv_bl_signal_compatibility_id == 4)
         state.compatibility |= Compatibility(FFF3FPHdrCompatibility::Hlg);
-    // The open-source build may identify Dolby metadata, but it is not a Dolby
-    // licensed implementation. Convert every profile to the public Rec.2020/PQ
-    // HDR10 output contract and never advertise Dolby Vision or HDR10+ output.
-    // P5 has no HDR10-compatible base layer, so that conversion is best effort.
+    // Use the base-layer compatibility path until an external extension accepts
+    // the current frame. P5 has no HDR10-compatible base layer, so its fallback
+    // is best effort.
     state.processingPath = FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback;
     state.fallback = true;
 }
@@ -267,8 +266,8 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         next.format = FFF3FPHdrFormat::DolbyVision;
         next.compatibility |= Compatibility(FFF3FPHdrCompatibility::DolbyVision);
         next.hasRpu = true;
-        // RPU is retained for diagnostics/FEL identification only. Applying it
-        // as Dolby Vision requires a separately licensed system implementation.
+        // Keep the RPU for peak estimation and optional external processing.
+        // This path does not apply its reshaping map to the base layer.
         next.dynamicMetadata = false;
         if (header != nullptr && next.hasEnhancementLayer) {
             next.enhancementLayer = header->disable_residual_flag != 0 ?
@@ -464,7 +463,7 @@ const char* HdrProcessor::FormatName(const FFF3FPHdrFormat format) noexcept {
     case FFF3FPHdrFormat::Hdr10: return "HDR10";
     case FFF3FPHdrFormat::Hdr10Plus: return "HDR10+";
     case FFF3FPHdrFormat::Hlg: return "HLG";
-    case FFF3FPHdrFormat::DolbyVision: return "Dolby Vision";
+    case FFF3FPHdrFormat::DolbyVision: return "杜比视界";
     case FFF3FPHdrFormat::HdrVivid: return "HDR Vivid";
     default: return "SDR";
     }
@@ -475,9 +474,9 @@ const char* HdrProcessor::ProcessingPathName(const FFF3FPHdrProcessingPath path)
     case FFF3FPHdrProcessingPath::StaticHdr10: return "HDR10 static metadata";
     case FFF3FPHdrProcessingPath::Hdr10PlusDynamic: return "HDR10+ metadata-guided display mapping";
     case FFF3FPHdrProcessingPath::HlgDisplayMapped: return "HLG display mapping";
-    case FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback: return "Dolby Vision source -> HDR10-compatible fallback";
-    case FFF3FPHdrProcessingPath::ExternalDynamic: return "External RPU processing -> SDR/scRGB (experimental)";
-    case FFF3FPHdrProcessingPath::DolbyVisionFelFallback: return "Dolby Vision BL -> HDR10 fallback (FEL ignored)";
+    case FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback: return "杜比视界基础层兼容输出（未应用 RPU 映射）";
+    case FFF3FPHdrProcessingPath::ExternalDynamic: return "测试扩展使用 RPU 处理画面";
+    case FFF3FPHdrProcessingPath::DolbyVisionFelFallback: return "杜比视界基础层兼容输出（未使用 FEL）";
     case FFF3FPHdrProcessingPath::HdrVividDynamic: return "HDR Vivid metadata-guided display mapping";
     default: return "None";
     }
@@ -501,7 +500,7 @@ std::string HdrProcessor::CompatibilityNames(const std::uint32_t compatibility) 
     };
     if ((compatibility & Compatibility(FFF3FPHdrCompatibility::Hdr10)) != 0) append("HDR10");
     if ((compatibility & Compatibility(FFF3FPHdrCompatibility::Hlg)) != 0) append("HLG");
-    if ((compatibility & Compatibility(FFF3FPHdrCompatibility::DolbyVision)) != 0) append("Dolby Vision");
+    if ((compatibility & Compatibility(FFF3FPHdrCompatibility::DolbyVision)) != 0) append("杜比视界");
     if ((compatibility & Compatibility(FFF3FPHdrCompatibility::HdrVivid)) != 0) append("HDR Vivid");
     return result;
 }

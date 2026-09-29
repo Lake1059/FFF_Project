@@ -1675,7 +1675,7 @@ Public NotInheritable Class 播放器控制器
                     If textPointer <> IntPtr.Zero Then Return Marshal.PtrToStringUTF8(textPointer)
                 Catch
                 End Try
-                Return "Dolby Vision"
+                Return "杜比视界基础层兼容输出"
             Case HDR格式.HDRVivid : Return "HDR Vivid"
             Case Else : Return "HDR10"
         End Select

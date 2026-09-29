@@ -342,8 +342,8 @@ Public Class Form1
             Return CInt(Me.Invoke(New Func(Of Integer)(Function() 显示DolbyVision授权对话框(代码UTF8, 容量))))
         End If
         Dim 代码 = LakeUI.ExInputBox(Me,
-            $"票据有效期为一个月{vbCrLf}如需刷新票据时间请删除票据文件并重新解锁{vbCrLf}{vbCrLf}此 DLL 仅限开发群内部测试使用！{vbCrLf}任何向外传播、公开使用、任何商业等行为导致违反杜比视界版权许可产生的纠纷均由使用者承担，与开发者没有任何关系！",
-            "Dolby Vision 技术测试防传播验证")
+            "请输入杜比视界测试扩展的 8 位授权码。授权有效期为 30 天。",
+            "杜比视界测试扩展授权")
         If String.IsNullOrWhiteSpace(代码) Then Return 0
         代码 = 代码.Trim()
         If 代码.Length <> 8 OrElse Not 代码.All(Function(character) Char.IsDigit(character)) Then Return 0
