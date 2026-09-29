@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -19,6 +20,7 @@
 #include <vector>
 
 struct AVCodecContext;
+struct AVBSFContext;
 struct AVCodec;
 struct AVFormatContext;
 struct AVFrame;
@@ -152,6 +154,11 @@ private:
     FFFResult LoadCoverArt() noexcept;
     FFFResult DecodePacket(AVCodecContext* decoder, AVPacket* packet, bool video,
         AVFormatContext* owner) noexcept;
+    FFFResult ConfigureDolbyVisionEnhancementDecoder() noexcept;
+    void DecodeDolbyVisionEnhancementPacket(const AVPacket* packet) noexcept;
+    void DrainDolbyVisionEnhancementDecoder() noexcept;
+    void ClearDolbyVisionEnhancementFrames() noexcept;
+    void AttachDolbyVisionEnhancementFrame(AVFrame* base) noexcept;
     bool PumpVideoPresentation() noexcept;
     void QueueVideoFrame(AVFrame* frame) noexcept;
     void ClearVideoQueue() noexcept;
@@ -226,6 +233,10 @@ private:
     AVFrame* audioDecodeFrame_;
     AVFrame* externalAudioDecodeFrame_;
     AVCodecContext* videoDecoder_;
+    AVBSFContext* dolbyVisionEnhancementBsf_;
+    AVCodecContext* dolbyVisionEnhancementDecoder_;
+    AVFrame* dolbyVisionEnhancementDecodeFrame_;
+    std::map<std::int64_t, AVFrame*> dolbyVisionEnhancementFrames_;
     AVCodecContext* audioDecoder_;
     std::int32_t videoStream_;
     std::int32_t audioStream_;

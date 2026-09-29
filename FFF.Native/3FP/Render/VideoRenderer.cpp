@@ -6,6 +6,7 @@
 extern "C" {
 #include <libavcodec/codec_par.h>
 #include <libavutil/frame.h>
+#include <libavutil/buffer.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/mastering_display_metadata.h>
@@ -36,6 +37,19 @@ extern "C" {
 using Microsoft::WRL::ComPtr;
 
 namespace {
+const AVFrame* EnhancementFrame(const AVFrame* frame) noexcept {
+    if (frame == nullptr || frame->opaque_ref == nullptr ||
+        frame->opaque_ref->data == nullptr ||
+        frame->opaque_ref->size < sizeof(FFFColorExtensionEnhancementFrameReference))
+        return nullptr;
+    const auto* reference = reinterpret_cast<const FFFColorExtensionEnhancementFrameReference*>(
+        frame->opaque_ref->data);
+    if (reference->magic != FFFColorExtensionEnhancementReferenceMagic ||
+        reference->frame == nullptr)
+        return nullptr;
+    return static_cast<const AVFrame*>(reference->frame);
+}
+
 float DetectDisplayRefreshRate(const HWND window) noexcept {
     // Pace camera redraws to the monitor hosting the playback window.  A
     // 120 Hz ceiling keeps high-refresh displays responsive without creating
@@ -3986,6 +4000,40 @@ void PlayerVideoRenderer::SetHdrMetadata() noexcept {
 FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNativeSize,
     const bool coverArt, const bool prepareOnly) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
+    AVFrame* enhancementBaseTransfer = nullptr;
+    struct EnhancementTransferGuard final {
+        AVFrame*& frame;
+        ~EnhancementTransferGuard() { if (frame != nullptr) av_frame_free(&frame); }
+    } enhancementTransferGuard{enhancementBaseTransfer};
+    const auto* enhancementFrame = EnhancementFrame(frame);
+    const AVFrame* extensionEnhancementFrame = enhancementFrame;
+    const auto* extensionApi = GetColorExtension();
+    const auto* initialDoviMetadata = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
+    if (extensionApi != nullptr && extensionApi->applyFrame != nullptr &&
+        enhancementFrame != nullptr && initialDoviMetadata != nullptr) {
+        if (frame->format == AV_PIX_FMT_D3D11 || frame->hw_frames_ctx != nullptr) {
+            enhancementBaseTransfer = av_frame_alloc();
+            if (enhancementBaseTransfer == nullptr ||
+                av_hwframe_transfer_data(enhancementBaseTransfer, frame, 0) < 0) {
+                if (enhancementBaseTransfer != nullptr) av_frame_free(&enhancementBaseTransfer);
+                enhancementBaseTransfer = nullptr;
+                extensionEnhancementFrame = nullptr;
+            } else {
+                av_frame_copy_props(enhancementBaseTransfer, frame);
+                frame = enhancementBaseTransfer;
+            }
+        }
+        if (frame->format != AV_PIX_FMT_D3D11 && frame->format != AV_PIX_FMT_D3D11VA_VLD) {
+            const FFFColorExtensionInput request{sizeof(FFFColorExtensionInput),
+                FFFColorExtensionVersion, avutil_version(), 0,
+                initialDoviMetadata->data, initialDoviMetadata->size,
+                extensionEnhancementFrame,
+                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->width),
+                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->height),
+                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->format)};
+            (void)extensionApi->applyFrame(&request, const_cast<AVFrame*>(frame));
+        }
+    }
     struct PlaybackWorkGuard final {
         std::atomic<std::uint32_t>& pending;
         explicit PlaybackWorkGuard(std::atomic<std::uint32_t>& value) noexcept : pending(value) {
@@ -4081,7 +4129,10 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         if (directYuv && metadata && actualMode_ != FFF3FPColorMode::RawHdrAsSdr) {
             const FFFColorExtensionInput request{sizeof(FFFColorExtensionInput),
                 FFFColorExtensionVersion, avutil_version(), hdrState.dolbyVisionProfile,
-                metadata->data, metadata->size};
+                metadata->data, metadata->size, extensionEnhancementFrame,
+                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->width),
+                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->height),
+                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->format)};
             applied = GetColorExtension()->prepare(&request, &output) != 0;
         }
         if (!applied) std::memset(output.constants, 0, sizeof(output.constants));

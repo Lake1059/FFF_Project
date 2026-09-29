@@ -1,8 +1,11 @@
 #include "pch.h"
 #include "3FP/Core/PlayerSession.h"
+#include "3FP/Render/ColorExtensionApi.h"
+#include "3FP/Render/ColorExtension.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/bsf.h>
 #include <libavcodec/codec_desc.h>
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersink.h>
@@ -12,6 +15,7 @@ extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
+#include <libavutil/buffer.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/mastering_display_metadata.h>
@@ -19,6 +23,7 @@ extern "C" {
 #include <libavutil/display.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/dict.h>
+#include <libavutil/dovi_meta.h>
 #include <libavutil/opt.h>
 #include <libavutil/samplefmt.h>
 }
@@ -46,6 +51,16 @@ constexpr std::size_t MaximumPendingVideoPackets = 64;
 constexpr std::size_t MaximumPendingVideoPacketBytes = 16 * 1024 * 1024;
 constexpr std::size_t MaximumPendingAudioPackets = 512;
 constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
+
+void FreeDolbyVisionEnhancementReference(void*, std::uint8_t* data) noexcept {
+    auto* reference = reinterpret_cast<FFFColorExtensionEnhancementFrameReference*>(data);
+    if (reference == nullptr) return;
+    if (reference->frame != nullptr) {
+        auto* frame = static_cast<AVFrame*>(reference->frame);
+        av_frame_free(&frame);
+    }
+    delete reference;
+}
 
 std::size_t EstimateDecodedFrameBytes(const AVFrame* frame) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return 0;
@@ -535,7 +550,9 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       callbackContext_(configuration.eventCallbackContext), terminate_(false), format_(nullptr),
       playbackPacket_(nullptr), externalAudioPacket_(nullptr), videoDecodeFrame_(nullptr),
       videoTransferFrame_(nullptr), audioDecodeFrame_(nullptr), externalAudioDecodeFrame_(nullptr),
-      videoDecoder_(nullptr), audioDecoder_(nullptr), videoStream_(-1),
+      videoDecoder_(nullptr), dolbyVisionEnhancementBsf_(nullptr),
+      dolbyVisionEnhancementDecoder_(nullptr), dolbyVisionEnhancementDecodeFrame_(nullptr),
+      videoStream_(-1),
       audioStream_(-1), coverArtStream_(-1), coverArtFrame_(nullptr), stillImageFrame_(nullptr),
       externalFormat_(nullptr), externalAudioDecoder_(nullptr),
       externalAudioStream_(-1), externalAudioOffset100ns_(0),
@@ -1154,6 +1171,9 @@ void PlayerSession::DoStepKeyframe(const std::int32_t direction) {
         }
         ClearVideoQueue();
         avcodec_flush_buffers(videoDecoder_);
+        if (dolbyVisionEnhancementBsf_ != nullptr) av_bsf_flush(dolbyVisionEnhancementBsf_);
+        if (dolbyVisionEnhancementDecoder_ != nullptr) avcodec_flush_buffers(dolbyVisionEnhancementDecoder_);
+        ClearDolbyVisionEnhancementFrames();
         if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
         seekTarget100ns_ = -1;
         seekTargetFrame_ = -1;
@@ -1496,6 +1516,7 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
                 "video-device-recovery");
             return true;
         }
+        (void)ConfigureDolbyVisionEnhancementDecoder();
         snapshot_.decodeMode = decodeMode_ == FFF3FPDecodeMode::D3D11 &&
             !staticImage_ && !hardwareFallback
             ? FFF3FPDecodeMode::Gpu : FFF3FPDecodeMode::Cpu;
@@ -2210,6 +2231,11 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         if (result != FFFResult::Success) { Fail(result, "Could not open a hardware or software video decoder.", "open"); return; }
         if (staticImage_ && decodeMode_ == FFF3FPDecodeMode::D3D11)
             snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
+        // Dolby Vision FEL is decoded through a generic enhancement-layer
+        // side channel. The external color extension owns the actual residual
+        // reconstruction; the player only keeps the decoded frame paired with
+        // its BL timestamp.
+        (void)ConfigureDolbyVisionEnhancementDecoder();
     }
     if (audioStream_ >= 0) {
         if (OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success)
@@ -2337,7 +2363,12 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
     const auto* stream = format_->streams[videoStream_];
     const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
     if (av_seek_frame(format_, videoStream_, start, AVSEEK_FLAG_BACKWARD) >= 0)
+    {
         avcodec_flush_buffers(videoDecoder_);
+        if (dolbyVisionEnhancementBsf_ != nullptr) av_bsf_flush(dolbyVisionEnhancementBsf_);
+        if (dolbyVisionEnhancementDecoder_ != nullptr) avcodec_flush_buffers(dolbyVisionEnhancementDecoder_);
+        ClearDolbyVisionEnhancementFrames();
+    }
     if (state_.load() == FFF3FPState::Failed) return FFFResult::DeviceFailure;
     return videoRenderer_.PresentedVideoFrames() > before
         ? FFFResult::Success : FFFResult::FfmpegFailure;
@@ -2496,6 +2527,141 @@ void PlayerSession::PumpPlayback() noexcept {
     av_packet_unref(playbackPacket_);
 }
 
+FFFResult PlayerSession::ConfigureDolbyVisionEnhancementDecoder() noexcept {
+    ClearDolbyVisionEnhancementFrames();
+    if (dolbyVisionEnhancementBsf_ != nullptr)
+        av_bsf_free(&dolbyVisionEnhancementBsf_);
+    if (dolbyVisionEnhancementDecoder_ != nullptr)
+        avcodec_free_context(&dolbyVisionEnhancementDecoder_);
+    if (dolbyVisionEnhancementDecodeFrame_ != nullptr)
+        av_frame_free(&dolbyVisionEnhancementDecodeFrame_);
+    // The public player has no enhancement compositor. Keep the additional
+    // decoder completely dormant unless the private color extension is present;
+    // ordinary HDR10-compatible fallback must retain the normal decode budget.
+    if (GetColorExtension() == nullptr || format_ == nullptr || videoStream_ < 0 ||
+        videoStream_ >= static_cast<std::int32_t>(format_->nb_streams))
+        return FFFResult::InvalidState;
+    const auto* parameters = format_->streams[videoStream_]->codecpar;
+    const auto* dovi = av_packet_side_data_get(parameters->coded_side_data,
+        parameters->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF);
+    if (dovi == nullptr || dovi->size < sizeof(AVDOVIDecoderConfigurationRecord))
+        return FFFResult::Success;
+    const auto* configuration = reinterpret_cast<const AVDOVIDecoderConfigurationRecord*>(dovi->data);
+    if (configuration->el_present_flag == 0 || configuration->rpu_present_flag == 0)
+        return FFFResult::Success;
+    const auto* filter = av_bsf_get_by_name("dovi_split");
+    if (filter == nullptr || av_bsf_alloc(filter, &dolbyVisionEnhancementBsf_) < 0)
+        return FFFResult::NotSupported;
+    if (avcodec_parameters_copy(dolbyVisionEnhancementBsf_->par_in, parameters) < 0) {
+        av_bsf_free(&dolbyVisionEnhancementBsf_);
+        return FFFResult::NativeFailure;
+    }
+    if (av_opt_set(dolbyVisionEnhancementBsf_->priv_data, "mode", "el", 0) < 0) {
+        av_bsf_free(&dolbyVisionEnhancementBsf_);
+        return FFFResult::NotSupported;
+    }
+    dolbyVisionEnhancementBsf_->time_base_in = format_->streams[videoStream_]->time_base;
+    if (av_bsf_init(dolbyVisionEnhancementBsf_) < 0 ||
+        dolbyVisionEnhancementBsf_->par_out == nullptr) {
+        av_bsf_free(&dolbyVisionEnhancementBsf_);
+        return FFFResult::NotSupported;
+    }
+    const auto* codec = avcodec_find_decoder(dolbyVisionEnhancementBsf_->par_out->codec_id);
+    if (codec == nullptr) {
+        av_bsf_free(&dolbyVisionEnhancementBsf_);
+        return FFFResult::NotSupported;
+    }
+    dolbyVisionEnhancementDecoder_ = avcodec_alloc_context3(codec);
+    if (dolbyVisionEnhancementDecoder_ == nullptr ||
+        avcodec_parameters_to_context(dolbyVisionEnhancementDecoder_, dolbyVisionEnhancementBsf_->par_out) < 0 ||
+        avcodec_open2(dolbyVisionEnhancementDecoder_, codec, nullptr) < 0) {
+        if (dolbyVisionEnhancementDecoder_ != nullptr)
+            avcodec_free_context(&dolbyVisionEnhancementDecoder_);
+        av_bsf_free(&dolbyVisionEnhancementBsf_);
+        return FFFResult::NotSupported;
+    }
+    dolbyVisionEnhancementDecodeFrame_ = av_frame_alloc();
+    if (dolbyVisionEnhancementDecodeFrame_ == nullptr) {
+        avcodec_free_context(&dolbyVisionEnhancementDecoder_);
+        av_bsf_free(&dolbyVisionEnhancementBsf_);
+        return FFFResult::NativeFailure;
+    }
+    return FFFResult::Success;
+}
+
+void PlayerSession::ClearDolbyVisionEnhancementFrames() noexcept {
+    for (auto& entry : dolbyVisionEnhancementFrames_)
+        if (entry.second != nullptr) av_frame_free(&entry.second);
+    dolbyVisionEnhancementFrames_.clear();
+}
+
+void PlayerSession::DrainDolbyVisionEnhancementDecoder() noexcept {
+    if (dolbyVisionEnhancementDecoder_ == nullptr || dolbyVisionEnhancementDecodeFrame_ == nullptr)
+        return;
+    while (avcodec_receive_frame(dolbyVisionEnhancementDecoder_,
+            dolbyVisionEnhancementDecodeFrame_) >= 0) {
+        const auto pts = dolbyVisionEnhancementDecodeFrame_->best_effort_timestamp == AV_NOPTS_VALUE
+            ? dolbyVisionEnhancementDecodeFrame_->pts
+            : dolbyVisionEnhancementDecodeFrame_->best_effort_timestamp;
+        if (pts != AV_NOPTS_VALUE) {
+            auto* copy = av_frame_clone(dolbyVisionEnhancementDecodeFrame_);
+            if (copy != nullptr) {
+                auto existing = dolbyVisionEnhancementFrames_.find(pts);
+                if (existing != dolbyVisionEnhancementFrames_.end())
+                    av_frame_free(&existing->second);
+                dolbyVisionEnhancementFrames_[pts] = copy;
+            }
+        }
+        av_frame_unref(dolbyVisionEnhancementDecodeFrame_);
+    }
+}
+
+void PlayerSession::DecodeDolbyVisionEnhancementPacket(const AVPacket* packet) noexcept {
+    if (dolbyVisionEnhancementBsf_ == nullptr || dolbyVisionEnhancementDecoder_ == nullptr)
+        return;
+    AVPacket* copy = packet == nullptr ? nullptr : av_packet_clone(packet);
+    if (packet != nullptr && copy == nullptr) return;
+    if (av_bsf_send_packet(dolbyVisionEnhancementBsf_, copy) < 0) {
+        if (copy != nullptr) av_packet_free(&copy);
+        return;
+    }
+    AVPacket* filtered = av_packet_alloc();
+    if (filtered == nullptr) return;
+    while (av_bsf_receive_packet(dolbyVisionEnhancementBsf_, filtered) >= 0) {
+        auto result = avcodec_send_packet(dolbyVisionEnhancementDecoder_, filtered);
+        if (result == AVERROR(EAGAIN)) {
+            DrainDolbyVisionEnhancementDecoder();
+            result = avcodec_send_packet(dolbyVisionEnhancementDecoder_, filtered);
+        }
+        if (result >= 0) DrainDolbyVisionEnhancementDecoder();
+        av_packet_unref(filtered);
+    }
+    av_packet_free(&filtered);
+    if (packet == nullptr) {
+        (void)avcodec_send_packet(dolbyVisionEnhancementDecoder_, nullptr);
+        DrainDolbyVisionEnhancementDecoder();
+    }
+}
+
+void PlayerSession::AttachDolbyVisionEnhancementFrame(AVFrame* base) noexcept {
+    if (base == nullptr || base->opaque_ref != nullptr || dolbyVisionEnhancementFrames_.empty()) return;
+    const auto pts = base->best_effort_timestamp == AV_NOPTS_VALUE ? base->pts : base->best_effort_timestamp;
+    if (pts == AV_NOPTS_VALUE) return;
+    auto match = dolbyVisionEnhancementFrames_.find(pts);
+    if (match == dolbyVisionEnhancementFrames_.end()) return;
+    auto* reference = new (std::nothrow) FFFColorExtensionEnhancementFrameReference{
+        FFFColorExtensionEnhancementReferenceMagic, nullptr};
+    if (reference == nullptr) return;
+    reference->frame = match->second;
+    match->second = nullptr;
+    dolbyVisionEnhancementFrames_.erase(match);
+    base->opaque_ref = av_buffer_create(reinterpret_cast<std::uint8_t*>(reference),
+        sizeof(*reference), FreeDolbyVisionEnhancementReference, nullptr, 0);
+    if (base->opaque_ref == nullptr) {
+        FreeDolbyVisionEnhancementReference(nullptr, reinterpret_cast<std::uint8_t*>(reference));
+    }
+}
+
 FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet, const bool video,
     AVFormatContext* owner) noexcept {
     if (decoder == nullptr) return FFFResult::Success;
@@ -2509,6 +2675,7 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
     av_frame_unref(frame);
     const auto handleFrame = [this, video, owner](AVFrame* decoded) {
         if (video) {
+            AttachDolbyVisionEnhancementFrame(decoded);
             NormalizeVideoFrameTimestamp(decoded);
             const auto seeking = seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_;
             if (state_.load() == FFF3FPState::Playing && !seeking) QueueVideoFrame(decoded);
@@ -2524,7 +2691,10 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
         }
         return receiveResult;
     };
-    if (video) FilterAv1HardwareTimecodeMetadata(decoder, packet);
+    if (video) {
+        DecodeDolbyVisionEnhancementPacket(packet);
+        FilterAv1HardwareTimecodeMetadata(decoder, packet);
+    }
     auto result = avcodec_send_packet(decoder, packet);
     if (result == AVERROR(EAGAIN)) {
         const auto receiveResult = receiveFrames();
@@ -3418,7 +3588,11 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     }
     ClearVideoQueue();
     ResetBitRateTracking();
-    if (videoDecoder_) avcodec_flush_buffers(videoDecoder_); if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
+    if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);
+    if (dolbyVisionEnhancementBsf_ != nullptr) av_bsf_flush(dolbyVisionEnhancementBsf_);
+    if (dolbyVisionEnhancementDecoder_ != nullptr) avcodec_flush_buffers(dolbyVisionEnhancementDecoder_);
+    ClearDolbyVisionEnhancementFrames();
+    if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
     internalAudioDecodeErrorCount_ = 0;
     seekTarget100ns_ = position; seekTargetFrame_ = targetFrame;
     keyframeSeekPending_ = !exact && videoStream_ >= 0; draining_ = false;
@@ -3487,7 +3661,15 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         snapshot_.decodeMode = decodeMode_;
     }
     if (result != FFFResult::Success) { ReportError(result, "Could not open the selected media stream.", "select-stream"); return; }
-    if (video) { if (videoDecoder_) avcodec_free_context(&videoDecoder_); videoDecoder_ = replacement; videoStream_ = index; snapshot_.selectedVideoStream = index; videoRenderer_.ConfigureHdrStream(format_->streams[index]->codecpar); ApplyHdrState(snapshot_, videoRenderer_.HdrState()); framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false; }
+    if (video) {
+        if (videoDecoder_) avcodec_free_context(&videoDecoder_);
+        videoDecoder_ = replacement; videoStream_ = index;
+        snapshot_.selectedVideoStream = index;
+        videoRenderer_.ConfigureHdrStream(format_->streams[index]->codecpar);
+        ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+        (void)ConfigureDolbyVisionEnhancementDecoder();
+        framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false;
+    }
     else {
         if (audioDecoder_) avcodec_free_context(&audioDecoder_);
         audioDecoder_ = replacement; audioStream_ = index; snapshot_.selectedAudioStream = index;
@@ -3548,7 +3730,12 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     if (preserveVideoOutput) videoRenderer_.ResetMedia();
     else videoRenderer_.Close();
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); CloseFormat(&externalFormat_, externalFormatIo_);
-    if (videoDecoder_) avcodec_free_context(&videoDecoder_); if (audioDecoder_) avcodec_free_context(&audioDecoder_);
+    if (videoDecoder_) avcodec_free_context(&videoDecoder_);
+    if (dolbyVisionEnhancementBsf_) av_bsf_free(&dolbyVisionEnhancementBsf_);
+    if (dolbyVisionEnhancementDecoder_) avcodec_free_context(&dolbyVisionEnhancementDecoder_);
+    if (dolbyVisionEnhancementDecodeFrame_) av_frame_free(&dolbyVisionEnhancementDecodeFrame_);
+    ClearDolbyVisionEnhancementFrames();
+    if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     if (coverArtFrame_) av_frame_free(&coverArtFrame_);
     ReleasePrimariesCarrierFilter();
     if (stillImageFrame_) av_frame_free(&stillImageFrame_);
