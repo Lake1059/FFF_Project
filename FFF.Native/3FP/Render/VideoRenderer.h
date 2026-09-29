@@ -192,7 +192,6 @@ public:
     std::string LastError() const;
 
 private:
-    friend struct TimedTextAtlasRegression;
     enum class CoverBackdropRenderResult {
         Complete,
         Deferred,

@@ -108,24 +108,5 @@ scheduler.生成帧(position, area, commands)
 
 ## 测试
 
-独立测试工程会创建受控的内部播放窗口，但只依据命令数、GPU 已绘制序号、纹理可见像素和最终完整
-合成帧数等程序数据断言。静态字幕不重复重绘，但必须持续进入由弹幕更新触发的最终交换链帧；测试不使用
-画面截图或人工视觉验证。测试还要求 D3D11 逻辑后备缓冲获取次数随最终呈现逐帧增长，防止再次跨
-`Present` 缓存 flip-model 缓冲对象；异步 GPU 管线统计必须确认字幕和弹幕两个全屏合成 Pass
-都产生实际像素着色器调用，避免错误继承精灵实例管线。可直接使用真实文件：
-
-```powershell
-dotnet run --project FFF.Player.Tests -c Debug -- `
-  "movie.mp4" "danmaku.xml" ["movie.ass"] ["movie.srt"]
-```
-
-测试覆盖 SRT 真实条目数、双语行、libass ASS 特效/字体/预乘 Alpha/释放及 4K 动画基准、B站 mode、搜索和屏蔽、轨道上限、
-目标帧率、1080p/2160p 与 DPI 缩放、600 个连续帧、实际 SUP 位图/Alpha/跳转、播放中 XML
-原子替换及损坏文件回退，以及通过播放器内核读取实际视频尺寸和时长。
-
-无需媒体文件的定时文字精确诊断会直接检查完整画布生命周期、同一传统量化帧内的小数位移、
-Seek 不回溯、DirectWrite 自然对称渲染、灰度抗锯齿、纯外描边、字幕 45 度阴影及弹幕软阴影：
-
-```powershell
-dotnet run --project FFF.Player.Tests -c Debug -- --timed-text-regression
-```
+测试项目目前为空，仅保留可编译的入口。新增字幕或弹幕测试时，可在 `FFF.Player.Tests` 中添加测试模块，
+再将对应命令接入入口；本目录不再提供已删除的旧测试命令。

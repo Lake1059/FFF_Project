@@ -113,35 +113,7 @@ UI 应把自己的 `SynchronizationContext` 写入 `播放器配置.事件同步
 再次调用 `设置输出窗口`（允许传入同一个 HWND）会复用 flip-model 交换链并触发重绘；呈现时
 按需 Resize 或重配色彩空间，播放状态和位置不会改变。同一 HWND 不得并存两个 flip-model 链。
 
-内部回归测试不采集画面。先构建 Release x64 的 `FFF.Native` 和 `FFF.Player.Tests`，再运行：
-
-```text
-FFF.Player.Tests --audio-latency-regression
-FFF.Player.Tests --shared-audio-file-regression
-FFF.Player.Tests --audio-cover-regression <带内嵌封面的纯音频>
-FFF.Player.Tests --color-regression <SDR视频> <HDR视频>
-FFF.Player.Tests --hdr-switch-regression <HDR视频>
-FFF.Player.Tests --performance-regression <SDR视频> <HDR视频>
-FFF.Player.Tests --targeted-regression <视频> <字幕.sup>
-FFF.Player.Tests --vcb-ass-regression <视频> <字幕.ass>
-FFF.Player.Tests --gpu-decode-matrix <视频目录>
-FFF.Player.Tests --video-scaling-regression <视频>
-FFF.Player.Tests --sdr-pixel-regression <视频> <参考图.png>
-FFF.Player.Tests --360-interaction-regression
-FFF.Player.Tests --360-projection-regression
-FFF.Player.Tests --360-performance-probe <360视频>
-FFF.Player.Tests --ass-render-benchmark
-FFF.Player.Tests --timed-text-regression
-```
-
-音频延迟回归自生成双声道 PCM，在完全无画面条件下覆盖共享/独占时钟、缓冲、欠载和每声道响度；
-音乐文件共享回归自生成 WAV，并验证播放中仍可改名、取得写访问和删除；
-封面回归先无窗口打开纯音频，再绑定一个不显示的 HWND，只检查封面流、尺寸和交换链呈现计数。
-色彩回归覆盖 SDR 码值直通、HDR/scRGB 覆盖层锚点、PQ 数值映射和 HDR→SDR 换片；HDR 切换回归在真实窗口中验证
-播放期间的 SDR→scRGB FP16→SDR 交换链切换、视频出帧和文字图层持续合成；性能回归固定覆盖 CPU 解码、呈现、
-独立字幕层/100 条同时移动弹幕层、按实际目标刷新率检查的弹幕合同（60 Hz 时至少 55 FPS）、音频缓冲、外部音轨偏移、Seek 和
-恢复内置音轨。专项回归验证连续 AAC PCM 在开头和 1000 秒 Seek 后都不会误补零/裁样，
-并验证 SUP/SRT/ASS/SSA 字幕与 XML 弹幕的播放中原子替换及损坏文件回退。
+`FFF.Player.Tests` 目前只保留可编译的空项目骨架，不包含测试项。后续新增测试时，直接在该项目中添加测试源文件，并从入口组织需要的测试命令。
 
 `tools/构建3FP.ps1` 优先使用环境中的工具，其次使用正式版 Visual Studio，最后回退到预览版，
 并准备 libass、构建 Native、Player 和测试项目；
@@ -150,42 +122,8 @@ FFmpeg 依赖由 `tools/准备FFmpeg.ps1` 固定到同一 commit。运行时需�
 `tools/发布3FP单文件.ps1`：FFF.Native 和 libass 运行库会进入单文件，FFmpeg DLL 仍保持外置，
 用户可把同一套兼容 ABI 的 Shared FFmpeg DLL 放在程序目录或可搜索路径中并整体替换版本。
 
-## 启动时序与内核回归
+## 启动时序
 
 播放器先完成首帧呈现与有界音视频预缓冲，再启动媒体时钟；不会把初始化或暂停时间算作
 已经播放的媒体时间。正常播放通过呈现代次提供背压，避免尚未 Present 的画面被下一帧覆盖。
 流结束时分别排空解码器、重采样器和呈现队列，最后一帧实际呈现并保持其时长后才发送结束事件。
-
-运行 `tools/测试3FP内核.ps1 -MediaPath "完整视频路径"` 可构建并生成微型测试片，覆盖
-CPU/GPU、共享/独占、两帧短片、无音轨、延迟视频、音轨提前结束、外部音轨正负偏移、
-暂停/跳转/重播、窗口解除与重绑、FP16 像素回读，以及指定实片的开头连续呈现。
-日志保存在 `artifacts/kernel-tests/logs`；需要 PATH 中存在带 libx264/libx265 的 ffmpeg。
-已有构建可加 `-SkipBuild`，Debug 可指定 `-Configuration Debug`。
-
-详细分析、修复边界与验证记录见 `KERNEL_REVIEW.md`。分层阴影修复位于同级 LakeUI 仓库；
-3FP 当前仍引用该仓库的 Debug `LakeUI.dll`，同步源代码后需要先构建 LakeUI，再构建播放器。
-
-## 弹幕边缘与缓存回归
-
-运行 `tools/测试3FP弹幕.ps1`，或加 `-Configuration Debug`；`-SkipBuild` 跳过播放器构建，
-仍会增量构建原生像素测试。原生测试位于 `FFF.Player.Tests/Native`，直接编译生产渲染器，
-读取 GPU 图层与字形缓存，不依赖桌面截图，也不需要增加对外播放器接口。
-
-弹幕宽度使用与绘制一致的字体解析和粗体/斜体样式；缓存范围使用实际字形及描边几何边界，
-另计阴影范围与透明隔离边。软阴影只回写所属条目，不再污染相邻或尚未使用的缓存区域。
-滚动坐标不参与尺寸缓存键，同批重复文字只栅格化一次，布局淘汰时保留待绘制引用。
-
-测试覆盖字形超界、组合音标、彩色表情、粗斜体、下划线/删除线、粗描边、正负硬阴影、
-混合软阴影、SDR/FP16 透明隔离边、缓存扩容/淘汰和小数位移复用。
-日志位于 `artifacts/kernel-tests/logs/danmaku-*`。
-
-## 退出与重启回归
-
-`FFF.Player.Tests --shutdown-regression "视频路径"` 使用静音的真实主窗体，分别验证播放中、
-缩放后、最小化及打开期间退出，并连续启动新进程。每个子进程有 20 秒总超时，
-消息循环退出限时 5 秒；超时只清理测试自己创建的子进程，不干预用户播放器。
-
-退出残留的消息队列修复位于同级 LakeUI 的 `D3D11GpuEngine/D3D_V5Presentation.vb`：
-批次内再次请求绘制时，由一次性计时器继续，不再向正在排空的 WinForms 回调队列不断追加自身。
-普通首批绘制保持原有异步提交方式；线程退出时释放批次调度资源。需要先构建 LakeUI Debug DLL，
-再构建 3FP；仅替换 `FFF.Native.dll` 不会带入这项修复。
