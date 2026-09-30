@@ -116,6 +116,19 @@ struct FFF3FPConfiguration {
     // field zeroed therefore pins playback to adapter #0 and silently overrides
     // the monitor match, so every caller must initialise it to -1 explicitly.
     std::int32_t preferredAdapterIndex = -1;
+    // Presentation policy for SDR sources on an Advanced Color display.
+    //   0 = Never: this policy adds no reason to leave the classic 8/10-bit sRGB
+    //       swap chain, which is the pre-existing behaviour. Sources that already
+    //       needed the scRGB chain before the field existed - an HDR transfer
+    //       function, or wide-gamut primaries - still get it; switching to Never
+    //       does not demote them.
+    //   1 = Auto: additionally route a plain SDR source through the 16-bit scRGB
+    //       swap chain when its bit depth exceeds 8. Without this, a 10-bit SDR
+    //       source sits on a gamma R10G10B10A2 chain that DWM resamples as an
+    //       ordinary SDR window, so the extra precision is rewritten away.
+    // The display gate (OutputSupportsHdr) still applies in both modes: on a
+    // non-Advanced Color display the SDR chain is used unchanged.
+    std::uint32_t sdrScRgbMode = 0;
 };
 
 struct FFF3FPSnapshot {
@@ -208,6 +221,18 @@ struct FFF3FPAudioPeakLevels {
 using FFF3FPHandle = void*;
 using FFF3FPBitmapSubtitleHandle = void*;
 using FFF3FPAssSubtitleHandle = void*;
+
+// Process-wide native log sink. The kernel calls the installed callback with UTF-8 log
+// lines from any of its threads (decode / present / recovery); route them wherever the
+// host keeps its logs. Install once at startup, before creating sessions.
+// Passing nullptr detaches the sink, but detaching is not synchronous with respect to a
+// line already in flight: a host whose callback is a managed delegate must keep that
+// delegate reachable until the kernel's threads have stopped. Releasing it right after
+// detaching can otherwise deliver a call into a torn-down runtime (CLR fatal, exit 127).
+// The type is noexcept because the kernel calls it from its decode/present threads and has
+// no way to handle anything coming back through it: a host whose callback is managed code
+// must catch its own failures, otherwise an exception escaping here terminates the process.
+using FFF3FPLogCallback = void(__cdecl*)(void* context, const char* utf8Line) noexcept;
 
 enum class FFF3FPBitmapSubtitleFlags : std::uint32_t {
     None = 0,
@@ -375,6 +400,7 @@ struct FFF3FPColorTransform {
     std::uint32_t version;
     FFF3FPColorMode colorMode;
     FFF3FPColorTransfer transfer;
+    // Gamut switch: 0 = Rec.709, 1 = Rec.2020, 2 = P3 (DCI/Display).
     std::uint32_t source2020;
     std::uint32_t reserved;
     float inputRed;
@@ -442,6 +468,8 @@ FFF3FP_API std::int32_t FFF3FP_GetColorExtensionStatus() noexcept;
 FFF3FP_API const char* FFF3FP_GetColorExtensionStatusText(std::uint32_t state, std::uint32_t variant) noexcept;
 FFF3FP_API void FFF3FP_SetColorExtensionAuthorizationPrompt(int (__cdecl* callback)(char*, std::uint32_t)) noexcept;
 FFF3FP_API FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept;
+// Install the process-wide native log sink.
+FFF3FP_API void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context) noexcept;
 FFF3FP_API FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration,
     FFF3FPHandle* player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Open(FFF3FPHandle player, const char* localPathUtf8) noexcept;
@@ -473,6 +501,17 @@ FFF3FP_API FFFResult FFF3FP_SetExternalAudioOffset(FFF3FPHandle player,
 FFF3FP_API FFFResult FFF3FP_SetColorMode(FFF3FPHandle player, FFF3FPColorMode mode,
     float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits,
     std::uint32_t forceHdrOutput) noexcept;
+// Present pacing (VRR / G-SYNC / FreeSync low-latency path):
+// enableTearing = 1 selects Present(0, DXGI_PRESENT_ALLOW_TEARING) so a VRR display
+// can scan out on its own schedule; 0 keeps the default vsync-locked Present(1, 0).
+// Swap chains are created with the ALLOW_TEARING capability flag whenever the OS
+// reports support, so toggling does not require chain recreation. The request is a
+// preference: it is remembered across device/chain re-creation, and where the chain
+// was created without the ALLOW_TEARING flag (the OS reports no support) the renderer
+// simply keeps the vsync-locked path. Only enableTearing > 1 is rejected
+// (InvalidArgument); a successful call does not by itself prove tearing will happen.
+FFF3FP_API FFFResult FFF3FP_SetPresentConfig(FFF3FPHandle player,
+    std::uint32_t enableTearing) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetOutputWindow(FFF3FPHandle player, void* outputWindow) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetInteractiveMove(FFF3FPHandle player, std::uint32_t enabled) noexcept;
 // View transform for frame inspection: zoom scales the fitted video box
@@ -480,6 +519,13 @@ FFF3FP_API FFFResult FFF3FP_SetInteractiveMove(FFF3FPHandle player, std::uint32_
 // relative to the unzoomed box.
 FFF3FP_API FFFResult FFF3FP_SetViewTransform(FFF3FPHandle player,
     float zoom, float panX, float panY) noexcept;
+// enable == 0 keeps the behavior above. enable == 1 caps the fitted box
+// at the source's native size, which turns zoom into an absolute screen:video pixel
+// ratio (zoom 1 = pixel-exact 1:1 instead of fit-to-window, and larger windows show
+// the whole frame at native size with letterboxing). Returns NotSupported while a
+// disc is open, because that renderer owns its own geometry.
+FFF3FP_API FFFResult FFF3FP_SetFitLimitToNative(FFF3FPHandle player,
+    std::uint32_t enable) noexcept;
 // Equirectangular 360-degree video projection. yaw/pitch/fovY use degrees;
 // pitch is clamped by the renderer so the horizon never rolls or flips.
 FFF3FP_API FFFResult FFF3FP_Set360View(FFF3FPHandle player,
@@ -582,13 +628,13 @@ FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,
 // be interpreted as a 0x0 target.
 struct FFF3FPRenderTargetInfo {
     std::uint32_t size;
-    std::uint32_t version; // == 1
+    std::uint32_t version; // == 2
     std::uint32_t swapWidth;
     std::uint32_t swapHeight;
     std::uint32_t clientWidth;
     std::uint32_t clientHeight;
-    std::uint32_t destX;
-    std::uint32_t destY;
+    std::int32_t destX;
+    std::int32_t destY;
     std::uint32_t destWidth;
     std::uint32_t destHeight;
     std::uint32_t outputBitDepth;
@@ -596,6 +642,10 @@ struct FFF3FPRenderTargetInfo {
 };
 FFF3FP_API FFFResult FFF3FP_GetRenderTargetInfo(FFF3FPHandle player,
     FFF3FPRenderTargetInfo* info) noexcept;
+// Re-present the last cached frame on the presenter thread.
+// The host calls it after a child HWND resize so flips keep issuing while
+// ResizeBuffers stays on the presenter.
+FFF3FP_API FFFResult FFF3FP_Redraw(FFF3FPHandle player) noexcept;
 FFF3FP_API void FFF3FP_Destroy(FFF3FPHandle player) noexcept;
 
 FFF3FP_API FFFResult FFF3FP_OpenBitmapSubtitle(const char* localPathUtf8,

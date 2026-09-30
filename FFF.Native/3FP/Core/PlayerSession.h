@@ -65,9 +65,12 @@ public:
     FFFResult SetExternalAudioOffset(std::int64_t offset100ns) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
+    FFFResult SetPresentConfig(bool enableTearing) noexcept;
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
     FFFResult SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
+    // Cap the fit box at the source's native size (see PlayerVideoRenderer).
+    FFFResult SetFitLimitToNative(bool enable) noexcept;
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;
     FFFResult SetAudioExclusiveMode(bool exclusive) noexcept;
@@ -85,6 +88,8 @@ public:
     FFFResult GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept;
     // Render-target diagnostics
     FFFResult GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept;
+    // Re-present the last cached frame (host calls it after a child HWND resize).
+    FFFResult Redraw() noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
 

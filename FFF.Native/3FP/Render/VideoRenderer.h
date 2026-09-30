@@ -125,7 +125,17 @@ public:
     void SetDiscAspect(double aspect) noexcept { discAspect_.store(static_cast<float>(aspect)); }
     void SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
+    // Presentation policy for SDR sources, see FFF3FPConfiguration::sdrScRgbMode.
+    //   0 = Never, 1 = Auto (route SDR sources the SDR chain cannot carry through
+    //   the 16-bit scRGB chain when the display runs Advanced Color).
+    FFFResult SetSdrScRgbMode(std::uint32_t mode) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
+    // Cap the fit box at the source's native size (PlayerApi exports
+    // FFF3FP_SetFitLimitToNative). While enabled, zoom is the screen:video pixel
+    // ratio, so zoom == 1 renders the source 1:1 instead of fitted to the window.
+    FFFResult SetFitLimitToNative(bool enable) noexcept;
+    // Presentation policy toggle (PlayerApi exports FFF3FP_SetPresentConfig).
+    FFFResult SetPresentConfig(bool enableTearing) noexcept;
     // Render-target diagnostics for the managed API surface
     // (PlayerApi exports FFF3FP_GetRenderTargetInfo). Reports the current
     // swap-chain / client / video-destination sizes so the App can position
@@ -135,8 +145,10 @@ public:
         std::uint32_t swapHeight = 0;
         std::uint32_t clientWidth = 0;
         std::uint32_t clientHeight = 0;
-        std::uint32_t destX = 0;
-        std::uint32_t destY = 0;
+        // Signed origin: panning a magnified picture pushes the box's left/top edge
+        // outside the back buffer, so negative values are legitimate.
+        std::int32_t destX = 0;
+        std::int32_t destY = 0;
         std::uint32_t destWidth = 0;
         std::uint32_t destHeight = 0;
         std::uint32_t outputBitDepth = 0;
@@ -148,6 +160,15 @@ public:
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput = false) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
     void ConfigureHdrStream(const AVCodecParameters* parameters) noexcept;
+    // True when the source wants the scRGB presentation path: HDR transfer or
+    // widened primaries always do; a plain SDR source does so under the Auto
+    // SDR policy (sdrScRgbMode_ == 1) when its bit depth exceeds 8.
+    bool WantsScRgbPresentationPath(std::uint32_t bitDepth) const noexcept;
+    // Paper white actually used for the picture: the Windows SDR content
+    // brightness when an SDR source is presented on the scRGB chain (so it lands
+    // on the luminance DWM would have given the classic SDR chain), otherwise the
+    // configured value.
+    float EffectivePaperWhiteNits() const noexcept;
     FFFResult Render(const AVFrame* frame, bool limitToNativeSize = false,
         bool coverArt = false, bool prepareOnly = false) noexcept;
     FFFResult Redraw() noexcept;
@@ -239,9 +260,15 @@ private:
     std::uint32_t PreferredOutputBitDepth(std::uint32_t sourceBitDepth, bool hdr) noexcept;
     FFFResult EnsureSwapChain(std::uint32_t width, std::uint32_t height,
         std::uint32_t sourceBitDepth) noexcept;
+    // sourceBitDepth is the depth of the frame the caller is about to render, not the
+    // member: a scRGB rejection has to pick the classic-chain rung for *that* frame, and
+    // the member (sourceBitDepth_) is still 0 until EnsurePipeline sees the first one.
+    // Reading the member here silently demotes a 10-bit SDR source to BGRA8 on the very
+    // first chain and forces a second reconfigure one frame later.
     FFFResult CreateSwapChain(std::uint32_t width, std::uint32_t height,
-        bool hdr, std::uint32_t outputBits) noexcept;
-    FFFResult ReconfigureSwapChain(bool hdr, std::uint32_t outputBits) noexcept;
+        bool hdr, std::uint32_t outputBits, std::uint32_t sourceBitDepth) noexcept;
+    FFFResult ReconfigureSwapChain(bool hdr, std::uint32_t outputBits,
+        std::uint32_t sourceBitDepth) noexcept;
     FFFResult EnsurePipeline(std::uint32_t sourceWidth, std::uint32_t sourceHeight,
         std::uint32_t inputLayout, std::uint32_t bitDepth,
         std::uint32_t chromaWidthShift, std::uint32_t chromaHeightShift,
@@ -272,7 +299,8 @@ private:
     FFFResult AcquireBackBufferTarget(ID3D11Texture2D** buffer,
         ID3D11RenderTargetView** target) noexcept;
     struct CachedVideoSettings {
-        std::uint32_t colorMode = 0, transfer = 0, source2020 = 0, reserved = 0;
+        // gamut: 0 = Rec.709, 1 = Rec.2020, 2 = P3 (DCI/Display).
+        std::uint32_t colorMode = 0, transfer = 0, gamut = 0, reserved = 0;
         float sdrPeak = 100, hdrPeak = 100, paperWhite = 203, targetPeak = 1000;
         float sourceWidth = 0, sourceHeight = 0, outputWidth = 0, outputHeight = 0;
         std::uint32_t inputLayout = 0;
@@ -382,12 +410,23 @@ private:
     std::uint32_t swapWidth_;
     std::uint32_t swapHeight_;
     bool swapHdr_;
+    // Capability of the *current* swap chain: it was created with
+    // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING (so ResizeBuffers must repeat that flag, and
+    // Present may pass DXGI_PRESENT_ALLOW_TEARING). Written on the chain-creation path.
     bool swapAllowTearing_;
+    // Host's pacing preference (FFF3FP_SetPresentConfig). Kept apart from the capability
+    // above for two reasons: clobbering it would make ResizeBuffers pass a flag the chain
+    // was not created with (DXGI_ERROR_INVALID_CALL), and the capability is rewritten by
+    // every chain creation, so a merged variable would lose the request on re-creation.
+    // Atomic: written on the session worker thread, read on the presenter thread.
+    std::atomic<bool> tearingRequested_{ false };
     std::atomic<std::uint32_t> swapOutputBits_;
     // Last drawn video destination rect (diagnostics),
     // recorded by DrawCachedVideo after each successful shader draw.
-    std::atomic<std::uint32_t> lastDestX_{ 0 };
-    std::atomic<std::uint32_t> lastDestY_{ 0 };
+    // Origin is signed: panning a magnified picture pushes the box's left/top edge
+    // outside the back buffer (negative values are legitimate).
+    std::atomic<std::int32_t> lastDestX_{ 0 };
+    std::atomic<std::int32_t> lastDestY_{ 0 };
     std::atomic<std::uint32_t> lastDestWidth_{ 0 };
     std::atomic<std::uint32_t> lastDestHeight_{ 0 };
     std::uint32_t sourceWidth_;
@@ -427,11 +466,16 @@ private:
     float sdrPeakNits_;
     float hdrPeakNits_;
     float paperWhiteNits_;
+    // Windows "SDR content brightness" (AdvancedColorInfo::SdrWhiteLevelInNits),
+    // 0 when unreported. See EffectivePaperWhiteNits().
+    float sdrWhiteLevelNits_;
     // View transform (zoom + pan) applied when composing the video into the
     // swap chain. Normalized pan in [-1,1] relative to the unzoomed video box.
     std::atomic<float> viewZoomBits_;
     std::atomic<float> viewPanXBits_;
     std::atomic<float> viewPanYBits_;
+    // Opt-in native-size cap for the fit box; see SetFitLimitToNative().
+    std::atomic<bool> fitLimitToNative_{ false };
     std::atomic<std::uint32_t> projection360Enabled_;
     std::atomic<bool> view360RedrawPending_;
     std::atomic<float> view360YawBits_;
@@ -504,6 +548,10 @@ private:
     bool hdrSupportValid_;
     bool hdrSupported_;
     bool forceHdrOutput_;
+    // 0 = Never, 1 = Auto; see FFF3FPConfiguration::sdrScRgbMode. Plain member:
+    // it is written once during session construction and read on the render path
+    // under the same lock as the colour mode.
+    std::uint32_t sdrScRgbMode_;
     std::chrono::steady_clock::time_point hdrSupportCheckedAt_;
     bool hdrSwapChainRejected_;
     // Bounded caches are keyed by the immutable command content contract.  The
@@ -523,6 +571,11 @@ private:
     std::uint64_t timedTextSpriteCacheHits_;
     std::uint64_t timedTextSpriteCacheMisses_;
     mutable std::mutex errorMutex_;
+    // fallbackReason_ is written under deviceMutex_ on the render path and read
+    // through the public FallbackReason() from any thread, so it needs its own
+    // leaf mutex (same pattern as errorMutex_/lastError_) - a plain std::string
+    // assignment while the managed side copies it is a use-after-free window.
+    mutable std::mutex fallbackMutex_;
     std::string fallbackReason_;
     std::string lastError_;
 };
