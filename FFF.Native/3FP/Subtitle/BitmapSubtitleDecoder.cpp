@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "3FP/Core/MediaText.h"
 #include "3FP/Api/FFF.Player.Api.h"
 #include "Shared/Ffmpeg/SharedFileInput.h"
 
@@ -12,15 +13,11 @@ extern "C" {
 #include <climits>
 
 namespace {
+using PlayerMediaText::FfmpegError;
+using PlayerMediaText::CopyUtf8;
 constexpr std::uint32_t ApiVersion = 1;
 constexpr std::int64_t TicksPerSecond = 10'000'000;
 constexpr int MaximumPacketsPerRead = 4096;
-
-std::string FfmpegError(const int error) {
-    char buffer[AV_ERROR_MAX_STRING_SIZE]{};
-    return av_strerror(error, buffer, sizeof(buffer)) == 0
-        ? buffer : "FFmpeg error " + std::to_string(error);
-}
 
 class BitmapSubtitleDecoder final {
 public:
@@ -31,7 +28,6 @@ public:
 
     FFFResult Open(const char* path, const std::int32_t requestedStream) noexcept {
         if (path == nullptr || *path == '\0') return FFFResult::InvalidArgument;
-        try { path_ = path; } catch (...) { return FFFResult::NativeFailure; }
         sharedInput_ = SharedFileInput::Open(path, lastError_);
         if (sharedInput_ == nullptr) return FFFResult::NativeFailure;
         format_ = avformat_alloc_context();
@@ -253,7 +249,6 @@ private:
         pixels_.clear();
     }
 
-    std::string path_;
     std::string lastError_;
     AVFormatContext* format_{};
     std::unique_ptr<SharedFileInput> sharedInput_;
@@ -266,15 +261,6 @@ private:
     bool hasPending_{};
 };
 
-FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
-    std::uint32_t* requiredSize) noexcept {
-    const auto bytes = value.size() + 1;
-    if (bytes > UINT32_MAX) return FFFResult::NativeFailure;
-    if (requiredSize != nullptr) *requiredSize = static_cast<std::uint32_t>(bytes);
-    if (output == nullptr || outputSize < bytes) return FFFResult::BufferTooSmall;
-    std::memcpy(output, value.c_str(), bytes);
-    return FFFResult::Success;
-}
 }
 
 FFFResult FFF3FP_OpenBitmapSubtitle(const char* path, const std::int32_t stream,

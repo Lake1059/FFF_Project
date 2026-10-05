@@ -4,7 +4,7 @@ Imports System.Threading
 Imports System.Threading.Tasks
 
 Public Class Form1
-    Private ReadOnly DolbyVision授权回调 As 原生授权对话框回调 = AddressOf 显示DolbyVision授权对话框
+    Private ReadOnly 外部色彩授权回调 As 原生授权对话框回调 = AddressOf 显示外部色彩授权对话框
     Private 光盘控制器 As 播放器光盘控制器
     Private Const WM_ENTERSIZEMOVE As Integer = &H231
     Private Const WM_EXITSIZEMOVE As Integer = &H232
@@ -328,7 +328,7 @@ Public Class Form1
             Return
         End If
 
-        FFF3FP_SetColorExtensionAuthorizationPrompt(DolbyVision授权回调)
+        FFF3FP_SetColorExtensionAuthorizationPrompt(外部色彩授权回调)
 
         Dim 启动文件 = My.Application.取出待处理启动文件()
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
@@ -336,17 +336,17 @@ Public Class Form1
         If Not String.IsNullOrEmpty(请求文件) Then BeginInvoke(Sub() 打开外部文件(请求文件))
     End Sub
 
-    Private Function 显示DolbyVision授权对话框(代码UTF8 As IntPtr, 容量 As UInteger) As Integer
-        If Me.IsDisposed OrElse Not Me.IsHandleCreated OrElse 容量 < 9 Then Return 0
+    Private Function 显示外部色彩授权对话框(代码UTF8 As IntPtr, 容量 As UInteger) As Integer
+        If Me.IsDisposed OrElse Not Me.IsHandleCreated OrElse 代码UTF8 = IntPtr.Zero OrElse 容量 = 0 Then Return 0
         If Me.InvokeRequired Then
-            Return CInt(Me.Invoke(New Func(Of Integer)(Function() 显示DolbyVision授权对话框(代码UTF8, 容量))))
+            Return CInt(Me.Invoke(New Func(Of Integer)(Function() 显示外部色彩授权对话框(代码UTF8, 容量))))
         End If
-        Dim 代码 = LakeUI.ExInputBox(Me,
-            "请输入杜比视界测试扩展的 8 位授权码。授权有效期为 30 天。",
-            "杜比视界测试扩展授权")
+        Dim 正文指针 = FFF3FP_GetColorExtensionStatusText(扩展授权文本用途, 0UI)
+        Dim 标题指针 = FFF3FP_GetColorExtensionStatusText(扩展授权文本用途, 1UI)
+        If 正文指针 = IntPtr.Zero OrElse 标题指针 = IntPtr.Zero Then Return 0
+        Dim 代码 = LakeUI.ExInputBox(Me, Marshal.PtrToStringUTF8(正文指针), Marshal.PtrToStringUTF8(标题指针))
         If String.IsNullOrWhiteSpace(代码) Then Return 0
         代码 = 代码.Trim()
-        If 代码.Length <> 8 OrElse Not 代码.All(Function(character) Char.IsDigit(character)) Then Return 0
         Dim utf8 = System.Text.Encoding.UTF8.GetBytes(代码 & ChrW(0))
         If utf8.Length > 容量 Then Return 0
         Marshal.Copy(utf8, 0, 代码UTF8, utf8.Length)
@@ -555,7 +555,8 @@ Public Class Form1
     <CodeAnalysis.SuppressMessage("Performance", "CA1861:不要将常量数组作为参数", Justification:="<挂起>")>
     Private Sub 播放控制器_HDR输出状态已确认(sender As Object, e As 播放器HDR状态事件参数)
         If 正在关闭 Then Return
-        信息图层呈现器?.显示操作信息(e.说明, &HFF69DF8BUI, HDR操作提示键)
+        信息图层呈现器?.显示操作信息(e.说明, &HFF69DF8BUI, HDR操作提示键,
+                            AddressOf 播放控制器.读取HDR操作提示)
         If Not e.可以强制开启 OrElse 正在显示HDR强制确认 OrElse 已跳过HDR强制确认 Then Return
 
         正在显示HDR强制确认 = True

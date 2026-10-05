@@ -173,6 +173,7 @@
     <ClInclude Include="3FP\Disc\DiscInput.h" />
     <ClInclude Include="3FP\Audio\WasapiRenderer.h" />
     <ClInclude Include="3FP\Core\PlayerSession.h" />
+    <ClInclude Include="3FP\Core\MediaText.h" />
     <ClInclude Include="3FP\Subtitle\SubtitleProbe.h" />
     <ClInclude Include="3FP\Hdr\HdrProcessor.h" />
     <ClInclude Include="3FP\Render\ShaderBytecode.h" />

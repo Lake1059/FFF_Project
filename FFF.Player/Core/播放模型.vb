@@ -566,6 +566,10 @@ Public NotInheritable Class 媒体流信息
     Public Property 解码输出位深度 As Integer
     <JsonPropertyName("hardwareAcceleration")>
     Public Property 硬件加速 As String = String.Empty
+    <JsonPropertyName("enhancementDecoderPixelFormat")>
+    Public Property 增强层解码像素格式 As String = String.Empty
+    <JsonPropertyName("enhancementHardwareAcceleration")>
+    Public Property 增强层硬件加速 As String = String.Empty
     <JsonPropertyName("colorRange")>
     Public Property 色彩范围 As Integer
     <JsonPropertyName("colorSpace")>

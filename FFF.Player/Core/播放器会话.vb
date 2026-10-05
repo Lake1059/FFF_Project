@@ -36,9 +36,7 @@ Public NotInheritable Class 播放器会话
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
         配置.验证()
-        ' 光盘导航接口及此前的渲染合同从 API 15 起才完整；16 是 FFF3FPConfiguration
-        ' 增加 sdrScRgbMode 字段带来的递增（内核按严格相等校验配置版本）。这里必须在创建
-        ' 会话前失败，不能让输出目录中的旧 DLL 继续播放出错误颜色。
+        ' 配置结构与内核按 API 版本严格匹配。
         If 播放器原生接口.FFF3FP_GetApiVersion() <> 16UI Then Throw New InvalidOperationException("FFF.Native 的 3FP API 版本不兼容。")
         同步上下文 = 配置.事件同步上下文
         Dim 状态 = New 回调状态()
@@ -46,8 +44,7 @@ Public NotInheritable Class 播放器会话
         Dim 端点指针 = IntPtr.Zero
         Try
             If Not String.IsNullOrEmpty(配置.音频端点标识) Then 端点指针 = Marshal.StringToCoTaskMemUTF8(配置.音频端点标识)
-            ' 首选适配器索引 -1 = 保持内核内置策略（按输出窗口所在显示器选卡）。
-            ' 0 是合法的适配器索引，不是"未设置"，因此必须显式赋值。
+            ' -1 按窗口所在显示器选卡；0 是合法适配器索引。
             Dim 原生配置 As New 原生播放器配置 With {
                 .大小 = 原生播放器配置大小, .版本 = 16UI,
                 .输出窗口 = 配置.输出窗口句柄, .解码器 = CUInt(配置.解码器),
@@ -404,30 +401,29 @@ Public NotInheritable Class 播放器会话
 
     Public ReadOnly Property 当前定时文字状态 As 定时文字状态
         Get
-            Dim 值 As New 原生定时文字状态 With {
-                .大小 = 原生定时文字状态大小, .版本 = 1UI}
-            检查结果(播放器原生接口.FFF3FP_GetTimedTextStatus(取得句柄(), 值))
-            Return New 定时文字状态(值)
+            Return 读取定时文字状态(AddressOf 播放器原生接口.FFF3FP_GetTimedTextStatus)
         End Get
     End Property
 
     Public ReadOnly Property 当前弹幕状态 As 定时文字状态
         Get
-            Dim 值 As New 原生定时文字状态 With {
-                .大小 = 原生定时文字状态大小, .版本 = 1UI}
-            检查结果(播放器原生接口.FFF3FP_GetDanmakuStatus(取得句柄(), 值))
-            Return New 定时文字状态(值)
+            Return 读取定时文字状态(AddressOf 播放器原生接口.FFF3FP_GetDanmakuStatus)
         End Get
     End Property
 
     Public ReadOnly Property 当前歌词状态 As 定时文字状态
         Get
-            Dim 值 As New 原生定时文字状态 With {
-                .大小 = 原生定时文字状态大小, .版本 = 1UI}
-            检查结果(播放器原生接口.FFF3FP_GetLyricsStatus(取得句柄(), 值))
-            Return New 定时文字状态(值)
+            Return 读取定时文字状态(AddressOf 播放器原生接口.FFF3FP_GetLyricsStatus)
         End Get
     End Property
+
+    Private Delegate Function 定时文字状态调用(句柄 As 播放器原生句柄, ByRef 值 As 原生定时文字状态) As 原生播放器结果
+
+    Private Function 读取定时文字状态(调用 As 定时文字状态调用) As 定时文字状态
+        Dim 值 As New 原生定时文字状态 With {.大小 = 原生定时文字状态大小, .版本 = 1UI}
+        检查结果(调用(取得句柄(), 值))
+        Return New 定时文字状态(值)
+    End Function
 
     Public ReadOnly Property 当前快照 As 播放器快照
         Get
@@ -458,37 +454,38 @@ Public NotInheritable Class 播放器会话
     End Function
 
     Public Function 读取音频峰值() As Single()
-        Dim 值 As New 原生音频峰值 With {
-            .大小 = 原生音频峰值大小, .版本 = 2UI, .输入峰值 = New Single(7) {}}
-        检查结果(播放器原生接口.FFF3FP_GetAudioPeakLevels(取得句柄(), 值))
+        Dim 值 = 读取原生音频峰值()
         Dim 数量 = Math.Min(CInt(值.声道数), 8)
-        If 数量 = 0 Then Return Array.Empty(Of Single)()
-        Dim 结果(数量 - 1) As Single
-        结果(0) = 值.峰值1
-        If 数量 > 1 Then 结果(1) = 值.峰值2
-        If 数量 > 2 Then 结果(2) = 值.峰值3
-        If 数量 > 3 Then 结果(3) = 值.峰值4
-        If 数量 > 4 Then 结果(4) = 值.峰值5
-        If 数量 > 5 Then 结果(5) = 值.峰值6
-        If 数量 > 6 Then 结果(6) = 值.峰值7
-        If 数量 > 7 Then 结果(7) = 值.峰值8
-        Return 结果
+        Return {值.峰值1, 值.峰值2, 值.峰值3, 值.峰值4, 值.峰值5, 值.峰值6, 值.峰值7, 值.峰值8}.Take(数量).ToArray()
     End Function
 
     Public Function 读取输入音频峰值() As Single()
+        Dim 值 = 读取原生音频峰值()
+        Dim 数量 = Math.Min(CInt(值.输入声道数), 8)
+        Return 值.输入峰值.Take(数量).ToArray()
+    End Function
+
+    Private Function 读取原生音频峰值() As 原生音频峰值
         Dim 值 As New 原生音频峰值 With {
             .大小 = 原生音频峰值大小, .版本 = 2UI, .输入峰值 = New Single(7) {}}
         检查结果(播放器原生接口.FFF3FP_GetAudioPeakLevels(取得句柄(), 值))
-        Dim 数量 = Math.Min(CInt(值.输入声道数), 8)
-        If 数量 = 0 Then Return Array.Empty(Of Single)()
-        Return 值.输入峰值.Take(数量).ToArray()
+        Return 值
     End Function
 
     Public ReadOnly Property 当前媒体信息 As 媒体信息
         Get
             Dim JSON = 读取原生文本(AddressOf 播放器原生接口.FFF3FP_GetMediaInfo)
             If String.IsNullOrWhiteSpace(JSON) Then Return Nothing
-            Return JsonSerializer.Deserialize(Of 媒体信息)(JSON)
+            Dim 信息 = JsonSerializer.Deserialize(Of 媒体信息)(JSON)
+            Dim 快照 = 当前快照
+            Dim 当前视频 = 信息?.流.FirstOrDefault(Function(流) 流.索引 = 快照.当前视频流 AndAlso 流.类型 = "video")
+            If 当前视频 IsNot Nothing Then
+                ' 原生媒体 JSON 缓存静态信息；逐帧处理结果以实时快照为准。
+                当前视频.外部RPU扩展已启用 = 快照.HDR处理路径 = HDR处理路径.外部RPU处理
+                当前视频.动态HDR元数据 = 快照.动态HDR元数据有效
+                当前视频.HDR回退 = 快照.HDR回退有效
+            End If
+            Return 信息
         End Get
     End Property
 

@@ -13,6 +13,7 @@ extern "C" {
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <type_traits>
 
 using Microsoft::WRL::ComPtr;
 
@@ -464,28 +465,20 @@ void PlayerWasapiRenderer::UpdatePeakLevels(const std::uint8_t* const samples,
     const auto channels = std::min<std::uint32_t>(outputChannels_, PlayerAudioRuntimeState::MaximumChannels);
     std::array<float, PlayerAudioRuntimeState::MaximumChannels> peaks{};
     const auto sampleCount = static_cast<std::size_t>(frames) * outputChannels_;
-    if (outputFloat_) {
-        const auto* values = reinterpret_cast<const float*>(samples);
+    const auto accumulate = [&](const auto* values, const float scale) {
         for (std::size_t index = 0; index < sampleCount; ++index) {
-            const auto value = std::isfinite(values[index]) ? std::abs(values[index]) : 0.0f;
-            const auto channel = static_cast<std::uint32_t>(index % outputChannels_);
-            if (channel < channels) peaks[channel] = std::max(peaks[channel], value);
-        }
-    } else if (outputBitsPerSample_ == 16) {
-        const auto* values = reinterpret_cast<const std::int16_t*>(samples);
-        for (std::size_t index = 0; index < sampleCount; ++index) {
-            const auto magnitude = static_cast<float>(std::abs(static_cast<std::int32_t>(values[index]))) / 32768.0f;
+            float magnitude;
+            if constexpr (std::is_floating_point_v<std::remove_cvref_t<decltype(values[index])>>)
+                magnitude = std::isfinite(values[index]) ? std::abs(values[index]) : 0.0f;
+            else
+                magnitude = static_cast<float>(std::abs(static_cast<std::int64_t>(values[index]))) / scale;
             const auto channel = static_cast<std::uint32_t>(index % outputChannels_);
             if (channel < channels) peaks[channel] = std::max(peaks[channel], magnitude);
         }
-    } else {
-        const auto* values = reinterpret_cast<const std::int32_t*>(samples);
-        for (std::size_t index = 0; index < sampleCount; ++index) {
-            const auto magnitude = static_cast<float>(std::abs(static_cast<std::int64_t>(values[index]))) / 2147483648.0f;
-            const auto channel = static_cast<std::uint32_t>(index % outputChannels_);
-            if (channel < channels) peaks[channel] = std::max(peaks[channel], magnitude);
-        }
-    }
+    };
+    if (outputFloat_) accumulate(reinterpret_cast<const float*>(samples), 1.0f);
+    else if (outputBitsPerSample_ == 16) accumulate(reinterpret_cast<const std::int16_t*>(samples), 32768.0f);
+    else accumulate(reinterpret_cast<const std::int32_t*>(samples), 2147483648.0f);
     for (std::uint32_t channel = 0; channel < channels; ++channel)
         runtimeState_->values[channel].store(std::clamp(peaks[channel], 0.0f, 1.0f), std::memory_order_relaxed);
 }

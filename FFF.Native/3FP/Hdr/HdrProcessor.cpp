@@ -376,35 +376,24 @@ void HdrProcessor::SetExtensionAvailability(const bool available) noexcept {
 
 void HdrProcessor::SetExtensionProcessing(const float sourcePeakNits, const bool active) noexcept {
     std::lock_guard lock(mutex_);
-    streamState_.externalExtensionActive = active;
-    frameState_.externalExtensionActive = active;
-    if (!active) {
-        if (frameState_.processingPath == FFF3FPHdrProcessingPath::ExternalDynamic)
-            frameState_.dynamicMetadata = false;
-        if (streamState_.processingPath == FFF3FPHdrProcessingPath::ExternalDynamic)
-            streamState_.dynamicMetadata = false;
-        if (frameState_.format == FFF3FPHdrFormat::DolbyVision &&
-            frameState_.processingPath == FFF3FPHdrProcessingPath::ExternalDynamic) {
-            frameState_.processingPath = frameState_.hasEnhancementLayer &&
-                frameState_.enhancementLayer == FFF3FPDolbyVisionEnhancementLayer::Fel
-                ? FFF3FPHdrProcessingPath::DolbyVisionFelFallback
-                : FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback;
-            frameState_.fallback = true;
+    for (auto* state : {&streamState_, &frameState_}) {
+        state->externalExtensionActive = active;
+        if (active) {
+            state->processingPath = FFF3FPHdrProcessingPath::ExternalDynamic;
+            state->dynamicMetadata = true;
+            state->fallback = false;
+        } else if (state->processingPath == FFF3FPHdrProcessingPath::ExternalDynamic) {
+            state->dynamicMetadata = false;
+            if (state->format == FFF3FPHdrFormat::DolbyVision) {
+                const bool frameFel = state == &frameState_ && state->hasEnhancementLayer &&
+                    state->enhancementLayer == FFF3FPDolbyVisionEnhancementLayer::Fel;
+                state->processingPath = frameFel ? FFF3FPHdrProcessingPath::DolbyVisionFelFallback
+                    : FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback;
+                state->fallback = true;
+            }
         }
-        if (streamState_.format == FFF3FPHdrFormat::DolbyVision &&
-            streamState_.processingPath == FFF3FPHdrProcessingPath::ExternalDynamic) {
-            streamState_.processingPath = FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback;
-            streamState_.fallback = true;
-        }
-        return;
     }
-    frameState_.processingPath = FFF3FPHdrProcessingPath::ExternalDynamic;
-    frameState_.dynamicMetadata = true;
-    frameState_.fallback = false;
-    streamState_.processingPath = FFF3FPHdrProcessingPath::ExternalDynamic;
-    streamState_.dynamicMetadata = true;
-    streamState_.fallback = false;
-    if (std::isfinite(sourcePeakNits) && sourcePeakNits > 0.0f)
+    if (active && std::isfinite(sourcePeakNits) && sourcePeakNits > 0.0f)
         frameState_.sourcePeakNits = std::clamp(sourcePeakNits, 1.0f, 10000.0f);
 }
 

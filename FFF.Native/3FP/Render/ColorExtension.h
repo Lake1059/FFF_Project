@@ -31,6 +31,10 @@ inline const FFFColorExtensionApi* GetColorExtension() noexcept {
             FreeLibrary(module);
             return FFFColorExtensionApi{};
         }
+        if (!result.enhancementShaderBytecode || !result.enhancementShaderBytecodeSize ||
+            result.enhancementShaderBytecodeSize > FFFColorExtensionBytecodeLimit) {
+            FreeLibrary(module); return FFFColorExtensionApi{};
+        }
         return result;
     }();
     return api.prepare ? &api : nullptr;

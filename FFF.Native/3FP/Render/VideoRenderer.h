@@ -281,6 +281,11 @@ private:
     FFFResult DrawWithShader(ID3D11RenderTargetView* target, float x, float y,
         float width, float height, std::uint32_t effect = 0,
         ID3D11ShaderResourceView* const* sourceViews = nullptr) noexcept;
+    bool UploadExtensionEnhancement(const AVFrame* frame) noexcept;
+    bool ReconstructExtensionEnhancement(std::uint32_t width, std::uint32_t height,
+        std::uint32_t layout, float sampleScale) noexcept;
+    void ReleaseExtensionEnhancement() noexcept;
+    void ReleaseExtensionReconstruction() noexcept;
     FFFResult PrepareScaledVideo(std::uint32_t outputWidth, std::uint32_t outputHeight,
         ID3D11ShaderResourceView** views) noexcept;
     FFFResult EnsurePlaneScaleChain(std::size_t plane, std::uint32_t sourceWidth,
@@ -354,6 +359,19 @@ private:
     ID3D11PixelShader* pixelShader_;
     ID3D11PixelShader* extensionShader_ = nullptr;
     ID3D11Buffer* extensionConstants_ = nullptr;
+    ID3D11Texture2D* extensionEnhancementTextures_[3]{};
+    ID3D11ShaderResourceView* extensionEnhancementViews_[3]{};
+    std::uint32_t extensionEnhancementWidth_ = 0, extensionEnhancementHeight_ = 0;
+    bool extensionEnhancementSemiplanar_ = false;
+    ID3D11ComputeShader* extensionEnhancementShader_ = nullptr;
+    ID3D11Buffer* extensionEnhancementConstants_ = nullptr;
+    ID3D11Texture2D* extensionReconstructedTextures_[3]{};
+    ID3D11ShaderResourceView* extensionReconstructedViews_[3]{};
+    ID3D11UnorderedAccessView* extensionReconstructedOutputs_[3]{};
+    std::uint32_t extensionReconstructedWidth_ = 0, extensionReconstructedHeight_ = 0;
+    bool extensionReconstructed_ = false;
+    std::uint32_t cachedOriginalInputLayout_ = 0;
+    float cachedOriginalSampleScale_ = 1;
     bool extensionAttempted_ = false;
     bool extensionEligible_ = false;
     ID3D11PixelShader* coverBackdropPixelShader_;

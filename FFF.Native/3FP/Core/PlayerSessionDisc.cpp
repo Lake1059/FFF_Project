@@ -33,8 +33,7 @@ void PlayerSession::PublishDisc() {
     if (selectedAudio >= 0 && selectedAudio != audioStream_ && !disc_->RestartRequired()) {
         AVCodecContext* replacement = nullptr;
         if (OpenDecoder(format_, selectedAudio, false, &replacement) == FFFResult::Success) {
-            for (auto*& packet : pendingAudioPackets_) av_packet_free(&packet);
-            pendingAudioPackets_.clear(); pendingAudioPacketBytes_ = 0;
+            ClearPacketQueue(pendingAudioPackets_, pendingAudioPacketBytes_);
             avcodec_free_context(&audioDecoder_); audioDecoder_ = replacement;
             audioStream_ = selectedAudio; snapshot_.selectedAudioStream = audioStream_;
             RebuildMediaInfo();
@@ -102,7 +101,6 @@ bool PlayerSession::ReopenDiscDemux() {
     snapshot_.frameIndex = -1; snapshot_.framePts = AV_NOPTS_VALUE;
     ++snapshot_.timelineGeneration;
     framePtsIndex_.clear(); framePtsIndexBase_ = 0;
-    lastQueuedVideoPts_ = AV_NOPTS_VALUE;
     nextUntimedVideoPosition100ns_ = discPositionOffset_;
     seekTarget100ns_ = seekTargetFrame_ = -1;
     lastVideoFrameDuration100ns_ = 0;
@@ -133,15 +131,13 @@ bool PlayerSession::HoldDisc() {
     }
     if (!pendingAudioPackets_.empty()) {
         if (audioRenderer_ && audioRenderer_->Buffered100ns() > 1200000) { PumpVideoPresentation(); Sleep(1); return true; }
-        auto* packet = pendingAudioPackets_.front(); pendingAudioPackets_.pop_front();
-        pendingAudioPacketBytes_ -= static_cast<size_t>(std::max(0, packet->size));
-        DecodePacket(audioDecoder_, packet, false, format_); av_packet_free(&packet); return true;
+        DecodePendingPacket(false);
+        return true;
     }
     if (!pendingVideoPackets_.empty()) {
         if (VideoQueueSaturated()) { PumpVideoPresentation(); Sleep(1); return true; }
-        auto* packet = pendingVideoPackets_.front(); pendingVideoPackets_.pop_front();
-        pendingVideoPacketBytes_ -= static_cast<size_t>(std::max(0, packet->size));
-        DecodePacket(videoDecoder_, packet, true, format_); av_packet_free(&packet); return true;
+        DecodePendingPacket(true);
+        return true;
     }
     if (!draining_) {
         draining_ = true;

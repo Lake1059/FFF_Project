@@ -417,6 +417,8 @@ Friend Module 播放器原生接口
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Friend Delegate Function 原生授权对话框回调(代码UTF8 As IntPtr, 容量 As UInteger) As Integer
 
+    Friend Const 扩展授权文本用途 As UInteger = 3UI
+
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetApiVersion() As UInteger
     End Function

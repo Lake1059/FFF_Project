@@ -148,6 +148,7 @@ private:
     FFFResult OpenHardwareVideoDecoder(AVFormatContext* format, std::int32_t streamIndex,
         AVCodecContext** decoder, std::string* failureReason = nullptr) noexcept;
     FFFResult FallbackToSoftwareVideoDecoder(const char* reason) noexcept;
+    FFFResult CompleteHardwareFallback(const char* failureMessage) noexcept;
     // Presents the first frame while the session stays stopped. Used for a still
     // picture and for an animated one, both of which must show a frame without
     // playback running; rewinds afterwards so play starts from the beginning.
@@ -163,11 +164,15 @@ private:
     void DecodeDolbyVisionEnhancementPacket(const AVPacket* packet) noexcept;
     void DrainDolbyVisionEnhancementDecoder() noexcept;
     void ClearDolbyVisionEnhancementFrames() noexcept;
+    void ResetDolbyVisionEnhancementDecoder() noexcept;
+    void FlushDolbyVisionEnhancementDecoder() noexcept;
     void AttachDolbyVisionEnhancementFrame(AVFrame* base) noexcept;
     bool PumpVideoPresentation() noexcept;
     void QueueVideoFrame(AVFrame* frame) noexcept;
     void ClearVideoQueue() noexcept;
     void ClearPendingPackets() noexcept;
+    static void ClearPacketQueue(std::deque<AVPacket*>& queue, std::size_t& bytes) noexcept;
+    void DecodePendingPacket(bool video) noexcept;
     void NormalizeVideoFrameTimestamp(AVFrame* frame) noexcept;
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
@@ -215,18 +220,13 @@ private:
     AVFormatContext* format_;
     std::unique_ptr<DiscInput> disc_;
     std::atomic<bool> discCancel_{false};
-    // Cross-thread mirror of "disc_ is live". disc_ is assigned in DoOpen() and
-    // reset in DoClose(), both on the worker thread, while FFF3FP_SetViewTransform
-    // runs on the caller's thread; reading the unique_ptr there is a data race
-    // (and a use-after-free window once the worker resets it). This flag is only
-    // ever tested for truth, never used to dereference disc_.
+    // Caller-thread disc checks use this atomic mirror, never the worker-owned disc_.
     std::atomic<bool> discOpened_{false};
     std::string discStatus_ = "{}";
     std::uint64_t discGraphicsSequence_ = 0;
     std::int64_t discPositionOffset_ = 0;
     bool discDrained_ = false;
     unsigned discInvalidPackets_ = 0;
-    std::int64_t lastQueuedVideoPts_ = AV_NOPTS_VALUE;
     std::unique_ptr<SharedFileInput> formatIo_;
     // These objects belong exclusively to the session worker.  FFmpeg permits
     // reuse after av_packet_unref/av_frame_unref, avoiding per-packet heap churn
@@ -241,6 +241,8 @@ private:
     AVBSFContext* dolbyVisionEnhancementBsf_;
     AVCodecContext* dolbyVisionEnhancementDecoder_;
     AVFrame* dolbyVisionEnhancementDecodeFrame_;
+    bool dolbyVisionEnhancementSoftwareOnly_ = false;
+    bool dolbyVisionEnhancementRecoveryPending_ = false;
     std::map<std::int64_t, AVFrame*> dolbyVisionEnhancementFrames_;
     AVCodecContext* audioDecoder_;
     std::int32_t videoStream_;
@@ -322,12 +324,7 @@ private:
     // not a still image, but it is still a picture: it must show its first frame
     // while stopped and it must report the animated flag.
     bool animatedImage_;
-    // Whether finishing one pass must be answered with DoSeek(0) from the
-    // session instead of the demuxer's own wrap-around. True for APNG (whose
-    // demuxer drops a frame at every wrap) and for timed AVIF/HEIC sequences;
-    // false for GIF/WebP/JXL, which loop inside the demuxer and never reach the
-    // end of the file. Set once the streams are known (DoOpen) and on every
-    // seek, so it must be reset when the session is closed/reused.
+    // APNG and AVIF/HEIC rewind per pass; reset this policy when reusing a session.
     bool sessionWrapLoop_;
     // Consecutive failed wrap-around seeks. A seek that is refused while the
     // demuxer is still mid read-ahead must not turn a looping picture into a

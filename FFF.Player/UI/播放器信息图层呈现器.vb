@@ -10,13 +10,16 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Implements IDisposable
 
     Private NotInheritable Class 操作消息
-        Friend Sub New(文本值 As String, 颜色值 As UInteger, 到期时钟值 As Long, 操作键值 As String)
+        Friend Sub New(文本值 As String, 颜色值 As UInteger, 到期时钟值 As Long, 操作键值 As String,
+                       文本提供器值 As Func(Of String))
             文本 = 文本值 : 颜色 = 颜色值 : 到期时钟 = 到期时钟值 : 操作键 = 操作键值
+            文本提供器 = 文本提供器值
         End Sub
         Friend ReadOnly 文本 As String
         Friend ReadOnly 颜色 As UInteger
         Friend ReadOnly 到期时钟 As Long
         Friend ReadOnly 操作键 As String
+        Friend ReadOnly 文本提供器 As Func(Of String)
     End Class
 
     Private NotInheritable Class 文本段
@@ -76,6 +79,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private 上次帧率采样时钟 As Long
     Private 最近实际帧率 As Double
     Private 最近实时丢帧数 As ULong
+    Private 上次播放位置 As TimeSpan
+    Private 上次时间轴代次 As ULong
+    Private 最近媒体速度 As Double = 1
     Private 已释放 As Boolean
 
     Friend Sub New(画面 As 播放器画面控件,
@@ -136,7 +142,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Sub
 
     Friend Sub 显示操作信息(文本 As String, Optional 颜色 As UInteger = 黄色,
-                          Optional 操作键 As String = Nothing)
+                          Optional 操作键 As String = Nothing,
+                          Optional 文本提供器 As Func(Of String) = Nothing)
         If 已释放 OrElse String.IsNullOrWhiteSpace(文本) Then Return
         文本 = 文本.Trim()
         操作键 = If(String.IsNullOrWhiteSpace(操作键), Nothing, 操作键.Trim())
@@ -147,7 +154,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
                 x.操作键 Is Nothing AndAlso x.颜色 = 颜色 AndAlso
                     String.Equals(x.文本, 文本, StringComparison.Ordinal)))
         If 旧索引 >= 0 Then 操作消息列表.RemoveAt(旧索引)
-        操作消息列表.Add(New 操作消息(文本, 颜色, 到期, 操作键))
+        操作消息列表.Add(New 操作消息(文本, 颜色, 到期, 操作键, 文本提供器))
         While 操作消息列表.Count > 3
             操作消息列表.RemoveAt(0)
         End While
@@ -303,7 +310,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim y = 画布.Height - 边距
         For index = 操作消息列表.Count - 1 To 0 Step -1
             Dim 消息 = 操作消息列表(index)
-            Dim 文本 = 拟合文本(图形, 消息.文本, 普通字体, 最大文本宽度)
+            Dim 当前文本 = If(消息.文本提供器 Is Nothing, 消息.文本, 安全获取(消息.文本提供器))
+            If String.IsNullOrWhiteSpace(当前文本) Then Continue For
+            Dim 文本 = 拟合文本(图形, 当前文本, 普通字体, 最大文本宽度)
             Dim 文本宽度 = 测量文本(图形, 文本, 普通字体)
             Dim 背景高度 = 行高 + 垂直内边距 * 2.0F
             ' Short operation messages keep a compact background; long text is
@@ -402,12 +411,18 @@ Friend NotInheritable Class 播放器信息图层呈现器
             上次视频帧次数 = If(快照 Is Nothing, 0UL, 快照.已呈现视频帧数)
             上次总丢帧数 = If(快照 Is Nothing, 0UL, 计算总丢帧数(快照))
             上次帧率采样时钟 = 当前时钟 : 最近实际帧率 = 0 : 最近实时丢帧数 = 0
+            上次播放位置 = If(快照 Is Nothing, TimeSpan.Zero, 快照.播放位置)
+            上次时间轴代次 = If(快照 Is Nothing, 0UL, 快照.时间轴代次)
+            最近媒体速度 = 1
             Return
         End If
-        If 上次帧率采样时钟 = 0 Then
+        If 上次帧率采样时钟 = 0 OrElse 快照.时间轴代次 <> 上次时间轴代次 Then
             上次视频帧次数 = 快照.已呈现视频帧数
             上次总丢帧数 = 计算总丢帧数(快照)
             上次帧率采样时钟 = 当前时钟
+            上次播放位置 = 快照.播放位置
+            上次时间轴代次 = 快照.时间轴代次
+            最近媒体速度 = 1
             Return
         End If
         Dim 已过秒数 = CDbl(当前时钟 - 上次帧率采样时钟) / Stopwatch.Frequency
@@ -416,6 +431,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
             (快照.已呈现视频帧数 - 上次视频帧次数) / 已过秒数, 0)
         Dim 总丢帧 = 计算总丢帧数(快照)
         最近实时丢帧数 = If(总丢帧 >= 上次总丢帧数, 总丢帧 - 上次总丢帧数, 0UL)
+        最近媒体速度 = Math.Max(0, (快照.播放位置 - 上次播放位置).TotalSeconds / 已过秒数)
+        上次播放位置 = 快照.播放位置
         上次视频帧次数 = 快照.已呈现视频帧数
         上次总丢帧数 = 总丢帧
         上次帧率采样时钟 = 当前时钟
@@ -459,16 +476,18 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 杜比 = If(快照.HDR规格 = HDR格式.杜比视界 AndAlso 快照.杜比视界配置档次 > 0,
             $"P{快照.杜比视界配置档次} L{快照.杜比视界级别} {杜比层文本(快照)}", String.Empty)
         Dim 动态 As String
-        If 快照.HDR处理路径 = HDR处理路径.外部RPU处理 OrElse 流.外部RPU扩展已启用 Then
-            动态 = "测试扩展使用 RPU 处理画面"
+        If 快照.HDR处理路径 = HDR处理路径.外部RPU处理 Then
+            动态 = "测试扩展使用逐帧 RPU 处理画面"
         ElseIf 流.外部RPU扩展可用 Then
             动态 = "测试扩展已加载，当前帧未处理"
         Else
             动态 = If(快照.动态HDR元数据有效, "动态元数据已用于处理", String.Empty)
         End If
-        Dim 亮度 = If(快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
-                       快照.HDR有效目标峰值尼特 > 0,
-            $"源峰值 {快照.源峰值尼特:0}尼特   显示目标 {快照.HDR有效目标峰值尼特:0}尼特", String.Empty)
+        Dim 亮度 = If(快照.源峰值尼特 > 0,
+            $"源峰值 {快照.源峰值尼特:0}尼特", String.Empty)
+        If 快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso 快照.HDR有效目标峰值尼特 > 0 Then
+            亮度 = 合并字段(亮度, $"显示目标 {快照.HDR有效目标峰值尼特:0}尼特")
+        End If
         Dim 回退 = If(快照.HDR回退有效,
             If(快照.杜比视界增强层类型 = 杜比视界增强层类型.FEL,
                "基础层兼容输出（未使用 FEL）", "基础层兼容输出"), String.Empty)
@@ -497,7 +516,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
             If(最近实际帧率 > 0, $"帧率 {最近实际帧率:0.00}fps", String.Empty),
             $"缓冲池 {快照.视频队列帧数}帧",
             $"实时丢帧 {最近实时丢帧数}",
-            $"总丢帧 {计算总丢帧数(快照)}")
+            $"总丢帧 {计算总丢帧数(快照)}",
+            If(最近媒体速度 < 0.95, $"媒体时钟 {最近媒体速度:0.00}x", String.Empty))
     End Function
 
     Private Shared Function 计算总丢帧数(快照 As 播放器快照) As ULong
@@ -527,7 +547,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
             If(采样率 > 0, $"采样 {采样率}Hz", String.Empty),
             If(位深 > 0, $"位深 {位深}bit", String.Empty),
             If(声道 > 0, $"声道数 {声道}", String.Empty),
-            $"缓冲区 {快照.音频缓冲时长.TotalMilliseconds:0}ms")
+            $"缓冲区 {快照.音频缓冲时长.TotalMilliseconds:0}ms",
+            $"欠载 {快照.音频欠载次数}")
     End Function
 
     Private Shared Function 图层延迟(状态 As 定时文字状态) As String

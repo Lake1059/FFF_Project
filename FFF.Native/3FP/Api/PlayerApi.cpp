@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "3FP/Core/MediaText.h"
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Render/VideoRenderer.h"
@@ -9,24 +10,14 @@
 #include <atomic>
 
 namespace {
-// Bumped 14 -> 15 because FFF3FPConfiguration gained the preferredAdapterIndex
-// field. FFF3FP_Create rejects a mismatched version outright, so
-// every consumer of this header MUST be rebuilt and bumped in lockstep.
-// Bumped 15 -> 16 because FFF3FPConfiguration gained the sdrScRgbMode field.
+using PlayerMediaText::CopyUtf8;
+// Configuration layout and version must match the public header exactly.
 constexpr std::uint32_t PlayerApiVersion = 16;
 
 // Process-wide native log sink, installed through FFF3FP_SetLogCallback.
 std::atomic<FFF3FPLogCallback> g_logSink{nullptr};
 std::atomic<void*> g_logContext{nullptr};
 
-FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
-    std::uint32_t* requiredSize) noexcept {
-    const auto bytes = value.size() + 1;
-    if (bytes > UINT32_MAX) return FFFResult::NativeFailure;
-    if (requiredSize != nullptr) *requiredSize = static_cast<std::uint32_t>(bytes);
-    if (output == nullptr || outputSize < bytes) return FFFResult::BufferTooSmall;
-    std::memcpy(output, value.c_str(), bytes); return FFFResult::Success;
-}
 }
 
 std::uint32_t FFF3FP_GetApiVersion() noexcept {
@@ -57,15 +48,12 @@ FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept {
         ? FFFResult::Success : FFFResult::NotSupported;
 }
 
-// ---- Process-wide native log sink (public surface: FFF3FP_SetLogCallback) ----
 void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context) noexcept {
     g_logContext.store(context, std::memory_order_release);
     g_logSink.store(callback, std::memory_order_release);
 }
 
-// Internal sink invoker for kernel log lines. Deliberately a plain C++ symbol and not
-// FFF3FP_API: it stays out of the export table (the surface the ABI checks walk), and
-// in-module callers declare it locally (PlayerSession::Fail, PlayerVideoRenderer).
+// Internal C++ sink; not part of the DLL export surface.
 void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept {
     if (utf8Line == nullptr) return;
     const auto sink = g_logSink.load(std::memory_order_acquire);

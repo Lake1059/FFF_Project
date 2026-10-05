@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "3FP/Core/MediaText.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Render/ColorExtensionApi.h"
 #include "3FP/Render/ColorExtension.h"
@@ -35,6 +36,10 @@ extern "C" {
 #include <chrono>
 
 namespace {
+using PlayerMediaText::FfmpegError;
+using PlayerMediaText::AppendDictionaryJson;
+using PlayerMediaText::EscapeJson;
+using PlayerMediaText::CodecTagName;
 constexpr std::int64_t TicksPerSecond = 10'000'000;
 constexpr std::size_t MaxQueuedVideoFrames = 8;
 constexpr std::size_t MinimumQueuedVideoFrames = 3;
@@ -206,64 +211,9 @@ std::uint64_t TimedTextContentKey(const std::uint64_t contentId, const char* tex
     return hash == 0 ? 1 : hash;
 }
 
-std::string EscapeJson(const std::string& value) {
-    std::ostringstream output;
-    static constexpr char Hex[] = "0123456789abcdef";
-    for (const auto raw : value) {
-        const auto character = static_cast<unsigned char>(raw);
-        switch (character) {
-        case '"': output << "\\\""; break;
-        case '\\': output << "\\\\"; break;
-        case '\n': output << "\\n"; break;
-        case '\r': output << "\\r"; break;
-        case '\t': output << "\\t"; break;
-        default:
-            if (character < 0x20) output << "\\u00" << Hex[character >> 4] << Hex[character & 15];
-            else output << raw;
-        }
-    }
-    return output.str();
-}
-
-void AppendDictionaryJson(std::ostringstream& json, const AVDictionary* dictionary) {
-    json << '{';
-    bool first = true;
-    const AVDictionaryEntry* entry = nullptr;
-    while ((entry = av_dict_get(dictionary, "", entry, AV_DICT_IGNORE_SUFFIX)) != nullptr) {
-        if (!first) json << ',';
-        first = false;
-        json << '"' << EscapeJson(entry->key ? entry->key : "") << "\":\""
-             << EscapeJson(entry->value ? entry->value : "") << '"';
-    }
-    json << '}';
-}
-
 std::string ChannelLayoutName(const AVChannelLayout& layout) {
     char text[256]{};
     return av_channel_layout_describe(&layout, text, sizeof(text)) >= 0 ? text : std::string{};
-}
-
-std::string CodecTagName(const std::uint32_t tag) {
-    if (tag == 0) return {};
-    std::string fourcc;
-    fourcc.reserve(4);
-    for (unsigned shift = 0; shift < 32; shift += 8) {
-        const auto character = static_cast<unsigned char>((tag >> shift) & 0xffu);
-        if (character < 0x20 || character > 0x7e) {
-            fourcc.clear();
-            break;
-        }
-        fourcc.push_back(static_cast<char>(character));
-    }
-    if (!fourcc.empty()) return fourcc;
-    std::ostringstream value;
-    value << "0x" << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << tag;
-    return value.str();
-}
-
-std::string FfmpegError(const int error) {
-    char buffer[AV_ERROR_MAX_STRING_SIZE]{};
-    return av_strerror(error, buffer, sizeof(buffer)) == 0 ? buffer : "FFmpeg error " + std::to_string(error);
 }
 
 std::string ToUtf8(const wchar_t* value) {
@@ -337,40 +287,14 @@ bool IsLoopAwareImageDemuxer(const AVInputFormat* inputFormat) noexcept {
     return name == "gif" || name == "apng" || name == "webp_anim" || name == "jpegxl_anim";
 }
 
-// FFmpeg's apng demuxer emits one malformed packet at every loop wrap-around: the
-// decoder rejects it with AVERROR(EINVAL) and produces no frame, so each pass
-// silently loses its first frame and the picture visibly stalls once per loop
-// (measured: 73 of 80 frames over 8s at 10 fps). The defect is inside FFmpeg —
-// the stock ffmpeg CLI drops the very same frames — so it cannot be fixed here.
-// What we can do is stop relying on the demuxer's own wrap-around for APNG and
-// use the same end-of-file rewind the timed image sequences (AVIF/HEIC) already
-// use: with ignore_loop the demuxer reaches EOF after one clean pass, and
-// FlushAtEnd() -> DoSeek(0) resets the decoder so frame 0 of the next pass is
-// decoded normally. Every other loop-aware demuxer (gif, webp_anim,
-// jpegxl_anim) wraps around cleanly and keeps its existing behaviour.
+// APNG's demuxer drops frames on repeated wraps; loop it with DoSeek(0) instead.
 bool DemuxerLosesFrameOnWrap(const AVInputFormat* inputFormat) noexcept {
     if (inputFormat == nullptr || inputFormat->name == nullptr) return false;
     return std::string_view(inputFormat->name) == "apng";
 }
 
-// Turns the demuxer's own wrap-around off for the formats whose wrap is broken,
-// so that the session's rewind at end of file (FlushAtEnd -> DoSeek(0)) is what
-// produces the next pass. Every loop-aware image demuxer accepts `ignore_loop`;
-// the value is set on the demuxer's private options after the file was opened,
-// which is early enough (no packet has been read yet) and does not depend on
-// knowing the format before opening.
-//   · apng      -> ignore_loop=1: the demuxer wrap loses a frame every pass, so
-//                  the session rewinds instead (docs/14 §7).
-//   · webp_anim -> ignore_loop=0: its av_seek_frame reports success but leaves the
-//                  demuxer unable to read further packets (measured 2026-09-26:
-//                  seek-then-read yields nothing, while a plain open decodes all
-//                  frames), so the session rewind would spin forever. Default
-//                  ignore_loop=true (single pass) makes Play() produce zero
-//                  presented frames; the demuxer's own wrap-around (ignore_loop=0,
-//                  the pre-docs/14 behaviour) is the only working loop for it.
-//   · gif/jpegxl_anim -> untouched: their default single pass + session rewind
-//                  works (gif verified: seekable, 30 frames over 3 loops).
-// Returns true when the option was successfully applied.
+// Set ignore_loop before decoding: APNG uses session rewind; WebP must use
+// demuxer looping because its seek does not resume reads. GIF/JXL keep defaults.
 bool ApplyLoopingOptions(AVFormatContext* format, const std::string_view demuxerName) noexcept {
     if (format == nullptr) return true;
     if (demuxerName == "apng") return av_opt_set_int(format->priv_data, "ignore_loop", 1, 0) >= 0;
@@ -388,15 +312,8 @@ bool IsStaticImageDemuxer(const AVInputFormat* inputFormat) noexcept {
         (name.size() > 5 && name.ends_with("_pipe"));
 }
 
-// Whether a stream is a still image is decided by what the file actually
-// contains, not by which demuxer happened to claim it. Matching demuxer names
-// cannot keep up with FFmpeg: AVIF and HEIC are ISOBMFF files that the mov
-// demuxer opens, so they never matched "image2" / "*_pipe" and were handled as
-// timed video — no retained frame, a hardware decoder attempted, and a
-// one-frame timeline that ends immediately. A single frame with no notion of
-// looping is the signal that actually matters.
-// nb_frames is unknown (0) for many sources; those fall back to the demuxer
-// name so existing behaviour is preserved exactly.
+// Prefer frame count for still-image detection (AVIF/HEIC use mov); when the
+// count is unknown, fall back to image demuxer names.
 bool IsStillImage(const AVFormatContext* format, const std::int32_t streamIndex) noexcept {
     if (format == nullptr || streamIndex < 0 ||
         streamIndex >= static_cast<std::int32_t>(format->nb_streams)) return false;
@@ -409,12 +326,7 @@ bool IsStillImage(const AVFormatContext* format, const std::int32_t streamIndex)
     return IsStaticImageDemuxer(format->iformat);
 }
 
-// Largest still-image side the renderer can upload in one piece.
-// D3D11 guarantees D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION (16384) on feature
-// level 11 hardware; a still image becomes a single texture, so anything wider
-// or taller cannot be displayed at all. Rejecting up front turns a confusing
-// render failure into an actionable message. Only still images are checked —
-// video frames stay on the existing path unchanged.
+// A still image must fit a single D3D11 texture (maximum side: 16384).
 constexpr std::int32_t MaxStillImageDimension = 16384;
 
 std::int64_t EstimateDuration100ns(const AVFormatContext* format) noexcept {
@@ -469,13 +381,8 @@ std::int32_t FindDefaultOrFirstStream(AVFormatContext* format, AVMediaType type)
     return first;
 }
 
-// AVIF and HEIC image sequences keep the primary still item as the first video
-// stream and put the animation on a separate later track; ffmpeg marks neither
-// as default, so the ordinary selection would take the still item and the file
-// would look like a single-frame picture with no timeline. Return the track that
-// carries the animation instead, but only when that reading is unambiguous: the
-// container is one of the mov-family image sequences, the first video stream
-// holds a single frame, and another video stream holds more than one.
+// AVIF/HEIC sequences may put a still item first. Select a later animated track
+// only when the mov-family container and frame counts make that unambiguous.
 std::int32_t FindAnimatedImageStream(AVFormatContext* format) noexcept {
     if (format == nullptr || format->iformat == nullptr || format->iformat->name == nullptr) return -1;
     const std::string_view demuxer(format->iformat->name);
@@ -498,17 +405,7 @@ std::int32_t FindAnimatedImageStream(AVFormatContext* format) noexcept {
     return busiest;
 }
 
-// Whether a source must be rewound with DoSeek(0) at the end of every pass
-// instead of being allowed to loop inside the demuxer. This is decided by what
-// the file actually contains, not by the demuxer name: an AVIF/HEIC animation
-// lives on a secondary track of a mov file, so it has to be looked for
-// explicitly (exactly like `animatedImage_` in DoOpen), and APNG has to be taken
-// away from the broken demuxer wrap-around.
-//   · APNG        -> true: the demuxer wrap-around loses a frame every pass, so
-//                    the session opens it with ignore_loop and rewinds instead.
-//   · AVIF/HEIC   -> true: a timed sequence that must be turned into a loop.
-//   · GIF/WebP/JXL-> false: the demuxer loops cleanly and never reaches EOF.
-//   · plain video -> false: must keep ending, so hosts can advance.
+// APNG and timed AVIF/HEIC rewind per pass; other demuxers loop internally.
 bool IsAnimatedImageSequence(AVFormatContext* format) noexcept {
     if (format == nullptr) return false;
     if (IsLoopAwareImageDemuxer(format->iformat)) return true;
@@ -672,14 +569,8 @@ bool PlayerSession::ShouldGateAudioAtVideoStart() const noexcept {
 }
 
 void PlayerSession::ArmAudioUntilVideoFrame() noexcept {
-    // An animated picture (a loop-aware image demuxer) has no audio track and no
-    // real timeline, and the picture mode opens it *stopped* so that its first
-    // frame is visible straight away. The preroll is only completed while the
-    // state is Playing (see TryCompletePlaybackPreroll), so arming it for such a
-    // file would leave PumpVideoPresentation blocked and the frame would never
-    // reach the screen: the window stays black until the user presses play.
-    // Only this arming site is relaxed - Play() still re-arms the preroll, so
-    // starting an animation behaves exactly like starting any other video.
+    // Opening an animation while stopped must present its first frame without
+    // Playing-only preroll. Play() arms preroll when playback starts.
     playbackPreroll_ = videoStream_ >= 0 && !staticImage_ && !animatedImage_;
     audioBlockedUntilVideoFrame_ = ShouldGateAudioAtVideoStart();
     audioUnblockVideoGeneration_ = 0;
@@ -1178,9 +1069,7 @@ void PlayerSession::DoStepKeyframe(const std::int32_t direction) {
         }
         ClearVideoQueue();
         avcodec_flush_buffers(videoDecoder_);
-        if (dolbyVisionEnhancementBsf_ != nullptr) av_bsf_flush(dolbyVisionEnhancementBsf_);
-        if (dolbyVisionEnhancementDecoder_ != nullptr) avcodec_flush_buffers(dolbyVisionEnhancementDecoder_);
-        ClearDolbyVisionEnhancementFrames();
+        FlushDolbyVisionEnhancementDecoder();
         if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
         seekTarget100ns_ = -1;
         seekTargetFrame_ = -1;
@@ -1241,13 +1130,8 @@ FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sd
         !std::isfinite(hdr) || hdr < 0 || hdr > 10000 || !std::isfinite(paper) || paper <= 0)
         return FFFResult::InvalidArgument;
     Enqueue([this, mode, sdr, hdr, paper, forceHdrOutput] {
-        // The gate is deliberately *not* applied here. At this point the stream may
-        // not be configured yet (SetColorMode commonly runs before Open reaches
-        // ConfigureHdrStream), so IsHdrSource()/IsWideGamutSource() can both read
-        // false for a source that is in fact HDR or wide gamut. Deciding now would
-        // silently rewrite the user's request — which is exactly how Display P3
-        // photos lost scRGB. Record the user's intent verbatim and let the
-        // renderer, plus the post-open re-evaluation, decide what is achievable.
+        // Preserve intent until stream classification is available; the renderer
+        // decides whether HDR/wide-gamut presentation is achievable.
         snapshot_.requestedColorMode = mode;
         const auto previous = snapshot_.actualColorMode;
         const auto result = videoRenderer_.SetColorMode(
@@ -1325,15 +1209,8 @@ FFFResult PlayerSession::SetViewTransform(const float zoom, const float panX,
     const float panY) noexcept {
     if (!std::isfinite(zoom) || zoom <= 0.0f || !std::isfinite(panX) || !std::isfinite(panY))
         return FFFResult::InvalidArgument;
-    // Bypass the playback command queue. The old
-    // Enqueue path executed the transform on the Worker (decode) thread —
-    // during HD/HDR playback that thread is busy decoding for tens of ms, so
-    // the queued pan commands arrived late or never before the next frame
-    // upload wiped them (the "horizontal pan dead + stutter" bug).
-    // ViewTransform is three relaxed atomics inside the renderer; writing them
-    // from any thread is safe. Redraw only wakes the presenter via its fast
-    // path, which also does not contend with decode.
-    // Upstream 2026.9: guard disc playback (disc renderer has its own view path).
+    // Atomic view updates bypass decode work and wake the presenter directly.
+    // Disc playback owns a separate view path.
     if (discOpened_.load(std::memory_order_acquire)) return FFFResult::Success;
     const auto result = videoRenderer_.SetViewTransform(zoom, panX, panY);
     if (result != FFFResult::Success) return result;
@@ -1844,11 +1721,7 @@ FFFResult PlayerSession::GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept
 
 // Forward to the renderer (RTInfo under deviceMutex_).
 FFFResult PlayerSession::GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept {
-    // Same contract as GetSnapshot: the caller declares the size and version of
-    // the struct it passes, so we never write past a smaller caller-side layout.
-    // v2 = destX/destY are signed. A v1 caller would read a negative origin as a huge
-    // unsigned value (silently wrong content), and v1/v2 share the same field widths so
-    // `size` cannot distinguish them ⇒ the only honest gate is the version number.
+    // Version 2 makes origins signed; size alone cannot distinguish v1/v2.
     if (info.size < sizeof(FFF3FPRenderTargetInfo) || info.version != 2)
         return FFFResult::InvalidArgument;
     info.size = sizeof(info);
@@ -2023,14 +1896,7 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
         demuxerName.find("dash") != std::string_view::npos) {
         CloseFormat(output, io); error = "Network and virtual-device demuxers are disabled."; return FFFResult::NotSupported;
     }
-    // The APNG demuxer only wraps cleanly at the *first* wrap-around; every one
-    // after it loses a frame (see DemuxerLosesFrameOnWrap). The session cannot
-    // rely on the demuxer for this format and has to rewind it at the end of
-    // each pass instead, which means its own wrap-around must be turned off.
-    // `ignore_loop` can be set on the demuxer's private options at any time
-    // before the first packet, and unlike the open-time dictionary this works
-    // for every caller of OpenFormat (an external audio file is a different
-    // demuxer and is deliberately left alone).
+    // Set image-loop options before the first packet on every OpenFormat path.
     if (!ApplyLoopingOptions(*output, demuxerName)) {
         CloseFormat(output, io); error = "The image demuxer could not be configured."; return FFFResult::FfmpegFailure;
     }
@@ -2205,6 +2071,8 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Keep the flip-model chain for a same-HWND media switch. DXGI can reject
     // an immediate replacement while the previous chain is still retiring.
     DoClose(FFF3FPState::Opening, true);
+    dolbyVisionEnhancementSoftwareOnly_ = false;
+    dolbyVisionEnhancementRecoveryPending_ = false;
     std::string openError;
     auto openResult = FFFResult::Success;
     if (DiscInput::IsDiscPath(path)) {
@@ -2225,11 +2093,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         videoStream_ = animationStream;
         animatedImage_ = true;
     }
-    // With the streams known, decide how a loop is produced: the APNG demuxer
-    // loses a frame at every wrap-around (and the wrap-around has therefore
-    // already been disabled for it above), while a timed AVIF/HEIC sequence has
-    // to be rewound by the session. Both are turned into a loop by the same
-    // endless DoSeek(0) below, never by the host.
+    // Select session rewind only after stream classification is available.
     sessionWrapLoop_ = IsAnimatedImageSequence(format_);
     staticImage_ = IsStillImage(format_, videoStream_);
     // Still images are uploaded as one texture, so an oversized source can only
@@ -2305,13 +2169,8 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
         if (videoStream_ >= 0) { snapshot_.videoWidth = videoDecoder_->width; snapshot_.videoHeight = videoDecoder_->height; ApplyHdrState(snapshot_, videoRenderer_.HdrState()); }
         else if (coverArtFrame_ != nullptr) { snapshot_.videoWidth = coverArtFrame_->width; snapshot_.videoHeight = coverArtFrame_->height; snapshot_.isHdrSource = 0; }
-        // Only a request that is genuinely unachievable is downgraded. Widened
-        // primaries (Display P3 / DCI-P3) count as achievable: they need scRGB
-        // just as much as an HDR transfer function, because an SDR swap chain
-        // cannot hold colours outside Rec.709 and would clip them silently.
-        // The renderer re-checks this same condition in EnsureSwapChain, which is
-        // the actual arbiter of the swap-chain format; keeping the two in step
-        // means no re-application pass is needed here.
+        // Downgrade only if HDR/wide-gamut output is unachievable; EnsureSwapChain
+        // rechecks this gate before selecting the actual format.
         if (snapshot_.isHdrSource == 0 && !videoRenderer_.IsWideGamutSource() &&
             snapshot_.requestedColorMode == FFF3FPColorMode::MapToHdr) {
             snapshot_.requestedColorMode = FFF3FPColorMode::MapToSdr;
@@ -2330,13 +2189,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     seekTarget100ns_ = -1; seekTargetFrame_ = -1; keyframeSeekPending_ = false;
     lastVideoFrameDuration100ns_ = 0; nextUntimedVideoPosition100ns_ = 0; draining_ = false;
     ArmAudioUntilVideoFrame();
-    // A still picture and an animated one both have to show a frame while the
-    // session is stopped: the first is what the host asked to look at, the second
-    // is meant to start paused on its first frame. Frames only reach the screen
-    // from the playback loop (PumpPlayback -> PumpVideoPresentation), which does
-    // not run while the session is merely Ready, and an animated picture is not
-    // drained on open either (it has more than one frame), so nothing would ever
-    // present it: the window would stay black until the user pressed play.
+    // Ready sessions do not pump playback, so present the first image frame here.
     if (staticImage_ || animatedImage_) {
         const auto imageResult = DecodeInitialFrame();
         if (imageResult != FFFResult::Success) {
@@ -2403,9 +2256,7 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
     if (av_seek_frame(format_, videoStream_, start, AVSEEK_FLAG_BACKWARD) >= 0)
     {
         avcodec_flush_buffers(videoDecoder_);
-        if (dolbyVisionEnhancementBsf_ != nullptr) av_bsf_flush(dolbyVisionEnhancementBsf_);
-        if (dolbyVisionEnhancementDecoder_ != nullptr) avcodec_flush_buffers(dolbyVisionEnhancementDecoder_);
-        ClearDolbyVisionEnhancementFrames();
+        FlushDolbyVisionEnhancementDecoder();
     }
     if (state_.load() == FFF3FPState::Failed) return FFFResult::DeviceFailure;
     return videoRenderer_.PresentedVideoFrames() > before
@@ -2436,6 +2287,13 @@ FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noex
 
 void PlayerSession::PumpPlayback() noexcept {
     if (format_ == nullptr) { SetState(FFF3FPState::Failed); return; }
+    if (dolbyVisionEnhancementRecoveryPending_) {
+        dolbyVisionEnhancementRecoveryPending_ = false;
+        dolbyVisionEnhancementSoftwareOnly_ = true;
+        (void)ConfigureDolbyVisionEnhancementDecoder();
+        DoSeek(std::max<std::int64_t>(0, snapshot_.position100ns));
+        return;
+    }
     if (disc_) {
         PublishDisc();
         if (disc_->RestartRequired() && !disc_->Held()) {
@@ -2450,7 +2308,6 @@ void PlayerSession::PumpPlayback() noexcept {
     if (state_.load() == FFF3FPState::Failed) return;
     UpdateDrainedAudioClock();
     UpdateBitRateForPosition(ClockPosition());
-    if (PumpVideoPresentation()) return;
     if (videoStream_ < 0 && audioStream_ >= 0 && !audioRenderer_) {
         // Windows can block both shared and exclusive initialization while a
         // different process owns the endpoint. Keep audio-only media on its
@@ -2468,19 +2325,14 @@ void PlayerSession::PumpPlayback() noexcept {
     const auto videoSaturated = [this] { return VideoQueueSaturated(); };
     if (!delayAudioUntilVideo && !pendingAudioPackets_.empty() &&
         audioBuffered < TargetAudioBuffer100ns) {
-        auto* packet = pendingAudioPackets_.front();
-        pendingAudioPackets_.pop_front();
-        pendingAudioPacketBytes_ -= static_cast<std::size_t>(std::max(packet->size, 0));
-        DecodePacket(audioDecoder_, packet, false, format_);
-        av_packet_free(&packet);
+        DecodePendingPacket(false);
         return;
     }
+    // Feed already-demuxed audio before doing a due frame's enhancement/render
+    // work. Otherwise a costly frame can starve a short WASAPI buffer.
+    if (PumpVideoPresentation()) return;
     if (!pendingVideoPackets_.empty() && !videoSaturated()) {
-        auto* packet = pendingVideoPackets_.front();
-        pendingVideoPackets_.pop_front();
-        pendingVideoPacketBytes_ -= static_cast<std::size_t>(std::max(packet->size, 0));
-        DecodePacket(videoDecoder_, packet, true, format_);
-        av_packet_free(&packet);
+        DecodePendingPacket(true);
         return;
     }
     if (videoStream_ < 0 && audioRenderer_ && audioBuffered >= TargetAudioBuffer100ns) { Sleep(2); return; }
@@ -2566,13 +2418,7 @@ void PlayerSession::PumpPlayback() noexcept {
 }
 
 FFFResult PlayerSession::ConfigureDolbyVisionEnhancementDecoder() noexcept {
-    ClearDolbyVisionEnhancementFrames();
-    if (dolbyVisionEnhancementBsf_ != nullptr)
-        av_bsf_free(&dolbyVisionEnhancementBsf_);
-    if (dolbyVisionEnhancementDecoder_ != nullptr)
-        avcodec_free_context(&dolbyVisionEnhancementDecoder_);
-    if (dolbyVisionEnhancementDecodeFrame_ != nullptr)
-        av_frame_free(&dolbyVisionEnhancementDecodeFrame_);
+    ResetDolbyVisionEnhancementDecoder();
     // The public player has no enhancement compositor. Keep the additional
     // decoder completely dormant unless the private color extension is present;
     // ordinary HDR10-compatible fallback must retain the normal decode budget.
@@ -2610,12 +2456,37 @@ FFFResult PlayerSession::ConfigureDolbyVisionEnhancementDecoder() noexcept {
         return FFFResult::NotSupported;
     }
     dolbyVisionEnhancementDecoder_ = avcodec_alloc_context3(codec);
-    if (dolbyVisionEnhancementDecoder_ == nullptr ||
-        avcodec_parameters_to_context(dolbyVisionEnhancementDecoder_, dolbyVisionEnhancementBsf_->par_out) < 0 ||
+    const auto parametersResult = dolbyVisionEnhancementDecoder_ != nullptr
+        ? avcodec_parameters_to_context(dolbyVisionEnhancementDecoder_, dolbyVisionEnhancementBsf_->par_out)
+        : AVERROR(ENOMEM);
+    if (parametersResult >= 0) {
+        const bool hardware = !dolbyVisionEnhancementSoftwareOnly_ && videoDecoder_ != nullptr &&
+            videoDecoder_->hw_device_ctx != nullptr &&
+            FindHardwareFormat(codec, AV_HWDEVICE_TYPE_D3D11VA) == AV_PIX_FMT_D3D11 &&
+            reinterpret_cast<const AVHWDeviceContext*>(videoDecoder_->hw_device_ctx->data)->type == AV_HWDEVICE_TYPE_D3D11VA;
+        if (hardware) {
+            dolbyVisionEnhancementDecoder_->hw_device_ctx = av_buffer_ref(videoDecoder_->hw_device_ctx);
+            dolbyVisionEnhancementDecoder_->opaque = reinterpret_cast<void*>(AV_PIX_FMT_D3D11);
+            dolbyVisionEnhancementDecoder_->get_format = SelectHardwareFormat;
+            dolbyVisionEnhancementDecoder_->extra_hw_frames = static_cast<int>(MaxQueuedVideoFrames + 2);
+        } else {
+            dolbyVisionEnhancementDecoder_->thread_count = static_cast<int>(std::min(
+                std::max(1u, std::thread::hardware_concurrency()), MaximumSoftwareDecoderThreads));
+            dolbyVisionEnhancementDecoder_->thread_type = FF_THREAD_SLICE;
+        }
+        dolbyVisionEnhancementDecoder_->pkt_timebase = dolbyVisionEnhancementBsf_->time_base_out;
+    }
+    if (parametersResult < 0 ||
         avcodec_open2(dolbyVisionEnhancementDecoder_, codec, nullptr) < 0) {
+        const bool retrySoftware = dolbyVisionEnhancementDecoder_ != nullptr &&
+            dolbyVisionEnhancementDecoder_->hw_device_ctx != nullptr;
         if (dolbyVisionEnhancementDecoder_ != nullptr)
             avcodec_free_context(&dolbyVisionEnhancementDecoder_);
         av_bsf_free(&dolbyVisionEnhancementBsf_);
+        if (retrySoftware) {
+            dolbyVisionEnhancementSoftwareOnly_ = true;
+            return ConfigureDolbyVisionEnhancementDecoder();
+        }
         return FFFResult::NotSupported;
     }
     dolbyVisionEnhancementDecodeFrame_ = av_frame_alloc();
@@ -2633,11 +2504,25 @@ void PlayerSession::ClearDolbyVisionEnhancementFrames() noexcept {
     dolbyVisionEnhancementFrames_.clear();
 }
 
+void PlayerSession::ResetDolbyVisionEnhancementDecoder() noexcept {
+    ClearDolbyVisionEnhancementFrames();
+    av_bsf_free(&dolbyVisionEnhancementBsf_);
+    avcodec_free_context(&dolbyVisionEnhancementDecoder_);
+    av_frame_free(&dolbyVisionEnhancementDecodeFrame_);
+}
+
+void PlayerSession::FlushDolbyVisionEnhancementDecoder() noexcept {
+    if (dolbyVisionEnhancementBsf_) av_bsf_flush(dolbyVisionEnhancementBsf_);
+    if (dolbyVisionEnhancementDecoder_) avcodec_flush_buffers(dolbyVisionEnhancementDecoder_);
+    ClearDolbyVisionEnhancementFrames();
+}
+
 void PlayerSession::DrainDolbyVisionEnhancementDecoder() noexcept {
     if (dolbyVisionEnhancementDecoder_ == nullptr || dolbyVisionEnhancementDecodeFrame_ == nullptr)
         return;
-    while (avcodec_receive_frame(dolbyVisionEnhancementDecoder_,
-            dolbyVisionEnhancementDecodeFrame_) >= 0) {
+    int result = 0;
+    while ((result = avcodec_receive_frame(dolbyVisionEnhancementDecoder_,
+            dolbyVisionEnhancementDecodeFrame_)) >= 0) {
         const auto pts = dolbyVisionEnhancementDecodeFrame_->best_effort_timestamp == AV_NOPTS_VALUE
             ? dolbyVisionEnhancementDecodeFrame_->pts
             : dolbyVisionEnhancementDecodeFrame_->best_effort_timestamp;
@@ -2652,6 +2537,8 @@ void PlayerSession::DrainDolbyVisionEnhancementDecoder() noexcept {
         }
         av_frame_unref(dolbyVisionEnhancementDecodeFrame_);
     }
+    if (result != AVERROR(EAGAIN) && result != AVERROR_EOF && dolbyVisionEnhancementDecoder_->hw_device_ctx)
+        dolbyVisionEnhancementRecoveryPending_ = true;
 }
 
 void PlayerSession::DecodeDolbyVisionEnhancementPacket(const AVPacket* packet) noexcept {
@@ -2663,6 +2550,7 @@ void PlayerSession::DecodeDolbyVisionEnhancementPacket(const AVPacket* packet) n
         if (copy != nullptr) av_packet_free(&copy);
         return;
     }
+    if (copy != nullptr) av_packet_free(&copy);
     AVPacket* filtered = av_packet_alloc();
     if (filtered == nullptr) return;
     while (av_bsf_receive_packet(dolbyVisionEnhancementBsf_, filtered) >= 0) {
@@ -2672,6 +2560,8 @@ void PlayerSession::DecodeDolbyVisionEnhancementPacket(const AVPacket* packet) n
             result = avcodec_send_packet(dolbyVisionEnhancementDecoder_, filtered);
         }
         if (result >= 0) DrainDolbyVisionEnhancementDecoder();
+        else if (dolbyVisionEnhancementDecoder_->hw_device_ctx)
+            dolbyVisionEnhancementRecoveryPending_ = true;
         av_packet_unref(filtered);
     }
     av_packet_free(&filtered);
@@ -2686,6 +2576,12 @@ void PlayerSession::AttachDolbyVisionEnhancementFrame(AVFrame* base) noexcept {
     const auto pts = base->best_effort_timestamp == AV_NOPTS_VALUE ? base->pts : base->best_effort_timestamp;
     if (pts == AV_NOPTS_VALUE) return;
     auto match = dolbyVisionEnhancementFrames_.find(pts);
+    // A dropped BL no longer needs its paired EL or decoder surface.
+    for (auto stale = dolbyVisionEnhancementFrames_.begin();
+        stale != dolbyVisionEnhancementFrames_.end() && stale->first < pts;) {
+        av_frame_free(&stale->second);
+        stale = dolbyVisionEnhancementFrames_.erase(stale);
+    }
     if (match == dolbyVisionEnhancementFrames_.end()) return;
     auto* reference = new (std::nothrow) FFFColorExtensionEnhancementFrameReference{
         FFFColorExtensionEnhancementReferenceMagic, nullptr};
@@ -2698,6 +2594,17 @@ void PlayerSession::AttachDolbyVisionEnhancementFrame(AVFrame* base) noexcept {
     if (base->opaque_ref == nullptr) {
         FreeDolbyVisionEnhancementReference(nullptr, reinterpret_cast<std::uint8_t*>(reference));
     }
+}
+
+FFFResult PlayerSession::CompleteHardwareFallback(const char* failureMessage) noexcept {
+    hardwareFallbackPending_ = false;
+    auto reason = pendingHardwareFallbackReason_.empty()
+        ? std::string("The GPU frame could not be transferred for presentation; playback continued with CPU decoding.")
+        : std::move(pendingHardwareFallbackReason_);
+    pendingHardwareFallbackReason_.clear();
+    const auto result = FallbackToSoftwareVideoDecoder(reason.c_str());
+    if (result != FFFResult::Success) Fail(result, failureMessage);
+    return result;
 }
 
 FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet, const bool video,
@@ -2737,15 +2644,7 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
     if (result == AVERROR(EAGAIN)) {
         const auto receiveResult = receiveFrames();
         if (hardwareFallbackPending_) {
-            hardwareFallbackPending_ = false;
-            auto reason = pendingHardwareFallbackReason_.empty()
-                ? std::string("The GPU frame could not be transferred for presentation; playback continued with CPU decoding.")
-                : std::move(pendingHardwareFallbackReason_);
-            pendingHardwareFallbackReason_.clear();
-            const auto fallbackResult = FallbackToSoftwareVideoDecoder(reason.c_str());
-            if (fallbackResult != FFFResult::Success)
-                Fail(fallbackResult, "Could not fall back to CPU decoding after a GPU frame-transfer failure.");
-            return fallbackResult;
+            return CompleteHardwareFallback("Could not fall back to CPU decoding after a GPU frame-transfer failure.");
         }
         if (!video && owner == format_ && internalAudioFailurePending_) {
             const auto failureResult = internalAudioFailureResult_;
@@ -2787,15 +2686,7 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
         return failureResult;
     }
     if (hardwareFallbackPending_) {
-        hardwareFallbackPending_ = false;
-        auto reason = pendingHardwareFallbackReason_.empty()
-            ? std::string("The GPU frame could not be transferred for presentation; playback continued with CPU decoding.")
-            : std::move(pendingHardwareFallbackReason_);
-        pendingHardwareFallbackReason_.clear();
-        const auto fallbackResult = FallbackToSoftwareVideoDecoder(reason.c_str());
-        if (fallbackResult != FFFResult::Success)
-            Fail(fallbackResult, "Could not fall back to CPU decoding after a GPU frame-transfer failure.");
-        return fallbackResult;
+        return CompleteHardwareFallback("Could not fall back to CPU decoding after a GPU frame-transfer failure.");
     }
     if (result != AVERROR(EAGAIN) && result != AVERROR_EOF && video &&
         snapshot_.decodeMode == FFF3FPDecodeMode::Gpu &&
@@ -2825,14 +2716,7 @@ bool PlayerSession::PumpVideoPresentation() noexcept {
         av_frame_unref(frame);
         videoFramePool_.push_back(frame);
         if (hardwareFallbackPending_) {
-            hardwareFallbackPending_ = false;
-            auto reason = pendingHardwareFallbackReason_.empty()
-                ? std::string("The GPU frame could not be transferred for presentation; playback continued with CPU decoding.")
-                : std::move(pendingHardwareFallbackReason_);
-            pendingHardwareFallbackReason_.clear();
-            const auto result = FallbackToSoftwareVideoDecoder(reason.c_str());
-            if (result != FFFResult::Success)
-                Fail(result, "Could not fall back to CPU decoding after a GPU frame-transfer failure.");
+            (void)CompleteHardwareFallback("Could not fall back to CPU decoding after a GPU frame-transfer failure.");
         }
         return true;
     }
@@ -2887,12 +2771,25 @@ void PlayerSession::ClearVideoQueue() noexcept {
 }
 
 void PlayerSession::ClearPendingPackets() noexcept {
-    for (auto*& packet : pendingVideoPackets_) av_packet_free(&packet);
-    pendingVideoPackets_.clear();
-    pendingVideoPacketBytes_ = 0;
-    for (auto*& packet : pendingAudioPackets_) av_packet_free(&packet);
-    pendingAudioPackets_.clear();
-    pendingAudioPacketBytes_ = 0;
+    ClearPacketQueue(pendingVideoPackets_, pendingVideoPacketBytes_);
+    ClearPacketQueue(pendingAudioPackets_, pendingAudioPacketBytes_);
+}
+
+void PlayerSession::ClearPacketQueue(std::deque<AVPacket*>& queue, std::size_t& bytes) noexcept {
+    for (auto*& packet : queue) av_packet_free(&packet);
+    queue.clear();
+    bytes = 0;
+}
+
+void PlayerSession::DecodePendingPacket(const bool video) noexcept {
+    auto& queue = video ? pendingVideoPackets_ : pendingAudioPackets_;
+    auto& bytes = video ? pendingVideoPacketBytes_ : pendingAudioPacketBytes_;
+    if (queue.empty()) return;
+    auto* packet = queue.front();
+    queue.pop_front();
+    bytes -= static_cast<std::size_t>(std::max(packet->size, 0));
+    DecodePacket(video ? videoDecoder_ : audioDecoder_, packet, video, format_);
+    av_packet_free(&packet);
 }
 
 void PlayerSession::NormalizeVideoFrameTimestamp(AVFrame* frame) noexcept {
@@ -3186,9 +3083,7 @@ void PlayerSession::DisableFailedInternalAudio(const FFFResult result, std::stri
         internalAudioFailurePending_ = false;
         internalAudioFailureResult_ = FFFResult::Success;
         internalAudioDecodeErrorCount_ = 0;
-        for (auto*& packet : pendingAudioPackets_) av_packet_free(&packet);
-        pendingAudioPackets_.clear();
-        pendingAudioPacketBytes_ = 0;
+        ClearPacketQueue(pendingAudioPackets_, pendingAudioPacketBytes_);
         if (audioRenderer_) audioRenderer_->Reset(position);
         ResetClock(position);
         UpdateAudioDiagnostics();
@@ -3531,36 +3426,16 @@ void PlayerSession::FlushAtEnd() noexcept {
         endPosition += lastVideoFrameDuration100ns_;
     if (audioRenderer_) endPosition = std::max(endPosition, audioRenderer_->Position100ns());
     if (!staticImage_ && ClockPosition() < endPosition) { Sleep(1); return; }
-    // A still image never "finishes playing": it has no timeline and its frame
-    // stays on screen. Entering Ended here only makes hosts treat a freshly
-    // opened picture as finished playback (auto-advance, loop, stop) and emits a
-    // PlaybackEnded that means nothing for a picture. Stay interactive instead —
-    // zoom, pan and switching pictures must keep working after the frame lands.
+    // A still image has no playback end; keep it visible and interactive.
     if (staticImage_) {
         RebuildMediaInfo();
         SuspendAudioRenderer(true);
         if (state_.load() == FFF3FPState::Playing) SetState(FFF3FPState::Paused, "end-still-image");
         return;
     }
-    // An animated picture is meant to keep looping: finishing one pass is not a
-    // meaningful state for it, and hosts react to PlaybackEnded by advancing to
-    // the next file or stopping. Rewind and carry on instead.
-    //   · APNG and timed AVIF/HEIC sequences are opened with ignore_loop=1, so
-    //     they reach the end of the file after exactly one pass and rely on the
-    //     DoSeek(0) below. This is what removes the APNG stall: the broken
-    //     demuxer wrap-around never runs, and the seek resets the decoder so
-    //     frame 0 of the next pass is decoded normally.
-    //   · The remaining loop-aware demuxers (GIF/WebP/JXL) are opened with
-    //     ignore_loop=0, so they resupply frames on their own and rarely reach
-    //     here at all (sessionWrapLoop_ stays false for them).
-    // DoSeek clears the draining flag and resets the clock, so the loop continues
-    // without a visible gap: the last frame stays on screen until frame 0 lands.
+    // Rewind session-looped animations at EOF while retaining the last visible frame.
     if (sessionWrapLoop_) {
-        // The very first seek in a pass can still be refused while the demuxer
-        // is mid read-ahead; retry the rewind instead of failing the picture.
-        // A demuxer whose seek is broken (it reports success but supplies no
-        // packets afterwards) would spin here forever, so after enough failed
-        // rewinds the loop is abandoned and the picture ends like a video.
+        // Retry temporarily refused rewinds, but bound retries for broken seek implementations.
         if (DoSeek(0) != FFFResult::Success) {
             if (++sessionWrapFailures_ >= 8) {
                 sessionWrapLoop_ = false;  // fall through to the ended path below
@@ -3590,11 +3465,7 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     }
     if (!format_) return FFFResult::Success;
     position = std::clamp<std::int64_t>(position, 0, snapshot_.duration100ns > 0 ? snapshot_.duration100ns : position);
-    // A still image has no timeline to move along, and the single-image
-    // demuxers (image2 and friends) are not seekable: av_seek_frame fails, the
-    // byte-position fallback fails too, and every attempt ends in ReportError.
-    // Hosts that poll or re-synchronise periodically therefore spam errors on
-    // any opened picture. Treat the request as a no-op that keeps the picture.
+    // Still-image seek is a no-op: single-image demuxers have no seekable timeline.
     if (staticImage_) { PublishSnapshot(); return FFFResult::Success; }
     auto decodeStartPosition = position;
     const auto referenceStream = videoStream_ >= 0 ? videoStream_ : audioStream_;
@@ -3627,9 +3498,7 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     ClearVideoQueue();
     ResetBitRateTracking();
     if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);
-    if (dolbyVisionEnhancementBsf_ != nullptr) av_bsf_flush(dolbyVisionEnhancementBsf_);
-    if (dolbyVisionEnhancementDecoder_ != nullptr) avcodec_flush_buffers(dolbyVisionEnhancementDecoder_);
-    ClearDolbyVisionEnhancementFrames();
+    FlushDolbyVisionEnhancementDecoder();
     if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
     internalAudioDecodeErrorCount_ = 0;
     seekTarget100ns_ = position; seekTargetFrame_ = targetFrame;
@@ -3769,10 +3638,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     else videoRenderer_.Close();
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); CloseFormat(&externalFormat_, externalFormatIo_);
     if (videoDecoder_) avcodec_free_context(&videoDecoder_);
-    if (dolbyVisionEnhancementBsf_) av_bsf_free(&dolbyVisionEnhancementBsf_);
-    if (dolbyVisionEnhancementDecoder_) avcodec_free_context(&dolbyVisionEnhancementDecoder_);
-    if (dolbyVisionEnhancementDecodeFrame_) av_frame_free(&dolbyVisionEnhancementDecodeFrame_);
-    ClearDolbyVisionEnhancementFrames();
+    ResetDolbyVisionEnhancementDecoder();
     if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     if (coverArtFrame_) av_frame_free(&coverArtFrame_);
     ReleasePrimariesCarrierFilter();
@@ -4003,6 +3869,12 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                 const auto acceleration = HardwareAccelerationName(videoDecoder_);
                 if (!acceleration.empty())
                     json << ",\"hardwareAcceleration\":\"" << EscapeJson(acceleration) << "\"";
+                if (dolbyVisionEnhancementDecoder_ != nullptr) {
+                    const auto* enhancementFormat = av_get_pix_fmt_name(dolbyVisionEnhancementDecoder_->pix_fmt);
+                    json << ",\"enhancementDecoderPixelFormat\":\"" << EscapeJson(enhancementFormat ? enhancementFormat : "") << "\""
+                        << ",\"enhancementHardwareAcceleration\":\""
+                        << EscapeJson(HardwareAccelerationName(dolbyVisionEnhancementDecoder_)) << "\"";
+                }
             }
             json << ",\"colorRange\":" << parameters->color_range
                  << ",\"colorSpace\":" << parameters->color_space

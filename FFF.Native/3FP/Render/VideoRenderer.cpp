@@ -37,6 +37,10 @@ extern "C" {
 using Microsoft::WRL::ComPtr;
 
 namespace {
+template<class T> void ReleaseCom(T*& resource) noexcept {
+    if (resource != nullptr) { resource->Release(); resource = nullptr; }
+}
+
 const AVFrame* EnhancementFrame(const AVFrame* frame) noexcept {
     if (frame == nullptr || frame->opaque_ref == nullptr ||
         frame->opaque_ref->data == nullptr ||
@@ -67,23 +71,8 @@ float DetectDisplayRefreshRate(const HWND window) noexcept {
     return std::clamp(static_cast<float>(mode.dmDisplayFrequency), 60.0f, 120.0f);
 }
 
-// -----------------------------------------------------------------------------
-// DISPLAYCONFIG is the second source for the SDR white level (the first is WinRT's
-// AdvancedColorInfo::SdrWhiteLevelInNits; both are the same system value, and
-// ReadSdrWhiteLevelDisplayConfig below converts it as SDRWhiteLevel / 1000 * 80).
-// Three traps measured while reading it, kept here so the next addition does not
-// rediscover them:
-//   1) the path-entry stride used with GET_TARGET_NAME has to be 72 bytes, not the
-//      official sizeof (which is larger); a wrong stride misaligns every path from
-//      the second one onward, and the names/ids still look plausible.
-//   2) QDC_ONLY_ACTIVE_PATHS fails outright (ERROR_INVALID_PARAMETER) on Win11 for
-//      some topologies - enumerate with QDC_DATABASE_CURRENT only.
-//   3) DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL wants the **target** id in
-//      header.id; a source id returns ERROR_GEN_FAILURE.
-// Scale caution: other tools anchor SDR paper white at 200 nits (graphics white).
-// This kernel uses 80 (the scRGB reference white, see EffectivePaperWhiteNits()), so
-// a fallback value must not be copied across without converting the scale.
-// -----------------------------------------------------------------------------
+// DISPLAYCONFIG SDR white = SDRWhiteLevel / 1000 * 80 nits.
+// Use 72-byte path entries, QDC_DATABASE_CURRENT and the target id for the white-level query.
 bool ReadWindowsDisplayLuminance(const HMONITOR monitor,
     HdrDisplayCapabilities& capabilities) noexcept {
     if (monitor == nullptr) return false;
@@ -127,13 +116,8 @@ bool ReadWindowsDisplayLuminance(const HMONITOR monitor,
     return read;
 }
 
-// -----------------------------------------------------------------------------
-// SDK-shape compatibility: from 10.0.28000 the `size` member moved into
-// DISPLAYCONFIG_DEVICE_INFO_HEADER and DisplayConfigGetDeviceInfo became a
-// single-argument call; older SDKs (<= 26100) have no size in the header and a
-// two-argument API. Probe with `requires` on the type, so each branch is discarded
-// by if constexpr under its own SDK.
-// -----------------------------------------------------------------------------
+// SDK 28000 moves size into DISPLAYCONFIG_DEVICE_INFO_HEADER; older SDKs use
+// the two-argument API. requires/if constexpr selects the installed SDK layout.
 template <typename Packet>
 bool QueryDisplayConfigInfo(Packet& packet) noexcept {
     if constexpr (requires { packet.header.size; }) {
@@ -267,20 +251,11 @@ bool IsP3Primaries(const AVFrame* frame) noexcept {
         frame->color_primaries == AVCOL_PRI_SMPTE432;
 }
 
-// The production pixel shader is consumed as precompiled DXBC (ShaderBytecode.h), so the
-// HLSL in this file has no effect until that array is regenerated from it
-// (tools/generate_shader_bytecode.py). The gamut switch below is a tri-state and the DXBC
-// committed alongside it decodes it as one; if that array is ever rolled back on its own,
-// the old boolean shader would apply the Rec.2020 matrix to P3 colours - worse than the
-// Rec.709 passthrough it replaced. Regenerate the two together.
+// Regenerate ShaderBytecode.h with tools/generate_shader_bytecode.py after HLSL changes.
+// Gamut is tri-state (709/2020/P3); source and bytecode must stay in sync.
 
-// Gamut of the source primaries: 0 = Rec.709, 1 = Rec.2020, 2 = P3 (DCI/Display).
-// Distinct from the YUV matrix, which stays a property of frame->colorspace.
-// P3 must be tested BEFORE the Rec.2020 test: real P3 video (HEVC/AV1) carries
-// matrix_coeffs = 2020_NCL (the VUI has no P3 matrix value), so
-// primaries=SMPTE432 + colorspace=BT2020_NCL is the typical marking - falling
-// through to IsRec2020() would classify it as Rec.2020 and route it through the
-// wrong matrix, silently undoing the P3 fix.
+// Gamut: 0=709, 1=2020, 2=P3. Test primaries before matrix tags:
+// P3 video commonly uses BT2020_NCL matrix coefficients.
 std::uint32_t ResolveSourceGamut(const AVFrame* frame, const bool hdrSource) noexcept {
     if (IsP3Primaries(frame)) return 2u;
     if (hdrSource || IsRec2020(frame)) return 1u;
@@ -817,11 +792,8 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     float4 tint=float4(float3((TintArgb>>16)&255u,(TintArgb>>8)&255u,TintArgb&255u),
                        float((TintArgb>>24)&255u))/255.0;
     if(ColorMode==2){
-        // scRGB swap-chain contract: linear Rec.709 primaries, 1.0 = 80 nits.
-        // The backdrop cache is FP16 and already holds the main shader's
-        // linear scRGB output. Blend it directly; only the sRGB tint needs
-        // linearization and conversion to scRGB so both operands share the
-        // same scale before lerp.
+        // The FP16 backdrop is already scRGB (linear 709, 1.0 = 80 nits).
+        // Convert only the sRGB tint before blending.
         float3 tintScRgb=ToLinear709(tint.rgb)*(PaperWhite/80.0);
         float3 result=lerp(color.rgb,tintScRgb,tint.a);
         return float4(result,color.a);
@@ -930,12 +902,7 @@ struct ScaleShaderSettings {
 static_assert(sizeof(ScaleShaderSettings) == 32);
 
 struct VideoDestination {
-    // The origin is **signed**: magnifying and panning pushes the box's left/top edge
-    // outside the back buffer, which is what brings the picture's right/bottom half
-    // into view. As uint32 with a `max(0, ·)` clamp, the whole "pan down/right" half
-    // of the range silently vanished (measured: sweeping pan from -1 to +1 kept
-    // reporting origin (0,0), so panning felt dead in one direction).
-    // Sizes stay unsigned.
+    // Zoom/pan may place the origin outside the back buffer. Keep it signed.
     std::int32_t x, y;
     std::uint32_t width, height;
 };
@@ -2011,13 +1978,8 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     swapWidth_ = swapHeight_ = 0;
     swapHdr_ = false; swapOutputBits_ = 8;
     swapAllowTearing_ = false;
-    // Do not enumerate DXGI outputs while the managed player object is being
-    // constructed. HDR capability is resolved lazily by EnsureSwapChain on
-    // the native worker/presenter path.
-    // Colour-mode gate. Kept identical to the one in SetColorMode: a widened
-    // primaries source needs scRGB too, so a missing wide-gamut term here would
-    // downgrade the mode behind the caller's back. (EnsureSwapChain re-checks
-    // before actually creating the swap chain.)
+    // Probe output capability lazily on the worker. HDR, wide gamut and
+    // high-bit-depth Auto SDR use the same gate as SetColorMode/EnsureSwapChain.
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
         const auto wantsHdrPath = WantsScRgbPresentationPath(sourceBitDepth_);
         actualMode_ = wantsHdrPath ? FFF3FPColorMode::MapToHdr :
@@ -2034,12 +1996,7 @@ FFFResult PlayerVideoRenderer::SetPreferredAdapterIndex(const std::int32_t index
     if (index < -1 || index > 15) return FFFResult::InvalidArgument;
     std::lock_guard deviceLock(deviceMutex_);
     preferredAdapterIndex_.store(index, std::memory_order_release);
-    // The preference is only consulted by EnsureDevice(), i.e. at device-creation
-    // time. We deliberately do not tear down an existing device here: that would
-    // force a swap-chain rebuild from an arbitrary call site, and
-    // ReleaseDeviceObjects() expects its caller to already hold deviceMutex_.
-    // In practice every caller sets this during session construction, when
-    // device_ is still null, so it is picked up by the first EnsureDevice().
+    // Adapter preference takes effect at the next device creation.
     return FFFResult::Success;
 }
 
@@ -2073,13 +2030,8 @@ FFFResult PlayerVideoRenderer::SetViewTransform(const float zoom,
 }
 
 FFFResult PlayerVideoRenderer::SetFitLimitToNative(const bool enable) noexcept {
-    // Opt in to "the fit box never exceeds the source's native size". With it on,
-    // zoom == 1 is pixel-exact 1:1 and the zoom factor *is* the screen:video pixel
-    // ratio; by default the picture is fitted to the window, so zoom is relative to
-    // that box and carries no absolute meaning.
-    // Separate from Render()'s per-frame limitToNativeSize on purpose: that one is
-    // only refreshed by the decode thread, so a paused session would keep the old
-    // geometry until the next frame. This flips on the next present.
+    // Native-size fit changes on the next present, including paused playback.
+    // At zoom=1 this makes the image pixel-exact rather than window-relative.
     std::lock_guard deviceLock(deviceMutex_);
     fitLimitToNative_.store(enable, std::memory_order_release);
     return FFFResult::Success;
@@ -2103,6 +2055,7 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
         !std::isfinite(hdrPeakNits) || hdrPeakNits < 0.0f || hdrPeakNits > 10000.0f ||
         !std::isfinite(paperWhiteNits) || paperWhiteNits <= 0.0f) return FFFResult::InvalidArgument;
     requestedMode_ = mode;
+    ReleaseScaleResources();
     sdrPeakNits_ = sdrPeakNits;
     // Zero selects the current display's reported peak. Positive values are a
     // future user setting and intentionally override the monitor descriptor.
@@ -2113,13 +2066,8 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
     actualMode_ = requestedMode_;
     hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
     hdrSwapChainRejected_ = false;
-    // The output capability probe is intentionally deferred until the first
-    // swap-chain creation, which is owned by the native media worker.
-    // Widened primaries need the scRGB path just as much as an HDR transfer
-    // function does: an SDR swap chain cannot hold colours outside Rec.709, so
-    // sending a Display P3 photo down it silently clips the gamut back. The same
-    // gate also admits a plain SDR source under the Auto SDR policy when its bit
-    // depth exceeds 8.
+    // Probe capability at swap-chain creation. HDR, wide gamut and high-bit-depth
+    // Auto SDR need scRGB; the SDR swap chain cannot retain their range.
     if (requestedMode_ == FFF3FPColorMode::MapToHdr && !WantsScRgbPresentationPath(sourceBitDepth_)) {
         actualMode_ = FFF3FPColorMode::MapToSdr;
         try { std::lock_guard fallbackLock(fallbackMutex_);
@@ -2227,14 +2175,7 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
         levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &device_, &selected, &context_);
     if (FAILED(result)) { SetError("Could not create the D3D11 playback device."); return FFFResult::DeviceFailure; }
 
-    // Diagnostic: report which adapter actually backs the device.
-    // Without this there is no way to tell from the outside whether a requested
-    // adapter index was honoured, silently ignored, or fell back to the default
-    // policy — the three cases are indistinguishable in behaviour on a machine
-    // where the default happens to be the same GPU.
-    // The formatted line is also forwarded to the process log sink
-    // (FFF3FP_SetLogCallback), so the adapter choice is visible in the host's log
-    // instead of only to a debugger attached at the right moment.
+    // Report the actual adapter to the debugger and public log sink.
     {
         ComPtr<IDXGIDevice> dxgiDevice;
         ComPtr<IDXGIAdapter> adapter;
@@ -2289,16 +2230,8 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
         return forceHdrOutput_ || hdrSupported_;
     };
     if (!preservePrevious) hdrSwapChainRejected_ = false;
-    // A rejection must expire - the user can flip Windows HDR on while playback is
-    // running (the HMONITOR usually stays the same, so preservePrevious stays true) -
-    // but the two kinds of "no" need different clocks. "This display has no Advanced
-    // Color right now" is cheap to re-ask and worth re-asking on the probe cadence;
-    // "this swap chain refused the scRGB colour space" is not, because every retry that
-    // gets refused again destroys and re-creates the chain (subtitle atlas, forced
-    // re-render) on a display that will keep refusing it. Rejections therefore use the
-    // long backoff. Both clocks are invalidated by the existing resets that force a
-    // re-probe (they move hdrSupportCheckedAt_ to the epoch), so a policy change, a
-    // monitor change or a device reset retries immediately.
+    // Display capability is re-probed periodically. Swap-chain rejection uses
+    // longer backoff to avoid repeated rebuilds; policy/device/monitor changes reset it.
     if (preservePrevious && hdrSwapChainRejected_ &&
         now - hdrSupportCheckedAt_ < ScRgbChainRejectionBackoff)
         return false;
@@ -2415,11 +2348,7 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     const std::uint32_t sourceBitDepth) noexcept {
     if (window_ == nullptr) return FFFResult::Success;
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
-        // A widened-primaries source needs the scRGB swap chain even when its
-        // transfer function is plain SDR: an 8-bit Rec.709 swap chain cannot
-        // represent Display P3 / DCI-P3 colours and would clip them silently.
-        // This is the final arbiter of the swap-chain format, so the wide-gamut
-        // case has to be honoured here and not only in SetColorMode.
+        // Wide-gamut SDR also needs scRGB to retain colors outside Rec.709.
         const auto wantsHdrPath = WantsScRgbPresentationPath(sourceBitDepth);
         const auto nextMode = wantsHdrPath && OutputSupportsHdr() ?
             FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
@@ -2714,7 +2643,7 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             if (FAILED(device_->CreatePixelShader(api->shaderBytecode,
                     api->shaderBytecodeSize, nullptr, &extensionShader_)) ||
                 FAILED(device_->CreateBuffer(&desc, &initial, &extensionConstants_))) {
-                if (extensionShader_) { extensionShader_->Release(); extensionShader_ = nullptr; }
+                    ReleaseCom(extensionShader_);
             }
         }
     }
@@ -2725,8 +2654,8 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         sourceChromaHeightShift_ == chromaHeightShift)
         return FFFResult::Success;
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
-        if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
-        if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
+        ReleaseCom(sourceViews_[plane]);
+        ReleaseCom(sourceTextures_[plane]);
     }
     ReleaseScaleResources();
     const auto planeCount = inputLayout == 1 ? 3u : (inputLayout == 2 ? 2u : 1u);
@@ -2754,18 +2683,9 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
                     sourceTextures_[0], &luma, &sourceViews_[0])) ||
                 FAILED(device_->CreateShaderResourceView(
                     sourceTextures_[0], &chroma, &sourceViews_[1]))) {
-                if (sourceViews_[1] != nullptr) {
-                    sourceViews_[1]->Release();
-                    sourceViews_[1] = nullptr;
-                }
-                if (sourceViews_[0] != nullptr) {
-                    sourceViews_[0]->Release();
-                    sourceViews_[0] = nullptr;
-                }
-                if (sourceTextures_[0] != nullptr) {
-                    sourceTextures_[0]->Release();
-                    sourceTextures_[0] = nullptr;
-                }
+                        ReleaseCom(sourceViews_[1]);
+                        ReleaseCom(sourceViews_[0]);
+                        ReleaseCom(sourceTextures_[0]);
                 return false;
             }
             return true;
@@ -2958,6 +2878,9 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     if (target == nullptr || context_ == nullptr || width <= 0.0f || height <= 0.0f)
         return FFFResult::InvalidArgument;
     cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
+    const bool reconstructed = extensionReconstructed_ && actualMode_ != FFF3FPColorMode::RawHdrAsSdr;
+    cachedVideoSettings_.inputLayout = reconstructed ? 1u : cachedOriginalInputLayout_;
+    cachedVideoSettings_.sampleScale = reconstructed ? 65535.0f / 1023.0f : cachedOriginalSampleScale_;
     cachedVideoSettings_.reserved = effect;
     cachedVideoSettings_.outputWidth = width;
     cachedVideoSettings_.outputHeight = height;
@@ -2983,7 +2906,8 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     context_->PSSetConstantBuffers(0, 1, &constants_);
     ID3D11SamplerState* samplers[] = {sampler_, pointSampler_, panoramaSampler_};
     context_->PSSetSamplers(0, ARRAYSIZE(samplers), samplers);
-    auto* views = sourceViews != nullptr ? sourceViews : sourceViews_;
+    auto* views = sourceViews != nullptr ? sourceViews :
+        (reconstructed ? extensionReconstructedViews_ : sourceViews_);
     context_->PSSetShaderResources(0, ARRAYSIZE(sourceViews_), views);
     context_->Draw(3, 0);
     ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
@@ -2992,12 +2916,158 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     return FFFResult::Success;
 }
 
+void PlayerVideoRenderer::ReleaseExtensionEnhancement() noexcept {
+    for (std::size_t plane = 0; plane < 3; ++plane) {
+        ReleaseCom(extensionEnhancementViews_[plane]);
+        ReleaseCom(extensionEnhancementTextures_[plane]);
+    }
+    extensionEnhancementWidth_ = extensionEnhancementHeight_ = 0;
+    ReleaseExtensionReconstruction();
+}
+
+void PlayerVideoRenderer::ReleaseExtensionReconstruction() noexcept {
+    for (std::size_t plane = 0; plane < 3; ++plane) {
+        ReleaseCom(extensionReconstructedOutputs_[plane]);
+        ReleaseCom(extensionReconstructedViews_[plane]);
+        ReleaseCom(extensionReconstructedTextures_[plane]);
+    }
+    extensionReconstructedWidth_ = extensionReconstructedHeight_ = 0;
+    extensionReconstructed_ = false;
+}
+
+bool PlayerVideoRenderer::UploadExtensionEnhancement(const AVFrame* frame) noexcept {
+    const bool hardware = frame != nullptr && frame->format == AV_PIX_FMT_D3D11;
+    if (!frame || (!hardware && frame->format != AV_PIX_FMT_YUV420P10LE) || frame->width <= 0 || frame->height <= 0)
+        return false;
+    if (hardware) {
+        auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
+        if (!texture || !frame->hw_frames_ctx) return false;
+        ComPtr<ID3D11Device> decodeDevice;
+        texture->GetDevice(&decodeDevice);
+        if (decodeDevice.Get() != device_) return false;
+        const auto* frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
+        if (frames->sw_format != AV_PIX_FMT_P010LE) return false;
+    }
+    for (int plane = 0; !hardware && plane < 3; ++plane) {
+        const auto width = plane == 0 ? frame->width : (frame->width + 1) / 2;
+        if (!frame->data[plane] || frame->linesize[plane] < width * 2) return false;
+    }
+    if (extensionEnhancementWidth_ != frame->width || extensionEnhancementHeight_ != frame->height ||
+        extensionEnhancementSemiplanar_ != hardware) {
+        ReleaseExtensionEnhancement();
+        for (int plane = 0; plane < (hardware ? 1 : 3); ++plane) {
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = plane == 0 ? frame->width : (frame->width + 1) / 2;
+            desc.Height = plane == 0 ? frame->height : (frame->height + 1) / 2;
+            desc.MipLevels = desc.ArraySize = 1;
+            desc.Format = hardware ? DXGI_FORMAT_P010 : DXGI_FORMAT_R16_UNORM; desc.SampleDesc.Count = 1;
+            if (hardware) {
+                D3D11_TEXTURE2D_DESC decoded{};
+                reinterpret_cast<ID3D11Texture2D*>(frame->data[0])->GetDesc(&decoded);
+                desc.Width = decoded.Width; desc.Height = decoded.Height;
+            }
+            desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+            view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; view.Texture2D.MipLevels = 1;
+            view.Format = DXGI_FORMAT_R16_UNORM;
+            if (FAILED(device_->CreateTexture2D(&desc, nullptr, &extensionEnhancementTextures_[plane])) ||
+                FAILED(device_->CreateShaderResourceView(extensionEnhancementTextures_[plane], hardware ? &view : nullptr,
+                    &extensionEnhancementViews_[plane]))) {
+                ReleaseExtensionEnhancement();
+                return false;
+            }
+            if (hardware) {
+                view.Format = DXGI_FORMAT_R16G16_UNORM;
+                if (FAILED(device_->CreateShaderResourceView(extensionEnhancementTextures_[plane], &view,
+                    &extensionEnhancementViews_[1]))) {
+                    ReleaseExtensionEnhancement(); return false;
+                }
+            }
+        }
+        extensionEnhancementWidth_ = frame->width; extensionEnhancementHeight_ = frame->height;
+        extensionEnhancementSemiplanar_ = hardware;
+    }
+    if (hardware) {
+        const auto slice = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
+        context_->CopySubresourceRegion(extensionEnhancementTextures_[0], 0, 0, 0, 0,
+            reinterpret_cast<ID3D11Texture2D*>(frame->data[0]), slice, nullptr);
+    } else {
+        for (int plane = 0; plane < 3; ++plane)
+            context_->UpdateSubresource(extensionEnhancementTextures_[plane], 0, nullptr,
+                frame->data[plane], frame->linesize[plane], 0);
+    }
+    return true;
+}
+
+bool PlayerVideoRenderer::ReconstructExtensionEnhancement(const std::uint32_t width,
+    const std::uint32_t height, const std::uint32_t layout, const float sampleScale) noexcept {
+    const auto* api = GetColorExtension();
+    if (!api || !context_ || !extensionConstants_ || (layout != 1 && layout != 2)) return false;
+    if (!extensionEnhancementShader_ && FAILED(device_->CreateComputeShader(api->enhancementShaderBytecode,
+        api->enhancementShaderBytecodeSize, nullptr, &extensionEnhancementShader_))) return false;
+    struct Settings {
+        std::uint32_t width, height, plane, layout;
+        float codeScale, padding[3];
+        std::uint32_t elLayout; float elCodeScale;
+        std::uint32_t elWidth, elHeight;
+    };
+    if (!extensionEnhancementConstants_) {
+        D3D11_BUFFER_DESC desc{};
+        desc.ByteWidth = sizeof(Settings); desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        if (FAILED(device_->CreateBuffer(&desc, nullptr, &extensionEnhancementConstants_))) return false;
+    }
+    if (extensionReconstructedWidth_ != width || extensionReconstructedHeight_ != height) {
+        ReleaseExtensionReconstruction();
+        for (int plane = 0; plane < 3; ++plane) {
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = plane == 0 ? width : (width + 1) / 2;
+            desc.Height = plane == 0 ? height : (height + 1) / 2;
+            desc.MipLevels = desc.ArraySize = 1; desc.SampleDesc.Count = 1;
+            desc.Format = DXGI_FORMAT_R16_UNORM; desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+            if (FAILED(device_->CreateTexture2D(&desc, nullptr, &extensionReconstructedTextures_[plane])) ||
+                FAILED(device_->CreateShaderResourceView(extensionReconstructedTextures_[plane], nullptr,
+                    &extensionReconstructedViews_[plane])) ||
+                FAILED(device_->CreateUnorderedAccessView(extensionReconstructedTextures_[plane], nullptr,
+                    &extensionReconstructedOutputs_[plane]))) {
+                ReleaseExtensionReconstruction();
+                return false;
+            }
+        }
+        extensionReconstructedWidth_ = width; extensionReconstructedHeight_ = height;
+        ReleaseScaleResources();
+    }
+    ID3D11ShaderResourceView* inputs[]{sourceViews_[0], sourceViews_[1], sourceViews_[2],
+        extensionEnhancementViews_[0], extensionEnhancementViews_[1], extensionEnhancementViews_[2]};
+    context_->CSSetShader(extensionEnhancementShader_, nullptr, 0);
+    ID3D11Buffer* buffers[]{extensionEnhancementConstants_, extensionConstants_};
+    context_->CSSetConstantBuffers(0, ARRAYSIZE(buffers), buffers);
+    context_->CSSetShaderResources(0, ARRAYSIZE(inputs), inputs);
+    for (int plane = 0; plane < 3; ++plane) {
+        const Settings settings{plane == 0 ? width : (width + 1) / 2,
+            plane == 0 ? height : (height + 1) / 2, static_cast<std::uint32_t>(plane), layout,
+            sampleScale * 1023.0f, {}, extensionEnhancementSemiplanar_ ? 2u : 1u,
+            extensionEnhancementSemiplanar_ ? 65535.0f / 64.0f : 65535.0f,
+            extensionEnhancementWidth_, extensionEnhancementHeight_};
+        context_->UpdateSubresource(extensionEnhancementConstants_, 0, nullptr, &settings, 0, 0);
+        context_->CSSetUnorderedAccessViews(0, 1, &extensionReconstructedOutputs_[plane], nullptr);
+        context_->Dispatch((settings.width + 15) / 16, (settings.height + 15) / 16, 1);
+    }
+    ID3D11UnorderedAccessView* nullOutput = nullptr;
+    context_->CSSetUnorderedAccessViews(0, 1, &nullOutput, nullptr);
+    ID3D11ShaderResourceView* nullInputs[6]{};
+    context_->CSSetShaderResources(0, ARRAYSIZE(nullInputs), nullInputs);
+    context_->CSSetShader(nullptr, nullptr, 0);
+    return true;
+}
+
 void PlayerVideoRenderer::ReleaseScaleResources() noexcept {
     for (auto& chain : planeScaleChains_) {
         for (auto& pass : chain.passes) {
-            if (pass.view != nullptr) { pass.view->Release(); pass.view = nullptr; }
-            if (pass.target != nullptr) { pass.target->Release(); pass.target = nullptr; }
-            if (pass.texture != nullptr) { pass.texture->Release(); pass.texture = nullptr; }
+            ReleaseCom(pass.view);
+            ReleaseCom(pass.target);
+            ReleaseCom(pass.texture);
         }
         chain = {};
     }
@@ -3135,10 +3205,12 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
         return FFFResult::Success;
     }
 
-    const auto planeCount = sourceInputLayout_ == 1 ? 3u :
-        (sourceInputLayout_ == 2 ? 2u : 1u);
+    const bool reconstructed = extensionReconstructed_ && actualMode_ != FFF3FPColorMode::RawHdrAsSdr;
+    const auto layout = reconstructed ? 1u : sourceInputLayout_;
+    auto* inputViews = reconstructed ? extensionReconstructedViews_ : sourceViews_;
+    const auto planeCount = layout == 1 ? 3u : (layout == 2 ? 2u : 1u);
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceViews_); ++plane) {
-        if (plane >= planeCount || sourceViews_[plane] == nullptr) {
+        if (plane >= planeCount || inputViews[plane] == nullptr) {
             scaledSourceViews_[plane] = nullptr;
             continue;
         }
@@ -3148,26 +3220,21 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
             (sourceHeight_ + (1u << sourceChromaHeightShift_) - 1) >> sourceChromaHeightShift_;
         const auto targetWidth = std::min(planeWidth, outputWidth);
         const auto targetHeight = std::min(planeHeight, outputHeight);
-        const auto format = sourceInputLayout_ == 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
-            (sourceInputLayout_ == 2 && plane == 1 ? DXGI_FORMAT_R16G16_FLOAT :
+        const auto format = layout == 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+            (layout == 2 && plane == 1 ? DXGI_FORMAT_R16G16_FLOAT :
                 DXGI_FORMAT_R16_FLOAT);
         const auto ensure = EnsurePlaneScaleChain(plane, planeWidth, planeHeight,
             targetWidth, targetHeight, static_cast<std::uint32_t>(format));
         if (ensure != FFFResult::Success) return ensure;
 
-        // Select the reconstruction filter once for the whole chain. The
-        // decision uses the overall downsample ratio (display area / source)
-        // rather than any single pass's instantaneous ratio, which the
-        // halving chain keeps near 0.5. Heavy downscales use an area-average
-        // (box) filter for anti-aliasing; otherwise honour the user's
-        // scaling-quality preference (Lanczos-3 for high quality, bicubic
-        // for balanced).
+        // Select the filter from the overall ratio, not each halving pass:
+        // severe downscale uses area average; otherwise use the configured quality.
         const float scaleX = static_cast<float>(targetWidth) / static_cast<float>(planeWidth);
         const float scaleY = static_cast<float>(targetHeight) / static_cast<float>(planeHeight);
         const std::uint32_t filter = std::min(scaleX, scaleY) < 0.25f ? 2u :
             (scalingQuality_ == FFF3FPVideoScalingQuality::HighQuality ? 1u : 0u);
 
-        auto* currentView = sourceViews_[plane];
+        auto* currentView = inputViews[plane];
         auto currentWidth = planeWidth;
         auto currentHeight = planeHeight;
         for (const auto& pass : planeScaleChains_[plane].passes) {
@@ -3243,12 +3310,10 @@ FFFResult PlayerVideoRenderer::DrawWithVideoProcessor(ID3D11Texture2D* inputText
 }
 
 void PlayerVideoRenderer::ReleaseVideoProcessor() noexcept {
-    if (videoProcessor_ != nullptr) { videoProcessor_->Release(); videoProcessor_ = nullptr; }
-    if (videoProcessorEnumerator_ != nullptr) {
-        videoProcessorEnumerator_->Release(); videoProcessorEnumerator_ = nullptr;
-    }
-    if (videoContext_ != nullptr) { videoContext_->Release(); videoContext_ = nullptr; }
-    if (videoDevice_ != nullptr) { videoDevice_->Release(); videoDevice_ = nullptr; }
+    ReleaseCom(videoProcessor_);
+    ReleaseCom(videoProcessorEnumerator_);
+    ReleaseCom(videoContext_);
+    ReleaseCom(videoDevice_);
     videoProcessorInputFormat_ = videoProcessorOutputFormat_ = DXGI_FORMAT_UNKNOWN;
     videoProcessorInputColorSpace_ = videoProcessorOutputColorSpace_ = DXGI_COLOR_SPACE_CUSTOM;
     videoProcessorInputWidth_ = videoProcessorInputHeight_ = 0;
@@ -3257,14 +3322,8 @@ void PlayerVideoRenderer::ReleaseVideoProcessor() noexcept {
 }
 
 void PlayerVideoRenderer::ReleaseVideoProcessorInputSurface() noexcept {
-    if (videoProcessorRenderTarget_ != nullptr) {
-        videoProcessorRenderTarget_->Release();
-        videoProcessorRenderTarget_ = nullptr;
-    }
-    if (videoProcessorRenderTexture_ != nullptr) {
-        videoProcessorRenderTexture_->Release();
-        videoProcessorRenderTexture_ = nullptr;
-    }
+    ReleaseCom(videoProcessorRenderTarget_);
+    ReleaseCom(videoProcessorRenderTexture_);
 }
 
 FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
@@ -3370,11 +3429,8 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
             if (!devicePollOnly) {
                 videoChanged = videoGeneration_.load() != observedVideoGeneration;
                 const auto cameraLive = projection360Enabled_.load(std::memory_order_acquire) != 0;
-                // A new decoded frame is never held behind the overlay cadence. Static
-                // subtitle/danmaku updates are still coalesced to their requested rate.
-                // A live 360 camera follows the same rule as decoded video: submit
-                // the newest view immediately and let the swap-chain frame-latency
-                // contract pace it to the physical display (including 120 Hz).
+                // Decode and 360-view updates present immediately; overlay-only
+                // updates obey their cadence. The swap chain paces the display.
                 if (const auto now = std::chrono::steady_clock::now();
                     !videoChanged && !cameraLive &&
                     nextPresentation != std::chrono::steady_clock::time_point::min() &&
@@ -3590,12 +3646,10 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requeste
         timedTextShadowBlurEffect_->SetInput(0, nullptr);
         timedTextShadowBlurEffect_->Release(); timedTextShadowBlurEffect_ = nullptr;
     }
-    if (d2dTimedTextShadowTarget_ != nullptr) {
-        d2dTimedTextShadowTarget_->Release(); d2dTimedTextShadowTarget_ = nullptr;
-    }
-    if (d2dAtlasTarget_ != nullptr) { d2dAtlasTarget_->Release(); d2dAtlasTarget_ = nullptr; }
-    if (timedTextAtlasView_ != nullptr) { timedTextAtlasView_->Release(); timedTextAtlasView_ = nullptr; }
-    if (timedTextAtlasTexture_ != nullptr) { timedTextAtlasTexture_->Release(); timedTextAtlasTexture_ = nullptr; }
+    ReleaseCom(d2dTimedTextShadowTarget_);
+    ReleaseCom(d2dAtlasTarget_);
+    ReleaseCom(timedTextAtlasView_);
+    ReleaseCom(timedTextAtlasTexture_);
     D3D11_TEXTURE2D_DESC texture{};
     texture.Width = texture.Height = size; texture.MipLevels = texture.ArraySize = 1;
     texture.Format = hdrLinear ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -3648,8 +3702,8 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextInstanceCapacity(const std::size_t
     const auto requested = static_cast<std::uint32_t>(std::min<std::size_t>(count, 4096));
     auto capacity = std::max<std::uint32_t>(64, timedTextSpriteInstanceCapacity_);
     while (capacity < requested) capacity = std::min<std::uint32_t>(capacity * 2, 4096);
-    if (timedTextSpriteInstanceView_ != nullptr) { timedTextSpriteInstanceView_->Release(); timedTextSpriteInstanceView_ = nullptr; }
-    if (timedTextSpriteInstanceBuffer_ != nullptr) { timedTextSpriteInstanceBuffer_->Release(); timedTextSpriteInstanceBuffer_ = nullptr; }
+    ReleaseCom(timedTextSpriteInstanceView_);
+    ReleaseCom(timedTextSpriteInstanceBuffer_);
     D3D11_BUFFER_DESC buffer{};
     buffer.ByteWidth = sizeof(TimedTextSpriteInstance) * capacity;
     buffer.Usage = D3D11_USAGE_DYNAMIC; buffer.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -4109,11 +4163,7 @@ void PlayerVideoRenderer::CompositeTimedText(ID3D11RenderTargetView* target,
         viewport.TopLeftX = static_cast<float>(rect.x); viewport.TopLeftY = static_cast<float>(rect.y);
         viewport.Width = static_cast<float>(rect.width); viewport.Height = static_cast<float>(rect.height);
     }
-    // This is a complete pipeline boundary, not a continuation of the layer
-    // redraw above. Danmaku sprite batching leaves an instanced vertex shader
-    // bound; using that shader after its instance SRV is detached produces no
-    // valid fullscreen triangle and makes both overlay layers disappear until
-    // some unrelated video draw happens to restore the old state.
+    // Restore the complete fullscreen pipeline after instanced danmaku drawing.
     context_->OMSetRenderTargets(1, &target, nullptr);
     context_->OMSetBlendState(timedTextBlend_, blendFactor, UINT_MAX);
     context_->RSSetViewports(1, &viewport);
@@ -4159,13 +4209,11 @@ void PlayerVideoRenderer::ReleaseTimedTextSlotResources(
     const auto index = static_cast<std::size_t>(slot);
     if (index >= ARRAYSIZE(timedTextTextures_)) return;
     if (d2dContext_ != nullptr) d2dContext_->SetTarget(nullptr);
-    if (d2dTargets_[index] != nullptr) { d2dTargets_[index]->Release(); d2dTargets_[index] = nullptr; }
-    if (timedTextPipelineQueries_[index] != nullptr) {
-        timedTextPipelineQueries_[index]->Release(); timedTextPipelineQueries_[index] = nullptr;
-    }
-    if (timedTextViews_[index] != nullptr) { timedTextViews_[index]->Release(); timedTextViews_[index] = nullptr; }
-    if (timedTextTargets_[index] != nullptr) { timedTextTargets_[index]->Release(); timedTextTargets_[index] = nullptr; }
-    if (timedTextTextures_[index] != nullptr) { timedTextTextures_[index]->Release(); timedTextTextures_[index] = nullptr; }
+    ReleaseCom(d2dTargets_[index]);
+    ReleaseCom(timedTextPipelineQueries_[index]);
+    ReleaseCom(timedTextViews_[index]);
+    ReleaseCom(timedTextTargets_[index]);
+    ReleaseCom(timedTextTextures_[index]);
     timedTextWidths_[index] = timedTextHeights_[index] = 0;
     timedTextRenderedHdrHighlights_[index] = false;
     timedTextPipelineQueryInFlight_[index] = false;
@@ -4184,33 +4232,29 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
     timedTextAtlasSize_ = 0;
     timedTextSpriteInstanceCapacity_ = 0;
     timedTextSpriteCacheHits_ = timedTextSpriteCacheMisses_ = 0;
-    if (timedTextRenderingParams_ != nullptr) {
-        timedTextRenderingParams_->Release(); timedTextRenderingParams_ = nullptr;
-    }
+    ReleaseCom(timedTextRenderingParams_);
     if (timedTextShadowBlurEffect_ != nullptr) {
         timedTextShadowBlurEffect_->SetInput(0, nullptr);
         timedTextShadowBlurEffect_->Release(); timedTextShadowBlurEffect_ = nullptr;
     }
-    if (d2dTimedTextShadowTarget_ != nullptr) {
-        d2dTimedTextShadowTarget_->Release(); d2dTimedTextShadowTarget_ = nullptr;
-    }
-    if (d2dAtlasTarget_ != nullptr) { d2dAtlasTarget_->Release(); d2dAtlasTarget_ = nullptr; }
+    ReleaseCom(d2dTimedTextShadowTarget_);
+    ReleaseCom(d2dAtlasTarget_);
     for (std::size_t index = 0; index < ARRAYSIZE(timedTextTextures_); ++index)
         ReleaseTimedTextSlotResources(static_cast<TimedTextLayerSlot>(index));
     if (d2dCoverBackdropSource_ == nullptr && d2dCoverBackdropTarget_ == nullptr &&
         coverBackdropBlurEffect_ == nullptr) {
-        if (d2dContext_ != nullptr) { d2dContext_->Release(); d2dContext_ = nullptr; }
-        if (d2dDevice_ != nullptr) { d2dDevice_->Release(); d2dDevice_ = nullptr; }
+        ReleaseCom(d2dContext_);
+        ReleaseCom(d2dDevice_);
     }
-    if (timedTextSpriteInstanceView_ != nullptr) { timedTextSpriteInstanceView_->Release(); timedTextSpriteInstanceView_ = nullptr; }
-    if (timedTextSpriteInstanceBuffer_ != nullptr) { timedTextSpriteInstanceBuffer_->Release(); timedTextSpriteInstanceBuffer_ = nullptr; }
-    if (timedTextSpritePixelShader_ != nullptr) { timedTextSpritePixelShader_->Release(); timedTextSpritePixelShader_ = nullptr; }
-    if (timedTextSpriteVertexShader_ != nullptr) { timedTextSpriteVertexShader_->Release(); timedTextSpriteVertexShader_ = nullptr; }
-    if (timedTextAtlasView_ != nullptr) { timedTextAtlasView_->Release(); timedTextAtlasView_ = nullptr; }
-    if (timedTextAtlasTexture_ != nullptr) { timedTextAtlasTexture_->Release(); timedTextAtlasTexture_ = nullptr; }
+    ReleaseCom(timedTextSpriteInstanceView_);
+    ReleaseCom(timedTextSpriteInstanceBuffer_);
+    ReleaseCom(timedTextSpritePixelShader_);
+    ReleaseCom(timedTextSpriteVertexShader_);
+    ReleaseCom(timedTextAtlasView_);
+    ReleaseCom(timedTextAtlasTexture_);
     timedTextAtlasHdr_ = false;
     timedTextResourcesHdr_ = false;
-    if (timedTextBlend_ != nullptr) { timedTextBlend_->Release(); timedTextBlend_ = nullptr; }
+    ReleaseCom(timedTextBlend_);
     {
         std::lock_guard lock(timedTextMutex_);
         for (std::size_t index = 0; index < ARRAYSIZE(timedTextLayers_); ++index) {
@@ -4228,11 +4272,7 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
 
 void PlayerVideoRenderer::SetHdrMetadata() noexcept {
     if (swapChain_ == nullptr || !swapHdr_) return;
-    // An SDR source presented on the scRGB chain has no mastering display and no
-    // content light level. The fallback HDR10 block would still declare Rec.2020
-    // primaries and a 100-nit peak the source never claimed, which is exactly the
-    // kind of hint that makes a display tone map the picture. Declare "none" and
-    // let DWM apply its default mapping to the linear values we hand over.
+    // SDR has no HDR mastering metadata; let DWM map the linear scRGB values.
     if (hdrProcessor_.State().format == FFF3FPHdrFormat::Sdr) {
         swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
         return;
@@ -4245,40 +4285,8 @@ void PlayerVideoRenderer::SetHdrMetadata() noexcept {
 FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNativeSize,
     const bool coverArt, const bool prepareOnly) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
-    AVFrame* enhancementBaseTransfer = nullptr;
-    struct EnhancementTransferGuard final {
-        AVFrame*& frame;
-        ~EnhancementTransferGuard() { if (frame != nullptr) av_frame_free(&frame); }
-    } enhancementTransferGuard{enhancementBaseTransfer};
-    const auto* enhancementFrame = EnhancementFrame(frame);
-    const AVFrame* extensionEnhancementFrame = enhancementFrame;
-    const auto* extensionApi = GetColorExtension();
-    const auto* initialDoviMetadata = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
-    if (extensionApi != nullptr && extensionApi->applyFrame != nullptr &&
-        enhancementFrame != nullptr && initialDoviMetadata != nullptr) {
-        if (frame->format == AV_PIX_FMT_D3D11 || frame->hw_frames_ctx != nullptr) {
-            enhancementBaseTransfer = av_frame_alloc();
-            if (enhancementBaseTransfer == nullptr ||
-                av_hwframe_transfer_data(enhancementBaseTransfer, frame, 0) < 0) {
-                if (enhancementBaseTransfer != nullptr) av_frame_free(&enhancementBaseTransfer);
-                enhancementBaseTransfer = nullptr;
-                extensionEnhancementFrame = nullptr;
-            } else {
-                av_frame_copy_props(enhancementBaseTransfer, frame);
-                frame = enhancementBaseTransfer;
-            }
-        }
-        if (frame->format != AV_PIX_FMT_D3D11 && frame->format != AV_PIX_FMT_D3D11VA_VLD) {
-            const FFFColorExtensionInput request{sizeof(FFFColorExtensionInput),
-                FFFColorExtensionVersion, avutil_version(), 0,
-                initialDoviMetadata->data, initialDoviMetadata->size,
-                extensionEnhancementFrame,
-                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->width),
-                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->height),
-                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->format)};
-            (void)extensionApi->applyFrame(&request, const_cast<AVFrame*>(frame));
-        }
-    }
+    const auto* extensionEnhancementFrame = EnhancementFrame(frame);
+    const auto hdrState = hdrProcessor_.ProcessFrame(frame, hdrPeakNits_, paperWhiteNits_);
     struct PlaybackWorkGuard final {
         std::atomic<std::uint32_t>& pending;
         explicit PlaybackWorkGuard(std::atomic<std::uint32_t>& value) noexcept : pending(value) {
@@ -4288,8 +4296,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     } playbackWorkGuard(playbackWorkPending_);
     const auto width = static_cast<std::uint32_t>(frame->width);
     const auto height = static_cast<std::uint32_t>(frame->height);
-    const auto hdrState = hdrProcessor_.ProcessFrame(
-        frame, hdrPeakNits_, paperWhiteNits_);
     // YUV matrix selection stays a property of the transfer/colorspace pair;
     // the shader's gamut switch is driven by the primaries instead.
     const auto source2020 = hdrState.format != FFF3FPHdrFormat::Sdr || IsRec2020(frame);
@@ -4345,13 +4351,10 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         // The timed-text/presentation thread owns the immediate context. Do not
         // make the playback worker wait behind it; the next decoded frame will
         // supersede this one and audio can continue on schedule.
+        coalescedVideoFrames_.fetch_add(1, std::memory_order_relaxed);
         return FFFResult::Success;
     }
-    // Written under deviceMutex_ like every other access to these two flags, so the
-    // check-then-act in EnsurePipeline cannot be overtaken by this writer. Set here
-    // (after the lock, before the pipeline is built) rather than next to ProcessFrame:
-    // a frame this renderer refuses to draw has no business changing pipeline
-    // eligibility either.
+    // Publish extension eligibility under deviceMutex_ before EnsurePipeline.
     extensionEligible_ = hdrState.format == FFF3FPHdrFormat::DolbyVision &&
         av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA) != nullptr;
     std::unique_lock presentLock(presentMutex_, std::defer_lock);
@@ -4360,6 +4363,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     if (!presentLock.owns_lock()) {
         // Present and ResizeBuffers must never overlap. Dropping this render is
         // safe because the following decoded frame publishes the latest state.
+        coalescedVideoFrames_.fetch_add(1, std::memory_order_relaxed);
         return FFFResult::Success;
     }
     // Keep the logical render counter useful for headless/clip-mode sessions;
@@ -4374,6 +4378,8 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     const auto pipelineResult = EnsurePipeline(width, height, input.layout, input.bitDepth,
         input.chromaWidthShift, input.chromaHeightShift, d3d11Frame);
     if (pipelineResult != FFFResult::Success) return pipelineResult;
+    extensionReconstructed_ = false;
+    bool reconstructEnhancement = false;
     if (extensionShader_ && extensionConstants_) {
         FFFColorExtensionOutput output{};
         output.size = sizeof(output);
@@ -4387,6 +4393,9 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
                 extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->height),
                 extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->format)};
             applied = GetColorExtension()->prepare(&request, &output) != 0;
+            if (applied && (output.flags & FFFColorExtensionGpuEnhancement) != 0)
+                applied = UploadExtensionEnhancement(extensionEnhancementFrame);
+            reconstructEnhancement = applied && (output.flags & FFFColorExtensionGpuEnhancement) != 0;
         }
         if (!applied) std::memset(output.constants, 0, sizeof(output.constants));
         context_->UpdateSubresource(extensionConstants_, 0, nullptr, output.constants, 0, 0);
@@ -4418,21 +4427,20 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, convertedRgb_.data(),
             width * bytesPerPixel, 0);
     }
+    if (reconstructEnhancement) {
+        extensionReconstructed_ = ReconstructExtensionEnhancement(width, height, input.layout, input.sampleScale);
+        if (!extensionReconstructed_) {
+            const unsigned char zero[FFFColorExtensionCapacity]{};
+            context_->UpdateSubresource(extensionConstants_, 0, nullptr, zero, 0, 0);
+            hdrProcessor_.SetExtensionProcessing(0, false);
+        }
+    }
     ShaderSettings settings{};
     settings.colorMode = static_cast<std::uint32_t>(actualMode_);
     settings.reserved = 0;
     const auto hlgCompatibility = static_cast<std::uint32_t>(FFF3FPHdrCompatibility::Hlg);
-    // The decode transfer function must follow the *pixels*, not the metadata
-    // classification. ST 2094 dynamic metadata (HDR10+, HDR Vivid) is defined
-    // for streams that keep their own encoding: metadata arriving later must
-    // not change how the samples are decoded. A "HLG signal + HDR Vivid
-    // metadata" stream decoded as PQ over-brightens its highlights by an order
-    // of magnitude (docs/21), and would flip transfer mid-playback.
-    //   1) Dolby Vision keeps its compatibility-layer decision: the RPU
-    //      remapping has its own semantics that a container trc cannot express.
-    //   2) Otherwise follow the frame's own color_trc when it declares one.
-    //   3) Fall back to the format-based inference for frames that declare
-    //      nothing (previous behaviour).
+    // Dynamic metadata does not change the pixel transfer function. Dolby Vision
+    // uses its compatibility transfer; other HDR follows frame TRC, then classification.
     auto transferFromFrame = 0u;
     const bool frameDeclaresTrc = frame != nullptr && frame->color_trc != AVCOL_TRC_UNSPECIFIED;
     if (frameDeclaresTrc) {
@@ -4455,7 +4463,10 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     settings.targetPeak = hdrState.targetPeakNits;
     settings.sourceWidth = static_cast<float>(width); settings.sourceHeight = static_cast<float>(height);
     settings.outputWidth = static_cast<float>(swapWidth_); settings.outputHeight = static_cast<float>(swapHeight_);
-    settings.inputLayout = input.layout; settings.sampleScale = input.sampleScale;
+    settings.inputLayout = extensionReconstructed_ ? 1u : input.layout;
+    settings.sampleScale = extensionReconstructed_ ? 65535.0f / 1023.0f : input.sampleScale;
+    cachedOriginalInputLayout_ = input.layout;
+    cachedOriginalSampleScale_ = input.sampleScale;
     const auto maximum = static_cast<float>((1u << input.bitDepth) - 1u);
     const auto shift = input.bitDepth > 8 ? input.bitDepth - 8 : 0;
     if (directYuv && !IsFullRange(frame)) {
@@ -4530,24 +4541,12 @@ void PlayerVideoRenderer::ReleaseCoverBackdropResources() noexcept {
         coverBackdropBlurEffect_->SetInput(0, nullptr);
         coverBackdropBlurEffect_->Release(); coverBackdropBlurEffect_ = nullptr;
     }
-    if (d2dCoverBackdropTarget_ != nullptr) {
-        d2dCoverBackdropTarget_->Release(); d2dCoverBackdropTarget_ = nullptr;
-    }
-    if (d2dCoverBackdropSource_ != nullptr) {
-        d2dCoverBackdropSource_->Release(); d2dCoverBackdropSource_ = nullptr;
-    }
-    if (coverBackdropSourceTarget_ != nullptr) {
-        coverBackdropSourceTarget_->Release(); coverBackdropSourceTarget_ = nullptr;
-    }
-    if (coverBackdropSourceTexture_ != nullptr) {
-        coverBackdropSourceTexture_->Release(); coverBackdropSourceTexture_ = nullptr;
-    }
-    if (coverBackdropView_ != nullptr) {
-        coverBackdropView_->Release(); coverBackdropView_ = nullptr;
-    }
-    if (coverBackdropTexture_ != nullptr) {
-        coverBackdropTexture_->Release(); coverBackdropTexture_ = nullptr;
-    }
+    ReleaseCom(d2dCoverBackdropTarget_);
+    ReleaseCom(d2dCoverBackdropSource_);
+    ReleaseCom(coverBackdropSourceTarget_);
+    ReleaseCom(coverBackdropSourceTexture_);
+    ReleaseCom(coverBackdropView_);
+    ReleaseCom(coverBackdropTexture_);
     coverBackdropWidth_ = coverBackdropHeight_ = 0;
     coverBackdropVideoGeneration_ = 0;
     coverBackdropAppliedBlurSettingsGeneration_ = 0;
@@ -4565,11 +4564,7 @@ FFFResult PlayerVideoRenderer::EnsureCoverBackdropResources() noexcept {
     const auto width = cacheSize.width;
     const auto height = cacheSize.height;
     if (width == 0 || height == 0) return FFFResult::InvalidState;
-    // The cache receives the main shader's output at a fixed source-relative
-    // size. FP16 is required here because scRGB values above 1.0 represent
-    // real HDR luminance and must survive the blur passes without UNORM
-    // clamping. DrawCoverBackdrop() linearly scales this completed texture to
-    // the current output region; swap-chain dimensions never enter this key.
+    // Keep source-relative cache sizing and FP16 values above 1.0 for HDR blur.
     const auto format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     if (coverBackdropTexture_ != nullptr && width == coverBackdropWidth_ &&
         height == coverBackdropHeight_ &&
@@ -4874,11 +4869,7 @@ FFFResult PlayerVideoRenderer::Set360View(const bool enabled, const float yaw,
     // Publish the enable flag last so an acquire load observes this complete
     // yaw/pitch/FOV tuple rather than a partially updated camera state.
     projection360Enabled_.store(enabled ? 1u : 0u, std::memory_order_release);
-    // View changes are lightweight state updates. Wake the presentation thread
-    // directly instead of forcing every mouse sample through the playback
-    // worker queue, where it can accumulate behind decode work.
-    // Coalesce high-frequency mouse samples into one wake-up per pending
-    // presentation. The presenter always reads the latest camera tuple.
+    // View updates wake the presenter directly and coalesce to the latest camera tuple.
     if (!view360RedrawPending_.exchange(true, std::memory_order_acq_rel)) {
         {
             std::lock_guard lock(timedTextMutex_);
@@ -4914,11 +4905,7 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
             swapHeight_,
             sourceLimitedToNativeSize_ || fitLimitToNative_.load(std::memory_order_acquire));
     }
-    // Apply the view transform (zoom + pan) around the destination center.
-    // Zoom scales the fitted video box; pan offsets are normalized to the
-    // unzoomed box and clamped to the interval the transformed box can actually
-    // occupy: z > 1 slides a magnified box that still covers the fitted box,
-    // z < 1 slides a shrunken box inside it (letterbox around the picture).
+    // Scale the fit box around its center; pan stays relative to that unzoomed box.
     const auto zoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire));
     const auto panX = std::bit_cast<float>(viewPanXBits_.load(std::memory_order_acquire));
     const auto panY = std::bit_cast<float>(viewPanYBits_.load(std::memory_order_acquire));
@@ -4927,14 +4914,7 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         const float fittedHeight = static_cast<float>(destination.height);
         const float zoomedWidth = std::max(1.0f, fittedWidth * zoom);
         const float zoomedHeight = std::max(1.0f, fittedHeight * zoom);
-        // The box origin may sit between x0 (aligned with the fitted box) and
-        // x0 + fitted − transformed. For z > 1 the far end falls to the left (negative
-        // offset, bringing the picture's right/bottom half into view); for z < 1 it
-        // falls to the right (the box retreats inside the fitted box, letterboxing the
-        // picture). Taking min/max of the two ends covers both regimes with one
-        // expression — writing it as [x0 − (transformed − fitted), x0] flips the
-        // interval when z < 1, and std::clamp(lo > hi) is undefined behaviour.
-        // The clamp itself only absorbs float drift and out-of-range callers.
+        // min/max keeps clamp bounds ordered for both zoom-in and zoom-out.
         const float edgeX0 = static_cast<float>(destination.x);
         const float edgeX1 = static_cast<float>(destination.x) + fittedWidth - zoomedWidth;
         const float minX = std::min(edgeX0, edgeX1), maxX = std::max(edgeX0, edgeX1);
@@ -4960,7 +4940,9 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         // image to the window first throws away source detail (and can distort
         // its 2:1 aspect ratio), especially in small windows. Sample the native
         // source planes directly in the projection shader instead.
-        std::copy(std::begin(sourceViews_), std::end(sourceViews_), presentationViews);
+        auto* views = extensionReconstructed_ && actualMode_ != FFF3FPColorMode::RawHdrAsSdr
+            ? extensionReconstructedViews_ : sourceViews_;
+        std::copy(views, views + 3, presentationViews);
     } else {
         const auto scaleResult = PrepareScaledVideo(destination.width, destination.height,
             presentationViews);
@@ -5095,12 +5077,7 @@ FFFResult PlayerVideoRenderer::ReadPixelRegion(const std::uint32_t x, const std:
         sourceFormat != DXGI_FORMAT_R10G10B10A2_UNORM &&
         sourceFormat != DXGI_FORMAT_R16G16B16A16_FLOAT)
         return FFFResult::NotSupported;
-    // NOTE: this allocates a staging texture per call. Callers are expected to
-    // throttle (the managed side serialises thumbnail requests), so the cost is
-    // acceptable; caching it would add renderer state that must stay in sync
-    // with swap-chain resizes. If readback ever becomes hot, cache it keyed on
-    // (format, width, height) and invalidate on swap-chain re-creation.
-    // Equal to width/height: the bounds check above rejected larger regions.
+    // Occasional readback uses a per-call staging texture, sized to the checked region.
     const auto copyWidth = width;
     const auto copyHeight = height;
     D3D11_TEXTURE2D_DESC stagingDesc{};
@@ -5363,27 +5340,28 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
         swapChain_ = nullptr;
     }
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
-        if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
-        if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
+        ReleaseCom(sourceViews_[plane]);
+        ReleaseCom(sourceTextures_[plane]);
     }
-    if (constants_ != nullptr) { constants_->Release(); constants_ = nullptr; }
-    if (scaleConstants_ != nullptr) { scaleConstants_->Release(); scaleConstants_ = nullptr; }
-    if (pointSampler_ != nullptr) { pointSampler_->Release(); pointSampler_ = nullptr; }
-    if (panoramaSampler_ != nullptr) { panoramaSampler_->Release(); panoramaSampler_ = nullptr; }
-    if (sampler_ != nullptr) { sampler_->Release(); sampler_ = nullptr; }
-    if (pixelShader_ != nullptr) { pixelShader_->Release(); pixelShader_ = nullptr; }
-    if (extensionShader_) { extensionShader_->Release(); extensionShader_ = nullptr; }
-    if (extensionConstants_) { extensionConstants_->Release(); extensionConstants_ = nullptr; }
+    ReleaseCom(constants_);
+    ReleaseCom(scaleConstants_);
+    ReleaseCom(pointSampler_);
+    ReleaseCom(panoramaSampler_);
+    ReleaseCom(sampler_);
+    ReleaseCom(pixelShader_);
+    ReleaseCom(extensionShader_);
+    ReleaseCom(extensionConstants_);
+    ReleaseExtensionEnhancement();
+    ReleaseCom(extensionEnhancementShader_);
+    ReleaseCom(extensionEnhancementConstants_);
     extensionAttempted_ = false;
     extensionEligible_ = false;
-    if (scalePixelShader_ != nullptr) { scalePixelShader_->Release(); scalePixelShader_ = nullptr; }
-    if (coverBackdropPixelShader_ != nullptr) {
-        coverBackdropPixelShader_->Release(); coverBackdropPixelShader_ = nullptr;
-    }
-    if (timedTextPixelShader_ != nullptr) { timedTextPixelShader_->Release(); timedTextPixelShader_ = nullptr; }
-    if (vertexShader_ != nullptr) { vertexShader_->Release(); vertexShader_ = nullptr; }
-    if (context_ != nullptr) { context_->Release(); context_ = nullptr; }
-    if (device_ != nullptr) { device_->Release(); device_ = nullptr; }
+    ReleaseCom(scalePixelShader_);
+    ReleaseCom(coverBackdropPixelShader_);
+    ReleaseCom(timedTextPixelShader_);
+    ReleaseCom(vertexShader_);
+    ReleaseCom(context_);
+    ReleaseCom(device_);
     swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
     swapHdr_ = false;
     swapOutputBits_ = 8;
@@ -5422,8 +5400,8 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     ReleaseCoverBackdropResources();
     ReleaseScaleResources();
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
-        if (sourceViews_[plane] != nullptr) { sourceViews_[plane]->Release(); sourceViews_[plane] = nullptr; }
-        if (sourceTextures_[plane] != nullptr) { sourceTextures_[plane]->Release(); sourceTextures_[plane] = nullptr; }
+        ReleaseCom(sourceViews_[plane]);
+        ReleaseCom(sourceTextures_[plane]);
     }
     sourceWidth_ = sourceHeight_ = 0;
     sourceInputLayout_ = UINT32_MAX;
@@ -5473,8 +5451,8 @@ void PlayerVideoRenderer::Close() noexcept {
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
     ReleaseDeviceObjects();
-    if (writeFactory_ != nullptr) { writeFactory_->Release(); writeFactory_ = nullptr; }
-    if (d2dFactory_ != nullptr) { d2dFactory_->Release(); d2dFactory_ = nullptr; }
+    ReleaseCom(writeFactory_);
+    ReleaseCom(d2dFactory_);
     {
         std::lock_guard lock(timedTextMutex_);
         for (std::size_t index = 0; index < ARRAYSIZE(timedTextLayers_); ++index) {
@@ -5491,13 +5469,8 @@ bool PlayerVideoRenderer::IsWideGamutSource() const noexcept {
     return sourceWideGamut_.load(std::memory_order_acquire);
 }
 float PlayerVideoRenderer::EffectivePaperWhiteNits() const noexcept {
-    // An SDR picture on the scRGB chain has no inherent luminance: scRGB 1.0 is
-    // 80 nits by contract, so "white" must be anchored somewhere. Anchor it at
-    // the Windows SDR content brightness — the luminance DWM maps an ordinary
-    // SDR window's white to while HDR is active — so the picture lands on the
-    // same brightness the classic SDR chain produced. This also follows the
-    // user's HDR calibration slider, which the player cannot read any other way.
-    // HDR sources keep the configured paper white (graphics white convention).
+    // SDR on scRGB anchors white at Windows SDR content brightness (1.0 = 80 nits).
+    // HDR keeps the configured paper white.
     if (actualMode_ == FFF3FPColorMode::MapToHdr && !hdrProcessor_.IsHdrSource()) {
         // Reported whenever Windows HDR is active. If the platform does not
         // report it, fall back to scRGB 1.0 (80 nits) rather than the 200-nit
@@ -5509,16 +5482,8 @@ float PlayerVideoRenderer::EffectivePaperWhiteNits() const noexcept {
 }
 
 bool PlayerVideoRenderer::WantsScRgbPresentationPath(const std::uint32_t bitDepth) const noexcept {
-    // An HDR transfer function and widened primaries both need the scRGB chain:
-    // a gamma-encoded Rec.709 swap chain cannot hold PQ levels, nor colours
-    // outside Rec.709. Those two qualify whatever the SDR policy says. With the
-    // Auto SDR policy a plain SDR source joins them once its precision above
-    // 8 bit is carried on a gamma R10G10B10A2 chain that DWM resamples as an
-    // ordinary SDR window; the linear scRGB chain is what keeps that precision.
-    // Callers pass the bit depth they are about to render with: EnsureSwapChain
-    // receives it as a parameter (the member is still 0 before the first frame
-    // lands in EnsurePipeline, which would mis-route the very first frame of a
-    // 10-bit source onto the 8-bit SDR chain and force a mid-stream rebuild).
+    // HDR and wide gamut always need scRGB; Auto SDR also admits >8-bit sources.
+    // Use the supplied depth because sourceBitDepth_ is unset before the first frame.
     if (hdrProcessor_.IsHdrSource() || IsWideGamutSource()) return true;
     return sdrScRgbMode_ != 0 && bitDepth > 8;
 }

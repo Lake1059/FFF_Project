@@ -92,15 +92,12 @@ Public NotInheritable Class 播放列表
     Public Sub 添加多个(本地路径 As IEnumerable(Of String))
         ArgumentNullException.ThrowIfNull(本地路径)
         Dim 新项目 As New List(Of 播放列表项)()
-        Dim 已存在路径 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         SyncLock 项目
+            Dim 已存在路径 As New HashSet(Of String)(项目.Select(Function(x) x.路径), StringComparer.OrdinalIgnoreCase)
             For Each 路径 In 本地路径
                 If String.IsNullOrWhiteSpace(路径) Then Continue For
                 Dim 项 As New 播放列表项(路径)
-                If 已存在路径.Add(项.路径) AndAlso
-                    Not 项目.Any(Function(x) String.Equals(x.路径, 项.路径, StringComparison.OrdinalIgnoreCase)) Then
-                    新项目.Add(项)
-                End If
+                If 已存在路径.Add(项.路径) Then 新项目.Add(项)
             Next
             If 新项目.Count = 0 Then Return
             项目.AddRange(新项目)
@@ -285,13 +282,14 @@ Public NotInheritable Class 播放列表
         Dim 完整列表路径 = 规范本地文件(列表路径)
         Dim 目录 = IO.Path.GetDirectoryName(完整列表路径)
         Dim 新列表 As New List(Of 播放列表项)()
+        Dim 已发现 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         For Each 原始行 In IO.File.ReadLines(完整列表路径, Encoding.UTF8)
             Dim 行 = 原始行.Trim()
             If 行.Length = 0 OrElse 行.StartsWith("#", StringComparison.Ordinal) Then Continue For
             If 行.Contains("://", StringComparison.Ordinal) OrElse 行.StartsWith("\\", StringComparison.Ordinal) Then Throw New InvalidDataException("M3U8 中包含被禁止的网络路径。")
             Dim 路径 = If(IO.Path.IsPathRooted(行), 行, IO.Path.Combine(目录, 行))
             Dim 值 As New 播放列表项(路径)
-            If Not 新列表.Any(Function(x) String.Equals(x.路径, 值.路径, StringComparison.OrdinalIgnoreCase)) Then 新列表.Add(值)
+            If 已发现.Add(值.路径) Then 新列表.Add(值)
         Next
         SyncLock 项目
             Dim 当前路径 = If(当前值 >= 0 AndAlso 当前值 < 项目.Count, 项目(当前值).路径, Nothing)

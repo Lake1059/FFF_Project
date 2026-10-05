@@ -226,53 +226,34 @@ Public NotInheritable Class 播放器控制器
     End Function
 
     Friend Function 读取定时文字状态() As 定时文字状态
-        Try
-            Return 会话?.当前定时文字状态
-        Catch ex As ObjectDisposedException
-            Return Nothing
-        Catch ex As 播放器异常
-            Return Nothing
-        End Try
+        Return 安全读取会话(Function(目标) 目标.当前定时文字状态)
     End Function
 
     Friend Function 读取弹幕状态() As 定时文字状态
-        Try
-            Return 会话?.当前弹幕状态
-        Catch ex As ObjectDisposedException
-            Return Nothing
-        Catch ex As 播放器异常
-            Return Nothing
-        End Try
+        Return 安全读取会话(Function(目标) 目标.当前弹幕状态)
     End Function
 
     Public Function 安全读取快照() As 播放器快照
-        Try
-            Return 会话?.当前快照
-        Catch ex As ObjectDisposedException
-            Return Nothing
-        Catch ex As 播放器异常
-            Return Nothing
-        End Try
+        Return 安全读取会话(Function(目标) 目标.当前快照)
     End Function
 
     Friend Function 读取音频峰值() As Single()
-        Try
-            Return If(会话?.读取音频峰值(), Array.Empty(Of Single)())
-        Catch ex As ObjectDisposedException
-            Return Array.Empty(Of Single)()
-        Catch ex As 播放器异常
-            Return Array.Empty(Of Single)()
-        End Try
+        Return 安全读取会话(Function(目标) 目标.读取音频峰值(), Array.Empty(Of Single)())
     End Function
 
     Public Function 安全读取媒体信息() As 媒体信息
+        Return 安全读取会话(Function(目标) 目标.当前媒体信息)
+    End Function
+
+    Private Function 安全读取会话(Of T)(读取 As Func(Of 播放器会话, T), Optional 默认值 As T = Nothing) As T
+        Dim 目标 = 会话
+        If 目标 Is Nothing Then Return 默认值
         Try
-            Return 会话?.当前媒体信息
+            Return 读取(目标)
         Catch ex As ObjectDisposedException
-            Return Nothing
         Catch ex As 播放器异常
-            Return Nothing
         End Try
+        Return 默认值
     End Function
 
     Friend Sub 设置360视角(启用 As Boolean, 水平角度 As Single, 垂直角度 As Single,
@@ -297,10 +278,7 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
-    ''' <summary>图片模式：读取图片信息（转发到会话层；失败或非图片返回 Nothing）。
-    ''' 预留：当前由探针与后续接线使用；若接线"动画图停首帧"（设计 G4），
-    ''' 判据必须是 <see cref="原生图片标志.动画"/> 标志且 <c>是静态图片</c>，
-    ''' 不得只看视频流/图片扩展名——否则视频会被误停首帧（视频回归点）。</summary>
+    ''' <summary>返回图片信息；失败或非图片返回 Nothing。</summary>
     Friend Function 取图片信息() As 原生图片信息?
         Dim 目标 = 会话
         If 已释放 OrElse 目标 Is Nothing Then Return Nothing
@@ -688,13 +666,7 @@ Public NotInheritable Class 播放器控制器
     End Function
 
     Friend Function 读取输入音频峰值() As Single()
-        Try
-            Return If(会话?.读取输入音频峰值(), Array.Empty(Of Single)())
-        Catch ex As ObjectDisposedException
-            Return Array.Empty(Of Single)()
-        Catch ex As 播放器异常
-            Return Array.Empty(Of Single)()
-        End Try
+        Return 安全读取会话(Function(目标) 目标.读取输入音频峰值(), Array.Empty(Of Single)())
     End Function
 
     Public Function 读取光盘状态() As 光盘状态
@@ -1642,6 +1614,12 @@ Public NotInheritable Class 播放器控制器
         Return If(解码器 = 解码模式.GPU, "GPU", "CPU")
     End Function
 
+    Friend Function 读取HDR操作提示() As String
+        Dim 快照 = 安全读取快照()
+        If 快照 Is Nothing OrElse Not 快照.是HDR源 Then Return String.Empty
+        Return 取得HDR模式说明(快照)
+    End Function
+
     Private Function 取得HDR模式说明(快照 As 播放器快照) As String
         Dim 外部扩展可用 = False
         If 快照.HDR规格 = HDR格式.杜比视界 AndAlso 快照.HDR处理路径 <> HDR处理路径.外部RPU处理 Then
@@ -1649,7 +1627,7 @@ Public NotInheritable Class 播放器控制器
             外部扩展可用 = 信息 IsNot Nothing AndAlso 信息.流.Any(
                 Function(流) 流.索引 = 快照.当前视频流 AndAlso 流.外部RPU扩展可用)
         End If
-        Select Case 当前色彩输出
+        Select Case 快照.请求色彩模式
             Case 色彩输出模式.映射到SDR
                 Return "HDR 映射到 SDR"
             Case 色彩输出模式.原始HDR按SDR呈现

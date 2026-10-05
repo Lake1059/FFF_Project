@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "3FP/Core/MediaText.h"
 #include "3FP/Api/FFF.Player.Api.h"
 #include "Shared/Ffmpeg/SharedFileInput.h"
 
@@ -22,14 +23,10 @@ extern "C" {
 #include <limits>
 
 namespace {
+using PlayerMediaText::FfmpegError;
+using PlayerMediaText::CopyUtf8;
 constexpr std::uint32_t ApiVersion = 1;
 constexpr std::int64_t TicksPerMillisecond = 10'000;
-
-std::string FfmpegError(const int error) {
-    char buffer[AV_ERROR_MAX_STRING_SIZE]{};
-    return av_strerror(error, buffer, sizeof(buffer)) == 0
-        ? buffer : "FFmpeg error " + std::to_string(error);
-}
 
 std::wstring Utf8ToWide(const std::string& value) {
     if (value.empty()) return {};
@@ -750,15 +747,6 @@ private:
     bool hasPendingCopy_{};
 };
 
-FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
-    std::uint32_t* requiredSize) noexcept {
-    const auto bytes = value.size() + 1;
-    if (bytes > UINT32_MAX) return FFFResult::NativeFailure;
-    if (requiredSize != nullptr) *requiredSize = static_cast<std::uint32_t>(bytes);
-    if (output == nullptr || outputSize < bytes) return FFFResult::BufferTooSmall;
-    std::memcpy(output, value.c_str(), bytes);
-    return FFFResult::Success;
-}
 }
 
 FFFResult FFF3FP_OpenAssSubtitle(const char* path, const char* fontDirectories,
