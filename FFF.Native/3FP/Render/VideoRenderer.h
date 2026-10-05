@@ -357,6 +357,7 @@ private:
     IDXGISwapChain4* swapChain_;
     ID3D11VertexShader* vertexShader_;
     ID3D11PixelShader* pixelShader_;
+    ID3D11PixelShader* sdrPixelShaders_[3]{};
     ID3D11PixelShader* extensionShader_ = nullptr;
     ID3D11Buffer* extensionConstants_ = nullptr;
     ID3D11Texture2D* extensionEnhancementTextures_[3]{};

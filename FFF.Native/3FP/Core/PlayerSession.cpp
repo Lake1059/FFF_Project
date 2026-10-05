@@ -1950,8 +1950,14 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
     context->pkt_timebase = stream->time_base;
     if (result >= 0 && video && !hardwareRequested) {
         const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+        // Large dav1d frames benefit from more workers; other software decoders
+        // retain the existing bounded thread policy.
+        const auto threadLimit = codec->id == AV_CODEC_ID_AV1 &&
+            std::string_view(codec->name) == "libdav1d" &&
+            stream->codecpar->width >= 3840 && stream->codecpar->height >= 2160
+            ? 16u : MaximumSoftwareDecoderThreads;
         context->thread_count = static_cast<int>(std::min(
-            hardwareThreads, MaximumSoftwareDecoderThreads));
+            hardwareThreads, threadLimit));
         context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     }
     if (disc_ && disc_->Menu() && video &&

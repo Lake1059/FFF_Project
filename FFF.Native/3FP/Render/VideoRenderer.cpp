@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "3FP/Render/VideoRenderer.h"
 #include "3FP/Render/ShaderBytecode.h"
+#include "3FP/Render/SdrShaderBytecode.h"
 #include "3FP/Render/ColorExtension.h"
 
 extern "C" {
@@ -443,6 +444,15 @@ cbuffer Settings : register(b0) {
     uint Projection360; float ViewYaw; float ViewPitch; float ViewFovY;
     float ViewAspect; float3 ViewPadding;
 };
+#ifdef FFF_SDR_LAYOUT
+// Compile-time specialization only: sampling and color formulas stay identical.
+#define InputLayout FFF_SDR_LAYOUT
+#define ColorMode 0
+#define Transfer 0
+#define Gamut 0
+#define Reserved 0
+#define Projection360 0
+#endif
 Texture2D<float4> Source : register(t0);
 Texture2D<float4> ChromaU : register(t1);
 Texture2D<float4> ChromaV : register(t2);
@@ -2435,7 +2445,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         (outputBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
             DXGI_FORMAT_B8G8R8A8_UNORM);
     description.SampleDesc.Count = 1; description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    description.BufferCount = 2; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    description.BufferCount = 3; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_NONE;
     description.Flags = allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
     ComPtr<IDXGISwapChain1> chain1;
@@ -2480,9 +2490,12 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         // call opts the window into an explicit Advanced Color presentation
         // contract instead of the ordinary SDR desktop path.
     }
-    // Keep at most one complete composite queued. Decode and managed overlay
-    // production retain only their latest state while Present is waiting.
-    swapChain_->SetMaximumFrameLatency(1);
+    // This chain has no FRAME_LATENCY_WAITABLE_OBJECT flag, so the swap-chain
+    // latency API is invalid. Bound the device queue to two frames instead,
+    // allowing GPU rendering to overlap the synchronized Present.
+    ComPtr<IDXGIDevice1> latencyDevice;
+    if (SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&latencyDevice))))
+        latencyDevice->SetMaximumFrameLatency(2);
     {
         std::lock_guard lock(timedTextMutex_);
         presentationFrameRate_ = DetectDisplayRefreshRate(window_);
@@ -2710,6 +2723,10 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         else texture.Format = bitDepth > 8 ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
         texture.SampleDesc.Count = 1;
         texture.Usage = D3D11_USAGE_DEFAULT; texture.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (inputLayout == 1) {
+            texture.Usage = D3D11_USAGE_DYNAMIC;
+            texture.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        }
         if (FAILED(device_->CreateTexture2D(&texture, nullptr, &sourceTextures_[plane])) ||
             FAILED(device_->CreateShaderResourceView(sourceTextures_[plane], nullptr, &sourceViews_[plane]))) {
             SetError("Could not create the decoded frame textures."); return FFFResult::DeviceFailure;
@@ -2901,7 +2918,22 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     context_->IASetInputLayout(nullptr);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(vertexShader_, nullptr, 0);
-    context_->PSSetShader(extensionShader_ ? extensionShader_ : pixelShader_, nullptr, 0);
+    auto* shader = extensionShader_ ? extensionShader_ : pixelShader_;
+    if (!extensionShader_ && effect == 0 && projection360 == 0 &&
+        cachedVideoSettings_.colorMode == 0 && cachedVideoSettings_.transfer == 0 &&
+        cachedVideoSettings_.gamut == 0 && cachedVideoSettings_.inputLayout < 3) {
+        auto*& specialized = sdrPixelShaders_[cachedVideoSettings_.inputLayout];
+        if (specialized == nullptr) {
+            const BYTE* bytecode[] = {FFFSdrRgbShaderBytecode,
+                FFFSdrPlanarShaderBytecode, FFFSdrSemiPlanarShaderBytecode};
+            const SIZE_T sizes[] = {sizeof(FFFSdrRgbShaderBytecode),
+                sizeof(FFFSdrPlanarShaderBytecode), sizeof(FFFSdrSemiPlanarShaderBytecode)};
+            device_->CreatePixelShader(bytecode[cachedVideoSettings_.inputLayout],
+                sizes[cachedVideoSettings_.inputLayout], nullptr, &specialized);
+        }
+        if (specialized != nullptr) shader = specialized;
+    }
+    context_->PSSetShader(shader, nullptr, 0);
     context_->PSSetConstantBuffers(1, 1, &extensionConstants_);
     context_->PSSetConstantBuffers(0, 1, &constants_);
     ID3D11SamplerState* samplers[] = {sampler_, pointSampler_, panoramaSampler_};
@@ -4357,24 +4389,35 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     // Publish extension eligibility under deviceMutex_ before EnsurePipeline.
     extensionEligible_ = hdrState.format == FFF3FPHdrFormat::DolbyVision &&
         av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA) != nullptr;
-    std::unique_lock presentLock(presentMutex_, std::defer_lock);
-    if (interactiveMove) (void)presentLock.try_lock();
-    else presentLock.lock();
-    if (!presentLock.owns_lock()) {
-        // Present and ResizeBuffers must never overlap. Dropping this render is
-        // safe because the following decoded frame publishes the latest state.
-        coalescedVideoFrames_.fetch_add(1, std::memory_order_relaxed);
-        return FFFResult::Success;
-    }
     // Keep the logical render counter useful for headless/clip-mode sessions;
     // swapChainPresents remains the separate counter for real DXGI presents.
     if (window_ == nullptr) {
         ++presentedVideoFrames_;
         return FFFResult::Success;
     }
-    const auto chainResult = EnsureSwapChain(frame->width, frame->height, input.bitDepth);
-    if (chainResult != FFFResult::Success) return chainResult;
-    if (swapHdr_) SetHdrMetadata();
+    // Ordinary SDR uploads do not access the back buffer. Avoid waiting for a
+    // blocking Present when the chain's size/precision/color contract is stable.
+    // All resize, HDR and output reconfiguration still take both locks.
+    RECT client{};
+    const bool stableSdrChain = swapChain_ != nullptr && !swapHdr_ &&
+        requestedMode_ == FFF3FPColorMode::MapToSdr &&
+        actualMode_ == FFF3FPColorMode::MapToSdr &&
+        PreferredOutputBitDepth(input.bitDepth, false) == swapOutputBits_ &&
+        GetClientRect(window_, &client) && client.right > 0 && client.bottom > 0 &&
+        static_cast<std::uint32_t>(client.right) == swapWidth_ &&
+        static_cast<std::uint32_t>(client.bottom) == swapHeight_;
+    if (!stableSdrChain) {
+        std::unique_lock presentLock(presentMutex_, std::defer_lock);
+        if (interactiveMove) (void)presentLock.try_lock();
+        else presentLock.lock();
+        if (!presentLock.owns_lock()) {
+            coalescedVideoFrames_.fetch_add(1, std::memory_order_relaxed);
+            return FFFResult::Success;
+        }
+        const auto chainResult = EnsureSwapChain(frame->width, frame->height, input.bitDepth);
+        if (chainResult != FFFResult::Success) return chainResult;
+        if (swapHdr_) SetHdrMetadata();
+    }
     const auto pipelineResult = EnsurePipeline(width, height, input.layout, input.bitDepth,
         input.chromaWidthShift, input.chromaHeightShift, d3d11Frame);
     if (pipelineResult != FFFResult::Success) return pipelineResult;
@@ -4418,10 +4461,32 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         // selected slice; this remains GPU-to-GPU and removes the full CPU transfer.
         context_->CopySubresourceRegion(sourceTextures_[0], 0, 0, 0, 0, texture, slice, nullptr);
     } else if (directYuv) {
-        context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, frame->data[0], frame->linesize[0], 0);
-        context_->UpdateSubresource(sourceTextures_[1], 0, nullptr, frame->data[1], frame->linesize[1], 0);
-        if (input.layout == 1)
-            context_->UpdateSubresource(sourceTextures_[2], 0, nullptr, frame->data[2], frame->linesize[2], 0);
+        if (input.layout == 1) {
+            // DISCARD permits storage renaming while the previous frame is
+            // sampled, avoiding updates of the same busy DEFAULT texture.
+            for (unsigned plane = 0; plane < 3; ++plane) {
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                if (FAILED(context_->Map(sourceTextures_[plane], 0,
+                    D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                    SetError("Could not map the decoded frame plane.");
+                    return FFFResult::DeviceFailure;
+                }
+                const auto xShift = plane == 0 ? 0u : input.chromaWidthShift;
+                const auto yShift = plane == 0 ? 0u : input.chromaHeightShift;
+                const auto rows = (height + (1u << yShift) - 1) >> yShift;
+                const auto rowBytes = ((width + (1u << xShift) - 1) >> xShift) *
+                    (input.bitDepth > 8 ? 2u : 1u);
+                for (unsigned row = 0; row < rows; ++row)
+                    std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
+                        static_cast<std::size_t>(row) * mapped.RowPitch,
+                        frame->data[plane] + static_cast<std::ptrdiff_t>(row) *
+                            frame->linesize[plane], rowBytes);
+                context_->Unmap(sourceTextures_[plane], 0);
+            }
+        } else {
+            context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, frame->data[0], frame->linesize[0], 0);
+            context_->UpdateSubresource(sourceTextures_[1], 0, nullptr, frame->data[1], frame->linesize[1], 0);
+        }
     } else {
         const auto bytesPerPixel = input.bitDepth <= 8 ? 4u : 8u;
         context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, convertedRgb_.data(),
@@ -5241,9 +5306,12 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::PlayerInformation);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     const auto generation = videoGeneration_.load();
-    // Keep deviceMutex_ held across Present: releasing it here would let the
-    // reconfiguration path tear down the chain this frame is presenting.
-    const auto result = PresentCurrentFrame(swapChain_, generation);
+    // presentMutex_ protects the chain/back buffer from reconfiguration. Keep
+    // their references, but release the context lock while DXGI waits so the
+    // playback worker can upload the next frame without changing this composite.
+    ComPtr<IDXGISwapChain4> retainedChain = swapChain_;
+    deviceLock.unlock();
+    const auto result = PresentCurrentFrame(retainedChain.Get(), generation);
     if (result != FFFResult::Success) return result;
     // A format/color-space switch destroys and recreates the flip-model chain.
     // Drop every reference to the old chain and its back buffer before handing
@@ -5251,9 +5319,11 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     // can wait for these references while this thread waits for deviceMutex_.
     backBufferTarget.Reset();
     backBuffer.Reset();
+    retainedChain.Reset();
     // Empty layers no longer need full-size GPU surfaces. Release them after the
     // clearing composite reached the display, preserving the submitted sequence.
     presentLock.unlock();
+    deviceLock.lock();
     auto allEmpty = true;
     for (std::size_t index = 0; index < ARRAYSIZE(timedTextLayers_); ++index) {
         bool empty = false;
@@ -5349,6 +5419,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseCom(panoramaSampler_);
     ReleaseCom(sampler_);
     ReleaseCom(pixelShader_);
+    for (auto*& shader : sdrPixelShaders_) ReleaseCom(shader);
     ReleaseCom(extensionShader_);
     ReleaseCom(extensionConstants_);
     ReleaseExtensionEnhancement();
