@@ -13,9 +13,8 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $ProjectRoot $OutputDirectory
 }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
-if (Test-Path -LiteralPath (Join-Path $OutputDirectory "FFF.DolbyVision.Test.dll")) {
-    throw "The release destination contains the private Dolby Vision test DLL. Use a clean release directory."
-}
+# Publishing uses a clean staging directory. Existing sidecar extensions in the
+# destination are independent of the bundle and must not prevent updating the host.
 . (Join-Path $ScriptDirectory "Resolve-Toolchain.ps1")
 $MSBuild = Get-MSBuildTool
 $DotNet = Get-DotNetTool
@@ -39,6 +38,7 @@ try {
     & $DotNet publish (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
         -c $Configuration -r win-x64 --self-contained false -o $StagingDirectory `
         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+        -p:PublishDocumentationFiles=false `
         -p:DebugType=None -p:DebugSymbols=false
     if ($LASTEXITCODE -ne 0) { throw "FFF.Player single-file publish failed." }
     $UnexpectedFiles = @(Get-ChildItem -LiteralPath $StagingDirectory -File | Where-Object { $_.Name -ne "FFF.Player.exe" })
@@ -50,9 +50,10 @@ try {
     $PendingExecutable = Join-Path $OutputDirectory ("FFF.Player.exe.new-" + [Guid]::NewGuid().ToString("N"))
     Copy-Item -LiteralPath $PublishedExecutable -Destination $PendingExecutable
     if (Test-Path -LiteralPath $Executable -PathType Leaf) {
-        Remove-Item -LiteralPath $Executable -Force
+        [IO.File]::Replace($PendingExecutable, $Executable, [NullString]::Value)
+    } else {
+        Move-Item -LiteralPath $PendingExecutable -Destination $Executable
     }
-    Move-Item -LiteralPath $PendingExecutable -Destination $Executable
     $PendingExecutable = $null
     $PublishedFile = Get-Item -LiteralPath $Executable
     Write-Host "Single-file publish completed: $($PublishedFile.FullName) ($($PublishedFile.Length) bytes)"
