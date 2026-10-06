@@ -16,6 +16,7 @@ Usage
     python tools/generate_shader_bytecode.py                  # auto-detect fxc
     python tools/generate_shader_bytecode.py --fxc <path>     # explicit compiler
     python tools/generate_shader_bytecode.py --dry-run        # list what it would do
+    python tools/generate_shader_bytecode.py --sdr-specializations # SDR layout variants
 
 Requirements: the Windows SDK HLSL compiler (fxc.exe). It ships with
 "Windows Kits\\10\\bin\\<version>\\x64\\fxc.exe"; the script probes the newest
@@ -139,13 +140,22 @@ def main() -> int:
                         help="only report what would be regenerated")
     parser.add_argument("--source", default=SOURCE_CPP)
     parser.add_argument("--output", default=OUTPUT_HEADER)
+    parser.add_argument("--sdr-specializations", action="store_true",
+                        help="generate equivalent SDR layout shaders into SdrShaderBytecode.h")
     args = parser.parse_args()
 
     with open(args.source, "r", encoding="utf-8") as handle:
         sources = extract_sources(handle.read())
 
+    shaders = SHADERS
+    if args.sdr_specializations:
+        shaders = [("PixelShaderSource", name, "ps_5_0") for name in
+                   ("FFFSdrRgbShaderBytecode", "FFFSdrPlanarShaderBytecode",
+                    "FFFSdrSemiPlanarShaderBytecode")]
+        if args.output == OUTPUT_HEADER:
+            args.output = os.path.join(os.path.dirname(OUTPUT_HEADER), "SdrShaderBytecode.h")
     if args.dry_run:
-        for name, array, profile in SHADERS:
+        for name, array, profile in shaders:
             print(f"{name} -> {array} ({profile}), {len(sources[name])} bytes of HLSL")
         return 0
 
@@ -154,10 +164,16 @@ def main() -> int:
 
     blocks = []
     with tempfile.TemporaryDirectory() as workdir:
-        for name, array, profile in SHADERS:
-            blob = compile_shader(fxc, sources[name], profile, workdir)
+        for index, (name, array, profile) in enumerate(shaders):
+            hlsl = sources[name]
+            if args.sdr_specializations:
+                hlsl = f"#define FFF_SDR_LAYOUT {index}\n" + hlsl
+            blob = compile_shader(fxc, hlsl, profile, workdir)
             print(f"{array}: {len(blob)} bytes ({profile})")
-            blocks.append(format_array(array, blob))
+            block = format_array(array, blob)
+            if args.sdr_specializations:
+                block = "\n".join(line.rstrip() for line in block.splitlines())
+            blocks.append(block)
 
     header = "#pragma once\n\n#include <d3d11.h>\n\n"
     header += (
@@ -166,6 +182,8 @@ def main() -> int:
         "// Regenerate with tools/generate_shader_bytecode.py after editing the HLSL in\n"
         "// VideoRenderer.cpp.\n\n"
     )
+    if args.sdr_specializations:
+        header += "// Use --sdr-specializations to regenerate this header.\n\n"
     header += "\n\n".join(blocks) + "\n"
 
     with open(args.output, "w", encoding="utf-8", newline="\n") as handle:
