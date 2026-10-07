@@ -159,7 +159,7 @@ private:
     void BuildImageInfo(FFF3FPImageInfo& info) const noexcept;
     FFFResult LoadCoverArt() noexcept;
     FFFResult DecodePacket(AVCodecContext* decoder, AVPacket* packet, bool video,
-        AVFormatContext* owner) noexcept;
+        AVFormatContext* owner, bool decodeEnhancement = true) noexcept;
     FFFResult ConfigureDolbyVisionEnhancementDecoder() noexcept;
     void DecodeDolbyVisionEnhancementPacket(const AVPacket* packet) noexcept;
     void DrainDolbyVisionEnhancementDecoder() noexcept;
@@ -167,6 +167,7 @@ private:
     void ResetDolbyVisionEnhancementDecoder() noexcept;
     void FlushDolbyVisionEnhancementDecoder() noexcept;
     void AttachDolbyVisionEnhancementFrame(AVFrame* base) noexcept;
+    bool DolbyVisionEnhancementNeedsReadAhead() const noexcept;
     bool PumpVideoPresentation() noexcept;
     void QueueVideoFrame(AVFrame* frame) noexcept;
     void ClearVideoQueue() noexcept;

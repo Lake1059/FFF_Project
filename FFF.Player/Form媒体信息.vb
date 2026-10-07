@@ -124,7 +124,7 @@ Public Class Form媒体信息
 
     Private Sub 刷新列表(信息 As 媒体信息, 快照 As 播放器快照)
         Dim HDR签名 = If(快照 Is Nothing, String.Empty,
-            $"{快照.当前视频流}:{快照.HDR规格}:{快照.HDR处理路径}:{快照.动态HDR元数据有效}:{快照.HDR回退有效}:{快照.显示器峰值尼特}:{快照.HDR有效目标峰值尼特}")
+            $"{快照.当前视频流}:{快照.HDR规格}:{快照.HDR处理路径}:{快照.杜比视界增强层类型}:{快照.有杜比视界RPU}:{快照.有杜比视界增强层}:{快照.动态HDR元数据有效}:{快照.HDR回退有效}:{快照.显示器峰值尼特}:{快照.HDR有效目标峰值尼特}")
         Dim 签名 = If(信息 Is Nothing, "", $"{信息.格式}|{信息.文件大小}|{信息.时长100纳秒}|{HDR签名}|{String.Join(";", 信息.流.Select(Function(x) $"{x.索引}:{x.流ID}:{x.编码}:{x.比特率}:{x.流大小}:{x.位深度}:{x.标称帧率分子}/{x.标称帧率分母}:{x.HDR格式}:{x.HDR兼容规格}:{x.HDR处理说明}:{x.增强层解码像素格式}:{x.增强层硬件加速}:{x.主显示器色域}:{x.最大内容光照}:{x.原始采样位数}:{x.未压缩内容MD5}"))}")
         If 签名 = 元数据签名 Then Return
         元数据签名 = 签名
@@ -160,44 +160,30 @@ Public Class Form媒体信息
                     添加条目(group, "格式配置档次", 视频配置档次(流))
                     添加条目如果有值(group, "HDR 格式", 流.HDR格式)
                     添加条目如果有值(group, "HDR 兼容基础", 流.HDR兼容规格)
-                    If 流.杜比视界配置档次 > 0 Then
-                        添加条目(group, "杜比视界", $"配置档次 {流.杜比视界配置档次} / 级别 {流.杜比视界级别}")
-                        添加条目(group, "杜比视界层结构", 合并杜比层信息(流))
+                    Dim 当前流 = 快照 IsNot Nothing AndAlso 快照.当前视频流 = 流.索引
+                    Dim 是杜比 = 流.杜比视界配置档次 > 0 OrElse
+                        (当前流 AndAlso 快照 IsNot Nothing AndAlso 快照.HDR规格 = HDR格式.杜比视界)
+                    If 是杜比 Then
+                        If 当前流 Then
+                            添加条目(group, 文案(格式用途, 快照), 摘要(快照))
+                        Else
+                            添加条目(group, 流.HDR格式, 未选中摘要(流))
+                        End If
                         If Not String.IsNullOrEmpty(流.增强层解码像素格式) Then
                             添加条目(group, "增强层解码", $"{If(String.IsNullOrEmpty(流.增强层硬件加速), "CPU", 流.增强层硬件加速)} / {流.增强层解码像素格式}")
                         End If
                     End If
-                    Dim 当前流 = 快照 IsNot Nothing AndAlso 快照.当前视频流 = 流.索引
-                    Dim 当前帧已处理 = 当前流 AndAlso 快照.HDR处理路径 = HDR处理路径.外部RPU处理
-                    Dim 处理说明 = 流.HDR处理说明
-                    If 当前流 Then
-                        Select Case 快照.HDR处理路径
-                            Case HDR处理路径.外部RPU处理 : 处理说明 = "测试扩展使用逐帧 RPU 处理画面"
-                            Case HDR处理路径.杜比视界兼容基础层回退 : 处理说明 = "杜比视界基础层兼容输出（未应用 RPU 映射）"
-                            Case HDR处理路径.杜比视界FEL基础层回退 : 处理说明 = "杜比视界基础层兼容输出（未应用 RPU 映射和 FEL）"
-                        End Select
-                    End If
-                    添加条目如果有值(group, "HDR 处理路径", 处理说明)
-                    If 流.外部RPU扩展可用 OrElse 当前帧已处理 Then
-                        添加条目(group, "外部色彩扩展",
-                            If(Not 当前流, "已加载，未选中此视频流",
-                               If(当前帧已处理, "当前帧已处理", "已加载，当前帧未处理")))
-                    End If
+                    If Not 是杜比 Then 添加条目如果有值(group, "HDR 处理路径", 流.HDR处理说明)
                     If 快照 IsNot Nothing AndAlso 快照.当前视频流 = 流.索引 Then
-                        添加条目(group, "动态 HDR 映射", If(快照.动态HDR元数据有效, "当前帧已启用", "当前帧未启用"))
+                        If Not 是杜比 Then 添加条目(group, "动态 HDR 映射", If(快照.动态HDR元数据有效, "当前帧已启用", "当前帧未启用"))
                         If 快照.实际色彩模式 = 色彩输出模式.峰值映射HDR Then
                             If 快照.显示器峰值尼特 > 0 Then
                                 添加条目(group, "HDR 显示范围", $"峰值 {快照.显示器峰值尼特:0} cd/m²，全屏 {快照.显示器全屏峰值尼特:0} cd/m²")
                             End If
                             If 快照.HDR有效目标峰值尼特 > 0 Then 添加条目(group, "HDR 有效目标", $"{快照.HDR有效目标峰值尼特:0} cd/m²")
                         End If
-                        If 快照.HDR回退有效 Then
-                            Dim 回退说明 = If(快照.杜比视界增强层类型 = 杜比视界增强层类型.FEL,
-                                "基础层兼容输出（未应用 RPU 映射和 FEL）",
-                                "基础层兼容输出（未应用 RPU 映射）")
-                            添加条目(group, "HDR 回退", 回退说明)
-                        End If
-                    ElseIf 流.HDR回退 Then
+                        If 快照.HDR回退有效 AndAlso Not 是杜比 Then 添加条目(group, "HDR 回退", "是")
+                    ElseIf 流.HDR回退 AndAlso Not 是杜比 Then
                         添加条目(group, "HDR 回退", "是")
                     End If
                     添加条目(group, "编码 ID", 空值(流.编码标签, 流.编码))
@@ -251,13 +237,6 @@ Public Class Form媒体信息
         UltraDetailListView1.Groups.Add(New LakeUI.UltraDetailListView.ListGroup(name, text))
     End Sub
 
-    Private Shared Function 合并杜比层信息(流 As 媒体流信息) As String
-        Dim 结构 = If(流.有杜比视界RPU, "基础层 + RPU", "基础层")
-        If Not String.IsNullOrWhiteSpace(流.杜比视界增强层) AndAlso 流.杜比视界增强层 <> "None" Then
-            结构 &= $" + 增强层（{流.杜比视界增强层}）"
-        End If
-        Return 结构
-    End Function
     Private Sub 添加条目(group As String, name As String, value As String)
         UltraDetailListView1.Items.Add(New LakeUI.UltraDetailListView.ListItem(New LakeUI.UltraDetailListView.ListSubItem($"{name}：{空值(value)}")) With {.GroupName = group})
     End Sub

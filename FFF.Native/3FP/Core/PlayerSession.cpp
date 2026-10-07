@@ -57,6 +57,25 @@ constexpr std::size_t MaximumPendingVideoPacketBytes = 16 * 1024 * 1024;
 constexpr std::size_t MaximumPendingAudioPackets = 512;
 constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
 
+std::uint32_t DolbyTextVariant(const HdrFrameState& state) noexcept {
+    auto value = state.dolbyVisionProfile & 0xffu;
+    value |= (state.dolbyVisionLevel & 0xffu) << 8;
+    if (state.hasRpu) value |= 1u << 16;
+    if (state.hasEnhancementLayer) value |= 1u << 17;
+    value |= (static_cast<std::uint32_t>(state.enhancementLayer) & 3u) << 18;
+    if (state.externalExtensionActive) value |= 1u << 20;
+    return value;
+}
+
+std::string DolbyExtensionText(const std::uint32_t kind, const HdrFrameState& state,
+    const char* fallback) {
+    if (const auto* api = GetColorExtension(); api != nullptr) {
+        if (const auto* text = api->getStatusText(kind, DolbyTextVariant(state)); text != nullptr)
+            return text;
+    }
+    return fallback == nullptr ? std::string{} : std::string(fallback);
+}
+
 void FreeDolbyVisionEnhancementReference(void*, std::uint8_t* data) noexcept {
     auto* reference = reinterpret_cast<FFFColorExtensionEnhancementFrameReference*>(data);
     if (reference == nullptr) return;
@@ -2353,7 +2372,7 @@ void PlayerSession::PumpPlayback() noexcept {
         pendingVideoPacketBytes_ >= MaximumPendingVideoPacketBytes;
     const auto audioPacketsFull = pendingAudioPackets_.size() >= MaximumPendingAudioPackets ||
         pendingAudioPacketBytes_ >= MaximumPendingAudioPacketBytes;
-    if (videoSaturated() &&
+    if (videoSaturated() && !(DolbyVisionEnhancementNeedsReadAhead() && !videoPacketsFull) &&
         ((!audioRenderer_ || audioBuffered >= TargetAudioBuffer100ns) || videoPacketsFull)) {
         Sleep(1);
         return;
@@ -2387,6 +2406,17 @@ void PlayerSession::PumpPlayback() noexcept {
     TrackPacketBitRate(playbackPacket_, format_);
     discInvalidPackets_ = 0;
     if (playbackPacket_->stream_index == videoStream_) {
+        // Decode EL before retaining a compressed BL packet. Its reorder delay
+        // can exceed the BL queue budget; do not grow the decoded BL queue.
+        if (dolbyVisionEnhancementDecoder_ != nullptr &&
+            pendingVideoPackets_.size() < MaxQueuedVideoFrames &&
+            dolbyVisionEnhancementFrames_.size() < MaxQueuedVideoFrames &&
+            std::all_of(pendingVideoPackets_.begin(), pendingVideoPackets_.end(),
+                [this](const AVPacket* packet) { return packet->opaque == this; })) {
+            DecodeDolbyVisionEnhancementPacket(playbackPacket_);
+            // av_packet_clone preserves opaque; deferred BL decode skips EL.
+            playbackPacket_->opaque = this;
+        }
         if (videoSaturated()) {
             auto* retained = av_packet_clone(playbackPacket_);
             if (retained == nullptr) {
@@ -2397,7 +2427,9 @@ void PlayerSession::PumpPlayback() noexcept {
             pendingVideoPacketBytes_ += static_cast<std::size_t>(std::max(retained->size, 0));
             pendingVideoPackets_.push_back(retained);
         } else {
-            DecodePacket(videoDecoder_, playbackPacket_, true, format_);
+            const bool decodeEnhancement = playbackPacket_->opaque != this;
+            playbackPacket_->opaque = nullptr;
+            DecodePacket(videoDecoder_, playbackPacket_, true, format_, decodeEnhancement);
         }
     }
     else if (playbackPacket_->stream_index == audioStream_ && externalFormat_ == nullptr) {
@@ -2529,7 +2561,10 @@ void PlayerSession::DrainDolbyVisionEnhancementDecoder() noexcept {
     int result = 0;
     while ((result = avcodec_receive_frame(dolbyVisionEnhancementDecoder_,
             dolbyVisionEnhancementDecodeFrame_)) >= 0) {
-        const auto pts = dolbyVisionEnhancementDecodeFrame_->best_effort_timestamp == AV_NOPTS_VALUE
+        // Split EL can have a different reorder pattern from the BL packet DTS.
+        // best_effort_timestamp may choose that DTS and even repeat it, causing
+        // a valid EL to overwrite another entry. Preserve the explicit PTS.
+        const auto pts = dolbyVisionEnhancementDecodeFrame_->pts != AV_NOPTS_VALUE
             ? dolbyVisionEnhancementDecodeFrame_->pts
             : dolbyVisionEnhancementDecodeFrame_->best_effort_timestamp;
         if (pts != AV_NOPTS_VALUE) {
@@ -2613,8 +2648,24 @@ FFFResult PlayerSession::CompleteHardwareFallback(const char* failureMessage) no
     return result;
 }
 
+bool PlayerSession::DolbyVisionEnhancementNeedsReadAhead() const noexcept {
+    if (dolbyVisionEnhancementDecoder_ == nullptr || demuxEnded_ || videoFrameQueue_.empty() ||
+        dolbyVisionEnhancementFrames_.size() >= MaxQueuedVideoFrames ||
+        pendingVideoPackets_.size() >= MaxQueuedVideoFrames) return false;
+    const auto* base = videoFrameQueue_.front();
+    const auto* metadata = av_frame_get_side_data(base, AV_FRAME_DATA_DOVI_METADATA);
+    const auto* api = GetColorExtension();
+    if (api == nullptr || metadata == nullptr) return false;
+    const FFFColorExtensionInput request{sizeof(request), FFFColorExtensionVersion, 0,
+        snapshot_.dolbyVisionProfile, metadata->data, metadata->size};
+    FFFColorExtensionMetadataInfo info{sizeof(info)};
+    if (!api->analyzeMetadata(&request, 1, &info) || !info.requiresEnhancement) return false;
+    const auto pts = base->best_effort_timestamp == AV_NOPTS_VALUE ? base->pts : base->best_effort_timestamp;
+    return pts != AV_NOPTS_VALUE && dolbyVisionEnhancementFrames_.find(pts) == dolbyVisionEnhancementFrames_.end();
+}
+
 FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet, const bool video,
-    AVFormatContext* owner) noexcept {
+    AVFormatContext* owner, const bool decodeEnhancement) noexcept {
     if (decoder == nullptr) return FFFResult::Success;
     if (packet != nullptr && packet->size == 0 && packet->side_data_elems == 0)
         return FFFResult::Success;
@@ -2626,7 +2677,6 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
     av_frame_unref(frame);
     const auto handleFrame = [this, video, owner](AVFrame* decoded) {
         if (video) {
-            AttachDolbyVisionEnhancementFrame(decoded);
             NormalizeVideoFrameTimestamp(decoded);
             const auto seeking = seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_;
             if (state_.load() == FFF3FPState::Playing && !seeking) QueueVideoFrame(decoded);
@@ -2643,7 +2693,7 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
         return receiveResult;
     };
     if (video) {
-        DecodeDolbyVisionEnhancementPacket(packet);
+        if (decodeEnhancement) DecodeDolbyVisionEnhancementPacket(packet);
         FilterAv1HardwareTimecodeMetadata(decoder, packet);
     }
     auto result = avcodec_send_packet(decoder, packet);
@@ -2716,6 +2766,10 @@ bool PlayerSession::PumpVideoPresentation() noexcept {
     const auto primesVisibleVideo = ShouldDelayAudioUntilVideoFrame() &&
         audioUnblockVideoGeneration_ == 0 && videoRenderer_.HasOutputWindow();
     if (playbackPreroll_ && !primesVisibleVideo) return false;
+    const auto enhancementNeedsData = DolbyVisionEnhancementNeedsReadAhead() &&
+        pendingVideoPackets_.size() < MaximumPendingVideoPackets &&
+        pendingVideoPacketBytes_ < MaximumPendingVideoPacketBytes;
+    if (enhancementNeedsData) return false;
     if (primesVisibleVideo || position <= now + 20'000) {
         videoFrameQueue_.pop_front();
         PresentVideoFrame(frame, format_);
@@ -2794,7 +2848,9 @@ void PlayerSession::DecodePendingPacket(const bool video) noexcept {
     auto* packet = queue.front();
     queue.pop_front();
     bytes -= static_cast<std::size_t>(std::max(packet->size, 0));
-    DecodePacket(video ? videoDecoder_ : audioDecoder_, packet, video, format_);
+    const bool decodeEnhancement = packet->opaque != this;
+    packet->opaque = nullptr;
+    DecodePacket(video ? videoDecoder_ : audioDecoder_, packet, video, format_, decodeEnhancement);
     av_packet_free(&packet);
 }
 
@@ -2846,6 +2902,8 @@ std::int64_t PlayerSession::VideoFramePosition(const AVFrame* frame) const noexc
 }
 
 void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept {
+    // Consume paired EL and prune stale surfaces even for frames skipped by Seek.
+    AttachDolbyVisionEnhancementFrame(frame);
     auto* stream = owner->streams[videoStream_];
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
     const auto position = pts == AV_NOPTS_VALUE ? snapshot_.position100ns :
@@ -3897,14 +3955,21 @@ void PlayerSession::RebuildMediaInfo() noexcept {
             streamHdr.ConfigureStream(parameters);
             const auto hdr = static_cast<std::int32_t>(index) == videoStream_
                 ? videoRenderer_.HdrState() : streamHdr.State();
-            json << ",\"hdrFormat\":\"" << EscapeJson(HdrProcessor::FormatName(hdr.format)) << "\""
+            const auto formatName = hdr.format == FFF3FPHdrFormat::DolbyVision
+                ? DolbyExtensionText(FFFColorExtensionDolbyFormatText, hdr, "Dolby Vision")
+                : std::string(HdrProcessor::FormatName(hdr.format));
+            const auto processingPath = hdr.format == FFF3FPHdrFormat::DolbyVision
+                ? DolbyExtensionText(FFFColorExtensionDolbyPathText, hdr, "DolbyVisionFallback")
+                : std::string(HdrProcessor::ProcessingPathName(hdr.processingPath));
+            const auto enhancementName = std::string(HdrProcessor::EnhancementLayerName(hdr.enhancementLayer));
+            json << ",\"hdrFormat\":\"" << EscapeJson(formatName) << "\""
                  << ",\"hdrCompatibility\":\"" << EscapeJson(HdrProcessor::CompatibilityNames(hdr.compatibility)) << "\""
-                 << ",\"hdrProcessingPath\":\"" << EscapeJson(HdrProcessor::ProcessingPathName(hdr.processingPath)) << "\""
+                 << ",\"hdrProcessingPath\":\"" << EscapeJson(processingPath) << "\""
                  << ",\"dolbyVisionProfile\":" << hdr.dolbyVisionProfile
                  << ",\"dolbyVisionLevel\":" << hdr.dolbyVisionLevel
                  << ",\"dolbyVisionRpu\":" << (hdr.hasRpu ? "true" : "false")
                  << ",\"dolbyVisionEnhancementLayer\":\""
-                 << EscapeJson(HdrProcessor::EnhancementLayerName(hdr.enhancementLayer)) << "\""
+                 << EscapeJson(enhancementName) << "\""
                  << ",\"hdrFallback\":" << (hdr.fallback ? "true" : "false")
                  << ",\"dynamicHdrMetadata\":" << (hdr.dynamicMetadata ? "true" : "false")
                  << ",\"externalColorExtensionAvailable\":"

@@ -12,7 +12,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FFF.Player\FFF.Player.vbproj" />
-    <None Update="Fixtures\sample.ass" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

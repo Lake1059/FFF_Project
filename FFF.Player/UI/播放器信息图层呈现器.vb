@@ -472,14 +472,13 @@ Friend NotInheritable Class 播放器信息图层呈现器
 
     Private Shared Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照) As String
         If Not 快照.是HDR源 AndAlso Not 流.是HDR Then Return String.Empty
-        Dim 规格 = HDR规格文本(快照.HDR规格, 流.HDR格式)
-        Dim 杜比 = If(快照.HDR规格 = HDR格式.杜比视界 AndAlso 快照.杜比视界配置档次 > 0,
-            $"P{快照.杜比视界配置档次} L{快照.杜比视界级别} {杜比层文本(快照)}", String.Empty)
+        Dim 是杜比 = 快照.HDR规格 = HDR格式.杜比视界
+        Dim 规格 = If(是杜比, String.Empty, HDR规格文本(快照.HDR规格, 流.HDR格式))
+        Dim 杜比 = If(是杜比,
+            摘要(快照), String.Empty)
         Dim 动态 As String
-        If 快照.HDR处理路径 = HDR处理路径.外部RPU处理 Then
-            动态 = "测试扩展使用逐帧 RPU 处理画面"
-        ElseIf 流.外部RPU扩展可用 Then
-            动态 = "测试扩展已加载，当前帧未处理"
+        If 是杜比 Then
+            动态 = String.Empty
         Else
             动态 = If(快照.动态HDR元数据有效, "动态元数据已用于处理", String.Empty)
         End If
@@ -488,9 +487,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         If 快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso 快照.HDR有效目标峰值尼特 > 0 Then
             亮度 = 合并字段(亮度, $"显示目标 {快照.HDR有效目标峰值尼特:0}尼特")
         End If
-        Dim 回退 = If(快照.HDR回退有效,
-            If(快照.杜比视界增强层类型 = 杜比视界增强层类型.FEL,
-               "基础层兼容输出（未使用 FEL）", "基础层兼容输出"), String.Empty)
+        Dim 回退 = If(快照.HDR回退有效 AndAlso Not 是杜比, "HDR fallback", String.Empty)
         Return 合并字段(规格, 杜比, 动态, 亮度, 回退)
     End Function
 
@@ -499,16 +496,10 @@ Friend NotInheritable Class 播放器信息图层呈现器
             Case HDR格式.HDR10 : Return "HDR10"
             Case HDR格式.HDR10Plus : Return "HDR10+"
             Case HDR格式.HLG : Return "HLG"
-            Case HDR格式.杜比视界 : Return "杜比视界"
+            Case HDR格式.杜比视界 : Return 媒体文本
             Case HDR格式.HDRVivid : Return "HDR Vivid"
             Case Else : Return 媒体文本
         End Select
-    End Function
-
-    Private Shared Function 杜比层文本(快照 As 播放器快照) As String
-        Dim 文本 = If(快照.有杜比视界RPU, "基础层+RPU", "基础层")
-        If 快照.有杜比视界增强层 Then 文本 &= $"+增强层({快照.杜比视界增强层类型})"
-        Return 文本
     End Function
 
     Private Function 视频渲染(快照 As 播放器快照) As String

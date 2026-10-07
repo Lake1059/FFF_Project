@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Hdr/HdrProcessor.h"
+#include "3FP/Render/ColorExtension.h"
 
 extern "C" {
 #include <libavcodec/codec_par.h>
@@ -34,18 +35,6 @@ float ValidLuminance(const double value) noexcept {
 float ValidChromaticity(const double value) noexcept {
     return std::isfinite(value) && value >= 0.0 && value <= 1.0 ?
         static_cast<float>(value) : 0.0f;
-}
-
-float PqCodeToNits(const std::uint16_t code) noexcept {
-    constexpr double m1 = 2610.0 / 16384.0;
-    constexpr double m2 = 2523.0 / 32.0;
-    constexpr double c1 = 3424.0 / 4096.0;
-    constexpr double c2 = 2413.0 / 128.0;
-    constexpr double c3 = 2392.0 / 128.0;
-    const auto value = std::clamp(static_cast<double>(code) / 4095.0, 0.0, 1.0);
-    const auto powered = std::pow(value, 1.0 / m2);
-    const auto denominator = std::max(c2 - c3 * powered, 1.0e-9);
-    return ValidPeak(10000.0 * std::pow(std::max(powered - c1, 0.0) / denominator, 1.0 / m1));
 }
 
 void ClassifyDolbyVision(const AVDOVIDecoderConfigurationRecord* configuration,
@@ -261,38 +250,26 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         }
     } else if (const auto* doviData = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
         doviData != nullptr && doviData->size >= sizeof(AVDOVIMetadata)) {
-        const auto* metadata = reinterpret_cast<const AVDOVIMetadata*>(doviData->data);
-        const auto* header = av_dovi_get_header(metadata);
         next.format = FFF3FPHdrFormat::DolbyVision;
         next.compatibility |= Compatibility(FFF3FPHdrCompatibility::DolbyVision);
         next.hasRpu = true;
-        // Keep the RPU for peak estimation and optional external processing.
-        // This path does not apply its reshaping map to the base layer.
         next.dynamicMetadata = false;
-        if (header != nullptr && next.hasEnhancementLayer) {
-            next.enhancementLayer = header->disable_residual_flag != 0 ?
-                FFF3FPDolbyVisionEnhancementLayer::Mel :
-                FFF3FPDolbyVisionEnhancementLayer::Fel;
-            if (next.enhancementLayer == FFF3FPDolbyVisionEnhancementLayer::Fel) {
-                next.processingPath = FFF3FPHdrProcessingPath::DolbyVisionFelFallback;
-                next.fallback = true;
-            } else {
-                next.processingPath = FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback;
-            }
-        } else {
-            next.processingPath = FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback;
-        }
-        if (const auto* level1 = av_dovi_find_level(metadata, 1); level1 != nullptr) {
-            const auto peak = PqCodeToNits(level1->l1.max_pq);
-            if (peak > 0.0f) {
-                next.sourcePeakNits = peak;
-                dynamicSourcePeak = true;
-            }
-        } else if (const auto* color = av_dovi_get_color(metadata); color != nullptr) {
-            const auto peak = PqCodeToNits(color->source_max_pq);
-            if (peak > 0.0f) {
-                next.sourcePeakNits = peak;
-                dynamicSourcePeak = true;
+        next.externalExtensionActive = false;
+        next.fallback = true;
+        next.processingPath = FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback;
+        if (const auto* api = GetColorExtension(); api != nullptr) {
+            const FFFColorExtensionInput request{sizeof(request), FFFColorExtensionVersion, 0,
+                next.dolbyVisionProfile, doviData->data, doviData->size};
+            FFFColorExtensionMetadataInfo info{sizeof(info)};
+            if (api->analyzeMetadata(&request, next.hasEnhancementLayer ? 1u : 0u, &info)) {
+                if (info.enhancementLayer <= 3)
+                    next.enhancementLayer = static_cast<FFF3FPDolbyVisionEnhancementLayer>(info.enhancementLayer);
+                if (info.requiresEnhancement)
+                    next.processingPath = FFF3FPHdrProcessingPath::DolbyVisionFelFallback;
+                if (const auto peak = ValidPeak(info.sourcePeakNits); peak > 0.0f) {
+                    next.sourcePeakNits = peak;
+                    dynamicSourcePeak = true;
+                }
             }
         }
     } else if (const auto* plusData = av_frame_get_side_data(frame, AV_FRAME_DATA_DYNAMIC_HDR_PLUS);
@@ -452,7 +429,12 @@ const char* HdrProcessor::FormatName(const FFF3FPHdrFormat format) noexcept {
     case FFF3FPHdrFormat::Hdr10: return "HDR10";
     case FFF3FPHdrFormat::Hdr10Plus: return "HDR10+";
     case FFF3FPHdrFormat::Hlg: return "HLG";
-    case FFF3FPHdrFormat::DolbyVision: return "杜比视界";
+    case FFF3FPHdrFormat::DolbyVision:
+        if (const auto* api = GetColorExtension(); api != nullptr) {
+            if (const auto* text = api->getStatusText(FFFColorExtensionDolbyFormatText, 0); text != nullptr)
+                return text;
+        }
+        return "Dolby Vision";
     case FFF3FPHdrFormat::HdrVivid: return "HDR Vivid";
     default: return "SDR";
     }
@@ -463,9 +445,9 @@ const char* HdrProcessor::ProcessingPathName(const FFF3FPHdrProcessingPath path)
     case FFF3FPHdrProcessingPath::StaticHdr10: return "HDR10 static metadata";
     case FFF3FPHdrProcessingPath::Hdr10PlusDynamic: return "HDR10+ metadata-guided display mapping";
     case FFF3FPHdrProcessingPath::HlgDisplayMapped: return "HLG display mapping";
-    case FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback: return "杜比视界基础层兼容输出（未应用 RPU 映射）";
-    case FFF3FPHdrProcessingPath::ExternalDynamic: return "测试扩展使用 RPU 处理画面";
-    case FFF3FPHdrProcessingPath::DolbyVisionFelFallback: return "杜比视界基础层兼容输出（未使用 FEL）";
+    case FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback: return "DolbyVisionFallback";
+    case FFF3FPHdrProcessingPath::ExternalDynamic: return "ExternalDynamic";
+    case FFF3FPHdrProcessingPath::DolbyVisionFelFallback: return "DolbyVisionFELFallback";
     case FFF3FPHdrProcessingPath::HdrVividDynamic: return "HDR Vivid metadata-guided display mapping";
     default: return "None";
     }
@@ -489,7 +471,8 @@ std::string HdrProcessor::CompatibilityNames(const std::uint32_t compatibility) 
     };
     if ((compatibility & Compatibility(FFF3FPHdrCompatibility::Hdr10)) != 0) append("HDR10");
     if ((compatibility & Compatibility(FFF3FPHdrCompatibility::Hlg)) != 0) append("HLG");
-    if ((compatibility & Compatibility(FFF3FPHdrCompatibility::DolbyVision)) != 0) append("杜比视界");
+    if ((compatibility & Compatibility(FFF3FPHdrCompatibility::DolbyVision)) != 0)
+        append(FormatName(FFF3FPHdrFormat::DolbyVision));
     if ((compatibility & Compatibility(FFF3FPHdrCompatibility::HdrVivid)) != 0) append("HDR Vivid");
     return result;
 }
