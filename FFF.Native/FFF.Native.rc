@@ -3,8 +3,13 @@
 // 更新内核 API 时须同步递增此处主版本号。
 #include <winver.h>
 
-// 17 = PlayerApiVersion（FFF.Player.Api.h；FFF3FPSnapshot 尾部新增 ST 2094 诊断字段）
-#define VER_API 17
+// 18 = PlayerApiVersion（FFF.Player.Api.h）。17 已被 #16 占用（FFF3FPSnapshot 尾部新增
+// ST 2094 诊断字段）；本支为 18 = FFF3FPConfiguration 新增 adaptiveDownscaleBeforeUpload /
+// adaptiveDownscaleDropPercent / adaptiveDecoderThreads / min・maxSoftwareDecoderThreads /
+// decoderGrow・ShrinkDropPercent，且 FFF3FPSnapshot 尾部新增 iamfActive / iamfChannels /
+// iamfSoundSystem / videoUpload100ns / iamfContentChannels。
+// 三处必须同值：PlayerApi.cpp 的常量、本文件、FFF.Player.vbproj 的 <PlayerApiVersion>。
+#define VER_API 18
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION VER_API,0,0,0
@@ -21,13 +26,13 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "FFF_Project"
             VALUE "FileDescription", "FFF.Native - 3FP media player kernel"
-            VALUE "FileVersion", "17.0.0.0"
+            VALUE "FileVersion", "18.0.0.0"
             VALUE "InternalName", "FFF.Native"
             VALUE "LegalCopyright", "MIT License"
             VALUE "OriginalFilename", "FFF.Native.dll"
             VALUE "ProductName", "3FP Player Kernel"
-            VALUE "ProductVersion", "0.3.0 (api 17)"
-            VALUE "ApiVersion", "17"
+            VALUE "ProductVersion", "0.3.0 (api 18)"
+            VALUE "ApiVersion", "18"
         END
     END
     BLOCK "VarFileInfo"

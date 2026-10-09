@@ -245,6 +245,13 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         }
     }
 
+    // HDR Vivid carries no transfer-function of its own: `frame->color_trc` is
+    // AVCOL_TRC_UNSPECIFIED on real Vivid streams (verified with ffprobe on the
+    // FATE Vivid and HDR10+ vectors -- stream-level color_transfer is populated,
+    // frame-level color_trc is not). The baseline is therefore taken from the
+    // stream-level classification that ConfigureStream() stored in streamState_
+    // (for the FATE Vivid vector that is Hlg(3), which is correct).
+    //
     // Deliberately read a single scalar (`format`) rather than the accumulating
     // `compatibility` bit set: compatibility is OR-ed in several places (e.g.
     // ClassifyDolbyVision) and `next` inherits it from streamState_, so testing the
@@ -529,6 +536,16 @@ bool BuildInjectedWindow(const FFF3FPHdrMetadataWindow& source,
         window.toneMappingPresent = false;
         if (degrade == HdrMetadataDegrade::None)
             degrade = HdrMetadataDegrade::TooFewAnchors;
+    } else if (previous <= source.kneePointY) {
+        // Anchors are validated non-decreasing from the knee, so this fires exactly
+        // when the declared curve never rises above it: a flat line. Every Bezier
+        // segment then has both endpoints and both slopes at zero, which maps the
+        // whole signal range to 0 -- with a typical 11 to 12 anchor preset that is
+        // about 91% of the 256-row curve texture. The bitstream parser keeps its own
+        // tolerance (shipped HDR10+ legitimately uses the no-curve shape above);
+        // this gate is on the host-supplied API, which already promises a malformed
+        // entry is rejected rather than applied.
+        return false;
     }
     return true;
 }
@@ -736,7 +753,7 @@ const char* HdrProcessor::ProcessingPathName(const FFF3FPHdrProcessingPath path)
     case FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback: return "DolbyVisionFallback";
     case FFF3FPHdrProcessingPath::ExternalDynamic: return "ExternalDynamic";
     case FFF3FPHdrProcessingPath::DolbyVisionFelFallback: return "DolbyVisionFELFallback";
-    case FFF3FPHdrProcessingPath::HdrVividDynamic: return "HDR Vivid metadata-guided display mapping";
+    case FFF3FPHdrProcessingPath::HdrVividDynamic: return "HDR Vivid dynamic peak mapping";
     default: return "None";
     }
 }

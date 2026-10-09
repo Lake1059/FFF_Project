@@ -84,6 +84,11 @@ Public NotInheritable Class 播放器配置
     Public Property SDR纸白尼特 As Single = 203.0F
     Public Property 强制HDR输出 As Boolean
     Public Property 缩放质量 As 视频缩放质量 = 视频缩放质量.高画质
+    ' SDR 源的 scRGB 呈现策略，对应内核 FFF3FPConfiguration.sdrScRgbMode。
+    ' 0 = 从不（历史行为）；1 = 自动（显示器开 Advanced Color 时，位深 >8 或广色域的
+    ' SDR 源走 16bit scRGB 链）。此前只存在于原生结构体里、托管侧没有对应属性，
+    ' 于是构造原生配置时该字段无处可取 —— 现补上，默认 0 保持历史行为。
+    Public Property SDRscRGB模式 As UInteger = 0UI
     Public Property 输出窗口句柄 As IntPtr
     Public Property 音频端点标识 As String = String.Empty
     Public Property 事件同步上下文 As Threading.SynchronizationContext
@@ -176,6 +181,12 @@ Public NotInheritable Class 播放器快照
         显示器峰值尼特 = 值.显示器峰值尼特
         显示器全屏峰值尼特 = 值.显示器全屏峰值尼特
         HDR有效目标峰值尼特 = 值.HDR有效目标峰值尼特
+        IAMF已接管 = 值.IAMF已接管 <> 0
+        IAMF声道数 = CInt(值.IAMF声道数)
+        IAMF声场系统 = CInt(值.IAMF声场系统)
+        IAMF内容声道数 = CInt(值.IAMF内容声道数)
+        ' 上传耗时是最后一个追加字段；与其它微秒级计时一样保留 100ns 精度。
+        视频上传时长 = TimeSpan.FromTicks(CLng(Math.Min(值.视频上传100纳秒, CULng(Long.MaxValue))))
     End Sub
 
     Public ReadOnly Property 状态 As 播放状态
@@ -234,6 +245,45 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 显示器峰值尼特 As UInteger
     Public ReadOnly Property 显示器全屏峰值尼特 As UInteger
     Public ReadOnly Property HDR有效目标峰值尼特 As UInteger
+
+    ' IAMF 沉浸式音频：由 AOM 参考解码器接管的音轨。
+    ' IAMF声道数 是**渲染目标**（固定 7.1.4 = 12）；IAMF内容声道数 才是文件里
+    ' 实际声明的声道数。两者不同时说明内容比渲染目标小 —— libiamf 会把多出的
+    ' 声道填成数字静音（实测 7.1 留 4 路静音、7.1.2 留 2 路），所以不是假内容，
+    ' 但报"7.1.4"会让用户以为四只音箱该响却没响。
+    Public ReadOnly Property IAMF已接管 As Boolean
+    Public ReadOnly Property IAMF声道数 As Integer
+    Public ReadOnly Property IAMF声场系统 As Integer
+    Public ReadOnly Property IAMF内容声道数 As Integer
+
+    ' <summary>本帧把解码平面拷进着色器可见纹理所花的时间（追加字段）。</summary>
+    Public ReadOnly Property 视频上传时长 As TimeSpan
+
+    ' <summary>内容的实际声场名（如 "7.1.4"）；非 IAMF 或未知系统返回空串。</summary>
+    Public ReadOnly Property IAMF布局名 As String
+        Get
+            If Not IAMF已接管 Then Return String.Empty
+            Return 原生IAMF声场系统.布局名(IAMF声场系统)
+        End Get
+    End Property
+
+    ' <summary>状态栏/信息图层用的完整描述。
+    ' 内容声道数与渲染目标一致时（7.1.4 素材）显示 "IAMF 7.1.4（12 声道）"；
+    ' 内容更小时把两者都写出来，例如 "IAMF 7.1.4 渲染（内容 8 声道）" ——
+    ' 既说明在按什么声场渲染，也说明文件里其实只有 8 路，避免用户以为
+    ' 四只顶置音箱应当有声。</summary>
+    Public ReadOnly Property IAMF描述 As String
+        Get
+            If Not IAMF已接管 Then Return String.Empty
+            Dim 名 = IAMF布局名
+            Dim 目标 = If(String.IsNullOrEmpty(名), $"{IAMF声道数} 声道", 名)
+            ' 内容未上报（0）或与目标相同 => 只报一个数。
+            If IAMF内容声道数 <= 0 OrElse IAMF内容声道数 = IAMF声道数 Then
+                Return $"IAMF {目标}（{IAMF声道数} 声道）"
+            End If
+            Return $"IAMF {目标} 渲染（内容 {IAMF内容声道数} 声道）"
+        End Get
+    End Property
 End Class
 
 Public Enum 定时文字对齐

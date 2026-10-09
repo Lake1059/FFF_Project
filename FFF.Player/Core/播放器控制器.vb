@@ -30,6 +30,10 @@ Public NotInheritable Class 播放器控制器
     Private 外部字幕候选快照 As 外部字幕候选() = Array.Empty(Of 外部字幕候选)()
     Private 当前内嵌字幕 As 外部字幕轨道
     Private 当前字幕来源索引 As Integer = -2
+    ' 快照被内核按 ABI 拒绝时，过去一律静默返回默认值，界面就显示『尚未打开媒体』——
+    ' 一次真实的合同违约被读成『健康但没片子』。这里只把那一类失败说出来，
+    ' 并且一个会话内只报一次，避免每次刷新都弹。
+    Private 已报告接口拒绝 As Boolean
     Private 当前弹幕资料库 As 弹幕资料库
     Private 当前歌词资料 As LRC歌词资料
     Private 当前媒体是纯音频 As Boolean
@@ -237,6 +241,12 @@ Public NotInheritable Class 播放器控制器
         Return 安全读取会话(Function(目标) 目标.当前快照)
     End Function
 
+    ''' <summary>截图用：离屏回读一帧（源分辨率）。内核不支持或没有画面时返回 Nothing，
+    ''' 由调用方回落到屏幕抓取。</summary>
+    Friend Function 读取原始帧() As Bitmap
+        Return 安全读取会话(Function(目标) 目标.读取原始帧(), Nothing)
+    End Function
+
     Friend Function 读取音频峰值() As Single()
         Return 安全读取会话(Function(目标) 目标.读取音频峰值(), Array.Empty(Of Single)())
     End Function
@@ -252,6 +262,15 @@ Public NotInheritable Class 播放器控制器
             Return 读取(目标)
         Catch ex As ObjectDisposedException
         Catch ex As 播放器异常
+            If CInt(ex.结果码) = CInt(原生播放器结果.参数无效) AndAlso Not 已报告接口拒绝 Then
+                ' 只有『参数无效』这一类才是 ABI 违约：结构体尺寸或版本对不上时内核会拒绝
+                ' 每一次 FFF3FP_GetSnapshot。其余结果码沿用原有的静默回落，因为一次采样
+                ' 失败不该打断播放。
+                已报告接口拒绝 = True
+                Dim 拒绝消息 = ex.Message &
+                    " | FFF.Native.dll 与本程序不是同一次发布：请一起替换 GUI 与内核。"
+                RaiseEvent 播放错误(Me, New 播放器错误事件参数(拒绝消息, "内核接口版本不匹配"))
+            End If
         End Try
         Return 默认值
     End Function
@@ -267,6 +286,43 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    ''' <summary>视图旋转（四分一转，顺时针 0..3）。转发到会话层，失败静默。
+    ''' 图片与视频通用：源的自动旋转由内核在打开时套用，这里只处理用户的手动调整。</summary>
+    Friend Sub 设置视图旋转(四分一转 As UInteger)
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return
+        Try
+            目标.设置视图旋转(四分一转)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
+    ''' <summary>手动旋转：顺时针 / 逆时针 90°。R = 顺，Shift+R = 逆。</summary>
+    Friend Sub 手动旋转(顺时针 As Boolean)
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return
+        Try
+            目标.手动旋转(顺时针)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
+    ''' <summary>当前视图旋转（四分一转，顺时针）。内核不支持时恒为 0。</summary>
+    Friend ReadOnly Property 当前视图旋转 As UInteger
+        Get
+            Dim 目标 = 会话
+            If 已释放 OrElse 目标 Is Nothing Then Return 0UI
+            Try
+                Return 目标.本机旋转
+            Catch ex As ObjectDisposedException
+            Catch ex As 播放器异常
+            End Try
+            Return 0UI
+        End Get
+    End Property
+
     ''' <summary>图片模式：缩放 + 平移（转发到会话层，失败静默）。</summary>
     Friend Sub 设置视图变换(缩放 As Single, 水平平移 As Single, 垂直平移 As Single)
         Dim 目标 = 会话
@@ -277,6 +333,21 @@ Public NotInheritable Class 播放器控制器
         Catch ex As 播放器异常
         End Try
     End Sub
+
+    ''' <summary>图片模式：以光标为锚做一次缩放步进（转发到会话层）。
+    ''' 返回 False 表示内核没有该导出，调用方回退到"改缩放 + 归零平移"。</summary>
+    Friend Function 光标锚定缩放(倍数 As Single, 锚点水平 As Single, 锚点垂直 As Single,
+                                 ByRef 结果缩放 As Single) As Boolean
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return False
+        Try
+            Return 目标.光标锚定缩放(倍数, 锚点水平, 锚点垂直, 结果缩放)
+        Catch ex As ObjectDisposedException
+            Return False
+        Catch ex As 播放器异常
+            Return False
+        End Try
+    End Function
 
     ''' <summary>返回图片信息；失败或非图片返回 Nothing。</summary>
     Friend Function 取图片信息() As 原生图片信息?
@@ -1087,6 +1158,7 @@ Public NotInheritable Class 播放器控制器
                 释放当前会话(保留当前字幕)
                 已临时释放独占 = False
                 会话 = 候选会话
+                已报告接口拒绝 = False
                 候选会话 = Nothing
                 当前文件路径 = 路径
                 最后打开文件路径 = 路径
@@ -1546,7 +1618,16 @@ Public NotInheritable Class 播放器控制器
     Private Async Function 自动加载同名歌词Async(媒体路径 As String,
                                             本次取消 As CancellationTokenSource) As Task
         Try
+            ' ① 同名 .lrc 优先：它是显式的边车文件，用户放它就是想要它。
             Dim candidate = Await LRC歌词自动加载器.尝试加载同名歌词Async(媒体路径, 本次取消.Token)
+
+            ' ② 没有边车就找**内嵌标签**。本地素材包验证过：歌词可能挂在
+            '    容器级（mka/flac/mp3/m4a）或流级（opus），键名与大小写也不统一，
+            '    还可能只有纯文本（无时间轴）。这些差异全部由 内嵌歌词提取器 吸收。
+            If candidate Is Nothing Then
+                candidate = Await 尝试加载内嵌歌词Async(本次取消.Token)
+            End If
+
             If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
                 Not ReferenceEquals(歌词加载取消, 本次取消) OrElse
                 Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) OrElse
@@ -1560,11 +1641,29 @@ Public NotInheritable Class 播放器控制器
                     ex.Message, True, "不支持此歌词"))
             End If
         Catch
-            ' 同名歌词是可选资源；无法读取时不影响音频播放。
+            ' 同名/内嵌歌词是可选资源；无法读取时不影响音频播放。
         Finally
             If ReferenceEquals(歌词加载取消, 本次取消) Then 歌词加载取消 = Nothing
             本次取消.Dispose()
         End Try
+    End Function
+
+    ''' <summary>从当前媒体信息里提取内嵌歌词。无可用标签时返回 Nothing。</summary>
+    Private Function 尝试加载内嵌歌词Async(取消令牌 As CancellationToken) As Task(Of LRC歌词资料)
+        Dim 信息 = 安全读取媒体信息()
+        If 信息 Is Nothing Then Return Task.FromResult(Of LRC歌词资料)(Nothing)
+        Dim 结果 = 内嵌歌词提取器.提取(信息)
+        If 结果 Is Nothing Then Return Task.FromResult(Of LRC歌词资料)(Nothing)
+        ' 纯文本载体（如 UNSYNCEDLYRICS）：有词但没有时间轴，**不能**当同步词用，
+        ' 否则整首会挤在同一时刻。这里如实提示"有词但不能同步"，而不是把它当 0 条丢弃。
+        If Not 结果.有条目 Then
+            If Not String.IsNullOrWhiteSpace(结果.纯文本) Then
+                RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(
+                    $"内嵌歌词「{结果.来源键}」没有时间轴，无法同步显示。", False, "歌词"))
+            End If
+            Return Task.FromResult(Of LRC歌词资料)(Nothing)
+        End If
+        Return Task.FromResult(结果.资料)
     End Function
 
     Private Sub 释放当前歌词()

@@ -212,8 +212,18 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
         // genuine edit/discontinuity. Small deltas are diagnostic only: decoded
         // samples stay bit-contiguous. A large jump is repaired once at the edit.
         const auto discontinuityThreshold = std::max<std::int64_t>(1, outputSampleRate_ / 10);
+        // Rounding slack, in output frames. A frame timestamp is media-time in 100 ns and
+        // the comparison is against a running sample count, so the two can never line up
+        // exactly: at 48 kHz a 100 ns tick is 0.0048 samples, and measured on a plain Opus
+        // stream every frame sits a constant 16-17 frames (0.33-0.35 ms) off. That is
+        // quantisation, not jitter, but the counter used to increment on any nonzero delta
+        // and so fired on essentially every frame -- 257 of 257 decoded, and 140 in two
+        // seconds -- while the stream was perfectly healthy (no underruns, no
+        // discontinuities, no inserted silence). A diagnostic that always reads "everything
+        // is jittering" cannot report the real thing, so only deltas beyond rounding count.
+        const auto jitterFloorFrames = std::max<std::int64_t>(1, outputSampleRate_ / 1000);
         if (std::abs(delta) < discontinuityThreshold) {
-            if (delta != 0) ++timestampJitterCount_;
+            if (std::abs(delta) > jitterFloorFrames) ++timestampJitterCount_;
         } else {
             ++discontinuityCount_;
             if (delta > 0) {

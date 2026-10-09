@@ -20,6 +20,13 @@ Friend NotInheritable Class 播放器图片浏览控制器
 
     Private ReadOnly 画面控件 As 播放器画面控件
     Private ReadOnly 应用视图 As Action(Of Single, Single, Single)
+    ''' <summary>以光标为锚做一次缩放步进；结果缩放 回填缩放后的绝对值。
+    ''' 返回 False 表示内核无此导出，需回退。</summary>
+    ''' <remarks>Func 无法表达 ByRef 参数，因此用具名委托。</remarks>
+    Friend Delegate Function 锚定缩放委托(倍数 As Single, 锚点水平 As Single,
+                                          锚点垂直 As Single,
+                                          ByRef 结果缩放 As Single) As Boolean
+    Private ReadOnly 锚定缩放 As 锚定缩放委托
     Private ReadOnly 切换图片 As Action(Of Integer)
     Private ReadOnly 操作提示 As Action(Of String)
     Private ReadOnly 模式菜单项 As LakeUI.ModernContextMenu.ModernMenuItem
@@ -35,7 +42,8 @@ Friend NotInheritable Class 播放器图片浏览控制器
                    标题栏菜单 As LakeUI.ModernContextMenu,
                    应用视图值 As Action(Of Single, Single, Single),
                    切换图片值 As Action(Of Integer),
-                   操作提示值 As Action(Of String))
+                   操作提示值 As Action(Of String),
+                   Optional 锚定缩放值 As 锚定缩放委托 = Nothing)
         ArgumentNullException.ThrowIfNull(画面控件值)
         ArgumentNullException.ThrowIfNull(标题栏菜单)
         ArgumentNullException.ThrowIfNull(应用视图值)
@@ -43,6 +51,7 @@ Friend NotInheritable Class 播放器图片浏览控制器
         ArgumentNullException.ThrowIfNull(操作提示值)
         画面控件 = 画面控件值
         应用视图 = 应用视图值
+        锚定缩放 = 锚定缩放值
         切换图片 = 切换图片值
         操作提示 = 操作提示值
         模式菜单项 = New LakeUI.ModernContextMenu.ModernMenuItem With {
@@ -123,7 +132,37 @@ Friend NotInheritable Class 播放器图片浏览控制器
         Dim 刻度 = 滚轮余量 \ 每刻度像素
         If 刻度 = 0 Then Return
         滚轮余量 -= 刻度 * 每刻度像素
-        调整缩放(缩放步进 ^ 刻度)
+        ' 优先让内核做光标锚定缩放：它掌握拟合盒与平移映射，能保证锚点下的内容
+        ' 一点不动。宿主自行改缩放会围绕画面中心放大，光标处的内容会漂走。
+        If 锚定缩放 IsNot Nothing Then
+            Dim 宽度 = Math.Max(1, 画面控件.Width)
+            Dim 高度 = Math.Max(1, 画面控件.Height)
+            Dim 锚点水平 = Math.Clamp(CSng(e.X) / 宽度, 0.0F, 1.0F)
+            Dim 锚点垂直 = Math.Clamp(CSng(e.Y) / 高度, 0.0F, 1.0F)
+            Dim 倍数 = CSng(缩放步进 ^ 刻度)
+            Dim 结果缩放 = 缩放值
+            Try
+                If 锚定缩放(倍数, 锚点水平, 锚点垂直, 结果缩放) Then
+                    ' 内核已直接改好缩放与平移。同步本地缓存，否则下一次拖动会用旧缩放
+                    ' 反解余量，表现为拖动距离与实际位移不符。
+                    缩放值 = Math.Clamp(结果缩放, 最小缩放, 最大缩放)
+                    If 缩放值 <= 1.0F Then
+                        水平平移值 = 0.0F
+                        垂直平移值 = 0.0F
+                    Else
+                        ' 内核已算出保持锚点所需的平移；这里只能按余量反解，故留待
+                        ' 下一次拖动时以内核实际值为准（拖动会重新计算并覆盖）。
+                    End If
+                    操作提示($"缩放：{缩放值 * 100.0F:0}%")
+                    Return
+                End If
+            Catch ex As ObjectDisposedException
+                Return
+            Catch ex As 播放器异常
+            End Try
+        End If
+        ' 回退（旧内核无 FFF3FP_ZoomViewAt）：改缩放并把平移归零，避免停留在角落。
+        调整缩放(CSng(缩放步进 ^ 刻度))
     End Sub
 
     Private Sub 画面控件_图片平移拖动(sender As Object, e As 播放器图片平移拖动事件参数)
@@ -131,9 +170,13 @@ Friend NotInheritable Class 播放器图片浏览控制器
         If 缩放值 <= 1.0F Then Return  ' 未放大时没有可平移的余量
         Dim 宽度 = Math.Max(1, 画面控件.Width)
         Dim 高度 = Math.Max(1, 画面控件.Height)
-        ' 对齐内核语义：内核按 offsetX = pan * (zoom - 1) / 2 * 目标宽 平移，
-        ' 反解出"拖多少像素等于多少 pan"，平移才跟手（此前用 zoom 当分母，
-        ' 且方向相反：鼠标右移画面却向左跑）。
+        ' 对齐内核语义：内核按 目标中心 + pan * |缩放后尺寸 - 拟合尺寸| / 2 摆放画面，
+        ' 所以 pan 为正表示画面**右移/下移**，即跟随光标。这里的 水平位移 = e.X - 上次X，
+        ' 鼠标右移为正 ⇒ 直接把位移累加到 pan 即可跟手。
+        '
+        ' 注意：内核此前的符号是相反的（pan 为正是画面左移），本控制器当时用"加"来抵消；
+        ' 内核修正符号后，若这里仍是"加"就会**二次反转**，表现为画面逆着鼠标跑。
+        ' 现在两边语义一致，保持"加"。
         Dim 水平余量 = 宽度 * (缩放值 - 1.0F) / 2.0F
         Dim 垂直余量 = 高度 * (缩放值 - 1.0F) / 2.0F
         水平平移值 = Math.Clamp(水平平移值 + CSng(e.水平位移) / 水平余量, -1.0F, 1.0F)
