@@ -3,8 +3,8 @@
 // 更新内核 API 时须同步递增此处主版本号。
 #include <winver.h>
 
-// 16 = PlayerApiVersion（FFF.Player.Api.h；FFF3FPConfiguration 新增 sdrScRgbMode 字段）
-#define VER_API 16
+// 17 = PlayerApiVersion（FFF.Player.Api.h；FFF3FPSnapshot 尾部新增 ST 2094 诊断字段）
+#define VER_API 17
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION VER_API,0,0,0
@@ -21,13 +21,13 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "FFF_Project"
             VALUE "FileDescription", "FFF.Native - 3FP media player kernel"
-            VALUE "FileVersion", "16.0.0.0"
+            VALUE "FileVersion", "17.0.0.0"
             VALUE "InternalName", "FFF.Native"
             VALUE "LegalCopyright", "MIT License"
             VALUE "OriginalFilename", "FFF.Native.dll"
             VALUE "ProductName", "3FP Player Kernel"
-            VALUE "ProductVersion", "0.3.0 (api 16)"
-            VALUE "ApiVersion", "16"
+            VALUE "ProductVersion", "0.3.0 (api 17)"
+            VALUE "ApiVersion", "17"
         END
     END
     BLOCK "VarFileInfo"

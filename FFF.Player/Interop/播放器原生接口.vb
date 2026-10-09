@@ -100,6 +100,14 @@ Friend Structure 原生播放器快照
     Public 显示器峰值尼特 As UInteger
     Public 显示器全屏峰值尼特 As UInteger
     Public HDR有效目标峰值尼特 As UInteger
+    ' ST 2094-40 dynamic metadata diagnostics; appended to FFF3FPSnapshot's tail.
+    ' The kernel rejects a caller whose declared size is smaller than its struct, so
+    ' these have to be mirrored here or FFF3FP_GetSnapshot fails for the whole host.
+    Public 动态HDR元数据窗口数 As UInteger
+    Public 动态HDR元数据回退 As UInteger
+    Public 动态HDR元数据序号 As ULong
+    Public 动态HDR元数据保持帧数 As ULong
+    Public 动态HDR元数据目标尼特 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>

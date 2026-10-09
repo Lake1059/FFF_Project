@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "3FP/Hdr/HdrProcessor.h"
 #include "3FP/Render/ColorExtension.h"
+#include "3FP/Hdr/HdrMetadataParse.h"
+#include "3FP/Hdr/HdrToneCurve.h"
 
 extern "C" {
 #include <libavcodec/codec_par.h>
@@ -21,6 +23,15 @@ namespace {
 constexpr std::uint32_t Compatibility(const FFF3FPHdrCompatibility value) noexcept {
     return static_cast<std::uint32_t>(value);
 }
+
+// How many consecutive frames may reuse the previous ST 2094 snapshot before it
+// is considered stale. HDR10+ does not require metadata on every frame, so
+// holding is necessary; an unbounded hold would let a pre-seek snapshot linger.
+constexpr std::uint64_t kHdrMetadataHoldFrameLimit = 60;
+
+// Upper bound on an injected scene list. Real scene lists are tens of entries;
+// the cap keeps a misbehaving host from growing the table without limit.
+constexpr std::uint32_t kMaxInjectedEntries = 4096;
 
 float ValidPeak(const double value) noexcept {
     return std::isfinite(value) && value > 0.0 ?
@@ -206,7 +217,8 @@ void HdrProcessor::ConfigureStream(const AVCodecParameters* parameters) noexcept
 }
 
 HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
-    const float targetPeakOverrideNits, const float paperWhiteNits) noexcept {
+    const float targetPeakOverrideNits, const float paperWhiteNits,
+    const std::int64_t frameIndex) noexcept {
     std::lock_guard lock(mutex_);
     targetPeakOverrideNits_ = std::isfinite(targetPeakOverrideNits) &&
         targetPeakOverrideNits > 0.0f ? targetPeakOverrideNits : 0.0f;
@@ -233,6 +245,14 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         }
     }
 
+    // Deliberately read a single scalar (`format`) rather than the accumulating
+    // `compatibility` bit set: compatibility is OR-ed in several places (e.g.
+    // ClassifyDolbyVision) and `next` inherits it from streamState_, so testing the
+    // Hlg *bit* here could pin a genuinely PQ-baseline stream to the HLG branch.
+    // `format` is assigned, never OR-ed, so it cannot go sticky.
+    // Must be captured BEFORE the Vivid branch below re-labels next.format.
+    const bool vividBaselineIsHlg = streamState_.format == FFF3FPHdrFormat::Hlg;
+
     if (const auto* vividData = av_frame_get_side_data(frame, AV_FRAME_DATA_DYNAMIC_HDR_VIVID);
         vividData != nullptr && vividData->size >= sizeof(AVDynamicHDRVivid)) {
         const auto* vivid = reinterpret_cast<const AVDynamicHDRVivid*>(vividData->data);
@@ -242,10 +262,24 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         next.processingPath = FFF3FPHdrProcessingPath::HdrVividDynamic;
         next.dynamicMetadata = true;
         if (vivid->num_windows > 0) {
-            const auto peak = ValidPeak(av_q2d(vivid->params[0].maximum_maxrgb) * 10000.0);
-            if (peak > 0.0f) {
-                next.sourcePeakNits = peak;
-                dynamicSourcePeak = true;
+            // `maximum_maxrgb` is a maxRGB statistic normalised into [0,1] on a
+            // 1/4095 grid; the FFmpeg header documents no unit for it. The absolute
+            // reading below (x10000) is only self-consistent for a PQ baseline, where
+            // PQ EOTF(1.0) == 10000 cd/m2 and the value sits near full code. It is NOT
+            // valid for an HLG baseline, which is relative/scene-referred: a full-code
+            // HLG signal means "1000 cd/m2 on the nominal BT.2100 reference display",
+            // not 10000. Taking the absolute reading there inflated sourcePeakNits by
+            // ~10x and blew out the highlights.
+            //
+            // HLG baseline therefore keeps the relative-domain reference peak, which
+            // the HLG classification above already set (1000.0f): just don't overwrite
+            // it: an HLG-baseline stream that read 10000 now reads 4000,
+            if (!vividBaselineIsHlg) {
+                const auto peak = ValidPeak(av_q2d(vivid->params[0].maximum_maxrgb) * 10000.0);
+                if (peak > 0.0f) {
+                    next.sourcePeakNits = peak;
+                    dynamicSourcePeak = true;
+                }
             }
         }
     } else if (const auto* doviData = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
@@ -279,22 +313,52 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         next.compatibility |= Compatibility(FFF3FPHdrCompatibility::Hdr10);
         next.processingPath = FFF3FPHdrProcessingPath::Hdr10PlusDynamic;
         next.dynamicMetadata = true;
-        if (plus->num_windows > 0) {
-            const auto& window = plus->params[0];
-            auto maximum = 0.0;
-            for (const auto& channel : window.maxscl)
-                maximum = std::max(maximum, av_q2d(channel));
-            const auto peak = ValidPeak(maximum * 10000.0);
-            if (peak > 0.0f) {
-                next.sourcePeakNits = peak;
-                dynamicSourcePeak = true;
-            }
+        // Full ST 2094-40 extraction: the window curve parameters (knee, bezier
+        // anchors, distribution) drive the tone mapping; maxscl only bounds the
+        // peak. maxscl is *linearized* RGB, so nits = value * 10000.
+        next.dynamic = HdrMetadataParse::FromHdr10Plus(*plus);
+        next.dynamic.serial = frameState_.dynamic.kind == HdrMetadataKind::Hdr10Plus
+            ? frameState_.dynamic.serial + 1 : 1;
+        if (const auto peak = ValidPeak(next.dynamic.windows[0].signalPeakNits);
+            peak > 0.0f) {
+            next.sourcePeakNits = peak;
+            dynamicSourcePeak = true;
         }
     }
 
+    ApplyInjectionLocked(frameIndex, next);
+    // An injected entry owns the whole dynamic state, including its peak: the two
+    // fallbacks below must not touch it, or the frame that carries no SEI would quietly
+    // inherit the held bitstream snapshot (and be dropped past the hold limit) while the
+    // source still reports Injected. ApplyInjectionLocked resolves the peak itself.
+
     if (next.format != FFF3FPHdrFormat::Sdr) {
         ApplyFrameStaticMetadata(frame, next.staticMetadata);
-        if (!dynamicSourcePeak) {
+        // ST 2094-40 metadata is not required on every frame. Without holding
+        // the previous snapshot, a frame that carries no SEI would fall back to
+        // the static peak and the picture would flicker between two mappings.
+        // Hold the last snapshot instead, but only for a bounded number of
+        // frames: past that the stream is treated as not carrying dynamic
+        // metadata at all, which also stops a stale snapshot surviving a seek.
+        const bool carriedMetadata = next.dynamic.kind != HdrMetadataKind::None;
+        if (carriedMetadata && !dynamicSourcePeak && !injectedActive_) {
+            if (frameState_.dynamic.kind == next.dynamic.kind &&
+                frameState_.dynamic.heldFrames < kHdrMetadataHoldFrameLimit) {
+                next.dynamic = frameState_.dynamic;
+                next.dynamic.heldFrames += 1;
+                next.dynamicMetadata = true;
+                const auto held = ValidPeak(next.dynamic.windows[0].signalPeakNits);
+                if (held > 0.0f) {
+                    next.sourcePeakNits = held;
+                    dynamicSourcePeak = true;
+                }
+            } else if (frameState_.dynamic.heldFrames >= kHdrMetadataHoldFrameLimit) {
+                // Stale beyond the limit: drop it so the static path takes over.
+                next.dynamic = HdrDynamicMetadata{};
+                next.dynamicMetadata = false;
+            }
+        }
+        if (!dynamicSourcePeak && !injectedActive_) {
             if (const auto staticPeak = StaticSourcePeak(next.staticMetadata);
                 staticPeak > 0.0f) {
                 next.sourcePeakNits = staticPeak;
@@ -303,6 +367,8 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         next.sourcePeakNits = std::clamp(next.sourcePeakNits,
             std::max(1.0f, paperWhiteNits), 10000.0f);
     }
+    if (!injectedActive_) lastUninjectedState_ = next;
+    if (!injectedActive_) haveUninjectedState_ = true;
     frameState_ = next;
     return frameState_;
 }
@@ -332,6 +398,15 @@ void HdrProcessor::Reset() noexcept {
     streamState_.display = display;
     streamState_.targetPeakNits = ResolveTargetPeak(targetPeakOverrideNits_, display);
     frameState_ = streamState_;
+    // A new stream has no finished frame of its own yet, so neither the
+    // bitstream-only baseline nor the index a table was last resolved at may
+    // survive from the previous stream.
+    lastUninjectedState_ = {};
+    haveUninjectedState_ = false;
+    lastLookupIndex_ = kUnknownFrameIndex;
+    // Cleared here too: until the new stream's first frame is resolved, reporting
+    // the previous stream's Injected source would be a claim with nothing behind it.
+    injectedActive_ = false;
 }
 
 HdrFrameState HdrProcessor::State() const noexcept {
@@ -381,6 +456,205 @@ bool HdrProcessor::RequiresMetadataAwareShader() const noexcept {
         state.format == FFF3FPHdrFormat::HdrVivid;
 }
 
+namespace {
+// Validate and copy one injected window. Returns false on any malformed field.
+// Shared by every window of an entry so the single- and multi-window shapes are
+// held to exactly the same standard.
+bool BuildInjectedWindow(const FFF3FPHdrMetadataWindow& source,
+    HdrProcessingWindow& window, HdrMetadataDegrade& degrade) noexcept {
+    if (!std::isfinite(source.upperLeftX) || !std::isfinite(source.upperLeftY) ||
+        !std::isfinite(source.lowerRightX) || !std::isfinite(source.lowerRightY))
+        return false;
+    if (source.upperLeftX < 0.0f || source.upperLeftY < 0.0f ||
+        source.lowerRightX > 1.0f || source.lowerRightY > 1.0f)
+        return false;
+    // A degenerate or inverted rectangle selects no pixels, which would make the
+    // window's curve unreachable rather than merely unused.
+    if (source.lowerRightX <= source.upperLeftX ||
+        source.lowerRightY <= source.upperLeftY)
+        return false;
+    window.valid = true;
+    window.upperLeftX = source.upperLeftX;
+    window.upperLeftY = source.upperLeftY;
+    window.lowerRightX = source.lowerRightX;
+    window.lowerRightY = source.lowerRightY;
+
+    float peak = 0.0f;
+    for (std::uint32_t channel = 0; channel < 3; ++channel) {
+        const auto value = source.maxScl[channel];
+        if (!std::isfinite(value) || value < 0.0f || value > 1.0f) return false;
+        window.maxScl[channel] = value;
+        peak = std::max(peak, value);
+    }
+    if (!std::isfinite(source.averageMaxRgb) ||
+        source.averageMaxRgb < 0.0f || source.averageMaxRgb > 1.0f) return false;
+    window.averageMaxRgb = source.averageMaxRgb;
+    if (std::isfinite(source.fractionBrightPixels) &&
+        source.fractionBrightPixels >= 0.0f && source.fractionBrightPixels <= 1.0f)
+        window.fractionBrightPixels = source.fractionBrightPixels;
+    window.signalPeakNits = HdrMetadataParse::LinearizedToNits(peak);
+
+    // No curve block: the window only bounds its peak, which is a valid shape
+    // (the filter's `curve=off` and most shipped HDR10+ both use it).
+    if (source.toneMappingFlag == 0) {
+        window.toneMappingPresent = false;
+        if (degrade == HdrMetadataDegrade::None)
+            degrade = HdrMetadataDegrade::ToneMappingAbsent;
+        return true;
+    }
+
+    if (!std::isfinite(source.kneePointX) || !std::isfinite(source.kneePointY) ||
+        source.kneePointX < 0.0f || source.kneePointX >= 1.0f ||
+        source.kneePointY < 0.0f || source.kneePointY > 1.0f ||
+        source.kneePointY > source.kneePointX + 1.0e-4f) {
+        return false;
+    }
+    window.kneePointX = source.kneePointX;
+    window.kneePointY = source.kneePointY;
+    window.toneMappingPresent = true;
+
+    if (source.numCurveAnchors > kHdrMaxBezierAnchors) return false;
+    float previous = source.kneePointY;
+    for (std::uint32_t index = 0; index < source.numCurveAnchors; ++index) {
+        const auto value = source.curveAnchors[index];
+        // Ascending and in range: a non-monotone anchor list cannot describe a
+        // tone curve, and silently accepting it would produce banding.
+        if (!std::isfinite(value) || value < 0.0f || value > 1.0f) return false;
+        if (value < previous) return false;
+        previous = value;
+        window.bezierAnchors[index] = value;
+    }
+    window.bezierAnchorCount = source.numCurveAnchors;
+    if (source.numCurveAnchors == 0) {
+        window.toneMappingPresent = false;
+        if (degrade == HdrMetadataDegrade::None)
+            degrade = HdrMetadataDegrade::TooFewAnchors;
+    }
+    return true;
+}
+}  // namespace
+
+bool HdrProcessor::BuildInjectedState(const FFF3FPHdrDynamicMetadataEntry& entry,
+    HdrDynamicMetadata& metadata) noexcept {
+    metadata = HdrDynamicMetadata{};
+    metadata.kind = HdrMetadataKind::Hdr10Plus;
+    // ST 2094-40 defines num_windows in [1,3]; anything else is out of spec and
+    // rejected rather than guessed at.
+    if (entry.numWindows < 1 || entry.numWindows > kHdrMaxProcessingWindows)
+        return false;
+    metadata.windowCount = entry.numWindows;
+
+    for (std::uint32_t index = 0; index < entry.numWindows; ++index) {
+        if (!BuildInjectedWindow(entry.windows[index], metadata.windows[index],
+                metadata.degrade))
+            return false;
+    }
+
+    if (std::isfinite(entry.targetedDisplayNits) && entry.targetedDisplayNits > 0.0f) {
+        metadata.targetedDisplayNits =
+            HdrMetadataParse::TargetedDisplayToNits(entry.targetedDisplayNits);
+        metadata.hasTargetedDisplay = metadata.targetedDisplayNits > 0.0f;
+    }
+    return true;
+}
+
+FFFResult HdrProcessor::SetInjectedMetadata(
+    const FFF3FPHdrDynamicMetadataEntry* entries, const std::uint32_t count) noexcept {
+    if (count > 0 && entries == nullptr) return FFFResult::InvalidArgument;
+    if (count > kMaxInjectedEntries) return FFFResult::InvalidArgument;
+    std::vector<FFF3FPHdrDynamicMetadataEntry> validated;
+    validated.reserve(count);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto& entry = entries[index];
+        if (entry.size < sizeof(FFF3FPHdrDynamicMetadataEntry) ||
+            entry.version != 1) return FFFResult::InvalidArgument;
+        // Validate through the same path the renderer uses, so a table that
+        // would be rejected at render time is rejected here instead.
+        HdrDynamicMetadata probe{};
+        if (!BuildInjectedState(entry, probe)) return FFFResult::InvalidArgument;
+        validated.push_back(entry);
+    }
+    // Ascending by frameIndex; the lookup walks backwards for "last <= frame".
+    std::sort(validated.begin(), validated.end(),
+        [](const FFF3FPHdrDynamicMetadataEntry& a,
+           const FFF3FPHdrDynamicMetadataEntry& b) noexcept {
+            return a.frameIndex < b.frameIndex;
+        });
+    std::lock_guard lock(mutex_);
+    injected_ = std::move(validated);
+    // Evaluate against the frame already on screen, so a paused or ended session
+    // reports and applies the new table instead of the last bitstream parse.
+    ReapplyInjectedMetadataLocked();
+    return FFFResult::Success;
+}
+
+void HdrProcessor::ClearInjectedMetadata() noexcept {
+    std::lock_guard lock(mutex_);
+    injected_.clear();
+    injectedActive_ = false;
+    ReapplyInjectedMetadataLocked();
+}
+
+void HdrProcessor::ReapplyInjectedMetadataLocked() noexcept {
+    auto next = haveUninjectedState_ ? lastUninjectedState_ : streamState_;
+    ApplyInjectionLocked(lastLookupIndex_, next);
+    frameState_ = next;
+}
+
+// Call with mutex_ held.
+void HdrProcessor::ApplyInjectionLocked(const std::int64_t frameIndex,
+    HdrFrameState& state) noexcept {
+    // Only an indexed frame may move the key. A presentation timestamp is a
+    // different space entirely (1/15360 at 60 fps puts frame 4 at pts 1024), so
+    // storing one here made every later lookup match the table's last entry, and
+    // a stream without pts matched its first. Callers that do not index the frame
+    // (cover art, still images, warm-up) leave the last indexed entry in force.
+    if (frameIndex != kUnknownFrameIndex) lastLookupIndex_ = frameIndex;
+    // Injected metadata (FFF3FP_SetHdrDynamicMetadata) takes precedence over
+    // whatever the bitstream supplied: the host asked for it explicitly, and a
+    // test harness needs it to override real SEI. The lookup takes the last
+    // entry whose frameIndex is <= this frame, so a sparse scene list works --
+    // keyed on the frame index, which is what the API documents as the key.
+    injectedActive_ = false;
+    if (injected_.empty() || lastLookupIndex_ == kUnknownFrameIndex) return;
+    // ST 2094-40 curves are defined for signals that carry their own transfer
+    // characteristic. On an SDR-transfer source there is nothing to re-map, so the
+    // table stays installed but inert and the source keeps reporting Bitstream --
+    // claiming it here would move the diagnostics without moving the picture.
+    if (state.format == FFF3FPHdrFormat::Sdr) return;
+    const FFF3FPHdrDynamicMetadataEntry* chosen = nullptr;
+    for (const auto& candidate : injected_) {
+        if (candidate.frameIndex <= lastLookupIndex_) chosen = &candidate;
+        else break;
+    }
+    if (chosen == nullptr) chosen = &injected_.front();
+    const auto previousDynamic = state.dynamic;
+    if (!BuildInjectedState(*chosen, state.dynamic)) {
+        state.dynamic = previousDynamic;
+        return;
+    }
+    // Deliberately not state.format: the injection owns the metadata in force, not
+    // the classification of the samples. Overwriting it made the decode transfer
+    // function and the gamut switch read a signal the pixels are not.
+    state.compatibility |= Compatibility(FFF3FPHdrCompatibility::Hdr10);
+    state.processingPath = FFF3FPHdrProcessingPath::Hdr10PlusDynamic;
+    state.dynamicMetadata = true;
+    injectedActive_ = true;
+    // The injected entry owns the peak: use the one it carries, otherwise fall back to the
+    // stream-level baseline -- never to a peak this frame's bitstream parse wrote into the
+    // frame state, which would leave the curve injected and the peak from the stream.
+    if (const auto peak = ValidPeak(state.dynamic.windows[0].signalPeakNits);
+        peak > 0.0f)
+        state.sourcePeakNits = peak;
+    else
+        state.sourcePeakNits = streamState_.sourcePeakNits;
+}
+
+bool HdrProcessor::InjectedMetadataActive() const noexcept {
+    std::lock_guard lock(mutex_);
+    return injectedActive_;
+}
+
 void HdrProcessor::BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) const noexcept {
     const auto state = State();
     std::memset(&metadata, 0, sizeof(metadata));
@@ -404,13 +678,27 @@ void HdrProcessor::BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) con
     const auto contentPeak = std::clamp(state.sourcePeakNits, 1.0f, 10000.0f);
     const auto masteringPeak = source.maximumMasteringLuminanceNits > 0.0f ?
         source.maximumMasteringLuminanceNits : contentPeak;
-    const auto maxCll = source.maximumContentLightLevelNits > 0.0f ?
+    auto maxCll = source.maximumContentLightLevelNits > 0.0f ?
         source.maximumContentLightLevelNits : contentPeak;
+    auto maxFall = source.maximumFrameAverageLightLevelNits;
+    // ST 2094 metadata describes one scene, so the content-light fields follow
+    // it frame by frame -- that is precisely the information HDR10 adds over
+    // HDR10. The mastering luminance stays static: it documents the display the
+    // content was graded on, which does not change per frame.
+    if (state.dynamic.kind != HdrMetadataKind::None && state.dynamic.windowCount > 0) {
+        const auto& window = state.dynamic.windows[0];
+        if (const auto dynamicPeak = window.signalPeakNits; dynamicPeak > 0.0f)
+            maxCll = dynamicPeak;
+        // average_maxrgb is a linearized RGB maximum, not a light level, so it
+        // only serves as a frame-average bound when it is below the peak.
+        if (const auto dynamicAverage = window.averageMaxRgb * 10000.0f;
+            dynamicAverage > 0.0f && dynamicAverage < maxCll)
+            maxFall = dynamicAverage;
+    }
     metadata.MaxMasteringLuminance = DxgiNits(masteringPeak);
     metadata.MinMasteringLuminance = DxgiMinNits(source.minimumLuminanceNits);
     metadata.MaxContentLightLevel = DxgiContentLight(maxCll);
-    metadata.MaxFrameAverageLightLevel =
-        DxgiContentLight(source.maximumFrameAverageLightLevelNits);
+    metadata.MaxFrameAverageLightLevel = DxgiContentLight(maxFall);
 }
 
 float HdrProcessor::ResolveTargetPeak(const float overrideNits,
@@ -443,7 +731,7 @@ const char* HdrProcessor::FormatName(const FFF3FPHdrFormat format) noexcept {
 const char* HdrProcessor::ProcessingPathName(const FFF3FPHdrProcessingPath path) noexcept {
     switch (path) {
     case FFF3FPHdrProcessingPath::StaticHdr10: return "HDR10 static metadata";
-    case FFF3FPHdrProcessingPath::Hdr10PlusDynamic: return "HDR10+ metadata-guided display mapping";
+    case FFF3FPHdrProcessingPath::Hdr10PlusDynamic: return "HDR10+ per-window tone mapping";
     case FFF3FPHdrProcessingPath::HlgDisplayMapped: return "HLG display mapping";
     case FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback: return "DolbyVisionFallback";
     case FFF3FPHdrProcessingPath::ExternalDynamic: return "ExternalDynamic";

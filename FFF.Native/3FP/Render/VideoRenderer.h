@@ -2,8 +2,10 @@
 
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Hdr/HdrProcessor.h"
+#include "3FP/Hdr/HdrToneCurve.h"
 
 #include <cstdint>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -109,6 +111,40 @@ FFFResult MeasureTimedText(const char* textUtf8, const char* fontFamilyUtf8,
 FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8,
     float fontSize, FFF3FPTimedTextFlags flags, float& width) noexcept;
 
+// Curve table width. Tied to the reconstruction's own LUT size: the shader
+// samples the table with normalised coordinates, so a mismatch would rescale
+// the tone curve silently instead of failing.
+inline constexpr std::uint32_t kDynamicCurveLutWidth = kHdrToneCurveLutSize;
+// The pixel shader divides a window's row number by a literal 3.0 to centre it in
+// the LUT's rows, so the two have to stay equal.
+static_assert(kHdrMaxProcessingWindows == 3,
+    "SampleCurve's row centring hardcodes the window count");
+
+// Half-width of the cross-window transition band, in normalised frame units.
+// Only consulted for multi-window ST 2094 streams.
+inline constexpr float kDynamicWindowBlend = 0.05f;
+
+// CPU mirror of the HLSL `DynamicSettings` cbuffer (register b2). Bound only
+// when a stream carries usable ST 2094 metadata; DynamicEnabled == 0 otherwise,
+// in which case the pixel shader takes its original mapping path.
+//
+// Layout must match the HLSL declaration exactly:
+//   row 0: enabled, windowCount, flags, windowBlend   (4 x 4 = 16)
+//   row 1: sourcePeak, targetPeak, pad0.xy            (16)
+//   row 2: windowMin0.xy, windowMax0.xy               (16)
+//   row 3: windowMin1.xy, windowMax1.xy               (16)
+//   row 4: windowMin2.xy, windowMax2.xy               (16)
+struct DynamicShaderSettings {
+    std::uint32_t enabled = 0, windowCount = 1, flags = 0;
+    float windowBlend = 0.0f;
+    float sourcePeak = 0.0f, targetPeak = 0.0f;
+    float pad0[2] = {};
+    float windowMin0[2] = {}, windowMax0[2] = {};
+    float windowMin1[2] = {}, windowMax1[2] = {};
+    float windowMin2[2] = {}, windowMax2[2] = {};
+};
+static_assert(sizeof(DynamicShaderSettings) == 80);
+
 class PlayerVideoRenderer final {
 public:
     explicit PlayerVideoRenderer(std::function<void()> recoveryCallback = {}) noexcept;
@@ -169,9 +205,24 @@ public:
     // on the luminance DWM would have given the classic SDR chain), otherwise the
     // configured value.
     float EffectivePaperWhiteNits() const noexcept;
-    FFFResult Render(const AVFrame* frame, bool limitToNativeSize = false,
+    // frameIndex is the session's published FFF3FPSnapshot::frameIndex for this frame;
+    // it is the key injected ST 2094-40 entries are matched on. Callers that render a
+    // frame the session never indexes (cover art, still images, warm-up) pass
+    // HdrProcessor::kUnknownFrameIndex and keep the pts-based behaviour.
+    FFFResult Render(const AVFrame* frame, std::int64_t frameIndex,
+        bool limitToNativeSize = false,
         bool coverArt = false, bool prepareOnly = false) noexcept;
     FFFResult Redraw() noexcept;
+    // Re-pull the HDR classification and the ST 2094-40 curve from the processor and
+    // refresh the shader inputs for the frame already sitting in the cached surface, so
+    // installing or clearing a metadata table shows up in the picture without waiting for
+    // a decoded frame that may never come (paused / end-of-stream). Only ever called on
+    // the present path: `cachedVideoSettings_` belongs to the device lock, not to the
+    // thread that received the API call.
+    void RefreshHdrShaderInputs() noexcept;
+    // The decode transfer function follows the pixels, never the metadata; this is the
+    // single place that decides it, for Render() and for the refresh above.
+    std::uint32_t ResolveDecodeTransfer(const HdrFrameState& hdrState) const noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     FFFResult PresentTimedText() noexcept;
     FFFResult ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept;
@@ -211,6 +262,12 @@ public:
     FFF3FPVideoScalingMode ActualVideoScalingMode() const noexcept;
     std::string FallbackReason() const;
     std::string LastError() const;
+    // ST 2094-40 injection, new with this change. The HdrProcessor owns the
+    // table; the renderer forwards so PlayerSession has a single entry point.
+    FFFResult SetInjectedHdrMetadata(const FFF3FPHdrDynamicMetadataEntry* entries,
+        std::uint32_t count) noexcept;
+    void ClearInjectedHdrMetadata() noexcept;
+    std::uint32_t HdrMetadataSource() const noexcept;
 
 private:
     enum class CoverBackdropRenderResult {
@@ -339,6 +396,11 @@ private:
     void ReleaseTimedTextResources(bool resetRenderedState = true) noexcept;
     bool OutputSupportsHdr() noexcept;
     void SetHdrMetadata() noexcept;
+    // Rebuild the b2 constant buffer + curve LUT for this frame's ST 2094
+    // metadata. Returns false to leave the shader on its original path.
+    bool BuildDynamicToneSettings(const HdrDynamicMetadata& metadata,
+        DynamicShaderSettings& settings,
+        std::array<float, kDynamicCurveLutWidth * kHdrMaxProcessingWindows>& curves) noexcept;
     void ClearSurface() noexcept;
     void ReleaseDeviceObjects() noexcept;
     void RequestDeviceRecovery(long result, const char* operation) noexcept;
@@ -383,6 +445,28 @@ private:
     ID3D11SamplerState* panoramaSampler_;
     ID3D11Buffer* constants_;
     ID3D11Buffer* scaleConstants_;
+    // ST 2094 dynamic tone mapping (HDR10+ / HDR Vivid). Both are optional:
+    // when the buffer or the LUT cannot be created, dynamicCurveBuilt_ stays false
+    // and playback falls back to the original static mapping. The LUT is a
+    // 256x3 R32_FLOAT texture holding one reconstructed curve per window.
+    ID3D11Buffer* dynamicConstants_ = nullptr;
+    ID3D11Texture2D* dynamicCurveTexture_ = nullptr;
+    ID3D11ShaderResourceView* dynamicCurveView_ = nullptr;
+    bool dynamicCurveBuilt_ = false;
+    // Raised when the injected ST 2094 table is installed or cleared, consumed on the
+    // present path so the refresh happens under the device lock instead of racing the
+    // presentation pump.
+    std::atomic<bool> hdrInputsDirty_{ false };
+    // Frame-derived halves of the transfer decision, kept so a refresh reproduces exactly
+    // what Render() computed: metadata arriving later must not change how samples decode.
+    bool lastFrameDeclaresTrc_ = false;
+    std::uint32_t lastTransferFromFrame_ = 0u;
+    // Last HDR10 metadata block handed to the swap chain. With ST 2094 metadata
+    // the content-light fields vary per scene, and re-submitting every frame
+    // makes the display tone mapping hunt, so submissions are gated on a real
+    // change.
+    DXGI_HDR_METADATA_HDR10 lastHdrMetadata_ = {};
+    bool hdrMetadataValid_ = false;
     ID3D11Texture2D* sourceTextures_[3];
     ID3D11ShaderResourceView* sourceViews_[3];
     PlaneScaleChain planeScaleChains_[3];

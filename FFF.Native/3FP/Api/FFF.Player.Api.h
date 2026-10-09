@@ -207,6 +207,22 @@ struct FFF3FPSnapshot {
     std::uint32_t displayPeakNits;
     std::uint32_t displayFullFramePeakNits;
     std::uint32_t effectiveTargetPeakNits;
+    // API v17: ST 2094 dynamic metadata diagnostics. These describe what the
+    // per-frame HDR10+ / HDR Vivid parse actually produced, so a host can tell
+    // "metadata-guided mapping is running" apart from "metadata was seen but
+    // could not be used". Appended at the end of the struct on purpose: the
+    // fields above keep their offsets, and readers must gate on `version`.
+    //
+    // dynamicMetadataWindows: validated windows, 0 when none.
+    // dynamicMetadataDegrade: HdrMetadataDegrade reason, 0 = none.
+    // dynamicMetadataSerial: increments per frame carrying fresh metadata.
+    // dynamicMetadataHeldFrames: consecutive frames reusing the last snapshot.
+    // dynamicMetadataTargetedNits: the stream's targeted display luminance.
+    std::uint32_t dynamicMetadataWindows;
+    std::uint32_t dynamicMetadataDegrade;
+    std::uint64_t dynamicMetadataSerial;
+    std::uint64_t dynamicMetadataHeldFrames;
+    std::uint32_t dynamicMetadataTargetedNits;
 };
 
 struct FFF3FPAudioPeakLevels {
@@ -646,6 +662,190 @@ FFF3FP_API FFFResult FFF3FP_GetRenderTargetInfo(FFF3FPHandle player,
 // The host calls it after a child HWND resize so flips keep issuing while
 // ResizeBuffers stays on the presenter.
 FFF3FP_API FFFResult FFF3FP_Redraw(FFF3FPHandle player) noexcept;
+
+// ---- ST 2094-40 dynamic metadata injection ---------------------------------
+//
+// Why this exists
+// ---------------
+// HDR10+ metadata normally arrives inside the bitstream, so it can only be
+// exercised with content that actually carries it -- and real HDR10+ material
+// is scarce, while the FATE test vector is a synthetic gradient whose curve is
+// near-identity and therefore barely exercises the mapping path at all. A host
+// (or a test harness) that can hand the renderer metadata directly makes the
+// dynamic path testable against arbitrary scenes, and lets a tool drive the
+// tone mapping for grading/verification work.
+//
+// Semantics
+// ---------
+// Injected metadata replaces whatever the bitstream provided for the frames it
+// covers. Values use the same units as the parsed ST 2094-40 payload:
+//
+//   maxScl           linearized RGB maximum, 0..1 (nits = value * 10000)
+//   averageMaxRgb    linearized RGB average, 0..1
+//   kneePointX/Y     0..1; kneePointX may be 0 for "no linear segment"
+//   curveAnchors     numAnchors intermediate anchor values, ascending, 0..1
+//   targetedDisplayNits  the content's targeted display peak, in cd/m^2
+//
+// Each entry carries up to three processing windows (ST 2094-40's range), so a
+// multi-window stream can be described as well as a single full-frame one. A
+// window whose toneMappingFlag is 0 bounds its own peak but supplies no curve;
+// if any window lacks a usable curve the whole entry falls back to the static
+// path, because mapping only part of the frame would look worse than not
+// mapping it at all.
+//
+// `frameIndex` selects the range the entry applies to. Entries are matched by
+// the frame's own index (FFF3FPSnapshot::frameIndex), and the last entry whose
+// frameIndex is <= the current frame wins, so a host can post a sparse list of
+// scene changes rather than one entry per frame.
+// The key is that published index, never the packet pts; see "Matching key".
+// Injection is opt-in and reversible: with no entries active, or after
+// FFF3FP_ClearHdrDynamicMetadata, the renderer behaves exactly as if the
+// feature did not exist. A malformed entry is rejected rather than applied.
+
+enum class FFF3FPHdrMetadataSource : std::uint32_t {
+    // Whatever the bitstream carried (the default).
+    Bitstream = 0,
+    // An injected entry is driving the mapping for this frame.
+    Injected = 1,
+};
+
+// One ST 2094-40 processing window. Coordinates are normalised to the picture
+// (0,0 = top-left, 1,1 = bottom-right), matching the bitstream representation.
+//
+// ST 2094-40 allows num_windows in [1,3]; the common shapes are one full-frame
+// window, or three side-by-side regions each carrying its own curve. Windows are
+// independent: adjacent windows are mastered separately, so the renderer blends
+// across a narrow band at their borders rather than switching at a hard edge.
+struct FFF3FPHdrMetadataWindow {
+    float upperLeftX;         // 0..1
+    float upperLeftY;         // 0..1
+    float lowerRightX;        // 0..1, > upperLeftX
+    float lowerRightY;        // 0..1, > upperLeftY
+
+    float maxScl[3];          // linearized RGB maxima, 0..1
+    float averageMaxRgb;      // linearized RGB average, 0..1
+    float fractionBrightPixels; // 0..1, informational
+
+    // Tone-mapping function, ST 2094-40 shape. When toneMappingFlag is 0 the
+    // curve fields are ignored and the window only bounds its own peak.
+    std::uint32_t toneMappingFlag;
+    float kneePointX;         // 0..1, 0 = no linear segment
+    float kneePointY;         // 0..1
+    std::uint32_t numCurveAnchors; // 0..15
+    float curveAnchors[15];   // ascending, 0..1
+};
+
+struct FFF3FPHdrDynamicMetadataEntry {
+    std::uint32_t size;       // sizeof(FFF3FPHdrDynamicMetadataEntry)
+    std::uint32_t version;    // must be 1
+    // First frame (inclusive) this entry applies to; see the matching rule above.
+    std::int64_t frameIndex;
+
+    // Number of windows this entry describes, 1..3 (ST 2094-40's range).
+    // windows[0] must span the full frame when numWindows == 1.
+    std::uint32_t numWindows;
+    std::uint32_t reserved;
+    FFF3FPHdrMetadataWindow windows[3];
+
+    // Targeted system display peak in cd/m^2 (0 = derive from the window peaks).
+    float targetedDisplayNits;
+};
+
+// Replaces the injected table. entries == nullptr with count == 0 clears it.
+// Entries are copied; the caller keeps ownership of the array.
+FFF3FP_API FFFResult FFF3FP_SetHdrDynamicMetadata(FFF3FPHandle player,
+    const FFF3FPHdrDynamicMetadataEntry* entries, std::uint32_t count) noexcept;
+
+// Drops injected metadata, returning the session to bitstream-only behaviour.
+FFF3FP_API FFFResult FFF3FP_ClearHdrDynamicMetadata(FFF3FPHandle player) noexcept;
+
+// Reports whether an injected entry owns the dynamic state *now*: a live processor
+// flag that flips when the table is installed or cleared, not a record of the last
+// rendered frame. It is not by itself proof that the picture changed -- see
+// "Visibility of an install or a clear" below for what a host must check instead.
+FFF3FP_API FFFResult FFF3FP_GetHdrMetadataSource(FFF3FPHandle player,
+    std::uint32_t* source) noexcept;
+
+// ---- Contract details --------------------------------------------------------
+//
+// Pinned to measured behaviour so the three entry points above have one
+// unambiguous reading. Descriptive only: it changes nothing in the kernel.
+//
+// Matching key
+// ............
+// An entry's frameIndex is compared against the value the session publishes as
+// FFF3FPSnapshot::frameIndex -- the session's own frame counter -- walking a table
+// the kernel sorts ascending by frameIndex when the call is accepted. The packet
+// pts is never that key (snapshot.framePts is a different number and is not the
+// lookup index): at a 1/15360 time base and 60 fps, frame 4 already carries pts
+// 1024, so keying on pts resolved every sparse scene list to its last entry.
+// Worked example, three tables (targeted 111 / 222 / 333) on one stream: keyed on
+// pts every frame reads 333; keyed on frameIndex, a table posted at 10/17/24,
+// 30/37/43/50/56 and 60+ reads 111 on frames 10..29, 222 on 30..59 and 333 from 60
+// on -- exactly the "last entry whose frameIndex <= current frame" rule. Frames
+// below the first entry are not a hole in the contract: they get the first entry.
+// A frame the session cannot index at all falls back to pts, which is a diagnostic
+// convenience, not something to design against: to get deterministic keys a host
+// must read snapshot.frameIndex and post those numbers.
+//
+// Visibility of an install or a clear
+// ...................................
+// The calling thread validates the table as a whole (a malformed entry returns
+// InvalidArgument and leaves the previous table in charge; entries == nullptr with
+// count == 0 clears it; entries are copied, the caller keeps its array) and hands
+// it to the HDR processor, which re-evaluates the state it holds for the frame
+// already on screen. The diagnostics therefore move with the call even while the
+// session is paused or at end-of-stream, with one timing caveat: the snapshot's ST
+// 2094 fields are refreshed by work the call queues onto the session thread, so a
+// reader that races the call can still see the previous frame's numbers, whereas
+// FFF3FP_GetHdrMetadataSource reads the processor live and flips immediately.
+// The *picture* is not repainted from the calling thread. The call marks the HDR
+// shader inputs stale and asks the presenter to re-present the cached frame; the
+// draw path consumes that mark, refreshing the tone-mapping constants and the
+// curve LUT texture immediately before it draws. Nothing touches the device on the
+// API caller's stack, so the refresh is serialised with the draw by construction
+// and cannot race the presentation pump against the same immediate context.
+// Two consequences a host must design for:
+//   · The visible half needs a cached frame and an output window. A headless
+//     session, or one that has never rendered a frame, has nothing to re-present:
+//     only the diagnostics move, and the picture changes with the next frame the
+//     renderer caches.
+//   · Judge "my injection took effect" on pixels, not on the source flag alone.
+//     On a paused session with a cached frame, installing a table moves the sampled
+//     points and clearing returns them to their pre-install values. Pure black stays
+//     black -- no curve moves it -- so "not every sampled point moved" is expected,
+//     whereas "the flag says Injected and no
+//     sampled pixel moved" means the present path never ran, not that the curve is
+//     identity.
+//
+// Peak ownership when the entry carries no usable maxscl
+// ......................................................
+// An active entry owns the frame's dynamic state: its windows and curves, and with
+// them the reported format (Hdr10Plus) and processing path (Hdr10PlusDynamic). The
+// source peak follows a strict precedence and never mixes the two sources:
+//   1. the entry's own peak -- max(maxScl) across windows[0]'s three channels,
+//      converted to nits as value * 10000 -- whenever that is a valid peak;
+//   2. otherwise the stream-level baseline -- the peak the processor derived from
+//      its codec parameters at open time (Dolby configuration, HDR10+ side data,
+//      color_trc) plus the stream's static mastering metadata. For real shipped
+//      HDR10/HDR10+ material this is normally the static
+//      targeted_system_display_maximum_luminance.
+// Never -- in either branch -- the dynamic peak this frame's bitstream parse
+// produced. A curve from the injection with a peak from this frame's SEI would map
+// one frame with two sources at once. With a stream whose mastering metadata reads
+// 1000/1 and an entry carrying no valid maxscl, snapshot
+// .sourcePeakNits stays pinned at 1000 for every frame while the bitstream peak it
+// would otherwise have followed moves 322/328/308/347/331/350/363, and windows,
+// targeted value and curve all follow the entry. The per-frame path then clamps
+// whatever the two branches resolved into [max(1 nit, paper white), 10000 nits];
+// maxScl is itself validated to [0,1], so an injected peak cannot exceed 10000.
+// So: GetHdrMetadataSource == Injected does NOT imply the peak came from the
+// injected entry. It implies the curve, the windows, the targeted value and the
+// reported format/path do. Peak provenance is guaranteed only when the entry
+// carries a valid maxScl; a host that needs to tell the two cases apart compares
+// snapshot.sourcePeakNits against maxScl * 10000 of the entry in range (or samples
+// the picture and finds the peak it can actually attribute).
+
 FFF3FP_API void FFF3FP_Destroy(FFF3FPHandle player) noexcept;
 
 FFF3FP_API FFFResult FFF3FP_OpenBitmapSubtitle(const char* localPathUtf8,
