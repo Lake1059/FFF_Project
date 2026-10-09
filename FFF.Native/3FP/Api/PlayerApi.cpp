@@ -11,8 +11,15 @@
 
 namespace {
 using PlayerMediaText::CopyUtf8;
-// Configuration layout and version must match the public header exactly.
-constexpr std::uint32_t PlayerApiVersion = 16;
+// Bumped 14 -> 15 because FFF3FPConfiguration gained the preferredAdapterIndex
+// field. FFF3FP_Create rejects a mismatched version outright, so
+// every consumer of this header MUST be rebuilt and bumped in lockstep.
+// Bumped 15 -> 16 because FFF3FPConfiguration gained the sdrScRgbMode field.
+// Bumped 16 -> 17 because FFF3FPSnapshot gained the ST 2094 dynamic metadata
+// diagnostic fields at its tail. GetSnapshot rejects a caller whose declared
+// size is smaller than sizeof(FFF3FPSnapshot), so every consumer of the
+// snapshot struct must be rebuilt in lockstep with this bump.
+constexpr std::uint32_t PlayerApiVersion = 17;
 
 // Process-wide native log sink, installed through FFF3FP_SetLogCallback.
 std::atomic<FFF3FPLogCallback> g_logSink{nullptr};
@@ -186,6 +193,25 @@ FFFResult FFF3FP_GetTimedTextStatus(const FFF3FPHandle player,
 FFFResult FFF3FP_Redraw(const FFF3FPHandle player) noexcept {
     return player ? static_cast<PlayerSession*>(player)->Redraw()
         : FFFResult::InvalidArgument;
+}
+// ST 2094-40 injection. See the header for units and the frame-matching rule.
+// A malformed entry is rejected (InvalidArgument) and the previously installed
+// table stays live, so a bad call cannot half-apply and change the picture.
+FFFResult FFF3FP_SetHdrDynamicMetadata(const FFF3FPHandle player,
+    const FFF3FPHdrDynamicMetadataEntry* entries, const std::uint32_t count) noexcept {
+    return player ? static_cast<PlayerSession*>(player)
+        ->SetInjectedHdrMetadata(entries, count)
+        : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_ClearHdrDynamicMetadata(const FFF3FPHandle player) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->ClearInjectedHdrMetadata()
+        : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_GetHdrMetadataSource(const FFF3FPHandle player,
+    std::uint32_t* source) noexcept {
+    if (player == nullptr || source == nullptr) return FFFResult::InvalidArgument;
+    *source = static_cast<PlayerSession*>(player)->HdrMetadataSource();
+    return FFFResult::Success;
 }
 FFFResult FFF3FP_GetDanmakuStatus(const FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept {

@@ -3,6 +3,7 @@
 #include "3FP/Render/ShaderBytecode.h"
 #include "3FP/Render/SdrShaderBytecode.h"
 #include "3FP/Render/ColorExtension.h"
+#include "3FP/Hdr/HdrToneCurve.h"
 
 extern "C" {
 #include <libavcodec/codec_par.h>
@@ -24,6 +25,7 @@ extern "C" {
 #include <windows.graphics.display.h>
 #include <windows.graphics.display.interop.h>
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <climits>
@@ -453,6 +455,39 @@ cbuffer Settings : register(b0) {
 #define Reserved 0
 #define Projection360 0
 #endif
+// ST 2094 (HDR10+ / HDR Vivid) dynamic tone mapping, bound at register(b2).
+//
+// Slot choice matters: register(b1) is already claimed by extensionConstants_
+// (the Dolby Vision color-extension path binds it on every draw), so the
+// dynamic curve state must not live there or the two would overwrite each
+// other whenever a color extension is installed.
+//
+// This is a separate buffer on purpose: when a stream carries no dynamic
+// metadata, DynamicEnabled stays 0 and every branch below falls through to the
+// original BT.2390 path byte for byte. Keeping the new state out of the b0
+// cbuffer means the existing path cannot be perturbed by layout changes.
+//
+// CurveLut holds the reconstructed per-window tone curve(s), sampled uniformly
+// over x in [0,1]. WindowMin/Max carry the normalised rectangles used to pick
+// which curve a pixel uses.
+//
+// The last row is a single float packed beside WindowMax2 because HLSL does not
+// allow two scalars to share a 16-byte register row: writing
+// `float2 WindowMin2; float2 WindowMax2; float WindowBlend;` silently widens the
+// buffer and shifts every field after it.
+cbuffer DynamicSettings : register(b2) {
+    uint DynamicEnabled;      // 0 = use the original mapping only
+    uint DynamicWindowCount;  // 1 or 3
+    uint DynamicFlags;        // reserved, currently 0
+    float WindowBlend;        // half-width of the cross-window transition band
+    float DynamicSourcePeak;  // content peak for this frame (nits)
+    float DynamicTargetPeak;  // the content's targeted display peak (nits)
+    float2 DynamicPad0;
+    float2 WindowMin0; float2 WindowMax0;
+    float2 WindowMin1; float2 WindowMax1;
+    float2 WindowMin2; float2 WindowMax2;
+};
+Texture2D<float4> CurveLut : register(t3);
 Texture2D<float4> Source : register(t0);
 Texture2D<float4> ChromaU : register(t1);
 Texture2D<float4> ChromaV : register(t2);
@@ -538,6 +573,59 @@ float3 ToneHdrToSdr(float3 rec2020Nits,float sourcePeak,float targetPeak) {
         ipt.yz*=chromaScale;
     }
     return IptToLinear2020Nits(ipt);
+}
+// Sample one ST 2094 window curve. The table is a 256-entry 1-D ramp laid out
+// along x, holding the reconstructed mapping of the normalised PQ signal.
+float SampleCurve(float windowIndex,float normalized) {
+    float x=saturate(normalized);
+    float texel=(x*255.0+0.5)/256.0;
+    // windowIndex is a row number; the table is kHdrMaxProcessingWindows rows tall
+    // (a C++ static_assert below pins that to the 3.0 here). Passing the raw index
+    // clamps rows 1 and 2 onto the last row, which handed the middle window the
+    // third window's curve.
+    return CurveLut.SampleLevel(LinearSampler,float2(texel,(windowIndex+0.5)/3.0),0).r;
+}
+// Resolve the ST 2094 window for this pixel and evaluate its curve.
+//
+// Windows do not tile the frame seamlessly in practice: adjacent windows carry
+// independently mastered parameters, so switching at a hard edge draws a visible
+// seam. The weight therefore ramps across a band of width WindowBlend *centred
+// on the border*, so that on the border itself both neighbours contribute half.
+//
+// Centring matters. An earlier version ramped from the window's own edge inward
+// (`smoothstep(min, min+blend, uv)`), which meant that at the border the outgoing
+// window had already fallen to 0 while the incoming one had not yet risen: the
+// weights never overlapped, the total collapsed toward 0 and the picture showed
+// a step. Each window's ramp must extend *outside* its own rectangle so the sum
+// stays ~1 everywhere.
+float DynamicCurveWeight(float2 uv,float2 minimum,float2 maximum,out float weight) {
+    // Eight-wide smoothstep, so the ramp is symmetric about each border:
+    // the lower edge ramps over [min-blend, min+blend], the upper over
+    // [max-blend, max+blend]. Adjacent windows therefore cross-fade exactly.
+    const float2 lower=smoothstep(minimum-WindowBlend,minimum+WindowBlend,uv);
+    const float2 upper=1.0-smoothstep(maximum-WindowBlend,maximum+WindowBlend,uv);
+    weight=saturate(min(lower.x,lower.y)*min(upper.x,upper.y));
+    return weight;
+}
+float EvaluateDynamicCurve(float2 uv,float normalized) {
+    if(DynamicWindowCount<=1)
+        return SampleCurve(0.0,normalized);
+    float weight0,weight1,weight2;
+    DynamicCurveWeight(uv,WindowMin0,WindowMax0,weight0);
+    DynamicCurveWeight(uv,WindowMin1,WindowMax1,weight1);
+    DynamicCurveWeight(uv,WindowMin2,WindowMax2,weight2);
+    const float total=weight0+weight1+weight2;
+    // A pixel can legitimately fall outside every rectangle once the ramps are
+    // symmetric (the corners of a multi-window layout, for instance). Falling
+    // back to window 0 there is right: window 0 is the full-frame window in the
+    // single-window shape, and in the three-window shape it is the left region,
+    // which is no worse than the static mapping.
+    if(total<=0.000001)
+        return SampleCurve(0.0,normalized);
+    const float c0=SampleCurve(0.0,normalized);
+    const float c1=SampleCurve(1.0,normalized);
+    const float c2=SampleCurve(2.0,normalized);
+    return (c0*weight0+c1*weight1+c2*weight2)/total;
 }
 float Sinc(float value) {
     value=abs(value);
@@ -726,6 +814,51 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     if(Gamut==0)nits=To2020(nits);
     // BT.2390 operates on IPT intensity before Rec.2020-to-Rec.709 gamut
     // conversion. Chroma follows the reduced IPT gamut hull.
+    if(DynamicEnabled!=0) {
+        // ST 2094 dynamic metadata path, composed in two stages.
+        //
+        //   1. The reconstructed curve maps the *content* signal to what the
+        //      content's own targeted display would show. This is the part that
+        //      varies per frame (and per window).
+        //   2. That targeted display is still not this display, so the result is
+        //      compressed onto our SDR peak with the same BT.2390 mapping the
+        //      static path uses.
+        //
+        // Applying the curve on its own (skipping step 2) would leave the source
+        // range uncompressed and clip highlights to white; using the static
+        // source peak alone (skipping step 1) is the behaviour this feature
+        // exists to replace.
+        //
+        // Domain note: in this renderer `ipt.x` (the IPT intensity of the nits
+        // vector) is the quantity Bt2390HdrToSdrPq consumes, exactly as the
+        // static path does via ToneHdrToSdr. The curve is defined on that same
+        // normalised signal, so multiplying back by sourcePq before the BT.2390
+        // call keeps both stages in one domain.
+        float3 ipt=Linear2020NitsToIpt(nits);
+        const float originalIntensity=ipt.x;
+        const float sourcePeak=max(DynamicSourcePeak,1.0);
+        const float sourcePq=NitsToPq(sourcePeak.xxx).r;
+        float mapped=originalIntensity;
+        if(sourcePq>0.000001) {
+            const float normalized=saturate(originalIntensity/sourcePq);
+            // Step 1: the per-window curve, in the normalised signal domain.
+            mapped=EvaluateDynamicCurve(uv,normalized)*sourcePq;
+            // Step 2: compress the content's targeted range onto this display.
+            mapped=Bt2390HdrToSdrPq(mapped,DynamicTargetPeak,SdrPeak);
+        }
+        ipt.x=mapped;
+        if(originalIntensity<=0.000001||mapped<=0.000001) {
+            ipt.yz=0.0;
+        } else {
+            float2 hull=float2(IptChromaHull(originalIntensity),IptChromaHull(mapped));
+            float chromaScale=saturate(min(mapped/originalIntensity,
+                hull.y/max(hull.x,0.000001)));
+            ipt.yz*=chromaScale;
+        }
+        float3 mapped2020=IptToLinear2020Nits(ipt);
+        float3 sdr=ToBt709(To709(mapped2020)/SdrPeak);
+        return float4(sdr,1);
+    }
     float3 sdr=ToBt709(To709(ToneHdrToSdr(nits,HdrPeak,SdrPeak))/SdrPeak);
     return float4(sdr,1);
 })";
@@ -910,6 +1043,37 @@ struct ScaleShaderSettings {
     float padding1, padding2;
 };
 static_assert(sizeof(ScaleShaderSettings) == 32);
+
+// Curve table width and the b2 cbuffer mirror now live in VideoRenderer.h so
+// the class method signature can name the settings type.
+
+// True when any HDR10 metadata field moved enough to be worth re-submitting.
+//
+// The luminance fields are the ones ST 2094 varies per scene. A threshold of
+// ~2% keeps genuinely different scenes apart while ignoring the last-bit
+// wigggle of a statically graded stream, so DWM is not asked to re-tone-map on
+// every frame.
+bool HdrMetadataChanged(const DXGI_HDR_METADATA_HDR10& previous,
+    const DXGI_HDR_METADATA_HDR10& next) noexcept {
+    const auto moved = [](const std::uint32_t a, const std::uint32_t b) noexcept {
+        const auto high = std::max(a, b);
+        if (high == 0) return false;
+        const auto low = std::min(a, b);
+        return (high - low) * 100u > high * 2u;
+    };
+    if (moved(previous.MaxContentLightLevel, next.MaxContentLightLevel)) return true;
+    if (moved(previous.MaxFrameAverageLightLevel, next.MaxFrameAverageLightLevel)) return true;
+    if (moved(previous.MaxMasteringLuminance, next.MaxMasteringLuminance)) return true;
+    if (previous.MinMasteringLuminance != next.MinMasteringLuminance) return true;
+    for (int index = 0; index < 2; ++index) {
+        if (previous.RedPrimary[index] != next.RedPrimary[index] ||
+            previous.GreenPrimary[index] != next.GreenPrimary[index] ||
+            previous.BluePrimary[index] != next.BluePrimary[index] ||
+            previous.WhitePoint[index] != next.WhitePoint[index])
+            return true;
+    }
+    return false;
+}
 
 struct VideoDestination {
     // Zoom/pan may place the origin outside the back buffer. Keep it signed.
@@ -2639,6 +2803,26 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             FAILED(device_->CreateBuffer(&scaleBuffer, nullptr, &scaleConstants_))) {
             SetError("Could not create the presentation shader resources."); return FFFResult::DeviceFailure;
         }
+        // The ST 2094 resources are optional: if either fails, dynamicCurveBuilt_
+        // stays false and the shader takes its original path. Creating them is
+        // therefore deliberately outside the hard-failure check above.
+        D3D11_BUFFER_DESC dynamicBuffer = buffer;
+        dynamicBuffer.ByteWidth = sizeof(DynamicShaderSettings);
+        if (SUCCEEDED(device_->CreateBuffer(&dynamicBuffer, nullptr, &dynamicConstants_))) {
+            D3D11_TEXTURE2D_DESC curve{};
+            curve.Width = kDynamicCurveLutWidth;
+            curve.Height = kHdrMaxProcessingWindows;
+            curve.MipLevels = curve.ArraySize = 1;
+            curve.Format = DXGI_FORMAT_R32_FLOAT;
+            curve.SampleDesc.Count = 1;
+            curve.Usage = D3D11_USAGE_DEFAULT;
+            curve.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            if (SUCCEEDED(device_->CreateTexture2D(&curve, nullptr, &dynamicCurveTexture_)) &&
+                SUCCEEDED(device_->CreateShaderResourceView(
+                    dynamicCurveTexture_, nullptr, &dynamicCurveView_))) {
+                dynamicCurveBuilt_ = true;
+            }
+        }
     }
     // Do not make ordinary SDR playback pay for private test shader setup.
     // Stream classification is already updated by ProcessFrame before the
@@ -2894,6 +3078,11 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     const std::uint32_t effect, ID3D11ShaderResourceView* const* sourceViews) noexcept {
     if (target == nullptr || context_ == nullptr || width <= 0.0f || height <= 0.0f)
         return FFFResult::InvalidArgument;
+    // An injected ST 2094 table is applied on the present path rather than from the API
+    // call: this is the one place that pushes the constant buffers immediately before a
+    // draw, so refreshing here is serialised with the draw by construction and never
+    // races the presentation pump against the same immediate context.
+    if (hdrInputsDirty_.exchange(false)) RefreshHdrShaderInputs();
     cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
     const bool reconstructed = extensionReconstructed_ && actualMode_ != FFF3FPColorMode::RawHdrAsSdr;
     cachedVideoSettings_.inputLayout = reconstructed ? 1u : cachedOriginalInputLayout_;
@@ -2936,14 +3125,23 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     context_->PSSetShader(shader, nullptr, 0);
     context_->PSSetConstantBuffers(1, 1, &extensionConstants_);
     context_->PSSetConstantBuffers(0, 1, &constants_);
+    // ST 2094 curve state at b2 / t3. Both are always bound so the shader's
+    // declared registers are never left holding a released object; with
+    // DynamicEnabled == 0 the values are inert.
+    if (dynamicConstants_ != nullptr)
+        context_->PSSetConstantBuffers(2, 1, &dynamicConstants_);
     ID3D11SamplerState* samplers[] = {sampler_, pointSampler_, panoramaSampler_};
     context_->PSSetSamplers(0, ARRAYSIZE(samplers), samplers);
     auto* views = sourceViews != nullptr ? sourceViews :
         (reconstructed ? extensionReconstructedViews_ : sourceViews_);
     context_->PSSetShaderResources(0, ARRAYSIZE(sourceViews_), views);
+    if (dynamicCurveView_ != nullptr)
+        context_->PSSetShaderResources(3, 1, &dynamicCurveView_);
     context_->Draw(3, 0);
     ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
     context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
+    ID3D11ShaderResourceView* nullCurve = nullptr;
+    context_->PSSetShaderResources(3, 1, &nullCurve);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     return FFFResult::Success;
 }
@@ -4302,23 +4500,136 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
     }
 }
 
+// Build the b2 constant buffer and the curve LUT for this frame.
+//
+// Returns false whenever the dynamic path must not be taken, which includes:
+// no metadata, a window with no usable curve, or missing GPU resources. Every
+// one of those cases leaves the shader's DynamicEnabled at 0, i.e. the original
+// mapping, so the failure mode is "as before" rather than "wrong picture".
+bool PlayerVideoRenderer::BuildDynamicToneSettings(const HdrDynamicMetadata& metadata,
+    DynamicShaderSettings& settings, std::array<float, kDynamicCurveLutWidth *
+        kHdrMaxProcessingWindows>& curves) noexcept {
+    settings = DynamicShaderSettings{};
+    if (!dynamicCurveBuilt_ || dynamicConstants_ == nullptr ||
+        dynamicCurveView_ == nullptr || metadata.windowCount == 0 ||
+        metadata.kind == HdrMetadataKind::None) {
+        return false;
+    }
+    // A stream whose metadata was rejected carries no usable curve; stay on the
+    // static path rather than applying a degenerate mapping.
+    if (IsBlockingDegrade(metadata.degrade)) return false;
+
+    std::uint32_t built = 0;
+    for (std::uint32_t index = 0; index < metadata.windowCount &&
+        index < kHdrMaxProcessingWindows; ++index) {
+        const auto& window = metadata.windows[index];
+        HdrToneCurve curve{};
+        if (!HdrToneCurveBuild::BuildFromWindow(window, curve)) break;
+        for (std::uint32_t sample = 0; sample < kDynamicCurveLutWidth; ++sample)
+            curves[index * kDynamicCurveLutWidth + sample] = curve.lut[sample];
+        ++built;
+    }
+    // Require every declared window to have produced a curve: applying a curve
+    // to only part of the frame would make the mapped region visibly different
+    // from the rest, which is worse than the static mapping.
+    if (built == 0 || built != metadata.windowCount) return false;
+
+    settings.enabled = 1;
+    settings.windowCount = built;
+    // Stage-2 compression runs from the content's own targeted display onto this
+    // display. When the stream names no targeted display, fall back to the
+    // frame's content peak so the mapping stays bounded.
+    settings.sourcePeak = std::clamp(metadata.windows[0].signalPeakNits, 1.0f, 10000.0f);
+    settings.targetPeak = metadata.hasTargetedDisplay && metadata.targetedDisplayNits > 0.0f
+        ? std::clamp(metadata.targetedDisplayNits, 1.0f, 10000.0f)
+        : std::max(settings.sourcePeak, 1.0f);
+    // A transition band keeps adjacent windows from meeting at a hard edge. The
+    // value is a fraction of the normalised frame, so it is resolution
+    // independent. Single-window streams never consult it.
+    settings.windowBlend = built > 1 ? kDynamicWindowBlend : 0.0f;
+    const auto write = [](float (&minimum)[2], float (&maximum)[2],
+        const HdrProcessingWindow& window) noexcept {
+        minimum[0] = window.upperLeftX; minimum[1] = window.upperLeftY;
+        maximum[0] = window.lowerRightX; maximum[1] = window.lowerRightY;
+    };
+    // Unused slots have to be parked one by one. A slot left at the zero-initialised
+    // rectangle is not "no area": the blend ramps are symmetric about each border, so
+    // a degenerate box at the origin still weighs in -- and its row in the curve LUT
+    // was never filled, because only `built` rows are written into a zeroed array. A
+    // two-window table therefore blended an all-zero curve into the whole picture.
+    write(settings.windowMin0, settings.windowMax0, metadata.windows[0]);
+    if (built > 1) {
+        write(settings.windowMin1, settings.windowMax1, metadata.windows[1]);
+    } else {
+        settings.windowMin1[0] = settings.windowMin1[1] = 2.0f;
+        settings.windowMax1[0] = settings.windowMax1[1] = 3.0f;
+    }
+    if (built > 2) {
+        write(settings.windowMin2, settings.windowMax2, metadata.windows[2]);
+    } else {
+        settings.windowMin2[0] = settings.windowMin2[1] = 2.0f;
+        settings.windowMax2[0] = settings.windowMax2[1] = 3.0f;
+    }
+    return true;
+}
+
+FFFResult PlayerVideoRenderer::SetInjectedHdrMetadata(
+    const FFF3FPHdrDynamicMetadataEntry* entries, const std::uint32_t count) noexcept {
+    const auto result = hdrProcessor_.SetInjectedMetadata(entries, count);
+    // Flag before redrawing: the pump's next draw refreshes the shader inputs on its own
+    // call stack, so a table installed while paused or at end-of-stream reaches the
+    // picture, not only the diagnostics.
+    if (result == FFFResult::Success) {
+        hdrInputsDirty_.store(true);
+        (void)Redraw();
+    }
+    return result;
+}
+
+void PlayerVideoRenderer::ClearInjectedHdrMetadata() noexcept {
+    hdrProcessor_.ClearInjectedMetadata();
+    hdrInputsDirty_.store(true);
+    (void)Redraw();
+}
+
+std::uint32_t PlayerVideoRenderer::HdrMetadataSource() const noexcept {
+    return hdrProcessor_.InjectedMetadataActive()
+        ? static_cast<std::uint32_t>(FFF3FPHdrMetadataSource::Injected)
+        : static_cast<std::uint32_t>(FFF3FPHdrMetadataSource::Bitstream);
+}
+
 void PlayerVideoRenderer::SetHdrMetadata() noexcept {
     if (swapChain_ == nullptr || !swapHdr_) return;
-    // SDR has no HDR mastering metadata; let DWM map the linear scRGB values.
+    // An SDR source presented on the scRGB chain has no mastering display and no
+    // content light level. The fallback HDR10 block would still declare Rec.2020
+    // primaries and a 100-nit peak the source never claimed, which is exactly the
+    // kind of hint that makes a display tone map the picture. Declare "none" and
+    // let DWM apply its default mapping to the linear values we hand over.
     if (hdrProcessor_.State().format == FFF3FPHdrFormat::Sdr) {
         swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+        lastHdrMetadata_ = {};
+        hdrMetadataValid_ = false;
         return;
     }
     DXGI_HDR_METADATA_HDR10 metadata{};
     hdrProcessor_.BuildDxgiHdr10Metadata(metadata);
+    // With ST 2094 metadata present these fields now change per scene, and DWM
+    // does not take kindly to a new block on every frame: pushing one per frame
+    // makes the display's tone mapping visibly hunt. Only submit when a field
+    // moved by more than a perceptual threshold.
+    if (hdrMetadataValid_ && !HdrMetadataChanged(lastHdrMetadata_, metadata)) return;
+    lastHdrMetadata_ = metadata;
+    hdrMetadataValid_ = true;
     swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(metadata), &metadata);
 }
 
-FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNativeSize,
+FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t frameIndex,
+    const bool limitToNativeSize,
     const bool coverArt, const bool prepareOnly) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
     const auto* extensionEnhancementFrame = EnhancementFrame(frame);
-    const auto hdrState = hdrProcessor_.ProcessFrame(frame, hdrPeakNits_, paperWhiteNits_);
+    const auto hdrState = hdrProcessor_.ProcessFrame(
+        frame, hdrPeakNits_, paperWhiteNits_, frameIndex);
     struct PlaybackWorkGuard final {
         std::atomic<std::uint32_t>& pending;
         explicit PlaybackWorkGuard(std::atomic<std::uint32_t>& value) noexcept : pending(value) {
@@ -4328,6 +4639,17 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     } playbackWorkGuard(playbackWorkPending_);
     const auto width = static_cast<std::uint32_t>(frame->width);
     const auto height = static_cast<std::uint32_t>(frame->height);
+    // Captured here, before any early return: the refresh path re-resolves the
+    // transfer from these, and pairing this frame's format with the previous
+    // frame's trc is exactly what the frame's own declaration is there to prevent.
+    const bool frameDeclaresTrc = frame != nullptr && frame->color_trc != AVCOL_TRC_UNSPECIFIED;
+    auto transferFromFrame = 0u;
+    if (frameDeclaresTrc) {
+        transferFromFrame = frame->color_trc == AVCOL_TRC_ARIB_STD_B67 ? 2u :
+            frame->color_trc == AVCOL_TRC_SMPTE2084 ? 1u : 0u;
+    }
+    lastFrameDeclaresTrc_ = frameDeclaresTrc;
+    lastTransferFromFrame_ = transferFromFrame;
     // YUV matrix selection stays a property of the transfer/colorspace pair;
     // the shader's gamut switch is driven by the primaries instead.
     const auto source2020 = hdrState.format != FFF3FPHdrFormat::Sdr || IsRec2020(frame);
@@ -4503,27 +4825,40 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     ShaderSettings settings{};
     settings.colorMode = static_cast<std::uint32_t>(actualMode_);
     settings.reserved = 0;
-    const auto hlgCompatibility = static_cast<std::uint32_t>(FFF3FPHdrCompatibility::Hlg);
-    // Dynamic metadata does not change the pixel transfer function. Dolby Vision
-    // uses its compatibility transfer; other HDR follows frame TRC, then classification.
-    auto transferFromFrame = 0u;
-    const bool frameDeclaresTrc = frame != nullptr && frame->color_trc != AVCOL_TRC_UNSPECIFIED;
-    if (frameDeclaresTrc) {
-        transferFromFrame = frame->color_trc == AVCOL_TRC_ARIB_STD_B67 ? 2u :
-            frame->color_trc == AVCOL_TRC_SMPTE2084 ? 1u : 0u;
-    }
-    if (hdrState.format == FFF3FPHdrFormat::DolbyVision) {
-        settings.transfer = (hdrState.compatibility & hlgCompatibility) != 0 ? 2u : 1u;
-    } else if (hdrState.format != FFF3FPHdrFormat::Sdr && frameDeclaresTrc && transferFromFrame != 0u) {
-        settings.transfer = transferFromFrame;
-    } else {
-        settings.transfer = hdrState.format == FFF3FPHdrFormat::Hlg ? 2u :
-            (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
-    }
+    // The decode transfer function must follow the *pixels*, not the metadata
+    // classification. ST 2094 dynamic metadata (HDR10+, HDR Vivid) is defined
+    // for streams that keep their own encoding: metadata arriving later must
+    // not change how the samples are decoded. A "HLG signal + HDR Vivid
+    // metadata" stream decoded as PQ over-brightens its highlights by an order
+    // of magnitude, and would flip transfer mid-playback.
+    // The decision itself lives in ResolveDecodeTransfer, shared with the
+    // injection refresh path.
+    settings.transfer = ResolveDecodeTransfer(hdrState);
     settings.gamut = gamut;
     settings.sdrPeak = sdrPeakNits_;
     settings.hdrPeak = settings.transfer == 0 ? 100.0f : hdrProcessor_.State().sourcePeakNits;
     sourcePeakNits_ = settings.hdrPeak;
+    // ST 2094 dynamic tone mapping owns the SDR mapping path only. The HDR
+    // (scRGB) path hands linear light to the display unchanged, so a curve there
+    // would double-map; mapToHdr uses per-frame DXGI metadata instead
+    // (SetHdrMetadata).
+    DynamicShaderSettings dynamicSettings{};
+    std::array<float, kDynamicCurveLutWidth * kHdrMaxProcessingWindows> dynamicCurves{};
+    const bool useDynamicCurve = !prepareOnly && settings.transfer != 0 &&
+        actualMode_ != FFF3FPColorMode::MapToHdr &&
+        actualMode_ != FFF3FPColorMode::RawHdrAsSdr &&
+        BuildDynamicToneSettings(hdrState.dynamic, dynamicSettings, dynamicCurves);
+    // Upload unconditionally so the GPU state never keeps a previous frame's
+    // curve when this frame has none: the buffer and texture are bound on every
+    // draw, and a stale table with enabled==0 would still be sampled if the
+    // shader were ever changed to ignore the gate.
+    if (dynamicConstants_ != nullptr) {
+        context_->UpdateSubresource(dynamicConstants_, 0, nullptr, &dynamicSettings, 0, 0);
+        if (dynamicCurveTexture_ != nullptr) {
+            context_->UpdateSubresource(dynamicCurveTexture_, 0, nullptr,
+                dynamicCurves.data(), kDynamicCurveLutWidth * sizeof(float), 0);
+        }
+    }
     settings.paperWhite = EffectivePaperWhiteNits();
     settings.targetPeak = hdrState.targetPeakNits;
     settings.sourceWidth = static_cast<float>(width); settings.sourceHeight = static_cast<float>(height);
@@ -4598,6 +4933,60 @@ FFFResult PlayerVideoRenderer::Redraw() noexcept {
     }
     timedTextCondition_.notify_one();
     return FFFResult::Success;
+}
+
+std::uint32_t PlayerVideoRenderer::ResolveDecodeTransfer(
+    const HdrFrameState& hdrState) const noexcept {
+    //   1) Dolby Vision keeps its compatibility-layer decision: the RPU
+    //      remapping has its own semantics that a container trc cannot express.
+    //   2) Otherwise follow the frame's own color_trc when it declares one.
+    //   3) Fall back to the format-based inference for frames that declare
+    //      nothing (previous behaviour).
+    const auto hlgCompatibility = static_cast<std::uint32_t>(FFF3FPHdrCompatibility::Hlg);
+    if (hdrState.format == FFF3FPHdrFormat::DolbyVision)
+        return (hdrState.compatibility & hlgCompatibility) != 0 ? 2u : 1u;
+    if (hdrState.format != FFF3FPHdrFormat::Sdr && lastFrameDeclaresTrc_ &&
+        lastTransferFromFrame_ != 0u)
+        return lastTransferFromFrame_;
+    return hdrState.format == FFF3FPHdrFormat::Hlg ? 2u :
+        (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
+}
+
+void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
+    // Present-path only (called from DrawWithShader under the device/present locks):
+    // cachedVideoSettings_ and the constant buffers belong to that lock, not to the
+    // thread that received FFF3FP_SetHdrDynamicMetadata.
+    if (!hasCachedVideo_ || context_ == nullptr) return;
+    const auto hdrState = hdrProcessor_.State();
+    cachedVideoSettings_.transfer = ResolveDecodeTransfer(hdrState);
+    cachedVideoSettings_.hdrPeak = cachedVideoSettings_.transfer == 0 ?
+        100.0f : hdrState.sourcePeakNits;
+    sourcePeakNits_ = cachedVideoSettings_.hdrPeak;
+    cachedVideoSettings_.paperWhite = EffectivePaperWhiteNits();
+    cachedVideoSettings_.targetPeak = hdrState.targetPeakNits;
+    // Same gate as the per-frame path, so a refresh cannot enable a curve that the
+    // frame path would have refused.
+    DynamicShaderSettings dynamicSettings{};
+    std::array<float, kDynamicCurveLutWidth * kHdrMaxProcessingWindows> dynamicCurves{};
+    const bool useDynamicCurve = cachedVideoSettings_.transfer != 0 &&
+        actualMode_ != FFF3FPColorMode::MapToHdr &&
+        actualMode_ != FFF3FPColorMode::RawHdrAsSdr &&
+        BuildDynamicToneSettings(hdrState.dynamic, dynamicSettings, dynamicCurves);
+    if (!useDynamicCurve) {
+        // Guarded rather than left to short-circuit order: whatever the gate decides,
+        // the buffer that reaches the shader has to agree with it.
+        dynamicSettings = DynamicShaderSettings{};
+        dynamicCurves = {};
+    }
+    // Uploaded unconditionally, exactly like the per-frame path: a stale table with
+    // enabled == 0 must never survive into the next draw.
+    if (dynamicConstants_ != nullptr) {
+        context_->UpdateSubresource(dynamicConstants_, 0, nullptr, &dynamicSettings, 0, 0);
+        if (dynamicCurveTexture_ != nullptr) {
+            context_->UpdateSubresource(dynamicCurveTexture_, 0, nullptr,
+                dynamicCurves.data(), kDynamicCurveLutWidth * sizeof(float), 0);
+        }
+    }
 }
 
 void PlayerVideoRenderer::ReleaseCoverBackdropResources() noexcept {
@@ -5425,6 +5814,10 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseExtensionEnhancement();
     ReleaseCom(extensionEnhancementShader_);
     ReleaseCom(extensionEnhancementConstants_);
+    ReleaseCom(dynamicCurveView_);
+    ReleaseCom(dynamicCurveTexture_);
+    ReleaseCom(dynamicConstants_);
+    dynamicCurveBuilt_ = false;
     extensionAttempted_ = false;
     extensionEligible_ = false;
     ReleaseCom(scalePixelShader_);

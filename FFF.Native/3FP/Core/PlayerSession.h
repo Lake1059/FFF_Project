@@ -90,6 +90,13 @@ public:
     FFFResult GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept;
     // Re-present the last cached frame (host calls it after a child HWND resize).
     FFFResult Redraw() noexcept;
+    // ST 2094-40 injection, new with this change.
+    // See FFF3FP_SetHdrDynamicMetadata in FFF.Player.Api.h for the units and
+    // matching rules.
+    FFFResult SetInjectedHdrMetadata(const FFF3FPHdrDynamicMetadataEntry* entries,
+        std::uint32_t count) noexcept;
+    FFFResult ClearInjectedHdrMetadata() noexcept;
+    std::uint32_t HdrMetadataSource() const noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
 

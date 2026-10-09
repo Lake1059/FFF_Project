@@ -176,6 +176,9 @@
     <ClInclude Include="3FP\Core\MediaText.h" />
     <ClInclude Include="3FP\Subtitle\SubtitleProbe.h" />
     <ClInclude Include="3FP\Hdr\HdrProcessor.h" />
+    <ClInclude Include="3FP\Hdr\HdrDynamicMetadata.h" />
+    <ClInclude Include="3FP\Hdr\HdrMetadataParse.h" />
+    <ClInclude Include="3FP\Hdr\HdrToneCurve.h" />
     <ClInclude Include="3FP\Render\ShaderBytecode.h" />
     <ClInclude Include="3FP\Render\ColorExtensionApi.h" />
     <ClInclude Include="3FP\Render\ColorExtension.h" />
@@ -199,6 +202,8 @@
     <ClCompile Include="3FP\Audio\WasapiRenderer.cpp" />
     <ClCompile Include="3FP\Core\PlayerSession.cpp" />
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp" />
+    <ClCompile Include="3FP\Hdr\HdrMetadataParse.cpp" />
+    <ClCompile Include="3FP\Hdr\HdrToneCurve.cpp" />
     <ClCompile Include="3FP\Render\VideoRenderer.cpp" />
     <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp" />
     <ClCompile Include="3FP\Subtitle\SubtitleProbe.cpp" />

@@ -129,6 +129,13 @@ void ApplyHdrState(FFF3FPSnapshot& snapshot, const HdrFrameState& hdr) noexcept 
     snapshot.displayPeakNits = toUnsigned(hdr.display.maximumNits);
     snapshot.displayFullFramePeakNits = toUnsigned(hdr.display.maximumFullFrameNits);
     snapshot.effectiveTargetPeakNits = toUnsigned(hdr.targetPeakNits);
+    snapshot.dynamicMetadataWindows = hdr.dynamic.windowCount;
+    snapshot.dynamicMetadataDegrade =
+        static_cast<std::uint32_t>(hdr.dynamic.degrade);
+    snapshot.dynamicMetadataSerial = hdr.dynamic.serial;
+    snapshot.dynamicMetadataHeldFrames = hdr.dynamic.heldFrames;
+    snapshot.dynamicMetadataTargetedNits =
+        toUnsigned(hdr.dynamic.targetedDisplayNits);
     snapshot.isHdrSource = hdr.format == FFF3FPHdrFormat::Sdr ? 0u : 1u;
 }
 
@@ -637,7 +644,7 @@ void PlayerSession::TryCompletePlaybackPreroll() noexcept {
             av_frame_copy_props(transferred, frame);
             frame = transferred;
         }
-        const auto result = videoRenderer_.Render(frame, false, false, true);
+        const auto result = videoRenderer_.Render(frame, HdrProcessor::kUnknownFrameIndex, false, false, true);
         av_frame_free(&transferred);
         if (result != FFFResult::Success) {
             if (result == FFFResult::DeviceFailure && videoRenderer_.RequestRecoveryIfDeviceLost()) return;
@@ -1204,7 +1211,7 @@ FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
             ApplyAudioPlaybackPause(true);
         }
         const auto redrawResult = coverArtFrame_ != nullptr && videoStream_ < 0 && window != nullptr
-            ? videoRenderer_.Render(coverArtFrame_, true, true) : videoRenderer_.Redraw();
+            ? videoRenderer_.Render(coverArtFrame_, HdrProcessor::kUnknownFrameIndex, true, true) : videoRenderer_.Redraw();
         if (redrawResult == FFFResult::DeviceFailure &&
             videoRenderer_.RequestRecoveryIfDeviceLost()) return;
         if (redrawResult != FFFResult::Success) {
@@ -1444,7 +1451,7 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
             !staticImage_ && !hardwareFallback
             ? FFF3FPDecodeMode::Gpu : FFF3FPDecodeMode::Cpu;
         if (staticImage_ && stillImageFrame_ != nullptr) {
-            const auto renderResult = videoRenderer_.Render(stillImageFrame_, true);
+            const auto renderResult = videoRenderer_.Render(stillImageFrame_, HdrProcessor::kUnknownFrameIndex, true);
             if (renderResult != FFFResult::Success) {
                 if (renderResult == FFFResult::DeviceFailure &&
                     videoRenderer_.RequestRecoveryIfDeviceLost()) return true;
@@ -1458,7 +1465,7 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
         if (videoRenderer_.DeviceRecoveryRequested() || state_.load() == FFF3FPState::Failed)
             return true;
     } else if (coverArtFrame_ != nullptr) {
-        const auto renderResult = videoRenderer_.Render(coverArtFrame_, true, true);
+        const auto renderResult = videoRenderer_.Render(coverArtFrame_, HdrProcessor::kUnknownFrameIndex, true, true);
         if (renderResult != FFFResult::Success) {
             if (renderResult == FFFResult::DeviceFailure &&
                 videoRenderer_.RequestRecoveryIfDeviceLost()) return true;
@@ -1769,6 +1776,35 @@ FFFResult PlayerSession::Redraw() noexcept {
     return result;
 }
 
+FFFResult PlayerSession::SetInjectedHdrMetadata(
+    const FFF3FPHdrDynamicMetadataEntry* entries, const std::uint32_t count) noexcept {
+    const auto result = videoRenderer_.SetInjectedHdrMetadata(entries, count);
+    // `snapshot_` belongs to the worker thread (the frame path writes it through
+    // mutex_ already released), so refreshing the ST 2094 diagnostics goes through
+    // Enqueue like SetColorMode does. The renderer call itself stays synchronous: the API
+    // promises an immediate InvalidArgument for a malformed table, and
+    // FFF3FP_GetHdrMetadataSource reads the processor, not the snapshot.
+    if (result == FFFResult::Success)
+        Enqueue([this] {
+            ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+            PublishSnapshot();
+        });
+    return result;
+}
+
+FFFResult PlayerSession::ClearInjectedHdrMetadata() noexcept {
+    videoRenderer_.ClearInjectedHdrMetadata();
+    Enqueue([this] {
+        ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+        PublishSnapshot();
+    });
+    return FFFResult::Success;
+}
+
+std::uint32_t PlayerSession::HdrMetadataSource() const noexcept {
+    return videoRenderer_.HdrMetadataSource();
+}
+
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     if (output.size < sizeof(FFF3FPSnapshot) || output.version != 8) return FFFResult::InvalidArgument;
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
@@ -2041,7 +2077,7 @@ FFFResult PlayerSession::LoadCoverArt() noexcept {
         if (coverArtFrame_ != nullptr) av_frame_free(&coverArtFrame_);
         coverArtFrame_ = av_frame_clone(frame);
         if (coverArtFrame_ == nullptr) result = FFFResult::NativeFailure;
-        else result = videoRenderer_.Render(coverArtFrame_, true, true);
+        else result = videoRenderer_.Render(coverArtFrame_, HdrProcessor::kUnknownFrameIndex, true, true);
     }
     av_frame_free(&frame);
     avcodec_free_context(&decoder);
@@ -3025,7 +3061,8 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
             return;
         }
     }
-    const auto renderResult = videoRenderer_.Render(frameToRender, staticImage_ && owner == format_);
+    const auto renderResult = videoRenderer_.Render(frameToRender, nextIndex,
+        staticImage_ && owner == format_);
     if (gamutConverted != nullptr) av_frame_free(&gamutConverted);
     if (renderResult != FFFResult::Success) {
         if (renderResult == FFFResult::DeviceFailure &&
