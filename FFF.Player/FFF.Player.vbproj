@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <Import Project="..\tools\DiscRuntime.props" />
   <PropertyGroup>
@@ -25,6 +25,15 @@
       <Prefer32Bit>false</Prefer32Bit>
       <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
       <ApplicationIcon>ICO.ico</ApplicationIcon>
+      <!-- 3FP native API version this host is built against.
+           Single source of truth for the release check below: it is compared against the
+           kernel's PlayerApiVersion and against the constant the host actually sends in
+           FFF3FPConfiguration.version, so the three cannot drift apart silently.
+           Bump ALL THREE together when the configuration struct changes:
+             1. kernel/FFF.Native/3FP/Api/PlayerApi.cpp   PlayerApiVersion
+             2. FFF.Player/Core/播放器会话.vb              <> NNUI  (and .版本 = NNUI)
+             3. this property                                            -->
+      <PlayerApiVersion>19</PlayerApiVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
@@ -104,14 +113,129 @@
     <Error Condition="'@(PrivateColorExtension)' != ''" Text="The private Dolby Vision test DLL must never be published or bundled." />
   </Target>
 
+  <!-- ════════════════════════════════════════════════════════════════════════════
+       发布前的 API 版本一致性校验。
+
+       为什么放在这里：宿主与内核共用一个 struct 布局，内核用
+       `size >= sizeof(FFF3FPConfiguration)` **和** `version == PlayerApiVersion`
+       双重校验。任一侧漂移，FFF3FP_Create 就返回 InvalidArgument —— 表现为
+       "播放器起不来"。这属于**发布事故**，必须在打包阶段拦下，
+       而不是等用户运行时才发现（那时只能给出一个含义不明的失败）。
+
+       三处必须一致，本 target 把三者都读出来比对：
+         ① 内核  PlayerApi.cpp          PlayerApiVersion
+         ② 宿主  播放器会话.vb            <> NNUI / .版本 = NNUI
+         ③ 本工程 <PlayerApiVersion>
+       ════════════════════════════════════════════════════════════════════════════ -->
+  <Target Name="VerifyPlayerApiVersion" BeforeTargets="Build;Publish">
+    <PropertyGroup>
+      <_PlayerApiCpp>$(MSBuildThisFileDirectory)..\FFF.Native\3FP\Api\PlayerApi.cpp</_PlayerApiCpp>
+      <_PlayerSessionVb>$(MSBuildThisFileDirectory)Core\播放器会话.vb</_PlayerSessionVb>
+    </PropertyGroup>
+
+    <Error Condition="!Exists('$(_PlayerApiCpp)')"
+           Text="版本校验找不到内核源文件：$(_PlayerApiCpp)" />
+    <Error Condition="!Exists('$(_PlayerSessionVb)')"
+           Text="版本校验找不到宿主源文件：$(_PlayerSessionVb)" />
+
+    <!-- 内核声明的版本：constexpr std::uint32_t PlayerApiVersion = NN; -->
+    <PropertyGroup>
+      <_KernelApiVersion>$([System.Text.RegularExpressions.Regex]::Match(
+        $([System.IO.File]::ReadAllText('$(_PlayerApiCpp)')),
+        'PlayerApiVersion\s*=\s*(\d+)').Groups[1].Value)</_KernelApiVersion>
+    </PropertyGroup>
+    <!-- 宿主构造配置时实际写入的版本。宿主现在统一用常量 期望API版本，
+         所以这里确认该常量确实被用于配置，而不是另一处硬编码的数字。 -->
+    <PropertyGroup>
+      <_HostSentVersion>$([System.Text.RegularExpressions.Regex]::Match(
+        $([System.IO.File]::ReadAllText('$(_PlayerSessionVb)')),
+        '原生播放器配置大小,\s*\.版本\s*=\s*(\w+)').Groups[1].Value)</_HostSentVersion>
+    </PropertyGroup>
+    <!-- 宿主硬校验的版本：常量 期望API版本 As UInteger = NNUI -->
+    <PropertyGroup>
+      <_HostCheckedVersion>$([System.Text.RegularExpressions.Regex]::Match(
+        $([System.IO.File]::ReadAllText('$(_PlayerSessionVb)')),
+        '期望API版本\s+As\s+UInteger\s*=\s*(\d+)UI').Groups[1].Value)</_HostCheckedVersion>
+    </PropertyGroup>
+
+    <Error Condition="'$(_KernelApiVersion)' == ''"
+           Text="无法从 PlayerApi.cpp 解析 PlayerApiVersion。校验无法进行。" />
+    <Error Condition="'$(_HostSentVersion)' == ''"
+           Text="无法从 播放器会话.vb 解析配置写入的版本（'原生播放器配置大小, .版本 = ...'）。校验无法进行。" />
+    <Error Condition="'$(_HostCheckedVersion)' == ''"
+           Text="无法从 播放器会话.vb 解析 '期望API版本 As UInteger = NNUI'。校验无法进行。" />
+
+    <Message Importance="high"
+             Text="3FP API 版本：内核=$(_KernelApiVersion) 宿主发送=$(_HostSentVersion) 宿主校验=$(_HostCheckedVersion) 工程声明=$(PlayerApiVersion)" />
+
+    <Error Condition="'$(_KernelApiVersion)' != '$(PlayerApiVersion)'"
+           Text="发布中止：内核 API 版本 ($(_KernelApiVersion)) 与本工程声明 ($(PlayerApiVersion)) 不一致。请同步 FFF.Player.vbproj 的 &lt;PlayerApiVersion&gt;，并重新构建 FFF.Native。" />
+    <Error Condition="'$(_HostCheckedVersion)' != '$(PlayerApiVersion)'"
+           Text="发布中止：宿主常量 期望API版本 ($(_HostCheckedVersion)) 与本工程声明 ($(PlayerApiVersion)) 不一致。请同步 播放器会话.vb 的 'Friend Const 期望API版本 As UInteger = NNUI'。" />
+    <!-- 宿主必须用常量而不是另一个字面量，否则三处声明就会各自漂移。 -->
+    <Error Condition="'$(_HostSentVersion)' != '期望API版本'"
+           Text="发布中止：配置里的版本写法为 '$(_HostSentVersion)'，应为常量 '期望API版本'。字面量会让版本号出现第四份副本。" />
+  </Target>
+
+  <!-- 打包前确认内核结构体大小与宿主一致：仅比对版本号不够，内核还会校验 size。 -->
+  <Target Name="VerifyPlayerConfigSize" BeforeTargets="Publish"
+          DependsOnTargets="VerifyPlayerApiVersion">
+    <PropertyGroup>
+      <_PlayerApiHeader>$(MSBuildThisFileDirectory)..\FFF.Native\3FP\Api\FFF.Player.Api.h</_PlayerApiHeader>
+      <_HostInteropVb>$(MSBuildThisFileDirectory)Interop\播放器原生接口.vb</_HostInteropVb>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(_PlayerApiHeader)')"
+           Text="结构体校验找不到内核头文件：$(_PlayerApiHeader)" />
+    <Error Condition="!Exists('$(_HostInteropVb)')"
+           Text="结构体校验找不到宿主互操作文件：$(_HostInteropVb)" />
+
+    <!-- 数 FFF3FPConfiguration 里的字段：从 struct 起到 '};' 止。
+         必须排除注释行 —— 结构体里有多行 '// ...' 说明，早期版本把它们也计进去，
+         于是内核报 25 而实测只有 22，检查自己产生了假阳性。 -->
+    <PropertyGroup>
+      <_KernelConfigBody>$([System.Text.RegularExpressions.Regex]::Match(
+        $([System.IO.File]::ReadAllText('$(_PlayerApiHeader)')),
+        '(?s)struct FFF3FPConfiguration\s*\{(.*?)\n\s*\};').Groups[1].Value)</_KernelConfigBody>
+      <_KernelConfigFields>$([System.Text.RegularExpressions.Regex]::Matches(
+        '$(_KernelConfigBody)', '(?m)^\s+(?!//)\S[^;]*;').Count)</_KernelConfigFields>
+    </PropertyGroup>
+    <!-- 宿主 原生播放器配置 的字段数 -->
+    <PropertyGroup>
+      <_HostConfigBody>$([System.Text.RegularExpressions.Regex]::Match(
+        $([System.IO.File]::ReadAllText('$(_HostInteropVb)')),
+        '(?s)Structure 原生播放器配置(.*?)End Structure').Groups[1].Value)</_HostConfigBody>
+      <_HostConfigFields>$([System.Text.RegularExpressions.Regex]::Matches(
+        '$(_HostConfigBody)', '(?m)^\s+Public \w+ As ').Count)</_HostConfigFields>
+    </PropertyGroup>
+
+    <Error Condition="'$(_KernelConfigFields)' == '' Or '$(_KernelConfigFields)' == '0'"
+           Text="无法解析 FFF3FPConfiguration 的字段。结构体校验无法进行。" />
+    <Error Condition="'$(_HostConfigFields)' == '' Or '$(_HostConfigFields)' == '0'"
+           Text="无法解析 原生播放器配置 的字段。结构体校验无法进行。" />
+
+    <Message Importance="high"
+             Text="3FP 配置结构体字段数：内核=$(_KernelConfigFields) 宿主=$(_HostConfigFields)" />
+
+    <Error Condition="'$(_KernelConfigFields)' != '$(_HostConfigFields)'"
+           Text="发布中止：配置结构体字段数不一致（内核 $(_KernelConfigFields) vs 宿主 $(_HostConfigFields)）。宿主会因 size 不足被 FFF3FP_Create 拒绝。请在 原生播放器接口.vb 的 原生播放器配置 末尾补齐缺失字段。" />
+  </Target>
+
   <Target Name="CopyNativeRuntime" AfterTargets="Build">
     <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
     <Error Condition="'@(LibassMainRuntime)' == ''" Text="缺少 libass 运行库；请先运行 tools\准备Libass.ps1。" />
     <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime);@(LibassRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 
+  <!-- 发布目录必须拿到**全部**运行期原生库。
+       这里此前只拷贝了 ProductNative 与 LibassRuntime，漏掉 @(DevelopmentRuntime)
+       —— 也就是 FFmpeg 的 avcodec/avformat/avutil/swresample/swscale/avfilter。
+       结果是 build 输出目录能跑、publish 出来的包缺少 FFmpeg，启动即失败。
+       与 CopyNativeRuntime 保持一致，并显式校验缺失情况。 -->
   <Target Name="CopyProductNativeToPublish" AfterTargets="Publish" Condition="'$(PublishSingleFile)' != 'true'">
-    <Copy SourceFiles="@(ProductNative);@(LibassRuntime)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+    <Error Condition="'@(DevelopmentRuntime)' == ''"
+           Text="找不到 FFmpeg 运行库（..\runtime\av*.dll 等）。请确认 kernel\runtime 已就位后再发布。" />
+    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime);@(LibassRuntime)"
+          DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
   </Target>
 
   <ItemGroup>

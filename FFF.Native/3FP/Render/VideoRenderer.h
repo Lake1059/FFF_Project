@@ -125,11 +125,35 @@ public:
     void SetDiscAspect(double aspect) noexcept { discAspect_.store(static_cast<float>(aspect)); }
     void SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
+    // Adaptive downscale-before-upload: opt-in, software-decode only, and engaged
+    // only while frames are being dropped. See the API field for the rationale.
+    void ConfigureAdaptiveDownscale(bool enabled, std::uint32_t dropPercent) noexcept;
+    void ObserveFrameForAdaptiveDownscale(bool dropped) noexcept;
     // Presentation policy for SDR sources, see FFF3FPConfiguration::sdrScRgbMode.
     //   0 = Never, 1 = Auto (route SDR sources the SDR chain cannot carry through
     //   the 16-bit scRGB chain when the display runs Advanced Color).
     FFFResult SetSdrScRgbMode(std::uint32_t mode) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
+    // Creates the D3D11 device ahead of the first frame. Measured at 195-245 ms on this
+    // machine, and inside the first Open it is the whole of the delay a user sees before
+    // the first picture appears. Doing it while the host is still setting up moves that
+    // cost off the critical path. Safe to call at any time; a no-op once the device
+    // exists, and failure is not fatal because Open still creates it on demand.
+    FFFResult WarmDevice() noexcept;
+    // Multiplies the zoom by `factor` while keeping the viewport point
+    // (anchorX, anchorY) -- both normalised to [0,1] over the client area -- under the
+    // cursor. Hosts that implement wheel zoom themselves have to redo the fit and pan
+    // arithmetic and usually drift; this keeps the anchor exact.
+    FFFResult ZoomViewAt(float factor, float anchorX, float anchorY,
+        float* resultingZoom = nullptr) noexcept;
+    // Current zoom and pan, so a host that zooms through ZoomViewAt can keep its cached
+    // values in step without a second query API.
+    void ViewTransform(float& zoom, float& panX, float& panY) const noexcept;
+    /// View rotation in quarter turns clockwise (0..3), applied on top of the
+    /// view transform. Kept as its own setter rather than folded into
+    /// SetViewTransform so existing callers keep their signature.
+    FFFResult SetViewRotation(std::uint32_t quarterTurnsClockwise) noexcept;
+    std::uint32_t ViewRotation() const noexcept;
     // Cap the fit box at the source's native size (PlayerApi exports
     // FFF3FP_SetFitLimitToNative). While enabled, zoom is the screen:video pixel
     // ratio, so zoom == 1 renders the source 1:1 instead of fitted to the window.
@@ -169,8 +193,13 @@ public:
     // on the luminance DWM would have given the classic SDR chain), otherwise the
     // configured value.
     float EffectivePaperWhiteNits() const noexcept;
+    // `imageMode` marks a still image (not an animated one, which plays as video).
+    // Images are judged differently from video: upscaling a picture is expected to
+    // preserve the source pixel grid so it reads as a crisp enlargement, whereas
+    // video upscaling wants a smooth reconstruction kernel. Passing it here keeps
+    // the two policies in one place instead of guessing from the frame.
     FFFResult Render(const AVFrame* frame, bool limitToNativeSize = false,
-        bool coverArt = false, bool prepareOnly = false) noexcept;
+        bool coverArt = false, bool prepareOnly = false, bool imageMode = false) noexcept;
     FFFResult Redraw() noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     FFFResult PresentTimedText() noexcept;
@@ -181,6 +210,20 @@ public:
         std::uint32_t dstFloatCount, std::uint32_t* outputBitDepth) noexcept;
     FFFResult CopySdrFrame(void* pixels, std::uint32_t capacity, std::uint32_t& width,
         std::uint32_t& height, bool discOnly) noexcept;
+    /// Frame readback for screenshots. Unlike CopySdrFrame (which is pinned to the
+    /// swap-chain size and to BGRA8) this renders off-screen, so it can produce the
+    /// source resolution and can carry an HDR / wide-gamut frame in 16-bit scRGB.
+    ///
+    /// `layout` 0 = source resolution (aspect preserved, rotation applied),
+    ///          1 = the current swap-chain size (what the window shows).
+    /// `format` 0 = BGRA8 (SDR), 1 = RGBA16F half floats (linear scRGB, HDR).
+    ///
+    /// Rendering goes to a private texture, never to the live back buffer: taking a
+    /// screenshot must not disturb the frame on screen.
+    FFFResult CopyFrame(void* pixels, std::uint32_t capacity, std::uint32_t& width,
+        std::uint32_t& height, std::uint32_t layout, std::uint32_t format) noexcept;
+    /// Bit depth of the frame produced by the most recent CopyFrame (8 or 16).
+    std::uint32_t FinalReadbackBitDepth() const noexcept { return finalReadbackFormat_; }
     FFFResult SetTimedTextLayer(TimedTextRenderLayer layer, TimedTextLayerSlot slot) noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status, TimedTextLayerSlot slot) noexcept;
     bool DeviceRecoveryRequested() const noexcept;
@@ -207,8 +250,16 @@ public:
     std::uint64_t PresentWait100ns() const noexcept;
     std::uint64_t DeviceLockWait100ns() const noexcept;
     std::uint64_t SoftwareConvert100ns() const noexcept;
+    std::uint64_t Upload100ns() const noexcept;
     std::uint32_t OutputBitDepth() const noexcept;
     FFF3FPVideoScalingMode ActualVideoScalingMode() const noexcept;
+    /// RTX Video Super Resolution switch and diagnostics. See the API header
+    /// for why `active` means "the driver accepted the request", not "the
+    /// image is provably sharper".
+    FFFResult SetVideoSuperResolution(FFF3FPVideoSuperResolution mode) noexcept;
+    FFF3FPVideoSuperResolution RequestedVideoSuperResolution() const noexcept;
+    bool VideoSuperResolutionActive() const noexcept;
+    void FillVideoSuperResolutionStatus(FFF3FPVideoSuperResolutionStatus& status) const noexcept;
     std::string FallbackReason() const;
     std::string LastError() const;
 
@@ -286,8 +337,19 @@ private:
         std::uint32_t layout, float sampleScale) noexcept;
     void ReleaseExtensionEnhancement() noexcept;
     void ReleaseExtensionReconstruction() noexcept;
+    // Resamples the decoded frame down to the display size into an internal buffer,
+    // returning false when the frame should be uploaded untouched. On true, the
+    // caller uploads AdaptivePlanes()/AdaptiveLines() at the requested size.
+    bool PrepareAdaptiveDownscale(const AVFrame* frame, std::uint32_t width,
+        std::uint32_t height, std::uint32_t outputWidth, std::uint32_t outputHeight) noexcept;
+    std::uint8_t* const* AdaptivePlanes() const noexcept { return adaptivePlanes_; }
+    const int* AdaptiveLines() const noexcept { return adaptiveLines_; }
     FFFResult PrepareScaledVideo(std::uint32_t outputWidth, std::uint32_t outputHeight,
         ID3D11ShaderResourceView** views) noexcept;
+    // Picks the scaling kernel from the horizontal/vertical ratios, honouring the
+    // configured quality and whether the source is a still image. Upscaling and
+    // downscaling deliberately get different kernels; see the definition.
+    std::uint32_t SelectScaleFilter(float scaleX, float scaleY) const noexcept;
     FFFResult EnsurePlaneScaleChain(std::size_t plane, std::uint32_t sourceWidth,
         std::uint32_t sourceHeight, std::uint32_t targetWidth,
         std::uint32_t targetHeight, std::uint32_t format) noexcept;
@@ -299,10 +361,40 @@ private:
         ID3D11Texture2D* outputTexture, const RECT& destination,
         std::uint32_t inputColorSpace, std::uint32_t outputColorSpace) noexcept;
     bool CanUseDirectVideoProcessor() const noexcept;
+    // --- RTX Video Super Resolution (P2) ---
+    /// Source/adapter preconditions for the VP upscale step, independent of any
+    /// colour-mode decision. Deliberately does NOT test transfer function or
+    /// output bit depth: VSR is a spatial operation and works on HDR sources too.
+    bool CanUseVideoProcessorForUpscale() const noexcept;
+    /// CanUseVideoProcessorForUpscale() plus the vendor gate, the "actually
+    /// upscaling" requirement and NVIDIA's documented 360p..1440p input range.
+    bool ShouldEnableNvidiaSuperResolution(std::uint32_t targetWidth,
+        std::uint32_t targetHeight) const noexcept;
+    /// Upscale the decoded planes through a video processor with RTX VSR
+    /// enabled, filling effectiveSourceViews_ with the result. Returns Success
+    /// with videoSuperResolutionActive_ == false when VSR simply does not apply.
+    FFFResult ApplySuperResolution(std::uint32_t targetWidth,
+        std::uint32_t targetHeight) noexcept;
+    /// Build plane SRVs over an NV12/P010 texture, matching EnsurePipeline's
+    /// view formats exactly (a mismatch silently shifts colours).
+    bool CreateYuvPlaneViews(ID3D11Texture2D* texture, std::uint32_t format,
+        ID3D11ShaderResourceView** views) noexcept;
+    void ReleaseSuperResolutionResources() noexcept;
     void ReleaseVideoProcessor() noexcept;
     void ReleaseVideoProcessorInputSurface() noexcept;
     FFFResult AcquireBackBufferTarget(ID3D11Texture2D** buffer,
         ID3D11RenderTargetView** target) noexcept;
+    /// Cached off-screen surface used by CopyFrame. Kept separate from the swap chain
+    /// so a screenshot never touches the buffer being displayed. Recreated only when
+    /// the requested size/format changes.
+    FFFResult AcquireOffscreenTarget(std::uint32_t width, std::uint32_t height,
+        std::uint32_t format, ID3D11Texture2D** texture,
+        ID3D11RenderTargetView** target) noexcept;
+    void ReleaseOffscreenTarget() noexcept;
+    /// Copies `source` into `pixels` as packed BGRA8 or RGBA16F half floats.
+    FFFResult ReadbackTexture(ID3D11Texture2D* source, void* pixels,
+        std::uint32_t capacity, std::uint32_t width, std::uint32_t height,
+        std::uint32_t format) noexcept;
     struct CachedVideoSettings {
         // gamut: 0 = Rec.709, 1 = Rec.2020, 2 = P3 (DCI/Display).
         std::uint32_t colorMode = 0, transfer = 0, gamut = 0, reserved = 0;
@@ -311,10 +403,16 @@ private:
         std::uint32_t inputLayout = 0;
         float sampleScale = 1, yOffset = 0, yScale = 1;
         float cOffset = 0.5f, cScale = 1, kr = 0.2126f, kb = 0.0722f;
-        float chromaOffsetX = 0, chromaOffsetY = 0, padding1 = 0, padding2 = 0;
+        // imageModeX drives the still-image pixel-block enlargement in SampleVideo;
+        // it reuses what used to be a padding slot, so the constant-buffer layout
+        // stays the same size.
+        float chromaOffsetX = 0, chromaOffsetY = 0, imageModeX = 0, padding2 = 0;
         std::uint32_t projection360 = 0;
         float viewYaw = 0, viewPitch = 0, viewFovY = 90;
-        float viewAspect = 1, padding3 = 0, padding4 = 0, padding5 = 0;
+        // viewRotation is quarter turns clockwise (0..3) and reuses a former
+        // padding slot, so the constant-buffer layout the HLSL cbuffer expects
+        // is unchanged in size.
+        float viewAspect = 1, viewRotation = 0, padding4 = 0, padding5 = 0;
     };
     FFFResult EnsureTimedTextResources(TimedTextLayerSlot slot) noexcept;
     FFFResult EnsureD2DContext() noexcept;
@@ -328,7 +426,15 @@ private:
     void CoverBackdropThread() noexcept;
     void StopCoverBackdropThread() noexcept;
     void ReleaseCoverBackdropResources() noexcept;
-    FFFResult DrawCachedVideo(ID3D11RenderTargetView* target) noexcept;
+    /// Renders the cached frame into `target`, laying it out for an output surface of
+    /// `outputWidth` x `outputHeight`. The size is a parameter rather than always
+    /// swapWidth_/swapHeight_ so the same code can also paint an off-screen surface at
+    /// the source resolution (screenshot readback) without a second render path.
+    FFFResult DrawCachedVideo(ID3D11RenderTargetView* target,
+        std::uint32_t outputWidth, std::uint32_t outputHeight) noexcept;
+    FFFResult DrawCachedVideo(ID3D11RenderTargetView* target) noexcept {
+        return DrawCachedVideo(target, swapWidth_, swapHeight_);
+    }
     FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
         std::uint64_t renderedVideoGeneration) noexcept;
     FFFResult DrawTimedText(TimedTextLayerSlot slot) noexcept;
@@ -389,7 +495,21 @@ private:
     std::uint64_t scaledVideoGeneration_;
     std::uint32_t scaledOutputWidth_;
     std::uint32_t scaledOutputHeight_;
+    // Part of the scaled-video cache key: VSR changes the effective source
+    // without advancing the decode generation, so the cached views would
+    // otherwise be reused across a VSR state change.
+    bool scaledVideoSuperResolution_;
     ID3D11ShaderResourceView* scaledSourceViews_[3];
+    // Screenshot readback surface (see AcquireOffscreenTarget). Owned by the
+    // renderer; deliberately independent of swapChain_.
+    ID3D11Texture2D* offscreenTexture_ = nullptr;
+    ID3D11RenderTargetView* offscreenTarget_ = nullptr;
+    std::uint32_t offscreenWidth_ = 0;
+    std::uint32_t offscreenHeight_ = 0;
+    std::uint32_t offscreenFormat_ = 0;
+    // Bit depth of the most recent CopyFrame result (8 or 16), so the host can label
+    // the image it just received without inferring it from the request.
+    std::uint32_t finalReadbackFormat_ = 0;
     ID3D11VideoDevice* videoDevice_;
     ID3D11VideoContext* videoContext_;
     ID3D11VideoProcessorEnumerator* videoProcessorEnumerator_;
@@ -457,6 +577,10 @@ private:
     bool sourceExternal_;
     bool sourceLimitedToNativeSize_;
     bool sourceCoverArt_;
+    // Still-image source. Selects the image scaling policy: pixel-block enlargement
+    // for upscaling, and a smoothing kernel for downscaling. Animated images are not
+    // affected -- they play as video and keep the video policy.
+    bool sourceImageMode_ = false;
     std::uint32_t coverBackdropWidth_;
     std::uint32_t coverBackdropHeight_;
     std::uint64_t coverBackdropVideoGeneration_;
@@ -479,7 +603,57 @@ private:
     // scRGB output path even though their transfer function is SDR.
     std::atomic<bool> sourceWideGamut_;
     std::atomic<FFF3FPVideoScalingMode> actualVideoScalingMode_;
+    // --- RTX Video Super Resolution (opt-in; default Off) ---
+    // The host-visible switch. Off keeps the renderer byte-identical to the
+    // pre-VSR behaviour, which is what the "video mode does not change"
+    // invariant requires.
+    std::atomic<FFF3FPVideoSuperResolution> requestedVideoSuperResolution_{
+        FFF3FPVideoSuperResolution::Off };
+    // Adapter of the current D3D11 device is NVIDIA (probed once per device).
+    bool nvidiaAdapter_{ false };
+    // VSR was requested AND the blit succeeded on the last presented frame.
+    std::atomic<bool> videoSuperResolutionActive_{ false };
+    // The driver rejected the request (or the blit failed). Latched for the
+    // lifetime of the device so later frames do not repeat a failing call.
+    bool videoSuperResolutionRejected_{ false };
+    // Why the last frame did not use VSR, for the status report.
+    std::atomic<FFF3FPVideoSuperResolutionReason> videoSuperResolutionReason_{
+        FFF3FPVideoSuperResolutionReason::NotRequested };
+    std::uint32_t videoSuperResolutionSourceWidth_{ 0 };
+    std::uint32_t videoSuperResolutionSourceHeight_{ 0 };
+    std::uint32_t videoSuperResolutionTargetWidth_{ 0 };
+    std::uint32_t videoSuperResolutionTargetHeight_{ 0 };
+    // The upscaled NV12/P010 surface and its per-plane views. Owned here, never
+    // swapped into sourceViews_ (that array is EnsurePipeline's long-lived
+    // pipeline state and mutating it would corrupt the next frame).
+    ID3D11Texture2D* superResolutionTexture_{ nullptr };
+    ID3D11ShaderResourceView* superResolutionViews_[3]{};
+    // DXGI_FORMAT of the cached super-resolution surface (0 when absent).
+    std::uint32_t superResolutionSourceFormat_{ 0 };
+    // effectiveSourceViews_ is rebuilt from sourceViews_ on every frame and then
+    // optionally redirected at superResolutionViews_. Keeping the two apart is
+    // what makes VSR switching safe mid-stream.
+    ID3D11ShaderResourceView* effectiveSourceViews_[3]{};
     FFF3FPVideoScalingQuality scalingQuality_;
+    // Adaptive downscale-before-upload state. The policy samples a rolling window of
+    // frame outcomes rather than reacting to any single drop.
+    std::atomic<bool> adaptiveDownscaleEnabled_{false};
+    std::atomic<std::uint32_t> adaptiveDownscaleDropPercent_{20};
+    std::atomic<bool> adaptiveDownscaleActive_{false};
+    std::uint64_t adaptiveWindowFrames_ = 0;
+    std::uint64_t adaptiveWindowDrops_ = 0;
+    // Separate sws context: the main scaler_ is configured for the colour conversion
+    // of full-size frames and must not be retargeted by this policy.
+    SwsContext* adaptiveScaler_ = nullptr;
+    std::uint32_t adaptiveSourceWidth_ = 0;
+    std::uint32_t adaptiveSourceHeight_ = 0;
+    std::uint32_t adaptiveTargetWidth_ = 0;
+    std::uint32_t adaptiveTargetHeight_ = 0;
+    int adaptiveSourceFormat_ = -1;
+    std::vector<std::uint8_t> adaptiveBuffer_;
+    // Plane pointers into adaptiveBuffer_, filled by PrepareAdaptiveDownscale.
+    std::uint8_t* adaptivePlanes_[4]{};
+    int adaptiveLines_[4]{};
     FFF3FPColorMode requestedMode_;
     FFF3FPColorMode actualMode_;
     float sdrPeakNits_;
@@ -493,6 +667,9 @@ private:
     std::atomic<float> viewZoomBits_;
     std::atomic<float> viewPanXBits_;
     std::atomic<float> viewPanYBits_;
+    // Quarter turns clockwise (0..3). Applied when sampling, so the destination
+    // rect only needs its aspect swapped, not a new geometry path.
+    std::atomic<std::uint32_t> viewRotation_{ 0 };
     // Opt-in native-size cap for the fit box; see SetFitLimitToNative().
     std::atomic<bool> fitLimitToNative_{ false };
     std::atomic<std::uint32_t> projection360Enabled_;
@@ -548,6 +725,11 @@ private:
     std::atomic<std::uint64_t> presentWait100ns_;
     std::atomic<std::uint64_t> deviceLockWait100ns_;
     std::atomic<std::uint64_t> softwareConvert100ns_;
+    // Time spent copying decoded planes into the shader-visible textures. Split out
+    // from softwareConvert100ns_ because that one only covers the CPU scaler: without
+    // this the upload path had no metric at all, so upload changes could not be
+    // measured or regressed.
+    std::atomic<std::uint64_t> upload100ns_;
     std::atomic<std::uint32_t> playbackWorkPending_;
     std::atomic<bool> interactiveMove_;
     std::atomic<bool> lyricsLayoutEnabled_;

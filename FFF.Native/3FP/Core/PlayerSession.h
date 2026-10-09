@@ -2,6 +2,9 @@
 
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Audio/WasapiRenderer.h"
+// IAMF needs the AOM reference decoder: FFmpeg splits an IAMF element into
+// dependent substreams and never mixes them (see IamfAudioDecoder.h).
+#include "3FP/Audio/IamfAudioDecoder.h"
 #include "3FP/Render/VideoRenderer.h"
 #include "Shared/Ffmpeg/SharedFileInput.h"
 #include "3FP/Disc/DiscInput.h"
@@ -47,6 +50,12 @@ public:
     std::string DiscStatus() const;
     FFFResult CopySdrFrame(void* pixels, std::uint32_t capacity, std::uint32_t& width,
         std::uint32_t& height, bool discOnly) noexcept { return videoRenderer_.CopySdrFrame(pixels, capacity, width, height, discOnly); }
+    /// Off-screen frame readback for screenshots (see FFF3FP_CopyFrame).
+    FFFResult CopyFrame(void* pixels, std::uint32_t capacity, std::uint32_t& width,
+        std::uint32_t& height, std::uint32_t layout, std::uint32_t format) noexcept
+        { return videoRenderer_.CopyFrame(pixels, capacity, width, height, layout, format); }
+    std::uint32_t LastCopyFrameBitDepth() const noexcept
+        { return videoRenderer_.FinalReadbackBitDepth(); }
     FFFResult Play() noexcept;
     FFFResult Pause() noexcept;
     FFFResult DiscardAudioOutput() noexcept;
@@ -69,6 +78,14 @@ public:
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
     FFFResult SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
+    // Cursor-anchored zoom step: see PlayerVideoRenderer::ZoomViewAt.
+    FFFResult ZoomViewAt(float factor, float anchorX, float anchorY,
+        float* resultingZoom = nullptr) noexcept;
+    void ViewTransform(float& zoom, float& panX, float& panY) const noexcept;
+    // View rotation in quarter turns clockwise (0..3). Independent of
+    // SetViewTransform so existing callers keep working unchanged.
+    FFFResult SetViewRotation(std::uint32_t quarterTurnsClockwise) noexcept;
+    std::uint32_t ViewRotation() const noexcept;
     // Cap the fit box at the source's native size (see PlayerVideoRenderer).
     FFFResult SetFitLimitToNative(bool enable) noexcept;
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
@@ -76,6 +93,16 @@ public:
     FFFResult SetAudioExclusiveMode(bool exclusive) noexcept;
     FFFResult SetVolume(float volume, bool muted) noexcept;
     FFFResult SetTimedTextLayer(const FFF3FPTimedTextLayer& layer) noexcept;
+    // RTX Video Super Resolution opt-in switch (default Off).
+    FFFResult SetVideoSuperResolution(FFF3FPVideoSuperResolution mode) noexcept;
+    // Host-declared flag: this session is driving a frame-exact comparison
+    // surface that compares several streams side by side. While set, enabling VSR is
+    // refused, because the AI model makes presented pixels an unreproducible
+    // function of the decoded frame. Clearing it never disables VSR by itself --
+    // the host decides, this only gates the transition and reports state.
+    FFFResult SetComparisonMode(bool active) noexcept;
+    FFFResult GetVideoSuperResolutionStatus(
+        FFF3FPVideoSuperResolutionStatus& status) const noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
     FFFResult ReadVideoPixel(FFF3FPVideoPixelProbe& probe) noexcept;
     // Batch pixel readback
@@ -148,11 +175,22 @@ private:
     FFFResult OpenHardwareVideoDecoder(AVFormatContext* format, std::int32_t streamIndex,
         AVCodecContext** decoder, std::string* failureReason = nullptr) noexcept;
     FFFResult FallbackToSoftwareVideoDecoder(const char* reason) noexcept;
+    // Chooses the software decoder's worker count. Fixed and bounded by default; with
+    // adaptiveDecoderThreads enabled it starts at the low rung and climbs a
+    // 4/8/16/24/32 ladder while measured load says the decoder is starving.
+    std::uint32_t SelectSoftwareDecoderThreads(std::uint32_t width,
+        std::uint32_t height) const noexcept;
+    // Evaluates measured decode load and, when the decoder is the constraint, reopens
+    // it at the next rung. Never descends.
+    void EvaluateDecoderLoad() noexcept;
     FFFResult CompleteHardwareFallback(const char* failureMessage) noexcept;
     // Presents the first frame while the session stays stopped. Used for a still
     // picture and for an animated one, both of which must show a frame without
     // playback running; rewinds afterwards so play starts from the beginning.
     FFFResult DecodeInitialFrame() noexcept;
+    /// Applies a display matrix found on the newest decoded frame. Needed because
+    /// still images expose EXIF orientation only as frame side data.
+    void ApplyRotationFromDecodedFrame() noexcept;
     // Fills `info` from the session state. Only ever runs on the worker thread
     // (called at the end of DoOpen) because it reads decoder-owned frames; the
     // public GetImageInfo hands out the published copy instead.
@@ -204,6 +242,9 @@ private:
         std::string& error) noexcept;
 
     FFF3FPDecodeMode decodeMode_;
+    // See SetComparisonMode(). Plain bool: only ever touched on the host's
+    // calling thread, never read from the render thread.
+    bool comparisonModeActive_ = false;
     FFF3FPEventCallback callback_;
     void* callbackContext_;
     mutable std::mutex mutex_;
@@ -246,11 +287,52 @@ private:
     bool dolbyVisionEnhancementRecoveryPending_ = false;
     std::map<std::int64_t, AVFrame*> dolbyVisionEnhancementFrames_;
     AVCodecContext* audioDecoder_;
+    // Set when the audio track is IAMF and the AOM reference decoder took over
+    // from FFmpeg. Null for every other codec, which keeps the ordinary path
+    // byte-for-byte unchanged.
+    std::unique_ptr<IamfAudioDecoder> iamfDecoder_;
+    // Sound system requested for IAMF output (-1 = decoder default).
+    int iamfSoundSystem_ = -1;
+    // True once the reference decoder has produced at least one frame, so a
+    // stream that ends silently can be distinguished from one that never worked.
+    bool iamfProducedAnyAudio_ = false;
+    // Path of the media currently open. Kept because the IAMF descriptor OBUs
+    // must be re-read from the file after the demuxer has consumed them.
+    std::string mediaPath_;
+    // 临时诊断开关（默认关）：排查 IAMF 泵是否在跑。
+    /// Opens the AOM reference decoder when the track is IAMF. False means the
+    /// caller must use the ordinary FFmpeg decoder.
+    bool TryOpenIamfAudioDecoder() noexcept;
+    /// Decodes one IAMF access unit through the reference decoder.
+    FFFResult DecodeIamfPacket(AVPacket* packet) noexcept;
+    /// Pulls decoded IAMF frames from the streaming decoder into the renderer.
+    void PumpIamfAudio() noexcept;
+    /// Abandons the IAMF decoder and re-opens the track through FFmpeg.
+    void FallBackFromIamf(const std::string& reason) noexcept;
+    void ReleaseIamfDecoder() noexcept;
     std::int32_t videoStream_;
+    // Software-decoder thread ladder. Driven by measured load, not by resolution: a
+    // resolution says nothing about whether this machine can keep up with this codec.
+    // The ladder only ever climbs (see SelectSoftwareDecoderThreads for why a ladder
+    // that also descends was tried and removed).
+    bool adaptiveThreadsEnabled_ = false;
+    std::uint32_t threadLadderMin_ = 4;
+    std::uint32_t threadLadderMax_ = 32;
+    std::uint32_t decoderThreads_ = 0;             // current rung; 0 = not yet chosen
+    std::uint64_t ladderWindowDecoded_ = 0;        // counters at the last evaluation
+    std::uint64_t ladderWindowPresented_ = 0;
+    std::int64_t ladderWindowStart100ns_ = 0;
+    // Reopen back-off: a rung costs a seek, so require sustained starvation first and
+    // then a settling period before judging the new rung.
+    std::uint64_t ladderSettlingFrames_ = 0;
     std::int32_t audioStream_;
     std::int32_t coverArtStream_;
     AVFrame* coverArtFrame_;
     AVFrame* stillImageFrame_;
+    // Clockwise quarter turns the source asks to be displayed with (0..3).
+    // Filled at open time from the container's rotation metadata / display
+    // matrix, for images and video alike. 0 means "no rotation requested".
+    std::uint32_t sourceRotation_ = 0;
     // Primaries-carrier filter graph (P3 -> BT.2020), built on demand for a
     // single still image and kept until the next open.
     AVFilterGraph* gamutGraph_ = nullptr;

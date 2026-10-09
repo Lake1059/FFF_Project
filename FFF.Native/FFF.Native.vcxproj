@@ -1,14 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="Debug|Win32">
-      <Configuration>Debug</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Release|Win32">
-      <Configuration>Release</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
+    <!-- 只保留 x64。Win32 配置早已无法构建（缺 3FP 包含目录、缺 iamf.lib），
+         却仍带着 FFF_WITH_LIBIAMF=1 的定义，容易让人误以为存在两条可用产线。
+         本项目在任何地方都不产出 32 位二进制，删掉可消除这一误导。 -->
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
       <Platform>x64</Platform>
@@ -26,19 +21,6 @@
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
-    <ConfigurationType>DynamicLibrary</ConfigurationType>
-    <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v145</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
-    <ConfigurationType>DynamicLibrary</ConfigurationType>
-    <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v145</PlatformToolset>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
-    <CharacterSet>Unicode</CharacterSet>
-  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
@@ -61,12 +43,6 @@
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
-  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-  </ImportGroup>
-  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-  </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
@@ -78,64 +54,24 @@
     <TargetName>FFF.Native</TargetName>
     <LibassRoot>$(ProjectDir)..\third_party\vcpkg_installed\x64-windows</LibassRoot>
   </PropertyGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
-      <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_DEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
-      <PrecompiledHeader>Use</PrecompiledHeader>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-    </ClCompile>
-    <Link>
-      <SubSystem>Windows</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-      <EnableUAC>false</EnableUAC>
-    </Link>
-    <Manifest>
-      <EnableSegmentHeap>true</EnableSegmentHeap>
-    </Manifest>
-  </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
-      <FunctionLevelLinking>true</FunctionLevelLinking>
-      <IntrinsicFunctions>true</IntrinsicFunctions>
-      <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
-      <PrecompiledHeader>Use</PrecompiledHeader>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-    </ClCompile>
-    <Link>
-      <SubSystem>Windows</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-      <EnableUAC>false</EnableUAC>
-    </Link>
-    <Manifest>
-      <EnableSegmentHeap>true</EnableSegmentHeap>
-    </Manifest>
-  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;FFF_WITH_LIBIAMF=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(ProjectDir)..\third_party\libiamf\include;$(ProjectDir)..\third_party\libiamf\oar\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(LibassRoot)\debug\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(ProjectDir)..\third_party\libiamf\lib\x64;$(LibassRoot)\debug\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;iamf.lib;oar.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>ass-9.dll;avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;swscale-10.dll;avfilter-12.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
@@ -148,20 +84,20 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;FFF_WITH_LIBIAMF=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(ProjectDir)..\third_party\libiamf\include;$(ProjectDir)..\third_party\libiamf\oar\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(LibassRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(ProjectDir)..\third_party\libiamf\lib\x64;$(LibassRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;iamf.lib;oar.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>ass-9.dll;avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;swscale-10.dll;avfilter-12.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
@@ -175,6 +111,7 @@
     <ClInclude Include="3FP\Core\PlayerSession.h" />
     <ClInclude Include="3FP\Core\MediaText.h" />
     <ClInclude Include="3FP\Subtitle\SubtitleProbe.h" />
+    <ClInclude Include="3FP\Render\NvidiaVideoExtensions.h" />
     <ClInclude Include="3FP\Hdr\HdrProcessor.h" />
     <ClInclude Include="3FP\Render\ShaderBytecode.h" />
     <ClInclude Include="3FP\Render\ColorExtensionApi.h" />
@@ -197,9 +134,11 @@
     <ClCompile Include="3FP\Disc\DiscInput.cpp" />
     <ClCompile Include="3FP\Core\PlayerSessionDisc.cpp" />
     <ClCompile Include="3FP\Audio\WasapiRenderer.cpp" />
+    <ClCompile Include="3FP\Audio\IamfAudioDecoder.cpp" />
     <ClCompile Include="3FP\Core\PlayerSession.cpp" />
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp" />
     <ClCompile Include="3FP\Render\VideoRenderer.cpp" />
+    <ClCompile Include="3FP\Render\NvidiaVideoExtensions.cpp" />
     <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp" />
     <ClCompile Include="3FP\Subtitle\SubtitleProbe.cpp" />
     <ClCompile Include="3FP\Subtitle\BitmapSubtitleDecoder.cpp" />
@@ -214,8 +153,6 @@
     <ClCompile Include="Shared\Ffmpeg\SharedFileInput.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="3FR\Timeline\QpcTimeline.cpp" />
@@ -232,4 +169,31 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+
+  <!-- ════════════════════════════════════════════════════════════════════════════════
+       构建后自动把内核 DLL 同步到 3fp\build\。
+
+       为什么必须自动化：`3fp\build\FFF.Native.dll` 是所有探针读取的副本，但它**不是**
+       构建产物 —— 历史上靠人工拷贝。2026-10-07/08 这个人工步骤造成了两次真实事故：
+
+         · W-1（交付级）：build\ 副本停留在**修复前**二进制，于是"修复后"的测量
+           实际测到的是修复前的 10000，差一步就误判"修复无效"。
+         · 同源错误：用陈旧副本的输出去论证缺陷（vivid_hlg.txt 的 hdrFormat=0 签名），
+           而那不是内核的真实行为。
+
+       根本问题是"同一个逻辑二进制存在两份物理副本，且同步靠人记"。这里把它变成
+       构建的一部分：**MSBuild 走哪条路都会同步**，包括手动调用 MSBuild、
+       以及 tools\build_kernel_manual.py（它是 MSBuild 的薄封装）。
+       ════════════════════════════════════════════════════════════════════════════════ -->
+  <Target Name="SyncKernelToBuildDir" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
+    <PropertyGroup>
+      <_SyncTargetDir>$(ProjectDir)..\..\build</_SyncTargetDir>
+      <_SyncTargetDll>$(_SyncTargetDir)\FFF.Native.dll</_SyncTargetDll>
+    </PropertyGroup>
+    <!-- 目标目录不存在时跳过：3fp\build 是开发/验证目录，干净检出可能没有。 -->
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(_SyncTargetDll)"
+          SkipUnchangedFiles="true" Condition="Exists('$(_SyncTargetDir)')" />
+    <Message Importance="high" Condition="Exists('$(_SyncTargetDir)')"
+             Text="已同步内核到验证副本: $(_SyncTargetDll)" />
+  </Target>
 </Project>

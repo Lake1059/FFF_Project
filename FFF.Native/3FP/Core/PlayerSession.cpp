@@ -27,6 +27,9 @@ extern "C" {
 #include <libavutil/dovi_meta.h>
 #include <libavutil/opt.h>
 #include <libavutil/samplefmt.h>
+// IAMF stream groups carry the real channel layout; the audio element and mix
+// presentation types are only declared here.
+#include <libavutil/iamf.h>
 }
 
 #include <filesystem>
@@ -56,6 +59,14 @@ constexpr std::size_t MaximumPendingVideoPackets = 64;
 constexpr std::size_t MaximumPendingVideoPacketBytes = 16 * 1024 * 1024;
 constexpr std::size_t MaximumPendingAudioPackets = 512;
 constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
+
+// Monotonic tick in 100 ns units, for the decoder thread ladder's timing. Uses
+// steady_clock rather than av_gettime_relative because PlayerSession does not include
+// libavutil/time.h, and a monotonic source is what the ladder wants anyway.
+std::int64_t CurrentSteadyTicks() noexcept {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count() / 100;
+}
 
 std::uint32_t DolbyTextVariant(const HdrFrameState& state) noexcept {
     auto value = state.dolbyVisionProfile & 0xffu;
@@ -387,6 +398,103 @@ std::int64_t EstimateDuration100ns(const AVFormatContext* format) noexcept {
     return av_rescale(fileSize, 8 * TicksPerSecond, bitRate);
 }
 
+// IAMF puts one audio element's channels across SEVERAL elementary streams, and
+// libavformat/iamfdec.c marks every one of them AV_DISPOSITION_DEPENDENT when the
+// element has more than one substream -- none is DEFAULT:
+//
+//     else if (audio_element->nb_layers > 1 || layers[0].substream_count > 1)
+//         st->disposition |= AV_DISPOSITION_DEPENDENT;
+//
+// FindDefaultOrFirstStream therefore fell through to "the first audio stream",
+// which for a 7.1.4 element is a single stereo pair: the player reported stereo
+// for a 12-channel source and silently dropped the other ten channels. Verified
+// against those same out-of-tree fixtures -- one
+// substream decodes to 2 channels while the full mix is 12.
+//
+// This resolves the layout the IAMF mix presentation actually asks for, so the
+// reported channel count is the truth rather than one substream's share.
+struct IamfLayoutInfo {
+    bool isIamf = false;
+    // Channels the mix presentation targets (0 when no presentation is found).
+    std::uint32_t presentationChannels = 0;
+    std::string presentationLayoutName;
+    // Audio elements carry the channel breakdown; used when there is no presentation.
+    std::uint32_t elementChannels = 0;
+    // Number of elementary streams the element is split across.
+    std::uint32_t substreamCount = 0;
+};
+
+std::string DescribeLayout(const AVChannelLayout& layout) noexcept {
+    if (layout.nb_channels <= 0) return {};
+    char text[256]{};
+    return av_channel_layout_describe(&layout, text, sizeof(text)) >= 0
+        ? std::string(text) : std::string{};
+}
+
+IamfLayoutInfo ResolveIamfLayout(const AVFormatContext* format) noexcept {
+    IamfLayoutInfo info{};
+    if (format == nullptr || format->iformat == nullptr || format->iformat->name == nullptr)
+        return info;
+    // Only the "iamf" demuxer produces these stream groups.
+    if (std::string_view(format->iformat->name).find("iamf") == std::string_view::npos)
+        return info;
+    info.isIamf = true;
+    if (format->stream_groups == nullptr) return info;
+
+    for (unsigned g = 0; g < format->nb_stream_groups; ++g) {
+        const auto* group = format->stream_groups[g];
+        if (group == nullptr) continue;
+        if (group->type == AV_STREAM_GROUP_PARAMS_IAMF_AUDIO_ELEMENT) {
+            const auto* element = group->params.iamf_audio_element;
+            if (element == nullptr) continue;
+            info.substreamCount = group->nb_streams;
+            // Sum the element's layer channel counts: that is how many channels the
+            // element contributes before any mix presentation is applied.
+            // AVIAMFLayer exposes only ch_layout (no substream count), and for a
+            // channel-based element one substream carries one layer's channels.
+            std::uint32_t channels = 0;
+            for (unsigned l = 0; l < element->nb_layers; ++l) {
+                const auto* layer = element->layers[l];
+                if (layer == nullptr) continue;
+                channels += static_cast<std::uint32_t>(
+                    std::max(0, layer->ch_layout.nb_channels));
+            }
+            if (channels > info.elementChannels) info.elementChannels = channels;
+        } else if (group->type == AV_STREAM_GROUP_PARAMS_IAMF_MIX_PRESENTATION) {
+            const auto* mix = group->params.iamf_mix_presentation;
+            if (mix == nullptr) continue;
+            // A presentation may offer SEVERAL submix layouts (measured: stereo and
+            // 5.1(side) in the same file). Report the largest, because that is the
+            // best rendering the content actually carries -- reporting the first or
+            // smallest would understate the file just as the old code did.
+            for (unsigned s = 0; s < mix->nb_submixes; ++s) {
+                const auto* submix = mix->submixes[s];
+                if (submix == nullptr) continue;
+                for (unsigned l = 0; l < submix->nb_layouts; ++l) {
+                    const auto* layout = submix->layouts[l];
+                    if (layout == nullptr) continue;
+                    const auto channels = static_cast<std::uint32_t>(
+                        layout->sound_system.nb_channels);
+                    if (channels > info.presentationChannels) {
+                        info.presentationChannels = channels;
+                        info.presentationLayoutName = DescribeLayout(layout->sound_system);
+                    }
+                }
+            }
+        }
+    }
+    // Ambisonic / scene-only fixtures legitimately carry no mix presentation, so the
+    // presentation fields stay 0. Fall back to the element's channel total: it is the
+    // only layout information the file has, and reporting 0 would look like a parse
+    // failure rather than "this file declares no presentation".
+    if (info.presentationChannels == 0 && info.elementChannels > 0) {
+        info.presentationChannels = info.elementChannels;
+        if (info.presentationLayoutName.empty())
+            info.presentationLayoutName = "(element, no mix presentation)";
+    }
+    return info;
+}
+
 std::int32_t FindDefaultOrFirstStream(AVFormatContext* format, AVMediaType type) noexcept {
     if (format == nullptr) return -1;
     std::int32_t first = -1;
@@ -502,6 +610,26 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
     // which happens lazily on the render path — hence here in the constructor.
     videoRenderer_.SetPreferredAdapterIndex(configuration.preferredAdapterIndex);
     videoRenderer_.SetScalingQuality(configuration.videoScalingQuality);
+    // Adaptive downscale-before-upload: opt-in, and only ever engages for software
+    // decoding with sustained dropped frames. Gated on the host's reported struct
+    // size: these fields were appended, so a host built against the older
+    // FFF3FPConfiguration must not have them read, or the read walks past the end of
+    // its struct. Treat a short struct as "disabled", which matches the default.
+    const auto hasAdaptiveDownscale = configuration.size >=
+        offsetof(FFF3FPConfiguration, adaptiveDownscaleDropPercent) + sizeof(std::uint32_t);
+    videoRenderer_.ConfigureAdaptiveDownscale(
+        hasAdaptiveDownscale && configuration.adaptiveDownscaleBeforeUpload != 0,
+        hasAdaptiveDownscale ? configuration.adaptiveDownscaleDropPercent : 20u);
+    // Adaptive software-decoder thread tier. Gated the same way: these fields were
+    // also appended, so a host built against an older header must not have them read.
+    const auto hasAdaptiveThreads = configuration.size >=
+        offsetof(FFF3FPConfiguration, decoderShrinkDropPercent) + sizeof(std::uint32_t);
+    if (hasAdaptiveThreads) {
+        adaptiveThreadsEnabled_ = configuration.adaptiveDecoderThreads != 0;
+        threadLadderMin_ = std::clamp(configuration.minSoftwareDecoderThreads, 1u, 64u);
+        threadLadderMax_ = std::clamp(configuration.maxSoftwareDecoderThreads, 1u, 64u);
+        if (threadLadderMax_ < threadLadderMin_) std::swap(threadLadderMax_, threadLadderMin_);
+    }
     // Applied before the colour mode: SetColorMode evaluates the scRGB gate and
     // must already know the SDR presentation policy.
     videoRenderer_.SetSdrScRgbMode(configuration.sdrScRgbMode);
@@ -510,6 +638,26 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
         configuration.forceHdrOutput != 0);
     snapshot_.actualColorMode = videoRenderer_.ActualColorMode();
     publishedSnapshot_ = snapshot_;
+    // Create the D3D11 device now rather than inside the first Open. Measured on this
+    // machine: 195-245 ms the first time and free afterwards. In the image-browsing
+    // pattern -- one player, one picture at a time -- that made the first picture take
+    // ~365 ms while every following one took 54-78 ms, so it is the whole of the delay
+    // before the first frame. The window is already known here, so the cost moves into
+    // host setup. Failure is ignored on purpose: Open still creates the device on demand
+    // and reports any real problem with full context.
+    //
+    // Only worth paying when the session has a video output window. EnsureDevice() uses
+    // window_ for adapter *selection* only -- it does not decline to create the device
+    // when there is none -- so an unconditional call made audio-only and headless
+    // sessions pay the same full ~150-170 ms of device creation inside FFF3FP_Create,
+    // which the caller waits on, for a device that session may never touch. Measured with
+    // create_cost_probe: 170 ms without a window against 150 ms with one, versus ~0 ms
+    // for both before this warm-up was added. The window test is the same one
+    // EnsureDevice() applies, so a non-null but invalid HWND does not qualify either,
+    // and a session that turns out to need the device later is unaffected: the render
+    // path still creates it on demand.
+    const auto outputWindow = static_cast<HWND>(configuration.outputWindow);
+    if (outputWindow != nullptr && IsWindow(outputWindow)) (void)videoRenderer_.WarmDevice();
     worker_ = std::thread(&PlayerSession::Worker, this);
 }
 
@@ -1239,6 +1387,50 @@ FFFResult PlayerSession::SetViewTransform(const float zoom, const float panX,
         videoRenderer_.RequestRecoveryIfDeviceLost()) return redrawResult;
     return FFFResult::Success;
 }
+FFFResult PlayerSession::ZoomViewAt(const float factor,
+    const float anchorX, const float anchorY, float* const resultingZoom) noexcept {
+    if (!std::isfinite(factor) || factor <= 0.0f ||
+        !std::isfinite(anchorX) || !std::isfinite(anchorY))
+        return FFFResult::InvalidArgument;
+    if (discOpened_.load(std::memory_order_acquire)) return FFFResult::Success;
+    const auto result = videoRenderer_.ZoomViewAt(factor, anchorX, anchorY, resultingZoom);
+    if (result != FFFResult::Success) return result;
+    // Redraw immediately for the same reason SetViewTransform does: a wheel step that
+    // waits on the decode queue feels laggy.
+    const auto redrawResult = videoRenderer_.Redraw();
+    if (redrawResult != FFFResult::Success &&
+        redrawResult != FFFResult::InvalidState &&
+        videoRenderer_.RequestRecoveryIfDeviceLost()) return redrawResult;
+    return FFFResult::Success;
+}
+
+void PlayerSession::ViewTransform(float& zoom, float& panX, float& panY) const noexcept {
+    videoRenderer_.ViewTransform(zoom, panX, panY);
+}
+
+FFFResult PlayerSession::SetViewRotation(
+    const std::uint32_t quarterTurnsClockwise) noexcept {
+    if (quarterTurnsClockwise > 3) return FFFResult::InvalidArgument;
+    // Same rationale as SetViewTransform above: the rotation is a single atomic
+    // inside the renderer, and queuing it behind decode would make the key
+    // repeat feel unresponsive. Disc playback has its own geometry path.
+    if (discOpened_.load(std::memory_order_acquire)) return FFFResult::Success;
+    const auto result = videoRenderer_.SetViewRotation(quarterTurnsClockwise);
+    if (result != FFFResult::Success) return result;
+    // Present again now: while paused there is no incoming frame to pick the new
+    // orientation up, and the whole point of rotating a still image is that it
+    // must turn immediately.
+    const auto redrawResult = videoRenderer_.Redraw();
+    if (redrawResult != FFFResult::Success &&
+        redrawResult != FFFResult::InvalidState &&
+        videoRenderer_.RequestRecoveryIfDeviceLost()) return redrawResult;
+    return FFFResult::Success;
+}
+
+std::uint32_t PlayerSession::ViewRotation() const noexcept {
+    return videoRenderer_.ViewRotation();
+}
+
 FFFResult PlayerSession::SetFitLimitToNative(const bool enable) noexcept {
     // Disc playback owns its own geometry (see SetViewTransform above), so refuse
     // rather than report a Success that changes nothing.
@@ -1444,7 +1636,11 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
             !staticImage_ && !hardwareFallback
             ? FFF3FPDecodeMode::Gpu : FFF3FPDecodeMode::Cpu;
         if (staticImage_ && stillImageFrame_ != nullptr) {
-            const auto renderResult = videoRenderer_.Render(stillImageFrame_, true);
+            // imageMode selects the still-image scaling policy: enlarge by pixel
+            // blocks, which keeps a picture's own pixel grid crisp, instead of the
+            // smooth interpolation video wants.
+            const auto renderResult = videoRenderer_.Render(stillImageFrame_, true,
+                false, false, true);
             if (renderResult != FFFResult::Success) {
                 if (renderResult == FFFResult::DeviceFailure &&
                     videoRenderer_.RequestRecoveryIfDeviceLost()) return true;
@@ -1726,6 +1922,51 @@ FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) no
     } catch (...) { return FFFResult::NativeFailure; }
 }
 
+FFFResult PlayerSession::SetVideoSuperResolution(
+    const FFF3FPVideoSuperResolution mode) noexcept {
+    // The renderer owns the device-facing decision, but the session refuses to
+    // switch VSR on while a comparison-style mode is active. VSR runs an AI
+    // model, so frames stop being a reproducible function of the decoded
+    // image; a host that compares pictures pixel-for-pixel must not have that.
+    // Turning it Off is always allowed.
+    if (mode != FFF3FPVideoSuperResolution::Off &&
+        mode != FFF3FPVideoSuperResolution::Auto)
+        return FFFResult::InvalidArgument;
+    if (mode == FFF3FPVideoSuperResolution::Auto && comparisonModeActive_)
+        return FFFResult::InvalidState;
+    const auto result = videoRenderer_.SetVideoSuperResolution(mode);
+    if (result != FFFResult::Success)
+        ReportError(result, videoRenderer_.LastError(), "video-super-resolution");
+    return result;
+}
+
+FFFResult PlayerSession::SetComparisonMode(const bool active) noexcept {
+    comparisonModeActive_ = active;
+    // Entering comparison mode forces VSR off rather than merely blocking the
+    // next enable: a host that flips the flag mid-playback would otherwise keep
+    // presenting AI-altered frames into a diff view.
+    if (active && videoRenderer_.RequestedVideoSuperResolution() !=
+            FFF3FPVideoSuperResolution::Off) {
+        const auto result = videoRenderer_.SetVideoSuperResolution(
+            FFF3FPVideoSuperResolution::Off);
+        if (result != FFFResult::Success) return result;
+        // Declared locally for the same reason as in ReportError below: the
+        // sink lives in PlayerApi.cpp and is not part of any public header.
+        extern void FFF3FP_KernelLogImpl(const char*) noexcept;
+        FFF3FP_KernelLogImpl(
+            "FFF.Native: RTX Video Super Resolution disabled (comparison mode active).");
+    }
+    return FFFResult::Success;
+}
+
+FFFResult PlayerSession::GetVideoSuperResolutionStatus(
+    FFF3FPVideoSuperResolutionStatus& status) const noexcept {
+    if (status.size < sizeof(FFF3FPVideoSuperResolutionStatus) || status.version != 1)
+        return FFFResult::InvalidArgument;
+    videoRenderer_.FillVideoSuperResolutionStatus(status);
+    return FFFResult::Success;
+}
+
 FFFResult PlayerSession::GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept {
     return videoRenderer_.GetTimedTextStatus(status, TimedTextLayerSlot::Subtitle);
 }
@@ -1741,6 +1982,11 @@ FFFResult PlayerSession::GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept
 // Forward to the renderer (RTInfo under deviceMutex_).
 FFFResult PlayerSession::GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept {
     // Version 2 makes origins signed; size alone cannot distinguish v1/v2.
+    // Same contract as GetSnapshot: the caller declares the size and version of
+    // the struct it passes, so we never write past a smaller caller-side layout.
+    // A v1 caller would read a negative origin as a huge unsigned value
+    // (silently wrong content), and v1/v2 share the same field widths so
+    // `size` cannot distinguish them -> the only honest gate is the version.
     if (info.size < sizeof(FFF3FPRenderTargetInfo) || info.version != 2)
         return FFFResult::InvalidArgument;
     info.size = sizeof(info);
@@ -1780,6 +2026,7 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     output.presentWait100ns = videoRenderer_.PresentWait100ns();
     output.deviceLockWait100ns = videoRenderer_.DeviceLockWait100ns();
     output.softwareConvert100ns = videoRenderer_.SoftwareConvert100ns();
+    output.videoUpload100ns = videoRenderer_.Upload100ns();
     output.videoOutputBitDepth = videoRenderer_.OutputBitDepth();
     output.videoScalingMode = videoRenderer_.ActualVideoScalingMode();
     if (output.state == FFF3FPState::Playing) {
@@ -1930,8 +2177,60 @@ void PlayerSession::CloseFormat(AVFormatContext** format,
     io.reset();
 }
 
-FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t index, const bool video,
-    AVCodecContext** output, const std::int32_t hardwareDeviceType,
+// Reads how many clockwise quarter turns the source asks to be displayed with.
+//
+// Two independent mechanisms carry this, and real files use either one:
+//
+//   1) Container metadata `rotate` (Matroska ProjectionPoseRoll, and the tag
+//      ffmpeg's own muxer writes). It never becomes a display matrix, so a
+//      reader that only looks for AV_FRAME_DATA_DISPLAYMATRIX misses it --
+//      measured with a `-metadata:s:v rotate=90` MKV.
+//   2) A display matrix (MP4 tkhd / MOV, or frame side data). ffmpeg converts
+//      the matrix form into AV_FRAME_DATA_DISPLAYMATRIX on decoded frames.
+//
+// The metadata tag is CCW-positive in ffmpeg's own convention (`rotate=90`
+// means "rotate 90 degrees counter-clockwise to display"), while this renderer
+// counts clockwise quarter turns, hence the 4 - n inversion. The matrix path
+// already yields a clockwise angle via av_display_rotation_get's sign, so it is
+// used as-is.
+//
+// Returns 0 when nothing usable is present. Never throws: a malformed matrix
+// must degrade to "no rotation" rather than fail the open.
+std::uint32_t SourceRotationQuarterTurns(AVFormatContext* format,
+    const std::int32_t streamIndex) noexcept {
+    if (format == nullptr || streamIndex < 0 ||
+        streamIndex >= static_cast<std::int32_t>(format->nb_streams))
+        return 0;
+
+    // 1) Container metadata tag. av_dict_get is case-insensitive-ish in practice
+    //    for these keys, but check both spellings that real muxers emit.
+    const auto* stream = format->streams[streamIndex];
+    for (const char* key : { "rotate", "ROTATE" }) {
+        const auto* entry = av_dict_get(stream->metadata, key, nullptr, 0);
+        if (entry == nullptr || entry->value == nullptr) continue;
+        const auto degrees = std::atof(entry->value);
+        if (!std::isfinite(degrees)) continue;
+        auto turns = static_cast<long>(std::lround(degrees / 90.0)) % 4;
+        if (turns < 0) turns += 4;
+        // Metadata is CCW-positive; the renderer counts clockwise.
+        return static_cast<std::uint32_t>((4 - turns) % 4);
+    }
+
+    // 2) Display matrix on the stream's coded side data (decoders copy this to
+    //    each frame, but at open time no frame exists yet, so read it here).
+    const auto* matrix = av_packet_side_data_get(stream->codecpar->coded_side_data,
+        stream->codecpar->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX);
+    if (matrix == nullptr || matrix->size < 9 * sizeof(std::int32_t)) return 0;
+    const auto angle = av_display_rotation_get(
+        reinterpret_cast<const std::int32_t*>(matrix->data));
+    if (angle != angle) return 0; // NaN: no usable matrix
+    auto normalized = angle;
+    while (normalized < 0.0) normalized += 360.0;
+    while (normalized >= 360.0) normalized -= 360.0;
+    return static_cast<std::uint32_t>(normalized / 90.0 + 0.5) % 4u;
+}
+
+FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t index, const bool video,    AVCodecContext** output, const std::int32_t hardwareDeviceType,
     std::int32_t* hardwarePixelFormat, const bool useConfiguredHardware,
     const AVCodec* codecOverride, std::string* failureReason) noexcept {
     const auto setFailure = [failureReason](std::string message) {
@@ -1968,15 +2267,11 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
     auto result = avcodec_parameters_to_context(context, stream->codecpar);
     context->pkt_timebase = stream->time_base;
     if (result >= 0 && video && !hardwareRequested) {
-        const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
-        // Large dav1d frames benefit from more workers; other software decoders
-        // retain the existing bounded thread policy.
-        const auto threadLimit = codec->id == AV_CODEC_ID_AV1 &&
-            std::string_view(codec->name) == "libdav1d" &&
-            stream->codecpar->width >= 3840 && stream->codecpar->height >= 2160
-            ? 16u : MaximumSoftwareDecoderThreads;
-        context->thread_count = static_cast<int>(std::min(
-            hardwareThreads, threadLimit));
+        // Worker count comes from the resolution tier (or the fixed policy when the
+        // host has not opted in); see SelectSoftwareDecoderThreads.
+        context->thread_count = static_cast<int>(SelectSoftwareDecoderThreads(
+            static_cast<std::uint32_t>(stream->codecpar->width),
+            static_cast<std::uint32_t>(stream->codecpar->height)));
         context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     }
     if (disc_ && disc_->Menu() && video &&
@@ -1986,10 +2281,22 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
         context->thread_type = FF_THREAD_SLICE;
     }
     if (result >= 0 && hardwareRequested) {
-        // The decoder already allocates its codec-specific DPB. Extra surfaces
-        // only cover the bounded presentation queue plus in-flight copies.
-        context->extra_hw_frames = std::max(context->extra_hw_frames,
-            static_cast<int>(MaxQueuedVideoFrames + 2));
+        // Reserve only what the presentation queue plus in-flight copies actually need.
+        //
+        // This was MaxQueuedVideoFrames + 2 = 10, a fixed count that ignores the cost of
+        // a surface: each one is a full decoded frame in VRAM. Measured on 8K HEVC that
+        // reservation is what dominates GPU memory -- 3201 MB at 10, 2626 MB at 4 and
+        // 2435 MB at 2 -- because a single 8K P010 surface is 99.6 MB, so eight surplus
+        // surfaces cost ~800 MB. The queue itself is memory-bounded and needs only two
+        // or three frames at 8K, so the surplus bought nothing: playback measured 714
+        // frames with zero drops at 10, 4 and 2 alike.
+        //
+        // Three covers the bounded queue (2 at 8K, 5 at 4K, capped at 8) plus a copy in
+        // flight, without the large fixed surplus. A decoder that needs more will still
+        // request it: extra_hw_frames is a request on top of the codec's own DPB, and
+        // FFmpeg raises it if the DPB requirement exceeds what was asked for.
+        constexpr int ExtraHardwareFrames = 3;
+        context->extra_hw_frames = std::max(context->extra_hw_frames, ExtraHardwareFrames);
         AVBufferRef* hardwareDevice = nullptr;
         if (deviceType == AV_HWDEVICE_TYPE_D3D11VA) {
             const auto shared = videoRenderer_.CreateD3D11HardwareDeviceContext(&hardwareDevice);
@@ -2109,6 +2416,8 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         } catch (...) { openResult = FFFResult::NativeFailure; openError = "Could not open the disc."; }
     } else openResult = OpenFormat(path, &format_, formatIo_, openError);
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
+    // Remembered so the IAMF decoder can re-open the file and drive the raw OBU stream.
+    mediaPath_ = path;
     videoStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_VIDEO);
     animatedImage_ = IsLoopAwareImageDemuxer(format_ != nullptr ? format_->iformat : nullptr);
     // An AVIF/HEIC image sequence keeps its animation on a later track than the
@@ -2121,6 +2430,14 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Select session rewind only after stream classification is available.
     sessionWrapLoop_ = IsAnimatedImageSequence(format_);
     staticImage_ = IsStillImage(format_, videoStream_);
+    // Rotation is a *view* property, so it is applied through the same renderer
+    // path the image mode and the host's manual R key use. Decoding stays
+    // untouched: the frame keeps its native orientation and only the sampling
+    // coordinate (plus the fit box) turns. That keeps the display matrix out of
+    // the pixel pipeline, where it would otherwise have to be re-applied after
+    // every hardware-transfer / colour step.
+    sourceRotation_ = SourceRotationQuarterTurns(format_, videoStream_);
+    (void)videoRenderer_.SetViewRotation(sourceRotation_);
     // Still images are uploaded as one texture, so an oversized source can only
     // fail later inside the renderer ("open-image" with an opaque reason).
     // Reject it here with the real limit instead. Video is not checked here and
@@ -2165,8 +2482,17 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         (void)ConfigureDolbyVisionEnhancementDecoder();
     }
     if (audioStream_ >= 0) {
-        if (OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success)
+        // IAMF first: FFmpeg cannot mix an IAMF element's substreams, so its
+        // decode of the first substream is a fraction of the content. Try the AOM
+        // reference decoder, and fall back to FFmpeg if it cannot handle this
+        // particular file -- libiamf has real gaps (FLAC carriage is unimplemented,
+        // some HOA layouts fail to configure), and a file that plays in stereo is
+        // better than one that does not play at all.
+        if (TryOpenIamfAudioDecoder()) {
+            audioDecoder_ = nullptr;
+        } else if (OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success) {
             audioStream_ = -1;
+        }
     }
     videoRenderer_.ConfigureHdrStream(videoStream_ >= 0 ?
         format_->streams[videoStream_]->codecpar : nullptr);
@@ -2284,8 +2610,160 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
         FlushDolbyVisionEnhancementDecoder();
     }
     if (state_.load() == FFF3FPState::Failed) return FFFResult::DeviceFailure;
-    return videoRenderer_.PresentedVideoFrames() > before
-        ? FFFResult::Success : FFFResult::FfmpegFailure;
+    if (videoRenderer_.PresentedVideoFrames() <= before) return FFFResult::FfmpegFailure;
+    // Still images carry their EXIF orientation as FRAME side data, which only
+    // exists after the first decode -- the open-time stream probe cannot see it
+    // (measured: a stream-level lookup on the Orientation=6 JPEG finds nothing,
+    // while the decoded frame reports rotation=3). Apply it now so an image is
+    // presented already upright, with no visible first-frame flip.
+    ApplyRotationFromDecodedFrame();
+    return FFFResult::Success;
+}
+
+// Re-reads the rotation from the most recently decoded frame and applies it when
+// it differs from what the stream reported at open time. Frame side data wins:
+// for still images it is the only source, and for video a per-frame matrix is
+// more specific than the container tag.
+void PlayerSession::ApplyRotationFromDecodedFrame() noexcept {
+    const auto* frame = stillImageFrame_ != nullptr ? stillImageFrame_ : videoDecodeFrame_;
+    if (frame == nullptr) return;
+    const auto* matrix = av_frame_get_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX);
+    if (matrix == nullptr || matrix->size < 9 * sizeof(std::int32_t)) return;
+    const auto angle = av_display_rotation_get(
+        reinterpret_cast<const std::int32_t*>(matrix->data));
+    if (angle != angle) return; // NaN: no usable matrix
+    auto normalized = angle;
+    while (normalized < 0.0) normalized += 360.0;
+    while (normalized >= 360.0) normalized -= 360.0;
+    const auto turns = static_cast<std::uint32_t>(normalized / 90.0 + 0.5) % 4u;
+    if (turns == sourceRotation_) return;
+    sourceRotation_ = turns;
+    (void)videoRenderer_.SetViewRotation(turns);
+}
+
+std::uint32_t PlayerSession::SelectSoftwareDecoderThreads(const std::uint32_t width,
+    const std::uint32_t height) const noexcept {
+    const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+    if (!adaptiveThreadsEnabled_) {
+        // Previous fixed policy, unchanged, so hosts that do not opt in are unaffected.
+        const auto largeAv1Frame = width >= 3840 && height >= 2160;
+        const auto limit = largeAv1Frame ? 16u : MaximumSoftwareDecoderThreads;
+        return (std::min)(hardwareThreads, limit);
+    }
+
+    // Load-driven, not resolution-driven. Resolution says nothing about whether this
+    // machine can decode this codec: an 8K file that starves a 4-core laptop is
+    // comfortable on a 20-thread desktop, and the reverse holds for heavy 4K AV1. The
+    // rung is therefore decided by measured load (EvaluateDecoderLoad).
+    //
+    // Start at 16 rather than the old fixed 8. Measured on 4K AV1 at low system load,
+    // a fixed 16 gave 693 frames / 8 drops against 682 / 20 at 8, 623 / 76 at 4 and
+    // 640 / 59 at 32 -- so 16 is both the peak and a safer place to begin than the
+    // minimum. Starting low and climbing does not recover the difference: the climb
+    // needs a reopen plus a seek, and measured that cost more than the rung gained
+    // (dynamic 8 -> 16 finished at 632 frames against 693 for simply starting at 16).
+    // The ladder therefore remains a safety net for a machine too slow for its source,
+    // not the primary mechanism.
+    const auto ceiling = (std::min)({ hardwareThreads, threadLadderMax_, 64u });
+    const auto floor = (std::min)(threadLadderMin_, ceiling);
+    const auto baseline = (std::min)({ hardwareThreads, 16u, ceiling });
+    const auto wanted = decoderThreads_ == 0 ? baseline : decoderThreads_;
+    return std::clamp(wanted, std::max(floor, 1u), std::max(ceiling, 1u));
+}
+
+void PlayerSession::EvaluateDecoderLoad() noexcept {
+    if (!adaptiveThreadsEnabled_ || format_ == nullptr || videoStream_ < 0) return;
+    if (snapshot_.decodeMode != FFF3FPDecodeMode::Cpu) return;
+    if (videoDecoder_ == nullptr) return;
+
+    // A rung costs a reopen and a seek, so let the new rung settle before judging it.
+    if (ladderSettlingFrames_ > 0) { --ladderSettlingFrames_; return; }
+
+    constexpr std::int64_t Window100ns = 20'000'000;   // 2 seconds
+    const auto now = CurrentSteadyTicks();
+    if (ladderWindowStart100ns_ == 0) { ladderWindowStart100ns_ = now; return; }
+    const auto elapsed = now - ladderWindowStart100ns_;
+    if (elapsed < Window100ns) return;
+
+    const auto decoded = snapshot_.decodedVideoFrames;
+    const auto presented = snapshot_.presentedVideoFrames;
+    const auto decodedDelta = decoded - ladderWindowDecoded_;
+    const auto presentedDelta = presented - ladderWindowPresented_;
+    ladderWindowDecoded_ = decoded;
+    ladderWindowPresented_ = presented;
+    ladderWindowStart100ns_ = now;
+    if (presentedDelta == 0 && decodedDelta == 0) return;
+
+    // Is the source keeping up at all? Compare against the stream's own frame rate.
+    auto* stream = format_->streams[videoStream_];
+    const auto frameRate = stream != nullptr
+        ? av_guess_frame_rate(format_, stream, nullptr) : AVRational{0, 1};
+    const auto sourceFps = frameRate.den != 0
+        ? static_cast<double>(frameRate.num) / frameRate.den : 0.0;
+    const auto seconds = static_cast<double>(elapsed) / 10'000'000.0;
+    const auto presentedFps = static_cast<double>(presentedDelta) / seconds;
+
+    // Two conditions must hold before spending a reopen:
+    //  1. Playback is actually missing the source rate.
+    //  2. Decoding has no spare capacity. This is the part that separates a decode
+    //     bottleneck from an upload one: at 8K the decoder produces frames far faster
+    //     than they can be uploaded, and adding workers there changes nothing (measured
+    //     across 4..32 rungs: 3.3-4.7 fps, all within noise). Without this test the
+    //     ladder would climb on every dropped frame and waste reopens on a bottleneck
+    //     that more threads cannot fix.
+    // Two conditions must hold before spending a reopen:
+    //  1. Playback is missing the source rate.
+    //  2. Decoding has no spare capacity, OR presentation has stalled completely while
+    //     decode still produces. The second clause matters because a badly starved
+    //     decoder can look like an upload bottleneck: decode keeps emitting frames
+    //     (measured ~48 fps at 4 workers on 8K) while nothing reaches the screen, which
+    //     satisfies "has spare capacity" even though more workers is precisely the fix.
+    //     Genuine upload saturation looks different -- frames are decoded and presented
+    //     at a steady low rate, so presentedDelta stays non-zero.
+    const auto missingSourceRate = sourceFps > 0.0 && presentedFps < sourceFps * 0.9;
+    const auto decoderHasNoSpare = decodedDelta <= presentedDelta * 3 / 2;
+    const auto presentationStalled = presentedDelta == 0 && decodedDelta > 0;
+    if (!missingSourceRate || (!decoderHasNoSpare && !presentationStalled)) return;
+
+    const auto current = SelectSoftwareDecoderThreads(0, 0);
+    const auto ceiling = (std::min)({ std::max(1u, std::thread::hardware_concurrency()),
+        threadLadderMax_, 64u });
+    if (current >= ceiling) return;
+
+    // Coarse ladder, up only. Descending was implemented earlier and removed: giving
+    // workers back costs another reopen and seek, and the drops each seek produces were
+    // read as fresh pressure, which oscillated (observed 19 -> 20 -> 19) and left 4K
+    // AV1 at 40 fps against 56 for a single fixed choice.
+    constexpr std::uint32_t Ladder[] = {4, 8, 16, 24, 32};
+    std::uint32_t next = ceiling;
+    for (const auto rung : Ladder) {
+        if (rung > current && rung <= ceiling) { next = rung; break; }
+    }
+    if (next <= current) return;
+
+    AVCodecContext* replacement = nullptr;
+    const auto previous = decoderThreads_;
+    decoderThreads_ = next;
+    if (OpenDecoder(format_, videoStream_, true, &replacement, -1, nullptr, false)
+            != FFFResult::Success) {
+        decoderThreads_ = previous;   // keep the working decoder and rung
+        return;
+    }
+    const auto resume = std::max<std::int64_t>(0, snapshot_.position100ns);
+    avcodec_free_context(&videoDecoder_);
+    videoDecoder_ = replacement;
+    if (videoDecodeFrame_ != nullptr) av_frame_unref(videoDecodeFrame_);
+    if (videoTransferFrame_ != nullptr) av_frame_unref(videoTransferFrame_);
+    ClearVideoQueue();
+    DoSeek(resume);
+    // Ignore the frames this seek itself drops; they are the rung's cost, not evidence
+    // that the rung is too small.
+    ladderSettlingFrames_ = 45;
+    ladderWindowDecoded_ = 0;
+    ladderWindowPresented_ = 0;
+    ladderWindowStart100ns_ = 0;
+    std::fprintf(stderr, "[threads] software decoder %u -> %u (presented %.1f of %.1f fps)\n",
+        current, next, presentedFps, sourceFps);
 }
 
 FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noexcept {
@@ -2333,6 +2811,10 @@ void PlayerSession::PumpPlayback() noexcept {
     if (state_.load() == FFF3FPState::Failed) return;
     UpdateDrainedAudioClock();
     UpdateBitRateForPosition(ClockPosition());
+    // Judge decoder load on the playback tick. This is where the peak frame-rate
+    // counters are already fresh, and it runs on the worker thread that owns the
+    // decoder, so a rung change cannot race a decode in progress.
+    EvaluateDecoderLoad();
     if (videoStream_ < 0 && audioStream_ >= 0 && !audioRenderer_) {
         // Windows can block both shared and exclusive initialization while a
         // different process owns the endpoint. Keep audio-only media on its
@@ -2352,6 +2834,14 @@ void PlayerSession::PumpPlayback() noexcept {
         audioBuffered < TargetAudioBuffer100ns) {
         DecodePendingPacket(false);
         return;
+    }
+    // IAMF is pushed from its own streaming decoder rather than the demuxer's
+    // packet queue, but it honours the same buffer target and the same
+    // "wait for video" rule so it stays in step with the clock.
+    if (iamfDecoder_ != nullptr && !delayAudioUntilVideo &&
+        audioBuffered < TargetAudioBuffer100ns) {
+        PumpIamfAudio();
+        if (state_.load() == FFF3FPState::Failed) return;
     }
     // Feed already-demuxed audio before doing a due frame's enhancement/render
     // work. Otherwise a costly frame can starve a short WASAPI buffer.
@@ -2433,9 +2923,19 @@ void PlayerSession::PumpPlayback() noexcept {
         }
     }
     else if (playbackPacket_->stream_index == audioStream_ && externalFormat_ == nullptr) {
+        // IAMF bypasses the FFmpeg decoder entirely: the reference decoder owns the
+        // substream mixing FFmpeg does not implement. Queue buffering stays the
+        // same either way, so a saturated audio queue is handled identically.
+        const auto decodeAudioPacket = [this]() {
+            if (iamfDecoder_ != nullptr) {
+                (void)DecodeIamfPacket(playbackPacket_);
+                return;
+            }
+            DecodePacket(audioDecoder_, playbackPacket_, false, format_);
+        };
         if (audioRenderer_ && (delayAudioUntilVideo || audioBuffered >= TargetAudioBuffer100ns)) {
             if (delayAudioUntilVideo && audioPacketsFull) {
-                DecodePacket(audioDecoder_, playbackPacket_, false, format_);
+                decodeAudioPacket();
                 av_packet_unref(playbackPacket_);
                 return;
             }
@@ -2448,7 +2948,7 @@ void PlayerSession::PumpPlayback() noexcept {
             pendingAudioPacketBytes_ += static_cast<std::size_t>(std::max(retained->size, 0));
             pendingAudioPackets_.push_back(retained);
         } else {
-            DecodePacket(audioDecoder_, playbackPacket_, false, format_);
+            decodeAudioPacket();
         }
     }
     if (disc_) disc_->DecodeSubtitle(playbackPacket_, format_);
@@ -2646,6 +3146,170 @@ FFFResult PlayerSession::CompleteHardwareFallback(const char* failureMessage) no
     const auto result = FallbackToSoftwareVideoDecoder(reason.c_str());
     if (result != FFFResult::Success) Fail(result, failureMessage);
     return result;
+}
+
+
+// True when the container is the raw IAMF demuxer.
+static bool IsIamfFormat(const AVFormatContext* format) noexcept {
+    return format != nullptr && format->iformat != nullptr &&
+        format->iformat->name != nullptr &&
+        std::string_view(format->iformat->name).find("iamf") != std::string_view::npos;
+}
+
+bool PlayerSession::TryOpenIamfAudioDecoder() noexcept {
+    if (!IsIamfFormat(format_)) return false;
+    if (audioStream_ < 0 || audioStream_ >= static_cast<std::int32_t>(format_->nb_streams))
+        return false;
+    if (!IamfAudioDecoder::Available()) return false;
+
+    auto decoder = std::make_unique<IamfAudioDecoder>();
+    std::string error;
+    // IAMF cannot be decoded packet-by-packet the way the rest of the pipeline
+    // does it: FFmpeg's demuxer hands out one packet per *substream*, while
+    // libiamf needs whole access units (every substream's OBUs together) and
+    // rejects per-substream feeds. The reference decoder therefore drives the raw
+    // OBU stream from the file itself; frames are pulled lazily by
+    // PumpIamfAudio so a 328 MB fixture does not decode up front.
+    if (!decoder->OpenFile(mediaPath_, error)) {
+        // Not fatal. libiamf has genuine gaps (FLAC carriage is unimplemented and
+        // some HOA layouts will not configure), so the track falls back to FFmpeg
+        // instead of failing: a file that plays in stereo beats one that does not
+        // play at all. Announced like the video-decoder fallback, because playback
+        // continues and the user should know why it sounds flat.
+        Emit(FFF3FPEvent::DeviceChanged,
+            "{\"type\":\"audio\",\"iamf\":true,\"fallback\":true,\"reason\":\"" +
+            EscapeJson(error) + "\"}");
+        return false;
+    }
+    iamfDecoder_ = std::move(decoder);
+    // Report the layout the content actually has, so diagnostics stop presenting
+    // one substream's stereo pair as if it were the whole track.
+    snapshot_.iamfActive = true;
+    snapshot_.iamfChannels = iamfDecoder_->Channels();
+    // Content layout, not the render target; see FFF3FPSnapshot::iamfContentChannels.
+    snapshot_.iamfContentChannels = static_cast<std::uint32_t>(
+        std::max(0, iamfDecoder_->ContentChannels()));
+    snapshot_.iamfSoundSystem = iamfDecoder_->SoundSystem();
+    return true;
+}
+
+// Pulls decoded IAMF frames into the renderer until the audio buffer is satisfied.
+// Called from the same worker that feeds every other codec, so ordering against
+// video and the playback clock is unchanged.
+void PlayerSession::PumpIamfAudio() noexcept {
+    if (iamfDecoder_ == nullptr) return;
+    if (audioRenderer_ == nullptr) return;
+    // Respect the same buffer target the ordinary path uses; over-filling would
+    // push audio ahead of the clock just as it would for any other codec.
+    constexpr int MaxFramesPerPump = 16;
+    std::vector<std::pair<AVFrame*, std::int64_t>> frames;
+    bool atEnd = false;
+    std::string error;
+    if (!iamfDecoder_->PumpFile(MaxFramesPerPump, frames, atEnd, error)) {
+        // Decoding can fail *after* the stream looked openable: libiamf reports
+        // some unsupported carriages only once it reaches the audio frames.
+        // Falling back keeps the track audible -- without it the file would go
+        // silent, which is worse than the stereo it played before.
+        for (auto& entry : frames) av_frame_free(&entry.first);
+        FallBackFromIamf(error);
+        return;
+    }
+    // The content layout only becomes known once libiamf has configured, which happens
+    // inside this first PumpFile -- so TryOpenIamfAudioDecoder cannot publish it at open
+    // time and the snapshot would carry 0 forever. Read it *after* the pump, on the one
+    // thread that owns the decoder, and only until it is known.
+    // Measured ordering that made this necessary: the old check ran before PumpFile and
+    // saw 0, while the configure that follows sets 8 for a 7.1 file.
+    if (snapshot_.iamfContentChannels == 0) {
+        const auto contentChannels = iamfDecoder_->ContentChannels();
+        if (contentChannels > 0)
+            snapshot_.iamfContentChannels = static_cast<std::uint32_t>(contentChannels);
+    }
+    for (auto& entry : frames) {
+        // The decoder numbers its frames in 100 ns units, but QueueAudioFrame reads a
+        // frame's PTS in the *stream's* time base -- for the raw IAMF demuxer that is
+        // 1/48000 -- and rescales it from there. Handing over 100 ns values unchanged
+        // therefore multiplied every timestamp by sampleRate/1e7: a 4096-sample frame
+        // advancing 0.085 s looked like it advanced 17.7 s. The renderer treats a jump
+        // that large as an edit and synthesises silence to cover it, so a 1.02 s file
+        // queued 207 s of PCM, and playback stalled while that was drained.
+        //
+        // Converting here keeps one convention for every codec: PTS in stream time base
+        // on the AVFrame, position in 100 ns only after StreamTimestampPosition100ns.
+        if (entry.first->pts != AV_NOPTS_VALUE && audioStream_ >= 0 &&
+            audioStream_ < static_cast<std::int32_t>(format_->nb_streams)) {
+            entry.first->pts = av_rescale_q(entry.first->pts,
+                AVRational{1, static_cast<int>(TicksPerSecond)},
+                format_->streams[audioStream_]->time_base);
+            entry.first->best_effort_timestamp = entry.first->pts;
+        }
+        QueueAudioFrame(entry.first, format_, audioStream_);
+        av_frame_free(&entry.first);
+    }
+    if (!frames.empty()) iamfProducedAnyAudio_ = true;
+    // A stream that ends without ever producing a frame is content libiamf
+    // accepted at configure time but cannot actually render (measured on
+    // conv_bedonly.iamf, a HOA fixture). Treat it like a hard failure so the track
+    // falls back to FFmpeg instead of playing silence.
+    if (atEnd && frames.empty()) {
+        if (iamfProducedAnyAudio_) audioDecoderDrained_ = true;
+        else FallBackFromIamf("libiamf produced no audio from this IAMF stream.");
+    }
+}
+
+// Gives up on the reference IAMF decoder and re-opens the track through FFmpeg.
+// Used when libiamf fails on content it cannot handle (FLAC carriage, some HOA
+// layouts); the alternative is silence.
+void PlayerSession::FallBackFromIamf(const std::string& reason) noexcept {
+    ReleaseIamfDecoder();
+    Emit(FFF3FPEvent::DeviceChanged,
+        "{\"type\":\"audio\",\"iamf\":true,\"fallback\":true,\"reason\":\"" +
+        EscapeJson(reason) + "\"}");
+    // Re-open the ordinary decoder for the same stream. The demuxer is untouched,
+    // so packets already read stay valid; only the decode path changes.
+    if (audioDecoder_ == nullptr && audioStream_ >= 0) {
+        AVCodecContext* replacement = nullptr;
+        if (OpenDecoder(format_, audioStream_, false, &replacement) == FFFResult::Success)
+            audioDecoder_ = replacement;
+    }
+}
+
+// Bytes read from the head of an IAMF stream to reach its descriptor OBUs. The
+// descriptors (sequence header, codec configs, audio elements, mix
+// presentations) always precede the first audio frame; libiamf's own reference
+// tool uses 960*6*2*16 = 184320 for the same purpose, so that is a proven size.
+
+void PlayerSession::ReleaseIamfDecoder() noexcept {
+    iamfDecoder_.reset();
+    snapshot_.iamfActive = false;
+    iamfProducedAnyAudio_ = false;
+    snapshot_.iamfChannels = 0;
+    snapshot_.iamfSoundSystem = -1;
+}
+
+FFFResult PlayerSession::DecodeIamfPacket(AVPacket* packet) noexcept {
+    if (iamfDecoder_ == nullptr) return FFFResult::InvalidState;
+    if (packet == nullptr || packet->size <= 0) return FFFResult::Success;
+    // The packet's position drives the frame timestamps, so seek anchoring and
+    // gap repair behave exactly as they do for every other codec.
+    auto position = AV_NOPTS_VALUE;
+    if (packet->pts != AV_NOPTS_VALUE)
+        position = StreamTimestampPosition100ns(format_, audioStream_, packet->pts);
+
+    std::string error;
+    const auto ok = iamfDecoder_->Decode(packet->data, static_cast<std::size_t>(packet->size),
+        position, [this](AVFrame* decoded) { QueueAudioFrame(decoded, format_, audioStream_); },
+        error);
+    if (!ok) {
+        // A single bad access unit must not take audio down: report and continue,
+        // mirroring how the ordinary path treats recoverable decode errors.
+        ++internalAudioDecodeErrorCount_;
+        if (error.empty()) return FFFResult::FfmpegFailure;
+        Emit(FFF3FPEvent::Error, "{\"type\":\"audio\",\"iamf\":true,\"reason\":\"" +
+            EscapeJson(error) + "\"}");
+        return FFFResult::Success;
+    }
+    return FFFResult::Success;
 }
 
 bool PlayerSession::DolbyVisionEnhancementNeedsReadAhead() const noexcept {
@@ -2848,9 +3512,17 @@ void PlayerSession::DecodePendingPacket(const bool video) noexcept {
     auto* packet = queue.front();
     queue.pop_front();
     bytes -= static_cast<std::size_t>(std::max(packet->size, 0));
+    // Upstream added a decodeEnhancement flag so a packet whose EL was already
+    // decoded ahead of time (its `opaque` is marked) does not decode the EL twice.
+    // Our IAMF branch replaces the ordinary audio/video path entirely, so the two
+    // changes are independent: keep the flag on the path it belongs to, and keep the
+    // IAMF interception ahead of it.
     const bool decodeEnhancement = packet->opaque != this;
     packet->opaque = nullptr;
-    DecodePacket(video ? videoDecoder_ : audioDecoder_, packet, video, format_, decodeEnhancement);
+    // Queued audio still has to go through the IAMF decoder when it owns the
+    // track, otherwise buffered packets would silently play through FFmpeg.
+    if (!video && iamfDecoder_ != nullptr) (void)DecodeIamfPacket(packet);
+    else DecodePacket(video ? videoDecoder_ : audioDecoder_, packet, video, format_, decodeEnhancement);
     av_packet_free(&packet);
 }
 
@@ -2964,6 +3636,10 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
         position + lateTolerance < ClockPosition()) {
         snapshot_.frameIndex = nextIndex;
         ++snapshot_.droppedVideoFrames;
+        // Feed the drop to the adaptive-downscale policy. Only software decoding can
+        // benefit, because a hardware frame never crosses PCIe as CPU planes.
+        if (!IsHardwareFrame(frame))
+            videoRenderer_.ObserveFrameForAdaptiveDownscale(true);
         snapshot_.queuedVideoFrames = static_cast<std::uint32_t>(videoFrameQueue_.size());
         PublishSnapshot();
         return;
@@ -3025,7 +3701,12 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
             return;
         }
     }
-    const auto renderResult = videoRenderer_.Render(frameToRender, staticImage_ && owner == format_);
+    // A frame that reaches the renderer counts against the adaptive-downscale drop
+    // ratio; hardware frames never engage the policy, so they are excluded here too.
+    if (renderFrame != nullptr && !IsHardwareFrame(renderFrame))
+        videoRenderer_.ObserveFrameForAdaptiveDownscale(false);
+    const auto renderResult = videoRenderer_.Render(frameToRender, staticImage_ && owner == format_,
+        false, false, staticImage_ && owner == format_);
     if (gamutConverted != nullptr) av_frame_free(&gamutConverted);
     if (renderResult != FFFResult::Success) {
         if (renderResult == FFFResult::DeviceFailure &&
@@ -3141,6 +3822,7 @@ void PlayerSession::DisableFailedInternalAudio(const FFFResult result, std::stri
         const auto failedStream = audioStream_;
         const auto position = std::max<std::int64_t>(0, snapshot_.position100ns);
         if (audioDecoder_ != nullptr) avcodec_free_context(&audioDecoder_);
+        ReleaseIamfDecoder();
         if (audioDecodeFrame_ != nullptr) av_frame_unref(audioDecodeFrame_);
         audioStream_ = -1;
         snapshot_.selectedAudioStream = -1;
@@ -3587,6 +4269,25 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
         av_seek_frame(externalFormat_, externalAudioStream_, externalTimestamp, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(externalAudioDecoder_);
     }
+    // The IAMF path does not go through audioDecoder_, so flushing that decoder does
+    // nothing for it: libiamf reads the raw file through its own handle and keeps its
+    // position. Without this the seek was silently ignored and audio kept playing from
+    // wherever it had reached.
+    //
+    // RestartFileAt anchors the replayed stream at the seek target rather than at zero.
+    // That matters: the decoder always replays from byte 0, so raw timestamps would name
+    // the wrong position, and QueueAudioFrame's filter (which drops audio before
+    // seekTarget100ns_) would then discard every frame until playback caught up --
+    // measured as a track that goes silent after a forward seek.
+    if (iamfDecoder_ != nullptr) {
+        std::string iamfError;
+        if (!iamfDecoder_->RestartFileAt(position, iamfError)) {
+            // A failed restart must not leave a decoder still reporting old positions;
+            // drop it and let the FFmpeg fallback take over.
+            FallBackFromIamf("Could not restart the IAMF decoder after a seek: " + iamfError);
+        }
+        iamfProducedAnyAudio_ = false;
+    }
     return FFFResult::Success;
 }
 
@@ -3643,7 +4344,15 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
     }
     else {
         if (audioDecoder_) avcodec_free_context(&audioDecoder_);
+        ReleaseIamfDecoder();
         audioDecoder_ = replacement; audioStream_ = index; snapshot_.selectedAudioStream = index;
+        // Re-evaluate the IAMF path for the newly selected track: switching onto an
+        // IAMF stream must engage the reference decoder, and switching away from one
+        // must release it. No fallback is needed here -- if IAMF cannot be opened we
+        // have already opened the FFmpeg decoder above.
+        if (TryOpenIamfAudioDecoder()) {
+            avcodec_free_context(&audioDecoder_);
+        }
         internalAudioFailurePending_ = false;
         internalAudioFailureResult_ = FFFResult::Success;
         internalAudioDecodeErrorCount_ = 0;
@@ -3704,6 +4413,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     if (videoDecoder_) avcodec_free_context(&videoDecoder_);
     ResetDolbyVisionEnhancementDecoder();
     if (audioDecoder_) avcodec_free_context(&audioDecoder_);
+    ReleaseIamfDecoder();
     if (coverArtFrame_) av_frame_free(&coverArtFrame_);
     ReleasePrimariesCarrierFilter();
     if (stillImageFrame_) av_frame_free(&stillImageFrame_);
@@ -3758,6 +4468,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
         snapshot_.swapChainPresents = snapshot_.presentWait100ns = 0;
         snapshot_.deviceLockWait100ns = snapshot_.hardwareTransfer100ns = 0;
         snapshot_.softwareConvert100ns = 0;
+    snapshot_.videoUpload100ns = 0;
         snapshot_.videoBitRate = snapshot_.audioBitRate = 0;
         snapshot_.queuedVideoFrames = 0; snapshot_.sourcePeakNits = 0;
         ApplyHdrState(snapshot_, {});
@@ -4014,6 +4725,19 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                  << ",\"initialPadding\":" << parameters->initial_padding
                  << ",\"trailingPadding\":" << parameters->trailing_padding
                  << ",\"seekPreroll\":" << parameters->seek_preroll;
+            // IAMF splits one audio element across several dependent elementary
+            // streams, so codecpar describes ONE substream (a stereo pair of a 7.1.4
+            // element), not the element. Report the mix presentation's real layout
+            // alongside it: a host that shows "stereo" for a 7.1.4 file is stating
+            // something false, and the mismatch is silent otherwise.
+            const auto iamf = ResolveIamfLayout(format_);
+            if (iamf.isIamf) {
+                json << ",\"iamf\":{\"substreams\":" << iamf.substreamCount
+                     << ",\"elementChannels\":" << iamf.elementChannels
+                     << ",\"presentationChannels\":" << iamf.presentationChannels
+                     << ",\"presentationLayout\":\""
+                     << EscapeJson(iamf.presentationLayoutName) << "\"}";
+            }
             const auto rawBits = std::max(parameters->bits_per_raw_sample, parameters->bits_per_coded_sample);
             json << ",\"rawSampleBits\":" << rawBits
                  << ",\"compressionMode\":\"" << (isLossless ? "无损" : "有损") << "\"";
@@ -4125,6 +4849,7 @@ void PlayerSession::PublishSnapshot() noexcept {
     snapshot_.presentWait100ns = videoRenderer_.PresentWait100ns();
     snapshot_.deviceLockWait100ns = videoRenderer_.DeviceLockWait100ns();
     snapshot_.softwareConvert100ns = videoRenderer_.SoftwareConvert100ns();
+    snapshot_.videoUpload100ns = videoRenderer_.Upload100ns();
     std::lock_guard lock(snapshotMutex_);
     publishedSnapshot_ = snapshot_;
 }

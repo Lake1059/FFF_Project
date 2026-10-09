@@ -38,10 +38,31 @@ Friend Structure 原生播放器配置
     ' 同样必须追加在末尾：内核按 size >= sizeof(FFF3FPConfiguration) 校验，
     ' 少这一个字段就是 80 < 84 ⇒ FFF3FP_Create 直接 InvalidArgument（会话根本起不来）。
     Public SDRscRGB模式 As UInteger
+    ' API 17/18 新增：自适应 CPU 预缩放 与 软解线程档位。
+    '
+    ' ⚠ 这些字段**必须存在**，即使宿主不使用：内核按
+    ' size >= sizeof(FFF3FPConfiguration) 校验，缺一个字段就会被
+    ' FFF3FP_Create 直接判为 InvalidArgument（result=-1），**会话根本起不来**。
+    ' 实测：宿主停在 API 16（80 字节）而内核为 API 18（112 字节）时，
+    ' Create 返回 -1，播放器完全无法启动。
+    '
+    ' 默认值与内核保持一致；宿主未提供 UI 时用这些默认即可。
+    ' 0 = 关闭（保持固定线程策略），非 0 = 启用自适应。
+    Public 自适应CPU预缩放 As UInteger
+    Public 自适应CPU预缩放丢帧百分比 As UInteger
+    Public 自适应解码线程 As UInteger
+    Public 软解最小线程数 As UInteger
+    Public 软解最大线程数 As UInteger
+    Public 解码升档丢帧百分比 As UInteger
+    Public 解码降档丢帧百分比 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
 Friend Structure 原生播放器快照
+    ' ⚠ 字段顺序**必须与 C 侧 FFF3FPSnapshot 逐字段一致**。顺序错了不会报错，
+    ' 只会静默读出错位的值 —— 曾经发生过：IAMF 三字段被追加到末尾（C 侧在第 26-28 位），
+    ' 于是其后约 30 个字段全部偏移，UI 显示的是别的字段内容。
+    ' 改动本结构体后，用 tools 里的快照布局校验确认与 C 侧一致。
     Public 大小 As UInteger
     Public 版本 As UInteger
     Public 状态 As UInteger
@@ -67,6 +88,12 @@ Friend Structure 原生播放器快照
     Public 视频队列帧数 As UInteger
     Public 源峰值尼特 As UInteger
     Public 已解码音频帧数 As ULong
+    ' IAMF 沉浸式音频。这三个在 C 侧紧跟 已解码音频帧数，**不是**追加在末尾。
+    ' IAMF已接管=1 表示该音轨由 AOM 参考解码器渲染；IAMF声道数 是**渲染目标**声道数
+    ' （固定 7.1.4 = 12），而 IAMF内容声道数 才是文件里实际声明的声道数。
+    Public IAMF已接管 As UInteger
+    Public IAMF声道数 As UInteger
+    Public IAMF声场系统 As Integer
     Public 音频位置100纳秒 As Long
     Public 音频缓冲100纳秒 As Long
     Public 音频欠载次数 As ULong
@@ -100,6 +127,13 @@ Friend Structure 原生播放器快照
     Public 显示器峰值尼特 As UInteger
     Public 显示器全屏峰值尼特 As UInteger
     Public HDR有效目标峰值尼特 As UInteger
+    ' 上传耗时（追加在末尾）。
+    Public 视频上传100纳秒 As ULong
+    ' IAMF 内容声道数（最后追加）：文件声明的声道数，可能小于 IAMF声道数。
+    ' 例：7.1 内容按 7.1.4 渲染，libiamf 会把多出的 4 个声道填成**数字静音**
+    ' （实测峰值 -inf），所以这不是"上混出假内容"，但 UI 应显示内容而非渲染目标 ——
+    ' 否则 7.1 素材会显示成 7.1.4，而实际有 4 只音箱不出声。
+    Public IAMF内容声道数 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -124,7 +158,47 @@ Friend Structure 原生图片信息
     Public 保留4 As UInteger
 End Structure
 
-''' <summary>原生图片信息.标志 的取值（对应 C 侧 FFF3FP_IMAGE_FLAG_*）。</summary>
+''' <summary>IAMF 声场系统（对应 C 侧 IAMF_SoundSystem / 原生解码器的解码输出布局）。
+''' 名称按 AOM IAMF 规范的 "Upper+Middle+Bottom" 记法写出，括号内为声道数。</summary>
+Friend Module 原生IAMF声场系统
+    Public Const 立体声 As Integer = 0            ' 0+2+0, 2
+    Public Const 五点一 As Integer = 1            ' 0+5+0, 6
+    Public Const 七点一 As Integer = 2            ' 2+5+0, 8
+    Public Const 四点零五点一 As Integer = 3      ' 4+5+0, 10
+    Public Const 七点一加一 As Integer = 4        ' 4+7+0, 11
+    Public Const 七点一点四 As Integer = 5        ' 3+7+0, 12
+    Public Const 九点一点四 As Integer = 6        ' 4+9+0, 14
+    Public Const 九点一点六 As Integer = 7        ' 9+10+... 24（库实测 24）
+    Public Const 五点一点二 As Integer = 8        ' 2+5+0, 8（扩展）
+    Public Const 七点一点二 As Integer = 9        ' 2+7+0, 12（扩展）
+    Public Const 七点一点二可替 As Integer = 10   ' 3+7+0, 10（扩展）
+    Public Const 三点一点二 As Integer = 11       ' 3+1+2, 6（扩展）
+    Public Const 单声道 As Integer = 12           ' 1+0+0, 1
+    Public Const 九点一点六可替 As Integer = 13   ' 9+1+6, 16（扩展）
+    Public Const 七点一点五点四 As Integer = 14   ' 7+1+6, 16（扩展）
+
+    ''' <summary>取便于显示的布局名，如 "7.1.4"。未知索引返回空串。</summary>
+    Friend Function 布局名(索引 As Integer) As String
+        Select Case 索引
+            Case 立体声 : Return "2.0"
+            Case 五点一 : Return "5.1"
+            Case 七点一 : Return "7.1"
+            Case 四点零五点一 : Return "5.1.4"
+            Case 七点一加一 : Return "7.1.1"
+            Case 七点一点四 : Return "7.1.4"
+            Case 九点一点四 : Return "9.1.4"
+            Case 九点一点六 : Return "9.1.6"
+            Case 五点一点二 : Return "5.1.2"
+            Case 七点一点二 : Return "7.1.2"
+            Case 七点一点二可替 : Return "7.1.2"
+            Case 三点一点二 : Return "3.1.2"
+            Case 单声道 : Return "1.0"
+            Case 九点一点六可替 : Return "9.1.6"
+            Case 七点一点五点四 : Return "7.1.5.4"
+            Case Else : Return String.Empty
+        End Select
+    End Function
+End Module
 Friend Module 原生图片标志
     Public Const 静态 As UInteger = &H1UI
     Public Const 动画 As UInteger = &H2UI
@@ -493,11 +567,159 @@ Friend Module 播放器原生接口
                                       水平角度 As Single, 垂直角度 As Single,
                                       视场角 As Single) As 原生播放器结果
     End Function
+    ' 截图帧回读：离屏渲染，不受遮挡/最小化影响，且能带 HDR/广色域的高精度帧。
+    '
+    ' ⚠ 同样必须动态解析（理由与下面的视图旋转一致）：这是"同版本号（16）内的新增导出"，
+    '   静态导入会让未含该导出的内核抛 EntryPointNotFoundException。
+    ' 两次调用契约：先传 像素=空 问尺寸（内核回"缓冲区不足"属正常），再按
+    '   宽×高×每像素字节 分配后二调。布局固定取"源分辨率"，格式由请求的位深决定。
+    Private Delegate Function 复制帧原型(播放器 As 播放器原生句柄, 像素 As IntPtr,
+        容量 As UInteger, ByRef 宽 As UInteger, ByRef 高 As UInteger,
+        布局 As UInteger, 格式 As UInteger) As 原生播放器结果
+
+    Private Delegate Function 取末次帧位深原型(播放器 As 播放器原生句柄,
+        ByRef 位深 As UInteger) As 原生播放器结果
+
+    Private ReadOnly 复制帧函数 As 复制帧原型 = 解析帧回读导出(Of 复制帧原型)("FFF3FP_CopyFrame")
+    Private ReadOnly 取末次帧位深函数 As 取末次帧位深原型 =
+        解析帧回读导出(Of 取末次帧位深原型)("FFF3FP_GetLastCopyFrameBitDepth")
+
+    Private Function 解析帧回读导出(Of T)(名称 As String) As T
+        Dim 句柄 = IntPtr.Zero
+        Try
+            ' TryLoad 成功后不再 Free：进程持有内核库，保证函数指针生命周期。
+            If Not NativeLibrary.TryLoad(动态库名称, GetType(播放器原生接口).Assembly, Nothing, 句柄) OrElse
+                句柄 = IntPtr.Zero Then Return Nothing
+            Dim 地址 = NativeLibrary.GetExport(句柄, 名称)
+            Return Marshal.GetDelegateForFunctionPointer(Of T)(地址)
+        Catch ex As EntryPointNotFoundException
+            Return Nothing
+        Catch ex As Exception
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>当前内核是否支持离屏帧回读（旧内核返回 False）。</summary>
+    Friend ReadOnly Property 支持帧回读 As Boolean
+        Get
+            Return 复制帧函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>问一次源分辨率帧尺寸（不取像素）。旧内核或无画面时返回 False。</summary>
+    Friend Function 取帧尺寸(播放器 As 播放器原生句柄, ByRef 宽 As UInteger,
+                             ByRef 高 As UInteger) As Boolean
+        Dim 函数 = 复制帧函数
+        If 函数 Is Nothing Then Return False
+        Try
+            ' 契约：像素为空指针时只回尺寸并返回"缓冲区不足"，这是正常路径不是错误。
+            Dim 结果 = 函数(播放器, IntPtr.Zero, 0UI, 宽, 高, 0UI, 0UI)
+            Return (结果 = 原生播放器结果.缓冲区不足 OrElse 结果 = 原生播放器结果.成功) AndAlso
+                宽 > 0UI AndAlso 高 > 0UI
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>把源分辨率的一帧读进调用方缓冲。容量按字节计；16 位时每像素 8 字节。</summary>
+    Friend Function 复制帧(播放器 As 播放器原生句柄, 缓冲 As IntPtr, 容量 As UInteger,
+                           ByRef 宽 As UInteger, ByRef 高 As UInteger,
+                           ByRef 位深 As UInteger) As Boolean
+        Dim 函数 = 复制帧函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Dim 格式 = If(位深 = 16UI, 1UI, 0UI)
+            Dim 结果 = 函数(播放器, 缓冲, 容量, 宽, 高, 0UI, 格式)
+            If 结果 <> 原生播放器结果.成功 Then Return False
+            Dim 实际位深 As UInteger = 0UI
+            If 取末次帧位深函数 IsNot Nothing AndAlso
+               取末次帧位深函数(播放器, 实际位深) = 原生播放器结果.成功 AndAlso 实际位深 > 0UI Then
+                位深 = 实际位深
+            End If
+            Return True
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ' 视图旋转（四分一转，顺时针 0..3）。
+    '
+    ' ⚠ 必须动态解析，不能像 FFF3FP_SetFitLimitToNative 那样静态导入：
+    '   旋转是"同版本号内的新增导出"，而构造函数只校验版本号（仍是 16）。
+    '   若静态导入，一个 16 版但**尚未含旋转**的内核会在首次调用时抛
+    '   EntryPointNotFoundException（甚至加载期失败），把"旧内核无此能力"
+    '   变成"宿主崩溃"。动态解析让它退化为"旋转不可用"，与字幕流探测同款处理。
+    Private Delegate Function 设置视图旋转原型(播放器 As 播放器原生句柄,
+        四分一转 As UInteger) As 原生播放器结果
+
+    Private ReadOnly 设置视图旋转函数 As 设置视图旋转原型 = 解析视图旋转()
+
+    Private Function 解析视图旋转() As 设置视图旋转原型
+        Dim 句柄 = IntPtr.Zero
+        Try
+            ' TryLoad 成功后不再 Free：进程持有内核库，保证函数指针生命周期。
+            If Not NativeLibrary.TryLoad(动态库名称, GetType(播放器原生接口).Assembly, Nothing, 句柄) OrElse
+                句柄 = IntPtr.Zero Then Return Nothing
+            Dim 地址 = NativeLibrary.GetExport(句柄, "FFF3FP_SetViewRotation")
+            Return Marshal.GetDelegateForFunctionPointer(Of 设置视图旋转原型)(地址)
+        Catch ex As EntryPointNotFoundException
+            Return Nothing
+        Catch ex As Exception
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>当前内核是否支持视图旋转（旧内核返回 False）。</summary>
+    Friend ReadOnly Property 支持视图旋转 As Boolean
+        Get
+            Return 设置视图旋转函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>设置视图旋转（四分一转，顺时针 0..3）。内核不支持时返回 False。
+    ''' 失败原因不在此层抛异常：与 探测字幕流JSON 同款——本模块只负责转发与
+    ''' 能力探测，错误语义由 播放器会话 决定。</summary>
+    Friend Function 设置视图旋转(播放器 As 播放器原生句柄, 四分一转 As UInteger) As Boolean
+        Dim 函数 = 设置视图旋转函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Return 函数(播放器, 四分一转) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     ' 图片模式：缩放 + 平移。zoom=1 为适应窗口，pan 为相对未缩放画面的归一化偏移 [-1,1]。
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetViewTransform(播放器 As 播放器原生句柄,
                                             缩放 As Single, 水平平移 As Single,
                                             垂直平移 As Single) As 原生播放器结果
+    End Function
+    ' 光标锚定缩放：当前缩放 × 倍数，并保持锚点下的画面内容不动。
+    ' 锚点按客户区归一化到 [0,1]，宿主直接传鼠标位置比例。
+    ' 属**追加导出**：更早的内核没有该符号。这里刻意**不做静态导入** —— 静态导入会在
+    ' 载入旧内核时直接抛 EntryPointNotFoundException，连视频播放都起不来。改为声明一个
+    ' 委托并按需解析（见 取光标锚定缩放委托），缺失时返回 Nothing 由调用方回退。
+    Friend Delegate Function 光标锚定缩放委托(播放器 As 播放器原生句柄,
+                                              倍数 As Single, 锚点水平 As Single,
+                                              锚点垂直 As Single,
+                                              结果缩放指针 As IntPtr) As 原生播放器结果
+
+    ' Module 的成员隐式 Shared，再写 Shared 会被拒（BC30593 / BC30433）。
+    Private 光标锚定缩放缓存 As 光标锚定缩放委托
+    Private 光标锚定缩放已查询 As Boolean
+
+    ''' <summary>解析 FFF3FP_ZoomViewAt；旧内核没有该导出时返回 Nothing。</summary>
+    Friend Function 取光标锚定缩放委托() As 光标锚定缩放委托
+        If 光标锚定缩放已查询 Then Return 光标锚定缩放缓存
+        光标锚定缩放已查询 = True
+        Try
+            Dim 地址 = NativeLibrary.GetExport(NativeLibrary.Load(动态库名称), "FFF3FP_ZoomViewAt")
+            光标锚定缩放缓存 = Marshal.GetDelegateForFunctionPointer(Of 光标锚定缩放委托)(地址)
+        Catch ex As Exception
+            光标锚定缩放缓存 = Nothing
+        End Try
+        Return 光标锚定缩放缓存
     End Function
     ' 视口封顶：非 0 时适配盒不超过源原生尺寸，于是"缩放"变成绝对的 屏幕:视频 像素比
     ' （缩放=1 即逐像素 1:1，窗口比源大时四周留黑边）。0 = 沿用"铺满窗口"的历史行为。

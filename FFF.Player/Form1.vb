@@ -35,6 +35,7 @@ Public Class Form1
     Private 画面菜单控制器 As 播放器画面菜单控制器
     Private 视角360控制器 As 播放器360视角控制器
     Private 图片浏览控制器 As 播放器图片浏览控制器
+    Private 视图旋转控制器 As 播放器视图旋转控制器
     Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
@@ -148,7 +149,8 @@ Public Class Form1
             窗口布局控制器, AddressOf 播放控制器.安全读取快照,
             Function() 设置.实例对象.取得初始画面尺寸(),
             Function() 播放控制器.当前媒体路径,
-            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI))
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI),
+            Function() 播放控制器.读取原始帧())
         视角360控制器 = New 播放器360视角控制器(
             Me, 画面控件, MCM_标题栏菜单,
             Sub(启用, 水平角度, 垂直角度, 视场角)
@@ -161,11 +163,22 @@ Public Class Form1
                 播放控制器.设置视图变换(缩放, 水平平移, 垂直平移)
             End Sub,
             Sub(方向) 播放相邻项目(方向),
-            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "图片"))
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "图片"),
+            AddressOf 图片光标锚定缩放)
         ' 图片模式通过 Form1 既有的 Handled 抢键机制接管 ←/→，
         ' 视频模式那条"±5 秒跳转"分支不用改一个字。
         AddHandler 方向键快捷键已请求, AddressOf 图片浏览控制器.处理方向键快捷键
         AddHandler 图片浏览控制器.图片模式已变化, AddressOf 图片浏览控制器_图片模式已变化
+        ' 视图旋转：源的自动转正由**内核在打开时**完成，本控制器只做
+        ' 用户侧的手动旋转 + 自动转正开关。图片与视频共用同一套（旋转是视图属性）。
+        视图旋转控制器 = New 播放器视图旋转控制器(
+            MCM_标题栏菜单,
+            Sub(四分一转) 播放控制器.设置视图旋转(四分一转),
+            Function() 播放控制器.当前视图旋转,
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "旋转"),
+            设置.实例对象.自动转正,
+            Sub(值) 设置.实例对象.自动转正 = 值)
+        AddHandler 播放控制器.媒体已打开, AddressOf 视图旋转控制器.媒体已打开
         画面菜单控制器.应用全局字体(设置.实例对象.字体)
         光盘控制器 = New 播放器光盘控制器(Me, 画面控件, 播放控制器, MCM_标题栏菜单)
         全屏交互控制器 = New 播放器全屏交互控制器(Me, 画面控件,
@@ -363,6 +376,14 @@ Public Class Form1
         RemoveHandler 方向键快捷键已请求, AddressOf 图片浏览控制器.处理方向键快捷键
         If 图片浏览控制器 IsNot Nothing Then RemoveHandler 图片浏览控制器.图片模式已变化, AddressOf 图片浏览控制器_图片模式已变化
         图片浏览控制器?.Dispose()
+        If 视图旋转控制器 IsNot Nothing Then
+            If 播放控制器 IsNot Nothing Then
+                ' 与安装处同一个方法组；显式委托实例避免 BC42328 的宽松转换歧义。
+                RemoveHandler 播放控制器.媒体已打开,
+                    New EventHandler(Of 播放器媒体事件参数)(AddressOf 视图旋转控制器.媒体已打开)
+            End If
+            视图旋转控制器.Dispose()
+        End If
         光盘控制器?.Dispose()
         画面菜单控制器?.Dispose()
         窗口布局控制器?.释放()
@@ -397,6 +418,15 @@ Public Class Form1
     Private Sub 图片浏览控制器_图片模式已变化(sender As Object, e As EventArgs)
         界面呈现器?.设置图片模式(图片浏览控制器.图片模式已启用)
     End Sub
+
+    ''' <summary>光标锚定缩放：交给 3FP 内核执行，它在拟合盒与平移映射上信息完整，
+    ''' 能保证锚点下的内容不动；宿主自己改缩放只能绕画面中心放大，光标处会漂走。
+    ''' 旧内核没有 FFF3FP_ZoomViewAt 时返回 False，控制器回退到旧行为。</summary>
+    Private Function 图片光标锚定缩放(倍数 As Single, 锚点水平 As Single, 锚点垂直 As Single,
+                                       ByRef 结果缩放 As Single) As Boolean
+        If 播放控制器 Is Nothing Then Return False
+        Return 播放控制器.光标锚定缩放(倍数, 锚点水平, 锚点垂直, 结果缩放)
+    End Function
 
     Private Sub MB_打开文件_Click(sender As Object, e As EventArgs) Handles MB_打开文件.Click
         If 正在关闭 Then Return
@@ -828,6 +858,11 @@ Public Class Form1
                 播放控制器.切换静音()
                 信息图层呈现器?.显示操作信息(If(播放控制器.静音,
                     "已静音", $"音量 {界面呈现器.音量百分比}%"), &HFFF0D35DUI, "音量")
+            Case Keys.R
+                ' 手动旋转：R = 顺时针 90°，Shift+R = 逆时针 90°（Shift 含在 keyData 里）。
+                ' 源的自动转正由内核在打开时套用，这里是在其之上再做用户调整。
+                If 视图旋转控制器 Is Nothing Then Return MyBase.ProcessCmdKey(msg, keyData)
+                视图旋转控制器.旋转(顺时针:=(keyData And Keys.Shift) <> Keys.Shift)
             Case Else
                 Return MyBase.ProcessCmdKey(msg, keyData)
         End Select

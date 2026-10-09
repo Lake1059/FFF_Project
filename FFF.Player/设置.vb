@@ -58,6 +58,12 @@ Public Class 设置
     Public Property 渲染封面图毛玻璃背景 As Boolean = True
     Public Property 渲染封面图 As Boolean = True
 
+    ' 按源的旋转信息自动转正（EXIF / 容器 rotate / display matrix），图片与视频通用。
+    ' 默认 True：手机竖拍照片与旋转过的视频本该以正确方向呈现，这属于"本该如此"，
+    ' 而不是一个需要用户先发现的选项。关掉它纯粹是给"我要看原始像素"的场景留口子。
+    ' 注意：内核在打开时就会套用源旋转；本开关为 False 时由宿主显式归零（见 应用自动转正设置）。
+    Public Property 自动转正 As Boolean = True
+
     Public Property 关联常见视频 As Boolean = False
     Public Property 关联不常见视频 As Boolean = False
     Public Property 关联老旧视频 As Boolean = False

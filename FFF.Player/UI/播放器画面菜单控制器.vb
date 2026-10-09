@@ -28,6 +28,9 @@ Friend NotInheritable Class 播放器画面菜单控制器
     Private ReadOnly 初始画面尺寸提供器 As Func(Of Size)
     Private ReadOnly 当前媒体路径提供器 As Func(Of String)
     Private ReadOnly 操作提示 As Action(Of String)
+    ' 截图的帧来源。优先用内核的离屏回读（不受遮挡/最小化影响、能带 HDR 精度）；
+    ' 返回 Nothing 时（旧内核）回落到屏幕抓取。
+    Private ReadOnly 原始帧提供器 As Func(Of Bitmap)
     Private 已释放 As Boolean
 
     Friend Sub New(宿主窗口值 As Form,
@@ -39,7 +42,8 @@ Friend NotInheritable Class 播放器画面菜单控制器
                    快照提供器值 As Func(Of 播放器快照),
                    初始画面尺寸提供器值 As Func(Of Size),
                    当前媒体路径提供器值 As Func(Of String),
-                   操作提示值 As Action(Of String))
+                   操作提示值 As Action(Of String),
+                   原始帧提供器值 As Func(Of Bitmap))
         ArgumentNullException.ThrowIfNull(宿主窗口值)
         ArgumentNullException.ThrowIfNull(画面控件值)
         ArgumentNullException.ThrowIfNull(标题栏菜单值)
@@ -50,6 +54,7 @@ Friend NotInheritable Class 播放器画面菜单控制器
         ArgumentNullException.ThrowIfNull(初始画面尺寸提供器值)
         ArgumentNullException.ThrowIfNull(当前媒体路径提供器值)
         ArgumentNullException.ThrowIfNull(操作提示值)
+        ArgumentNullException.ThrowIfNull(原始帧提供器值)
 
         宿主窗口 = 宿主窗口值
         画面控件 = 画面控件值
@@ -61,6 +66,7 @@ Friend NotInheritable Class 播放器画面菜单控制器
         初始画面尺寸提供器 = 初始画面尺寸提供器值
         当前媒体路径提供器 = 当前媒体路径提供器值
         操作提示 = 操作提示值
+        原始帧提供器 = 原始帧提供器值
 
         挂接菜单()
     End Sub
@@ -149,7 +155,13 @@ Friend NotInheritable Class 播放器画面菜单控制器
         End Try
     End Sub
 
+    ''' <summary>原始画面：优先用内核的离屏回读（真实源分辨率像素，不受遮挡影响）。
+    ''' 旧内核才回落到"屏幕抓取后放大"的历史实现。</summary>
     Private Function 截取原始画面() As Bitmap
+        Dim 离屏 = 尝试读取离屏帧()
+        If 离屏 IsNot Nothing Then Return 离屏
+
+        ' ---- 回落：屏幕抓取 + 放大到源分辨率（旧内核）----
         Dim 快照 = 安全读取快照()
         Dim 原始尺寸 = 取得原始画面尺寸(快照)
         If 原始尺寸.IsEmpty Then Throw New InvalidOperationException("媒体没有可用的视频画面。")
@@ -166,6 +178,17 @@ Friend NotInheritable Class 播放器画面菜单控制器
             End Using
             Return 原始画面
         End Using
+    End Function
+
+    ''' <summary>Try the kernel's off-screen readback. Nothing when unavailable.</summary>
+    Private Function 尝试读取离屏帧() As Bitmap
+        Try
+            Return 原始帧提供器()
+        Catch ex As ObjectDisposedException
+            Return Nothing
+        Catch ex As Exception
+            Return Nothing
+        End Try
     End Function
 
     Private Function 截取实际渲染() As Bitmap
@@ -195,6 +218,23 @@ Friend NotInheritable Class 播放器画面菜单控制器
         Dim 基本名称 = Path.GetFileNameWithoutExtension(媒体路径)
         If String.IsNullOrWhiteSpace(基本名称) Then 基本名称 = "FFF.Player"
         Dim 文件名 = $"{基本名称}_{Date.Now:yyyyMMdd_HHmmss_fff}.png"
+        ' 优先存到媒体所在目录（用户找得到）。⚠ 不用 Environment.CurrentDirectory：
+        ' 从快捷方式/文件关联启动时它可能是 System32，会导致保存失败或写到意外位置。
+        ' 媒体目录不可用时退回"图片"目录，再不行才用当前目录。
+        Try
+            Dim 媒体目录 = Path.GetDirectoryName(媒体路径)
+            If Not String.IsNullOrWhiteSpace(媒体目录) AndAlso Directory.Exists(媒体目录) Then
+                Return Path.Combine(媒体目录, 文件名)
+            End If
+        Catch ex As Exception
+        End Try
+        Try
+            Dim 图片目录 = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures)
+            If Not String.IsNullOrWhiteSpace(图片目录) AndAlso Directory.Exists(图片目录) Then
+                Return Path.Combine(图片目录, 文件名)
+            End If
+        Catch ex As Exception
+        End Try
         Return Path.Combine(Environment.CurrentDirectory, 文件名)
     End Function
 

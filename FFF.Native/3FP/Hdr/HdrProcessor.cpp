@@ -233,6 +233,23 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         }
     }
 
+    // HDR Vivid carries no transfer-function of its own: `frame->color_trc` is
+    // AVCOL_TRC_UNSPECIFIED on real Vivid streams (verified with ffprobe on the
+    // FATE Vivid and HDR10+ vectors -- stream-level color_transfer is populated,
+    // frame-level color_trc is not). The baseline is therefore taken from the
+    // stream-level classification that ConfigureStream() stored in streamState_
+    // (for the FATE Vivid vector that is Hlg(3), which is correct).
+    //
+    // Deliberately read a single scalar (`format`) rather than the accumulating
+    // `compatibility` bit set. `compatibility` is OR-ed in several places (e.g.
+    // ClassifyDolbyVision sets the Hlg bit for DV profile 7 / BL compat id 4) and
+    // `next` inherits it from streamState_, so testing the Hlg *bit* here could
+    // pin a genuinely PQ-baseline stream to the HLG branch. `format` is assigned,
+    // never OR-ed, so it cannot go sticky.
+    //
+    // Must be captured BEFORE the Vivid branch below re-labels next.format.
+    const bool vividBaselineIsHlg = streamState_.format == FFF3FPHdrFormat::Hlg;
+
     if (const auto* vividData = av_frame_get_side_data(frame, AV_FRAME_DATA_DYNAMIC_HDR_VIVID);
         vividData != nullptr && vividData->size >= sizeof(AVDynamicHDRVivid)) {
         const auto* vivid = reinterpret_cast<const AVDynamicHDRVivid*>(vividData->data);
@@ -242,10 +259,25 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         next.processingPath = FFF3FPHdrProcessingPath::HdrVividDynamic;
         next.dynamicMetadata = true;
         if (vivid->num_windows > 0) {
-            const auto peak = ValidPeak(av_q2d(vivid->params[0].maximum_maxrgb) * 10000.0);
-            if (peak > 0.0f) {
-                next.sourcePeakNits = peak;
-                dynamicSourcePeak = true;
+            // `maximum_maxrgb` is a maxRGB statistic normalised into [0,1] on a
+            // 1/4095 grid; the FFmpeg header documents no unit for it. The
+            // absolute-domain reading below (x10000) is only self-consistent for
+            // the PQ baseline, where PQ EOTF(1.0) == 10000 cd/m2 and the value sits
+            // near full code. It is NOT valid for an HLG baseline, which is
+            // relative/scene-referred: a full-code HLG signal means "1000 cd/m2 on
+            // the nominal BT.2100 reference display", not 10000. Applying the
+            // absolute reading there inflated sourcePeakNits by ~10x and, together
+            // with the transfer-function mix-up, drove highlight blow-out.
+            //
+            // HLG baseline therefore keeps the relative-domain reference peak. The
+            // pre-Vivid HLG path already set exactly this value (see the HLG branch
+            // above, sourcePeakNits = 1000.0f); we simply stop overwriting it.
+            if (!vividBaselineIsHlg) {
+                const auto peak = ValidPeak(av_q2d(vivid->params[0].maximum_maxrgb) * 10000.0);
+                if (peak > 0.0f) {
+                    next.sourcePeakNits = peak;
+                    dynamicSourcePeak = true;
+                }
             }
         }
     } else if (const auto* doviData = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
@@ -448,7 +480,7 @@ const char* HdrProcessor::ProcessingPathName(const FFF3FPHdrProcessingPath path)
     case FFF3FPHdrProcessingPath::DolbyVisionHdr10Fallback: return "DolbyVisionFallback";
     case FFF3FPHdrProcessingPath::ExternalDynamic: return "ExternalDynamic";
     case FFF3FPHdrProcessingPath::DolbyVisionFelFallback: return "DolbyVisionFELFallback";
-    case FFF3FPHdrProcessingPath::HdrVividDynamic: return "HDR Vivid metadata-guided display mapping";
+    case FFF3FPHdrProcessingPath::HdrVividDynamic: return "HDR Vivid dynamic peak mapping";
     default: return "None";
     }
 }
