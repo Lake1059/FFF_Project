@@ -113,10 +113,21 @@ UI 应把自己的 `SynchronizationContext` 写入 `播放器配置.事件同步
 再次调用 `设置输出窗口`（允许传入同一个 HWND）会复用 flip-model 交换链并触发重绘；呈现时
 按需 Resize 或重配色彩空间，播放状态和位置不会改变。同一 HWND 不得并存两个 flip-model 链。
 
-`FFF.Player.Tests` 目前只保留可编译的空项目骨架，不包含测试项。后续新增测试时，直接在该项目中添加测试源文件，并从入口组织需要的测试命令。
+`FFF.Player.Tests` 现在带一个真实测试模块（内嵌歌词提取的回归用例），由入口按 `--lyrics-kit-regression`
+分派执行；新增测试继续在该项目里加源文件并从入口组织命令。
 
 `tools/构建3FP.ps1` 优先使用环境中的工具，其次使用正式版 Visual Studio，最后回退到预览版，
 并准备 libass、构建 Native、Player 和测试项目；
+
+宿主 `FFF.Player` 用 hint path 引用同级仓库 LakeUI（`..\..\LakeUI\LakeUI\bin\Debug\…\LakeUI.dll`）。
+LakeUI 不在本仓库内、也不附带产物，所以全新机器上必须先把它编出来，否则宿主会以几百条
+`未定义类型“LakeUI.*”` 失败，而那些错误一个字都不会提到真正的原因：
+
+```powershell
+dotnet build ..\LakeUI\LakeUI\LakeUI.vbproj -c Debug
+```
+
+构建脚本已加前置检查：找不到该 DLL 时直接点名这条命令，而不是让编译器刷屏。
 FFmpeg 依赖由 `tools/准备FFmpeg.ps1` 固定到同一 commit。运行时需要 `avcodec`、`avformat`、`avutil`、
 `swresample`、`swscale`、`avfilter`、`FFF.Native` 以及 libass。正式发布可使用
 `tools/发布3FP单文件.ps1`：FFF.Native 和 libass 运行库会进入单文件，FFmpeg DLL 仍保持外置，

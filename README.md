@@ -4,6 +4,8 @@
 
 要使用本项目中的任何产品，你需要下载 [Shared FFmpeg](https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip) 而不是完全独立的三 EXE 版本，因为这些产品实际上需要的是 `avcodec` 等那一堆 dll 而不是 ffmpeg 的 exe，并与产品程序放在同目录，当然更推荐加入环境变量。如果有实力的话也可以自己单独编译那些 dll，在 `tools` 目录已经有全自动构建脚本，需要环境变量中的 C++ 编译工具，另外这些 dll 必须配套不得混用，擅自混用导致的任何后果均自行承担。
 
+编译 `FFF.Native` 还需要 `tools` 里的准备脚本把外部依赖落到被 `.gitignore` 排除的 `third_party`：`准备FFmpeg.ps1`、`准备Libass.ps1`，以及 IAMF 空间音频用的 `准备Libiamf.ps1`（它构建并暂存 `iamf.lib`/`oar.lib` 与头文件；这两个库必须按动态 CRT `/MD` 构建，否则链接时报 `__imp_realloc` 等未解析符号）。没有跑过 `准备Libiamf.ps1` 时，`FFF.Native.vcxproj` 会因为找不到 `iamf.lib` 而链接失败。
+
 这些产品的收费政策均和 3FUI 一样：所有生产力功能免费 + 个性化功能收费，无验证无广告。每个产品都需要单独购买，解锁授权不互通，与 3FUI 也不互通，而且价格不低，毕竟咱不能真做慈善来了。
 
 

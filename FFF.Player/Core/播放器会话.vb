@@ -33,11 +33,32 @@ Public NotInheritable Class 播放器会话
     Private 已释放 As Integer
     Private 事件排程中 As Integer
 
+    ''' <summary>本宿主构建时对应的 3FP 原生 API 版本。
+    ''' **改动时三处必须同步**（发布 target `VerifyPlayerApiVersion` 会强制校验）：
+    '''   ① 内核 FFF.Native/3FP/Api/PlayerApi.cpp 的 PlayerApiVersion
+    '''   ② 本文件的 期望API版本（下面两处用法）
+    '''   ③ FFF.Player.vbproj 的 &lt;PlayerApiVersion&gt;
+    ''' </summary>
+    Friend Const 期望API版本 As UInteger = 18UI
+
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
         配置.验证()
-        ' 配置结构与内核按 API 版本严格匹配。
-        If 播放器原生接口.FFF3FP_GetApiVersion() <> 17UI Then Throw New InvalidOperationException("FFF.Native 的 3FP API 版本不兼容。")
+        ' 配置结构与内核按 API 版本严格匹配：内核既校验 version == PlayerApiVersion，
+        ' 也校验 size >= sizeof(FFF3FPConfiguration)，两者任一不符都会让
+        ' FFF3FP_Create 返回 InvalidArgument。这里在创建前先拦住，避免旧 DLL 被静默使用。
+        '
+        ' 这本质上是**发布期的**问题（打包时必须确保 GUI 与内核同版本），
+        ' 构建阶段已由 VerifyPlayerApiVersion / VerifyPlayerConfigSize 拦截；
+        ' 此处只作为最后一道防线，并把"哪个版本"讲清楚，便于用户与开发者判断。
+        ' ⚠ VSR、视图旋转、光标锚定缩放**不在**这个合同里：它们是追加的导出，
+        ' 旧宿主仍可正常工作（宿主侧用动态解析探测）。
+        Dim 内核API版本 = 播放器原生接口.FFF3FP_GetApiVersion()
+        If 内核API版本 <> 期望API版本 Then
+            Throw New InvalidOperationException(
+                $"FFF.Native 的 3FP API 版本不匹配：内核为 {内核API版本}，本程序需要 {期望API版本}。" &
+                "请确认 FFF.Native.dll 与播放器来自同一次发布（两者必须一起替换）。")
+        End If
         同步上下文 = 配置.事件同步上下文
         Dim 状态 = New 回调状态()
         Dim 回调句柄 = GCHandle.Alloc(状态)
@@ -46,7 +67,7 @@ Public NotInheritable Class 播放器会话
             If Not String.IsNullOrEmpty(配置.音频端点标识) Then 端点指针 = Marshal.StringToCoTaskMemUTF8(配置.音频端点标识)
             ' -1 按窗口所在显示器选卡；0 是合法适配器索引。
             Dim 原生配置 As New 原生播放器配置 With {
-                .大小 = 原生播放器配置大小, .版本 = 17UI,
+                .大小 = 原生播放器配置大小, .版本 = 期望API版本,
                 .输出窗口 = 配置.输出窗口句柄, .解码器 = CUInt(配置.解码器),
                 .色彩模式 = CUInt(配置.色彩模式), .SDR峰值 = 配置.SDR峰值尼特,
                 .HDR峰值 = 配置.HDR峰值尼特, .SDR纸白 = 配置.SDR纸白尼特,
@@ -55,7 +76,15 @@ Public NotInheritable Class 播放器会话
                 .回调上下文 = GCHandle.ToIntPtr(回调句柄),
                 .视频缩放质量 = CUInt(配置.缩放质量),
                 .强制HDR输出 = If(配置.强制HDR输出, 1UI, 0UI),
-                .首选适配器索引 = -1
+                .首选适配器索引 = -1,
+                .SDRscRGB模式 = 配置.SDRscRGB模式,
+                .自适应CPU预缩放 = 0UI,
+                .自适应CPU预缩放丢帧百分比 = 20UI,
+                .自适应解码线程 = 0UI,
+                .软解最小线程数 = 4UI,
+                .软解最大线程数 = 32UI,
+                .解码升档丢帧百分比 = 10UI,
+                .解码降档丢帧百分比 = 2UI
             }
             Dim 原生指针 = IntPtr.Zero
             Dim 结果 = 播放器原生接口.FFF3FP_Create(原生配置, 原生指针)
@@ -209,6 +238,56 @@ Public NotInheritable Class 播放器会话
                                                 水平角度, 垂直角度, 视场角))
     End Sub
 
+    ''' <summary>视图旋转（四分一转，顺时针 0..3）。内核不支持时静默忽略（旧内核回落）。</summary>
+    Public Sub 设置视图旋转(四分一转 As UInteger)
+        If 四分一转 > 3UI Then Throw New ArgumentOutOfRangeException(NameOf(四分一转))
+        If Not 播放器原生接口.设置视图旋转(取得句柄(), 四分一转) Then
+            ' 旧内核没有该导出：不抛异常，让宿主按"旋转不可用"处理即可。
+            Return
+        End If
+        本机旋转 = 四分一转
+    End Sub
+
+    ''' <summary>当前视图旋转（四分一转，顺时针）。内核不支持旋转时恒为 0。</summary>
+    Public Property 本机旋转 As UInteger = 0UI
+
+    ' ------------------------------------------------------------------
+    ' 自动转正（默认启用，由内核在打开时完成）
+    ' ------------------------------------------------------------------
+    ' 内核在**打开时就**读容器的旋转信息并调用 SetViewRotation，
+    ' 图片与视频一视同仁（见 PlayerSession.cpp 的 SourceRotationQuarterTurns）。
+    ' ⇒ 默认路径下宿主**不需要做任何事**。这正是"默认启用"最稳的落地方式：
+    '   不依赖宿主记得调用，也不会出现"打开流程改了、旋转就忘了"的回归。
+    '
+    ' 宿主这一层只负责：记住用户的开关偏好，并提供手动旋转（R / Shift+R）。
+    '
+    ' ⚠ 语义换算值得记一笔：EXIF Orientation=6 与容器 rotate=90 在**内核里都报 3**，
+    '   因为 av_display_rotation_get 给的是 -90°，归一化到 [0,360) 后是 270°。
+    '   内核报的是"要施加的顺时针四分一转数"，与 EXIF/rotate 标签的方向定义相反
+    '   （内核值 = 4 − 标签校正角/90）。宿主**直接用内核的值**即可，
+    '   不要按标签自行换算，否则会转反 180°。
+
+    Private 自动转正偏好 As Boolean = True
+
+    ''' <summary>自动转正是否启用（默认 True）。关闭会把当前视图旋转归零；
+    ''' 重新启用后由下一次打开媒体重新套用（内核在打开时读取源旋转）。</summary>
+    Public Property 自动转正已启用 As Boolean
+        Get
+            Return 自动转正偏好
+        End Get
+        Set(值 As Boolean)
+            自动转正偏好 = 值
+            If Not 值 Then 设置视图旋转(0UI)
+        End Set
+    End Property
+
+    ''' <summary>手动旋转：R = 顺时针 90°，Shift+R = 逆时针 90°。
+    ''' 手动值覆盖自动值，直到用户按 R 转满一圈或重新打开媒体。</summary>
+    Public Sub 手动旋转(顺时针 As Boolean)
+        Dim 当前 = 本机旋转
+        设置视图旋转(If(顺时针, (当前 + 1UI) Mod 4UI, (当前 + 3UI) Mod 4UI))
+    End Sub
+
     ''' <summary>图片模式：设置缩放与平移。缩放=1 表示适应窗口。</summary>
     Public Sub 设置视图变换(缩放 As Single, 水平平移 As Single, 垂直平移 As Single)
         If Not Single.IsFinite(缩放) OrElse 缩放 <= 0.0F OrElse
@@ -217,6 +296,30 @@ Public NotInheritable Class 播放器会话
         End If
         检查结果(播放器原生接口.FFF3FP_SetViewTransform(取得句柄(), 缩放, 水平平移, 垂直平移))
     End Sub
+
+    ''' <summary>图片模式：以光标为锚做一次缩放步进（放大 1.25 / 缩小 0.8）。
+    ''' 锚点按客户区归一化到 [0,1]，由内核保持该点下的画面内容不动。
+    ''' 成功时 结果缩放 返回缩放后的绝对值，便于宿主同步本地缓存。
+    ''' 返回 False 表示当前内核没有该导出，调用方应回退。</summary>
+    Public Function 光标锚定缩放(倍数 As Single, 锚点水平 As Single, 锚点垂直 As Single,
+                                  ByRef 结果缩放 As Single) As Boolean
+        If Not Single.IsFinite(倍数) OrElse 倍数 <= 0.0F OrElse
+            Not Single.IsFinite(锚点水平) OrElse Not Single.IsFinite(锚点垂直) Then
+            Throw New ArgumentOutOfRangeException(NameOf(倍数))
+        End If
+        Dim 调用 = 播放器原生接口.取光标锚定缩放委托()
+        If 调用 Is Nothing Then Return False
+        ' 把结果缩放的接收位置钉住，避免 GC 在调用期间移动它。
+        Dim 缓冲(0) As Single
+        Dim 句柄 = GCHandle.Alloc(缓冲, GCHandleType.Pinned)
+        Try
+            检查结果(调用(取得句柄(), 倍数, 锚点水平, 锚点垂直, 句柄.AddrOfPinnedObject()))
+            结果缩放 = 缓冲(0)
+        Finally
+            句柄.Free()
+        End Try
+        Return True
+    End Function
 
     ' 视口封顶开关（API 16 新增导出）：开启后适配盒不超过源原生尺寸，缩放值就是绝对的
     ' 屏幕:视频 像素比。内核把这一偏好存在渲染器里，设备重建后不丢，所以不必在恢复路径重发。
@@ -504,6 +607,38 @@ Public NotInheritable Class 播放器会话
     Public Sub 光盘导航(命令 As 光盘命令, Optional 参数 As Integer = 0, Optional Y As Integer = 0)
         检查结果(播放器原生接口.FFF3FP_DiscNavigate(取得句柄(), CInt(命令), 参数, Y))
     End Sub
+
+    ''' <summary>离屏回读一帧（截图用）。内核不支持或没有画面时返回 Nothing。
+    ''' 8 位返回 Format32bppArgb 位图；16 位返回 Format64bppArgb（线性 scRGB 半浮点，
+    ''' 1.0 = 80 nits），由调用方决定如何映射/保存。
+    ''' ⚠ 与屏幕抓取不同：这不依赖窗口可见，被遮挡或最小化时同样正确。</summary>
+    Public Function 读取原始帧() As Bitmap
+        If Not 播放器原生接口.支持帧回读 Then Return Nothing
+        Dim 宽 As UInteger = 0UI, 高 As UInteger = 0UI
+        If Not 播放器原生接口.取帧尺寸(取得句柄(), 宽, 高) Then Return Nothing
+        ' 先按 8 位问；若交换链是 16 位（HDR/广色域 SDR），改按 16 位取，避免量化丢精度。
+        Dim 位深 As UInteger = If(当前快照.视频输出位深度 >= 16, 16UI, 8UI)
+        Dim 每像素 = If(位深 = 16UI, 8UI, 4UI)
+        Dim 字节数 = CULng(宽) * 高 * 每像素
+        If 字节数 = 0UL OrElse 字节数 > 268435456UL Then Return Nothing   ' 上限 256 MB
+        Dim 缓冲(CInt(字节数) - 1) As Byte
+        Dim 固定 = GCHandle.Alloc(缓冲, GCHandleType.Pinned)
+        Try
+            Dim 实际宽 = 宽, 实际高 = 高, 实际位深 = 位深
+            If Not 播放器原生接口.复制帧(取得句柄(), 固定.AddrOfPinnedObject(),
+                                          CUInt(缓冲.Length), 实际宽, 实际高, 实际位深) Then Return Nothing
+            Dim 像素格式 = If(实际位深 = 16UI, Imaging.PixelFormat.Format64bppArgb,
+                                                Imaging.PixelFormat.Format32bppArgb)
+            Using 临时 As New Bitmap(CInt(实际宽), CInt(实际高),
+                                     CInt(CULng(实际宽) * If(实际位深 = 16UI, 8UI, 4UI)),
+                                     像素格式, 固定.AddrOfPinnedObject())
+                ' Clone 出来，让位图不再依赖这块会被回收的缓冲。
+                Return 临时.Clone(New Rectangle(0, 0, CInt(实际宽), CInt(实际高)), 像素格式)
+            End Using
+        Finally
+            固定.Free()
+        End Try
+    End Function
 
     Public Function 读取SDR合成帧(Optional 仅光盘层 As Boolean = False) As Bitmap
         Dim 宽, 高 As UInteger

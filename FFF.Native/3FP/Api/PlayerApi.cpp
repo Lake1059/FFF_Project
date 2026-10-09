@@ -11,6 +11,7 @@
 
 namespace {
 using PlayerMediaText::CopyUtf8;
+// Configuration layout and version must match the public header exactly.
 // Bumped 14 -> 15 because FFF3FPConfiguration gained the preferredAdapterIndex
 // field. FFF3FP_Create rejects a mismatched version outright, so
 // every consumer of this header MUST be rebuilt and bumped in lockstep.
@@ -19,7 +20,20 @@ using PlayerMediaText::CopyUtf8;
 // diagnostic fields at its tail. GetSnapshot rejects a caller whose declared
 // size is smaller than sizeof(FFF3FPSnapshot), so every consumer of the
 // snapshot struct must be rebuilt in lockstep with this bump.
-constexpr std::uint32_t PlayerApiVersion = 17;
+// Bumped 17 -> 18 because FFF3FPConfiguration gained adaptiveDownscaleBeforeUpload,
+// adaptiveDownscaleDropPercent, adaptiveDecoderThreads, minSoftwareDecoderThreads,
+// maxSoftwareDecoderThreads, decoderGrowDropPercent and decoderShrinkDropPercent,
+// and FFF3FPSnapshot gained iamfActive / iamfChannels / iamfSoundSystem,
+// videoUpload100ns and iamfContentChannels at its tail.
+// FFF3FP_Create rejects both a struct smaller than sizeof(FFF3FPConfiguration)
+// and a version != PlayerApiVersion, so a host built against an older header now
+// fails with InvalidArgument instead of reading past the end of its own struct --
+// rebuild against this header. That rejection is the contract working, not a
+// defect, and it is why every probe had to be recompiled after this change.
+// VSR and view rotation are deliberately NOT part of this contract: they are
+// appended exports, so a host that knows only the current version keeps working
+// unchanged.
+constexpr std::uint32_t PlayerApiVersion = 18;
 
 // Process-wide native log sink, installed through FFF3FP_SetLogCallback.
 std::atomic<FFF3FPLogCallback> g_logSink{nullptr};
@@ -55,12 +69,15 @@ FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept {
         ? FFFResult::Success : FFFResult::NotSupported;
 }
 
+// ---- Process-wide native log sink (public surface: FFF3FP_SetLogCallback) ----
 void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context) noexcept {
     g_logContext.store(context, std::memory_order_release);
     g_logSink.store(callback, std::memory_order_release);
 }
 
-// Internal C++ sink; not part of the DLL export surface.
+// Internal sink invoker for kernel log lines. Deliberately a plain C++ symbol and not
+// FFF3FP_API: it stays out of the export table (the surface the ABI checks walk), and
+// in-module callers declare it locally (PlayerSession::Fail, PlayerVideoRenderer).
 void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept {
     if (utf8Line == nullptr) return;
     const auto sink = g_logSink.load(std::memory_order_acquire);
@@ -136,6 +153,11 @@ FFFResult FFF3FP_SetViewTransform(const FFF3FPHandle player, const float zoom,
     const float panX, const float panY) noexcept {
     return player ? static_cast<PlayerSession*>(player)->SetViewTransform(zoom, panX, panY)
         : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_ZoomViewAt(const FFF3FPHandle player, const float factor,
+    const float anchorX, const float anchorY, float* const resultingZoom) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->ZoomViewAt(factor, anchorX, anchorY,
+        resultingZoom) : FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_SetFitLimitToNative(const FFF3FPHandle player,
     const std::uint32_t enable) noexcept {
@@ -256,3 +278,61 @@ FFFResult FFF3FP_GetRenderTargetInfo(const FFF3FPHandle player,
         : FFFResult::InvalidArgument;
 }
 void FFF3FP_Destroy(const FFF3FPHandle player) noexcept { delete static_cast<PlayerSession*>(player); }
+
+// RTX Video Super Resolution. Appended after the v16 surface on purpose: these
+// are additive entry points, so PlayerApiVersion stays at 16 and an existing
+// host keeps working against this DLL without a rebuild.
+FFFResult FFF3FP_SetVideoSuperResolution(const FFF3FPHandle player,
+    const FFF3FPVideoSuperResolution mode) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetVideoSuperResolution(mode)
+        : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_GetVideoSuperResolutionStatus(const FFF3FPHandle player,
+    FFF3FPVideoSuperResolutionStatus* status) noexcept {
+    return player && status
+        ? static_cast<PlayerSession*>(player)->GetVideoSuperResolutionStatus(*status)
+        : FFFResult::InvalidArgument;
+}
+
+FFFResult FFF3FP_SetViewRotation(const FFF3FPHandle player,
+    const std::uint32_t quarterTurnsClockwise) noexcept {
+    return player
+        ? static_cast<PlayerSession*>(player)->SetViewRotation(quarterTurnsClockwise)
+        : FFFResult::InvalidArgument;
+}
+
+FFFResult FFF3FP_GetViewRotation(const FFF3FPHandle player,
+    std::uint32_t* quarterTurnsClockwise) noexcept {
+    if (player == nullptr || quarterTurnsClockwise == nullptr)
+        return FFFResult::InvalidArgument;
+    *quarterTurnsClockwise = static_cast<PlayerSession*>(player)->ViewRotation();
+    return FFFResult::Success;
+}
+
+// Screenshot readback. Appended after the v16 surface, so PlayerApiVersion is
+// unchanged; hosts resolve this dynamically.
+FFFResult FFF3FP_CopyFrame(const FFF3FPHandle player, void* pixels,
+    const std::uint32_t capacity, std::uint32_t* width, std::uint32_t* height,
+    const FFF3FPCopyFrameLayout layout, const FFF3FPCopyFrameFormat format) noexcept {
+    if (player == nullptr || width == nullptr || height == nullptr)
+        return FFFResult::InvalidArgument;
+    const auto layoutValue = static_cast<std::uint32_t>(layout);
+    const auto formatValue = static_cast<std::uint32_t>(format);
+    if (layoutValue > 1 || formatValue > 1) return FFFResult::InvalidArgument;
+    std::uint32_t frameWidth = 0;
+    std::uint32_t frameHeight = 0;
+    const auto result = static_cast<PlayerSession*>(player)->CopyFrame(pixels, capacity,
+        frameWidth, frameHeight, layoutValue, formatValue);
+    // Publish the size on every path: the two-call contract needs it even when the
+    // caller's buffer was too small (that is how it learns what to allocate).
+    *width = frameWidth;
+    *height = frameHeight;
+    return result;
+}
+
+FFFResult FFF3FP_GetLastCopyFrameBitDepth(const FFF3FPHandle player,
+    std::uint32_t* bitDepth) noexcept {
+    if (player == nullptr || bitDepth == nullptr) return FFFResult::InvalidArgument;
+    *bitDepth = static_cast<PlayerSession*>(player)->LastCopyFrameBitDepth();
+    return FFFResult::Success;
+}

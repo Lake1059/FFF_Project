@@ -4,6 +4,7 @@
 #include "3FP/Render/SdrShaderBytecode.h"
 #include "3FP/Render/ColorExtension.h"
 #include "3FP/Hdr/HdrToneCurve.h"
+#include "3FP/Render/NvidiaVideoExtensions.h"
 
 extern "C" {
 #include <libavcodec/codec_par.h>
@@ -15,6 +16,7 @@ extern "C" {
 #include <libavutil/pixfmt.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/rational.h>
+#include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
 
@@ -442,9 +444,9 @@ cbuffer Settings : register(b0) {
     float SourceWidth; float SourceHeight; float OutputWidth; float OutputHeight;
     uint InputLayout; float SampleScale; float YOffset; float YScale;
     float COffset; float CScale; float Kr; float Kb;
-    float2 ChromaOffset; float2 Padding;
+    float2 ChromaOffset; float2 ImageMode;
     uint Projection360; float ViewYaw; float ViewPitch; float ViewFovY;
-    float ViewAspect; float3 ViewPadding;
+    float ViewAspect; float ViewRotation; float3 ViewPadding;
 };
 #ifdef FFF_SDR_LAYOUT
 // Compile-time specialization only: sampling and color formulas stay identical.
@@ -704,10 +706,19 @@ float4 SampleVideo(Texture2D<float4> sourceTexture,float2 uv) {
     const uint2 dimensions=uint2(width,height);
     if(abs(OutputWidth-float(width))<0.01&&abs(OutputHeight-float(height))<0.01)
         return sourceTexture.SampleLevel(PointSampler,uv,0);
+    // Still images enlarged: each source pixel becomes a square block of output
+    // pixels, so the picture keeps its own pixel grid and reads as a crisp
+    // magnification instead of a smeared interpolation. ImageMode.x carries the flag.
+    // Sampling is done with an explicit texel index rather than a point sampler so
+    // the block edges land exactly on the source texel centres at any zoom factor.
+    if(ImageMode.x>0.5) {
+        const int2 texel=int2(floor(uv*float2(dimensions)));
+        return sourceTexture.Load(int3(clamp(texel,int2(0,0),int2(dimensions)-1),0));
+    }
     return SampleLanczos3(sourceTexture,uv,dimensions);
 }
 float3 ReadSource(float2 uv) {
-    if(InputLayout==0)return SampleVideo(Source,uv).rgb;
+    if(InputLayout==0||InputLayout==3)return SampleVideo(Source,uv).rgb;
     float2 chromaUv=uv+ChromaOffset;
     float y=SampleVideo(Source,uv).r*SampleScale;
     float2 chroma=InputLayout==1
@@ -724,7 +735,7 @@ float3 ReadSource(float2 uv) {
         y+(2.0-2.0*Kb)*chroma.x);
 }
 float3 ReadSourceLinear(float2 uv) {
-    if(InputLayout==0)return Source.Sample(LinearSampler,uv).rgb;
+    if(InputLayout==0||InputLayout==3)return Source.Sample(LinearSampler,uv).rgb;
     float2 chromaUv=uv+ChromaOffset;
     float y=Source.Sample(LinearSampler,uv).r*SampleScale;
     float2 chroma=InputLayout==1
@@ -754,7 +765,7 @@ float3 ReadCoverBackdrop(float2 uv) {
     return ReadSourceLinear(CoverFillUv(uv));
 }
 float3 ReadSourcePanorama(float2 uv) {
-    if(InputLayout==0)return SamplePanorama(Source,uv).rgb;
+    if(InputLayout==0||InputLayout==3)return SamplePanorama(Source,uv).rgb;
     float2 chromaUv=uv+ChromaOffset;
     float y=SamplePanorama(Source,uv).r*SampleScale;
     float2 chroma=InputLayout==1
@@ -793,16 +804,45 @@ float2 EquirectangularUv(float2 uv) {
         saturate(0.5-latitude/3.141592653589793));
 }
 float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
-    float3 rgb=Reserved==1?ReadCoverBackdrop(uv):
-        (Projection360!=0?ReadSourcePanorama(EquirectangularUv(uv)):ReadSource(uv));
-    if(ColorMode==1)return float4(rgb,1);
+    // ViewRotation is quarter turns clockwise (0..3), applied by rotating the
+    // sampling coordinate. Rotating the lookup rather than the quad keeps the
+    // destination rect and the chroma layout untouched: every downstream stage
+    // (chroma offsets, 360 projection, tone mapping) still sees a normal 0..1 uv.
+    // The rotated value goes in a local: an HLSL pixel-shader input parameter
+    // cannot be written (inout would turn TEXCOORD0 into an output semantic).
+    float2 sampleUv=uv;
+    if(ViewRotation>0.5){
+        if(ViewRotation<1.5)      sampleUv=float2(1.0-uv.y,uv.x);      // 90 cw
+        else if(ViewRotation<2.5) sampleUv=float2(1.0-uv.x,1.0-uv.y);  // 180
+        else                      sampleUv=float2(uv.y,1.0-uv.x);      // 270 cw
+    }
+    float3 rgb=Reserved==1?ReadCoverBackdrop(sampleUv):
+        (Projection360!=0?ReadSourcePanorama(EquirectangularUv(sampleUv)):ReadSource(sampleUv));    if(ColorMode==1)return float4(rgb,1);
+    // Transfer==3: the source is already linear light (JPEG XR decodes to scRGB, whose
+    // gamma is 1.0 -- see jxrlib JXRGlue.h, "scRGB formats. Gamma is 1.0").
+    // Running the sRGB decode below would both apply the wrong curve and re-clamp the
+    // negatives/super-whites through saturate(), so pass the value through untouched.
+    // The SDR chain below still folds Rec.2020 and scales by PaperWhite, which is the
+    // correct treatment for linear input.
+    if(Transfer==3){
+        float3 alreadyLinear=rgb;
+        if(ColorMode==0){
+            if(Gamut==1)alreadyLinear=ToBt709(To709(alreadyLinear));
+            // No saturate() here on purpose: this is the SDR chain, and its surface is
+            // UNORM -- R10G10B10A2 for sources deeper than 8-bit, B8G8R8A8 for 8-bit
+            // ones (OutputBitDepthForSource never hands SDR a float surface). Neither
+            // can hold >1.0 or <0.0, so let that conversion clamp: the limit stays a
+            // visible property of the surface, not a hidden edit to the source.
+            return float4(alreadyLinear,1);
+        }
+    }
     if(ColorMode==0&&Transfer==0){
         // Rec.2020 is folded into Rec.709 here because the SDR chain cannot hold
         // it. P3 keeps its historical Rec.709 passthrough on this path.
         if(Gamut==1)rgb=ToBt709(To709(ToLinear709(rgb)));
         return float4(rgb,1);
     }
-    float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):ToLinear709(rgb)*PaperWhite);
+    float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):(Transfer==3?rgb:ToLinear709(rgb)*PaperWhite));
     if(ColorMode==2){
         // scRGB swap-chain contract: linear Rec.709 primaries, 1.0 = 80 nits.
         // Tone mapping is delegated to the display via the HDR metadata.
@@ -1031,10 +1071,15 @@ struct ShaderSettings {
     std::uint32_t inputLayout;
     float sampleScale, yOffset, yScale;
     float cOffset, cScale, kr, kb;
-    float chromaOffsetX, chromaOffsetY, padding1, padding2;
+    // imageModeX drives the still-image pixel-block enlargement in SampleVideo;
+    // padding2 stays reserved. Both reuse what the HLSL cbuffer calls ImageMode.
+    float chromaOffsetX, chromaOffsetY, imageModeX, padding2;
     std::uint32_t projection360;
     float viewYaw, viewPitch, viewFovY;
-    float viewAspect, padding3, padding4, padding5;
+    // viewRotation holds quarter turns clockwise (0..3). It reuses what used to be
+    // padding, so the constant buffer layout (and the HLSL cbuffer above) is
+    // unchanged in size -- only the meaning of one slot moved.
+    float viewAspect, viewRotation, padding4, padding5;
 };
 
 struct ScaleShaderSettings {
@@ -1200,6 +1245,31 @@ struct InputDescription {
     std::uint32_t chromaHeightShift = 0;
 };
 
+// Filter identifiers understood by ScalePixelShader's ScaleWeight().
+enum class ScaleKernel : std::uint32_t {
+    Cubic = 0,      // Catmull-Rom cubic, radius 1 -- sharp, cheapest
+    Lanczos3 = 1,   // radius 3 -- sharpest reconstruction, best anti-aliasing
+    Block = 2,      // radius 0.5 -- enlarges by pixel blocks
+};
+
+constexpr std::uint32_t ToShaderFilter(const ScaleKernel kernel) noexcept {
+    return static_cast<std::uint32_t>(kernel);
+}
+
+// Planar/semi-planar CPU uploads switch from Map(WRITE_DISCARD) to
+// UpdateSubresource above this size. Map's write-combined memory is fine for
+// small frames but degrades as rows widen: at 8K the same copy costs 22.27 ms
+// against 15.21 ms, while at 1080p the two are within 6%. 4K is the crossover --
+// it already favours UpdateSubresource (2.886 vs 3.293 ms), so the threshold sits
+// there rather than higher.
+constexpr std::uint32_t DefaultUploadWidthThreshold = 3840;
+constexpr std::uint32_t DefaultUploadHeightThreshold = 2160;
+
+constexpr bool UseDefaultUploadForSize(const std::uint32_t width,
+    const std::uint32_t height) noexcept {
+    return width >= DefaultUploadWidthThreshold && height >= DefaultUploadHeightThreshold;
+}
+
 constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
     switch (format) {
     case AV_PIX_FMT_YUV420P:
@@ -1243,6 +1313,13 @@ constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
         return {2, 12, 65535.0f / 65520.0f, 1, 0};
     case AV_PIX_FMT_P216LE:
         return {2, 16, 1.0f, 1, 0};
+    // Float RGB (JPEG XR decodes to rgbaf16le). This gets its OWN layout value
+    // rather than only a bitDepth, because downstream picks the shader-visible
+    // texture format from `layout`: layout 0 would give R16G16B16A16_UNORM, which
+    // cannot represent the >1.0 and <0.0 components that float RGB legitimately
+    // carries (measured saturation 2.79%-10.73% across the sample set).
+    case AV_PIX_FMT_RGBAF16LE:
+        return {3, 16, 1.0f, 0, 0};
     default:
         return {};
     }
@@ -2030,9 +2107,12 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       pointSampler_(nullptr), panoramaSampler_(nullptr), constants_(nullptr), scaleConstants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
       scaledVideoGeneration_(UINT64_MAX), scaledOutputWidth_(0), scaledOutputHeight_(0),
+      scaledVideoSuperResolution_(false),
       scaledSourceViews_{nullptr, nullptr, nullptr},
       videoDevice_(nullptr), videoContext_(nullptr), videoProcessorEnumerator_(nullptr),
       videoProcessor_(nullptr), videoProcessorRenderTexture_(nullptr),
+      superResolutionTexture_(nullptr), superResolutionViews_{nullptr, nullptr, nullptr},
+      effectiveSourceViews_{nullptr, nullptr, nullptr},
       videoProcessorRenderTarget_(nullptr),
       coverBackdropTexture_(nullptr), coverBackdropView_(nullptr),
       coverBackdropSourceTexture_(nullptr), coverBackdropSourceTarget_(nullptr),
@@ -2094,7 +2174,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       timedTextCompositePixelInvocations_{0, 0, 0, 0},
       hasCachedVideo_(false), videoGeneration_(0), presentedVideoGeneration_(0), countedVideoGeneration_(0),
       presentedVideoFrames_(0), coalescedVideoFrames_(0), swapChainPresents_(0),
-      presentWait100ns_(0), deviceLockWait100ns_(0), softwareConvert100ns_(0),
+      presentWait100ns_(0), deviceLockWait100ns_(0), softwareConvert100ns_(0), upload100ns_(0),
       playbackWorkPending_(0),
       interactiveMove_(false),
       lyricsLayoutEnabled_(false),
@@ -2189,6 +2269,13 @@ FFFResult PlayerVideoRenderer::SetScalingQuality(
     return FFFResult::Success;
 }
 
+FFFResult PlayerVideoRenderer::WarmDevice() noexcept {
+    // Same entry point the first Render uses, so nothing here can put the renderer into
+    // a state Render would not have reached on its own.
+    std::lock_guard deviceLock(deviceMutex_);
+    return EnsureDevice();
+}
+
 FFFResult PlayerVideoRenderer::SetViewTransform(const float zoom,
     const float panX, const float panY) noexcept {
     if (!std::isfinite(zoom) || zoom <= 0.0f || !std::isfinite(panX) || !std::isfinite(panY))
@@ -2203,9 +2290,126 @@ FFFResult PlayerVideoRenderer::SetViewTransform(const float zoom,
     return FFFResult::Success;
 }
 
+void PlayerVideoRenderer::ViewTransform(float& zoom, float& panX, float& panY) const noexcept {
+    // Read back in one place so a host that zooms through ZoomViewAt can keep its own
+    // cached zoom in step without a second API to query the anchor result.
+    zoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_relaxed));
+    panX = std::bit_cast<float>(viewPanXBits_.load(std::memory_order_relaxed));
+    panY = std::bit_cast<float>(viewPanYBits_.load(std::memory_order_relaxed));
+}
+
+FFFResult PlayerVideoRenderer::ZoomViewAt(const float factor,
+    const float anchorX, const float anchorY, float* const resultingZoom) noexcept {
+    if (!std::isfinite(factor) || factor <= 0.0f ||
+        !std::isfinite(anchorX) || !std::isfinite(anchorY) ||
+        anchorX < 0.0f || anchorX > 1.0f || anchorY < 0.0f || anchorY > 1.0f)
+        return FFFResult::InvalidArgument;
+    std::lock_guard deviceLock(deviceMutex_);
+
+    // Keep the point under the cursor fixed while the scale changes. A host doing this
+    // itself would have to reconstruct the fitted box, the zoomed box and the pan
+    // mapping, all of which live here -- and getting the arithmetic subtly wrong is what
+    // makes wheel zoom feel like it drifts. The work is the same computation the draw
+    // path already performs, so the result stays consistent with what is on screen.
+    const auto previousZoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_relaxed));
+    const auto previousPanX = std::bit_cast<float>(viewPanXBits_.load(std::memory_order_relaxed));
+    const auto previousPanY = std::bit_cast<float>(viewPanYBits_.load(std::memory_order_relaxed));
+    const auto nextZoom = std::clamp(previousZoom * factor, 0.05f, 64.0f);
+    if (resultingZoom != nullptr) *resultingZoom = previousZoom;
+    if (nextZoom == previousZoom) return FFFResult::Success;
+
+    // The anchor is expressed in viewport space; convert it to a point in the source
+    // picture using the geometry the last frame was drawn with.
+    const auto swapWidth = std::max(1u, swapWidth_);
+    const auto swapHeight = std::max(1u, swapHeight_);
+    const auto layoutWidth = (viewRotation_.load(std::memory_order_acquire) & 1u) != 0
+        ? sourceHeight_ : sourceWidth_;
+    const auto layoutHeight = (viewRotation_.load(std::memory_order_acquire) & 1u) != 0
+        ? sourceWidth_ : sourceHeight_;
+    if (resultingZoom != nullptr) *resultingZoom = nextZoom;
+    if (layoutWidth == 0 || layoutHeight == 0) return FFFResult::Success;
+    const auto fitted = CalculateVideoDestination(
+        layoutWidth, layoutHeight, swapWidth, swapHeight,
+        sourceLimitedToNativeSize_ || fitLimitToNative_.load(std::memory_order_acquire));
+    const auto fittedWidth = static_cast<float>(fitted.width);
+    const auto fittedHeight = static_cast<float>(fitted.height);
+    if (resultingZoom != nullptr) *resultingZoom = nextZoom;
+    if (fittedWidth <= 0.0f || fittedHeight <= 0.0f) return FFFResult::Success;
+
+    const auto zoomedWidth = std::max(1.0f, fittedWidth * previousZoom);
+    const auto zoomedHeight = std::max(1.0f, fittedHeight * previousZoom);
+    const auto travelX = std::abs(zoomedWidth - fittedWidth);
+    const auto travelY = std::abs(zoomedHeight - fittedHeight);
+    if (travelX < 0.5f && travelY < 0.5f) {
+        // Nothing to anchor against: the box does not move at this size.
+        viewZoomBits_.store(std::bit_cast<float>(nextZoom), std::memory_order_relaxed);
+        if (resultingZoom != nullptr) *resultingZoom = nextZoom;
+        return FFFResult::Success;
+    }
+
+    // Where the anchor sits relative to the box centre *as currently drawn*. The box is
+    // not at its fitted centre once pan is applied, so measuring from the fitted centre
+    // alone misses the existing pan offset and the anchor slides on every step.
+    const auto currentOffsetX = previousPanX * travelX * 0.5f;
+    const auto currentOffsetY = previousPanY * travelY * 0.5f;
+    const auto anchorPixelsX = anchorX * static_cast<float>(swapWidth);
+    const auto anchorPixelsY = anchorY * static_cast<float>(swapHeight);
+    const auto boxCentreX = static_cast<float>(fitted.x) + fittedWidth * 0.5f;
+    const auto boxCentreY = static_cast<float>(fitted.y) + fittedHeight * 0.5f;
+    // Displacement of the cursor from the drawn box centre, in screen pixels.
+    const auto cursorFromDrawnCentreX = anchorPixelsX - (boxCentreX + currentOffsetX);
+    const auto cursorFromDrawnCentreY = anchorPixelsY - (boxCentreY + currentOffsetY);
+
+    // In the drawn box's own coordinates that same point is cursorFromDrawnCentre
+    // regardless of scale, so after scaling the box by nextZoom / previousZoom the
+    // required new pan follows directly.
+    const auto scaleRatio = nextZoom / previousZoom;
+    const auto nextZoomedWidth = std::max(1.0f, fittedWidth * nextZoom);
+    const auto nextZoomedHeight = std::max(1.0f, fittedHeight * nextZoom);
+    const auto nextTravelX = std::abs(nextZoomedWidth - fittedWidth);
+    const auto nextTravelY = std::abs(nextZoomedHeight - fittedHeight);
+
+    auto nextPanX = previousPanX;
+    auto nextPanY = previousPanY;
+    // Solve pan so that centre + pan * nextTravel / 2 lands on the same content point.
+    if (nextTravelX > 0.5f)
+        nextPanX = std::clamp((currentOffsetX + cursorFromDrawnCentreX * (scaleRatio - 1.0f)) /
+            (nextTravelX * 0.5f), -1.0f, 1.0f);
+    if (nextTravelY > 0.5f)
+        nextPanY = std::clamp((currentOffsetY + cursorFromDrawnCentreY * (scaleRatio - 1.0f)) /
+            (nextTravelY * 0.5f), -1.0f, 1.0f);
+
+    viewZoomBits_.store(std::bit_cast<float>(nextZoom), std::memory_order_relaxed);
+    viewPanXBits_.store(std::bit_cast<float>(nextPanX), std::memory_order_relaxed);
+    viewPanYBits_.store(std::bit_cast<float>(nextPanY), std::memory_order_relaxed);
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::SetViewRotation(
+    const std::uint32_t quarterTurnsClockwise) noexcept {
+    if (quarterTurnsClockwise > 3) return FFFResult::InvalidArgument;
+    std::lock_guard deviceLock(deviceMutex_);
+    if (viewRotation_.exchange(quarterTurnsClockwise, std::memory_order_acq_rel) ==
+        quarterTurnsClockwise)
+        return FFFResult::Success;
+    // The fit box depends on the rotated aspect ratio, so the scaled-video cache
+    // keyed on the old output size must be invalidated.
+    scaledVideoGeneration_ = UINT64_MAX;
+    return FFFResult::Success;
+}
+
+std::uint32_t PlayerVideoRenderer::ViewRotation() const noexcept {
+    return viewRotation_.load(std::memory_order_acquire);
+}
+
 FFFResult PlayerVideoRenderer::SetFitLimitToNative(const bool enable) noexcept {
-    // Native-size fit changes on the next present, including paused playback.
-    // At zoom=1 this makes the image pixel-exact rather than window-relative.
+    // Opt in to "the fit box never exceeds the source's native size". With it on,
+    // zoom == 1 is pixel-exact 1:1 and the zoom factor *is* the screen:video pixel
+    // ratio; by default the picture is fitted to the window, so zoom is relative to
+    // that box and carries no absolute meaning.
+    // Separate from Render()'s per-frame limitToNativeSize on purpose: that one is
+    // only refreshed by the decode thread, so a paused session would keep the old
+    // geometry until the next frame. This flips on the next present.
     std::lock_guard deviceLock(deviceMutex_);
     fitLimitToNative_.store(enable, std::memory_order_release);
     return FFFResult::Success;
@@ -2357,6 +2561,11 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
             SUCCEEDED(dxgiDevice->GetAdapter(&adapter))) {
             DXGI_ADAPTER_DESC desc{};
             if (SUCCEEDED(adapter->GetDesc(&desc))) {
+                // RTX Video Super Resolution is a vendor-private NVIDIA
+                // extension; probe once per device so the status report can say
+                // "not an NVIDIA adapter" instead of silently doing nothing.
+                nvidiaAdapter_ =
+                    desc.VendorId == FFF3FP::NvidiaVideo::NvidiaVendorId;
                 // Fixed-size stack buffer: EnsureDevice() is noexcept, so a
                 // std::string/std::to_string allocation here would turn an
                 // OutOfMemory into std::terminate instead of a returned error.
@@ -2622,6 +2831,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         SetError(message.str()); return FFFResult::DeviceFailure;
     }
     swapWidth_ = width; swapHeight_ = height; swapHdr_ = hdr; swapOutputBits_ = outputBits;
+    InvalidateHdrMetadataCache();
     swapAllowTearing_ = allowTearing != FALSE;
     ReleaseTimedTextResources();
     if (hdr) {
@@ -2654,9 +2864,15 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         // call opts the window into an explicit Advanced Color presentation
         // contract instead of the ordinary SDR desktop path.
     }
-    // This chain has no FRAME_LATENCY_WAITABLE_OBJECT flag, so the swap-chain
-    // latency API is invalid. Bound the device queue to two frames instead,
-    // allowing GPU rendering to overlap the synchronized Present.
+    // This chain has no FRAME_LATENCY_WAITABLE_OBJECT flag, so IDXGISwapChain2's
+    // latency API is invalid here (that call was silently failing before). The
+    // device-level API has no such precondition.
+    //
+    // The value is 2 rather than the previous *intended* 1 or DXGI's default 3:
+    // two permits one frame rendering while another waits on Present, which is the
+    // overlap this path wants, and it stays strictly below the 3-deep buffer count
+    // so the queue cannot outrun the chain. Measured via the queue-depth effect on
+    // dropped frames.
     ComPtr<IDXGIDevice1> latencyDevice;
     if (SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&latencyDevice))))
         latencyDevice->SetMaximumFrameLatency(2);
@@ -2709,6 +2925,7 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr,
         return FFFResult::DeviceFailure;
     }
     swapHdr_ = hdr; swapOutputBits_ = formatBits;
+    InvalidateHdrMetadataCache();
     if (hdr) {
         UINT support = 0;
         const auto supportResult = swapChain_->CheckColorSpaceSupport(
@@ -2758,6 +2975,159 @@ FFFResult PlayerVideoRenderer::AcquireBackBufferTarget(ID3D11Texture2D** buffer,
         return FFFResult::DeviceFailure;
     }
     ++backBufferAcquisitionCount_;
+    return FFFResult::Success;
+}
+
+void PlayerVideoRenderer::ReleaseOffscreenTarget() noexcept {
+    if (offscreenTarget_ != nullptr) { offscreenTarget_->Release(); offscreenTarget_ = nullptr; }
+    if (offscreenTexture_ != nullptr) { offscreenTexture_->Release(); offscreenTexture_ = nullptr; }
+    offscreenWidth_ = offscreenHeight_ = offscreenFormat_ = 0;
+}
+
+FFFResult PlayerVideoRenderer::AcquireOffscreenTarget(const std::uint32_t width,
+    const std::uint32_t height, const std::uint32_t format,
+    ID3D11Texture2D** texture, ID3D11RenderTargetView** target) noexcept {
+    if (texture == nullptr || target == nullptr || device_ == nullptr)
+        return FFFResult::InvalidArgument;
+    *texture = nullptr; *target = nullptr;
+    if (width == 0 || height == 0) return FFFResult::InvalidArgument;
+    // 0 = BGRA8 (SDR), 1 = RGBA16F (linear scRGB, for HDR and wide-gamut SDR).
+    const auto dxgiFormat = format == 1 ? DXGI_FORMAT_R16G16B16A16_FLOAT
+                                        : DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (offscreenTexture_ != nullptr && offscreenWidth_ == width &&
+        offscreenHeight_ == height && offscreenFormat_ == format) {
+        *texture = offscreenTexture_;
+        *target = offscreenTarget_;
+        return FFFResult::Success;
+    }
+    ReleaseOffscreenTarget();
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = width;
+    description.Height = height;
+    description.MipLevels = description.ArraySize = 1;
+    description.Format = dxgiFormat;
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_DEFAULT;
+    description.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(device_->CreateTexture2D(&description, nullptr,
+            &offscreenTexture_)) ||
+        FAILED(device_->CreateRenderTargetView(offscreenTexture_, nullptr,
+            &offscreenTarget_))) {
+        ReleaseOffscreenTarget();
+        SetError("Could not create the screenshot readback surface.");
+        return FFFResult::DeviceFailure;
+    }
+    offscreenWidth_ = width;
+    offscreenHeight_ = height;
+    offscreenFormat_ = format;
+    *texture = offscreenTexture_;
+    *target = offscreenTarget_;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::ReadbackTexture(ID3D11Texture2D* const source,
+    void* const pixels, const std::uint32_t capacity, const std::uint32_t width,
+    const std::uint32_t height, const std::uint32_t format) noexcept {
+    if (source == nullptr || pixels == nullptr || device_ == nullptr || context_ == nullptr)
+        return FFFResult::InvalidArgument;
+    // BGRA8 is 4 bytes per pixel, RGBA16F is 8. The byte count is what the host
+    // sized its buffer with, so it is the contract that matters here.
+    const std::uint64_t bytesPerPixel = format == 1 ? 8u : 4u;
+    const std::uint64_t bytes =
+        static_cast<std::uint64_t>(width) * height * bytesPerPixel;
+    if (bytes > capacity) return FFFResult::BufferTooSmall;
+
+    D3D11_TEXTURE2D_DESC description{};
+    source->GetDesc(&description);
+    description.Usage = D3D11_USAGE_STAGING;
+    description.BindFlags = 0;
+    description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    description.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(device_->CreateTexture2D(&description, nullptr, &staging)))
+        return FFFResult::DeviceFailure;
+    context_->CopyResource(staging.Get(), source);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+        return FFFResult::DeviceFailure;
+    const auto* rows = static_cast<const std::uint8_t*>(mapped.pData);
+    auto* out = static_cast<std::uint8_t*>(pixels);
+    if (format == 1) {
+        // Source is DXGI_FORMAT_R16G16B16A16_FLOAT: HALF per channel, already in the
+        // scRGB linear contract (1.0 = 80 nits), so this is a pure copy with the
+        // RowPitch removed. Callers must NOT treat these as 8-bit code values.
+        const auto rowBytes = static_cast<std::size_t>(width) * 8u;
+        for (std::uint32_t row = 0; row < height; ++row)
+            std::memcpy(out + static_cast<std::size_t>(row) * rowBytes,
+                rows + static_cast<std::size_t>(row) * mapped.RowPitch, rowBytes);
+    } else {
+        // Source is DXGI_FORMAT_B8G8R8A8_UNORM. Emit BGRA byte order so the caller
+        // can wrap it as 32bpp with no per-pixel work (Windows bitmaps are BGRA).
+        const auto rowBytes = static_cast<std::size_t>(width) * 4u;
+        for (std::uint32_t row = 0; row < height; ++row)
+            std::memcpy(out + static_cast<std::size_t>(row) * rowBytes,
+                rows + static_cast<std::size_t>(row) * mapped.RowPitch, rowBytes);
+    }
+    context_->Unmap(staging.Get(), 0);
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::CopyFrame(void* const pixels,
+    const std::uint32_t capacity, std::uint32_t& width, std::uint32_t& height,
+    const std::uint32_t layout, const std::uint32_t format) noexcept {
+    if (layout > 1 || format > 1) return FFFResult::InvalidArgument;
+    std::lock_guard deviceLock(deviceMutex_);
+    if (!hasCachedVideo_ || device_ == nullptr || context_ == nullptr)
+        return FFFResult::InvalidState;
+    std::lock_guard presentLock(presentMutex_);
+
+    // Source resolution honours the view rotation: an odd quarter turn presents the
+    // picture with its axes swapped, and a screenshot of a rotated photo must come
+    // out portrait rather than letterboxed into a landscape frame.
+    const auto rotated = (viewRotation_.load(std::memory_order_acquire) & 1u) != 0;
+    const auto sourceLayoutWidth = rotated ? sourceHeight_ : sourceWidth_;
+    const auto sourceLayoutHeight = rotated ? sourceWidth_ : sourceHeight_;
+    const auto targetWidth = layout == 1 ? swapWidth_ : sourceLayoutWidth;
+    const auto targetHeight = layout == 1 ? swapHeight_ : sourceLayoutHeight;
+    if (targetWidth == 0 || targetHeight == 0) return FFFResult::InvalidState;
+
+    width = targetWidth;
+    height = targetHeight;
+    if (pixels == nullptr)
+        return FFFResult::BufferTooSmall;   // size query: caller re-calls with a buffer
+
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11RenderTargetView> target;
+    const auto acquired = AcquireOffscreenTarget(targetWidth, targetHeight, format,
+        texture.GetAddressOf(), target.GetAddressOf());
+    if (acquired != FFFResult::Success) return acquired;
+    // AcquireOffscreenTarget hands back *borrowed* references to members it owns, and
+    // those ComPtr locals would release them on scope exit -- dropping the refcount to
+    // zero and leaving dangling members for the next call (measured as an access
+    // violation on the second screenshot). Take our own reference for the duration.
+    texture->AddRef();
+    target->AddRef();
+
+    constexpr float black[] = {0, 0, 0, 1};
+    context_->ClearRenderTargetView(target.Get(), black);
+    const auto drawn = DrawCachedVideo(target.Get(), targetWidth, targetHeight);
+    if (drawn != FFFResult::Success) return drawn;
+    // Subtitle/danmaku/lyrics layers are composited in the same order the presenter
+    // uses, so the screenshot matches what the user sees rather than video only.
+    const TimedTextLayerSlot slots[] = {TimedTextLayerSlot::Danmaku,
+        TimedTextLayerSlot::Subtitle, TimedTextLayerSlot::Lyrics,
+        TimedTextLayerSlot::Disc, TimedTextLayerSlot::PlayerInformation};
+    for (const auto slot : slots) {
+        const auto layerDrawn = DrawTimedText(slot);
+        if (layerDrawn != FFFResult::Success) return layerDrawn;
+        CompositeTimedText(target.Get(), slot);
+    }
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
+
+    const auto read = ReadbackTexture(texture.Get(), pixels, capacity, targetWidth,
+        targetHeight, format);
+    if (read != FFFResult::Success) return read;
+    finalReadbackFormat_ = format == 1 ? 16u : 8u;
     return FFFResult::Success;
 }
 
@@ -2900,14 +3270,27 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         texture.Height = plane == 0 ? sourceHeight :
             (sourceHeight + (1u << chromaHeightShift) - 1) >> chromaHeightShift;
         texture.MipLevels = texture.ArraySize = 1;
-        if (inputLayout == 0) texture.Format = bitDepth <= 8 ?
+        if (inputLayout == 3)
+            // Fully general floating-point range: negatives and super-whites survive.
+            // Half-float is bit-compatible with rgba f16, so no swscale is involved.
+            texture.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        else if (inputLayout == 0) texture.Format = bitDepth <= 8 ?
             DXGI_FORMAT_B8G8R8A8_UNORM : DXGI_FORMAT_R16G16B16A16_UNORM;
         else if (inputLayout == 2 && plane == 1)
             texture.Format = bitDepth > 8 ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
         else texture.Format = bitDepth > 8 ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
         texture.SampleDesc.Count = 1;
         texture.Usage = D3D11_USAGE_DEFAULT; texture.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        if (inputLayout == 1) {
+        // Small planar/semi-planar frames upload through Map(WRITE_DISCARD), which
+        // needs a CPU-writable dynamic texture. Large ones must NOT: Map hands back
+        // write-combined memory, and copying into it row by row loses badly once the
+        // rows get wide. Measured (31 interleaved rounds, 10-bit):
+        //   1920x1080  Map 0.582 ms vs UpdateSubresource 0.546 ms  (1.06x)
+        //   3840x2160  Map 3.293 ms vs 2.886 ms                    (1.14x)
+        //   7680x4320  Map 22.266 ms vs 15.213 ms                  (1.46x)
+        // So only the large case is worth a second code path, and it needs a DEFAULT
+        // texture because UpdateSubresource cannot target a DYNAMIC one.
+        if ((inputLayout == 1 || inputLayout == 2) && !UseDefaultUploadForSize(sourceWidth, sourceHeight)) {
             texture.Usage = D3D11_USAGE_DYNAMIC;
             texture.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         }
@@ -2935,6 +3318,265 @@ bool PlayerVideoRenderer::CanUseDirectVideoProcessor() const noexcept {
     D3D11_TEXTURE2D_DESC inputDescription{};
     sourceTextures_[0]->GetDesc(&inputDescription);
     return (inputDescription.BindFlags & D3D11_BIND_DECODER) != 0;
+}
+
+bool PlayerVideoRenderer::CanUseVideoProcessorForUpscale() const noexcept {
+    // A dedicated, colour-agnostic precondition test for the VP upscale step.
+    // It intentionally drops four tests that the older CanUseDirectVideoProcessor
+    // applied, each for a measured reason:
+    //   * sourceExternal_    - software decode uploaded to a D3D11 texture feeds
+    //                          a video processor just as well (Chromium uploads a
+    //                          staging texture this way).
+    //   * transfer / MapToSdr - VSR is spatial; it enhances HDR sources too
+    //                          (NVIDIA: "VSR now also upscales HDR video").
+    //   * swapOutputBits_     - unrelated to VSR, and gating on it would wrongly
+    //                          disable VSR on the 16-bit scRGB path.
+    // Chroma location is relaxed to accept UNSPECIFIED, which most real files use.
+    if (sourceInputLayout_ != 2 || sourceTextures_[0] == nullptr) return false;
+    if (sourceInterlaced_ || sourceBitDepth_ > 10) return false;
+    if (sourceCoverArt_) return false;
+    if (projection360Enabled_.load(std::memory_order_acquire) != 0) return false;
+    if (sourceChromaLocation_ != AVCHROMA_LOC_LEFT &&
+        sourceChromaLocation_ != AVCHROMA_LOC_UNSPECIFIED) return false;
+    D3D11_TEXTURE2D_DESC inputDescription{};
+    sourceTextures_[0]->GetDesc(&inputDescription);
+    return (inputDescription.BindFlags & D3D11_BIND_DECODER) != 0;
+}
+
+bool PlayerVideoRenderer::ShouldEnableNvidiaSuperResolution(
+    const std::uint32_t targetWidth, const std::uint32_t targetHeight) const noexcept {
+    if (requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
+        FFF3FPVideoSuperResolution::Auto)
+        return false;
+    if (videoSuperResolutionRejected_) return false;
+    if (!nvidiaAdapter_) return false;
+    if (!CanUseVideoProcessorForUpscale()) return false;
+    // NVIDIA: "will only be enabled if the video requires upscaling".
+    if (targetWidth <= sourceWidth_ && targetHeight <= sourceHeight_) return false;
+    // NVIDIA documents an input range of 360p..1440p. Judged on height; the
+    // documented wording is resolution-class based and says nothing about
+    // unusually wide aspect ratios.
+    if (sourceHeight_ < 360 || sourceHeight_ > 1440) return false;
+    return true;
+}
+
+bool PlayerVideoRenderer::CreateYuvPlaneViews(ID3D11Texture2D* const texture,
+    const std::uint32_t format, ID3D11ShaderResourceView** const views) noexcept {
+    if (texture == nullptr || views == nullptr || device_ == nullptr) return false;
+    // P010 carries 10-bit samples; NV12 carries 8-bit. The plane view formats
+    // MUST match EnsurePipeline's (R16/R16G16 vs R8/R8G8), otherwise the shader
+    // reads the wrong width and the picture shifts.
+    const bool tenBit = format == DXGI_FORMAT_P010;
+    D3D11_SHADER_RESOURCE_VIEW_DESC luma{};
+    luma.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    luma.Texture2D.MipLevels = 1;
+    luma.Format = tenBit ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+    auto chroma = luma;
+    chroma.Format = tenBit ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
+    // One resource, two views: NV12/P010 interleave chroma as a second plane.
+    if (FAILED(device_->CreateShaderResourceView(texture, &luma, &views[0])) ||
+        FAILED(device_->CreateShaderResourceView(texture, &chroma, &views[1]))) {
+        if (views[0] != nullptr) { views[0]->Release(); views[0] = nullptr; }
+        if (views[1] != nullptr) { views[1]->Release(); views[1] = nullptr; }
+        return false;
+    }
+    views[2] = nullptr;
+    return true;
+}
+
+void PlayerVideoRenderer::ReleaseSuperResolutionResources() noexcept {
+    for (std::size_t plane = 0; plane < ARRAYSIZE(superResolutionViews_); ++plane) {
+        if (superResolutionViews_[plane] != nullptr) {
+            superResolutionViews_[plane]->Release();
+            superResolutionViews_[plane] = nullptr;
+        }
+    }
+    if (superResolutionTexture_ != nullptr) {
+        superResolutionTexture_->Release();
+        superResolutionTexture_ = nullptr;
+    }
+    videoSuperResolutionSourceWidth_ = videoSuperResolutionSourceHeight_ = 0;
+    videoSuperResolutionTargetWidth_ = videoSuperResolutionTargetHeight_ = 0;
+    videoSuperResolutionActive_.store(false, std::memory_order_release);
+}
+
+FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWidth,
+    const std::uint32_t targetHeight) noexcept {
+    // Latch the feature off permanently on any driver-side failure: the
+    // extension has no capability query, so a failed attempt is the only
+    // evidence available (Chromium does the same, and mpv/VLC behave likewise).
+    const auto reject = [this](const FFF3FPVideoSuperResolutionReason reason) noexcept {
+        videoSuperResolutionRejected_ = true;
+        videoSuperResolutionActive_.store(false, std::memory_order_release);
+        videoSuperResolutionReason_.store(reason, std::memory_order_release);
+        SetError("NVIDIA RTX Super Resolution was rejected; using shader scaling.");
+        return FFFResult::NotSupported;
+    };
+    // Same latch, but records which step failed. Kept separate so the caller can
+    // tell "the driver has no such feature" apart from "our view setup is wrong"
+    // -- both used to collapse into one opaque DriverRejected.
+    const auto rejectAt = [this](const char* stage) noexcept {
+        videoSuperResolutionRejected_ = true;
+        videoSuperResolutionActive_.store(false, std::memory_order_release);
+        videoSuperResolutionReason_.store(FFF3FPVideoSuperResolutionReason::DriverRejected,
+            std::memory_order_release);
+        std::string message = "NVIDIA RTX Super Resolution step failed: ";
+        message += stage;
+        SetError(message);
+        // Also surface it through the process log: the status block only says
+        // "DriverRejected", which cannot distinguish an unsupported driver from a
+        // bug in our own view setup.
+        FFF3FP_KernelLogImpl(message.c_str());
+        return FFFResult::NotSupported;
+    };
+
+    // Every early exit must clear `active`, otherwise a frame that ran with VSR
+    // leaves the flag latched and the status block would claim VSR is on while
+    // the shader path is actually in use.
+    const auto skip = [this](const FFF3FPVideoSuperResolutionReason reason) noexcept {
+        videoSuperResolutionActive_.store(false, std::memory_order_release);
+        videoSuperResolutionReason_.store(reason, std::memory_order_release);
+        return FFFResult::NotSupported;
+    };
+
+    if (requestedVideoSuperResolution_.load(std::memory_order_acquire) ==
+        FFF3FPVideoSuperResolution::Off)
+        return skip(FFF3FPVideoSuperResolutionReason::NotRequested);
+
+    if (!nvidiaAdapter_)
+        return skip(FFF3FPVideoSuperResolutionReason::NotNvidiaAdapter);
+    if (!CanUseVideoProcessorForUpscale())
+        return skip(FFF3FPVideoSuperResolutionReason::UnsupportedSourceFormat);
+    if (targetWidth <= sourceWidth_ && targetHeight <= sourceHeight_)
+        return skip(FFF3FPVideoSuperResolutionReason::NotUpscaling);
+    if (sourceHeight_ < 360 || sourceHeight_ > 1440)
+        return skip(FFF3FPVideoSuperResolutionReason::SourceResolutionOutOfRange);
+    if (videoSuperResolutionRejected_)
+        return skip(FFF3FPVideoSuperResolutionReason::DriverRejected);
+
+    // NV12/P010 are 4:2:0 formats: a video processor cannot write an odd-sized
+    // surface. The destination rect can be odd (it is a fit-to-window box), so
+    // round the intermediate surface up to even and keep the rect separate.
+    const auto surfaceWidth = (targetWidth + 1u) & ~1u;
+    const auto surfaceHeight = (targetHeight + 1u) & ~1u;
+
+    // A video processor is configured for a fixed in/out geometry, so the
+    // cached surface is rebuilt whenever the geometry or the decoded format
+    // changes. Compare against the *cached* values before overwriting them.
+    D3D11_TEXTURE2D_DESC sourceDescription{};
+    sourceTextures_[0]->GetDesc(&sourceDescription);
+    const auto sourceFormat = static_cast<std::uint32_t>(sourceDescription.Format);
+    const bool sameGeometry = superResolutionTexture_ != nullptr &&
+        videoSuperResolutionSourceWidth_ == sourceWidth_ &&
+        videoSuperResolutionSourceHeight_ == sourceHeight_ &&
+        videoSuperResolutionTargetWidth_ == surfaceWidth &&
+        videoSuperResolutionTargetHeight_ == surfaceHeight &&
+        superResolutionSourceFormat_ == sourceFormat;
+    if (!sameGeometry) {
+        ReleaseSuperResolutionResources();
+        videoSuperResolutionSourceWidth_ = sourceWidth_;
+        videoSuperResolutionSourceHeight_ = sourceHeight_;
+        videoSuperResolutionTargetWidth_ = surfaceWidth;
+        videoSuperResolutionTargetHeight_ = surfaceHeight;
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = surfaceWidth;
+        description.Height = surfaceHeight;
+        description.MipLevels = description.ArraySize = 1;
+        // Same format in and out: the video processor must not perform the
+        // YUV->RGB conversion, because that would bypass this renderer's entire
+        // colour pipeline (tone mapping, scRGB, wide gamut).
+        description.Format = sourceDescription.Format;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device_->CreateTexture2D(&description, nullptr,
+                &superResolutionTexture_)) ||
+            !CreateYuvPlaneViews(superResolutionTexture_, sourceFormat,
+                superResolutionViews_)) {
+            ReleaseSuperResolutionResources();
+            superResolutionSourceFormat_ = 0;
+            return rejectAt("CreateTexture2D/plane views for the upscaled surface");
+        }
+        superResolutionSourceFormat_ = sourceFormat;
+    }
+
+    ComPtr<ID3D11VideoDevice> videoDevice;
+    ComPtr<ID3D11VideoContext> videoContext;
+    if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&videoDevice))) ||
+        FAILED(context_->QueryInterface(IID_PPV_ARGS(&videoContext))))
+        return rejectAt("QueryInterface: no ID3D11VideoDevice/ID3D11VideoContext");
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+    content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    content.InputFrameRate = { 60, 1 };
+    content.InputWidth = sourceWidth_;
+    content.InputHeight = sourceHeight_;
+    content.OutputFrameRate = content.InputFrameRate;
+    // The processor writes the even-sized surface, not the possibly-odd rect.
+    content.OutputWidth = surfaceWidth;
+    content.OutputHeight = surfaceHeight;
+    content.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
+    ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
+    ComPtr<ID3D11VideoProcessor> processor;
+    if (FAILED(videoDevice->CreateVideoProcessorEnumerator(&content, &enumerator)) ||
+        FAILED(videoDevice->CreateVideoProcessor(enumerator.Get(), 0, &processor)))
+        return rejectAt("CreateVideoProcessorEnumerator/Processor");
+
+    UINT inputSupport = 0;
+    UINT outputSupport = 0;
+    if (FAILED(enumerator->CheckVideoProcessorFormat(sourceDescription.Format, &inputSupport)) ||
+        FAILED(enumerator->CheckVideoProcessorFormat(sourceDescription.Format, &outputSupport)) ||
+        (inputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0 ||
+        (outputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0)
+        return reject(FFF3FPVideoSuperResolutionReason::UnsupportedSourceFormat);
+
+    videoContext->VideoProcessorSetStreamFrameFormat(processor.Get(), 0,
+        D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+    // Keep the driver's implicit enhancements off for a reproducible result;
+    // VSR itself is requested explicitly below and is unaffected by this flag
+    // (mpv and VLC both disable auto-processing and still use VSR).
+    videoContext->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
+    const RECT source{ 0, 0, static_cast<LONG>(sourceWidth_),
+        static_cast<LONG>(sourceHeight_) };
+    videoContext->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &source);
+    // Fill the whole even-sized surface; the renderer then samples it into the
+    // real destination rect, so the extra row/column is never shown.
+    const RECT destination{ 0, 0, static_cast<LONG>(surfaceWidth),
+        static_cast<LONG>(surfaceHeight) };
+    videoContext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &destination);
+
+    // The one call that turns the driver's AI upscaler on.
+    if (FAILED(FFF3FP::NvidiaVideo::SetSuperResolution(videoContext.Get(),
+            processor.Get(), true)))
+        return rejectAt("SetStreamExtension(NVIDIA PPE) rejected");
+
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDescription{};
+    inputDescription.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    ComPtr<ID3D11VideoProcessorInputView> inputView;
+    if (FAILED(videoDevice->CreateVideoProcessorInputView(sourceTextures_[0],
+            enumerator.Get(), &inputDescription, &inputView)))
+        return rejectAt("CreateVideoProcessorInputView");
+
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputDescription{};
+    outputDescription.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    ComPtr<ID3D11VideoProcessorOutputView> outputView;
+    if (FAILED(videoDevice->CreateVideoProcessorOutputView(superResolutionTexture_,
+            enumerator.Get(), &outputDescription, &outputView)))
+        return rejectAt("CreateVideoProcessorOutputView");
+
+    D3D11_VIDEO_PROCESSOR_STREAM stream{};
+    stream.Enable = TRUE;
+    stream.OutputIndex = 0;
+    stream.InputFrameOrField = 0;
+    stream.pInputSurface = inputView.Get();
+    if (FAILED(videoContext->VideoProcessorBlt(processor.Get(), outputView.Get(), 0, 1,
+            &stream)))
+        return rejectAt("VideoProcessorBlt");
+
+    videoSuperResolutionReason_.store(FFF3FPVideoSuperResolutionReason::None,
+        std::memory_order_release);
+    videoSuperResolutionActive_.store(true, std::memory_order_release);
+    return FFFResult::Success;
 }
 
 FFFResult PlayerVideoRenderer::EnsureVideoProcessor(ID3D11Texture2D* inputTexture,
@@ -3100,6 +3742,14 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     cachedVideoSettings_.viewFovY = std::bit_cast<float>(
         view360FovYBits_.load(std::memory_order_acquire));
     cachedVideoSettings_.viewAspect = width / height;
+    cachedVideoSettings_.viewRotation = static_cast<float>(
+        viewRotation_.load(std::memory_order_acquire));
+    // Image pixel-block sampling applies only while enlarging. The destination rect
+    // passed in is the final fitted box, so comparing it with the cached source size
+    // is the authoritative test -- the earlier size-based checks cannot see the fit.
+    cachedVideoSettings_.imageModeX = sourceImageMode_ &&
+        (width > cachedVideoSettings_.sourceWidth || height > cachedVideoSettings_.sourceHeight)
+        ? 1.0f : 0.0f;
     context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
     context_->OMSetRenderTargets(1, &target, nullptr);
     const D3D11_VIEWPORT viewport{x, y, width, height, 0.0f, 1.0f};
@@ -3108,6 +3758,16 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(vertexShader_, nullptr, 0);
     auto* shader = extensionShader_ ? extensionShader_ : pixelShader_;
+    // SDR layout specialization: the bytecode has InputLayout fixed at compile time
+    // and the colour/projection constants forced to zero, so it is only valid when
+    // the frame really is plain SDR. `effect` must stay excluded -- effect 1 is the
+    // cover-backdrop composite, which shades differently.
+    //
+    // Measured on the RTX 5080: this changes nothing (median 173 vs 173 frames on 8K
+    // hardware decode, 66 vs 66 on 720p software). The branches it removes are all
+    // uniform, which modern GPUs effectively execute for free, and every available
+    // source is decode- or refresh-bound anyway. Kept because it is already written
+    // and passes pixel-equivalence, but it is not an optimization to rely on.
     if (!extensionShader_ && effect == 0 && projection360 == 0 &&
         cachedVideoSettings_.colorMode == 0 && cachedVideoSettings_.transfer == 0 &&
         cachedVideoSettings_.gamut == 0 && cachedVideoSettings_.inputLayout < 3) {
@@ -3424,45 +4084,186 @@ FFFResult PlayerVideoRenderer::ExecuteScalePass(ID3D11ShaderResourceView* source
     return FFFResult::Success;
 }
 
+std::uint32_t PlayerVideoRenderer::SelectScaleFilter(const float scaleX,
+    const float scaleY) const noexcept {
+    const auto upscaling = scaleX > 1.0f || scaleY > 1.0f;
+    const auto downscaling = scaleX < 1.0f || scaleY < 1.0f;
+
+    if (sourceImageMode_) {
+        // A photograph or drawing is enlarged by whole pixel blocks: each source pixel
+        // becomes a square of output pixels, so the picture keeps its own pixel grid
+        // and reads as a crisp enlargement rather than a smeared one. Only upscaling
+        // can do this -- reducing a picture still has to average detail away, so a
+        // downscale keeps the smoothing kernel below.
+        if (upscaling && !downscaling) return ToShaderFilter(ScaleKernel::Block);
+    } else if (upscaling && !downscaling) {
+        // Video upscaling: reconstruct sharply. Lanczos-3 on the high-quality setting,
+        // the cubic otherwise, which is the cheaper sharp kernel.
+        return ToShaderFilter(scalingQuality_ == FFF3FPVideoScalingQuality::HighQuality
+            ? ScaleKernel::Lanczos3 : ScaleKernel::Cubic);
+    }
+
+    if (downscaling) {
+        // Every downscale uses Lanczos-3. Its support widens with the ratio
+        // (support = radius/scale), so it anti-aliases properly at any reduction,
+        // including the severe ones that previously fell back to the equal-weight
+        // Box. Measured on a stripe sweep it had the lowest residual of the separable
+        // kernels, and it costs only ~15% more than bilinear.
+        return ToShaderFilter(ScaleKernel::Lanczos3);
+    }
+
+    // Pure 1:1 pass (a chain step that changes only one axis): keep it exact.
+    return ToShaderFilter(ScaleKernel::Block);
+}
+
+void PlayerVideoRenderer::ConfigureAdaptiveDownscale(const bool enabled,
+    const std::uint32_t dropPercent) noexcept {
+    adaptiveDownscaleEnabled_.store(enabled, std::memory_order_release);
+    adaptiveDownscaleDropPercent_.store(std::clamp(dropPercent, 1u, 99u),
+        std::memory_order_release);
+    if (!enabled) {
+        adaptiveDownscaleActive_.store(false, std::memory_order_release);
+        adaptiveWindowFrames_ = 0;
+        adaptiveWindowDrops_ = 0;
+    }
+}
+
+void PlayerVideoRenderer::ObserveFrameForAdaptiveDownscale(const bool dropped) noexcept {
+    if (!adaptiveDownscaleEnabled_.load(std::memory_order_acquire)) return;
+    ++adaptiveWindowFrames_;
+    if (dropped) ++adaptiveWindowDrops_;
+    // A window long enough that one stall cannot flip the policy, short enough that a
+    // genuinely overloaded session switches within a fraction of a second at 60 fps.
+    constexpr std::uint64_t WindowFrames = 30;
+    if (adaptiveWindowFrames_ < WindowFrames) return;
+    const auto percent = static_cast<std::uint32_t>(
+        adaptiveWindowDrops_ * 100 / std::max<std::uint64_t>(adaptiveWindowFrames_, 1));
+    const auto threshold = adaptiveDownscaleDropPercent_.load(std::memory_order_acquire);
+    const auto nowActive = percent >= threshold;
+    const auto wasActive = adaptiveDownscaleActive_.exchange(nowActive, std::memory_order_acq_rel);
+    adaptiveWindowFrames_ = 0;
+    adaptiveWindowDrops_ = 0;
+    // Log only the edges: the policy is meant to be invisible until it matters.
+    if (nowActive != wasActive)
+        std::fprintf(stderr, "[adaptive] downscale-before-upload %s (drops %u%%)\n",
+            nowActive ? "engaged" : "released", percent);
+}
+
+bool PlayerVideoRenderer::PrepareAdaptiveDownscale(const AVFrame* frame,
+    const std::uint32_t width, const std::uint32_t height,
+    const std::uint32_t outputWidth, const std::uint32_t outputHeight) noexcept {
+    if (frame == nullptr) return false;
+    if (!adaptiveDownscaleEnabled_.load(std::memory_order_acquire)) return false;
+    if (!adaptiveDownscaleActive_.load(std::memory_order_acquire)) return false;
+    if (outputWidth == 0 || outputHeight == 0) return false;
+    // Only meaningful when the frame really is larger than its destination.
+    if (width <= outputWidth && height <= outputHeight) return false;
+
+    const auto pixelFormat = static_cast<AVPixelFormat>(frame->format);
+    adaptiveScaler_ = sws_getCachedContext(adaptiveScaler_, frame->width, frame->height,
+        pixelFormat, static_cast<int>(outputWidth), static_cast<int>(outputHeight),
+        pixelFormat, SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (adaptiveScaler_ == nullptr) return false;
+    // Match the main path's colour handling so the resample does not shift colours.
+    const auto* sourceCoefficients = sws_getCoefficients(ToSwsColorSpace(frame, false));
+    const auto* destinationCoefficients = sws_getCoefficients(SWS_CS_ITU709);
+    if (sourceCoefficients != nullptr && destinationCoefficients != nullptr)
+        (void)sws_setColorspaceDetails(adaptiveScaler_, sourceCoefficients,
+            IsFullRange(frame) ? 1 : 0, destinationCoefficients, 1, 0, 1 << 16, 1 << 16);
+
+    const auto bytes = static_cast<std::size_t>(av_image_get_buffer_size(pixelFormat,
+        static_cast<int>(outputWidth), static_cast<int>(outputHeight), 1));
+    if (bytes == 0) return false;
+    if (adaptiveBuffer_.size() < bytes) {
+        try { adaptiveBuffer_.resize(bytes); }
+        catch (...) { return false; }
+    }
+    std::uint8_t* destinationData[4]{};
+    int destinationLines[4]{};
+    if (av_image_fill_arrays(destinationData, destinationLines, adaptiveBuffer_.data(),
+            pixelFormat, static_cast<int>(outputWidth), static_cast<int>(outputHeight), 1) < 0)
+        return false;
+    if (sws_scale(adaptiveScaler_, frame->data, frame->linesize, 0, frame->height,
+            destinationData, destinationLines) <= 0)
+        return false;
+    adaptiveSourceWidth_ = outputWidth;
+    adaptiveSourceHeight_ = outputHeight;
+    // The caller uploads these planes instead of the original frame's.
+    for (int plane = 0; plane < 4; ++plane) {
+        adaptivePlanes_[plane] = destinationData[plane];
+        adaptiveLines_[plane] = destinationLines[plane];
+    }
+    return true;
+}
+
 FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidth,
     const std::uint32_t outputHeight, ID3D11ShaderResourceView** views) noexcept {
     if (views == nullptr || outputWidth == 0 || outputHeight == 0)
         return FFFResult::InvalidArgument;
     const auto generation = videoGeneration_.load(std::memory_order_acquire);
+    // The cache key includes the VSR state: VSR swaps the effective source for an
+    // upscaled surface of a different size, and that changes the result even
+    // though the decoded generation is unchanged.
+    const auto superResolutionActive = videoSuperResolutionActive_.load(std::memory_order_acquire);
     if (scaledVideoGeneration_ == generation && scaledOutputWidth_ == outputWidth &&
-        scaledOutputHeight_ == outputHeight) {
+        scaledOutputHeight_ == outputHeight &&
+        scaledVideoSuperResolution_ == superResolutionActive) {
         std::copy(std::begin(scaledSourceViews_), std::end(scaledSourceViews_), views);
         return FFFResult::Success;
     }
 
+    // Upstream's reconstructed-extension path picks its own plane layout and
+    // source array; VSR only ever applies to the ordinary decoded planes, so the
+    // two are combined rather than one replacing the other.
     const bool reconstructed = extensionReconstructed_ && actualMode_ != FFF3FPColorMode::RawHdrAsSdr;
     const auto layout = reconstructed ? 1u : sourceInputLayout_;
-    auto* inputViews = reconstructed ? extensionReconstructedViews_ : sourceViews_;
+    auto* inputViews = reconstructed ? extensionReconstructedViews_ : effectiveSourceViews_;
     const auto planeCount = layout == 1 ? 3u : (layout == 2 ? 2u : 1u);
-    for (std::size_t plane = 0; plane < ARRAYSIZE(sourceViews_); ++plane) {
+    for (std::size_t plane = 0; plane < ARRAYSIZE(effectiveSourceViews_); ++plane) {
         if (plane >= planeCount || inputViews[plane] == nullptr) {
             scaledSourceViews_[plane] = nullptr;
             continue;
         }
-        const auto planeWidth = plane == 0 ? sourceWidth_ :
-            (sourceWidth_ + (1u << sourceChromaWidthShift_) - 1) >> sourceChromaWidthShift_;
-        const auto planeHeight = plane == 0 ? sourceHeight_ :
-            (sourceHeight_ + (1u << sourceChromaHeightShift_) - 1) >> sourceChromaHeightShift_;
+        // With VSR active the effective source is already at the target size, so
+        // these denominators describe the upscaled surface, not the decoded one.
+        const auto superResolutionPlane =
+            !reconstructed && superResolutionActive && superResolutionViews_[plane] != nullptr;
+        const auto planeSourceWidth = superResolutionPlane ? outputWidth : sourceWidth_;
+        const auto planeSourceHeight = superResolutionPlane ? outputHeight : sourceHeight_;
+        const auto planeWidth = plane == 0 ? planeSourceWidth :
+            (planeSourceWidth + (1u << sourceChromaWidthShift_) - 1) >> sourceChromaWidthShift_;
+        const auto planeHeight = plane == 0 ? planeSourceHeight :
+            (planeSourceHeight + (1u << sourceChromaHeightShift_) - 1) >> sourceChromaHeightShift_;
         const auto targetWidth = std::min(planeWidth, outputWidth);
         const auto targetHeight = std::min(planeHeight, outputHeight);
-        const auto format = layout == 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+        // Layout 3 (float RGB) is interleaved RGBA in a single plane, exactly like
+        // layout 0, so it must use the same 4-channel float format. Without this the
+        // `else` arm below degrades it to R16_FLOAT and only the red channel survives.
+        const auto format = layout == 0 || layout == 3 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
             (layout == 2 && plane == 1 ? DXGI_FORMAT_R16G16_FLOAT :
                 DXGI_FORMAT_R16_FLOAT);
         const auto ensure = EnsurePlaneScaleChain(plane, planeWidth, planeHeight,
             targetWidth, targetHeight, static_cast<std::uint32_t>(format));
         if (ensure != FFFResult::Success) return ensure;
 
-        // Select the filter from the overall ratio, not each halving pass:
-        // severe downscale uses area average; otherwise use the configured quality.
+        // Select the filter from the overall ratio, not each halving pass.
+        //
+        // Upscaling and downscaling want opposite things, so they no longer share one
+        // kernel:
+        //   - Upscaling wants a sharp reconstruction. Lanczos-3 keeps the most detail;
+        //     the Catmull-Rom cubic is the cheaper sharp option.
+        //   - Downscaling wants a smooth, wide kernel to suppress aliasing. Lanczos-3
+        //     already widens its support with the ratio (support = radius/scale), and
+        //     measured best on a stripe sweep, so it is used for every downscale
+        //     instead of dropping to the equal-weight Box below 0.25x. That Box
+        //     shortcut only equals a true area average at integer ratios, which the
+        //     common video sizes happen to be but an arbitrary window size is not.
+        //   - Still images enlarge by pixel blocks instead, so a picture keeps its
+        //     source pixel grid and reads as a crisp magnification rather than a
+        //     smooth interpolation. See SelectScaleFilter.
         const float scaleX = static_cast<float>(targetWidth) / static_cast<float>(planeWidth);
         const float scaleY = static_cast<float>(targetHeight) / static_cast<float>(planeHeight);
-        const std::uint32_t filter = std::min(scaleX, scaleY) < 0.25f ? 2u :
-            (scalingQuality_ == FFF3FPVideoScalingQuality::HighQuality ? 1u : 0u);
+        const std::uint32_t filter = SelectScaleFilter(scaleX, scaleY);
 
         auto* currentView = inputViews[plane];
         auto currentWidth = planeWidth;
@@ -3480,6 +4281,7 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
     scaledVideoGeneration_ = generation;
     scaledOutputWidth_ = outputWidth;
     scaledOutputHeight_ = outputHeight;
+    scaledVideoSuperResolution_ = superResolutionActive;
     std::copy(std::begin(scaledSourceViews_), std::end(scaledSourceViews_), views);
     return FFFResult::Success;
 }
@@ -4598,6 +5400,11 @@ std::uint32_t PlayerVideoRenderer::HdrMetadataSource() const noexcept {
         : static_cast<std::uint32_t>(FFF3FPHdrMetadataSource::Bitstream);
 }
 
+void PlayerVideoRenderer::InvalidateHdrMetadataCache() noexcept {
+    lastHdrMetadata_ = {};
+    hdrMetadataValid_ = false;
+}
+
 void PlayerVideoRenderer::SetHdrMetadata() noexcept {
     if (swapChain_ == nullptr || !swapHdr_) return;
     // An SDR source presented on the scRGB chain has no mastering display and no
@@ -4625,7 +5432,7 @@ void PlayerVideoRenderer::SetHdrMetadata() noexcept {
 
 FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t frameIndex,
     const bool limitToNativeSize,
-    const bool coverArt, const bool prepareOnly) noexcept {
+    const bool coverArt, const bool prepareOnly, const bool imageMode) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
     const auto* extensionEnhancementFrame = EnhancementFrame(frame);
     const auto hdrState = hdrProcessor_.ProcessFrame(
@@ -4660,8 +5467,23 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         const auto* frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
         input = DescribeInput(frames->sw_format);
     }
-    const auto directYuv = input.layout != 0;
-    if (!directYuv) {
+    // Layout 3 is interleaved half-float RGBA (JPEG XR's rgbaf16le): like layout 0 it
+    // is sampled directly as RGB, so it must NOT take the planar/semi-planar upload
+    // path. Unlike layout 0 it needs no CPU conversion at all -- the decoded buffer is
+    // already half-float, which is bit-compatible with DXGI_FORMAT_R16G16B16A16_FLOAT,
+    // so sws_scale would only re-quantise it into an integer range that cannot hold the
+    // negatives and super-whites float RGB legitimately carries.
+    const auto floatRgb = input.layout == 3;
+    const auto directYuv = input.layout != 0 && !floatRgb;
+    // The size that gets uploaded has to be settled before the CPU conversion below,
+    // because the layout-0 arm folds an engaged downscale into that conversion (see the
+    // fold inside it). The planar arms and float RGB keep deciding at the pipeline, where
+    // the resample has always happened, so their timing is unchanged.
+    auto uploadWidth = width;
+    auto uploadHeight = height;
+    auto uploadPlanes = frame->data;
+    auto uploadLines = frame->linesize;
+    if (!directYuv && !floatRgb) {
         const auto* sourceDescriptor = av_pix_fmt_desc_get(
             static_cast<AVPixelFormat>(frame->format));
         if (sourceDescriptor != nullptr && sourceDescriptor->nb_components > 0)
@@ -4672,8 +5494,34 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         // continue moving cached text while a 4K software frame is converted.
         const auto convertedFormat = input.bitDepth <= 8 ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGBA64LE;
         const auto bytesPerPixel = input.bitDepth <= 8 ? 4u : 8u;
+        // Same size in and out unless the adaptive policy folded a downscale into this
+        // pass (uploadWidth/uploadHeight above), so this is normally a pure format
+        // conversion (rgb24 -> BGRA) and sws already takes its unscaled path. Measured on
+        // a 4K rgb24 frame: 4.73 ms with BILINEAR against 4.76 ms with POINT, i.e.
+        // identical -- the cost is memory bandwidth (~58 MB moved at ~12 GB/s), not
+        // filtering. The flags are therefore not worth changing; a real win would need the
+        // conversion itself to move to the GPU.
+        // The fold: when the policy is engaged this pass resamples to the destination size
+        // instead of the frame size, so the buffer, the texture EnsurePipeline creates and
+        // the row pitch of the upload all describe the same picture. Converting at full
+        // frame size and pouring that into the smaller texture is what used to leave a
+        // magnified top-left corner of the frame on screen.
+        const auto fittedWidth = lastDestWidth_.load(std::memory_order_relaxed);
+        const auto fittedHeight = lastDestHeight_.load(std::memory_order_relaxed);
+        // Deliberately the same guards PrepareAdaptiveDownscale applies, minus its
+        // resample: that one produces planes in the *decoded* format (rgb24 and friends),
+        // which this arm cannot upload into a BGRA / RGBA64LE texture. Keep the two in
+        // step if those guards ever change.
+        if (adaptiveDownscaleEnabled_.load(std::memory_order_acquire) &&
+            adaptiveDownscaleActive_.load(std::memory_order_acquire) &&
+            fittedWidth != 0 && fittedHeight != 0 &&
+            (width > fittedWidth || height > fittedHeight)) {
+            uploadWidth = fittedWidth;
+            uploadHeight = fittedHeight;
+        }
         scaler_ = sws_getCachedContext(scaler_, frame->width, frame->height,
-            static_cast<AVPixelFormat>(frame->format), frame->width, frame->height, convertedFormat,
+            static_cast<AVPixelFormat>(frame->format), static_cast<int>(uploadWidth),
+            static_cast<int>(uploadHeight), convertedFormat,
             SWS_BILINEAR | SWS_ACCURATE_RND, nullptr, nullptr, nullptr);
         if (scaler_ == nullptr) { SetError("FFmpeg could not create the video conversion context."); return FFFResult::FfmpegFailure; }
         const auto* sourceCoefficients = sws_getCoefficients(ToSwsColorSpace(frame, source2020));
@@ -4685,9 +5533,9 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
             return FFFResult::FfmpegFailure;
         }
         ResizeVideoConversionBuffer(convertedRgb_,
-            static_cast<std::size_t>(width) * height * bytesPerPixel);
+            static_cast<std::size_t>(uploadWidth) * uploadHeight * bytesPerPixel);
         std::uint8_t* outputData[] = { convertedRgb_.data(), nullptr, nullptr, nullptr };
-        int outputLines[] = { static_cast<int>(width * bytesPerPixel), 0, 0, 0 };
+        int outputLines[] = { static_cast<int>(uploadWidth * bytesPerPixel), 0, 0, 0 };
         if (sws_scale(scaler_, frame->data, frame->linesize, 0, frame->height, outputData, outputLines) <= 0) {
             SetError("FFmpeg could not convert the decoded video frame."); return FFFResult::FfmpegFailure;
         }
@@ -4740,7 +5588,22 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         if (chainResult != FFFResult::Success) return chainResult;
         if (swapHdr_) SetHdrMetadata();
     }
-    const auto pipelineResult = EnsurePipeline(width, height, input.layout, input.bitDepth,
+    // Adaptive downscale must be decided BEFORE the pipeline is created: the source
+    // textures are sized here, and uploading a resampled frame into full-size textures
+    // would save nothing while also mismatching the source stride. When the policy is
+    // engaged the frame is resampled to the display size and the pipeline is built for
+    // that smaller size instead. Layout 0 settled its share above, inside the colour
+    // conversion, so the planes resampled here only ever feed the planar arms and float.
+    const auto destWidth = lastDestWidth_.load(std::memory_order_relaxed);
+    const auto destHeight = lastDestHeight_.load(std::memory_order_relaxed);
+    if ((directYuv || floatRgb) &&
+        PrepareAdaptiveDownscale(frame, width, height, destWidth, destHeight)) {
+        uploadWidth = adaptiveSourceWidth_;
+        uploadHeight = adaptiveSourceHeight_;
+        uploadPlanes = AdaptivePlanes();
+        uploadLines = AdaptiveLines();
+    }
+    const auto pipelineResult = EnsurePipeline(uploadWidth, uploadHeight, input.layout, input.bitDepth,
         input.chromaWidthShift, input.chromaHeightShift, d3d11Frame);
     if (pipelineResult != FFFResult::Success) return pipelineResult;
     extensionReconstructed_ = false;
@@ -4783,36 +5646,73 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         // selected slice; this remains GPU-to-GPU and removes the full CPU transfer.
         context_->CopySubresourceRegion(sourceTextures_[0], 0, 0, 0, 0, texture, slice, nullptr);
     } else if (directYuv) {
-        if (input.layout == 1) {
-            // DISCARD permits storage renaming while the previous frame is
-            // sampled, avoiding updates of the same busy DEFAULT texture.
-            for (unsigned plane = 0; plane < 3; ++plane) {
-                D3D11_MAPPED_SUBRESOURCE mapped{};
-                if (FAILED(context_->Map(sourceTextures_[plane], 0,
-                    D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-                    SetError("Could not map the decoded frame plane.");
-                    return FFFResult::DeviceFailure;
+        // Planar (1) and semi-planar (2) frames arrive as CPU planes and must be
+        // copied into shader-visible textures. Two upload strategies, picked by size:
+        //
+        //  - Small frames: Map(WRITE_DISCARD) into a DYNAMIC texture. The driver can
+        //    rename storage rather than waiting for the previous frame to stop
+        //    sampling the same DEFAULT texture, which is why this path exists.
+        //  - Large frames (>= 4K): UpdateSubresource into a DEFAULT texture. Map
+        //    returns write-combined memory and copying into it row by row loses badly
+        //    as rows widen -- measured at 8K, 22.27 ms against 15.21 ms for the same
+        //    bytes, while at 1080p the two are within 6%. EnsurePipeline creates the
+        //    matching texture usage, so these two decisions must stay in step.
+        const auto uploadStart = std::chrono::steady_clock::now();
+        // uploadPlanes/uploadLines already point at the resampled copy when the
+        // adaptive policy engaged, and uploadWidth/uploadHeight match the textures
+        // EnsurePipeline just created for that size.
+        const auto largeFrame = UseDefaultUploadForSize(uploadWidth, uploadHeight);
+        if (input.layout == 1 || input.layout == 2) {
+            const auto planeCount = input.layout == 1 ? 3u : 2u;
+            if (largeFrame) {
+                for (unsigned plane = 0; plane < planeCount; ++plane)
+                    context_->UpdateSubresource(sourceTextures_[plane], 0, nullptr,
+                        uploadPlanes[plane], uploadLines[plane], 0);
+            } else {
+                for (unsigned plane = 0; plane < planeCount; ++plane) {
+                    D3D11_MAPPED_SUBRESOURCE mapped{};
+                    if (FAILED(context_->Map(sourceTextures_[plane], 0,
+                        D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                        SetError("Could not map the decoded frame plane.");
+                        return FFFResult::DeviceFailure;
+                    }
+                    const auto xShift = plane == 0 ? 0u : input.chromaWidthShift;
+                    const auto yShift = plane == 0 ? 0u : input.chromaHeightShift;
+                    const auto rows = (uploadHeight + (1u << yShift) - 1) >> yShift;
+                    const auto rowBytes = ((uploadWidth + (1u << xShift) - 1) >> xShift) *
+                        (input.bitDepth > 8 ? 2u : 1u);
+                    for (unsigned row = 0; row < rows; ++row)
+                        std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
+                            static_cast<std::size_t>(row) * mapped.RowPitch,
+                            uploadPlanes[plane] + static_cast<std::ptrdiff_t>(row) *
+                                uploadLines[plane], rowBytes);
+                    context_->Unmap(sourceTextures_[plane], 0);
                 }
-                const auto xShift = plane == 0 ? 0u : input.chromaWidthShift;
-                const auto yShift = plane == 0 ? 0u : input.chromaHeightShift;
-                const auto rows = (height + (1u << yShift) - 1) >> yShift;
-                const auto rowBytes = ((width + (1u << xShift) - 1) >> xShift) *
-                    (input.bitDepth > 8 ? 2u : 1u);
-                for (unsigned row = 0; row < rows; ++row)
-                    std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
-                        static_cast<std::size_t>(row) * mapped.RowPitch,
-                        frame->data[plane] + static_cast<std::ptrdiff_t>(row) *
-                            frame->linesize[plane], rowBytes);
-                context_->Unmap(sourceTextures_[plane], 0);
             }
         } else {
-            context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, frame->data[0], frame->linesize[0], 0);
-            context_->UpdateSubresource(sourceTextures_[1], 0, nullptr, frame->data[1], frame->linesize[1], 0);
+            context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, uploadPlanes[0],
+                uploadLines[0], 0);
         }
+        upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+            std::chrono::nanoseconds>(std::chrono::steady_clock::now() - uploadStart).count() / 100));
+    } else if (floatRgb) {
+        // Verbatim (no quantisation) so negatives and super-whites survive; taken from uploadPlanes/
+        // uploadLines, like directYuv above, so an engaged downscale cannot leave a top-left crop.
+        const auto floatUploadStart = std::chrono::steady_clock::now();
+        context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, uploadPlanes[0], uploadLines[0], 0);
+        upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+            std::chrono::nanoseconds>(std::chrono::steady_clock::now() - floatUploadStart).count() / 100));
     } else {
+        // Layout 0: convertedRgb_ already holds the frame at uploadWidth x uploadHeight,
+        // so the row pitch has to be the uploaded width. A decoded-width pitch inside a
+        // destination-sized texture makes UpdateSubresource read only the top-left corner
+        // of the conversion and drop the rest of the frame.
         const auto bytesPerPixel = input.bitDepth <= 8 ? 4u : 8u;
+        const auto rgbUploadStart = std::chrono::steady_clock::now();
         context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, convertedRgb_.data(),
-            width * bytesPerPixel, 0);
+            uploadWidth * bytesPerPixel, 0);
+        upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+            std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rgbUploadStart).count() / 100));
     }
     if (reconstructEnhancement) {
         extensionReconstructed_ = ReconstructExtensionEnhancement(width, height, input.layout, input.sampleScale);
@@ -4835,6 +5735,22 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // injection refresh path.
     settings.transfer = ResolveDecodeTransfer(hdrState);
     settings.gamut = gamut;
+    // Half-float RGB (JPEG XR's rgbaf16le) is linear scRGB by construction: jxrlib
+    // documents these formats as "scRGB formats. Gamma is 1.0", and the decoder sets
+    // no colour tags at all, so every metadata-driven guess above would be wrong --
+    // it would land on transfer 0 and sRGB-decode already-linear pixels, clipping the
+    // negatives and super-whites the FP16 texture was chosen to preserve.
+    //
+    // Keyed on the PIXEL FORMAT rather than a measured dynamic range: WIC's rule is
+    // that integer RGB is sRGB and float RGB is scRGB, independent of how wide the
+    // values happen to be (FH4-HDR.jxr peaks at only 4.56, so a ">1.0 means linear"
+    // heuristic would misfire). Transfer 3 means "already linear, do not decode".
+    // Gamut is forced to 709 after `gamut` is assigned, not before -- scRGB is defined
+    // on Rec.709 primaries, and assigning it earlier would be silently overwritten.
+    if (floatRgb) {
+        settings.transfer = 3u;
+        settings.gamut = 0u;
+    }
     settings.sdrPeak = sdrPeakNits_;
     settings.hdrPeak = settings.transfer == 0 ? 100.0f : hdrProcessor_.State().sourcePeakNits;
     sourcePeakNits_ = settings.hdrPeak;
@@ -4861,7 +5777,11 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     }
     settings.paperWhite = EffectivePaperWhiteNits();
     settings.targetPeak = hdrState.targetPeakNits;
-    settings.sourceWidth = static_cast<float>(width); settings.sourceHeight = static_cast<float>(height);
+    // Report the size actually uploaded: when adaptive downscale engaged this is the
+    // resampled size, and the shader scales from that. Using the original frame size
+    // here would make the shader sample a texture it believes is larger than it is.
+    settings.sourceWidth = static_cast<float>(uploadWidth);
+    settings.sourceHeight = static_cast<float>(uploadHeight);
     settings.outputWidth = static_cast<float>(swapWidth_); settings.outputHeight = static_cast<float>(swapHeight_);
     settings.inputLayout = extensionReconstructed_ ? 1u : input.layout;
     settings.sampleScale = extensionReconstructed_ ? 65535.0f / 1023.0f : input.sampleScale;
@@ -4887,6 +5807,11 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         ? AVCHROMA_LOC_LEFT : frame->chroma_location;
     ResolveChromaOffset(frame, input, chromaLocation,
         settings.chromaOffsetX, settings.chromaOffsetY);
+    // A still image that is being enlarged (its fitted destination is larger than the
+    // source) switches SampleVideo to pixel-block sampling so the picture keeps its
+    // own pixel grid. Shrinking one still needs the smoothing kernel, so the flag is
+    // only set when the destination actually exceeds the source.
+    settings.imageModeX = 0.0f;
     sourceColorSpace_ = frame->colorspace;
     sourceChromaLocation_ = chromaLocation;
     sourceFullRange_ = IsFullRange(frame);
@@ -4895,6 +5820,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     std::memcpy(&cachedVideoSettings_, &settings, sizeof(settings));
     sourceLimitedToNativeSize_ = limitToNativeSize;
     sourceCoverArt_ = coverArt;
+    sourceImageMode_ = imageMode;
     if (prepareOnly) return FFFResult::Success;
     hasCachedVideo_ = true;
     videoGeneration_.fetch_add(1);
@@ -5334,13 +6260,15 @@ FFFResult PlayerVideoRenderer::Set360View(const bool enabled, const float yaw,
     return FFFResult::Success;
 }
 
-FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) noexcept {
+FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
+    const std::uint32_t outputWidth, const std::uint32_t outputHeight) noexcept {
     if (!hasCachedVideo_ || target == nullptr) return FFFResult::InvalidState;
+    if (outputWidth == 0 || outputHeight == 0) return FFFResult::InvalidArgument;
     const auto projection360 = projection360Enabled_.load(std::memory_order_acquire) != 0;
     VideoDestination destination{};
     if (lyricsLayoutEnabled_.load(std::memory_order_acquire) && sourceLimitedToNativeSize_) {
         destination = CalculateLyricsCoverDestination(sourceWidth_, sourceHeight_,
-            swapWidth_, swapHeight_,
+            outputWidth, outputHeight,
             std::bit_cast<float>(coverRegionWidthPercentageBits_.load(
                 std::memory_order_acquire)),
             std::bit_cast<float>(lyricsRegionWidthPercentageBits_.load(
@@ -5352,14 +6280,26 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
             std::bit_cast<float>(coverVerticalPaddingPercentageBits_.load(
                 std::memory_order_acquire)));
     } else if (projection360) {
-        destination = {0, 0, swapWidth_, swapHeight_};
+        destination = {0, 0, outputWidth, outputHeight};
     } else {
         const auto aspect = discAspect_.load();
-        destination = CalculateVideoDestination(aspect > 0 ? static_cast<unsigned>(sourceHeight_ * aspect + 0.5f) : sourceWidth_, sourceHeight_, swapWidth_,
-            swapHeight_,
+        // A rotated view presents the picture with its axes swapped, so the fit
+        // box must be computed from the swapped dimensions; otherwise a portrait
+        // photo keeps a landscape box and is letterboxed into a sliver.
+        const auto rotation = viewRotation_.load(std::memory_order_acquire);
+        const auto swapAxes = (rotation & 1u) != 0;
+        const auto layoutWidth = swapAxes ? sourceHeight_ : sourceWidth_;
+        const auto layoutHeight = swapAxes ? sourceWidth_ : sourceHeight_;
+        destination = CalculateVideoDestination(
+            aspect > 0 ? static_cast<unsigned>(layoutHeight * aspect + 0.5f) : layoutWidth,
+            layoutHeight, outputWidth, outputHeight,
             sourceLimitedToNativeSize_ || fitLimitToNative_.load(std::memory_order_acquire));
     }
-    // Scale the fit box around its center; pan stays relative to that unzoomed box.
+    // Apply the view transform (zoom + pan) around the destination center.
+    // Zoom scales the fitted video box; pan offsets are normalized to the
+    // unzoomed box and clamped to the interval the transformed box can actually
+    // occupy: z > 1 slides a magnified box that still covers the fitted box,
+    // z < 1 slides a shrunken box inside it (letterbox around the picture).
     const auto zoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire));
     const auto panX = std::bit_cast<float>(viewPanXBits_.load(std::memory_order_acquire));
     const auto panY = std::bit_cast<float>(viewPanYBits_.load(std::memory_order_acquire));
@@ -5377,14 +6317,20 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         const float minY = std::min(edgeY0, edgeY1), maxY = std::max(edgeY0, edgeY1);
         // Travel range = half the interval, and it must be an **absolute** value: the
         // old max(maxPan, 0) form swallowed it to zero for z < 1, which killed panning
-        // entirely in the downscaled state. pan = +1 pushes the box as far left/up in
-        // both regimes, so the mapping stays continuous through z = 1.
+        // entirely in the downscaled state. The mapping stays continuous through z = 1.
+        //
+        // pan is positive = the picture moves right/down, i.e. it follows the pointer.
+        // The sign here was the opposite, which made a drag push the image away from the
+        // cursor -- measured with pan_direction_probe: panX = +0.5 moved the content 316
+        // px left, and the usual convention (lakeUI's PixelPictureBox, and scroll views
+        // generally) is that dragging right reveals what is to the left, so the image
+        // travels with the pointer. Adding the offset instead of subtracting matches that.
         const float offsetX = panX * std::abs(zoomedWidth - fittedWidth) / 2.0f;
         const float offsetY = panY * std::abs(zoomedHeight - fittedHeight) / 2.0f;
         destination.x = static_cast<std::int32_t>(std::lround(
-            std::clamp((minX + maxX) * 0.5f - offsetX, minX, maxX)));
+            std::clamp((minX + maxX) * 0.5f + offsetX, minX, maxX)));
         destination.y = static_cast<std::int32_t>(std::lround(
-            std::clamp((minY + maxY) * 0.5f - offsetY, minY, maxY)));
+            std::clamp((minY + maxY) * 0.5f + offsetY, minY, maxY)));
         destination.width = static_cast<std::uint32_t>(zoomedWidth);
         destination.height = static_cast<std::uint32_t>(zoomedHeight);
     }
@@ -5394,10 +6340,21 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         // image to the window first throws away source detail (and can distort
         // its 2:1 aspect ratio), especially in small windows. Sample the native
         // source planes directly in the projection shader instead.
-        auto* views = extensionReconstructed_ && actualMode_ != FFF3FPColorMode::RawHdrAsSdr
-            ? extensionReconstructedViews_ : sourceViews_;
-        std::copy(views, views + 3, presentationViews);
+        videoSuperResolutionActive_.store(false, std::memory_order_release);
+        std::copy(std::begin(sourceViews_), std::end(sourceViews_), presentationViews);
     } else {
+        // Rebuild the per-frame source views from the pipeline's decoded planes,
+        // then optionally redirect them at the RTX VSR upscale result. The
+        // pipeline-owned sourceViews_ array is never mutated, so switching VSR
+        // on or off mid-stream cannot corrupt the next frame.
+        for (std::size_t plane = 0; plane < ARRAYSIZE(effectiveSourceViews_); ++plane)
+            effectiveSourceViews_[plane] = sourceViews_[plane];
+        if (ApplySuperResolution(destination.width, destination.height) ==
+                FFFResult::Success &&
+            videoSuperResolutionActive_.load(std::memory_order_acquire)) {
+            for (std::size_t plane = 0; plane < ARRAYSIZE(effectiveSourceViews_); ++plane)
+                effectiveSourceViews_[plane] = superResolutionViews_[plane];
+        }
         const auto scaleResult = PrepareScaledVideo(destination.width, destination.height,
             presentationViews);
         if (scaleResult != FFFResult::Success) return scaleResult;
@@ -5416,7 +6373,13 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         static_cast<float>(destination.y), static_cast<float>(destination.width),
         static_cast<float>(destination.height), 0, presentationViews);
     if (result == FFFResult::Success) {
-        actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
+        // Report the path that actually produced the frame. A VP-upscaled frame
+        // leaves PrepareScaledVideo with zero passes (source already equals the
+        // target), so this is the only place that knows VSR ran.
+        actualVideoScalingMode_.store(
+            videoSuperResolutionActive_.load(std::memory_order_acquire)
+                ? FFF3FPVideoScalingMode::D3D11VideoProcessor
+                : FFF3FPVideoScalingMode::Shader);
         // Record the drawn rect for GetRenderTargetInfo.
         lastDestX_.store(destination.x, std::memory_order_relaxed);
         lastDestY_.store(destination.y, std::memory_order_relaxed);
@@ -5695,9 +6658,22 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::PlayerInformation);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     const auto generation = videoGeneration_.load();
-    // presentMutex_ protects the chain/back buffer from reconfiguration. Keep
-    // their references, but release the context lock while DXGI waits so the
-    // playback worker can upload the next frame without changing this composite.
+    // presentMutex_ protects the chain/back buffer from reconfiguration, and it is
+    // still held across Present. deviceMutex_ guards the immediate context, and is
+    // released for the duration so the playback worker can upload the next frame
+    // instead of stalling behind a synchronised Present.
+    //
+    // This is safe but not free, and the cost is worth naming: the D3D11 immediate
+    // context accepts commands from any thread, so an upload landing inside this
+    // window is legal, but its commands interleave with the composite that is
+    // already waiting on the GPU. That makes submission order across the two threads
+    // non-deterministic and is the most likely source of the present-wait jitter we
+    // measured (2.1-5.9 ms spread run to run, wider than the effect of any scheduling
+    // change we tested). Reconfiguration cannot slip in here -- it needs presentMutex_,
+    // which is still held -- so this does not risk tearing down the live chain.
+    //
+    // If the jitter ever becomes a problem, the clean fix is a deferred context for
+    // uploads rather than re-taking this lock, which would reintroduce the stall.
     ComPtr<IDXGISwapChain4> retainedChain = swapChain_;
     deviceLock.unlock();
     const auto result = PresentCurrentFrame(retainedChain.Get(), generation);
@@ -5785,6 +6761,8 @@ bool PlayerVideoRenderer::RequestRecoveryIfDeviceLostLocked() noexcept {
 void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseVideoProcessor();
     ReleaseVideoProcessorInputSurface();
+    ReleaseSuperResolutionResources();
+    ReleaseOffscreenTarget();
     ReleaseCoverBackdropResources();
     ReleaseTimedTextResources();
     ReleaseScaleResources();
@@ -5835,6 +6813,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     sourceExternal_ = false;
     sourceLimitedToNativeSize_ = false;
     sourceCoverArt_ = false;
+    sourceImageMode_ = false;
     hasCachedVideo_ = false;
     hdrMonitor_ = nullptr;
     hdrSupportValid_ = false;
@@ -5859,8 +6838,11 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
+    if (adaptiveScaler_ != nullptr) { sws_freeContext(adaptiveScaler_); adaptiveScaler_ = nullptr; }
     ReleaseVideoProcessor();
     ReleaseVideoProcessorInputSurface();
+    ReleaseSuperResolutionResources();
+    ReleaseOffscreenTarget();
     ReleaseCoverBackdropResources();
     ReleaseScaleResources();
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
@@ -5881,6 +6863,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     std::vector<std::uint8_t>().swap(convertedRgb_);
     hasCachedVideo_ = false; sourceExternal_ = false; sourceLimitedToNativeSize_ = false;
     sourceCoverArt_ = false;
+    sourceImageMode_ = false;
     projection360Enabled_.store(0, std::memory_order_release);
     view360YawBits_.store(std::bit_cast<float>(0.0f), std::memory_order_relaxed);
     view360PitchBits_.store(std::bit_cast<float>(0.0f), std::memory_order_relaxed);
@@ -5891,7 +6874,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     countedVideoGeneration_.store(0);
     presentedVideoFrames_.store(0); coalescedVideoFrames_.store(0);
     swapChainPresents_.store(0); presentWait100ns_.store(0);
-    deviceLockWait100ns_.store(0); softwareConvert100ns_.store(0);
+    deviceLockWait100ns_.store(0); softwareConvert100ns_.store(0); upload100ns_.store(0);
     {
         std::lock_guard lock(timedTextMutex_);
         ++presentationGeneration_;
@@ -5914,6 +6897,7 @@ void PlayerVideoRenderer::Close() noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
+    if (adaptiveScaler_ != nullptr) { sws_freeContext(adaptiveScaler_); adaptiveScaler_ = nullptr; }
     ReleaseDeviceObjects();
     ReleaseCom(writeFactory_);
     ReleaseCom(d2dFactory_);
@@ -6007,11 +6991,54 @@ bool PlayerVideoRenderer::HasOutputWindow() const noexcept {
 std::uint64_t PlayerVideoRenderer::PresentWait100ns() const noexcept { return presentWait100ns_.load(); }
 std::uint64_t PlayerVideoRenderer::DeviceLockWait100ns() const noexcept { return deviceLockWait100ns_.load(); }
 std::uint64_t PlayerVideoRenderer::SoftwareConvert100ns() const noexcept { return softwareConvert100ns_.load(); }
+std::uint64_t PlayerVideoRenderer::Upload100ns() const noexcept { return upload100ns_.load(); }
 std::uint32_t PlayerVideoRenderer::OutputBitDepth() const noexcept {
     return swapOutputBits_.load(std::memory_order_acquire);
 }
 FFF3FPVideoScalingMode PlayerVideoRenderer::ActualVideoScalingMode() const noexcept {
     return actualVideoScalingMode_.load();
+}
+
+FFFResult PlayerVideoRenderer::SetVideoSuperResolution(
+    const FFF3FPVideoSuperResolution mode) noexcept {
+    if (mode != FFF3FPVideoSuperResolution::Off &&
+        mode != FFF3FPVideoSuperResolution::Auto)
+        return FFFResult::InvalidArgument;
+    // A new request clears a previous driver rejection: the user may have just
+    // turned the feature on in the NVIDIA control panel, and re-probing costs
+    // one extension call per frame at worst until the next blit settles it.
+    if (mode == FFF3FPVideoSuperResolution::Auto && videoSuperResolutionRejected_)
+        videoSuperResolutionRejected_ = false;
+    requestedVideoSuperResolution_.store(mode, std::memory_order_release);
+    if (mode == FFF3FPVideoSuperResolution::Off) {
+        videoSuperResolutionActive_.store(false, std::memory_order_release);
+        videoSuperResolutionReason_.store(FFF3FPVideoSuperResolutionReason::NotRequested,
+            std::memory_order_release);
+    }
+    return FFFResult::Success;
+}
+
+FFF3FPVideoSuperResolution PlayerVideoRenderer::RequestedVideoSuperResolution() const noexcept {
+    return requestedVideoSuperResolution_.load(std::memory_order_acquire);
+}
+
+bool PlayerVideoRenderer::VideoSuperResolutionActive() const noexcept {
+    return videoSuperResolutionActive_.load(std::memory_order_acquire);
+}
+
+void PlayerVideoRenderer::FillVideoSuperResolutionStatus(
+    FFF3FPVideoSuperResolutionStatus& status) const noexcept {
+    status.requested = requestedVideoSuperResolution_.load(std::memory_order_acquire);
+    status.nvidiaAdapter = nvidiaAdapter_ ? 1u : 0u;
+    status.active = videoSuperResolutionActive_.load(std::memory_order_acquire) ? 1u : 0u;
+    status.driverRejected = videoSuperResolutionRejected_ ? 1u : 0u;
+    status.reason = status.active
+        ? FFF3FPVideoSuperResolutionReason::None
+        : videoSuperResolutionReason_.load(std::memory_order_acquire);
+    status.sourceWidth = videoSuperResolutionSourceWidth_;
+    status.sourceHeight = videoSuperResolutionSourceHeight_;
+    status.targetWidth = videoSuperResolutionTargetWidth_;
+    status.targetHeight = videoSuperResolutionTargetHeight_;
 }
 std::string PlayerVideoRenderer::FallbackReason() const {
     try { std::lock_guard fallbackLock(fallbackMutex_); return fallbackReason_; }

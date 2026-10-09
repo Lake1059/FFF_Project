@@ -129,6 +129,44 @@ struct FFF3FPConfiguration {
     // The display gate (OutputSupportsHdr) still applies in both modes: on a
     // non-Advanced Color display the SDR chain is used unchanged.
     std::uint32_t sdrScRgbMode = 0;
+    // Adaptive downscale-before-upload. Software-decoded frames cross PCIe as whole
+    // planes -- an 8K P010 frame is ~100 MB -- which caps playback well below the
+    // source rate on a bus that cannot carry it. When the session is software decoding
+    // AND the renderer is dropping a large share of frames, resampling the frame down
+    // to the size actually on screen first cuts that transfer by roughly the square of
+    // the ratio, for about a millisecond of CPU work.
+    //
+    // Off by default. It never engages for hardware decoding (those frames are already
+    // GPU-resident, so there is nothing to save) or for still images.
+    //   0 = Disabled (default)
+    //   1 = Enabled: engage automatically once drops are sustained
+    std::uint32_t adaptiveDownscaleBeforeUpload = 0;
+    // Sustained drop ratio, in percent, that engages the adaptive downscale. Measured
+    // over a rolling window so one hiccup cannot trigger it. A lower value engages
+    // sooner, at the cost of resampling even when the pipeline was nearly keeping up.
+    std::uint32_t adaptiveDownscaleDropPercent = 20;
+    // Adaptive software-decoder thread count. A fixed count is wrong in both
+    // directions. Measured here, the decode optimum lands around 6-12 workers
+    // depending on codec and resolution (8K HEVC 6, 8K AV1 8, 4K AV1 32), and going
+    // past it actively hurts: 8K HEVC at 32 threads is 2.14x slower than at 6, because
+    // those frames are memory-bandwidth bound and extra workers only contend. Equally,
+    // an easy source does not need the workers at all, so starting low and growing
+    // only under pressure keeps the CPU free when playback is comfortable.
+    //
+    // Bounded to [minSoftwareDecoderThreads, maxSoftwareDecoderThreads], and never
+    // applied to hardware decoding.
+    //   0 = Disabled: one fixed count chosen at open time (the previous behaviour)
+    //   1 = Enabled: adapt within the bounds below
+    std::uint32_t adaptiveDecoderThreads = 0;
+    // Ladder bounds. Clamped to [1, 64]; ffmpeg caps the usable count itself.
+    std::uint32_t minSoftwareDecoderThreads = 4;
+    std::uint32_t maxSoftwareDecoderThreads = 32;
+    // Sustained drop ratio, in percent, meaning "decoding cannot keep up", which grows
+    // the ladder; below the shrink threshold it shrinks again. Same rolling-window idea
+    // as the adaptive downscale but with separate thresholds, so the two policies
+    // cannot drive each other into oscillation.
+    std::uint32_t decoderGrowDropPercent = 10;
+    std::uint32_t decoderShrinkDropPercent = 2;
 };
 
 struct FFF3FPSnapshot {
@@ -160,6 +198,7 @@ struct FFF3FPSnapshot {
     // report renderer state only; the media clock remains the owner of video
     // presentation timing.
     std::uint64_t decodedAudioFrames;
+    // (The IAMF fields live at the end of this struct -- see iamfActive there.)
     std::int64_t audioPosition100ns;
     std::int64_t bufferedAudio100ns;
     std::uint64_t audioUnderruns;
@@ -223,6 +262,32 @@ struct FFF3FPSnapshot {
     std::uint64_t dynamicMetadataSerial;
     std::uint64_t dynamicMetadataHeldFrames;
     std::uint32_t dynamicMetadataTargetedNits;
+    // IAMF immersive audio. Appended at the tail like every other field in this
+    // struct: hosts and our own probes read it by fixed offset, so a field placed
+    // in the middle would silently shift everything after it.
+    // iamfActive is set when the AOM reference decoder is rendering the track;
+    // iamfChannels is then the *render target* channel count (7.1.4 = 12) rather
+    // than one substream's share, and iamfSoundSystem carries the OAR sound system.
+    std::uint32_t iamfActive;
+    std::uint32_t iamfChannels;
+    std::int32_t iamfSoundSystem;
+
+    // Time spent copying decoded planes into the shader-visible textures, in the
+    // same 100 ns base as the other diagnostics. Strictly appended at the end:
+    // putting a new field earlier would shift every field after it, and hosts
+    // (and our own probes) read the struct by fixed offset. The upload path had no
+    // metric at all before this, so upload changes could not be measured.
+    std::uint64_t videoUpload100ns;
+    // IAMF: channels the *content* declares, which is not the same as iamfChannels.
+    // The render target is always 7.1.4 (12), and when the content is smaller libiamf
+    // fills the speakers it does not have with digital silence rather than upmixing --
+    // verified against its own iamfdec: a 7.1 file rendered at -s5 still produces 12
+    // channels, with exactly four of them at peak -inf. So iamfChannels answers "what are
+    // we rendering into" while this answers "what is actually in the file", and a UI that
+    // showed only the former would label a 7.1 track as 7.1.4 even though four speakers
+    // will stay silent. 0 when libiamf reports no per-element detail.
+    // Appended at the end for the same offset reason as videoUpload100ns above.
+    std::uint32_t iamfContentChannels;
 };
 
 struct FFF3FPAudioPeakLevels {
@@ -473,6 +538,56 @@ struct FFF3FPVideoPixelProbe {
     std::uint32_t reserved;
 };
 
+// NVIDIA RTX Video Super Resolution (driver-level D3D11 video processor
+// extension). This is a switch, NOT a default: Off unless the host asks for it.
+//
+// Scope and safety: VSR runs an AI model, so the presented pixels stop being a
+// reproducible function of the decoded frame. Hosts that compare frames
+// pixel-for-pixel must leave it Off, which is also why the renderer refuses to
+// enable it while a comparison-style mode is active.
+enum class FFF3FPVideoSuperResolution : std::uint32_t {
+    // Default. The shader scaling path is used exactly as before.
+    Off = 0,
+    // Attempt VSR whenever the source satisfies the driver's conditions
+    // (upscaling, source height 360p..1440p, NVIDIA adapter).
+    Auto = 1,
+};
+
+// Why the last presented frame did or did not use VSR. Reported so a host can
+// explain the state without guessing; 0 means "used" when active is 1.
+enum class FFF3FPVideoSuperResolutionReason : std::uint32_t {
+    None = 0,
+    NotRequested = 1,
+    NotNvidiaAdapter = 2,
+    NotUpscaling = 3,
+    SourceResolutionOutOfRange = 4,
+    UnsupportedSourceFormat = 5,
+    DriverRejected = 6,
+};
+
+struct FFF3FPVideoSuperResolutionStatus {
+    std::uint32_t size;
+    std::uint32_t version; // == 1
+    FFF3FPVideoSuperResolution requested;
+    // The adapter backing the renderer's D3D11 device is NVIDIA.
+    std::uint32_t nvidiaAdapter;
+    // VSR was requested and VideoProcessorBlt succeeded on the last frame.
+    // IMPORTANT: this means "the driver accepted the request and the blit did
+    // not fail" -- NOT a guarantee that the image was perceptibly enhanced.
+    // The extension has no reliable capability query, so an accepted request is
+    // the strongest signal available (NVIDIA's own status indicator exists for
+    // the same reason).
+    std::uint32_t active;
+    // The driver rejected the request or the blit failed; VSR is latched off
+    // for the lifetime of this device.
+    std::uint32_t driverRejected;
+    FFF3FPVideoSuperResolutionReason reason;
+    std::uint32_t sourceWidth;
+    std::uint32_t sourceHeight;
+    std::uint32_t targetWidth;
+    std::uint32_t targetHeight;
+};
+
 #ifdef FFFNATIVE_EXPORTS
 #define FFF3FP_API extern "C" __declspec(dllexport)
 #else
@@ -533,8 +648,21 @@ FFF3FP_API FFFResult FFF3FP_SetInteractiveMove(FFF3FPHandle player, std::uint32_
 // View transform for frame inspection: zoom scales the fitted video box
 // (1.0 = fit, >1 = magnify), panX/panY are normalized offsets in [-1,1]
 // relative to the unzoomed box.
+//
+// pan is positive = the picture moves right/down, so it follows the pointer: a drag to
+// the right should be sent as increasing panX, and the image travels with the cursor.
+// That is the convention scroll views use, and what lakeUI's PixelPictureBox does
+// (_scrollX = start - dx). This sign was inverted here until it was measured; a host
+// written against the old behaviour should negate its pan values.
 FFF3FP_API FFFResult FFF3FP_SetViewTransform(FFF3FPHandle player,
     float zoom, float panX, float panY) noexcept;
+// Cursor-anchored zoom. Multiplies the current zoom by `factor` (use 1.25 to step in and
+// 0.8 to step out, matching lakeUI's PixelPictureBox) while keeping whatever is under the
+// given point fixed. anchorX/anchorY are normalised to [0,1] across the client area, so a
+// host can pass the wheel position directly without knowing the fit geometry.
+// Appended export: hosts that never call it are unaffected.
+FFF3FP_API FFFResult FFF3FP_ZoomViewAt(FFF3FPHandle player,
+    float factor, float anchorX, float anchorY, float* resultingZoom) noexcept;
 // enable == 0 keeps the behavior above. enable == 1 caps the fitted box
 // at the source's native size, which turns zoom into an absolute screen:video pixel
 // ratio (zoom 1 = pixel-exact 1:1 instead of fit-to-window, and larger windows show
@@ -873,3 +1001,81 @@ FFF3FP_API FFFResult FFF3FP_CopyAssSubtitlePixels(FFF3FPAssSubtitleHandle render
 FFF3FP_API FFFResult FFF3FP_GetAssSubtitleLastError(FFF3FPAssSubtitleHandle renderer,
     char* outputUtf8, std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 FFF3FP_API void FFF3FP_DestroyAssSubtitle(FFF3FPAssSubtitleHandle renderer) noexcept;
+
+// --- RTX Video Super Resolution (opt-in switch; see the enum above) ---
+//
+// These are appended AFTER the v16 surface and deliberately do not change
+// FFF3FPConfiguration or PlayerApiVersion: FFF3FP_Create rejects a version
+// mismatch outright, so bumping it would break every existing host (the 3FC
+// shell included) until it is rebuilt in lockstep. Hosts are expected to
+// resolve these entry points dynamically (GetProcAddress) and degrade when
+// they are absent, which is how a single host can drive both a pre-VSR kernel
+// and this one.
+//
+// Takes effect from the next presented frame; safe to call during playback.
+// Returns InvalidArgument for an out-of-range enum value, and InvalidState
+// when the host asks to enable VSR while a comparison-style mode is active.
+FFF3FP_API FFFResult FFF3FP_SetVideoSuperResolution(FFF3FPHandle player,
+    FFF3FPVideoSuperResolution mode) noexcept;
+FFF3FP_API FFFResult FFF3FP_GetVideoSuperResolutionStatus(FFF3FPHandle player,
+    FFF3FPVideoSuperResolutionStatus* status) noexcept;
+
+// --- Frame readback for screenshots ---
+//
+// Appended after the v16 surface like the VSR and rotation exports, so
+// PlayerApiVersion is unchanged and an existing host keeps working. Resolve
+// dynamically (GetProcAddress) and degrade when absent.
+//
+// Why this exists: the host's old screenshot path captured the *screen*
+// (Graphics.CopyFromScreen). That fails whenever the window is occluded or
+// minimised, and an HDR frame comes back as DWM's SDR-mapped 8-bit result. This
+// renders off-screen instead, so it is independent of window visibility and can
+// carry an HDR / wide-gamut frame at full precision.
+enum class FFF3FPCopyFrameLayout : std::uint32_t {
+    // Source resolution, honouring the view rotation (a rotated photo comes out
+    // portrait). This is the "original picture" a user expects from a screenshot.
+    Source = 0,
+    // The current swap-chain size: what the window is showing right now.
+    Window = 1,
+};
+
+enum class FFF3FPCopyFrameFormat : std::uint32_t {
+    // 32bpp BGRA, 4 bytes per pixel. SDR code values.
+    Bgra8 = 0,
+    // 16-bit half-float RGBA, 8 bytes per pixel, in the linear scRGB contract
+    // (1.0 = 80 nits) -- i.e. the same values the HDR swap chain receives. A host
+    // that writes this to a file must map it to PQ/HLG itself; writing the raw
+    // numbers as if they were sRGB will look wrong.
+    Rgba16Float = 1,
+};
+
+// Two-call contract, like FFF3FP_CopyBitmapSubtitlePixels: pass pixels = null to
+// learn *width/*height, then call again with a buffer of width*height*bpp bytes.
+// Capacity is measured in bytes. Returns BufferTooSmall when capacity is short,
+// and writes the required size into *width/*height in both cases.
+FFF3FP_API FFFResult FFF3FP_CopyFrame(FFF3FPHandle player, void* pixels,
+    std::uint32_t capacity, std::uint32_t* width, std::uint32_t* height,
+    FFF3FPCopyFrameLayout layout, FFF3FPCopyFrameFormat format) noexcept;
+// Bit depth of the most recent FFF3FP_CopyFrame result: 8 for Bgra8, 16 for
+// Rgba16Float. Lets a host label the file it just wrote without re-deriving it.
+FFF3FP_API FFFResult FFF3FP_GetLastCopyFrameBitDepth(FFF3FPHandle player,
+    std::uint32_t* bitDepth) noexcept;
+
+// --- View rotation (quarter turns clockwise, 0..3) ---
+//
+// Appended after the v16 surface, like the VSR entry points above, so
+// FFF3FPConfiguration and PlayerApiVersion stay untouched and an existing host
+// keeps working without a rebuild. Resolve dynamically (GetProcAddress) and
+// degrade when absent.
+//
+// Rotation is a *view* property: it does not re-decode and does not touch the
+// pixel format. The renderer rotates the sampling coordinate and swaps the fit
+// box's axes, so a portrait photo fills a portrait-shaped box instead of being
+// letterboxed. Values above 3 are InvalidArgument. Disc playback has its own
+// geometry path and returns Success without changing anything.
+FFF3FP_API FFFResult FFF3FP_SetViewRotation(FFF3FPHandle player,
+    std::uint32_t quarterTurnsClockwise) noexcept;
+// Reads back the current rotation; useful for hosts that cycle R / Shift+R and
+// need to keep their UI in step after a device-loss reset.
+FFF3FP_API FFFResult FFF3FP_GetViewRotation(FFF3FPHandle player,
+    std::uint32_t* quarterTurnsClockwise) noexcept;

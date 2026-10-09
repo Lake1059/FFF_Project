@@ -41,6 +41,20 @@ if ($MissingFfmpegFiles.Count -ne 0) {
     }
 }
 
+# FFF.Player references the UI library by hint path
+# (..\..\LakeUI\LakeUI\bin\Debug\...\LakeUI.dll). LakeUI is a sibling repository
+# that is not part of this one and ships no binaries, so on a fresh machine the host
+# build dies with hundreds of "undefined type LakeUI.*" errors that never name the
+# real cause. Say what to do instead of letting the compiler shout.
+$LakeUiRoot = Join-Path (Split-Path -Parent $ProjectRoot) "LakeUI\LakeUI\bin\Debug"
+$LakeUiFound = 0
+if (Test-Path -LiteralPath $LakeUiRoot) {
+    $LakeUiFound = @(Get-ChildItem -LiteralPath $LakeUiRoot -Recurse -Filter "LakeUI.dll" -File).Count
+}
+if ($LakeUiFound -eq 0) {
+    throw "LakeUI has not been built. FFF.Player hints a DLL under ..\..\LakeUI\LakeUI\bin\Debug, and LakeUI is a sibling repository that is not vendored here. Build it first: dotnet build <this repo>\..\LakeUI\LakeUI\LakeUI.vbproj -c Debug"
+}
+
 & $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") `
     /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }

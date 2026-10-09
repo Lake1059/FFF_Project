@@ -49,6 +49,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private Const 蓝色 As UInteger = &HFF75A7FFUI
     Private Const 紫色 As UInteger = &HFFC58CFFUI
     Private Const 橙色 As UInteger = &HFFFFA85AUI
+    ' 告警色：比橙色更偏红，与所有"普通信息"色（青/黄/绿/品红/蓝/紫/橙）都能区分，
+    ' 避免用户把异常当成又一条常规读数。
+    Private Const 告警色 As UInteger = &HFFFF6B6BUI
     Private Const 默认信息字体 As String = "Microsoft YaHei UI"
     Private Const 信息字号 As Single = 11.0F
 
@@ -262,8 +265,23 @@ Friend NotInheritable Class 播放器信息图层呈现器
             Dim 音频概要 = If(String.IsNullOrEmpty(编码), $"WASAPI {WASAPI}",
                            $"{编码} - WASAPI {WASAPI}")
             添加配对行如果有值(结果, "音频：", 音频概要, 品红, 8)
+            ' IAMF 由 AOM 参考解码器接管时，容器里那条音轨的编码名（如 opus/flac）
+            ' 并不能说明实际声场 —— 同一素材在旧路径下会显示为 stereo。这一行把
+            ' 真实声道布局摆出来，用户才能确认沉浸声是否真的生效。
+            添加配对行如果有值(结果, "声场：", 快照.IAMF描述, 青色)
             添加配对行如果有值(结果, "输入：", 音频输入(音频, 快照.音频实时比特率), 紫色)
             添加配对行如果有值(结果, "输出：", 音频输出(音频, 快照), 绿色)
+            ' 音频健康度：只在**异常时**出现。
+            '
+            ' 这一行的由来值得记录：本轮排查中发现的 IAMF 时间戳 208 倍误差
+            ' （导致排队 207 秒静音）和抖动计数 100% 误报，都是**任何现有指标都没报警**
+            ' 的缺陷 —— 前者把 207 秒静音推给端点，后者让"抖动"永远非零而失去意义。
+            ' 管线本身不缺正确性，缺的是"出问题时能被发现"。
+            '
+            ' 因此这里刻意不常驻：正常播放多一行数字只会稀释真正重要的信息，
+            ' 而异常一旦出现就必须显眼（用告警色而不是普通信息色）。
+            Dim 音频告警 = 音频健康度(快照)
+            添加配对行如果有值(结果, "音频告警：", 音频告警, 告警色)
         End If
 
         Dim 字幕文本 = If(字幕 Is Nothing, "未加载", 合并字段(
@@ -540,6 +558,28 @@ Friend NotInheritable Class 播放器信息图层呈现器
             If(声道 > 0, $"声道数 {声道}", String.Empty),
             $"缓冲区 {快照.音频缓冲时长.TotalMilliseconds:0}ms",
             $"欠载 {快照.音频欠载次数}")
+    End Function
+
+    ''' <summary>音频健康度：只在异常时返回非空，正常播放不占一行。</summary>
+    ''' <remarks>
+    ''' 为什么需要它：本轮排查发现的 IAMF 时间戳 208 倍误差（排队 207 秒静音）和
+    ''' 抖动计数 100% 误报，都是现有指标**没有报警**的缺陷 —— 前者把大量静音推给
+    ''' 端点并让播放卡在末尾，后者让"抖动"永远非零因而失去意义。
+    '''
+    ''' 「缓冲区」与「欠载」已在"输出"行常驻显示，所以这里**只报真正不可见的那几个**：
+    ''' 抖动、不连续、插入静音、丢弃重叠、拒绝帧。刻意不常驻：正常播放多一行数字
+    ''' 只会稀释重要信息，异常出现时才需要显眼。
+    ''' </remarks>
+    Private Shared Function 音频健康度(快照 As 播放器快照) As String
+        If 快照 Is Nothing Then Return String.Empty
+        Dim 问题 As New List(Of String)
+        If 快照.音频不连续次数 > 0 Then 问题.Add($"不连续 {快照.音频不连续次数}")
+        If 快照.音频时间戳抖动帧数 > 0 Then 问题.Add($"抖动 {快照.音频时间戳抖动帧数}")
+        If 快照.音频插入静音帧数 > 0 Then 问题.Add($"补静音 {快照.音频插入静音帧数}")
+        If 快照.音频丢弃重叠帧数 > 0 Then 问题.Add($"丢重叠 {快照.音频丢弃重叠帧数}")
+        If 快照.音频拒绝帧数 > 0 Then 问题.Add($"拒绝 {快照.音频拒绝帧数}")
+        If 问题.Count = 0 Then Return String.Empty
+        Return 合并字段(问题.ToArray())
     End Function
 
     Private Shared Function 图层延迟(状态 As 定时文字状态) As String
