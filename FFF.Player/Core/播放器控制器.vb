@@ -298,6 +298,43 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    ''' <summary>本机内核是否提供 RTX 视频超分辨率。False 时 UI 应置灰并说明，
+    ''' 而不是让开关看起来"开了却没效果"。</summary>
+    Friend ReadOnly Property 支持视频超分辨率 As Boolean
+        Get
+            Dim 目标 = 会话
+            If 已释放 OrElse 目标 Is Nothing Then Return 播放器原生接口.支持视频超分辨率
+            Return 目标.支持视频超分辨率
+        End Get
+    End Property
+
+    ''' <summary>RTX 视频超分辨率开关。转发到会话层，失败静默（同 设置视图旋转）。</summary>
+    Friend Sub 设置视频超分辨率(开启 As Boolean)
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return
+        Try
+            目标.设置视频超分辨率(开启)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
+    ''' <summary>读取 VSR 状态并翻成可显示文本。读不到（内核不支持或会话未建立）返回 Nothing，
+    ''' 由 UI 显示"未读取"——不伪造一个"未生效"。</summary>
+    Friend Function 视频超分辨率状态文本() As String
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return Nothing
+        Try
+            Dim 状态 As 原生视频超分辨率状态
+            If Not 目标.读取视频超分辨率状态(状态) Then Return Nothing
+            Return 播放器会话.视频超分辨率状态文本(状态)
+        Catch ex As ObjectDisposedException
+            Return Nothing
+        Catch ex As 播放器异常
+            Return Nothing
+        End Try
+    End Function
+
     ''' <summary>手动旋转：顺时针 / 逆时针 90°。R = 顺，Shift+R = 逆。</summary>
     Friend Sub 手动旋转(顺时针 As Boolean)
         Dim 目标 = 会话

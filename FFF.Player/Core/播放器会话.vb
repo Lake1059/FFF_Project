@@ -24,6 +24,9 @@ Public NotInheritable Class 播放器会话
     Private Shared ReadOnly 原生播放器快照大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生播放器快照)())
     Private Shared ReadOnly 原生视频像素探针大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生视频像素探针)())
     Private Shared ReadOnly 原生音频峰值大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生音频峰值)())
+    ' RTX VSR 状态：内核要求 size >= sizeof(44) 且 version = PlayerApiVersion，两者缺一即拒。
+    Private Shared ReadOnly 原生视频超分辨率状态大小 As UInteger =
+        CUInt(Marshal.SizeOf(Of 原生视频超分辨率状态)())
     Private ReadOnly 定时文字提交锁 As New Object()
     Private ReadOnly 定时文字UTF8缓存 As New Dictionary(Of String, IntPtr)(StringComparer.Ordinal)
     Private ReadOnly 定时文字临时指针 As New List(Of IntPtr)()
@@ -246,6 +249,56 @@ Public NotInheritable Class 播放器会话
             Return 0UI
         End Get
     End Property
+
+    ''' <summary>本机加载的内核是否提供 RTX 视频超分辨率入口。
+    ''' 供 UI 决定"置灰 + 说明"还是"可切换"，不是靠试调用捕获异常来猜。</summary>
+    Public ReadOnly Property 支持视频超分辨率 As Boolean
+        Get
+            Return 播放器原生接口.支持视频超分辨率
+        End Get
+    End Property
+
+    ''' <summary>RTX 视频超分辨率开关：True = 请求 Auto（内核逐帧判定要不要真用），
+    ''' False = 请求 Off。
+    ''' <para>内核不支持该导出、或返回非成功时**静默忽略**：VSR 是可选增强，
+    ''' 不该让一次开关把播放会话变成错误弹窗。UI 侧用 支持视频超分辨率 区分
+    ''' "没这个能力"与"有但这一帧没满足条件"。</para>
+    ''' <para>注意：重新请求 True 会清掉内核的"驱动拒绝"闩并重新探测，
+    ''' 所以关掉再打开就是那条唯一的复位路径。</para></summary>
+    Public Sub 设置视频超分辨率(开启 As Boolean)
+        If Not 播放器原生接口.设置视频超分辨率(取得句柄(), 开启) Then Return
+        本机视频超分辨率已请求 = 开启
+    End Sub
+
+    ''' <summary>宿主侧最后一次成功登记的请求（仅供 UI 回显勾选态；
+    ''' 真实生效与否要看 读取视频超分辨率状态）。</summary>
+    Public Property 本机视频超分辨率已请求 As Boolean = False
+
+    ''' <summary>读取内核的 VSR 状态。内核不支持或未成功时返回 False。
+    ''' Friend 而非 Public：状态是 Friend 结构，Public 成员不能外泄它（BC30909）。</summary>
+    Friend Function 读取视频超分辨率状态(ByRef 状态 As 原生视频超分辨率状态) As Boolean
+        状态 = New 原生视频超分辨率状态 With {
+            .大小 = 原生视频超分辨率状态大小, .版本 = 期望API版本}
+        Return 播放器原生接口.读取视频超分辨率状态(取得句柄(), 状态)
+    End Function
+
+    ''' <summary>把内核的原因码翻成人话。逐值对应 FFF3FPVideoSuperResolutionReason。
+    ''' <para>最后一句是刻意的：内核的"生效"只表示驱动没有拒绝这次请求，
+    ''' 该路径没有任何能力查询可用（实测连伪造的 GUID 都返回成功），
+    ''' 所以这里不能写成"已增强"。</para></summary>
+    Friend Shared Function 视频超分辨率状态文本(状态 As 原生视频超分辨率状态) As String
+        If 状态.生效 <> 0UI Then Return "驱动已接受本次请求（不等于画面已被增强）"
+        Select Case 状态.原因
+            Case 1UI : Return "未请求"
+            Case 2UI : Return "渲染适配器不是 NVIDIA"
+            Case 3UI : Return "当前不是放大（窗口不大于画面）"
+            Case 4UI : Return $"源高度 {状态.源高} 不在 360..1440 区间"
+            Case 5UI : Return "源格式不支持送入视频处理器（如软解上传路径）"
+            Case 6UI : Return "驱动拒绝过，已闩住；关掉再打开可重新探测"
+            Case Else : Return If(状态.驱动拒绝闩 <> 0UI, "驱动拒绝过", "内核未报告原因")
+        End Select
+    End Function
+
 
     Private 自动转正偏好 As Boolean = True
 

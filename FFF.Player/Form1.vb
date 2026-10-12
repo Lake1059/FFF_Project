@@ -36,6 +36,7 @@ Public Class Form1
     Private 视角360控制器 As 播放器360视角控制器
     Private 图片浏览控制器 As 播放器图片浏览控制器
     Private 视图旋转控制器 As 播放器视图旋转控制器
+    Private 视频超分辨率控制器 As 播放器视频超分辨率控制器
     Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
@@ -182,6 +183,17 @@ Public Class Form1
             设置.实例对象.自动转正,
             Sub(值) 设置.实例对象.自动转正 = 值)
         AddHandler 播放控制器.媒体已打开, AddressOf 视图旋转控制器.媒体已打开
+        ' RTX 视频超分辨率：内核逐帧判定，宿主只负责"请求/取消"与把原因摊开。
+        ' 媒体打开后重放偏好是必需的——VSR 请求是会话内状态，新会话从内核默认的 Off 起步。
+        视频超分辨率控制器 = New 播放器视频超分辨率控制器(
+            MCM_标题栏菜单,
+            Sub(开启) 播放控制器.设置视频超分辨率(开启),
+            Function() 播放控制器.视频超分辨率状态文本(),
+            Function() 播放控制器.支持视频超分辨率,
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "超分辨率"),
+            设置.实例对象.RTX视频超分辨率,
+            Sub(值) 设置.实例对象.RTX视频超分辨率 = 值)
+        AddHandler 播放控制器.媒体已打开, AddressOf 视频超分辨率控制器.媒体已打开
         画面菜单控制器.应用全局字体(设置.实例对象.字体)
         光盘控制器 = New 播放器光盘控制器(Me, 画面控件, 播放控制器, MCM_标题栏菜单)
         全屏交互控制器 = New 播放器全屏交互控制器(Me, 画面控件,
@@ -386,6 +398,13 @@ Public Class Form1
                     New EventHandler(Of 播放器媒体事件参数)(AddressOf 视图旋转控制器.媒体已打开)
             End If
             视图旋转控制器.Dispose()
+        End If
+        If 视频超分辨率控制器 IsNot Nothing Then
+            If 播放控制器 IsNot Nothing Then
+                RemoveHandler 播放控制器.媒体已打开,
+                    New EventHandler(Of 播放器媒体事件参数)(AddressOf 视频超分辨率控制器.媒体已打开)
+            End If
+            视频超分辨率控制器.Dispose()
         End If
         光盘控制器?.Dispose()
         画面菜单控制器?.Dispose()

@@ -663,6 +663,80 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+    ' RTX 视频超分辨率（VSR）：内核 FFF3FP_SetVideoSuperResolution / GetVideoSuperResolutionStatus。
+    '
+    ' ⚠ 与视图旋转同款，必须动态解析、不能静态导入：这两个导出同样是"同版本号内的新增"，
+    '   而构造函数只校验版本号（仍是 20）。静态导入会让一个 20 版但**尚未含 VSR** 的内核在
+    '   载入期就抛 EntryPointNotFoundException —— 那等于把"这台的内核没这能力"升级成
+    '   "整个播放器起不来"。动态解析让它退化成"能力不可用"，由 UI 显示而不是崩溃。
+    '
+    ' 状态结构必须与内核 FFF3FPVideoSuperResolutionStatus 逐字段同宽同序：11 个 UInteger = 44 字节。
+    ' 内核按 `size < sizeof || version <> PlayerApiVersion` 拒收（PlayerSession.cpp 的
+    ' GetVideoSuperResolutionStatus），所以"同尺寸换顺序"是最危险的错法——它会过闸门并按错偏移读。
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 原生视频超分辨率状态
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 请求模式 As UInteger          ' 0 = Off，1 = Auto
+        Public 是NVIDIA适配器 As UInteger
+        Public 生效 As UInteger              ' 只表示驱动没拒绝本次请求，见 视频超分辨率状态文本
+        Public 驱动拒绝闩 As UInteger
+        Public 原因 As UInteger              ' 内核在 生效=1 时恒写 0(None)
+        Public 源宽 As UInteger
+        Public 源高 As UInteger
+        Public 目标宽 As UInteger
+        Public 目标高 As UInteger
+    End Structure
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置视频超分辨率原型(播放器 As 播放器原生句柄,
+        模式 As UInteger) As 原生播放器结果
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取视频超分辨率状态原型(播放器 As 播放器原生句柄,
+        ByRef 状态 As 原生视频超分辨率状态) As 原生播放器结果
+
+    ' 与视图旋转同走 解析可选导出：句柄由模块持有，缓存下来的函数指针一直有效。
+    Private ReadOnly 设置视频超分辨率函数 As 设置视频超分辨率原型 =
+        解析可选导出(Of 设置视频超分辨率原型)("FFF3FP_SetVideoSuperResolution")
+    Private ReadOnly 读取视频超分辨率状态函数 As 读取视频超分辨率状态原型 =
+        解析可选导出(Of 读取视频超分辨率状态原型)("FFF3FP_GetVideoSuperResolutionStatus")
+
+    ''' <summary>当前内核是否支持 RTX 视频超分辨率（旧内核返回 False）。
+    ''' 两个入口都要在：只有 setter 没有状态读取的话，UI 就无从解释"为什么没生效"。</summary>
+    Friend ReadOnly Property 支持视频超分辨率 As Boolean
+        Get
+            Return 设置视频超分辨率函数 IsNot Nothing AndAlso 读取视频超分辨率状态函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>请求（True = Auto）或取消（False = Off）RTX 视频超分辨率。
+    ''' 内核不支持时返回 False，不抛异常——能力探测与错误语义的分工同 设置视图旋转。
+    ''' <para>再发一次 True 会清掉内核的"驱动拒绝"闩并重新探测，这是宿主唯一的复位路径，
+    ''' 所以开关必须做成可来回切的，不能只做一次性开启。</para></summary>
+    Friend Function 设置视频超分辨率(播放器 As 播放器原生句柄, 开启 As Boolean) As Boolean
+        Dim 函数 = 设置视频超分辨率函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Return 函数(播放器, If(开启, 1UI, 0UI)) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>读取 VSR 状态。调用前必须填好 大小 与 版本（与 FFF3FP_GetImageInfo 同规矩），
+    ''' 版本用 播放器会话.期望API版本 这一处符号钉位，不在这里再抄一个字面量。</summary>
+    Friend Function 读取视频超分辨率状态(播放器 As 播放器原生句柄,
+        ByRef 状态 As 原生视频超分辨率状态) As Boolean
+        Dim 函数 = 读取视频超分辨率状态函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Return 函数(播放器, 状态) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     ' 图片模式：缩放 + 平移。zoom=1 为适应窗口，pan 为相对未缩放画面的归一化偏移 [-1,1]。
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetViewTransform(播放器 As 播放器原生句柄,
