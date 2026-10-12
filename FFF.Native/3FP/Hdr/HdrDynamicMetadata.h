@@ -39,7 +39,9 @@ inline constexpr std::uint32_t kHdrMaxBezierAnchors = 15;
 enum class HdrMetadataKind : std::uint32_t {
     None = 0,
     Hdr10Plus = 1,   // ST 2094-40
-    HdrVivid = 2,    // ST 2094-30 (curve interpretation differs; see HdrToneCurve)
+    HdrVivid = 2,    // ST 2094-30, peak-only reading. HdrToneCurve implements
+                     // no Vivid/CUVA curve at all, so this kind has no curve
+                     // to route through.
 };
 
 /// One entry of distribution_maxrgb. See the field-name trap above.
@@ -62,6 +64,12 @@ struct HdrProcessingWindow {
     float fractionBrightPixels = 0.0f;
     std::uint32_t distributionCount = 0;
     HdrDistributionPoint distribution[kHdrMaxDistributionPoints] = {};
+    /// distribution_maxrgb is parsed and retained for
+    /// diagnostics/identification only. No render path consumes
+    /// distributionCount / distribution[] / distributionPeakNits, and
+    /// fractionBrightPixels is range-validated but likewise unread;
+    /// HasToneMappingFunction() has no caller. Their presence is therefore NOT a
+    /// claim that percentile-driven mapping runs.
     /// tone_mapping_flag: when 0 the knee/bezier fields carry no function.
     bool toneMappingPresent = false;
     float kneePointX = 0.0f;

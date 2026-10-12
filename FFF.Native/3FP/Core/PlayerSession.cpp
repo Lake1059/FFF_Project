@@ -586,7 +586,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       videoStream_(-1),
       audioStream_(-1), coverArtStream_(-1), coverArtFrame_(nullptr), stillImageFrame_(nullptr),
       externalFormat_(nullptr), externalAudioDecoder_(nullptr),
-      externalAudioStream_(-1), externalAudioOffset100ns_(0),
+      externalAudioStream_(-1), externalAudioOffset100ns_(0), audioDelay100ns_(0),
       videoRenderer_([this] { NotifyVideoRecovery(); }), audioExclusive_(false), volume_(1.0f), muted_(false),
       clockOriginPosition100ns_(0), clockOriginQpc_(0), playbackPosition100ns_(0),
       playbackClockSampleQpc_(0), playbackClockLimit100ns_(0), playbackClockSequence_(0),
@@ -606,7 +606,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       hardwareFallbackPending_(false), internalAudioFailurePending_(false),
       internalAudioFailureResult_(FFFResult::Success), internalAudioDecodeErrorCount_(0) {
     snapshot_ = {};
-    snapshot_.size = sizeof(snapshot_); snapshot_.version = 8; snapshot_.state = FFF3FPState::Idle;
+    snapshot_.size = sizeof(snapshot_); snapshot_.version = 20; snapshot_.state = FFF3FPState::Idle;
     snapshot_.decodeMode = configuration.decodeMode; snapshot_.requestedColorMode = configuration.colorMode;
     snapshot_.actualColorMode = FFF3FPColorMode::MapToSdr; snapshot_.frameIndex = -1;
     snapshot_.framePts = AV_NOPTS_VALUE; snapshot_.selectedVideoStream = -1; snapshot_.selectedAudioStream = -1;
@@ -1169,7 +1169,12 @@ void PlayerSession::DoStepFrame(const std::int32_t direction) {
         frameQuantum = std::max<std::int64_t>(1, frameQuantum);
         targetPosition = originalPosition + direction * frameQuantum;
     }
-    targetPosition = std::clamp<std::int64_t>(targetPosition, 0, snapshot_.duration100ns);
+    // An unknown duration is not an upper bound. Loop-aware image demuxers publish
+    // duration100ns == 0 on purpose (see the IsLoopAwareImageDemuxer branch in DoOpen),
+    // and clamping to it pinned every forward step back onto frame 0. DoSeek() right
+    // below already treats a non-positive duration as "no upper bound".
+    const auto stepUpperBound = snapshot_.duration100ns > 0 ? snapshot_.duration100ns : targetPosition;
+    targetPosition = std::max<std::int64_t>(0, std::min(targetPosition, stepUpperBound));
     DoSeek(targetPosition);
     DecodeUntilSeekTarget();
 
@@ -1282,6 +1287,11 @@ FFFResult PlayerSession::ClearExternalAudio() noexcept {
         CloseFormat(&externalFormat_, externalFormatIo_);
         externalAudioStream_ = -1;
         externalAudioPath_.clear();
+        // The offset has to go with the track it belongs to; DoClose resets both, and
+        // leaving the snapshot carrying a stale offset makes the host report a delay
+        // that no longer applies to any stream.
+        externalAudioOffset100ns_ = 0;
+        snapshot_.externalAudioOffset100ns = 0;
         snapshot_.isExternalAudio = 0;
         // Main-container audio packets were intentionally skipped while the
         // external track was active. A full seek is required to put demux,
@@ -1292,6 +1302,27 @@ FFFResult PlayerSession::ClearExternalAudio() noexcept {
     return FFFResult::Success;
 }
 FFFResult PlayerSession::SetExternalAudioOffset(const std::int64_t offset) noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, offset] { externalAudioOffset100ns_ = offset; snapshot_.externalAudioOffset100ns = offset; if (externalFormat_) DoSeek(snapshot_.position100ns); else PublishSnapshot(); }); return FFFResult::Success; }
+
+FFFResult PlayerSession::SetAudioDelay(const std::int64_t delay) noexcept {
+    // +/- 10 minutes: larger values are almost certainly caller bugs, and the
+    // renderer's silence-insertion alignment was never designed for wider gaps.
+    if (delay < -6000000000LL || delay > 6000000000LL) return FFFResult::InvalidArgument;
+    const auto state = state_.load();
+    if (state != FFF3FPState::Ready && state != FFF3FPState::Playing &&
+        state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState;
+    Enqueue([this, delay] {
+        audioDelay100ns_ = delay;
+        snapshot_.audioDelay100ns = delay;
+        // Frames already queued carry positions computed with the old delay, so re-seek:
+        // that flushes them and re-demuxes from the current position -- the same repair
+        // SetExternalAudioOffset makes when an external track owns the audio, except that
+        // here it is unconditional because there is always an internal timeline to move.
+        // This is the only writer of the member and DoClose never touches it,
+        // which is what the header's "survives Close/Open" claim rests on.
+        DoSeek(snapshot_.position100ns);
+    });
+    return FFFResult::Success;
+}
 FFFResult PlayerSession::SetPresentConfig(const bool enableTearing) noexcept {
     // Pacing preference: safe in any state; the renderer applies it on the next
     // present and remembers the request across device/chain re-creation.
@@ -1802,7 +1833,7 @@ FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) no
         coverRightPaddingPercentage);
     const auto targetFrameRate = input.size >= frameRateLayerSize
         ? input.targetFrameRate : 60.0f;
-    if (input.size < legacyLayerSize || input.version != 1 ||
+    if (input.size < legacyLayerSize || input.version != 20 ||
         input.canvasWidth == 0 || input.canvasHeight == 0 || input.commandCount > 4096 ||
         input.layerSlot > static_cast<std::uint32_t>(TimedTextLayerSlot::Lyrics) ||
         !std::isfinite(targetFrameRate) || targetFrameRate < 1.0f || targetFrameRate > 240.0f ||
@@ -1858,7 +1889,7 @@ FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) no
         for (std::uint32_t index = 0; index < input.commandCount; ++index) {
             const auto& source = input.commands[index];
             constexpr auto legacyCommandSize = offsetof(FFF3FPTimedTextCommand, shadowArgb);
-            if (source.size < legacyCommandSize || source.version != 1 ||
+            if (source.size < legacyCommandSize || source.version != 20 ||
                 source.type < FFF3FPTimedTextCommandType::Text || source.type > FFF3FPTimedTextCommandType::Bitmap ||
                 !std::isfinite(source.x) || !std::isfinite(source.y) || !std::isfinite(source.width) ||
                 !std::isfinite(source.height) || source.width <= 0 || source.height <= 0)
@@ -1968,7 +1999,7 @@ FFFResult PlayerSession::SetComparisonMode(const bool active) noexcept {
 
 FFFResult PlayerSession::GetVideoSuperResolutionStatus(
     FFF3FPVideoSuperResolutionStatus& status) const noexcept {
-    if (status.size < sizeof(FFF3FPVideoSuperResolutionStatus) || status.version != 1)
+    if (status.size < sizeof(FFF3FPVideoSuperResolutionStatus) || status.version != 20)
         return FFFResult::InvalidArgument;
     videoRenderer_.FillVideoSuperResolutionStatus(status);
     return FFFResult::Success;
@@ -1994,10 +2025,10 @@ FFFResult PlayerSession::GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexc
     // A v1 caller would read a negative origin as a huge unsigned value
     // (silently wrong content), and v1/v2 share the same field widths so
     // `size` cannot distinguish them -> the only honest gate is the version.
-    if (info.size < sizeof(FFF3FPRenderTargetInfo) || info.version != 2)
+    if (info.size < sizeof(FFF3FPRenderTargetInfo) || info.version != 20)
         return FFFResult::InvalidArgument;
     info.size = sizeof(info);
-    info.version = 2;
+    info.version = 20;
     PlayerVideoRenderer::RenderTargetInfo rtInfo{};
     const auto result = videoRenderer_.GetRenderTargetInfo(rtInfo);
     if (result != FFFResult::Success) return result;
@@ -2051,8 +2082,39 @@ std::uint32_t PlayerSession::HdrMetadataSource() const noexcept {
     return videoRenderer_.HdrMetadataSource();
 }
 
+FFFResult PlayerSession::SetDynamicMetadata(
+    const FFF3FPDynamicMetadataPacket* packets, const std::uint32_t count) noexcept {
+    const auto result = videoRenderer_.SetDynamicMetadata(packets, count);
+    // Same synchronous-validate / async-snapshot split as the ST 2094-40
+    // entry point: the call thread gets the immediate verdict, the snapshot's
+    // ST 2094 diagnostics refresh on the session thread.
+    if (result == FFFResult::Success)
+        Enqueue([this] {
+            ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+            PublishSnapshot();
+        });
+    return result;
+}
+
+FFFResult PlayerSession::ClearDynamicMetadata(const std::uint32_t kind) noexcept {
+    videoRenderer_.ClearDynamicMetadata(kind);
+    Enqueue([this] {
+        ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+        PublishSnapshot();
+    });
+    return FFFResult::Success;
+}
+
+FFFResult PlayerSession::GetHdrSignalDiagnostics(
+    FFF3FPHdrSignalDiagnostics& output) const noexcept {
+    if (output.size < sizeof(FFF3FPHdrSignalDiagnostics) || output.version != 20)
+        return FFFResult::InvalidArgument;
+    output = videoRenderer_.HdrSignalDiagnostics();
+    return FFFResult::Success;
+}
+
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
-    if (output.size < sizeof(FFF3FPSnapshot) || output.version != 8) return FFFResult::InvalidArgument;
+    if (output.size < sizeof(FFF3FPSnapshot) || output.version != 20) return FFFResult::InvalidArgument;
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
     // Presentation completes asynchronously on the dedicated swap-chain owner;
     // expose its live counters even if no later decode-frame snapshot was needed.
@@ -2116,10 +2178,7 @@ FFFResult PlayerSession::ReadVideoPixelRegion(const std::uint32_t x, const std::
 }
 
 FFFResult PlayerSession::GetAudioPeakLevels(FFF3FPAudioPeakLevels& output) const noexcept {
-    constexpr auto legacySize = offsetof(FFF3FPAudioPeakLevels, inputValues);
-    if ((output.version == 1 && output.size < legacySize) ||
-        (output.version == 2 && output.size < sizeof(FFF3FPAudioPeakLevels)) ||
-        (output.version != 1 && output.version != 2))
+    if (output.size < sizeof(FFF3FPAudioPeakLevels) || output.version != 20)
         return FFFResult::InvalidArgument;
     output.channelCount = 0;
     output.inputChannelCount = 0;
@@ -3822,6 +3881,13 @@ void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, cons
     if (pts != AV_NOPTS_VALUE) {
         position = StreamTimestampPosition100ns(owner, streamIndex, pts);
         if (owner == externalFormat_) position += externalAudioOffset100ns_;
+        // The internal track -- plain decode and the IAMF-rendered frames, which are
+        // both queued with owner == format_ -- gets the session delay instead. Chosen
+        // by owner, so a frame is never shifted by both knobs. Applied before the
+        // seek filter below, i.e. the filter compares already-shifted positions against
+        // seekTarget100ns_, exactly as the external offset has always done. Untimed
+        // frames skip this whole block (pts == AV_NOPTS_VALUE), so they are not shifted.
+        else position += audioDelay100ns_;
     }
     if (pts != AV_NOPTS_VALUE && seekTarget100ns_ >= 0) {
         if (position + av_rescale(frame->nb_samples, TicksPerSecond, frame->sample_rate) < seekTarget100ns_) return;
@@ -4022,7 +4088,7 @@ void PlayerSession::PumpExternalAudio() noexcept {
 }
 
 FFFResult PlayerSession::GetImageInfo(FFF3FPImageInfo& info) const noexcept {
-    if (info.size < sizeof(FFF3FPImageInfo) || info.version != 1) return FFFResult::InvalidArgument;
+    if (info.size < sizeof(FFF3FPImageInfo) || info.version != 20) return FFFResult::InvalidArgument;
     // The details were built on the worker thread while the media was opened;
     // handing out that copy keeps the decoder-owned frames off the caller's
     // thread (same contract as GetSnapshot).

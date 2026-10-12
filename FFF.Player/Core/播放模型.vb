@@ -142,6 +142,7 @@ Public NotInheritable Class 播放器快照
         是HDR源 = 值.是HDR源 <> 0
         正在使用外部音轨 = 值.正在使用外部音轨 <> 0
         外部音轨偏移 = TimeSpan.FromTicks(值.外部音轨偏移100纳秒)
+        音频延迟 = TimeSpan.FromTicks(值.音频延迟100纳秒)
         已解码视频帧数 = 值.已解码视频帧数
         已呈现视频帧数 = 值.已呈现视频帧数
         已丢弃视频帧数 = 值.已丢弃视频帧数
@@ -206,6 +207,9 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 是HDR源 As Boolean
     Public ReadOnly Property 正在使用外部音轨 As Boolean
     Public ReadOnly Property 外部音轨偏移 As TimeSpan
+    ''' <summary>内嵌音轨的音频延迟（唇音同步）：正值 = 声音落后于画面。
+    ''' 会话级偏好；经 设置音频延迟 修改。</summary>
+    Public ReadOnly Property 音频延迟 As TimeSpan
     Public ReadOnly Property 已解码视频帧数 As ULong
     Public ReadOnly Property 已呈现视频帧数 As ULong
     Public ReadOnly Property 已丢弃视频帧数 As ULong

@@ -1909,7 +1909,7 @@ private:
 }
 
 FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept {
-    if (transform.size < sizeof(transform) || transform.version != 1 ||
+    if (transform.size < sizeof(transform) || transform.version != 20 ||
         transform.colorMode > FFF3FPColorMode::MapToHdr ||
         // source2020 is a gamut switch: 0 = Rec.709, 1 = Rec.2020, 2 = P3.
         transform.transfer > FFF3FPColorTransfer::Hlg || transform.source2020 > 2 ||
@@ -1979,7 +1979,7 @@ FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept 
 }
 
 FFFResult EvaluateTimedTextRasterization(FFF3FPTimedTextRasterizationProbe& probe) noexcept {
-    if (probe.size < sizeof(probe) || probe.version != 1 ||
+    if (probe.size < sizeof(probe) || probe.version != 20 ||
         !std::isfinite(probe.outlineWidth) || probe.outlineWidth < 0.0f ||
         !std::isfinite(probe.shadowOffsetX) || !std::isfinite(probe.shadowOffsetY))
         return FFFResult::InvalidArgument;
@@ -2002,7 +2002,7 @@ FFFResult MeasureTimedText(const char* textUtf8, const char* fontFamilyUtf8,
     const float fontSize, const FFF3FPTimedTextFlags flags, const float maxWidth,
     const float outlineWidth, const float shadowOffsetX, const float shadowOffsetY,
     const bool shadowEnabled, FFF3FPTimedTextMeasurement& measurement) noexcept {
-    if (measurement.size < sizeof(measurement) || measurement.version != 1 ||
+    if (measurement.size < sizeof(measurement) || measurement.version != 20 ||
         textUtf8 == nullptr || fontFamilyUtf8 == nullptr ||
         !std::isfinite(fontSize) || fontSize <= 0.0f ||
         !std::isfinite(maxWidth) || maxWidth <= 0.0f ||
@@ -2147,7 +2147,10 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       videoProcessorOutputHeight_(0), videoProcessorConfigurationFailed_(false),
       sourceColorSpace_(AVCOL_SPC_UNSPECIFIED), sourceChromaLocation_(AVCHROMA_LOC_UNSPECIFIED),
       sourceFullRange_(false), sourceInterlaced_(false),
-      actualVideoScalingMode_(FFF3FPVideoScalingMode::D3D11VideoProcessor),
+      // The D3D11 VideoProcessor path has no caller in this tree, so the readout must
+      // not start out claiming it: before the first draw the only mechanism that can
+      // have run is the shader path, which is what DrawCachedVideo records.
+      actualVideoScalingMode_(FFF3FPVideoScalingMode::Shader),
       scalingQuality_(FFF3FPVideoScalingQuality::HighQuality),
       requestedMode_(FFF3FPColorMode::MapToSdr), actualMode_(FFF3FPColorMode::MapToSdr),
       sdrPeakNits_(100.0f), hdrPeakNits_(0.0f),
@@ -3343,21 +3346,23 @@ bool PlayerVideoRenderer::CanUseVideoProcessorForUpscale() const noexcept {
     return (inputDescription.BindFlags & D3D11_BIND_DECODER) != 0;
 }
 
-bool PlayerVideoRenderer::ShouldEnableNvidiaSuperResolution(
-    const std::uint32_t targetWidth, const std::uint32_t targetHeight) const noexcept {
-    if (requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
-        FFF3FPVideoSuperResolution::Auto)
-        return false;
-    if (videoSuperResolutionRejected_) return false;
-    if (!nvidiaAdapter_) return false;
-    if (!CanUseVideoProcessorForUpscale()) return false;
-    // NVIDIA: "will only be enabled if the video requires upscaling".
-    if (targetWidth <= sourceWidth_ && targetHeight <= sourceHeight_) return false;
-    // NVIDIA documents an input range of 360p..1440p. Judged on height; the
-    // documented wording is resolution-class based and says nothing about
-    // unusually wide aspect ratios.
-    if (sourceHeight_ < 360 || sourceHeight_ > 1440) return false;
-    return true;
+// Human-readable text for a VSR decision, used by the transition log in
+// ApplySuperResolution. Kept next to its only consumer rather than in the
+// public API header.
+static const char* VideoSuperResolutionReasonText(
+    const FFF3FPVideoSuperResolutionReason reason) noexcept {
+    switch (reason) {
+    case FFF3FPVideoSuperResolutionReason::None: return "none";
+    case FFF3FPVideoSuperResolutionReason::NotRequested: return "not requested";
+    case FFF3FPVideoSuperResolutionReason::NotNvidiaAdapter: return "not an NVIDIA adapter";
+    case FFF3FPVideoSuperResolutionReason::NotUpscaling: return "source is not being upscaled";
+    case FFF3FPVideoSuperResolutionReason::SourceResolutionOutOfRange:
+        return "source height outside 360p..1440p";
+    case FFF3FPVideoSuperResolutionReason::UnsupportedSourceFormat:
+        return "unsupported source format";
+    case FFF3FPVideoSuperResolutionReason::DriverRejected: return "driver rejected";
+    }
+    return "unknown";
 }
 
 bool PlayerVideoRenderer::CreateYuvPlaneViews(ID3D11Texture2D* const texture,
@@ -3400,13 +3405,53 @@ void PlayerVideoRenderer::ReleaseSuperResolutionResources() noexcept {
     videoSuperResolutionActive_.store(false, std::memory_order_release);
 }
 
+// A video processor always consumes the decoded planes in their native
+// (unrotated) axes, but the destination rect handed to ApplySuperResolution is
+// expressed in viewport axes, which a quarter-turn rotation has already swapped
+// (DrawCachedVideo computes the fit box from the swapped layout). This converts
+// such a view box back to the picture's axes so it can be compared with, and
+// used to size a surface from, the decoded source dimensions.
+struct SourceAxisTarget {
+    std::uint32_t width;
+    std::uint32_t height;
+};
+constexpr SourceAxisTarget ToSourceAxisTarget(const std::uint32_t targetWidth,
+    const std::uint32_t targetHeight, const std::uint32_t rotation) noexcept {
+    return (rotation & 1u) != 0
+        ? SourceAxisTarget{ targetHeight, targetWidth }
+        : SourceAxisTarget{ targetWidth, targetHeight };
+}
+// "The video requires upscaling" (NVIDIA's wording): more output pixels than
+// source pixels on at least one axis, judged in the picture's own axes.
+constexpr bool IsUpscaleTarget(const std::uint32_t sourceWidth,
+    const std::uint32_t sourceHeight, const SourceAxisTarget target) noexcept {
+    return target.width > sourceWidth || target.height > sourceHeight;
+}
+
+// Teeth for the P1 rotation fix. The first case is the actual defect: a 90°
+// rotated view of a 1920x1080 source fitted into a 788x1400 portrait box is a
+// *downscale*, but judged in view axes it read as an upscale (1400 > 1080) and
+// engaged VSR, which then stretched the picture. Converted to picture axes the
+// target is 1400x788 and is correctly rejected. The rest pin the swap and the
+// untouched unrotated behaviour.
+static_assert(!IsUpscaleTarget(1920, 1080, ToSourceAxisTarget(788, 1400, 1)));
+static_assert(IsUpscaleTarget(640, 360, ToSourceAxisTarget(800, 3000, 1)));
+static_assert(IsUpscaleTarget(640, 360, ToSourceAxisTarget(1280, 720, 0)));
+static_assert(!IsUpscaleTarget(1920, 1080, ToSourceAxisTarget(1280, 720, 0)));
+static_assert(ToSourceAxisTarget(1080, 1920, 2).width == 1080 &&
+    ToSourceAxisTarget(1080, 1920, 2).height == 1920);   // 180°: no swap
+static_assert(ToSourceAxisTarget(1080, 1920, 3).width == 1920 &&
+    ToSourceAxisTarget(1080, 1920, 3).height == 1080);   // 270°: swap
+
 FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWidth,
     const std::uint32_t targetHeight) noexcept {
-    // Latch the feature off permanently on any driver-side failure: the
-    // extension has no capability query, so a failed attempt is the only
-    // evidence available (Chromium does the same, and mpv/VLC behave likewise).
+    // Latch the feature off on any driver-side failure: the extension exposes no
+    // capability query, so a failed attempt is the only evidence available.
+    // The latch is kept
+    // until the host issues a fresh Auto request in SetVideoSuperResolution,
+    // which re-probes in case VSR was just enabled in the NVIDIA control panel.
     const auto reject = [this](const FFF3FPVideoSuperResolutionReason reason) noexcept {
-        videoSuperResolutionRejected_ = true;
+        videoSuperResolutionRejected_.store(true, std::memory_order_release);
         videoSuperResolutionActive_.store(false, std::memory_order_release);
         videoSuperResolutionReason_.store(reason, std::memory_order_release);
         SetError("NVIDIA RTX Super Resolution was rejected; using shader scaling.");
@@ -3416,7 +3461,7 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
     // tell "the driver has no such feature" apart from "our view setup is wrong"
     // -- both used to collapse into one opaque DriverRejected.
     const auto rejectAt = [this](const char* stage) noexcept {
-        videoSuperResolutionRejected_ = true;
+        videoSuperResolutionRejected_.store(true, std::memory_order_release);
         videoSuperResolutionActive_.store(false, std::memory_order_release);
         videoSuperResolutionReason_.store(FFF3FPVideoSuperResolutionReason::DriverRejected,
             std::memory_order_release);
@@ -3436,6 +3481,20 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
     const auto skip = [this](const FFF3FPVideoSuperResolutionReason reason) noexcept {
         videoSuperResolutionActive_.store(false, std::memory_order_release);
         videoSuperResolutionReason_.store(reason, std::memory_order_release);
+        // Surface the transition in the process log; without this a silent skip
+        // (e.g. an adaptive-downscaled source with no D3D11_BIND_DECODER) is
+        // invisible. Deduplicated so a steady state does not log once per frame.
+        // A fixed stack buffer (not std::string) keeps this noexcept path free of
+        // a throwing allocation; the sink is null-safe when no host is attached.
+        const auto reasonValue = static_cast<std::uint32_t>(reason);
+        if (videoSuperResolutionLoggedReason_.exchange(reasonValue,
+                std::memory_order_acq_rel) != reasonValue) {
+            char line[128]{};
+            _snprintf_s(line, sizeof(line), _TRUNCATE,
+                "FFF.Native: RTX Super Resolution skipped: %s",
+                VideoSuperResolutionReasonText(reason));
+            FFF3FP_KernelLogImpl(line);
+        }
         return FFFResult::NotSupported;
     };
 
@@ -3443,22 +3502,33 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
         FFF3FPVideoSuperResolution::Off)
         return skip(FFF3FPVideoSuperResolutionReason::NotRequested);
 
-    if (!nvidiaAdapter_)
+    if (!nvidiaAdapter_.load(std::memory_order_acquire))
         return skip(FFF3FPVideoSuperResolutionReason::NotNvidiaAdapter);
     if (!CanUseVideoProcessorForUpscale())
         return skip(FFF3FPVideoSuperResolutionReason::UnsupportedSourceFormat);
-    if (targetWidth <= sourceWidth_ && targetHeight <= sourceHeight_)
+
+    // Convert the view destination rect back to the picture's axes before
+    // deciding whether to upscale or sizing the output surface. Otherwise a rotated
+    // view compares a portrait rect against a landscape source, engages VSR on a
+    // frame that is really a downscale, and lets the video processor stretch the
+    // picture by about (h/w)^2.
+    // The HLSL rotates only the sampling coordinate, so a surface laid out in
+    // picture axes is correct once sampled (see ViewRotation in the pixel
+    // shader); see ToSourceAxisTarget for the static_assert-backed reasoning.
+    const auto rotation = viewRotation_.load(std::memory_order_acquire);
+    const auto targetSource = ToSourceAxisTarget(targetWidth, targetHeight, rotation);
+    if (!IsUpscaleTarget(sourceWidth_, sourceHeight_, targetSource))
         return skip(FFF3FPVideoSuperResolutionReason::NotUpscaling);
     if (sourceHeight_ < 360 || sourceHeight_ > 1440)
         return skip(FFF3FPVideoSuperResolutionReason::SourceResolutionOutOfRange);
-    if (videoSuperResolutionRejected_)
+    if (videoSuperResolutionRejected_.load(std::memory_order_acquire))
         return skip(FFF3FPVideoSuperResolutionReason::DriverRejected);
 
     // NV12/P010 are 4:2:0 formats: a video processor cannot write an odd-sized
     // surface. The destination rect can be odd (it is a fit-to-window box), so
-    // round the intermediate surface up to even and keep the rect separate.
-    const auto surfaceWidth = (targetWidth + 1u) & ~1u;
-    const auto surfaceHeight = (targetHeight + 1u) & ~1u;
+    // round the intermediate surface up to an even size and leave the rect alone.
+    const auto surfaceWidth = (targetSource.width + 1u) & ~1u;
+    const auto surfaceHeight = (targetSource.height + 1u) & ~1u;
 
     // A video processor is configured for a fixed in/out geometry, so the
     // cached surface is rebuilt whenever the geometry or the decoded format
@@ -3574,6 +3644,11 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
         return rejectAt("VideoProcessorBlt");
 
     videoSuperResolutionReason_.store(FFF3FPVideoSuperResolutionReason::None,
+        std::memory_order_release);
+    // Reset the log-dedup marker too, so a skip that follows this success logs its
+    // transition again instead of looking like the previous, already-logged state.
+    videoSuperResolutionLoggedReason_.store(
+        static_cast<std::uint32_t>(FFF3FPVideoSuperResolutionReason::None),
         std::memory_order_release);
     videoSuperResolutionActive_.store(true, std::memory_order_release);
     return FFFResult::Success;
@@ -4510,12 +4585,12 @@ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
     const auto slotIndex = static_cast<std::size_t>(slot);
     if (slotIndex >= ARRAYSIZE(timedTextLayers_)) return FFFResult::InvalidArgument;
     std::lock_guard deviceLock(deviceMutex_);
-    if (status.size < sizeof(FFF3FPTimedTextStatus) || status.version != 1)
+    if (status.size < sizeof(FFF3FPTimedTextStatus) || status.version != 20)
         return FFFResult::InvalidArgument;
     D3D11_TEXTURE2D_DESC description{};
     {
         std::lock_guard lock(timedTextMutex_);
-        status.size = sizeof(status); status.version = 1;
+        status.size = sizeof(status); status.version = 20;
         status.submittedSequence = timedTextLayers_[slotIndex] ? timedTextLayers_[slotIndex]->sequence : 0;
         status.renderedSequence = timedTextRenderedSequences_[slotIndex];
         status.commandCount = timedTextRenderedCommandCounts_[slotIndex];
@@ -5394,6 +5469,26 @@ void PlayerVideoRenderer::ClearInjectedHdrMetadata() noexcept {
     (void)Redraw();
 }
 
+// Generic dynamic-metadata carrier (FFF3FP_SetDynamicMetadata): the same table,
+// the same matching rule and the same flag-then-redraw contract as the ST 2094-40
+// entry point, so a table installed while paused reaches the picture and not
+// only the diagnostics.
+FFFResult PlayerVideoRenderer::SetDynamicMetadata(
+    const FFF3FPDynamicMetadataPacket* packets, const std::uint32_t count) noexcept {
+    const auto result = hdrProcessor_.SetInjectedMetadataPackets(packets, count);
+    if (result == FFFResult::Success) {
+        hdrInputsDirty_.store(true);
+        (void)Redraw();
+    }
+    return result;
+}
+
+void PlayerVideoRenderer::ClearDynamicMetadata(const std::uint32_t kind) noexcept {
+    hdrProcessor_.ClearInjectedMetadata(kind);
+    hdrInputsDirty_.store(true);
+    (void)Redraw();
+}
+
 std::uint32_t PlayerVideoRenderer::HdrMetadataSource() const noexcept {
     return hdrProcessor_.InjectedMetadataActive()
         ? static_cast<std::uint32_t>(FFF3FPHdrMetadataSource::Injected)
@@ -5414,6 +5509,11 @@ void PlayerVideoRenderer::SetHdrMetadata() noexcept {
     // let DWM apply its default mapping to the linear values we hand over.
     if (hdrProcessor_.State().format == FFF3FPHdrFormat::Sdr) {
         swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+        hdrMetaDataCalls_.fetch_add(1, std::memory_order_relaxed);
+        signaledMaxMastering_.store(0, std::memory_order_relaxed);
+        signaledMinMastering_.store(0, std::memory_order_relaxed);
+        signaledMaxCll_.store(0, std::memory_order_relaxed);
+        signaledMaxFall_.store(0, std::memory_order_relaxed);
         lastHdrMetadata_ = {};
         hdrMetadataValid_ = false;
         return;
@@ -5424,10 +5524,18 @@ void PlayerVideoRenderer::SetHdrMetadata() noexcept {
     // does not take kindly to a new block on every frame: pushing one per frame
     // makes the display's tone mapping visibly hunt. Only submit when a field
     // moved by more than a perceptual threshold.
-    if (hdrMetadataValid_ && !HdrMetadataChanged(lastHdrMetadata_, metadata)) return;
+    if (hdrMetadataValid_ && !HdrMetadataChanged(lastHdrMetadata_, metadata)) {
+        hdrMetaDataSuppressed_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     lastHdrMetadata_ = metadata;
     hdrMetadataValid_ = true;
     swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(metadata), &metadata);
+    hdrMetaDataCalls_.fetch_add(1, std::memory_order_relaxed);
+    signaledMaxMastering_.store(metadata.MaxMasteringLuminance, std::memory_order_relaxed);
+    signaledMinMastering_.store(metadata.MinMasteringLuminance, std::memory_order_relaxed);
+    signaledMaxCll_.store(metadata.MaxContentLightLevel, std::memory_order_relaxed);
+    signaledMaxFall_.store(metadata.MaxFrameAverageLightLevel, std::memory_order_relaxed);
 }
 
 FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t frameIndex,
@@ -5775,6 +5883,13 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
                 dynamicCurves.data(), kDynamicCurveLutWidth * sizeof(float), 0);
         }
     }
+    // Counted from the buffer the shader actually receives, not from the predicate: the
+    // gate and the hardware must not be able to disagree about what was reported.
+    if (hdrState.dynamicMetadata) {
+        (dynamicSettings.enabled != 0 ? dynamicCurveFramesApplied_
+            : dynamicCurveFramesRefused_).fetch_add(1, std::memory_order_relaxed);
+    }
+
     settings.paperWhite = EffectivePaperWhiteNits();
     settings.targetPeak = hdrState.targetPeakNits;
     // Report the size actually uploaded: when adaptive downscale engaged this is the
@@ -5912,6 +6027,12 @@ void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
             context_->UpdateSubresource(dynamicCurveTexture_, 0, nullptr,
                 dynamicCurves.data(), kDynamicCurveLutWidth * sizeof(float), 0);
         }
+    }
+    // Counted from the buffer the shader actually receives, not from the predicate:
+    // the cached-draw path has to move the same counters as the per-frame path.
+    if (hdrState.dynamicMetadata) {
+        (dynamicSettings.enabled != 0 ? dynamicCurveFramesApplied_
+            : dynamicCurveFramesRefused_).fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -6390,7 +6511,7 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
 }
 
 FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept {
-    if (probe.version != 1 || probe.size < sizeof(FFF3FPVideoPixelProbe))
+    if (probe.version != 20 || probe.size < sizeof(FFF3FPVideoPixelProbe))
         return FFFResult::InvalidArgument;
     std::lock_guard deviceLock(deviceMutex_);
     if (!hasCachedVideo_ || swapChain_ == nullptr || device_ == nullptr || context_ == nullptr ||
@@ -6869,7 +6990,10 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     view360PitchBits_.store(std::bit_cast<float>(0.0f), std::memory_order_relaxed);
     view360FovYBits_.store(std::bit_cast<float>(90.0f), std::memory_order_relaxed);
     lyricsLayoutEnabled_.store(false, std::memory_order_release);
-    actualVideoScalingMode_.store(FFF3FPVideoScalingMode::D3D11VideoProcessor);
+    // Same reason as the constructor: nothing on this path has drawn yet, so
+    // resetting to D3D11VideoProcessor would advertise a scaling mechanism that
+    // cannot have run.
+    actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
     videoGeneration_.store(0); presentedVideoGeneration_.store(0);
     countedVideoGeneration_.store(0);
     presentedVideoFrames_.store(0); coalescedVideoFrames_.store(0);
@@ -6995,6 +7119,22 @@ std::uint64_t PlayerVideoRenderer::Upload100ns() const noexcept { return upload1
 std::uint32_t PlayerVideoRenderer::OutputBitDepth() const noexcept {
     return swapOutputBits_.load(std::memory_order_acquire);
 }
+FFF3FPHdrSignalDiagnostics PlayerVideoRenderer::HdrSignalDiagnostics() const noexcept {
+    FFF3FPHdrSignalDiagnostics out{};
+    out.size = sizeof(out);
+    out.version = 20;
+    out.dynamicCurveFramesApplied = dynamicCurveFramesApplied_.load(std::memory_order_relaxed);
+    out.dynamicCurveFramesRefused = dynamicCurveFramesRefused_.load(std::memory_order_relaxed);
+    out.setHdrMetaDataCalls = hdrMetaDataCalls_.load(std::memory_order_relaxed);
+    out.setHdrMetaDataSuppressed = hdrMetaDataSuppressed_.load(std::memory_order_relaxed);
+    out.lastSignaledMaxMasteringLuminance = signaledMaxMastering_.load(std::memory_order_relaxed);
+    out.lastSignaledMinMasteringLuminance = signaledMinMastering_.load(std::memory_order_relaxed);
+    out.lastSignaledMaxContentLightLevel = signaledMaxCll_.load(std::memory_order_relaxed);
+    out.lastSignaledMaxFrameAverageLightLevel = signaledMaxFall_.load(std::memory_order_relaxed);
+    out.swapChainHdrEnabled = swapHdr_ ? 1u : 0u;
+    out.reserved = 0;
+    return out;
+}
 FFF3FPVideoScalingMode PlayerVideoRenderer::ActualVideoScalingMode() const noexcept {
     return actualVideoScalingMode_.load();
 }
@@ -7004,11 +7144,14 @@ FFFResult PlayerVideoRenderer::SetVideoSuperResolution(
     if (mode != FFF3FPVideoSuperResolution::Off &&
         mode != FFF3FPVideoSuperResolution::Auto)
         return FFFResult::InvalidArgument;
-    // A new request clears a previous driver rejection: the user may have just
-    // turned the feature on in the NVIDIA control panel, and re-probing costs
-    // one extension call per frame at worst until the next blit settles it.
-    if (mode == FFF3FPVideoSuperResolution::Auto && videoSuperResolutionRejected_)
-        videoSuperResolutionRejected_ = false;
+    // A fresh Auto request clears a previous driver rejection: the user may have
+    // just turned the feature on in the NVIDIA control panel, and re-probing
+    // costs one extension call per frame at worst until the next blit settles
+    // it. This is the counterpart of the latch in ApplySuperResolution, so a
+    // "latched off" state lasts until the next Auto request, not forever.
+    if (mode == FFF3FPVideoSuperResolution::Auto &&
+        videoSuperResolutionRejected_.load(std::memory_order_acquire))
+        videoSuperResolutionRejected_.store(false, std::memory_order_release);
     requestedVideoSuperResolution_.store(mode, std::memory_order_release);
     if (mode == FFF3FPVideoSuperResolution::Off) {
         videoSuperResolutionActive_.store(false, std::memory_order_release);
@@ -7029,16 +7172,16 @@ bool PlayerVideoRenderer::VideoSuperResolutionActive() const noexcept {
 void PlayerVideoRenderer::FillVideoSuperResolutionStatus(
     FFF3FPVideoSuperResolutionStatus& status) const noexcept {
     status.requested = requestedVideoSuperResolution_.load(std::memory_order_acquire);
-    status.nvidiaAdapter = nvidiaAdapter_ ? 1u : 0u;
+    status.nvidiaAdapter = nvidiaAdapter_.load(std::memory_order_acquire) ? 1u : 0u;
     status.active = videoSuperResolutionActive_.load(std::memory_order_acquire) ? 1u : 0u;
-    status.driverRejected = videoSuperResolutionRejected_ ? 1u : 0u;
+    status.driverRejected = videoSuperResolutionRejected_.load(std::memory_order_acquire) ? 1u : 0u;
     status.reason = status.active
         ? FFF3FPVideoSuperResolutionReason::None
         : videoSuperResolutionReason_.load(std::memory_order_acquire);
-    status.sourceWidth = videoSuperResolutionSourceWidth_;
-    status.sourceHeight = videoSuperResolutionSourceHeight_;
-    status.targetWidth = videoSuperResolutionTargetWidth_;
-    status.targetHeight = videoSuperResolutionTargetHeight_;
+    status.sourceWidth = videoSuperResolutionSourceWidth_.load(std::memory_order_acquire);
+    status.sourceHeight = videoSuperResolutionSourceHeight_.load(std::memory_order_acquire);
+    status.targetWidth = videoSuperResolutionTargetWidth_.load(std::memory_order_acquire);
+    status.targetHeight = videoSuperResolutionTargetHeight_.load(std::memory_order_acquire);
 }
 std::string PlayerVideoRenderer::FallbackReason() const {
     try { std::lock_guard fallbackLock(fallbackMutex_); return fallbackReason_; }

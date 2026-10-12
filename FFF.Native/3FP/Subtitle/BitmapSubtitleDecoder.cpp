@@ -15,7 +15,7 @@ extern "C" {
 namespace {
 using PlayerMediaText::FfmpegError;
 using PlayerMediaText::CopyUtf8;
-constexpr std::uint32_t ApiVersion = 1;
+constexpr std::uint32_t ApiVersion = 20;
 constexpr std::int64_t TicksPerSecond = 10'000'000;
 constexpr int MaximumPacketsPerRead = 4096;
 
@@ -103,6 +103,7 @@ public:
             }
 
             const auto packetPts = packet_->pts;
+            const auto packetDuration = packet_->duration;   // must be read before the unref below
             AVSubtitle subtitle{};
             int gotSubtitle = 0;
             const auto decodeResult = avcodec_decode_subtitle2(codec_, &subtitle, &gotSubtitle, packet_);
@@ -116,7 +117,7 @@ public:
                 }
                 continue;
             }
-            const auto result = BuildFrame(subtitle, packetPts, output);
+            const auto result = BuildFrame(subtitle, packetPts, packetDuration, output);
             avsubtitle_free(&subtitle);
             return result;
         }
@@ -160,6 +161,7 @@ public:
 
 private:
     FFFResult BuildFrame(const AVSubtitle& subtitle, const std::int64_t packetPts,
+        const std::int64_t packetDuration,
         FFF3FPBitmapSubtitleFrame& output) noexcept {
         try {
             const auto* stream = format_->streams[streamIndex_];
@@ -170,9 +172,20 @@ private:
                 base = av_rescale_q(packetPts, stream->time_base, AVRational{1, static_cast<int>(TicksPerSecond)});
             base -= timelineOrigin100ns_;
             output.start100ns = std::max<std::int64_t>(0, base + static_cast<std::int64_t>(subtitle.start_display_time) * 10'000);
-            if (subtitle.end_display_time > subtitle.start_display_time && subtitle.end_display_time != UINT32_MAX)
+            if (subtitle.end_display_time > subtitle.start_display_time && subtitle.end_display_time != UINT32_MAX) {
                 output.end100ns = std::max(output.start100ns,
                     base + static_cast<std::int64_t>(subtitle.end_display_time) * 10'000);
+            } else {
+                // An event without a usable end must still expire: the host only drops the
+                // current bitmap once end100ns is in the past, so leaving it zero pinned the
+                // image on screen for the rest of the playback. Same fallback ladder the ASS
+                // path already uses (packet duration, then a fixed floor).
+                auto durationMilliseconds = packetDuration > 0
+                    ? av_rescale_q(packetDuration, stream->time_base, AVRational{1, 1000})
+                    : std::int64_t{5000};
+                durationMilliseconds = std::max<std::int64_t>(1, durationMilliseconds);
+                output.end100ns = output.start100ns + durationMilliseconds * 10'000;
+            }
             output.canvasWidth = codec_->width;
             output.canvasHeight = codec_->height;
             output.sequence = sequence_++;

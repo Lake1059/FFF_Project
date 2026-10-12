@@ -90,13 +90,21 @@ public:
     bool RequiresMetadataAwareShader() const noexcept;
     void BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) const noexcept;
 
-    // ---- injected ST 2094-40 metadata (see FFF3FP_SetHdrDynamicMetadata) ----
+    // ---- injected dynamic metadata (ST 2094-40 entry point and the generic
+    // FFF3FP_SetDynamicMetadata carrier; one shared table, see the header
+    // contract for the matching/rejection semantics both channels follow) ----
     // Replaces the injected table. Validated up front: a caller passing a
     // malformed entry gets InvalidArgument and the previous table stays live,
     // rather than a half-applied table silently changing the picture.
     FFFResult SetInjectedMetadata(const FFF3FPHdrDynamicMetadataEntry* entries,
         std::uint32_t count) noexcept;
-    void ClearInjectedMetadata() noexcept;
+    // Generic-carrier flavour of the same table: kind-tagged packets, whole-call
+    // validation (unknown kind -> NotSupported, previous table stays live).
+    FFFResult SetInjectedMetadataPackets(const FFF3FPDynamicMetadataPacket* packets,
+        std::uint32_t count) noexcept;
+    // kind 0 clears every kind; any other kind clears only that kind's entries
+    // and re-evaluates the rest against the frame on screen.
+    void ClearInjectedMetadata(std::uint32_t kind = 0) noexcept;
     // True when an injected entry is driving the current frame.
     bool InjectedMetadataActive() const noexcept;
 
@@ -108,11 +116,25 @@ public:
     static FFFResult EvaluateProbe(FFF3FPHdrProcessingProbe& probe) noexcept;
 
 private:
+private:
+    // One installed table row. Kind-tagged so the generic carrier and the
+    // dedicated ST 2094-40 entry point share one sorted table; only the payload
+    // matching `kind` is meaningful.
+    struct InjectedEntry {
+        HdrMetadataKind kind = HdrMetadataKind::Hdr10Plus;
+        std::int64_t frameIndex = 0;
+        FFF3FPHdrDynamicMetadataEntry hdr10Plus{};
+        FFF3FPHdrVividMetadataPayload vivid{};
+    };
     static float ResolveTargetPeak(float overrideNits,
         const HdrDisplayCapabilities& display) noexcept;
     // Build the frame state an injected entry describes. Returns false when the
     // entry is malformed; the caller then leaves bitstream metadata in charge.
     static bool BuildInjectedState(const FFF3FPHdrDynamicMetadataEntry& entry,
+        HdrDynamicMetadata& metadata) noexcept;
+    // Vivid flavour: peak-only windows (same reading as bitstream Vivid), no
+    // curve interpretation. Returns false on malformed payloads.
+    static bool BuildInjectedStateVivid(const FFF3FPHdrVividMetadataPayload& payload,
         HdrDynamicMetadata& metadata) noexcept;
     // Select the injected entry in force for frameIndex and apply it to `state`.
     // Split out of ProcessFrame so installing or clearing a table can re-evaluate the
@@ -122,6 +144,9 @@ private:
     // Re-evaluate the table against the last finished frame. Call with mutex_ held --
     // both callers already hold it, and std::mutex is not recursive.
     void ReapplyInjectedMetadataLocked() noexcept;
+    // Sort, install and re-evaluate. Shared tail of both setter flavours; call
+    // before taking mutex_ (it takes it itself).
+    FFFResult InstallInjectedTable(std::vector<InjectedEntry>&& validated) noexcept;
     std::int64_t lastLookupIndex_ = kUnknownFrameIndex;
     // The frame state as the bitstream alone produced it, kept so clearing a table
     // while paused returns the picture to that frame instead of leaving the injected
@@ -135,6 +160,6 @@ private:
     HdrFrameState frameState_;
     // Injected table, kept sorted by frameIndex. Bounded so a host cannot grow
     // it without limit; scene lists are naturally small.
-    std::vector<FFF3FPHdrDynamicMetadataEntry> injected_;
+    std::vector<InjectedEntry> injected_;
     bool injectedActive_ = false;
 };

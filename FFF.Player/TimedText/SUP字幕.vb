@@ -61,7 +61,7 @@ Public NotInheritable Class SUP字幕解码器
     Public Function 读取下一事件() As SUP字幕事件
         检查未释放()
         Dim info As New 原生位图字幕帧 With {
-            .大小 = CUInt(Marshal.SizeOf(Of 原生位图字幕帧)()), .版本 = 1UI}
+            .大小 = CUInt(Marshal.SizeOf(Of 原生位图字幕帧)()), .版本 = 20UI}
         检查结果(播放器原生接口.FFF3FP_ReadBitmapSubtitle(句柄, info))
         If (info.标志 And 原生位图字幕标志.流结束) <> 0 Then Return Nothing
         If (info.标志 And 原生位图字幕标志.仍需读取) <> 0 Then

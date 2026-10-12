@@ -2,6 +2,7 @@
 
 #include "3FR/Api/FFF.Native.Api.h"
 
+#include <cstddef>
 #include <cstdint>
 
 enum class FFF3FPDecodeMode : std::uint32_t {
@@ -288,7 +289,52 @@ struct FFF3FPSnapshot {
     // will stay silent. 0 when libiamf reports no per-element detail.
     // Appended at the end for the same offset reason as videoUpload100ns above.
     std::uint32_t iamfContentChannels;
+    // IAMF rendering mode in force: 0 = the speaker layout (7.1.4) with the
+    // WASAPI resampler folding down to the device, 1 = libiamf's binaural
+    // (HRTF) renderer produced the stereo signal directly. Binaural keeps the
+    // spatial *image* on headphones; the matrix downmix keeps the energy but
+    // loses the placement. Chosen automatically from the device's channel
+    // count (stereo => binaural); reported so a host can say which one the
+    // user is actually hearing. Appended at the end for the offset reason above.
+    std::uint32_t iamfBinaural;
+    // Generic bed binaural rendering for NON-IAMF multichannel tracks (Dolby
+    // AC-3/E-AC-3/Atmos bed, TrueHD, DTS/DTS-HD/DTS:X bed, plain multichannel
+    // PCM/FLAC/WAV): when the output device is stereo, those tracks got
+    // a plain swr matrix downmix: energy preserved, placement lost. This is
+    // 1 while the OBR HRTF renderer is feeding the stereo output instead, 0 when
+    // the matrix downmix is in force (multichannel device, unsupported
+    // layout, or IAMF owning the track, which renders through its own binaural
+    // path reported by iamfBinaural). Appended at the end for the offset
+    // reason above.
+    std::uint32_t audioBinaural;
+    // Audio position offset in 100ns units applied to the internal (muxed) audio
+    // track's timestamps before they are queued: positive = audio plays later than
+    // video (lip-sync correction). It is the internal-track counterpart of
+    // externalAudioOffset100ns, which covers the externally loaded track; the two are
+    // mutually exclusive because exactly one owner supplies any given audio frame, so
+    // they never add up on the same frame. Set via FFF3FP_SetAudioDelay; survives
+    // Close/Open (only Destroy+Create resets it). Appended at the end for the offset
+    // reason above.
+    std::int64_t audioDelay100ns;
 };
+// Layout teeth. FFF3FPSnapshot is read by fixed offset from the VB/C# hosts and from
+// the probes, which is why it is append-only; that rule is unenforceable until the
+// offsets are pinned, so an insertion in the middle breaks the build here instead of
+// shifting a host's view of the struct at runtime.
+// Values below were measured by compiling a probe against this header (cl /std:c++20,
+// offsetof/sizeof printed) -- not derived from a field table.
+static_assert(sizeof(FFF3FPSnapshot) == 408,
+    "FFF3FPSnapshot size changed: hosts and probes read it by fixed offset");
+static_assert(offsetof(FFF3FPSnapshot, externalAudioOffset100ns) == 88, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, iamfActive) == 364, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, iamfChannels) == 368, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, iamfSoundSystem) == 372, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, videoUpload100ns) == 376, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, iamfContentChannels) == 384, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, iamfBinaural) == 388, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, audioBinaural) == 392, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, audioDelay100ns) == 400, "offset pin");
+
 
 struct FFF3FPAudioPeakLevels {
     std::uint32_t size;
@@ -298,6 +344,41 @@ struct FFF3FPAudioPeakLevels {
     float values[8];
     float inputValues[8];
 };
+
+// HDR presentation diagnostics. Separate struct rather than new FFF3FPSnapshot fields:
+// the snapshot layout is mirrored by every host's Marshal offsets, and this data is
+// polled rarely and read by tooling, not by the frame loop.
+//
+// It exists because two claims about the ST 2094 paths were previously only checkable by
+// reading the shader gate:
+//   * whether the per-window curve actually shaped the frame just drawn
+//     (dynamicCurveFrames* -- under MapToHdr the renderer deliberately does not
+//     map the injected curve (see the useDynamicCurve gate in DrawCachedVideo),
+//     so "hdrProcessingPath = ...Dynamic" alone cannot tell a host which of the
+//     two mechanisms ran);
+//   * whether the per-frame display signaling actually reached DXGI, and how often the
+//     change gate suppressed it (setHdrMetaData* / lastSignaled*).
+struct FFF3FPHdrSignalDiagnostics {
+    std::uint32_t size;
+    std::uint32_t version;              // 20
+    std::uint64_t dynamicCurveFramesApplied;
+    std::uint64_t dynamicCurveFramesRefused;   // dynamic metadata present, curve not applied
+    std::uint64_t setHdrMetaDataCalls;         // actual IDXGISwapChain::SetHDRMetaData calls
+    std::uint64_t setHdrMetaDataSuppressed;    // frames where the change gate said "same"
+    // The last block actually handed to DXGI, in the DXGI units themselves:
+    // MaxMasteringLuminance / MinMasteringLuminance in 1/10000 cd/m^2, the two light
+    // levels in 1 cd/m^2. Zeroes mean nothing has been signaled yet.
+    std::uint32_t lastSignaledMaxMasteringLuminance;
+    std::uint32_t lastSignaledMinMasteringLuminance;
+    std::uint32_t lastSignaledMaxContentLightLevel;
+    std::uint32_t lastSignaledMaxFrameAverageLightLevel;
+    std::uint32_t swapChainHdrEnabled;         // 1 when the chain is the scRGB HDR chain
+    std::uint32_t reserved;
+};
+// Pinned so a host-side Marshal.SizeOf drift cannot silently produce a struct that passes
+// the `size < sizeof` gate while reading fields at the wrong offsets.
+static_assert(sizeof(FFF3FPHdrSignalDiagnostics) == 64,
+    "FFF3FPHdrSignalDiagnostics layout changed: mirror it in Fff3FpNative.cs and re-pin");
 
 using FFF3FPHandle = void*;
 using FFF3FPBitmapSubtitleHandle = void*;
@@ -567,7 +648,7 @@ enum class FFF3FPVideoSuperResolutionReason : std::uint32_t {
 
 struct FFF3FPVideoSuperResolutionStatus {
     std::uint32_t size;
-    std::uint32_t version; // == 1
+    std::uint32_t version; // == 20
     FFF3FPVideoSuperResolution requested;
     // The adapter backing the renderer's D3D11 device is NVIDIA.
     std::uint32_t nvidiaAdapter;
@@ -579,7 +660,7 @@ struct FFF3FPVideoSuperResolutionStatus {
     // the same reason).
     std::uint32_t active;
     // The driver rejected the request or the blit failed; VSR is latched off
-    // for the lifetime of this device.
+    // until the host issues a fresh Auto request (which re-probes).
     std::uint32_t driverRejected;
     FFF3FPVideoSuperResolutionReason reason;
     std::uint32_t sourceWidth;
@@ -684,6 +765,11 @@ FFF3FP_API FFFResult FFF3FP_SetVolume(FFF3FPHandle player, float volume, std::ui
 FFF3FP_API FFFResult FFF3FP_SetTimedTextLayer(FFF3FPHandle player,
     const FFF3FPTimedTextLayer* layer) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetSnapshot(FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept;
+// HDR presentation diagnostics: whether the ST 2094 curve actually shaped the drawn
+// frame, and whether/what per-frame HDR metadata reached the swap chain. Counters are
+// process-lifetime for this session, not reset per seek.
+FFF3FP_API FFFResult FFF3FP_GetHdrSignalDiagnostics(FFF3FPHandle player,
+    FFF3FPHdrSignalDiagnostics* diagnostics) noexcept;
 FFF3FP_API FFFResult FFF3FP_ReadVideoPixel(FFF3FPHandle player,
     FFF3FPVideoPixelProbe* probe) noexcept;
 // Batch pixel readback. Samples a rectangular region
@@ -724,7 +810,7 @@ FFF3FP_API FFFResult FFF3FP_GetMediaInfo(FFF3FPHandle player, char* outputUtf8,
 // so callers must handle unknown explicitly instead of reading a default.
 struct FFF3FPImageInfo {
     std::uint32_t size;                  // sizeof(FFF3FPImageInfo)
-    std::uint32_t version;               // 1
+    std::uint32_t version;               // 20
     std::int32_t  frameCount;            // total frames; <0 unknown
     std::int32_t  loopCount;             // 0 = infinite, -1 = not looping, >0 = count; <0 unknown
     std::uint32_t flags;                 // FFF3FP_IMAGE_FLAG_*
@@ -772,7 +858,7 @@ FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,
 // be interpreted as a 0x0 target.
 struct FFF3FPRenderTargetInfo {
     std::uint32_t size;
-    std::uint32_t version; // == 2
+    std::uint32_t version; // == 20
     std::uint32_t swapWidth;
     std::uint32_t swapHeight;
     std::uint32_t clientWidth;
@@ -881,6 +967,16 @@ struct FFF3FPHdrDynamicMetadataEntry {
 
 // Replaces the injected table. entries == nullptr with count == 0 clears it.
 // Entries are copied; the caller keeps ownership of the array.
+// Pinned for the same reason as the payload structs at the
+// foot of this header -- hosts mirror these by Marshal offsets (the C# side
+// hand-flattens the 28 floats of one window), so a drift must fail at compile
+// time instead of reading fields at wrong offsets behind a passing size gate.
+// New fields append; a reorder means a new version.
+static_assert(sizeof(FFF3FPHdrMetadataWindow) == 112,
+    "FFF3FPHdrMetadataWindow layout changed: mirror it in Fff3FpNative.cs and re-pin");
+static_assert(sizeof(FFF3FPHdrDynamicMetadataEntry) == 368,
+    "FFF3FPHdrDynamicMetadataEntry layout changed: mirror it in Fff3FpNative.cs and re-pin");
+
 FFF3FP_API FFFResult FFF3FP_SetHdrDynamicMetadata(FFF3FPHandle player,
     const FFF3FPHdrDynamicMetadataEntry* entries, std::uint32_t count) noexcept;
 
@@ -948,9 +1044,15 @@ FFF3FP_API FFFResult FFF3FP_GetHdrMetadataSource(FFF3FPHandle player,
 //
 // Peak ownership when the entry carries no usable maxscl
 // ......................................................
-// An active entry owns the frame's dynamic state: its windows and curves, and with
-// them the reported format (Hdr10Plus) and processing path (Hdr10PlusDynamic). The
-// source peak follows a strict precedence and never mixes the two sources:
+// An active entry owns the frame's dynamic state: its windows and curves, and
+// with them the processing path (Hdr10PlusDynamic), the dynamicMetadataActive
+// flag and the Hdr10 compatibility bit. It deliberately does NOT own the
+// reported format: snapshot.hdrFormat keeps reporting the samples' own
+// classification (Hdr10 for an HDR10/PQ stream); only the bitstream's own
+// HDR10+ classification sets Hdr10Plus, because overwriting the format made
+// the decode transfer function and the gamut switch read a signal the pixels
+// are not. The source peak follows a strict precedence and never mixes the
+// two sources:
 //   1. the entry's own peak -- max(maxScl) across windows[0]'s three channels,
 //      converted to nits as value * 10000 -- whenever that is a valid peak;
 //   2. otherwise the stream-level baseline -- the peak the processor derived from
@@ -969,10 +1071,116 @@ FFF3FP_API FFFResult FFF3FP_GetHdrMetadataSource(FFF3FPHandle player,
 // maxScl is itself validated to [0,1], so an injected peak cannot exceed 10000.
 // So: GetHdrMetadataSource == Injected does NOT imply the peak came from the
 // injected entry. It implies the curve, the windows, the targeted value and the
-// reported format/path do. Peak provenance is guaranteed only when the entry
+// reported processing path do. Peak provenance is guaranteed only when the entry
 // carries a valid maxScl; a host that needs to tell the two cases apart compares
 // snapshot.sourcePeakNits against maxScl * 10000 of the entry in range (or samples
 // the picture and finds the peak it can actually attribute).
+
+// ---- Generic dynamic-metadata injection carrier ------------------------------
+//
+// A purpose-agnostic extension of the ST 2094-40 injection above: one channel
+// that carries ANY per-frame dynamic metadata kind the kernel knows, keyed and
+// applied exactly like the HDR10+ table (same matching rule, same rejection
+// semantics, same diagnostics), so a host learns one interface instead of one
+// per metadata family. The channel itself prescribes nothing: kinds are a
+// registry that only grows, and a kernel that does not know a kind refuses it
+// cleanly instead of guessing.
+//
+// Kinds
+// .....
+// Hdr10Plus (1): payload is one FFF3FPHdrDynamicMetadataEntry (version 1) --
+//   byte-identical to what FFF3FP_SetHdrDynamicMetadata takes per entry, so a
+//   host can move between the two channels without re-encoding. Validated and
+//   applied by exactly the code path the dedicated entry point uses.
+// HdrVivid (2): payload is one FFF3FPHdrVividMetadataPayload (version 1) --
+//   ST 2094-30 / CUVA 005-style per-window peaks. The kernel applies Vivid
+//   with peak-only semantics (the same reading it gives bitstream Vivid),
+//   because CUVA 005.1's parametric curve is not publicly documented; the
+//   curve fields the ST 2094-40 entry carries have no Vivid counterpart.
+//
+// Packet and table semantics
+// ..........................
+// One successful call REPLACES the injected table wholesale (all kinds);
+// packets are copied and the caller keeps its memory. Packets are validated
+// as a whole before anything is installed: any malformed packet (bad
+// size/version, bad payload, unknown kind) fails the entire call --
+// InvalidArgument for shape errors, NotSupported when the kind is unknown to
+// this kernel -- and leaves the previous table in charge. Frame matching,
+// lazy install before the first indexed frame, paused/EOS application and
+// the peak-ownership precedence are the HDR10+ injection's own contract
+// (above), now per kind: an HdrVivid entry reports processingPath
+// HdrVividDynamic and the HdrVivid compatibility bit, an Hdr10Plus entry
+// reports Hdr10PlusDynamic and the Hdr10 bit; neither touches the reported
+// format. The two channels share one table: setting through either replaces
+// what the other installed.
+//
+// FFF3FP_ClearDynamicMetadata drops injected metadata: kind 0 clears every
+// kind, any other value clears only that kind's entries and re-evaluates the
+// remaining table against the frame on screen.
+enum class FFF3FPDynamicMetadataKind : std::uint32_t {
+    None = 0,        // only meaningful to FFF3FP_ClearDynamicMetadata: every kind
+    Hdr10Plus = 1,   // payload: FFF3FPHdrDynamicMetadataEntry, version 1
+    HdrVivid = 2,    // payload: FFF3FPHdrVividMetadataPayload, version 1
+};
+
+// One ST 2094-30 / CUVA 005-style processing window, peak-only reading. Windows
+// are full-frame by definition (the same reading the kernel gives bitstream
+// Vivid, whose per-window reading never carries geometry); the kernel derives
+// each window's peak as max(maxRGB) * 10000 nits.
+struct FFF3FPHdrVividMetadataWindow {
+    float maxRGB[3];          // normalized content maxima, 0..1
+    float averageMaxRGB;      // normalized average, 0..1
+};
+
+struct FFF3FPHdrVividMetadataPayload {
+    std::uint32_t size;       // sizeof(FFF3FPHdrVividMetadataPayload)
+    std::uint32_t version;    // must be 1
+    // Number of windows, 1..3 (mirrors the ST 2094-40 entry's rule).
+    std::uint32_t numWindows;
+    std::uint32_t reserved;
+    FFF3FPHdrVividMetadataWindow windows[3];
+    // Targeted system display peak in cd/m^2 (0 = derive from the window peaks).
+    float targetedDisplayNits;
+};
+
+// One packet of the generic channel. The payload is a single versioned struct
+// of `payloadSize` bytes (never a smaller prefix: kindVersion gates the exact
+// layout), copied by the kernel on success.
+struct FFF3FPDynamicMetadataPacket {
+    std::uint32_t size;        // >= sizeof(FFF3FPDynamicMetadataPacket): a larger
+                             //     packet is accepted, appended fields stay
+                             //     forward-compatible
+    std::uint32_t version;     // must be 1
+    std::uint32_t kind;        // FFF3FPDynamicMetadataKind
+    std::uint32_t kindVersion; // per-kind payload version, currently 1
+    // First frame (inclusive) this packet applies to; same matching rule and
+    // same key (snapshot.frameIndex) as the HDR10+ injection.
+    std::int64_t frameIndex;
+    std::uint32_t payloadSize; // EXACTLY sizeof(the kind's payload struct), or 0
+                             //     with payload == nullptr. A larger payload is
+                             //     rejected, never silently truncated.
+    std::uint32_t reserved;    // must be 0
+    const void* payload;       // kind-specific struct, caller keeps ownership
+};
+
+// Replaces the injected table (all kinds) with these packets. See the carrier
+// contract above for validation, rejection and matching semantics.
+FFF3FP_API FFFResult FFF3FP_SetDynamicMetadata(FFF3FPHandle player,
+    const FFF3FPDynamicMetadataPacket* packets, std::uint32_t count) noexcept;
+
+// Drops injected metadata: kind 0 (FFF3FPDynamicMetadataKind::None) clears
+// every kind, any other kind clears only that kind's entries.
+FFF3FP_API FFFResult FFF3FP_ClearDynamicMetadata(FFF3FPHandle player,
+    std::uint32_t kind) noexcept;
+
+// Pinned so a host-side Marshal.SizeOf drift cannot silently produce structs
+// that pass the size gate while reading fields at wrong offsets (same policy
+// as FFF3FPHdrSignalDiagnostics above). New kinds extend the kind enum, never
+// these layouts; a layout change means a new kindVersion.
+static_assert(sizeof(FFF3FPHdrVividMetadataPayload) == 68,
+    "FFF3FPHdrVividMetadataPayload layout changed: mirror it in Fff3FpNative.cs and re-pin");
+static_assert(sizeof(FFF3FPDynamicMetadataPacket) == 40,
+    "FFF3FPDynamicMetadataPacket layout changed: mirror it in Fff3FpNative.cs and re-pin");
 
 FFF3FP_API void FFF3FP_Destroy(FFF3FPHandle player) noexcept;
 
@@ -1079,3 +1287,28 @@ FFF3FP_API FFFResult FFF3FP_SetViewRotation(FFF3FPHandle player,
 // need to keep their UI in step after a device-loss reset.
 FFF3FP_API FFFResult FFF3FP_GetViewRotation(FFF3FPHandle player,
     std::uint32_t* quarterTurnsClockwise) noexcept;
+
+// --- Audio delay for the embedded audio track -------------------------------
+//
+// The entry point is appended after the v16 surface, like the VSR and view-rotation
+// exports above: resolve it dynamically (GetProcAddress) and treat it as absent as a
+// missing optional feature, not a broken session.
+//
+// The snapshot field it reports through is not optional, and that is the part with
+// teeth: GetSnapshot rejects a caller whose declared size is smaller than
+// sizeof(FFF3FPSnapshot), so growing the struct forces every snapshot consumer to be
+// rebuilt against this header in lockstep with PlayerApiVersion -- for the same reason
+// the previous snapshot growth took a version bump. In this tree that version is 20;
+// the bump itself belongs to the version pass, not to this feature. A host built
+// against the older header failing with InvalidArgument is the contract working, not a
+// defect.
+//
+// Positive = audio plays later than the video (lip-sync correction). Bounded to
+// +/- 10 minutes; outside that bound, or called outside Ready/Playing/Paused/Ended, the
+// call is rejected and nothing changes. Session-level preference: DoClose does
+// not clear it, so it survives Close/Open. On success the kernel re-seeks the
+// current position so the change takes effect from the next audible frame. Frames
+// without a timestamp are not shifted, exactly as with the external offset. See
+// PlayerSession::SetAudioDelay for the mechanics.
+FFF3FP_API FFFResult FFF3FP_SetAudioDelay(FFF3FPHandle player,
+    std::int64_t delay100ns) noexcept;

@@ -492,7 +492,7 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         If SRT测量缓存.TryGetValue(键, 已有) Then Return 已有
 
         Dim 原生 As New 原生定时文字测量 With {
-            .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字测量)()), .版本 = 1UI
+            .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字测量)()), .版本 = 20UI
         }
         Dim 结果 = 播放器原生接口.FFF3FP_MeasureTimedText(
             行.文本, 行.字体, 行.字号像素, CType(行.字体样式, 原生定时文字标志),

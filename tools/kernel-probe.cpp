@@ -50,7 +50,7 @@ int wmain(int argc, wchar_t** argv) {
         }
     };
     auto snapshot = [&] {
-        FFF3FPSnapshot value{}; value.size = sizeof(value); value.version = 8;
+        FFF3FPSnapshot value{}; value.size = sizeof(value); value.version = 20;
         if (!check(GetSnapshot(player, &value))) value.state = FFF3FPState::Failed;
         return value;
     };
@@ -105,14 +105,14 @@ int wmain(int argc, wchar_t** argv) {
                     !check(SetColorMode(player, static_cast<FFF3FPColorMode>(phase % 3),
                         100, 1000, 203, 1))) return 17;
                 FFF3FPTimedTextCommand command{};
-                command.size = sizeof(command); command.version = 1;
+                command.size = sizeof(command); command.version = 20;
                 command.type = FFF3FPTimedTextCommandType::Text;
                 command.x = 20; command.y = 20; command.width = 400; command.height = 80;
                 command.fontSize = 32; command.foregroundArgb = 0xFFFFFFFF;
                 command.textUtf8 = "Scheduling stress"; command.fontFamilyUtf8 = "Segoe UI";
                 command.contentId = 1;
                 FFF3FPTimedTextLayer layer{};
-                layer.size = sizeof(layer); layer.version = 1;
+                layer.size = sizeof(layer); layer.version = 20;
                 layer.canvasWidth = width; layer.canvasHeight = height;
                 layer.commandCount = phase % 2; layer.commands = &command;
                 layer.sequence = phase + 1; layer.targetFrameRate = 60;

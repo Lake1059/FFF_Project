@@ -39,7 +39,7 @@ Public NotInheritable Class 播放器会话
     '''   ② 本文件的 期望API版本（下面两处用法）
     '''   ③ FFF.Player.vbproj 的 &lt;PlayerApiVersion&gt;
     ''' </summary>
-    Friend Const 期望API版本 As UInteger = 18UI
+    Friend Const 期望API版本 As UInteger = 20UI
 
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
@@ -216,6 +216,12 @@ Public NotInheritable Class 播放器会话
     Public Sub 设置外部音轨偏移(偏移 As TimeSpan)
         检查结果(播放器原生接口.FFF3FP_SetExternalAudioOffset(取得句柄(), 偏移.Ticks))
     End Sub
+    ''' <summary>内嵌音轨的音频延迟（唇音同步）：正值 = 声音落后于画面。
+    ''' 外挂音轨请用 加载外部音轨/设置外部音轨偏移。内核约束 ±10 分钟；
+    ''' 会话级偏好：跨 关闭/打开媒体 保留。内核收到后会重 seek 使其立即生效。</summary>
+    Public Sub 设置音频延迟(延迟 As TimeSpan)
+        检查结果(播放器原生接口.FFF3FP_SetAudioDelay(取得句柄(), 延迟.Ticks))
+    End Sub
     Public Sub 设置色彩模式(模式 As 色彩输出模式, SDR峰值尼特 As Single, HDR峰值尼特 As Single,
                          SDR纸白尼特 As Single, Optional 强制HDR输出 As Boolean = False)
         检查结果(播放器原生接口.FFF3FP_SetColorMode(取得句柄(), CUInt(模式), SDR峰值尼特,
@@ -333,7 +339,7 @@ Public NotInheritable Class 播放器会话
     Friend Function 取图片信息() As 原生图片信息?
         Dim 信息 As New 原生图片信息 With {
             .大小 = CUInt(Marshal.SizeOf(GetType(原生图片信息))),
-            .版本 = 1UI
+            .版本 = 20UI
         }
         Dim 结果 = 播放器原生接口.FFF3FP_GetImageInfo(取得句柄(), 信息)
         ' "不支持"是正常回落，不当作错误：调用方只关心"是不是动图"，读不到就按不是处理。
@@ -421,7 +427,7 @@ Public NotInheritable Class 播放器会话
                     Dim source = 命令(index)
                     ArgumentNullException.ThrowIfNull(source)
                     Dim value As New 原生定时文字命令 With {
-                        .大小 = 原生定时文字命令大小, .版本 = 1UI,
+                        .大小 = 原生定时文字命令大小, .版本 = 20UI,
                         .类型 = If(source.是位图, 原生定时文字命令类型.位图, 原生定时文字命令类型.文字),
                         .标志 = CType(CUInt(source.样式), 原生定时文字标志),
                         .X = source.X, .Y = source.Y, .宽度 = source.宽度, .高度 = source.高度,
@@ -448,7 +454,7 @@ Public NotInheritable Class 播放器会话
                     定时文字原生缓冲(index) = value
                 Next
                 Dim layer As New 原生定时文字图层 With {
-                    .大小 = 原生定时文字图层大小, .版本 = 1UI,
+                    .大小 = 原生定时文字图层大小, .版本 = 20UI,
                     .画布宽度 = CUInt(画布大小.Width), .画布高度 = CUInt(画布大小.Height),
                     .命令数 = CUInt(命令.Count), .图层槽位 = 图层槽位, .序号 = 序号,
                     .命令 = If(命令.Count = 0, IntPtr.Zero, 定时文字原生缓冲句柄.AddrOfPinnedObject()),
@@ -523,14 +529,14 @@ Public NotInheritable Class 播放器会话
     Private Delegate Function 定时文字状态调用(句柄 As 播放器原生句柄, ByRef 值 As 原生定时文字状态) As 原生播放器结果
 
     Private Function 读取定时文字状态(调用 As 定时文字状态调用) As 定时文字状态
-        Dim 值 As New 原生定时文字状态 With {.大小 = 原生定时文字状态大小, .版本 = 1UI}
+        Dim 值 As New 原生定时文字状态 With {.大小 = 原生定时文字状态大小, .版本 = 20UI}
         检查结果(调用(取得句柄(), 值))
         Return New 定时文字状态(值)
     End Function
 
     Public ReadOnly Property 当前快照 As 播放器快照
         Get
-            Dim 值 As New 原生播放器快照 With {.大小 = 原生播放器快照大小, .版本 = 8UI}
+            Dim 值 As New 原生播放器快照 With {.大小 = 原生播放器快照大小, .版本 = 20UI}
             检查结果(播放器原生接口.FFF3FP_GetSnapshot(取得句柄(), 值))
             Return New 播放器快照(值)
         End Get
@@ -541,7 +547,7 @@ Public NotInheritable Class 播放器会话
         If Y < 0 Then Throw New ArgumentOutOfRangeException(NameOf(Y))
         Dim 值 As New 原生视频像素探针 With {
             .大小 = 原生视频像素探针大小,
-            .版本 = 1UI, .X = CUInt(X), .Y = CUInt(Y)}
+            .版本 = 20UI, .X = CUInt(X), .Y = CUInt(Y)}
         检查结果(播放器原生接口.FFF3FP_ReadVideoPixel(取得句柄(), 值))
         Return New 视频输出原始像素(值)
     End Function
@@ -570,7 +576,7 @@ Public NotInheritable Class 播放器会话
 
     Private Function 读取原生音频峰值() As 原生音频峰值
         Dim 值 As New 原生音频峰值 With {
-            .大小 = 原生音频峰值大小, .版本 = 2UI, .输入峰值 = New Single(7) {}}
+            .大小 = 原生音频峰值大小, .版本 = 20UI, .输入峰值 = New Single(7) {}}
         检查结果(播放器原生接口.FFF3FP_GetAudioPeakLevels(取得句柄(), 值))
         Return 值
     End Function

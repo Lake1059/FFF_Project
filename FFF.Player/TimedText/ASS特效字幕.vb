@@ -103,7 +103,7 @@ Friend NotInheritable Class ASS特效字幕帧生成器
         If 时间 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(时间))
         If 画布宽度 <= 0 OrElse 画布高度 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(画布宽度))
         Dim 信息 As New 原生位图字幕帧 With {
-            .大小 = CUInt(Marshal.SizeOf(Of 原生位图字幕帧)()), .版本 = 1UI}
+            .大小 = CUInt(Marshal.SizeOf(Of 原生位图字幕帧)()), .版本 = 20UI}
         检查结果(播放器原生接口.FFF3FP_RenderAssSubtitle(
             句柄, 时间.Ticks, 画布宽度, 画布高度, 信息))
         If (信息.标志 And 原生位图字幕标志.未变化) <> 0 Then Return 上一帧

@@ -33,7 +33,7 @@ using PlayerMediaText::CopyUtf8;
 // VSR and view rotation are deliberately NOT part of this contract: they are
 // appended exports, so a host that knows only the current version keeps working
 // unchanged.
-constexpr std::uint32_t PlayerApiVersion = 18;
+constexpr std::uint32_t PlayerApiVersion = 20;
 
 // Process-wide native log sink, installed through FFF3FP_SetLogCallback.
 std::atomic<FFF3FPLogCallback> g_logSink{nullptr};
@@ -186,6 +186,15 @@ FFFResult FFF3FP_SetTimedTextLayer(const FFF3FPHandle player,
         : FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_GetSnapshot(const FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept { return player && snapshot ? static_cast<PlayerSession*>(player)->GetSnapshot(*snapshot) : FFFResult::InvalidArgument; }
+// HDR presentation diagnostics. The ST 2094 curve gate and the per-frame
+// display signaling were previously only assertable by reading the shader source; a
+// host can now ask which mechanism actually ran for the frames drawn so far.
+FFFResult FFF3FP_GetHdrSignalDiagnostics(const FFF3FPHandle player,
+    FFF3FPHdrSignalDiagnostics* diagnostics) noexcept {
+    return player && diagnostics
+        ? static_cast<PlayerSession*>(player)->GetHdrSignalDiagnostics(*diagnostics)
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_ReadVideoPixel(const FFF3FPHandle player,
     FFF3FPVideoPixelProbe* probe) noexcept {
     return player && probe ? static_cast<PlayerSession*>(player)->ReadVideoPixel(*probe) :
@@ -234,6 +243,21 @@ FFFResult FFF3FP_GetHdrMetadataSource(const FFF3FPHandle player,
     if (player == nullptr || source == nullptr) return FFFResult::InvalidArgument;
     *source = static_cast<PlayerSession*>(player)->HdrMetadataSource();
     return FFFResult::Success;
+}
+
+// Generic dynamic-metadata carrier. See the header's carrier contract: same
+// table, matching rule and rejection semantics as the ST 2094-40 entry point,
+// with a kind tag per packet and NotSupported for kinds this kernel does not
+// know (the previous table stays live either way).
+FFFResult FFF3FP_SetDynamicMetadata(const FFF3FPHandle player,
+    const FFF3FPDynamicMetadataPacket* packets, const std::uint32_t count) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetDynamicMetadata(packets, count)
+        : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_ClearDynamicMetadata(const FFF3FPHandle player,
+    const std::uint32_t kind) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->ClearDynamicMetadata(kind)
+        : FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_GetDanmakuStatus(const FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept {
@@ -336,3 +360,8 @@ FFFResult FFF3FP_GetLastCopyFrameBitDepth(const FFF3FPHandle player,
     *bitDepth = static_cast<PlayerSession*>(player)->LastCopyFrameBitDepth();
     return FFFResult::Success;
 }
+
+// Embedded-track audio delay (lip-sync correction). Appended after the v16 surface
+// like the VSR, rotation and readback exports, so PlayerApiVersion is unchanged for
+// a host that never resolves this entry point.
+FFFResult FFF3FP_SetAudioDelay(const FFF3FPHandle player, const std::int64_t delay) noexcept { return player ? static_cast<PlayerSession*>(player)->SetAudioDelay(delay) : FFFResult::InvalidArgument; }

@@ -288,12 +288,19 @@ Public NotInheritable Class 录制控制器
             捕获线程 = 显示器线程
             已停止值 = True
         End SyncLock
-        窗口捕获?.停止()
-        停止窗口处理()
-        If 捕获线程 IsNot Nothing AndAlso 捕获线程 IsNot Thread.CurrentThread Then 捕获线程.Join()
-        调度器?.停止(停止时间戳)
-        动态编码器?.停止()
-        会话.停止()
+        Try
+            窗口捕获?.停止()
+            停止窗口处理()
+            If 捕获线程 IsNot Nothing AndAlso 捕获线程 IsNot Thread.CurrentThread Then 捕获线程.Join()
+            调度器?.停止(停止时间戳)
+            动态编码器?.停止()
+        Finally
+            ' 只有 会话.停止() 会排空编码与写队列并写 Matroska trailer
+            ' （原生 FFF.Native/3FR/Api/FFF.Native.Api.h 的 FFF_StopSession 注释就是这个契约）。
+            ' 已停止值 已在上方置真，释放() 的守卫因此不会重跑 停止()——前置任一步抛出就必须
+            ' 在这里无条件把会话停下来，否则留下一个没有 trailer、时长不明的文件。
+            会话.停止()
+        End Try
         SyncLock 同步锁
             已暂停值 = False
         End SyncLock

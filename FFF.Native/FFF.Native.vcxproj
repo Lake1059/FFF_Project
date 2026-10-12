@@ -54,16 +54,26 @@
     <TargetName>FFF.Native</TargetName>
     <LibassRoot>$(ProjectDir)..\third_party\vcpkg_installed\x64-windows</LibassRoot>
   </PropertyGroup>
+  <PropertyGroup>
+    <!-- libiamf is not vendored here. When its header and import library are both absent,
+         the kernel builds without immersive audio instead of dying on C1083 IAMF_decoder.h.
+         A build that must not lose that feature sets FFF_FORCE_LIBIAMF=true and fails loudly
+         (target below) rather than silently shipping a narrower player. -->
+    <HaveLibiamf Condition="'$(HaveLibiamf)'=='' And Exists('$(ProjectDir)..\third_party\libiamf\include\IAMF_decoder.h') And Exists('$(ProjectDir)..\third_party\libiamf\lib\x64\iamf.lib')">true</HaveLibiamf>
+    <HaveLibiamf Condition="'$(HaveLibiamf)'==''">false</HaveLibiamf>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;FFF_WITH_LIBIAMF=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(HaveLibiamf)'=='true'">FFF_WITH_LIBIAMF=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(ProjectDir)..\third_party\libiamf\include;$(ProjectDir)..\third_party\libiamf\oar\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(HaveLibiamf)'=='true'">$(ProjectDir)..\third_party\libiamf\include;$(ProjectDir)..\third_party\libiamf\oar\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -71,7 +81,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(ProjectDir)..\third_party\libiamf\lib\x64;$(LibassRoot)\debug\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;iamf.lib;oar.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(HaveLibiamf)'=='true'">iamf.lib;oar.lib;obr_capi.lib;obr.lib;pffft.lib;FLAC.lib;opus.lib;fdk-aac.lib;absl\absl_base.lib;absl\absl_city.lib;absl\absl_civil_time.lib;absl\absl_cord_internal.lib;absl\absl_cord.lib;absl\absl_cordz_functions.lib;absl\absl_cordz_handle.lib;absl\absl_cordz_info.lib;absl\absl_crc_cord_state.lib;absl\absl_crc_cpu_detect.lib;absl\absl_crc_internal.lib;absl\absl_crc32c.lib;absl\absl_debugging_internal.lib;absl\absl_decode_rust_punycode.lib;absl\absl_demangle_internal.lib;absl\absl_demangle_rust.lib;absl\absl_die_if_null.lib;absl\absl_examine_stack.lib;absl\absl_exponential_biased.lib;absl\absl_graphcycles_internal.lib;absl\absl_hash.lib;absl\absl_hashtablez_sampler.lib;absl\absl_int128.lib;absl\absl_kernel_timeout_internal.lib;absl\absl_leak_check.lib;absl\absl_log_globals.lib;absl\absl_log_internal_check_op.lib;absl\absl_log_internal_conditions.lib;absl\absl_log_internal_fnmatch.lib;absl\absl_log_internal_format.lib;absl\absl_log_internal_globals.lib;absl\absl_log_internal_log_sink_set.lib;absl\absl_log_internal_message.lib;absl\absl_log_internal_nullguard.lib;absl\absl_log_internal_proto.lib;absl\absl_log_internal_structured_proto.lib;absl\absl_log_severity.lib;absl\absl_log_sink.lib;absl\absl_low_level_hash.lib;absl\absl_malloc_internal.lib;absl\absl_raw_hash_set.lib;absl\absl_raw_logging_internal.lib;absl\absl_spinlock_wait.lib;absl\absl_stacktrace.lib;absl\absl_status.lib;absl\absl_statusor.lib;absl\absl_str_format_internal.lib;absl\absl_strerror.lib;absl\absl_string_view.lib;absl\absl_strings_internal.lib;absl\absl_strings.lib;absl\absl_symbolize.lib;absl\absl_synchronization.lib;absl\absl_throw_delegate.lib;absl\absl_time_zone.lib;absl\absl_time.lib;absl\absl_tracing_internal.lib;absl\absl_utf8_for_code_point.lib;absl\absl_vlog_config_internal.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>ass-9.dll;avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;swscale-10.dll;avfilter-12.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
@@ -84,12 +95,14 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;FFF_WITH_LIBIAMF=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(HaveLibiamf)'=='true'">FFF_WITH_LIBIAMF=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(ProjectDir)..\third_party\libiamf\include;$(ProjectDir)..\third_party\libiamf\oar\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)3FR;$(ProjectDir)..\third_party\ffmpeg\include;$(LibassRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(HaveLibiamf)'=='true'">$(ProjectDir)..\third_party\libiamf\include;$(ProjectDir)..\third_party\libiamf\oar\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -97,7 +110,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(ProjectDir)..\third_party\libiamf\lib\x64;$(LibassRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;iamf.lib;oar.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(HaveLibiamf)'=='true'">iamf.lib;oar.lib;obr_capi.lib;obr.lib;pffft.lib;FLAC.lib;opus.lib;fdk-aac.lib;absl\absl_base.lib;absl\absl_city.lib;absl\absl_civil_time.lib;absl\absl_cord_internal.lib;absl\absl_cord.lib;absl\absl_cordz_functions.lib;absl\absl_cordz_handle.lib;absl\absl_cordz_info.lib;absl\absl_crc_cord_state.lib;absl\absl_crc_cpu_detect.lib;absl\absl_crc_internal.lib;absl\absl_crc32c.lib;absl\absl_debugging_internal.lib;absl\absl_decode_rust_punycode.lib;absl\absl_demangle_internal.lib;absl\absl_demangle_rust.lib;absl\absl_die_if_null.lib;absl\absl_examine_stack.lib;absl\absl_exponential_biased.lib;absl\absl_graphcycles_internal.lib;absl\absl_hash.lib;absl\absl_hashtablez_sampler.lib;absl\absl_int128.lib;absl\absl_kernel_timeout_internal.lib;absl\absl_leak_check.lib;absl\absl_log_globals.lib;absl\absl_log_internal_check_op.lib;absl\absl_log_internal_conditions.lib;absl\absl_log_internal_fnmatch.lib;absl\absl_log_internal_format.lib;absl\absl_log_internal_globals.lib;absl\absl_log_internal_log_sink_set.lib;absl\absl_log_internal_message.lib;absl\absl_log_internal_nullguard.lib;absl\absl_log_internal_proto.lib;absl\absl_log_internal_structured_proto.lib;absl\absl_log_severity.lib;absl\absl_log_sink.lib;absl\absl_low_level_hash.lib;absl\absl_malloc_internal.lib;absl\absl_raw_hash_set.lib;absl\absl_raw_logging_internal.lib;absl\absl_spinlock_wait.lib;absl\absl_stacktrace.lib;absl\absl_status.lib;absl\absl_statusor.lib;absl\absl_str_format_internal.lib;absl\absl_strerror.lib;absl\absl_string_view.lib;absl\absl_strings_internal.lib;absl\absl_strings.lib;absl\absl_symbolize.lib;absl\absl_synchronization.lib;absl\absl_throw_delegate.lib;absl\absl_time_zone.lib;absl\absl_time.lib;absl\absl_tracing_internal.lib;absl\absl_utf8_for_code_point.lib;absl\absl_vlog_config_internal.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>ass-9.dll;avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;swscale-10.dll;avfilter-12.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
@@ -108,6 +122,7 @@
     <ClInclude Include="3FP\Api\FFF.Player.Api.h" />
     <ClInclude Include="3FP\Disc\DiscInput.h" />
     <ClInclude Include="3FP\Audio\WasapiRenderer.h" />
+    <ClInclude Include="3FP\Audio\BedBinauralRenderer.h" Condition="'$(HaveLibiamf)'=='true'" />
     <ClInclude Include="3FP\Core\PlayerSession.h" />
     <ClInclude Include="3FP\Core\MediaText.h" />
     <ClInclude Include="3FP\Subtitle\SubtitleProbe.h" />
@@ -138,6 +153,7 @@
     <ClCompile Include="3FP\Core\PlayerSessionDisc.cpp" />
     <ClCompile Include="3FP\Audio\WasapiRenderer.cpp" />
     <ClCompile Include="3FP\Audio\IamfAudioDecoder.cpp" />
+    <ClCompile Include="3FP\Audio\BedBinauralRenderer.cpp" Condition="'$(HaveLibiamf)'=='true'" />
     <ClCompile Include="3FP\Core\PlayerSession.cpp" />
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp" />
     <ClCompile Include="3FP\Hdr\HdrMetadataParse.cpp" />
@@ -200,5 +216,8 @@
           SkipUnchangedFiles="true" Condition="Exists('$(_SyncTargetDir)')" />
     <Message Importance="high" Condition="Exists('$(_SyncTargetDir)')"
              Text="已同步内核到验证副本: $(_SyncTargetDll)" />
+  </Target>
+  <Target Name="FailIfLibiamfMissing" Condition="'$(FFF_FORCE_LIBIAMF)'=='true' And '$(HaveLibiamf)'!='true'" BeforeTargets="PrepareForBuild">
+    <Error Text="FFF_FORCE_LIBIAMF=true but libiamf is not present under $(ProjectDir)..\third_party\libiamf (looked for include\IAMF_decoder.h and lib\x64\iamf.lib). Run tools\准备Libiamf.ps1 first; refusing to build a player that silently lacks immersive audio." />
   </Target>
 </Project>

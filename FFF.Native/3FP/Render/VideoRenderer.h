@@ -304,6 +304,8 @@ public:
     std::uint64_t Upload100ns() const noexcept;
     std::uint32_t OutputBitDepth() const noexcept;
     FFF3FPVideoScalingMode ActualVideoScalingMode() const noexcept;
+    // Presentation diagnostics for the ST 2094 paths; see FFF3FPHdrSignalDiagnostics.
+    FFF3FPHdrSignalDiagnostics HdrSignalDiagnostics() const noexcept;
     /// RTX Video Super Resolution switch and diagnostics. See the API header
     /// for why `active` means "the driver accepted the request", not "the
     /// image is provably sharper".
@@ -318,6 +320,11 @@ public:
     FFFResult SetInjectedHdrMetadata(const FFF3FPHdrDynamicMetadataEntry* entries,
         std::uint32_t count) noexcept;
     void ClearInjectedHdrMetadata() noexcept;
+    // Generic dynamic-metadata carrier (FFF3FP_SetDynamicMetadata): same table
+    // and picture path as the ST 2094-40 injection, kind-tagged packets.
+    FFFResult SetDynamicMetadata(const FFF3FPDynamicMetadataPacket* packets,
+        std::uint32_t count) noexcept;
+    void ClearDynamicMetadata(std::uint32_t kind) noexcept;
     std::uint32_t HdrMetadataSource() const noexcept;
 
 private:
@@ -423,13 +430,12 @@ private:
     /// colour-mode decision. Deliberately does NOT test transfer function or
     /// output bit depth: VSR is a spatial operation and works on HDR sources too.
     bool CanUseVideoProcessorForUpscale() const noexcept;
-    /// CanUseVideoProcessorForUpscale() plus the vendor gate, the "actually
-    /// upscaling" requirement and NVIDIA's documented 360p..1440p input range.
-    bool ShouldEnableNvidiaSuperResolution(std::uint32_t targetWidth,
-        std::uint32_t targetHeight) const noexcept;
     /// Upscale the decoded planes through a video processor with RTX VSR
-    /// enabled, filling effectiveSourceViews_ with the result. Returns Success
+    /// enabled, redirecting effectiveSourceViews_ at the result. Returns Success
     /// with videoSuperResolutionActive_ == false when VSR simply does not apply.
+    /// `targetWidth`/`targetHeight` are the destination rect in *viewport* axes,
+    /// computed in DrawCachedVideo; they are converted to the picture's own axes
+    /// because a quarter-turn rotation swaps them.
     FFFResult ApplySuperResolution(std::uint32_t targetWidth,
         std::uint32_t targetHeight) noexcept;
     /// Build plane SRVs over an NV12/P010 texture, matching EnsurePipeline's
@@ -568,6 +574,18 @@ private:
     // present path so the refresh happens under the device lock instead of racing the
     // presentation pump.
     std::atomic<bool> hdrInputsDirty_{ false };
+    // Presentation diagnostics (see FFF3FPHdrSignalDiagnostics). Counters accumulate for
+    // the life of the renderer; the signaled block is whatever was last handed to DXGI.
+    // Each field is atomic on its own, so a poll can catch a mixed read across a
+    // block change; there is no way to read the block atomically.
+    std::atomic<std::uint64_t> dynamicCurveFramesApplied_{ 0 };
+    std::atomic<std::uint64_t> dynamicCurveFramesRefused_{ 0 };
+    std::atomic<std::uint64_t> hdrMetaDataCalls_{ 0 };
+    std::atomic<std::uint64_t> hdrMetaDataSuppressed_{ 0 };
+    std::atomic<std::uint32_t> signaledMaxMastering_{ 0 };
+    std::atomic<std::uint32_t> signaledMinMastering_{ 0 };
+    std::atomic<std::uint32_t> signaledMaxCll_{ 0 };
+    std::atomic<std::uint32_t> signaledMaxFall_{ 0 };
     // Frame-derived halves of the transfer decision, kept so a refresh reproduces exactly
     // what Render() computed: metadata arriving later must not change how samples decode.
     bool lastFrameDeclaresTrc_ = false;
@@ -699,19 +717,30 @@ private:
     std::atomic<FFF3FPVideoSuperResolution> requestedVideoSuperResolution_{
         FFF3FPVideoSuperResolution::Off };
     // Adapter of the current D3D11 device is NVIDIA (probed once per device).
-    bool nvidiaAdapter_{ false };
+    // Atomic because the status report may read it from another thread while the
+    // device is being (re)created.
+    std::atomic<bool> nvidiaAdapter_{ false };
     // VSR was requested AND the blit succeeded on the last presented frame.
     std::atomic<bool> videoSuperResolutionActive_{ false };
-    // The driver rejected the request (or the blit failed). Latched for the
-    // lifetime of the device so later frames do not repeat a failing call.
-    bool videoSuperResolutionRejected_{ false };
+    // The driver rejected the request (or the blit failed). Latched off so later
+    // frames do not repeat a failing call; cleared by a fresh Auto request in
+    // SetVideoSuperResolution, which re-probes in case VSR was just enabled in
+    // the NVIDIA control panel.
+    std::atomic<bool> videoSuperResolutionRejected_{ false };
     // Why the last frame did not use VSR, for the status report.
     std::atomic<FFF3FPVideoSuperResolutionReason> videoSuperResolutionReason_{
         FFF3FPVideoSuperResolutionReason::NotRequested };
-    std::uint32_t videoSuperResolutionSourceWidth_{ 0 };
-    std::uint32_t videoSuperResolutionSourceHeight_{ 0 };
-    std::uint32_t videoSuperResolutionTargetWidth_{ 0 };
-    std::uint32_t videoSuperResolutionTargetHeight_{ 0 };
+    // Last reason written to the process log, so a steady state (e.g. VSR Off)
+    // logs its transition once instead of once per frame. Sentinelled with a
+    // value outside the enum.
+    std::atomic<std::uint32_t> videoSuperResolutionLoggedReason_{ 0xFFFFFFFFu };
+    // Geometry of the cached upscaled surface, in the *picture's* axes (see
+    // ApplySuperResolution). Atomic because the status getter reads them on the
+    // host's thread while the render path writes them.
+    std::atomic<std::uint32_t> videoSuperResolutionSourceWidth_{ 0 };
+    std::atomic<std::uint32_t> videoSuperResolutionSourceHeight_{ 0 };
+    std::atomic<std::uint32_t> videoSuperResolutionTargetWidth_{ 0 };
+    std::atomic<std::uint32_t> videoSuperResolutionTargetHeight_{ 0 };
     // The upscaled NV12/P010 surface and its per-plane views. Owned here, never
     // swapped into sourceViews_ (that array is EnsurePipeline's long-lived
     // pipeline state and mutating it would corrupt the next frame).

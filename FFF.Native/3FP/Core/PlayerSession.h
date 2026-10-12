@@ -72,6 +72,12 @@ public:
         std::int64_t offset100ns) noexcept;
     FFFResult ClearExternalAudio() noexcept;
     FFFResult SetExternalAudioOffset(std::int64_t offset100ns) noexcept;
+    // Audio delay for the *embedded* audio track (the external-track counterpart is
+    // SetExternalAudioOffset). Positive = audio plays later than the video. Applied to
+    // the presentation position computed in QueueAudioFrame, so a positive value opens
+    // a gap the renderer's own silence-insertion path bridges. Session-level preference:
+    // DoClose does not clear it, so it is expected to survive Close/Open.
+    FFFResult SetAudioDelay(std::int64_t delay100ns) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
     FFFResult SetPresentConfig(bool enableTearing) noexcept;
@@ -104,6 +110,11 @@ public:
     FFFResult GetVideoSuperResolutionStatus(
         FFF3FPVideoSuperResolutionStatus& status) const noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
+    // HDR presentation diagnostics (see FFF3FPHdrSignalDiagnostics in
+    // FFF.Player.Api.h): which ST 2094 mechanism actually ran for the frames drawn
+    // so far, and whether the per-frame display signaling reached DXGI.
+    FFFResult GetHdrSignalDiagnostics(
+        FFF3FPHdrSignalDiagnostics& diagnostics) const noexcept;
     FFFResult ReadVideoPixel(FFF3FPVideoPixelProbe& probe) noexcept;
     // Batch pixel readback
     FFFResult ReadVideoPixelRegion(std::uint32_t x, std::uint32_t y,
@@ -124,6 +135,11 @@ public:
         std::uint32_t count) noexcept;
     FFFResult ClearInjectedHdrMetadata() noexcept;
     std::uint32_t HdrMetadataSource() const noexcept;
+    // See FFF3FP_SetDynamicMetadata in FFF.Player.Api.h: the generic carrier
+    // over the same table, kind-tagged packets.
+    FFFResult SetDynamicMetadata(const FFF3FPDynamicMetadataPacket* packets,
+        std::uint32_t count) noexcept;
+    FFFResult ClearDynamicMetadata(std::uint32_t kind) noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
 
@@ -353,6 +369,11 @@ private:
     AVCodecContext* externalAudioDecoder_;
     std::int32_t externalAudioStream_;
     std::int64_t externalAudioOffset100ns_;
+    // Kept next to the offset it mirrors rather than at the end of the block:
+    // PlayerSession never crosses the DLL boundary (hosts hold an opaque handle), so
+    // the append-at-the-tail rule that FFF3FPSnapshot follows does not apply here,
+    // and the constructor's mem-init list has to stay in declaration order.
+    std::int64_t audioDelay100ns_;
     std::string externalAudioPath_;
     PlayerAudioRuntimeState audioRuntimeState_;
     std::unique_ptr<PlayerWasapiRenderer> audioRenderer_;

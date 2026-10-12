@@ -144,6 +144,17 @@ Friend Structure 原生播放器快照
     ' （实测峰值 -inf），所以这不是"上混出假内容"，但 UI 应显示内容而非渲染目标 ——
     ' 否则 7.1 素材会显示成 7.1.4，而实际有 4 只音箱不出声。
     Public IAMF内容声道数 As UInteger
+    ' IAMF 渲染模式（尾追加，内核侧 iamfBinaural@388）：0=扬声器布局(7.1.4)经 WASAPI 重采样折叠到
+    ' 设备；1=libiamf 双耳(HRTF)渲染直接产立体声（设备是立体声时自动选用，
+    ' 空间定位在耳机上保留）。UI 据此告诉用户听到的是哪一种。
+    Public IAMF双耳渲染 As UInteger
+    ' 通用双耳渲染（尾追加，内核侧 audioBinaural@392）：非 IAMF 多声道床（Dolby AC-3/E-AC-3/Atmos 床、
+    ' TrueHD、DTS/DTS:X 床、多声道 PCM/FLAC）在立体声设备上由 OBR HRTF 渲染时
+    ' 置 1；0=swr 矩阵折叠（能量在、定位丢）。IAMF 轨看 IAMF双耳渲染，两条路径互斥。
+    Public 音频双耳渲染 As UInteger
+    ' 音频延迟（尾追加，内核侧 audioDelay100ns@400，8 字节对齐）：内嵌音轨的唇音同步偏移，正值=声音落后于画面。
+    ' 与 外部音轨偏移100纳秒 互不干扰（外挂音轨走它自己的偏移）。
+    Public 音频延迟100纳秒 As Long
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -562,6 +573,9 @@ Friend Module 播放器原生接口
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetExternalAudioOffset(播放器 As 播放器原生句柄, 偏移100纳秒 As Long) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetAudioDelay(播放器 As 播放器原生句柄, 延迟100纳秒 As Long) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetColorMode(播放器 As 播放器原生句柄, 模式 As UInteger, SDR峰值 As Single, HDR峰值 As Single, SDR纸白 As Single, 强制HDR输出 As UInteger) As 原生播放器结果

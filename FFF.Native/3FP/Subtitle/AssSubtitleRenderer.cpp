@@ -25,7 +25,7 @@ extern "C" {
 namespace {
 using PlayerMediaText::FfmpegError;
 using PlayerMediaText::CopyUtf8;
-constexpr std::uint32_t ApiVersion = 1;
+constexpr std::uint32_t ApiVersion = 20;
 constexpr std::int64_t TicksPerMillisecond = 10'000;
 
 std::wstring Utf8ToWide(const std::string& value) {

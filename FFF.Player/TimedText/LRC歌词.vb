@@ -45,6 +45,10 @@ Public NotInheritable Class LRC歌词解析器
     Private Shared ReadOnly 逐字时间标签 As New Regex(
         "<\d+:[0-5]?\d(?:[\.:]\d{1,3})?>",
         RegexOptions.Compiled Or RegexOptions.CultureInvariant)
+    ' [offset:+100] is a file-global shift in milliseconds; several of them add up.
+    Private Shared ReadOnly 全局偏移标签 As New Regex(
+        "\[\s*offset\s*:\s*(?<value>[-+]?\d+)\s*\]",
+        RegexOptions.Compiled Or RegexOptions.CultureInvariant Or RegexOptions.IgnoreCase)
 
     Private Sub New()
     End Sub
@@ -72,11 +76,21 @@ Public NotInheritable Class LRC歌词解析器
                               Optional 取消令牌 As CancellationToken = Nothing) As LRC歌词资料
         ArgumentNullException.ThrowIfNull(reader)
         Dim groups As New SortedDictionary(Of Long, List(Of String))()
+        Dim offsetTicks As Long = 0L
         Do
             取消令牌.ThrowIfCancellationRequested()
             Dim line = reader.ReadLine()
             If line Is Nothing Then Exit Do
             line = line.TrimStart(ChrW(&HFEFF))
+            Dim offsetMatch = 全局偏移标签.Match(line)
+            If offsetMatch.Success Then
+                Dim offsetMilliseconds As Long
+                If Long.TryParse(offsetMatch.Groups("value").Value, NumberStyles.AllowLeadingSign,
+                                 CultureInfo.InvariantCulture, offsetMilliseconds) Then
+                    offsetTicks += offsetMilliseconds * TimeSpan.TicksPerMillisecond
+                End If
+                Continue Do
+            End If
             Dim position = 0
             Dim timestamps As New HashSet(Of Long)()
             Do
@@ -101,8 +115,12 @@ Public NotInheritable Class LRC歌词解析器
         If groups.Count = 0 Then
             Throw New NotSupportedException("歌词文件不包含支持的 LRC 时间轴。")
         End If
+        ' Shifted here, not per line: an [offset] tag is file-global, so it also has to move
+        ' the lines parsed before it, and a negative offset must not yield a negative start.
         Dim entries = groups.Select(
-            Function(pair) New LRC歌词条目(TimeSpan.FromTicks(pair.Key), pair.Value.AsReadOnly())).ToArray()
+            Function(pair) New LRC歌词条目(
+                TimeSpan.FromTicks(Math.Max(0L, pair.Key + offsetTicks)),
+                pair.Value.AsReadOnly())).ToArray()
         Return New LRC歌词资料(If(路径, String.Empty), Array.AsReadOnly(entries))
     End Function
 

@@ -33,7 +33,7 @@
              1. kernel/FFF.Native/3FP/Api/PlayerApi.cpp   PlayerApiVersion
              2. FFF.Player/Core/播放器会话.vb              <> NNUI  (and .版本 = NNUI)
              3. this property                                            -->
-      <PlayerApiVersion>18</PlayerApiVersion>
+      <PlayerApiVersion>20</PlayerApiVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Debug'">

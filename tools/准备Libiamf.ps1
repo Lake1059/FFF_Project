@@ -4,15 +4,20 @@
 # 布局），而 third_party\ 被 .gitignore 排除，与 FFmpeg/Libass 同一策略 —— 所以新克隆必须
 # 先跑本脚本，否则 FFF.Native.vcxproj 找不到 iamf.lib/oar.lib。
 #
+# 关键：必须带 -DIAMF_ENABLE_BINAURALIZER=ON。不带它 libiamf 只产 iamf.lib + oar.lib，
+# 而 FFF.Native 的 IAMF 路径要 obr_create/obr_add_audio_element/obr_process（双耳）与
+# opus/FLAC/fdk-aac 的 multistream 解码器（iamf.lib 内部引用它们），照“只产 iamf+oar”的取库
+# Upstream's own copy omits the binauralizer switch, so following its README and then applying this bucket guarantees LNK2019 (29 unresolved externals).
+#
 # 产物：
 #   third_party\libiamf\include\        IAMF_decoder.h IAMF_defines.h vlogging_tool_sr.h
 #   third_party\libiamf\oar\include\    oar.h oar_base.h oar_metadata.h animation.h
-#   third_party\libiamf\lib\x64\        iamf.lib oar.lib
+#   third_party\libiamf\lib\x64\        iamf.lib oar.lib obr.lib obr_capi.lib pffft.lib FLAC.lib opus.lib fdk-aac.lib
 #   third_party\libiamf\LICENSE.libiamf.txt
 #
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File tools\准备Libiamf.ps1
-#   powershell -ExecutionPolicy Bypass -File tools\准备Libiamf.ps1 -RepoPath D:\cache\libiamf
+#   powershell -ExecutionPolicy Bypass -File tools\准备Libiamf.ps1 -RepoPath $env:TEMP\libiamf-src   # 已 clone 好的仓库；缺省用 $env:TEMP\libiamf-prepare\repo
 #
 # -RepoPath 指向一个已经 clone 好的 libiamf（跳过联网 clone）。两条路径产出的文件集合一致，
 # 差别只是是否重新 clone/build。
@@ -60,19 +65,19 @@ try {
 } finally { Pop-Location }
 
 if ([string]::IsNullOrWhiteSpace($CmakeExe)) {
+    # 不在这里硬编码某个机器的 cmake 安装路径：PATH 里找，找不到就要求显式传参。
     $found = Get-Command cmake -ErrorAction SilentlyContinue
-    if ($null -eq $found) {
-        $fallback = "C:\Program Files\CMake\bin\cmake.exe"
-        if (-not (Test-Path -LiteralPath $fallback)) { throw "找不到 cmake，请传 -CmakeExe" }
-        $CmakeExe = $fallback
-    } else { $CmakeExe = $found.Source }
+    if ($null -eq $found) { throw "PATH 里没有 cmake，请用 -CmakeExe <绝对路径> 指定（本脚本不猜安装位置）" }
+    $CmakeExe = $found.Source
 }
+
 
 # /MD 是硬要求：这两个静态库按动态 CRT 构建，用 /MT 会在链接 FFF.Native 时报
 # __imp_realloc / __imp_fmax / __imp__localtime64 等未解析外部符号。
-Write-Host "configure（iamf 静态库 + oar）"
+Write-Host "configure（iamf + oar + OBR 双耳链）"
 & $CmakeExe -S $RepoPath -B $BuildDir -A x64 -DCMAKE_CONFIGURATION_TYPES=Release `
-    -DIAMF_TEST_TOOL=ON -DIAMF_BUILD_SHARED_LIB=OFF
+    -DIAMF_TEST_TOOL=ON -DIAMF_BUILD_SHARED_LIB=OFF `
+    -DIAMF_ENABLE_BINAURALIZER=ON
 if ($LASTEXITCODE -ne 0) { throw "cmake configure 失败（rc=$LASTEXITCODE）" }
 & $CmakeExe --build $BuildDir --config Release
 if ($LASTEXITCODE -ne 0) { throw "cmake build 失败（rc=$LASTEXITCODE）" }
@@ -99,6 +104,28 @@ Copy-Stage -SourceDir (Join-Path $BuildDir "Release") -TargetDir (Join-Path $Sta
     -Names @("iamf.lib")
 Copy-Stage -SourceDir (Join-Path $BuildDir "dep_external\src\oar\Release") `
     -TargetDir (Join-Path $StageRoot "lib\x64") -Names @("oar.lib")
+
+# 双耳 + 编解码传递依赖。CMake 把 dep_external 下的每个包各自输出到
+# <build>\dep_external\src\<pkg>\Release 还是 <build>\Release 取决于 libiamf 那一版的
+# CMakeLists，所以这里按文件名在整棵 build 树里找第一个命中项，不硬编码子目录；
+# 找不到就响亮报错——绝大多数情况就是忘了 -DIAMF_ENABLE_BINAURALIZER=ON。
+foreach ($spec in @(
+    @{ Name = "oar.lib";       Why = "OAR 元数据/布局" },
+    @{ Name = "obr.lib";       Why = "双耳 HRTF 实现（BedBinauralRenderer 的直接依赖）" },
+    @{ Name = "obr_capi.lib";  Why = "obr 的 C API 封装" },
+    @{ Name = "pffft.lib";     Why = "obr 的 FFT" },
+    @{ Name = "FLAC.lib";      Why = "iamf.lib 的 flac_multistream_decoder.obj" },
+    @{ Name = "opus.lib";      Why = "iamf.lib 的 opus_multistream2_decoder.obj" },
+    @{ Name = "fdk-aac.lib";   Why = "iamf.lib 的 aac_multistream_decoder.obj" })) {
+    $hit = Get-ChildItem -LiteralPath $BuildDir -Recurse -File -Filter $spec.Name |
+        Select-Object -First 1
+    if ($null -eq $hit) {
+        throw "构建产物里没有 $($spec.Name)（$($spec.Why)）。检查 configure 是否带 -DIAMF_ENABLE_BINAURALIZER=ON。"
+    }
+    New-Item -ItemType Directory -Force -Path (Join-Path $StageRoot "lib\x64") | Out-Null
+    Copy-Item -LiteralPath $hit.FullName -Destination (Join-Path $StageRoot "lib\x64") -Force
+    Write-Host ("  staged {0} <- {1}" -f $spec.Name, $hit.FullName.Substring($BuildDir.Length + 1))
+}
 Copy-Stage -SourceDir $RepoPath -TargetDir $StageRoot -Names @("LICENSE")
 Rename-Item -LiteralPath (Join-Path $StageRoot "LICENSE") -NewName "LICENSE.libiamf.txt" -Force
 

@@ -16,7 +16,9 @@ extern "C" {
 #include <libavutil/rational.h>
 }
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace {
@@ -245,20 +247,16 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         }
     }
 
-    // HDR Vivid carries no transfer-function of its own: `frame->color_trc` is
-    // AVCOL_TRC_UNSPECIFIED on real Vivid streams (verified with ffprobe on the
-    // FATE Vivid and HDR10+ vectors -- stream-level color_transfer is populated,
-    // frame-level color_trc is not). The baseline is therefore taken from the
-    // stream-level classification that ConfigureStream() stored in streamState_
-    // (for the FATE Vivid vector that is Hlg(3), which is correct).
-    //
     // Deliberately read a single scalar (`format`) rather than the accumulating
     // `compatibility` bit set: compatibility is OR-ed in several places (e.g.
     // ClassifyDolbyVision) and `next` inherits it from streamState_, so testing the
     // Hlg *bit* here could pin a genuinely PQ-baseline stream to the HLG branch.
     // `format` is assigned, never OR-ed, so it cannot go sticky.
-    // Must be captured BEFORE the Vivid branch below re-labels next.format.
-    const bool vividBaselineIsHlg = streamState_.format == FFF3FPHdrFormat::Hlg;
+    // Must be captured BEFORE the Vivid branch below re-labels next.format, and it must
+    // read `next`: the per-frame B67/PQ classification above writes `next.format` only,
+    // while `streamState_` is refreshed on stream configure, so reading the stream-level
+    // copy here left the gate false for any stream whose container omits color_trc.
+    const bool vividBaselineIsHlg = next.format == FFF3FPHdrFormat::Hlg;
 
     if (const auto* vividData = av_frame_get_side_data(frame, AV_FRAME_DATA_DYNAMIC_HDR_VIVID);
         vividData != nullptr && vividData->size >= sizeof(AVDynamicHDRVivid)) {
@@ -551,6 +549,54 @@ bool BuildInjectedWindow(const FFF3FPHdrMetadataWindow& source,
 }
 }  // namespace
 
+bool HdrProcessor::BuildInjectedStateVivid(const FFF3FPHdrVividMetadataPayload& payload,
+    HdrDynamicMetadata& metadata) noexcept {
+    metadata = HdrDynamicMetadata{};
+    metadata.kind = HdrMetadataKind::HdrVivid;
+    // ST 2094-30 allows num_windows in [1,3] just like ST 2094-40; anything
+    // else is out of spec and rejected rather than guessed at.
+    if (payload.numWindows < 1 || payload.numWindows > kHdrMaxProcessingWindows)
+        return false;
+    metadata.windowCount = payload.numWindows;
+    for (std::uint32_t index = 0; index < payload.numWindows; ++index) {
+        const auto& source = payload.windows[index];
+        auto& window = metadata.windows[index];
+        // Mirror FromVivid exactly: full-frame windows, peak-only reading. The
+        // CUVA 005.1 curve is a parametric spline the kernel does not interpret
+        // (the specification is not publicly available), so the window is
+        // deliberately left without a tone-mapping function and the honest
+        // ToneMappingAbsent degrade rides along -- exactly what a bitstream
+        // Vivid frame produces.
+        if (!std::isfinite(source.averageMaxRGB) || source.averageMaxRGB < 0.0f ||
+            source.averageMaxRGB > 1.0f)
+            return false;
+        float maximumMaxRgb = 0.0f;
+        for (int channel = 0; channel < 3; ++channel) {
+            if (!std::isfinite(source.maxRGB[channel]) || source.maxRGB[channel] < 0.0f ||
+                source.maxRGB[channel] > 1.0f)
+                return false;
+            window.maxScl[channel] = source.maxRGB[channel];
+            maximumMaxRgb = std::max(maximumMaxRgb, source.maxRGB[channel]);
+        }
+        window.valid = true;
+        window.upperLeftX = 0.0f;
+        window.upperLeftY = 0.0f;
+        window.lowerRightX = 1.0f;
+        window.lowerRightY = 1.0f;
+        window.averageMaxRgb = source.averageMaxRGB;
+        window.signalPeakNits = HdrMetadataParse::LinearizedToNits(maximumMaxRgb);
+        window.toneMappingPresent = false;
+        metadata.degrade = HdrMetadataDegrade::ToneMappingAbsent;
+    }
+    if (std::isfinite(payload.targetedDisplayNits) && payload.targetedDisplayNits > 0.0f) {
+        // Same units and clamps as the bitstream Vivid path applies.
+        metadata.targetedDisplayNits =
+            std::clamp(payload.targetedDisplayNits, 1.0f, 10000.0f);
+        metadata.hasTargetedDisplay = true;
+    }
+    return true;
+}
+
 bool HdrProcessor::BuildInjectedState(const FFF3FPHdrDynamicMetadataEntry& entry,
     HdrDynamicMetadata& metadata) noexcept {
     metadata = HdrDynamicMetadata{};
@@ -567,6 +613,19 @@ bool HdrProcessor::BuildInjectedState(const FFF3FPHdrDynamicMetadataEntry& entry
             return false;
     }
 
+    // The header promises windows[0] spans the picture
+    // when numWindows == 1, and the renderer is free to ignore the rectangle below
+    // two windows -- so a narrower single window is a contract violation, not an
+    // alternative reading. Reject it instead of accepting a table whose geometry is
+    // silently dropped. Checked after the per-window build so the coordinates are
+    // already known finite and in range.
+    if (entry.numWindows == 1) {
+        const auto& only = metadata.windows[0];
+        if (!(only.upperLeftX <= 1.0e-4f && only.upperLeftY <= 1.0e-4f &&
+              only.lowerRightX >= 1.0f - 1.0e-4f &&
+              only.lowerRightY >= 1.0f - 1.0e-4f)) return false;
+    }
+
     if (std::isfinite(entry.targetedDisplayNits) && entry.targetedDisplayNits > 0.0f) {
         metadata.targetedDisplayNits =
             HdrMetadataParse::TargetedDisplayToNits(entry.targetedDisplayNits);
@@ -579,7 +638,7 @@ FFFResult HdrProcessor::SetInjectedMetadata(
     const FFF3FPHdrDynamicMetadataEntry* entries, const std::uint32_t count) noexcept {
     if (count > 0 && entries == nullptr) return FFFResult::InvalidArgument;
     if (count > kMaxInjectedEntries) return FFFResult::InvalidArgument;
-    std::vector<FFF3FPHdrDynamicMetadataEntry> validated;
+    std::vector<InjectedEntry> validated;
     validated.reserve(count);
     for (std::uint32_t index = 0; index < count; ++index) {
         const auto& entry = entries[index];
@@ -589,12 +648,73 @@ FFFResult HdrProcessor::SetInjectedMetadata(
         // would be rejected at render time is rejected here instead.
         HdrDynamicMetadata probe{};
         if (!BuildInjectedState(entry, probe)) return FFFResult::InvalidArgument;
-        validated.push_back(entry);
+        InjectedEntry tagged;
+        tagged.kind = HdrMetadataKind::Hdr10Plus;
+        tagged.frameIndex = entry.frameIndex;
+        tagged.hdr10Plus = entry;
+        validated.push_back(std::move(tagged));
     }
-    // Ascending by frameIndex; the lookup walks backwards for "last <= frame".
+    return InstallInjectedTable(std::move(validated));
+}
+
+// The generic carrier: same table, same matching rule, same rejection semantics,
+// one kind tag per packet. Unknown kinds fail the whole call with NotSupported
+// so a newer host talking to an older kernel degrades cleanly instead of
+// half-applying something the kernel cannot interpret.
+FFFResult HdrProcessor::SetInjectedMetadataPackets(
+    const FFF3FPDynamicMetadataPacket* packets, const std::uint32_t count) noexcept {
+    if (count > 0 && packets == nullptr) return FFFResult::InvalidArgument;
+    if (count > kMaxInjectedEntries) return FFFResult::InvalidArgument;
+    std::vector<InjectedEntry> validated;
+    validated.reserve(count);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto& packet = packets[index];
+        if (packet.size < sizeof(FFF3FPDynamicMetadataPacket) || packet.version != 1 ||
+            packet.reserved != 0)
+            return FFFResult::InvalidArgument;
+        // payloadSize is gated by equality, not by a smaller-prefix tolerance.
+        // The header states that kindVersion fixes the exact layout, but a `<` test
+        // let a larger struct through while the kernel copied only sizeof(...)
+        // bytes: a newer host got Success and saw an
+        // older shape mapped. The enclosing size/version/reserved checks keep
+        // their >= reading, so appended packet fields stay forward-compatible.
+        if (packet.kind == static_cast<std::uint32_t>(HdrMetadataKind::Hdr10Plus)) {
+            if (packet.kindVersion != 1 || packet.payload == nullptr ||
+                packet.payloadSize != sizeof(FFF3FPHdrDynamicMetadataEntry))
+                return FFFResult::InvalidArgument;
+            FFF3FPHdrDynamicMetadataEntry entry{};
+            std::memcpy(&entry, packet.payload, sizeof(entry));
+            HdrDynamicMetadata probe{};
+            if (!BuildInjectedState(entry, probe)) return FFFResult::InvalidArgument;
+            InjectedEntry tagged;
+            tagged.kind = HdrMetadataKind::Hdr10Plus;
+            tagged.frameIndex = packet.frameIndex;
+            tagged.hdr10Plus = entry;
+            validated.push_back(std::move(tagged));
+        } else if (packet.kind == static_cast<std::uint32_t>(HdrMetadataKind::HdrVivid)) {
+            if (packet.kindVersion != 1 || packet.payload == nullptr ||
+                packet.payloadSize != sizeof(FFF3FPHdrVividMetadataPayload))
+                return FFFResult::InvalidArgument;
+            FFF3FPHdrVividMetadataPayload payload{};
+            std::memcpy(&payload, packet.payload, sizeof(payload));
+            HdrDynamicMetadata probe{};
+            if (!BuildInjectedStateVivid(payload, probe)) return FFFResult::InvalidArgument;
+            InjectedEntry tagged;
+            tagged.kind = HdrMetadataKind::HdrVivid;
+            tagged.frameIndex = packet.frameIndex;
+            tagged.vivid = payload;
+            validated.push_back(std::move(tagged));
+        } else {
+            return FFFResult::NotSupported;
+        }
+    }
+    return InstallInjectedTable(std::move(validated));
+}
+
+FFFResult HdrProcessor::InstallInjectedTable(std::vector<InjectedEntry>&& validated) noexcept {
+    // Ascending by frameIndex; the lookup walks for "last <= frame".
     std::sort(validated.begin(), validated.end(),
-        [](const FFF3FPHdrDynamicMetadataEntry& a,
-           const FFF3FPHdrDynamicMetadataEntry& b) noexcept {
+        [](const InjectedEntry& a, const InjectedEntry& b) noexcept {
             return a.frameIndex < b.frameIndex;
         });
     std::lock_guard lock(mutex_);
@@ -605,10 +725,21 @@ FFFResult HdrProcessor::SetInjectedMetadata(
     return FFFResult::Success;
 }
 
-void HdrProcessor::ClearInjectedMetadata() noexcept {
+void HdrProcessor::ClearInjectedMetadata(const std::uint32_t kind) noexcept {
     std::lock_guard lock(mutex_);
-    injected_.clear();
-    injectedActive_ = false;
+    if (kind == 0) {
+        injected_.clear();
+        injectedActive_ = false;
+    } else {
+        // Selective clear: unknown kinds match nothing and are a no-op. The
+        // remaining table is re-evaluated against the frame on screen.
+        const auto wanted = static_cast<HdrMetadataKind>(kind);
+        injected_.erase(std::remove_if(injected_.begin(), injected_.end(),
+                            [wanted](const InjectedEntry& entry) noexcept {
+                                return entry.kind == wanted;
+                            }),
+            injected_.end());
+    }
     ReapplyInjectedMetadataLocked();
 }
 
@@ -639,22 +770,33 @@ void HdrProcessor::ApplyInjectionLocked(const std::int64_t frameIndex,
     // table stays installed but inert and the source keeps reporting Bitstream --
     // claiming it here would move the diagnostics without moving the picture.
     if (state.format == FFF3FPHdrFormat::Sdr) return;
-    const FFF3FPHdrDynamicMetadataEntry* chosen = nullptr;
+    const InjectedEntry* chosen = nullptr;
     for (const auto& candidate : injected_) {
         if (candidate.frameIndex <= lastLookupIndex_) chosen = &candidate;
         else break;
     }
     if (chosen == nullptr) chosen = &injected_.front();
     const auto previousDynamic = state.dynamic;
-    if (!BuildInjectedState(*chosen, state.dynamic)) {
+    // The kind decides which builder validates the packet and which processing
+    // path is reported. Both builders share the ST 2094-40 window representation.
+    const bool built = chosen->kind == HdrMetadataKind::HdrVivid
+        ? BuildInjectedStateVivid(chosen->vivid, state.dynamic)
+        : BuildInjectedState(chosen->hdr10Plus, state.dynamic);
+    if (!built) {
         state.dynamic = previousDynamic;
         return;
     }
     // Deliberately not state.format: the injection owns the metadata in force, not
     // the classification of the samples. Overwriting it made the decode transfer
-    // function and the gamut switch read a signal the pixels are not.
-    state.compatibility |= Compatibility(FFF3FPHdrCompatibility::Hdr10);
-    state.processingPath = FFF3FPHdrProcessingPath::Hdr10PlusDynamic;
+    // function and the gamut switch read a signal the pixels are not. This holds
+    // for every kind -- an injected Vivid entry on an HDR10 stream reports
+    // HdrVividDynamic as the path while the samples stay classified as they are.
+    state.compatibility |= chosen->kind == HdrMetadataKind::HdrVivid
+        ? Compatibility(FFF3FPHdrCompatibility::HdrVivid)
+        : Compatibility(FFF3FPHdrCompatibility::Hdr10);
+    state.processingPath = chosen->kind == HdrMetadataKind::HdrVivid
+        ? FFF3FPHdrProcessingPath::HdrVividDynamic
+        : FFF3FPHdrProcessingPath::Hdr10PlusDynamic;
     state.dynamicMetadata = true;
     injectedActive_ = true;
     // The injected entry owns the peak: use the one it carries, otherwise fall back to the
@@ -783,7 +925,7 @@ std::string HdrProcessor::CompatibilityNames(const std::uint32_t compatibility) 
 }
 
 FFFResult HdrProcessor::EvaluateProbe(FFF3FPHdrProcessingProbe& probe) noexcept {
-    if (probe.size < sizeof(probe) || probe.version != 1 ||
+    if (probe.size < sizeof(probe) || probe.version != 20 ||
         probe.transfer > FFF3FPColorTransfer::Hlg ||
         probe.dolbyVisionProfile > 15 || probe.dolbyVisionLevel > 15 ||
         probe.dolbyVisionCompatibilityId > 15 || probe.dolbyVisionRpu > 1 ||
