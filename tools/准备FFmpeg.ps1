@@ -15,6 +15,18 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# ⚠ 变体不符警示（2026-10-14 实盘查证，勿删）：
+#   盘上 runtime\*.dll 经 avutil_configuration() 实测是 **nonfree-shared** 变体
+#   （--enable-gpl --enable-nonfree --enable-libx264 --enable-libx265
+#    --enable-libfdk-aac --enable-libplacebo …，BtbN 构建农场 /home/dominic/ffmpeg/bin），
+#   与上面 $DownloadUrl 默认的 lgpl-shared **不是同一件**：
+#     · lgpl-shared 明确不含 x264/x265 与 fdk-aac（BtbN README 变体定义）；
+#     · 按默认 URL 重新下载会**静默丢掉** libx264/libx265 编码器与 libfdk_aac，
+#       以及 libplacebo 滤镜链（HDR 色调映射的承接线）——能力矩阵整体降级。
+#   换变体（lgpl ⇄ nonfree）属**团队 license 决策**，不要顺手改 URL：
+#   nonfree 变体含 GPL(x264/x265)+nonfree(fdk-aac) 组件，分发合规性需另行评估。
+#   刷新 runtime 前先读 3fp/docs/98（FFmpeg 能力矩阵与变体查证）。
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "Resolve-Toolchain.ps1")
 $ThirdPartyDirectory = Join-Path $ProjectRoot "third_party\ffmpeg"

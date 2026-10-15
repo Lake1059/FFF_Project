@@ -22,7 +22,16 @@ struct AVFrame;
 struct SwrContext;
 
 struct PlayerAudioRuntimeState final {
-    static constexpr std::uint32_t MaximumChannels = 8;
+    // 24, not 8: the level meters now have to carry the IAMF render target
+    // (7.1.4 = 12 channels) plus head-room for wider targets the same probe
+    // supports (sound system H renders 24 channels through the same path).
+    // 8 silently truncated every IAMF stream to a partial meter. The fixed-size
+    // arrays below and both clamp sites (renderer output here, PlayerSession's
+    // UpdateInputAudioPeakLevels input side) size themselves from this
+    // constant, and the public ABI copy (FFF3FP_GetAudioPeakLevels) stays
+    // bounded by its own 8-slot struct -- so raising this only widens the
+    // internal storage, not the API contract.
+    static constexpr std::uint32_t MaximumChannels = 24;
 
     PlayerAudioRuntimeState() noexcept { ClearAll(); }
 

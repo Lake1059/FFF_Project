@@ -56,6 +56,8 @@ Friend NotInheritable Class 播放器画面控件
     Friend Event 全景视角拖动 As EventHandler(Of 播放器360视角拖动事件参数)
     Friend Event 图片缩放滚轮 As EventHandler(Of MouseEventArgs)
     Friend Event 图片平移拖动 As EventHandler(Of 播放器图片平移拖动事件参数)
+    ''' <summary>图片模式下左键双击（docs/00 §6.4：适应窗口 ↔ 1:1）。由 图片交互已启用 门控。</summary>
+    Friend Event 图片双击切换 As EventHandler
 
     <Browsable(False), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)>
     Friend Property 全景交互已启用 As Boolean
@@ -111,6 +113,9 @@ Friend NotInheritable Class 播放器画面控件
             Return
         End If
         If 图片交互启用值 AndAlso e.Button = MouseButtons.Left Then
+            ' 第二次按下（Clicks>=2）即双击。先给切换事件，**再**照常进入拖动准备：
+            ' 若在双击分支里直接 Return，"双击后顺手拖"就会失灵（Capture 没开）。
+            If e.Clicks >= 2 Then RaiseEvent 图片双击切换(sender, e)
             正在拖动图片 = True
             上次图片拖动位置 = e.Location
             视频输出窗口.Capture = True
@@ -157,9 +162,19 @@ Friend NotInheritable Class 播放器画面控件
         视频输出窗口.Capture = False
     End Sub
 
+    ' 滚轮在 WinForms 里会沿父子链**冒泡**：子窗（输出面）与父窗各触发一次。
+    ' 图片模式两处都缩一格 ⇒ 实测真机一格滚轮走到 1.25^2 = 1.5625（两档）。
+    ' MouseEventArgs 本身没有 Handled（本 TFM 编译实测 BC30456），真正传进来的是
+    ' HandledMouseEventArgs ⇒ 按它取，拿到就把 Handled 置上，拿不到就当框架没这条通道。
+    Private Shared Sub 挡住滚轮冒泡(e As MouseEventArgs)
+        Dim 可标记 = TryCast(e, HandledMouseEventArgs)
+        If 可标记 IsNot Nothing Then 可标记.Handled = True
+    End Sub
+
     Protected Overrides Sub OnMouseWheel(e As MouseEventArgs)
         MyBase.OnMouseWheel(e)
         If 图片交互启用值 Then
+            挡住滚轮冒泡(e)
             RaiseEvent 图片缩放滚轮(Me, e)
             Return
         End If
@@ -169,6 +184,7 @@ Friend NotInheritable Class 播放器画面控件
     Private Sub 视频输出窗口_MouseWheel(sender As Object, e As MouseEventArgs)
         ' 图片模式下滚轮归缩放：音量分支必须不可达，否则看图时滚轮会同时改音量。
         If 图片交互启用值 Then
+            挡住滚轮冒泡(e)
             RaiseEvent 图片缩放滚轮(Me, e)
             Return
         End If

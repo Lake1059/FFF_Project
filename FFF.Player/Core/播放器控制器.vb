@@ -298,6 +298,43 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    ''' <summary>本机内核是否提供 RTX 视频超分辨率。False 时 UI 应置灰并说明，
+    ''' 而不是让开关看起来"开了却没效果"。</summary>
+    Friend ReadOnly Property 支持视频超分辨率 As Boolean
+        Get
+            Dim 目标 = 会话
+            If 已释放 OrElse 目标 Is Nothing Then Return 播放器原生接口.支持视频超分辨率
+            Return 目标.支持视频超分辨率
+        End Get
+    End Property
+
+    ''' <summary>RTX 视频超分辨率开关。转发到会话层，失败静默（同 设置视图旋转）。</summary>
+    Friend Sub 设置视频超分辨率(开启 As Boolean)
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return
+        Try
+            目标.设置视频超分辨率(开启)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
+    ''' <summary>读取 VSR 状态并翻成可显示文本。读不到（内核不支持或会话未建立）返回 Nothing，
+    ''' 由 UI 显示"未读取"——不伪造一个"未生效"。</summary>
+    Friend Function 视频超分辨率状态文本() As String
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return Nothing
+        Try
+            Dim 状态 As 原生视频超分辨率状态
+            If Not 目标.读取视频超分辨率状态(状态) Then Return Nothing
+            Return 播放器会话.视频超分辨率状态文本(状态)
+        Catch ex As ObjectDisposedException
+            Return Nothing
+        Catch ex As 播放器异常
+            Return Nothing
+        End Try
+    End Function
+
     ''' <summary>手动旋转：顺时针 / 逆时针 90°。R = 顺，Shift+R = 逆。</summary>
     Friend Sub 手动旋转(顺时针 As Boolean)
         Dim 目标 = 会话
@@ -1423,21 +1460,34 @@ Public NotInheritable Class 播放器控制器
         Dim 独占回退原因 As String = String.Empty
         Dim 音频不可用 = False
         Dim 音频不可用原因 As String = String.Empty
+        ' IAMF 音频回退：内核在 libiamf 打不开时发 {"type":"audio","iamf":true,"fallback":true}。
+        ' 必须先甄别再解析 fallback —— 否则会落进下面的 解码回退 分支，把音频回退
+        ' 误报成 "GPU 解码已回退到 CPU"。
+        Dim 音频IAMF回退 = False
+        Dim 音频IAMF回退原因 As String = String.Empty
         Try
             Using 文档 = JsonDocument.Parse(e.详情JSON)
+                Dim 音频类型 As JsonElement
+                Dim 是音频IAMF = 文档.RootElement.TryGetProperty("type", 音频类型) AndAlso
+                    音频类型.ValueKind = JsonValueKind.String AndAlso
+                    音频类型.GetString() = "audio" AndAlso
+                    文档.RootElement.TryGetProperty("iamf", 音频类型) AndAlso
+                    音频类型.ValueKind = JsonValueKind.True
                 Dim 独占 As JsonElement
                 If 文档.RootElement.TryGetProperty("exclusive", 独占) Then
                     当前WASAPI模式 = If(独占.GetBoolean(), WASAPI共享模式.独占, WASAPI共享模式.共享)
                 End If
                 Dim 回退 As JsonElement
                 If 文档.RootElement.TryGetProperty("fallback", 回退) Then
-                    解码回退 = 回退.GetBoolean()
+                    If 是音频IAMF Then 音频IAMF回退 = 回退.GetBoolean() Else 解码回退 = 回退.GetBoolean()
                 ElseIf 文档.RootElement.TryGetProperty("hardwareFallback", 回退) Then
                     解码回退 = 回退.GetBoolean()
                 End If
                 Dim 原因 As JsonElement
                 If 解码回退 AndAlso 文档.RootElement.TryGetProperty("reason", 原因) AndAlso
                     原因.ValueKind = JsonValueKind.String Then 回退原因 = 原因.GetString()
+                If 音频IAMF回退 AndAlso 文档.RootElement.TryGetProperty("reason", 原因) AndAlso
+                    原因.ValueKind = JsonValueKind.String Then 音频IAMF回退原因 = 原因.GetString()
                 Dim 独占回退值 As JsonElement
                 If 文档.RootElement.TryGetProperty("exclusiveFallback", 独占回退值) Then
                     独占回退 = 独占回退值.GetBoolean()
@@ -1456,6 +1506,11 @@ Public NotInheritable Class 播放器控制器
         If 解码回退 Then
             Dim 说明 = "GPU 解码已回退到 CPU"
             If Not String.IsNullOrWhiteSpace(回退原因) Then 说明 &= $"：{回退原因.Trim()}"
+            RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(说明))
+        End If
+        If 音频IAMF回退 Then
+            Dim 说明 = "IAMF 空间音频已回退到常规解码，声场以容器声明为准。"
+            If Not String.IsNullOrWhiteSpace(音频IAMF回退原因) Then 说明 &= $"：{音频IAMF回退原因.Trim()}"
             RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(说明))
         End If
         If 独占回退 Then
@@ -1754,8 +1809,6 @@ Public NotInheritable Class 播放器控制器
         Select Case 快照.HDR规格
             Case HDR格式.HDR10Plus : Return "HDR10+"
             Case HDR格式.HLG : Return "HLG"
-            Case HDR格式.杜比视界
-                Return 杜比视界状态文本.文案(杜比视界状态文本.路径用途, 快照)
             Case HDR格式.HDRVivid : Return "HDR Vivid"
             Case Else : Return "HDR10"
         End Select

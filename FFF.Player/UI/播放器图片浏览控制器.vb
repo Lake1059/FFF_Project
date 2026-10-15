@@ -4,7 +4,6 @@ Imports System.Diagnostics
 Friend NotInheritable Class 播放器图片浏览控制器
     Implements IDisposable
 
-    Private Const 滚轮缩放步进 As Double = 1.10
     Private Const 按键缩放步进 As Double = 1.01
     Private Const 每刻度像素 As Integer = 120
     Private Const 缩放阻尼毫秒 As Integer = 300
@@ -30,7 +29,13 @@ Friend NotInheritable Class 播放器图片浏览控制器
             Dim 衰减 = Math.Exp(-角频率 * 间隔秒)
             值 = 目标 + (差值 + 系数 * 间隔秒) * 衰减
             速度 = (速度 - 角频率 * 系数 * 间隔秒) * 衰减
-            If Math.Abs(值 - 目标) < 0.0000001 AndAlso Math.Abs(速度) < 0.000001 Then
+            ' 停表判据必须用几何层的**相对**阈值，不能留在这里的绝对 1e-7/1e-6：
+            ' 临界阻尼的尾部是渐近的，绝对阈值在 z=1（对数空间目标为 0）附近永远
+            ' 差一点点 —— 实测真计时器下单格滚轮要发 78 次、末次 596 ms，且判定
+            ' 静止后再等 0.4 s 仍在涨。几何层的 已静止 把位移/速度按目标幅度缩放并
+            ' 各留一个下限，正是为这两种失败写的。阻尼常数与积分保持本控制器自己的
+            ' 一套（0.3 s），不借用 阻尼步进 —— 那会顺手改掉手感。
+            If 图片缩放几何.已静止(CSng(值), CSng(目标), CSng(速度)) Then
                 重置(目标)
                 Return False
             End If
@@ -72,6 +77,12 @@ Friend NotInheritable Class 播放器图片浏览控制器
     Private 缩放提示累计秒 As Double = 缩放提示间隔秒
     Private 图片模式已启用值 As Boolean
     Private 已释放 As Boolean
+    ' 双击 1:1 的来源尺寸：内核封顶之后"适应"与"1:1"是不是同档全看它。
+    Private 源宽 As UInteger
+    Private 源高 As UInteger
+    ''' <summary>双击请求 1:1 但够不着时置位。静止提示必须把它带出来，否则
+    ''' 后到的「已到最大缩放」会把「够不到 1:1」这句关键信息顶掉。</summary>
+    Private 够不到一比一 As Boolean
 
     Friend Sub New(画面控件值 As 播放器画面控件,
                    应用视图值 As Action(Of Single, Single, Single),
@@ -104,6 +115,7 @@ Friend NotInheritable Class 播放器图片浏览控制器
         AddHandler 动画计时器.Tick, AddressOf 动画计时器_Tick
         AddHandler 画面控件.图片缩放滚轮, AddressOf 画面控件_图片缩放滚轮
         AddHandler 画面控件.图片平移拖动, AddressOf 画面控件_图片平移拖动
+        AddHandler 画面控件.图片双击切换, AddressOf 画面控件_图片双击切换
     End Sub
 
     Friend Event 图片模式已变化 As EventHandler
@@ -116,7 +128,15 @@ Friend NotInheritable Class 播放器图片浏览控制器
 
     Friend Sub 媒体已打开(信息 As 媒体信息, 快照 As 播放器快照)
         If 已释放 Then Return
-        设置模式(自动进入图片模式(信息, 快照))
+        Dim 启用 = 自动进入图片模式(信息, 快照)
+        If 启用 AndAlso 快照 IsNot Nothing Then
+            源宽 = 快照.视频宽度
+            源高 = 快照.视频高度
+        Else
+            源宽 = 0
+            源高 = 0
+        End If
+        设置模式(启用)
         If 图片模式已启用值 Then 操作提示("已自动启用图片模式")
     End Sub
 
@@ -144,6 +164,27 @@ Friend NotInheritable Class 播放器图片浏览控制器
     Friend Sub 关闭图片模式()
         If 已释放 Then Return
         设置模式(False)
+    End Sub
+
+    ' ── 测试钩子（Friend + InternalsVisibleTo("FFF.Player.Tests")） ──
+    ' 直达处理器，绕过控件层的消息翻译；真实消息路径（OnMouseWheel → 图片缩放滚轮）
+    ' 由 ImageZoomLiveRegression 的 S9 用真 WM_MOUSEWHEEL 覆盖，两层不重复也不遗漏。
+    Friend Sub 测试进入图片模式(源宽值 As UInteger, 源高值 As UInteger)
+        源宽 = 源宽值
+        源高 = 源高值
+        设置模式(True)
+    End Sub
+
+    Friend Sub 测试退出图片模式()
+        设置模式(False)
+    End Sub
+
+    Friend Sub 测试滚轮(delta As Integer, x As Integer, y As Integer)
+        画面控件_图片缩放滚轮(Nothing, New MouseEventArgs(MouseButtons.None, 0, x, y, delta))
+    End Sub
+
+    Friend Sub 测试双击(x As Integer, y As Integer)
+        画面控件_图片双击切换(Nothing, New MouseEventArgs(MouseButtons.Left, 2, x, y, 0))
     End Sub
 
     Friend Sub 处理方向键快捷键(sender As Object, e As KeyEventArgs)
@@ -175,13 +216,35 @@ Friend NotInheritable Class 播放器图片浏览控制器
         Return True
     End Function
 
+    ''' <summary>双击：适应窗口 ↔ 像素级 1:1。源两轴都不超过视口时两者同档，
+    ''' 必须明说而不是静默不动（否则会被读成"1:1 坏了"）。</summary>
+    Private Sub 画面控件_图片双击切换(sender As Object, e As EventArgs)
+        If 已释放 OrElse Not 图片模式已启用 Then Return
+        If Not 准备视图() Then Return
+        推进至当前时刻()
+        If 图片缩放几何.适应即一比一(画面控件.Width, 画面控件.Height, 源宽, 源高) Then
+            操作提示("这张图比窗口小：适应窗口就是 1:1")
+            Return
+        End If
+        Dim 适应档 = 1.0F
+        Dim 一比一 = 图片缩放几何.钳制缩放(
+            图片缩放几何.一比一缩放(图片缩放几何.单位屏幕比(画面控件.Width, 画面控件.Height, 源宽, 源高)),
+            最小倍率, 最大倍率)
+        Dim 目标 = If(实际倍率 > 适应档 + 0.001F, 适应档, 一比一)
+        ' 够不到 1:1 时必须说清楚，不能把"停在内核上限"讲成"已到 1:1"。
+        够不到一比一 = Not 图片缩放几何.一比一可达(画面控件.Width, 画面控件.Height, 源宽, 源高)
+        缩放运动.目标 = Math.Log(目标)
+        启动动画()
+    End Sub
+
     Private Sub 画面控件_图片缩放滚轮(sender As Object, e As MouseEventArgs)
         If 已释放 OrElse Not 图片模式已启用 OrElse e.Delta = 0 Then Return
         滚轮余量 += e.Delta
         Dim 刻度 = 滚轮余量 \ 每刻度像素
         If 刻度 = 0 Then Return
         滚轮余量 -= 刻度 * 每刻度像素
-        调整缩放(Math.Pow(滚轮缩放步进, 刻度),
+        ' 步进律的唯一真源是 图片缩放几何；这里曾留过一份私有 1.10，出货路径与几何层/回归就此分叉。
+        调整缩放(Math.Pow(图片缩放几何.缩放步进, 刻度),
             Math.Clamp(CSng(e.X) / Math.Max(1, 画面控件.Width), 0.0F, 1.0F),
             Math.Clamp(CSng(e.Y) / Math.Max(1, 画面控件.Height), 0.0F, 1.0F))
     End Sub
@@ -199,6 +262,16 @@ Friend NotInheritable Class 播放器图片浏览控制器
     Private Sub 画面控件_图片平移拖动(sender As Object, e As 播放器图片平移拖动事件参数)
         If 已释放 OrElse Not 图片模式已启用 OrElse Not 准备视图() Then Return
         推进至当前时刻()
+        ' 没有可平移余量时**根本不累加目标**：内核 PanView 在 zoom<=1 时是
+        ' "返回 Success 但什么都不做"（VideoRenderer.cpp:2453-2454），宿主照提
+        ' 就等于把一次注定被丢弃的平移写进弹簧目标 —— 目标与实位从此错开，
+        ' 动画也就永远不会真正停表。余量判据用现成的纯函数，它已经把
+        ' "原生尺寸封顶下 z=1 并不铺满窗口"这一层算进去了。
+        Dim 单位屏幕比 = 图片缩放几何.单位屏幕比(画面控件.Width, 画面控件.Height, 源宽, 源高)
+        If Not 图片缩放几何.有平移余量(实际倍率, 单位屏幕比, 源宽, 源高,
+                                       画面控件.Width, 画面控件.Height) Then
+            Return
+        End If
         水平运动.目标 += e.水平位移
         垂直运动.目标 += e.垂直位移
         启动动画()
@@ -291,6 +364,19 @@ Friend NotInheritable Class 播放器图片浏览控制器
             缩放提示累计秒 = 0
         End If
         If Not 缩放未结束 AndAlso Not 水平未结束 AndAlso Not 垂直未结束 Then
+            ' 收尾播报：滚到边界时那句"已到最大缩放"若被中间的百分比提示顶掉，
+            ' 用户就只知道当前百分比，不知道还能不能继续滚。
+            If Math.Abs(实际倍率 - 最大倍率) < 0.0001F Then
+                If 够不到一比一 Then
+                    操作提示($"窗口太小，已到最大缩放（{实际倍率 * 100.0F:0}%），够不到 1:1")
+                    够不到一比一 = False
+                Else
+                    操作提示($"已到最大缩放（{实际倍率 * 100.0F:0}%）")
+                End If
+            ElseIf Math.Abs(实际倍率 - 最小倍率) < 0.0001F Then
+                操作提示("已回到适应窗口（整图入窗）")
+                够不到一比一 = False
+            End If
             动画计时器.Stop()
             水平运动.重置(0)
             垂直运动.重置(0)
@@ -300,6 +386,7 @@ Friend NotInheritable Class 播放器图片浏览控制器
     End Sub
 
     Private Sub 停止动画()
+        够不到一比一 = False
         动画计时器.Stop()
         视图已初始化 = False
         水平运动.重置(0)
@@ -316,6 +403,7 @@ Friend NotInheritable Class 播放器图片浏览控制器
         动画计时器.Dispose()
         RemoveHandler 画面控件.图片缩放滚轮, AddressOf 画面控件_图片缩放滚轮
         RemoveHandler 画面控件.图片平移拖动, AddressOf 画面控件_图片平移拖动
+        RemoveHandler 画面控件.图片双击切换, AddressOf 画面控件_图片双击切换
         画面控件.图片交互已启用 = False
     End Sub
 End Class

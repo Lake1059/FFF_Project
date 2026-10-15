@@ -35,7 +35,16 @@ Friend Structure 原生播放器配置
     Public 首选适配器索引 As Integer
     ' SDR scRGB 策略：0=关闭；1=在高级色彩显示器上自动处理高位深或广色域 SDR。
     Public SDRscRGB模式 As UInteger
-    ' 自适应 CPU 预缩放与软解线程策略：开关为 0 时禁用。
+    ' API 17/18 新增：自适应 CPU 预缩放 与 软解线程档位。
+    '
+    ' ⚠ 这些字段**必须存在**，即使宿主不使用：内核按
+    ' size >= sizeof(FFF3FPConfiguration) 校验，缺一个字段就会被
+    ' FFF3FP_Create 直接判为 InvalidArgument（result=-1），**会话根本起不来**。
+    ' 实测：宿主停在 API 16（80 字节）而内核为 API 18（112 字节）时，
+    ' Create 返回 -1，播放器完全无法启动。
+    '
+    ' 默认值与内核保持一致；宿主未提供 UI 时用这些默认即可。
+    ' 0 = 关闭（保持固定线程策略），非 0 = 启用自适应。
     Public 自适应CPU预缩放 As UInteger
     Public 自适应CPU预缩放丢帧百分比 As UInteger
     Public 自适应解码线程 As UInteger
@@ -46,8 +55,41 @@ Friend Structure 原生播放器配置
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生呈现节律状态
+    ' 字段类型与顺序须与内核 FFF3FPPresentPacingStatus 一致；内核按 size/version 校验，
+    ' 少写字段会被判 InvalidArgument（与 原生播放器配置 同一类坑）。
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    ' EnumDisplaySettings 报给内核的面板刷新率。内核过去先把它夹到 120，于是 144Hz
+    ' 面板被报成 120；这里是不再修正后的原值。
+    Public 声明刷新率 As Single
+    ' 由交换链自身的帧统计（SyncRefreshCount 对 SyncQPCTime）反解出的面板周期。
+    ' 0 = 还没标定出来，也就是锁还没上岗。
+    Public 标定刷新率 As Single
+    Public 帧率上限 As Single        ' 生效中的自动上限 = min(面板率, 视频率)，非可调
+    Public 网格锁定 As UInteger      ' 1 = 每次翻帧都对齐到刷新网格
+    ' 0 = 已锁或本无可对节律；1 = 走可变刷新路（G-SYNC/FreeSync 自己配速）；
+    ' 2 = 网格未标定；3 = 这次翻帧由原生窗口移动循环接管。
+    Public 让位原因 As UInteger
+    ' 上次翻帧的**提交时刻**相对它瞄准那一格的偏差，单位 100ns，正=提交晚了。
+    Public 瞄格误差100纳秒 As Long
+    ' 结果那半边：屏幕实际停留格数落在 ⌊r⌋/⌈r⌉ 带内（60fps 配 144Hz 就是 2 或 3 格）的
+    ' 对账。带内=看着稳；带外（1 格、或 4 格以上）=眼睛说的卡顿。
+    Public 停留采样数 As UInt64
+    Public 停留带内数 As UInt64
+    Public 停留最差偏差格数 As UInt64
+    ' 因"片源比面板快"被丢弃的帧（240fps 片配 144Hz 面板）。刻意不并进快照的丢弃计数：
+    ' 那个数含义是"管线跟不上媒体时钟"，还会驱动自适应降采样，而面板限死的丢弃不是这回事。
+    ' 两个数要并排列出，相加才是总丢弃。
+    Public 显示速率丢弃数 As UInt64
+End Structure
+
+<StructLayout(LayoutKind.Sequential)>
 Friend Structure 原生播放器快照
-    ' 字段类型及顺序须与 FFF3FPSnapshot 一致，避免读取错位。
+    ' ⚠ 字段顺序**必须与 C 侧 FFF3FPSnapshot 逐字段一致**。顺序错了不会报错，
+    ' 只会静默读出错位的值 —— 曾经发生过：IAMF 三字段被追加到末尾（C 侧在第 26-28 位），
+    ' 于是其后约 30 个字段全部偏移，UI 显示的是别的字段内容。
+    ' 改动本结构体后，用 tools 里的快照布局校验确认与 C 侧一致。
     Public 大小 As UInteger
     Public 版本 As UInteger
     Public 状态 As UInteger
@@ -95,11 +137,12 @@ Friend Structure 原生播放器快照
     Public HDR格式 As UInteger
     Public 兼容HDR格式 As UInteger
     Public HDR处理路径 As UInteger
-    Public 杜比视界配置档次 As UInteger
-    Public 杜比视界级别 As UInteger
-    Public 有杜比视界RPU As UInteger
-    Public 有杜比视界增强层 As UInteger
-    Public 杜比视界增强层类型 As UInteger
+    ' DEPRECATED ABI slots: layout must match FFF3FPSnapshot; always zero.
+    Public HDRdp配置档次 As UInteger
+    Public HDRdp级别 As UInteger
+    Public 有HDRdpRPU As UInteger
+    Public 有HDRdp增强层 As UInteger
+    Public HDRdp增强层类型 As UInteger
     Public 动态HDR元数据有效 As UInteger
     Public HDR回退有效 As UInteger
     Public 显示器最小亮度毫尼特 As UInteger
@@ -119,6 +162,9 @@ Friend Structure 原生播放器快照
 
     ' 视频纹理上传耗时，单位为 100 纳秒。
     Public 视频上传100纳秒 As ULong
+    ' 例：7.1 内容按 7.1.4 渲染，libiamf 会把多出的 4 个声道填成**数字静音**
+    ' （实测峰值 -inf），所以这不是"上混出假内容"，但 UI 应显示内容而非渲染目标 ——
+    ' 否则 7.1 素材会显示成 7.1.4，而实际有 4 只音箱不出声。
     Public IAMF内容声道数 As UInteger
     ' IAMF 渲染模式：0=扬声器布局；1=HRTF 双耳立体声。
     Public IAMF双耳渲染 As UInteger
@@ -482,17 +528,22 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+    ' DEPRECATED: the private color-extension module no longer exists, so this
+    ' callback is never invoked. Retained to mirror the native ABI.
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Friend Delegate Function 原生授权对话框回调(代码UTF8 As IntPtr, 容量 As UInteger) As Integer
 
+    ' DEPRECATED: same reason; the matching exports are stubbed in the kernel.
     Friend Const 扩展授权文本用途 As UInteger = 3UI
 
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetApiVersion() As UInteger
     End Function
+    ' DEPRECATED: stubbed in the kernel (always returns IntPtr.Zero).
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetColorExtensionStatusText(statusCode As UInteger, textKind As UInteger) As IntPtr
     End Function
+    ' DEPRECATED: stubbed in the kernel (no-op).
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Sub FFF3FP_SetColorExtensionAuthorizationPrompt(callback As 原生授权对话框回调)
     End Sub
@@ -553,6 +604,11 @@ Friend Module 播放器原生接口
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetColorMode(播放器 As 播放器原生句柄, 模式 As UInteger, SDR峰值 As Single, HDR峰值 As Single, SDR纸白 As Single, 强制HDR输出 As UInteger) As 原生播放器结果
     End Function
+    ' 呈现器实际按什么在配速（声明值/标定值/生效上限/是否锁上/没锁的原因/提交精度/屏幕停留对账）。
+    ' 只有读、没有写：窗口翻帧上限是自动的 min(面板率, 视频率)，不是可调开关。
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetPresentPacingStatus(播放器 As 播放器原生句柄, ByRef 状态 As 原生呈现节律状态) As 原生播放器结果
+    End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetOutputWindow(播放器 As 播放器原生句柄, 窗口 As IntPtr) As 原生播放器结果
     End Function
@@ -564,8 +620,12 @@ Friend Module 播放器原生接口
                                       水平角度 As Single, 垂直角度 As Single,
                                       视场角 As Single) As 原生播放器结果
     End Function
-    ' 离屏帧回读：先查询尺寸，再分配缓冲区读取像素。
-    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    ' 截图帧回读：离屏渲染，不受遮挡/最小化影响，且能带 HDR/广色域的高精度帧。
+    '
+    ' ⚠ 同样必须动态解析（理由与下面的视图旋转一致）：这是"同版本号（16）内的新增导出"，
+    '   静态导入会让未含该导出的内核抛 EntryPointNotFoundException。
+    ' 两次调用契约：先传 像素=空 问尺寸（内核回"缓冲区不足"属正常），再按
+    '   宽×高×每像素字节 分配后二调。布局固定取"源分辨率"，格式由请求的位深决定。
     Private Delegate Function 复制帧原型(播放器 As 播放器原生句柄, 像素 As IntPtr,
         容量 As UInteger, ByRef 宽 As UInteger, ByRef 高 As UInteger,
         布局 As UInteger, 格式 As UInteger) As 原生播放器结果
@@ -640,7 +700,9 @@ Friend Module 播放器原生接口
         End Get
     End Property
 
-    ''' <summary>设置视图旋转（顺时针 0..3）；导出缺失或调用失败时返回 False。</summary>
+    ''' <summary>设置视图旋转（四分一转，顺时针 0..3）。内核不支持时返回 False。
+    ''' 失败原因不在此层抛异常：与 探测字幕流JSON 同款——本模块只负责转发与
+    ''' 能力探测，错误语义由 播放器会话 决定。</summary>
     Friend Function 设置视图旋转(播放器 As 播放器原生句柄, 四分一转 As UInteger) As Boolean
         Dim 函数 = 设置视图旋转函数
         If 函数 Is Nothing Then Return False
@@ -663,14 +725,91 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+    ' RTX 视频超分辨率（VSR）：内核 FFF3FP_SetVideoSuperResolution / GetVideoSuperResolutionStatus。
+    '
+    ' ⚠ 与视图旋转同款，必须动态解析、不能静态导入：这两个导出同样是"同版本号内的新增"，
+    '   而构造函数只校验版本号（仍是 20）。静态导入会让一个 20 版但**尚未含 VSR** 的内核在
+    '   载入期就抛 EntryPointNotFoundException —— 那等于把"这台的内核没这能力"升级成
+    '   "整个播放器起不来"。动态解析让它退化成"能力不可用"，由 UI 显示而不是崩溃。
+    '
+    ' 状态结构必须与内核 FFF3FPVideoSuperResolutionStatus 逐字段同宽同序：11 个 UInteger = 44 字节。
+    ' 内核按 `size < sizeof || version <> PlayerApiVersion` 拒收（PlayerSession.cpp 的
+    ' GetVideoSuperResolutionStatus），所以"同尺寸换顺序"是最危险的错法——它会过闸门并按错偏移读。
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 原生视频超分辨率状态
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 请求模式 As UInteger          ' 0 = Off，1 = Auto
+        Public 是NVIDIA适配器 As UInteger
+        Public 生效 As UInteger              ' 只表示驱动没拒绝本次请求，见 视频超分辨率状态文本
+        Public 驱动拒绝闩 As UInteger
+        Public 原因 As UInteger              ' 内核在 生效=1 时恒写 0(None)
+        Public 源宽 As UInteger
+        Public 源高 As UInteger
+        Public 目标宽 As UInteger
+        Public 目标高 As UInteger
+    End Structure
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置视频超分辨率原型(播放器 As 播放器原生句柄,
+        模式 As UInteger) As 原生播放器结果
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取视频超分辨率状态原型(播放器 As 播放器原生句柄,
+        ByRef 状态 As 原生视频超分辨率状态) As 原生播放器结果
+
+    ' 与视图旋转同走 解析可选导出：句柄由模块持有，缓存下来的函数指针一直有效。
+    Private ReadOnly 设置视频超分辨率函数 As 设置视频超分辨率原型 =
+        解析可选导出(Of 设置视频超分辨率原型)("FFF3FP_SetVideoSuperResolution")
+    Private ReadOnly 读取视频超分辨率状态函数 As 读取视频超分辨率状态原型 =
+        解析可选导出(Of 读取视频超分辨率状态原型)("FFF3FP_GetVideoSuperResolutionStatus")
+
+    ''' <summary>当前内核是否支持 RTX 视频超分辨率（旧内核返回 False）。
+    ''' 两个入口都要在：只有 setter 没有状态读取的话，UI 就无从解释"为什么没生效"。</summary>
+    Friend ReadOnly Property 支持视频超分辨率 As Boolean
+        Get
+            Return 设置视频超分辨率函数 IsNot Nothing AndAlso 读取视频超分辨率状态函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>请求（True = Auto）或取消（False = Off）RTX 视频超分辨率。
+    ''' 内核不支持时返回 False，不抛异常——能力探测与错误语义的分工同 设置视图旋转。
+    ''' <para>再发一次 True 会清掉内核的"驱动拒绝"闩并重新探测，这是宿主唯一的复位路径，
+    ''' 所以开关必须做成可来回切的，不能只做一次性开启。</para></summary>
+    Friend Function 设置视频超分辨率(播放器 As 播放器原生句柄, 开启 As Boolean) As Boolean
+        Dim 函数 = 设置视频超分辨率函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Return 函数(播放器, If(开启, 1UI, 0UI)) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>读取 VSR 状态。调用前必须填好 大小 与 版本（与 FFF3FP_GetImageInfo 同规矩），
+    ''' 版本用 播放器会话.期望API版本 这一处符号钉位，不在这里再抄一个字面量。</summary>
+    Friend Function 读取视频超分辨率状态(播放器 As 播放器原生句柄,
+        ByRef 状态 As 原生视频超分辨率状态) As Boolean
+        Dim 函数 = 读取视频超分辨率状态函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Return 函数(播放器, 状态) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     ' 图片模式：缩放 + 平移。zoom=1 为适应窗口，pan 为相对未缩放画面的归一化偏移 [-1,1]。
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetViewTransform(播放器 As 播放器原生句柄,
                                             缩放 As Single, 水平平移 As Single,
                                             垂直平移 As Single) As 原生播放器结果
     End Function
-    ' 光标锚定缩放：保持客户区归一化锚点下的画面内容不动；导出缺失时回退。
-    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    ' 光标锚定缩放：当前缩放 × 倍数，并保持锚点下的画面内容不动。
+    ' 锚点按客户区归一化到 [0,1]，宿主直接传鼠标位置比例。
+    ' 属**追加导出**：更早的内核没有该符号。这里刻意**不做静态导入** —— 静态导入会在
+    ' 载入旧内核时直接抛 EntryPointNotFoundException，连视频播放都起不来。改为声明一个
+    ' 委托并按需解析（见 取光标锚定缩放委托），缺失时返回 Nothing 由调用方回退。
     Friend Delegate Function 光标锚定缩放委托(播放器 As 播放器原生句柄,
                                               倍数 As Single, 锚点水平 As Single,
                                               锚点垂直 As Single,

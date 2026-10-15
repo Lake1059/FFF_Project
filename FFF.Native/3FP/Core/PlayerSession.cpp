@@ -1,8 +1,6 @@
 #include "pch.h"
 #include "3FP/Core/MediaText.h"
 #include "3FP/Core/PlayerSession.h"
-#include "3FP/Render/ColorExtensionApi.h"
-#include "3FP/Render/ColorExtension.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -24,7 +22,6 @@ extern "C" {
 #include <libavutil/display.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/dict.h>
-#include <libavutil/dovi_meta.h>
 #include <libavutil/opt.h>
 #include <libavutil/samplefmt.h>
 // IAMF stream groups carry the real channel layout; the audio element and mix
@@ -59,6 +56,19 @@ constexpr std::size_t MaximumPendingVideoPackets = 64;
 constexpr std::size_t MaximumPendingVideoPacketBytes = 16 * 1024 * 1024;
 constexpr std::size_t MaximumPendingAudioPackets = 512;
 constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
+// Frame side-data ring (CopyFrameSideDataAfter). Sized from measurement, not
+// guesswork -- see 3fp/tools/sidedata_size_probe.cpp, compiled against the
+// bundled FFmpeg headers: an AV_FRAME_DATA_DOVI_METADATA blob is a
+// self-relative structure of 48 B of offsets + 20 B RPU header + 5144 B data
+// mapping + 196 B colour metadata + 76 B per display-management extension
+// (~5.5-7.5 KB in practice), AV_FRAME_DATA_DYNAMIC_HDR_PLUS is 11304 B,
+// AV_FRAME_DATA_DYNAMIC_HDR_VIVID 1372 B, AV_FRAME_DATA_FILM_GRAIN_PARAMS
+// 10848 B. Everything a colour analyser can use fits under 16 KiB; ICC
+// profiles and motion vectors are far larger and are no use here, so they are
+// skipped rather than inflating the budget.
+constexpr std::size_t MaximumCachedSideDataBlobBytes = 16 * 1024;
+constexpr std::size_t MaximumSideDataRingFrames = 120;        // ~2 s at 60 fps
+constexpr std::size_t MaximumSideDataRingBytes = 1024 * 1024; // hard stop
 
 // Monotonic tick in 100 ns units, for the decoder thread ladder's timing. Uses
 // steady_clock rather than av_gettime_relative because PlayerSession does not include
@@ -66,35 +76,6 @@ constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
 std::int64_t CurrentSteadyTicks() noexcept {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count() / 100;
-}
-
-std::uint32_t DolbyTextVariant(const HdrFrameState& state) noexcept {
-    auto value = state.dolbyVisionProfile & 0xffu;
-    value |= (state.dolbyVisionLevel & 0xffu) << 8;
-    if (state.hasRpu) value |= 1u << 16;
-    if (state.hasEnhancementLayer) value |= 1u << 17;
-    value |= (static_cast<std::uint32_t>(state.enhancementLayer) & 3u) << 18;
-    if (state.externalExtensionActive) value |= 1u << 20;
-    return value;
-}
-
-std::string DolbyExtensionText(const std::uint32_t kind, const HdrFrameState& state,
-    const char* fallback) {
-    if (const auto* api = GetColorExtension(); api != nullptr) {
-        if (const auto* text = api->getStatusText(kind, DolbyTextVariant(state)); text != nullptr)
-            return text;
-    }
-    return fallback == nullptr ? std::string{} : std::string(fallback);
-}
-
-void FreeDolbyVisionEnhancementReference(void*, std::uint8_t* data) noexcept {
-    auto* reference = reinterpret_cast<FFFColorExtensionEnhancementFrameReference*>(data);
-    if (reference == nullptr) return;
-    if (reference->frame != nullptr) {
-        auto* frame = static_cast<AVFrame*>(reference->frame);
-        av_frame_free(&frame);
-    }
-    delete reference;
 }
 
 std::size_t EstimateDecodedFrameBytes(const AVFrame* frame) noexcept {
@@ -111,12 +92,33 @@ std::size_t EstimateDecodedFrameBytes(const AVFrame* frame) noexcept {
         pixels * 4u, std::numeric_limits<std::size_t>::max()));
 }
 
-std::size_t VideoFrameQueueLimit(const std::deque<AVFrame*>& queue) noexcept {
+// Single-DLL A/B gate for the animated queue accounting below: setting
+// FFF_ANIM_QUEUE_RESERVE=0 restores the old budget split without a rebuild, so a
+// timing batch can interleave the two behaviours inside one binary.
+bool AnimQueueReserveEnabled() noexcept {
+    static const auto enabled = [] {
+        wchar_t value[8] = {};
+        if (GetEnvironmentVariableW(L"FFF_ANIM_QUEUE_RESERVE", value,
+            static_cast<DWORD>(sizeof(value) / sizeof(value[0]))) == 0) return true;
+        return value[0] != L'0';
+    }();
+    return enabled;
+}
+
+// `pipelineFrames` is how many decoded pictures the decoder itself is holding
+// before it can hand one out. A frame-threaded decoder keeps up to thread_count
+// of them in flight, and those are charged to the same budget as the queue, so
+// the queue may only be sized with what is left over. Passing 0 reproduces the
+// older accounting, which counted the whole 128 MB to the queue and therefore
+// under-counted the real peak by exactly the depth of the pipeline.
+std::size_t VideoFrameQueueLimit(const std::deque<AVFrame*>& queue,
+    const std::size_t pipelineFrames) noexcept {
     if (queue.empty()) return MaxQueuedVideoFrames;
     const auto bytesPerFrame = EstimateDecodedFrameBytes(queue.back());
     if (bytesPerFrame == 0) return MaxQueuedVideoFrames;
     const auto memoryBound = DecodedVideoQueueBudgetBytes / bytesPerFrame;
-    return std::clamp(memoryBound, MinimumMemoryBoundVideoFrames, MaxQueuedVideoFrames);
+    const auto queueBound = memoryBound > pipelineFrames ? memoryBound - pipelineFrames : 0;
+    return std::clamp(queueBound, MinimumMemoryBoundVideoFrames, MaxQueuedVideoFrames);
 }
 
 void ApplyHdrState(FFF3FPSnapshot& snapshot, const HdrFrameState& hdr) noexcept {
@@ -129,11 +131,9 @@ void ApplyHdrState(FFF3FPSnapshot& snapshot, const HdrFrameState& hdr) noexcept 
     snapshot.hdrFormat = hdr.format;
     snapshot.compatibleHdrFormats = hdr.compatibility;
     snapshot.hdrProcessingPath = hdr.processingPath;
-    snapshot.dolbyVisionProfile = hdr.dolbyVisionProfile;
-    snapshot.dolbyVisionLevel = hdr.dolbyVisionLevel;
-    snapshot.hasDolbyVisionRpu = hdr.hasRpu ? 1u : 0u;
-    snapshot.hasDolbyVisionEnhancementLayer = hdr.hasEnhancementLayer ? 1u : 0u;
-    snapshot.dolbyVisionEnhancementLayer = hdr.enhancementLayer;
+    snapshot.hdrDpProfile = 0;  // deprecated: no longer classified
+    snapshot.hdrDpLevel = 0;  // deprecated: no longer classified
+    snapshot.hasHDRdpRpu = 0;  // deprecated: no longer classified
     snapshot.dynamicHdrMetadataActive = hdr.dynamicMetadata ? 1u : 0u;
     snapshot.hdrFallbackActive = hdr.fallback ? 1u : 0u;
     snapshot.displayMinLuminanceMilliNits = toUnsigned(hdr.display.minimumNits, 1000.0f);
@@ -316,6 +316,27 @@ bool IsHardwareFrame(const AVFrame* frame) noexcept {
     if (frame == nullptr) return false;
     const auto* descriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format));
     return descriptor != nullptr && (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL) != 0;
+}
+
+// A hardware frame transferred back to CPU memory comes out semi-planar (U and V packed
+// into one plane). Reported source formats must not depend on which route decoded the
+// picture, so name the planar layout that holds the same samples.
+AVPixelFormat PlanarEquivalent(const AVPixelFormat format) noexcept {
+    switch (format) {
+    case AV_PIX_FMT_NV12: case AV_PIX_FMT_NV21: return AV_PIX_FMT_YUV420P;
+    case AV_PIX_FMT_NV16: return AV_PIX_FMT_YUV422P;
+    case AV_PIX_FMT_NV24: return AV_PIX_FMT_YUV444P;
+    case AV_PIX_FMT_NV20: case AV_PIX_FMT_P010: return AV_PIX_FMT_YUV420P10LE;
+    case AV_PIX_FMT_P012: return AV_PIX_FMT_YUV420P12LE;
+    case AV_PIX_FMT_P016: return AV_PIX_FMT_YUV420P16LE;
+    case AV_PIX_FMT_P210: return AV_PIX_FMT_YUV422P10LE;
+    case AV_PIX_FMT_P212: return AV_PIX_FMT_YUV422P12LE;
+    case AV_PIX_FMT_P216: return AV_PIX_FMT_YUV422P16LE;
+    case AV_PIX_FMT_P410: return AV_PIX_FMT_YUV444P10LE;
+    case AV_PIX_FMT_P412: return AV_PIX_FMT_YUV444P12LE;
+    case AV_PIX_FMT_P416: return AV_PIX_FMT_YUV444P16LE;
+    default: return format;
+    }
 }
 
 bool IsLoopAwareImageDemuxer(const AVInputFormat* inputFormat) noexcept {
@@ -579,11 +600,9 @@ std::string HardwareAccelerationName(const AVCodecContext* decoder) {
 PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
     : decodeMode_(configuration.decodeMode), callback_(configuration.eventCallback),
       callbackContext_(configuration.eventCallbackContext), terminate_(false), format_(nullptr),
-      playbackPacket_(nullptr), externalAudioPacket_(nullptr), videoDecodeFrame_(nullptr),
+      playbackPacket_(nullptr), stillImagePacket_(nullptr), externalAudioPacket_(nullptr), videoDecodeFrame_(nullptr),
       videoTransferFrame_(nullptr), audioDecodeFrame_(nullptr), externalAudioDecodeFrame_(nullptr),
-      videoDecoder_(nullptr), dolbyVisionEnhancementBsf_(nullptr),
-      dolbyVisionEnhancementDecoder_(nullptr), dolbyVisionEnhancementDecodeFrame_(nullptr),
-      videoStream_(-1),
+      videoDecoder_(nullptr), videoStream_(-1),
       audioStream_(-1), coverArtStream_(-1), coverArtFrame_(nullptr), stillImageFrame_(nullptr),
       externalFormat_(nullptr), externalAudioDecoder_(nullptr),
       externalAudioStream_(-1), externalAudioOffset100ns_(0), audioDelay100ns_(0),
@@ -637,6 +656,10 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
         threadLadderMax_ = std::clamp(configuration.maxSoftwareDecoderThreads, 1u, 64u);
         if (threadLadderMax_ < threadLadderMin_) std::swap(threadLadderMax_, threadLadderMin_);
     }
+    // No cadence bound is read from the configuration: see the note on
+    // FFF3FPConfiguration's tail -- reading a field that is not there would require
+    // widening sizeof, and FFF3FP_Create rejects any host that has not been rebuilt
+    // alongside this struct. The bound is therefore computed in the renderer instead.
     // Applied before the colour mode: SetColorMode evaluates the scRGB gate and
     // must already know the SDR presentation policy.
     videoRenderer_.SetSdrScRgbMode(configuration.sdrScRgbMode);
@@ -754,10 +777,45 @@ void PlayerSession::ArmAudioUntilVideoFrame() noexcept {
         audioRenderer_->SetPaused(true);
 }
 
+std::size_t PlayerSession::VideoQueuePipelineReservation() const noexcept {
+    // Scoped to animated images: this accounting can only ever shorten the queue,
+    // and the video path's pacing has its own large regression body behind it. The
+    // measured problem aimed at here is a 4K animation's per-loop memory peak, so
+    // the change is validated there and left byte-identical for video.
+    if (!animatedImage_ || !AnimQueueReserveEnabled()) return 0;
+    if (videoDecoder_ == nullptr) return 0;
+    // active_thread_type is what the codec actually ended up using; thread_type is
+    // only what was asked for at open time. A decoder that never runs frame threads
+    // hands pictures out as it decodes them and holds no pipeline to charge.
+    if ((videoDecoder_->active_thread_type & FF_THREAD_FRAME) == 0) return 0;
+    return static_cast<std::size_t>(std::max(0, videoDecoder_->thread_count));
+}
+
+std::size_t PlayerSession::VideoQueueLimit() const noexcept {
+    const auto pipelineFrames = VideoQueuePipelineReservation();
+    const auto limit = VideoFrameQueueLimit(videoFrameQueue_, pipelineFrames);
+    // The two numbers this slice stands on, said by the kernel itself: whether frame
+    // threading is really active for this decoder, and the depth the budget then
+    // allows. Without them "the honest queue is shorter" cannot be checked against
+    // the probe's queued-frames readout.
+    if (animatedImage_ && (pipelineFrames != tracedQueuePipelineFrames_ ||
+        limit != tracedQueueLimit_)) {
+        tracedQueuePipelineFrames_ = static_cast<std::int64_t>(pipelineFrames);
+        tracedQueueLimit_ = static_cast<std::int64_t>(limit);
+        const auto bytesPerFrame = videoFrameQueue_.empty()
+            ? 0ULL : static_cast<unsigned long long>(
+                EstimateDecodedFrameBytes(videoFrameQueue_.back()));
+        std::fprintf(stderr, "[queue] animated bytesPerFrame=%llu pipeline=%lld limit=%lld\n",
+            bytesPerFrame, static_cast<long long>(pipelineFrames),
+            static_cast<long long>(limit));
+    }
+    return limit;
+}
+
 bool PlayerSession::VideoQueueSaturated() const noexcept {
     if (videoFrameQueue_.empty()) return false;
     const auto lookAhead = VideoFramePosition(videoFrameQueue_.back()) - ClockPosition();
-    const auto queueLimit = VideoFrameQueueLimit(videoFrameQueue_);
+    const auto queueLimit = VideoQueueLimit();
     return videoFrameQueue_.size() >= std::max<std::size_t>(1, queueLimit - 1) ||
         (videoFrameQueue_.size() >= MinimumQueuedVideoFrames &&
             lookAhead >= TargetVideoLookAhead100ns);
@@ -1248,7 +1306,6 @@ void PlayerSession::DoStepKeyframe(const std::int32_t direction) {
         }
         ClearVideoQueue();
         avcodec_flush_buffers(videoDecoder_);
-        FlushDolbyVisionEnhancementDecoder();
         if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
         seekTarget100ns_ = -1;
         seekTargetFrame_ = -1;
@@ -1304,7 +1361,7 @@ FFFResult PlayerSession::ClearExternalAudio() noexcept {
 FFFResult PlayerSession::SetExternalAudioOffset(const std::int64_t offset) noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, offset] { externalAudioOffset100ns_ = offset; snapshot_.externalAudioOffset100ns = offset; if (externalFormat_) DoSeek(snapshot_.position100ns); else PublishSnapshot(); }); return FFFResult::Success; }
 
 FFFResult PlayerSession::SetAudioDelay(const std::int64_t delay) noexcept {
-    // +/- 10 minutes: larger values are almost certainly caller bugs, and the
+    // ±10 minutes: larger values are almost certainly caller bugs, and the
     // renderer's silence-insertion alignment was never designed for wider gaps.
     if (delay < -6000000000LL || delay > 6000000000LL) return FFFResult::InvalidArgument;
     const auto state = state_.load();
@@ -1327,6 +1384,27 @@ FFFResult PlayerSession::SetPresentConfig(const bool enableTearing) noexcept {
     // Pacing preference: safe in any state; the renderer applies it on the next
     // present and remembers the request across device/chain re-creation.
     Enqueue([this, enableTearing] { videoRenderer_.SetPresentConfig(enableTearing); });
+    return FFFResult::Success;
+}
+FFFResult PlayerSession::GetPresentPacingStatus(
+    FFF3FPPresentPacingStatus& status) noexcept {
+    // Same contract as GetRenderTargetInfo: the caller declares the layout it allocated by
+    // size and version, and nothing is written past it.
+    if (status.size < sizeof(FFF3FPPresentPacingStatus) || status.version != 20)
+        return FFFResult::InvalidArgument;
+    const auto pacing = videoRenderer_.QueryPresentPacing();
+    status.size = sizeof(status);
+    status.version = 20;
+    status.declaredRefreshHz = pacing.declaredRefreshHz;
+    status.measuredRefreshHz = pacing.measuredRefreshHz;
+    status.frameRateBoundHz = pacing.frameRateBoundHz;
+    status.gridLocked = pacing.gridLocked;
+    status.pacingBypass = pacing.pacingBypass;
+    status.lastSlotError100ns = pacing.lastSlotError100ns;
+    status.holdSampled = pacing.holdSampled;
+    status.holdWithinRounding = pacing.holdWithinRounding;
+    status.holdWorstDeviationRefreshes = pacing.holdWorstDeviationRefreshes;
+    status.displayRateDiscardedFrames = displayRateDiscardedFrames_.load(std::memory_order_relaxed);
     return FFFResult::Success;
 }
 FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sdr, const float hdr,
@@ -1671,7 +1749,7 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
     bool hardwareFallback = false;
     std::string hardwareFailureReason;
     if (format_ != nullptr && videoStream_ >= 0) {
-        if (decodeMode_ == FFF3FPDecodeMode::D3D11 && !staticImage_) {
+        if (decodeMode_ == FFF3FPDecodeMode::D3D11) {
             result = OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_,
                 &hardwareFailureReason);
             if (result != FFFResult::Success) {
@@ -1688,11 +1766,25 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
                 "video-device-recovery");
             return true;
         }
-        (void)ConfigureDolbyVisionEnhancementDecoder();
-        snapshot_.decodeMode = decodeMode_ == FFF3FPDecodeMode::D3D11 &&
-            !staticImage_ && !hardwareFallback
+        snapshot_.decodeMode = decodeMode_ == FFF3FPDecodeMode::D3D11 && !hardwareFallback
             ? FFF3FPDecodeMode::Gpu : FFF3FPDecodeMode::Cpu;
-        if (staticImage_ && stillImageFrame_ != nullptr) {
+        if (staticImage_ && stillImageFrame_ != nullptr && IsHardwareFrame(stillImageFrame_)) {
+            // The retained still names surfaces owned by the device that was just lost,
+            // so it cannot be redrawn. Drop it and decode the picture again below.
+            av_frame_unref(stillImageFrame_);
+        }
+        if (staticImage_ && stillImageFrame_ == nullptr) {
+            const auto* stream = format_->streams[videoStream_];
+            const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
+            if (av_seek_frame(format_, videoStream_, start, AVSEEK_FLAG_BACKWARD) >= 0)
+                avcodec_flush_buffers(videoDecoder_);
+            const auto decodeResult = DecodeInitialFrame();
+            if (decodeResult != FFFResult::Success) {
+                Fail(decodeResult, "Could not re-decode the still image after rebuilding the graphics device.",
+                    "video-device-recovery");
+                return true;
+            }
+        } else if (staticImage_ && stillImageFrame_ != nullptr) {
             // imageMode selects the still-image scaling policy: enlarge by pixel
             // blocks, which keeps a picture's own pixel grid crisp, instead of the
             // smooth interpolation video wants.
@@ -2038,8 +2130,8 @@ FFFResult PlayerSession::GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept
 
 // Forward to the renderer (RTInfo under deviceMutex_).
 FFFResult PlayerSession::GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept {
-    // Version 2 makes origins signed; size alone cannot distinguish v1/v2.
-    // Same contract as GetSnapshot: the caller declares the size and version of
+    // Declared version 20 makes origins signed; size alone cannot distinguish the older
+    // v1 layout. Same contract as GetSnapshot: the caller declares the size and version of
     // the struct it passes, so we never write past a smaller caller-side layout.
     // A v1 caller would read a negative origin as a huge unsigned value
     // (silently wrong content), and v1/v2 share the same field widths so
@@ -2480,8 +2572,23 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
         AV_HWDEVICE_TYPE_D3D11VA,
         AV_HWDEVICE_TYPE_CUDA,
     };
+    // A still image is presented one frame and then kept, so a backend whose surfaces
+    // the renderer cannot sample directly has to be consumed through a frame transfer
+    // into semi-planar CPU memory. That route measured two things against the CPU arm
+    // and neither is worth paying at still sizes:
+    //   - it is not bit-exact: the CUDA JPEG decode differs from libjpeg by 1/255 at a
+    //     stripe edge (09h) and by 4/255 on a 4:4:4 sample, and a 4:2:0 surface loses
+    //     the chroma detail of a 4:4:4 source outright;
+    //   - it is slower: +64 ms to +196 ms measured, because the decoder is built for
+    //     one frame that never amortises it.
+    // So stills stay on the renderer's own device, where the decoded surface is sampled
+    // as-is and every sampled file measures bit-exact. Video keeps the full list: there
+    // a CUDA or QSV frame is transferred every frame anyway, and the semi-planar upload
+    // in VideoRenderer is what carries it.
+    const std::size_t backendCount = staticImage_ ? 1u : std::size(Backends);
     std::string lastFailure = "No compatible hardware decoder was found.";
-    for (const auto backend : Backends) {
+    for (std::size_t backendIndex = 0; backendIndex < backendCount; ++backendIndex) {
+        const auto backend = Backends[backendIndex];
         // A backend can expose both a dedicated wrapper and the native FFmpeg
         // decoder. Try both: profiles accepted by one parser are not always
         // accepted by the other, notably 4:2:2/4:4:4 and some AV1 streams.
@@ -2517,8 +2624,6 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Keep the flip-model chain for a same-HWND media switch. DXGI can reject
     // an immediate replacement while the previous chain is still retiring.
     DoClose(FFF3FPState::Opening, true);
-    dolbyVisionEnhancementSoftwareOnly_ = false;
-    dolbyVisionEnhancementRecoveryPending_ = false;
     std::string openError;
     auto openResult = FFFResult::Success;
     if (DiscInput::IsDiscPath(path)) {
@@ -2576,10 +2681,17 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     bool hardwareFallback = false;
     std::string hardwareFailureReason;
     if (videoStream_ >= 0) {
-        auto result = decodeMode_ == FFF3FPDecodeMode::D3D11 && !staticImage_
+        // Still images are included here on purpose: the hardware decoder is tried
+        // first for every media type and the retry below takes the CPU decoder when the
+        // GPU refuses. Formats with no hardware path (PNG, WebP, TIFF, JPEG XL, JXR) are
+        // refused inside the hardware open before any device is created, so probing them
+        // costs nothing.
+        auto result = decodeMode_ == FFF3FPDecodeMode::D3D11
             ? OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_, &hardwareFailureReason)
             : OpenDecoder(format_, videoStream_, true, &videoDecoder_);
         if (result != FFFResult::Success && decodeMode_ == FFF3FPDecodeMode::D3D11) {
+            // OpenDecoder's default consults decodeMode_, so the retry has to ask for
+            // the software decoder explicitly or it fails the same way.
             result = OpenDecoder(format_, videoStream_, true, &videoDecoder_, -1, nullptr, false);
             if (result == FFFResult::Success) {
                 snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
@@ -2587,13 +2699,6 @@ void PlayerSession::DoOpen(std::string path) noexcept {
             }
         }
         if (result != FFFResult::Success) { Fail(result, "Could not open a hardware or software video decoder.", "open"); return; }
-        if (staticImage_ && decodeMode_ == FFF3FPDecodeMode::D3D11)
-            snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
-        // Dolby Vision FEL is decoded through a generic enhancement-layer
-        // side channel. The external color extension owns the actual residual
-        // reconstruction; the player only keeps the decoded frame paired with
-        // its BL timestamp.
-        (void)ConfigureDolbyVisionEnhancementDecoder();
     }
     if (audioStream_ >= 0) {
         // IAMF first: FFmpeg cannot mix an IAMF element's substreams, so its
@@ -2675,10 +2780,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     }
     PublishDisc();
     Emit(FFF3FPEvent::OpenCompleted, "{\"success\":true}");
-    if (staticImage_ && decodeMode_ == FFF3FPDecodeMode::D3D11)
-        Emit(FFF3FPEvent::DeviceChanged,
-            "{\"decodeMode\":1,\"reason\":\"Still images use CPU decoding for immediate, device-independent loading.\"}");
-    else if (hardwareFallback)
+    if (hardwareFallback)
         Emit(FFF3FPEvent::DeviceChanged,
             "{\"type\":\"video\",\"decodeMode\":1,\"fallback\":true,\"reason\":\"" +
             EscapeJson(hardwareFailureReason.empty()
@@ -2700,11 +2802,18 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
     if (!staticImage_ && !animatedImage_) return FFFResult::InvalidState;
     if (playbackPacket_ == nullptr) playbackPacket_ = av_packet_alloc();
     if (playbackPacket_ == nullptr) return FFFResult::NativeFailure;
+    if (stillImagePacket_ == nullptr) stillImagePacket_ = av_packet_alloc();
+    if (stillImagePacket_ == nullptr) return FFFResult::NativeFailure;
+    av_packet_unref(stillImagePacket_);
     const auto before = videoRenderer_.PresentedVideoFrames();
     int readResult = 0;
     while (videoRenderer_.PresentedVideoFrames() == before &&
         (readResult = av_read_frame(format_, playbackPacket_)) >= 0) {
         if (playbackPacket_->stream_index == videoStream_) {
+            if (staticImage_) {
+                av_packet_unref(stillImagePacket_);
+                if (av_packet_ref(stillImagePacket_, playbackPacket_) < 0) return FFFResult::NativeFailure;
+            }
             const auto decodeResult = DecodePacket(videoDecoder_, playbackPacket_, true, format_);
             av_packet_unref(playbackPacket_);
             if (decodeResult != FFFResult::Success) return decodeResult;
@@ -2716,12 +2825,26 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
         const auto drainResult = DecodePacket(videoDecoder_, nullptr, true, format_);
         if (drainResult != FFFResult::Success) return drainResult;
     }
+    // Still-image retry after the GPU refused the packet: FallbackToSoftwareVideoDecoder
+    // has already swapped in the CPU decoder, but image2 and the *_pipe demuxers have no
+    // timeline to seek back to, so the packet cannot be re-read from the demuxer. Submit
+    // the retained copy instead of failing the open.
+    if (staticImage_ && videoRenderer_.PresentedVideoFrames() == before &&
+        stillImagePacket_->size > 0 && snapshot_.decodeMode == FFF3FPDecodeMode::Cpu) {
+        // The CPU decoder swapped in by the fallback has already been drained with an
+        // EOF packet above, so it refuses this one unless its buffers are reset first.
+        avcodec_flush_buffers(videoDecoder_);
+        const auto retryResult = DecodePacket(videoDecoder_, stillImagePacket_, true, format_);
+        av_packet_unref(stillImagePacket_);
+        if (retryResult != FFFResult::Success) return retryResult;
+        const auto retryDrain = DecodePacket(videoDecoder_, nullptr, true, format_);
+        if (retryDrain != FFFResult::Success) return retryDrain;
+    }
     const auto* stream = format_->streams[videoStream_];
     const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
     if (av_seek_frame(format_, videoStream_, start, AVSEEK_FLAG_BACKWARD) >= 0)
     {
         avcodec_flush_buffers(videoDecoder_);
-        FlushDolbyVisionEnhancementDecoder();
     }
     if (state_.load() == FFF3FPState::Failed) return FFFResult::DeviceFailure;
     if (videoRenderer_.PresentedVideoFrames() <= before) return FFFResult::FfmpegFailure;
@@ -2894,7 +3017,17 @@ FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noex
     if (videoTransferFrame_ != nullptr) av_frame_unref(videoTransferFrame_);
     ClearVideoQueue();
     snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
-    DoSeek(resumePosition);
+    if (staticImage_) {
+        // DoSeek is a deliberate no-op for a still image, and its single packet was
+        // already consumed by the failed hardware attempt, so rewind here or the CPU
+        // decoder is handed nothing and the open fails. Same seek as DecodeInitialFrame.
+        const auto* stream = format_->streams[videoStream_];
+        const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
+        if (av_seek_frame(format_, videoStream_, start, AVSEEK_FLAG_BACKWARD) >= 0)
+            avcodec_flush_buffers(videoDecoder_);
+    } else {
+        DoSeek(resumePosition);
+    }
     RebuildMediaInfo();
     Emit(FFF3FPEvent::DeviceChanged,
         "{\"type\":\"video\",\"decodeMode\":1,\"fallback\":true,\"reason\":\"" + EscapeJson(reason == nullptr ?
@@ -2904,13 +3037,6 @@ FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noex
 
 void PlayerSession::PumpPlayback() noexcept {
     if (format_ == nullptr) { SetState(FFF3FPState::Failed); return; }
-    if (dolbyVisionEnhancementRecoveryPending_) {
-        dolbyVisionEnhancementRecoveryPending_ = false;
-        dolbyVisionEnhancementSoftwareOnly_ = true;
-        (void)ConfigureDolbyVisionEnhancementDecoder();
-        DoSeek(std::max<std::int64_t>(0, snapshot_.position100ns));
-        return;
-    }
     if (disc_) {
         PublishDisc();
         if (disc_->RestartRequired() && !disc_->Held()) {
@@ -2976,7 +3102,7 @@ void PlayerSession::PumpPlayback() noexcept {
         pendingVideoPacketBytes_ >= MaximumPendingVideoPacketBytes;
     const auto audioPacketsFull = pendingAudioPackets_.size() >= MaximumPendingAudioPackets ||
         pendingAudioPacketBytes_ >= MaximumPendingAudioPacketBytes;
-    if (videoSaturated() && !(DolbyVisionEnhancementNeedsReadAhead() && !videoPacketsFull) &&
+    if (videoSaturated() &&
         ((!audioRenderer_ || audioBuffered >= TargetAudioBuffer100ns) || videoPacketsFull)) {
         Sleep(1);
         return;
@@ -3010,17 +3136,6 @@ void PlayerSession::PumpPlayback() noexcept {
     TrackPacketBitRate(playbackPacket_, format_);
     discInvalidPackets_ = 0;
     if (playbackPacket_->stream_index == videoStream_) {
-        // Decode EL before retaining a compressed BL packet. Its reorder delay
-        // can exceed the BL queue budget; do not grow the decoded BL queue.
-        if (dolbyVisionEnhancementDecoder_ != nullptr &&
-            pendingVideoPackets_.size() < MaxQueuedVideoFrames &&
-            dolbyVisionEnhancementFrames_.size() < MaxQueuedVideoFrames &&
-            std::all_of(pendingVideoPackets_.begin(), pendingVideoPackets_.end(),
-                [this](const AVPacket* packet) { return packet->opaque == this; })) {
-            DecodeDolbyVisionEnhancementPacket(playbackPacket_);
-            // av_packet_clone preserves opaque; deferred BL decode skips EL.
-            playbackPacket_->opaque = this;
-        }
         if (videoSaturated()) {
             auto* retained = av_packet_clone(playbackPacket_);
             if (retained == nullptr) {
@@ -3031,9 +3146,7 @@ void PlayerSession::PumpPlayback() noexcept {
             pendingVideoPacketBytes_ += static_cast<std::size_t>(std::max(retained->size, 0));
             pendingVideoPackets_.push_back(retained);
         } else {
-            const bool decodeEnhancement = playbackPacket_->opaque != this;
-            playbackPacket_->opaque = nullptr;
-            DecodePacket(videoDecoder_, playbackPacket_, true, format_, decodeEnhancement);
+            DecodePacket(videoDecoder_, playbackPacket_, true, format_);
         }
     }
     else if (playbackPacket_->stream_index == audioStream_ && externalFormat_ == nullptr) {
@@ -3077,188 +3190,6 @@ void PlayerSession::PumpPlayback() noexcept {
     }
     if (disc_) disc_->DecodeSubtitle(playbackPacket_, format_);
     av_packet_unref(playbackPacket_);
-}
-
-FFFResult PlayerSession::ConfigureDolbyVisionEnhancementDecoder() noexcept {
-    ResetDolbyVisionEnhancementDecoder();
-    // The public player has no enhancement compositor. Keep the additional
-    // decoder completely dormant unless the private color extension is present;
-    // ordinary HDR10-compatible fallback must retain the normal decode budget.
-    if (GetColorExtension() == nullptr || format_ == nullptr || videoStream_ < 0 ||
-        videoStream_ >= static_cast<std::int32_t>(format_->nb_streams))
-        return FFFResult::InvalidState;
-    const auto* parameters = format_->streams[videoStream_]->codecpar;
-    const auto* dovi = av_packet_side_data_get(parameters->coded_side_data,
-        parameters->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF);
-    if (dovi == nullptr || dovi->size < sizeof(AVDOVIDecoderConfigurationRecord))
-        return FFFResult::Success;
-    const auto* configuration = reinterpret_cast<const AVDOVIDecoderConfigurationRecord*>(dovi->data);
-    if (configuration->el_present_flag == 0 || configuration->rpu_present_flag == 0)
-        return FFFResult::Success;
-    const auto* filter = av_bsf_get_by_name("dovi_split");
-    if (filter == nullptr || av_bsf_alloc(filter, &dolbyVisionEnhancementBsf_) < 0)
-        return FFFResult::NotSupported;
-    if (avcodec_parameters_copy(dolbyVisionEnhancementBsf_->par_in, parameters) < 0) {
-        av_bsf_free(&dolbyVisionEnhancementBsf_);
-        return FFFResult::NativeFailure;
-    }
-    if (av_opt_set(dolbyVisionEnhancementBsf_->priv_data, "mode", "el", 0) < 0) {
-        av_bsf_free(&dolbyVisionEnhancementBsf_);
-        return FFFResult::NotSupported;
-    }
-    dolbyVisionEnhancementBsf_->time_base_in = format_->streams[videoStream_]->time_base;
-    if (av_bsf_init(dolbyVisionEnhancementBsf_) < 0 ||
-        dolbyVisionEnhancementBsf_->par_out == nullptr) {
-        av_bsf_free(&dolbyVisionEnhancementBsf_);
-        return FFFResult::NotSupported;
-    }
-    const auto* codec = avcodec_find_decoder(dolbyVisionEnhancementBsf_->par_out->codec_id);
-    if (codec == nullptr) {
-        av_bsf_free(&dolbyVisionEnhancementBsf_);
-        return FFFResult::NotSupported;
-    }
-    dolbyVisionEnhancementDecoder_ = avcodec_alloc_context3(codec);
-    const auto parametersResult = dolbyVisionEnhancementDecoder_ != nullptr
-        ? avcodec_parameters_to_context(dolbyVisionEnhancementDecoder_, dolbyVisionEnhancementBsf_->par_out)
-        : AVERROR(ENOMEM);
-    if (parametersResult >= 0) {
-        const bool hardware = !dolbyVisionEnhancementSoftwareOnly_ && videoDecoder_ != nullptr &&
-            videoDecoder_->hw_device_ctx != nullptr &&
-            FindHardwareFormat(codec, AV_HWDEVICE_TYPE_D3D11VA) == AV_PIX_FMT_D3D11 &&
-            reinterpret_cast<const AVHWDeviceContext*>(videoDecoder_->hw_device_ctx->data)->type == AV_HWDEVICE_TYPE_D3D11VA;
-        if (hardware) {
-            dolbyVisionEnhancementDecoder_->hw_device_ctx = av_buffer_ref(videoDecoder_->hw_device_ctx);
-            dolbyVisionEnhancementDecoder_->opaque = reinterpret_cast<void*>(AV_PIX_FMT_D3D11);
-            dolbyVisionEnhancementDecoder_->get_format = SelectHardwareFormat;
-            dolbyVisionEnhancementDecoder_->extra_hw_frames = static_cast<int>(MaxQueuedVideoFrames + 2);
-        } else {
-            dolbyVisionEnhancementDecoder_->thread_count = static_cast<int>(std::min(
-                std::max(1u, std::thread::hardware_concurrency()), MaximumSoftwareDecoderThreads));
-            dolbyVisionEnhancementDecoder_->thread_type = FF_THREAD_SLICE;
-        }
-        dolbyVisionEnhancementDecoder_->pkt_timebase = dolbyVisionEnhancementBsf_->time_base_out;
-    }
-    if (parametersResult < 0 ||
-        avcodec_open2(dolbyVisionEnhancementDecoder_, codec, nullptr) < 0) {
-        const bool retrySoftware = dolbyVisionEnhancementDecoder_ != nullptr &&
-            dolbyVisionEnhancementDecoder_->hw_device_ctx != nullptr;
-        if (dolbyVisionEnhancementDecoder_ != nullptr)
-            avcodec_free_context(&dolbyVisionEnhancementDecoder_);
-        av_bsf_free(&dolbyVisionEnhancementBsf_);
-        if (retrySoftware) {
-            dolbyVisionEnhancementSoftwareOnly_ = true;
-            return ConfigureDolbyVisionEnhancementDecoder();
-        }
-        return FFFResult::NotSupported;
-    }
-    dolbyVisionEnhancementDecodeFrame_ = av_frame_alloc();
-    if (dolbyVisionEnhancementDecodeFrame_ == nullptr) {
-        avcodec_free_context(&dolbyVisionEnhancementDecoder_);
-        av_bsf_free(&dolbyVisionEnhancementBsf_);
-        return FFFResult::NativeFailure;
-    }
-    return FFFResult::Success;
-}
-
-void PlayerSession::ClearDolbyVisionEnhancementFrames() noexcept {
-    for (auto& entry : dolbyVisionEnhancementFrames_)
-        if (entry.second != nullptr) av_frame_free(&entry.second);
-    dolbyVisionEnhancementFrames_.clear();
-}
-
-void PlayerSession::ResetDolbyVisionEnhancementDecoder() noexcept {
-    ClearDolbyVisionEnhancementFrames();
-    av_bsf_free(&dolbyVisionEnhancementBsf_);
-    avcodec_free_context(&dolbyVisionEnhancementDecoder_);
-    av_frame_free(&dolbyVisionEnhancementDecodeFrame_);
-}
-
-void PlayerSession::FlushDolbyVisionEnhancementDecoder() noexcept {
-    if (dolbyVisionEnhancementBsf_) av_bsf_flush(dolbyVisionEnhancementBsf_);
-    if (dolbyVisionEnhancementDecoder_) avcodec_flush_buffers(dolbyVisionEnhancementDecoder_);
-    ClearDolbyVisionEnhancementFrames();
-}
-
-void PlayerSession::DrainDolbyVisionEnhancementDecoder() noexcept {
-    if (dolbyVisionEnhancementDecoder_ == nullptr || dolbyVisionEnhancementDecodeFrame_ == nullptr)
-        return;
-    int result = 0;
-    while ((result = avcodec_receive_frame(dolbyVisionEnhancementDecoder_,
-            dolbyVisionEnhancementDecodeFrame_)) >= 0) {
-        // Split EL can have a different reorder pattern from the BL packet DTS.
-        // best_effort_timestamp may choose that DTS and even repeat it, causing
-        // a valid EL to overwrite another entry. Preserve the explicit PTS.
-        const auto pts = dolbyVisionEnhancementDecodeFrame_->pts != AV_NOPTS_VALUE
-            ? dolbyVisionEnhancementDecodeFrame_->pts
-            : dolbyVisionEnhancementDecodeFrame_->best_effort_timestamp;
-        if (pts != AV_NOPTS_VALUE) {
-            auto* copy = av_frame_clone(dolbyVisionEnhancementDecodeFrame_);
-            if (copy != nullptr) {
-                auto existing = dolbyVisionEnhancementFrames_.find(pts);
-                if (existing != dolbyVisionEnhancementFrames_.end())
-                    av_frame_free(&existing->second);
-                dolbyVisionEnhancementFrames_[pts] = copy;
-            }
-        }
-        av_frame_unref(dolbyVisionEnhancementDecodeFrame_);
-    }
-    if (result != AVERROR(EAGAIN) && result != AVERROR_EOF && dolbyVisionEnhancementDecoder_->hw_device_ctx)
-        dolbyVisionEnhancementRecoveryPending_ = true;
-}
-
-void PlayerSession::DecodeDolbyVisionEnhancementPacket(const AVPacket* packet) noexcept {
-    if (dolbyVisionEnhancementBsf_ == nullptr || dolbyVisionEnhancementDecoder_ == nullptr)
-        return;
-    AVPacket* copy = packet == nullptr ? nullptr : av_packet_clone(packet);
-    if (packet != nullptr && copy == nullptr) return;
-    if (av_bsf_send_packet(dolbyVisionEnhancementBsf_, copy) < 0) {
-        if (copy != nullptr) av_packet_free(&copy);
-        return;
-    }
-    if (copy != nullptr) av_packet_free(&copy);
-    AVPacket* filtered = av_packet_alloc();
-    if (filtered == nullptr) return;
-    while (av_bsf_receive_packet(dolbyVisionEnhancementBsf_, filtered) >= 0) {
-        auto result = avcodec_send_packet(dolbyVisionEnhancementDecoder_, filtered);
-        if (result == AVERROR(EAGAIN)) {
-            DrainDolbyVisionEnhancementDecoder();
-            result = avcodec_send_packet(dolbyVisionEnhancementDecoder_, filtered);
-        }
-        if (result >= 0) DrainDolbyVisionEnhancementDecoder();
-        else if (dolbyVisionEnhancementDecoder_->hw_device_ctx)
-            dolbyVisionEnhancementRecoveryPending_ = true;
-        av_packet_unref(filtered);
-    }
-    av_packet_free(&filtered);
-    if (packet == nullptr) {
-        (void)avcodec_send_packet(dolbyVisionEnhancementDecoder_, nullptr);
-        DrainDolbyVisionEnhancementDecoder();
-    }
-}
-
-void PlayerSession::AttachDolbyVisionEnhancementFrame(AVFrame* base) noexcept {
-    if (base == nullptr || base->opaque_ref != nullptr || dolbyVisionEnhancementFrames_.empty()) return;
-    const auto pts = base->best_effort_timestamp == AV_NOPTS_VALUE ? base->pts : base->best_effort_timestamp;
-    if (pts == AV_NOPTS_VALUE) return;
-    auto match = dolbyVisionEnhancementFrames_.find(pts);
-    // A dropped BL no longer needs its paired EL or decoder surface.
-    for (auto stale = dolbyVisionEnhancementFrames_.begin();
-        stale != dolbyVisionEnhancementFrames_.end() && stale->first < pts;) {
-        av_frame_free(&stale->second);
-        stale = dolbyVisionEnhancementFrames_.erase(stale);
-    }
-    if (match == dolbyVisionEnhancementFrames_.end()) return;
-    auto* reference = new (std::nothrow) FFFColorExtensionEnhancementFrameReference{
-        FFFColorExtensionEnhancementReferenceMagic, nullptr};
-    if (reference == nullptr) return;
-    reference->frame = match->second;
-    match->second = nullptr;
-    dolbyVisionEnhancementFrames_.erase(match);
-    base->opaque_ref = av_buffer_create(reinterpret_cast<std::uint8_t*>(reference),
-        sizeof(*reference), FreeDolbyVisionEnhancementReference, nullptr, 0);
-    if (base->opaque_ref == nullptr) {
-        FreeDolbyVisionEnhancementReference(nullptr, reinterpret_cast<std::uint8_t*>(reference));
-    }
 }
 
 FFFResult PlayerSession::CompleteHardwareFallback(const char* failureMessage) noexcept {
@@ -3450,24 +3381,8 @@ FFFResult PlayerSession::DecodeIamfPacket(AVPacket* packet) noexcept {
     return FFFResult::Success;
 }
 
-bool PlayerSession::DolbyVisionEnhancementNeedsReadAhead() const noexcept {
-    if (dolbyVisionEnhancementDecoder_ == nullptr || demuxEnded_ || videoFrameQueue_.empty() ||
-        dolbyVisionEnhancementFrames_.size() >= MaxQueuedVideoFrames ||
-        pendingVideoPackets_.size() >= MaxQueuedVideoFrames) return false;
-    const auto* base = videoFrameQueue_.front();
-    const auto* metadata = av_frame_get_side_data(base, AV_FRAME_DATA_DOVI_METADATA);
-    const auto* api = GetColorExtension();
-    if (api == nullptr || metadata == nullptr) return false;
-    const FFFColorExtensionInput request{sizeof(request), FFFColorExtensionVersion, 0,
-        snapshot_.dolbyVisionProfile, metadata->data, metadata->size};
-    FFFColorExtensionMetadataInfo info{sizeof(info)};
-    if (!api->analyzeMetadata(&request, 1, &info) || !info.requiresEnhancement) return false;
-    const auto pts = base->best_effort_timestamp == AV_NOPTS_VALUE ? base->pts : base->best_effort_timestamp;
-    return pts != AV_NOPTS_VALUE && dolbyVisionEnhancementFrames_.find(pts) == dolbyVisionEnhancementFrames_.end();
-}
-
 FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet, const bool video,
-    AVFormatContext* owner, const bool decodeEnhancement) noexcept {
+    AVFormatContext* owner) noexcept {
     if (decoder == nullptr) return FFFResult::Success;
     if (packet != nullptr && packet->size == 0 && packet->side_data_elems == 0)
         return FFFResult::Success;
@@ -3495,7 +3410,6 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
         return receiveResult;
     };
     if (video) {
-        if (decodeEnhancement) DecodeDolbyVisionEnhancementPacket(packet);
         FilterAv1HardwareTimecodeMetadata(decoder, packet);
     }
     auto result = avcodec_send_packet(decoder, packet);
@@ -3568,10 +3482,6 @@ bool PlayerSession::PumpVideoPresentation() noexcept {
     const auto primesVisibleVideo = ShouldDelayAudioUntilVideoFrame() &&
         audioUnblockVideoGeneration_ == 0 && videoRenderer_.HasOutputWindow();
     if (playbackPreroll_ && !primesVisibleVideo) return false;
-    const auto enhancementNeedsData = DolbyVisionEnhancementNeedsReadAhead() &&
-        pendingVideoPackets_.size() < MaximumPendingVideoPackets &&
-        pendingVideoPacketBytes_ < MaximumPendingVideoPacketBytes;
-    if (enhancementNeedsData) return false;
     if (primesVisibleVideo || position <= now + 20'000) {
         videoFrameQueue_.pop_front();
         PresentVideoFrame(frame, format_);
@@ -3583,7 +3493,7 @@ bool PlayerSession::PumpVideoPresentation() noexcept {
         return true;
     }
     const auto lookAhead = VideoFramePosition(videoFrameQueue_.back()) - now;
-    const auto queueLimit = VideoFrameQueueLimit(videoFrameQueue_);
+    const auto queueLimit = VideoQueueLimit();
     const auto saturated = videoFrameQueue_.size() >= std::max<std::size_t>(1, queueLimit - 1) ||
         (videoFrameQueue_.size() >= MinimumQueuedVideoFrames &&
             lookAhead >= TargetVideoLookAhead100ns);
@@ -3629,7 +3539,91 @@ void PlayerSession::ClearVideoQueue() noexcept {
     }
     videoFrameQueue_.clear();
     snapshot_.queuedVideoFrames = 0;
+    // The presentation index restarts at every flush point, so cached blobs
+    // keyed to the old indices would be handed out under a wrong frame number.
+    ClearSideDataRing();
     ClearPendingPackets();
+}
+
+void PlayerSession::ClearSideDataRing() noexcept {
+    std::lock_guard lock(sideDataMutex_);
+    sideDataRing_.clear();
+    sideDataRingBytes_ = 0;
+}
+
+void PlayerSession::CacheFrameSideData(const AVFrame* frame,
+    const std::int64_t frameIndex) noexcept {
+    if (frame == nullptr || frame->side_data == nullptr || frame->nb_side_data <= 0)
+        return;
+    try {
+        CachedSideDataFrame entry;
+        entry.frameIndex = frameIndex;
+        std::size_t entryBytes = 0;
+        for (std::int32_t index = 0; index < frame->nb_side_data; ++index) {
+            const auto* side = frame->side_data[index];
+            // side->size is size_t in this libavutil, so test it for emptiness
+            // rather than against a signed bound.
+            if (side == nullptr || side->data == nullptr || side->size == 0) continue;
+            const std::size_t size = side->size;
+            if (size > MaximumCachedSideDataBlobBytes) continue;
+            // Byte-for-byte copy, type carried as a plain number: nothing here
+            // reads the payload, which is the whole point of the neutral seam.
+            entry.blobs.push_back(SideDataBlob{ static_cast<std::uint32_t>(side->type),
+                std::vector<std::uint8_t>(side->data, side->data + size) });
+            entryBytes += size;
+        }
+        if (entry.blobs.empty()) return;
+        std::lock_guard lock(sideDataMutex_);
+        sideDataRing_.push_back(std::move(entry));
+        sideDataRingBytes_ += entryBytes;
+        while (!sideDataRing_.empty() && (sideDataRing_.size() > MaximumSideDataRingFrames ||
+            sideDataRingBytes_ > MaximumSideDataRingBytes)) {
+            std::size_t released = 0;
+            for (const auto& blob : sideDataRing_.front().blobs) released += blob.bytes.size();
+            sideDataRingBytes_ -= std::min(sideDataRingBytes_, released);
+            sideDataRing_.pop_front();
+        }
+    } catch (...) {
+        // The cache is advisory: a blob that could not be stored costs the host
+        // one NotFound answer, never a dropped frame or a failed presentation.
+    }
+}
+
+FFFResult PlayerSession::CopyFrameSideDataAfter(const std::uint32_t sideDataType,
+    const std::int64_t fromFrameIndex, void* buffer, const std::uint32_t capacity,
+    std::uint32_t& writtenSize, std::int64_t& foundFrameIndex) noexcept {
+    try {
+        std::lock_guard lock(sideDataMutex_);
+        const CachedSideDataFrame* bestFrame = nullptr;
+        const SideDataBlob* bestBlob = nullptr;
+        for (const auto& entry : sideDataRing_) {
+            if (entry.frameIndex < fromFrameIndex) continue;
+            if (bestFrame != nullptr && entry.frameIndex >= bestFrame->frameIndex) continue;
+            for (const auto& blob : entry.blobs) {
+                if (blob.type != sideDataType) continue;
+                bestFrame = &entry;
+                bestBlob = &blob;
+                break;
+            }
+        }
+        if (bestBlob == nullptr) {
+            writtenSize = 0;
+            foundFrameIndex = -1;
+            return FFFResult::NotFound;
+        }
+        // Reported on every path that found an entry, including BufferTooSmall:
+        // that is how the caller learns what to allocate for the retry.
+        writtenSize = static_cast<std::uint32_t>(bestBlob->bytes.size());
+        foundFrameIndex = bestFrame->frameIndex;
+        if (buffer == nullptr) return FFFResult::Success;  // size probe, writes nothing
+        if (capacity < writtenSize) return FFFResult::BufferTooSmall;
+        std::memcpy(buffer, bestBlob->bytes.data(), writtenSize);
+        return FFFResult::Success;
+    } catch (...) {
+        writtenSize = 0;
+        foundFrameIndex = -1;
+        return FFFResult::NativeFailure;
+    }
 }
 
 void PlayerSession::ClearPendingPackets() noexcept {
@@ -3655,8 +3649,6 @@ void PlayerSession::DecodePendingPacket(const bool video) noexcept {
     // Our IAMF branch replaces the ordinary audio/video path entirely, so the two
     // changes are independent: keep the flag on the path it belongs to, and keep the
     // IAMF interception ahead of it.
-    const bool decodeEnhancement = packet->opaque != this;
-    packet->opaque = nullptr;
     // Queued audio still has to go through the IAMF decoder when it owns the
     // track and no pump is feeding it, otherwise buffered packets would silently
     // play through FFmpeg. With the pump alive the packet is dropped: one owner
@@ -3666,7 +3658,7 @@ void PlayerSession::DecodePendingPacket(const bool video) noexcept {
         return;
     }
     if (!video && iamfDecoder_ != nullptr) (void)DecodeIamfPacket(packet);
-    else DecodePacket(video ? videoDecoder_ : audioDecoder_, packet, video, format_, decodeEnhancement);
+    else DecodePacket(video ? videoDecoder_ : audioDecoder_, packet, video, format_);
     av_packet_free(&packet);
 }
 
@@ -3718,8 +3710,6 @@ std::int64_t PlayerSession::VideoFramePosition(const AVFrame* frame) const noexc
 }
 
 void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept {
-    // Consume paired EL and prune stale surfaces even for frames skipped by Seek.
-    AttachDolbyVisionEnhancementFrame(frame);
     auto* stream = owner->streams[videoStream_];
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
     const auto position = pts == AV_NOPTS_VALUE ? snapshot_.position100ns :
@@ -3731,6 +3721,10 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
         lastVideoFrameDuration100ns_ = av_rescale_q(1, av_inv_q(stream->avg_frame_rate),
             AVRational{1, static_cast<int>(TicksPerSecond)});
     }
+    // Hand the source period to the cadence lock. It is what lets the presenter size each
+    // flip in refresh slots (2.4 slots for 60 fps on 144 Hz) instead of taking one slot per
+    // flip, which is how a display-synced loop ends up re-scanning-out the same frame.
+    videoRenderer_.SetContentFramePeriod100ns(lastVideoFrameDuration100ns_);
     auto nextIndex = snapshot_.frameIndex + 1;
     if (nextIndex < 0) nextIndex = 0;
     if (pts != AV_NOPTS_VALUE) {
@@ -3761,6 +3755,13 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     if ((!keyframeSeekPending_ && seekTarget100ns_ >= 0 && position < seekTarget100ns_) ||
         (seekTargetFrame_ >= 0 && nextIndex < seekTargetFrame_)) { snapshot_.frameIndex = nextIndex; return; }
 
+    // Frames skipped while chasing a seek target never reached this index, but
+    // every frame from here on has a final presentation index -- including one
+    // dropped for lateness, which still carried metadata for that index. The
+    // ring is keyed by that index so the host's injection can use the same
+    // matching rule the renderer already applies.
+    CacheFrameSideData(frame, nextIndex);
+
     if (keyframeSeekPending_) {
         keyframeSeekPending_ = false;
         seekTarget100ns_ = -1;
@@ -3779,18 +3780,65 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
         snapshot_.framePts != AV_NOPTS_VALUE &&
         position + lateTolerance < ClockPosition()) {
         snapshot_.frameIndex = nextIndex;
-        ++snapshot_.droppedVideoFrames;
-        // Feed the drop to the adaptive-downscale policy. Only software decoding can
-        // benefit, because a hardware frame never crosses PCIe as CPU planes.
-        if (!IsHardwareFrame(frame))
-            videoRenderer_.ObserveFrameForAdaptiveDownscale(true);
+        // Two different reasons land at this one test, and they must not share a counter.
+        //
+        //   content rate > panel rate -- the frame is late because the display can only
+        //     scan out DisplayCadenceHz() frames per second while the source delivers more.
+        //     Nothing in the pipeline is failing: at 240 fps on a 144 Hz panel the queue
+        //     gains ~2.4 ms of lateness per frame and must overflow any tolerance. Counted as
+        //     display-rate discards.
+        //   otherwise -- the pipeline fell behind the media clock (decode, upload, a costly
+        //     frame). Counted as droppedVideoFrames, the traditional reading.
+        //
+        // The distinction is not cosmetic: the adaptive-downscale policy below exists to
+        // relieve a decode/upload bottleneck, and feeding it display-rate discards would make
+        // it resample 240 fps content down toward the window size to fix something a smaller
+        // picture cannot fix -- the panel is the binding constraint. So it is not fed here.
+        //
+        // Caveat kept honest: a genuine pipeline stall *during* such content is classified
+        // into the display-rate bucket too. The count therefore means "discarded while the
+        // panel was the binding constraint", which is what a caller acts on, and it is
+        // reported separately so the traditional reading stays clean.
+        const auto contentHz = frameDuration > 0 ? 10'000'000.0 / static_cast<double>(frameDuration) : 0.0;
+        const auto displayHz = videoRenderer_.DisplayCadenceHz();
+        // HasOutputWindow() is part of the test, not decoration: with no window the renderer
+        // never runs a display detection, so DisplayCadenceHz() falls back to its 60.0f
+        // construction default and headless/clip playback of anything faster than 60 fps would
+        // be labelled "the panel cannot keep up" when there is no panel in the session at all.
+        // Those drops stay in the traditional bucket, where they belong.
+        // The 0.5% margin is a deliberate trade-off, and one edge is knowingly on the wrong
+        // side of it: 60 fps content on a 59.94 Hz panel really is panel-limited, but 60 is
+        // not greater than 59.94 x 1.005, so those ~0.06 discards per second land in the
+        // traditional bucket. Without the margin the two buckets would flip back and forth
+        // every time the grid estimate moved by its own measurement noise, which is worse
+        // than a stable, documented 0.1% misattribution.
+        if (videoRenderer_.HasOutputWindow() && contentHz > displayHz * 1.005) {
+            displayRateDiscardedFrames_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            ++snapshot_.droppedVideoFrames;
+            // Feed the drop to the adaptive-downscale policy. Only software decoding can
+            // benefit, because a hardware frame never crosses PCIe as CPU planes.
+            if (!IsHardwareFrame(frame))
+                videoRenderer_.ObserveFrameForAdaptiveDownscale(true);
+        }
         snapshot_.queuedVideoFrames = static_cast<std::uint32_t>(videoFrameQueue_.size());
         PublishSnapshot();
         return;
     }
 
     AVFrame* renderFrame = frame;
-    if (IsHardwareFrame(frame) && frame->format != AV_PIX_FMT_D3D11) {
+    // Only a D3D11 surface can be handed to the renderer as-is. Anything else (the CUDA
+    // backend, or QSV) has to come back to CPU memory first as a semi-planar frame.
+    // A still image is downloaded even when it is a D3D11 surface, because the two routes
+    // do not agree on chroma siting: the texture route substitutes AVCHROMA_LOC_LEFT for an
+    // unspecified site (VideoRenderer::ResolveChromaOffset's caller) while the plane route
+    // applies no offset, and images have always been presented through the plane route.
+    // Measured: hardware-decoded AVIF stills at 640x480 / 960x540 / 1280x720 differed from
+    // the CPU arm on 1.07%-2.24% of pixels, in full-height vertical stripes up to 0.518
+    // (docs/99 section 13). Downloading puts both arms on the route that already matched
+    // HEVC and every >=1920x1080 sample exactly.
+    if (IsHardwareFrame(frame) &&
+        (frame->format != AV_PIX_FMT_D3D11 || (staticImage_ && owner == format_))) {
         if (videoTransferFrame_ == nullptr) videoTransferFrame_ = av_frame_alloc();
         if (videoTransferFrame_ == nullptr) {
             Fail(FFFResult::NativeFailure, "Could not allocate the reusable hardware-transfer frame.");
@@ -3819,10 +3867,12 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     const auto firstFrameForMedia = snapshot_.framePts == AV_NOPTS_VALUE;
     // P3 -> BT.2020 runs **before** the frame is cached and rendered, so the
     // retained recovery frame is already converted and a device-loss redraw
-    // does not lose the gamut again.
+    // does not lose the gamut again. It reads CPU planes, so a frame still held on
+    // the GPU is left to the renderer's own wide-gamut path instead.
     const AVFrame* frameToRender = renderFrame;
     AVFrame* gamutConverted = nullptr;
-    if (staticImage_ && owner == format_ && NeedsPrimariesCarrier(renderFrame)) {
+    if (staticImage_ && owner == format_ && !IsHardwareFrame(renderFrame) &&
+        NeedsPrimariesCarrier(renderFrame)) {
         if (ConvertPrimariesToBt2020(renderFrame, &gamutConverted) == FFFResult::Success &&
             gamutConverted != nullptr) {
             frameToRender = gamutConverted;
@@ -4159,16 +4209,38 @@ void PlayerSession::BuildImageInfo(FFF3FPImageInfo& info) const noexcept {
     // the frame carries none: a presented frame is unreffed afterwards, which
     // resets its format to AV_PIX_FMT_NONE, and reading the flags off that would
     // silently drop alpha (and misreport the bit depth).
-    const auto frameFormat = frame != nullptr ?
-        static_cast<AVPixelFormat>(frame->format) : AV_PIX_FMT_NONE;
-    const auto pixelFormat = frameFormat != AV_PIX_FMT_NONE ?
+    //
+    // A hardware frame is the second unusable case, and for the same reason: its
+    // format names the GPU surface layout (AV_PIX_FMT_D3D11 and friends) rather
+    // than the source. Those descriptors declare no components at all, so
+    // reporting one misnames the source format AND leaves the bit depth on its
+    // 8-bit default -- a 10-bit still was reported as 8-bit. A retained still
+    // image frame is a hardware frame, so this is reachable; fall through to the
+    // container parameters (which avformat_find_stream_info fills from a software
+    // decode, hence independent of the decode path), then to the frame's own
+    // underlying software format.
+    // A still that was hardware-decoded arrives here as the transferred CPU frame, and a
+    // transfer yields a semi-planar layout (NV12/P010/...) for what the source actually
+    // stores as separate planes. Report the planar equivalent: the number is a property of
+    // the picture, not of whichever decode route the host happened to configure, and the
+    // two arms otherwise disagree (measured: 8K HEVC still reported 0 on the CPU arm and
+    // 23 on the hardware arm, with the presented pixels identical).
+    const auto frameFormat = frame != nullptr && !IsHardwareFrame(frame) ?
+        PlanarEquivalent(static_cast<AVPixelFormat>(frame->format)) : AV_PIX_FMT_NONE;
+    auto pixelFormat = frameFormat != AV_PIX_FMT_NONE ?
         frameFormat : static_cast<AVPixelFormat>(parameters->format);
+    if (pixelFormat == AV_PIX_FMT_NONE && frame != nullptr && frame->hw_frames_ctx != nullptr) {
+        const auto* frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
+        if (frames != nullptr) pixelFormat = static_cast<AVPixelFormat>(frames->sw_format);
+    }
     info.sourcePixelFormat = static_cast<std::int32_t>(pixelFormat);
     info.sourceBitDepth = parameters->bits_per_raw_sample > 0 ?
         static_cast<std::uint32_t>(parameters->bits_per_raw_sample) : 8u;
     if (const auto* descriptor = av_pix_fmt_desc_get(pixelFormat)) {
-        if (descriptor->comp[0].depth > 0) info.sourceBitDepth = descriptor->comp[0].depth;
-        if ((descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0) flags |= FFF3FP_IMAGE_FLAG_HAS_ALPHA;
+        if (descriptor != nullptr && descriptor->nb_components > 0 &&
+            descriptor->comp[0].depth > 0) info.sourceBitDepth = descriptor->comp[0].depth;
+        if (descriptor != nullptr &&
+            (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0) flags |= FFF3FP_IMAGE_FLAG_HAS_ALPHA;
     }
 
     // ICC profiles arrive as frame side data from the codecs that embed them.
@@ -4395,7 +4467,6 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     ClearVideoQueue();
     ResetBitRateTracking();
     if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);
-    FlushDolbyVisionEnhancementDecoder();
     if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
     internalAudioDecodeErrorCount_ = 0;
     seekTarget100ns_ = position; seekTargetFrame_ = targetFrame;
@@ -4490,7 +4561,6 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         snapshot_.selectedVideoStream = index;
         videoRenderer_.ConfigureHdrStream(format_->streams[index]->codecpar);
         ApplyHdrState(snapshot_, videoRenderer_.HdrState());
-        (void)ConfigureDolbyVisionEnhancementDecoder();
         framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false;
     }
     else {
@@ -4562,7 +4632,6 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     else videoRenderer_.Close();
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); CloseFormat(&externalFormat_, externalFormatIo_);
     if (videoDecoder_) avcodec_free_context(&videoDecoder_);
-    ResetDolbyVisionEnhancementDecoder();
     if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     ReleaseIamfDecoder();
     if (coverArtFrame_) av_frame_free(&coverArtFrame_);
@@ -4573,6 +4642,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     if (audioDecodeFrame_) av_frame_free(&audioDecodeFrame_);
     if (externalAudioDecodeFrame_) av_frame_free(&externalAudioDecodeFrame_);
     if (playbackPacket_) av_packet_free(&playbackPacket_);
+    if (stillImagePacket_) av_packet_free(&stillImagePacket_);
     if (externalAudioPacket_) av_packet_free(&externalAudioPacket_);
     ClearVideoQueue();
     for (auto*& frame : videoFramePool_) av_frame_free(&frame);
@@ -4611,6 +4681,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
         snapshot_.isExternalAudio = 0; snapshot_.externalAudioOffset100ns = 0;
         snapshot_.decodedVideoFrames = snapshot_.presentedVideoFrames = snapshot_.droppedVideoFrames = 0;
+        displayRateDiscardedFrames_.store(0, std::memory_order_relaxed);
         snapshot_.decodedAudioFrames = snapshot_.audioUnderruns = 0;
         snapshot_.audioPosition100ns = snapshot_.bufferedAudio100ns = 0;
         snapshot_.audioTimestampJitterFrames = snapshot_.audioDiscontinuities = 0;
@@ -4749,8 +4820,6 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                   << ",\"hdr\":" << ((parameters->color_trc == AVCOL_TRC_SMPTE2084 ||
                     parameters->color_trc == AVCOL_TRC_ARIB_STD_B67 ||
                     av_packet_side_data_get(parameters->coded_side_data,
-                        parameters->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF) != nullptr ||
-                    av_packet_side_data_get(parameters->coded_side_data,
                         parameters->nb_coded_side_data, AV_PKT_DATA_DYNAMIC_HDR10_PLUS) != nullptr) ? "true" : "false")
                   << ",\"attachedPicture\":" << ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0 ? "true" : "false");
             const auto* sphericalData = av_packet_side_data_get(parameters->coded_side_data,
@@ -4795,12 +4864,6 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                 const auto acceleration = HardwareAccelerationName(videoDecoder_);
                 if (!acceleration.empty())
                     json << ",\"hardwareAcceleration\":\"" << EscapeJson(acceleration) << "\"";
-                if (dolbyVisionEnhancementDecoder_ != nullptr) {
-                    const auto* enhancementFormat = av_get_pix_fmt_name(dolbyVisionEnhancementDecoder_->pix_fmt);
-                    json << ",\"enhancementDecoderPixelFormat\":\"" << EscapeJson(enhancementFormat ? enhancementFormat : "") << "\""
-                        << ",\"enhancementHardwareAcceleration\":\""
-                        << EscapeJson(HardwareAccelerationName(dolbyVisionEnhancementDecoder_)) << "\"";
-                }
             }
             json << ",\"colorRange\":" << parameters->color_range
                  << ",\"colorSpace\":" << parameters->color_space
@@ -4817,27 +4880,13 @@ void PlayerSession::RebuildMediaInfo() noexcept {
             streamHdr.ConfigureStream(parameters);
             const auto hdr = static_cast<std::int32_t>(index) == videoStream_
                 ? videoRenderer_.HdrState() : streamHdr.State();
-            const auto formatName = hdr.format == FFF3FPHdrFormat::DolbyVision
-                ? DolbyExtensionText(FFFColorExtensionDolbyFormatText, hdr, "Dolby Vision")
-                : std::string(HdrProcessor::FormatName(hdr.format));
-            const auto processingPath = hdr.format == FFF3FPHdrFormat::DolbyVision
-                ? DolbyExtensionText(FFFColorExtensionDolbyPathText, hdr, "DolbyVisionFallback")
-                : std::string(HdrProcessor::ProcessingPathName(hdr.processingPath));
-            const auto enhancementName = std::string(HdrProcessor::EnhancementLayerName(hdr.enhancementLayer));
+            const auto formatName = std::string(HdrProcessor::FormatName(hdr.format));
+            const auto processingPath = std::string(HdrProcessor::ProcessingPathName(hdr.processingPath));
             json << ",\"hdrFormat\":\"" << EscapeJson(formatName) << "\""
                  << ",\"hdrCompatibility\":\"" << EscapeJson(HdrProcessor::CompatibilityNames(hdr.compatibility)) << "\""
                  << ",\"hdrProcessingPath\":\"" << EscapeJson(processingPath) << "\""
-                 << ",\"dolbyVisionProfile\":" << hdr.dolbyVisionProfile
-                 << ",\"dolbyVisionLevel\":" << hdr.dolbyVisionLevel
-                 << ",\"dolbyVisionRpu\":" << (hdr.hasRpu ? "true" : "false")
-                 << ",\"dolbyVisionEnhancementLayer\":\""
-                 << EscapeJson(enhancementName) << "\""
                  << ",\"hdrFallback\":" << (hdr.fallback ? "true" : "false")
-                 << ",\"dynamicHdrMetadata\":" << (hdr.dynamicMetadata ? "true" : "false")
-                 << ",\"externalColorExtensionAvailable\":"
-                 << (hdr.externalExtensionAvailable ? "true" : "false")
-                 << ",\"externalColorExtensionActive\":"
-                 << (hdr.externalExtensionActive ? "true" : "false");
+                 << ",\"dynamicHdrMetadata\":" << (hdr.dynamicMetadata ? "true" : "false");
             if (masteringData != nullptr && masteringData->size >= sizeof(AVMasteringDisplayMetadata)) {
                 const auto* mastering = reinterpret_cast<const AVMasteringDisplayMetadata*>(masteringData->data);
                 std::string primaries;

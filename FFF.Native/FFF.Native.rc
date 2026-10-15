@@ -3,12 +3,15 @@
 // 更新内核 API 时须同步递增此处主版本号。
 #include <winver.h>
 
-// 18 = PlayerApiVersion（FFF.Player.Api.h）。17 已被 #16 占用（FFF3FPSnapshot 尾部新增
-// ST 2094 诊断字段）；本支为 18 = FFF3FPConfiguration 新增 adaptiveDownscaleBeforeUpload /
+// 以下是版本号历史：v18 那次 bump 的内容（17 已被 #16 占用 —— FFF3FPSnapshot 尾部新增
+// ST 2094 诊断字段）；18 = FFF3FPConfiguration 新增 adaptiveDownscaleBeforeUpload /
 // adaptiveDownscaleDropPercent / adaptiveDecoderThreads / min・maxSoftwareDecoderThreads /
 // decoderGrow・ShrinkDropPercent，且 FFF3FPSnapshot 尾部新增 iamfActive / iamfChannels /
-// iamfSoundSystem / videoUpload100ns / iamfContentChannels。
-// 三处必须同值：PlayerApi.cpp 的常量、本文件、FFF.Player.vbproj 的 <PlayerApiVersion>。
+// iamfSoundSystem / videoUpload100ns / iamfContentChannels。v19/v20 的清单在 PlayerApi.cpp
+// 与提交记录里，不在这里重复。当前生效值就是下一行的 VER_API。
+// 同值约束（由 FFF.Player.vbproj 的 VerifyPlayerApiVersion 逐条比对，任一处不同即构建失败）：
+// PlayerApi.cpp 的 PlayerApiVersion、播放器会话.vb 的 期望API版本、FFF.Player.vbproj 的
+// <PlayerApiVersion>、本文件的 VER_API 与下面 FileVersion / ApiVersion / "(api NN)" 三段字符串。
 #define VER_API 20
 
 VS_VERSION_INFO VERSIONINFO

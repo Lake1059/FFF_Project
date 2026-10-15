@@ -20,6 +20,11 @@ enum class FFFResult : std::int32_t {
     FfmpegFailure = -5,
     DeviceFailure = -6,
     NotSupported = -7,
+    // Nothing matched in a bounded store the caller was pointed at -- e.g.
+    // FFF3FP_CopyFrameSideDataAfter finding no cached blob for the requested
+    // type and frame range. Appended value: hosts that do not know it treat
+    // nonzero as failure, so the ABI stays intact.
+    NotFound = -8,
 };
 
 enum class FFFSessionState : std::uint32_t {

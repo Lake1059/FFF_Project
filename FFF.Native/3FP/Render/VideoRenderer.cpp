@@ -2,9 +2,14 @@
 #include "3FP/Render/VideoRenderer.h"
 #include "3FP/Render/ShaderBytecode.h"
 #include "3FP/Render/SdrShaderBytecode.h"
-#include "3FP/Render/ColorExtension.h"
-#include "3FP/Hdr/HdrToneCurve.h"
 #include "3FP/Render/NvidiaVideoExtensions.h"
+
+// Used only by the presenter thread, to put the refresh grid within reach of its waits.
+// Linked by pragma rather than in the .vcxproj: the project carries several
+// AdditionalDependencies lists and only some of them are the configuration actually
+// shipping, so a source-side reference is the one that cannot be missed.
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 
 extern "C" {
 #include <libavcodec/codec_par.h>
@@ -46,23 +51,54 @@ template<class T> void ReleaseCom(T*& resource) noexcept {
     if (resource != nullptr) { resource->Release(); resource = nullptr; }
 }
 
-const AVFrame* EnhancementFrame(const AVFrame* frame) noexcept {
-    if (frame == nullptr || frame->opaque_ref == nullptr ||
-        frame->opaque_ref->data == nullptr ||
-        frame->opaque_ref->size < sizeof(FFFColorExtensionEnhancementFrameReference))
-        return nullptr;
-    const auto* reference = reinterpret_cast<const FFFColorExtensionEnhancementFrameReference*>(
-        frame->opaque_ref->data);
-    if (reference->magic != FFFColorExtensionEnhancementReferenceMagic ||
-        reference->frame == nullptr)
-        return nullptr;
-    return static_cast<const AVFrame*>(reference->frame);
+// QPC pair used by the presentation cadence lock. Declared here because the presenter
+// thread (TimedTextThread) is defined a few thousand lines before the lock itself.
+std::int64_t QpcTicks() noexcept {
+    static const std::int64_t frequency = [] {
+        LARGE_INTEGER value{};
+        QueryPerformanceFrequency(&value);
+        return value.QuadPart;
+    }();
+    return frequency;
 }
 
+std::int64_t QpcNowValue() noexcept {
+    LARGE_INTEGER value{};
+    QueryPerformanceCounter(&value);
+    return value.QuadPart;
+}
+
+// The grid the cadence lock aims at is 6.94 ms wide on a 144 Hz panel. This process runs at
+// the default system timer resolution, and the release cadence of 60 fps content measured at
+// a 15.7 ms median -- the quantisation is coarser than the thing it has to hit, so no
+// condition_variable::wait_for in this process can land on a slot. The presenter therefore
+// raises the resolution for as long as it owns the cadence and restores it on the way out.
+//
+// Deliberately scoped to the presenter thread rather than to a call site, because it is
+// process-wide and refcounted: the session's own Sleep(1)/wait_for release loop gets the
+// same correction, which is half the defect. The cost is a higher timer interrupt rate for
+// as long as something is playing.
+struct PresenterTimerResolution {
+    bool raised = false;
+    PresenterTimerResolution() noexcept { raised = timeBeginPeriod(1) == 0; }
+    ~PresenterTimerResolution() noexcept { if (raised) timeEndPeriod(1); }
+    PresenterTimerResolution(const PresenterTimerResolution&) = delete;
+    PresenterTimerResolution& operator=(const PresenterTimerResolution&) = delete;
+};
+
 float DetectDisplayRefreshRate(const HWND window) noexcept {
-    // Pace camera redraws to the monitor hosting the playback window.  A
-    // 120 Hz ceiling keeps high-refresh displays responsive without creating
-    // an unbounded presentation queue on faster panels.
+    // Report the refresh rate of the monitor hosting the playback window, un-corrected.
+    //
+    // This used to clamp to [60,120], whose stated purpose was to keep a high-refresh
+    // display from building an unbounded presentation queue. That bound is now the
+    // explicit job of the automatic flip-rate bound, and leaving it here meant every
+    // consumer of this
+    // number was handed a wrong fact: on a 144 Hz panel the caller was told 120, so any
+    // cadence derived from it was 20% off before it started. Measured on this machine:
+    // EnumDisplaySettings says 144, and the swap chain's own frame statistics recover
+    // 143.995-144.012 Hz run to run.
+    //
+    // The remaining guard only rejects garbage (a driver reporting 0 or 1 Hz), not panels.
     if (window == nullptr) return 60.0f;
     const auto monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
     if (monitor == nullptr) return 60.0f;
@@ -73,7 +109,7 @@ float DetectDisplayRefreshRate(const HWND window) noexcept {
     mode.dmSize = sizeof(mode);
     if (!EnumDisplaySettingsExW(monitorInfo.szDevice, ENUM_CURRENT_SETTINGS, &mode, 0) ||
         mode.dmDisplayFrequency < 2) return 60.0f;
-    return std::clamp(static_cast<float>(mode.dmDisplayFrequency), 60.0f, 120.0f);
+    return std::clamp(static_cast<float>(mode.dmDisplayFrequency), 20.0f, 1000.0f);
 }
 
 // DISPLAYCONFIG SDR white = SDRWhiteLevel / 1000 * 80 nits.
@@ -459,11 +495,6 @@ cbuffer Settings : register(b0) {
 #endif
 // ST 2094 (HDR10+ / HDR Vivid) dynamic tone mapping, bound at register(b2).
 //
-// Slot choice matters: register(b1) is already claimed by extensionConstants_
-// (the Dolby Vision color-extension path binds it on every draw), so the
-// dynamic curve state must not live there or the two would overwrite each
-// other whenever a color extension is installed.
-//
 // This is a separate buffer on purpose: when a stream carries no dynamic
 // metadata, DynamicEnabled stays 0 and every branch below falls through to the
 // original BT.2390 path byte for byte. Keeping the new state out of the b0
@@ -477,6 +508,11 @@ cbuffer Settings : register(b0) {
 // allow two scalars to share a 16-byte register row: writing
 // `float2 WindowMin2; float2 WindowMax2; float WindowBlend;` silently widens the
 // buffer and shifts every field after it.
+//
+// Rows 5..8 carry the caller-supplied colour transform (kind 3) and are appended
+// for the same reason the ST 2094 block is a separate buffer at all: with
+// TransformEnabled == 0 every branch that consults them is byte-for-byte the
+// original path.
 cbuffer DynamicSettings : register(b2) {
     uint DynamicEnabled;      // 0 = use the original mapping only
     uint DynamicWindowCount;  // 1 or 3
@@ -488,8 +524,21 @@ cbuffer DynamicSettings : register(b2) {
     float2 WindowMin0; float2 WindowMax0;
     float2 WindowMin1; float2 WindowMax1;
     float2 WindowMin2; float2 WindowMax2;
+    uint TransformEnabled;    // 0 = no colour transform this frame
+    uint TransformDomain;     // 0 = table replaces component->RGB, 1 = table runs on coded RGB
+    uint TransformLutBound;   // 1 = TransformLut (t4) holds the uploaded table
+    uint TransformPad0;
+    // Row-major output matrix (out = M * rgb), applied to the linear-light signal
+    // after transfer decoding, before gamut conversion. All zero = identity.
+    float4 TransformMatrix0;
+    float4 TransformMatrix1;
+    float4 TransformMatrix2;
 };
 Texture2D<float4> CurveLut : register(t3);
+// Kind-3 colour transform: 33^3 texels, each a float3, axes spanning the coded
+// [0,1] domain. Sampled through LinearSampler (clamped), so out-of-range coded
+// values clamp at the table edges instead of wrapping around.
+Texture3D<float3> TransformLut : register(t4);
 Texture2D<float4> Source : register(t0);
 Texture2D<float4> ChromaU : register(t1);
 Texture2D<float4> ChromaV : register(t2);
@@ -718,35 +767,50 @@ float4 SampleVideo(Texture2D<float4> sourceTexture,float2 uv) {
     return SampleLanczos3(sourceTexture,uv,dimensions);
 }
 float3 ReadSource(float2 uv) {
-    if(InputLayout==0||InputLayout==3)return SampleVideo(Source,uv).rgb;
+    if(InputLayout==0||InputLayout==3){
+        // Kind-3 domain 0: the table replaces the component->RGB conversion, so
+        // for RGB sources its input axes are the coded R/G/B themselves.
+        float3 rgb=SampleVideo(Source,uv).rgb;
+        if(TransformEnabled!=0&&TransformDomain==0)
+            return TransformLut.SampleLevel(LinearSampler,rgb,0);
+        return rgb;
+    }
     float2 chromaUv=uv+ChromaOffset;
     float y=SampleVideo(Source,uv).r*SampleScale;
     float2 chroma=InputLayout==1
         ?float2(SampleVideo(ChromaU,chromaUv).r,SampleVideo(ChromaV,chromaUv).r)*SampleScale
         :SampleVideo(ChromaU,chromaUv).rg*SampleScale;
-#ifdef FFF_COLOR_EXTENSION
-    if(ExtensionEnabled!=0&&ColorMode!=1)return ExtensionDecode(float3(y,chroma));
-#endif
     y=(y-YOffset)*YScale;
     chroma=(chroma-COffset)*CScale;
+    // Kind-3 domain 0: the table replaces the YUV->RGB matrix below. Its input
+    // axes are the three coded components (Y, Cb, Cr) in [0,1] -- exactly the
+    // range-expanded values the matrix would have consumed -- and its output is
+    // coded RGB. The sampler is clamped, so out-of-range coded values clamp at
+    // the table edges.
+    if(TransformEnabled!=0&&TransformDomain==0)
+        return TransformLut.SampleLevel(LinearSampler,float3(y,chroma),0);
     float kg=1.0-Kr-Kb;
     return float3(y+(2.0-2.0*Kr)*chroma.y,
         y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
         y+(2.0-2.0*Kb)*chroma.x);
 }
 float3 ReadSourceLinear(float2 uv) {
-    if(InputLayout==0||InputLayout==3)return Source.Sample(LinearSampler,uv).rgb;
+    if(InputLayout==0||InputLayout==3){
+        float3 rgb=Source.Sample(LinearSampler,uv).rgb;
+        if(TransformEnabled!=0&&TransformDomain==0)
+            return TransformLut.SampleLevel(LinearSampler,rgb,0);
+        return rgb;
+    }
     float2 chromaUv=uv+ChromaOffset;
     float y=Source.Sample(LinearSampler,uv).r*SampleScale;
     float2 chroma=InputLayout==1
         ?float2(ChromaU.Sample(LinearSampler,chromaUv).r,
                 ChromaV.Sample(LinearSampler,chromaUv).r)*SampleScale
         :ChromaU.Sample(LinearSampler,chromaUv).rg*SampleScale;
-#ifdef FFF_COLOR_EXTENSION
-    if(ExtensionEnabled!=0&&ColorMode!=1)return ExtensionDecode(float3(y,chroma));
-#endif
     y=(y-YOffset)*YScale;
     chroma=(chroma-COffset)*CScale;
+    if(TransformEnabled!=0&&TransformDomain==0)
+        return TransformLut.SampleLevel(LinearSampler,float3(y,chroma),0);
     float kg=1.0-Kr-Kb;
     return float3(y+(2.0-2.0*Kr)*chroma.y,
         y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
@@ -765,18 +829,22 @@ float3 ReadCoverBackdrop(float2 uv) {
     return ReadSourceLinear(CoverFillUv(uv));
 }
 float3 ReadSourcePanorama(float2 uv) {
-    if(InputLayout==0||InputLayout==3)return SamplePanorama(Source,uv).rgb;
+    if(InputLayout==0||InputLayout==3){
+        float3 rgb=SamplePanorama(Source,uv).rgb;
+        if(TransformEnabled!=0&&TransformDomain==0)
+            return TransformLut.SampleLevel(LinearSampler,rgb,0);
+        return rgb;
+    }
     float2 chromaUv=uv+ChromaOffset;
     float y=SamplePanorama(Source,uv).r*SampleScale;
     float2 chroma=InputLayout==1
         ?float2(SamplePanorama(ChromaU,chromaUv).r,
                 SamplePanorama(ChromaV,chromaUv).r)*SampleScale
         :SamplePanorama(ChromaU,chromaUv).rg*SampleScale;
-#ifdef FFF_COLOR_EXTENSION
-    if(ExtensionEnabled!=0&&ColorMode!=1)return ExtensionDecode(float3(y,chroma));
-#endif
     y=(y-YOffset)*YScale;
     chroma=(chroma-COffset)*CScale;
+    if(TransformEnabled!=0&&TransformDomain==0)
+        return TransformLut.SampleLevel(LinearSampler,float3(y,chroma),0);
     float kg=1.0-Kr-Kb;
     return float3(y+(2.0-2.0*Kr)*chroma.y,
         y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
@@ -817,9 +885,14 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
         else                      sampleUv=float2(uv.y,1.0-uv.x);      // 270 cw
     }
     float3 rgb=Reserved==1?ReadCoverBackdrop(sampleUv):
-        (Projection360!=0?ReadSourcePanorama(EquirectangularUv(sampleUv)):ReadSource(sampleUv));    if(ColorMode==1)return float4(rgb,1);
+        (Projection360!=0?ReadSourcePanorama(EquirectangularUv(sampleUv)):ReadSource(sampleUv));
+    // Kind-3 domain 1: the table runs on the coded RGB the kernel's own
+    // conversion just produced -- input and output both coded RGB.
+    if(TransformEnabled!=0&&TransformDomain==1)
+        rgb=TransformLut.SampleLevel(LinearSampler,rgb,0);
+    if(ColorMode==1)return float4(rgb,1);
     // Transfer==3: the source is already linear light (JPEG XR decodes to scRGB, whose
-    // gamma is 1.0 -- see jxrlib JXRGlue.h, "scRGB formats. Gamma is 1.0").
+    // gamma is 1.0 -- see jxrlib JXRGlue.h "scRGB formats. Gamma is 1.0", docs/70).
     // Running the sRGB decode below would both apply the wrong curve and re-clamp the
     // negatives/super-whites through saturate(), so pass the value through untouched.
     // The SDR chain below still folds Rec.2020 and scales by PaperWhite, which is the
@@ -827,22 +900,43 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     if(Transfer==3){
         float3 alreadyLinear=rgb;
         if(ColorMode==0){
+            // Kind-3 output matrix: this path already holds linear light, so the
+            // matrix applies directly, before the gamut conversion.
+            if(TransformEnabled!=0)
+                alreadyLinear=mul(float3x3(
+                    TransformMatrix0.x,TransformMatrix0.y,TransformMatrix0.z,
+                    TransformMatrix1.x,TransformMatrix1.y,TransformMatrix1.z,
+                    TransformMatrix2.x,TransformMatrix2.y,TransformMatrix2.z),alreadyLinear);
             if(Gamut==1)alreadyLinear=ToBt709(To709(alreadyLinear));
             // No saturate() here on purpose: this is the SDR chain, and its surface is
             // UNORM -- R10G10B10A2 for sources deeper than 8-bit, B8G8R8A8 for 8-bit
             // ones (OutputBitDepthForSource never hands SDR a float surface). Neither
             // can hold >1.0 or <0.0, so let that conversion clamp: the limit stays a
-            // visible property of the surface, not a hidden edit to the source.
+            // visible property of the surface, not a hidden edit to the source (docs/65).
             return float4(alreadyLinear,1);
         }
     }
     if(ColorMode==0&&Transfer==0){
         // Rec.2020 is folded into Rec.709 here because the SDR chain cannot hold
         // it. P3 keeps its historical Rec.709 passthrough on this path.
+        //
+        // The kind-3 output matrix deliberately does not run here: with Gamut == 0
+        // this path returns the *coded* signal untouched (the surface is sRGB-encoded),
+        // and the matrix is defined on linear light. The kind-3 table itself still
+        // runs -- it lives in the coded domain, upstream of this point.
         if(Gamut==1)rgb=ToBt709(To709(ToLinear709(rgb)));
         return float4(rgb,1);
     }
     float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):(Transfer==3?rgb:ToLinear709(rgb)*PaperWhite));
+    // Kind-3 output matrix: applied to the linear-light signal after transfer
+    // decoding and before any gamut conversion, on both the scRGB and the
+    // tone-mapped SDR paths below.
+    if(TransformEnabled!=0) {
+        nits=mul(float3x3(
+            TransformMatrix0.x,TransformMatrix0.y,TransformMatrix0.z,
+            TransformMatrix1.x,TransformMatrix1.y,TransformMatrix1.z,
+            TransformMatrix2.x,TransformMatrix2.y,TransformMatrix2.z),nits);
+    }
     if(ColorMode==2){
         // scRGB swap-chain contract: linear Rec.709 primaries, 1.0 = 80 nits.
         // Tone mapping is delegated to the display via the HDR metadata.
@@ -1089,9 +1183,6 @@ struct ScaleShaderSettings {
 };
 static_assert(sizeof(ScaleShaderSettings) == 32);
 
-// Curve table width and the b2 cbuffer mirror now live in VideoRenderer.h so
-// the class method signature can name the settings type.
-
 // True when any HDR10 metadata field moved enough to be worth re-submitting.
 //
 // The luminance fields are the ones ST 2094 varies per scene. A threshold of
@@ -1317,7 +1408,7 @@ constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
     // rather than only a bitDepth, because downstream picks the shader-visible
     // texture format from `layout`: layout 0 would give R16G16B16A16_UNORM, which
     // cannot represent the >1.0 and <0.0 components that float RGB legitimately
-    // carries (measured saturation 2.79%-10.73% across the sample set).
+    // carries. See docs/65 (measured saturation 2.79%-10.73%) and docs/68.
     case AV_PIX_FMT_RGBAF16LE:
         return {3, 16, 1.0f, 0, 0};
     default:
@@ -2334,9 +2425,9 @@ FFFResult PlayerVideoRenderer::ZoomViewAt(const float factor,
     const auto previousZoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_relaxed));
     const auto previousPanX = std::bit_cast<float>(viewPanXBits_.load(std::memory_order_relaxed));
     const auto previousPanY = std::bit_cast<float>(viewPanYBits_.load(std::memory_order_relaxed));
-    const auto nextZoom = std::clamp(previousZoom * factor, sourceImageMode_ ? 1.0f : 0.05f,
-        sourceImageMode_ ? 32.0f : 64.0f);
+    const auto nextZoom = std::clamp(previousZoom * factor, 0.05f, 64.0f);
     if (resultingZoom != nullptr) *resultingZoom = previousZoom;
+    if (nextZoom == previousZoom) return FFFResult::Success;
 
     // The anchor is expressed in viewport space; convert it to a point in the source
     // picture using the geometry the last frame was drawn with.
@@ -2346,23 +2437,26 @@ FFFResult PlayerVideoRenderer::ZoomViewAt(const float factor,
         ? sourceHeight_ : sourceWidth_;
     const auto layoutHeight = (viewRotation_.load(std::memory_order_acquire) & 1u) != 0
         ? sourceWidth_ : sourceHeight_;
-    if (layoutWidth == 0 || layoutHeight == 0) return FFFResult::InvalidState;
+    if (resultingZoom != nullptr) *resultingZoom = nextZoom;
+    if (layoutWidth == 0 || layoutHeight == 0) return FFFResult::Success;
     const auto fitted = CalculateVideoDestination(
         layoutWidth, layoutHeight, swapWidth, swapHeight,
         sourceLimitedToNativeSize_ || fitLimitToNative_.load(std::memory_order_acquire));
     const auto fittedWidth = static_cast<float>(fitted.width);
     const auto fittedHeight = static_cast<float>(fitted.height);
-    if (fittedWidth <= 0.0f || fittedHeight <= 0.0f) return FFFResult::InvalidState;
-    // 图片倍率以源像素为基准；内部仍以拟合区域为基准计算锚定和平移。
-    const auto pixelScale = sourceImageMode_
-        ? fittedWidth / static_cast<float>(layoutWidth) : 1.0f;
-    if (resultingZoom != nullptr) *resultingZoom = previousZoom * pixelScale;
-    if (nextZoom == previousZoom) return FFFResult::Success;
+    if (resultingZoom != nullptr) *resultingZoom = nextZoom;
+    if (fittedWidth <= 0.0f || fittedHeight <= 0.0f) return FFFResult::Success;
 
     const auto zoomedWidth = std::max(1.0f, fittedWidth * previousZoom);
     const auto zoomedHeight = std::max(1.0f, fittedHeight * previousZoom);
     const auto travelX = std::abs(zoomedWidth - fittedWidth);
     const auto travelY = std::abs(zoomedHeight - fittedHeight);
+    if (travelX < 0.5f && travelY < 0.5f) {
+        // Nothing to anchor against: the box does not move at this size.
+        viewZoomBits_.store(std::bit_cast<float>(nextZoom), std::memory_order_relaxed);
+        if (resultingZoom != nullptr) *resultingZoom = nextZoom;
+        return FFFResult::Success;
+    }
 
     // Where the anchor sits relative to the box centre *as currently drawn*. The box is
     // not at its fitted centre once pan is applied, so measuring from the fitted centre
@@ -2377,7 +2471,9 @@ FFFResult PlayerVideoRenderer::ZoomViewAt(const float factor,
     const auto cursorFromDrawnCentreX = anchorPixelsX - (boxCentreX + currentOffsetX);
     const auto cursorFromDrawnCentreY = anchorPixelsY - (boxCentreY + currentOffsetY);
 
-    // 缩放后中心向光标的反方向补偿，保持光标下的同一内容点不动。
+    // In the drawn box's own coordinates that same point is cursorFromDrawnCentre
+    // regardless of scale, so after scaling the box by nextZoom / previousZoom the
+    // required new pan follows directly.
     const auto scaleRatio = nextZoom / previousZoom;
     const auto nextZoomedWidth = std::max(1.0f, fittedWidth * nextZoom);
     const auto nextZoomedHeight = std::max(1.0f, fittedHeight * nextZoom);
@@ -2397,7 +2493,7 @@ FFFResult PlayerVideoRenderer::ZoomViewAt(const float factor,
     viewZoomBits_.store(std::bit_cast<float>(nextZoom), std::memory_order_relaxed);
     viewPanXBits_.store(std::bit_cast<float>(nextPanX), std::memory_order_relaxed);
     viewPanYBits_.store(std::bit_cast<float>(nextPanY), std::memory_order_relaxed);
-    if (resultingZoom != nullptr) *resultingZoom = nextZoom * pixelScale;
+    if (resultingZoom != nullptr) *resultingZoom = nextZoom;
     return FFFResult::Success;
 }
 
@@ -2524,14 +2620,6 @@ void PlayerVideoRenderer::ConfigureHdrStream(const AVCodecParameters* parameters
         primaries == AVCOL_PRI_SMPTE431 || primaries == AVCOL_PRI_SMPTE432,
         std::memory_order_release);
     hdrProcessor_.ConfigureStream(parameters);
-    hdrProcessor_.SetExtensionAvailability(IsColorExtensionAuthorized());
-    // These two flags are read under deviceMutex_ in EnsurePipeline; clear them
-    // under the same lock or a concurrent pipeline build can re-enter the
-    // extension-shader creation block and overwrite (leak) the live shader.
-    { std::lock_guard deviceLock(deviceMutex_);
-        extensionAttempted_ = false;
-        extensionEligible_ = false;
-    }
 }
 
 FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
@@ -2912,7 +3000,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     // two permits one frame rendering while another waits on Present, which is the
     // overlap this path wants, and it stays strictly below the 3-deep buffer count
     // so the queue cannot outrun the chain. Measured via the queue-depth effect on
-    // dropped frames.
+    // dropped frames; see docs/45.
     ComPtr<IDXGIDevice1> latencyDevice;
     if (SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&latencyDevice))))
         latencyDevice->SetMaximumFrameLatency(2);
@@ -2920,6 +3008,11 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         std::lock_guard lock(timedTextMutex_);
         presentationFrameRate_ = DetectDisplayRefreshRate(window_);
     }
+    // A new chain restarts the frame-statistics sequence, so the grid must be re-derived
+    // from scratch. Requested here and cleared on the presenter thread: the grid state is
+    // presenter-thread-only, and the presenter is not inside presentMutex_ while it waits
+    // for a slot, so a reconfiguration can land between the deadline and the flip.
+    gridResetRequested_.store(true, std::memory_order_release);
     return FFFResult::Success;
 }
 
@@ -3233,24 +3326,33 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
                 dynamicCurveBuilt_ = true;
             }
         }
-    }
-    // Do not make ordinary SDR playback pay for private test shader setup.
-    // Stream classification is already updated by ProcessFrame before the
-    // pipeline is requested, and late RPU side data will retry on that frame.
-    if (!extensionAttempted_ && extensionEligible_) {
-        extensionAttempted_ = true;
-        if (const auto* api = GetColorExtension()) {
-            D3D11_BUFFER_DESC desc{};
-            desc.ByteWidth = api->constantsSize;
-            desc.Usage = D3D11_USAGE_DEFAULT;
-            desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-            const unsigned char zero[FFFColorExtensionCapacity]{};
-            D3D11_SUBRESOURCE_DATA initial{};
-            initial.pSysMem = zero;
-            if (FAILED(device_->CreatePixelShader(api->shaderBytecode,
-                    api->shaderBytecodeSize, nullptr, &extensionShader_)) ||
-                FAILED(device_->CreateBuffer(&desc, &initial, &extensionConstants_))) {
-                    ReleaseCom(extensionShader_);
+        // Kind-3 colour transform: one 33^3 R32G32B32_FLOAT table, uploaded per
+        // installed table and sampled trilinearly. Optional for the same reason
+        // as the ST 2094 resources -- without it transformLutBuilt_ stays false
+        // and the kind-3 rows of b2 stay zero, i.e. the original path.
+        {
+            D3D11_TEXTURE3D_DESC lut{};
+            lut.Width = lut.Height = lut.Depth = kColorTransformLutResolution;
+            lut.MipLevels = 1;
+            lut.Format = DXGI_FORMAT_R32G32B32_FLOAT;
+            // D3D11_TEXTURE3D_DESC has no SampleDesc member: a 3-D texture
+            // cannot be multisampled, so there is nothing to declare here.
+            lut.Usage = D3D11_USAGE_DEFAULT;
+            lut.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            if (SUCCEEDED(device_->CreateTexture3D(&lut, nullptr, &transformLutTexture_))) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+                view.Format = lut.Format;
+                view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
+                view.Texture3D.MipLevels = 1;
+                if (SUCCEEDED(device_->CreateShaderResourceView(
+                        transformLutTexture_, &view, &transformLutView_)))
+                    transformLutBuilt_ = true;
+            }
+            if (!transformLutBuilt_) {
+                // Half-created state would leave the kind-3 rows claimable while
+                // the shader sampled a released (or absent) texture.
+                ReleaseCom(transformLutView_);
+                ReleaseCom(transformLutTexture_);
             }
         }
     }
@@ -3443,8 +3545,8 @@ void PlayerVideoRenderer::ReleaseSuperResolutionResources() noexcept {
 }
 
 // A video processor always consumes the decoded planes in their native
-// (unrotated) axes, but the destination rect handed to ApplySuperResolution is
-// expressed in viewport axes, which a quarter-turn rotation has already swapped
+// (unrotated) axes, but the destination box handed to ApplySuperResolution is
+// expressed in view axes, whose axes a quarter-turn rotation has already swapped
 // (DrawCachedVideo computes the fit box from the swapped layout). This converts
 // such a view box back to the picture's axes so it can be compared with, and
 // used to size a surface from, the decoded source dimensions.
@@ -3482,11 +3584,11 @@ static_assert(ToSourceAxisTarget(1080, 1920, 3).width == 1920 &&
 
 FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWidth,
     const std::uint32_t targetHeight) noexcept {
-    // Latch the feature off on any driver-side failure: the extension exposes no
-    // capability query, so a failed attempt is the only evidence available.
-    // The latch is kept
+    // Latch the feature off on any driver-side failure: the extension has no
+    // capability query, so a failed attempt is the only evidence available
+    // (Chromium does the same, and mpv/VLC behave likewise). The latch is kept
     // until the host issues a fresh Auto request in SetVideoSuperResolution,
-    // which re-probes in case VSR was just enabled in the NVIDIA control panel.
+    // which re-probes in case VSR was just enabled in the NVIDIA panel.
     const auto reject = [this](const FFF3FPVideoSuperResolutionReason reason) noexcept {
         videoSuperResolutionRejected_.store(true, std::memory_order_release);
         videoSuperResolutionActive_.store(false, std::memory_order_release);
@@ -3544,11 +3646,10 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
     if (!CanUseVideoProcessorForUpscale())
         return skip(FFF3FPVideoSuperResolutionReason::UnsupportedSourceFormat);
 
-    // Convert the view destination rect back to the picture's axes before
-    // deciding whether to upscale or sizing the output surface. Otherwise a rotated
-    // view compares a portrait rect against a landscape source, engages VSR on a
-    // frame that is really a downscale, and lets the video processor stretch the
-    // picture by about (h/w)^2.
+    // Convert the view target box back to the picture's axes before judging
+    // upscaling or sizing the output surface. Otherwise a rotated view compares
+    // a portrait box against a landscape source, wrongly engages VSR on a
+    // downscaled frame, and lets the VP stretch the picture by roughly (h/w)^2.
     // The HLSL rotates only the sampling coordinate, so a surface laid out in
     // picture axes is correct once sampled (see ViewRotation in the pixel
     // shader); see ToSourceAxisTarget for the static_assert-backed reasoning.
@@ -3562,8 +3663,8 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
         return skip(FFF3FPVideoSuperResolutionReason::DriverRejected);
 
     // NV12/P010 are 4:2:0 formats: a video processor cannot write an odd-sized
-    // surface. The destination rect can be odd (it is a fit-to-window box), so
-    // round the intermediate surface up to an even size and leave the rect alone.
+    // surface. The target box can be odd (it is a fit-to-window box), so round
+    // the intermediate surface up to even and keep the box separate.
     const auto surfaceWidth = (targetSource.width + 1u) & ~1u;
     const auto surfaceHeight = (targetSource.height + 1u) & ~1u;
 
@@ -3838,9 +3939,8 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     // races the presentation pump against the same immediate context.
     if (hdrInputsDirty_.exchange(false)) RefreshHdrShaderInputs();
     cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
-    const bool reconstructed = extensionReconstructed_ && actualMode_ != FFF3FPColorMode::RawHdrAsSdr;
-    cachedVideoSettings_.inputLayout = reconstructed ? 1u : cachedOriginalInputLayout_;
-    cachedVideoSettings_.sampleScale = reconstructed ? 65535.0f / 1023.0f : cachedOriginalSampleScale_;
+    cachedVideoSettings_.inputLayout = cachedOriginalInputLayout_;
+    cachedVideoSettings_.sampleScale = cachedOriginalSampleScale_;
     cachedVideoSettings_.reserved = effect;
     cachedVideoSettings_.outputWidth = width;
     cachedVideoSettings_.outputHeight = height;
@@ -3869,7 +3969,7 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     context_->IASetInputLayout(nullptr);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(vertexShader_, nullptr, 0);
-    auto* shader = extensionShader_ ? extensionShader_ : pixelShader_;
+    auto* shader = pixelShader_;
     // SDR layout specialization: the bytecode has InputLayout fixed at compile time
     // and the colour/projection constants forced to zero, so it is only valid when
     // the frame really is plain SDR. `effect` must stay excluded -- effect 1 is the
@@ -3880,7 +3980,10 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     // uniform, which modern GPUs effectively execute for free, and every available
     // source is decode- or refresh-bound anyway. Kept because it is already written
     // and passes pixel-equivalence, but it is not an optimization to rely on.
-    if (!extensionShader_ && effect == 0 && projection360 == 0 &&
+    // A kind-3 colour transform disables the specialisation outright: those
+    // variants fix InputLayout/ColorMode/Transfer/Gamut at compile time and would
+    // drop the transform's compile-time-unknown branches from the picture.
+    if (effect == 0 && projection360 == 0 && !cachedTransformEnabled_ &&
         cachedVideoSettings_.colorMode == 0 && cachedVideoSettings_.transfer == 0 &&
         cachedVideoSettings_.gamut == 0 && cachedVideoSettings_.inputLayout < 3) {
         auto*& specialized = sdrPixelShaders_[cachedVideoSettings_.inputLayout];
@@ -3895,7 +3998,6 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
         if (specialized != nullptr) shader = specialized;
     }
     context_->PSSetShader(shader, nullptr, 0);
-    context_->PSSetConstantBuffers(1, 1, &extensionConstants_);
     context_->PSSetConstantBuffers(0, 1, &constants_);
     // ST 2094 curve state at b2 / t3. Both are always bound so the shader's
     // declared registers are never left holding a released object; with
@@ -3904,164 +4006,24 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
         context_->PSSetConstantBuffers(2, 1, &dynamicConstants_);
     ID3D11SamplerState* samplers[] = {sampler_, pointSampler_, panoramaSampler_};
     context_->PSSetSamplers(0, ARRAYSIZE(samplers), samplers);
-    auto* views = sourceViews != nullptr ? sourceViews :
-        (reconstructed ? extensionReconstructedViews_ : sourceViews_);
+    auto* views = sourceViews != nullptr ? sourceViews : sourceViews_;
     context_->PSSetShaderResources(0, ARRAYSIZE(sourceViews_), views);
     if (dynamicCurveView_ != nullptr)
         context_->PSSetShaderResources(3, 1, &dynamicCurveView_);
+    // Kind-3 colour transform at t4, same always-bound contract as the curve LUT:
+    // the shader declares the register, so it must never hold a released object.
+    // With TransformEnabled == 0 the table is inert.
+    if (transformLutView_ != nullptr)
+        context_->PSSetShaderResources(4, 1, &transformLutView_);
     context_->Draw(3, 0);
     ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
     context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
     ID3D11ShaderResourceView* nullCurve = nullptr;
     context_->PSSetShaderResources(3, 1, &nullCurve);
+    ID3D11ShaderResourceView* nullTransformLut = nullptr;
+    context_->PSSetShaderResources(4, 1, &nullTransformLut);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     return FFFResult::Success;
-}
-
-void PlayerVideoRenderer::ReleaseExtensionEnhancement() noexcept {
-    for (std::size_t plane = 0; plane < 3; ++plane) {
-        ReleaseCom(extensionEnhancementViews_[plane]);
-        ReleaseCom(extensionEnhancementTextures_[plane]);
-    }
-    extensionEnhancementWidth_ = extensionEnhancementHeight_ = 0;
-    ReleaseExtensionReconstruction();
-}
-
-void PlayerVideoRenderer::ReleaseExtensionReconstruction() noexcept {
-    for (std::size_t plane = 0; plane < 3; ++plane) {
-        ReleaseCom(extensionReconstructedOutputs_[plane]);
-        ReleaseCom(extensionReconstructedViews_[plane]);
-        ReleaseCom(extensionReconstructedTextures_[plane]);
-    }
-    extensionReconstructedWidth_ = extensionReconstructedHeight_ = 0;
-    extensionReconstructed_ = false;
-}
-
-bool PlayerVideoRenderer::UploadExtensionEnhancement(const AVFrame* frame) noexcept {
-    const bool hardware = frame != nullptr && frame->format == AV_PIX_FMT_D3D11;
-    if (!frame || (!hardware && frame->format != AV_PIX_FMT_YUV420P10LE) || frame->width <= 0 || frame->height <= 0)
-        return false;
-    if (hardware) {
-        auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
-        if (!texture || !frame->hw_frames_ctx) return false;
-        ComPtr<ID3D11Device> decodeDevice;
-        texture->GetDevice(&decodeDevice);
-        if (decodeDevice.Get() != device_) return false;
-        const auto* frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
-        if (frames->sw_format != AV_PIX_FMT_P010LE) return false;
-    }
-    for (int plane = 0; !hardware && plane < 3; ++plane) {
-        const auto width = plane == 0 ? frame->width : (frame->width + 1) / 2;
-        if (!frame->data[plane] || frame->linesize[plane] < width * 2) return false;
-    }
-    if (extensionEnhancementWidth_ != frame->width || extensionEnhancementHeight_ != frame->height ||
-        extensionEnhancementSemiplanar_ != hardware) {
-        ReleaseExtensionEnhancement();
-        for (int plane = 0; plane < (hardware ? 1 : 3); ++plane) {
-            D3D11_TEXTURE2D_DESC desc{};
-            desc.Width = plane == 0 ? frame->width : (frame->width + 1) / 2;
-            desc.Height = plane == 0 ? frame->height : (frame->height + 1) / 2;
-            desc.MipLevels = desc.ArraySize = 1;
-            desc.Format = hardware ? DXGI_FORMAT_P010 : DXGI_FORMAT_R16_UNORM; desc.SampleDesc.Count = 1;
-            if (hardware) {
-                D3D11_TEXTURE2D_DESC decoded{};
-                reinterpret_cast<ID3D11Texture2D*>(frame->data[0])->GetDesc(&decoded);
-                desc.Width = decoded.Width; desc.Height = decoded.Height;
-            }
-            desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            D3D11_SHADER_RESOURCE_VIEW_DESC view{};
-            view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; view.Texture2D.MipLevels = 1;
-            view.Format = DXGI_FORMAT_R16_UNORM;
-            if (FAILED(device_->CreateTexture2D(&desc, nullptr, &extensionEnhancementTextures_[plane])) ||
-                FAILED(device_->CreateShaderResourceView(extensionEnhancementTextures_[plane], hardware ? &view : nullptr,
-                    &extensionEnhancementViews_[plane]))) {
-                ReleaseExtensionEnhancement();
-                return false;
-            }
-            if (hardware) {
-                view.Format = DXGI_FORMAT_R16G16_UNORM;
-                if (FAILED(device_->CreateShaderResourceView(extensionEnhancementTextures_[plane], &view,
-                    &extensionEnhancementViews_[1]))) {
-                    ReleaseExtensionEnhancement(); return false;
-                }
-            }
-        }
-        extensionEnhancementWidth_ = frame->width; extensionEnhancementHeight_ = frame->height;
-        extensionEnhancementSemiplanar_ = hardware;
-    }
-    if (hardware) {
-        const auto slice = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
-        context_->CopySubresourceRegion(extensionEnhancementTextures_[0], 0, 0, 0, 0,
-            reinterpret_cast<ID3D11Texture2D*>(frame->data[0]), slice, nullptr);
-    } else {
-        for (int plane = 0; plane < 3; ++plane)
-            context_->UpdateSubresource(extensionEnhancementTextures_[plane], 0, nullptr,
-                frame->data[plane], frame->linesize[plane], 0);
-    }
-    return true;
-}
-
-bool PlayerVideoRenderer::ReconstructExtensionEnhancement(const std::uint32_t width,
-    const std::uint32_t height, const std::uint32_t layout, const float sampleScale) noexcept {
-    const auto* api = GetColorExtension();
-    if (!api || !context_ || !extensionConstants_ || (layout != 1 && layout != 2)) return false;
-    if (!extensionEnhancementShader_ && FAILED(device_->CreateComputeShader(api->enhancementShaderBytecode,
-        api->enhancementShaderBytecodeSize, nullptr, &extensionEnhancementShader_))) return false;
-    struct Settings {
-        std::uint32_t width, height, plane, layout;
-        float codeScale, padding[3];
-        std::uint32_t elLayout; float elCodeScale;
-        std::uint32_t elWidth, elHeight;
-    };
-    if (!extensionEnhancementConstants_) {
-        D3D11_BUFFER_DESC desc{};
-        desc.ByteWidth = sizeof(Settings); desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        if (FAILED(device_->CreateBuffer(&desc, nullptr, &extensionEnhancementConstants_))) return false;
-    }
-    if (extensionReconstructedWidth_ != width || extensionReconstructedHeight_ != height) {
-        ReleaseExtensionReconstruction();
-        for (int plane = 0; plane < 3; ++plane) {
-            D3D11_TEXTURE2D_DESC desc{};
-            desc.Width = plane == 0 ? width : (width + 1) / 2;
-            desc.Height = plane == 0 ? height : (height + 1) / 2;
-            desc.MipLevels = desc.ArraySize = 1; desc.SampleDesc.Count = 1;
-            desc.Format = DXGI_FORMAT_R16_UNORM; desc.Usage = D3D11_USAGE_DEFAULT;
-            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-            if (FAILED(device_->CreateTexture2D(&desc, nullptr, &extensionReconstructedTextures_[plane])) ||
-                FAILED(device_->CreateShaderResourceView(extensionReconstructedTextures_[plane], nullptr,
-                    &extensionReconstructedViews_[plane])) ||
-                FAILED(device_->CreateUnorderedAccessView(extensionReconstructedTextures_[plane], nullptr,
-                    &extensionReconstructedOutputs_[plane]))) {
-                ReleaseExtensionReconstruction();
-                return false;
-            }
-        }
-        extensionReconstructedWidth_ = width; extensionReconstructedHeight_ = height;
-        ReleaseScaleResources();
-    }
-    ID3D11ShaderResourceView* inputs[]{sourceViews_[0], sourceViews_[1], sourceViews_[2],
-        extensionEnhancementViews_[0], extensionEnhancementViews_[1], extensionEnhancementViews_[2]};
-    context_->CSSetShader(extensionEnhancementShader_, nullptr, 0);
-    ID3D11Buffer* buffers[]{extensionEnhancementConstants_, extensionConstants_};
-    context_->CSSetConstantBuffers(0, ARRAYSIZE(buffers), buffers);
-    context_->CSSetShaderResources(0, ARRAYSIZE(inputs), inputs);
-    for (int plane = 0; plane < 3; ++plane) {
-        const Settings settings{plane == 0 ? width : (width + 1) / 2,
-            plane == 0 ? height : (height + 1) / 2, static_cast<std::uint32_t>(plane), layout,
-            sampleScale * 1023.0f, {}, extensionEnhancementSemiplanar_ ? 2u : 1u,
-            extensionEnhancementSemiplanar_ ? 65535.0f / 64.0f : 65535.0f,
-            extensionEnhancementWidth_, extensionEnhancementHeight_};
-        context_->UpdateSubresource(extensionEnhancementConstants_, 0, nullptr, &settings, 0, 0);
-        context_->CSSetUnorderedAccessViews(0, 1, &extensionReconstructedOutputs_[plane], nullptr);
-        context_->Dispatch((settings.width + 15) / 16, (settings.height + 15) / 16, 1);
-    }
-    ID3D11UnorderedAccessView* nullOutput = nullptr;
-    context_->CSSetUnorderedAccessViews(0, 1, &nullOutput, nullptr);
-    ID3D11ShaderResourceView* nullInputs[6]{};
-    context_->CSSetShaderResources(0, ARRAYSIZE(nullInputs), nullInputs);
-    context_->CSSetShader(nullptr, nullptr, 0);
-    return true;
 }
 
 void PlayerVideoRenderer::ReleaseScaleResources() noexcept {
@@ -4324,12 +4286,8 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
         return FFFResult::Success;
     }
 
-    // Upstream's reconstructed-extension path picks its own plane layout and
-    // source array; VSR only ever applies to the ordinary decoded planes, so the
-    // two are combined rather than one replacing the other.
-    const bool reconstructed = extensionReconstructed_ && actualMode_ != FFF3FPColorMode::RawHdrAsSdr;
-    const auto layout = reconstructed ? 1u : sourceInputLayout_;
-    auto* inputViews = reconstructed ? extensionReconstructedViews_ : effectiveSourceViews_;
+    const auto layout = sourceInputLayout_;
+    auto* inputViews = effectiveSourceViews_;
     const auto planeCount = layout == 1 ? 3u : (layout == 2 ? 2u : 1u);
     for (std::size_t plane = 0; plane < ARRAYSIZE(effectiveSourceViews_); ++plane) {
         if (plane >= planeCount || inputViews[plane] == nullptr) {
@@ -4339,7 +4297,7 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
         // With VSR active the effective source is already at the target size, so
         // these denominators describe the upscaled surface, not the decoded one.
         const auto superResolutionPlane =
-            !reconstructed && superResolutionActive && superResolutionViews_[plane] != nullptr;
+            superResolutionActive && superResolutionViews_[plane] != nullptr;
         const auto planeSourceWidth = superResolutionPlane ? outputWidth : sourceWidth_;
         const auto planeSourceHeight = superResolutionPlane ? outputHeight : sourceHeight_;
         const auto planeWidth = plane == 0 ? planeSourceWidth :
@@ -4544,6 +4502,9 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
 }
 
 void PlayerVideoRenderer::TimedTextThread() noexcept {
+    // Held for the whole thread: this is the thread that owns the presentation cadence, and
+    // its waits are what have to reach the refresh grid.
+    PresenterTimerResolution timerResolution;
     std::uint64_t observedPresentationGeneration = 0;
     std::uint64_t observedVideoGeneration = 0;
     auto nextPresentation = std::chrono::steady_clock::time_point::min();
@@ -4595,7 +4556,25 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
             RequestRecoveryIfDeviceLost();
             continue;
         }
+        // Cadence lock: hold the flip until the refresh slot it is aimed at, unless the
+        // pacing says this flip has no slot to wait for. Waiting here rather than inside
+        // PresentCurrentFrame keeps the deadline off presentMutex_, which is held across a
+        // blocking Present and must stay free for ResizeBuffers.
+        const auto deadlineQpc = AdvancePacingDeadline(QpcNowValue());
+        if (deadlineQpc != 0) {
+            const auto remainingQpc = deadlineQpc - QpcNowValue();
+            if (remainingQpc > 0) {
+                std::unique_lock waitLock(timedTextMutex_);
+                // Microseconds, not milliseconds: integer-millisecond rounding here would
+                // throw away a tenth of the panel period on every single flip.
+                timedTextCondition_.wait_for(waitLock,
+                    std::chrono::microseconds(remainingQpc * 1'000'000 / QpcTicks()),
+                    [this] { return timedTextThreadStop_; });
+                if (timedTextThreadStop_) return;
+            }
+        }
         const auto presentationStart = std::chrono::steady_clock::now();
+        lastSubmitQpc_ = QpcNowValue();
         const auto result = PresentTimedText();
         if (result != FFFResult::Success) {
             if (result == FFFResult::DeviceFailure && RequestRecoveryIfDeviceLost()) continue;
@@ -5414,6 +5393,49 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
     }
 }
 
+void PlayerVideoRenderer::InvalidateHdrMetadataCache() noexcept {
+    lastHdrMetadata_ = {};
+    hdrMetadataValid_ = false;
+}
+
+void PlayerVideoRenderer::SetHdrMetadata() noexcept {
+    if (swapChain_ == nullptr || !swapHdr_) return;
+    // An SDR source presented on the scRGB chain has no mastering display and no
+    // content light level. The fallback HDR10 block would still declare Rec.2020
+    // primaries and a 100-nit peak the source never claimed, which is exactly the
+    // kind of hint that makes a display tone map the picture. Declare "none" and
+    // let DWM apply its default mapping to the linear values we hand over.
+    if (hdrProcessor_.State().format == FFF3FPHdrFormat::Sdr) {
+        swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+        hdrMetaDataCalls_.fetch_add(1, std::memory_order_relaxed);
+        signaledMaxMastering_.store(0, std::memory_order_relaxed);
+        signaledMinMastering_.store(0, std::memory_order_relaxed);
+        signaledMaxCll_.store(0, std::memory_order_relaxed);
+        signaledMaxFall_.store(0, std::memory_order_relaxed);
+        lastHdrMetadata_ = {};
+        hdrMetadataValid_ = false;
+        return;
+    }
+    DXGI_HDR_METADATA_HDR10 metadata{};
+    hdrProcessor_.BuildDxgiHdr10Metadata(metadata);
+    // With ST 2094 metadata present these fields now change per scene, and DWM
+    // does not take kindly to a new block on every frame: pushing one per frame
+    // makes the display's tone mapping visibly hunt. Only submit when a field
+    // moved by more than a perceptual threshold.
+    if (hdrMetadataValid_ && !HdrMetadataChanged(lastHdrMetadata_, metadata)) {
+        hdrMetaDataSuppressed_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    lastHdrMetadata_ = metadata;
+    hdrMetadataValid_ = true;
+    swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(metadata), &metadata);
+    hdrMetaDataCalls_.fetch_add(1, std::memory_order_relaxed);
+    signaledMaxMastering_.store(metadata.MaxMasteringLuminance, std::memory_order_relaxed);
+    signaledMinMastering_.store(metadata.MinMasteringLuminance, std::memory_order_relaxed);
+    signaledMaxCll_.store(metadata.MaxContentLightLevel, std::memory_order_relaxed);
+    signaledMaxFall_.store(metadata.MaxFrameAverageLightLevel, std::memory_order_relaxed);
+}
+
 // Build the b2 constant buffer and the curve LUT for this frame.
 //
 // Returns false whenever the dynamic path must not be taken, which includes:
@@ -5487,6 +5509,56 @@ bool PlayerVideoRenderer::BuildDynamicToneSettings(const HdrDynamicMetadata& met
     return true;
 }
 
+// Kind-3 (caller-supplied colour transform) state for this frame. The payload is
+// fetched from the HDR processor, which owns the table; the renderer only
+// uploads it. Runs after BuildDynamicToneSettings so the ST 2094 rows of b2 are
+// already settled and the transform rows are additive.
+//
+// The 3-D LUT is uploaded only when the installed table changed: 421 KB per
+// frame is avoidable, and a static table -- the common case -- then costs one
+// upload per install instead of one per frame.
+bool PlayerVideoRenderer::BuildColorTransformSettings(const HdrFrameState& hdrState,
+    DynamicShaderSettings& settings) noexcept {
+    cachedTransformEnabled_ = false;
+    if (!hdrState.dynamic.externalTransform) return false;
+    std::shared_ptr<const FFF3FPColorTransformPayload> payload;
+    if (!hdrProcessor_.ActiveColorTransform(payload) || payload == nullptr) return false;
+    // The processor validated the shape when the table was installed; the extra
+    // checks here are the ones the GPU path depends on.
+    if (!transformLutBuilt_ || transformLutTexture_ == nullptr ||
+        transformLutView_ == nullptr ||
+        payload->lutResolution != kColorTransformLutResolution ||
+        payload->lutDomain > 1u)
+        return false;
+    if (uploadedTransform_ != payload) {
+        constexpr std::uint32_t texels = kColorTransformLutResolution;
+        constexpr std::uint32_t rowPitch = texels * 3 * static_cast<std::uint32_t>(sizeof(float));
+        constexpr std::uint32_t depthPitch = rowPitch * texels;
+        context_->UpdateSubresource(transformLutTexture_, 0, nullptr,
+            payload->curveLut, rowPitch, depthPitch);
+        uploadedTransform_ = payload;
+    }
+    settings.transformEnabled = 1;
+    settings.transformDomain = payload->lutDomain;
+    settings.transformLutBound = 1;
+    // All-zero matrix means identity (header contract). Normalised here so the
+    // shader can apply the matrix unconditionally.
+    bool any = false;
+    for (const float value : payload->outputMatrix) any = any || value != 0.0f;
+    if (any) {
+        for (std::uint32_t row = 0; row < 3; ++row)
+            for (std::uint32_t col = 0; col < 3; ++col)
+                settings.outputMatrixRows[row][col] =
+                    payload->outputMatrix[row * 3 + col];
+    } else {
+        settings.outputMatrixRows[0][0] = 1.0f;
+        settings.outputMatrixRows[1][1] = 1.0f;
+        settings.outputMatrixRows[2][2] = 1.0f;
+    }
+    cachedTransformEnabled_ = true;
+    return true;
+}
+
 FFFResult PlayerVideoRenderer::SetInjectedHdrMetadata(
     const FFF3FPHdrDynamicMetadataEntry* entries, const std::uint32_t count) noexcept {
     const auto result = hdrProcessor_.SetInjectedMetadata(entries, count);
@@ -5532,54 +5604,87 @@ std::uint32_t PlayerVideoRenderer::HdrMetadataSource() const noexcept {
         : static_cast<std::uint32_t>(FFF3FPHdrMetadataSource::Bitstream);
 }
 
-void PlayerVideoRenderer::InvalidateHdrMetadataCache() noexcept {
-    lastHdrMetadata_ = {};
-    hdrMetadataValid_ = false;
+FFF3FPHdrSignalDiagnostics PlayerVideoRenderer::HdrSignalDiagnostics() const noexcept {
+    FFF3FPHdrSignalDiagnostics out{};
+    out.size = sizeof(out);
+    out.version = 20;
+    out.dynamicCurveFramesApplied = dynamicCurveFramesApplied_.load(std::memory_order_relaxed);
+    out.dynamicCurveFramesRefused = dynamicCurveFramesRefused_.load(std::memory_order_relaxed);
+    out.setHdrMetaDataCalls = hdrMetaDataCalls_.load(std::memory_order_relaxed);
+    out.setHdrMetaDataSuppressed = hdrMetaDataSuppressed_.load(std::memory_order_relaxed);
+    out.lastSignaledMaxMasteringLuminance = signaledMaxMastering_.load(std::memory_order_relaxed);
+    out.lastSignaledMinMasteringLuminance = signaledMinMastering_.load(std::memory_order_relaxed);
+    out.lastSignaledMaxContentLightLevel = signaledMaxCll_.load(std::memory_order_relaxed);
+    out.lastSignaledMaxFrameAverageLightLevel = signaledMaxFall_.load(std::memory_order_relaxed);
+    out.swapChainHdrEnabled = swapHdr_ ? 1u : 0u;
+    out.reserved = 0;
+    return out;
 }
 
-void PlayerVideoRenderer::SetHdrMetadata() noexcept {
-    if (swapChain_ == nullptr || !swapHdr_) return;
-    // An SDR source presented on the scRGB chain has no mastering display and no
-    // content light level. The fallback HDR10 block would still declare Rec.2020
-    // primaries and a 100-nit peak the source never claimed, which is exactly the
-    // kind of hint that makes a display tone map the picture. Declare "none" and
-    // let DWM apply its default mapping to the linear values we hand over.
-    if (hdrProcessor_.State().format == FFF3FPHdrFormat::Sdr) {
-        swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-        hdrMetaDataCalls_.fetch_add(1, std::memory_order_relaxed);
-        signaledMaxMastering_.store(0, std::memory_order_relaxed);
-        signaledMinMastering_.store(0, std::memory_order_relaxed);
-        signaledMaxCll_.store(0, std::memory_order_relaxed);
-        signaledMaxFall_.store(0, std::memory_order_relaxed);
-        lastHdrMetadata_ = {};
-        hdrMetadataValid_ = false;
-        return;
+std::uint32_t PlayerVideoRenderer::ResolveDecodeTransfer(
+    const HdrFrameState& hdrState) const noexcept {
+    //   1) Otherwise follow the frame's own color_trc when it declares one.
+    //   2) Fall back to the format-based inference for frames that declare
+    //      nothing (previous behaviour).
+    if (hdrState.format != FFF3FPHdrFormat::Sdr && lastFrameDeclaresTrc_ &&
+        lastTransferFromFrame_ != 0u)
+        return lastTransferFromFrame_;
+    return hdrState.format == FFF3FPHdrFormat::Hlg ? 2u :
+        (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
+}
+
+void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
+    // Present-path only (called from DrawWithShader under the device/present locks):
+    // cachedVideoSettings_ and the constant buffers belong to that lock, not to the
+    // thread that received FFF3FP_SetHdrDynamicMetadata.
+    if (!hasCachedVideo_ || context_ == nullptr) return;
+    const auto hdrState = hdrProcessor_.State();
+    cachedVideoSettings_.transfer = ResolveDecodeTransfer(hdrState);
+    cachedVideoSettings_.hdrPeak = cachedVideoSettings_.transfer == 0 ?
+        100.0f : hdrState.sourcePeakNits;
+    sourcePeakNits_ = cachedVideoSettings_.hdrPeak;
+    cachedVideoSettings_.paperWhite = EffectivePaperWhiteNits();
+    cachedVideoSettings_.targetPeak = hdrState.targetPeakNits;
+    // Same gate as the per-frame path, so a refresh cannot enable a curve that the
+    // frame path would have refused.
+    DynamicShaderSettings dynamicSettings{};
+    std::array<float, kDynamicCurveLutWidth * kHdrMaxProcessingWindows> dynamicCurves{};
+    const bool useDynamicCurve = cachedVideoSettings_.transfer != 0 &&
+        actualMode_ != FFF3FPColorMode::MapToHdr &&
+        actualMode_ != FFF3FPColorMode::RawHdrAsSdr &&
+        BuildDynamicToneSettings(hdrState.dynamic, dynamicSettings, dynamicCurves);
+    if (!useDynamicCurve) {
+        // Guarded rather than left to short-circuit order: whatever the gate decides,
+        // the buffer that reaches the shader has to agree with it.
+        dynamicSettings = DynamicShaderSettings{};
+        dynamicCurves = {};
     }
-    DXGI_HDR_METADATA_HDR10 metadata{};
-    hdrProcessor_.BuildDxgiHdr10Metadata(metadata);
-    // With ST 2094 metadata present these fields now change per scene, and DWM
-    // does not take kindly to a new block on every frame: pushing one per frame
-    // makes the display's tone mapping visibly hunt. Only submit when a field
-    // moved by more than a perceptual threshold.
-    if (hdrMetadataValid_ && !HdrMetadataChanged(lastHdrMetadata_, metadata)) {
-        hdrMetaDataSuppressed_.fetch_add(1, std::memory_order_relaxed);
-        return;
+    // Kind-3 rows are additive to whatever the ST 2094 gate decided: a transform
+    // can drive the picture with or without a curve in force.
+    (void)BuildColorTransformSettings(hdrState, dynamicSettings);
+    // Uploaded unconditionally, exactly like the per-frame path: a stale table with
+    // enabled == 0 must never survive into the next draw.
+    if (dynamicConstants_ != nullptr) {
+        context_->UpdateSubresource(dynamicConstants_, 0, nullptr, &dynamicSettings, 0, 0);
+        if (dynamicCurveTexture_ != nullptr) {
+            context_->UpdateSubresource(dynamicCurveTexture_, 0, nullptr,
+                dynamicCurves.data(), kDynamicCurveLutWidth * sizeof(float), 0);
+        }
     }
-    lastHdrMetadata_ = metadata;
-    hdrMetadataValid_ = true;
-    swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(metadata), &metadata);
-    hdrMetaDataCalls_.fetch_add(1, std::memory_order_relaxed);
-    signaledMaxMastering_.store(metadata.MaxMasteringLuminance, std::memory_order_relaxed);
-    signaledMinMastering_.store(metadata.MinMasteringLuminance, std::memory_order_relaxed);
-    signaledMaxCll_.store(metadata.MaxContentLightLevel, std::memory_order_relaxed);
-    signaledMaxFall_.store(metadata.MaxFrameAverageLightLevel, std::memory_order_relaxed);
+    // Counted from the buffer the shader actually receives, not from the predicate:
+    // the cached-draw path has to move the same counters as the per-frame path.
+    if (hdrState.dynamicMetadata) {
+        const bool applied = dynamicSettings.enabled != 0 ||
+            dynamicSettings.transformEnabled != 0;
+        (applied ? dynamicCurveFramesApplied_
+            : dynamicCurveFramesRefused_).fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t frameIndex,
     const bool limitToNativeSize,
     const bool coverArt, const bool prepareOnly, const bool imageMode) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
-    const auto* extensionEnhancementFrame = EnhancementFrame(frame);
     const auto hdrState = hdrProcessor_.ProcessFrame(
         frame, hdrPeakNits_, paperWhiteNits_, frameIndex);
     struct PlaybackWorkGuard final {
@@ -5617,7 +5722,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // path. Unlike layout 0 it needs no CPU conversion at all -- the decoded buffer is
     // already half-float, which is bit-compatible with DXGI_FORMAT_R16G16B16A16_FLOAT,
     // so sws_scale would only re-quantise it into an integer range that cannot hold the
-    // negatives and super-whites float RGB legitimately carries.
+    // negatives and super-whites float RGB legitimately carries (see docs/65, docs/70).
     const auto floatRgb = input.layout == 3;
     const auto directYuv = input.layout != 0 && !floatRgb;
     // The size that gets uploaded has to be settled before the CPU conversion below,
@@ -5645,7 +5750,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         // a 4K rgb24 frame: 4.73 ms with BILINEAR against 4.76 ms with POINT, i.e.
         // identical -- the cost is memory bandwidth (~58 MB moved at ~12 GB/s), not
         // filtering. The flags are therefore not worth changing; a real win would need the
-        // conversion itself to move to the GPU.
+        // conversion itself to move to the GPU (see docs/45 section 6).
         // The fold: when the policy is engaged this pass resamples to the destination size
         // instead of the frame size, so the buffer, the texture EnsurePipeline creates and
         // the row pitch of the upload all describe the same picture. Converting at full
@@ -5701,9 +5806,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         coalescedVideoFrames_.fetch_add(1, std::memory_order_relaxed);
         return FFFResult::Success;
     }
-    // Publish extension eligibility under deviceMutex_ before EnsurePipeline.
-    extensionEligible_ = hdrState.format == FFF3FPHdrFormat::DolbyVision &&
-        av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA) != nullptr;
     // Keep the logical render counter useful for headless/clip-mode sessions;
     // swapChainPresents remains the separate counter for real DXGI presents.
     if (window_ == nullptr) {
@@ -5751,34 +5853,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     const auto pipelineResult = EnsurePipeline(uploadWidth, uploadHeight, input.layout, input.bitDepth,
         input.chromaWidthShift, input.chromaHeightShift, d3d11Frame);
     if (pipelineResult != FFFResult::Success) return pipelineResult;
-    extensionReconstructed_ = false;
-    bool reconstructEnhancement = false;
-    if (extensionShader_ && extensionConstants_) {
-        FFFColorExtensionOutput output{};
-        output.size = sizeof(output);
-        bool applied = false;
-        const auto* metadata = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
-        if (directYuv && metadata && actualMode_ != FFF3FPColorMode::RawHdrAsSdr) {
-            const FFFColorExtensionInput request{sizeof(FFFColorExtensionInput),
-                FFFColorExtensionVersion, avutil_version(), hdrState.dolbyVisionProfile,
-                metadata->data, metadata->size, extensionEnhancementFrame,
-                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->width),
-                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->height),
-                extensionEnhancementFrame == nullptr ? 0u : static_cast<std::uint32_t>(extensionEnhancementFrame->format)};
-            applied = GetColorExtension()->prepare(&request, &output) != 0;
-            if (applied && (output.flags & FFFColorExtensionGpuEnhancement) != 0)
-                applied = UploadExtensionEnhancement(extensionEnhancementFrame);
-            reconstructEnhancement = applied && (output.flags & FFFColorExtensionGpuEnhancement) != 0;
-        }
-        if (!applied) std::memset(output.constants, 0, sizeof(output.constants));
-        context_->UpdateSubresource(extensionConstants_, 0, nullptr, output.constants, 0, 0);
-        hdrProcessor_.SetExtensionProcessing(output.sourcePeakNits, applied);
-        if (applied) {
-            if (swapHdr_) SetHdrMetadata();
-        }
-    } else {
-        hdrProcessor_.SetExtensionProcessing(0.0f, false);
-    }
     if (d3d11Frame) {
         auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
         const auto slice = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
@@ -5824,8 +5898,18 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
                     const auto xShift = plane == 0 ? 0u : input.chromaWidthShift;
                     const auto yShift = plane == 0 ? 0u : input.chromaHeightShift;
                     const auto rows = (uploadHeight + (1u << yShift) - 1) >> yShift;
+                    // A row of the destination texture is (texels x samples-per-texel x
+                    // bytes-per-sample). Semi-planar chroma packs U and V into one R8G8 /
+                    // R16G16 texel, so it carries two samples per texel -- skipping that
+                    // factor copies half of every chroma row and leaves the rest at the
+                    // zeroed pages a freshly created texture starts with, which samples
+                    // as (U=0, V=0) and reads as a strong green cast. Planar formats
+                    // (and the luma plane) are one sample per texel, so they are
+                    // unaffected. The >= 4K arm above uses the real source stride via
+                    // UpdateSubresource and never had this problem.
+                    const auto samplesPerTexel = (input.layout == 2 && plane != 0) ? 2u : 1u;
                     const auto rowBytes = ((uploadWidth + (1u << xShift) - 1) >> xShift) *
-                        (input.bitDepth > 8 ? 2u : 1u);
+                        samplesPerTexel * (input.bitDepth > 8 ? 2u : 1u);
                     for (unsigned row = 0; row < rows; ++row)
                         std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
                             static_cast<std::size_t>(row) * mapped.RowPitch,
@@ -5858,14 +5942,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
             uploadWidth * bytesPerPixel, 0);
         upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
             std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rgbUploadStart).count() / 100));
-    }
-    if (reconstructEnhancement) {
-        extensionReconstructed_ = ReconstructExtensionEnhancement(width, height, input.layout, input.sampleScale);
-        if (!extensionReconstructed_) {
-            const unsigned char zero[FFFColorExtensionCapacity]{};
-            context_->UpdateSubresource(extensionConstants_, 0, nullptr, zero, 0, 0);
-            hdrProcessor_.SetExtensionProcessing(0, false);
-        }
     }
     ShaderSettings settings{};
     settings.colorMode = static_cast<std::uint32_t>(actualMode_);
@@ -5913,6 +5989,8 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // curve when this frame has none: the buffer and texture are bound on every
     // draw, and a stale table with enabled==0 would still be sampled if the
     // shader were ever changed to ignore the gate.
+    if (!prepareOnly)
+        (void)BuildColorTransformSettings(hdrState, dynamicSettings);
     if (dynamicConstants_ != nullptr) {
         context_->UpdateSubresource(dynamicConstants_, 0, nullptr, &dynamicSettings, 0, 0);
         if (dynamicCurveTexture_ != nullptr) {
@@ -5921,12 +5999,15 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         }
     }
     // Counted from the buffer the shader actually receives, not from the predicate: the
-    // gate and the hardware must not be able to disagree about what was reported.
+    // gate and the hardware must not be able to disagree about what was reported. A
+    // kind-3 frame counts as applied when its table reached the shader: it has no
+    // curve, so enabled alone would misreport every transform frame as refused.
     if (hdrState.dynamicMetadata) {
-        (dynamicSettings.enabled != 0 ? dynamicCurveFramesApplied_
+        const bool applied = dynamicSettings.enabled != 0 ||
+            dynamicSettings.transformEnabled != 0;
+        (applied ? dynamicCurveFramesApplied_
             : dynamicCurveFramesRefused_).fetch_add(1, std::memory_order_relaxed);
     }
-
     settings.paperWhite = EffectivePaperWhiteNits();
     settings.targetPeak = hdrState.targetPeakNits;
     // Report the size actually uploaded: when adaptive downscale engaged this is the
@@ -5935,8 +6016,8 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     settings.sourceWidth = static_cast<float>(uploadWidth);
     settings.sourceHeight = static_cast<float>(uploadHeight);
     settings.outputWidth = static_cast<float>(swapWidth_); settings.outputHeight = static_cast<float>(swapHeight_);
-    settings.inputLayout = extensionReconstructed_ ? 1u : input.layout;
-    settings.sampleScale = extensionReconstructed_ ? 65535.0f / 1023.0f : input.sampleScale;
+    settings.inputLayout = input.layout;
+    settings.sampleScale = input.sampleScale;
     cachedOriginalInputLayout_ = input.layout;
     cachedOriginalSampleScale_ = input.sampleScale;
     const auto maximum = static_cast<float>((1u << input.bitDepth) - 1u);
@@ -6011,66 +6092,6 @@ FFFResult PlayerVideoRenderer::Redraw() noexcept {
     }
     timedTextCondition_.notify_one();
     return FFFResult::Success;
-}
-
-std::uint32_t PlayerVideoRenderer::ResolveDecodeTransfer(
-    const HdrFrameState& hdrState) const noexcept {
-    //   1) Dolby Vision keeps its compatibility-layer decision: the RPU
-    //      remapping has its own semantics that a container trc cannot express.
-    //   2) Otherwise follow the frame's own color_trc when it declares one.
-    //   3) Fall back to the format-based inference for frames that declare
-    //      nothing (previous behaviour).
-    const auto hlgCompatibility = static_cast<std::uint32_t>(FFF3FPHdrCompatibility::Hlg);
-    if (hdrState.format == FFF3FPHdrFormat::DolbyVision)
-        return (hdrState.compatibility & hlgCompatibility) != 0 ? 2u : 1u;
-    if (hdrState.format != FFF3FPHdrFormat::Sdr && lastFrameDeclaresTrc_ &&
-        lastTransferFromFrame_ != 0u)
-        return lastTransferFromFrame_;
-    return hdrState.format == FFF3FPHdrFormat::Hlg ? 2u :
-        (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
-}
-
-void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
-    // Present-path only (called from DrawWithShader under the device/present locks):
-    // cachedVideoSettings_ and the constant buffers belong to that lock, not to the
-    // thread that received FFF3FP_SetHdrDynamicMetadata.
-    if (!hasCachedVideo_ || context_ == nullptr) return;
-    const auto hdrState = hdrProcessor_.State();
-    cachedVideoSettings_.transfer = ResolveDecodeTransfer(hdrState);
-    cachedVideoSettings_.hdrPeak = cachedVideoSettings_.transfer == 0 ?
-        100.0f : hdrState.sourcePeakNits;
-    sourcePeakNits_ = cachedVideoSettings_.hdrPeak;
-    cachedVideoSettings_.paperWhite = EffectivePaperWhiteNits();
-    cachedVideoSettings_.targetPeak = hdrState.targetPeakNits;
-    // Same gate as the per-frame path, so a refresh cannot enable a curve that the
-    // frame path would have refused.
-    DynamicShaderSettings dynamicSettings{};
-    std::array<float, kDynamicCurveLutWidth * kHdrMaxProcessingWindows> dynamicCurves{};
-    const bool useDynamicCurve = cachedVideoSettings_.transfer != 0 &&
-        actualMode_ != FFF3FPColorMode::MapToHdr &&
-        actualMode_ != FFF3FPColorMode::RawHdrAsSdr &&
-        BuildDynamicToneSettings(hdrState.dynamic, dynamicSettings, dynamicCurves);
-    if (!useDynamicCurve) {
-        // Guarded rather than left to short-circuit order: whatever the gate decides,
-        // the buffer that reaches the shader has to agree with it.
-        dynamicSettings = DynamicShaderSettings{};
-        dynamicCurves = {};
-    }
-    // Uploaded unconditionally, exactly like the per-frame path: a stale table with
-    // enabled == 0 must never survive into the next draw.
-    if (dynamicConstants_ != nullptr) {
-        context_->UpdateSubresource(dynamicConstants_, 0, nullptr, &dynamicSettings, 0, 0);
-        if (dynamicCurveTexture_ != nullptr) {
-            context_->UpdateSubresource(dynamicCurveTexture_, 0, nullptr,
-                dynamicCurves.data(), kDynamicCurveLutWidth * sizeof(float), 0);
-        }
-    }
-    // Counted from the buffer the shader actually receives, not from the predicate:
-    // the cached-draw path has to move the same counters as the per-frame path.
-    if (hdrState.dynamicMetadata) {
-        (dynamicSettings.enabled != 0 ? dynamicCurveFramesApplied_
-            : dynamicCurveFramesRefused_).fetch_add(1, std::memory_order_relaxed);
-    }
 }
 
 void PlayerVideoRenderer::ReleaseCoverBackdropResources() noexcept {
@@ -6364,6 +6385,276 @@ FFFResult PlayerVideoRenderer::SetPresentConfig(const bool enableTearing) noexce
     // Takes effect on the next Present.
     tearingRequested_.store(enableTearing, std::memory_order_release);
     return FFFResult::Success;
+}
+
+// ---- Presentation cadence lock (exported as FFF3FP_GetPresentPacingStatus) ----
+//
+// The bound is not configurable, so there is no setter to call: it is always
+//     bound = min(panel refresh rate, content frame rate)
+// and it only ever holds the presenter back, never speeds it up. Both halves are needed:
+//   * content < panel (60 fps on 144 Hz) -- the panel would accept 144 flips, and flipping
+//     more often than the source changes picture only re-scan-outs the same frame, so the
+//     content rate is the useful limit;
+//   * content > panel (240 fps on 144 Hz) -- the panel cannot show more than its own rate,
+//     so the panel is the limit and the surplus is dropped upstream by the session's
+//     existing lateness rule.
+// Expressed as a period this is simply "the longer of the two periods", which is what
+// AdvancePacingDeadline uses to size each flip.
+double PlayerVideoRenderer::DisplayCadenceHz() const noexcept {
+    const auto measured = measuredRefreshHz_.load(std::memory_order_acquire);
+    // presentationFrameRate_ is written under timedTextMutex_; reading it unlocked here is
+    // the same benign race the diagnostics already accept -- it changes on chain creation
+    // and on timed-text layer changes, never mid-flip, and a one-frame-stale rate would
+    // only shift the classification threshold, not the presentation.
+    return measured > 0.0 ? measured : static_cast<double>(presentationFrameRate_);
+}
+
+double PlayerVideoRenderer::FrameRateBoundHz() const noexcept {
+    const auto panelHz = DisplayCadenceHz();
+    const auto content100ns = contentPeriod100ns_.load(std::memory_order_acquire);
+    if (content100ns <= 0) return panelHz;   // rate unknown: only the panel bound applies
+    return std::min(panelHz, 10'000'000.0 / static_cast<double>(content100ns));
+}
+
+void PlayerVideoRenderer::SetContentFramePeriod100ns(const std::int64_t period100ns) noexcept {
+    contentPeriod100ns_.store(period100ns > 0 ? period100ns : 0, std::memory_order_release);
+}
+
+PlayerVideoRenderer::PresentPacingStatus PlayerVideoRenderer::QueryPresentPacing() const noexcept {
+    PresentPacingStatus status;
+    status.declaredRefreshHz = static_cast<float>(declaredRefreshHz_.load(std::memory_order_acquire));
+    status.measuredRefreshHz = static_cast<float>(measuredRefreshHz_.load(std::memory_order_acquire));
+    // Derived here rather than stored, so the reading can never disagree with the rule:
+    // a cached bound would be one more thing that can go stale between a media change and
+    // the next flip.
+    status.frameRateBoundHz = static_cast<float>(FrameRateBoundHz());
+    status.gridLocked = gridLocked_.load(std::memory_order_acquire);
+    status.pacingBypass = pacingBypass_.load(std::memory_order_acquire);
+    status.lastSlotError100ns = lastSlotError100ns_.load(std::memory_order_acquire);
+    status.holdSampled = holdSampled_.load(std::memory_order_acquire);
+    status.holdWithinRounding = holdWithinRounding_.load(std::memory_order_acquire);
+    status.holdWorstDeviationRefreshes = holdWorstDeviation_.load(std::memory_order_acquire);
+    return status;
+}
+
+std::int64_t PlayerVideoRenderer::AdvancePacingDeadline(const std::int64_t nowQpc) noexcept {
+    // Published here rather than at the detection sites: this is the only place the value
+    // is acted on, it runs on the presenter thread, and presentationFrameRate_ is written
+    // under timedTextMutex_, which must not be taken to answer a diagnostics query.
+    declaredRefreshHz_.store(static_cast<double>(presentationFrameRate_), std::memory_order_release);
+    const auto frequency = QpcTicks();
+    const auto content100ns = contentPeriod100ns_.load(std::memory_order_acquire);
+    if (gridResetRequested_.exchange(false, std::memory_order_acq_rel)) {
+        // Chain recreated (or first flip): nothing is calibrated until a fresh sample pair
+        // arrives, so fall back to the un-paced path for one flip rather than aiming at a
+        // slot derived from the previous chain's counts.
+        lastSyncRefresh_ = 0;
+        lastSyncQpc_ = 0;
+        gridPeriodQpc_ = 0.0;
+        gridOriginQpc_ = 0;
+        nextSlotRefresh_ = 0;
+        slotCarry_ = 0.0;
+        aimedRefresh_ = 0;
+        aimedSlotQpc_ = 0;
+        aimedSubmitQpc_ = 0;
+        lastLandedRefresh_ = 0;
+        aimedSlots_ = 0;
+        aimedSlotRatio_ = 0.0;
+        measuredRefreshHz_.store(0.0, std::memory_order_release);
+    }
+
+    // Three ways out, each publishing why, so "not locked" is diagnosable instead of a
+    // silent fall-back to the free-running behaviour this replaced.
+    if (tearingRequested_.load(std::memory_order_acquire)) {
+        // Variable refresh (G-SYNC / FreeSync) requested: the panel paces itself to each
+        // flip, so snapping submits to a fixed grid would only add queueing latency.
+        gridLocked_.store(0, std::memory_order_release);
+        pacingBypass_.store(1, std::memory_order_release);
+        return 0;
+    }
+    if (interactiveMove_.load(std::memory_order_acquire)) {
+        // The native window-move loop owns the cadence and presents with DO_NOT_WAIT to
+        // avoid starving audio; waiting for a slot here would put the UI thread behind.
+        gridLocked_.store(0, std::memory_order_release);
+        pacingBypass_.store(3, std::memory_order_release);
+        return 0;
+    }
+    if (gridPeriodQpc_ <= 0.0 || gridOriginQpc_ == 0) {
+        gridLocked_.store(0, std::memory_order_release);
+        pacingBypass_.store(2, std::memory_order_release);
+        return 0;
+    }
+
+    // The interval a flip may not occupy less of. The bound is the window's own frame-rate
+    // ceiling, min(panel rate, content rate), and its reciprocal is simply the *longer* of
+    // the two periods -- so this line is the whole rule, with nothing to configure:
+    //   60 fps content on 144 Hz  -> content period wins -> 60 flips/s, never 144;
+    //   240 fps content on 144 Hz -> panel period wins    -> 144 flips/s, surplus dropped
+    //                                upstream by the session's existing lateness rule;
+    //   content rate unknown      -> panel period only.
+    // It applies to overlay-only flips too: re-flipping the same picture to push a subtitle
+    // change is exactly the duplicate scan-out the bound exists to prevent, so at 24 fps
+    // content an overlay update can wait up to one source frame (~41 ms). That is the stated
+    // rule's consequence, not an exception to smooth over.
+    double flipPeriodQpc = gridPeriodQpc_;
+    if (content100ns > 0)
+        flipPeriodQpc = std::max(flipPeriodQpc,
+            content100ns * static_cast<double>(frequency) / 10'000'000.0);
+
+    // Slots owned. The remainder is carried so a fractional ratio -- 2.4 slots for 60 fps
+    // content on a 144 Hz panel -- becomes an exact 2,2,3,2,3 cycle instead of rounding
+    // every frame the same way, which would drift a whole frame every few seconds.
+    std::uint64_t slots = 1;
+    if (flipPeriodQpc >= gridPeriodQpc_) {
+        slotCarry_ += flipPeriodQpc / gridPeriodQpc_;
+        slots = static_cast<std::uint64_t>(slotCarry_);
+        slotCarry_ -= static_cast<double>(slots);
+        if (slots < 1) slots = 1;
+    } else {
+        // Source faster than the panel: take the next slot every flip and let the session's
+        // lateness rule discard the surplus. Carrying a remainder here would make the
+        // presenter wait, which is the opposite of what a fast source needs.
+        slotCarry_ = 0.0;
+    }
+
+    const auto periodTicks = static_cast<std::int64_t>(gridPeriodQpc_);
+    // Lead scales with the panel but never drops below 1 ms: the flip has to be in the
+    // queue before the compositor samples it, and sampling happens at the slot itself.
+    const auto lead = std::max<std::int64_t>(periodTicks * 35 / 100, frequency / 1000);
+    auto slotIndex = nextSlotRefresh_;
+    auto slotQpc = gridOriginQpc_ +
+        static_cast<std::int64_t>(static_cast<double>(slotIndex - gridOriginRefresh_) * gridPeriodQpc_);
+    // Catch up all the way to a reachable slot, not just one step. A single step was a
+    // real defect found by measurement: after any late arrival the sequence stayed behind
+    // the clock, so every later flip aimed at a slot that had already passed and the
+    // "error against the aimed slot" wandered to several refresh periods instead of zero.
+    // The bound keeps a mis-calibrated origin from spinning here.
+    for (int catchUp = 0; catchUp < 16 && slotQpc - lead <= nowQpc; ++catchUp) {
+        ++slotIndex;
+        slotQpc += periodTicks;
+    }
+    const auto deadlineQpc = slotQpc - lead;
+    // Give-up bound. This has to scale with what was asked for, not with one panel period:
+    // 24 fps content on a 144 Hz panel legitimately owns 6 slots (and a 30 fps bound measured
+    // 4.8), so a two-period guard rejected those waits outright and the bound silently never
+    // engaged -- measured as gridLocked staying 0 for an entire run while the panel itself
+    // calibrated fine. Two of whatever cadence was asked for, floored at two refreshes, still
+    // cannot freeze playback on a bad calibration.
+    const auto bailBoundQpc = std::max<std::int64_t>(2 * periodTicks,
+        static_cast<std::int64_t>(flipPeriodQpc * 2.0));
+    if (deadlineQpc - nowQpc > bailBoundQpc) {
+        // A wild calibration must not be able to freeze playback: give up on the slot,
+        // keep the sequence moving, and say so.
+        nextSlotRefresh_ = slotIndex + slots;
+        aimedRefresh_ = 0;
+        // Cleared, not left standing: an accuracy reading from the previous aim would
+        // otherwise keep reporting the lock as precise while it is bypassed. Measured exactly
+        // this false green -- an arm whose give-up bound was mis-set read "100% within one
+        // refresh" for a whole run in which gridLocked never once went true (that run used the
+        // ceiling setter that has since been removed; the failure mode it exposed has not).
+        aimedSlotQpc_ = 0;
+        aimedSubmitQpc_ = 0;
+        lastSlotError100ns_.store(0, std::memory_order_release);
+        gridLocked_.store(0, std::memory_order_release);
+        pacingBypass_.store(0, std::memory_order_release);
+        return 0;
+    }
+    aimedRefresh_ = static_cast<std::int64_t>(slotIndex);
+    aimedSlotQpc_ = slotQpc;
+    aimedSubmitQpc_ = deadlineQpc;   // slot minus the lead, not the slot: see lastSlotError100ns
+    aimedSlots_ = static_cast<std::int64_t>(slots);
+    aimedSlotRatio_ = flipPeriodQpc / gridPeriodQpc_;
+    nextSlotRefresh_ = slotIndex + slots;
+    gridLocked_.store(1, std::memory_order_release);
+    pacingBypass_.store(0, std::memory_order_release);
+    return deadlineQpc;
+}
+
+void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
+    const std::int64_t syncQpc, const std::int64_t landedRefresh,
+    const bool sequenceDisjoint) noexcept {
+    const auto frequency = QpcTicks();
+    if (sequenceDisjoint || syncRefresh <= 0 || syncQpc <= 0) {
+        // The first sample, and every mode change, restart the sequence. Drop the
+        // calibration instead of trusting a delta taken across the break -- DXGI reports
+        // DXGI_ERROR_FRAME_STATISTICS_DISJOINT precisely because the counts no longer form
+        // one series, and an anchored grid built on that delta would misaim every slot.
+        lastSyncRefresh_ = 0;
+        lastSyncQpc_ = 0;
+        gridPeriodQpc_ = 0.0;
+        gridOriginQpc_ = 0;
+        aimedRefresh_ = 0;
+        aimedSlotQpc_ = 0;
+        aimedSubmitQpc_ = 0;
+        lastLandedRefresh_ = 0;
+        aimedSlots_ = 0;
+        aimedSlotRatio_ = 0.0;
+        measuredRefreshHz_.store(0.0, std::memory_order_release);
+        return;
+    }
+    if (lastSyncRefresh_ != 0 && syncRefresh > lastSyncRefresh_) {
+        const auto period = static_cast<double>(syncQpc - lastSyncQpc_) /
+            static_cast<double>(syncRefresh - lastSyncRefresh_);
+        // Plausibility band 10-1000 Hz. Outside it the sample is not a refresh interval,
+        // and adopting it would misaim the grid rather than merely miss it by a little.
+        if (period > frequency / 1000.0 && period < frequency / 10.0) {
+            const auto previous = gridPeriodQpc_;
+            // Re-anchor whenever the estimate moves by more than half a percent: a fixed
+            // origin plus a revised period accumulates phase error otherwise, and the whole
+            // point of the origin is that slots measured from it stay put.
+            if (previous <= 0.0 || std::fabs(period - previous) / previous > 0.005) {
+                gridOriginQpc_ = lastSyncQpc_;
+                gridOriginRefresh_ = static_cast<std::uint64_t>(lastSyncRefresh_);
+                nextSlotRefresh_ = static_cast<std::uint64_t>(syncRefresh) + 1;
+                slotCarry_ = 0.0;
+            }
+            gridPeriodQpc_ = period;
+            measuredRefreshHz_.store(static_cast<double>(frequency) / period,
+                std::memory_order_release);
+        }
+    }
+    lastSyncRefresh_ = syncRefresh;
+    lastSyncQpc_ = syncQpc;
+    // Scored in the grid's own space, against the instant this thread really handed the flip
+    // to Present. Two things it deliberately does NOT use:
+    //   * PresentRefreshCount -- that counter only advances on the vblanks where the chain's
+    //     image reached the monitor, so at 60 fps on 144 Hz it steps about 2.4 per flip while
+    //     the aim steps a full grid pitch. Comparing the two series was measured reporting a
+    //     "many refresh periods off" error that never existed on screen.
+    //   * SyncQPCTime -- it is the scheduler's sample instant, not ours, so it reports queue
+    //     depth as if it were aim error.
+    // What remains is exactly the lock's own job: did the submit happen when the grid asked.
+    // Whether the panel then held the frame an exact number of refreshes is scored separately
+    // by the standalone grid fixture.
+    if (aimedRefresh_ != 0 && aimedSubmitQpc_ != 0 && lastSubmitQpc_ != 0) {
+        const double errorQpc = static_cast<double>(lastSubmitQpc_ - aimedSubmitQpc_);
+        lastSlotError100ns_.store(static_cast<std::int64_t>(
+            errorQpc * 10'000'000.0 / frequency), std::memory_order_release);
+    }
+    // The other half of the job: how long the panel actually held the previous flip.
+    // Presented only when the sequence is continuous (landedRefresh advancing by a plausible
+    // amount); a chain reconfiguration restarts these counts, and a delta across that break is
+    // not a hold.
+    if (aimedSlotRatio_ >= 1.0 && landedRefresh > 0 && lastLandedRefresh_ > 0 &&
+        landedRefresh > lastLandedRefresh_) {
+        const auto held = landedRefresh - lastLandedRefresh_;
+        if (held <= 16) {
+            // Accept either rounding of the fractional slot count: 60 fps on 144 Hz is
+            // legitimately held 2 or 3 refreshes, and a steady alternation between those
+            // two is what "locked" looks like. A hold of 1, or of 4 and up, is what a viewer
+            // calls a hitch, and that is the quantity this counter is actually able to prove.
+            const auto low = static_cast<std::int64_t>(std::floor(aimedSlotRatio_));
+            const auto high = static_cast<std::int64_t>(std::ceil(aimedSlotRatio_));
+            const bool within = (held == low || held == high);
+            ++holdSampled_;
+            if (within) ++holdWithinRounding_;
+            const auto deviation = static_cast<std::uint64_t>(within ? 0 :
+                (held > high ? held - high : (held < low ? low - held : high - held)));
+            if (deviation > holdWorstDeviation_.load(std::memory_order_relaxed))
+                holdWorstDeviation_.store(deviation, std::memory_order_release);
+        }
+    }
+    lastLandedRefresh_ = landedRefresh;
 }
 
 FFFResult PlayerVideoRenderer::GetRenderTargetInfo(RenderTargetInfo& info) noexcept {
@@ -6750,6 +7041,16 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
         return FFFResult::DeviceFailure;
     }
     ++swapChainPresents_;
+    // Feed the cadence lock. PresentRefreshCount says on which vblank this image actually
+    // reached the monitor, and the (SyncRefreshCount, SyncQPCTime) pair is the grid itself;
+    // together they are the only reading that distinguishes "held 2 refreshes" from
+    // "held 3", which is the thing the lock is supposed to make predictable.
+    DXGI_FRAME_STATISTICS frameStatistics{};
+    const auto statisticsResult = chain->GetFrameStatistics(&frameStatistics);
+    UpdatePresentGrid(static_cast<std::int64_t>(frameStatistics.SyncRefreshCount),
+        frameStatistics.SyncQPCTime.QuadPart,
+        static_cast<std::int64_t>(frameStatistics.PresentRefreshCount),
+        statisticsResult == DXGI_ERROR_FRAME_STATISTICS_DISJOINT || FAILED(statisticsResult));
     presentedVideoGeneration_.store(renderedVideoGeneration);
     const auto previous = countedVideoGeneration_.exchange(renderedVideoGeneration);
     if (renderedVideoGeneration != 0 && renderedVideoGeneration != previous)
@@ -6945,17 +7246,17 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseCom(sampler_);
     ReleaseCom(pixelShader_);
     for (auto*& shader : sdrPixelShaders_) ReleaseCom(shader);
-    ReleaseCom(extensionShader_);
-    ReleaseCom(extensionConstants_);
-    ReleaseExtensionEnhancement();
-    ReleaseCom(extensionEnhancementShader_);
-    ReleaseCom(extensionEnhancementConstants_);
     ReleaseCom(dynamicCurveView_);
     ReleaseCom(dynamicCurveTexture_);
     ReleaseCom(dynamicConstants_);
     dynamicCurveBuilt_ = false;
-    extensionAttempted_ = false;
-    extensionEligible_ = false;
+    ReleaseCom(transformLutView_);
+    ReleaseCom(transformLutTexture_);
+    transformLutBuilt_ = false;
+    // The resident-table pointer must not survive the texture: a recreated device
+    // gets a fresh texture, and a matching pointer would skip the upload.
+    uploadedTransform_ = nullptr;
+    cachedTransformEnabled_ = false;
     ReleaseCom(scalePixelShader_);
     ReleaseCom(coverBackdropPixelShader_);
     ReleaseCom(timedTextPixelShader_);
@@ -7158,22 +7459,6 @@ std::uint64_t PlayerVideoRenderer::SoftwareConvert100ns() const noexcept { retur
 std::uint64_t PlayerVideoRenderer::Upload100ns() const noexcept { return upload100ns_.load(); }
 std::uint32_t PlayerVideoRenderer::OutputBitDepth() const noexcept {
     return swapOutputBits_.load(std::memory_order_acquire);
-}
-FFF3FPHdrSignalDiagnostics PlayerVideoRenderer::HdrSignalDiagnostics() const noexcept {
-    FFF3FPHdrSignalDiagnostics out{};
-    out.size = sizeof(out);
-    out.version = 20;
-    out.dynamicCurveFramesApplied = dynamicCurveFramesApplied_.load(std::memory_order_relaxed);
-    out.dynamicCurveFramesRefused = dynamicCurveFramesRefused_.load(std::memory_order_relaxed);
-    out.setHdrMetaDataCalls = hdrMetaDataCalls_.load(std::memory_order_relaxed);
-    out.setHdrMetaDataSuppressed = hdrMetaDataSuppressed_.load(std::memory_order_relaxed);
-    out.lastSignaledMaxMasteringLuminance = signaledMaxMastering_.load(std::memory_order_relaxed);
-    out.lastSignaledMinMasteringLuminance = signaledMinMastering_.load(std::memory_order_relaxed);
-    out.lastSignaledMaxContentLightLevel = signaledMaxCll_.load(std::memory_order_relaxed);
-    out.lastSignaledMaxFrameAverageLightLevel = signaledMaxFall_.load(std::memory_order_relaxed);
-    out.swapChainHdrEnabled = swapHdr_ ? 1u : 0u;
-    out.reserved = 0;
-    return out;
 }
 FFF3FPVideoScalingMode PlayerVideoRenderer::ActualVideoScalingMode() const noexcept {
     return actualVideoScalingMode_.load();

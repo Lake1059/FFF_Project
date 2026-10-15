@@ -64,6 +64,15 @@ Public Class 设置
     ' 注意：内核在打开时就会套用源旋转；本开关为 False 时由宿主显式归零（见 应用自动转正设置）。
     Public Property 自动转正 As Boolean = True
 
+    ' RTX 视频超分辨率（VSR）：默认关闭。
+    ' 三个理由写在这儿，免得以后有人"顺手改成 True"：
+    '   ① 内核侧默认也是 Off，宿主替用户打开等于改变既有播放行为；
+    '   ② 它只在"真放大 + 源高度 360..1440 + NVIDIA 适配器直驱窗口"时才可能生效，
+    '      不满足时是静默不生效（不是错误），默认开只会让人以为坏了；
+    '   ③ 画质档位与总开关归 NVIDIA App / 控制面板，本程序只能请求"允许"，
+    '      不能保证也不能验证画面确实被增强。
+    Public Property RTX视频超分辨率 As Boolean = False
+
     Public Property 关联常见视频 As Boolean = False
     Public Property 关联不常见视频 As Boolean = False
     Public Property 关联老旧视频 As Boolean = False

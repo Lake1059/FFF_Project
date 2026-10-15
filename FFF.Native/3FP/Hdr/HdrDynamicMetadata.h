@@ -42,6 +42,11 @@ enum class HdrMetadataKind : std::uint32_t {
     HdrVivid = 2,    // ST 2094-30, peak-only reading. HdrToneCurve implements
                      // no Vivid/CUVA curve at all, so this kind has no curve
                      // to route through.
+    // Caller-supplied colour transform (FFF3FP_SetDynamicMetadata kind 3).
+    // Carries no ST 2094 window data: the payload is a 3-D lookup table plus
+    // a linear-light matrix (FFF3FPColorTransformPayload), applied through the
+    // dynamic path. The kernel does not interpret what produced it.
+    ExternalColorTransform = 3,
 };
 
 /// One entry of distribution_maxrgb. See the field-name trap above.
@@ -121,6 +126,13 @@ struct HdrDynamicMetadata {
     float targetedDisplayNits = 0.0f;
     bool hasTargetedDisplay = false;
     HdrMetadataDegrade degrade = HdrMetadataDegrade::None;
+    // True when the frame is driven by a caller-supplied colour transform
+    // (HdrMetadataKind::ExternalColorTransform). Such an entry carries no ST 2094
+    // window data: the payload is a 3-D lookup table plus a linear-light matrix
+    // that lives outside this struct, fetched through
+    // HdrProcessor::ActiveColorTransform. The kernel does not interpret what
+    // produced the table.
+    bool externalTransform = false;
     /// Bumped every time a frame carried fresh metadata (diagnostics + tests).
     std::uint64_t serial = 0;
     /// How many consecutive frames have reused this snapshot instead of a new one.

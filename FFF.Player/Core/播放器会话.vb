@@ -24,6 +24,12 @@ Public NotInheritable Class 播放器会话
     Private Shared ReadOnly 原生播放器快照大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生播放器快照)())
     Private Shared ReadOnly 原生视频像素探针大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生视频像素探针)())
     Private Shared ReadOnly 原生音频峰值大小 As UInteger = CUInt(Marshal.SizeOf(Of 原生音频峰值)())
+    ' RTX VSR 状态：内核要求 size >= sizeof(44) 且 version = PlayerApiVersion，两者缺一即拒。
+    Private Shared ReadOnly 原生视频超分辨率状态大小 As UInteger =
+        CUInt(Marshal.SizeOf(Of 原生视频超分辨率状态)())
+    ' 呈现节律状态：内核同样按 size >= sizeof 且 version = PlayerApiVersion 校验。
+    Private Shared ReadOnly 原生呈现节律状态大小 As UInteger =
+        CUInt(Marshal.SizeOf(Of 原生呈现节律状态)())
     Private ReadOnly 定时文字提交锁 As New Object()
     Private ReadOnly 定时文字UTF8缓存 As New Dictionary(Of String, IntPtr)(StringComparer.Ordinal)
     Private ReadOnly 定时文字临时指针 As New List(Of IntPtr)()
@@ -215,6 +221,14 @@ Public NotInheritable Class 播放器会话
                                                   HDR峰值尼特, SDR纸白尼特,
                                                   If(强制HDR输出, 1UI, 0UI)))
     End Sub
+    ''' <summary>读回呈现器实际在按什么配速：面板声明值/网格标定值/生效上限/是否锁上/
+    ''' 没锁的原因/提交精度，以及屏幕停留格数的带内对账。诊断用，不改变任何行为。
+    ''' 窗口翻帧上限本身不可调：内核恒取 min(面板率, 视频率)。</summary>
+    Friend Function 读取呈现节律状态() As 原生呈现节律状态
+        Dim 值 As New 原生呈现节律状态 With {.大小 = 原生呈现节律状态大小, .版本 = 期望API版本}
+        检查结果(播放器原生接口.FFF3FP_GetPresentPacingStatus(取得句柄(), 值))
+        Return 值
+    End Function
     Public Sub 设置输出窗口(窗口句柄 As IntPtr)
         检查结果(播放器原生接口.FFF3FP_SetOutputWindow(取得句柄(), 窗口句柄))
     End Sub
@@ -246,6 +260,56 @@ Public NotInheritable Class 播放器会话
             Return 0UI
         End Get
     End Property
+
+    ''' <summary>本机加载的内核是否提供 RTX 视频超分辨率入口。
+    ''' 供 UI 决定"置灰 + 说明"还是"可切换"，不是靠试调用捕获异常来猜。</summary>
+    Public ReadOnly Property 支持视频超分辨率 As Boolean
+        Get
+            Return 播放器原生接口.支持视频超分辨率
+        End Get
+    End Property
+
+    ''' <summary>RTX 视频超分辨率开关：True = 请求 Auto（内核逐帧判定要不要真用），
+    ''' False = 请求 Off。
+    ''' <para>内核不支持该导出、或返回非成功时**静默忽略**：VSR 是可选增强，
+    ''' 不该让一次开关把播放会话变成错误弹窗。UI 侧用 支持视频超分辨率 区分
+    ''' "没这个能力"与"有但这一帧没满足条件"。</para>
+    ''' <para>注意：重新请求 True 会清掉内核的"驱动拒绝"闩并重新探测，
+    ''' 所以关掉再打开就是那条唯一的复位路径。</para></summary>
+    Public Sub 设置视频超分辨率(开启 As Boolean)
+        If Not 播放器原生接口.设置视频超分辨率(取得句柄(), 开启) Then Return
+        本机视频超分辨率已请求 = 开启
+    End Sub
+
+    ''' <summary>宿主侧最后一次成功登记的请求（仅供 UI 回显勾选态；
+    ''' 真实生效与否要看 读取视频超分辨率状态）。</summary>
+    Public Property 本机视频超分辨率已请求 As Boolean = False
+
+    ''' <summary>读取内核的 VSR 状态。内核不支持或未成功时返回 False。
+    ''' Friend 而非 Public：状态是 Friend 结构，Public 成员不能外泄它（BC30909）。</summary>
+    Friend Function 读取视频超分辨率状态(ByRef 状态 As 原生视频超分辨率状态) As Boolean
+        状态 = New 原生视频超分辨率状态 With {
+            .大小 = 原生视频超分辨率状态大小, .版本 = 期望API版本}
+        Return 播放器原生接口.读取视频超分辨率状态(取得句柄(), 状态)
+    End Function
+
+    ''' <summary>把内核的原因码翻成人话。逐值对应 FFF3FPVideoSuperResolutionReason。
+    ''' <para>最后一句是刻意的：内核的"生效"只表示驱动没有拒绝这次请求，
+    ''' 该路径没有任何能力查询可用（实测连伪造的 GUID 都返回成功），
+    ''' 所以这里不能写成"已增强"。</para></summary>
+    Friend Shared Function 视频超分辨率状态文本(状态 As 原生视频超分辨率状态) As String
+        If 状态.生效 <> 0UI Then Return "驱动已接受本次请求（不等于画面已被增强）"
+        Select Case 状态.原因
+            Case 1UI : Return "未请求"
+            Case 2UI : Return "渲染适配器不是 NVIDIA"
+            Case 3UI : Return "当前不是放大（窗口不大于画面）"
+            Case 4UI : Return $"源高度 {状态.源高} 不在 360..1440 区间"
+            Case 5UI : Return "源格式不支持送入视频处理器（如软解上传路径）"
+            Case 6UI : Return "驱动拒绝过，已闩住；关掉再打开可重新探测"
+            Case Else : Return If(状态.驱动拒绝闩 <> 0UI, "驱动拒绝过", "内核未报告原因")
+        End Select
+    End Function
+
 
     Private 自动转正偏好 As Boolean = True
 
@@ -292,6 +356,7 @@ Public NotInheritable Class 播放器会话
 
     ''' <summary>图片模式：以光标为锚做一次缩放步进（放大 1.25 / 缩小 0.8）。
     ''' 锚点按客户区归一化到 [0,1]，由内核保持该点下的画面内容不动。
+    ''' 成功时 结果缩放 返回缩放后的绝对值，便于宿主同步本地缓存。
     ''' 成功时 结果缩放 按源像素计，1 表示原生尺寸。
     ''' 返回 False 表示当前内核没有该导出，调用方应回退。</summary>
     Public Function 光标锚定缩放(倍数 As Single, 锚点水平 As Single, 锚点垂直 As Single,
@@ -603,7 +668,7 @@ Public NotInheritable Class 播放器会话
     ''' <summary>离屏回读一帧（截图用）。内核不支持或没有画面时返回 Nothing。
     ''' 8 位返回 Format32bppArgb 位图；16 位返回 Format64bppArgb（线性 scRGB 半浮点，
     ''' 1.0 = 80 nits），由调用方决定如何映射/保存。
-    ''' 窗口被遮挡或最小化时仍可读取。</summary>
+    ''' ⚠ 与屏幕抓取不同：这不依赖窗口可见，被遮挡或最小化时同样正确。</summary>
     Public Function 读取原始帧() As Bitmap
         If Not 播放器原生接口.支持帧回读 Then Return Nothing
         Dim 宽 As UInteger = 0UI, 高 As UInteger = 0UI

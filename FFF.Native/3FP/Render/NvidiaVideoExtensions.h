@@ -56,12 +56,19 @@ bool IsNvidiaAdapter(ID3D11Device* device) noexcept;
 /// stream 0. Returns the driver's HRESULT.
 ///
 /// NOTE ON DETECTION: there is no reliable "is VSR supported?" query on this
-/// path. Chromium's source warns that GetStreamExtension never fails its
-/// HRESULT unless the buffer size is wrong, so a successful Get proves
-/// nothing; and NVIDIA's PPE extension has no documented Get semantics of its
-/// own. Chromium, mpv and VLC therefore all just call this function and treat
-/// a failed VideoProcessorBlt as the only real signal. Callers must do the
-/// same: attempt, and latch the feature off if the blit fails.
+/// path, and the HRESULT turns out to carry no capability information at all.
+/// Measured on an RTX 4060 Laptop with driver 616.92:
+/// VideoProcessorGetStreamExtension returned S_OK -- with the payload reading
+/// back {0,0,0} every time -- for the PPE GUID immediately after a successful
+/// Set(enable=1), for a deliberately wrong DataSize (4 instead of 12), and even
+/// for a GUID that cannot exist. So neither a successful Get nor a successful
+/// Set proves anything. Chromium, mpv and VLC therefore all just call this
+/// function and treat a failed VideoProcessorBlt as the only real signal.
+/// Callers must do the same: attempt, and latch the feature off if the blit
+/// fails. A host must not present the resulting "active" bit to a user as
+/// evidence that the picture was enhanced; it only means the driver did not
+/// refuse the request, and the quality level itself belongs to the NVIDIA App
+/// or Control Panel, which this API cannot read.
 HRESULT SetSuperResolution(ID3D11VideoContext* videoContext,
     ID3D11VideoProcessor* videoProcessor, bool enable) noexcept;
 

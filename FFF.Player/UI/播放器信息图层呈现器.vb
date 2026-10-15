@@ -490,23 +490,15 @@ Friend NotInheritable Class 播放器信息图层呈现器
 
     Private Shared Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照) As String
         If Not 快照.是HDR源 AndAlso Not 流.是HDR Then Return String.Empty
-        Dim 是杜比 = 快照.HDR规格 = HDR格式.杜比视界
-        Dim 规格 = If(是杜比, String.Empty, HDR规格文本(快照.HDR规格, 流.HDR格式))
-        Dim 杜比 = If(是杜比,
-            摘要(快照), String.Empty)
-        Dim 动态 As String
-        If 是杜比 Then
-            动态 = String.Empty
-        Else
-            动态 = If(快照.动态HDR元数据有效, "动态元数据已用于处理", String.Empty)
-        End If
+        Dim 规格 = HDR规格文本(快照.HDR规格, 流.HDR格式)
+        Dim 动态 = If(快照.动态HDR元数据有效, "动态元数据已用于处理", String.Empty)
         Dim 亮度 = If(快照.源峰值尼特 > 0,
             $"源峰值 {快照.源峰值尼特:0}尼特", String.Empty)
         If 快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso 快照.HDR有效目标峰值尼特 > 0 Then
             亮度 = 合并字段(亮度, $"显示目标 {快照.HDR有效目标峰值尼特:0}尼特")
         End If
-        Dim 回退 = If(快照.HDR回退有效 AndAlso Not 是杜比, "HDR fallback", String.Empty)
-        Return 合并字段(规格, 杜比, 动态, 亮度, 回退)
+        Dim 回退 = If(快照.HDR回退有效, "HDR fallback", String.Empty)
+        Return 合并字段(规格, 动态, 亮度, 回退)
     End Function
 
     Private Shared Function HDR规格文本(规格 As HDR格式, 媒体文本 As String) As String
@@ -514,7 +506,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
             Case HDR格式.HDR10 : Return "HDR10"
             Case HDR格式.HDR10Plus : Return "HDR10+"
             Case HDR格式.HLG : Return "HLG"
-            Case HDR格式.杜比视界 : Return 媒体文本
             Case HDR格式.HDRVivid : Return "HDR Vivid"
             Case Else : Return 媒体文本
         End Select
