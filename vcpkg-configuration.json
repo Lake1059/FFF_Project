@@ -1,0 +1,3 @@
+{
+  "overlay-ports": ["tools/vcpkg-ports"]
+}

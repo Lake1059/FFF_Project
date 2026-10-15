@@ -1,0 +1,15 @@
+{
+  "name": "libbluray",
+  "version-semver": "1.4.1",
+  "port-version": 1,
+  "description": "Blu-ray navigation using the official VideoLAN release archive",
+  "homepage": "https://www.videolan.org/developers/libbluray.html",
+  "license": "LGPL-2.1-or-later",
+  "supports": "windows & !uwp & !xbox",
+  "dependencies": [
+    "freetype",
+    "libudfread",
+    "libxml2",
+    { "name": "vcpkg-tool-meson", "host": true }
+  ]
+}
