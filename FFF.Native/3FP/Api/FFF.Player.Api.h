@@ -39,7 +39,7 @@ enum class FFF3FPHdrFormat : std::uint32_t {
     Hdr10 = 1,
     Hdr10Plus = 2,
     Hlg = 3,
-    DolbyVision = 4,
+    HDRdp = 4,
     HdrVivid = 5,
 };
 
@@ -47,7 +47,7 @@ enum class FFF3FPHdrCompatibility : std::uint32_t {
     None = 0,
     Hdr10 = 1u << 0,
     Hlg = 1u << 1,
-    DolbyVision = 1u << 2,
+    HDRdp = 1u << 2,
     HdrVivid = 1u << 3,
 };
 
@@ -56,13 +56,16 @@ enum class FFF3FPHdrProcessingPath : std::uint32_t {
     StaticHdr10 = 1,
     Hdr10PlusDynamic = 2,
     HlgDisplayMapped = 3,
-    DolbyVisionHdr10Fallback = 4,
-    DolbyVisionFelFallback = 5,
+    HDRdpHdr10Fallback = 4,
+    HDRdpFelFallback = 5,
     HdrVividDynamic = 6,
     ExternalDynamic = 7,
 };
 
-enum class FFF3FPDolbyVisionEnhancementLayer : std::uint32_t {
+// DEPRECATED ABI (values retained, never produced): the RPU enhancement layer
+// is no longer decoded or reported by the player. Kept so snapshot and probe
+// layouts stay byte-identical for hosts built against earlier headers.
+enum class FFF3FPHDRdpEnhancementLayer : std::uint32_t {
     None = 0,
     Mel = 1,
     Fel = 2,
@@ -168,6 +171,17 @@ struct FFF3FPConfiguration {
     // cannot drive each other into oscillation.
     std::uint32_t decoderGrowDropPercent = 10;
     std::uint32_t decoderShrinkDropPercent = 2;
+    // Deliberately NOT extended here. The flip-rate bound is automatic (min of panel rate
+    // and content rate) and computed inside the renderer.
+    //
+    // A field appended to this struct grows sizeof it, and FFF3FP_Create rejects any host
+    // whose reported size is below sizeof(FFF3FPConfiguration) (PlayerApi.cpp:94) -- so a
+    // config-only knob would take down every host that has not been rebuilt in the same
+    // step, including the two managed ones in this repository. Measured, not assumed:
+    // the VB host's own comment on 原生播放器配置 records exactly that failure (host at
+    // 80 bytes against a 112-byte kernel => Create returns -1, the player cannot open
+    // anything). A setter carries no such coupling: a host that never calls it simply has
+    // no bound, which is the behaviour it has today.
 };
 
 struct FFF3FPSnapshot {
@@ -236,11 +250,13 @@ struct FFF3FPSnapshot {
     FFF3FPHdrFormat hdrFormat;
     std::uint32_t compatibleHdrFormats;
     FFF3FPHdrProcessingPath hdrProcessingPath;
-    std::uint32_t dolbyVisionProfile;
-    std::uint32_t dolbyVisionLevel;
-    std::uint32_t hasDolbyVisionRpu;
-    std::uint32_t hasDolbyVisionEnhancementLayer;
-    FFF3FPDolbyVisionEnhancementLayer dolbyVisionEnhancementLayer;
+    // DEPRECATED ABI (slots retained, always zero): the stream is no longer
+    // classified as RPU-bearing; its base layer is presented as plain HDR10.
+    std::uint32_t hdrDpProfile;
+    std::uint32_t hdrDpLevel;
+    std::uint32_t hasHDRdpRpu;
+    std::uint32_t hasHDRdpEnhancementLayer;
+    FFF3FPHDRdpEnhancementLayer hdrDpEnhancementLayer;
     std::uint32_t dynamicHdrMetadataActive;
     std::uint32_t hdrFallbackActive;
     std::uint32_t displayMinLuminanceMilliNits;
@@ -577,17 +593,20 @@ struct FFF3FPColorTransform {
 };
 
 // Deterministic ABI-v1 probe for HDR classification and luminance policy.
-// Dolby residual: 0=unknown/not present, 1=MEL, 2=FEL.
+// The hdrDp* inputs below are DEPRECATED ABI (slots retained): they are
+// validated but no longer influence the result -- an RPU-bearing stream is
+// classified through its transfer characteristic alone. HdrDp residual:
+// 0=unknown/not present, 1=MEL, 2=FEL.
 struct FFF3FPHdrProcessingProbe {
     std::uint32_t size;
     std::uint32_t version;
     FFF3FPColorTransfer transfer;
-    std::uint32_t dolbyVisionProfile;
-    std::uint32_t dolbyVisionLevel;
-    std::uint32_t dolbyVisionCompatibilityId;
-    std::uint32_t dolbyVisionRpu;
-    std::uint32_t dolbyVisionEnhancementLayer;
-    std::uint32_t dolbyVisionResidual;
+    std::uint32_t hdrDpProfile;
+    std::uint32_t hdrDpLevel;
+    std::uint32_t hdrDpCompatibilityId;
+    std::uint32_t hdrDpRpu;
+    std::uint32_t hdrDpEnhancementLayer;
+    std::uint32_t hdrDpResidual;
     std::uint32_t hdr10PlusMetadata;
     std::uint32_t hdrVividMetadata;
     float displayPeakNits;
@@ -596,7 +615,7 @@ struct FFF3FPHdrProcessingProbe {
     FFF3FPHdrFormat outputFormat;
     std::uint32_t outputCompatibility;
     FFF3FPHdrProcessingPath outputProcessingPath;
-    FFF3FPDolbyVisionEnhancementLayer outputEnhancementLayer;
+    FFF3FPHDRdpEnhancementLayer outputEnhancementLayer;  // deprecated: always None
     std::uint32_t outputDynamicMetadata;
     std::uint32_t outputFallback;
     std::uint32_t outputTargetPeakNits;
@@ -676,6 +695,9 @@ struct FFF3FPVideoSuperResolutionStatus {
 #endif
 
 FFF3FP_API std::uint32_t FFF3FP_GetApiVersion() noexcept;
+// DEPRECATED ABI (symbols retained, capability removed): the private
+// color-extension module these drove no longer exists. They now report
+// "absent" / "unsupported" -- see PlayerApi.cpp.
 FFF3FP_API std::int32_t FFF3FP_GetColorExtensionStatus() noexcept;
 FFF3FP_API const char* FFF3FP_GetColorExtensionStatusText(std::uint32_t state, std::uint32_t variant) noexcept;
 FFF3FP_API void FFF3FP_SetColorExtensionAuthorizationPrompt(int (__cdecl* callback)(char*, std::uint32_t)) noexcept;
@@ -710,6 +732,11 @@ FFF3FP_API FFFResult FFF3FP_LoadExternalAudio(FFF3FPHandle player,
 FFF3FP_API FFFResult FFF3FP_ClearExternalAudio(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetExternalAudioOffset(FFF3FPHandle player,
     std::int64_t offset100ns) noexcept;
+// Audio delay for the embedded audio track: positive = audio plays later than the
+// video (lip-sync correction). Bounded to ±10 minutes. Session-level preference
+// (persists across media); see PlayerSession::SetAudioDelay for the mechanics.
+FFF3FP_API FFFResult FFF3FP_SetAudioDelay(FFF3FPHandle player,
+    std::int64_t delay100ns) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetColorMode(FFF3FPHandle player, FFF3FPColorMode mode,
     float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits,
     std::uint32_t forceHdrOutput) noexcept;
@@ -724,6 +751,70 @@ FFF3FP_API FFFResult FFF3FP_SetColorMode(FFF3FPHandle player, FFF3FPColorMode mo
 // (InvalidArgument); a successful call does not by itself prove tearing will happen.
 FFF3FP_API FFFResult FFF3FP_SetPresentConfig(FFF3FPHandle player,
     std::uint32_t enableTearing) noexcept;
+// The window's flip-rate bound is automatic and not configurable:
+//     bound = min(display refresh rate, video frame rate)
+// Expressed as a period that is the longer of the two, so 60 fps content on a 144 Hz panel
+// flips at most 60 times a second -- never 144 re-scan-outs of the same frame -- while
+// 240 fps content on the same panel flips at most 144 and the surplus is discarded upstream
+// by the session's existing lateness rule. There is deliberately no setter: a configurable
+// ceiling would be a switch for a behaviour that is always on.
+//
+// FFF3FP_GetPresentPacingStatus below is the read-only view of what the presenter actually
+// paces against. Read-only diagnostics matter here because the cadence lock is invisible to
+// the eye when it works and invisible when it does not; the two numbers that decide its
+// behaviour (the panel refresh rate, and whether the grid has been calibrated yet) were
+// previously only assertable from inside the renderer.
+struct FFF3FPPresentPacingStatus {
+    std::uint32_t size;
+    std::uint32_t version; // == PlayerApiVersion
+    // EnumDisplaySettings for the monitor that hosts the output window. Reported here
+    // un-clamped; the renderer used to clamp this to 120 before a 2026-10-15 fix, so a
+    // 144 Hz panel was described as 120 Hz to whatever consumed it.
+    float declaredRefreshHz;
+    // Panel period recovered from the swap chain's own frame statistics
+    // (IDXGISwapChain::GetFrameStatistics: SyncRefreshCount against SyncQPCTime).
+    // 0 until two samples have arrived, which is what "not locked yet" means here.
+    float measuredRefreshHz;
+    float frameRateBoundHz;   // the bound in force: min(panel rate, content rate)
+    std::uint32_t gridLocked;       // 1 = flips are snapped to the refresh grid
+    // Why the grid is not in charge when gridLocked is 0:
+    //   0 = locked, or there was nothing to pace against
+    //   1 = variable-refresh path requested (the display paces itself; snapping to a fixed
+    //       grid would only add latency)
+    //   2 = the grid is not calibrated yet (needs two frame-statistics samples)
+    //   3 = the native window-move loop owns the cadence for this flip
+    std::uint32_t pacingBypass;
+    // Signed error of the last flip's submit against the instant it was told to submit at
+    // (its slot minus the lead), in 100 ns units. Positive = submitted late.
+    // Scored against the slot itself instead, this reports the lead as though it were
+    // accuracy: measured that way it produced a suspiciously steady "worst 0.35 refresh
+    // periods", which is just the lead (0.35 x 6.94 ms), and it said nothing about how well
+    // the wait actually landed. Measured on this machine at 60 fps content: signed mean +0.12
+    // refresh periods, worst absolute 0.34 -- and the lead is 0.35, so the worst case spends
+    // the entire headroom and lands on the slot itself. The lead is therefore the thing to
+    // raise if a slipped slot is ever observed; this reading says the margin is thin, not that
+    // it is negative.
+    std::int64_t lastSlotError100ns;
+    // The displayed half, counted from PresentRefreshCount (the vblank on which the chain's
+    // image reached the monitor). holdSampled counts flips whose on-screen hold was
+    // observable, holdWithinRounding those held for either rounding (floor or ceiling) of the
+    // refresh count the cadence asked for -- 2 or 3 for 60 fps on 144 Hz -- and
+    // holdWorstDeviationRefreshes the largest miss outside that band. A hold inside the band
+    // is what a steady cadence looks like; one outside it (1 refresh, or 4 and up) is what
+    // the eye calls a hitch. Submit accuracy alone does not prove either.
+    std::uint64_t holdSampled;
+    std::uint64_t holdWithinRounding;
+    std::uint64_t holdWorstDeviationRefreshes;
+    // Frames discarded because the source delivers faster than the panel can scan out
+    // (240 fps content on a 144 Hz panel). Deliberately NOT folded into the snapshot's
+    // droppedVideoFrames: that reading means "the pipeline fell behind the media clock" and
+    // drives the adaptive-downscale policy, and a panel-limited discard is neither of those
+    // things -- no amount of resampling lets a 144 Hz panel show 240 frames a second.
+    // Report the two numbers side by side; the total is their sum.
+    std::uint64_t displayRateDiscardedFrames;
+};
+FFF3FP_API FFFResult FFF3FP_GetPresentPacingStatus(FFF3FPHandle player,
+    FFF3FPPresentPacingStatus* status) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetOutputWindow(FFF3FPHandle player, void* outputWindow) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetInteractiveMove(FFF3FPHandle player, std::uint32_t enabled) noexcept;
 // View transform for frame inspection: zoom scales the fitted video box
@@ -1128,6 +1219,11 @@ enum class FFF3FPDynamicMetadataKind : std::uint32_t {
     None = 0,        // only meaningful to FFF3FP_ClearDynamicMetadata: every kind
     Hdr10Plus = 1,   // payload: FFF3FPHdrDynamicMetadataEntry, version 1
     HdrVivid = 2,    // payload: FFF3FPHdrVividMetadataPayload, version 1
+    // Payload: FFF3FPColorTransformPayload, version 1. A caller-supplied
+    // colour transform: one sampled 3-D lookup table plus one linear-light
+    // matrix. Every field is generic colour-pipeline vocabulary; the kernel
+    // never learns what produced the table.
+    ExternalColorTransform = 3,
 };
 
 // One ST 2094-30 / CUVA 005-style processing window, peak-only reading. Windows
@@ -1188,6 +1284,50 @@ static_assert(sizeof(FFF3FPHdrVividMetadataPayload) == 68,
     "FFF3FPHdrVividMetadataPayload layout changed: mirror it in Fff3FpNative.cs and re-pin");
 static_assert(sizeof(FFF3FPDynamicMetadataPacket) == 40,
     "FFF3FPDynamicMetadataPacket layout changed: mirror it in Fff3FpNative.cs and re-pin");
+
+// --- External colour transform (kind 3) -------------------------------------
+//
+// A caller-supplied colour transform carried as pure data: one sampled 3-D
+// lookup table over the coded source signal plus one 3x3 matrix applied to the
+// linear-light signal after transfer decoding. Nothing in the payload names a
+// video format; a 3-D LUT and a working-space matrix are the standard
+// vocabulary of colour management (creative grades, display calibration,
+// format conversion all speak it), so the same slot serves any producer. The
+// kernel consumes the table exactly like it consumes an ST 2094 curve: as
+// numbers, through the same frame-indexed injection table.
+//
+// Why a 3-D table and not three 1-D curves: a per-component 1-D table cannot
+// express a transform whose components interact (the general case for any
+// cross-channel mapping), while a 3-D table can, with trilinear sampling.
+// 33^3 texels keep the payload at ~421 KB and the per-frame upload at a
+// fraction of the decoded-frame traffic; a finer grid is a future
+// kindVersion, not a layout change.
+inline constexpr std::uint32_t kColorTransformLutResolution = 33;
+
+struct FFF3FPColorTransformPayload {
+    std::uint32_t size;         // sizeof(FFF3FPColorTransformPayload)
+    std::uint32_t version;      // must be 1 (== packet kindVersion)
+    // Grid resolution of curveLut; must equal kColorTransformLutResolution.
+    std::uint32_t lutResolution;
+    // 0: the table replaces the source's component->RGB conversion -- its
+    //    input axes are the three coded source components (Y/Cb/Cr for YUV
+    //    sources, R/G/B for RGB ones), its output is coded RGB.
+    // 1: the table applies after the kernel's own conversion -- its input and
+    //    output are both coded RGB.
+    std::uint32_t lutDomain;
+    // Applied to the linear-light signal after transfer decoding, before gamut
+    // conversion. All-zero = identity. Row-major (out = M * rgb).
+    float outputMatrix[9];
+    // kColorTransformLutResolution^3 texels, R32G32B32_FLOAT layout, index
+    // (z * res + y) * res + x, each texel a float3. Input axes span the coded
+    // [0,1] domain at texel centres; sampling is trilinear.
+    float curveLut[kColorTransformLutResolution * kColorTransformLutResolution *
+        kColorTransformLutResolution * 3];
+};
+
+static_assert(sizeof(FFF3FPColorTransformPayload) == 431296,
+    "FFF3FPColorTransformPayload layout changed: mirror it in Fff3FpNative.cs and re-pin");
+
 
 FFF3FP_API void FFF3FP_Destroy(FFF3FPHandle player) noexcept;
 
@@ -1319,3 +1459,50 @@ FFF3FP_API FFFResult FFF3FP_GetViewRotation(FFF3FPHandle player,
 // PlayerSession::SetAudioDelay for the mechanics.
 FFF3FP_API FFFResult FFF3FP_SetAudioDelay(FFF3FPHandle player,
     std::int64_t delay100ns) noexcept;
+// --- Frame side-data ring for external colour analysis ---
+//
+// Appended after the v16 surface like the VSR, rotation and readback entry
+// points: PlayerApiVersion is unchanged, hosts resolve this dynamically
+// (GetProcAddress) and degrade when it is absent.
+//
+// Why this exists. The kind-3 payload (FFF3FPColorTransformPayload) is a
+// table the caller supplies, and the analysis that turns a stream's per-frame
+// colour metadata into that table deliberately lives in an external module --
+// the kernel carries no format-specific reader. This call is the neutral
+// hand-off in the other direction: the session keeps a bounded copy of the
+// side data attached to the frames it has already presented, keyed by the same
+// frameIndex the injection rule uses, and gives the bytes back untouched. The
+// kernel never parses them and never learns what produced them.
+//
+// sideDataType is an FFmpeg AVFrameSideDataType value carried as a plain
+// number, which is what keeps this interface generic: an analyser asks for 24,
+// 25 or 17 by number (those are the per-frame colour-metadata types in the
+// bundled libavutil -- sidedata_size_probe prints the whole table), and the
+// kernel holds every type the same way and interprets none of them.
+//
+// Semantics. Finds the cached frame with the LOWEST index >= fromFrameIndex
+// that carries a blob of `sideDataType`, writes that blob into buffer,
+// reports its length through *writtenSize and the frame it came from through
+// *foundFrameIndex. A host iterates by setting fromFrameIndex to
+// foundFrameIndex + 1 on the next call.
+//
+// Returns NotFound when nothing in the ring matches (*writtenSize is then 0
+// and *foundFrameIndex -1), BufferTooSmall when capacity is short -- the
+// required size is still reported through *writtenSize and the entry stays in
+// the ring, so the host can retry with a bigger buffer -- and Success for a
+// buffer == nullptr probe call, which just reports the size (same two-call
+// contract as FFF3FP_CopyBitmapSubtitlePixels). InvalidArgument for a null
+// out pointer.
+//
+// Bounds: the ring holds at most 120 presented frames and 1 MiB of blobs,
+// oldest first, and blobs above 16384 bytes are not cached (see the constants
+// in PlayerSession.cpp, sized from the measured side-data structs). A host
+// that polls slower than the ring wraps can miss a frame's metadata; the
+// colour transform it then derives applies one frame late at worst, which is
+// the same lag the injection already has for the frame it is derived from --
+// the blob for frame N only becomes readable after frame N is presented, so a
+// table keyed to N takes effect at N+1.
+FFF3FP_API FFFResult FFF3FP_CopyFrameSideDataAfter(FFF3FPHandle player,
+    std::uint32_t sideDataType, std::int64_t fromFrameIndex, void* buffer,
+    std::uint32_t capacity, std::uint32_t* writtenSize,
+    std::int64_t* foundFrameIndex) noexcept;

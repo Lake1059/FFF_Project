@@ -5,6 +5,7 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/frame.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/opt.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
 }
@@ -21,6 +22,37 @@ namespace {
 constexpr std::size_t MaximumReusableAudioBuffers = 8;
 constexpr std::size_t MaximumReusableAudioBufferBytes = 1024 * 1024;
 constexpr std::uint32_t StartupFadeInMilliseconds = 5;
+
+// Downmix quality layer for the WASAPI output resampler. Every multichannel
+// stream (IAMF renders 12ch) reaches the device through this rematrix, so the
+// options belong to the common path, not to IAMF alone.
+//
+// Names, defaults and semantics were verified against the linked
+// libswresample 7.2.100 (swresample-7.dll): av_opt_get_double on a freshly
+// allocated SwrContext reports exactly the numbers below, and each key is a
+// registered AVOption ("set rematrix maxval" & co. in the option table).
+//
+//   rematrix_maxval = 0.95 -- the fix. Default is 0.0, which leaves the
+//     rematrix coefficients unbounded: measured 7.1.4 -> stereo with every
+//     channel at -1 dBFS, the fold-down peaked at 2.11 (hard clipping).
+//     0.95 normalizes the mixing matrix to a 0.95 ceiling, keeping 5% of
+//     head-room for the intersample peaks that survive any later stage.
+//     (1.0 normalizes to exactly full scale; 0.95 trades one loudness
+//     percent for the only insurance this stage has against clipping.)
+//   center_mix_level / surround_mix_level = 0.707 (-3 dB) -- pinned to the
+//     verified defaults rather than left implicit, so a future libswresample
+//     default change cannot silently retune the fold-down.
+//   lfe_mix_level = 0.0 -- the verified default, written explicitly to pin
+//     it: the LFE does not belong in the stereo main mix and would only
+//     make the fold-down sound muddy/bassy (and on a stereo device it is
+//     energy the limiter later has to throw away anyway).
+//   rematrix_volume deliberately untouched (stays 1.0): the renderer's own
+//     volume/gain stage owns absolute level, and scaling here would fight
+//     the user's volume control. Head-room is maxval's job.
+constexpr double RematrixMaxval = 0.95;
+constexpr double CenterMixLevel = 0.707107;    // == M_SQRT1_2, the verified default
+constexpr double SurroundMixLevel = 0.707107;  // == M_SQRT1_2, the verified default
+constexpr double LfeMixLevel = 0.0;            // == the verified default, now pinned
 
 class ComInitialization final {
 public:
@@ -172,7 +204,29 @@ FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame) noexcept {
         outputSampleRate_, &frame->ch_layout, static_cast<AVSampleFormat>(frame->format),
         frame->sample_rate, 0, nullptr);
     av_channel_layout_uninit(&outputLayout);
-    if (result < 0 || resampler_ == nullptr || swr_init(resampler_) < 0) {
+    if (result < 0 || resampler_ == nullptr) {
+        if (resampler_ != nullptr) swr_free(&resampler_);
+        av_channel_layout_uninit(&inputChannelLayout_);
+        inputSampleRate_ = 0; inputSampleFormat_ = -1;
+        SetError("FFmpeg could not initialize the WASAPI resampler.");
+        return FFFResult::FfmpegFailure;
+    }
+    // Rematrix options take effect only before swr_init. They are best-effort:
+    // a rejected key (older libswresample without the option, a future rename)
+    // must not take playback down with the resampler, so the failure is
+    // recorded once and the default matrix -- the behaviour before this layer
+    // existed -- keeps working. Fault tolerance beats strictly-correct here.
+    unsigned int rejectedOptions = 0;
+    const auto setRematrixOption = [&](const char* name, const double value) {
+        if (av_opt_set_double(resampler_, name, value, 0) < 0) ++rejectedOptions;
+    };
+    setRematrixOption("rematrix_maxval", RematrixMaxval);
+    setRematrixOption("center_mix_level", CenterMixLevel);
+    setRematrixOption("surround_mix_level", SurroundMixLevel);
+    setRematrixOption("lfe_mix_level", LfeMixLevel);
+    if (rejectedOptions != 0)
+        SetError("WASAPI downmix options were partially rejected; using FFmpeg defaults.");
+    if (swr_init(resampler_) < 0) {
         if (resampler_ != nullptr) swr_free(&resampler_);
         av_channel_layout_uninit(&inputChannelLayout_);
         inputSampleRate_ = 0; inputSampleFormat_ = -1;

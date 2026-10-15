@@ -4,7 +4,6 @@ Imports System.Threading
 Imports System.Threading.Tasks
 
 Public Class Form1
-    Private ReadOnly 外部色彩授权回调 As 原生授权对话框回调 = AddressOf 显示外部色彩授权对话框
     Private 光盘控制器 As 播放器光盘控制器
     Private Const WM_ENTERSIZEMOVE As Integer = &H231
     Private Const WM_EXITSIZEMOVE As Integer = &H232
@@ -36,6 +35,7 @@ Public Class Form1
     Private 视角360控制器 As 播放器360视角控制器
     Private 图片浏览控制器 As 播放器图片浏览控制器
     Private 视图旋转控制器 As 播放器视图旋转控制器
+    Private 视频超分辨率控制器 As 播放器视频超分辨率控制器
     Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
@@ -182,6 +182,17 @@ Public Class Form1
             设置.实例对象.自动转正,
             Sub(值) 设置.实例对象.自动转正 = 值)
         AddHandler 播放控制器.媒体已打开, AddressOf 视图旋转控制器.媒体已打开
+        ' RTX 视频超分辨率：内核逐帧判定，宿主只负责"请求/取消"与把原因摊开。
+        ' 媒体打开后重放偏好是必需的——VSR 请求是会话内状态，新会话从内核默认的 Off 起步。
+        视频超分辨率控制器 = New 播放器视频超分辨率控制器(
+            MCM_标题栏菜单,
+            Sub(开启) 播放控制器.设置视频超分辨率(开启),
+            Function() 播放控制器.视频超分辨率状态文本(),
+            Function() 播放控制器.支持视频超分辨率,
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "超分辨率"),
+            设置.实例对象.RTX视频超分辨率,
+            Sub(值) 设置.实例对象.RTX视频超分辨率 = 值)
+        AddHandler 播放控制器.媒体已打开, AddressOf 视频超分辨率控制器.媒体已打开
         画面菜单控制器.应用全局字体(设置.实例对象.字体)
         光盘控制器 = New 播放器光盘控制器(Me, 画面控件, 播放控制器, MCM_标题栏菜单)
         全屏交互控制器 = New 播放器全屏交互控制器(Me, 画面控件,
@@ -344,7 +355,6 @@ Public Class Form1
             Return
         End If
 
-        FFF3FP_SetColorExtensionAuthorizationPrompt(外部色彩授权回调)
 
         Dim 启动文件 = My.Application.取出待处理启动文件()
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
@@ -352,26 +362,9 @@ Public Class Form1
         If Not String.IsNullOrEmpty(请求文件) Then BeginInvoke(Sub() 打开外部文件(请求文件))
     End Sub
 
-    Private Function 显示外部色彩授权对话框(代码UTF8 As IntPtr, 容量 As UInteger) As Integer
-        If Me.IsDisposed OrElse Not Me.IsHandleCreated OrElse 代码UTF8 = IntPtr.Zero OrElse 容量 = 0 Then Return 0
-        If Me.InvokeRequired Then
-            Return CInt(Me.Invoke(New Func(Of Integer)(Function() 显示外部色彩授权对话框(代码UTF8, 容量))))
-        End If
-        Dim 正文指针 = FFF3FP_GetColorExtensionStatusText(扩展授权文本用途, 0UI)
-        Dim 标题指针 = FFF3FP_GetColorExtensionStatusText(扩展授权文本用途, 1UI)
-        If 正文指针 = IntPtr.Zero OrElse 标题指针 = IntPtr.Zero Then Return 0
-        Dim 代码 = LakeUI.ExInputBox(Me, Marshal.PtrToStringUTF8(正文指针), Marshal.PtrToStringUTF8(标题指针))
-        If String.IsNullOrWhiteSpace(代码) Then Return 0
-        代码 = 代码.Trim()
-        Dim utf8 = System.Text.Encoding.UTF8.GetBytes(代码 & ChrW(0))
-        If utf8.Length > 容量 Then Return 0
-        Marshal.Copy(utf8, 0, 代码UTF8, utf8.Length)
-        Return 1
-    End Function
 
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
         正在关闭 = True
-        FFF3FP_SetColorExtensionAuthorizationPrompt(Nothing)
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
@@ -386,6 +379,13 @@ Public Class Form1
                     New EventHandler(Of 播放器媒体事件参数)(AddressOf 视图旋转控制器.媒体已打开)
             End If
             视图旋转控制器.Dispose()
+        End If
+        If 视频超分辨率控制器 IsNot Nothing Then
+            If 播放控制器 IsNot Nothing Then
+                RemoveHandler 播放控制器.媒体已打开,
+                    New EventHandler(Of 播放器媒体事件参数)(AddressOf 视频超分辨率控制器.媒体已打开)
+            End If
+            视频超分辨率控制器.Dispose()
         End If
         光盘控制器?.Dispose()
         画面菜单控制器?.Dispose()
@@ -557,6 +557,22 @@ Public Class Form1
         Text = 光盘标题
         界面呈现器.媒体已打开(e.保留剪辑区间)
         界面呈现器.更新媒体信息(e.媒体信息, e.快照)
+        ' IAMF 空间音频声明（docs/52 验收 #6 的产品拍板：UI 声明即可）。
+        ' 调试层的"声场："行要手动开信息层才可见；libiamf 接管与否决定用户听到
+        ' 的是沉浸声渲染还是降级下混，值得在打开媒体时主动声明一次。
+        ' 内容声道数小于渲染目标时补一句（libiamf 对缺失声道填数字静音），
+        ' 避免 7.1 素材被声明成 7.1.4 而四只顶置音箱实际无声。
+        If e.快照 IsNot Nothing AndAlso e.快照.IAMF已接管 Then
+            Dim 布局 = e.快照.IAMF布局名
+            Dim 声明 = If(String.IsNullOrEmpty(布局),
+                $"IAMF 空间音频 · {e.快照.IAMF声道数} 声道",
+                $"IAMF 空间音频 · {布局}（{e.快照.IAMF声道数} 声道）")
+            If e.快照.IAMF内容声道数 > 0 AndAlso
+                e.快照.IAMF内容声道数 < e.快照.IAMF声道数 Then
+                声明 &= $"，内容 {e.快照.IAMF内容声道数} 声道"
+            End If
+            信息图层呈现器?.显示操作信息(声明, &HFF55E7EAUI, "IAMF")
+        End If
         视角360控制器?.媒体已打开(e.文件路径, e.媒体信息, e.快照)
         图片浏览控制器?.媒体已打开(e.媒体信息, e.快照)
         界面呈现器.设置图片模式(图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.图片模式已启用)

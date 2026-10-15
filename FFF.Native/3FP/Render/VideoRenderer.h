@@ -4,8 +4,8 @@
 #include "3FP/Hdr/HdrProcessor.h"
 #include "3FP/Hdr/HdrToneCurve.h"
 
-#include <cstdint>
 #include <array>
+#include <cstdint>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -29,6 +29,7 @@ struct ID3D11PixelShader;
 struct ID3D11SamplerState;
 struct ID3D11Buffer;
 struct ID3D11Texture2D;
+struct ID3D11Texture3D;
 struct ID3D11RenderTargetView;
 struct ID3D11ShaderResourceView;
 struct ID3D11VideoDevice;
@@ -134,6 +135,10 @@ inline constexpr float kDynamicWindowBlend = 0.05f;
 //   row 2: windowMin0.xy, windowMax0.xy               (16)
 //   row 3: windowMin1.xy, windowMax1.xy               (16)
 //   row 4: windowMin2.xy, windowMax2.xy               (16)
+//   row 5: transformEnabled, transformDomain, lutBound, pad (16)
+//   row 6: outputMatrixRows[0][0..2], pad             (16)
+//   row 7: outputMatrixRows[1][0..2], pad             (16)
+//   row 8: outputMatrixRows[2][0..2], pad             (16)
 struct DynamicShaderSettings {
     std::uint32_t enabled = 0, windowCount = 1, flags = 0;
     float windowBlend = 0.0f;
@@ -142,8 +147,25 @@ struct DynamicShaderSettings {
     float windowMin0[2] = {}, windowMax0[2] = {};
     float windowMin1[2] = {}, windowMax1[2] = {};
     float windowMin2[2] = {}, windowMax2[2] = {};
+    // Caller-supplied colour transform (FFF3FP_SetDynamicMetadata kind 3). Rows
+    // 5..8 are appended, so the ST 2094 rows above keep their offsets and the
+    // two features cannot shift each other's fields.
+    std::uint32_t transformEnabled = 0;  // 0 = no transform this frame
+    std::uint32_t transformDomain = 0;   // payload lutDomain: 0 = coded components, 1 = coded RGB
+    std::uint32_t transformLutBound = 0; // 1 = the 3-D LUT is bound at t4
+    std::uint32_t transformPad0 = 0;
+    // Row-major output matrix (out = M * rgb) applied to the linear-light signal
+    // after transfer decoding, before gamut conversion. All-zero = identity, so
+    // the uploader normalises an all-zero payload to the identity matrix.
+    // Three padded register rows, deliberately NOT a flat float[9]: the
+    // shader reads each float4 row's .xyz, so a compact array would put m3
+    // into TransformMatrix0.w -- a component nothing reads -- and shift rows
+    // 1 and 2 by one float each. sizeof is 144 either way, so only
+    // tools/check_shader_cbuffer_layout.py can tell the two apart.
+    float outputMatrixRows[3][4] = {};
 };
-static_assert(sizeof(DynamicShaderSettings) == 80);
+static_assert(sizeof(DynamicShaderSettings) == 144,
+    "DynamicShaderSettings must stay in lockstep with the HLSL DynamicSettings cbuffer");
 
 class PlayerVideoRenderer final {
 public:
@@ -198,6 +220,37 @@ public:
     FFFResult SetFitLimitToNative(bool enable) noexcept;
     // Presentation policy toggle (PlayerApi exports FFF3FP_SetPresentConfig).
     FFFResult SetPresentConfig(bool enableTearing) noexcept;
+    // Presentation cadence lock (PlayerApi exports FFF3FP_GetPresentPacingStatus). The
+    // presenter snaps each flip to the display's own refresh grid, recovered from the swap
+    // chain's frame statistics, so a 60 fps source on a 144 Hz panel is held 2,2,3,2,3
+    // refreshes in a predictable cycle instead of whichever integer the arrival phase
+    // happened to hand out. The window's flip rate is bounded by min(panel rate, content
+    // rate) -- always, with nothing to configure; see FrameRateBoundHz.
+    // The source frame period, in 100 ns, handed over by the session for each frame it
+    // releases. Zero means "unknown", which leaves the panel rate as the only bound.
+    void SetContentFramePeriod100ns(std::int64_t period100ns) noexcept;
+    // The bound currently in force, in Hz, derived on demand from the same two inputs the
+    // presenter uses so the reading cannot drift out of step with the rule.
+    double FrameRateBoundHz() const noexcept;
+    // The display side of that min(): the panel rate the presenter paces to (measured when
+    // calibrated, otherwise declared). The session needs this on its own, not folded into
+    // the bound, because "content is faster than the panel" is a *reason* for discarding a
+    // frame and it has to be told apart from "the pipeline fell behind the media clock".
+    double DisplayCadenceHz() const noexcept;
+    struct PresentPacingStatus {
+        float declaredRefreshHz = 0.0f;
+        float measuredRefreshHz = 0.0f;
+        float frameRateBoundHz = 0.0f;
+        std::uint32_t gridLocked = 0;
+        std::uint32_t pacingBypass = 0;
+        std::int64_t lastSlotError100ns = 0;
+        // Displayed outcome, counted off PresentRefreshCount: how many flips were held for
+        // either rounding (floor or ceiling) of the refresh count the cadence asked for.
+        std::uint64_t holdSampled = 0;
+        std::uint64_t holdWithinRounding = 0;
+        std::uint64_t holdWorstDeviationRefreshes = 0;
+    };
+    PresentPacingStatus QueryPresentPacing() const noexcept;
     // Render-target diagnostics for the managed API surface
     // (PlayerApi exports FFF3FP_GetRenderTargetInfo). Reports the current
     // swap-chain / client / video-destination sizes so the App can position
@@ -317,7 +370,7 @@ public:
     void FillVideoSuperResolutionStatus(FFF3FPVideoSuperResolutionStatus& status) const noexcept;
     std::string FallbackReason() const;
     std::string LastError() const;
-    // ST 2094-40 injection, new with this change. The HdrProcessor owns the
+    // ST 2094-40 injection. The HdrProcessor owns the
     // table; the renderer forwards so PlayerSession has a single entry point.
     FFFResult SetInjectedHdrMetadata(const FFF3FPHdrDynamicMetadataEntry* entries,
         std::uint32_t count) noexcept;
@@ -398,11 +451,6 @@ private:
     FFFResult DrawWithShader(ID3D11RenderTargetView* target, float x, float y,
         float width, float height, std::uint32_t effect = 0,
         ID3D11ShaderResourceView* const* sourceViews = nullptr) noexcept;
-    bool UploadExtensionEnhancement(const AVFrame* frame) noexcept;
-    bool ReconstructExtensionEnhancement(std::uint32_t width, std::uint32_t height,
-        std::uint32_t layout, float sampleScale) noexcept;
-    void ReleaseExtensionEnhancement() noexcept;
-    void ReleaseExtensionReconstruction() noexcept;
     // Resamples the decoded frame down to the display size into an internal buffer,
     // returning false when the frame should be uploaded untouched. On true, the
     // caller uploads AdaptivePlanes()/AdaptiveLines() at the requested size.
@@ -502,6 +550,15 @@ private:
     }
     FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
         std::uint64_t renderedVideoGeneration) noexcept;
+    // Cadence lock, called on the presenter thread only. Returns the QPC instant by which
+    // the next flip must be submitted to land on its refresh slot, or 0 meaning
+    // "flip now".
+    std::int64_t AdvancePacingDeadline(std::int64_t nowQpc) noexcept;
+    // Feeds one swap-chain frame-statistics sample into the grid estimate and scores the
+    // last flip against the slot it was aimed at. Plain integers rather than the DXGI
+    // struct so this header stays free of the dxgi includes.
+    void UpdatePresentGrid(std::int64_t syncRefresh, std::int64_t syncQpc,
+        std::int64_t landedRefresh, bool sequenceDisjoint) noexcept;
     FFFResult DrawTimedText(TimedTextLayerSlot slot) noexcept;
     void TimedTextThread() noexcept;
     void StopTimedTextThread() noexcept;
@@ -520,6 +577,12 @@ private:
     bool BuildDynamicToneSettings(const HdrDynamicMetadata& metadata,
         DynamicShaderSettings& settings,
         std::array<float, kDynamicCurveLutWidth * kHdrMaxProcessingWindows>& curves) noexcept;
+    // Fill the kind-3 (caller-supplied colour transform) rows of `settings` and
+    // upload the 3-D LUT when the table changed. Returns true when a transform
+    // is in force for this frame; the b2 rows stay zero otherwise. Call with the
+    // device lock held (it uploads on the immediate context).
+    bool BuildColorTransformSettings(const HdrFrameState& hdrState,
+        DynamicShaderSettings& settings) noexcept;
     void ClearSurface() noexcept;
     void ReleaseDeviceObjects() noexcept;
     void RequestDeviceRecovery(long result, const char* operation) noexcept;
@@ -539,23 +602,8 @@ private:
     ID3D11VertexShader* vertexShader_;
     ID3D11PixelShader* pixelShader_;
     ID3D11PixelShader* sdrPixelShaders_[3]{};
-    ID3D11PixelShader* extensionShader_ = nullptr;
-    ID3D11Buffer* extensionConstants_ = nullptr;
-    ID3D11Texture2D* extensionEnhancementTextures_[3]{};
-    ID3D11ShaderResourceView* extensionEnhancementViews_[3]{};
-    std::uint32_t extensionEnhancementWidth_ = 0, extensionEnhancementHeight_ = 0;
-    bool extensionEnhancementSemiplanar_ = false;
-    ID3D11ComputeShader* extensionEnhancementShader_ = nullptr;
-    ID3D11Buffer* extensionEnhancementConstants_ = nullptr;
-    ID3D11Texture2D* extensionReconstructedTextures_[3]{};
-    ID3D11ShaderResourceView* extensionReconstructedViews_[3]{};
-    ID3D11UnorderedAccessView* extensionReconstructedOutputs_[3]{};
-    std::uint32_t extensionReconstructedWidth_ = 0, extensionReconstructedHeight_ = 0;
-    bool extensionReconstructed_ = false;
     std::uint32_t cachedOriginalInputLayout_ = 0;
     float cachedOriginalSampleScale_ = 1;
-    bool extensionAttempted_ = false;
-    bool extensionEligible_ = false;
     ID3D11PixelShader* coverBackdropPixelShader_;
     ID3D11PixelShader* timedTextPixelShader_;
     ID3D11PixelShader* scalePixelShader_;
@@ -572,6 +620,23 @@ private:
     ID3D11Texture2D* dynamicCurveTexture_ = nullptr;
     ID3D11ShaderResourceView* dynamicCurveView_ = nullptr;
     bool dynamicCurveBuilt_ = false;
+    // Caller-supplied colour transform (kind 3): one 33^3 R32G32B32_FLOAT 3-D
+    // lookup table, bound at t4 and sampled trilinearly through the same clamped
+    // linear sampler as the curve LUT. Optional like the ST 2094 resources: when
+    // it cannot be created, transformLutBuilt_ stays false, the kind-3 rows of
+    // b2 stay zero and the shader takes its original path.
+    ID3D11Texture3D* transformLutTexture_ = nullptr;
+    ID3D11ShaderResourceView* transformLutView_ = nullptr;
+    bool transformLutBuilt_ = false;
+    // The payload whose table is currently resident in transformLutTexture_.
+    // Comparing the shared_ptr keeps a static table at one upload per install
+    // instead of 421 KB per frame; cleared on device teardown so a recreated
+    // texture always receives a fresh upload.
+    std::shared_ptr<const FFF3FPColorTransformPayload> uploadedTransform_;
+    // Mirrors DynamicShaderSettings::transformEnabled of the last refresh, so the
+    // SDR layout specialisation (which fixes InputLayout/ColorMode/Transfer/Gamut
+    // at compile time) can be skipped while a transform is in force.
+    bool cachedTransformEnabled_ = false;
     // Raised when the injected ST 2094 table is installed or cleared, consumed on the
     // present path so the refresh happens under the device lock instead of racing the
     // presentation pump.
@@ -668,6 +733,56 @@ private:
     // every chain creation, so a merged variable would lose the request on re-creation.
     // Atomic: written on the session worker thread, read on the presenter thread.
     std::atomic<bool> tearingRequested_{ false };
+    // ---- Presentation cadence lock (see FrameRateBoundHz) ----
+    // Written on the session/API thread, read on the presenter thread.
+    std::atomic<std::int64_t> contentPeriod100ns_{ 0 };
+    // Set by every chain creation, consumed by the presenter thread: the grid counts
+    // restart with the chain, so a delta across the swap would misaim every slot.
+    std::atomic<bool> gridResetRequested_{ true };
+    // Grid state. Touched only on the presenter thread -- TimedTextThread is the sole
+    // caller of PresentTimedText, and PresentCurrentFrame runs inside it -- so these need
+    // no lock against each other. The four below are mirrored into atomics after each
+    // flip so the API thread can read them without taking presentMutex_, which the
+    // presenter holds across a blocking Present.
+    std::int64_t gridOriginQpc_ = 0;         // QPC sample paired with gridOriginRefresh_
+    std::uint64_t gridOriginRefresh_ = 0;    // SyncRefreshCount at that sample
+    double gridPeriodQpc_ = 0.0;             // QPC ticks per refresh; 0 = not calibrated
+    std::uint64_t nextSlotRefresh_ = 0;      // grid slot the next flip should land on
+    std::int64_t aimedRefresh_ = 0;          // slot the flip in flight was aimed at
+    std::int64_t aimedSlotQpc_ = 0;          // that slot's own grid instant, in QPC ticks
+    std::int64_t aimedSubmitQpc_ = 0;        // slot minus the lead: when the submit should happen
+    // The instant this thread actually handed the flip to Present, recorded immediately
+    // before the call. Scored against aimedSlotQpc_ because that is the only quantity the
+    // lock controls; DXGI's SyncQPCTime is when the scheduler sampled, not when we submitted.
+    std::int64_t lastSubmitQpc_ = 0;
+    // Displayed-outcome accounting. Submitting on the aimed slot is only the lock's half of
+    // the job; whether the panel then held the frame for the number of refreshes asked for is
+    // the half the eye actually sees, and it is read from PresentRefreshCount -- the vblank on
+    // which the chain's last image reached the monitor. Two consecutive reads of it differ by
+    // the refreshes the earlier flip was on screen for.
+    std::int64_t lastLandedRefresh_ = 0;
+    std::int64_t aimedSlots_ = 0;              // slots the flip in flight was meant to own
+    // The fractional number of refreshes the flip in flight was *supposed* to occupy
+    // (content period / panel period, e.g. 2.4 for 60 fps on 144 Hz). Its floor and ceiling
+    // bound every hold the eye can accept as steady, and that band is what the hold counter
+    // is scored against -- deliberately not "equal to the aim": deciding which flip a given
+    // PresentRefreshCount delta belongs to needs an alignment between two counter series,
+    // and two different alignments were tried and both stayed near 30-47% while the panel
+    // average was exactly 2.4. A rounding band is the same judgement without depending on
+    // that alignment being right.
+    double aimedSlotRatio_ = 0.0;
+    std::atomic<std::uint64_t> holdSampled_{ 0 };
+    std::atomic<std::uint64_t> holdWithinRounding_{ 0 };
+    std::atomic<std::uint64_t> holdWorstDeviation_{ 0 };
+    std::int64_t lastSyncRefresh_ = 0;       // previous frame-statistics sample pair
+    std::int64_t lastSyncQpc_ = 0;
+    double slotCarry_ = 0.0;                 // Bresenham remainder, in refresh units
+    std::int64_t lastTargetQpc_ = 0;
+    std::atomic<double> measuredRefreshHz_{ 0.0 };
+    std::atomic<double> declaredRefreshHz_{ 0.0 };
+    std::atomic<std::uint32_t> gridLocked_{ 0 };
+    std::atomic<std::uint32_t> pacingBypass_{ 2 };   // starts "not calibrated yet"
+    std::atomic<std::int64_t> lastSlotError100ns_{ 0 };
     std::atomic<std::uint32_t> swapOutputBits_;
     // Last drawn video destination rect (diagnostics),
     // recorded by DrawCachedVideo after each successful shader draw.

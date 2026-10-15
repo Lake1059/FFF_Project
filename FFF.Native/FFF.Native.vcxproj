@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
+    <!-- 只保留 x64。Win32 配置早已无法构建（缺 3FP 包含目录、缺 iamf.lib），
+         却仍带着 FFF_WITH_LIBIAMF=1 的定义，容易让人误以为存在两条可用产线。
+         本项目在任何地方都不产出 32 位二进制，删掉可消除这一误导。 -->
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
       <Platform>x64</Platform>
@@ -114,7 +117,7 @@
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(LibiamfRoot)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>iamf.lib;oar.lib;obr_capi.lib;obr.lib;pffft.lib;FLAC.lib;opus.lib;fdk-aac.lib;absl\absl_base.lib;absl\absl_city.lib;absl\absl_civil_time.lib;absl\absl_cord_internal.lib;absl\absl_cord.lib;absl\absl_cordz_functions.lib;absl\absl_cordz_handle.lib;absl\absl_cordz_info.lib;absl\absl_crc_cord_state.lib;absl\absl_crc_cpu_detect.lib;absl\absl_crc_internal.lib;absl\absl_crc32c.lib;absl\absl_debugging_internal.lib;absl\absl_decode_rust_punycode.lib;absl\absl_demangle_internal.lib;absl\absl_demangle_rust.lib;absl\absl_die_if_null.lib;absl\absl_examine_stack.lib;absl\absl_exponential_biased.lib;absl\absl_graphcycles_internal.lib;absl\absl_hash.lib;absl\absl_hashtablez_sampler.lib;absl\absl_int128.lib;absl\absl_kernel_timeout_internal.lib;absl\absl_leak_check.lib;absl\absl_log_globals.lib;absl\absl_log_internal_check_op.lib;absl\absl_log_internal_conditions.lib;absl\absl_log_internal_fnmatch.lib;absl\absl_log_internal_format.lib;absl\absl_log_internal_globals.lib;absl\absl_log_internal_log_sink_set.lib;absl\absl_log_internal_message.lib;absl\absl_log_internal_nullguard.lib;absl\absl_log_internal_proto.lib;absl\absl_log_internal_structured_proto.lib;absl\absl_log_severity.lib;absl\absl_log_sink.lib;absl\absl_low_level_hash.lib;absl\absl_malloc_internal.lib;absl\absl_raw_hash_set.lib;absl\absl_raw_logging_internal.lib;absl\absl_spinlock_wait.lib;absl\absl_stacktrace.lib;absl\absl_status.lib;absl\absl_statusor.lib;absl\absl_str_format_internal.lib;absl\absl_strerror.lib;absl\absl_string_view.lib;absl\absl_strings_internal.lib;absl\absl_strings.lib;absl\absl_symbolize.lib;absl\absl_synchronization.lib;absl\absl_throw_delegate.lib;absl\absl_time_zone.lib;absl\absl_time.lib;absl\absl_tracing_internal.lib;absl\absl_utf8_for_code_point.lib;absl\absl_vlog_config_internal.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>iamf.lib;oar.lib;obr_capi.lib;obr.lib;pffft.lib;FLAC.lib;opus.lib;absl\absl_base.lib;absl\absl_city.lib;absl\absl_civil_time.lib;absl\absl_cord_internal.lib;absl\absl_cord.lib;absl\absl_cordz_functions.lib;absl\absl_cordz_handle.lib;absl\absl_cordz_info.lib;absl\absl_crc_cord_state.lib;absl\absl_crc_cpu_detect.lib;absl\absl_crc_internal.lib;absl\absl_crc32c.lib;absl\absl_debugging_internal.lib;absl\absl_decode_rust_punycode.lib;absl\absl_demangle_internal.lib;absl\absl_demangle_rust.lib;absl\absl_die_if_null.lib;absl\absl_examine_stack.lib;absl\absl_exponential_biased.lib;absl\absl_graphcycles_internal.lib;absl\absl_hash.lib;absl\absl_hashtablez_sampler.lib;absl\absl_int128.lib;absl\absl_kernel_timeout_internal.lib;absl\absl_leak_check.lib;absl\absl_log_globals.lib;absl\absl_log_internal_check_op.lib;absl\absl_log_internal_conditions.lib;absl\absl_log_internal_fnmatch.lib;absl\absl_log_internal_format.lib;absl\absl_log_internal_globals.lib;absl\absl_log_internal_log_sink_set.lib;absl\absl_log_internal_message.lib;absl\absl_log_internal_nullguard.lib;absl\absl_log_internal_proto.lib;absl\absl_log_internal_structured_proto.lib;absl\absl_log_severity.lib;absl\absl_log_sink.lib;absl\absl_low_level_hash.lib;absl\absl_malloc_internal.lib;absl\absl_raw_hash_set.lib;absl\absl_raw_logging_internal.lib;absl\absl_spinlock_wait.lib;absl\absl_stacktrace.lib;absl\absl_status.lib;absl\absl_statusor.lib;absl\absl_str_format_internal.lib;absl\absl_strerror.lib;absl\absl_string_view.lib;absl\absl_strings_internal.lib;absl\absl_strings.lib;absl\absl_symbolize.lib;absl\absl_synchronization.lib;absl\absl_throw_delegate.lib;absl\absl_time_zone.lib;absl\absl_time.lib;absl\absl_tracing_internal.lib;absl\absl_utf8_for_code_point.lib;absl\absl_vlog_config_internal.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -131,8 +134,6 @@
     <ClInclude Include="3FP\Hdr\HdrMetadataParse.h" />
     <ClInclude Include="3FP\Hdr\HdrToneCurve.h" />
     <ClInclude Include="3FP\Render\ShaderBytecode.h" />
-    <ClInclude Include="3FP\Render\ColorExtensionApi.h" />
-    <ClInclude Include="3FP\Render\ColorExtension.h" />
     <ClInclude Include="3FP\Render\VideoRenderer.h" />
     <ClInclude Include="3FR\Api\FFF.Native.Api.h" />
     <ClInclude Include="3FR\Audio\AudioTrackEncoder.h" />
@@ -192,5 +193,31 @@
 
   <Target Name="FailIfLibiamfMissing" Condition="'$(FFF_FORCE_LIBIAMF)'=='true' And '$(HaveLibiamf)'!='true'" BeforeTargets="PrepareForBuild">
     <Error Text="缺少 libiamf 头文件或导入库（$(LibiamfRoot)），无法满足 FFF_FORCE_LIBIAMF=true。请先运行 tools\准备Libiamf.ps1。" />
+  </Target>
+  <!-- ════════════════════════════════════════════════════════════════════════════════
+       构建后自动把内核 DLL 同步到 3fp\build\。
+
+       为什么必须自动化：`3fp\build\FFF.Native.dll` 是所有探针读取的副本，但它**不是**
+       构建产物 —— 历史上靠人工拷贝。2026-10-07/08 这个人工步骤造成了两次真实事故：
+
+         · W-1（交付级）：build\ 副本停留在**修复前**二进制，于是"修复后"的测量
+           实际测到的是修复前的 10000，差一步就误判"修复无效"。
+         · 同源错误：用陈旧副本的输出去论证缺陷（vivid_hlg.txt 的 hdrFormat=0 签名），
+           而那不是内核的真实行为。
+
+       根本问题是"同一个逻辑二进制存在两份物理副本，且同步靠人记"。这里把它变成
+       构建的一部分：**MSBuild 走哪条路都会同步**，包括手动调用 MSBuild、
+       以及 tools\build_kernel_manual.py（它是 MSBuild 的薄封装）。
+       ════════════════════════════════════════════════════════════════════════════════ -->
+  <Target Name="SyncKernelToBuildDir" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
+    <PropertyGroup>
+      <_SyncTargetDir>$(ProjectDir)..\..\build</_SyncTargetDir>
+      <_SyncTargetDll>$(_SyncTargetDir)\FFF.Native.dll</_SyncTargetDll>
+    </PropertyGroup>
+    <!-- 目标目录不存在时跳过：3fp\build 是开发/验证目录，干净检出可能没有。 -->
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(_SyncTargetDll)"
+          SkipUnchangedFiles="true" Condition="Exists('$(_SyncTargetDir)')" />
+    <Message Importance="high" Condition="Exists('$(_SyncTargetDir)')"
+             Text="已同步内核到验证副本: $(_SyncTargetDll)" />
   </Target>
 </Project>

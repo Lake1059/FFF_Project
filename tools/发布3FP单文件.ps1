@@ -43,6 +43,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "FFF.Player single-file publish failed." }
     $UnexpectedFiles = @(Get-ChildItem -LiteralPath $StagingDirectory -File | Where-Object { $_.Name -ne "FFF.Player.exe" })
     if ($UnexpectedFiles) { throw "Unexpected files in single-file output: $($UnexpectedFiles.Name -join ', ')" }
+    # 侵权护栏（tripwire）：单文件 bundle 由 GenerateSingleFileBundle 生成，vbproj 的
+    # RejectPrivateColorExtensionPublish（BeforeTargets=GenerateSingleFileBundle）已拦一道；
+    # 这里再查一次 staging 做双保险。旧商标名 FFF.DolbyVision.Test.dll 永不入包；
+    # 中性模块 FFF.HDRdp.Test.dll 按设计放行（条件精确匹配旧名，不误伤新名）。
+    $ForbiddenLegacy = @(Get-ChildItem -LiteralPath $StagingDirectory -Filter "FFF.DolbyVision.Test.dll" -File -ErrorAction SilentlyContinue)
+    if ($ForbiddenLegacy.Count -gt 0) {
+        throw "侵权护栏：staging 目录出现旧商标私有 DLL FFF.DolbyVision.Test.dll（$($ForbiddenLegacy.FullName -join ', ')）——必须移除；中性模块请使用 FFF.HDRdp.Test.dll。"
+    }
     $PublishedExecutable = Join-Path $StagingDirectory "FFF.Player.exe"
     if (-not (Test-Path -LiteralPath $PublishedExecutable -PathType Leaf)) { throw "FFF.Player.exe is missing from publish output." }
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null

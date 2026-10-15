@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 
 extern "C" {
@@ -155,6 +157,54 @@ void ReorderFromIamfToChannelLayout(std::uint8_t* const interleaved,
 constexpr int DefaultSoundSystemIndex = 5;   // F (3+7+0) = 12 channels = 7.1.4
 
 } // namespace
+
+// Process log sink, defined in 3FP/Api/PlayerApi.cpp. Declared here (plain C++
+// symbol, as VideoRenderer.cpp and PlayerSession.cpp do) instead of included so
+// this translation unit keeps no dependency on the API header.
+void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept;
+
+#if FFF_WITH_LIBIAMF
+// libiamf and its oar renderer dependency write every diagnostic through one
+// application-supplied sink, `log_impl`, declared by oar's clog.h as
+//
+//     void log_impl(const char* tag, log_level_t level, const char* module,
+//                   const char* function, int line, const char* fmt, ...);
+//
+// with log_level_t { fatal=0, error=1, warn=2, info=3, debug=4, trace=5 }
+// (levels enumerated in the shipped clog.h, so the callback has a level
+// parameter and filtering is by level, not by pattern matching the text).
+// When the application does not supply it, the archive's own copy prints
+// warn and above straight to stderr -- which is how the flood happens:
+// libiamf is recoverably chatty at WARN. "Substream ID 4 already has an audio
+// frame OBU" is the canonical example: libiamf drops the duplicate audio
+// frame OBU and keeps decoding, the stream plays fine, and the caller already
+// learns about real failures through the error string of the operation.
+//
+// Policy: warn and below (warn/info/debug/trace) are dropped -- upstream
+// library noise, recoverable, nothing is lost. Fatal and error are kept but
+// tagged "libiamf:" so the host can tell them from kernel lines, and they go
+// through the same process-wide sink every other component uses
+// (FFF3FP_KernelLogImpl, declared the same way PlayerSession and
+// VideoRenderer do it). Only the libiamf path is filtered; FFmpeg's own log
+// callbacks and every other kernel line are untouched.
+//
+// The signature is fixed by the library: `level` is an int-sized enum and the
+// formatted message is built here (vsnprintf into a stack buffer) so nothing
+// allocates on the decode thread.
+extern "C" void log_impl(const char* tag, const int level, const char* module,
+    const char* function, const int line, const char* format, ...) noexcept {
+    (void)tag; (void)module; (void)function; (void)line;
+    if (format == nullptr || level > 1) return;   // keep only fatal/error
+    char message[1024]{};
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    char entry[1064]{};
+    std::snprintf(entry, sizeof(entry), "libiamf: %s", message);
+    FFF3FP_KernelLogImpl(entry);
+}
+#endif
 
 IamfAudioDecoder::IamfAudioDecoder() = default;
 

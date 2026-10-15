@@ -81,6 +81,10 @@ public:
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
     FFFResult SetPresentConfig(bool enableTearing) noexcept;
+    // Cadence read-back (PlayerApi exports FFF3FP_GetPresentPacingStatus). Non-queueing:
+    // the renderer publishes these from atomics. The flip-rate bound itself is automatic
+    // (min of panel rate and content rate) and has no setter.
+    FFFResult GetPresentPacingStatus(FFF3FPPresentPacingStatus& status) noexcept;
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
     FFFResult SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
@@ -142,6 +146,13 @@ public:
     FFFResult SetDynamicMetadata(const FFF3FPDynamicMetadataPacket* packets,
         std::uint32_t count) noexcept;
     FFFResult ClearDynamicMetadata(std::uint32_t kind) noexcept;
+    // Neutral frame side-data ring (see FFF3FP_CopyFrameSideDataAfter in the
+    // API header): hands back the untouched bytes a presented frame carried,
+    // keyed by the presentation index the injection rule uses. The session
+    // neither parses them nor knows what produced them.
+    FFFResult CopyFrameSideDataAfter(std::uint32_t sideDataType,
+        std::int64_t fromFrameIndex, void* buffer, std::uint32_t capacity,
+        std::uint32_t& writtenSize, std::int64_t& foundFrameIndex) noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
 
@@ -161,6 +172,13 @@ private:
     void Worker() noexcept;
     void PumpPlayback() noexcept;
     bool VideoQueueSaturated() const noexcept;
+    // Decoded pictures the decoder is holding right now, charged against the same
+    // memory budget as the queue. Non-zero only for an animated image whose decoder
+    // actually ended up running frame threads.
+    std::size_t VideoQueuePipelineReservation() const noexcept;
+    // VideoFrameQueueLimit for this session, i.e. the queue depth the 128 MB budget
+    // allows once the pipeline reservation above is subtracted.
+    std::size_t VideoQueueLimit() const noexcept;
     void TryCompletePlaybackPreroll() noexcept;
     void UpdateDrainedAudioClock() noexcept;
     void DrainInternalAudio() noexcept;
@@ -222,18 +240,13 @@ private:
     void BuildImageInfo(FFF3FPImageInfo& info) const noexcept;
     FFFResult LoadCoverArt() noexcept;
     FFFResult DecodePacket(AVCodecContext* decoder, AVPacket* packet, bool video,
-        AVFormatContext* owner, bool decodeEnhancement = true) noexcept;
-    FFFResult ConfigureDolbyVisionEnhancementDecoder() noexcept;
-    void DecodeDolbyVisionEnhancementPacket(const AVPacket* packet) noexcept;
-    void DrainDolbyVisionEnhancementDecoder() noexcept;
-    void ClearDolbyVisionEnhancementFrames() noexcept;
-    void ResetDolbyVisionEnhancementDecoder() noexcept;
-    void FlushDolbyVisionEnhancementDecoder() noexcept;
-    void AttachDolbyVisionEnhancementFrame(AVFrame* base) noexcept;
-    bool DolbyVisionEnhancementNeedsReadAhead() const noexcept;
+        AVFormatContext* owner) noexcept;
     bool PumpVideoPresentation() noexcept;
     void QueueVideoFrame(AVFrame* frame) noexcept;
     void ClearVideoQueue() noexcept;
+    // Copies the side data of one about-to-be-presented frame into the ring.
+    void CacheFrameSideData(const AVFrame* frame, std::int64_t frameIndex) noexcept;
+    void ClearSideDataRing() noexcept;
     void ClearPendingPackets() noexcept;
     static void ClearPacketQueue(std::deque<AVPacket*>& queue, std::size_t& bytes) noexcept;
     void DecodePendingPacket(bool video) noexcept;
@@ -299,18 +312,16 @@ private:
     // reuse after av_packet_unref/av_frame_unref, avoiding per-packet heap churn
     // on both the audio and video decode paths.
     AVPacket* playbackPacket_;
+    // A still image's one packet, kept so a hardware decode that is rejected only at
+    // decode time can be retried on the CPU decoder: image2/*_pipe demuxers have no
+    // timeline to seek back to, so the packet would otherwise be gone.
+    AVPacket* stillImagePacket_;
     AVPacket* externalAudioPacket_;
     AVFrame* videoDecodeFrame_;
     AVFrame* videoTransferFrame_;
     AVFrame* audioDecodeFrame_;
     AVFrame* externalAudioDecodeFrame_;
     AVCodecContext* videoDecoder_;
-    AVBSFContext* dolbyVisionEnhancementBsf_;
-    AVCodecContext* dolbyVisionEnhancementDecoder_;
-    AVFrame* dolbyVisionEnhancementDecodeFrame_;
-    bool dolbyVisionEnhancementSoftwareOnly_ = false;
-    bool dolbyVisionEnhancementRecoveryPending_ = false;
-    std::map<std::int64_t, AVFrame*> dolbyVisionEnhancementFrames_;
     AVCodecContext* audioDecoder_;
     // Set when the audio track is IAMF and the AOM reference decoder took over
     // from FFmpeg. Null for every other codec, which keeps the ordinary path
@@ -405,6 +416,10 @@ private:
     std::int64_t seekTargetFrame_;
     bool keyframeSeekPending_;
     std::int64_t lastVideoFrameDuration100ns_;
+    // Frames discarded because the source delivers faster than the panel can scan out, kept
+    // apart from snapshot_.droppedVideoFrames (which means "the pipeline fell behind the
+    // media clock"). Read from the API thread, written on the worker thread.
+    std::atomic<std::uint64_t> displayRateDiscardedFrames_{ 0 };
     std::int64_t nextUntimedVideoPosition100ns_;
     std::deque<std::int64_t> framePtsIndex_;
     std::int64_t framePtsIndexBase_;
@@ -415,6 +430,23 @@ private:
     bool audioResumePendingAfterVideoFrame_;
     std::deque<AVFrame*> videoFrameQueue_;
     std::vector<AVFrame*> videoFramePool_;
+    // --- Frame side-data ring (see CopyFrameSideDataAfter) ---
+    // Written on the worker thread as frames are presented, read on the API
+    // thread; sideDataMutex_ is the only synchronisation between them. Entries
+    // are dropped at every queue flush (seek, decoder reopen, device recovery,
+    // close), because the presentation index restarts there -- an old entry
+    // would then be keyed to a frame that no longer means what it said.
+    struct SideDataBlob {
+        std::uint32_t type;               // AVFrameSideDataType value, opaque here
+        std::vector<std::uint8_t> bytes;
+    };
+    struct CachedSideDataFrame {
+        std::int64_t frameIndex;
+        std::vector<SideDataBlob> blobs;
+    };
+    std::deque<CachedSideDataFrame> sideDataRing_;
+    std::size_t sideDataRingBytes_ = 0;   // blob payload only
+    mutable std::mutex sideDataMutex_;
     std::deque<AVPacket*> pendingVideoPackets_;
     std::size_t pendingVideoPacketBytes_;
     std::deque<AVPacket*> pendingAudioPackets_;
@@ -437,6 +469,10 @@ private:
     // not a still image, but it is still a picture: it must show its first frame
     // while stopped and it must report the animated flag.
     bool animatedImage_;
+    // Last [queue] trace values, so an animation logs its depth accounting once per
+    // distinct combination instead of once per pump. Worker thread only.
+    mutable std::int64_t tracedQueuePipelineFrames_ = -1;
+    mutable std::int64_t tracedQueueLimit_ = -1;
     // APNG and AVIF/HEIC rewind per pass; reset this policy when reusing a session.
     bool sessionWrapLoop_;
     // Consecutive failed wrap-around seeks. A seek that is refused while the

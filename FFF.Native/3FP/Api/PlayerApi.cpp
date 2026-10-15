@@ -3,14 +3,12 @@
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Render/VideoRenderer.h"
-#include "3FP/Render/ColorExtension.h"
 #include "3FP/Subtitle/SubtitleProbe.h"
 
 #include <cmath>
 #include <atomic>
 
 namespace {
-using PlayerMediaText::CopyUtf8;
 // Configuration layout and version must match the public header exactly.
 // Bumped 14 -> 15 because FFF3FPConfiguration gained the preferredAdapterIndex
 // field. FFF3FP_Create rejects a mismatched version outright, so
@@ -33,6 +31,7 @@ using PlayerMediaText::CopyUtf8;
 // VSR and view rotation are deliberately NOT part of this contract: they are
 // appended exports, so a host that knows only the current version keeps working
 // unchanged.
+using PlayerMediaText::CopyUtf8;
 constexpr std::uint32_t PlayerApiVersion = 20;
 
 // Process-wide native log sink, installed through FFF3FP_SetLogCallback.
@@ -42,31 +41,32 @@ std::atomic<void*> g_logContext{nullptr};
 }
 
 std::uint32_t FFF3FP_GetApiVersion() noexcept {
-    if (const auto* api = GetColorExtension()) api->requestAuthorizationPrompt();
     return PlayerApiVersion;
 }
 
+// The four exports below are deprecated ABI: the private color-extension module
+// they used to drive no longer exists (and was never shippable), so the
+// capability is permanently absent. The symbols are kept so that existing
+// hosts keep resolving them; they now report "absent" / "unsupported".
 std::int32_t FFF3FP_GetColorExtensionStatus() noexcept {
-    const auto* api = GetColorExtension();
-    return api == nullptr ? 0 : api->getAuthorizationStatus();
+    return 0;
 }
 
 const char* FFF3FP_GetColorExtensionStatusText(std::uint32_t state, std::uint32_t variant) noexcept {
-    const auto* api = GetColorExtension();
-    return api == nullptr ? nullptr : api->getStatusText(state, variant);
+    (void)state;
+    (void)variant;
+    return nullptr;
 }
 
 void FFF3FP_SetColorExtensionAuthorizationPrompt(
     int (__cdecl* callback)(char*, std::uint32_t)) noexcept {
-    if (const auto* api = GetColorExtension()) api->setAuthorizationPrompt(callback);
+    (void)callback;
 }
 
 FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept {
-    const auto* api = GetColorExtension();
-    if (api == nullptr || codeUtf8 == nullptr)
+    if (codeUtf8 == nullptr)
         return FFFResult::InvalidArgument;
-    return api->authenticate(codeUtf8) == 1
-        ? FFFResult::Success : FFFResult::NotSupported;
+    return FFFResult::NotSupported;
 }
 
 // ---- Process-wide native log sink (public surface: FFF3FP_SetLogCallback) ----
@@ -143,6 +143,16 @@ FFFResult FFF3FP_SetPresentConfig(const FFF3FPHandle player, const std::uint32_t
     return player && enableTearing <= 1 ?
         static_cast<PlayerSession*>(player)->SetPresentConfig(enableTearing != 0) :
         FFFResult::InvalidArgument;
+}
+// Presentation cadence lock. Appended after the v20 surface like the readback and VSR
+// entries: additive, so PlayerApiVersion is unchanged and a host built against an older
+// header keeps loading this DLL. There is deliberately no setter -- the window's flip-rate
+// bound is always min(panel rate, content rate) and is not configurable.
+FFFResult FFF3FP_GetPresentPacingStatus(const FFF3FPHandle player,
+    FFF3FPPresentPacingStatus* status) noexcept {
+    return player && status
+        ? static_cast<PlayerSession*>(player)->GetPresentPacingStatus(*status)
+        : FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetInteractiveMove(const FFF3FPHandle player, const std::uint32_t enabled) noexcept {
@@ -376,3 +386,22 @@ FFFResult FFF3FP_GetLastCopyFrameBitDepth(const FFF3FPHandle player,
 // like the VSR, rotation and readback exports, so PlayerApiVersion is unchanged for
 // a host that never resolves this entry point.
 FFFResult FFF3FP_SetAudioDelay(const FFF3FPHandle player, const std::int64_t delay) noexcept { return player ? static_cast<PlayerSession*>(player)->SetAudioDelay(delay) : FFFResult::InvalidArgument; }
+// Neutral frame side-data ring. Additive like the entry points above, so
+// PlayerApiVersion is unchanged and hosts resolve it through GetProcAddress.
+// The side data type is a plain number and the payload is copied untouched:
+// this layer interprets nothing, which is what lets an external module own the
+// format-specific reading.
+FFFResult FFF3FP_CopyFrameSideDataAfter(const FFF3FPHandle player,
+    const std::uint32_t sideDataType, const std::int64_t fromFrameIndex, void* buffer,
+    const std::uint32_t capacity, std::uint32_t* writtenSize,
+    std::int64_t* foundFrameIndex) noexcept {
+    if (player == nullptr || writtenSize == nullptr || foundFrameIndex == nullptr)
+        return FFFResult::InvalidArgument;
+    std::uint32_t written = 0;
+    std::int64_t found = -1;
+    const auto result = static_cast<PlayerSession*>(player)->CopyFrameSideDataAfter(
+        sideDataType, fromFrameIndex, buffer, capacity, written, found);
+    *writtenSize = written;
+    *foundFrameIndex = found;
+    return result;
+}

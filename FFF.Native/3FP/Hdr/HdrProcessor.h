@@ -4,6 +4,7 @@
 #include "3FP/Hdr/HdrDynamicMetadata.h"
 
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -47,16 +48,8 @@ struct HdrFrameState {
     FFF3FPHdrFormat format = FFF3FPHdrFormat::Sdr;
     std::uint32_t compatibility = 0;
     FFF3FPHdrProcessingPath processingPath = FFF3FPHdrProcessingPath::None;
-    std::uint32_t dolbyVisionProfile = 0;
-    std::uint32_t dolbyVisionLevel = 0;
-    bool hasRpu = false;
-    bool hasEnhancementLayer = false;
-    FFF3FPDolbyVisionEnhancementLayer enhancementLayer =
-        FFF3FPDolbyVisionEnhancementLayer::None;
     bool dynamicMetadata = false;
     bool fallback = false;
-    bool externalExtensionAvailable = false;
-    bool externalExtensionActive = false;
     float sourcePeakNits = 100.0f;
     float targetPeakNits = 1000.0f;
     HdrStaticMetadata staticMetadata;
@@ -66,8 +59,8 @@ struct HdrFrameState {
     HdrDynamicMetadata dynamic;
 };
 
-// Owns HDR stream classification, per-frame metadata extraction, Dolby Vision
-// fallback decisions and source/display luminance resolution. AVFrame side data
+// Owns HDR stream classification, per-frame metadata extraction and
+// source/display luminance resolution. AVFrame side data
 // never escapes ProcessFrame, keeping cached renderer state aligned with its frame.
 class HdrProcessor final {
 public:
@@ -84,8 +77,6 @@ public:
     void Reset() noexcept;
 
     HdrFrameState State() const noexcept;
-    void SetExtensionAvailability(bool available) noexcept;
-    void SetExtensionProcessing(float sourcePeakNits, bool active) noexcept;
     bool IsHdrSource() const noexcept;
     bool RequiresMetadataAwareShader() const noexcept;
     void BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) const noexcept;
@@ -107,15 +98,19 @@ public:
     void ClearInjectedMetadata(std::uint32_t kind = 0) noexcept;
     // True when an injected entry is driving the current frame.
     bool InjectedMetadataActive() const noexcept;
+    // The colour-transform payload in force for the current frame, if the chosen
+    // entry is kind 3 (ExternalColorTransform). Returns false when no such entry
+    // is active; on true, `out` holds a shared reference to the table the
+    // renderer uploads. Kept out of HdrFrameState so the ~421 KB payload is
+    // never copied by the by-value frame-state passes.
+    bool ActiveColorTransform(
+        std::shared_ptr<const FFF3FPColorTransformPayload>& out) const noexcept;
 
     static const char* FormatName(FFF3FPHdrFormat format) noexcept;
     static const char* ProcessingPathName(FFF3FPHdrProcessingPath path) noexcept;
-    static const char* EnhancementLayerName(
-        FFF3FPDolbyVisionEnhancementLayer layer) noexcept;
     static std::string CompatibilityNames(std::uint32_t compatibility);
     static FFFResult EvaluateProbe(FFF3FPHdrProcessingProbe& probe) noexcept;
 
-private:
 private:
     // One installed table row. Kind-tagged so the generic carrier and the
     // dedicated ST 2094-40 entry point share one sorted table; only the payload
@@ -125,6 +120,10 @@ private:
         std::int64_t frameIndex = 0;
         FFF3FPHdrDynamicMetadataEntry hdr10Plus{};
         FFF3FPHdrVividMetadataPayload vivid{};
+        // kind == ExternalColorTransform only. Heap-allocated behind a shared_ptr
+        // because the payload is ~421 KB and installing a table must not copy it
+        // per entry; the renderer holds a shared reference for the frame it draws.
+        std::shared_ptr<FFF3FPColorTransformPayload> colorTransform;
     };
     static float ResolveTargetPeak(float overrideNits,
         const HdrDisplayCapabilities& display) noexcept;
@@ -162,4 +161,7 @@ private:
     // it without limit; scene lists are naturally small.
     std::vector<InjectedEntry> injected_;
     bool injectedActive_ = false;
+    // The kind-3 payload in force for the current frame, or null. Mirrors what
+    // ApplyInjectionLocked chose, so the getter needs no second table walk.
+    std::shared_ptr<const FFF3FPColorTransformPayload> activeTransform_;
 };

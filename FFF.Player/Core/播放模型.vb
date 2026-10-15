@@ -27,7 +27,8 @@ Public Enum HDR格式 As UInteger
     HDR10 = 1
     HDR10Plus = 2
     HLG = 3
-    杜比视界 = 4
+    ' DEPRECATED ABI mirror: never produced by the kernel any more.
+    HDRdp = 4
     HDRVivid = 5
 End Enum
 
@@ -36,13 +37,15 @@ Public Enum HDR处理路径 As UInteger
     HDR10静态元数据 = 1
     HDR10Plus动态映射 = 2
     HLG显示器映射 = 3
-    杜比视界兼容基础层回退 = 4
-    杜比视界FEL基础层回退 = 5
+    ' DEPRECATED ABI mirror: never produced by the kernel any more.
+    HDRdp兼容基础层回退 = 4
+    HDRdpFEL基础层回退 = 5
     HDRVivid动态映射 = 6
     外部RPU处理 = 7
 End Enum
 
-Public Enum 杜比视界增强层类型 As UInteger
+' DEPRECATED ABI mirror: never produced by the kernel any more.
+Public Enum HDRdp增强层类型 As UInteger
     无 = 0
     MEL = 1
     FEL = 2
@@ -171,11 +174,12 @@ Public NotInheritable Class 播放器快照
         HDR规格 = CType(值.HDR格式, HDR格式)
         兼容HDR规格 = 值.兼容HDR格式
         HDR处理路径 = CType(值.HDR处理路径, HDR处理路径)
-        杜比视界配置档次 = CInt(值.杜比视界配置档次)
-        杜比视界级别 = CInt(值.杜比视界级别)
-        有杜比视界RPU = 值.有杜比视界RPU <> 0
-        有杜比视界增强层 = 值.有杜比视界增强层 <> 0
-        杜比视界增强层类型 = CType(值.杜比视界增强层类型, 杜比视界增强层类型)
+        ' 以下为废弃 ABI 镜像：内核不再分类，恒为 0 / False / 无。
+        HDRdp配置档次 = CInt(值.HDRdp配置档次)
+        HDRdp级别 = CInt(值.HDRdp级别)
+        有HDRdpRPU = 值.有HDRdpRPU <> 0
+        有HDRdp增强层 = 值.有HDRdp增强层 <> 0
+        HDRdp增强层类型 = CType(值.HDRdp增强层类型, HDRdp增强层类型)
         动态HDR元数据有效 = 值.动态HDR元数据有效 <> 0
         HDR回退有效 = 值.HDR回退有效 <> 0
         显示器最小亮度 = 值.显示器最小亮度毫尼特 / 1000.0F
@@ -238,11 +242,12 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property HDR规格 As HDR格式
     Public ReadOnly Property 兼容HDR规格 As UInteger
     Public ReadOnly Property HDR处理路径 As HDR处理路径
-    Public ReadOnly Property 杜比视界配置档次 As Integer
-    Public ReadOnly Property 杜比视界级别 As Integer
-    Public ReadOnly Property 有杜比视界RPU As Boolean
-    Public ReadOnly Property 有杜比视界增强层 As Boolean
-    Public ReadOnly Property 杜比视界增强层类型 As 杜比视界增强层类型
+    ' DEPRECATED ABI mirror: the kernel no longer classifies these.
+    Public ReadOnly Property HDRdp配置档次 As Integer
+    Public ReadOnly Property HDRdp级别 As Integer
+    Public ReadOnly Property 有HDRdpRPU As Boolean
+    Public ReadOnly Property 有HDRdp增强层 As Boolean
+    Public ReadOnly Property HDRdp增强层类型 As HDRdp增强层类型
     Public ReadOnly Property 动态HDR元数据有效 As Boolean
     Public ReadOnly Property HDR回退有效 As Boolean
     Public ReadOnly Property 显示器最小亮度 As Single
@@ -644,14 +649,15 @@ Public NotInheritable Class 媒体流信息
     Public Property HDR兼容规格 As String = String.Empty
     <JsonPropertyName("hdrProcessingPath")>
     Public Property HDR处理说明 As String = String.Empty
-    <JsonPropertyName("dolbyVisionProfile")>
-    Public Property 杜比视界配置档次 As Integer
-    <JsonPropertyName("dolbyVisionLevel")>
-    Public Property 杜比视界级别 As Integer
-    <JsonPropertyName("dolbyVisionRpu")>
-    Public Property 有杜比视界RPU As Boolean
-    <JsonPropertyName("dolbyVisionEnhancementLayer")>
-    Public Property 杜比视界增强层 As String = String.Empty
+    ' DEPRECATED ABI mirror: always zero now; kept so the JSON schema is stable.
+    <JsonPropertyName("hdrDpProfile")>
+    Public Property HDRdp配置档次 As Integer
+    <JsonPropertyName("hdrDpLevel")>
+    Public Property HDRdp级别 As Integer
+    <JsonPropertyName("hdrDpRpu")>
+    Public Property 有HDRdpRPU As Boolean
+    <JsonPropertyName("hdrDpEnhancementLayer")>
+    Public Property HDRdp增强层 As String = String.Empty
     <JsonPropertyName("hdrFallback")>
     Public Property HDR回退 As Boolean
     <JsonPropertyName("dynamicHdrMetadata")>
