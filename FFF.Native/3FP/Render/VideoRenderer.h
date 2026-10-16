@@ -220,35 +220,75 @@ public:
     FFFResult SetFitLimitToNative(bool enable) noexcept;
     // Presentation policy toggle (PlayerApi exports FFF3FP_SetPresentConfig).
     FFFResult SetPresentConfig(bool enableTearing) noexcept;
-    // Presentation cadence lock (PlayerApi exports FFF3FP_GetPresentPacingStatus). The
-    // presenter snaps each flip to the display's own refresh grid, recovered from the swap
-    // chain's frame statistics, so a 60 fps source on a 144 Hz panel is held 2,2,3,2,3
-    // refreshes in a predictable cycle instead of whichever integer the arrival phase
-    // happened to hand out. The window's flip rate is bounded by min(panel rate, content
-    // rate) -- always, with nothing to configure; see FrameRateBoundHz.
+    // Presentation pacing (PlayerApi exports FFF3FP_GetPresentPacingStatus). This layer only
+    // produces a ceiling: the window's flip rate is bounded by min(declared panel rate,
+    // per-media ceiling), and that ceiling is executed by the presenter's own schedule plus
+    // the vblank clamp that Present(1,0) already applies on a fixed-refresh panel. Nothing
+    // here picks which refresh slot a flip lands on any more. What killed the slot-aiming
+    // system was two measurements on this machine's 144 Hz panel (2026-10-16, docs/03 §A9/A12):
+    // on a quiet box the aiming arm and the fully-yielded variable-refresh arm both read 100.0%
+    // of on-screen holds inside the rounding band with zero out-of-band samples -- aiming
+    // bought no measurable difference at 60 fps on 144 Hz -- and the 4K60 run put 100% of 4214
+    // submit-error samples inside one refresh period while 40% of its flips never reached the
+    // display, so accuracy was not the bottleneck. Whether removing the aiming degrades the
+    // 1/2-alternation case (120 fps content, 1.2 refreshes per frame) is measured, not
+    // asserted: see the 12e_cfr_120 before/after arm in docs/03. The pacing readings below are
+    // what is left of the grid, kept as instrumentation.
     // The source frame period, in 100 ns, handed over by the session for each frame it
-    // releases. Zero means "unknown", which leaves the panel rate as the only bound.
+    // releases. It no longer feeds the ceiling (the setters below do, per media); it stays
+    // because the on-screen hold band is expected from it and the discard bucketing reads it
+    // per frame. Zero means "unknown", which makes the hold interval unscoreable.
     void SetContentFramePeriod100ns(std::int64_t period100ns) noexcept;
-    // The bound currently in force, in Hz, derived on demand from the same two inputs the
-    // presenter uses so the reading cannot drift out of step with the rule.
+    // 每条媒体一条上限，会话在 open 时按片源帧率设进来。逐帧周期不能当上限用：可变帧率
+    // 片源每帧报一个数，上限会跟着逐帧抖，所以这里要的是一个媒体一个值。
+    // 0 = 该媒体没有可用的帧率上界，只剩面板那一半。
+    void SetMediaFrameRateCeilingHz(double ceilingHz) noexcept;
+    // 只把这个上限往上抬、永不往下压。会话在看到更短的逐帧间距时调它：容器那两个字段在
+    // MPEG-TS 上会**偏低**（没有索引，按流头采样），初值钉死就会掐掉后来的快段。
+    void RaiseMediaFrameRateCeilingHz(double ceilingHz) noexcept;
+    double MediaFrameRateCeilingHz() const noexcept;
+    // The bound currently in force, in Hz: min(declared panel rate, ceiling) with the ceiling
+    // left out when it is 0. Derived on demand from the same two inputs the presenter
+    // schedules against, so the reading cannot drift out of step with the rule.
     double FrameRateBoundHz() const noexcept;
-    // The display side of that min(): the panel rate the presenter paces to (measured when
-    // calibrated, otherwise declared). The session needs this on its own, not folded into
-    // the bound, because "content is faster than the panel" is a *reason* for discarding a
-    // frame and it has to be told apart from "the pipeline fell behind the media clock".
+    // The display side of that min(): the panel's *declared* rate, always. The calibrated
+    // value is deliberately not used -- see the body for the two ways it goes wrong. The
+    // session needs this on its own, not folded into the bound, because "content is faster
+    // than the panel" is a *reason* for discarding a frame and it has to be told apart from
+    // "the pipeline fell behind the media clock".
     double DisplayCadenceHz() const noexcept;
     struct PresentPacingStatus {
         float declaredRefreshHz = 0.0f;
+        // Panel period recovered from the swap chain's own frame statistics
+        // (IDXGISwapChain::GetFrameStatistics: SyncRefreshCount against SyncQPCTime). Pure
+        // readout since 2026-10-18: it is no longer allowed to feed the ceiling, because with
+        // variable refresh on it measures the content cadence, not the panel.
         float measuredRefreshHz = 0.0f;
         float frameRateBoundHz = 0.0f;
+        // 上限在岗 = 1：有输出窗口、取得到声明面板率、且没走无同步/移动循环那两条路。
+        // 名字留着是为了 ABI 与宿主可读，语义已从"翻帧被钉在网格上"换成这句话。
         std::uint32_t gridLocked = 0;
+        // 上限不在岗时说明是哪一个原因：
+        //   0 = 在岗
+        //   1 = 无同步（VRR/撕裂）路，让位给显示自己排
+        //   2 = 上限不可用：没有输出窗口，或声明刷新率取不到
+        //   3 = 交互式移动循环这一帧自己掌节奏
         std::uint32_t pacingBypass = 0;
+        // 上限合规误差：这次提交 −（上次提交 + 上限周期），100 ns 单位、带符号，负值＝翻得
+        // 比上限允许的最快速度还快。字段名里的 slot 是旧的（ABI），读的已经不是对槽位的偏差。
+        // 读数按惯例除以面板周期换算成"几个刷新周期"，探针与 HOLD 行都是这么打的。
         std::int64_t lastSlotError100ns = 0;
         // Displayed outcome, counted off PresentRefreshCount: how many flips were held for
-        // either rounding (floor or ceiling) of the refresh count the cadence asked for.
+        // either rounding (floor or ceiling) of the refresh count the ceiling asked for.
         std::uint64_t holdSampled = 0;
         std::uint64_t holdWithinRounding = 0;
         std::uint64_t holdWorstDeviationRefreshes = 0;
+        // Flips handed to Present() whose image never reached the monitor -- a later flip
+        // replaced them in the queue before a vblank sampled the chain. This is the number
+        // that makes the hold accounting interpretable: PresentRefreshCount only advances
+        // when an image actually goes on screen, so without it a legitimate span over two or
+        // three flips reads as a 10-refresh hitch.
+        std::uint64_t neverCompositedPresents = 0;
     };
     PresentPacingStatus QueryPresentPacing() const noexcept;
     // Render-target diagnostics for the managed API surface
@@ -550,15 +590,22 @@ private:
     }
     FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
         std::uint64_t renderedVideoGeneration) noexcept;
-    // Cadence lock, called on the presenter thread only. Returns the QPC instant by which
-    // the next flip must be submitted to land on its refresh slot, or 0 meaning
-    // "flip now".
-    std::int64_t AdvancePacingDeadline(std::int64_t nowQpc) noexcept;
-    // Feeds one swap-chain frame-statistics sample into the grid estimate and scores the
-    // last flip against the slot it was aimed at. Plain integers rather than the DXGI
-    // struct so this header stays free of the dxgi includes.
+    // Pacing bookkeeping, once per flip, on the presenter thread: mirrors the declared panel
+    // rate into the readouts, re-polls it when the calibrated value drifts from it (see the
+    // body -- the output window belongs to the host, so this is the only hook available), and
+    // publishes whether the ceiling is in force and why not. Caller must hold
+    // timedTextMutex_, because presentationFrameRate_ is written under it at every other site.
+    void PublishPacingStatus() noexcept;
+    // Feeds one swap-chain frame-statistics sample into the panel-period readout, scores the
+    // last flip against the ceiling's own cadence, and settles the on-screen hold band. Plain
+    // integers rather than the DXGI struct so this header stays free of the dxgi includes.
+    // presentCount and generation are carried for the interval accounting: a flip whose
+    // image never reached the monitor leaves PresentRefreshCount where it was, and the only
+    // way to tell that apart from frame-statistics lag is PresentCount advancing anyway,
+    // while generation says whether the flip even had a new picture to hand over.
     void UpdatePresentGrid(std::int64_t syncRefresh, std::int64_t syncQpc,
-        std::int64_t landedRefresh, bool sequenceDisjoint) noexcept;
+        std::int64_t landedRefresh, std::int64_t presentCount, std::uint64_t generation,
+        bool sequenceDisjoint) noexcept;
     FFFResult DrawTimedText(TimedTextLayerSlot slot) noexcept;
     void TimedTextThread() noexcept;
     void StopTimedTextThread() noexcept;
@@ -733,56 +780,72 @@ private:
     // every chain creation, so a merged variable would lose the request on re-creation.
     // Atomic: written on the session worker thread, read on the presenter thread.
     std::atomic<bool> tearingRequested_{ false };
-    // ---- Presentation cadence lock (see FrameRateBoundHz) ----
+    // ---- Presentation pacing ceiling (see FrameRateBoundHz) ----
     // Written on the session/API thread, read on the presenter thread.
     std::atomic<std::int64_t> contentPeriod100ns_{ 0 };
-    // Set by every chain creation, consumed by the presenter thread: the grid counts
-    // restart with the chain, so a delta across the swap would misaim every slot.
+    // 一条媒体一个帧率上界，会话在 open 时写；0 = 这条媒体没有可用的上界。
+    // Atomic because the session worker writes it while the presenter schedules against it.
+    std::atomic<double> mediaCeilingHz_{ 0.0 };
+    // Set by every chain creation, consumed by the presenter thread: the frame-statistics
+    // sequence restarts with the chain, so a delta taken across the swap is not a period.
     std::atomic<bool> gridResetRequested_{ true };
-    // Grid state. Touched only on the presenter thread -- TimedTextThread is the sole
-    // caller of PresentTimedText, and PresentCurrentFrame runs inside it -- so these need
-    // no lock against each other. The four below are mirrored into atomics after each
-    // flip so the API thread can read them without taking presentMutex_, which the
-    // presenter holds across a blocking Present.
-    std::int64_t gridOriginQpc_ = 0;         // QPC sample paired with gridOriginRefresh_
-    std::uint64_t gridOriginRefresh_ = 0;    // SyncRefreshCount at that sample
+    // Presenter-thread-only state -- TimedTextThread is the sole caller of PresentTimedText,
+    // and PresentCurrentFrame runs inside it -- so none of this needs a lock against itself.
+    // The atomics at the bottom of this block are mirrored after each flip so the API thread
+    // can read them without taking presentMutex_, which the presenter holds across a blocking
+    // Present.
     double gridPeriodQpc_ = 0.0;             // QPC ticks per refresh; 0 = not calibrated
-    std::uint64_t nextSlotRefresh_ = 0;      // grid slot the next flip should land on
-    std::int64_t aimedRefresh_ = 0;          // slot the flip in flight was aimed at
-    std::int64_t aimedSlotQpc_ = 0;          // that slot's own grid instant, in QPC ticks
-    std::int64_t aimedSubmitQpc_ = 0;        // slot minus the lead: when the submit should happen
     // The instant this thread actually handed the flip to Present, recorded immediately
-    // before the call. Scored against aimedSlotQpc_ because that is the only quantity the
-    // lock controls; DXGI's SyncQPCTime is when the scheduler sampled, not when we submitted.
+    // before the call, plus the previous flip's instant: their difference is the real submit
+    // spacing, and that is what gets scored against the ceiling's period. DXGI's SyncQPCTime
+    // is when the scheduler sampled, not when we submitted, so neither number uses it.
     std::int64_t lastSubmitQpc_ = 0;
-    // Displayed-outcome accounting. Submitting on the aimed slot is only the lock's half of
-    // the job; whether the panel then held the frame for the number of refreshes asked for is
-    // the half the eye actually sees, and it is read from PresentRefreshCount -- the vblank on
-    // which the chain's last image reached the monitor. Two consecutive reads of it differ by
-    // the refreshes the earlier flip was on screen for.
+    std::int64_t previousSubmitQpc_ = 0;
+    std::int64_t pacingPollQpc_ = 0;         // last declared-rate re-poll; 1 s gate
+    // Displayed-outcome accounting. Keeping the flip rate at the ceiling is only half the
+    // job; whether the panel then held the frame for the number of refreshes the content
+    // period asks for is the half the eye actually sees, and it is read from
+    // PresentRefreshCount -- the vblank on which the chain's last image reached the monitor.
+    // Two consecutive reads of it differ by the refreshes the earlier flip was on screen for.
     std::int64_t lastLandedRefresh_ = 0;
-    std::int64_t aimedSlots_ = 0;              // slots the flip in flight was meant to own
-    // The fractional number of refreshes the flip in flight was *supposed* to occupy
-    // (content period / panel period, e.g. 2.4 for 60 fps on 144 Hz). Its floor and ceiling
-    // bound every hold the eye can accept as steady, and that band is what the hold counter
-    // is scored against -- deliberately not "equal to the aim": deciding which flip a given
-    // PresentRefreshCount delta belongs to needs an alignment between two counter series,
-    // and two different alignments were tried and both stayed near 30-47% while the panel
-    // average was exactly 2.4. A rounding band is the same judgement without depending on
-    // that alignment being right.
-    double aimedSlotRatio_ = 0.0;
+    // 一条翻帧*该*占几个刷新周期（内容周期 ÷ 声明面板周期，144 Hz 上的 60 fps 就是 2.4）。
+    // 它的 floor 和 ceiling 框住眼睛能接受为"匀"的全部停留，判带就打在这个带上，而不是
+    // "等于某个瞄点"：要把某个 PresentRefreshCount 差值归给某次翻帧，得先对齐两条计数器
+    // 序列，而两种对齐都试过、都停在 30-47% 而面板平均正好是 2.4。取整带给出同一句判断，
+    // 却不依赖那个对齐是对的。
+    // 停在"等待被显示器采样"里的那串翻帧，各自该占几个刷新周期的累计值。一次上屏结算一个
+    // 停留样本并清零——这样被后来者取代、从未上屏的那些翻帧会把自己应得的那份计入带内，
+    // 而不是让下一次停留凭空多出好几格。
+    double pendingHoldRatio_ = 0.0;
+    // 结算一个停留样本所用的区间账，三个数各自独立数同一段区间：
+    //   intervalFlips_          —— 这段区间里有几次翻帧；
+    //   intervalAdvances_       —— 这些翻帧一共带进来几张新画面（生成号差值之和）；
+    //   intervalNeverComposited_—— 其中几次翻帧的 PresentRefreshCount 没有前进。
+    // 这三条就是它们的答案（2026-10-16 用 FPT_HOLD_TRACE 逐样本量的，不是推的）：
+    //   adv == flips 在每趟 ~500 个样本里成立（只有重启后那一个例外）⇒ "按新画面数开带"
+    //   与"按翻帧数开带"操作数相同，那个改法因此没做；
+    //   nc=1 的区间实测 meanHeld 4.61~4.80 对预测 2×ratio=4.80 ⇒ 累计口径是对的。
+    std::uint32_t intervalFlips_ = 0;
+    std::uint32_t intervalAdvances_ = 0;
+    std::uint32_t intervalNeverComposited_ = 0;
+    // 这段区间里出现过"内容周期未知的翻帧"（contentPeriod100ns_ <= 0，会话还没给出这一帧
+    // 该占几格）。这样的区间结算不出"停留落在预期的 ⌊r⌋/⌈r⌉ 内"这句话，判带要跳过它。
+    bool intervalUnscoreable_ = false;
+    std::int64_t lastPresentCount_ = 0;
+    std::uint64_t lastFlipGeneration_ = 0;
+    std::atomic<std::uint64_t> neverCompositedPresents_{ 0 };
     std::atomic<std::uint64_t> holdSampled_{ 0 };
     std::atomic<std::uint64_t> holdWithinRounding_{ 0 };
     std::atomic<std::uint64_t> holdWorstDeviation_{ 0 };
     std::int64_t lastSyncRefresh_ = 0;       // previous frame-statistics sample pair
     std::int64_t lastSyncQpc_ = 0;
-    double slotCarry_ = 0.0;                 // Bresenham remainder, in refresh units
-    std::int64_t lastTargetQpc_ = 0;
+    // Readouts mirrored after each flip. measuredRefreshHz_ is a pure measurement: with
+    // variable refresh on it equals the content cadence, so it must not become a bound input.
     std::atomic<double> measuredRefreshHz_{ 0.0 };
     std::atomic<double> declaredRefreshHz_{ 0.0 };
-    std::atomic<std::uint32_t> gridLocked_{ 0 };
-    std::atomic<std::uint32_t> pacingBypass_{ 2 };   // starts "not calibrated yet"
-    std::atomic<std::int64_t> lastSlotError100ns_{ 0 };
+    std::atomic<std::uint32_t> gridLocked_{ 0 };     // 1 = the ceiling is in force
+    std::atomic<std::uint32_t> pacingBypass_{ 2 };   // starts "no ceiling available"
+    std::atomic<std::int64_t> lastSlotError100ns_{ 0 };   // ceiling-cadence error; name is ABI
     std::atomic<std::uint32_t> swapOutputBits_;
     // Last drawn video destination rect (diagnostics),
     // recorded by DrawCachedVideo after each successful shader draw.

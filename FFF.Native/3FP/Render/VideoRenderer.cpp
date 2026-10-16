@@ -4,7 +4,7 @@
 #include "3FP/Render/SdrShaderBytecode.h"
 #include "3FP/Render/NvidiaVideoExtensions.h"
 
-// Used only by the presenter thread, to put the refresh grid within reach of its waits.
+// Used only by the presenter thread, to keep its waits in reach of the pacing ceiling.
 // Linked by pragma rather than in the .vcxproj: the project carries several
 // AdditionalDependencies lists and only some of them are the configuration actually
 // shipping, so a source-side reference is the one that cannot be missed.
@@ -51,8 +51,8 @@ template<class T> void ReleaseCom(T*& resource) noexcept {
     if (resource != nullptr) { resource->Release(); resource = nullptr; }
 }
 
-// QPC pair used by the presentation cadence lock. Declared here because the presenter
-// thread (TimedTextThread) is defined a few thousand lines before the lock itself.
+// QPC pair used by the presenter's pacing bookkeeping. Declared here because the presenter
+// thread (TimedTextThread) is defined a few thousand lines before that code lives.
 std::int64_t QpcTicks() noexcept {
     static const std::int64_t frequency = [] {
         LARGE_INTEGER value{};
@@ -68,11 +68,21 @@ std::int64_t QpcNowValue() noexcept {
     return value.QuadPart;
 }
 
-// The grid the cadence lock aims at is 6.94 ms wide on a 144 Hz panel. This process runs at
-// the default system timer resolution, and the release cadence of 60 fps content measured at
-// a 15.7 ms median -- the quantisation is coarser than the thing it has to hit, so no
-// condition_variable::wait_for in this process can land on a slot. The presenter therefore
-// raises the resolution for as long as it owns the cadence and restores it on the way out.
+// 停留判带的区间账开关。残差（60fps 臂最好的一趟 95.6%、带外最差 2 格）要归因，只能
+// 把每个样本的"区间里翻了几次帧 / 其中几次没上屏 / 累计该占几格 / 实际停了几格"一次打出来：
+// 聚合读数分不开"区间真的跨了两帧"和"PresentRefreshCount 读数滞后"这两种解释，它们给出的
+// 修复方向是相反的。默认关闭，FPT_HOLD_TRACE=1 才写 stderr。
+bool HoldTraceEnabled() noexcept {
+    static const bool enabled = GetEnvironmentVariableW(L"FPT_HOLD_TRACE", nullptr, 0) != 0;
+    return enabled;
+}
+
+// One refresh is 6.94 ms wide on a 144 Hz panel, and the presenter's waits are on that pitch
+// once the ceiling allows it. This process otherwise runs at the default system timer
+// resolution -- the release cadence measured here had a 15.7 ms median, i.e. the quantisation
+// is coarser than the period it has to wait out -- so no condition_variable::wait_for in this
+// process can keep a high-ceiling schedule. The presenter therefore raises the resolution for
+// as long as it owns the cadence and restores it on the way out.
 //
 // Deliberately scoped to the presenter thread rather than to a call site, because it is
 // process-wide and refcounted: the session's own Sleep(1)/wait_for release loop gets the
@@ -3008,10 +3018,10 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         std::lock_guard lock(timedTextMutex_);
         presentationFrameRate_ = DetectDisplayRefreshRate(window_);
     }
-    // A new chain restarts the frame-statistics sequence, so the grid must be re-derived
-    // from scratch. Requested here and cleared on the presenter thread: the grid state is
-    // presenter-thread-only, and the presenter is not inside presentMutex_ while it waits
-    // for a slot, so a reconfiguration can land between the deadline and the flip.
+    // A new chain restarts the frame-statistics sequence, so the panel-period estimate has to
+    // be re-derived from scratch. Requested here and cleared on the presenter thread, which is
+    // the only thread that owns that state -- a delta taken across the chain swap is not a
+    // refresh interval.
     gridResetRequested_.store(true, std::memory_order_release);
     return FFFResult::Success;
 }
@@ -4503,7 +4513,7 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
 
 void PlayerVideoRenderer::TimedTextThread() noexcept {
     // Held for the whole thread: this is the thread that owns the presentation cadence, and
-    // its waits are what have to reach the refresh grid.
+    // its waits are what hold the flip rate down to the ceiling.
     PresenterTimerResolution timerResolution;
     std::uint64_t observedPresentationGeneration = 0;
     std::uint64_t observedVideoGeneration = 0;
@@ -4549,6 +4559,11 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
                 }
                 observedPresentationGeneration = presentationGeneration_;
                 observedVideoGeneration = videoGeneration_.load();
+                // Publishes the readouts and, when the calibrated panel period has drifted
+                // from the declared rate, re-reads the declared rate. Runs here because this
+                // is the presenter thread and this block holds timedTextMutex_, the lock every
+                // other writer of presentationFrameRate_ takes.
+                PublishPacingStatus();
                 frameRate = presentationFrameRate_;
             }
         }
@@ -4556,23 +4571,11 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
             RequestRecoveryIfDeviceLost();
             continue;
         }
-        // Cadence lock: hold the flip until the refresh slot it is aimed at, unless the
-        // pacing says this flip has no slot to wait for. Waiting here rather than inside
-        // PresentCurrentFrame keeps the deadline off presentMutex_, which is held across a
-        // blocking Present and must stay free for ResizeBuffers.
-        const auto deadlineQpc = AdvancePacingDeadline(QpcNowValue());
-        if (deadlineQpc != 0) {
-            const auto remainingQpc = deadlineQpc - QpcNowValue();
-            if (remainingQpc > 0) {
-                std::unique_lock waitLock(timedTextMutex_);
-                // Microseconds, not milliseconds: integer-millisecond rounding here would
-                // throw away a tenth of the panel period on every single flip.
-                timedTextCondition_.wait_for(waitLock,
-                    std::chrono::microseconds(remainingQpc * 1'000'000 / QpcTicks()),
-                    [this] { return timedTextThreadStop_; });
-                if (timedTextThreadStop_) return;
-            }
-        }
+        // The cadence is this loop's own schedule plus the vblank clamp inside
+        // PresentCurrentFrame: on a fixed-refresh panel Present(1,0) already pins every flip
+        // to a vblank, so the only thing left to enforce here is "no faster than the ceiling".
+        // Nothing aims at a refresh slot any more -- see FrameRateBoundHz for why that layer
+        // was measured to be dead weight.
         const auto presentationStart = std::chrono::steady_clock::now();
         lastSubmitQpc_ = QpcNowValue();
         const auto result = PresentTimedText();
@@ -4580,8 +4583,15 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
             if (result == FFFResult::DeviceFailure && RequestRecoveryIfDeviceLost()) continue;
             SetError("The independent timed-text presenter could not compose the latest layer.");
         }
+        // The ceiling is the executor: the next flip is scheduled one ceiling period out,
+        // falling back to the panel's declared rate only when no ceiling is available (no
+        // output window, or no declared value) -- the same rule FrameRateBoundHz states, so
+        // the wait and the reported bound cannot disagree. Clamped to the range the old
+        // schedule used, which keeps a bogus input from parking the presenter.
+        const auto boundHz = FrameRateBoundHz();
+        const auto paceHz = boundHz > 0.0 ? boundHz : static_cast<double>(frameRate);
         nextPresentation = presentationStart + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(1.0 / std::clamp(static_cast<double>(frameRate), 1.0, 240.0)));
+            std::chrono::duration<double>(1.0 / std::clamp(paceHz, 1.0, 240.0)));
     }
 }
 
@@ -6387,10 +6397,10 @@ FFFResult PlayerVideoRenderer::SetPresentConfig(const bool enableTearing) noexce
     return FFFResult::Success;
 }
 
-// ---- Presentation cadence lock (exported as FFF3FP_GetPresentPacingStatus) ----
+// ---- Presentation pacing ceiling (exported as FFF3FP_GetPresentPacingStatus) ----
 //
-// The bound is not configurable, so there is no setter to call: it is always
-//     bound = min(panel refresh rate, content frame rate)
+// This layer produces one number and nothing else:
+//     bound = min(declared panel refresh rate, per-media frame-rate ceiling)
 // and it only ever holds the presenter back, never speeds it up. Both halves are needed:
 //   * content < panel (60 fps on 144 Hz) -- the panel would accept 144 flips, and flipping
 //     more often than the source changes picture only re-scan-outs the same frame, so the
@@ -6398,26 +6408,69 @@ FFFResult PlayerVideoRenderer::SetPresentConfig(const bool enableTearing) noexce
 //   * content > panel (240 fps on 144 Hz) -- the panel cannot show more than its own rate,
 //     so the panel is the limit and the surplus is dropped upstream by the session's
 //     existing lateness rule.
-// Expressed as a period this is simply "the longer of the two periods", which is what
-// AdvancePacingDeadline uses to size each flip.
+// Expressed as a period this is simply "the longer of the two periods", which is the interval
+// the presenter schedules its next flip over. Choosing *which* refresh a flip lands on was a
+// second system on top of that (a calibrated grid, a Bresenham carry, a lead and a wait); it
+// is gone -- see the header note on FrameRateBoundHz for the two measurements that killed it,
+// and what is left of its readings below.
 double PlayerVideoRenderer::DisplayCadenceHz() const noexcept {
-    const auto measured = measuredRefreshHz_.load(std::memory_order_acquire);
     // presentationFrameRate_ is written under timedTextMutex_; reading it unlocked here is
     // the same benign race the diagnostics already accept -- it changes on chain creation
     // and on timed-text layer changes, never mid-flip, and a one-frame-stale rate would
     // only shift the classification threshold, not the presentation.
-    return measured > 0.0 ? measured : static_cast<double>(presentationFrameRate_);
+    //
+    // The calibrated value (measuredRefreshHz_) is deliberately NOT used here any more, even
+    // though it is still measured. Two reasons, both from this machine:
+    //   * it is self-referential once variable refresh is on -- the panel paces itself to the
+    //     flips we submit, so the "panel rate" it reports *is* the content rate, and
+    //     min(panel, content) would then be min(content, content): the ceiling would follow
+    //     whatever it is supposed to be limiting.
+    //   * the session reads this number to split two discard buckets (PlayerSession's
+    //     display-rate vs pipeline-lateness test), and the adaptive-downscale policy is fed
+    //     only the pipeline bucket. A content-shaped panel rate would misfile panel-limited
+    //     discards as a decode bottleneck and start resampling picture size to fix something
+    //     the panel owns.
+    // EnumDisplaySettings' declared value cannot go self-referential, and PublishPacingStatus
+    // re-reads it when the panel's mode changes mid-session, which is what made it usable as
+    // the only panel half.
+    return static_cast<double>(presentationFrameRate_);
 }
 
 double PlayerVideoRenderer::FrameRateBoundHz() const noexcept {
     const auto panelHz = DisplayCadenceHz();
-    const auto content100ns = contentPeriod100ns_.load(std::memory_order_acquire);
-    if (content100ns <= 0) return panelHz;   // rate unknown: only the panel bound applies
-    return std::min(panelHz, 10'000'000.0 / static_cast<double>(content100ns));
+    const auto ceilingHz = mediaCeilingHz_.load(std::memory_order_acquire);
+    // The per-media ceiling, not the per-frame period: contentPeriod100ns_ is now read only by
+    // the hold-band scoring and the discard bucketing. Feeding a variable-frame-rate source's
+    // frame-by-frame period into the ceiling made the ceiling itself stutter frame to frame.
+    if (ceilingHz <= 0.0) return panelHz;   // no ceiling for this media: panel half only
+    return std::min(panelHz, ceilingHz);
 }
 
 void PlayerVideoRenderer::SetContentFramePeriod100ns(const std::int64_t period100ns) noexcept {
     contentPeriod100ns_.store(period100ns > 0 ? period100ns : 0, std::memory_order_release);
+}
+
+void PlayerVideoRenderer::SetMediaFrameRateCeilingHz(const double ceilingHz) noexcept {
+    mediaCeilingHz_.store(ceilingHz > 0.0 ? ceilingHz : 0.0, std::memory_order_release);
+}
+
+// 只上抬、永不回落的那个方向。必需，不是保险：`r_frame_rate` 在 MPEG-TS 上会**偏低**
+// （解容器没有索引，按流头采样），本机实测 `12b_vfr_20then40.ts` 的 r=20/1、
+// av_guess=20/1，而后半段真是 40fps（无窗口电池读到 [2.60s@20.0Hz][1.88s@40.0Hz]）。
+// 危害的边界由消融划清（docs/03 §A12）：不上抬时**报出去的上限是假的**，而视频翻帧并不会
+// 被它掐住（有 new picture 时 presenter 不等排程，实测后半段仍 40.1Hz、丢弃 0）；这条真正
+// 保护的读数与"没有新画面时那条覆盖层排程"。所以钳视频不是它的职责——那样只能靠丢真帧兑现。
+void PlayerVideoRenderer::RaiseMediaFrameRateCeilingHz(const double ceilingHz) noexcept {
+    if (ceilingHz <= 0.0) return;
+    auto current = mediaCeilingHz_.load(std::memory_order_acquire);
+    while (ceilingHz > current &&
+        !mediaCeilingHz_.compare_exchange_weak(current, ceilingHz,
+            std::memory_order_release, std::memory_order_acquire)) {
+    }
+}
+
+double PlayerVideoRenderer::MediaFrameRateCeilingHz() const noexcept {
+    return mediaCeilingHz_.load(std::memory_order_acquire);
 }
 
 PlayerVideoRenderer::PresentPacingStatus PlayerVideoRenderer::QueryPresentPacing() const noexcept {
@@ -6434,217 +6487,207 @@ PlayerVideoRenderer::PresentPacingStatus PlayerVideoRenderer::QueryPresentPacing
     status.holdSampled = holdSampled_.load(std::memory_order_acquire);
     status.holdWithinRounding = holdWithinRounding_.load(std::memory_order_acquire);
     status.holdWorstDeviationRefreshes = holdWorstDeviation_.load(std::memory_order_acquire);
+    status.neverCompositedPresents = neverCompositedPresents_.load(std::memory_order_acquire);
     return status;
 }
 
-std::int64_t PlayerVideoRenderer::AdvancePacingDeadline(const std::int64_t nowQpc) noexcept {
-    // Published here rather than at the detection sites: this is the only place the value
-    // is acted on, it runs on the presenter thread, and presentationFrameRate_ is written
-    // under timedTextMutex_, which must not be taken to answer a diagnostics query.
-    declaredRefreshHz_.store(static_cast<double>(presentationFrameRate_), std::memory_order_release);
+void PlayerVideoRenderer::PublishPacingStatus() noexcept {
+    // Presenter thread, called by TimedTextThread with timedTextMutex_ held. Published here
+    // rather than at the detection sites: this is the thread whose cadence the numbers
+    // describe, and presentationFrameRate_ is guarded by that lock -- which a diagnostics
+    // query must never take, since the presenter holds it around a blocking Present.
     const auto frequency = QpcTicks();
-    const auto content100ns = contentPeriod100ns_.load(std::memory_order_acquire);
-    if (gridResetRequested_.exchange(false, std::memory_order_acq_rel)) {
-        // Chain recreated (or first flip): nothing is calibrated until a fresh sample pair
-        // arrives, so fall back to the un-paced path for one flip rather than aiming at a
-        // slot derived from the previous chain's counts.
-        lastSyncRefresh_ = 0;
-        lastSyncQpc_ = 0;
-        gridPeriodQpc_ = 0.0;
-        gridOriginQpc_ = 0;
-        nextSlotRefresh_ = 0;
-        slotCarry_ = 0.0;
-        aimedRefresh_ = 0;
-        aimedSlotQpc_ = 0;
-        aimedSubmitQpc_ = 0;
-        lastLandedRefresh_ = 0;
-        aimedSlots_ = 0;
-        aimedSlotRatio_ = 0.0;
-        measuredRefreshHz_.store(0.0, std::memory_order_release);
+    const auto nowQpc = QpcNowValue();
+    // 声明刷新率要能自己变新鲜。输出窗口是宿主的 HWND，内核没有它的 wndproc，也不去
+    // subclass 或注册什么，所以用"漂移当触发器 + 翻帧当节拍"：用户在 Windows 设置里把面板
+    // 从 144 调到 60 时，窗口和交换链都没动，而重取声明值原本只发生在四个站点
+    // (SetWindow / 换窗 / EnsureSwapChain / 图层变更)，播放中的会话就会带着一个过期的
+    // 面板率一路跑到停——上限的那一半因此是错的。标定值与声明值差过 5% 即视为声明值可能
+    // 已经过期，一秒最多重取一次（这条只是限流，用的就是循环已有的时间点，不新加定时器）。
+    // 标定值为 0（尚未标定或序列刚重启）时也照样取一次：没有可比读数不等于声明值没变。
+    // window_ 在这里不加锁读，与 :4485 那条已有的写路径同一口径；指针短暂过期最多是拿
+    // 邻近显示器重取一次，而 DetectDisplayRefreshRate 自己对 null 返回 60。
+    if (nowQpc - pacingPollQpc_ >= frequency) {
+        pacingPollQpc_ = nowQpc;
+        const auto declared = static_cast<double>(presentationFrameRate_);
+        const auto measured = measuredRefreshHz_.load(std::memory_order_acquire);
+        if (measured <= 0.0 || (declared > 0.0 &&
+            std::fabs(measured - declared) / declared > 0.05)) {
+            const auto fresh = static_cast<double>(DetectDisplayRefreshRate(window_));
+            if (fresh > 0.0 && fresh != static_cast<double>(presentationFrameRate_)) {
+                presentationFrameRate_ = static_cast<float>(fresh);
+                // 上限的倒数就是排程周期，所以下一次 nextPresentation 自然按新值排；不必
+                // 再把自己叫醒一次，那只会多一次空转。
+            }
+        }
     }
+    declaredRefreshHz_.store(static_cast<double>(presentationFrameRate_), std::memory_order_release);
 
-    // Three ways out, each publishing why, so "not locked" is diagnosable instead of a
-    // silent fall-back to the free-running behaviour this replaced.
+    // Whether the ceiling is actually in force (gridLocked's present meaning), and if not,
+    // which way it stood down -- so "not in charge" stays diagnosable instead of a silent
+    // fall-back to free-running.
     if (tearingRequested_.load(std::memory_order_acquire)) {
         // Variable refresh (G-SYNC / FreeSync) requested: the panel paces itself to each
-        // flip, so snapping submits to a fixed grid would only add queueing latency.
+        // flip, so this layer has nothing to clamp against and stands down.
         gridLocked_.store(0, std::memory_order_release);
         pacingBypass_.store(1, std::memory_order_release);
-        return 0;
+        return;
     }
     if (interactiveMove_.load(std::memory_order_acquire)) {
         // The native window-move loop owns the cadence and presents with DO_NOT_WAIT to
-        // avoid starving audio; waiting for a slot here would put the UI thread behind.
+        // avoid starving audio, so this flip is not clamped to a vblank either.
         gridLocked_.store(0, std::memory_order_release);
         pacingBypass_.store(3, std::memory_order_release);
-        return 0;
+        return;
     }
-    if (gridPeriodQpc_ <= 0.0 || gridOriginQpc_ == 0) {
+    if (window_ == nullptr || presentationFrameRate_ <= 0.0f) {
+        // 上限不可用：没有输出窗口（无头/剪辑播放），或者声明刷新率取不到。这时排程只能
+        // 走 FrameRateBoundHz 那条 fallback，等于面板那一半也没有。
         gridLocked_.store(0, std::memory_order_release);
         pacingBypass_.store(2, std::memory_order_release);
-        return 0;
+        return;
     }
-
-    // The interval a flip may not occupy less of. The bound is the window's own frame-rate
-    // ceiling, min(panel rate, content rate), and its reciprocal is simply the *longer* of
-    // the two periods -- so this line is the whole rule, with nothing to configure:
-    //   60 fps content on 144 Hz  -> content period wins -> 60 flips/s, never 144;
-    //   240 fps content on 144 Hz -> panel period wins    -> 144 flips/s, surplus dropped
-    //                                upstream by the session's existing lateness rule;
-    //   content rate unknown      -> panel period only.
-    // It applies to overlay-only flips too: re-flipping the same picture to push a subtitle
-    // change is exactly the duplicate scan-out the bound exists to prevent, so at 24 fps
-    // content an overlay update can wait up to one source frame (~41 ms). That is the stated
-    // rule's consequence, not an exception to smooth over.
-    double flipPeriodQpc = gridPeriodQpc_;
-    if (content100ns > 0)
-        flipPeriodQpc = std::max(flipPeriodQpc,
-            content100ns * static_cast<double>(frequency) / 10'000'000.0);
-
-    // Slots owned. The remainder is carried so a fractional ratio -- 2.4 slots for 60 fps
-    // content on a 144 Hz panel -- becomes an exact 2,2,3,2,3 cycle instead of rounding
-    // every frame the same way, which would drift a whole frame every few seconds.
-    std::uint64_t slots = 1;
-    if (flipPeriodQpc >= gridPeriodQpc_) {
-        slotCarry_ += flipPeriodQpc / gridPeriodQpc_;
-        slots = static_cast<std::uint64_t>(slotCarry_);
-        slotCarry_ -= static_cast<double>(slots);
-        if (slots < 1) slots = 1;
-    } else {
-        // Source faster than the panel: take the next slot every flip and let the session's
-        // lateness rule discard the surplus. Carrying a remainder here would make the
-        // presenter wait, which is the opposite of what a fast source needs.
-        slotCarry_ = 0.0;
-    }
-
-    const auto periodTicks = static_cast<std::int64_t>(gridPeriodQpc_);
-    // Lead scales with the panel but never drops below 1 ms: the flip has to be in the
-    // queue before the compositor samples it, and sampling happens at the slot itself.
-    const auto lead = std::max<std::int64_t>(periodTicks * 35 / 100, frequency / 1000);
-    auto slotIndex = nextSlotRefresh_;
-    auto slotQpc = gridOriginQpc_ +
-        static_cast<std::int64_t>(static_cast<double>(slotIndex - gridOriginRefresh_) * gridPeriodQpc_);
-    // Catch up all the way to a reachable slot, not just one step. A single step was a
-    // real defect found by measurement: after any late arrival the sequence stayed behind
-    // the clock, so every later flip aimed at a slot that had already passed and the
-    // "error against the aimed slot" wandered to several refresh periods instead of zero.
-    // The bound keeps a mis-calibrated origin from spinning here.
-    for (int catchUp = 0; catchUp < 16 && slotQpc - lead <= nowQpc; ++catchUp) {
-        ++slotIndex;
-        slotQpc += periodTicks;
-    }
-    const auto deadlineQpc = slotQpc - lead;
-    // Give-up bound. This has to scale with what was asked for, not with one panel period:
-    // 24 fps content on a 144 Hz panel legitimately owns 6 slots (and a 30 fps bound measured
-    // 4.8), so a two-period guard rejected those waits outright and the bound silently never
-    // engaged -- measured as gridLocked staying 0 for an entire run while the panel itself
-    // calibrated fine. Two of whatever cadence was asked for, floored at two refreshes, still
-    // cannot freeze playback on a bad calibration.
-    const auto bailBoundQpc = std::max<std::int64_t>(2 * periodTicks,
-        static_cast<std::int64_t>(flipPeriodQpc * 2.0));
-    if (deadlineQpc - nowQpc > bailBoundQpc) {
-        // A wild calibration must not be able to freeze playback: give up on the slot,
-        // keep the sequence moving, and say so.
-        nextSlotRefresh_ = slotIndex + slots;
-        aimedRefresh_ = 0;
-        // Cleared, not left standing: an accuracy reading from the previous aim would
-        // otherwise keep reporting the lock as precise while it is bypassed. Measured exactly
-        // this false green -- an arm whose give-up bound was mis-set read "100% within one
-        // refresh" for a whole run in which gridLocked never once went true (that run used the
-        // ceiling setter that has since been removed; the failure mode it exposed has not).
-        aimedSlotQpc_ = 0;
-        aimedSubmitQpc_ = 0;
-        lastSlotError100ns_.store(0, std::memory_order_release);
-        gridLocked_.store(0, std::memory_order_release);
-        pacingBypass_.store(0, std::memory_order_release);
-        return 0;
-    }
-    aimedRefresh_ = static_cast<std::int64_t>(slotIndex);
-    aimedSlotQpc_ = slotQpc;
-    aimedSubmitQpc_ = deadlineQpc;   // slot minus the lead, not the slot: see lastSlotError100ns
-    aimedSlots_ = static_cast<std::int64_t>(slots);
-    aimedSlotRatio_ = flipPeriodQpc / gridPeriodQpc_;
-    nextSlotRefresh_ = slotIndex + slots;
     gridLocked_.store(1, std::memory_order_release);
     pacingBypass_.store(0, std::memory_order_release);
-    return deadlineQpc;
 }
 
 void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
     const std::int64_t syncQpc, const std::int64_t landedRefresh,
+    const std::int64_t presentCount, const std::uint64_t generation,
     const bool sequenceDisjoint) noexcept {
     const auto frequency = QpcTicks();
-    if (sequenceDisjoint || syncRefresh <= 0 || syncQpc <= 0) {
-        // The first sample, and every mode change, restart the sequence. Drop the
-        // calibration instead of trusting a delta taken across the break -- DXGI reports
-        // DXGI_ERROR_FRAME_STATISTICS_DISJOINT precisely because the counts no longer form
-        // one series, and an anchored grid built on that delta would misaim every slot.
+    if (gridResetRequested_.exchange(false, std::memory_order_acq_rel) || sequenceDisjoint ||
+        syncRefresh <= 0 || syncQpc <= 0) {
+        // The first sample, every mode change and every chain reconfiguration restart the
+        // sequence. Drop the calibration instead of trusting a delta taken across the break --
+        // DXGI reports DXGI_ERROR_FRAME_STATISTICS_DISJOINT precisely because the counts no
+        // longer form one series, and a period recovered from a straddling delta is not a
+        // refresh interval at all. The presenter thread consumes the chain-creation request
+        // here because this is the only reader of that state.
         lastSyncRefresh_ = 0;
         lastSyncQpc_ = 0;
         gridPeriodQpc_ = 0.0;
-        gridOriginQpc_ = 0;
-        aimedRefresh_ = 0;
-        aimedSlotQpc_ = 0;
-        aimedSubmitQpc_ = 0;
         lastLandedRefresh_ = 0;
-        aimedSlots_ = 0;
-        aimedSlotRatio_ = 0.0;
+        pendingHoldRatio_ = 0.0;
+        intervalFlips_ = 0;
+        intervalAdvances_ = 0;
+        intervalNeverComposited_ = 0;
+        intervalUnscoreable_ = false;
+        lastPresentCount_ = 0;
+        lastFlipGeneration_ = 0;
+        previousSubmitQpc_ = 0;
+        lastSlotError100ns_.store(0, std::memory_order_release);
         measuredRefreshHz_.store(0.0, std::memory_order_release);
         return;
     }
     if (lastSyncRefresh_ != 0 && syncRefresh > lastSyncRefresh_) {
         const auto period = static_cast<double>(syncQpc - lastSyncQpc_) /
             static_cast<double>(syncRefresh - lastSyncRefresh_);
-        // Plausibility band 10-1000 Hz. Outside it the sample is not a refresh interval,
-        // and adopting it would misaim the grid rather than merely miss it by a little.
+        // Plausibility band 10-1000 Hz. Outside it the sample is not a refresh interval, and
+        // adopting it would corrupt the readout rather than merely miss it by a little.
         if (period > frequency / 1000.0 && period < frequency / 10.0) {
-            const auto previous = gridPeriodQpc_;
-            // Re-anchor whenever the estimate moves by more than half a percent: a fixed
-            // origin plus a revised period accumulates phase error otherwise, and the whole
-            // point of the origin is that slots measured from it stay put.
-            if (previous <= 0.0 || std::fabs(period - previous) / previous > 0.005) {
-                gridOriginQpc_ = lastSyncQpc_;
-                gridOriginRefresh_ = static_cast<std::uint64_t>(lastSyncRefresh_);
-                nextSlotRefresh_ = static_cast<std::uint64_t>(syncRefresh) + 1;
-                slotCarry_ = 0.0;
-            }
             gridPeriodQpc_ = period;
+            // Readout only now. The ceiling's panel half is the declared value: with variable
+            // refresh on, this number tracks the cadence of the flips we submit, so letting it
+            // define the ceiling would make min(panel, content) measure itself (see
+            // DisplayCadenceHz). It still proves whether the panel is compositing at all,
+            // which is what PublishPacingStatus's drift trigger and the hold band's
+            // refresh-unit conversion read.
             measuredRefreshHz_.store(static_cast<double>(frequency) / period,
                 std::memory_order_release);
         }
     }
     lastSyncRefresh_ = syncRefresh;
     lastSyncQpc_ = syncQpc;
-    // Scored in the grid's own space, against the instant this thread really handed the flip
-    // to Present. Two things it deliberately does NOT use:
-    //   * PresentRefreshCount -- that counter only advances on the vblanks where the chain's
-    //     image reached the monitor, so at 60 fps on 144 Hz it steps about 2.4 per flip while
-    //     the aim steps a full grid pitch. Comparing the two series was measured reporting a
-    //     "many refresh periods off" error that never existed on screen.
-    //   * SyncQPCTime -- it is the scheduler's sample instant, not ours, so it reports queue
-    //     depth as if it were aim error.
-    // What remains is exactly the lock's own job: did the submit happen when the grid asked.
-    // Whether the panel then held the frame an exact number of refreshes is scored separately
-    // by the standalone grid fixture.
-    if (aimedRefresh_ != 0 && aimedSubmitQpc_ != 0 && lastSubmitQpc_ != 0) {
-        const double errorQpc = static_cast<double>(lastSubmitQpc_ - aimedSubmitQpc_);
-        lastSlotError100ns_.store(static_cast<std::int64_t>(
-            errorQpc * 10'000'000.0 / frequency), std::memory_order_release);
+    // 上限合规误差。成员名与导出字段名里的 slot 是旧名字，留着是为了 ABI 和宿主已经在读它，
+    // 语义已经从"对某个槽位的偏差"换成这句话：这次提交 −（上次提交 + 上限周期）。
+    // 这是这一层唯一还归它管的事——翻帧的**间隔**有没有守住上限，而不是它落在哪一格。
+    // 仍按 100 ns 带符号存，读的一方按惯例除以面板周期换算成"几个刷新周期"（探针和下面的
+    // HOLD 行都是这么打的）。固定刷新下 Present(1,0) 把每次提交钉在一个 vblank 上，上限周期
+    // 不是面板周期的整数倍时这里就会留下 ±半个刷新周期量级的固定偏移，那是钳位本身，不是失准。
+    // 两条刻意不用的东西：
+    //   * PresentRefreshCount -- 它只在图像真上屏的那些 vblank 前进，60 fps on 144 Hz 下每次
+    //     翻帧约进 2.4 格，拿去和提交间隔比会量出一个屏幕上根本不存在的"差好几个周期"。
+    //   * SyncQPCTime -- 那是调度器的采样时刻，会把队列深度报成误差。
+    // 不在岗时清零，而不是留着上一次在岗时的准头：一条恒 0 会让"误差落在一格内 ≥95%"那句判据
+    // 空转成假绿，而残留的旧读数更能替一次根本没钳位的翻帧说谎。
+    if (gridLocked_.load(std::memory_order_acquire) != 0 && previousSubmitQpc_ != 0 &&
+        lastSubmitQpc_ > previousSubmitQpc_) {
+        const auto capHz = FrameRateBoundHz();
+        if (capHz > 0.0) {
+            const double capPeriodQpc = static_cast<double>(frequency) / capHz;
+            const double errorQpc =
+                static_cast<double>(lastSubmitQpc_ - previousSubmitQpc_) - capPeriodQpc;
+            lastSlotError100ns_.store(static_cast<std::int64_t>(
+                errorQpc * 10'000'000.0 / frequency), std::memory_order_release);
+        }
+    } else {
+        lastSlotError100ns_.store(0, std::memory_order_release);
     }
+    previousSubmitQpc_ = lastSubmitQpc_;
     // The other half of the job: how long the panel actually held the previous flip.
     // Presented only when the sequence is continuous (landedRefresh advancing by a plausible
     // amount); a chain reconfiguration restarts these counts, and a delta across that break is
     // not a hold.
-    if (aimedSlotRatio_ >= 1.0 && landedRefresh > 0 && lastLandedRefresh_ > 0 &&
-        landedRefresh > lastLandedRefresh_) {
+    // 归属要在这里算清，否则这条判据量的不是节律：
+    // ① held = 这次落地刷新 − 上次落地刷新，那是**上一帧**（以及停在等待采样里的那几帧）的
+    //    停留，所以预期值不能取"这一次翻帧的 ratio"。累计口径已经把这件事办了：每一次翻帧都
+    //    把自己该占的格数加进 pendingHoldRatio_，结算时用的是整段的和，不再有"新档的 {2,3}
+    //    去判旧档 6 格"那种错位。
+    // ② 更要紧的是：PresentRefreshCount 只在图像真上屏那一场 vblank 前进。被后来者取代、
+    //    从未合成的那些翻帧不推进它，于是两三帧会被并成一次"跨 5~7 格"的停留——按单帧
+    //    ratio 判就是带外 hitch，按**累计**判才是它本来的样子。实测就是这么定位的：
+    //    60fps 臂提交误差最差 2.2 个刷新周期，停留偏差却 10~11 格，差五倍，"翻晚了"
+    //    解释不了，只能是中间有翻帧没上屏。
+    // 每次进入这里＝一次翻帧：先把它该占的刷新数累加，等某次翻帧真的上屏才结算一个样本。
+    // 判带的预期值就是"内容周期 ÷ 声明面板周期"这一行推导，没有别的来源。分母刻意不用标定的
+    // 面板周期：VRR 一开，标定值就等于内容周期，ratio 会永远算成 1，判带因此退化成"每帧只能
+    // 停一格"这句假话。声明值取不到时 ratio 为 0，落到下面的 1 格兜底。
+    // 读声明值走 declaredRefreshHz_ 这个原子：它由同一条线程在每次翻帧前刚镜像过，
+    // 而 presentationFrameRate_ 在这里并没有持锁。
+    const auto holdContent100ns = contentPeriod100ns_.load(std::memory_order_acquire);
+    const auto declaredHz = declaredRefreshHz_.load(std::memory_order_acquire);
+    const double holdContentRatio = declaredHz > 0.0 && holdContent100ns > 0
+        ? static_cast<double>(holdContent100ns) / 10'000'000.0 * declaredHz
+        : 0.0;
+    // 没有内容周期就是"这一帧我该占几格没有依据"：会话还没给出逐帧时长（首几帧、
+    // 或纯覆盖层翻帧的那几趟）。拿 1 格兜底去判这段停留，会把一次本来没有预期的重翻记成
+    // 偏差——实测三趟 60fps 臂各只有 1 个这样的样本（形状固定：flips=2 adv=1 nc=0 err=0.00
+    // held=1），而它正是整轮里唯一的带外样本。所以这段区间标成不可判，跳过结算：判带只对
+    // "会话真的给出过预期"的区间成立，这与上面丢弃重启两侧差分是同一条理由。
+    // 1 格兜底同时让撕裂/旁路那条路也能出样本，别把它一起删了。
+    if (holdContent100ns <= 0) intervalUnscoreable_ = true;
+    pendingHoldRatio_ += std::max(1.0, holdContentRatio);
+    ++intervalFlips_;
+    const auto advance = (generation != 0 && lastFlipGeneration_ != 0 &&
+        generation > lastFlipGeneration_) ? generation - lastFlipGeneration_ : 0;
+    intervalAdvances_ += static_cast<std::uint32_t>(advance > 16 ? 16 : advance);
+    if (generation != 0) lastFlipGeneration_ = generation;
+    const auto presentDelta = lastPresentCount_ == 0 ? std::int64_t{ 0 } :
+        presentCount - lastPresentCount_;
+    lastPresentCount_ = presentCount;
+    const bool composited = landedRefresh > 0 && lastLandedRefresh_ > 0 &&
+        landedRefresh > lastLandedRefresh_;
+    if (!composited && landedRefresh > 0 && lastLandedRefresh_ > 0) {
+        neverCompositedPresents_.fetch_add(1, std::memory_order_relaxed);
+        ++intervalNeverComposited_;
+        if (HoldTraceEnabled())
+            std::fprintf(stderr, "HOLDNC dPresent=%lld dPresentRefresh=%lld dSync=%lld flips=%u\n",
+                static_cast<long long>(presentDelta),
+                static_cast<long long>(landedRefresh - lastLandedRefresh_),
+                static_cast<long long>(syncRefresh - lastSyncRefresh_),
+                intervalFlips_);
+    }
+    if (composited) {
         const auto held = landedRefresh - lastLandedRefresh_;
-        if (held <= 16) {
-            // Accept either rounding of the fractional slot count: 60 fps on 144 Hz is
-            // legitimately held 2 or 3 refreshes, and a steady alternation between those
-            // two is what "locked" looks like. A hold of 1, or of 4 and up, is what a viewer
-            // calls a hitch, and that is the quantity this counter is actually able to prove.
-            const auto low = static_cast<std::int64_t>(std::floor(aimedSlotRatio_));
-            const auto high = static_cast<std::int64_t>(std::ceil(aimedSlotRatio_));
+        if (held <= 16 && pendingHoldRatio_ >= 1.0 && !intervalUnscoreable_) {
+            // Accept either rounding of the fractional refresh count the content period asks
+            // for: 60 fps on 144 Hz is legitimately held 2 or 3 refreshes, and a steady
+            // alternation between those two is what an even cadence looks like. A hold of 1,
+            // or of 4 and up, is what a viewer calls a hitch, and that is the quantity this
+            // counter is actually able to prove.
+            const auto low = static_cast<std::int64_t>(std::floor(pendingHoldRatio_));
+            const auto high = static_cast<std::int64_t>(std::ceil(pendingHoldRatio_));
             const bool within = (held == low || held == high);
             ++holdSampled_;
             if (within) ++holdWithinRounding_;
@@ -6652,9 +6695,37 @@ void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
                 (held > high ? held - high : (held < low ? low - held : high - held)));
             if (deviation > holdWorstDeviation_.load(std::memory_order_relaxed))
                 holdWorstDeviation_.store(deviation, std::memory_order_release);
+            // ratio = 这一段的预期停留（内容周期 ÷ 声明面板周期，逐次累加前的那一条）；
+            // err = 上限合规误差换算成"几个刷新周期"，分母优先用标定面板周期，没标定时
+            // 退回声明周期——两个都是面板周期，只是一个是量的、一个是系统声明的。
+            const double errPanelPeriodQpc = gridPeriodQpc_ > 0.0 ? gridPeriodQpc_ :
+                (declaredHz > 0.0 ? static_cast<double>(frequency) / declaredHz : 0.0);
+            if (HoldTraceEnabled())
+                std::fprintf(stderr,
+                    "HOLD flips=%u adv=%u nc=%u pend=%.2f held=%lld band=[%lld,%lld] %s "
+                    "dPresent=%lld ratio=%.3f err=%.2f\n",
+                    intervalFlips_, intervalAdvances_, intervalNeverComposited_,
+                    pendingHoldRatio_, static_cast<long long>(held),
+                    static_cast<long long>(low), static_cast<long long>(high),
+                    within ? "in" : "OUT", static_cast<long long>(presentDelta),
+                    holdContentRatio, errPanelPeriodQpc > 0.0 ?
+                        static_cast<double>(lastSlotError100ns_.load(std::memory_order_acquire)) *
+                        static_cast<double>(frequency) / 10'000'000.0 / errPanelPeriodQpc : 0.0);
+        } else if (intervalUnscoreable_ && HoldTraceEnabled()) {
+            // 跳过也要留痕：这个计数不走 API，只能靠这一行证明它没有把真卡顿一起扔掉。
+            // meas= 是面板周期的标定读数（0 = 还没标定），不是判带的分母——那条用声明值。
+            std::fprintf(stderr, "HOLDSKIP flips=%u adv=%u nc=%u pend=%.2f held=%lld meas=%.3fHz\n",
+                intervalFlips_, intervalAdvances_, intervalNeverComposited_,
+                pendingHoldRatio_, static_cast<long long>(held),
+                measuredRefreshHz_.load(std::memory_order_acquire));
         }
+        pendingHoldRatio_ = 0.0;
+        intervalFlips_ = 0;
+        intervalAdvances_ = 0;
+        intervalNeverComposited_ = 0;
+        intervalUnscoreable_ = false;
     }
-    lastLandedRefresh_ = landedRefresh;
+    if (landedRefresh > 0) lastLandedRefresh_ = landedRefresh;
 }
 
 FFFResult PlayerVideoRenderer::GetRenderTargetInfo(RenderTargetInfo& info) noexcept {
@@ -7011,8 +7082,11 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     const std::uint64_t renderedVideoGeneration) noexcept {
     if (chain == nullptr) return FFFResult::InvalidState;
     const auto start = std::chrono::steady_clock::now();
-    // Normal playback is synchronized to the display. During the native
-    // window-move loop, Present must not wait for DWM: that loop owns the UI
+    // Normal playback is synchronized to the display. With the refresh-slot aiming gone,
+    // that clamp is one of the two things that set the flip cadence: Present(1,0) keeps every
+    // flip on a vblank, and the presenter's own schedule (TimedTextThread's nextPresentation,
+    // paced at FrameRateBoundHz) keeps the flips from coming faster than the ceiling. During
+    // the native window-move loop, Present must not wait for DWM: that loop owns the UI
     // thread's message pump and a blocking Present can starve audio and decode.
     const auto interactiveMove = interactiveMove_.load(std::memory_order_acquire);
     // Tearing needs the host's request *and* a chain created with the ALLOW_TEARING
@@ -7041,15 +7115,16 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
         return FFFResult::DeviceFailure;
     }
     ++swapChainPresents_;
-    // Feed the cadence lock. PresentRefreshCount says on which vblank this image actually
-    // reached the monitor, and the (SyncRefreshCount, SyncQPCTime) pair is the grid itself;
-    // together they are the only reading that distinguishes "held 2 refreshes" from
-    // "held 3", which is the thing the lock is supposed to make predictable.
+    // Feed the pacing readouts. PresentRefreshCount says on which vblank this image actually
+    // reached the monitor, and the (SyncRefreshCount, SyncQPCTime) pair is the panel period
+    // itself; together they are the only reading that distinguishes "held 2 refreshes" from
+    // "held 3", which is the outcome the ceiling is supposed to make predictable.
     DXGI_FRAME_STATISTICS frameStatistics{};
     const auto statisticsResult = chain->GetFrameStatistics(&frameStatistics);
     UpdatePresentGrid(static_cast<std::int64_t>(frameStatistics.SyncRefreshCount),
         frameStatistics.SyncQPCTime.QuadPart,
         static_cast<std::int64_t>(frameStatistics.PresentRefreshCount),
+        static_cast<std::int64_t>(frameStatistics.PresentCount), renderedVideoGeneration,
         statisticsResult == DXGI_ERROR_FRAME_STATISTICS_DISJOINT || FAILED(statisticsResult));
     presentedVideoGeneration_.store(renderedVideoGeneration);
     const auto previous = countedVideoGeneration_.exchange(renderedVideoGeneration);
