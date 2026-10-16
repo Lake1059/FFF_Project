@@ -812,6 +812,14 @@ struct FFF3FPPresentPacingStatus {
     // things -- no amount of resampling lets a 144 Hz panel show 240 frames a second.
     // Report the two numbers side by side; the total is their sum.
     std::uint64_t displayRateDiscardedFrames;
+    // Flips that were handed to Present() but whose image never reached the monitor, because
+    // a newer flip replaced them before a vblank sampled the chain. Appended after the field
+    // above: this struct is size-checked by the kernel (a caller declaring a smaller size gets
+    // InvalidArgument, never a short write), so a host built against the older header keeps
+    // loading this DLL but loses this one call until it is rebuilt against the new one.
+    // It is what makes the two hold readings above interpretable: a hold spanning k flips is
+    // legitimate when k-1 of them are in here, and a hitch when this counter says otherwise.
+    std::uint64_t neverCompositedPresents;
 };
 FFF3FP_API FFFResult FFF3FP_GetPresentPacingStatus(FFF3FPHandle player,
     FFF3FPPresentPacingStatus* status) noexcept;
