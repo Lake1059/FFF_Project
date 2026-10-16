@@ -1056,7 +1056,14 @@ FFFResult PlayerSession::DiscardAudioOutput() noexcept {
 }
 FFFResult PlayerSession::Stop() noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this] { DoClose(FFF3FPState::Idle); }); return FFFResult::Success; }
 FFFResult PlayerSession::Close() noexcept { discCancel_.store(true); Enqueue([this] { DoClose(); }); return FFFResult::Success; }
-FFFResult PlayerSession::Seek(const std::int64_t value) noexcept { if (value < 0) return FFFResult::InvalidArgument; const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, value] { DoSeek(value); if (state_.load() != FFF3FPState::Playing) DecodeUntilSeekTarget(); Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":" + std::to_string(snapshot_.position100ns) + "}"); }); return FFFResult::Success; }
+FFFResult PlayerSession::Seek(const std::int64_t value) noexcept { if (value < 0) return FFFResult::InvalidArgument; const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, value] {
+        // 定位失败时 DoSeek 会提前返回：不动队列、不装 seekTarget100ns_、也不改位置。这时
+        // 照常去 DecodeUntilSeekTarget()，就是朝一个"根本没装上的靶"抽干 demuxer——EOF 一到
+        // 而 pendingVideoPackets_ 已空，FlushAtEnd 直接把会话判成 Ended，而 DoSeek 自己的
+        // 错误消息写的是 "playback remained active"。实测裸 Annex-B：探针一句 Seek(0) ⇒
+        // 解码 0 帧＋state=Ended；跳过那句 seek，同一个文件正常播（88 帧、位置推进 3.41s）。
+        const auto seeked = DoSeek(value);
+        if (seeked == FFFResult::Success && state_.load() != FFF3FPState::Playing) DecodeUntilSeekTarget(); Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":" + std::to_string(snapshot_.position100ns) + "}"); }); return FFFResult::Success; }
 FFFResult PlayerSession::SeekKeyframe(const std::int64_t value) noexcept {
     if (value < 0) return FFFResult::InvalidArgument;
     const auto state = state_.load();
@@ -1312,6 +1319,9 @@ void PlayerSession::DoStepKeyframe(const std::int32_t direction) {
         keyframeSeekPending_ = true;
         draining_ = false;
         demuxEnded_ = audioDecoderDrained_ = externalAudioDrained_ = audioClockFinished_ = false;
+        // 只清内容周期，不清帧率散布：DoStepKeyframe 是同一个文件里的单帧步进，而
+        // "恒定/可变"是这个文件的属性，步进一次就把判词退回"还没测出来"是错的。
+        // 散布只在媒体身份变化处清（DoOpen / DoClose）。
         lastVideoFrameDuration100ns_ = 0;
         snapshot_.frameIndex = -1;
         PublishSnapshot();
@@ -1404,6 +1414,7 @@ FFFResult PlayerSession::GetPresentPacingStatus(
     status.holdSampled = pacing.holdSampled;
     status.holdWithinRounding = pacing.holdWithinRounding;
     status.holdWorstDeviationRefreshes = pacing.holdWorstDeviationRefreshes;
+    status.neverCompositedPresents = pacing.neverCompositedPresents;
     status.displayRateDiscardedFrames = displayRateDiscardedFrames_.load(std::memory_order_relaxed);
     return FFFResult::Success;
 }
@@ -2757,7 +2768,10 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     }
     framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false;
     seekTarget100ns_ = -1; seekTargetFrame_ = -1; keyframeSeekPending_ = false;
-    lastVideoFrameDuration100ns_ = 0; nextUntimedVideoPosition100ns_ = 0; draining_ = false;
+    lastVideoFrameDuration100ns_ = 0; nextUntimedVideoPosition100ns_ = 0; draining_ = false; ResetCadenceSpread();
+    // Fresh media identity: panel-only until the ceiling is (re)published below.
+    // DoOpen's leading DoClose already cleared it, this makes the line self-evident.
+    videoRenderer_.SetMediaFrameRateCeilingHz(0.0);
     ArmAudioUntilVideoFrame();
     // Ready sessions do not pump playback, so present the first image frame here.
     if (staticImage_ || animatedImage_) {
@@ -3055,6 +3069,13 @@ void PlayerSession::PumpPlayback() noexcept {
     // counters are already fresh, and it runs on the worker thread that owns the
     // decoder, so a rung change cannot race a decode in progress.
     EvaluateDecoderLoad();
+    if (cadenceModeRefreshPending_) {
+        cadenceModeRefreshPending_ = false;
+        RebuildMediaInfo();
+        publishedFrameRateMode_ = MeasuredFrameRateMode();   // 记下真正发布了哪一版
+        if (GetEnvironmentVariableW(L"FFF_CADENCE_TRACE", nullptr, 0))
+            std::fprintf(stderr, "CADENCE rebuild\n");
+    }
     if (videoStream_ < 0 && audioStream_ >= 0 && !audioRenderer_) {
         // Windows can block both shared and exclusive initialization while a
         // different process owns the endpoint. Keep audio-only media on its
@@ -3115,6 +3136,10 @@ void PlayerSession::PumpPlayback() noexcept {
     if (playbackPacket_ == nullptr) playbackPacket_ = av_packet_alloc();
     if (playbackPacket_ == nullptr) { Fail(FFFResult::NativeFailure, "Could not allocate a playback packet."); return; }
     const auto result = av_read_frame(format_, playbackPacket_);
+    if (GetEnvironmentVariableW(L"FFF_SEEK_TRACE", nullptr, 0) && ++readTraceCount_ <= 6)
+        std::fprintf(stderr, "READ rc=%d tell=%lld pendingV=%zu q=%zu demuxEnded=%d\n", result,
+            format_->pb ? (long long)avio_tell(format_->pb) : -1, pendingVideoPackets_.size(),
+            videoFrameQueue_.size(), demuxEnded_ ? 1 : 0);
     if (result < 0) {
         av_packet_unref(playbackPacket_);
         if (result != AVERROR_EOF) {
@@ -3702,6 +3727,38 @@ void PlayerSession::NormalizeVideoFrameTimestamp(AVFrame* frame) noexcept {
     nextUntimedVideoPosition100ns_ = std::max(nextUntimedVideoPosition100ns_, position + duration);
 }
 
+void PlayerSession::ResetCadenceSpread() noexcept {
+    cadenceSpreadMin100ns_ = 0; cadenceSpreadMax100ns_ = 0;
+    cadenceSpreadSamples_ = 0; cadenceModeRefreshPending_ = false;
+    publishedFrameRateMode_ = nullptr;
+    // 观测到的最快速率与散布同生命周期：只在媒体身份变化时清。上限是"初值与观测峰值里
+    // 取大的那个"，所以重新发布（seek、设备恢复、EOF 那些路径都会走 RebuildMediaInfo）
+    // 不能把已经抬上去的观测值抹掉——实测 12a 那件就因此从 60 掉回 25。
+    mediaObservedPeakHz_ = 0.0;
+}
+
+const char* PlayerSession::MeasuredFrameRateMode() const noexcept {
+    if (cadenceSpreadSamples_ < MinimumCadenceModeSamples || cadenceSpreadMax100ns_ <= 0)
+        return nullptr;
+    const auto spread = static_cast<double>(cadenceSpreadMax100ns_ - cadenceSpreadMin100ns_) /
+        static_cast<double>(cadenceSpreadMax100ns_);
+    // 5% 这条线两侧都有实测点：CFR 的取整散布只有 0.6%（16.6 与 16.7 ms 交替），而两段
+    // 变速的夹具一上来就是 50%（20 与 40 fps）。12 帧这个门槛是为了不让片头那几帧的
+    // 抖动单独定判词。
+    return spread > 0.05 ? "variable" : "constant";
+}
+
+const char* PlayerSession::FrameRateModeLabel(const AVStream* stream, const AVRational guessed,
+    const AVRational nominal) const noexcept {
+    if (const auto* measured = MeasuredFrameRateMode()) return measured;
+    // nominalFrameRate 在 r_frame_rate 无效时就是 guessed 的复制，比较它等于自己比自己，
+    // 那个"constant"没有证据。此时报 unknown——宿主的映射本来就把别的值画成"—"
+    // （FFF.Player/Form媒体信息.vb:183），不会多出一个要改的分支。
+    if (stream == nullptr || stream->r_frame_rate.num <= 0 || stream->r_frame_rate.den <= 0)
+        return "unknown";
+    return av_cmp_q(guessed, nominal) == 0 ? "constant" : "variable";
+}
+
 std::int64_t PlayerSession::VideoFramePosition(const AVFrame* frame) const noexcept {
     if (frame == nullptr || format_ == nullptr || videoStream_ < 0) return snapshot_.position100ns;
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
@@ -3714,12 +3771,70 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
     const auto position = pts == AV_NOPTS_VALUE ? snapshot_.position100ns :
         StreamTimestampPosition100ns(owner, videoStream_, pts);
-    if (frame->duration > 0) {
-        lastVideoFrameDuration100ns_ = av_rescale_q(frame->duration, stream->time_base,
+    // 内容周期 = 这一帧要在屏上占多久，是渲染器丢弃分桶与停留判带的操作数来源。它不再
+    // 是翻帧率上限——上限改成 per-媒体，打开媒体时由 RebuildMediaInfo 推一次
+    // （MediaFrameRateCeilingHz）。按"离呈现时钟最近"取，四级：
+    //   ① 队列里下一帧的 PTS − 本帧 PTS。释放闸比的就是这个 position，所以用同一个差
+    //      去定这一帧的停留，两者不可能互相掐。可变帧率的间距只有这里是**测出来**的。
+    //   ② frame->duration —— 队列已空（片尾、静图）时没有 ① 可用。
+    //   ③ 容器率 avg→r —— 整片一个常数，可变帧率在这一档必然失真。实测形状：VFR 的 .ts
+    //      包级 duration 170/170 全是 N/A，而 avg 被 demuxer 按流头填成 25/1，于是
+    //      后 2 秒的 60fps 被上限掐到 25，4 秒里丢 68 帧（present_pacing_probe ⑥ 的晚段）。
+    //   ④ 0 = 未知 —— 渲染器的 min() 自动只剩面板那一半。这一档不是可选项：缺了它，
+    //      ①②③ 全落空时这里会静默留着**上一条媒体**的周期，正是 §A9 ⑤ 要抓的形状。
+    std::int64_t contentPeriod100ns = 0;
+    bool perFrameEvidence = false;
+    // ① 只认队列路（PresentVideoFrame 的另一个调用点是暂停/seek 单帧路，那时队列里
+    //    还留着 seek 前的帧，front() 不是本帧的下一帧）。判据就用调用方自己那一条
+    //    Playing 谓词，不另立标准。
+    if (!videoFrameQueue_.empty() && state_.load() == FFF3FPState::Playing) {
+        const auto next = VideoFramePosition(videoFrameQueue_.front());
+        if (next > position) { contentPeriod100ns = next - position; perFrameEvidence = true; }
+    }
+    if (contentPeriod100ns <= 0 && frame->duration > 0) {
+        contentPeriod100ns = av_rescale_q(frame->duration, stream->time_base,
             AVRational{1, static_cast<int>(TicksPerSecond)});
-    } else if (stream->avg_frame_rate.num > 0 && stream->avg_frame_rate.den > 0) {
-        lastVideoFrameDuration100ns_ = av_rescale_q(1, av_inv_q(stream->avg_frame_rate),
-            AVRational{1, static_cast<int>(TicksPerSecond)});
+        perFrameEvidence = true;
+    }
+    if (contentPeriod100ns <= 0) {
+        const auto frameRate = stream->avg_frame_rate.num > 0 && stream->avg_frame_rate.den > 0
+            ? stream->avg_frame_rate : stream->r_frame_rate;
+        if (frameRate.num > 0 && frameRate.den > 0)
+            contentPeriod100ns = av_rescale_q(1, av_inv_q(frameRate),
+                AVRational{1, static_cast<int>(TicksPerSecond)});
+    }
+    lastVideoFrameDuration100ns_ = contentPeriod100ns > 0 ? contentPeriod100ns : 0;
+    if (perFrameEvidence && contentPeriod100ns > 0) {
+        if (cadenceSpreadSamples_ == 0)
+            cadenceSpreadMin100ns_ = cadenceSpreadMax100ns_ = contentPeriod100ns;
+        else {
+            cadenceSpreadMin100ns_ = std::min(cadenceSpreadMin100ns_, contentPeriod100ns);
+            cadenceSpreadMax100ns_ = std::max(cadenceSpreadMax100ns_, contentPeriod100ns);
+        }
+        ++cadenceSpreadSamples_;
+        // 上限只允许被"看见的更快的那一帧"抬高，永不自己回落（换媒体才整份替换）。
+        // 这条不是保险，是必需的：`r_frame_rate` 的误差方向**不是**只会偏松——TS 没有全局索引，
+        // 解容器按流头采样，`12b_vfr_20then40.ts` 实测 `r_frame_rate=20/1`、`av_guess=20/1`，
+        // 而后半段真的是 40fps（电池读到的平台段是 [2.60s@20][1.88s@40]）。
+        // 消融实测（docs/03 §A12）说清危害的边界：关掉上抬以后报出去的上限停在 20，那是个假数，
+        // 但**视频翻帧并没有被它掐住**——后半段仍以 40.1Hz 呈现、传统口径丢弃 0，因为有新画面时
+        // presenter 不等排程。所以危害是"读数错"＋"没有新画面时那条覆盖层排程按错周期走"，不是
+        // 丢帧；真要让上限去钳视频就只能丢真帧，那是错的。偏松同理无害：上限松只等于让面板那一半
+        // （vblank 钳 + 丢弃分桶）继续当限制。
+        mediaObservedPeakHz_ = std::max(mediaObservedPeakHz_,
+            10'000'000.0 / static_cast<double>(cadenceSpreadMin100ns_));
+        videoRenderer_.RaiseMediaFrameRateCeilingHz(mediaObservedPeakHz_);
+        // 判词第一次成立时刷一次 media info：RebuildMediaInfo 只在 open／设备恢复／换轨
+        // 那些路径被调，不刷的话这个字段会永远停在"还没测出来"的那一版。只刷一次。
+        // 判词变了才重发布（不是每帧刷 JSON，也不是一次性发布）。
+        const char* mode = MeasuredFrameRateMode();
+        if (mode != nullptr && mode != publishedFrameRateMode_)
+            cadenceModeRefreshPending_ = true;
+        if (GetEnvironmentVariableW(L"FFF_CADENCE_TRACE", nullptr, 0))
+            std::fprintf(stderr, "CADENCE n=%d min=%lld max=%lld pending=%d mode=%s\n",
+                cadenceSpreadSamples_, static_cast<long long>(cadenceSpreadMin100ns_),
+                static_cast<long long>(cadenceSpreadMax100ns_), cadenceModeRefreshPending_ ? 1 : 0,
+                MeasuredFrameRateMode());
     }
     // Hand the source period to the cadence lock. It is what lets the presenter size each
     // flip in refresh slots (2.4 slots for 60 fps on 144 Hz) instead of taking one slot per
@@ -3810,8 +3925,9 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
         // side of it: 60 fps content on a 59.94 Hz panel really is panel-limited, but 60 is
         // not greater than 59.94 x 1.005, so those ~0.06 discards per second land in the
         // traditional bucket. Without the margin the two buckets would flip back and forth
-        // every time the grid estimate moved by its own measurement noise, which is worse
-        // than a stable, documented 0.1% misattribution.
+        // Without the margin the two buckets would flip back and forth every time the
+        // declared refresh rate moved with a display-mode change, which is worse than a
+        // stable, documented 0.1% misattribution.
         if (videoRenderer_.HasOutputWindow() && contentHz > displayHz * 1.005) {
             displayRateDiscardedFrames_.fetch_add(1, std::memory_order_relaxed);
         } else {
@@ -4438,6 +4554,12 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     if (staticImage_) { PublishSnapshot(); return FFFResult::Success; }
     auto decodeStartPosition = position;
     const auto referenceStream = videoStream_ >= 0 ? videoStream_ : audioStream_;
+    // 时间戳定位对"没有 read_seek 的解容器"会退到去找一对时间戳——那要把输入一路读下去。
+    // 找不到时它返回失败，可输入指针已经停在末尾：裸 Annex-B 就是这个形状，Seek 返回 -5
+    // 之后会话读到 EOF、pending 已空，FlushAtEnd 直接判 Ended（实测解码 0 帧，而同一个
+    // 文件不 seek 能正常播 88 帧）。所以"定位失败＝没有副作用"不能只写在注释里，必须
+    // 真的把读位置还原；avformat_flush 是文档规定的配套调用（绕过解容器去 seek AVIO 之后）。
+    const auto byteOffsetBeforeSeek = format_->pb != nullptr ? avio_tell(format_->pb) : -1;
     auto timestamp = av_rescale_q(position + TimelineOrigin100ns(format_),
         AVRational{1, static_cast<int>(TicksPerSecond)},
         format_->streams[referenceStream]->time_base);
@@ -4458,10 +4580,33 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
             if (seekResult >= 0)
                 decodeStartPosition = av_rescale(bytePosition, timelineExtent, byteExtent);
         }
+        // 回到开头不需要任何"时间↔字节"映射，所以它不该被上面那个 timelineExtent>0 的门槛
+        // 挡掉——而恰恰是无时长源（裸 Annex-B）才需要这条：实测 Seek(0) 在那种文件上把读
+        // 位置甩到文件末尾（before=450560 after=1102103=整个文件大小），于是会话立刻
+        // Ended、解码 0 帧，而同一个文件不动它能在 450560 处继续正常播。
+        // 还原到原字节偏移也救不回来：那个偏移是**带缓冲的 AVIO 的逻辑位置**，多半落在
+        // 一个访问单元中间，解出来就是"读得到包、一帧都不出"（实测就是这形状）。
+        if (seekResult < 0 && position == 0)
+            seekResult = av_seek_frame(format_, -1, 0, AVSEEK_FLAG_BYTE);
     }
     if (seekResult < 0) {
-        ReportError(FFFResult::FfmpegFailure,
-            "FFmpeg could not seek to the requested position; playback remained active.", "seek");
+        if (GetEnvironmentVariableW(L"FFF_SEEK_TRACE", nullptr, 0))
+            std::fprintf(stderr, "SEEK fail rc=%d before=%lld after=%lld seekable=%d\n", seekResult,
+                (long long)byteOffsetBeforeSeek, format_->pb ? (long long)avio_tell(format_->pb) : -1,
+                format_->pb ? (int)(format_->pb->seekable & AVIO_SEEKABLE_NORMAL) : -1);
+        // 还原读位置，让"playback remained active"这句话真的成立。还原失败时不再含糊其辞，
+        // 直接把输入已到末尾这件事写进消息——那种情况下会话确实会继续走到结束。
+        auto rolledBack = false;
+        if (format_->pb != nullptr && byteOffsetBeforeSeek >= 0 &&
+            (format_->pb->seekable & AVIO_SEEKABLE_NORMAL) != 0 &&
+            avio_seek(format_->pb, byteOffsetBeforeSeek, SEEK_SET) >= 0) {
+            avformat_flush(format_);
+            rolledBack = true;
+        }
+        ReportError(FFFResult::FfmpegFailure, rolledBack
+            ? "FFmpeg could not seek to the requested position; the reader was rolled back and playback remained active."
+            : "FFmpeg could not seek to the requested position and the reader could not be rolled back; playback will run to the end.",
+            "seek");
         return FFFResult::FfmpegFailure;
     }
     ClearVideoQueue();
@@ -4658,7 +4803,13 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     videoStream_ = audioStream_ = coverArtStream_ = externalAudioStream_ = -1; externalAudioPath_.clear(); framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false;
     timedTextContentCache_.clear();
     externalAudioOffset100ns_ = 0; seekTarget100ns_ = seekTargetFrame_ = -1;
-    keyframeSeekPending_ = false; lastVideoFrameDuration100ns_ = 0;
+    keyframeSeekPending_ = false; lastVideoFrameDuration100ns_ = 0; ResetCadenceSpread();
+    // The session is losing its media identity: with the content period zeroed the
+    // ceiling must go panel-only too, or Stop/Close followed by nothing would keep
+    // the previous file's bound, and the same-HWND re-open path below DoOpen would
+    // show it during the new media's first frames. DoClose never runs through
+    // RebuildMediaInfo, so this is the anti-leak site for every close path.
+    videoRenderer_.SetMediaFrameRateCeilingHz(0.0);
     nextUntimedVideoPosition100ns_ = 0; draining_ = false;
     demuxEnded_ = audioDecoderDrained_ = externalAudioDrained_ = audioClockFinished_ = false;
     staticImage_ = false;
@@ -4710,8 +4861,62 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     }
 }
 
+// Produces the per-media frame-rate ceiling, in Hz, that bounds the renderer's flip
+// rate (FrameRateBoundHz = min(declared panel rate, this)). It is computed once when
+// a media is opened / switched and pushed from RebuildMediaInfo, instead of being
+// re-derived from every presented frame's duration.
+//
+// Why r_frame_rate, and why its looseness is safe here:
+//   - r_frame_rate is NOT "the maximum frame rate recorded in the file". Measured on
+//     this machine: the same content (a 25 fps segment plus a 60 fps segment) reports
+//     25/1 or 60/1 depending only on the order the two segments were muxed, and a
+//     24+30 file reports 120/1 while its real peak is 30. The field's own header note
+//     (third_party/ffmpeg/include/libavformat/avformat.h) calls it a "Real base
+//     framerate ... least common multiple ... just a guess".
+//   - avg_frame_rate is the whole-file average and cannot see VFR at all (a real VFR
+//     .ts reports avg == r == 20/1), so it is only a fallback for files whose
+//     r_frame_rate is absent.
+//   - What the error direction really is, and what the session does about it: for
+//     container-indexed formats r_frame_rate is derived from every sample timestamp,
+//     so it sits at or above the peak (a 24+30 file reports 120/1; bare Annex-B reports
+//     40/1 while its rate is 20). For MPEG-TS the demuxer has no index and samples the
+//     stream head, so the field can sit **below** a later fast segment - measured on
+//     12b_vfr_20then40.ts: r_frame_rate = 20/1 and av_guess = 20/1 while the back half
+//     really is 40 fps. That is why this value is only the initial ceiling and
+//     PresentVideoFrame raises it (never lowers it) as faster per-frame evidence
+//     arrives; a media switch replaces the whole thing via DoClose/RebuildMediaInfo.
+//   - Being loose costs nothing here: the presenter flips on new content, so a wide
+//     ceiling just leaves the panel half binding. Hence no full-file scan for the exact
+//     peak, and the per-frame period keeps feeding the discard buckets and hold bands
+//     separately.
+//   - 0 = no usable bound (no stream, no valid rate field): the renderer keeps the
+//     declared-panel half only.
+double PlayerSession::MediaFrameRateCeilingHz(const AVStream* stream) const noexcept {
+    if (stream != nullptr && stream->r_frame_rate.num > 0 && stream->r_frame_rate.den > 0)
+        return static_cast<double>(stream->r_frame_rate.num) /
+            static_cast<double>(stream->r_frame_rate.den);
+    if (stream != nullptr && stream->avg_frame_rate.num > 0 && stream->avg_frame_rate.den > 0)
+        return static_cast<double>(stream->avg_frame_rate.num) /
+            static_cast<double>(stream->avg_frame_rate.den);
+    return 0.0;
+}
+
 void PlayerSession::RebuildMediaInfo() noexcept {
     if (!format_) return;
+    // Publish the per-media frame-rate ceiling on every media-info rebuild. This runs
+    // from every path that can change the media identity (open, select-stream, disc
+    // title change) as well as the idempotent re-rebuilds (device recovery, hardware
+    // fallback, first frame, end-of-file refresh); recomputing from the current
+    // videoStream_ is correct in all of them. A media switch must never carry the
+    // previous file's ceiling over - DoClose clears it separately for the paths that
+    // tear the session down without reaching this function.
+    const AVStream* ceilingStream = nullptr;
+    if (videoStream_ >= 0 && videoStream_ < static_cast<std::int32_t>(format_->nb_streams))
+        ceilingStream = format_->streams[videoStream_];
+    // 发布的是"容器初值与已观测峰值里大的那个"：RebuildMediaInfo 也被 seek／设备恢复／
+    // EOF 这些路径调用，那里必须只是重新发布同一份上限，不能把抬上去的观测值抹回容器值。
+    videoRenderer_.SetMediaFrameRateCeilingHz(
+        std::max(MediaFrameRateCeilingHz(ceilingStream), mediaObservedPeakHz_));
     std::ostringstream json;
     const auto formatName = format_->iformat && format_->iformat->name ? format_->iformat->name : "";
     const auto formatLongName = format_->iformat && format_->iformat->long_name ? format_->iformat->long_name : "";
@@ -4812,7 +5017,8 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                  << ",\"nominalFrameRateNumerator\":" << nominalFrameRate.num
                  << ",\"nominalFrameRateDenominator\":" << nominalFrameRate.den
                  << ",\"frameRateMode\":\"" <<
-                    (av_cmp_q(frameRate, nominalFrameRate) == 0 ? "constant" : "variable") << "\""
+                    FrameRateModeLabel(index == static_cast<unsigned>(videoStream_) ? stream : nullptr,
+                        frameRate, nominalFrameRate) << "\""
                  << ",\"sampleAspectNumerator\":" << sampleAspect.num
                  << ",\"sampleAspectDenominator\":" << sampleAspect.den
                  << ",\"displayAspectNumerator\":" << displayAspect.num

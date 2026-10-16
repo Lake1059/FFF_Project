@@ -83,7 +83,8 @@ public:
     FFFResult SetPresentConfig(bool enableTearing) noexcept;
     // Cadence read-back (PlayerApi exports FFF3FP_GetPresentPacingStatus). Non-queueing:
     // the renderer publishes these from atomics. The flip-rate bound itself is automatic
-    // (min of panel rate and content rate) and has no setter.
+    // (min of the declared panel rate and the per-media frame-rate ceiling the session
+    // publishes at every open / media switch) and has no setter.
     FFFResult GetPresentPacingStatus(FFF3FPPresentPacingStatus& status) noexcept;
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
     FFFResult SetInteractiveMove(bool enabled) noexcept;
@@ -253,6 +254,11 @@ private:
     void NormalizeVideoFrameTimestamp(AVFrame* frame) noexcept;
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
+    void ResetCadenceSpread() noexcept;
+    // nullptr = 还没测够，调用方必须退回容器那两个字段而不是蒙一个"constant"。
+    const char* MeasuredFrameRateMode() const noexcept;
+    const char* FrameRateModeLabel(const struct AVStream* stream, AVRational guessed,
+        AVRational nominal) const noexcept;
     void QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, std::int32_t streamIndex) noexcept;
     void UpdateInputAudioPeakLevels(const AVFrame* frame) noexcept;
     bool HandleInternalAudioDecodeFailure(FFFResult result, std::string message) noexcept;
@@ -268,6 +274,10 @@ private:
     void Fail(FFFResult result, std::string message, const char* operation = nullptr) noexcept;
     void Emit(FFF3FPEvent eventType, const std::string& detailJson) const noexcept;
     void RebuildMediaInfo() noexcept;
+    // Per-media frame-rate ceiling (Hz) for the renderer's flip-rate bound, computed
+    // from the stream's container frame-rate fields at every open / media switch /
+    // media-info rebuild. 0 = no usable bound; the renderer keeps the panel half only.
+    double MediaFrameRateCeilingHz(const struct AVStream* stream) const noexcept;
     std::int64_t TimelineOrigin100ns(const AVFormatContext* owner) const noexcept;
     std::int64_t StreamTimestampPosition100ns(const AVFormatContext* owner,
         std::int32_t streamIndex, std::int64_t timestamp) const noexcept;
@@ -416,6 +426,24 @@ private:
     std::int64_t seekTargetFrame_;
     bool keyframeSeekPending_;
     std::int64_t lastVideoFrameDuration100ns_;
+    // 帧率模式的实测依据：呈现出来的逐帧间距散布。容器那两个字段单独不够定"恒定/可变"——
+    // 实测真 VFR 的 .ts 在会话里 av_guess_frame_rate() 与 r_frame_rate 同为 20/1，比较它们
+    // 永远说"恒定"。只有"逐帧测出来/逐帧声明"那两档算证据（队列里下一帧的 PTS 差、
+    // frame->duration）；退回整片容器率的那些帧不喂这里，那是猜测不是观测。
+    std::int64_t cadenceSpreadMin100ns_ = 0;
+    std::int64_t cadenceSpreadMax100ns_ = 0;
+    std::int32_t cadenceSpreadSamples_ = 0;
+    // 本媒体已经观测到的最快速率（Hz），与散布同生命周期（ResetCadenceSpread 清）。
+    // 上限 = max(容器字段的初值, 这个数)：容器的 r_frame_rate 在 MPEG-TS 上会偏低。
+    double mediaObservedPeakHz_ = 0.0;
+    bool cadenceModeRefreshPending_ = false;
+    // 已经发布进 media info JSON 的那一版判词（指向上面两个字符串常量之一，或 nullptr＝还没发布）。
+    // 判词是"到目前为止测到的散布"：一个前 2 秒恒速、后面才变速的文件，在第 12 帧时读
+    // constant 是对的，但它必须在散布真的变宽时重新发布——一次性的话就永远停在早期的
+    // constant 上（实测过这个形状：12b 的 40fps 段要到第 ~40 帧才进散布）。
+    const char* publishedFrameRateMode_ = nullptr;
+    static constexpr std::int32_t MinimumCadenceModeSamples = 12;
+    std::size_t readTraceCount_ = 0;   // 仅 FFF_SEEK_TRACE=1 时用，给定位失败排查读位置
     // Frames discarded because the source delivers faster than the panel can scan out, kept
     // apart from snapshot_.droppedVideoFrames (which means "the pipeline fell behind the
     // media clock"). Read from the API thread, written on the worker thread.
