@@ -3375,6 +3375,9 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         ReleaseCom(sourceViews_[plane]);
         ReleaseCom(sourceTextures_[plane]);
+        ReleaseCom(uploadViews_[plane]);
+        ReleaseCom(uploadTextures_[plane]);
+        for (auto& slot : uploadStaging_) ReleaseCom(slot[plane]);
     }
     ReleaseScaleResources();
     const auto planeCount = inputLayout == 1 ? 3u : (inputLayout == 2 ? 2u : 1u);
@@ -3441,7 +3444,7 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         //   3840x2160  Map 3.293 ms vs 2.886 ms                    (1.14x)
         //   7680x4320  Map 22.266 ms vs 15.213 ms                  (1.46x)
         // So only the large case is worth a second code path, and it needs a DEFAULT
-        // texture because UpdateSubresource cannot target a DYNAMIC one.
+        // texture for the staging copies below.
         if ((inputLayout == 1 || inputLayout == 2) && !UseDefaultUploadForSize(sourceWidth, sourceHeight)) {
             texture.Usage = D3D11_USAGE_DYNAMIC;
             texture.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -3449,6 +3452,28 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         if (FAILED(device_->CreateTexture2D(&texture, nullptr, &sourceTextures_[plane])) ||
             FAILED(device_->CreateShaderResourceView(sourceTextures_[plane], nullptr, &sourceViews_[plane]))) {
             SetError("Could not create the decoded frame textures."); return FFFResult::DeviceFailure;
+        }
+    }
+    uploadSlot_ = 0;
+    if (!externalSource && (inputLayout == 1 || inputLayout == 2) &&
+        UseDefaultUploadForSize(sourceWidth, sourceHeight)) {
+        for (unsigned plane = 0; plane < planeCount; ++plane) {
+            D3D11_TEXTURE2D_DESC desc{};
+            sourceTextures_[plane]->GetDesc(&desc);
+            if (FAILED(device_->CreateTexture2D(&desc, nullptr, &uploadTextures_[plane])) ||
+                FAILED(device_->CreateShaderResourceView(uploadTextures_[plane], nullptr, &uploadViews_[plane]))) {
+                SetError("Could not create the upload texture ring.");
+                return FFFResult::DeviceFailure;
+            }
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            for (auto& slot : uploadStaging_) {
+                if (FAILED(device_->CreateTexture2D(&desc, nullptr, &slot[plane]))) {
+                    SetError("Could not create the upload staging textures.");
+                    return FFFResult::DeviceFailure;
+                }
+            }
         }
     }
     sourceWidth_ = sourceWidth; sourceHeight_ = sourceHeight;
@@ -5881,11 +5906,9 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         //  - Small frames: Map(WRITE_DISCARD) into a DYNAMIC texture. The driver can
         //    rename storage rather than waiting for the previous frame to stop
         //    sampling the same DEFAULT texture, which is why this path exists.
-        //  - Large frames (>= 4K): UpdateSubresource into a DEFAULT texture. Map
-        //    returns write-combined memory and copying into it row by row loses badly
-        //    as rows widen -- measured at 8K, 22.27 ms against 15.21 ms for the same
-        //    bytes, while at 1080p the two are within 6%. EnsurePipeline creates the
-        //    matching texture usage, so these two decisions must stay in step.
+        //  - Large frames (>= 4K): CPU-write STAGING -> alternating DEFAULT
+        //    textures, keeping upload and sampling on separate resources.
+        //    EnsurePipeline creates the matching resource ring.
         const auto uploadStart = std::chrono::steady_clock::now();
         // uploadPlanes/uploadLines already point at the resampled copy when the
         // adaptive policy engaged, and uploadWidth/uploadHeight match the textures
@@ -5894,9 +5917,30 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         if (input.layout == 1 || input.layout == 2) {
             const auto planeCount = input.layout == 1 ? 3u : 2u;
             if (largeFrame) {
-                for (unsigned plane = 0; plane < planeCount; ++plane)
-                    context_->UpdateSubresource(sourceTextures_[plane], 0, nullptr,
-                        uploadPlanes[plane], uploadLines[plane], 0);
+                // Alternate sampled textures and CPU-write staging resources so
+                // uploading the next picture can overlap sampling the last one.
+                for (unsigned plane = 0; plane < planeCount; ++plane) {
+                    std::swap(sourceTextures_[plane], uploadTextures_[plane]);
+                    std::swap(sourceViews_[plane], uploadViews_[plane]);
+                    auto* staging = uploadStaging_[uploadSlot_][plane];
+                    D3D11_MAPPED_SUBRESOURCE mapped{};
+                    if (FAILED(context_->Map(staging, 0, D3D11_MAP_WRITE, 0, &mapped))) {
+                        SetError("Could not map the upload staging texture.");
+                        return FFFResult::DeviceFailure;
+                    }
+                    const auto xs = plane == 0 ? 0u : input.chromaWidthShift;
+                    const auto ys = plane == 0 ? 0u : input.chromaHeightShift;
+                    const auto rows = (uploadHeight + (1u << ys) - 1) >> ys;
+                    const auto rowBytes = ((uploadWidth + (1u << xs) - 1) >> xs) *
+                        (input.layout == 2 && plane != 0 ? 2u : 1u) * (input.bitDepth > 8 ? 2u : 1u);
+                    for (unsigned row = 0; row < rows; ++row)
+                        std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
+                            static_cast<std::size_t>(row) * mapped.RowPitch,
+                            uploadPlanes[plane] + static_cast<std::ptrdiff_t>(row) * uploadLines[plane], rowBytes);
+                    context_->Unmap(staging, 0);
+                    context_->CopyResource(sourceTextures_[plane], staging);
+                }
+                uploadSlot_ = (uploadSlot_ + 1) % 2;
             } else {
                 for (unsigned plane = 0; plane < planeCount; ++plane) {
                     D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -7313,6 +7357,9 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         ReleaseCom(sourceViews_[plane]);
         ReleaseCom(sourceTextures_[plane]);
+        ReleaseCom(uploadViews_[plane]);
+        ReleaseCom(uploadTextures_[plane]);
+        for (auto& slot : uploadStaging_) ReleaseCom(slot[plane]);
     }
     ReleaseCom(constants_);
     ReleaseCom(scaleConstants_);
@@ -7382,6 +7429,9 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         ReleaseCom(sourceViews_[plane]);
         ReleaseCom(sourceTextures_[plane]);
+        ReleaseCom(uploadViews_[plane]);
+        ReleaseCom(uploadTextures_[plane]);
+        for (auto& slot : uploadStaging_) ReleaseCom(slot[plane]);
     }
     sourceWidth_ = sourceHeight_ = 0;
     sourceInputLayout_ = UINT32_MAX;
