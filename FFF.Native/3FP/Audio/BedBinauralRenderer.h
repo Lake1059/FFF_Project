@@ -7,8 +7,8 @@
 
 // Generic channel-bed -> binaural renderer.
 //
-// Why this exists: spatial audio outside IAMF (Dolby AC-3/E-AC-3/Atmos beds,
-// TrueHD, DTS/DTS-HD/DTS:X beds, any multichannel PCM/FLAC/WAV) only ever got an
+// Why this exists: spatial audio outside IAMF (channel-based surround beds
+// from legacy codecs, any multichannel PCM/FLAC/WAV) only ever got an
 // swr matrix downmix on a stereo device: the energy survives, the placement
 // does not, because a fixed-coefficient mix carries no azimuth. This class renders
 // the bed through OBR instead (libiamf's own binaural renderer, Clear BSD plus

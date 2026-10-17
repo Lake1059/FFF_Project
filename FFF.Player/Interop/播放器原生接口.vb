@@ -10,6 +10,9 @@ Friend Enum 原生播放器结果 As Integer
     FFmpeg失败 = -5
     设备失败 = -6
     不支持 = -7
+    ' 尾部追加：内核 FFFResult::NotFound。环上这是正常回答（"这一趟没有可取的条目"），
+    ' 与失败码必须分得开；不知道它的宿主会把 nonzero 一律当失败，行为仍安全。
+    未找到 = -8
 End Enum
 
 <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
@@ -556,6 +559,131 @@ Friend Module 播放器原生接口
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Sub FFF3FP_SetColorExtensionAuthorizationPrompt(callback As 原生授权对话框回调)
     End Sub
+
+    ' ---- 动态元数据注入与帧边数据环（外部色彩变换 kind=3 通路） ----
+    ' 这三个导出按"可选导出"动态解析（与字幕流探测同一模式）：旧内核没有它们时
+    ' 能力属性答 False，整条通路按"内核不支持"静默降级。若改用静态 DllImport，
+    ' 调用点会抛 EntryPointNotFoundException——"没有环"会变成启动崩溃。
+
+    ''' <summary>帧边数据环的类型键。数值由宿主—模块的二进制契约约定：
+    ''' 宿主只把它当作"取我该看的那类条目"的不透明键传给内核，从不解析载荷内容，
+    ''' 也不由此推断任何源格式语义——载荷的语义完全由模块内部处理。</summary>
+    Friend Const 边数据契约类型 As UInteger = 24UI
+
+    ''' <summary>FFF3FPDynamicMetadataPacket（40 B）。载荷是调用方拥有的钉住缓冲区首址，
+    ''' 内核成功时整批拷走（payloadSize 必须精确等于载荷结构大小，拒大不拒小地整批拒绝）。</summary>
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 原生动态元数据包
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 种类 As UInteger
+        Public 种类版本 As UInteger
+        Public 帧序号 As Long
+        Public 载荷大小 As UInteger
+        Public 保留 As UInteger
+        Public 载荷 As IntPtr
+    End Structure
+
+    ''' <summary>FFF3FPColorTransformPayload（431296 B）：3×3 线性光矩阵 + 33³×3 LUT。
+    ''' 域 0 = 表替换源的成分→RGB 转换；域 1 = 表作用在内核自己的转换之后。全零矩阵 = 恒等。</summary>
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 原生色彩变换载荷
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 表分辨率 As UInteger
+        Public 表域 As UInteger
+        <MarshalAs(UnmanagedType.ByValArray, SizeConst:=9)>
+        Public 输出矩阵 As Single()
+        <MarshalAs(UnmanagedType.ByValArray, SizeConst:=107811)>
+        Public 查找表 As Single()
+    End Structure
+
+    ''' <summary>载荷结构的托管尺寸对账：与内核 static_assert（431296）必须同水，
+    ''' 否则每一帧都会被内核整批拒绝——在这里炸，比在每次注入时炸好。</summary>
+    Friend ReadOnly 色彩变换载荷尺寸 As Integer = Marshal.SizeOf(Of 原生色彩变换载荷)()
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置动态元数据原型(播放器 As IntPtr, 包数组 As IntPtr,
+        数量 As UInteger) As 原生播放器结果
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 清空动态元数据原型(播放器 As IntPtr, 种类 As UInteger) As 原生播放器结果
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 复制帧边数据原型(播放器 As IntPtr, 边数据类型 As UInteger,
+        起始帧号 As Long, 缓冲区 As IntPtr, 容量 As UInteger,
+        ByRef 写入大小 As UInteger, ByRef 找到帧号 As Long) As 原生播放器结果
+
+    ' 注意：字段必须显式声明委托类型——VB 的字段声明不适用 Option 推断，
+    ' 不写 As 的话字段类型是 Object，调用点走迟绑定，运行期抛
+    ' MissingMemberException（泵每一拍都会中，且被泵的兜底 catch 吞成一行日志）。
+    Private ReadOnly 设置动态元数据函数 As 设置动态元数据原型 =
+        解析可选导出(Of 设置动态元数据原型)("FFF3FP_SetDynamicMetadata")
+    Private ReadOnly 清空动态元数据函数 As 清空动态元数据原型 =
+        解析可选导出(Of 清空动态元数据原型)("FFF3FP_ClearDynamicMetadata")
+    Private ReadOnly 复制帧边数据函数 As 复制帧边数据原型 =
+        解析可选导出(Of 复制帧边数据原型)("FFF3FP_CopyFrameSideDataAfter")
+
+    ''' <summary>内核是否提供动态元数据注入导出。</summary>
+    Friend ReadOnly Property 支持动态元数据注入 As Boolean
+        Get
+            Return 设置动态元数据函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>内核是否提供帧边数据环导出。</summary>
+    Friend ReadOnly Property 支持帧边数据环 As Boolean
+        Get
+            Return 复制帧边数据函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>整表替换式注入：这一批包整体换掉已注入的表（所有 kind）。
+    ''' 旧内核没有该导出时答 <see cref="原生播放器结果.不支持"/>（调用方按"不支持"降级）。</summary>
+    Friend Function 设置动态元数据(播放器 As 播放器原生句柄, 包数组 As 原生动态元数据包()) As 原生播放器结果
+        Dim 函数 = 设置动态元数据函数
+        If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
+        If 包数组 Is Nothing OrElse 包数组.Length = 0 Then Return 原生播放器结果.参数无效
+        Dim 钉住 = GCHandle.Alloc(包数组, GCHandleType.Pinned)
+        Try
+            Return 函数(播放器.DangerousGetHandle(), 钉住.AddrOfPinnedObject(), CUInt(包数组.Length))
+        Finally
+            钉住.Free()
+        End Try
+    End Function
+
+    ''' <summary>丢弃已注入元数据：种类 0 清空所有 kind，其他只清该 kind。</summary>
+    Friend Function 清空动态元数据(播放器 As 播放器原生句柄, 种类 As UInteger) As 原生播放器结果
+        Dim 函数 = 清空动态元数据函数
+        If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
+        Return 函数(播放器.DangerousGetHandle(), 种类)
+    End Function
+
+    ''' <summary>帧边数据环的两趟式契约：<paramref name="缓冲区"/> 传 Nothing 只问尺寸
+    ''' （此时 <paramref name="写入大小"/> 是该条目字节数）；传非空则拷入。
+    ''' <paramref name="找到帧号"/> 是该条目的呈现帧号，未找到为 -1。</summary>
+    Friend Function 复制帧边数据(播放器 As 播放器原生句柄, 边数据类型 As UInteger,
+                                 起始帧号 As Long, 缓冲区 As Byte(),
+                                 ByRef 写入大小 As UInteger, ByRef 找到帧号 As Long) As 原生播放器结果
+        Dim 函数 = 复制帧边数据函数
+        写入大小 = 0UI
+        找到帧号 = -1L
+        If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
+        Dim 容量 As UInteger = 0UI
+        Dim 缓冲钉住 As GCHandle = Nothing
+        Dim 缓冲地址 As IntPtr = IntPtr.Zero
+        If 缓冲区 IsNot Nothing Then
+            容量 = CUInt(缓冲区.Length)
+            缓冲钉住 = GCHandle.Alloc(缓冲区, GCHandleType.Pinned)
+            缓冲地址 = 缓冲钉住.AddrOfPinnedObject()
+        End If
+        Try
+            Return 函数(播放器.DangerousGetHandle(), 边数据类型, 起始帧号, 缓冲地址, 容量, 写入大小, 找到帧号)
+        Finally
+            If 缓冲钉住.IsAllocated Then 缓冲钉住.Free()
+        End Try
+    End Function
+
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_Create(ByRef 配置 As 原生播放器配置, ByRef 播放器 As IntPtr) As 原生播放器结果
     End Function
