@@ -242,6 +242,12 @@ private:
     FFFResult LoadCoverArt() noexcept;
     FFFResult DecodePacket(AVCodecContext* decoder, AVPacket* packet, bool video,
         AVFormatContext* owner) noexcept;
+    FFFResult QueueSoftwareVideoDecode(AVPacket* packet) noexcept;
+    void SoftwareVideoDecodeWorker(AVCodecContext* decoder) noexcept;
+    bool SoftwareVideoDecodePending() noexcept;
+    bool SoftwareVideoInputFull() noexcept;
+    bool CollectSoftwareVideoFrame() noexcept;
+    void StopSoftwareVideoDecode() noexcept;
     bool PumpVideoPresentation() noexcept;
     void QueueVideoFrame(AVFrame* frame) noexcept;
     void ClearVideoQueue() noexcept;
@@ -307,6 +313,16 @@ private:
     std::int32_t pendingStepDirection_;
     std::thread worker_;
     std::atomic<bool> terminate_;
+    std::thread softwareVideoWorker_;
+    std::mutex softwareVideoMutex_;
+    std::mutex softwareVideoCodecMutex_;
+    std::condition_variable softwareVideoCondition_;
+    std::deque<AVPacket*> softwareVideoPackets_;
+    std::deque<AVFrame*> softwareVideoOutputs_;
+    unsigned softwareVideoOutputLimit_ = 1;
+    bool softwareVideoBusy_ = false;
+    bool softwareVideoStopping_ = false;
+    int softwareVideoResult_ = 0;
     AVFormatContext* format_;
     std::unique_ptr<DiscInput> disc_;
     std::atomic<bool> discCancel_{false};

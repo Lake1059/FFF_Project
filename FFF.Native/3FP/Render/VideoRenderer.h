@@ -712,6 +712,10 @@ private:
     bool hdrMetadataValid_ = false;
     ID3D11Texture2D* sourceTextures_[3];
     ID3D11ShaderResourceView* sourceViews_[3];
+    ID3D11Texture2D* uploadStaging_[2][3]{};
+    ID3D11Texture2D* uploadTextures_[3]{};
+    ID3D11ShaderResourceView* uploadViews_[3]{};
+    unsigned uploadSlot_ = 0;
     PlaneScaleChain planeScaleChains_[3];
     std::uint64_t scaledVideoGeneration_;
     std::uint32_t scaledOutputWidth_;
