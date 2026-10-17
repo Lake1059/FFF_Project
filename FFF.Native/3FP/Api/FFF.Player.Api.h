@@ -62,7 +62,7 @@ enum class FFF3FPHdrProcessingPath : std::uint32_t {
     ExternalDynamic = 7,
 };
 
-// DEPRECATED ABI (values retained, never produced): the RPU enhancement layer
+// DEPRECATED ABI (values retained, never produced): the external enhancement layer
 // is no longer decoded or reported by the player. Kept so snapshot and probe
 // layouts stay byte-identical for hosts built against earlier headers.
 enum class FFF3FPHDRdpEnhancementLayer : std::uint32_t {
@@ -251,7 +251,7 @@ struct FFF3FPSnapshot {
     std::uint32_t compatibleHdrFormats;
     FFF3FPHdrProcessingPath hdrProcessingPath;
     // DEPRECATED ABI (slots retained, always zero): the stream is no longer
-    // classified as RPU-bearing; its base layer is presented as plain HDR10.
+    // classified as carrying external metadata; its base layer is plain HDR10.
     std::uint32_t hdrDpProfile;
     std::uint32_t hdrDpLevel;
     std::uint32_t hasHDRdpRpu;
@@ -313,9 +313,9 @@ struct FFF3FPSnapshot {
     // count (stereo => binaural); reported so a host can say which one the
     // user is actually hearing. Appended at the end for the offset reason above.
     std::uint32_t iamfBinaural;
-    // Generic bed binaural rendering for NON-IAMF multichannel tracks (Dolby
-    // AC-3/E-AC-3/Atmos bed, TrueHD, DTS/DTS-HD/DTS:X bed, plain multichannel
-    // PCM/FLAC/WAV): when the output device is stereo, those tracks got
+    // Generic bed binaural rendering for NON-IAMF multichannel tracks (legacy
+    // channel-based surround beds, plain multichannel PCM/FLAC/WAV): when the
+    // output device is stereo, those tracks got
     // a plain swr matrix downmix: energy preserved, placement lost. This is
     // 1 while the OBR HRTF renderer is feeding the stereo output instead, 0 when
     // the matrix downmix is in force (multichannel device, unsupported
@@ -594,7 +594,7 @@ struct FFF3FPColorTransform {
 
 // Deterministic ABI-v1 probe for HDR classification and luminance policy.
 // The hdrDp* inputs below are DEPRECATED ABI (slots retained): they are
-// validated but no longer influence the result -- an RPU-bearing stream is
+// validated but no longer influence the result -- a stream carrying external
 // classified through its transfer characteristic alone. HdrDp residual:
 // 0=unknown/not present, 1=MEL, 2=FEL.
 struct FFF3FPHdrProcessingProbe {
@@ -1162,7 +1162,7 @@ FFF3FP_API FFFResult FFF3FP_GetHdrMetadataSource(FFF3FPHandle player,
 //   1. the entry's own peak -- max(maxScl) across windows[0]'s three channels,
 //      converted to nits as value * 10000 -- whenever that is a valid peak;
 //   2. otherwise the stream-level baseline -- the peak the processor derived from
-//      its codec parameters at open time (Dolby configuration, HDR10+ side data,
+//      its codec parameters at open time (stream configuration, HDR10+ side data,
 //      color_trc) plus the stream's static mastering metadata. For real shipped
 //      HDR10/HDR10+ material this is normally the static
 //      targeted_system_display_maximum_luminance.

@@ -59,7 +59,7 @@ constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
 // Frame side-data ring (CopyFrameSideDataAfter). Sized from measurement, not
 // guesswork -- see 3fp/tools/sidedata_size_probe.cpp, compiled against the
 // bundled FFmpeg headers: an AV_FRAME_DATA_DOVI_METADATA blob is a
-// self-relative structure of 48 B of offsets + 20 B RPU header + 5144 B data
+// self-relative structure of 48 B of offsets + 20 B external-metadata header + 5144 B data
 // mapping + 196 B colour metadata + 76 B per display-management extension
 // (~5.5-7.5 KB in practice), AV_FRAME_DATA_DYNAMIC_HDR_PLUS is 11304 B,
 // AV_FRAME_DATA_DYNAMIC_HDR_VIVID 1372 B, AV_FRAME_DATA_FILM_GRAIN_PARAMS
@@ -4124,8 +4124,8 @@ void PlayerSession::UpdateInputAudioPeakLevels(const AVFrame* frame) noexcept {
 
 bool PlayerSession::HandleInternalAudioDecodeFailure(const FFFResult result, std::string message) noexcept {
     // A stream switch seeks on the video timeline. MPEG-TS can land on a partial
-    // DTS/AC-3 access unit before the next audio sync word; reject that boundary
-    // packet and let the decoder lock onto subsequent complete packets.
+    // cinema-surround access unit before the next audio sync word; reject that
+    // boundary packet and let the decoder lock onto subsequent complete packets.
     if (++internalAudioDecodeErrorCount_ < 32) {
         if (audioDecoder_ != nullptr) avcodec_flush_buffers(audioDecoder_);
         return false;
