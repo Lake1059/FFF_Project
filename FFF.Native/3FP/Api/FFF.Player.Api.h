@@ -157,8 +157,12 @@ struct FFF3FPConfiguration {
     // an easy source does not need the workers at all, so starting low and growing
     // only under pressure keeps the CPU free when playback is comfortable.
     //
-    // Bounded to [minSoftwareDecoderThreads, maxSoftwareDecoderThreads], and never
-    // applied to hardware decoding.
+    // Bounded to [minSoftwareDecoderThreads, maxSoftwareDecoderThreads] and by the
+    // thread budget: decoder workers plus the player's worker, audio and video present
+    // threads stay below the CPU count. One step also never crosses the preferred
+    // domain boundary (performance class on hybrid, one L3 domain on multi-CCD): the
+    // boundary set is tried first, the next class/domain only if it is not enough.
+    // Never applied to hardware decoding, whose decode part is a single thread.
     //   0 = Disabled: one fixed count chosen at open time (the previous behaviour)
     //   1 = Enabled: adapt within the bounds below
     std::uint32_t adaptiveDecoderThreads = 0;
