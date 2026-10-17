@@ -48,5 +48,5 @@
   - 真实 HDR 高亮：按源 HDR 规格映射到实际亮度范围，需要 HDR 屏幕
 - HDR 多规格支持
   - HDR10、HDR10+、HLG
-  - 杜比视界：回退 HDR10
+  - HDRdp：回退 HDR10
   - HDR Vivid
