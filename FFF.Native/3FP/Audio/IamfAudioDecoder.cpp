@@ -98,7 +98,7 @@ int SoundSystemForChannels(const int wanted) {
 // layout, so the interleaved PCM has to be permuted before it is handed on.
 //
 // Ground truth is the bed-order probe in
-// an out-of-tree fixture set rendered from Atmos material, which muxed fixtures
+// an out-of-tree fixture set rendered from bed material, which muxed fixtures
 // whose tracks are pairwise decorrelated (max |corr| 0.0141) and compared each
 // rendered channel against the source identity. It resolves to the same swap for
 // every layout that has both side and back speakers:

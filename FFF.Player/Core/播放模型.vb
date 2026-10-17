@@ -41,7 +41,7 @@ Public Enum HDR处理路径 As UInteger
     HDRdp兼容基础层回退 = 4
     HDRdpFEL基础层回退 = 5
     HDRVivid动态映射 = 6
-    外部RPU处理 = 7
+    外部色彩变换 = 7
 End Enum
 
 ' DEPRECATED ABI mirror: never produced by the kernel any more.
@@ -663,9 +663,9 @@ Public NotInheritable Class 媒体流信息
     <JsonPropertyName("dynamicHdrMetadata")>
     Public Property 动态HDR元数据 As Boolean
     <JsonPropertyName("externalColorExtensionAvailable")>
-    Public Property 外部RPU扩展可用 As Boolean
+    Public Property 外部色彩变换可用 As Boolean
     <JsonPropertyName("externalColorExtensionActive")>
-    Public Property 外部RPU扩展已启用 As Boolean
+    Public Property 外部色彩变换已启用 As Boolean
     <JsonPropertyName("masteringPrimaries")>
     Public Property 主显示器色域 As String = String.Empty
     <JsonPropertyName("masteringMinLuminance")>

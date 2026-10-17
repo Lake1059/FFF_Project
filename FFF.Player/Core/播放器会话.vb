@@ -38,6 +38,8 @@ Public NotInheritable Class 播放器会话
     Private 定时文字原生缓冲句柄 As GCHandle
     Private 已释放 As Integer
     Private 事件排程中 As Integer
+    ''' <summary>外部色彩变换注入泵（模块缺席/未解锁/内核无环导出时为 Nothing，通路整体静默）。</summary>
+    Private 注入泵 As 色彩变换注入泵
 
     ''' <summary>宿主对应的原生 API 版本，须与 PlayerApi.cpp 的 PlayerApiVersion 同步。</summary>
     Friend Const 期望API版本 As UInteger = 20UI
@@ -103,6 +105,55 @@ Public NotInheritable Class 播放器会话
 
     Public Sub 打开(本地路径 As String)
         调用路径(AddressOf 播放器原生接口.FFF3FP_Open, 本地路径)
+        启动色彩变换通路()
+    End Sub
+
+    ' ---- 外部色彩变换通路（kind=3 注入） ----
+    ' 三态探测：缺席 / 旧件 ⇒ 静默（绝大多数用户）；已解锁 ⇒ 装载建泵；
+    ' 已锁定 ⇒ 建泵走 60 秒补装载（用户可能在启动弹框里输码，也可能切出去找码）。
+    ' 铁律：任何意外都按“没有这条通路”处理，绝不能把一个好会话弄坏。
+    Private Sub 启动色彩变换通路()
+        If Volatile.Read(已释放) <> 0 Then Return
+        Try
+            ' 旧内核没有环/注入导出：这条路不存在，静默。
+            If Not 播放器原生接口.支持帧边数据环 OrElse Not 播放器原生接口.支持动态元数据注入 Then Return
+
+            Dim 原因 As String = Nothing
+            Dim 形态 = 色彩变换模块接口.探测(原因)
+            If 形态 = 色彩变换模块接口.模块在场形态.缺席 OrElse
+              形态 = 色彩变换模块接口.模块在场形态.旧件 Then
+                Debug.WriteLine("色彩变换模块：" & 原因)
+                Return
+            End If
+
+            If 注入泵 Is Nothing Then 注入泵 = New 色彩变换注入泵(Me)
+
+            ' 已解锁且泵里还没有活模块时才装载：避免每次打开文件都重载一遍（431 KB 钉住缓冲 + 握手）。
+            If 形态 = 色彩变换模块接口.模块在场形态.就绪 AndAlso Not 注入泵.通路可用 Then
+                Dim 模块 = 色彩变换模块接口.尝试装载(原因)
+                If 模块 Is Nothing Then
+                    Debug.WriteLine("色彩变换模块：" & 原因)
+                Else
+                    注入泵.采用模块(模块)
+                End If
+            End If
+
+            ' 已锁定时泵是空转起步的：后台按 2 秒节流补装载，票据一落盘下一拍就转入正常节拍。
+            注入泵.启动()
+            注入泵.流重启()
+        Catch ex As Exception
+            Debug.WriteLine("色彩变换模块：通路启动异常（已忽略）：" & ex.GetType().Name & ": " & ex.Message)
+        End Try
+    End Sub
+
+    ''' <summary>流重启通知：seek / 帧步进 / 停止 / 换文件 / 换轨之后调。
+    ''' 内核在这些点把边数据环整个丢掉、presentation index 从那里重来。</summary>
+    Private Sub 通知注入泵流重启()
+        Try
+            注入泵?.流重启()
+        Catch ex As Exception
+            ' 复位失败不该把调用方（可能是 UI 线程的播放控制）带倒。
+        End Try
     End Sub
 
     Public Function 打开Async(本地路径 As String, Optional 取消标记 As CancellationToken = Nothing) As Task
@@ -166,36 +217,46 @@ Public NotInheritable Class 播放器会话
     End Sub
     Public Sub 停止()
         检查结果(播放器原生接口.FFF3FP_Stop(取得句柄()))
+        通知注入泵流重启()
     End Sub
     Public Sub 关闭媒体()
         检查结果(播放器原生接口.FFF3FP_Close(取得句柄()))
+        通知注入泵流重启()
     End Sub
     Public Sub 跳转(位置 As TimeSpan)
         If 位置 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(位置))
         检查结果(播放器原生接口.FFF3FP_Seek(取得句柄(), 位置.Ticks))
+        通知注入泵流重启()
     End Sub
     Public Sub 跳转到关键帧(位置 As TimeSpan)
         If 位置 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(位置))
         检查结果(播放器原生接口.FFF3FP_SeekKeyframe(取得句柄(), 位置.Ticks))
+        通知注入泵流重启()
     End Sub
     Public Sub 跳转到帧(帧序号 As Long)
         If 帧序号 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(帧序号))
         检查结果(播放器原生接口.FFF3FP_SeekFrame(取得句柄(), 帧序号))
+        通知注入泵流重启()
     End Sub
     Public Sub 上一帧()
         检查结果(播放器原生接口.FFF3FP_StepFrame(取得句柄(), -1))
+        通知注入泵流重启()
     End Sub
     Public Sub 下一帧()
         检查结果(播放器原生接口.FFF3FP_StepFrame(取得句柄(), 1))
+        通知注入泵流重启()
     End Sub
     Public Sub 上一关键帧()
         检查结果(播放器原生接口.FFF3FP_StepKeyframe(取得句柄(), -1))
+        通知注入泵流重启()
     End Sub
     Public Sub 下一关键帧()
         检查结果(播放器原生接口.FFF3FP_StepKeyframe(取得句柄(), 1))
+        通知注入泵流重启()
     End Sub
     Public Sub 选择视频流(索引 As Integer)
         检查结果(播放器原生接口.FFF3FP_SelectVideoStream(取得句柄(), 索引))
+        通知注入泵流重启()
     End Sub
     Public Sub 选择音频流(索引 As Integer)
         检查结果(播放器原生接口.FFF3FP_SelectAudioStream(取得句柄(), 索引))
@@ -641,7 +702,11 @@ Public NotInheritable Class 播放器会话
             Dim 当前视频 = 信息?.流.FirstOrDefault(Function(流) 流.索引 = 快照.当前视频流 AndAlso 流.类型 = "video")
             If 当前视频 IsNot Nothing Then
                 ' 原生媒体 JSON 缓存静态信息；逐帧处理结果以实时快照为准。
-                当前视频.外部RPU扩展已启用 = 快照.HDR处理路径 = HDR处理路径.外部RPU处理
+                ' 外部色彩变换已启用由内核自报（HDR处理路径=外部色彩变换）；外部色彩变换可用
+                ' 内核不写（该字段在两侧都是死读位），由宿主按“模块 DLL 在盘上”回填——
+                ' 只查文件存在，不装载、不握手，每次调用都是廉价读数。
+                当前视频.外部色彩变换已启用 = 快照.HDR处理路径 = HDR处理路径.外部色彩变换
+                当前视频.外部色彩变换可用 = 色彩变换模块接口.模块在盘上()
                 当前视频.动态HDR元数据 = 快照.动态HDR元数据有效
                 当前视频.HDR回退 = 快照.HDR回退有效
             End If
@@ -715,9 +780,25 @@ Public NotInheritable Class 播放器会话
         End Try
     End Function
 
+    ''' <summary>色彩变换通路的诊断摘要（测试与日志用；通路未启动时答“未启动”）。</summary>
+    Friend ReadOnly Property 色彩变换诊断 As String
+        Get
+            Dim 泵 = 注入泵
+            If 泵 Is Nothing Then Return "通路未启动（模块缺席、未装载或内核无环导出）"
+            Return 泵.描述计数器() & "；" & 泵.描述模块态()
+        End Get
+    End Property
+
     Public Sub 释放() Implements IDisposable.Dispose
         If Interlocked.Exchange(已释放, 1) <> 0 Then Return
         释放取消源.Cancel()
+        ' 先停注入泵：泵的每次原生调用都要用活句柄，停止（含线程 join）必须在句柄销毁前，
+        ' 否则就是拿着正在销毁的句柄进 CopyFrameSideDataAfter（use-after-free）。
+        Try
+            注入泵?.Dispose()
+        Catch ex As Exception
+            ' 停泵失败不该阻断会话的其余清理。
+        End Try
         SyncLock 定时文字提交锁
             句柄.Dispose()
             If 定时文字原生缓冲句柄.IsAllocated Then 定时文字原生缓冲句柄.Free()
@@ -761,7 +842,7 @@ Public NotInheritable Class 播放器会话
         End Try
     End Function
 
-    Private Function 取得句柄() As 播放器原生句柄
+    Friend Function 取得句柄() As 播放器原生句柄
         ObjectDisposedException.ThrowIf(Volatile.Read(已释放) <> 0, Me)
         Return 句柄
     End Function

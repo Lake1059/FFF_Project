@@ -22,6 +22,11 @@ Friend Module Program
                     StringComparison.OrdinalIgnoreCase) Then
                 Return StreamSelectionRegression.运行(args.Skip(1).ToArray())
             End If
+            ' 外部色彩变换 kind=3 注入回归（真内核 + 真模块 DLL；票据须由驱动预铸，见文件头）。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--color-transform-injection",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return ColorTransformInjectionRegression.运行(args.Skip(1).ToArray())
+            End If
             ' 体感那一路要真计时器 + 真消息循环才观测得到，所以另开一档（同进程，不起产品 exe）。
             If args.Length > 0 AndAlso String.Equals(args(0), "--image-zoom-live",
                     StringComparison.OrdinalIgnoreCase) Then

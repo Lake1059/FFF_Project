@@ -355,11 +355,94 @@ Public Class Form1
             Return
         End If
 
+        启动时处理色彩变换模块解锁()
 
         Dim 启动文件 = My.Application.取出待处理启动文件()
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
         待打开外部文件 = String.Empty
         If Not String.IsNullOrEmpty(请求文件) Then BeginInvoke(Sub() 打开外部文件(请求文件))
+    End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  外部色彩变换模块（FFF.HDRdp.Test.dll）启动时解锁处理
+    '
+    '  ● 用户裁定（最简版）：**有 DLL 且未解锁 ⇒ 弹一次输码框；没 DLL 或已解锁 ⇒ 完全不提示**。
+    '  ● 三条纪律（与 3FCompare 侧同口径）：
+    '    ① 解锁码绝不进任何日志——只记"接受 / 拒绝 / 够不到"；
+    '    ② 文案用本窗体自有的中性措辞，不引用模块自带的说明文本（措辞不由本仓控制）；
+    '    ③ 连续错 <see cref="解锁最大尝试次数"/> 次即放弃；取消与放弃都回到"本次按基础层
+    '       出画"，不再打扰。
+    '  ● 单实例：VB 单实例应用的次实例只转发、不建窗体，所以这里天然只在主实例跑一次。
+    ' ═══════════════════════════════════════════════════════════════════════════
+    Private Const 解锁最大尝试次数 As Integer = 5
+
+    Private Sub 启动时处理色彩变换模块解锁()
+        Try
+            Dim 原因 As String = Nothing
+            Select Case 色彩变换模块接口.探测(原因)
+                Case 色彩变换模块接口.模块在场形态.缺席, 色彩变换模块接口.模块在场形态.旧件
+                    ' 静默：与"没这功能"同形，不提示、不报错、不改默认行为。
+                    Debug.WriteLine("色彩变换模块：" & 原因)
+                Case 色彩变换模块接口.模块在场形态.就绪
+                    Debug.WriteLine("色彩变换模块：已解锁")
+                Case 色彩变换模块接口.模块在场形态.已锁定
+                    解锁对话框循环()
+            End Select
+        Catch ex As Exception
+            ' 探测是"要不要打扰用户"的判据：宁可静默，也不能让启动链断在这里。
+            Debug.WriteLine("色彩变换模块：启动时处理异常（已忽略）：" & ex.GetType().Name)
+        End Try
+    End Sub
+
+    ''' <summary>输码闭环：输入 → 提交 → 错了再来（有上限）→ 接受或放弃。码不落日志。</summary>
+    Private Sub 解锁对话框循环()
+        For 尝试 As Integer = 1 To 解锁最大尝试次数
+            Dim 提示文本 As String
+            If 尝试 = 1 Then
+                提示文本 = "检测到色彩变换模块，但尚未解锁。" & vbCrLf &
+                    "请输入解锁码；留空或取消则本次按基础画面播放。"
+            Else
+                提示文本 = "解锁码不正确，请重新输入。（第 " & 尝试.ToString() & " / " &
+                    解锁最大尝试次数.ToString() & " 次）" & vbCrLf &
+                    "留空或取消则本次按基础画面播放。"
+            End If
+
+            Dim 码 = LakeUI.ExInputBox(Me, 提示文本, "色彩变换模块解锁")
+            If String.IsNullOrWhiteSpace(码) Then Return   ' 取消 / 空输入 ⇒ 放弃，静默
+
+            Dim 详情 As String = Nothing
+            Select Case 色彩变换模块接口.提交解锁码(码.Trim(), 详情)
+                Case 色彩变换模块接口.解锁结果.已接受
+                    Debug.WriteLine("色彩变换模块：解锁码已被模块接受（票据已落盘）")
+                    LakeUI.ExOverlayMsgBox(Me, "色彩变换模块已解锁。",
+                        MsgBoxStyle.Information Or MsgBoxStyle.OkOnly, "色彩变换模块解锁")
+                    Return
+
+                Case 色彩变换模块接口.解锁结果.已接受未落盘
+                    ' 码是对的，但票据写不进目标位置（常见于装在不可写目录）：
+                    ' 本次进程能用，重启后要重输。这句必须说清，否则用户以为"没成功"。
+                    Debug.WriteLine("色彩变换模块：解锁码已被模块接受（票据未落盘，仅本次进程）")
+                    LakeUI.ExOverlayMsgBox(Me,
+                        "解锁码已通过，但票据无法写入目标位置：本次运行可用，重启后需要重新输入。",
+                        MsgBoxStyle.Exclamation Or MsgBoxStyle.OkOnly, "色彩变换模块解锁")
+                    Return
+
+                Case 色彩变换模块接口.解锁结果.被拒
+                    ' 码不对：换文案再给一次机会（详情只进调试输出，不含码）。
+                    Debug.WriteLine("色彩变换模块：解锁码被拒" &
+                        If(String.IsNullOrEmpty(详情), "", "（" & 详情 & "）"))
+                    Continue For
+
+                Case Else
+                    ' 够不到模块 / 不含解锁入口：这不是"码对不对"的问题，
+                    ' 再弹下去只是让用户白试，直接放弃并回到静默。
+                    Debug.WriteLine("色彩变换模块：无法提交解锁码" &
+                        If(String.IsNullOrEmpty(详情), "", "（" & 详情 & "）"))
+                    Return
+            End Select
+        Next
+        ' 连续错满上限：放弃，回到"本次按基础层出画"，不再打扰。
+        Debug.WriteLine("色彩变换模块：连续输错满 " & 解锁最大尝试次数.ToString() & " 次，放弃")
     End Sub
 
 
