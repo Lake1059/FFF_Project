@@ -906,7 +906,7 @@ FFFResult HdrProcessor::EvaluateProbe(FFF3FPHdrProcessingProbe& probe) noexcept 
         return FFFResult::InvalidArgument;
 
     HdrFrameState state{};
-    // An RPU-bearing stream is no longer classified here: its base layer is
+    // A stream carrying external metadata is no longer classified here: its base layer is
     // presented as plain HDR10 through the transfer branch below, and any
     // stream-specific handling belongs to the FFmpeg patch layer, not the player.
     if (probe.hdrVividMetadata != 0) {
