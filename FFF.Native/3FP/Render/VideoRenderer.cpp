@@ -1381,6 +1381,13 @@ constexpr std::uint32_t ToShaderFilter(const ScaleKernel kernel) noexcept {
 // moves the same pixel count several times over), and with whatever else holds the
 // GPU busy. The question being answered is "is the upload expensive on THIS
 // machine for THIS content", and only measurement answers that.
+// Every snapshot timing field counts 100 ns units; this keeps the new split
+// counters from repeating the duration_cast boilerplate at each site.
+inline std::uint64_t To100ns(const std::chrono::steady_clock::duration& d) noexcept {
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+    return static_cast<std::uint64_t>(ns > 0 ? ns / 100 : 0);
+}
+
 constexpr std::uint32_t UploadLadderWindowFrames = 32;   // frames per settlement window
 constexpr double UploadEscalateRatio = 0.50;             // upload share of the frame budget that earns rung 1
 constexpr double UploadDeescalateRatio = 0.15;           // share below which rung 1 is given back
@@ -2295,6 +2302,8 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       hasCachedVideo_(false), videoGeneration_(0), presentedVideoGeneration_(0), countedVideoGeneration_(0),
       presentedVideoFrames_(0), coalescedVideoFrames_(0), swapChainPresents_(0),
       presentWait100ns_(0), deviceLockWait100ns_(0), softwareConvert100ns_(0), upload100ns_(0),
+      uploadMapWait100ns_(0), uploadCopy100ns_(0), downscaleResample100ns_(0), scalePassCount_(0),
+      uploadCount_(0), uploadCopyBytes_(0), uploadPath_(0),
       playbackWorkPending_(0),
       interactiveMove_(false),
       lyricsLayoutEnabled_(false),
@@ -4224,6 +4233,7 @@ FFFResult PlayerVideoRenderer::EnsurePlaneScaleChain(const std::size_t plane,
 FFFResult PlayerVideoRenderer::ExecuteScalePass(ID3D11ShaderResourceView* source,
     const std::uint32_t sourceWidth, const std::uint32_t sourceHeight,
     const ScalePassResource& pass, const std::uint32_t filter) noexcept {
+    scalePassCount_.fetch_add(1, std::memory_order_relaxed);
     if (source == nullptr || pass.target == nullptr || context_ == nullptr ||
         scalePixelShader_ == nullptr || scaleConstants_ == nullptr)
         return FFFResult::InvalidState;
@@ -4349,9 +4359,12 @@ bool PlayerVideoRenderer::PrepareAdaptiveDownscale(const AVFrame* frame,
     if (av_image_fill_arrays(destinationData, destinationLines, adaptiveBuffer_.data(),
             pixelFormat, static_cast<int>(outputWidth), static_cast<int>(outputHeight), 1) < 0)
         return false;
+    const auto resampleStart = std::chrono::steady_clock::now();
     if (sws_scale(adaptiveScaler_, frame->data, frame->linesize, 0, frame->height,
             destinationData, destinationLines) <= 0)
         return false;
+    downscaleResample100ns_.fetch_add(To100ns(
+        std::chrono::steady_clock::now() - resampleStart), std::memory_order_relaxed);
     adaptiveSourceWidth_ = outputWidth;
     adaptiveSourceHeight_ = outputHeight;
     // The caller uploads these planes instead of the original frame's.
@@ -5993,31 +6006,43 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
                     std::swap(sourceViews_[plane], uploadViews_[plane]);
                     auto* staging = uploadStaging_[uploadSlot_][plane];
                     D3D11_MAPPED_SUBRESOURCE mapped{};
+                    const auto mapStart = std::chrono::steady_clock::now();
                     if (FAILED(context_->Map(staging, 0, D3D11_MAP_WRITE, 0, &mapped))) {
                         SetError("Could not map the upload staging texture.");
                         return FFFResult::DeviceFailure;
                     }
+                    uploadMapWait100ns_.fetch_add(To100ns(
+                        std::chrono::steady_clock::now() - mapStart), std::memory_order_relaxed);
                     const auto xs = plane == 0 ? 0u : input.chromaWidthShift;
                     const auto ys = plane == 0 ? 0u : input.chromaHeightShift;
                     const auto rows = (uploadHeight + (1u << ys) - 1) >> ys;
                     const auto rowBytes = ((uploadWidth + (1u << xs) - 1) >> xs) *
                         (input.layout == 2 && plane != 0 ? 2u : 1u) * (input.bitDepth > 8 ? 2u : 1u);
+                    const auto copyStart = std::chrono::steady_clock::now();
                     for (unsigned row = 0; row < rows; ++row)
                         std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
                             static_cast<std::size_t>(row) * mapped.RowPitch,
                             uploadPlanes[plane] + static_cast<std::ptrdiff_t>(row) * uploadLines[plane], rowBytes);
+                    uploadCopy100ns_.fetch_add(To100ns(
+                        std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
+                    uploadCopyBytes_.fetch_add(static_cast<std::size_t>(rows) * rowBytes,
+                        std::memory_order_relaxed);
                     context_->Unmap(staging, 0);
                     context_->CopyResource(sourceTextures_[plane], staging);
                 }
                 uploadSlot_ = (uploadSlot_ + 1) % 2;
+                uploadPath_.store(1, std::memory_order_relaxed);
             } else {
                 for (unsigned plane = 0; plane < planeCount; ++plane) {
                     D3D11_MAPPED_SUBRESOURCE mapped{};
+                    const auto mapStart = std::chrono::steady_clock::now();
                     if (FAILED(context_->Map(sourceTextures_[plane], 0,
                         D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
                         SetError("Could not map the decoded frame plane.");
                         return FFFResult::DeviceFailure;
                     }
+                    uploadMapWait100ns_.fetch_add(To100ns(
+                        std::chrono::steady_clock::now() - mapStart), std::memory_order_relaxed);
                     const auto xShift = plane == 0 ? 0u : input.chromaWidthShift;
                     const auto yShift = plane == 0 ? 0u : input.chromaHeightShift;
                     const auto rows = (uploadHeight + (1u << yShift) - 1) >> yShift;
@@ -6033,18 +6058,31 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
                     const auto samplesPerTexel = (input.layout == 2 && plane != 0) ? 2u : 1u;
                     const auto rowBytes = ((uploadWidth + (1u << xShift) - 1) >> xShift) *
                         samplesPerTexel * (input.bitDepth > 8 ? 2u : 1u);
+                    const auto copyStart = std::chrono::steady_clock::now();
                     for (unsigned row = 0; row < rows; ++row)
                         std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
                             static_cast<std::size_t>(row) * mapped.RowPitch,
                             uploadPlanes[plane] + static_cast<std::ptrdiff_t>(row) *
                                 uploadLines[plane], rowBytes);
+                    uploadCopy100ns_.fetch_add(To100ns(
+                        std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
+                    uploadCopyBytes_.fetch_add(static_cast<std::size_t>(rows) * rowBytes,
+                        std::memory_order_relaxed);
                     context_->Unmap(sourceTextures_[plane], 0);
                 }
+                uploadPath_.store(2, std::memory_order_relaxed);
             }
         } else {
+            const auto copyStart = std::chrono::steady_clock::now();
             context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, uploadPlanes[0],
                 uploadLines[0], 0);
+            uploadCopy100ns_.fetch_add(To100ns(
+                std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
+            // The driver owns the byte count on this arm, so no bytes are recorded and
+            // the arm stays identifiable through uploadPath == 3.
+            uploadPath_.store(3, std::memory_order_relaxed);
         }
+        uploadCount_.fetch_add(1, std::memory_order_relaxed);
         const auto uploadNs = static_cast<std::uint64_t>(std::chrono::duration_cast<
             std::chrono::nanoseconds>(std::chrono::steady_clock::now() - uploadStart).count());
         upload100ns_.fetch_add(uploadNs / 100);
@@ -6057,8 +6095,12 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         // uploadLines, like directYuv above, so an engaged downscale cannot leave a top-left crop.
         const auto floatUploadStart = std::chrono::steady_clock::now();
         context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, uploadPlanes[0], uploadLines[0], 0);
+        const auto floatUploadNs = std::chrono::steady_clock::now() - floatUploadStart;
         upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
-            std::chrono::nanoseconds>(std::chrono::steady_clock::now() - floatUploadStart).count() / 100));
+            std::chrono::nanoseconds>(floatUploadNs).count() / 100));
+        uploadCopy100ns_.fetch_add(To100ns(floatUploadNs), std::memory_order_relaxed);
+        uploadCount_.fetch_add(1, std::memory_order_relaxed);
+        uploadPath_.store(4, std::memory_order_relaxed);
     } else {
         // Layout 0: convertedRgb_ already holds the frame at uploadWidth x uploadHeight,
         // so the row pitch has to be the uploaded width. A decoded-width pitch inside a
@@ -6068,8 +6110,15 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         const auto rgbUploadStart = std::chrono::steady_clock::now();
         context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, convertedRgb_.data(),
             uploadWidth * bytesPerPixel, 0);
+        const auto rgbUploadNs = std::chrono::steady_clock::now() - rgbUploadStart;
         upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
-            std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rgbUploadStart).count() / 100));
+            std::chrono::nanoseconds>(rgbUploadNs).count() / 100));
+        uploadCopy100ns_.fetch_add(To100ns(rgbUploadNs), std::memory_order_relaxed);
+        // Exact here: the whole box moves, and both dimensions and the pitch are known.
+        uploadCopyBytes_.fetch_add(static_cast<std::size_t>(uploadWidth) * uploadHeight *
+            bytesPerPixel, std::memory_order_relaxed);
+        uploadCount_.fetch_add(1, std::memory_order_relaxed);
+        uploadPath_.store(5, std::memory_order_relaxed);
     }
     ShaderSettings settings{};
     settings.colorMode = static_cast<std::uint32_t>(actualMode_);
@@ -7643,6 +7692,9 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     presentedVideoFrames_.store(0); coalescedVideoFrames_.store(0);
     swapChainPresents_.store(0); presentWait100ns_.store(0);
     deviceLockWait100ns_.store(0); softwareConvert100ns_.store(0); upload100ns_.store(0);
+    uploadMapWait100ns_.store(0); uploadCopy100ns_.store(0);
+    downscaleResample100ns_.store(0); scalePassCount_.store(0);
+    uploadCount_.store(0); uploadCopyBytes_.store(0); uploadPath_.store(0);
     {
         std::lock_guard lock(timedTextMutex_);
         ++presentationGeneration_;
@@ -7760,6 +7812,15 @@ std::uint64_t PlayerVideoRenderer::PresentWait100ns() const noexcept { return pr
 std::uint64_t PlayerVideoRenderer::DeviceLockWait100ns() const noexcept { return deviceLockWait100ns_.load(); }
 std::uint64_t PlayerVideoRenderer::SoftwareConvert100ns() const noexcept { return softwareConvert100ns_.load(); }
 std::uint64_t PlayerVideoRenderer::Upload100ns() const noexcept { return upload100ns_.load(); }
+std::uint64_t PlayerVideoRenderer::UploadMapWait100ns() const noexcept { return uploadMapWait100ns_.load(); }
+std::uint64_t PlayerVideoRenderer::UploadCopy100ns() const noexcept { return uploadCopy100ns_.load(); }
+std::uint64_t PlayerVideoRenderer::DownscaleResample100ns() const noexcept {
+    return downscaleResample100ns_.load();
+}
+std::uint64_t PlayerVideoRenderer::ScalePassCount() const noexcept { return scalePassCount_.load(); }
+std::uint64_t PlayerVideoRenderer::UploadCount() const noexcept { return uploadCount_.load(); }
+std::uint64_t PlayerVideoRenderer::UploadCopyBytes() const noexcept { return uploadCopyBytes_.load(); }
+std::uint32_t PlayerVideoRenderer::UploadPath() const noexcept { return uploadPath_.load(); }
 std::uint32_t PlayerVideoRenderer::OutputBitDepth() const noexcept {
     return swapOutputBits_.load(std::memory_order_acquire);
 }

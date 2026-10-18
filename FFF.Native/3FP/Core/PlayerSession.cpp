@@ -2337,6 +2337,13 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     output.deviceLockWait100ns = videoRenderer_.DeviceLockWait100ns();
     output.softwareConvert100ns = videoRenderer_.SoftwareConvert100ns();
     output.videoUpload100ns = videoRenderer_.Upload100ns();
+    output.uploadMapWait100ns = videoRenderer_.UploadMapWait100ns();
+    output.uploadCopy100ns = videoRenderer_.UploadCopy100ns();
+    output.downscaleResample100ns = videoRenderer_.DownscaleResample100ns();
+    output.scalePassCount = videoRenderer_.ScalePassCount();
+    output.uploadCount = videoRenderer_.UploadCount();
+    output.uploadCopyBytes = videoRenderer_.UploadCopyBytes();
+    output.uploadPath = videoRenderer_.UploadPath();
     output.videoOutputBitDepth = videoRenderer_.OutputBitDepth();
     output.videoScalingMode = videoRenderer_.ActualVideoScalingMode();
     if (output.state == FFF3FPState::Playing) {
@@ -5649,6 +5656,10 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
         snapshot_.deviceLockWait100ns = snapshot_.hardwareTransfer100ns = 0;
         snapshot_.softwareConvert100ns = 0;
     snapshot_.videoUpload100ns = 0;
+    snapshot_.uploadMapWait100ns = snapshot_.uploadCopy100ns = 0;
+    snapshot_.downscaleResample100ns = snapshot_.scalePassCount = 0;
+    snapshot_.uploadCount = snapshot_.uploadCopyBytes = 0;
+    snapshot_.uploadPath = 0;
         snapshot_.videoBitRate = snapshot_.audioBitRate = 0;
         snapshot_.queuedVideoFrames = 0; snapshot_.sourcePeakNits = 0;
         ApplyHdrState(snapshot_, {});
@@ -6072,6 +6083,13 @@ void PlayerSession::PublishSnapshot() noexcept {
     snapshot_.deviceLockWait100ns = videoRenderer_.DeviceLockWait100ns();
     snapshot_.softwareConvert100ns = videoRenderer_.SoftwareConvert100ns();
     snapshot_.videoUpload100ns = videoRenderer_.Upload100ns();
+    snapshot_.uploadMapWait100ns = videoRenderer_.UploadMapWait100ns();
+    snapshot_.uploadCopy100ns = videoRenderer_.UploadCopy100ns();
+    snapshot_.downscaleResample100ns = videoRenderer_.DownscaleResample100ns();
+    snapshot_.scalePassCount = videoRenderer_.ScalePassCount();
+    snapshot_.uploadCount = videoRenderer_.UploadCount();
+    snapshot_.uploadCopyBytes = videoRenderer_.UploadCopyBytes();
+    snapshot_.uploadPath = videoRenderer_.UploadPath();
     std::lock_guard lock(snapshotMutex_);
     publishedSnapshot_ = snapshot_;
 }

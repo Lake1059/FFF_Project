@@ -336,6 +336,52 @@ struct FFF3FPSnapshot {
     // Close/Open (only Destroy+Create resets it). Appended at the end for the offset
     // reason above.
     std::int64_t audioDelay100ns;
+    // Upload-path cost split. videoUpload100ns covers the whole upload step,
+    // which turned out to be three different costs sharing one number:
+    //   uploadMapWait100ns - the Map() call itself. D3D11 Map() blocks until the
+    //                        GPU is finished with the resource being mapped unless
+    //                        D3D11_MAP_FLAG_DO_NOT_WAIT is passed, so this is where
+    //                        waiting on the previous frame's draw shows up.
+    //   uploadCopy100ns    - the memcpy loop (planar rung 0/1) or the
+    //                        UpdateSubresource call (packed / half-float arms):
+    //                        the bytes actually moving.
+    //   the remainder      - Unmap / CopyResource / driver submission, still inside
+    //                        videoUpload100ns; not split out here.
+    // The packed arms never map, so their whole cost lands in uploadCopy100ns and
+    // their map wait is 0. Appended at the end for the offset reason above.
+    std::uint64_t uploadMapWait100ns;
+    std::uint64_t uploadCopy100ns;
+    // CPU resample performed by the downscale-before-upload policy
+    // (PrepareAdaptiveDownscale's sws_scale). It runs OUTSIDE videoUpload100ns and
+    // had no metric at all, which is what let that policy look like a 90% win on
+    // the numbers while making playback slower. Appended at the end for the offset
+    // reason above.
+    std::uint64_t downscaleResample100ns;
+    // Cumulative count of scale-chain passes actually executed. A delta divided by
+    // the presented-frame delta gives passes per frame. The chain is built by
+    // halving (EnsurePlaneScaleChain), so this is what makes an extreme downscale
+    // show up as GPU draw cost instead of hiding inside the upload number.
+    // Appended at the end for the offset reason above.
+    std::uint64_t scalePassCount;
+    // The operands a bandwidth needs. uploadCopy100ns on its own is a duration that
+    // cannot be turned into GB/s, and it was divided by PRESENTED frames while nobody
+    // recorded how many pictures were uploaded -- so every "GB/s" quoted from the
+    // snapshot was a theoretical frame size (W*H*1.5*bpp) over an inferred denominator.
+    // Both are now measured. Appended at the end for the offset reason above.
+    std::uint64_t uploadCount;
+    std::uint64_t uploadCopyBytes;
+    // Which upload branch the last picture took, because the branches move the same
+    // bytes into different kinds of memory and were previously indistinguishable:
+    //   1 staging ring (uploadRung_ != 0)  - 2 DYNAMIC + Map(WRITE_DISCARD)
+    //   3 packed UpdateSubresource inside directYuv
+    //   4 half-float UpdateSubresource     - 5 RGB layout 0 UpdateSubresource
+    // uploadCopyBytes is exact for 1, 2 and 5. The UpdateSubresource arms leave it
+    // untouched rather than guessing a texture size they do not carry, and stay
+    // identifiable through this field. (The test tree additionally has a 6th value,
+    // an env-gated planar-UpdateSubresource arm; it is deliberately not mirrored
+    // here, where this tree keeps the upload ladder without experiment copy modes.)
+    // Appended at the end for the offset reason above.
+    std::uint32_t uploadPath;
 };
 // Layout teeth. FFF3FPSnapshot is read by fixed offset from the VB/C# hosts and from
 // the probes, which is why it is append-only; that rule is unenforceable until the
@@ -343,7 +389,7 @@ struct FFF3FPSnapshot {
 // shifting a host's view of the struct at runtime.
 // Values below were measured by compiling a probe against this header (cl /std:c++20,
 // offsetof/sizeof printed) -- not derived from a field table.
-static_assert(sizeof(FFF3FPSnapshot) == 408,
+static_assert(sizeof(FFF3FPSnapshot) == 464,
     "FFF3FPSnapshot size changed: hosts and probes read it by fixed offset");
 static_assert(offsetof(FFF3FPSnapshot, externalAudioOffset100ns) == 88, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, iamfActive) == 364, "offset pin");
@@ -354,6 +400,13 @@ static_assert(offsetof(FFF3FPSnapshot, iamfContentChannels) == 384, "offset pin"
 static_assert(offsetof(FFF3FPSnapshot, iamfBinaural) == 388, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, audioBinaural) == 392, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, audioDelay100ns) == 400, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, uploadMapWait100ns) == 408, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, uploadCopy100ns) == 416, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, downscaleResample100ns) == 424, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, scalePassCount) == 432, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, uploadCount) == 440, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, uploadCopyBytes) == 448, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, uploadPath) == 456, "offset pin");
 
 
 struct FFF3FPAudioPeakLevels {

@@ -404,6 +404,13 @@ public:
     std::uint64_t DeviceLockWait100ns() const noexcept;
     std::uint64_t SoftwareConvert100ns() const noexcept;
     std::uint64_t Upload100ns() const noexcept;
+    std::uint64_t UploadMapWait100ns() const noexcept;
+    std::uint64_t UploadCopy100ns() const noexcept;
+    std::uint64_t DownscaleResample100ns() const noexcept;
+    std::uint64_t ScalePassCount() const noexcept;
+    std::uint64_t UploadCount() const noexcept;
+    std::uint64_t UploadCopyBytes() const noexcept;
+    std::uint32_t UploadPath() const noexcept;
     std::uint32_t OutputBitDepth() const noexcept;
     FFF3FPVideoScalingMode ActualVideoScalingMode() const noexcept;
     // Presentation diagnostics for the ST 2094 paths; see FFF3FPHdrSignalDiagnostics.
@@ -1062,6 +1069,19 @@ private:
     // this the upload path had no metric at all, so upload changes could not be
     // measured or regressed.
     std::atomic<std::uint64_t> upload100ns_;
+    // Split of upload100ns_ (see the snapshot fields of the same name): without
+    // these an upload regression could not be attributed to waiting on the GPU,
+    // to moving bytes, or to a CPU resample done before the upload.
+    std::atomic<std::uint64_t> uploadMapWait100ns_;
+    std::atomic<std::uint64_t> uploadCopy100ns_;
+    std::atomic<std::uint64_t> downscaleResample100ns_;
+    std::atomic<std::uint64_t> scalePassCount_;
+    // The operands that turn uploadCopy100ns_ into a bandwidth: bytes moved, and how
+    // many pictures were uploaded (the presented-frame denominator hides uploads that
+    // never became a present). uploadPath_ says which branch produced them.
+    std::atomic<std::uint64_t> uploadCount_;
+    std::atomic<std::uint64_t> uploadCopyBytes_;
+    std::atomic<std::uint32_t> uploadPath_;
     std::atomic<std::uint32_t> playbackWorkPending_;
     std::atomic<bool> interactiveMove_;
     std::atomic<bool> lyricsLayoutEnabled_;
