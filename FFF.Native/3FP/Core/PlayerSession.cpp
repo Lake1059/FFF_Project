@@ -145,6 +145,14 @@ constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
 constexpr std::size_t MaximumCachedSideDataBlobBytes = 16 * 1024;
 constexpr std::size_t MaximumSideDataRingFrames = 120;        // ~2 s at 60 fps
 constexpr std::size_t MaximumSideDataRingBytes = 1024 * 1024; // hard stop
+// Stream-level side-data cache (CopyStreamSideData). A container configuration
+// record is a one-shot, stream-level constant, so the bounds are much smaller
+// than the ring's: there is nothing per-frame to accumulate, just the handful
+// of records a demuxer attaches to codecpar at binding time. The per-blob
+// bound reuses MaximumCachedSideDataBlobBytes: the payloads on this path are
+// of the same kind, and anything larger is of no use to a colour analyser.
+constexpr std::size_t MaximumStreamSideDataBlobs = 32;
+constexpr std::size_t MaximumStreamSideDataBytes = 64 * 1024;
 
 // Monotonic tick in 100 ns units, for the decoder thread ladder's timing. Uses
 // steady_clock rather than av_gettime_relative because PlayerSession does not include
@@ -2967,6 +2975,14 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         videoStream_ = animationStream;
         animatedImage_ = true;
     }
+    // The video stream is final for this open: capture its stream-level side
+    // data (container records the demuxer declares once at binding time) so
+    // the host can read them through FFF3FP_CopyStreamSideData. The guard
+    // covers the audio-only / cover-art-less case, where there is no stream
+    // to bind. Clear first so a capture failure cannot leave stale records
+    // from a previous media.
+    ClearStreamSideData();
+    if (videoStream_ >= 0) CacheStreamSideDataFromStream(format_->streams[videoStream_]);
     // Select session rewind only after stream classification is available.
     sessionWrapLoop_ = IsAnimatedImageSequence(format_);
     staticImage_ = IsStillImage(format_, videoStream_);
@@ -4332,6 +4348,78 @@ FFFResult PlayerSession::CopyFrameSideDataAfter(const std::uint32_t sideDataType
     }
 }
 
+void PlayerSession::ClearStreamSideData() noexcept {
+    std::lock_guard lock(sideDataMutex_);
+    streamSideData_.clear();
+}
+
+void PlayerSession::CacheStreamSideDataFromStream(const AVStream* stream) noexcept {
+    if (stream == nullptr || stream->codecpar == nullptr) return;
+    const auto* parameters = stream->codecpar;
+    if (parameters->coded_side_data == nullptr || parameters->nb_coded_side_data <= 0) return;
+    try {
+        std::vector<SideDataBlob> captured;
+        std::size_t capturedBytes = 0;
+        for (std::int32_t index = 0; index < parameters->nb_coded_side_data; ++index) {
+            const auto& side = parameters->coded_side_data[index];
+            // side.size is size_t in this libavcodec, so test it for emptiness
+            // rather than against a signed bound.
+            if (side.data == nullptr || side.size == 0) continue;
+            const std::size_t size = side.size;
+            if (size > MaximumCachedSideDataBlobBytes) continue;
+            // First-seen wins: the demuxer declares these once, so a repeat of
+            // the same type further down the list adds nothing.
+            bool duplicate = false;
+            for (const auto& blob : captured) {
+                if (blob.type == static_cast<std::uint32_t>(side.type)) { duplicate = true; break; }
+            }
+            if (duplicate) continue;
+            if (captured.size() >= MaximumStreamSideDataBlobs) break;
+            if (capturedBytes + size > MaximumStreamSideDataBytes) continue;
+            // Byte-for-byte copy, type carried as a plain number: nothing here
+            // reads the payload, which is the whole point of the neutral seam.
+            captured.push_back(SideDataBlob{ static_cast<std::uint32_t>(side.type),
+                std::vector<std::uint8_t>(side.data, side.data + size) });
+            capturedBytes += size;
+        }
+        // Replace rather than append: the cache belongs to exactly one stream
+        // binding, so the new track's records can never be mixed with the
+        // previous track's.
+        std::lock_guard lock(sideDataMutex_);
+        streamSideData_ = std::move(captured);
+    } catch (...) {
+        // The cache is advisory: a record that could not be stored costs the
+        // host one NotFound answer, never a failed open or a stalled stream.
+    }
+}
+
+FFFResult PlayerSession::CopyStreamSideData(const std::uint32_t sideDataType,
+    void* buffer, const std::uint32_t capacity, std::uint32_t& writtenSize) noexcept {
+    try {
+        std::lock_guard lock(sideDataMutex_);
+        const SideDataBlob* found = nullptr;
+        for (const auto& blob : streamSideData_) {
+            if (blob.type != sideDataType) continue;
+            found = &blob;
+            break;
+        }
+        if (found == nullptr) {
+            writtenSize = 0;
+            return FFFResult::NotFound;
+        }
+        // Reported on every path that found an entry, including BufferTooSmall:
+        // that is how the caller learns what to allocate for the retry.
+        writtenSize = static_cast<std::uint32_t>(found->bytes.size());
+        if (buffer == nullptr) return FFFResult::Success;  // size probe, writes nothing
+        if (capacity < writtenSize) return FFFResult::BufferTooSmall;
+        std::memcpy(buffer, found->bytes.data(), writtenSize);
+        return FFFResult::Success;
+    } catch (...) {
+        writtenSize = 0;
+        return FFFResult::NativeFailure;
+    }
+}
+
 void PlayerSession::ClearPendingPackets() noexcept {
     ClearPacketQueue(pendingVideoPackets_, pendingVideoPacketBytes_);
     ClearPacketQueue(pendingAudioPackets_, pendingAudioPacketBytes_);
@@ -5617,6 +5705,10 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         StopSoftwareVideoDecode();
         if (videoDecoder_) avcodec_free_context(&videoDecoder_);
         videoDecoder_ = replacement; videoStream_ = index;
+        // Rebinding the video stream rebinds its stream-level side data too:
+        // the previous track's records must never be answered for the new one.
+        ClearStreamSideData();
+        CacheStreamSideDataFromStream(format_->streams[index]);
         snapshot_.selectedVideoStream = index;
         videoRenderer_.ConfigureHdrStream(format_->streams[index]->codecpar);
         ApplyHdrState(snapshot_, videoRenderer_.HdrState());
@@ -5717,6 +5809,9 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     videoRenderer_.SetDiscAspect(0);
     { std::lock_guard lock(snapshotMutex_); discStatus_ = "{}"; }
     videoStream_ = audioStream_ = coverArtStream_ = externalAudioStream_ = -1; externalAudioPath_.clear(); framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false;
+    // The bound video stream is gone; its stream-level side data must not
+    // outlive it in the cache.
+    ClearStreamSideData();
     timedTextContentCache_.clear();
     externalAudioOffset100ns_ = 0; seekTarget100ns_ = seekTargetFrame_ = -1;
     keyframeSeekPending_ = false; lastVideoFrameDuration100ns_ = 0; ResetCadenceSpread();

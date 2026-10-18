@@ -64,6 +64,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取字幕状态 As Func(Of 定时文字状态)
     Private ReadOnly 获取弹幕状态 As Func(Of 定时文字状态)
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
+    Private ReadOnly 获取内容描述 As Func(Of String)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
     Private ReadOnly 刷新定时器 As LakeUI.PrecisionTimer
     Private 普通字体 As New Font(默认信息字体, 信息字号, FontStyle.Regular, GraphicsUnit.Point)
@@ -96,6 +97,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
                    字幕状态提供器 As Func(Of 定时文字状态),
                    弹幕状态提供器 As Func(Of 定时文字状态),
                    WASAPI模式提供器 As Func(Of WASAPI共享模式),
+                   内容描述提供器 As Func(Of String),
                    图层提交器 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single))
         ArgumentNullException.ThrowIfNull(画面)
         ArgumentNullException.ThrowIfNull(快照提供器)
@@ -107,6 +109,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取字幕 = 字幕提供器 : 获取弹幕 = 弹幕提供器
         获取字幕状态 = 字幕状态提供器 : 获取弹幕状态 = 弹幕状态提供器
         获取WASAPI模式 = WASAPI模式提供器
+        获取内容描述 = 内容描述提供器
         提交图层 = 图层提交器
         文本测量格式 = DirectCast(StringFormat.GenericTypographic.Clone(), StringFormat)
         文本测量格式.FormatFlags = 文本测量格式.FormatFlags Or
@@ -253,7 +256,11 @@ Friend NotInheritable Class 播放器信息图层呈现器
             添加配对行如果有值(结果, "视频：", 视频概要, 品红, 8)
             添加配对行如果有值(结果, "输入：", 视频输入(视频, 快照.视频实时比特率), 紫色)
             添加配对行如果有值(结果, "色彩：", 视频色彩(视频), 蓝色)
-            添加配对行如果有值(结果, "HDR：", 视频HDR(视频, 快照), 橙色)
+            ' 内容分类由外部模块产出（解锁后才非空）；宿主只显示不解释，"空值自然不出现"。
+            ' HDR 行里把等级插在规格之后（HDR10 P8.1 动态元数据已用于处理 …），与「内容：」行同源。
+            Dim 内容描述 = 安全获取(获取内容描述)
+            添加配对行如果有值(结果, "HDR：", 视频HDR(视频, 快照, 内容描述), 橙色)
+            添加配对行如果有值(结果, "内容：", 内容描述, 橙色)
             添加配对行如果有值(结果, "输出：", 视频输出(快照, 画面控件.ClientSize), 绿色)
             添加配对行如果有值(结果, "渲染：", 视频渲染(快照), 黄色)
         End If
@@ -269,6 +276,11 @@ Friend NotInheritable Class 播放器信息图层呈现器
             ' 并不能说明实际声场 —— 同一素材在旧路径下会显示为 stereo。这一行把
             ' 真实声道布局摆出来，用户才能确认沉浸声是否真的生效。
             添加配对行如果有值(结果, "声场：", 快照.IAMF描述, 青色)
+            ' 接缝生效才出现这一行：外部渲染器拥有床（HRTF 双耳）。缺席 / 旧件 / 未解锁
+            ' 一律不出现——那是现网的矩阵折叠，不是一条需要向用户解释的降级。
+            If 快照.音频双耳渲染生效 Then
+                添加配对行如果有值(结果, "双耳：", "HRTF（外部渲染器拥有床）", 青色)
+            End If
             添加配对行如果有值(结果, "输入：", 音频输入(音频, 快照.音频实时比特率), 紫色)
             添加配对行如果有值(结果, "输出：", 音频输出(音频, 快照), 绿色)
             ' 音频健康度：只在**异常时**出现。
@@ -488,9 +500,11 @@ Friend NotInheritable Class 播放器信息图层呈现器
             $"色彩模式 {色彩模式文本(快照)}")
     End Function
 
-    Private Shared Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照) As String
+    Private Shared Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照, 内容描述 As String) As String
         If Not 快照.是HDR源 AndAlso Not 流.是HDR Then Return String.Empty
         Dim 规格 = HDR规格文本(快照.HDR规格, 流.HDR格式)
+        ' 外部模块算出的 P 等级（解锁后才有值）插在规格之后；宿主只显示不解释，空值自然不出现。
+        Dim 等级 = If(String.IsNullOrWhiteSpace(内容描述), String.Empty, 内容描述.Trim())
         Dim 动态 = If(快照.动态HDR元数据有效, "动态元数据已用于处理", String.Empty)
         Dim 亮度 = If(快照.源峰值尼特 > 0,
             $"源峰值 {快照.源峰值尼特:0}尼特", String.Empty)
@@ -602,7 +616,12 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private Shared Function 色彩模式文本(快照 As 播放器快照) As String
         Select Case 快照.实际色彩模式
             Case 色彩输出模式.峰值映射HDR
-                Return $"{HDR规格文本(快照.HDR规格, "HDR")} 真实高亮"
+                ' SDR 源现在也会被放到这条链上（默认策略：位深 >8 优先 16bit scRGB），
+                ' 所以"真实高亮"必须按**源**说话——把高位深 SDR 报成 HDR 是假陈述。
+                If 快照.是HDR源 Then
+                    Return $"{HDR规格文本(快照.HDR规格, "HDR")} 真实高亮"
+                End If
+                Return "scRGB 高位深（SDR 源）"
             Case 色彩输出模式.原始HDR按SDR呈现 : Return "原始 HDR 灰"
             Case Else : Return If(快照.是HDR源, "映射 SDR", "SDR")
         End Select

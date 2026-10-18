@@ -88,10 +88,11 @@ Public NotInheritable Class 播放器配置
     Public Property 强制HDR输出 As Boolean
     Public Property 缩放质量 As 视频缩放质量 = 视频缩放质量.高画质
     ' SDR 源的 scRGB 呈现策略，对应内核 FFF3FPConfiguration.sdrScRgbMode。
-    ' 0 = 从不（历史行为）；1 = 自动（显示器开 Advanced Color 时，位深 >8 或广色域的
-    ' SDR 源走 16bit scRGB 链）。此前只存在于原生结构体里、托管侧没有对应属性，
-    ' 于是构造原生配置时该字段无处可取 —— 现补上，默认 0 保持历史行为。
-    Public Property SDRscRGB模式 As UInteger = 0UI
+    ' 1 = 自动（默认）：位深 >8 的 SDR 源优先上 16bit scRGB 链；
+    ' 0 = 从不：留在 8/10bit gamma 链（历史行为，留作退回开关）。
+    ' "优先"不是"必须"：显示器未被 Windows 报为高级色彩、系统/驱动没有 ACM 色彩空间 API、
+    ' 或交换链拒绝 G10 时，内核自动退回 10bit（8bit 源退回 8bit），不需要这里参与。
+    Public Property SDRscRGB模式 As UInteger = 1UI
     Public Property 输出窗口句柄 As IntPtr
     Public Property 音频端点标识 As String = String.Empty
     Public Property 事件同步上下文 As Threading.SynchronizationContext
@@ -189,6 +190,9 @@ Public NotInheritable Class 播放器快照
         IAMF已接管 = 值.IAMF已接管 <> 0
         IAMF声道数 = CInt(值.IAMF声道数)
         IAMF声场系统 = CInt(值.IAMF声场系统)
+        ' 床由谁渲染：内核侧的接缝写这个字段（外部渲染器拥有床=1，矩阵折叠=0）。
+        ' 它此前在 ABI 里躺了很久却没有写入者，接缝落地后才有真值。
+        音频双耳渲染生效 = 值.音频双耳渲染 <> 0
         IAMF内容声道数 = CInt(值.IAMF内容声道数)
         ' 上传耗时是最后一个追加字段；与其它微秒级计时一样保留 100ns 精度。
         视频上传时长 = TimeSpan.FromTicks(CLng(Math.Min(值.视频上传100纳秒, CULng(Long.MaxValue))))
@@ -220,6 +224,9 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 视频队列帧数 As Integer
     Public ReadOnly Property 源峰值尼特 As UInteger
     Public ReadOnly Property 已解码音频帧数 As ULong
+    ''' <summary>床当前由外部渲染器拥有（HRTF 双耳）而非内核的矩阵折叠。
+    ''' 真值只在接缝生效时出现；缺席、旧件、未解锁一律为假——那是现网行为，不是降级故障。</summary>
+    Public ReadOnly Property 音频双耳渲染生效 As Boolean
     Public ReadOnly Property 音频位置 As TimeSpan
     Public ReadOnly Property 音频缓冲时长 As TimeSpan
     Public ReadOnly Property 音频欠载次数 As ULong
