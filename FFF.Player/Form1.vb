@@ -140,6 +140,7 @@ Public Class Form1
             Function() 播放控制器.当前媒体路径, Function() 播放控制器.当前字幕,
             Function() 播放控制器.当前弹幕, AddressOf 播放控制器.读取定时文字状态,
             AddressOf 播放控制器.读取弹幕状态, Function() 播放控制器.WASAPI模式,
+            AddressOf 播放控制器.读取色彩变换内容描述,
             AddressOf 播放控制器.提交播放器信息图层)
         信息图层呈现器.应用全局字体(设置.实例对象.字体)
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
@@ -184,8 +185,8 @@ Public Class Form1
         AddHandler 播放控制器.媒体已打开, AddressOf 视图旋转控制器.媒体已打开
         ' RTX 视频超分辨率：内核逐帧判定，宿主只负责"请求/取消"与把原因摊开。
         ' 媒体打开后重放偏好是必需的——VSR 请求是会话内状态，新会话从内核默认的 Off 起步。
+        ' 入口已移到 设置 → 视频超分辨率 页（10-18），标题栏菜单不再挂它，避免两处开关。
         视频超分辨率控制器 = New 播放器视频超分辨率控制器(
-            MCM_标题栏菜单,
             Sub(开启) 播放控制器.设置视频超分辨率(开启),
             Function() 播放控制器.视频超分辨率状态文本(),
             Function() 播放控制器.支持视频超分辨率,
@@ -829,6 +830,29 @@ Public Class Form1
         弹幕图层呈现器?.应用弹幕设置(设置.实例对象.创建弹幕显示配置())
         更新弹幕按钮状态()
     End Sub
+
+    ' ── 设置页 → 视频超分辨率 的后端（10-18 从标题栏菜单移到这里）───────────────
+    ' 原生调用与"新会话重放偏好"都留在 播放器视频超分辨率控制器 里，这里只做转发；
+    ' 设置页不许自己再发一次 FFF3FP_SetVideoSuperResolution，否则两处会各写各的偏好。
+    Friend Function 视频超分辨率可用() As Boolean
+        Return 视频超分辨率控制器?.可用 OrElse False
+    End Function
+
+    Friend Function 视频超分辨率已启用() As Boolean
+        Return 视频超分辨率控制器 IsNot Nothing AndAlso 视频超分辨率控制器.已启用
+    End Function
+
+    Friend Sub 应用视频超分辨率设置(开启 As Boolean)
+        视频超分辨率控制器?.设置为(开启)
+    End Sub
+
+    Friend Sub 重新探测视频超分辨率()
+        视频超分辨率控制器?.重新探测()
+    End Sub
+
+    Friend Function 读取视频超分辨率状态() As String
+        Return 视频超分辨率控制器?.刷新状态()
+    End Function
 
     Friend Sub 应用歌词设置()
         歌词图层呈现器?.使图层失效()
