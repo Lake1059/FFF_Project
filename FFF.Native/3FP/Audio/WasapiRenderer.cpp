@@ -54,6 +54,68 @@ constexpr double CenterMixLevel = 0.707107;    // == M_SQRT1_2, the verified def
 constexpr double SurroundMixLevel = 0.707107;  // == M_SQRT1_2, the verified default
 constexpr double LfeMixLevel = 0.0;            // == the verified default, now pinned
 
+// ---- the external bed render plug seam -------------------------------------
+//
+// What engages here and what does not (user decision, 2026-10-18):
+//   * a plug is installed, AND
+//   * the endpoint is a stereo (2-channel) endpoint, AND
+//   * the frame carries a bed the ABI can describe: nb_channels == 1 or
+//     3 <= nb_channels <= FFF3FP_AUDIO_PLUG_MAX_CHANNELS.
+// A 2.0 frame is never handed over: the device target is exactly two channels, so
+// the route would have to reproduce swr's passthrough byte-for-byte and prove it --
+// all cost, no information. Mono IS in scope (the contract header's comment still
+// says ">2ch"; that text is pending the main loop's sync). A single channel is not
+// a stereo bed, it is a point source at one real azimuth -- the fold-down the body
+// runs is av_get_default_channel_layout(1) -> {FC} -> front-left with unity, i.e.
+// the same signal twice with no spatial cue. The plug places it once and rotates
+// both ears around it, which is information the fold-down cannot produce.
+//
+// Decline accounting (2026-10-18, second round): `framesDeclined` counts exactly one
+// thing -- the plug's answer of "no" to a bed, i.e. the bed-level decline from
+// supports() (or from a bed wider than the ABI can describe, which the plug is never
+// asked about). A per-frame render() bail counts nowhere, not even here: the
+// contract only says "fall back for this frame", so 500 frames with a 3-frame bail
+// and 503 clean frames are indistinguishable in the kernel's own numbers, and there
+// is no field anywhere to hold the difference. The visible form of that distinction
+// is the gap between framesRendered and the decoded frame count.
+//
+// audioBinaural reads 1 for a mono bed the plug rendered, exactly as for a 5.1 one.
+//
+// The seam never blocks and never takes a lock around plug->render(): it runs on
+// the session worker next to the endpoint's event thread, and the queue mutex is
+// what that thread needs every device period.
+
+// Owns one channel layout so every early return still releases it.
+struct ScopedChannelLayout final {
+    AVChannelLayout layout{};
+    ScopedChannelLayout() = default;
+    ScopedChannelLayout(const ScopedChannelLayout&) = delete;
+    ScopedChannelLayout& operator=(const ScopedChannelLayout&) = delete;
+    ~ScopedChannelLayout() { av_channel_layout_uninit(&layout); }
+    bool Copy(const AVChannelLayout* source) noexcept {
+        return av_channel_layout_copy(&layout, source) >= 0;
+    }
+    void Default(const int channels) noexcept { av_channel_layout_default(&layout, channels); }
+};
+
+// Folds the bed's resolved position map into one comparable value. Built from
+// av_channel_layout_channel_from_index, which answers for NATIVE, CUSTOM and
+// AMBISONIC orders alike (AV_CHAN_NONE for UNSPEC, which is what a bare channel
+// count decodes to) -- reading layout.u.mask directly would be wrong for CUSTOM,
+// where the union holds the map instead.
+std::uint64_t BedPositionsFingerprint(const AVChannelLayout& layout) noexcept {
+    std::uint64_t value = 1469598103934665603ULL;  // FNV-1a offset basis
+    const auto count = std::max(0, layout.nb_channels);
+    value = (value ^ static_cast<std::uint64_t>(layout.order)) * 1099511628211ULL;
+    for (int index = 0; index < count; ++index) {
+        const auto channel = av_channel_layout_channel_from_index(&layout,
+            static_cast<unsigned int>(index));
+        value = (value ^ static_cast<std::uint64_t>(static_cast<std::int64_t>(channel))) *
+            1099511628211ULL;
+    }
+    return value;
+}
+
 class ComInitialization final {
 public:
     ComInitialization() noexcept : result_(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {}
@@ -168,9 +230,18 @@ void PlayerWasapiRenderer::Stop() noexcept {
     if (resampler_ != nullptr) { swr_free(&resampler_); }
     av_channel_layout_uninit(&inputChannelLayout_);
     inputSampleRate_ = 0; inputSampleFormat_ = -1;
+    FreePlugResamplers();
+    bedRenderedByPlug_ = false;
     outputSampleRate_ = 0; outputChannels_ = 0; outputBlockAlign_ = 0;
     outputBitsPerSample_ = outputValidBitsPerSample_ = 0;
-    if (hadResources && runtimeState_ != nullptr) runtimeState_->ClearAll();
+    if (hadResources && runtimeState_ != nullptr) {
+        runtimeState_->ClearAll();
+        // A renderer instance's seam numbers end with it; the replacement starts at
+        // zero on its first frame rather than inheriting a dead instance's totals.
+        runtimeState_->plugBedActive.store(0, std::memory_order_relaxed);
+        runtimeState_->plugFramesRendered.store(0, std::memory_order_relaxed);
+        runtimeState_->plugFramesDeclined.store(0, std::memory_order_relaxed);
+    }
     std::lock_guard lock(mutex_);
     queue_.clear(); reusableBuffers_.clear(); queuedBytes_ = 0; pendingMediaFrames_ = 0;
 }
@@ -181,18 +252,27 @@ void PlayerWasapiRenderer::CloseEvents() noexcept {
     if (stopEvent_ != nullptr) { CloseHandle(stopEvent_); stopEvent_ = nullptr; }
 }
 
-FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame) noexcept {
-    const auto inputFormat = static_cast<std::int32_t>(frame->format);
+FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame, const BedRoute route) noexcept {
+    // In the plug route swr's input is the plug's own stereo pair, so the cache key
+    // below describes what is actually handed to swr_convert. Native and Declined
+    // key it on the decoded frame exactly as before this seam existed, which is what
+    // keeps those paths byte-for-byte unchanged.
+    const bool plugFed = route == BedRoute::Plug;
+    const auto inputFormat = plugFed ? static_cast<std::int32_t>(AV_SAMPLE_FMT_FLTP)
+        : static_cast<std::int32_t>(frame->format);
+    ScopedChannelLayout effective;
+    if (plugFed) effective.Default(2);
+    else if (!effective.Copy(&frame->ch_layout)) return FFFResult::FfmpegFailure;
     if (resampler_ != nullptr && inputSampleRate_ == frame->sample_rate &&
         inputSampleFormat_ == inputFormat &&
-        av_channel_layout_compare(&inputChannelLayout_, &frame->ch_layout) == 0)
+        av_channel_layout_compare(&inputChannelLayout_, &effective.layout) == 0)
         return FFFResult::Success;
     if (outputSampleRate_ == 0 || outputChannels_ == 0) return FFFResult::InvalidState;
     // Track the complete FFmpeg layout contract, not merely channel count. A
     // stream can switch between layouts with the same number of channels.
     if (resampler_ != nullptr) swr_free(&resampler_);
     av_channel_layout_uninit(&inputChannelLayout_);
-    if (av_channel_layout_copy(&inputChannelLayout_, &frame->ch_layout) < 0)
+    if (av_channel_layout_copy(&inputChannelLayout_, &effective.layout) < 0)
         return FFFResult::FfmpegFailure;
     inputSampleRate_ = frame->sample_rate;
     inputSampleFormat_ = inputFormat;
@@ -201,8 +281,8 @@ FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame) noexcept {
     const auto outputFormat = outputFloat_ ? AV_SAMPLE_FMT_FLT :
         (outputBitsPerSample_ == 16 ? AV_SAMPLE_FMT_S16 : AV_SAMPLE_FMT_S32);
     const auto result = swr_alloc_set_opts2(&resampler_, &outputLayout, outputFormat,
-        outputSampleRate_, &frame->ch_layout, static_cast<AVSampleFormat>(frame->format),
-        frame->sample_rate, 0, nullptr);
+        outputSampleRate_, &effective.layout,
+        static_cast<AVSampleFormat>(inputFormat), frame->sample_rate, 0, nullptr);
     av_channel_layout_uninit(&outputLayout);
     if (result < 0 || resampler_ == nullptr) {
         if (resampler_ != nullptr) swr_free(&resampler_);
@@ -236,13 +316,262 @@ FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame) noexcept {
     return FFFResult::Success;
 }
 
+void PlayerWasapiRenderer::SetAudioRenderPlug(const FFF3FPAudioRenderPlug* const plug) noexcept {
+    // Runs on the session worker -- the same thread that calls Enqueue and Reset --
+    // so this swap cannot interrupt a render() call. Frames already inside the PCM
+    // queue keep whatever produced them; the route changes at the next frame
+    // boundary, which is the switch the contract asks for.
+    plug_ = {};
+    plugInstalled_.store(plug != nullptr, std::memory_order_release);
+    if (plug != nullptr) {
+        plug_ = *plug;
+        // A fresh owner of the bed deserves a fresh pipeline: reset() is the
+        // contract's "drop any internal phase/pipeline state" entry, so calling it
+        // on install is allowed and is also what a replacement's successor needs.
+        if (plug_.reset != nullptr && plug_.context != nullptr) plug_.reset(plug_.context);
+    }
+    plugBedIdentity_ = {};
+    plugBedAccepted_ = false;
+    plugFramesRendered_ = 0;
+    plugFramesDeclined_ = 0;
+    bedRenderedByPlug_ = false;
+    // The plug-fed and fold slots exist only for a seam that can engage. resampler_
+    // keeps its cached descriptor on purpose: EnsureResampler sees the mismatch on
+    // the next frame and rebuilds it from the decoded bed, the same rebuild a media
+    // switch already performs. No endpoint rebuild, no discontinuity count -- a bed
+    // owner swap at a frame boundary is a route change, not a timeline break.
+    FreePlugResamplers();
+    ReleaseBedSeamBuffers();
+    PublishRuntimeDiagnostics();
+}
+
+PlayerWasapiRenderer::BedRoute PlayerWasapiRenderer::SelectBedRoute(const AVFrame* const frame) noexcept {
+    if (!plugInstalled_.load(std::memory_order_acquire)) return BedRoute::Native;
+    // The seam renders a stereo pair, so it owns the bed only against a 2-channel
+    // endpoint. A multichannel device keeps today's route, unchanged.
+    if (outputChannels_ != 2) return BedRoute::Native;
+    const auto channels = frame->ch_layout.nb_channels;
+    if (channels <= 0) return BedRoute::Native;
+    // 2.0 already is the device target: the route could only reproduce swr's
+    // passthrough, so it is not a bed and it is never a decline.
+    if (channels == 2) return BedRoute::Native;
+    // Wider than the ABI can describe: the bed struct carries 16 positions, so the
+    // plug is never asked. Reported as a decline -- the seam had this bed and did
+    // not render it -- rather than hidden, which is what made the old field useless.
+    if (channels > static_cast<int>(FFF3FP_AUDIO_PLUG_MAX_CHANNELS)) return BedRoute::Declined;
+    const BedIdentity identity{frame->sample_rate, channels,
+        static_cast<std::int32_t>(frame->format), BedPositionsFingerprint(frame->ch_layout)};
+    if (!(identity == plugBedIdentity_)) {
+        plugBedIdentity_ = identity;
+        plugBedAccepted_ = false;
+        if (plug_.supports != nullptr && plug_.context != nullptr) {
+            FFF3FPAudioBedDescription bed{};
+            bed.size = sizeof(bed);
+            bed.version = FFF3FP_AUDIO_PLUG_VERSION;
+            bed.sampleRate = static_cast<std::uint32_t>(std::max<std::int32_t>(0, frame->sample_rate));
+            bed.channelCount = static_cast<std::uint32_t>(channels);
+            bed.lfeIndex = 0xFFFFFFFFu;
+            for (int index = 0; index < channels; ++index) {
+                const auto channel = av_channel_layout_channel_from_index(&frame->ch_layout,
+                    static_cast<unsigned int>(index));
+                // AVChannel values as plain ints; AV_CHAN_NONE (-1) means "no such
+                // slot" and the module maps them into its own layout tables.
+                bed.positions[index] = static_cast<std::int32_t>(channel);
+                if (channel == AV_CHAN_LOW_FREQUENCY) bed.lfeIndex = static_cast<std::uint32_t>(index);
+            }
+            // "no" is a normal answer: it costs nothing but the decline counter.
+            plugBedAccepted_ = plug_.supports(plug_.context, &bed) != 0;
+            if (plug_.reset != nullptr && plug_.context != nullptr) plug_.reset(plug_.context);
+        }
+    }
+    return plugBedAccepted_ ? BedRoute::Plug : BedRoute::Declined;
+}
+
+FFFResult PlayerWasapiRenderer::EnsureBedConverter(const AVFrame* const frame) noexcept {
+    const auto inputFormat = static_cast<std::int32_t>(frame->format);
+    if (inputFormat == static_cast<std::int32_t>(AV_SAMPLE_FMT_FLTP)) {
+        // Already the plug's input contract: release the slot so the caller reads
+        // the decoded planes directly and nothing is copied twice.
+        if (bedConverter_ != nullptr) {
+            swr_free(&bedConverter_);
+            av_channel_layout_uninit(&bedConverterLayout_);
+            bedConverterRate_ = 0; bedConverterFormat_ = -1;
+        }
+        return FFFResult::Success;
+    }
+    if (bedConverter_ != nullptr && bedConverterRate_ == frame->sample_rate &&
+        bedConverterFormat_ == inputFormat &&
+        av_channel_layout_compare(&bedConverterLayout_, &frame->ch_layout) == 0)
+        return FFFResult::Success;
+    if (bedConverter_ != nullptr) swr_free(&bedConverter_);
+    av_channel_layout_uninit(&bedConverterLayout_);
+    // Layout and rate are passed through untouched -- this slot only changes the
+    // sample format, which is the kernel's half of the "planar float32" contract.
+    // A bare channel count (AV_CHANNEL_ORDER_UNSPEC) is normalized to FFmpeg's
+    // speaker order for that count: swr would refuse the conversion otherwise, and
+    // the plug needs positions it can place in azimuth. This normalization exists
+    // only here; the fold-down and primary slots keep the frame's own layout, so
+    // the paths outside the seam are untouched.
+    ScopedChannelLayout normalized;
+    if (frame->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC)
+        normalized.Default(frame->ch_layout.nb_channels);
+    else if (!normalized.Copy(&frame->ch_layout)) return FFFResult::FfmpegFailure;
+    if (av_channel_layout_copy(&bedConverterLayout_, &normalized.layout) < 0)
+        return FFFResult::FfmpegFailure;
+    bedConverterRate_ = frame->sample_rate;
+    bedConverterFormat_ = inputFormat;
+    if (swr_alloc_set_opts2(&bedConverter_, &bedConverterLayout_, AV_SAMPLE_FMT_FLTP,
+        frame->sample_rate, &normalized.layout, static_cast<AVSampleFormat>(inputFormat),
+        frame->sample_rate, 0, nullptr) < 0 || bedConverter_ == nullptr) {
+        if (bedConverter_ != nullptr) swr_free(&bedConverter_);
+        av_channel_layout_uninit(&bedConverterLayout_);
+        bedConverterRate_ = 0; bedConverterFormat_ = -1;
+        SetError("FFmpeg could not initialize the bed planar-float converter.");
+        return FFFResult::FfmpegFailure;
+    }
+    if (swr_init(bedConverter_) < 0) {
+        swr_free(&bedConverter_);
+        av_channel_layout_uninit(&bedConverterLayout_);
+        bedConverterRate_ = 0; bedConverterFormat_ = -1;
+        SetError("FFmpeg could not initialize the bed planar-float converter.");
+        return FFFResult::FfmpegFailure;
+    }
+    return FFFResult::Success;
+}
+
+FFFResult PlayerWasapiRenderer::EnsureFoldResampler(const AVFrame* const frame) noexcept {
+    // The frame the plug bailed on must fold exactly the way the body folded it
+    // before the seam existed: same source layout, same device target, same
+    // rematrix layer as EnsureResampler. Hence its own slot -- the plug-fed
+    // resampler_ must not be torn down for a single frame.
+    const auto inputFormat = static_cast<std::int32_t>(frame->format);
+    if (foldResampler_ != nullptr && foldSampleRate_ == frame->sample_rate &&
+        foldSampleFormat_ == inputFormat &&
+        av_channel_layout_compare(&foldInputLayout_, &frame->ch_layout) == 0)
+        return FFFResult::Success;
+    if (outputSampleRate_ == 0 || outputChannels_ == 0) return FFFResult::InvalidState;
+    if (foldResampler_ != nullptr) swr_free(&foldResampler_);
+    av_channel_layout_uninit(&foldInputLayout_);
+    if (av_channel_layout_copy(&foldInputLayout_, &frame->ch_layout) < 0)
+        return FFFResult::FfmpegFailure;
+    foldSampleRate_ = frame->sample_rate;
+    foldSampleFormat_ = inputFormat;
+    AVChannelLayout outputLayout{};
+    av_channel_layout_default(&outputLayout, outputChannels_);
+    const auto outputFormat = outputFloat_ ? AV_SAMPLE_FMT_FLT :
+        (outputBitsPerSample_ == 16 ? AV_SAMPLE_FMT_S16 : AV_SAMPLE_FMT_S32);
+    const auto result = swr_alloc_set_opts2(&foldResampler_, &outputLayout, outputFormat,
+        outputSampleRate_, &frame->ch_layout, static_cast<AVSampleFormat>(frame->format),
+        frame->sample_rate, 0, nullptr);
+    av_channel_layout_uninit(&outputLayout);
+    if (result < 0 || foldResampler_ == nullptr) {
+        if (foldResampler_ != nullptr) swr_free(&foldResampler_);
+        av_channel_layout_uninit(&foldInputLayout_);
+        foldSampleRate_ = 0; foldSampleFormat_ = -1;
+        SetError("FFmpeg could not initialize the WASAPI downmix resampler.");
+        return FFFResult::FfmpegFailure;
+    }
+    unsigned int rejectedOptions = 0;
+    const auto setRematrixOption = [&](const char* name, const double value) {
+        if (av_opt_set_double(foldResampler_, name, value, 0) < 0) ++rejectedOptions;
+    };
+    setRematrixOption("rematrix_maxval", RematrixMaxval);
+    setRematrixOption("center_mix_level", CenterMixLevel);
+    setRematrixOption("surround_mix_level", SurroundMixLevel);
+    setRematrixOption("lfe_mix_level", LfeMixLevel);
+    if (rejectedOptions != 0)
+        SetError("WASAPI downmix options were partially rejected; using FFmpeg defaults.");
+    if (swr_init(foldResampler_) < 0) {
+        swr_free(&foldResampler_);
+        av_channel_layout_uninit(&foldInputLayout_);
+        foldSampleRate_ = 0; foldSampleFormat_ = -1;
+        SetError("FFmpeg could not initialize the WASAPI downmix resampler.");
+        return FFFResult::FfmpegFailure;
+    }
+    return FFFResult::Success;
+}
+
+std::int32_t PlayerWasapiRenderer::RenderBedWithPlug(const AVFrame* const frame,
+    const std::int64_t position100ns) noexcept {
+    const auto channels = frame->ch_layout.nb_channels;
+    const auto samples = frame->nb_samples;
+    if (plug_.render == nullptr || plug_.context == nullptr || channels <= 0 || samples <= 0)
+        return -1;
+    if (EnsureBedConverter(frame) != FFFResult::Success) return -1;
+    // Head-room for a converter that reports a few frames more than the decoded
+    // frame; the plug's own capacity is the same stride, so it can never overrun.
+    const std::size_t stride = static_cast<std::size_t>(samples) + 64;
+    if (bedPlaneScratch_.size() < static_cast<std::size_t>(channels) * stride)
+        bedPlaneScratch_.resize(static_cast<std::size_t>(channels) * stride);
+    bedPlaneStrideFrames_ = stride;
+    if (plugLeftScratch_.size() < stride) plugLeftScratch_.resize(stride);
+    if (plugRightScratch_.size() < stride) plugRightScratch_.resize(stride);
+    std::array<const float*, FFF3FP_AUDIO_PLUG_MAX_CHANNELS> planes{};
+    std::int32_t bedFrames = samples;
+    if (bedConverter_ != nullptr) {
+        std::array<std::uint8_t*, FFF3FP_AUDIO_PLUG_MAX_CHANNELS> destination{};
+        for (int index = 0; index < channels; ++index)
+            destination[index] = reinterpret_cast<std::uint8_t*>(bedPlaneScratch_.data()) +
+                static_cast<std::size_t>(index) * stride * sizeof(float);
+        const auto inputFormat = static_cast<AVSampleFormat>(frame->format);
+        const auto bytesPerSample = av_get_bytes_per_sample(inputFormat);
+        if (bytesPerSample <= 0) return -1;
+        const auto planar = av_sample_fmt_is_planar(inputFormat) != 0;
+        const auto inputPlanes = planar ? channels : 1;
+        if (inputPlanes <= 0 || inputPlanes > 64) return -1;
+        std::array<const std::uint8_t*, 64> source{};
+        for (int plane = 0; plane < inputPlanes; ++plane)
+            source[plane] = frame->extended_data[plane];
+        const auto converted = swr_convert(bedConverter_, destination.data(),
+            static_cast<int>(stride), source.data(), samples);
+        if (converted <= 0) return -1;
+        bedFrames = std::min<std::int32_t>(converted, static_cast<std::int32_t>(stride));
+        for (int index = 0; index < channels; ++index)
+            planes[index] = bedPlaneScratch_.data() + static_cast<std::size_t>(index) * stride;
+    } else {
+        for (int index = 0; index < channels; ++index)
+            planes[index] = reinterpret_cast<const float*>(frame->extended_data[index]);
+    }
+    FFF3FPAudioBedFrame bedFrame{};
+    bedFrame.size = sizeof(bedFrame);
+    bedFrame.version = FFF3FP_AUDIO_PLUG_VERSION;
+    bedFrame.channels = planes.data();
+    bedFrame.channelCount = static_cast<std::uint32_t>(channels);
+    bedFrame.frameCount = static_cast<std::uint32_t>(bedFrames);
+    bedFrame.position100ns = position100ns;
+    const auto produced = plug_.render(plug_.context, &bedFrame, plugLeftScratch_.data(),
+        plugRightScratch_.data(), static_cast<std::uint32_t>(stride));
+    // <= 0 is "decline exactly this frame": the caller runs the fold-down for it.
+    if (produced <= 0) return -1;
+    return std::min<std::int32_t>(produced, static_cast<std::int32_t>(stride));
+}
+
+void PlayerWasapiRenderer::FreePlugResamplers() noexcept {
+    if (bedConverter_ != nullptr) swr_free(&bedConverter_);
+    av_channel_layout_uninit(&bedConverterLayout_);
+    bedConverterRate_ = 0; bedConverterFormat_ = -1;
+    if (foldResampler_ != nullptr) swr_free(&foldResampler_);
+    av_channel_layout_uninit(&foldInputLayout_);
+    foldSampleRate_ = 0; foldSampleFormat_ = -1;
+}
+
+void PlayerWasapiRenderer::ReleaseBedSeamBuffers() noexcept {
+    std::vector<float>{}.swap(bedPlaneScratch_);
+    std::vector<float>{}.swap(plugLeftScratch_);
+    std::vector<float>{}.swap(plugRightScratch_);
+    bedPlaneStrideFrames_ = 0;
+}
+
 FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t position100ns) noexcept {
     if (frame == nullptr || frame->nb_samples <= 0) return FFFResult::InvalidArgument;
     endOfStream_ = false;
     // Enqueue, reset and volume changes are serialized by PlayerSession's worker.
     // Do not take the PCM queue mutex while resampling or applying gain: the
     // WASAPI event thread must be able to take that mutex every device period.
-    const auto ensured = EnsureResampler(frame);
+    // The bed route is decided before the resampler because a plug-fed frame feeds
+    // swr the plug's stereo pair instead of the decoded bed.
+    const auto route = SelectBedRoute(frame);
+    const auto ensured = EnsureResampler(frame, route);
     if (ensured != FFFResult::Success) return ensured;
     const auto resetPosition = resetPosition100ns_.load();
     const auto signedStartFrame = position100ns == AV_NOPTS_VALUE
@@ -297,7 +626,73 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
         return FFFResult::Success;
     }
     const auto inputSamples = frame->nb_samples - skipSamples;
-    const auto capacity = swr_get_out_samples(resampler_, inputSamples);
+    // --- seam: one bed frame, one owner ---
+    // The plug is handed the whole frame, including the leading samples about to be
+    // trimmed -- that trim is preroll, and preroll is what warms its pipeline. The
+    // trim is then applied to its stereo pair, one output frame per input frame at
+    // the bed's own rate, so the timeline math below is the same math as always.
+    std::int32_t plugProduced = 0;
+    if (route == BedRoute::Plug) {
+        plugProduced = RenderBedWithPlug(frame, position100ns);
+        if (plugProduced > 0) {
+            ++plugFramesRendered_;
+            bedRenderedByPlug_ = true;
+        } else {
+            // The plug bailed on exactly this frame; the fold-down below covers it.
+            // Deliberately no counter moves: a per-frame bail is not a bed decline,
+            // and its only visible trace is this frame missing from
+            // framesRendered relative to the decoded frame count.
+            bedRenderedByPlug_ = false;
+        }
+    } else {
+        bedRenderedByPlug_ = false;
+        // Reaching this route for a bed in scope is the plug's answer of "no" to
+        // that bed -- supports() returning zero, or a bed wider than the ABI can
+        // describe. Bed-level, so it counts, and it counts for a mono bed too: the
+        // plug was shown one channel and said it would not place it.
+        if (route == BedRoute::Declined) ++plugFramesDeclined_;
+    }
+    // Which slot and which input planes this frame converts. Native and Declined
+    // hand over exactly the decoded bed at the same offset as before this seam
+    // existed; a rendered frame hands over the plug's stereo pair; a frame the plug
+    // bailed on mid-stream folds through its own slot so the plug-fed one survives.
+    SwrContext* convert = resampler_;
+    std::array<const std::uint8_t*, 64> input{};
+    int convertSamples = inputSamples;
+    if (route == BedRoute::Plug && plugProduced > 0) {
+        const auto trim = static_cast<int>(std::min<std::int64_t>(skipSamples, plugProduced));
+        convertSamples = plugProduced - trim;
+        input[0] = reinterpret_cast<const std::uint8_t*>(plugLeftScratch_.data()) +
+            static_cast<std::size_t>(trim) * sizeof(float);
+        input[1] = reinterpret_cast<const std::uint8_t*>(plugRightScratch_.data()) +
+            static_cast<std::size_t>(trim) * sizeof(float);
+    } else {
+        if (route == BedRoute::Plug) {
+            const auto folded = EnsureFoldResampler(frame);
+            if (folded != FFFResult::Success) return folded;
+            convert = foldResampler_;
+        }
+        const auto inputFormat = static_cast<AVSampleFormat>(frame->format);
+        const auto bytesPerSample = av_get_bytes_per_sample(inputFormat);
+        if (bytesPerSample <= 0) return FFFResult::FfmpegFailure;
+        const auto planar = av_sample_fmt_is_planar(inputFormat) != 0;
+        const auto inputPlanes = planar ? frame->ch_layout.nb_channels : 1;
+        // FFmpeg audio layouts have a bounded channel count.  Stack storage avoids a
+        // heap allocation for every decoded audio frame.
+        if (inputPlanes <= 0 || inputPlanes > 64) return FFFResult::NotSupported;
+        const auto byteOffset = static_cast<std::size_t>(skipSamples) * bytesPerSample *
+            (planar ? 1 : frame->ch_layout.nb_channels);
+        for (int plane = 0; plane < inputPlanes; ++plane) {
+            input[plane] = frame->extended_data[plane] + byteOffset;
+        }
+    }
+    if (convertSamples <= 0) {
+        // Only reachable when the plug produced no more frames than the trim asked
+        // for: nothing to submit for this frame, exactly the early return above.
+        PublishRuntimeDiagnostics();
+        return FFFResult::Success;
+    }
+    const auto capacity = swr_get_out_samples(convert, convertSamples);
     if (capacity <= 0) return FFFResult::FfmpegFailure;
     std::vector<std::uint8_t> converted;
     {
@@ -309,21 +704,7 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
     }
     converted.resize(static_cast<std::size_t>(capacity) * outputBlockAlign_);
     std::uint8_t* output[] = { converted.data() };
-    const auto inputFormat = static_cast<AVSampleFormat>(frame->format);
-    const auto bytesPerSample = av_get_bytes_per_sample(inputFormat);
-    if (bytesPerSample <= 0) return FFFResult::FfmpegFailure;
-    const auto planar = av_sample_fmt_is_planar(inputFormat) != 0;
-    const auto inputPlanes = planar ? frame->ch_layout.nb_channels : 1;
-    // FFmpeg audio layouts have a bounded channel count.  Stack storage avoids a
-    // heap allocation for every decoded audio frame.
-    if (inputPlanes <= 0 || inputPlanes > 64) return FFFResult::NotSupported;
-    std::array<const std::uint8_t*, 64> input{};
-    const auto byteOffset = static_cast<std::size_t>(skipSamples) * bytesPerSample *
-        (planar ? 1 : frame->ch_layout.nb_channels);
-    for (int plane = 0; plane < inputPlanes; ++plane) {
-        input[plane] = frame->extended_data[plane] + byteOffset;
-    }
-    const auto frames = swr_convert(resampler_, output, capacity, input.data(), inputSamples);
+    const auto frames = swr_convert(convert, output, capacity, input.data(), convertSamples);
     if (frames < 0) { SetError("FFmpeg failed to resample decoded audio."); return FFFResult::FfmpegFailure; }
     converted.resize(static_cast<std::size_t>(frames) * outputBlockAlign_);
     ApplyGain(converted);
@@ -455,6 +836,18 @@ void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
     if (resampler_ != nullptr) swr_free(&resampler_);
     av_channel_layout_uninit(&inputChannelLayout_);
     inputSampleRate_ = 0; inputSampleFormat_ = -1;
+    // A seek or a device restart also drops the plug's phase, and clears the verdict
+    // for the bed it was asked about: a stream switch can bring a different bed
+    // through the same sample rate, and the position map is what the plug placed.
+    // The frame counters deliberately survive this -- ResetDiagnostics() below does
+    // not touch them either, so a seek cannot erase which renderer owned the bed.
+    FreePlugResamplers();
+    ReleaseBedSeamBuffers();
+    plugBedIdentity_ = {};
+    plugBedAccepted_ = false;
+    bedRenderedByPlug_ = false;
+    if (plugInstalled_.load(std::memory_order_acquire) && plug_.reset != nullptr &&
+        plug_.context != nullptr) plug_.reset(plug_.context);
     pendingMediaFrames_ = 0; resetPosition100ns_ = position100ns;
     playedMediaFrames_ = 0;
     {
@@ -555,6 +948,13 @@ void PlayerWasapiRenderer::PublishRuntimeDiagnostics() noexcept {
     runtimeState_->discontinuities.store(discontinuityCount_.load(), std::memory_order_relaxed);
     runtimeState_->insertedSilenceFrames.store(insertedSilenceFrames_.load(), std::memory_order_relaxed);
     runtimeState_->droppedOverlapFrames.store(droppedOverlapFrames_.load(), std::memory_order_relaxed);
+    // Seam readout. The API thread answers FFF3FP_GetAudioRenderPlugState from these
+    // published values because it must not dereference the renderer: PlayerSession
+    // may replace the renderer between one call and the next.
+    runtimeState_->plugBedActive.store(bedRenderedByPlug_.load() ? 1u : 0u,
+        std::memory_order_relaxed);
+    runtimeState_->plugFramesRendered.store(plugFramesRendered_.load(), std::memory_order_relaxed);
+    runtimeState_->plugFramesDeclined.store(plugFramesDeclined_.load(), std::memory_order_relaxed);
 }
 
 void PlayerWasapiRenderer::RenderThread() noexcept {

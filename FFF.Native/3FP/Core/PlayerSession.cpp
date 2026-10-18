@@ -780,6 +780,31 @@ PlayerSession::~PlayerSession() {
     { std::lock_guard lock(mutex_); terminate_ = true; commands_.clear(); }
     commandCondition_.notify_all();
     if (worker_.joinable()) worker_.join();
+    // The plug's context is the kernel's from the install that took it, so releasing
+    // the session releases it. This runs after the join on purpose: the renderer only
+    // ever borrows the pointer, so nothing can be inside plug->render()/reset() here,
+    // and its own teardown (a member destructor, below) must not try to free it again.
+    {
+        FFF3FPAudioRenderPlug held{};
+        bool holding = false;
+        std::vector<FFF3FPAudioRenderPlug> retired;
+        {
+            std::lock_guard lock(audioPlugMutex_);
+            if (audioPlugInstalled_) { held = audioPlug_; holding = true; }
+            audioPlug_ = {};
+            audioPlugName_.clear();
+            audioPlugInstalled_ = false;
+            // Commands were cleared above, so a replacement whose release had not
+            // run yet is still parked here. Release it rather than leak the context
+            // the kernel took ownership of.
+            retired.swap(audioPlugRetired_);
+        }
+        for (const auto& plug : retired)
+            if (plug.destroy != nullptr && plug.context != nullptr)
+                plug.destroy(plug.context);
+        if (holding && held.destroy != nullptr && held.context != nullptr)
+            held.destroy(held.context);
+    }
     // Must run AFTER the join: the worker's P3 still-image path
     // (ConvertPrimariesToBt2020) is still using the gamutGraph_ filter graph, so
     // releasing it first would be a use-after-free. DoClose(Closed) on the worker's
@@ -1705,6 +1730,14 @@ FFFResult PlayerSession::RecreateAudioRenderer(const std::wstring& endpointId,
         replacement->SetVolume(volume_, muted_);
         replacement->SetPaused(paused ||
             (state_.load() == FFF3FPState::Playing && videoStream_ >= 0));
+        {
+            // The installed plug outlives the renderer it was installed into: a
+            // device switch, an exclusive-mode fallback or a suspend/resume all
+            // rebuild the renderer, and the bed owner must not silently vanish with
+            // it. The context is borrowed, never owned here.
+            std::lock_guard lock(audioPlugMutex_);
+            if (audioPlugInstalled_) replacement->SetAudioRenderPlug(&audioPlug_);
+        }
         audioRenderer_ = std::move(replacement);
         return FFFResult::Success;
     } catch (...) {
@@ -2037,6 +2070,70 @@ FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
 }
 FFFResult PlayerSession::SetVolume(const float volume, const bool muted) noexcept { if (!std::isfinite(volume) || volume < 0 || volume > 1) return FFFResult::InvalidArgument; Enqueue([this, volume, muted] { volume_ = volume; muted_ = muted; if (audioRenderer_) audioRenderer_->SetVolume(volume_, muted_); }); return FFFResult::Success; }
 
+FFFResult PlayerSession::SetAudioRenderPlug(const FFF3FPAudioRenderPlug* const plug) noexcept {
+    // Validate on the caller's thread, before anything moves: a struct that is not
+    // this ABI's size/version, or a table with a missing entry, is refused and the
+    // installed plug stays exactly as it was. Same "a bad call cannot half-apply"
+    // rule the metadata injection entry points already follow.
+    //
+    // `context` is part of that rule: the contract requires every pointer except
+    // destroy to be non-null, and a null context used to pass validation only to be
+    // filtered later by SelectBedRoute's `plug_.context != nullptr` guard -- the bed
+    // then fell back forever and every frame was counted as a decline, which reads
+    // exactly like a plug that refuses. A malformed plug must fail at install.
+    if (plug != nullptr && (plug->size != sizeof(FFF3FPAudioRenderPlug) ||
+        plug->version != FFF3FP_AUDIO_PLUG_VERSION || plug->supports == nullptr ||
+        plug->render == nullptr || plug->reset == nullptr || plug->context == nullptr))
+        return FFFResult::InvalidArgument;
+    {
+        std::lock_guard lock(audioPlugMutex_);
+        if (audioPlugInstalled_) {
+            // Parked, not released: a worker pass frees it, so the release can never
+            // land on top of a render() call that is already in flight.
+            audioPlugRetired_.push_back(audioPlug_);
+        }
+        // The struct is copied, so the caller may free its own right after this
+        // returns; the context it carries becomes the kernel's until the next
+        // install, a clear, or the session's destruction.
+        audioPlug_ = plug != nullptr ? *plug : FFF3FPAudioRenderPlug{};
+        audioPlugName_ = plug != nullptr && plug->name != nullptr ? plug->name : std::string{};
+        audioPlugInstalled_ = plug != nullptr;
+    }
+    // Swapping the seam is a worker-thread operation for the same reason a volume
+    // change is: the renderer reads its plug view while it converts a frame, and the
+    // two are serialized here. Releasing the previous context belongs in the same
+    // command, so it can never be freed under a render() call already in flight.
+    // A clear costs no device rebuild and no discontinuity count: the route changes
+    // at the next frame boundary and the fold-down takes the bed back.
+    Enqueue([this] {
+        if (audioRenderer_ != nullptr) {
+            std::lock_guard lock(audioPlugMutex_);
+            audioRenderer_->SetAudioRenderPlug(audioPlugInstalled_ ? &audioPlug_ : nullptr);
+        }
+        std::vector<FFF3FPAudioRenderPlug> retired;
+        { std::lock_guard lock(audioPlugMutex_); retired.swap(audioPlugRetired_); }
+        for (const auto& plug : retired)
+            if (plug.destroy != nullptr && plug.context != nullptr)
+                plug.destroy(plug.context);
+    });
+    return FFFResult::Success;
+}
+
+void PlayerSession::GetAudioRenderPlugState(std::uint32_t& active, std::string& name,
+    std::uint64_t& framesRendered, std::uint64_t& framesDeclined) const noexcept {
+    {
+        std::lock_guard lock(audioPlugMutex_);
+        active = audioPlugInstalled_ ? 1u : 0u;
+        name = audioPlugName_;
+    }
+    // Published by the renderer (PlayerAudioRuntimeState) rather than read off it:
+    // a device switch may replace the renderer between one call and the next, and
+    // the API thread must not dereference it. Per renderer instance, like the other
+    // seam numbers; a seek deliberately does not clear them.
+    framesRendered = audioRuntimeState_.plugFramesRendered.load(std::memory_order_relaxed);
+    framesDeclined = audioRuntimeState_.plugFramesDeclined.load(std::memory_order_relaxed);
+}
+
 FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) noexcept {
     constexpr auto legacyLayerSize = offsetof(FFF3FPTimedTextLayer, targetFrameRate);
     constexpr auto frameRateLayerSize = offsetof(FFF3FPTimedTextLayer,
@@ -2335,6 +2432,14 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     output.swapChainPresents = videoRenderer_.SwapChainPresents();
     output.presentWait100ns = videoRenderer_.PresentWait100ns();
     output.deviceLockWait100ns = videoRenderer_.DeviceLockWait100ns();
+    // Which stage owned the last bed frame is a live mirror too. The snapshot is
+    // published from the video-present path, and an audio-only file never walks
+    // that path, so the published copy would freeze at whatever the last publish
+    // happened to see -- the same reason 缓冲区/欠载 go stale for pure audio.
+    // audioRuntimeState_ belongs to the session rather than to the renderer, so it
+    // stays valid across a device swap and is safe to read here.
+    output.audioBinaural =
+        audioRuntimeState_.plugBedActive.load(std::memory_order_relaxed);
     output.softwareConvert100ns = videoRenderer_.SoftwareConvert100ns();
     output.videoUpload100ns = videoRenderer_.Upload100ns();
     output.uploadMapWait100ns = videoRenderer_.UploadMapWait100ns();
@@ -4960,6 +5065,11 @@ void PlayerSession::UpdateAudioDiagnostics() noexcept {
         snapshot_.audioDiscontinuities = 0;
         snapshot_.audioInsertedSilenceFrames = 0;
         snapshot_.audioDroppedOverlapFrames = 0;
+        // No renderer, therefore no bed owner. `audioBinaural` had no writer at all
+        // before the plug seam existed -- the field could only ever report the value
+        // the reset path left in it, which is why the two arms of the seam write it
+        // here and DoClose clears it with the other per-media counters.
+        snapshot_.audioBinaural = 0;
         return;
     }
     snapshot_.audioPosition100ns = audioRenderer_->Position100ns();
@@ -4969,6 +5079,19 @@ void PlayerSession::UpdateAudioDiagnostics() noexcept {
     snapshot_.audioDiscontinuities = audioRenderer_->DiscontinuityCount();
     snapshot_.audioInsertedSilenceFrames = audioRenderer_->InsertedSilenceFrames();
     snapshot_.audioDroppedOverlapFrames = audioRenderer_->DroppedOverlapFrames();
+    // 1 while the external renderer produced the last bed frame, 0 while the matrix
+    // fold-down did -- including a mono bed the plug placed, which is a real
+    // placement and not a fold-down (2026-10-18 decision). Multichannel devices and
+    // 2.0 sources never enter the seam, so they keep it at 0.
+    //
+    // Read from the published runtime state, not off `audioRenderer_`: this function
+    // also runs on paths where the renderer has just been replaced, and
+    // `plugBedActive` is written by the renderer on every frame
+    // (PlayerWasapiRenderer::PublishRuntimeDiagnostics), so the value the listener
+    // sees is the bed owner as of the last processed frame rather than as of
+    // whatever publish happened to run last.
+    snapshot_.audioBinaural =
+        audioRuntimeState_.plugBedActive.load(std::memory_order_relaxed);
 }
 
 void PlayerSession::ResetBitRateTracking() noexcept {
@@ -5651,6 +5774,11 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
         snapshot_.audioPosition100ns = snapshot_.bufferedAudio100ns = 0;
         snapshot_.audioTimestampJitterFrames = snapshot_.audioDiscontinuities = 0;
         snapshot_.audioInsertedSilenceFrames = snapshot_.audioDroppedOverlapFrames = 0;
+        // The seam's bed owner is per-media state like every counter around it: a new
+        // media starts with nobody rendering its bed, whether or not a plug is still
+        // installed (it is a session-level preference and survives Close/Open, like
+        // audioDelay100ns; the next media's first frame re-decides the route).
+        snapshot_.audioBinaural = 0;
         snapshot_.coalescedVideoFrames = snapshot_.audioRejectedFrames = 0;
         snapshot_.swapChainPresents = snapshot_.presentWait100ns = 0;
         snapshot_.deviceLockWait100ns = snapshot_.hardwareTransfer100ns = 0;
