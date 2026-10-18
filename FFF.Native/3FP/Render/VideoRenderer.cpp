@@ -231,6 +231,42 @@ constexpr std::uint32_t OutputBitDepthForSource(const std::uint32_t sourceBitDep
     return 8;
 }
 
+// The single ladder behind every output-buffer format. There are exactly three
+// output cases -- 8-bit B8G8R8A8, 10-bit R10G10B10A2, and 16-bit scRGB FP16 -- and both
+// swap-chain paths (CreateSwapChain and ReconfigureSwapChain), both pixel readbacks and
+// the host's media-info line have to agree on where the boundaries are. Duplicating the
+// comparison here is what would let a fourth case appear in only one of them.
+constexpr DXGI_FORMAT SwapChainFormatForOutputBits(const std::uint32_t outputBits) noexcept {
+    if (outputBits >= 16) return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if (outputBits >= 10) return DXGI_FORMAT_R10G10B10A2_UNORM;
+    return DXGI_FORMAT_B8G8R8A8_UNORM;
+}
+
+// The tier ladder is "prefer 16, fall back to 10". `hdr` here is the *output mode*
+// (actualMode_ == MapToHdr), which an SDR source also gets under the default Auto policy
+// once its bit depth exceeds 8 (WantsScRgbPresentationPath) -- so 16 is not reserved for
+// HDR content, only for sessions that reached the scRGB chain. The 10-bit tier is what is
+// left when that chain cannot be established: a display Windows does not report as
+// Advanced Color, an OS/driver without the ACM colour-space API, a swap chain that
+// rejects G10, or a caller that asked for sdrScRgbMode = Never. 12-bit and 16-bit SDR
+// sources that end up in the fallback stay at 10 bits (DXGI has no 12-bit output).
+static_assert(OutputBitDepthForSource(0, false) == 8);      // depth not reported
+static_assert(OutputBitDepthForSource(8, false) == 8);
+static_assert(OutputBitDepthForSource(10, false) == 10);
+static_assert(OutputBitDepthForSource(12, false) == 10);
+static_assert(OutputBitDepthForSource(16, false) == 10);
+static_assert(OutputBitDepthForSource(8, true) == 16 &&
+    OutputBitDepthForSource(16, true) == 16);
+// No input selects a fourth format, and the >=16 arm is the scRGB one.
+static_assert(SwapChainFormatForOutputBits(8) == DXGI_FORMAT_B8G8R8A8_UNORM);
+static_assert(SwapChainFormatForOutputBits(10) == DXGI_FORMAT_R10G10B10A2_UNORM);
+static_assert(SwapChainFormatForOutputBits(16) == DXGI_FORMAT_R16G16B16A16_FLOAT);
+static_assert(SwapChainFormatForOutputBits(12) == DXGI_FORMAT_R10G10B10A2_UNORM);
+static_assert(SwapChainFormatForOutputBits(OutputBitDepthForSource(16, false)) ==
+    DXGI_FORMAT_R10G10B10A2_UNORM);
+static_assert(SwapChainFormatForOutputBits(OutputBitDepthForSource(16, true)) ==
+    DXGI_FORMAT_R16G16B16A16_FLOAT);
+
 float Clamp01(const float value) noexcept { return std::clamp(value, 0.0f, 1.0f); }
 
 constexpr bool IsBt2020ColorSpace(const AVColorSpace colorSpace) noexcept {
@@ -1369,6 +1405,16 @@ constexpr std::uint32_t ToShaderFilter(const ScaleKernel kernel) noexcept {
 //          3840x2160  Map 3.293 ms   (2.886 ms, 1.14x)
 //          7680x4320  Map 22.266 ms  (15.213 ms, 1.46x) -- more than a 60 fps
 //                      frame period, so the upload alone would cap presentation.
+// The UpdateSubresource column above is the ORIGINAL author's own measurement, and this
+// machine does not reproduce it: measured here on the same content, staging-with-ring
+// and a single Map(WRITE_DISCARD) cost the same at 8K (11.529 vs 11.509 ms, because
+// CopyResource is queued and hidden inside the next frame's copy), and UpdateSubresource
+// is 4.6% SLOWER at 4K (unjudged at 8K -- two runs of one mode already differ by 8.9-9.7%,
+// same size as the effect). So the bracketed numbers are NOT a recommendation to switch
+// this ladder to UpdateSubresource -- if anyone reads them that way, the reading is wrong.
+// What is measured and load-bearing here is the ring: with a single staging slot the CPU
+// waits on the previous CopyResource for 2.36-2.99 ms per frame, with two slots 0.0155 ms
+// (a depth-1 queue cap does not substitute -- 2x2 of latency x ring, 8/8 arms valid).
 //   1 -- CPU-write STAGING textures alternating with sampled DEFAULT textures, so
 //        uploading the next picture overlaps sampling the last one. Flat cost, but
 //        it commits 3x the frame bytes of VRAM (two staging slots plus the upload
@@ -1437,7 +1483,34 @@ constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
         return {2, 12, 65535.0f / 65520.0f, 1, 0};
     case AV_PIX_FMT_P216LE:
         return {2, 16, 1.0f, 1, 0};
-    // Float RGB (JPEG XR decodes to rgbaf16le). This gets its OWN layout value
+    // Semi-planar 4:2:2 and 4:4:4. These were missing, so each of them fell through
+    // `default:` to layout 0 and paid a full-frame CPU sws_scale to get pixels the
+    // existing two-plane shader arm can already sample: texture format selection
+    // reads only `layout` and `bitDepth > 8` (see EnsurePipeline), so no new sampling
+    // path is required -- this is the same NV12/P010 machinery at different shifts.
+    //
+    // NV20 vs P210 is deliberately NOT the same sampleScale: the vendored pixfmt.h
+    // documents P210/P410 as "data in the high bits" and NV16/NV20 without that note,
+    // so NV20LE is LSB-aligned like planar yuv422p10le while P210LE is MSB-aligned
+    // like P010LE. Getting this backwards is a silent 64x colour error, hence the
+    // assertions below pin every entry rather than leaving it to review.
+    case AV_PIX_FMT_NV16:
+        return {2, 8, 1.0f, 1, 0};
+    case AV_PIX_FMT_NV20LE:
+        return {2, 10, 65535.0f / 1023.0f, 1, 0};
+    case AV_PIX_FMT_NV24:
+        return {2, 8, 1.0f, 0, 0};
+    case AV_PIX_FMT_P410LE:
+        return {2, 10, 65535.0f / 65472.0f, 0, 0};
+    case AV_PIX_FMT_P416LE:
+        return {2, 16, 1.0f, 0, 0};
+    // Planar 4:1:0 and 4:4:0. 410P is "1 Cr & Cb sample per 4x4 Y", 440P "per 1x2 Y"
+    // (pixfmt.h), i.e. shifts (2,2) and (0,1) -- neither is a variant of the other,
+    // and both were previously landing on the CPU route.
+    case AV_PIX_FMT_YUV410P:
+        return {1, 8, 1.0f, 2, 2};
+    case AV_PIX_FMT_YUV440P:
+        return {1, 8, 1.0f, 0, 1};    // Float RGB (JPEG XR decodes to rgbaf16le). This gets its OWN layout value
     // rather than only a bitDepth, because downstream picks the shader-visible
     // texture format from `layout`: layout 0 would give R16G16B16A16_UNORM, which
     // cannot represent the >1.0 and <0.0 components that float RGB legitimately
@@ -1471,6 +1544,39 @@ static_assert(DescribeInput(AV_PIX_FMT_P010LE).sampleScale == 65535.0f / 65472.0
     DescribeInput(AV_PIX_FMT_P012LE).sampleScale == 65535.0f / 65520.0f &&
     DescribeInput(AV_PIX_FMT_P210LE).sampleScale == 65535.0f / 65472.0f &&
     DescribeInput(AV_PIX_FMT_P212LE).sampleScale == 65535.0f / 65520.0f);
+// Every format added to the table above is pinned here: layout, depth, both chroma
+// shifts, and for the 10-bit ones the LSB-vs-MSB alignment that decides sampleScale.
+static_assert(DescribeInput(AV_PIX_FMT_NV16).layout == 2 &&
+    DescribeInput(AV_PIX_FMT_NV16).bitDepth == 8 &&
+    DescribeInput(AV_PIX_FMT_NV16).chromaWidthShift == 1 &&
+    DescribeInput(AV_PIX_FMT_NV16).chromaHeightShift == 0);
+static_assert(DescribeInput(AV_PIX_FMT_NV20LE).layout == 2 &&
+    DescribeInput(AV_PIX_FMT_NV20LE).bitDepth == 10 &&
+    DescribeInput(AV_PIX_FMT_NV20LE).sampleScale == 65535.0f / 1023.0f &&   // LSB
+    DescribeInput(AV_PIX_FMT_NV20LE).chromaWidthShift == 1 &&
+    DescribeInput(AV_PIX_FMT_NV20LE).chromaHeightShift == 0);
+static_assert(DescribeInput(AV_PIX_FMT_NV24).layout == 2 &&
+    DescribeInput(AV_PIX_FMT_NV24).chromaWidthShift == 0 &&
+    DescribeInput(AV_PIX_FMT_NV24).chromaHeightShift == 0);
+static_assert(DescribeInput(AV_PIX_FMT_P410LE).layout == 2 &&
+    DescribeInput(AV_PIX_FMT_P410LE).sampleScale == 65535.0f / 65472.0f &&   // MSB
+    DescribeInput(AV_PIX_FMT_P410LE).chromaWidthShift == 0);
+static_assert(DescribeInput(AV_PIX_FMT_P416LE).layout == 2 &&
+    DescribeInput(AV_PIX_FMT_P416LE).bitDepth == 16 &&
+    DescribeInput(AV_PIX_FMT_P416LE).chromaWidthShift == 0);
+static_assert(DescribeInput(AV_PIX_FMT_YUV410P).layout == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV410P).chromaWidthShift == 2 &&
+    DescribeInput(AV_PIX_FMT_YUV410P).chromaHeightShift == 2);
+static_assert(DescribeInput(AV_PIX_FMT_YUV440P).layout == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV440P).chromaWidthShift == 0 &&
+    DescribeInput(AV_PIX_FMT_YUV440P).chromaHeightShift == 1);
+// None of these may fall through to the CPU conversion route any more; this is the
+// assertion that fails if someone re-introduces the `default:` capture for them.
+static_assert(DescribeInput(AV_PIX_FMT_NV16).layout != 0 &&
+    DescribeInput(AV_PIX_FMT_NV24).layout != 0 &&
+    DescribeInput(AV_PIX_FMT_P410LE).layout != 0 &&
+    DescribeInput(AV_PIX_FMT_YUV410P).layout != 0 &&
+    DescribeInput(AV_PIX_FMT_YUV440P).layout != 0);
 
 constexpr int ChromaOffsetNumerator256(const std::uint32_t shift,
     const int position256) noexcept {
@@ -2900,7 +3006,13 @@ FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** ou
 FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_t height,
     const std::uint32_t sourceBitDepth) noexcept {
     if (window_ == nullptr) return FFFResult::Success;
-    if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
+    // The Auto policy applies to a plain MapToSdr caller too: the tier ladder prefers the
+    // 16-bit scRGB chain for anything deeper than 8 bits, so a session that only asked for
+    // SDR is still promoted when the display can carry scRGB -- which is what
+    // FFF3FPConfiguration.sdrScRgbMode documents. Keeping the whole block inside
+    // `requestedMode_ == MapToHdr` made the policy a no-op for the normal SDR caller;
+    // measured here: a 10-bit HEVC source stayed at outBits=10 with the gate forced on.
+    if (requestedMode_ == FFF3FPColorMode::MapToHdr || sdrScRgbMode_ != 0) {
         // Wide-gamut SDR also needs scRGB to retain colors outside Rec.709.
         const auto wantsHdrPath = WantsScRgbPresentationPath(sourceBitDepth);
         const auto nextMode = wantsHdrPath && OutputSupportsHdr() ?
@@ -2913,8 +3025,12 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
             (hdrProcessor_.IsHdrSource() || IsWideGamutSource() ?
                 "The target display or Windows Advanced Color mode does not support true HDR output." :
                 "Advanced Color output is not active, so this SDR source stays on the classic SDR swap chain.");
+        // Only a caller that actually asked for HDR can be *demoted*: a promotion out of
+        // MapToSdr must not be reported as a fallback reason.
+        const auto demoted = requestedMode_ == FFF3FPColorMode::MapToHdr &&
+            nextMode != requestedMode_;
         try { std::lock_guard fallbackLock(fallbackMutex_);
-            fallbackReason_ = nextMode == requestedMode_ ? std::string{} : reason;
+            fallbackReason_ = demoted ? reason : std::string{};
         } catch (...) {}
         if (nextMode != actualMode_) {
             actualMode_ = nextMode;
@@ -2984,9 +3100,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
             &allowTearing, sizeof(allowTearing));
     DXGI_SWAP_CHAIN_DESC1 description{};
     description.Width = width; description.Height = height;
-    description.Format = outputBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
-        (outputBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
-            DXGI_FORMAT_B8G8R8A8_UNORM);
+    description.Format = SwapChainFormatForOutputBits(outputBits);
     description.SampleDesc.Count = 1; description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     description.BufferCount = 3; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_NONE;
@@ -3085,9 +3199,7 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr,
         swapOutputBits_ = 8;
         return CreateSwapChain(width, height, hdr, formatBits, sourceBitDepth);
     }
-    const auto format = formatBits >= 16 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
-        (formatBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
-            DXGI_FORMAT_B8G8R8A8_UNORM);
+    const auto format = SwapChainFormatForOutputBits(formatBits);
     const auto resizeFlags = swapAllowTearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
     const auto resize = swapChain_->ResizeBuffers(0, std::max(1u, swapWidth_),
         std::max(1u, swapHeight_), format, resizeFlags);

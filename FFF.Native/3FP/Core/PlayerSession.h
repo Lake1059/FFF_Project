@@ -106,6 +106,18 @@ public:
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;
     FFFResult SetAudioExclusiveMode(bool exclusive) noexcept;
     FFFResult SetVolume(float volume, bool muted) noexcept;
+    // External bed render plug (3FP/Api/FFF.Player.AudioRenderPlug.h). Install,
+    // replace or clear; the session owns the context from the call that installs it
+    // and is the only code that calls plug->destroy. See PlayerApi.cpp for the
+    // export's contract, and the audioPlug_ members for why the renderer only ever
+    // borrows the pointer.
+    FFFResult SetAudioRenderPlug(const FFF3FPAudioRenderPlug* plug) noexcept;
+    // Read-back for FFF3FP_GetAudioRenderPlugState: whether a plug is installed, its
+    // UTF-8 name, and the seam's rendered/declined frame counters. The counters come
+    // from the shared runtime state, not from the renderer, because the renderer may
+    // be replaced at any moment by a device switch.
+    void GetAudioRenderPlugState(std::uint32_t& active, std::string& name,
+        std::uint64_t& framesRendered, std::uint64_t& framesDeclined) const noexcept;
     FFFResult SetTimedTextLayer(const FFF3FPTimedTextLayer& layer) noexcept;
     // RTX Video Super Resolution opt-in switch (default Off).
     FFFResult SetVideoSuperResolution(FFF3FPVideoSuperResolution mode) noexcept;
@@ -468,6 +480,22 @@ private:
     std::string externalAudioPath_;
     PlayerAudioRuntimeState audioRuntimeState_;
     std::unique_ptr<PlayerWasapiRenderer> audioRenderer_;
+    // The bed render plug the host installed. Copied, because the caller may free
+    // its own struct the moment the call returns; `context` is the kernel's from
+    // then on and only this class releases it (see SetAudioRenderPlug / ~PlayerSession).
+    // A renderer therefore only borrows the pointer, which is what makes a device
+    // restart safe: RecreateAudioRenderer installs the same context into the
+    // successor instead of inheriting a renderer instance's ownership of it.
+    mutable std::mutex audioPlugMutex_;
+    FFF3FPAudioRenderPlug audioPlug_{};
+    bool audioPlugInstalled_ = false;
+    std::string audioPlugName_;
+    // Contexts handed over by a replaced or cleared plug, waiting for a worker pass
+    // to release them (a release must not race a render() call in flight). Draining a
+    // list instead of holding one "previous" pointer matters: the destructor drops
+    // queued commands, and whatever is still parked here at that point is released
+    // there rather than leaked.
+    std::vector<FFF3FPAudioRenderPlug> audioPlugRetired_;
     PlayerVideoRenderer videoRenderer_;
     std::wstring audioEndpointId_;
     bool audioExclusive_;

@@ -1,12 +1,14 @@
 #include "pch.h"
 #include "3FP/Core/MediaText.h"
 #include "3FP/Api/FFF.Player.Api.h"
+#include "3FP/Api/FFF.Player.AudioRenderPlug.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Render/VideoRenderer.h"
 #include "3FP/Subtitle/SubtitleProbe.h"
 
 #include <cmath>
 #include <atomic>
+#include <cstring>
 
 namespace {
 // Configuration layout and version must match the public header exactly.
@@ -404,4 +406,49 @@ FFFResult FFF3FP_CopyFrameSideDataAfter(const FFF3FPHandle player,
     *writtenSize = written;
     *foundFrameIndex = found;
     return result;
+}
+
+// External bed render plug. Appended after the v20 surface like the readback, VSR,
+// rotation and side-data entries before it: additive entry points, so
+// PlayerApiVersion stays at 20 and a host that never resolves these two keeps
+// loading this DLL unchanged. See FFF.Player.AudioRenderPlug.h for why the seam
+// exists at all -- rendering a channel bed to binaural output is an implementation
+// that needs authorization to write, so the body keeps the neutral socket and the
+// matrix fold-down, and the renderer itself arrives from outside the process's own
+// source tree.
+FFFResult FFF3FP_SetAudioRenderPlug(const FFF3FPHandle player,
+    const FFF3FPAudioRenderPlug* plug) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetAudioRenderPlug(plug)
+        : FFFResult::InvalidArgument;
+}
+
+// active: 1 = a plug owns the bed, 0 = the matrix fold-down does. The two frame
+// counters are the seam's own accounting (rendered / declined), read back from the
+// renderer's published runtime state so this call never touches the renderer
+// pointer. Only `active` is mandatory: name, capacity, and both counters are
+// optional outputs, and a name that does not fit is truncated rather than failed --
+// it is informational, and unlike the string-returning exports there is no
+// two-call resize dance to ask for a bigger buffer.
+FFFResult FFF3FP_GetAudioRenderPlugState(const FFF3FPHandle player,
+    std::uint32_t* active, char* name, const std::uint32_t nameCapacity,
+    std::uint64_t* framesRendered, std::uint64_t* framesDeclined) noexcept {
+    if (player == nullptr || active == nullptr) return FFFResult::InvalidArgument;
+    std::uint32_t activeValue = 0;
+    std::string plugName;
+    std::uint64_t rendered = 0;
+    std::uint64_t declined = 0;
+    static_cast<PlayerSession*>(player)->GetAudioRenderPlugState(activeValue, plugName,
+        rendered, declined);
+    *active = activeValue;
+    if (framesRendered != nullptr) *framesRendered = rendered;
+    if (framesDeclined != nullptr) *framesDeclined = declined;
+    if (name != nullptr && nameCapacity > 0) {
+        name[0] = '\0';
+        const auto copied = CopyUtf8(plugName, name, nameCapacity, nullptr);
+        if (copied != FFFResult::Success && nameCapacity > 1) {
+            std::memcpy(name, plugName.c_str(), nameCapacity - 1);
+            name[nameCapacity - 1] = '\0';
+        }
+    }
+    return FFFResult::Success;
 }
