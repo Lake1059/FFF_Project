@@ -120,25 +120,36 @@ struct FFF3FPConfiguration {
     // field zeroed therefore pins playback to adapter #0 and silently overrides
     // the monitor match, so every caller must initialise it to -1 explicitly.
     std::int32_t preferredAdapterIndex = -1;
-    // Presentation policy for SDR sources on an Advanced Color display.
-    //   0 = Never: this policy adds no reason to leave the classic 8/10-bit sRGB
-    //       swap chain, which is the pre-existing behaviour. Sources that already
-    //       needed the scRGB chain before the field existed - an HDR transfer
-    //       function, or wide-gamut primaries - still get it; switching to Never
-    //       does not demote them.
-    //   1 = Auto: additionally route a plain SDR source through the 16-bit scRGB
-    //       swap chain when its bit depth exceeds 8. Without this, a 10-bit SDR
-    //       source sits on a gamma R10G10B10A2 chain that DWM resamples as an
-    //       ordinary SDR window, so the extra precision is rewritten away.
-    // The display gate (OutputSupportsHdr) still applies in both modes: on a
-    // non-Advanced Color display the SDR chain is used unchanged.
-    std::uint32_t sdrScRgbMode = 0;
+    // Presentation policy for SDR sources on an Advanced Color display. The output tier
+    // ladder is "prefer 16-bit, fall back to 10-bit", and this field is the preference:
+    //   1 = Auto (default): a source deeper than 8 bits is presented on the 16-bit scRGB
+    //       chain. Without it a 10-bit SDR source sits on a gamma R10G10B10A2 chain that
+    //       DWM resamples as an ordinary SDR window, so the extra precision is rewritten
+    //       away.
+    //   0 = Never: keep the classic 8/10-bit gamma chain for SDR sources. Sources that
+    //       already needed scRGB before this field existed - an HDR transfer function or
+    //       wide-gamut primaries - still get it; Never does not demote them.
+    // scRGB is only *preferred*, never required. Every way of not getting it degrades to
+    // the 10-bit tier (8-bit for 8-bit sources): a display Windows does not report as
+    // Advanced Color (the OutputSupportsHdr gate), an OS or driver without the ACM
+    // colour-space API, or a swap chain that rejects
+    // DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 - that rejection rebuilds the chain and
+    // then backs off for 10 s before retrying.
+    // FFF3FP_SDR_SCRGB=0/1 overrides whatever the caller passes, for measurement only.
+    std::uint32_t sdrScRgbMode = 1;
     // Adaptive downscale-before-upload. Software-decoded frames cross PCIe as whole
     // planes -- an 8K P010 frame is ~100 MB -- which caps playback well below the
     // source rate on a bus that cannot carry it. When the session is software decoding
     // AND the renderer is dropping a large share of frames, resampling the frame down
     // to the size actually on screen first cuts that transfer by roughly the square of
-    // the ratio, for about a millisecond of CPU work.
+    // the ratio (measured 8K AV1: 99,532,800 B -> 19,685,982 B per upload, the CPU copy
+    // 14.85 ms -> 2.83 ms).
+    //
+    // Measured cost, which is why this stays off: the resample itself is sws_scale at
+    // about 4.6 GB/s, so it takes **26 ms per 8K frame** -- roughly 2 ms more than the
+    // 14.85 ms of copy it removes, and net playback went 30 -> 24.5 fps. The earlier
+    // claim on this line, "about a millisecond of CPU work", was never measured; the
+    // direction is right (fewer bytes should be moved) but not on the CPU.
     //
     // Off by default. It never engages for hardware decoding (those frames are already
     // GPU-resident, so there is nothing to save) or for still images.
