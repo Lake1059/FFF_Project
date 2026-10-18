@@ -184,6 +184,32 @@ Friend Structure 原生播放器快照
     Public 音频双耳渲染 As UInteger
     ' 内嵌音轨延迟：正值表示声音落后于画面，与外部音轨偏移独立。
     Public 音频延迟100纳秒 As Long
+    ' 上传路径拆分计量，单位同为 100 纳秒。视频上传100纳秒是整段上传步骤的总耗时，
+    ' 实测发现它是三种性质不同的开销共用一个数：
+    '   上传映射等待 - Map() 调用本身。D3D11 的 Map 不带 DO_NOT_WAIT 时会阻塞到
+    '                  GPU 用完被映射的资源，所以"等上一帧画完"的代价落在这里。
+    '   上传复制     - 逐行 memcpy（平面/半平面臂）或 UpdateSubresource（打包/半浮点臂），
+    '                  即真正在搬的字节。
+    '   余数         - Unmap / CopyResource / 驱动提交，仍在视频上传100纳秒内，未再拆分。
+    Public 上传映射等待100纳秒 As ULong
+    Public 上传复制100纳秒 As ULong
+    ' 上传前降档策略在 CPU 侧做的 sws_scale 重采样。它跑在视频上传100纳秒**之外**，
+    ' 此前没有任何指标，这正是那条策略"数字上省 90%、播放反而更慢"却能蒙混过关的原因。
+    Public 降档重采样100纳秒 As ULong
+    ' 实际执行过的缩放链 pass 累计数。差值除以呈现帧数即每帧 pass 数；缩放链是逐级减半
+    ' 构建的，所以极端降采样会在这里暴露成 GPU 绘制代价，而不是藏在上传数字里。
+    Public 缩放链趟数 As ULong
+    ' 上传复制的真实字节数与上传次数。上传复制时长单独存在时换不成带宽：之前的每一个
+    ' GB/s 都是拿"理论帧大小"（宽×高×1.5×每样本字节）除以**每呈现帧**的耗时，两个操作数
+    ' 都是推测 —— 8K 那臂每秒丢 16 帧只呈现 41 帧，被丢掉的那些有没有上传过快照里没写，
+    ' 所以分母用 41 还是 57 会让带宽差 1.39 倍。有了这两个数，字节/次和字节/时长都是量的。
+    Public 上传次数 As ULong
+    Public 上传复制字节 As ULong
+    ' 上一帧走的是哪条上传分支：1 = 平面 STAGING + Map(WRITE)（≥4K 那档），
+    ' 2 = 平面 DYNAMIC + Map(WRITE_DISCARD)（<4K 那档），3 = 打包 UpdateSubresource，
+    ' 4 = 半浮点，5 = RGB。这两档搬的字节数和内存类型都不一样，之前无法区分。
+    ' 分支 3/4 的字节数由驱动掌握，此处不记，靠本字段识别而不是混进平均值。
+    Public 上传路径 As UInteger
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -570,6 +596,11 @@ Friend Module 播放器原生接口
     ''' 也不由此推断任何源格式语义——载荷的语义完全由模块内部处理。</summary>
     Friend Const 边数据契约类型 As UInteger = 24UI
 
+    ''' <summary>容器码流配置记录的类型键（AVPacketSideDataType 里的配置记录）。数值由随包
+    ''' FFmpeg ABI 固定，宿主只当不透明键传给内核——内核不解释字节，语义完全由模块处理。
+    ''' ⚠ 与 <see cref="边数据契约类型"/> 分属两套枚举（AVFrame 与 AVPacket），数值相同也互不相干。</summary>
+    Friend Const 配置记录契约类型 As UInteger = 29UI
+
     ''' <summary>FFF3FPDynamicMetadataPacket（40 B）。载荷是调用方拥有的钉住缓冲区首址，
     ''' 内核成功时整批拷走（payloadSize 必须精确等于载荷结构大小，拒大不拒小地整批拒绝）。</summary>
     <StructLayout(LayoutKind.Sequential)>
@@ -614,6 +645,10 @@ Friend Module 播放器原生接口
         起始帧号 As Long, 缓冲区 As IntPtr, 容量 As UInteger,
         ByRef 写入大小 As UInteger, ByRef 找到帧号 As Long) As 原生播放器结果
 
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 复制流边数据原型(播放器 As IntPtr, 边数据类型 As UInteger,
+        缓冲区 As IntPtr, 容量 As UInteger, ByRef 写入大小 As UInteger) As 原生播放器结果
+
     ' 注意：字段必须显式声明委托类型——VB 的字段声明不适用 Option 推断，
     ' 不写 As 的话字段类型是 Object，调用点走迟绑定，运行期抛
     ' MissingMemberException（泵每一拍都会中，且被泵的兜底 catch 吞成一行日志）。
@@ -623,6 +658,8 @@ Friend Module 播放器原生接口
         解析可选导出(Of 清空动态元数据原型)("FFF3FP_ClearDynamicMetadata")
     Private ReadOnly 复制帧边数据函数 As 复制帧边数据原型 =
         解析可选导出(Of 复制帧边数据原型)("FFF3FP_CopyFrameSideDataAfter")
+    Private ReadOnly 复制流边数据函数 As 复制流边数据原型 =
+        解析可选导出(Of 复制流边数据原型)("FFF3FP_CopyStreamSideData")
 
     ''' <summary>内核是否提供动态元数据注入导出。</summary>
     Friend ReadOnly Property 支持动态元数据注入 As Boolean
@@ -635,6 +672,13 @@ Friend Module 播放器原生接口
     Friend ReadOnly Property 支持帧边数据环 As Boolean
         Get
             Return 复制帧边数据函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>内核是否提供流级边数据导出（容器配置记录通道；旧内核缺席即静默降级）。</summary>
+    Friend ReadOnly Property 支持流边数据 As Boolean
+        Get
+            Return 复制流边数据函数 IsNot Nothing
         End Get
     End Property
 
@@ -679,6 +723,32 @@ Friend Module 播放器原生接口
         End If
         Try
             Return 函数(播放器.DangerousGetHandle(), 边数据类型, 起始帧号, 缓冲地址, 容量, 写入大小, 找到帧号)
+        Finally
+            If 缓冲钉住.IsAllocated Then 缓冲钉住.Free()
+        End Try
+    End Function
+
+    ''' <summary>流级边数据的两趟式契约：<paramref name="缓冲区"/> 传 Nothing 只问尺寸
+    ''' （此时 <paramref name="写入大小"/> 是该条目字节数）；传非空则拷入。
+    ''' 取的是当前视频流上指定类型**首个见过**的 blob（容器配置记录是流级常量，
+    ''' 不需要逐帧环）。未见过答 <see cref="原生播放器结果.未找到"/>；容量不足答
+    ''' <see cref="原生播放器结果.缓冲区不足"/> 且照报尺寸（条目保留，可换大缓冲重取）。
+    ''' seek 不清除；流重绑（open/换轨/关闭）才清除。</summary>
+    Friend Function 复制流边数据(播放器 As 播放器原生句柄, 边数据类型 As UInteger,
+                                 缓冲区 As Byte(), ByRef 写入大小 As UInteger) As 原生播放器结果
+        Dim 函数 = 复制流边数据函数
+        写入大小 = 0UI
+        If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
+        Dim 容量 As UInteger = 0UI
+        Dim 缓冲钉住 As GCHandle = Nothing
+        Dim 缓冲地址 As IntPtr = IntPtr.Zero
+        If 缓冲区 IsNot Nothing Then
+            容量 = CUInt(缓冲区.Length)
+            缓冲钉住 = GCHandle.Alloc(缓冲区, GCHandleType.Pinned)
+            缓冲地址 = 缓冲钉住.AddrOfPinnedObject()
+        End If
+        Try
+            Return 函数(播放器.DangerousGetHandle(), 边数据类型, 缓冲地址, 容量, 写入大小)
         Finally
             If 缓冲钉住.IsAllocated Then 缓冲钉住.Free()
         End Try
@@ -1037,6 +1107,24 @@ Friend Module 播放器原生接口
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetAudioExclusiveMode(播放器 As 播放器原生句柄, 独占 As UInteger) As 原生播放器结果
+    End Function
+
+    ' 外部床渲染函数表转交：表由模块产出、宿主钉住后整张交出，内核在装载点拷贝一份，
+    ' 所以调用返回即可解钉。传 IntPtr.Zero 表示撤下插槽、回到矩阵折叠。
+    ' 附加导出：不抬 API 版本，也不动快照布局（见契约头）。
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetAudioRenderPlug(播放器 As 播放器原生句柄,
+                                              表地址 As IntPtr) As 原生播放器结果
+    End Function
+
+    ' 插槽状态回读：生效=1 表示床由外部渲染器拥有，0 表示内核自己的矩阵折叠。
+    ' 名称缓冲/两个计数都可给零——按契约它们是可选输出。
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetAudioRenderPlugState(播放器 As 播放器原生句柄,
+                                                   ByRef 生效 As UInteger,
+                                                   名称缓冲 As IntPtr, 名称容量 As UInteger,
+                                                   ByRef 已渲染帧数 As ULong,
+                                                   ByRef 已拒绝帧数 As ULong) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetVolume(播放器 As 播放器原生句柄, 音量 As Single, 静音 As UInteger) As 原生播放器结果
