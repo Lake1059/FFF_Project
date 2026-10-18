@@ -1,6 +1,7 @@
 #pragma once
 
 #include "3FR/Api/FFF.Native.Api.h"
+#include "3FP/Api/FFF.Player.AudioRenderPlug.h"
 
 extern "C" {
 #include <libavutil/channel_layout.h>
@@ -80,6 +81,18 @@ struct PlayerAudioRuntimeState final {
     std::atomic<std::uint64_t> discontinuities{0};
     std::atomic<std::uint64_t> insertedSilenceFrames{0};
     std::atomic<std::uint64_t> droppedOverlapFrames{0};
+    // External bed render plug seam (FFF.Player.AudioRenderPlug.h). Published here
+    // rather than read straight off the renderer because PlayerSession may replace
+    // the renderer at any time (device switch, exclusive-mode fallback, restart),
+    // and the API thread that answers FFF3FP_GetAudioRenderPlugState must never
+    // dereference it. These are deliberately NOT FFF3FPSnapshot fields: the seam
+    // adds no snapshot member and moves no offset pin; `audioBinaural` is the only
+    // snapshot field it writes, and that one already existed without a writer.
+    // Not part of ResetDiagnostics()/ClearAll(): a seek must not erase the evidence
+    // of which renderer owned the bed. They restart with the renderer instance.
+    std::atomic<std::uint32_t> plugBedActive{0};
+    std::atomic<std::uint64_t> plugFramesRendered{0};
+    std::atomic<std::uint64_t> plugFramesDeclined{0};
 };
 
 class PlayerWasapiRenderer final {
@@ -112,7 +125,37 @@ public:
     bool RestartRequested() const noexcept;
     std::string LastError() const;
 
+    // ---- external bed render plug (FFF.Player.AudioRenderPlug.h) ----
+    // Install (plug != nullptr) or clear (plug == nullptr) the plug. Called on the
+    // session worker -- the same thread that calls Enqueue/Reset -- so the swap can
+    // never race a render() call, and a new bed route only takes effect at the next
+    // frame boundary. The struct is copied; the `context` pointer is BORROWED:
+    // PlayerSession owns the context and is the only code that calls plug->destroy,
+    // because this renderer may be replaced while the same context is about to be
+    // installed into its successor. Returns false only on a null plug argument that
+    // cannot be a clear request, i.e. never; validation lives in PlayerSession.
+    void SetAudioRenderPlug(const FFF3FPAudioRenderPlug* plug) noexcept;
+    bool AudioRenderPlugInstalled() const noexcept { return plugInstalled_.load(std::memory_order_acquire); }
+    std::uint64_t PlugFramesRendered() const noexcept { return plugFramesRendered_.load(std::memory_order_relaxed); }
+    std::uint64_t PlugFramesDeclined() const noexcept { return plugFramesDeclined_.load(std::memory_order_relaxed); }
+    // True while the most recent bed frame was produced by the plug rather than by
+    // the matrix fold-down. This is what writes FFF3FPSnapshot's `audioBinaural`.
+    bool BedRenderedByPlug() const noexcept { return bedRenderedByPlug_.load(std::memory_order_relaxed); }
+
 private:
+    // Which route one decoded frame takes through the seam.
+    enum class BedRoute {
+        // Outside the seam: no plug, a 2.0 bed (the device is already stereo), or a
+        // device that is not a stereo endpoint. Exactly today's code path, and no
+        // seam counter moves.
+        Native,
+        // In the seam, and the plug said no. The frame goes through the matrix
+        // fold-down and counts as a decline (see the accounting rule in .cpp).
+        Declined,
+        // In the seam, and the plug accepted this bed: every frame of it is handed
+        // to plug->render() and only rate-converted afterwards.
+        Plug,
+    };
     struct AudioChunk {
         std::vector<std::uint8_t> bytes;
         std::size_t offset = 0;
@@ -120,7 +163,21 @@ private:
     };
     void RenderThread() noexcept;
     void ApplyGain(std::vector<std::uint8_t>& converted) noexcept;
-    FFFResult EnsureResampler(const AVFrame* frame) noexcept;
+    FFFResult EnsureResampler(const AVFrame* frame, const BedRoute route) noexcept;
+    // The same swr allocation the non-seam path builds, but kept in its own slot so
+    // a plug that bails out mid-stream can fold exactly the way today's code folds
+    // (same layout, same rate, same rematrix options) without tearing down the
+    // plug-fed slot. Only ever created for a frame the plug declined.
+    FFFResult EnsureFoldResampler(const AVFrame* frame) noexcept;
+    // Bed in its codec format -> the same bed as planar float32, channel layout and
+    // sample rate untouched. Skipped entirely when the frame already is FLTP.
+    FFFResult EnsureBedConverter(const AVFrame* frame) noexcept;
+    BedRoute SelectBedRoute(const AVFrame* frame) noexcept;
+    // Renders one whole bed frame through the plug into plugLeft_/plugRight_.
+    // Returns the frame count produced, or <= 0 when the plug declines this frame.
+    std::int32_t RenderBedWithPlug(const AVFrame* frame, std::int64_t position100ns) noexcept;
+    void ReleaseBedSeamBuffers() noexcept;
+    void FreePlugResamplers() noexcept;
     void UpdatePeakLevels(const std::uint8_t* samples, std::uint32_t frames) noexcept;
     void PublishRuntimeDiagnostics() noexcept;
     void RequestRestart(std::string message) noexcept;
@@ -150,6 +207,44 @@ private:
     AVChannelLayout inputChannelLayout_;
     std::int32_t inputSampleRate_;
     std::int32_t inputSampleFormat_;
+    // Seam slots. foldResampler_ mirrors resampler_'s role for one declined frame;
+    // bedConverter_ only ever changes sample format, never layout or rate, because
+    // the plug's contract is planar float32 and handing it the codec's native
+    // format would push av_sample_fmt knowledge across the module boundary.
+    SwrContext* foldResampler_ = nullptr;
+    AVChannelLayout foldInputLayout_{};
+    std::int32_t foldSampleRate_ = 0;
+    std::int32_t foldSampleFormat_ = -1;
+    SwrContext* bedConverter_ = nullptr;
+    AVChannelLayout bedConverterLayout_{};
+    std::int32_t bedConverterRate_ = 0;
+    std::int32_t bedConverterFormat_ = -1;
+    // Copied plug view (context borrowed, see SetAudioRenderPlug) plus the bed it
+    // was last asked about. Touched only on the session worker, like Enqueue.
+    FFF3FPAudioRenderPlug plug_{};
+    std::atomic<bool> plugInstalled_{false};
+    struct BedIdentity final {
+        std::int32_t sampleRate = 0;
+        std::int32_t channels = 0;
+        std::int32_t format = -1;
+        // Position map folded into one value: two layouts with the same channel
+        // count are different beds and the plug's answer may differ.
+        std::uint64_t positions = 0;
+        bool operator==(const BedIdentity& other) const noexcept {
+            return sampleRate == other.sampleRate && channels == other.channels &&
+                format == other.format && positions == other.positions;
+        }
+    };
+    BedIdentity plugBedIdentity_{};
+    bool plugBedAccepted_ = false;
+    std::atomic<std::uint64_t> plugFramesRendered_{0};
+    std::atomic<std::uint64_t> plugFramesDeclined_{0};
+    std::atomic<bool> bedRenderedByPlug_{false};
+    // Scratch, kept as members so a steady-state stream allocates nothing per frame.
+    std::vector<float> bedPlaneScratch_;    // channelCount planes, stride below
+    std::vector<float> plugLeftScratch_;
+    std::vector<float> plugRightScratch_;
+    std::size_t bedPlaneStrideFrames_ = 0;
     std::uint32_t outputSampleRate_;
     std::uint16_t outputChannels_;
     std::uint16_t outputBlockAlign_;
