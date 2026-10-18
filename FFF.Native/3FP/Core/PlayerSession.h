@@ -2,6 +2,7 @@
 
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Audio/WasapiRenderer.h"
+#include "3FP/Core/PlacementPolicy.h"
 // IAMF needs the AOM reference decoder: FFmpeg splits an IAMF element into
 // dependent substreams and never mixes them (see IamfAudioDecoder.h).
 #include "3FP/Audio/IamfAudioDecoder.h"
@@ -219,9 +220,15 @@ private:
     FFFResult OpenHardwareVideoDecoder(AVFormatContext* format, std::int32_t streamIndex,
         AVCodecContext** decoder, std::string* failureReason = nullptr) noexcept;
     FFFResult FallbackToSoftwareVideoDecoder(const char* reason) noexcept;
-    // Chooses the software decoder's worker count. Fixed and bounded by default; with
-    // adaptiveDecoderThreads enabled it starts at the low rung and climbs a
-    // 4/8/16/24/32 ladder while measured load says the decoder is starving.
+    // Maximum workers the shared thread budget allows: the CPU count minus the player's
+    // own threads (worker, audio renderer, present thread) minus one core of scheduler
+    // headroom, so total player threads stay below the CPU count.
+    std::uint32_t DecoderThreadBudget() const noexcept;
+    // Chooses the software decoder's worker count. Fixed and budget-bounded by default;
+    // with adaptiveDecoderThreads enabled it starts at the floor (4 by default) and
+    // climbs a 4/8/16/24/32 ladder while measured load says the decoder is starving --
+    // never past the budget, and never crossing the preferred domain boundary
+    // (efficiency class / one L3 domain) in a single step.
     std::uint32_t SelectSoftwareDecoderThreads(std::uint32_t width,
         std::uint32_t height) const noexcept;
     // Evaluates measured decode load and, when the decoder is the constraint, reopens
@@ -261,6 +268,21 @@ private:
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
     void ResetCadenceSpread() noexcept;
+    // Adaptive presentation pacing: engage or release the renderer's pace floor from
+    // the late branch of PresentVideoFrame. Worker-thread-only; the floor itself is
+    // an atomic in the renderer, which the presenter schedules against.
+    void EngagePresentationPace(double floorHz, double contentHz,
+        std::int64_t lag100ns, const char* via) noexcept;
+    void ReleasePresentationPace(const char* reason) noexcept;
+    // Settles the rolling engage window once it holds PaceWindowFrames arrivals.
+    // Returns true when the pacer engaged on it, in which case the caller must
+    // show the picture rather than discard it; the window restarts on every
+    // outcome, exactly like the pool rung and upload ladders restart theirs.
+    bool SettlePaceWindow(std::int64_t lag100ns, std::int64_t clock100ns,
+        double contentHz) noexcept;
+    // Drops a half-filled rolling window: its rate estimate is only meaningful
+    // across a contiguous run of arrivals.
+    void ResetPaceWindow() noexcept;
     // nullptr = 还没测够，调用方必须退回容器那两个字段而不是蒙一个"constant"。
     const char* MeasuredFrameRateMode() const noexcept;
     const char* FrameRateModeLabel(const struct AVStream* stream, AVRational guessed,
@@ -375,18 +397,48 @@ private:
     std::int32_t videoStream_;
     // Software-decoder thread ladder. Driven by measured load, not by resolution: a
     // resolution says nothing about whether this machine can keep up with this codec.
-    // The ladder only ever climbs (see SelectSoftwareDecoderThreads for why a ladder
-    // that also descends was tried and removed).
+    // It starts at the floor and only ever climbs -- one step per starving window,
+    // within the shared thread budget and without jumping past the preferred domain
+    // boundary (see SelectSoftwareDecoderThreads for why a ladder that also descends
+    // was tried and removed).
     bool adaptiveThreadsEnabled_ = false;
-    std::uint32_t threadLadderMin_ = 4;
+    std::uint32_t threadLadderMin_ = 4;            // floor / first rung (soft-decode minimum)
     std::uint32_t threadLadderMax_ = 32;
     std::uint32_t decoderThreads_ = 0;             // current rung; 0 = not yet chosen
-    std::uint64_t ladderWindowDecoded_ = 0;        // counters at the last evaluation
+    std::uint64_t ladderWindowDecoded_ = 0;        // counters when the window armed
     std::uint64_t ladderWindowPresented_ = 0;
     std::int64_t ladderWindowStart100ns_ = 0;
+    // Pump-tick evidence for the window being measured: how many playback ticks ran,
+    // how many found the decode queue saturated (either gate), and the split the pool
+    // verdict needs -- ticks gated by the queue limit itself, and ticks with the queue
+    // below its minimum. Diagnostics for the trace line and the pool climb gate.
+    std::uint64_t pumpIterations_ = 0;
+    std::uint64_t pumpSaturatedIterations_ = 0;
+    std::uint64_t pumpQueueBoundIterations_ = 0;
+    std::uint64_t pumpStarvedIterations_ = 0;
+    // Counter baselines captured when the ladder window armed, so a window reads
+    // deltas rather than session totals (the same discipline as decoded/presented).
+    std::uint64_t ladderWindowUpload100ns_ = 0;
+    std::uint64_t ladderWindowConvert100ns_ = 0;
+    std::uint64_t ladderWindowDropped_ = 0;
+    // Current rung of the software look-ahead pool ladder: indexes SoftwarePoolBudgets
+    // / SoftwarePoolFrameCaps (128 MB / 4 frames at the floor, 1024 MB / 16 at the top).
+    // Climbs one rung per window the pool gate finds pool-starved; like the thread
+    // ladder it never descends, and it resets per media (see DoClose).
+    std::uint8_t softwarePoolRung_ = 0;
+    // Frames dropped by ClearVideoQueue (seek, rung reopen, fallback, close). They have
+    // no drop counter of their own; the trace line reports them.
+    std::uint64_t clearedVideoFrames_ = 0;
+    // Adaptive CPU placement (P/E classes or per-CCD L3 domains). Escalation order is
+    // spill -> more decoder threads -> priority, so the cheap action comes first.
+    PlacementPolicy placement_;
+    std::uint32_t workerThreadId_ = 0;
+    std::uint32_t placementGoodWindows_ = 0;
     // Reopen back-off: a rung costs a seek, so require sustained starvation first and
-    // then a settling period before judging the new rung.
-    std::uint64_t ladderSettlingFrames_ = 0;
+    // then a settling period before judging the new rung. The deadline is wall-clock:
+    // the pump loop calls the evaluator thousands of times per second, so an
+    // iteration-count guard (the earlier design) expired in milliseconds.
+    std::int64_t ladderSettlingUntil100ns_ = 0;
     std::int32_t audioStream_;
     std::int32_t coverArtStream_;
     AVFrame* coverArtFrame_;
@@ -459,6 +511,35 @@ private:
     // constant 上（实测过这个形状：12b 的 40fps 段要到第 ~40 帧才进散布）。
     const char* publishedFrameRateMode_ = nullptr;
     static constexpr std::int32_t MinimumCadenceModeSamples = 12;
+    // --- Adaptive presentation pacing (see the late branch of PresentVideoFrame) ---
+    // Worker-thread-only. When the pipeline falls behind the media clock the classic
+    // answer is to discard late pictures; the pacer instead holds every picture at a
+    // slower cadence (the renderer's pace floor), which a variable-refresh panel
+    // follows as a lower refresh rate. The trade is bounded by the drift cap: past it
+    // the discard path resumes so A/V lag cannot grow without limit. Only the
+    // "pipeline fell behind" bucket engages -- a frame the panel itself cannot scan
+    // out is not something a slower cadence can fix.
+    bool paceEngaged_ = false;
+    double paceHz_ = 0.0;                      // floor currently in force (0 = off)
+    std::uint32_t paceLateStreak_ = 0;         // consecutive pipeline-late pictures
+    std::uint32_t paceOverDeliverStreak_ = 0;  // consecutive late pops that found a newer picture queued
+    std::uint64_t pacePacedFrames_ = 0;        // pictures shown by the pacer since engage (trace)
+    std::int64_t paceStreakClock100ns_ = 0;    // streak anchors for the rate estimate
+    std::int64_t paceStreakLag100ns_ = 0;
+    // Rolling engage window. The streak above needs 12 consecutive pipeline-late
+    // pictures, but a pool gate that pins the queue at a couple of frames makes
+    // late pictures alternate with on-time ones (measured on the 8K stream: the
+    // longest late run was 4 of 1194 arrivals), so that deficit never builds a
+    // streak at all. The window counts every arrival -- late or on-time -- and
+    // settles every PaceWindowFrames of them, which is the only evidence an
+    // oscillating deficit ever produces. The sustainable rate it paces at is the
+    // arrival rate itself (while the pacer is off, every decoded picture becomes
+    // exactly one arrival), which is phase-independent where the streak's
+    // lag-growth estimate is not.
+    std::uint32_t paceWindowFrames_ = 0;        // arrivals counted in the window
+    std::uint32_t paceWindowLate_ = 0;          // late arrivals inside it
+    std::int64_t paceWindowStart100ns_ = 0;     // clock at the window's first arrival
+    std::int64_t paceWindowLateLagSum100ns_ = 0; // sum of late lags; the mean is the drift-cap test
     std::size_t readTraceCount_ = 0;   // 仅 FFF_SEEK_TRACE=1 时用，给定位失败排查读位置
     // Frames discarded because the source delivers faster than the panel can scan out, kept
     // apart from snapshot_.droppedVideoFrames (which means "the pipeline fell behind the

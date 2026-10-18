@@ -243,6 +243,13 @@ public:
     // 片源每帧报一个数，上限会跟着逐帧抖，所以这里要的是一个媒体一个值。
     // 0 = 该媒体没有可用的帧率上界，只剩面板那一半。
     void SetMediaFrameRateCeilingHz(double ceilingHz) noexcept;
+    // Presentation pace floor (adaptive pacing, driven from the session's late
+    // branch). Zero is "off"; any positive value caps the bound from below -- the
+    // presenter then holds every flip one floor-period out, which is what lets a
+    // falling-behind pipeline show every picture at a slower cadence instead of
+    // discarding pictures. Written on the session worker thread, read on the
+    // presenter thread.
+    void SetPresentPaceFloorHz(double paceHz) noexcept;
     // 只把这个上限往上抬、永不往下压。会话在看到更短的逐帧间距时调它：容器那两个字段在
     // MPEG-TS 上会**偏低**（没有索引，按流头采样），初值钉死就会掐掉后来的快段。
     void RaiseMediaFrameRateCeilingHz(double ceilingHz) noexcept;
@@ -397,6 +404,13 @@ public:
     std::uint64_t DeviceLockWait100ns() const noexcept;
     std::uint64_t SoftwareConvert100ns() const noexcept;
     std::uint64_t Upload100ns() const noexcept;
+    std::uint64_t UploadMapWait100ns() const noexcept;
+    std::uint64_t UploadCopy100ns() const noexcept;
+    std::uint64_t DownscaleResample100ns() const noexcept;
+    std::uint64_t ScalePassCount() const noexcept;
+    std::uint64_t UploadCount() const noexcept;
+    std::uint64_t UploadCopyBytes() const noexcept;
+    std::uint32_t UploadPath() const noexcept;
     std::uint32_t OutputBitDepth() const noexcept;
     FFF3FPVideoScalingMode ActualVideoScalingMode() const noexcept;
     // Presentation diagnostics for the ST 2094 paths; see FFF3FPHdrSignalDiagnostics.
@@ -716,6 +730,26 @@ private:
     ID3D11Texture2D* uploadTextures_[3]{};
     ID3D11ShaderResourceView* uploadViews_[3]{};
     unsigned uploadSlot_ = 0;
+    // Upload-strategy ladder on top of the ring mechanism above: 0 = Map into
+    // a DYNAMIC texture, 1 = the alternating STAGING ring. Written and read on
+    // the session worker thread only (Render / EnsurePipeline run there); a rung
+    // change is picked up by EnsurePipeline's recreation guard on the next frame.
+    std::uint32_t uploadRung_ = 0;
+    std::uint32_t uploadRungCreated_ = 0;   // the rung the current textures were built for
+    std::uint32_t uploadWindowFrames_ = 0;
+    std::uint64_t uploadWindowNs_ = 0;
+    std::uint64_t uploadWindowPeriodNs_ = 0;
+    std::uint32_t uploadCheapWindows_ = 0;
+    // Set when the device refused the staging ring's allocation: the ladder stops
+    // asking until the device is recreated (a refusal is per-device, and retrying
+    // every window would hitch playback).
+    bool uploadStagingRefused_ = false;
+    // Dedicated VRAM of the adapter the device was created on, captured at device
+    // creation. Gates the staging rung: a small discrete part or an integrated GPU
+    // never commits the 3x frame bytes it may not have. Atomic because device
+    // creation can run off the session worker thread.
+    std::atomic<std::uint64_t> dedicatedVideoMemoryBytes_{ 0 };
+    void ObserveUploadCost(std::uint64_t uploadNs) noexcept;
     PlaneScaleChain planeScaleChains_[3];
     std::uint64_t scaledVideoGeneration_;
     std::uint32_t scaledOutputWidth_;
@@ -790,6 +824,9 @@ private:
     // 一条媒体一个帧率上界，会话在 open 时写；0 = 这条媒体没有可用的上界。
     // Atomic because the session worker writes it while the presenter schedules against it.
     std::atomic<double> mediaCeilingHz_{ 0.0 };
+    // Adaptive presentation pace floor (0 = off). See SetPresentPaceFloorHz: the
+    // presenter schedules against FrameRateBoundHz, which takes the min with this.
+    std::atomic<double> paceFloorHz_{ 0.0 };
     // Set by every chain creation, consumed by the presenter thread: the frame-statistics
     // sequence restarts with the chain, so a delta taken across the swap is not a period.
     std::atomic<bool> gridResetRequested_{ true };
@@ -1032,6 +1069,19 @@ private:
     // this the upload path had no metric at all, so upload changes could not be
     // measured or regressed.
     std::atomic<std::uint64_t> upload100ns_;
+    // Split of upload100ns_ (see the snapshot fields of the same name): without
+    // these an upload regression could not be attributed to waiting on the GPU,
+    // to moving bytes, or to a CPU resample done before the upload.
+    std::atomic<std::uint64_t> uploadMapWait100ns_;
+    std::atomic<std::uint64_t> uploadCopy100ns_;
+    std::atomic<std::uint64_t> downscaleResample100ns_;
+    std::atomic<std::uint64_t> scalePassCount_;
+    // The operands that turn uploadCopy100ns_ into a bandwidth: bytes moved, and how
+    // many pictures were uploaded (the presented-frame denominator hides uploads that
+    // never became a present). uploadPath_ says which branch produced them.
+    std::atomic<std::uint64_t> uploadCount_;
+    std::atomic<std::uint64_t> uploadCopyBytes_;
+    std::atomic<std::uint32_t> uploadPath_;
     std::atomic<std::uint32_t> playbackWorkPending_;
     std::atomic<bool> interactiveMove_;
     std::atomic<bool> lyricsLayoutEnabled_;
