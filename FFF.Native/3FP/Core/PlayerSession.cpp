@@ -45,7 +45,83 @@ constexpr std::size_t MaxQueuedVideoFrames = 8;
 constexpr std::size_t MinimumQueuedVideoFrames = 3;
 constexpr std::size_t MinimumMemoryBoundVideoFrames = 2;
 constexpr std::size_t DecodedVideoQueueBudgetBytes = 128 * 1024 * 1024;
+// The software decoding look-ahead pool, staged like the thread ladder. A rung is
+// only a wider admission bound -- it never pre-allocates -- so the floor is pure
+// declared headroom: 128 MB already holds the four-frame look-ahead for anything up
+// to 4K 10-bit 4:2:0, and small-frame content saves the declaration outright. Rung 3
+// reproduces the fixed pair the upstream patch shipped (512 MB / 8 frames); the steps
+// above it keep the same cadence for streams that keep starving (768 / 1024 MB).
+constexpr std::size_t SoftwarePoolBudgets[] = { 128ULL * 1024 * 1024,
+                                                256ULL * 1024 * 1024,
+                                                384ULL * 1024 * 1024,
+                                                512ULL * 1024 * 1024,
+                                                768ULL * 1024 * 1024,
+                                                1024ULL * 1024 * 1024 };
+constexpr std::size_t SoftwarePoolFrameCaps[] = { 4, 4, 6, 8, 12, 16 };
+// The pool's opening rung must fit at least this many frames: the saturation gate
+// closes one frame below the queue limit, so a two-frame queue gates the demux feed
+// almost continuously while the stream is still filling its pipeline (see the
+// opening-rung block in OpenDecoder).
+constexpr std::size_t MinimumPoolLookAheadFrames = 4;
+constexpr std::size_t SoftwarePoolRungCount =
+    sizeof(SoftwarePoolBudgets) / sizeof(SoftwarePoolBudgets[0]);
+// Queue depth a pool rung actually admits for a frame of this size: the budget
+// divided by the frame, clamped to the rung's frame cap. The in-flight subtraction
+// VideoQueueLimit applies on top is constant across rungs for one media, so this
+// relative depth is what the climb gate compares.
+constexpr std::size_t SoftwarePoolRungDepth(std::size_t rung,
+                                            std::size_t bytesPerFrame) noexcept {
+    const auto cap = SoftwarePoolFrameCaps[rung];
+    if (bytesPerFrame == 0) return cap;
+    const auto byBudget = SoftwarePoolBudgets[rung] / bytesPerFrame;
+    return byBudget < 2 ? std::size_t{2} : (std::min)(byBudget, cap);
+}
+// The pool climbs only when the pool itself starved the pipeline. A window that
+// misses the source rate is equally produced by a decode-limited or a
+// presentation-limited stream, and a deeper cushion helps neither of those (the
+// thread ladder and the placement path already cover them). The verdict below
+// separates the three from the evidence the window already collects, and only a
+// pool-starved stream earns the next rung. Shares are of pump ticks in the window.
+constexpr double PoolBoundRatioFloor = 0.80;      // ticks that found the queue at its admission bound
+constexpr double PoolStarvedRatioCeiling = 0.20;  // ticks with the queue below its minimum
+constexpr double PoolUploadSaturateShare = 0.80;  // upload cost / frame period that marks presentation saturation
+constexpr double PoolUploadHeadroomShare = 0.50;  // below this the upload path still has room to spare
+// Frame-delay tiers for libdav1d, keyed on the same per-frame byte estimate that
+// sizes the decode pool (no pixel-format enumeration): dav1d's automatic
+// ceil(sqrt(workers)) frame contexts under-serve any large frame, so at or above
+// HeavyDecoderFrameBytes the delay follows the worker count; at or above
+// CappedDecoderFrameBytes it is bounded so the resident pipeline stays finite on
+// the largest frames (an 8K context is ~100 MB). See the dav1d block in OpenDecoder.
+constexpr std::size_t HeavyDecoderFrameBytes = 32 * 1024 * 1024;
+constexpr std::size_t CappedDecoderFrameBytes = 64 * 1024 * 1024;
+constexpr int MaximumDecoderFrameDelay = 16;
+// Adaptive presentation pacing. Discarding late pictures keeps A/V in sync but
+// judders; presenting every picture at a slower cadence is smooth, and on a
+// variable-refresh panel the panel simply follows the slower cadence (G-SYNC /
+// FreeSync) instead of dropping the surplus. The trade is bounded: a picture may
+// fall behind the audio clock by at most the drift cap, past which the classic
+// discard behaviour resumes and burns the lag back down. Only the "pipeline fell
+// behind" bucket engages -- a frame the panel itself cannot scan out is not
+// something a slower cadence can fix.
+constexpr std::uint32_t PaceEngageLateFrames = 12;      // consecutive pipeline-late pictures
+constexpr std::uint32_t PaceOverDeliverFrames = 16;     // consecutive late pops that found a newer picture queued
+constexpr std::int64_t PaceDriftCap100ns = 2'500'000;   // 250 ms of A/V lag bounds the smooth trade
+constexpr double PaceMinimumHz = 10.0;                  // never hold a picture longer than this
+constexpr double PaceDeficitFraction = 0.95;            // only a measured deficit is worth pacing
+constexpr std::int64_t PaceEstimateMinSpan100ns = 1'000'000; // 100 ms of streak for a rate estimate
+constexpr std::uint32_t PaceWindowFrames = 32;              // rolling window for oscillating deficits
+constexpr double PaceWindowLateShare = 0.40;                // late share inside it that counts as a deficit
 constexpr std::uint32_t MaximumSoftwareDecoderThreads = 8;
+// Thread budget for the software decoder. Its workers share the machine with the
+// threads the player itself runs -- the worker (demux, decode drive, present pacing),
+// the audio renderer and the video present thread -- plus one core of scheduler
+// headroom; the decoder may never claim so much that those push the total to the CPU
+// count. See DecoderThreadBudget.
+constexpr std::uint32_t ReservedPlaybackThreads = 3;     // worker + audio + present
+constexpr std::uint32_t SchedulerHeadroomThreads = 1;    // one core left for the OS
+// A hardware decoder is driven from the calling thread and never runs a worker pool,
+// so its decode part is exactly one thread.
+constexpr std::uint32_t HardwareDecoderThreads = 1;
 constexpr std::int64_t TargetVideoLookAhead100ns = 1'500'000;
 // Buffered100ns includes both application PCM and samples already submitted to
 // WASAPI.  Keep the complete audible queue short so seek, stream/volume changes
@@ -112,17 +188,21 @@ bool AnimQueueReserveEnabled() noexcept {
 // older accounting, which counted the whole 128 MB to the queue and therefore
 // under-counted the real peak by exactly the depth of the pipeline.
 std::size_t VideoFrameQueueLimit(const std::deque<AVFrame*>& queue,
-    const std::size_t pipelineFrames, const bool softwareVideo) noexcept {
+    const std::size_t pipelineFrames, const bool softwareVideo,
+    const std::size_t softwarePoolBudgetBytes,
+    const std::size_t softwarePoolFrameCap) noexcept {
     if (queue.empty()) return MaxQueuedVideoFrames;
     const auto bytesPerFrame = EstimateDecodedFrameBytes(queue.back());
     if (bytesPerFrame == 0) return MaxQueuedVideoFrames;
-    // Software decoding needs look-ahead while the session feeds audio and uploads.
-    // Keep the existing hardware/animated-image budget; cap the software queue at 8.
-    const auto budget = softwareVideo && queue.back()->hw_frames_ctx == nullptr
-        ? 512ULL * 1024 * 1024 : DecodedVideoQueueBudgetBytes;
+    // Software decoding needs look-ahead while the session feeds audio and uploads; its
+    // budget and frame cap are the pool ladder's current rung (SoftwarePoolBudgets).
+    // The hardware and animated-image paths keep the fixed 128 MB / 8 frames split.
+    const auto software = softwareVideo && queue.back()->hw_frames_ctx == nullptr;
+    const auto budget = software ? softwarePoolBudgetBytes : DecodedVideoQueueBudgetBytes;
+    const auto cap = software ? softwarePoolFrameCap : MaxQueuedVideoFrames;
     const auto memoryBound = static_cast<std::size_t>(budget / bytesPerFrame);
     const auto queueBound = memoryBound > pipelineFrames ? memoryBound - pipelineFrames : 0;
-    return std::clamp(queueBound, MinimumMemoryBoundVideoFrames, MaxQueuedVideoFrames);
+    return std::clamp(queueBound, MinimumMemoryBoundVideoFrames, cap);
 }
 
 void ApplyHdrState(FFF3FPSnapshot& snapshot, const HdrFrameState& hdr) noexcept {
@@ -798,7 +878,8 @@ std::size_t PlayerSession::VideoQueuePipelineReservation() const noexcept {
 std::size_t PlayerSession::VideoQueueLimit() const noexcept {
     const auto pipelineFrames = VideoQueuePipelineReservation();
     const auto originalLimit = VideoFrameQueueLimit(videoFrameQueue_, pipelineFrames,
-        !staticImage_ && !animatedImage_);
+        !staticImage_ && !animatedImage_, SoftwarePoolBudgets[softwarePoolRung_],
+        SoftwarePoolFrameCaps[softwarePoolRung_]);
     const auto limit = std::max(MinimumMemoryBoundVideoFrames,
         originalLimit - std::min(originalLimit - 1, static_cast<std::size_t>(softwareVideoOutputLimit_ - 1)));
     // The two numbers this slice stands on, said by the kernel itself: whether frame
@@ -2256,6 +2337,13 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     output.deviceLockWait100ns = videoRenderer_.DeviceLockWait100ns();
     output.softwareConvert100ns = videoRenderer_.SoftwareConvert100ns();
     output.videoUpload100ns = videoRenderer_.Upload100ns();
+    output.uploadMapWait100ns = videoRenderer_.UploadMapWait100ns();
+    output.uploadCopy100ns = videoRenderer_.UploadCopy100ns();
+    output.downscaleResample100ns = videoRenderer_.DownscaleResample100ns();
+    output.scalePassCount = videoRenderer_.ScalePassCount();
+    output.uploadCount = videoRenderer_.UploadCount();
+    output.uploadCopyBytes = videoRenderer_.UploadCopyBytes();
+    output.uploadPath = videoRenderer_.UploadPath();
     output.videoOutputBitDepth = videoRenderer_.OutputBitDepth();
     output.videoScalingMode = videoRenderer_.ActualVideoScalingMode();
     if (output.state == FFF3FPState::Playing) {
@@ -2329,6 +2417,7 @@ std::string PlayerSession::MediaInfo() const { std::lock_guard lock(mutex_); ret
 std::string PlayerSession::LastError() const { std::lock_guard lock(errorMutex_); return lastError_; }
 
 void PlayerSession::Worker() noexcept {
+    workerThreadId_ = GetCurrentThreadId();
     for (;;) {
         Command command;
         {
@@ -2493,23 +2582,32 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
     auto result = avcodec_parameters_to_context(context, stream->codecpar);
     context->pkt_timebase = stream->time_base;
     if (result >= 0 && video && !hardwareRequested) {
-        // Worker count comes from the resolution tier (or the fixed policy when the
-        // host has not opted in); see SelectSoftwareDecoderThreads.
+        // Widen the preferred CPU set to the decode budget before anything reads it as
+        // the ladder's boundary: on parts where the fastest class alone seats fewer
+        // threads than the budget (8P+16E and friends), a boundary pinned to that
+        // class would cap the ladder early or over-subscribe the class on the way back
+        // down. Idempotent, and a no-op on uniform or undiscovered topologies.
+        placement_.EnsurePreferredCapacity(DecoderThreadBudget());
+        // Worker count comes from the fixed resolution tier, or from the load-driven
+        // ladder when the host opted in; both respect the shared thread budget. See
+        // SelectSoftwareDecoderThreads.
         context->thread_count = static_cast<int>(SelectSoftwareDecoderThreads(
             static_cast<std::uint32_t>(stream->codecpar->width),
             static_cast<std::uint32_t>(stream->codecpar->height)));
         context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+        // The two heavy AV1 classes the dav1d policy below enumerates. Hoisted so
+        // the byte-keyed frame-delay block can yield to it instead of setting the
+        // same option twice with a different bound.
+        const auto heavy444 = std::strcmp(codec->name, "libdav1d") == 0 &&
+            stream->codecpar->format == AV_PIX_FMT_YUV444P12LE &&
+            stream->codecpar->width >= 3840 && stream->codecpar->height >= 2160;
+        const auto large420 = std::strcmp(codec->name, "libdav1d") == 0 &&
+            stream->codecpar->format == AV_PIX_FMT_YUV420P10LE &&
+            stream->codecpar->width >= 7680 && stream->codecpar->height >= 4320;
         if (std::strcmp(codec->name, "libdav1d") == 0) {
             // dav1d's automatic delay opens only ceil(sqrt(workers)) frame
             // contexts. Single-tile AV1 needs frame parallelism as well as workers.
             const auto logical = std::max(1u, std::thread::hardware_concurrency());
-            // Heavy 12-bit 4:4:4 AV1 needs more reference frames in flight even
-            // when there are fewer CPU threads. Cap this policy at 32 contexts;
-            // 64 contexts doubled memory for little gain in the diagnosis.
-            const auto heavy444 = stream->codecpar->format == AV_PIX_FMT_YUV444P12LE &&
-                stream->codecpar->width >= 3840 && stream->codecpar->height >= 2160;
-            const auto large420 = stream->codecpar->format == AV_PIX_FMT_YUV420P10LE &&
-                stream->codecpar->width >= 7680 && stream->codecpar->height >= 4320;
             // Eight workers leave bandwidth and CPU time for upload, audio and subtitles.
             // 7940HX fullscreen: ~40 fps with 8/8 versus ~34 fps with 16/16.
             auto workers = heavy444 ? (std::min)(logical * 2, 32u) :
@@ -2525,6 +2623,71 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
                 result = av_opt_set_int(context->priv_data, "max_frame_delay", workers, 0);
             }
         }
+        // One per-frame byte estimate drives both the pool's opening rung and the
+        // decoder's frame parallelism: keying on the byte cost covers every
+        // large-frame class (4:4:4 and 4:2:0 at 10/12-bit, 5K/6K/8K) without
+        // enumerating pixel formats, and it is the same figure the queue budgets
+        // already divide by.
+        std::size_t bytesPerFrame = 0;
+        if (stream->codecpar->width > 0 && stream->codecpar->height > 0) {
+            const auto estimatedBytes = av_image_get_buffer_size(
+                static_cast<AVPixelFormat>(stream->codecpar->format),
+                stream->codecpar->width, stream->codecpar->height, 1);
+            if (estimatedBytes > 0)
+                bytesPerFrame = static_cast<std::size_t>(estimatedBytes);
+        }
+        // Pick the pool's opening rung by frame size. The load ladder owns everything
+        // above it, but the opening must still offer the look-ahead depth the fixed
+        // pool used to provide: the saturation gate closes one frame below the limit,
+        // so opening with only two or three queued frames of ~100 MB (8K 4:2:0) keeps
+        // the demux feed gated while the pipeline is still filling. Require room for
+        // MinimumPoolLookAheadFrames frames plus one frame of accounting slack;
+        // smaller-frame classes still open at the floor rung.
+        if (bytesPerFrame > 0) {
+            const auto floorBytes = (MinimumPoolLookAheadFrames + 1) * bytesPerFrame;
+            std::size_t opening = 0;
+            while (opening + 1 < SoftwarePoolRungCount &&
+                   SoftwarePoolBudgets[opening] < floorBytes)
+                ++opening;
+            if (opening > softwarePoolRung_) {
+                softwarePoolRung_ = static_cast<std::uint8_t>(opening);
+                if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+                    std::fprintf(stderr,
+                        "[ladder] frame pool opens at %llu MiB (%llu-frame floor) for %llu MB frames\n",
+                        static_cast<unsigned long long>(
+                            SoftwarePoolBudgets[opening] / (1024 * 1024)),
+                        static_cast<unsigned long long>(MinimumPoolLookAheadFrames),
+                        static_cast<unsigned long long>(bytesPerFrame / (1024 * 1024)));
+            }
+        }
+        // libdav1d's automatic frame delay opens only ceil(sqrt(workers)) frame
+        // contexts, which under-serves any large frame: the worker count stays with
+        // the shared budget and the load ladder, and the frame delay follows it. Both
+        // tiers key on the byte estimate above (no pixel-format enumeration): at or
+        // above HeavyDecoderFrameBytes the delay equals the worker count; at or above
+        // CappedDecoderFrameBytes it is bounded at MaximumDecoderFrameDelay so the
+        // resident pipeline stays finite on the largest frames (an 8K context is
+        // ~100 MB). Smaller frames keep dav1d's automatic value; the two classes the
+        // dav1d policy above already tuned are left to it.
+        if (std::strcmp(codec->name, "libdav1d") == 0 && bytesPerFrame > 0 &&
+            bytesPerFrame >= HeavyDecoderFrameBytes && !(heavy444 || large420)) {
+            const auto capped = bytesPerFrame >= CappedDecoderFrameBytes;
+            const auto frameDelay = capped
+                ? (std::min)(context->thread_count, MaximumDecoderFrameDelay)
+                : context->thread_count;
+            const auto setResult =
+                av_opt_set_int(context->priv_data, "max_frame_delay", frameDelay, 0);
+            if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+                std::fprintf(stderr, "[ladder] dav1d frame delay=%d for %llu MB frames%s set=%d\n",
+                    frameDelay,
+                    static_cast<unsigned long long>(bytesPerFrame / (1024 * 1024)),
+                    capped ? " (capped)" : "", setResult);
+        }
+        if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+            std::fprintf(stderr,
+                "[ladder] soft decode workers=%d budget=%u adaptive=%d boundary=%u\n",
+                context->thread_count, DecoderThreadBudget(), adaptiveThreadsEnabled_ ? 1 : 0,
+                placement_.PreferredDomainThreads());
     }
     if (disc_ && disc_->Menu() && video &&
         stream->codecpar->codec_id == AV_CODEC_ID_MPEG2VIDEO) {
@@ -2533,6 +2696,13 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
         context->thread_type = FF_THREAD_SLICE;
     }
     if (result >= 0 && hardwareRequested) {
+        // The decode part of hardware decoding is exactly one thread: FFmpeg drives the
+        // hwaccel from the calling thread and runs no worker pool. FFmpeg sets this
+        // itself; setting it explicitly keeps the thread accounting honest (see the
+        // budget in DecoderThreadBudget).
+        context->thread_count = static_cast<int>(HardwareDecoderThreads);
+        if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+            std::fprintf(stderr, "[ladder] hardware decode workers=%u\n", HardwareDecoderThreads);
         // Reserve only what the presentation queue plus in-flight copies actually need.
         //
         // This was MaxQueuedVideoFrames + 2 = 10, a fixed count that ignores the cost of
@@ -2804,6 +2974,10 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false;
     seekTarget100ns_ = -1; seekTargetFrame_ = -1; keyframeSeekPending_ = false;
     lastVideoFrameDuration100ns_ = 0; nextUntimedVideoPosition100ns_ = 0; draining_ = false; ResetCadenceSpread();
+    // A media change restarts every adaptive response: the pacer's floor lives in the
+    // renderer, so it has to be released here or the next file inherits this file's
+    // deficit cadence.
+    if (paceEngaged_) ReleasePresentationPace("media-change");
     // Fresh media identity: panel-only until the ceiling is (re)published below.
     // DoOpen's leading DoClose already cleared it, this makes the line self-evident.
     videoRenderer_.SetMediaFrameRateCeilingHz(0.0);
@@ -2927,14 +3101,24 @@ void PlayerSession::ApplyRotationFromDecodedFrame() noexcept {
     (void)videoRenderer_.SetViewRotation(turns);
 }
 
+std::uint32_t PlayerSession::DecoderThreadBudget() const noexcept {
+    // Total player threads stay below the CPU count: decoder workers + worker + audio
+    // renderer + present thread + one core of scheduler headroom.
+    const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+    constexpr std::uint32_t Reserved = ReservedPlaybackThreads + SchedulerHeadroomThreads;
+    return hardwareThreads > Reserved ? hardwareThreads - Reserved : 1u;
+}
+
 std::uint32_t PlayerSession::SelectSoftwareDecoderThreads(const std::uint32_t width,
     const std::uint32_t height) const noexcept {
-    const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+    const auto budget = DecoderThreadBudget();
     if (!adaptiveThreadsEnabled_) {
-        // Previous fixed policy, unchanged, so hosts that do not opt in are unaffected.
-        const auto largeAv1Frame = width >= 3840 && height >= 2160;
-        const auto limit = largeAv1Frame ? 16u : MaximumSoftwareDecoderThreads;
-        return (std::min)(hardwareThreads, limit);
+        // Fixed policy shape, now also capped by the thread budget: on a small machine
+        // the decoder plus the player's own threads used to reach the CPU count (eight
+        // workers on an eight-thread box), which the budget exists to prevent.
+        const auto largeFrame = width >= 3840 && height >= 2160;
+        const auto limit = largeFrame ? 16u : MaximumSoftwareDecoderThreads;
+        return (std::min)(limit, budget);
     }
 
     // Load-driven, not resolution-driven. Resolution says nothing about whether this
@@ -2942,32 +3126,70 @@ std::uint32_t PlayerSession::SelectSoftwareDecoderThreads(const std::uint32_t wi
     // comfortable on a 20-thread desktop, and the reverse holds for heavy 4K AV1. The
     // rung is therefore decided by measured load (EvaluateDecoderLoad).
     //
-    // Start at 16 rather than the old fixed 8. Measured on 4K AV1 at low system load,
-    // a fixed 16 gave 693 frames / 8 drops against 682 / 20 at 8, 623 / 76 at 4 and
-    // 640 / 59 at 32 -- so 16 is both the peak and a safer place to begin than the
-    // minimum. Starting low and climbing does not recover the difference: the climb
-    // needs a reopen plus a seek, and measured that cost more than the rung gained
-    // (dynamic 8 -> 16 finished at 632 frames against 693 for simply starting at 16).
-    // The ladder therefore remains a safety net for a machine too slow for its source,
-    // not the primary mechanism.
-    const auto ceiling = (std::min)({ hardwareThreads, threadLadderMax_, 64u });
+    // Start at the floor -- 4 workers by default -- and only ever climb. An earlier
+    // revision started at 16 because a measured 4K AV1 sample peaked there; that
+    // permanently overshot bandwidth-bound sources (upstream measured 6 workers best
+    // on 8K HEVC, 2.14x slower at 32) and on a 20-thread machine it consumed the whole
+    // budget, leaving the ladder nothing to climb. The climb keeps that measurement's
+    // caution: one rung per starving window, and no step jumps past the preferred
+    // domain boundary in one go (see EvaluateDecoderLoad). Below roughly eight threads
+    // the budget wins over the floor: four workers plus three player threads would
+    // already reach the CPU count.
+    const auto ceiling = (std::min)({ threadLadderMax_, 64u, budget });
     const auto floor = (std::min)(threadLadderMin_, ceiling);
-    const auto baseline = (std::min)({ hardwareThreads, 16u, ceiling });
-    const auto wanted = decoderThreads_ == 0 ? baseline : decoderThreads_;
+    const auto wanted = decoderThreads_ == 0 ? floor : decoderThreads_;
     return std::clamp(wanted, std::max(floor, 1u), std::max(ceiling, 1u));
 }
 
 void PlayerSession::EvaluateDecoderLoad() noexcept {
-    if (!adaptiveThreadsEnabled_ || format_ == nullptr || videoStream_ < 0) return;
+    // CPU placement runs even when the host opted out of the thread ladder: they share
+    // the trigger below but they are separate mechanisms.
+    if (format_ == nullptr || videoStream_ < 0) return;
     if (snapshot_.decodeMode != FFF3FPDecodeMode::Cpu) return;
     if (videoDecoder_ == nullptr) return;
 
-    // A rung costs a reopen and a seek, so let the new rung settle before judging it.
-    if (ladderSettlingFrames_ > 0) { --ladderSettlingFrames_; return; }
+    // The one situation placement cannot improve: the decoder is at its thread budget,
+    // so the software stack (workers + worker + audio + present + the scheduler
+    // headroom) has claimed every logical processor the budget hands out. No affinity
+    // move can add a core from here, so the process holds HIGH priority -- the rule is
+    // "software threads == CPU threads, then priority is the lever". Prioritize, not
+    // Boost: priority alone is the lever the rule asks for, and it leaves the CPU-set
+    // tiers where the load path put them instead of freeing the decoder workers onto
+    // the slower cores just to raise the class.
+    const auto threadClaimExhausted =
+        static_cast<std::uint32_t>(std::max(0, videoDecoder_->thread_count)) >=
+        DecoderThreadBudget();
+    if (threadClaimExhausted) placement_.Prioritize();
+
+    const auto now = CurrentSteadyTicks();
+    // A rung costs a reopen and a seek, so do not judge the new rung until its own
+    // seek fallout has aged out. The deadline is wall-clock: the pump loop calls this
+    // evaluator thousands of times per second, so a guard measured in loop iterations
+    // (the earlier design) expired in milliseconds instead of covering the re-prime.
+    if (ladderSettlingUntil100ns_ != 0) {
+        if (now < ladderSettlingUntil100ns_) return;
+        ladderSettlingUntil100ns_ = 0;
+    }
 
     constexpr std::int64_t Window100ns = 20'000'000;   // 2 seconds
-    const auto now = CurrentSteadyTicks();
-    if (ladderWindowStart100ns_ == 0) { ladderWindowStart100ns_ = now; return; }
+    if (ladderWindowStart100ns_ == 0) {
+        // (Re)arm the window and capture the counter baselines here, at the moment the
+        // window actually starts. Zeroing them at a rung change instead made the first
+        // window after the reopen subtract from zero -- i.e. from everything since the
+        // session started -- which always read as a burst of surplus frames and hence
+        // as a healthy window.
+        ladderWindowStart100ns_ = now;
+        ladderWindowDecoded_ = snapshot_.decodedVideoFrames;
+        ladderWindowPresented_ = snapshot_.presentedVideoFrames;
+        pumpIterations_ = 0;
+        pumpSaturatedIterations_ = 0;
+        pumpQueueBoundIterations_ = 0;
+        pumpStarvedIterations_ = 0;
+        ladderWindowUpload100ns_ = snapshot_.videoUpload100ns;
+        ladderWindowConvert100ns_ = snapshot_.softwareConvert100ns;
+        ladderWindowDropped_ = snapshot_.droppedVideoFrames;
+        return;
+    }
     const auto elapsed = now - ladderWindowStart100ns_;
     if (elapsed < Window100ns) return;
 
@@ -2978,6 +3200,22 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
     ladderWindowDecoded_ = decoded;
     ladderWindowPresented_ = presented;
     ladderWindowStart100ns_ = now;
+    const auto windowPumpIters = pumpIterations_;
+    const auto windowSaturatedIters = pumpSaturatedIterations_;
+    const auto windowBoundIters = pumpQueueBoundIterations_;
+    const auto windowStarvedIters = pumpStarvedIterations_;
+    pumpIterations_ = 0;
+    pumpSaturatedIterations_ = 0;
+    pumpQueueBoundIterations_ = 0;
+    pumpStarvedIterations_ = 0;
+    const auto windowUpload100ns = snapshot_.videoUpload100ns - ladderWindowUpload100ns_;
+    const auto windowConvert100ns = snapshot_.softwareConvert100ns - ladderWindowConvert100ns_;
+    const auto droppedDelta = snapshot_.droppedVideoFrames - ladderWindowDropped_;
+    ladderWindowUpload100ns_ = snapshot_.videoUpload100ns;
+    ladderWindowConvert100ns_ = snapshot_.softwareConvert100ns;
+    ladderWindowDropped_ = snapshot_.droppedVideoFrames;
+    // Re-pick the preferred cache domain once per window (no-op on hybrid machines).
+    placement_.Tick();
     if (presentedDelta == 0 && decodedDelta == 0) return;
 
     // Is the source keeping up at all? Compare against the stream's own frame rate.
@@ -2991,30 +3229,157 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
 
     // Two conditions must hold before spending a reopen:
     //  1. Playback is actually missing the source rate.
-    //  2. Decoding has no spare capacity. This is the part that separates a decode
+    //  2. Decoding has no spare capacity, OR presentation has stalled completely while
+    //     decode still produces. The no-spare test is the part that separates a decode
     //     bottleneck from an upload one: at 8K the decoder produces frames far faster
     //     than they can be uploaded, and adding workers there changes nothing (measured
-    //     across 4..32 rungs: 3.3-4.7 fps, all within noise). Without this test the
-    //     ladder would climb on every dropped frame and waste reopens on a bottleneck
-    //     that more threads cannot fix.
-    // Two conditions must hold before spending a reopen:
-    //  1. Playback is missing the source rate.
-    //  2. Decoding has no spare capacity, OR presentation has stalled completely while
-    //     decode still produces. The second clause matters because a badly starved
-    //     decoder can look like an upload bottleneck: decode keeps emitting frames
-    //     (measured ~48 fps at 4 workers on 8K) while nothing reaches the screen, which
-    //     satisfies "has spare capacity" even though more workers is precisely the fix.
-    //     Genuine upload saturation looks different -- frames are decoded and presented
-    //     at a steady low rate, so presentedDelta stays non-zero.
+    //     across 4..32 rungs: 3.3-4.7 fps, all within noise); without it, the ladder
+    //     would climb on every dropped frame and waste reopens on a bottleneck that
+    //     more threads cannot fix. The stall clause matters because a badly starved
+    //     decoder can itself look like an upload bottleneck: decode keeps emitting
+    //     frames (measured ~48 fps at 4 workers on 8K) while nothing reaches the
+    //     screen, which satisfies "has spare capacity" even though more workers is
+    //     precisely the fix. Genuine upload saturation looks different -- frames are
+    //     decoded and presented at a steady low rate, so presentedDelta stays non-zero.
     const auto missingSourceRate = sourceFps > 0.0 && presentedFps < sourceFps * 0.9;
     const auto decoderHasNoSpare = decodedDelta <= presentedDelta * 3 / 2;
     const auto presentationStalled = presentedDelta == 0 && decodedDelta > 0;
-    if (!missingSourceRate || (!decoderHasNoSpare && !presentationStalled)) return;
+    if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+        std::fprintf(stderr,
+            "[ladder] window decoded=%llu presented=%llu presentedFps=%.2f sourceFps=%.2f "
+            "missingRate=%d noSpare=%d stalled=%d saturated=%llu/%llu\n",
+            static_cast<unsigned long long>(decodedDelta),
+            static_cast<unsigned long long>(presentedDelta), presentedFps, sourceFps,
+            missingSourceRate ? 1 : 0, decoderHasNoSpare ? 1 : 0, presentationStalled ? 1 : 0,
+            static_cast<unsigned long long>(windowSaturatedIters),
+            static_cast<unsigned long long>(windowPumpIters));
 
+    // Both bounds belong in one ceiling: the hardware count keeps the ladder honest
+    // about the machine, and the shared budget reserves the player's own threads plus
+    // one core of scheduler headroom so the decoder can never oversubscribe the CPU.
+    // Read from the live context, once: a dav1d-capable open may have rewritten the
+    // worker count after the budget picked it, so only the context is the truth.
     const auto current = static_cast<std::uint32_t>(videoDecoder_->thread_count);
     const auto ceiling = (std::min)({ std::max(1u, std::thread::hardware_concurrency()),
-        threadLadderMax_, 64u });
-    if (current >= ceiling) return;
+        threadLadderMax_, 64u, DecoderThreadBudget() });
+    // The look-ahead pool climbs only when the pool itself starved the pipeline. A
+    // window that misses the source rate is equally produced by a decode-limited or a
+    // presentation-limited stream, and a deeper cushion helps neither of those -- the
+    // thread ladder and the placement path already cover them. The verdict reads the
+    // evidence this window collected:
+    //   pool    -- the queue sat at its admission bound, the decoder was not starved,
+    //              the upload path had room to spare, and frames were actually
+    //              dropped: the cushion was too thin to absorb a burst.
+    //   decode  -- the decoder ran starved; the admission bound was never the active
+    //              constraint, so a deeper queue stays empty.
+    //   present -- the upload path ate the frame period; deeper frames cannot leave.
+    //   stalled -- nothing reached the screen; the thread ladder's stall clause owns it.
+    //   hold    -- anything else, including the gray band between the upload shares.
+    // The dropped-frames requirement doubles as the guard against a container that
+    // over-reports its frame rate (VFR with an index): a comfortable stream never
+    // drops, whatever the guessed rate says.
+    const double boundRatio = windowPumpIters != 0
+        ? static_cast<double>(windowBoundIters) / static_cast<double>(windowPumpIters) : 0.0;
+    const double starvedRatio = windowPumpIters != 0
+        ? static_cast<double>(windowStarvedIters) / static_cast<double>(windowPumpIters) : 0.0;
+    const auto framePeriod100ns = sourceFps > 0.0
+        ? static_cast<std::int64_t>(10'000'000.0 / sourceFps) : 0;
+    const std::int64_t uploadCost100ns = presentedDelta != 0
+        ? static_cast<std::int64_t>((windowUpload100ns + windowConvert100ns) / presentedDelta) : 0;
+    enum class PoolVerdict { Climb, Decode, Present, Stalled, Hold };
+    const auto poolVerdict = [&]() noexcept {
+        if (presentedDelta == 0) return PoolVerdict::Stalled;
+        if (missingSourceRate && starvedRatio > PoolStarvedRatioCeiling)
+            return PoolVerdict::Decode;
+        if (framePeriod100ns > 0 && boundRatio >= PoolBoundRatioFloor &&
+            uploadCost100ns >= static_cast<std::int64_t>(framePeriod100ns * PoolUploadSaturateShare))
+            return PoolVerdict::Present;
+        if (missingSourceRate && droppedDelta > 0 &&
+            boundRatio >= PoolBoundRatioFloor && starvedRatio <= PoolStarvedRatioCeiling &&
+            (framePeriod100ns == 0 ||
+                uploadCost100ns < static_cast<std::int64_t>(framePeriod100ns * PoolUploadHeadroomShare)))
+            return PoolVerdict::Climb;
+        return PoolVerdict::Hold;
+    }();
+    const char* poolVerdictName = "hold";
+    switch (poolVerdict) {
+        case PoolVerdict::Climb: poolVerdictName = "pool"; break;
+        case PoolVerdict::Decode: poolVerdictName = "decode"; break;
+        case PoolVerdict::Present: poolVerdictName = "present"; break;
+        case PoolVerdict::Stalled: poolVerdictName = "stalled"; break;
+        case PoolVerdict::Hold: break;
+    }
+    if (poolVerdict == PoolVerdict::Climb && softwarePoolRung_ + 1 < SoftwarePoolRungCount) {
+        const auto bytesPerFrame = videoFrameQueue_.empty()
+            ? std::size_t{0} : EstimateDecodedFrameBytes(videoFrameQueue_.back());
+        // Skip rungs that would not deepen the queue for this frame size: a budget
+        // whose frame cap already binds declares more memory without admitting one
+        // more frame, and the ladder only gets one move per window.
+        auto target = softwarePoolRung_;
+        do {
+            ++target;
+        } while (target + 1 < SoftwarePoolRungCount &&
+                 SoftwarePoolRungDepth(target, bytesPerFrame) <=
+                     SoftwarePoolRungDepth(softwarePoolRung_, bytesPerFrame));
+        const auto previousBudget = SoftwarePoolBudgets[softwarePoolRung_];
+        const auto previousFrames = SoftwarePoolFrameCaps[softwarePoolRung_];
+        softwarePoolRung_ = static_cast<std::uint8_t>(target);
+        if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+            std::fprintf(stderr,
+                "[ladder] frame pool %llu -> %llu MiB (%llu -> %llu frames) gate=pool "
+                "bound=%.2f starved=%.2f dropped=%llu presented=%.2f of %.2f fps\n",
+                static_cast<unsigned long long>(previousBudget / (1024 * 1024)),
+                static_cast<unsigned long long>(
+                    SoftwarePoolBudgets[softwarePoolRung_] / (1024 * 1024)),
+                static_cast<unsigned long long>(previousFrames),
+                static_cast<unsigned long long>(SoftwarePoolFrameCaps[softwarePoolRung_]),
+                boundRatio, starvedRatio,
+                static_cast<unsigned long long>(droppedDelta),
+                presentedFps, sourceFps);
+    } else if ((missingSourceRate || presentationStalled) &&
+               GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0)) {
+        // A window that missed but earned no rung: say which gate held it back, so
+        // the silence is attributable instead of looking like a missed climb.
+        std::fprintf(stderr,
+            "[ladder] frame pool holds at %llu MiB gate=%s bound=%.2f starved=%.2f "
+            "dropped=%llu uploadMs=%.2f frameMs=%.2f\n",
+            static_cast<unsigned long long>(
+                SoftwarePoolBudgets[softwarePoolRung_] / (1024 * 1024)),
+            poolVerdictName, boundRatio, starvedRatio,
+            static_cast<unsigned long long>(droppedDelta),
+            static_cast<double>(uploadCost100ns) / 10'000.0,
+            static_cast<double>(framePeriod100ns) / 10'000.0);
+    }
+
+    if (!missingSourceRate || (!decoderHasNoSpare && !presentationStalled)) {
+        // Healthy window. Walk one placement tier back after three in a row, so a single
+        // lucky two-second sample cannot undo an escalation that was earned. The
+        // priority overlay (Prioritize) is not a tier and survives this walk-back.
+        if (++placementGoodWindows_ >= 3) {
+            placementGoodWindows_ = 0;
+            // The ladder never descends, so the worker count can sit above what the
+            // preferred set seats; pulling the process default back then would
+            // over-subscribe the preferred group and oscillate with the next spill.
+            // Stay spilled until the workers fit the preferred set again.
+            if (decoderThreads_ <= placement_.PreferredDomainThreads())
+                placement_.Recover();
+        }
+        return;
+    }
+    placementGoodWindows_ = 0;
+
+    // Cheapest action first: lifting the preferred-domain restriction is one call and
+    // costs no decoder reopen, while a rung costs a seek. Only when the extra domain is
+    // already in use does the ladder get to spend its reopen, and only when both are
+    // exhausted does the process priority move.
+    if (placement_.Spill()) return;
+
+    if (!adaptiveThreadsEnabled_) { placement_.Boost(); return; }
+
+    // The ladder maximum and the shared budget both cap the next rung; exhausting
+    // them hands over to the priority boost. The climb below self-guards as well
+    // (no rung qualifies once the ceiling is reached).
+    if (current >= ceiling) { placement_.Boost(); return; }
 
     // Coarse ladder, up only. Descending was implemented earlier and removed: giving
     // workers back costs another reopen and seek, and the drops each seek produces were
@@ -3026,6 +3391,16 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
         if (rung > current && rung <= ceiling) { next = rung; break; }
     }
     if (next <= current) return;
+
+    // Do not cross a physical boundary in one step: on a hybrid part the first rung
+    // above the performance class puts workers on the efficiency class, and on a
+    // multi-CCD part it pushes them onto the second L3 domain. Climb to the boundary
+    // itself first (12 on a 6P+8E machine, where the 16 rung would already spill), and
+    // only continue past it when a window at the boundary is still starving. The
+    // boundary is 0 on uniform machines, where there is nothing to cross.
+    const auto boundary = placement_.PreferredDomainThreads();
+    const auto cappedAtBoundary = boundary > current && next > boundary;
+    if (cappedAtBoundary) next = boundary;
 
     AVCodecContext* replacement = nullptr;
     const auto previous = decoderThreads_;
@@ -3044,13 +3419,17 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
     ClearVideoQueue();
     DoSeek(resume);
     // Ignore the frames this seek itself drops; they are the rung's cost, not evidence
-    // that the rung is too small.
-    ladderSettlingFrames_ = 45;
-    ladderWindowDecoded_ = 0;
-    ladderWindowPresented_ = 0;
+    // that the rung is too small. The deadline is wall-clock because the pump loop can
+    // spin thousands of times per second; the window that follows arms its own counter
+    // baselines (see the start-of-function block), so it measures true deltas.
+    ladderSettlingUntil100ns_ = CurrentSteadyTicks() + 10'000'000;   // 1 s of re-prime
     ladderWindowStart100ns_ = 0;
-    std::fprintf(stderr, "[threads] software decoder %u -> %u (presented %.1f of %.1f fps)\n",
-        current, next, presentedFps, sourceFps);
+    if (cappedAtBoundary)
+        std::fprintf(stderr, "[threads] software decoder %u -> %u (presented %.1f of %.1f fps, "
+            "domain boundary %u)\n", current, next, presentedFps, sourceFps, boundary);
+    else
+        std::fprintf(stderr, "[threads] software decoder %u -> %u (presented %.1f of %.1f fps)\n",
+            current, next, presentedFps, sourceFps);
 }
 
 FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noexcept {
@@ -3089,6 +3468,16 @@ FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noex
 void PlayerSession::PumpPlayback() noexcept {
     if (format_ == nullptr) { SetState(FFF3FPState::Failed); return; }
     if (!CollectSoftwareVideoFrame()) return;
+    // Window evidence for EvaluateDecoderLoad: how many playback ticks ran and how
+    // many of them found the decode pipeline at its bound. Diagnostics only --
+    // consumed and reported when an evaluation window closes.
+    ++pumpIterations_;
+    if (SoftwareVideoInputFull() || VideoQueueSaturated()) ++pumpSaturatedIterations_;
+    // The pool gate needs the two causes apart: input-full is packets banked in front
+    // of the decoder (a decode fingerprint), queue-bound is the admission limit doing
+    // the gating (a pool or presentation fingerprint).
+    if (VideoQueueSaturated()) ++pumpQueueBoundIterations_;
+    if (videoFrameQueue_.size() < MinimumQueuedVideoFrames) ++pumpStarvedIterations_;
     if (disc_) {
         PublishDisc();
         if (disc_->RestartRequired() && !disc_->Held()) {
@@ -3738,6 +4127,13 @@ void PlayerSession::QueueVideoFrame(AVFrame* frame) noexcept {
 }
 
 void PlayerSession::ClearVideoQueue() noexcept {
+    // Frames dropped here (seek, rung reopen, fallback, close) land in no drop counter;
+    // keep a running count so the ladder trace can account for them.
+    const auto dropped = videoFrameQueue_.size();
+    clearedVideoFrames_ += dropped;
+    if (dropped != 0 && GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+        std::fprintf(stderr, "[ladder] queue cleared dropped=%zu total=%llu\n",
+            dropped, static_cast<unsigned long long>(clearedVideoFrames_));
     for (auto* frame : videoFrameQueue_) {
         av_frame_unref(frame);
         videoFramePool_.push_back(frame);
@@ -3946,7 +4342,90 @@ std::int64_t PlayerSession::VideoFramePosition(const AVFrame* frame) const noexc
     return StreamTimestampPosition100ns(format_, videoStream_, pts);
 }
 
+void PlayerSession::EngagePresentationPace(const double floorHz, const double contentHz,
+    const std::int64_t lag100ns, const char* via) noexcept {
+    paceEngaged_ = true;
+    paceHz_ = floorHz;
+    paceOverDeliverStreak_ = 0;
+    pacePacedFrames_ = 0;
+    videoRenderer_.SetPresentPaceFloorHz(floorHz);
+    if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+        std::fprintf(stderr,
+            "[pace] engage via=%s floor=%.1fHz content=%.1fHz lag=%lldms\n",
+            via, floorHz, contentHz, static_cast<long long>(lag100ns / 10'000));
+    paceLateStreak_ = 0;
+    ResetPaceWindow();
+}
+
+void PlayerSession::ReleasePresentationPace(const char* reason) noexcept {
+    if (!paceEngaged_) return;
+    paceEngaged_ = false;
+    videoRenderer_.SetPresentPaceFloorHz(0.0);
+    if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+        std::fprintf(stderr, "[pace] release reason=%s paced=%llu floor=%.1fHz\n",
+            reason, static_cast<unsigned long long>(pacePacedFrames_), paceHz_);
+    paceHz_ = 0.0;
+    paceLateStreak_ = 0;
+    paceOverDeliverStreak_ = 0;
+    pacePacedFrames_ = 0;
+    ResetPaceWindow();
+}
+
+void PlayerSession::ResetPaceWindow() noexcept {
+    paceWindowFrames_ = 0;
+    paceWindowLate_ = 0;
+    paceWindowLateLagSum100ns_ = 0;
+}
+
+bool PlayerSession::SettlePaceWindow(const std::int64_t lag100ns, const std::int64_t clock100ns,
+    const double contentHz) noexcept {
+    if (paceWindowFrames_ < PaceWindowFrames) return false;
+    const auto windowFrames = paceWindowFrames_;
+    const auto windowLate = paceWindowLate_;
+    const auto windowLateLagSum100ns = paceWindowLateLagSum100ns_;
+    const auto windowStart100ns = paceWindowStart100ns_;
+    // Every outcome restarts the window, so the next settlement measures a fresh
+    // stretch instead of averaging across a regime change.
+    ResetPaceWindow();
+    if (contentHz <= 0.0 || windowLate == 0) return false;
+    const auto share = static_cast<double>(windowLate) / static_cast<double>(windowFrames);
+    const auto span100ns = clock100ns - windowStart100ns;
+    const auto meanLateLag100ns = windowLateLagSum100ns / static_cast<std::int64_t>(windowLate);
+    // The evidence bar: persistent lateness, a span long enough for a rate to
+    // mean something, and a typical lag still inside the drift budget. The mean
+    // is the cap test, not the settling frame's lag alone: that frame is one
+    // sawtooth sample, and on the 8K stream it read 20 ms on windows whose late
+    // pictures had all sat at 600-740 ms. The settling frame's own lag is
+    // checked as well, mirroring the streak path's over-cap hold: taking the
+    // cadence over from a picture that is already past the lip-sync budget
+    // buys one paced frame and an immediate drift-cap release.
+    if (share < PaceWindowLateShare || span100ns < PaceEstimateMinSpan100ns ||
+        meanLateLag100ns > PaceDriftCap100ns || lag100ns > PaceDriftCap100ns) {
+        return false;
+    }
+    // The sustainable delivery rate, measured directly: while the pacer is off
+    // every decoded picture becomes exactly one arrival (shown or discarded), so
+    // the arrival rate over the window IS the rate the pipeline sustains. The
+    // lag-growth estimate the streak uses reads an oscillating stream's sawtooth
+    // phase rather than its trend -- a window settling on an on-time picture
+    // measures negative growth -- so the arrival rate replaces it here. The
+    // min/max form rather than std::clamp because a sub-10 Hz source would make
+    // the clamp's bounds cross.
+    const auto spanSeconds = static_cast<double>(span100ns) / 10'000'000.0;
+    const auto popHz = spanSeconds > 0.0 ? static_cast<double>(windowFrames) / spanSeconds : 0.0;
+    const auto floorHz = std::min(contentHz, std::max(popHz, PaceMinimumHz));
+    if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+        std::fprintf(stderr,
+            "[pace] window share=%.2f meanLag=%lldms pop=%.1fHz floor=%.1f of %.1fHz%s\n",
+            share, static_cast<long long>(meanLateLag100ns / 10'000), popHz, floorHz, contentHz,
+            floorHz > contentHz * PaceDeficitFraction ? " (no deficit)" : "");
+    if (floorHz > contentHz * PaceDeficitFraction) return false;
+    EngagePresentationPace(floorHz, contentHz, lag100ns, "window");
+    return true;
+}
+
 void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept {
+    placement_.SamplePresentThread();
     auto* stream = owner->streams[videoStream_];
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
     const auto position = pts == AV_NOPTS_VALUE ? snapshot_.position100ns :
@@ -4067,16 +4546,28 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
 
     const auto frameDuration = std::max<std::int64_t>(0, lastVideoFrameDuration100ns_);
     const auto lateTolerance = std::max<std::int64_t>(frameDuration * 2, 500'000);
-    if (state_.load() == FFF3FPState::Playing && !fulfillingSeek &&
-        !audioBlockedUntilVideoFrame_ &&
+    const auto clock100ns = ClockPosition();
+    // An "arrival" is a picture the worker popped while the session is really
+    // playing. The rolling engage window counts every arrival, late or not, so
+    // a deficit that oscillates still fills a window even though it never
+    // builds the streak the fast path needs. Pause, seek and the pre-first-frame
+    // gap are not arrivals: they would stretch the window's span and corrupt
+    // its rate estimate, so they reset it instead. The first-frame exclusion
+    // carries over from the discard test below -- until one picture has been
+    // presented there is no timing relationship to measure.
+    const auto arrivalCounts = state_.load() == FFF3FPState::Playing && !fulfillingSeek &&
+        !audioBlockedUntilVideoFrame_ && snapshot_.framePts != AV_NOPTS_VALUE;
+    const auto late = arrivalCounts &&
         // Drop a late picture only when a newer one can replace it. A decoder
         // below realtime must keep showing its newest output, not freeze forever.
         !videoFrameQueue_.empty() &&
-        // Never discard the first decoded frame merely because the audio/device
-        // clock won the startup race. Until one frame is actually presented,
-        // waiting is preferable to creating a permanent opening-frame hole.
-        snapshot_.framePts != AV_NOPTS_VALUE &&
-        position + lateTolerance < ClockPosition()) {
+        position + lateTolerance < clock100ns;
+    const auto contentHz = frameDuration > 0 ? 10'000'000.0 / static_cast<double>(frameDuration) : 0.0;
+    // A late picture is either discarded or, while the pacer is engaged and within
+    // its drift budget, shown at the slower cadence the renderer is holding. The
+    // bucketing below runs for both outcomes because it decides which is which.
+    bool discardLateFrame = false;
+    if (late) {
         snapshot_.frameIndex = nextIndex;
         // Two different reasons land at this one test, and they must not share a counter.
         //
@@ -4097,7 +4588,6 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
         // into the display-rate bucket too. The count therefore means "discarded while the
         // panel was the binding constraint", which is what a caller acts on, and it is
         // reported separately so the traditional reading stays clean.
-        const auto contentHz = frameDuration > 0 ? 10'000'000.0 / static_cast<double>(frameDuration) : 0.0;
         const auto displayHz = videoRenderer_.DisplayCadenceHz();
         // HasOutputWindow() is part of the test, not decoration: with no window the renderer
         // never runs a display detection, so DisplayCadenceHz() falls back to its 60.0f
@@ -4108,18 +4598,132 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
         // side of it: 60 fps content on a 59.94 Hz panel really is panel-limited, but 60 is
         // not greater than 59.94 x 1.005, so those ~0.06 discards per second land in the
         // traditional bucket. Without the margin the two buckets would flip back and forth
-        // Without the margin the two buckets would flip back and forth every time the
-        // declared refresh rate moved with a display-mode change, which is worse than a
-        // stable, documented 0.1% misattribution.
+        // every time the declared refresh rate moved with a display-mode change, which is
+        // worse than a stable, documented 0.1% misattribution.
+        const auto lag100ns = clock100ns - position;
         if (videoRenderer_.HasOutputWindow() && contentHz > displayHz * 1.005) {
+            // The panel is the binding constraint: no cadence can present more pictures
+            // per second than the display scans out, so this bucket never engages the
+            // pacer and an engaged pacer steps aside for it.
             displayRateDiscardedFrames_.fetch_add(1, std::memory_order_relaxed);
+            if (paceEngaged_) ReleasePresentationPace("panel-limited");
+            paceLateStreak_ = 0;
+            ResetPaceWindow();
+            discardLateFrame = true;
+        } else if (paceEngaged_) {
+            if (lag100ns > PaceDriftCap100ns) {
+                // Past the lip-sync budget the smooth trade is no longer worth it:
+                // hand the frame back to the discard path, which burns the lag down.
+                ReleasePresentationPace("drift-cap");
+                discardLateFrame = true;
+            } else {
+                ++pacePacedFrames_;
+                ++paceOverDeliverStreak_;
+                if (paceOverDeliverStreak_ >= PaceOverDeliverFrames) {
+                    // Every one of the last pictures found a newer one already queued:
+                    // the pipeline is delivering faster than the pacer presents (it
+                    // recovered, or the floor is now too slow). Hand cadence control
+                    // back and let the discard path rebalance the queue.
+                    ReleasePresentationPace("over-delivery");
+                    discardLateFrame = true;
+                }
+                // else: show this picture. It falls through to the render path; the
+                // renderer's pace floor is what holds it on screen longer.
+            }
         } else {
+            ++paceLateStreak_;
+            if (paceLateStreak_ == 1) {
+                paceStreakClock100ns_ = clock100ns;
+                paceStreakLag100ns_ = lag100ns;
+            }
+            // Rolling-window accounting. This arrival counts whether or not the
+            // streak fast path fires below: the two are independent evidence of
+            // the same deficit, and the window is the only one an oscillating
+            // stream ever produces.
+            if (paceWindowFrames_ == 0) paceWindowStart100ns_ = clock100ns;
+            ++paceWindowFrames_;
+            ++paceWindowLate_;
+            paceWindowLateLagSum100ns_ += lag100ns;
+            if (paceLateStreak_ >= PaceEngageLateFrames && lag100ns > PaceDriftCap100ns) {
+                // Already past the lip-sync budget: the classic path owns this stream,
+                // and re-evaluating every streak would only spam the trace.
+                if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+                    std::fprintf(stderr,
+                        "[pace] hold streak=%u lag=%lldms (over %lldms drift cap)\n",
+                        paceLateStreak_, static_cast<long long>(lag100ns / 10'000),
+                        static_cast<long long>(PaceDriftCap100ns / 10'000));
+                paceLateStreak_ = 0;
+                discardLateFrame = true;
+            } else if (paceLateStreak_ >= PaceEngageLateFrames && contentHz > 0.0) {
+                // Sustainable delivery rate, measured on the streak itself: the lag
+                // grows at (1 - delivered fraction) per second of clock, so the
+                // fraction is 1 - dLag/dt from the first late picture of the streak.
+                // A burst of late pictures lands inside one render loop and reads as
+                // "no growth" -- that is the backlog-burn case, and the full content
+                // rate is the right floor for it.
+                double fraction = 1.0;
+                const auto span100ns = clock100ns - paceStreakClock100ns_;
+                if (span100ns >= PaceEstimateMinSpan100ns) {
+                    const auto growth = static_cast<double>(lag100ns - paceStreakLag100ns_) /
+                        static_cast<double>(span100ns);
+                    fraction = std::clamp(1.0 - growth, 0.05, 1.0);
+                }
+                const auto floorHz = std::clamp(fraction * contentHz, PaceMinimumHz, contentHz);
+                if (floorHz <= contentHz * PaceDeficitFraction) {
+                    EngagePresentationPace(floorHz, contentHz, lag100ns, "streak");
+                    ++pacePacedFrames_;
+                } else {
+                    // Lateness with no measurable deficit behind it (a one-off costly
+                    // frame): pacing at the content rate would only add lag.
+                    if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+                        std::fprintf(stderr,
+                            "[pace] hold streak=%u estimate=%.1f of %.1fHz (no deficit)\n",
+                            paceLateStreak_, floorHz, contentHz);
+                    paceLateStreak_ = 0;
+                    discardLateFrame = true;
+                }
+            } else if (SettlePaceWindow(lag100ns, clock100ns, contentHz)) {
+                // The window found the deficit the streak could not: this late
+                // picture is the one the pacer shows, at the cadence the window
+                // just measured.
+                ++pacePacedFrames_;
+            } else {
+                discardLateFrame = true;
+            }
+        }
+        if (discardLateFrame) {
             ++snapshot_.droppedVideoFrames;
             // Feed the drop to the adaptive-downscale policy. Only software decoding can
             // benefit, because a hardware frame never crosses PCIe as CPU planes.
             if (!IsHardwareFrame(frame))
                 videoRenderer_.ObserveFrameForAdaptiveDownscale(true);
         }
+    } else if (arrivalCounts) {
+        // An on-time picture breaks both streaks: whatever deficit (or over-delivery)
+        // the last stretch showed is over as far as this frame is concerned. While the
+        // pacer is engaged this is the steady state -- the queue is empty at pop, so
+        // the floor is holding the cadence, not the discard path.
+        paceLateStreak_ = 0;
+        paceOverDeliverStreak_ = 0;
+        if (!paceEngaged_) {
+            // It also counts into the rolling window: on an oscillating stream the
+            // on-time arrivals are half the evidence, and skipping them would make
+            // every window look saturated with lateness.
+            if (paceWindowFrames_ == 0) paceWindowStart100ns_ = clock100ns;
+            ++paceWindowFrames_;
+            if (SettlePaceWindow(clock100ns - position, clock100ns, contentHz))
+                ++pacePacedFrames_;
+        }
+    } else if (paceEngaged_ || paceLateStreak_ != 0 || paceOverDeliverStreak_ != 0 ||
+        paceWindowFrames_ != 0) {
+        // Not an arrival (pause, seek, the pre-first-frame gap): the timing
+        // relationship any window was measuring is gone, so its span would be
+        // meaningless. Drop the streaks and the half-filled window alike.
+        paceLateStreak_ = 0;
+        paceOverDeliverStreak_ = 0;
+        ResetPaceWindow();
+    }
+    if (discardLateFrame) {
         snapshot_.queuedVideoFrames = static_cast<std::uint32_t>(videoFrameQueue_.size());
         PublishSnapshot();
         return;
@@ -4956,6 +5560,7 @@ void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t req
 
 void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVideoOutput) noexcept {
     StopSoftwareVideoDecode();
+    placement_.Release();
     if (audioRenderer_) { audioRenderer_->Stop(); audioRenderer_.reset(); }
     // SetTimedTextLayer is intentionally callable outside the session command
     // queue. Gate renderer teardown with its content lock so a final timer tick
@@ -5013,6 +5618,27 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     internalAudioFailurePending_ = false;
     internalAudioFailureResult_ = FFFResult::Success;
     internalAudioDecodeErrorCount_ = 0;
+    placementGoodWindows_ = 0;
+    ladderWindowDecoded_ = 0;
+    ladderWindowPresented_ = 0;
+    ladderWindowStart100ns_ = 0;
+    ladderSettlingUntil100ns_ = 0;
+    pumpIterations_ = pumpSaturatedIterations_ = 0;
+    pumpQueueBoundIterations_ = pumpStarvedIterations_ = 0;
+    ladderWindowUpload100ns_ = ladderWindowConvert100ns_ = ladderWindowDropped_ = 0;
+    clearedVideoFrames_ = 0;
+    // The load ladder and the pool rung are per-media state: carrying them across a
+    // close hands the next file the previous file's worst case (a VFR-misjudged
+    // climb would follow the session). Reset both so every media re-derives its
+    // opening rung and starts the thread ladder from its floor.
+    decoderThreads_ = 0;
+    softwarePoolRung_ = 0;
+    // The pacer is per-media state as well, and its floor lives in the renderer: a
+    // close must clear it there or the next session would inherit the cadence.
+    if (paceEngaged_) ReleasePresentationPace("close");
+    paceStreakClock100ns_ = 0;
+    paceStreakLag100ns_ = 0;
+    ResetPaceWindow();
     ResetBitRateTracking();
     {
         std::lock_guard lock(mutex_); snapshot_.state = finalState; snapshot_.position100ns = 0; snapshot_.duration100ns = 0;
@@ -5030,6 +5656,10 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
         snapshot_.deviceLockWait100ns = snapshot_.hardwareTransfer100ns = 0;
         snapshot_.softwareConvert100ns = 0;
     snapshot_.videoUpload100ns = 0;
+    snapshot_.uploadMapWait100ns = snapshot_.uploadCopy100ns = 0;
+    snapshot_.downscaleResample100ns = snapshot_.scalePassCount = 0;
+    snapshot_.uploadCount = snapshot_.uploadCopyBytes = 0;
+    snapshot_.uploadPath = 0;
         snapshot_.videoBitRate = snapshot_.audioBitRate = 0;
         snapshot_.queuedVideoFrames = 0; snapshot_.sourcePeakNits = 0;
         ApplyHdrState(snapshot_, {});
@@ -5367,6 +5997,11 @@ void PlayerSession::SetState(const FFF3FPState state, const char* operation) noe
     snapshot_.state = state;
     PublishSnapshot();
     if (previous == state) return;
+    // CPU placement follows the playing state: tier 3 is dropped as soon as playback
+    // stops, and tier 1 is (re)applied on every start. Placement is cheap enough to do
+    // inline, and doing it here keeps every state transition in one place.
+    if (state == FFF3FPState::Playing) placement_.OnPlaybackStart(workerThreadId_);
+    else if (previous == FFF3FPState::Playing) placement_.OnPlaybackStop();
     std::string json = "{\"state\":" + std::to_string(static_cast<unsigned>(state));
     if (operation) json += ",\"operation\":\"" + EscapeJson(operation) + "\""; json += '}';
     Emit(FFF3FPEvent::StateChanged, json);
@@ -5430,6 +6065,9 @@ void PlayerSession::PublishPlaybackClock(const std::int64_t position,
 }
 
 void PlayerSession::ResetClock(const std::int64_t position) noexcept {
+    // Every clock reset (play, seek, keyframe-seek completion) restarts the timing
+    // relationship the pacer was balancing, so an engaged pacer steps aside here.
+    if (paceEngaged_) ReleasePresentationPace("clock-reset");
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
     clockOriginPosition100ns_ = position;
@@ -5445,6 +6083,13 @@ void PlayerSession::PublishSnapshot() noexcept {
     snapshot_.deviceLockWait100ns = videoRenderer_.DeviceLockWait100ns();
     snapshot_.softwareConvert100ns = videoRenderer_.SoftwareConvert100ns();
     snapshot_.videoUpload100ns = videoRenderer_.Upload100ns();
+    snapshot_.uploadMapWait100ns = videoRenderer_.UploadMapWait100ns();
+    snapshot_.uploadCopy100ns = videoRenderer_.UploadCopy100ns();
+    snapshot_.downscaleResample100ns = videoRenderer_.DownscaleResample100ns();
+    snapshot_.scalePassCount = videoRenderer_.ScalePassCount();
+    snapshot_.uploadCount = videoRenderer_.UploadCount();
+    snapshot_.uploadCopyBytes = videoRenderer_.UploadCopyBytes();
+    snapshot_.uploadPath = videoRenderer_.UploadPath();
     std::lock_guard lock(snapshotMutex_);
     publishedSnapshot_ = snapshot_;
 }

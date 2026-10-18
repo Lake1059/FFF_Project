@@ -32,6 +32,12 @@ Friend Module Program
                     StringComparison.OrdinalIgnoreCase) Then
                 Return ImageZoomLiveRegression.运行(args.Skip(1).ToArray())
             End If
+            ' CPU 放置策略真机回归：真播放会话 + 真输出窗口，五臂 off/auto/prefer/spill/boost，
+            ' 读内核自带 PLACEMENT 遥测 + 进程默认 CPU set 数 + 按成因丢帧（见文件头注释）。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--playback-placement",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return PlaybackPlacementRegression.运行(args.Skip(1).ToArray())
+            End If
             ' ⚠ 认不出的旗标**必须判红**，不许再往下兜底（这就是本文件最后一处落笔的牙）。
             ' 为什么：出货树那份 Program.vb（5713 行注册表，含 --static-image-open-regression）里有
             ' 23 个 --*-regression 旗标，而本树只实现 --lyrics-kit-regression 一个。此前任何未知旗标
