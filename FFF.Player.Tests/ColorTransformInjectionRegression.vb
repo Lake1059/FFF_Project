@@ -3,6 +3,9 @@
 ' 测的是宿主侧 2026-10-17 落地的整条通路：
 '   帧边数据环（FFF3FP_CopyFrameSideDataAfter）→ 外部模块（FFF.HDRdp.Test.dll 的
 '   analyzeFrame）→ kind=3 注入（FFF3FP_SetDynamicMetadata）→ 快照落“外部色彩变换”路径。
+' 2026-10-18 追加：容器配置记录通道（FFF3FP_CopyStreamSideData → analyzeFrame 的
+'   配置记录 字段 → FFF_ColorTransformContentText）——场景四新增“内容描述”读数：
+'   它是本次唯一“跨解锁态翻转”的新读数（内容是模块产出的分类文本，未解锁必为空串）。
 ' 走 FFF.Player 托管包装（播放器会话，Public + InternalsVisibleTo），不 mock，
 ' P/Invoke 到 x64/Release 的 FFF.Native.dll 真内核；模块 DLL 是真件（库外独立仓产物）。
 '
@@ -103,6 +106,7 @@ Friend Module ColorTransformInjectionRegression
             "kind=3 载荷结构尺寸 = 431296（与内核 static_assert 同水）",
             $"实测 {播放器原生接口.色彩变换载荷尺寸}")
         检查(播放器原生接口.支持帧边数据环, "内核提供帧边数据环导出", $"支持={播放器原生接口.支持帧边数据环}")
+        检查(播放器原生接口.支持流边数据, "内核提供流边数据导出", $"支持={播放器原生接口.支持流边数据}")
         检查(播放器原生接口.支持动态元数据注入, "内核提供动态元数据注入导出",
             $"支持={播放器原生接口.支持动态元数据注入}")
 
@@ -165,6 +169,21 @@ Friend Module ColorTransformInjectionRegression
             检查(锁态.播放推进 AndAlso 解锁态.播放推进,
                 "播放推进：两种状态都正常（未解锁不是故障，是静默降级）",
                 $"{锁态.帧序号} / {解锁态.帧序号}")
+            ' 内容描述：这是本次唯一“跨解锁态翻转”的新读数——文本是模块算出来的分类
+            ' （配置记录通道 + 分析帧 的产物），未解锁时模块压根没被采用，所以必为空串。
+            检查(锁态.内容描述 = "", "内容描述：未解锁态必为空串", $"实测 '{锁态.内容描述}'")
+            检查(解锁态.内容描述.Length > 0 AndAlso 解锁态.内容描述.StartsWith("P", StringComparison.Ordinal),
+                "内容描述：已解锁态非空且以 P 开头（模块产出的分类文本）",
+                $"实测 '{解锁态.内容描述}'")
+            ' 已知夹具（dv-regular 样本）的强断言：只有“配置记录真的喂进了 分析帧”
+            ' 才会是 P8.1 —— 若只跑 RPU 启发式，那只可能给出 P8（缺 .1）。
+            If 素材.IndexOf("dv-regular", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                检查(解锁态.内容描述 = "P8.1",
+                    "内容描述：已知夹具 ⇒ P8.1（配置记录通道端到端判据）",
+                    $"实测 '{解锁态.内容描述}'（若为 P8 或空，说明配置记录通道没通）")
+            Else
+                Console.WriteLine("  （素材名不含已知夹具标记，跳过 P8.1 强断言）")
+            End If
 
             ' 合规观测：模块不影响任何终端用户可见的信息。
             ' 内核把这条路径的用户可见文案定成中性措辞（Caller-supplied colour transform），
@@ -187,6 +206,8 @@ Friend Module ColorTransformInjectionRegression
         Public 帧序号 As Long
         ''' <summary>终端用户实际会看到的那句 HDR 路径文案（合规性观测点）。</summary>
         Public 可见文案 As String = String.Empty
+        ''' <summary>模块产出的内容分类文本（配置记录通道的端到端读数；未解锁必为空串）。</summary>
+        Public 内容描述 As String = String.Empty
         Public ReadOnly Property 播放推进 As Boolean
             Get
                 Return 帧序号 > 3
@@ -194,7 +215,7 @@ Friend Module ColorTransformInjectionRegression
         End Property
         Public ReadOnly Property 顺序 As String()
             Get
-                Return {"HDR处理路径", "模块已采用", "注入帧数", "外部色彩变换可用", "帧序号", "用户可见文案"}
+                Return {"HDR处理路径", "模块已采用", "注入帧数", "外部色彩变换可用", "帧序号", "用户可见文案", "内容描述"}
             End Get
         End Property
         Public Function 取值(名称 As String) As String
@@ -205,6 +226,7 @@ Friend Module ColorTransformInjectionRegression
                 Case "外部色彩变换可用" : Return 可用位.ToString()
                 Case "帧序号" : Return 帧序号.ToString()
                 Case "用户可见文案" : Return 可见文案
+                Case "内容描述" : Return 内容描述
                 Case Else : Return "?"
             End Select
         End Function
@@ -225,6 +247,17 @@ Friend Module ColorTransformInjectionRegression
             Dim 视频流 = 信息?.流.FirstOrDefault(Function(流) 流.类型 = "video")
             结果.可用位 = 视频流 IsNot Nothing AndAlso 视频流.外部色彩变换可用
             结果.可见文案 = 视频流?.HDR处理说明
+            ' 内容描述：模块产出的分类文本。只有模块已采用才可能非空——未解锁时它恒为空串，
+            ' 所以非空证明的是“配置记录真的喂进了 分析帧”，不是“模块在盘上”。
+            结果.内容描述 = 会话.色彩变换内容描述
+            If 结果.已采用 AndAlso String.IsNullOrEmpty(结果.内容描述) Then
+                ' 分类文本要等泵下一拍取完配置记录再出（每拍 2–12ms，给足窗口）。
+                Dim 截止 = DateTimeOffset.UtcNow.AddSeconds(10)
+                While DateTimeOffset.UtcNow < 截止 AndAlso String.IsNullOrEmpty(结果.内容描述)
+                    结果.内容描述 = 会话.色彩变换内容描述
+                    Thread.Sleep(50)
+                End While
+            End If
             ' 注入帧数：从诊断串里取（形如“注入 N 帧”）
             Dim 位置 = 诊断.IndexOf("注入 ")
             If 位置 >= 0 Then

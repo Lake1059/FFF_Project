@@ -23,6 +23,11 @@ Imports System.Threading
 '
 '  ● 模块缺席 / 内核没有环导出 / 本帧无据，三种情况都只是“什么都不做”，
 '    与不装模块时的行为逐位一致（既定口径：不装模块 = 静默降级且不提示）。
+'
+'  ● 配置记录通道：容器码流配置记录是**流级**常量（在 codecpar 上，不在逐帧环里），
+'    由内核导出 FFF3FP_CopyStreamSideData 取回、缓存一次、喂给模块 分析帧 的追加字段；
+'    模块据此把分类文本（如多层/兼容档）算出来，再由 取内容描述() 提供给 UI。
+'    这两个追加通道都按"旧内核/旧模块没有就静默降级"处理。
 ' ═══════════════════════════════════════════════════════════════════════════
 
 Friend Class 色彩变换注入泵
@@ -51,6 +56,12 @@ Friend Class 色彩变换注入泵
     ''' <summary>环回退自愈的检查间隔（ms）：只在“这一趟没有新条目”时才有意义。</summary>
     Private Const 回退检查间隔毫秒 As Integer = 200
 
+    ''' <summary>容器配置记录通道的失败重试间隔（ms）：流里没有 / 尺寸不合时干净地稍后再试。</summary>
+    Private Const 配置记录重试间隔毫秒 As Long = 2000L
+
+    ''' <summary>配置记录的单条上限（字节）。正常记录只有几十字节；更大的异常条目一概不缓存。</summary>
+    Private Const 配置记录上限 As UInteger = 64UI
+
     ' ---- 游标：高 32 位是复位世代，低 32 位是“帧号 ≥”下界 ----
     ' 为什么不直接对帧号做 CAS：复位把下界写回 0，而探测时的下界本来就可能
     ' 是 0（从头播、或刚复位过一次）——那时“值没变”与“被人复位过”在单值 CAS
@@ -74,6 +85,12 @@ Friend Class 色彩变换注入泵
     Private _节拍毫秒 As Integer = 8
     Private _节拍已缓存 As Boolean
 
+    ' ---- 配置记录通道（容器码流配置记录：流级常量，取首次出现的一条并缓存） ----
+    Private _配置记录 As Byte()
+    Private _配置记录下次查询 As Long
+    ' 模块产出的分类文本（泵线程写、UI 线程读 ⇒ 用 Volatile 发布可见性）。
+    Private _内容描述 As String
+
     ' ---- 计数器（诊断：会话收尾时一句话回答“通路到底跑没跑”） ----
     Public Property 注入帧数 As UInteger
     Public Property 未变帧数 As UInteger
@@ -87,6 +104,15 @@ Friend Class 色彩变换注入泵
     ''' <summary>计数器摘要。</summary>
     Public Function 描述计数器() As String
         Return $"注入 {注入帧数} 帧，未变 {未变帧数} 帧，跳过 {跳过帧数} 帧，末帧 {_末次注入帧号}"
+    End Function
+
+    ''' <summary>最近一次 分析帧（泵线程）产出的分类文本；未解锁 / 无分类 / 模块缺席时为空串。
+    ''' <para>只能在泵线程调用过 分析帧 之后读（模块侧导出按线程保存快照）；
+    ''' 这里读到的是已拷贝的托管串，跨线程安全。</para></summary>
+    Friend Function 读取内容描述() As String
+        Dim 值 = Volatile.Read(_内容描述)
+        If String.IsNullOrEmpty(值) Then Return String.Empty
+        Return 值
     End Function
 
     ''' <summary>模块采用态（诊断用：把“0 注入”分成“没装载”与“装载了但环空”两种读法）。</summary>
@@ -250,9 +276,17 @@ Friend Class 色彩变换注入泵
             Return False
         End If
 
+        ' 换算前先把容器配置记录拿到手（流级常量；拿不到只是模块走它自己的保守路径）。
+        确保配置记录()
+
         Dim 载荷大小 As Integer = 0
-        Dim 返回 = 模块.分析帧(数据, 帧序号, 载荷大小)
+        Dim 返回 = 模块.分析帧(数据, 帧序号, _配置记录, 载荷大小)
         _已消费帧号 = 帧序号
+
+        ' 分类文本必须**紧接 分析帧 之后、在同一线程**读（模块侧按线程保存快照）。
+        ' 放在 Select Case 之前：所有结果分支都要发布——包括 NoMetadata（本帧无据但
+        ' 流级分类已经算出来）与未授权（模块可能刚失效），漏了会让显示行停在旧值。
+        发布内容描述(模块.取内容描述())
 
         Select Case 返回
             Case 色彩变换模块接口.结果成功
@@ -364,6 +398,43 @@ Friend Class 色彩变换注入泵
         Loop While Interlocked.CompareExchange(_游标状态, 新值, 旧值) <> 旧值
     End Sub
 
+    ' ---- 配置记录通道（流级边数据） ----
+
+    ''' <summary>取回当前视频流的容器配置记录并缓存（流级常量，取一次即可；seek 不清除、
+    ''' 换文件/换轨由 <see cref="流重启"/> 清掉重取）。两趟式：先探询尺寸，0 &lt; 尺寸 ≤
+    ''' <see cref="配置记录上限"/> 才回取。内核没有该导出、流里还没有记录、或尺寸不合，
+    ''' 都只是"这一趟没有"——按 <see cref="配置记录重试间隔毫秒"/> 节流后再试，不报错。</summary>
+    Private Sub 确保配置记录()
+        If _配置记录 IsNot Nothing Then Return
+        If Not 播放器原生接口.支持流边数据 Then Return
+        Dim 现在 = Environment.TickCount64
+        If 现在 < _配置记录下次查询 Then Return
+
+        Dim 句柄 = _会话.取得句柄()
+        If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return
+
+        Dim 需要 As UInteger = 0UI
+        Dim 探询 = 播放器原生接口.复制流边数据(句柄, 播放器原生接口.配置记录契约类型, Nothing, 需要)
+        If 探询 = 原生播放器结果.成功 AndAlso 需要 > 0UI AndAlso 需要 <= 配置记录上限 Then
+            Dim 缓冲(CInt(需要) - 1) As Byte
+            Dim 写入 As UInteger = 0UI
+            Dim 取结果 = 播放器原生接口.复制流边数据(句柄, 播放器原生接口.配置记录契约类型, 缓冲, 写入)
+            If 取结果 = 原生播放器结果.成功 AndAlso 写入 = 需要 Then
+                _配置记录 = 缓冲
+                Return
+            End If
+        End If
+        ' 未找到（流里没有这类记录）或尺寸在两次调用之间变了：2 秒后再试。
+        _配置记录下次查询 = 现在 + 配置记录重试间隔毫秒
+    End Sub
+
+    ''' <summary>与当前值不同才发布（分类文本逐帧不变，避免无谓写入）。泵线程调用。</summary>
+    Private Sub 发布内容描述(描述 As String)
+        If 描述 Is Nothing Then 描述 = String.Empty
+        If String.Equals(描述, _内容描述, StringComparison.Ordinal) Then Return
+        Volatile.Write(_内容描述, 描述)
+    End Sub
+
     ' ---- 流重启与环回退自愈 ----
 
     ''' <summary>流状态重置：seek、帧步进、停止、换文件、换轨之后必须调。
@@ -387,6 +458,10 @@ Friend Class 色彩变换注入泵
         _已消费帧号 = -1
         ' 换文件后帧率可能变了：清掉缓存让下一拍重读。
         _节拍已缓存 = False
+        ' 流重绑才会清内核侧的流级边数据；配置记录与分类文本必须跟着重取。
+        _配置记录 = Nothing
+        _配置记录下次查询 = 0L
+        Volatile.Write(_内容描述, String.Empty)
     End Sub
 
     ''' <summary>“环被内核清空”的自愈：presentation index 回退即环已重来。
