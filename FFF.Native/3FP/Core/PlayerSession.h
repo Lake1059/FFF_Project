@@ -167,6 +167,13 @@ public:
     FFFResult CopyFrameSideDataAfter(std::uint32_t sideDataType,
         std::int64_t fromFrameIndex, void* buffer, std::uint32_t capacity,
         std::uint32_t& writtenSize, std::int64_t& foundFrameIndex) noexcept;
+    // Neutral stream-level side data (see FFF3FP_CopyStreamSideData in the API
+    // header): the first-seen blob of a type from the current video stream's
+    // coded side data, bytes untouched. A separate entry point because the
+    // stream-level type enumeration is a different one from the per-frame
+    // enumeration above -- the two collide on raw numbers.
+    FFFResult CopyStreamSideData(std::uint32_t sideDataType, void* buffer,
+        std::uint32_t capacity, std::uint32_t& writtenSize) noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
 
@@ -273,6 +280,11 @@ private:
     // Copies the side data of one about-to-be-presented frame into the ring.
     void CacheFrameSideData(const AVFrame* frame, std::int64_t frameIndex) noexcept;
     void ClearSideDataRing() noexcept;
+    // Captures / drops the stream-level coded side data of a bound video
+    // stream (see CopyStreamSideData). Capture replaces the cache, so a newly
+    // selected track can never be answered with the previous track's blobs.
+    void CacheStreamSideDataFromStream(const struct AVStream* stream) noexcept;
+    void ClearStreamSideData() noexcept;
     void ClearPendingPackets() noexcept;
     static void ClearPacketQueue(std::deque<AVPacket*>& queue, std::size_t& bytes) noexcept;
     void DecodePendingPacket(bool video) noexcept;
@@ -599,6 +611,13 @@ private:
     };
     std::deque<CachedSideDataFrame> sideDataRing_;
     std::size_t sideDataRingBytes_ = 0;   // blob payload only
+    // --- Stream-level side data (see CopyStreamSideData) ---
+    // The coded side data the container declared for the current video stream,
+    // captured at stream binding on the command thread and read on the API
+    // thread; sideDataMutex_ guards both. Unlike the ring above it survives
+    // seeks -- the declaration happens once and a seek does not re-emit it --
+    // and is cleared only when the stream is destroyed or rebound.
+    std::vector<SideDataBlob> streamSideData_;
     mutable std::mutex sideDataMutex_;
     std::deque<AVPacket*> pendingVideoPackets_;
     std::size_t pendingVideoPacketBytes_;

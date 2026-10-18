@@ -43,6 +43,10 @@ Friend Module 色彩变换模块接口
     ''' <summary>解锁码提交裸导出。</summary>
     Friend Const 解锁入口名 As String = "FFF_ColorTransformAuthenticate"
 
+    ''' <summary>分类文本裸导出：调用线程上最近一次 分析帧 的分类结果（UTF-8）。
+    ''' 旧模块没有它 ⇒ 解析不到即答空串，静默降级。</summary>
+    Friend Const 内容文本入口名 As String = "FFF_ColorTransformContentText"
+
     ''' <summary>Authenticate 的三态返回（与模块 AuthenticateResult 同水）。</summary>
     Friend Const 解锁被拒 As Integer = 0
     Friend Const 解锁已落盘 As Integer = 1
@@ -56,6 +60,17 @@ Friend Module 色彩变换模块接口
     ''' <summary>函数表版本门。2 = 握手新增"未授权即拒"（表形状未变）。
     ''' 停在 1 会被模块拒，于是整链按"模块缺席"静默降级——症状与不装模块一模一样。</summary>
     Friend Const 表版本 As UInteger = 2UI
+
+    ''' <summary>外部床渲染函数表的导出名（本模块的第二个能力面，中性词汇）。
+    ''' 未授权时模块拒交这张表 ⇒ 内核继续走它自己的矩阵折叠，症状与"模块不在盘上"同形。</summary>
+    Friend Const 音频能力表入口名 As String = "FFF_GetAudioRenderApi"
+
+    ''' <summary>音频函数表版本门，与内核 FFF3FP_AUDIO_PLUG_VERSION 同水；数值漂移即握手失败。</summary>
+    Friend Const 音频表版本 As UInteger = 1UI
+
+    ''' <summary>音频函数表字节数 = sizeof(FFF3FPAudioRenderPlug)：两枚 UInteger + 六枚指针（x64）。
+    ''' 装载点会拿 音频渲染能力表 的 Marshal.SizeOf 当场对撞，不等就不把表交给内核。</summary>
+    Friend Const 音频表大小 As UInteger = 56UI
 
     ''' <summary>本模块产出的载荷 kind（内核 ExternalColorTransform）。</summary>
     Friend Const 载荷种类 As UInteger = 3UI
@@ -172,6 +187,11 @@ Friend Module 色彩变换模块接口
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Friend Delegate Function 解锁原型(代码UTF8 As IntPtr) As Integer
 
+    ''' <summary>分类文本裸导出（无参数，答 UTF-8 常量串；无分类时空串，非空指针）。
+    ''' ⚠ 返回指针只在**调用线程**上、直到该线程下次 分析帧 前有效 ⇒ 调用方必须立即拷贝。</summary>
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Function 内容文本原型() As IntPtr
+
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Friend Delegate Function 变换版本原型() As UInteger
 
@@ -189,6 +209,24 @@ Friend Module 色彩变换模块接口
         Public 变换版本 As IntPtr
         Public 分析帧 As IntPtr
         Public 复位 As IntPtr
+    End Structure
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Function 取音频表原型(版本 As UInteger, 表地址 As IntPtr) As Integer
+
+    ''' <summary>外部床渲染函数表的宿主镜像（56 B，全 blittable）。字段次序就是 ABI：
+    ''' 宿主只把整张表转交给内核（内核在装载点拷贝一份，所以调用期间钉住即可），
+    ''' 自己不逐枚调用任何一列，因此本文件不需要为它们声明委托原型。</summary>
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 音频渲染能力表
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 上下文 As IntPtr
+        Public 名称 As IntPtr
+        Public 支持 As IntPtr
+        Public 渲染 As IntPtr
+        Public 复位 As IntPtr
+        Public 释放 As IntPtr
     End Structure
 
     ''' <summary>一帧的输入（48 B 扩展布局：头 + 两个借用通道 + 演示帧号）。
@@ -467,7 +505,12 @@ Friend Module 色彩变换模块接口
 
             Dim 载荷缓冲区 = New Byte(CInt(载荷容量) - 1) {}
             载荷句柄 = GCHandle.Alloc(载荷缓冲区, GCHandleType.Pinned)
-            Dim 实例 As New 色彩变换模块实例(句柄, 表, 载荷缓冲区, 载荷句柄) With {.布局版本 = 布局版本}
+            ' 分类文本裸导出：缺了（旧模块）只是"没有内容可显示"，不影响换算本身。
+            Dim 内容文本地址 = 解析导出(句柄, 内容文本入口名)
+            ' 床渲染函数表的导出地址：旧模块没有它只是"没有这条通路"，不影响色彩侧装载。
+            Dim 音频表地址 = 解析导出(句柄, 音频能力表入口名)
+            Dim 实例 As New 色彩变换模块实例(句柄, 表, 载荷缓冲区, 载荷句柄, 内容文本地址,
+                                          音频表地址) With {.布局版本 = 布局版本}
             ' 装载成功：模块句柄的所有权已移交给实例（Dispose 时释放），别再走 Finally 的释放。
             句柄 = IntPtr.Zero
             载荷句柄 = Nothing
@@ -518,14 +561,28 @@ Friend Class 色彩变换模块实例
     Private ReadOnly _表 As 色彩变换能力表
     Private ReadOnly _载荷缓冲区 As Byte()
     Private ReadOnly _载荷句柄 As GCHandle
+    ' 分类文本裸导出的地址（模块函数表之外；装载时解析一次）。
+    Private ReadOnly _内容文本地址 As IntPtr
+    ' 外部床渲染函数表裸导出的地址（装载时解析一次）。0 = 盘上是还没有这一面的旧模块。
+    Private ReadOnly _音频表入口地址 As IntPtr
+    ' 表一旦交给内核就必须留着模块：内核持有的是指向本模块代码段的裸函数指针与它自己
+    ' 分配的 context，FreeLibrary 之后下一次渲染调用就是踩空。所以交出成功后 Dispose
+    ' 跳过卸载（代价是这一份映射陪进程到结束，与"功能可用"相比是可接受的）。
+    Private _音频表已交出 As Boolean
+    Private _音频表函数 As 取音频表原型
+    ' GetDelegateForFunctionPointer 的结果按需缓存一次；字段必须显式写类型。
+    Private _内容文本函数 As 内容文本原型
     Private ReadOnly _锁 As New Object()
     Private _已释放 As Boolean
 
-    Friend Sub New(模块 As IntPtr, 表 As 色彩变换能力表, 载荷缓冲区 As Byte(), 载荷句柄 As GCHandle)
+    Friend Sub New(模块 As IntPtr, 表 As 色彩变换能力表, 载荷缓冲区 As Byte(), 载荷句柄 As GCHandle,
+                   内容文本地址 As IntPtr, 音频表入口地址 As IntPtr)
         _模块 = 模块
         _表 = 表
         _载荷缓冲区 = 载荷缓冲区
         _载荷句柄 = 载荷句柄
+        _内容文本地址 = 内容文本地址
+        _音频表入口地址 = 音频表入口地址
     End Sub
 
     ''' <summary>模块自报的载荷布局版本（仅日志归因用）。</summary>
@@ -550,10 +607,13 @@ Friend Class 色彩变换模块实例
     End Sub
 
     ''' <summary>换算一帧的帧边数据。借用输入仅本次调用有效；输出写内部钉住的载荷缓冲区。
+    ''' <paramref name="配置记录"/> 是当前流的容器码流配置记录（流级常量；没有就传 Nothing）。
     ''' 返回 <see cref="结果无元数据"/> 表示本帧无可换算据（正常跳过，不是错误）。</summary>
-    Public Function 分析帧(边数据 As Byte(), 帧序号 As Long, <Out> ByRef 载荷大小 As Integer) As Integer
+    Public Function 分析帧(边数据 As Byte(), 帧序号 As Long, 配置记录 As Byte(),
+                          <Out> ByRef 载荷大小 As Integer) As Integer
         载荷大小 = 0
         Dim 边数据句柄 As GCHandle = Nothing
+        Dim 配置记录句柄 As GCHandle = Nothing
         Dim 输入结构句柄 As GCHandle = Nothing
         Dim 输出结构句柄 As GCHandle = Nothing
         Try
@@ -574,6 +634,11 @@ Friend Class 色彩变换模块实例
                 边数据句柄 = GCHandle.Alloc(边数据, GCHandleType.Pinned)
                 输入.元数据 = 边数据句柄.AddrOfPinnedObject()
                 输入.元数据大小 = CULng(边数据.Length)
+            End If
+            If 配置记录 IsNot Nothing AndAlso 配置记录.Length > 0 Then
+                配置记录句柄 = GCHandle.Alloc(配置记录, GCHandleType.Pinned)
+                输入.配置记录 = 配置记录句柄.AddrOfPinnedObject()
+                输入.配置记录大小 = CULng(配置记录.Length)
             End If
 
             Dim 输出 As New 色彩变换输出 With {
@@ -604,6 +669,7 @@ Friend Class 色彩变换模块实例
             Return 结果参数无效
         Finally
             If 边数据句柄.IsAllocated Then 边数据句柄.Free()
+            If 配置记录句柄.IsAllocated Then 配置记录句柄.Free()
         End Try
     End Function
 
@@ -614,6 +680,81 @@ Friend Class 色彩变换模块实例
             Return DirectCast(_载荷缓冲区.Clone(), Byte())
         End SyncLock
     End Function
+
+    ''' <summary>调用线程上最近一次 <see cref="分析帧"/> 产出的分类文本（UTF-8，立即拷贝成托管串）。
+    ''' <para>⚠ 只能在**刚调用过 分析帧 的同一线程**（泵线程）上读：导出按线程保存快照，
+    ''' 指针只在该线程下次 分析帧 前有效；这里拿到就马上拷贝，不留任何跨调用指针。</para>
+    ''' <para>导出缺失（早于该 ABI 的模块）或本帧没有分类时答空串；不抛。</para></summary>
+    Public Function 取内容描述() As String
+        If _内容文本地址 = IntPtr.Zero Then Return String.Empty
+        Try
+            Dim 函数 = _内容文本函数
+            If 函数 Is Nothing Then
+                函数 = CType(Marshal.GetDelegateForFunctionPointer(_内容文本地址, GetType(内容文本原型)), 内容文本原型)
+                _内容文本函数 = 函数
+            End If
+            Dim 指针 = 函数()
+            If 指针 = IntPtr.Zero Then Return String.Empty
+            Return Marshal.PtrToStringUTF8(指针)
+        Catch ex As Exception
+            Return String.Empty
+        End Try
+    End Function
+
+    ''' <summary>握手取外部床渲染函数表。旧模块没有这一面 / 未授权 / 表不合格 ⇒ 返回 Nothing
+    ''' 并给出只进日志的原因，按既定口径与"模块不在盘上"同等处理：不提示、不报错、
+    ''' 床继续由内核自己的矩阵折叠处理（那是现网行为，不是新的失败分支）。</summary>
+    Public Function 尝试取音频渲染表(<Out> ByRef 原因 As String) As Nullable(Of 音频渲染能力表)
+        原因 = Nothing
+        If _音频表入口地址 = IntPtr.Zero Then
+            原因 = 模块文件名 & " 里没有导出 " & 音频能力表入口名 & "——床保持矩阵折叠，静默降级"
+            Return Nothing
+        End If
+        Try
+            If CUInt(Marshal.SizeOf(Of 音频渲染能力表)()) <> 音频表大小 Then
+                ' 镜像与内核契约不同水：把这张表交给内核就是让内核按错的偏移读指针。
+                原因 = "音频函数表镜像尺寸 " & Marshal.SizeOf(Of 音频渲染能力表)().ToString() &
+                        " 与契约 " & 音频表大小.ToString() & " 不同水——不交出表"
+                Return Nothing
+            End If
+            If _音频表函数 Is Nothing Then
+                _音频表函数 = CType(Marshal.GetDelegateForFunctionPointer(
+                    _音频表入口地址, GetType(取音频表原型)), 取音频表原型)
+            End If
+            Dim 表 As New 音频渲染能力表 With {.大小 = 音频表大小, .版本 = 0UI}
+            Dim 钉住 = GCHandle.Alloc(表, GCHandleType.Pinned)
+            Dim 返回 As Integer
+            Try
+                返回 = _音频表函数(音频表版本, 钉住.AddrOfPinnedObject())
+                表 = CType(Marshal.PtrToStructure(钉住.AddrOfPinnedObject(),
+                        GetType(音频渲染能力表)), 音频渲染能力表)
+            Finally
+                钉住.Free()
+            End Try
+            If 返回 <> 0 OrElse 表.版本 <> 音频表版本 OrElse 表.大小 < 音频表大小 OrElse
+               表.上下文 = IntPtr.Zero OrElse 表.支持 = IntPtr.Zero OrElse
+               表.渲染 = IntPtr.Zero OrElse 表.复位 = IntPtr.Zero Then
+                ' 与色彩侧同一套三分法：旧件没有这一面、模块在但未解锁（设计结果）、
+                ' 自称已解锁却仍被拒（真故障）。日志必须分得开。
+                原因 = 音频能力表入口名 & " 返回 " & 返回.ToString() &
+                        "（version=" & 表.版本.ToString() & " size=" & 表.大小.ToString() &
+                        " context=" & 表.上下文.ToString() & "）——床保持矩阵折叠"
+                Return Nothing
+            End If
+            _音频表已交出 = True
+            Return 表
+        Catch ex As Exception
+            原因 = "音频握手异常 " & ex.GetType().Name & ": " & ex.Message
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>模块已被交出的函数表绑住时，本属性为真；只给日志与测试用。</summary>
+    Public ReadOnly Property 音频表已交出 As Boolean
+        Get
+            Return _音频表已交出
+        End Get
+    End Property
 
     Public Sub Dispose() Implements IDisposable.Dispose
         SyncLock _锁
@@ -626,6 +767,10 @@ Friend Class 色彩变换模块实例
             ' 释放失败不应掩盖后续清理
         End Try
         If _模块 <> IntPtr.Zero Then
+            If _音频表已交出 Then
+                ' 见 _音频表已交出 的说明：内核还拿着这张表里的指针，不能卸载。
+                Return
+            End If
             Try
                 FreeLibrary(_模块)
             Catch ex As DllNotFoundException

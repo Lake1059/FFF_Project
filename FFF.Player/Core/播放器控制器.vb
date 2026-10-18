@@ -255,6 +255,12 @@ Public NotInheritable Class 播放器控制器
         Return 安全读取会话(Function(目标) 目标.当前媒体信息)
     End Function
 
+    ''' <summary>色彩变换通路已读到的内容分类文本（模块产出；无会话 / 未解锁 / 无分类时答空串）。
+    ''' 供信息图层“内容：”行与测试读取，任何时候都能安全问。</summary>
+    Public Function 读取色彩变换内容描述() As String
+        Return 安全读取会话(Function(目标) 目标.色彩变换内容描述, String.Empty)
+    End Function
+
     Private Function 安全读取会话(Of T)(读取 As Func(Of 播放器会话, T), Optional 默认值 As T = Nothing) As T
         Dim 目标 = 会话
         If 目标 Is Nothing Then Return 默认值
