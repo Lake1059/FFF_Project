@@ -135,7 +135,6 @@ struct FFF3FPConfiguration {
     // colour-space API, or a swap chain that rejects
     // DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 - that rejection rebuilds the chain and
     // then backs off for 10 s before retrying.
-    // FFF3FP_SDR_SCRGB=0/1 overrides whatever the caller passes, for measurement only.
     std::uint32_t sdrScRgbMode = 1;
     // Adaptive downscale-before-upload. Software-decoded frames cross PCIe as whole
     // planes -- an 8K P010 frame is ~100 MB -- which caps playback well below the
@@ -1582,3 +1581,51 @@ FFF3FP_API FFFResult FFF3FP_CopyFrameSideDataAfter(FFF3FPHandle player,
     std::uint32_t sideDataType, std::int64_t fromFrameIndex, void* buffer,
     std::uint32_t capacity, std::uint32_t* writtenSize,
     std::int64_t* foundFrameIndex) noexcept;
+// --- Stream-level side data for external colour analysis --------------------
+//
+// Appended after the frame side-data ring above, in the same additive style:
+// PlayerApiVersion is unchanged, hosts resolve this dynamically
+// (GetProcAddress) and degrade when it is absent.
+//
+// Why a second entry point instead of a flag on the ring above. Stream-level
+// side data uses its own FFmpeg type enumeration (AVPacketSideDataType), a
+// DIFFERENT enum from the per-frame AVFrameSideDataType the ring above speaks:
+// the two collide on raw numbers, so folding this into
+// FFF3FP_CopyFrameSideDataAfter would make one number mean two things
+// depending on the call. This export keeps the namespaces apart by
+// construction. Nothing about it is format-specific: sideDataType is a plain
+// AVPacketSideDataType number carried through, and the kernel interprets none
+// of the bytes it hands back.
+//
+// Why stream-level. A container configuration record (the kind that decides,
+// for example, how a Dolby-Vision stream must be processed) belongs to the
+// media stream, not to an individual packet or frame: the demuxer declares it
+// once when the stream is bound (AVCodecParameters::coded_side_data) and does
+// not re-send it per frame. A per-frame ring therefore can never carry it.
+//
+// Semantics. Returns the FIRST-SEEN cached blob of `sideDataType` from the
+// current video stream's coded side data, copied byte-for-byte. The session
+// neither parses it nor knows what produced it.
+//
+// Lifecycle. The cache is filled when a video stream is bound -- open, and
+// video-track re-selection -- with first-seen-wins per type. It is dropped
+// when that stream is destroyed or rebound (close, re-open, track switch). A
+// seek does NOT clear it: the demuxer declares stream side data once and a
+// seek does not re-emit it, so clearing on seek would silently lose the
+// record for the rest of the session.
+//
+// Bounds: at most 32 blobs (64 KiB total) are cached; a single blob above
+// 16384 bytes is skipped, the same per-blob bound the frame ring uses. These
+// are advisory: a record that does not fit costs the host one NotFound
+// answer, never a failed open.
+//
+// Returns NotFound when no cached blob of that type exists (*writtenSize is
+// then 0); BufferTooSmall when capacity is short -- the required size is
+// still reported through *writtenSize and the entry stays cached, so the host
+// can retry with a bigger buffer -- and Success for a buffer == nullptr probe
+// call, which just reports the size without writing (same two-call contract
+// as the ring above and FFF3FP_CopyBitmapSubtitlePixels). InvalidArgument
+// for a null writtenSize pointer.
+FFF3FP_API FFFResult FFF3FP_CopyStreamSideData(FFF3FPHandle player,
+    std::uint32_t sideDataType, void* buffer, std::uint32_t capacity,
+    std::uint32_t* writtenSize) noexcept;

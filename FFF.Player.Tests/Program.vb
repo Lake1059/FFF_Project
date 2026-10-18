@@ -18,6 +18,12 @@ Friend Module Program
                     StringComparison.OrdinalIgnoreCase) Then
                 Return ImageZoomRegression.运行(args.Skip(1).ToArray())
             End If
+            ' 设置 → 视频超分辨率 页（10-18 从标题栏菜单移来）：正向证明新页在，
+            ' 反向证明控制器不再往标题栏塞菜单项。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--vsr-page-regression",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return VsrPageRegression.运行(args.Skip(1).ToArray())
+            End If
             If args.Length > 0 AndAlso String.Equals(args(0), "--stream-selection-regression",
                     StringComparison.OrdinalIgnoreCase) Then
                 Return StreamSelectionRegression.运行(args.Skip(1).ToArray())

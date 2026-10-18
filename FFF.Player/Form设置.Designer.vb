@@ -32,6 +32,7 @@ Partial Class Form设置
         Dim ModernTabPage8 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         Dim ModernTabPage9 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         Dim ModernTabPage10 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage11 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         ModernTabListControl1 = New LakeUI.ModernTabListControl()
         SuspendLayout()
         ' 
@@ -49,6 +50,7 @@ Partial Class Form设置
         ModernTabPage8.Text = "弹幕"
         ModernTabPage9.Text = "音乐与歌词"
         ModernTabPage10.Text = "文件关联"
+        ModernTabPage11.Text = "视频超分辨率"
         ModernTabListControl1.Items.Add(ModernTabPage1)
         ModernTabListControl1.Items.Add(ModernTabPage2)
         ModernTabListControl1.Items.Add(ModernTabPage3)
@@ -59,6 +61,7 @@ Partial Class Form设置
         ModernTabListControl1.Items.Add(ModernTabPage8)
         ModernTabListControl1.Items.Add(ModernTabPage9)
         ModernTabListControl1.Items.Add(ModernTabPage10)
+        ModernTabListControl1.Items.Add(ModernTabPage11)
         ModernTabListControl1.Location = New Point(0, 0)
         ModernTabListControl1.Name = "ModernTabListControl1"
         ModernTabListControl1.ScrollBarThumbColor = Color.FromArgb(CByte(40), CByte(200), CByte(200), CByte(200))

@@ -408,6 +408,23 @@ FFFResult FFF3FP_CopyFrameSideDataAfter(const FFF3FPHandle player,
     return result;
 }
 
+// Neutral stream-level side data. Additive like the entry points above, so
+// PlayerApiVersion is unchanged and hosts resolve it through GetProcAddress.
+// A separate entry point from the frame ring because the stream-level type
+// enumeration is a different one from the per-frame enumeration: the two
+// collide on raw numbers. The type is carried as a plain number and the
+// payload is copied untouched.
+FFFResult FFF3FP_CopyStreamSideData(const FFF3FPHandle player,
+    const std::uint32_t sideDataType, void* buffer, const std::uint32_t capacity,
+    std::uint32_t* writtenSize) noexcept {
+    if (player == nullptr || writtenSize == nullptr) return FFFResult::InvalidArgument;
+    std::uint32_t written = 0;
+    const auto result = static_cast<PlayerSession*>(player)->CopyStreamSideData(
+        sideDataType, buffer, capacity, written);
+    *writtenSize = written;
+    return result;
+}
+
 // External bed render plug. Appended after the v20 surface like the readback, VSR,
 // rotation and side-data entries before it: additive entry points, so
 // PlayerApiVersion stays at 20 and a host that never resolves these two keeps

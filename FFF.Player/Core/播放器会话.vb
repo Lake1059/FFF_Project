@@ -61,6 +61,10 @@ Public NotInheritable Class 播放器会话
         Try
             If Not String.IsNullOrEmpty(配置.音频端点标识) Then 端点指针 = Marshal.StringToCoTaskMemUTF8(配置.音频端点标识)
             ' -1 按窗口所在显示器选卡；0 是合法适配器索引。
+            ' 自适应CPU预缩放（上传前降档）默认关：实测它省下的拷贝（8K 14.85 → 2.83 ms）
+            ' 抵不过 sws_scale 自己的 26 ms/帧，净耗时翻倍、帧率 30 → 24.5，所以保持关闭。
+            ' 测量用的环境变量门只存在于开发工作树，不在这条路径上；这里逐字给现网值。
+            ' （注：多行对象初始值设定项里不能夹注释行，说明写在这里。）
             Dim 原生配置 As New 原生播放器配置 With {
                 .大小 = 原生播放器配置大小, .版本 = 期望API版本,
                 .输出窗口 = 配置.输出窗口句柄, .解码器 = CUInt(配置.解码器),
@@ -139,8 +143,15 @@ Public NotInheritable Class 播放器会话
                     Debug.WriteLine("色彩变换模块：" & 原因)
                 Else
                     注入泵.采用模块(模块)
+                    ' 泵与床渲染插槽共用这一个活实例：再走一次 尝试装载 会再钉一份
+                    ' 431 KB 载荷缓冲，而交出去的函数表必须绑在同一份模块映射上。
+                    色彩模块实例 = 模块
                 End If
             End If
+
+            ' 模块在场且已解锁 ⇒ 把外部床渲染函数表交给内核。未解锁或旧模块时一次都不叫，
+            ' 床继续由内核自己的矩阵折叠处理——那是现网行为，不是新的失败分支。
+            安装音频渲染插槽()
 
             ' 已锁定时泵是空转起步的：后台按 2 秒节流补装载，票据一落盘下一拍就转入正常节拍。
             注入泵.启动()
@@ -463,6 +474,49 @@ Public NotInheritable Class 播放器会话
         检查结果(结果)
         Return 信息
     End Function
+    ' 床渲染插槽的会话侧状态：实例来自色彩侧装载的那一次（同一份模块映射），
+    ' 装过一次就不再重复握手——每次重装都会让模块新建一个渲染上下文。
+    Private 色彩模块实例 As 色彩变换模块实例
+    Private 音频插槽已装 As Boolean
+
+    ''' <summary>把模块的外部床渲染函数表交给本会话的内核。任何一步不成立都静默返回：
+    ''' 缺席、旧件、未解锁、镜像尺寸不同水、内核拒绝——全部保持矩阵折叠。</summary>
+    Private Sub 安装音频渲染插槽()
+        If 音频插槽已装 OrElse 色彩模块实例 Is Nothing Then Return
+        Dim 原因 As String = Nothing
+        Dim 表 = 色彩模块实例.尝试取音频渲染表(原因)
+        If Not 表.HasValue Then
+            If 原因 IsNot Nothing Then Debug.WriteLine("音频渲染插槽：" & 原因)
+            Return
+        End If
+        Dim 本地表 = 表.Value
+        Dim 钉住 = GCHandle.Alloc(本地表, GCHandleType.Pinned)
+        Try
+            Dim 结果 = 播放器原生接口.FFF3FP_SetAudioRenderPlug(取得句柄(), 钉住.AddrOfPinnedObject())
+            If 结果 = 原生播放器结果.成功 Then
+                音频插槽已装 = True
+            Else
+                ' 内核没收下这张表；模块那边的上下文是这次握手新建的，由内核在
+                ' 下一次成功装载或会话拆解时释放，宿主不越界替它 free。
+                Debug.WriteLine("音频渲染插槽：内核拒绝 " & 结果.ToString())
+            End If
+        Finally
+            钉住.Free()
+        End Try
+    End Sub
+
+    ''' <summary>插槽读数：0/1 + 已渲染与已拒绝帧数。给信息层与测试用，不抛。</summary>
+    Public Function 读取音频渲染插槽状态() As (生效 As Integer, 已渲染帧数 As ULong, 已拒绝帧数 As ULong)
+        Dim 生效UI As UInteger
+        Dim 已渲染 As ULong, 已拒绝 As ULong
+        Try
+            播放器原生接口.FFF3FP_GetAudioRenderPlugState(取得句柄(), 生效UI, IntPtr.Zero, 0UI, 已渲染, 已拒绝)
+        Catch ex As EntryPointNotFoundException
+            Return (0UL, 0UL, 0UL)
+        End Try
+        Return (CInt(生效UI), 已渲染, 已拒绝)
+    End Function
+
     Public Sub 设置音频端点(端点标识 As String)
         Dim 指针 = IntPtr.Zero
         Try
@@ -790,6 +844,15 @@ Public NotInheritable Class 播放器会话
             Dim 泵 = 注入泵
             If 泵 Is Nothing Then Return "通路未启动（模块缺席、未装载或内核无环导出）"
             Return 泵.描述计数器() & "；" & 泵.描述模块态()
+        End Get
+    End Property
+
+    ''' <summary>色彩变换通路已读到的内容分类文本（模块产出；泵未启动 / 未解锁 / 无分类时答空串）。</summary>
+    Friend ReadOnly Property 色彩变换内容描述 As String
+        Get
+            Dim 泵 = 注入泵
+            If 泵 Is Nothing Then Return String.Empty
+            Return 泵.读取内容描述()
         End Get
     End Property
 
