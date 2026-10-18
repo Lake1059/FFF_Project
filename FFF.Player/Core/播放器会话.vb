@@ -75,7 +75,7 @@ Public NotInheritable Class 播放器会话
                 .SDRscRGB模式 = 配置.SDRscRGB模式,
                 .自适应CPU预缩放 = 0UI,
                 .自适应CPU预缩放丢帧百分比 = 20UI,
-                .自适应解码线程 = 0UI,
+                .自适应解码线程 = 1UI,
                 .软解最小线程数 = 4UI,
                 .软解最大线程数 = 32UI,
                 .解码升档丢帧百分比 = 10UI,
@@ -105,6 +105,10 @@ Public NotInheritable Class 播放器会话
 
     Public Sub 打开(本地路径 As String)
         调用路径(AddressOf 播放器原生接口.FFF3FP_Open, 本地路径)
+        ' 呈现策略一次性接上：请求 VRR 低时延路径（tearing present）。偏好语义——
+        ' 渲染侧只在自适应降速（pace）真正介入时兑现，健康播放仍是 vblank 钳制；
+        ' 旧内核没有该导出时静默跳过，不影响播放。
+        播放器原生接口.设置呈现配置(取得句柄(), True)
         启动色彩变换通路()
     End Sub
 

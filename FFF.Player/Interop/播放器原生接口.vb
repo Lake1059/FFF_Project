@@ -936,6 +936,43 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+    ' 呈现策略（VRR / G-SYNC / FreeSync 低时延路径）：内核 FFF3FP_SetPresentConfig。
+    '
+    ' ⚠ 与视图旋转/VSR 同款，必须动态解析：同版本号内的新增导出，静态导入会让一个
+    '   20 版但**尚未含它**的内核在载入期抛 EntryPointNotFoundException —— 把"这台
+    '   的内核没这能力"升级成"整个播放器起不来"。动态解析让其退化为能力不可用。
+    '
+    ' 语义是"偏好"不是"开关"：tearing present 只在渲染侧自适应降速（pace）真正介入时
+    ' 兑现，健康播放对所有宿主保持 vblank 钳制；非 VRR 屏上交换链本就没带
+    ' ALLOW_TEARING，请求自动落空。详见 FFF.Player.Api.h 的 SetPresentConfig 注释。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置呈现配置原型(播放器 As 播放器原生句柄,
+        启用撕裂 As UInteger) As 原生播放器结果
+
+    Private ReadOnly 设置呈现配置函数 As 设置呈现配置原型 =
+        解析可选导出(Of 设置呈现配置原型)("FFF3FP_SetPresentConfig")
+
+    ''' <summary>当前内核是否支持呈现策略切换（旧内核返回 False）。</summary>
+    Friend ReadOnly Property 支持呈现配置 As Boolean
+        Get
+            Return 设置呈现配置函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>请求 VRR 低时延呈现路径（True = 允许 tearing present）。
+    ''' 旧内核返回 False，不抛异常——能力探测与错误语义的分工同 设置视图旋转。
+    ''' <para>兑现条件在渲染侧：仅当自适应降速（pace）介入、呈现节律低于面板率时
+    ''' 才真正走 tearing；其余情况保持 vblank 钳制，防非 VRR 屏可见撕裂。</para></summary>
+    Friend Function 设置呈现配置(播放器 As 播放器原生句柄, 启用撕裂 As Boolean) As Boolean
+        Dim 函数 = 设置呈现配置函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Return 函数(播放器, If(启用撕裂, 1UI, 0UI)) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     ' 图片模式：缩放 + 平移。zoom=1 为适应窗口，pan 为相对未缩放画面的归一化偏移 [-1,1]。
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetViewTransform(播放器 As 播放器原生句柄,
