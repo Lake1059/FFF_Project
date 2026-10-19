@@ -14,6 +14,11 @@ Friend Module Program
                     StringComparison.OrdinalIgnoreCase) Then
                 Return LyricsKitRegression.运行(args.Skip(1).ToArray())
             End If
+            ' 弹幕重锚（10-19 Task 16 那条分支）：调度器层直驱 + 与呈现器 重置() 语义做分叉对照。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--danmaku-reanchor-regression",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return DanmakuReanchorRegression.运行(args.Skip(1).ToArray())
+            End If
             If args.Length > 0 AndAlso String.Equals(args(0), "--image-zoom-regression",
                     StringComparison.OrdinalIgnoreCase) Then
                 Return ImageZoomRegression.运行(args.Skip(1).ToArray())
@@ -23,6 +28,16 @@ Friend Module Program
             If args.Length > 0 AndAlso String.Equals(args(0), "--vsr-page-regression",
                     StringComparison.OrdinalIgnoreCase) Then
                 Return VsrPageRegression.运行(args.Skip(1).ToArray())
+            End If
+            ' 同页内的自动 HDR（TrueHDR）区：与 VSR 区同构的另一半，同样不新开页。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--truehdr-page-regression",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return TrueHdrPageRegression.运行(args.Skip(1).ToArray())
+            End If
+            ' 自动 HDR 的**运行时行为**（委托全替身）：上面那 17 条只量结构，本档量行为。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--truehdr-runtime-regression",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return TrueHdrRuntimeRegression.运行(args.Skip(1).ToArray())
             End If
             If args.Length > 0 AndAlso String.Equals(args(0), "--stream-selection-regression",
                     StringComparison.OrdinalIgnoreCase) Then
@@ -60,14 +75,14 @@ Friend Module Program
             ' 测试，只把"缺席"做成可见。
             If args.Length > 0 Then
                 Console.WriteLine($"入口未实现：{args(0)} —— 本树（上游 PR 工作区 3fp/kernel）没有这个入口，本次未运行任何回归。")
-                Console.WriteLine("本树已实现的入口：--lyrics-kit-regression [kit目录] | --image-zoom-regression [参数] | --image-zoom-live [参数] | --stream-selection-regression [样本目录]")
+                Console.WriteLine("本树已实现的入口：--lyrics-kit-regression [kit目录] | --danmaku-reanchor-regression [xml] [outdir] | --truehdr-runtime-regression | --image-zoom-regression [参数] | --image-zoom-live [参数] | --stream-selection-regression [样本目录]")
                 Console.Error.WriteLine($"UNIMPLEMENTED IN THIS TREE: {args(0)} => exit 3 (no regression was run)")
                 Return 3
             End If
             ' 无参数时跑**不依赖媒体与窗口**的那一档：图片缩放几何是纯函数，
             ' 同进程就能判；比"打印用法就退出"多给一条真绿灯。
             Console.WriteLine("未指定入口，运行图片缩放几何回归（纯函数，无媒体依赖）。")
-            Console.WriteLine("可用入口：--lyrics-kit-regression [kit目录] | --image-zoom-regression [参数]")
+            Console.WriteLine("可用入口：--lyrics-kit-regression [kit目录] | --danmaku-reanchor-regression [xml] [outdir] | --image-zoom-regression [参数]")
             Return ImageZoomRegression.运行(Array.Empty(Of String)())
         Catch ex As Exception
             Console.Error.WriteLine(ex)
