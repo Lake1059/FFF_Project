@@ -80,6 +80,12 @@ public:
     bool IsHdrSource() const noexcept;
     bool RequiresMetadataAwareShader() const noexcept;
     void BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) const noexcept;
+    // Static HDR10 signalling block for a frame the NVIDIA TrueHDR video-
+    // processor pass produced: BT.2020 primaries, PQ, 1000-nit peak (the
+    // extension's output contract, same max_luma mpv uses). The stream's own
+    // static metadata is deliberately not consulted -- the samples are the
+    // driver's generated HDR, not the stream's.
+    void BuildTrueHdrMetadata(DXGI_HDR_METADATA_HDR10& metadata) const noexcept;
 
     // ---- injected dynamic metadata (ST 2094-40 entry point and the generic
     // FFF3FP_SetDynamicMetadata carrier; one shared table, see the header

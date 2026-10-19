@@ -1,6 +1,7 @@
 #pragma once
 
 #include "3FP/Api/FFF.Player.Api.h"
+#include "3FP/Api/FFF.Player.AudioRenderPlug.h"
 #include "3FP/Audio/WasapiRenderer.h"
 #include "3FP/Core/PlacementPolicy.h"
 // IAMF needs the AOM reference decoder: FFmpeg splits an IAMF element into
@@ -129,6 +130,13 @@ public:
     FFFResult SetComparisonMode(bool active) noexcept;
     FFFResult GetVideoSuperResolutionStatus(
         FFF3FPVideoSuperResolutionStatus& status) const noexcept;
+    // NVIDIA automatic HDR (RTX Video HDR / TrueHDR) opt-in, default Off.
+    // Same ownership split as VSR: the session gates the comparison-mode
+    // transition and the renderer owns the device-facing decision.
+    FFFResult SetVideoAutoHdr(FFF3FPVideoAutoHdr mode) noexcept;
+    FFF3FPVideoAutoHdr RequestedVideoAutoHdr() const noexcept;
+    FFFResult GetVideoAutoHdrStatus(
+        FFF3FPVideoAutoHdrStatus& status) const noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
     // HDR presentation diagnostics (see FFF3FPHdrSignalDiagnostics in
     // FFF.Player.Api.h): which ST 2094 mechanism actually ran for the frames drawn
@@ -602,7 +610,13 @@ private:
     // close), because the presentation index restarts there -- an old entry
     // would then be keyed to a frame that no longer means what it said.
     struct SideDataBlob {
-        std::uint32_t type;               // AVFrameSideDataType value, opaque here
+        // Side-data type value, opaque here. The namespace depends on which
+        // list holds the blob: the ring carries AVFrameSideDataType values,
+        // streamSideData_ carries AVPacketSideDataType values. Different
+        // enums that collide on raw numbers -- which is why
+        // CopyFrameSideDataAfter and CopyStreamSideData are separate entry
+        // points.
+        std::uint32_t type;
         std::vector<std::uint8_t> bytes;
     };
     struct CachedSideDataFrame {

@@ -2299,7 +2299,9 @@ FFFResult PlayerSession::SetComparisonMode(const bool active) noexcept {
     comparisonModeActive_ = active;
     // Entering comparison mode forces VSR off rather than merely blocking the
     // next enable: a host that flips the flag mid-playback would otherwise keep
-    // presenting AI-altered frames into a diff view.
+    // presenting AI-altered frames into a diff view. Automatic HDR gets the
+    // same treatment for the same reason (generated pixels are not a
+    // reproducible function of the decoded frame).
     if (active && videoRenderer_.RequestedVideoSuperResolution() !=
             FFF3FPVideoSuperResolution::Off) {
         const auto result = videoRenderer_.SetVideoSuperResolution(
@@ -2311,6 +2313,13 @@ FFFResult PlayerSession::SetComparisonMode(const bool active) noexcept {
         FFF3FP_KernelLogImpl(
             "FFF.Native: RTX Video Super Resolution disabled (comparison mode active).");
     }
+    if (active && videoRenderer_.RequestedVideoAutoHdr() != FFF3FPVideoAutoHdr::Off) {
+        const auto result = videoRenderer_.SetVideoAutoHdr(FFF3FPVideoAutoHdr::Off);
+        if (result != FFFResult::Success) return result;
+        extern void FFF3FP_KernelLogImpl(const char*) noexcept;
+        FFF3FP_KernelLogImpl(
+            "FFF.Native: NVIDIA automatic HDR disabled (comparison mode active).");
+    }
     return FFFResult::Success;
 }
 
@@ -2319,6 +2328,32 @@ FFFResult PlayerSession::GetVideoSuperResolutionStatus(
     if (status.size < sizeof(FFF3FPVideoSuperResolutionStatus) || status.version != 20)
         return FFFResult::InvalidArgument;
     videoRenderer_.FillVideoSuperResolutionStatus(status);
+    return FFFResult::Success;
+}
+
+FFFResult PlayerSession::SetVideoAutoHdr(const FFF3FPVideoAutoHdr mode) noexcept {
+    // Same comparison-mode contract as VSR, and for a stronger reason: the
+    // generated HDR pixels depend on the driver's model, so a frame-exact
+    // comparison surface must never see them. Off is always allowed.
+    if (mode != FFF3FPVideoAutoHdr::Off && mode != FFF3FPVideoAutoHdr::Auto)
+        return FFFResult::InvalidArgument;
+    if (mode == FFF3FPVideoAutoHdr::Auto && comparisonModeActive_)
+        return FFFResult::InvalidState;
+    const auto result = videoRenderer_.SetVideoAutoHdr(mode);
+    if (result != FFFResult::Success)
+        ReportError(result, videoRenderer_.LastError(), "video-auto-hdr");
+    return result;
+}
+
+FFF3FPVideoAutoHdr PlayerSession::RequestedVideoAutoHdr() const noexcept {
+    return videoRenderer_.RequestedVideoAutoHdr();
+}
+
+FFFResult PlayerSession::GetVideoAutoHdrStatus(
+    FFF3FPVideoAutoHdrStatus& status) const noexcept {
+    if (status.size < sizeof(FFF3FPVideoAutoHdrStatus) || status.version != 20)
+        return FFFResult::InvalidArgument;
+    videoRenderer_.FillVideoAutoHdrStatus(status);
     return FFFResult::Success;
 }
 
@@ -3067,6 +3102,17 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         if (result != FFFResult::Success) { Fail(result, "Could not decode or render the attached cover art.", "cover-art"); return; }
     }
     bool forcedSdrOutput = false;
+    // Source bit depth of the video stream, for the scRGB-path gate below.
+    // Computed from codec parameters the same way the open event's media
+    // details do, because the decoder-level value is not populated yet at
+    // this point in DoOpen.
+    std::uint32_t sourceBitDepth = 0;
+    if (videoStream_ >= 0) {
+        const auto* parameters = format_->streams[videoStream_]->codecpar;
+        sourceBitDepth = static_cast<std::uint32_t>(std::max(
+            parameters->bits_per_raw_sample,
+            PixelFormatBitDepth(static_cast<AVPixelFormat>(parameters->format))));
+    }
     {
         std::lock_guard lock(mutex_);
         snapshot_.duration100ns = IsLoopAwareImageDemuxer(format_->iformat)
@@ -3077,8 +3123,15 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         if (videoStream_ >= 0) { snapshot_.videoWidth = videoDecoder_->width; snapshot_.videoHeight = videoDecoder_->height; ApplyHdrState(snapshot_, videoRenderer_.HdrState()); }
         else if (coverArtFrame_ != nullptr) { snapshot_.videoWidth = coverArtFrame_->width; snapshot_.videoHeight = coverArtFrame_->height; snapshot_.isHdrSource = 0; }
         // Downgrade only if HDR/wide-gamut output is unachievable; EnsureSwapChain
-        // rechecks this gate before selecting the actual format.
+        // rechecks this gate before selecting the actual format. The scRGB
+        // presentation path is not exclusive to HDR sources -- Auto SDR admits
+        // a >8-bit SDR source onto it -- so WantsScRgbPresentationPath must be
+        // part of the gate. Without it, a 10-bit SDR file requested on the HDR
+        // mode is downgraded here even though the renderer would have kept the
+        // scRGB chain, and the ColorModeChanged event then contradicts the
+        // renderer's own decision.
         if (snapshot_.isHdrSource == 0 && !videoRenderer_.IsWideGamutSource() &&
+            !videoRenderer_.WantsScRgbPresentationPath(sourceBitDepth) &&
             snapshot_.requestedColorMode == FFF3FPColorMode::MapToHdr) {
             snapshot_.requestedColorMode = FFF3FPColorMode::MapToSdr;
             forcedSdrOutput = true;
@@ -3131,13 +3184,30 @@ void PlayerSession::DoOpen(std::string path) noexcept {
                 ? "The GPU rejected the video stream; playback is using CPU decoding."
                 : hardwareFailureReason) + "\"}");
     if (forcedSdrOutput)
+        // "requested" is the host's original ask (MapToHdr == 2 -- the
+        // downgrade only fires in that case) and "actual" is read from the
+        // renderer after ForceSdrOutputForSdrSource. The old text emitted
+        // requested:0 next to a reason explaining a MapToHdr refusal, which
+        // contradicted itself and made hosts show "no change" for a change.
         Emit(FFF3FPEvent::ColorModeChanged,
-            "{\"requested\":0,\"actual\":0,\"reason\":\"" +
+            "{\"requested\":2,\"actual\":" +
+            std::to_string(static_cast<unsigned>(snapshot_.actualColorMode)) +
+            ",\"reason\":\"" +
             EscapeJson(videoRenderer_.FallbackReason().empty()
                 ? std::string("True HDR output is only available for HDR or wide-gamut sources.")
                 : videoRenderer_.FallbackReason()) + "\"}");
-    else if (snapshot_.requestedColorMode == FFF3FPColorMode::MapToHdr && snapshot_.actualColorMode != snapshot_.requestedColorMode)
-        Emit(FFF3FPEvent::ColorModeChanged, "{\"requested\":2,\"actual\":0,\"reason\":\"" + EscapeJson(videoRenderer_.FallbackReason()) + "\"}");
+    else if (snapshot_.requestedColorMode == FFF3FPColorMode::MapToHdr) {
+        // Same rule as the branch above: compare and report the renderer's
+        // actual mode from the same read, so a host never sees a claimed change
+        // the renderer did not make. The per-frame path re-emits with the
+        // settled value once the first frame has been presented.
+        const auto actualMode = videoRenderer_.ActualColorMode();
+        if (actualMode != snapshot_.requestedColorMode)
+            Emit(FFF3FPEvent::ColorModeChanged,
+                "{\"requested\":2,\"actual\":" +
+                std::to_string(static_cast<unsigned>(actualMode)) +
+                ",\"reason\":\"" + EscapeJson(videoRenderer_.FallbackReason()) + "\"}");
+    }
 }
 
 FFFResult PlayerSession::DecodeInitialFrame() noexcept {
