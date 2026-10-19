@@ -135,6 +135,7 @@ struct FFF3FPConfiguration {
     // colour-space API, or a swap chain that rejects
     // DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 - that rejection rebuilds the chain and
     // then backs off for 10 s before retrying.
+    // FFF3FP_SDR_SCRGB=0/1 overrides whatever the caller passes, for measurement only.
     std::uint32_t sdrScRgbMode = 1;
     // Adaptive downscale-before-upload. Software-decoded frames cross PCIe as whole
     // planes -- an 8K P010 frame is ~100 MB -- which caps playback well below the
@@ -373,23 +374,31 @@ struct FFF3FPSnapshot {
     // show up as GPU draw cost instead of hiding inside the upload number.
     // Appended at the end for the offset reason above.
     std::uint64_t scalePassCount;
-    // The operands a bandwidth needs. uploadCopy100ns on its own is a duration that
-    // cannot be turned into GB/s, and it was divided by PRESENTED frames while nobody
-    // recorded how many pictures were uploaded -- so every "GB/s" quoted from the
-    // snapshot was a theoretical frame size (W*H*1.5*bpp) over an inferred denominator.
-    // Both are now measured. Appended at the end for the offset reason above.
+    // Bytes actually handed to the copy, and how many pictures were uploaded.
+    // uploadCopy100ns on its own cannot be turned into a bandwidth: the snapshot
+    // recorded no byte count and no upload count, so every "GB/s" quoted from it
+    // was computed from a *theoretical* frame size (W*H*1.5*bpp) divided by a
+    // per-PRESENTED-frame time. Both operands were guesses -- an 8K arm that drops
+    // 16 of its 57 decoded frames per second divides by 41, and nothing in the
+    // snapshot says whether those 16 were uploaded at all. With these two,
+    // bytes/upload and bytes/copy100ns are both measured.
+    // Appended at the end for the offset reason above.
     std::uint64_t uploadCount;
     std::uint64_t uploadCopyBytes;
-    // Which upload branch the last picture took, because the branches move the same
-    // bytes into different kinds of memory and were previously indistinguishable:
-    //   1 staging ring (uploadRung_ != 0)  - 2 DYNAMIC + Map(WRITE_DISCARD)
+    // Which upload branch the last picture took, because the branches move
+    // different numbers of bytes into different kinds of memory and were
+    // previously indistinguishable:
+    //   0 none yet - 1 planar STAGING + Map(WRITE) (the >= 4K rung)
+    //   2 planar DYNAMIC + Map(WRITE_DISCARD) (the < 4K rung)
     //   3 packed UpdateSubresource inside directYuv
-    //   4 half-float UpdateSubresource     - 5 RGB layout 0 UpdateSubresource
-    // uploadCopyBytes is exact for 1, 2 and 5. The UpdateSubresource arms leave it
-    // untouched rather than guessing a texture size they do not carry, and stay
-    // identifiable through this field. (The test tree additionally has a 6th value,
-    // an env-gated planar-UpdateSubresource arm; it is deliberately not mirrored
-    // here, where this tree keeps the upload ladder without experiment copy modes.)
+    //   4 half-float UpdateSubresource - 5 RGB layout 0 UpdateSubresource
+    //   6 planar/semi-planar via UpdateSubresource -- the pre-#25 large-frame route,
+    //     kept as an env-gated A/B arm against path 1. Bytes stay exact here: the
+    //     box handed to the driver is the whole frame, so this arm is comparable to
+    //     path 1 on bytes-per-upload and on uploadCopy100ns.
+    // uploadCopyBytes is exact for 1 and 2; the UpdateSubresource arms do not know
+    // their own byte total here, so they leave it untouched and stay identifiable
+    // by this field instead of being silently averaged in.
     // Appended at the end for the offset reason above.
     std::uint32_t uploadPath;
 };
@@ -730,6 +739,12 @@ enum class FFF3FPVideoSuperResolutionReason : std::uint32_t {
     SourceResolutionOutOfRange = 4,
     UnsupportedSourceFormat = 5,
     DriverRejected = 6,
+    // VSR was requested but the frame's video-processor pass belonged to
+    // automatic HDR (TrueHDR owns the pass because its output contract is
+    // PQ/BT.2020, which the VSR intermediate cannot represent). VSR's PPE
+    // extension may still ride along inside that pass. Tail-appended only, so
+    // an older host reports it as an unknown value.
+    YieldedToAutoHdr = 7,
 };
 
 struct FFF3FPVideoSuperResolutionStatus {
@@ -753,6 +768,78 @@ struct FFF3FPVideoSuperResolutionStatus {
     std::uint32_t sourceHeight;
     std::uint32_t targetWidth;
     std::uint32_t targetHeight;
+};
+
+// NVIDIA RTX Video HDR ("auto HDR", driver-internal name TrueHDR). Like VSR
+// this is a vendor-private stream extension on the standard
+// ID3D11VideoProcessor, reached through a second NVIDIA GUID; unlike VSR it
+// has a documented capability probe (VideoProcessorGetStreamExtension reads
+// back 1). GUID, payload and probe appear byte-for-byte identical across
+// Chromium and mpv:
+//
+//   Chromium  ui/gl/swap_chain_presenter.cc   ToggleNvidiaVpTrueHDR() /
+//                                             NvidiaDriverSupportsTrueHDR()
+//   mpv       video/filter/vf_d3d11vpp.c      enable_nvidia_true_hdr() /
+//                                             supports_nvidia_true_hdr()
+//
+// Scope: the extension converts an SDR stream to HDR10 (BT.2020 primaries, PQ
+// transfer) inside VideoProcessorBlt. Verified constraints shared by both
+// implementations:
+//   * SDR input only -- an HDR source is refused ("This filter only converts
+//     SDR to HDR", mpv 5abce15f1).
+//   * The output must be re-tagged and carried on a 10-bit RGB surface
+//     (R10G10B10A2_UNORM, HDR10). mpv 0.41.0 shipped the trap: it enabled the
+//     extension but never retagged, and the frames came out identical
+//     (byte-identical screenshots). The renderer therefore only engages this
+//     path when it already presents the scRGB/10-bit HDR output contract, and
+//     feeds the PQ surface into the normal HDR colour pipeline.
+//
+// Like VSR: a switch, NOT a default; Off keeps the renderer byte-identical to
+// the pre-enhancement behaviour, and the renderer refuses to enable it while a
+// comparison-style mode is active.
+enum class FFF3FPVideoAutoHdr : std::uint32_t {
+    // Default. SDR frames take the classic path exactly as before.
+    Off = 0,
+    // Attempt the driver's SDR->HDR conversion whenever the source and the
+    // output path satisfy the conditions above.
+    Auto = 1,
+};
+
+// Why the last presented frame did or did not use the driver's auto HDR.
+// Reported so a host can explain the state without guessing; 0 means "used"
+// when active is 1.
+enum class FFF3FPVideoAutoHdrReason : std::uint32_t {
+    None = 0,
+    NotRequested = 1,
+    NotNvidiaAdapter = 2,
+    NotSupportedByDriver = 3,
+    NotSdrSource = 4,
+    OutputPathNotHdr = 5,
+    UnsupportedSourceFormat = 6,
+    DriverRejected = 7,
+};
+
+struct FFF3FPVideoAutoHdrStatus {
+    std::uint32_t size;
+    std::uint32_t version; // == 20
+    FFF3FPVideoAutoHdr requested;
+    // The adapter backing the renderer's D3D11 device is NVIDIA.
+    std::uint32_t nvidiaAdapter;
+    // The extension was requested, the driver's capability probe read back 1,
+    // and VideoProcessorBlt succeeded with the HDR output contract in force on
+    // the last frame. Stronger than VSR's bit because the probe exists, but it
+    // still is not a perceptual guarantee: the generated HDR is the driver's
+    // and its quality level belongs to the NVIDIA App.
+    std::uint32_t active;
+    // The driver rejected the request or the blit failed; latched off until the
+    // host issues a fresh Auto request (which re-probes).
+    std::uint32_t driverRejected;
+    FFF3FPVideoAutoHdrReason reason;
+    // Geometry of the last frame's video-processor pass (0 when inactive).
+    std::uint32_t sourceWidth;
+    std::uint32_t sourceHeight;
+    std::uint32_t outputWidth;
+    std::uint32_t outputHeight;
 };
 
 #ifdef FFFNATIVE_EXPORTS
@@ -1449,6 +1536,14 @@ FFF3FP_API FFFResult FFF3FP_SetVideoSuperResolution(FFF3FPHandle player,
     FFF3FPVideoSuperResolution mode) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetVideoSuperResolutionStatus(FFF3FPHandle player,
     FFF3FPVideoSuperResolutionStatus* status) noexcept;
+
+// RTX Video HDR (driver-level "auto HDR" / TrueHDR). Appended entry points
+// like the VSR pair above: additive, so PlayerApiVersion is unchanged and a
+// host that never resolves them keeps working against this DLL.
+FFF3FP_API FFFResult FFF3FP_SetVideoAutoHdr(FFF3FPHandle player,
+    FFF3FPVideoAutoHdr mode) noexcept;
+FFF3FP_API FFFResult FFF3FP_GetVideoAutoHdrStatus(FFF3FPHandle player,
+    FFF3FPVideoAutoHdrStatus* status) noexcept;
 
 // --- Frame readback for screenshots ---
 //

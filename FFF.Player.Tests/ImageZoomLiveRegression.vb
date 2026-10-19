@@ -46,6 +46,12 @@ Friend Module ImageZoomLiveRegression
     Private 假内核缩放 As Single = 1.0F
     Private Const 假内核下钳 As Single = 0.05F
     Private Const 假内核上钳 As Single = 64.0F
+    ''' <summary>宿主可达的最高档（相对 z）。内核 GetImageZoom 报的界是 [f, f×32]
+    ''' （VideoRenderer.cpp:2692）⇒ 换到相对口径就是 32；而 ZoomViewAt 内部钳到 64（:2713）、
+    ''' 图片缩放几何 按 64/f 建模（该文件 最大缩放）。**三份上界本来就不一致**，
+    ''' 宿主实际能走到的只有 32。旧档把 64 当期望值，是因为假内核当时照抄了几何层那份数；
+    ''' 这条不一致单独进账，本轮不顺手改语义。</summary>
+    Private Const 宿主可达上限档 As Single = 32.0F
     ' 绝对提交（SetViewTransform）在图片模式是**另一套**界：见 VideoRenderer.cpp:2327-2328。
     ' 与上面那对（滚轮 ZoomViewAt，:2377）刻意不同值，假内核才能重现真内核的分叉。
     Private Const 假内核绝对下钳 As Single = 1.0F
@@ -107,6 +113,7 @@ Friend Module ImageZoomLiveRegression
 
     Private Function 锚定(倍数 As Single, 锚点水平 As Single, 锚点垂直 As Single,
                           ByRef 结果缩放 As Single) As Boolean
+        ' ZoomViewAt 口径：钳 viewZoom ∈ [0.05,64]，回读**相对**倍数（:2713/:2781）
         假内核缩放 = Math.Min(假内核上钳, Math.Max(假内核下钳, 假内核缩放 * 倍数))
         结果缩放 = 假内核缩放
         下发次数 += 1
@@ -119,9 +126,11 @@ Friend Module ImageZoomLiveRegression
     ' 合并后控制器是上游 8 参构造器，补足后三个委托（假内核读数 / 平移 / 旋转）。
     Private Function 读取缩放(ByRef 当前倍率 As Single, ByRef 最小倍率 As Single,
                               ByRef 最大倍率 As Single) As Boolean
-        当前倍率 = 假内核缩放
-        最小倍率 = 假内核下钳
-        最大倍率 = 假内核上钳
+        ' GetImageZoom 口径：回**绝对**比 f×viewZoom，界是 [f, f×32]（:2691-2693）。
+        ' 这里若图省事回相对值（旧写法），宿主"绝对/相对混用"那一整类缺陷就结构上测不到。
+        当前倍率 = 假内核f值 * 假内核缩放
+        最小倍率 = 假内核f值
+        最大倍率 = 假内核f值 * 32.0F
         Return True
     End Function
 
@@ -163,8 +172,27 @@ Friend Module ImageZoomLiveRegression
         Return True
     End Function
 
+    ' ── 假内核的单位口径：必须与真内核逐行一致 ────────────────────────────────
+    ' 真内核两个入口报的**不是同一个量**：
+    '   GetImageZoom（VideoRenderer.cpp:2691-2693）：minimum = 适配盒宽/源宽 = f，
+    '     zoom = minimum × viewZoom ⇒ 回的是"一个源像素占几屏幕像素"的**绝对**比，
+    '     上界 minimum×32（:2692）。Interop 注释（播放器原生接口.vb:1133）同口径。
+    '   ZoomViewAt（:2713/:2778-2781）：钳 viewZoom ∈ [0.05,64]，回读**相对**倍数。
+    ' 宿主 准备视图 在 10-19 之前把绝对值直接当相对 z 用，于是"拖不动 + 滚轮每格只走一拍"
+    ' （判据 S14/S15）。假内核若只有一套单位，这层分叉在结构上就看不见 —— 所以这里
+    ' 一律按真内核的三元组回报：(f×z, f, f×32)。
+    Private 假内核f值 As Single = 1.0F           ' = 内核 minimum = 适配盒宽/源宽
+
+    ''' <summary>手算 f，不调 图片缩放几何 —— 期望值不能取自被测模块自己（同 S5 的 D2 口径）。
+    ''' 内核把适配盒恒钳在源原生尺寸，所以 f 不超过 1。</summary>
+    Private Function 算假内核f(源宽 As UInteger, 源高 As UInteger) As Single
+        If 源宽 = 0 OrElse 源高 = 0 Then Return 1.0F
+        Return Math.Min(1.0F, Math.Min(CSng(视口宽()) / CSng(源宽), CSng(视口高()) / CSng(源高)))
+    End Function
+
     ''' <summary>开一档干净场景：进图片模式（会复位视图）→ 清计数 → 假内核同步到 1.0。</summary>
     Private Sub 场景开始(源宽 As UInteger, 源高 As UInteger)
+        假内核f值 = 算假内核f(源宽, 源高)
         全局控制器.测试进入图片模式(源宽, 源高)
         假内核缩放 = 1.0F
         下发次数 = 0
@@ -236,6 +264,10 @@ Friend Module ImageZoomLiveRegression
             RunS10_drag_follows_pointer()
             RunS11_small_image()
             RunS12_doubleclick_small_image()
+            ' S14/S15：同一套动作，只差"假内核按不按真内核的单位口径回读"。
+            RunS14_拖拽跟手(12000UI, 9000UI, "S14 大图 f<1")
+            RunS14_拖拽跟手(200UI, 200UI, "S15 小图 f=1")
+            RunS16_带内双击()
 
             ' ── S13 绝对提交不变量：把"两套钳位分叉"从隐患变成有人看着的判据 ──────
             ' 内核图片模式下两条入口的界**不是同一套**：绝对路径 [1.0, 32]
@@ -331,7 +363,9 @@ Friend Module ImageZoomLiveRegression
     Private Sub RunS4_bound()
         场景开始(12000UI, 9000UI)
         Dim f = 图片缩放几何.单位屏幕比(视口宽(), 视口高(), 12000UI, 9000UI)
-        Dim 上限 = 图片缩放几何.最大缩放(f)
+        ' 停到的不是几何层算出的 64/f，而是内核报给宿主的界 f×32 ⇒ 相对 32
+        ' （见 宿主可达上限档 的注释：三份上界本来就不一致，这条单独进账）。
+        Dim 上限 = 宿主可达上限档
         For i = 1 To 40
             全局控制器.测试滚轮(120, 600, 200)
         Next
@@ -385,7 +419,8 @@ Friend Module ImageZoomLiveRegression
         泵(0.9)
         检查(Not 图片缩放几何.一比一可达(全局画面.Width, 全局画面.Height, 16384UI, 2000UI),
              "S6 判据认定该组合够不到 1:1", $"{全局画面.Width}x{全局画面.Height}")
-        检查(Math.Abs(末值() - 假内核上钳) < 0.02, "S6 实际停在内核上限而不是谎称 1:1", $"末={末值():F2}")
+        检查(Math.Abs(末值() - 宿主可达上限档) < 0.02,
+             "S6 实际停在内核报给宿主的上限而不是谎称 1:1", $"末={末值():F2} 上限={宿主可达上限档:F1}")
         检查(最近提示.Contains("够不到 1:1"), "S6 末句仍带着「够不到 1:1」没被顶掉", $"提示「{最近提示}」")
         全局窗体.ClientSize = New Size(1264, 681)
         泵(0.2)
@@ -517,8 +552,10 @@ Friend Module ImageZoomLiveRegression
         检查(Math.Abs(末值() - 1.25F) < 0.002, "S11 小图一格滚轮落到 1.25", $"末={末值():F4}（1.0×1.25）")
 
         ' 再连滚 5×5 = 25 格：1.25^26 = 330.9 远超上界 ⇒ 终点只能是上界本身。
-        ' 上界手算 = 每像素最多 64 屏幕像素 ÷ f(=1) = 64.0，与内核上钳同值 ⇒ 期望写死 64.0F。
-        ' 修前那条界算成 64/3.405 = 18.79，滚到 18.79 就"滚轮没反应"，这就是本档的牙。
+        ' 上界取**内核报给宿主的那一份**（GetImageZoom 的 maximum = minimum×32 ⇒ 相对 32），
+        ' 不是几何层的 64/f：三份上界本来就不一致，能走到的只有 32（见 宿主可达上限档 注释）。
+        ' 修前那条界算成 64/3.405 = 18.79，滚到 18.79 就"滚轮没反应"，这就是本档的牙
+        ' —— 换成 32 之后这条牙不钝：18.79 照样红。
         For 批 As Integer = 1 To 5
             For i As Integer = 1 To 5
                 投滚轮(输出面.Handle, 120, cx, cy)
@@ -526,9 +563,9 @@ Friend Module ImageZoomLiveRegression
             泵(0.45)
         Next
         泵(0.8)
-        检查(Math.Abs(末值() - 64.0F) < 0.02, "S11 连滚 26 格顶到 64（不是修前的 18.79）",
-             $"末={末值():F2} 期望=64.0=64/1.0；未封顶建模是 64/3.405=18.79")
-        检查(峰值() <= 64.0F + 0.0005F, "S11 全程没越过内核 64", $"峰={峰值():F4}")
+        检查(Math.Abs(末值() - 宿主可达上限档) < 0.02, "S11 连滚 26 格顶到 32（不是建模错的 18.79）",
+             $"末={末值():F2} 期望={宿主可达上限档:F1}=内核报的 f×32/f；未封顶建模是 64/3.405=18.79")
+        检查(峰值() <= 宿主可达上限档 + 0.0005F, "S11 全程没越过内核报给宿主的界", $"峰={峰值():F4}")
         检查(单调不减(), "S11 轨迹单调（不回抽）", $"{轨迹.Count} 点")
 
         ' 拖动灵敏度：内核 offsetX = pan × |fittedWidth×z − fittedWidth| / 2（VideoRenderer.cpp:5933），
@@ -608,6 +645,95 @@ Friend Module ImageZoomLiveRegression
         检查(提示记录.Count > 0, "S12 双击至少给一句反馈（不是闷着不动）", $"末句「{最近提示}」")
         检查(说了小图, "S12 双击那句反馈讲清了「图片比窗口小，适应就是 1:1」（D4）",
              $"共 {提示记录.Count} 句，末句「{最近提示}」")
+    End Sub
+
+    ' ── S14/S15：拖拽提不提供视图，只由 f（适配盒/源）决定 ────────────────────
+    ' 假内核现在一律按真内核的三元组回报 (f×z, f, f×32)，所以这两档的唯一变量是**源尺寸**：
+    '   S14 大图 12000×9000 ⇒ f≈0.076（绝对 ≠ 相对）；
+    '   S15 小图 200×200   ⇒ f = 1（绝对 == 相对）。
+    ' 宿主 准备视图 若把内核的绝对读数当相对 z 用（10-19 之前的写法），只有 f<1 那档会坏：
+    ' 滚轮 14 格只走到 1.11 档、平移零提交；f=1 那档两方向都看不出问题。
+    ' 两档动作完全相同（逐格泵 14 格真滚轮 → 真 DOWN/MOVE/UP 拖 120px）。
+    Private Sub RunS14_拖拽跟手(源宽 As UInteger, 源高 As UInteger, 标签 As String)
+        Dim 输出面 = 取输出面()
+        If 输出面 Is Nothing Then
+            检查(False, $"{标签} 拿不到输出子窗", $"{全局画面.Controls.Count} 个")
+            Return
+        End If
+        场景开始(源宽, 源高)
+        Dim r = 输出面.RectangleToScreen(输出面.ClientRectangle)
+        Dim cx = r.Left + r.Width \ 2
+        Dim cy = r.Top + r.Height \ 2
+        For i As Integer = 1 To 14
+            投滚轮(输出面.Handle, 120, cx, cy)
+            ' 必须逐格泵：产品上滚轮是 60ms 一格、中间消息循环照转。不泵就成了"一次注入 14 格"
+            ' 的突发，那是另一种工况（量到的是合并后的终值，不是每格都被打断的那个毛病）。
+            泵(0.12)
+        Next
+        泵(1.0)
+        Dim 末提示 = 最近提示
+        Dim 缩放提交次数 = 锚定下发
+        Dim 到档 = 末值()
+        下发次数 = 0
+        轨迹.Clear()
+        水平记录.Clear()
+        垂直记录.Clear()
+        Dim x0 = 300, y0 = 300, dx = 120
+        投鼠标(输出面.Handle, &H201, New IntPtr(1), x0, y0)
+        泵(0.05)
+        投鼠标(输出面.Handle, &H200, New IntPtr(1), x0 + dx, y0)
+        泵(0.5)
+        投鼠标(输出面.Handle, &H202, IntPtr.Zero, x0 + dx, y0)
+        泵(0.5)
+        Dim 累加 As Single = 0.0F
+        For Each v In 水平记录
+            累加 += v
+        Next
+        记($"{标签}：f={假内核f值:F4} 滚轮 14 格后到档 z={到档:F2}（标称 1.25^14=22.74）" &
+            $"锚定 {缩放提交次数} 次 末提示「{末提示}」 平移提交 {水平记录.Count} 次 Σ={累加:F2}px 手指={dx}px")
+        检查(Math.Abs(到档 - 22.74F) < 0.6F, $"{标签} 连滚 14 格走到 1.25^14≈22.7 档",
+             $"实到 z={到档:F2}（每格只走一拍弹簧会停在 1.11）")
+        检查(水平记录.Count > 0, $"{标签} 拖 120px 至少提交一次平移视图", $"{水平记录.Count} 次提交")
+        检查(Math.Abs(累加 - dx) < 0.02F * dx, $"{标签} 提交量跟手（Σ≈手指位移）",
+             $"Σ={累加:F2} 期望={dx}")
+    End Sub
+
+    ' ── S16：f ∈ [1/64, 1/32) 这一带的真双击 —— "够不到 1:1" 必须说出口 ────────
+    ' 与 ImageZoomRegression 的"带内"那一组配对：纯函数档判 一比一可达 的布尔，这一档判产品
+    ' **说出来没有**。源 27240×27240 进真控件（1264×681）⇒ f = 681/27240 = 0.025、1/f = 40
+    ' 超过内核可达界 32 ⇒ 双击只能停在 32×fit = 1:1 的 80%。
+    ' 旧常数 内核最大缩放=64 时 够不到一比一 不置位，播报只剩"已到最大缩放（80%）"——
+    ' 用户读到的是"到顶了"，不知道 1:1 是够不着而不是坏了。S6 的夹具 f=0.0122 在 1/64 之下，
+    ' 两版都判 False，抓不到这一带，所以必须有 S16。
+    Private Sub RunS16_带内双击()
+        Dim 输出面 = 取输出面()
+        If 输出面 Is Nothing Then
+            检查(False, "S16 拿不到输出子窗", $"{全局画面.Controls.Count} 个")
+            Return
+        End If
+        场景开始(27240UI, 27240UI)
+        Dim 视口宽值 = 全局画面.Width, 视口高值 = 全局画面.Height
+        ' 先钉前置条件本身（判据不成立就别怪产品）
+        检查(Not 图片缩放几何.适应即一比一(视口宽值, 视口高值, 27240UI, 27240UI),
+             "S16 前置：这一档适应 ≠ 1:1", $"{视口宽值}x{视口高值} vs 27240x27240")
+        检查(Math.Abs(图片缩放几何.单位屏幕比(视口宽值, 视口高值, 27240UI, 27240UI) - 0.025F) < 0.0015F,
+             "S16 前置：f≈0.025 落在 [1/64, 1/32) 带内",
+             $"f={图片缩放几何.单位屏幕比(视口宽值, 视口高值, 27240UI, 27240UI):F4}")
+        Dim 中点x = Math.Max(1, 输出面.Width \ 2), 中点y = Math.Max(1, 输出面.Height \ 2)
+        投鼠标(输出面.Handle, &H201, New IntPtr(1), 中点x, 中点y)
+        泵(0.05)
+        投鼠标(输出面.Handle, &H202, IntPtr.Zero, 中点x, 中点y)
+        泵(0.05)
+        投鼠标(输出面.Handle, &H203, New IntPtr(1), 中点x, 中点y)
+        泵(0.05)
+        投鼠标(输出面.Handle, &H202, IntPtr.Zero, 中点x, 中点y)
+        泵(2.0)
+        记($"S16：末值 z={末值():F2}（可达界 32，1:1 要 40）末提示「{最近提示}」")
+        检查(Math.Abs(末值() - 32.0F) < 0.05F, "S16 双击停在可达界 32（不是 1/f=40）", $"末={末值():F2}")
+        检查(最近提示.Contains("够不到 1:1"), "S16 播报里带出「够不到 1:1」（旧常数下这句被省掉）",
+             $"末句「{最近提示}」")
+        检查(最近提示.Contains("80%"), "S16 那句的百分比按**绝对**口径报（32×f=0.8 ⇒ 80%）",
+             $"末句「{最近提示}」")
     End Sub
 
     ' 输出子窗（画面控件的第一个子控件）。拿不到就判失败，不静默跳过。
