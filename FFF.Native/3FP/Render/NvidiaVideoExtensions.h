@@ -72,4 +72,52 @@ bool IsNvidiaAdapter(ID3D11Device* device) noexcept;
 HRESULT SetSuperResolution(ID3D11VideoContext* videoContext,
     ID3D11VideoProcessor* videoProcessor, bool enable) noexcept;
 
+// RTX Video HDR ("TrueHDR"), NVIDIA's automatic SDR->HDR enhancement. It is a
+// second vendor-private stream extension on the very same
+// ID3D11VideoProcessor, with a different GUID and payload:
+//
+//   probe  VideoProcessorGetStreamExtension(guid, sizeof(UINT), &out)
+//          supported <=> the UINT reads back 1. Unlike the PPE GUID, this one
+//          DOES answer the capability query -- but the HRESULT still lies
+//          (S_OK on adapters without the feature), so the payload is the only
+//          usable signal.
+//   set    VideoProcessorSetStreamExtension with a 12-byte payload
+//          {version = 4, method = 3, enable : 1 | reserved : 31}.
+//
+// Interface facts taken from mpv (video/filter/vf_d3d11vpp.c) and Chromium's
+// ToggleNvidiaVpHdr, which agree byte for byte:
+//   * SDR input only (mpv commit 5abce15f1: the extension is requested only
+//     for non-HDR frames).
+//   * Output contract: R10G10B10A2_UNORM samples, BT.2020 primaries, PQ
+//     transfer, 1000-nit peak. The caller MUST re-tag the frame accordingly;
+//     mpv 0.41.0 shipped a build that called the extension without re-tagging
+//     and produced a screenshot bit-identical to the un-enhanced one -- the
+//     driver honoured the call and the picture did not change.
+//   * Needs an HDR10-capable display with Windows HDR enabled to be visible.
+inline constexpr GUID TrueHdrInterfaceGuid{
+    0xfdd62bb4, 0x620b, 0x4fd7, {0x9a, 0xb3, 0x1e, 0x59, 0xd0, 0xd5, 0x44, 0xb3}};
+
+inline constexpr UINT StreamExtensionVersionTrueHdr = 0x4;
+inline constexpr UINT StreamExtensionMethodTrueHdr = 0x3;
+
+struct TrueHdrStreamExtension {
+    UINT version;
+    UINT method;
+    UINT enable;  // bit 0 is the switch; the remaining 31 bits are reserved and must be 0
+};
+
+/// TrueHDR availability probe. Supported <=> the driver's read-back UINT is 1.
+/// The HRESULT is deliberately ignored: on this GUID it returns S_OK even
+/// where the feature does not exist, so a caller that trusts it would report
+/// a capability the adapter does not have.
+bool IsTrueHdrSupported(ID3D11VideoContext* videoContext,
+    ID3D11VideoProcessor* videoProcessor) noexcept;
+
+/// Enable or disable TrueHDR on one video processor's stream 0. Returns the
+/// driver's HRESULT from the Set call. Same discipline as SetSuperResolution:
+/// success is permission to attempt, never proof of effect -- the caller must
+/// verify the blit AND re-tag the output samples as PQ/BT.2020.
+HRESULT SetTrueHdr(ID3D11VideoContext* videoContext,
+    ID3D11VideoProcessor* videoProcessor, bool enable) noexcept;
+
 } // namespace FFF3FP::NvidiaVideo

@@ -341,6 +341,21 @@ FFFResult FFF3FP_GetVideoSuperResolutionStatus(const FFF3FPHandle player,
         : FFFResult::InvalidArgument;
 }
 
+// NVIDIA automatic HDR (RTX Video HDR, video-processor private path). Appended
+// like the VSR exports above: additive entry points, PlayerApiVersion unchanged,
+// and an older kernel simply fails to resolve them (treated as unavailable).
+FFFResult FFF3FP_SetVideoAutoHdr(const FFF3FPHandle player,
+    const FFF3FPVideoAutoHdr mode) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetVideoAutoHdr(mode)
+        : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_GetVideoAutoHdrStatus(const FFF3FPHandle player,
+    FFF3FPVideoAutoHdrStatus* status) noexcept {
+    return player && status
+        ? static_cast<PlayerSession*>(player)->GetVideoAutoHdrStatus(*status)
+        : FFFResult::InvalidArgument;
+}
+
 FFFResult FFF3FP_SetViewRotation(const FFF3FPHandle player,
     const std::uint32_t quarterTurnsClockwise) noexcept {
     return player

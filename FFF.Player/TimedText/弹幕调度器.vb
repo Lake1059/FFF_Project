@@ -12,12 +12,82 @@ Public NotInheritable Class 默认弹幕文本测量器
             Function() DWrite.DWriteCreateFactory(Of IDWriteFactory)(FactoryType.Shared),
             Threading.LazyThreadSafetyMode.ExecutionAndPublication)
 
+    ' 文本宽度只取决于（文本, 字体, 字号, 样式），与位置和时间无关，所以可以缓存。
+    ' 这不是微优化：调度器在每条弹幕入屏时测一次，而"行内前后间距"配得比较紧时
+    ' （设置默认 5 行 / 间距 30）绝大多数新条目会在测完之后才发现没有空行、测量被
+    ' 白扔；同一条弹幕每次重新滚入屏幕又要再测一遍。缓存后命中率会迅速接近 1。
+    Private Const 缓存上限 As Integer = 2048
+    Private Shared ReadOnly 缓存 As New Dictionary(Of 测量键, Single)()
+    Private Shared ReadOnly 缓存锁 As New Object()
+    Private Shared 命中次数 As Long
+    Private Shared 未命中次数 As Long
+
+    ''' <summary>缓存命中次数（Shared：进程内所有弹幕调度共用同一个测量器类型）。</summary>
+    Friend Shared ReadOnly Property 缓存命中次数 As Long
+        Get
+            Return Threading.Interlocked.Read(命中次数)
+        End Get
+    End Property
+
+    Friend Shared ReadOnly Property 缓存未命中次数 As Long
+        Get
+            Return Threading.Interlocked.Read(未命中次数)
+        End Get
+    End Property
+
+    Friend Structure 测量键
+        Public ReadOnly 文本 As String
+        Public ReadOnly 字体 As String
+        Public ReadOnly 字号位元 As Integer
+        Public ReadOnly 样式位元 As Integer
+
+        Friend Sub New(文本值 As String, 字体值 As String, 字号值 As Single, 样式值 As Integer)
+            文本 = 文本值
+            字体 = 字体值
+            字号位元 = BitConverter.SingleToInt32Bits(字号值)
+            样式位元 = 样式值
+        End Sub
+
+        Public Overrides Function Equals(obj As Object) As Boolean
+            If TypeOf obj IsNot 测量键 Then Return False
+            Dim other = DirectCast(obj, 测量键)
+            Return 字号位元 = other.字号位元 AndAlso 样式位元 = other.样式位元 AndAlso
+                String.Equals(文本, other.文本, StringComparison.Ordinal) AndAlso
+                String.Equals(字体, other.字体, StringComparison.Ordinal)
+        End Function
+
+        Public Overrides Function GetHashCode() As Integer
+            Return HashCode.Combine(文本, 字体, 字号位元, 样式位元)
+        End Function
+    End Structure
+
     Public Function 测量宽度(文本 As String, 字体 As String, 字号像素 As Single) As Single Implements I弹幕文本测量器.测量宽度
         Return 测量宽度(文本, 字体, 字号像素, System.Drawing.FontStyle.Regular)
     End Function
 
     Public Function 测量宽度(文本 As String, 字体 As String, 字号像素 As Single,
                          样式 As System.Drawing.FontStyle) As Single
+        Dim 键 As New 测量键(文本, 字体, 字号像素, CInt(样式))
+        SyncLock 缓存锁
+            Dim 已有 As Single
+            If 缓存.TryGetValue(键, 已有) Then
+                Threading.Interlocked.Increment(命中次数)
+                Return 已有
+            End If
+        End SyncLock
+        Threading.Interlocked.Increment(未命中次数)
+        Dim 宽度 = 计算宽度(文本, 字体, 字号像素, 样式)
+        If Single.IsFinite(宽度) AndAlso 宽度 >= 0.0F Then
+            SyncLock 缓存锁
+                If 缓存.Count >= 缓存上限 Then 缓存.Clear()
+                缓存(键) = 宽度
+            End SyncLock
+        End If
+        Return 宽度
+    End Function
+
+    Private Shared Function 计算宽度(文本 As String, 字体 As String, 字号像素 As Single,
+                                 样式 As System.Drawing.FontStyle) As Single
         Try
             Dim 标志 = CType(CInt(样式) And &HF, 原生定时文字标志)
             Dim 原生宽度 As Single
@@ -163,6 +233,7 @@ Public NotInheritable Class 弹幕调度器
     Private 过滤器 As 弹幕过滤器
     Private 游标 As Integer
     Private 上一帧 As Long = Long.MinValue
+    Private 上一帧有效 As Boolean
     Private 上一时间秒 As Double = Double.NaN
     Private 上一签名 As Integer
     Private 签名有效 As Boolean
@@ -201,6 +272,7 @@ Public NotInheritable Class 弹幕调度器
         活动列表.Clear()
         游标 = 0
         上一帧 = Long.MinValue
+        上一帧有效 = False
         上一时间秒 = Double.NaN
         上一签名 = 0
         签名有效 = False
@@ -229,11 +301,18 @@ Public NotInheritable Class 弹幕调度器
         Dim 滚动速度 = 实际滚动速度(区域)
         Dim 顶部边距 = 实际顶部边距(区域)
         Dim 行间距 = 配置.行间距 * 区域.缩放系数
-        Dim 最大连续间隔 = Math.Max(0.25R, 4.0R / 配置.目标帧率)
+        ' 不连续判定按帧数走，不按墙上时钟的毫秒间隔：跟随视频之后提交节拍随
+        ' 片源在 8~125 Hz 之间变化，任何固定的毫秒阈值都会和片源帧率打架。
+        ' 阈值 = 目标帧率的 4 帧（下限 100 ms 折帧，防止高帧率配置被单次提交
+        ' 的正常增量误触）。早期版本在这里垫过 250 ms 下限，≤62 fps 时阈值被
+        ' 钉平，一次 UI 抖动就触发整屏 Clear，反而制造更明显的空白。
+        Dim 帧跳变阈值 As Long = Math.Max(4L, CLng(Math.Round(0.1R * 配置.目标帧率)))
+        Dim 帧号倒退 = 上一帧有效 AndAlso frame < 上一帧
+        Dim 帧号跳变 = 上一帧有效 AndAlso frame - 上一帧 > 帧跳变阈值
         Dim discontinuity = Not Double.IsFinite(上一时间秒) OrElse
-            seconds < 上一时间秒 OrElse seconds - 上一时间秒 > 最大连续间隔
+            seconds < 上一时间秒 OrElse 帧号倒退 OrElse 帧号跳变
         If discontinuity Then
-            从当前位置重置(时间, seconds, 区域)
+            重新锚定到(时间, seconds, 区域)
         ElseIf Not 签名有效 OrElse signature <> 上一签名 Then
             刷新活动项(seconds, 区域)
         End If
@@ -265,15 +344,21 @@ Public NotInheritable Class 弹幕调度器
                                      active.字号, active.颜色, frame))
         Next
         上一帧 = frame
+        上一帧有效 = True
         上一时间秒 = seconds
         上一签名 = signature
         签名有效 = True
     End Sub
 
-    Private Sub 从当前位置重置(时间 As TimeSpan, seconds As Double, area As 视频显示区域)
-        活动列表.Clear()
-        ' Seek/拖动和几何突变只从当前位置继续读取，不回溯恢复此前仍在飞行的完整状态。
-        ' 这既符合网页端行为，也避免一次跳转集中重测并重建大量旧文字精灵。
+    Private Sub 重新锚定到(时间 As TimeSpan, seconds As Double, area As 视频显示区域)
+        ' 时间跳变后不再清空活动列表：整屏 Clear 会换来 1~2 秒空白，比一次位置
+        ' 跳变刺眼得多。这里按每条弹幕当前的飞行进度在新时间上重新锚定，屏上
+        ' 内容原地续飞——等效于"画面冻结一拍又继续"，与视频卡顿后的表现一致。
+        ' 样式/行号一并重算（复用 刷新活动项 的进度保持逻辑），避免与几何或
+        ' 配置变化同一帧到达时留下旧字号、旧宽度。
+        刷新活动项(seconds, area)
+        ' 资料库游标跳到新位置，不从跳转区间回填（与网页端行为一致，也避免
+        ' 一次跳转集中重测并重建大量旧文字精灵）。
         游标 = 资料库.首个开始不早于(时间.Ticks)
         推进到(seconds, area)
         清除过期(seconds)

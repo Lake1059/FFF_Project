@@ -341,6 +341,42 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Function
 
+    ''' <summary>本机内核是否提供自动 HDR（TrueHDR）入口。False 时 UI 应置灰并说明。</summary>
+    Friend ReadOnly Property 支持视频自动HDR As Boolean
+        Get
+            Dim 目标 = 会话
+            If 已释放 OrElse 目标 Is Nothing Then Return 播放器原生接口.支持视频自动HDR
+            Return 目标.支持视频自动HDR
+        End Get
+    End Property
+
+    ''' <summary>自动 HDR 开关。转发到会话层，失败静默（同 设置视频超分辨率）。
+    ''' compare 模式激活时内核返回 InvalidState，同样被静默吞掉——UI 已先行置灰。</summary>
+    Friend Sub 设置视频自动HDR(开启 As Boolean)
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return
+        Try
+            目标.设置视频自动HDR(开启)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+    End Sub
+
+    ''' <summary>读取自动 HDR 状态并翻成可显示文本。读不到返回 Nothing，由 UI 显示"未读取"。</summary>
+    Friend Function 视频自动HDR状态文本() As String
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return Nothing
+        Try
+            Dim 状态 As 原生视频自动HDR状态
+            If Not 目标.读取视频自动HDR状态(状态) Then Return Nothing
+            Return 播放器会话.视频自动HDR状态文本(状态)
+        Catch ex As ObjectDisposedException
+            Return Nothing
+        Catch ex As 播放器异常
+            Return Nothing
+        End Try
+    End Function
+
     ''' <summary>手动旋转：顺时针 / 逆时针 90°。R = 顺，Shift+R = 逆。</summary>
     Friend Sub 手动旋转(顺时针 As Boolean)
         Dim 目标 = 会话

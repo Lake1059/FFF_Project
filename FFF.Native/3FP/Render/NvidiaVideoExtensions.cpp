@@ -42,4 +42,30 @@ HRESULT SetSuperResolution(ID3D11VideoContext* const videoContext,
         &PpeInterfaceGuid, sizeof(extension), &extension);
 }
 
+bool IsTrueHdrSupported(ID3D11VideoContext* const videoContext,
+    ID3D11VideoProcessor* const videoProcessor) noexcept {
+    if (videoContext == nullptr || videoProcessor == nullptr) return false;
+    UINT supported = 0;
+    // The payload, not the HRESULT, carries the answer: this GUID returns
+    // S_OK on adapters that do not implement TrueHDR at all, so only the
+    // read-back value is a signal.
+    const auto hr = videoContext->VideoProcessorGetStreamExtension(videoProcessor,
+        0, &TrueHdrInterfaceGuid, sizeof(supported), &supported);
+    return SUCCEEDED(hr) && supported == 1u;
+}
+
+HRESULT SetTrueHdr(ID3D11VideoContext* const videoContext,
+    ID3D11VideoProcessor* const videoProcessor, const bool enable) noexcept {
+    if (videoContext == nullptr || videoProcessor == nullptr) return E_POINTER;
+    // Non-const for the same reason as the PPE payload: the D3D11 signature
+    // takes void* and the driver only reads it.
+    TrueHdrStreamExtension extension{
+        StreamExtensionVersionTrueHdr,
+        StreamExtensionMethodTrueHdr,
+        enable ? 1u : 0u,
+    };
+    return videoContext->VideoProcessorSetStreamExtension(videoProcessor, 0,
+        &TrueHdrInterfaceGuid, sizeof(extension), &extension);
+}
+
 } // namespace FFF3FP::NvidiaVideo

@@ -2,6 +2,7 @@
 #include "3FP/Render/VideoRenderer.h"
 #include "3FP/Render/ShaderBytecode.h"
 #include "3FP/Render/SdrShaderBytecode.h"
+#include <emmintrin.h>
 #include "3FP/Render/NvidiaVideoExtensions.h"
 
 // Used only by the presenter thread, to keep its waits in reach of the pacing ceiling.
@@ -222,10 +223,13 @@ bool ReadSdrWhiteLevelDisplayConfig(const HMONITOR monitor, float& nits) noexcep
 
 constexpr std::uint32_t OutputBitDepthForSource(const std::uint32_t sourceBitDepth,
     const bool hdr) noexcept {
-    // HDR output uses a 16-bit scRGB floating-point swap chain (linear
-    // Rec.709 primaries, 1.0 = 80 nits) so the display's tone mapper receives
-    // full-precision linear light. Floating point is never used for SDR so DWM
-    // applies the Windows HDR SDR-white adjustment exactly once.
+    // An scRGB-mode session uses a 16-bit floating-point swap chain (linear Rec.709
+    // primaries, 1.0 = 80 nits) so the display's tone mapper receives full-precision
+    // linear light and DWM does not rewrite the extra bits away. Whether a session is in
+    // that mode comes from WantsScRgbPresentationPath: HDR transfer, wide-gamut
+    // primaries, or - under the default Auto policy - any source deeper than 8 bits.
+    // A session that stayed SDR keeps the gamma chain: 10-bit for deep sources, 8-bit
+    // otherwise.
     if (hdr) return 16;
     if (sourceBitDepth > 8) return 10;
     return 8;
@@ -1181,6 +1185,17 @@ constexpr std::uint32_t CoverBackdropEffect = 1;
 // making the 64 MiB allocation resident during ordinary subtitle playback.
 constexpr std::uint32_t MaximumTimedTextAtlasSize = 4096;
 constexpr std::uint32_t MaximumTimedTextSprites = 512;
+// Danmaku-only sprite quota. The shared table used to have no eviction path at
+// all: danmaku strings churned the table full, and the only remaining policy
+// was a full atlas clear that destroyed every slot's sprites and re-rasterised
+// from scratch a few frames later. Bounded LRU eviction keeps the dead strings
+// recycling their rects instead. Non-danmaku entries never take part: a
+// subtitle glyph set is small and precious.
+constexpr std::uint32_t MaximumDanmakuSprites = 256;
+// Bound on the free-rect list so the first-fit scan stays cheap. Small
+// fragments are dropped when the list is full; the shelf cursor is the
+// ultimate fallback and a full clear is the terminal fallback after that.
+constexpr std::size_t MaximumTimedTextAtlasFreeRects = 128;
 constexpr std::size_t MaximumTimedTextBrushes = 256;
 constexpr float TimedTextSoftShadowExtentFactor = 3.0f;
 constexpr std::size_t VideoConversionBufferSlackBytes = 32 * 1024 * 1024;
@@ -1392,41 +1407,6 @@ enum class ScaleKernel : std::uint32_t {
 constexpr std::uint32_t ToShaderFilter(const ScaleKernel kernel) noexcept {
     return static_cast<std::uint32_t>(kernel);
 }
-
-// Planar/semi-planar CPU uploads pick their strategy from measurement, not from a
-// resolution table. Two rungs:
-//   0 -- Map(WRITE_DISCARD) into a DYNAMIC texture. No extra VRAM, and the driver
-//        can rename storage rather than wait for the previous frame to stop
-//        sampling the same DEFAULT texture -- which is why this is the default for
-//        every media. It degrades as rows widen, though: the write-combined copy
-//        loses to the alternatives once a frame is large. Measured on this machine
-//        (31 interleaved rounds, 10-bit):
-//          1920x1080  Map 0.582 ms   (UpdateSubresource 0.546 ms, 1.06x)
-//          3840x2160  Map 3.293 ms   (2.886 ms, 1.14x)
-//          7680x4320  Map 22.266 ms  (15.213 ms, 1.46x) -- more than a 60 fps
-//                      frame period, so the upload alone would cap presentation.
-// The UpdateSubresource column above is the ORIGINAL author's own measurement, and this
-// machine does not reproduce it: measured here on the same content, staging-with-ring
-// and a single Map(WRITE_DISCARD) cost the same at 8K (11.529 vs 11.509 ms, because
-// CopyResource is queued and hidden inside the next frame's copy), and UpdateSubresource
-// is 4.6% SLOWER at 4K (unjudged at 8K -- two runs of one mode already differ by 8.9-9.7%,
-// same size as the effect). So the bracketed numbers are NOT a recommendation to switch
-// this ladder to UpdateSubresource -- if anyone reads them that way, the reading is wrong.
-// What is measured and load-bearing here is the ring: with a single staging slot the CPU
-// waits on the previous CopyResource for 2.36-2.99 ms per frame, with two slots 0.0155 ms
-// (a depth-1 queue cap does not substitute -- 2x2 of latency x ring, 8/8 arms valid).
-//   1 -- CPU-write STAGING textures alternating with sampled DEFAULT textures, so
-//        uploading the next picture overlaps sampling the last one. Flat cost, but
-//        it commits 3x the frame bytes of VRAM (two staging slots plus the upload
-//        ring) for as long as it stays engaged.
-// The renderer starts every media on rung 0 and climbs when the measured upload
-// cost eats into the frame budget (ObserveUploadCost), stepping back down -- and
-// releasing the VRAM -- when uploads stay cheap. A resolution threshold cannot
-// express this: the crossover moves with the adapter (weak discrete parts and
-// integrated GPUs cross at different sizes), with the frame format (4:4:4 12-bit
-// moves the same pixel count several times over), and with whatever else holds the
-// GPU busy. The question being answered is "is the upload expensive on THIS
-// machine for THIS content", and only measurement answers that.
 // Every snapshot timing field counts 100 ns units; this keeps the new split
 // counters from repeating the duration_cast boilerplate at each site.
 inline std::uint64_t To100ns(const std::chrono::steady_clock::duration& d) noexcept {
@@ -1434,11 +1414,164 @@ inline std::uint64_t To100ns(const std::chrono::steady_clock::duration& d) noexc
     return static_cast<std::uint64_t>(ns > 0 ? ns / 100 : 0);
 }
 
-constexpr std::uint32_t UploadLadderWindowFrames = 32;   // frames per settlement window
-constexpr double UploadEscalateRatio = 0.50;             // upload share of the frame budget that earns rung 1
-constexpr double UploadDeescalateRatio = 0.15;           // share below which rung 1 is given back
-constexpr std::uint32_t UploadDeescalateWindows = 2;     // consecutive cheap windows before stepping down
-constexpr std::uint64_t UploadStagingVramFloor = 2ULL * 1024 * 1024 * 1024; // 2 GiB dedicated VRAM gates rung 1
+// ── 上传拷贝策略实验（默认不改变任何行为） ────────────────────────────────────
+// 实机测量显示 8K 的上传几乎全是拷贝（Map 等待只占 0.1%），而拷贝带宽只有约
+// 5 GB/s —— 远低于 4K 时同样的代码跑出的 13.6 GB/s。首要嫌疑是 Map 出来的是
+// write-combining 内存，普通 store 到 WC 会退化成读-改-写。下面三种实现用来把
+// 这个判断从猜测变成数据。
+enum class UploadCopyMode { Row, Bulk, Streaming, UpdateSubresource };
+
+inline UploadCopyMode ResolveUploadCopyMode() noexcept {
+    char* buffer = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_COPY_MODE") != 0 || buffer == nullptr)
+        return UploadCopyMode::Row;
+    const std::string value(buffer);
+    free(buffer);
+    if (value == "bulk") return UploadCopyMode::Bulk;
+    if (value == "stream") return UploadCopyMode::Streaming;
+    if (value == "us") return UploadCopyMode::UpdateSubresource;
+    return UploadCopyMode::Row;
+}
+
+// 每帧读环境变量没有必要，解析一次就缓存（static 局部量初始化本身是线程安全的）。
+inline UploadCopyMode ResolveUploadCopyModeCached() noexcept {
+    static const UploadCopyMode mode = ResolveUploadCopyMode();
+    return mode;
+}
+
+// #25 的双槽环到底值不值：把深度做成可读的开关，1 = 不换纹理，直接把 staging
+// CopyResource 进当前正被采样的纹理。深度 2 让上一次 DMA 有约两帧时间落地才需要
+// 同一块 staging，深度 1 只有一帧——8K 的 PCIe 搬运正好落在这两种口径之间，
+// 所以这个开关能把它从"注释里的说法"变成 mapwait / presentwait 上的读数。
+inline unsigned ResolveUploadRingDepth() noexcept {
+    char* buffer = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_RING") != 0 || buffer == nullptr)
+        return 2u;                                  // 默认保持 #25 现网行为
+    const std::string value(buffer);
+    free(buffer);
+    return value == "1" ? 1u : 2u;
+}
+
+inline unsigned UploadRingDepthCached() noexcept {
+    static const unsigned depth = ResolveUploadRingDepth();
+    return depth;
+}
+
+// 队列上限（MaxFrameLatency）与上传环深度是同一根绳上的两个数：环之所以能免掉
+// Map 等待，是因为深度 2 的队列最多只有两帧在途，被复用的那块 staging 上一次被读
+// 至少是两帧之前，按定义已经退完。把上限压到 1 理论上就不需要双槽——代价是渲染与
+// Present 串行，正是上面注释里明确要买的那份重叠。做成 env 门，是为了把"谁付这笔钱"
+// 从推理变成读数；默认保持现网值 2。
+inline unsigned ResolveMaxFrameLatency() noexcept {
+    char* buffer = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&buffer, &length, "FFF3FP_MAX_FRAME_LATENCY") != 0 || buffer == nullptr)
+        return 2u;
+    const std::string value(buffer);
+    free(buffer);
+    return value == "1" ? 1u : 2u;
+}
+
+// 非临时存储：绕开 WC 内存的读-改-写。dst 需要 16 字节对齐，所以先对齐再批量。
+inline void StreamingCopy(std::uint8_t* dst, const std::uint8_t* src, std::size_t bytes) noexcept {
+    auto* d = dst;
+    const auto* s = src;
+    while (bytes > 0 && (reinterpret_cast<std::uintptr_t>(d) & 15u) != 0u) {
+        *d++ = *s++;
+        --bytes;
+    }
+    while (bytes >= 64) {
+        _mm_stream_si128(reinterpret_cast<__m128i*>(d),
+            _mm_loadu_si128(reinterpret_cast<const __m128i*>(s)));
+        d += 16;
+        s += 16;
+        bytes -= 16;
+    }
+    while (bytes > 0) {
+        *d++ = *s++;
+        --bytes;
+    }
+    _mm_sfence();
+}
+
+// 把解码器的一路平面搬进映射出来的 staging / default 纹理。返回真正搬走的字节数：
+// 只有把它记下来，uploadCopy100ns 才能变成一个带宽，否则任何 GB/s 都是从"理论帧
+// 大小"倒推的，而不是量出来的。
+inline std::size_t CopyUploadPlane(std::uint8_t* dst, const std::size_t dstPitch,
+    const std::uint8_t* src, const std::size_t srcPitch,
+    const std::size_t rowBytes, const unsigned rows, const UploadCopyMode mode) noexcept {
+    if (mode == UploadCopyMode::Bulk && dstPitch == srcPitch) {
+        // 两个 stride 相等时整行连续，可以一次搬完，省掉几千次函数调用。
+        const std::size_t bytes = static_cast<std::size_t>(rows) * rowBytes;
+        std::memcpy(dst, src, bytes);
+        return bytes;
+    }
+    for (unsigned row = 0; row < rows; ++row) {
+        auto* rowDst = dst + static_cast<std::size_t>(row) * dstPitch;
+        const auto* rowSrc = src + static_cast<std::size_t>(row) * srcPitch;
+        if (mode == UploadCopyMode::Streaming) StreamingCopy(rowDst, rowSrc, rowBytes);
+        else std::memcpy(rowDst, rowSrc, rowBytes);
+    }
+    return static_cast<std::size_t>(rows) * rowBytes;
+}
+
+// Above this size, planar/semi-planar uploads go through the 2-deep STAGING ->
+// DEFAULT ring (uploadPath 1) instead of Map(WRITE_DISCARD) on a DYNAMIC texture.
+//
+// Why two slots and not one: with a single staging buffer, Map(WRITE) has to wait
+// for the previous frame's CopyResource to finish reading it. Measured with
+// FFF3FP_UPLOAD_RING=1 vs 2, interleaved 2 passes per cell, fullscreen viewport,
+// witnessed to no other player instance: uploadMapWait100ns goes from 0.0155 ms to
+// 2.99 ms on the 8K AV1 clip and to 2.36-2.99 ms on the 8K HEVC clip, with dropped
+// frames rising from ~4.5/s to ~6-7/s. The copy itself does not get faster
+// (uploadCopy100ns is ~15 ms either way) -- the ring only removes the wait.
+//
+// The wait is NOT bounded by SetMaximumFrameLatency, so the cap cannot substitute
+// for the second slot: latency 1 with one slot still waited 2.36 ms.
+//
+// Numbers previously quoted here ("at 8K the same copy costs 22.27 ms against
+// 15.21 ms", "4K favours UpdateSubresource 2.886 vs 3.293") were not reproducible on
+// this machine and described a route this function no longer takes; measured here,
+// the staging ring moves 24.9 MB at 4K in 1.79 ms and 99.5 MB at 8K in 9.75-10.35 ms
+// while the box is otherwise quiet.
+constexpr std::uint32_t DefaultUploadWidthThreshold = 3840;
+constexpr std::uint32_t DefaultUploadHeightThreshold = 2160;
+
+// Measurement gate: FFF3FP_UPLOAD_FORCE_DYNAMIC=1 sends every frame down the
+// sub-threshold route (DYNAMIC texture + Map(WRITE_DISCARD)), so the one-transfer
+// path can be compared against the >= 4K staging ring's two transfers (CPU write,
+// then CopyResource pulling the same bytes into video memory).
+//
+// It deliberately lives INSIDE this one predicate rather than at the call sites: it is
+// consulted by EnsurePipeline (which decides DYNAMIC vs DEFAULT when creating the
+// textures) and by Render (which decides which upload branch to run). A gate that
+// only moved the Render decision would make Map(WRITE_DISCARD) target a DEFAULT
+// texture and fail, so the two decisions have to keep reading the same answer.
+inline bool ForceDynamicUploadCached() noexcept {
+    char* buffer = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_FORCE_DYNAMIC") != 0 || buffer == nullptr)
+        return false;
+    const std::string value(buffer);
+    free(buffer);
+    return value == "1";
+}
+
+inline bool UseDefaultUploadForSize(const std::uint32_t width,
+    const std::uint32_t height) noexcept {
+    if (ForceDynamicUploadCached()) return false;
+    return width >= DefaultUploadWidthThreshold && height >= DefaultUploadHeightThreshold;
+}
+
+// The staging ring commits three frame-bytes' worth of memory on top of the decoded
+// frame itself (the alternating DEFAULT ring the shader samples, plus the CPU-write
+// STAGING pair), so a card that does not carry that much dedicated video memory should
+// not be asked to allocate it. Measured here: 4K staging 24.9 MB, 8K 99.5 MB per
+// picture, so an 8K media is committing roughly 0.3 GiB before the frame it decodes
+// into. The floor is one adapter's worth of headroom, not a tuning number.
+constexpr std::uint64_t UploadStagingVramFloor = 2ULL * 1024 * 1024 * 1024;
 
 constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
     switch (format) {
@@ -1510,7 +1643,8 @@ constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
     case AV_PIX_FMT_YUV410P:
         return {1, 8, 1.0f, 2, 2};
     case AV_PIX_FMT_YUV440P:
-        return {1, 8, 1.0f, 0, 1};    // Float RGB (JPEG XR decodes to rgbaf16le). This gets its OWN layout value
+        return {1, 8, 1.0f, 0, 1};
+    // Float RGB (JPEG XR decodes to rgbaf16le). This gets its OWN layout value
     // rather than only a bitDepth, because downstream picks the shader-visible
     // texture format from `layout`: layout 0 would give R16G16B16A16_UNORM, which
     // cannot represent the >1.0 and <0.0 components that float RGB legitimately
@@ -2228,6 +2362,26 @@ FFFResult EvaluateTimedTextRasterization(FFF3FPTimedTextRasterizationProbe& prob
     return FFFResult::Success;
 }
 
+// DirectWrite factory shared by the timed-text measurement entry points. Both of
+// them used to call DWriteCreateFactory per invocation: the danmaku scheduler
+// measures every item as it enters the screen, so a busy stream built one
+// factory -- and with it a system font collection -- per danmaku, per frame,
+// on the host's single danmaku worker thread. Shared factories are documented
+// as safe to use from any thread for layout objects, which is all this does.
+// The instance is process-lifetime on purpose: releasing it from a static
+// destructor would race the render thread during shutdown.
+IDWriteFactory* SharedTimedTextWriteFactory() noexcept {
+    static std::once_flag onceFlag;
+    static IDWriteFactory* factory = nullptr;
+    std::call_once(onceFlag, []() noexcept {
+        ComPtr<IDWriteFactory> created;
+        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+            reinterpret_cast<IUnknown**>(created.GetAddressOf())))) return;
+        factory = created.Detach();
+    });
+    return factory;
+}
+
 FFFResult MeasureTimedText(const char* textUtf8, const char* fontFamilyUtf8,
     const float fontSize, const FFF3FPTimedTextFlags flags, const float maxWidth,
     const float outlineWidth, const float shadowOffsetX, const float shadowOffsetY,
@@ -2243,15 +2397,14 @@ FFFResult MeasureTimedText(const char* textUtf8, const char* fontFamilyUtf8,
     if (!TimedTextUtf8ToWide(textUtf8, text) || !TimedTextUtf8ToWide(fontFamilyUtf8, fontFamily) ||
         fontFamily.empty()) return FFFResult::InvalidArgument;
     try {
-        ComPtr<IDWriteFactory> factory;
-        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-            reinterpret_cast<IUnknown**>(factory.GetAddressOf())))) return FFFResult::DeviceFailure;
+        auto* const factory = SharedTimedTextWriteFactory();
+        if (factory == nullptr) return FFFResult::DeviceFailure;
         ComPtr<IDWriteTextLayout> layout;
         // First discover DirectWrite's natural single-line box, then constrain
         // the production-equivalent layout to that exact height before reading
         // overhangs. A large arbitrary layout height would make bottom overhang
         // relative to the wrong box and recreate the subtitle clipping bug.
-        if (FAILED(CreateTimedTextLayout(factory.Get(), text, fontFamily, fontSize, flags,
+        if (FAILED(CreateTimedTextLayout(factory, text, fontFamily, fontSize, flags,
             FFF3FPTimedTextAlignment::Center, FFF3FPTimedTextAlignment::Near,
             maxWidth, 65536.0f, &layout))) return FFFResult::DeviceFailure;
         DWRITE_TEXT_METRICS metrics{};
@@ -2283,15 +2436,13 @@ FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8
     if (!TimedTextUtf8ToWide(textUtf8, text) || !TimedTextUtf8ToWide(fontFamilyUtf8, fontFamily) ||
         fontFamily.empty()) return FFFResult::InvalidArgument;
     try {
-        ComPtr<IDWriteFactory> factory;
-        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-            reinterpret_cast<IUnknown**>(factory.GetAddressOf()))) || factory == nullptr)
-            return FFFResult::DeviceFailure;
+        auto* const factory = SharedTimedTextWriteFactory();
+        if (factory == nullptr) return FFFResult::DeviceFailure;
         ComPtr<IDWriteTextLayout> layout;
         // No wrapping is used by all timed-text commands. A finite oversized
         // layout keeps DirectWrite's natural advance width available without
         // allowing a long information line to create a second line.
-        if (FAILED(CreateTimedTextLayout(factory.Get(), text, fontFamily, fontSize, flags,
+        if (FAILED(CreateTimedTextLayout(factory, text, fontFamily, fontSize, flags,
             FFF3FPTimedTextAlignment::Near, FFF3FPTimedTextAlignment::Near,
             65536.0f, 65536.0f, &layout))) return FFFResult::DeviceFailure;
         DWRITE_TEXT_METRICS metrics{};
@@ -2337,11 +2488,12 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       pointSampler_(nullptr), panoramaSampler_(nullptr), constants_(nullptr), scaleConstants_(nullptr),
       sourceTextures_{nullptr, nullptr, nullptr}, sourceViews_{nullptr, nullptr, nullptr},
       scaledVideoGeneration_(UINT64_MAX), scaledOutputWidth_(0), scaledOutputHeight_(0),
-      scaledVideoSuperResolution_(false),
+      scaledVideoSuperResolution_(false), scaledVideoTrueHdr_(false),
       scaledSourceViews_{nullptr, nullptr, nullptr},
       videoDevice_(nullptr), videoContext_(nullptr), videoProcessorEnumerator_(nullptr),
       videoProcessor_(nullptr), videoProcessorRenderTexture_(nullptr),
       superResolutionTexture_(nullptr), superResolutionViews_{nullptr, nullptr, nullptr},
+      trueHdrTexture_(nullptr), trueHdrView_(nullptr),
       effectiveSourceViews_{nullptr, nullptr, nullptr},
       videoProcessorRenderTarget_(nullptr),
       coverBackdropTexture_(nullptr), coverBackdropView_(nullptr),
@@ -2697,7 +2849,19 @@ FFFResult PlayerVideoRenderer::SetSdrScRgbMode(const std::uint32_t mode) noexcep
     std::lock_guard deviceLock(deviceMutex_);
     // Changing the policy re-evaluates the gate on the next present: the mode is
     // recomputed by EnsureSwapChain, so no swap chain is torn down here.
-    sdrScRgbMode_ = mode;
+    auto effective = mode;
+    // Measurement gate: FFF3FP_SDR_SCRGB=0/1 overrides the caller's policy so both
+    // output tiers run against one binary. Unset (or anything else) means no override,
+    // so the shipped default decides.
+    char* buffer = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&buffer, &length, "FFF3FP_SDR_SCRGB") == 0 && buffer != nullptr) {
+        const std::string value(buffer);
+        free(buffer);
+        if (value == "0") effective = 0;
+        else if (value == "1") effective = 1;
+    }
+    sdrScRgbMode_ = effective;
     hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
     hdrSwapChainRejected_ = false;
     return FFFResult::Success;
@@ -2830,13 +2994,18 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
             SUCCEEDED(dxgiDevice->GetAdapter(&adapter))) {
             DXGI_ADAPTER_DESC desc{};
             if (SUCCEEDED(adapter->GetDesc(&desc))) {
+                // Captured for the upload ring's capacity gate (UploadStagingVramFloor).
+                // Zero -- an adapter that reports nothing, or a GetDesc failure -- is
+                // deliberately read as "unknown, so try" rather than "cannot afford",
+                // because the conservative answer here would silently move every large
+                // software decode onto the one-transfer Map path.
                 dedicatedVideoMemoryBytes_.store(
                     static_cast<std::uint64_t>(desc.DedicatedVideoMemory),
                     std::memory_order_release);
-                // A new device is a new chance for the staging ring: whatever
-                // refused the allocation before (fragmentation, a mode change) does
-                // not have to hold for this one.
-                uploadStagingRefused_ = false;
+                // A new device is a new chance for the ring: whatever refused the
+                // allocation before (fragmentation, a mode change) does not have to
+                // hold for this one.
+                uploadRingUnavailable_.store(false, std::memory_order_release);
                 // RTX Video Super Resolution is a vendor-private NVIDIA
                 // extension; probe once per device so the status report can say
                 // "not an NVIDIA adapter" instead of silently doing nothing.
@@ -3006,12 +3175,12 @@ FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** ou
 FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_t height,
     const std::uint32_t sourceBitDepth) noexcept {
     if (window_ == nullptr) return FFFResult::Success;
-    // The Auto policy applies to a plain MapToSdr caller too: the tier ladder prefers the
-    // 16-bit scRGB chain for anything deeper than 8 bits, so a session that only asked for
-    // SDR is still promoted when the display can carry scRGB -- which is what
-    // FFF3FPConfiguration.sdrScRgbMode documents. Keeping the whole block inside
-    // `requestedMode_ == MapToHdr` made the policy a no-op for the normal SDR caller;
-    // measured here: a 10-bit HEVC source stayed at outBits=10 with the gate forced on.
+    // The Auto policy applies to a plain MapToSdr caller too. The tier ladder prefers
+    // the 16-bit scRGB chain for anything deeper than 8 bits, so a session that only
+    // asked for SDR is still promoted when the display can carry scRGB -- which is what
+    // FFF3FPConfiguration.sdrScRgbMode documents. Keeping this whole block inside
+    // `requestedMode_ == MapToHdr` made the policy a no-op for the normal SDR caller,
+    // measured: a 10-bit HEVC source stayed at outBits=10 with FFF3FP_SDR_SCRGB=1.
     if (requestedMode_ == FFF3FPColorMode::MapToHdr || sdrScRgbMode_ != 0) {
         // Wide-gamut SDR also needs scRGB to retain colors outside Rec.709.
         const auto wantsHdrPath = WantsScRgbPresentationPath(sourceBitDepth);
@@ -3019,14 +3188,14 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
             FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
         // Distinguish "this source does not need scRGB" from "the display cannot
         // give it scRGB": with the Auto SDR policy a 10-bit SDR source reaches
-        // the second branch without being HDR or wide gamut at all.
+        // the second branch without being HDR or wide gamut at all. Only a caller
+        // that actually asked for HDR can be *demoted*, so a promotion out of
+        // MapToSdr must not write a fallback reason.
         const auto reason = !wantsHdrPath ?
             "True HDR output is only available for HDR or wide-gamut sources." :
             (hdrProcessor_.IsHdrSource() || IsWideGamutSource() ?
                 "The target display or Windows Advanced Color mode does not support true HDR output." :
                 "Advanced Color output is not active, so this SDR source stays on the classic SDR swap chain.");
-        // Only a caller that actually asked for HDR can be *demoted*: a promotion out of
-        // MapToSdr must not be reported as a fallback reason.
         const auto demoted = requestedMode_ == FFF3FPColorMode::MapToHdr &&
             nextMode != requestedMode_;
         try { std::lock_guard fallbackLock(fallbackMutex_);
@@ -3159,7 +3328,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     // dropped frames; see docs/45.
     ComPtr<IDXGIDevice1> latencyDevice;
     if (SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&latencyDevice))))
-        latencyDevice->SetMaximumFrameLatency(2);
+        latencyDevice->SetMaximumFrameLatency(ResolveMaxFrameLatency());
     {
         std::lock_guard lock(timedTextMutex_);
         presentationFrameRate_ = DetectDisplayRefreshRate(window_);
@@ -3418,6 +3587,18 @@ FFFResult PlayerVideoRenderer::CopyFrame(void* const pixels,
     return FFFResult::Success;
 }
 
+// The single place that answers "does this frame upload through the staging ring".
+// The size table is local's own policy; the two extra clauses are the parts worth
+// having from upstream's measured ladder -- the capacity gate, and a refusal that is
+// remembered for the life of the device instead of retried every settlement window.
+bool PlayerVideoRenderer::WantsStagingUpload(const std::uint32_t width,
+    const std::uint32_t height) const noexcept {
+    if (uploadRingUnavailable_.load(std::memory_order_acquire)) return false;
+    const auto dedicated = dedicatedVideoMemoryBytes_.load(std::memory_order_acquire);
+    if (dedicated != 0 && dedicated < UploadStagingVramFloor) return false;
+    return UseDefaultUploadForSize(width, height);
+}
+
 FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     const std::uint32_t sourceHeight, const std::uint32_t inputLayout,
     const std::uint32_t bitDepth, const std::uint32_t chromaWidthShift,
@@ -3514,8 +3695,7 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         sourceWidth_ == sourceWidth && sourceHeight_ == sourceHeight &&
         sourceInputLayout_ == inputLayout && sourceBitDepth_ == bitDepth &&
         sourceChromaWidthShift_ == chromaWidthShift &&
-        sourceChromaHeightShift_ == chromaHeightShift &&
-        uploadRungCreated_ == uploadRung_)
+        sourceChromaHeightShift_ == chromaHeightShift)
         return FFFResult::Success;
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         ReleaseCom(sourceViews_[plane]);
@@ -3563,14 +3743,14 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             return FFFResult::NotSupported;
         }
     }
-    // The upload rung decides the texture usage: rung 0 maps the planes into a
-    // DYNAMIC texture (WRITE_DISCARD, driver-side renaming, no extra VRAM); rung 1
-    // keeps them DEFAULT and uploads through an alternating STAGING ring so the
-    // next picture's copy overlaps the last one's sampling. The rung is the
-    // renderer's own measurement, not a size test -- see the ladder constants
-    // above and ObserveUploadCost.
-    const auto buildSourceTextures = [&](const std::uint32_t rung) noexcept {
-        for (std::uint32_t plane = 0; plane < planeCount; ++plane) {
+    // The two shapes of the planar upload need different textures, and only one of
+    // them is chosen by size: the staging ring costs extra memory the Map path does
+    // not, so WantsStagingUpload also answers for the adapter. Both resource sets are
+    // built by these two helpers because a refused ring allocation has to rebuild the
+    // frame textures DYNAMIC -- the size table alone cannot express that, and it is
+    // exactly the step that used to end playback with DeviceFailure.
+    const auto buildSourceTextures = [&](const bool dynamicPlanes) noexcept {
+        for (std::uint32_t plane = 0; plane < (externalSource ? 0u : planeCount); ++plane) {
             D3D11_TEXTURE2D_DESC texture{};
             texture.Width = plane == 0 ? sourceWidth :
                 (sourceWidth + (1u << chromaWidthShift) - 1) >> chromaWidthShift;
@@ -3588,7 +3768,22 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             else texture.Format = bitDepth > 8 ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
             texture.SampleDesc.Count = 1;
             texture.Usage = D3D11_USAGE_DEFAULT; texture.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            if (rung == 0 && (inputLayout == 1 || inputLayout == 2)) {
+            // Small planar/semi-planar frames upload through Map(WRITE_DISCARD), which
+            // needs a CPU-writable dynamic texture. Large ones must NOT: that route needs
+            // a DEFAULT texture for the staging copies below.
+            //
+            // The table below is inherited from an earlier round and has NOT been
+            // reproduced in this build -- reaching "Map at 8K" requires creating the
+            // texture DYNAMIC at 8K, which this code never does, so there is no arm here
+            // that can confirm or refute it. Treat it as the reason for the DEFAULT usage
+            // choice, not as a current measurement. What IS measured in the round that
+            // added uploadCopyBytes/uploadCount/uploadPath: the staging route moves
+            // 24.9 MB at 4K in 1.79 ms and 99.5 MB at 8K in 9.75-10.35 ms on a quiet box,
+            // and a planar UpdateSubresource arm measured 4.6% slower at 4K.
+            //   1920x1080  Map 0.582 ms vs UpdateSubresource 0.546 ms  (1.06x)
+            //   3840x2160  Map 3.293 ms vs 2.886 ms                    (1.14x)
+            //   7680x4320  Map 22.266 ms vs 15.213 ms                  (1.46x)
+            if (dynamicPlanes) {
                 texture.Usage = D3D11_USAGE_DYNAMIC;
                 texture.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
             }
@@ -3600,60 +3795,53 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         return true;
     };
     const auto buildUploadRing = [&]() noexcept {
-        for (unsigned plane = 0; plane < planeCount; ++plane) {
-            D3D11_TEXTURE2D_DESC desc{};
-            sourceTextures_[plane]->GetDesc(&desc);
-            if (FAILED(device_->CreateTexture2D(&desc, nullptr, &uploadTextures_[plane])) ||
-                FAILED(device_->CreateShaderResourceView(uploadTextures_[plane], nullptr, &uploadViews_[plane]))) {
-                SetError("Could not create the upload texture ring.");
-                return false;
-            }
-            desc.Usage = D3D11_USAGE_STAGING;
-            desc.BindFlags = 0;
-            desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-            for (auto& slot : uploadStaging_) {
-                if (FAILED(device_->CreateTexture2D(&desc, nullptr, &slot[plane]))) {
-                    SetError("Could not create the upload staging textures.");
+            for (unsigned plane = 0; plane < planeCount; ++plane) {
+                D3D11_TEXTURE2D_DESC desc{};
+                sourceTextures_[plane]->GetDesc(&desc);
+                if (FAILED(device_->CreateTexture2D(&desc, nullptr, &uploadTextures_[plane])) ||
+                    FAILED(device_->CreateShaderResourceView(uploadTextures_[plane], nullptr, &uploadViews_[plane]))) {
+                    SetError("Could not create the upload texture ring.");
                     return false;
                 }
+                desc.Usage = D3D11_USAGE_STAGING;
+                desc.BindFlags = 0;
+                desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+                for (auto& slot : uploadStaging_) {
+                    if (FAILED(device_->CreateTexture2D(&desc, nullptr, &slot[plane]))) {
+                        SetError("Could not create the upload staging textures.");
+                        return false;
+                    }
+                }
             }
-        }
         return true;
     };
-    if (externalSource) {
-        // Decoder-owned surfaces: no CPU upload happens, so neither rung applies.
-        uploadRungCreated_ = uploadRung_;
-    } else if (uploadRung_ != 0) {
-        if (buildSourceTextures(1) && buildUploadRing()) {
-            uploadRungCreated_ = 1;
-        } else {
-            // The measured climb could not be paid for in VRAM -- a card that
-            // passed the adapter gate can still refuse the allocation. Fall back to
-            // rung 0 rather than taking playback down: release everything the
-            // attempt created and rebuild as the Map arm, which needs no extra
-            // VRAM. The refusal is remembered so the next window does not retry
-            // the same allocation every settlement.
-            for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
-                ReleaseCom(sourceViews_[plane]);
-                ReleaseCom(sourceTextures_[plane]);
-                ReleaseCom(uploadViews_[plane]);
-                ReleaseCom(uploadTextures_[plane]);
-                for (auto& slot : uploadStaging_) ReleaseCom(slot[plane]);
-            }
-            uploadRung_ = 0;
-            uploadStagingRefused_ = true;
-            uploadCheapWindows_ = 0;
-            if (!buildSourceTextures(0)) return FFFResult::DeviceFailure;
-            uploadRungCreated_ = 0;
-            if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
-                std::fprintf(stderr,
-                    "[ladder] upload rung 1 refused by the device; fell back to rung 0 (Map)\n");
-        }
-    } else {
-        if (!buildSourceTextures(0)) return FFFResult::DeviceFailure;
-        uploadRungCreated_ = 0;
-    }
+    const auto planarInput = inputLayout == 1 || inputLayout == 2;
+    const auto wantsRing = !externalSource && planarInput &&
+        WantsStagingUpload(sourceWidth, sourceHeight);
+    // Same predicate the upload branch reads: DEFAULT only when the ring is really
+    // going to exist, because Map(WRITE_DISCARD) cannot target a DEFAULT texture.
+    const auto dynamicPlanes = !externalSource && planarInput && !wantsRing;
+    if (!buildSourceTextures(dynamicPlanes)) return FFFResult::DeviceFailure;
     uploadSlot_ = 0;
+    if (wantsRing && !buildUploadRing()) {
+        // The card could not pay for the ring even though the adapter report said it
+        // should. Fall back to the one-transfer Map path instead of taking playback
+        // down with it: release everything the attempt left behind, remember the
+        // refusal for this device, and rebuild the frame textures CPU-writable.
+        for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
+            ReleaseCom(sourceViews_[plane]);
+            ReleaseCom(sourceTextures_[plane]);
+            ReleaseCom(uploadViews_[plane]);
+            ReleaseCom(uploadTextures_[plane]);
+            for (auto& slot : uploadStaging_) ReleaseCom(slot[plane]);
+        }
+        uploadRingUnavailable_.store(true, std::memory_order_release);
+        if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+            std::fprintf(stderr,
+                "[upload] staging ring refused by the device (%ux%u); fell back to Map\n",
+                sourceWidth, sourceHeight);
+        if (!buildSourceTextures(true)) return FFFResult::DeviceFailure;
+    }
     sourceWidth_ = sourceWidth; sourceHeight_ = sourceHeight;
     sourceInputLayout_ = inputLayout; sourceBitDepth_ = bitDepth;
     sourceExternal_ = externalSource;
@@ -3713,6 +3901,27 @@ static const char* VideoSuperResolutionReasonText(
     case FFF3FPVideoSuperResolutionReason::UnsupportedSourceFormat:
         return "unsupported source format";
     case FFF3FPVideoSuperResolutionReason::DriverRejected: return "driver rejected";
+    case FFF3FPVideoSuperResolutionReason::YieldedToAutoHdr:
+        return "yielded to automatic HDR this frame";
+    }
+    return "unknown";
+}
+
+// Human-readable text for a TrueHDR decision, for the same transition log.
+static const char* VideoAutoHdrReasonText(
+    const FFF3FPVideoAutoHdrReason reason) noexcept {
+    switch (reason) {
+    case FFF3FPVideoAutoHdrReason::None: return "none";
+    case FFF3FPVideoAutoHdrReason::NotRequested: return "not requested";
+    case FFF3FPVideoAutoHdrReason::NotNvidiaAdapter: return "not an NVIDIA adapter";
+    case FFF3FPVideoAutoHdrReason::NotSupportedByDriver:
+        return "driver does not support TrueHDR";
+    case FFF3FPVideoAutoHdrReason::NotSdrSource: return "source is not SDR";
+    case FFF3FPVideoAutoHdrReason::OutputPathNotHdr:
+        return "output path is not HDR (needs the scRGB chain)";
+    case FFF3FPVideoAutoHdrReason::UnsupportedSourceFormat:
+        return "unsupported source or output format";
+    case FFF3FPVideoAutoHdrReason::DriverRejected: return "driver rejected";
     }
     return "unknown";
 }
@@ -3755,6 +3964,20 @@ void PlayerVideoRenderer::ReleaseSuperResolutionResources() noexcept {
     videoSuperResolutionSourceWidth_ = videoSuperResolutionSourceHeight_ = 0;
     videoSuperResolutionTargetWidth_ = videoSuperResolutionTargetHeight_ = 0;
     videoSuperResolutionActive_.store(false, std::memory_order_release);
+}
+
+void PlayerVideoRenderer::ReleaseTrueHdrResources() noexcept {
+    if (trueHdrView_ != nullptr) {
+        trueHdrView_->Release();
+        trueHdrView_ = nullptr;
+    }
+    if (trueHdrTexture_ != nullptr) {
+        trueHdrTexture_->Release();
+        trueHdrTexture_ = nullptr;
+    }
+    videoTrueHdrSourceWidth_ = videoTrueHdrSourceHeight_ = 0;
+    videoTrueHdrOutputWidth_ = videoTrueHdrOutputHeight_ = 0;
+    videoTrueHdrActive_.store(false, std::memory_order_release);
 }
 
 // A video processor always consumes the decoded planes in their native
@@ -4005,6 +4228,222 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
     return FFFResult::Success;
 }
 
+FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
+    const std::uint32_t targetHeight) noexcept {
+    // Latches and skip/reject plumbing mirror ApplySuperResolution one-for-one,
+    // on their own members. Every early exit clears `active` so the status
+    // block can never claim TrueHDR is on while the shader path is in use.
+    const auto reject = [this](const FFF3FPVideoAutoHdrReason reason) noexcept {
+        videoTrueHdrRejected_.store(true, std::memory_order_release);
+        videoTrueHdrActive_.store(false, std::memory_order_release);
+        videoTrueHdrReason_.store(reason, std::memory_order_release);
+        SetError("NVIDIA automatic HDR was rejected; the SDR path is unchanged.");
+        return FFFResult::NotSupported;
+    };
+    const auto rejectAt = [this](const char* stage) noexcept {
+        videoTrueHdrRejected_.store(true, std::memory_order_release);
+        videoTrueHdrActive_.store(false, std::memory_order_release);
+        videoTrueHdrReason_.store(FFF3FPVideoAutoHdrReason::DriverRejected,
+            std::memory_order_release);
+        std::string message = "NVIDIA automatic HDR step failed: ";
+        message += stage;
+        SetError(message);
+        FFF3FP_KernelLogImpl(message.c_str());
+        return FFFResult::NotSupported;
+    };
+    const auto skip = [this](const FFF3FPVideoAutoHdrReason reason) noexcept {
+        videoTrueHdrActive_.store(false, std::memory_order_release);
+        videoTrueHdrReason_.store(reason, std::memory_order_release);
+        const auto reasonValue = static_cast<std::uint32_t>(reason);
+        if (videoTrueHdrLoggedReason_.exchange(reasonValue,
+                std::memory_order_acq_rel) != reasonValue) {
+            char line[128]{};
+            _snprintf_s(line, sizeof(line), _TRUNCATE,
+                "FFF.Native: NVIDIA automatic HDR skipped: %s",
+                VideoAutoHdrReasonText(reason));
+            FFF3FP_KernelLogImpl(line);
+        }
+        return FFFResult::NotSupported;
+    };
+
+    if (requestedVideoAutoHdr_.load(std::memory_order_acquire) ==
+        FFF3FPVideoAutoHdr::Off)
+        return skip(FFF3FPVideoAutoHdrReason::NotRequested);
+    if (!nvidiaAdapter_.load(std::memory_order_acquire))
+        return skip(FFF3FPVideoAutoHdrReason::NotNvidiaAdapter);
+    // TrueHDR's contract is SDR input: an HDR signal (PQ/HLG/linear) would have
+    // the driver generate what the frame already carries, double-mapping the
+    // picture. The gate reads the stashed decode transfer, NOT
+    // cachedVideoSettings_.transfer: the TrueHDR re-tag in DrawWithShader
+    // writes 1 into that field for the shader's PQ decode, and a repeated draw
+    // of the SAME frame (pause, redraw, pixel readback) has no new frame
+    // prepare to restore it -- reading the retagged field there made a TrueHDR
+    // frame self-block every subsequent draw of itself (skip: source is not
+    // SDR) and leaked transfer=1 into the shader constants of those draws.
+    if (decodedTransfer_.load(std::memory_order_acquire) != 0)
+        return skip(FFF3FPVideoAutoHdrReason::NotSdrSource);
+    // The pass writes PQ/BT.2020 samples; presenting them through the SDR path
+    // would decode them as sRGB and show a wrong (crushed/dark) picture. Both
+    // halves of the HDR-output equivalence are checked: actualMode_ is the
+    // mode in force, swapHdr_ the chain that was actually created.
+    if (actualMode_ != FFF3FPColorMode::MapToHdr || !swapHdr_)
+        return skip(FFF3FPVideoAutoHdrReason::OutputPathNotHdr);
+    if (!CanUseVideoProcessorForUpscale())
+        return skip(FFF3FPVideoAutoHdrReason::UnsupportedSourceFormat);
+    if (videoTrueHdrRejected_.load(std::memory_order_acquire))
+        return skip(FFF3FPVideoAutoHdrReason::DriverRejected);
+
+    // Picture axes, same rotation handling as the VSR path: the processor
+    // consumes unrotated planes while the destination box arrives in view axes.
+    const auto rotation = viewRotation_.load(std::memory_order_acquire);
+    const auto targetSource = ToSourceAxisTarget(targetWidth, targetHeight, rotation);
+    // Even-rounded for the same driver-facing reason as the VSR surface (a
+    // video processor destination is not reliable at odd sizes). The extra
+    // row/column is never shown: PrepareScaledVideo samples the surface into
+    // the real destination rect.
+    const auto surfaceWidth = (targetSource.width + 1u) & ~1u;
+    const auto surfaceHeight = (targetSource.height + 1u) & ~1u;
+
+    D3D11_TEXTURE2D_DESC sourceDescription{};
+    sourceTextures_[0]->GetDesc(&sourceDescription);
+    const bool sameSurface = trueHdrTexture_ != nullptr &&
+        videoTrueHdrOutputWidth_ == surfaceWidth &&
+        videoTrueHdrOutputHeight_ == surfaceHeight;
+    if (!sameSurface) {
+        ReleaseTrueHdrResources();
+        videoTrueHdrSourceWidth_ = sourceWidth_;
+        videoTrueHdrSourceHeight_ = sourceHeight_;
+        videoTrueHdrOutputWidth_ = surfaceWidth;
+        videoTrueHdrOutputHeight_ = surfaceHeight;
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = surfaceWidth;
+        description.Height = surfaceHeight;
+        description.MipLevels = description.ArraySize = 1;
+        // The extension's output contract, verbatim: 10-bit RGB samples that
+        // the shader decodes as PQ on BT.2020 primaries. Both bind flags are
+        // required: RENDER_TARGET because CreateVideoProcessorOutputView
+        // (D3D11_VPOV_DIMENSION_TEXTURE2D) refuses a texture without it --
+        // the processor writes through that view -- and SHADER_RESOURCE
+        // because the presentation shader then samples it as a plain SRV.
+        // Same combination as the VSR surface.
+        description.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device_->CreateTexture2D(&description, nullptr, &trueHdrTexture_))) {
+            ReleaseTrueHdrResources();
+            return rejectAt("CreateTexture2D for the HDR surface");
+        }
+        if (FAILED(device_->CreateShaderResourceView(trueHdrTexture_, nullptr,
+                &trueHdrView_))) {
+            ReleaseTrueHdrResources();
+            return rejectAt("CreateShaderResourceView for the HDR surface");
+        }
+    }
+
+    ComPtr<ID3D11VideoDevice> videoDevice;
+    ComPtr<ID3D11VideoContext> videoContext;
+    if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&videoDevice))) ||
+        FAILED(context_->QueryInterface(IID_PPV_ARGS(&videoContext))))
+        return rejectAt("QueryInterface: no ID3D11VideoDevice/ID3D11VideoContext");
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+    content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    content.InputFrameRate = { 60, 1 };
+    content.InputWidth = sourceWidth_;
+    content.InputHeight = sourceHeight_;
+    content.OutputFrameRate = content.InputFrameRate;
+    content.OutputWidth = surfaceWidth;
+    content.OutputHeight = surfaceHeight;
+    content.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
+    ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
+    ComPtr<ID3D11VideoProcessor> processor;
+    if (FAILED(videoDevice->CreateVideoProcessorEnumerator(&content, &enumerator)) ||
+        FAILED(videoDevice->CreateVideoProcessor(enumerator.Get(), 0, &processor)))
+        return rejectAt("CreateVideoProcessorEnumerator/Processor");
+
+    UINT inputSupport = 0;
+    UINT outputSupport = 0;
+    if (FAILED(enumerator->CheckVideoProcessorFormat(sourceDescription.Format, &inputSupport)) ||
+        (inputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0 ||
+        FAILED(enumerator->CheckVideoProcessorFormat(DXGI_FORMAT_R10G10B10A2_UNORM,
+            &outputSupport)) ||
+        (outputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0)
+        return reject(FFF3FPVideoAutoHdrReason::UnsupportedSourceFormat);
+
+    // Capability probe. Only this GUID answers one, and the answer is the
+    // read-back payload rather than the HRESULT (see NvidiaVideoExtensions.h);
+    // it needs a live processor, so it runs here, once per Auto request.
+    if (!videoTrueHdrProbed_.load(std::memory_order_acquire)) {
+        const auto supported = FFF3FP::NvidiaVideo::IsTrueHdrSupported(
+            videoContext.Get(), processor.Get());
+        videoTrueHdrSupported_.store(supported, std::memory_order_release);
+        videoTrueHdrProbed_.store(true, std::memory_order_release);
+        if (!supported)
+            return reject(FFF3FPVideoAutoHdrReason::NotSupportedByDriver);
+    } else if (!videoTrueHdrSupported_.load(std::memory_order_acquire)) {
+        return reject(FFF3FPVideoAutoHdrReason::NotSupportedByDriver);
+    }
+
+    videoContext->VideoProcessorSetStreamFrameFormat(processor.Get(), 0,
+        D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+    // Same reproducible-result flag as the VSR path: the driver's implicit
+    // enhancements stay off and only the extension we set explicitly applies.
+    videoContext->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
+    const RECT source{ 0, 0, static_cast<LONG>(sourceWidth_),
+        static_cast<LONG>(sourceHeight_) };
+    videoContext->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &source);
+    const RECT destination{ 0, 0, static_cast<LONG>(surfaceWidth),
+        static_cast<LONG>(surfaceHeight) };
+    videoContext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &destination);
+
+    // The one call that turns the driver's automatic HDR on. When the host
+    // also asked for VSR the PPE extension rides in the same blit: the two are
+    // separate GUIDs on one processor and NVIDIA documents them as composable.
+    // If the driver disagrees the blit fails below, TrueHDR latches off, and
+    // the next frame takes the VSR-only path -- a working picture either way.
+    if (requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
+            FFF3FPVideoSuperResolution::Off &&
+        !videoSuperResolutionRejected_.load(std::memory_order_acquire) &&
+        FAILED(FFF3FP::NvidiaVideo::SetSuperResolution(videoContext.Get(),
+            processor.Get(), true)))
+        return rejectAt("SetStreamExtension(NVIDIA PPE) rejected");
+    if (FAILED(FFF3FP::NvidiaVideo::SetTrueHdr(videoContext.Get(),
+            processor.Get(), true)))
+        return rejectAt("SetStreamExtension(NVIDIA TrueHDR) rejected");
+
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDescription{};
+    inputDescription.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    ComPtr<ID3D11VideoProcessorInputView> inputView;
+    if (FAILED(videoDevice->CreateVideoProcessorInputView(sourceTextures_[0],
+            enumerator.Get(), &inputDescription, &inputView)))
+        return rejectAt("CreateVideoProcessorInputView");
+
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputDescription{};
+    outputDescription.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    ComPtr<ID3D11VideoProcessorOutputView> outputView;
+    if (FAILED(videoDevice->CreateVideoProcessorOutputView(trueHdrTexture_,
+            enumerator.Get(), &outputDescription, &outputView)))
+        return rejectAt("CreateVideoProcessorOutputView");
+
+    D3D11_VIDEO_PROCESSOR_STREAM stream{};
+    stream.Enable = TRUE;
+    stream.OutputIndex = 0;
+    stream.InputFrameOrField = 0;
+    stream.pInputSurface = inputView.Get();
+    if (FAILED(videoContext->VideoProcessorBlt(processor.Get(), outputView.Get(), 0, 1,
+            &stream)))
+        return rejectAt("VideoProcessorBlt");
+
+    videoTrueHdrReason_.store(FFF3FPVideoAutoHdrReason::None,
+        std::memory_order_release);
+    videoTrueHdrLoggedReason_.store(
+        static_cast<std::uint32_t>(FFF3FPVideoAutoHdrReason::None),
+        std::memory_order_release);
+    videoTrueHdrActive_.store(true, std::memory_order_release);
+    return FFFResult::Success;
+}
+
 FFFResult PlayerVideoRenderer::EnsureVideoProcessor(ID3D11Texture2D* inputTexture,
     ID3D11Texture2D* outputTexture, const std::uint32_t inputColorSpace,
     const std::uint32_t outputColorSpace) noexcept {
@@ -4154,6 +4593,32 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
     cachedVideoSettings_.inputLayout = cachedOriginalInputLayout_;
     cachedVideoSettings_.sampleScale = cachedOriginalSampleScale_;
+    // Baseline the decode transfer before the re-tag below (see
+    // decodedTransfer_ in the header): the re-tag may set it to 1 for THIS
+    // draw, and without this line nothing restores it for the next draw when
+    // no new frame is prepared (overlay draws and skipped TrueHDR draws
+    // included -- both used to inherit the stale 1 and decode the decoded SDR
+    // picture as PQ).
+    cachedVideoSettings_.transfer = decodedTransfer_.load(std::memory_order_acquire);
+    // TrueHDR re-tag. When the NVIDIA automatic-HDR pass produced this frame the
+    // samples are no longer the decoded SDR picture: the video processor wrote
+    // PQ-encoded BT.2020 values into an R10G10B10A2 surface. The shader must
+    // therefore decode them as an HDR10 frame -- layout 0 (interleaved RGB,
+    // normalized samples so sampleScale 1.0), transfer 1 (PQ), gamut 1
+    // (BT.2020), 1000-nit peak per the extension's output contract -- and the
+    // rest of the pipeline treats it exactly like a decoded HDR10 stream.
+    // This is applied here rather than in the frame prepare because it
+    // describes what THIS draw consumes, and it must never leak into the
+    // effect != 0 draws (cover backdrop / overlays), which keep the decoded
+    // picture's constants. The SDR-shader specialisation below is excluded
+    // automatically: transfer is 1, not 0.
+    if (effect == 0 && videoTrueHdrActive_.load(std::memory_order_acquire)) {
+        cachedVideoSettings_.inputLayout = 0;
+        cachedVideoSettings_.sampleScale = 1.0f;
+        cachedVideoSettings_.transfer = 1;
+        cachedVideoSettings_.gamut = 1;
+        cachedVideoSettings_.hdrPeak = 1000.0f;
+    }
     cachedVideoSettings_.reserved = effect;
     cachedVideoSettings_.outputWidth = width;
     cachedVideoSettings_.outputHeight = height;
@@ -4488,22 +4953,29 @@ bool PlayerVideoRenderer::PrepareAdaptiveDownscale(const AVFrame* frame,
 }
 
 FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidth,
-    const std::uint32_t outputHeight, ID3D11ShaderResourceView** views) noexcept {
+    const std::uint32_t outputHeight, ID3D11ShaderResourceView** views,
+    const bool rgbSource) noexcept {
     if (views == nullptr || outputWidth == 0 || outputHeight == 0)
         return FFFResult::InvalidArgument;
     const auto generation = videoGeneration_.load(std::memory_order_acquire);
     // The cache key includes the VSR state: VSR swaps the effective source for an
     // upscaled surface of a different size, and that changes the result even
-    // though the decoded generation is unchanged.
+    // though the decoded generation is unchanged. TrueHDR gets its own key bit
+    // for the same reason plus a layout change (single RGB plane, not planes).
     const auto superResolutionActive = videoSuperResolutionActive_.load(std::memory_order_acquire);
     if (scaledVideoGeneration_ == generation && scaledOutputWidth_ == outputWidth &&
         scaledOutputHeight_ == outputHeight &&
-        scaledVideoSuperResolution_ == superResolutionActive) {
+        scaledVideoSuperResolution_ == superResolutionActive &&
+        scaledVideoTrueHdr_ == rgbSource) {
         std::copy(std::begin(scaledSourceViews_), std::end(scaledSourceViews_), views);
         return FFFResult::Success;
     }
 
-    const auto layout = sourceInputLayout_;
+    // A TrueHDR frame carries one RGB plane (R10G10B10A2, PQ/BT.2020) instead
+    // of the decoded NV12/P010 planes, so the planar arm must see layout 0 --
+    // the same arm an interleaved RGB source takes -- while the shader's
+    // colour constants are re-tagged in DrawWithShader.
+    const auto layout = rgbSource ? 0u : sourceInputLayout_;
     auto* inputViews = effectiveSourceViews_;
     const auto planeCount = layout == 1 ? 3u : (layout == 2 ? 2u : 1u);
     for (std::size_t plane = 0; plane < ARRAYSIZE(effectiveSourceViews_); ++plane) {
@@ -4513,10 +4985,13 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
         }
         // With VSR active the effective source is already at the target size, so
         // these denominators describe the upscaled surface, not the decoded one.
+        // TrueHDR's surface is the target size by construction, so it takes the
+        // same special case.
         const auto superResolutionPlane =
             superResolutionActive && superResolutionViews_[plane] != nullptr;
-        const auto planeSourceWidth = superResolutionPlane ? outputWidth : sourceWidth_;
-        const auto planeSourceHeight = superResolutionPlane ? outputHeight : sourceHeight_;
+        const auto trueHdrPlane = rgbSource && plane == 0;
+        const auto planeSourceWidth = superResolutionPlane || trueHdrPlane ? outputWidth : sourceWidth_;
+        const auto planeSourceHeight = superResolutionPlane || trueHdrPlane ? outputHeight : sourceHeight_;
         const auto planeWidth = plane == 0 ? planeSourceWidth :
             (planeSourceWidth + (1u << sourceChromaWidthShift_) - 1) >> sourceChromaWidthShift_;
         const auto planeHeight = plane == 0 ? planeSourceHeight :
@@ -4569,6 +5044,7 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
     scaledOutputWidth_ = outputWidth;
     scaledOutputHeight_ = outputHeight;
     scaledVideoSuperResolution_ = superResolutionActive;
+    scaledVideoTrueHdr_ = rgbSource;
     std::copy(std::begin(scaledSourceViews_), std::end(scaledSourceViews_), views);
     return FFFResult::Success;
 }
@@ -5045,6 +5521,9 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requeste
     timedTextAtlasHdr_ = hdrLinear;
     timedTextAtlasX_ = timedTextAtlasY_ = timedTextAtlasRowHeight_ = 0;
     timedTextSprites_.clear();
+    // A new texture invalidates every rect in the table and in the free list.
+    timedTextAtlasFreeRects_.clear();
+    danmakuSpriteCount_ = 0;
     return FFFResult::Success;
 }
 
@@ -5102,6 +5581,11 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     d2dContext_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     d2dContext_->SetTextRenderingParams(timedTextRenderingParams_);
     const bool hdrLinear = actualMode_ == FFF3FPColorMode::MapToHdr;
+    // One LRU stamp per layer draw. Every visible sprite refreshes its stamp
+    // before any eviction decision for this frame can run, so on-screen text
+    // is never the eviction candidate.
+    const auto frameClock = ++timedTextSpriteClock_;
+    const auto danmakuLayer = slot == TimedTextLayerSlot::Danmaku;
     const auto scaleX = layer->canvasWidth == 0 ? 1.0f : static_cast<float>(swapWidth_) / layer->canvasWidth;
     const auto scaleY = layer->canvasHeight == 0 ? 1.0f : static_cast<float>(swapHeight_) / layer->canvasHeight;
     if (timedTextBrushes_.size() >= MaximumTimedTextBrushes) {
@@ -5192,6 +5676,8 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     pendingSprites.reserve(layer->commands.size());
     const auto clearAtlas = [this]() noexcept -> bool {
         timedTextSprites_.clear();
+        timedTextAtlasFreeRects_.clear();
+        danmakuSpriteCount_ = 0;
         timedTextAtlasX_ = timedTextAtlasY_ = timedTextAtlasRowHeight_ = 0;
         d2dContext_->SetTarget(d2dAtlasTarget_);
         d2dContext_->BeginDraw();
@@ -5199,6 +5685,88 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         const auto result = d2dContext_->EndDraw();
         d2dContext_->SetTarget(nullptr);
         return SUCCEEDED(result);
+    };
+    // Atlas space recycling. Evicted sprites hand their rect back here; new
+    // sprites take a fitting rect before the shelf cursor advances. Splits
+    // keep the unused bottom and right strips reusable, so churning danmaku
+    // settles into a steady-state recycle loop instead of marching the cursor
+    // into a full clear every few frames.
+    const auto pushFreeRect = [this](const TimedTextAtlasRect& rect) noexcept {
+        if (rect.w == 0 || rect.h == 0) return;
+        if (timedTextAtlasFreeRects_.size() < MaximumTimedTextAtlasFreeRects) {
+            timedTextAtlasFreeRects_.push_back(rect);
+            return;
+        }
+        auto smallest = timedTextAtlasFreeRects_.begin();
+        for (auto it = timedTextAtlasFreeRects_.begin(); it != timedTextAtlasFreeRects_.end(); ++it) {
+            if (static_cast<std::uint64_t>(it->w) * it->h <
+                static_cast<std::uint64_t>(smallest->w) * smallest->h) smallest = it;
+        }
+        if (static_cast<std::uint64_t>(smallest->w) * smallest->h >=
+            static_cast<std::uint64_t>(rect.w) * rect.h) return;
+        *smallest = rect;
+    };
+    const auto releaseSpriteRect = [this, &pushFreeRect](const TimedTextSprite& sprite) noexcept {
+        pushFreeRect(TimedTextAtlasRect{static_cast<std::uint32_t>(sprite.atlasX),
+            static_cast<std::uint32_t>(sprite.atlasY),
+            static_cast<std::uint32_t>(sprite.width),
+            static_cast<std::uint32_t>(sprite.height)});
+    };
+    // Evicts the least recently used danmaku sprite. Entries stamped this
+    // frame win over staler ones; if every entry is current the oldest still
+    // goes, because the quota must hold. Returns false only if the table
+    // contains no danmaku entry at all (accounting drift guard).
+    const auto evictLeastRecentlyUsedDanmaku =
+        [this, &releaseSpriteRect](const std::uint64_t frameClock) noexcept -> bool {
+        auto best = timedTextSprites_.end();
+        for (auto it = timedTextSprites_.begin(); it != timedTextSprites_.end(); ++it) {
+            if (!it->second.danmaku) continue;
+            if (best == timedTextSprites_.end()) { best = it; continue; }
+            const bool candidateCurrent = it->second.lastUsed >= frameClock;
+            const bool bestCurrent = best->second.lastUsed >= frameClock;
+            if (candidateCurrent != bestCurrent) {
+                if (candidateCurrent) best = it;
+                continue;
+            }
+            if (it->second.lastUsed < best->second.lastUsed) best = it;
+        }
+        if (best == timedTextSprites_.end()) return false;
+        releaseSpriteRect(best->second);
+        timedTextSprites_.erase(best);
+        --danmakuSpriteCount_;
+        ++danmakuSpriteEvictions_;
+        return true;
+    };
+    const auto allocateAtlasRect =
+        [this, &pushFreeRect](const std::uint32_t width, const std::uint32_t height,
+        std::uint32_t& outX, std::uint32_t& outY) noexcept -> bool {
+        for (std::size_t index = 0; index < timedTextAtlasFreeRects_.size(); ++index) {
+            const auto candidate = timedTextAtlasFreeRects_[index];
+            if (candidate.w < width || candidate.h < height) continue;
+            outX = candidate.x; outY = candidate.y;
+            // Detach the consumed rect first, then hand the unused bottom
+            // strip (full width) and right strip (placed height) back so both
+            // stay reusable by later sprites.
+            timedTextAtlasFreeRects_[index] = timedTextAtlasFreeRects_.back();
+            timedTextAtlasFreeRects_.pop_back();
+            if (candidate.h > height && candidate.w >= 8)
+                pushFreeRect(TimedTextAtlasRect{candidate.x, candidate.y + height,
+                    candidate.w, candidate.h - height});
+            if (candidate.w > width && candidate.h >= 8)
+                pushFreeRect(TimedTextAtlasRect{candidate.x + width, candidate.y,
+                    candidate.w - width, height});
+            return true;
+        }
+        if (timedTextAtlasX_ + width > timedTextAtlasSize_) {
+            timedTextAtlasX_ = 0;
+            timedTextAtlasY_ += timedTextAtlasRowHeight_;
+            timedTextAtlasRowHeight_ = 0;
+        }
+        if (timedTextAtlasY_ + height > timedTextAtlasSize_) return false;
+        outX = timedTextAtlasX_; outY = timedTextAtlasY_;
+        timedTextAtlasX_ += width;
+        timedTextAtlasRowHeight_ = std::max(timedTextAtlasRowHeight_, height);
+        return true;
     };
     const auto buildPendingSprites = [&](const bool stopWhenFull) noexcept -> bool {
         pendingSprites.clear();
@@ -5216,7 +5784,20 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             const auto shadowY = command.shadowOffsetY * scaleY;
             const auto key = TimedTextSpriteKey(command, std::max(command.width * scaleX, 1.0f),
                 std::max(command.height * scaleY, 1.0f), fontSize, outline, shadowX, shadowY);
-            if (timedTextSprites_.contains(key) || !pendingKeys.insert(key).second) continue;
+            if (const auto existing = timedTextSprites_.find(key); existing != timedTextSprites_.end()) {
+                // Still wanted this frame: refresh the LRU stamp so eviction
+                // never picks text that is currently on screen.
+                existing->second.lastUsed = frameClock;
+                continue;
+            }
+            if (!pendingKeys.insert(key).second) continue;
+            if (danmakuLayer) {
+                // Churning quota: dead strings recycle their rects instead of
+                // pushing the atlas into a full clear. The loop is bounded by
+                // the eviction return value; on accounting drift it stops.
+                while (danmakuSpriteCount_ >= MaximumDanmakuSprites &&
+                       evictLeastRecentlyUsedDanmaku(frameClock)) {}
+            }
             if (timedTextSprites_.size() + pendingSprites.size() >= MaximumTimedTextSprites)
                 return !stopWhenFull;
             auto* layout = getLayout(command, fontSize);
@@ -5248,23 +5829,20 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
                 return !stopWhenFull;
             const auto width = static_cast<std::uint32_t>(measuredWidth);
             const auto height = static_cast<std::uint32_t>(measuredHeight);
-            if (timedTextAtlasX_ + width > timedTextAtlasSize_) {
-                timedTextAtlasX_ = 0;
-                timedTextAtlasY_ += timedTextAtlasRowHeight_;
-                timedTextAtlasRowHeight_ = 0;
-            }
-            if (timedTextAtlasY_ + height > timedTextAtlasSize_)
+            std::uint32_t atlasX = 0;
+            std::uint32_t atlasY = 0;
+            if (!allocateAtlasRect(width, height, atlasX, atlasY))
                 return !stopWhenFull;
-            TimedTextSprite sprite{static_cast<float>(timedTextAtlasX_),
-                static_cast<float>(timedTextAtlasY_), left, top,
+            TimedTextSprite sprite{static_cast<float>(atlasX),
+                static_cast<float>(atlasY), left, top,
                 static_cast<float>(width), static_cast<float>(height)};
-            timedTextAtlasX_ += width;
-            timedTextAtlasRowHeight_ = std::max(timedTextAtlasRowHeight_, height);
+            sprite.danmaku = danmakuLayer;
+            sprite.lastUsed = frameClock;
             layout->AddRef();
             pendingSprites.push_back(PendingTimedTextSprite{commandIndex,
                 std::shared_ptr<IDWriteTextLayout>(layout, [](IDWriteTextLayout* retained) {
                     retained->Release();
-                }), key, sprite, outline, shadowX, shadowY});
+                }), key, sprite, outline, shadowX, shadowY, danmakuLayer});
         }
         return true;
     };
@@ -5381,6 +5959,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         }
         for (const auto& pending : pendingSprites) {
             timedTextSprites_[pending.key] = pending.sprite;
+            if (pending.danmaku) ++danmakuSpriteCount_;
             ++timedTextSpriteCacheMisses_;
         }
         pendingSprites.clear();
@@ -5422,6 +6001,9 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             const auto sprite = timedTextSprites_.find(spriteKey);
             if (sprite != timedTextSprites_.end()) {
                 ++timedTextSpriteCacheHits_;
+                // Visible again this frame: refresh the LRU stamp so the
+                // danmaku quota cannot evict on-screen text.
+                sprite->second.lastUsed = frameClock;
                 const auto left = destination.left + sprite->second.offsetX;
                 const auto top = destination.top + sprite->second.offsetY;
                 const auto right = left + sprite->second.width;
@@ -5578,6 +6160,9 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
     for (auto& [color, brush] : timedTextBrushes_) if (brush != nullptr) brush->Release();
     timedTextBrushes_.clear();
     timedTextSprites_.clear();
+    timedTextAtlasFreeRects_.clear();
+    danmakuSpriteCount_ = 0;
+    danmakuSpriteEvictions_ = 0;
     timedTextSpriteInstances_.clear();
     timedTextAtlasX_ = timedTextAtlasY_ = timedTextAtlasRowHeight_ = 0;
     timedTextAtlasSize_ = 0;
@@ -5628,24 +6213,33 @@ void PlayerVideoRenderer::InvalidateHdrMetadataCache() noexcept {
 
 void PlayerVideoRenderer::SetHdrMetadata() noexcept {
     if (swapChain_ == nullptr || !swapHdr_) return;
-    // An SDR source presented on the scRGB chain has no mastering display and no
-    // content light level. The fallback HDR10 block would still declare Rec.2020
-    // primaries and a 100-nit peak the source never claimed, which is exactly the
-    // kind of hint that makes a display tone map the picture. Declare "none" and
-    // let DWM apply its default mapping to the linear values we hand over.
-    if (hdrProcessor_.State().format == FFF3FPHdrFormat::Sdr) {
-        swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-        hdrMetaDataCalls_.fetch_add(1, std::memory_order_relaxed);
-        signaledMaxMastering_.store(0, std::memory_order_relaxed);
-        signaledMinMastering_.store(0, std::memory_order_relaxed);
-        signaledMaxCll_.store(0, std::memory_order_relaxed);
-        signaledMaxFall_.store(0, std::memory_order_relaxed);
-        lastHdrMetadata_ = {};
-        hdrMetadataValid_ = false;
-        return;
-    }
     DXGI_HDR_METADATA_HDR10 metadata{};
-    hdrProcessor_.BuildDxgiHdr10Metadata(metadata);
+    if (videoTrueHdrActive_.load(std::memory_order_acquire)) {
+        // A TrueHDR frame carries PQ/BT.2020 samples by the extension's output
+        // contract even though the stream classifier still sees the original
+        // SDR picture. Signal the HDR10 block the pixels actually carry, so
+        // DWM maps the extended highlights into the display's range instead of
+        // treating them as an un-signalled SDR window's linear values.
+        hdrProcessor_.BuildTrueHdrMetadata(metadata);
+    } else {
+        // An SDR source presented on the scRGB chain has no mastering display and no
+        // content light level. The fallback HDR10 block would still declare Rec.2020
+        // primaries and a 100-nit peak the source never claimed, which is exactly the
+        // kind of hint that makes a display tone map the picture. Declare "none" and
+        // let DWM apply its default mapping to the linear values we hand over.
+        if (hdrProcessor_.State().format == FFF3FPHdrFormat::Sdr) {
+            swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+            hdrMetaDataCalls_.fetch_add(1, std::memory_order_relaxed);
+            signaledMaxMastering_.store(0, std::memory_order_relaxed);
+            signaledMinMastering_.store(0, std::memory_order_relaxed);
+            signaledMaxCll_.store(0, std::memory_order_relaxed);
+            signaledMaxFall_.store(0, std::memory_order_relaxed);
+            lastHdrMetadata_ = {};
+            hdrMetadataValid_ = false;
+            return;
+        }
+        hdrProcessor_.BuildDxgiHdr10Metadata(metadata);
+    }
     // With ST 2094 metadata present these fields now change per scene, and DWM
     // does not take kindly to a new block on every frame: pushing one per frame
     // makes the display's tone mapping visibly hunt. Only submit when a field
@@ -6094,29 +6688,56 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         context_->CopySubresourceRegion(sourceTextures_[0], 0, 0, 0, 0, texture, slice, nullptr);
     } else if (directYuv) {
         // Planar (1) and semi-planar (2) frames arrive as CPU planes and must be
-        // copied into shader-visible textures. Two upload strategies, picked by the
-        // measured cost (see the ladder constants above):
+        // copied into shader-visible textures. Two upload strategies: the size
+        // table picks one, and WantsStagingUpload can still turn it off when this
+        // adapter cannot carry the ring (see the constants above):
         //
-        //  - Rung 0: Map(WRITE_DISCARD) into a DYNAMIC texture. The driver can
+        //  - Small frames: Map(WRITE_DISCARD) into a DYNAMIC texture. The driver can
         //    rename storage rather than waiting for the previous frame to stop
         //    sampling the same DEFAULT texture, which is why this path exists.
-        //  - Rung 1: CPU-write STAGING -> alternating DEFAULT textures, keeping
-        //    upload and sampling on separate resources. EnsurePipeline creates the
-        //    matching resource ring.
+        //  - Large frames (>= 4K): CPU-write STAGING -> alternating DEFAULT
+        //    textures, keeping upload and sampling on separate resources.
+        //    EnsurePipeline creates the matching resource ring.
         const auto uploadStart = std::chrono::steady_clock::now();
         // uploadPlanes/uploadLines already point at the resampled copy when the
         // adaptive policy engaged, and uploadWidth/uploadHeight match the textures
         // EnsurePipeline just created for that size.
-        const auto stagingUpload = uploadRung_ != 0;
+        const auto largeFrame = WantsStagingUpload(uploadWidth, uploadHeight);
         if (input.layout == 1 || input.layout == 2) {
             const auto planeCount = input.layout == 1 ? 3u : 2u;
-            if (stagingUpload) {
+            if (largeFrame && ResolveUploadCopyModeCached() == UploadCopyMode::UpdateSubresource) {
+                // 实验臂：回到 #25 之前的做法，让驱动自己搬，CPU 不直接碰 staging。
+                // 字节量在这里仍然是可精确算出的——交给驱动的就是那 box 的整帧数据，
+                // 所以照常记账，否则这一臂会显示"搬了 0 字节"而和 STAGING 臂不可比。
+                const auto copyStart = std::chrono::steady_clock::now();
+                std::size_t moved = 0;
+                for (unsigned plane = 0; plane < planeCount; ++plane) {
+                    const auto xs = plane == 0 ? 0u : input.chromaWidthShift;
+                    const auto ys = plane == 0 ? 0u : input.chromaHeightShift;
+                    const auto rows = (uploadHeight + (1u << ys) - 1) >> ys;
+                    const auto rowBytes = ((uploadWidth + (1u << xs) - 1) >> xs) *
+                        (input.layout == 2 && plane != 0 ? 2u : 1u) * (input.bitDepth > 8 ? 2u : 1u);
+                    context_->UpdateSubresource(sourceTextures_[plane], 0, nullptr,
+                        uploadPlanes[plane], uploadLines[plane], 0);
+                    moved += rows * rowBytes;
+                }
+                uploadCopy100ns_.fetch_add(To100ns(
+                    std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
+                uploadCopyBytes_.fetch_add(moved, std::memory_order_relaxed);
+                // uploadCount_ is NOT touched here: the tail of the directYuv block
+                // already counts one per picture. Counting it twice made bytes_per_upload
+                // read half of the truth and per-upload times read double.
+                uploadPath_.store(6, std::memory_order_relaxed);
+            } else if (largeFrame) {
+                const bool doubleRing = UploadRingDepthCached() >= 2u;
                 // Alternate sampled textures and CPU-write staging resources so
                 // uploading the next picture can overlap sampling the last one.
                 for (unsigned plane = 0; plane < planeCount; ++plane) {
-                    std::swap(sourceTextures_[plane], uploadTextures_[plane]);
-                    std::swap(sourceViews_[plane], uploadViews_[plane]);
-                    auto* staging = uploadStaging_[uploadSlot_][plane];
+                    if (doubleRing) {
+                        std::swap(sourceTextures_[plane], uploadTextures_[plane]);
+                        std::swap(sourceViews_[plane], uploadViews_[plane]);
+                    }
+                    auto* staging = uploadStaging_[doubleRing ? uploadSlot_ : 0u][plane];
                     D3D11_MAPPED_SUBRESOURCE mapped{};
                     const auto mapStart = std::chrono::steady_clock::now();
                     if (FAILED(context_->Map(staging, 0, D3D11_MAP_WRITE, 0, &mapped))) {
@@ -6131,18 +6752,18 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
                     const auto rowBytes = ((uploadWidth + (1u << xs) - 1) >> xs) *
                         (input.layout == 2 && plane != 0 ? 2u : 1u) * (input.bitDepth > 8 ? 2u : 1u);
                     const auto copyStart = std::chrono::steady_clock::now();
-                    for (unsigned row = 0; row < rows; ++row)
-                        std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
-                            static_cast<std::size_t>(row) * mapped.RowPitch,
-                            uploadPlanes[plane] + static_cast<std::ptrdiff_t>(row) * uploadLines[plane], rowBytes);
+                    const std::size_t moved = CopyUploadPlane(
+                        static_cast<std::uint8_t*>(mapped.pData),
+                        static_cast<std::size_t>(mapped.RowPitch),
+                        uploadPlanes[plane], static_cast<std::size_t>(uploadLines[plane]),
+                        rowBytes, rows, ResolveUploadCopyModeCached());
                     uploadCopy100ns_.fetch_add(To100ns(
                         std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
-                    uploadCopyBytes_.fetch_add(static_cast<std::size_t>(rows) * rowBytes,
-                        std::memory_order_relaxed);
+                    uploadCopyBytes_.fetch_add(moved, std::memory_order_relaxed);
                     context_->Unmap(staging, 0);
                     context_->CopyResource(sourceTextures_[plane], staging);
                 }
-                uploadSlot_ = (uploadSlot_ + 1) % 2;
+                if (doubleRing) uploadSlot_ = (uploadSlot_ + 1) % 2;
                 uploadPath_.store(1, std::memory_order_relaxed);
             } else {
                 for (unsigned plane = 0; plane < planeCount; ++plane) {
@@ -6165,21 +6786,21 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
                     // zeroed pages a freshly created texture starts with, which samples
                     // as (U=0, V=0) and reads as a strong green cast. Planar formats
                     // (and the luma plane) are one sample per texel, so they are
-                    // unaffected. The UpdateSubresource arm below passes the real
-                    // source stride and never had this problem.
+                    // unaffected. The >= 4K staging arm multiplies the same factor, so
+                    // it never had this either -- it is not a route that bypasses the
+                    // arithmetic, contrary to what this note used to claim.
                     const auto samplesPerTexel = (input.layout == 2 && plane != 0) ? 2u : 1u;
                     const auto rowBytes = ((uploadWidth + (1u << xShift) - 1) >> xShift) *
                         samplesPerTexel * (input.bitDepth > 8 ? 2u : 1u);
                     const auto copyStart = std::chrono::steady_clock::now();
-                    for (unsigned row = 0; row < rows; ++row)
-                        std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
-                            static_cast<std::size_t>(row) * mapped.RowPitch,
-                            uploadPlanes[plane] + static_cast<std::ptrdiff_t>(row) *
-                                uploadLines[plane], rowBytes);
+                    const std::size_t moved = CopyUploadPlane(
+                        static_cast<std::uint8_t*>(mapped.pData),
+                        static_cast<std::size_t>(mapped.RowPitch),
+                        uploadPlanes[plane], static_cast<std::size_t>(uploadLines[plane]),
+                        rowBytes, rows, ResolveUploadCopyModeCached());
                     uploadCopy100ns_.fetch_add(To100ns(
                         std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
-                    uploadCopyBytes_.fetch_add(static_cast<std::size_t>(rows) * rowBytes,
-                        std::memory_order_relaxed);
+                    uploadCopyBytes_.fetch_add(moved, std::memory_order_relaxed);
                     context_->Unmap(sourceTextures_[plane], 0);
                 }
                 uploadPath_.store(2, std::memory_order_relaxed);
@@ -6190,18 +6811,13 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
                 uploadLines[0], 0);
             uploadCopy100ns_.fetch_add(To100ns(
                 std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
-            // The driver owns the byte count on this arm, so no bytes are recorded and
-            // the arm stays identifiable through uploadPath == 3.
+            // The driver owns the byte count here, so this arm records no bytes and
+            // stays identifiable by path 3 rather than diluting bytes-per-upload.
             uploadPath_.store(3, std::memory_order_relaxed);
         }
         uploadCount_.fetch_add(1, std::memory_order_relaxed);
-        const auto uploadNs = static_cast<std::uint64_t>(std::chrono::duration_cast<
-            std::chrono::nanoseconds>(std::chrono::steady_clock::now() - uploadStart).count());
-        upload100ns_.fetch_add(uploadNs / 100);
-        // The only upload path whose strategy the ladder selects (rung 0 Map vs
-        // rung 1 staging ring). The UpdateSubresource arms below run the same
-        // path on either rung, so timing them would buy nothing but VRAM.
-        ObserveUploadCost(uploadNs);
+        upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+            std::chrono::nanoseconds>(std::chrono::steady_clock::now() - uploadStart).count() / 100));
     } else if (floatRgb) {
         // Verbatim (no quantisation) so negatives and super-whites survive; taken from uploadPlanes/
         // uploadLines, like directYuv above, so an engaged downscale cannot leave a top-left crop.
@@ -6225,8 +6841,11 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         const auto rgbUploadNs = std::chrono::steady_clock::now() - rgbUploadStart;
         upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
             std::chrono::nanoseconds>(rgbUploadNs).count() / 100));
+        // This arm's upload IS its copy. Without this the layout-0 route reports
+        // uploadCopy100ns == 0 while upload100ns is non-zero, which reads as "moved no
+        // bytes" instead of "bytes moved that nobody instrumented".
         uploadCopy100ns_.fetch_add(To100ns(rgbUploadNs), std::memory_order_relaxed);
-        // Exact here: the whole box moves, and both dimensions and the pitch are known.
+        // Exact here: the whole box moves and both dimensions and the pitch are known.
         uploadCopyBytes_.fetch_add(static_cast<std::size_t>(uploadWidth) * uploadHeight *
             bytesPerPixel, std::memory_order_relaxed);
         uploadCount_.fetch_add(1, std::memory_order_relaxed);
@@ -6261,6 +6880,13 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         settings.transfer = 3u;
         settings.gamut = 0u;
     }
+    // Stash the frame's decode transfer for the TrueHDR gate and the draw
+    // baseline. The memcpy below lands this value in cachedVideoSettings_, but
+    // DrawWithShader's TrueHDR re-tag later overwrites THAT field with 1 (PQ)
+    // whenever the frame came out of the TrueHDR pass, and a repeated draw of
+    // the same frame never re-runs this prepare to restore it. See
+    // decodedTransfer_ in the header.
+    decodedTransfer_.store(settings.transfer, std::memory_order_relaxed);
     settings.sdrPeak = sdrPeakNits_;
     settings.hdrPeak = settings.transfer == 0 ? 100.0f : hdrProcessor_.State().sourcePeakNits;
     sourcePeakNits_ = settings.hdrPeak;
@@ -6743,79 +7369,6 @@ void PlayerVideoRenderer::SetPresentPaceFloorHz(const double paceHz) noexcept {
     paceFloorHz_.store(paceHz > 0.0 ? paceHz : 0.0, std::memory_order_release);
 }
 
-void PlayerVideoRenderer::ObserveUploadCost(std::uint64_t uploadNs) noexcept {
-    if (sourceExternal_) return;   // decoder-owned surfaces: no CPU upload to compare
-    // The budget the upload has to fit inside is the effective frame period: the
-    // content period while decoding keeps up, the presentation bound (panel rate,
-    // media ceiling, pace floor) whenever that is the tighter of the two. Scoring
-    // against the content period alone would condemn an upload for content the
-    // panel was only ever going to show at half rate; scoring against the panel
-    // alone would miss the 120 fps case where the content period is the tighter
-    // budget. While a pace floor is engaged the bound IS the pace period, which
-    // is the point -- a slower cadence buys the upload more room, and the ladder
-    // must not spend VRAM chasing a budget that only existed at full rate.
-    const auto ceilingHz = mediaCeilingHz_.load(std::memory_order_acquire);
-    const auto boundHz = FrameRateBoundHz();
-    auto effectiveHz = ceilingHz;
-    if (boundHz > 0.0 && (effectiveHz <= 0.0 || boundHz < effectiveHz)) effectiveHz = boundHz;
-    if (effectiveHz <= 0.0) effectiveHz = 60.0;   // no rate information yet: assume 60
-    const auto periodNs = static_cast<std::uint64_t>(1'000'000'000.0 / effectiveHz);
-    // A material budget change (pace engaged/released, ceiling ratcheted up by an
-    // observed peak) ends the window early: samples taken against the old budget
-    // would otherwise settle against the new one. Jitter below 1.5% is absorbed
-    // so a republished identical ceiling cannot starve the window.
-    if (uploadWindowPeriodNs_ != 0 && periodNs != uploadWindowPeriodNs_) {
-        const auto larger = periodNs > uploadWindowPeriodNs_ ? periodNs : uploadWindowPeriodNs_;
-        const auto smaller = periodNs > uploadWindowPeriodNs_ ? uploadWindowPeriodNs_ : periodNs;
-        if (larger - smaller > smaller / 64) {   // > ~1.5%
-            uploadWindowFrames_ = 0;
-            uploadWindowNs_ = 0;
-        }
-    }
-    uploadWindowPeriodNs_ = periodNs;
-    uploadWindowNs_ += uploadNs;
-    if (++uploadWindowFrames_ < UploadLadderWindowFrames) return;
-    const auto windowFrames = uploadWindowFrames_;
-    const auto meanNs = uploadWindowNs_ / windowFrames;
-    const auto share = static_cast<double>(meanNs) / static_cast<double>(periodNs);
-    uploadWindowFrames_ = 0;
-    uploadWindowNs_ = 0;
-    const auto trace = GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0) != 0;
-    if (uploadRung_ == 0) {
-        // Climb only on sustained evidence: the upload eating half or more of the
-        // frame budget across a whole window, on a device that can pay for the
-        // ring and has not already refused it.
-        const auto vramOk = dedicatedVideoMemoryBytes_.load(std::memory_order_acquire) >=
-            UploadStagingVramFloor;
-        if (share >= UploadEscalateRatio && vramOk && !uploadStagingRefused_) {
-            uploadRung_ = 1;
-            uploadCheapWindows_ = 0;
-            if (trace)
-                std::fprintf(stderr,
-                    "[ladder] upload rung 0 -> 1: mean upload %.3f ms of %.3f ms frame budget (%u frames)\n",
-                    static_cast<double>(meanNs) / 1e6, static_cast<double>(periodNs) / 1e6,
-                    windowFrames);
-        }
-    } else {
-        // Step back down -- releasing the ring's VRAM -- once uploads stay cheap
-        // across consecutive windows. Two windows, because a single quiet stretch
-        // can be a decode queue draining rather than the upload getting cheaper.
-        if (share <= UploadDeescalateRatio) {
-            if (++uploadCheapWindows_ >= UploadDeescalateWindows) {
-                uploadRung_ = 0;
-                uploadCheapWindows_ = 0;
-                if (trace)
-                    std::fprintf(stderr,
-                        "[ladder] upload rung 1 -> 0: mean upload %.3f ms of %.3f ms frame budget (%u cheap windows)\n",
-                        static_cast<double>(meanNs) / 1e6, static_cast<double>(periodNs) / 1e6,
-                        UploadDeescalateWindows);
-            }
-        } else {
-            uploadCheapWindows_ = 0;
-        }
-    }
-}
-
 // 只上抬、永不回落的那个方向。必需，不是保险：`r_frame_rate` 在 MPEG-TS 上会**偏低**
 // （解容器没有索引，按流头采样），本机实测 `12b_vfr_20then40.ts` 的 r=20/1、
 // av_guess=20/1，而后半段真是 40fps（无窗口电池读到 [2.60s@20.0Hz][1.88s@40.0Hz]）。
@@ -7227,6 +7780,12 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
         // its 2:1 aspect ratio), especially in small windows. Sample the native
         // source planes directly in the projection shader instead.
         videoSuperResolutionActive_.store(false, std::memory_order_release);
+        videoTrueHdrActive_.store(false, std::memory_order_release);
+        // The projection path samples the native planes directly, so neither
+        // VP extension can apply. There is no "content shape" reason value, so
+        // report it as an unsupported source rather than claiming silence.
+        videoTrueHdrReason_.store(FFF3FPVideoAutoHdrReason::UnsupportedSourceFormat,
+            std::memory_order_release);
         std::copy(std::begin(sourceViews_), std::end(sourceViews_), presentationViews);
     } else {
         // Rebuild the per-frame source views from the pipeline's decoded planes,
@@ -7235,14 +7794,37 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
         // on or off mid-stream cannot corrupt the next frame.
         for (std::size_t plane = 0; plane < ARRAYSIZE(effectiveSourceViews_); ++plane)
             effectiveSourceViews_[plane] = sourceViews_[plane];
-        if (ApplySuperResolution(destination.width, destination.height) ==
+        // TrueHDR runs first: its pass produces the frame's final pixel format
+        // (PQ/BT.2020 in a single R10G10B10A2 plane), so when it engages there
+        // is no NV12/P010 intermediate for VSR to feed and the planar shader
+        // arm must not run. When it does not engage, VSR owns the pass exactly
+        // as before -- including the retry after a latched TrueHDR rejection.
+        const auto trueHdrEngaged =
+            ApplyTrueHdr(destination.width, destination.height) ==
+                FFFResult::Success &&
+            videoTrueHdrActive_.load(std::memory_order_acquire) &&
+            trueHdrView_ != nullptr;
+        if (trueHdrEngaged) {
+            effectiveSourceViews_[0] = trueHdrView_;
+            effectiveSourceViews_[1] = nullptr;
+            effectiveSourceViews_[2] = nullptr;
+            // VSR did not produce this frame's pixels even when its PPE
+            // extension rode inside the same blit; report the state honestly
+            // instead of leaving a stale "VSR active" behind.
+            videoSuperResolutionActive_.store(false, std::memory_order_release);
+            if (videoSuperResolutionReason_.load(std::memory_order_acquire) ==
+                    FFF3FPVideoSuperResolutionReason::None)
+                videoSuperResolutionReason_.store(
+                    FFF3FPVideoSuperResolutionReason::YieldedToAutoHdr,
+                    std::memory_order_release);
+        } else if (ApplySuperResolution(destination.width, destination.height) ==
                 FFFResult::Success &&
             videoSuperResolutionActive_.load(std::memory_order_acquire)) {
             for (std::size_t plane = 0; plane < ARRAYSIZE(effectiveSourceViews_); ++plane)
                 effectiveSourceViews_[plane] = superResolutionViews_[plane];
         }
         const auto scaleResult = PrepareScaledVideo(destination.width, destination.height,
-            presentationViews);
+            presentationViews, trueHdrEngaged);
         if (scaleResult != FFFResult::Success) return scaleResult;
     }
     constexpr float black[] = {0, 0, 0, 1};
@@ -7261,9 +7843,11 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
     if (result == FFFResult::Success) {
         // Report the path that actually produced the frame. A VP-upscaled frame
         // leaves PrepareScaledVideo with zero passes (source already equals the
-        // target), so this is the only place that knows VSR ran.
+        // target), so this is the only place that knows VSR ran; the TrueHDR
+        // pass is the same story with its own surface.
         actualVideoScalingMode_.store(
-            videoSuperResolutionActive_.load(std::memory_order_acquire)
+            videoSuperResolutionActive_.load(std::memory_order_acquire) ||
+            videoTrueHdrActive_.load(std::memory_order_acquire)
                 ? FFF3FPVideoScalingMode::D3D11VideoProcessor
                 : FFF3FPVideoScalingMode::Shader);
         // Record the drawn rect for GetRenderTargetInfo.
@@ -7667,6 +8251,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseVideoProcessor();
     ReleaseVideoProcessorInputSurface();
     ReleaseSuperResolutionResources();
+    ReleaseTrueHdrResources();
     ReleaseOffscreenTarget();
     ReleaseCoverBackdropResources();
     ReleaseTimedTextResources();
@@ -7750,6 +8335,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     ReleaseVideoProcessor();
     ReleaseVideoProcessorInputSurface();
     ReleaseSuperResolutionResources();
+    ReleaseTrueHdrResources();
     ReleaseOffscreenTarget();
     ReleaseCoverBackdropResources();
     ReleaseScaleResources();
@@ -7760,18 +8346,6 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
         ReleaseCom(uploadTextures_[plane]);
         for (auto& slot : uploadStaging_) ReleaseCom(slot[plane]);
     }
-    // The ladder answers "is the upload expensive on THIS machine for THIS
-    // content": a new stream can change the frame size, the sample format and
-    // therefore the crossover, and the ring's 3x VRAM commitment was sized for
-    // the old one. Every media restarts on rung 0 and re-earns its way up. The
-    // device-level refusal deliberately survives -- it is per-device, not
-    // per-content, and is cleared only when the device is recreated.
-    uploadRung_ = 0;
-    uploadRungCreated_ = 0;
-    uploadWindowFrames_ = 0;
-    uploadWindowNs_ = 0;
-    uploadWindowPeriodNs_ = 0;
-    uploadCheapWindows_ = 0;
     sourceWidth_ = sourceHeight_ = 0;
     sourceInputLayout_ = UINT32_MAX;
     sourceBitDepth_ = 0;
@@ -7984,6 +8558,51 @@ void PlayerVideoRenderer::FillVideoSuperResolutionStatus(
     status.targetWidth = videoSuperResolutionTargetWidth_.load(std::memory_order_acquire);
     status.targetHeight = videoSuperResolutionTargetHeight_.load(std::memory_order_acquire);
 }
+
+FFFResult PlayerVideoRenderer::SetVideoAutoHdr(
+    const FFF3FPVideoAutoHdr mode) noexcept {
+    if (mode != FFF3FPVideoAutoHdr::Off &&
+        mode != FFF3FPVideoAutoHdr::Auto)
+        return FFFResult::InvalidArgument;
+    // A fresh Auto request clears the latches AND re-arms the driver probe:
+    // a driver update (or an NVIDIA panel switch) can make TrueHDR appear
+    // without the adapter changing. Same discipline as VSR.
+    if (mode == FFF3FPVideoAutoHdr::Auto) {
+        videoTrueHdrRejected_.store(false, std::memory_order_release);
+        videoTrueHdrProbed_.store(false, std::memory_order_release);
+    }
+    requestedVideoAutoHdr_.store(mode, std::memory_order_release);
+    if (mode == FFF3FPVideoAutoHdr::Off) {
+        videoTrueHdrActive_.store(false, std::memory_order_release);
+        videoTrueHdrReason_.store(FFF3FPVideoAutoHdrReason::NotRequested,
+            std::memory_order_release);
+    }
+    return FFFResult::Success;
+}
+
+FFF3FPVideoAutoHdr PlayerVideoRenderer::RequestedVideoAutoHdr() const noexcept {
+    return requestedVideoAutoHdr_.load(std::memory_order_acquire);
+}
+
+bool PlayerVideoRenderer::VideoAutoHdrActive() const noexcept {
+    return videoTrueHdrActive_.load(std::memory_order_acquire);
+}
+
+void PlayerVideoRenderer::FillVideoAutoHdrStatus(
+    FFF3FPVideoAutoHdrStatus& status) const noexcept {
+    status.requested = requestedVideoAutoHdr_.load(std::memory_order_acquire);
+    status.nvidiaAdapter = nvidiaAdapter_.load(std::memory_order_acquire) ? 1u : 0u;
+    status.active = videoTrueHdrActive_.load(std::memory_order_acquire) ? 1u : 0u;
+    status.driverRejected = videoTrueHdrRejected_.load(std::memory_order_acquire) ? 1u : 0u;
+    status.reason = status.active
+        ? FFF3FPVideoAutoHdrReason::None
+        : videoTrueHdrReason_.load(std::memory_order_acquire);
+    status.sourceWidth = videoTrueHdrSourceWidth_.load(std::memory_order_acquire);
+    status.sourceHeight = videoTrueHdrSourceHeight_.load(std::memory_order_acquire);
+    status.outputWidth = videoTrueHdrOutputWidth_.load(std::memory_order_acquire);
+    status.outputHeight = videoTrueHdrOutputHeight_.load(std::memory_order_acquire);
+}
+
 std::string PlayerVideoRenderer::FallbackReason() const {
     try { std::lock_guard fallbackLock(fallbackMutex_); return fallbackReason_; }
     catch (...) { return {}; }

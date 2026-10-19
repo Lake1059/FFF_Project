@@ -849,6 +849,30 @@ void HdrProcessor::BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) con
     metadata.MaxFrameAverageLightLevel = DxgiContentLight(maxFall);
 }
 
+void HdrProcessor::BuildTrueHdrMetadata(
+    DXGI_HDR_METADATA_HDR10& metadata) const noexcept {
+    std::memset(&metadata, 0, sizeof(metadata));
+    // BT.2020 primaries and D65 white, per the TrueHDR output contract.
+    metadata.RedPrimary[0] = DxgiChromaticity(0.708f);
+    metadata.RedPrimary[1] = DxgiChromaticity(0.292f);
+    metadata.GreenPrimary[0] = DxgiChromaticity(0.170f);
+    metadata.GreenPrimary[1] = DxgiChromaticity(0.797f);
+    metadata.BluePrimary[0] = DxgiChromaticity(0.131f);
+    metadata.BluePrimary[1] = DxgiChromaticity(0.046f);
+    metadata.WhitePoint[0] = DxgiChromaticity(0.3127f);
+    metadata.WhitePoint[1] = DxgiChromaticity(0.3290f);
+    metadata.MaxMasteringLuminance = DxgiNits(1000.0f);
+    metadata.MinMasteringLuminance = DxgiMinNits(0.0001f);
+    metadata.MaxContentLightLevel = DxgiContentLight(1000.0f);
+    // The frame-average level is left at 0 (unknown) on purpose: claiming a
+    // bright average would push DWM's tone map to over-brighten midtones for a
+    // number the driver does not actually publish. A compositor that ignores
+    // the block because of it lands on the un-signalled behaviour, which is
+    // exactly today's rendering -- a missing bound must never look worse than
+    // no block at all.
+    metadata.MaxFrameAverageLightLevel = DxgiContentLight(0.0f);
+}
+
 float HdrProcessor::ResolveTargetPeak(const float overrideNits,
     const HdrDisplayCapabilities& display) noexcept {
     if (std::isfinite(overrideNits) && overrideNits > 0.0f)

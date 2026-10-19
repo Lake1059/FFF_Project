@@ -1006,6 +1006,82 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+    ' NVIDIA 视频处理器私有流扩展自动 HDR（RTX TrueHDR）：内核
+    ' FFF3FP_SetVideoAutoHdr / GetVideoAutoHdrStatus。与 VSR 同源同规矩——
+    ' 同一个 ID3D11VideoProcessor 私有流扩展家族，只是换了一个 GUID
+    ' （fdd62bb4-620b-4fd7-9ab3-1e59d0d544b3）与另一套载荷。
+    '
+    ' ⚠ 同样必须动态解析：这两个导出是"同版本号内的新增"，PlayerApiVersion 仍是 20。
+    '   静态导入会让一个 20 版但**尚未含自动 HDR** 的内核在载入期抛
+    '   EntryPointNotFoundException，把"这台内核没这能力"升级成"播放器起不来"。
+    '
+    ' 状态结构必须与内核 FFF3FPVideoAutoHdrStatus 逐字段同宽同序：11 个 UInteger = 44 字节。
+    ' 内核按 `size < sizeof || version <> PlayerApiVersion` 拒收，所以"同尺寸换顺序"是最
+    ' 危险的错法——它会过闸门并按错偏移读。字段顺序见 FFF.Player.Api.h:818-839。
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 原生视频自动HDR状态
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 请求模式 As UInteger          ' 0 = Off，1 = Auto
+        Public 是NVIDIA适配器 As UInteger
+        Public 生效 As UInteger              ' 探测读到 1 且最后一帧 Blt 成功；不等于画质有保证
+        Public 驱动拒绝闩 As UInteger
+        Public 原因 As UInteger              ' 内核在 生效=1 时恒写 0(None)
+        Public 源宽 As UInteger
+        Public 源高 As UInteger
+        Public 输出宽 As UInteger
+        Public 输出高 As UInteger
+    End Structure
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置视频自动HDR原型(播放器 As 播放器原生句柄,
+        模式 As UInteger) As 原生播放器结果
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取视频自动HDR状态原型(播放器 As 播放器原生句柄,
+        ByRef 状态 As 原生视频自动HDR状态) As 原生播放器结果
+
+    ' 与 VSR 同走 解析可选导出：句柄由模块持有，缓存下来的函数指针一直有效。
+    Private ReadOnly 设置视频自动HDR函数 As 设置视频自动HDR原型 =
+        解析可选导出(Of 设置视频自动HDR原型)("FFF3FP_SetVideoAutoHdr")
+    Private ReadOnly 读取视频自动HDR状态函数 As 读取视频自动HDR状态原型 =
+        解析可选导出(Of 读取视频自动HDR状态原型)("FFF3FP_GetVideoAutoHdrStatus")
+
+    ''' <summary>当前内核是否支持自动 HDR（旧内核返回 False）。
+    ''' 两个入口都要在：只有 setter 没有状态读取的话，UI 就无从解释"为什么没生效"。</summary>
+    Friend ReadOnly Property 支持视频自动HDR As Boolean
+        Get
+            Return 设置视频自动HDR函数 IsNot Nothing AndAlso 读取视频自动HDR状态函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>请求（True = Auto）或取消（False = Off）自动 HDR。
+    ''' 内核不支持时返回 False，不抛异常——能力探测与错误语义的分工同 设置视频超分辨率。
+    ''' <para>再发一次 True 会清掉内核的"驱动拒绝"闩并重新探测，这是宿主唯一的复位路径，
+    ''' 所以开关必须做成可来回切的，不能只做一次性开启。</para></summary>
+    Friend Function 设置视频自动HDR(播放器 As 播放器原生句柄, 开启 As Boolean) As Boolean
+        Dim 函数 = 设置视频自动HDR函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Return 函数(播放器, If(开启, 1UI, 0UI)) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>读取自动 HDR 状态。调用前必须填好 大小 与 版本，
+    ''' 版本用 播放器会话.期望API版本 这一处符号钉位。</summary>
+    Friend Function 读取视频自动HDR状态(播放器 As 播放器原生句柄,
+        ByRef 状态 As 原生视频自动HDR状态) As Boolean
+        Dim 函数 = 读取视频自动HDR状态函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Return 函数(播放器, 状态) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     ' 呈现策略（VRR / G-SYNC / FreeSync 低时延路径）：内核 FFF3FP_SetPresentConfig。
     '
     ' ⚠ 与视图旋转/VSR 同款，必须动态解析：同版本号内的新增导出，静态导入会让一个

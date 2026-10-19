@@ -73,6 +73,17 @@ Public Class 设置
     '      不能保证也不能验证画面确实被增强。
     Public Property RTX视频超分辨率 As Boolean = False
 
+    ' NVIDIA 视频处理器私有流扩展自动 HDR（RTX TrueHDR）：默认关闭。
+    ' 与 VSR 同样的三条理由，外加两条自己的：
+    '   ④ 内核默认也是 Off——host 侧默认值必须与内核一致，否则"偏好"与"实际"从第一次
+    '      打开起就分叉，UI 回显会骗人；
+    '   ⑤ 它把 SDR 帧整体改写成 HDR10（BT.2020 + PQ，1000 nit），是**画面色调映射**行为，
+    '      不是中性的能力开关。对比/审片类用途（compare 模式）下用户要的就是原样像素，
+    '      内核已强制互斥，宿主这边同样不许默认打开。
+    ' 生效条件（内核逐帧判定）：NVIDIA 适配器 + 驱动探测通过 + SDR 源 + 已是 10 位 HDR
+    ' 输出契约。任一条不满足是静默不生效（不是错误），默认开只会让人以为坏了。
+    Public Property NVIDIA自动HDR As Boolean = False
+
     Public Property 关联常见视频 As Boolean = False
     Public Property 关联不常见视频 As Boolean = False
     Public Property 关联老旧视频 As Boolean = False
