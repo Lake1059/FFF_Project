@@ -512,7 +512,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             亮度 = 合并字段(亮度, $"显示目标 {快照.HDR有效目标峰值尼特:0}尼特")
         End If
         Dim 回退 = If(快照.HDR回退有效, "HDR fallback", String.Empty)
-        Return 合并字段(规格, 动态, 亮度, 回退)
+        Return 合并字段(规格, 等级, 动态, 亮度, 回退)
     End Function
 
     Private Shared Function HDR规格文本(规格 As HDR格式, 媒体文本 As String) As String

@@ -422,6 +422,15 @@ public:
     FFF3FPVideoSuperResolution RequestedVideoSuperResolution() const noexcept;
     bool VideoSuperResolutionActive() const noexcept;
     void FillVideoSuperResolutionStatus(FFF3FPVideoSuperResolutionStatus& status) const noexcept;
+    /// NVIDIA automatic HDR (RTX Video HDR) switch and diagnostics. Same
+    /// ownership split as VSR: the renderer owns the device-facing decision.
+    /// When TrueHDR is engaged it takes precedence over VSR for the frame:
+    /// its video-processor pass writes PQ/BT.2020 samples, which VSR's
+    /// same-format YUV intermediate contract cannot represent.
+    FFFResult SetVideoAutoHdr(FFF3FPVideoAutoHdr mode) noexcept;
+    FFF3FPVideoAutoHdr RequestedVideoAutoHdr() const noexcept;
+    bool VideoAutoHdrActive() const noexcept;
+    void FillVideoAutoHdrStatus(FFF3FPVideoAutoHdrStatus& status) const noexcept;
     std::string FallbackReason() const;
     std::string LastError() const;
     // ST 2094-40 injection. The HdrProcessor owns the
@@ -449,6 +458,20 @@ private:
         float offsetY = 0;
         float width = 0;
         float height = 0;
+        // LRU bookkeeping. Danmaku strings churn (a string is on screen for
+        // seconds and rarely repeats), so only entries tagged danmaku take
+        // part in the bounded quota; subtitle/lyrics entries are precious and
+        // never evicted by it.
+        bool danmaku = false;
+        std::uint64_t lastUsed = 0;
+    };
+    // Integer atlas rect used by the eviction free list. The float fields of
+    // TimedTextSprite carry the same geometry in pixel units.
+    struct TimedTextAtlasRect {
+        std::uint32_t x = 0;
+        std::uint32_t y = 0;
+        std::uint32_t w = 0;
+        std::uint32_t h = 0;
     };
     struct TimedTextSpriteInstance {
         float destination[4]{};
@@ -462,6 +485,7 @@ private:
         float outline = 0;
         float shadowX = 0;
         float shadowY = 0;
+        bool danmaku = false;
     };
     struct ScalePassResource {
         std::uint32_t width = 0;
@@ -513,7 +537,7 @@ private:
     std::uint8_t* const* AdaptivePlanes() const noexcept { return adaptivePlanes_; }
     const int* AdaptiveLines() const noexcept { return adaptiveLines_; }
     FFFResult PrepareScaledVideo(std::uint32_t outputWidth, std::uint32_t outputHeight,
-        ID3D11ShaderResourceView** views) noexcept;
+        ID3D11ShaderResourceView** views, bool rgbSource = false) noexcept;
     // Picks the scaling kernel from the horizontal/vertical ratios, honouring the
     // configured quality and whether the source is a still image. Upscaling and
     // downscaling deliberately get different kernels; see the definition.
@@ -542,11 +566,22 @@ private:
     /// because a quarter-turn rotation swaps them.
     FFFResult ApplySuperResolution(std::uint32_t targetWidth,
         std::uint32_t targetHeight) noexcept;
+    // --- NVIDIA automatic HDR (RTX Video HDR / TrueHDR) ---
+    /// Convert the decoded SDR planes through a video processor with TrueHDR
+    /// enabled, writing PQ / BT.2020 samples into an R10G10B10A2_UNORM surface
+    /// and redirecting effectiveSourceViews_[0] at it. Unlike VSR this does
+    /// NOT require an upscale or a 360p..1440p source: the extension is
+    /// orthogonal to scaling (mpv forces the VP at 1:1 for exactly this
+    /// reason). The caller must present the frame through the HDR output
+    /// path, which ApplyTrueHdr itself checks.
+    FFFResult ApplyTrueHdr(std::uint32_t targetWidth,
+        std::uint32_t targetHeight) noexcept;
     /// Build plane SRVs over an NV12/P010 texture, matching EnsurePipeline's
     /// view formats exactly (a mismatch silently shifts colours).
     bool CreateYuvPlaneViews(ID3D11Texture2D* texture, std::uint32_t format,
         ID3D11ShaderResourceView** views) noexcept;
     void ReleaseSuperResolutionResources() noexcept;
+    void ReleaseTrueHdrResources() noexcept;
     void ReleaseVideoProcessor() noexcept;
     void ReleaseVideoProcessorInputSurface() noexcept;
     FFFResult AcquireBackBufferTarget(ID3D11Texture2D** buffer,
@@ -726,38 +761,31 @@ private:
     bool hdrMetadataValid_ = false;
     ID3D11Texture2D* sourceTextures_[3];
     ID3D11ShaderResourceView* sourceViews_[3];
+    // Upload-capacity state, read by WantsStagingUpload. Both are atomic because the
+    // device (and its reset of the refusal) can be created off the session worker
+    // thread that runs Render / EnsurePipeline.
+    std::atomic<std::uint64_t> dedicatedVideoMemoryBytes_{ 0 };
+    std::atomic<bool> uploadRingUnavailable_{ false };
     ID3D11Texture2D* uploadStaging_[2][3]{};
     ID3D11Texture2D* uploadTextures_[3]{};
     ID3D11ShaderResourceView* uploadViews_[3]{};
     unsigned uploadSlot_ = 0;
-    // Upload-strategy ladder on top of the ring mechanism above: 0 = Map into
-    // a DYNAMIC texture, 1 = the alternating STAGING ring. Written and read on
-    // the session worker thread only (Render / EnsurePipeline run there); a rung
-    // change is picked up by EnsurePipeline's recreation guard on the next frame.
-    std::uint32_t uploadRung_ = 0;
-    std::uint32_t uploadRungCreated_ = 0;   // the rung the current textures were built for
-    std::uint32_t uploadWindowFrames_ = 0;
-    std::uint64_t uploadWindowNs_ = 0;
-    std::uint64_t uploadWindowPeriodNs_ = 0;
-    std::uint32_t uploadCheapWindows_ = 0;
-    // Set when the device refused the staging ring's allocation: the ladder stops
-    // asking until the device is recreated (a refusal is per-device, and retrying
-    // every window would hitch playback).
-    bool uploadStagingRefused_ = false;
-    // Dedicated VRAM of the adapter the device was created on, captured at device
-    // creation. Gates the staging rung: a small discrete part or an integrated GPU
-    // never commits the 3x frame bytes it may not have. Atomic because device
-    // creation can run off the session worker thread.
-    std::atomic<std::uint64_t> dedicatedVideoMemoryBytes_{ 0 };
-    void ObserveUploadCost(std::uint64_t uploadNs) noexcept;
+    // "Does this frame go through the STAGING ring?" -- the size table, the capacity
+    // gate and this device's refusal, in that order. EnsurePipeline and Render must
+    // read the SAME answer: DEFAULT textures without a ring would make the upload's
+    // Map(WRITE_DISCARD) fail, which is why this is one predicate and not two tests.
+    bool WantsStagingUpload(std::uint32_t width, std::uint32_t height) const noexcept;
     PlaneScaleChain planeScaleChains_[3];
     std::uint64_t scaledVideoGeneration_;
     std::uint32_t scaledOutputWidth_;
     std::uint32_t scaledOutputHeight_;
     // Part of the scaled-video cache key: VSR changes the effective source
     // without advancing the decode generation, so the cached views would
-    // otherwise be reused across a VSR state change.
+    // otherwise be reused across a VSR state change. TrueHDR changes both the
+    // effective source and its layout (single RGB plane), so it gets its own
+    // key member for the same reason.
     bool scaledVideoSuperResolution_;
+    bool scaledVideoTrueHdr_;
     ID3D11ShaderResourceView* scaledSourceViews_[3];
     // Screenshot readback surface (see AcquireOffscreenTarget). Owned by the
     // renderer; deliberately independent of swapChain_.
@@ -969,6 +997,48 @@ private:
     ID3D11ShaderResourceView* superResolutionViews_[3]{};
     // DXGI_FORMAT of the cached super-resolution surface (0 when absent).
     std::uint32_t superResolutionSourceFormat_{ 0 };
+    // --- NVIDIA automatic HDR (RTX Video HDR / TrueHDR, opt-in; default Off) ---
+    // Host-visible switch. Off keeps the renderer byte-identical to the
+    // pre-TrueHDR behaviour, same invariant as VSR.
+    std::atomic<FFF3FPVideoAutoHdr> requestedVideoAutoHdr_{ FFF3FPVideoAutoHdr::Off };
+    // Driver capability answer for the current Auto request, probed once per
+    // request (the probe needs a live video processor, so it runs on the
+    // render path -- latched so a negative answer costs one call, not one
+    // per frame).
+    std::atomic<bool> videoTrueHdrSupported_{ false };
+    std::atomic<bool> videoTrueHdrProbed_{ false };
+    // TrueHDR was requested, the probe read back 1, and the blit succeeded on
+    // the last presented frame with the PQ/BT.2020 output contract in force.
+    std::atomic<bool> videoTrueHdrActive_{ false };
+    // The driver refused (probe, Set or blit). Latched until a fresh Auto
+    // request, mirroring the VSR discipline.
+    std::atomic<bool> videoTrueHdrRejected_{ false };
+    // Why the last frame did or did not use TrueHDR, for the status report.
+    std::atomic<FFF3FPVideoAutoHdrReason> videoTrueHdrReason_{
+        FFF3FPVideoAutoHdrReason::NotRequested };
+    // Last reason written to the process log (dedup, sentinel outside enum).
+    std::atomic<std::uint32_t> videoTrueHdrLoggedReason_{ 0xFFFFFFFFu };
+    // Geometry of the cached TrueHDR surface in the picture's axes. Atomic
+    // because the status getter reads them on the host's thread.
+    std::atomic<std::uint32_t> videoTrueHdrSourceWidth_{ 0 };
+    std::atomic<std::uint32_t> videoTrueHdrSourceHeight_{ 0 };
+    std::atomic<std::uint32_t> videoTrueHdrOutputWidth_{ 0 };
+    std::atomic<std::uint32_t> videoTrueHdrOutputHeight_{ 0 };
+    // The R10G10B10A2_UNORM surface the TrueHDR pass writes and its single
+    // SRV. Like the VSR surface it is owned here and never swapped into
+    // sourceViews_.
+    ID3D11Texture2D* trueHdrTexture_{ nullptr };
+    ID3D11ShaderResourceView* trueHdrView_{ nullptr };
+    // Decode transfer of the frame currently held, untouched by the TrueHDR
+    // re-tag. The ApplyTrueHdr SDR-source gate and every draw's baseline must
+    // read THIS, not cachedVideoSettings_.transfer: DrawWithShader retags that
+    // field to 1 (PQ) whenever a frame's pixels came out of the TrueHDR pass,
+    // and on a repeated draw of the SAME frame (pause, redraw, pixel readback)
+    // no new frame prepare runs to restore it. Reading the retagged field
+    // there made a TrueHDR frame self-block every subsequent draw of itself
+    // (skip: source is not SDR) and leaked transfer=1 into the shader constants
+    // of those skipped draws, which then decoded the decoded SDR picture as PQ.
+    std::atomic<std::uint32_t> decodedTransfer_{ 0 };
     // effectiveSourceViews_ is rebuilt from sourceViews_ on every frame and then
     // optionally redirected at superResolutionViews_. Keeping the two apart is
     // what makes VSR switching safe mid-stream.
@@ -1076,9 +1146,9 @@ private:
     std::atomic<std::uint64_t> uploadCopy100ns_;
     std::atomic<std::uint64_t> downscaleResample100ns_;
     std::atomic<std::uint64_t> scalePassCount_;
-    // The operands that turn uploadCopy100ns_ into a bandwidth: bytes moved, and how
-    // many pictures were uploaded (the presented-frame denominator hides uploads that
-    // never became a present). uploadPath_ says which branch produced them.
+    // Operand the bandwidth claim needs: uploadCopy100ns_ without a byte count is
+    // a duration that cannot be turned into GB/s, and without an upload count it is
+    // divided by presented frames even when dropped ones were uploaded too.
     std::atomic<std::uint64_t> uploadCount_;
     std::atomic<std::uint64_t> uploadCopyBytes_;
     std::atomic<std::uint32_t> uploadPath_;
@@ -1116,6 +1186,13 @@ private:
     std::unordered_map<std::uint64_t, TimedTextSprite> timedTextSprites_;
     std::vector<PendingTimedTextSprite> timedTextPendingSprites_;
     std::vector<TimedTextSpriteInstance> timedTextSpriteInstances_;
+    // Rects freed by danmaku LRU eviction, reused before the shelf cursor
+    // advances. Without this the atlas only ever grows, then full-clears and
+    // re-rasterises every slot a few frames later.
+    std::vector<TimedTextAtlasRect> timedTextAtlasFreeRects_;
+    std::uint32_t danmakuSpriteCount_ = 0;
+    std::uint64_t timedTextSpriteClock_ = 0;
+    std::uint64_t danmakuSpriteEvictions_ = 0;
     std::uint32_t timedTextAtlasX_;
     std::uint32_t timedTextAtlasY_;
     std::uint32_t timedTextAtlasRowHeight_;
