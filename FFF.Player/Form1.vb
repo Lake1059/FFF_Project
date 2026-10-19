@@ -22,10 +22,13 @@ Public Class Form1
 
     Private 画面控件 As 播放器画面控件
     Private 播放控制器 As 播放器控制器
+    ' 实机性能采样：仅当 FFF3FP_PERF_OUT / FFF3FP_PERF_SECONDS 同时给出时才会被创建，
+    ' 正常使用时恒为 Nothing。
+    Private 性能采样 As 性能采样器
     Private 界面呈现器 As 播放器界面呈现器
     Private 窗口布局控制器 As 播放器窗口布局控制器
     Private 字幕图层呈现器 As 播放器定时文字图层呈现器
-    Private 弹幕图层呈现器 As 播放器定时文字图层呈现器
+    Private 弹幕图层呈现器 As 播放器弹幕图层呈现器
     Private 歌词图层呈现器 As 播放器歌词呈现器
     Private 信息图层呈现器 As 播放器信息图层呈现器
     Private 剪辑区间控制器 As 播放器剪辑区间控制器
@@ -36,6 +39,7 @@ Public Class Form1
     Private 图片浏览控制器 As 播放器图片浏览控制器
     Private 视图旋转控制器 As 播放器视图旋转控制器
     Private 视频超分辨率控制器 As 播放器视频超分辨率控制器
+    Private 视频自动HDR控制器 As 播放器视频自动HDR控制器
     Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
@@ -106,9 +110,14 @@ Public Class Form1
         MP_DX视频容器.Controls.Add(画面控件)
         AddHandler 画面控件.文件拖入, AddressOf 画面控件_文件拖入
 
+        ' FFF3FP_DECODER=gpu 只为测量用：现网默认走设置里的解码方式，环境变量不设就等于没这段。
+        ' 需要它是因为"硬解直贴"是上传成本清单上唯一还没量的大杠杆，而它在这棵树里已经实现
+        ' （PlayerSession.cpp:2663 av_hwdevice_ctx_create / 快照里有 硬件传输时长 列），
+        ' 只是初始值被设置文件钉在 CPU 上，无人值守的采样轮没有键能改它。
         播放控制器 = New 播放器控制器(
             Function() 画面控件.输出窗口句柄, SynchronizationContext.Current,
-            CType(设置.实例对象.解码方式, 解码模式))
+            If(Environment.GetEnvironmentVariable("FFF3FP_DECODER") = "gpu", 解码模式.GPU,
+               CType(设置.实例对象.解码方式, 解码模式)))
         显示器唤醒 = New 显示器唤醒请求()
         播放控制器.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
         播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
@@ -125,11 +134,13 @@ Public Class Form1
             AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
             AddressOf 播放控制器.提交定时文字图层, Nothing, Nothing,
             定时文字图层内容.仅字幕)
-        弹幕图层呈现器 = New 播放器定时文字图层呈现器(画面控件,
-            AddressOf 播放控制器.安全读取快照, Function() Nothing,
+        ' 弹幕与字幕分轨：弹幕有自己的呈现器，节拍跟随视频（见 播放器弹幕图层呈现器）。
+        ' 字幕仍走 播放器定时文字图层呈现器，保留它那套为静态内容设计的节拍与去重。
+        弹幕图层呈现器 = New 播放器弹幕图层呈现器(画面控件,
+            AddressOf 播放控制器.安全读取快照,
             AddressOf 播放控制器.提交弹幕图层,
             Function() If(设置.实例对象.弹幕已启用, 播放控制器.当前弹幕, Nothing),
-            设置.实例对象.创建弹幕显示配置(), 定时文字图层内容.仅弹幕)
+            设置.实例对象.创建弹幕显示配置())
         歌词图层呈现器 = New 播放器歌词呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照,
             Function() If(设置.实例对象.启用歌词支持, 播放控制器.当前歌词, Nothing),
@@ -194,6 +205,17 @@ Public Class Form1
             设置.实例对象.RTX视频超分辨率,
             Sub(值) 设置.实例对象.RTX视频超分辨率 = 值)
         AddHandler 播放控制器.媒体已打开, AddressOf 视频超分辨率控制器.媒体已打开
+        ' NVIDIA 视频处理器私有流扩展自动 HDR（TrueHDR）：同样会话内状态、同样逐帧判定。
+        ' 与 VSR 的入口同页并列，但概念、载荷、GUID 都不同，各自的开关互不代理。
+        ' compare 模式由内核强制互斥（返回 InvalidState），宿主不尝试绕过。
+        视频自动HDR控制器 = New 播放器视频自动HDR控制器(
+            Sub(开启) 播放控制器.设置视频自动HDR(开启),
+            Function() 播放控制器.视频自动HDR状态文本(),
+            Function() 播放控制器.支持视频自动HDR,
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "自动 HDR"),
+            设置.实例对象.NVIDIA自动HDR,
+            Sub(值) 设置.实例对象.NVIDIA自动HDR = 值)
+        AddHandler 播放控制器.媒体已打开, AddressOf 视频自动HDR控制器.媒体已打开
         画面菜单控制器.应用全局字体(设置.实例对象.字体)
         光盘控制器 = New 播放器光盘控制器(Me, 画面控件, 播放控制器, MCM_标题栏菜单)
         全屏交互控制器 = New 播放器全屏交互控制器(Me, 画面控件,
@@ -234,6 +256,14 @@ Public Class Form1
         PerformLayout()
         窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
         核心文件检查通过 = True
+
+        ' 实机性能采样：环境变量没给全就是 Nothing，此处等价于没这几行。
+        ' 放在 Load 末尾是因为要拿到画面控件（视口口径）与播放控制器（快照来源）。
+        性能采样 = 性能采样器.尝试创建(
+            Function() 播放控制器?.安全读取快照(),
+            Function() If(画面控件 Is Nothing, ClientSize, 画面控件.ClientSize),
+            Me)
+        性能采样?.启动()
     End Sub
 
     Private Shared Function 可以加载核心文件(文件名 As String) As Boolean
@@ -356,7 +386,7 @@ Public Class Form1
             Return
         End If
 
-        启动时处理色彩变换模块解锁()
+        启动时探测色彩变换模块()
 
         Dim 启动文件 = My.Application.取出待处理启动文件()
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
@@ -365,37 +395,88 @@ Public Class Form1
     End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
-    '  外部色彩变换模块（FFF.HDRdp.Test.dll）启动时解锁处理
+    '  外部色彩变换模块（FFF.HDRdp.Test.dll）：启动探测 + 限时解锁输码（每进程一次）
     '
-    '  ● 用户裁定（最简版）：**有 DLL 且未解锁 ⇒ 弹一次输码框；没 DLL 或已解锁 ⇒ 完全不提示**。
-    '  ● 三条纪律（与 3FCompare 侧同口径）：
-    '    ① 解锁码绝不进任何日志——只记"接受 / 拒绝 / 够不到"；
-    '    ② 文案用本窗体自有的中性措辞，不引用模块自带的说明文本（措辞不由本仓控制）；
-    '    ③ 连续错 <see cref="解锁最大尝试次数"/> 次即放弃；取消与放弃都回到"本次按基础层
-    '       出画"，不再打扰。
-    '  ● 单实例：VB 单实例应用的次实例只转发、不建窗体，所以这里天然只在主实例跑一次。
+    '  ● 用户裁定（2026-10-18 二次修正，最终口径）：输码 UI 是本体必须内容；弹出规则——
+    '    ① 启动后 1s~60s 窗口内检测到 DLL 且未解锁 ⇒ 弹一次；超过 60s 一律不再弹；
+    '    ② 每进程至多一次：取消 / 输完（成功或错满）后本次会话不再弹，重启软件才恢复；
+    '    ③ 没 DLL / 旧件 / 已解锁 ⇒ 不弹（探测只回答"要不要弹"）。
+    '  ● 解锁入口只此一处：码 → 模块铸票（票据落 exe 旁或 %LOCALAPPDATA%\FFF.HDRdp.Test）；
+    '    解锁后本体行为才改变（kind=3 注入 + 「内容：」行）。
+    '  ● 三条纪律：① 解锁码绝不进任何日志——只记"接受 / 拒绝 / 够不到"；② 文案用本体
+    '    自有的中性措辞，不引用模块自带文本；③ 探测/轮询异常静默吞掉，不让启动链断在这里。
     ' ═══════════════════════════════════════════════════════════════════════════
     Private Const 解锁最大尝试次数 As Integer = 5
+    Private Const 解锁弹窗最早毫秒 As Long = 1000
+    Private Const 解锁弹窗最晚毫秒 As Long = 60000
 
-    Private Sub 启动时处理色彩变换模块解锁()
+    Private 解锁轮询计时器 As System.Windows.Forms.Timer
+    Private 解锁轮询起点 As Long
+    Private 解锁轮询已收工 As Boolean
+
+    ''' <summary>启动探测（只记调试读数）并排期解锁输码轮询：1s 起、60s 截止、每进程最多弹一次。</summary>
+    Private Sub 启动时探测色彩变换模块()
         Try
             Dim 原因 As String = Nothing
+            Debug.WriteLine("色彩变换模块：" & 色彩变换模块接口.探测(原因).ToString() &
+                If(String.IsNullOrEmpty(原因), "", "（" & 原因 & "）"))
+        Catch ex As Exception
+            Debug.WriteLine("色彩变换模块：启动时探测异常（已忽略）：" & ex.GetType().Name)
+        End Try
+
+        解锁轮询起点 = Environment.TickCount64
+        解锁轮询已收工 = False
+        解锁轮询计时器 = New System.Windows.Forms.Timer With {.Interval = 1000}
+        AddHandler 解锁轮询计时器.Tick, AddressOf 解锁轮询_Tick
+        解锁轮询计时器.Start()
+    End Sub
+
+    Private Sub 解锁轮询_Tick(sender As Object, e As EventArgs)
+        If 解锁轮询已收工 Then
+            停止解锁轮询()
+            Return
+        End If
+        Try
+            Dim 已过毫秒 = Environment.TickCount64 - 解锁轮询起点
+            If 已过毫秒 < 解锁弹窗最早毫秒 Then Return
+            If 已过毫秒 > 解锁弹窗最晚毫秒 Then
+                解锁轮询已收工 = True
+                停止解锁轮询()
+                Debug.WriteLine("色彩变换模块：解锁提示窗口（启动后 60 秒）已过且未弹，本进程不再提示")
+                Return
+            End If
+
+            Dim 原因 As String = Nothing
             Select Case 色彩变换模块接口.探测(原因)
-                Case 色彩变换模块接口.模块在场形态.缺席, 色彩变换模块接口.模块在场形态.旧件
-                    ' 静默：与"没这功能"同形，不提示、不报错、不改默认行为。
-                    Debug.WriteLine("色彩变换模块：" & 原因)
-                Case 色彩变换模块接口.模块在场形态.就绪
-                    Debug.WriteLine("色彩变换模块：已解锁")
                 Case 色彩变换模块接口.模块在场形态.已锁定
+                    ' 命中唯一该弹的一格：先收工再生弹，保证"每进程至多一次"。
+                    解锁轮询已收工 = True
+                    停止解锁轮询()
+                    Debug.WriteLine("色彩变换模块：在场未解锁，弹出输码（每进程仅一次）")
                     解锁对话框循环()
+                Case 色彩变换模块接口.模块在场形态.缺席
+                    ' DLL 可能稍后才出现：窗口内继续等。
+                Case Else
+                    ' 已解锁 / 旧件：没有可解锁的路径，收工。
+                    解锁轮询已收工 = True
+                    停止解锁轮询()
             End Select
         Catch ex As Exception
-            ' 探测是"要不要打扰用户"的判据：宁可静默，也不能让启动链断在这里。
-            Debug.WriteLine("色彩变换模块：启动时处理异常（已忽略）：" & ex.GetType().Name)
+            ' 轮询异常不打扰用户：下一跳再试，窗口到点自然收工。
+            Debug.WriteLine("色彩变换模块：解锁轮询异常（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
 
-    ''' <summary>输码闭环：输入 → 提交 → 错了再来（有上限）→ 接受或放弃。码不落日志。</summary>
+    Private Sub 停止解锁轮询()
+        If 解锁轮询计时器 IsNot Nothing Then
+            解锁轮询计时器.Stop()
+            解锁轮询计时器.Dispose()
+            解锁轮询计时器 = Nothing
+        End If
+    End Sub
+
+    ''' <summary>输码闭环：输入 → 提交 → 错了再来（有上限）→ 接受或放弃。码不落日志。
+    ''' 只由 <see cref="解锁轮询_Tick"/> 调用（每进程至多一次）。</summary>
     Private Sub 解锁对话框循环()
         For 尝试 As Integer = 1 To 解锁最大尝试次数
             Dim 提示文本 As String
@@ -442,13 +523,14 @@ Public Class Form1
                     Return
             End Select
         Next
-        ' 连续错满上限：放弃，回到"本次按基础层出画"，不再打扰。
+        ' 连续错满上限：放弃，回到"本次按基础层出画"，不再打扰（重启后恢复）。
         Debug.WriteLine("色彩变换模块：连续输错满 " & 解锁最大尝试次数.ToString() & " 次，放弃")
     End Sub
 
 
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
         正在关闭 = True
+        停止解锁轮询()
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
@@ -470,6 +552,13 @@ Public Class Form1
                     New EventHandler(Of 播放器媒体事件参数)(AddressOf 视频超分辨率控制器.媒体已打开)
             End If
             视频超分辨率控制器.Dispose()
+        End If
+        If 视频自动HDR控制器 IsNot Nothing Then
+            If 播放控制器 IsNot Nothing Then
+                RemoveHandler 播放控制器.媒体已打开,
+                    New EventHandler(Of 播放器媒体事件参数)(AddressOf 视频自动HDR控制器.媒体已打开)
+            End If
+            视频自动HDR控制器.Dispose()
         End If
         光盘控制器?.Dispose()
         画面菜单控制器?.Dispose()
@@ -852,6 +941,29 @@ Public Class Form1
 
     Friend Function 读取视频超分辨率状态() As String
         Return 视频超分辨率控制器?.刷新状态()
+    End Function
+
+    ' ── 设置页 → 视频超分辨率 页内 自动 HDR 区的后端 ────────────────────────
+    ' 与 VSR 同规矩：原生调用与"新会话重放偏好"都留在 播放器视频自动HDR控制器 里，
+    ' 这里只做转发；设置页不许自己再发一次 FFF3FP_SetVideoAutoHdr。
+    Friend Function 视频自动HDR可用() As Boolean
+        Return 视频自动HDR控制器?.可用 OrElse False
+    End Function
+
+    Friend Function 视频自动HDR已启用() As Boolean
+        Return 视频自动HDR控制器 IsNot Nothing AndAlso 视频自动HDR控制器.已启用
+    End Function
+
+    Friend Sub 应用视频自动HDR设置(开启 As Boolean)
+        视频自动HDR控制器?.设置为(开启)
+    End Sub
+
+    Friend Sub 重新探测视频自动HDR()
+        视频自动HDR控制器?.重新探测()
+    End Sub
+
+    Friend Function 读取视频自动HDR状态() As String
+        Return 视频自动HDR控制器?.刷新状态()
     End Function
 
     Friend Sub 应用歌词设置()

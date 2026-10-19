@@ -27,6 +27,9 @@ Public NotInheritable Class 播放器会话
     ' RTX VSR 状态：内核要求 size >= sizeof(44) 且 version = PlayerApiVersion，两者缺一即拒。
     Private Shared ReadOnly 原生视频超分辨率状态大小 As UInteger =
         CUInt(Marshal.SizeOf(Of 原生视频超分辨率状态)())
+    ' 自动 HDR（TrueHDR）状态：与 VSR 同尺寸同闸门（size >= sizeof(44) 且 version = 20）。
+    Private Shared ReadOnly 原生视频自动HDR状态大小 As UInteger =
+        CUInt(Marshal.SizeOf(Of 原生视频自动HDR状态)())
     ' 呈现节律状态：内核同样按 size >= sizeof 且 version = PlayerApiVersion 校验。
     Private Shared ReadOnly 原生呈现节律状态大小 As UInteger =
         CUInt(Marshal.SizeOf(Of 原生呈现节律状态)())
@@ -61,10 +64,14 @@ Public NotInheritable Class 播放器会话
         Try
             If Not String.IsNullOrEmpty(配置.音频端点标识) Then 端点指针 = Marshal.StringToCoTaskMemUTF8(配置.音频端点标识)
             ' -1 按窗口所在显示器选卡；0 是合法适配器索引。
-            ' 自适应CPU预缩放（上传前降档）默认关：实测它省下的拷贝（8K 14.85 → 2.83 ms）
-            ' 抵不过 sws_scale 自己的 26 ms/帧，净耗时翻倍、帧率 30 → 24.5，所以保持关闭。
-            ' 测量用的环境变量门只存在于开发工作树，不在这条路径上；这里逐字给现网值。
-            ' （注：多行对象初始值设定项里不能夹注释行，说明写在这里。）
+            ' 自适应CPU预缩放（上传前降档）内核默认是关的，本次所有性能读数都在关闭态下取
+            ' —— 快照里 降档重采样时长 恒为 0、bytes_per_upload 恒等于整帧字节数就是证据。
+            ' 这条最省字节的通路此前从未被量过；下面那个环境变量只是给测量开门，不设时逐字
+            ' 保持现网行为。（注：多行对象初始值设定项里不能夹注释行，说明写在这里。）
+            ' 门控打开时阈值一并从现网 20% 压到 1%：本机当前最好的 8K HEVC 臂只丢约 4%，
+            ' 用 20% 永远越不过门槛，那一臂就退化成"开了但没启用"，量不到降档的代价与收益。
+            ' 解码线程阶梯（自适应解码线程）取 1：内核 PlacementPolicy 的三档放只在非 0 时参与，
+            ' 留 0 会把 9b82322（PR #27）那条已合并的通路整个关成死代码。
             Dim 原生配置 As New 原生播放器配置 With {
                 .大小 = 原生播放器配置大小, .版本 = 期望API版本,
                 .输出窗口 = 配置.输出窗口句柄, .解码器 = CUInt(配置.解码器),
@@ -77,8 +84,8 @@ Public NotInheritable Class 播放器会话
                 .强制HDR输出 = If(配置.强制HDR输出, 1UI, 0UI),
                 .首选适配器索引 = -1,
                 .SDRscRGB模式 = 配置.SDRscRGB模式,
-                .自适应CPU预缩放 = 0UI,
-                .自适应CPU预缩放丢帧百分比 = 20UI,
+                .自适应CPU预缩放 = If(Environment.GetEnvironmentVariable("FFF3FP_ADAPTIVE_DOWNSCALE") = "1", 1UI, 0UI),
+                .自适应CPU预缩放丢帧百分比 = If(Environment.GetEnvironmentVariable("FFF3FP_ADAPTIVE_DOWNSCALE") = "1", 1UI, 20UI),
                 .自适应解码线程 = 1UI,
                 .软解最小线程数 = 4UI,
                 .软解最大线程数 = 32UI,
@@ -369,6 +376,36 @@ Public NotInheritable Class 播放器会话
         Return 播放器原生接口.读取视频超分辨率状态(取得句柄(), 状态)
     End Function
 
+    ''' <summary>本机加载的内核是否提供自动 HDR（TrueHDR）入口。
+    ''' 供 UI 决定"置灰 + 说明"还是"可切换"，与 VSR 同一分工。</summary>
+    Public ReadOnly Property 支持视频自动HDR As Boolean
+        Get
+            Return 播放器原生接口.支持视频自动HDR
+        End Get
+    End Property
+
+    ''' <summary>自动 HDR 开关：True = 请求 Auto（内核逐帧判定要不要真用），False = 请求 Off。
+    ''' <para>内核不支持该导出、或返回非成功时**静默忽略**：与 VSR 同性质的可选增强，
+    ''' 不该让一次开关把播放会话变成错误弹窗。</para>
+    ''' <para>注意两点与 VSR 不同：① compare 模式激活时内核返回 InvalidState——
+    ''' 互斥是内核强制的（对比模式不许任何帧增强），宿主不绕过；② 重新请求 True 同样会清掉
+    ''' 内核的"驱动拒绝"闩并重新探测，所以关掉再打开就是那条唯一的复位路径。</para></summary>
+    Public Sub 设置视频自动HDR(开启 As Boolean)
+        If Not 播放器原生接口.设置视频自动HDR(取得句柄(), 开启) Then Return
+        本机视频自动HDR已请求 = 开启
+    End Sub
+
+    ''' <summary>宿主侧最后一次成功登记的请求（仅供 UI 回显勾选态；
+    ''' 真实生效与否要看 读取视频自动HDR状态）。</summary>
+    Public Property 本机视频自动HDR已请求 As Boolean = False
+
+    ''' <summary>读取内核的自动 HDR 状态。内核不支持或未成功时返回 False。</summary>
+    Friend Function 读取视频自动HDR状态(ByRef 状态 As 原生视频自动HDR状态) As Boolean
+        状态 = New 原生视频自动HDR状态 With {
+            .大小 = 原生视频自动HDR状态大小, .版本 = 期望API版本}
+        Return 播放器原生接口.读取视频自动HDR状态(取得句柄(), 状态)
+    End Function
+
     ''' <summary>把内核的原因码翻成人话。逐值对应 FFF3FPVideoSuperResolutionReason。
     ''' <para>最后一句是刻意的：内核的"生效"只表示驱动没有拒绝这次请求，
     ''' 该路径没有任何能力查询可用（实测连伪造的 GUID 都返回成功），
@@ -382,6 +419,28 @@ Public NotInheritable Class 播放器会话
             Case 4UI : Return $"源高度 {状态.源高} 不在 360..1440 区间"
             Case 5UI : Return "源格式不支持送入视频处理器（如软解上传路径）"
             Case 6UI : Return "驱动拒绝过，已闩住；关掉再打开可重新探测"
+            Case Else : Return If(状态.驱动拒绝闩 <> 0UI, "驱动拒绝过", "内核未报告原因")
+        End Select
+    End Function
+
+    ''' <summary>把内核的原因码翻成人话。逐值对应 FFF3FPVideoAutoHdrReason。
+    ''' <para>与 VSR 的本质差别写进文案：TrueHDR 有真实的能力探测
+    ''' （VideoProcessorGetStreamExtension 读回 1），所以 "生效" 比 VSR 的"驱动没拒绝"
+    ''' 更强——但它仍然不是画质保证：生成的 HDR 是驱动算的，强度档位归 NVIDIA App，
+    ''' 本程序设不了也读不回来。文案说"已启用"不说"已增强"。</para></summary>
+    Friend Shared Function 视频自动HDR状态文本(状态 As 原生视频自动HDR状态) As String
+        If 状态.生效 <> 0UI Then
+            Return $"自动 HDR 已启用（驱动探测器通过，最后一帧 Blt 成功；" &
+                   $"源 {状态.源宽}×{状态.源高} → PQ/BT.2020 {状态.输出宽}×{状态.输出高}）"
+        End If
+        Select Case 状态.原因
+            Case 1UI : Return "未请求"
+            Case 2UI : Return "渲染适配器不是 NVIDIA"
+            Case 3UI : Return "驱动不支持该私有流扩展（探测未读到 1）"
+            Case 4UI : Return "当前源不是 SDR（HDR 源不予转换）"
+            Case 5UI : Return "当前输出路径不是 HDR（需 10 位 HDR 输出契约）"
+            Case 6UI : Return "源格式不支持送入视频处理器"
+            Case 7UI : Return "驱动拒绝或 Blt 失败，已闩住；关掉再打开可重新探测"
             Case Else : Return If(状态.驱动拒绝闩 <> 0UI, "驱动拒绝过", "内核未报告原因")
         End Select
     End Function

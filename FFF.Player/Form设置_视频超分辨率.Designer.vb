@@ -22,6 +22,10 @@ Partial Class Form设置_视频超分辨率
         MB_调整与读数 = New LakeUI.ModernButton()
         MCK_启用RTX视频超分辨率 = New LakeUI.ModernCheckBox()
         HCL_说明 = New LakeUI.HtmlColorLabel()
+        HCL_自动HDR说明 = New LakeUI.HtmlColorLabel()
+        MCK_启用视频自动HDR = New LakeUI.ModernCheckBox()
+        MB_自动HDR调整与读数 = New LakeUI.ModernButton()
+        HCL_自动HDR状态读数 = New LakeUI.HtmlColorLabel()
         ModernPanel1.SuspendLayout()
         SuspendLayout()
         '
@@ -33,6 +37,10 @@ Partial Class Form设置_视频超分辨率
         ModernPanel1.Controls.Add(MB_调整与读数)
         ModernPanel1.Controls.Add(MCK_启用RTX视频超分辨率)
         ModernPanel1.Controls.Add(HCL_说明)
+        ModernPanel1.Controls.Add(HCL_自动HDR说明)
+        ModernPanel1.Controls.Add(MCK_启用视频自动HDR)
+        ModernPanel1.Controls.Add(MB_自动HDR调整与读数)
+        ModernPanel1.Controls.Add(HCL_自动HDR状态读数)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
@@ -92,6 +100,58 @@ Partial Class Form设置_视频超分辨率
         HCL_状态读数.TabIndex = 43
         HCL_状态读数.Text = "状态：未读取"
         '
+        ' HCL_自动HDR说明
+        '
+        HCL_自动HDR说明.AutoSize = True
+        HCL_自动HDR说明.BackColor = Color.Transparent
+        HCL_自动HDR说明.Dock = DockStyle.None
+        HCL_自动HDR说明.Location = New Point(10, 150)
+        HCL_自动HDR说明.Name = "HCL_自动HDR说明"
+        HCL_自动HDR说明.Padding = New Padding(0, 0, 0, 6)
+        HCL_自动HDR说明.Size = New Size(568, 48)
+        HCL_自动HDR说明.TabIndex = 50
+        HCL_自动HDR说明.Text = "NVIDIA 视频处理器私有流扩展自动 HDR（TrueHDR）：把 SDR 帧转换为 HDR10（BT.2020 + PQ，1000 nit）；强度档位归 NVIDIA App。"
+        '
+        ' MCK_启用视频自动HDR
+        '
+        MCK_启用视频自动HDR.AutoSize = True
+        MCK_启用视频自动HDR.BackColor = Color.Transparent
+        MCK_启用视频自动HDR.BoxBorderRadius = 5
+        MCK_启用视频自动HDR.BoxBorderSize = 0
+        MCK_启用视频自动HDR.BoxCheckedBackColor = Color.OliveDrab
+        MCK_启用视频自动HDR.BoxInnerPadding = 6
+        MCK_启用视频自动HDR.BoxSize = 24
+        MCK_启用视频自动HDR.BoxTextSpacing = 10
+        MCK_启用视频自动HDR.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCK_启用视频自动HDR.Dock = DockStyle.None
+        MCK_启用视频自动HDR.Location = New Point(10, 204)
+        MCK_启用视频自动HDR.Name = "MCK_启用视频自动HDR"
+        MCK_启用视频自动HDR.Padding = New Padding(0, 0, 0, 10)
+        MCK_启用视频自动HDR.Size = New Size(568, 34)
+        MCK_启用视频自动HDR.TabIndex = 51
+        MCK_启用视频自动HDR.Text = "请求自动 HDR（SDR → HDR10）"
+        '
+        ' MB_自动HDR调整与读数
+        '
+        MB_自动HDR调整与读数.Dock = DockStyle.None
+        MB_自动HDR调整与读数.Location = New Point(10, 248)
+        MB_自动HDR调整与读数.Name = "MB_自动HDR调整与读数"
+        MB_自动HDR调整与读数.Size = New Size(568, 34)
+        MB_自动HDR调整与读数.TabIndex = 52
+        MB_自动HDR调整与读数.Text = "调整与内核读数"
+        '
+        ' HCL_自动HDR状态读数
+        '
+        HCL_自动HDR状态读数.AutoSize = True
+        HCL_自动HDR状态读数.BackColor = Color.Transparent
+        HCL_自动HDR状态读数.Dock = DockStyle.None
+        HCL_自动HDR状态读数.Location = New Point(10, 288)
+        HCL_自动HDR状态读数.Name = "HCL_自动HDR状态读数"
+        HCL_自动HDR状态读数.Padding = New Padding(0, 6, 0, 0)
+        HCL_自动HDR状态读数.Size = New Size(568, 24)
+        HCL_自动HDR状态读数.TabIndex = 53
+        HCL_自动HDR状态读数.Text = "状态：未读取"
+        '
         ' Form设置_视频超分辨率
         '
         AutoScaleDimensions = New SizeF(96F, 96F)
@@ -113,4 +173,8 @@ Partial Class Form设置_视频超分辨率
     Friend WithEvents MCK_启用RTX视频超分辨率 As LakeUI.ModernCheckBox
     Friend WithEvents MB_调整与读数 As LakeUI.ModernButton
     Friend WithEvents HCL_状态读数 As LakeUI.HtmlColorLabel
+    Friend WithEvents HCL_自动HDR说明 As LakeUI.HtmlColorLabel
+    Friend WithEvents MCK_启用视频自动HDR As LakeUI.ModernCheckBox
+    Friend WithEvents MB_自动HDR调整与读数 As LakeUI.ModernButton
+    Friend WithEvents HCL_自动HDR状态读数 As LakeUI.HtmlColorLabel
 End Class

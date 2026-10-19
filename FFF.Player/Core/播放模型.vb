@@ -194,8 +194,21 @@ Public NotInheritable Class 播放器快照
         ' 它此前在 ABI 里躺了很久却没有写入者，接缝落地后才有真值。
         音频双耳渲染生效 = 值.音频双耳渲染 <> 0
         IAMF内容声道数 = CInt(值.IAMF内容声道数)
-        ' 上传耗时是最后一个追加字段；与其它微秒级计时一样保留 100ns 精度。
+        ' 上传耗时是追加字段；与其它微秒级计时一样保留 100ns 精度。
         视频上传时长 = TimeSpan.FromTicks(CLng(Math.Min(值.视频上传100纳秒, CULng(Long.MaxValue))))
+        ' 上传路径拆分计量。视频上传时长是整段上传步骤的总数，实测发现它是三种性质
+        ' 不同的开销共用一个数，只有拆开才能判断上传到底贵在哪一步：
+        '   上传映射等待 —— Map() 本身。D3D11 的 Map 不带 DO_NOT_WAIT 时会阻塞到 GPU
+        '                    用完这块资源，等上一帧画完的代价落在这里。
+        '   上传复制     —— 真正在搬的字节。
+        '   降档重采样   —— 上传前降档策略在 CPU 侧做的 sws_scale，跑在上传之外。
+        上传映射等待时长 = TimeSpan.FromTicks(CLng(Math.Min(值.上传映射等待100纳秒, CULng(Long.MaxValue))))
+        上传复制时长 = TimeSpan.FromTicks(CLng(Math.Min(值.上传复制100纳秒, CULng(Long.MaxValue))))
+        降档重采样时长 = TimeSpan.FromTicks(CLng(Math.Min(值.降档重采样100纳秒, CULng(Long.MaxValue))))
+        缩放链趟数 = 值.缩放链趟数
+        上传次数 = 值.上传次数
+        上传复制字节 = 值.上传复制字节
+        上传路径 = 值.上传路径
     End Sub
 
     Public ReadOnly Property 状态 As 播放状态
@@ -274,6 +287,27 @@ Public NotInheritable Class 播放器快照
 
     ' <summary>本帧把解码平面拷进着色器可见纹理所花的时间（追加字段）。</summary>
     Public ReadOnly Property 视频上传时长 As TimeSpan
+    ''' <summary>上传步骤里 Map() 调用本身的耗时。D3D11 的 Map 不带 DO_NOT_WAIT 时会阻塞
+    ''' 到 GPU 用完被映射的资源，所以等上一帧画完的代价出现在这里而不是呈现等待里。</summary>
+    Public ReadOnly Property 上传映射等待时长 As TimeSpan
+    ''' <summary>上传步骤里真正在搬字节的那一段（逐行 memcpy 或 UpdateSubresource）。</summary>
+    Public ReadOnly Property 上传复制时长 As TimeSpan
+    ''' <summary>上传前降档策略在 CPU 侧做的重采样耗时。它在视频上传时长之外，
+    ''' 此前没有任何指标，这是那条策略能"数字上省钱、播放更慢"却不被发现的原因。</summary>
+    Public ReadOnly Property 降档重采样时长 As TimeSpan
+    ''' <summary>缩放链实际执行过的 pass 累计数。除以帧数得每帧趟数：缩放链是逐级减半构建的，
+    ''' 所以极端降采样会在这里暴露成 GPU 代价，而不是藏在上传数字里。</summary>
+    Public ReadOnly Property 缩放链趟数 As ULong
+
+    ''' <summary>累计"上传了一张画面"的次数。除以呈现帧数才知道每呈现帧要搬几帧，
+    ''' 因为被丢掉的帧同样可能已经上传过 —— 这是之前每一个带宽数字的分母来源。</summary>
+    Public ReadOnly Property 上传次数 As ULong
+    ''' <summary>累计真正交给拷贝例程的字节数。STAGING/DYNAMIC 两档按行精确统计，
+    ''' UpdateSubresource 的打包与半浮点档由驱动掌握字节数，此处不记。</summary>
+    Public ReadOnly Property 上传复制字节 As ULong
+    ''' <summary>上一帧走的上传分支号（1 平面 STAGING、2 平面 DYNAMIC、3 打包、4 半浮点、5 RGB）。
+    ''' 各档搬的字节数和内存类型不同，不区分就会把两档平均成一个没有意义的数。</summary>
+    Public ReadOnly Property 上传路径 As UInteger
 
     ' <summary>内容的实际声场名（如 "7.1.4"）；非 IAMF 或未知系统返回空串。</summary>
     Public ReadOnly Property IAMF布局名 As String
