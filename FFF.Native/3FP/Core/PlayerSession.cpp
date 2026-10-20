@@ -416,6 +416,18 @@ bool HardwareRouteMemoryEnabled() noexcept {
     return !(value[0] == L'0' && value[1] == L'\0');
 }
 
+// Stills ask D3D11VA first because its surfaces are sampled as-is; this decides
+// whether CUDA joins the list as a refusal fallback. Default on: the measured cost of
+// the CUDA route for a still (a frame transfer, and not bit-exact -- see
+// OpenHardwareVideoDecoder) is only paid after D3D11VA has already refused, when the
+// alternative is the CPU decoder. FFF3FP_HWCAP_STILL_CUDA=0 restores the D3D11VA-only
+// list for A/B work.
+bool StillCudaFallbackEnabled() noexcept {
+    wchar_t value[8]{};
+    if (GetEnvironmentVariableW(L"FFF3FP_HWCAP_STILL_CUDA", value, 8) == 0) return true;
+    return !(value[0] == L'0' && value[1] == L'\0');
+}
+
 // What the hardware route is capable of depends on the codec, the profile, the pixel
 // format and the frame size, and on nothing else in the stream description. Two files
 // that agree on those four agree on the answer, which is what makes a key out of them
@@ -3055,20 +3067,26 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
         AV_HWDEVICE_TYPE_D3D11VA,
         AV_HWDEVICE_TYPE_CUDA,
     };
-    // A still image is presented one frame and then kept, so a backend whose surfaces
-    // the renderer cannot sample directly has to be consumed through a frame transfer
-    // into semi-planar CPU memory. That route measured two things against the CPU arm
-    // and neither is worth paying at still sizes:
+    // A still image is presented one frame and then kept, so the renderer's own device
+    // is the preferred route: a D3D11 surface is sampled as-is, which is the path every
+    // sampled file measures bit-exact on. A backend whose surfaces the renderer cannot
+    // sample directly (CUDA) has to be consumed through a frame transfer into
+    // semi-planar CPU memory, and that route measured two things against the CPU arm:
     //   - it is not bit-exact: the CUDA JPEG decode differs from libjpeg by 1/255 at a
     //     stripe edge (09h) and by 4/255 on a 4:4:4 sample, and a 4:2:0 surface loses
     //     the chroma detail of a 4:4:4 source outright;
     //   - it is slower: +64 ms to +196 ms measured, because the decoder is built for
     //     one frame that never amortises it.
-    // So stills stay on the renderer's own device, where the decoded surface is sampled
-    // as-is and every sampled file measures bit-exact. Video keeps the full list: there
-    // a CUDA or QSV frame is transferred every frame anyway, and the semi-planar upload
-    // in VideoRenderer is what carries it.
-    const std::size_t backendCount = staticImage_ ? 1u : std::size(Backends);
+    // Neither is worth paying while the alternative is a CPU decode of one frame, so
+    // stills ask D3D11VA first and only extend the list to CUDA once it has refused: a
+    // stream the renderer's own device will not take (4:4:4 HEVC, some AV1, MJPEG) then
+    // still decodes on the GPU instead of falling all the way to the CPU. The backend
+    // order is what makes this a fallback -- CUDA is only reached after a refusal,
+    // never before. FFF3FP_HWCAP_STILL_CUDA=0 restores the D3D11VA-only list. Video
+    // keeps the full list either way: there a CUDA or QSV frame is transferred every
+    // frame anyway, and the semi-planar upload in VideoRenderer is what carries it.
+    const std::size_t backendCount =
+        (staticImage_ && !StillCudaFallbackEnabled()) ? 1u : std::size(Backends);
     std::string lastFailure = "No compatible hardware decoder was found.";
     // What this refusal says, told apart for the memory written at the end: only an
     // answer the GPU itself gave is worth remembering (see the comment on
