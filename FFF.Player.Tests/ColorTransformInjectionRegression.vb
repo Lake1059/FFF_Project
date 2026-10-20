@@ -1,6 +1,6 @@
-' 3FP 外部色彩变换 kind=3 注入回归 —— 同进程直连内核
+' 3FP 外部色彩变换 kind=3 注入回归 —— 真内核 + 真模块 DLL
 '
-' 测的是宿主侧 2026-10-17 落地的整条通路：
+' 测的是宿主侧整条通路：
 '   帧边数据环（FFF3FP_CopyFrameSideDataAfter）→ 外部模块（FFF.HDRdp.Test.dll 的
 '   analyzeFrame）→ kind=3 注入（FFF3FP_SetDynamicMetadata）→ 快照落“外部色彩变换”路径。
 ' 2026-10-18 追加：容器配置记录通道（FFF3FP_CopyStreamSideData → analyzeFrame 的
@@ -9,11 +9,24 @@
 ' 走 FFF.Player 托管包装（播放器会话，Public + InternalsVisibleTo），不 mock，
 ' P/Invoke 到 x64/Release 的 FFF.Native.dll 真内核；模块 DLL 是真件（库外独立仓产物）。
 '
-' 两个场景互为对照：
-'   场景一 模块在场且已解锁（FC_COLORTRANSFORM_DIR 指向模块目录 + 票据在测试 exe 旁）
-'          ⇒ 必须注入：快照 HDR处理路径落 外部色彩变换，注入帧数 > 0，媒体信息回填可用位。
-'   场景二 模块缺席（FC_COLORTRANSFORM_DIR 指向空目录）
-'          ⇒ 必须静默：通路不启动、快照不落外部路径、播放不报错。
+' ⚠ 2026-10-20：**每个场景必须各起一个进程**（本文件的结构就是为此改的）。
+'   原因有两条，都是产品的既定设计而不是缺陷：
+'     1) 授权是模块的**进程级全局态**：票据在进程里读成功一次，AuthorizationStatus()
+'        之后一直答 2。同进程再“把票据挪走”也回不到锁态。
+'     2) 音频函数表一旦交给内核就**永不 FreeLibrary**（色彩变换模块接口._音频表已交出；
+'        内核握着裸函数指针）。所以模块映射会陪进程到结束，候选路径末尾的裸文件名
+'        （LoadLibraryW 按基名命中已映射件）也会在“模块目录指向空目录”时把它取回来。
+'   两条合起来 ⇒ 同进程内“场景一（已解锁）”之后的“场景二（缺席）/场景三（锁态开局）/
+'   场景四（未解锁）”必然读到上一场的已解锁态：19 绿 8 红，红的三组全在这里。
+'   这不是 pytest 式的洁癖：要观测“未解锁”这一格，进程就只能是新的。
+'
+' 场景分工（父进程编排，子进程各跑一场）：
+'   场景零 ABI 与能力门禁                 —— 父进程内（不碰模块）
+'   场景一 模块在场且已解锁 ⇒ 必须注入     —— 子进程 ct inject
+'   场景二 模块缺席 ⇒ 必须静默             —— 子进程 ct absent（FC_COLORTRANSFORM_DIR 指空目录）
+'   场景三 锁态开局、中途解锁 ⇒ 泵自己补装载 —— 子进程 ct locked-unlock
+'   场景四 解锁前后对照（只差票据在不在）   —— 两个子进程 ct four-locked / ct four-unlocked，
+'                                            父进程解析两边的 CT-READING 行后断言
 '
 ' 前置条件（缺一则 SKIP，exit 2，不判红）：
 '   · 素材：由环境变量 FFF_COLORTRANSFORM_SAMPLE 指定；未指定时用本机的一份既有
@@ -24,9 +37,11 @@
 '     绑定本机用户；DPAPI 保护，换机/换用户需重铸）。
 '
 ' 用法：FFF.Player.Tests --color-transform-injection
+'       （内部子进程入口：--color-transform-injection-scenario <名称>，不由人手调）
 ' 退出码：0 全绿 / 1 有失败条 / 2 前置条件不具备
 
 Imports System
+Imports System.Diagnostics
 Imports System.IO
 Imports System.Threading
 Imports FFF.Player
@@ -34,6 +49,9 @@ Imports FFF.Player
 Friend Module ColorTransformInjectionRegression
     Private 通过 As Integer
     Private 失败 As Integer
+
+    ''' <summary>子进程入口旗标（父进程自己起自己用；不对人）。</summary>
+    Friend Const 子场景旗标 As String = "--color-transform-injection-scenario"
 
     Private Sub 检查(条件 As Boolean, 名称 As String, 实测 As String)
         If 条件 Then
@@ -71,34 +89,46 @@ Friend Module ColorTransformInjectionRegression
         Return Nothing
     End Function
 
-    Friend Function 运行(参数 As String()) As Integer
-        Console.WriteLine("3FP 外部色彩变换 kind=3 注入回归")
+    Private Function 取票据路径() As String
+        Return Path.Combine(AppContext.BaseDirectory, "FFF.HDRdp.Test.ticket")
+    End Function
 
+    ''' <summary>前置条件：素材/模块/票据三者齐备。缺一项就 SKIP（exit 2），不判红。</summary>
+    Private Function 前置条件齐备() As Boolean
         Dim 素材 = 取素材()
         Dim 模块目录 = 取模块目录()
         Dim 模块路径 = If(模块目录 IsNot Nothing, Path.Combine(模块目录, "FFF.HDRdp.Test.dll"), Nothing)
-        Dim 票据 = Path.Combine(AppContext.BaseDirectory, "FFF.HDRdp.Test.ticket")
+        Dim 票据 = 取票据路径()
 
         If 素材 Is Nothing OrElse 模块目录 Is Nothing OrElse Not File.Exists(模块路径) Then
             Console.WriteLine("SKIP：素材或模块不具备。")
             Console.WriteLine($"  素材={素材}")
             Console.WriteLine($"  模块目录={模块目录}（应含 FFF.HDRdp.Test.dll；用 FC_COLORTRANSFORM_MODULE 指定）")
-            Console.WriteLine($"通过 {通过} 条，失败 {失败} 条")
-            Return 2
+            Return False
         End If
         If Not File.Exists(票据) Then
             Console.WriteLine("SKIP：测试 exe 旁没有已解锁票据（模块会一直判未锁定态，无人值守不会弹框）。")
             Console.WriteLine($"  期望票据：{票据}")
             Console.WriteLine("  预铸：powershell -File C:\PLAN\ColorTransform\New-AuthTicket.ps1 -Kind valid -OutFile <该路径>")
+            Return False
+        End If
+        Return True
+    End Function
+
+    ' ── 父进程入口：编排四场（每场一个子进程）──
+    Friend Function 运行(参数 As String()) As Integer
+        Console.WriteLine("3FP 外部色彩变换 kind=3 注入回归")
+
+        If Not 前置条件齐备() Then
             Console.WriteLine($"通过 {通过} 条，失败 {失败} 条")
             Return 2
         End If
 
-        Console.WriteLine($"素材：{素材}")
-        Console.WriteLine($"模块：{模块路径}（{New FileInfo(模块路径).Length} B）")
-        Console.WriteLine($"票据：{票据}（{New FileInfo(票据).Length} B）")
+        Console.WriteLine($"素材：{取素材()}")
+        Console.WriteLine($"模块：{Path.Combine(取模块目录(), "FFF.HDRdp.Test.dll")}（{New FileInfo(Path.Combine(取模块目录(), "FFF.HDRdp.Test.dll")).Length} B）")
+        Console.WriteLine($"票据：{取票据路径()}（{New FileInfo(取票据路径()).Length} B）")
 
-        ' ── 场景零：ABI 与能力门禁 ──
+        ' ── 场景零：ABI 与能力门禁（不涉及模块，父进程内直接读）──
         ' 这两条是“通路能不能起来”的前置闸：尺寸漂移会让每一帧被整批拒绝，
         ' 内核缺导出会让通路静默降级——两者都不该被读成绿灯。
         Console.WriteLine("场景零：ABI 尺寸与内核能力门禁")
@@ -110,92 +140,238 @@ Friend Module ColorTransformInjectionRegression
         检查(播放器原生接口.支持动态元数据注入, "内核提供动态元数据注入导出",
             $"支持={播放器原生接口.支持动态元数据注入}")
 
-        场景注入(素材, 模块目录)
-        场景缺席(素材)
-        场景锁态开局中途解锁(素材, 模块目录, 票据)
-        场景解锁前后对照(素材, 模块目录, 票据)
+        ' 每场一个干净进程：模块的授权与映射都是进程级全局态（见文件头）。
+        Dim 未用 As String = Nothing
+        运行子进程("inject", 未用)
+        运行子进程("absent", 未用)
+        运行子进程("locked-unlock", 未用)
+        场景解锁前后对照()
+        ' 最后一场：它会主动让模块的授权在本进程里失效，所以必须排在所有“已解锁”场景之后。
+        运行子进程("revoked", 未用)
 
         Console.WriteLine($"通过 {通过} 条，失败 {失败} 条")
         If 失败 > 0 Then Return 1
         Return 0
     End Function
 
-    ' ── 场景四：解锁前后行为对照（同一素材跑两遍，只差“票据在不在”）──
+    ' ── 子进程入口：只跑一场，把读数用机器行交回父进程 ──
+    Friend Function 运行子场景(名称 As String) As Integer
+        If Not 前置条件齐备() Then Return 2
+        Try
+            Select Case If(名称, "").ToLowerInvariant()
+                Case "inject"
+                    场景注入(取素材(), 取模块目录())
+                Case "absent"
+                    场景缺席(取素材())
+                Case "locked-unlock"
+                    场景锁态开局中途解锁(取素材(), 取模块目录(), 取票据路径())
+                Case "four-locked"
+                    子场景四对照(True)
+                Case "four-unlocked"
+                    子场景四对照(False)
+                Case "revoked"
+                    场景授权中途失效(取素材(), 取模块目录(), 取票据路径())
+                Case Else
+                    Console.Error.WriteLine($"未知子场景：{名称}")
+                    Return 2
+            End Select
+        Catch ex As Exception
+            ' 子进程里任何未捕获异常都要变成一条红，而不是让父进程读到一个残缺的计数。
+            检查(False, $"子场景 {名称} 无异常", ex.GetType().Name & ": " & ex.Message)
+        End Try
+        ' 机器行：父进程用它累加条数（人读的是上面那些 ok/FAIL）。
+        Console.WriteLine($"CT-COUNTS|{通过}|{失败}")
+        If 失败 > 0 Then Return 1
+        Return 0
+    End Function
+
+    ''' <summary>起一个子进程跑一场，边跑边把它的输出转出来，并把条数累加进本进程。</summary>
+    Private Function 运行子进程(名称 As String, ByRef 读数行 As String) As Integer
+        Dim 启动 As New ProcessStartInfo(Environment.ProcessPath) With {
+            .UseShellExecute = False,
+            .RedirectStandardOutput = True,
+            .RedirectStandardError = True,
+            .CreateNoWindow = True
+        }
+        启动.ArgumentList.Add(子场景旗标)
+        启动.ArgumentList.Add(名称)
+
+        Dim 子 As Process
+        Try
+            子 = Process.Start(启动)
+        Catch ex As Exception
+            ' 起不来就是本场没跑：按一条红记，避免“父进程绿、场景其实没执行”。
+            检查(False, $"子进程可启动（{名称}）", ex.GetType().Name & ": " & ex.Message)
+            Return -1
+        End Try
+
+        Dim 子通过 As Integer = 0
+        Dim 子失败 As Integer = 0
+        Dim 错误任务 = 子.StandardError.ReadToEndAsync()
+        Do While Not 子.StandardOutput.EndOfStream
+            Dim 行 = 子.StandardOutput.ReadLine()
+            If 行.StartsWith("CT-COUNTS|", StringComparison.Ordinal) Then
+                Dim 段 = 行.Split("|"c)
+                If 段.Length >= 3 Then
+                    Integer.TryParse(段(1), 子通过)
+                    Integer.TryParse(段(2), 子失败)
+                End If
+            ElseIf 行.StartsWith("CT-READING|", StringComparison.Ordinal) Then
+                读数行 = 行
+                Console.WriteLine("  读数行：" & 行)
+            Else
+                Console.WriteLine(行)
+            End If
+        Loop
+        子.WaitForExit()
+        Dim 错误文本 = 错误任务.GetAwaiter().GetResult()
+        If Not String.IsNullOrWhiteSpace(错误文本) Then Console.Error.Write(错误文本)
+
+        If 子.ExitCode = 2 Then
+            Console.WriteLine("SKIP：子进程报告前置条件不具备。")
+            Return -1
+        End If
+        通过 += 子通过
+        失败 += 子失败
+        Return 子失败
+    End Function
+
+    ' ── 场景四：解锁前后行为对照（两臂各一个进程，只差“票据在不在”）──
     ' 目的不是再证一次注入，而是把“解锁究竟改变了什么”做成可复现的读数对照：
     ' 哪些读数会翻、哪些读数不动（后者同样重要——外部色彩变换可用=真并不代表已解锁）。
-    Private Sub 场景解锁前后对照(素材 As String, 模块目录 As String, 票据 As String)
+    ' 两臂不能同进程：票据放回的瞬间模块就授权了，之后再也拿不到“未解锁”这一格。
+    Private Sub 场景解锁前后对照()
         Console.WriteLine("场景四：解锁前后行为对照（同一素材，只差票据在不在）")
-        Dim 暂存 = 票据 & ".held"
-        Environment.SetEnvironmentVariable("FC_COLORTRANSFORM_DIR", 模块目录)
-        Try
-            If File.Exists(暂存) Then File.Delete(暂存)
-            If File.Exists(票据) Then File.Move(票据, 暂存)
+        Dim 锁行 As String = Nothing
+        Dim 解行 As String = Nothing
+        运行子进程("four-locked", 锁行)
+        运行子进程("four-unlocked", 解行)
 
-            Dim 锁态 As 对照读数 = Nothing
-            Dim 解锁态 As 对照读数 = Nothing
-            Try
-                锁态 = 采集(素材)
-                File.Move(暂存, 票据)
-                解锁态 = 采集(素材)
-            Catch ex As Exception
-                检查(False, "场景四无异常", ex.GetType().Name & ": " & ex.Message)
-                Return
-            Finally
+        Dim 锁态 = 解析读数(锁行)
+        Dim 解锁态 = 解析读数(解行)
+        If 锁态 Is Nothing OrElse 解锁态 Is Nothing Then
+            检查(False, "场景四两臂都交回了读数",
+                $"锁态={If(锁行, "（无）")} / 解锁态={If(解行, "（无）")}")
+            Return
+        End If
+
+        Console.WriteLine("  " & "读数".PadRight(22) & "未解锁".PadRight(26) & "已解锁")
+        For Each 名称 In 锁态.顺序
+            Console.WriteLine("  " & 名称.PadRight(22) &
+                If(锁态.取值(名称), "").PadRight(26) & 解锁态.取值(名称))
+        Next
+
+        ' 会翻的读数：
+        检查(锁态.处理路径 <> HDR处理路径.外部色彩变换 AndAlso
+             解锁态.处理路径 = HDR处理路径.外部色彩变换,
+            "HDR处理路径：未解锁≠外部色彩变换 ⇒ 已解锁=外部色彩变换",
+            $"{锁态.处理路径} → {解锁态.处理路径}")
+        检查(锁态.已采用 = False AndAlso 解锁态.已采用 = True,
+            "模块采用：未解锁未采用 ⇒ 已解锁已采用", $"{锁态.已采用} → {解锁态.已采用}")
+        检查(锁态.注入帧数 = 0UI AndAlso 解锁态.注入帧数 > 0UI,
+            "注入帧数：0 ⇒ >0", $"{锁态.注入帧数} → {解锁态.注入帧数}")
+        ' 不会翻的读数（必须说清楚，否则会被读成解锁标志）：
+        检查(锁态.可用位 AndAlso 解锁态.可用位,
+            "外部色彩变换可用：两种状态都为真（它只表示模块在盘上，不代表已解锁）",
+            $"{锁态.可用位} / {解锁态.可用位}")
+        检查(锁态.播放推进 AndAlso 解锁态.播放推进,
+            "播放推进：两种状态都正常（未解锁不是故障，是静默降级）",
+            $"{锁态.帧序号} / {解锁态.帧序号}")
+        ' 内容描述：这是本次唯一“跨解锁态翻转”的新读数——文本是模块算出来的分类
+        ' （配置记录通道 + 分析帧 的产物），未解锁时模块压根没被采用，所以必为空串。
+        检查(锁态.内容描述 = "", "内容描述：未解锁态必为空串", $"实测 '{锁态.内容描述}'")
+        检查(解锁态.内容描述.Length > 0 AndAlso 解锁态.内容描述.StartsWith("P", StringComparison.Ordinal),
+            "内容描述：已解锁态非空且以 P 开头（模块产出的分类文本）",
+            $"实测 '{解锁态.内容描述}'")
+        ' 已知夹具（dv-regular 样本）的强断言：只有“配置记录真的喂进了 分析帧”
+        ' 才会是 P8.1 —— 若只跑 RPU 启发式，那只可能给出 P8（缺 .1）。
+        Dim 素材 = 取素材()
+        If 素材.IndexOf("dv-regular", StringComparison.OrdinalIgnoreCase) >= 0 Then
+            检查(解锁态.内容描述 = "P8.1",
+                "内容描述：已知夹具 ⇒ P8.1（配置记录通道端到端判据）",
+                $"实测 '{解锁态.内容描述}'（若为 P8 或空，说明配置记录通道没通）")
+        Else
+            Console.WriteLine("  （素材名不含已知夹具标记，跳过 P8.1 强断言）")
+        End If
+
+        ' 合规观测：模块不影响任何终端用户可见的信息。
+        ' 内核把这条路径的用户可见文案定成中性措辞（Caller-supplied colour transform），
+        ' 而且媒体信息 JSON 记录的是打开时确定的静态路径 —— 两者都不随解锁而变。
+        ' 若将来有人让它跟随注入变化、或写成非中性措辞，这条会先红。
+        检查(String.Equals(锁态.可见文案, 解锁态.可见文案, StringComparison.Ordinal),
+            "合规：用户可见文案解锁前后一致（模块不泄漏到用户可见层）",
+            $"{锁态.可见文案} / {解锁态.可见文案}")
+    End Sub
+
+    ''' <summary>场景四的单臂：票据在/不在各跑一次，把读数打成一行交回父进程。</summary>
+    Private Sub 子场景四对照(锁态臂 As Boolean)
+        Console.WriteLine(If(锁态臂, "场景四（未解锁臂）：票据不在 ⇒ 不应落外部路径、内容描述应为空",
+                                       "场景四（已解锁臂）：票据在 ⇒ 应落外部路径并给出分类文本"))
+        Dim 票据 = 取票据路径()
+        Dim 暂存 = 票据 & ".held"
+        Dim 已挪 = False
+        Environment.SetEnvironmentVariable("FC_COLORTRANSFORM_DIR", 取模块目录())
+        Try
+            If 锁态臂 Then
+                If File.Exists(暂存) Then File.Delete(暂存)
+                If File.Exists(票据) Then
+                    File.Move(票据, 暂存)
+                    已挪 = True
+                End If
+            End If
+            Dim 读数 = 采集(取素材())
+            打印读数(读数)
+        Catch ex As Exception
+            检查(False, "场景四单臂无异常", ex.GetType().Name & ": " & ex.Message)
+        Finally
+            Environment.SetEnvironmentVariable("FC_COLORTRANSFORM_DIR", Nothing)
+            ' 恢复票据（无论成败）：下一臂和后续运行都要用它。
+            If 已挪 Then
                 Try
                     If File.Exists(暂存) AndAlso Not File.Exists(票据) Then File.Move(暂存, 票据)
                 Catch
                 End Try
-            End Try
-
-            Console.WriteLine("  " & "读数".PadRight(22) & "未解锁".PadRight(26) & "已解锁")
-            For Each 名称 In 锁态.顺序
-                Console.WriteLine("  " & 名称.PadRight(22) &
-                    If(锁态.取值(名称), "").PadRight(26) & 解锁态.取值(名称))
-            Next
-
-            ' 会翻的读数：
-            检查(锁态.处理路径 <> HDR处理路径.外部色彩变换 AndAlso
-                 解锁态.处理路径 = HDR处理路径.外部色彩变换,
-                "HDR处理路径：未解锁≠外部色彩变换 ⇒ 已解锁=外部色彩变换",
-                $"{锁态.处理路径} → {解锁态.处理路径}")
-            检查(锁态.已采用 = False AndAlso 解锁态.已采用 = True,
-                "模块采用：未解锁未采用 ⇒ 已解锁已采用", $"{锁态.已采用} → {解锁态.已采用}")
-            检查(锁态.注入帧数 = 0UI AndAlso 解锁态.注入帧数 > 0UI,
-                "注入帧数：0 ⇒ >0", $"{锁态.注入帧数} → {解锁态.注入帧数}")
-            ' 不会翻的读数（必须说清楚，否则会被读成解锁标志）：
-            检查(锁态.可用位 AndAlso 解锁态.可用位,
-                "外部色彩变换可用：两种状态都为真（它只表示模块在盘上，不代表已解锁）",
-                $"{锁态.可用位} / {解锁态.可用位}")
-            检查(锁态.播放推进 AndAlso 解锁态.播放推进,
-                "播放推进：两种状态都正常（未解锁不是故障，是静默降级）",
-                $"{锁态.帧序号} / {解锁态.帧序号}")
-            ' 内容描述：这是本次唯一“跨解锁态翻转”的新读数——文本是模块算出来的分类
-            ' （配置记录通道 + 分析帧 的产物），未解锁时模块压根没被采用，所以必为空串。
-            检查(锁态.内容描述 = "", "内容描述：未解锁态必为空串", $"实测 '{锁态.内容描述}'")
-            检查(解锁态.内容描述.Length > 0 AndAlso 解锁态.内容描述.StartsWith("P", StringComparison.Ordinal),
-                "内容描述：已解锁态非空且以 P 开头（模块产出的分类文本）",
-                $"实测 '{解锁态.内容描述}'")
-            ' 已知夹具（dv-regular 样本）的强断言：只有“配置记录真的喂进了 分析帧”
-            ' 才会是 P8.1 —— 若只跑 RPU 启发式，那只可能给出 P8（缺 .1）。
-            If 素材.IndexOf("dv-regular", StringComparison.OrdinalIgnoreCase) >= 0 Then
-                检查(解锁态.内容描述 = "P8.1",
-                    "内容描述：已知夹具 ⇒ P8.1（配置记录通道端到端判据）",
-                    $"实测 '{解锁态.内容描述}'（若为 P8 或空，说明配置记录通道没通）")
-            Else
-                Console.WriteLine("  （素材名不含已知夹具标记，跳过 P8.1 强断言）")
             End If
-
-            ' 合规观测：模块不影响任何终端用户可见的信息。
-            ' 内核把这条路径的用户可见文案定成中性措辞（Caller-supplied colour transform），
-            ' 而且媒体信息 JSON 记录的是打开时确定的静态路径 —— 两者都不随解锁而变。
-            ' 若将来有人让它跟随注入变化、或写成非中性措辞，这条会先红。
-            检查(String.Equals(锁态.可见文案, 解锁态.可见文案, StringComparison.Ordinal),
-                "合规：用户可见文案解锁前后一致（模块不泄漏到用户可见层）",
-                $"{锁态.可见文案} / {解锁态.可见文案}")
-        Finally
-            Environment.SetEnvironmentVariable("FC_COLORTRANSFORM_DIR", Nothing)
         End Try
     End Sub
+
+    Private Sub 打印读数(读数 As 对照读数)
+        ' 机器行：父进程解析。分隔符只用 | 与 =，值里不许出现（可见文案是英文中性句，
+        ' 分类文本是 P 开头的短串，两者都不含这两个字符）。
+        Dim 段 As New System.Text.StringBuilder()
+        段.Append("CT-READING|")
+        For Each 名称 In 读数.顺序
+            段.Append(名称).Append("=").Append(读数.取值(名称)).Append("|")
+        Next
+        Console.WriteLine(段.ToString())
+    End Sub
+
+    Private Function 解析读数(行 As String) As 对照读数
+        If String.IsNullOrEmpty(行) OrElse Not 行.StartsWith("CT-READING|", StringComparison.Ordinal) Then Return Nothing
+        Dim 键值 As New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.Ordinal)
+        For Each 段 In 行.Substring("CT-READING|".Length).Split("|"c)
+            If 段.Length = 0 Then Continue For
+            Dim 等号 = 段.IndexOf("="c)
+            If 等号 <= 0 Then Continue For
+            键值(段.Substring(0, 等号)) = 段.Substring(等号 + 1)
+        Next
+        Dim 结果 As New 对照读数()
+        Dim 文本 As String = Nothing
+        If 键值.TryGetValue("HDR处理路径", 文本) Then
+            Dim 解析 As HDR处理路径
+            If [Enum].TryParse(文本, 解析) Then 结果.处理路径 = 解析
+        End If
+        Dim 布尔 As Boolean
+        If 键值.TryGetValue("模块已采用", 文本) AndAlso Boolean.TryParse(文本, 布尔) Then 结果.已采用 = 布尔
+        Dim 整数 As UInteger
+        If 键值.TryGetValue("注入帧数", 文本) AndAlso UInteger.TryParse(文本, 整数) Then 结果.注入帧数 = 整数
+        If 键值.TryGetValue("外部色彩变换可用", 文本) AndAlso Boolean.TryParse(文本, 布尔) Then 结果.可用位 = 布尔
+        Dim 长整 As Long
+        If 键值.TryGetValue("帧序号", 文本) AndAlso Long.TryParse(文本, 长整) Then 结果.帧序号 = 长整
+        If 键值.TryGetValue("用户可见文案", 文本) Then 结果.可见文案 = 文本
+        If 键值.TryGetValue("内容描述", 文本) Then 结果.内容描述 = 文本
+        Return 结果
+    End Function
 
     ''' <summary>一次会话的可观测读数快照（解锁前后对照用）。</summary>
     Private Class 对照读数
@@ -258,7 +434,8 @@ Friend Module ColorTransformInjectionRegression
                     Thread.Sleep(50)
                 End While
             End If
-            ' 注入帧数：从诊断串里取（形如“注入 N 帧”）
+            ' 注入帧数：从诊断串里取（形如“注入 N 帧”）。必须在 Using 内读完了取，
+            ' 会话一释放泵的计数器就没了。
             Dim 位置 = 诊断.IndexOf("注入 ")
             If 位置 >= 0 Then
                 Dim 尾部 = 诊断.Substring(位置 + 3)
@@ -267,6 +444,104 @@ Friend Module ColorTransformInjectionRegression
             End If
         End Using
         Return 结果
+    End Function
+
+    ' ── 场景五：授权中途失效 ⇒ 宿主必须把内核里的注入表清掉 ──
+    ' 这是“清注入表”那条宿主修复的唯一正证据，也是它存在的理由：
+    '   模块侧 analyzeFrame 每次都复查授权（FFFColorTransform.cpp 的纵深防御），失效后
+    '   答 5（未授权）；但内核里还躺着上一条 LUT，而 HdrProcessor 的查表在 chosen==nullptr
+    '   时会回退 injected_.front() —— 不清表，画面会一直套着旧表到换文件，而显示行已经
+    '   空了，两边自相矛盾。
+    ' 怎么让授权失效：IsAuthorized() 读的是**进程内缓存的到期时刻**（票据 30 天），删票据
+    '   文件不会收回本进程已拿到的授予。所以这里先挪走票据，再用模块自带的测试钩子
+    '   FFF_ColorTransformForgetAuthorizationForTesting 丢掉缓存 —— 钩子只丢缓存、不能凭空
+    '   授权，因此它把“真实失效路径”原样摆出来了，不是伪造的未授权态。
+    Private Sub 场景授权中途失效(素材 As String, 模块目录 As String, 票据 As String)
+        Console.WriteLine("场景五：授权中途失效 ⇒ 宿主清注入表、画面回落基底")
+        Dim 暂存 = 票据 & ".held"
+        Environment.SetEnvironmentVariable("FC_COLORTRANSFORM_DIR", 模块目录)
+        Try
+            If File.Exists(暂存) Then File.Delete(暂存)
+            Dim 已挪 = False
+            Try
+                Using 会话 = New 播放器会话(New 播放器配置 With {.解码器 = 解码模式.CPU})
+                    会话.打开Async(素材).GetAwaiter().GetResult()
+                    会话.播放()
+                    Dim 注入后 = 等待快照(会话,
+                        Function(快照) 快照.HDR处理路径 = HDR处理路径.外部色彩变换, 30.0)
+                    检查(注入后.HDR处理路径 = HDR处理路径.外部色彩变换,
+                        "失效前先注入起来（本场前提）", $"路径={注入后.HDR处理路径}")
+
+                    ' 失效：票据挪走 + 丢缓存。丢缓存后下一次复查就读盘 ⇒ 读不到票据。
+                    File.Move(票据, 暂存)
+                    已挪 = True
+                    Dim 钩子可用 = 丢弃模块授权缓存(模块目录)
+                    检查(钩子可用, "模块的测试钩子可调用（只丢缓存，不授权）", $"可用={钩子可用}")
+
+                    Dim 失效后 = 等待快照(会话,
+                        Function(快照) 快照.HDR处理路径 <> HDR处理路径.外部色彩变换, 30.0)
+                    检查(失效后.HDR处理路径 <> HDR处理路径.外部色彩变换,
+                        "授权失效后快照回落基底（注入表已清空，不是继续套旧表）",
+                        $"路径={失效后.HDR处理路径}")
+                    检查(String.IsNullOrEmpty(会话.色彩变换内容描述),
+                        "授权失效后内容描述变空（显示行与画面同时回落）",
+                        $"实测 '{会话.色彩变换内容描述}'")
+
+                    ' 计数不再增长：先读一次，等 2 秒再读，注入帧数必须一样。
+                    Dim 前 = 读取注入帧数(会话.色彩变换诊断)
+                    Thread.Sleep(2000)
+                    Dim 后 = 读取注入帧数(会话.色彩变换诊断)
+                    检查(前 >= 0 AndAlso 前 = 后, "授权失效后不再注入新帧", $"{前} → {后}")
+                End Using
+            Catch ex As Exception
+                检查(False, "场景五无异常", ex.GetType().Name & ": " & ex.Message)
+            Finally
+                If 已挪 Then
+                    Try
+                        If File.Exists(暂存) AndAlso Not File.Exists(票据) Then File.Move(暂存, 票据)
+                    Catch
+                    End Try
+                End If
+            End Try
+        Finally
+            Environment.SetEnvironmentVariable("FC_COLORTRANSFORM_DIR", Nothing)
+        End Try
+    End Sub
+
+    ''' <summary>从诊断串里取“注入 N 帧”的那个 N（取不到答 -1）。</summary>
+    Private Function 读取注入帧数(诊断 As String) As Integer
+        If String.IsNullOrEmpty(诊断) Then Return -1
+        Dim 位置 = 诊断.IndexOf("注入 ")
+        If 位置 < 0 Then Return -1
+        Dim 尾部 = 诊断.Substring(位置 + 3)
+        Dim 空格 = 尾部.IndexOf(" "c)
+        If 空格 <= 0 Then Return -1
+        Dim 值 As Integer
+        If Integer.TryParse(尾部.Substring(0, 空格), 值) Then Return 值
+        Return -1
+    End Function
+
+    <Runtime.InteropServices.UnmanagedFunctionPointer(Runtime.InteropServices.CallingConvention.Cdecl)>
+    Private Delegate Sub 丢弃授权缓存原型()
+
+    ''' <summary>调模块自带的测试钩子丢掉授权缓存。同一基名的模块已经在本进程里映射着，
+    ''' 所以 NativeLibrary.Load 拿到的是宿主正在用的那一份；不 Free（宿主还持有它）。</summary>
+    Private Function 丢弃模块授权缓存(模块目录 As String) As Boolean
+        Try
+            Dim 路径 = Path.Combine(模块目录, "FFF.HDRdp.Test.dll")
+            Dim 模块 = Runtime.InteropServices.NativeLibrary.Load(路径)
+            If 模块 = IntPtr.Zero Then Return False
+            Dim 出口 = Runtime.InteropServices.NativeLibrary.GetExport(模块,
+                "FFF_ColorTransformForgetAuthorizationForTesting")
+            If 出口 = IntPtr.Zero Then Return False
+            Dim 钩子 = CType(Runtime.InteropServices.Marshal.GetDelegateForFunctionPointer(
+                出口, GetType(丢弃授权缓存原型)), 丢弃授权缓存原型)
+            钩子()
+            Return True
+        Catch ex As Exception
+            Console.WriteLine($"  钩子调用失败：{ex.GetType().Name}: {ex.Message}")
+            Return False
+        End Try
     End Function
 
     ' ── 场景三：模块在但锁着开局 ⇒ 泵空转补装载；中途解锁 ⇒ 自动装载并注入 ──

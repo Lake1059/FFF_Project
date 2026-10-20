@@ -396,6 +396,12 @@ struct FFF3FPSnapshot {
     //     kept as an env-gated A/B arm against path 1. Bytes stay exact here: the
     //     box handed to the driver is the whole frame, so this arm is comparable to
     //     path 1 on bytes-per-upload and on uploadCopy100ns.
+    //   7 D3D11VA hardware frames -- GPU-to-GPU CopySubresourceRegion from the
+    //     decoder's array slice into the retained source texture. No Map, so
+    //     uploadMapWait100ns stays 0; upload100ns == uploadCopy100ns (the copy is
+    //     the whole upload). Bytes are the NV12/P010/P016 texture size, so the
+    //     bandwidth column stays comparable with the CPU arms. Before 2026-10-20
+    //     this branch recorded nothing and hardware runs showed uploads=0/upath=0.
     // uploadCopyBytes is exact for 1 and 2; the UpdateSubresource arms do not know
     // their own byte total here, so they leave it untouched and stay identifiable
     // by this field instead of being silently averaged in.
@@ -1693,7 +1699,7 @@ FFF3FP_API FFFResult FFF3FP_CopyFrameSideDataAfter(FFF3FPHandle player,
 // of the bytes it hands back.
 //
 // Why stream-level. A container configuration record (the kind that decides,
-// for example, how a Dolby-Vision stream must be processed) belongs to the
+// for example, how a dynamic-metadata stream must be processed) belongs to the
 // media stream, not to an individual packet or frame: the demuxer declares it
 // once when the stream is bound (AVCodecParameters::coded_side_data) and does
 // not re-send it per frame. A per-frame ring therefore can never carry it.
