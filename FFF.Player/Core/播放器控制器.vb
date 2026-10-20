@@ -261,6 +261,20 @@ Public NotInheritable Class 播放器控制器
         Return 安全读取会话(Function(目标) 目标.色彩变换内容描述, String.Empty)
     End Function
 
+    ''' <summary>解锁成功后调用：把注入通路从“补装载已放弃”里拉回来。
+    ''' 无会话 / 模块仍不可用 / 任何异常都答 False，绝不影响解锁流程本身。</summary>
+    Public Function 唤醒色彩变换通路() As Boolean
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return False
+        Try
+            Return 目标.唤醒色彩变换通路()
+        Catch ex As ObjectDisposedException
+        Catch ex As Exception
+            Debug.WriteLine("色彩变换模块：唤醒通路异常（已忽略）：" & ex.GetType().Name)
+        End Try
+        Return False
+    End Function
+
     Private Function 安全读取会话(Of T)(读取 As Func(Of 播放器会话, T), Optional 默认值 As T = Nothing) As T
         Dim 目标 = 会话
         If 目标 Is Nothing Then Return 默认值

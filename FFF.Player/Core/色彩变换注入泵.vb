@@ -84,6 +84,9 @@ Friend Class 色彩变换注入泵
     Private _上次回退检查 As Long = 0
     Private _节拍毫秒 As Integer = 8
     Private _节拍已缓存 As Boolean
+    ' 模块答"未授权"之后是否已经通知过内核丢表。只做一次：未授权是逐帧回答，
+    ' 每帧都调一次内核既无意义也会把日志刷满。重新注入成功后复位。
+    Private _已清注入表 As Boolean
 
     ' ---- 配置记录通道（容器码流配置记录：流级常量，取首次出现的一条并缓存） ----
     Private _配置记录 As Byte()
@@ -150,11 +153,21 @@ Friend Class 色彩变换注入泵
 
     ''' <summary>启动泵线程。已在跑时是空操作；线程曾退出（如补装载放弃）时可重启动。</summary>
     Public Sub 启动()
+        Dim 旧唤醒 As ManualResetEventSlim = Nothing
         SyncLock _锁
             If _已释放 OrElse _停止 Then Return
             If _线程 IsNot Nothing AndAlso _线程.IsAlive Then Return
+            旧唤醒 = _唤醒
             _唤醒 = New ManualResetEventSlim(False)
         End SyncLock
+        ' 旧线程已经不在跑（上面 IsAlive 已排除），它那条唤醒事件可以收了：
+        ' 重启动是真会发生的路径（解锁晚于补装载预算），不释放会一次泄一个句柄。
+        If 旧唤醒 IsNot Nothing Then
+            Try
+                旧唤醒.Dispose()
+            Catch ex As ObjectDisposedException
+            End Try
+        End If
         Dim 新线程 As New Thread(New ThreadStart(AddressOf 泵循环)) With {
             .IsBackground = True,
             .Name = "色彩变换注入泵"
@@ -197,6 +210,9 @@ Friend Class 色彩变换注入泵
                     ' 还没装载（通常是“锁着、等用户输入解锁码”这一段）：低频补装载。
                     ' 票据一旦落盘，尝试装载就会成功，下一拍转入正常节拍。
                     If 补装载次数 >= 最大补装载次数 Then
+                        ' 放弃前把已注入的表丢掉：模块是中途失效（不只是在锁着）时，
+                        ' 内核里会一直躺着最后一条 LUT，而显示行早就空了。
+                        If 注入帧数 > 0UI Then 清除注入表()
                         Debug.WriteLine("色彩变换注入泵：补装载 " & 最大补装载次数.ToString() &
                                         " 次仍未成功（模块仍锁着或不在）⇒ 本会话放弃，保持静默")
                         Return
@@ -226,6 +242,9 @@ Friend Class 色彩变换注入泵
             End While
         Catch ex As Exception
             ' 线程入口的兜底：任何意外都静默退场，绝不把异常带出线程。
+            ' 退场前同样要丢表：否则画面继续套最后一条 LUT，而宿主这边已经没有任何
+            ' 供给源了（症状是“解锁了但显示没变”的镜像版）。
+            If 注入帧数 > 0UI Then 清除注入表()
             Debug.WriteLine("色彩变换注入泵：线程异常退场：" & ex.GetType().Name)
         End Try
     End Sub
@@ -310,6 +329,7 @@ Friend Class 色彩变换注入泵
                     Array.Copy(载荷, _上次载荷, 载荷大小)
                     注入帧数 += 1UI
                     _末次注入帧号 = 帧序号
+                    _已清注入表 = False
                     Return True
                 End If
                 跳过帧数 += 1UI
@@ -319,12 +339,41 @@ Friend Class 色彩变换注入泵
                 ' 本帧无可换算据：正常跳过，不是错误，不计数。
                 Return False
 
+            Case 色彩变换模块接口.结果未授权
+                ' 解锁失效（票据到期/被删/换机）：模块从此不再供货。宿主这边显示行
+                ' 会自己变空（上面刚发布的空内容描述），但内核里还躺着上一条表 ——
+                ' 不丢掉的话，画面会继续套 LUT 直到换文件，与显示行自相矛盾。
+                跳过帧数 += 1UI
+                清除注入表()
+                Return False
+
             Case Else
-                ' 参数无效 / 缓冲不足 / 不支持 / 未授权：都记跳过。
+                ' 参数无效 / 缓冲不足 / 不支持：都记跳过。
                 跳过帧数 += 1UI
                 Return False
         End Select
     End Function
+
+    ''' <summary>通知内核丢掉所有已注入的动态元数据（种类 0 = 清空所有 kind）。
+    ''' 幂等且只做一次；下一次成功注入时复位，让“授权恢复”能重新生效。</summary>
+    Private Sub 清除注入表()
+        If _已清注入表 Then Return
+        _已清注入表 = True
+        ' 载荷缓存一起作废：授权恢复后必须重新注入，不能因为“内容没变”而跳过。
+        _上次载荷 = Nothing
+        Try
+            Dim 句柄 = _会话.取得句柄()
+            If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return
+            If Not 播放器原生接口.支持动态元数据注入 Then Return
+            Dim 结果 = 播放器原生接口.清空动态元数据(句柄, 0UI)
+            If 结果 <> 原生播放器结果.成功 Then
+                Debug.WriteLine("色彩变换注入泵：清注入表未被内核接受（" & 结果.ToString() & "）")
+            End If
+        Catch ex As Exception
+            ' 句柄可能正在销毁：清不掉也不能把泵带倒。
+            Debug.WriteLine("色彩变换注入泵：清注入表异常（已忽略）：" & ex.GetType().Name)
+        End Try
+    End Sub
 
     ' ---- 帧边数据环游标 ----
 
@@ -456,6 +505,8 @@ Friend Class 色彩变换注入泵
         _上次载荷 = Nothing
         _末次注入帧号 = -1
         _已消费帧号 = -1
+        ' 新时间线还没有任何注入：允许下一次"未授权"再通知一次内核。
+        _已清注入表 = False
         ' 换文件后帧率可能变了：清掉缓存让下一拍重读。
         _节拍已缓存 = False
         ' 流重绑才会清内核侧的流级边数据；配置记录与分类文本必须跟着重取。
