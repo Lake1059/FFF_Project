@@ -44,6 +44,12 @@ Friend Module Program
                 Return StreamSelectionRegression.运行(args.Skip(1).ToArray())
             End If
             ' 外部色彩变换 kind=3 注入回归（真内核 + 真模块 DLL；票据须由驱动预铸，见文件头）。
+            ' 两个入口：父进程编排（--color-transform-injection），子进程跑单场
+            ' （--color-transform-injection-scenario，父进程自己起，见该文件头的“每场一个进程”）。
+            If args.Length > 0 AndAlso String.Equals(args(0), ColorTransformInjectionRegression.子场景旗标,
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return ColorTransformInjectionRegression.运行子场景(If(args.Length > 1, args(1), Nothing))
+            End If
             If args.Length > 0 AndAlso String.Equals(args(0), "--color-transform-injection",
                     StringComparison.OrdinalIgnoreCase) Then
                 Return ColorTransformInjectionRegression.运行(args.Skip(1).ToArray())

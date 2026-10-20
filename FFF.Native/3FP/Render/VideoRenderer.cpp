@@ -14,6 +14,7 @@
 
 extern "C" {
 #include <libavcodec/codec_par.h>
+#include <libavcodec/codec_id.h>
 #include <libavutil/frame.h>
 #include <libavutil/buffer.h>
 #include <libavutil/hwcontext.h>
@@ -830,15 +831,19 @@ float3 ReadSource(float2 uv) {
     float2 chroma=InputLayout==1
         ?float2(SampleVideo(ChromaU,chromaUv).r,SampleVideo(ChromaV,chromaUv).r)*SampleScale
         :SampleVideo(ChromaU,chromaUv).rg*SampleScale;
-    y=(y-YOffset)*YScale;
-    chroma=(chroma-COffset)*CScale;
-    // Kind-3 domain 0: the table replaces the YUV->RGB matrix below. Its input
-    // axes are the three coded components (Y, Cb, Cr) in [0,1] -- exactly the
-    // range-expanded values the matrix would have consumed -- and its output is
-    // coded RGB. The sampler is clamped, so out-of-range coded values clamp at
-    // the table edges.
+    // Kind-3 domain 0: the table replaces the YUV->RGB matrix below, and its
+    // input axes are the three CODED components (Y, Cb, Cr) in [0,1] -- the
+    // published payload contract (FFF.Player.Api.h: "Input axes span the coded
+    // [0,1] domain"). It is sampled BEFORE the range expansion on purpose: the
+    // expansion is calibrated for the matrix and drives chroma to
+    // [-0.57, 0.57], which a clamped sampler cannot represent (every negative
+    // chroma would land on the edge texel, i.e. lose half the colour plane). A
+    // producer bakes against the coded domain and applies whatever levels its
+    // own source needs. The table's output is coded RGB.
     if(TransformEnabled!=0&&TransformDomain==0)
         return TransformLut.SampleLevel(LinearSampler,float3(y,chroma),0);
+    y=(y-YOffset)*YScale;
+    chroma=(chroma-COffset)*CScale;
     float kg=1.0-Kr-Kb;
     return float3(y+(2.0-2.0*Kr)*chroma.y,
         y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
@@ -857,10 +862,10 @@ float3 ReadSourceLinear(float2 uv) {
         ?float2(ChromaU.Sample(LinearSampler,chromaUv).r,
                 ChromaV.Sample(LinearSampler,chromaUv).r)*SampleScale
         :ChromaU.Sample(LinearSampler,chromaUv).rg*SampleScale;
-    y=(y-YOffset)*YScale;
-    chroma=(chroma-COffset)*CScale;
     if(TransformEnabled!=0&&TransformDomain==0)
         return TransformLut.SampleLevel(LinearSampler,float3(y,chroma),0);
+    y=(y-YOffset)*YScale;
+    chroma=(chroma-COffset)*CScale;
     float kg=1.0-Kr-Kb;
     return float3(y+(2.0-2.0*Kr)*chroma.y,
         y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
@@ -891,10 +896,10 @@ float3 ReadSourcePanorama(float2 uv) {
         ?float2(SamplePanorama(ChromaU,chromaUv).r,
                 SamplePanorama(ChromaV,chromaUv).r)*SampleScale
         :SamplePanorama(ChromaU,chromaUv).rg*SampleScale;
-    y=(y-YOffset)*YScale;
-    chroma=(chroma-COffset)*CScale;
     if(TransformEnabled!=0&&TransformDomain==0)
         return TransformLut.SampleLevel(LinearSampler,float3(y,chroma),0);
+    y=(y-YOffset)*YScale;
+    chroma=(chroma-COffset)*CScale;
     float kg=1.0-Kr-Kb;
     return float3(y+(2.0-2.0*Kr)*chroma.y,
         y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
@@ -1517,8 +1522,36 @@ inline std::size_t CopyUploadPlane(std::uint8_t* dst, const std::size_t dstPitch
     return static_cast<std::size_t>(rows) * rowBytes;
 }
 
-// Above this size, planar/semi-planar uploads go through the 2-deep STAGING ->
-// DEFAULT ring (uploadPath 1) instead of Map(WRITE_DISCARD) on a DYNAMIC texture.
+// Upload route policy for planar/semi-planar frames -- decision of 2026-10-20:
+// every size goes through Map(WRITE_DISCARD) on a DYNAMIC texture (uploadPath 2).
+// The >= 4K STAGING ring (uploadPath 1) is NOT the default any more, but it is not
+// deleted either: FFF3FP_UPLOAD_FORCE_STAGING=1 restores it without a rebuild, and
+// every line of code that builds and drives the ring is unchanged.
+//
+// Why the default moved: the ring moves every frame twice -- the CPU writes a
+// STAGING texture, then CopyResource pulls the same bytes into video memory --
+// while the Map path moves them once. Measured with the 16-knob A/B round plus the
+// two high-pressure clips (interleaved passes, fullscreen viewport, witnessed
+// quiet), the one-transfer route won on every material and nothing regressed:
+//   8K HEVC      fps 52.5 -> 59.0 (+12.4%)   dropped 7.0 -> 0.0 /window
+//                upload 17.08 -> 14.80 ms   presentwait -49.7%
+//   Chou 8K AV1  presentwait -66%
+//   OP 4K 444p12 presentwait -38%           upload +3.9% (inside the noise band)
+// The CPU side only saves ~1.1 ms of copy; the win is the GPU CopyResource no
+// longer serialising against present, which is why upload_ms barely moves while
+// presentwait collapses.
+//
+// Evidence gaps that keep this from being called settled: the win is demonstrated
+// on one 8K and one 4K source on this machine's GPU only. 8K AV1 full-length and a
+// second GPU are still outstanding. Hence "default off, not deleted": a machine
+// that measures the other way needs one environment variable, not a patch.
+//
+// --- historical record: why the ring existed and why it had two slots ----------
+// (kept because the code is still here and FFF3FP_UPLOAD_FORCE_STAGING re-enables
+// every word of it)
+// Above this size, planar/semi-planar uploads used to go through the 2-deep
+// STAGING -> DEFAULT ring (uploadPath 1) instead of Map(WRITE_DISCARD) on a
+// DYNAMIC texture.
 //
 // Why two slots and not one: with a single staging buffer, Map(WRITE) has to wait
 // for the previous frame's CopyResource to finish reading it. Measured with
@@ -1536,19 +1569,34 @@ inline std::size_t CopyUploadPlane(std::uint8_t* dst, const std::size_t dstPitch
 // this machine and described a route this function no longer takes; measured here,
 // the staging ring moves 24.9 MB at 4K in 1.79 ms and 99.5 MB at 8K in 9.75-10.35 ms
 // while the box is otherwise quiet.
+// --- end historical record ----------------------------------------------------
 constexpr std::uint32_t DefaultUploadWidthThreshold = 3840;
 constexpr std::uint32_t DefaultUploadHeightThreshold = 2160;
 
-// Measurement gate: FFF3FP_UPLOAD_FORCE_DYNAMIC=1 sends every frame down the
-// sub-threshold route (DYNAMIC texture + Map(WRITE_DISCARD)), so the one-transfer
-// path can be compared against the >= 4K staging ring's two transfers (CPU write,
-// then CopyResource pulling the same bytes into video memory).
+// Reverse gate: FFF3FP_UPLOAD_FORCE_STAGING=1 puts the >= 4K ring back for this
+// process. It is the A/B handle against the new default and the escape hatch for a
+// machine where the Map route measures worse.
 //
-// It deliberately lives INSIDE this one predicate rather than at the call sites: it is
-// consulted by EnsurePipeline (which decides DYNAMIC vs DEFAULT when creating the
-// textures) and by Render (which decides which upload branch to run). A gate that
-// only moved the Render decision would make Map(WRITE_DISCARD) target a DEFAULT
-// texture and fail, so the two decisions have to keep reading the same answer.
+// FFF3FP_UPLOAD_FORCE_DYNAMIC=1 is kept working on purpose: it asks for the route
+// that is now the default, so it is a documented no-op that keeps older scripts
+// and CSV arms comparable instead of silently changing meaning.
+//
+// Both gates deliberately live INSIDE this one predicate rather than at the call
+// sites: it is consulted by EnsurePipeline (which decides DYNAMIC vs DEFAULT when
+// creating the textures) and by Render (which decides which upload branch to run).
+// A gate that only moved the Render decision would make Map(WRITE_DISCARD) target
+// a DEFAULT texture and fail, so the two decisions have to keep reading the same
+// answer.
+inline bool ForceStagingUploadCached() noexcept {
+    char* buffer = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_FORCE_STAGING") != 0 || buffer == nullptr)
+        return false;
+    const std::string value(buffer);
+    free(buffer);
+    return value == "1";
+}
+
 inline bool ForceDynamicUploadCached() noexcept {
     char* buffer = nullptr;
     std::size_t length = 0;
@@ -1562,7 +1610,9 @@ inline bool ForceDynamicUploadCached() noexcept {
 inline bool UseDefaultUploadForSize(const std::uint32_t width,
     const std::uint32_t height) noexcept {
     if (ForceDynamicUploadCached()) return false;
-    return width >= DefaultUploadWidthThreshold && height >= DefaultUploadHeightThreshold;
+    if (ForceStagingUploadCached())
+        return width >= DefaultUploadWidthThreshold && height >= DefaultUploadHeightThreshold;
+    return false;
 }
 
 // The staging ring commits three frame-bytes' worth of memory on top of the decoded
@@ -3172,6 +3222,132 @@ FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** ou
     return FFFResult::Success;
 }
 
+namespace {
+
+struct D3D11DecoderSurface {
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    int bitDepth = 8;
+};
+
+// FFmpeg's d3d11va frame pool only ever allocates NV12, P010 or P016, so a decoder
+// surface cannot carry 4:2:2 or 4:4:4 samples. That is a property of the hwaccel
+// itself, not of this machine, so refusing those pixel formats here is exact and
+// costs nothing -- and it removes the preroll-then-fall-back round trip that
+// measured -15%..-30% fps on a 4:4:4 source (op_4k_444p12).
+bool D3D11DecoderSurfaceFormat(const std::int32_t pixelFormat,
+    D3D11DecoderSurface* output) noexcept {
+    switch (pixelFormat) {
+    case AV_PIX_FMT_YUV420P: case AV_PIX_FMT_YUVJ420P:
+    case AV_PIX_FMT_NV12: case AV_PIX_FMT_NV21:
+        *output = { DXGI_FORMAT_NV12, 8 }; return true;
+    case AV_PIX_FMT_YUV420P9LE: case AV_PIX_FMT_YUV420P10LE: case AV_PIX_FMT_P010:
+        *output = { DXGI_FORMAT_P010, 10 }; return true;
+    case AV_PIX_FMT_YUV420P12LE: case AV_PIX_FMT_YUV420P14LE:
+    case AV_PIX_FMT_YUV420P16LE: case AV_PIX_FMT_P016:
+        *output = { DXGI_FORMAT_P016, 12 }; return true;
+    default: return false;
+    }
+}
+
+// DXVA / D3D11 decoder profile GUIDs are specification constants, not a description
+// of any one GPU: spelling them out carries no device-specific assumption. What is
+// device-specific -- whether this driver exposes a configuration for them at this
+// resolution and output format -- is answered at run time by
+// GetVideoDecoderConfigCount. That split is the whole point of this probe.
+int D3D11DecoderProfiles(const std::int32_t codecId, const int bitDepth,
+    GUID* profiles, const int capacity) noexcept {
+    int count = 0;
+    const auto add = [profiles, capacity, &count](const GUID& guid) noexcept {
+        if (count < capacity) profiles[count++] = guid;
+    };
+    switch (codecId) {
+    case AV_CODEC_ID_H264:
+        add(D3D11_DECODER_PROFILE_H264_VLD_NOFGT);
+        add(D3D11_DECODER_PROFILE_H264_VLD_FGT);
+        break;
+    case AV_CODEC_ID_HEVC:
+        // Main10 also decodes 8-bit on every driver measured, so it is always a
+        // candidate; it is simply tried second at 8-bit where Main is the match.
+        if (bitDepth <= 8) {
+            add(D3D11_DECODER_PROFILE_HEVC_VLD_MAIN);
+            add(D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10);
+        } else {
+            add(D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10);
+            add(D3D11_DECODER_PROFILE_HEVC_VLD_MAIN);
+        }
+        break;
+    case AV_CODEC_ID_AV1:
+        if (bitDepth <= 8) {
+            add(D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0);
+            add(D3D11_DECODER_PROFILE_AV1_VLD_PROFILE2);
+        } else if (bitDepth <= 10) {
+            add(D3D11_DECODER_PROFILE_AV1_VLD_PROFILE2);
+            add(D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0);
+        } else {
+            add(D3D11_DECODER_PROFILE_AV1_VLD_12BIT_PROFILE2_420);
+            add(D3D11_DECODER_PROFILE_AV1_VLD_PROFILE2);
+        }
+        break;
+    case AV_CODEC_ID_VP9:
+        add(D3D11_DECODER_PROFILE_VP9_VLD_PROFILE0);
+        if (bitDepth > 8) add(D3D11_DECODER_PROFILE_VP9_VLD_10BIT_PROFILE2);
+        break;
+    case AV_CODEC_ID_VP8:
+        add(D3D11_DECODER_PROFILE_VP8_VLD);
+        break;
+    case AV_CODEC_ID_MPEG2VIDEO:
+        add(D3D11_DECODER_PROFILE_MPEG2_VLD);
+        break;
+    case AV_CODEC_ID_VC1:
+        add(D3D11_DECODER_PROFILE_VC1_VLD);
+        break;
+    default: break;
+    }
+    return count;
+}
+
+} // namespace
+
+PlayerVideoRenderer::D3D11DecodeSupport PlayerVideoRenderer::QueryD3D11DecodeSupport(
+    const std::int32_t codecId, const std::int32_t profile, const std::int32_t pixelFormat,
+    const std::int32_t width, const std::int32_t height) noexcept {
+    // The stream profile is not consulted yet: the surface bit depth already selects
+    // the decoder profile GUID (Main vs Main10, AV1 profile 0 vs 2), and adding a
+    // per-codec profile table would reintroduce exactly the kind of hand-maintained
+    // mapping this probe exists to avoid.
+    (void)profile;
+    // A stream whose pixel format FFmpeg has not resolved yet must not be refused:
+    // "unknown format" is missing information, not a driver verdict.
+    if (pixelFormat == AV_PIX_FMT_NONE || width <= 0 || height <= 0)
+        return D3D11DecodeSupport::Unknown;
+    D3D11DecoderSurface surface{};
+    if (!D3D11DecoderSurfaceFormat(pixelFormat, &surface))
+        return D3D11DecodeSupport::Unsupported;
+    std::lock_guard deviceLock(deviceMutex_);
+    if (EnsureDevice() != FFFResult::Success || device_ == nullptr)
+        return D3D11DecodeSupport::Unknown;
+    ComPtr<ID3D11VideoDevice> videoDevice;
+    if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&videoDevice))))
+        return D3D11DecodeSupport::Unknown;
+    // A codec this probe does not model returns Unknown: keeping hardware decoding
+    // for it preserves the existing behaviour rather than silently regressing it.
+    GUID profiles[4]{};
+    const auto profileCount = D3D11DecoderProfiles(codecId, surface.bitDepth, profiles, 4);
+    if (profileCount == 0) return D3D11DecodeSupport::Unknown;
+    D3D11_VIDEO_DECODER_DESC descriptor{};
+    descriptor.SampleWidth = static_cast<UINT>(width);
+    descriptor.SampleHeight = static_cast<UINT>(height);
+    descriptor.OutputFormat = surface.format;
+    for (int index = 0; index < profileCount; ++index) {
+        descriptor.Guid = profiles[index];
+        UINT configurationCount = 0;
+        if (FAILED(videoDevice->GetVideoDecoderConfigCount(&descriptor, &configurationCount)))
+            continue;
+        if (configurationCount > 0) return D3D11DecodeSupport::Supported;
+    }
+    return D3D11DecodeSupport::Unsupported;
+}
+
 FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_t height,
     const std::uint32_t sourceBitDepth) noexcept {
     if (window_ == nullptr) return FFFResult::Success;
@@ -3588,9 +3764,11 @@ FFFResult PlayerVideoRenderer::CopyFrame(void* const pixels,
 }
 
 // The single place that answers "does this frame upload through the staging ring".
-// The size table is local's own policy; the two extra clauses are the parts worth
-// having from upstream's measured ladder -- the capacity gate, and a refusal that is
-// remembered for the life of the device instead of retried every settlement window.
+// Since 2026-10-20 the size table answers "no" by default (see the policy block
+// above) and the ring only comes back through FFF3FP_UPLOAD_FORCE_STAGING=1; the
+// two extra clauses are the parts worth having from upstream's measured ladder --
+// the capacity gate, and a refusal that is remembered for the life of the device
+// instead of retried every settlement window.
 bool PlayerVideoRenderer::WantsStagingUpload(const std::uint32_t width,
     const std::uint32_t height) const noexcept {
     if (uploadRingUnavailable_.load(std::memory_order_acquire)) return false;
@@ -3743,12 +3921,14 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             return FFFResult::NotSupported;
         }
     }
-    // The two shapes of the planar upload need different textures, and only one of
-    // them is chosen by size: the staging ring costs extra memory the Map path does
-    // not, so WantsStagingUpload also answers for the adapter. Both resource sets are
-    // built by these two helpers because a refused ring allocation has to rebuild the
-    // frame textures DYNAMIC -- the size table alone cannot express that, and it is
-    // exactly the step that used to end playback with DeviceFailure.
+    // The two shapes of the planar upload need different textures, and which one is
+    // used is chosen by the upload policy block above (Map by default since
+    // 2026-10-20, the ring only under FFF3FP_UPLOAD_FORCE_STAGING=1): the staging
+    // ring costs extra memory the Map path does not, so WantsStagingUpload also
+    // answers for the adapter. Both resource sets are built by these two helpers
+    // because a refused ring allocation has to rebuild the frame textures DYNAMIC
+    // -- the size table alone cannot express that, and it is exactly the step that
+    // used to end playback with DeviceFailure.
     const auto buildSourceTextures = [&](const bool dynamicPlanes) noexcept {
         for (std::uint32_t plane = 0; plane < (externalSource ? 0u : planeCount); ++plane) {
             D3D11_TEXTURE2D_DESC texture{};
@@ -3768,18 +3948,19 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             else texture.Format = bitDepth > 8 ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
             texture.SampleDesc.Count = 1;
             texture.Usage = D3D11_USAGE_DEFAULT; texture.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            // Small planar/semi-planar frames upload through Map(WRITE_DISCARD), which
-            // needs a CPU-writable dynamic texture. Large ones must NOT: that route needs
-            // a DEFAULT texture for the staging copies below.
+            // Every size uploads through Map(WRITE_DISCARD) by default since
+            // 2026-10-20, which needs a CPU-writable dynamic texture. The ring route
+            // (FF3FP_UPLOAD_FORCE_STAGING=1, >= 4K) must NOT: it needs a DEFAULT
+            // texture for the staging copies below.
             //
-            // The table below is inherited from an earlier round and has NOT been
-            // reproduced in this build -- reaching "Map at 8K" requires creating the
-            // texture DYNAMIC at 8K, which this code never does, so there is no arm here
-            // that can confirm or refute it. Treat it as the reason for the DEFAULT usage
-            // choice, not as a current measurement. What IS measured in the round that
-            // added uploadCopyBytes/uploadCount/uploadPath: the staging route moves
-            // 24.9 MB at 4K in 1.79 ms and 99.5 MB at 8K in 9.75-10.35 ms on a quiet box,
-            // and a planar UpdateSubresource arm measured 4.6% slower at 4K.
+            // The old size table that used to justify the DEFAULT usage choice is
+            // superseded: the 2026-10-20 round DID create DYNAMIC textures at 8K (via
+            // the then-measurement gate) and measured that route better at every size,
+            // so it is no longer a claim this code has to respect. What is still
+            // measured in the round that added uploadCopyBytes/uploadCount/uploadPath:
+            // the staging route moves 24.9 MB at 4K in 1.79 ms and 99.5 MB at 8K in
+            // 9.75-10.35 ms on a quiet box, and a planar UpdateSubresource arm
+            // measured 4.6% slower at 4K.
             //   1920x1080  Map 0.582 ms vs UpdateSubresource 0.546 ms  (1.06x)
             //   3840x2160  Map 3.293 ms vs 2.886 ms                    (1.14x)
             //   7680x4320  Map 22.266 ms vs 15.213 ms                  (1.46x)
@@ -6685,19 +6866,42 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         // Decoder array slices are transient and are reused as soon as the AVFrame
         // is released. Retain only one shader-readable GPU surface and copy the
         // selected slice; this remains GPU-to-GPU and removes the full CPU transfer.
+        //
+        // Telemetry (uploadPath 7): this arm used to record nothing at all, so a
+        // hardware-decode run showed uploads=0 / upload_ms=0 / upath=0 and the whole
+        // upload family of CSV columns read as "no work happened" -- which made the
+        // "unmetered 97%" of hardware arms impossible to attribute. The counters
+        // below are the same ones the CPU arms use; CopySubresourceRegion IS the
+        // copy, so upload100ns and uploadCopy100ns are the same interval here and
+        // uploadMapWait100ns stays 0 by construction (no Map on this path).
+        const auto hwCopyStart = std::chrono::steady_clock::now();
         context_->CopySubresourceRegion(sourceTextures_[0], 0, 0, 0, 0, texture, slice, nullptr);
+        const auto hwCopyNs = std::chrono::steady_clock::now() - hwCopyStart;
+        upload100ns_.fetch_add(To100ns(hwCopyNs), std::memory_order_relaxed);
+        uploadCopy100ns_.fetch_add(To100ns(hwCopyNs), std::memory_order_relaxed);
+        // Byte count mirrors how buildSourceTextures sizes this texture
+        // (NV12 / P010 / P016 by bit depth, :3762-3765): 1.5 bytes per pixel at
+        // 8 bit, 3 at 10/12 bit. Recording it keeps bytes_per_upload (and the
+        // bandwidth column) comparable across paths instead of silently zero.
+        const std::uint64_t hwCopyBytes = static_cast<std::uint64_t>(uploadWidth) * uploadHeight *
+            (input.bitDepth <= 8 ? 3u : 6u) / 2u;
+        uploadCopyBytes_.fetch_add(static_cast<std::size_t>(hwCopyBytes), std::memory_order_relaxed);
+        uploadCount_.fetch_add(1, std::memory_order_relaxed);
+        uploadPath_.store(7, std::memory_order_relaxed);
     } else if (directYuv) {
         // Planar (1) and semi-planar (2) frames arrive as CPU planes and must be
-        // copied into shader-visible textures. Two upload strategies: the size
-        // table picks one, and WantsStagingUpload can still turn it off when this
-        // adapter cannot carry the ring (see the constants above):
+        // copied into shader-visible textures. Two upload strategies: the policy
+        // block above picks one (Map by default since 2026-10-20), and
+        // WantsStagingUpload can still turn the ring off when this adapter cannot
+        // carry it (see the constants above):
         //
-        //  - Small frames: Map(WRITE_DISCARD) into a DYNAMIC texture. The driver can
+        //  - Default: Map(WRITE_DISCARD) into a DYNAMIC texture. The driver can
         //    rename storage rather than waiting for the previous frame to stop
-        //    sampling the same DEFAULT texture, which is why this path exists.
-        //  - Large frames (>= 4K): CPU-write STAGING -> alternating DEFAULT
-        //    textures, keeping upload and sampling on separate resources.
-        //    EnsurePipeline creates the matching resource ring.
+        //    sampling the same DEFAULT texture, which is why this path exists --
+        //    and since 2026-10-20 it is also the measured winner at every size.
+        //  - Opt-in (FFF3FP_UPLOAD_FORCE_STAGING=1, >= 4K): CPU-write STAGING ->
+        //    alternating DEFAULT textures, keeping upload and sampling on separate
+        //    resources. EnsurePipeline creates the matching resource ring.
         const auto uploadStart = std::chrono::steady_clock::now();
         // uploadPlanes/uploadLines already point at the resampled copy when the
         // adaptive policy engaged, and uploadWidth/uploadHeight match the textures

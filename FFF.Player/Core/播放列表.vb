@@ -29,13 +29,13 @@ Public NotInheritable Class 播放列表
         ".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".ape", ".ac3", ".eac3", ".dts", ".mka",
         ".wv", ".tak", ".aif", ".aiff", ".amr", ".au", ".ra", ".tta", ".mpc",
         ".png", ".jpg", ".jpeg", ".jpe", ".gif", ".apng", ".webp", ".jxl", ".bmp", ".tif", ".tiff",
-        ".ico", ".avif", ".heic", ".heif", ".jxr", ".wdp", ".hdp"
+        ".ico", ".avif", ".avifs", ".heic", ".heif", ".jxr", ".wdp", ".hdp"
     }
     ' 图片模式：与 视频扩展名 平行的一份集合。看图要按目录建列表，
     ' 而 视频扩展名 只用来判断"这是不是视频"，不能反过来当"是不是图片"用。
     Private Shared ReadOnly 图片扩展名 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
         ".png", ".jpg", ".jpeg", ".jpe", ".gif", ".apng", ".webp", ".jxl", ".bmp", ".tif", ".tiff",
-        ".ico", ".avif", ".heic", ".heif", ".jxr", ".wdp", ".hdp"
+        ".ico", ".avif", ".avifs", ".heic", ".heif", ".jxr", ".wdp", ".hdp"
     }
     Private Shared ReadOnly 视频扩展名 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
         ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".webm", ".flv", ".ts", ".m2ts", ".mts",

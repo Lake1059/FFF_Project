@@ -81,8 +81,14 @@ Friend Module 色彩变换模块接口
     ''' <summary>一次调用可能产出的最大字节数（= sizeof(FFF3FPColorTransformPayload)）。</summary>
     Friend Const 载荷容量 As UInteger = 431296UI
 
-    ''' <summary>载荷输入结构扩展布局字节数（带配置记录通道的那版）。</summary>
-    Friend Const 输入结构大小 As UInteger = 48UI
+    ''' <summary>载荷输入结构扩展布局字节数（配置记录通道 + EL 合同字）。</summary>
+    Friend Const 输入结构大小 As UInteger = 56UI
+
+    ''' <summary>输入标志：宿主已把增强层残差合成进基底层采样。
+    ''' <para>当前宿主还没有 EL 解码/合成通路，所以置 0；等宿主真正合成后再置这一位。
+    ''' 48 B 旧布局没有这个字段，模块按 0 处理；56 B 布局里模块只认这一位，
+    ''' 其余位或非零保留字会被拒（<see cref="结果参数无效"/>）。</para></summary>
+    Friend Const 输入标志增强层已预合成 As UInteger = 1UI
 
     ''' <summary>analyzeFrame 返回码（FFFColorTransformResult）。</summary>
     Friend Const 结果成功 As Integer = 0
@@ -229,8 +235,10 @@ Friend Module 色彩变换模块接口
         Public 释放 As IntPtr
     End Structure
 
-    ''' <summary>一帧的输入（48 B 扩展布局：头 + 两个借用通道 + 演示帧号）。
-    ''' 帧号模块不读也不抄进载荷——"取最后一条 ≤ 当前帧"的匹配是宿主的职责。</summary>
+    ''' <summary>一帧的输入（56 B 扩展布局：头 + 两个借用通道 + 演示帧号 + 合同字）。
+    ''' 帧号模块不读也不抄进载荷——"取最后一条 ≤ 当前帧"的匹配是宿主的职责。
+    ''' 48 B 旧模块会忽略末尾的 <see cref="标志"/>/<see cref="保留"/>；当前模块只认
+    ''' <see cref="输入标志增强层已预合成"/>，宿主尚未置位。</summary>
     <StructLayout(LayoutKind.Sequential)>
     Friend Structure 色彩变换输入
         Public 大小 As UInteger
@@ -240,6 +248,8 @@ Friend Module 色彩变换模块接口
         Public 帧序号 As ULong
         Public 配置记录 As IntPtr
         Public 配置记录大小 As ULong
+        Public 标志 As UInteger
+        Public 保留 As UInteger
     End Structure
 
     ''' <summary>一次分析的结果（32 B）。载荷写调用方拥有的缓冲区。</summary>
@@ -389,6 +399,11 @@ Friend Module 色彩变换模块接口
         详情 = Nothing
         If String.IsNullOrWhiteSpace(码) Then Return 解锁结果.被拒
         Dim 句柄 As IntPtr = IntPtr.Zero
+        ' 票据写不进盘时，模块的授权只活在本进程的内存里（授予是模块全局态）。
+        ' 这一份句柄绝不能再卸掉：FreeLibrary 会把那份授予连同模块一起抹掉，
+        ' 之后每次探测/装载都重新读盘 ⇒ 全程未授权，而用户刚看到"已通过"。
+        ' 代价是一个进程生命期的模块引用，与"本次运行可用"的承诺正好等长。
+        Dim 保留句柄 As Boolean = False
         Try
             ' 搜索口径必须与探测/装载同一份：否则探测说"在且锁着"、弹了框，
             ' 而这里去解锁的是另一枚拷贝（或压根找不到），框白弹一次。
@@ -416,6 +431,7 @@ Friend Module 色彩变换模块接口
                 Case 解锁已落盘
                     Return 解锁结果.已接受
                 Case 解锁未落盘
+                    保留句柄 = True
                     Return 解锁结果.已接受未落盘
                 Case 解锁被拒
                     Return 解锁结果.被拒
@@ -429,7 +445,7 @@ Friend Module 色彩变换模块接口
             详情 = "提交解锁码异常 " & ex.GetType().Name & ": " & ex.Message
             Return 解锁结果.够不到
         Finally
-            If 句柄 <> IntPtr.Zero Then 释放模块(句柄)
+            If 句柄 <> IntPtr.Zero AndAlso Not 保留句柄 Then 释放模块(句柄)
         End Try
     End Function
 
@@ -628,7 +644,9 @@ Friend Class 色彩变换模块实例
                 .元数据大小 = 0UI,
                 .帧序号 = CULng(帧序号),
                 .配置记录 = IntPtr.Zero,
-                .配置记录大小 = 0UI
+                .配置记录大小 = 0UI,
+                .标志 = 0UI,
+                .保留 = 0UI
             }
             If 边数据 IsNot Nothing AndAlso 边数据.Length > 0 Then
                 边数据句柄 = GCHandle.Alloc(边数据, GCHandleType.Pinned)

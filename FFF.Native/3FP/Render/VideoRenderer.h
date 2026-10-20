@@ -355,6 +355,29 @@ public:
     // single place that decides it, for Render() and for the refresh above.
     std::uint32_t ResolveDecodeTransfer(const HdrFrameState& hdrState) const noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
+    /// Zero-cost capability probe for D3D11VA hardware decoding.
+    ///
+    /// Ask the driver instead of consulting a table: the answer describes this GPU
+    /// and this driver build, so it stays correct on machines where a static
+    /// "codec X at resolution Y is fine" rule would be wrong. It is a capability
+    /// question only -- can this stream be decoded at all -- never a throughput
+    /// question, which has no standard API and is left alone.
+    enum class D3D11DecodeSupport : std::uint8_t {
+        /// The probe could not run (no device yet, or no ID3D11VideoDevice).
+        /// The caller must keep its existing fallback ordering: this is not a
+        /// verdict, and treating it as "unsupported" would disable hardware
+        /// decoding whenever the renderer has not warmed up yet.
+        Unknown = 0,
+        /// The driver exposes at least one decoder configuration for the stream.
+        Supported = 1,
+        /// The driver has no configuration for it; software decoding is the only route.
+        Unsupported = 2,
+    };
+    /// `codecId` is an AVCodecID, `pixelFormat` an AVPixelFormat and `profile` an
+    /// FFmpeg profile. All three are passed as integers so this header stays free
+    /// of FFmpeg types.
+    D3D11DecodeSupport QueryD3D11DecodeSupport(std::int32_t codecId, std::int32_t profile,
+        std::int32_t pixelFormat, std::int32_t width, std::int32_t height) noexcept;
     FFFResult PresentTimedText() noexcept;
     FFFResult ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept;
     // Batch pixel readback (single GPU staging copy).

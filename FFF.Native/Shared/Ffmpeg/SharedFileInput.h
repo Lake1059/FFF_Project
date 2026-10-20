@@ -20,6 +20,11 @@ public:
     static std::unique_ptr<SharedFileInput> Open(const char* pathUtf8,
         std::string& error) noexcept;
 
+    // Serves a copy of `data` instead of a file on disk, for the callers that
+    // have to hand FFmpeg bytes they had to repair first (see AvifIlocShim).
+    static std::unique_ptr<SharedFileInput> OpenMemory(const std::uint8_t* data,
+        std::size_t size, std::string& error) noexcept;
+
     AVIOContext* Context() const noexcept { return context_; }
 
 private:
@@ -29,5 +34,7 @@ private:
     HANDLE file_{INVALID_HANDLE_VALUE};
     AVIOContext* context_{};
     std::uint8_t* buffer_{};
+    std::uint8_t* data_{};      // owned copy of the in-memory media, when used
+    std::int64_t position_{};   // read cursor for the in-memory media
     std::int64_t size_{};
 };

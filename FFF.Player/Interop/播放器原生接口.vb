@@ -205,9 +205,13 @@ Friend Structure 原生播放器快照
     ' 所以分母用 41 还是 57 会让带宽差 1.39 倍。有了这两个数，字节/次和字节/时长都是量的。
     Public 上传次数 As ULong
     Public 上传复制字节 As ULong
-    ' 上一帧走的是哪条上传分支：1 = 平面 STAGING + Map(WRITE)（≥4K 那档），
-    ' 2 = 平面 DYNAMIC + Map(WRITE_DISCARD)（<4K 那档），3 = 打包 UpdateSubresource，
-    ' 4 = 半浮点，5 = RGB。这两档搬的字节数和内存类型都不一样，之前无法区分。
+    ' 上一帧走的是哪条上传分支：0 = 还没上传过，1 = 平面 STAGING + Map(WRITE)（≥4K 那档，
+    ' 2026-10-20 起仅 FFF3FP_UPLOAD_FORCE_STAGING=1 时走），
+    ' 2 = 平面 DYNAMIC + Map(WRITE_DISCARD)（<4K 那档，2026-10-20 起的默认），
+    ' 3 = 打包 UpdateSubresource，4 = 半浮点，5 = RGB，6 = env 门控 A/B 臂，
+    ' 7 = D3D11VA 硬解帧 GPU 直贴（CopySubresourceRegion，无 Map；上传时长即拷贝时长，
+    ' 字节数按 NV12/P010/P016 贴图大小记，带宽列与其他分支可比）。
+    ' 这些分支搬的字节数和内存类型都不一样，之前无法区分。
     ' 分支 3/4 的字节数由驱动掌握，此处不记，靠本字段识别而不是混进平均值。
     Public 上传路径 As UInteger
 End Structure
