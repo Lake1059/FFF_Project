@@ -5,6 +5,9 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 }
 #include <algorithm>
+#include "3FP/Core/MediaText.h"
+
+using PlayerMediaText::EscapeJson;
 
 std::string PlayerSession::DiscStatus() const {
     std::lock_guard lock(snapshotMutex_); return discStatus_;
@@ -72,15 +75,32 @@ bool PlayerSession::ReopenDiscDemux() {
     videoStream_ = av_find_best_stream(format_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     audioStream_ = av_find_best_stream(format_, AVMEDIA_TYPE_AUDIO, -1, videoStream_, nullptr, 0);
     if (videoStream_ >= 0) {
-        auto result = decodeMode_ == FFF3FPDecodeMode::Gpu ?
-            OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_) :
-            OpenDecoder(format_, videoStream_, true, &videoDecoder_);
-        snapshot_.decodeMode = decodeMode_;
-        if (result != FFFResult::Success) {
+        // The same two rules as every other open: a route the GPU already refused for
+        // this stream is not asked again, and a refusal that happens now is reported
+        // as a fallback instead of being left for the snapshot to imply.
+        const auto tryHardware = decodeMode_ == FFF3FPDecodeMode::Gpu &&
+            !HardwareRouteKnownUnsupported(format_->streams[videoStream_]);
+        std::string hardwareFailureReason;
+        auto result = tryHardware
+            ? OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_, &hardwareFailureReason)
+            : OpenDecoder(format_, videoStream_, true, &videoDecoder_, -1, nullptr, false);
+        auto hardwareFallback = false;
+        if (result != FFFResult::Success && tryHardware) {
             result = OpenDecoder(format_, videoStream_, true, &videoDecoder_, -1, nullptr, false);
-            snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
+            hardwareFallback = result == FFFResult::Success;
+        } else if (result == FFFResult::Success && !tryHardware) {
+            hardwareFallback = true;
+            hardwareFailureReason = "The GPU decoder was rejected for this stream earlier in this session; playback is using CPU decoding.";
         }
+        snapshot_.decodeMode = result == FFFResult::Success && tryHardware
+            ? decodeMode_ : FFF3FPDecodeMode::Cpu;
         if (result != FFFResult::Success) { Fail(result, "Could not decode disc video."); return false; }
+        if (hardwareFallback)
+            Emit(FFF3FPEvent::DeviceChanged,
+                "{\"type\":\"video\",\"decodeMode\":1,\"fallback\":true,\"reason\":\"" +
+                EscapeJson(hardwareFailureReason.empty()
+                    ? "The GPU rejected the disc video; playback is using CPU decoding."
+                    : hardwareFailureReason) + "\"}");
     }
     if (audioStream_ >= 0 && OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success)
         audioStream_ = -1;

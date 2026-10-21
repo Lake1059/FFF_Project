@@ -9,7 +9,12 @@ Public Class 设置
     Public Property 初始画面尺寸选项 As Integer = 2
     Public Property 自定义初始画面宽度 As Integer = 1024
     Public Property 自定义初始画面高度 As Integer = 576
-    Public Property 解码方式 As 解码模式 = 解码模式.CPU
+    ' 解码方式默认 GPU（2026-10-21 起，此前为 CPU）。理由：硬解不通时内核自己会回退 CPU
+    ' （打开时试解首包 + 播放中失败即切换，均已实机验证），用户侧没有"选错就放不出"的风险，
+    ' 而默认 CPU 等于让大多数机器白白放弃硬解。主界面「解码」按钮仍可随时翻转，并写回本项。
+    ' 注意：本默认值只在设置文件不存在/解析失败时生效；老设置文件里已持久化的值原样尊重
+    ' （文件只存 1/2，分不出"从没设置过"与"显式选过 CPU"，故不做迁移）。
+    Public Property 解码方式 As 解码模式 = 解码模式.GPU
     Public Property 视频缩放质量选项 As Integer = CInt(视频缩放质量.高画质)
     Public Property HDR峰值亮度选项 As Integer = 0
     Public Property HDR峰值亮度 As Integer = 0
@@ -160,8 +165,9 @@ Public Class 设置
         初始画面尺寸选项 = Math.Clamp(初始画面尺寸选项, 0, 9)
         自定义初始画面宽度 = Math.Clamp(自定义初始画面宽度, 320, 7680)
         自定义初始画面高度 = Math.Clamp(自定义初始画面高度, 180, 4320)
+        ' 非法值归一到默认档（GPU）：与字段默认值保持一致，破损/越界的配置不会把用户按在 CPU 上。
         If 解码方式 <> CInt(解码模式.CPU) AndAlso 解码方式 <> CInt(解码模式.GPU) Then
-            解码方式 = CInt(解码模式.CPU)
+            解码方式 = CInt(解码模式.GPU)
         End If
         视频缩放质量选项 = Math.Clamp(视频缩放质量选项, 0, 1)
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
