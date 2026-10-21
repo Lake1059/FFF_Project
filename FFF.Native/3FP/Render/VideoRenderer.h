@@ -924,6 +924,13 @@ private:
     // Adaptive presentation pace floor (0 = off). See SetPresentPaceFloorHz: the
     // presenter schedules against FrameRateBoundHz, which takes the min with this.
     std::atomic<double> paceFloorHz_{ 0.0 };
+    // Max targetFrameRate over visible timed-text layers (0 = none visible). The
+    // media ceiling must not swallow this half: a 24 fps source with a 60 Hz danmaku
+    // layer still owes the overlay 60 flips/s even though the pictures change 24
+    // times a second. FrameRateBoundHz raises against the declared panel rate, so
+    // this request can never raise the bound above what the panel scans out. Written
+    // on the API thread, read on the presenter thread.
+    std::atomic<float> timedTextLayerTargetHz_{ 0.0f };
     // Set by every chain creation, consumed by the presenter thread: the frame-statistics
     // sequence restarts with the chain, so a delta taken across the swap is not a period.
     std::atomic<bool> gridResetRequested_{ true };

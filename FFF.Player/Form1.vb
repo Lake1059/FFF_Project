@@ -359,8 +359,7 @@ Public Class Form1
             JEC_当前音频编码显示前面的空白占位, JEC_当前声道数显示前面的空白占位, 画面控件,
             AddressOf 播放控制器.安全读取快照,
             Function() 播放控制器.是否正在切换,
-            Function() 播放控制器.解码器,
-            Function() 播放控制器.色彩模式)
+            Function() 播放控制器.解码器)
     End Function
 
     Private Sub 配置播放器按钮图标()

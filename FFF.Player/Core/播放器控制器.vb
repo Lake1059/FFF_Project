@@ -43,8 +43,13 @@ Public NotInheritable Class 播放器控制器
     Private 当前解码器 As 解码模式 = 解码模式.CPU
     Private 当前会话解码器配置 As 解码模式 = 解码模式.CPU
     Private 用户解码器偏好 As 解码模式 = 解码模式.CPU
-    Private 当前色彩输出 As 色彩输出模式 = 色彩输出模式.映射到SDR
-    Private HDR色彩输出偏好 As 色彩输出模式 = 色彩输出模式.映射到SDR
+    ' 开机默认请求真实HDR：HDR 屏直接进 scRGB 链；屏不支持或 SDR 8-bit 源由内核
+    ' EnsureSwapChain 降级回映射SDR（挂 fallbackReason），手动三档切换不受影响。
+    Private 当前色彩输出 As 色彩输出模式 = 色彩输出模式.峰值映射HDR
+    Private HDR色彩输出偏好 As 色彩输出模式 = 色彩输出模式.峰值映射HDR
+    ' 只有用户手动选了真实HDR才弹"强制开启"确认框；开机默认请求被内核降级时
+    ' 只走非模态提示，否则 SDR 屏上每次打开都会多一个没人要求的模态框。
+    Private 用户请求过HDR As Boolean
     Private 强制HDR输出 As Boolean
     Private 当前WASAPI模式 As WASAPI共享模式 = WASAPI共享模式.共享
     Private 当前音量 As Single = 1.0F
@@ -993,12 +998,15 @@ Public NotInheritable Class 播放器控制器
         If 已释放 OrElse 正在切换会话 OrElse 目标 Is Nothing OrElse 快照 Is Nothing OrElse
             Not 可操作(快照.状态) OrElse Not 快照.是HDR源 Then Return
 
-        Dim 新模式 = CType((CInt(当前色彩输出) + 1) Mod 3, 色彩输出模式)
+        ' 循环基点用快照的实际档：SDR 屏上请求真实HDR 会被内核降级成映射SDR，
+        ' 若从请求值起算，第一次点击的新档恰好等于眼前这档，表现为"点了没反应"。
+        Dim 新模式 = CType((CInt(快照.实际色彩模式) + 1) Mod 3, 色彩输出模式)
         Try
             目标.设置色彩模式(新模式, 当前SDR峰值尼特, 取得HDR输出峰值参数(新模式),
                          SDR纸白尼特, 强制HDR输出)
             当前色彩输出 = 新模式
             HDR色彩输出偏好 = 新模式
+            If 新模式 = 色彩输出模式.峰值映射HDR Then 用户请求过HDR = True
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
             ' 设置色彩模式会排入原生播放线程；此刻的快照仍可能是切换前的 SDR 状态。
             ' 等待色彩模式变化事件后，再基于新快照给出最终提示，避免把已成功的 HDR 误报为回退。
@@ -1499,7 +1507,8 @@ Public NotInheritable Class 播放器控制器
         RaiseEvent 状态已变化(Me, EventArgs.Empty)
         Dim 快照 = 安全读取快照()
         If 快照 IsNot Nothing AndAlso 快照.是HDR源 Then
-            Dim 可以强制开启 = 当前色彩输出 = 色彩输出模式.峰值映射HDR AndAlso
+            Dim 可以强制开启 = 用户请求过HDR AndAlso
+                当前色彩输出 = 色彩输出模式.峰值映射HDR AndAlso
                 快照.实际色彩模式 <> 色彩输出模式.峰值映射HDR AndAlso Not 强制HDR输出
             RaiseEvent HDR输出状态已确认(Me,
                 New 播放器HDR状态事件参数(取得HDR模式说明(快照), 可以强制开启))
@@ -1847,15 +1856,21 @@ Public NotInheritable Class 播放器控制器
     End Function
 
     Private Function 取得HDR模式说明(快照 As 播放器快照) As String
-        Select Case 快照.请求色彩模式
+        ' 按**实际**档说话：说"看到的是什么"。只有在映射SDR 这一档才需要回看
+        ' 请求值——请求真实HDR 却被内核降级，和用户主动选映射SDR 是两回事。
+        ' 本函数只服务 HDR 源（两个调用点都先判 是HDR源）；SDR 源的 scRGB 文案由
+        ' 播放器信息图层呈现器 自己的 色彩模式文本 提供，那里对 SDR 也可见。
+        If 快照 Is Nothing OrElse Not 快照.是HDR源 Then Return String.Empty
+        Select Case 快照.实际色彩模式
             Case 色彩输出模式.映射到SDR
+                If 快照.请求色彩模式 = 色彩输出模式.峰值映射HDR Then
+                    Return "HDR 目标不可用，已映射到 SDR"
+                End If
                 Return "HDR 映射到 SDR"
             Case 色彩输出模式.原始HDR按SDR呈现
                 Return "原始 HDR 按 SDR 呈现"
             Case 色彩输出模式.峰值映射HDR
-                Return If(快照.实际色彩模式 = 色彩输出模式.峰值映射HDR,
-                    $"{HDR规格文本(快照)} 真实高亮",
-                    "HDR 目标不可用，已映射到 SDR")
+                Return $"{HDR规格文本(快照)} 真实高亮"
             Case Else
                 Return String.Empty
         End Select

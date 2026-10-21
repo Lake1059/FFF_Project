@@ -11,14 +11,13 @@ Imports System.Threading
 ''' 命令做全文本哈希）、按显示器刷新率定的固定节拍、以及"量不足就丢整个 tick"的降频
 ''' 策略。拆开之后两边各用自己的节拍与策略。
 '''
-''' 驱动方式（本次改造的核心）：**跟随视频**。
-'''   · 判据用快照的"已解码视频帧数"——它只在解码器产出新帧并入队时递增
-'''     （PlayerSession::QueueVideoFrame），暂停/停止时不涨。而"已呈现视频帧数"不能用作
-'''     判据：present 循环每转一圈就 ++，暂停时仍在增长。
-'''   · 有新帧 ⇒ 生成并提交一次；视频 60 fps 就是 60 Hz，24 fps 就是 24 Hz。
-'''   · 保底 30 Hz：片源帧率低于 30 fps 时，两次新帧之间若已超过一个保底间隔就补一次，
-'''     避免低帧率片源下滚动出现阶跃（180 px/s 下 24 Hz 每帧走 7.5 px）。
-'''   · 暂停/无新帧 ⇒ 零工作（不取数、不测量、不提交），图层保持上一帧内容。
+''' 驱动方式：**下限 60 Hz 保底，其余跟随片源**。
+'''   · 播放中每个泵拍都提交一次；泵间隔按实测片源帧周期取 clamp(帧周期, 8, 16) ms：
+'''     ≤60 fps 的片源一律 16 ms（62.5 Hz，即 60 Hz 保底），120 fps 片源 ≈8 ms（≈120 Hz），
+'''     更快的行为 8 ms 护栏（125 Hz）——8 ms 在 180 px/s 下每拍位移约 1.4 px，再快收益递减。
+'''     位置按连续媒体时钟计算，提交多密、滚动步进就多细；内核侧的合成节奏另见
+'''     FrameRateBoundHz（可见图层的目标帧率那一半，不被媒体帧率上限吞掉，也不超过面板）。
+'''   · 暂停/停止 ⇒ 零工作（不取数、不测量、不提交），图层保持上一帧内容。
 '''   · seek 拖动（时间轴代次变化）、窗口几何变化、配置变化 ⇒ 立即强制提交一次。
 '''
 ''' 命令与文字对象由呈现器复用；调用方只能在同步提交期间读取命令，不能跨帧保留引用。
@@ -27,14 +26,9 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
     Implements IDisposable
 
     ' ── 驱动节拍 ────────────────────────────────────────────────────────────
-    ' 保底间隔：片源比 30 fps 还慢时，弹幕至少按这个间隔走（33 ms ≈ 30 Hz）。
-    Private Const 保底间隔毫秒 As Integer = 33
-    ' 检测上限：片源比 60 fps 还快时，弹幕不跟着一起冲（16 ms ≈ 60 Hz）。再快下去
-    ' 每帧位移不足 3 px，人眼收益递减，而测量/提交的成本是实打实的。
-    Private Const 检测上限间隔毫秒 As Integer = 16
-    ' 片源帧率还没估出来时（刚开播、或长时间没新帧）用的检测间隔。
-    Private Const 默认检测间隔毫秒 As Integer = 16
-    ' 估算帧周期时的下限，防止异常大的帧率把定时器打到 1 ms。
+    ' 初始/最高泵间隔 16 ms（62.5 Hz）：≤60 fps 片源一律按它走，这就是 60 Hz 保底。
+    Private Const 泵间隔毫秒 As Integer = 16
+    ' 最小泵间隔 8 ms（125 Hz）：高帧率片源跟随到这里为止，再快就只烧定时器。
     Private Const 最小间隔毫秒 As Integer = 8
 
     Private ReadOnly 画面控件 As 播放器画面控件
@@ -60,16 +54,15 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
     Private 缓存客户区高度 As Integer
     Private 缓存DPI位元 As Integer
 
-    ' ── 视频帧跟随 ──────────────────────────────────────────────────────────
-    Private 上次解码帧数 As ULong
-    Private 上次解码帧数有效 As Boolean
-    Private 上次提交时间戳 As Long
-    Private 采样起始时间戳 As Long
-    Private 采样起始解码帧数 As ULong
-    Private 估算帧周期毫秒 As Double = 0.0R
+    ' ── 强制/重建标记 ───────────────────────────────────────────────────────
     Private 上一时间轴代次 As ULong
     Private 时间轴代次有效 As Boolean
     Private 强制提交标志 As Integer
+
+    ' ── 片源帧周期估计（决定泵间隔：跟随片源，下限 60 Hz）──────────────────
+    Private 采样起始时间戳 As Long
+    Private 采样起始解码帧数 As ULong
+    Private 上次正在播放 As Boolean
 
     ' ── 埋点（只读，供浮层/采样器读取）─────────────────────────────────────
     Private 提交次数 As Long
@@ -96,7 +89,7 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
         End Get
     End Property
 
-    ''' <summary>因"没有新帧且未到保底间隔"而跳过的次数。</summary>
+    ''' <summary>因"未在播放且无强制/重建"而跳过的次数。</summary>
     Friend ReadOnly Property 已跳过次数 As Long
         Get
             Return Interlocked.Read(跳过次数)
@@ -116,7 +109,7 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
         End Get
     End Property
 
-    ''' <summary>被定时器丢弃的 tick 数。跟随视频后工作量大幅下降，这个数应为 0；
+    ''' <summary>被定时器丢弃的 tick 数。每拍工作量是固定的，这个数应为 0；
     ''' 若它持续增长，说明单次生成仍然超过一个间隔，需要继续优化而不是继续丢帧。</summary>
     Friend ReadOnly Property 已丢弃节拍数 As Long
         Get
@@ -140,12 +133,11 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
         Me.弹幕提供器 = 弹幕提供器
         Me.弹幕配置 = If(弹幕配置, New 弹幕显示配置())
         Me.弹幕配置.验证()
-        ' 溢出策略仍是 Drop：偶发一次超时就丢弃，靠下一次新帧补上，比堆积一批过期的
-        ' 弹幕命令更接近"跟随视频"的语义。不同之处在于丢弃数由 已丢弃节拍数 暴露出来，
-        ' 不再像以前那样静默发生。
+        ' 溢出策略仍是 Drop：偶发一次超时就丢弃，靠下一拍补上，比堆积一批过期的
+        ' 弹幕命令更合适。丢弃数由 已丢弃节拍数 暴露出来，不会静默发生。
         刷新计时器 = New LakeUI.PrecisionTimer With {
             .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
-            .Interval = 默认检测间隔毫秒,
+            .Interval = 泵间隔毫秒,
             .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop
         }
         更新画面快照()
@@ -172,11 +164,13 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
             Dim DPI = BitConverter.Int32BitsToSingle(Volatile.Read(缓存DPI位元))
             If Not Single.IsFinite(DPI) OrElse DPI <= 0 Then DPI = 96.0F
 
-            ' 1) 跟随判据：解码器有没有产出新帧。
-            Dim 解码帧数 = 快照.已解码视频帧数
-            Dim 有新帧 = (Not 上次解码帧数有效) OrElse 解码帧数 <> 上次解码帧数
-            上次解码帧数 = 解码帧数
-            上次解码帧数有效 = True
+            ' 1) 片源帧周期估计：决定泵间隔（跟随片源，下限 60 Hz）。只在播放中更新。
+            Dim 正在播放 = 快照.状态 = 播放状态.正在播放
+            ' 暂停会把墙钟拉长而解码帧不涨，恢复后那个窗口必须重开；否则一次暂停
+            ' 会把帧周期估成"总时长/几帧"，泵被错误地放慢到 16 ms。
+            If 正在播放 AndAlso Not 上次正在播放 Then 采样起始时间戳 = 0L
+            上次正在播放 = 正在播放
+            刷新帧率估计(快照.已解码视频帧数, 正在播放)
 
             ' 2) seek 拖动：时间轴代次只在 seek 时自增，此时调度器必须整体重建。
             Dim 时间轴代次 = 快照.时间轴代次
@@ -184,25 +178,13 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
             上一时间轴代次 = 时间轴代次
             时间轴代次有效 = True
 
-            ' 3) 保底：片源低于 30 fps 时，两次新帧之间补一次，避免滚动阶跃。
-            Dim 正在播放 = 快照.状态 = 播放状态.正在播放
-            Dim 距上次提交毫秒 = 0.0R
-            If 上次提交时间戳 <> 0L Then
-                距上次提交毫秒 = CDbl(Stopwatch.GetTimestamp() - 上次提交时间戳) * 1000.0R /
-                    CDbl(Stopwatch.Frequency)
-            End If
-            Dim 需要保底 = 正在播放 AndAlso 距上次提交毫秒 >= CDbl(保底间隔毫秒)
-
-            ' 4) 几何/配置变化等强制刷新。
+            ' 3) 播放中每拍必提交（60 Hz 保底；高帧率片源泵已按片源缩短）；未播放时只有强制/重建才动。
             Dim 需要强制 = Volatile.Read(强制提交标志) <> 0
-
-            If Not (有新帧 OrElse 需要重建 OrElse 需要保底 OrElse 需要强制) Then
+            If Not (正在播放 OrElse 需要重建 OrElse 需要强制) Then
                 Interlocked.Increment(跳过次数)
-                刷新帧率估计(解码帧数, 正在播放)
                 Return
             End If
 
-            刷新帧率估计(解码帧数, 正在播放)
             Volatile.Write(强制提交标志, 0)
             提交当前帧(客户区大小, 快照.视频宽度, 快照.视频高度, 快照.播放位置,
                      DPI, 时间轴代次, 需要重建)
@@ -214,13 +196,13 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
         End Try
     End Sub
 
-    ''' <summary>用"解码帧数/时间"估算片源帧周期，并把泵间隔夹在 [最小, 保底] 之间。
-    ''' 这样做完泵本身就贴合片源：60 fps 片源 ≈16 ms 一跳，24 fps 片源被夹到 33 ms。</summary>
+    ''' <summary>用"解码帧数/时间"估算片源帧周期，泵间隔取 clamp(周期, 8, 16) ms：
+    ''' 60 fps 及以下 ⇒ 16 ms（60 Hz 保底），120 fps ⇒ ≈8 ms（跟随片源），更快 ⇒ 8 ms 护栏。
+    ''' 250 ms 窗口且至少 1 帧才更新，避免片头/抖动把泵带偏。
+    ''' 换媒体时解码计数会归零，负增量就是那个信号：重开窗口，否则要等新片
+    ''' 的解码数追过旧片的起点，120 fps 跟随会长时间停在 16 ms。</summary>
     Private Sub 刷新帧率估计(解码帧数 As ULong, 正在播放 As Boolean)
-        If Not 正在播放 Then
-            ' 暂停时不更新估计：此时既不产新帧，也不该因为"很久没提交"而把泵放慢。
-            Return
-        End If
+        If Not 正在播放 Then Return
         Dim 现在 = Stopwatch.GetTimestamp()
         If 采样起始时间戳 = 0L Then
             采样起始时间戳 = 现在
@@ -228,17 +210,22 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
             Return
         End If
         Dim 经过毫秒 = CDbl(现在 - 采样起始时间戳) * 1000.0R / CDbl(Stopwatch.Frequency)
+        If 经过毫秒 < 250.0R Then Return
         Dim 新增帧 = CLng(解码帧数) - CLng(采样起始解码帧数)
-        If 经过毫秒 < 250.0R OrElse 新增帧 <= 0 Then Return
-        Dim 帧周期 = 经过毫秒 / CDbl(新增帧)
-        If Double.IsFinite(帧周期) AndAlso 帧周期 > 0.0R Then
-            估算帧周期毫秒 = 帧周期
+        If 新增帧 < 0 Then
+            ' 计数器归零（换媒体）。这里必须把起点拉到当前值，不能只 Return：
+            ' 旧的起点可能比新片的计数器大几个数量级。
             采样起始时间戳 = 现在
             采样起始解码帧数 = 解码帧数
-            Dim 目标 = CInt(Math.Round(Math.Clamp(帧周期, CDbl(最小间隔毫秒), CDbl(保底间隔毫秒)),
+            Return
+        End If
+        If 新增帧 = 0 Then Return
+        Dim 帧周期 = 经过毫秒 / CDbl(新增帧)
+        采样起始时间戳 = 现在
+        采样起始解码帧数 = 解码帧数
+        If Double.IsFinite(帧周期) AndAlso 帧周期 > 0.0R Then
+            Dim 目标 = CInt(Math.Round(Math.Clamp(帧周期, CDbl(最小间隔毫秒), CDbl(泵间隔毫秒)),
                                      MidpointRounding.AwayFromZero))
-            ' 检测上限：比 60 fps 更快的片源，弹幕不跟着冲。
-            目标 = Math.Max(目标, 检测上限间隔毫秒)
             If 目标 <> 刷新计时器.Interval Then 刷新计时器.Interval = 目标
         End If
     End Sub
@@ -255,15 +242,15 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
                 图层序号 += 1UL
                 提交图层(客户区大小, commands, 图层序号, 弹幕目标帧率())
             End SyncLock
-            上次提交时间戳 = Stopwatch.GetTimestamp()
             Interlocked.Increment(提交次数)
         Catch
             ' 弹幕是可选图层；异常不能影响视频呈现。
         End Try
     End Sub
 
-    ''' <summary>交给内核的"目标帧率"：跟随视频时用估算出来的实际帧率，估不出来就用
-    ''' 泵当前的节拍。它只参与内核的呈现节奏计算，不参与本类的调度。</summary>
+    ''' <summary>交给内核的"目标帧率"：1000 / 当前泵间隔。16 ms ⇒ 62.5，8 ms ⇒ 125；
+    ''' 内核用它抬升 overlay 合成节奏（FrameRateBoundHz 的图层那一半），
+    ''' 不被媒体帧率上限吞掉，也不会超过实际面板刷新率。</summary>
     Private Function 弹幕目标帧率() As Single
         Dim 间隔 = 刷新计时器.Interval
         If 间隔 <= 0 Then Return 60.0F

@@ -929,13 +929,17 @@ struct FFF3FPPresentPacingStatus {
     std::uint32_t version; // == PlayerApiVersion
     // EnumDisplaySettings for the monitor that hosts the output window. Reported here
     // un-clamped; the renderer used to clamp this to 120 before a 2026-10-15 fix, so a
-    // 144 Hz panel was described as 120 Hz to whatever consumed it.
+    // 144 Hz panel was described as 120 Hz to whatever consumed it. It is the declared
+    // panel rate only: a timed-text layer's targetFrameRate does not raise it.
     float declaredRefreshHz;
     // Panel period recovered from the swap chain's own frame statistics
     // (IDXGISwapChain::GetFrameStatistics: SyncRefreshCount against SyncQPCTime).
     // 0 until two samples have arrived, which is what "not locked yet" means here.
     float measuredRefreshHz;
-    float frameRateBoundHz;   // the bound in force: min(panel rate, content rate)
+    // The bound in force: min(panel rate, content rate), raised to a visible timed-text
+    // layer's target frame rate but never above the declared panel rate. The adaptive
+    // pace floor can lower it further while the pipeline is behind the media clock.
+    float frameRateBoundHz;
     std::uint32_t gridLocked;       // 1 = flips are snapped to the refresh grid
     // Why the grid is not in charge when gridLocked is 0:
     //   0 = locked, or there was nothing to pace against
