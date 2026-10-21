@@ -146,6 +146,11 @@ constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
 constexpr std::size_t MaximumCachedSideDataBlobBytes = 16 * 1024;
 constexpr std::size_t MaximumSideDataRingFrames = 120;        // ~2 s at 60 fps
 constexpr std::size_t MaximumSideDataRingBytes = 1024 * 1024; // hard stop
+// Optional auxiliary video layer. The frame queue only needs to cover decoder
+// reorder plus PTS jitter between the two tracks; the request ring mirrors the
+// side-data ring's horizon so a host polling at the same rate cannot outrun it.
+constexpr std::size_t MaximumAuxiliaryQueuedFrames = 12;
+constexpr std::size_t MaximumAuxiliaryCompositionRequests = 256;
 // Stream-level side-data cache (CopyStreamSideData). A container configuration
 // record is a one-shot, stream-level constant, so the bounds are much smaller
 // than the ring's: there is nothing per-frame to accumulate, just the handful
@@ -712,6 +717,24 @@ std::int32_t FindDefaultOrFirstStream(AVFormatContext* format, AVMediaType type)
         if ((stream->disposition & AV_DISPOSITION_DEFAULT) != 0) return static_cast<std::int32_t>(index);
     }
     return first;
+}
+
+// The first video stream that is not the base layer: cover art is skipped the
+// same way FindDefaultOrFirstStream skips it. Only consulted when the host has
+// asked for an auxiliary composition, so a file with several video tracks pays
+// nothing until then.
+std::int32_t FindAuxiliaryVideoStream(AVFormatContext* format,
+    const std::int32_t primary) noexcept {
+    if (format == nullptr) return -1;
+    for (unsigned index = 0; index < format->nb_streams; ++index) {
+        if (static_cast<std::int32_t>(index) == primary) continue;
+        const auto* stream = format->streams[index];
+        if (stream == nullptr || stream->codecpar == nullptr) continue;
+        if (stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) continue;
+        if ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0) continue;
+        return static_cast<std::int32_t>(index);
+    }
+    return -1;
 }
 
 // AVIF/HEIC sequences may put a still item first. Select a later animated track
@@ -4035,6 +4058,14 @@ FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noex
 
 void PlayerSession::PumpPlayback() noexcept {
     if (format_ == nullptr) { SetState(FFF3FPState::Failed); return; }
+    // The host asked for an auxiliary composition: open the second video
+    // stream on this worker, once, before the next demux. A file without such
+    // a stream simply never gets one; the base path is untouched.
+    if (auxLayerRequested_.load(std::memory_order_acquire) && !auxOpenAttempted_ &&
+        videoStream_ >= 0 && !staticImage_ && !animatedImage_ && !tileGrid_) {
+        auxOpenAttempted_ = true;
+        (void)OpenAuxiliaryDecoder();
+    }
     if (!CollectSoftwareVideoFrame()) return;
     // Window evidence for EvaluateDecoderLoad: how many playback ticks ran and how
     // many of them found the decode pipeline at its bound. Diagnostics only --
@@ -4209,6 +4240,12 @@ void PlayerSession::PumpPlayback() noexcept {
         } else {
             decodeAudioPacket();
         }
+    }
+    else if (auxStream_ >= 0 && playbackPacket_->stream_index == auxStream_) {
+        // The auxiliary track is decoded on this worker, synchronously, and its
+        // frames go to their own bounded queue. It never enters the base-layer
+        // packet budget, bitrate counters or snapshot counters.
+        DecodeAuxiliaryPacket(playbackPacket_);
     }
     if (disc_) disc_->DecodeSubtitle(playbackPacket_, format_);
     av_packet_unref(playbackPacket_);
@@ -4711,11 +4748,162 @@ void PlayerSession::ClearVideoQueue() noexcept {
     // The presentation index restarts at every flush point, so cached blobs
     // keyed to the old indices would be handed out under a wrong frame number.
     ClearSideDataRing();
+    // Same reasoning for the auxiliary layer: its queued frames and its
+    // per-index requests belong to the timeline that just ended.
+    FlushAuxiliaryLayer();
     ClearPendingPackets();
 }
 
-void PlayerSession::ClearSideDataRing() noexcept {
-    std::lock_guard lock(sideDataMutex_);
+// ---- optional auxiliary video layer ----------------------------------------
+
+FFFResult PlayerSession::SetAuxiliaryComposition(
+    const FFF3FPAuxiliaryComposition& composition) noexcept {
+    if (composition.size != sizeof(composition) ||
+        composition.version != FFF3FP_AUXILIARY_COMPOSITION_VERSION)
+        return FFFResult::InvalidArgument;
+    {
+        std::lock_guard lock(auxMutex_);
+        auxCompositionRing_.push_back(AuxCompositionRequest{
+            composition.frameIndex, composition.enabled,
+            composition.residualCenter, composition.residualShift,
+            composition.maxValue});
+        while (auxCompositionRing_.size() > MaximumAuxiliaryCompositionRequests)
+            auxCompositionRing_.pop_front();
+    }
+    // enabled != 0 is the only thing that arms the worker; an explicit
+    // "skip this frame" request must not open a second decoder.
+    if (composition.enabled != 0)
+        auxLayerRequested_.store(true, std::memory_order_release);
+    return FFFResult::Success;
+}
+
+bool PlayerSession::SelectAuxiliaryComposition(const std::int64_t frameIndex,
+    AuxCompositionRequest& out) const noexcept {
+    std::lock_guard lock(auxMutex_);
+    if (auxCompositionRing_.empty()) return false;
+    // The kind-3 table's rule, verbatim: the last request at or before the
+    // presented index, or the first entry when the index precedes all of them.
+    const auto* selected = &auxCompositionRing_.front();
+    for (const auto& entry : auxCompositionRing_) {
+        if (entry.frameIndex <= frameIndex) selected = &entry;
+        else break;
+    }
+    out = *selected;
+    return true;
+}
+
+FFFResult PlayerSession::OpenAuxiliaryDecoder() noexcept {
+    if (auxDecoder_ != nullptr) return FFFResult::Success;
+    if (format_ == nullptr || videoStream_ < 0) return FFFResult::InvalidState;
+    auxStream_ = FindAuxiliaryVideoStream(format_, videoStream_);
+    if (auxStream_ < 0) return FFFResult::NotSupported;
+    // Software on purpose: the composition reference reads planar 10-bit
+    // samples, and the auxiliary track is small next to the base layer. The
+    // base layer keeps whatever hardware or software route it already chose.
+    const auto result = OpenDecoder(format_, auxStream_, true, &auxDecoder_, -1, nullptr, false);
+    if (GetEnvironmentVariableW(L"FFF_EL_TRACE", nullptr, 0) != 0)
+        std::fprintf(stderr, "[el] open base=%d aux=%d result=%d\n",
+            videoStream_, auxStream_, static_cast<int>(result));
+    if (result != FFFResult::Success) {
+        auxDecoder_ = nullptr;
+        auxStream_ = -1;
+        return result;
+    }
+    if (auxDecodeFrame_ == nullptr) auxDecodeFrame_ = av_frame_alloc();
+    if (auxDecodeFrame_ == nullptr) {
+        avcodec_free_context(&auxDecoder_);
+        auxStream_ = -1;
+        return FFFResult::NativeFailure;
+    }
+    return FFFResult::Success;
+}
+
+void PlayerSession::FlushAuxiliaryLayer() noexcept {
+    if (auxDecoder_ != nullptr) avcodec_flush_buffers(auxDecoder_);
+    for (auto& entry : auxFrameQueue_) av_frame_free(&entry.second);
+    auxFrameQueue_.clear();
+    if (auxDecodeFrame_ != nullptr) av_frame_unref(auxDecodeFrame_);
+    std::lock_guard lock(auxMutex_);
+    auxCompositionRing_.clear();
+}
+
+void PlayerSession::CloseAuxiliaryLayer() noexcept {
+    FlushAuxiliaryLayer();
+    if (auxDecodeFrame_ != nullptr) av_frame_free(&auxDecodeFrame_);
+    if (auxDecoder_ != nullptr) avcodec_free_context(&auxDecoder_);
+    auxStream_ = -1;
+    auxOpenAttempted_ = false;
+    auxLayerRequested_.store(false, std::memory_order_release);
+}
+
+void PlayerSession::DecodeAuxiliaryPacket(AVPacket* packet) noexcept {
+    if (auxDecoder_ == nullptr || packet == nullptr) return;
+    if (auxDecodeFrame_ == nullptr) auxDecodeFrame_ = av_frame_alloc();
+    if (auxDecodeFrame_ == nullptr) return;
+    const auto sent = avcodec_send_packet(auxDecoder_, packet);
+    if (sent < 0 && sent != AVERROR(EAGAIN)) return;
+    while (true) {
+        const auto received = avcodec_receive_frame(auxDecoder_, auxDecodeFrame_);
+        if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) break;
+        if (received < 0) break;
+        const auto pts = auxDecodeFrame_->best_effort_timestamp == AV_NOPTS_VALUE
+            ? auxDecodeFrame_->pts : auxDecodeFrame_->best_effort_timestamp;
+        auto* copy = av_frame_alloc();
+        if (copy != nullptr && av_frame_ref(copy, auxDecodeFrame_) >= 0) {
+            auxFrameQueue_.emplace_back(pts, copy);
+            while (auxFrameQueue_.size() > MaximumAuxiliaryQueuedFrames) {
+                av_frame_free(&auxFrameQueue_.front().second);
+                auxFrameQueue_.pop_front();
+            }
+        } else {
+            av_frame_free(&copy);
+        }
+        av_frame_unref(auxDecodeFrame_);
+    }
+}
+
+AVFrame* PlayerSession::TakeAuxiliaryFrame(const std::int64_t basePts,
+    AVFormatContext* owner) noexcept {
+    if (auxFrameQueue_.empty() || auxStream_ < 0 || owner == nullptr ||
+        owner != format_ || videoStream_ < 0 || basePts == AV_NOPTS_VALUE)
+        return nullptr;
+    const auto* auxiliary = format_->streams[auxStream_];
+    const auto* base = format_->streams[videoStream_];
+    if (auxiliary == nullptr || base == nullptr) return nullptr;
+    const auto target = av_rescale_q(basePts, base->time_base, auxiliary->time_base);
+    const auto period = lastVideoFrameDuration100ns_ > 0 ? lastVideoFrameDuration100ns_ : 1'000'000;
+    auto tolerance = av_rescale_q(period,
+        AVRational{1, static_cast<int>(TicksPerSecond)}, auxiliary->time_base);
+    if (tolerance <= 0) tolerance = 1;
+    std::size_t best = auxFrameQueue_.size();
+    std::int64_t bestDistance = INT64_MAX;
+    for (std::size_t index = 0; index < auxFrameQueue_.size(); ++index) {
+        const auto pts = auxFrameQueue_[index].first;
+        if (pts == AV_NOPTS_VALUE) continue;
+        const auto distance = pts >= target ? pts - target : target - pts;
+        if (distance < bestDistance) { bestDistance = distance; best = index; }
+    }
+    if (best == auxFrameQueue_.size() || bestDistance > tolerance) {
+        // Nothing close enough: drop what can no longer pair, keep the rest.
+        while (!auxFrameQueue_.empty()) {
+            const auto pts = auxFrameQueue_.front().first;
+            if (pts == AV_NOPTS_VALUE || pts >= target - tolerance) break;
+            av_frame_free(&auxFrameQueue_.front().second);
+            auxFrameQueue_.pop_front();
+        }
+        return nullptr;
+    }
+    AVFrame* result = nullptr;
+    for (std::size_t index = 0; index <= best; ++index) {
+        auto& entry = auxFrameQueue_.front();
+        if (index == best) result = entry.second;
+        else av_frame_free(&entry.second);
+        auxFrameQueue_.pop_front();
+    }
+    return result;
+}
+
+void PlayerSession::ClearSideDataRing() noexcept {    std::lock_guard lock(sideDataMutex_);
     sideDataRing_.clear();
     sideDataRingBytes_ = 0;
 }
@@ -5442,8 +5630,44 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     // ratio; hardware frames never engage the policy, so they are excluded here too.
     if (renderFrame != nullptr && !IsHardwareFrame(renderFrame))
         videoRenderer_.ObserveFrameForAdaptiveDownscale(false);
+    // Optional auxiliary layer: the caller's per-frame request says "this picture
+    // is expected to carry the composed signal". The frame is paired by PTS within
+    // one base-frame period; when nothing pairs, the params still go to the
+    // renderer so it withholds the caller's colour table instead of sampling it on
+    // an uncomposed picture.
+    AVFrame* auxiliaryFrame = nullptr;
+    FFF3FPAuxiliaryComposition auxiliaryComposition{};
+    bool elCompositionRequested = false;
+    if (auxLayerRequested_.load(std::memory_order_acquire)) {
+        AuxCompositionRequest request{};
+        if (SelectAuxiliaryComposition(nextIndex, request)) {
+            elCompositionRequested = request.enabled != 0;
+            if (elCompositionRequested) {
+                auxiliaryFrame = TakeAuxiliaryFrame(pts, owner);
+                auxiliaryComposition = FFF3FPAuxiliaryComposition{
+                    sizeof(FFF3FPAuxiliaryComposition),
+                    FFF3FP_AUXILIARY_COMPOSITION_VERSION, nextIndex,
+                    request.enabled, request.residualCenter, request.residualShift,
+                    request.maxValue};
+            }
+        }
+    }
     const auto renderResult = videoRenderer_.Render(frameToRender, nextIndex,
-        staticImage_ && owner == format_, false, false, staticImage_ && owner == format_);
+        staticImage_ && owner == format_, false, false, staticImage_ && owner == format_,
+        auxiliaryFrame, elCompositionRequested ? &auxiliaryComposition : nullptr);
+    // Diagnostic (FFF_EL_TRACE), the same shape as the ladder/cadence traces:
+    // "requested but not paired" is the state that withholds the colour table, and
+    // it is invisible in a headless session otherwise.
+    if (GetEnvironmentVariableW(L"FFF_EL_TRACE", nullptr, 0) != 0 &&
+        (elCompositionRequested || auxiliaryFrame != nullptr))
+        std::fprintf(stderr, "[el] frame=%lld request=%u paired=%u aux=%dx%d fmt=%d stream=%d queued=%zu\n",
+            static_cast<long long>(nextIndex), elCompositionRequested ? 1u : 0u,
+            auxiliaryFrame != nullptr ? 1u : 0u,
+            auxiliaryFrame != nullptr ? auxiliaryFrame->width : 0,
+            auxiliaryFrame != nullptr ? auxiliaryFrame->height : 0,
+            auxiliaryFrame != nullptr ? auxiliaryFrame->format : -1,
+            auxStream_, auxFrameQueue_.size());
+    if (auxiliaryFrame != nullptr) av_frame_free(&auxiliaryFrame);
     if (gamutConverted != nullptr) av_frame_free(&gamutConverted);
     if (renderResult != FFFResult::Success) {
         if (renderResult == FFFResult::DeviceFailure &&
@@ -6156,6 +6380,9 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         StopSoftwareVideoDecode();
         if (videoDecoder_) avcodec_free_context(&videoDecoder_);
         videoDecoder_ = replacement; videoStream_ = index;
+        // The auxiliary stream was chosen against the previous base stream, so
+        // forget it; the host's next enabled request re-selects against this one.
+        CloseAuxiliaryLayer();
         // Rebinding the video stream rebinds its stream-level side data too:
         // the previous track's records must never be answered for the new one.
         ClearStreamSideData();
@@ -6246,6 +6473,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     if (preserveVideoOutput) videoRenderer_.ResetMedia();
     else videoRenderer_.Close();
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); CloseFormat(&externalFormat_, externalFormatIo_);
+    CloseAuxiliaryLayer();
     if (videoDecoder_) avcodec_free_context(&videoDecoder_);
     if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     ReleaseIamfDecoder();

@@ -20,6 +20,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -183,6 +184,10 @@ public:
     // enumeration above -- the two collide on raw numbers.
     FFFResult CopyStreamSideData(std::uint32_t sideDataType, void* buffer,
         std::uint32_t capacity, std::uint32_t& writtenSize) noexcept;
+    // Neutral auxiliary video layer (see FFF3FP_SetAuxiliaryComposition in the
+    // API header): records one per-frame composition request. Additive entry
+    // point; a host that never calls it leaves every existing path untouched.
+    FFFResult SetAuxiliaryComposition(const FFF3FPAuxiliaryComposition& composition) noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
 
@@ -330,6 +335,35 @@ private:
     void NormalizeVideoFrameTimestamp(AVFrame* frame) noexcept;
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
+    // --- optional auxiliary video layer -------------------------------------
+    // One host request, keyed by the presentation index it belongs to.
+    struct AuxCompositionRequest {
+        std::int64_t frameIndex;
+        std::uint32_t enabled;
+        std::uint32_t residualCenter;
+        std::int32_t residualShift;
+        std::uint32_t maxValue;
+    };
+    // Opens the second video stream (software decode; the base layer keeps
+    // whatever route it chose) when the host first asks for a composition.
+    FFFResult OpenAuxiliaryDecoder() noexcept;
+    // Flushes the decoder and drops every queued frame; used by seek and EOF.
+    void FlushAuxiliaryLayer() noexcept;
+    // Flushes, frees the decoder and clears the parameter ring; used by close
+    // and by a video-track switch.
+    void CloseAuxiliaryLayer() noexcept;
+    // Feeds one demuxed packet of auxStream_ through the auxiliary decoder and
+    // queues every frame it produces. Never touches the base-layer pipeline.
+    void DecodeAuxiliaryPacket(AVPacket* packet) noexcept;
+    // Returns the auxiliary frame whose PTS is closest to the base frame's,
+    // within one base-frame period; nullptr when nothing is close enough. The
+    // caller owns the returned frame and frees it after presentation.
+    AVFrame* TakeAuxiliaryFrame(std::int64_t basePts, AVFormatContext* owner) noexcept;
+    // Same selection rule the kind-3 table uses: the last request whose
+    // frameIndex is <= the presented index, or the first entry when the index
+    // precedes all of them. Returns false when no request has ever arrived.
+    bool SelectAuxiliaryComposition(std::int64_t frameIndex,
+        AuxCompositionRequest& out) const noexcept;
     void ResetCadenceSpread() noexcept;
     // Adaptive presentation pacing: engage or release the renderer's pace floor from
     // the late branch of PresentVideoFrame. Worker-thread-only; the floor itself is
@@ -637,6 +671,21 @@ private:
     bool audioResumePendingAfterVideoFrame_;
     std::deque<AVFrame*> videoFrameQueue_;
     std::vector<AVFrame*> videoFramePool_;
+    // --- Optional auxiliary video layer (see FFF3FP_SetAuxiliaryComposition) ---
+    // A second video stream decoded alongside the base layer and paired by PTS.
+    // Every member below is inert until the host asks for a composition with
+    // enabled != 0: a host that never calls the entry point pays nothing and the
+    // single-stream path is byte-for-byte what it was. The worker thread owns the
+    // decoder and both frame queues; auxMutex_ is the only hand-off for the
+    // parameter ring, which the API thread writes.
+    std::int32_t auxStream_ = -1;
+    AVCodecContext* auxDecoder_ = nullptr;
+    AVFrame* auxDecodeFrame_ = nullptr;
+    std::deque<std::pair<std::int64_t, AVFrame*>> auxFrameQueue_;  // aux-stream PTS -> owned frame
+    std::deque<AuxCompositionRequest> auxCompositionRing_;
+    mutable std::mutex auxMutex_;
+    std::atomic<bool> auxLayerRequested_{ false };
+    bool auxOpenAttempted_ = false;
     // --- Frame side-data ring (see CopyFrameSideDataAfter) ---
     // Written on the worker thread as frames are presented, read on the API
     // thread; sideDataMutex_ is the only synchronisation between them. Entries
