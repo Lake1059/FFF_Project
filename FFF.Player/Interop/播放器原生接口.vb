@@ -1086,6 +1086,65 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+    ' 可选辅层合成参数：内核 FFF3FP_SetAuxiliaryComposition。
+    '
+    ' ⚠ 同款动态解析：这是"同版本号（20）内的新增导出"，静态导入会让一个还不含它的
+    '   20 版内核在载入期抛 EntryPointNotFoundException。缺失时 支持辅层合成 = False，
+    '   调用方按"不请求合成"处理，其余通路逐位不变。
+    '
+    ' 结构必须与内核 FFF3FPAuxiliaryComposition 逐字段同宽同序：2×UInteger + Long +
+    '   3×UInteger + Integer = 32 字节。版本门是内核自己的 1（FFF3FP_AUXILIARY_COMPOSITION_VERSION），
+    '   不是 PlayerApiVersion —— 这一面按"同版本号内追加"演进，版本号归它自己所有。
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 原生辅层合成
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 帧序号 As Long
+        Public 是否启用 As UInteger
+        Public 残差中心 As UInteger
+        Public 残差移位 As Integer
+        Public 最大值 As UInteger
+    End Structure
+
+    Private Const 辅层合成版本 As UInteger = 1UI
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置辅层合成原型(播放器 As 播放器原生句柄,
+        ByRef 合成 As 原生辅层合成) As 原生播放器结果
+
+    Private ReadOnly 设置辅层合成函数 As 设置辅层合成原型 =
+        解析可选导出(Of 设置辅层合成原型)("FFF3FP_SetAuxiliaryComposition")
+
+    ''' <summary>当前内核是否支持辅层合成（旧内核返回 False）。
+    ''' 为 False 时宿主绝不请求合成，也绝不置"已预合成"标志。</summary>
+    Friend ReadOnly Property 支持辅层合成 As Boolean
+        Get
+            Return 设置辅层合成函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>把一帧的合成请求交给内核。参数由模块的合成面给出，宿主不解释。
+    ''' 内核按帧号取"最后一条 ≤ 当前帧"，并在该帧未能配到辅层时扣下 kind=3 表。</summary>
+    Friend Function 设置辅层合成(播放器 As 播放器原生句柄, 帧序号 As Long, 是否启用 As Boolean,
+        残差中心 As UInteger, 残差移位 As Integer, 最大值 As UInteger) As Boolean
+        Dim 函数 = 设置辅层合成函数
+        If 函数 Is Nothing Then Return False
+        Dim 请求 As New 原生辅层合成 With {
+            .大小 = CUInt(Marshal.SizeOf(Of 原生辅层合成)()),
+            .版本 = 辅层合成版本,
+            .帧序号 = 帧序号,
+            .是否启用 = If(是否启用, 1UI, 0UI),
+            .残差中心 = 残差中心,
+            .残差移位 = 残差移位,
+            .最大值 = 最大值
+        }
+        Try
+            Return 函数(播放器, 请求) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     ' 呈现策略（VRR / G-SYNC / FreeSync 低时延路径）：内核 FFF3FP_SetPresentConfig。
     '
     ' ⚠ 与视图旋转/VSR 同款，必须动态解析：同版本号内的新增导出，静态导入会让一个

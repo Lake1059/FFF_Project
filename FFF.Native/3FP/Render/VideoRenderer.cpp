@@ -585,6 +585,23 @@ cbuffer DynamicSettings : register(b2) {
     float4 TransformMatrix1;
     float4 TransformMatrix2;
 };
+// Optional auxiliary video layer (the second, generically selected stream).
+// Its own buffer for the same reason the ST 2094 block is separate: with
+// ElComposeEnabled == 0 every branch that consults it is the original path.
+//
+// The planes carry raw code values (R16_UINT), not normalised samples, so the
+// integer composition below is exact: base and residual are added in the coded
+// domain the caller's parameters describe, then handed to the colour path as a
+// normalised coded signal. Nothing here knows what the layer means.
+cbuffer ElComposition : register(b3) {
+    uint ElComposeEnabled;   // 0 = no auxiliary layer this frame
+    uint ElResidualCenter;   // neutral code of the auxiliary component
+    int  ElResidualShift;    // right shift applied to (auxiliary - centre)
+    uint ElMaxValue;         // (1 << base bit depth) - 1
+};
+Texture2D<uint> ElPlane0 : register(t5);
+Texture2D<uint> ElPlane1 : register(t6);
+Texture2D<uint> ElPlane2 : register(t7);
 Texture2D<float4> CurveLut : register(t3);
 // Kind-3 colour transform: 33^3 texels, each a float3, axes spanning the coded
 // [0,1] domain. Sampled through LinearSampler (clamped), so out-of-range coded
@@ -817,6 +834,41 @@ float4 SampleVideo(Texture2D<float4> sourceTexture,float2 uv) {
     }
     return SampleLanczos3(sourceTexture,uv,dimensions);
 }
+// Nearest code of one auxiliary plane at the base layer's sampling coordinate.
+// Each plane has its own size (4:2:0 chroma is half resolution), so the texel is
+// resolved against that plane's own dimensions rather than the source texture's.
+int ElSample(Texture2D<uint> plane,float2 uv) {
+    uint width,height;
+    plane.GetDimensions(width,height);
+    const int2 extent=int2(width,height);
+    const int2 texel=clamp(int2(floor(uv*float2(extent))),int2(0,0),extent-1);
+    return int(plane.Load(int3(texel,0)).r);
+}
+// Compose the auxiliary layer into coded components. The rounding matches the
+// reference composition exactly: round half away from zero after the shift, then
+// clamp to the base layer's code range. Luma and chroma are looked up at the
+// same coordinates the base layer samples them, so a chroma siting offset
+// applies to the residual's chroma exactly as it applies to the base. When no
+// layer is enabled the value is returned untouched, which is what keeps the
+// single-stream path identical.
+float3 ComposeEl(float2 lumaUv,float2 chromaUv,float3 coded) {
+    if(ElComposeEnabled==0) return coded;
+    const int3 baseCode=int3(round(coded*float(ElMaxValue)));
+    const int3 elCode=int3(ElSample(ElPlane0,lumaUv),ElSample(ElPlane1,chromaUv),
+        ElSample(ElPlane2,chromaUv));
+    const int3 residual=elCode-(int3)(int)ElResidualCenter;
+    // The reference composition rounds half away from zero when it shifts right
+    // and scales exactly when it shifts left; a zero shift keeps the residual.
+    int3 scaled=residual;
+    if(ElResidualShift>0){
+        const int divisor=1<<ElResidualShift;
+        scaled=residual>=0?(residual+divisor/2)/divisor:
+            -((-residual+divisor/2)/divisor);
+    } else if(ElResidualShift<0) {
+        scaled=residual<<(-ElResidualShift);
+    }
+    return float3(clamp(baseCode+scaled,(int3)0,(int3)(int)ElMaxValue))/float(ElMaxValue);
+}
 float3 ReadSource(float2 uv) {
     if(InputLayout==0||InputLayout==3){
         // Kind-3 domain 0: the table replaces the component->RGB conversion, so
@@ -831,6 +883,10 @@ float3 ReadSource(float2 uv) {
     float2 chroma=InputLayout==1
         ?float2(SampleVideo(ChromaU,chromaUv).r,SampleVideo(ChromaV,chromaUv).r)*SampleScale
         :SampleVideo(ChromaU,chromaUv).rg*SampleScale;
+    if(ElComposeEnabled!=0){
+        const float3 composed=ComposeEl(uv,chromaUv,float3(y,chroma));
+        y=composed.x; chroma=composed.yz;
+    }
     // Kind-3 domain 0: the table replaces the YUV->RGB matrix below, and its
     // input axes are the three CODED components (Y, Cb, Cr) in [0,1] -- the
     // published payload contract (FFF.Player.Api.h: "Input axes span the coded
@@ -862,6 +918,10 @@ float3 ReadSourceLinear(float2 uv) {
         ?float2(ChromaU.Sample(LinearSampler,chromaUv).r,
                 ChromaV.Sample(LinearSampler,chromaUv).r)*SampleScale
         :ChromaU.Sample(LinearSampler,chromaUv).rg*SampleScale;
+    if(ElComposeEnabled!=0){
+        const float3 composed=ComposeEl(uv,chromaUv,float3(y,chroma));
+        y=composed.x; chroma=composed.yz;
+    }
     if(TransformEnabled!=0&&TransformDomain==0)
         return TransformLut.SampleLevel(LinearSampler,float3(y,chroma),0);
     y=(y-YOffset)*YScale;
@@ -896,6 +956,10 @@ float3 ReadSourcePanorama(float2 uv) {
         ?float2(SamplePanorama(ChromaU,chromaUv).r,
                 SamplePanorama(ChromaV,chromaUv).r)*SampleScale
         :SamplePanorama(ChromaU,chromaUv).rg*SampleScale;
+    if(ElComposeEnabled!=0){
+        const float3 composed=ComposeEl(uv,chromaUv,float3(y,chroma));
+        y=composed.x; chroma=composed.yz;
+    }
     if(TransformEnabled!=0&&TransformDomain==0)
         return TransformLut.SampleLevel(LinearSampler,float3(y,chroma),0);
     y=(y-YOffset)*YScale;
@@ -3868,6 +3932,12 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
                 ReleaseCom(transformLutTexture_);
             }
         }
+        // Auxiliary-layer parameters. Optional like the two blocks above: a null
+        // buffer reads as zeros in the shader, which is exactly "no composition".
+        D3D11_BUFFER_DESC elBuffer = buffer;
+        elBuffer.ByteWidth = sizeof(ElCompositionSettings);
+        if (FAILED(device_->CreateBuffer(&elBuffer, nullptr, &elCompositionBuffer_)))
+            elCompositionBuffer_ = nullptr;
     }
     if (sourceTextures_[0] != nullptr && sourceExternal_ == externalSource &&
         sourceWidth_ == sourceWidth && sourceHeight_ == sourceHeight &&
@@ -4874,6 +4944,17 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     // With TransformEnabled == 0 the table is inert.
     if (transformLutView_ != nullptr)
         context_->PSSetShaderResources(4, 1, &transformLutView_);
+    // Auxiliary-layer composition at b3 / t5..t7. The planes are bound only while
+    // this frame actually composed them; an all-null set with ElComposeEnabled == 0
+    // is the single-stream path.
+    if (elCompositionBuffer_ != nullptr)
+        context_->PSSetConstantBuffers(3, 1, &elCompositionBuffer_);
+    ID3D11ShaderResourceView* elViews[] = {nullptr, nullptr, nullptr};
+    if (cachedElComposeEnabled_) {
+        for (std::size_t plane = 0; plane < ARRAYSIZE(elPlanes_); ++plane)
+            elViews[plane] = elPlanes_[plane].view;
+    }
+    context_->PSSetShaderResources(5, ARRAYSIZE(elViews), elViews);
     context_->Draw(3, 0);
     ID3D11ShaderResourceView* nullViews[] = {nullptr, nullptr, nullptr};
     context_->PSSetShaderResources(0, ARRAYSIZE(nullViews), nullViews);
@@ -4881,6 +4962,7 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     context_->PSSetShaderResources(3, 1, &nullCurve);
     ID3D11ShaderResourceView* nullTransformLut = nullptr;
     context_->PSSetShaderResources(4, 1, &nullTransformLut);
+    context_->PSSetShaderResources(5, ARRAYSIZE(nullViews), nullViews);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     return FFFResult::Success;
 }
@@ -6562,6 +6644,91 @@ bool PlayerVideoRenderer::BuildColorTransformSettings(const HdrFrameState& hdrSt
     return true;
 }
 
+// Optional auxiliary video layer. The three planes arrive as CPU 4:2:0 10-bit
+// samples from the software decoder and are uploaded as raw code values
+// (R16_UINT), so the integer composition in the shader neither re-quantises nor
+// normalises twice. An R16_UNORM texture would carry the same numbers divided by
+// 65535, which cannot represent every 10-bit code exactly through the float32
+// round trip.
+FFFResult PlayerVideoRenderer::PrepareElComposition(const AVFrame* frame,
+    const FFF3FPAuxiliaryComposition& composition,
+    ElCompositionSettings& settings) noexcept {
+    settings = ElCompositionSettings{};
+    if (frame == nullptr || context_ == nullptr || device_ == nullptr)
+        return FFFResult::InvalidState;
+    if (frame->format != AV_PIX_FMT_YUV420P10LE || frame->width <= 0 || frame->height <= 0)
+        return FFFResult::NotSupported;
+    // Both directions are part of the contract (the caller derives the shift
+    // from two bit depths), so only the sanity range is enforced here. A
+    // negative shift scales the residual up exactly, as the CPU reference does.
+    if (composition.residualShift < -8 || composition.residualShift > 8 ||
+        composition.residualCenter == 0 || composition.maxValue == 0)
+        return FFFResult::NotSupported;
+    const auto planeWidth = [frame](const int plane) noexcept {
+        return plane == 0 ? frame->width : (frame->width + 1) / 2;
+    };
+    const auto planeHeight = [frame](const int plane) noexcept {
+        return plane == 0 ? frame->height : (frame->height + 1) / 2;
+    };
+    for (int plane = 0; plane < 3; ++plane) {
+        const auto width = static_cast<std::uint32_t>(planeWidth(plane));
+        const auto height = static_cast<std::uint32_t>(planeHeight(plane));
+        if (frame->data[plane] == nullptr || frame->linesize[plane] < 0 ||
+            static_cast<std::uint32_t>(frame->linesize[plane]) < width * 2u)
+            return FFFResult::NotSupported;
+        auto& target = elPlanes_[plane];
+        if (target.texture == nullptr || target.width != width || target.height != height) {
+            ReleaseCom(target.view);
+            ReleaseCom(target.texture);
+            D3D11_TEXTURE2D_DESC description{};
+            description.Width = width;
+            description.Height = height;
+            description.MipLevels = description.ArraySize = 1;
+            description.Format = DXGI_FORMAT_R16_UINT;
+            description.SampleDesc.Count = 1;
+            description.Usage = D3D11_USAGE_DYNAMIC;
+            description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            description.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            if (FAILED(device_->CreateTexture2D(&description, nullptr, &target.texture)) ||
+                FAILED(device_->CreateShaderResourceView(target.texture, nullptr, &target.view))) {
+                ReleaseCom(target.view);
+                ReleaseCom(target.texture);
+                return FFFResult::DeviceFailure;
+            }
+            target.width = width;
+            target.height = height;
+        }
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(context_->Map(target.texture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+            SetError("Could not map the auxiliary-layer plane.");
+            return FFFResult::DeviceFailure;
+        }
+        const auto rowBytes = static_cast<std::size_t>(width) * 2u;
+        for (std::uint32_t row = 0; row < height; ++row)
+            std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
+                    static_cast<std::size_t>(row) * mapped.RowPitch,
+                frame->data[plane] + static_cast<std::ptrdiff_t>(row) * frame->linesize[plane],
+                rowBytes);
+        context_->Unmap(target.texture, 0);
+    }
+    settings.enabled = 1;
+    settings.residualCenter = composition.residualCenter;
+    settings.residualShift = composition.residualShift;
+    settings.maxValue = composition.maxValue;
+    return FFFResult::Success;
+}
+
+void PlayerVideoRenderer::ReleaseElCompositionResources() noexcept {
+    for (auto& plane : elPlanes_) {
+        ReleaseCom(plane.view);
+        ReleaseCom(plane.texture);
+        plane.width = plane.height = 0;
+    }
+    ReleaseCom(elCompositionBuffer_);
+    cachedElComposeEnabled_ = false;
+    cachedElTransformBlocked_ = false;
+}
+
 FFFResult PlayerVideoRenderer::SetInjectedHdrMetadata(
     const FFF3FPHdrDynamicMetadataEntry* entries, const std::uint32_t count) noexcept {
     const auto result = hdrProcessor_.SetInjectedMetadata(entries, count);
@@ -6665,6 +6832,14 @@ void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
     // Kind-3 rows are additive to whatever the ST 2094 gate decided: a transform
     // can drive the picture with or without a curve in force.
     (void)BuildColorTransformSettings(hdrState, dynamicSettings);
+    // A frame whose auxiliary layer could not be paired withheld the table, and a
+    // refresh of that same cached frame must not put it back: the pixels on the
+    // surface are the uncomposed base layer.
+    if (cachedElTransformBlocked_) {
+        dynamicSettings.transformEnabled = 0;
+        dynamicSettings.transformDomain = 0;
+        cachedTransformEnabled_ = false;
+    }
     // Uploaded unconditionally, exactly like the per-frame path: a stale table with
     // enabled == 0 must never survive into the next draw.
     if (dynamicConstants_ != nullptr) {
@@ -6686,7 +6861,9 @@ void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
 
 FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t frameIndex,
     const bool limitToNativeSize,
-    const bool coverArt, const bool prepareOnly, const bool imageMode) noexcept {
+    const bool coverArt, const bool prepareOnly, const bool imageMode,
+    const AVFrame* auxiliaryFrame,
+    const FFF3FPAuxiliaryComposition* auxiliaryComposition) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
     const auto hdrState = hdrProcessor_.ProcessFrame(
         frame, hdrPeakNits_, paperWhiteNits_, frameIndex);
@@ -7110,6 +7287,36 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // shader were ever changed to ignore the gate.
     if (!prepareOnly)
         (void)BuildColorTransformSettings(hdrState, dynamicSettings);
+    // Optional auxiliary layer. A request without a paired frame must NOT leave the
+    // kind-3 table running: the caller baked that table against composed samples,
+    // and sampling it on the bare base layer would map the wrong signal onto every
+    // pixel. Withholding the table for that one frame degrades to the plain base
+    // picture, which is the only honest option -- and it is what the caller's own
+    // "pre-applied" claim would otherwise make invisible.
+    const bool elRequested = auxiliaryComposition != nullptr && auxiliaryComposition->enabled != 0;
+    ElCompositionSettings elSettings{};
+    cachedElComposeEnabled_ = false;
+    if (elRequested && auxiliaryFrame != nullptr && directYuv && !floatRgb &&
+        PrepareElComposition(auxiliaryFrame, *auxiliaryComposition, elSettings) ==
+            FFFResult::Success)
+        cachedElComposeEnabled_ = true;
+    if (!cachedElComposeEnabled_) elSettings = ElCompositionSettings{};
+    cachedElTransformBlocked_ = elRequested && !cachedElComposeEnabled_;
+    if (cachedElTransformBlocked_) {
+        dynamicSettings.transformEnabled = 0;
+        dynamicSettings.transformDomain = 0;
+        cachedTransformEnabled_ = false;
+    }
+    // Diagnostic only, same shape as FFF_LADDER_TRACE / FFF_CADENCE_TRACE: the
+    // auxiliary layer's pairing is invisible in the picture when it silently
+    // does not happen, and "requested but not paired" is exactly the state that
+    // withholds the table. Silent unless the variable is set.
+    if (GetEnvironmentVariableW(L"FFF_EL_TRACE", nullptr, 0) != 0)
+        std::fprintf(stderr, "[el] frame=%lld request=%u paired=%u composed=%u\n",
+            static_cast<long long>(frameIndex), elRequested ? 1u : 0u,
+            auxiliaryFrame != nullptr ? 1u : 0u, cachedElComposeEnabled_ ? 1u : 0u);
+    if (elCompositionBuffer_ != nullptr)
+        context_->UpdateSubresource(elCompositionBuffer_, 0, nullptr, &elSettings, 0, 0);
     if (dynamicConstants_ != nullptr) {
         context_->UpdateSubresource(dynamicConstants_, 0, nullptr, &dynamicSettings, 0, 0);
         if (dynamicCurveTexture_ != nullptr) {
@@ -8491,6 +8698,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseCom(transformLutView_);
     ReleaseCom(transformLutTexture_);
     transformLutBuilt_ = false;
+    ReleaseElCompositionResources();
     // The resident-table pointer must not survive the texture: a recreated device
     // gets a fresh texture, and a matching pointer would skip the upload.
     uploadedTransform_ = nullptr;

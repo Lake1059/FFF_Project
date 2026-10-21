@@ -444,6 +444,16 @@ FFFResult FFF3FP_CopyStreamSideData(const FFF3FPHandle player,
     return result;
 }
 
+// Optional auxiliary video layer. Additive like the entry points above, so
+// PlayerApiVersion is unchanged and a host that never resolves it keeps
+// loading this DLL unchanged.
+FFFResult FFF3FP_SetAuxiliaryComposition(const FFF3FPHandle player,
+    const FFF3FPAuxiliaryComposition* composition) noexcept {
+    if (player == nullptr || composition == nullptr)
+        return FFFResult::InvalidArgument;
+    return static_cast<PlayerSession*>(player)->SetAuxiliaryComposition(*composition);
+}
+
 // External bed render plug. Appended after the v20 surface like the readback, VSR,
 // rotation and side-data entries before it: additive entry points, so
 // PlayerApiVersion stays at 20 and a host that never resolves these two keeps

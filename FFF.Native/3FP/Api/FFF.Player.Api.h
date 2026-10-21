@@ -1730,3 +1730,60 @@ FFF3FP_API FFFResult FFF3FP_CopyFrameSideDataAfter(FFF3FPHandle player,
 FFF3FP_API FFFResult FFF3FP_CopyStreamSideData(FFF3FPHandle player,
     std::uint32_t sideDataType, void* buffer, std::uint32_t capacity,
     std::uint32_t* writtenSize) noexcept;
+
+// --- Optional auxiliary video layer for module-driven composition -----------
+//
+// Appended after the side-data surface in the same additive style:
+// PlayerApiVersion is unchanged, hosts resolve this dynamically and degrade to
+// exactly today's behaviour when it is absent.
+//
+// What it is. Some sources carry a second video stream meant to be combined
+// with the base layer sample-by-sample before colour processing. This entry
+// point lets the host (which owns the out-of-tree module that understands the
+// format) ask for that combination without teaching the kernel anything about
+// the format: the request carries plain integers -- a residual centre, a right
+// shift and a maximum code value -- and the kernel applies
+//   combined = clamp(base + roundHalfAwayFromZero((aux - centre) / 2^shift),
+//                    0, max)
+// to the coded samples before the kind-3 table is sampled. The module derives
+// those numbers; the kernel only does generic integer arithmetic.
+//
+// Component order. v1 composes (luma, chroma U, chroma V) into the source's
+// three coded lanes in that order -- the planar and semi-planar layouts, where
+// that is the only sensible pairing. An RGB source has no such lanes, so a
+// request against one is treated as unpaired (see below) rather than guessed.
+//
+// When it is off. No request has ever carried enabled != 0 => the second
+// stream is never opened, no packet is routed to it, and every existing path
+// is byte-for-byte what it was. A request with enabled == 0 is recorded and
+// means "do not compose this frame"; the table is still applied as usual.
+//
+// Pairing. The kernel decodes the second stream in software, pairs its frames
+// with the base frame whose PTS is closest (within one base-frame period), and
+// applies the request selected by the same rule the kind-3 table uses: the
+// last request whose frameIndex <= the presented index, or the first entry
+// when the index precedes all of them. If a request says enabled but no
+// auxiliary frame is available for that index, the kernel does NOT apply the
+// colour table for that frame: the table may have been baked on the promise
+// that the samples were combined, so base-only output is the safe fallback.
+//
+// Lifecycle. Requests are bounded (the last 256 are kept). Seek, track switch
+// and close flush or free the auxiliary decoder together with the base
+// pipeline; the host simply sends the next request after playback resumes.
+struct FFF3FPAuxiliaryComposition {
+    std::uint32_t size;             // sizeof(FFF3FPAuxiliaryComposition)
+    std::uint32_t version;          // FFF3FP_AUXILIARY_COMPOSITION_VERSION
+    std::int64_t frameIndex;        // presentation index the request belongs to
+    std::uint32_t enabled;          // 0 = skip this frame, nonzero = compose
+    std::uint32_t residualCenter;   // sample value that means "no residual"
+    std::int32_t residualShift;     // >0 shifts right (with rounding), <0 scales up
+    std::uint32_t maxValue;         // clamp ceiling in base-layer code units
+};
+#define FFF3FP_AUXILIARY_COMPOSITION_VERSION 1u
+// The host mirrors this struct in managed code; a silent size drift is the one
+// failure both sides would otherwise accept.
+static_assert(sizeof(FFF3FPAuxiliaryComposition) == 32,
+    "FFF3FPAuxiliaryComposition is mirrored by the managed host and must stay 32 bytes");
+
+FFF3FP_API FFFResult FFF3FP_SetAuxiliaryComposition(FFF3FPHandle player,
+    const FFF3FPAuxiliaryComposition* composition) noexcept;
