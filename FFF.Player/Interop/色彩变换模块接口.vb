@@ -65,6 +65,13 @@ Friend Module 色彩变换模块接口
     ''' 未授权时模块拒交这张表 ⇒ 内核继续走它自己的矩阵折叠，症状与"模块不在盘上"同形。</summary>
     Friend Const 音频能力表入口名 As String = "FFF_GetAudioRenderApi"
 
+    ''' <summary>可选合成面的导出名：只交逐帧参数，不交任何像素代码。
+    ''' 旧模块没有这个导出 ⇒ 宿主不请求合成，整条通路与今天逐位一致。</summary>
+    Friend Const 合成能力表入口名 As String = "FFF_GetElCompositionApi"
+
+    ''' <summary>可选合成面的版本门（模块 FFFElCompositionVersion）。</summary>
+    Friend Const 合成表版本 As UInteger = 1UI
+
     ''' <summary>音频函数表版本门，与内核 FFF3FP_AUDIO_PLUG_VERSION 同水；数值漂移即握手失败。</summary>
     Friend Const 音频表版本 As UInteger = 1UI
 
@@ -85,9 +92,12 @@ Friend Module 色彩变换模块接口
     Friend Const 输入结构大小 As UInteger = 56UI
 
     ''' <summary>输入标志：宿主已把增强层残差合成进基底层采样。
-    ''' <para>当前宿主还没有 EL 解码/合成通路，所以置 0；等宿主真正合成后再置这一位。
+    ''' <para>置位条件只有一个：<see cref="色彩变换模块实例.分析增强层"/> 对**同一帧**返回了
+    ''' <see cref="原生合成参数.是否启用"/> 非零，宿主随即将同一组参数交给内核
+    ''' （FFF3FP_SetAuxiliaryComposition）；内核在没能配到辅帧的那一帧会**扣下** kind=3 表，
+    ''' 于是置位永远不会让表落在未合成的画面上。旧模块/旧内核没有这条通路 ⇒ 恒 0。</para>
     ''' 48 B 旧布局没有这个字段，模块按 0 处理；56 B 布局里模块只认这一位，
-    ''' 其余位或非零保留字会被拒（<see cref="结果参数无效"/>）。</para></summary>
+    ''' 其余位或非零保留字会被拒（<see cref="结果参数无效"/>）。</summary>
     Friend Const 输入标志增强层已预合成 As UInteger = 1UI
 
     ''' <summary>analyzeFrame 返回码（FFFColorTransformResult）。</summary>
@@ -238,7 +248,7 @@ Friend Module 色彩变换模块接口
     ''' <summary>一帧的输入（56 B 扩展布局：头 + 两个借用通道 + 演示帧号 + 合同字）。
     ''' 帧号模块不读也不抄进载荷——"取最后一条 ≤ 当前帧"的匹配是宿主的职责。
     ''' 48 B 旧模块会忽略末尾的 <see cref="标志"/>/<see cref="保留"/>；当前模块只认
-    ''' <see cref="输入标志增强层已预合成"/>，宿主尚未置位。</summary>
+    ''' <see cref="输入标志增强层已预合成"/>，由泵按合成面的同帧分析结果置位。</summary>
     <StructLayout(LayoutKind.Sequential)>
     Friend Structure 色彩变换输入
         Public 大小 As UInteger
@@ -263,6 +273,53 @@ Friend Module 色彩变换模块接口
         Public 载荷容量 As UInteger
         Public 保留 As UInteger
     End Structure
+
+    ''' <summary>可选合成面的逐帧参数（32 B，与模块 FFFElCompositionParams 同宽同序）。
+    ''' 宿主只把它原样转交给内核 FFF3FP_SetAuxiliaryComposition，自己不解释任何字段。</summary>
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 原生合成参数
+        Public 是否启用 As UInteger
+        Public 是否禁用残差 As UInteger
+        Public 基底层位深 As UInteger
+        Public 增强层位深 As UInteger
+        Public 视频位深 As UInteger
+        Public 残差中心 As UInteger
+        Public 残差移位 As Integer
+        Public 最大值 As UInteger
+    End Structure
+
+    ''' <summary>合成面输入（40 B）：与色彩变换输入同一份借用通道，没有标志字。</summary>
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 原生合成输入
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 元数据 As IntPtr
+        Public 元数据大小 As ULong
+        Public 配置记录 As IntPtr
+        Public 配置记录大小 As ULong
+    End Structure
+
+    ''' <summary>合成面输出（40 B）：头 + 参数，没有缓冲区。</summary>
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 原生合成输出
+        Public 大小 As UInteger
+        Public 保留 As UInteger
+        Public 参数 As 原生合成参数
+    End Structure
+
+    ''' <summary>合成面函数表（16 B，与模块 FFFElCompositionApi 同布局）。</summary>
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 合成能力表
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 分析 As IntPtr
+    End Structure
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Function 取合成表原型(版本 As UInteger, 表地址 As IntPtr) As Integer
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Function 合成分析原型(输入地址 As IntPtr, 输出地址 As IntPtr) As Integer
 
     ' ---- 搜索目录：三个入口必须同一份口径，否则"探测说在、解锁说够不到"自相矛盾 ----
 
@@ -519,6 +576,32 @@ Friend Module 色彩变换模块接口
                 布局版本 = 版本函数()
             End If
 
+            ' 可选合成面：导出缺席、版本不符、未授权或表不合格，都只让这条通路缺席，
+            ' 不影响已经成功的主握手。少一面 = 不请求合成 = 与今天逐位一致。
+            Dim 合成分析地址 As IntPtr = IntPtr.Zero
+            Dim 合成入口 = 解析导出(句柄, 合成能力表入口名)
+            If 合成入口 <> IntPtr.Zero Then
+                Try
+                    Dim 取合成表 = CType(Marshal.GetDelegateForFunctionPointer(合成入口, GetType(取合成表原型)), 取合成表原型)
+                    Dim 合成表 As New 合成能力表 With {.大小 = CUInt(Marshal.SizeOf(Of 合成能力表)()), .版本 = 0UI}
+                    Dim 合成表句柄 = GCHandle.Alloc(合成表, GCHandleType.Pinned)
+                    Dim 合成返回 As Integer
+                    Try
+                        合成返回 = 取合成表(合成表版本, 合成表句柄.AddrOfPinnedObject())
+                        合成表 = CType(Marshal.PtrToStructure(合成表句柄.AddrOfPinnedObject(), GetType(合成能力表)), 合成能力表)
+                    Finally
+                        合成表句柄.Free()
+                    End Try
+                    If 合成返回 = 0 AndAlso 合成表.版本 = 合成表版本 AndAlso
+                       合成表.大小 >= CUInt(Marshal.SizeOf(Of 合成能力表)()) AndAlso
+                       合成表.分析 <> IntPtr.Zero Then
+                        合成分析地址 = 合成表.分析
+                    End If
+                Catch ex As Exception
+                    ' 合成面坏掉只是"没有这条通路"：主表已就绪，按不请求合成继续。
+                End Try
+            End If
+
             Dim 载荷缓冲区 = New Byte(CInt(载荷容量) - 1) {}
             载荷句柄 = GCHandle.Alloc(载荷缓冲区, GCHandleType.Pinned)
             ' 分类文本裸导出：缺了（旧模块）只是"没有内容可显示"，不影响换算本身。
@@ -526,7 +609,7 @@ Friend Module 色彩变换模块接口
             ' 床渲染函数表的导出地址：旧模块没有它只是"没有这条通路"，不影响色彩侧装载。
             Dim 音频表地址 = 解析导出(句柄, 音频能力表入口名)
             Dim 实例 As New 色彩变换模块实例(句柄, 表, 载荷缓冲区, 载荷句柄, 内容文本地址,
-                                          音频表地址) With {.布局版本 = 布局版本}
+                                          音频表地址, 合成分析地址) With {.布局版本 = 布局版本}
             ' 装载成功：模块句柄的所有权已移交给实例（Dispose 时释放），别再走 Finally 的释放。
             句柄 = IntPtr.Zero
             载荷句柄 = Nothing
@@ -579,8 +662,10 @@ Friend Class 色彩变换模块实例
     Private ReadOnly _载荷句柄 As GCHandle
     ' 分类文本裸导出的地址（模块函数表之外；装载时解析一次）。
     Private ReadOnly _内容文本地址 As IntPtr
-    ' 外部床渲染函数表裸导出的地址（装载时解析一次）。0 = 盘上是还没有这一面的旧模块。
+    ' 外部床渲染函数表裸导出的地址（装载时解析一次）——0 = 盘上是还没有这一面的旧模块。
     Private ReadOnly _音频表入口地址 As IntPtr
+    ' 可选合成面的分析入口（装载时解析一次）。0 = 旧模块/未授权/表不合格 ⇒ 不请求合成。
+    Private ReadOnly _合成分析地址 As IntPtr
     ' 表一旦交给内核就必须留着模块：内核持有的是指向本模块代码段的裸函数指针与它自己
     ' 分配的 context，FreeLibrary 之后下一次渲染调用就是踩空。所以交出成功后 Dispose
     ' 跳过卸载（代价是这一份映射陪进程到结束，与"功能可用"相比是可接受的）。
@@ -592,14 +677,23 @@ Friend Class 色彩变换模块实例
     Private _已释放 As Boolean
 
     Friend Sub New(模块 As IntPtr, 表 As 色彩变换能力表, 载荷缓冲区 As Byte(), 载荷句柄 As GCHandle,
-                   内容文本地址 As IntPtr, 音频表入口地址 As IntPtr)
+                   内容文本地址 As IntPtr, 音频表入口地址 As IntPtr, 合成分析地址 As IntPtr)
         _模块 = 模块
         _表 = 表
         _载荷缓冲区 = 载荷缓冲区
         _载荷句柄 = 载荷句柄
         _内容文本地址 = 内容文本地址
         _音频表入口地址 = 音频表入口地址
+        _合成分析地址 = 合成分析地址
     End Sub
+
+    ''' <summary>模块提供了可选合成面（它解释自己的逐帧参数；像素合成仍由内核完成）。
+    ''' 缺席时宿主不请求合成，整条通路与今天逐位一致。</summary>
+    Public ReadOnly Property 支持增强层合成 As Boolean
+        Get
+            Return _合成分析地址 <> IntPtr.Zero
+        End Get
+    End Property
 
     ''' <summary>模块自报的载荷布局版本（仅日志归因用）。</summary>
     Public Property 布局版本 As UInteger
@@ -624,9 +718,11 @@ Friend Class 色彩变换模块实例
 
     ''' <summary>换算一帧的帧边数据。借用输入仅本次调用有效；输出写内部钉住的载荷缓冲区。
     ''' <paramref name="配置记录"/> 是当前流的容器码流配置记录（流级常量；没有就传 Nothing）。
+    ''' <paramref name="标志"/> 只应由模块自己的合成分析结果决定（见 <see cref="分析增强层"/>）。
     ''' 返回 <see cref="结果无元数据"/> 表示本帧无可换算据（正常跳过，不是错误）。</summary>
     Public Function 分析帧(边数据 As Byte(), 帧序号 As Long, 配置记录 As Byte(),
-                          <Out> ByRef 载荷大小 As Integer) As Integer
+                          <Out> ByRef 载荷大小 As Integer,
+                          Optional 标志 As UInteger = 0UI) As Integer
         载荷大小 = 0
         Dim 边数据句柄 As GCHandle = Nothing
         Dim 配置记录句柄 As GCHandle = Nothing
@@ -645,7 +741,7 @@ Friend Class 色彩变换模块实例
                 .帧序号 = CULng(帧序号),
                 .配置记录 = IntPtr.Zero,
                 .配置记录大小 = 0UI,
-                .标志 = 0UI,
+                .标志 = 标志,
                 .保留 = 0UI
             }
             If 边数据 IsNot Nothing AndAlso 边数据.Length > 0 Then
@@ -678,6 +774,66 @@ Friend Class 色彩变换模块实例
                 If 返回 = 结果成功 AndAlso 输出.载荷大小 > 0UI Then
                     载荷大小 = CInt(输出.载荷大小)
                 End If
+                Return 返回
+            Finally
+                输入结构句柄.Free()
+                输出结构句柄.Free()
+            End Try
+        Catch ex As Exception
+            Return 结果参数无效
+        Finally
+            If 边数据句柄.IsAllocated Then 边数据句柄.Free()
+            If 配置记录句柄.IsAllocated Then 配置记录句柄.Free()
+        End Try
+    End Function
+
+    ''' <summary>可选合成面：让模块从同一份帧边数据算出"这一帧要不要合成、按什么参数合成"。
+    ''' 宿主把参数原样转交内核，自己不解释任何字段（红线 B）。
+    ''' <para>返回 <see cref="结果成功"/> 且 <see cref="原生合成参数.是否启用"/> 非零时，宿主才
+    ''' 在 <see cref="分析帧"/> 的输入里置 <see cref="输入标志增强层已预合成"/>。模块缺席这一面时
+    ''' 返回 <see cref="结果不支持"/>，调用方按"不合成、不置标志"处理。</para></summary>
+    Public Function 分析增强层(边数据 As Byte(), 帧序号 As Long, 配置记录 As Byte(),
+                              <Out> ByRef 参数 As 原生合成参数) As Integer
+        ' 帧号本面不消费（内核按自己的呈现序号配对），保留形参让两侧调用形状一致。
+        参数 = New 原生合成参数()
+        If _合成分析地址 = IntPtr.Zero Then Return 结果不支持
+        Dim 边数据句柄 As GCHandle = Nothing
+        Dim 配置记录句柄 As GCHandle = Nothing
+        Dim 输入结构句柄 As GCHandle = Nothing
+        Dim 输出结构句柄 As GCHandle = Nothing
+        Try
+            SyncLock _锁
+                If _已释放 Then Return 结果未授权
+            End SyncLock
+            Dim 输入 As New 原生合成输入 With {
+                .大小 = CUInt(Marshal.SizeOf(Of 原生合成输入)()),
+                .版本 = 合成表版本,
+                .元数据 = IntPtr.Zero,
+                .元数据大小 = 0UL,
+                .配置记录 = IntPtr.Zero,
+                .配置记录大小 = 0UL
+            }
+            If 边数据 IsNot Nothing AndAlso 边数据.Length > 0 Then
+                边数据句柄 = GCHandle.Alloc(边数据, GCHandleType.Pinned)
+                输入.元数据 = 边数据句柄.AddrOfPinnedObject()
+                输入.元数据大小 = CULng(边数据.Length)
+            End If
+            If 配置记录 IsNot Nothing AndAlso 配置记录.Length > 0 Then
+                配置记录句柄 = GCHandle.Alloc(配置记录, GCHandleType.Pinned)
+                输入.配置记录 = 配置记录句柄.AddrOfPinnedObject()
+                输入.配置记录大小 = CULng(配置记录.Length)
+            End If
+            Dim 输出 As New 原生合成输出 With {
+                .大小 = CUInt(Marshal.SizeOf(Of 原生合成输出)()),
+                .保留 = 0UI
+            }
+            输入结构句柄 = GCHandle.Alloc(输入, GCHandleType.Pinned)
+            输出结构句柄 = GCHandle.Alloc(输出, GCHandleType.Pinned)
+            Try
+                Dim 分析函数 = CType(Marshal.GetDelegateForFunctionPointer(_合成分析地址, GetType(合成分析原型)), 合成分析原型)
+                Dim 返回 = 分析函数(输入结构句柄.AddrOfPinnedObject(), 输出结构句柄.AddrOfPinnedObject())
+                输出 = CType(Marshal.PtrToStructure(输出结构句柄.AddrOfPinnedObject(), GetType(原生合成输出)), 原生合成输出)
+                If 返回 = 结果成功 Then 参数 = 输出.参数
                 Return 返回
             Finally
                 输入结构句柄.Free()
