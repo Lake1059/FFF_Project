@@ -19,6 +19,16 @@ Friend Module Program
                     StringComparison.OrdinalIgnoreCase) Then
                 Return DanmakuReanchorRegression.运行(args.Skip(1).ToArray())
             End If
+            ' 弹幕高压力探针：量宿主每拍生成成本能否进 16 ms 泵预算（见该文件头）。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--danmaku-stress",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return DanmakuStressProbe.运行(args.Skip(1).ToArray())
+            End If
+            ' 弹幕节拍实机探针：真会话放 24fps 片，采样节律 帧率上限（两臂对照见文件头）。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--danmaku-pacing-live",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return DanmakuPacingLive.运行(args.Skip(1).ToArray())
+            End If
             If args.Length > 0 AndAlso String.Equals(args(0), "--image-zoom-regression",
                     StringComparison.OrdinalIgnoreCase) Then
                 Return ImageZoomRegression.运行(args.Skip(1).ToArray())
@@ -65,6 +75,17 @@ Friend Module Program
                     StringComparison.OrdinalIgnoreCase) Then
                 Return PlaybackPlacementRegression.运行(args.Skip(1).ToArray())
             End If
+            ' kind=3 实机像素回读：真渲染着色链 + 离屏帧回读，量画面均值/绿主导，
+            ' 判"画面到底长什么样"而不是"注入了几帧"（见该文件头）。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--ct-frame-readback",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return ColorTransformFrameReadback.运行(args.Skip(1).ToArray())
+            End If
+            ' 色彩档位：HDR 源显式 SDR 档保持 + SDR 位深抬升（见该文件头）。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--color-tier-regression",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return ColorTierRegression.运行(args.Skip(1).ToArray())
+            End If
             ' ⚠ 认不出的旗标**必须判红**，不许再往下兜底（这就是本文件最后一处落笔的牙）。
             ' 为什么：出货树那份 Program.vb（5713 行注册表，含 --static-image-open-regression）里有
             ' 23 个 --*-regression 旗标，而本树只实现 --lyrics-kit-regression 一个。此前任何未知旗标
@@ -81,7 +102,7 @@ Friend Module Program
             ' 测试，只把"缺席"做成可见。
             If args.Length > 0 Then
                 Console.WriteLine($"入口未实现：{args(0)} —— 本树（上游 PR 工作区 3fp/kernel）没有这个入口，本次未运行任何回归。")
-                Console.WriteLine("本树已实现的入口：--lyrics-kit-regression [kit目录] | --danmaku-reanchor-regression [xml] [outdir] | --truehdr-runtime-regression | --image-zoom-regression [参数] | --image-zoom-live [参数] | --stream-selection-regression [样本目录]")
+                Console.WriteLine("本树已实现的入口：--lyrics-kit-regression [kit目录] | --danmaku-reanchor-regression [xml] [outdir] | --danmaku-stress [outdir] | --danmaku-pacing-live [夹具] [秒] [manual|real|switch] [offscreen|visible|60hz] [B夹具] | --ct-frame-readback <夹具> [秒] [输出目录] | --color-tier-regression [HDR10夹具] [8bit SDR夹具] [10bit SDR夹具] | --truehdr-runtime-regression | --image-zoom-regression [参数] | --image-zoom-live [参数] | --stream-selection-regression [样本目录]")
                 Console.Error.WriteLine($"UNIMPLEMENTED IN THIS TREE: {args(0)} => exit 3 (no regression was run)")
                 Return 3
             End If
