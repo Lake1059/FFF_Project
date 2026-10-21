@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "3FP/Core/AvifIlocShim.h"
 #include "3FP/Core/MediaText.h"
 #include "3FP/Core/PlayerSession.h"
 
@@ -145,6 +146,11 @@ constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
 constexpr std::size_t MaximumCachedSideDataBlobBytes = 16 * 1024;
 constexpr std::size_t MaximumSideDataRingFrames = 120;        // ~2 s at 60 fps
 constexpr std::size_t MaximumSideDataRingBytes = 1024 * 1024; // hard stop
+// Optional auxiliary video layer. The frame queue only needs to cover decoder
+// reorder plus PTS jitter between the two tracks; the request ring mirrors the
+// side-data ring's horizon so a host polling at the same rate cannot outrun it.
+constexpr std::size_t MaximumAuxiliaryQueuedFrames = 12;
+constexpr std::size_t MaximumAuxiliaryCompositionRequests = 256;
 // Stream-level side-data cache (CopyStreamSideData). A container configuration
 // record is a one-shot, stream-level constant, so the bounds are much smaller
 // than the ring's: there is nothing per-frame to accumulate, just the handful
@@ -384,6 +390,65 @@ AVPixelFormat SelectHardwareFormat(AVCodecContext* context, const AVPixelFormat*
     return AV_PIX_FMT_NONE;
 }
 
+// The predictive D3D11 capability probe is OFF by default. It asks the driver
+// whether a decoder configuration exists, which is exact for what it asks, but it
+// is a prediction about one backend only and the authoritative answer is the trial
+// decode (see HardwareDecoderProducesFrame). Keep it behind a flag for A/B work.
+bool HardwareCapabilityProbeEnabled() noexcept {
+    wchar_t value[8]{};
+    if (GetEnvironmentVariableW(L"FFF3FP_HWCAP_PROBE", value, 8) == 0) return false;
+    return value[0] == L'1' && value[1] == L'\0';
+}
+
+// The trial decode is the gate, so it is on by default. FFF3FP_HWCAP_TRIAL=0
+// restores "open the decoder and hope", which is what an A/B measurement needs.
+bool HardwareTrialDecodeEnabled() noexcept {
+    wchar_t value[8]{};
+    if (GetEnvironmentVariableW(L"FFF3FP_HWCAP_TRIAL", value, 8) == 0) return true;
+    return !(value[0] == L'0' && value[1] == L'\0');
+}
+
+bool HardwareCapabilityTrace() noexcept {
+    return GetEnvironmentVariableW(L"FFF3FP_HWCAP_TRACE", nullptr, 0) != 0;
+}
+
+// Remembering a refused hardware route skips the second attempt. On by default
+// because the memory only covers answers the GPU itself gave; FFF3FP_HWCAP_MEMORY=0
+// restores "ask again every time" for A/B work.
+bool HardwareRouteMemoryEnabled() noexcept {
+    wchar_t value[8]{};
+    if (GetEnvironmentVariableW(L"FFF3FP_HWCAP_MEMORY", value, 8) == 0) return true;
+    return !(value[0] == L'0' && value[1] == L'\0');
+}
+
+// Stills ask D3D11VA first because its surfaces are sampled as-is; this decides
+// whether CUDA joins the list as a refusal fallback. Default on: the measured cost of
+// the CUDA route for a still (a frame transfer, and not bit-exact -- see
+// OpenHardwareVideoDecoder) is only paid after D3D11VA has already refused, when the
+// alternative is the CPU decoder. FFF3FP_HWCAP_STILL_CUDA=0 restores the D3D11VA-only
+// list for A/B work.
+bool StillCudaFallbackEnabled() noexcept {
+    wchar_t value[8]{};
+    if (GetEnvironmentVariableW(L"FFF3FP_HWCAP_STILL_CUDA", value, 8) == 0) return true;
+    return !(value[0] == L'0' && value[1] == L'\0');
+}
+
+// What the hardware route is capable of depends on the codec, the profile, the pixel
+// format and the frame size, and on nothing else in the stream description. Two files
+// that agree on those four agree on the answer, which is what makes a key out of them
+// safe to reuse.
+std::uint64_t HardwareRouteKey(const AVCodecParameters* parameters) noexcept {
+    if (parameters == nullptr) return 0;
+    const auto mix = [](const std::uint64_t value, const std::uint64_t seed) noexcept {
+        return seed ^ (value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2));
+    };
+    auto key = mix(static_cast<std::uint32_t>(parameters->codec_id), 0ull);
+    key = mix(static_cast<std::uint32_t>(parameters->profile), key);
+    key = mix(static_cast<std::uint32_t>(parameters->format), key);
+    key = mix(static_cast<std::uint32_t>(parameters->width), key);
+    return mix(static_cast<std::uint32_t>(parameters->height), key);
+}
+
 AVPixelFormat FindHardwareFormat(const AVCodec* codec, const AVHWDeviceType deviceType) noexcept {
     if (codec == nullptr) return AV_PIX_FMT_NONE;
     const auto expectedFormat = deviceType == AV_HWDEVICE_TYPE_D3D11VA
@@ -478,6 +543,32 @@ bool IsStillImage(const AVFormatContext* format, const std::int32_t streamIndex)
 
 // A still image must fit a single D3D11 texture (maximum side: 16384).
 constexpr std::int32_t MaxStillImageDimension = 16384;
+
+// Only a still-image container can carry a layered item, and only those files are
+// read whole on the way to the demuxer: everything else keeps its file-backed
+// input. 256 MiB is far above any still image that reaches here.
+constexpr std::int64_t MaxRepairedStillImageBytes = 256 * 1024 * 1024;
+
+// Cheap gate in front of AvifIlocShim, so no other media pays for the read.
+bool IsStillImageContainerName(const std::string& path) noexcept {
+    // Compared against the extension without its dot.
+    static const std::string_view kNames[] = {"avif", "avifs", "heic", "heif", "heics", "heifs"};
+    const auto dot = path.find_last_of('.');
+    if (dot == std::string::npos || dot + 1 >= path.size()) return false;
+    const std::string_view extension(path.data() + dot + 1, path.size() - dot - 1);
+    for (const auto name : kNames) {
+        if (extension.size() != name.size()) continue;
+        bool match = true;
+        for (std::size_t index = 0; index < name.size(); ++index) {
+            const auto character = extension[index];
+            const auto lower = character >= 'A' && character <= 'Z'
+                ? static_cast<char>(character - 'A' + 'a') : character;
+            if (lower != name[index]) { match = false; break; }
+        }
+        if (match) return true;
+    }
+    return false;
+}
 
 std::int64_t EstimateDuration100ns(const AVFormatContext* format) noexcept {
     if (format == nullptr) return 0;
@@ -628,6 +719,24 @@ std::int32_t FindDefaultOrFirstStream(AVFormatContext* format, AVMediaType type)
     return first;
 }
 
+// The first video stream that is not the base layer: cover art is skipped the
+// same way FindDefaultOrFirstStream skips it. Only consulted when the host has
+// asked for an auxiliary composition, so a file with several video tracks pays
+// nothing until then.
+std::int32_t FindAuxiliaryVideoStream(AVFormatContext* format,
+    const std::int32_t primary) noexcept {
+    if (format == nullptr) return -1;
+    for (unsigned index = 0; index < format->nb_streams; ++index) {
+        if (static_cast<std::int32_t>(index) == primary) continue;
+        const auto* stream = format->streams[index];
+        if (stream == nullptr || stream->codecpar == nullptr) continue;
+        if (stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) continue;
+        if ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0) continue;
+        return static_cast<std::int32_t>(index);
+    }
+    return -1;
+}
+
 // AVIF/HEIC sequences may put a still item first. Select a later animated track
 // only when the mov-family container and frame counts make that unambiguous.
 std::int32_t FindAnimatedImageStream(AVFormatContext* format) noexcept {
@@ -689,8 +798,15 @@ std::string HardwareAccelerationName(const AVCodecContext* decoder) {
 }
 }
 
+// "No preference" is answered, not refused: the GPU is the default route and the
+// CPU is what a refusal falls back to. Every decision downstream reads decodeMode_,
+// so normalizing once here keeps the rest of the session a two-valued question
+// (D3D11 or Cpu) and has the snapshot report the route that is actually attempted.
 PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
-    : decodeMode_(configuration.decodeMode), callback_(configuration.eventCallback),
+    : decodeMode_(configuration.decodeMode == FFF3FPDecodeMode::Unspecified
+              ? FFF3FPDecodeMode::Gpu
+              : configuration.decodeMode),
+      callback_(configuration.eventCallback),
       callbackContext_(configuration.eventCallbackContext), terminate_(false), format_(nullptr),
       playbackPacket_(nullptr), stillImagePacket_(nullptr), externalAudioPacket_(nullptr), videoDecodeFrame_(nullptr),
       videoTransferFrame_(nullptr), audioDecodeFrame_(nullptr), externalAudioDecodeFrame_(nullptr),
@@ -714,11 +830,12 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       draining_(false), demuxEnded_(false), audioDecoderDrained_(false),
       externalAudioDrained_(false), audioClockFinished_(false),
       staticImage_(false), animatedImage_(false), sessionWrapLoop_(false), sessionWrapFailures_(0),
+      tileGrid_(false), tileGridWidth_(0), tileGridHeight_(0), tileGridBackground_{},
       hardwareFallbackPending_(false), internalAudioFailurePending_(false),
       internalAudioFailureResult_(FFFResult::Success), internalAudioDecodeErrorCount_(0) {
     snapshot_ = {};
     snapshot_.size = sizeof(snapshot_); snapshot_.version = 20; snapshot_.state = FFF3FPState::Idle;
-    snapshot_.decodeMode = configuration.decodeMode; snapshot_.requestedColorMode = configuration.colorMode;
+    snapshot_.decodeMode = decodeMode_; snapshot_.requestedColorMode = configuration.colorMode;
     snapshot_.actualColorMode = FFF3FPColorMode::MapToSdr; snapshot_.frameIndex = -1;
     snapshot_.framePts = AV_NOPTS_VALUE; snapshot_.selectedVideoStream = -1; snapshot_.selectedAudioStream = -1;
     LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency); qpcFrequency_ = frequency.QuadPart;
@@ -1891,7 +2008,12 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
     bool hardwareFallback = false;
     std::string hardwareFailureReason;
     if (format_ != nullptr && videoStream_ >= 0) {
-        if (decodeMode_ == FFF3FPDecodeMode::D3D11) {
+        // The device is new, so a stream the GPU refused before is worth asking about
+        // again -- unless the refusal was about the stream rather than the device, in
+        // which case it is remembered and the attempt is skipped here too.
+        const auto tryHardware = decodeMode_ == FFF3FPDecodeMode::D3D11 &&
+            !HardwareRouteKnownUnsupported(format_->streams[videoStream_]);
+        if (tryHardware) {
             result = OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_,
                 &hardwareFailureReason);
             if (result != FFFResult::Success) {
@@ -1902,6 +2024,10 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
         } else {
             result = OpenDecoder(format_, videoStream_, true, &videoDecoder_,
                 -1, nullptr, false);
+            if (result == FFFResult::Success && decodeMode_ == FFF3FPDecodeMode::D3D11) {
+                hardwareFallback = true;
+                hardwareFailureReason = "The GPU decoder was rejected for this stream earlier in this session; playback is using CPU decoding.";
+            }
         }
         if (result != FFFResult::Success) {
             Fail(result, "Could not reopen the video decoder after rebuilding the graphics device.",
@@ -2592,7 +2718,18 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
     AVDictionary* options = nullptr;
     av_dict_set(&options, "protocol_whitelist", "file,crypto,data", 0);
     av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
-    io = SharedFileInput::Open(path.c_str(), error);
+    // A layered ("progressive") AVIF stores its primary item as several extents,
+    // and the mov demuxer refuses those before any decoder runs. Repairing the box
+    // means editing the bytes, so such a file is read and repaired here and handed
+    // to the demuxer from memory; every other media keeps its file-backed input.
+    // The gate is a container name check so nothing else pays for the read.
+    std::vector<std::uint8_t> repairedBytes;
+    std::string repairDetail;
+    const bool repaired = IsStillImageContainerName(path) &&
+        AvifIlocShim::ReadAndRepair(path.c_str(), MaxRepairedStillImageBytes,
+            repairedBytes, repairDetail);
+    io = repaired ? SharedFileInput::OpenMemory(repairedBytes.data(), repairedBytes.size(), error)
+                  : SharedFileInput::Open(path.c_str(), error);
     if (io == nullptr) {
         av_dict_free(&options);
         return FFFResult::NativeFailure;
@@ -2929,6 +3066,23 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
     AVCodecContext** output, std::string* failureReason) noexcept {
     if (owner == nullptr || index < 0 || index >= static_cast<std::int32_t>(owner->nb_streams))
         return FFFResult::InvalidArgument;
+    // There is exactly one gate and it is a measurement, not a prediction: each
+    // backend's decoder is opened and then asked to produce a frame from the
+    // stream's own first packets (HardwareDecoderProducesFrame).
+    //
+    // Nothing here decides by pixel format, codec, resolution or device. Every such
+    // rule has to be maintained per hwaccel and per GPU generation, and a rule that
+    // is wrong in the "unsupported" direction silently disables a path that works:
+    // NVDEC decodes HEVC 4:4:4 from Turing onwards, H.264 4:4:4 on Turing and again
+    // from Blackwell, and HEVC 4:2:2 from Blackwell, while DXVA has no 4:2:2 or
+    // 4:4:4 decoder surface at all. The same stream is therefore supported and
+    // unsupported depending on the backend, and only asking tells them apart.
+    //
+    // Doing it here -- inside the open, before the presentation queue, the media
+    // info and the seek path exist -- is what makes it cheap. The same failure
+    // discovered later during playback costs DoSeek + ClearVideoQueue +
+    // RebuildMediaInfo; discovered here it costs one avio seek back to where the
+    // reader already was.
     const AVHWDeviceType Backends[] = {
         // Prefer the renderer's own D3D11 device: decoded surfaces can then be
         // sampled directly without a GPU-to-CPU-to-GPU round trip. CUDA remains
@@ -2936,21 +3090,33 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
         AV_HWDEVICE_TYPE_D3D11VA,
         AV_HWDEVICE_TYPE_CUDA,
     };
-    // A still image is presented one frame and then kept, so a backend whose surfaces
-    // the renderer cannot sample directly has to be consumed through a frame transfer
-    // into semi-planar CPU memory. That route measured two things against the CPU arm
-    // and neither is worth paying at still sizes:
+    // A still image is presented one frame and then kept, so the renderer's own device
+    // is the preferred route: a D3D11 surface is sampled as-is, which is the path every
+    // sampled file measures bit-exact on. A backend whose surfaces the renderer cannot
+    // sample directly (CUDA) has to be consumed through a frame transfer into
+    // semi-planar CPU memory, and that route measured two things against the CPU arm:
     //   - it is not bit-exact: the CUDA JPEG decode differs from libjpeg by 1/255 at a
     //     stripe edge (09h) and by 4/255 on a 4:4:4 sample, and a 4:2:0 surface loses
     //     the chroma detail of a 4:4:4 source outright;
     //   - it is slower: +64 ms to +196 ms measured, because the decoder is built for
     //     one frame that never amortises it.
-    // So stills stay on the renderer's own device, where the decoded surface is sampled
-    // as-is and every sampled file measures bit-exact. Video keeps the full list: there
-    // a CUDA or QSV frame is transferred every frame anyway, and the semi-planar upload
-    // in VideoRenderer is what carries it.
-    const std::size_t backendCount = staticImage_ ? 1u : std::size(Backends);
+    // Neither is worth paying while the alternative is a CPU decode of one frame, so
+    // stills ask D3D11VA first and only extend the list to CUDA once it has refused: a
+    // stream the renderer's own device will not take (4:4:4 HEVC, some AV1, MJPEG) then
+    // still decodes on the GPU instead of falling all the way to the CPU. The backend
+    // order is what makes this a fallback -- CUDA is only reached after a refusal,
+    // never before. FFF3FP_HWCAP_STILL_CUDA=0 restores the D3D11VA-only list. Video
+    // keeps the full list either way: there a CUDA or QSV frame is transferred every
+    // frame anyway, and the semi-planar upload in VideoRenderer is what carries it.
+    const std::size_t backendCount =
+        (staticImage_ && !StillCudaFallbackEnabled()) ? 1u : std::size(Backends);
     std::string lastFailure = "No compatible hardware decoder was found.";
+    // What this refusal says, told apart for the memory written at the end: only an
+    // answer the GPU itself gave is worth remembering (see the comment on
+    // HardwareRouteKnownUnsupported). A decoder that never opened says nothing.
+    std::size_t hardwareCandidates = 0;
+    std::size_t decoderOpenFailures = 0;
+    std::size_t trialRefusals = 0;
     for (std::size_t backendIndex = 0; backendIndex < backendCount; ++backendIndex) {
         const auto backend = Backends[backendIndex];
         // A backend can expose both a dedicated wrapper and the native FFmpeg
@@ -2963,25 +3129,160 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
                 if (codec->id != parameters->codec_id || !av_codec_is_decoder(codec) ||
                     (IsDedicatedCudaDecoder(codec) ? 0 : 1) != dedicatedPass ||
                     FindHardwareFormat(codec, backend) == AV_PIX_FMT_NONE) continue;
+                // 2026-10-21: ask the driver before building the decoder. The old path
+                // trusted the pixel format the codec merely *declares* and only learned
+                // that the driver disagrees on the first real packet, which costs a
+                // DoSeek + ClearVideoQueue + RebuildMediaInfo round trip (measured
+                // -15%..-30% fps on a 4:4:4 source). The question asked here is purely
+                // "does a decoder configuration exist" -- never "is it fast enough",
+                // because throughput has no standard API and single-stream decoding is
+                // assumed to fit.
+                if (backend == AV_HWDEVICE_TYPE_D3D11VA && HardwareCapabilityProbeEnabled()) {
+                    const auto* probe = owner->streams[index]->codecpar;
+                    const auto support = videoRenderer_.QueryD3D11DecodeSupport(
+                        static_cast<std::int32_t>(probe->codec_id), probe->profile,
+                        static_cast<std::int32_t>(probe->format), probe->width, probe->height);
+                    if (HardwareCapabilityTrace())
+                        std::fprintf(stderr, "[hwcap] codec=%d %dx%d fmt=%d -> %s\n",
+                            static_cast<int>(probe->codec_id), probe->width, probe->height,
+                            static_cast<int>(probe->format),
+                            support == PlayerVideoRenderer::D3D11DecodeSupport::Supported ? "supported"
+                                : support == PlayerVideoRenderer::D3D11DecodeSupport::Unsupported
+                                    ? "unsupported" : "unknown");
+                    if (support == PlayerVideoRenderer::D3D11DecodeSupport::Unsupported) {
+                        lastFailure = "The D3D11 driver exposes no decoder configuration for this stream.";
+                        continue;
+                    }
+                }
+                ++hardwareCandidates;
                 AVCodecContext* candidate = nullptr;
                 std::int32_t hardwareFormat = AV_PIX_FMT_NONE;
                 std::string candidateFailure;
                 if (OpenDecoder(owner, index, true, &candidate, backend, &hardwareFormat,
                     true, codec, &candidateFailure) != FFFResult::Success) {
+                    ++decoderOpenFailures;
                     if (!candidateFailure.empty()) lastFailure = std::move(candidateFailure);
                     continue;
                 }
-                // Do not pre-decode media here. The first real packet validates
-                // the selected hardware format through SelectHardwareFormat;
-                // DecodePacket already falls back to software decoding when the
-                // driver rejects it.
+                // The gate. This backend has just proved it can open a decoder for
+                // this codec, which says nothing about whether it can decode this
+                // stream, so it now has to produce a frame from the stream's own
+                // first packets before it is accepted.
+                if (HardwareTrialDecodeEnabled() &&
+                    !HardwareDecoderProducesFrame(owner, index, candidate, &candidateFailure)) {
+                    ++trialRefusals;
+                    if (candidateFailure.empty())
+                        candidateFailure = "The GPU decoder produced no frame from this stream.";
+                    lastFailure = std::move(candidateFailure);
+                    avcodec_free_context(&candidate);
+                    continue;
+                }
                 *output = candidate;
                 return FFFResult::Success;
             }
         }
     }
+    // Two answers are worth keeping. No hardware candidate at all means this codec has
+    // no hardware decoder here, and a trial refusal means the driver was asked and said
+    // no. Anything that involved a decoder failing to open is left out on purpose: it
+    // may have run out of concurrent decode sessions rather than capability.
+    const auto refusedByCapability = hardwareCandidates == 0 || trialRefusals > 0;
+    if (HardwareRouteMemoryEnabled() && refusedByCapability && decoderOpenFailures == 0) {
+        RememberUnsupportedHardwareRoute(owner->streams[index]);
+        if (HardwareCapabilityTrace())
+            std::fprintf(stderr, "[hwcap] memory stream=%d remembered (candidates=%zu trialRefused=%zu openFailed=%zu)\n",
+                index, hardwareCandidates, trialRefusals, decoderOpenFailures);
+    }
     if (failureReason != nullptr) *failureReason = std::move(lastFailure);
     return FFFResult::NotSupported;
+}
+
+bool PlayerSession::HardwareRouteKnownUnsupported(const AVStream* stream) const noexcept {
+    if (stream == nullptr || stream->codecpar == nullptr) return false;
+    const auto key = HardwareRouteKey(stream->codecpar);
+    for (const auto remembered : unsupportedHardwareRoutes_)
+        if (remembered == key) return true;
+    return false;
+}
+
+void PlayerSession::RememberUnsupportedHardwareRoute(const AVStream* stream) noexcept {
+    if (stream == nullptr || stream->codecpar == nullptr) return;
+    const auto key = HardwareRouteKey(stream->codecpar);
+    for (const auto remembered : unsupportedHardwareRoutes_)
+        if (remembered == key) return;
+    try { unsupportedHardwareRoutes_.push_back(key); } catch (...) {}
+}
+
+bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const std::int32_t index,
+    AVCodecContext* decoder, std::string* failureReason) noexcept {
+    if (owner == nullptr || decoder == nullptr) return false;
+    AVPacket* packet = av_packet_alloc();
+    AVFrame* frame = av_frame_alloc();
+    auto finish = [&](const bool accept, std::string detail) noexcept {
+        av_frame_free(&frame);
+        av_packet_free(&packet);
+        // Leave the decoder empty: whatever it buffered during the trial is not part
+        // of playback, which starts from the beginning of the stream.
+        avcodec_flush_buffers(decoder);
+        if (!accept && failureReason != nullptr)
+            *failureReason = detail.empty()
+                ? "The GPU decoder produced no frame from this stream; playback continued with CPU decoding."
+                : "The GPU decoder rejected this stream (" + detail + "); playback continued with CPU decoding.";
+        if (HardwareCapabilityTrace())
+            std::fprintf(stderr, "[hwcap] trial stream=%d accept=%d err=%s\n",
+                index, accept ? 1 : 0, detail.c_str());
+        return accept;
+    };
+    if (packet == nullptr || frame == nullptr) return finish(true, "out of memory");
+    // Read the trial packets from a context of our own. Rewinding the caller's
+    // context instead -- avio_seek back plus avformat_flush -- restores the byte
+    // position but not the demuxer's own read state, and measured worse than not
+    // checking at all: a 3 s HEVC stream decoded 0 of 90 frames and playback ended
+    // immediately. Playback's context is therefore never touched here.
+    //
+    // A trial that cannot be run accepts the decoder: missing information is not a
+    // verdict, and the pre-existing fallback in DecodePacket still covers a decoder
+    // that fails later.
+    if (owner->url == nullptr || owner->url[0] == '\0') return finish(true, "no url");
+    AVFormatContext* probe = nullptr;
+    if (avformat_open_input(&probe, owner->url, nullptr, nullptr) < 0 || probe == nullptr)
+        return finish(true, "reopen failed");
+    const auto streamCountMatches = probe->nb_streams == owner->nb_streams;
+    bool produced = false;
+    std::string detail;
+    if (streamCountMatches) {
+        // First frame only, and that is the intended scope. A frame coming out of the
+        // decoder answers the question this gate asks -- this backend can decode this
+        // stream -- because the decoder configuration has already been negotiated and
+        // the first frame is the one that exercises it. A decoder that fails on a later
+        // frame is a different failure (a damaged slice, a mid-stream format change)
+        // and it is handled where it happens, by the pre-existing fallback in
+        // DecodePacket, which rewinds and rebuilds once instead of guessing per frame.
+        // Decoding N frames here would add demux and decode work to every open without
+        // answering a second question, so N stays 1.
+        // Enough packets to cover a decoder with output delay plus a reopened GOP;
+        // stop as soon as a frame arrives, which for nearly every stream is the first
+        // packet of the stream.
+        for (int attempt = 0; attempt < 32 && !produced; ++attempt) {
+            if (av_read_frame(probe, packet) < 0) break;
+            if (packet->stream_index != index) { av_packet_unref(packet); continue; }
+            const auto sendResult = avcodec_send_packet(decoder, packet);
+            av_packet_unref(packet);
+            if (sendResult < 0) { detail = FfmpegError(sendResult); break; }
+            const auto receiveResult = avcodec_receive_frame(decoder, frame);
+            if (receiveResult == 0) produced = true;
+            else if (receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF) {
+                detail = FfmpegError(receiveResult);
+                break;
+            }
+        }
+        // A decoder with output delay answers EAGAIN until it is drained, and draining
+        // is safe here: the decoder is flushed on the way out either way.
+        if (!produced && detail.empty() && avcodec_send_packet(decoder, nullptr) == 0 &&
+            avcodec_receive_frame(decoder, frame) == 0) produced = true;
+    } else detail = "stream count differs";
+    avformat_close_input(&probe);
+    return finish(produced || !streamCountMatches, detail);
 }
 
 void PlayerSession::DoOpen(std::string path) noexcept {
@@ -3021,6 +3322,17 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Select session rewind only after stream classification is available.
     sessionWrapLoop_ = IsAnimatedImageSequence(format_);
     staticImage_ = IsStillImage(format_, videoStream_);
+    // A tiled still image is one stream per tile, so the stream picked above is only
+    // the first tile. Recognize such a file from its tile grid group and read every
+    // tile's packets now, while the demuxer is still at the start of the file: the
+    // canvas is assembled from them, and a still image has no timeline to rewind.
+    ResetTileGrid();
+    if (staticImage_ &&
+        AvifTileGridComposer::Describe(format_, tileGridWidth_, tileGridHeight_,
+            tileGridTiles_, tileGridBackground_)) {
+        tileGrid_ = true;
+        ReadTileGridPackets();
+    }
     // Rotation is a *view* property, so it is applied through the same renderer
     // path the image mode and the host's manual R key use. Decoding stays
     // untouched: the frame keeps its native orientation and only the sampling
@@ -3034,13 +3346,18 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Reject it here with the real limit instead. Video is not checked here and
     // keeps its existing behaviour.
     if (staticImage_) {
-        const auto* imageParameters = format_->streams[videoStream_]->codecpar;
-        if (imageParameters->width > MaxStillImageDimension ||
-            imageParameters->height > MaxStillImageDimension) {
+        // A tiled still is checked against the canvas it assembles into, not against
+        // the single tile the stream points at.
+        const auto imageWidth = tileGrid_ ? tileGridWidth_
+            : format_->streams[videoStream_]->codecpar->width;
+        const auto imageHeight = tileGrid_ ? tileGridHeight_
+            : format_->streams[videoStream_]->codecpar->height;
+        if (imageWidth > MaxStillImageDimension ||
+            imageHeight > MaxStillImageDimension) {
             Fail(FFFResult::NotSupported,
                 "The still image is too large to display: " +
-                std::to_string(imageParameters->width) + "x" +
-                std::to_string(imageParameters->height) +
+                std::to_string(imageWidth) + "x" +
+                std::to_string(imageHeight) +
                 " exceeds the limit of " + std::to_string(MaxStillImageDimension) +
                 " pixels per side.", "open-image-size");
             return;
@@ -3058,10 +3375,27 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         // GPU refuses. Formats with no hardware path (PNG, WebP, TIFF, JPEG XL, JXR) are
         // refused inside the hardware open before any device is created, so probing them
         // costs nothing.
-        auto result = decodeMode_ == FFF3FPDecodeMode::D3D11
-            ? OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_, &hardwareFailureReason)
-            : OpenDecoder(format_, videoStream_, true, &videoDecoder_);
-        if (result != FFFResult::Success && decodeMode_ == FFF3FPDecodeMode::D3D11) {
+        // A tiled still is assembled on the CPU, so a hardware decoder would only
+        // add a device per tile and a download per tile: ask for the CPU decoder
+        // outright and say so in the snapshot, which reports the route actually used.
+        // A stream the GPU already refused in this session is not asked again: the
+        // attempt costs a decoder open plus a reopened demux for the trial packets,
+        // and the answer cannot have changed.
+        const auto tryHardware = decodeMode_ == FFF3FPDecodeMode::D3D11 &&
+            !HardwareRouteKnownUnsupported(format_->streams[videoStream_]);
+        auto result = tileGrid_ || !tryHardware
+            ? OpenDecoder(format_, videoStream_, true, &videoDecoder_, -1, nullptr, false)
+            : OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_, &hardwareFailureReason);
+        if (result == FFFResult::Success && tileGrid_) snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
+        if (result == FFFResult::Success && !tileGrid_ && !tryHardware &&
+            decodeMode_ == FFF3FPDecodeMode::D3D11) {
+            // Took the CPU route from memory. Report the route actually used, and say
+            // why, so a host that surfaces the fallback can explain it.
+            snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
+            hardwareFallback = true;
+            hardwareFailureReason = "The GPU decoder was rejected for this stream earlier in this session; playback is using CPU decoding.";
+        }
+        if (result != FFFResult::Success && decodeMode_ == FFF3FPDecodeMode::D3D11 && !tileGrid_) {
             // OpenDecoder's default consults decodeMode_, so the retry has to ask for
             // the software decoder explicitly or it fails the same way.
             result = OpenDecoder(format_, videoStream_, true, &videoDecoder_, -1, nullptr, false);
@@ -3120,7 +3454,13 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         snapshot_.position100ns = 0; snapshot_.frameIndex = -1; snapshot_.framePts = AV_NOPTS_VALUE;
         snapshot_.selectedVideoStream = videoStream_; snapshot_.selectedAudioStream = audioStream_;
         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
-        if (videoStream_ >= 0) { snapshot_.videoWidth = videoDecoder_->width; snapshot_.videoHeight = videoDecoder_->height; ApplyHdrState(snapshot_, videoRenderer_.HdrState()); }
+        // A tiled still image is presented as its canvas, so that is what the host
+        // has to see: the decoder belongs to one tile and would report a fraction.
+        if (videoStream_ >= 0) {
+            snapshot_.videoWidth = tileGrid_ ? tileGridWidth_ : videoDecoder_->width;
+            snapshot_.videoHeight = tileGrid_ ? tileGridHeight_ : videoDecoder_->height;
+            ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+        }
         else if (coverArtFrame_ != nullptr) { snapshot_.videoWidth = coverArtFrame_->width; snapshot_.videoHeight = coverArtFrame_->height; snapshot_.isHdrSource = 0; }
         // Downgrade only if HDR/wide-gamut output is unachievable; EnsureSwapChain
         // rechecks this gate before selecting the actual format. The scRGB
@@ -3210,10 +3550,70 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     }
 }
 
+void PlayerSession::ResetTileGrid() noexcept {
+    tileGrid_ = false;
+    tileGridWidth_ = 0;
+    tileGridHeight_ = 0;
+    for (auto& byte : tileGridBackground_) byte = 0;
+    tileGridTiles_.clear();
+    AvifTileGridComposer::ReleaseSources(tileGridSources_);
+}
+
+void PlayerSession::ReadTileGridPackets() noexcept {
+    if (format_ == nullptr || !tileGrid_) return;
+    // One bucket per tile stream. The whole file is walked once: a grid still is a
+    // handful of packets and there is no timeline to come back for them later.
+    tileGridSources_.clear();
+    for (const auto& tile : tileGridTiles_) {
+        auto& source = tileGridSources_.emplace_back();
+        source.streamIndex = tile.streamIndex;
+    }
+    auto* packet = av_packet_alloc();
+    if (packet == nullptr) { ResetTileGrid(); return; }
+    while (av_read_frame(format_, packet) >= 0) {
+        for (auto& source : tileGridSources_) {
+            if (source.streamIndex != packet->stream_index) continue;
+            auto* copy = av_packet_alloc();
+            if (copy == nullptr || av_packet_ref(copy, packet) < 0) {
+                av_packet_free(&copy);
+                av_packet_unref(packet);
+                av_packet_free(&packet);
+                ResetTileGrid();
+                return;
+            }
+            source.packets.push_back(copy);
+            break;
+        }
+        av_packet_unref(packet);
+    }
+    av_packet_free(&packet);
+    for (const auto& source : tileGridSources_) {
+        if (source.packets.empty()) { ResetTileGrid(); return; }
+    }
+}
+
+FFFResult PlayerSession::ComposeTileGridFrame() noexcept {
+    if (format_ == nullptr) return FFFResult::InvalidState;
+    auto* canvas = AvifTileGridComposer::Compose(format_, tileGridTiles_, tileGridSources_,
+        tileGridWidth_, tileGridHeight_, tileGridBackground_);
+    if (canvas == nullptr) return FFFResult::FfmpegFailure;
+    const auto before = videoRenderer_.PresentedVideoFrames();
+    NormalizeVideoFrameTimestamp(canvas);
+    PresentVideoFrame(canvas, format_);
+    av_frame_free(&canvas);
+    // The canvas is the only frame this picture has, so a presentation that did not
+    // happen is a failed open rather than a silently empty one.
+    if (videoRenderer_.PresentedVideoFrames() == before) return FFFResult::FfmpegFailure;
+    return FFFResult::Success;
+}
+
 FFFResult PlayerSession::DecodeInitialFrame() noexcept {
     if (format_ == nullptr || videoDecoder_ == nullptr || videoStream_ < 0)
         return FFFResult::InvalidState;
     if (!staticImage_ && !animatedImage_) return FFFResult::InvalidState;
+    // A tiled still image has nothing to read: its packets were taken at open and
+    // the picture is the canvas assembled from them.
+    if (tileGrid_) return ComposeTileGridFrame();
     if (playbackPacket_ == nullptr) playbackPacket_ = av_packet_alloc();
     if (playbackPacket_ == nullptr) return FFFResult::NativeFailure;
     if (stillImagePacket_ == nullptr) stillImagePacket_ = av_packet_alloc();
@@ -3658,6 +4058,14 @@ FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noex
 
 void PlayerSession::PumpPlayback() noexcept {
     if (format_ == nullptr) { SetState(FFF3FPState::Failed); return; }
+    // The host asked for an auxiliary composition: open the second video
+    // stream on this worker, once, before the next demux. A file without such
+    // a stream simply never gets one; the base path is untouched.
+    if (auxLayerRequested_.load(std::memory_order_acquire) && !auxOpenAttempted_ &&
+        videoStream_ >= 0 && !staticImage_ && !animatedImage_ && !tileGrid_) {
+        auxOpenAttempted_ = true;
+        (void)OpenAuxiliaryDecoder();
+    }
     if (!CollectSoftwareVideoFrame()) return;
     // Window evidence for EvaluateDecoderLoad: how many playback ticks ran and how
     // many of them found the decode pipeline at its bound. Diagnostics only --
@@ -3832,6 +4240,12 @@ void PlayerSession::PumpPlayback() noexcept {
         } else {
             decodeAudioPacket();
         }
+    }
+    else if (auxStream_ >= 0 && playbackPacket_->stream_index == auxStream_) {
+        // The auxiliary track is decoded on this worker, synchronously, and its
+        // frames go to their own bounded queue. It never enters the base-layer
+        // packet budget, bitrate counters or snapshot counters.
+        DecodeAuxiliaryPacket(playbackPacket_);
     }
     if (disc_) disc_->DecodeSubtitle(playbackPacket_, format_);
     av_packet_unref(playbackPacket_);
@@ -4334,11 +4748,162 @@ void PlayerSession::ClearVideoQueue() noexcept {
     // The presentation index restarts at every flush point, so cached blobs
     // keyed to the old indices would be handed out under a wrong frame number.
     ClearSideDataRing();
+    // Same reasoning for the auxiliary layer: its queued frames and its
+    // per-index requests belong to the timeline that just ended.
+    FlushAuxiliaryLayer();
     ClearPendingPackets();
 }
 
-void PlayerSession::ClearSideDataRing() noexcept {
-    std::lock_guard lock(sideDataMutex_);
+// ---- optional auxiliary video layer ----------------------------------------
+
+FFFResult PlayerSession::SetAuxiliaryComposition(
+    const FFF3FPAuxiliaryComposition& composition) noexcept {
+    if (composition.size != sizeof(composition) ||
+        composition.version != FFF3FP_AUXILIARY_COMPOSITION_VERSION)
+        return FFFResult::InvalidArgument;
+    {
+        std::lock_guard lock(auxMutex_);
+        auxCompositionRing_.push_back(AuxCompositionRequest{
+            composition.frameIndex, composition.enabled,
+            composition.residualCenter, composition.residualShift,
+            composition.maxValue});
+        while (auxCompositionRing_.size() > MaximumAuxiliaryCompositionRequests)
+            auxCompositionRing_.pop_front();
+    }
+    // enabled != 0 is the only thing that arms the worker; an explicit
+    // "skip this frame" request must not open a second decoder.
+    if (composition.enabled != 0)
+        auxLayerRequested_.store(true, std::memory_order_release);
+    return FFFResult::Success;
+}
+
+bool PlayerSession::SelectAuxiliaryComposition(const std::int64_t frameIndex,
+    AuxCompositionRequest& out) const noexcept {
+    std::lock_guard lock(auxMutex_);
+    if (auxCompositionRing_.empty()) return false;
+    // The kind-3 table's rule, verbatim: the last request at or before the
+    // presented index, or the first entry when the index precedes all of them.
+    const auto* selected = &auxCompositionRing_.front();
+    for (const auto& entry : auxCompositionRing_) {
+        if (entry.frameIndex <= frameIndex) selected = &entry;
+        else break;
+    }
+    out = *selected;
+    return true;
+}
+
+FFFResult PlayerSession::OpenAuxiliaryDecoder() noexcept {
+    if (auxDecoder_ != nullptr) return FFFResult::Success;
+    if (format_ == nullptr || videoStream_ < 0) return FFFResult::InvalidState;
+    auxStream_ = FindAuxiliaryVideoStream(format_, videoStream_);
+    if (auxStream_ < 0) return FFFResult::NotSupported;
+    // Software on purpose: the composition reference reads planar 10-bit
+    // samples, and the auxiliary track is small next to the base layer. The
+    // base layer keeps whatever hardware or software route it already chose.
+    const auto result = OpenDecoder(format_, auxStream_, true, &auxDecoder_, -1, nullptr, false);
+    if (GetEnvironmentVariableW(L"FFF_EL_TRACE", nullptr, 0) != 0)
+        std::fprintf(stderr, "[el] open base=%d aux=%d result=%d\n",
+            videoStream_, auxStream_, static_cast<int>(result));
+    if (result != FFFResult::Success) {
+        auxDecoder_ = nullptr;
+        auxStream_ = -1;
+        return result;
+    }
+    if (auxDecodeFrame_ == nullptr) auxDecodeFrame_ = av_frame_alloc();
+    if (auxDecodeFrame_ == nullptr) {
+        avcodec_free_context(&auxDecoder_);
+        auxStream_ = -1;
+        return FFFResult::NativeFailure;
+    }
+    return FFFResult::Success;
+}
+
+void PlayerSession::FlushAuxiliaryLayer() noexcept {
+    if (auxDecoder_ != nullptr) avcodec_flush_buffers(auxDecoder_);
+    for (auto& entry : auxFrameQueue_) av_frame_free(&entry.second);
+    auxFrameQueue_.clear();
+    if (auxDecodeFrame_ != nullptr) av_frame_unref(auxDecodeFrame_);
+    std::lock_guard lock(auxMutex_);
+    auxCompositionRing_.clear();
+}
+
+void PlayerSession::CloseAuxiliaryLayer() noexcept {
+    FlushAuxiliaryLayer();
+    if (auxDecodeFrame_ != nullptr) av_frame_free(&auxDecodeFrame_);
+    if (auxDecoder_ != nullptr) avcodec_free_context(&auxDecoder_);
+    auxStream_ = -1;
+    auxOpenAttempted_ = false;
+    auxLayerRequested_.store(false, std::memory_order_release);
+}
+
+void PlayerSession::DecodeAuxiliaryPacket(AVPacket* packet) noexcept {
+    if (auxDecoder_ == nullptr || packet == nullptr) return;
+    if (auxDecodeFrame_ == nullptr) auxDecodeFrame_ = av_frame_alloc();
+    if (auxDecodeFrame_ == nullptr) return;
+    const auto sent = avcodec_send_packet(auxDecoder_, packet);
+    if (sent < 0 && sent != AVERROR(EAGAIN)) return;
+    while (true) {
+        const auto received = avcodec_receive_frame(auxDecoder_, auxDecodeFrame_);
+        if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) break;
+        if (received < 0) break;
+        const auto pts = auxDecodeFrame_->best_effort_timestamp == AV_NOPTS_VALUE
+            ? auxDecodeFrame_->pts : auxDecodeFrame_->best_effort_timestamp;
+        auto* copy = av_frame_alloc();
+        if (copy != nullptr && av_frame_ref(copy, auxDecodeFrame_) >= 0) {
+            auxFrameQueue_.emplace_back(pts, copy);
+            while (auxFrameQueue_.size() > MaximumAuxiliaryQueuedFrames) {
+                av_frame_free(&auxFrameQueue_.front().second);
+                auxFrameQueue_.pop_front();
+            }
+        } else {
+            av_frame_free(&copy);
+        }
+        av_frame_unref(auxDecodeFrame_);
+    }
+}
+
+AVFrame* PlayerSession::TakeAuxiliaryFrame(const std::int64_t basePts,
+    AVFormatContext* owner) noexcept {
+    if (auxFrameQueue_.empty() || auxStream_ < 0 || owner == nullptr ||
+        owner != format_ || videoStream_ < 0 || basePts == AV_NOPTS_VALUE)
+        return nullptr;
+    const auto* auxiliary = format_->streams[auxStream_];
+    const auto* base = format_->streams[videoStream_];
+    if (auxiliary == nullptr || base == nullptr) return nullptr;
+    const auto target = av_rescale_q(basePts, base->time_base, auxiliary->time_base);
+    const auto period = lastVideoFrameDuration100ns_ > 0 ? lastVideoFrameDuration100ns_ : 1'000'000;
+    auto tolerance = av_rescale_q(period,
+        AVRational{1, static_cast<int>(TicksPerSecond)}, auxiliary->time_base);
+    if (tolerance <= 0) tolerance = 1;
+    std::size_t best = auxFrameQueue_.size();
+    std::int64_t bestDistance = INT64_MAX;
+    for (std::size_t index = 0; index < auxFrameQueue_.size(); ++index) {
+        const auto pts = auxFrameQueue_[index].first;
+        if (pts == AV_NOPTS_VALUE) continue;
+        const auto distance = pts >= target ? pts - target : target - pts;
+        if (distance < bestDistance) { bestDistance = distance; best = index; }
+    }
+    if (best == auxFrameQueue_.size() || bestDistance > tolerance) {
+        // Nothing close enough: drop what can no longer pair, keep the rest.
+        while (!auxFrameQueue_.empty()) {
+            const auto pts = auxFrameQueue_.front().first;
+            if (pts == AV_NOPTS_VALUE || pts >= target - tolerance) break;
+            av_frame_free(&auxFrameQueue_.front().second);
+            auxFrameQueue_.pop_front();
+        }
+        return nullptr;
+    }
+    AVFrame* result = nullptr;
+    for (std::size_t index = 0; index <= best; ++index) {
+        auto& entry = auxFrameQueue_.front();
+        if (index == best) result = entry.second;
+        else av_frame_free(&entry.second);
+        auxFrameQueue_.pop_front();
+    }
+    return result;
+}
+
+void PlayerSession::ClearSideDataRing() noexcept {    std::lock_guard lock(sideDataMutex_);
     sideDataRing_.clear();
     sideDataRingBytes_ = 0;
 }
@@ -5065,8 +5630,44 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     // ratio; hardware frames never engage the policy, so they are excluded here too.
     if (renderFrame != nullptr && !IsHardwareFrame(renderFrame))
         videoRenderer_.ObserveFrameForAdaptiveDownscale(false);
+    // Optional auxiliary layer: the caller's per-frame request says "this picture
+    // is expected to carry the composed signal". The frame is paired by PTS within
+    // one base-frame period; when nothing pairs, the params still go to the
+    // renderer so it withholds the caller's colour table instead of sampling it on
+    // an uncomposed picture.
+    AVFrame* auxiliaryFrame = nullptr;
+    FFF3FPAuxiliaryComposition auxiliaryComposition{};
+    bool elCompositionRequested = false;
+    if (auxLayerRequested_.load(std::memory_order_acquire)) {
+        AuxCompositionRequest request{};
+        if (SelectAuxiliaryComposition(nextIndex, request)) {
+            elCompositionRequested = request.enabled != 0;
+            if (elCompositionRequested) {
+                auxiliaryFrame = TakeAuxiliaryFrame(pts, owner);
+                auxiliaryComposition = FFF3FPAuxiliaryComposition{
+                    sizeof(FFF3FPAuxiliaryComposition),
+                    FFF3FP_AUXILIARY_COMPOSITION_VERSION, nextIndex,
+                    request.enabled, request.residualCenter, request.residualShift,
+                    request.maxValue};
+            }
+        }
+    }
     const auto renderResult = videoRenderer_.Render(frameToRender, nextIndex,
-        staticImage_ && owner == format_, false, false, staticImage_ && owner == format_);
+        staticImage_ && owner == format_, false, false, staticImage_ && owner == format_,
+        auxiliaryFrame, elCompositionRequested ? &auxiliaryComposition : nullptr);
+    // Diagnostic (FFF_EL_TRACE), the same shape as the ladder/cadence traces:
+    // "requested but not paired" is the state that withholds the colour table, and
+    // it is invisible in a headless session otherwise.
+    if (GetEnvironmentVariableW(L"FFF_EL_TRACE", nullptr, 0) != 0 &&
+        (elCompositionRequested || auxiliaryFrame != nullptr))
+        std::fprintf(stderr, "[el] frame=%lld request=%u paired=%u aux=%dx%d fmt=%d stream=%d queued=%zu\n",
+            static_cast<long long>(nextIndex), elCompositionRequested ? 1u : 0u,
+            auxiliaryFrame != nullptr ? 1u : 0u,
+            auxiliaryFrame != nullptr ? auxiliaryFrame->width : 0,
+            auxiliaryFrame != nullptr ? auxiliaryFrame->height : 0,
+            auxiliaryFrame != nullptr ? auxiliaryFrame->format : -1,
+            auxStream_, auxFrameQueue_.size());
+    if (auxiliaryFrame != nullptr) av_frame_free(&auxiliaryFrame);
     if (gamutConverted != nullptr) av_frame_free(&gamutConverted);
     if (renderResult != FFFResult::Success) {
         if (renderResult == FFFResult::DeviceFailure &&
@@ -5761,20 +6362,27 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         (video && (format_->streams[index]->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0)) { ReportError(FFFResult::InvalidArgument, "The requested media stream is invalid.", "select-stream"); return; }
     AVCodecContext* replacement = nullptr;
     const auto previousDecodeMode = snapshot_.decodeMode;
-    auto result = video && decodeMode_ == FFF3FPDecodeMode::D3D11
+    // Same memory as the open path: a track whose hardware route was already refused
+    // is opened on the CPU directly instead of asking the GPU again.
+    const auto tryHardware = video && decodeMode_ == FFF3FPDecodeMode::D3D11 &&
+        !HardwareRouteKnownUnsupported(format_->streams[index]);
+    auto result = tryHardware
         ? OpenHardwareVideoDecoder(format_, index, &replacement)
-        : OpenDecoder(format_, index, video, &replacement);
+        : OpenDecoder(format_, index, video, &replacement, -1, nullptr, false);
     if (result != FFFResult::Success && video && decodeMode_ == FFF3FPDecodeMode::D3D11) {
         result = OpenDecoder(format_, index, true, &replacement, -1, nullptr, false);
         if (result == FFFResult::Success) snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
     } else if (result == FFFResult::Success && video) {
-        snapshot_.decodeMode = decodeMode_;
+        snapshot_.decodeMode = tryHardware ? decodeMode_ : FFF3FPDecodeMode::Cpu;
     }
     if (result != FFFResult::Success) { ReportError(result, "Could not open the selected media stream.", "select-stream"); return; }
     if (video) {
         StopSoftwareVideoDecode();
         if (videoDecoder_) avcodec_free_context(&videoDecoder_);
         videoDecoder_ = replacement; videoStream_ = index;
+        // The auxiliary stream was chosen against the previous base stream, so
+        // forget it; the host's next enabled request re-selects against this one.
+        CloseAuxiliaryLayer();
         // Rebinding the video stream rebinds its stream-level side data too:
         // the previous track's records must never be answered for the new one.
         ClearStreamSideData();
@@ -5805,10 +6413,21 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         ClearPendingPackets();
     } else DoSeek(snapshot_.position100ns);
     RebuildMediaInfo();
-    if (video && snapshot_.decodeMode != previousDecodeMode)
+    if (video && snapshot_.decodeMode != previousDecodeMode) {
+        // Same shape as every other route change: "type" names the subsystem and the
+        // fallback flag tells a host that surfaces this event that the GPU route was
+        // given up rather than chosen. A track the GPU cannot decode is exactly that,
+        // and without the flag the host reports a graphics-device change the user
+        // never experienced (and resets screen-capture routing for nothing).
+        const auto fellBackToCpu = previousDecodeMode == FFF3FPDecodeMode::Gpu &&
+            snapshot_.decodeMode == FFF3FPDecodeMode::Cpu;
         Emit(FFF3FPEvent::DeviceChanged,
-            "{\"decodeMode\":" + std::to_string(static_cast<unsigned>(snapshot_.decodeMode)) +
-            ",\"reason\":\"The selected video stream changed the active decoder.\"}");
+            "{\"type\":\"video\",\"decodeMode\":" + std::to_string(static_cast<unsigned>(snapshot_.decodeMode)) +
+            ",\"fallback\":" + (fellBackToCpu ? "true" : "false") +
+            ",\"reason\":\"" + EscapeJson(fellBackToCpu
+                ? "The selected video stream cannot be decoded on the GPU; playback is using CPU decoding."
+                : "The selected video stream changed the active decoder.") + "\"}");
+    }
     Emit(FFF3FPEvent::OperationCompleted, std::string("{\"operation\":\"select-") + (video ? "video" : "audio") + "\",\"stream\":" + std::to_string(index) + "}");
 }
 
@@ -5854,6 +6473,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     if (preserveVideoOutput) videoRenderer_.ResetMedia();
     else videoRenderer_.Close();
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); CloseFormat(&externalFormat_, externalFormatIo_);
+    CloseAuxiliaryLayer();
     if (videoDecoder_) avcodec_free_context(&videoDecoder_);
     if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     ReleaseIamfDecoder();
@@ -5867,6 +6487,8 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     if (playbackPacket_) av_packet_free(&playbackPacket_);
     if (stillImagePacket_) av_packet_free(&stillImagePacket_);
     if (externalAudioPacket_) av_packet_free(&externalAudioPacket_);
+    // The tile packets belong to the format being closed, so they go with it.
+    ResetTileGrid();
     ClearVideoQueue();
     for (auto*& frame : videoFramePool_) av_frame_free(&frame);
     videoFramePool_.clear();
@@ -6045,6 +6667,10 @@ void PlayerSession::RebuildMediaInfo() noexcept {
         << ",\"fileSize\":" << std::max<std::int64_t>(0, format_->pb ? avio_size(format_->pb) : 0)
         << ",\"probeScore\":" << format_->probe_score
         << ",\"staticImage\":" << (staticImage_ ? "true" : "false")
+        << ",\"tileGrid\":" << (tileGrid_ ? "true" : "false")
+        << ",\"tileGridWidth\":" << tileGridWidth_
+        << ",\"tileGridHeight\":" << tileGridHeight_
+        << ",\"tileGridTileCount\":" << tileGridTiles_.size()
         << ",\"metadata\":";
     AppendDictionaryJson(json, format_->metadata);
     json << ",\"chapters\":[";

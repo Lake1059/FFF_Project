@@ -178,6 +178,50 @@ Public NotInheritable Class 播放器会话
         End Try
     End Sub
 
+    ''' <summary>解锁成功后由 UI 线程调用：把通路从“已放弃 / 未采用”里拉回来。
+    ''' <para>为什么需要它：泵的补装载预算只有 60 秒（30 × 2s）。用户切出去找码、
+    ''' 再回来输码很容易超时；超时后泵线程自行退场，而票据此刻才落盘 —— 不显式
+    ''' 唤醒的话这一场播放永远不会开始注入，界面上却已经报了“已解锁”。</para>
+    ''' <para>只做探测/装载/采用/启动，不碰流状态：解锁不改变时间线，泵会从环里
+    ''' 现有条目接着取。任何失败都答 False，绝不抛。</para></summary>
+    Public Function 唤醒色彩变换通路() As Boolean
+        If Volatile.Read(已释放) <> 0 Then Return False
+        Try
+            If Not 播放器原生接口.支持帧边数据环 OrElse
+               Not 播放器原生接口.支持动态元数据注入 Then Return False
+
+            Dim 原因 As String = Nothing
+            Dim 形态 = 色彩变换模块接口.探测(原因)
+            If 形态 <> 色彩变换模块接口.模块在场形态.就绪 Then
+                Debug.WriteLine("色彩变换模块：解锁后唤醒未成（" & 形态.ToString() & "）" &
+                    If(String.IsNullOrEmpty(原因), "", "：" & 原因))
+                Return False
+            End If
+
+            If 注入泵 Is Nothing Then 注入泵 = New 色彩变换注入泵(Me)
+
+            If Not 注入泵.通路可用 Then
+                Dim 模块 = 色彩变换模块接口.尝试装载(原因)
+                If 模块 Is Nothing Then
+                    Debug.WriteLine("色彩变换模块：解锁后装载失败（" & 原因 & "）")
+                    Return False
+                End If
+                注入泵.采用模块(模块)
+                ' 与 启动色彩变换通路 同一份实例：泵与床渲染插槽必须绑在同一份映射上。
+                色彩模块实例 = 模块
+                ' 解锁也可能刚刚让音频那一面可用（未解锁时模块拒交那张表）。
+                安装音频渲染插槽()
+            End If
+
+            ' 线程已退场（补装载预算用尽）时这里重启；还活着则是空操作。
+            注入泵.启动()
+            Return 注入泵.通路可用
+        Catch ex As Exception
+            Debug.WriteLine("色彩变换模块：解锁后唤醒异常（已忽略）：" & ex.GetType().Name)
+            Return False
+        End Try
+    End Function
+
     Public Function 打开Async(本地路径 As String, Optional 取消标记 As CancellationToken = Nothing) As Task
         If 取消标记.IsCancellationRequested Then Return Task.FromCanceled(取消标记)
         Dim 完成源 As New TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)

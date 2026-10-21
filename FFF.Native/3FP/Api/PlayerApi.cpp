@@ -94,7 +94,11 @@ FFFResult FFF3FP_EvaluateHdrProcessing(FFF3FPHdrProcessingProbe* probe) noexcept
 
 FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration, FFF3FPHandle* player) noexcept {
     if (configuration == nullptr || player == nullptr || configuration->size < sizeof(FFF3FPConfiguration) ||
-        configuration->version != PlayerApiVersion || configuration->decodeMode == FFF3FPDecodeMode::Unspecified ||
+        configuration->version != PlayerApiVersion ||
+        // Unspecified is answered, not refused: it means "no preference", and the
+        // session then runs GPU-first -- hardware where it works, CPU where it does
+        // not (PlayerSession's constructor normalizes it to Gpu). Only values past
+        // the end of the enum are rejected.
         configuration->decodeMode > FFF3FPDecodeMode::D3D11 || configuration->colorMode > FFF3FPColorMode::MapToHdr ||
         configuration->videoScalingQuality > FFF3FPVideoScalingQuality::HighQuality ||
         configuration->forceHdrOutput > 1 ||
@@ -438,6 +442,16 @@ FFFResult FFF3FP_CopyStreamSideData(const FFF3FPHandle player,
         sideDataType, buffer, capacity, written);
     *writtenSize = written;
     return result;
+}
+
+// Optional auxiliary video layer. Additive like the entry points above, so
+// PlayerApiVersion is unchanged and a host that never resolves it keeps
+// loading this DLL unchanged.
+FFFResult FFF3FP_SetAuxiliaryComposition(const FFF3FPHandle player,
+    const FFF3FPAuxiliaryComposition* composition) noexcept {
+    if (player == nullptr || composition == nullptr)
+        return FFFResult::InvalidArgument;
+    return static_cast<PlayerSession*>(player)->SetAuxiliaryComposition(*composition);
 }
 
 // External bed render plug. Appended after the v20 surface like the readback, VSR,
