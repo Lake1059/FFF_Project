@@ -24,6 +24,18 @@ Imports System.Threading
 '  ● 模块缺席 / 内核没有环导出 / 本帧无据，三种情况都只是“什么都不做”，
 '    与不装模块时的行为逐位一致（既定口径：不装模块 = 静默降级且不提示）。
 '
+'  ● 无据帧的清表纪律（stale-table 防护）：模块答“无元数据”时**不区分原因**，
+'    统一按连续计数处理——连续达 <see cref="连续无元数据清表阈值"/> 帧（且本会话注入过）
+'    才认定“这条流模块不接”并清表。单帧不清：偶发无据帧（数据不自证、结构坏、未知档）
+'    保留旧表是既定降级口径，阈值就是防这个的。
+'
+'  ● 🔴 宿主零 DV 语义（红线 B，2026-10-21 隔离修正）：本泵**不解析边数据内容**——
+'    不读 RPU 头、不判增强层、不解释任何档位字段，一切按模块的回答行事。边数据对宿主
+'    只是不透明字节；模块拒烘焙（无论坏帧还是携带未合成增强层残差）在宿主侧同构：
+'    都是 NoMetadata ⇒ 都走上面的统一阈值。代价：真双层流的前几帧会多套几帧 BL-only
+'    旧表（阈值帧数），合规优先。曾加的“live EL 首帧即清”分支已删——它要求宿主读
+'    AVDOVIRpuDataHeader 字段偏移，属 DV 语义外泄。
+'
 '  ● 配置记录通道：容器码流配置记录是**流级**常量（在 codecpar 上，不在逐帧环里），
 '    由内核导出 FFF3FP_CopyStreamSideData 取回、缓存一次、喂给模块 分析帧 的追加字段；
 '    模块据此把分类文本（如多层/兼容档）算出来，再由 取内容描述() 提供给 UI。
@@ -62,6 +74,11 @@ Friend Class 色彩变换注入泵
     ''' <summary>配置记录的单条上限（字节）。正常记录只有几十字节；更大的异常条目一概不缓存。</summary>
     Private Const 配置记录上限 As UInteger = 64UI
 
+    ''' <summary>连续多少帧“模块答无元数据”才清表（stale-table 防护，2026-10-21）。
+    ''' 单帧不清：偶发无据帧（P5 数据不自证、坏帧）保留旧表是既定降级口径；
+    ''' 连续多帧不接才说明旧表已无依据，继续套着就是 stale-table 欠账。</summary>
+    Private Const 连续无元数据清表阈值 As Integer = 3
+
     ' ---- 游标：高 32 位是复位世代，低 32 位是“帧号 ≥”下界 ----
     ' 为什么不直接对帧号做 CAS：复位把下界写回 0，而探测时的下界本来就可能
     ' 是 0（从头播、或刚复位过一次）——那时“值没变”与“被人复位过”在单值 CAS
@@ -84,6 +101,12 @@ Friend Class 色彩变换注入泵
     Private _上次回退检查 As Long = 0
     Private _节拍毫秒 As Integer = 8
     Private _节拍已缓存 As Boolean
+    ' 模块答"未授权"之后是否已经通知过内核丢表。只做一次：未授权是逐帧回答，
+    ' 每帧都调一次内核既无意义也会把日志刷满。重新注入成功后复位。
+    Private _已清注入表 As Boolean
+    ' 连续“模块答无元数据”的帧数（宿主零 DV 语义：不区分无据原因，统一计数）。
+    ' 成功注入或流重启时归零。只由泵线程读写。
+    Private _连续无元数据帧数 As Integer
 
     ' ---- 配置记录通道（容器码流配置记录：流级常量，取首次出现的一条并缓存） ----
     Private _配置记录 As Byte()
@@ -103,7 +126,8 @@ Friend Class 色彩变换注入泵
 
     ''' <summary>计数器摘要。</summary>
     Public Function 描述计数器() As String
-        Return $"注入 {注入帧数} 帧，未变 {未变帧数} 帧，跳过 {跳过帧数} 帧，末帧 {_末次注入帧号}"
+        Return $"注入 {注入帧数} 帧，未变 {未变帧数} 帧，跳过 {跳过帧数} 帧，" &
+               $"连续无据 {_连续无元数据帧数} 帧，末帧 {_末次注入帧号}"
     End Function
 
     ''' <summary>最近一次 分析帧（泵线程）产出的分类文本；未解锁 / 无分类 / 模块缺席时为空串。
@@ -150,11 +174,21 @@ Friend Class 色彩变换注入泵
 
     ''' <summary>启动泵线程。已在跑时是空操作；线程曾退出（如补装载放弃）时可重启动。</summary>
     Public Sub 启动()
+        Dim 旧唤醒 As ManualResetEventSlim = Nothing
         SyncLock _锁
             If _已释放 OrElse _停止 Then Return
             If _线程 IsNot Nothing AndAlso _线程.IsAlive Then Return
+            旧唤醒 = _唤醒
             _唤醒 = New ManualResetEventSlim(False)
         End SyncLock
+        ' 旧线程已经不在跑（上面 IsAlive 已排除），它那条唤醒事件可以收了：
+        ' 重启动是真会发生的路径（解锁晚于补装载预算），不释放会一次泄一个句柄。
+        If 旧唤醒 IsNot Nothing Then
+            Try
+                旧唤醒.Dispose()
+            Catch ex As ObjectDisposedException
+            End Try
+        End If
         Dim 新线程 As New Thread(New ThreadStart(AddressOf 泵循环)) With {
             .IsBackground = True,
             .Name = "色彩变换注入泵"
@@ -197,6 +231,9 @@ Friend Class 色彩变换注入泵
                     ' 还没装载（通常是“锁着、等用户输入解锁码”这一段）：低频补装载。
                     ' 票据一旦落盘，尝试装载就会成功，下一拍转入正常节拍。
                     If 补装载次数 >= 最大补装载次数 Then
+                        ' 放弃前把已注入的表丢掉：模块是中途失效（不只是在锁着）时，
+                        ' 内核里会一直躺着最后一条 LUT，而显示行早就空了。
+                        If 注入帧数 > 0UI Then 清除注入表()
                         Debug.WriteLine("色彩变换注入泵：补装载 " & 最大补装载次数.ToString() &
                                         " 次仍未成功（模块仍锁着或不在）⇒ 本会话放弃，保持静默")
                         Return
@@ -226,6 +263,9 @@ Friend Class 色彩变换注入泵
             End While
         Catch ex As Exception
             ' 线程入口的兜底：任何意外都静默退场，绝不把异常带出线程。
+            ' 退场前同样要丢表：否则画面继续套最后一条 LUT，而宿主这边已经没有任何
+            ' 供给源了（症状是“解锁了但显示没变”的镜像版）。
+            If 注入帧数 > 0UI Then 清除注入表()
             Debug.WriteLine("色彩变换注入泵：线程异常退场：" & ex.GetType().Name)
         End Try
     End Sub
@@ -279,8 +319,22 @@ Friend Class 色彩变换注入泵
         ' 换算前先把容器配置记录拿到手（流级常量；拿不到只是模块走它自己的保守路径）。
         确保配置记录()
 
+        ' 可选合成面：先问模块"这一帧要不要先合成"，再拿同一帧的答案去置 分析帧 的
+        ' 预合成标志。顺序不能反：该标志是模块烘焙 kind=3 表的准入条件，而表只能落在
+        ' 合成后的像素上。模块缺席这一面、或内核没有合成导出 ⇒ 两边都不碰，行为与今天一致。
+        Dim 合成参数 As New 色彩变换模块接口.原生合成参数
+        Dim 预合成标志 As UInteger = 0UI
+        Dim 合成已分析 As Boolean = False
+        If 模块.支持增强层合成 AndAlso 播放器原生接口.支持辅层合成 Then
+            Dim 合成返回 = 模块.分析增强层(数据, 帧序号, _配置记录, 合成参数)
+            合成已分析 = 合成返回 = 色彩变换模块接口.结果成功
+            If 合成已分析 AndAlso 合成参数.是否启用 <> 0UI Then
+                预合成标志 = 色彩变换模块接口.输入标志增强层已预合成
+            End If
+        End If
+
         Dim 载荷大小 As Integer = 0
-        Dim 返回 = 模块.分析帧(数据, 帧序号, _配置记录, 载荷大小)
+        Dim 返回 = 模块.分析帧(数据, 帧序号, _配置记录, 载荷大小, 预合成标志)
         _已消费帧号 = 帧序号
 
         ' 分类文本必须**紧接 分析帧 之后、在同一线程**读（模块侧按线程保存快照）。
@@ -305,26 +359,74 @@ Friend Class 色彩变换注入泵
                     未变帧数 += 1UI
                     Return False
                 End If
-                If 尝试注入(载荷, 载荷大小, 帧序号) Then
+                If 尝试注入(载荷, 载荷大小, 帧序号, 合成已分析, 合成参数) Then
                     ReDim Preserve _上次载荷(载荷大小 - 1)
                     Array.Copy(载荷, _上次载荷, 载荷大小)
                     注入帧数 += 1UI
                     _末次注入帧号 = 帧序号
+                    _已清注入表 = False
+                    _连续无元数据帧数 = 0
                     Return True
                 End If
                 跳过帧数 += 1UI
                 Return False
 
             Case 色彩变换模块接口.结果无元数据
-                ' 本帧无可换算据：正常跳过，不是错误，不计数。
+                ' 本帧无可换算据。宿主零 DV 语义（红线 B）：不区分原因——数据不自证、
+                ' 结构坏、未知档、携带未合成增强层残差，在宿主侧同构，统一按连续计数处理。
+                ' 偶发无据帧保留旧表是既定降级口径；连续达阈值才认定"这条流模块不接"并清表
+                ' （旧表继续套着就是 stale-table：seek/换段后旧 LUT 会套在内容不同的帧上）。
+                _连续无元数据帧数 += 1
+                If _连续无元数据帧数 >= 连续无元数据清表阈值 AndAlso 注入帧数 > 0UI Then
+                    Dim 本轮首清 = Not _已清注入表
+                    清除注入表()
+                    If 本轮首清 Then
+                        Debug.WriteLine("色彩变换注入泵：连续 " & _连续无元数据帧数.ToString() &
+                                        " 帧无元数据（本会话注入过 " & 注入帧数.ToString() &
+                                        " 帧）⇒ 已清注入表，stale-table 防护")
+                    End If
+                End If
+                Return False
+
+            Case 色彩变换模块接口.结果未授权
+                ' 解锁失效（票据到期/被删/换机）：模块从此不再供货。宿主这边显示行
+                ' 会自己变空（上面刚发布的空内容描述），但内核里还躺着上一条表 ——
+                ' 不丢掉的话，画面会继续套 LUT 直到换文件，与显示行自相矛盾。
+                跳过帧数 += 1UI
+                清除注入表()
                 Return False
 
             Case Else
-                ' 参数无效 / 缓冲不足 / 不支持 / 未授权：都记跳过。
+                ' 参数无效 / 缓冲不足 / 不支持：都记跳过。
                 跳过帧数 += 1UI
                 Return False
         End Select
     End Function
+
+    ''' <summary>通知内核丢掉所有已注入的动态元数据（种类 0 = 清空所有 kind）。
+    ''' 幂等且只做一次；下一次成功注入时复位，让“授权恢复”能重新生效。</summary>
+    Private Sub 清除注入表()
+        If _已清注入表 Then Return
+        _已清注入表 = True
+        ' 载荷缓存一起作废：授权恢复后必须重新注入，不能因为“内容没变”而跳过。
+        _上次载荷 = Nothing
+        Try
+            Dim 句柄 = _会话.取得句柄()
+            If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return
+            If Not 播放器原生接口.支持动态元数据注入 Then Return
+            Dim 结果 = 播放器原生接口.清空动态元数据(句柄, 0UI)
+            If 结果 <> 原生播放器结果.成功 Then
+                Debug.WriteLine("色彩变换注入泵：清注入表未被内核接受（" & 结果.ToString() & "）")
+            ElseIf _已消费帧号 >= 0 Then
+                ' 表没了，合成也必须停：否则画面继续带着老参数合成，而宿主这边已经
+                ' 没有任何供给源（症状与"表没清"互为镜像）。
+                发送合成请求(_已消费帧号, New 色彩变换模块接口.原生合成参数())
+            End If
+        Catch ex As Exception
+            ' 句柄可能正在销毁：清不掉也不能把泵带倒。
+            Debug.WriteLine("色彩变换注入泵：清注入表异常（已忽略）：" & ex.GetType().Name)
+        End Try
+    End Sub
 
     ' ---- 帧边数据环游标 ----
 
@@ -456,6 +558,9 @@ Friend Class 色彩变换注入泵
         _上次载荷 = Nothing
         _末次注入帧号 = -1
         _已消费帧号 = -1
+        _连续无元数据帧数 = 0
+        ' 新时间线还没有任何注入：允许下一次"未授权"再通知一次内核。
+        _已清注入表 = False
         ' 换文件后帧率可能变了：清掉缓存让下一拍重读。
         _节拍已缓存 = False
         ' 流重绑才会清内核侧的流级边数据；配置记录与分类文本必须跟着重取。
@@ -487,8 +592,13 @@ Friend Class 色彩变换注入泵
 
     ''' <summary>把一份载荷钉住、打成一个 kind=3 包，整表替换式注入。
     ''' 载荷字节就是内核 kind=3 载荷结构的字节（模块与内核 static_assert 同水），
-    ''' 所以不需要重建结构，直接钉住模块的缓冲即可。</summary>
-    Private Function 尝试注入(载荷 As Byte(), 载荷大小 As Integer, 帧序号 As Long) As Boolean
+    ''' 所以不需要重建结构，直接钉住模块的缓冲即可。
+    ''' <para>合成请求**只跟着表走**：同一帧成功注入后才把模块给出的那组参数交给内核。
+    ''' 这样"内核当前的表是用哪个预合成标志烘焙的"与"内核正在合成什么"永远同源；
+    ''' 载荷未变而跳过注入的帧，核心里那条请求也仍然有效（同一条 ≤ 帧号的规则）。</para></summary>
+    Private Function 尝试注入(载荷 As Byte(), 载荷大小 As Integer, 帧序号 As Long,
+                              合成已分析 As Boolean,
+                              合成参数 As 色彩变换模块接口.原生合成参数) As Boolean
         Dim 句柄 = _会话.取得句柄()
         If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return False
         If Not 播放器原生接口.支持动态元数据注入 Then Return False
@@ -507,11 +617,26 @@ Friend Class 色彩变换注入泵
                 .保留 = 0UI,
                 .载荷 = 钉住.AddrOfPinnedObject()
             }
-            Return 播放器原生接口.设置动态元数据(句柄, {包}) = 原生播放器结果.成功
+            Dim 注入结果 = 播放器原生接口.设置动态元数据(句柄, {包}) = 原生播放器结果.成功
+            If 注入结果 AndAlso 合成已分析 Then 发送合成请求(帧序号, 合成参数)
+            Return 注入结果
         Finally
             钉住.Free()
         End Try
     End Function
+
+    ''' <summary>把模块给出的合成参数原样交给内核。宿主不解释任何字段（红线 B）。</summary>
+    Private Sub 发送合成请求(帧序号 As Long, 参数 As 色彩变换模块接口.原生合成参数)
+        If Not 播放器原生接口.支持辅层合成 Then Return
+        Dim 句柄 = _会话.取得句柄()
+        If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return
+        Dim 已交 = 播放器原生接口.设置辅层合成(句柄, 帧序号, 参数.是否启用 <> 0UI,
+            参数.残差中心, 参数.残差移位, 参数.最大值)
+        ' 诊断（FFF_EL_TRACE）：合成请求跟着表走，一条表一条请求，量很小。
+        If Environment.GetEnvironmentVariable("FFF_EL_TRACE") = "1" Then
+            Console.Error.WriteLine($"CT-EL req frame={帧序号} enabled={参数.是否启用} shift={参数.残差移位} center={参数.残差中心} max={参数.最大值} ok={已交}")
+        End If
+    End Sub
 
     ''' <summary>两份载荷的前 <paramref name="大小"/> 字节是否逐位相同。</summary>
     Private Shared Function 载荷相同(左 As Byte(), 大小 As Integer, 右 As Byte()) As Boolean

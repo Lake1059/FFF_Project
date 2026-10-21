@@ -84,6 +84,12 @@
     <ClInclude Include="3FP\Core\PlayerSession.h">
       <Filter>3FP\Core</Filter>
     </ClInclude>
+    <ClInclude Include="3FP\Core\AvifIlocShim.h">
+      <Filter>3FP\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Core\AvifTileGridComposer.h">
+      <Filter>3FP\Core</Filter>
+    </ClInclude>
     <ClInclude Include="3FP\Subtitle\SubtitleProbe.h">
       <Filter>3FP\Subtitle</Filter>
     </ClInclude>
@@ -150,6 +156,12 @@
       <Filter>3FP\Audio</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Core\PlayerSession.cpp">
+      <Filter>3FP\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Core\AvifIlocShim.cpp">
+      <Filter>3FP\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Core\AvifTileGridComposer.cpp">
       <Filter>3FP\Core</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Core\PlayerSessionDisc.cpp">

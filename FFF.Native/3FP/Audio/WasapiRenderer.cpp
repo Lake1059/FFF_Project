@@ -371,8 +371,20 @@ PlayerWasapiRenderer::BedRoute PlayerWasapiRenderer::SelectBedRoute(const AVFram
             bed.sampleRate = static_cast<std::uint32_t>(std::max<std::int32_t>(0, frame->sample_rate));
             bed.channelCount = static_cast<std::uint32_t>(channels);
             bed.lfeIndex = 0xFFFFFFFFu;
+            // A bare channel count (AV_CHANNEL_ORDER_UNSPEC) carries no positions:
+            // every slot would read back as AV_CHAN_UNKNOWN and the plug could only
+            // decline, so a 5.1 or mono stream whose decoder left the layout bare
+            // would never be placed. Normalize exactly the way EnsureBedConverter
+            // does -- same call, same order -- so the description matches the plane
+            // order the plug is actually handed.
+            ScopedChannelLayout normalized;
+            const AVChannelLayout* positionsFrom = &frame->ch_layout;
+            if (frame->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC) {
+                normalized.Default(channels);
+                if (normalized.layout.nb_channels == channels) positionsFrom = &normalized.layout;
+            }
             for (int index = 0; index < channels; ++index) {
-                const auto channel = av_channel_layout_channel_from_index(&frame->ch_layout,
+                const auto channel = av_channel_layout_channel_from_index(positionsFrom,
                     static_cast<unsigned int>(index));
                 // AVChannel values as plain ints; AV_CHAN_NONE (-1) means "no such
                 // slot" and the module maps them into its own layout tables.

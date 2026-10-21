@@ -496,6 +496,9 @@ Public Class Form1
             Select Case 色彩变换模块接口.提交解锁码(码.Trim(), 详情)
                 Case 色彩变换模块接口.解锁结果.已接受
                     Debug.WriteLine("色彩变换模块：解锁码已被模块接受（票据已落盘）")
+                    ' 泵的补装载预算可能已经用尽（用户输码慢于 60 秒）：显式唤醒，
+                    ' 否则这一场播放不会开始注入，而用户已经看到“已解锁”。
+                    播放控制器?.唤醒色彩变换通路()
                     LakeUI.ExOverlayMsgBox(Me, "色彩变换模块已解锁。",
                         MsgBoxStyle.Information Or MsgBoxStyle.OkOnly, "色彩变换模块解锁")
                     Return
@@ -504,6 +507,9 @@ Public Class Form1
                     ' 码是对的，但票据写不进目标位置（常见于装在不可写目录）：
                     ' 本次进程能用，重启后要重输。这句必须说清，否则用户以为"没成功"。
                     Debug.WriteLine("色彩变换模块：解锁码已被模块接受（票据未落盘，仅本次进程）")
+                    ' 这条路径的授权只活在本进程的内存里，唤醒同样必须做——
+                    ' 否则用户会看到"已通过"但画面毫无变化。
+                    播放控制器?.唤醒色彩变换通路()
                     LakeUI.ExOverlayMsgBox(Me,
                         "解锁码已通过，但票据无法写入目标位置：本次运行可用，重启后需要重新输入。",
                         MsgBoxStyle.Exclamation Or MsgBoxStyle.OkOnly, "色彩变换模块解锁")

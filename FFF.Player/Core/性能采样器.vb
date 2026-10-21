@@ -131,7 +131,8 @@ Friend NotInheritable Class 性能采样器
             累积.AppendLine("window,clientW,clientH,videoW,videoH," &
                 "presented,dropped,coalesced,decoded,queued," &
                 "sw_ms,hw_ms,upload_ms,mapwait_ms,copy_ms,resample_ms," &
-                "devlock_ms,presentwait_ms,pass_per_frame,uploads,bytes_per_upload,upath,total_ms,fps")
+                "devlock_ms,presentwait_ms,pass_per_frame,uploads,bytes_per_upload,upath,total_ms,fps," &
+                "audio_delay_ms,audio_buffer_ms,audio_pos_ms")
             表头已写 = True
         End If
 
@@ -152,6 +153,14 @@ Friend NotInheritable Class 性能采样器
         Dim 上传增量 = 差值(后.上传次数, 前.上传次数)
         Dim 字节增量 = 差值(后.上传复制字节, 前.上传复制字节)
         Dim 每次字节 = If(上传增量 > 0, CDbl(字节增量) / CDbl(上传增量), 0.0R)
+
+        ' 音画同步三列（2026-10-20 补；此前 CSV 24 列零音频列，sync 只能证设计不能证实测）。
+        ' audio_delay_ms 是会话级设置量（唇音同步偏移），记当前值不记差值——改了就是改了。
+        ' audio_buffer_ms / audio_pos_ms 是累计量做差：缓冲占用变化（负=在被消耗）与
+        ' 音钟推进速率（应≈帧周期）。三者都走饱和差/时差，seek 回绕不会变成天文数字。
+        Dim 音频延迟毫秒 = 后.音频延迟.TotalMilliseconds
+        Dim 音频缓冲毫秒 = 毫秒(时差(后.音频缓冲时长, 前.音频缓冲时长), 呈现增量)
+        Dim 音钟毫秒 = 毫秒(时差(后.音频位置, 前.音频位置), 呈现增量)
 
         ' 记的是**画面控件**的视口，不是窗体客户区：两者差着边框、标题栏和控制条，
         ' 而决定缩放链长度的正是画面控件那块区域。用窗体尺寸会把口径再搞错一次。
@@ -180,7 +189,10 @@ Friend NotInheritable Class 性能采样器
             每次字节.ToString("F0", CultureInfo.InvariantCulture),
             后.上传路径.ToString(CultureInfo.InvariantCulture),
             (软转换 + 硬传输 + 上传 + 设备锁 + 呈现等待 + 重采样).ToString("F3", CultureInfo.InvariantCulture),
-            (呈现增量 / 1.0R).ToString("F2", CultureInfo.InvariantCulture)
+            (呈现增量 / 1.0R).ToString("F2", CultureInfo.InvariantCulture),
+            音频延迟毫秒.ToString("F3", CultureInfo.InvariantCulture),
+            音频缓冲毫秒.ToString("F3", CultureInfo.InvariantCulture),
+            音钟毫秒.ToString("F3", CultureInfo.InvariantCulture)
         }))
     End Sub
 

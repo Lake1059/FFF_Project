@@ -167,6 +167,18 @@ struct DynamicShaderSettings {
 static_assert(sizeof(DynamicShaderSettings) == 144,
     "DynamicShaderSettings must stay in lockstep with the HLSL DynamicSettings cbuffer");
 
+// Optional auxiliary-layer composition, bound as its own constant buffer (b3) so
+// the b0 and b2 layouts stay bit-identical to the single-stream path. With
+// `enabled == 0` the shader takes its original branches untouched.
+struct ElCompositionSettings {
+    std::uint32_t enabled = 0;        // 1 = the auxiliary planes at t5..t7 are composed
+    std::uint32_t residualCenter = 0; // neutral code of the auxiliary component
+    std::int32_t residualShift = 0;   // right shift applied to (auxiliary - centre)
+    std::uint32_t maxValue = 0;       // (1 << base bit depth) - 1
+};
+static_assert(sizeof(ElCompositionSettings) == 16,
+    "ElCompositionSettings must stay in lockstep with the HLSL ElComposition cbuffer");
+
 class PlayerVideoRenderer final {
 public:
     explicit PlayerVideoRenderer(std::function<void()> recoveryCallback = {}) noexcept;
@@ -340,9 +352,18 @@ public:
     // preserve the source pixel grid so it reads as a crisp enlargement, whereas
     // video upscaling wants a smooth reconstruction kernel. Passing it here keeps
     // the two policies in one place instead of guessing from the frame.
+    //
+    // `auxiliaryFrame` / `auxiliaryComposition` carry the optional second video layer.
+    // When the caller requests composition (enabled != 0) its coded components are
+    // composed over the base layer before any colour mapping runs, and the kind-3
+    // table then sees the combined signal. When the request is present but no frame
+    // could be paired, the table is withheld for that frame rather than sampled on
+    // samples it was not baked for; callers must pass the request either way.
     FFFResult Render(const AVFrame* frame, std::int64_t frameIndex,
         bool limitToNativeSize = false,
-        bool coverArt = false, bool prepareOnly = false, bool imageMode = false) noexcept;
+        bool coverArt = false, bool prepareOnly = false, bool imageMode = false,
+        const AVFrame* auxiliaryFrame = nullptr,
+        const FFF3FPAuxiliaryComposition* auxiliaryComposition = nullptr) noexcept;
     FFFResult Redraw() noexcept;
     // Re-pull the HDR classification and the ST 2094-40 curve from the processor and
     // refresh the shader inputs for the frame already sitting in the cached surface, so
@@ -355,6 +376,29 @@ public:
     // single place that decides it, for Render() and for the refresh above.
     std::uint32_t ResolveDecodeTransfer(const HdrFrameState& hdrState) const noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
+    /// Zero-cost capability probe for D3D11VA hardware decoding.
+    ///
+    /// Ask the driver instead of consulting a table: the answer describes this GPU
+    /// and this driver build, so it stays correct on machines where a static
+    /// "codec X at resolution Y is fine" rule would be wrong. It is a capability
+    /// question only -- can this stream be decoded at all -- never a throughput
+    /// question, which has no standard API and is left alone.
+    enum class D3D11DecodeSupport : std::uint8_t {
+        /// The probe could not run (no device yet, or no ID3D11VideoDevice).
+        /// The caller must keep its existing fallback ordering: this is not a
+        /// verdict, and treating it as "unsupported" would disable hardware
+        /// decoding whenever the renderer has not warmed up yet.
+        Unknown = 0,
+        /// The driver exposes at least one decoder configuration for the stream.
+        Supported = 1,
+        /// The driver has no configuration for it; software decoding is the only route.
+        Unsupported = 2,
+    };
+    /// `codecId` is an AVCodecID, `pixelFormat` an AVPixelFormat and `profile` an
+    /// FFmpeg profile. All three are passed as integers so this header stays free
+    /// of FFmpeg types.
+    D3D11DecodeSupport QueryD3D11DecodeSupport(std::int32_t codecId, std::int32_t profile,
+        std::int32_t pixelFormat, std::int32_t width, std::int32_t height) noexcept;
     FFFResult PresentTimedText() noexcept;
     FFFResult ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept;
     // Batch pixel readback (single GPU staging copy).
@@ -679,6 +723,14 @@ private:
     // device lock held (it uploads on the immediate context).
     bool BuildColorTransformSettings(const HdrFrameState& hdrState,
         DynamicShaderSettings& settings) noexcept;
+    // Upload the optional auxiliary layer's three planes and fill the b3 row.
+    // Fails (leaving `settings` zeroed) when the frame is not a 10-bit planar
+    // 4:2:0 picture or a plane is not CPU-addressable; the caller then treats
+    // the request as unpaired. Call with the device lock held.
+    FFFResult PrepareElComposition(const AVFrame* frame,
+        const FFF3FPAuxiliaryComposition& composition,
+        ElCompositionSettings& settings) noexcept;
+    void ReleaseElCompositionResources() noexcept;
     void ClearSurface() noexcept;
     void ReleaseDeviceObjects() noexcept;
     void RequestDeviceRecovery(long result, const char* operation) noexcept;
@@ -733,6 +785,23 @@ private:
     // SDR layout specialisation (which fixes InputLayout/ColorMode/Transfer/Gamut
     // at compile time) can be skipped while a transform is in force.
     bool cachedTransformEnabled_ = false;
+    // Optional auxiliary-layer composition resources. Three R16_UINT planes bound
+    // at t5..t7 (the code values themselves, never normalised, so the integer
+    // composition in the shader is exact) and the parameter row at b3. Created on
+    // demand; `cachedElComposeEnabled_` says they hold this frame's layer.
+    struct ElPlaneTexture {
+        ID3D11Texture2D* texture = nullptr;
+        ID3D11ShaderResourceView* view = nullptr;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+    };
+    ElPlaneTexture elPlanes_[3];
+    ID3D11Buffer* elCompositionBuffer_ = nullptr;
+    bool cachedElComposeEnabled_ = false;
+    // Set when the caller asked for composition but no auxiliary frame was paired:
+    // the kind-3 table must not run on the uncomposed picture, and a metadata
+    // refresh must not silently re-enable it for the cached frame.
+    bool cachedElTransformBlocked_ = false;
     // Raised when the injected ST 2094 table is installed or cleared, consumed on the
     // present path so the refresh happens under the device lock instead of racing the
     // presentation pump.

@@ -6,8 +6,10 @@ extern "C" {
 #include <libavutil/mem.h>
 }
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
+#include <cstring>
 
 namespace {
 constexpr int AvioBufferSize = 64 * 1024;
@@ -52,6 +54,10 @@ SharedFileInput::~SharedFileInput() {
     } else if (buffer_ != nullptr) {
         av_free(buffer_);
         buffer_ = nullptr;
+    }
+    if (data_ != nullptr) {
+        av_free(data_);
+        data_ = nullptr;
     }
     if (file_ != INVALID_HANDLE_VALUE) {
         CloseHandle(file_);
@@ -105,12 +111,57 @@ std::unique_ptr<SharedFileInput> SharedFileInput::Open(const char* pathUtf8,
     }
 }
 
+std::unique_ptr<SharedFileInput> SharedFileInput::OpenMemory(const std::uint8_t* data,
+    const std::size_t size, std::string& error) noexcept {
+    try {
+        if (data == nullptr || size == 0) {
+            error = "The in-memory media is empty.";
+            return nullptr;
+        }
+        auto input = std::make_unique<SharedFileInput>();
+        input->data_ = static_cast<std::uint8_t*>(av_malloc(size));
+        if (input->data_ == nullptr) {
+            error = "Could not allocate the in-memory media buffer.";
+            return nullptr;
+        }
+        std::memcpy(input->data_, data, size);
+        input->buffer_ = static_cast<std::uint8_t*>(av_malloc(AvioBufferSize));
+        if (input->buffer_ == nullptr) {
+            error = "Could not allocate the media input buffer.";
+            return nullptr;
+        }
+        input->context_ = avio_alloc_context(input->buffer_, AvioBufferSize, 0,
+            input.get(), &SharedFileInput::Read, nullptr, &SharedFileInput::Seek);
+        if (input->context_ == nullptr) {
+            error = "Could not allocate the FFmpeg media input context.";
+            return nullptr;
+        }
+        input->buffer_ = nullptr;
+        input->size_ = static_cast<std::int64_t>(size);
+        input->context_->seekable = AVIO_SEEKABLE_NORMAL;
+        return input;
+    } catch (...) {
+        error = "Could not prepare the in-memory media input.";
+        return nullptr;
+    }
+}
+
 int SharedFileInput::Read(void* opaque, std::uint8_t* buffer,
     const int bufferSize) noexcept {
     auto* input = static_cast<SharedFileInput*>(opaque);
-    if (input == nullptr || input->file_ == INVALID_HANDLE_VALUE ||
-        buffer == nullptr || bufferSize < 0)
+    if (input == nullptr || buffer == nullptr || bufferSize < 0)
         return AVERROR(EINVAL);
+    // In-memory media: copy what is left of the buffer and advance the cursor.
+    if (input->file_ == INVALID_HANDLE_VALUE) {
+        if (input->data_ == nullptr) return AVERROR(EINVAL);
+        if (bufferSize == 0 || input->position_ >= input->size_) return AVERROR_EOF;
+        const auto available = static_cast<int>(
+            std::min<std::int64_t>(bufferSize, input->size_ - input->position_));
+        std::memcpy(buffer, input->data_ + input->position_,
+            static_cast<std::size_t>(available));
+        input->position_ += available;
+        return available;
+    }
     if (bufferSize == 0) return 0;
 
     DWORD bytesRead = 0;
@@ -123,10 +174,24 @@ int SharedFileInput::Read(void* opaque, std::uint8_t* buffer,
 std::int64_t SharedFileInput::Seek(void* opaque, const std::int64_t offset,
     const int whence) noexcept {
     auto* input = static_cast<SharedFileInput*>(opaque);
-    if (input == nullptr || input->file_ == INVALID_HANDLE_VALUE)
-        return AVERROR(EINVAL);
+    if (input == nullptr) return AVERROR(EINVAL);
     const auto origin = whence & ~AVSEEK_FORCE;
     if (origin == AVSEEK_SIZE) return input->size_;
+    // In-memory media: the cursor is all there is to move.
+    if (input->file_ == INVALID_HANDLE_VALUE) {
+        if (input->data_ == nullptr) return AVERROR(EINVAL);
+        std::int64_t target = 0;
+        switch (origin) {
+        case SEEK_SET: target = offset; break;
+        case SEEK_CUR: target = input->position_ + offset; break;
+        case SEEK_END: target = input->size_ + offset; break;
+        default: return AVERROR(EINVAL);
+        }
+        if (target < 0) return AVERROR(EINVAL);
+        if (target > input->size_) target = input->size_;
+        input->position_ = target;
+        return target;
+    }
 
     DWORD method = FILE_BEGIN;
     switch (origin) {
