@@ -3433,7 +3433,7 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
         // An explicit SDR tier is authoritative only for an HDR source. For an SDR
         // source the same pick is just the Auto policy's starting point, so a >8-bit
         // SDR source is still promoted to the scRGB chain when the display can take it.
-        const auto preserveExplicitSdrTier = hdrProcessor_.IsHdrSource() &&
+        const auto preserveExplicitSdrTier = hdrProcessor_.IsHdrSourceStream() &&
             (requestedMode_ == FFF3FPColorMode::MapToSdr ||
                 requestedMode_ == FFF3FPColorMode::RawHdrAsSdr);
         const auto nextMode =
@@ -3451,7 +3451,7 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
         // MapToSdr must not write a fallback reason.
         const auto reason = !wantsHdrPath ?
             "True HDR output is only available for HDR or wide-gamut sources." :
-            (hdrProcessor_.IsHdrSource() || IsWideGamutSource() ?
+            (hdrProcessor_.IsHdrSourceStream() || IsWideGamutSource() ?
                 "The target display or Windows Advanced Color mode does not support true HDR output." :
                 "Advanced Color output is not active, so this SDR source stays on the classic SDR swap chain.");
         const auto demoted = requestedMode_ == FFF3FPColorMode::MapToHdr &&
@@ -8880,7 +8880,7 @@ bool PlayerVideoRenderer::IsWideGamutSource() const noexcept {
 float PlayerVideoRenderer::EffectivePaperWhiteNits() const noexcept {
     // SDR on scRGB anchors white at Windows SDR content brightness (1.0 = 80 nits).
     // HDR keeps the configured paper white.
-    if (actualMode_ == FFF3FPColorMode::MapToHdr && !hdrProcessor_.IsHdrSource()) {
+    if (actualMode_ == FFF3FPColorMode::MapToHdr && !hdrProcessor_.IsHdrSourceStream()) {
         // Reported whenever Windows HDR is active. If the platform does not
         // report it, fall back to scRGB 1.0 (80 nits) rather than the 200-nit
         // graphics white: 80 is the contract reference and sits much closer to
@@ -8893,11 +8893,13 @@ float PlayerVideoRenderer::EffectivePaperWhiteNits() const noexcept {
 bool PlayerVideoRenderer::WantsScRgbPresentationPath(const std::uint32_t bitDepth) const noexcept {
     // HDR and wide gamut always need scRGB; Auto SDR also admits >8-bit sources.
     // Use the supplied depth because sourceBitDepth_ is unset before the first frame.
-    if (hdrProcessor_.IsHdrSource() || IsWideGamutSource()) return true;
+    if (hdrProcessor_.IsHdrSourceStream() || IsWideGamutSource()) return true;
     return sdrScRgbMode_ != 0 && bitDepth > 8;
 }
 float PlayerVideoRenderer::SourcePeakNits() const noexcept { return sourcePeakNits_; }
 HdrFrameState PlayerVideoRenderer::HdrState() const noexcept { return hdrProcessor_.State(); }
+HdrFrameState PlayerVideoRenderer::StreamHdrState() const noexcept { return hdrProcessor_.StreamState(); }
+bool PlayerVideoRenderer::IsHdrSourceStream() const noexcept { return hdrProcessor_.IsHdrSourceStream(); }
 std::uint64_t PlayerVideoRenderer::PresentedVideoFrames() const noexcept { return presentedVideoFrames_.load(); }
 std::uint64_t PlayerVideoRenderer::CoalescedVideoFrames() const noexcept { return coalescedVideoFrames_.load(); }
 std::uint64_t PlayerVideoRenderer::SwapChainPresents() const noexcept { return swapChainPresents_.load(); }
