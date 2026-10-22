@@ -127,7 +127,8 @@ constexpr std::int64_t TargetVideoLookAhead100ns = 1'500'000;
 // Buffered100ns includes both application PCM and samples already submitted to
 // WASAPI.  Keep the complete audible queue short so seek, stream/volume changes
 // and the information overlay reflect a low-latency local playback pipeline.
-constexpr std::int64_t TargetAudioBuffer100ns = 1'200'000;
+// The target itself (audioTargetBuffer100ns_) is a per-round adaptive member --
+// see PlayerSession.h; this file deliberately keeps no copy of the default.
 constexpr std::size_t MaximumIndexedVideoFrames = 32'768;
 constexpr std::size_t MaximumPendingVideoPackets = 64;
 constexpr std::size_t MaximumPendingVideoPacketBytes = 16 * 1024 * 1024;
@@ -1070,7 +1071,7 @@ void PlayerSession::TryCompletePlaybackPreroll() noexcept {
         !(packetBound && !videoFrameQueue_.empty())) return;
     const auto audioDrained = externalFormat_ != nullptr ? externalAudioDrained_ : audioDecoderDrained_;
     if (!draining_ && !packetBound && audioRenderer_ && !audioDrained &&
-        audioRenderer_->Buffered100ns() < TargetAudioBuffer100ns) return;
+        audioRenderer_->Buffered100ns() < audioTargetBuffer100ns_) return;
     if (snapshot_.framePts == AV_NOPTS_VALUE && !videoFrameQueue_.empty() &&
         videoRenderer_.HasOutputWindow()) {
         auto* frame = videoFrameQueue_.front();
@@ -1864,6 +1865,12 @@ FFFResult PlayerSession::RecreateAudioRenderer(const std::wstring& endpointId,
             if (audioPlugInstalled_) replacement->SetAudioRenderPlug(&audioPlug_);
         }
         audioRenderer_ = std::move(replacement);
+        // Floor latch: the pool may never target less than the buffer WASAPI
+        // actually granted (a smaller target could not fill it). On a fresh
+        // open the member was just reset to the default, so this is the whole
+        // latch; on a mid-round device switch a risen target survives.
+        audioTargetBuffer100ns_ = std::max(audioTargetBuffer100ns_,
+            audioRenderer_->DeviceBufferDuration100ns());
         return FFFResult::Success;
     } catch (...) {
         error = "Could not allocate a replacement WASAPI renderer.";
@@ -3289,6 +3296,9 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Keep the flip-model chain for a same-HWND media switch. DXGI can reject
     // an immediate replacement while the previous chain is still retiring.
     DoClose(FFF3FPState::Opening, true);
+    // A new file is a new audio-pool round: back to the default target.
+    audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
+    seenAudioUnderruns_ = 0;
     std::string openError;
     auto openResult = FFFResult::Success;
     if (DiscInput::IsDiscPath(path)) {
@@ -4115,10 +4125,30 @@ void PlayerSession::PumpPlayback() noexcept {
         return;
     }
     const auto audioBuffered = audioRenderer_ ? audioRenderer_->Buffered100ns() : 0;
+    // Rise-only pool: each newly observed underrun batch (any delta since the
+    // last pump) buys one step of target headroom, capped at the maximum. A
+    // seek rewinds the renderer's own counter below what we have seen -- that
+    // is a counter reset, not a drop, so it only re-baselines the comparison.
+    if (audioRenderer_) {
+        const auto underruns = audioRenderer_->UnderrunCount();
+        if (underruns < seenAudioUnderruns_) seenAudioUnderruns_ = underruns;
+        else if (underruns > seenAudioUnderruns_) {
+            seenAudioUnderruns_ = underruns;
+            const auto previousTarget = audioTargetBuffer100ns_;
+            audioTargetBuffer100ns_ = std::min(kMaximumAudioTargetBuffer100ns,
+                audioTargetBuffer100ns_ + kAudioTargetBufferStep100ns);
+            if (GetEnvironmentVariableW(L"FFF_AUDIO_TARGET_TRACE", nullptr, 0))
+                std::fprintf(stderr, "AUDIO_TARGET underruns=%llu target=%lld -> %lld buffered=%lld\n",
+                    static_cast<unsigned long long>(underruns),
+                    static_cast<long long>(previousTarget),
+                    static_cast<long long>(audioTargetBuffer100ns_),
+                    static_cast<long long>(audioBuffered));
+        }
+    }
     const auto delayAudioUntilVideo = audioRenderer_ && ShouldDelayAudioUntilVideoFrame();
     const auto videoSaturated = [this] { return SoftwareVideoInputFull() || VideoQueueSaturated(); };
     if (!delayAudioUntilVideo && !pendingAudioPackets_.empty() &&
-        audioBuffered < TargetAudioBuffer100ns) {
+        audioBuffered < audioTargetBuffer100ns_) {
         DecodePendingPacket(false);
         return;
     }
@@ -4126,7 +4156,7 @@ void PlayerSession::PumpPlayback() noexcept {
     // packet queue, but it honours the same buffer target and the same
     // "wait for video" rule so it stays in step with the clock.
     if (iamfDecoder_ != nullptr && !delayAudioUntilVideo &&
-        audioBuffered < TargetAudioBuffer100ns) {
+        audioBuffered < audioTargetBuffer100ns_) {
         PumpIamfAudio();
         if (state_.load() == FFF3FPState::Failed) return;
     }
@@ -4137,9 +4167,9 @@ void PlayerSession::PumpPlayback() noexcept {
         DecodePendingPacket(true);
         return;
     }
-    if (videoStream_ < 0 && audioRenderer_ && audioBuffered >= TargetAudioBuffer100ns) { Sleep(2); return; }
+    if (videoStream_ < 0 && audioRenderer_ && audioBuffered >= audioTargetBuffer100ns_) { Sleep(2); return; }
     if (externalFormat_ != nullptr && audioRenderer_ && !delayAudioUntilVideo &&
-        audioBuffered < TargetAudioBuffer100ns) PumpExternalAudio();
+        audioBuffered < audioTargetBuffer100ns_) PumpExternalAudio();
     if (demuxEnded_) {
         if (pendingVideoPackets_.empty()) FlushAtEnd();
         else Sleep(1);
@@ -4150,11 +4180,11 @@ void PlayerSession::PumpPlayback() noexcept {
     const auto audioPacketsFull = pendingAudioPackets_.size() >= MaximumPendingAudioPackets ||
         pendingAudioPacketBytes_ >= MaximumPendingAudioPacketBytes;
     if (videoSaturated() &&
-        ((!audioRenderer_ || audioBuffered >= TargetAudioBuffer100ns) || videoPacketsFull)) {
+        ((!audioRenderer_ || audioBuffered >= audioTargetBuffer100ns_) || videoPacketsFull)) {
         Sleep(1);
         return;
     }
-    if (audioRenderer_ && audioBuffered >= TargetAudioBuffer100ns && audioPacketsFull &&
+    if (audioRenderer_ && audioBuffered >= audioTargetBuffer100ns_ && audioPacketsFull &&
         pendingVideoPackets_.empty()) {
         Sleep(1);
         return;
@@ -4223,7 +4253,7 @@ void PlayerSession::PumpPlayback() noexcept {
             }
             DecodePacket(audioDecoder_, playbackPacket_, false, format_);
         };
-        if (audioRenderer_ && (delayAudioUntilVideo || audioBuffered >= TargetAudioBuffer100ns)) {
+        if (audioRenderer_ && (delayAudioUntilVideo || audioBuffered >= audioTargetBuffer100ns_)) {
             if (delayAudioUntilVideo && audioPacketsFull) {
                 decodeAudioPacket();
                 av_packet_unref(playbackPacket_);
@@ -4699,7 +4729,7 @@ bool PlayerSession::PumpVideoPresentation() noexcept {
     // Continue demuxing toward audio while video is ahead, retaining compressed
     // video packets instead of several additional full decoded 4K frames.
     const auto audioNeedsData = audioRenderer_ &&
-        audioRenderer_->Buffered100ns() < TargetAudioBuffer100ns;
+        audioRenderer_->Buffered100ns() < audioTargetBuffer100ns_;
     const auto packetCapacityAvailable =
         pendingVideoPackets_.size() < MaximumPendingVideoPackets &&
         pendingVideoPacketBytes_ < MaximumPendingVideoPacketBytes;
@@ -6405,6 +6435,9 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         if (audioDecoder_) avcodec_free_context(&audioDecoder_);
         ReleaseIamfDecoder();
         audioDecoder_ = replacement; audioStream_ = index; snapshot_.selectedAudioStream = index;
+        // A new audio track is a new pool round, same as a new file.
+        audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
+        seenAudioUnderruns_ = 0;
         // Re-evaluate the IAMF path for the newly selected track: switching onto an
         // IAMF stream must engage the reference decoder, and switching away from one
         // must release it. No fallback is needed here -- if IAMF cannot be opened we
@@ -6831,8 +6864,7 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                 parameters->nb_coded_side_data, AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
             HdrProcessor streamHdr;
             streamHdr.ConfigureStream(parameters);
-            const auto hdr = static_cast<std::int32_t>(index) == videoStream_
-                ? videoRenderer_.HdrState() : streamHdr.State();
+            const auto hdr = streamHdr.State();
             const auto formatName = std::string(HdrProcessor::FormatName(hdr.format));
             const auto processingPath = std::string(HdrProcessor::ProcessingPathName(hdr.processingPath));
             json << ",\"hdrFormat\":\"" << EscapeJson(formatName) << "\""

@@ -113,6 +113,9 @@ public:
     std::int64_t TimelineLimit100ns() const noexcept;
     std::int64_t Buffered100ns() const noexcept;
     std::uint64_t UnderrunCount() const noexcept;
+    // The buffer duration WASAPI actually granted at Initialize time (both modes,
+    // including the exclusive aligned retry), in 100 ns units. 0 before Start.
+    std::int64_t DeviceBufferDuration100ns() const noexcept;
     std::uint64_t TimestampJitterCount() const noexcept;
     std::uint64_t DiscontinuityCount() const noexcept;
     std::uint64_t InsertedSilenceFrames() const noexcept;
@@ -246,6 +249,7 @@ private:
     std::vector<float> plugRightScratch_;
     std::size_t bedPlaneStrideFrames_ = 0;
     std::uint32_t outputSampleRate_;
+    std::int64_t deviceBufferDuration100ns_ = 0;
     std::uint16_t outputChannels_;
     std::uint16_t outputBlockAlign_;
     std::uint16_t outputBitsPerSample_;
