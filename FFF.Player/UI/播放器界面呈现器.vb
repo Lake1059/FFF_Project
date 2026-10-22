@@ -33,7 +33,6 @@ Friend NotInheritable Class 播放器界面呈现器
     Private ReadOnly 快照提供器 As Func(Of 播放器快照)
     Private ReadOnly 正在切换提供器 As Func(Of Boolean)
     Private ReadOnly 解码器提供器 As Func(Of 解码模式)
-    Private ReadOnly 色彩模式提供器 As Func(Of 色彩输出模式)
     Private ReadOnly 刷新计时器 As LakeUI.PrecisionTimer
 
     Private 正在更新进度条 As Boolean
@@ -68,8 +67,7 @@ Friend NotInheritable Class 播放器界面呈现器
                    画面控件 As 播放器画面控件,
                    快照提供器 As Func(Of 播放器快照),
                    正在切换提供器 As Func(Of Boolean),
-                   解码器提供器 As Func(Of 解码模式),
-                   色彩模式提供器 As Func(Of 色彩输出模式))
+                   解码器提供器 As Func(Of 解码模式))
         Me.进度条 = 进度条
         Me.音量条 = 音量条
         Me.播放暂停按钮 = 播放暂停按钮
@@ -90,7 +88,6 @@ Friend NotInheritable Class 播放器界面呈现器
         Me.快照提供器 = 快照提供器
         Me.正在切换提供器 = 正在切换提供器
         Me.解码器提供器 = 解码器提供器
-        Me.色彩模式提供器 = 色彩模式提供器
         刷新计时器 = New LakeUI.PrecisionTimer With {
             .Interval = 100,
             .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
@@ -388,7 +385,9 @@ Friend NotInheritable Class 播放器界面呈现器
         设置配对可见(HDR按钮, HDR占位, 可见)
         If Not 可见 Then Return
 
-        Select Case 色彩模式提供器()
+        ' 徽章描述"现在看到的是什么"：优先用实际色彩模式。SDR 屏上请求真实HDR
+        ' 会被内核降级成映射SDR，此时显示请求值会写出与实际不符的 "HDR"。
+        Select Case 快照.实际色彩模式
             Case 色彩输出模式.映射到SDR
                 设置自适应文本(HDR按钮, "SDR")
             Case 色彩输出模式.原始HDR按SDR呈现
