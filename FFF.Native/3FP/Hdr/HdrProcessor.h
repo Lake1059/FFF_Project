@@ -77,7 +77,15 @@ public:
     void Reset() noexcept;
 
     HdrFrameState State() const noexcept;
+    // The stream declaration (container tags + coded side data), re-resolved on
+    // display/target changes but never on frames. Info surfaces read this, not
+    // State(): a frame without HDR10+ SEI must not pull the reported caliber
+    // back to the stream default while the next frame pushes it forward again.
+    HdrFrameState StreamState() const noexcept;
     bool IsHdrSource() const noexcept;
+    // Stream-level counterpart of IsHdrSource(): the presentation-path gates
+    // must not depend on whether the current frame happens to carry SEI.
+    bool IsHdrSourceStream() const noexcept;
     bool RequiresMetadataAwareShader() const noexcept;
     void BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) const noexcept;
     // Static HDR10 signalling block for a frame the NVIDIA TrueHDR video-
