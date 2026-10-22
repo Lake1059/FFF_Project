@@ -68,10 +68,12 @@ Friend Module HdrOverlayStabilityProbe
             End Sub)
 
         ' 帧1：无 SEI 帧（动态=0，快照枚举=HDR10）。流级 HDR10，不该有动态段。
+        ' 帧1 也是 HDR 行锁存的取数点（是HDR源=1）：此后快照派生段全部冻结。
         当前快照 = 造快照(HDR格式.HDR10, False)
         Dim 行1 = HDR行(呈现器.读取调试文本行(媒体信息合成(), 当前快照, 媒体路径))
         检查(行1.Contains("HDR10") AndAlso Not 行1.Contains("HDR10+"), "帧1 规格走流级口径", 行1)
         检查(Not 行1.Contains("动态元数据"), "帧1 无动态段（尚未见过有效帧）", 行1)
+        检查(行1.Contains("源峰值 1000尼特"), "帧1 锁存源峰值 1000", 行1)
 
         ' 帧2：带 SEI 帧（动态=1，快照枚举翻 HDR10Plus）。规格必须仍是流的 HDR10；
         ' 旧逻辑在这里会输出 "HDR10+" —— 本条就是两臂分叉判据。
@@ -81,6 +83,14 @@ Friend Module HdrOverlayStabilityProbe
              "帧2 逐帧枚举翻 HDR10Plus 后规格仍为流级 HDR10", 行2)
         检查(行2.Contains("P8.1"), "帧2 内容等级仍在行内", 行2)
         检查(行2.Contains("动态元数据已用于处理"), "帧2 出现动态段", 行2)
+
+        ' 帧2.5：快照逐帧派生段开始横跳（枚举翻 HDR10+、源峰值翻 2000、回退位翻真）——
+        ' 锁存后行内必须还是帧1 取到的值。旧逻辑在这里整行横跳。
+        当前快照 = 造快照(HDR格式.HDR10Plus, True, 源峰值:=2000UI, 回退:=True)
+        Dim 行25 = HDR行(呈现器.读取调试文本行(媒体信息合成(), 当前快照, 媒体路径))
+        检查(行25.Contains("源峰值 1000尼特") AndAlso Not 行25.Contains("2000"),
+             "帧2.5 源峰值锁存不随快照翻动", 行25)
+        检查(Not 行25.Contains("HDR fallback"), "帧2.5 回退位锁存不随快照翻动", 行25)
 
         ' 帧3：回落帧（动态=0）。粘滞位保持。
         当前快照 = 造快照(HDR格式.HDR10, False)
@@ -98,22 +108,44 @@ Friend Module HdrOverlayStabilityProbe
         Dim 行5 = HDR行(呈现器.读取调试文本行(媒体信息合成(), 当前快照, 媒体路径))
         检查(行5.Contains("动态元数据已用于处理"), "帧5 新流见到有效帧后动态段再现", 行5)
 
+        ' 帧6：用户换档（请求色彩模式变）→ HDR 行重新取一次：换档时刻的
+        ' 峰值映射档 + 目标 427 尼特必须可见（合法变化不能被冻结吞掉）。
+        当前快照 = 造快照(HDR格式.HDR10Plus, True, 请求档:=色彩输出模式.峰值映射HDR,
+                         目标尼特:=427UI, 实际档:=色彩输出模式.峰值映射HDR)
+        Dim 行6 = HDR行(呈现器.读取调试文本行(媒体信息合成(), 当前快照, 媒体路径))
+        检查(行6.Contains("显示目标 427尼特"), "帧6 用户换档后重新取数（目标可见）", 行6)
+
+        ' 帧7：换档后快照目标再翻动 —— 新一轮锁存生效，行内保持帧6 的值。
+        当前快照 = 造快照(HDR格式.HDR10Plus, True, 源峰值:=2000UI, 请求档:=色彩输出模式.峰值映射HDR,
+                         目标尼特:=900UI, 实际档:=色彩输出模式.峰值映射HDR)
+        Dim 行7 = HDR行(呈现器.读取调试文本行(媒体信息合成(), 当前快照, 媒体路径))
+        检查(行7.Contains("显示目标 427尼特") AndAlso 行7.Contains("源峰值 1000尼特"),
+             "帧7 换档后第二轮锁存冻结", 行7)
+
         Console.WriteLine($"HDR 行稳定性：通过 {通过} 条，失败 {失败} 条")
         Return If(失败 = 0, 0, 1)
     End Function
 
-    Private Function 造快照(规格 As HDR格式, 动态有效 As Boolean) As 播放器快照
+    Private Function 造快照(规格 As HDR格式, 动态有效 As Boolean,
+                           Optional 源峰值 As UInteger = 1000UI, Optional 回退 As Boolean = False,
+                           Optional 请求档 As 色彩输出模式 = 色彩输出模式.映射到SDR,
+                           Optional 目标尼特 As UInteger = 0UI,
+                           Optional 实际档 As 色彩输出模式 = 色彩输出模式.映射到SDR) As 播放器快照
         Dim 原生 As New 原生播放器快照 With {
             .大小 = CUInt(Runtime.InteropServices.Marshal.SizeOf(Of 原生播放器快照)()),
             .状态 = CUInt(播放状态.正在播放),
             .解码器 = CUInt(解码模式.GPU),
+            .请求色彩模式 = CUInt(请求档),
+            .实际色彩模式 = CUInt(实际档),
             .当前视频流 = 0,
             .视频宽度 = 3840UI, .视频高度 = 2160UI,
             .是HDR源 = 1UI,
             .视频队列帧数 = 8UI,
-            .源峰值尼特 = 1000UI,
+            .源峰值尼特 = 源峰值,
             .HDR格式 = CUInt(规格),
             .动态HDR元数据有效 = If(动态有效, 1UI, 0UI),
+            .HDR有效目标峰值尼特 = 目标尼特,
+            .HDR回退有效 = If(回退, 1UI, 0UI),
             .显示器峰值尼特 = 1000UI}
         Return New 播放器快照(原生)
     End Function
@@ -158,7 +190,7 @@ Friend Module HdrOverlayStabilityProbe
              "逐帧横跳后选中项保持", $"selectedIndex={列表类型.GetProperty("SelectedIndex").GetValue(列表)}")
 
         ' 牙齿臂：签名内字段（显示器峰值尼特）变化 —— 必须重建（实例引用变、选中丢失）。
-        当前快照 = 造快照(HDR格式.HDR10, False, 1200UI)
+        当前快照 = 造列表快照(HDR格式.HDR10, False, 1200UI)
         表单.刷新()
         Dim 仍同实例 = CObj(取条目(0)) Is CObj(基线条目)
         检查(Not 仍同实例, "签名内字段变化触发重建（牙齿）", $"sameInstance={仍同实例}")
@@ -169,7 +201,7 @@ Friend Module HdrOverlayStabilityProbe
         Return If(失败 = 0, 0, 1)
     End Function
 
-    Private Function 造快照(规格 As HDR格式, 动态有效 As Boolean, 显示器峰值 As UInteger) As 播放器快照
+    Private Function 造列表快照(规格 As HDR格式, 动态有效 As Boolean, 显示器峰值 As UInteger) As 播放器快照
         Dim 原生 As New 原生播放器快照 With {
             .大小 = CUInt(Runtime.InteropServices.Marshal.SizeOf(Of 原生播放器快照)()),
             .状态 = CUInt(播放状态.正在播放),
