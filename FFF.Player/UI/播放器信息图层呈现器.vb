@@ -90,6 +90,16 @@ Friend NotInheritable Class 播放器信息图层呈现器
     ' 直接显示会横跳；本流内一旦见过就保持显示，换片/换流时重置。
     Private 粘滞动态媒体键 As String = String.Empty
     Private 粘滞动态已见过 As Boolean
+    ' HDR 行快照派生段的"开流取一次"锁存：源峰值/显示目标/回退位/规格回退枚举
+    ' 全是逐帧口径，实时显示就是横跳本身。打开后的第一次有效读数取一次，
+    ' 整轮冻结；键含请求色彩模式 —— 用户主动换档是合法变化，必须重新可见。
+    Private 粘滞HDR键 As String = String.Empty
+    Private 粘滞HDR已取 As Boolean
+    Private 粘滞HDR规格枚举 As HDR格式 = HDR格式.SDR
+    Private 粘滞源峰值 As UInteger
+    Private 粘滞目标有效 As Boolean
+    Private 粘滞目标尼特 As UInteger
+    Private 粘滞回退 As Boolean
     Private 已释放 As Boolean
 
     Friend Sub New(画面 As 播放器画面控件,
@@ -270,6 +280,22 @@ Friend NotInheritable Class 播放器信息图层呈现器
                 粘滞动态已见过 = False
             End If
             If 快照.动态HDR元数据有效 Then 粘滞动态已见过 = True
+            ' HDR 行"开流取一次"锁存：换片/换流/用户换档跨过键界才重取，
+            ' 其余时刻不再读快照的逐帧派生段 —— 显示层从此没有逐帧输入。
+            Dim HDR键 = $"{媒体路径}|{快照.当前视频流}|{快照.请求色彩模式}"
+            If HDR键 <> 粘滞HDR键 Then
+                粘滞HDR键 = HDR键
+                粘滞HDR已取 = False
+            End If
+            If Not 粘滞HDR已取 AndAlso (快照.是HDR源 OrElse 视频.是HDR) Then
+                粘滞HDR已取 = True
+                粘滞HDR规格枚举 = 快照.HDR规格
+                粘滞源峰值 = 快照.源峰值尼特
+                粘滞目标有效 = 快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
+                    快照.HDR有效目标峰值尼特 > 0
+                粘滞目标尼特 = 快照.HDR有效目标峰值尼特
+                粘滞回退 = 快照.HDR回退有效
+            End If
             添加配对行如果有值(结果, "HDR：", 视频HDR(视频, 快照, 内容描述), 橙色)
             添加配对行如果有值(结果, "内容：", 内容描述, 橙色)
             添加配对行如果有值(结果, "输出：", 视频输出(快照, 画面控件.ClientSize), 绿色)
@@ -513,21 +539,20 @@ Friend NotInheritable Class 播放器信息图层呈现器
 
     Private Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照, 内容描述 As String) As String
         If Not 快照.是HDR源 AndAlso Not 流.是HDR Then Return String.Empty
-        ' 规格取流级口径：媒体 JSON 的 hdrFormat 已与逐帧状态脱钩（内核侧），
-        ' 无 SEI 的帧不再把 HDR10+ 拉回 HDR10 造成规格横跳。流字段缺失时
-        ' 才退回快照枚举（旧路径兜底）。
+        ' 规格优先流级口径（媒体 JSON 已与逐帧状态脱钩）；流只声明 SDR/缺声明时
+        ' 才回退快照枚举 —— 且读的是"开流取一次"的锁存值，不再逐帧横跳。
         Dim 规格 = If(String.IsNullOrWhiteSpace(流.HDR格式) OrElse 流.HDR格式 = "SDR",
-                    HDR规格文本(快照.HDR规格, 流.HDR格式), 流.HDR格式)
+                    HDR规格文本(粘滞HDR规格枚举, 流.HDR格式), 流.HDR格式)
         ' 外部模块算出的 P 等级（解锁后才有值）插在规格之后；宿主只显示不解释，空值自然不出现。
         Dim 等级 = If(String.IsNullOrWhiteSpace(内容描述), String.Empty, 内容描述.Trim())
         ' 动态段是粘滞位（见 创建调试行），逐帧回落不再把这段抹掉。
         Dim 动态 = If(粘滞动态已见过, "动态元数据已用于处理", String.Empty)
-        Dim 亮度 = If(快照.源峰值尼特 > 0,
-            $"源峰值 {快照.源峰值尼特:0}尼特", String.Empty)
-        If 快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso 快照.HDR有效目标峰值尼特 > 0 Then
-            亮度 = 合并字段(亮度, $"显示目标 {快照.HDR有效目标峰值尼特:0}尼特")
+        ' 亮度段与回退位同走锁存值：显示目标只在锁存时刻处于峰值映射档才出现。
+        Dim 亮度 = If(粘滞源峰值 > 0, $"源峰值 {粘滞源峰值:0}尼特", String.Empty)
+        If 粘滞目标有效 Then
+            亮度 = 合并字段(亮度, $"显示目标 {粘滞目标尼特:0}尼特")
         End If
-        Dim 回退 = If(快照.HDR回退有效, "HDR fallback", String.Empty)
+        Dim 回退 = If(粘滞回退, "HDR fallback", String.Empty)
         Return 合并字段(规格, 等级, 动态, 亮度, 回退)
     End Function
 
@@ -556,10 +581,16 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Function
 
     Private Shared Function 音频输入(流 As 媒体流信息, 实时比特率 As ULong) As String
-        Dim 位深 = If(流.原始采样位数 > 0, 流.原始采样位数, 流.编码采样位数)
+        ' 位深只对无损/PCM 流有意义：有损编码（AAC 等）的 bitsPerCodedSample 是
+        ' 编码槽宽（32 = fltp 的尺寸），不是源位深，显示出来就是假信息。
+        Dim 位深 As String = String.Empty
+        If 流.无损 OrElse 流.压缩模式 <> "有损" Then
+            Dim 位 = If(流.原始采样位数 > 0, 流.原始采样位数, 流.编码采样位数)
+            If 位 > 0 Then 位深 = $"位深 {位}bit"
+        End If
         Return 合并字段(
             If(流.采样率 > 0, $"采样 {流.采样率}Hz", String.Empty),
-            If(位深 > 0, $"位深 {位深}bit", String.Empty),
+            位深,
             If(流.声道数 > 0, $"声道数 {流.声道数}", String.Empty),
             If(实时比特率 > 0, $"实时码率 {格式化比特率(实时比特率)}", String.Empty))
     End Function
