@@ -344,6 +344,9 @@ Public Class Form媒体信息
         Return If(value > 0, $"{value / 1000.0R:0.##} kHz", "—")
     End Function
     Private Shared Function 位深(stream As 媒体流信息) As String
+        ' 有损编码（AAC 等）没有源位深可言：bitsPerCodedSample 是编码槽宽
+        ' （32 = fltp 的尺寸），显示出来就是假信息 —— 直接不报，交给"压缩模式"行。
+        If Not stream.无损 AndAlso stream.压缩模式 = "有损" Then Return String.Empty
         Dim d = If(stream.位深度 > 0, stream.位深度, If(stream.原始采样位数 > 0, stream.原始采样位数, stream.编码采样位数))
         Return If(d > 0, $"{d}bit", 空值(stream.采样格式))
     End Function

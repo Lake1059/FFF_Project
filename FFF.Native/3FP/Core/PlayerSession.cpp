@@ -3299,6 +3299,10 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // A new file is a new audio-pool round: back to the default target.
     audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
     seenAudioUnderruns_ = 0;
+    seenAudioJitterFrames_ = 0;
+    seenAudioDiscontinuities_ = 0;
+    seenAudioInsertedSilence_ = 0;
+    seenAudioDroppedOverlap_ = 0;
     std::string openError;
     auto openResult = FFFResult::Success;
     if (DiscInput::IsDiscPath(path)) {
@@ -4125,21 +4129,37 @@ void PlayerSession::PumpPlayback() noexcept {
         return;
     }
     const auto audioBuffered = audioRenderer_ ? audioRenderer_->Buffered100ns() : 0;
-    // Rise-only pool: each newly observed underrun batch (any delta since the
-    // last pump) buys one step of target headroom, capped at the maximum. A
-    // seek rewinds the renderer's own counter below what we have seen -- that
-    // is a counter reset, not a drop, so it only re-baselines the comparison.
+    // Rise-only pool: any newly observed warning batch (any counter growth since
+    // the last pump) buys one step of target headroom, capped at the maximum.
+    // Underruns are the hard signal; timestamp jitter and discontinuity-family
+    // counters mean the decoded timeline itself is unsteady, and the pool must
+    // open for them too -- a stream that warns while the queue stays shallow is
+    // exactly the case the fixed default cannot absorb. A seek rewinds the
+    // renderer's counters below what we have seen -- that is a counter reset,
+    // not a drop, so it only re-baselines the comparison.
     if (audioRenderer_) {
+        auto grew = false;
+        const auto track = [&grew](const std::uint64_t now, std::uint64_t& seen) {
+            if (now < seen) { seen = now; return; }   // counter reset (seek): re-baseline
+            if (now > seen) { seen = now; grew = true; }
+        };
         const auto underruns = audioRenderer_->UnderrunCount();
-        if (underruns < seenAudioUnderruns_) seenAudioUnderruns_ = underruns;
-        else if (underruns > seenAudioUnderruns_) {
-            seenAudioUnderruns_ = underruns;
+        const auto jitter = audioRenderer_->TimestampJitterCount();
+        const auto discontinuities = audioRenderer_->DiscontinuityCount();
+        track(underruns, seenAudioUnderruns_);
+        track(jitter, seenAudioJitterFrames_);
+        track(discontinuities, seenAudioDiscontinuities_);
+        track(audioRenderer_->InsertedSilenceFrames(), seenAudioInsertedSilence_);
+        track(audioRenderer_->DroppedOverlapFrames(), seenAudioDroppedOverlap_);
+        if (grew) {
             const auto previousTarget = audioTargetBuffer100ns_;
             audioTargetBuffer100ns_ = std::min(kMaximumAudioTargetBuffer100ns,
                 audioTargetBuffer100ns_ + kAudioTargetBufferStep100ns);
             if (GetEnvironmentVariableW(L"FFF_AUDIO_TARGET_TRACE", nullptr, 0))
-                std::fprintf(stderr, "AUDIO_TARGET underruns=%llu target=%lld -> %lld buffered=%lld\n",
+                std::fprintf(stderr, "AUDIO_TARGET underruns=%llu jitter=%llu disc=%llu target=%lld -> %lld buffered=%lld\n",
                     static_cast<unsigned long long>(underruns),
+                    static_cast<unsigned long long>(jitter),
+                    static_cast<unsigned long long>(discontinuities),
                     static_cast<long long>(previousTarget),
                     static_cast<long long>(audioTargetBuffer100ns_),
                     static_cast<long long>(audioBuffered));
@@ -6438,6 +6458,10 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         // A new audio track is a new pool round, same as a new file.
         audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
         seenAudioUnderruns_ = 0;
+        seenAudioJitterFrames_ = 0;
+        seenAudioDiscontinuities_ = 0;
+        seenAudioInsertedSilence_ = 0;
+        seenAudioDroppedOverlap_ = 0;
         // Re-evaluate the IAMF path for the newly selected track: switching onto an
         // IAMF stream must engage the reference decoder, and switching away from one
         // must release it. No fallback is needed here -- if IAMF cannot be opened we
