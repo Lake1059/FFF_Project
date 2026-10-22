@@ -138,6 +138,12 @@ Friend Module AudioPoolLiveProbe
                 Dim 起始快照 = 会话.当前快照
                 r.起始欠载 = 起始快照.音频欠载次数
                 r.起始呈现 = CLng(起始快照.已呈现视频帧数)
+                ' 音频流身份读数：编码/布局/声道（验输入行取数来源的端到端链路）。
+                Dim 音频流 = 会话.当前媒体信息?.流.FirstOrDefault(
+                    Function(x) x.类型.Equals("audio", StringComparison.OrdinalIgnoreCase))
+                If 音频流 IsNot Nothing Then
+                    Console.WriteLine($"  读数: 音频流 编码={音频流.编码} 声道={音频流.声道数} 布局=[{音频流.声道布局}] 压缩模式=[{音频流.压缩模式}]")
+                End If
                 If 采HDR AndAlso 会话.当前媒体信息 IsNot Nothing AndAlso
                     会话.当前媒体信息.流.Count > 0 Then
                     r.早期HDR = 会话.当前媒体信息.流(0).HDR格式 &
