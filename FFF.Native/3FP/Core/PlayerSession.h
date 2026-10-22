@@ -720,6 +720,16 @@ private:
     std::size_t pendingVideoPacketBytes_;
     std::deque<AVPacket*> pendingAudioPackets_;
     std::size_t pendingAudioPacketBytes_;
+    // Audio buffer target, in 100 ns units. Per file round: latched to at least
+    // the duration WASAPI actually granted at renderer creation, then raised one
+    // step per observed underrun batch. Rise-only within the round -- nothing
+    // steps it down -- and reset to the default by DoOpen and by an audio-track
+    // change. Everything that touches it runs on the session worker thread.
+    static constexpr std::int64_t kDefaultAudioTargetBuffer100ns = 600'000;
+    static constexpr std::int64_t kMaximumAudioTargetBuffer100ns = 2'400'000;
+    static constexpr std::int64_t kAudioTargetBufferStep100ns = 300'000;
+    std::int64_t audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
+    std::uint64_t seenAudioUnderruns_ = 0;
     struct BitRateBucket {
         std::int64_t secondIndex;
         std::uint64_t bytes;
