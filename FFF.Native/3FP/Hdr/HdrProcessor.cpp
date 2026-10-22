@@ -487,7 +487,17 @@ HdrFrameState HdrProcessor::State() const noexcept {
     return frameState_;
 }
 
+HdrFrameState HdrProcessor::StreamState() const noexcept {
+    std::lock_guard lock(mutex_);
+    return streamState_;
+}
+
 bool HdrProcessor::IsHdrSource() const noexcept { return State().format != FFF3FPHdrFormat::Sdr; }
+
+bool HdrProcessor::IsHdrSourceStream() const noexcept {
+    std::lock_guard lock(mutex_);
+    return streamState_.format != FFF3FPHdrFormat::Sdr;
+}
 
 bool HdrProcessor::BuildInjectedStateVivid(const FFF3FPHdrVividMetadataPayload& payload,
     HdrDynamicMetadata& metadata) noexcept {
