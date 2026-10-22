@@ -729,7 +729,15 @@ private:
     static constexpr std::int64_t kMaximumAudioTargetBuffer100ns = 2'400'000;
     static constexpr std::int64_t kAudioTargetBufferStep100ns = 300'000;
     std::int64_t audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
+    // Last-seen values of the renderer's warning counters. Any growth since the
+    // previous pump buys one step of target headroom -- underruns are the hard
+    // signal, timestamp jitter / discontinuities / inserted silence / dropped
+    // overlap are the timeline-unsteady signals the pool must also open for.
     std::uint64_t seenAudioUnderruns_ = 0;
+    std::uint64_t seenAudioJitterFrames_ = 0;
+    std::uint64_t seenAudioDiscontinuities_ = 0;
+    std::uint64_t seenAudioInsertedSilence_ = 0;
+    std::uint64_t seenAudioDroppedOverlap_ = 0;
     struct BitRateBucket {
         std::int64_t secondIndex;
         std::uint64_t bytes;

@@ -83,6 +83,7 @@ Friend Module AudioPoolLiveProbe
     Private Class 轮读数
         Public 稳态缓冲 As New List(Of Double)()   ' 预热 2s 之后的 音频缓冲时长 ms 采样
         Public 稳态欠载峰 As ULong                 ' 稳态采样窗内见过的最大 音频欠载次数
+        Public 稳态抖动峰 As ULong                 ' 稳态采样窗内见过的最大 抖动帧数
         Public 起始欠载 As ULong
         Public 末欠载 As ULong
         Public 起始呈现 As Long
@@ -137,10 +138,17 @@ Friend Module AudioPoolLiveProbe
                 Dim 起始快照 = 会话.当前快照
                 r.起始欠载 = 起始快照.音频欠载次数
                 r.起始呈现 = CLng(起始快照.已呈现视频帧数)
+                ' 音频流身份读数：编码/布局/声道（验输入行取数来源的端到端链路）。
+                Dim 音频流 = 会话.当前媒体信息?.流.FirstOrDefault(
+                    Function(x) x.类型.Equals("audio", StringComparison.OrdinalIgnoreCase))
+                If 音频流 IsNot Nothing Then
+                    Console.WriteLine($"  读数: 音频流 编码={音频流.编码} 声道={音频流.声道数} 布局=[{音频流.声道布局}] 压缩模式=[{音频流.压缩模式}]")
+                End If
                 If 采HDR AndAlso 会话.当前媒体信息 IsNot Nothing AndAlso
                     会话.当前媒体信息.流.Count > 0 Then
                     r.早期HDR = 会话.当前媒体信息.流(0).HDR格式 &
-                        "|" & 会话.当前媒体信息.流(0).动态HDR元数据.ToString()
+                        "|" & 会话.当前媒体信息.流(0).动态HDR元数据.ToString() &
+                        "|快照:" & CInt(会话.当前快照.HDR规格).ToString()
                 End If
 
                 ' 前 2 秒是预热（解码器起转 + 队列首次填充），不进稳态样本。
@@ -149,7 +157,8 @@ Friend Module AudioPoolLiveProbe
                 If 采HDR AndAlso 会话.当前媒体信息 IsNot Nothing AndAlso
                     会话.当前媒体信息.流.Count > 0 Then
                     r.中期HDR = 会话.当前媒体信息.流(0).HDR格式 &
-                        "|" & 会话.当前媒体信息.流(0).动态HDR元数据.ToString()
+                        "|" & 会话.当前媒体信息.流(0).动态HDR元数据.ToString() &
+                        "|快照:" & CInt(会话.当前快照.HDR规格).ToString()
                 End If
                 Dim 截止 = Stopwatch.GetTimestamp() + CLng((播放秒 - 2.0) * Stopwatch.Frequency)
                 Dim 下次 = Stopwatch.GetTimestamp()
@@ -160,6 +169,7 @@ Friend Module AudioPoolLiveProbe
                         Dim s = 会话.当前快照
                         r.稳态缓冲.Add(s.音频缓冲时长.TotalMilliseconds)
                         If s.音频欠载次数 > r.稳态欠载峰 Then r.稳态欠载峰 = s.音频欠载次数
+                        If s.音频时间戳抖动帧数 > r.稳态抖动峰 Then r.稳态抖动峰 = s.音频时间戳抖动帧数
                         下次 += Stopwatch.Frequency \ 8   ' 125ms 一采
                     End If
                 Loop While Stopwatch.GetTimestamp() < 截止
@@ -225,10 +235,11 @@ Friend Module AudioPoolLiveProbe
                           $"欠载 {轮2欠载}（窗内峰 {轮2.稳态欠载峰}），呈现 {轮2.末呈现 - 轮2.起始呈现} 帧")
         If 轮2.稳态缓冲.Count = 0 OrElse 轮2.末呈现 - 轮2.起始呈现 <= 0 Then
             跳过判("轮2 回合重置", "无有效稳态样本，未判")
-        ElseIf 轮2欠载 > 0 OrElse 轮2.稳态欠载峰 > 0 Then
-            ' 持续饥饿下轮 2 会再次欠载、目标再次抬升 —— 这是设计行为（"只升不降"
+        ElseIf 轮2欠载 > 0 OrElse 轮2.稳态欠载峰 > 0 OrElse 轮2.稳态抖动峰 > 0 Then
+            ' 持续告警（欠载或抖动）下轮 2 会再次抬升 —— 这是设计行为（"只升不降"
             ' 是对回合内说的），此时默认水位判据不适用，记未判而不是判红。
-            跳过判("轮2 回合重置（默认水位）", $"轮2 自身欠载 {轮2欠载}（窗内峰 {轮2.稳态欠载峰}），抬升属设计，未判默认水位")
+            跳过判("轮2 回合重置（默认水位）",
+                   $"轮2 自身欠载 {轮2欠载}（窗内峰 {轮2.稳态欠载峰}）抖动峰 {轮2.稳态抖动峰}，抬升属设计，未判默认水位")
         Else
             检查(缓冲中位2 > 0.0 AndAlso 缓冲中位2 <= 110.0, "轮2 重开后回到默认档水位（回合重置）",
                  $"median={缓冲中位2:F1}ms")
