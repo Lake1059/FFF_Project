@@ -315,8 +315,10 @@ Friend NotInheritable Class 播放器信息图层呈现器
             添加配对行如果有值(结果, "声场：", 快照.IAMF描述, 青色)
             ' 接缝生效才出现这一行：外部渲染器拥有床（HRTF 双耳）。缺席 / 旧件 / 未解锁
             ' 一律不出现——那是现网的矩阵折叠，不是一条需要向用户解释的降级。
+            ' 用户口径只写身份："床/拥有床"是混音行话（channel-based 的静态层），
+            ' 谁在渲染是实现者视角的诊断，对用户是噪音。
             If 快照.音频双耳渲染生效 Then
-                添加配对行如果有值(结果, "双耳：", "HRTF（外部渲染器拥有床）", 青色)
+                添加配对行如果有值(结果, "双耳：", "HRTF 空间音频", 青色)
             End If
             添加配对行如果有值(结果, "输入：", 音频输入(音频, 快照.音频实时比特率), 紫色)
             添加配对行如果有值(结果, "输出：", 音频输出(音频, 快照), 绿色)
@@ -581,14 +583,17 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Function
 
     Private Shared Function 音频输入(流 As 媒体流信息, 实时比特率 As ULong) As String
+        ' 编码名打头（AAC/OPUS/EAC3…）：输入行的身份来自编码，采样/声道是它的属性。
         ' 位深只对无损/PCM 流有意义：有损编码（AAC 等）的 bitsPerCodedSample 是
         ' 编码槽宽（32 = fltp 的尺寸），不是源位深，显示出来就是假信息。
+        Dim 编码 = If(String.IsNullOrWhiteSpace(流.编码), String.Empty, 流.编码.ToUpperInvariant())
         Dim 位深 As String = String.Empty
         If 流.无损 OrElse 流.压缩模式 <> "有损" Then
             Dim 位 = If(流.原始采样位数 > 0, 流.原始采样位数, 流.编码采样位数)
             If 位 > 0 Then 位深 = $"位深 {位}bit"
         End If
         Return 合并字段(
+            编码,
             If(流.采样率 > 0, $"采样 {流.采样率}Hz", String.Empty),
             位深,
             If(流.声道数 > 0, $"声道数 {流.声道数}", String.Empty),
