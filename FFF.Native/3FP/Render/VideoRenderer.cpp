@@ -3421,11 +3421,29 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     // FFF3FPConfiguration.sdrScRgbMode documents. Keeping this whole block inside
     // `requestedMode_ == MapToHdr` made the policy a no-op for the normal SDR caller,
     // measured: a 10-bit HEVC source stayed at outBits=10 with FFF3FP_SDR_SCRGB=1.
+    // The policy is documented for *SDR* sources only (FFF.Player.Api.h
+    // sdrScRgbMode: "Presentation policy for SDR sources on an Advanced Color
+    // display"): an HDR source whose caller picked MapToSdr or RawHdrAsSdr must
+    // keep that tier, or an explicit SDR pick on an HDR display snaps back to
+    // HDR on the next frame. A host that wants Auto-HDR asks for MapToHdr,
+    // which keeps its demotion path below unchanged.
     if (requestedMode_ == FFF3FPColorMode::MapToHdr || sdrScRgbMode_ != 0) {
         // Wide-gamut SDR also needs scRGB to retain colors outside Rec.709.
         const auto wantsHdrPath = WantsScRgbPresentationPath(sourceBitDepth);
-        const auto nextMode = wantsHdrPath && OutputSupportsHdr() ?
-            FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr;
+        // An explicit SDR tier is authoritative only for an HDR source. For an SDR
+        // source the same pick is just the Auto policy's starting point, so a >8-bit
+        // SDR source is still promoted to the scRGB chain when the display can take it.
+        const auto preserveExplicitSdrTier = hdrProcessor_.IsHdrSource() &&
+            (requestedMode_ == FFF3FPColorMode::MapToSdr ||
+                requestedMode_ == FFF3FPColorMode::RawHdrAsSdr);
+        const auto nextMode =
+            requestedMode_ == FFF3FPColorMode::MapToHdr ?
+                (wantsHdrPath && OutputSupportsHdr() ?
+                    FFF3FPColorMode::MapToHdr : FFF3FPColorMode::MapToSdr) :
+            preserveExplicitSdrTier ?
+                requestedMode_ :
+                (wantsHdrPath && OutputSupportsHdr() ?
+                    FFF3FPColorMode::MapToHdr : requestedMode_);
         // Distinguish "this source does not need scRGB" from "the display cannot
         // give it scRGB": with the Auto SDR policy a 10-bit SDR source reaches
         // the second branch without being HDR or wide gamut at all. Only a caller
@@ -5431,13 +5449,22 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
             timedTextLayers_[slotIndex] = std::move(retained);
             presentationFrameRate_ = DetectDisplayRefreshRate(window_);
             bool hasVisibleLayer = false;
+            float layerTargetHz = 0.0f;
             for (const auto& item : timedTextLayers_) {
                 if (item != nullptr && !item->commands.empty()) {
                     hasVisibleLayer = true;
-                    presentationFrameRate_ = std::max(presentationFrameRate_,
+                    layerTargetHz = std::max(layerTargetHz,
                         std::clamp(item->targetFrameRate, 1.0f, 240.0f));
                 }
             }
+            // presentationFrameRate_ is the declared panel rate and nothing else. The
+            // layer target deliberately does NOT raise it: it is a request for overlay
+            // flips, not a claim about how fast the display can scan out. Folding the two
+            // together (the old behaviour) let a 125 Hz layer target make a 60 Hz panel
+            // advertise 125 Hz here, which then raised FrameRateBoundHz above the panel
+            // and misfiled panel-limited discards as pipeline lateness. FrameRateBoundHz
+            // raises against this value, so the cap stays the real panel.
+            timedTextLayerTargetHz_.store(layerTargetHz, std::memory_order_release);
             if (hasVisibleLayer) {
                 timedTextThreadRunning_ = true;
                 if (!timedTextThread_.joinable()) {
@@ -7716,8 +7743,10 @@ FFFResult PlayerVideoRenderer::SetPresentConfig(const bool enableTearing) noexce
 // ---- Presentation pacing ceiling (exported as FFF3FP_GetPresentPacingStatus) ----
 //
 // This layer produces one number and nothing else:
-//     bound = min(declared panel refresh rate, per-media frame-rate ceiling)
-// and it only ever holds the presenter back, never speeds it up. Both halves are needed:
+//     bound = min(declared panel refresh rate, per-media frame-rate ceiling),
+//             raised back up to a visible layer's requested rate (still ≤ panel)
+// and apart from that layer-request raise it only ever holds the presenter back. Both
+// ceiling halves are needed:
 //   * content < panel (60 fps on 144 Hz) -- the panel would accept 144 flips, and flipping
 //     more often than the source changes picture only re-scan-outs the same frame, so the
 //     content rate is the useful limit;
@@ -7731,9 +7760,10 @@ FFFResult PlayerVideoRenderer::SetPresentConfig(const bool enableTearing) noexce
 // and what is left of its readings below.
 double PlayerVideoRenderer::DisplayCadenceHz() const noexcept {
     // presentationFrameRate_ is written under timedTextMutex_; reading it unlocked here is
-    // the same benign race the diagnostics already accept -- it changes on chain creation
-    // and on timed-text layer changes, never mid-flip, and a one-frame-stale rate would
-    // only shift the classification threshold, not the presentation.
+    // the same benign race the diagnostics already accept -- it is the declared panel rate,
+    // changed only by window/chain creation, display-mode detection and SetWindow, never
+    // by a timed-text layer target. A one-frame-stale rate would only shift the
+    // classification threshold, not the presentation.
     //
     // The calibrated value (measuredRefreshHz_) is deliberately NOT used here any more, even
     // though it is still measured. Two reasons, both from this machine:
@@ -7760,6 +7790,17 @@ double PlayerVideoRenderer::FrameRateBoundHz() const noexcept {
     // the hold-band scoring and the discard bucketing. Feeding a variable-frame-rate source's
     // frame-by-frame period into the ceiling made the ceiling itself stutter frame to frame.
     auto bound = ceilingHz <= 0.0 ? panelHz : std::min(panelHz, ceilingHz);
+    // The media ceiling bounds how often the *picture* changes; a visible animated
+    // layer (danmaku) still owes flips at its own requested rate even when the source
+    // is slower. Raise the bound back up to that request, capped by the declared panel
+    // rate only (panelHz is never raised by a layer target) -- the ceiling must not
+    // swallow a floor the host asked for, and the floor must not exceed what the panel
+    // can scan out. Video frames do not wait on this number (they bypass it while
+    // !paceEngaged), so the extra flips are overlay-only re-compositions of the
+    // already-presented picture.
+    if (const auto layerTargetHz = timedTextLayerTargetHz_.load(std::memory_order_acquire);
+        layerTargetHz > 0.0f)
+        bound = std::max(bound, std::min(panelHz, static_cast<double>(layerTargetHz)));
     // The adaptive pace floor caps the bound from below: the session sets it when the
     // pipeline falls behind the media clock, and holding every flip one floor-period
     // out is what presents every picture at a slower cadence (which a variable-refresh
@@ -8803,6 +8844,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
             timedTextRenderedHdrHighlights_[index] = false;
             timedTextPresentCounts_[index] = 0;
         }
+        timedTextLayerTargetHz_.store(0.0f, std::memory_order_release);
     }
     timedTextCondition_.notify_one();
 }
@@ -8825,6 +8867,7 @@ void PlayerVideoRenderer::Close() noexcept {
             timedTextLayers_[index].reset();
             timedTextPresentCounts_[index] = 0;
         }
+        timedTextLayerTargetHz_.store(0.0f, std::memory_order_release);
     }
     std::vector<std::uint8_t>().swap(convertedRgb_);
     deviceRecoveryRequested_.store(false, std::memory_order_release);
