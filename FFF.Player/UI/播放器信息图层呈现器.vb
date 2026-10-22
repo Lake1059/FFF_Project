@@ -592,11 +592,21 @@ Friend NotInheritable Class 播放器信息图层呈现器
             Dim 位 = If(流.原始采样位数 > 0, 流.原始采样位数, 流.编码采样位数)
             If 位 > 0 Then 位深 = $"位深 {位}bit"
         End If
+        ' 声道数带布局（5.1 / 7.1.4 / 6.1…，FFmpeg 布局描述原样）；mono/stereo
+        ' 不加——声道数 1/2 已经说明，括号只服务多声道布局这层信息。
+        Dim 声道 As String = String.Empty
+        If 流.声道数 > 0 Then
+            声道 = $"声道数 {流.声道数}"
+            Dim 布局 = 流.声道布局
+            If Not String.IsNullOrWhiteSpace(布局) AndAlso 布局 <> "mono" AndAlso 布局 <> "stereo" Then
+                声道 &= $"（{布局}）"
+            End If
+        End If
         Return 合并字段(
             编码,
             If(流.采样率 > 0, $"采样 {流.采样率}Hz", String.Empty),
             位深,
-            If(流.声道数 > 0, $"声道数 {流.声道数}", String.Empty),
+            声道,
             If(实时比特率 > 0, $"实时码率 {格式化比特率(实时比特率)}", String.Empty))
     End Function
 
