@@ -437,6 +437,9 @@ public:
     bool IsWideGamutSource() const noexcept;
     float SourcePeakNits() const noexcept;
     HdrFrameState HdrState() const noexcept;
+    // Stream declaration counterpart of HdrState(): never changes per frame.
+    HdrFrameState StreamHdrState() const noexcept;
+    bool IsHdrSourceStream() const noexcept;
     std::uint64_t PresentedVideoFrames() const noexcept;
     std::uint64_t CoalescedVideoFrames() const noexcept;
     std::uint64_t SwapChainPresents() const noexcept;

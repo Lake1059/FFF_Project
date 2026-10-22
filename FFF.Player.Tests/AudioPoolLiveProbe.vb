@@ -141,7 +141,8 @@ Friend Module AudioPoolLiveProbe
                 If 采HDR AndAlso 会话.当前媒体信息 IsNot Nothing AndAlso
                     会话.当前媒体信息.流.Count > 0 Then
                     r.早期HDR = 会话.当前媒体信息.流(0).HDR格式 &
-                        "|" & 会话.当前媒体信息.流(0).动态HDR元数据.ToString()
+                        "|" & 会话.当前媒体信息.流(0).动态HDR元数据.ToString() &
+                        "|快照:" & CInt(会话.当前快照.HDR规格).ToString()
                 End If
 
                 ' 前 2 秒是预热（解码器起转 + 队列首次填充），不进稳态样本。
@@ -150,7 +151,8 @@ Friend Module AudioPoolLiveProbe
                 If 采HDR AndAlso 会话.当前媒体信息 IsNot Nothing AndAlso
                     会话.当前媒体信息.流.Count > 0 Then
                     r.中期HDR = 会话.当前媒体信息.流(0).HDR格式 &
-                        "|" & 会话.当前媒体信息.流(0).动态HDR元数据.ToString()
+                        "|" & 会话.当前媒体信息.流(0).动态HDR元数据.ToString() &
+                        "|快照:" & CInt(会话.当前快照.HDR规格).ToString()
                 End If
                 Dim 截止 = Stopwatch.GetTimestamp() + CLng((播放秒 - 2.0) * Stopwatch.Frequency)
                 Dim 下次 = Stopwatch.GetTimestamp()

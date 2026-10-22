@@ -220,33 +220,40 @@ std::size_t VideoFrameQueueLimit(const std::deque<AVFrame*>& queue,
     return std::clamp(queueBound, MinimumMemoryBoundVideoFrames, cap);
 }
 
-void ApplyHdrState(FFF3FPSnapshot& snapshot, const HdrFrameState& hdr) noexcept {
+// Classification comes from the STREAM declaration (container tags + coded side
+// data, re-resolved on display/target changes but never per frame) -- the info
+// surfaces read file data, so a frame without HDR10+ SEI must not pull the
+// reported caliber back while the next frame pushes it forward again. Only the
+// ST 2094-40 diagnostics blocks stay per-frame: they are deliberately live
+// readouts of the metadata currently on screen.
+void ApplyHdrState(FFF3FPSnapshot& snapshot, const HdrFrameState& stream,
+    const HdrFrameState& frame) noexcept {
     const auto toUnsigned = [](const float value, const float scale = 1.0f) {
         if (!std::isfinite(value) || value <= 0.0f) return 0u;
         return static_cast<std::uint32_t>(std::lround(std::min(
             static_cast<double>(value) * scale,
             static_cast<double>(std::numeric_limits<std::uint32_t>::max()))));
     };
-    snapshot.hdrFormat = hdr.format;
-    snapshot.compatibleHdrFormats = hdr.compatibility;
-    snapshot.hdrProcessingPath = hdr.processingPath;
+    snapshot.hdrFormat = stream.format;
+    snapshot.compatibleHdrFormats = stream.compatibility;
+    snapshot.hdrProcessingPath = stream.processingPath;
     snapshot.hdrDpProfile = 0;  // deprecated: no longer classified
     snapshot.hdrDpLevel = 0;  // deprecated: no longer classified
     snapshot.hasHDRdpRpu = 0;  // deprecated: no longer classified
-    snapshot.dynamicHdrMetadataActive = hdr.dynamicMetadata ? 1u : 0u;
-    snapshot.hdrFallbackActive = hdr.fallback ? 1u : 0u;
-    snapshot.displayMinLuminanceMilliNits = toUnsigned(hdr.display.minimumNits, 1000.0f);
-    snapshot.displayPeakNits = toUnsigned(hdr.display.maximumNits);
-    snapshot.displayFullFramePeakNits = toUnsigned(hdr.display.maximumFullFrameNits);
-    snapshot.effectiveTargetPeakNits = toUnsigned(hdr.targetPeakNits);
-    snapshot.dynamicMetadataWindows = hdr.dynamic.windowCount;
+    snapshot.dynamicHdrMetadataActive = stream.dynamicMetadata ? 1u : 0u;
+    snapshot.hdrFallbackActive = stream.fallback ? 1u : 0u;
+    snapshot.displayMinLuminanceMilliNits = toUnsigned(stream.display.minimumNits, 1000.0f);
+    snapshot.displayPeakNits = toUnsigned(stream.display.maximumNits);
+    snapshot.displayFullFramePeakNits = toUnsigned(stream.display.maximumFullFrameNits);
+    snapshot.effectiveTargetPeakNits = toUnsigned(stream.targetPeakNits);
+    snapshot.isHdrSource = stream.format == FFF3FPHdrFormat::Sdr ? 0u : 1u;
+    snapshot.dynamicMetadataWindows = frame.dynamic.windowCount;
     snapshot.dynamicMetadataDegrade =
-        static_cast<std::uint32_t>(hdr.dynamic.degrade);
-    snapshot.dynamicMetadataSerial = hdr.dynamic.serial;
-    snapshot.dynamicMetadataHeldFrames = hdr.dynamic.heldFrames;
+        static_cast<std::uint32_t>(frame.dynamic.degrade);
+    snapshot.dynamicMetadataSerial = frame.dynamic.serial;
+    snapshot.dynamicMetadataHeldFrames = frame.dynamic.heldFrames;
     snapshot.dynamicMetadataTargetedNits =
-        toUnsigned(hdr.dynamic.targetedDisplayNits);
-    snapshot.isHdrSource = hdr.format == FFF3FPHdrFormat::Sdr ? 0u : 1u;
+        toUnsigned(frame.dynamic.targetedDisplayNits);
 }
 
 bool ReadLeb128(const std::uint8_t* data, const std::size_t size,
@@ -2548,7 +2555,7 @@ FFFResult PlayerSession::SetInjectedHdrMetadata(
     // FFF3FP_GetHdrMetadataSource reads the processor, not the snapshot.
     if (result == FFFResult::Success)
         Enqueue([this] {
-            ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+            ApplyHdrState(snapshot_, videoRenderer_.StreamHdrState(), videoRenderer_.HdrState());
             PublishSnapshot();
         });
     return result;
@@ -2557,7 +2564,7 @@ FFFResult PlayerSession::SetInjectedHdrMetadata(
 FFFResult PlayerSession::ClearInjectedHdrMetadata() noexcept {
     videoRenderer_.ClearInjectedHdrMetadata();
     Enqueue([this] {
-        ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+        ApplyHdrState(snapshot_, videoRenderer_.StreamHdrState(), videoRenderer_.HdrState());
         PublishSnapshot();
     });
     return FFFResult::Success;
@@ -2575,7 +2582,7 @@ FFFResult PlayerSession::SetDynamicMetadata(
     // ST 2094 diagnostics refresh on the session thread.
     if (result == FFFResult::Success)
         Enqueue([this] {
-            ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+            ApplyHdrState(snapshot_, videoRenderer_.StreamHdrState(), videoRenderer_.HdrState());
             PublishSnapshot();
         });
     return result;
@@ -2584,7 +2591,7 @@ FFFResult PlayerSession::SetDynamicMetadata(
 FFFResult PlayerSession::ClearDynamicMetadata(const std::uint32_t kind) noexcept {
     videoRenderer_.ClearDynamicMetadata(kind);
     Enqueue([this] {
-        ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+        ApplyHdrState(snapshot_, videoRenderer_.StreamHdrState(), videoRenderer_.HdrState());
         PublishSnapshot();
     });
     return FFFResult::Success;
@@ -3473,7 +3480,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         if (videoStream_ >= 0) {
             snapshot_.videoWidth = tileGrid_ ? tileGridWidth_ : videoDecoder_->width;
             snapshot_.videoHeight = tileGrid_ ? tileGridHeight_ : videoDecoder_->height;
-            ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+            ApplyHdrState(snapshot_, videoRenderer_.StreamHdrState(), videoRenderer_.HdrState());
         }
         else if (coverArtFrame_ != nullptr) { snapshot_.videoWidth = coverArtFrame_->width; snapshot_.videoHeight = coverArtFrame_->height; snapshot_.isHdrSource = 0; }
         // Downgrade only if HDR/wide-gamut output is unachievable; EnsureSwapChain
@@ -5752,7 +5759,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     snapshot_.frameTimeBaseDenominator = stream->time_base.den;
     snapshot_.actualColorMode = videoRenderer_.ActualColorMode();
     snapshot_.sourcePeakNits = static_cast<std::uint32_t>(std::lround(videoRenderer_.SourcePeakNits()));
-    ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+    ApplyHdrState(snapshot_, videoRenderer_.StreamHdrState(), videoRenderer_.HdrState());
     UpdateAudioDiagnostics();
     PublishSnapshot();
     if (firstFrameForMedia) RebuildMediaInfo();
@@ -6448,7 +6455,7 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         CacheStreamSideDataFromStream(format_->streams[index]);
         snapshot_.selectedVideoStream = index;
         videoRenderer_.ConfigureHdrStream(format_->streams[index]->codecpar);
-        ApplyHdrState(snapshot_, videoRenderer_.HdrState());
+        ApplyHdrState(snapshot_, videoRenderer_.StreamHdrState(), videoRenderer_.HdrState());
         framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = false;
     }
     else {
@@ -6643,7 +6650,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     snapshot_.uploadPath = 0;
         snapshot_.videoBitRate = snapshot_.audioBitRate = 0;
         snapshot_.queuedVideoFrames = 0; snapshot_.sourcePeakNits = 0;
-        ApplyHdrState(snapshot_, {});
+        ApplyHdrState(snapshot_, {}, {});
         // During same-HWND media replacement the flip chain is intentionally
         // retained. Keep reporting its real mode while Opening; the next source
         // commits SDR only after ForceSdrOutputForSdrSource has reconfigured DXGI.
