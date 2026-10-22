@@ -5395,6 +5395,12 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     // its drift budget, shown at the slower cadence the renderer is holding. The
     // bucketing below runs for both outcomes because it decides which is which.
     bool discardLateFrame = false;
+    // True only when the panel is the binding constraint. That frame belongs to
+    // displayRateDiscardedFrames_ alone: it must not also move the traditional counter
+    // or feed the adaptive-downscale policy (the panel owns the limit, a smaller
+    // picture cannot fix it). The comment below has always said this; the accounting
+    // at the end of this block used to ignore the distinction.
+    bool displayRateDiscard = false;
     if (late) {
         snapshot_.frameIndex = nextIndex;
         // Two different reasons land at this one test, and they must not share a counter.
@@ -5438,6 +5444,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
             paceLateStreak_ = 0;
             ResetPaceWindow();
             discardLateFrame = true;
+            displayRateDiscard = true;
         } else if (paceEngaged_) {
             if (lag100ns > PaceDriftCap100ns) {
                 // Past the lip-sync budget the smooth trade is no longer worth it:
@@ -5520,11 +5527,13 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
             }
         }
         if (discardLateFrame) {
-            ++snapshot_.droppedVideoFrames;
-            // Feed the drop to the adaptive-downscale policy. Only software decoding can
-            // benefit, because a hardware frame never crosses PCIe as CPU planes.
-            if (!IsHardwareFrame(frame))
-                videoRenderer_.ObserveFrameForAdaptiveDownscale(true);
+            if (!displayRateDiscard) {
+                ++snapshot_.droppedVideoFrames;
+                // Feed the drop to the adaptive-downscale policy. Only software decoding can
+                // benefit, because a hardware frame never crosses PCIe as CPU planes.
+                if (!IsHardwareFrame(frame))
+                    videoRenderer_.ObserveFrameForAdaptiveDownscale(true);
+            }
         }
     } else if (arrivalCounts) {
         // An on-time picture breaks both streaks: whatever deficit (or over-delivery)
