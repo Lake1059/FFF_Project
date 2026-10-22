@@ -86,6 +86,10 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private 上次播放位置 As TimeSpan
     Private 上次时间轴代次 As ULong
     Private 最近媒体速度 As Double = 1
+    ' HDR 动态段的粘滞状态：动态元数据是逐帧口径（无 SEI 的帧会回落），
+    ' 直接显示会横跳；本流内一旦见过就保持显示，换片/换流时重置。
+    Private 粘滞动态媒体键 As String = String.Empty
+    Private 粘滞动态已见过 As Boolean
     Private 已释放 As Boolean
 
     Friend Sub New(画面 As 播放器画面控件,
@@ -259,6 +263,13 @@ Friend NotInheritable Class 播放器信息图层呈现器
             ' 内容分类由外部模块产出（解锁后才非空）；宿主只显示不解释，"空值自然不出现"。
             ' HDR 行里把等级插在规格之后（HDR10 P8.1 动态元数据已用于处理 …），与「内容：」行同源。
             Dim 内容描述 = 安全获取(获取内容描述)
+            ' 粘滞窗口按 媒体路径|视频流 划界：跨过边界一律从头累计。
+            Dim 粘滞键 = $"{媒体路径}|{快照.当前视频流}"
+            If 粘滞键 <> 粘滞动态媒体键 Then
+                粘滞动态媒体键 = 粘滞键
+                粘滞动态已见过 = False
+            End If
+            If 快照.动态HDR元数据有效 Then 粘滞动态已见过 = True
             添加配对行如果有值(结果, "HDR：", 视频HDR(视频, 快照, 内容描述), 橙色)
             添加配对行如果有值(结果, "内容：", 内容描述, 橙色)
             添加配对行如果有值(结果, "输出：", 视频输出(快照, 画面控件.ClientSize), 绿色)
@@ -500,12 +511,17 @@ Friend NotInheritable Class 播放器信息图层呈现器
             $"色彩模式 {色彩模式文本(快照)}")
     End Function
 
-    Private Shared Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照, 内容描述 As String) As String
+    Private Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照, 内容描述 As String) As String
         If Not 快照.是HDR源 AndAlso Not 流.是HDR Then Return String.Empty
-        Dim 规格 = HDR规格文本(快照.HDR规格, 流.HDR格式)
+        ' 规格取流级口径：媒体 JSON 的 hdrFormat 已与逐帧状态脱钩（内核侧），
+        ' 无 SEI 的帧不再把 HDR10+ 拉回 HDR10 造成规格横跳。流字段缺失时
+        ' 才退回快照枚举（旧路径兜底）。
+        Dim 规格 = If(String.IsNullOrWhiteSpace(流.HDR格式) OrElse 流.HDR格式 = "SDR",
+                    HDR规格文本(快照.HDR规格, 流.HDR格式), 流.HDR格式)
         ' 外部模块算出的 P 等级（解锁后才有值）插在规格之后；宿主只显示不解释，空值自然不出现。
         Dim 等级 = If(String.IsNullOrWhiteSpace(内容描述), String.Empty, 内容描述.Trim())
-        Dim 动态 = If(快照.动态HDR元数据有效, "动态元数据已用于处理", String.Empty)
+        ' 动态段是粘滞位（见 创建调试行），逐帧回落不再把这段抹掉。
+        Dim 动态 = If(粘滞动态已见过, "动态元数据已用于处理", String.Empty)
         Dim 亮度 = If(快照.源峰值尼特 > 0,
             $"源峰值 {快照.源峰值尼特:0}尼特", String.Empty)
         If 快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso 快照.HDR有效目标峰值尼特 > 0 Then
@@ -571,13 +587,17 @@ Friend NotInheritable Class 播放器信息图层呈现器
     ''' 抖动计数 100% 误报，都是现有指标**没有报警**的缺陷 —— 前者把大量静音推给
     ''' 端点并让播放卡在末尾，后者让"抖动"永远非零因而失去意义。
     '''
-    ''' 「缓冲区」与「欠载」已在"输出"行常驻显示，所以这里**只报真正不可见的那几个**：
-    ''' 抖动、不连续、插入静音、丢弃重叠、拒绝帧。刻意不常驻：正常播放多一行数字
-    ''' 只会稀释重要信息，异常出现时才需要显眼。
+    ''' 「缓冲区」已在"输出"行常驻显示，所以这里**只报真正不可见的那几个**：
+    ''' 欠载、抖动、不连续、插入静音、丢弃重叠、拒绝帧。欠载虽然在"输出"行有
+    ''' 累计数字，但它在空间解码（双耳床）路线上是缓冲池抬升的直接触发器
+    ''' （内核按欠载批次单调抬高目标缓冲），告警行同报让"出过欠载"在异常
+    ''' 场景里显眼而不必去常驻行里找。刻意不常驻：正常播放多一行数字只会
+    ''' 稀释重要信息，异常出现时才需要显眼。
     ''' </remarks>
     Private Shared Function 音频健康度(快照 As 播放器快照) As String
         If 快照 Is Nothing Then Return String.Empty
         Dim 问题 As New List(Of String)
+        If 快照.音频欠载次数 > 0 Then 问题.Add($"欠载 {快照.音频欠载次数}")
         If 快照.音频不连续次数 > 0 Then 问题.Add($"不连续 {快照.音频不连续次数}")
         If 快照.音频时间戳抖动帧数 > 0 Then 问题.Add($"抖动 {快照.音频时间戳抖动帧数}")
         If 快照.音频插入静音帧数 > 0 Then 问题.Add($"补静音 {快照.音频插入静音帧数}")
