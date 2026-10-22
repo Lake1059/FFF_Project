@@ -271,6 +271,7 @@ void HdrProcessor::ConfigureStream(const AVCodecParameters* parameters) noexcept
             next.compatibility = Compatibility(FFF3FPHdrCompatibility::Hdr10);
             next.processingPath = FFF3FPHdrProcessingPath::Hdr10PlusDynamic;
             next.sourcePeakNits = 1000.0f;
+            next.dynamicMetadata = true;
         } else if (parameters->color_trc == AVCOL_TRC_ARIB_STD_B67) {
             next.format = FFF3FPHdrFormat::Hlg;
             next.compatibility = Compatibility(FFF3FPHdrCompatibility::Hlg);

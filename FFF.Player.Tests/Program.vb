@@ -81,10 +81,20 @@ Friend Module Program
                     StringComparison.OrdinalIgnoreCase) Then
                 Return ColorTransformFrameReadback.运行(args.Skip(1).ToArray())
             End If
-            ' 色彩档位：HDR 源显式 SDR 档保持 + SDR 位深抬升（见该文件头）。
-            If args.Length > 0 AndAlso String.Equals(args(0), "--color-tier-regression",
+            ' HDR 行流级口径 + 粘滞动态段（真呈现器 + 合成快照，见该文件头）。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--hdr-row-stability",
                     StringComparison.OrdinalIgnoreCase) Then
-                Return ColorTierRegression.运行(args.Skip(1).ToArray())
+                Return HdrOverlayStabilityProbe.运行HDR行探针()
+            End If
+            ' 媒体信息列表重建签名脱钩（真 Form + 合成快照 + 牙齿臂，见该文件头）。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--media-list-stability",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return HdrOverlayStabilityProbe.运行媒体列表探针()
+            End If
+            ' 音频动态缓冲池实机（真会话 + 真 WASAPI + FFF_AUDIO_TARGET_TRACE，见该文件头）。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--audio-pool-live",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return AudioPoolLiveProbe.运行(args.Skip(1).ToArray())
             End If
             ' ⚠ 认不出的旗标**必须判红**，不许再往下兜底（这就是本文件最后一处落笔的牙）。
             ' 为什么：出货树那份 Program.vb（5713 行注册表，含 --static-image-open-regression）里有
@@ -102,7 +112,7 @@ Friend Module Program
             ' 测试，只把"缺席"做成可见。
             If args.Length > 0 Then
                 Console.WriteLine($"入口未实现：{args(0)} —— 本树（上游 PR 工作区 3fp/kernel）没有这个入口，本次未运行任何回归。")
-                Console.WriteLine("本树已实现的入口：--lyrics-kit-regression [kit目录] | --danmaku-reanchor-regression [xml] [outdir] | --danmaku-stress [outdir] | --danmaku-pacing-live [夹具] [秒] [manual|real|switch] [offscreen|visible|60hz] [B夹具] | --ct-frame-readback <夹具> [秒] [输出目录] | --color-tier-regression [HDR10夹具] [8bit SDR夹具] [10bit SDR夹具] | --truehdr-runtime-regression | --image-zoom-regression [参数] | --image-zoom-live [参数] | --stream-selection-regression [样本目录]")
+                Console.WriteLine("本树已实现的入口：--lyrics-kit-regression [kit目录] | --danmaku-reanchor-regression [xml] [outdir] | --danmaku-stress [outdir] | --truehdr-runtime-regression | --image-zoom-regression [参数] | --image-zoom-live [参数] | --stream-selection-regression [样本目录]")
                 Console.Error.WriteLine($"UNIMPLEMENTED IN THIS TREE: {args(0)} => exit 3 (no regression was run)")
                 Return 3
             End If

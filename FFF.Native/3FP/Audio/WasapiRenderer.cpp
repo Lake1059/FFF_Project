@@ -909,6 +909,10 @@ std::int64_t PlayerWasapiRenderer::Buffered100ns() const noexcept {
     return static_cast<std::int64_t>(frames) * 10'000'000 / outputSampleRate_;
 }
 std::uint64_t PlayerWasapiRenderer::UnderrunCount() const noexcept { return underrunCount_.load(); }
+std::int64_t PlayerWasapiRenderer::DeviceBufferDuration100ns() const noexcept {
+    std::lock_guard lock(mutex_);
+    return deviceBufferDuration100ns_;
+}
 std::uint64_t PlayerWasapiRenderer::TimestampJitterCount() const noexcept { return timestampJitterCount_.load(); }
 std::uint64_t PlayerWasapiRenderer::DiscontinuityCount() const noexcept { return discontinuityCount_.load(); }
 std::uint64_t PlayerWasapiRenderer::InsertedSilenceFrames() const noexcept { return insertedSilenceFrames_.load(); }
@@ -1116,6 +1120,8 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         if (activeFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE && activeFormat->cbSize >= 22)
             outputValidBitsPerSample_ = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(activeFormat)->Samples.wValidBitsPerSample;
         outputFloat_ = IsFloatWaveFormat(activeFormat);
+        deviceBufferDuration100ns_ = outputSampleRate_ > 0
+            ? static_cast<std::int64_t>(bufferFrames) * 10'000'000 / outputSampleRate_ : 0;
         initializationResult_ = FFFResult::Success; initializationFinished_ = true;
     }
     if (runtimeState_ != nullptr) runtimeState_->SetChannels(activeFormat->nChannels);
