@@ -218,7 +218,10 @@ Public Class Form媒体信息
                     添加条目(group, "声道布局", 空值(流.声道布局))
                     添加条目(group, "采样率", 采样率(流.采样率))
                     添加条目(group, "位深", 位深(流))
-                    添加条目(group, "压缩模式", 空值(流.压缩模式, If(流.无损, "无损", "有损")))
+                    ' 有损是常态，不是需要标注的例外；只有无损才值得一行。
+                    If 流.无损 OrElse 流.压缩模式 = "无损" Then
+                        添加条目(group, "压缩模式", "无损")
+                    End If
                     添加条目如果有值(group, "流大小", 流大小(流, 信息.文件大小))
                     添加条目(group, "默认", If(流.是默认流, "是", "否"))
                     添加条目如果有值(group, "未压缩内容 MD5", 流.未压缩内容MD5)
@@ -345,7 +348,7 @@ Public Class Form媒体信息
     End Function
     Private Shared Function 位深(stream As 媒体流信息) As String
         ' 有损编码（AAC 等）没有源位深可言：bitsPerCodedSample 是编码槽宽
-        ' （32 = fltp 的尺寸），显示出来就是假信息 —— 直接不报，交给"压缩模式"行。
+        ' （32 = fltp 的尺寸），显示出来就是假信息 —— 直接不报。
         If Not stream.无损 AndAlso stream.压缩模式 = "有损" Then Return String.Empty
         Dim d = If(stream.位深度 > 0, stream.位深度, If(stream.原始采样位数 > 0, stream.原始采样位数, stream.编码采样位数))
         Return If(d > 0, $"{d}bit", 空值(stream.采样格式))
