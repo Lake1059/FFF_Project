@@ -43,7 +43,7 @@ Partial Class Form设置_AI字幕
         LBL_模型档 = New Label()
         MCB_模型档 = New LakeUI.ModernComboBox()
         LBL_Gpu层数 = New Label()
-        MTB_Gpu层数 = New LakeUI.ModernTextBox()
+        MCB_Gpu层数 = New LakeUI.ModernComboBox()
         ModernPanel1.SuspendLayout()
         SuspendLayout()
         '
@@ -94,28 +94,38 @@ Partial Class Form设置_AI字幕
         LBL_Gpu层数.ForeColor = Color.Silver
         LBL_Gpu层数.Location = New Point(10, 450)
         LBL_Gpu层数.Name = "LBL_Gpu层数"
-        LBL_Gpu层数.Size = New Size(120, 20)
+        LBL_Gpu层数.Size = New Size(178, 20)
         LBL_Gpu层数.TabIndex = 19
         LBL_Gpu层数.Text = "GPU 层数"
         LBL_Gpu层数.Visible = False
         '
-        ' MTB_Gpu层数
+        ' MCB_Gpu层数
         '
-        MTB_Gpu层数.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_Gpu层数.BorderColor = Color.Transparent
-        MTB_Gpu层数.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MTB_Gpu层数.BorderRadius = 10
-        MTB_Gpu层数.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
-        MTB_Gpu层数.Location = New Point(10, 472)
-        MTB_Gpu层数.Margin = New Padding(2)
-        MTB_Gpu层数.Name = "MTB_Gpu层数"
-        MTB_Gpu层数.Padding = New Padding(10, 0, 10, 0)
-        MTB_Gpu层数.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_Gpu层数.Size = New Size(120, 30)
-        MTB_Gpu层数.TabIndex = 20
-        MTB_Gpu层数.WaterText = "留空=全部"
-        MTB_Gpu层数.WaterTextForeColor = Color.DarkGray
-        MTB_Gpu层数.Visible = False
+        MCB_Gpu层数.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_Gpu层数.BorderRadius = 10
+        MCB_Gpu层数.BorderSize = 0
+        MCB_Gpu层数.DropDownBackdropBlurPasses = 2
+        MCB_Gpu层数.DropDownBackdropBlurRadius = 30
+        MCB_Gpu层数.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_Gpu层数.DropDownHoverColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MCB_Gpu层数.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_Gpu层数.DropDownPadding = New Padding(10)
+        MCB_Gpu层数.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_Gpu层数.DropDownSelectedForeColor = Color.White
+        MCB_Gpu层数.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCB_Gpu层数.Location = New Point(10, 472)
+        MCB_Gpu层数.Margin = New Padding(2)
+        MCB_Gpu层数.Name = "MCB_Gpu层数"
+        MCB_Gpu层数.Padding = New Padding(10, 0, 10, 0)
+        MCB_Gpu层数.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_Gpu层数.Size = New Size(178, 30)
+        MCB_Gpu层数.TabIndex = 20
+        MCB_Gpu层数.ToolTipGap = -1
+        MCB_Gpu层数.ToolTipMaxWidth = 350
+        MCB_Gpu层数.ToolTipPadding = New Padding(15)
+        MCB_Gpu层数.WaterText = "GPU 层数"
+        MCB_Gpu层数.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MCB_Gpu层数.Visible = False
         '
         ' ModernPanel1
         '
@@ -141,7 +151,7 @@ Partial Class Form设置_AI字幕
         ModernPanel1.Controls.Add(LBL_模型档)
         ModernPanel1.Controls.Add(MCB_模型档)
         ModernPanel1.Controls.Add(LBL_Gpu层数)
-        ModernPanel1.Controls.Add(MTB_Gpu层数)
+        ModernPanel1.Controls.Add(MCB_Gpu层数)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
@@ -450,5 +460,5 @@ Partial Class Form设置_AI字幕
     Friend WithEvents LBL_模型档 As Label
     Friend WithEvents MCB_模型档 As LakeUI.ModernComboBox
     Friend WithEvents LBL_Gpu层数 As Label
-    Friend WithEvents MTB_Gpu层数 As LakeUI.ModernTextBox
+    Friend WithEvents MCB_Gpu层数 As LakeUI.ModernComboBox
 End Class

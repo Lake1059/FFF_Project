@@ -110,9 +110,9 @@ def main():
     # 高级区时它还杵在面板上（与模型档同一批加，同一批漏过可见性的先例）。
     高级块 = re.search(r"Private Sub 显示高级\(显示 As Boolean\)(.*?)End Sub", form, re.S)
     断言(高级块 is not None and "LBL_Gpu层数.Visible = 显示" in 高级块.group(1)
-        and "MTB_Gpu层数.Visible = 显示" in 高级块.group(1),
+        and "MCB_Gpu层数.Visible = 显示" in 高级块.group(1),
         "L0-1b GPU 层数控件挂进高级区可见性切换",
-        "显示高级 里找不到 LBL_Gpu层数/MTB_Gpu层数 的 Visible 行")
+        "显示高级 里找不到 LBL_Gpu层数/MCB_Gpu层数 的 Visible 行")
 
     # ---------------- L0-2：设置页几何 ----------------
     src = read(VB_DESIGNER)
