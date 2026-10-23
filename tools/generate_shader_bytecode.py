@@ -171,7 +171,7 @@ def main() -> int:
             blob = compile_shader(fxc, hlsl, profile, workdir)
             print(f"{array}: {len(blob)} bytes ({profile})")
             block = format_array(array, blob)
-            if args.sdr_specializations:
+            if args.sdr_specializations or name.startswith("TimedTextSprite"):
                 block = "\n".join(line.rstrip() for line in block.splitlines())
             blocks.append(block)
 

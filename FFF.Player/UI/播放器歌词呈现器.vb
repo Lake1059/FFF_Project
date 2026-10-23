@@ -6,8 +6,6 @@ Friend NotInheritable Class 播放器歌词呈现器
     Implements IDisposable
 
     ' 歌词视觉参数集中放在这里，后续可直接迁移为播放器设置项。
-    Private Const 普通歌词字体 As String = "Microsoft YaHei UI"
-    Private Const 当前歌词字体 As String = "Microsoft YaHei UI"
     Private Const 普通歌词字号DIP As Single = 18.0F
     Private Const 当前歌词字号DIP As Single = 22.0F
     Private Const 歌词行高DIP As Single = 22.0F
@@ -78,6 +76,7 @@ Friend NotInheritable Class 播放器歌词呈现器
     Private 图层签名有效标志 As Integer
     Private 活动刷新数 As Integer
     Private 已释放标志 As Integer
+    Private 临时字号偏移磅值 As Single
 
     Friend Sub New(画面控件值 As 播放器画面控件, 快照提供器值 As Func(Of 播放器快照),
                    歌词提供器值 As Func(Of LRC歌词资料), 封面状态提供器值 As Func(Of Boolean),
@@ -131,6 +130,14 @@ Friend NotInheritable Class 播放器歌词呈现器
         更新画面快照()
     End Sub
 
+    Friend Sub 调整临时字号(滚轮格数 As Integer)
+        If Volatile.Read(已释放标志) <> 0 OrElse 滚轮格数 = 0 Then Return
+        Dim 新偏移 = Math.Clamp(临时字号偏移磅值 + 滚轮格数 * 1.0F, -8.0F, 24.0F)
+        If 新偏移 = 临时字号偏移磅值 Then Return
+        Volatile.Write(临时字号偏移磅值, 新偏移)
+        Volatile.Write(图层签名有效标志, 0)
+    End Sub
+
     Private Sub 更新画面快照()
         Volatile.Write(缓存客户区宽度, 画面控件.ClientSize.Width)
         Volatile.Write(缓存客户区高度, 画面控件.ClientSize.Height)
@@ -148,9 +155,18 @@ Friend NotInheritable Class 播放器歌词呈现器
         Dim region = 计算歌词区域(客户区大小, 有封面)
         If region.Width <= 1.0F OrElse region.Height <= 1.0F Then Return 图层命令
         Dim dpiScale = DPI / 96.0F
-        Dim normalFontSize = 普通歌词字号DIP * dpiScale
-        Dim activeFontSize = 当前歌词字号DIP * dpiScale
-        Dim lineHeight = 歌词行高DIP * dpiScale
+        Dim 字体设置 = 设置.实例对象
+        Dim 字体名称 = 字体设置.歌词字体
+        Dim 字体样式 = CType(字体设置.歌词字体样式, FontStyle)
+        ' 设置保存磅值；22 DIP 对应默认的 16.5 磅，行高随字号同步变化。
+        Dim 字号缩放 = Math.Clamp(字体设置.歌词字号 + Volatile.Read(临时字号偏移磅值), 8.0F, 224.0F) / 16.5F
+        Dim 初始尺寸 = 字体设置.取得初始画面尺寸()
+        Dim 初始歌词区域 = 计算歌词区域(初始尺寸, 有封面)
+        Dim 区域放大 = 计算渲染区域字号档位(region.Width / dpiScale, region.Height / dpiScale,
+            CInt(初始歌词区域.Width), CInt(初始歌词区域.Height))
+        Dim normalFontSize = 普通歌词字号DIP * 字号缩放 * 区域放大 * dpiScale
+        Dim activeFontSize = 当前歌词字号DIP * 字号缩放 * 区域放大 * dpiScale
+        Dim lineHeight = 歌词行高DIP * 字号缩放 * 区域放大 * dpiScale
         Dim groupGap = 歌词组间距DIP * dpiScale
         ' 同一时间组内的多语言/多行歌词也使用相同的组间距，避免它们
         ' 挤成一块；组高、滚动距离和实际命令位置必须共享这一几何模型。
@@ -164,8 +180,8 @@ Friend NotInheritable Class 播放器歌词呈现器
         Dim displayLines(last - first)() As String
         For index = first To last
             ' 统一按较大的当前歌词字形换行，避免尺寸过渡期间突然改变行数。
-            displayLines(index - first) = 生成显示行(歌词.条目(index), 当前歌词字体,
-                activeFontSize, FontStyle.Regular, maximumTextWidth)
+            displayLines(index - first) = 生成显示行(歌词.条目(index), 字体名称,
+                activeFontSize, 字体样式, maximumTextWidth)
         Next
 
         Dim transition = 0.0F
@@ -208,17 +224,16 @@ Friend NotInheritable Class 播放器歌词呈现器
                 If(distance <= 1, 相邻歌词颜色, If(distance <= 2, 次相邻歌词颜色, 远端歌词颜色)))
             Dim activeWeight = If(isActive, 计算当前歌词尺寸权重(歌词, index, 播放位置), 0.0F)
             Dim fontSize = normalFontSize + (activeFontSize - normalFontSize) * activeWeight
-            Dim fontFamily = If(isActive, 当前歌词字体, 普通歌词字体)
             For lineIndex = 0 To lines.Length - 1
                 Dim text = lines(lineIndex)
                 If String.IsNullOrEmpty(text) Then Continue For
                 Dim command = 取得复用命令()
-                command.设置文字(text, fontFamily, fontSize,
+                command.设置文字(text, 字体名称, fontSize,
                     New RectangleF(region.Left, top + lineIndex * lineStep, region.Width, lineHeight),
                     color, 歌词描边颜色,
                     (普通歌词描边宽度DIP +
                      (当前歌词描边宽度DIP - 普通歌词描边宽度DIP) * activeWeight) * dpiScale,
-                    定时文字对齐.居中, 定时文字对齐.居中, 定时文字样式.无,
+                    定时文字对齐.居中, 定时文字对齐.居中, CType(字体样式, 定时文字样式),
                     阴影色值:=歌词阴影颜色,
                     阴影X值:=歌词阴影X偏移DIP * dpiScale,
                     阴影Y值:=歌词阴影Y偏移DIP * dpiScale)
@@ -270,6 +285,16 @@ Friend NotInheritable Class 播放器歌词呈现器
         Return New RectangleF(left + horizontalPadding, verticalPadding,
                               Math.Max(1.0F, width - horizontalPadding * 2.0F),
                               Math.Max(1.0F, 客户区大小.Height - verticalPadding * 2.0F))
+    End Function
+
+    Friend Shared Function 计算渲染区域字号档位(宽度 As Single, 高度 As Single,
+                                            初始宽度 As Integer, 初始高度 As Integer) As Single
+        If Not Single.IsFinite(宽度) OrElse Not Single.IsFinite(高度) OrElse
+            宽度 <= 0 OrElse 高度 <= 0 OrElse 初始宽度 <= 0 OrElse 初始高度 <= 0 Then Return 1.0F
+        If 宽度 >= 初始宽度 * 3.0F OrElse 高度 >= 初始高度 * 3.0F Then Return 1.12F
+        If 宽度 >= 初始宽度 * 2.0F OrElse 高度 >= 初始高度 * 2.0F Then Return 1.08F
+        If 宽度 >= 初始宽度 * 1.35F OrElse 高度 >= 初始高度 * 1.35F Then Return 1.04F
+        Return 1.0F
     End Function
 
     Private Shared Function 计算封面区域宽度(总宽度 As Integer) As Integer
