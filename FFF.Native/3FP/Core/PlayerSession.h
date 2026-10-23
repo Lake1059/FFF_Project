@@ -726,9 +726,11 @@ private:
     // steps it down -- and reset to the default by DoOpen and by an audio-track
     // change. Everything that touches it runs on the session worker thread.
     static constexpr std::int64_t kDefaultAudioTargetBuffer100ns = 600'000;
+    static constexpr std::int64_t kInteractiveMoveAudioTargetBuffer100ns = 1'200'000;
     static constexpr std::int64_t kMaximumAudioTargetBuffer100ns = 2'400'000;
     static constexpr std::int64_t kAudioTargetBufferStep100ns = 300'000;
     std::int64_t audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
+    std::atomic<bool> interactiveMove_{false};
     // Last-seen values of the renderer's warning counters. Any growth since the
     // previous pump buys one step of target headroom -- underruns are the hard
     // signal, timestamp jitter / discontinuities / inserted silence / dropped

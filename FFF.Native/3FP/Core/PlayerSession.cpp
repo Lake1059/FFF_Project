@@ -1746,6 +1746,7 @@ FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
 }
 
 FFFResult PlayerSession::SetInteractiveMove(const bool enabled) noexcept {
+    interactiveMove_.store(enabled, std::memory_order_release);
     videoRenderer_.SetInteractiveMove(enabled);
     return FFFResult::Success;
 }
@@ -4078,6 +4079,12 @@ FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noex
 }
 
 void PlayerSession::PumpPlayback() noexcept {
+    const auto movingWindow = interactiveMove_.load(std::memory_order_acquire);
+    if (movingWindow) {
+        // 移动窗口前主动增加解码储备；本轮保留已增加的水位，避免连续拖动反复欠载。
+        audioTargetBuffer100ns_ = std::max(audioTargetBuffer100ns_,
+            kInteractiveMoveAudioTargetBuffer100ns);
+    }
     if (format_ == nullptr) { SetState(FFF3FPState::Failed); return; }
     // The host asked for an auxiliary composition: open the second video
     // stream on this worker, once, before the next demux. A file without such
@@ -5795,7 +5802,8 @@ void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, cons
         if (position + av_rescale(frame->nb_samples, TicksPerSecond, frame->sample_rate) < seekTarget100ns_) return;
     }
     ++snapshot_.decodedAudioFrames;
-    const auto result = audioRenderer_->Enqueue(frame, position);
+    const auto timestampResolution = av_rescale_q(1, stream->time_base, AVRational{1, TicksPerSecond});
+    const auto result = audioRenderer_->Enqueue(frame, position, timestampResolution);
     if (result == FFFResult::Success && owner == format_) internalAudioDecodeErrorCount_ = 0;
     if (result == FFFResult::BufferTooSmall) ++snapshot_.audioRejectedFrames;
     else if (result != FFFResult::Success) {

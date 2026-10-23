@@ -402,6 +402,9 @@ Partial Class Form1
         MB_弹幕开关.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_弹幕开关.TabIndex = 44
         MB_弹幕开关.Text = "弹幕"
+        MB_弹幕开关.ToolTipPadding = New Padding(5)
+        MB_弹幕开关.ToolTipShowDelaySeconds = 1R
+        MB_弹幕开关.ToolTipText = "点击切换弹幕开关"
         MB_弹幕开关.Visible = False
         ' 
         ' JEC_弹幕开关前面的空白占位
@@ -430,6 +433,9 @@ Partial Class Form1
         MB_当前声道数显示.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_当前声道数显示.TabIndex = 40
         MB_当前声道数显示.Text = "声道"
+        MB_当前声道数显示.ToolTipPadding = New Padding(5)
+        MB_当前声道数显示.ToolTipShowDelaySeconds = 1R
+        MB_当前声道数显示.ToolTipText = "点击切换独占模式"
         ' 
         ' JEC_当前声道数显示前面的空白占位
         ' 
@@ -454,6 +460,9 @@ Partial Class Form1
         MB_当前音频编码显示.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_当前音频编码显示.TabIndex = 38
         MB_当前音频编码显示.Text = "音频"
+        MB_当前音频编码显示.ToolTipPadding = New Padding(5)
+        MB_当前音频编码显示.ToolTipShowDelaySeconds = 1R
+        MB_当前音频编码显示.ToolTipText = "当前轨道的音频编码"
         ' 
         ' JEC_当前音频编码显示前面的空白占位
         ' 
@@ -478,6 +487,9 @@ Partial Class Form1
         MB_当前视频编码显示.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_当前视频编码显示.TabIndex = 36
         MB_当前视频编码显示.Text = "视频"
+        MB_当前视频编码显示.ToolTipPadding = New Padding(5)
+        MB_当前视频编码显示.ToolTipShowDelaySeconds = 1R
+        MB_当前视频编码显示.ToolTipText = "当前轨道的视频编码"
         ' 
         ' JEC_当前视频编码显示前面的空白占位
         ' 
@@ -504,6 +516,9 @@ Partial Class Form1
         MB_HDR模式.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_HDR模式.TabIndex = 41
         MB_HDR模式.Text = "色彩"
+        MB_HDR模式.ToolTipPadding = New Padding(5)
+        MB_HDR模式.ToolTipShowDelaySeconds = 1R
+        MB_HDR模式.ToolTipText = "切换 HDR 模式：映射 SDR / 原始 SDR 灰 / 真实 HDR 高亮"
         ' 
         ' JEC_HDR选项前面的空白占位
         ' 
@@ -530,6 +545,9 @@ Partial Class Form1
         MB_软件解码或硬件解码.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_软件解码或硬件解码.TabIndex = 34
         MB_软件解码或硬件解码.Text = "解码"
+        MB_软件解码或硬件解码.ToolTipPadding = New Padding(5)
+        MB_软件解码或硬件解码.ToolTipShowDelaySeconds = 1R
+        MB_软件解码或硬件解码.ToolTipText = "切换 CPU / GPU 解码"
         ' 
         ' JustEmptyControl19
         ' 
@@ -556,6 +574,9 @@ Partial Class Form1
         MB_选择流.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_选择流.TabIndex = 54
         MB_选择流.Text = ""
+        MB_选择流.ToolTipPadding = New Padding(5)
+        MB_选择流.ToolTipShowDelaySeconds = 1R
+        MB_选择流.ToolTipText = "流选择器"
         ' 
         ' JustEmptyControl18
         ' 
@@ -582,6 +603,9 @@ Partial Class Form1
         MB_查看当前媒体信息.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_查看当前媒体信息.TabIndex = 52
         MB_查看当前媒体信息.Text = ""
+        MB_查看当前媒体信息.ToolTipPadding = New Padding(5)
+        MB_查看当前媒体信息.ToolTipShowDelaySeconds = 1R
+        MB_查看当前媒体信息.ToolTipText = "媒体信息窗口"
         ' 
         ' JustEmptyControl13
         ' 
@@ -608,6 +632,9 @@ Partial Class Form1
         MB_剪辑区间模式.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_剪辑区间模式.TabIndex = 49
         MB_剪辑区间模式.Text = ""
+        MB_剪辑区间模式.ToolTipPadding = New Padding(5)
+        MB_剪辑区间模式.ToolTipShowDelaySeconds = 1R
+        MB_剪辑区间模式.ToolTipText = "切换剪辑区间模式"
         ' 
         ' JustEmptyControl12
         ' 
@@ -634,6 +661,9 @@ Partial Class Form1
         MB_播放列表.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_播放列表.TabIndex = 47
         MB_播放列表.Text = ""
+        MB_播放列表.ToolTipPadding = New Padding(5)
+        MB_播放列表.ToolTipShowDelaySeconds = 1R
+        MB_播放列表.ToolTipText = "播放列表"
         ' 
         ' JustEmptyControl11
         ' 
@@ -660,6 +690,9 @@ Partial Class Form1
         MB_软件设置.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_软件设置.TabIndex = 45
         MB_软件设置.Text = ""
+        MB_软件设置.ToolTipPadding = New Padding(5)
+        MB_软件设置.ToolTipShowDelaySeconds = 1R
+        MB_软件设置.ToolTipText = "软件设置"
         ' 
         ' JustEmptyControl10
         ' 
@@ -708,6 +741,9 @@ Partial Class Form1
         MB_打开文件.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_打开文件.TabIndex = 41
         MB_打开文件.Text = ""
+        MB_打开文件.ToolTipPadding = New Padding(5)
+        MB_打开文件.ToolTipShowDelaySeconds = 1R
+        MB_打开文件.ToolTipText = "打开文件"
         ' 
         ' JustEmptyControl8
         ' 
@@ -734,6 +770,9 @@ Partial Class Form1
         MB_快进或下一个.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_快进或下一个.TabIndex = 39
         MB_快进或下一个.Text = ""
+        MB_快进或下一个.ToolTipPadding = New Padding(5)
+        MB_快进或下一个.ToolTipShowDelaySeconds = 1R
+        MB_快进或下一个.ToolTipText = "前进/下一个"
         ' 
         ' JustEmptyControl7
         ' 
@@ -760,6 +799,9 @@ Partial Class Form1
         MB_倒退或上一个.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_倒退或上一个.TabIndex = 37
         MB_倒退或上一个.Text = ""
+        MB_倒退或上一个.ToolTipPadding = New Padding(5)
+        MB_倒退或上一个.ToolTipShowDelaySeconds = 1R
+        MB_倒退或上一个.ToolTipText = "倒退/上一个"
         ' 
         ' JustEmptyControl6
         ' 
@@ -786,6 +828,9 @@ Partial Class Form1
         MB_停止.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_停止.TabIndex = 35
         MB_停止.Text = ""
+        MB_停止.ToolTipPadding = New Padding(5)
+        MB_停止.ToolTipShowDelaySeconds = 1R
+        MB_停止.ToolTipText = "停止"
         ' 
         ' JustEmptyControl5
         ' 
@@ -812,6 +857,9 @@ Partial Class Form1
         MB_播放和暂停.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MB_播放和暂停.TabIndex = 33
         MB_播放和暂停.Text = ""
+        MB_播放和暂停.ToolTipPadding = New Padding(5)
+        MB_播放和暂停.ToolTipShowDelaySeconds = 1R
+        MB_播放和暂停.ToolTipText = "播放/暂停"
         ' 
         ' JustEmptyControl3
         ' 

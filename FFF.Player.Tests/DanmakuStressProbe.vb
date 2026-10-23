@@ -1,9 +1,8 @@
 ' 弹幕高压力探针 —— 同进程，量"宿主每拍生成成本能不能进泵预算"
 '
 ' 背景（播放器弹幕图层呈现器.vb）：播放中每拍必提交一次。泵间隔是
-' clamp(实测帧周期, 8, 16) ms：≤60fps 片源走 16 ms（60 Hz 保底），120fps 片源
-' 走 8 ms（125 Hz 护栏）。单拍成本超过当前间隔就会被 PrecisionTimer 的 Drop
-' 策略丢拍（已丢弃节拍数 > 0）。判据按最紧的 8 ms 算：过得了 8 ms，16 ms
+' 弹幕目标节拍由显示器探针决定，最高 120Hz；单拍成本超过当前间隔就会被 PrecisionTimer 的 Drop
+' 策略丢拍（已丢弃节拍数 > 0）。探针按 8ms 的最高档预算测量：过得了 8ms，较低刷新率
 ' 的保底预算自动满足。本探针量的是宿主侧最大那块：弹幕调度器.生成帧 ——
 ' lane 分配 + 碰撞 + 真实 DirectWrite 文本测量（默认弹幕文本测量器，Shared 缓存在场）。
 ' 明确不量：命令对象复用与转换、P/Invoke 过界、内核合成（GPU 半边在内核线程上，
@@ -34,7 +33,7 @@ Friend Module DanmakuStressProbe
     Private Const 区域宽度 As Single = 1920.0F
     Private Const 区域高度 As Single = 1080.0F
     Private Const 目标帧率 As Double = 60.0R
-    ' 最紧泵间隔：120fps 片源跟随到 8ms（125Hz）；≤60fps 片源的 16ms 保底更宽裕。
+    ' 压力预算按最高 120Hz 的 8ms 估算；较低刷新率显示器拥有更宽裕的预算。
     Private Const 泵预算毫秒 As Double = 8.0R
     Private Const 保底预算毫秒 As Double = 16.0R
 

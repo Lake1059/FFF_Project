@@ -7,6 +7,17 @@ Public Class Form1
     Private 光盘控制器 As 播放器光盘控制器
     Private Const WM_ENTERSIZEMOVE As Integer = &H231
     Private Const WM_EXITSIZEMOVE As Integer = &H232
+    Private Const WM_APPCOMMAND As Integer = &H319
+    Private Enum 多媒体操作
+        下一项 = 11
+        上一项 = 12
+        停止 = 13
+        播放暂停 = 14
+        播放 = 46
+        暂停 = 47
+        快进 = 49
+        快退 = 50
+    End Enum
     Public Shared Property 当前主窗体 As Form1
     Private Const 跳转秒数 As Integer = 5
     Private Const HDR操作提示键 As String = "HDR模式"
@@ -22,12 +33,9 @@ Public Class Form1
 
     Private 画面控件 As 播放器画面控件
     Private 播放控制器 As 播放器控制器
-    ' 实机性能采样：仅当 FFF3FP_PERF_OUT / FFF3FP_PERF_SECONDS 同时给出时才会被创建，
-    ' 正常使用时恒为 Nothing。
-    Private 性能采样 As 性能采样器
     Private 界面呈现器 As 播放器界面呈现器
     Private 窗口布局控制器 As 播放器窗口布局控制器
-    Private 字幕图层呈现器 As 播放器定时文字图层呈现器
+    Private 字幕图层呈现器 As 播放器字幕叠加呈现器
     Private 弹幕图层呈现器 As 播放器弹幕图层呈现器
     Private 歌词图层呈现器 As 播放器歌词呈现器
     Private 信息图层呈现器 As 播放器信息图层呈现器
@@ -58,6 +66,13 @@ Public Class Form1
     Private Event 方向键快捷键已请求 As KeyEventHandler
 
     Protected Overrides Sub WndProc(ByRef m As Message)
+        If m.Msg = WM_APPCOMMAND AndAlso 窗口当前有焦点() Then
+            Dim 命令 = CType((m.LParam.ToInt64() >> 16) And &HFFFL, 多媒体操作)
+            If 处理多媒体命令(命令) Then
+                m.Result = New IntPtr(1)
+                Return
+            End If
+        End If
         If m.Msg = WM_ENTERSIZEMOVE Then 播放控制器?.设置窗口移动状态(True)
         MyBase.WndProc(m)
         If m.Msg = WM_EXITSIZEMOVE Then 播放控制器?.设置窗口移动状态(False)
@@ -110,14 +125,9 @@ Public Class Form1
         MP_DX视频容器.Controls.Add(画面控件)
         AddHandler 画面控件.文件拖入, AddressOf 画面控件_文件拖入
 
-        ' FFF3FP_DECODER=gpu 只为测量用：现网默认走设置里的解码方式，环境变量不设就等于没这段。
-        ' 需要它是因为"硬解直贴"是上传成本清单上唯一还没量的大杠杆，而它在这棵树里已经实现
-        ' （PlayerSession.cpp:2663 av_hwdevice_ctx_create / 快照里有 硬件传输时长 列），
-        ' 只是初始值被设置文件钉在 CPU 上，无人值守的采样轮没有键能改它。
         播放控制器 = New 播放器控制器(
             Function() 画面控件.输出窗口句柄, SynchronizationContext.Current,
-            If(Environment.GetEnvironmentVariable("FFF3FP_DECODER") = "gpu", 解码模式.GPU,
-               CType(设置.实例对象.解码方式, 解码模式)))
+            CType(设置.实例对象.解码方式, 解码模式))
         显示器唤醒 = New 显示器唤醒请求()
         播放控制器.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
         播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
@@ -130,12 +140,11 @@ Public Class Form1
         界面呈现器 = 创建界面呈现器()
         界面呈现器.设置音量百分比(设置.实例对象.音量百分比)
         播放控制器.设置音量(CSng(设置.实例对象.音量百分比 / 100.0F))
-        字幕图层呈现器 = New 播放器定时文字图层呈现器(画面控件,
+        字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
-            AddressOf 播放控制器.提交定时文字图层, Nothing, Nothing,
-            定时文字图层内容.仅字幕)
+            AddressOf 播放控制器.提交定时文字图层)
         ' 弹幕与字幕分轨：弹幕有自己的呈现器，节拍跟随视频（见 播放器弹幕图层呈现器）。
-        ' 字幕仍走 播放器定时文字图层呈现器，保留它那套为静态内容设计的节拍与去重。
+        ' 字幕仍走 播放器字幕叠加呈现器，保留它那套为静态内容设计的节拍与去重。
         弹幕图层呈现器 = New 播放器弹幕图层呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照,
             AddressOf 播放控制器.提交弹幕图层,
@@ -146,6 +155,7 @@ Public Class Form1
             Function() If(设置.实例对象.启用歌词支持, 播放控制器.当前歌词, Nothing),
             Function() 设置.实例对象.渲染封面图 AndAlso 播放控制器.当前音乐有封面,
             AddressOf 播放控制器.提交歌词图层, AddressOf 创建歌词呈现设置)
+        AddHandler 画面控件.Ctrl滚轮, AddressOf 画面控件_Ctrl滚轮
         信息图层呈现器 = New 播放器信息图层呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, AddressOf 播放控制器.安全读取媒体信息,
             Function() 播放控制器.当前媒体路径, Function() 播放控制器.当前字幕,
@@ -257,13 +267,6 @@ Public Class Form1
         窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
         核心文件检查通过 = True
 
-        ' 实机性能采样：环境变量没给全就是 Nothing，此处等价于没这几行。
-        ' 放在 Load 末尾是因为要拿到画面控件（视口口径）与播放控制器（快照来源）。
-        性能采样 = 性能采样器.尝试创建(
-            Function() 播放控制器?.安全读取快照(),
-            Function() If(画面控件 Is Nothing, ClientSize, 画面控件.ClientSize),
-            Me)
-        性能采样?.启动()
     End Sub
 
     Private Shared Function 可以加载核心文件(文件名 As String) As Boolean
@@ -1078,6 +1081,7 @@ Public Class Form1
     End Sub
 
     Protected Overrides Function ProcessDialogKey(keyData As Keys) As Boolean
+        If 播放控制器 Is Nothing OrElse Not 窗口当前有焦点() Then Return MyBase.ProcessDialogKey(keyData)
         If 光盘控制器 IsNot Nothing AndAlso 光盘控制器.处理按键(keyData) Then Return True
         If 图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.处理缩放快捷键(keyData) Then Return True
         If keyData = Keys.Tab AndAlso Not 正在关闭 Then
@@ -1089,31 +1093,108 @@ Public Class Form1
     End Function
 
     Protected Overrides Function ProcessCmdKey(ByRef msg As Message, keyData As Keys) As Boolean
-        If 正在关闭 Then Return MyBase.ProcessCmdKey(msg, keyData)
+        If 播放控制器 Is Nothing OrElse Not 窗口当前有焦点() Then Return MyBase.ProcessCmdKey(msg, keyData)
         If 光盘控制器 IsNot Nothing AndAlso 光盘控制器.处理按键(keyData) Then Return True
         If 图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.处理缩放快捷键(keyData) Then Return True
         If 处理方向键快捷键(keyData) Then Return True
         Select Case keyData
             Case Keys.Control Or Keys.O
                 MB_打开文件_Click(MB_打开文件, EventArgs.Empty)
-            Case Keys.Space, Keys.MediaPlayPause
+            Case Keys.Space
                 播放控制器.切换播放暂停()
-            Case Keys.MediaStop
-                MB_停止_Click(MB_停止, EventArgs.Empty)
+            Case Keys.MediaPlayPause, Keys.MediaStop,
+                 Keys.MediaNextTrack, Keys.MediaPreviousTrack
+                Return 处理多媒体按键(keyData)
             Case Keys.M
                 播放控制器.切换静音()
                 信息图层呈现器?.显示操作信息(If(播放控制器.静音,
                     "已静音", $"音量 {界面呈现器.音量百分比}%"), &HFFF0D35DUI, "音量")
-            Case Keys.R
+            Case Keys.R, Keys.Shift Or Keys.R
                 ' 手动旋转：R = 顺时针 90°，Shift+R = 逆时针 90°（Shift 含在 keyData 里）。
                 ' 源的自动转正由内核在打开时套用，这里是在其之上再做用户调整。
                 If 视图旋转控制器 Is Nothing Then Return MyBase.ProcessCmdKey(msg, keyData)
                 视图旋转控制器.旋转(顺时针:=(keyData And Keys.Shift) <> Keys.Shift)
+            Case Keys.F11, Keys.Alt Or Keys.Enter
+                ThisIsYourWindow1.ToggleFullScreen(Me)
+            Case Keys.Escape
+                If Not ThisIsYourWindow1.IsFullScreen(Me) Then Return MyBase.ProcessCmdKey(msg, keyData)
+                ThisIsYourWindow1.ExitFullScreen(Me)
+            Case Keys.S
+                MB_停止_Click(MB_停止, EventArgs.Empty)
+            Case Keys.PageUp
+                播放相邻项目(-1)
+            Case Keys.PageDown
+                播放相邻项目(1)
             Case Else
                 Return MyBase.ProcessCmdKey(msg, keyData)
         End Select
         Return True
     End Function
+
+    Private Function 窗口当前有焦点() As Boolean
+        Return Not 正在关闭 AndAlso ContainsFocus AndAlso Form.ActiveForm Is Me
+    End Function
+
+    Private Function 处理多媒体按键(按键 As Keys) As Boolean
+        Select Case 按键
+            Case Keys.MediaPlayPause
+                Return 处理多媒体命令(多媒体操作.播放暂停)
+            Case Keys.MediaStop
+                Return 处理多媒体命令(多媒体操作.停止)
+            Case Keys.MediaNextTrack
+                Return 处理多媒体命令(多媒体操作.下一项)
+            Case Keys.MediaPreviousTrack
+                Return 处理多媒体命令(多媒体操作.上一项)
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    Private Function 处理多媒体命令(命令 As 多媒体操作) As Boolean
+        If 播放控制器 Is Nothing Then Return False
+        Select Case 命令
+            Case 多媒体操作.下一项
+                播放相邻项目(1)
+            Case 多媒体操作.上一项
+                播放相邻项目(-1)
+            Case 多媒体操作.停止
+                MB_停止_Click(MB_停止, EventArgs.Empty)
+            Case 多媒体操作.播放暂停
+                播放控制器?.切换播放暂停()
+            Case 多媒体操作.播放
+                If 播放控制器?.安全读取快照()?.状态 <> 播放状态.正在播放 Then
+                    播放控制器?.切换播放暂停()
+                End If
+            Case 多媒体操作.暂停
+                If 播放控制器?.安全读取快照()?.状态 = 播放状态.正在播放 Then
+                    播放控制器?.切换播放暂停()
+                End If
+            Case 多媒体操作.快进
+                播放控制器?.相对跳转(跳转秒数)
+            Case 多媒体操作.快退
+                播放控制器?.相对跳转(-跳转秒数)
+            Case Else
+                Return False
+        End Select
+        Return True
+    End Function
+
+    Private Sub 画面控件_Ctrl滚轮(sender As Object, e As HandledMouseEventArgs)
+        If Not 窗口当前有焦点() Then Return
+        Dim 滚轮格数 = e.Delta \ 120
+        If 滚轮格数 = 0 Then Return
+        If 信息图层呈现器 IsNot Nothing AndAlso 信息图层呈现器.调试信息可见 Then
+            信息图层呈现器.调整临时字号(滚轮格数)
+            e.Handled = True
+            Return
+        End If
+        If Not 设置.实例对象.启用歌词支持 OrElse 播放控制器?.当前歌词 Is Nothing Then Return
+        Dim 快照 = 播放控制器.安全读取快照()
+        If 快照 Is Nothing OrElse 播放控制器.当前媒体是视频 OrElse 快照.当前音频流 < 0 OrElse
+            播放控制器.当前歌词.条目.Count = 0 Then Return
+        歌词图层呈现器?.调整临时字号(滚轮格数)
+        e.Handled = True
+    End Sub
 
     Private Function 处理方向键快捷键(keyData As Keys) As Boolean
         If 正在关闭 Then Return False

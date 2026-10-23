@@ -1226,7 +1226,11 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
 constexpr const char* TimedTextSpriteVertexShaderSource = R"(
 struct InstanceData { float4 destination; float4 uv; };
 StructuredBuffer<InstanceData> Instances : register(t1);
-struct Output { float4 position : SV_Position; float2 uv : TEXCOORD0; };
+struct Output {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    nointerpolation float4 bounds : TEXCOORD1;
+};
 Output main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
     static const float2 corners[6] = {
         float2(0,0), float2(1,0), float2(0,1),
@@ -1237,14 +1241,19 @@ Output main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
     Output output;
     output.position = float4(lerp(instance.destination.xy, instance.destination.zw, corner), 0, 1);
     output.uv = lerp(instance.uv.xy, instance.uv.zw, corner);
+    output.bounds = instance.uv;
     return output;
 })";
 
 constexpr const char* TimedTextSpritePixelShaderSource = R"(
 Texture2D<float4> Atlas : register(t0);
 SamplerState LinearSampler : register(s0);
-float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    return Atlas.Sample(LinearSampler, uv);
+float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0,
+    nointerpolation float4 bounds : TEXCOORD1) : SV_Target {
+    uint width, height;
+    Atlas.GetDimensions(width, height);
+    float2 halfTexel = 0.5 / float2(width, height);
+    return Atlas.Sample(LinearSampler, clamp(uv, bounds.xy + halfTexel, bounds.zw - halfTexel));
 })";
 
 constexpr std::uint32_t InitialTimedTextAtlasSize = 1024;
@@ -6002,10 +6011,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             static_cast<std::uint32_t>(sprite.width),
             static_cast<std::uint32_t>(sprite.height)});
     };
-    // Evicts the least recently used danmaku sprite. Entries stamped this
-    // frame win over staler ones; if every entry is current the oldest still
-    // goes, because the quota must hold. Returns false only if the table
-    // contains no danmaku entry at all (accounting drift guard).
+    // 仅回收不在本帧使用的最旧弹幕精灵；本帧全部可见时交给图集容量策略处理。
     const auto evictLeastRecentlyUsedDanmaku =
         [this, &releaseSpriteRect](const std::uint64_t frameClock) noexcept -> bool {
         auto best = timedTextSprites_.end();
@@ -6015,12 +6021,12 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             const bool candidateCurrent = it->second.lastUsed >= frameClock;
             const bool bestCurrent = best->second.lastUsed >= frameClock;
             if (candidateCurrent != bestCurrent) {
-                if (candidateCurrent) best = it;
+                if (!candidateCurrent) best = it;
                 continue;
             }
             if (it->second.lastUsed < best->second.lastUsed) best = it;
         }
-        if (best == timedTextSprites_.end()) return false;
+        if (best == timedTextSprites_.end() || best->second.lastUsed >= frameClock) return false;
         releaseSpriteRect(best->second);
         timedTextSprites_.erase(best);
         --danmakuSpriteCount_;
@@ -6060,6 +6066,18 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     };
     const auto buildPendingSprites = [&](const bool stopWhenFull) noexcept -> bool {
         pendingSprites.clear();
+        // 先标记本帧全部可见精灵，再回收过期矩形，避免后面的命令引用已被覆盖的图集区域。
+        for (const auto& command : layer->commands) {
+            if (command.type != FFF3FPTimedTextCommandType::Text || command.contentId == 0 ||
+                command.horizontalAlignment != FFF3FPTimedTextAlignment::Near ||
+                command.verticalAlignment != FFF3FPTimedTextAlignment::Near) continue;
+            const auto key = TimedTextSpriteKey(command, std::max(command.width * scaleX, 1.0f),
+                std::max(command.height * scaleY, 1.0f), std::max(command.fontSize * scaleY, 1.0f),
+                std::max(command.outlineWidth * (scaleX + scaleY) * 0.5f, 0.0f),
+                command.shadowOffsetX * scaleX, command.shadowOffsetY * scaleY);
+            if (const auto existing = timedTextSprites_.find(key); existing != timedTextSprites_.end())
+                existing->second.lastUsed = frameClock;
+        }
         std::unordered_set<std::uint64_t> pendingKeys;
         pendingKeys.reserve(std::min(layer->commands.size(),
             static_cast<std::size_t>(MaximumTimedTextSprites)));
@@ -6303,6 +6321,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
                 instance.destination[1] = 1.0f - top * 2.0f / swapHeight_;
                 instance.destination[2] = right * 2.0f / swapWidth_ - 1.0f;
                 instance.destination[3] = 1.0f - bottom * 2.0f / swapHeight_;
+                // 保持一比一映射；着色器将线性采样限制在本精灵的纹素中心内。
                 instance.uv[0] = sprite->second.atlasX / timedTextAtlasSize_;
                 instance.uv[1] = sprite->second.atlasY / timedTextAtlasSize_;
                 instance.uv[2] = (sprite->second.atlasX + sprite->second.width) / timedTextAtlasSize_;
@@ -7000,19 +7019,9 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
             std::chrono::nanoseconds>(std::chrono::steady_clock::now() - conversionStart).count() / 100));
     }
     const auto deviceWaitStart = std::chrono::steady_clock::now();
-    const auto interactiveMove = interactiveMove_.load(std::memory_order_acquire);
-    std::unique_lock deviceLock(deviceMutex_, std::defer_lock);
-    if (interactiveMove) (void)deviceLock.try_lock();
-    else deviceLock.lock();
+    std::unique_lock deviceLock(deviceMutex_);
     deviceLockWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
         std::chrono::nanoseconds>(std::chrono::steady_clock::now() - deviceWaitStart).count() / 100));
-    if (!deviceLock.owns_lock()) {
-        // The timed-text/presentation thread owns the immediate context. Do not
-        // make the playback worker wait behind it; the next decoded frame will
-        // supersede this one and audio can continue on schedule.
-        coalescedVideoFrames_.fetch_add(1, std::memory_order_relaxed);
-        return FFFResult::Success;
-    }
     // Keep the logical render counter useful for headless/clip-mode sessions;
     // swapChainPresents remains the separate counter for real DXGI presents.
     if (window_ == nullptr) {
@@ -7031,13 +7040,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         static_cast<std::uint32_t>(client.right) == swapWidth_ &&
         static_cast<std::uint32_t>(client.bottom) == swapHeight_;
     if (!stableSdrChain) {
-        std::unique_lock presentLock(presentMutex_, std::defer_lock);
-        if (interactiveMove) (void)presentLock.try_lock();
-        else presentLock.lock();
-        if (!presentLock.owns_lock()) {
-            coalescedVideoFrames_.fetch_add(1, std::memory_order_relaxed);
-            return FFFResult::Success;
-        }
+        std::unique_lock presentLock(presentMutex_);
         const auto chainResult = EnsureSwapChain(frame->width, frame->height, input.bitDepth);
         if (chainResult != FFFResult::Success) return chainResult;
         if (swapHdr_) SetHdrMetadata();
@@ -7801,6 +7804,8 @@ double PlayerVideoRenderer::FrameRateBoundHz() const noexcept {
     if (const auto layerTargetHz = timedTextLayerTargetHz_.load(std::memory_order_acquire);
         layerTargetHz > 0.0f)
         bound = std::max(bound, std::min(panelHz, static_cast<double>(layerTargetHz)));
+    // 拖动时减少重复合成的开销，视频仍按自己的时间戳提交，不丢弃待显示的电影帧。
+    if (interactiveMove_.load(std::memory_order_acquire)) bound = std::min(bound, 60.0);
     // The adaptive pace floor caps the bound from below: the session sets it when the
     // pipeline falls behind the media clock, and holding every flip one floor-period
     // out is what presents every picture at a slower cadence (which a variable-refresh
@@ -7905,8 +7910,7 @@ void PlayerVideoRenderer::PublishPacingStatus() noexcept {
         return;
     }
     if (interactiveMove_.load(std::memory_order_acquire)) {
-        // The native window-move loop owns the cadence and presents with DO_NOT_WAIT to
-        // avoid starving audio, so this flip is not clamped to a vblank either.
+        // 系统移动循环期间不等待垂直同步，仍保留每一张尚未提交的视频帧。
         gridLocked_.store(0, std::memory_order_release);
         pacingBypass_.store(3, std::memory_order_release);
         return;
@@ -8484,12 +8488,8 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     const std::uint64_t renderedVideoGeneration) noexcept {
     if (chain == nullptr) return FFFResult::InvalidState;
     const auto start = std::chrono::steady_clock::now();
-    // Normal playback is synchronized to the display. With the refresh-slot aiming gone,
-    // that clamp is one of the two things that set the flip cadence: Present(1,0) keeps every
-    // flip on a vblank, and the presenter's own schedule (TimedTextThread's nextPresentation,
-    // paced at FrameRateBoundHz) keeps the flips from coming faster than the ceiling. During
-    // the native window-move loop, Present must not wait for DWM: that loop owns the UI
-    // thread's message pump and a blocking Present can starve audio and decode.
+    // 普通播放与垂直同步对齐；系统移动期间使用零同步间隔。
+    // 不再把交换链忙视为已成功呈现，视频代次的背压与音频预缓冲共同保护播放连续性。
     const auto interactiveMove = interactiveMove_.load(std::memory_order_acquire);
     // Tearing needs the host's request *and* a chain created with the ALLOW_TEARING
     // flag: passing DXGI_PRESENT_ALLOW_TEARING to a chain without it is
@@ -8502,8 +8502,7 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
         tearingRequested_.load(std::memory_order_acquire) &&
         paceFloorHz_.load(std::memory_order_acquire) > 0.0;
     const auto present = interactiveMove
-        ? chain->Present(0, swapAllowTearing_ ?
-            (DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_DO_NOT_WAIT) : DXGI_PRESENT_DO_NOT_WAIT)
+        ? chain->Present(0, swapAllowTearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0)
         : tearing ? chain->Present(0, DXGI_PRESENT_ALLOW_TEARING) : chain->Present(1, 0);
     presentWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
         std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count() / 100));
@@ -8906,8 +8905,7 @@ std::uint64_t PlayerVideoRenderer::SwapChainPresents() const noexcept { return s
 std::uint64_t PlayerVideoRenderer::SubmittedVideoGeneration() const noexcept { return videoGeneration_.load(); }
 std::uint64_t PlayerVideoRenderer::PresentedVideoGeneration() const noexcept { return presentedVideoGeneration_.load(); }
 bool PlayerVideoRenderer::HasPendingVideoPresentation() const noexcept {
-    return !interactiveMove_.load(std::memory_order_acquire) &&
-        videoGeneration_.load() > presentedVideoGeneration_.load() && HasOutputWindow();
+    return videoGeneration_.load() > presentedVideoGeneration_.load() && HasOutputWindow();
 }
 
 FFFResult PlayerVideoRenderer::CopySdrFrame(void* pixels, std::uint32_t capacity,

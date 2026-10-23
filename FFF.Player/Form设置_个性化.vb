@@ -24,6 +24,7 @@ Public Class Form设置_个性化
                 Panel4.Visible = True
             End If
             MCB_边框宽度.SelectedIndex = 设置.实例对象.SP_边框宽度
+            MCB_分割线宽度.SelectedIndex = 设置.实例对象.SP_分割线宽度
             MCB_毛玻璃模式.SelectedIndex = 设置.实例对象.SP_毛玻璃模式
             MCB_背景来源.SelectedIndex = 设置.实例对象.SP_毛玻璃背景来源
             MCB_噪点颗粒.SelectedIndex = 设置.实例对象.SP_毛玻璃噪点颗粒
@@ -36,6 +37,24 @@ Public Class Form设置_个性化
     Private Sub MB_前往购买_Click(sender As Object, e As EventArgs) Handles MB_前往购买.Click
         Process.Start(New ProcessStartInfo With {
             .FileName = "https://ifdian.net/item/ed2719d4841211f1a67352540025c377", .UseShellExecute = True})
+    End Sub
+
+    Private Sub MB_上下分割线颜色_Click(sender As Object, e As EventArgs) Handles MB_上下分割线颜色.Click
+        Dim 主窗体 = Form1.当前主窗体
+        If Not SP_UnLock OrElse 主窗体 Is Nothing Then Return
+        Using 对话框 As New ModernColorDialog With {
+            .SelectedColor = Color.FromArgb(设置.实例对象.SP_分割线颜色ARGB), .Icon = 主窗体.Icon}
+            主窗体.ThisIsYourWindow1.Attach(对话框)
+            If 对话框.ShowDialog(主窗体) <> DialogResult.OK Then Return
+            设置.实例对象.SP_分割线颜色ARGB = 对话框.SelectedColor.ToArgb()
+        End Using
+        设置.应用SP个性化设置()
+    End Sub
+
+    Private Sub MCB_分割线宽度_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_分割线宽度.SelectedIndexChanged
+        If 正在初始化 OrElse Not SP_UnLock OrElse MCB_分割线宽度.SelectedIndex < 0 Then Return
+        设置.实例对象.SP_分割线宽度 = MCB_分割线宽度.SelectedIndex
+        设置.应用SP个性化设置()
     End Sub
 
     Private Sub MB_图标_Click(sender As Object, e As EventArgs) Handles MB_图标.Click
