@@ -1,0 +1,33 @@
+{
+  "_说明": "复制这个文件到你的扩展包目录里再改。除 worker 外每项都可留空：留空的规则见 docs/ai-subtitles/ 的 PACK_FORMAT 小节。",
+  "version": 1,
+  "name": "Qwen3-ASR-0.6B（Q8_0）",
+  "worker": "asr_worker.py",
+  "python": "E:/WorkBuddy/3FP-AI-Subtitles/venv/Scripts/python.exe",
+  "llamaServer": "E:/WorkBuddy/3FP-AI-Subtitles/llama-b11669/cuda/llama-server.exe",
+  "model": "E:/WorkBuddy/3FP-AI-Subtitles/Qwen3-ASR-0.6B-GGUF/Qwen3-ASR-0.6B-Q8_0.gguf",
+  "mmproj": "E:/WorkBuddy/3FP-AI-Subtitles/Qwen3-ASR-0.6B-GGUF/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
+  "window": 5.0,
+  "step": 5.0,
+  "_说明设备": "device 是这个包推荐的后端（auto/cpu/cuda/vulkan/rocm/sycl），用户在设置里另选时以用户为准。servers 是 后端 -> llama-server.exe 的映射：一个二进制只带它被编译时勾的后端，所以换厂商要换二进制；没列出的后端回落到上面的 llamaServer。纯 CPU 不需要单独一份——任何构建都自带 CPU 后端。",
+  "device": "cuda",
+  "servers": {
+    "cuda": "E:/WorkBuddy/3FP-AI-Subtitles/llama-b11669/cuda/llama-server.exe",
+    "vulkan": "E:/WorkBuddy/3FP-AI-Subtitles/llama-b11669/vulkan/llama-server.exe"
+  },
+  "_说明模型档": "models 是\"档位名 -> 权重\"的映射，用于同一个包同时带标准档与低配档。设置页高级里会列出这些档位，选了就重启 worker 换权重。投影（mmproj）是音频编码器，量化它掉点明显，所以低配档也只换主权重。",
+  "models": {
+    "Q8_0": {
+      "model": "E:/WorkBuddy/3FP-AI-Subtitles/Qwen3-ASR-0.6B-GGUF/Qwen3-ASR-0.6B-Q8_0.gguf",
+      "mmproj": "E:/WorkBuddy/3FP-AI-Subtitles/Qwen3-ASR-0.6B-GGUF/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf"
+    },
+    "Q6_K": {
+      "model": "E:/WorkBuddy/3FP-AI-Subtitles/Qwen3-ASR-0.6B-GGUF/Qwen3-ASR-0.6B-Q6_K.gguf",
+      "mmproj": "E:/WorkBuddy/3FP-AI-Subtitles/Qwen3-ASR-0.6B-GGUF/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf"
+    },
+    "Q4_K_M": {
+      "model": "E:/WorkBuddy/3FP-AI-Subtitles/Qwen3-ASR-0.6B-GGUF/Qwen3-ASR-0.6B-Q4_K_M.gguf",
+      "mmproj": "E:/WorkBuddy/3FP-AI-Subtitles/Qwen3-ASR-0.6B-GGUF/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf"
+    }
+  }
+}

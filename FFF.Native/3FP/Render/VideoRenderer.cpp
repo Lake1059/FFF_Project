@@ -2679,6 +2679,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       playbackWorkPending_(0),
       interactiveMove_(false),
       lyricsLayoutEnabled_(false),
+      subtitleLayoutEnabled_(false),
       coverBackdropBlurRadiusBits_(std::bit_cast<std::uint32_t>(30.0f)),
       coverBackdropBlurPasses_(3), coverBackdropDownsampleFactor_(4),
       coverBackdropTintArgb_(0x78000000u),
@@ -5440,6 +5441,8 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
             if (blurSettingsChanged)
                 coverBackdropBlurSettingsGeneration_.fetch_add(1, std::memory_order_acq_rel);
             if (blurSettingsChanged) RequestCoverBackdropRender(true);
+        } else if (slot == TimedTextLayerSlot::Subtitle) {
+            subtitleLayoutEnabled_.store(!retained->commands.empty(), std::memory_order_release);
         }
         {
             std::lock_guard lock(timedTextMutex_);
@@ -8548,7 +8551,14 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
 FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     std::unique_lock deviceLock(deviceMutex_);
     const auto lyricsLayout = lyricsLayoutEnabled_.load(std::memory_order_acquire);
-    if (window_ == nullptr || (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout))
+    // The subtitle latch is what lets an audio-only file show words at all: with
+    // no picture and no lyrics, there would otherwise be nothing to justify a
+    // swap chain, and the first subtitle layer is exactly what creates one. Every
+    // later presentation passes on swapChain_ != nullptr, so clearing the layer
+    // still reaches the screen.
+    const auto subtitleLayout = subtitleLayoutEnabled_.load(std::memory_order_acquire);
+    if (window_ == nullptr ||
+        (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout && !subtitleLayout))
         return FFFResult::Success;
     // Hold both locks across EnsureSwapChain: it may resize or recreate the
     // swap chain, and Present must never overlap that rewrite (the same
@@ -8761,6 +8771,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     sourceCoverArt_ = false;
     sourceImageMode_ = false;
     hasCachedVideo_ = false;
+    subtitleLayoutEnabled_.store(false, std::memory_order_release);
     hdrMonitor_ = nullptr;
     hdrSupportValid_ = false;
     hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
@@ -8822,6 +8833,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     view360PitchBits_.store(std::bit_cast<float>(0.0f), std::memory_order_relaxed);
     view360FovYBits_.store(std::bit_cast<float>(90.0f), std::memory_order_relaxed);
     lyricsLayoutEnabled_.store(false, std::memory_order_release);
+    subtitleLayoutEnabled_.store(false, std::memory_order_release);
     // Same reason as the constructor: nothing on this path has drawn yet, so
     // resetting to D3D11VideoProcessor would advertise a scaling mechanism that
     // cannot have run.

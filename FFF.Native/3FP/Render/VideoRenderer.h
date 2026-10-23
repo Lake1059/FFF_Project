@@ -1234,6 +1234,12 @@ private:
     std::atomic<std::uint32_t> playbackWorkPending_;
     std::atomic<bool> interactiveMove_;
     std::atomic<bool> lyricsLayoutEnabled_;
+    // An audio-only source has no picture, so the timed-text presenter has no
+    // reason to own a swap chain -- unless something actually wants to draw
+    // words on it. The lyrics layer already had this latch; the subtitle layer
+    // needs one too since AI subtitles render into it and a media file with an
+    // audio track but no video track would otherwise never reach the screen.
+    std::atomic<bool> subtitleLayoutEnabled_;
     std::atomic<std::uint32_t> coverBackdropBlurRadiusBits_;
     std::atomic<std::uint32_t> coverBackdropBlurPasses_;
     std::atomic<std::uint32_t> coverBackdropDownsampleFactor_;

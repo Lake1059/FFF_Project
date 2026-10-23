@@ -2,6 +2,7 @@
 
 #include "3FR/Api/FFF.Native.Api.h"
 #include "3FP/Api/FFF.Player.AudioRenderPlug.h"
+#include "3FP/Audio/AsrAudioTap.h"
 
 extern "C" {
 #include <libavutil/channel_layout.h>
@@ -14,6 +15,7 @@ extern "C" {
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -145,6 +147,14 @@ public:
     // the matrix fold-down. This is what writes FFF3FPSnapshot's `audioBinaural`.
     bool BedRenderedByPlug() const noexcept { return bedRenderedByPlug_.load(std::memory_order_relaxed); }
 
+    // ---- ASR audio tap (FFF.Player.AudioTap.h) ----
+    // Install (tap != nullptr) or clear (tap == nullptr) the tap. Called on the
+    // session worker -- the same thread that calls Enqueue -- so the swap can
+    // never race a Produce, exactly like SetAudioRenderPlug. The tap is held by
+    // reference for as long as it is installed, which is what lets the session
+    // replace or free it across a device switch without a retire list.
+    void SetAsrTap(std::shared_ptr<AsrAudioTap> tap) noexcept;
+
 private:
     // Which route one decoded frame takes through the seam.
     enum class BedRoute {
@@ -243,6 +253,11 @@ private:
     std::atomic<std::uint64_t> plugFramesRendered_{0};
     std::atomic<std::uint64_t> plugFramesDeclined_{0};
     std::atomic<bool> bedRenderedByPlug_{false};
+    // ASR tap, held by reference (the session owns the authoritative one, so a
+    // device switch re-installs it into the successor instead of inheriting an
+    // instance's ownership). Touched only on the session worker, like the plug
+    // view above; Enqueue reads it there and nowhere else.
+    std::shared_ptr<AsrAudioTap> asrTap_;
     // Scratch, kept as members so a steady-state stream allocates nothing per frame.
     std::vector<float> bedPlaneScratch_;    // channelCount planes, stride below
     std::vector<float> plugLeftScratch_;

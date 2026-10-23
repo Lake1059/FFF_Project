@@ -260,6 +260,13 @@ Public NotInheritable Class 播放器控制器
         Return 安全读取会话(Function(目标) 目标.当前媒体信息)
     End Function
 
+    ''' <summary>当前会话的原生句柄；无会话 / 会话已释放答 Nothing。
+    ''' AI 字幕管道的取数线程每轮调它：句柄随会话销毁自然失效，不存在悬空解引用
+    ''' （"取到句柄后会话恰好释放"的竞态由管道逐轮 ObjectDisposedException 容错兜住）。</summary>
+    Friend Function 取当前句柄() As 播放器原生句柄
+        Return 安全读取会话(Function(目标) 目标.取得句柄())
+    End Function
+
     ''' <summary>色彩变换通路已读到的内容分类文本（模块产出；无会话 / 未解锁 / 无分类时答空串）。
     ''' 供信息图层“内容：”行与测试读取，任何时候都能安全问。</summary>
     Public Function 读取色彩变换内容描述() As String

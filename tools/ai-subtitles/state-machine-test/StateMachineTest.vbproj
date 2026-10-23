@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    状态机的纯逻辑测试。不碰内核、不碰 worker、不碰 UI，所以它能在任何环境直接跑
+    （这个沙箱里播放器路径跑不了，纯 CLI 没问题）。
+
+    Ai字幕状态机.vb 是用 Link 引进来的**同一个源文件**，不是副本：测试与实现永远
+    不会漂移，也不需要 InternalsVisibleTo 之类的机制。
+
+    跑法：dotnet run 指定本目录的 vbproj（参数名 project）
+    或   dotnet build 之后执行 bin/.../StateMachineTest.exe（退出码 = 失败用例数）
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>StateMachineTest</RootNamespace>
+    <StartupObject>StateMachineTest.Program</StartupObject>
+    <OptionStrict>On</OptionStrict>
+    <OptionExplicit>On</OptionExplicit>
+    <OptionInfer>On</OptionInfer>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\..\FFF.Player\AI字幕\Ai字幕状态机.vb" Link="Ai字幕状态机.vb" />
+    <Compile Include="..\..\..\FFF.Player\AI字幕\Ai字幕语言.vb" Link="Ai字幕语言.vb" />
+  </ItemGroup>
+
+</Project>

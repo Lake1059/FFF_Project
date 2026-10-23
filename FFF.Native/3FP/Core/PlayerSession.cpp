@@ -1871,6 +1871,15 @@ FFFResult PlayerSession::RecreateAudioRenderer(const std::wstring& endpointId,
             std::lock_guard lock(audioPlugMutex_);
             if (audioPlugInstalled_) replacement->SetAudioRenderPlug(&audioPlug_);
         }
+        // The ASR tap outlives the renderer for exactly the same reason, and by
+        // the same mechanism: the session owns it, the successor borrows a
+        // reference for as long as it is installed. The local copy keeps the
+        // object alive across the install even if a Disable lands in between.
+        {
+            std::shared_ptr<AsrAudioTap> tap;
+            { std::lock_guard lock(asrTapMutex_); tap = asrTap_; }
+            if (tap != nullptr) replacement->SetAsrTap(std::move(tap));
+        }
         audioRenderer_ = std::move(replacement);
         // Floor latch: the pool may never target less than the buffer WASAPI
         // actually granted (a smaller target could not fill it). On a fresh
@@ -2280,6 +2289,99 @@ void PlayerSession::GetAudioRenderPlugState(std::uint32_t& active, std::string& 
     // seam numbers; a seek deliberately does not clear them.
     framesRendered = audioRuntimeState_.plugFramesRendered.load(std::memory_order_relaxed);
     framesDeclined = audioRuntimeState_.plugFramesDeclined.load(std::memory_order_relaxed);
+}
+
+void PlayerSession::NoteTapGeneration() noexcept {
+    std::shared_ptr<AsrAudioTap> tap;
+    { std::lock_guard lock(asrTapMutex_); tap = asrTap_; }
+    if (tap != nullptr) tap->NoteGeneration(snapshot_.timelineGeneration);
+}
+
+FFFResult PlayerSession::EnableAudioTap(const FFF3FPAudioTapConfig* const config) noexcept {
+    // Validate on the caller's thread, before anything moves: a struct that is
+    // not this ABI's size/version is refused and any installed tap stays put --
+    // the same "a bad call cannot half-apply" rule the plug install follows.
+    if (config != nullptr && (config->size != sizeof(FFF3FPAudioTapConfig) ||
+        config->version != FFF3FP_AUDIO_TAP_VERSION))
+        return FFFResult::InvalidArgument;
+    auto capacity = config != nullptr && config->ringCapacityBytes != 0
+        ? config->ringCapacityBytes : FFF3FP_AUDIO_TAP_DEFAULT_RING_BYTES;
+    capacity = std::min(std::max(capacity, FFF3FP_AUDIO_TAP_MIN_RING_BYTES),
+        FFF3FP_AUDIO_TAP_MAX_RING_BYTES);
+    std::shared_ptr<AsrAudioTap> tap;
+    try {
+        tap = std::make_shared<AsrAudioTap>(capacity);
+    } catch (...) {
+        return FFFResult::NativeFailure;   // no memory for the ring
+    }
+    {
+        std::lock_guard lock(asrTapMutex_);
+        asrTap_ = std::move(tap);
+    }
+    // Install on the worker thread: the renderer reads the tap from the same
+    // thread that calls Enqueue, so the swap must happen there. The command
+    // holds its own reference for its lifetime, so a Disable racing this call
+    // can never leave the renderer pointing at a freed object -- worst case the
+    // install command finds the member already replaced and installs null.
+    Enqueue([this] {
+        std::shared_ptr<AsrAudioTap> installed;
+        { std::lock_guard lock(asrTapMutex_); installed = asrTap_; }
+        if (audioRenderer_ != nullptr) audioRenderer_->SetAsrTap(std::move(installed));
+    });
+    return FFFResult::Success;
+}
+
+void PlayerSession::DisableAudioTap() noexcept {
+    std::shared_ptr<AsrAudioTap> tap;
+    { std::lock_guard lock(asrTapMutex_); tap.swap(asrTap_); }
+    // Uninstall on the worker thread first: Produce runs there, and the tap must
+    // be unreachable from the renderer before the last reference can release
+    // it. That last reference is this capture, dropped when the command runs --
+    // the earliest safe point. A host ReadAudioTap call in flight holds its own
+    // copy and finishes safely either way.
+    Enqueue([this, tap] {
+        if (audioRenderer_ != nullptr) audioRenderer_->SetAsrTap(nullptr);
+    });
+}
+
+FFFResult PlayerSession::ReadAudioTap(void* const dst, const std::uint32_t capacity,
+    FFF3FPAudioTapBlock* const block) const noexcept {
+    if (block == nullptr) return FFFResult::InvalidArgument;
+    std::shared_ptr<AsrAudioTap> tap;
+    { std::lock_guard lock(asrTapMutex_); tap = asrTap_; }
+    block->size = sizeof(FFF3FPAudioTapBlock);
+    block->version = FFF3FP_AUDIO_TAP_VERSION;
+    if (tap == nullptr) {
+        // Feature off: an empty read rather than an error, so a pump loop that
+        // is still draining after a Disable exits quietly.
+        block->bytesWritten = 0;
+        block->requiredBytes = 0;
+        return FFFResult::Success;
+    }
+    if (dst == nullptr && capacity > 0) return FFFResult::InvalidArgument;
+    switch (tap->Consume(dst, capacity, *block)) {
+    case AsrAudioTap::ConsumeResult::Ok:
+        return FFFResult::Success;
+    case AsrAudioTap::ConsumeResult::Empty:
+        block->bytesWritten = 0;
+        block->requiredBytes = 0;
+        return FFFResult::Success;
+    case AsrAudioTap::ConsumeResult::BufferTooSmall:
+        return FFFResult::BufferTooSmall;
+    }
+    return FFFResult::NativeFailure;
+}
+
+FFFResult PlayerSession::GetAudioTapStats(FFF3FPAudioTapStats* const stats) const noexcept {
+    if (stats == nullptr) return FFFResult::InvalidArgument;
+    stats->size = sizeof(FFF3FPAudioTapStats);
+    stats->version = FFF3FP_AUDIO_TAP_VERSION;
+    std::shared_ptr<AsrAudioTap> tap;
+    { std::lock_guard lock(asrTapMutex_); tap = asrTap_; }
+    stats->blocksProduced = tap != nullptr ? tap->BlocksProduced() : 0;
+    stats->blocksDropped = tap != nullptr ? tap->BlocksDropped() : 0;
+    stats->bufferedBytes = tap != nullptr ? tap->BufferedBytes() : 0;
+    return FFFResult::Success;
 }
 
 FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) noexcept {
@@ -3303,6 +3405,10 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Keep the flip-model chain for a same-HWND media switch. DXGI can reject
     // an immediate replacement while the previous chain is still retiring.
     DoClose(FFF3FPState::Opening, true);
+    // A new file is a new timeline: whatever the tap buffered from the previous
+    // one must not survive into it. The generation value itself only changes on
+    // a seek, so this re-stamps the same value and clears the ring.
+    NoteTapGeneration();
     // A new file is a new audio-pool round: back to the default target.
     audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
     seenAudioUnderruns_ = 0;
@@ -6361,6 +6467,10 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     snapshot_.position100ns = position;
     snapshot_.frameIndex = targetFrame >= 0 && position > 0 ? targetFrame - 1 : -1;
     ++snapshot_.timelineGeneration;
+    // The tap's ring is seek-invalidated here, in the kernel: blocks stamped
+    // with the previous generation can never reach a consumer that already
+    // re-anchored, and neither the host nor the worker has to be polite about it.
+    NoteTapGeneration();
     ResetClock(position); if (audioRenderer_) audioRenderer_->Reset(position);
     if (state_.load() == FFF3FPState::Ended)
         SetState(FFF3FPState::Paused, "seek");
