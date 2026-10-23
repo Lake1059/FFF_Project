@@ -45,6 +45,9 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
     Private 图层签名有效标志 As Integer
     Private 上一时间轴代次 As ULong
     Private 时间轴代次有效 As Boolean
+    ' 无视频轨（纯音频）时是否仍驱动本图层。默认关 —— 既有行为是无视频就不画；
+    ' 只有明确要求的一方（AI 字幕）会打开它，且打开后也不画外部字幕（见下方注释）。
+    Private 无视频回退标志 As Integer
     Private ReadOnly 生命周期锁 As New Object()
     Private ReadOnly 弹幕配置锁 As New Object()
     Private ReadOnly 刷新空闲 As New ManualResetEventSlim(True)
@@ -162,6 +165,23 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         刷新计时器.Start()
     End Sub
 
+    ''' <summary>纯音频（无视频轨）时是否仍然驱动图层。
+    ''' 默认 False：既有行为是"没有画面就不画字幕"。只有 AI 字幕会置 True —— 它是按媒体
+    ''' 时间轴来的文字，不依赖画面，而纯音频恰好是它最该出场的场景。
+    ''' 打开后本图层仍<b>不画外部字幕</b>（提交时字幕传 Nothing），所以既有的纯音频行为
+    ''' 一字不改；只有订阅了 <see cref="绘制扩展定时文字"/> 的一方会拿到绘制机会。</summary>
+    Friend Property 无视频时也绘制 As Boolean
+        Get
+            Return Volatile.Read(无视频回退标志) <> 0
+        End Get
+        Set(value As Boolean)
+            Dim 旧值 = Volatile.Read(无视频回退标志) <> 0
+            If 旧值 = value Then Return
+            Volatile.Write(无视频回退标志, If(value, 1, 0))
+            使图层失效()
+        End Set
+    End Property
+
     Friend Event 绘制扩展定时文字 As EventHandler(Of 定时文字图层绘制事件参数)
 
     Friend Property 目标帧率 As Integer
@@ -194,8 +214,20 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
             Dim 快照 = 快照提供器()
             Dim 客户区大小 = New Size(Volatile.Read(缓存客户区宽度), Volatile.Read(缓存客户区高度))
             Dim DPI = BitConverter.Int32BitsToSingle(Volatile.Read(缓存DPI位元))
-            If 快照 Is Nothing OrElse 快照.视频宽度 = 0 OrElse 快照.视频高度 = 0 OrElse
-                客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return
+            If 快照 Is Nothing OrElse 客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return
+            Dim 无视频 = (快照.视频宽度 = 0 OrElse 快照.视频高度 = 0)
+            If 无视频 AndAlso Volatile.Read(无视频回退标志) = 0 Then Return
+            If 无视频 Then
+                ' 纯音频：没有画面可对齐，就用一个铺满客户区的虚拟显示区让文字有位置可放。
+                ' 外部字幕一律不画（字幕传 Nothing）——既有行为不因本开关改变，
+                ' 需要文字的一方只能走 绘制扩展定时文字 事件。
+                If Not Single.IsFinite(DPI) OrElse DPI <= 0 Then DPI = 96.0F
+                Dim 缩放 = DPI / 96.0F
+                Dim 虚拟宽 = CUInt(Math.Max(1, CInt(Math.Round(客户区大小.Width / 缩放))))
+                Dim 虚拟高 = CUInt(Math.Max(1, CInt(Math.Round(客户区大小.Height / 缩放))))
+                提交当前帧(客户区大小, 虚拟宽, 虚拟高, 快照.播放位置, Nothing, DPI, 快照.时间轴代次)
+                Return
+            End If
             Dim 字幕 = If(图层内容 = 定时文字图层内容.仅弹幕, Nothing, 字幕提供器())
             提交当前帧(客户区大小, 快照.视频宽度, 快照.视频高度,
                      快照.播放位置, 字幕, DPI, 快照.时间轴代次)
@@ -329,7 +361,7 @@ Friend NotInheritable Class 播放器定时文字图层呈现器
         End If
         If 图层内容 <> 定时文字图层内容.仅弹幕 Then
             RaiseEvent 绘制扩展定时文字(Me,
-                New 定时文字图层绘制事件参数(图层命令, 播放位置, 区域))
+                New 定时文字图层绘制事件参数(图层命令, 播放位置, 区域, 时间轴代次))
         End If
         Return 图层命令
     End Function
@@ -636,13 +668,17 @@ End Class
 Friend NotInheritable Class 定时文字图层绘制事件参数
     Inherits EventArgs
 
-    Friend Sub New(命令 As ICollection(Of 定时文字命令), 播放位置 As TimeSpan, 视频区域 As 视频显示区域)
+    Friend Sub New(命令 As ICollection(Of 定时文字命令), 播放位置 As TimeSpan, 视频区域 As 视频显示区域,
+                   Optional 时间轴代次 As ULong = 0)
         Me.命令 = 命令
         Me.播放位置 = 播放位置
         Me.视频区域 = 视频区域
+        Me.时间轴代次 = 时间轴代次
     End Sub
 
     Friend ReadOnly Property 命令 As ICollection(Of 定时文字命令)
     Friend ReadOnly Property 播放位置 As TimeSpan
     Friend ReadOnly Property 视频区域 As 视频显示区域
+    ' 由 生成命令 的同一实参透传；AI 字幕状态机靠它识别 seek 代次跳变并立即清空。
+    Friend ReadOnly Property 时间轴代次 As ULong
 End Class

@@ -9,6 +9,7 @@ Public Class Form设置
     Private ReadOnly 音乐与歌词页面 As New Form设置_音乐与歌词()
     Private ReadOnly 文件关联页面 As New Form设置_文件关联()
     Private ReadOnly 视频超分辨率页面 As New Form设置_视频超分辨率()
+    Private ReadOnly AI字幕页面 As New Form设置_AI字幕()
 
     Private Sub Form设置_Load(sender As Object, e As EventArgs) Handles Me.Load
         Form1.ThisIsYourWindow1.Attach(Me)
@@ -28,25 +29,65 @@ Public Class Form设置
         ' 追加在末尾而不是插到 HDR 之后：Items 下标在 Designer 里是按添加顺序硬绑的，
         ' 中间插入会把后面每一页都错位，而这一页的位置没有硬约束。
         ModernTabListControl1.Items(10).BoundControl = 视频超分辨率页面
+        ' 同上：AI 字幕页继续追加（Items(11)，Designer 里 ModernTabPage12）。
+        ModernTabListControl1.Items(11).BoundControl = AI字幕页面
         If 主窗体 IsNot Nothing Then Location = Me.居中于(主窗体.Bounds)
         应用玻璃背景(SP_UnLock AndAlso 设置.实例对象.SP_毛玻璃模式 > 0)
         应用字体(设置.实例对象.字体)
     End Sub
 
+    ' 从别处（如 AI 实时字幕菜单的“设置…”）直达某一页时用：统一在 Shown 里应用，
+    ' 因为 SelectedIndex 必须在 Show 之后设置，否则会被 Form设置_Shown 的默认 0 盖掉。
+    Private 待选中页索引 As Integer = -1
+
     Friend Sub 显示窗口()
+        待选中页索引 = -1
+        打开并定位()
+    End Sub
+
+    ''' <summary>打开设置窗口并直接选中“AI 字幕”页。
+    ''' 按 Text 查找而不硬编码下标：Designer 里 Items 是按添加顺序硬绑的，
+    ''' 今后再插入新页会让它整体移位。</summary>
+    Friend Sub 显示Ai字幕页()
+        待选中页索引 = 查找页索引("AI 字幕")
+        打开并定位()
+    End Sub
+
+    Private Sub 打开并定位()
         If Visible Then
             初始化所有页面()
+            应用待选中页()
             Activate()
             BringToFront()
             Return
         End If
         If IsHandleCreated Then 初始化所有页面()
         Show()
+        ' Shown 只在窗体首次显示时触发一次，而本窗口“关闭”时走的是 Hide 不是
+        ' Close（见 Form设置_FormClosing），所以从第二次起必须在这里自己收尾。
+        应用待选中页()
     End Sub
+
+    Private Sub 应用待选中页()
+        If 待选中页索引 < 0 Then Return
+        ModernTabListControl1.SelectedIndex = 待选中页索引
+        待选中页索引 = -1
+    End Sub
+
+    Private Function 查找页索引(标题 As String) As Integer
+        For i = 0 To ModernTabListControl1.Items.Count - 1
+            If String.Equals(ModernTabListControl1.Items(i).Text, 标题, StringComparison.Ordinal) Then Return i
+        Next
+        Return 0
+    End Function
 
     Private Sub Form设置_Shown(sender As Object, e As EventArgs) Handles Me.Shown
         初始化所有页面()
-        ModernTabListControl1.SelectedIndex = 0
+        If 待选中页索引 >= 0 Then
+            应用待选中页()
+        Else
+            ModernTabListControl1.SelectedIndex = 0
+        End If
     End Sub
 
     Private Sub 初始化所有页面()
@@ -57,6 +98,7 @@ Public Class Form设置
         音乐与歌词页面.初始化页面()
         文件关联页面.初始化页面()
         视频超分辨率页面.初始化页面()
+        AI字幕页面.初始化页面()
         个性化页面.初始化页面()
         支持者页面.初始化页面()
     End Sub
@@ -65,7 +107,7 @@ Public Class Form设置
         字体控制.设置控件字体(fontName, Me, Nothing, True)
         For Each 页面 In {关于页面, 个性化页面, 支持者页面, 界面与尺寸页面,
                          HDR页面, 字幕页面, 弹幕页面, 音乐与歌词页面, 文件关联页面,
-                         视频超分辨率页面}
+                         视频超分辨率页面, AI字幕页面}
             Dim 排除 = If(ReferenceEquals(页面, 界面与尺寸页面),
                         New Control() {界面与尺寸页面.MCB_全局字体}, Nothing)
             字体控制.设置控件字体(fontName, 页面, 排除, True)
@@ -79,7 +121,7 @@ Public Class Form设置
         ModernTabListControl1.ContentBackColor = 背景颜色
         For Each 页面 In {关于页面, 个性化页面, 支持者页面, 界面与尺寸页面,
                          HDR页面, 字幕页面, 弹幕页面, 音乐与歌词页面, 文件关联页面,
-                         视频超分辨率页面}
+                         视频超分辨率页面, AI字幕页面}
             Dim 根面板 = DirectCast(页面, Form).Controls.Cast(Of Control)().OfType(Of LakeUI.ModernPanel)().
                 FirstOrDefault(Function(x) x.Dock = DockStyle.Fill)
             If 根面板 Is Nothing Then Continue For

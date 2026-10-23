@@ -89,6 +89,48 @@ Public Class 设置
     ' 输出契约。任一条不满足是静默不生效（不是错误），默认开只会让人以为坏了。
     Public Property NVIDIA自动HDR As Boolean = False
 
+    ' AI 实时字幕（docs/ai-subtitles/，实验分支功能）：默认全关。
+    ' 三条理由写在这儿，免得以后有人"顺手改成 True"：
+    '   ① 它要拉一个独立 Python 进程 + llama-server 子进程，还要一块显卡显存；
+    '      默认开等于改变既有播放行为，而 ASR 是"锦上添花"不是"必需"；
+    '   ② 模型文件 1GB 量级不随播放器分发，用户没配好目录时功能静默不可用；
+    '   ③ 识别滞后于画面是物理下限（5s 窗 + ~0.2s 推理），默认开会让
+    '      第一次用的人以为"字幕坏了"。
+    ' 老设置文件没有这些键 → 反序列化留默认 → 同样关闭，无需迁移。
+    ' AI 实时字幕（docs/ai-subtitles/，实验分支功能）：本体不内置任何 ASR 能力，
+    ' 只认"扩展包"这一个契约 —— 一个含 ai-subtitles.json 的目录，worker / python /
+    ' 模型 / llama-server 在哪一律由包自己说清。于是这里只剩一个路径。
+    ' 未选包（默认空）就完全不启用：不拉进程、不占显存、不碰播放路径。
+    Public Property Ai字幕包目录 As String = ""
+    ' 选到有效包之后，用户仍可在菜单里临时关掉。它只决定"这次要不要起 worker"，
+    ' 与"装了哪个包"是两件事，所以分开存。
+    Public Property Ai字幕已停用 As Boolean = False
+    ' 高级项：覆盖清单里的窗口/步长（秒）。0 = 跟随清单；包自身已做钳制，这里只挡脏数据。
+    Public Property Ai字幕窗口秒覆盖 As Double = 0
+    Public Property Ai字幕步长秒覆盖 As Double = 0
+    ' 推理设备："" / "auto" = 跟随包清单的 device；其余取 Ai字幕后端 的标识
+    '（cpu / cuda / vulkan / rocm / sycl）。换后端在 llama.cpp 这边等于换二进制，
+    ' 包没带对应二进制时回落到包默认的那个，并在设置页状态行说明。
+    Public Property Ai字幕设备后端 As String = ""
+    ' 同一后端下的第几块设备（多显卡时用）。-1 = 不指定，交给 llama-server 自选。
+    Public Property Ai字幕设备序号 As Integer = -1
+    ' 卸载到显卡的层数（llama-server --n-gpu-layers）。-1 = 自动：GPU 后端全卸、
+    ' CPU 后端不卸；>= 0 时按用户指定的层数卸（显存吃紧的机器填小数，如 16）。
+    ' 它和模型档一样是启动期参数 —— 改了必须重启 worker 才生效。
+    ' 注意：选 CPU 后端时设备是 none，这一项没有意义（界面会置灰）。
+    Public Property Ai字幕Gpu层数 As Integer = -1
+    ' 字幕语言："" / "auto" = 让模型自判（默认）；其余取 Ai字幕语言 的标识（zh/en/…）。
+    ' 它给 llama-server 的 language 字段做提示，属于**软约束**：模型确信时压不住，
+    ' 也不是翻译。真正的"只出这个语言"要靠下面的闸门。
+    Public Property Ai字幕语言 As String = ""
+    ' 只显示所选语言：模型自报的语言与所选不符时，该窗结果不上屏。
+    ' 默认关 —— 开了它，选中文看英文片就是整片空白，用户很可能以为功能坏了。
+    Public Property Ai字幕仅所选语言 As Boolean = False
+    ' 模型档位："" = 跟包清单的默认档（model / mmproj 字段）；其余取清单 models 里的键。
+    ' 低性能设备（无独显、内存吃紧）选低量化档：显存与内存占用一起降，精度略降。
+    ' 它也属于启动期参数 —— 换档就是换权重文件，必须重启 worker 才生效。
+    Public Property Ai字幕模型档 As String = ""
+
     Public Property 关联常见视频 As Boolean = False
     Public Property 关联不常见视频 As Boolean = False
     Public Property 关联老旧视频 As Boolean = False
@@ -209,6 +251,13 @@ Public Class 设置
         SP_毛玻璃模式 = Math.Clamp(SP_毛玻璃模式, 0, 3)
         SP_毛玻璃背景来源 = Math.Clamp(SP_毛玻璃背景来源, -1, 1)
         SP_毛玻璃噪点颗粒 = Math.Clamp(SP_毛玻璃噪点颗粒, -1, 2)
+        ' AI 字幕：高级覆盖项钳在 [0.5, 30] 秒；0 或脏数据 = 跟随包清单（包自己已钳过一遍）。
+        If Not Double.IsFinite(Ai字幕窗口秒覆盖) OrElse Ai字幕窗口秒覆盖 < 0.5 OrElse Ai字幕窗口秒覆盖 > 30 Then
+            Ai字幕窗口秒覆盖 = 0
+        End If
+        If Not Double.IsFinite(Ai字幕步长秒覆盖) OrElse Ai字幕步长秒覆盖 < 0.5 OrElse Ai字幕步长秒覆盖 > 30 Then
+            Ai字幕步长秒覆盖 = 0
+        End If
     End Sub
 
     Private Shared Sub 规范化字幕字体(ByRef 字体名称 As String, ByRef 字号 As Single,

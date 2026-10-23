@@ -2,6 +2,7 @@
 #include "3FP/Core/MediaText.h"
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Api/FFF.Player.AudioRenderPlug.h"
+#include "3FP/Api/FFF.Player.AudioTap.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Render/VideoRenderer.h"
 #include "3FP/Subtitle/SubtitleProbe.h"
@@ -497,4 +498,42 @@ FFFResult FFF3FP_GetAudioRenderPlugState(const FFF3FPHandle player,
         }
     }
     return FFFResult::Success;
+}
+
+// ASR audio tap (FFF.Player.AudioTap.h). Appended after the render plug entries,
+// same additive discipline: PlayerApiVersion stays at 20 and a host that never
+// resolves these four keeps loading this DLL unchanged. The tap carries raw
+// decoded frames to a speech-recognition worker living outside the process; the
+// renderer install that makes Produce run is posted to the session worker by
+// Enable/Disable, and the read-back never touches the renderer pointer (the
+// session owns the tap, the renderer only borrows it while installed).
+FFFResult FFF3FP_EnableAudioTap(const FFF3FPHandle player,
+    const FFF3FPAudioTapConfig* config) noexcept {
+    return player != nullptr
+        ? static_cast<PlayerSession*>(player)->EnableAudioTap(config)
+        : FFFResult::InvalidArgument;
+}
+
+FFFResult FFF3FP_DisableAudioTap(const FFF3FPHandle player) noexcept {
+    if (player == nullptr) return FFFResult::InvalidArgument;
+    static_cast<PlayerSession*>(player)->DisableAudioTap();
+    return FFFResult::Success;
+}
+
+// Non-blocking: copies at most one block out and leaves the rest in the ring.
+// An empty ring (or a disabled tap) is Success with bytesWritten = 0; a buffer
+// too small for the head block is BufferTooSmall with requiredBytes set and
+// nothing consumed.
+FFFResult FFF3FP_ReadAudioTap(const FFF3FPHandle player, void* const dst,
+    const std::uint32_t capacity, FFF3FPAudioTapBlock* const block) noexcept {
+    return player != nullptr
+        ? static_cast<PlayerSession*>(player)->ReadAudioTap(dst, capacity, block)
+        : FFFResult::InvalidArgument;
+}
+
+FFFResult FFF3FP_GetAudioTapStats(const FFF3FPHandle player,
+    FFF3FPAudioTapStats* const stats) noexcept {
+    return player != nullptr
+        ? static_cast<PlayerSession*>(player)->GetAudioTapStats(stats)
+        : FFFResult::InvalidArgument;
 }

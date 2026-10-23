@@ -345,6 +345,15 @@ void PlayerWasapiRenderer::SetAudioRenderPlug(const FFF3FPAudioRenderPlug* const
     PublishRuntimeDiagnostics();
 }
 
+void PlayerWasapiRenderer::SetAsrTap(std::shared_ptr<AsrAudioTap> tap) noexcept {
+    // Runs on the session worker -- the same thread that calls Enqueue -- so
+    // this swap cannot race a Produce. Held by reference for exactly as long as
+    // it is installed: the session's authoritative shared_ptr can be replaced or
+    // dropped at any time, and the object survives until this copy goes away
+    // (cleared here, or with the renderer at teardown).
+    asrTap_ = std::move(tap);
+}
+
 PlayerWasapiRenderer::BedRoute PlayerWasapiRenderer::SelectBedRoute(const AVFrame* const frame) noexcept {
     if (!plugInstalled_.load(std::memory_order_acquire)) return BedRoute::Native;
     // The seam renders a stereo pair, so it owns the bed only against a 2-channel
@@ -577,6 +586,12 @@ void PlayerWasapiRenderer::ReleaseBedSeamBuffers() noexcept {
 FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t position100ns) noexcept {
     if (frame == nullptr || frame->nb_samples <= 0) return FFFResult::InvalidArgument;
     endOfStream_ = false;
+    // ASR tap: the raw decoded bed, ahead of any bed route, fold-down, resample
+    // or gain (FFF.Player.AudioTap.h). One pointer load while the tap is off;
+    // Produce copies and never blocks, so a stalled consumer costs itself
+    // dropped blocks and never playback. Runs on this (session worker) thread,
+    // the only thread that also swaps the tap in via SetAsrTap.
+    if (auto* tap = asrTap_.get()) tap->Produce(frame, position100ns);
     // Enqueue, reset and volume changes are serialized by PlayerSession's worker.
     // Do not take the PCM queue mutex while resampling or applying gain: the
     // WASAPI event thread must be able to take that mutex every device period.
