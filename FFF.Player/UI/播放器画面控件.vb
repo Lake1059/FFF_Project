@@ -52,6 +52,7 @@ Friend NotInheritable Class 播放器画面控件
     Friend Event 光盘鼠标移动 As EventHandler(Of MouseEventArgs)
     Friend Event 光盘鼠标确认 As EventHandler(Of MouseEventArgs)
     Friend Event 音量滚轮 As EventHandler(Of MouseEventArgs)
+    Friend Event Ctrl滚轮 As EventHandler(Of HandledMouseEventArgs)
     Friend Event 全景视场角滚轮 As EventHandler(Of MouseEventArgs)
     Friend Event 全景视角拖动 As EventHandler(Of 播放器360视角拖动事件参数)
     Friend Event 图片缩放滚轮 As EventHandler(Of MouseEventArgs)
@@ -173,6 +174,7 @@ Friend NotInheritable Class 播放器画面控件
 
     Protected Overrides Sub OnMouseWheel(e As MouseEventArgs)
         MyBase.OnMouseWheel(e)
+        If 尝试引发Ctrl滚轮(e) Then Return
         If 图片交互启用值 Then
             挡住滚轮冒泡(e)
             RaiseEvent 图片缩放滚轮(Me, e)
@@ -182,6 +184,7 @@ Friend NotInheritable Class 播放器画面控件
     End Sub
 
     Private Sub 视频输出窗口_MouseWheel(sender As Object, e As MouseEventArgs)
+        If 尝试引发Ctrl滚轮(e) Then Return
         ' 图片模式下滚轮归缩放：音量分支必须不可达，否则看图时滚轮会同时改音量。
         If 图片交互启用值 Then
             挡住滚轮冒泡(e)
@@ -191,6 +194,15 @@ Friend NotInheritable Class 播放器画面控件
         RaiseEvent 音量滚轮(Me, e)
         RaiseEvent 全景视场角滚轮(Me, e)
     End Sub
+
+    Private Function 尝试引发Ctrl滚轮(e As MouseEventArgs) As Boolean
+        Dim 已处理 = TryCast(e, HandledMouseEventArgs)
+        If 已处理 IsNot Nothing AndAlso 已处理.Handled Then Return True
+        If (Control.ModifierKeys And Keys.Control) <> Keys.Control Then Return False
+        Dim 参数 = If(已处理, New HandledMouseEventArgs(e.Button, e.Clicks, e.X, e.Y, e.Delta))
+        RaiseEvent Ctrl滚轮(Me, 参数)
+        Return 参数.Handled
+    End Function
 
     Private Sub 文件_DragEnter(sender As Object, e As DragEventArgs)
         e.Effect = If(e.Data IsNot Nothing AndAlso e.Data.GetDataPresent(DataFormats.FileDrop),

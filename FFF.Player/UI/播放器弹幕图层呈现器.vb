@@ -1,35 +1,14 @@
 Imports System.Diagnostics
-Imports System.Runtime.InteropServices
+Imports Microsoft.Win32
 Imports System.Threading
 
-''' <summary>
-''' 弹幕图层呈现器。把弹幕资料库按播放时钟转成一层 GPU 命令（内核 timed-text 图层槽位 1）。
-'''
-''' 与字幕分开是有原因的，不是单纯的分类整理：字幕是静态、低频、内容数秒一变，
-''' 弹幕是每帧都在动、同屏上百条、寿命只有几秒。共用一个呈现器时，为静态内容设计的
-''' 三件事对弹幕全是负收益——图层签名去重（弹幕 x 每帧变，永远不命中，却仍要为上百条
-''' 命令做全文本哈希）、按显示器刷新率定的固定节拍、以及"量不足就丢整个 tick"的降频
-''' 策略。拆开之后两边各用自己的节拍与策略。
-'''
-''' 驱动方式：**下限 60 Hz 保底，其余跟随片源**。
-'''   · 播放中每个泵拍都提交一次；泵间隔按实测片源帧周期取 clamp(帧周期, 8, 16) ms：
-'''     ≤60 fps 的片源一律 16 ms（62.5 Hz，即 60 Hz 保底），120 fps 片源 ≈8 ms（≈120 Hz），
-'''     更快的行为 8 ms 护栏（125 Hz）——8 ms 在 180 px/s 下每拍位移约 1.4 px，再快收益递减。
-'''     位置按连续媒体时钟计算，提交多密、滚动步进就多细；内核侧的合成节奏另见
-'''     FrameRateBoundHz（可见图层的目标帧率那一半，不被媒体帧率上限吞掉，也不超过面板）。
-'''   · 暂停/停止 ⇒ 零工作（不取数、不测量、不提交），图层保持上一帧内容。
-'''   · seek 拖动（时间轴代次变化）、窗口几何变化、配置变化 ⇒ 立即强制提交一次。
-'''
-''' 命令与文字对象由呈现器复用；调用方只能在同步提交期间读取命令，不能跨帧保留引用。
-''' </summary>
+''' <summary>以连续媒体时钟生成弹幕，提交节拍跟随显示器且最高为 120 帧。</summary>
 Friend NotInheritable Class 播放器弹幕图层呈现器
     Implements IDisposable
 
-    ' ── 驱动节拍 ────────────────────────────────────────────────────────────
-    ' 初始/最高泵间隔 16 ms（62.5 Hz）：≤60 fps 片源一律按它走，这就是 60 Hz 保底。
-    Private Const 泵间隔毫秒 As Integer = 16
-    ' 最小泵间隔 8 ms（125 Hz）：高帧率片源跟随到这里为止，再快就只烧定时器。
-    Private Const 最小间隔毫秒 As Integer = 8
+    Private 当前目标帧率 As Integer = 60
+    Private 当前显示设备名称 As String = String.Empty
+    Private 下次刷新时间戳 As Double
 
     Private ReadOnly 画面控件 As 播放器画面控件
     Private ReadOnly 宿主窗体 As Form
@@ -59,11 +38,6 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
     Private 时间轴代次有效 As Boolean
     Private 强制提交标志 As Integer
 
-    ' ── 片源帧周期估计（决定泵间隔：跟随片源，下限 60 Hz）──────────────────
-    Private 采样起始时间戳 As Long
-    Private 采样起始解码帧数 As ULong
-    Private 上次正在播放 As Boolean
-
     ' ── 埋点（只读，供浮层/采样器读取）─────────────────────────────────────
     Private 提交次数 As Long
     Private 跳过次数 As Long
@@ -75,7 +49,13 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
     Private 已释放标志 As Integer
     Private ReadOnly 刷新计时器 As LakeUI.PrecisionTimer
 
-    ''' <summary>最近一次实际使用的提交间隔（毫秒）。跟随视频时它≈片源帧周期。</summary>
+    ''' <summary>最近一次唤醒间隔；整数毫秒交替调度以保持平均目标帧率。</summary>
+    Friend ReadOnly Property 目标帧率 As Integer
+        Get
+            Return Volatile.Read(当前目标帧率)
+        End Get
+    End Property
+
     Friend ReadOnly Property 当前间隔毫秒 As Integer
         Get
             Return 刷新计时器.Interval
@@ -137,12 +117,15 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
         ' 弹幕命令更合适。丢弃数由 已丢弃节拍数 暴露出来，不会静默发生。
         刷新计时器 = New LakeUI.PrecisionTimer With {
             .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
-            .Interval = 泵间隔毫秒,
+            .Interval = 16,
             .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop
         }
         更新画面快照()
+        更新显示器节拍()
         AddHandler 画面控件.ClientSizeChanged, AddressOf 画面几何已变化
         AddHandler 画面控件.DpiChangedAfterParent, AddressOf 画面几何已变化
+        If 宿主窗体 IsNot Nothing Then AddHandler 宿主窗体.LocationChanged, AddressOf 宿主位置已变化
+        AddHandler SystemEvents.DisplaySettingsChanged, AddressOf 显示设置已变化
         AddHandler 刷新计时器.Tick, AddressOf 刷新计时器_Tick
         Volatile.Write(强制提交标志, 1)
         刷新计时器.Start()
@@ -164,14 +147,8 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
             Dim DPI = BitConverter.Int32BitsToSingle(Volatile.Read(缓存DPI位元))
             If Not Single.IsFinite(DPI) OrElse DPI <= 0 Then DPI = 96.0F
 
-            ' 1) 片源帧周期估计：决定泵间隔（跟随片源，下限 60 Hz）。只在播放中更新。
             Dim 正在播放 = 快照.状态 = 播放状态.正在播放
-            ' 暂停会把墙钟拉长而解码帧不涨，恢复后那个窗口必须重开；否则一次暂停
-            ' 会把帧周期估成"总时长/几帧"，泵被错误地放慢到 16 ms。
-            If 正在播放 AndAlso Not 上次正在播放 Then 采样起始时间戳 = 0L
-            上次正在播放 = 正在播放
-            刷新帧率估计(快照.已解码视频帧数, 正在播放)
-
+            ' 时间轴跳转必须重建轨道，普通节拍只推进连续位置。
             ' 2) seek 拖动：时间轴代次只在 seek 时自增，此时调度器必须整体重建。
             Dim 时间轴代次 = 快照.时间轴代次
             Dim 需要重建 = (Not 时间轴代次有效) OrElse 时间轴代次 <> 上一时间轴代次
@@ -186,6 +163,7 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
             End If
 
             Volatile.Write(强制提交标志, 0)
+            更新下一节拍()
             提交当前帧(客户区大小, 快照.视频宽度, 快照.视频高度, 快照.播放位置,
                      DPI, 时间轴代次, 需要重建)
         Finally
@@ -196,38 +174,41 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
         End Try
     End Sub
 
-    ''' <summary>用"解码帧数/时间"估算片源帧周期，泵间隔取 clamp(周期, 8, 16) ms：
-    ''' 60 fps 及以下 ⇒ 16 ms（60 Hz 保底），120 fps ⇒ ≈8 ms（跟随片源），更快 ⇒ 8 ms 护栏。
-    ''' 250 ms 窗口且至少 1 帧才更新，避免片头/抖动把泵带偏。
-    ''' 换媒体时解码计数会归零，负增量就是那个信号：重开窗口，否则要等新片
-    ''' 的解码数追过旧片的起点，120 fps 跟随会长时间停在 16 ms。</summary>
-    Private Sub 刷新帧率估计(解码帧数 As ULong, 正在播放 As Boolean)
-        If Not 正在播放 Then Return
-        Dim 现在 = Stopwatch.GetTimestamp()
-        If 采样起始时间戳 = 0L Then
-            采样起始时间戳 = 现在
-            采样起始解码帧数 = 解码帧数
-            Return
+    Private Sub 更新下一节拍()
+        Dim 现在 = CDbl(Stopwatch.GetTimestamp())
+        Dim 周期 = Stopwatch.Frequency / CDbl(目标帧率)
+        ' 累积绝对截止点，避免整数毫秒取整造成长期漂移。
+        If 下次刷新时间戳 = 0 OrElse Math.Abs(现在 - 下次刷新时间戳) > 周期 * 2 Then 下次刷新时间戳 = 现在
+        下次刷新时间戳 += 周期
+        刷新计时器.Interval = Math.Max(1, CInt(Math.Round((下次刷新时间戳 - 现在) * 1000.0R / Stopwatch.Frequency)))
+    End Sub
+
+    Private Sub 宿主位置已变化(sender As Object, e As EventArgs)
+        更新显示器节拍()
+    End Sub
+
+    Private Sub 显示设置已变化(sender As Object, e As EventArgs)
+        If Volatile.Read(已释放标志) <> 0 Then Return
+        If 画面控件.IsHandleCreated AndAlso 画面控件.InvokeRequired Then
+            Try
+                画面控件.BeginInvoke(Sub() 更新显示器节拍(True))
+            Catch ex As InvalidOperationException
+            End Try
+        Else
+            更新显示器节拍(True)
         End If
-        Dim 经过毫秒 = CDbl(现在 - 采样起始时间戳) * 1000.0R / CDbl(Stopwatch.Frequency)
-        If 经过毫秒 < 250.0R Then Return
-        Dim 新增帧 = CLng(解码帧数) - CLng(采样起始解码帧数)
-        If 新增帧 < 0 Then
-            ' 计数器归零（换媒体）。这里必须把起点拉到当前值，不能只 Return：
-            ' 旧的起点可能比新片的计数器大几个数量级。
-            采样起始时间戳 = 现在
-            采样起始解码帧数 = 解码帧数
-            Return
-        End If
-        If 新增帧 = 0 Then Return
-        Dim 帧周期 = 经过毫秒 / CDbl(新增帧)
-        采样起始时间戳 = 现在
-        采样起始解码帧数 = 解码帧数
-        If Double.IsFinite(帧周期) AndAlso 帧周期 > 0.0R Then
-            Dim 目标 = CInt(Math.Round(Math.Clamp(帧周期, CDbl(最小间隔毫秒), CDbl(泵间隔毫秒)),
-                                     MidpointRounding.AwayFromZero))
-            If 目标 <> 刷新计时器.Interval Then 刷新计时器.Interval = 目标
-        End If
+    End Sub
+
+    Private Sub 更新显示器节拍(Optional 强制读取 As Boolean = False)
+        If Volatile.Read(已释放标志) <> 0 Then Return
+        Dim 设备名称 = Screen.FromControl(画面控件).DeviceName
+        If Not 强制读取 AndAlso 设备名称 = 当前显示设备名称 Then Return
+        当前显示设备名称 = 设备名称
+        Volatile.Write(当前目标帧率, 显示器节拍.计算目标帧率(显示器节拍.读取刷新率(设备名称)))
+        SyncLock 配置锁
+            弹幕配置.目标帧率 = 目标帧率
+        End SyncLock
+        使图层失效()
     End Sub
 
     ' ── 命令生成与提交 ──────────────────────────────────────────────────────
@@ -240,22 +221,13 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
                 If 重建调度器 Then 当前弹幕调度器?.重置()
                 Dim commands = 生成命令(客户区大小, 视频宽度, 视频高度, 播放位置, DPI)
                 图层序号 += 1UL
-                提交图层(客户区大小, commands, 图层序号, 弹幕目标帧率())
+                提交图层(客户区大小, commands, 图层序号, CSng(目标帧率))
             End SyncLock
             Interlocked.Increment(提交次数)
         Catch
             ' 弹幕是可选图层；异常不能影响视频呈现。
         End Try
     End Sub
-
-    ''' <summary>交给内核的"目标帧率"：1000 / 当前泵间隔。16 ms ⇒ 62.5，8 ms ⇒ 125；
-    ''' 内核用它抬升 overlay 合成节奏（FrameRateBoundHz 的图层那一半），
-    ''' 不被媒体帧率上限吞掉，也不会超过实际面板刷新率。</summary>
-    Private Function 弹幕目标帧率() As Single
-        Dim 间隔 = 刷新计时器.Interval
-        If 间隔 <= 0 Then Return 60.0F
-        Return CSng(1000.0R / CDbl(间隔))
-    End Function
 
     Private Function 生成命令(客户区大小 As Size, 视频宽度 As UInteger, 视频高度 As UInteger,
                           播放位置 As TimeSpan, DPI As Single) As IReadOnlyList(Of 定时文字命令)
@@ -317,6 +289,7 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
         ArgumentNullException.ThrowIfNull(value)
         value.验证()
         SyncLock 配置锁
+            value.目标帧率 = 目标帧率
             弹幕配置 = value
             当前弹幕调度器?.应用配置(value)
         End SyncLock
@@ -377,13 +350,15 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
         ' 后台 Tick 退出，保证清空图层之后旧命令不可能再次提交。
         刷新空闲.Wait()
         刷新计时器.Dispose()
+        If 宿主窗体 IsNot Nothing Then RemoveHandler 宿主窗体.LocationChanged, AddressOf 宿主位置已变化
+        RemoveHandler SystemEvents.DisplaySettingsChanged, AddressOf 显示设置已变化
         RemoveHandler 画面控件.ClientSizeChanged, AddressOf 画面几何已变化
         RemoveHandler 画面控件.DpiChangedAfterParent, AddressOf 画面几何已变化
         Try
             图层序号 += 1UL
             提交图层(New Size(Math.Max(1, 画面控件.ClientSize.Width),
                               Math.Max(1, 画面控件.ClientSize.Height)),
-                   Array.Empty(Of 定时文字命令)(), 图层序号, 60.0F)
+                   Array.Empty(Of 定时文字命令)(), 图层序号, CSng(目标帧率))
         Catch
         End Try
         刷新空闲.Dispose()

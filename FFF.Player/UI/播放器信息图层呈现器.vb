@@ -54,6 +54,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private Const 告警色 As UInteger = &HFFFF6B6BUI
     Private Const 默认信息字体 As String = "Microsoft YaHei UI"
     Private Const 信息字号 As Single = 11.0F
+    Private Const 文字阴影颜色 As UInteger = &H90000000UI
+    Private Const 文字阴影偏移DIP As Single = 2.0F
 
     Private ReadOnly 画面控件 As 播放器画面控件
     Private ReadOnly 获取快照 As Func(Of 播放器快照)
@@ -69,6 +71,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 刷新定时器 As LakeUI.PrecisionTimer
     Private 普通字体 As New Font(默认信息字体, 信息字号, FontStyle.Regular, GraphicsUnit.Point)
     Private 普通字体名称 As String = 默认信息字体
+    Private 临时字号偏移磅值 As Single
     Private ReadOnly 原生宽度缓存 As New Dictionary(Of String, Single)(StringComparer.Ordinal)
     Private ReadOnly 文本测量格式 As StringFormat
     Private ReadOnly 操作消息列表 As New List(Of 操作消息)()
@@ -142,10 +145,27 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return 调试可见
     End Function
 
+    Friend ReadOnly Property 调试信息可见 As Boolean
+        Get
+            Return 调试可见 AndAlso Not 已释放
+        End Get
+    End Property
+
+    Friend Sub 调整临时字号(滚轮格数 As Integer)
+        If Not 调试信息可见 OrElse 滚轮格数 = 0 Then Return
+        Dim 新偏移 = Math.Clamp(临时字号偏移磅值 + 滚轮格数 * 1.0F,
+                                8.0F - 信息字号, 36.0F - 信息字号)
+        If 新偏移 = 临时字号偏移磅值 Then Return
+        临时字号偏移磅值 = 新偏移
+        重建普通字体()
+        原生宽度缓存.Clear()
+        使内容失效()
+    End Sub
+
     Friend Sub 应用全局字体(fontName As String)
         If 已释放 Then Return
         Dim 新字体名称 = 规范信息字体名称(fontName)
-        Dim 新字体 = 创建信息字体(新字体名称, 普通字体)
+        Dim 新字体 = 创建信息字体(新字体名称, 普通字体, 信息字号 + 临时字号偏移磅值)
         If String.Equals(普通字体名称, 新字体名称, StringComparison.CurrentCultureIgnoreCase) AndAlso
            String.Equals(普通字体.Name, 新字体.Name,
                          StringComparison.CurrentCultureIgnoreCase) Then
@@ -159,6 +179,13 @@ Friend NotInheritable Class 播放器信息图层呈现器
         原生宽度缓存.Clear()
         旧字体.Dispose()
         使内容失效()
+    End Sub
+
+    Private Sub 重建普通字体()
+        Dim 新字体 = 创建信息字体(普通字体名称, 普通字体, 信息字号 + 临时字号偏移磅值)
+        Dim 旧字体 = 普通字体
+        普通字体 = 新字体
+        旧字体.Dispose()
     End Sub
 
     Friend Sub 显示操作信息(文本 As String, Optional 颜色 As UInteger = 黄色,
@@ -424,19 +451,23 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private Shared Function 创建文字命令(文本 As String, 字体名称 As String, 字体 As Font, 颜色 As UInteger,
                                       区域 As RectangleF, DPI As Integer) As 定时文字命令
         Dim 字号像素 = CSng(字体.SizeInPoints * Math.Max(1, DPI) / 72.0F)
+        Dim 阴影偏移 = 文字阴影偏移DIP * Math.Max(1, DPI) / 96.0F
         Return 定时文字命令.创建文字(文本, 规范信息字体名称(字体名称), 字号像素, 区域, 颜色,
-            &HFF000000UI, 0, 定时文字对齐.靠前, 定时文字对齐.靠前, 定时文字样式.无)
+            &HFF000000UI, 0, 定时文字对齐.靠前, 定时文字对齐.靠前, 定时文字样式.无,
+            阴影色ARGB:=文字阴影颜色, 阴影X偏移:=阴影偏移, 阴影Y偏移:=阴影偏移)
     End Function
 
-    Private Shared Function 创建信息字体(fontName As String, 当前字体 As Font) As Font
+    Private Shared Function 创建信息字体(fontName As String, 当前字体 As Font,
+                                      Optional 字号磅值 As Single = 0) As Font
         Dim 字体名称 = 规范信息字体名称(fontName)
+        Dim 实际字号 = If(字号磅值 > 0, 字号磅值, 当前字体.SizeInPoints)
         Try
-            Return New Font(字体名称, 当前字体.SizeInPoints, 当前字体.Style, GraphicsUnit.Point)
+            Return New Font(字体名称, 实际字号, 当前字体.Style, GraphicsUnit.Point)
         Catch
             Try
-                Return New Font(默认信息字体, 当前字体.SizeInPoints, 当前字体.Style, GraphicsUnit.Point)
+                Return New Font(默认信息字体, 实际字号, 当前字体.Style, GraphicsUnit.Point)
             Catch
-                Return New Font(SystemFonts.DefaultFont.FontFamily, 当前字体.SizeInPoints, 当前字体.Style, GraphicsUnit.Point)
+                Return New Font(SystemFonts.DefaultFont.FontFamily, 实际字号, 当前字体.Style, GraphicsUnit.Point)
             End Try
         End Try
     End Function
@@ -805,6 +836,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
             混合(哈希, BitConverter.SingleToUInt32Bits(项.宽度))
             混合(哈希, BitConverter.SingleToUInt32Bits(项.高度))
             混合(哈希, 项.前景色ARGB) : 混合(哈希, CULng(项.样式))
+            混合(哈希, 项.阴影色ARGB)
+            混合(哈希, BitConverter.SingleToUInt32Bits(项.阴影X偏移))
+            混合(哈希, BitConverter.SingleToUInt32Bits(项.阴影Y偏移))
             For Each 字符 In 项.文本
                 混合(哈希, CULng(AscW(字符) And &HFFFF&))
             Next

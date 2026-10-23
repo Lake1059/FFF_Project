@@ -148,12 +148,12 @@ Public NotInheritable Class 弹幕显示配置
     Public Property 顶部边距 As Single = 24.0F
     Public Property 固定弹幕持续秒数 As Single = 4.0F
     Public Property 基准视频高度 As Single = 1080.0F
-    Public Property 描边颜色ARGB As UInteger = &HC0000000UI
+    Public Property 描边颜色ARGB As UInteger = &HE0000000UI
     ''' <summary>在默认字号下最终可见的向外描边宽度。</summary>
-    Public Property 描边宽度 As Single = 1.0F
-    Public Property 阴影颜色ARGB As UInteger = &H70000000UI
+    Public Property 描边宽度 As Single = 1.25F
+    Public Property 阴影颜色ARGB As UInteger = &HC0000000UI
     ''' <summary>在默认字号下向四周发散的高斯软阴影深度。</summary>
-    Public Property 阴影深度 As Single = 1.5F
+    Public Property 阴影深度 As Single = 3.0F
     <Obsolete("弹幕阴影已改为四周软阴影；请使用阴影深度。")>
     Public Property 阴影偏移 As Single
         Get
@@ -172,7 +172,7 @@ Public NotInheritable Class 弹幕显示配置
         If Not Single.IsFinite(字号) OrElse 字号 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(字号))
         If 不透明度 < 0 OrElse 不透明度 > 255 Then Throw New ArgumentOutOfRangeException(NameOf(不透明度))
         If Not Single.IsFinite(滚动速度) OrElse 滚动速度 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(滚动速度))
-        If Not Single.IsFinite(目标帧率) OrElse 目标帧率 < 1 OrElse 目标帧率 > 240 Then Throw New ArgumentOutOfRangeException(NameOf(目标帧率))
+        If Not Single.IsFinite(目标帧率) OrElse 目标帧率 < 1 OrElse 目标帧率 > 120 Then Throw New ArgumentOutOfRangeException(NameOf(目标帧率))
         If 同屏最大数量 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(同屏最大数量))
         If 常规滚动最大行数 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(常规滚动最大行数))
         If 顶部最大行数 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(顶部最大行数))
@@ -302,7 +302,7 @@ Public NotInheritable Class 弹幕调度器
         Dim 顶部边距 = 实际顶部边距(区域)
         Dim 行间距 = 配置.行间距 * 区域.缩放系数
         ' 不连续判定按帧数走，不按墙上时钟的毫秒间隔：跟随视频之后提交节拍随
-        ' 片源在 8~125 Hz 之间变化，任何固定的毫秒阈值都会和片源帧率打架。
+        ' 目标节拍由显示器决定，时间游标仍按连续媒体时钟推进。
         ' 阈值 = 目标帧率的 4 帧（下限 100 ms 折帧，防止高帧率配置被单次提交
         ' 的正常增量误触）。早期版本在这里垫过 250 ms 下限，≤62 fps 时阈值被
         ' 钉平，一次 UI 抖动就触发整屏 Clear，反而制造更明显的空白。

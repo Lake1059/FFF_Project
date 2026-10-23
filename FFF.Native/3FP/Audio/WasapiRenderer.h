@@ -104,7 +104,8 @@ public:
 
     FFFResult Start() noexcept;
     void Stop() noexcept;
-    FFFResult Enqueue(const AVFrame* frame, std::int64_t position100ns) noexcept;
+    FFFResult Enqueue(const AVFrame* frame, std::int64_t position100ns,
+        std::int64_t timestampResolution100ns = 0) noexcept;
     FFFResult Finish() noexcept;
     void SetPaused(bool paused) noexcept;
     void Reset(std::int64_t position100ns) noexcept;
