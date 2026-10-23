@@ -7,14 +7,21 @@ Imports LakeUI
 ''' 目录，包自己说清 worker / python / 模型 / llama-server 在哪、用什么量化档。
 ''' 于是这一页只需要一行"选哪个目录"——选到有效包即启用，包没了就自动停用。
 ''' 窗口/步长/设备序号/模型档/GPU 层数在"高级选项"里（默认展开，可随手折回去），
-''' 留空表示跟随包清单（默认）。GPU 层数只在选显卡时有意义：留空 = 全部卸载，
-''' 显存吃紧的机器填小数（模型 28 层）。
+''' 留空表示跟随包清单（默认）。GPU 层数是下拉（模型 28 层）：自动 = 不指定，
+''' 由 llama-server 自己全卸；显存吃紧再逐档往下选。模型档位取自包清单的
+''' models 表：没配包或包里只有一个档时下拉置灰，水印会说明原因。
 '''
 ''' 路径文本框走 Leave 而不是 TextChanged：半途路径写进设置会在下次打开媒体时
 ''' 被当成有效配置去启 worker，滋一脸错误提示。数值类同理，解析失败就不写。
 ''' </summary>
 Public Class Form设置_AI字幕
     Private 正在初始化 As Boolean
+
+    ' GPU 层数下拉项：显示 ↔ 值（--ngl；负数 = 不传，llama-server 自行全卸）。
+    ' 模型 28 层（Qwen3-ASR-0.6B 的 GGUF block_count），按 4 层一档切到 0。
+    Private Shared ReadOnly _层数显示 As String() = {
+        "自动（全部卸载）", "全部 28 层", "24 层", "20 层", "16 层", "12 层", "8 层", "4 层", "0 层（纯 CPU）"}
+    Private Shared ReadOnly _层数值 As Integer() = {-1, 28, 24, 20, 16, 12, 8, 4, 0}
 
     Public Sub New()
         正在初始化 = True
@@ -32,6 +39,11 @@ Public Class Form设置_AI字幕
             ' 于是 SelectedIndex 就是语言下标，不需要另存一份映射。
             For Each id In Ai字幕语言.主项
                 MCB_语言.Items.Add(Ai字幕语言.显示名(id))
+            Next
+            ' GPU 层数下拉：自动（不指定）打头，之后按 4 层一档给到 0。
+            ' 同样只在构造时填一次；顺序即下标，值表见 _层数值。
+            For i = 0 To _层数显示.Length - 1
+                MCB_Gpu层数.Items.Add(_层数显示(i))
             Next
         Finally
             正在初始化 = False
@@ -59,7 +71,15 @@ Public Class Form设置_AI字幕
             MTB_窗口秒.Text = 覆盖文本(设置.实例对象.Ai字幕窗口秒覆盖)
             MTB_步长秒.Text = 覆盖文本(设置.实例对象.Ai字幕步长秒覆盖)
             MTB_设备序号.Text = 序号文本(设置.实例对象.Ai字幕设备序号)
-            MTB_Gpu层数.Text = 层数文本(设置.实例对象.Ai字幕Gpu层数)
+            ' 文本框时代存下来的任意层数（含 999 这种"全部"的老写法）归位到最近
+            ' 预置项：≥28 记 28（llama-server 本来也会 clamp），其余归自动。只改
+            ' 内存不主动落盘，与语言残留值同一套路——界面显示什么就是什么。
+            Dim 层数 = 设置.实例对象.Ai字幕Gpu层数
+            If Not 层数已预置(层数) Then
+                层数 = If(层数 >= 28, 28, -1)
+                设置.实例对象.Ai字幕Gpu层数 = 层数
+            End If
+            MCB_Gpu层数.SelectedIndex = 层数下标(层数)
             刷新设备可用性()
             显示高级(MCK_显示高级.Checked)
             刷新状态()
@@ -112,12 +132,11 @@ Public Class Form设置_AI字幕
         Form1.当前主窗体?.应用Ai字幕设置()
     End Sub
 
-    ''' <summary>GPU 层数：留空 = 全部卸载（自动）；显存吃紧填小数（模型 28 层）。
-    ''' 和模型档一样是启动期参数，改完走应用Ai字幕设置让控制器重启 worker。</summary>
-    Private Sub MTB_Gpu层数_Leave(sender As Object, e As EventArgs) Handles MTB_Gpu层数.Leave
-        If 正在初始化 Then Return
-        设置.实例对象.Ai字幕Gpu层数 = 解析层数(MTB_Gpu层数.Text)
-        MTB_Gpu层数.Text = 层数文本(设置.实例对象.Ai字幕Gpu层数)
+    ''' <summary>GPU 层数下拉：和模型档一样是启动期参数，改完走应用Ai字幕设置
+    ''' 让控制器重启 worker（-ngl 变了必须重起 llama-server）。</summary>
+    Private Sub MCB_Gpu层数_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_Gpu层数.SelectedIndexChanged
+        If 正在初始化 OrElse MCB_Gpu层数.SelectedIndex < 0 Then Return
+        设置.实例对象.Ai字幕Gpu层数 = 层数值(MCB_Gpu层数.SelectedIndex)
         刷新状态()
         Form1.当前主窗体?.应用Ai字幕设置()
     End Sub
@@ -126,7 +145,7 @@ Public Class Form设置_AI字幕
     ''' 藏起来用户会以为这一项丢了。</summary>
     Private Sub 刷新设备可用性()
         Dim 用显卡 = Ai字幕后端.规整(设置.实例对象.Ai字幕设备后端) <> Ai字幕后端.处理器
-        MTB_Gpu层数.Enabled = 用显卡
+        MCB_Gpu层数.Enabled = 用显卡
         LBL_Gpu层数.Enabled = 用显卡
     End Sub
 
@@ -182,7 +201,7 @@ Public Class Form设置_AI字幕
         LBL_模型档.Visible = 显示
         MCB_模型档.Visible = 显示
         LBL_Gpu层数.Visible = 显示
-        MTB_Gpu层数.Visible = 显示
+        MCB_Gpu层数.Visible = 显示
     End Sub
 
     ''' <summary>"只显示所选语言"没有 auto 可言：没指定语言时置灰并归零。
@@ -294,7 +313,9 @@ Public Class Form设置_AI字幕
                 新.Add(档.档名)
             Next
         End If
-        Dim 签名 = String.Join("|", 新)
+        ' 签名带上"有没有包"：有包无档 与 没包 的档位列表都只剩默认档一项，
+        ' 只按列表签名会漏掉这两种状态之间的切换（水印理由不同）。
+        Dim 签名 = If(配置 Is Nothing, "无包", "有包") & String.Join("|", 新)
         If 签名 = _档表签名 Then Return
         _档表签名 = 签名
         _档名表 = 新
@@ -308,13 +329,26 @@ Public Class Form设置_AI字幕
         正在初始化 = True
         Try
             MCB_模型档.Items.Clear()
-            MCB_模型档.Items.Add(默认档显示)
-            For i = 1 To 新.Count - 1
-                MCB_模型档.Items.Add(新(i))
-            Next
-            MCB_模型档.SelectedIndex = 下标
-            ' 包里只有一个默认档时没得选，置灰比给一个只有一项的下拉更诚实。
-            MCB_模型档.Enabled = 新.Count > 1
+            If 新.Count > 1 Then
+                ' 多档：默认档打头，后面跟各档名。
+                MCB_模型档.Items.Add(默认档显示)
+                For i = 1 To 新.Count - 1
+                    MCB_模型档.Items.Add(新(i))
+                Next
+                MCB_模型档.SelectedIndex = 下标
+                MCB_模型档.Enabled = True
+            Else
+                ' 没得选（没配包 / 包里只有一档）：原因必须作为可见项显示。
+                ' 下拉框的水印只在无选中项时可见，而 SelectedIndex 恒 ≥ 0 ——
+                ' 靠 WaterText 说话等于没说，用户只看到一个灰下拉、
+                ' 没有任何地方告诉他为什么。置灰 + 项里写清下一步动作。
+                MCB_模型档.Items.Add(If(配置 Is Nothing,
+                    "需先选择有效扩展包（含 ai-subtitles.json）",
+                    "此包仅一个档位"))
+                MCB_模型档.SelectedIndex = 0
+                MCB_模型档.Enabled = False
+            End If
+            MCB_模型档.WaterText = "模型档位"
         Finally
             正在初始化 = False
         End Try
@@ -356,17 +390,27 @@ Public Class Form设置_AI字幕
         Return If(值 >= 0, 值.ToString(Globalization.CultureInfo.InvariantCulture), String.Empty)
     End Function
 
-    ''' <summary>层数回显：-1（自动）= 留空，让水印"留空=全部"说话。</summary>
-    Private Shared Function 层数文本(值 As Integer) As String
-        Return If(值 >= 0, 值.ToString(Globalization.CultureInfo.InvariantCulture), String.Empty)
+    ''' <summary>层数 ← → 下拉下标。项在构造时按 _层数显示/_层数值 的顺序填。
+    ''' 不在表里的值理论上已被调用方归位，落 0（自动）只是兜底。</summary>
+    Private Shared Function 层数下标(值 As Integer) As Integer
+        For i = 0 To _层数值.Length - 1
+            If _层数值(i) = 值 Then Return i
+        Next
+        Return 0
     End Function
 
-    ''' <summary>层数解析：留空/非数字/越界 = -1（自动，llama-server 自己按层数 clamp）。
-    ''' 上限 999 与 worker 侧"全部"的约定写法对齐，只挡脏数据不挡合理输入。</summary>
-    Private Shared Function 解析层数(文本 As String) As Integer
-        Dim 值 As Integer
-        If Integer.TryParse(文本, 值) AndAlso 值 >= 0 AndAlso 值 <= 999 Then Return 值
-        Return -1
+    Private Shared Function 层数值(下标 As Integer) As Integer
+        If 下标 < 0 OrElse 下标 >= _层数值.Length Then Return -1
+        Return _层数值(下标)
+    End Function
+
+    ''' <summary>存着的层数是不是下拉里的预置项。老设置里可能是文本框时代的
+    ''' 任意 0–999 整数，归位策略见 初始化页面。</summary>
+    Private Shared Function 层数已预置(值 As Integer) As Boolean
+        For i = 0 To _层数值.Length - 1
+            If _层数值(i) = 值 Then Return True
+        Next
+        Return False
     End Function
 
     Private Shared Function 解析覆盖(文本 As String) As Double
