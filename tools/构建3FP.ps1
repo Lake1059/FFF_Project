@@ -2,6 +2,15 @@ param(
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Debug",
 
+    # 目标框架。留空 = 用各工程自身默认值（当前 net10.0-windows10.0.26100.0）。
+    # .NET 11 正式版发布后改为：构建3FP.ps1 -NetTFM net11.0-windows10.0.26100.0
+    [string]$NetTFM = "",
+
+    # 外部商业兄弟仓 LakeUI 的目标框架。留空 = 用各工程自身默认值。
+    # 宿主升到 .NET 11 而 LakeUI 还没跟上时，可单独指向它现有产物：
+    #   -NetTFM net11.0-windows10.0.26100.0 -LakeUITfm net10.0-windows10.0.17763.0
+    [string]$LakeUITfm = "",
+
     [switch]$SkipDependencyPreparation,
 
     [switch]$SkipTests,
@@ -59,17 +68,22 @@ if ($LakeUiFound -eq 0) {
     throw "LakeUI has not been built. FFF.Player hints a DLL under ..\..\LakeUI\LakeUI\bin\Debug, and LakeUI is a sibling repository that is not vendored here. Build it first: dotnet build <this repo>\..\LakeUI\LakeUI\LakeUI.vbproj -c Debug"
 }
 
+# TFM 参数包：留空时展开为 0 个参数，命令行与改动前逐字符一致。
+$TfmArgs = @()
+if (-not [string]::IsNullOrWhiteSpace($NetTFM)) { $TfmArgs += "-p:NetTFM=$NetTFM" }
+if (-not [string]::IsNullOrWhiteSpace($LakeUITfm)) { $TfmArgs += "-p:LakeUITfm=$LakeUITfm" }
+
 & $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") `
     /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }
 
 & $DotNet build (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
-    -c $Configuration --nologo
+    -c $Configuration --nologo @TfmArgs
 if ($LASTEXITCODE -ne 0) { throw "FFF.Player x64 $Configuration build failed." }
 
 if (-not $SkipTests) {
     & $DotNet build (Join-Path $ProjectRoot "FFF.Player.Tests\FFF.Player.Tests.vbproj") `
-        -c $Configuration --nologo
+        -c $Configuration --nologo @TfmArgs
     if ($LASTEXITCODE -ne 0) { throw "FFF.Player.Tests x64 $Configuration build failed." }
 
     # ── 缩放体感门禁（docs/79 P0 / docs/81 第四节第 5 条）──────────────────────
