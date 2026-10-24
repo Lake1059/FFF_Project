@@ -282,6 +282,34 @@ def main():
     断言(re.search(r"模型加载中，首句字幕约需 1 分钟", ctrl),
         "L0-5 首启加载提示（空窗期不解释，用户会以为开了没反应）")
 
+    # ---------------- L0-6：实机验收抓到的输出护栏不许回退 ----------------
+    # 2026-10-25 用真实影片片段验收才暴露的两个缺陷：无语音段模型编字（3808 个
+    # 「啊」，占满 ctx）、语音稀疏段把 instruction 当内容输出（"Transcribe audio
+    # to text"）。两者都不会抛异常，只会把一屏编造的字糊在画面上——用户看到的
+    # 是"字幕功能坏了/模型在胡说"，比没字幕更糟。护栏任断一环，交互测试都看不出来
+    # （界面上字幕照常出，只是内容是假的）。
+    断言('"--n-predict", "512"' in worker,
+        "L0-6 默认命令行带 --n-predict 512（失控输出的长度上限）",
+        "worker 默认参数里找不到 --n-predict 512 —— 失控窗会再次占满 ctx")
+    断言('"--no-cache-idle-slots"' not in worker,
+        "L0-6 默认命令行不带 --no-cache-idle-slots（实测 RTF 元凶）",
+        "它回来了：5 秒窗实测 7.6~30.5s（rtf 1.5~6.7），字幕永久滞后于画面")
+    断言("def looks_degenerate(" in worker and "looks_degenerate(text)" in worker,
+        "L0-6 失控编字护栏在（定义 + 主循环调用）",
+        "looks_degenerate 没被调用 —— 无语音段会再次糊一屏重复字")
+    断言("def looks_like_prompt_leak(" in worker and "looks_like_prompt_leak(text)" in worker,
+        "L0-6 指令泄漏护栏在（定义 + 主循环调用）",
+        "looks_like_prompt_leak 没被调用 —— 模板串会原样上屏")
+    # 三种"这窗没有有效内容"，缺一种就漏一种污染：empty（只有语言头）/
+    # degenerate（重复字）/ leak（模板串）。
+    for 原因 in ("empty", "degenerate", "leak"):
+        断言(f'原因 = "{原因}"' in worker,
+            f"L0-6 丢弃分支覆盖 {原因}",
+            f"主循环里找不到 原因 = \"{原因}\" —— 这类内容会重新上屏")
+    断言("字幕不会凭空编字" in worker,
+        "L0-6 丢弃时给用户一次解释（空白字幕 + 无提示 = 用户以为坏了）",
+        "找不到丢弃提示文案 —— 用户面对空白字幕得不到任何解释")
+
     print(f"\n通过 {通过} / 失败 {失败}")
     return 失败
 

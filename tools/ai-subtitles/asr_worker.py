@@ -43,6 +43,34 @@ _INFER_TIMEOUT_S = 30.0
 _DEGENERATE_MIN_LEN = 24
 _DEGENERATE_TOP_RATIO = 0.6
 
+# 指令泄漏的判据（2026-10-25 实测）：语音极稀疏时模型会把 llama-server 拼进
+# prompt 的 instruction 原样当内容吐出来（"Transcribe audio to text"），有时连
+# chat 模板的标记（<asr_text> / <|im_start|>）一起。它字面是"识别结果"，但和
+# 失控编字是同一类污染——糊到屏幕上比没字幕更像"功能坏了"。处置同失控：丢弃 + 提示一次。
+#
+# 只判"短得像一句指令"的文本：长度超过下面的上限就放行，免得把真在讲 ASR 教程的
+# 长段对白误杀（那种场景里这句话只是长句里的一小段）。
+_PROMPT_LEAK_PHRASES = (
+    "transcribe audio to text",
+    "transcribe the audio to text",
+    "transcribe audio into text",
+    "transcribe the following audio",
+    "transcribe this audio",
+    "transcribe the speech",
+    "please transcribe",
+    "transcribe audio",
+)
+# 标记残留不受长度限制：正常转写结果里不可能出现 chat 模板标记，出现即泄漏。
+_PROMPT_LEAK_MARKERS = (
+    "<asr_text>", "</asr_text>", "asr_text",
+    "<|audio|>", "<|im_start|>", "<|im_end|>", "<|endoftext|>",
+)
+_PROMPT_LEAK_MAX_LEN = 160
+# 正文里 CJK 占比超过这个值就不判短语泄漏：模板串是纯英文指令，中文长句里夹
+# 一句英文指令是正常内容（讲 ASR 教程的片段实测就长这样），杀了就是误伤。
+_CJK_RE = re.compile(r"[\u3000-\u303f\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+_PROMPT_LEAK_MAX_CJK_RATIO = 0.2
+
 # --------------------------------------------------------------------------
 # 语言指定（--language）
 #
@@ -679,6 +707,41 @@ def looks_degenerate(text):
     return max(counts.values()) / len(s) >= _DEGENERATE_TOP_RATIO
 
 
+def looks_like_prompt_leak(text):
+    """模型是不是把 instruction 当内容输出了？
+
+    实测（2026-10-25，`zh-wiki` 语音稀疏段）：转写结果整句就是服务端拼的模板串
+    `Transcribe audio to text`。它不是识别结果，也不是噪声——上屏等于告诉用户
+    "模型在胡说"。判出来的窗直接丢掉，并和失控编字共用一次提示（见调用处）。
+
+    两类命中：
+      * 模板短语（大小写/标点不敏感），仅在文本短得像一句指令时才算——长段对白里
+        偶尔出现 transcribe 一词不该被杀。
+      * chat 模板标记残留（`asr_text` / `<|im_start|>` 等），一旦出现即泄漏，不看长度。
+
+    正常的 {"language X<asr_text> 正文"} 前缀已在 transcribe() 里被剥离，这里只看
+    剩下的正文，所以不会误伤带语言头的正常结果。
+    """
+    s = " ".join((text or "").split())
+    if not s:
+        return False
+    low = s.lower()
+    for marker in _PROMPT_LEAK_MARKERS:
+        if marker in low:
+            return True
+    # 长度按原文算（不是按去掉非 ASCII 后的残串）：中文长句里夹一句英文短语，
+    # 折完只剩那句短语，按残串判长度会把它误杀。
+    if len(s) > _PROMPT_LEAK_MAX_LEN:
+        return False
+    # 模板串是服务端拼的英文指令，整句就是它。中文（或日韩文）正文里夹一句
+    # 英文指令不是泄漏——讲 ASR 教程的长句正好长这样，别杀。
+    cjk = len(_CJK_RE.findall(s))
+    if cjk > _PROMPT_LEAK_MAX_CJK_RATIO * len(s):
+        return False
+    folded = re.sub(r"[^a-z0-9]+", " ", low).strip()
+    return any(p in folded for p in _PROMPT_LEAK_PHRASES)
+
+
 def transcribe(server, samples, tmpdir, session, language=None):
     """Write the window as 16k mono PCM16, POST it, return (language, text).
 
@@ -956,16 +1019,27 @@ def main():
                     return 4
                 continue
             dt = time.perf_counter() - t0
-            # 失控输出（无语音段 / 非支持语种下模型空转）：宁可不出字幕，也不要
-            # 把一屏编造的字糊在画面上——那比没字幕更像"功能坏了"。
-            if looks_degenerate(text):
+            # 三种"这一窗没有有效内容"，一律丢弃不上屏（宁可不出字幕，也不要
+            # 把一屏编造的字糊在画面上——那比没字幕更像"功能坏了"）：
+            #   empty      —— 只有语言头、正文为空（静音段的常见形态）
+            #   degenerate —— 失控编字（重复同一个字直到撞上限）
+            #   leak       —— 把 instruction 当内容输出（模板串 / chat 标记残留）
+            if not text.strip():
+                原因 = "empty"
+            elif looks_degenerate(text):
+                原因 = "degenerate"
+            elif looks_like_prompt_leak(text):
+                原因 = "leak"
+            else:
+                原因 = ""
+            if 原因:
                 dropped += 1
                 if not 已报失控:
                     已报失控 = True
                     emit({"type": "status", "state": "warning",
                           "detail": "这段音频疑似没有语音或语种不受支持（模型在重复同一个"
-                                    "字），已跳过；字幕不会凭空编字"})
-                log(f"degenerate dropped [{start100ns/1e7:.2f}s..{end100ns/1e7:.2f}s] "
+                                    "字，或把指令当内容输出），已跳过；字幕不会凭空编字"})
+                log(f"{原因} dropped [{start100ns/1e7:.2f}s..{end100ns/1e7:.2f}s] "
                     f"len={len(text)} preview={text[:40]!r}")
                 continue
             infer_seconds.append(dt)

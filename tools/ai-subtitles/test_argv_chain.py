@@ -200,5 +200,26 @@ for name, text, want in cases:
     check(name, mod.looks_degenerate(text) is want,
           f"got {mod.looks_degenerate(text)} want {want}")
 
+# S15 指令泄漏判定（2026-10-25 实测缺陷的护栏：模型把 instruction 当内容输出）
+leak_cases = [
+    ("S15a bare template", "Transcribe audio to text.", True),
+    ("S15b template with the", "Transcribe the audio to text", True),
+    ("S15c template + stray spaces", "  transcribe   AUDIO to TEXT  ", True),
+    ("S15d chinese-ish template", "Transcribe audio to text", True),
+    ("S15e chat marker asr_text", "language Chinese<asr_text> Transcribe audio to text", True),
+    ("S15f chat marker im_start", "<|im_start|>assistant", True),
+    ("S15g empty is not leak", "", False),
+    ("S15h normal english line", "Good morning everyone and welcome back to the show", False),
+    ("S15i normal chinese line", "今天我们先看一下这个方案的总体设计", False),
+    # 长段对白里提到 transcribe 不该被杀（只判"短得像一句指令"的文本）
+    ("S15j long tutorial mentioning transcribe",
+     "今天我们要讲的是如何 transcribe audio to text，也就是把一段音频里的语音"
+     "转成文字，整个流程分成三步，第一步是采样率归一化，第二步是特征提取，"
+     "第三步才是解码器输出，每一步都有各自的代价和注意事项需要权衡。", False),
+]
+for name, text, want in leak_cases:
+    check(name, mod.looks_like_prompt_leak(text) is want,
+          f"got {mod.looks_like_prompt_leak(text)} want {want}")
+
 print(f"\n{ok} passed / {fail} failed")
 sys.exit(1 if fail else 0)
