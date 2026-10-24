@@ -52,8 +52,11 @@ def chain(tokens, mmproj=None):
 
 
 FIXED = ["llama-server.exe", "-m", "M.gguf", "--port", "8199", "--host", "127.0.0.1"]
+# 2026-10-25 两处变更，都写在 S7/S13 的断言里：
+#   1. 新增输出护栏 --n-predict 512（无语音段会让模型重复到撞满 ctx）。
+#   2. 移除 --no-cache-idle-slots：实测它是性能元凶（rtf 恶化 1~2 个数量级）。
 DEFAULTS = ["--device", "Vulkan0", "--ctx-size", "4096", "--n-gpu-layers", "999",
-            "--threads", "8", "--temp", "0.6", "--no-cache-idle-slots",
+            "--threads", "8", "--temp", "0.6", "--n-predict", "512",
             "--cache-ram", "0"]
 
 # S1 文档标准示例（PACK_FORMAT §2.5）：["--ctx-size","8192","--temp","0.4"]
@@ -66,7 +69,11 @@ check("S1 temp overridden to 0.4",
       cmd.count("--temp") == 1 and cmd[cmd.index("--temp") + 1] == "0.4", cmd)
 check("S1 worker defaults kept",
       all(f in cmd for f in ["--n-gpu-layers", "--threads",
-                             "--no-cache-idle-slots", "--cache-ram", "--device"]), cmd)
+                             "--cache-ram", "--device"]), cmd)
+# S1b 防回归：--no-cache-idle-slots 不能再回来。它看着是省内存的开关，实测
+# （2026-10-25，CUDA0）却让长输出请求的 rtf 从 0.08 恶化到 1.5~6.7（极端 34）。
+# 字幕实时性优先：宁可多占一点内存，也不能让字幕追不上画面。
+check("S1b no-cache-idle-slots absent", "--no-cache-idle-slots" not in cmd, cmd)
 check("S1 fixed segment intact", cmd[:7] == FIXED, cmd[:7])
 
 # S2 拆分形态必须失败（防回归：M1 缺陷形态原样复现）
@@ -96,7 +103,8 @@ extra, cmd = chain(["--ctx-size"])
 tail = cmd[cmd.index("--ctx-size"):]
 check("S6 dangling flag at tail", tail == ["--ctx-size"], tail)
 
-# S7 老 manifest（无 llamaArgs）与改动前逐 token 等价（向后兼容）
+# S7 老 manifest（无 llamaArgs）命令行 = 固定段 + 默认段（别无其他变化）。
+# 默认段自 2026-10-25 起含输出护栏 --n-predict 512（见 DEFAULTS 注释）。
 extra, cmd = chain([])
 check("S7 legacy manifest identical", cmd == FIXED + DEFAULTS, cmd)
 
@@ -170,6 +178,27 @@ try:
     check("S12d custom fallback honored", srv._probe_model_id(fallback="x") == "x")
 finally:
     mod._HTTP.get = _orig_get
+
+# S13 输出护栏可被用户覆盖（--n-predict 走 _user_first，与 --ctx-size 同语义）
+extra, cmd = chain(["--n-predict", "2048"])
+check("S13a n-predict override single",
+      cmd.count("--n-predict") == 1 and cmd[cmd.index("--n-predict") + 1] == "2048", cmd)
+extra, cmd = chain([])
+check("S13b guard present by default",
+      cmd.count("--n-predict") == 1 and cmd[cmd.index("--n-predict") + 1] == "512", cmd)
+
+# S14 失控输出判定（纯逻辑，2026-10-25 实测缺陷的护栏）
+cases = [
+    ("S14a runaway single char", "啊" * 3808, True),
+    ("S14b runaway with spaces", "啊 " * 100, True),
+    ("S14c normal chinese line", "今天天气很好我们出去散步吧顺便买点水果回来", False),
+    ("S14d short interjection", "嗯。", False),
+    ("S14e empty", "", False),
+    ("S14f repeated but short", "哈哈哈", False),
+]
+for name, text, want in cases:
+    check(name, mod.looks_degenerate(text) is want,
+          f"got {mod.looks_degenerate(text)} want {want}")
 
 print(f"\n{ok} passed / {fail} failed")
 sys.exit(1 if fail else 0)

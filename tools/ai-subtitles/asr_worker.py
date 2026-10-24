@@ -33,6 +33,16 @@ import soundfile as sf
 
 TARGET_RATE = 16000
 
+# 单个转写请求的超时（秒）。原来写死 120：一个失控窗口能卡住两分钟，后面所有
+# 窗口排队，字幕永久滞后于画面（2026-10-25 实测失控窗 27s）。窗口上限 30s、
+# 正常转写远快于实时，30s 已经很宽。超时只丢这一窗，worker 继续跑。
+_INFER_TIMEOUT_S = 30.0
+
+# 失控输出的判据：去空白后长度 ≥ 该值，且最高频单字占比 ≥ 该比例 → 判为模型在
+# 空转（重复同一个字直到撞上限），丢弃不上屏。
+_DEGENERATE_MIN_LEN = 24
+_DEGENERATE_TOP_RATIO = 0.6
+
 # --------------------------------------------------------------------------
 # 语言指定（--language）
 #
@@ -312,12 +322,27 @@ class LlamaServer:
             "--n-gpu-layers", str(self.ngl),
             "--threads", str(self.threads),
             "--temp", "0.6",
+            # 输出长度上限。llama-server 默认 -1（无限）——这是失控的根源：实测
+            # （2026-10-25，CUDA0）一段没有语音的 20s 音频让模型重复生成 3808 个
+            # 「啊」，耗时 27s 并把 4096 的 ctx 吃满，字幕管道被这一窗堵死。
+            # 512 token 足够转写最大的 30s 窗口（中文约 150 字），最坏耗时从
+            # 27s 压到几秒。要更长请用自己的 --n-predict 覆盖（_user_first 让位）。
+            "--n-predict", "512",
             # Every subtitle window is unique audio, so prefix reuse is pure
             # waste: the default prompt cache (cache-ram 8192) retains ~12 MiB
             # of KV per unique window on the host side (VRAM stays flat) --
-            # measured +2.1 GB over a 15-minute run. Both flags together keep
-            # RSS flat (p14_continuous_q8_fixed.json).
-            "--no-cache-idle-slots",
+            # measured +2.1 GB over a 15-minute run (p14_continuous_q8_fixed.json).
+            #
+            # 2026-10-25 实测（RTX 4060 Laptop / CUDA0 / Q8_0，5s 窗、真实影片、
+            # 单实例）：旁边那个 --no-cache-idle-slots 曾经也在这里，它是性能
+            # 元凶——带着它，同一段 5s 音频转写耗时 7.6~30.5s（rtf 1.5~6.7），
+            # 长输出请求甚至到 171s（rtf 34）；去掉它（保留 --cache-ram 0）后
+            # 同一请求 0.30~0.55s（rtf 0.06~0.11），全素材 rtf 0.06~0.21。
+            # 服务端日志里 eval 速度在两个配置间差两个数量级（0.29 vs 108 tok/s）。
+            # 字幕是实时活儿，rtf > 1 就等于永远追不上画面，所以去掉它。
+            # 内存仍由 --cache-ram 0 兜着（实测带它的实例 1.18 GB，不带 2.74 GB）。
+            # 要更激进的省内存，用 llamaArgs 自己加回 --no-cache-idle-slots，
+            # 代价就是字幕开始滞后。
             "--cache-ram", "0",
         ]
         cmd += _user_first(defaults, self.extra)
@@ -632,6 +657,28 @@ class WindowBuilder:
         return (start, end, samples)
 
 
+def looks_degenerate(text):
+    """模型是不是在空转（把同一个字重复到撞上限）？
+
+    实测（2026-10-25，CUDA0）：一段没有语音的音频换来 3808 个「啊」，占满 4096
+    的 ctx、耗时 27s。它在字面上是"识别结果"，糊到屏幕上是纯粹的信息污染，而且
+    比没有字幕更糟——用户会以为字幕功能坏了或者模型在胡说。判出来的窗直接丢掉，
+    并把原因告诉用户（见调用处的 warning）。
+
+    只判"长且高度重复"：短文本（"嗯。"）与正常句子都不可能让单字占到 60%，
+    所以既不会误伤笑声（"哈哈哈"本来也不是字幕），也不会误伤正常对白。
+    """
+    s = "".join((text or "").split())
+    if len(s) < _DEGENERATE_MIN_LEN:
+        return False
+    if not s:
+        return False
+    counts = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    return max(counts.values()) / len(s) >= _DEGENERATE_TOP_RATIO
+
+
 def transcribe(server, samples, tmpdir, session, language=None):
     """Write the window as 16k mono PCM16, POST it, return (language, text).
 
@@ -651,7 +698,10 @@ def transcribe(server, samples, tmpdir, session, language=None):
                 f"http://127.0.0.1:{server.port}/v1/audio/transcriptions",
                 files={"file": (path.name, fh, "audio/wav")},
                 data=data,
-                timeout=120)
+                # 单窗超时。原来 120s：一窗卡住两分钟，后面的窗口全在排队，字幕
+                # 永久滞后于画面（实测失控窗就是 27s）。窗口最长 30s、正常转写
+                # 远快于实时，30s 已经很宽；超时只是丢这一窗，worker 继续跑。
+                timeout=_INFER_TIMEOUT_S)
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
         text = r.json().get("text", "")
@@ -796,14 +846,19 @@ def main():
         return 5
     log(f"tmpdir: {tmpdir}")
     windows = dropped = failures = 0
+    # 失控（模型重复同一个字）只报一次：它通常整段片子都在发生，每窗报一次会
+    # 把信息图层刷成刷屏。
+    已报失控 = False
     infer_seconds = []
     last_stats = time.time()
     generation = 0
 
     try:
         server.start()
-        # 先把音频路径预热掉：否则第一个真窗口要额外付十几秒构图代价，用户看到
-        # 的第一句字幕会明显迟到（详见 warm_audio 的注释）。
+        # 先把音频路径预热掉：否则第一个真窗口要额外付一笔构图代价，用户看到的
+        # 第一句字幕会明显迟到（详见 warm_audio 的注释）。实测（2026-10-25，
+        # CUDA0）这笔代价是 57~60s 量级、且前 1~2 个请求都要付，不只是 warm
+        # 一次就完——宿主那边的首启提示按「约 1 分钟」写，别再写「十几秒」。
         if not server.warm_audio(tmpdir=tmpdir):
             # warm 失败 = 这个模型不认音频请求（端点 404 / 模型不认音频输入）。
             # 不判 fatal——转写窗口失败本来就有既有降级路径，但必须让用户看见
@@ -901,6 +956,18 @@ def main():
                     return 4
                 continue
             dt = time.perf_counter() - t0
+            # 失控输出（无语音段 / 非支持语种下模型空转）：宁可不出字幕，也不要
+            # 把一屏编造的字糊在画面上——那比没字幕更像"功能坏了"。
+            if looks_degenerate(text):
+                dropped += 1
+                if not 已报失控:
+                    已报失控 = True
+                    emit({"type": "status", "state": "warning",
+                          "detail": "这段音频疑似没有语音或语种不受支持（模型在重复同一个"
+                                    "字），已跳过；字幕不会凭空编字"})
+                log(f"degenerate dropped [{start100ns/1e7:.2f}s..{end100ns/1e7:.2f}s] "
+                    f"len={len(text)} preview={text[:40]!r}")
+                continue
             infer_seconds.append(dt)
             windows += 1
             # matched 只是"报给宿主看"：worker 从不自己丢结果（宿主可选择丢弃，
