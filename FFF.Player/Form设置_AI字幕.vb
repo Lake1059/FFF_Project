@@ -6,10 +6,17 @@ Imports LakeUI
 ''' 本体不内置任何 ASR 能力，只认"扩展包"这一个契约：一个含 ai-subtitles.json 的
 ''' 目录，包自己说清 worker / python / 模型 / llama-server 在哪、用什么量化档。
 ''' 于是这一页只需要一行"选哪个目录"——选到有效包即启用，包没了就自动停用。
-''' 窗口/步长/设备序号/模型档/GPU 层数在"高级选项"里（默认展开，可随手折回去），
-''' 留空表示跟随包清单（默认）。GPU 层数是下拉（模型 28 层）：自动 = 不指定，
-''' 由 llama-server 自己全卸；显存吃紧再逐档往下选。模型档位取自包清单的
-''' models 表：没配包或包里只有一个档时下拉置灰，水印会说明原因。
+''' 窗口/步长/设备序号/模型档/GPU 层数/驻留偏移/附加参数在"高级选项"里（默认展开，
+''' 可随手折回去），留空表示跟随包清单（默认）。GPU 层数是下拉，预置档按包清单
+''' 声明的 layers（模型层数）生成——不同架构的模型不再是写死的 28 层；包没声明时
+''' 沿用旧的 28 层表。模型档位取自包清单的 models 表：没配包或包里只有一个档时
+''' 下拉置灰，水印会说明原因。
+'''
+''' 按模型能力开放的几处（条件不满足时置灰而非藏起来——藏起来用户会以为这项丢了）：
+'''   · 模型档：清单 models 表有多档才可点；没配包 / 包里只有一档时原因作为可见项；
+'''   · GPU 层数：选 CPU 后端时置灰（设备是 none，无从卸起）；预置档随包 layers 变，
+'''     包没声明 layers 时用默认 28 层表——下拉照样可用，不是置灰；
+'''   · 附加参数框：选了有效包才可编辑——那些 flag 是给这个包的 llama-server 的。
 '''
 ''' 路径文本框走 Leave 而不是 TextChanged：半途路径写进设置会在下次打开媒体时
 ''' 被当成有效配置去启 worker，滋一脸错误提示。数值类同理，解析失败就不写。
@@ -18,10 +25,24 @@ Public Class Form设置_AI字幕
     Private 正在初始化 As Boolean
 
     ' GPU 层数下拉项：显示 ↔ 值（--ngl；负数 = 不传，llama-server 自行全卸）。
-    ' 模型 28 层（Qwen3-ASR-0.6B 的 GGUF block_count），按 4 层一档切到 0。
-    Private Shared ReadOnly _层数显示 As String() = {
-        "自动（全部卸载）", "全部 28 层", "24 层", "20 层", "16 层", "12 层", "8 层", "4 层", "0 层（纯 CPU）"}
-    Private Shared ReadOnly _层数值 As Integer() = {-1, 28, 24, 20, 16, 12, 8, 4, 0}
+    ' 表按包清单声明的 layers（模型层数）动态生成，见 重建层数下拉 —— 同一个
+    ' 设置页要适配不同架构的模型，不能把某一层的层数写死。包没声明 layers 时
+    ' 用 _默认层数（= 旧固定表的 28 层基准），老包行为逐字节不变。
+    Private Const 默认层数 As Integer = 28
+    Private _层数显示表 As New List(Of String)
+    Private _层数值表 As New List(Of Integer)
+    Private _层数表签名 As String = String.Empty
+    Private _生效层数 As Integer = 默认层数
+
+    ' 窗口/步长预置：显示 ↔（窗口秒, 步长秒）。索引 0 = 跟随包清单（两个覆盖都
+    ' 写 0）；最后一项"自定义"没有自己的数值（见 MCB_预置_SelectedIndexChanged）。
+    ' 预置存在的理由：批式 ASR 的贴合度基本由"步长 + 推理耗时"决定，手填两个框
+    ' 对普通用户是黑话；灵敏档把滞后压到 1s 量级，完整档给长句更多上下文。
+    Private Shared ReadOnly _预置显示 As String() = {
+        "跟随包清单", "灵敏（窗 2s · 步长 1s）", "均衡（窗 5s · 步长 3s）",
+        "完整（窗 8s · 步长 4s）", "自定义"}
+    Private Shared ReadOnly _预置窗口 As Double() = {0, 2, 5, 8, 0}
+    Private Shared ReadOnly _预置步长 As Double() = {0, 1, 3, 4, 0}
 
     Public Sub New()
         正在初始化 = True
@@ -40,10 +61,12 @@ Public Class Form设置_AI字幕
             For Each id In Ai字幕语言.主项
                 MCB_语言.Items.Add(Ai字幕语言.显示名(id))
             Next
-            ' GPU 层数下拉：自动（不指定）打头，之后按 4 层一档给到 0。
-            ' 同样只在构造时填一次；顺序即下标，值表见 _层数值。
-            For i = 0 To _层数显示.Length - 1
-                MCB_Gpu层数.Items.Add(_层数显示(i))
+            ' 预置下拉是静态表：构造时填一次（初始化页面会被反复调用，在里面 Add
+            ' 会越加越多），但选中项要等设置读进来后再同步（见 同步预置下拉）。
+            ' GPU 层数下拉不在这儿填：它的预置档随包清单声明的 layers 而变，
+            ' 由 重建层数下拉 在 刷新状态 时按签名重建。
+            For i = 0 To _预置显示.Length - 1
+                MCB_预置.Items.Add(_预置显示(i))
             Next
         Finally
             正在初始化 = False
@@ -65,21 +88,24 @@ Public Class Form设置_AI字幕
             MCB_语言.SelectedIndex = 语言下标(设置.实例对象.Ai字幕语言)
             MCK_仅所选语言.Checked = 设置.实例对象.Ai字幕仅所选语言
             刷新语言可用性()
-            ' 高级项默认展开：窗口/步长/设备序号/模型档都是用户明确想调才会来调的东西，
-            ' 藏一层折叠只会让人以为"这些不让改"。想看简洁画面随手再折上去。
+            ' 高级项默认展开：窗口/步长/设备序号/模型档/层数/偏移/附加参数都是用户
+            ' 明确想调才会来调的东西，藏一层折叠只会让人以为"这些不让改"。
+            ' 想看简洁画面随手再折上去。
             MCK_显示高级.Checked = True
             MTB_窗口秒.Text = 覆盖文本(设置.实例对象.Ai字幕窗口秒覆盖)
             MTB_步长秒.Text = 覆盖文本(设置.实例对象.Ai字幕步长秒覆盖)
             MTB_设备序号.Text = 序号文本(设置.实例对象.Ai字幕设备序号)
-            ' 文本框时代存下来的任意层数（含 999 这种"全部"的老写法）归位到最近
-            ' 预置项：≥28 记 28（llama-server 本来也会 clamp），其余归自动。只改
-            ' 内存不主动落盘，与语言残留值同一套路——界面显示什么就是什么。
-            Dim 层数 = 设置.实例对象.Ai字幕Gpu层数
-            If Not 层数已预置(层数) Then
-                层数 = If(层数 >= 28, 28, -1)
-                设置.实例对象.Ai字幕Gpu层数 = 层数
-            End If
-            MCB_Gpu层数.SelectedIndex = 层数下标(层数)
+            MTB_偏移.Text = 偏移文本(设置.实例对象.Ai字幕字幕偏移秒)
+            MTB_附加参数.Text = 设置.实例对象.Ai字幕附加参数
+            ' 层数归位必须发生在建表之后：预置表随包清单声明的 layers 而变
+            ' （重建层数下拉 带签名缓存，重复调用不重建、只会归位）。老设置里
+            ' 文本框时代存下来的任意值（含 999 这种"全部"的老写法）在这里归位：
+            ' ≥ 生效层数记生效层数（llama-server 本来也会 clamp），其余归自动。
+            ' 只改内存不主动落盘，与语言残留值同一套路——界面显示什么就是什么。
+            Dim 归位错误 As String = String.Empty
+            Dim 归位包 = Ai字幕包.载入(MTB_包目录.Text.Trim(), 归位错误)
+            重建层数下拉(归位包)
+            同步预置下拉()
             刷新设备可用性()
             显示高级(MCK_显示高级.Checked)
             刷新状态()
@@ -177,6 +203,7 @@ Public Class Form设置_AI字幕
         If 正在初始化 Then Return
         设置.实例对象.Ai字幕窗口秒覆盖 = 解析覆盖(MTB_窗口秒.Text)
         MTB_窗口秒.Text = 覆盖文本(设置.实例对象.Ai字幕窗口秒覆盖)
+        同步预置下拉()
         刷新状态()
         Form1.当前主窗体?.应用Ai字幕设置()
     End Sub
@@ -184,6 +211,43 @@ Public Class Form设置_AI字幕
     Private Sub MTB_步长秒_Leave(sender As Object, e As EventArgs) Handles MTB_步长秒.Leave
         If 正在初始化 Then Return
         设置.实例对象.Ai字幕步长秒覆盖 = 解析覆盖(MTB_步长秒.Text)
+        MTB_步长秒.Text = 覆盖文本(设置.实例对象.Ai字幕步长秒覆盖)
+        同步预置下拉()
+        刷新状态()
+        Form1.当前主窗体?.应用Ai字幕设置()
+    End Sub
+
+    ''' <summary>字幕驻留偏移：走 Leave 不 TextChanged，理由同路径框。偏移是纯显示侧
+    ''' （控制器同步进状态机，不重启 worker），但照样要过 应用Ai字幕设置 让控制器
+    ''' 把新值同步过去——播放中改也立刻见效。</summary>
+    Private Sub MTB_偏移_Leave(sender As Object, e As EventArgs) Handles MTB_偏移.Leave
+        If 正在初始化 Then Return
+        Dim 值 = 解析偏移(MTB_偏移.Text)
+        设置.实例对象.Ai字幕字幕偏移秒 = 值
+        MTB_偏移.Text = 偏移文本(值)
+        刷新状态()
+        Form1.当前主窗体?.应用Ai字幕设置()
+    End Sub
+
+    ''' <summary>用户附加参数框：Leave 时整篇落盘（不 TextChanged——半途一个 --flag
+    ''' 写进设置会在下次打开媒体时重启 worker，等于每敲一个字符重载一次模型）。
+    ''' 它是启动期参数：控制器比对原文，变了就重启 worker。</summary>
+    Private Sub MTB_附加参数_Leave(sender As Object, e As EventArgs) Handles MTB_附加参数.Leave
+        If 正在初始化 Then Return
+        设置.实例对象.Ai字幕附加参数 = MTB_附加参数.Text
+        刷新状态()
+        Form1.当前主窗体?.应用Ai字幕设置()
+    End Sub
+
+    ''' <summary>窗口/步长预置：只是"快速填数值"的写入器——真存储仍是窗口/步长两个
+    ''' 覆盖项（0 = 跟随包清单）。选中预置即写设置并回填两个文本框；"自定义"没有
+    ''' 自己的数值，选中它什么都不写，它只表示"当前值与任何预置都对不上"。</summary>
+    Private Sub MCB_预置_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_预置.SelectedIndexChanged
+        If 正在初始化 OrElse MCB_预置.SelectedIndex < 0 Then Return
+        If MCB_预置.SelectedIndex >= _预置显示.Length - 1 Then Return   ' 自定义：只反映现状
+        设置.实例对象.Ai字幕窗口秒覆盖 = _预置窗口(MCB_预置.SelectedIndex)
+        设置.实例对象.Ai字幕步长秒覆盖 = _预置步长(MCB_预置.SelectedIndex)
+        MTB_窗口秒.Text = 覆盖文本(设置.实例对象.Ai字幕窗口秒覆盖)
         MTB_步长秒.Text = 覆盖文本(设置.实例对象.Ai字幕步长秒覆盖)
         刷新状态()
         Form1.当前主窗体?.应用Ai字幕设置()
@@ -202,6 +266,12 @@ Public Class Form设置_AI字幕
         MCB_模型档.Visible = 显示
         LBL_Gpu层数.Visible = 显示
         MCB_Gpu层数.Visible = 显示
+        LBL_偏移.Visible = 显示
+        MTB_偏移.Visible = 显示
+        LBL_预置.Visible = 显示
+        MCB_预置.Visible = 显示
+        LBL_附加参数.Visible = 显示
+        MTB_附加参数.Visible = 显示
     End Sub
 
     ''' <summary>"只显示所选语言"没有 auto 可言：没指定语言时置灰并归零。
@@ -220,11 +290,14 @@ Public Class Form设置_AI字幕
         End If
     End Sub
 
-    ''' <summary>状态行：包是否有效、实际生效的窗口/步长、有没有被高级覆盖。</summary>
+    ''' <summary>状态行：包是否有效、实际生效的窗口/步长、有没有被高级覆盖，
+    ''' 第三行是"这个包/这个模型能干什么"的能力行。</summary>
     Private Sub 刷新状态()
         Dim 目录 = MTB_包目录.Text.Trim()
         Dim 错误 As String = String.Empty
         Dim 配置 = Ai字幕包.载入(目录, 错误)
+        应用附加参数可用性(配置 IsNot Nothing)
+        重建层数下拉(配置)
         If 配置 Is Nothing Then
             重建模型档下拉(Nothing)
             If String.IsNullOrWhiteSpace(目录) Then
@@ -272,14 +345,45 @@ Public Class Form设置_AI字幕
         End If
         重建模型档下拉(配置)
         ' 层数只在用户显式设过时进状态行：默认"全部卸载"没什么可说的，
-        ' 而无条件拼上去会把第二行撑爆（568px 放不下"设备+模型+语言+层数"全套）。
+        ' 而无条件拼上去会把状态行撑爆（568px 放不下"设备+模型+语言+层数"全套）。
         Dim 层数 = 设置.实例对象.Ai字幕Gpu层数
         Dim 层数说明 = If(层数 >= 0, $"　层数：{层数}", "")
+        ' 能力行：模型形态（有没有投影权重）、层数表从哪来、附加参数两个来源各几条。
+        ' 单文件模型不是错误——llama-server 能加载它就能跑；但值得让人看见，
+        ' 因为"双文件包塞个单文件模型"正是换模型时最常见的踩坑。
+        Dim 形态说明 = If(String.IsNullOrWhiteSpace(配置.投影文件),
+                          "单文件模型（无投影权重）",
+                          "双文件（LLM + mmproj）")
+        Dim 层数表说明 = If(配置.模型层数 > 0,
+                            $"包声明 {配置.模型层数} 层",
+                            $"默认 {默认层数} 层（包未声明 layers）")
+        Dim 包参数条数 = 配置.额外参数.Count
+        Dim 用户参数条数 = Ai字幕管道.解析附加参数(设置.实例对象.Ai字幕附加参数).Count
+        Dim 参数说明 As String
+        If 包参数条数 = 0 AndAlso 用户参数条数 = 0 Then
+            参数说明 = "无"
+        ElseIf 用户参数条数 = 0 Then
+            参数说明 = $"包 {包参数条数} 条"
+        Else
+            参数说明 = $"包 {包参数条数} 条 + 用户 {用户参数条数} 条"
+        End If
         LBL_状态.Text = $"已启用：{配置.名称} —— 窗口 {窗口:0.###}s / 步长 {步长:0.###}s{后缀}" & vbCrLf &
-                        $"推理设备：{设备说明}　模型：{档名}　字幕语言：{语言说明}{层数说明}"
+                        $"推理设备：{设备说明}　模型：{档名}　字幕语言：{语言说明}{层数说明}" & vbCrLf &
+                        $"模型形态：{形态说明}　GPU 层数表：{层数表说明}　附加参数：{参数说明}"
         If 缺二进制 Then
             LBL_状态.Text &= vbCrLf & "注意：包内没有该后端专用的二进制，会回落到包默认的那个。"
         End If
+    End Sub
+
+    ''' <summary>附加参数框按"有没有有效包"开放：那些 flag 是给这个包的 llama-server
+    ''' 的，没包时置灰并把水印换成原因（可见项口径，与模型档下拉一致——藏起来或
+    ''' 只靠水印说话，用户都看不到"为什么不能填"）。</summary>
+    Private Sub 应用附加参数可用性(有效 As Boolean)
+        MTB_附加参数.Enabled = 有效
+        LBL_附加参数.Enabled = 有效
+        MTB_附加参数.WaterText = If(有效,
+            "每行一个参数，如 --ctx-size 换行 8192",
+            "需先选择有效扩展包（含 ai-subtitles.json）")
     End Sub
 
     ''' <summary>下拉框下标 ← → 后端标识。项是在构造时按 Ai字幕后端.全部 的顺序填的。</summary>
@@ -390,28 +494,122 @@ Public Class Form设置_AI字幕
         Return If(值 >= 0, 值.ToString(Globalization.CultureInfo.InvariantCulture), String.Empty)
     End Function
 
-    ''' <summary>层数 ← → 下拉下标。项在构造时按 _层数显示/_层数值 的顺序填。
-    ''' 不在表里的值理论上已被调用方归位，落 0（自动）只是兜底。</summary>
-    Private Shared Function 层数下标(值 As Integer) As Integer
-        For i = 0 To _层数值.Length - 1
-            If _层数值(i) = 值 Then Return i
+    ''' <summary>按包清单声明的 layers 重建 GPU 层数下拉。列表没变（签名相同）就
+    ''' 什么都不做——否则每次刷新状态都会清空重建，用户正打开的下拉会被抽走
+    ''' （与模型档下拉同一套路）。签名带上"有没有包"：没包 与 有包但没声明 layers
+    ''' 的层数表相同（都落默认 28），只按层数签名会漏掉这两种状态间的切换。</summary>
+    Private Sub 重建层数下拉(配置 As Ai字幕包配置)
+        Dim 层数 = If(配置 IsNot Nothing AndAlso 配置.模型层数 > 0, 配置.模型层数, 默认层数)
+        Dim 签名 = If(配置 Is Nothing, "无包", "有包") & 层数.ToString(Globalization.CultureInfo.InvariantCulture)
+        If 签名 = _层数表签名 Then Return
+        _层数表签名 = 签名
+        _生效层数 = 层数
+        _层数显示表 = New List(Of String)
+        _层数值表 = New List(Of Integer)
+        ' 自动 = 不传 --ngl，由 llama-server 自己全卸（GPU 后端）/ 不卸（CPU）。
+        _层数显示表.Add("自动（全部卸载）")
+        _层数值表.Add(-1)
+        If 层数 < 4 Then
+            ' 微型模型（不足 4 层）："全部"与"0"之外没有有意义的中间档。
+            If 层数 > 0 Then
+                _层数显示表.Add($"全部 {层数} 层")
+                _层数值表.Add(层数)
+            End If
+        Else
+            ' 全部 N 层打头，每 4 层一档递减到 4，0 层（纯 CPU）收尾。
+            ' N=28 时恰为旧固定表（28/24/20/16/12/8/4/0）——老包不声明 layers
+            ' 也走得这条分支（默认层数 = 28），行为与过去逐字节一致。
+            Dim 档 As Integer = 层数
+            While 档 >= 4
+                _层数显示表.Add(If(档 = 层数, $"全部 {层数} 层", $"{档} 层"))
+                _层数值表.Add(档)
+                档 -= 4
+            End While
+        End If
+        _层数显示表.Add("0 层（纯 CPU）")
+        _层数值表.Add(0)
+        ' 换包后存着的层数可能不在新表里（不同架构层数不同）：先归位再选中，
+        ' 否则会出现"界面显示自动、worker 却按 16 卸"——显示什么就必须是什么。
+        Dim 值 = 规整层数(设置.实例对象.Ai字幕Gpu层数)
+        If 值 <> 设置.实例对象.Ai字幕Gpu层数 Then 设置.实例对象.Ai字幕Gpu层数 = 值
+        Dim 外层初始化 = 正在初始化
+        正在初始化 = True
+        Try
+            MCB_Gpu层数.Items.Clear()
+            For i = 0 To _层数显示表.Count - 1
+                MCB_Gpu层数.Items.Add(_层数显示表(i))
+            Next
+            MCB_Gpu层数.SelectedIndex = 层数下标(值)
+        Finally
+            正在初始化 = 外层初始化
+        End Try
+    End Sub
+
+    ''' <summary>把存着的层数值归位到当前预置表：在表里原样用；≥ 生效层数记生效层数
+    ''' （llama-server 本来也会 clamp，老设置里 999 这种"全部"写法走这条）；其余归
+    ''' 自动（-1）。只改内存不主动落盘——用户一动界面就会把正确值写回去
+    ''' （与语言残留值同一套路）。</summary>
+    Private Function 规整层数(值 As Integer) As Integer
+        If 层数已预置(值) Then Return 值
+        Return If(值 >= _生效层数, _生效层数, -1)
+    End Function
+
+    ''' <summary>层数 ← → 下拉下标。项按 _层数显示表/_层数值表 的顺序填。
+    ''' 不在表里的值理论上已被 规整层数 归位，落 0（自动）只是兜底。</summary>
+    Private Function 层数下标(值 As Integer) As Integer
+        For i = 0 To _层数值表.Count - 1
+            If _层数值表(i) = 值 Then Return i
         Next
         Return 0
     End Function
 
-    Private Shared Function 层数值(下标 As Integer) As Integer
-        If 下标 < 0 OrElse 下标 >= _层数值.Length Then Return -1
-        Return _层数值(下标)
+    Private Function 层数值(下标 As Integer) As Integer
+        If 下标 < 0 OrElse 下标 >= _层数值表.Count Then Return -1
+        Return _层数值表(下标)
     End Function
 
-    ''' <summary>存着的层数是不是下拉里的预置项。老设置里可能是文本框时代的
-    ''' 任意 0–999 整数，归位策略见 初始化页面。</summary>
-    Private Shared Function 层数已预置(值 As Integer) As Boolean
-        For i = 0 To _层数值.Length - 1
-            If _层数值(i) = 值 Then Return True
-        Next
-        Return False
+    ''' <summary>存着的层数是不是当前下拉里的预置项。老设置里可能是文本框时代的
+    ''' 任意 0–999 整数，归位策略见 规整层数。</summary>
+    Private Function 层数已预置(值 As Integer) As Boolean
+        Return _层数值表.Contains(值)
     End Function
+
+    ''' <summary>字幕驻留偏移：留空或非法 = 0；范围钳 [-3, +3] 秒（设置项同区间，双保险）。
+    ''' 它只调"每行驻留多久"（守卫判定位置 = 播放位置 − 偏移），不调"何时出现"。</summary>
+    Private Shared Function 解析偏移(文本 As String) As Double
+        Dim 值 As Double
+        If Double.TryParse(文本, 值) Then Return Math.Clamp(值, -3.0, 3.0)
+        Return 0
+    End Function
+
+    Private Shared Function 偏移文本(值 As Double) As String
+        Return 值.ToString("0.###", Globalization.CultureInfo.InvariantCulture)
+    End Function
+
+    ''' <summary>按当前窗口/步长覆盖值同步预置下拉：两个都是 0 = 跟随包清单；与某项
+    ''' 预置完全相等 = 选中它；都对不上 = 自定义（手填过）。</summary>
+    Private Sub 同步预置下拉()
+        Dim 窗口 = 设置.实例对象.Ai字幕窗口秒覆盖
+        Dim 步长 = 设置.实例对象.Ai字幕步长秒覆盖
+        Dim 下标 = _预置显示.Length - 1   ' 默认落"自定义"
+        If 窗口 <= 0 AndAlso 步长 <= 0 Then
+            下标 = 0
+        Else
+            For i = 1 To _预置显示.Length - 2
+                If _预置窗口(i) = 窗口 AndAlso _预置步长(i) = 步长 Then
+                    下标 = i
+                    Exit For
+                End If
+            Next
+        End If
+        Dim 外层初始化 = 正在初始化
+        正在初始化 = True
+        Try
+            MCB_预置.SelectedIndex = 下标
+        Finally
+            正在初始化 = 外层初始化
+        End Try
+    End Sub
 
     Private Shared Function 解析覆盖(文本 As String) As Double
         Dim 值 As Double

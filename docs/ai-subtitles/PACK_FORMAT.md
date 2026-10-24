@@ -37,7 +37,8 @@ llama-server 用机器上那一份）。
 | `model` | 路径 | 否 | 主权重 .gguf。留空 = worker 按 `--model-dir` + 默认量化档自己拼 |
 | `mmproj` | 路径 | 否 | 投影权重。留空 = 与主权重同目录的 `mmproj-*.gguf`；**旁边也没有 = 单文件模型**（不传 `--mmproj`，由 llama-server 自己判定能不能加载） |
 | `models` | 对象 | 否 | **模型档位**：档名 → `{model, mmproj}`。同一包带标准档与低配档，用户在设置里换档，见 §2.4 |
-| `llamaArgs` | 数组 | 否 | **llama-server 附加参数**：`["--ctx-size","8192"]`，逐 token 追加到命令行。worker 固定默认值遇同名 flag 自动让位，见 §2.5 |
+| `layers` | 整数 | 否 | 模型层数（GGUF `block_count`）。**只用于生成设置页「GPU 层数」下拉的预置档**：自动 → 全部 N 层 → 每 4 层一档递减 → 0 层；缺省 = 旧的 28 层固定表，行为与过去一致，见 §2.6 |
+| `llamaArgs` | 数组 | 否 | **llama-server 附加参数**：`["--ctx-size","8192"]`，逐 token 追加到命令行。worker 固定默认值遇同名 flag 自动让位；设置页高级区的用户框排在其后、同名 flag 覆盖它，见 §2.5 |
 | `window` | 秒 | 否 | 推理窗口，0.5–30，默认 5 |
 | `step` | 秒 | 否 | 推进步长，0.5–30，默认 5。大于窗口时压到窗口 |
 
@@ -60,7 +61,8 @@ llama-server 用机器上那一份）。
   "python": "runtime/venv/Scripts/python.exe",
   "llamaServer": "runtime/llama-server.exe",
   "model": "models/Qwen3-ASR-0.6B-Q6_K.gguf",
-  "mmproj": "models/mmproj-Qwen3-ASR-0.6B-Q6_K.gguf"
+  "mmproj": "models/mmproj-Qwen3-ASR-0.6B-Q6_K.gguf",
+  "layers": 28
 }
 ```
 
@@ -158,8 +160,54 @@ worker 有一份固定默认参数（`--ctx-size 4096` / `--temp 0.6` / 缓存�
 `MODEL_TIERS.md` §7 逐条记录了默认值的实测依据，逃生门是给"有依据的例外"
 用的，不是给"据说更好"用的。
 
+#### 用户侧覆盖：设置页的「llama-server 附加参数」文本框
+
+清单之外，**设置 → AI 字幕 → 高级区**还有一个多行文本框（界面标签
+「llama-server 附加参数」，设置项 `Ai字幕附加参数`），临时调参不必改包。写法：
+**每行一个 token**——`--ctx-size` 与 `8192` 分两行写，或单行 `--ctx-size=8192`；
+空行（含只有空格的行）忽略；`#` 开头的行是注释，不传给 llama-server。
+
+合并规则（宿主 `Ai字幕管道.合并附加参数`）：**两个来源都传，用户参数排在包参数
+之后**；用户点名过的 flag（`--flag` 或 `--flag=value` 形式取 `--flag` 部分），
+连同它在包参数里的值（紧随的下一个不以 `--` 开头的 token）一起被剔除——即
+「用户覆盖包」，避免 llama-server 收到重复 flag（某些版本对重复 `--ctx-size`
+直接报错）。这与 worker 侧固定默认值让位（`_user_first`）是同一套语义。
+
+| 规则 | 行为 |
+| --- | --- |
+| 生效时机 | **启动期参数**：改内容后重启 worker 才生效（与模型档/后端/语言同一重启判定队列） |
+| 传递形态 | 合并后的每个 token 以**等号形式** `--llama-arg=<token>` 传给 worker——argparse 的 append action 不收以 `--` 开头的值，拆两个 token 传会被判 expected one argument 直接 exit 2（2026-10-25 实测） |
+| 没选包时 | 文本框置灰，水印提示「需先选择有效扩展包（含 ai-subtitles.json）」 |
+| 日志 | 合并结果记一行：`AI 字幕：llama-server 附加参数 N 条（清单 X + 用户 Y，同名 flag 以用户为准）`，N 按 token 数计 |
+
 换模型还要过三道架构约束（`model` / `mmproj` 怎么给、API 模型名怎么探测、
 输出格式怎么解析），完整说明见 `USER_GUIDE.md` §7。
+
+### 2.6 `layers`：让「GPU 层数」预置跟着模型走
+
+「GPU 层数」下拉过去是一张写死的 28 层表（28/24/20/16/12/8/4/0）——因为
+Qwen3-ASR-0.6B 恰好 28 层。换个层数不同的模型，这张表就名不副实了：清单可以用
+`layers` 把层数告诉本体，由它生成预置档。
+
+```json
+"layers": 32
+```
+
+它**不改任何推理行为**，只决定下拉里出现哪些档位。生成规则（N = 声明值，
+**缺省不写 = 28**）：
+
+| 档位 | 怎么来 |
+| --- | --- |
+| 自动（全部卸载） | 永远在第一位：不向 llama-server 传 `--n-gpu-layers`，由它自行全卸 |
+| 全部 N 层 | 显式传 `--n-gpu-layers N` |
+| N-4 / N-8 / … | 每 4 层一档递减，直到 0 |
+| 0 层（纯 CPU） | 永远在最后一位 |
+
+N=28 时生成的正是旧固定表——**缺省不写 `layers` 就是过去的行为**，旧包一个字
+不用改。字段缺失或类型不符（写成字符串等）按没声明处理，坏数据不会让包不可用。
+
+老设置里存过的任意层数归位：不在当前预置表里的值，≥ N 记为 N，其余归「自动」
+（只改内存、不主动落盘，用户一动界面就写回）——界面显示什么，实际就是什么。
 
 ---
 

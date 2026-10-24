@@ -123,11 +123,12 @@ python tools/ai-subtitles/make_portable_pack.py --source <包目录> --target <�
 | 参数 | 界面入口 | 语义 |
 | --- | --- | --- |
 | 量化档（"Q 几"） | 高级 → 模型档位 | 同一个包多档权重，换档只重启 worker（§1–§3） |
-| `--n-gpu-layers`（"深度"） | 高级 → GPU 层数 | 卸载到显卡的层数。下拉预置：自动（不指定，llama-server 把 28 层全卸）/ 全部 28 层 / 24 / 20 / 16 / 12 / 8 / 4 / 0（纯 CPU）。显存吃紧往下选，如 16 = 一半权重在显存。选 CPU 后端时置灰（设备是 none，无从卸起） |
+| `--n-gpu-layers`（"深度"） | 高级 → GPU 层数 | 卸载到显卡的层数。下拉预置按包清单声明的 `layers`（模型层数）生成：自动（不指定，llama-server 全卸）/ 全部 N 层 / 每 4 层一档 / 0（纯 CPU）；包不声明 = 旧的 28 层表（全部 28 / 24 / 20 / 16 / 12 / 8 / 4 / 0）。显存吃紧往下选，如 16 = 一半权重在显存。选 CPU 后端时置灰（设备是 none，无从卸起） |
 | `--device` / `--device-backend` | 推理设备 | auto = 跟随包清单 device；本机清单是 cuda，所以 auto 在该机落 CUDA0 + 全卸 |
 | `--device` 序号 | 高级 → 设备序号 | 多显卡时选第几块 |
-| 窗口 / 步长 | 高级 → 窗口（秒）/ 步长（秒） | 字幕切分粒度，与 llama-server 无关但同属高级区 |
-| **任意 llama-server 参数** | 扩展包清单 `llamaArgs` | 换模型时的逃生门：`["--ctx-size","8192","--temp","0.4"]` 逐 token 追加，worker 固定默认值遇同名 flag 整项让位。见 `PACK_FORMAT.md` §2.5 |
+| 窗口 / 步长 | 高级 → 窗口（秒）/ 步长（秒）+ 预置下拉 | 字幕切分粒度，与 llama-server 无关但同属高级区；预置（灵敏 / 均衡 / 完整）只是快速填这两个框，真存储仍是那两个覆盖项 |
+| 字幕驻留偏移 | 高级 → 字幕驻留偏移（秒） | 纯显示侧：只调每行驻留多久（守卫判定位置 = 播放位置 − 偏移），**不影响一行何时出现**——那由推理窗口与推理耗时决定。范围 [-3, +3] 秒，改它不重启 worker |
+| **任意 llama-server 参数** | 高级 → llama-server 附加参数（每行一个）+ 扩展包清单 `llamaArgs` | 换模型时的逃生门：清单 `["--ctx-size","8192","--temp","0.4"]` 与设置页多行框（每行一个参数，`#` 注释）两个来源合并透传，用户同名 flag 覆盖清单；worker 固定默认值遇同名 flag 整项让位。见 `PACK_FORMAT.md` §2.5 |
 
 **默认值为什么是 auto 而不是 CPU**：auto 的解析链是"用户没选 → 包清单 device
 （cuda）→ worker 问 `--list-devices` 匹配 CUDA0 + ngl 999"。老设置文件里存过
@@ -142,8 +143,9 @@ python tools/ai-subtitles/make_portable_pack.py --source <包目录> --target <�
 
 ### 7.3 默认值 + llamaArgs 逃生门（2026-10-25 起不再是绝对锁死）
 
-这些参数 worker 带固定默认值，**默认不放界面**；换非 Qwen3-ASR 模型时可用扩展包
-清单的 `llamaArgs` 覆盖（同名 flag 整项让位，见 `PACK_FORMAT.md` §2.5）。下表
+这些参数 worker 带固定默认值，**默认不给专门控件**；换非 Qwen3-ASR 模型时用
+设置页高级区的「llama-server 附加参数」多行框或扩展包清单的 `llamaArgs` 覆盖
+（同名 flag 整项让位，用户框覆盖清单，见 `PACK_FORMAT.md` §2.5）。下表
 "默认值依据"栏就是逃生门的正确用法说明——有依据的例外才该覆盖：
 
 | 参数 | 当前值 | 默认值依据（覆盖前先对照自己的场景） |
@@ -167,8 +169,8 @@ llama-server.exe -m <model> --mmproj <mmproj> --n-gpu-layers 16 --device CUDA0
 ```
 
 改任何默认值之前，先想清楚"它改变哪个结论"——这一节的每一项都对应一次实测或一个
-明确的失败模式，没有"据说更好"的位置。真要覆盖时走清单 `llamaArgs`
-（`PACK_FORMAT.md` §2.5），并在覆盖前用上面的命令对照自己场景。
+明确的失败模式，没有"据说更好"的位置。真要覆盖时走设置页的附加参数框或清单
+`llamaArgs`（`PACK_FORMAT.md` §2.5），并在覆盖前用上面的命令对照自己场景。
 
 ---
 

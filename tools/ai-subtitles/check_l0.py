@@ -4,10 +4,13 @@
   * 宿主 `Ai字幕语言.名称表` 与 worker `LANGUAGE_NAMES` 是**两份**表（VB / Python）。
     两份一旦不一致，现象是"选了某语言 → 模型没提示 或 matched 永远 False"，
     而勾了"只显示所选语言"时就是整片空白，且不抛任何异常。
-  * 设置页的语言行是脚本批量下移高级区之后加上去的（ClientSize 598x510），
+  * 设置页的语言行是脚本批量下移高级区之后加上去的（ClientSize 598x644），
     光靠肉眼没法确认有没有压字或越界。
   * 界面只列 4 个主项（其余 28 个未验证语种不上面板）：这里钉住"下拉只引用主项"，
     防止后人把循环改回整表、让未验证语种重新出现（L0-1b）。
+  * 「扩展 UI + 按模型能力开放」一轮（2026-10-25）的新契约：清单 layers 驱动
+    GPU 层数预置、用户 llamaArgs 进 UI 并合并透传、驻留偏移进状态机——
+    断链现象全是"UI 看着能改、实际不生效"且不抛异常，见 L0-5。
 
 用法（从仓库根目录）：
     python tools/ai-subtitles/check_l0.py
@@ -24,6 +27,9 @@ VB_FORM = os.path.join(ROOT, "FFF.Player", "Form设置_AI字幕.vb")
 VB_DESIGNER = os.path.join(ROOT, "FFF.Player", "Form设置_AI字幕.Designer.vb")
 VB_PACK = os.path.join(ROOT, "FFF.Player", "AI字幕", "Ai字幕包.vb")
 VB_PIPE = os.path.join(ROOT, "FFF.Player", "AI字幕", "Ai字幕管道.vb")
+VB_FSM = os.path.join(ROOT, "FFF.Player", "AI字幕", "Ai字幕状态机.vb")
+VB_CTRL = os.path.join(ROOT, "FFF.Player", "AI字幕", "播放器AI字幕控制器.vb")
+VB_SET = os.path.join(ROOT, "FFF.Player", "设置.vb")
 WORKER = os.path.join(ROOT, "tools", "ai-subtitles", "asr_worker.py")
 
 通过 = 0
@@ -160,11 +166,12 @@ def main():
         return next(b for b in boxes if b[0] == n)
 
     _, _, ly, _, lh = box("MCB_语言")
-    _, _, sy, _, _ = box("LBL_状态")
+    _, _, sy, _, sh = box("LBL_状态")
     断言(sy - (ly + lh) >= 8, "L0-2 语言下拉与状态行间距 ≥ 8px", f"实际 {sy - (ly + lh)}px")
 
-    _, _, hy, _, hh = box("MCK_显示高级")
-    断言(hy - (sy + 70) >= 8, "L0-2 状态行（3 行高 70）与高级区间距 ≥ 8px", f"实际 {hy - (sy + 70)}px")
+    _, _, hy, _, _ = box("MCK_显示高级")
+    断言(hy - (sy + sh) >= 8, "L0-2 状态行与高级区间距 ≥ 8px（状态行高随内容变，取实测值）",
+        f"实际 {hy - (sy + sh)}px")
 
     bottom = max(b[2] + b[4] for b in boxes)
     断言(ch - bottom >= 8, "L0-2 底部留白 ≥ 8px", f"最低控件 {bottom}px / 客户区 {ch}px")
@@ -188,13 +195,16 @@ def main():
         "start() 里找不到 --mmproj 传参 —— 双文件模型被改坏了")
 
     pipe = read(VB_PIPE)
-    映射块 = re.search(r'For Each 附加 In 配置\.额外参数(.*?)Next', pipe, re.S)
+    映射块 = re.search(r'For Each 附加 In 合并参数(.*?)Next', pipe, re.S)
     # 必须是等号形式（"--llama-arg=" & 附加）：拆成两个 token 传的话，argparse 的
     # append action 不收以 -- 开头的值，llamaArgs 的标准用法（["--ctx-size","8192"]）
     # 会让 worker 启动即 exit 2（2026-10-25 审查实测，见 PACK_FORMAT §2.5）。
-    断言(映射块 is not None and '"--llama-arg=" &' in (映射块.group(1) if 映射块 else ""),
-        "L0-4 管道把 额外参数 逐项映射为 --llama-arg=（等号形式）",
-        "找不到 For Each 附加 In 配置.额外参数 → --llama-arg= 的映射（或退回了拆分形式）")
+    断言(映射块 is not None and '"--llama-arg=" & 附加' in (映射块.group(1) if 映射块 else ""),
+        "L0-4 管道把（合并后的）附加参数逐项映射为 --llama-arg=（等号形式）",
+        "找不到 For Each 附加 In 合并参数 → --llama-arg= 的映射（或退回了拆分形式）")
+    断言(re.search(r"合并附加参数\(配置\.额外参数,", pipe),
+        "L0-4 包清单 llamaArgs 仍进命令行（走合并入口，不是被用户参数顶掉）",
+        "启动路径里找不到 合并附加参数(配置.额外参数, …)——清单参数被改丢了")
 
     pack = read(VB_PACK)
     断言('TryGetProperty("llamaArgs"' in pack,
@@ -207,6 +217,68 @@ def main():
     断言('读附加参数(根, 配置)' in pack,
         "L0-4 载入路径调用 读附加参数（方法有被调用）",
         "找不到 读附加参数(根, 配置) 调用点 —— 字段读了也没人填")
+
+    # ---------------- L0-5：「扩展 UI + 按模型能力开放」契约不许回退 ----------------
+    # 2026-10-25 这一轮把设置页从"只认 Qwen3-ASR 双文件 28 层"扩成按包声明的能力
+    # 开放：清单 layers 驱动 GPU 层数预置、用户 llamaArgs 接进 UI 并与清单合并、
+    # 驻留偏移进状态机、新控件全部挂进折叠区。任一处断链，现象都是"UI 看着能改、
+    # 实际不生效"或"折叠后控件杵在面板上"，且不抛异常。
+    st = read(VB_SET)
+    断言('Public Property Ai字幕附加参数 As String' in st,
+        "L0-5 设置带 Ai字幕附加参数（用户侧 llamaArgs 逃生门）",
+        "设置.vb 里没有 Ai字幕附加参数 —— 用户框填了没处存")
+    断言('Public Property Ai字幕字幕偏移秒 As Double' in st,
+        "L0-5 设置带 Ai字幕字幕偏移秒（字幕驻留偏移）")
+    断言(re.search(r'Ai字幕字幕偏移秒 < -3\.0 OrElse Ai字幕字幕偏移秒 > 3\.0', st),
+        "L0-5 偏移规范化钳在 [-3, +3]",
+        "规范化() 里找不到偏移的区间钳制——脏设置会把字幕守卫带飞")
+
+    断言(re.search(r'读整数\(根, "layers"', pack),
+        "L0-5 包载入读 layers 字段（模型层数，走通用整数助手）",
+        "Ai字幕包.vb 里找不到 layers 的读取——GPU 层数表又变回写死 28 层")
+    断言(re.search(r"Friend Property 模型层数 As Integer", pack),
+        "L0-5 包配置带 模型层数 字段")
+
+    fsm = read(VB_FSM)
+    断言(re.search(r"Public Property 时间偏移100纳秒 As Long", fsm),
+        "L0-5 状态机带 时间偏移100纳秒（驻留偏移入口）")
+    断言(re.search(r"CLng\(播放位置\.Ticks\) - 时间偏移100纳秒", fsm),
+        "L0-5 守卫判定用 播放位置 − 偏移",
+        "取当前条目 里找不到偏移项——偏移设了等于没设")
+
+    form = read(VB_FORM)
+    高级块 = re.search(r"Private Sub 显示高级\(显示 As Boolean\)(.*?)End Sub", form, re.S)
+    for 控件 in ("LBL_附加参数", "MTB_附加参数", "LBL_偏移", "MTB_偏移", "LBL_预置", "MCB_预置"):
+        断言(高级块 is not None and f"{控件}.Visible = 显示" in 高级块.group(1),
+            f"L0-5 {控件} 挂进高级区可见性切换",
+            "显示高级 里找不到该控件的 Visible 行——折起来它还杵在面板上")
+    断言(re.search(r"Private Sub 重建层数下拉", form),
+        "L0-5 GPU 层数下拉按包 layers 动态重建",
+        "找不到 重建层数下拉 —— 层数表写死，换架构模型时预置档全是错的")
+    断言(re.search(r"MTB_附加参数\.Enabled = 有效", form),
+        "L0-5 附加参数框按包有效性开放/置灰（没包时不能填）")
+    断言(re.search(r"解析附加参数\(设置\.实例对象\.Ai字幕附加参数\)", form),
+        "L0-5 状态行数一眼用户附加参数条数（能力行数据源）")
+
+    断言(re.search(r"Friend Shared Function 解析附加参数", pipe),
+        "L0-5 管道解析用户附加参数（按行拆分、# 注释、去空行）")
+    断言(re.search(r"Private Shared Function 合并附加参数", pipe),
+        "L0-5 管道合并包清单与用户附加参数（同名 flag 用户覆盖包）",
+        "找不到 合并附加参数——用户参数会与清单参数重复传给 llama-server")
+    断言(re.search(r"解析附加参数\(用户附加参数\)", pipe),
+        "L0-5 启动路径解析用户附加参数文本")
+    断言(re.search(r"合并附加参数\(配置\.额外参数, 用户参数\)", pipe),
+        "L0-5 启动路径真的走合并（两个来源都进命令行）",
+        "启动() 里找不到 合并附加参数(配置.额外参数, 用户参数)——用户参数被丢了")
+
+    ctrl = read(VB_CTRL)
+    断言(re.search(r"已启动附加参数 <> 设置对象\.Ai字幕附加参数", ctrl),
+        "L0-5 控制器把附加参数纳入重启判定",
+        "应用设置 的重启条件里没有 已启动附加参数——改了参数不重启，命令行还是旧的")
+    断言(re.search(r"状态机\.时间偏移100纳秒 = CLng\(", ctrl),
+        "L0-5 控制器把偏移同步进状态机（应用设置即生效，不重启 worker）")
+    断言(re.search(r"模型加载中，首句字幕约需十几秒", ctrl),
+        "L0-5 首启加载提示（空窗期不解释，用户会以为开了没反应）")
 
     print(f"\n通过 {通过} / 失败 {失败}")
     return 失败

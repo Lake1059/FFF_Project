@@ -34,6 +34,12 @@ Imports System.Text.Json
 '''                （ctx-size/temp/缓存策略）遇同名 flag 自动让位 —— 换模型时
 '''                想调这些参数不必改 worker 源码。不是数组、或元素不是字符串
 '''                时该项忽略（宁可少给一个参数，也不要起一个注定失败的进程）。
+'''                设置页高级区还有一份用户侧附加参数框，排在清单这些参数之后、
+'''                同名 flag 覆盖它们（见 Ai字幕管道.合并附加参数）。
+'''   layers       可选：模型层数（GGUF block_count，整数）。只用于生成设置页
+'''                「GPU 层数」下拉的预置档（全部 N 层 → 每 4 层一档 → 0 层）——
+'''                同一个设置页要适配不同架构的模型，不能把 28 层写死。缺省 =
+'''                沿用旧的 28 层固定表（Qwen3-ASR-0.6B），行为与过去一致。
 '''   window       推理窗口秒（默认 5）
 '''   step         推进步长秒（默认 5）
 '''
@@ -61,6 +67,8 @@ Friend NotInheritable Class Ai字幕包配置
     Friend Property 模型档表 As New List(Of Ai字幕模型档)
     ''' <summary>llama-server 附加参数（清单 llamaArgs 逐 token）；空 = 全用 worker 默认值。</summary>
     Friend Property 额外参数 As New List(Of String)
+    ''' <summary>模型层数（清单 layers）；0 = 清单没声明，界面按旧固定表（28 层）生成预置。</summary>
+    Friend Property 模型层数 As Integer = 0
     Friend Property 窗口秒 As Double = 5.0
     Friend Property 步长秒 As Double = 5.0
 
@@ -180,6 +188,7 @@ Friend NotInheritable Class Ai字幕包
             配置.投影文件 = 投影
             读模型档表(目录, 根, 配置)
             读附加参数(根, 配置)
+            配置.模型层数 = Math.Clamp(读整数(根, "layers", 0), 0, 999)
 
             Dim 窗口 = 读数值(根, "window", 5.0)
             Dim 步长 = 读数值(根, "step", 5.0)
@@ -275,6 +284,17 @@ Friend NotInheritable Class Ai字幕包
         If 元素.ValueKind <> JsonValueKind.Number Then Return 默认
         Dim 值 As Double
         If 元素.TryGetDouble(值) Then Return 值
+        Return 默认
+    End Function
+
+    ''' <summary>读整数；缺字段 / 类型不符 / 越界一律回落默认值（脏数据不该让整个包不可用）。</summary>
+    Private Shared Function 读整数(根 As JsonElement, 名 As String, 默认 As Integer) As Integer
+        If 根.ValueKind <> JsonValueKind.Object Then Return 默认
+        Dim 元素 As JsonElement = Nothing
+        If Not 根.TryGetProperty(名, 元素) Then Return 默认
+        If 元素.ValueKind <> JsonValueKind.Number Then Return 默认
+        Dim 值 As Long
+        If 元素.TryGetInt64(值) Then Return CInt(Math.Clamp(值, Integer.MinValue, Integer.MaxValue))
         Return 默认
     End Function
 End Class

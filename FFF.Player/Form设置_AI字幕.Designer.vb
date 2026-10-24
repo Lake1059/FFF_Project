@@ -44,6 +44,12 @@ Partial Class Form设置_AI字幕
         MCB_模型档 = New LakeUI.ModernComboBox()
         LBL_Gpu层数 = New Label()
         MCB_Gpu层数 = New LakeUI.ModernComboBox()
+        LBL_偏移 = New Label()
+        MTB_偏移 = New LakeUI.ModernTextBox()
+        LBL_预置 = New Label()
+        MCB_预置 = New LakeUI.ModernComboBox()
+        LBL_附加参数 = New Label()
+        MTB_附加参数 = New LakeUI.ModernTextBox()
         ModernPanel1.SuspendLayout()
         SuspendLayout()
         '
@@ -52,7 +58,7 @@ Partial Class Form设置_AI字幕
         LBL_模型档.AutoSize = False
         LBL_模型档.BackColor = Color.Transparent
         LBL_模型档.ForeColor = Color.Silver
-        LBL_模型档.Location = New Point(400, 392)
+        LBL_模型档.Location = New Point(400, 414)
         LBL_模型档.Name = "LBL_模型档"
         LBL_模型档.Size = New Size(178, 20)
         LBL_模型档.TabIndex = 17
@@ -73,7 +79,7 @@ Partial Class Form设置_AI字幕
         MCB_模型档.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MCB_模型档.DropDownSelectedForeColor = Color.White
         MCB_模型档.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_模型档.Location = New Point(400, 414)
+        MCB_模型档.Location = New Point(400, 436)
         MCB_模型档.Margin = New Padding(2)
         MCB_模型档.Name = "MCB_模型档"
         MCB_模型档.Padding = New Padding(10, 0, 10, 0)
@@ -92,7 +98,7 @@ Partial Class Form设置_AI字幕
         LBL_Gpu层数.AutoSize = False
         LBL_Gpu层数.BackColor = Color.Transparent
         LBL_Gpu层数.ForeColor = Color.Silver
-        LBL_Gpu层数.Location = New Point(10, 450)
+        LBL_Gpu层数.Location = New Point(10, 476)
         LBL_Gpu层数.Name = "LBL_Gpu层数"
         LBL_Gpu层数.Size = New Size(178, 20)
         LBL_Gpu层数.TabIndex = 19
@@ -113,7 +119,7 @@ Partial Class Form设置_AI字幕
         MCB_Gpu层数.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MCB_Gpu层数.DropDownSelectedForeColor = Color.White
         MCB_Gpu层数.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_Gpu层数.Location = New Point(10, 472)
+        MCB_Gpu层数.Location = New Point(10, 498)
         MCB_Gpu层数.Margin = New Padding(2)
         MCB_Gpu层数.Name = "MCB_Gpu层数"
         MCB_Gpu层数.Padding = New Padding(10, 0, 10, 0)
@@ -126,6 +132,108 @@ Partial Class Form设置_AI字幕
         MCB_Gpu层数.WaterText = "GPU 层数"
         MCB_Gpu层数.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         MCB_Gpu层数.Visible = False
+        '
+        ' LBL_偏移
+        '
+        LBL_偏移.AutoSize = False
+        LBL_偏移.BackColor = Color.Transparent
+        LBL_偏移.ForeColor = Color.Silver
+        LBL_偏移.Location = New Point(200, 476)
+        LBL_偏移.Name = "LBL_偏移"
+        LBL_偏移.Size = New Size(110, 20)
+        LBL_偏移.TabIndex = 21
+        LBL_偏移.Text = "字幕驻留偏移（秒）"
+        LBL_偏移.Visible = False
+        '
+        ' MTB_偏移
+        '
+        MTB_偏移.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MTB_偏移.BorderColor = Color.Transparent
+        MTB_偏移.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MTB_偏移.BorderRadius = 10
+        MTB_偏移.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
+        MTB_偏移.Location = New Point(200, 498)
+        MTB_偏移.Margin = New Padding(2)
+        MTB_偏移.Name = "MTB_偏移"
+        MTB_偏移.Padding = New Padding(10, 0, 10, 0)
+        MTB_偏移.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MTB_偏移.Size = New Size(110, 30)
+        MTB_偏移.TabIndex = 22
+        MTB_偏移.WaterText = "0"
+        MTB_偏移.WaterTextForeColor = Color.DarkGray
+        MTB_偏移.Visible = False
+        '
+        ' LBL_预置
+        '
+        LBL_预置.AutoSize = False
+        LBL_预置.BackColor = Color.Transparent
+        LBL_预置.ForeColor = Color.Silver
+        LBL_预置.Location = New Point(330, 476)
+        LBL_预置.Name = "LBL_预置"
+        LBL_预置.Size = New Size(248, 20)
+        LBL_预置.TabIndex = 23
+        LBL_预置.Text = "窗口 / 步长预置（选中即填上面两格）"
+        LBL_预置.Visible = False
+        '
+        ' MCB_预置
+        '
+        MCB_预置.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_预置.BorderRadius = 10
+        MCB_预置.BorderSize = 0
+        MCB_预置.DropDownBackdropBlurPasses = 2
+        MCB_预置.DropDownBackdropBlurRadius = 30
+        MCB_预置.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_预置.DropDownHoverColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MCB_预置.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_预置.DropDownPadding = New Padding(10)
+        MCB_预置.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_预置.DropDownSelectedForeColor = Color.White
+        MCB_预置.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCB_预置.Location = New Point(330, 498)
+        MCB_预置.Margin = New Padding(2)
+        MCB_预置.Name = "MCB_预置"
+        MCB_预置.Padding = New Padding(10, 0, 10, 0)
+        MCB_预置.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_预置.Size = New Size(248, 30)
+        MCB_预置.TabIndex = 24
+        MCB_预置.ToolTipGap = -1
+        MCB_预置.ToolTipMaxWidth = 350
+        MCB_预置.ToolTipPadding = New Padding(15)
+        MCB_预置.WaterText = "窗口 / 步长预置"
+        MCB_预置.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MCB_预置.Visible = False
+        '
+        ' LBL_附加参数
+        '
+        LBL_附加参数.AutoSize = False
+        LBL_附加参数.BackColor = Color.Transparent
+        LBL_附加参数.ForeColor = Color.Silver
+        LBL_附加参数.Location = New Point(10, 538)
+        LBL_附加参数.Name = "LBL_附加参数"
+        LBL_附加参数.Size = New Size(568, 20)
+        LBL_附加参数.TabIndex = 25
+        LBL_附加参数.Text = "llama-server 附加参数（每行一个，# 开头是注释；与包清单合并时同名以这里为准）"
+        LBL_附加参数.Visible = False
+        '
+        ' MTB_附加参数
+        '
+        MTB_附加参数.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MTB_附加参数.BorderColor = Color.Transparent
+        MTB_附加参数.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MTB_附加参数.BorderRadius = 10
+        MTB_附加参数.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
+        MTB_附加参数.Location = New Point(10, 560)
+        MTB_附加参数.Margin = New Padding(2)
+        MTB_附加参数.MultiLine = True
+        MTB_附加参数.Name = "MTB_附加参数"
+        MTB_附加参数.Padding = New Padding(10, 0, 10, 0)
+        MTB_附加参数.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MTB_附加参数.Size = New Size(568, 64)
+        MTB_附加参数.TabIndex = 26
+        MTB_附加参数.WaterText = "每行一个参数，如 --ctx-size 换行 8192"
+        MTB_附加参数.WaterTextForeColor = Color.DarkGray
+        MTB_附加参数.WordWrap = False
+        MTB_附加参数.Visible = False
         '
         ' ModernPanel1
         '
@@ -152,11 +260,17 @@ Partial Class Form设置_AI字幕
         ModernPanel1.Controls.Add(MCB_模型档)
         ModernPanel1.Controls.Add(LBL_Gpu层数)
         ModernPanel1.Controls.Add(MCB_Gpu层数)
+        ModernPanel1.Controls.Add(LBL_偏移)
+        ModernPanel1.Controls.Add(MTB_偏移)
+        ModernPanel1.Controls.Add(LBL_预置)
+        ModernPanel1.Controls.Add(MCB_预置)
+        ModernPanel1.Controls.Add(LBL_附加参数)
+        ModernPanel1.Controls.Add(MTB_附加参数)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
         ModernPanel1.Padding = New Padding(10, 20, 20, 20)
-        ModernPanel1.Size = New Size(598, 510)
+        ModernPanel1.Size = New Size(598, 644)
         ModernPanel1.TabIndex = 0
         '
         ' LBL_说明
@@ -314,8 +428,9 @@ Partial Class Form设置_AI字幕
         LBL_状态.ForeColor = Color.Gray
         LBL_状态.Location = New Point(10, 270)
         LBL_状态.Name = "LBL_状态"
-        ' 三行：包与窗口/步长、推理设备与语言、"这个包没带该后端二进制"的提醒。
-        LBL_状态.Size = New Size(568, 70)
+        ' 四行：包与窗口/步长、推理设备/模型/语言、模型能力行（形态/层数表/附加参数）、
+        ' 以及"这个包没带该后端二进制"的提醒（仅缺二进制时出现）。
+        LBL_状态.Size = New Size(568, 92)
         LBL_状态.TabIndex = 9
         LBL_状态.Text = "未启用。选择一个扩展包目录（含 ai-subtitles.json）即可启用。"
         '
@@ -330,7 +445,7 @@ Partial Class Form设置_AI字幕
         MCK_显示高级.BoxSize = 24
         MCK_显示高级.BoxTextSpacing = 10
         MCK_显示高级.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_显示高级.Location = New Point(10, 348)
+        MCK_显示高级.Location = New Point(10, 370)
         MCK_显示高级.Name = "MCK_显示高级"
         MCK_显示高级.Padding = New Padding(0, 0, 0, 10)
         MCK_显示高级.Size = New Size(568, 34)
@@ -342,7 +457,7 @@ Partial Class Form设置_AI字幕
         LBL_窗口秒.AutoSize = False
         LBL_窗口秒.BackColor = Color.Transparent
         LBL_窗口秒.ForeColor = Color.Silver
-        LBL_窗口秒.Location = New Point(10, 392)
+        LBL_窗口秒.Location = New Point(10, 414)
         LBL_窗口秒.Name = "LBL_窗口秒"
         LBL_窗口秒.Size = New Size(120, 20)
         LBL_窗口秒.TabIndex = 11
@@ -356,7 +471,7 @@ Partial Class Form设置_AI字幕
         MTB_窗口秒.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         MTB_窗口秒.BorderRadius = 10
         MTB_窗口秒.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
-        MTB_窗口秒.Location = New Point(10, 414)
+        MTB_窗口秒.Location = New Point(10, 436)
         MTB_窗口秒.Margin = New Padding(2)
         MTB_窗口秒.Name = "MTB_窗口秒"
         MTB_窗口秒.Padding = New Padding(10, 0, 10, 0)
@@ -370,7 +485,7 @@ Partial Class Form设置_AI字幕
         LBL_步长秒.AutoSize = False
         LBL_步长秒.BackColor = Color.Transparent
         LBL_步长秒.ForeColor = Color.Silver
-        LBL_步长秒.Location = New Point(140, 392)
+        LBL_步长秒.Location = New Point(140, 414)
         LBL_步长秒.Name = "LBL_步长秒"
         LBL_步长秒.Size = New Size(120, 20)
         LBL_步长秒.TabIndex = 13
@@ -384,7 +499,7 @@ Partial Class Form设置_AI字幕
         MTB_步长秒.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         MTB_步长秒.BorderRadius = 10
         MTB_步长秒.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
-        MTB_步长秒.Location = New Point(140, 414)
+        MTB_步长秒.Location = New Point(140, 436)
         MTB_步长秒.Margin = New Padding(2)
         MTB_步长秒.Name = "MTB_步长秒"
         MTB_步长秒.Padding = New Padding(10, 0, 10, 0)
@@ -398,7 +513,7 @@ Partial Class Form设置_AI字幕
         LBL_设备序号.AutoSize = False
         LBL_设备序号.BackColor = Color.Transparent
         LBL_设备序号.ForeColor = Color.Silver
-        LBL_设备序号.Location = New Point(270, 392)
+        LBL_设备序号.Location = New Point(270, 414)
         LBL_设备序号.Name = "LBL_设备序号"
         LBL_设备序号.Size = New Size(120, 20)
         LBL_设备序号.TabIndex = 15
@@ -412,7 +527,7 @@ Partial Class Form设置_AI字幕
         MTB_设备序号.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         MTB_设备序号.BorderRadius = 10
         MTB_设备序号.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
-        MTB_设备序号.Location = New Point(270, 414)
+        MTB_设备序号.Location = New Point(270, 436)
         MTB_设备序号.Margin = New Padding(2)
         MTB_设备序号.Name = "MTB_设备序号"
         MTB_设备序号.Padding = New Padding(10, 0, 10, 0)
@@ -428,7 +543,7 @@ Partial Class Form设置_AI字幕
         AutoScaleDimensions = New SizeF(96F, 96F)
         AutoScaleMode = AutoScaleMode.Dpi
         BackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))
-        ClientSize = New Size(598, 510)
+        ClientSize = New Size(598, 644)
         Controls.Add(ModernPanel1)
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver
@@ -461,4 +576,10 @@ Partial Class Form设置_AI字幕
     Friend WithEvents MCB_模型档 As LakeUI.ModernComboBox
     Friend WithEvents LBL_Gpu层数 As Label
     Friend WithEvents MCB_Gpu层数 As LakeUI.ModernComboBox
+    Friend WithEvents LBL_偏移 As Label
+    Friend WithEvents MTB_偏移 As LakeUI.ModernTextBox
+    Friend WithEvents LBL_预置 As Label
+    Friend WithEvents MCB_预置 As LakeUI.ModernComboBox
+    Friend WithEvents LBL_附加参数 As Label
+    Friend WithEvents MTB_附加参数 As LakeUI.ModernTextBox
 End Class

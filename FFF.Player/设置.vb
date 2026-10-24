@@ -130,6 +130,18 @@ Public Class 设置
     ' 低性能设备（无独显、内存吃紧）选低量化档：显存与内存占用一起降，精度略降。
     ' 它也属于启动期参数 —— 换档就是换权重文件，必须重启 worker 才生效。
     Public Property Ai字幕模型档 As String = ""
+    ' 用户侧 llama-server 附加参数（设置页高级区多行文本框）：每行一个 token
+    '（"--ctx-size" 与 "8192" 各一行，或单行 "--ctx-size=8192"；空行忽略，# 开头
+    ' 是注释）。与包清单 llamaArgs 合并时用户参数排后、同名 flag 覆盖包参数
+    '（见 Ai字幕管道.合并附加参数）—— 换模型想调 ctx-size / temp / 缓存策略时，
+    ' 不必改包也不必改 worker 源码。启动期参数：改内容会重启 worker。
+    Public Property Ai字幕附加参数 As String = ""
+    ' 字幕驻留偏移（秒）：[-3, +3]，0 = 不偏移。作用在状态机守卫判定的播放位置上
+    '（播放位置 − 偏移）：正值 = 每行多驻留一会儿（慢读者、或下一句来得慢时不等空窗），
+    ' 负值 = 提前收起（嫌字幕拖音）。**它不能让一行字幕更早出现** —— 出现时机由推理
+    ' 窗口与推理耗时决定（批式 ASR 的物理下限），要更贴脸请调小窗口/步长（设置页
+    ' 「节奏」预置）。纯显示侧：改它不重启 worker。
+    Public Property Ai字幕字幕偏移秒 As Double = 0
 
     Public Property 关联常见视频 As Boolean = False
     Public Property 关联不常见视频 As Boolean = False
@@ -257,6 +269,10 @@ Public Class 设置
         End If
         If Not Double.IsFinite(Ai字幕步长秒覆盖) OrElse Ai字幕步长秒覆盖 < 0.5 OrElse Ai字幕步长秒覆盖 > 30 Then
             Ai字幕步长秒覆盖 = 0
+        End If
+        ' AI 字幕：字幕时间偏移钳在 [-3, +3] 秒；NaN / 越界 / 老设置里的脏值归 0（不偏移）。
+        If Not Double.IsFinite(Ai字幕字幕偏移秒) OrElse Ai字幕字幕偏移秒 < -3.0 OrElse Ai字幕字幕偏移秒 > 3.0 Then
+            Ai字幕字幕偏移秒 = 0
         End If
     End Sub
 

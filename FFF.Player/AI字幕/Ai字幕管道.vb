@@ -113,10 +113,14 @@ Friend NotInheritable Class Ai字幕管道
     ''' 显存吃紧的机器填小数（模型 28 层，填 16 = 一半权重在显存）。</param>
     ''' <param name="语言">字幕语言标识（zh/en/…）或 auto。串到 worker 的 --language，
     ''' 由它换成模型认识的英文名 —— 实测 llama-server 只认英文名，ISO 代码会被忽略。</param>
+    ''' <param name="用户附加参数">设置页高级框里用户填的 llama-server 附加参数（每行一个
+    ''' token，# 开头是注释）。与清单 llamaArgs 合并后排后、同名 flag 覆盖清单的
+    ''' （见 <see cref="合并附加参数"/>）——换模型调 ctx-size / temp 时用户不必改包。</param>
     Public Function 启动(配置 As Ai字幕包配置, 窗口覆盖 As Double, 步长覆盖 As Double,
                         后端 As String, 序号 As Integer, Gpu层数 As Integer,
                         Optional 语言 As String = "",
-                        Optional 模型档 As String = "") As Boolean
+                        Optional 模型档 As String = "",
+                        Optional 用户附加参数 As String = "") As Boolean
         If _已释放 Then Return False
         If 配置 Is Nothing Then Return False
         If String.IsNullOrWhiteSpace(配置.Worker脚本) OrElse Not IO.File.Exists(配置.Worker脚本) Then
@@ -220,18 +224,22 @@ Friend NotInheritable Class Ai字幕管道
                 启动信息.ArgumentList.Add("--llama-servers")
                 启动信息.ArgumentList.Add(JsonSerializer.Serialize(配置.服务器映射))
             End If
-            ' 扩展包逃生门：清单 llamaArgs 逐 token 映射为 --llama-arg，worker 的
-            ' 固定默认值遇同名 flag 让位。换模型要调 ctx-size / temp / 后端专属开关
-            ' 时走这里，本体与 worker 都不用改。
+            ' 扩展包逃生门：清单 llamaArgs + 设置页用户框（Ai字幕附加参数）两个来源，
+            ' 合并后逐 token 映射为 --llama-arg，worker 的固定默认值遇同名 flag 让位。
+            ' 换模型要调 ctx-size / temp / 后端专属开关时走这里，本体与 worker 都不用改。
             ' 等号形式不是风格选择：argparse 的 append action 不收以 -- 开头的值，
             ' 拆成两个 token 传（"--llama-arg" "--ctx-size"）会被判 expected one
             ' argument 直接 exit 2——文档的标准示例 ["--ctx-size","8192"] 恰恰
             ' 每个值都以 -- 开头。"--llama-arg=--ctx-size" 才收集得到（2026-10-25
             ' 审查实测：拆分形式 SystemExit(2)，等号形式 Namespace 正常）。
-            If 配置.额外参数.Count > 0 Then
-                For Each 附加 In 配置.额外参数
-                    启动信息.ArgumentList.Add("--llama-arg=" & 附加)
-                Next
+            Dim 用户参数 = 解析附加参数(用户附加参数)
+            Dim 合并参数 = 合并附加参数(配置.额外参数, 用户参数)
+            For Each 附加 In 合并参数
+                启动信息.ArgumentList.Add("--llama-arg=" & 附加)
+            Next
+            If 合并参数.Count > 0 Then
+                记录($"AI 字幕：llama-server 附加参数 {合并参数.Count} 条" &
+                     $"（清单 {配置.额外参数.Count} + 用户 {用户参数.Count}，同名 flag 以用户为准）")
             End If
             If Not String.IsNullOrEmpty(临时根) Then
                 ' 显式指定 + 把子进程的 TEMP/TMP 一并指过去：llama-server 是 worker
@@ -633,6 +641,60 @@ Friend NotInheritable Class Ai字幕管道
             End Try
         Next
         Return String.Empty
+    End Function
+
+    ''' <summary>解析用户附加参数文本（设置页高级框）：每行一个 token。空行忽略；
+    ''' # 开头是注释行 —— 写给用户自己看的说明，不进 llama-server 命令行；
+    ''' 其余 Trim 后原样收取（"--ctx-size" 与 "8192" 各一行，或单行 "--ctx-size=8192"）。
+    ''' Friend：设置页状态行要数一眼用户填了几条（不解析就得在两处各写一遍）。</summary>
+    Friend Shared Function 解析附加参数(文本 As String) As List(Of String)
+        Dim 结果 As New List(Of String)
+        If String.IsNullOrWhiteSpace(文本) Then Return 结果
+        For Each 行 In 文本.Split(New String() {vbCrLf, vbLf, vbCr}, StringSplitOptions.RemoveEmptyEntries)
+            Dim 值 = 行.Trim()
+            ' RemoveEmptyEntries 只挡"真空行"，挡不住纯空格行——Trim 后是空串的
+            ' 一律跳过：塞个空 token 进 --llama-arg=，llama-server 会当位置参数报错。
+            If 值.Length = 0 Then Continue For
+            If 值.StartsWith("#"c, StringComparison.Ordinal) Then Continue For
+            结果.Add(值)
+        Next
+        Return 结果
+    End Function
+
+    ''' <summary>合并包清单与用户的附加参数：用户参数排后（llama-server 侧后者生效），
+    ''' 且用户点名过的 flag 连同它在包参数里的值一起剔除 —— 即"用户覆盖包"。
+    ''' 与 worker 的 <c>_user_first</c> 同一套语义（值 = 下一个不以 -- 开头的 token），
+    ''' 两边一致才不会出现"清单给 4096、用户给 8192，命令行两个都在"——某些 llama-server
+    ''' 版本对重复 --ctx-size 直接报错，那会让用户以为整个功能坏了。</summary>
+    Private Shared Function 合并附加参数(包参数 As IList(Of String), 用户参数 As IList(Of String)) As List(Of String)
+        If 用户参数.Count = 0 Then Return New List(Of String)(包参数)
+        Dim 点名 As New HashSet(Of String)(StringComparer.Ordinal)
+        For Each 项 In 用户参数
+            If 项.StartsWith("--", StringComparison.Ordinal) Then 点名.Add(取Flag名(项))
+        Next
+        Dim 结果 As New List(Of String)
+        Dim i As Integer = 0
+        While i < 包参数.Count
+            Dim 令牌 = 包参数(i)
+            If 令牌.StartsWith("--", StringComparison.Ordinal) AndAlso 点名.Contains(取Flag名(令牌)) Then
+                ' 删 flag 顺带删它的值：只删 flag 会把包里的旧值留给 llama-server 当位置
+                ' 参数，报出来的错比"重复参数"更难懂。等号形态（--flag=value）是单 token，
+                ' 下一个 token 必是别的 flag，不会多吃。
+                i += If(i + 1 < 包参数.Count AndAlso
+                        Not 包参数(i + 1).StartsWith("--", StringComparison.Ordinal), 2, 1)
+                Continue While
+            End If
+            结果.Add(令牌)
+            i += 1
+        End While
+        结果.AddRange(用户参数)
+        Return 结果
+    End Function
+
+    ''' <summary>token 的 flag 名：--flag=value 取 --flag 部分（等号形态在用户框里很常见）。</summary>
+    Private Shared Function 取Flag名(令牌 As String) As String
+        Dim 等号 = 令牌.IndexOf("="c)
+        Return If(等号 > 0, 令牌.Substring(0, 等号), 令牌)
     End Function
 
     Private Sub 记录(消息 As String)
