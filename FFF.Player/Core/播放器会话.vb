@@ -807,6 +807,8 @@ Public NotInheritable Class 播放器会话
         Return New 定时文字状态(值)
     End Function
 
+    ''' <summary>播放器当下状态的快照 —— 语义就是"每次读都是最新的"，所以必须每次现取，绝不能缓存。</summary>
+    ''' <remarks>命中 .NET 11 的 WFO2000（getter 内构造新引用实例），已在 .editorconfig 中按本文件作用域抑制；理由见那里。</remarks>
     Public ReadOnly Property 当前快照 As 播放器快照
         Get
             Dim 值 As New 原生播放器快照 With {.大小 = 原生播放器快照大小, .版本 = 20UI}

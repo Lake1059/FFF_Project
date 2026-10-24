@@ -2,7 +2,8 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <NetTFM Condition="'$(NetTFM)' == ''">net10.0-windows10.0.26100.0</NetTFM>
+    <TargetFramework>$(NetTFM)</TargetFramework>
     <PlatformTarget>x64</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
     <RootNamespace></RootNamespace>

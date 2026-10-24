@@ -1,7 +1,12 @@
 param(
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
-    [string]$OutputDirectory = ""
+    [string]$OutputDirectory = "",
+    # 目标框架。留空 = 用各工程自身默认值（当前 net10.0-windows10.0.26100.0）。
+    # .NET 11 正式版发布后改为：发布3FR单文件.ps1 -NetTFM net11.0-windows10.0.26100.0
+    [string]$NetTFM = "",
+    # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
+    [string]$LakeUITfm = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,12 +39,16 @@ $PendingExecutable = $null
 try {
     New-Item -ItemType Directory -Path $StagingDirectory | Out-Null
 
+    # TFM 参数包：留空时展开为 0 个参数，命令行与改动前逐字符一致。
+    $TfmArgs = @()
+    if (-not [string]::IsNullOrWhiteSpace($NetTFM)) { $TfmArgs += "-p:NetTFM=$NetTFM" }
+    if (-not [string]::IsNullOrWhiteSpace($LakeUITfm)) { $TfmArgs += "-p:LakeUITfm=$LakeUITfm" }
     & $DotNet publish (Join-Path $ProjectRoot "FFF.Recorder\FFF.Recorder.vbproj") `
         -c $Configuration -r win-x64 --self-contained false -o $StagingDirectory `
         -p:PublishSingleFile=true `
         -p:EnableMsixTooling=true `
         -p:IncludeNativeLibrariesForSelfExtract=true `
-        -p:DebugType=None -p:DebugSymbols=false
+        -p:DebugType=None -p:DebugSymbols=false @TfmArgs
     if ($LASTEXITCODE -ne 0) { throw "FFF.Recorder single-file publish failed." }
 
     $OutputFiles = @(Get-ChildItem -LiteralPath $StagingDirectory -File)

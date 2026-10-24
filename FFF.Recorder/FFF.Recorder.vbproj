@@ -2,7 +2,11 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <!-- TFM 就地定义：默认与上游一致（.NET 10）。切 .NET 11 用 -p:NetTFM=net11.0-windows10.0.26100.0 -->
+    <NetTFM Condition="'$(NetTFM)' == ''">net10.0-windows10.0.26100.0</NetTFM>
+    <TargetFramework>$(NetTFM)</TargetFramework>
+    <!-- LakeUI 是外部商业兄弟仓，构建节奏独立，单独一个 TFM 参数 -->
+    <LakeUITfm Condition="'$(LakeUITfm)' == ''">net10.0-windows10.0.17763.0</LakeUITfm>
     <StartupObject>Sub Main</StartupObject>
     <UseWindowsForms>true</UseWindowsForms>
     <MyType>WindowsForms</MyType>
@@ -83,7 +87,7 @@
 
   <ItemGroup>
     <Reference Include="LakeUI">
-      <HintPath>..\..\LakeUI\LakeUI\bin\Debug\net10.0-windows10.0.17763.0\LakeUI.dll</HintPath>
+      <HintPath>..\..\LakeUI\LakeUI\bin\Debug\$(LakeUITfm)\LakeUI.dll</HintPath>
     </Reference>
   </ItemGroup>
 
@@ -114,5 +118,21 @@
       <LastGenOutput>Application.Designer.vb</LastGenOutput>
     </None>
   </ItemGroup>
+
+
+  <!-- LakeUI 引用护栏：把「LakeUI 找不到」从数百条「未定义类型」错误变成一条明确报错。
+       默认（宿主与 LakeUI 同为 .NET 10）不发任何消息，行为与改动前一致。 -->
+  <Target Name="VerifyLakeUIReference" BeforeTargets="BeforeBuild;ResolveAssemblyReferences">
+    <PropertyGroup>
+      <_LakeUIRef>$(MSBuildThisFileDirectory)..\..\LakeUI\LakeUI\bin\Debug\$(LakeUITfm)\LakeUI.dll</_LakeUIRef>
+      <!-- 大版本号（net10.0-... -> 10.0），仅用于混血检测 -->
+      <_NetTfmMajor>$(NetTFM.Substring(3, 4))</_NetTfmMajor>
+      <_LakeUiTfmMajor>$(LakeUITfm.Substring(3, 4))</_LakeUiTfmMajor>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(_LakeUIRef)')"
+           Text="LakeUI 引用缺失，未找到：$(_LakeUIRef)（当前 LakeUITfm=$(LakeUITfm)）。请先在兄弟仓 LakeUI 用该目标框架构建 Debug 配置，或对本工程传入 -p:LakeUITfm=某已有目标框架 指向既有产物。" />
+    <Warning Condition="'$(_NetTfmMajor)' != '$(_LakeUiTfmMajor)'"
+             Text="宿主 TFM ($(NetTFM)) 与 LakeUI TFM ($(LakeUITfm)) 大版本不一致 —— 当前是「宿主 .NET $(_NetTfmMajor) + UI 库 .NET $(_LakeUiTfmMajor)」的混血状态。运行时可工作（程序集引用向下兼容），但 LakeUI 上游一旦重建别的 TFM，本 HintPath 会静默失效。建议推进 LakeUI 同步升级到与宿主一致的目标框架。" />
+  </Target>
 
 </Project>
