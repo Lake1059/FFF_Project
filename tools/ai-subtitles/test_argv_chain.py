@@ -116,5 +116,60 @@ check("S10 mmproj segment present",
       cmd[:6] == ["llama-server.exe", "-m", "M.gguf", "--mmproj",
                   "mmproj.gguf", "--port"], cmd[:7])
 
+# S11 无值开关（--no-cache-idle-slots）同名让位：它后面跟的是下一个 flag
+# （--cache-ram），_user_first 只删这 1 个 token；用户的开关落在命令行末尾
+extra, cmd = chain(["--no-cache-idle-slots"])
+check("S11 valueless flag override",
+      cmd.count("--no-cache-idle-slots") == 1
+      and cmd[-1] == "--no-cache-idle-slots"
+      and "--cache-ram" in cmd and cmd[cmd.index("--cache-ram") + 1] == "0", cmd)
+
+# S12 _probe_model_id 四分支（多模型核心机制：服务端自报身份 + 三档失败回落）
+class _Resp:
+    def __init__(self, status, payload):
+        self.status_code = status
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _Probe:
+    """替身 requests.Session：按 script 依次返回预定响应或抛异常。"""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls = []
+
+    def get(self, url, timeout=0):
+        self.calls.append(url)
+        kind = self.script.pop(0)
+        if kind == "raise":
+            raise OSError("connection refused")
+        status, payload = kind
+        return _Resp(status, payload)
+
+
+_orig_get = mod._HTTP.get
+try:
+    srv = mod.LlamaServer("llama-server.exe", "M.gguf", None, 8199)
+    probe = _Probe([(200, {"data": [{"id": "C:/models/qwen3-asr.gguf"}]})])
+    mod._HTTP.get = probe.get
+    mid = srv._probe_model_id()
+    check("S12 probe returns server-reported id",
+          mid == "C:/models/qwen3-asr.gguf", mid)
+    check("S12 probe hits /v1/models",
+          bool(probe.calls) and probe.calls[0].endswith("/v1/models"), probe.calls)
+
+    for name, kind in [("S12a empty list -> fallback", (200, {"data": []})),
+                       ("S12b non-200 -> fallback", (404, {})),
+                       ("S12c exception -> fallback", "raise")]:
+        mod._HTTP.get = _Probe([kind]).get
+        check(name, srv._probe_model_id() == "qwen3-asr")
+    mod._HTTP.get = _Probe([(404, {})]).get
+    check("S12d custom fallback honored", srv._probe_model_id(fallback="x") == "x")
+finally:
+    mod._HTTP.get = _orig_get
+
 print(f"\n{ok} passed / {fail} failed")
 sys.exit(1 if fail else 0)

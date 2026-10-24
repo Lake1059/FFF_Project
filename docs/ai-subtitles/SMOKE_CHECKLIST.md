@@ -43,7 +43,10 @@
 | 18 | 高级里把「模型档位」换成 Q4_K_M | worker 重启，字幕继续出；日志有 `模型 Q4_K_M` | 日志 `AI 字幕：模型 Q4_K_M`；换回默认档同样重启 |
 | 19 | 播放中把「GPU 层数」下拉从「自动（全部卸载）」改成「16 层」 | worker 重启、字幕继续出；加载日志出现用户指定的层数 | 日志 `设备=… ngl=16`（及"用户指定层数 16（原自动值 999）"）；改回「自动」同样重启 |
 | 20 | 「推理设备」选 CPU 时看「GPU 层数」 | 该框置灰（选 CPU 时设备是 none，层数无从卸起） | 目视；选回显卡恢复可用 |
-| 21 | 扩展包目录清空时看「模型档位」 | 下拉置灰，水印写"需先选择有效扩展包"；换一个只有单档的包时水印写"此包仅一个档位" | 目视 |
+| 21 | 扩展包目录清空时看「模型档位」 | 下拉置灰，**下拉里直接写着**"需先选择有效扩展包"（作为可见项，不是水印——选中态≥0 时水印不可见）；换一个只有单档的包时可见项写"此包仅一个档位" | 目视 |
+| 22 | 清单加 `llamaArgs: ["--ctx-size","2048"]` 后启用字幕 | 字幕正常出；日志里 llama-server 命令行只有一个 `--ctx-size`（值 2048，worker 的 4096 默认整项让位）。grep 时注意 argv 形态是 `--llama-arg=--ctx-size`（等号，2026-10-25 修复：拆分形式会被 argparse 判 expected one argument，worker 启动即 exit 2） | worker 日志 `starting llama-server:` 行；实测（2026-10-25，真 CUDA llama-server）：ready 4.4s、warm 0.4s、转写 200 返回 `嗯。` |
+| 23 | 清单只给主权重、不给 mmproj（单文件模型）启用字幕 | llama-server 能起（纯 LLM 模式）；转写失败时**不是白屏**：日志有 llama-server 原话（`HTTP 501 ... does not support audio input`）+ worker 的 warning「音频端点探测失败：该模型可能不是音频转写模型」+ **屏幕信息图层出一次提示**（节流 30s，不只进日志） | worker 日志 `audio path warmup skipped (...)` 行 + ai-subtitles.log 的 warning 行 + 信息图层提示；实测（2026-10-25）：warm 失败、错误含 HTTP 状态码可读 |
+| 24 | 换一个 llama-server 加载不了的权重（截断的 gguf / 架构不认） | worker 走 error 路径关字幕、播放不受影响；**包目录（或程序目录）的 `llama-server.log` 里有 llama-server 的真实报错**，不是只有一句 `exited early rc=1`；不留孤儿 llama-server 进程（任务管理器无残留） | llama-server.log 文件内容 + 关字幕后无 llama-server.exe 残留（2026-10-25 修复：stderr 落盘 + start 失败即 stop） |
 
 > 第 10–12 项是 P0 回归：`状态机` 的「worker 已退出」标志曾经只置位不复位，这三条
 > 路径（都要先停管道）任意走一次，字幕就永久空白直到重启播放器。逻辑层已由
@@ -68,6 +71,3 @@
 - worker 被杀后播放器存活：`P5_E2E_RESULTS.md`（Kill 后 PID 90292 存活、仅关字幕）。
 - 外部 SRT 与 AI 并存：决策 D4，AI 行在 SRT 上一行，实测两态不重叠。
 - 临时目录着落：宿主日志有 `临时目录 <路径>`、worker 有 `tmpdir: <路径>`，且全程无 `No usable temporary directory`（`--tmp-dir` + 四级回退，2026-10-23 完整跑实测）。
-| 22 | 清单加 `llamaArgs: ["--ctx-size","2048"]` 后启用字幕 | 字幕正常出；日志里 llama-server 命令行只有一个 `--ctx-size`（值 2048，worker 的 4096 默认整项让位）。grep 时注意 argv 形态是 `--llama-arg=--ctx-size`（等号，2026-10-25 修复：拆分形式会被 argparse 判 expected one argument，worker 启动即 exit 2） | worker 日志 `starting llama-server:` 行；实测（2026-10-25，真 CUDA llama-server）：ready 4.4s、warm 0.4s、转写 200 返回 `嗯。` |
-| 23 | 清单只给主权重、不给 mmproj（单文件模型）启用字幕 | llama-server 能起（纯 LLM 模式）；转写失败时**不是白屏**：日志有 llama-server 原话（`HTTP 501 ... does not support audio input`）+ worker 的 warning「音频端点探测失败：该模型可能不是音频转写模型」+ **屏幕信息图层出一次提示**（节流 30s，不只进日志） | worker 日志 `audio path warmup skipped (...)` 行 + ai-subtitles.log 的 warning 行 + 信息图层提示；实测（2026-10-25）：warm 失败、错误含 HTTP 状态码可读 |
-| 24 | 换一个 llama-server 加载不了的权重（截断的 gguf / 架构不认） | worker 走 error 路径关字幕、播放不受影响；**包目录（或程序目录）的 `llama-server.log` 里有 llama-server 的真实报错**，不是只有一句 `exited early rc=1`；不留孤儿 llama-server 进程（任务管理器无残留） | llama-server.log 文件内容 + 关字幕后无 llama-server.exe 残留（2026-10-25 修复：stderr 落盘 + start 失败即 stop） |
