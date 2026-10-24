@@ -68,3 +68,6 @@
 - worker 被杀后播放器存活：`P5_E2E_RESULTS.md`（Kill 后 PID 90292 存活、仅关字幕）。
 - 外部 SRT 与 AI 并存：决策 D4，AI 行在 SRT 上一行，实测两态不重叠。
 - 临时目录着落：宿主日志有 `临时目录 <路径>`、worker 有 `tmpdir: <路径>`，且全程无 `No usable temporary directory`（`--tmp-dir` + 四级回退，2026-10-23 完整跑实测）。
+| 22 | 清单加 `llamaArgs: ["--ctx-size","2048"]` 后启用字幕 | 字幕正常出；日志里 llama-server 命令行只有一个 `--ctx-size`（值 2048，worker 的 4096 默认整项让位）。grep 时注意 argv 形态是 `--llama-arg=--ctx-size`（等号，2026-10-25 修复：拆分形式会被 argparse 判 expected one argument，worker 启动即 exit 2） | worker 日志 `starting llama-server:` 行；实测（2026-10-25，真 CUDA llama-server）：ready 4.4s、warm 0.4s、转写 200 返回 `嗯。` |
+| 23 | 清单只给主权重、不给 mmproj（单文件模型）启用字幕 | llama-server 能起（纯 LLM 模式）；转写失败时**不是白屏**：日志有 llama-server 原话（`HTTP 501 ... does not support audio input`）+ worker 的 warning「音频端点探测失败：该模型可能不是音频转写模型」+ **屏幕信息图层出一次提示**（节流 30s，不只进日志） | worker 日志 `audio path warmup skipped (...)` 行 + ai-subtitles.log 的 warning 行 + 信息图层提示；实测（2026-10-25）：warm 失败、错误含 HTTP 状态码可读 |
+| 24 | 换一个 llama-server 加载不了的权重（截断的 gguf / 架构不认） | worker 走 error 路径关字幕、播放不受影响；**包目录（或程序目录）的 `llama-server.log` 里有 llama-server 的真实报错**，不是只有一句 `exited early rc=1`；不留孤儿 llama-server 进程（任务管理器无残留） | llama-server.log 文件内容 + 关字幕后无 llama-server.exe 残留（2026-10-25 修复：stderr 落盘 + start 失败即 stop） |

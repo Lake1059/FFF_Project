@@ -55,11 +55,22 @@ Friend NotInheritable Class Ai字幕管道
     Private _语言不符丢弃 As Integer = 0
     Private _上次语言日志 As Long = 0L
 
+    ' worker warning（模型不认音频端点、设备回落）的用户可见通道：result 线程
+    ' 触发，按文案去重后交宿主提示（信息图层）。每条不同的 warning 首见必显——
+    ' 启动批里"设备回落"之后紧跟着"音频端点探测失败"（换错模型的核心场景），
+    ' 一刀切 30s 限流会把第二条吞掉；同一条重复才按 30s 收，防持续 warning
+    ' 把提示通道刷爆（与语言闸门同一套路）。
+    Private ReadOnly _提示 As Action(Of String)
+    Private _上次警告文本 As String = String.Empty
+    Private _上次警告计时 As Long = 0L
+
     Public Sub New(句柄提供器 As Func(Of 播放器原生句柄), 状态机 As Ai字幕状态机,
-                   Optional 日志 As Action(Of String) = Nothing)
+                   Optional 日志 As Action(Of String) = Nothing,
+                   Optional 提示 As Action(Of String) = Nothing)
         Me.句柄提供器 =句柄提供器
         Me.状态机 = 状态机
         Me.日志 = 日志
+        Me._提示 = 提示
     End Sub
 
     ''' <summary>worker 是否在运行。</summary>
@@ -208,6 +219,19 @@ Friend NotInheritable Class Ai字幕管道
                 ' 换后端 = 换二进制，所以把整张"后端 → llama-server"表交给 worker。
                 启动信息.ArgumentList.Add("--llama-servers")
                 启动信息.ArgumentList.Add(JsonSerializer.Serialize(配置.服务器映射))
+            End If
+            ' 扩展包逃生门：清单 llamaArgs 逐 token 映射为 --llama-arg，worker 的
+            ' 固定默认值遇同名 flag 让位。换模型要调 ctx-size / temp / 后端专属开关
+            ' 时走这里，本体与 worker 都不用改。
+            ' 等号形式不是风格选择：argparse 的 append action 不收以 -- 开头的值，
+            ' 拆成两个 token 传（"--llama-arg" "--ctx-size"）会被判 expected one
+            ' argument 直接 exit 2——文档的标准示例 ["--ctx-size","8192"] 恰恰
+            ' 每个值都以 -- 开头。"--llama-arg=--ctx-size" 才收集得到（2026-10-25
+            ' 审查实测：拆分形式 SystemExit(2)，等号形式 Namespace 正常）。
+            If 配置.额外参数.Count > 0 Then
+                For Each 附加 In 配置.额外参数
+                    启动信息.ArgumentList.Add("--llama-arg=" & 附加)
+                Next
             End If
             If Not String.IsNullOrEmpty(临时根) Then
                 ' 显式指定 + 把子进程的 TEMP/TMP 一并指过去：llama-server 是 worker
@@ -438,6 +462,9 @@ Friend NotInheritable Class Ai字幕管道
                                 _诊断文本 = If(String.IsNullOrEmpty(详情), 状态, $"{状态}: {详情}")
                             End SyncLock
                             记录($"AI 字幕：worker 状态 {_诊断文本}")
+                            ' warning（模型不认音频端点、设备回落）不是死亡，但必须
+                            ' 让人看见：只进日志的话，用户面对的是空白字幕+无解释。
+                            If 状态 = "warning" Then 记警告(详情)
                             ' 只有 worker 自述"我不干了"才当死亡。缺省按致命处理（旧 worker 没这个字段），
                             ' 但必须让"这一窗推理失败、我继续重试"（fatal=false）走开——否则本地 HTTP
                             ' 抖一次就把字幕永久关掉，而 worker 其实活得好好的。
@@ -488,6 +515,48 @@ Friend NotInheritable Class Ai字幕管道
         记录($"AI 字幕：语言不符已丢弃 {_语言不符丢弃} 条（实际 {If(实际语言, "未知")}，" &
              $"只显示 {Ai字幕语言.显示名(设置.实例对象.Ai字幕语言)}）")
     End Sub
+
+    ' ---------------- worker warning → 用户可见 ----------------
+
+    ''' <summary>worker 的 warning 必须让人看见，不能只躺日志文件：换了个不认
+    ''' 音频端点的模型时，用户看到的是"字幕空白但没解释"，而原因 worker 早就
+    ''' 说出来了。节流按文案去重：不同 warning 首见必显（启动批里设备回落与
+    ''' 音频端点探测失败是两条不同的话，都得让人看见），同一条重复才 30s 收。</summary>
+    Private Sub 记警告(详情 As String)
+        If _提示 Is Nothing Then Return
+        Dim 文本 = 警告摘要(详情)
+        Dim 现在 As Long = Stopwatch.GetTimestamp()
+        If 文本 = _上次警告文本 AndAlso
+           (现在 - _上次警告计时) / CDbl(Stopwatch.Frequency) < 30.0 Then Return
+        _上次警告文本 = 文本
+        _上次警告计时 = 现在
+        Try
+            _提示(文本)
+        Catch
+            ' 提示通道失败不影响字幕本体。
+        End Try
+    End Sub
+
+    ''' <summary>warning 详情是写给日志的长文，提示通道只留能读完的第一句。
+    ''' WARNING 前缀是 worker 的设备回落约定，剥掉免得和 "AI 字幕：" 叠成两层
+    ''' 警告样。分号串的是并列子句（"只有 X；已回落到它的默认设备；用户指定层数
+    ''' 16"）——整串短就全留着；按第一个分号一刀切曾把"已回落到它的默认设备"
+    ''' 这种结果说明切掉，用户只看到半句话。长了才从尾部收，收口补省略号。</summary>
+    Private Shared Function 警告摘要(详情 As String) As String
+        Dim 文本 = If(详情, String.Empty).Trim()
+        If 文本.StartsWith("WARNING", StringComparison.Ordinal) Then
+            文本 = 文本.Substring(7).TrimStart("："c, ":"c, " "c)
+        End If
+        If 文本 = String.Empty Then Return "AI 字幕：worker 报告异常，详见日志"
+        If 文本.Length <= 50 Then Return $"AI 字幕：{文本}"
+        Dim 段 = 文本.Split("；"c)
+        Dim 收编 As String = 段(0)
+        For i As Integer = 1 To 段.Length - 1
+            If 收编.Length + 1 + 段(i).Length > 50 Then Exit For
+            收编 &= "；" & 段(i)
+        Next
+        Return $"AI 字幕：{收编}…（详见日志）"
+    End Function
 
     ' ---------------- JSON 取值助手（缺字段走默认，绝不抛） ----------------
 

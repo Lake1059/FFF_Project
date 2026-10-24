@@ -22,6 +22,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 VB_LANG = os.path.join(ROOT, "FFF.Player", "AI字幕", "Ai字幕语言.vb")
 VB_FORM = os.path.join(ROOT, "FFF.Player", "Form设置_AI字幕.vb")
 VB_DESIGNER = os.path.join(ROOT, "FFF.Player", "Form设置_AI字幕.Designer.vb")
+VB_PACK = os.path.join(ROOT, "FFF.Player", "AI字幕", "Ai字幕包.vb")
+VB_PIPE = os.path.join(ROOT, "FFF.Player", "AI字幕", "Ai字幕管道.vb")
 WORKER = os.path.join(ROOT, "tools", "ai-subtitles", "asr_worker.py")
 
 通过 = 0
@@ -166,6 +168,45 @@ def main():
 
     bottom = max(b[2] + b[4] for b in boxes)
     断言(ch - bottom >= 8, "L0-2 底部留白 ≥ 8px", f"最低控件 {bottom}px / 客户区 {ch}px")
+
+    # ---------------- L0-4：多模型适配契约不许回退 ----------------
+    # 这批改动（2026-10-25）把"只认 Qwen3-ASR 双文件包"的硬约束逐个拆掉，
+    # 让扩展包能带任意 llama-server 能加载的 gguf。三条链任断一环，
+    # 现象都是"塞了新模型但跑的还是老行为/参数不生效"，且不抛异常：
+    worker = read(WORKER)
+    断言(re.search(r'add_argument\("--llama-arg".*action="append"', worker),
+        "L0-4 worker 收 --llama-arg（append 多值）",
+        "找不到 --llama-arg 的 add_argument（或不是 append）")
+    断言("_user_first(defaults, self.extra)" in worker,
+        "L0-4 worker 固定默认值遇同名 flag 让位（_user_first）",
+        "start() 里没有走 _user_first —— 用户的 llamaArgs 会被固定参数压掉")
+    断言("if self.mmproj:" in worker,
+        "L0-4 worker 的 --mmproj 条件传（单文件模型不传投影）",
+        "找不到 if self.mmproj: —— 无投影的模型会被塞一个空路径")
+    断言('"--mmproj", str(self.mmproj)' in worker,
+        "L0-4 worker 仍保留 mmproj 支持（拆约束不是删功能）",
+        "start() 里找不到 --mmproj 传参 —— 双文件模型被改坏了")
+
+    pipe = read(VB_PIPE)
+    映射块 = re.search(r'For Each 附加 In 配置\.额外参数(.*?)Next', pipe, re.S)
+    # 必须是等号形式（"--llama-arg=" & 附加）：拆成两个 token 传的话，argparse 的
+    # append action 不收以 -- 开头的值，llamaArgs 的标准用法（["--ctx-size","8192"]）
+    # 会让 worker 启动即 exit 2（2026-10-25 审查实测，见 PACK_FORMAT §2.5）。
+    断言(映射块 is not None and '"--llama-arg=" &' in (映射块.group(1) if 映射块 else ""),
+        "L0-4 管道把 额外参数 逐项映射为 --llama-arg=（等号形式）",
+        "找不到 For Each 附加 In 配置.额外参数 → --llama-arg= 的映射（或退回了拆分形式）")
+
+    pack = read(VB_PACK)
+    断言('TryGetProperty("llamaArgs"' in pack,
+        "L0-4 包载入读 llamaArgs 字段",
+        "Ai字幕包.vb 里找不到 llamaArgs 的读取")
+    断言(re.search(r"Friend Property 额外参数 As New List\(Of String\)", pack),
+        "L0-4 包配置带 额外参数 字段",
+        "Ai字幕包配置 里没有 额外参数 字段")
+    # 方法还在但没人调 = 白写：载入路径必须真的走到 读附加参数（区别于函数定义行）。
+    断言('读附加参数(根, 配置)' in pack,
+        "L0-4 载入路径调用 读附加参数（方法有被调用）",
+        "找不到 读附加参数(根, 配置) 调用点 —— 字段读了也没人填")
 
     print(f"\n通过 {通过} / 失败 {失败}")
     return 失败

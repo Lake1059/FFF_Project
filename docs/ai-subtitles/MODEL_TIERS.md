@@ -112,7 +112,7 @@ python tools/ai-subtitles/make_portable_pack.py --source <包目录> --target <�
 
 ---
 
-## 7. llama-server 参数盘点：哪些能调、哪些锁死（2026-10-23）
+## 7. llama-server 参数盘点：哪些能调、哪些是默认值（2026-10-23，2026-10-25 加逃生门）
 
 用户问"模型本身还有什么可调的（深度、Q 几等）"。把 b11669 二进制
 `llama-server --help` 过了一遍，结论如下。**"能调"的标准是：改它对 ASR 字幕
@@ -127,6 +127,7 @@ python tools/ai-subtitles/make_portable_pack.py --source <包目录> --target <�
 | `--device` / `--device-backend` | 推理设备 | auto = 跟随包清单 device；本机清单是 cuda，所以 auto 在该机落 CUDA0 + 全卸 |
 | `--device` 序号 | 高级 → 设备序号 | 多显卡时选第几块 |
 | 窗口 / 步长 | 高级 → 窗口（秒）/ 步长（秒） | 字幕切分粒度，与 llama-server 无关但同属高级区 |
+| **任意 llama-server 参数** | 扩展包清单 `llamaArgs` | 换模型时的逃生门：`["--ctx-size","8192","--temp","0.4"]` 逐 token 追加，worker 固定默认值遇同名 flag 整项让位。见 `PACK_FORMAT.md` §2.5 |
 
 **默认值为什么是 auto 而不是 CPU**：auto 的解析链是"用户没选 → 包清单 device
 （cuda）→ worker 问 `--list-devices` 匹配 CUDA0 + ngl 999"。老设置文件里存过
@@ -139,12 +140,16 @@ python tools/ai-subtitles/make_portable_pack.py --source <包目录> --target <�
 | --- | --- | --- |
 | `--threads` | worker `--threads` 已实现，宿主不传 | 自动值已经合理：GPU 后端 `min(核, 8)`（只做采样与回退）、CPU `min(核, 16)`（线程直接决定速度）。再往界面放一层只会多一个"调坏了不知找谁"的入口。排障时可手动传 |
 
-### 7.3 锁死（改了有风险或没好处）
+### 7.3 默认值 + llamaArgs 逃生门（2026-10-25 起不再是绝对锁死）
 
-| 参数 | 当前值 | 锁死原因 |
+这些参数 worker 带固定默认值，**默认不放界面**；换非 Qwen3-ASR 模型时可用扩展包
+清单的 `llamaArgs` 覆盖（同名 flag 整项让位，见 `PACK_FORMAT.md` §2.5）。下表
+"默认值依据"栏就是逃生门的正确用法说明——有依据的例外才该覆盖：
+
+| 参数 | 当前值 | 默认值依据（覆盖前先对照自己的场景） |
 | --- | --- | --- |
 | `--temp` | 0.6 | 直接决定转写质量（更确定 vs 更多样）。没有质量评测就不该动——字幕错了用户立刻看得见，而" temperature 调到 0 更稳"只是直觉 |
-| `--ctx-size` | 4096 | 5 s 窗的 prompt 只有几百 token，4096 余量巨大；调大只白吃 KV |
+| `--ctx-size` | 4096 | 5 s 窗的 prompt 只有几百 token，4096 余量巨大；调大只白吃 KV。换用长上下文模型 / 更长窗口时才值得调 |
 | `--cache-ram 0` + `--no-cache-idle-slots` | 已启用 | **这是针对 ASR 的优化**：每个窗的音频都不同，前缀复用纯浪费。实测默认 cache-ram 8192 会在 15 分钟里涨 2.1 GB RSS（VRAM 平坦），两个 flag 一起才压住 |
 | `--batch-size` / `--ubatch-size` | 默认 2048/512 | ASR 是单请求串行，没有并发批可批 |
 | `--flash-attn` | auto（二进制默认） | 0.6B + 4k ctx 的收益不成比例，兼容风险（老驱动）倒是一票否决 |
@@ -161,8 +166,9 @@ llama-server.exe --list-devices
 llama-server.exe -m <model> --mmproj <mmproj> --n-gpu-layers 16 --device CUDA0
 ```
 
-改任何锁死项之前，先想清楚"它改变哪个结论"——这一节的每一项都对应一次实测或一个
-明确的失败模式，没有"据说更好"的位置。
+改任何默认值之前，先想清楚"它改变哪个结论"——这一节的每一项都对应一次实测或一个
+明确的失败模式，没有"据说更好"的位置。真要覆盖时走清单 `llamaArgs`
+（`PACK_FORMAT.md` §2.5），并在覆盖前用上面的命令对照自己场景。
 
 ---
 

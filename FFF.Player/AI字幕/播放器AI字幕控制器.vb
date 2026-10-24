@@ -292,7 +292,9 @@ Friend NotInheritable Class 播放器AI字幕控制器
             End If
 
             If 管道 Is Nothing Then
-                管道 = New Ai字幕管道(句柄提供器, 状态机, AddressOf 记日志)
+                ' 提示通道随管道一起给：worker 的 warning（模型不认音频端点等）
+                ' 由 result 线程节流后经它上屏，只进日志的话用户面对的是无解释空白。
+                管道 = New Ai字幕管道(句柄提供器, 状态机, AddressOf 记日志, 操作提示)
             End If
             状态机.重置()
             Dim 设置对象 = 设置.实例对象

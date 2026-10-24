@@ -35,8 +35,9 @@ llama-server 用机器上那一份）。
 | `servers` | 对象 | 否 | 后端 → `llama-server.exe` 的映射，键取 `cuda`/`vulkan`/`rocm`/`sycl`/`cpu`。**换后端要换二进制**，见 §2.3 |
 | `device` | 字符串 | 否 | 包推荐的后端（`auto`/`cpu`/`cuda`/`vulkan`/`rocm`/`sycl`）。用户在设置里另选时以用户为准 |
 | `model` | 路径 | 否 | 主权重 .gguf。留空 = worker 按 `--model-dir` + 默认量化档自己拼 |
-| `mmproj` | 路径 | 否 | 投影权重。留空 = 与主权重同目录的 `mmproj-*.gguf` |
+| `mmproj` | 路径 | 否 | 投影权重。留空 = 与主权重同目录的 `mmproj-*.gguf`；**旁边也没有 = 单文件模型**（不传 `--mmproj`，由 llama-server 自己判定能不能加载） |
 | `models` | 对象 | 否 | **模型档位**：档名 → `{model, mmproj}`。同一包带标准档与低配档，用户在设置里换档，见 §2.4 |
+| `llamaArgs` | 数组 | 否 | **llama-server 附加参数**：`["--ctx-size","8192"]`，逐 token 追加到命令行。worker 固定默认值遇同名 flag 自动让位，见 §2.5 |
 | `window` | 秒 | 否 | 推理窗口，0.5–30，默认 5 |
 | `step` | 秒 | 否 | 推进步长，0.5–30，默认 5。大于窗口时压到窗口 |
 
@@ -84,7 +85,7 @@ llama-server 用机器上那一份）。
 | --- | --- |
 | 档名 | 任取（建议用量化名），界面上原样显示 |
 | 任一路径不存在 | **整档丢弃** —— 宁可少一个选项，也不让用户选到注定起不来的档 |
-| 省略 `mmproj` | 取主权重旁边第一个 `mmproj-*.gguf` |
+| 省略 `mmproj` | 取主权重旁边第一个 `mmproj-*.gguf`；旁边也没有 = 该档按单文件模型处理（不传 `--mmproj`） |
 | 旧设置里的档名在新包里不存在 | 回落默认档并写日志，**绝不拒绝启动** |
 | 没有 `models` | 下拉只剩"默认档"且置灰（旧包完全不受影响） |
 | 默认档 | 仍是顶层 `model` / `mmproj`；`models` 只是额外选项 |
@@ -130,6 +131,36 @@ Available devices:
 
 各后端对应的硬件与运行状态见 `BACKEND_MATRIX.md`。
 
+### 2.5 `llamaArgs`：换模型时的参数逃生门
+
+worker 有一份固定默认参数（`--ctx-size 4096` / `--temp 0.6` / 缓存策略，依据见
+`MODEL_TIERS.md` §7）。**换一个不是 Qwen3-ASR 的模型时这些默认值未必还合适**——
+所以清单可以用 `llamaArgs` 逐 token 追加自己的参数：
+
+```json
+"llamaArgs": ["--ctx-size", "8192", "--temp", "0.4", "--flash-attn"]
+```
+
+规则：
+
+| 规则 | 行为 |
+| --- | --- |
+| 同名 flag | worker 的固定默认值**整项让位**（不是依赖"后者覆盖"的语义——某些 llama-server 版本对重复 `--ctx-size` 直接报错）。可覆盖 `--ctx-size` / `--temp` / `--n-gpu-layers` / `--threads` / `--device` 等全部长选项 |
+| 新 flag | 原样追加在命令行末尾（`--flash-attn` 这类开关） |
+| 格式非法 | 整项不是数组就整个忽略；单个元素不是字符串就跳过那一个——**绝不让坏参数拖垮启动** |
+| token 语义 | 一律原样传递：这些是命令行 flag 与值，不是路径。需要路径型参数（`--grammar` 等）请写绝对路径 |
+| 只认长选项 | 让位匹配按 `--flag` / `--flag=value` 做。写短选项（`-c 8192` / `-ngl 16`）不触发让位，会与 worker 默认值重复传参，某些 llama-server 版本直接报错——**逃生门里只写长选项** |
+| 固定段不在让位范围 | `-m`（主权重）/ `--mmproj` / `--port` / `--host` 由本体和 worker 固定拼接，`llamaArgs` 里写了会重复传参（`--port` 重复 = health timeout），**勿写** |
+| flag 必须成对 | `["--ctx-size"]` 这种悬空 flag 本体不拦（原样传递的代价），到 llama-server 启动才报错——报错可读（stderr 落盘 `llama-server.log`），但别这么写 |
+
+典型用途：换的模型上下文要得更大（`--ctx-size 8192`）、换的权重训练时温度不同
+（`--temp`）、后端专属开关。**每一项都请先想清楚"它改变哪个结论"**——本项目
+`MODEL_TIERS.md` §7 逐条记录了默认值的实测依据，逃生门是给"有依据的例外"
+用的，不是给"据说更好"用的。
+
+换模型还要过三道架构约束（`model` / `mmproj` 怎么给、API 模型名怎么探测、
+输出格式怎么解析），完整说明见 `USER_GUIDE.md` §7。
+
 ---
 
 ## 3. 校验与失效
@@ -143,6 +174,7 @@ Available devices:
 | JSON 解析失败 | 清单不是合法 JSON |
 | `worker` 缺失或文件不存在 | 清单未指定 worker / worker 文件不存在 |
 | `model`/`python`/`llamaServer` 指了不存在的文件 | 对应文件不存在（原样带路径） |
+| `mmproj` 指了不存在的文件 | 投影权重不存在（原样带路径）。**注意与"留空"区分**：留空走单文件模型 fallback，写了路径但文件不在才是配错 |
 | `window`/`step` 超出 0.5–30 | 窗口/步长超出范围 |
 
 **失效行为**：功能自动停用，播放完全不受影响。修好后重新选一次目录即可（设置页状态行

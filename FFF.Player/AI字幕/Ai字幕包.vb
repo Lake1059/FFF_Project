@@ -29,6 +29,11 @@ Imports System.Text.Json
 '''   models       可选：档名 → {model, mmproj} 的映射。同一个包可以同时带
 '''                标准档（Q8_0）和低配档（Q4_K_M），用户在设置里换档即可，
 '''                不用换包。未列出的档在界面上不出现。
+'''   llamaArgs    可选：llama-server 附加参数数组（["--ctx-size","8192"]）。
+'''                逐 token 追加到 llama-server 命令行；worker 的固定默认值
+'''                （ctx-size/temp/缓存策略）遇同名 flag 自动让位 —— 换模型时
+'''                想调这些参数不必改 worker 源码。不是数组、或元素不是字符串
+'''                时该项忽略（宁可少给一个参数，也不要起一个注定失败的进程）。
 '''   window       推理窗口秒（默认 5）
 '''   step         推进步长秒（默认 5）
 '''
@@ -54,6 +59,8 @@ Friend NotInheritable Class Ai字幕包配置
     Friend Property 投影文件 As String = String.Empty
     ''' <summary>清单 models 里列出的额外档位（低配档在这里）；空 = 这个包只有默认档。</summary>
     Friend Property 模型档表 As New List(Of Ai字幕模型档)
+    ''' <summary>llama-server 附加参数（清单 llamaArgs 逐 token）；空 = 全用 worker 默认值。</summary>
+    Friend Property 额外参数 As New List(Of String)
     Friend Property 窗口秒 As Double = 5.0
     Friend Property 步长秒 As Double = 5.0
 
@@ -172,6 +179,7 @@ Friend NotInheritable Class Ai字幕包
             End If
             配置.投影文件 = 投影
             读模型档表(目录, 根, 配置)
+            读附加参数(根, 配置)
 
             Dim 窗口 = 读数值(根, "window", 5.0)
             Dim 步长 = 读数值(根, "step", 5.0)
@@ -234,6 +242,23 @@ Friend NotInheritable Class Ai字幕包
         End Try
         Return String.Empty
     End Function
+
+    ''' <summary>llamaArgs：llama-server 附加参数数组。整项不是数组就整个忽略；
+    ''' 单个元素不是字符串就跳过那一个（数组里混进数字多半是手滑，但不该因此
+    ''' 拖垮后面合法的项）。token 一律原样传给 llama-server —— 这些是命令行
+    ''' flag 和它的值（"--ctx-size" "8192"），不是路径；需要路径型参数
+    ''' （--grammar 之类）请写绝对路径。</summary>
+    Private Shared Sub 读附加参数(根 As JsonElement, 配置 As Ai字幕包配置)
+        If 根.ValueKind <> JsonValueKind.Object Then Return
+        Dim 表 As JsonElement = Nothing
+        If Not 根.TryGetProperty("llamaArgs", 表) OrElse 表.ValueKind <> JsonValueKind.Array Then Return
+        For Each 元素 In 表.EnumerateArray()
+            If 元素.ValueKind <> JsonValueKind.String Then Continue For
+            Dim 值 = 元素.GetString()
+            If String.IsNullOrWhiteSpace(值) Then Continue For
+            配置.额外参数.Add(值)
+        Next
+    End Sub
 
     Private Shared Function 读字符串(根 As JsonElement, 名 As String) As String
         If 根.ValueKind <> JsonValueKind.Object Then Return String.Empty

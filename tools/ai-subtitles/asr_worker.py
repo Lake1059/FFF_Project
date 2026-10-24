@@ -236,12 +236,37 @@ def pick_tmpdir(preferred=""):
                        "(tried --tmp-dir, system temp, script dir, cwd)")
 
 
+def _user_first(defaults, extra):
+    """固定默认参数里被用户 extra 点名（同名 flag）的项剔除，返回合并 token 列表。
+
+    为什么不依赖"llama-server 重复参数后者覆盖"：某些版本对重复 --ctx-size
+    直接报错，删掉自己的默认比赌覆盖语义稳。只认长选项 --flag / --flag=value。
+    extra 里非 -- 开头的 token（值）原样保留在末尾。
+    """
+    if not extra:
+        return list(defaults)
+    given = {t.split("=", 1)[0] for t in extra if t.startswith("--")}
+    out, i = [], 0
+    while i < len(defaults):
+        tok = defaults[i]
+        if tok in given:
+            i += 2 if i + 1 < len(defaults) and not defaults[i + 1].startswith("--") else 1
+            continue
+        out.append(tok)
+        i += 1
+    return out + list(extra)
+
+
 class LlamaServer:
     """Child llama-server process with health polling and one restart."""
 
-    def __init__(self, exe, model, mmproj, port, device=None, ngl=999, threads=8):
+    def __init__(self, exe, model, mmproj, port, device=None, ngl=999, threads=8,
+                 extra=None):
         self.exe = exe
         self.model = model
+        # mmproj 允许为 None：单文件模型（LLM 主权重自带音频编码器，或干脆不是
+        # 多模态模型）不传 --mmproj，由 llama-server 自己决定能不能加载。早年
+        # Qwen3-ASR 的「LLM + mmproj 双文件」形态只是其中一种，不是通则。
         self.mmproj = mmproj
         self.port = port
         # device=None 表示不传 --device，交给 llama-server 按自己的后端默认挑。
@@ -250,14 +275,38 @@ class LlamaServer:
         self.threads = threads
         self.proc = None
         self.restarts_left = 1
+        # llama-server 自己报告的模型 id（/v1/models 探测，见 _probe_model_id）。
+        # 转写请求的 model 字段必须跟它对得上，而不同 gguf 的 id 来自各自
+        # 元数据、各不相同 —— 写死一个名字只对当初那个权重有效。
+        self.model_id = ""
+        # 扩展包/用户通过 --llama-arg 追加的 llama-server 参数（token 列表）。
+        # 固定默认值（ctx-size/temp/缓存策略）里同名的 flag 让位给它们，
+        # 见 _user_first —— 换模型时想调这些参数不必改 worker 源码。
+        self.extra = list(extra or [])
+        # llama-server stderr 的落盘句柄（见 start()）：DEVNULL 一扔，加载失败
+        # 的真实原因（缺 mmproj、架构不认、显存不足）就只剩一句 rc=1。
+        self._stderr_handle = None
 
-    def start(self, timeout_s=90.0):
+    def _build_cmd(self):
+        """拼 llama-server 命令行。单独抽出是为了回归测试能不启进程地验整条
+        链（manifest llamaArgs -> 等号 argv -> argparse -> 这里）—— M1
+        （--llama-arg 拆分形式被 argparse 拒）当初就是单测绕过了这一层才漏的。"""
         cmd = [
             str(self.exe),
             "-m", str(self.model),
-            "--mmproj", str(self.mmproj),
+        ]
+        if self.mmproj:
+            cmd += ["--mmproj", str(self.mmproj)]
+        cmd += [
             "--port", str(self.port),
             "--host", "127.0.0.1",
+        ]
+        # 固定默认（各项的实测依据见旁边注释）。--device 也走这条流水线，
+        # 用户在 llamaArgs 里点名它时以用户为准。
+        defaults = []
+        if self.device:
+            defaults += ["--device", str(self.device)]
+        defaults += [
             "--ctx-size", "4096",
             # 0 = 全部留在内存里跑 CPU 后端；999 = 能 offload 的层全给设备。
             "--n-gpu-layers", str(self.ngl),
@@ -271,11 +320,43 @@ class LlamaServer:
             "--no-cache-idle-slots",
             "--cache-ram", "0",
         ]
-        if self.device:
-            cmd += ["--device", str(self.device)]
+        cmd += _user_first(defaults, self.extra)
+        return cmd
+
+    def start(self, timeout_s=90.0):
+        cmd = self._build_cmd()
         log("starting llama-server: " + " ".join(cmd))
+        # llama-server 的 stderr 是加载失败的唯一真相来源（找不到 mmproj、
+        # 音频架构不认、显存不足、参数写错……全只在它嘴里）。早年 DEVNULL 一扔，
+        # 用户侧只剩 "exited early rc=1" 干瞪眼；现在追加落盘到脚本旁的
+        # llama-server.log（只读安装退 cwd，再不行才丢），超 8 MB 从头覆盖。
+        # restart 路径（ensure() 会再进 start()）：旧句柄先关——不关就是泄漏
+        # 一个只增不减的 fd，外加一份没人再写的文件锁（Windows 上想删都难）。
+        旧句柄 = self._stderr_handle
+        self._stderr_handle = None
+        if 旧句柄 is not None:
+            try:
+                旧句柄.close()
+            except Exception:
+                pass
+        err = subprocess.DEVNULL
+        for 根 in (Path(__file__).resolve().parent, Path.cwd()):
+            try:
+                路径 = 根 / "llama-server.log"
+                if 路径.exists() and 路径.stat().st_size > 8 * 1024 * 1024:
+                    路径.unlink()
+                err = open(路径, "ab")
+            except Exception:
+                continue
+            self._stderr_handle = err
+            log(f"llama-server stderr -> {路径}")
+            break
+        else:
+            # 两处都不可写（只读安装 + cwd 也锁着）：明确说一声 stderr 丢了，
+            # 别让排障的人以为压根没打开过日志。
+            log("llama-server stderr discarded (no writable dir beside script or cwd)")
         self.proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cmd, stdout=subprocess.DEVNULL, stderr=err,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         deadline = time.time() + timeout_s
         while time.time() < deadline:
@@ -285,11 +366,42 @@ class LlamaServer:
                 r = _HTTP.get(f"http://127.0.0.1:{self.port}/health", timeout=3)
                 if r.status_code == 200:
                     log("llama-server ready")
+                    # 服务端说自己叫什么，之后的转写请求就用那个名字（见
+                    # _probe_model_id）：换任何 gguf 都不必改 worker。
+                    self.model_id = self._probe_model_id()
+                    log(f"api model id: {self.model_id}")
                     return
             except requests.RequestException:
                 pass
             time.sleep(0.5)
         raise RuntimeError("llama-server health timeout")
+
+    def _probe_model_id(self, fallback="qwen3-asr"):
+        """问 llama-server 它把自己叫什么，转写请求的 model 字段就用这个。
+
+        llama.cpp 的 OpenAI 兼容端点按模型 id 寻址，而 id 来自加载的 gguf
+        元数据 —— Qwen3-ASR 官方量化是 "qwen3-asr"，换任何别的权重都可能是
+        另一个字符串。写死名字只对第一个权重有效；这里让服务端自报身份，
+        同一个 worker 适配任意 gguf。
+
+        探测失败（端点不存在 / 超时 / 空列表 / 字段缺失）一律回落 fallback：
+        /v1/audio/transcriptions 的 model 字段在多数 llama-server 版本里并不
+        严格校验，回落值保持与既有扩展包的现有行为逐字节一致。
+        """
+        try:
+            r = _HTTP.get(f"http://127.0.0.1:{self.port}/v1/models", timeout=5)
+            if r.status_code == 200:
+                items = r.json().get("data") or []
+                if items and items[0].get("id"):
+                    return str(items[0]["id"])
+                log("model id probe: empty /v1/models list; using fallback")
+            else:
+                # 老版本 llama-server 没这个端点：与"探测成功拿到路径 id"在日志里
+                # 必须可区分，否则排障时看着同一行 "api model id:" 会误导。
+                log(f"model id probe: HTTP {r.status_code}; using fallback")
+        except Exception as exc:  # noqa: BLE001 - probe is best-effort
+            log(f"model id probe failed ({type(exc).__name__}: {exc}); using fallback")
+        return fallback
 
     def warm_audio(self, seconds=0.5, tmpdir=None):
         """用一小段静音替音频路径付掉一次性开销，别让第一个真窗口承担。
@@ -305,7 +417,10 @@ class LlamaServer:
 
         tmpdir 传 main() 选好的目录；不传就自己回退选一个（绝不因此崩）。
 
-        失败一律忽略：warmup 只是优化，不承担正确性。
+        返回 True/False。失败时它同时是一次**能力探测**：端点 404/模型不认音频
+        意味着这个 gguf 不是音频转写模型（单文件模型、或压根不是多模态模型），
+        main() 据此向宿主发一条 warning——用户看到的不是白屏+无解释，而是
+        ai-subtitles.log 里一行"该模型不提供音频转写端点"。
         """
         try:
             t0 = time.perf_counter()
@@ -314,8 +429,10 @@ class LlamaServer:
                 tmpdir = pick_tmpdir("")
             transcribe(self, silence, tmpdir, _HTTP, None)
             log(f"audio path warmup {time.perf_counter() - t0:.1f}s")
+            return True
         except Exception as exc:
             log(f"audio path warmup skipped ({type(exc).__name__}: {exc})")
+            return False
 
     def ensure(self):
         """Restart once if the process died; raise if out of restarts."""
@@ -328,15 +445,36 @@ class LlamaServer:
         self.start()
 
     def stop(self):
-        if self.proc is None:
-            return
-        if self.proc.poll() is None:
-            self.proc.terminate()
+        # 句柄先收再管进程：start() 里 Popen 自己抛异常时（llama-server 路径
+        # 写错就是现实场景）self.proc 还是 None，老结构在这里早返回，句柄跟着
+        # start() 的栈一起泄漏——llama-server 每起一次漏一个 fd，直到 worker
+        # 退出才还。子进程有自己的 fd 副本，关父进程这份只是卫生。
+        句柄 = self._stderr_handle
+        self._stderr_handle = None
+        if 句柄 is not None:
             try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+                句柄.close()
+            except Exception:
+                pass
+        proc = self.proc
         self.proc = None
+        if proc is None:
+            return
+        if proc.poll() is None:
+            # terminate/kill 包 try：进程恰在窗口期退出时，老版本 Python 的
+            # terminate/kill 会抛 AccessRefused 竞态（新版本已内置保护，这里
+            # 只是兜底）——收尸失败绝不能把异常抛回调用方。
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 # --------------------------------------------------------------------------
@@ -505,7 +643,7 @@ def transcribe(server, samples, tmpdir, session, language=None):
     path = Path(tmpdir) / f"win_{uuid.uuid4().hex}.wav"
     try:
         sf.write(str(path), samples, TARGET_RATE, subtype="PCM_16")
-        data = {"model": "qwen3-asr", "response_format": "json"}
+        data = {"model": server.model_id or "qwen3-asr", "response_format": "json"}
         if language:
             data["language"] = language
         with open(path, "rb") as fh:
@@ -535,7 +673,9 @@ def read_exact(stream, n):
     return data
 
 
-def main():
+def build_arg_parser():
+    """worker 的 CLI 解析器。单独抽出供回归测试 import 真解析器（测试复刻一
+    行 --llama-arg 会随主体漂移，测的就不是真东西了——M1 漏测根因即此类）。"""
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--quant", default="Q8_0")
@@ -569,7 +709,18 @@ def main():
     # 环境下系统临时目录可能整个不可用，Python 会在 mkdtemp 直接
     # FileNotFoundError 退出，字幕全白（2026-10-23 完整跑实测）。
     ap.add_argument("--tmp-dir", default="")
-    args = ap.parse_args()
+    # llama-server 附加参数逃生门：每个 token 一次（"--llama-arg=--ctx-size"
+    # "--llama-arg=8192"），扩展包清单的 llamaArgs 数组逐项映射到这里。等号
+    # 形式是硬约束：append action 不收以 -- 开头的值，拆成两个 token 传会被
+    # argparse 判 expected one argument 直接 exit 2。worker 的固定默认值
+    # （ctx-size/temp/缓存策略）遇同名 flag 自动让位（见 _user_first）——
+    # 换模型时调这些参数不必改 worker 源码。
+    ap.add_argument("--llama-arg", action="append", default=[], dest="llama_arg")
+    return ap
+
+
+def main():
+    args = build_arg_parser().parse_args()
 
     sys.stdout.reconfigure(encoding="utf-8")
     model_dir = Path(args.model_dir)
@@ -578,17 +729,23 @@ def main():
         if args.mmproj:
             mmproj = Path(args.mmproj)
         else:
-            # 只给了主模型：在它旁边找投影（mmproj-*.gguf）；找不到就落到
-            # 一个必然不存在的名字上，让下面的存在性检查统一报错。
+            # 只给了主模型：在它旁边找投影（mmproj-*.gguf）；找不到就当单文件
+            # 模型处理（mmproj=None，不传 --mmproj）—— 由 llama-server 自己
+            # 决定能不能加载；加载失败的真实原因在它的 stderr，已落盘脚本旁
+            # llama-server.log（见 LlamaServer.start）。
             cands = sorted(model.parent.glob("mmproj-*.gguf"))
-            mmproj = cands[0] if cands else model.parent / "__missing_mmproj__.gguf"
+            mmproj = cands[0] if cands else None
     else:
+        # 老路径（包没写 model 字段）：按约定文件名拼双文件，缺一个就是配错了，
+        # 保持严格报错——那是 Qwen3-ASR 双文件包的既定契约。
         model = model_dir / f"Qwen3-ASR-0.6B-{args.quant}.gguf"
         mmproj = model_dir / f"mmproj-Qwen3-ASR-0.6B-{args.mmproj_quant}.gguf"
-    for p in (model, mmproj):
-        if not p.exists():
-            emit({"type": "status", "state": "error", "detail": f"missing {p}"})
-            return 2
+    if not model.exists():
+        emit({"type": "status", "state": "error", "detail": f"missing {model}"})
+        return 2
+    if mmproj is not None and not mmproj.exists():
+        emit({"type": "status", "state": "error", "detail": f"missing {mmproj}"})
+        return 2
 
     backend = (args.device_backend or "auto").strip().lower()
     if backend != "auto" and backend not in BACKEND_ALIASES:
@@ -627,7 +784,8 @@ def main():
           "detail": f"backend={backend} device={device or 'default'} ngl={ngl} "
                     f"threads={threads} port={port} exe={exe}"})
     server = LlamaServer(exe, model, mmproj, port,
-                         device=device, ngl=ngl, threads=threads)
+                         device=device, ngl=ngl, threads=threads,
+                         extra=args.llama_arg)
     # 临时目录必须在起 llama-server 之前定好：选不出来的话走协议报 fatal，
     # 让宿主记一行日志，而不是一句 traceback 崩掉（2026-10-23 完整跑的教训）。
     try:
@@ -646,8 +804,19 @@ def main():
         server.start()
         # 先把音频路径预热掉：否则第一个真窗口要额外付十几秒构图代价，用户看到
         # 的第一句字幕会明显迟到（详见 warm_audio 的注释）。
-        server.warm_audio(tmpdir=tmpdir)
+        if not server.warm_audio(tmpdir=tmpdir):
+            # warm 失败 = 这个模型不认音频请求（端点 404 / 模型不认音频输入）。
+            # 不判 fatal——转写窗口失败本来就有既有降级路径，但必须让用户看见
+            # 原因，而不是对着一片白屏猜。
+            emit({"type": "status", "state": "warning",
+                  "detail": "音频端点探测失败：该模型可能不是音频转写模型"
+                            "（llama-server 能加载它，但 /v1/audio/transcriptions"
+                            " 不可用）；字幕会空白，详见 ai-subtitles.log"})
     except Exception as e:  # noqa: BLE001 - report through the protocol
+        # 先收子进程再报错：health timeout（90s）那条路 llama-server 还活着，
+        # 不 stop 就是孤儿进程——继续占着显存/端口/内存，而用户只看到一行错误
+        # 还以为是自己的机器闹鬼（2026-10-25 审查实测确认的泄漏路径）。
+        server.stop()
         emit({"type": "status", "state": "error", "detail": str(e)})
         return 3
 
