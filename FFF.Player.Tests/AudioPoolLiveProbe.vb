@@ -32,7 +32,7 @@ Friend Module AudioPoolLiveProbe
     Private 通过 As Integer
     Private 失败 As Integer
     Private 跳过 As Integer
-    Private 自旋退出 As Integer   ' 0=自旋继续；Thread.VolatileRead/Write 走 Integer
+    Private 自旋退出 As Integer   ' 0=自旋继续；Volatile.Read/Write 走 Integer
 
     Private Sub 检查(条件 As Boolean, 名称 As String, 实测 As String)
         If 条件 Then
@@ -98,12 +98,12 @@ Friend Module AudioPoolLiveProbe
                             采HDR As Boolean) As 轮读数
         Dim r As New 轮读数()
         Dim 自旋 As New List(Of Thread)()
-        Thread.VolatileWrite(自旋退出, 0)
+        Volatile.Write(自旋退出, 0)
         For i = 1 To spinners
             Dim t As New Thread(
                 Sub()
                     Dim x = 0.0R
-                    While Thread.VolatileRead(自旋退出) = 0
+                    While Volatile.Read(自旋退出) = 0
                         For j = 0 To 100000
                             x += Math.Sqrt(CDbl(j))
                         Next
@@ -182,7 +182,7 @@ Friend Module AudioPoolLiveProbe
         Finally
             窗体.Close()
             窗体.Dispose()
-            Thread.VolatileWrite(自旋退出, 1)
+            Volatile.Write(自旋退出, 1)
             For Each t In 自旋
                 t.Join(500)   ' 自旋线程是 IsBackground；正常路径 500ms 内会自己看到退出位。
             Next

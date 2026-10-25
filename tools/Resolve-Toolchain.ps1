@@ -243,3 +243,58 @@ function Get-VisualCppTool {
     }
     throw "$Name was not found in the environment, stable Visual Studio, or Visual Studio Preview."
 }
+
+function Get-ProductTargetFramework {
+    param(
+        [Parameter(Mandatory = $true)] [string]$ProjectPath,
+        [string]$NetTFM = "",
+        [string]$DotNet = "dotnet"
+    )
+
+    # 取值而不是解析：TargetFramework 在工程里是 $(NetTFM) 表达式，正则去啃 XML
+    # 会在下次改工程时悄悄给出旧值。dotnet msbuild -getProperty 是权威求值。
+    $arguments = @("msbuild", $ProjectPath, "-nologo", "-v:q", "-getProperty:TargetFramework")
+    if (-not [string]::IsNullOrWhiteSpace($NetTFM)) { $arguments += "-p:NetTFM=$NetTFM" }
+    $output = @(& $DotNet @arguments)
+    if ($LASTEXITCODE -ne 0) { throw "Could not evaluate TargetFramework for $ProjectPath." }
+    $framework = @($output | Where-Object { $_ -match '^net\d' }) | Select-Object -Last 1
+    if ($null -eq $framework) { throw "TargetFramework evaluated empty for $ProjectPath." }
+    return $framework.Trim()
+}
+
+function Assert-ProductFrameworkPair {
+    param(
+        [Parameter(Mandatory = $true)] [string]$OutputDirectory,
+        [Parameter(Mandatory = $true)] [string]$Product,
+        [Parameter(Mandatory = $true)] [string]$Framework,
+        [switch]$AllowMismatch
+    )
+
+    # 两个产品是两条独立的发布命令，所以"同框架"不是任何一个工程的属性，而是
+    # 已经躺在输出目录里的那一对产物的属性。把每个产品解析出的框架记在旁边的
+    # 账上，后一个与之不一致就直接拒绝，而不是让用户自己发现。
+    $manifest = Join-Path $OutputDirectory ".product-frameworks.txt"
+    $entries = @{}
+    if (Test-Path -LiteralPath $manifest -PathType Leaf) {
+        foreach ($line in @(Get-Content -LiteralPath $manifest -ErrorAction SilentlyContinue)) {
+            $parts = $line.Split("=", 2)
+            if ($parts.Count -eq 2 -and -not [string]::IsNullOrWhiteSpace($parts[0])) {
+                $entries[$parts[0].Trim()] = $parts[1].Trim()
+            }
+        }
+    }
+    foreach ($name in @($entries.Keys)) {
+        if ($name -eq $Product) { continue }
+        if ($entries[$name] -eq $Framework) { continue }
+        $message = ("$name in $OutputDirectory was published for $($entries[$name]) but " +
+            "$Product resolves to $Framework. Re-publish both with the same -NetTFM, " +
+            "or pass -AllowFrameworkMismatch on purpose.")
+        if (-not $AllowMismatch) { throw $message }
+        Write-Warning $message
+    }
+    $entries[$Product] = $Framework
+    $lines = @($entries.Keys | Sort-Object | ForEach-Object { "$_=$($entries[$_])" })
+    New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    [IO.File]::WriteAllLines($manifest, $lines, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "Product framework recorded: $Product=$Framework ($manifest)"
+}
