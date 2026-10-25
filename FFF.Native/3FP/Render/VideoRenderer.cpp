@@ -2725,10 +2725,15 @@ PlayerVideoRenderer::~PlayerVideoRenderer() { Close(); }
 FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     if (window != nullptr && !IsWindow(window)) return FFFResult::InvalidArgument;
-    if (window == window_) {
+    if (window == window_ && (swapChain_ != nullptr || window == nullptr)) {
         // The same HWND can move between monitors while the player remains
         // open. Refresh the pacing contract and wake the presenter so a
         // 120 Hz monitor is picked up without rebuilding the media session.
+        // A missing chain is NOT the same-HWND fast path: device-loss recovery
+        // (ReleaseDeviceObjects) and renderer teardown release the swap chain
+        // while keeping window_, so re-binding that same HWND must fall through
+        // and rebuild it -- otherwise the session is stranded headless with a
+        // window handle it believes is bound (black video, dead text layers).
         {
             std::lock_guard lock(timedTextMutex_);
             presentationFrameRate_ = DetectDisplayRefreshRate(window_);
@@ -7695,6 +7700,44 @@ FFFResult PlayerVideoRenderer::Redraw() noexcept {
     }
     timedTextCondition_.notify_one();
     return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::PresentAfterBind() noexcept {
+    // Same lock order as the presenter thread: deviceMutex_ then presentMutex_,
+    // with deviceMutex_ released across the actual Present so an upload from the
+    // playback worker is never stalled behind it.
+    std::unique_lock deviceLock(deviceMutex_);
+    if (window_ == nullptr) return FFFResult::Success;
+    std::unique_lock presentLock(presentMutex_);
+    const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : 1,
+        hasCachedVideo_ ? sourceHeight_ : 1, hasCachedVideo_ ? sourceBitDepth_ : 8);
+    if (chainResult != FFFResult::Success || swapChain_ == nullptr) return chainResult;
+    ComPtr<ID3D11Texture2D> backBuffer;
+    ComPtr<ID3D11RenderTargetView> backBufferTarget;
+    const auto targetResult = AcquireBackBufferTarget(
+        backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
+    if (targetResult != FFFResult::Success) return targetResult;
+    if (hasCachedVideo_) {
+        const auto drawResult = DrawCachedVideo(backBufferTarget.Get());
+        if (drawResult != FFFResult::Success) return drawResult;
+    } else {
+        // No frame was ever rendered into this window (headless open dropped
+        // them all). One black frame is strictly better than a window with no
+        // swap chain at all: it proves the chain works, gives the text layers a
+        // real canvas to size themselves against, and is superseded by the next
+        // decoded frame.
+        constexpr float black[] = {0, 0, 0, 1};
+        context_->ClearRenderTargetView(backBufferTarget.Get(), black);
+    }
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
+    ComPtr<IDXGISwapChain4> retainedChain = swapChain_;
+    const auto generation = videoGeneration_.load();
+    deviceLock.unlock();
+    const auto result = PresentCurrentFrame(retainedChain.Get(), generation);
+    retainedChain.Reset();
+    backBufferTarget.Reset();
+    backBuffer.Reset();
+    return result;
 }
 
 void PlayerVideoRenderer::ReleaseCoverBackdropResources() noexcept {

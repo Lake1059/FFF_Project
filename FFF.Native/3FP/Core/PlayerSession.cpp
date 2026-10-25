@@ -1744,11 +1744,17 @@ FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
             ApplyAudioPlaybackPause(true);
         }
         // 候选会话无窗口时只保留解码帧；绑定窗口后必须先上传静态图片，才能重绘。
+        // 普通视频在没有缓存帧时不能只靠 Redraw()：headless 打开期间解出的帧被
+        // 刻意丢弃（Renderer 不替无窗会话保管 GPU 缓存），Redraw 此时必然空转，
+        // 于是一个暂停/就绪态的新会话永远等不到首帧——换解码器、切文件后黑屏
+        // 就是这么来的。改用 PresentAfterBind() 把交换链建起来并呈交一帧。
         const auto redrawResult = staticImage_ && stillImageFrame_ != nullptr && window != nullptr
             ? videoRenderer_.Render(stillImageFrame_, snapshot_.frameIndex, true, false, false, true)
             : coverArtFrame_ != nullptr && videoStream_ < 0 && window != nullptr
                 ? videoRenderer_.Render(coverArtFrame_, HdrProcessor::kUnknownFrameIndex, true, true)
-                : videoRenderer_.Redraw();
+                : window != nullptr && videoStream_ >= 0 && !videoRenderer_.HasCachedVideo()
+                    ? videoRenderer_.PresentAfterBind()
+                    : videoRenderer_.Redraw();
         if (redrawResult == FFFResult::DeviceFailure &&
             videoRenderer_.RequestRecoveryIfDeviceLost()) return;
         if (redrawResult != FFFResult::Success) {
