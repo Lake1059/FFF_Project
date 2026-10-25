@@ -1077,13 +1077,34 @@ private:
     // logs its transition once instead of once per frame. Sentinelled with a
     // value outside the enum.
     std::atomic<std::uint32_t> videoSuperResolutionLoggedReason_{ 0xFFFFFFFFu };
-    // Geometry of the cached upscaled surface, in the *picture's* axes (see
-    // ApplySuperResolution). Atomic because the status getter reads them on the
-    // host's thread while the render path writes them.
+    // 临时诊断：VSR 步进账。只在 deviceMutex_ 保护的渲染路径上累加，所以是普通量；
+    // 每 300 帧经内核日志槽报一次，重建计数器用来判几何是否逐帧抖动。
+    std::int64_t vsrBuildTicks_{ 0 };
+    std::int64_t vsrBltTicks_{ 0 };
+    std::uint64_t vsrFrames_{ 0 };
+    std::uint64_t vsrRebuilds_{ 0 };
+    // 临时诊断：TrueHDR 步进账，与 VSR 同款但走 FPT_HDR_TRACE。两路抢同一条
+    // 视频处理器时，混在一份日志里分不清是谁在重建。
+    std::int64_t trueHdrBuildTicks_{ 0 };
+    std::int64_t trueHdrBltTicks_{ 0 };
+    std::uint64_t trueHdrFrames_{ 0 };
+    std::uint64_t trueHdrRebuilds_{ 0 };
+    // Geometry this frame *would* have used, in the *picture's* axes (see
+    // ApplySuperResolution). Published before the geometry gates so the host can
+    // explain a skip (0x0 said nothing about why NotUpscaling fired). Atomic
+    // because the status getter reads them on the host's thread. These are a
+    // diagnostic only: they must never be the cache key, or the comparison
+    // becomes a value against itself.
     std::atomic<std::uint32_t> videoSuperResolutionSourceWidth_{ 0 };
     std::atomic<std::uint32_t> videoSuperResolutionSourceHeight_{ 0 };
     std::atomic<std::uint32_t> videoSuperResolutionTargetWidth_{ 0 };
     std::atomic<std::uint32_t> videoSuperResolutionTargetHeight_{ 0 };
+    // Geometry the cached pass was *built* with. Written only inside the rebuild
+    // block, so it stays put while a frame skips or publishes new diagnostics.
+    std::uint32_t superResolutionPassSourceWidth_{ 0 };
+    std::uint32_t superResolutionPassSourceHeight_{ 0 };
+    std::uint32_t superResolutionPassTargetWidth_{ 0 };
+    std::uint32_t superResolutionPassTargetHeight_{ 0 };
     // The upscaled NV12/P010 surface and its per-plane views. Owned here, never
     // swapped into sourceViews_ (that array is EnsurePipeline's long-lived
     // pipeline state and mutating it would corrupt the next frame).
@@ -1091,6 +1112,20 @@ private:
     ID3D11ShaderResourceView* superResolutionViews_[3]{};
     // DXGI_FORMAT of the cached super-resolution surface (0 when absent).
     std::uint32_t superResolutionSourceFormat_{ 0 };
+    // The video processor, both views and the two QIs that drive the upscaled
+    // pass. Cached across frames on purpose: building them every frame measures
+    // 60fps -> 1-4fps because the driver re-negotiates its AI scaler on each
+    // fresh processor, so only the blit stays in the per-frame path.
+    // `superResolutionInputTexture_` is held with its own reference so that a
+    // destroyed and reallocated decoded texture cannot alias the cached input
+    // view by address.
+    ID3D11VideoDevice* superResolutionVideoDevice_{ nullptr };
+    ID3D11VideoContext* superResolutionVideoContext_{ nullptr };
+    ID3D11VideoProcessorEnumerator* superResolutionEnumerator_{ nullptr };
+    ID3D11VideoProcessor* superResolutionProcessor_{ nullptr };
+    ID3D11VideoProcessorInputView* superResolutionInputView_{ nullptr };
+    ID3D11VideoProcessorOutputView* superResolutionOutputView_{ nullptr };
+    ID3D11Texture2D* superResolutionInputTexture_{ nullptr };
     // --- NVIDIA automatic HDR (RTX Video HDR / TrueHDR, opt-in; default Off) ---
     // Host-visible switch. Off keeps the renderer byte-identical to the
     // pre-TrueHDR behaviour, same invariant as VSR.
@@ -1123,6 +1158,20 @@ private:
     // sourceViews_.
     ID3D11Texture2D* trueHdrTexture_{ nullptr };
     ID3D11ShaderResourceView* trueHdrView_{ nullptr };
+    // The TrueHDR video-processor pass, cached across frames with the same
+    // discipline as the super-resolution one: rebuilding it every frame costs
+    // ~20x the frame budget because the driver re-warms its enhancement on each
+    // fresh processor. `trueHdrPpeRequested_` is part of the pass identity --
+    // the cached processor carries the super-resolution extension only if the
+    // host asked for it when the processor was built.
+    ID3D11VideoDevice* trueHdrVideoDevice_{ nullptr };
+    ID3D11VideoContext* trueHdrVideoContext_{ nullptr };
+    ID3D11VideoProcessorEnumerator* trueHdrEnumerator_{ nullptr };
+    ID3D11VideoProcessor* trueHdrProcessor_{ nullptr };
+    ID3D11VideoProcessorInputView* trueHdrInputView_{ nullptr };
+    ID3D11VideoProcessorOutputView* trueHdrOutputView_{ nullptr };
+    ID3D11Texture2D* trueHdrInputTexture_{ nullptr };
+    bool trueHdrPpeRequested_{ false };
     // Decode transfer of the frame currently held, untouched by the TrueHDR
     // re-tag. The ApplyTrueHdr SDR-source gate and every draw's baseline must
     // read THIS, not cachedVideoSettings_.transfer: DrawWithShader retags that

@@ -259,6 +259,15 @@ private:
     bool RecoverVideoDevice() noexcept;
     FFFResult OpenFormat(const std::string& pathUtf8, AVFormatContext** format,
         std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept;
+    // A second demuxer for the trial decode, opened under the same IO policy as
+    // OpenFormat (protocol allow/deny lists, the same file-or-repaired-memory
+    // input, the same demuxer gate) and additionally wired to the session's
+    // terminate flag so a slow read can be abandoned instead of joined. It skips
+    // avformat_find_stream_info: the trial needs only the stream table, which the
+    // header already carries.
+    FFFResult OpenProbeFormat(const std::string& pathUtf8, AVFormatContext** format,
+        std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept;
+    static int ProbeInterrupt(void* opaque) noexcept;
     void CloseFormat(AVFormatContext** format,
         std::unique_ptr<SharedFileInput>& io) noexcept;
     FFFResult OpenDecoder(AVFormatContext* format, std::int32_t streamIndex, bool video,

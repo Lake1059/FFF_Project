@@ -2909,6 +2909,76 @@ void PlayerSession::CloseFormat(AVFormatContext** format,
     io.reset();
 }
 
+int PlayerSession::ProbeInterrupt(void* opaque) noexcept {
+    const auto* self = static_cast<const PlayerSession*>(opaque);
+    return (self != nullptr && self->terminate_.load(std::memory_order_acquire)) ? 1 : 0;
+}
+
+FFFResult PlayerSession::OpenProbeFormat(const std::string& path, AVFormatContext** output,
+    std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept {
+    // Mirrors OpenFormat rather than avformat_open_input(path): the trial used to
+    // reopen the bare url, which skipped the protocol lists, the repaired-memory
+    // input for layered AVIF and every demuxer gate -- so the "same file" it
+    // measured was not always the file the session plays.
+    AVDictionary* options = nullptr;
+    av_dict_set(&options, "protocol_whitelist", "file,crypto,data", 0);
+    av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
+    std::vector<std::uint8_t> repairedBytes;
+    std::string repairDetail;
+    const bool repaired = IsStillImageContainerName(path) &&
+        AvifIlocShim::ReadAndRepair(path.c_str(), MaxRepairedStillImageBytes,
+            repairedBytes, repairDetail);
+    io = repaired ? SharedFileInput::OpenMemory(repairedBytes.data(), repairedBytes.size(), error)
+                  : SharedFileInput::Open(path.c_str(), error);
+    if (io == nullptr) {
+        av_dict_free(&options);
+        return FFFResult::NativeFailure;
+    }
+    auto* context = avformat_alloc_context();
+    if (context == nullptr) {
+        av_dict_free(&options);
+        io.reset();
+        error = "Could not allocate the trial demuxer context.";
+        return FFFResult::NativeFailure;
+    }
+    context->pb = io->Context();
+    context->flags |= AVFMT_FLAG_CUSTOM_IO;
+    // The read itself is a synchronous file read and cannot be cut short, but
+    // avformat's own probing loops do consult this, and the packet loop below
+    // checks the same flag, so the non-cancellable window shrinks to one read.
+    context->interrupt_callback.callback = &PlayerSession::ProbeInterrupt;
+    context->interrupt_callback.opaque = this;
+    *output = context;
+    const auto result = avformat_open_input(output, path.c_str(), nullptr, &options);
+    av_dict_free(&options);
+    if (result < 0) {
+        if (*output != nullptr) avformat_free_context(*output);
+        *output = nullptr;
+        io.reset();
+        error = FfmpegError(result);
+        return FFFResult::FfmpegFailure;
+    }
+    if ((*output)->iformat == nullptr) {
+        CloseFormat(output, io);
+        error = "Network and virtual-device demuxers are disabled.";
+        return FFFResult::NotSupported;
+    }
+    const std::string_view demuxerName(
+        (*output)->iformat->name == nullptr ? "" : (*output)->iformat->name);
+    if (demuxerName.find("hls") != std::string_view::npos ||
+        demuxerName.find("dash") != std::string_view::npos) {
+        CloseFormat(output, io);
+        error = "Network and virtual-device demuxers are disabled.";
+        return FFFResult::NotSupported;
+    }
+    if (!ApplyLoopingOptions(*output, demuxerName)) {
+        CloseFormat(output, io);
+        error = "The image demuxer could not be configured.";
+        return FFFResult::FfmpegFailure;
+    }
+    return FFFResult::Success;
+}
+
 // Reads how many clockwise quarter turns the source asks to be displayed with.
 //
 // Two independent mechanisms carry this, and real files use either one:
@@ -3372,16 +3442,32 @@ bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const s
     // checking at all: a 3 s HEVC stream decoded 0 of 90 frames and playback ended
     // immediately. Playback's context is therefore never touched here.
     //
+    // That second context goes through OpenProbeFormat, so it carries the session's
+    // own IO policy and an interrupt callback tied to terminate_; the bare url this
+    // used to open skipped the protocol lists, the repaired-memory input and the
+    // demuxer gate, and could not be cancelled at all.
+    //
     // A trial that cannot be run accepts the decoder: missing information is not a
     // verdict, and the pre-existing fallback in DecodePacket still covers a decoder
-    // that fails later.
+    // that fails later. A cancelled trial is in the same class.
     if (owner->url == nullptr || owner->url[0] == '\0') return finish(true, "no url");
     AVFormatContext* probe = nullptr;
-    if (avformat_open_input(&probe, owner->url, nullptr, nullptr) < 0 || probe == nullptr)
-        return finish(true, "reopen failed");
+    std::unique_ptr<SharedFileInput> probeIo;
+    std::string probeError;
+    if (OpenProbeFormat(owner->url, &probe, probeIo, probeError) != FFFResult::Success ||
+        probe == nullptr)
+        return finish(true, "reopen failed: " + probeError);
     const auto streamCountMatches = probe->nb_streams == owner->nb_streams;
     bool produced = false;
+    bool cancelled = false;
     std::string detail;
+    // 试解的中间量。`err=` 为空时旧 trace 只说"没解出帧"，分不清是没读到包、包没落到
+    // 这条流、还是解码器真拒了 —— 而这三者的修法方向相反，所以必须把计数打出来。
+    int readCount = 0;
+    int matchedCount = 0;
+    int eagainCount = 0;
+    int seenMask = 0;
+    std::string stopDetail;
     if (streamCountMatches) {
         // First frame only, and that is the intended scope. A frame coming out of the
         // decoder answers the question this gate asks -- this backend can decode this
@@ -3395,26 +3481,70 @@ bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const s
         // Enough packets to cover a decoder with output delay plus a reopened GOP;
         // stop as soon as a frame arrives, which for nearly every stream is the first
         // packet of the stream.
-        for (int attempt = 0; attempt < 32 && !produced; ++attempt) {
-            if (av_read_frame(probe, packet) < 0) break;
+        //
+        // The 32 budget belongs to *this* stream. Counting every packet instead let an
+        // audio-dense prefix eat the whole budget before a single video packet arrived:
+        // measured on an AV1/Opus WebM (ffprobe: 0=av1 video, 1=opus audio) the trial
+        // read 32 packets, matched 0, saw no error, and then rejected hardware decode
+        // with an empty reason -- and remembered the route as unsupported for the
+        // session. The same elementary stream remuxed into MP4 passed on packet 1, so
+        // the defect was the budget, not the decoder, the codec, the bit depth or the
+        // encoder. `reads` bounds the work so a stream that never carries this index
+        // cannot spin the loop.
+        for (int reads = 0, fed = 0; reads < 512 && fed < 32 && !produced; ++reads) {
+            // Shutdown must not wait out the whole budget on a slow source; the
+            // destructor joins this thread without a timeout.
+            if (terminate_.load(std::memory_order_acquire)) {
+                cancelled = true;
+                detail = "cancelled";
+                stopDetail = "cancelled";
+                break;
+            }
+            const auto readResult = av_read_frame(probe, packet);
+            if (readResult < 0) {
+                if (readResult == AVERROR_EXIT) cancelled = true;
+                if (cancelled) detail = "cancelled";
+                stopDetail = cancelled ? "cancelled" : FfmpegError(readResult);
+                break;
+            }
+            ++readCount;
+            seenMask |= (packet->stream_index >= 0 && packet->stream_index < 31)
+                ? (1 << packet->stream_index) : 0;
             if (packet->stream_index != index) { av_packet_unref(packet); continue; }
+            ++fed;
+            ++matchedCount;
             const auto sendResult = avcodec_send_packet(decoder, packet);
             av_packet_unref(packet);
-            if (sendResult < 0) { detail = FfmpegError(sendResult); break; }
+            if (sendResult < 0) { detail = FfmpegError(sendResult); stopDetail = detail; break; }
             const auto receiveResult = avcodec_receive_frame(decoder, frame);
             if (receiveResult == 0) produced = true;
-            else if (receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF) {
-                detail = FfmpegError(receiveResult);
-                break;
+            else if (receiveResult == AVERROR(EAGAIN)) ++eagainCount;
+            else if (receiveResult != AVERROR_EOF) {
+                detail = FfmpegError(receiveResult); stopDetail = detail; break;
             }
         }
         // A decoder with output delay answers EAGAIN until it is drained, and draining
-        // is safe here: the decoder is flushed on the way out either way.
-        if (!produced && detail.empty() && avcodec_send_packet(decoder, nullptr) == 0 &&
+        // is safe here: the decoder is flushed on the way out either way. A cancelled
+        // trial does not drain -- there is nothing left to learn from it.
+        if (!produced && !cancelled && detail.empty() &&
+            avcodec_send_packet(decoder, nullptr) == 0 &&
             avcodec_receive_frame(decoder, frame) == 0) produced = true;
     } else detail = "stream count differs";
-    avformat_close_input(&probe);
-    return finish(produced || !streamCountMatches, detail);
+    if (HardwareCapabilityTrace())
+        std::fprintf(stderr,
+            "[hwcap] trial detail stream=%d fmt=%s extradata=%dB read=%d matched=%d eagain=%d"
+            " seen=%08x probeStreams=%d probeCodec0=%d wantCodec=%d stop=%s produced=%d\n",
+            index,
+            (probe != nullptr && probe->iformat != nullptr) ? probe->iformat->name : "?",
+            decoder->extradata_size, readCount, matchedCount, eagainCount, seenMask,
+            probe != nullptr ? static_cast<int>(probe->nb_streams) : -1,
+            (probe != nullptr && probe->nb_streams > 0 &&
+                probe->streams[0]->codecpar != nullptr)
+                ? static_cast<int>(probe->streams[0]->codecpar->codec_id) : -1,
+            static_cast<int>(decoder->codec_id),
+            stopDetail.empty() ? "-" : stopDetail.c_str(), produced ? 1 : 0);
+    CloseFormat(&probe, probeIo);
+    return finish(produced || !streamCountMatches || cancelled, detail);
 }
 
 void PlayerSession::DoOpen(std::string path) noexcept {

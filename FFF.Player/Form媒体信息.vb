@@ -8,9 +8,9 @@ Public Class Form媒体信息
     Private ReadOnly 获取输入音频峰值 As Func(Of Single())
     Private ReadOnly 响度条 As LakeUI.ExcellentProgressBar()
     Private ReadOnly 输入响度条 As LakeUI.ExcellentProgressBar()
-    Private ReadOnly 刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 200}
-    Private ReadOnly 响度刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 67}
-    Private ReadOnly 帧率刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 1000}
+    Private ReadOnly 刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 200, .SynchronizingObject = Me}
+    Private ReadOnly 响度刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 67, .SynchronizingObject = Me}
+    Private ReadOnly 帧率刷新定时器 As New LakeUI.PrecisionTimer With {.Interval = 1000, .SynchronizingObject = Me}
     Private 上次视频帧次数 As ULong
     Private 上次采样时钟 As Long
     Private 最近实际帧率 As Double
