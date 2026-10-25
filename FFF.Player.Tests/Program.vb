@@ -91,6 +91,11 @@ Friend Module Program
                     StringComparison.OrdinalIgnoreCase) Then
                 Return HdrOverlayStabilityProbe.运行媒体列表探针()
             End If
+            ' RTX 超分/自动HDR 两行的判词、配色与行装配（真会话函数 + 真呈现器，见该文件头）。
+            If args.Length > 0 AndAlso String.Equals(args(0), "--rtx-overlay-rows",
+                    StringComparison.OrdinalIgnoreCase) Then
+                Return RtxOverlayRowProbe.运行()
+            End If
             ' 音频动态缓冲池实机（真会话 + 真 WASAPI + FFF_AUDIO_TARGET_TRACE，见该文件头）。
             If args.Length > 0 AndAlso String.Equals(args(0), "--audio-pool-live",
                     StringComparison.OrdinalIgnoreCase) Then
