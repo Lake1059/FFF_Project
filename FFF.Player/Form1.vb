@@ -186,7 +186,8 @@ Public Class Form1
             AddressOf 播放控制器.读取色彩变换内容描述,
             AddressOf 播放控制器.提交播放器信息图层,
             AddressOf 播放控制器.读取视频超分辨率图层文本,
-            AddressOf 播放控制器.读取视频自动HDR图层文本)
+            AddressOf 播放控制器.读取视频自动HDR图层文本,
+            Function() AI字幕控制器 IsNot Nothing AndAlso AI字幕控制器.Worker运行中)
         信息图层呈现器.应用全局字体(设置.实例对象.字体)
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
