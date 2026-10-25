@@ -4616,6 +4616,15 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
     }
 
     const auto buildDoneQpc = traceSteps ? QpcNowValue() : 0;
+    if (rebuilt) {
+        // Releasing the old pass zeroes the four diagnostic atomics along with it,
+        // so the one frame that *built* the pass would otherwise report active=1
+        // with source 0x0 -- the exact reading this publish exists to prevent.
+        videoSuperResolutionSourceWidth_ = sourceWidth_;
+        videoSuperResolutionSourceHeight_ = sourceHeight_;
+        videoSuperResolutionTargetWidth_ = surfaceWidth;
+        videoSuperResolutionTargetHeight_ = surfaceHeight;
+    }
 
     D3D11_VIDEO_PROCESSOR_STREAM stream{};
     stream.Enable = TRUE;
@@ -4671,7 +4680,12 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
     // Latches and skip/reject plumbing mirror ApplySuperResolution one-for-one,
     // on their own members. Every early exit clears `active` so the status
     // block can never claim TrueHDR is on while the shader path is in use.
+    // Both reject paths also drop the pass: the latch below means no later frame
+    // rebuilds it, so this is the only thing that frees the 10-bit surface and
+    // the decoded-texture reference the rebuild block had already taken. The VSR
+    // path has released on every one of its failure returns all along.
     const auto reject = [this](const FFF3FPVideoAutoHdrReason reason) noexcept {
+        ReleaseTrueHdrResources();
         videoTrueHdrRejected_.store(true, std::memory_order_release);
         videoTrueHdrActive_.store(false, std::memory_order_release);
         videoTrueHdrReason_.store(reason, std::memory_order_release);
@@ -4679,6 +4693,7 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
         return FFFResult::NotSupported;
     };
     const auto rejectAt = [this](const char* stage) noexcept {
+        ReleaseTrueHdrResources();
         videoTrueHdrRejected_.store(true, std::memory_order_release);
         videoTrueHdrActive_.store(false, std::memory_order_release);
         videoTrueHdrReason_.store(FFF3FPVideoAutoHdrReason::DriverRejected,
@@ -4793,12 +4808,10 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
         description.Usage = D3D11_USAGE_DEFAULT;
         description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(device_->CreateTexture2D(&description, nullptr, &trueHdrTexture_))) {
-            ReleaseTrueHdrResources();
             return rejectAt("CreateTexture2D for the HDR surface");
         }
         if (FAILED(device_->CreateShaderResourceView(trueHdrTexture_, nullptr,
                 &trueHdrView_))) {
-            ReleaseTrueHdrResources();
             return rejectAt("CreateShaderResourceView for the HDR surface");
         }
 
@@ -4912,7 +4925,6 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
     stream.pInputSurface = trueHdrInputView_;
     if (FAILED(trueHdrVideoContext_->VideoProcessorBlt(trueHdrProcessor_,
             trueHdrOutputView_, 0, 1, &stream))) {
-        ReleaseTrueHdrResources();
         return rejectAt("VideoProcessorBlt");
     }
 
@@ -8494,13 +8506,21 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
             // VSR did not produce this frame's pixels even when its PPE
             // extension rode inside the same blit; report the state honestly
             // instead of leaving a stale "VSR active" behind. Gate on the
-            // *request*, not on a previous reason: gating it on "reason was
-            // None" meant a cold start -- TrueHDR engaging on the first drawn
+            // *request*, not on a previous reason being None: gating it on
+            // None meant a cold start -- TrueHDR engaging on the first drawn
             // frame -- left the reason at its NotRequested default, and the
-            // host then told the user the feature was off while it was asked for.
+            // host then told the user the feature was off while it was asked
+            // for. But only overwrite the *empty* reasons: a specific one the
+            // last VSR attempt wrote (driver rejected, not upscaling, out of
+            // range, unsupported format) is the reading the user can act on,
+            // and "yields to automatic HDR" would hide it.
             videoSuperResolutionActive_.store(false, std::memory_order_release);
+            const auto previousReason = videoSuperResolutionReason_.load(std::memory_order_acquire);
             if (requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
-                    FFF3FPVideoSuperResolution::Off)
+                    FFF3FPVideoSuperResolution::Off &&
+                (previousReason == FFF3FPVideoSuperResolutionReason::None ||
+                    previousReason == FFF3FPVideoSuperResolutionReason::NotRequested ||
+                    previousReason == FFF3FPVideoSuperResolutionReason::YieldedToAutoHdr))
                 videoSuperResolutionReason_.store(
                     FFF3FPVideoSuperResolutionReason::YieldedToAutoHdr,
                     std::memory_order_release);
