@@ -3265,6 +3265,13 @@ bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const s
     const auto streamCountMatches = probe->nb_streams == owner->nb_streams;
     bool produced = false;
     std::string detail;
+    // 试解的中间量。`err=` 为空时旧 trace 只说"没解出帧"，分不清是没读到包、包没落到
+    // 这条流、还是解码器真拒了 —— 而这三者的修法方向相反，所以必须把计数打出来。
+    int readCount = 0;
+    int matchedCount = 0;
+    int eagainCount = 0;
+    int seenMask = 0;
+    std::string stopDetail;
     if (streamCountMatches) {
         // First frame only, and that is the intended scope. A frame coming out of the
         // decoder answers the question this gate asks -- this backend can decode this
@@ -3278,17 +3285,33 @@ bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const s
         // Enough packets to cover a decoder with output delay plus a reopened GOP;
         // stop as soon as a frame arrives, which for nearly every stream is the first
         // packet of the stream.
-        for (int attempt = 0; attempt < 32 && !produced; ++attempt) {
-            if (av_read_frame(probe, packet) < 0) break;
+        //
+        // The 32 budget belongs to *this* stream. Counting every packet instead let an
+        // audio-dense prefix eat the whole budget before a single video packet arrived:
+        // measured on an AV1/Opus WebM (ffprobe: 0=av1 video, 1=opus audio) the trial
+        // read 32 packets, matched 0, saw no error, and then rejected hardware decode
+        // with an empty reason -- and remembered the route as unsupported for the
+        // session. The same elementary stream remuxed into MP4 passed on packet 1, so
+        // the defect was the budget, not the decoder, the codec, the bit depth or the
+        // encoder. `reads` bounds the work so a stream that never carries this index
+        // cannot spin the loop.
+        for (int reads = 0, fed = 0; reads < 512 && fed < 32 && !produced; ++reads) {
+            const auto readResult = av_read_frame(probe, packet);
+            if (readResult < 0) { stopDetail = FfmpegError(readResult); break; }
+            ++readCount;
+            seenMask |= (packet->stream_index >= 0 && packet->stream_index < 31)
+                ? (1 << packet->stream_index) : 0;
             if (packet->stream_index != index) { av_packet_unref(packet); continue; }
+            ++fed;
+            ++matchedCount;
             const auto sendResult = avcodec_send_packet(decoder, packet);
             av_packet_unref(packet);
-            if (sendResult < 0) { detail = FfmpegError(sendResult); break; }
+            if (sendResult < 0) { detail = FfmpegError(sendResult); stopDetail = detail; break; }
             const auto receiveResult = avcodec_receive_frame(decoder, frame);
             if (receiveResult == 0) produced = true;
-            else if (receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF) {
-                detail = FfmpegError(receiveResult);
-                break;
+            else if (receiveResult == AVERROR(EAGAIN)) ++eagainCount;
+            else if (receiveResult != AVERROR_EOF) {
+                detail = FfmpegError(receiveResult); stopDetail = detail; break;
             }
         }
         // A decoder with output delay answers EAGAIN until it is drained, and draining
@@ -3296,6 +3319,19 @@ bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const s
         if (!produced && detail.empty() && avcodec_send_packet(decoder, nullptr) == 0 &&
             avcodec_receive_frame(decoder, frame) == 0) produced = true;
     } else detail = "stream count differs";
+    if (HardwareCapabilityTrace())
+        std::fprintf(stderr,
+            "[hwcap] trial detail stream=%d fmt=%s extradata=%dB read=%d matched=%d eagain=%d"
+            " seen=%08x probeStreams=%d probeCodec0=%d wantCodec=%d stop=%s produced=%d\n",
+            index,
+            (probe != nullptr && probe->iformat != nullptr) ? probe->iformat->name : "?",
+            decoder->extradata_size, readCount, matchedCount, eagainCount, seenMask,
+            probe != nullptr ? static_cast<int>(probe->nb_streams) : -1,
+            (probe != nullptr && probe->nb_streams > 0 &&
+                probe->streams[0]->codecpar != nullptr)
+                ? static_cast<int>(probe->streams[0]->codecpar->codec_id) : -1,
+            static_cast<int>(decoder->codec_id),
+            stopDetail.empty() ? "-" : stopDetail.c_str(), produced ? 1 : 0);
     avformat_close_input(&probe);
     return finish(produced || !streamCountMatches, detail);
 }
