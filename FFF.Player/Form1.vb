@@ -156,13 +156,18 @@ Public Class Form1
             Function() 设置.实例对象.渲染封面图 AndAlso 播放控制器.当前音乐有封面,
             AddressOf 播放控制器.提交歌词图层, AddressOf 创建歌词呈现设置)
         AddHandler 画面控件.Ctrl滚轮, AddressOf 画面控件_Ctrl滚轮
+        ' VSR 与自动 HDR 的逐帧判定态进 Tab 图层：内核静默跳过时，那是用户唯一能看见它的地方。
+        ' 两者都现读，不走各自控制器的缓存——那份只在开页与勾选时更新，恰好错过内核真正
+        ' 做判定的那一刻。文本由 播放器会话 侧组好（判词 + 一句人话），图层不再拼字段。
         信息图层呈现器 = New 播放器信息图层呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, AddressOf 播放控制器.安全读取媒体信息,
             Function() 播放控制器.当前媒体路径, Function() 播放控制器.当前字幕,
             Function() 播放控制器.当前弹幕, AddressOf 播放控制器.读取定时文字状态,
             AddressOf 播放控制器.读取弹幕状态, Function() 播放控制器.WASAPI模式,
             AddressOf 播放控制器.读取色彩变换内容描述,
-            AddressOf 播放控制器.提交播放器信息图层)
+            AddressOf 播放控制器.提交播放器信息图层,
+            AddressOf 播放控制器.读取视频超分辨率图层文本,
+            AddressOf 播放控制器.读取视频自动HDR图层文本)
         信息图层呈现器.应用全局字体(设置.实例对象.字体)
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
