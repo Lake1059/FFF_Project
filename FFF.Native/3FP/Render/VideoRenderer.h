@@ -365,6 +365,16 @@ public:
         const AVFrame* auxiliaryFrame = nullptr,
         const FFF3FPAuxiliaryComposition* auxiliaryComposition = nullptr) noexcept;
     FFFResult Redraw() noexcept;
+    /// Establish the presentation chain for a freshly bound output window and
+    /// present exactly one frame. Redraw() is a no-op while no decoded frame is
+    /// cached -- and a session that was opened headless (host rebuilding its
+    /// HWND, or a brand-new session binding its first window) has none, because
+    /// the headless Render path deliberately keeps no GPU cache. Without this
+    /// entry the window is stranded: nothing creates the swap chain until a
+    /// frame is rendered, and in a paused/ready session no frame ever is.
+    /// Safe from the session command queue: it takes the same locks the
+    /// presenter thread takes, in the same order.
+    FFFResult PresentAfterBind() noexcept;
     // Re-pull the HDR classification and the ST 2094-40 curve from the processor and
     // refresh the shader inputs for the frame already sitting in the cached surface, so
     // installing or clearing a metadata table shows up in the picture without waiting for
@@ -448,6 +458,11 @@ public:
     std::uint64_t PresentedVideoGeneration() const noexcept;
     bool HasPendingVideoPresentation() const noexcept;
     bool HasOutputWindow() const noexcept;
+    /// Whether a decoded frame is currently sitting in the cached surface.
+    /// Unsynchronized on purpose: the only caller is the session command queue
+    /// deciding between Redraw() and PresentAfterBind() at bind time, and a
+    /// stale answer there costs at most one redundant present.
+    bool HasCachedVideo() const noexcept { return hasCachedVideo_; }
     std::uint64_t PresentWait100ns() const noexcept;
     std::uint64_t DeviceLockWait100ns() const noexcept;
     std::uint64_t SoftwareConvert100ns() const noexcept;
