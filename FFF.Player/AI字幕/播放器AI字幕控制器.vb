@@ -196,7 +196,8 @@ Friend NotInheritable Class 播放器AI字幕控制器
             Dim 句柄 = 句柄提供器()
             If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return
             Dim 值 As New 原生定时文字状态 With {
-                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字状态)()), .版本 = 20UI}
+                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字状态)()),
+                .版本 = 播放器会话.期望API版本}
             If 播放器原生接口.FFF3FP_GetTimedTextStatus(句柄, 值) <> 原生播放器结果.成功 Then Return
             Dim 统计 As New 原生音频Tap统计
             Dim 采集文本 = String.Empty
@@ -311,6 +312,15 @@ Friend NotInheritable Class 播放器AI字幕控制器
             End If
             状态机.重置()
             Dim 设置对象 = 设置.实例对象
+            ' 状态机的过期/跨时间线守卫余量按生效推理窗口等比缩放（默认 10s/15s
+            ' 是按 5s 窗口的 2×/3× 写死的）：窗口覆盖成 30s 时固定余量会在窗口
+            ' 后半段提前隐藏条目，每窗出现约 20s 空白。与 worker 实际拿到的
+            ' --window 同源同算法（覆盖>0 用覆盖，否则包清单），运行中改覆盖
+            ' 不重启 worker，余量也跟着保持与 worker 一致。
+            Dim 生效窗口秒 = If(设置对象.Ai字幕窗口秒覆盖 > 0,
+                                设置对象.Ai字幕窗口秒覆盖, 包.窗口秒)
+            状态机.陈旧余量100纳秒 = CLng(Math.Max(生效窗口秒, 0.5) * 2.0 * 10_000_000L)
+            状态机.未来余量100纳秒 = CLng(Math.Max(生效窗口秒, 0.5) * 3.0 * 10_000_000L)
             ' 生效后端 已经把"用户没选 → 跟随包清单 device → 还是空则 auto"处理完。
             Dim 后端 = 生效后端(包)
             Dim 语言 = Ai字幕语言.规整(设置对象.Ai字幕语言)

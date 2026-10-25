@@ -41,10 +41,15 @@ def main():
         data = data.mean(axis=1)
     data = np.tile(data, args.repeat)
     # Present as stereo interleaved: exercises the downmix path (D1).
-    stereo = np.repeat(data[:, None], 2, axis=1).reshape(-1)
-
     frames_per_chunk = max(1, int(rate * args.frame_ms / 1000.0))
     nch = 2
+    # 每帧的 PCM 必须按"声道平面"拼：L 声道全部帧 + R 声道全部帧（FLTP，
+    # sampleFormat=8），与真实宿主写帧（Ai字幕管道.vb 按 plane 拼接）一致。
+    # 早期版本发的是交错立体声却仍声明 planar——worker 按 plane 重排后每样本
+    # 重复（半速降八度）或首尾平均，冒烟转写一直建立在扭曲音频上而全绿。
+    def planar_chunk(off, frames):
+        mono_chunk = data[off:off + frames]
+        return np.concatenate([mono_chunk, mono_chunk]).tobytes()
 
     cmd = [VENV_PY, WORKER,
            "--model-dir", MODEL_DIR, "--quant", args.quant,
@@ -80,14 +85,14 @@ def main():
     threading.Thread(target=reader, daemon=True).start()
     threading.Thread(target=err_reader, daemon=True).start()
 
-    total = len(stereo) // nch
+    total = len(data)
     t0 = time.time()
     pos = 0
     written = 0
     try:
         for off in range(0, total, frames_per_chunk):
             frames = min(frames_per_chunk, total - off)
-            pcm = stereo[off * nch:(off + frames) * nch]
+            pcm = planar_chunk(off, frames)
             meta = {
                 "generation": 0,
                 "position100ns": pos,
@@ -95,11 +100,11 @@ def main():
                 "channels": nch,
                 "sampleFormat": 8,
                 "frames": frames,
-                "bytes": int(pcm.nbytes),
+                "bytes": len(pcm),
             }
             mb = json.dumps(meta).encode("utf-8")
             try:
-                proc.stdin.write(struct.pack("<I", len(mb)) + mb + pcm.tobytes())
+                proc.stdin.write(struct.pack("<I", len(mb)) + mb + pcm)
             except (BrokenPipeError, ValueError):
                 print("stdin closed early", flush=True)
                 break

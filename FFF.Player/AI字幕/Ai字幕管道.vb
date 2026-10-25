@@ -174,6 +174,17 @@ Friend NotInheritable Class Ai字幕管道
             If String.IsNullOrEmpty(临时根) Then
                 临时根 = 挑选临时目录(IO.Path.Combine(程序目录, "tmp"))
             End If
+            ' 收编残留的上一代取数线程。worker 在空转期死亡时（暂停/播完/tap 环
+            ' 长期无数据），旧 pump 的写帧失败这条退出路径走不到，它会一直活在
+            ' 空转等待里；不先等它退场就起新线程，同一 stdin 上会有两条取数线程
+            ' 交错写帧，帧协议直接打碎（worker 侧 json.loads 必炸）。停止事件在
+            ' 这里短暂置位只用于收人，随后立刻 Reset，新线程看到的是干净状态。
+            If _pump线程 IsNot Nothing AndAlso _pump线程.IsAlive Then
+                _停止事件.Set()
+                If Not _pump线程.Join(1000) Then
+                    记录("AI 字幕：旧取数线程 1s 内未退场（将在下轮存活检查自灭）")
+                End If
+            End If
             _停止事件.Reset()
             Dim 启动信息 As New ProcessStartInfo With {
                 .FileName = If(String.IsNullOrWhiteSpace(配置.Python), "python", 配置.Python),
@@ -261,6 +272,9 @@ Friend NotInheritable Class Ai字幕管道
                  If(配置.服务器映射.Count > 0, $"（包内专用二进制 {配置.服务器映射.Count} 份）", "（用包默认二进制）"))
             记录($"AI 字幕：字幕语言 {Ai字幕语言.显示名(语言)}" &
                  If(设置.实例对象.Ai字幕仅所选语言, "（只显示该语言）", "（提示，不筛除）"))
+            ' 上一代 worker 的 Process 包装在替换前释放：进程已死但句柄还捏在
+            ' 字段里，全靠终结器回收的话，改设置反复重启会一路累积。
+            _进程?.Dispose()
             Try
                 _进程 = Process.Start(启动信息)
             Catch ex As Exception
@@ -313,6 +327,11 @@ Friend NotInheritable Class Ai字幕管道
         Catch ex As Exception
             记录($"AI 字幕：停止时异常 {ex.Message}")
         End Try
+        Try
+            进程本地.Dispose()
+        Catch
+            ' 已由内核/子进程管理方先收走等场景，无碍。
+        End Try
         状态机?.通知Worker已退出()
         记录("AI 字幕：worker 已停止")
     End Sub
@@ -332,6 +351,16 @@ Friend NotInheritable Class Ai字幕管道
                 ' 若让异常杀死取数线程，切到下一个文件时 worker 明明在运行却
                 ' 再也收不到帧，而 启动() 又会因"已在运行"直接返回 True。
                 Try
+                    ' worker 死了本线程必须退场。"写帧失败退出"只在有数据可写时
+                    ' 走得到；空转期（暂停/播完/环无数据）worker 死亡走不到那里，
+                    ' 而残留的旧取数线程会让下一次 启动() 变成双写 stdin。读到已
+                    ' 释放的包装实例属停止竞态，落进下方兜底 Catch 后下轮必走
+                    ' Nothing 分支干净退场。
+                    Dim 当前进程 = _进程
+                    If 当前进程 Is Nothing OrElse 当前进程.HasExited Then
+                        记录("AI 字幕：worker 已不在，取数线程退场")
+                        Return
+                    End If
                     Dim 句柄 = 句柄提供器()
                     If 句柄 Is Nothing OrElse 句柄.IsInvalid Then
                         If _停止事件.Wait(200) Then Return
@@ -437,7 +466,7 @@ Friend NotInheritable Class Ai字幕管道
                 Dim 行 = 读取器.ReadLine()
                 If 行 Is Nothing Then Exit While     ' EOF：worker 退出
                 If 行.Length = 0 Then Continue While
-                处理结果行(行)
+                处理结果行(行, 代)
             End While
             记录("AI 字幕：worker 输出流结束")
         Catch ex As Exception
@@ -452,7 +481,7 @@ Friend NotInheritable Class Ai字幕管道
         End Try
     End Sub
 
-    Private Sub 处理结果行(行 As String)
+    Private Sub 处理结果行(行 As String, 代 As Integer)
         Try
             Using 文档 = JsonDocument.Parse(行)
                 Dim 根 = 文档.RootElement
@@ -492,7 +521,17 @@ Friend NotInheritable Class Ai字幕管道
                             ' 但必须让"这一窗推理失败、我继续重试"（fatal=false）走开——否则本地 HTTP
                             ' 抖一次就把字幕永久关掉，而 worker 其实活得好好的。
                             If 状态 = "error" AndAlso 取布尔(根, "fatal", True) Then
-                                状态机?.通知Worker已退出()
+                                ' 代次 gate 与 EOF 收尾同款：停止/重启瞬间旧 worker
+                                ' 在途的第 5 连败 fatal 行会晚于新 worker 启动才被
+                                ' 旧结果线程处理，裸置"已退出"会把新 worker 的全部
+                                ' 结果当噪声丢掉——字幕永久沉默且无日志（与 2026-10-25
+                                ' 修的 EOF 收尾同类残洞）。只有"当前这一代"线程亲历
+                                ' 的死亡才作数。fatal 还必须上屏：只进日志的话用户
+                                ' 面对的是空白字幕+菜单仍打勾+零解释。
+                                If Volatile.Read(_结果线程代) = 代 Then
+                                    状态机?.通知Worker已退出()
+                                    记警告(If(String.IsNullOrEmpty(详情), "worker 已退出", $"worker 已退出：{详情}"))
+                                End If
                             End If
                         Case "stats"
                             SyncLock 诊断锁

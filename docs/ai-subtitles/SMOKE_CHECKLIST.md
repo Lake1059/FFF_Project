@@ -244,7 +244,8 @@ worker 行统一带前缀 `AI 字幕(worker)：[asr-worker] `（stderr 经 `Ai�
 
 ### 素材
 
-`tests/media/video/speech/`（Wikimedia Commons，开放授权、可重新分发，**带人声
+`tests/media/video/speech/`（位于 **3FP 主仓**——本仓库不含这些媒体与
+`_3fc_tmp/asr_batch.py`，验收前先在主仓就位；Wikimedia Commons，开放授权、可重新分发，**带人声
 对白**；来源与授权见该目录 `SOURCES.md`）。
 
 原先 `tests/media/video/real/` 那 7 个「真实影片」经 ffprobe 实测**全部无音轨**——

@@ -154,10 +154,18 @@ def build_manifest(manifest, source, target, items, copy_python):
             out[key] = rel(target, moved[key])
 
     if "llamaServer" in moved:
-        # 目录型搬运时 moved 值是目录，exe 名要拼回去（Windows 构建就叫这个名）。
+        # 目录型（CUDA/Vulkan 构建带一目录 DLL）与单文件型分开判：目录整搬时
+        # moved 值是目录，要拼回 exe 名——且必须拼**源 exe 的原名**（拷贝按原名
+        # 落盘）；单文件搬运时 moved 已经就是 exe 的最终落点，原样写清单即可。
+        # 历史版本无条件拼 "llama-server.exe"：源名不同（llama-server-cuda.exe、
+        # Linux 命名 llama-server）时写出 runtime/<名>/llama-server.exe 这种
+        # 指向不存在文件的死路径，包到目标机必起不来。用"items 里的源路径 ==
+        # 清单 exe 的父目录"判目录型，dry-run 下同样成立（不依赖落盘状态）。
         dest = moved["llamaServer"]
-        if (target / dest).is_dir() or dest.name != "llama-server.exe":
-            dest = dest / "llama-server.exe"
+        llm = resolve(source, manifest.get("llamaServer"))
+        llama_src = next((s for s, _, k in items if k == "llamaServer"), None)
+        if llm is not None and llama_src == llm.parent:
+            dest = dest / llm.name
         out["llamaServer"] = rel(target, dest)
 
     if "python" in moved:

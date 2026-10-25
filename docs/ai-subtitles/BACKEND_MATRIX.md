@@ -44,7 +44,10 @@ llama-server.exe -m <model.gguf> --mmproj <mmproj.gguf>
   --port 8199 --host 127.0.0.1 --ctx-size 4096
   `--n-gpu-layers 999        # 0 = 全部留在 CPU；999 = 能 offload 的层全给设备
   --threads 8               # CPU 后端时决定速度，自动取 min(核数,16)
-  --temp 0.6 --no-cache-idle-slots --cache-ram 0
+  --temp 0.6 --n-predict 512 --cache-ram 0
+  # --n-predict 512：输出长度上限（无语音段失控护栏，见 USER_GUIDE §4）。
+  # --no-cache-idle-slots 已随失控修复移除（实测会把长输出请求拖到 171s），
+  # 内存仍由 --cache-ram 0 兜住；要更省请用 llamaArgs 自己加回。
   --device CUDA0            # 非 auto 后端才出现；CPU 臂是 --device none
 ```
 

@@ -578,7 +578,12 @@ Public Class Form设置_AI字幕
     ''' 它只调"每行驻留多久"（守卫判定位置 = 播放位置 − 偏移），不调"何时出现"。</summary>
     Private Shared Function 解析偏移(文本 As String) As Double
         Dim 值 As Double
-        If Double.TryParse(文本, 值) Then Return Math.Clamp(值, -3.0, 3.0)
+        ' InvariantCulture：写回侧（偏移文本）一直是 InvariantCulture，解析侧
+        ' 不固定的话，逗号小数点区域里自家写回的值会被判非法归 0。
+        If Double.TryParse(文本, Globalization.NumberStyles.Float,
+                           Globalization.CultureInfo.InvariantCulture, 值) Then
+            Return Math.Clamp(值, -3.0, 3.0)
+        End If
         Return 0
     End Function
 
@@ -613,7 +618,9 @@ Public Class Form设置_AI字幕
 
     Private Shared Function 解析覆盖(文本 As String) As Double
         Dim 值 As Double
-        If Double.TryParse(文本, 值) AndAlso 值 >= 0.5 AndAlso 值 <= 30 Then Return 值
+        If Double.TryParse(文本, Globalization.NumberStyles.Float,
+                           Globalization.CultureInfo.InvariantCulture, 值) AndAlso
+           值 >= 0.5 AndAlso 值 <= 30 Then Return 值
         Return 0   ' 0 = 跟随包清单（留空或非法值都归到这里）
     End Function
 
