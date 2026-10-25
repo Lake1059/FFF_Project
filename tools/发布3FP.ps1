@@ -185,14 +185,19 @@ try {
         } else { throw "FFmpeg 变体门禁退出码异常（rc=$varRc）⇒ 守卫不成立，中止：$tail" }
     }
 
+    $PlayerFramework = Get-ProductTargetFramework -ProjectPath (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
+        -NetTFM $NetTFM -DotNet $DotNet
+    # 配对护栏必须先于删目录跑：账本（.product-frameworks.txt）就躺在输出目录里，
+    # 先删后查永远读到空账，跨产品框架配对在这条发布路径上就形同虚设。
+    # 先在对家旧账还在时判一次（能拦住），重建目录后再记一次新账（账已随目录清空，不会自冲突）。
+    Assert-ProductFrameworkPair -OutputDirectory $OutputDirectory -Product "FFF.Player" `
+        -Framework $PlayerFramework -AllowMismatch:$AllowFrameworkMismatch
     if (Test-Path -LiteralPath $OutputDirectory) {
         Remove-Item -LiteralPath $OutputDirectory -Recurse -Force
     }
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     Assert-ProductFrameworkPair -OutputDirectory $OutputDirectory -Product "FFF.Player" `
-        -Framework (Get-ProductTargetFramework -ProjectPath (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
-            -NetTFM $NetTFM -DotNet $DotNet) `
-        -AllowMismatch:$AllowFrameworkMismatch
+        -Framework $PlayerFramework -AllowMismatch:$AllowFrameworkMismatch
 
     Get-ChildItem -LiteralPath $StagingDirectory -Force | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $OutputDirectory -Recurse -Force
