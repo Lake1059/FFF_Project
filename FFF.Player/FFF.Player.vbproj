@@ -291,10 +291,13 @@
   <Target Name="VerifyLakeUIReference" BeforeTargets="BeforeBuild;ResolveAssemblyReferences">
     <PropertyGroup>
       <_LakeUIRef>$(MSBuildThisFileDirectory)..\..\LakeUI\LakeUI\bin\Debug\$(LakeUITfm)\LakeUI.dll</_LakeUIRef>
-      <!-- 大版本号（net10.0-... -> 10.0），仅用于混血检测 -->
-      <_NetTfmMajor>$(NetTFM.Substring(3, 4))</_NetTfmMajor>
-      <_LakeUiTfmMajor>$(LakeUITfm.Substring(3, 4))</_LakeUiTfmMajor>
+      <!-- 大版本号（net10.0-... -> 10.0），仅用于混血检测。先判长度再取子串：
+           短串（如 net8.0）会让 Substring 自己抛越界，取代本要给出的明确报错。 -->
+      <_NetTfmMajor Condition="$(NetTFM.Length) &gt;= 7">$(NetTFM.Substring(3, 4))</_NetTfmMajor>
+      <_LakeUiTfmMajor Condition="$(LakeUITfm.Length) &gt;= 7">$(LakeUITfm.Substring(3, 4))</_LakeUiTfmMajor>
     </PropertyGroup>
+    <Error Condition="'$(_NetTfmMajor)' == '' Or '$(_LakeUiTfmMajor)' == ''"
+           Text="无法从 TFM 解析大版本号（NetTFM='$(NetTFM)'，LakeUITfm='$(LakeUITfm)'）。期望形如 net10.0-windows10.0.26100.0；混血检测靠它，解析不了就不能放行。" />
     <Error Condition="!Exists('$(_LakeUIRef)')"
            Text="LakeUI 引用缺失，未找到：$(_LakeUIRef)（当前 LakeUITfm=$(LakeUITfm)）。请先在兄弟仓 LakeUI 用该目标框架构建 Debug 配置，或对本工程传入 -p:LakeUITfm=某已有目标框架 指向既有产物。" />
     <Warning Condition="'$(_NetTfmMajor)' != '$(_LakeUiTfmMajor)'"
