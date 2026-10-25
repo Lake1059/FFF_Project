@@ -79,6 +79,13 @@ bool HoldTraceEnabled() noexcept {
     return enabled;
 }
 
+// RTX 超分步进账的开关：默认关闭，FPT_VSR_TRACE=1 才计时并按 300 帧写日志。
+// 关掉时连 QPC 读数都不做，所以留在生产代码里不改变渲染路径的成本结构。
+bool VsrStepTraceEnabled() noexcept {
+    static const bool enabled = GetEnvironmentVariableW(L"FPT_VSR_TRACE", nullptr, 0) != 0;
+    return enabled;
+}
+
 // One refresh is 6.94 ms wide on a 144 Hz panel, and the presenter's waits are on that pitch
 // once the ceiling allows it. This process otherwise runs at the default system timer
 // resolution -- the release cadence measured here had a 15.7 ms median, i.e. the quantisation
@@ -4270,6 +4277,8 @@ void PlayerVideoRenderer::ReleaseSuperResolutionResources() noexcept {
         superResolutionInputTexture_ = nullptr;
     }
     superResolutionSourceFormat_ = 0;
+    superResolutionPassSourceWidth_ = superResolutionPassSourceHeight_ = 0;
+    superResolutionPassTargetWidth_ = superResolutionPassTargetHeight_ = 0;
     videoSuperResolutionSourceWidth_ = videoSuperResolutionSourceHeight_ = 0;
     videoSuperResolutionTargetWidth_ = videoSuperResolutionTargetHeight_ = 0;
     videoSuperResolutionActive_.store(false, std::memory_order_release);
@@ -4438,8 +4447,10 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
     const auto surfaceHeight = (targetSource.height + 1u) & ~1u;
     // Publish the geometry this frame *would* have used before any geometry gate
     // can skip: the host's diagnostic line reads these four, and 0x0 told you
-    // nothing about why NotUpscaling fired. Safe to share with the cache key
-    // because sameGeometry also requires the surface and processor to exist.
+    // nothing about why NotUpscaling fired. Diagnostic only -- the cache key is
+    // the separate superResolutionPass* set below, written when the pass is
+    // built. Using these fields for both made every sameGeometry comparison a
+    // value against itself, so a resize reused the previous surface.
     videoSuperResolutionSourceWidth_ = sourceWidth_;
     videoSuperResolutionSourceHeight_ = sourceHeight_;
     videoSuperResolutionTargetWidth_ = surfaceWidth;
@@ -4456,8 +4467,8 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
     // geometry, the decoded format or the decoded texture changes, and only the
     // blit below stays in the per-frame path. Rebuilding the processor every
     // frame measured 60fps -> 1-4fps: the driver re-negotiates its AI scaler on
-    // each fresh processor. Compare against the *cached* values before
-    // overwriting them.
+    // each fresh processor. Compare against the geometry the pass was built
+    // with, not against this frame's values.
     D3D11_TEXTURE2D_DESC sourceDescription{};
     sourceTextures_[0]->GetDesc(&sourceDescription);
     const auto sourceFormat = static_cast<std::uint32_t>(sourceDescription.Format);
@@ -4466,17 +4477,23 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
         superResolutionProcessor_ != nullptr && superResolutionVideoContext_ != nullptr &&
         superResolutionInputView_ != nullptr && superResolutionOutputView_ != nullptr &&
         superResolutionInputTexture_ == inputTexture &&
-        videoSuperResolutionSourceWidth_ == sourceWidth_ &&
-        videoSuperResolutionSourceHeight_ == sourceHeight_ &&
-        videoSuperResolutionTargetWidth_ == surfaceWidth &&
-        videoSuperResolutionTargetHeight_ == surfaceHeight &&
+        superResolutionPassSourceWidth_ == sourceWidth_ &&
+        superResolutionPassSourceHeight_ == sourceHeight_ &&
+        superResolutionPassTargetWidth_ == surfaceWidth &&
+        superResolutionPassTargetHeight_ == surfaceHeight &&
         superResolutionSourceFormat_ == sourceFormat;
+    // 步进账（FPT_VSR_TRACE=1 才开）。只量 CPU 侧提交时间：真实管线里的残余代价落在
+    // presentwait（GPU 完成侧），所以这两个数若都很小，就恰好把代价排除在我们的 API
+    // 调用之外。rebuilt 用来判几何是否逐帧抖动。
+    const bool traceSteps = VsrStepTraceEnabled();
+    const auto stepStartQpc = traceSteps ? QpcNowValue() : 0;
+    bool rebuilt = false;
     if (!sameGeometry) {
         ReleaseSuperResolutionResources();
-        videoSuperResolutionSourceWidth_ = sourceWidth_;
-        videoSuperResolutionSourceHeight_ = sourceHeight_;
-        videoSuperResolutionTargetWidth_ = surfaceWidth;
-        videoSuperResolutionTargetHeight_ = surfaceHeight;
+        superResolutionPassSourceWidth_ = sourceWidth_;
+        superResolutionPassSourceHeight_ = sourceHeight_;
+        superResolutionPassTargetWidth_ = surfaceWidth;
+        superResolutionPassTargetHeight_ = surfaceHeight;
         D3D11_TEXTURE2D_DESC description{};
         description.Width = surfaceWidth;
         description.Height = surfaceHeight;
@@ -4588,7 +4605,10 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
         superResolutionOutputView_ = outputView.Detach();
         superResolutionInputTexture_ = inputTexture;
         superResolutionInputTexture_->AddRef();
+        rebuilt = true;
     }
+
+    const auto buildDoneQpc = traceSteps ? QpcNowValue() : 0;
 
     D3D11_VIDEO_PROCESSOR_STREAM stream{};
     stream.Enable = TRUE;
@@ -4599,6 +4619,29 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
             superResolutionOutputView_, 0, 1, &stream))) {
         ReleaseSuperResolutionResources();
         return rejectAt("VideoProcessorBlt");
+    }
+
+    if (traceSteps) {
+        const auto bltDoneQpc = QpcNowValue();
+        vsrBuildTicks_ += (buildDoneQpc - stepStartQpc);
+        vsrBltTicks_ += (bltDoneQpc - buildDoneQpc);
+        if (rebuilt) ++vsrRebuilds_;
+        // 纯 ASCII：内核日志槽按 UTF-8 交给宿主，窄字面量在 MSVC 默认下会按系统 ANSI
+        // 码页编码，混进中文只会读成乱码，反而妨碍判读。
+        if (++vsrFrames_ % 300ULL == 0ULL) {
+            char line[224]{};
+            _snprintf_s(line, sizeof(line), _TRUNCATE,
+                "FFF.Native: VSR step accounting frames=%llu rebuilds=%llu"
+                " buildAvgMs=%.3f bltSubmitAvgMs=%.3f",
+                static_cast<unsigned long long>(vsrFrames_),
+                static_cast<unsigned long long>(vsrRebuilds_),
+                vsrRebuilds_ ? static_cast<double>(vsrBuildTicks_) /
+                    static_cast<double>(vsrRebuilds_) * 1000.0 /
+                        static_cast<double>(QpcTicks()) : 0.0,
+                static_cast<double>(vsrBltTicks_) / static_cast<double>(vsrFrames_) *
+                    1000.0 / static_cast<double>(QpcTicks()));
+            FFF3FP_KernelLogImpl(line);
+        }
     }
 
     videoSuperResolutionReason_.store(FFF3FPVideoSuperResolutionReason::None,
@@ -4690,10 +4733,30 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
 
     D3D11_TEXTURE2D_DESC sourceDescription{};
     sourceTextures_[0]->GetDesc(&sourceDescription);
-    const bool sameSurface = trueHdrTexture_ != nullptr &&
+
+    // Whether this pass must also carry the super-resolution extension: it is
+    // stream state on the processor, so it belongs to the cached pass identity.
+    const bool ppeRequested =
+        requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
+            FFF3FPVideoSuperResolution::Off &&
+        !videoSuperResolutionRejected_.load(std::memory_order_acquire);
+    ID3D11Texture2D* const inputTexture = sourceTextures_[0];
+    // One key and one rebuild path for the whole pass. The earlier shape split
+    // surface identity (output size) from pass identity (source size, texture,
+    // PPE flag): when only the source moved, the surface stayed, the release was
+    // skipped, and the tail publish overwrote seven raw pointers anyway -- one
+    // leaked interface set plus one leaked decoded-texture reference per pass,
+    // and the key never settled because the source fields were written in the
+    // surface branch only, so this rebuilt every frame instead of once.
+    const bool samePass = trueHdrTexture_ != nullptr && trueHdrView_ != nullptr &&
+        trueHdrProcessor_ != nullptr && trueHdrVideoContext_ != nullptr &&
+        trueHdrInputView_ != nullptr && trueHdrOutputView_ != nullptr &&
+        trueHdrInputTexture_ == inputTexture && trueHdrPpeRequested_ == ppeRequested &&
+        videoTrueHdrSourceWidth_ == sourceWidth_ &&
+        videoTrueHdrSourceHeight_ == sourceHeight_ &&
         videoTrueHdrOutputWidth_ == surfaceWidth &&
         videoTrueHdrOutputHeight_ == surfaceHeight;
-    if (!sameSurface) {
+    if (!samePass) {
         ReleaseTrueHdrResources();
         videoTrueHdrSourceWidth_ = sourceWidth_;
         videoTrueHdrSourceHeight_ = sourceHeight_;
@@ -4723,24 +4786,7 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
             ReleaseTrueHdrResources();
             return rejectAt("CreateShaderResourceView for the HDR surface");
         }
-    }
 
-    // Whether this pass must also carry the super-resolution extension: it is
-    // stream state on the processor, so it belongs to the cached pass identity.
-    const bool ppeRequested =
-        requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
-            FFF3FPVideoSuperResolution::Off &&
-        !videoSuperResolutionRejected_.load(std::memory_order_acquire);
-    ID3D11Texture2D* const inputTexture = sourceTextures_[0];
-    const bool samePass = trueHdrTexture_ != nullptr &&
-        trueHdrProcessor_ != nullptr && trueHdrVideoContext_ != nullptr &&
-        trueHdrInputView_ != nullptr && trueHdrOutputView_ != nullptr &&
-        trueHdrInputTexture_ == inputTexture && trueHdrPpeRequested_ == ppeRequested &&
-        videoTrueHdrSourceWidth_ == sourceWidth_ &&
-        videoTrueHdrSourceHeight_ == sourceHeight_ &&
-        videoTrueHdrOutputWidth_ == surfaceWidth &&
-        videoTrueHdrOutputHeight_ == surfaceHeight;
-    if (!samePass) {
         ComPtr<ID3D11VideoDevice> videoDevice;
         ComPtr<ID3D11VideoContext> videoContext;
         if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&videoDevice))) ||
@@ -8405,10 +8451,14 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
             effectiveSourceViews_[2] = nullptr;
             // VSR did not produce this frame's pixels even when its PPE
             // extension rode inside the same blit; report the state honestly
-            // instead of leaving a stale "VSR active" behind.
+            // instead of leaving a stale "VSR active" behind. Gate on the
+            // *request*, not on a previous reason: gating it on "reason was
+            // None" meant a cold start -- TrueHDR engaging on the first drawn
+            // frame -- left the reason at its NotRequested default, and the
+            // host then told the user the feature was off while it was asked for.
             videoSuperResolutionActive_.store(false, std::memory_order_release);
-            if (videoSuperResolutionReason_.load(std::memory_order_acquire) ==
-                    FFF3FPVideoSuperResolutionReason::None)
+            if (requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
+                    FFF3FPVideoSuperResolution::Off)
                 videoSuperResolutionReason_.store(
                     FFF3FPVideoSuperResolutionReason::YieldedToAutoHdr,
                     std::memory_order_release);
@@ -9127,6 +9177,15 @@ FFFResult PlayerVideoRenderer::SetVideoSuperResolution(
         videoSuperResolutionReason_.store(FFF3FPVideoSuperResolutionReason::NotRequested,
             std::memory_order_release);
     }
+    // Drop the cached pass on every request. The extension is processor state
+    // and a live pass never re-runs the negotiation, so without this a "fresh
+    // Auto re-probes" promise is dead code while the cache is warm, and Off
+    // keeps the whole upscaled surface plus its reference on the decoded
+    // texture alive. Requests are user-paced, so the rebuild cost is noise.
+    {
+        std::lock_guard deviceLock(deviceMutex_);
+        ReleaseSuperResolutionResources();
+    }
     return FFFResult::Success;
 }
 
@@ -9170,6 +9229,14 @@ FFFResult PlayerVideoRenderer::SetVideoAutoHdr(
         videoTrueHdrActive_.store(false, std::memory_order_release);
         videoTrueHdrReason_.store(FFF3FPVideoAutoHdrReason::NotRequested,
             std::memory_order_release);
+    }
+    // Same reason as the VSR setter: the capability probe and the extension are
+    // both processor state, and a warm pass would skip the probe entirely, so
+    // the re-arm above would never reach the driver. Dropping the pass also
+    // frees the 10-bit surface when the user turns the feature off.
+    {
+        std::lock_guard deviceLock(deviceMutex_);
+        ReleaseTrueHdrResources();
     }
     return FFFResult::Success;
 }

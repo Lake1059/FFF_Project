@@ -457,7 +457,10 @@ Public NotInheritable Class 播放器会话
     Friend Shared Function 视频超分辨率状态文本(状态 As 原生视频超分辨率状态) As String
         If 状态.生效 <> 0UI Then Return "驱动已接受本次请求（不等于画面已被增强）"
         Select Case 状态.原因
-            Case 1UI : Return "未请求"
+            ' 内核的 原因 初值就是 NotRequested，不等于用户没勾：请求已下发但本帧还没走到
+            ' 超分那条路（自动 HDR 占用处理通道、compare 模式互斥）时它仍是这个值。
+            Case 1UI : Return If(状态.请求模式 = 0UI, "未请求",
+                               "已请求，内核尚未逐帧判定（自动 HDR 可能占用了处理通道）")
             Case 2UI : Return "渲染适配器不是 NVIDIA"
             Case 3UI : Return "当前不是放大（窗口不大于画面）；把播放窗口拉大或全屏才会生效"
             Case 4UI : Return $"源高度 {状态.源高} 不在 360..1440 区间（4K/8K 源本功能不适用）"
@@ -477,7 +480,9 @@ Public NotInheritable Class 播放器会话
     ''' 截断，而排查要的原值 FFF3FP_GetVideoSuperResolutionStatus 逐字段都还在报。</summary>
     Friend Shared Function 视频超分辨率图层文本(状态 As 原生视频超分辨率状态) As String
         If 状态.生效 <> 0UI Then Return "已激活 · 驱动已接受（不等于画面已被增强）"
-        If 状态.原因 = 1UI Then Return "未开启"
+        ' "未开启" 只能表示"用户没请求"。用 原因 单独判会在这些场合说谎：自动 HDR
+        ' 占用通道时内核原因停在初值、驱动闩住、compare 模式互斥——那时用户确实勾了。
+        If 状态.请求模式 = 0UI Then Return "未开启"
         Return "未生效 · " & 视频超分辨率状态文本(状态)
     End Function
 
@@ -492,7 +497,9 @@ Public NotInheritable Class 播放器会话
                    $"源 {状态.源宽}×{状态.源高} → PQ/BT.2020 {状态.输出宽}×{状态.输出高}）"
         End If
         Select Case 状态.原因
-            Case 1UI : Return "未请求"
+            ' 与超分同理：NotRequested 是内核初值，请求已下发但本帧还没走到这条通道时
+            ' 它仍是这个值，不能翻成"未请求"。
+            Case 1UI : Return If(状态.请求模式 = 0UI, "未请求", "已请求，内核尚未逐帧判定")
             Case 2UI : Return "渲染适配器不是 NVIDIA"
             Case 3UI : Return "驱动不支持该私有流扩展（探测未读到 1）"
             Case 4UI : Return "当前源不是 SDR（HDR 源不予转换）"
@@ -510,7 +517,7 @@ Public NotInheritable Class 播放器会话
     ''' 那等于替内核报一个它没报的数。</summary>
     Friend Shared Function 视频自动HDR图层文本(状态 As 原生视频自动HDR状态) As String
         If 状态.生效 <> 0UI Then Return "已启用 · SDR → HDR10（驱动 TrueHDR）"
-        If 状态.原因 = 1UI Then Return "未开启"
+        If 状态.请求模式 = 0UI Then Return "未开启"
         Return "未生效 · " & 视频自动HDR状态文本(状态)
     End Function
 

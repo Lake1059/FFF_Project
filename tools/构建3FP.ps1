@@ -90,15 +90,25 @@ if (-not $SkipTests) {
     # 为什么挂在这里：这批判据此前只有人手跑，"写好没人调"本身就是最大的假绿源。
     # 纯函数档无桌面依赖、秒级 ⇒ 红了就 throw。
     $testsProj = Join-Path $ProjectRoot "FFF.Player.Tests\FFF.Player.Tests.vbproj"
-    & $DotNet run --project $testsProj --no-build -- --image-zoom-regression
+    & $DotNet run --project $testsProj --no-build @TfmArgs -- --image-zoom-regression
     if ($LASTEXITCODE -ne 0) {
         throw "图片缩放几何回归失败（exit $LASTEXITCODE）。判据见 3fp/docs/81 第四节。"
+    }
+
+    # RTX 两行判词（真会话函数 + 真呈现器，无桌面依赖）。exit 2 在这里**不**按
+    # "环境不具备"放行：它只表示探针自己读不到配色常量，也就是这道门坏了。
+    & $DotNet run --project $testsProj --no-build @TfmArgs -- --rtx-overlay-rows
+    switch ($LASTEXITCODE) {
+        0 { Write-Host "RTX 图层两行判词通过。" }
+        1 { throw "RTX 图层两行判词判红（exit 1）——判词/配色/行装配与结构体字段不一致。" }
+        2 { throw "RTX 图层两行判词的探针本身失效（exit 2）：配色常量读不到，门没跑，按失败处理。" }
+        default { throw "RTX 图层两行判词退出码 $LASTEXITCODE 不在白名单 (0/1/2) 内 —— 测件崩溃或入口未实现。" }
     }
 
     if ($StrictZoomGate) {
         # 真控件档在无桌面会话的环境下会自报"环境不具备"并退出 2 —— 那不算产品失败，
         # 按"能不拒就不拒"的口径只警告并说清代价，别把它变成构建链上的假红。
-        & $DotNet run --project $testsProj --no-build -- --image-zoom-live 0
+        & $DotNet run --project $testsProj --no-build @TfmArgs -- --image-zoom-live 0
         switch ($LASTEXITCODE) {
             0 { Write-Host "缩放体感回归通过。" }
             1 { throw "缩放体感回归判红（exit 1）——产品缺陷，不是环境问题。" }
