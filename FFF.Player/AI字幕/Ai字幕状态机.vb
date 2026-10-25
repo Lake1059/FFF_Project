@@ -59,6 +59,12 @@ Friend NotInheritable Class Ai字幕状态机
     ''' 正常 latest-wins 下条目起始只可能略早于播放位置（推理滞后），不会误触。</summary>
     Public Property 未来余量100纳秒 As Long = 15L * 10_000_000L   ' 默认 3×5s 窗口
 
+    ''' <summary>字幕驻留偏移（100ns 单位）：守卫判定用的播放位置 = 实际播放位置 − 本偏移。
+    ''' 正值 = 每行多驻留一会儿（慢读者、下一句来得慢时不等空窗）；负值 = 提前收起。
+    ''' 来自设置项 Ai字幕字幕偏移秒（[-3, +3] 秒），由控制器在起 worker / 应用设置时同步。
+    ''' 注意它**不影响一行字幕何时出现**——那由推理窗口与推理耗时决定；这里只调驻留。</summary>
+    Public Property 时间偏移100纳秒 As Long = 0L
+
     Public Sub 提交结果(条目 As Ai字幕条目)
         If 条目 Is Nothing Then Return
         Try
@@ -150,7 +156,8 @@ Friend NotInheritable Class Ai字幕状态机
                     Return String.Empty
                 End If
                 If String.IsNullOrWhiteSpace(当前条目.文本) Then Return String.Empty
-                Dim 播放位置100纳秒 = CLng(播放位置.Ticks)
+                ' 守卫判定位置 = 实际播放位置 − 驻留偏移（见 时间偏移100纳秒：正值多留）。
+                Dim 播放位置100纳秒 = CLng(播放位置.Ticks) - 时间偏移100纳秒
                 ' 跨时间条守卫：切文件后 worker 在途的旧结果（起始远大播放位置）。
                 If 当前条目.起始100纳秒 - 播放位置100纳秒 > 未来余量100纳秒 Then
                     当前条目 = Nothing

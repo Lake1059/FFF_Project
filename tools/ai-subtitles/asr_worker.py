@@ -33,6 +33,44 @@ import soundfile as sf
 
 TARGET_RATE = 16000
 
+# 单个转写请求的超时（秒）。原来写死 120：一个失控窗口能卡住两分钟，后面所有
+# 窗口排队，字幕永久滞后于画面（2026-10-25 实测失控窗 27s）。窗口上限 30s、
+# 正常转写远快于实时，30s 已经很宽。超时只丢这一窗，worker 继续跑。
+_INFER_TIMEOUT_S = 30.0
+
+# 失控输出的判据：去空白后长度 ≥ 该值，且最高频单字占比 ≥ 该比例 → 判为模型在
+# 空转（重复同一个字直到撞上限），丢弃不上屏。
+_DEGENERATE_MIN_LEN = 24
+_DEGENERATE_TOP_RATIO = 0.6
+
+# 指令泄漏的判据（2026-10-25 实测）：语音极稀疏时模型会把 llama-server 拼进
+# prompt 的 instruction 原样当内容吐出来（"Transcribe audio to text"），有时连
+# chat 模板的标记（<asr_text> / <|im_start|>）一起。它字面是"识别结果"，但和
+# 失控编字是同一类污染——糊到屏幕上比没字幕更像"功能坏了"。处置同失控：丢弃 + 提示一次。
+#
+# 只判"短得像一句指令"的文本：长度超过下面的上限就放行，免得把真在讲 ASR 教程的
+# 长段对白误杀（那种场景里这句话只是长句里的一小段）。
+_PROMPT_LEAK_PHRASES = (
+    "transcribe audio to text",
+    "transcribe the audio to text",
+    "transcribe audio into text",
+    "transcribe the following audio",
+    "transcribe this audio",
+    "transcribe the speech",
+    "please transcribe",
+    "transcribe audio",
+)
+# 标记残留不受长度限制：正常转写结果里不可能出现 chat 模板标记，出现即泄漏。
+_PROMPT_LEAK_MARKERS = (
+    "<asr_text>", "</asr_text>", "asr_text",
+    "<|audio|>", "<|im_start|>", "<|im_end|>", "<|endoftext|>",
+)
+_PROMPT_LEAK_MAX_LEN = 160
+# 正文里 CJK 占比超过这个值就不判短语泄漏：模板串是纯英文指令，中文长句里夹
+# 一句英文指令是正常内容（讲 ASR 教程的片段实测就长这样），杀了就是误伤。
+_CJK_RE = re.compile(r"[\u3000-\u303f\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+_PROMPT_LEAK_MAX_CJK_RATIO = 0.2
+
 # --------------------------------------------------------------------------
 # 语言指定（--language）
 #
@@ -236,12 +274,37 @@ def pick_tmpdir(preferred=""):
                        "(tried --tmp-dir, system temp, script dir, cwd)")
 
 
+def _user_first(defaults, extra):
+    """固定默认参数里被用户 extra 点名（同名 flag）的项剔除，返回合并 token 列表。
+
+    为什么不依赖"llama-server 重复参数后者覆盖"：某些版本对重复 --ctx-size
+    直接报错，删掉自己的默认比赌覆盖语义稳。只认长选项 --flag / --flag=value。
+    extra 里非 -- 开头的 token（值）原样保留在末尾。
+    """
+    if not extra:
+        return list(defaults)
+    given = {t.split("=", 1)[0] for t in extra if t.startswith("--")}
+    out, i = [], 0
+    while i < len(defaults):
+        tok = defaults[i]
+        if tok in given:
+            i += 2 if i + 1 < len(defaults) and not defaults[i + 1].startswith("--") else 1
+            continue
+        out.append(tok)
+        i += 1
+    return out + list(extra)
+
+
 class LlamaServer:
     """Child llama-server process with health polling and one restart."""
 
-    def __init__(self, exe, model, mmproj, port, device=None, ngl=999, threads=8):
+    def __init__(self, exe, model, mmproj, port, device=None, ngl=999, threads=8,
+                 extra=None):
         self.exe = exe
         self.model = model
+        # mmproj 允许为 None：单文件模型（LLM 主权重自带音频编码器，或干脆不是
+        # 多模态模型）不传 --mmproj，由 llama-server 自己决定能不能加载。早年
+        # Qwen3-ASR 的「LLM + mmproj 双文件」形态只是其中一种，不是通则。
         self.mmproj = mmproj
         self.port = port
         # device=None 表示不传 --device，交给 llama-server 按自己的后端默认挑。
@@ -250,32 +313,103 @@ class LlamaServer:
         self.threads = threads
         self.proc = None
         self.restarts_left = 1
+        # llama-server 自己报告的模型 id（/v1/models 探测，见 _probe_model_id）。
+        # 转写请求的 model 字段必须跟它对得上，而不同 gguf 的 id 来自各自
+        # 元数据、各不相同 —— 写死一个名字只对当初那个权重有效。
+        self.model_id = ""
+        # 扩展包/用户通过 --llama-arg 追加的 llama-server 参数（token 列表）。
+        # 固定默认值（ctx-size/temp/缓存策略）里同名的 flag 让位给它们，
+        # 见 _user_first —— 换模型时想调这些参数不必改 worker 源码。
+        self.extra = list(extra or [])
+        # llama-server stderr 的落盘句柄（见 start()）：DEVNULL 一扔，加载失败
+        # 的真实原因（缺 mmproj、架构不认、显存不足）就只剩一句 rc=1。
+        self._stderr_handle = None
 
-    def start(self, timeout_s=90.0):
+    def _build_cmd(self):
+        """拼 llama-server 命令行。单独抽出是为了回归测试能不启进程地验整条
+        链（manifest llamaArgs -> 等号 argv -> argparse -> 这里）—— M1
+        （--llama-arg 拆分形式被 argparse 拒）当初就是单测绕过了这一层才漏的。"""
         cmd = [
             str(self.exe),
             "-m", str(self.model),
-            "--mmproj", str(self.mmproj),
+        ]
+        if self.mmproj:
+            cmd += ["--mmproj", str(self.mmproj)]
+        cmd += [
             "--port", str(self.port),
             "--host", "127.0.0.1",
+        ]
+        # 固定默认（各项的实测依据见旁边注释）。--device 也走这条流水线，
+        # 用户在 llamaArgs 里点名它时以用户为准。
+        defaults = []
+        if self.device:
+            defaults += ["--device", str(self.device)]
+        defaults += [
             "--ctx-size", "4096",
             # 0 = 全部留在内存里跑 CPU 后端；999 = 能 offload 的层全给设备。
             "--n-gpu-layers", str(self.ngl),
             "--threads", str(self.threads),
             "--temp", "0.6",
+            # 输出长度上限。llama-server 默认 -1（无限）——这是失控的根源：实测
+            # （2026-10-25，CUDA0）一段没有语音的 20s 音频让模型重复生成 3808 个
+            # 「啊」，耗时 27s 并把 4096 的 ctx 吃满，字幕管道被这一窗堵死。
+            # 512 token 足够转写最大的 30s 窗口（中文约 150 字），最坏耗时从
+            # 27s 压到几秒。要更长请用自己的 --n-predict 覆盖（_user_first 让位）。
+            "--n-predict", "512",
             # Every subtitle window is unique audio, so prefix reuse is pure
             # waste: the default prompt cache (cache-ram 8192) retains ~12 MiB
             # of KV per unique window on the host side (VRAM stays flat) --
-            # measured +2.1 GB over a 15-minute run. Both flags together keep
-            # RSS flat (p14_continuous_q8_fixed.json).
-            "--no-cache-idle-slots",
+            # measured +2.1 GB over a 15-minute run (p14_continuous_q8_fixed.json).
+            #
+            # 2026-10-25 实测（RTX 4060 Laptop / CUDA0 / Q8_0，5s 窗、真实影片、
+            # 单实例）：旁边那个 --no-cache-idle-slots 曾经也在这里，它是性能
+            # 元凶——带着它，同一段 5s 音频转写耗时 7.6~30.5s（rtf 1.5~6.7），
+            # 长输出请求甚至到 171s（rtf 34）；去掉它（保留 --cache-ram 0）后
+            # 同一请求 0.30~0.55s（rtf 0.06~0.11），全素材 rtf 0.06~0.21。
+            # 服务端日志里 eval 速度在两个配置间差两个数量级（0.29 vs 108 tok/s）。
+            # 字幕是实时活儿，rtf > 1 就等于永远追不上画面，所以去掉它。
+            # 内存仍由 --cache-ram 0 兜着（实测带它的实例 1.18 GB，不带 2.74 GB）。
+            # 要更激进的省内存，用 llamaArgs 自己加回 --no-cache-idle-slots，
+            # 代价就是字幕开始滞后。
             "--cache-ram", "0",
         ]
-        if self.device:
-            cmd += ["--device", str(self.device)]
+        cmd += _user_first(defaults, self.extra)
+        return cmd
+
+    def start(self, timeout_s=90.0):
+        cmd = self._build_cmd()
         log("starting llama-server: " + " ".join(cmd))
+        # llama-server 的 stderr 是加载失败的唯一真相来源（找不到 mmproj、
+        # 音频架构不认、显存不足、参数写错……全只在它嘴里）。早年 DEVNULL 一扔，
+        # 用户侧只剩 "exited early rc=1" 干瞪眼；现在追加落盘到脚本旁的
+        # llama-server.log（只读安装退 cwd，再不行才丢），超 8 MB 从头覆盖。
+        # restart 路径（ensure() 会再进 start()）：旧句柄先关——不关就是泄漏
+        # 一个只增不减的 fd，外加一份没人再写的文件锁（Windows 上想删都难）。
+        旧句柄 = self._stderr_handle
+        self._stderr_handle = None
+        if 旧句柄 is not None:
+            try:
+                旧句柄.close()
+            except Exception:
+                pass
+        err = subprocess.DEVNULL
+        for 根 in (Path(__file__).resolve().parent, Path.cwd()):
+            try:
+                路径 = 根 / "llama-server.log"
+                if 路径.exists() and 路径.stat().st_size > 8 * 1024 * 1024:
+                    路径.unlink()
+                err = open(路径, "ab")
+            except Exception:
+                continue
+            self._stderr_handle = err
+            log(f"llama-server stderr -> {路径}")
+            break
+        else:
+            # 两处都不可写（只读安装 + cwd 也锁着）：明确说一声 stderr 丢了，
+            # 别让排障的人以为压根没打开过日志。
+            log("llama-server stderr discarded (no writable dir beside script or cwd)")
         self.proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cmd, stdout=subprocess.DEVNULL, stderr=err,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         deadline = time.time() + timeout_s
         while time.time() < deadline:
@@ -285,11 +419,42 @@ class LlamaServer:
                 r = _HTTP.get(f"http://127.0.0.1:{self.port}/health", timeout=3)
                 if r.status_code == 200:
                     log("llama-server ready")
+                    # 服务端说自己叫什么，之后的转写请求就用那个名字（见
+                    # _probe_model_id）：换任何 gguf 都不必改 worker。
+                    self.model_id = self._probe_model_id()
+                    log(f"api model id: {self.model_id}")
                     return
             except requests.RequestException:
                 pass
             time.sleep(0.5)
         raise RuntimeError("llama-server health timeout")
+
+    def _probe_model_id(self, fallback="qwen3-asr"):
+        """问 llama-server 它把自己叫什么，转写请求的 model 字段就用这个。
+
+        llama.cpp 的 OpenAI 兼容端点按模型 id 寻址，而 id 来自加载的 gguf
+        元数据 —— Qwen3-ASR 官方量化是 "qwen3-asr"，换任何别的权重都可能是
+        另一个字符串。写死名字只对第一个权重有效；这里让服务端自报身份，
+        同一个 worker 适配任意 gguf。
+
+        探测失败（端点不存在 / 超时 / 空列表 / 字段缺失）一律回落 fallback：
+        /v1/audio/transcriptions 的 model 字段在多数 llama-server 版本里并不
+        严格校验，回落值保持与既有扩展包的现有行为逐字节一致。
+        """
+        try:
+            r = _HTTP.get(f"http://127.0.0.1:{self.port}/v1/models", timeout=5)
+            if r.status_code == 200:
+                items = r.json().get("data") or []
+                if items and items[0].get("id"):
+                    return str(items[0]["id"])
+                log("model id probe: empty /v1/models list; using fallback")
+            else:
+                # 老版本 llama-server 没这个端点：与"探测成功拿到路径 id"在日志里
+                # 必须可区分，否则排障时看着同一行 "api model id:" 会误导。
+                log(f"model id probe: HTTP {r.status_code}; using fallback")
+        except Exception as exc:  # noqa: BLE001 - probe is best-effort
+            log(f"model id probe failed ({type(exc).__name__}: {exc}); using fallback")
+        return fallback
 
     def warm_audio(self, seconds=0.5, tmpdir=None):
         """用一小段静音替音频路径付掉一次性开销，别让第一个真窗口承担。
@@ -305,7 +470,10 @@ class LlamaServer:
 
         tmpdir 传 main() 选好的目录；不传就自己回退选一个（绝不因此崩）。
 
-        失败一律忽略：warmup 只是优化，不承担正确性。
+        返回 True/False。失败时它同时是一次**能力探测**：端点 404/模型不认音频
+        意味着这个 gguf 不是音频转写模型（单文件模型、或压根不是多模态模型），
+        main() 据此向宿主发一条 warning——用户看到的不是白屏+无解释，而是
+        ai-subtitles.log 里一行"该模型不提供音频转写端点"。
         """
         try:
             t0 = time.perf_counter()
@@ -314,8 +482,10 @@ class LlamaServer:
                 tmpdir = pick_tmpdir("")
             transcribe(self, silence, tmpdir, _HTTP, None)
             log(f"audio path warmup {time.perf_counter() - t0:.1f}s")
+            return True
         except Exception as exc:
             log(f"audio path warmup skipped ({type(exc).__name__}: {exc})")
+            return False
 
     def ensure(self):
         """Restart once if the process died; raise if out of restarts."""
@@ -328,15 +498,36 @@ class LlamaServer:
         self.start()
 
     def stop(self):
-        if self.proc is None:
-            return
-        if self.proc.poll() is None:
-            self.proc.terminate()
+        # 句柄先收再管进程：start() 里 Popen 自己抛异常时（llama-server 路径
+        # 写错就是现实场景）self.proc 还是 None，老结构在这里早返回，句柄跟着
+        # start() 的栈一起泄漏——llama-server 每起一次漏一个 fd，直到 worker
+        # 退出才还。子进程有自己的 fd 副本，关父进程这份只是卫生。
+        句柄 = self._stderr_handle
+        self._stderr_handle = None
+        if 句柄 is not None:
             try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+                句柄.close()
+            except Exception:
+                pass
+        proc = self.proc
         self.proc = None
+        if proc is None:
+            return
+        if proc.poll() is None:
+            # terminate/kill 包 try：进程恰在窗口期退出时，老版本 Python 的
+            # terminate/kill 会抛 AccessRefused 竞态（新版本已内置保护，这里
+            # 只是兜底）——收尸失败绝不能把异常抛回调用方。
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 # --------------------------------------------------------------------------
@@ -494,6 +685,63 @@ class WindowBuilder:
         return (start, end, samples)
 
 
+def looks_degenerate(text):
+    """模型是不是在空转（把同一个字重复到撞上限）？
+
+    实测（2026-10-25，CUDA0）：一段没有语音的音频换来 3808 个「啊」，占满 4096
+    的 ctx、耗时 27s。它在字面上是"识别结果"，糊到屏幕上是纯粹的信息污染，而且
+    比没有字幕更糟——用户会以为字幕功能坏了或者模型在胡说。判出来的窗直接丢掉，
+    并把原因告诉用户（见调用处的 warning）。
+
+    只判"长且高度重复"：短文本（"嗯。"）与正常句子都不可能让单字占到 60%，
+    所以既不会误伤笑声（"哈哈哈"本来也不是字幕），也不会误伤正常对白。
+    """
+    s = "".join((text or "").split())
+    if len(s) < _DEGENERATE_MIN_LEN:
+        return False
+    if not s:
+        return False
+    counts = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    return max(counts.values()) / len(s) >= _DEGENERATE_TOP_RATIO
+
+
+def looks_like_prompt_leak(text):
+    """模型是不是把 instruction 当内容输出了？
+
+    实测（2026-10-25，`zh-wiki` 语音稀疏段）：转写结果整句就是服务端拼的模板串
+    `Transcribe audio to text`。它不是识别结果，也不是噪声——上屏等于告诉用户
+    "模型在胡说"。判出来的窗直接丢掉，并和失控编字共用一次提示（见调用处）。
+
+    两类命中：
+      * 模板短语（大小写/标点不敏感），仅在文本短得像一句指令时才算——长段对白里
+        偶尔出现 transcribe 一词不该被杀。
+      * chat 模板标记残留（`asr_text` / `<|im_start|>` 等），一旦出现即泄漏，不看长度。
+
+    正常的 {"language X<asr_text> 正文"} 前缀已在 transcribe() 里被剥离，这里只看
+    剩下的正文，所以不会误伤带语言头的正常结果。
+    """
+    s = " ".join((text or "").split())
+    if not s:
+        return False
+    low = s.lower()
+    for marker in _PROMPT_LEAK_MARKERS:
+        if marker in low:
+            return True
+    # 长度按原文算（不是按去掉非 ASCII 后的残串）：中文长句里夹一句英文短语，
+    # 折完只剩那句短语，按残串判长度会把它误杀。
+    if len(s) > _PROMPT_LEAK_MAX_LEN:
+        return False
+    # 模板串是服务端拼的英文指令，整句就是它。中文（或日韩文）正文里夹一句
+    # 英文指令不是泄漏——讲 ASR 教程的长句正好长这样，别杀。
+    cjk = len(_CJK_RE.findall(s))
+    if cjk > _PROMPT_LEAK_MAX_CJK_RATIO * len(s):
+        return False
+    folded = re.sub(r"[^a-z0-9]+", " ", low).strip()
+    return any(p in folded for p in _PROMPT_LEAK_PHRASES)
+
+
 def transcribe(server, samples, tmpdir, session, language=None):
     """Write the window as 16k mono PCM16, POST it, return (language, text).
 
@@ -505,7 +753,7 @@ def transcribe(server, samples, tmpdir, session, language=None):
     path = Path(tmpdir) / f"win_{uuid.uuid4().hex}.wav"
     try:
         sf.write(str(path), samples, TARGET_RATE, subtype="PCM_16")
-        data = {"model": "qwen3-asr", "response_format": "json"}
+        data = {"model": server.model_id or "qwen3-asr", "response_format": "json"}
         if language:
             data["language"] = language
         with open(path, "rb") as fh:
@@ -513,7 +761,10 @@ def transcribe(server, samples, tmpdir, session, language=None):
                 f"http://127.0.0.1:{server.port}/v1/audio/transcriptions",
                 files={"file": (path.name, fh, "audio/wav")},
                 data=data,
-                timeout=120)
+                # 单窗超时。原来 120s：一窗卡住两分钟，后面的窗口全在排队，字幕
+                # 永久滞后于画面（实测失控窗就是 27s）。窗口最长 30s、正常转写
+                # 远快于实时，30s 已经很宽；超时只是丢这一窗，worker 继续跑。
+                timeout=_INFER_TIMEOUT_S)
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
         text = r.json().get("text", "")
@@ -535,7 +786,9 @@ def read_exact(stream, n):
     return data
 
 
-def main():
+def build_arg_parser():
+    """worker 的 CLI 解析器。单独抽出供回归测试 import 真解析器（测试复刻一
+    行 --llama-arg 会随主体漂移，测的就不是真东西了——M1 漏测根因即此类）。"""
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--quant", default="Q8_0")
@@ -569,7 +822,18 @@ def main():
     # 环境下系统临时目录可能整个不可用，Python 会在 mkdtemp 直接
     # FileNotFoundError 退出，字幕全白（2026-10-23 完整跑实测）。
     ap.add_argument("--tmp-dir", default="")
-    args = ap.parse_args()
+    # llama-server 附加参数逃生门：每个 token 一次（"--llama-arg=--ctx-size"
+    # "--llama-arg=8192"），扩展包清单的 llamaArgs 数组逐项映射到这里。等号
+    # 形式是硬约束：append action 不收以 -- 开头的值，拆成两个 token 传会被
+    # argparse 判 expected one argument 直接 exit 2。worker 的固定默认值
+    # （ctx-size/temp/缓存策略）遇同名 flag 自动让位（见 _user_first）——
+    # 换模型时调这些参数不必改 worker 源码。
+    ap.add_argument("--llama-arg", action="append", default=[], dest="llama_arg")
+    return ap
+
+
+def main():
+    args = build_arg_parser().parse_args()
 
     sys.stdout.reconfigure(encoding="utf-8")
     model_dir = Path(args.model_dir)
@@ -578,17 +842,23 @@ def main():
         if args.mmproj:
             mmproj = Path(args.mmproj)
         else:
-            # 只给了主模型：在它旁边找投影（mmproj-*.gguf）；找不到就落到
-            # 一个必然不存在的名字上，让下面的存在性检查统一报错。
+            # 只给了主模型：在它旁边找投影（mmproj-*.gguf）；找不到就当单文件
+            # 模型处理（mmproj=None，不传 --mmproj）—— 由 llama-server 自己
+            # 决定能不能加载；加载失败的真实原因在它的 stderr，已落盘脚本旁
+            # llama-server.log（见 LlamaServer.start）。
             cands = sorted(model.parent.glob("mmproj-*.gguf"))
-            mmproj = cands[0] if cands else model.parent / "__missing_mmproj__.gguf"
+            mmproj = cands[0] if cands else None
     else:
+        # 老路径（包没写 model 字段）：按约定文件名拼双文件，缺一个就是配错了，
+        # 保持严格报错——那是 Qwen3-ASR 双文件包的既定契约。
         model = model_dir / f"Qwen3-ASR-0.6B-{args.quant}.gguf"
         mmproj = model_dir / f"mmproj-Qwen3-ASR-0.6B-{args.mmproj_quant}.gguf"
-    for p in (model, mmproj):
-        if not p.exists():
-            emit({"type": "status", "state": "error", "detail": f"missing {p}"})
-            return 2
+    if not model.exists():
+        emit({"type": "status", "state": "error", "detail": f"missing {model}"})
+        return 2
+    if mmproj is not None and not mmproj.exists():
+        emit({"type": "status", "state": "error", "detail": f"missing {mmproj}"})
+        return 2
 
     backend = (args.device_backend or "auto").strip().lower()
     if backend != "auto" and backend not in BACKEND_ALIASES:
@@ -627,7 +897,8 @@ def main():
           "detail": f"backend={backend} device={device or 'default'} ngl={ngl} "
                     f"threads={threads} port={port} exe={exe}"})
     server = LlamaServer(exe, model, mmproj, port,
-                         device=device, ngl=ngl, threads=threads)
+                         device=device, ngl=ngl, threads=threads,
+                         extra=args.llama_arg)
     # 临时目录必须在起 llama-server 之前定好：选不出来的话走协议报 fatal，
     # 让宿主记一行日志，而不是一句 traceback 崩掉（2026-10-23 完整跑的教训）。
     try:
@@ -638,16 +909,32 @@ def main():
         return 5
     log(f"tmpdir: {tmpdir}")
     windows = dropped = failures = 0
+    # 失控（模型重复同一个字）只报一次：它通常整段片子都在发生，每窗报一次会
+    # 把信息图层刷成刷屏。
+    已报失控 = False
     infer_seconds = []
     last_stats = time.time()
     generation = 0
 
     try:
         server.start()
-        # 先把音频路径预热掉：否则第一个真窗口要额外付十几秒构图代价，用户看到
-        # 的第一句字幕会明显迟到（详见 warm_audio 的注释）。
-        server.warm_audio(tmpdir=tmpdir)
+        # 先把音频路径预热掉：否则第一个真窗口要额外付一笔构图代价，用户看到的
+        # 第一句字幕会明显迟到（详见 warm_audio 的注释）。实测（2026-10-25，
+        # CUDA0）这笔代价是 57~60s 量级、且前 1~2 个请求都要付，不只是 warm
+        # 一次就完——宿主那边的首启提示按「约 1 分钟」写，别再写「十几秒」。
+        if not server.warm_audio(tmpdir=tmpdir):
+            # warm 失败 = 这个模型不认音频请求（端点 404 / 模型不认音频输入）。
+            # 不判 fatal——转写窗口失败本来就有既有降级路径，但必须让用户看见
+            # 原因，而不是对着一片白屏猜。
+            emit({"type": "status", "state": "warning",
+                  "detail": "音频端点探测失败：该模型可能不是音频转写模型"
+                            "（llama-server 能加载它，但 /v1/audio/transcriptions"
+                            " 不可用）；字幕会空白，详见 ai-subtitles.log"})
     except Exception as e:  # noqa: BLE001 - report through the protocol
+        # 先收子进程再报错：health timeout（90s）那条路 llama-server 还活着，
+        # 不 stop 就是孤儿进程——继续占着显存/端口/内存，而用户只看到一行错误
+        # 还以为是自己的机器闹鬼（2026-10-25 审查实测确认的泄漏路径）。
+        server.stop()
         emit({"type": "status", "state": "error", "detail": str(e)})
         return 3
 
@@ -732,6 +1019,29 @@ def main():
                     return 4
                 continue
             dt = time.perf_counter() - t0
+            # 三种"这一窗没有有效内容"，一律丢弃不上屏（宁可不出字幕，也不要
+            # 把一屏编造的字糊在画面上——那比没字幕更像"功能坏了"）：
+            #   empty      —— 只有语言头、正文为空（静音段的常见形态）
+            #   degenerate —— 失控编字（重复同一个字直到撞上限）
+            #   leak       —— 把 instruction 当内容输出（模板串 / chat 标记残留）
+            if not text.strip():
+                原因 = "empty"
+            elif looks_degenerate(text):
+                原因 = "degenerate"
+            elif looks_like_prompt_leak(text):
+                原因 = "leak"
+            else:
+                原因 = ""
+            if 原因:
+                dropped += 1
+                if not 已报失控:
+                    已报失控 = True
+                    emit({"type": "status", "state": "warning",
+                          "detail": "这段音频疑似没有语音或语种不受支持（模型在重复同一个"
+                                    "字，或把指令当内容输出），已跳过；字幕不会凭空编字"})
+                log(f"{原因} dropped [{start100ns/1e7:.2f}s..{end100ns/1e7:.2f}s] "
+                    f"len={len(text)} preview={text[:40]!r}")
+                continue
             infer_seconds.append(dt)
             windows += 1
             # matched 只是"报给宿主看"：worker 从不自己丢结果（宿主可选择丢弃，

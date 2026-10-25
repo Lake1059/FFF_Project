@@ -1073,10 +1073,22 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 重绑输出窗口()
         If 已释放 OrElse 会话 Is Nothing Then Return
+        Dim 窗口 = 输出窗口提供器()
         Try
-            会话.设置输出窗口(输出窗口提供器())
+            会话.设置输出窗口(窗口)
         Catch ex As 播放器异常
-            ' 视频宿主重建期间可能暂时没有有效句柄，下一次布局变更会再次绑定。
+            ' 视频宿主重建期间可能暂时没有有效句柄；DXGI 也会在旧 flip chain 尚未
+            ' retire 完时拒绝 CreateSwapChainForHwnd（内核 PlayerSession 的注释自证）。
+            ' 两者都是一瞬间的事：原样立刻重试一次，多数情况第二次就成。
+            ' 重试仍失败必须上报——静默吞掉会让用户面对一个没有画面的窗口且得不到
+            ' 任何解释（切解码器/切文件后"黑屏中断"的现场就是这么来的）。
+            Try
+                会话.设置输出窗口(窗口)
+            Catch ex2 As 播放器异常
+                RaiseEvent 播放错误(Me, New 播放器错误事件参数(
+                    $"无法把视频输出绑定到窗口（{ex2.Message}）。画面可能保持黑屏，可尝试重新打开文件或重启播放器。",
+                    "视频输出绑定失败"))
+            End Try
         End Try
     End Sub
 

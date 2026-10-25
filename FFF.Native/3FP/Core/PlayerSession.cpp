@@ -1726,11 +1726,17 @@ FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
             ApplyAudioPlaybackPause(true);
         }
         // 候选会话无窗口时只保留解码帧；绑定窗口后必须先上传静态图片，才能重绘。
+        // 普通视频在没有缓存帧时不能只靠 Redraw()：headless 打开期间解出的帧被
+        // 刻意丢弃（Renderer 不替无窗会话保管 GPU 缓存），Redraw 此时必然空转，
+        // 于是一个暂停/就绪态的新会话永远等不到首帧——换解码器、切文件后黑屏
+        // 就是这么来的。改用 PresentAfterBind() 把交换链建起来并呈交一帧。
         const auto redrawResult = staticImage_ && stillImageFrame_ != nullptr && window != nullptr
             ? videoRenderer_.Render(stillImageFrame_, snapshot_.frameIndex, true, false, false, true)
             : coverArtFrame_ != nullptr && videoStream_ < 0 && window != nullptr
                 ? videoRenderer_.Render(coverArtFrame_, HdrProcessor::kUnknownFrameIndex, true, true)
-                : videoRenderer_.Redraw();
+                : window != nullptr && videoStream_ >= 0 && !videoRenderer_.HasCachedVideo()
+                    ? videoRenderer_.PresentAfterBind()
+                    : videoRenderer_.Redraw();
         if (redrawResult == FFFResult::DeviceFailure &&
             videoRenderer_.RequestRecoveryIfDeviceLost()) return;
         if (redrawResult != FFFResult::Success) {
@@ -2323,9 +2329,18 @@ FFFResult PlayerSession::EnableAudioTap(const FFF3FPAudioTapConfig* const config
     // holds its own reference for its lifetime, so a Disable racing this call
     // can never leave the renderer pointing at a freed object -- worst case the
     // install command finds the member already replaced and installs null.
+    // Stamp the new tap with the session's current timeline generation before
+    // it goes live: a fresh AsrAudioTap starts at generation 0, and a host that
+    // re-installs the tap on every media open (which is exactly what the AI
+    // subtitle controller does) would otherwise leave the tap at 0 while the
+    // snapshot keeps reporting the post-seek generation -- every block would
+    // then be discarded by the host's generation guard and subtitles would go
+    // permanently silent after a file switch. DoOpen/DoSeek re-stamp the tap
+    // they find; this closes the gap for the tap installed after them.
     Enqueue([this] {
         std::shared_ptr<AsrAudioTap> installed;
         { std::lock_guard lock(asrTapMutex_); installed = asrTap_; }
+        if (installed != nullptr) installed->NoteGeneration(snapshot_.timelineGeneration);
         if (audioRenderer_ != nullptr) audioRenderer_->SetAsrTap(std::move(installed));
     });
     return FFFResult::Success;
@@ -3406,8 +3421,14 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // an immediate replacement while the previous chain is still retiring.
     DoClose(FFF3FPState::Opening, true);
     // A new file is a new timeline: whatever the tap buffered from the previous
-    // one must not survive into it. The generation value itself only changes on
-    // a seek, so this re-stamps the same value and clears the ring.
+    // one must not survive into it -- and neither may what the ASR worker has
+    // accumulated. The worker's only re-anchor mechanism is a generation change
+    // (it drops its sample buffer and position clock when the meta generation
+    // moves), so re-stamping the *same* value is not enough: the generation has
+    // to advance here, exactly as a seek advances it. Stamping then clears the
+    // kernel-side ring. 2026-10-25 实机：只换文件不换解码器时代次不变，worker
+    // 端着旧文件的尾音继续按旧时钟报位置，宿主侧代次守卫又对不上，字幕整段沉默。
+    ++snapshot_.timelineGeneration;
     NoteTapGeneration();
     // A new file is a new audio-pool round: back to the default target.
     audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;

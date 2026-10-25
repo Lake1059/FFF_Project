@@ -143,7 +143,7 @@ Public Class Form1
             MCM_AI字幕,
             Function() 播放控制器.取当前句柄(),
             Function() 播放控制器.安全读取媒体信息(),
-            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "AI 字幕"),
+            Sub(文本) 安全显示操作信息(文本),
             Sub(值) 设置.实例对象.Ai字幕已停用 = 值,
             AddressOf 打开Ai字幕设置)
         ' 启动时就读一次包：装了就起，没装就完全不动（本体默认不带任何 ASR 能力）。
@@ -823,6 +823,26 @@ Public Class Form1
         If Not 正在关闭 Then
             LakeUI.ExOverlayMsgBox(Me, e.消息, MsgBoxStyle.Critical Or MsgBoxStyle.OkOnly, e.标题)
         End If
+    End Sub
+
+    ''' <summary>AI 字幕的操作提示：信息图层的消息列表与定时器都不是线程安全的，
+    ''' 而 warning 来自 worker 的 result 线程（解码回退那条路同样可能是播放线程），
+    ''' 统一 marshalling 回 UI 线程再上屏。失败必须安静——提示通道绝不能
+    ''' 反咬播放或字幕。颜色取黄灯：与"解码回退"同一档语义，warning 不是
+    ''' 良性通知（别用绿灯），也不是致命错误（不用弹窗）。</summary>
+    Private Sub 安全显示操作信息(文本 As String)
+        Try
+            If 画面控件.InvokeRequired AndAlso 画面控件.IsHandleCreated Then
+                画面控件.BeginInvoke(New Action(Of String)(AddressOf 安全显示操作信息), 文本)
+                Return
+            End If
+            ' 句柄还没建（窗体未亮相）时无从 marshalling，也无从显示：静默丢弃。
+            If Not 画面控件.IsHandleCreated Then Return
+            If 正在关闭 Then Return
+            信息图层呈现器?.显示操作信息(文本, &HFFF0D35DUI, "AI 字幕")
+        Catch
+            ' 控件已销毁/关闭竞态：丢一条提示无妨。
+        End Try
     End Sub
 
     Private Sub 播放控制器_操作提示(sender As Object, e As 播放器操作提示事件参数)

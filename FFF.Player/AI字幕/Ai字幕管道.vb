@@ -42,6 +42,11 @@ Friend NotInheritable Class Ai字幕管道
     Private _pump线程 As Thread = Nothing
     Private _result线程 As Thread = Nothing
     Private _stderr线程 As Thread = Nothing
+    ' 结果线程代次：每停一次/每启一次 worker 就 +1。旧结果线程的收尾（Finally 里
+    ' 置"worker 已退出"）只允许在代次未变时生效——重启时旧线程可能在进程退场后
+    ' 很久才 unwind，迟到的置位会把新 worker 的每一条结果全部丢掉，字幕从此永久
+    ' 沉默且日志无任何异常（停止再播 / 改设置重启的现场，2026-10-25 实机复盘）。
+    Private _结果线程代 As Integer = 0
     Private _停止事件 As New ManualResetEventSlim(False)
     Private _已释放 As Boolean = False
 
@@ -55,11 +60,22 @@ Friend NotInheritable Class Ai字幕管道
     Private _语言不符丢弃 As Integer = 0
     Private _上次语言日志 As Long = 0L
 
+    ' worker warning（模型不认音频端点、设备回落）的用户可见通道：result 线程
+    ' 触发，按文案去重后交宿主提示（信息图层）。每条不同的 warning 首见必显——
+    ' 启动批里"设备回落"之后紧跟着"音频端点探测失败"（换错模型的核心场景），
+    ' 一刀切 30s 限流会把第二条吞掉；同一条重复才按 30s 收，防持续 warning
+    ' 把提示通道刷爆（与语言闸门同一套路）。
+    Private ReadOnly _提示 As Action(Of String)
+    Private _上次警告文本 As String = String.Empty
+    Private _上次警告计时 As Long = 0L
+
     Public Sub New(句柄提供器 As Func(Of 播放器原生句柄), 状态机 As Ai字幕状态机,
-                   Optional 日志 As Action(Of String) = Nothing)
+                   Optional 日志 As Action(Of String) = Nothing,
+                   Optional 提示 As Action(Of String) = Nothing)
         Me.句柄提供器 =句柄提供器
         Me.状态机 = 状态机
         Me.日志 = 日志
+        Me._提示 = 提示
     End Sub
 
     ''' <summary>worker 是否在运行。</summary>
@@ -102,10 +118,14 @@ Friend NotInheritable Class Ai字幕管道
     ''' 显存吃紧的机器填小数（模型 28 层，填 16 = 一半权重在显存）。</param>
     ''' <param name="语言">字幕语言标识（zh/en/…）或 auto。串到 worker 的 --language，
     ''' 由它换成模型认识的英文名 —— 实测 llama-server 只认英文名，ISO 代码会被忽略。</param>
+    ''' <param name="用户附加参数">设置页高级框里用户填的 llama-server 附加参数（每行一个
+    ''' token，# 开头是注释）。与清单 llamaArgs 合并后排后、同名 flag 覆盖清单的
+    ''' （见 <see cref="合并附加参数"/>）——换模型调 ctx-size / temp 时用户不必改包。</param>
     Public Function 启动(配置 As Ai字幕包配置, 窗口覆盖 As Double, 步长覆盖 As Double,
                         后端 As String, 序号 As Integer, Gpu层数 As Integer,
                         Optional 语言 As String = "",
-                        Optional 模型档 As String = "") As Boolean
+                        Optional 模型档 As String = "",
+                        Optional 用户附加参数 As String = "") As Boolean
         If _已释放 Then Return False
         If 配置 Is Nothing Then Return False
         If String.IsNullOrWhiteSpace(配置.Worker脚本) OrElse Not IO.File.Exists(配置.Worker脚本) Then
@@ -142,18 +162,18 @@ Friend NotInheritable Class Ai字幕管道
             End Try
         End If
         If String.IsNullOrWhiteSpace(模型目录) Then 模型目录 = 配置.包目录
-        ' worker 要把每个窗口写成 wav 再 POST 给 llama-server，落盘位置必须是宿主
-        ' 亲眼验证过可写的目录：schtasks 派发等环境下系统临时目录可能整个不可用
-        ' （Python 直接 FileNotFoundError 退出，字幕全白，2026-10-23 完整跑实测）。
-        ' 候选：扩展包目录下的 tmp（模型都放那，几 MB 的 wav 不算负担）→ 程序目录
-        ' 下的 tmp（诊断日志就写在那，便携安装下可写）。都不可写就不传 --tmp-dir，
-        ' worker 有自己的回退链兜底（脚本旁 tmp → cwd → 系统临时目录）。
-        Dim 临时根 = 挑选临时目录(IO.Path.Combine(配置.包目录, "tmp"))
-        If String.IsNullOrEmpty(临时根) Then
-            临时根 = 挑选临时目录(IO.Path.Combine(程序目录, "tmp"))
-        End If
         SyncLock 锁
             If _进程 IsNot Nothing AndAlso Not _进程.HasExited Then Return True
+            ' 临时目录挑选必须在存活检查之后：媒体已打开会让 启动() 重入一次，
+            ' worker 活着时根本用不到新临时目录，却要白扫一遍候选目录。2026-10-25
+            ' 实测 E 盘扩展包目录的探测被文件过滤驱动拒绝（UnauthorizedAccessException），
+            ' 于是每次切文件/切解码器都刷一条告警——挪下来就只在真正要起 worker 时探测。
+            ' 候选与回退语义不变：扩展包目录下的 tmp → 程序目录下的 tmp，都不可写
+            ' 就不传 --tmp-dir，worker 有自己的回退链兜底（脚本旁 tmp → cwd → 系统临时目录）。
+            Dim 临时根 = 挑选临时目录(IO.Path.Combine(配置.包目录, "tmp"))
+            If String.IsNullOrEmpty(临时根) Then
+                临时根 = 挑选临时目录(IO.Path.Combine(程序目录, "tmp"))
+            End If
             _停止事件.Reset()
             Dim 启动信息 As New ProcessStartInfo With {
                 .FileName = If(String.IsNullOrWhiteSpace(配置.Python), "python", 配置.Python),
@@ -209,6 +229,23 @@ Friend NotInheritable Class Ai字幕管道
                 启动信息.ArgumentList.Add("--llama-servers")
                 启动信息.ArgumentList.Add(JsonSerializer.Serialize(配置.服务器映射))
             End If
+            ' 扩展包逃生门：清单 llamaArgs + 设置页用户框（Ai字幕附加参数）两个来源，
+            ' 合并后逐 token 映射为 --llama-arg，worker 的固定默认值遇同名 flag 让位。
+            ' 换模型要调 ctx-size / temp / 后端专属开关时走这里，本体与 worker 都不用改。
+            ' 等号形式不是风格选择：argparse 的 append action 不收以 -- 开头的值，
+            ' 拆成两个 token 传（"--llama-arg" "--ctx-size"）会被判 expected one
+            ' argument 直接 exit 2——文档的标准示例 ["--ctx-size","8192"] 恰恰
+            ' 每个值都以 -- 开头。"--llama-arg=--ctx-size" 才收集得到（2026-10-25
+            ' 审查实测：拆分形式 SystemExit(2)，等号形式 Namespace 正常）。
+            Dim 用户参数 = 解析附加参数(用户附加参数)
+            Dim 合并参数 = 合并附加参数(配置.额外参数, 用户参数)
+            For Each 附加 In 合并参数
+                启动信息.ArgumentList.Add("--llama-arg=" & 附加)
+            Next
+            If 合并参数.Count > 0 Then
+                记录($"AI 字幕：llama-server 附加参数 {合并参数.Count} 条" &
+                     $"（清单 {配置.额外参数.Count} + 用户 {用户参数.Count}，同名 flag 以用户为准）")
+            End If
             If Not String.IsNullOrEmpty(临时根) Then
                 ' 显式指定 + 把子进程的 TEMP/TMP 一并指过去：llama-server 是 worker
                 ' 的子进程，环境变量整棵树继承，哪一层要写临时文件都有着落。
@@ -237,7 +274,8 @@ Friend NotInheritable Class Ai字幕管道
                 ' 提权不足等场景不影响功能。
             End Try
             _pump线程 = New Thread(AddressOf Pump循环) With {.IsBackground = True, .Name = "AI字幕-取数"}
-            _result线程 = New Thread(AddressOf Result循环) With {.IsBackground = True, .Name = "AI字幕-结果"}
+            Dim 代 As Integer = Interlocked.Increment(_结果线程代)
+            _result线程 = New Thread(Sub() Result循环(代)) With {.IsBackground = True, .Name = "AI字幕-结果"}
             _stderr线程 = New Thread(AddressOf Stderr循环) With {.IsBackground = True, .Name = "AI字幕-诊断"}
             _pump线程.Start()
             _result线程.Start()
@@ -254,6 +292,10 @@ Friend NotInheritable Class Ai字幕管道
     Public Sub 停止()
         Dim 进程本地 As Process = Nothing
         SyncLock 锁
+            ' 先作废这一代结果线程的收尾通知（见 _结果线程代）：本方法随后那句
+            ' 同步的通知已经覆盖了"worker 停了"的语义，旧线程迟到的 Finally 不许
+            ' 再把标志置回去——重启路径紧接着就是 状态机.重置()，谁后到谁害人。
+            Interlocked.Increment(_结果线程代)
             _停止事件.Set()
             进程本地 = _进程
             _进程 = Nothing
@@ -383,7 +425,7 @@ Friend NotInheritable Class Ai字幕管道
 
     ' ---------------- result 线程：worker stdout → 状态机 ----------------
 
-    Private Sub Result循环()
+    Private Sub Result循环(代 As Integer)
         Try
             Dim 进程本地 As Process = Nothing
             SyncLock 锁
@@ -401,7 +443,12 @@ Friend NotInheritable Class Ai字幕管道
         Catch ex As Exception
             记录($"AI 字幕：结果线程退出 {ex.GetType().Name} {ex.Message}")
         Finally
-            状态机?.通知Worker已退出()
+            ' 代次 gate：只有"当前这一代"结果线程的退场才算 worker 真的死了。
+            ' 重启时旧线程可能在新线程已开始收结果之后才 unwinding（进程退场≠
+            ' 线程退场），迟到的置位会让 状态机 把新 worker 的每条结果都当噪声
+            ' 丢掉——字幕永久沉默，且没有任何一行日志提示（停止再播/改设置
+            ' 重启现场，2026-10-25 实机复盘定位）。
+            If Volatile.Read(_结果线程代) = 代 Then 状态机?.通知Worker已退出()
         End Try
     End Sub
 
@@ -438,6 +485,9 @@ Friend NotInheritable Class Ai字幕管道
                                 _诊断文本 = If(String.IsNullOrEmpty(详情), 状态, $"{状态}: {详情}")
                             End SyncLock
                             记录($"AI 字幕：worker 状态 {_诊断文本}")
+                            ' warning（模型不认音频端点、设备回落）不是死亡，但必须
+                            ' 让人看见：只进日志的话，用户面对的是空白字幕+无解释。
+                            If 状态 = "warning" Then 记警告(详情)
                             ' 只有 worker 自述"我不干了"才当死亡。缺省按致命处理（旧 worker 没这个字段），
                             ' 但必须让"这一窗推理失败、我继续重试"（fatal=false）走开——否则本地 HTTP
                             ' 抖一次就把字幕永久关掉，而 worker 其实活得好好的。
@@ -488,6 +538,48 @@ Friend NotInheritable Class Ai字幕管道
         记录($"AI 字幕：语言不符已丢弃 {_语言不符丢弃} 条（实际 {If(实际语言, "未知")}，" &
              $"只显示 {Ai字幕语言.显示名(设置.实例对象.Ai字幕语言)}）")
     End Sub
+
+    ' ---------------- worker warning → 用户可见 ----------------
+
+    ''' <summary>worker 的 warning 必须让人看见，不能只躺日志文件：换了个不认
+    ''' 音频端点的模型时，用户看到的是"字幕空白但没解释"，而原因 worker 早就
+    ''' 说出来了。节流按文案去重：不同 warning 首见必显（启动批里设备回落与
+    ''' 音频端点探测失败是两条不同的话，都得让人看见），同一条重复才 30s 收。</summary>
+    Private Sub 记警告(详情 As String)
+        If _提示 Is Nothing Then Return
+        Dim 文本 = 警告摘要(详情)
+        Dim 现在 As Long = Stopwatch.GetTimestamp()
+        If 文本 = _上次警告文本 AndAlso
+           (现在 - _上次警告计时) / CDbl(Stopwatch.Frequency) < 30.0 Then Return
+        _上次警告文本 = 文本
+        _上次警告计时 = 现在
+        Try
+            _提示(文本)
+        Catch
+            ' 提示通道失败不影响字幕本体。
+        End Try
+    End Sub
+
+    ''' <summary>warning 详情是写给日志的长文，提示通道只留能读完的第一句。
+    ''' WARNING 前缀是 worker 的设备回落约定，剥掉免得和 "AI 字幕：" 叠成两层
+    ''' 警告样。分号串的是并列子句（"只有 X；已回落到它的默认设备；用户指定层数
+    ''' 16"）——整串短就全留着；按第一个分号一刀切曾把"已回落到它的默认设备"
+    ''' 这种结果说明切掉，用户只看到半句话。长了才从尾部收，收口补省略号。</summary>
+    Private Shared Function 警告摘要(详情 As String) As String
+        Dim 文本 = If(详情, String.Empty).Trim()
+        If 文本.StartsWith("WARNING", StringComparison.Ordinal) Then
+            文本 = 文本.Substring(7).TrimStart("："c, ":"c, " "c)
+        End If
+        If 文本 = String.Empty Then Return "AI 字幕：worker 报告异常，详见日志"
+        If 文本.Length <= 50 Then Return $"AI 字幕：{文本}"
+        Dim 段 = 文本.Split("；"c)
+        Dim 收编 As String = 段(0)
+        For i As Integer = 1 To 段.Length - 1
+            If 收编.Length + 1 + 段(i).Length > 50 Then Exit For
+            收编 &= "；" & 段(i)
+        Next
+        Return $"AI 字幕：{收编}…（详见日志）"
+    End Function
 
     ' ---------------- JSON 取值助手（缺字段走默认，绝不抛） ----------------
 
@@ -564,6 +656,60 @@ Friend NotInheritable Class Ai字幕管道
             End Try
         Next
         Return String.Empty
+    End Function
+
+    ''' <summary>解析用户附加参数文本（设置页高级框）：每行一个 token。空行忽略；
+    ''' # 开头是注释行 —— 写给用户自己看的说明，不进 llama-server 命令行；
+    ''' 其余 Trim 后原样收取（"--ctx-size" 与 "8192" 各一行，或单行 "--ctx-size=8192"）。
+    ''' Friend：设置页状态行要数一眼用户填了几条（不解析就得在两处各写一遍）。</summary>
+    Friend Shared Function 解析附加参数(文本 As String) As List(Of String)
+        Dim 结果 As New List(Of String)
+        If String.IsNullOrWhiteSpace(文本) Then Return 结果
+        For Each 行 In 文本.Split(New String() {vbCrLf, vbLf, vbCr}, StringSplitOptions.RemoveEmptyEntries)
+            Dim 值 = 行.Trim()
+            ' RemoveEmptyEntries 只挡"真空行"，挡不住纯空格行——Trim 后是空串的
+            ' 一律跳过：塞个空 token 进 --llama-arg=，llama-server 会当位置参数报错。
+            If 值.Length = 0 Then Continue For
+            If 值.StartsWith("#"c, StringComparison.Ordinal) Then Continue For
+            结果.Add(值)
+        Next
+        Return 结果
+    End Function
+
+    ''' <summary>合并包清单与用户的附加参数：用户参数排后（llama-server 侧后者生效），
+    ''' 且用户点名过的 flag 连同它在包参数里的值一起剔除 —— 即"用户覆盖包"。
+    ''' 与 worker 的 <c>_user_first</c> 同一套语义（值 = 下一个不以 -- 开头的 token），
+    ''' 两边一致才不会出现"清单给 4096、用户给 8192，命令行两个都在"——某些 llama-server
+    ''' 版本对重复 --ctx-size 直接报错，那会让用户以为整个功能坏了。</summary>
+    Private Shared Function 合并附加参数(包参数 As IList(Of String), 用户参数 As IList(Of String)) As List(Of String)
+        If 用户参数.Count = 0 Then Return New List(Of String)(包参数)
+        Dim 点名 As New HashSet(Of String)(StringComparer.Ordinal)
+        For Each 项 In 用户参数
+            If 项.StartsWith("--", StringComparison.Ordinal) Then 点名.Add(取Flag名(项))
+        Next
+        Dim 结果 As New List(Of String)
+        Dim i As Integer = 0
+        While i < 包参数.Count
+            Dim 令牌 = 包参数(i)
+            If 令牌.StartsWith("--", StringComparison.Ordinal) AndAlso 点名.Contains(取Flag名(令牌)) Then
+                ' 删 flag 顺带删它的值：只删 flag 会把包里的旧值留给 llama-server 当位置
+                ' 参数，报出来的错比"重复参数"更难懂。等号形态（--flag=value）是单 token，
+                ' 下一个 token 必是别的 flag，不会多吃。
+                i += If(i + 1 < 包参数.Count AndAlso
+                        Not 包参数(i + 1).StartsWith("--", StringComparison.Ordinal), 2, 1)
+                Continue While
+            End If
+            结果.Add(令牌)
+            i += 1
+        End While
+        结果.AddRange(用户参数)
+        Return 结果
+    End Function
+
+    ''' <summary>token 的 flag 名：--flag=value 取 --flag 部分（等号形态在用户框里很常见）。</summary>
+    Private Shared Function 取Flag名(令牌 As String) As String
+        Dim 等号 = 令牌.IndexOf("="c)
+        Return If(等号 > 0, 令牌.Substring(0, 等号), 令牌)
     End Function
 
     Private Sub 记录(消息 As String)

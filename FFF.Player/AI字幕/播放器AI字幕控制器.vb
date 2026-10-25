@@ -61,6 +61,8 @@ Friend NotInheritable Class 播放器AI字幕控制器
     Private 已启动语言 As String = Ai字幕语言.自动
     ' 模型档同理：换档就是换权重文件，只在启动期生效。
     Private 已启动模型档 As String = String.Empty
+    ' 用户附加参数（设置页高级框原文）同理：改内容就要重启 worker 才会进命令行。
+    Private 已启动附加参数 As String = String.Empty
     Private 已启动层数 As Integer = -1
     ' 日志滚动：-1 = 还没量过现有文件长度（首次写时取实际大小，这样跨进程追加也准）。
     Private Const 日志上限字节 As Long = 2L * 1024L * 1024L
@@ -135,9 +137,13 @@ Friend NotInheritable Class 播放器AI字幕控制器
                                        已启动序号 <> 设置对象.Ai字幕设备序号 OrElse
                                        已启动层数 <> 设置对象.Ai字幕Gpu层数 OrElse
                                        已启动语言 <> 新语言 OrElse
-                                       已启动模型档 <> 新模型档) Then
+                                       已启动模型档 <> 新模型档 OrElse
+                                       已启动附加参数 <> 设置对象.Ai字幕附加参数) Then
             停止()
         End If
+        ' 驻留偏移是纯显示侧（状态机守卫判定用）：不触发重启，这里同步即可，
+        ' 播放中改设置也立刻见效。字幕"何时出现"由推理窗口决定，偏移只调驻留。
+        状态机.时间偏移100纳秒 = CLng(设置对象.Ai字幕字幕偏移秒 * 10_000_000L)
         If 停用 Then
             停止()
         Else
@@ -292,7 +298,16 @@ Friend NotInheritable Class 播放器AI字幕控制器
             End If
 
             If 管道 Is Nothing Then
-                管道 = New Ai字幕管道(句柄提供器, 状态机, AddressOf 记日志)
+                ' 提示通道随管道一起给：worker 的 warning（模型不认音频端点等）
+                ' 由 result 线程节流后经它上屏，只进日志的话用户面对的是无解释空白。
+                管道 = New Ai字幕管道(句柄提供器, 状态机, AddressOf 记日志, 操作提示)
+                ' 首启提示：从起到首句字幕有一段明显空窗（权重首次搬进显存 + CUDA
+                ' graph 捕获 + 音频路径初始化）。实测（2026-10-25，CUDA0 / Q8_0）
+                ' 启动后前 1~2 个转写请求各需 57~60s，第 3 个起才降到 0.3~1.1s——
+                ' 所以这里写「约 1 分钟」而不是早先的「十几秒」（那个数字来自另一
+                ' 套测量条件，量级上乐观得多；照它去排查会误判成卡死）。
+                ' 只在新建管道时说一次——切文件不重启 worker，不反复刷。
+                操作提示("AI 字幕：模型加载中，首句字幕约需 1 分钟")
             End If
             状态机.重置()
             Dim 设置对象 = 设置.实例对象
@@ -300,9 +315,10 @@ Friend NotInheritable Class 播放器AI字幕控制器
             Dim 后端 = 生效后端(包)
             Dim 语言 = Ai字幕语言.规整(设置对象.Ai字幕语言)
             Dim 新模型档 = If(设置对象.Ai字幕模型档, String.Empty).Trim()
+            Dim 新附加参数 = 设置对象.Ai字幕附加参数
             If Not 管道.启动(包, 设置对象.Ai字幕窗口秒覆盖, 设置对象.Ai字幕步长秒覆盖,
                              后端, 设置对象.Ai字幕设备序号, 设置对象.Ai字幕Gpu层数,
-                             语言, 新模型档) Then
+                             语言, 新模型档, 新附加参数) Then
                 管道 = Nothing
                 操作提示("AI 字幕：worker 启动失败，详见日志")
             Else
@@ -311,6 +327,7 @@ Friend NotInheritable Class 播放器AI字幕控制器
                 已启动层数 = 设置对象.Ai字幕Gpu层数
                 已启动语言 = 语言
                 已启动模型档 = 新模型档
+                已启动附加参数 = 新附加参数
             End If
         Catch ex As Exception
             记日志($"AI 字幕：启动路径异常 {ex.GetType().Name} {ex.Message}")
