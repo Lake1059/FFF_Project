@@ -92,9 +92,37 @@
 | 4 | ✅ | **必须用 `MediaPlayPause`(VK 0xB3) 注入**：`Space`(VK 0x20) 在焦点落在按钮上时被 WinForms 当按钮点击吃掉，暂停不生效（这本身是条方法学坑）。干净暂停实测：呈现帧数 8932→8949（只涨 17 帧），`已绘制序号/命令数=1/画布` 全冻结 = 字幕保持可见 |
 | 5 | ✅ | 恢复后位置接续（暂停前 70 s → 恢复后 `final [70.01s..75.01s]`），同一时刻只有一条 |
 | 6 | ❌ **失败（P0）** | 见下方「切文件会话损坏」 |
-| 7 | ⬜ 未跑 | 被第 6 项失败阻塞（播放会话已损坏，无法区分"无音轨跳过"与"会话坏") |
-| 8 | ⬜ 未跑 | 开关是 `LakeUI.ModernContextMenu` 自绘菜单（`Form1.Designer.vb:58`），UIA 不可见，只能坐标点击 |
+| 7 | ✅ | 2026-10-25 12:00 复测：`AI 字幕：当前媒体没有音轨，跳过` 只记一次、无 worker 进程、`real_720p_h264_derived.mp4` 播放正常（12 s 播完） || 8 | ⬜ 未跑 | 开关是 `LakeUI.ModernContextMenu` 自绘菜单（`Form1.Designer.vb:58`），UIA 不可见，只能坐标点击 |
 | 9 | ✅ | `worker 已停止` + `音频 tap 已卸载` 同在 08:30:13；`tasklist` 无 `python.exe` / `llama-server.exe`；全会话 worker 只启动一次（切文件不重启 worker，符合设计） |
+
+### 自动化补充验证（2026-10-25 下午，B/C 批可机判项）
+
+驱动：schtasks 启动 + `PostMessage` 按键 + `click_dec3.ps1` 动态点按钮；**设置类项走等价路径**
+（直接改 `FFF.Player.Settings.json` 后重启，绕过设置页 UI——只验证 worker/llama 侧行为，
+设置页控件本身的目视项不在此列）。结果文件：`_3fc_tmp/matrix_args_results.txt`。
+
+| 项 | 结果 | 证据 / 说明 |
+|---|---|---|
+| 6 补充 | ✅ | 播放中（en-lecture，81 s 处）点解码按钮：点击同秒 `generation -> 4` + 完成标记，位置正确恢复（81 s→94 s 续播，偏移=键帧落点）、字幕代次 4 无缝接续、worker 不重启。**4.2「切换后从头播」据此重判为素材特异**：只在 cue/时长损坏的 zh-en-mix.webm 上发生（seek 85 s 经假 cue 落到 0），完好文件不复现 |
+| 14 / 15（语言闸门逻辑） | ✅ | 语言=中文 + 仅所选=开：`worker 状态 ready: … lang=Chinese` + `语言不符已丢弃 1/6 条（实际 english，只显示 中文（Chinese））`；仅所选=关（提示不筛除）：`字幕语言 中文（Chinese）（提示，不筛除）`，无丢弃行 |
+| 18（模型档） | ✅ | 档=Q4_K_M：`-m …Qwen3-ASR-0.6B-Q4_K_M.gguf` 真到 llama-server 命令行 |
+| 22（args2048） | ✅ | 命令行仅一个 `--ctx-size 2048`（worker 自身 4096 默认整项让位） |
+| 24（坏权重） | ✅ | llama-server 2 s 内 rc=1 → `worker 状态 error: llama-server exited early rc=1`；stderr 真实报错落盘（`failed to load model '_truncated_bad.gguf'`）；关闭后 `tasklist` 无孤儿 python/llama。**勘误：llama-server.log 落在播放器 bin 目录**（worker 以 cwd 为准），不是清单早前写的扩展包目录 |
+| 26（用户覆盖包参数） | ✅ | args4096 包 + 用户 `--ctx-size=8192`：命令行 4096 消失、`--ctx-size=8192` 生效（同名 flag 用户为准）。注：本机（8 GB 笔记本 GPU）llama-server 对 8192 ctx 自身拒绝 rc=1——argv 机制已验证，资源上限属环境 |
+| 10（停止→再播 ×5，P0 回归） | ✅ | 2026-10-25 12:37~12:40 连做 5 次：每轮 worker 启动→首句出字→`MediaStop` 后 `worker 已停止`+`音频 tap 已卸载` 同秒落、`tasklist` python=0。5/5 全过，P0 竞态（旧 result 线程迟到置位）无复发。结果：`_3fc_tmp/matrix_item10_results.txt` |
+| 23 复核 | ✅ | nommproj 变体包实测**仍带 mmproj**（其清单声明了 bf16 投影，包名有误导）；单文件模型路径本清单此前已实测通过（HTTP 501 + warning + 信息图层提示），维持原结论 |
+| 30 复核（说明） | — | `layers:32` 包实测传 `--n-gpu-layers 999`：层数预设只进设置页下拉（用户不选=auto），属设计行为非缺陷；"包声明 32 层"的状态行是目视项 |
+
+**未自动化、留待人工**：8 / 11（LakeUI 自绘右键菜单的开关，只能坐标点击）、12 / 13
+（播放中经设置页热改后端/设备并观察 worker 重启）、16（设置页几何）、19 / 21 / 27 / 28 / 29 / 31
+（设置页控件目视部分——其 worker 侧行为已由等价路径覆盖的见上表）。
+
+**本轮工具链教训（下一轮别再踩）**：
+- 改 `FFF.Player.Settings.json` 必须**类型严格**：布尔写成字符串 `"True"` 会让
+  `JsonSerializer.Deserialize(Of 设置)` 整个文件拒绝 → 静默回落全部默认值（包目录空 → AI
+  全程无日志），且每次启动会留 `*.broken-时间戳` 备份（可作判定证据）。
+- 快速连续重启播放器会撞 **VB 单实例通道竞态**：新实例把命令行转发给正在拆解的旧实例后
+  自己退出（零日志"无痕消失"）。收尾必须轮询等旧进程真退净再启下一个。
 
 ### P0：切文件 / 切换解码器 → 会话损坏（黑屏 + 播放中断 + AI 字幕永久沉默）
 
@@ -141,9 +169,9 @@
 - **E 盘扩展包目录 `tmp` 建不了**：每 5 s 一条 `临时目录候选不可写 … UnauthorizedAccessException`
   （`Ai字幕管道.vb:640`）。磁盘 ACL 完全允许（属主本人、`Authenticated Users:(M)`、无 DENY），
   拒绝发生在 IRP 层，该机装有 360 系文件过滤驱动（`360FsFlt`/`360AntiSteal`/`FileCrypt`…）最符合解释。
-  功能不受影响（回落到程序目录 `tmp`，wav 落 `…\net10.0-windows10.0.26100.0\tmp\asr_worker_*`），
-  但 `Ai字幕管道.vb:166-169` 的探测排在 `:171` 的"进程已存活则返回"**之前**，
-  worker 活着时每次事件都白扫一遍候选目录 + 刷一条告警。最小修法：把探测挪到存活检查之后。
+  功能不受影响（回落到程序目录 `tmp`，wav 落 `…\net10.0-windows10.0.26100.0\tmp\asr_worker_*`）。
+  **2026-10-25 下午已修**：探测挪到 `启动()` 存活检查之后——worker 活着时不再白扫 + 刷告警
+  （实测：冷启动真起 worker 时 1 条，切解码器重入 0 条新增）。
 - **07:55:51 事件复盘**：那次"暂停后字幕消失"实为**会话重置**（四字段全零 + `尝试启动` 的
   `临时目录候选不可写`），与暂停无关——同一时刻发生了会话切换（最可能是当时手动点了「解码」按钮）。
   第 4 项本身是干净的（后用 0xB3 单独复验通过）。

@@ -162,18 +162,18 @@ Friend NotInheritable Class Ai字幕管道
             End Try
         End If
         If String.IsNullOrWhiteSpace(模型目录) Then 模型目录 = 配置.包目录
-        ' worker 要把每个窗口写成 wav 再 POST 给 llama-server，落盘位置必须是宿主
-        ' 亲眼验证过可写的目录：schtasks 派发等环境下系统临时目录可能整个不可用
-        ' （Python 直接 FileNotFoundError 退出，字幕全白，2026-10-23 完整跑实测）。
-        ' 候选：扩展包目录下的 tmp（模型都放那，几 MB 的 wav 不算负担）→ 程序目录
-        ' 下的 tmp（诊断日志就写在那，便携安装下可写）。都不可写就不传 --tmp-dir，
-        ' worker 有自己的回退链兜底（脚本旁 tmp → cwd → 系统临时目录）。
-        Dim 临时根 = 挑选临时目录(IO.Path.Combine(配置.包目录, "tmp"))
-        If String.IsNullOrEmpty(临时根) Then
-            临时根 = 挑选临时目录(IO.Path.Combine(程序目录, "tmp"))
-        End If
         SyncLock 锁
             If _进程 IsNot Nothing AndAlso Not _进程.HasExited Then Return True
+            ' 临时目录挑选必须在存活检查之后：媒体已打开会让 启动() 重入一次，
+            ' worker 活着时根本用不到新临时目录，却要白扫一遍候选目录。2026-10-25
+            ' 实测 E 盘扩展包目录的探测被文件过滤驱动拒绝（UnauthorizedAccessException），
+            ' 于是每次切文件/切解码器都刷一条告警——挪下来就只在真正要起 worker 时探测。
+            ' 候选与回退语义不变：扩展包目录下的 tmp → 程序目录下的 tmp，都不可写
+            ' 就不传 --tmp-dir，worker 有自己的回退链兜底（脚本旁 tmp → cwd → 系统临时目录）。
+            Dim 临时根 = 挑选临时目录(IO.Path.Combine(配置.包目录, "tmp"))
+            If String.IsNullOrEmpty(临时根) Then
+                临时根 = 挑选临时目录(IO.Path.Combine(程序目录, "tmp"))
+            End If
             _停止事件.Reset()
             Dim 启动信息 As New ProcessStartInfo With {
                 .FileName = If(String.IsNullOrWhiteSpace(配置.Python), "python", 配置.Python),
