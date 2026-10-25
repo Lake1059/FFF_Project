@@ -42,6 +42,11 @@ Friend NotInheritable Class Ai字幕管道
     Private _pump线程 As Thread = Nothing
     Private _result线程 As Thread = Nothing
     Private _stderr线程 As Thread = Nothing
+    ' 结果线程代次：每停一次/每启一次 worker 就 +1。旧结果线程的收尾（Finally 里
+    ' 置"worker 已退出"）只允许在代次未变时生效——重启时旧线程可能在进程退场后
+    ' 很久才 unwind，迟到的置位会把新 worker 的每一条结果全部丢掉，字幕从此永久
+    ' 沉默且日志无任何异常（停止再播 / 改设置重启的现场，2026-10-25 实机复盘）。
+    Private _结果线程代 As Integer = 0
     Private _停止事件 As New ManualResetEventSlim(False)
     Private _已释放 As Boolean = False
 
@@ -269,7 +274,8 @@ Friend NotInheritable Class Ai字幕管道
                 ' 提权不足等场景不影响功能。
             End Try
             _pump线程 = New Thread(AddressOf Pump循环) With {.IsBackground = True, .Name = "AI字幕-取数"}
-            _result线程 = New Thread(AddressOf Result循环) With {.IsBackground = True, .Name = "AI字幕-结果"}
+            Dim 代 As Integer = Interlocked.Increment(_结果线程代)
+            _result线程 = New Thread(Sub() Result循环(代)) With {.IsBackground = True, .Name = "AI字幕-结果"}
             _stderr线程 = New Thread(AddressOf Stderr循环) With {.IsBackground = True, .Name = "AI字幕-诊断"}
             _pump线程.Start()
             _result线程.Start()
@@ -286,6 +292,10 @@ Friend NotInheritable Class Ai字幕管道
     Public Sub 停止()
         Dim 进程本地 As Process = Nothing
         SyncLock 锁
+            ' 先作废这一代结果线程的收尾通知（见 _结果线程代）：本方法随后那句
+            ' 同步的通知已经覆盖了"worker 停了"的语义，旧线程迟到的 Finally 不许
+            ' 再把标志置回去——重启路径紧接着就是 状态机.重置()，谁后到谁害人。
+            Interlocked.Increment(_结果线程代)
             _停止事件.Set()
             进程本地 = _进程
             _进程 = Nothing
@@ -415,7 +425,7 @@ Friend NotInheritable Class Ai字幕管道
 
     ' ---------------- result 线程：worker stdout → 状态机 ----------------
 
-    Private Sub Result循环()
+    Private Sub Result循环(代 As Integer)
         Try
             Dim 进程本地 As Process = Nothing
             SyncLock 锁
@@ -433,7 +443,12 @@ Friend NotInheritable Class Ai字幕管道
         Catch ex As Exception
             记录($"AI 字幕：结果线程退出 {ex.GetType().Name} {ex.Message}")
         Finally
-            状态机?.通知Worker已退出()
+            ' 代次 gate：只有"当前这一代"结果线程的退场才算 worker 真的死了。
+            ' 重启时旧线程可能在新线程已开始收结果之后才 unwinding（进程退场≠
+            ' 线程退场），迟到的置位会让 状态机 把新 worker 的每条结果都当噪声
+            ' 丢掉——字幕永久沉默，且没有任何一行日志提示（停止再播/改设置
+            ' 重启现场，2026-10-25 实机复盘定位）。
+            If Volatile.Read(_结果线程代) = 代 Then 状态机?.通知Worker已退出()
         End Try
     End Sub
 

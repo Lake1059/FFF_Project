@@ -30,6 +30,9 @@ VB_PIPE = os.path.join(ROOT, "FFF.Player", "AI字幕", "Ai字幕管道.vb")
 VB_FSM = os.path.join(ROOT, "FFF.Player", "AI字幕", "Ai字幕状态机.vb")
 VB_CTRL = os.path.join(ROOT, "FFF.Player", "AI字幕", "播放器AI字幕控制器.vb")
 VB_SET = os.path.join(ROOT, "FFF.Player", "设置.vb")
+VB_CTRLER = os.path.join(ROOT, "FFF.Player", "Core", "播放器控制器.vb")
+CPP_SESSION = os.path.join(ROOT, "FFF.Native", "3FP", "Core", "PlayerSession.cpp")
+CPP_RENDER = os.path.join(ROOT, "FFF.Native", "3FP", "Render", "VideoRenderer.cpp")
 WORKER = os.path.join(ROOT, "tools", "ai-subtitles", "asr_worker.py")
 
 通过 = 0
@@ -309,6 +312,56 @@ def main():
     断言("字幕不会凭空编字" in worker,
         "L0-6 丢弃时给用户一次解释（空白字幕 + 无提示 = 用户以为坏了）",
         "找不到丢弃提示文案 —— 用户面对空白字幕得不到任何解释")
+
+    # ---------------- L0-7：切文件/切解码器会话损坏（2026-10-25 实机 P0）------------
+    # 实机矩阵第 6 项（切文件）暴露的永久沉默：worker 持续出 final、rtf 正常，
+    # 但字幕图层恒为 呈现帧数=0 已绘制序号冻结 命令数=0 画布=0x0，一条不上屏；
+    # 追加 seek 也无效。同一根因也造成用户报告的"切 GPU/CPU 解码黑屏中断"。
+    # 三处修法任断一环，现象都是"没有字幕/没有画面"且不抛异常：
+    #   C1 代次坐标系：DoOpen 必须自增 timelineGeneration（worker 唯一的重挂锚
+    #      机制就是代次变化），EnableAudioTap 装的新 tap 必须盖当前代次——
+    #      否则新 tap 从 0 开始而快照仍是旧值，代次守卫丢弃全部条目；
+    #   A1 首帧呈现：SetOutputWindow 对"有视频流但无缓存帧"必须走
+    #      PresentAfterBind()——Redraw() 在 !hasCachedVideo_ 时必然空转，
+    #      暂停/就绪态的新会话永远等不到首帧；
+    #   A2 自愈：SetWindow 同 HWND 早退不得跳过 swapchain 重建（设备恢复/
+    #      渲染器拆装后 window_ 还在，再绑同一句柄会被卡死）；
+    #   B  重绑失败不得静默吞（DXGI 会在旧 flip chain 未 retire 完时拒绝
+    #      CreateSwapChainForHwnd，用户当时看不到任何提示）；
+    #   +  worker 退出标志的代次 gate：旧结果线程迟到的 Finally 会把新 worker
+    #      的每条结果全部丢掉（停止再播/改设置重启现场）。
+    session = read(CPP_SESSION)
+    render = read(CPP_RENDER)
+    ctrler = read(VB_CTRLER)
+    pipe = read(VB_PIPE)
+    断言(re.search(r"\+\+snapshot_\.timelineGeneration;\s*\r?\n\s*NoteTapGeneration\(\);", session) is not None,
+        "L0-7 DoOpen 自增代次并紧接着盖 tap（新文件 = 新时间轴）",
+        "DoOpen 没有自增 timelineGeneration —— worker 端着旧文件的尾音按旧时钟报位置，"
+        "宿主代次守卫又对不上，切文件后字幕整段沉默")
+    断言(session.count("installed->NoteGeneration(snapshot_.timelineGeneration)") >= 1,
+        "L0-7 EnableAudioTap 给新 tap 盖当前代次",
+        "新 tap 从 0 开始而快照仍是旧代次 —— 每条音频块都被代次守卫丢弃")
+    断言("videoRenderer_.PresentAfterBind()" in session and
+        "!videoRenderer_.HasCachedVideo()" in session,
+        "L0-7 SetOutputWindow 无缓存帧时强制首帧呈现",
+        "普通视频仍只走 Redraw() —— headless 期间帧被丢，暂停/就绪态会话永远黑屏")
+    断言("FFFResult PlayerVideoRenderer::PresentAfterBind() noexcept {" in render,
+        "L0-7 PresentAfterBind 有实现（不是只声明）",
+        "找不到 PresentAfterBind 定义")
+    断言("window == window_ && (swapChain_ != nullptr || window == nullptr)" in render,
+        "L0-7 SetWindow 同句柄早退带 swapchain 检查（缺 chain 就重建）",
+        "同 HWND 早退不检查 chain —— 设备恢复后再绑同一句柄会被静默卡死")
+    断言(ctrler.count("会话.设置输出窗口(窗口)") >= 2 and "视频输出绑定失败" in ctrler,
+        "L0-7 重绑输出窗口失败要重试一次并上报（不静默吞）",
+        "重绑仍只吞异常 —— 用户面对黑屏得不到任何解释")
+    断言("Private _结果线程代 As Integer" in pipe and
+        "Private Sub Result循环(代 As Integer)" in pipe and
+        "Volatile.Read(_结果线程代) = 代" in pipe,
+        "L0-7 结果线程收尾通知有代次 gate（旧线程迟到不许置退出标志）",
+        "没有代次 gate —— 重启时旧结果线程的 Finally 会把新 worker 的每条结果全部丢掉")
+    断言(pipe.count("Interlocked.Increment(_结果线程代)") >= 2,
+        "L0-7 停/启两条路径都作废旧结果线程代次",
+        "少一处自增就留一个竞态窗口（进程退场 ≠ 线程退场）")
 
     print(f"\n通过 {通过} / 失败 {失败}")
     return 失败
