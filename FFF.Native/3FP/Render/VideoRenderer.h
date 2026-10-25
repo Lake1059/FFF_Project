@@ -1062,13 +1062,28 @@ private:
     // logs its transition once instead of once per frame. Sentinelled with a
     // value outside the enum.
     std::atomic<std::uint32_t> videoSuperResolutionLoggedReason_{ 0xFFFFFFFFu };
-    // Geometry of the cached upscaled surface, in the *picture's* axes (see
-    // ApplySuperResolution). Atomic because the status getter reads them on the
-    // host's thread while the render path writes them.
+    // 临时诊断：VSR 步进账。只在 deviceMutex_ 保护的渲染路径上累加，所以是普通量；
+    // 每 300 帧经内核日志槽报一次，重建计数器用来判几何是否逐帧抖动。
+    std::int64_t vsrBuildTicks_{ 0 };
+    std::int64_t vsrBltTicks_{ 0 };
+    std::uint64_t vsrFrames_{ 0 };
+    std::uint64_t vsrRebuilds_{ 0 };
+    // Geometry this frame *would* have used, in the *picture's* axes (see
+    // ApplySuperResolution). Published before the geometry gates so the host can
+    // explain a skip (0x0 said nothing about why NotUpscaling fired). Atomic
+    // because the status getter reads them on the host's thread. These are a
+    // diagnostic only: they must never be the cache key, or the comparison
+    // becomes a value against itself.
     std::atomic<std::uint32_t> videoSuperResolutionSourceWidth_{ 0 };
     std::atomic<std::uint32_t> videoSuperResolutionSourceHeight_{ 0 };
     std::atomic<std::uint32_t> videoSuperResolutionTargetWidth_{ 0 };
     std::atomic<std::uint32_t> videoSuperResolutionTargetHeight_{ 0 };
+    // Geometry the cached pass was *built* with. Written only inside the rebuild
+    // block, so it stays put while a frame skips or publishes new diagnostics.
+    std::uint32_t superResolutionPassSourceWidth_{ 0 };
+    std::uint32_t superResolutionPassSourceHeight_{ 0 };
+    std::uint32_t superResolutionPassTargetWidth_{ 0 };
+    std::uint32_t superResolutionPassTargetHeight_{ 0 };
     // The upscaled NV12/P010 surface and its per-plane views. Owned here, never
     // swapped into sourceViews_ (that array is EnsurePipeline's long-lived
     // pipeline state and mutating it would corrupt the next frame).
