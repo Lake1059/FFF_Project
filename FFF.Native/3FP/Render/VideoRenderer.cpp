@@ -4284,6 +4284,37 @@ void PlayerVideoRenderer::ReleaseTrueHdrResources() noexcept {
         trueHdrTexture_->Release();
         trueHdrTexture_ = nullptr;
     }
+    // The cached pass dies with the surface it writes into: its output view
+    // references that texture, so no frame can keep blitting into a released one.
+    if (trueHdrInputView_ != nullptr) {
+        trueHdrInputView_->Release();
+        trueHdrInputView_ = nullptr;
+    }
+    if (trueHdrOutputView_ != nullptr) {
+        trueHdrOutputView_->Release();
+        trueHdrOutputView_ = nullptr;
+    }
+    if (trueHdrProcessor_ != nullptr) {
+        trueHdrProcessor_->Release();
+        trueHdrProcessor_ = nullptr;
+    }
+    if (trueHdrEnumerator_ != nullptr) {
+        trueHdrEnumerator_->Release();
+        trueHdrEnumerator_ = nullptr;
+    }
+    if (trueHdrVideoContext_ != nullptr) {
+        trueHdrVideoContext_->Release();
+        trueHdrVideoContext_ = nullptr;
+    }
+    if (trueHdrVideoDevice_ != nullptr) {
+        trueHdrVideoDevice_->Release();
+        trueHdrVideoDevice_ = nullptr;
+    }
+    if (trueHdrInputTexture_ != nullptr) {
+        trueHdrInputTexture_->Release();
+        trueHdrInputTexture_ = nullptr;
+    }
+    trueHdrPpeRequested_ = false;
     videoTrueHdrSourceWidth_ = videoTrueHdrSourceHeight_ = 0;
     videoTrueHdrOutputWidth_ = videoTrueHdrOutputHeight_ = 0;
     videoTrueHdrActive_.store(false, std::memory_order_release);
@@ -4694,99 +4725,132 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
         }
     }
 
-    ComPtr<ID3D11VideoDevice> videoDevice;
-    ComPtr<ID3D11VideoContext> videoContext;
-    if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&videoDevice))) ||
-        FAILED(context_->QueryInterface(IID_PPV_ARGS(&videoContext))))
-        return rejectAt("QueryInterface: no ID3D11VideoDevice/ID3D11VideoContext");
-
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
-    content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
-    content.InputFrameRate = { 60, 1 };
-    content.InputWidth = sourceWidth_;
-    content.InputHeight = sourceHeight_;
-    content.OutputFrameRate = content.InputFrameRate;
-    content.OutputWidth = surfaceWidth;
-    content.OutputHeight = surfaceHeight;
-    content.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
-    ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
-    ComPtr<ID3D11VideoProcessor> processor;
-    if (FAILED(videoDevice->CreateVideoProcessorEnumerator(&content, &enumerator)) ||
-        FAILED(videoDevice->CreateVideoProcessor(enumerator.Get(), 0, &processor)))
-        return rejectAt("CreateVideoProcessorEnumerator/Processor");
-
-    UINT inputSupport = 0;
-    UINT outputSupport = 0;
-    if (FAILED(enumerator->CheckVideoProcessorFormat(sourceDescription.Format, &inputSupport)) ||
-        (inputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0 ||
-        FAILED(enumerator->CheckVideoProcessorFormat(DXGI_FORMAT_R10G10B10A2_UNORM,
-            &outputSupport)) ||
-        (outputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0)
-        return reject(FFF3FPVideoAutoHdrReason::UnsupportedSourceFormat);
-
-    // Capability probe. Only this GUID answers one, and the answer is the
-    // read-back payload rather than the HRESULT (see NvidiaVideoExtensions.h);
-    // it needs a live processor, so it runs here, once per Auto request.
-    if (!videoTrueHdrProbed_.load(std::memory_order_acquire)) {
-        const auto supported = FFF3FP::NvidiaVideo::IsTrueHdrSupported(
-            videoContext.Get(), processor.Get());
-        videoTrueHdrSupported_.store(supported, std::memory_order_release);
-        videoTrueHdrProbed_.store(true, std::memory_order_release);
-        if (!supported)
-            return reject(FFF3FPVideoAutoHdrReason::NotSupportedByDriver);
-    } else if (!videoTrueHdrSupported_.load(std::memory_order_acquire)) {
-        return reject(FFF3FPVideoAutoHdrReason::NotSupportedByDriver);
-    }
-
-    videoContext->VideoProcessorSetStreamFrameFormat(processor.Get(), 0,
-        D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-    // Same reproducible-result flag as the VSR path: the driver's implicit
-    // enhancements stay off and only the extension we set explicitly applies.
-    videoContext->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
-    const RECT source{ 0, 0, static_cast<LONG>(sourceWidth_),
-        static_cast<LONG>(sourceHeight_) };
-    videoContext->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &source);
-    const RECT destination{ 0, 0, static_cast<LONG>(surfaceWidth),
-        static_cast<LONG>(surfaceHeight) };
-    videoContext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &destination);
-
-    // The one call that turns the driver's automatic HDR on. When the host
-    // also asked for VSR the PPE extension rides in the same blit: the two are
-    // separate GUIDs on one processor and NVIDIA documents them as composable.
-    // If the driver disagrees the blit fails below, TrueHDR latches off, and
-    // the next frame takes the VSR-only path -- a working picture either way.
-    if (requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
+    // Whether this pass must also carry the super-resolution extension: it is
+    // stream state on the processor, so it belongs to the cached pass identity.
+    const bool ppeRequested =
+        requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
             FFF3FPVideoSuperResolution::Off &&
-        !videoSuperResolutionRejected_.load(std::memory_order_acquire) &&
-        FAILED(FFF3FP::NvidiaVideo::SetSuperResolution(videoContext.Get(),
-            processor.Get(), true)))
-        return rejectAt("SetStreamExtension(NVIDIA PPE) rejected");
-    if (FAILED(FFF3FP::NvidiaVideo::SetTrueHdr(videoContext.Get(),
-            processor.Get(), true)))
-        return rejectAt("SetStreamExtension(NVIDIA TrueHDR) rejected");
+        !videoSuperResolutionRejected_.load(std::memory_order_acquire);
+    ID3D11Texture2D* const inputTexture = sourceTextures_[0];
+    const bool samePass = trueHdrTexture_ != nullptr &&
+        trueHdrProcessor_ != nullptr && trueHdrVideoContext_ != nullptr &&
+        trueHdrInputView_ != nullptr && trueHdrOutputView_ != nullptr &&
+        trueHdrInputTexture_ == inputTexture && trueHdrPpeRequested_ == ppeRequested &&
+        videoTrueHdrSourceWidth_ == sourceWidth_ &&
+        videoTrueHdrSourceHeight_ == sourceHeight_ &&
+        videoTrueHdrOutputWidth_ == surfaceWidth &&
+        videoTrueHdrOutputHeight_ == surfaceHeight;
+    if (!samePass) {
+        ComPtr<ID3D11VideoDevice> videoDevice;
+        ComPtr<ID3D11VideoContext> videoContext;
+        if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&videoDevice))) ||
+            FAILED(context_->QueryInterface(IID_PPV_ARGS(&videoContext))))
+            return rejectAt("QueryInterface: no ID3D11VideoDevice/ID3D11VideoContext");
 
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDescription{};
-    inputDescription.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-    ComPtr<ID3D11VideoProcessorInputView> inputView;
-    if (FAILED(videoDevice->CreateVideoProcessorInputView(sourceTextures_[0],
-            enumerator.Get(), &inputDescription, &inputView)))
-        return rejectAt("CreateVideoProcessorInputView");
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+        content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        content.InputFrameRate = { 60, 1 };
+        content.InputWidth = sourceWidth_;
+        content.InputHeight = sourceHeight_;
+        content.OutputFrameRate = content.InputFrameRate;
+        content.OutputWidth = surfaceWidth;
+        content.OutputHeight = surfaceHeight;
+        content.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
+        ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
+        ComPtr<ID3D11VideoProcessor> processor;
+        if (FAILED(videoDevice->CreateVideoProcessorEnumerator(&content, &enumerator)) ||
+            FAILED(videoDevice->CreateVideoProcessor(enumerator.Get(), 0, &processor)))
+            return rejectAt("CreateVideoProcessorEnumerator/Processor");
 
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputDescription{};
-    outputDescription.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
-    ComPtr<ID3D11VideoProcessorOutputView> outputView;
-    if (FAILED(videoDevice->CreateVideoProcessorOutputView(trueHdrTexture_,
-            enumerator.Get(), &outputDescription, &outputView)))
-        return rejectAt("CreateVideoProcessorOutputView");
+        UINT inputSupport = 0;
+        UINT outputSupport = 0;
+        if (FAILED(enumerator->CheckVideoProcessorFormat(sourceDescription.Format,
+                &inputSupport)) ||
+            (inputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0 ||
+            FAILED(enumerator->CheckVideoProcessorFormat(DXGI_FORMAT_R10G10B10A2_UNORM,
+                &outputSupport)) ||
+            (outputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0)
+            return reject(FFF3FPVideoAutoHdrReason::UnsupportedSourceFormat);
+
+        // Capability probe. Only this GUID answers one, and the answer is the
+        // read-back payload rather than the HRESULT (see NvidiaVideoExtensions.h);
+        // it needs a live processor, so it runs here, once per Auto request.
+        if (!videoTrueHdrProbed_.load(std::memory_order_acquire)) {
+            const auto supported = FFF3FP::NvidiaVideo::IsTrueHdrSupported(
+                videoContext.Get(), processor.Get());
+            videoTrueHdrSupported_.store(supported, std::memory_order_release);
+            videoTrueHdrProbed_.store(true, std::memory_order_release);
+            if (!supported)
+                return reject(FFF3FPVideoAutoHdrReason::NotSupportedByDriver);
+        } else if (!videoTrueHdrSupported_.load(std::memory_order_acquire)) {
+            return reject(FFF3FPVideoAutoHdrReason::NotSupportedByDriver);
+        }
+
+        videoContext->VideoProcessorSetStreamFrameFormat(processor.Get(), 0,
+            D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+        // Same reproducible-result flag as the VSR path: the driver's implicit
+        // enhancements stay off and only the extension we set explicitly applies.
+        videoContext->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
+        const RECT source{ 0, 0, static_cast<LONG>(sourceWidth_),
+            static_cast<LONG>(sourceHeight_) };
+        videoContext->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &source);
+        const RECT destination{ 0, 0, static_cast<LONG>(surfaceWidth),
+            static_cast<LONG>(surfaceHeight) };
+        videoContext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &destination);
+
+        // The calls that turn the driver's automatic HDR on -- and, when the host
+        // asked for it, the super-resolution scaler riding the same blit, since the
+        // two are separate GUIDs on one processor and NVIDIA documents them as
+        // composable. They are stream state on this processor, so issuing them once
+        // per pass is what makes the cache worth having. If the driver disagrees with
+        // the combination the blit fails below, TrueHDR latches off, and the next
+        // frame takes the VSR-only path -- a working picture either way.
+        if (ppeRequested &&
+            FAILED(FFF3FP::NvidiaVideo::SetSuperResolution(videoContext.Get(),
+                processor.Get(), true)))
+            return rejectAt("SetStreamExtension(NVIDIA PPE) rejected");
+        if (FAILED(FFF3FP::NvidiaVideo::SetTrueHdr(videoContext.Get(),
+                processor.Get(), true)))
+            return rejectAt("SetStreamExtension(NVIDIA TrueHDR) rejected");
+
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDescription{};
+        inputDescription.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        ComPtr<ID3D11VideoProcessorInputView> inputView;
+        if (FAILED(videoDevice->CreateVideoProcessorInputView(inputTexture,
+                enumerator.Get(), &inputDescription, &inputView)))
+            return rejectAt("CreateVideoProcessorInputView");
+
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputDescription{};
+        outputDescription.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        ComPtr<ID3D11VideoProcessorOutputView> outputView;
+        if (FAILED(videoDevice->CreateVideoProcessorOutputView(trueHdrTexture_,
+                enumerator.Get(), &outputDescription, &outputView)))
+            return rejectAt("CreateVideoProcessorOutputView");
+
+        // Publish only a fully built pass, and hold a reference on the decoded
+        // texture so its address cannot be reused by a new texture behind the
+        // cached input view.
+        trueHdrVideoDevice_ = videoDevice.Detach();
+        trueHdrVideoContext_ = videoContext.Detach();
+        trueHdrEnumerator_ = enumerator.Detach();
+        trueHdrProcessor_ = processor.Detach();
+        trueHdrInputView_ = inputView.Detach();
+        trueHdrOutputView_ = outputView.Detach();
+        trueHdrInputTexture_ = inputTexture;
+        trueHdrInputTexture_->AddRef();
+        trueHdrPpeRequested_ = ppeRequested;
+    }
 
     D3D11_VIDEO_PROCESSOR_STREAM stream{};
     stream.Enable = TRUE;
     stream.OutputIndex = 0;
     stream.InputFrameOrField = 0;
-    stream.pInputSurface = inputView.Get();
-    if (FAILED(videoContext->VideoProcessorBlt(processor.Get(), outputView.Get(), 0, 1,
-            &stream)))
+    stream.pInputSurface = trueHdrInputView_;
+    if (FAILED(trueHdrVideoContext_->VideoProcessorBlt(trueHdrProcessor_,
+            trueHdrOutputView_, 0, 1, &stream))) {
+        ReleaseTrueHdrResources();
         return rejectAt("VideoProcessorBlt");
+    }
 
     videoTrueHdrReason_.store(FFF3FPVideoAutoHdrReason::None,
         std::memory_order_release);
