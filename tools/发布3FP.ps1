@@ -1,7 +1,14 @@
 param(
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
-    [string]$OutputDirectory = ""
+    [string]$OutputDirectory = "",
+    # 目标框架。留空 = 用各工程自身默认值（当前 net10.0-windows10.0.26100.0）。
+    # .NET 11 正式版发布后改为：发布3FP.ps1 -NetTFM net11.0-windows10.0.26100.0
+    [string]$NetTFM = "",
+    # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
+    [string]$LakeUITfm = "",
+    # 跨产品框架配对：默认拒绝与输出目录里已发布的对家产品框架不一致，见 Resolve-Toolchain.ps1。
+    [switch]$AllowFrameworkMismatch
 )
 
 # 传统散装发布：产出「FFF.Player.exe + 全部依赖 DLL 同目录」的目录形态。
@@ -41,9 +48,13 @@ if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration 构建失败。"
 $StagingDirectory = Join-Path ([IO.Path]::GetTempPath()) ("3FP-publish-loose-" + [Guid]::NewGuid().ToString("N"))
 try {
     New-Item -ItemType Directory -Path $StagingDirectory | Out-Null
+    # TFM 参数包：留空时展开为 0 个参数，命令行与改动前逐字符一致。
+    $TfmArgs = @()
+    if (-not [string]::IsNullOrWhiteSpace($NetTFM)) { $TfmArgs += "-p:NetTFM=$NetTFM" }
+    if (-not [string]::IsNullOrWhiteSpace($LakeUITfm)) { $TfmArgs += "-p:LakeUITfm=$LakeUITfm" }
     & $DotNet publish (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
         -c $Configuration -r win-x64 --self-contained false -o $StagingDirectory `
-        -p:DebugType=None -p:DebugSymbols=false
+        -p:DebugType=None -p:DebugSymbols=false @TfmArgs
     if ($LASTEXITCODE -ne 0) { throw "FFF.Player 散装发布失败。" }
 
     # 确认运行依赖齐全后，再替换发布目录。
@@ -174,10 +185,20 @@ try {
         } else { throw "FFmpeg 变体门禁退出码异常（rc=$varRc）⇒ 守卫不成立，中止：$tail" }
     }
 
+    $PlayerFramework = Get-ProductTargetFramework -ProjectPath (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
+        -NetTFM $NetTFM -DotNet $DotNet
+    # 配对护栏必须先于删目录跑：账本（.product-frameworks.txt）就躺在输出目录里，
+    # 先删后查永远读到空账，跨产品框架配对在这条发布路径上就形同虚设。
+    # 先在对家旧账还在时判一次（能拦住），重建目录后再记一次新账（账已随目录清空，不会自冲突）。
+    Assert-ProductFrameworkPair -OutputDirectory $OutputDirectory -Product "FFF.Player" `
+        -Framework $PlayerFramework -AllowMismatch:$AllowFrameworkMismatch
     if (Test-Path -LiteralPath $OutputDirectory) {
         Remove-Item -LiteralPath $OutputDirectory -Recurse -Force
     }
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    Assert-ProductFrameworkPair -OutputDirectory $OutputDirectory -Product "FFF.Player" `
+        -Framework $PlayerFramework -AllowMismatch:$AllowFrameworkMismatch
+
     Get-ChildItem -LiteralPath $StagingDirectory -Force | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $OutputDirectory -Recurse -Force
     }
