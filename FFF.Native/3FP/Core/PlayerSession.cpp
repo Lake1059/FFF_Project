@@ -1730,16 +1730,25 @@ FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
         // 刻意丢弃（Renderer 不替无窗会话保管 GPU 缓存），Redraw 此时必然空转，
         // 于是一个暂停/就绪态的新会话永远等不到首帧——换解码器、切文件后黑屏
         // 就是这么来的。改用 PresentAfterBind() 把交换链建起来并呈交一帧。
+        const bool presentAfterBind =
+            window != nullptr && videoStream_ >= 0 && !videoRenderer_.HasCachedVideo();
         const auto redrawResult = staticImage_ && stillImageFrame_ != nullptr && window != nullptr
             ? videoRenderer_.Render(stillImageFrame_, snapshot_.frameIndex, true, false, false, true)
             : coverArtFrame_ != nullptr && videoStream_ < 0 && window != nullptr
                 ? videoRenderer_.Render(coverArtFrame_, HdrProcessor::kUnknownFrameIndex, true, true)
-                : window != nullptr && videoStream_ >= 0 && !videoRenderer_.HasCachedVideo()
+                : presentAfterBind
                     ? videoRenderer_.PresentAfterBind()
                     : videoRenderer_.Redraw();
         if (redrawResult == FFFResult::DeviceFailure &&
             videoRenderer_.RequestRecoveryIfDeviceLost()) return;
         if (redrawResult != FFFResult::Success) {
+            // PresentAfterBind 是尽力而为的补呈，不是解码管线的一环：它替代的
+            // Redraw() 在无缓存帧时本可"空转成功"。设备未丢（真丢失上面已经
+            // 走恢复分支）时的失败是窗口/DXGI 瞬时不可用——典型如旧 flip chain
+            // 尚未 retire 完时 CreateSwapChainForHwnd 被拒。这种失败不能把整个
+            // 暂停/就绪会话升级成 Failed：宿主的重绑重试与下一次布局变更都会
+            // 再走到这里，链一旦能建起来画面就补上了。
+            if (presentAfterBind) return;
             Fail(FFFResult::DeviceFailure, videoRenderer_.LastError(), "redraw");
             return;
         }
@@ -3417,9 +3426,6 @@ bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const s
 }
 
 void PlayerSession::DoOpen(std::string path) noexcept {
-    // Keep the flip-model chain for a same-HWND media switch. DXGI can reject
-    // an immediate replacement while the previous chain is still retiring.
-    DoClose(FFF3FPState::Opening, true);
     // A new file is a new timeline: whatever the tap buffered from the previous
     // one must not survive into it -- and neither may what the ASR worker has
     // accumulated. The worker's only re-anchor mechanism is a generation change
@@ -3428,8 +3434,18 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // to advance here, exactly as a seek advances it. Stamping then clears the
     // kernel-side ring. 2026-10-25 实机：只换文件不换解码器时代次不变，worker
     // 端着旧文件的尾音继续按旧时钟报位置，宿主侧代次守卫又对不上，字幕整段沉默。
+    // The stamp must precede DoClose, not follow it: the host's pump does not
+    // stop for a file switch, and DoClose tears the demuxer/decoder down for
+    // tens of milliseconds during which the pump can still drain old-file tail
+    // blocks stamped with the old generation -- the worker's per-block guard
+    // reads those as "current" and transcribes them. Stamping at the entry
+    // empties the ring first, so the DoClose window cannot leak the previous
+    // file's tail into the new timeline.
     ++snapshot_.timelineGeneration;
     NoteTapGeneration();
+    // Keep the flip-model chain for a same-HWND media switch. DXGI can reject
+    // an immediate replacement while the previous chain is still retiring.
+    DoClose(FFF3FPState::Opening, true);
     // A new file is a new audio-pool round: back to the default target.
     audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
     seenAudioUnderruns_ = 0;

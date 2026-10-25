@@ -836,6 +836,12 @@ def main():
     args = build_arg_parser().parse_args()
 
     sys.stdout.reconfigure(encoding="utf-8")
+    # stderr 同样必须钉死 UTF-8：宿主按 UTF-8 解码 stderr 管道（Ai字幕管道.vb
+    # 的 StandardErrorEncoding=UTF8），而默认 python 的 stderr 管道走 ANSI 代码
+    # 页——zh-CN 机落 GBK 进 ai-subtitles.log 全是 mojibake，cp1252 机更是在
+    # log() 写中文那行直接 UnicodeEncodeError，worker 起不来。errors=replace
+    # 保证任何环境都"最多样一个替换符"，绝不因编码崩掉诊断通道。
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     model_dir = Path(args.model_dir)
     if args.model:
         model = Path(args.model)
@@ -909,6 +915,7 @@ def main():
         return 5
     log(f"tmpdir: {tmpdir}")
     windows = dropped = failures = 0
+    audio_seconds = 0.0
     # 失控（模型重复同一个字）只报一次：它通常整段片子都在发生，每窗报一次会
     # 把信息图层刷成刷屏。
     已报失控 = False
@@ -956,10 +963,18 @@ def main():
                 break
             try:
                 meta = json.loads(meta_bytes.decode("utf-8"))
-            except Exception:
-                # Resync is impossible on a length-prefixed stream; drop PCM.
-                pcm = read_exact(stdin, meta.get("bytes", 0) if isinstance(meta, dict) else 0)
-                continue
+                if not isinstance(meta, dict):
+                    raise ValueError("frame meta is not a JSON object")
+            except Exception as e:
+                # 长度前缀流无法重同步：元数据坏一帧，后面的 PCM 边界全不可信。
+                # 历史版本在这里试图"跳过本帧 PCM 继续"，但 except 分支里 meta
+                # 根本没绑定（首帧 NameError 直接崩，后续帧沿用上一帧的陈旧
+                # bytes 把流错位越搞越深）。唯一自洽的做法是放弃流、退场，
+                # 让宿主的存活检查去重启一个干净的 worker。
+                log(f"bad frame meta ({e}); stream is unsyncable, exiting")
+                emit({"type": "status", "state": "error", "fatal": True,
+                      "detail": f"bad frame meta: {e}"})
+                return 4
             pcm = read_exact(stdin, meta.get("bytes", 0))
             if pcm is None:
                 break
@@ -1044,6 +1059,11 @@ def main():
                 continue
             infer_seconds.append(dt)
             windows += 1
+            # 累计的是每窗实际音频秒（len(samples)/TARGET_RATE），不是 windows×step：
+            # 预置里 window≠step 的档（灵敏 2/1、均衡 5/3、完整 8/4）用步长当分母
+            # 会把 rtf 系统性抬高 window/step 倍（灵敏档 2 倍虚高）。rtf 是文档
+            # 体系里唯一的实时性判据，还被宿主状态行原样上屏，必须按真实音频量计。
+            audio_seconds += len(samples) / TARGET_RATE
             # matched 只是"报给宿主看"：worker 从不自己丢结果（宿主可选择丢弃，
             # 而且那个开关不该逼 worker 重启）。
             matched = same_language(language, target_language)
@@ -1057,8 +1077,7 @@ def main():
                 f" rtf={dt/max(0.001, len(samples)/TARGET_RATE):.3f} :: {text[:60]}")
 
             if time.time() - last_stats >= 30.0:
-                rtf = (sum(infer_seconds) /
-                       max(0.001, windows * args.step)) if windows else 0.0
+                rtf = (sum(infer_seconds) / max(0.001, audio_seconds)) if windows else 0.0
                 emit({"type": "stats", "rtf": round(rtf, 3),
                       "windows": windows, "dropped": dropped})
                 last_stats = time.time()
@@ -1071,7 +1090,7 @@ def main():
             pass
     # Final stats carry the real cumulative rtf (this used to hardcode 0.0, which
     # made every shutdown look like "no inference ever ran").
-    final_rtf = (sum(infer_seconds) / max(0.001, windows * args.step)) if windows else 0.0
+    final_rtf = (sum(infer_seconds) / max(0.001, audio_seconds)) if windows else 0.0
     emit({"type": "stats", "rtf": round(final_rtf, 3),
           "windows": windows, "dropped": dropped})
     return 0

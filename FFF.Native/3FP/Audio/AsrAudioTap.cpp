@@ -175,9 +175,13 @@ AsrAudioTap::ConsumeResult AsrAudioTap::Consume(void* const dst,
 }
 
 std::size_t AsrAudioTap::BufferedBytes() const noexcept {
-    // Read the read cursor first: both only move forward, so this difference
-    // can never read as negative the way the other order could.
-    const auto read = readIdx_.load(std::memory_order_acquire);
-    const auto written = writeIdx_.load(std::memory_order_acquire);
+    // Under consumeMutex_: NoteGeneration resets both cursors to 0, which breaks
+    // the monotonicity this difference used to rely on. A stats reader racing
+    // that reset could sample the old read cursor with the new write cursor and
+    // underflow to ~2^64. The lock is the same one the reset holds, so a
+    // snapshot is always taken from one side or the other of any reset.
+    std::lock_guard lock(consumeMutex_);
+    const auto read = readIdx_.load(std::memory_order_relaxed);
+    const auto written = writeIdx_.load(std::memory_order_relaxed);
     return written - read;
 }
