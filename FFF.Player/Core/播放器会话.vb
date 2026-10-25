@@ -457,14 +457,33 @@ Public NotInheritable Class 播放器会话
     Friend Shared Function 视频超分辨率状态文本(状态 As 原生视频超分辨率状态) As String
         If 状态.生效 <> 0UI Then Return "驱动已接受本次请求（不等于画面已被增强）"
         Select Case 状态.原因
-            Case 1UI : Return "未请求"
+            ' 内核的 原因 初值就是 NotRequested，不等于用户没勾：请求已下发但本帧还没走到
+            ' 超分那条路（自动 HDR 占用处理通道、compare 模式互斥）时它仍是这个值。
+            Case 1UI : Return If(状态.请求模式 = 0UI, "未请求",
+                               "已请求，内核尚未逐帧判定（自动 HDR 可能占用了处理通道）")
             Case 2UI : Return "渲染适配器不是 NVIDIA"
-            Case 3UI : Return "当前不是放大（窗口不大于画面）"
-            Case 4UI : Return $"源高度 {状态.源高} 不在 360..1440 区间"
-            Case 5UI : Return "源格式不支持送入视频处理器（如软解上传路径）"
+            Case 3UI : Return "当前不是放大（窗口不大于画面）；把播放窗口拉大或全屏才会生效"
+            Case 4UI : Return $"源高度 {状态.源高} 不在 360..1440 区间（4K/8K 源本功能不适用）"
+            Case 5UI : Return "源格式不支持送入视频处理器（如软解上传路径）；换硬件解码可播的片源才会生效"
             Case 6UI : Return "驱动拒绝过，已闩住；关掉再打开可重新探测"
+            ' 内核明确报了这一值（FFF.Player.Api.h:753 YieldedToAutoHdr），漏了它就会落到
+            ' Case Else 报"内核未报告原因"——把一条有名字的读数说成没有。
+            Case 7UI : Return "自动 HDR 占用同一条视频处理器通道，本次超分未单独生效（两者互斥）"
             Case Else : Return If(状态.驱动拒绝闩 <> 0UI, "驱动拒绝过", "内核未报告原因")
         End Select
+    End Function
+
+    ''' <summary>Tab 图层的超分行：一个判词 + 一句人话，仅此两样。判词固定三态开头
+    ''' （已激活 / 未开启 / 未生效），UI 只按前缀着色，判据仍然取自内核的 生效 字段
+    ''' 而不是用户的勾选态——勾选态实测不等于生效，拿它点亮就是假凭证。
+    ''' 裸读数（active / reason / 尺寸 / 闩）不进界面：人话与字段并排会把行挤到窗口右沿
+    ''' 截断，而排查要的原值 FFF3FP_GetVideoSuperResolutionStatus 逐字段都还在报。</summary>
+    Friend Shared Function 视频超分辨率图层文本(状态 As 原生视频超分辨率状态) As String
+        If 状态.生效 <> 0UI Then Return "已激活 · 驱动已接受（不等于画面已被增强）"
+        ' "未开启" 只能表示"用户没请求"。用 原因 单独判会在这些场合说谎：自动 HDR
+        ' 占用通道时内核原因停在初值、驱动闩住、compare 模式互斥——那时用户确实勾了。
+        If 状态.请求模式 = 0UI Then Return "未开启"
+        Return "未生效 · " & 视频超分辨率状态文本(状态)
     End Function
 
     ''' <summary>把内核的原因码翻成人话。逐值对应 FFF3FPVideoAutoHdrReason。
@@ -478,7 +497,9 @@ Public NotInheritable Class 播放器会话
                    $"源 {状态.源宽}×{状态.源高} → PQ/BT.2020 {状态.输出宽}×{状态.输出高}）"
         End If
         Select Case 状态.原因
-            Case 1UI : Return "未请求"
+            ' 与超分同理：NotRequested 是内核初值，请求已下发但本帧还没走到这条通道时
+            ' 它仍是这个值，不能翻成"未请求"。
+            Case 1UI : Return If(状态.请求模式 = 0UI, "未请求", "已请求，内核尚未逐帧判定")
             Case 2UI : Return "渲染适配器不是 NVIDIA"
             Case 3UI : Return "驱动不支持该私有流扩展（探测未读到 1）"
             Case 4UI : Return "当前源不是 SDR（HDR 源不予转换）"
@@ -487,6 +508,17 @@ Public NotInheritable Class 播放器会话
             Case 7UI : Return "驱动拒绝或 Blt 失败，已闩住；关掉再打开可重新探测"
             Case Else : Return If(状态.驱动拒绝闩 <> 0UI, "驱动拒绝过", "内核未报告原因")
         End Select
+    End Function
+
+    ''' <summary>Tab 图层的自动 HDR 行，与超分行同一条规则：判词 + 一句人话，不摊字段。
+    ''' 判词取自内核的 生效 而不是勾选态——自动 HDR 与 compare 模式互斥由内核强制，
+    ''' 那类场合同样是"已请求但未启用"。TrueHDR 的能力探测没有独立读数可报
+    ''' （内核把"探测读回 1"折进了 生效），所以这里不写"探测通过"之类的话，
+    ''' 那等于替内核报一个它没报的数。</summary>
+    Friend Shared Function 视频自动HDR图层文本(状态 As 原生视频自动HDR状态) As String
+        If 状态.生效 <> 0UI Then Return "已启用 · SDR → HDR10（驱动 TrueHDR）"
+        If 状态.请求模式 = 0UI Then Return "未开启"
+        Return "未生效 · " & 视频自动HDR状态文本(状态)
     End Function
 
 
@@ -807,6 +839,8 @@ Public NotInheritable Class 播放器会话
         Return New 定时文字状态(值)
     End Function
 
+    ''' <summary>播放器当下状态的快照 —— 语义就是"每次读都是最新的"，所以必须每次现取，绝不能缓存。</summary>
+    ''' <remarks>命中 .NET 11 的 WFO2000（getter 内构造新引用实例），已在 .editorconfig 中按本文件作用域抑制；理由见那里。</remarks>
     Public ReadOnly Property 当前快照 As 播放器快照
         Get
             Dim 值 As New 原生播放器快照 With {.大小 = 原生播放器快照大小, .版本 = 20UI}

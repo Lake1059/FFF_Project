@@ -389,9 +389,13 @@ Friend Module ColorTransformInjectionRegression
                 Return 帧序号 > 3
             End Get
         End Property
+        ''' <summary>表头顺序是常量，原为每次访问新建数组，.NET 11 的 WFO2000（属性 getter 内构造新引用实例）会命中，故提为共享只读字段。</summary>
+        Private Shared ReadOnly 顺序表 As String() =
+            {"HDR处理路径", "模块已采用", "注入帧数", "外部色彩变换可用", "帧序号", "用户可见文案", "内容描述"}
+
         Public ReadOnly Property 顺序 As String()
             Get
-                Return {"HDR处理路径", "模块已采用", "注入帧数", "外部色彩变换可用", "帧序号", "用户可见文案", "内容描述"}
+                Return 顺序表
             End Get
         End Property
         Public Function 取值(名称 As String) As String
