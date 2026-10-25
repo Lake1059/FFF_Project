@@ -67,6 +67,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取弹幕状态 As Func(Of 定时文字状态)
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
     Private ReadOnly 获取内容描述 As Func(Of String)
+    Private ReadOnly 获取超分状态 As Func(Of String)
+    Private ReadOnly 获取自动HDR状态 As Func(Of String)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
     Private ReadOnly 刷新定时器 As LakeUI.PrecisionTimer
     Private 普通字体 As New Font(默认信息字体, 信息字号, FontStyle.Regular, GraphicsUnit.Point)
@@ -115,7 +117,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
                    弹幕状态提供器 As Func(Of 定时文字状态),
                    WASAPI模式提供器 As Func(Of WASAPI共享模式),
                    内容描述提供器 As Func(Of String),
-                   图层提交器 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single))
+                   图层提交器 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single),
+                   Optional 超分状态提供器 As Func(Of String) = Nothing,
+                   Optional 自动HDR状态提供器 As Func(Of String) = Nothing)
         ArgumentNullException.ThrowIfNull(画面)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(媒体信息提供器)
@@ -127,6 +131,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取字幕状态 = 字幕状态提供器 : 获取弹幕状态 = 弹幕状态提供器
         获取WASAPI模式 = WASAPI模式提供器
         获取内容描述 = 内容描述提供器
+        获取超分状态 = 超分状态提供器
+        获取自动HDR状态 = 自动HDR状态提供器
         提交图层 = 图层提交器
         文本测量格式 = DirectCast(StringFormat.GenericTypographic.Clone(), StringFormat)
         文本测量格式.FormatFlags = 文本测量格式.FormatFlags Or
@@ -327,6 +333,25 @@ Friend NotInheritable Class 播放器信息图层呈现器
             添加配对行如果有值(结果, "内容：", 内容描述, 橙色)
             添加配对行如果有值(结果, "输出：", 视频输出(快照, 画面控件.ClientSize), 绿色)
             添加配对行如果有值(结果, "渲染：", 视频渲染(快照), 黄色)
+            ' RTX 视频超分辨率与 RTX 自动 HDR（TrueHDR）各一行。这两行存在的理由相同：
+            ' 内核逐帧跳过时**完全静默**（软解源没有 D3D11_BIND_DECODER、窗口没放大、
+            ' 输出不是 10 位 HDR 契约……），用户能看到的只有"勾了但没效果"。
+            ' 文本由 播放器会话 侧组好：判词（已激活/已启用 · 未开启 · 未生效）+ 一句人话，
+            ' 这里只按判词着色——判词取自内核的 生效 字段，不是用户的勾选态。
+            ' 跳过态用告警色而不是青色，是为了不让它被读成又一条常规读数；
+            ' 未开启是常规态（两个功能默认都关），涂成告警色等于把常规读数报成异常。
+            Dim 超分行 = 安全获取(获取超分状态)
+            If 超分行 IsNot Nothing Then
+                添加配对行如果有值(结果, "超分辨率：", 超分行,
+                                   If(超分行.StartsWith("未生效", StringComparison.Ordinal), 告警色,
+                                      If(超分行.StartsWith("未开启", StringComparison.Ordinal), 青色, 绿色)))
+            End If
+            Dim 自动HDR行 = 安全获取(获取自动HDR状态)
+            If 自动HDR行 IsNot Nothing Then
+                添加配对行如果有值(结果, "自动HDR：", 自动HDR行,
+                                   If(自动HDR行.StartsWith("未生效", StringComparison.Ordinal), 告警色,
+                                      If(自动HDR行.StartsWith("未开启", StringComparison.Ordinal), 青色, 绿色)))
+            End If
         End If
 
         If 音频 IsNot Nothing Then
