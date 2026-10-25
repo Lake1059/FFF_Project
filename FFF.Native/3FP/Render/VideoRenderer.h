@@ -1068,6 +1068,12 @@ private:
     std::int64_t vsrBltTicks_{ 0 };
     std::uint64_t vsrFrames_{ 0 };
     std::uint64_t vsrRebuilds_{ 0 };
+    // 临时诊断：TrueHDR 步进账，与 VSR 同款但走 FPT_HDR_TRACE。两路抢同一条
+    // 视频处理器时，混在一份日志里分不清是谁在重建。
+    std::int64_t trueHdrBuildTicks_{ 0 };
+    std::int64_t trueHdrBltTicks_{ 0 };
+    std::uint64_t trueHdrFrames_{ 0 };
+    std::uint64_t trueHdrRebuilds_{ 0 };
     // Geometry this frame *would* have used, in the *picture's* axes (see
     // ApplySuperResolution). Published before the geometry gates so the host can
     // explain a skip (0x0 said nothing about why NotUpscaling fired). Atomic
