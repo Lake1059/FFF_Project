@@ -360,6 +360,23 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Function
 
+    ''' <summary>Tab 图层的超分行（逐帧现读，不走 播放器视频超分辨率控制器 的缓存：
+    ''' 那份只在开页与勾选时更新，恰好错过了内核真正做判定的那一刻）。
+    ''' 读不到时答 Nothing，图层就不显示这一行——不伪造一个"未生效"。</summary>
+    Friend Function 读取视频超分辨率图层文本() As String
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return Nothing
+        Try
+            Dim 状态 As 原生视频超分辨率状态
+            If Not 目标.读取视频超分辨率状态(状态) Then Return Nothing
+            Return 播放器会话.视频超分辨率图层文本(状态)
+        Catch ex As ObjectDisposedException
+            Return Nothing
+        Catch ex As 播放器异常
+            Return Nothing
+        End Try
+    End Function
+
     ''' <summary>本机内核是否提供自动 HDR（TrueHDR）入口。False 时 UI 应置灰并说明。</summary>
     Friend ReadOnly Property 支持视频自动HDR As Boolean
         Get
@@ -389,6 +406,23 @@ Public NotInheritable Class 播放器控制器
             Dim 状态 As 原生视频自动HDR状态
             If Not 目标.读取视频自动HDR状态(状态) Then Return Nothing
             Return 播放器会话.视频自动HDR状态文本(状态)
+        Catch ex As ObjectDisposedException
+            Return Nothing
+        Catch ex As 播放器异常
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>Tab 图层的自动 HDR 行（逐帧现读，不走 播放器视频自动HDR控制器 的缓存：
+    ''' 那份只在开页与勾选时更新，恰好错过了内核真正做判定的那一刻）。
+    ''' 读不到时答 Nothing，图层就不显示这一行——不伪造一个"未生效"。</summary>
+    Friend Function 读取视频自动HDR图层文本() As String
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return Nothing
+        Try
+            Dim 状态 As 原生视频自动HDR状态
+            If Not 目标.读取视频自动HDR状态(状态) Then Return Nothing
+            Return 播放器会话.视频自动HDR图层文本(状态)
         Catch ex As ObjectDisposedException
             Return Nothing
         Catch ex As 播放器异常
