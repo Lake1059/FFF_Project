@@ -1122,6 +1122,20 @@ private:
     // sourceViews_.
     ID3D11Texture2D* trueHdrTexture_{ nullptr };
     ID3D11ShaderResourceView* trueHdrView_{ nullptr };
+    // The TrueHDR video-processor pass, cached across frames with the same
+    // discipline as the super-resolution one: rebuilding it every frame costs
+    // ~20x the frame budget because the driver re-warms its enhancement on each
+    // fresh processor. `trueHdrPpeRequested_` is part of the pass identity --
+    // the cached processor carries the super-resolution extension only if the
+    // host asked for it when the processor was built.
+    ID3D11VideoDevice* trueHdrVideoDevice_{ nullptr };
+    ID3D11VideoContext* trueHdrVideoContext_{ nullptr };
+    ID3D11VideoProcessorEnumerator* trueHdrEnumerator_{ nullptr };
+    ID3D11VideoProcessor* trueHdrProcessor_{ nullptr };
+    ID3D11VideoProcessorInputView* trueHdrInputView_{ nullptr };
+    ID3D11VideoProcessorOutputView* trueHdrOutputView_{ nullptr };
+    ID3D11Texture2D* trueHdrInputTexture_{ nullptr };
+    bool trueHdrPpeRequested_{ false };
     // Decode transfer of the frame currently held, untouched by the TrueHDR
     // re-tag. The ApplyTrueHdr SDR-source gate and every draw's baseline must
     // read THIS, not cachedVideoSettings_.transfer: DrawWithShader retags that
