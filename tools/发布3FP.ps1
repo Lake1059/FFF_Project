@@ -6,7 +6,9 @@ param(
     # .NET 11 正式版发布后改为：发布3FP.ps1 -NetTFM net11.0-windows10.0.26100.0
     [string]$NetTFM = "",
     # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
-    [string]$LakeUITfm = ""
+    [string]$LakeUITfm = "",
+    # 跨产品框架配对：默认拒绝与输出目录里已发布的对家产品框架不一致，见 Resolve-Toolchain.ps1。
+    [switch]$AllowFrameworkMismatch
 )
 
 # 传统散装发布：产出「FFF.Player.exe + 全部依赖 DLL 同目录」的目录形态。
@@ -187,6 +189,11 @@ try {
         Remove-Item -LiteralPath $OutputDirectory -Recurse -Force
     }
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    Assert-ProductFrameworkPair -OutputDirectory $OutputDirectory -Product "FFF.Player" `
+        -Framework (Get-ProductTargetFramework -ProjectPath (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
+            -NetTFM $NetTFM -DotNet $DotNet) `
+        -AllowMismatch:$AllowFrameworkMismatch
+
     Get-ChildItem -LiteralPath $StagingDirectory -Force | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $OutputDirectory -Recurse -Force
     }

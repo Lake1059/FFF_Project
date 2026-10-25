@@ -6,7 +6,9 @@ param(
     # .NET 11 正式版发布后改为：发布3FR单文件.ps1 -NetTFM net11.0-windows10.0.26100.0
     [string]$NetTFM = "",
     # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
-    [string]$LakeUITfm = ""
+    [string]$LakeUITfm = "",
+    # 跨产品框架配对：默认拒绝与输出目录里已发布的对家产品框架不一致，见 Resolve-Toolchain.ps1。
+    [switch]$AllowFrameworkMismatch
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,6 +64,10 @@ try {
         throw "FFF.Recorder.exe is missing from the publish output."
     }
 
+    Assert-ProductFrameworkPair -OutputDirectory $OutputDirectory -Product "FFF.Recorder" `
+        -Framework (Get-ProductTargetFramework -ProjectPath (Join-Path $ProjectRoot "FFF.Recorder\FFF.Recorder.vbproj") `
+            -NetTFM $NetTFM -DotNet $DotNet) `
+        -AllowMismatch:$AllowFrameworkMismatch
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     $Executable = Join-Path $OutputDirectory "FFF.Recorder.exe"
     $PendingExecutable = Join-Path $OutputDirectory ("FFF.Recorder.exe.new-" + [Guid]::NewGuid().ToString("N"))

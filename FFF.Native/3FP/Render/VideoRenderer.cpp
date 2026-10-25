@@ -86,6 +86,13 @@ bool VsrStepTraceEnabled() noexcept {
     return enabled;
 }
 
+// TrueHDR 步进账的开关。与 VSR 分开一个变量，只因为两路会在同一帧里各重建一次，
+// 一份日志分不清是谁。
+bool HdrStepTraceEnabled() noexcept {
+    static const bool enabled = GetEnvironmentVariableW(L"FPT_HDR_TRACE", nullptr, 0) != 0;
+    return enabled;
+}
+
 // One refresh is 6.94 ms wide on a 144 Hz panel, and the presenter's waits are on that pitch
 // once the ceiling allows it. This process otherwise runs at the default system timer
 // resolution -- the release cadence measured here had a 15.7 ms median, i.e. the quantisation
@@ -4623,9 +4630,13 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
 
     if (traceSteps) {
         const auto bltDoneQpc = QpcNowValue();
-        vsrBuildTicks_ += (buildDoneQpc - stepStartQpc);
         vsrBltTicks_ += (bltDoneQpc - buildDoneQpc);
-        if (rebuilt) ++vsrRebuilds_;
+        // buildAvgMs 的分母是重建次数，分子也只能是重建耗时：每帧都累加会把
+        // 命中缓存那些帧的零头也算进"重建平均"，读数偏大且随帧数漂移。
+        if (rebuilt) {
+            vsrBuildTicks_ += (buildDoneQpc - stepStartQpc);
+            ++vsrRebuilds_;
+        }
         // 纯 ASCII：内核日志槽按 UTF-8 交给宿主，窄字面量在 MSVC 默认下会按系统 ANSI
         // 码页编码，混进中文只会读成乱码，反而妨碍判读。
         if (++vsrFrames_ % 300ULL == 0ULL) {
@@ -4692,6 +4703,10 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
         }
         return FFFResult::NotSupported;
     };
+
+    const bool traceSteps = HdrStepTraceEnabled();
+    const auto stepStartQpc = traceSteps ? QpcNowValue() : 0;
+    bool rebuilt = false;
 
     if (requestedVideoAutoHdr_.load(std::memory_order_acquire) ==
         FFF3FPVideoAutoHdr::Off)
@@ -4885,7 +4900,10 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
         trueHdrInputTexture_ = inputTexture;
         trueHdrInputTexture_->AddRef();
         trueHdrPpeRequested_ = ppeRequested;
+        rebuilt = true;
     }
+
+    const auto buildDoneQpc = traceSteps ? QpcNowValue() : 0;
 
     D3D11_VIDEO_PROCESSOR_STREAM stream{};
     stream.Enable = TRUE;
@@ -4896,6 +4914,30 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
             trueHdrOutputView_, 0, 1, &stream))) {
         ReleaseTrueHdrResources();
         return rejectAt("VideoProcessorBlt");
+    }
+
+    if (traceSteps) {
+        const auto bltDoneQpc = QpcNowValue();
+        trueHdrBltTicks_ += (bltDoneQpc - buildDoneQpc);
+        if (rebuilt) {
+            trueHdrBuildTicks_ += (buildDoneQpc - stepStartQpc);
+            ++trueHdrRebuilds_;
+        }
+        if (++trueHdrFrames_ % 300ULL == 0ULL) {
+            char line[256]{};
+            _snprintf_s(line, sizeof(line), _TRUNCATE,
+                "FFF.Native: HDR step accounting frames=%llu rebuilds=%llu"
+                " buildAvgMs=%.3f bltSubmitAvgMs=%.3f src=%ux%u dst=%ux%u",
+                static_cast<unsigned long long>(trueHdrFrames_),
+                static_cast<unsigned long long>(trueHdrRebuilds_),
+                trueHdrRebuilds_ ? static_cast<double>(trueHdrBuildTicks_) /
+                    static_cast<double>(trueHdrRebuilds_) * 1000.0 /
+                        static_cast<double>(QpcTicks()) : 0.0,
+                static_cast<double>(trueHdrBltTicks_) / static_cast<double>(trueHdrFrames_) *
+                    1000.0 / static_cast<double>(QpcTicks()),
+                sourceWidth_, sourceHeight_, surfaceWidth, surfaceHeight);
+            FFF3FP_KernelLogImpl(line);
+        }
     }
 
     videoTrueHdrReason_.store(FFF3FPVideoAutoHdrReason::None,
