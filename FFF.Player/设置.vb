@@ -60,6 +60,9 @@ Public Class 设置
     Public Property 弹幕尺寸缩放方式 As Integer = 0
 
     Public Property 启用歌词支持 As Boolean = True
+    Public Property 歌词字体 As String = "Microsoft YaHei UI"
+    Public Property 歌词字号 As Single = 16.5F
+    Public Property 歌词字体样式 As Integer = CInt(FontStyle.Regular)
     Public Property 渲染封面图毛玻璃背景 As Boolean = True
     Public Property 渲染封面图 As Boolean = True
 
@@ -162,6 +165,8 @@ Public Class 设置
     Public Property SP_分层阴影颜色_G As Integer = Color.Black.G
     Public Property SP_分层阴影颜色_B As Integer = Color.Black.B
     Public Property SP_边框宽度 As Integer = 1
+    Public Property SP_分割线颜色ARGB As Integer = Color.FromArgb(40, 220, 220, 220).ToArgb()
+    Public Property SP_分割线宽度 As Integer = 1
     Public Property SP_毛玻璃模式 As Integer = 0
     Public Property SP_毛玻璃背景来源 As Integer = -1
     Public Property SP_毛玻璃噪点颗粒 As Integer = -1
@@ -251,6 +256,10 @@ Public Class 设置
         弹幕行内前后间距 = Math.Clamp(弹幕行内前后间距, 0, 100)
         弹幕滚动速度 = Math.Clamp(弹幕滚动速度, 1, 100)
         弹幕尺寸缩放方式 = Math.Clamp(弹幕尺寸缩放方式, 0, 3)
+        歌词字体 = 规范字体(歌词字体, "Microsoft YaHei UI")
+        If Not Single.IsFinite(歌词字号) OrElse 歌词字号 < 8 OrElse 歌词字号 > 200 Then 歌词字号 = 16.5F
+        歌词字体样式 = 规范字体样式(歌词字体样式)
+        SP_分割线宽度 = Math.Clamp(SP_分割线宽度, 0, 1)
         SP_窗口边框颜色_A = Math.Clamp(SP_窗口边框颜色_A, 0, 255)
         SP_窗口边框颜色_R = Math.Clamp(SP_窗口边框颜色_R, 0, 255)
         SP_窗口边框颜色_G = Math.Clamp(SP_窗口边框颜色_G, 0, 255)
@@ -326,17 +335,17 @@ Public Class 设置
         If 渲染常规滚动弹幕 Then 类型 = 类型 Or 弹幕类型.常规滚动
         If 渲染顶部弹幕 Then 类型 = 类型 Or 弹幕类型.顶部
         If 渲染底部弹幕 Then 类型 = 类型 Or 弹幕类型.底部
-        Dim 描边宽度 = {0.0F, 1.0F, 2.0F}(弹幕描边样式)
-        Dim 阴影深度 = {0.0F, 1.5F, 3.0F}(弹幕阴影样式)
+        Dim 描边宽度 = {0.0F, 1.25F, 2.0F}(弹幕描边样式)
+        Dim 阴影深度 = {0.0F, 3.0F, 4.5F}(弹幕阴影样式)
         Return New 弹幕显示配置 With {
             .字体 = 弹幕字体, .字号 = 弹幕字号, .字体样式 = CType(弹幕字体样式, FontStyle),
             .滚动速度 = 弹幕滚动速度 * 6.0F, .同屏最大数量 = 弹幕最大渲染数量,
             .常规滚动最大行数 = 弹幕最大行数, .顶部最大行数 = 弹幕最大行数,
             .行内前后间距 = 弹幕行内前后间距, .尺寸缩放方式 = 弹幕尺寸缩放方式,
             .启用类型 = 类型, .不透明度 = 弹幕不透明度, .描边宽度 = 描边宽度,
-            .描边颜色ARGB = If(描边宽度 > 0, 应用不透明度(&HC0000000UI, 弹幕不透明度), 0UI),
+            .描边颜色ARGB = If(描边宽度 > 0, 应用不透明度(&HE0000000UI, 弹幕不透明度), 0UI),
             .阴影深度 = 阴影深度,
-            .阴影颜色ARGB = If(阴影深度 > 0, 应用不透明度(&H70000000UI, 弹幕不透明度), 0UI)
+            .阴影颜色ARGB = If(阴影深度 > 0, 应用不透明度(If(弹幕阴影样式 = 2, &HFF000000UI, &HC0000000UI), 弹幕不透明度), 0UI)
         }
     End Function
 
@@ -357,6 +366,11 @@ Public Class 设置
         窗口.LayerShadowColor = Color.FromArgb(实例对象.SP_分层阴影颜色_A, 实例对象.SP_分层阴影颜色_R,
                                            实例对象.SP_分层阴影颜色_G, 实例对象.SP_分层阴影颜色_B)
         窗口.BorderSize = 实例对象.SP_边框宽度
+        窗口.CaptionBottomLineColor = Color.FromArgb(实例对象.SP_分割线颜色ARGB)
+        窗口.CaptionBottomLineHeight = 实例对象.SP_分割线宽度
+        Form1.当前主窗体.JustEmptyControl1.BackColor = 窗口.CaptionBottomLineColor
+        Form1.当前主窗体.JustEmptyControl1.Height = 实例对象.SP_分割线宽度
+        Form1.当前主窗体.JustEmptyControl1.Visible = 实例对象.SP_分割线宽度 > 0
         Select Case 实例对象.SP_毛玻璃模式
             Case 0
                 窗口.BackdropMode = LakeUI.ThisIsYourWindow.BackdropModeEnum.None

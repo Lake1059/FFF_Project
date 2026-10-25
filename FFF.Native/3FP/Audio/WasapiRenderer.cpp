@@ -583,7 +583,8 @@ void PlayerWasapiRenderer::ReleaseBedSeamBuffers() noexcept {
     bedPlaneStrideFrames_ = 0;
 }
 
-FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t position100ns) noexcept {
+FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t position100ns,
+    const std::int64_t timestampResolution100ns) noexcept {
     if (frame == nullptr || frame->nb_samples <= 0) return FFFResult::InvalidArgument;
     endOfStream_ = false;
     // ASR tap: the raw decoded bed, ahead of any bed route, fold-down, resample
@@ -611,27 +612,26 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
         if (fadeInFramesRemaining_ == 0 && outputSampleRate_ > 0)
             fadeInFramesRemaining_ = std::max<std::uint32_t>(1,
                 outputSampleRate_ * StartupFadeInMilliseconds / 1000);
-        // The first decoded frame establishes the post-seek media anchor. Only
-        // this path may trim preroll or synthesize leading silence.
+        // 定位后的解码器会从目标时间之前的关键帧开始输出；这些帧既不属于播放
+        // 时间线，也不能参与抖动统计。逐帧裁去目标点之前的样本，直到真正抵达目标。
         preRollFrames = static_cast<std::uint64_t>(std::max<std::int64_t>(0, -signedStartFrame));
         gapFrames = static_cast<std::uint64_t>(std::max<std::int64_t>(0, signedStartFrame));
-        timelineAnchored_ = true;
     } else if (position100ns != AV_NOPTS_VALUE) {
-        const auto delta = signedStartFrame - static_cast<std::int64_t>(producedTimelineFrames_);
+        // 已送入重采样器但尚未输出的样本也属于连续时间线。
+        const auto pendingResampleFrames = swr_get_delay(resampler_, outputSampleRate_);
+        const auto delta = signedStartFrame - static_cast<std::int64_t>(producedTimelineFrames_) -
+            pendingResampleFrames;
         // 100 ms separates packet timestamp rounding and resampler phase from a
         // genuine edit/discontinuity. Small deltas are diagnostic only: decoded
         // samples stay bit-contiguous. A large jump is repaired once at the edit.
         const auto discontinuityThreshold = std::max<std::int64_t>(1, outputSampleRate_ / 10);
-        // Rounding slack, in output frames. A frame timestamp is media-time in 100 ns and
-        // the comparison is against a running sample count, so the two can never line up
-        // exactly: at 48 kHz a 100 ns tick is 0.0048 samples, and measured on a plain Opus
-        // stream every frame sits a constant 16-17 frames (0.33-0.35 ms) off. That is
-        // quantisation, not jitter, but the counter used to increment on any nonzero delta
-        // and so fired on essentially every frame -- 257 of 257 decoded, and 140 in two
-        // seconds -- while the stream was perfectly healthy (no underruns, no
-        // discontinuities, no inserted silence). A diagnostic that always reads "everything
-        // is jittering" cannot report the real thing, so only deltas beyond rounding count.
-        const auto jitterFloorFrames = std::max<std::int64_t>(1, outputSampleRate_ / 1000);
+        // 容器时间戳和时间线锚点各有量化误差，AAC 包的时长又不一定整除时间基。
+        // 允许最多 5 ms 的短时偏差，避免把单个量化边界抖动当成持续漂移。
+        const auto quantizationFrames = av_rescale_rnd(
+            std::clamp<std::int64_t>(timestampResolution100ns, 0, 25'000) * 2,
+            outputSampleRate_, 10'000'000, AV_ROUND_UP);
+        const auto jitterFloorFrames = std::max<std::int64_t>({1, outputSampleRate_ / 1000,
+            outputSampleRate_ / 200, quantizationFrames});
         if (std::abs(delta) < discontinuityThreshold) {
             if (std::abs(delta) > jitterFloorFrames) ++timestampJitterCount_;
         } else {
@@ -652,6 +652,7 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
         PublishRuntimeDiagnostics();
         return FFFResult::Success;
     }
+    timelineAnchored_ = true;
     const auto inputSamples = frame->nb_samples - skipSamples;
     // --- seam: one bed frame, one owner ---
     // The plug is handed the whole frame, including the leading samples about to be

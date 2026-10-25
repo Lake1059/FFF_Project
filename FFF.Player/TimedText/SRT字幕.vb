@@ -155,6 +155,7 @@ Public NotInheritable Class SRT字幕帧生成器
     Private ReadOnly 文档 As SRT字幕文档
     Private 样式 As SRT字幕样式
     Private ReadOnly 活动提示 As New List(Of SRT字幕提示)()
+    Private ReadOnly 顶部提示 As New HashSet(Of SRT字幕提示)()
 
     Public Sub New(文档值 As SRT字幕文档, 样式值 As SRT字幕样式)
         ArgumentNullException.ThrowIfNull(文档值)
@@ -162,6 +163,20 @@ Public NotInheritable Class SRT字幕帧生成器
         样式值.验证()
         文档 = 文档值
         样式 = 样式值
+        ' 在整条时间轴上固定分配位置，避免底部条目结束时顶部条目突然下跳。
+        Dim 底部结束 = TimeSpan.MinValue
+        For Each 提示 In 文档.索引.项目
+            If 提示.定位X.HasValue AndAlso 提示.定位Y.HasValue Then Continue For
+            If 提示.ASS对齐 >= 7 Then
+                顶部提示.Add(提示)
+                Continue For
+            End If
+            If 提示.开始时间 < 底部结束 Then
+                顶部提示.Add(提示)
+            Else
+                底部结束 = 提示.结束时间
+            End If
+        Next
     End Sub
 
     Public ReadOnly Property 条目数 As Integer
@@ -191,12 +206,14 @@ Public NotInheritable Class SRT字幕帧生成器
             Case Else : scale = 区域.高度像素 / 当前样式.基准视频高度
         End Select
         For Each cue In 活动提示
+            Dim 顶部对齐 = 顶部提示.Contains(cue) OrElse cue.ASS对齐 >= 7
             Dim lines As New List(Of SRT字幕绘制行)(cue.行.Count)
             For lineIndex = 0 To cue.行.Count - 1
                 Dim line = cue.行(lineIndex)
-                Dim fallbackFont = If(line.语言 = 字幕语言类型.拉丁, 当前样式.拉丁字体, 当前样式.中文字体)
+                Dim fallbackFont = If(Not 顶部对齐 AndAlso line.语言 = 字幕语言类型.拉丁,
+                                      当前样式.拉丁字体, 当前样式.中文字体)
                 Dim fontName As String, fontSize As Single, fontStyle As FontStyle, color As UInteger
-                Select Case lineIndex
+                Select Case If(顶部对齐, 0, lineIndex)
                     Case 0
                         fontName = If(String.IsNullOrWhiteSpace(当前样式.第一行字体), fallbackFont, 当前样式.第一行字体)
                         fontSize = 当前样式.第一行字号.GetValueOrDefault(当前样式.字号)
@@ -221,7 +238,7 @@ Public NotInheritable Class SRT字幕帧生成器
             Dim x = 区域.X像素 + 区域.宽度像素 * 0.5F
             Dim y As Single
             Dim 水平对齐 = 定时文字对齐.居中
-            Dim 垂直对齐 = 定时文字对齐.靠前
+            Dim 垂直对齐 = 定时文字对齐.靠后
             If 使用定位 Then
                 x = 区域.X像素 + cue.定位X.Value / ASS默认画布宽度 * 区域.宽度像素
                 y = 区域.Y像素 + cue.定位Y.Value / ASS默认画布高度 * 区域.高度像素
@@ -230,6 +247,10 @@ Public NotInheritable Class SRT字幕帧生成器
                 Dim bottom = If(当前样式.底部对齐方式 = 1 AndAlso 画布高度 > 0,
                                 画布高度, 区域.Y像素 + 区域.高度像素)
                 y = bottom - 当前样式.底部边距 * scale
+                If 顶部对齐 Then
+                    垂直对齐 = 定时文字对齐.靠前
+                    y = 区域.Y像素 + 当前样式.底部边距 * scale
+                End If
             End If
             结果.Add(New SRT字幕绘制项(cue, lines, x, y,
                                         当前样式.行间距 * scale, 使用定位,

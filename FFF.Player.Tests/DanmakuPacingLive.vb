@@ -1,9 +1,9 @@
 ' 弹幕节拍实机探针 —— 真播放会话 + 真输出窗口，采样 呈现节律状态 与真呈现器泵
 '
-' 验证的事（对应 播放器弹幕图层呈现器.vb 的 60Hz 保底/跟随片源 + VideoRenderer
+' 验证的事（对应 播放器弹幕图层呈现器.vb 的显示器节拍 + VideoRenderer
 ' FrameRateBoundHz 的图层目标抬升子句）：
-'   · ≤60fps 片源 ⇒ 16ms 泵（62.5Hz，60Hz 保底）；120fps ⇒ 8ms 泵（125Hz 护栏）。
-'   · 内核 overlay 合成上限抬到图层目标（≈62.5 / ≈125），但绝不超过声明面板率。
+'   · 泵间隔由窗口所在显示器决定，目标最高 120Hz；整数毫秒取整后允许相邻值交替。
+'   · 内核 overlay 合成上限抬到图层目标，但绝不超过声明面板率。
 '   · 片源快于面板时丢弃进显示速率桶，不重复计入管线丢帧。
 '   · switch 臂：同一呈现器跨片源，解码计数归零后 1s 内回到 ≤9ms。
 '
@@ -157,7 +157,7 @@ Friend Module DanmakuPacingLive
     End Function
 
     Friend Function 运行(参数 As String()) As Integer
-        Console.WriteLine("3FP 弹幕节拍实机探针（--danmaku-pacing-live：真会话 + 真窗口 + 60Hz 保底/跟随片源的提交泵）")
+        Console.WriteLine("3FP 弹幕节拍实机探针（--danmaku-pacing-live：真会话 + 真窗口 + 显示器节拍提交泵）")
 
         Dim 夹具 = 探测夹具(参数)
         If 夹具 Is Nothing OrElse Not File.Exists(夹具) Then
@@ -271,7 +271,7 @@ Friend Module DanmakuPacingLive
                         Dim 呈现帧 = CLng(末快照.已呈现视频帧数) - CLng(起始快照.已呈现视频帧数)
                         Dim 显示丢弃 = CLng(末节律.显示速率丢弃数) - CLng(起始节律.显示速率丢弃数)
                         Dim 管线丢弃 = CLng(末快照.已丢弃视频帧数) - CLng(起始快照.已丢弃视频帧数)
-                        ' 前 250 ms 是帧周期估计窗口，间隔会从初始 16 ms 过渡到片源值；只判稳态段。
+                        ' 首拍使用初始节拍；后续保持显示器目标节拍，只判稳态段。
                         Dim 稳态 = 间隔样本.Skip(Math.Min(3, 间隔样本.Count)).ToList()
                         Dim 稳态间隔 = If(稳态.Count > 0, 稳态.Average(), 16.0R)
                         Dim 期望提交率 = 1000.0R / 稳态间隔
@@ -433,23 +433,26 @@ Friend Module DanmakuPacingLive
                         Console.WriteLine($"换片前：泵间隔 {切换前间隔}ms；帧率上限 {N2(切换前节律.帧率上限)}；" &
                                           $"解码 {切换前快照.已解码视频帧数}；切换窗看见未播放={看见未播放} 看见计数回落={看见计数回落}")
                         Console.WriteLine($"换片后：泵间隔样本（ms@时标ms）= {样本行.ToString().TrimEnd()}")
-                        Console.WriteLine($"首达 ≤9ms 时标={If(首达快 < 0.0R, "未达", 首达快.ToString("F0", CultureInfo.InvariantCulture) + "ms")}；" &
+                        Console.WriteLine($"首达目标节拍时标={If(首达快 < 0.0R, "未达", 首达快.ToString("F0", CultureInfo.InvariantCulture) + "ms")}；" &
                                           $"1s 后最大间隔={一秒后最大}ms；后段帧率上限峰值={N2(后段峰值上限)}；" &
                                           $"后段提交 {总提交} 次；后段呈现 {后段呈现} 帧")
 
-                        检查(切换前间隔 = 16, "前段 24fps ⇒ 泵间隔 16ms（60Hz 保底）", $"{切换前间隔}ms")
+                        Dim 实际刷新率 = 取实际刷新率(画面)
+                        Dim 目标刷新率 = 显示器节拍.计算目标帧率(CInt(Math.Round(实际刷新率)))
+                        Dim 目标间隔 = Math.Max(1, CInt(Math.Floor(1000.0R / Math.Max(1, 目标刷新率))))
+                        检查(Math.Abs(切换前间隔 - 目标间隔) <= 1,
+                             "换片前泵间隔符合显示器目标节拍", $"{切换前间隔}ms / 目标 {目标间隔}ms")
                         检查(看见计数回落 OrElse 看见未播放,
                              "切换窗观察到解码计数回落或状态离开播放（估计器有条件重开窗口）",
                              $"计数回落={看见计数回落} 未播放={看见未播放}")
                         检查(首达快 >= 0.0R AndAlso 首达快 <= 1000.0R,
-                             "换片后 1s 内泵间隔降到 ≤9ms（跟随 120fps）",
+                             "换片后 1s 内泵间隔回到显示器目标",
                              If(首达快 < 0.0R, "整段未达", 首达快.ToString("F0", CultureInfo.InvariantCulture) & "ms"))
-                        检查(一秒后.Count > 0 AndAlso 一秒后最大 <= 9,
-                             "换片 1s 后泵间隔保持 ≤9ms（无回摆到 16ms）",
+                        检查(一秒后.Count > 0 AndAlso 一秒后最大 <= 1000.0R / Math.Max(1, 目标刷新率) + 1,
+                             "换片 1s 后泵间隔保持显示器目标",
                              $"1s 后样本={If(一秒后.Count = 0, "无", String.Join("/", 一秒后))}")
                         检查(总提交 > (播放秒 + 后段秒) * 40, "泵全程在跑（提交次数 > 总秒数×40）", $"{总提交} 次")
                         检查(后段呈现 > 0, "换片后视频在真播", $"{后段呈现} 帧")
-                        Dim 实际刷新率 = 取实际刷新率(画面)
                         Console.WriteLine($"系统当前刷新率={N2(实际刷新率)}Hz")
                         If 实际刷新率 > 0.0 Then
                             检查(Math.Abs(CDbl(末节律.声明刷新率) - 实际刷新率) / 实际刷新率 <= 0.02,
@@ -458,12 +461,12 @@ Friend Module DanmakuPacingLive
                             检查(CDbl(后段峰值上限) <= 实际刷新率 * 1.02,
                                  "换片后帧率上限不超过实际面板",
                                  $"峰值 {N2(后段峰值上限)} vs 面板 {N2(实际刷新率)}Hz")
-                            If 实际刷新率 >= 125.0 Then
+                            If 实际刷新率 >= 120.0 Then
                                 检查(CDbl(后段峰值上限) >= 120.0,
-                                     "120fps 片源的图层目标把上限抬到 ≈125",
+                                     "120Hz 以上显示器开放到 120fps",
                                      $"{N2(后段峰值上限)} 上限")
                             Else
-                                Console.WriteLine("  note 面板低于 125Hz，图层目标抬升幅度判据未判")
+                                Console.WriteLine("  note 面板低于 120Hz，120fps 上限判据未判")
                             End If
                         Else
                             Console.WriteLine("  note 取不到系统刷新率，面板上限判据未判")
