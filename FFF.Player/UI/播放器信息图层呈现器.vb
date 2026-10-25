@@ -131,7 +131,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         文本测量格式 = DirectCast(StringFormat.GenericTypographic.Clone(), StringFormat)
         文本测量格式.FormatFlags = 文本测量格式.FormatFlags Or
             StringFormatFlags.MeasureTrailingSpaces Or StringFormatFlags.NoWrap
-        刷新定时器 = New LakeUI.PrecisionTimer With {.Interval = 200}
+        刷新定时器 = New LakeUI.PrecisionTimer With {.Interval = 200, .SynchronizingObject = 画面控件}
         AddHandler 刷新定时器.Tick, AddressOf 刷新定时器_Tick
         AddHandler 画面控件.ClientSizeChanged, AddressOf 画面大小已变化
     End Sub

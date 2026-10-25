@@ -4239,6 +4239,37 @@ void PlayerVideoRenderer::ReleaseSuperResolutionResources() noexcept {
         superResolutionTexture_->Release();
         superResolutionTexture_ = nullptr;
     }
+    // Every cached video-processor object dies with the surface it feeds, so no
+    // frame can keep blitting into a released target.
+    if (superResolutionInputView_ != nullptr) {
+        superResolutionInputView_->Release();
+        superResolutionInputView_ = nullptr;
+    }
+    if (superResolutionOutputView_ != nullptr) {
+        superResolutionOutputView_->Release();
+        superResolutionOutputView_ = nullptr;
+    }
+    if (superResolutionProcessor_ != nullptr) {
+        superResolutionProcessor_->Release();
+        superResolutionProcessor_ = nullptr;
+    }
+    if (superResolutionEnumerator_ != nullptr) {
+        superResolutionEnumerator_->Release();
+        superResolutionEnumerator_ = nullptr;
+    }
+    if (superResolutionVideoContext_ != nullptr) {
+        superResolutionVideoContext_->Release();
+        superResolutionVideoContext_ = nullptr;
+    }
+    if (superResolutionVideoDevice_ != nullptr) {
+        superResolutionVideoDevice_->Release();
+        superResolutionVideoDevice_ = nullptr;
+    }
+    if (superResolutionInputTexture_ != nullptr) {
+        superResolutionInputTexture_->Release();
+        superResolutionInputTexture_ = nullptr;
+    }
+    superResolutionSourceFormat_ = 0;
     videoSuperResolutionSourceWidth_ = videoSuperResolutionSourceHeight_ = 0;
     videoSuperResolutionTargetWidth_ = videoSuperResolutionTargetHeight_ = 0;
     videoSuperResolutionActive_.store(false, std::memory_order_release);
@@ -4369,6 +4400,19 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
     // shader); see ToSourceAxisTarget for the static_assert-backed reasoning.
     const auto rotation = viewRotation_.load(std::memory_order_acquire);
     const auto targetSource = ToSourceAxisTarget(targetWidth, targetHeight, rotation);
+    // NV12/P010 are 4:2:0 formats: a video processor cannot write an odd-sized
+    // surface. The target box can be odd (it is a fit-to-window box), so round
+    // the intermediate surface up to even and keep the box separate.
+    const auto surfaceWidth = (targetSource.width + 1u) & ~1u;
+    const auto surfaceHeight = (targetSource.height + 1u) & ~1u;
+    // Publish the geometry this frame *would* have used before any geometry gate
+    // can skip: the host's diagnostic line reads these four, and 0x0 told you
+    // nothing about why NotUpscaling fired. Safe to share with the cache key
+    // because sameGeometry also requires the surface and processor to exist.
+    videoSuperResolutionSourceWidth_ = sourceWidth_;
+    videoSuperResolutionSourceHeight_ = sourceHeight_;
+    videoSuperResolutionTargetWidth_ = surfaceWidth;
+    videoSuperResolutionTargetHeight_ = surfaceHeight;
     if (!IsUpscaleTarget(sourceWidth_, sourceHeight_, targetSource))
         return skip(FFF3FPVideoSuperResolutionReason::NotUpscaling);
     if (sourceHeight_ < 360 || sourceHeight_ > 1440)
@@ -4376,19 +4420,21 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
     if (videoSuperResolutionRejected_.load(std::memory_order_acquire))
         return skip(FFF3FPVideoSuperResolutionReason::DriverRejected);
 
-    // NV12/P010 are 4:2:0 formats: a video processor cannot write an odd-sized
-    // surface. The target box can be odd (it is a fit-to-window box), so round
-    // the intermediate surface up to even and keep the box separate.
-    const auto surfaceWidth = (targetSource.width + 1u) & ~1u;
-    const auto surfaceHeight = (targetSource.height + 1u) & ~1u;
-
-    // A video processor is configured for a fixed in/out geometry, so the
-    // cached surface is rebuilt whenever the geometry or the decoded format
-    // changes. Compare against the *cached* values before overwriting them.
+    // A video processor is configured for a fixed in/out geometry, so the whole
+    // upscaled pass -- surface, processor, views -- is rebuilt whenever the
+    // geometry, the decoded format or the decoded texture changes, and only the
+    // blit below stays in the per-frame path. Rebuilding the processor every
+    // frame measured 60fps -> 1-4fps: the driver re-negotiates its AI scaler on
+    // each fresh processor. Compare against the *cached* values before
+    // overwriting them.
     D3D11_TEXTURE2D_DESC sourceDescription{};
     sourceTextures_[0]->GetDesc(&sourceDescription);
     const auto sourceFormat = static_cast<std::uint32_t>(sourceDescription.Format);
+    ID3D11Texture2D* const inputTexture = sourceTextures_[0];
     const bool sameGeometry = superResolutionTexture_ != nullptr &&
+        superResolutionProcessor_ != nullptr && superResolutionVideoContext_ != nullptr &&
+        superResolutionInputView_ != nullptr && superResolutionOutputView_ != nullptr &&
+        superResolutionInputTexture_ == inputTexture &&
         videoSuperResolutionSourceWidth_ == sourceWidth_ &&
         videoSuperResolutionSourceHeight_ == sourceHeight_ &&
         videoSuperResolutionTargetWidth_ == surfaceWidth &&
@@ -4416,84 +4462,113 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
             !CreateYuvPlaneViews(superResolutionTexture_, sourceFormat,
                 superResolutionViews_)) {
             ReleaseSuperResolutionResources();
-            superResolutionSourceFormat_ = 0;
             return rejectAt("CreateTexture2D/plane views for the upscaled surface");
         }
         superResolutionSourceFormat_ = sourceFormat;
+
+        ComPtr<ID3D11VideoDevice> videoDevice;
+        ComPtr<ID3D11VideoContext> videoContext;
+        if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&videoDevice))) ||
+            FAILED(context_->QueryInterface(IID_PPV_ARGS(&videoContext)))) {
+            ReleaseSuperResolutionResources();
+            return rejectAt("QueryInterface: no ID3D11VideoDevice/ID3D11VideoContext");
+        }
+
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+        content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        content.InputFrameRate = { 60, 1 };
+        content.InputWidth = sourceWidth_;
+        content.InputHeight = sourceHeight_;
+        content.OutputFrameRate = content.InputFrameRate;
+        // The processor writes the even-sized surface, not the possibly-odd rect.
+        content.OutputWidth = surfaceWidth;
+        content.OutputHeight = surfaceHeight;
+        content.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
+        ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
+        ComPtr<ID3D11VideoProcessor> processor;
+        if (FAILED(videoDevice->CreateVideoProcessorEnumerator(&content, &enumerator)) ||
+            FAILED(videoDevice->CreateVideoProcessor(enumerator.Get(), 0, &processor))) {
+            ReleaseSuperResolutionResources();
+            return rejectAt("CreateVideoProcessorEnumerator/Processor");
+        }
+
+        UINT inputSupport = 0;
+        UINT outputSupport = 0;
+        if (FAILED(enumerator->CheckVideoProcessorFormat(sourceDescription.Format,
+                &inputSupport)) ||
+            FAILED(enumerator->CheckVideoProcessorFormat(sourceDescription.Format,
+                &outputSupport)) ||
+            (inputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0 ||
+            (outputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0) {
+            ReleaseSuperResolutionResources();
+            return reject(FFF3FPVideoSuperResolutionReason::UnsupportedSourceFormat);
+        }
+
+        videoContext->VideoProcessorSetStreamFrameFormat(processor.Get(), 0,
+            D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+        // Keep the driver's implicit enhancements off for a reproducible result;
+        // VSR itself is requested explicitly below and is unaffected by this flag
+        // (mpv and VLC both disable auto-processing and still use VSR).
+        videoContext->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
+        const RECT source{ 0, 0, static_cast<LONG>(sourceWidth_),
+            static_cast<LONG>(sourceHeight_) };
+        videoContext->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &source);
+        // Fill the whole even-sized surface; the renderer then samples it into the
+        // real destination rect, so the extra row/column is never shown.
+        const RECT destination{ 0, 0, static_cast<LONG>(surfaceWidth),
+            static_cast<LONG>(surfaceHeight) };
+        videoContext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &destination);
+
+        // The one call that turns the driver's AI upscaler on. It is stream state
+        // on this processor, so issuing it once here is what makes the cache worth
+        // having; a fresh processor would otherwise re-negotiate it every frame.
+        if (FAILED(FFF3FP::NvidiaVideo::SetSuperResolution(videoContext.Get(),
+                processor.Get(), true))) {
+            ReleaseSuperResolutionResources();
+            return rejectAt("SetStreamExtension(NVIDIA PPE) rejected");
+        }
+
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDescription{};
+        inputDescription.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        ComPtr<ID3D11VideoProcessorInputView> inputView;
+        if (FAILED(videoDevice->CreateVideoProcessorInputView(inputTexture,
+                enumerator.Get(), &inputDescription, &inputView))) {
+            ReleaseSuperResolutionResources();
+            return rejectAt("CreateVideoProcessorInputView");
+        }
+
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputDescription{};
+        outputDescription.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        ComPtr<ID3D11VideoProcessorOutputView> outputView;
+        if (FAILED(videoDevice->CreateVideoProcessorOutputView(superResolutionTexture_,
+                enumerator.Get(), &outputDescription, &outputView))) {
+            ReleaseSuperResolutionResources();
+            return rejectAt("CreateVideoProcessorOutputView");
+        }
+
+        // Publish only a fully built pass, and keep a reference on the decoded
+        // texture so its address cannot be reused by a new texture behind the
+        // cached input view.
+        superResolutionVideoDevice_ = videoDevice.Detach();
+        superResolutionVideoContext_ = videoContext.Detach();
+        superResolutionEnumerator_ = enumerator.Detach();
+        superResolutionProcessor_ = processor.Detach();
+        superResolutionInputView_ = inputView.Detach();
+        superResolutionOutputView_ = outputView.Detach();
+        superResolutionInputTexture_ = inputTexture;
+        superResolutionInputTexture_->AddRef();
     }
-
-    ComPtr<ID3D11VideoDevice> videoDevice;
-    ComPtr<ID3D11VideoContext> videoContext;
-    if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&videoDevice))) ||
-        FAILED(context_->QueryInterface(IID_PPV_ARGS(&videoContext))))
-        return rejectAt("QueryInterface: no ID3D11VideoDevice/ID3D11VideoContext");
-
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
-    content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
-    content.InputFrameRate = { 60, 1 };
-    content.InputWidth = sourceWidth_;
-    content.InputHeight = sourceHeight_;
-    content.OutputFrameRate = content.InputFrameRate;
-    // The processor writes the even-sized surface, not the possibly-odd rect.
-    content.OutputWidth = surfaceWidth;
-    content.OutputHeight = surfaceHeight;
-    content.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
-    ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
-    ComPtr<ID3D11VideoProcessor> processor;
-    if (FAILED(videoDevice->CreateVideoProcessorEnumerator(&content, &enumerator)) ||
-        FAILED(videoDevice->CreateVideoProcessor(enumerator.Get(), 0, &processor)))
-        return rejectAt("CreateVideoProcessorEnumerator/Processor");
-
-    UINT inputSupport = 0;
-    UINT outputSupport = 0;
-    if (FAILED(enumerator->CheckVideoProcessorFormat(sourceDescription.Format, &inputSupport)) ||
-        FAILED(enumerator->CheckVideoProcessorFormat(sourceDescription.Format, &outputSupport)) ||
-        (inputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0 ||
-        (outputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0)
-        return reject(FFF3FPVideoSuperResolutionReason::UnsupportedSourceFormat);
-
-    videoContext->VideoProcessorSetStreamFrameFormat(processor.Get(), 0,
-        D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-    // Keep the driver's implicit enhancements off for a reproducible result;
-    // VSR itself is requested explicitly below and is unaffected by this flag
-    // (mpv and VLC both disable auto-processing and still use VSR).
-    videoContext->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
-    const RECT source{ 0, 0, static_cast<LONG>(sourceWidth_),
-        static_cast<LONG>(sourceHeight_) };
-    videoContext->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &source);
-    // Fill the whole even-sized surface; the renderer then samples it into the
-    // real destination rect, so the extra row/column is never shown.
-    const RECT destination{ 0, 0, static_cast<LONG>(surfaceWidth),
-        static_cast<LONG>(surfaceHeight) };
-    videoContext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &destination);
-
-    // The one call that turns the driver's AI upscaler on.
-    if (FAILED(FFF3FP::NvidiaVideo::SetSuperResolution(videoContext.Get(),
-            processor.Get(), true)))
-        return rejectAt("SetStreamExtension(NVIDIA PPE) rejected");
-
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDescription{};
-    inputDescription.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-    ComPtr<ID3D11VideoProcessorInputView> inputView;
-    if (FAILED(videoDevice->CreateVideoProcessorInputView(sourceTextures_[0],
-            enumerator.Get(), &inputDescription, &inputView)))
-        return rejectAt("CreateVideoProcessorInputView");
-
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputDescription{};
-    outputDescription.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
-    ComPtr<ID3D11VideoProcessorOutputView> outputView;
-    if (FAILED(videoDevice->CreateVideoProcessorOutputView(superResolutionTexture_,
-            enumerator.Get(), &outputDescription, &outputView)))
-        return rejectAt("CreateVideoProcessorOutputView");
 
     D3D11_VIDEO_PROCESSOR_STREAM stream{};
     stream.Enable = TRUE;
     stream.OutputIndex = 0;
     stream.InputFrameOrField = 0;
-    stream.pInputSurface = inputView.Get();
-    if (FAILED(videoContext->VideoProcessorBlt(processor.Get(), outputView.Get(), 0, 1,
-            &stream)))
+    stream.pInputSurface = superResolutionInputView_;
+    if (FAILED(superResolutionVideoContext_->VideoProcessorBlt(superResolutionProcessor_,
+            superResolutionOutputView_, 0, 1, &stream))) {
+        ReleaseSuperResolutionResources();
         return rejectAt("VideoProcessorBlt");
+    }
 
     videoSuperResolutionReason_.store(FFF3FPVideoSuperResolutionReason::None,
         std::memory_order_release);

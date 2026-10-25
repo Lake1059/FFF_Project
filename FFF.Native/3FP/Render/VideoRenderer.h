@@ -1076,6 +1076,20 @@ private:
     ID3D11ShaderResourceView* superResolutionViews_[3]{};
     // DXGI_FORMAT of the cached super-resolution surface (0 when absent).
     std::uint32_t superResolutionSourceFormat_{ 0 };
+    // The video processor, both views and the two QIs that drive the upscaled
+    // pass. Cached across frames on purpose: building them every frame measures
+    // 60fps -> 1-4fps because the driver re-negotiates its AI scaler on each
+    // fresh processor, so only the blit stays in the per-frame path.
+    // `superResolutionInputTexture_` is held with its own reference so that a
+    // destroyed and reallocated decoded texture cannot alias the cached input
+    // view by address.
+    ID3D11VideoDevice* superResolutionVideoDevice_{ nullptr };
+    ID3D11VideoContext* superResolutionVideoContext_{ nullptr };
+    ID3D11VideoProcessorEnumerator* superResolutionEnumerator_{ nullptr };
+    ID3D11VideoProcessor* superResolutionProcessor_{ nullptr };
+    ID3D11VideoProcessorInputView* superResolutionInputView_{ nullptr };
+    ID3D11VideoProcessorOutputView* superResolutionOutputView_{ nullptr };
+    ID3D11Texture2D* superResolutionInputTexture_{ nullptr };
     // --- NVIDIA automatic HDR (RTX Video HDR / TrueHDR, opt-in; default Off) ---
     // Host-visible switch. Off keeps the renderer byte-identical to the
     // pre-TrueHDR behaviour, same invariant as VSR.
