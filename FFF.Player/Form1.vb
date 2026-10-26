@@ -186,7 +186,8 @@ Public Class Form1
             AddressOf 播放控制器.读取色彩变换内容描述,
             AddressOf 播放控制器.提交播放器信息图层,
             AddressOf 播放控制器.读取视频超分辨率图层文本,
-            AddressOf 播放控制器.读取视频自动HDR图层文本)
+            AddressOf 播放控制器.读取视频自动HDR图层文本,
+            Function() AI字幕控制器 IsNot Nothing AndAlso AI字幕控制器.Worker运行中)
         信息图层呈现器.应用全局字体(设置.实例对象.字体)
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
@@ -796,7 +797,9 @@ Public Class Form1
     End Sub
 
     ''' <summary>AI 字幕绘制扩展（PrecisionTimer 线程）：同一帧、同一图层 append
-    ''' 一条文字命令；与外部 SRT 同底并存、AI 上移一行（决策 D4）。
+    ''' 文字命令；与外部 SRT 同底并存、AI 整块上移一行（决策 D4）。
+    ''' 长句先按 DirectWrite 实测宽度折成至多 3 行、放不下逐级缩小字号，
+    ''' 字幕整体永不越出视频区域。
     ''' 铁律：命令对象每帧新建、append 后不得修改——D3D present 线程会在提交期读它。
     ''' 任何失败只当本帧没有 AI 字幕，绝不影响既有字幕图层。</summary>
     Private Sub OnAi字幕绘制扩展(sender As Object, e As 定时文字图层绘制事件参数)
@@ -805,20 +808,158 @@ Public Class Form1
             Dim 文本 = AI字幕控制器.取当前条目(e.播放位置, e.时间轴代次)
             If String.IsNullOrWhiteSpace(文本) Then Return
             Dim 区域 = e.视频区域
-            Dim 行高 = 区域.高度像素 / 22.0F
+            If 区域.宽度像素 <= 1 OrElse 区域.高度像素 <= 1 Then Return
+            Dim 基准字号 = 区域.高度像素 / 22.0F
+            Dim 字体 = 设置.实例对象.字幕第一行字体
+            Dim 行集 = 生成AI字幕行(文本, 字体, 基准字号, 区域.宽度像素)
+            Dim 描边宽度 = 行集.字号 * 0.08F
+            Dim 行间距 = 行集.字号 * 0.1F
+            ' 每行高度取渲染同源的 DirectWrite 布局高度（SRT 路径同款），
+            ' 行距以此为准，堆叠时字形不会被裁切、行与行不会叠上。
+            Dim 行高(行集.行.Length - 1) As Single
+            Dim 总高度 = 0.0F
+            For 索引 = 0 To 行集.行.Length - 1
+                行高(索引) = 测量AI字幕行高(行集.行(索引), 字体, 行集.字号, 区域.宽度像素, 描边宽度)
+                总高度 += 行高(索引)
+            Next
+            总高度 += 行间距 * (行集.行.Length - 1)
             ' 判据用"本帧图层里已经有几条命令"而不是"有没有外挂字幕轨"：纯音频回退路径
             ' 不画外部字幕，若仍按字幕轨判断，AI 那一行会悬在底部上方两行的空位上。
             Dim 有同底文字 = e.命令.Count > 0
-            Dim y = 区域.Y像素 + 区域.高度像素 - If(有同底文字, 行高 * 2.2F, 行高 * 1.2F)
-            Dim cmd = 定时文字命令.创建文字(文本, 设置.实例对象.字幕第一行字体, 行高,
-                         New RectangleF(区域.X像素, y, 区域.宽度像素, 行高),
-                         &HFFFFFFFFUI, &HF0000000UI, 行高 * 0.08F,
-                         定时文字对齐.居中, 定时文字对齐.靠前)
-            e.命令.Add(cmd)
+            Dim y = 区域.Y像素 + 区域.高度像素 - If(有同底文字, 1.2F, 0.2F) * 行集.字号 - 总高度
+            For 索引 = 0 To 行集.行.Length - 1
+                Dim cmd = 定时文字命令.创建文字(行集.行(索引), 字体, 行集.字号,
+                             New RectangleF(区域.X像素, y, 区域.宽度像素, 行高(索引)),
+                             &HFFFFFFFFUI, &HF0000000UI, 描边宽度,
+                             定时文字对齐.居中, 定时文字对齐.靠前)
+                e.命令.Add(cmd)
+                y += 行高(索引) + 行间距
+            Next
         Catch
             ' AI 字幕是可选图层：任何失败只当本帧没有 AI 字幕。
         End Try
     End Sub
+
+    ' —— AI 字幕折行：宽度与行高都走渲染同源的 DirectWrite 测量接口，断行结果即绘制结果 ——
+
+    Private Const AI字幕最大行数 As Integer = 3
+    Private Const AI字幕换行缓存上限 As Integer = 512
+    Private Const AI字幕最小缩放 As Single = 0.62F
+    Private ReadOnly AI字幕换行缓存 As New Dictionary(
+        Of (文本 As String, 字体 As String, 字号位元 As Integer, 最大宽度 As Integer), String())
+
+    ''' <summary>把整句折成至多 AI字幕最大行数 行；任一档字号放不下就逐级缩小
+    ''' （1.0 → 0.62），到下限仍超出则截尾加省略号。返回最终行数组与采用的字号。</summary>
+    Private Function 生成AI字幕行(文本 As String, 字体 As String, 基准字号 As Single,
+                              最大宽度 As Single) As (行 As String(), 字号 As Single)
+        Dim 行 As String() = {文本}
+        For Each 缩放 In {1.0F, 0.88F, 0.78F, 0.7F, AI字幕最小缩放}
+            Dim 字号 = 基准字号 * 缩放
+            行 = 折行AI字幕文本(文本, 字体, 字号, 最大宽度)
+            If 行.Length <= AI字幕最大行数 Then Return (行, 字号)
+        Next
+        Dim 字号下限 = 基准字号 * AI字幕最小缩放
+        Dim 截断(AI字幕最大行数 - 1) As String
+        Array.Copy(行, 截断, AI字幕最大行数)
+        ' 尾行换成"折行后能放下的最长前缀"——折行函数保证首行不超宽。
+        截断(AI字幕最大行数 - 1) = 折行AI字幕文本(
+            行(AI字幕最大行数 - 1) & "…", 字体, 字号下限, 最大宽度)(0)
+        Return (截断, 字号下限)
+    End Function
+
+    ''' <summary>按字素二分找每行能放下的最长前缀，西文优先在空格处断行
+    '''（策略与 播放器歌词呈现器.按字素换行 一致），宽度用
+    ''' FFF3FP_MeasureTimedTextWidth 实测，按（文本,字体,字号,宽度）缓存。
+    ''' 本方法与绘制扩展同在字幕呈现的 PrecisionTimer 线程串行调用，缓存无需加锁
+    '''（SRT测量缓存 同款约定）。</summary>
+    Private Function 折行AI字幕文本(文本 As String, 字体 As String, 字号 As Single,
+                                最大宽度 As Single) As String()
+        Dim 宽度上限 = Math.Max(1, CInt(Math.Floor(最大宽度)))
+        Dim 键 = (文本, 字体, BitConverter.SingleToInt32Bits(字号), 宽度上限)
+        Dim 已折 As String() = Nothing
+        If AI字幕换行缓存.TryGetValue(键, 已折) Then Return 已折
+
+        Dim 实测宽度 As Single
+        If 测量AI字幕宽度(文本, 字体, 字号, 实测宽度) AndAlso 实测宽度 <= 宽度上限 Then
+            已折 = {文本}
+        Else
+            Dim starts = System.Globalization.StringInfo.ParseCombiningCharacters(文本)
+            Dim 结果 As New List(Of String)()
+            Dim 起点 = 0
+            While 起点 < starts.Length
+                While 起点 < starts.Length AndAlso Char.IsWhiteSpace(文本, starts(起点))
+                    起点 += 1
+                End While
+                If 起点 >= starts.Length Then Exit While
+
+                Dim 低 = 起点 + 1
+                Dim 高 = starts.Length
+                Dim 适配终点 = 低
+                While 低 <= 高
+                    Dim 中 = 低 + ((高 - 低) \ 2)
+                    If 测量AI字幕宽度(取得字素前缀(文本, starts, 起点, 中), 字体, 字号, 实测宽度) AndAlso
+                        实测宽度 <= 宽度上限 Then
+                        适配终点 = 中
+                        低 = 中 + 1
+                    Else
+                        高 = 中 - 1
+                    End If
+                End While
+
+                Dim 断点 = 适配终点
+                If 适配终点 < starts.Length Then
+                    For 索引 = 适配终点 - 1 To 起点 + 1 Step -1
+                        If Char.IsWhiteSpace(文本, starts(索引)) Then
+                            断点 = 索引
+                            Exit For
+                        End If
+                    Next
+                End If
+                Dim 行 = 取得字素前缀(文本, starts, 起点, 断点).TrimEnd()
+                If 行.Length > 0 Then 结果.Add(行)
+                起点 = Math.Max(断点, 起点 + 1)
+            End While
+            已折 = If(结果.Count = 0, {文本}, 结果.ToArray())
+        End If
+        If AI字幕换行缓存.Count >= AI字幕换行缓存上限 Then AI字幕换行缓存.Clear()
+        AI字幕换行缓存(键) = 已折
+        Return 已折
+    End Function
+
+    Private Shared Function 取得字素前缀(文本 As String, starts As Integer(),
+                                    起点 As Integer, 终点 As Integer) As String
+        Dim 起始索引 = starts(起点)
+        Dim 结束索引 = If(终点 < starts.Length, starts(终点), 文本.Length)
+        Return 文本.Substring(起始索引, 结束索引 - 起始索引)
+    End Function
+
+    Private Shared Function 测量AI字幕宽度(文本 As String, 字体 As String, 字号 As Single,
+                                      ByRef 宽度 As Single) As Boolean
+        宽度 = 0
+        Try
+            Return 播放器原生接口.FFF3FP_MeasureTimedTextWidth(
+                文本, 字体, 字号, 原生定时文字标志.无, 宽度) = 原生播放器结果.成功 AndAlso
+                Single.IsFinite(宽度) AndAlso 宽度 >= 0
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function 测量AI字幕行高(文本 As String, 字体 As String, 字号 As Single,
+                                      最大宽度 As Single, 描边宽度 As Single) As Single
+        Try
+            Dim 原生 As New 原生定时文字测量 With {
+                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字测量)()), .版本 = 20UI}
+            If 播放器原生接口.FFF3FP_MeasureTimedText(
+                文本, 字体, 字号, 原生定时文字标志.无, Math.Max(最大宽度, 1.0F),
+                描边宽度, 0.0F, 0.0F, 0UI, 原生) = 原生播放器结果.成功 AndAlso
+                Single.IsFinite(原生.布局高度) AndAlso 原生.布局高度 > 0 Then
+                Return 原生.布局高度
+            End If
+        Catch
+        End Try
+        Return 字号 * 1.2F ' 测量不可用时的保守行高
+    End Function
 
     Private Sub 播放控制器_播放结束(sender As Object, e As EventArgs)
         If 光盘路径.是光盘路径(播放控制器.当前媒体路径) Then Return
