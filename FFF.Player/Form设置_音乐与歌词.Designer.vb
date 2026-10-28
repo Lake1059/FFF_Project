@@ -23,19 +23,19 @@ Partial Class Form设置_音乐与歌词
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
-        MCK_是否启用歌词支持 = New LakeUI.ModernCheckBox()
-        MCK_是否渲染封面图毛玻璃背景 = New LakeUI.ModernCheckBox()
-        MCK_是否渲染封面图 = New LakeUI.ModernCheckBox()
         Panel1 = New LakeUI.ModernPanel()
         MB_重置歌词字体样式 = New LakeUI.ModernButton()
         JustEmptyControl2 = New LakeUI.JustEmptyControl()
         MB_设置歌词字体样式 = New LakeUI.ModernButton()
+        MCK_是否启用歌词支持 = New LakeUI.ModernCheckBox()
+        MCK_是否渲染封面图毛玻璃背景 = New LakeUI.ModernCheckBox()
+        MCK_是否渲染封面图 = New LakeUI.ModernCheckBox()
         ModernPanel1.SuspendLayout()
         Panel1.SuspendLayout()
         SuspendLayout()
-        '
+        ' 
         ' ModernPanel1
-        '
+        ' 
         ModernPanel1.BackColor1 = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ModernPanel1.BorderSize = 0
         ModernPanel1.Controls.Add(Panel1)
@@ -45,12 +45,64 @@ Partial Class Form设置_音乐与歌词
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(10, 20, 20, 20)
+        ModernPanel1.Padding = New Padding(20)
         ModernPanel1.Size = New Size(598, 433)
         ModernPanel1.TabIndex = 0
-        '
+        ' 
+        ' Panel1
+        ' 
+        Panel1.BackColor = Color.Transparent
+        Panel1.BackColor1 = Color.Transparent
+        Panel1.BorderSize = 0
+        Panel1.Controls.Add(MB_重置歌词字体样式)
+        Panel1.Controls.Add(JustEmptyControl2)
+        Panel1.Controls.Add(MB_设置歌词字体样式)
+        Panel1.Dock = DockStyle.Top
+        Panel1.Location = New Point(20, 122)
+        Panel1.Name = "Panel1"
+        Panel1.Size = New Size(558, 32)
+        Panel1.TabIndex = 32
+        ' 
+        ' MB_重置歌词字体样式
+        ' 
+        MB_重置歌词字体样式.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_重置歌词字体样式.BorderRadius = 10
+        MB_重置歌词字体样式.BorderSize = 0
+        MB_重置歌词字体样式.Dock = DockStyle.Left
+        MB_重置歌词字体样式.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MB_重置歌词字体样式.Location = New Point(210, 0)
+        MB_重置歌词字体样式.Margin = New Padding(2)
+        MB_重置歌词字体样式.Name = "MB_重置歌词字体样式"
+        MB_重置歌词字体样式.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MB_重置歌词字体样式.Size = New Size(80, 32)
+        MB_重置歌词字体样式.TabIndex = 18
+        MB_重置歌词字体样式.Text = "重置"
+        ' 
+        ' JustEmptyControl2
+        ' 
+        JustEmptyControl2.Dock = DockStyle.Left
+        JustEmptyControl2.Location = New Point(200, 0)
+        JustEmptyControl2.Name = "JustEmptyControl2"
+        JustEmptyControl2.Size = New Size(10, 32)
+        JustEmptyControl2.TabIndex = 19
+        ' 
+        ' MB_设置歌词字体样式
+        ' 
+        MB_设置歌词字体样式.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_设置歌词字体样式.BorderRadius = 10
+        MB_设置歌词字体样式.BorderSize = 0
+        MB_设置歌词字体样式.Dock = DockStyle.Left
+        MB_设置歌词字体样式.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MB_设置歌词字体样式.Location = New Point(0, 0)
+        MB_设置歌词字体样式.Margin = New Padding(2)
+        MB_设置歌词字体样式.Name = "MB_设置歌词字体样式"
+        MB_设置歌词字体样式.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MB_设置歌词字体样式.Size = New Size(200, 32)
+        MB_设置歌词字体样式.TabIndex = 17
+        MB_设置歌词字体样式.Text = "设置歌词字体样式"
+        ' 
         ' MCK_是否启用歌词支持
-        '
+        ' 
         MCK_是否启用歌词支持.AutoSize = True
         MCK_是否启用歌词支持.BackColor = Color.Transparent
         MCK_是否启用歌词支持.BoxBorderRadius = 5
@@ -62,15 +114,15 @@ Partial Class Form设置_音乐与歌词
         MCK_是否启用歌词支持.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_是否启用歌词支持.Checked = True
         MCK_是否启用歌词支持.Dock = DockStyle.Top
-        MCK_是否启用歌词支持.Location = New Point(10, 88)
+        MCK_是否启用歌词支持.Location = New Point(20, 88)
         MCK_是否启用歌词支持.Name = "MCK_是否启用歌词支持"
         MCK_是否启用歌词支持.Padding = New Padding(0, 0, 0, 10)
-        MCK_是否启用歌词支持.Size = New Size(568, 34)
+        MCK_是否启用歌词支持.Size = New Size(558, 34)
         MCK_是否启用歌词支持.TabIndex = 31
         MCK_是否启用歌词支持.Text = "启用 LRC 歌词支持"
-        '
+        ' 
         ' MCK_是否渲染封面图毛玻璃背景
-        '
+        ' 
         MCK_是否渲染封面图毛玻璃背景.AutoSize = True
         MCK_是否渲染封面图毛玻璃背景.BackColor = Color.Transparent
         MCK_是否渲染封面图毛玻璃背景.BoxBorderRadius = 5
@@ -82,15 +134,15 @@ Partial Class Form设置_音乐与歌词
         MCK_是否渲染封面图毛玻璃背景.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_是否渲染封面图毛玻璃背景.Checked = True
         MCK_是否渲染封面图毛玻璃背景.Dock = DockStyle.Top
-        MCK_是否渲染封面图毛玻璃背景.Location = New Point(10, 54)
+        MCK_是否渲染封面图毛玻璃背景.Location = New Point(20, 54)
         MCK_是否渲染封面图毛玻璃背景.Name = "MCK_是否渲染封面图毛玻璃背景"
         MCK_是否渲染封面图毛玻璃背景.Padding = New Padding(0, 0, 0, 10)
-        MCK_是否渲染封面图毛玻璃背景.Size = New Size(568, 34)
+        MCK_是否渲染封面图毛玻璃背景.Size = New Size(558, 34)
         MCK_是否渲染封面图毛玻璃背景.TabIndex = 30
         MCK_是否渲染封面图毛玻璃背景.Text = "渲染封面图毛玻璃背景"
-        '
+        ' 
         ' MCK_是否渲染封面图
-        '
+        ' 
         MCK_是否渲染封面图.AutoSize = True
         MCK_是否渲染封面图.BackColor = Color.Transparent
         MCK_是否渲染封面图.BoxBorderRadius = 5
@@ -102,68 +154,15 @@ Partial Class Form设置_音乐与歌词
         MCK_是否渲染封面图.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_是否渲染封面图.Checked = True
         MCK_是否渲染封面图.Dock = DockStyle.Top
-        MCK_是否渲染封面图.Location = New Point(10, 20)
+        MCK_是否渲染封面图.Location = New Point(20, 20)
         MCK_是否渲染封面图.Name = "MCK_是否渲染封面图"
         MCK_是否渲染封面图.Padding = New Padding(0, 0, 0, 10)
-        MCK_是否渲染封面图.Size = New Size(568, 34)
+        MCK_是否渲染封面图.Size = New Size(558, 34)
         MCK_是否渲染封面图.TabIndex = 29
         MCK_是否渲染封面图.Text = "渲染封面图"
-        '
-        ' Panel1
-        '
-        Panel1.BackColor = Color.Transparent
-        Panel1.BackColor1 = Color.Transparent
-        Panel1.BorderSize = 0
-        Panel1.Controls.Add(MB_重置歌词字体样式)
-        Panel1.Controls.Add(JustEmptyControl2)
-        Panel1.Controls.Add(MB_设置歌词字体样式)
-        Panel1.Dock = DockStyle.Top
-        Panel1.Location = New Point(10, 122)
-        Panel1.Name = "Panel1"
-        Panel1.Padding = New Padding(0, 10, 0, 0)
-        Panel1.Size = New Size(568, 42)
-        Panel1.TabIndex = 32
-        '
-        ' MB_重置歌词字体样式
-        '
-        MB_重置歌词字体样式.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MB_重置歌词字体样式.BorderRadius = 10
-        MB_重置歌词字体样式.BorderSize = 0
-        MB_重置歌词字体样式.Dock = DockStyle.Left
-        MB_重置歌词字体样式.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_重置歌词字体样式.Location = New Point(210, 10)
-        MB_重置歌词字体样式.Margin = New Padding(2)
-        MB_重置歌词字体样式.Name = "MB_重置歌词字体样式"
-        MB_重置歌词字体样式.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_重置歌词字体样式.Size = New Size(80, 32)
-        MB_重置歌词字体样式.TabIndex = 18
-        MB_重置歌词字体样式.Text = "重置"
-        '
-        ' JustEmptyControl2
-        '
-        JustEmptyControl2.Dock = DockStyle.Left
-        JustEmptyControl2.Location = New Point(200, 10)
-        JustEmptyControl2.Name = "JustEmptyControl2"
-        JustEmptyControl2.Size = New Size(10, 32)
-        JustEmptyControl2.TabIndex = 19
-        '
-        ' MB_设置歌词字体样式
-        '
-        MB_设置歌词字体样式.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MB_设置歌词字体样式.BorderRadius = 10
-        MB_设置歌词字体样式.BorderSize = 0
-        MB_设置歌词字体样式.Dock = DockStyle.Left
-        MB_设置歌词字体样式.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_设置歌词字体样式.Location = New Point(0, 10)
-        MB_设置歌词字体样式.Margin = New Padding(2)
-        MB_设置歌词字体样式.Name = "MB_设置歌词字体样式"
-        MB_设置歌词字体样式.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_设置歌词字体样式.Size = New Size(200, 32)
-        MB_设置歌词字体样式.TabIndex = 17
-        MB_设置歌词字体样式.Text = "设置歌词字体样式"
-        '
+        ' 
         ' Form设置_音乐与歌词
-        '
+        ' 
         AutoScaleDimensions = New SizeF(96F, 96F)
         AutoScaleMode = AutoScaleMode.Dpi
         BackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))

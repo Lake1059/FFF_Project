@@ -867,6 +867,11 @@ FFF3FP_API void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context)
 FFF3FP_API FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration,
     FFF3FPHandle* player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Open(FFF3FPHandle player, const char* localPathUtf8) noexcept;
+// Configure before Open. Appended export: existing ABI layouts stay unchanged.
+// Profiles: 0 balanced, 1 more, 2 stress. Decode and render adapters are independent.
+FFF3FP_API FFFResult FFF3FP_ConfigurePlaybackPerformance(FFF3FPHandle player,
+    std::int32_t decodeAdapterIndex, std::uint32_t videoBufferPolicy,
+    std::uint32_t audioBufferPolicy) noexcept;
 FFF3FP_API FFFResult FFF3FP_DiscNavigate(FFF3FPHandle player, int command, int value, int y) noexcept;
 FFF3FP_API FFFResult FFF3FP_CopySdrFrame(FFF3FPHandle player, void* pixels, std::uint32_t capacity,
     std::uint32_t* width, std::uint32_t* height, std::uint32_t discOnly) noexcept;

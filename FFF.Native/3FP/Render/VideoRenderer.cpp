@@ -3287,6 +3287,14 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
     return forceHdrOutput_;
 }
 
+bool PlayerVideoRenderer::OwnsD3D11Texture(ID3D11Texture2D* const texture) const noexcept {
+    if (!texture) return false;
+    ComPtr<ID3D11Device> source;
+    texture->GetDevice(&source);
+    std::lock_guard deviceLock(deviceMutex_);
+    return source.Get() == device_;
+}
+
 FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** output) noexcept {
     if (output == nullptr) return FFFResult::InvalidArgument;
     *output = nullptr;

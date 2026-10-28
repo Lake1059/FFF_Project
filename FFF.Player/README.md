@@ -48,16 +48,10 @@ dotnet build ..\LakeUI\LakeUI\LakeUI.vbproj -c Debug
 .\tools\构建3FP.ps1 -Configuration Debug
 ~~~
 
-脚本会构建 FFF.Native、FFF.Player 和 FFF.Player.Tests，并执行无桌面依赖的图片缩放回归。真实桌面上的弹幕节拍探针：
-
-~~~powershell
-dotnet run --project .\FFF.Player.Tests\FFF.Player.Tests.vbproj -- --danmaku-pacing-live <夹具路径> <秒数> real visible
-~~~
-
-探针会报告显示器刷新率、托管泵间隔、提交数量、Native 呈现上限和显示速率丢弃。无桌面或缺少素材时返回“未判定”，不伪造通过结果。
+脚本会构建 FFF.Native、FFF.Player 和 FFF.Player.Tests。
 
 ## 发布与依赖
 
 正式发布可使用 tools/发布3FP单文件.ps1。FFF.Native 和 libass 运行库随单文件释放；FFmpeg Shared DLL 保持外置，由用户提供同一 ABI 的整套 DLL。3FP 自有代码采用 MIT，第三方依赖保留各自许可证和发布义务。
 
-FFF.Player.Tests 用于同进程回归和真窗口探针，不是产品运行时依赖。API 版本和配置结构体大小在构建或发布阶段由项目目标自动校验。
+FFF.Player.Tests 保留可编译的测试接入点，不是产品运行时依赖。API 版本和配置结构体大小在构建或发布阶段由项目目标自动校验。

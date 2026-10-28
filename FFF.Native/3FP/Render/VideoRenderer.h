@@ -376,6 +376,7 @@ public:
     // single place that decides it, for Render() and for the refresh above.
     std::uint32_t ResolveDecodeTransfer(const HdrFrameState& hdrState) const noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
+    bool OwnsD3D11Texture(ID3D11Texture2D* texture) const noexcept;
     /// Zero-cost capability probe for D3D11VA hardware decoding.
     ///
     /// Ask the driver instead of consulting a table: the answer describes this GPU

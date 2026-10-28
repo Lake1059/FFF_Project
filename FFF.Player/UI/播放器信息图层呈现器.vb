@@ -395,25 +395,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return 结果
     End Function
 
-    Friend Function 读取调试文本行(信息 As 媒体信息, 快照 As 播放器快照,
-                                 媒体路径 As String) As IReadOnlyList(Of String)
-        Dim 行 = 创建调试行(信息, 快照, 媒体路径)
-        Dim 结果(行.Count - 1) As String
-        For 行索引 = 0 To 行.Count - 1
-            Dim 段 = 行(行索引).文本段
-            If 段.Length = 1 Then
-                结果(行索引) = 段(0).文本
-            Else
-                Dim 文本 As New Text.StringBuilder()
-                For 段索引 = 0 To 段.Length - 1
-                    文本.Append(段(段索引).文本)
-                Next
-                结果(行索引) = 文本.ToString()
-            End If
-        Next
-        Return 结果
-    End Function
-
     Private Sub 构建操作消息(图形 As Graphics, 画布 As Size)
         If 操作消息列表.Count = 0 Then Return
         Dim DPI缩放 = Math.Max(0.5F, 画面控件.DeviceDpi / 96.0F)
@@ -643,14 +624,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
 
     Private Shared Function 音频输入(流 As 媒体流信息, 实时比特率 As ULong) As String
         ' 编码名打头（AAC/OPUS/EAC3…）：输入行的身份来自编码，采样/声道是它的属性。
-        ' 位深只对无损/PCM 流有意义：有损编码（AAC 等）的 bitsPerCodedSample 是
-        ' 编码槽宽（32 = fltp 的尺寸），不是源位深，显示出来就是假信息。
         Dim 编码 = If(String.IsNullOrWhiteSpace(流.编码), String.Empty, 流.编码.ToUpperInvariant())
-        Dim 位深 As String = String.Empty
-        If 流.无损 OrElse 流.压缩模式 <> "有损" Then
-            Dim 位 = If(流.原始采样位数 > 0, 流.原始采样位数, 流.编码采样位数)
-            If 位 > 0 Then 位深 = $"位深 {位}bit"
-        End If
+        Dim 位深 = 音频采样格式化.输入位深(流)
         ' 声道数带布局（5.1 / 7.1.4 / 6.1…，FFmpeg 布局描述原样）；mono/stereo
         ' 不加——声道数 1/2 已经说明，括号只服务多声道布局这层信息。
         Dim 声道 As String = String.Empty
@@ -664,7 +639,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return 合并字段(
             编码,
             If(流.采样率 > 0, $"采样 {流.采样率}Hz", String.Empty),
-            位深,
+            If(位深.Length > 0, "位深 " & 位深, String.Empty),
             声道,
             If(实时比特率 > 0, $"实时码率 {格式化比特率(实时比特率)}", String.Empty))
     End Function
