@@ -336,7 +336,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             ' RTX 视频超分辨率与 RTX 自动 HDR（TrueHDR）各一行。这两行存在的理由相同：
             ' 内核逐帧跳过时**完全静默**（软解源没有 D3D11_BIND_DECODER、窗口没放大、
             ' 输出不是 10 位 HDR 契约……），用户能看到的只有"勾了但没效果"。
-            ' 文本由 播放器会话 侧组好：判词（已激活/已启用 · 未开启 · 未生效）+ 一句人话，
+            ' 文本由 播放器会话 侧组好：判词（已激活/已启用 · 未生效）+ 一句人话，
             ' 这里只按判词着色——判词取自内核的 生效 字段，不是用户的勾选态。
             Dim 超分行 = 安全获取(获取超分状态)
             If 超分行 IsNot Nothing Then
@@ -344,7 +344,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             End If
             Dim 自动HDR行 = 安全获取(获取自动HDR状态)
             If 自动HDR行 IsNot Nothing Then
-                添加配对行如果有值(结果, "自动HDR：", 自动HDR行, 判词颜色(自动HDR行))
+                添加配对行如果有值(结果, "自动 HDR：", 自动HDR行, 判词颜色(自动HDR行))
             End If
         End If
 
@@ -481,12 +481,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return New 信息行(空隙前, New 文本段(标签, 标签颜色), New 文本段(值, 值颜色))
     End Function
 
-    ''' <summary>RTX 两行判词的配色。跳过态用告警色而不是青色，是为了不让它被读成又一条
-    ''' 常规读数；未开启是常规态（超分与自动 HDR 默认都关），涂成告警色等于把常规读数
-    ''' 报成异常——正是本文件给告警色写的那条理由反过来。判词由 播放器会话 侧固定三态开头。</summary>
+    ''' <summary>RTX 两行判词的配色：未生效用告警色，已生效用绿色。</summary>
     Friend Shared Function 判词颜色(文本 As String) As UInteger
         If 文本.StartsWith("未生效", StringComparison.Ordinal) Then Return 告警色
-        If 文本.StartsWith("未开启", StringComparison.Ordinal) Then Return 青色
         Return 绿色
     End Function
 
