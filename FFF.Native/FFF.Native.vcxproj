@@ -128,6 +128,8 @@
     <ClInclude Include="3FP\Core\AvifIlocShim.h" />
     <ClInclude Include="3FP\Core\AvifTileGridComposer.h" />
     <ClInclude Include="3FP\Core\PlacementPolicy.h" />
+    <ClInclude Include="3FP\Core\PlaybackPerformancePolicy.h" />
+    <ClInclude Include="3FP\Core\DecodeDeviceSelection.h" />
     <ClInclude Include="3FP\Core\MediaText.h" />
     <ClInclude Include="3FP\Subtitle\SubtitleProbe.h" />
     <ClInclude Include="3FP\Render\NvidiaVideoExtensions.h" />
@@ -156,6 +158,7 @@
     <ClCompile Include="3FP\Audio\WasapiRenderer.cpp" />
     <ClCompile Include="3FP\Audio\IamfAudioDecoder.cpp" />
     <ClCompile Include="3FP\Core\PlayerSession.cpp" />
+    <ClCompile Include="3FP\Core\DecodeDeviceSelection.cpp" />
     <ClCompile Include="3FP\Core\AvifIlocShim.cpp" />
     <ClCompile Include="3FP\Core\AvifTileGridComposer.cpp" />
     <ClCompile Include="3FP\Core\PlacementPolicy.cpp" />

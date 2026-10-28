@@ -762,6 +762,10 @@ Friend Module 播放器原生接口
     Friend Function FFF3FP_Create(ByRef 配置 As 原生播放器配置, ByRef 播放器 As IntPtr) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_ConfigurePlaybackPerformance(播放器 As 播放器原生句柄,
+        解码适配器索引 As Integer, 视频缓冲区策略 As UInteger, 音频缓冲区策略 As UInteger) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_Open(播放器 As 播放器原生句柄, 路径UTF8 As IntPtr) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>

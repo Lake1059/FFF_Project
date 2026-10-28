@@ -15,6 +15,7 @@ Public Class Form设置_HDR
     Friend Sub 初始化页面()
         正在初始化 = True
         Try
+            MCK_自动切换到真实HDR高亮模式.Checked = 设置.实例对象.自动切换到真实HDR高亮
             MCB_真实HDR峰值亮度选项.SelectedIndex = 设置.实例对象.HDR峰值亮度选项
             MTB_自定义真实HDR峰值亮度.Text = If(设置.实例对象.HDR峰值亮度 > 0,
                                                设置.实例对象.HDR峰值亮度.ToString(), String.Empty)
@@ -23,6 +24,12 @@ Public Class Form设置_HDR
         Finally
             正在初始化 = False
         End Try
+    End Sub
+
+    Private Sub 自动HDR_CheckedChanged(sender As Object, e As EventArgs) Handles MCK_自动切换到真实HDR高亮模式.CheckedChanged
+        If 正在初始化 Then Return
+        设置.实例对象.自动切换到真实HDR高亮 = MCK_自动切换到真实HDR高亮模式.Checked
+        Form1.当前主窗体?.应用自动HDR模式设置()
     End Sub
 
     Private Sub MCB_真实HDR峰值亮度选项_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_真实HDR峰值亮度选项.SelectedIndexChanged

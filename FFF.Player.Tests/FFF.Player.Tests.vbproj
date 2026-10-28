@@ -15,24 +15,4 @@
     <ProjectReference Include="..\FFF.Player\FFF.Player.vbproj" />
   </ItemGroup>
 
-  <!-- 多轨流选择回归（stream-selection-regression 入口）经 播放器会话 P/Invoke 真内核，
-       所以本工程输出目录也需要 FFF.Native.dll 与 FFmpeg 运行库。
-       FFF.Player 的 CopyNativeRuntime 只拷它自己的 OutDir，不会传递到本工程，
-       因此这里按同一份清单再拷一次（只拷 FFmpeg 六件 + FFF.Native；本回归不渲染
-       字幕，libass 运行库暂不需要 —— 若未来加字幕用例再照 FFF.Player 清单补）。 -->
-  <ItemGroup>
-    <ProductNative Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" />
-    <DevelopmentRuntime Include="..\runtime\avcodec*.dll" />
-    <DevelopmentRuntime Include="..\runtime\avformat*.dll" />
-    <DevelopmentRuntime Include="..\runtime\avutil*.dll" />
-    <DevelopmentRuntime Include="..\runtime\swresample*.dll" />
-    <DevelopmentRuntime Include="..\runtime\swscale*.dll" />
-    <DevelopmentRuntime Include="..\runtime\avfilter*.dll" />
-  </ItemGroup>
-
-  <Target Name="CopyNativeRuntime" AfterTargets="Build">
-    <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
-    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
-  </Target>
-
 </Project>

@@ -90,7 +90,4 @@ Public Class Form设置_视频超分辨率
         菜单.Items.Add(New ModernContextMenu.ModernMenuItem(文本) With {.IsDescription = True})
     End Sub
 
-    Private Sub Form设置_视频超分辨率_Load(sender As Object, e As EventArgs) Handles MyBase.Load
-
-    End Sub
 End Class

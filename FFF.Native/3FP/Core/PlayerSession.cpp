@@ -2,6 +2,7 @@
 #include "3FP/Core/AvifIlocShim.h"
 #include "3FP/Core/MediaText.h"
 #include "3FP/Core/PlayerSession.h"
+#include "3FP/Core/DecodeDeviceSelection.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -70,11 +71,11 @@ constexpr std::size_t SoftwarePoolRungCount =
 // divided by the frame, clamped to the rung's frame cap. The in-flight subtraction
 // VideoQueueLimit applies on top is constant across rungs for one media, so this
 // relative depth is what the climb gate compares.
-constexpr std::size_t SoftwarePoolRungDepth(std::size_t rung,
-                                            std::size_t bytesPerFrame) noexcept {
-    const auto cap = SoftwarePoolFrameCaps[rung];
+std::size_t SoftwarePoolRungDepth(std::size_t rung,
+    std::size_t bytesPerFrame, const PlaybackPerformancePolicy& policy) noexcept {
+    const auto cap = policy.VideoFrames(SoftwarePoolFrameCaps[rung]);
     if (bytesPerFrame == 0) return cap;
-    const auto byBudget = SoftwarePoolBudgets[rung] / bytesPerFrame;
+    const auto byBudget = policy.VideoBudget(SoftwarePoolBudgets[rung]) / bytesPerFrame;
     return byBudget < 2 ? std::size_t{2} : (std::min)(byBudget, cap);
 }
 // The pool climbs only when the pool itself starved the pipeline. A window that
@@ -123,7 +124,6 @@ constexpr std::uint32_t SchedulerHeadroomThreads = 1;    // one core left for th
 // A hardware decoder is driven from the calling thread and never runs a worker pool,
 // so its decode part is exactly one thread.
 constexpr std::uint32_t HardwareDecoderThreads = 1;
-constexpr std::int64_t TargetVideoLookAhead100ns = 1'500'000;
 // Buffered100ns includes both application PCM and samples already submitted to
 // WASAPI.  Keep the complete audible queue short so seek, stream/volume changes
 // and the information overlay reflect a low-latency local playback pipeline.
@@ -205,16 +205,17 @@ bool AnimQueueReserveEnabled() noexcept {
 std::size_t VideoFrameQueueLimit(const std::deque<AVFrame*>& queue,
     const std::size_t pipelineFrames, const bool softwareVideo,
     const std::size_t softwarePoolBudgetBytes,
-    const std::size_t softwarePoolFrameCap) noexcept {
-    if (queue.empty()) return MaxQueuedVideoFrames;
+    const std::size_t softwarePoolFrameCap,
+    const PlaybackPerformancePolicy& policy) noexcept {
+    if (queue.empty()) return policy.VideoFrames(MaxQueuedVideoFrames);
     const auto bytesPerFrame = EstimateDecodedFrameBytes(queue.back());
-    if (bytesPerFrame == 0) return MaxQueuedVideoFrames;
+    if (bytesPerFrame == 0) return policy.VideoFrames(MaxQueuedVideoFrames);
     // Software decoding needs look-ahead while the session feeds audio and uploads; its
     // budget and frame cap are the pool ladder's current rung (SoftwarePoolBudgets).
     // The hardware and animated-image paths keep the fixed 128 MB / 8 frames split.
     const auto software = softwareVideo && queue.back()->hw_frames_ctx == nullptr;
-    const auto budget = software ? softwarePoolBudgetBytes : DecodedVideoQueueBudgetBytes;
-    const auto cap = software ? softwarePoolFrameCap : MaxQueuedVideoFrames;
+    const auto budget = policy.VideoBudget(software ? softwarePoolBudgetBytes : DecodedVideoQueueBudgetBytes);
+    const auto cap = policy.VideoFrames(software ? softwarePoolFrameCap : MaxQueuedVideoFrames);
     const auto memoryBound = static_cast<std::size_t>(budget / bytesPerFrame);
     const auto queueBound = memoryBound > pipelineFrames ? memoryBound - pipelineFrames : 0;
     return std::clamp(queueBound, MinimumMemoryBoundVideoFrames, cap);
@@ -1037,7 +1038,7 @@ std::size_t PlayerSession::VideoQueueLimit() const noexcept {
     const auto pipelineFrames = VideoQueuePipelineReservation();
     const auto originalLimit = VideoFrameQueueLimit(videoFrameQueue_, pipelineFrames,
         !staticImage_ && !animatedImage_, SoftwarePoolBudgets[softwarePoolRung_],
-        SoftwarePoolFrameCaps[softwarePoolRung_]);
+        SoftwarePoolFrameCaps[softwarePoolRung_], performance_);
     const auto limit = std::max(MinimumMemoryBoundVideoFrames,
         originalLimit - std::min(originalLimit - 1, static_cast<std::size_t>(softwareVideoOutputLimit_ - 1)));
     // The two numbers this slice stands on, said by the kernel itself: whether frame
@@ -1064,7 +1065,7 @@ bool PlayerSession::VideoQueueSaturated() const noexcept {
     const auto queueLimit = VideoQueueLimit();
     return videoFrameQueue_.size() >= std::max<std::size_t>(1, queueLimit - 1) ||
         (videoFrameQueue_.size() >= MinimumQueuedVideoFrames &&
-            lookAhead >= TargetVideoLookAhead100ns);
+            lookAhead >= performance_.VideoLookAhead());
 }
 
 void PlayerSession::TryCompletePlaybackPreroll() noexcept {
@@ -1083,7 +1084,7 @@ void PlayerSession::TryCompletePlaybackPreroll() noexcept {
         videoRenderer_.HasOutputWindow()) {
         auto* frame = videoFrameQueue_.front();
         AVFrame* transferred = nullptr;
-        if (IsHardwareFrame(frame) && frame->format != AV_PIX_FMT_D3D11) {
+        if (IsHardwareFrame(frame) && !CanPresentHardwareFrameDirectly(frame, videoRenderer_)) {
             transferred = av_frame_alloc();
             if (transferred == nullptr || av_hwframe_transfer_data(transferred, frame, 0) < 0) {
                 av_frame_free(&transferred);
@@ -1199,6 +1200,23 @@ bool PlayerSession::PresentAudioBoundary() noexcept {
     }
     TryReleaseAudioAfterVideoPresentation();
     return true;
+}
+
+FFFResult PlayerSession::ConfigurePlaybackPerformance(
+    const std::int32_t decodeAdapterIndex, const std::uint32_t videoBufferPolicy,
+    const std::uint32_t audioBufferPolicy) noexcept {
+    if (decodeAdapterIndex < -1 || decodeAdapterIndex > 15 ||
+        videoBufferPolicy > 2 || audioBufferPolicy > 2)
+        return FFFResult::InvalidArgument;
+    if (state_.load(std::memory_order_acquire) != FFF3FPState::Idle)
+        return FFFResult::InvalidState;
+    Enqueue([this, decodeAdapterIndex, videoBufferPolicy, audioBufferPolicy] {
+        decodeAdapterIndex_ = decodeAdapterIndex;
+        performance_ = {videoBufferPolicy, audioBufferPolicy};
+        audioTargetBuffer100ns_ = performance_.AudioInitial();
+        unsupportedHardwareRoutes_.clear();
+    });
+    return FFFResult::Success;
 }
 
 FFFResult PlayerSession::Open(const char* path) noexcept {
@@ -3013,11 +3031,11 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
         // the demux feed gated while the pipeline is still filling. Require room for
         // MinimumPoolLookAheadFrames frames plus one frame of accounting slack;
         // smaller-frame classes still open at the floor rung.
-        if (bytesPerFrame > 0) {
-            const auto floorBytes = (MinimumPoolLookAheadFrames + 1) * bytesPerFrame;
+        if (bytesPerFrame > 0 && performance_.video != 2) {
+            const auto floorBytes = (performance_.VideoFrames(MinimumPoolLookAheadFrames) + 1) * bytesPerFrame;
             std::size_t opening = 0;
             while (opening + 1 < SoftwarePoolRungCount &&
-                   SoftwarePoolBudgets[opening] < floorBytes)
+                   performance_.VideoBudget(SoftwarePoolBudgets[opening]) < floorBytes)
                 ++opening;
             if (opening > softwarePoolRung_) {
                 softwarePoolRung_ = static_cast<std::uint8_t>(opening);
@@ -3090,15 +3108,9 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
         constexpr int ExtraHardwareFrames = 3;
         context->extra_hw_frames = std::max(context->extra_hw_frames, ExtraHardwareFrames);
         AVBufferRef* hardwareDevice = nullptr;
-        if (deviceType == AV_HWDEVICE_TYPE_D3D11VA) {
-            const auto shared = videoRenderer_.CreateD3D11HardwareDeviceContext(&hardwareDevice);
-            result = shared == FFFResult::Success ? 0 : AVERROR(ENODEV);
-            if (result < 0) setFailure(videoRenderer_.LastError());
-        } else {
-            result = av_hwdevice_ctx_create(&hardwareDevice, deviceType, nullptr, nullptr, 0);
-            if (result < 0)
-                setFailure("FFmpeg could not create the hardware device: " + FfmpegError(result));
-        }
+        result = CreateDecodeHardwareDevice(&hardwareDevice, deviceType, decodeAdapterIndex_, videoRenderer_);
+        if (result < 0)
+            setFailure("FFmpeg could not create the selected decode device: " + FfmpegError(result));
         if (result >= 0) {
             context->hw_device_ctx = av_buffer_ref(hardwareDevice);
             context->opaque = reinterpret_cast<void*>(static_cast<std::intptr_t>(selectedHardwareFormat));
@@ -3222,7 +3234,7 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
                 // "does a decoder configuration exist" -- never "is it fast enough",
                 // because throughput has no standard API and single-stream decoding is
                 // assumed to fit.
-                if (backend == AV_HWDEVICE_TYPE_D3D11VA && HardwareCapabilityProbeEnabled()) {
+                if (decodeAdapterIndex_ < 0 && backend == AV_HWDEVICE_TYPE_D3D11VA && HardwareCapabilityProbeEnabled()) {
                     const auto* probe = owner->streams[index]->codecpar;
                     const auto support = videoRenderer_.QueryD3D11DecodeSupport(
                         static_cast<std::int32_t>(probe->codec_id), probe->profile,
@@ -3435,7 +3447,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // an immediate replacement while the previous chain is still retiring.
     DoClose(FFF3FPState::Opening, true);
     // A new file is a new audio-pool round: back to the default target.
-    audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
+    audioTargetBuffer100ns_ = performance_.AudioInitial();
     seenAudioUnderruns_ = 0;
     seenAudioJitterFrames_ = 0;
     seenAudioDiscontinuities_ = 0;
@@ -4052,7 +4064,7 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
         case PoolVerdict::Stalled: poolVerdictName = "stalled"; break;
         case PoolVerdict::Hold: break;
     }
-    if (poolVerdict == PoolVerdict::Climb && softwarePoolRung_ + 1 < SoftwarePoolRungCount) {
+    if (performance_.video != 2 && poolVerdict == PoolVerdict::Climb && softwarePoolRung_ + 1 < SoftwarePoolRungCount) {
         const auto bytesPerFrame = videoFrameQueue_.empty()
             ? std::size_t{0} : EstimateDecodedFrameBytes(videoFrameQueue_.back());
         // Skip rungs that would not deepen the queue for this frame size: a budget
@@ -4062,8 +4074,8 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
         do {
             ++target;
         } while (target + 1 < SoftwarePoolRungCount &&
-                 SoftwarePoolRungDepth(target, bytesPerFrame) <=
-                     SoftwarePoolRungDepth(softwarePoolRung_, bytesPerFrame));
+                 SoftwarePoolRungDepth(target, bytesPerFrame, performance_) <=
+                     SoftwarePoolRungDepth(softwarePoolRung_, bytesPerFrame, performance_));
         const auto previousBudget = SoftwarePoolBudgets[softwarePoolRung_];
         const auto previousFrames = SoftwarePoolFrameCaps[softwarePoolRung_];
         softwarePoolRung_ = static_cast<std::uint8_t>(target);
@@ -4213,7 +4225,7 @@ void PlayerSession::PumpPlayback() noexcept {
     if (movingWindow) {
         // 移动窗口前主动增加解码储备；本轮保留已增加的水位，避免连续拖动反复欠载。
         audioTargetBuffer100ns_ = std::max(audioTargetBuffer100ns_,
-            kInteractiveMoveAudioTargetBuffer100ns);
+            performance_.AudioMoveFloor());
     }
     if (format_ == nullptr) { SetState(FFF3FPState::Failed); return; }
     // The host asked for an auxiliary composition: open the second video
@@ -4297,8 +4309,9 @@ void PlayerSession::PumpPlayback() noexcept {
         track(audioRenderer_->DroppedOverlapFrames(), seenAudioDroppedOverlap_);
         if (grew) {
             const auto previousTarget = audioTargetBuffer100ns_;
-            audioTargetBuffer100ns_ = std::min(kMaximumAudioTargetBuffer100ns,
-                audioTargetBuffer100ns_ + kAudioTargetBufferStep100ns);
+            const auto deviceFloor = audioRenderer_->DeviceBufferDuration100ns();
+            audioTargetBuffer100ns_ = std::max(deviceFloor, std::min(performance_.AudioMaximum(),
+                audioTargetBuffer100ns_ + kAudioTargetBufferStep100ns));
             if (GetEnvironmentVariableW(L"FFF_AUDIO_TARGET_TRACE", nullptr, 0))
                 std::fprintf(stderr, "AUDIO_TARGET underruns=%llu jitter=%llu disc=%llu target=%lld -> %lld buffered=%lld\n",
                     static_cast<unsigned long long>(underruns),
@@ -4889,7 +4902,7 @@ bool PlayerSession::PumpVideoPresentation() noexcept {
     const auto queueLimit = VideoQueueLimit();
     const auto saturated = videoFrameQueue_.size() >= std::max<std::size_t>(1, queueLimit - 1) ||
         (videoFrameQueue_.size() >= MinimumQueuedVideoFrames &&
-            lookAhead >= TargetVideoLookAhead100ns);
+            lookAhead >= performance_.VideoLookAhead());
     // Continue demuxing toward audio while video is ahead, retaining compressed
     // video packets instead of several additional full decoded 4K frames.
     const auto audioNeedsData = audioRenderer_ &&
@@ -5772,7 +5785,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     // (docs/99 section 13). Downloading puts both arms on the route that already matched
     // HEVC and every >=1920x1080 sample exactly.
     if (IsHardwareFrame(frame) &&
-        (frame->format != AV_PIX_FMT_D3D11 || (staticImage_ && owner == format_))) {
+        (!CanPresentHardwareFrameDirectly(frame, videoRenderer_) || (staticImage_ && owner == format_))) {
         if (videoTransferFrame_ == nullptr) videoTransferFrame_ = av_frame_alloc();
         if (videoTransferFrame_ == nullptr) {
             Fail(FFFResult::NativeFailure, "Could not allocate the reusable hardware-transfer frame.");
@@ -6601,7 +6614,7 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         ReleaseIamfDecoder();
         audioDecoder_ = replacement; audioStream_ = index; snapshot_.selectedAudioStream = index;
         // A new audio track is a new pool round, same as a new file.
-        audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
+        audioTargetBuffer100ns_ = performance_.AudioInitial();
         seenAudioUnderruns_ = 0;
         seenAudioJitterFrames_ = 0;
         seenAudioDiscontinuities_ = 0;
@@ -7092,8 +7105,8 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                      << ",\"presentationLayout\":\""
                      << EscapeJson(iamf.presentationLayoutName) << "\"}";
             }
-            const auto rawBits = std::max(parameters->bits_per_raw_sample, parameters->bits_per_coded_sample);
-            json << ",\"rawSampleBits\":" << rawBits
+            // Keep effective precision distinct from the coded width (e.g. ADPCM codewords).
+            json << ",\"rawSampleBits\":" << parameters->bits_per_raw_sample
                  << ",\"compressionMode\":\"" << (isLossless ? "无损" : "有损") << "\"";
             if (parameters->codec_id == AV_CODEC_ID_FLAC && parameters->extradata != nullptr && parameters->extradata_size >= 16) {
                 static constexpr char Hex[] = "0123456789ABCDEF";

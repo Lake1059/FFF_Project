@@ -5,6 +5,7 @@
 #include "3FP/Audio/WasapiRenderer.h"
 #include "3FP/Core/AvifTileGridComposer.h"
 #include "3FP/Core/PlacementPolicy.h"
+#include "3FP/Core/PlaybackPerformancePolicy.h"
 // IAMF needs the AOM reference decoder: FFmpeg splits an IAMF element into
 // dependent substreams and never mixes them (see IamfAudioDecoder.h).
 #include "3FP/Audio/IamfAudioDecoder.h"
@@ -42,6 +43,8 @@ public:
     ~PlayerSession();
 
     FFFResult Open(const char* localPathUtf8) noexcept;
+    FFFResult ConfigurePlaybackPerformance(std::int32_t decodeAdapterIndex,
+        std::uint32_t videoBufferPolicy, std::uint32_t audioBufferPolicy) noexcept;
     FFFResult GetImageInfo(FFF3FPImageInfo& info) const noexcept;
 
     // Wide-gamut carrier: P3 sources are converted to BT.2020 once, because the
@@ -427,6 +430,8 @@ private:
     // ("no preference") becomes Gpu, which is the GPU-first default -- the CPU is
     // what a hardware refusal falls back to, never what is asked for up front.
     FFF3FPDecodeMode decodeMode_;
+    std::int32_t decodeAdapterIndex_ = -1;
+    PlaybackPerformancePolicy performance_;
     // See SetComparisonMode(). Plain bool: only ever touched on the host's
     // calling thread, never read from the render thread.
     bool comparisonModeActive_ = false;
@@ -734,11 +739,8 @@ private:
     // step per observed underrun batch. Rise-only within the round -- nothing
     // steps it down -- and reset to the default by DoOpen and by an audio-track
     // change. Everything that touches it runs on the session worker thread.
-    static constexpr std::int64_t kDefaultAudioTargetBuffer100ns = 600'000;
-    static constexpr std::int64_t kInteractiveMoveAudioTargetBuffer100ns = 1'200'000;
-    static constexpr std::int64_t kMaximumAudioTargetBuffer100ns = 2'400'000;
     static constexpr std::int64_t kAudioTargetBufferStep100ns = 300'000;
-    std::int64_t audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
+    std::int64_t audioTargetBuffer100ns_ = performance_.AudioInitial();
     std::atomic<bool> interactiveMove_{false};
     // Last-seen values of the renderer's warning counters. Any growth since the
     // previous pump buys one step of target headroom -- underruns are the hard
