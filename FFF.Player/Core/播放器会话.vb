@@ -41,6 +41,7 @@ Public NotInheritable Class 播放器会话
     Private 定时文字原生缓冲句柄 As GCHandle
     Private 已释放 As Integer
     Private 事件排程中 As Integer
+    Private 空间音频已启用 As Integer = 1
     ''' <summary>外部色彩变换注入泵（模块缺席/未解锁/内核无环导出时为 Nothing，通路整体静默）。</summary>
     Private 注入泵 As 色彩变换注入泵
 
@@ -50,6 +51,7 @@ Public NotInheritable Class 播放器会话
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
         配置.验证()
+        空间音频已启用 = If(配置.启用空间音频, 1, 0)
         ' 创建前检查实际加载的内核版本；配置大小仍由 FFF3FP_Create 校验。
         Dim 内核API版本 = 播放器原生接口.FFF3FP_GetApiVersion()
         If 内核API版本 <> 期望API版本 Then
@@ -102,6 +104,13 @@ Public NotInheritable Class 播放器会话
             Throw
         Finally
             If 端点指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(端点指针)
+        End Try
+        Try
+            检查结果(播放器原生接口.FFF3FP_ConfigurePlaybackPerformance(句柄,
+                配置.首选解码适配器索引, CUInt(配置.视频缓冲区策略), CUInt(配置.音频缓冲区策略)))
+        Catch
+            释放()
+            Throw
         End Try
     End Sub
 
@@ -613,11 +622,20 @@ Public NotInheritable Class 播放器会话
     ' 装过一次就不再重复握手——每次重装都会让模块新建一个渲染上下文。
     Private 色彩模块实例 As 色彩变换模块实例
     Private 音频插槽已装 As Boolean
+    Private ReadOnly 音频插槽锁 As New Object()
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Sub 释放音频上下文(上下文 As IntPtr)
 
     ''' <summary>把模块的外部床渲染函数表交给本会话的内核。任何一步不成立都静默返回：
     ''' 缺席、旧件、未解锁、镜像尺寸不同水、内核拒绝——全部保持矩阵折叠。</summary>
     Private Sub 安装音频渲染插槽()
-        If 音频插槽已装 OrElse 色彩模块实例 Is Nothing Then Return
+        SyncLock 音频插槽锁
+            安装音频渲染插槽核心()
+        End SyncLock
+    End Sub
+
+    Private Sub 安装音频渲染插槽核心()
+        If Volatile.Read(空间音频已启用) = 0 OrElse 音频插槽已装 OrElse 色彩模块实例 Is Nothing Then Return
         Dim 原因 As String = Nothing
         Dim 表 = 色彩模块实例.尝试取音频渲染表(原因)
         If Not 表.HasValue Then
@@ -626,18 +644,34 @@ Public NotInheritable Class 播放器会话
         End If
         Dim 本地表 = 表.Value
         Dim 钉住 = GCHandle.Alloc(本地表, GCHandleType.Pinned)
+        Dim 已交给内核 As Boolean
         Try
             Dim 结果 = 播放器原生接口.FFF3FP_SetAudioRenderPlug(取得句柄(), 钉住.AddrOfPinnedObject())
             If 结果 = 原生播放器结果.成功 Then
+                已交给内核 = True
                 音频插槽已装 = True
             Else
-                ' 内核没收下这张表；模块那边的上下文是这次握手新建的，由内核在
-                ' 下一次成功装载或会话拆解时释放，宿主不越界替它 free。
                 Debug.WriteLine("音频渲染插槽：内核拒绝 " & 结果.ToString())
             End If
         Finally
             钉住.Free()
+            ' 只有成功装载才转移上下文所有权；拒绝或异常时由调用方归还。
+            If Not 已交给内核 AndAlso 本地表.释放 <> IntPtr.Zero AndAlso 本地表.上下文 <> IntPtr.Zero Then
+                Marshal.GetDelegateForFunctionPointer(Of 释放音频上下文)(本地表.释放).Invoke(本地表.上下文)
+            End If
         End Try
+    End Sub
+
+    Public Sub 设置空间音频(启用 As Boolean)
+        SyncLock 音频插槽锁
+            Volatile.Write(空间音频已启用, If(启用, 1, 0))
+            If 启用 Then
+                安装音频渲染插槽核心()
+            ElseIf 音频插槽已装 Then
+                检查结果(播放器原生接口.FFF3FP_SetAudioRenderPlug(取得句柄(), IntPtr.Zero))
+                音频插槽已装 = False
+            End If
+        End SyncLock
     End Sub
 
     ''' <summary>插槽读数：0/1 + 已渲染与已拒绝帧数。给信息层与测试用，不抛。</summary>

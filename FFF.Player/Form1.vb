@@ -1,7 +1,6 @@
 Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Threading
-Imports System.Threading.Tasks
 
 Public Class Form1
     Private 光盘控制器 As 播放器光盘控制器
@@ -921,6 +920,14 @@ Public Class Form1
 
     Friend Sub 应用SDR亮度设置()
         播放控制器?.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
+    End Sub
+
+    Friend Sub 应用自动HDR模式设置()
+        播放控制器?.应用自动HDR模式设置()
+    End Sub
+
+    Friend Sub 应用空间音频设置()
+        播放控制器?.应用空间音频设置()
     End Sub
 
     Friend Sub 应用字幕设置()

@@ -42,11 +42,12 @@ Public NotInheritable Class 播放器控制器
     Private 最后打开文件路径 As String = String.Empty
     Private 当前解码器 As 解码模式 = 解码模式.CPU
     Private 当前会话解码器配置 As 解码模式 = 解码模式.CPU
+    Private 当前会话性能选项 As 播放性能选项
     Private 用户解码器偏好 As 解码模式 = 解码模式.CPU
-    ' 开机默认请求真实HDR：HDR 屏直接进 scRGB 链；屏不支持或 SDR 8-bit 源由内核
-    ' EnsureSwapChain 降级回映射SDR（挂 fallbackReason），手动三档切换不受影响。
+    ' 自动 HDR 偏好由设置初始化；显示器能力仍由内核判断。手动三档切换保留会话偏好。
     Private 当前色彩输出 As 色彩输出模式 = 色彩输出模式.峰值映射HDR
     Private HDR色彩输出偏好 As 色彩输出模式 = 色彩输出模式.峰值映射HDR
+    Private HDR模式已手动选择 As Boolean
     ' 只有用户手动选了真实HDR才弹"强制开启"确认框；开机默认请求被内核降级时
     ' 只走非模态提示，否则 SDR 屏上每次打开都会多一个没人要求的模态框。
     Private 用户请求过HDR As Boolean
@@ -67,6 +68,8 @@ Public NotInheritable Class 播放器控制器
         Me.事件同步上下文 = 事件同步上下文
         当前解码器 = 初始解码器
         用户解码器偏好 = 初始解码器
+        当前色彩输出 = 自动HDR目标模式()
+        HDR色彩输出偏好 = 当前色彩输出
     End Sub
 
     Public Event 状态已变化 As EventHandler
@@ -1040,12 +1043,46 @@ Public NotInheritable Class 播放器控制器
                          SDR纸白尼特, 强制HDR输出)
             当前色彩输出 = 新模式
             HDR色彩输出偏好 = 新模式
+            HDR模式已手动选择 = True
             If 新模式 = 色彩输出模式.峰值映射HDR Then 用户请求过HDR = True
             RaiseEvent 状态已变化(Me, EventArgs.Empty)
             ' 设置色彩模式会排入原生播放线程；此刻的快照仍可能是切换前的 SDR 状态。
             ' 等待色彩模式变化事件后，再基于新快照给出最终提示，避免把已成功的 HDR 误报为回退。
         Catch ex As 播放器异常
             RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法切换 HDR 模式"))
+        End Try
+    End Sub
+
+    Private Shared Function 自动HDR目标模式() As 色彩输出模式
+        Return If(设置.实例对象.自动切换到真实HDR高亮, 色彩输出模式.峰值映射HDR, 色彩输出模式.映射到SDR)
+    End Function
+
+    Friend Sub 应用自动HDR模式设置()
+        HDR模式已手动选择 = False
+        HDR色彩输出偏好 = 自动HDR目标模式()
+        用户请求过HDR = False
+        强制HDR输出 = False
+        Dim 目标 = 会话
+        If 目标 Is Nothing Then 当前色彩输出 = HDR色彩输出偏好
+        Dim 快照 = 安全读取快照()
+        If 已释放 OrElse 正在切换会话 OrElse 目标 Is Nothing OrElse 快照 Is Nothing OrElse
+            Not 可操作(快照.状态) OrElse Not 快照.是HDR源 Then Return
+        Try
+            目标.设置色彩模式(HDR色彩输出偏好, 当前SDR峰值尼特,
+                取得HDR输出峰值参数(HDR色彩输出偏好), SDR纸白尼特, False)
+            当前色彩输出 = HDR色彩输出偏好
+            RaiseEvent 状态已变化(Me, EventArgs.Empty)
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用自动 HDR 设置"))
+        End Try
+    End Sub
+
+    Friend Sub 应用空间音频设置()
+        If 已释放 OrElse 会话 Is Nothing Then Return
+        Try
+            会话.设置空间音频(设置.实例对象.启用空间音频)
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用空间音频设置"))
         End Try
     End Sub
 
@@ -1178,7 +1215,7 @@ Public NotInheritable Class 播放器控制器
         Dim 保留WASAPI模式 = 当前WASAPI模式
         Dim 已临时释放独占 = False
         Dim 打开异常 As Exception = Nothing
-        Dim 视频缩放质量值 = CType(设置.实例对象.视频缩放质量选项, 视频缩放质量)
+        Dim 性能选项 As New 播放性能选项(设置.实例对象)
         Try
             Try
                 If 已释放 OrElse 此次取消.IsCancellationRequested Then Return
@@ -1187,11 +1224,12 @@ Public NotInheritable Class 播放器控制器
 
                 ' 同一解码配置下原生会话支持原位重开。它会在自己的命令队列中
                 ' 先关闭旧媒体并保留输出链，避免候选会话和音频设备重复初始化。
-                If 原会话 IsNot Nothing AndAlso 当前会话解码器配置 = 解码器 Then
+                If 原会话 IsNot Nothing AndAlso 当前会话解码器配置 = 解码器 AndAlso
+                    当前会话性能选项.Equals(性能选项) Then
                     Dim 原位事件已移除 = False
                     Dim 原位目标色彩输出 = If(
                         String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase),
-                        当前色彩输出, HDR色彩输出偏好)
+                        当前色彩输出, If(HDR模式已手动选择, HDR色彩输出偏好, 自动HDR目标模式()))
                     Try
                         Await Task.Run(Sub() 原会话.丢弃音频输出())
                         移除会话事件(原会话)
@@ -1284,9 +1322,9 @@ Public NotInheritable Class 播放器控制器
                 ' SDR，会由播放器会话按源类型安全地收敛回 SDR 映射。
                 Dim 候选色彩输出 = If(
                 String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase),
-                当前色彩输出, HDR色彩输出偏好)
+                当前色彩输出, If(HDR模式已手动选择, HDR色彩输出偏好, 自动HDR目标模式()))
                 候选会话 = Await Task.Run(
-                    Function() 创建会话(解码器, 候选色彩输出, 视频缩放质量值),
+                    Function() 创建会话(解码器, 候选色彩输出, 性能选项),
                     此次取消.Token)
                 候选会话.设置音量(当前音量, 已静音)
                 Await 候选会话.打开Async(路径, 此次取消.Token)
@@ -1316,6 +1354,7 @@ Public NotInheritable Class 播放器控制器
                 Volatile.Write(当前媒体是纯音频, 候选是纯音频)
                 Volatile.Write(当前音乐包含封面, 候选包含封面)
                 当前会话解码器配置 = 解码器
+                当前会话性能选项 = 性能选项
                 当前解码器 = 快照.解码器
                 当前色彩输出 = 快照.请求色彩模式
                 添加会话事件(会话)
@@ -1430,7 +1469,7 @@ Public NotInheritable Class 播放器控制器
     End Function
 
     Private Function 创建会话(解码器 As 解码模式, 色彩模式 As 色彩输出模式,
-                            缩放质量 As 视频缩放质量) As 播放器会话
+                            性能 As 播放性能选项) As 播放器会话
         Return New 播放器会话(New 播放器配置 With {
             .解码器 = 解码器,
             .色彩模式 = 色彩模式,
@@ -1438,7 +1477,11 @@ Public NotInheritable Class 播放器控制器
             .HDR峰值尼特 = 取得HDR输出峰值参数(色彩模式),
             .SDR纸白尼特 = SDR纸白尼特,
             .强制HDR输出 = 强制HDR输出,
-            .缩放质量 = 缩放质量,
+            .缩放质量 = 性能.缩放质量,
+            .首选解码适配器索引 = 性能.GPU设备索引,
+            .视频缓冲区策略 = 性能.视频缓冲区策略,
+            .音频缓冲区策略 = 性能.音频缓冲区策略,
+            .启用空间音频 = 性能.启用空间音频,
             .输出窗口句柄 = IntPtr.Zero,
             .事件同步上下文 = 事件同步上下文
         })

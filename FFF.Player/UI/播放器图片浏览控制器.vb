@@ -169,27 +169,6 @@ Friend NotInheritable Class 播放器图片浏览控制器
         设置模式(False)
     End Sub
 
-    ' ── 测试钩子（Friend + InternalsVisibleTo("FFF.Player.Tests")） ──
-    ' 直达处理器，绕过控件层的消息翻译；真实消息路径（OnMouseWheel → 图片缩放滚轮）
-    ' 由 ImageZoomLiveRegression 的 S9 用真 WM_MOUSEWHEEL 覆盖，两层不重复也不遗漏。
-    Friend Sub 测试进入图片模式(源宽值 As UInteger, 源高值 As UInteger)
-        源宽 = 源宽值
-        源高 = 源高值
-        设置模式(True)
-    End Sub
-
-    Friend Sub 测试退出图片模式()
-        设置模式(False)
-    End Sub
-
-    Friend Sub 测试滚轮(delta As Integer, x As Integer, y As Integer)
-        画面控件_图片缩放滚轮(Nothing, New MouseEventArgs(MouseButtons.None, 0, x, y, delta))
-    End Sub
-
-    Friend Sub 测试双击(x As Integer, y As Integer)
-        画面控件_图片双击切换(Nothing, New MouseEventArgs(MouseButtons.Left, 2, x, y, 0))
-    End Sub
-
     Friend Sub 处理方向键快捷键(sender As Object, e As KeyEventArgs)
         If 已释放 OrElse Not 图片模式已启用 Then Return
         If e.Modifiers <> Keys.None Then Return

@@ -16,6 +16,12 @@ Public Class 设置
     ' （文件只存 1/2，分不出"从没设置过"与"显式选过 CPU"，故不做迁移）。
     Public Property 解码方式 As 解码模式 = 解码模式.GPU
     Public Property 视频缩放质量选项 As Integer = CInt(视频缩放质量.高画质)
+    Public Property GPU解码设备标识 As String = String.Empty
+    ' 0 均衡自适应，1 更多缓冲，2 小缓冲压力测试。旧配置缺项时保持原有策略。
+    Public Property 视频缓冲区策略 As Integer = 0
+    Public Property 音频缓冲区策略 As Integer = 0
+    Public Property 启用空间音频 As Boolean = True
+    Public Property 自动切换到真实HDR高亮 As Boolean = True
     Public Property HDR峰值亮度选项 As Integer = 0
     Public Property HDR峰值亮度 As Integer = 0
     Public Property HDR映射SDR参考亮度 As Integer = 250
@@ -175,6 +181,9 @@ Public Class 设置
             解码方式 = CInt(解码模式.GPU)
         End If
         视频缩放质量选项 = Math.Clamp(视频缩放质量选项, 0, 1)
+        GPU解码设备标识 = If(GPU解码设备标识, String.Empty).Trim()
+        If 视频缓冲区策略 < 0 OrElse 视频缓冲区策略 > 2 Then 视频缓冲区策略 = 0
+        If 音频缓冲区策略 < 0 OrElse 音频缓冲区策略 > 2 Then 音频缓冲区策略 = 0
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
         HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)

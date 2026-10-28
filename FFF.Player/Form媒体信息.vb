@@ -237,10 +237,11 @@ Public Class Form媒体信息
     End Sub
 
     Private Sub 添加条目(group As String, name As String, value As String)
-        UltraDetailListView1.Items.Add(New LakeUI.UltraDetailListView.ListItem(New LakeUI.UltraDetailListView.ListSubItem($"{name}：{空值(value)}")) With {.GroupName = group})
+        If String.IsNullOrWhiteSpace(value) OrElse value.Trim() = "—" Then Return
+        UltraDetailListView1.Items.Add(New LakeUI.UltraDetailListView.ListItem(New LakeUI.UltraDetailListView.ListSubItem($"{name}：{value}")) With {.GroupName = group})
     End Sub
     Private Sub 添加条目如果有值(group As String, name As String, value As String)
-        If Not String.IsNullOrWhiteSpace(value) AndAlso value <> "—" Then 添加条目(group, name, value)
+        添加条目(group, name, value)
     End Sub
     Private Sub 添加分组条目(group As String, groupText As String, name As String, value As String)
         添加分组(group, groupText) : 添加条目(group, name, value)
@@ -347,9 +348,9 @@ Public Class Form媒体信息
         Return If(value > 0, $"{value / 1000.0R:0.##} kHz", "—")
     End Function
     Private Shared Function 位深(stream As 媒体流信息) As String
-        ' 有损编码（AAC 等）没有源位深可言：bitsPerCodedSample 是编码槽宽
-        ' （32 = fltp 的尺寸），显示出来就是假信息 —— 直接不报。
-        If Not stream.无损 AndAlso stream.压缩模式 = "有损" Then Return String.Empty
+        If String.Equals(stream.类型, "audio", StringComparison.OrdinalIgnoreCase) Then
+            Return 空值(音频采样格式化.输入位深(stream))
+        End If
         Dim d = If(stream.位深度 > 0, stream.位深度, If(stream.原始采样位数 > 0, stream.原始采样位数, stream.编码采样位数))
         Return If(d > 0, $"{d}bit", 空值(stream.采样格式))
     End Function
@@ -416,7 +417,7 @@ Public Class Form媒体信息
             Next
             brands = String.Join("/", parts)
         End If
-        Return $"{first} ({brands})"
+        Return If(first = "—", brands, $"{first} ({brands})")
     End Function
     Private Shared Function 流格式(stream As 媒体流信息) As String
         If stream Is Nothing Then Return "—"
@@ -437,7 +438,7 @@ Public Class Form媒体信息
         Dim profile = 空值(stream.配置档次)
         If stream.编码.Equals("av1", StringComparison.OrdinalIgnoreCase) AndAlso stream.编码级别 > 0 Then
             Dim level = If(stream.编码级别 = 12, "5.0", If(stream.编码级别 = 13, "5.1", If(stream.编码级别 = 14, "5.2", stream.编码级别.ToString())))
-            Return $"{profile}@L{level}"
+            Return If(profile = "—", $"L{level}", $"{profile}@L{level}")
         End If
         Return profile
     End Function

@@ -87,6 +87,10 @@ Public NotInheritable Class 播放器配置
     Public Property SDR纸白尼特 As Single = 203.0F
     Public Property 强制HDR输出 As Boolean
     Public Property 缩放质量 As 视频缩放质量 = 视频缩放质量.高画质
+    Public Property 首选解码适配器索引 As Integer = -1
+    Public Property 视频缓冲区策略 As Integer
+    Public Property 音频缓冲区策略 As Integer
+    Public Property 启用空间音频 As Boolean = True
     ' SDR 源的 scRGB 呈现策略，对应内核 FFF3FPConfiguration.sdrScRgbMode。
     ' 1 = 自动（默认）：位深 >8 的 SDR 源优先上 16bit scRGB 链；
     ' 0 = 从不：留在 8/10bit gamma 链（历史行为，留作退回开关）。
@@ -104,6 +108,9 @@ Public NotInheritable Class 播放器配置
         If HDR峰值尼特 < 0 OrElse HDR峰值尼特 > 10000 OrElse Not Single.IsFinite(HDR峰值尼特) Then Throw New ArgumentOutOfRangeException(NameOf(HDR峰值尼特))
         If SDR纸白尼特 <= 0 OrElse Not Single.IsFinite(SDR纸白尼特) Then Throw New ArgumentOutOfRangeException(NameOf(SDR纸白尼特))
         If 缩放质量 <> 视频缩放质量.均衡 AndAlso 缩放质量 <> 视频缩放质量.高画质 Then Throw New ArgumentOutOfRangeException(NameOf(缩放质量))
+        If 首选解码适配器索引 < -1 OrElse 首选解码适配器索引 > 15 Then Throw New ArgumentOutOfRangeException(NameOf(首选解码适配器索引))
+        If 视频缓冲区策略 < 0 OrElse 视频缓冲区策略 > 2 Then Throw New ArgumentOutOfRangeException(NameOf(视频缓冲区策略))
+        If 音频缓冲区策略 < 0 OrElse 音频缓冲区策略 > 2 Then Throw New ArgumentOutOfRangeException(NameOf(音频缓冲区策略))
     End Sub
 End Class
 
