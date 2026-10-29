@@ -71,7 +71,7 @@ def parse_vb():
     cases = re.findall(r'Case "([^"]*)" : Return "([^"]*)"', src)
     # 混说那一行用的是常量（Case 混说），不是字符串字面量，单独补进表里。
     if "Case 混说" in src:
-        cases.append(("zh-en", "中文 · English（中英混说）"))
+        cases.append(("zh-en", "只显示中文和 English"))
     return ids, dict(pairs), dict(cases)
 
 

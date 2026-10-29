@@ -492,7 +492,7 @@ Friend NotInheritable Class Ai字幕管道
            (现在 - _上次语言日志) / CDbl(Stopwatch.Frequency) < 30.0 Then Return
         _上次语言日志 = 现在
         记录($"AI 字幕：语言不符已丢弃 {_语言不符丢弃} 条（实际 {If(实际语言, "未知")}，" &
-             $"只显示 {Ai字幕语言.显示名(设置.实例对象.Ai字幕语言)}）")
+             $"只显示 {Ai字幕语言.短名(设置.实例对象.Ai字幕语言)}）")
     End Sub
 
     ' ---------------- worker warning → 用户可见 ----------------

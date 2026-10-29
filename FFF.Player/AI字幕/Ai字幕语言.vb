@@ -4,18 +4,17 @@ Option Explicit On
 ''' <summary>
 ''' 字幕语言标识：用户选什么、worker 传给 llama-server 的完整名、怎么显示、闸门怎么判。
 '''
-''' 为什么需要这一层（2026-10-23 在 b11669 + Qwen3-ASR-0.6B 上实测）：
-'''   * llama-server 的 <c>/v1/audio/transcriptions</c> 接受 <c>language</c> 表单字段，
-'''     但值是**原样拼进 prompt 的文本**（同一段音频 input_tokens 从 80 → 85）。于是：
-'''       - 必须给模型认识的**完整英文名**（"Chinese"）：
-'''         <c>language=Chinese</c> 能把英文音频的标签改成 Chinese；
-'''       - 给 ISO 代码（<c>language=zh</c>）**不生效**，输出标签仍是模型自判的 English；
-'''         <c>language=Klingon</c> 同样被忽略。宿主这边因此不能把 "zh" 直接丢给 worker。
-'''   * 它是**软提示不是硬约束**：中文音频 + <c>language=English</c> 仍输出
-'''     <c>language Chinese</c>（模型确信时提示压不住）。所以"只要所选语言"必须由
-'''     宿主闸门（<see cref="应丢弃"/>）另外保证。
-'''   * 它**不是翻译**：Qwen3-ASR 只转写。指定与片源不同的语言，得到的是
-'''     "标签被改 + 正文仍是原语言"，还可能把英文强行音译成汉字。设置页文案必须说清。
+''' 为什么需要这一层（2026-10-23 实测建立，2026-10-29 按现状修订）：
+'''   * 上一版 llama-server 把 <c>language</c> 表单字段**原样拼进 prompt**，那时
+'''     指定语言是"软提示"。现在两个引擎都不接受语言输入（sherpa 没这个口子，
+'''     llama-server 也不再拼接），<c>language</c> 只剩一个用途：worker 拿它算
+'''     <c>matched</c>，供宿主闸门使用。
+'''   * 因此这个设置的真实语义是**过滤器**：按模型每个窗自报的语言标签筛。
+'''     「只显示中文」对英语片意味着整片丢弃——这是字面承诺，30 秒一条的语言
+'''     不符日志是用户唯一的线索；sherpa 后端自报缺失时闸门失效（ready 行
+'''     lang-gate=off 有报）。界面文案必须按这个结果写，不能写"倾向/提示"。
+'''   * 它**不是翻译**：Qwen3-ASR 只转写。双语对照是另一条路（双语字幕设置），
+'''     与这里无关。
 '''
 ''' 语言清单与英文名取自模型卡（Qwen3-ASR-0.6B README）的 30 种语言；中文方言
 ''' （四川话/粤语港腔等 22 种）暂不列出——它们的提示词写法没有实证，宁可先不给。
@@ -28,10 +27,9 @@ Option Explicit On
 Friend NotInheritable Class Ai字幕语言
     Friend Const 自动 As String = "auto"
 
-    ''' <summary>中英混说档：**不传 language 提示**（模型自判），但闸门同时放行中文与英文。
-    ''' 为什么这么设计：Qwen3-ASR 每个窗只给一个语言标签，锁中文会把英文句子音译成汉字、
-    ''' 锁英文会把中文音译成字母，而混说素材两种都不对。"两头都放行、提示不干预"
-    ''' 是唯一不需要对模型行为下赌注的做法。</summary>
+    ''' <summary>中英混说档：worker 不指定语言（模型按窗自判），闸门同时放行中文与英文。
+    ''' 为什么这么设计：Qwen3-ASR 每个窗只给一个语言标签，筛中文会丢英文句、筛英文会丢
+    ''' 中文句，而混说素材两种都有。"两头都放行"是唯一不对模型行为下赌注的做法。</summary>
     Friend Const 混说 As String = "zh-en"
 
     ''' <summary>菜单顶部的一等公民：自动 / 中文 / English / 中英混说。
@@ -87,11 +85,22 @@ Friend NotInheritable Class Ai字幕语言
     ''' <summary>显示名表。只收主项 —— 未验证语种不上面板，也就不该有显示名。</summary>
     Private Shared Function 基显示名(id As String) As String
         Select Case id
-            Case 自动 : Return "自动（让模型自判）"
-            Case "zh" : Return "中文（Chinese）"
+            Case 自动 : Return "自动（显示所有语种）"
+            Case "zh" : Return "只显示中文"
+            Case "en" : Return "只显示 English"
+            Case 混说 : Return "只显示中文和 English"
+            Case Else : Return "自动（显示所有语种）"
+        End Select
+    End Function
+
+    ''' <summary>日志与状态行的短名。显示名是结果句（"只显示中文"），拼进
+    ''' "只显示 …" 这类句式会变成"只显示 只显示中文"，那种场合用这个。</summary>
+    Friend Shared Function 短名(id As String) As String
+        Select Case 规整(id)
+            Case "zh" : Return "中文"
             Case "en" : Return "English"
-            Case 混说 : Return "中文 · English（中英混说）"
-            Case Else : Return "自动（让模型自判）"
+            Case 混说 : Return "中文和 English"
+            Case Else : Return "自动"
         End Select
     End Function
 
