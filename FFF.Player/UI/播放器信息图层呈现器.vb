@@ -69,6 +69,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取内容描述 As Func(Of String)
     Private ReadOnly 获取超分状态 As Func(Of String)
     Private ReadOnly 获取自动HDR状态 As Func(Of String)
+    ' AI 实时字幕是否正在跑（worker 进程活着）。字幕行用它区分"真的没有字幕"
+    ' 与"没有外挂字幕但 AI 在实时转写"——后者显示"未加载"是口径错误。
+    Private ReadOnly 获取AI字幕活动 As Func(Of Boolean)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
     Private ReadOnly 刷新定时器 As LakeUI.PrecisionTimer
     Private 普通字体 As New Font(默认信息字体, 信息字号, FontStyle.Regular, GraphicsUnit.Point)
@@ -119,7 +122,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
                    内容描述提供器 As Func(Of String),
                    图层提交器 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single),
                    Optional 超分状态提供器 As Func(Of String) = Nothing,
-                   Optional 自动HDR状态提供器 As Func(Of String) = Nothing)
+                   Optional 自动HDR状态提供器 As Func(Of String) = Nothing,
+                   Optional AI字幕活动提供器 As Func(Of Boolean) = Nothing)
         ArgumentNullException.ThrowIfNull(画面)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(媒体信息提供器)
@@ -133,6 +137,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取内容描述 = 内容描述提供器
         获取超分状态 = 超分状态提供器
         获取自动HDR状态 = 自动HDR状态提供器
+        获取AI字幕活动 = AI字幕活动提供器
         提交图层 = 图层提交器
         文本测量格式 = DirectCast(StringFormat.GenericTypographic.Clone(), StringFormat)
         文本测量格式.FormatFlags = 文本测量格式.FormatFlags Or
@@ -381,11 +386,20 @@ Friend NotInheritable Class 播放器信息图层呈现器
             添加配对行如果有值(结果, "音频告警：", 音频告警, 告警色)
         End If
 
-        Dim 字幕文本 = If(字幕 Is Nothing, "未加载", 合并字段(
-            字幕.格式.ToString().ToUpperInvariant(),
-            $"总数量 {字幕条目数(字幕)}",
-            If(字幕状态 Is Nothing, String.Empty, $"正在渲染 {字幕状态.命令数}"),
-            $"延迟 {图层延迟(字幕状态)}"))
+        ' AI 实时字幕与外挂字幕是两条独立轨道：外挂为空不代表"没有字幕"——
+        ' worker 在跑就是 AI 在实时转写，此时显示"未加载"是错误口径（用户按
+        ' Tab 想确认字幕状态，看到的应当是"已加载"级别的答复）。两种情况都
+        ' 覆盖：纯 AI（外挂为空）整行改口；外挂 + AI 并存时在外挂信息后追加
+        ' AI 标记，两种来源一眼可分。
+        Dim AI活动 = 安全获取(获取AI字幕活动)
+        Dim 字幕文本 = If(字幕 Is Nothing,
+            If(AI活动, "已加载 AI实时识别", "未加载"),
+            合并字段(
+                字幕.格式.ToString().ToUpperInvariant(),
+                $"总数量 {字幕条目数(字幕)}",
+                If(字幕状态 Is Nothing, String.Empty, $"正在渲染 {字幕状态.命令数}"),
+                $"延迟 {图层延迟(字幕状态)}",
+                If(AI活动, "AI实时识别", String.Empty)))
         Dim 弹幕文本 = If(弹幕 Is Nothing, "未加载", 合并字段(
             "哔哩哔哩 XML", $"总数量 {弹幕.数量}",
             If(弹幕状态 Is Nothing, String.Empty, $"正在渲染 {弹幕状态.命令数}"),

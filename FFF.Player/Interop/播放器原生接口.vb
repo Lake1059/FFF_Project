@@ -877,14 +877,6 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
-    Friend Function FFF3FP_Create(ByRef 配置 As 原生播放器配置, ByRef 播放器 As IntPtr) As 原生播放器结果
-    End Function
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
-    Friend Function FFF3FP_ConfigurePlaybackPerformance(播放器 As 播放器原生句柄,
-        解码适配器索引 As Integer, 视频缓冲区策略 As UInteger, 音频缓冲区策略 As UInteger) As 原生播放器结果
-    End Function
-
     ' ---- ASR 音频 tap（可选导出，与字幕流探测同一动态解析模式） ----
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Private Delegate Function 启用音频Tap原型(播放器 As IntPtr, 配置 As IntPtr) As 原生播放器结果
@@ -980,18 +972,24 @@ Friend Module 播放器原生接口
             .版本 = 音频Tap版本
         }
         If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
-        ' 不能用 GCHandle.Alloc(统计, Pinned)：结构体实参装箱后钉住的是箱内副本，
-        ' 内核写进箱子、本侧局部变量永远是初始零值。走非托管缓冲再拷回。
-        Dim 缓冲 = Marshal.AllocHGlobal(Marshal.SizeOf(Of 原生音频Tap统计)())
+        Dim 钉住 = GCHandle.Alloc(统计, GCHandleType.Pinned)
         Try
-            Marshal.StructureToPtr(统计, 缓冲, False)
-            Dim 结果 = 函数(播放器.DangerousGetHandle(), 缓冲)
-            统计 = Marshal.PtrToStructure(Of 原生音频Tap统计)(缓冲)
-            Return 结果
+            Return 函数(播放器.DangerousGetHandle(), 钉住.AddrOfPinnedObject())
         Finally
-            Marshal.FreeHGlobal(缓冲)
+            钉住.Free()
         End Try
     End Function
+
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_Create(ByRef 配置 As 原生播放器配置, ByRef 播放器 As IntPtr) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_ConfigurePlaybackPerformance(播放器 As 播放器原生句柄,
+        解码适配器索引 As Integer, 视频缓冲区策略 As UInteger, 音频缓冲区策略 As UInteger) As 原生播放器结果
+    End Function
+
+
+    ''' <summary>内核是否提供 ASR 音频 tap（旧内核缺席 → AI 字幕静默降级）。</summary>
 
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_Open(播放器 As 播放器原生句柄, 路径UTF8 As IntPtr) As 原生播放器结果

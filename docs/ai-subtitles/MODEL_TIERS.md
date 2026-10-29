@@ -1,13 +1,5 @@
 # 模型档位：低性能设备的回退方案
 
-
-> ⚠️ **路线已变更（2026-10-27）**：本文写于 llama.cpp 时代（`llama-server` 子进程 + GGUF 双文件）。
-> 推理栈现已换成 **sherpa-onnx（ONNX Runtime）进程内**：后端只剩 `cpu` / `cuda` 两档 + `npu` 占位，
-> 模型是一套 ONNX 目录而非 .gguf，扩展包清单升到 **v2**（见 `PACK_FORMAT.md`）。
-> **已失效**：Q8_0 / Q6_K / Q4_K_M 档位表、`llamaArgs` 常用参数、`layers` 预置档
-> **仍有效**：无（全文以 llama.cpp 为前提）
-> 归并理由与新方案全貌见主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
-
 - 日期：2026-10-23
 - 适用：AI 字幕（Qwen3-ASR-0.6B，llama.cpp 后端）
 - 相关：`PACK_FORMAT.md`（清单 `models` 字段）、`BACKEND_MATRIX.md`（后端选型）
@@ -138,7 +130,7 @@ python tools/ai-subtitles/make_portable_pack.py --source <包目录> --target <�
 | 参数 | 界面入口 | 语义 |
 | --- | --- | --- |
 | 量化档（"Q 几"） | 高级 → 模型档位 | 同一个包多档权重，换档只重启 worker（§1–§3） |
-| `--n-gpu-layers`（"深度"） | 高级 → GPU 层数 | 卸载到显卡的层数。下拉预置按包清单声明的 `layers`（模型层数）生成：自动（不指定，llama-server 全卸）/ 全部 N 层 / 每 4 层一档 / 0（纯 CPU）；包不声明 = 旧的 28 层表（全部 28 / 24 / 20 / 16 / 12 / 8 / 4 / 0）。显存吃紧往下选，如 16 = 一半权重在显存。选 CPU 后端时置灰（设备是 none，无从卸起） |
+| `--n-gpu-layers`（"深度"） | 高级 → GPU 层数 | 卸载到显卡的层数。下拉预置按包清单声明的 `layers`（模型层数）生成：自动（显式传 999，全卸）/ 全部 N 层 / 每 4 层一档 / 0（纯 CPU）；包不声明 = 旧的 28 层表（全部 28 / 24 / 20 / 16 / 12 / 8 / 4 / 0）。显存吃紧往下选，如 16 = 一半权重在显存。选 CPU 后端时置灰（设备是 none，无从卸起） |
 | `--device` / `--device-backend` | 推理设备 | auto = 跟随包清单 device；本机清单是 cuda，所以 auto 在该机落 CUDA0 + 全卸 |
 | `--device` 序号 | 高级 → 设备序号 | 多显卡时选第几块 |
 | 窗口 / 步长 | 高级 → 窗口（秒）/ 步长（秒）+ 预置下拉 | 字幕切分粒度，与 llama-server 无关但同属高级区；预置（灵敏 / 均衡 / 完整）只是快速填这两个框，真存储仍是那两个覆盖项 |
@@ -185,7 +177,8 @@ llama-server.exe -m <model> --mmproj <mmproj> --n-gpu-layers 16 --device CUDA0
 ```
 
 上面两条只能证明「跑起来了」。要拿到**可量化的**耗时 / RTF / 识别文本（改一个参数前后
-有没有真的变好），用 `USER_GUIDE.md` §7.5 的 `_3fc_tmp/asr_batch.py`：不起 worker、
+有没有真的变好），用 `USER_GUIDE.md` §7.5 的 `_3fc_tmp/asr_batch.py`（脚本与素材在 3FP 主仓，
+不入本仓库）：不起 worker、
 不依赖播放器，对同一批素材各跑一份逐条比对即可——§7.3 那两处 2026-10-25 的实测就是
 这么量出来的。
 

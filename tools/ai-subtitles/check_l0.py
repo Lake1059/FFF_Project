@@ -34,7 +34,6 @@ VB_CTRLER = os.path.join(ROOT, "FFF.Player", "Core", "播放器控制器.vb")
 CPP_SESSION = os.path.join(ROOT, "FFF.Native", "3FP", "Core", "PlayerSession.cpp")
 CPP_RENDER = os.path.join(ROOT, "FFF.Native", "3FP", "Render", "VideoRenderer.cpp")
 WORKER = os.path.join(ROOT, "tools", "ai-subtitles", "asr_worker.py")
-SAMPLE_PACK = os.path.join(ROOT, "tools", "ai-subtitles", "pack-sample", "ai-subtitles.json")
 
 通过 = 0
 失败 = 0
@@ -118,31 +117,13 @@ def main():
     断言(下标块 is not None and 下标块.group(1) == "主项",
         "L0-1b 语言下标映射只认主项",
         "实际引用：" + (下标块.group(1) if 下标块 else "（没找到语言下标循环）"))
-    # 设备下拉来自常量表而不是写死字符串（写死就会与 设备全部 脱节：加一档要改
-    # 两处，改漏就是"下拉里有、代码不认"）。
-    设备填充 = re.search(r"For Each id In Ai字幕推理档\.(\w+)\s*\n(?:.*\n){0,5}?\s*MCB_设备\.Items\.Add", form)
-    断言(设备填充 is not None and 设备填充.group(1) == "设备全部",
-        "L0-1c 设备下拉来自 Ai字幕推理档.设备全部",
-        "实际引用：" + (设备填充.group(1) if 设备填充 else "（没找到设备填充循环）"))
-    # 后端下拉**不能**在构造期写死填一遍：它的内容随设备变。必须由 设备后端(设备)
-    # 现算 —— 写死就是第二份真值表，症状是「AMD 显卡 + CUDA」这种不存在的组合。
-    断言(re.search(r"Dim 列表 = Ai字幕推理档\.设备后端\(设备\)", form) and
-         re.search(r"For Each id In 列表\s*\n(?:.*\n){0,6}?\s*MCB_后端\.Items\.Add", form),
-        "L0-1c 后端下拉由 设备后端(设备) 现算，不在构造期写死")
-    # 项提示只能挂 ItemToolTips（按项文本建索引的集合）。Items 是
-    # Collection(Of String)，写成 Items.Add(文本, 提示) 编译就不过 —— 而如果
-    # 干脆不挂提示，"这个后端把哪一段放到显卡上"用户就只能靠猜。
-    断言(form.count("ItemToolTips.Add(") >= 2 and "ItemToolTips.Clear()" in form,
-        "L0-1c 设备 / 后端两个下拉都挂项提示，且换设备时清旧项",
-        "ItemToolTips 缺失或不清理 —— 提示会串到上一次设备的项上")
-    # 归位（换设备后旧后端不在新表里）必须真的写回内存：只改下拉不写内存，
-    # 就是「界面显示 CPU、worker 收到 dml」。
-    断言(re.search(r"设置\.实例对象\.Ai字幕推理后端 = 选中", form),
-        "L0-1c 后端归位写回设置（换设备后不留不存在的组合）")
-    # 赋值 SelectedIndex 时正在初始化，事件被吞 ⇒ 初始化页面必须显式重建一次，
-    # 否则打开设置页看到一个空后端下拉。
-    断言(re.search(r"Friend Sub 初始化页面\(\)(.*?)重建后端下拉\(\)", form, re.S),
-        "L0-1c 初始化页面显式重建后端下拉（否则打开设置页是空的）")
+    # GPU 层数控件是后加进高级区的：必须挂进 显示高级 的可见性切换，否则折叠
+    # 高级区时它还杵在面板上（与模型档同一批加，同一批漏过可见性的先例）。
+    高级块 = re.search(r"Private Sub 显示高级\(显示 As Boolean\)(.*?)End Sub", form, re.S)
+    断言(高级块 is not None and "LBL_Gpu层数.Visible = 显示" in 高级块.group(1)
+        and "MCB_Gpu层数.Visible = 显示" in 高级块.group(1),
+        "L0-1b GPU 层数控件挂进高级区可见性切换",
+        "显示高级 里找不到 LBL_Gpu层数/MCB_Gpu层数 的 Visible 行")
 
     # ---------------- L0-2：设置页几何 ----------------
     src = read(VB_DESIGNER)
@@ -174,16 +155,11 @@ def main():
     断言(not 越界, "L0-2 所有控件在客户区内", "越界：" + str(越界))
 
     # 视觉行的重叠：只比同一水平带上真正可能互相压的（跳过隐藏的高级区标签与输入框）
-    # 互斥对例外：同一格里按条件只显示其中一个，坐标相同是设计而不是压字。
-    # 目前只有模型那一格（单档显示只读事实、有第二档才显示下拉，见 L0-9）。
-    互斥 = {frozenset(("LBL_模型档值", "MCB_模型档"))}
     重叠 = []
     for i in range(len(boxes)):
         for j in range(i + 1, len(boxes)):
             n1, x1, y1, w1, h1 = boxes[i]
             n2, x2, y2, w2, h2 = boxes[j]
-            if frozenset((n1, n2)) in 互斥:
-                continue
             if x1 < x2 + w2 and x2 < x1 + w1 and y1 < y2 + h2 and y2 < y1 + h1:
                 重叠.append((n1, n2))
     断言(not 重叠, "L0-2 无控件重叠", str(重叠))
@@ -203,52 +179,68 @@ def main():
     bottom = max(b[2] + b[4] for b in boxes)
     断言(ch - bottom >= 8, "L0-2 底部留白 ≥ 8px", f"最低控件 {bottom}px / 客户区 {ch}px")
 
-    # ---------------- L0-4：清单 v2 契约不许回退 ----------------
-    # v2（2026-10-27）把模型从"单文件 GGUF + 投影"换成"一整套 ONNX 目录"。
-    # 这里钉住三件最容易在后续改动里被悄悄弄回去的事：模型四件套的文件名、
-    # version 门控、以及 v1 死字段不许回到读取路径上。
+    # ---------------- L0-4：多模型适配契约不许回退 ----------------
+    # 这批改动（2026-10-25）把"只认 Qwen3-ASR 双文件包"的硬约束逐个拆掉，
+    # 让扩展包能带任意 llama-server 能加载的 gguf。三条链任断一环，
+    # 现象都是"塞了新模型但跑的还是老行为/参数不生效"，且不抛异常：
     worker = read(WORKER)
-    断言('_MODEL_STEMS = ("conv_frontend", "encoder", "decoder")' in worker,
-        "L0-4 worker 模型必备件在（三 onnx 主干名 + tokenizer/）",
-        "找不到 _MODEL_STEMS —— 模型目录校验会形同虚设")
-    断言('conv = _pick_onnx(md, "conv_frontend")' in worker,
-        "L0-4 worker 按主干名解析权重（官方包是 encoder.int8.onnx，硬钉全名会直接起不来）",
-        "load() 里没走 _pick_onnx —— 有人把文件名钉回去了")
-    断言('"encoder.onnx"' not in worker and '"decoder.onnx"' not in worker,
-        "L0-4 不许再出现硬编码的 encoder.onnx / decoder.onnx",
-        "发现硬编码全名：官方 int8 包用的是 encoder.int8.onnx，会让解压即用失效")
-    断言(re.search(r'add_argument\("--model-dir", required=True\)', worker),
-        "L0-4 worker --model-dir 必填（没有模型目录就没有推理）",
-        "找不到 --model-dir 的 required=True")
+    断言(re.search(r'add_argument\("--llama-arg".*action="append"', worker),
+        "L0-4 worker 收 --llama-arg（append 多值）",
+        "找不到 --llama-arg 的 add_argument（或不是 append）")
+    断言("_user_first(defaults, self.extra)" in worker,
+        "L0-4 worker 固定默认值遇同名 flag 让位（_user_first）",
+        "start() 里没有走 _user_first —— 用户的 llamaArgs 会被固定参数压掉")
+    断言("if self.mmproj:" in worker,
+        "L0-4 worker 的 --mmproj 条件传（单文件模型不传投影）",
+        "找不到 if self.mmproj: —— 无投影的模型会被塞一个空路径")
+    断言('"--mmproj", str(self.mmproj)' in worker,
+        "L0-4 worker 仍保留 mmproj 支持（拆约束不是删功能）",
+        "start() 里找不到 --mmproj 传参 —— 双文件模型被改坏了")
+
+    pipe = read(VB_PIPE)
+    映射块 = re.search(r'For Each 附加 In 合并参数(.*?)Next', pipe, re.S)
+    # 必须是等号形式（"--llama-arg=" & 附加）：拆成两个 token 传的话，argparse 的
+    # append action 不收以 -- 开头的值，llamaArgs 的标准用法（["--ctx-size","8192"]）
+    # 会让 worker 启动即 exit 2（2026-10-25 审查实测，见 PACK_FORMAT §2.5）。
+    断言(映射块 is not None and '"--llama-arg=" & 附加' in (映射块.group(1) if 映射块 else ""),
+        "L0-4 管道把（合并后的）附加参数逐项映射为 --llama-arg=（等号形式）",
+        "找不到 For Each 附加 In 合并参数 → --llama-arg= 的映射（或退回了拆分形式）")
+    断言(re.search(r"合并附加参数\(配置\.额外参数,", pipe),
+        "L0-4 包清单 llamaArgs 仍进命令行（走合并入口，不是被用户参数顶掉）",
+        "启动路径里找不到 合并附加参数(配置.额外参数, …)——清单参数被改丢了")
 
     pack = read(VB_PACK)
-    断言('If 版本 <> 2 Then' in pack,
-        "L0-4 清单 version 门控在（v1 清单必须被拒，不能一路走到奇怪报错）",
-        "找不到 If 版本 <> 2 Then —— v1 包会被当成 v2 载入")
-    断言(re.search(r'必需权重 As String\(\) = \{"conv_frontend", "encoder", "decoder"\}', pack),
-        "L0-4 宿主也钉住三 onnx 的主干名（与 worker 同口径）",
-        "Ai字幕包.vb 的 必需权重 数组变了或被删")
-    断言('找权重(模型目录, 主干, 原因)' in pack and '"encoder.onnx"' not in pack,
-        "L0-4 宿主缺件检查走 找权重，不硬钉 encoder.onnx",
-        "宿主又硬钉全名了 —— 与 worker 的解析口径会分叉")
-    断言('If Not Directory.Exists(Path.Combine(模型目录, 分词器目录))' in pack,
-        "L0-4 宿主校验 tokenizer/ 是子目录（它是目录不是文件）",
-        "找不到 tokenizer 子目录校验")
-    断言('属性.Value.ValueKind = JsonValueKind.String' in pack,
-        "L0-4 models 支持「档名 → 目录」简写（不必写 {dir:...}）",
-        "读模型档表只剩对象写法 —— PACK_FORMAT §2.4 的简写会整档消失")
-    for 死字段 in ("llamaArgs", "servers", "mmproj"):
-        断言(f'TryGetProperty("{死字段}"' not in pack,
-            f"L0-4 v1 死字段 {死字段} 没有回到读取路径",
-            f"Ai字幕包里又在读 {死字段} —— 那是 llama.cpp 时代的字段，v2 没有对应物")
+    断言('TryGetProperty("llamaArgs"' in pack,
+        "L0-4 包载入读 llamaArgs 字段",
+        "Ai字幕包.vb 里找不到 llamaArgs 的读取")
+    断言(re.search(r"Friend Property 额外参数 As New List\(Of String\)", pack),
+        "L0-4 包配置带 额外参数 字段",
+        "Ai字幕包配置 里没有 额外参数 字段")
+    # 方法还在但没人调 = 白写：载入路径必须真的走到 读附加参数（区别于函数定义行）。
+    断言('读附加参数(根, 配置)' in pack,
+        "L0-4 载入路径调用 读附加参数（方法有被调用）",
+        "找不到 读附加参数(根, 配置) 调用点 —— 字段读了也没人填")
 
-    # ---------------- L0-5：字幕驻留偏移（纯显示侧，不随推理栈变） ----------------
+    # ---------------- L0-5：「扩展 UI + 按模型能力开放」契约不许回退 ----------------
+    # 2026-10-25 这一轮把设置页从"只认 Qwen3-ASR 双文件 28 层"扩成按包声明的能力
+    # 开放：清单 layers 驱动 GPU 层数预置、用户 llamaArgs 接进 UI 并与清单合并、
+    # 驻留偏移进状态机、新控件全部挂进折叠区。任一处断链，现象都是"UI 看着能改、
+    # 实际不生效"或"折叠后控件杵在面板上"，且不抛异常。
     st = read(VB_SET)
+    断言('Public Property Ai字幕附加参数 As String' in st,
+        "L0-5 设置带 Ai字幕附加参数（用户侧 llamaArgs 逃生门）",
+        "设置.vb 里没有 Ai字幕附加参数 —— 用户框填了没处存")
     断言('Public Property Ai字幕字幕偏移秒 As Double' in st,
         "L0-5 设置带 Ai字幕字幕偏移秒（字幕驻留偏移）")
     断言(re.search(r'Ai字幕字幕偏移秒 < -3\.0 OrElse Ai字幕字幕偏移秒 > 3\.0', st),
         "L0-5 偏移规范化钳在 [-3, +3]",
         "规范化() 里找不到偏移的区间钳制——脏设置会把字幕守卫带飞")
+
+    断言(re.search(r'读整数\(根, "layers"', pack),
+        "L0-5 包载入读 layers 字段（模型层数，走通用整数助手）",
+        "Ai字幕包.vb 里找不到 layers 的读取——GPU 层数表又变回写死 28 层")
+    断言(re.search(r"Friend Property 模型层数 As Integer", pack),
+        "L0-5 包配置带 模型层数 字段")
 
     fsm = read(VB_FSM)
     断言(re.search(r"Public Property 时间偏移100纳秒 As Long", fsm),
@@ -259,28 +251,60 @@ def main():
 
     form = read(VB_FORM)
     高级块 = re.search(r"Private Sub 显示高级\(显示 As Boolean\)(.*?)End Sub", form, re.S)
-    for 控件 in ("LBL_偏移", "MTB_偏移", "LBL_预置", "MCB_预置"):
+    for 控件 in ("LBL_附加参数", "MTB_附加参数", "LBL_偏移", "MTB_偏移", "LBL_预置", "MCB_预置"):
         断言(高级块 is not None and f"{控件}.Visible = 显示" in 高级块.group(1),
             f"L0-5 {控件} 挂进高级区可见性切换",
             "显示高级 里找不到该控件的 Visible 行——折起来它还杵在面板上")
+    断言(re.search(r"Private Sub 重建层数下拉", form),
+        "L0-5 GPU 层数下拉按包 layers 动态重建",
+        "找不到 重建层数下拉 —— 层数表写死，换架构模型时预置档全是错的")
+    断言(re.search(r"MTB_附加参数\.Enabled = 有效", form),
+        "L0-5 附加参数框按包有效性开放/置灰（没包时不能填）")
+    断言(re.search(r"解析附加参数\(设置\.实例对象\.Ai字幕附加参数\)", form),
+        "L0-5 状态行数一眼用户附加参数条数（能力行数据源）")
+
+    断言(re.search(r"Friend Shared Function 解析附加参数", pipe),
+        "L0-5 管道解析用户附加参数（按行拆分、# 注释、去空行）")
+    断言(re.search(r"Private Shared Function 合并附加参数", pipe),
+        "L0-5 管道合并包清单与用户附加参数（同名 flag 用户覆盖包）",
+        "找不到 合并附加参数——用户参数会与清单参数重复传给 llama-server")
+    断言(re.search(r"解析附加参数\(用户附加参数\)", pipe),
+        "L0-5 启动路径解析用户附加参数文本")
+    断言(re.search(r"合并附加参数\(配置\.额外参数, 用户参数\)", pipe),
+        "L0-5 启动路径真的走合并（两个来源都进命令行）",
+        "启动() 里找不到 合并附加参数(配置.额外参数, 用户参数)——用户参数被丢了")
 
     ctrl = read(VB_CTRL)
+    断言(re.search(r"已启动附加参数 <> 设置对象\.Ai字幕附加参数", ctrl),
+        "L0-5 控制器把附加参数纳入重启判定",
+        "应用设置 的重启条件里没有 已启动附加参数——改了参数不重启，命令行还是旧的")
     断言(re.search(r"状态机\.时间偏移100纳秒 = CLng\(", ctrl),
         "L0-5 控制器把偏移同步进状态机（应用设置即生效，不重启 worker）")
+    # 文案与实测对齐：早期写「十几秒」，实测（2026-10-25，CUDA0）前 1~2 个转写
+    # 请求各需 57~60s。提示低估会让人按错的方向排查（以为卡死），所以钉住口径。
     断言(re.search(r"模型加载中，首句字幕约需 1 分钟", ctrl),
         "L0-5 首启加载提示（空窗期不解释，用户会以为开了没反应）")
 
-    # ---------------- L0-6：输出护栏不许回退 ----------------
-    # 2026-10-25 用真实影片片段验收才暴露的两个缺陷：无语音段模型编字、
-    # 语音稀疏段把 instruction 当内容输出。两者都不抛异常，只会把一屏编造的字
-    # 糊在画面上。护栏任断一环，交互测试都看不出来。
-    断言("looks_degenerate(" in worker and "looks_degenerate(text)" in worker,
+    # ---------------- L0-6：实机验收抓到的输出护栏不许回退 ----------------
+    # 2026-10-25 用真实影片片段验收才暴露的两个缺陷：无语音段模型编字（3808 个
+    # 「啊」，占满 ctx）、语音稀疏段把 instruction 当内容输出（"Transcribe audio
+    # to text"）。两者都不会抛异常，只会把一屏编造的字糊在画面上——用户看到的
+    # 是"字幕功能坏了/模型在胡说"，比没字幕更糟。护栏任断一环，交互测试都看不出来
+    # （界面上字幕照常出，只是内容是假的）。
+    断言('"--n-predict", "512"' in worker,
+        "L0-6 默认命令行带 --n-predict 512（失控输出的长度上限）",
+        "worker 默认参数里找不到 --n-predict 512 —— 失控窗会再次占满 ctx")
+    断言('"--no-cache-idle-slots"' not in worker,
+        "L0-6 默认命令行不带 --no-cache-idle-slots（实测 RTF 元凶）",
+        "它回来了：5 秒窗实测 7.6~30.5s（rtf 1.5~6.7），字幕永久滞后于画面")
+    断言("def looks_degenerate(" in worker and "looks_degenerate(text)" in worker,
         "L0-6 失控编字护栏在（定义 + 主循环调用）",
         "looks_degenerate 没被调用 —— 无语音段会再次糊一屏重复字")
-    断言("looks_like_prompt_leak(" in worker and "looks_like_prompt_leak(text)" in worker,
+    断言("def looks_like_prompt_leak(" in worker and "looks_like_prompt_leak(text)" in worker,
         "L0-6 指令泄漏护栏在（定义 + 主循环调用）",
         "looks_like_prompt_leak 没被调用 —— 模板串会原样上屏")
-    # 三种"这窗没有有效内容"，缺一种就漏一种污染。
+    # 三种"这窗没有有效内容"，缺一种就漏一种污染：empty（只有语言头）/
+    # degenerate（重复字）/ leak（模板串）。
     for 原因 in ("empty", "degenerate", "leak"):
         断言(f'原因 = "{原因}"' in worker,
             f"L0-6 丢弃分支覆盖 {原因}",
@@ -288,234 +312,6 @@ def main():
     断言("字幕不会凭空编字" in worker,
         "L0-6 丢弃时给用户一次解释（空白字幕 + 无提示 = 用户以为坏了）",
         "找不到丢弃提示文案 —— 用户面对空白字幕得不到任何解释")
-    # 长度上限从 llama.cpp 的 --n-predict 512 换成 sherpa 的 max_new_tokens：
-    # 没有它，失控窗会把预算全烧在同一个窗口上（外层还有共享 token 预算）。
-    断言("max_new_tokens=" in worker,
-        "L0-6 单窗生成上限 max_new_tokens 在（sherpa 版的长度护栏）",
-        "找不到 max_new_tokens —— 失控窗没有长度上限")
-
-    # ---------------- L0-7：推理档只有三档，降档只有一处 ----------------
-    # 2026-10-27 把"设备类别 + 厂商后端 + 二进制扫描"整套删掉，收敛成
-    # 一个标识 + 一张 _CANDIDATES 表 + 一处 _select_backend。这些断言防的是
-    # "又长出一层推断"：多一处回落，用户看到的现象就是"选了 A 实际跑 B 还不说"。
-    # 二维真值表：设备（哪块硬件）× 后端（哪个运行时）。标识一律是字符串常量，
-    # 设置里存标识不存下标，所以数组顺序可以安全调整。
-    断言(re.search(r"Friend Shared ReadOnly 设备全部 As String\(\) = \{设备自动, 设备Cpu, 设备Nvidia, 设备Amd, 设备Intel, 设备Npu\}", pack),
-        "L0-7 设备维六项：auto / cpu / nvidia / amd / intel / npu",
-        "Ai字幕包.vb 的 设备全部 变了 —— 加设备要同步 设备后端 表与文档 §20")
-    断言('Friend Const 设备自动 As String = "auto"' in pack,
-        "L0-7 设备标识是字符串常量（设置里存标识不存下标，重排安全）",
-        "找不到 Friend Const 设备自动 As String = \"auto\"")
-
-    # 后端维必须与引擎 BACKENDS 的键**逐一相等**（除 auto）。两边分叉的唯一症状
-    # 是用户在下拉里挑了个名字、日志里跑的是另一个，而界面上没有任何异常。
-    后端值 = {m.group(1) for m in
-             re.finditer(r'Friend Const 后端\w+ As String = "([^"]+)"', pack)}
-    引擎键 = set(re.findall(r'^\s{4}"([a-z0-9\-]+)": Backend\(',
-                            read(os.path.join(ROOT, "tools", "ai-subtitles", "qwen3_ort.py")), re.M))
-    断言(后端值 - {"auto"} == 引擎键,
-        "L0-7 后端标识与 qwen3_ort.BACKENDS 的键逐一相等",
-        "宿主=%s 引擎=%s —— 多的那侧是「下拉里有、引擎不认」，少的那侧是「引擎能跑、界面选不到」"
-        % (sorted(后端值 - {"auto"}), sorted(引擎键)))
-
-    # 每类实体设备各一张候选表；表里不能有拼错的标识（拼错 = 该设备永远起不来）；
-    # 每个非 auto 后端至少被一台设备列出来（否则是一条用户永远选不到的死路）。
-    候选表 = dict((m.group(1), re.findall(r"后端(\w+)", m.group(2)))
-                 for m in re.finditer(r"Case 设备(\w+)\s*\n\s*Return \{([^}]*)\}", pack))
-    断言(set(候选表) == {"Cpu", "Nvidia", "Amd", "Intel", "Npu"},
-        "L0-7 五类实体设备各有一张候选表",
-        "实际：%s" % sorted(候选表))
-    后端名 = {m.group(1) for m in re.finditer(r'Friend Const 后端(\w+) As String = "', pack)}
-    坏项 = [d + ":" + x for d, xs in 候选表.items() for x in xs if x not in 后端名]
-    断言(not 坏项,
-        "L0-7 候选表里没有拼错的标识",
-        "未知标识：%s" % 坏项)
-    被列出 = {x for xs in 候选表.values() for x in xs}
-    断言(后端名 - {"自动"} <= 被列出,
-        "L0-7 每个后端至少被一台设备列出来（没有选不到的死项）",
-        "永远选不到：%s" % sorted(后端名 - {"自动"} - 被列出))
-
-    # 设备与后端分两个字段、不合成串：合成串要解析，脏值就解析成别的档
-    # （v1 那套「设备类别 + 厂商后端 + 二进制扫描」正是这么长出来的）。
-    断言("Public Property Ai字幕运行设备 As String" in st and
-         "Public Property Ai字幕推理后端 As String" in st,
-        "L0-7 设备与后端各存一个字段（不合成串）",
-        "设置类里少了 Ai字幕运行设备 / Ai字幕推理后端 之一")
-
-    # worker 还不认的后端必须当场说出来。不说 = 用户以为选了 DirectML 就在跑。
-    断言("当前worker可用" in read(VB_PIPE) and "当前worker可用" in form,
-        "L0-7 worker 未接的后端在界面与日志里都点名",
-        "找不到 当前worker可用 —— 选了跑不了的后端会被静默按 auto 处理")
-    断言(re.search(r"_CANDIDATES = \{", worker) and '"npu": ("npu", "cpu")' in worker,
-        "L0-7 worker 有 _CANDIDATES 且 npu 有降档候选",
-        "找不到 _CANDIDATES 或 npu 候选 —— 选 NPU 会直接起不来而不是降档")
-    断言("def _select_backend(" in worker and "backend.load()" in worker,
-        "L0-7 降档集中在 _select_backend（load 失败即换下一个候选）")
-    断言(re.search(r'raise RuntimeError\("NPU 需要 OpenVINO GenAI 运行时，本期未实现"\)', worker),
-        "L0-7 NPU 占位必须显式抛错（不许静默回落到 CPU 假装成功）",
-        "NpuBackend.load() 里的显式抛错不见了")
-
-    pipe = read(VB_PIPE)
-    for 参 in ("--model-dir", "--window", "--step", "--device", "--language"):
-        断言(f'ArgumentList.Add("{参}")' in pipe,
-            f"L0-7 管道传 {参}",
-            f"启动参数里找不到 {参}")
-    断言('"--llama-arg="' not in pipe and "合并附加参数" not in pipe,
-        "L0-7 管道不再有 llama-arg 逃生门（v1 的附加参数通道已整体删除）",
-        "管道里又能看到 llama-arg / 合并附加参数 —— v1 通道被恢复了")
-
-    断言(re.search(r"已启动后端 <> 新后端", ctrl) and re.search(r"已启动模型档 <> 新模型档", ctrl),
-        "L0-7 控制器重启判据含 后端 + 模型档（启动期参数，中途改必须重启）",
-        "应用设置 的重启条件里缺后端或模型档")
-
-    # --- cuda 必须在 load() 之前静态预检 -------------------------------------
-    # sherpa-onnx 在 provider 不可用时**不抛异常**，只打一行 C++ 日志就回落到 CPU
-    # （那句日志走控制台句柄，Python 重定向抓不到，对象上也没有 provider 查询接口）。
-    # 所以"靠 load() 抛错来降档"这条路根本不通，必须提前查包形态。
-    断言("def _cuda_ready(" in worker and "_CUDA_EP_DLL" in worker,
-        "L0-8 cuda 有静态预检（provider 不可用时不报错，只能查包形态）",
-        "_cuda_ready / _CUDA_EP_DLL 不见了 —— cuda 档会退回"
-        "「报 cuda、实跑 CPU」")
-    段落 = worker[worker.find("def _select_backend("):]
-    段落 = 段落[:段落.find("def build_arg_parser(")]
-    断言(段落.find("_capability(") != -1
-        and 段落.find("_capability(") < 段落.find("backend.load()"),
-        "L0-8 降档循环里预检在 load() 之前调用",
-        "_select_backend 没有在 load() 之前调 _capability()，"
-        "cuda 会先选上再静默回落")
-    断言("onnxruntime_providers_cuda.dll" in worker,
-        "L0-8 预检查的是 CUDA EP 的 DLL（纯 CPU 版 wheel 不带它）",
-        "预检没查 onnxruntime_providers_cuda.dll")
-
-    # --- 线程数上限 ---------------------------------------------------------
-    # 实测（6P+8E，5 s 窗，4 次中位数）：4→0.991 / 6→0.907 / 8→1.052 / 20→4.698。
-    # 超过 6 会有线程落到 E-core，慢核拖住同步点，整段被拉长。
-    断言("min(6, os.cpu_count()" in worker,
-        "L0-8 默认线程数上限 6（超 6 在 P+E 混合架构上断崖退化）",
-        "默认线程数不是 min(6, 核数) —— 8 线程 5 s 窗口 rtf=1.05，追不上实时")
-    断言("min(8, os.cpu_count()" not in worker,
-        "L0-8 旧的 min(8, 核数) 没有残留",
-        "代码里还留着 min(8, 核数)")
-
-    # ---------------- L0-9：底部高级区的三项（预置 / 线程 / 模型档） ----------------
-    # 预置项文字里那个「1.5×」不是修辞，是 窗口÷步长，也就是每秒要处理几秒音频。
-    # 它一变，用户据此判断"我这台机器够不够"的结论就跟着错 —— 而这类错不抛异常。
-    预置块 = re.search(
-        r"_预置显示 As String\(\) = \{(.*?)\}\s*\n\s*Private Shared ReadOnly _预置窗口 As Double\(\) = \{(.*?)\}\s*\n\s*Private Shared ReadOnly _预置步长 As Double\(\) = \{(.*?)\}",
-        form, re.S)
-    断言(预置块 is not None,
-        "L0-9 预置表三段（显示 / 窗口 / 步长）齐全",
-        "找不到 _预置显示 / _预置窗口 / _预置步长 的相邻定义")
-    if 预置块 is not None:
-        显示 = re.findall(r'"([^"]*)"', 预置块.group(1))
-        窗 = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", 预置块.group(2))]
-        步 = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", 预置块.group(3))]
-        断言(len(显示) == len(窗) == len(步),
-            "L0-9 预置三段长度一致",
-            "显示 %d 项 / 窗口 %d 项 / 步长 %d 项" % (len(显示), len(窗), len(步)))
-        坏 = []
-        for 名, w, s in zip(显示, 窗, 步):
-            if w <= 0 and s <= 0:
-                continue                      # 跟随包清单 / 自定义 没有自己的数值
-            if s > w:
-                坏.append("%s：步长 %.2f > 窗口 %.2f（会在窗与窗之间留空洞）" % (名, s, w))
-                continue
-            m = re.search(r"([\d.]+)×", 名)
-            if m and abs(float(m.group(1)) - w / s) > 0.051:
-                坏.append("%s：文字 %s× 实际 %.2f×" % (名, m.group(1), w / s))
-        断言(not 坏,
-            "L0-9 预置的倍率文字与实际 窗口÷步长 一致",
-            "；".join(坏))
-
-    # 线程数：worker 早就有 --threads，管道不传就等于这项调了没用（改设置重启一次，
-    # 日志里线程数照样是自动）。
-    断言('ArgumentList.Add("--threads")' in pipe,
-        "L0-9 管道传 --threads（否则界面上的线程数是个摆设）",
-        "启动参数里找不到 --threads")
-    断言(re.search(r"已启动线程 <> 新线程", ctrl),
-        "L0-9 控制器重启判据含线程数（启动期参数，中途改必须重启）",
-        "应用设置 的重启条件里没有线程数")
-    断言("Public Property Ai字幕线程数 As Integer" in st,
-        "L0-9 设置带 Ai字幕线程数（0 = 自动）",
-        "设置类里没有 Ai字幕线程数")
-
-    # 模型档位：单档时必须报「这一档是什么形态、多大」，而不是一句「仅一个档位」；
-    # 多档时每一项都带形态与体积 —— 用户加档的决策依据全在这里。
-    断言("Ai字幕包.体积文本" in form and "Property 默认档形态 As String" in pack
-         and "Property 形态 As String" in pack and "Property 体积字节 As Long" in pack,
-        "L0-9 模型档位显示形态与体积",
-        "找不到 体积文本 / 默认档形态 / 模型档.形态 之一")
-    断言("此包仅一个档位" not in form,
-        "L0-9 单档时不说「此包仅一个档位」这句废话",
-        "单档分支又回到了只报「仅一个档位」——用户看不出这档是什么、多大")
-    断言("MCB_模型档.ItemToolTips.Add" in form,
-        "L0-9 模型档项挂提示（体积 + 目录，排查「这档指到哪」的唯一线索）",
-        "模型档没有挂 ItemToolTips")
-
-    # 本版只有 Qwen3-ASR 0.6B int8 一份权重：定了的事不能摆成选项。一个永远只有
-    # 一项的下拉（哪怕置灰）在暗示"还能选别的"，用户就得试着点一遍才知道没有。
-    # 所以单档位置必须是只读文字，下拉只在包清单真放了第二套权重时出现。
-    断言("LBL_模型档值" in form and "LBL_模型档值.Text = If(详 = \"\", \"未标注量化形态\", 详)" in form,
-        "L0-9 单档时模型一格是只读事实行",
-        "找不到 LBL_模型档值 或它没有报形态体积")
-    断言("MCB_模型档.Visible = 显示 AndAlso _有多档" in form
-         and "LBL_模型档值.Visible = 显示 AndAlso Not _有多档" in form,
-        "L0-9 下拉与只读行按「有没有第二档」互斥",
-        "模型下拉不是常驻的条件可见 —— 单档时它又会出现")
-    断言("_有多档 = 新.Count > 1" in form,
-        "L0-9 有无第二档由 模型档表.Count 判定（不靠档名猜）",
-        "找不到 _有多档 的赋值")
-
-    # 名不副实的档比没有档更坏：档名写 int4、目录里是 int8，界面显示
-    # 「int4（int8 · 941 MB）」，用户按错了精度做判断且不抛任何异常。
-    断言("Function 形态相符" in pack and "If Not 形态相符(属性.Name, 形态) Then Continue For" in pack,
-        "L0-9 档名声明的量化形态必须与目录实际形态一致",
-        "读模型档表 不校验档名与形态，名不副实的档会进列表")
-    样例 = read(SAMPLE_PACK)
-    断言('"models"' not in 样例,
-        "L0-9 样例清单不示范 models 多档（本版只有一份权重）",
-        "pack-sample 又写了 models —— 复制出去就会在设置页多出一堆档位")
-    # 字面判不行：_说明models 里本来就要举 int8 / int4 / fp16 / fp32 这些词。
-    # 判的是结构 —— 样例目录下不能真躺着一个只被清单引用的第二套权重复制品。
-    断言(not os.path.isdir(os.path.join(os.path.dirname(SAMPLE_PACK), "model-fp16")),
-        "L0-9 样例目录不含 fp16 重复权重（本版只有一份 int8）",
-        "pack-sample 下又出现了 model-fp16 目录")
-
-    # 新控件必须挂进高级区折叠，否则收起时它还杵在面板上（L0-5 同一口径）。
-    高级块 = re.search(r"Private Sub 显示高级\(显示 As Boolean\)(.*?)End Sub", form, re.S)
-    for 控件 in ("LBL_线程", "MCB_线程"):
-        断言(高级块 is not None and f"{控件}.Visible = 显示" in 高级块.group(1),
-            f"L0-9 {控件} 挂进高级区可见性切换",
-            "显示高级 里找不到该控件的 Visible 行")
-
-
-    # 段分配默认表：界面「后端说明」对每个加速后端都承诺「int8 两段留 CPU」，
-    # 引擎 STAGE_DEFAULTS 必须真的这么分 —— 否则用户选了 NPU/GPU，引擎把
-    # decoder.int8 也送上去，轻则编译失败，重则算错不抛异常（假绿三形态之三）。
-    eng = read(os.path.join(ROOT, "tools", "ai-subtitles", "qwen3_ort.py"))
-    seg = {}
-    for _ln in eng.splitlines():
-        _s = _ln.strip()
-        if _s.startswith('"') and _s.endswith('),') and '(' in _s and ': Backend(' not in _s:
-            _key = _s.split('"')[1]
-            _tup = _s[_s.index('(') + 1:_s.rindex(')')]
-            _parts = [p.strip() for p in _tup.split(',')]
-            if len(_parts) == 3 and all(p.startswith('"') and p.endswith('"') for p in _parts):
-                seg[_key] = [p.strip('"') for p in _parts]
-    断言(set(seg) == 引擎键,
-        "L0-10 STAGE_DEFAULTS 覆盖全部后端（少一个 = 该后端没有缺省段分配）",
-        "STAGE_DEFAULTS 的键=%s 与 BACKENDS=%s 不一致" % (sorted(seg), sorted(引擎键)))
-    for _k, _row in seg.items():
-        if _k in ("cpu", "ov-cpu"):
-            _want = (_k, _k, _k)
-        else:
-            _want = (_k, "cpu", "cpu")
-        断言(tuple(_row) == _want,
-            "L0-10 %s 缺省段分配 = %s" % (_k, _want),
-            "实际 %s —— 与界面「后端说明」的承诺不一致" % (_row,))
-    断言("device in STAGE_DEFAULTS" in eng and "pick(conv_device" in eng,
-        "L0-10 Engine 缺省走 STAGE_DEFAULTS（显式 --conv-device 才让位）",
-        "Engine.__init__ 没有引用 STAGE_DEFAULTS —— 表是死的，三段仍全送 --device")
 
     # ---------------- L0-7：切文件/切解码器会话损坏（2026-10-25 实机 P0）------------
     # 实机矩阵第 6 项（切文件）暴露的永久沉默：worker 持续出 final、rtf 正常，

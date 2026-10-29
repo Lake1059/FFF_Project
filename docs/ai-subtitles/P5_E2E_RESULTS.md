@@ -1,13 +1,5 @@
 # P5 真机端到端验收（含 P1.5 稳态显存）
 
-
-> ⚠️ **路线已变更（2026-10-27）**：本文写于 llama.cpp 时代（`llama-server` 子进程 + GGUF 双文件）。
-> 推理栈现已换成 **sherpa-onnx（ONNX Runtime）进程内**：后端只剩 `cpu` / `cuda` 两档 + `npu` 占位，
-> 模型是一套 ONNX 目录而非 .gguf，扩展包清单升到 **v2**（见 `PACK_FORMAT.md`）。
-> **已失效**：端到端延迟、显存/内存账单的具体数字
-> **仍有效**：三个真机缺陷的根因（那些不随推理栈变）
-> 归并理由与新方案全貌见主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
-
 日期：2026-10-22　分支：`feature/realtime-ai-subtitles-qwen3-asr`（worktree `_3fp-ai-subtitles`）
 内核：`FFF.Native` Release x64（含 tap 导出）　宿主：`FFF.Player` Release
 

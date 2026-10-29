@@ -1,13 +1,5 @@
 # 3FP 实时 AI 字幕实验项目规划
 
-
-> ⚠️ **路线已变更（2026-10-27）**：本文写于 llama.cpp 时代（`llama-server` 子进程 + GGUF 双文件）。
-> 推理栈现已换成 **sherpa-onnx（ONNX Runtime）进程内**：后端只剩 `cpu` / `cuda` 两档 + `npu` 占位，
-> 模型是一套 ONNX 目录而非 .gguf，扩展包清单升到 **v2**（见 `PACK_FORMAT.md`）。
-> **已失效**：Stage 1 里的 worker 实现细节与对应门禁项
-> **仍有效**：仓库隔离做法、排除项清单、门禁表骨架
-> 归并理由与新方案全貌见主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
-
 > 实验分支：`feature/realtime-ai-subtitles-qwen3-asr`
 > 工作树：`C:/PLAN/3FCompare/_3fp-ai-subtitles`
 > 基线提交：`1a930b08ecc3d18de2bd82dc124400ee6a008023`

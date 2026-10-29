@@ -1,13 +1,5 @@
 # Qwen3-ASR-0.6B 性能开销分析与优化空间
 
-
-> ⚠️ **路线已变更（2026-10-27）**：本文写于 llama.cpp 时代（`llama-server` 子进程 + GGUF 双文件）。
-> 推理栈现已换成 **sherpa-onnx（ONNX Runtime）进程内**：后端只剩 `cpu` / `cuda` 两档 + `npu` 占位，
-> 模型是一套 ONNX 目录而非 .gguf，扩展包清单升到 **v2**（见 `PACK_FORMAT.md`）。
-> **已失效**：launch-bound 归因（llama.cpp 的调度特性导致，sherpa-onnx 是进程内图执行）
-> **仍有效**：开销拆解方法（哪些环节要计时）
-> 归并理由与新方案全貌见主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
-
 > 日期：2026-10-22 ｜ 阶段：Stage 1 收尾 + Stage 2 输入
 > 数据来源：本机实测（`results/transformers_gpu_zh.json`）+ 模型静态分析（safetensors 头 + transformers 5.20.2 源码）
 > 量化专题：**`QUANTIZATION_ANALYSIS.md`**（档位全图、VRAM/速度/质量对比、门禁协议）

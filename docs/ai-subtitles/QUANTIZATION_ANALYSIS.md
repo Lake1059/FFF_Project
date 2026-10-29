@@ -1,13 +1,5 @@
 # Qwen3-ASR-0.6B 量化选择分析与建议
 
-
-> ⚠️ **路线已变更（2026-10-27）**：本文写于 llama.cpp 时代（`llama-server` 子进程 + GGUF 双文件）。
-> 推理栈现已换成 **sherpa-onnx（ONNX Runtime）进程内**：后端只剩 `cpu` / `cuda` 两档 + `npu` 占位，
-> 模型是一套 ONNX 目录而非 .gguf，扩展包清单升到 **v2**（见 `PACK_FORMAT.md`）。
-> **已失效**：GGUF 量化档位测评（Q4_K_M 等）
-> **仍有效**：精度/体积权衡的方法论与“哪种量化形态能被哪些 EP 认识”的机理
-> 归并理由与新方案全貌见主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
-
 > 日期：2026-10-22 ｜ 场景：3FP 实时字幕 worker，RTX 4060 Laptop 8G，桌面争用 5.6–7.2G，单流 batch=1
 > 依赖事实：`MODEL_PERFORMANCE_ANALYSIS.md`（成本模型：launch/带宽bound，decode ~51ms/token）
 > 纪律：文件大小/存在性为【实测】；体积速度为【估算】；CER 影响全部待 A/B 门禁

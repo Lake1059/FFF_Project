@@ -1,13 +1,5 @@
 # AI 字幕验收清单：交互矩阵 + 量化基线
 
-
-> ⚠️ **路线已变更（2026-10-27）**：本文写于 llama.cpp 时代（`llama-server` 子进程 + GGUF 双文件）。
-> 推理栈现已换成 **sherpa-onnx（ONNX Runtime）进程内**：后端只剩 `cpu` / `cuda` 两档 + `npu` 占位，
-> 模型是一套 ONNX 目录而非 .gguf，扩展包清单升到 **v2**（见 `PACK_FORMAT.md`）。
-> **已失效**：llama-server 相关的冒烟步骤与判据
-> **仍有效**：涵盖面骨架（它提醒你该查哪些环节）
-> 归并理由与新方案全貌见主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
-
 > 两部分，别只跑一半：
 >
 > 1. **交互矩阵**（下面 31 项）——P4 门禁里唯一还挂着的项（seek / 暂停 /
@@ -252,7 +244,8 @@ worker 行统一带前缀 `AI 字幕(worker)：[asr-worker] `（stderr 经 `Ai�
 
 ### 素材
 
-`tests/media/video/speech/`（Wikimedia Commons，开放授权、可重新分发，**带人声
+`tests/media/video/speech/`（位于 **3FP 主仓**——本仓库不含这些媒体与
+`_3fc_tmp/asr_batch.py`，验收前先在主仓就位；Wikimedia Commons，开放授权、可重新分发，**带人声
 对白**；来源与授权见该目录 `SOURCES.md`）。
 
 原先 `tests/media/video/real/` 那 7 个「真实影片」经 ffprobe 实测**全部无音轨**——

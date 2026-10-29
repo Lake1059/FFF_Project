@@ -85,8 +85,11 @@ def main():
     samples = load_16k(args.wav, args.seconds)
     print(f"audio {args.wav} -> {len(samples)/W.TARGET_RATE:.2f}s @16k", flush=True)
 
-    # 启动参数刻意与 asr_worker.LlamaServer.start() 保持一致（含 --temp 0.6 与 cache 关掉）：
-    # 矩阵要回答的是"生产里会发生什么"，不是"理想条件下模型能不能认"。
+    # 启动参数刻意与 asr_worker.LlamaServer.start() 的固定默认保持一致
+    # （--temp 0.6、--n-predict 512、--cache-ram 0；--no-cache-idle-slots 在
+    # 生产里已随失控修复移除——保留它会把长输出请求拖到 171s，矩阵测的就
+    # 不再是生产行为了）：矩阵要回答的是"生产里会发生什么"，不是"理想条件
+    # 下模型能不能认"。
     outdir = Path(args.out).parent
     outdir.mkdir(parents=True, exist_ok=True)
     log = open(outdir / "lang_matrix.server.log", "w", encoding="utf-8")
@@ -94,7 +97,7 @@ def main():
         [args.llama, "-m", args.model, "--mmproj", args.mmproj,
          "--port", str(args.port), "--host", "127.0.0.1",
          "--ctx-size", "4096", "--n-gpu-layers", "999", "--threads", "8",
-         "--temp", "0.6", "--no-cache-idle-slots", "--cache-ram", "0"],
+         "--temp", "0.6", "--n-predict", "512", "--cache-ram", "0"],
         stdout=log, stderr=subprocess.STDOUT)
     try:
         for _ in range(240):
@@ -109,7 +112,11 @@ def main():
             return 99
 
         session = _TimedSession(args.timeout)
-        server = type("S", (), {"port": args.port})()
+        # 替身必须带 model_id：asr_worker.transcribe 直接读 server.model_id
+        # （多模型适配起引入），缺属性的替身会让每次转写都 AttributeError、
+        # 整张矩阵 31 行全 error——工具自多模型提交后一直处于这个失效状态。
+        # 空串走 transcribe 里的 "qwen3-asr" 回退，与生产探测失败时的行为一致。
+        server = type("S", (), {"port": args.port, "model_id": ""})()
         tmpdir = Path("_3fc_tmp/lang_matrix_windows")
         tmpdir.mkdir(parents=True, exist_ok=True)
 

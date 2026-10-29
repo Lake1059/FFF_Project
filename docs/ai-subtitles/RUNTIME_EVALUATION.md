@@ -1,13 +1,5 @@
 # Qwen3-ASR-0.6B 在本机的运行时评估
 
-
-> ⚠️ **路线已变更（2026-10-27）**：本文写于 llama.cpp 时代（`llama-server` 子进程 + GGUF 双文件）。
-> 推理栈现已换成 **sherpa-onnx（ONNX Runtime）进程内**：后端只剩 `cpu` / `cuda` 两档 + `npu` 占位，
-> 模型是一套 ONNX 目录而非 .gguf，扩展包清单升到 **v2**（见 `PACK_FORMAT.md`）。
-> **已失效**：llama-server 各后端的实测（启动耗时、VRAM、RTF）
-> **仍有效**：Qwen3-ASR-0.6B 本身的 RTF 量级与模型尺寸对比
-> 归并理由与新方案全貌见主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
-
 > 目的：在修改播放器之前，确认“模型本身能做什么”“官方接口能做什么”“某个运行时在 Windows 上实际能做什么”“应用自己分块能做什么”这四件事，并把它们严格分开。  
 > 所有本机数值都来自 `tools/ai-subtitles/qwen3_asr_benchmark.py`，结果 JSON 落 E 盘；未实际运行的项目一律标注为“未实测”。
 

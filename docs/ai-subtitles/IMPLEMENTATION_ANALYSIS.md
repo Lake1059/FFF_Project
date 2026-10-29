@@ -1,13 +1,5 @@
 # 3FP 实时 AI 字幕：落地实现分析
 
-
-> ⚠️ **路线已变更（2026-10-27）**：本文写于 llama.cpp 时代（`llama-server` 子进程 + GGUF 双文件）。
-> 推理栈现已换成 **sherpa-onnx（ONNX Runtime）进程内**：后端只剩 `cpu` / `cuda` 两档 + `npu` 占位，
-> 模型是一套 ONNX 目录而非 .gguf，扩展包清单升到 **v2**（见 `PACK_FORMAT.md`）。
-> **已失效**：worker 内部的 llama-server 启动、HTTP 转写、参数合并
-> **仍有效**：音频 tap 挂点、媒体时间切窗、ABI 纪律、线程边界
-> 归并理由与新方案全貌见主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
-
 > 分支：`feature/realtime-ai-subtitles-qwen3-asr`（worktree `C:/PLAN/3FCompare/_3fp-ai-subtitles`，基线 `1a930b0`）
 > 总纲：`MASTER_PLAN.md`（决策清单/路线图/门禁）；配套：`PROJECT_PLAN.md`（范围与门禁）、`RUNTIME_EVALUATION.md`（运行时实测）
 > 本文只回答一个问题：**在 3FP 现有代码里，实时 ASR 字幕具体挂在哪里、怎么流、谁来管生命周期**。所有结论带 file:line 证据；未落码。

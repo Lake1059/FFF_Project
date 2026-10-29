@@ -5704,6 +5704,7 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
             if (blurSettingsChanged)
                 coverBackdropBlurSettingsGeneration_.fetch_add(1, std::memory_order_acq_rel);
             if (blurSettingsChanged) RequestCoverBackdropRender(true);
+        } else if (slot == TimedTextLayerSlot::Subtitle) {
         }
         {
             std::lock_guard lock(timedTextMutex_);
@@ -9089,6 +9090,9 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     sourceCoverArt_ = false;
     sourceImageMode_ = false;
     hasCachedVideo_ = false;
+    subtitleOverlayEnabled_.store(false, std::memory_order_release);
+    subtitleOverlayCanvasWidth_.store(0, std::memory_order_release);
+    subtitleOverlayCanvasHeight_.store(0, std::memory_order_release);
     hdrMonitor_ = nullptr;
     hdrSupportValid_ = false;
     hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();

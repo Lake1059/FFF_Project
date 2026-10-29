@@ -1,13 +1,5 @@
 # P1.2 CER 基线对撞：Q8_0 vs bf16（2026-10-22 实测）
 
-
-> ⚠️ **路线已变更（2026-10-27）**：本文写于 llama.cpp 时代（`llama-server` 子进程 + GGUF 双文件）。
-> 推理栈现已换成 **sherpa-onnx（ONNX Runtime）进程内**：后端只剩 `cpu` / `cuda` 两档 + `npu` 占位，
-> 模型是一套 ONNX 目录而非 .gguf，扩展包清单升到 **v2**（见 `PACK_FORMAT.md`）。
-> **已失效**：Q8_0 / Q6_K 的绝对 CER 数字（那是 GGUF 路线的产物）
-> **仍有效**：CER 口径（怎么比、比什么）与判定阈值
-> 归并理由与新方案全貌见主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
-
 > 样本、JSON 原始输出与对撞脚本：`E:/WorkBuddy/3FP-AI-Subtitles/results/`；
 > 工具：`tools/ai-subtitles/cer_baseline.py`（bf16=transformers GPU / 其余=llama-server HTTP）。
 > 归一化口径：剥离 `language XX<asr_text>` 前缀与聊天模板脚手架，去标点大小写，中文去空格；

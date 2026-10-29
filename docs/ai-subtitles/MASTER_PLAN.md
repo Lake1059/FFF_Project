@@ -3,47 +3,25 @@
 > 日期：2026-10-22 ｜ 分支：`feature/realtime-ai-subtitles-qwen3-asr`（worktree `C:/PLAN/3FCompare/_3fp-ai-subtitles`，基线 `1a930b0`）
 > 本文是**唯一总纲**：状态盘点、决策清单、路线图、分阶段门禁。各专题文档是附件，不重复其内容。
 
-> 🔄 **当前状态（2026-10-27）——读本文前先看这一段**
->
-> 推理栈已从 **llama.cpp**（`llama-server` 子进程 + GGUF 双文件）整体换成
-> **sherpa-onnx（ONNX Runtime）进程内**。后果：
->
-> * 后端从"每个厂商一份二进制"收敛为 **`cpu` / `cuda` 两档 + `npu` 占位**；
-> * 模型从 .gguf 单文件变成一套 ONNX 目录（三 onnx + `tokenizer/`）；
-> * 扩展包清单升到 **v2**，`servers` / `mmproj` / `llamaArgs` / `layers` / `device` 全部删除；
-> * 设置页从"设备类别 + 运行方式 + 设备序号 + GPU 层数 + 附加参数"五项收敛为**一个下拉**。
->
-> **本文仍然成立的部分**：§1 的目标与边界、§2 的分阶段记录、各阶段门禁表——那些是工程纪律，
-> 不随推理栈变。**凡涉及 llama-server / GGUF / 多后端 / 量化档的段落一律作废**，以
-> `PACK_FORMAT.md`（v2）与主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md` 为准。
->
-> 所有附件文档顶部都已插入同一条"路线已变更"横幅，逐份标明哪部分失效、哪部分仍有效。
-
 ## 0. 文档地图
 
 | 文档 | 内容 | 状态 |
 |---|---|---|
 | **MASTER_PLAN.md（本文）** | 总纲：状态、决策、路线图、门禁 | 本文 |
-| **`PACK_FORMAT.md`** | **扩展包契约**（本体与包之间唯一的接口） | ✅ **v2 现行** |
-| `PROJECT_PLAN.md` | Stage 0 仓库隔离与架构调查、首版范围、Stage 1 门禁表 | ⚠️ 部分失效 |
-| `RUNTIME_EVALUATION.md` | 运行时实测（GPU/CPU、RTF、路线对比） | ⚠️ 部分失效 |
-| `MODEL_PERFORMANCE_ANALYSIS.md` | 开销归因（launch-bound）、优化空间 | ⚠️ 部分失效 |
-| `QUANTIZATION_ANALYSIS.md` | 量化档位全图、VRAM/速度/质量、CER 门禁 | ⚠️ 部分失效 |
-| `IMPLEMENTATION_ANALYSIS.md` | 落码设计（挂点 file:line、ABI、worker 协议、线程边界） | ⚠️ 部分失效 |
-| `CER_BASELINE_RESULTS.md` | P1.2/P1.3 的 CER 对撞原始数据 | ⚠️ 部分失效 |
-| `P5_E2E_RESULTS.md` | 真机端到端：延迟账、显存、三个真机缺陷的根因 | ⚠️ 部分失效 |
-| `SMOKE_CHECKLIST.md` | 冒烟核对项 | ⚠️ 部分失效 |
-| `USER_GUIDE.md` | 用户向：装包、启用、已知限制 | ⚠️ 待按 v2 重写 |
-| `LANGUAGE_SUPPORT.md` / `LANGUAGE_TEST_ANALYSIS.md` | 语言闸门的设计与实测 | ❌ 已失效 |
-| `MODEL_TIERS.md` | GGUF 档位与栈内参数 | ❌ 已失效 |
-| `BACKEND_MATRIX.md` | N/I/A/CPU 各自怎么跑、`-ngl` 与 `--device` | ❌ 已失效 |
+| `PROJECT_PLAN.md` | Stage 0 仓库隔离与架构调查、首版范围、Stage 1 门禁表 | ✅ 已完成 |
+| `RUNTIME_EVALUATION.md` | 运行时实测（GPU/CPU、RTF、路线对比） | ✅ |
+| `MODEL_PERFORMANCE_ANALYSIS.md` | 开销归因（launch-bound）、优化空间 | ✅ |
+| `QUANTIZATION_ANALYSIS.md` | 量化档位全图、VRAM/速度/质量、CER 门禁 | ✅ |
+| `IMPLEMENTATION_ANALYSIS.md` | 落码设计（挂点 file:line、ABI、worker 协议、线程边界、2a–2d） | ✅ |
+| `CER_BASELINE_RESULTS.md` | P1.2/P1.3 的 CER 对撞原始数据 | ✅ |
+| `P5_E2E_RESULTS.md` | 真机端到端：延迟账、显存、三个真机缺陷的根因 | ✅ |
+| `PACK_FORMAT.md` | **扩展包契约**（本体与包之间唯一的接口） | ✅ |
+| `USER_GUIDE.md` | 用户向：装包、模型、启用、已知限制 | ✅ |
+| `BACKEND_MATRIX.md` | N/I/A/CPU 各自怎么跑、`-ngl` 与 `--device`、未验证项 | ✅ |
 
-> 状态含义：✅ 现行 ｜ ⚠️ 数据与结论部分仍可参考，但路线前提已变 ｜ ❌ 前提整体不成立。
-
-> 读法（v2 口径）：想**做一个包**看 `PACK_FORMAT.md`；想知道**功能怎么用**看
-> `USER_GUIDE.md`（⚠️ 尚未按 v2 重写，装包步骤那段请直接读 `PACK_FORMAT.md` §1/§2）；
-> 想知道**当初为什么这么设计**看 `IMPLEMENTATION_ANALYSIS.md` 与本文 §4 的决策表；
-> 想知道**为什么砍掉那么多后端**看主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
+> 读法：想知道**功能怎么用**看 `USER_GUIDE.md`；想**做一个包**看 `PACK_FORMAT.md`；
+> 想**换显卡/纯 CPU**看 `BACKEND_MATRIX.md`；想知道**当初为什么这么设计**看
+> `IMPLEMENTATION_ANALYSIS.md` 与本文 §4 的决策表。
 
 ---
 

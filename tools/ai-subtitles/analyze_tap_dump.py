@@ -92,7 +92,11 @@ def main(path):
     total_bytes = sum(b["nbytes"] for b in blocks)
     print(f"total audio: {total_seconds:.2f}s, {total_bytes} bytes "
           f"({total_bytes / max(1, total_seconds) / 1024:.0f} KiB/s)")
-    ok = (bad_order == 0 and len(rates) == 1 and len(chans) == 1 and checked == 0 or nonzero == checked)
+    # 优先级修正（历史版本的 or 把判定短路成"只要非全静音就放行"，乱序/
+    # 多采样率/多声道全被放过；checked==0 时右半恒真同理）。判定本意：
+    # 结构三项必须全过，且（无样本可查 或 样本非全静音）。
+    ok = (bad_order == 0 and len(rates) == 1 and len(chans) == 1 and
+          (checked == 0 or nonzero == checked))
     print("DUMP-OK" if ok else "DUMP-SUSPECT")
     return 0 if ok else 2
 

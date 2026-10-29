@@ -55,6 +55,12 @@ Public Class Form设置
     Private 待选中页索引 As Integer = -1
 
     Friend Sub 显示窗口()
+        待选中页索引 = -1
+        打开并定位()
+    End Sub
+
+
+    Private Sub 打开并定位()
         If Visible Then
             初始化所有页面()
             应用待选中页()

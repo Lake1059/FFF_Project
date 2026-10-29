@@ -154,6 +154,10 @@ Public Class 设置
     Public Property Ai字幕字幕偏移秒 As Double = 0
 
 
+    ' AI 实时字幕（docs/ai-subtitles/，实验分支功能）：默认全关。
+    ' 三条理由写在这儿，免得以后有人"顺手改成 True"：
+    '   ① 它要拉一个独立 Python 进程 + llama-server 子进程，还要一块显卡显存；
+    
     Public Property 关联常见视频 As Boolean = False
     Public Property 关联不常见视频 As Boolean = False
     Public Property 关联老旧视频 As Boolean = False

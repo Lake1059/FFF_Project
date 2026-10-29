@@ -1,13 +1,5 @@
 # 3FP 实时 AI 字幕：使用说明（P6）
 
-
-> ⚠️ **路线已变更（2026-10-27）**：本文写于 llama.cpp 时代（`llama-server` 子进程 + GGUF 双文件）。
-> 推理栈现已换成 **sherpa-onnx（ONNX Runtime）进程内**：后端只剩 `cpu` / `cuda` 两档 + `npu` 占位，
-> 模型是一套 ONNX 目录而非 .gguf，扩展包清单升到 **v2**（见 `PACK_FORMAT.md`）。
-> **已失效**：装 llama-server、选后端、填附加参数、换 GGUF 档位的操作步骤
-> **仍有效**：功能开关位置、已知限制的描述
-> 归并理由与新方案全貌见主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
-
 > 日期：2026-10-23 ｜ 分支 `feature/realtime-ai-subtitles-qwen3-asr`
 > 面向"想在自己机器上跑起来"的人。设计与验收细节见 `MASTER_PLAN.md` 与 `P5_E2E_RESULTS.md`，
 > 包格式（包作者看这份）见 `PACK_FORMAT.md`。
@@ -188,7 +180,7 @@ CUDA DLL 有 30%+ 空间（cublasLt 445→308 MB）；固实吃到的主要是 v
 时 N=28，就是过去那张固定表（28/24/20/16/12/8/4/0）；换个 32 层的模型，包里写
 `"layers": 32`，下拉就会出现「全部 32 层」。
 
-默认「自动」= 不向 llama-server 指定层数，由它自己把全部层卸到显存（也是性能最好
+默认「自动」= 显式传 `--n-gpu-layers 999`（全部层卸到显存，也是性能最好
 的选择）；显存吃紧再逐档往下选——比如选 16，一半权重留在内存里跑，显存占用大致减半，
 速度会降但通常仍在实时能力内（rtf 判据：小于 1 就是实时）。
 
@@ -464,7 +456,8 @@ llama-server 自己的 stderr（加载失败的真实原因：缺 mmproj、架�
 ### 7.5 自己量化验收（不靠播放器，没有 GUI 也能跑）
 
 上面这些入口都是「看日志里有没有那一行」，只能证明字幕出来了，证明不了**快不快、
-对不对**。`_3fc_tmp/asr_batch.py` 把这件事变成一条命令（2026-10-25 新增）：切片段 →
+对不对**。`_3fc_tmp/asr_batch.py` 把这件事变成一条命令（2026-10-25 新增；脚本与素材
+都在 **3FP 主仓**，本仓库不带）：切片段 →
 抽 16k mono wav → 直接打 llama-server 的 `/v1/audio/transcriptions` → 每个片段产出
 **耗时 / RTF / 识别文本 / 丢弃原因**（空 / 失控编字 / 指令泄漏；空着表示这窗有
 有效内容）。护栏判据直接加载 worker 的 `asr_worker.py`，不会与 worker 漂移。
@@ -481,7 +474,7 @@ python _3fc_tmp/asr_batch.py cases.json out.json
 （`ss` = 起始秒、`t` = 片段时长、`lang` 留空 = 让模型自判）。**换模型 / 改 llama-server
 参数前后各跑一份，RTF 就是唯一的对照指标**——判据同 §4：> 1 等于永远追不上画面。
 
-#### 素材：`tests/media/video/speech/`（2026-10-25 入库）
+#### 素材：`tests/media/video/speech/`（3FP 主仓，不入本仓库）
 
 要跑上面的脚本得先有带人声的素材。`tests/media/video/real/` 下那 7 个「真实影片」
 经 ffprobe 实测**全部没有音轨**，根本出不了字幕，所以新入库了一组 Wikimedia Commons

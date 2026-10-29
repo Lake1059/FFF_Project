@@ -1,13 +1,5 @@
 # 推理后端矩阵：N 卡 / I 卡 / A 卡 / 纯 CPU 分别怎么跑
 
-
-> ⚠️ **路线已变更（2026-10-27）**：本文写于 llama.cpp 时代（`llama-server` 子进程 + GGUF 双文件）。
-> 推理栈现已换成 **sherpa-onnx（ONNX Runtime）进程内**：后端只剩 `cpu` / `cuda` 两档 + `npu` 占位，
-> 模型是一套 ONNX 目录而非 .gguf，扩展包清单升到 **v2**（见 `PACK_FORMAT.md`）。
-> **已失效**：vulkan / rocm / sycl / OpenVINO 各后端的选型与 `-ngl` / `--device` 参数、按设备类别推断后端的整套逻辑
-> **仍有效**：NVIDIA / Intel / AMD / CPU 硬件能力边界的一般结论
-> 归并理由与新方案全貌见主仓 `docs/交接文档-2026-10-27-设备选择统一方案.md`。
-
 配套代码：宿主 `FFF.Player/AI字幕/Ai字幕包.vb` + `Form设置_AI字幕.vb`，
 worker `tools/ai-subtitles/asr_worker.py`。实测记录见 §6。
 
@@ -52,7 +44,10 @@ llama-server.exe -m <model.gguf> --mmproj <mmproj.gguf>
   --port 8199 --host 127.0.0.1 --ctx-size 4096
   `--n-gpu-layers 999        # 0 = 全部留在 CPU；999 = 能 offload 的层全给设备
   --threads 8               # CPU 后端时决定速度，自动取 min(核数,16)
-  --temp 0.6 --no-cache-idle-slots --cache-ram 0
+  --temp 0.6 --n-predict 512 --cache-ram 0
+  # --n-predict 512：输出长度上限（无语音段失控护栏，见 USER_GUIDE §4）。
+  # --no-cache-idle-slots 已随失控修复移除（实测会把长输出请求拖到 171s），
+  # 内存仍由 --cache-ram 0 兜住；要更省请用 llamaArgs 自己加回。
   --device CUDA0            # 非 auto 后端才出现；CPU 臂是 --device none
 ```
 

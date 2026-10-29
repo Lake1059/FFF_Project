@@ -263,8 +263,9 @@ Public NotInheritable Class 播放器控制器
         Return 安全读取会话(Function(目标) 目标.当前媒体信息)
     End Function
 
-    ''' <summary>当前会话的原生句柄（无会话 / 已释放 / 句柄无效时答 Nothing）。
-    ''' 给 AI 字幕装/卸音频 tap 用：那是直接打到内核的调用，不经过会话命令队列。</summary>
+    ''' <summary>当前会话的原生句柄；无会话 / 会话已释放答 Nothing。
+    ''' AI 字幕管道的取数线程每轮调它：句柄随会话销毁自然失效，不存在悬空解引用
+    ''' （"取到句柄后会话恰好释放"的竞态由管道逐轮 ObjectDisposedException 容错兜住）。</summary>
     Friend Function 取当前句柄() As 播放器原生句柄
         Return 安全读取会话(Function(目标) 目标.取得句柄())
     End Function
