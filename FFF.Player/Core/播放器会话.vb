@@ -41,6 +41,7 @@ Public NotInheritable Class 播放器会话
     Private 定时文字原生缓冲句柄 As GCHandle
     Private 已释放 As Integer
     Private 事件排程中 As Integer
+    Private 空间音频已启用 As Integer = 1
     ''' <summary>外部色彩变换注入泵（模块缺席/未解锁/内核无环导出时为 Nothing，通路整体静默）。</summary>
     Private 注入泵 As 色彩变换注入泵
 
@@ -50,6 +51,7 @@ Public NotInheritable Class 播放器会话
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
         配置.验证()
+        空间音频已启用 = If(配置.启用空间音频, 1, 0)
         ' 创建前检查实际加载的内核版本；配置大小仍由 FFF3FP_Create 校验。
         Dim 内核API版本 = 播放器原生接口.FFF3FP_GetApiVersion()
         If 内核API版本 <> 期望API版本 Then
@@ -102,6 +104,13 @@ Public NotInheritable Class 播放器会话
             Throw
         Finally
             If 端点指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(端点指针)
+        End Try
+        Try
+            检查结果(播放器原生接口.FFF3FP_ConfigurePlaybackPerformance(句柄,
+                配置.首选解码适配器索引, CUInt(配置.视频缓冲区策略), CUInt(配置.音频缓冲区策略)))
+        Catch
+            释放()
+            Throw
         End Try
     End Sub
 
@@ -473,16 +482,14 @@ Public NotInheritable Class 播放器会话
         End Select
     End Function
 
-    ''' <summary>Tab 图层的超分行：一个判词 + 一句人话，仅此两样。判词固定三态开头
-    ''' （已激活 / 未开启 / 未生效），UI 只按前缀着色，判据仍然取自内核的 生效 字段
+    ''' <summary>Tab 图层的超分行：一个判词 + 一句人话，仅此两样。判词固定两态开头
+    ''' （已激活 / 未生效），未请求时不显示，判据仍然取自内核的 生效 字段
     ''' 而不是用户的勾选态——勾选态实测不等于生效，拿它点亮就是假凭证。
     ''' 裸读数（active / reason / 尺寸 / 闩）不进界面：人话与字段并排会把行挤到窗口右沿
     ''' 截断，而排查要的原值 FFF3FP_GetVideoSuperResolutionStatus 逐字段都还在报。</summary>
     Friend Shared Function 视频超分辨率图层文本(状态 As 原生视频超分辨率状态) As String
+        If 状态.请求模式 = 0UI Then Return Nothing
         If 状态.生效 <> 0UI Then Return "已激活 · 驱动已接受（不等于画面已被增强）"
-        ' "未开启" 只能表示"用户没请求"。用 原因 单独判会在这些场合说谎：自动 HDR
-        ' 占用通道时内核原因停在初值、驱动闩住、compare 模式互斥——那时用户确实勾了。
-        If 状态.请求模式 = 0UI Then Return "未开启"
         Return "未生效 · " & 视频超分辨率状态文本(状态)
     End Function
 
@@ -516,8 +523,8 @@ Public NotInheritable Class 播放器会话
     ''' （内核把"探测读回 1"折进了 生效），所以这里不写"探测通过"之类的话，
     ''' 那等于替内核报一个它没报的数。</summary>
     Friend Shared Function 视频自动HDR图层文本(状态 As 原生视频自动HDR状态) As String
+        If 状态.请求模式 = 0UI Then Return Nothing
         If 状态.生效 <> 0UI Then Return "已启用 · SDR → HDR10（驱动 TrueHDR）"
-        If 状态.请求模式 = 0UI Then Return "未开启"
         Return "未生效 · " & 视频自动HDR状态文本(状态)
     End Function
 
@@ -613,11 +620,20 @@ Public NotInheritable Class 播放器会话
     ' 装过一次就不再重复握手——每次重装都会让模块新建一个渲染上下文。
     Private 色彩模块实例 As 色彩变换模块实例
     Private 音频插槽已装 As Boolean
+    Private ReadOnly 音频插槽锁 As New Object()
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Sub 释放音频上下文(上下文 As IntPtr)
 
     ''' <summary>把模块的外部床渲染函数表交给本会话的内核。任何一步不成立都静默返回：
     ''' 缺席、旧件、未解锁、镜像尺寸不同水、内核拒绝——全部保持矩阵折叠。</summary>
     Private Sub 安装音频渲染插槽()
-        If 音频插槽已装 OrElse 色彩模块实例 Is Nothing Then Return
+        SyncLock 音频插槽锁
+            安装音频渲染插槽核心()
+        End SyncLock
+    End Sub
+
+    Private Sub 安装音频渲染插槽核心()
+        If Volatile.Read(空间音频已启用) = 0 OrElse 音频插槽已装 OrElse 色彩模块实例 Is Nothing Then Return
         Dim 原因 As String = Nothing
         Dim 表 = 色彩模块实例.尝试取音频渲染表(原因)
         If Not 表.HasValue Then
@@ -626,18 +642,34 @@ Public NotInheritable Class 播放器会话
         End If
         Dim 本地表 = 表.Value
         Dim 钉住 = GCHandle.Alloc(本地表, GCHandleType.Pinned)
+        Dim 已交给内核 As Boolean
         Try
             Dim 结果 = 播放器原生接口.FFF3FP_SetAudioRenderPlug(取得句柄(), 钉住.AddrOfPinnedObject())
             If 结果 = 原生播放器结果.成功 Then
+                已交给内核 = True
                 音频插槽已装 = True
             Else
-                ' 内核没收下这张表；模块那边的上下文是这次握手新建的，由内核在
-                ' 下一次成功装载或会话拆解时释放，宿主不越界替它 free。
                 Debug.WriteLine("音频渲染插槽：内核拒绝 " & 结果.ToString())
             End If
         Finally
             钉住.Free()
+            ' 只有成功装载才转移上下文所有权；拒绝或异常时由调用方归还。
+            If Not 已交给内核 AndAlso 本地表.释放 <> IntPtr.Zero AndAlso 本地表.上下文 <> IntPtr.Zero Then
+                Marshal.GetDelegateForFunctionPointer(Of 释放音频上下文)(本地表.释放).Invoke(本地表.上下文)
+            End If
         End Try
+    End Sub
+
+    Public Sub 设置空间音频(启用 As Boolean)
+        SyncLock 音频插槽锁
+            Volatile.Write(空间音频已启用, If(启用, 1, 0))
+            If 启用 Then
+                安装音频渲染插槽核心()
+            ElseIf 音频插槽已装 Then
+                检查结果(播放器原生接口.FFF3FP_SetAudioRenderPlug(取得句柄(), IntPtr.Zero))
+                音频插槽已装 = False
+            End If
+        End SyncLock
     End Sub
 
     ''' <summary>插槽读数：0/1 + 已渲染与已拒绝帧数。给信息层与测试用，不抛。</summary>

@@ -16,6 +16,12 @@ Public Class 设置
     ' （文件只存 1/2，分不出"从没设置过"与"显式选过 CPU"，故不做迁移）。
     Public Property 解码方式 As 解码模式 = 解码模式.GPU
     Public Property 视频缩放质量选项 As Integer = CInt(视频缩放质量.高画质)
+    Public Property GPU解码设备标识 As String = String.Empty
+    ' 0 均衡自适应，1 更多缓冲，2 小缓冲压力测试。旧配置缺项时保持原有策略。
+    Public Property 视频缓冲区策略 As Integer = 0
+    Public Property 音频缓冲区策略 As Integer = 0
+    Public Property 启用空间音频 As Boolean = True
+    Public Property 自动切换到真实HDR高亮 As Boolean = True
     Public Property HDR峰值亮度选项 As Integer = 0
     Public Property HDR峰值亮度 As Integer = 0
     Public Property HDR映射SDR参考亮度 As Integer = 250
@@ -91,7 +97,6 @@ Public Class 设置
     ' 生效条件（内核逐帧判定）：NVIDIA 适配器 + 驱动探测通过 + SDR 源 + 已是 10 位 HDR
     ' 输出契约。任一条不满足是静默不生效（不是错误），默认开只会让人以为坏了。
     Public Property NVIDIA自动HDR As Boolean = False
-
     ' AI 实时字幕（docs/ai-subtitles/，实验分支功能）：默认全关。
     ' 三条理由写在这儿，免得以后有人"顺手改成 True"：
     '   ① 它要拉一个独立 Python 进程 + llama-server 子进程，还要一块显卡显存；
@@ -111,34 +116,36 @@ Public Class 设置
     ' 高级项：覆盖清单里的窗口/步长（秒）。0 = 跟随清单；包自身已做钳制，这里只挡脏数据。
     Public Property Ai字幕窗口秒覆盖 As Double = 0
     Public Property Ai字幕步长秒覆盖 As Double = 0
-    ' 推理设备："" / "auto" = 跟随包清单的 device；其余取 Ai字幕后端 的标识
-    '（cpu / cuda / vulkan / rocm / sycl）。换后端在 llama.cpp 这边等于换二进制，
-    ' 包没带对应二进制时回落到包默认的那个，并在设置页状态行说明。
-    Public Property Ai字幕设备后端 As String = ""
-    ' 同一后端下的第几块设备（多显卡时用）。-1 = 不指定，交给 llama-server 自选。
-    Public Property Ai字幕设备序号 As Integer = -1
-    ' 卸载到显卡的层数（llama-server --n-gpu-layers）。-1 = 自动：GPU 后端全卸、
-    ' CPU 后端不卸；>= 0 时按用户指定的层数卸（显存吃紧的机器填小数，如 16）。
-    ' 它和模型档一样是启动期参数 —— 改了必须重启 worker 才生效。
-    ' 注意：选 CPU 后端时设备是 none，这一项没有意义（界面会置灰）。
-    Public Property Ai字幕Gpu层数 As Integer = -1
+    ' 推理线程数：0 = 自动（worker 取 min(6, 核数)）。启动期参数，改了要重启 worker。
+    ' 上限 6 有实测依据 —— 超过 6 时 P+E 混合架构上前台线程会落到 E-core，同步点被
+    ' 拖住，反而更慢；全大核机器可以往上调，所以这里不硬钳，只给界面几个预设。
+    ' 非法值（负数）在管道里归 0，不让它传到 worker 变成 num_threads=-1。
+    Public Property Ai字幕线程数 As Integer = 0
+    ' 推理设备：这台机器拿哪块硬件算，取值见 Ai字幕推理档.设备全部
+    ' （auto / cpu / nvidia / amd / intel / npu）。
+    ' 它**不参与传参**：只决定设置页「后端」下拉列出哪几项，真正发给 worker 的是下面
+    ' 那个 后端 字段。分成两个字段是有意的 —— 合成成一个串就要解析，脏值就会解析成
+    ' 别的档（v1 那套「设备类别 + 厂商后端 + 二进制扫描」正是这么长出来的）。
+    ' 空串与 auto 同义；老设置里 cuda（llama.cpp 时代它同时表示 NVIDIA 卡）由
+    ' Ai字幕推理档.规整设备 归到 nvidia，其余旧标识归 auto，不需要迁移代码。
+    Public Property Ai字幕运行设备 As String = ""
+
+    ' 推理后端：用哪个运行时，取值见 Ai字幕推理档.后端全部
+    ' （auto / cpu / cuda / dml / ov-cpu / ov-gpu / ov-npu）。
+    ' 启动期参数 —— 改了要重启 worker 才生效（控制器按这个值判断要不要重启）。
+    ' 与设备是一对：换设备后旧后端可能不在新设备的候选表里，读取时由
+    ' Ai字幕推理档.规整后端 一次性归位，不落盘（用户一动下拉就写回正确值）。
+    Public Property Ai字幕推理后端 As String = ""
     ' 字幕语言："" / "auto" = 让模型自判（默认）；其余取 Ai字幕语言 的标识（zh/en/…）。
-    ' 它给 llama-server 的 language 字段做提示，属于**软约束**：模型确信时压不住，
-    ' 也不是翻译。真正的"只出这个语言"要靠下面的闸门。
+    ' ⚠ 换到 sherpa-onnx 之后这条降级为**无操作**：该运行时只返回文本、不返回语言
+    ' 标签，所以 worker 报上来的 language 恒为空，下面那个闸门也就压不住任何东西。
     Public Property Ai字幕语言 As String = ""
-    ' 只显示所选语言：模型自报的语言与所选不符时，该窗结果不上屏。
-    ' 默认关 —— 开了它，选中文看英文片就是整片空白，用户很可能以为功能坏了。
+    ' 只显示所选语言：模型自报语言与所选不符时该窗不上屏。现在恒不触发（见上），
+    ' 保留字段是为了不丢老设置，界面按"暂不可用"置灰显示。
     Public Property Ai字幕仅所选语言 As Boolean = False
-    ' 模型档位："" = 跟包清单的默认档（model / mmproj 字段）；其余取清单 models 里的键。
-    ' 低性能设备（无独显、内存吃紧）选低量化档：显存与内存占用一起降，精度略降。
-    ' 它也属于启动期参数 —— 换档就是换权重文件，必须重启 worker 才生效。
+    ' 模型档位："" = 跟包清单的默认档（清单 model 字段指向的目录）；其余取清单 models 里的键。
+    ' 它属于启动期参数 —— 换档就是换一套 ONNX 权重，必须重启 worker 才生效。
     Public Property Ai字幕模型档 As String = ""
-    ' 用户侧 llama-server 附加参数（设置页高级区多行文本框）：每行一个 token
-    '（"--ctx-size" 与 "8192" 各一行，或单行 "--ctx-size=8192"；空行忽略，# 开头
-    ' 是注释）。与包清单 llamaArgs 合并时用户参数排后、同名 flag 覆盖包参数
-    '（见 Ai字幕管道.合并附加参数）—— 换模型想调 ctx-size / temp / 缓存策略时，
-    ' 不必改包也不必改 worker 源码。启动期参数：改内容会重启 worker。
-    Public Property Ai字幕附加参数 As String = ""
     ' 字幕驻留偏移（秒）：[-3, +3]，0 = 不偏移。作用在状态机守卫判定的播放位置上
     '（播放位置 − 偏移）：正值 = 每行多驻留一会儿（慢读者、或下一句来得慢时不等空窗），
     ' 负值 = 提前收起（嫌字幕拖音）。**它不能让一行字幕更早出现** —— 出现时机由推理
@@ -146,6 +153,11 @@ Public Class 设置
     ' 「节奏」预置）。纯显示侧：改它不重启 worker。
     Public Property Ai字幕字幕偏移秒 As Double = 0
 
+
+    ' AI 实时字幕（docs/ai-subtitles/，实验分支功能）：默认全关。
+    ' 三条理由写在这儿，免得以后有人"顺手改成 True"：
+    '   ① 它要拉一个独立 Python 进程 + llama-server 子进程，还要一块显卡显存；
+    
     Public Property 关联常见视频 As Boolean = False
     Public Property 关联不常见视频 As Boolean = False
     Public Property 关联老旧视频 As Boolean = False
@@ -229,6 +241,9 @@ Public Class 设置
             解码方式 = CInt(解码模式.GPU)
         End If
         视频缩放质量选项 = Math.Clamp(视频缩放质量选项, 0, 1)
+        GPU解码设备标识 = If(GPU解码设备标识, String.Empty).Trim()
+        If 视频缓冲区策略 < 0 OrElse 视频缓冲区策略 > 2 Then 视频缓冲区策略 = 0
+        If 音频缓冲区策略 < 0 OrElse 音频缓冲区策略 > 2 Then 音频缓冲区策略 = 0
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
         HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)
@@ -272,6 +287,7 @@ Public Class 设置
         SP_毛玻璃模式 = Math.Clamp(SP_毛玻璃模式, 0, 3)
         SP_毛玻璃背景来源 = Math.Clamp(SP_毛玻璃背景来源, -1, 1)
         SP_毛玻璃噪点颗粒 = Math.Clamp(SP_毛玻璃噪点颗粒, -1, 2)
+
         ' AI 字幕：高级覆盖项钳在 [0.5, 30] 秒；0 或脏数据 = 跟随包清单（包自己已钳过一遍）。
         If Not Double.IsFinite(Ai字幕窗口秒覆盖) OrElse Ai字幕窗口秒覆盖 < 0.5 OrElse Ai字幕窗口秒覆盖 > 30 Then
             Ai字幕窗口秒覆盖 = 0

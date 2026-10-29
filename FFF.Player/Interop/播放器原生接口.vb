@@ -323,6 +323,7 @@ Friend Structure 原生音频峰值
     Public 输入峰值 As Single()
 End Structure
 
+
 ' ---- ASR 音频 tap（FFF.Player.AudioTap.h，可选导出） ----
 ' 内核新增面：旧内核没有这四个入口时能力属性答 False，AI 字幕整条通路静默降级。
 ' 结构是纯 POD，禁止出现任何 FFmpeg 类型；声道位置是 AVChannel 值（-1 = 无此槽）。
@@ -614,6 +615,79 @@ Friend Module 播放器原生接口
             If 路径指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(路径指针)
         End Try
     End Function
+
+
+    ' ---- 进程级内核日志槽（FFF3FP_SetLogCallback，可选导出） ----
+    ' 内核的诊断只有这一个出口：VSR 的逐帧跳过（VideoRenderer.cpp 的 skip lambda，按原因
+    ' 去重）与每一次 PlayerSession::Fail 都写到这里。槽位默认是 null，所以宿主不注册就等于
+    ' 把"为什么开着却看不见"的唯一证据直接丢掉——出货宿主此前正是这个状态。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Sub 原生日志回调(上下文 As IntPtr, 行UTF8 As IntPtr)
+
+    ' 首参按函数指针传（与 播放器会话 交给内核的 回调 字段同一套做法），
+    ' 这样委托的封送只有"被调用"这一个方向，不依赖嵌套委托参数的封送规则。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Sub 设置日志回调原型(回调 As IntPtr, 上下文 As IntPtr)
+
+    Private ReadOnly 设置日志回调函数 As 设置日志回调原型 =
+        解析可选导出(Of 设置日志回调原型)("FFF3FP_SetLogCallback")
+
+    ' 委托必须活得比内核所有线程久：GC 一收，原生侧手里就是野指针。挂在本模块的静态字段上
+    ' （模块类型随进程存活），并且**只装不摘**——注销后仍可能有行在飞，落进已拆掉的运行时
+    ' 就是 CLR 致命错误（FFF.Player.Api.h:488-491）。
+    Private 内核日志钩子 As 原生日志回调
+    Private ReadOnly 内核日志锁 As New Object()
+    ' 上限是必要的而不是讲究：内核把每一次 Fail 都镜像进来，反复失败的片源能把文件写大。
+    ' 只留一份历史（.log → .log.1），与 ai-subtitles.log 同规矩。
+    Private Const 内核日志上限字节 As Long = 2L * 1024L * 1024L
+    Private 内核日志字节 As Long = -1L
+
+    ''' <summary>把内核日志接到 程序目录\kernel.log（追加，带锁，失败即丢）。
+    ''' 启动早期调一次；旧内核没有该导出时静默跳过。</summary>
+    Friend Sub 注册内核日志()
+        Dim 函数 = 设置日志回调函数
+        If 函数 Is Nothing OrElse 内核日志钩子 IsNot Nothing Then Return
+        内核日志钩子 = AddressOf 收内核日志
+        Try
+            函数(Marshal.GetFunctionPointerForDelegate(内核日志钩子), IntPtr.Zero)
+        Catch ex As Exception
+            ' 装日志不该影响启动，装不上就没有这一路诊断而已。
+        End Try
+    End Sub
+
+    ''' <summary>跑在内核的解码/呈现线程上：绝不碰任何 Control 成员，异常必须在这里吞干净
+    ''' ——从这里逃出去就是终止进程（FFF.Player.Api.h:492-494）。</summary>
+    Private Sub 收内核日志(上下文 As IntPtr, 行UTF8 As IntPtr)
+        Try
+            Dim 文本 = Marshal.PtrToStringUTF8(行UTF8)
+            If String.IsNullOrEmpty(文本) Then Return
+            Dim 行 = $"[{DateTime.Now:HH:mm:ss}] {文本}" & vbCrLf
+            Dim 字节数 = System.Text.Encoding.UTF8.GetByteCount(行)
+            SyncLock 内核日志锁
+                Dim 路径 = IO.Path.Combine(程序目录, "kernel.log")
+                If 内核日志字节 < 0L Then
+                    Try
+                        内核日志字节 = If(IO.File.Exists(路径), New IO.FileInfo(路径).Length, 0L)
+                    Catch
+                        内核日志字节 = 0L
+                    End Try
+                End If
+                If 内核日志字节 + 字节数 > 内核日志上限字节 Then
+                    Try
+                        Dim 历史 = 路径 & ".1"
+                        If IO.File.Exists(历史) Then IO.File.Delete(历史)
+                        IO.File.Move(路径, 历史)
+                    Catch
+                    End Try
+                    内核日志字节 = 0L
+                End If
+                IO.File.AppendAllText(路径, 行, System.Text.Encoding.UTF8)
+                内核日志字节 += 字节数
+            End SyncLock
+        Catch
+            ' 日志失败必须安静。
+        End Try
+    End Sub
 
     ' DEPRECATED: the private color-extension module no longer exists, so this
     ' callback is never invoked. Retained to mirror the native ABI.
@@ -909,6 +983,14 @@ Friend Module 播放器原生接口
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_Create(ByRef 配置 As 原生播放器配置, ByRef 播放器 As IntPtr) As 原生播放器结果
     End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_ConfigurePlaybackPerformance(播放器 As 播放器原生句柄,
+        解码适配器索引 As Integer, 视频缓冲区策略 As UInteger, 音频缓冲区策略 As UInteger) As 原生播放器结果
+    End Function
+
+
+    ''' <summary>内核是否提供 ASR 音频 tap（旧内核缺席 → AI 字幕静默降级）。</summary>
+
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_Open(播放器 As 播放器原生句柄, 路径UTF8 As IntPtr) As 原生播放器结果
     End Function

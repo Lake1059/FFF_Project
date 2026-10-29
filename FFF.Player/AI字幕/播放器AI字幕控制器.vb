@@ -54,16 +54,15 @@ Friend NotInheritable Class 播放器AI字幕控制器
     Private 上次图层状态时刻 As DateTime = DateTime.MinValue
     ' 当前管道是用哪套设备选项起起来的。播放中改设置时，管道会因为"已在运行"直接
     ' 返回成功，必须先比对这两项决定是否重启（否则改了后端照样跑旧的）。
-    Private 已启动后端 As String = Ai字幕后端.自动
-    Private 已启动序号 As Integer = -1
+    Private 已启动后端 As String = Ai字幕推理档.后端自动
     ' 语言也是启动期参数（worker 只在 --language 里拿到一次），中途改必须重启，
     ' 否则用户改了"字幕语言"却发现输出一点没变。
     Private 已启动语言 As String = Ai字幕语言.自动
     ' 模型档同理：换档就是换权重文件，只在启动期生效。
     Private 已启动模型档 As String = String.Empty
-    ' 用户附加参数（设置页高级框原文）同理：改内容就要重启 worker 才会进命令行。
-    Private 已启动附加参数 As String = String.Empty
-    Private 已启动层数 As Integer = -1
+    ' 线程数同样是启动期参数（worker 只在进程启动时拿一次 --threads）。初值 -1 与
+    ' 任何合法值都不同，但首次启动时 管道 IsNot Nothing 为假，不会误判成"变过"。
+    Private 已启动线程 As Integer = -1
     ' 日志滚动：-1 = 还没量过现有文件长度（首次写时取实际大小，这样跨进程追加也准）。
     Private Const 日志上限字节 As Long = 2L * 1024L * 1024L
     Private Shared 日志字节 As Long = -1L
@@ -133,12 +132,13 @@ Friend NotInheritable Class 播放器AI字幕控制器
         ' 管道还活着时 启动() 会直接返回"已在运行"，所以换设备（或换包、换字幕语言）
         ' 必须显式先停：否则用户改了设置，跑着的还是旧二进制/旧后端/旧语言提示。
         Dim 新模型档 = If(设置对象.Ai字幕模型档, String.Empty).Trim()
+        Dim 新线程 = Math.Max(0, 设置对象.Ai字幕线程数)
+        ' 判据只剩四个：档（决定跑在哪）、语言、模型档、线程数。序号 / 层数 /
+        ' 精确设备这些中间量已经不存在了。
         If 管道 IsNot Nothing AndAlso (已启动后端 <> 新后端 OrElse
-                                       已启动序号 <> 设置对象.Ai字幕设备序号 OrElse
-                                       已启动层数 <> 设置对象.Ai字幕Gpu层数 OrElse
                                        已启动语言 <> 新语言 OrElse
                                        已启动模型档 <> 新模型档 OrElse
-                                       已启动附加参数 <> 设置对象.Ai字幕附加参数) Then
+                                       已启动线程 <> 新线程) Then
             停止()
         End If
         ' 驻留偏移是纯显示侧（状态机守卫判定用）：不触发重启，这里同步即可，
@@ -151,12 +151,13 @@ Friend NotInheritable Class 播放器AI字幕控制器
         End If
     End Sub
 
-    ''' <summary>这台机器上真正要用的后端：用户没选（auto）就跟随包清单的 device。</summary>
+    ''' <summary>这台机器上真正要用的推理后端：设备 + 后端两个下拉解析成一个标识
+    ''' （设备只过滤候选表，不参与传参）。auto 就是让 worker 自己按能力试 —— 本体
+    ''' 不再叠一层「包推荐后端」的推断，那层推断正是 2026-10-27 清掉的账。</summary>
     Private Shared Function 生效后端(包 As Ai字幕包配置) As String
-        If 包 Is Nothing Then Return Ai字幕后端.自动
-        Dim id = Ai字幕后端.规整(设置.实例对象.Ai字幕设备后端)
-        If id = Ai字幕后端.自动 Then id = Ai字幕后端.规整(包.推荐后端)
-        Return id
+        If 包 Is Nothing Then Return Ai字幕推理档.后端自动
+        Return Ai字幕推理档.解析(设置.实例对象.Ai字幕运行设备, 设置.实例对象.Ai字幕推理后端,
+                                  包.引擎)
     End Function
 
     ''' <summary>AI 字幕是否在工作（包有效且未停用）。</summary>
@@ -196,8 +197,7 @@ Friend NotInheritable Class 播放器AI字幕控制器
             Dim 句柄 = 句柄提供器()
             If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return
             Dim 值 As New 原生定时文字状态 With {
-                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字状态)()),
-                .版本 = 播放器会话.期望API版本}
+                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字状态)()), .版本 = 20UI}
             If 播放器原生接口.FFF3FP_GetTimedTextStatus(句柄, 值) <> 原生播放器结果.成功 Then Return
             Dim 统计 As New 原生音频Tap统计
             Dim 采集文本 = String.Empty
@@ -312,32 +312,19 @@ Friend NotInheritable Class 播放器AI字幕控制器
             End If
             状态机.重置()
             Dim 设置对象 = 设置.实例对象
-            ' 状态机的过期/跨时间线守卫余量按生效推理窗口等比缩放（默认 10s/15s
-            ' 是按 5s 窗口的 2×/3× 写死的）：窗口覆盖成 30s 时固定余量会在窗口
-            ' 后半段提前隐藏条目，每窗出现约 20s 空白。与 worker 实际拿到的
-            ' --window 同源同算法（覆盖>0 用覆盖，否则包清单），运行中改覆盖
-            ' 不重启 worker，余量也跟着保持与 worker 一致。
-            Dim 生效窗口秒 = If(设置对象.Ai字幕窗口秒覆盖 > 0,
-                                设置对象.Ai字幕窗口秒覆盖, 包.窗口秒)
-            状态机.陈旧余量100纳秒 = CLng(Math.Max(生效窗口秒, 0.5) * 2.0 * 10_000_000L)
-            状态机.未来余量100纳秒 = CLng(Math.Max(生效窗口秒, 0.5) * 3.0 * 10_000_000L)
             ' 生效后端 已经把"用户没选 → 跟随包清单 device → 还是空则 auto"处理完。
             Dim 后端 = 生效后端(包)
             Dim 语言 = Ai字幕语言.规整(设置对象.Ai字幕语言)
             Dim 新模型档 = If(设置对象.Ai字幕模型档, String.Empty).Trim()
-            Dim 新附加参数 = 设置对象.Ai字幕附加参数
             If Not 管道.启动(包, 设置对象.Ai字幕窗口秒覆盖, 设置对象.Ai字幕步长秒覆盖,
-                             后端, 设置对象.Ai字幕设备序号, 设置对象.Ai字幕Gpu层数,
-                             语言, 新模型档, 新附加参数) Then
+                             后端, 语言, 新模型档, 设置对象.Ai字幕线程数) Then
                 管道 = Nothing
                 操作提示("AI 字幕：worker 启动失败，详见日志")
             Else
                 已启动后端 = 后端
-                已启动序号 = 设置对象.Ai字幕设备序号
-                已启动层数 = 设置对象.Ai字幕Gpu层数
                 已启动语言 = 语言
                 已启动模型档 = 新模型档
-                已启动附加参数 = 新附加参数
+                已启动线程 = Math.Max(0, 设置对象.Ai字幕线程数)
             End If
         Catch ex As Exception
             记日志($"AI 字幕：启动路径异常 {ex.GetType().Name} {ex.Message}")

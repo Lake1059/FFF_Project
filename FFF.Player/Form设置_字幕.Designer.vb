@@ -88,7 +88,7 @@ Partial Class Form设置_字幕
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(10, 20, 20, 20)
+        ModernPanel1.Padding = New Padding(15, 20, 20, 20)
         ModernPanel1.Size = New Size(651, 486)
         ModernPanel1.TabIndex = 0
         ' 
@@ -100,10 +100,10 @@ Partial Class Form设置_字幕
         Panel7.Controls.Add(HtmlColorLabel8)
         Panel7.Controls.Add(MCB_尺寸缩放方式)
         Panel7.Dock = DockStyle.Top
-        Panel7.Location = New Point(10, 379)
+        Panel7.Location = New Point(15, 379)
         Panel7.Name = "Panel7"
         Panel7.Padding = New Padding(0, 10, 0, 0)
-        Panel7.Size = New Size(621, 42)
+        Panel7.Size = New Size(616, 42)
         Panel7.TabIndex = 25
         ' 
         ' HtmlColorLabel8
@@ -115,7 +115,7 @@ Partial Class Form设置_字幕
         HtmlColorLabel8.Margin = New Padding(2)
         HtmlColorLabel8.Name = "HtmlColorLabel8"
         HtmlColorLabel8.Padding = New Padding(10, 0, 0, 0)
-        HtmlColorLabel8.Size = New Size(421, 32)
+        HtmlColorLabel8.Size = New Size(416, 32)
         HtmlColorLabel8.TabIndex = 15
         HtmlColorLabel8.Text = "尺寸缩放方式"
         HtmlColorLabel8.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
@@ -160,10 +160,10 @@ Partial Class Form设置_字幕
         Panel6.Controls.Add(JustEmptyControl3)
         Panel6.Controls.Add(MB_设置其他位置字体样式)
         Panel6.Dock = DockStyle.Top
-        Panel6.Location = New Point(10, 337)
+        Panel6.Location = New Point(15, 337)
         Panel6.Name = "Panel6"
         Panel6.Padding = New Padding(0, 10, 0, 0)
-        Panel6.Size = New Size(621, 42)
+        Panel6.Size = New Size(616, 42)
         Panel6.TabIndex = 24
         ' 
         ' MB_重置其他位置样式
@@ -212,10 +212,10 @@ Partial Class Form设置_字幕
         Panel5.Controls.Add(HtmlColorLabel6)
         Panel5.Controls.Add(MCB_底部对齐方式)
         Panel5.Dock = DockStyle.Top
-        Panel5.Location = New Point(10, 295)
+        Panel5.Location = New Point(15, 295)
         Panel5.Name = "Panel5"
         Panel5.Padding = New Padding(0, 10, 0, 0)
-        Panel5.Size = New Size(621, 42)
+        Panel5.Size = New Size(616, 42)
         Panel5.TabIndex = 23
         ' 
         ' HtmlColorLabel6
@@ -227,7 +227,7 @@ Partial Class Form设置_字幕
         HtmlColorLabel6.Margin = New Padding(2)
         HtmlColorLabel6.Name = "HtmlColorLabel6"
         HtmlColorLabel6.Padding = New Padding(10, 0, 0, 0)
-        HtmlColorLabel6.Size = New Size(421, 32)
+        HtmlColorLabel6.Size = New Size(416, 32)
         HtmlColorLabel6.TabIndex = 15
         HtmlColorLabel6.Text = "底部对齐方式"
         HtmlColorLabel6.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
@@ -269,10 +269,10 @@ Partial Class Form设置_字幕
         Panel9.Controls.Add(HtmlColorLabel1)
         Panel9.Controls.Add(ETB_字幕不透明度)
         Panel9.Dock = DockStyle.Top
-        Panel9.Location = New Point(10, 253)
+        Panel9.Location = New Point(15, 253)
         Panel9.Name = "Panel9"
         Panel9.Padding = New Padding(0, 10, 0, 0)
-        Panel9.Size = New Size(621, 42)
+        Panel9.Size = New Size(616, 42)
         Panel9.TabIndex = 27
         ' 
         ' HtmlColorLabel1
@@ -284,7 +284,7 @@ Partial Class Form设置_字幕
         HtmlColorLabel1.Margin = New Padding(2)
         HtmlColorLabel1.Name = "HtmlColorLabel1"
         HtmlColorLabel1.Padding = New Padding(10, 0, 0, 0)
-        HtmlColorLabel1.Size = New Size(211, 32)
+        HtmlColorLabel1.Size = New Size(206, 32)
         HtmlColorLabel1.TabIndex = 15
         HtmlColorLabel1.Text = "不透明度"
         HtmlColorLabel1.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
@@ -320,10 +320,10 @@ Partial Class Form设置_字幕
         Panel4.Controls.Add(HtmlColorLabel5)
         Panel4.Controls.Add(ETB_字幕底部间距)
         Panel4.Dock = DockStyle.Top
-        Panel4.Location = New Point(10, 211)
+        Panel4.Location = New Point(15, 211)
         Panel4.Name = "Panel4"
         Panel4.Padding = New Padding(0, 10, 0, 0)
-        Panel4.Size = New Size(621, 42)
+        Panel4.Size = New Size(616, 42)
         Panel4.TabIndex = 22
         ' 
         ' HtmlColorLabel5
@@ -335,7 +335,7 @@ Partial Class Form设置_字幕
         HtmlColorLabel5.Margin = New Padding(2)
         HtmlColorLabel5.Name = "HtmlColorLabel5"
         HtmlColorLabel5.Padding = New Padding(10, 0, 0, 0)
-        HtmlColorLabel5.Size = New Size(211, 32)
+        HtmlColorLabel5.Size = New Size(206, 32)
         HtmlColorLabel5.TabIndex = 15
         HtmlColorLabel5.Text = "底部间距"
         HtmlColorLabel5.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
@@ -370,10 +370,10 @@ Partial Class Form设置_字幕
         Panel3.Controls.Add(HtmlColorLabel4)
         Panel3.Controls.Add(ETB_字幕行间距)
         Panel3.Dock = DockStyle.Top
-        Panel3.Location = New Point(10, 169)
+        Panel3.Location = New Point(15, 169)
         Panel3.Name = "Panel3"
         Panel3.Padding = New Padding(0, 10, 0, 0)
-        Panel3.Size = New Size(621, 42)
+        Panel3.Size = New Size(616, 42)
         Panel3.TabIndex = 21
         ' 
         ' HtmlColorLabel4
@@ -385,7 +385,7 @@ Partial Class Form设置_字幕
         HtmlColorLabel4.Margin = New Padding(2)
         HtmlColorLabel4.Name = "HtmlColorLabel4"
         HtmlColorLabel4.Padding = New Padding(10, 0, 0, 0)
-        HtmlColorLabel4.Size = New Size(211, 32)
+        HtmlColorLabel4.Size = New Size(206, 32)
         HtmlColorLabel4.TabIndex = 15
         HtmlColorLabel4.Text = "行间距"
         HtmlColorLabel4.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
@@ -422,10 +422,10 @@ Partial Class Form设置_字幕
         Panel8.Controls.Add(JustEmptyControl6)
         Panel8.Controls.Add(MCB_字幕描边样式)
         Panel8.Dock = DockStyle.Top
-        Panel8.Location = New Point(10, 127)
+        Panel8.Location = New Point(15, 127)
         Panel8.Name = "Panel8"
         Panel8.Padding = New Padding(0, 10, 0, 0)
-        Panel8.Size = New Size(621, 42)
+        Panel8.Size = New Size(616, 42)
         Panel8.TabIndex = 26
         ' 
         ' MCB_字幕阴影样式
@@ -509,10 +509,10 @@ Partial Class Form设置_字幕
         Panel2.Controls.Add(JustEmptyControl1)
         Panel2.Controls.Add(MB_设置第二行字体样式)
         Panel2.Dock = DockStyle.Top
-        Panel2.Location = New Point(10, 85)
+        Panel2.Location = New Point(15, 85)
         Panel2.Name = "Panel2"
         Panel2.Padding = New Padding(0, 10, 0, 0)
-        Panel2.Size = New Size(621, 42)
+        Panel2.Size = New Size(616, 42)
         Panel2.TabIndex = 20
         ' 
         ' MB_重置第二行样式和颜色
@@ -587,10 +587,10 @@ Partial Class Form设置_字幕
         Panel1.Controls.Add(JustEmptyControl2)
         Panel1.Controls.Add(MB_设置第一行字体样式)
         Panel1.Dock = DockStyle.Top
-        Panel1.Location = New Point(10, 43)
+        Panel1.Location = New Point(15, 43)
         Panel1.Name = "Panel1"
         Panel1.Padding = New Padding(0, 10, 0, 0)
-        Panel1.Size = New Size(621, 42)
+        Panel1.Size = New Size(616, 42)
         Panel1.TabIndex = 19
         ' 
         ' MB_重置第一行样式和颜色
@@ -660,10 +660,10 @@ Partial Class Form设置_字幕
         HtmlColorLabel2.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel2.Dock = DockStyle.Top
         HtmlColorLabel2.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        HtmlColorLabel2.Location = New Point(10, 20)
+        HtmlColorLabel2.Location = New Point(15, 20)
         HtmlColorLabel2.Margin = New Padding(2)
         HtmlColorLabel2.Name = "HtmlColorLabel2"
-        HtmlColorLabel2.Size = New Size(621, 23)
+        HtmlColorLabel2.Size = New Size(616, 23)
         HtmlColorLabel2.TabIndex = 18
         HtmlColorLabel2.Text = "<span style=""font-size:13; color:Silver"">SRT 字幕设置</span>   特效和位图字幕不支持调整"
         ' 

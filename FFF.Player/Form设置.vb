@@ -3,40 +3,54 @@ Public Class Form设置
     Private ReadOnly 个性化页面 As New Form设置_个性化()
     Private ReadOnly 支持者页面 As New Form设置_支持者()
     Private ReadOnly 界面与尺寸页面 As New Form设置_界面与尺寸()
+    Private ReadOnly 设备与性能页面 As New Form设置_设备与性能()
     Private ReadOnly HDR页面 As New Form设置_HDR()
     Private ReadOnly 字幕页面 As New Form设置_字幕()
     Private ReadOnly 弹幕页面 As New Form设置_弹幕()
     Private ReadOnly 音乐与歌词页面 As New Form设置_音乐与歌词()
     Private ReadOnly 文件关联页面 As New Form设置_文件关联()
     Private ReadOnly 视频超分辨率页面 As New Form设置_视频超分辨率()
+    ' AI 实时字幕页。放在注册表最末：导航项是 Designer 里按添加顺序硬绑的，
+    ' 中间插一项会把后面每一页都错位，而这一页的位置没有硬约束。
     Private ReadOnly AI字幕页面 As New Form设置_AI字幕()
+    Private ReadOnly 页面注册 As (页面 As Form, 初始化 As Action)()
+
+    Public Sub New()
+        InitializeComponent()
+        ' 导航、初始化、字体和背景共用这一份注册表；分隔项不占页面位置。
+        页面注册 = {
+            (关于页面, Nothing),
+            (个性化页面, AddressOf 个性化页面.初始化页面),
+            (支持者页面, AddressOf 支持者页面.初始化页面),
+            (界面与尺寸页面, AddressOf 界面与尺寸页面.初始化页面),
+            (设备与性能页面, AddressOf 设备与性能页面.初始化页面),
+            (HDR页面, AddressOf HDR页面.初始化页面),
+            (字幕页面, AddressOf 字幕页面.初始化页面),
+            (弹幕页面, AddressOf 弹幕页面.初始化页面),
+            (音乐与歌词页面, AddressOf 音乐与歌词页面.初始化页面),
+            (文件关联页面, AddressOf 文件关联页面.初始化页面),
+            (视频超分辨率页面, AddressOf 视频超分辨率页面.初始化页面),
+            (AI字幕页面, AddressOf AI字幕页面.初始化页面)
+        }
+        Dim 导航项 = ModernTabListControl1.Items.Where(Function(x) Not x.IsSeparator).ToArray()
+        If 导航项.Length <> 页面注册.Length Then Throw New InvalidOperationException("设置导航与页面注册数量不一致。")
+        For index = 0 To 页面注册.Length - 1
+            导航项(index).BoundControl = 页面注册(index).页面
+        Next
+    End Sub
 
     Private Sub Form设置_Load(sender As Object, e As EventArgs) Handles Me.Load
-        Form1.ThisIsYourWindow1.Attach(Me)
         Dim 主窗体 = Form1.当前主窗体
         If 主窗体 IsNot Nothing Then
+            主窗体.ThisIsYourWindow1.Attach(Me)
             Icon = 主窗体.Icon
         End If
-        ModernTabListControl1.Items(0).BoundControl = 关于页面
-        ModernTabListControl1.Items(1).BoundControl = 个性化页面
-        ModernTabListControl1.Items(2).BoundControl = 支持者页面
-        ModernTabListControl1.Items(4).BoundControl = 界面与尺寸页面
-        ModernTabListControl1.Items(5).BoundControl = HDR页面
-        ModernTabListControl1.Items(6).BoundControl = 字幕页面
-        ModernTabListControl1.Items(7).BoundControl = 弹幕页面
-        ModernTabListControl1.Items(8).BoundControl = 音乐与歌词页面
-        ModernTabListControl1.Items(9).BoundControl = 文件关联页面
-        ' 追加在末尾而不是插到 HDR 之后：Items 下标在 Designer 里是按添加顺序硬绑的，
-        ' 中间插入会把后面每一页都错位，而这一页的位置没有硬约束。
-        ModernTabListControl1.Items(10).BoundControl = 视频超分辨率页面
-        ' 同上：AI 字幕页继续追加（Items(11)，Designer 里 ModernTabPage12）。
-        ModernTabListControl1.Items(11).BoundControl = AI字幕页面
         If 主窗体 IsNot Nothing Then Location = Me.居中于(主窗体.Bounds)
         应用玻璃背景(SP_UnLock AndAlso 设置.实例对象.SP_毛玻璃模式 > 0)
         应用字体(设置.实例对象.字体)
     End Sub
 
-    ' 从别处（如 AI 实时字幕菜单的“设置…”）直达某一页时用：统一在 Shown 里应用，
+    ' 从别处（如 AI 实时字幕菜单的「设置…」）直达某一页时用：统一在显示后应用，
     ' 因为 SelectedIndex 必须在 Show 之后设置，否则会被 Form设置_Shown 的默认 0 盖掉。
     Private 待选中页索引 As Integer = -1
 
@@ -45,13 +59,6 @@ Public Class Form设置
         打开并定位()
     End Sub
 
-    ''' <summary>打开设置窗口并直接选中“AI 字幕”页。
-    ''' 按 Text 查找而不硬编码下标：Designer 里 Items 是按添加顺序硬绑的，
-    ''' 今后再插入新页会让它整体移位。</summary>
-    Friend Sub 显示Ai字幕页()
-        待选中页索引 = 查找页索引("AI 字幕")
-        打开并定位()
-    End Sub
 
     Private Sub 打开并定位()
         If Visible Then
@@ -63,9 +70,17 @@ Public Class Form设置
         End If
         If IsHandleCreated Then 初始化所有页面()
         Show()
-        ' Shown 只在窗体首次显示时触发一次，而本窗口“关闭”时走的是 Hide 不是
+        ' Shown 只在窗体首次显示时触发一次，而本窗口「关闭」时走的是 Hide 不是
         ' Close（见 Form设置_FormClosing），所以从第二次起必须在这里自己收尾。
         应用待选中页()
+    End Sub
+
+    ''' <summary>打开设置窗口并直接选中「AI 字幕」页。
+    ''' 按 Text 查找而不硬编码下标：Designer 里 Items 是按添加顺序硬绑的，
+    ''' 今后再插入新页会让它整体移位。</summary>
+    Friend Sub 显示Ai字幕页()
+        待选中页索引 = 查找页索引("AI 字幕")
+        显示窗口()
     End Sub
 
     Private Sub 应用待选中页()
@@ -91,23 +106,15 @@ Public Class Form设置
     End Sub
 
     Private Sub 初始化所有页面()
-        界面与尺寸页面.初始化页面()
-        HDR页面.初始化页面()
-        字幕页面.初始化页面()
-        弹幕页面.初始化页面()
-        音乐与歌词页面.初始化页面()
-        文件关联页面.初始化页面()
-        视频超分辨率页面.初始化页面()
-        AI字幕页面.初始化页面()
-        个性化页面.初始化页面()
-        支持者页面.初始化页面()
+        For Each 注册 In 页面注册
+            注册.初始化?.Invoke()
+        Next
     End Sub
 
     Friend Sub 应用字体(fontName As String)
         字体控制.设置控件字体(fontName, Me, Nothing, True)
-        For Each 页面 In {关于页面, 个性化页面, 支持者页面, 界面与尺寸页面,
-                         HDR页面, 字幕页面, 弹幕页面, 音乐与歌词页面, 文件关联页面,
-                         视频超分辨率页面, AI字幕页面}
+        For Each 注册 In 页面注册
+            Dim 页面 = 注册.页面
             Dim 排除 = If(ReferenceEquals(页面, 界面与尺寸页面),
                         New Control() {界面与尺寸页面.MCB_全局字体}, Nothing)
             字体控制.设置控件字体(fontName, 页面, 排除, True)
@@ -119,10 +126,8 @@ Public Class Form设置
         ModernTabListControl1.BackColor = 背景颜色
         ModernTabListControl1.TabStripBackColor = 背景颜色
         ModernTabListControl1.ContentBackColor = 背景颜色
-        For Each 页面 In {关于页面, 个性化页面, 支持者页面, 界面与尺寸页面,
-                         HDR页面, 字幕页面, 弹幕页面, 音乐与歌词页面, 文件关联页面,
-                         视频超分辨率页面, AI字幕页面}
-            Dim 根面板 = DirectCast(页面, Form).Controls.Cast(Of Control)().OfType(Of LakeUI.ModernPanel)().
+        For Each 注册 In 页面注册
+            Dim 根面板 = 注册.页面.Controls.Cast(Of Control)().OfType(Of LakeUI.ModernPanel)().
                 FirstOrDefault(Function(x) x.Dock = DockStyle.Fill)
             If 根面板 Is Nothing Then Continue For
             根面板.BackColor = 背景颜色
@@ -136,5 +141,12 @@ Public Class Form设置
             e.Cancel = True
             Hide()
         End If
+    End Sub
+
+    Private Sub Form设置_Disposed(sender As Object, e As EventArgs) Handles Me.Disposed
+        If 页面注册 Is Nothing Then Return
+        For Each 注册 In 页面注册
+            If Not 注册.页面.IsDisposed Then 注册.页面.Dispose()
+        Next
     End Sub
 End Class

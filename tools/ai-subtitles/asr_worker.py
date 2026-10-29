@@ -1,52 +1,151 @@
-# 3FP realtime AI-subtitle ASR worker (D7 route: llama-server over HTTP).
+# 3FP realtime AI-subtitle ASR worker —— sherpa-onnx 路线（进程内推理）。
 #
-# Protocol (frozen, see docs/ai-subtitles/IMPLEMENTATION_ANALYSIS.md section 6):
-#   stdin  frame: [u32 LE metaLen][metaLen bytes UTF-8 JSON][PCM bytes]
-#   stdout line : one JSON object per line
-#       {"type":"status","state":"loading|ready|error","detail":"..."}
+# 协议（冻结，见 docs/ai-subtitles/IMPLEMENTATION_ANALYSIS.md §6）：
+#   stdin  逐帧：[u32 LE metaLen][metaLen 字节 UTF-8 JSON][PCM 字节]
+#   stdout 逐行：一行一个 JSON 对象
+#       {"type":"status","state":"loading|ready|warning|error","detail":"...","fatal":bool}
 #       {"type":"final","generation":N,"start100ns":S,"end100ns":E,
 #        "text":"...","language":"Chinese","target":"Chinese","matched":true}
 #       {"type":"stats","rtf":0.31,"windows":42,"dropped":0}
-#   "target"/"matched" are only meaningful when --language is set; the host
-#   decides whether a mismatched window is dropped (worker always reports).
+#   "target"/"matched" 只在 --language 有值时有意义；worker 从不自己丢结果，
+#   丢不丢由宿主决定（那个开关不该逼 worker 重启）。
 #
-# The worker owns a llama-server child process, converts tap frames to
-# 16 kHz mono, windows them by MEDIA time (never wall clock), and posts each
-# window to /v1/audio/transcriptions. Playback never waits on it: frames are
-# dropped, inference is retried, and a dead server is restarted once.
+# 两条运行时，一份 worker：
+#   * onnx   —— sherpa-onnx 进程内推理，权重是官方 int8 三件套
+#                （DynamicQuantizeLinear -> MatMulInteger，W8A8）。
+#   * llama  —— llama.cpp 子进程，权重是 GGUF Q8_0（block-wise weight-only int8）。
+#
+# 为什么会有两条（2026-10-29 定，依据见交接文档 §26–§31）：
+#   官方 int8 那份用的是 QOperator 动态量化，激活量化成 uint8，而 CUDA 的
+#   MatMulInteger 只注册 int8 版、且要求权重 zero_point 是标量 —— 本模型是
+#   per-channel，于是整段静默回落 CPU（profiling 里 220 个 MatMulInteger 全在
+#   CPU EP）。改写成 s8s8 后能在 CUDA 上算，但在 x86-64 CPU 上慢 29 倍，
+#   统一不了。GGUF 走的是"只量化权重、反量化写进 kernel"，同一份 Qwen3-ASR
+#   权重的 int8 封装，CPU 上比 sherpa 快 2.2–2.6 倍（同一段 5 s 音频
+#   1.24 s vs 2.75 s），三家 GPU 用一份 Vulkan 运行时就能吃。
+#   ⇒ 默认走 llama；onnx 留给 NPU 与老设备（NPU 只能吃静态 QDQ，是另一条支线）。
+#
+# llama 那条腿的固有成本（不是失误，是进程边界本身）：端口分配、健康轮询、
+# 每个窗口落一次临时 wav、进程回收。上一版删掉这些是因为当时只有 sherpa 一条
+# 腿；现在两条腿并存，它们必须回来。两条硬约束写在 LlamaBackend 里。
+#
+# 保留下来的东西都是有独立价值的：窗口按**媒体时间**切（不是墙钟，暂停/跳转不
+# 会串窗）、对白优先下混、三条文本污染过滤、语言归一。它们的实测依据留在原处。
 
 import argparse
+import io
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
+import urllib.request
 import uuid
+import wave
 from pathlib import Path
 
 import numpy as np
-import requests
-import soundfile as sf
+
+# sherpa_onnx 是可选的安装项：缺了它这个 worker 一个设备也跑不了，但"缺依赖"
+# 必须走协议报 fatal（宿主能显示原因），而不是在 import 期甩一串 traceback 让
+# 用户对着白屏猜。所以这里兜住导入异常，由 SherpaBackend.load() 转成 RuntimeError。
+try:
+    import sherpa_onnx
+except Exception as _exc:  # noqa: BLE001 - 缺依赖要在协议里说清楚
+    sherpa_onnx = None
+    _SHERPA_IMPORT_ERROR = _exc
+else:
+    _SHERPA_IMPORT_ERROR = None
 
 TARGET_RATE = 16000
 
-# 单个转写请求的超时（秒）。原来写死 120：一个失控窗口能卡住两分钟，后面所有
-# 窗口排队，字幕永久滞后于画面（2026-10-25 实测失控窗 27s）。窗口上限 30s、
-# 正常转写远快于实时，30s 已经很宽。超时只丢这一窗，worker 继续跑。
-_INFER_TIMEOUT_S = 30.0
+# 模型目录的必备件。少一个都加载不了，与其让 sherpa_onnx 抛一句 C++ 断言，不如
+# 在 main() 里逐个点名报错 —— 用户看到"缺 encoder"才知道该补哪个文件。
+# 只钉主干名、不钉全名，理由见 _pick_onnx。
+_MODEL_STEMS = ("conv_frontend", "encoder", "decoder")
+
+
+def _pick_onnx(model_dir, stem):
+    """在模型目录里挑 <stem>.onnx；没有就接受唯一的 <stem>.<后缀>.onnx。
+
+    k2-fsa 的官方包是 encoder.int8.onnx / decoder.int8.onnx（量化标在文件名里），
+    换 int4 后又变成 encoder.int4.onnx。硬钉 encoder.onnx 等于要求每个打包的人
+    先重命名两个文件 —— 而"解压即用"正是便携包的全部意义。所以按主干名解析。
+    """
+    exact = model_dir / f"{stem}.onnx"
+    if exact.is_file():
+        return exact
+    cands = sorted(p for p in model_dir.glob(f"{stem}.*.onnx") if p.is_file())
+    if len(cands) == 1:
+        return cands[0]
+    if len(cands) > 1:
+        raise RuntimeError(
+            f"{stem} 有多个候选：{'、'.join(p.name for p in cands)}；"
+            f"一个模型目录里只能留一份")
+    raise RuntimeError(f"缺 {stem}.onnx（也接受 {stem}.int8.onnx 这类带后缀的）")
+
+
+# 引擎判定：模型目录里放的是什么容器，就决定了走哪条运行时。不靠清单里的
+# engine 字段做主判据 —— 文件本身是唯一真相，清单写错了也不该把包判死。
+# gguf 里嵌了 tokenizer 与词表，所以 llama 引擎不需要 tokenizer/ 目录。
+_ENGINE_LLAMA = "llama"
+_ENGINE_ONNX = "onnx"
+
+
+def _detect_engine(model_dir):
+    model_dir = Path(model_dir)
+    if any(model_dir.glob("*.gguf")):
+        return _ENGINE_LLAMA
+    return _ENGINE_ONNX
+
+
+def _llama_weights(model_dir):
+    """返回 (主权重, mmproj)。两者都在模型目录根的 *.gguf 里。"""
+    model_dir = Path(model_dir)
+    allg = sorted(p for p in model_dir.glob("*.gguf") if p.is_file())
+    mm = [p for p in allg if "mmproj" in p.name.lower()]
+    main = [p for p in allg if "mmproj" not in p.name.lower()]
+    if not main:
+        raise RuntimeError("模型目录里没有主权重 *.gguf")
+    if not mm:
+        raise RuntimeError("模型目录里没有 mmproj*.gguf（音频编码器，缺了只能转文字模型不认音频）")
+    # 分片权重（xxx-00001-of-00002.gguf）会命中多个，交给 llama.cpp 自己按第一片拼。
+    return main[0], mm[0]
+
+
+def _missing_items(model_dir, engine):
+    """清点缺什么。只报不抛，给 main() 拼一句人能看懂的错。"""
+    out = []
+    if engine == _ENGINE_LLAMA:
+        try:
+            _llama_weights(model_dir)
+        except RuntimeError as exc:
+            out.append(str(exc))
+        return out
+    for stem in _MODEL_STEMS:
+        try:
+            _pick_onnx(model_dir, stem)
+        except RuntimeError as exc:
+            out.append(str(exc))
+    if not (model_dir / "tokenizer").is_dir():
+        out.append("缺 tokenizer/ 目录（内含 vocab.json、merges.txt 等）")
+    return out
+
 
 # 失控输出的判据：去空白后长度 ≥ 该值，且最高频单字占比 ≥ 该比例 → 判为模型在
 # 空转（重复同一个字直到撞上限），丢弃不上屏。
 _DEGENERATE_MIN_LEN = 24
 _DEGENERATE_TOP_RATIO = 0.6
 
-# 指令泄漏的判据（2026-10-25 实测）：语音极稀疏时模型会把 llama-server 拼进
-# prompt 的 instruction 原样当内容吐出来（"Transcribe audio to text"），有时连
-# chat 模板的标记（<asr_text> / <|im_start|>）一起。它字面是"识别结果"，但和
-# 失控编字是同一类污染——糊到屏幕上比没字幕更像"功能坏了"。处置同失控：丢弃 + 提示一次。
+# 指令泄漏的判据（2026-10-25 实测）：语音极稀疏时模型会把拼进 prompt 的
+# instruction 原样当内容吐出来（"Transcribe audio to text"），有时连 chat 模板的
+# 标记（<asr_text> / <|im_start|>）一起。它字面是"识别结果"，但和失控编字是同一
+# 类污染——糊到屏幕上比没字幕更像"功能坏了"。处置同失控：丢弃 + 提示一次。
 #
 # 只判"短得像一句指令"的文本：长度超过下面的上限就放行，免得把真在讲 ASR 教程的
 # 长段对白误杀（那种场景里这句话只是长句里的一小段）。
@@ -71,17 +170,106 @@ _PROMPT_LEAK_MAX_LEN = 160
 _CJK_RE = re.compile(r"[\u3000-\u303f\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 _PROMPT_LEAK_MAX_CJK_RATIO = 0.2
 
+# 模型偶尔把语言标签留在正文里（"language Chinese<asr_text>正文"）。这是模型自己
+# 的输出习惯，与运行时无关，所以照旧拆；拆不出就整句当正文。
+_ASR_TEXT_RE = re.compile(r"^language\s+([A-Za-z\-]+)<asr_text>\s*(.*)$", re.S)
+
+# 自检的容忍度：字符级编辑距离 / max(1, 期望长度)。0.30 是"能听懂大意但个别字
+# 不同"的量级，足以区分"模型加载对了"和"权重/分词器配错了"（后者 CER 接近 1）。
+_SELFTEST_MAX_CER = 0.30
+
+# --------------------------------------------------------------------------
+# 设备表（唯一真值表）
+#
+# id -> (provider 字符串, 显示名)。provider 的合法取值由运行时决定：
+#   onnx  走 sherpa-onnx 的 EP 名（cpu / cuda，后者要 GPU 版 wheel）；
+#   llama 的 provider 是 --list-devices 现选的设备名（Vulkan0 / CUDA0 / cpu），
+#   加载时才定得下来，所以表里留空串，由 LlamaBackend.load() 填真值。
+# 新增设备 = 往这张表加一行 + 在 _CANDIDATES 里给它一个候选序列，别处不用改。
+# --------------------------------------------------------------------------
+_BACKENDS = {
+    "cpu": ("cpu", "CPU"),
+    "cuda": ("cuda", "NVIDIA CUDA"),
+    "gpu": ("", "GPU"),
+}
+
+# 请求 -> 候选序列（第一个是首选，后面是唯一的降档路径）。按引擎分开：
+#   onnx  —— 一份 int8 权重，能上加速器的只有 conv（§20/§26），cuda 是 EP 名；
+#            npu / ov-gpu / ov-cpu 走 OpenVINO 原生（OvBackend），三段各挂各的。
+#            npu 的降档落到 cpu（sherpa）：OpenVINO CPU 比 sherpa 慢 2.3 倍，
+#            兜底要挑快的，而不是"同族所以顺延"。
+#   llama —— 一份 GGUF，同一份二进制既跑 CPU 也跑 GPU，档位只剩"要不要上显卡"。
+#            cuda 是旧宿主会传的值，按 gpu 处理：它是别名，不是第二档。
+#            npu 这条腿没有实现（weight-only 量化进不了 NPU 的执行单元），
+#            NpuBackend.load() 必失败 → 落 cpu，notes 里说清"该装 NPU 包"。
+_CANDIDATES = {
+    _ENGINE_ONNX: {
+        "auto": ("cuda", "cpu"),
+        # gpu 不是 cuda 的别名：它按"这台机器能用的显卡"依次试 —— NVIDIA 走 CUDA EP，
+        # Intel 走 OpenVINO 原生（NPU 包里没有 CUDA 版 ORT，不这么排就会直接掉 CPU，
+        # 等于把用户点的"显卡"静默作废）。没有 openvino 的老 ONNX 包会在
+        # _capability 里跳过 ov-gpu，行为与从前一致。
+        "gpu": ("cuda", "ov-gpu", "cpu"),
+        "cuda": ("cuda", "cpu"),
+        "cpu": ("cpu",),
+        "ov-npu": ("ov-npu", "cpu"),
+        "ov-gpu": ("ov-gpu", "cpu"),
+        "ov-cpu": ("ov-cpu",),
+    },
+    _ENGINE_LLAMA: {
+        "auto": ("gpu", "cpu"),
+        "gpu": ("gpu", "cpu"),
+        "cuda": ("gpu", "cpu"),
+        "cpu": ("cpu",),
+        "ov-npu": ("ov-npu", "cpu"),
+    },
+}
+
+# 同一个意思、两种叫法。用户设置里存的值是跨包复用的：从 GGUF 包换回 ONNX 包时
+# 还留着 "gpu" 就直接掉回 auto，那等于把"我明确选了显卡"静默作废。
+# onnx 侧的 gpu 已经是正式键（会依次试 CUDA / OpenVINO），不再是 cuda 的别名。
+# npu -> ov-npu：宿主与 qwen3_ort.BACKENDS 用的都是 ov-npu，worker 内部统一到它，
+# 旧设置里存的裸 "npu" 靠这条别名接住（这条曾经断过：宿主传 ov-npu、worker 只认
+# npu，选 NPU 会静默落到 auto，连"降档"都不报）。
+_DEVICE_ALIAS = {
+    _ENGINE_ONNX: {"npu": "ov-npu"},
+    _ENGINE_LLAMA: {"npu": "ov-npu"},   # llama 侧 cuda 已经是正式键
+}
+
+
+def _normalize_request(request, engine):
+    """宿主传的是自由文本，拼错不该让字幕整个起不来：不认识就按 auto。
+
+    两个引擎对"显卡"的叫法不同（onnx 叫 cuda，llama 叫 gpu）。用户设置里存的值
+    是跨包复用的 —— 从 ONNX 包换到 GGUF 包时还留着 "cuda"，不认就直接掉回 auto，
+    等于把"我明确选了显卡"静默作废。所以这里补一层同义映射，映射不出去才 auto。
+    """
+    cand = _CANDIDATES[engine]
+    key = (request or "").strip().lower()
+    if key not in cand:
+        alias = _DEVICE_ALIAS.get(engine, {}).get(key)
+        if alias in cand:
+            return alias
+    return key if key in cand else "auto"
+
 # --------------------------------------------------------------------------
 # 语言指定（--language）
 #
-# llama-server 的 /v1/audio/transcriptions 把 language 字段**原样拼进 prompt**
-# （同一段音频 input_tokens 80 -> 85），因此：
-#   * 必须给模型认识的完整英文名。实测 language=Chinese 能把英文音频的标签
-#     改成 Chinese，而 language=zh / language=Klingon 被忽略（标签仍是 English）。
-#     宿主那边因此先做 ISO -> 英文名的映射，再把英文名传进来。
-#   * 它只是软提示，不是硬约束：中文音频 + language=English 仍输出
-#     language Chinese（模型确信时压不住）。要"只出所选语言"必须由宿主闸门丢弃。
-#   * 它不是翻译：指定与片源不同的语言只会改标签，正文仍是原语言。
+# 上一版（llama-server）把 language 字段**原样拼进 prompt**，所以必须给模型认识
+# 的完整英文名（实测 language=Chinese 能把英文音频的标签改成 Chinese，而
+# language=zh / language=Klingon 被忽略）。宿主因此先做 ISO -> 英文名映射，
+# 再把英文名传进来。现在两个引擎都不接受语言输入（sherpa 没这个口子，
+# llama-server 侧也没把 language 拼进 prompt），这份映射只剩两个用途：
+# 日志里打得好看，以及给宿主算 matched。契约照旧保留。
+#
+# 语言闸门能不能真判，取决于**最终选中的后端**（不是引擎）：
+#   - llama：输出恒带 "language X<asr_text>" 模板，X 就是模型自报的语言，
+#     所以 reported 基本都有值 ⇒ matched 有意义（实测粤语回 cantonese）。
+#   - OpenVINO（qwen3_ort.Engine，即 ov-npu / ov-gpu / ov-cpu）：同一个模板，
+#     同一个抠法，实测同样回 cantonese ⇒ 闸门有效。
+#   - sherpa（cpu / cuda）：result 只有 text，没有独立 language 字段，只能从正文
+#     残留的前缀里抠，多数时候是空串 ⇒ matched 恒 true，闸门退化为不拦。
+# 所以 ready 行的 lang-gate 由 backend.id 决定，见 main()。
 # --------------------------------------------------------------------------
 LANGUAGE_NAMES = {
     "zh": "Chinese", "en": "English", "yue": "Cantonese", "ja": "Japanese",
@@ -96,7 +284,7 @@ LANGUAGE_NAMES = {
 
 
 def normalize_language(value):
-    """ISO 代码或英文名 -> 模型认识的英文名；auto/空值返回 None（不传字段）。"""
+    """ISO 代码或英文名 -> 英文名；auto/空值返回 None（表示不指定）。"""
     if not value:
         return None
     v = value.strip()
@@ -108,7 +296,7 @@ def normalize_language(value):
     for name in LANGUAGE_NAMES.values():
         if name.lower() == low:
             return name
-    # 未知值原样透传：llama-server 会忽略它，但日志里留下用户到底写了什么。
+    # 未知值原样透传：日志里留下用户到底写了什么。
     return v
 
 
@@ -120,119 +308,9 @@ def same_language(reported, target):
     b = target.strip().lower()
     return a == b or a.startswith(b) or b.startswith(a)
 
-# The sandbox (and some corporate networks) export a system proxy that would
-# otherwise answer our own localhost calls itself (404 "File Not Found"):
-# every HTTP call to llama-server -- health polls and transcriptions alike --
-# must bypass it.
-_HTTP = requests.Session()
-_HTTP.trust_env = False
-
 
 def log(msg):
     print(f"[asr-worker] {msg}", file=sys.stderr, flush=True)
-
-
-# --------------------------------------------------------------------------
-# 推理后端 / 设备选择
-#
-# llama.cpp 的一个二进制里只编进了它被编译时勾选的那几个后端（本机的 CUDA 构建
-# --list-devices 只报 CUDA0），所以"换后端"本质是"换二进制"。至于这台机器上真
-# 有什么设备、设备名叫什么，一律问二进制自己（--list-devices），不在这里猜名字。
-# --------------------------------------------------------------------------
-
-# 各后端在 --list-devices 里可能打印的前缀。一个后端给多个别名是为了不吃版本差异
-# （ROCm 后端历史上既报过 ROCm 也报过 HIP），匹配时统一小写前缀比较。
-BACKEND_ALIASES = {
-    "cuda": ("cuda", "nvidia"),
-    "vulkan": ("vulkan",),
-    "rocm": ("rocm", "hip", "amd"),
-    "sycl": ("sycl", "intel"),
-    "cpu": ("cpu",),
-}
-
-_DEVICE_LINE = re.compile(r"^\s*([^\s:]+):\s*(.+?)\s*$")
-
-
-def list_devices(exe):
-    """问 llama-server 这台机器上有哪些设备。失败/超时返回空列表（不致命）。"""
-    try:
-        out = subprocess.run(
-            [str(exe), "--list-devices"],
-            capture_output=True, text=True, timeout=30,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except Exception as e:  # noqa: BLE001 - 探测失败只影响日志，不该拖垮启动
-        log(f"list-devices failed: {e}")
-        return []
-    devices = []
-    for line in (out.stdout or "").splitlines():
-        m = _DEVICE_LINE.match(line)
-        if m and not line.lower().startswith("available"):
-            devices.append((m.group(1), m.group(2)))
-    return devices
-
-
-def _is_cpu_device(name):
-    return name.lower().startswith(BACKEND_ALIASES["cpu"])
-
-
-def resolve_device(exe, backend, index):
-    """决定 --device 与 --n-gpu-layers。
-    返回 (device_arg or None, ngl, note)；note 为空表示一切按预期。"""
-    devices = list_devices(exe)
-    shown = ", ".join(n for n, _ in devices) or "(二进制没报出任何设备)"
-
-    if backend == "cpu":
-        # -ngl 0 只表示"层不 offload"，官方文档明确说 GPU 仍可能参与部分算子；
-        # 彻底关掉要用 --device none（本机二进制实测接受该值并正常加载模型）。
-        # 这样"选 CPU"才是真的不碰显卡，显存占用归零。
-        return "none", 0, f"设备=CPU（-ngl 0 --device none）；该二进制可用设备: {shown}"
-
-    if backend == "auto":
-        gpu = [n for n, _ in devices if not _is_cpu_device(n)]
-        if devices and not gpu:
-            return "none", 0, f"自动：这台机器上没报出 GPU 设备（{shown}），走 CPU"
-        return None, 999, f"自动：交给 llama-server 自选；可用设备: {shown}"
-
-    aliases = BACKEND_ALIASES.get(backend, (backend,))
-    hits = [(n, d) for n, d in devices
-            if n.lower().startswith(tuple(a.lower() for a in aliases))]
-    if not hits:
-        # 用户明确要了一个这个二进制没有的后端：说清楚再回落，绝不静默跑错设备。
-        return (None, 999,
-                f"WARNING 请求后端 {backend}，但这个 llama-server 只有: {shown}；"
-                f"已回落到它的默认设备")
-
-    if index >= 0 and index < len(hits):
-        name, desc = hits[index]
-    else:
-        name, desc = hits[0]
-        if index >= len(hits):
-            return (name, 999,
-                    f"WARNING 只有 {len(hits)} 块 {backend} 设备，序号 {index} 越界；"
-                    f"用第一块 {name} ({desc})")
-    return name, 999, f"设备={name} ({desc})"
-
-
-def auto_threads(backend):
-    """GPU 后端给少量线程做采样/回退即可；纯 CPU 时线程数直接决定速度。"""
-    n = os.cpu_count() or 8
-    if backend == "cpu":
-        return max(4, min(n, 16))
-    return max(4, min(n, 8))
-
-
-def free_port():
-    """Pick an unused localhost port.
-
-    The host no longer hands us a fixed port: two 3FP windows (or a dual-pane
-    comparison) each start their own worker, and a hardcoded 8199 meant the
-    second llama-server could never bind. Ask the OS instead -- it knows which
-    ports are actually free, and the window between close() and llama-server's
-    bind() is small enough to be worth not managing ourselves.
-    """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 def emit(obj):
@@ -240,294 +318,638 @@ def emit(obj):
     sys.stdout.flush()
 
 
-def pick_tmpdir(preferred=""):
-    """挑一个可写的临时目录，返回本 worker 独立的子目录（退出时整棵删掉）。
-
-    preferred 是宿主验证过可写的根目录（--tmp-dir）；为空或不可写时依次回退：
-    系统临时目录（tempfile 自己挑）→ worker 脚本旁边的 tmp → 当前目录的 tmp。
-    schtasks 派发环境里连用户 Temp 都可能整个不可用
-    （FileNotFoundError: No usable temporary directory found in [...]），
-    所以这条链必须存在——2026-10-23 完整跑就死在这一步，字幕全白。
-
-    每个 worker 用 mkdtemp 拿独立子目录：两个播放器窗口各起一份 worker 时
-    互不干扰，退出时也只删自己那棵（wav 名字还带 uuid，双保险）。
-    """
-    candidates = []
-    if preferred:
-        candidates.append(Path(preferred))
-    candidates.append(None)  # None = 系统默认
-    try:
-        candidates.append(Path(__file__).resolve().parent / "tmp")
-    except Exception:
-        pass
-    candidates.append(Path.cwd() / "tmp")
-    for root in candidates:
-        try:
-            if root is None:
-                return tempfile.mkdtemp(prefix="asr_worker_")
-            root.mkdir(parents=True, exist_ok=True)
-            return tempfile.mkdtemp(prefix="asr_worker_", dir=str(root))
-        except Exception as exc:
-            log(f"tmpdir candidate {root or 'system default'} unusable "
-                f"({type(exc).__name__}: {exc})")
-    raise RuntimeError("no writable temporary directory "
-                       "(tried --tmp-dir, system temp, script dir, cwd)")
+def read_exact(stream, n):
+    data = b""
+    while len(data) < n:
+        chunk = stream.read(n - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
 
 
-def _user_first(defaults, extra):
-    """固定默认参数里被用户 extra 点名（同名 flag）的项剔除，返回合并 token 列表。
-
-    为什么不依赖"llama-server 重复参数后者覆盖"：某些版本对重复 --ctx-size
-    直接报错，删掉自己的默认比赌覆盖语义稳。只认长选项 --flag / --flag=value。
-    extra 里非 -- 开头的 token（值）原样保留在末尾。
-    """
-    if not extra:
-        return list(defaults)
-    given = {t.split("=", 1)[0] for t in extra if t.startswith("--")}
-    out, i = [], 0
-    while i < len(defaults):
-        tok = defaults[i]
-        if tok in given:
-            i += 2 if i + 1 < len(defaults) and not defaults[i + 1].startswith("--") else 1
-            continue
-        out.append(tok)
-        i += 1
-    return out + list(extra)
+# --------------------------------------------------------------------------
+# 推理后端
+#
+# 三个方法就是全部接口：load() 失败一律抛 RuntimeError（带可读原因），选设备的
+# 代码只认这个约定，不认具体是哪家运行时。换实现（onnxruntime 直调、TensorRT、
+# OpenVINO）时改的是这里，主循环一行都不用动。
+# --------------------------------------------------------------------------
 
 
-class LlamaServer:
-    """Child llama-server process with health polling and one restart."""
+class InferenceBackend:
+    """唯一接口。"""
 
-    def __init__(self, exe, model, mmproj, port, device=None, ngl=999, threads=8,
-                 extra=None):
-        self.exe = exe
-        self.model = model
-        # mmproj 允许为 None：单文件模型（LLM 主权重自带音频编码器，或干脆不是
-        # 多模态模型）不传 --mmproj，由 llama-server 自己决定能不能加载。早年
-        # Qwen3-ASR 的「LLM + mmproj 双文件」形态只是其中一种，不是通则。
-        self.mmproj = mmproj
-        self.port = port
-        # device=None 表示不传 --device，交给 llama-server 按自己的后端默认挑。
-        self.device = device
-        self.ngl = ngl
+    def __init__(self, backend_id, provider, display):
+        self.id = backend_id
+        self.provider = provider
+        self.display = display
+
+    def load(self):
+        """加载模型。失败抛 RuntimeError（原因要能直接给用户看）。"""
+        raise NotImplementedError
+
+    def transcribe(self, samples):
+        """samples: float32 mono@16k -> (language, text)。"""
+        raise NotImplementedError
+
+    def close(self):
+        raise NotImplementedError
+
+
+class SherpaBackend(InferenceBackend):
+    """sherpa-onnx 的 Qwen3-ASR 离线识别器。cpu / cuda 共用，只差 provider。"""
+
+    def __init__(self, backend_id, provider, display, model_dir, threads):
+        super().__init__(backend_id, provider, display)
+        self.model_dir = Path(model_dir)
         self.threads = threads
-        self.proc = None
-        self.restarts_left = 1
-        # llama-server 自己报告的模型 id（/v1/models 探测，见 _probe_model_id）。
-        # 转写请求的 model 字段必须跟它对得上，而不同 gguf 的 id 来自各自
-        # 元数据、各不相同 —— 写死一个名字只对当初那个权重有效。
-        self.model_id = ""
-        # 扩展包/用户通过 --llama-arg 追加的 llama-server 参数（token 列表）。
-        # 固定默认值（ctx-size/temp/缓存策略）里同名的 flag 让位给它们，
-        # 见 _user_first —— 换模型时想调这些参数不必改 worker 源码。
-        self.extra = list(extra or [])
-        # llama-server stderr 的落盘句柄（见 start()）：DEVNULL 一扔，加载失败
-        # 的真实原因（缺 mmproj、架构不认、显存不足）就只剩一句 rc=1。
-        self._stderr_handle = None
+        self._rec = None
 
-    def _build_cmd(self):
-        """拼 llama-server 命令行。单独抽出是为了回归测试能不启进程地验整条
-        链（manifest llamaArgs -> 等号 argv -> argparse -> 这里）—— M1
-        （--llama-arg 拆分形式被 argparse 拒）当初就是单测绕过了这一层才漏的。"""
-        cmd = [
-            str(self.exe),
-            "-m", str(self.model),
-        ]
-        if self.mmproj:
-            cmd += ["--mmproj", str(self.mmproj)]
-        cmd += [
-            "--port", str(self.port),
-            "--host", "127.0.0.1",
-        ]
-        # 固定默认（各项的实测依据见旁边注释）。--device 也走这条流水线，
-        # 用户在 llamaArgs 里点名它时以用户为准。
-        defaults = []
-        if self.device:
-            defaults += ["--device", str(self.device)]
-        defaults += [
-            "--ctx-size", "4096",
-            # 0 = 全部留在内存里跑 CPU 后端；999 = 能 offload 的层全给设备。
-            "--n-gpu-layers", str(self.ngl),
-            "--threads", str(self.threads),
-            "--temp", "0.6",
-            # 输出长度上限。llama-server 默认 -1（无限）——这是失控的根源：实测
-            # （2026-10-25，CUDA0）一段没有语音的 20s 音频让模型重复生成 3808 个
-            # 「啊」，耗时 27s 并把 4096 的 ctx 吃满，字幕管道被这一窗堵死。
-            # 512 token 足够转写最大的 30s 窗口（中文约 150 字），最坏耗时从
-            # 27s 压到几秒。要更长请用自己的 --n-predict 覆盖（_user_first 让位）。
-            "--n-predict", "512",
-            # Every subtitle window is unique audio, so prefix reuse is pure
-            # waste: the default prompt cache (cache-ram 8192) retains ~12 MiB
-            # of KV per unique window on the host side (VRAM stays flat) --
-            # measured +2.1 GB over a 15-minute run (p14_continuous_q8_fixed.json).
-            #
-            # 2026-10-25 实测（RTX 4060 Laptop / CUDA0 / Q8_0，5s 窗、真实影片、
-            # 单实例）：旁边那个 --no-cache-idle-slots 曾经也在这里，它是性能
-            # 元凶——带着它，同一段 5s 音频转写耗时 7.6~30.5s（rtf 1.5~6.7），
-            # 长输出请求甚至到 171s（rtf 34）；去掉它（保留 --cache-ram 0）后
-            # 同一请求 0.30~0.55s（rtf 0.06~0.11），全素材 rtf 0.06~0.21。
-            # 服务端日志里 eval 速度在两个配置间差两个数量级（0.29 vs 108 tok/s）。
-            # 字幕是实时活儿，rtf > 1 就等于永远追不上画面，所以去掉它。
-            # 内存仍由 --cache-ram 0 兜着（实测带它的实例 1.18 GB，不带 2.74 GB）。
-            # 要更激进的省内存，用 llamaArgs 自己加回 --no-cache-idle-slots，
-            # 代价就是字幕开始滞后。
-            "--cache-ram", "0",
-        ]
-        cmd += _user_first(defaults, self.extra)
-        return cmd
+    def load(self):
+        if sherpa_onnx is None:
+            raise RuntimeError(f"sherpa_onnx 不可用：{_SHERPA_IMPORT_ERROR}")
+        md = self.model_dir
+        try:
+            conv = _pick_onnx(md, "conv_frontend")
+            enc = _pick_onnx(md, "encoder")
+            dec = _pick_onnx(md, "decoder")
+            # 参数名以本机 2.0.1 的签名为准（已实测），别照网上别的版本改。
+            self._rec = sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
+                conv_frontend=str(conv),
+                encoder=str(enc),
+                decoder=str(dec),
+                tokenizer=str(md / "tokenizer"),   # 目录，内含 vocab.json / merges.txt
+                num_threads=self.threads,
+                sample_rate=TARGET_RATE,
+                feature_dim=128,
+                provider=self.provider,
+                max_total_len=512,
+                # 单次生成的硬上限，兜的是和当年 --n-predict 512 同一件事：没有
+                # 上限时一段没语音的音频能让模型一直编到撞 ctx（实测 3808 个
+                # 「啊」、27s，把整条字幕管道堵死）。128 个 token 对 5s 窗口
+                # （中文 ≤ 40 字）绰绰有余。
+                max_new_tokens=128,
+            )
+        except Exception as exc:  # noqa: BLE001 - 统一转成可读原因
+            raise RuntimeError(f"加载 {self.display} 失败：{exc}") from exc
+        if self._rec is None:
+            raise RuntimeError(f"加载 {self.display} 失败：运行时返回空识别器")
 
-    def start(self, timeout_s=90.0):
-        cmd = self._build_cmd()
-        log("starting llama-server: " + " ".join(cmd))
-        # llama-server 的 stderr 是加载失败的唯一真相来源（找不到 mmproj、
-        # 音频架构不认、显存不足、参数写错……全只在它嘴里）。早年 DEVNULL 一扔，
-        # 用户侧只剩 "exited early rc=1" 干瞪眼；现在追加落盘到脚本旁的
-        # llama-server.log（只读安装退 cwd，再不行才丢），超 8 MB 从头覆盖。
-        # restart 路径（ensure() 会再进 start()）：旧句柄先关——不关就是泄漏
-        # 一个只增不减的 fd，外加一份没人再写的文件锁（Windows 上想删都难）。
-        旧句柄 = self._stderr_handle
-        self._stderr_handle = None
-        if 旧句柄 is not None:
+    def transcribe(self, samples):
+        if self._rec is None:
+            raise RuntimeError("识别器尚未加载")
+        # accept_waveform 要一维 float32 连续数组：传 list 或 float64 会被 pybind
+        # 的 Sequence[SupportsFloat] 逐个转换，几万个元素慢一个量级；dtype 不对还
+        # 可能静默截断。窗口本身已经是 float32，这里的拷贝主要防的是切片不连续。
+        mono = np.ascontiguousarray(samples, dtype=np.float32).reshape(-1)
+        stream = self._rec.create_stream()
+        stream.accept_waveform(TARGET_RATE, mono)
+        self._rec.decode_stream(stream)
+        raw = (stream.result.text or "").strip()
+        m = _ASR_TEXT_RE.match(raw)
+        if m:
+            return m.group(1).lower(), m.group(2).strip()
+        return "", raw
+
+    def close(self):
+        # 识别器没有显式释放接口，丢掉引用等 GC 归还 onnxruntime 的 session。
+        self._rec = None
+
+
+# --------------------------------------------------------------------------
+# llama.cpp 后端（GGUF Q8_0）
+#
+# 两条硬约束，违反任意一条都表现为"起了但永远没结果"，而不是报错：
+#   1. 子进程 stdout/stderr 必须重定向到文件。worker 的 stdout 是长度前缀 +
+#      JSON 行协议，llama.cpp 一上来就往 stdout 打模型加载日志，混进协议流里
+#      宿主那边就是解析崩溃。
+#   2. 子进程 stdin 必须 DEVNULL。否则父子抢同一个管道句柄，PCM 帧被
+#      llama-server 吃掉一部分，worker 侧表现为"窗口一直凑不齐"。
+#
+# 超时为什么要 180 s：Vulkan 冷启实测 4.6–5.2 s，但 CUDA 那份预构建缺
+# Ada/Blackwell 的 SASS（§29.3），5080 要靠 compute_90 的 PTX 现场 JIT，
+# 冷启到能服务要 58.9 s、首句再等 76 s。这个后端的任务是"别误判成挂了"，
+# 不是"快点挂"。
+# --------------------------------------------------------------------------
+
+_LLAMA_TEMP_PREFIX = "fff-asr-"
+_LLAMA_LOAD_TIMEOUT = 180.0
+_LLAMA_CTX = "4096"
+_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+# 弱 GPU：Intel 核显 / 软件实现。核显上 Vulkan 实测比 CPU 慢 2.5 倍
+# （rtf 0.458 vs 0.183），所以自动档要主动跳过它，别把"有设备"当成"有收益"。
+# Arc 是独显（Xe-HPG，有 XMX），不能连坐。
+_WEAK_GPU = re.compile(r"intel|uhd|iris|\bhd graphics\b|swiftshader|microsoft basic|llvmpipe",
+                       re.I)
+
+
+def _free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _http_json(port, path, timeout=10.0):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def _post_wav(port, wav_bytes, model_id, timeout=600.0):
+    """multipart 手拼字节。不为一个 POST 引入 requests —— 包里只有 numpy。"""
+    boundary = uuid.uuid4().hex
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n"
+            f"{model_id}\r\n").encode("utf-8")
+    body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+             f"filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n").encode("utf-8")
+    body += wav_bytes + b"\r\n" + f"--{boundary}--\r\n".encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/audio/transcriptions", data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def _wav_bytes(samples):
+    """float32 mono@16k -> 16 bit PCM 的 wav 字节。llama-server 只吃容器文件。"""
+    pcm = np.clip(np.asarray(samples, dtype=np.float32).reshape(-1), -1.0, 1.0)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(TARGET_RATE)
+        w.writeframes((pcm * 32767.0).astype("<i2").tobytes())
+    return buf.getvalue()
+
+
+class LlamaBackend(InferenceBackend):
+    """llama.cpp 的 llama-server 子进程（GGUF Q8_0）。cpu / gpu 共用一份二进制。"""
+
+    def __init__(self, backend_id, display, model_dir, runtime_dir, threads, want_gpu):
+        super().__init__(backend_id, "", display)
+        self.model_dir = Path(model_dir)
+        self.runtime_dir = Path(runtime_dir) if runtime_dir else None
+        self.threads = threads
+        self.want_gpu = want_gpu
+        self._proc = None
+        self._port = 0
+        self._model_id = ""
+        self._tmp = None
+        self._log = None
+        self._log_path = None
+
+    # ---- 启动前 -----------------------------------------------------------
+    def _exe(self):
+        if self.runtime_dir is None:
+            raise RuntimeError("清单里没有写 runtime 目录（llama 引擎需要 runtime/vulkan）")
+        exe = self.runtime_dir / "llama-server.exe"
+        if not exe.is_file():
+            raise RuntimeError(f"runtime 目录里没有 llama-server.exe：{self.runtime_dir}")
+        return exe
+
+    @staticmethod
+    def _list_devices(exe):
+        try:
+            r = subprocess.run([exe, "--list-devices"], capture_output=True, text=True,
+                               timeout=90, cwd=str(Path(exe).parent),
+                               creationflags=_NO_WINDOW)
+        except Exception:
+            return []
+        out = []
+        for ln in (r.stdout or "").splitlines():
+            m = re.match(r"\s*([A-Za-z]+\d+)\s*:\s*(.+?)\s*\((\d+)\s*MiB", ln)
+            if m:
+                out.append({"idx": m.group(1), "name": m.group(2),
+                            "vram_mb": int(m.group(3))})
+        return out
+
+    def _pick_device(self, exe):
+        """返回 (device_idx, 说明)。自动档跳过核显；没有可用的就回 CPU。"""
+        devs = self._list_devices(exe)
+        if not devs:
+            return "", "没有可用的 GPU 设备，退回 CPU"
+        strong = [d for d in devs if not (_WEAK_GPU.search(d["name"])
+                                          and "arc" not in d["name"].lower())]
+        if not strong:
+            names = "、".join(d["name"] for d in devs)
+            return "", f"只看到核显/软件设备（{names}），退回 CPU（核显实测比 CPU 慢 2.5 倍）"
+        best = max(strong, key=lambda d: d["vram_mb"])
+        return best["idx"], f"{best['idx']} {best['name']}"
+
+    def _log_tail(self, limit=800):
+        if not self._log_path or not os.path.exists(self._log_path):
+            return ""
+        try:
+            with open(self._log_path, "rb") as f:
+                return f.read()[-limit:].decode("utf-8", "replace").strip()
+        except Exception:
+            return ""
+
+    # ---- 生命周期 ---------------------------------------------------------
+    def load(self):
+        exe = self._exe()
+        main, mmproj = _llama_weights(self.model_dir)
+
+        device, why = ("", "指定 CPU")
+        if self.want_gpu:
+            device, why = self._pick_device(exe)
+        log(f"llama: {why}")
+
+        self._port = _free_port()
+        # 临时目录不能无条件用系统 TEMP：实测 schtasks 派发的宿主子进程对 C:\Users\<user>\AppData\Local\Temp 真实写被拒（os.access 还骗真），tempfile 全候选失败报 "No usable temporary directory"。包根与宿主同盘部署、宿主能写日志就能写包根，故优先用包根，失败再退回系统 TEMP。
+        try:
+            self._tmp = tempfile.mkdtemp(prefix=_LLAMA_TEMP_PREFIX,
+                                         dir=str(self.model_dir.parent))
+        except OSError:
+            self._tmp = tempfile.mkdtemp(prefix=_LLAMA_TEMP_PREFIX)
+        self._log_path = os.path.join(self._tmp, "llama-server.log")
+        self._log = open(self._log_path, "wb")
+        cmd = [str(exe), "-m", str(main), "--mmproj", str(mmproj),
+               "--host", "127.0.0.1", "--port", str(self._port),
+               "--ctx-size", _LLAMA_CTX, "--threads", str(self.threads),
+               "--n-gpu-layers", "999" if device else "0",
+               # 贪心解码：温度 > 0 时中文会退化成复述指令
+               # （实测 --temp 0.6 输出 "Transcribe audio to text."）。
+               "--temp", "0", "--n-predict", "512", "--cache-ram", "0"]
+        if device:
+            cmd += ["--device", device]
+        log("llama 命令：" + " ".join(cmd[1:]))
+        try:
+            self._proc = subprocess.Popen(
+                cmd, cwd=str(exe.parent), stdin=subprocess.DEVNULL,
+                stdout=self._log, stderr=self._log, creationflags=_NO_WINDOW)
+        except Exception as exc:  # noqa: BLE001 - 起不来就是这一档不可用
+            self.close()
+            raise RuntimeError(f"启动 llama-server 失败：{exc}") from exc
+
+        self._wait_ready()
+        self.provider = device or "cpu"
+        self.display = "GPU（Vulkan）" if device else "CPU"
+
+    def _wait_ready(self):
+        t0 = time.time()
+        while time.time() - t0 < _LLAMA_LOAD_TIMEOUT:
+            if self._proc.poll() is not None:
+                raise RuntimeError(
+                    f"llama-server 启动即退出（rc={self._proc.returncode}）："
+                    f"{self._log_tail(400)}")
             try:
-                旧句柄.close()
-            except Exception:
-                pass
-        err = subprocess.DEVNULL
-        for 根 in (Path(__file__).resolve().parent, Path.cwd()):
-            try:
-                路径 = 根 / "llama-server.log"
-                if 路径.exists() and 路径.stat().st_size > 8 * 1024 * 1024:
-                    路径.unlink()
-                err = open(路径, "ab")
-            except Exception:
-                continue
-            self._stderr_handle = err
-            log(f"llama-server stderr -> {路径}")
-            break
-        else:
-            # 两处都不可写（只读安装 + cwd 也锁着）：明确说一声 stderr 丢了，
-            # 别让排障的人以为压根没打开过日志。
-            log("llama-server stderr discarded (no writable dir beside script or cwd)")
-        self.proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=err,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            if self.proc.poll() is not None:
-                raise RuntimeError(f"llama-server exited early rc={self.proc.returncode}")
-            try:
-                r = _HTTP.get(f"http://127.0.0.1:{self.port}/health", timeout=3)
-                if r.status_code == 200:
-                    log("llama-server ready")
-                    # 服务端说自己叫什么，之后的转写请求就用那个名字（见
-                    # _probe_model_id）：换任何 gguf 都不必改 worker。
-                    self.model_id = self._probe_model_id()
-                    log(f"api model id: {self.model_id}")
+                if _http_json(self._port, "/health", timeout=5).get("status") == "ok":
+                    self._model_id = _http_json(self._port, "/v1/models")["data"][0]["id"]
+                    log(f"llama-server 就绪，用时 {time.time() - t0:.1f}s")
                     return
-            except requests.RequestException:
-                pass
-            time.sleep(0.5)
-        raise RuntimeError("llama-server health timeout")
-
-    def _probe_model_id(self, fallback="qwen3-asr"):
-        """问 llama-server 它把自己叫什么，转写请求的 model 字段就用这个。
-
-        llama.cpp 的 OpenAI 兼容端点按模型 id 寻址，而 id 来自加载的 gguf
-        元数据 —— Qwen3-ASR 官方量化是 "qwen3-asr"，换任何别的权重都可能是
-        另一个字符串。写死名字只对第一个权重有效；这里让服务端自报身份，
-        同一个 worker 适配任意 gguf。
-
-        探测失败（端点不存在 / 超时 / 空列表 / 字段缺失）一律回落 fallback：
-        /v1/audio/transcriptions 的 model 字段在多数 llama-server 版本里并不
-        严格校验，回落值保持与既有扩展包的现有行为逐字节一致。
-        """
-        try:
-            r = _HTTP.get(f"http://127.0.0.1:{self.port}/v1/models", timeout=5)
-            if r.status_code == 200:
-                items = r.json().get("data") or []
-                if items and items[0].get("id"):
-                    return str(items[0]["id"])
-                log("model id probe: empty /v1/models list; using fallback")
-            else:
-                # 老版本 llama-server 没这个端点：与"探测成功拿到路径 id"在日志里
-                # 必须可区分，否则排障时看着同一行 "api model id:" 会误导。
-                log(f"model id probe: HTTP {r.status_code}; using fallback")
-        except Exception as exc:  # noqa: BLE001 - probe is best-effort
-            log(f"model id probe failed ({type(exc).__name__}: {exc}); using fallback")
-        return fallback
-
-    def warm_audio(self, seconds=0.5, tmpdir=None):
-        """用一小段静音替音频路径付掉一次性开销，别让第一个真窗口承担。
-
-        实测（CUDA + Q4_K_M，2026-10-23）：
-          * 刚量化出来的新权重**第一次**加载：首个音频请求 16.3 s（窗口只有 5 s），
-            第二个 1.3 s —— 大头是权重首次从磁盘搬进显存，预热消不掉；
-          * 同一份权重第二次启动（文件已在页缓存）：预热 0.77 s，随后 10 s 音频
-            1.50 s（rtf 0.150）、4.2 s 音频 0.59 s（rtf 0.140）。
-        所以这里付掉的是"音频图首次构建"那一层（约 0.7 s），顺带把
-        "第一句字幕比后面慢一截"的抖动压平。权重首次上传属于换档后的正常现象，
-        见 MODEL_TIERS.md。
-
-        tmpdir 传 main() 选好的目录；不传就自己回退选一个（绝不因此崩）。
-
-        返回 True/False。失败时它同时是一次**能力探测**：端点 404/模型不认音频
-        意味着这个 gguf 不是音频转写模型（单文件模型、或压根不是多模态模型），
-        main() 据此向宿主发一条 warning——用户看到的不是白屏+无解释，而是
-        ai-subtitles.log 里一行"该模型不提供音频转写端点"。
-        """
-        try:
-            t0 = time.perf_counter()
-            silence = np.zeros(int(TARGET_RATE * seconds), dtype=np.float32)
-            if not tmpdir:
-                tmpdir = pick_tmpdir("")
-            transcribe(self, silence, tmpdir, _HTTP, None)
-            log(f"audio path warmup {time.perf_counter() - t0:.1f}s")
-            return True
-        except Exception as exc:
-            log(f"audio path warmup skipped ({type(exc).__name__}: {exc})")
-            return False
-
-    def ensure(self):
-        """Restart once if the process died; raise if out of restarts."""
-        if self.proc is not None and self.proc.poll() is None:
-            return
-        if self.restarts_left <= 0:
-            raise RuntimeError("llama-server keeps dying")
-        self.restarts_left -= 1
-        log("llama-server died; restarting (last restart)")
-        self.start()
-
-    def stop(self):
-        # 句柄先收再管进程：start() 里 Popen 自己抛异常时（llama-server 路径
-        # 写错就是现实场景）self.proc 还是 None，老结构在这里早返回，句柄跟着
-        # start() 的栈一起泄漏——llama-server 每起一次漏一个 fd，直到 worker
-        # 退出才还。子进程有自己的 fd 副本，关父进程这份只是卫生。
-        句柄 = self._stderr_handle
-        self._stderr_handle = None
-        if 句柄 is not None:
-            try:
-                句柄.close()
             except Exception:
                 pass
-        proc = self.proc
-        self.proc = None
-        if proc is None:
-            return
-        if proc.poll() is None:
-            # terminate/kill 包 try：进程恰在窗口期退出时，老版本 Python 的
-            # terminate/kill 会抛 AccessRefused 竞态（新版本已内置保护，这里
-            # 只是兜底）——收尸失败绝不能把异常抛回调用方。
+            time.sleep(0.3)
+        raise RuntimeError(
+            f"llama-server 在 {_LLAMA_LOAD_TIMEOUT:.0f}s 内没有就绪：{self._log_tail(400)}")
+
+    def transcribe(self, samples):
+        if self._proc is None:
+            raise RuntimeError("llama-server 尚未启动")
+        if self._proc.poll() is not None:
+            raise RuntimeError(
+                f"llama-server 已退出（rc={self._proc.returncode}）：{self._log_tail(300)}")
+        try:
+            out = _post_wav(self._port, _wav_bytes(samples), self._model_id)
+        except Exception as exc:  # noqa: BLE001 - 这一窗失败，别拖垮整条管道
+            raise RuntimeError(f"转写请求失败：{exc}") from exc
+        raw = (out.get("text") or "").strip()
+        # 输出形如 "language Chinese<asr_text>正文"。模板必须剥掉 ——
+        # 原样上屏就是把 "language Chinese<asr_text>" 打进字幕。
+        # 没有模板时把整串交回去，交给上面的泄漏过滤判定，而不是在这里猜。
+        m = _ASR_TEXT_RE.match(raw)
+        if m:
+            return m.group(1).lower(), m.group(2).strip()
+        return "", raw
+
+    def close(self):
+        if self._proc is not None:
             try:
-                proc.terminate()
+                subprocess.run(["taskkill", "/PID", str(self._proc.pid), "/T", "/F"],
+                               capture_output=True, timeout=30, creationflags=_NO_WINDOW)
             except Exception:
-                pass
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
                 try:
-                    proc.kill()
+                    self._proc.kill()
                 except Exception:
                     pass
+            # 必须等进程真的退出。taskkill 是异步的：不等就删临时目录，
+            # Windows 上 log 文件还被子进程占着，rmtree 会静默失败，
+            # 于是每跑一次就在包根留一个 fff-asr-xxxx 空目录。
+            try:
+                self._proc.wait(timeout=10)
+            except Exception:
+                pass
+            self._proc = None
+        if self._log is not None:
+            try:
+                self._log.close()
+            except Exception:
+                pass
+            self._log = None
+        if self._tmp and os.path.isdir(self._tmp):
+            # 句柄释放有个几毫秒的滞后：重试三次，还不行就算了，别为清理日志
+            # 把正常的关闭流程搞成异常。
+            for _ in range(3):
+                try:
+                    shutil.rmtree(self._tmp)
+                    break
+                except OSError:
+                    time.sleep(0.15)
+            self._tmp = None
+
+
+# --------------------------------------------------------------------------
+# OpenVINO 原生后端（NPU / Intel GPU / Intel CPU）
+#
+# 为什么 NPU 只能走这条：encoder/decoder 是 QOperator 动态量化
+# （DynamicQuantizeLinear + MatMulInteger），GGUF 那条腿是 block-wise weight-only，
+# 数学上不等价，到不了 NPU；onnxruntime 的 OpenVINO EP 又和 2025.x/2026.x 报
+# Error 127（符号缺失），只有 openvino 原生的 read_model -> compile_model 通。
+#
+# 三段各挂各的设备这件事复用同目录的 qwen3_ort.py（**模型一个字节都不改**）：
+#   npu    : conv -> NPU，      int8 两段 -> CPU
+#   ov-gpu : conv -> Intel GPU，int8 两段 -> CPU
+#   ov-cpu : 三段都在 OpenVINO CPU
+# int8 两段必须留 CPU 不是保守，是实测：OpenVINO GPU 跑 encoder.int8 出 NaN 且
+# **不抛异常**，只有数值探针能挡；NPU 的 op 集比 GPU 更窄，更没有理由放上去。
+#
+# 与 sherpa 路线的取舍：sherpa 一个 recognizer 只吃一个 provider，做不到"conv 上
+# 加速器、int8 留 CPU"，而且它自带的是纯 CPU 版 onnxruntime。所以 NPU 包用这条，
+# 代价是 CPU 侧解码比 sherpa 慢（每 token 一次 session.run），换来的是真能用 NPU。
+# --------------------------------------------------------------------------
+
+_OV_TARGETS = {
+    "ov-npu": ("NPU", "NPU（Intel Core Ultra）"),
+    "ov-gpu": ("GPU", "Intel GPU（OpenVINO）"),
+    "ov-cpu": ("CPU", "CPU（OpenVINO）"),
+}
+
+
+class OvBackend(InferenceBackend):
+    """OpenVINO 原生三段推理。目标设备不存在时**明确失败**，不假装跑在加速器上。"""
+
+    def __init__(self, backend_id, model_dir, threads):
+        target, display = _OV_TARGETS[backend_id]
+        super().__init__(backend_id, target, display)
+        self.model_dir = str(model_dir)
+        self.threads = threads
+        self._engine = None
+        self._qv = None
+        self.stages = {}
+
+    def load(self):
+        try:
+            import qwen3_ort as qv
+        except Exception as exc:  # noqa: BLE001 - 缺包就是不能用，说清缺什么
+            raise RuntimeError(
+                f"NPU 包需要同目录的 qwen3_ort.py 与 openvino（{exc}）") from exc
+        self._qv = qv
+
+        try:
+            _, core = qv.openvino_core()
+            devices = list(core.available_devices)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"OpenVINO 不可用：{exc}") from exc
+
+        # 目标设备必须真的在枚举里。compile_model("NPU") 在没有 NPU 的机器上会抛，
+        # 但抛出来的是一串插件路径错误，不如在这里给出"本机有什么、缺什么"。
+        want = self.provider
+        have = [d for d in devices if d == want or d.startswith(want + ".")]
+        if not have:
+            raise RuntimeError(
+                f"本机没有 {want} 设备（OpenVINO 只看到 {'、'.join(devices) or '无'}）")
+
+        # NPU 编译器只吃"有上界"的形状，conv_frontend 的帧维是 INT64_MAX，直接编
+        # 会报 Upper bounds are not specified。给上界就能过（离线实测 NPU4000：
+        # 500 / 3000 / [1,1..3000] 三种都成功），而 reshape 只改内存元数据，
+        # onnx 文件一个字节不动。上界取 32 s：宿主窗口上限就是 30 s，留两成余量。
+        bounded = 3200 if self.provider.upper() == "NPU" else None
+        # 编译缓存：NPU 首次编译几十秒（实测离线 20 s，真机带编译器初始化更久），
+        # 第二次必须命中，否则每次开字幕都卡一次。只给 NPU 设，免得 OpenVINO
+        # 在 GPU 路径上多打一行 CACHE_DIR 警告。
+        if bounded:
+            cache = Path(__file__).resolve().parent / "runtime" / "npu-cache"
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                os.environ.setdefault("OV_CACHE_DIR", str(cache))
+            except OSError:
+                pass
+        try:
+            self._engine = qv.Engine(self.model_dir, device=self.id,
+                                     threads=self.threads,
+                                     conv_bounded_frames=bounded)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"OpenVINO 三段编译失败：{exc}") from exc
+
+        self.stages = {k: v["bound"]
+                       for k, v in self._engine.device_report().items()
+                       if isinstance(v, dict)}
+        # 只验上加速器的那一段：int8 两段本来就在 CPU，与参考同设备，比值恒 0，
+        # 白编译一遍 decoder.int8（720 MB）要几十秒。
+        accel = [n for n, b in (("conv", self._engine.conv_backend),
+                                ("encoder", self._engine.enc_backend),
+                                ("decoder", self._engine.dec_backend))
+                 if b.kind == "ov" and b.target != "CPU"]
+        if accel:
+            try:
+                rep = self._engine.verify(stages=accel)
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"数值门禁跑不起来：{exc}") from exc
+            bad = [n for n, r in rep.items() if not r["ok"]]
+            if bad:
+                detail = "，".join(
+                    f"{n} 偏差 {rep[n]['rel_err']}（上限 {rep[n]['limit']}）"
+                    f"{'/含 NaN' if rep[n]['has_nan'] else ''}" for n in bad)
+                raise RuntimeError(
+                    f"{self.provider} 上算错了：{detail}。这是「不报错但算错」的"
+                    f"那类假绿，拒绝继续（int8 段请留 CPU）")
+            log(f"{self.id} 数值门禁通过："
+                + "，".join(f"{n} {rep[n]['rel_err']}" for n in rep))
+
+    def transcribe(self, samples):
+        if self._engine is None:
+            raise RuntimeError("OvBackend 尚未加载")
+        # pad30=False 是实测出来的，不是省事：
+        #   pad30=True  390 audio token、rtf 1.81、文本「去香」
+        #   pad30=False  78 audio token、rtf 0.96、文本「喺香」，CER 0.029 vs 0.059
+        # 补到 30 s 的代价是 decoder 要多跑 5 倍 token，而尾部那点信息照样被 5 s
+        # 窗口切掉 —— 花的钱没买到字。宿主是滑动窗口，每窗本来就短，按真实长度算
+        # 才是对的。（qwen3_ort.py 的 CLI 默认 True，是给整段离线转写用的。）
+        r = self._engine.transcribe(np.ascontiguousarray(samples, dtype=np.float32),
+                                    pad30=False)
+        lang = (r.get("language") or "").strip().lower()
+        return lang, (r.get("text") or "").strip()
+
+    def close(self):
+        # OpenVINO 的 CompiledModel 没有显式释放接口，丢引用等 GC。
+        self._engine = None
+
+
+class NpuBackend(InferenceBackend):
+    """GGUF 包里没有 NPU 路径（block-wise weight-only 进不了 NPU 的执行单元）。
+
+    真正能跑 NPU 的后端是 OvBackend，它只在 NPU 包里（ONNX 三件套 + OpenVINO）。
+    这个类留着是为了在**默认包**里选中 NPU 时给出可执行的下一步，而不是笼统的
+    "设备不可用"。
+    """
+
+    def __init__(self):
+        super().__init__("ov-npu", "", "NPU")
+
+    def load(self):
+        raise RuntimeError(
+            "这个包是 GGUF 引擎，没有 NPU 路径；NPU 要装独立的 NPU 包"
+            "（ONNX 三件套 + OpenVINO）")
+
+    def transcribe(self, samples):
+        raise RuntimeError("NPU 后端不可用")
+
+    def close(self):
+        pass
+
+
+# sherpa-onnx 的 provider 是 pip 包形态决定的，不是运行时选项：
+#   纯 CPU 版 wheel 只带一个 17 MB 的 onnxruntime.dll；
+#   `sherpa-onnx==<版本>+cuda` 才额外带 onnxruntime_providers_cuda.dll。
+_CUDA_EP_DLL = "onnxruntime_providers_cuda.dll"
+_NV_DRIVER_DLL = "nvcuda.dll"
+
+# onnxruntime_providers_cuda.dll 的静态导入（从 PE 导入表读出，不是猜的）。
+# 缺任何一个都会让 LoadLibrary 失败，而 sherpa 只打一行日志就静默回落 CPU；
+# 金样本自检照样通过（CPU 算得对），所以必须逐项挡。实测本机只查前两项时，
+# 缺 cufft64_11.dll 就出现过"报 cuda、实跑 CPU、自检绿"的情况。
+_CUDA_RUNTIME_DLLS = (
+    "cublas64_12.dll",
+    "cublasLt64_12.dll",
+    "cudart64_12.dll",
+    "cudnn64_9.dll",
+    "cufft64_11.dll",
+)
+
+
+def _find_dll(name, pkg):
+    """按 Windows 的搜索顺序找运行库：包内 -> System32 -> PATH -> CUDA_PATH。"""
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    for d in (Path(pkg), Path(root) / "System32"):
+        if (d / name).exists():
+            return str(d / name)
+    for part in os.environ.get("PATH", "").split(os.pathsep):
+        if part and (Path(part) / name).exists():
+            return str(Path(part) / name)
+    cuda = os.environ.get("CUDA_PATH")
+    if cuda and (Path(cuda) / "bin" / name).exists():
+        return str(Path(cuda) / "bin" / name)
+    return ""
+
+
+def _has_nv_driver():
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    return (Path(root) / "System32" / _NV_DRIVER_DLL).exists()
+
+
+def _cuda_ready():
+    """cuda 档能不能真的用上，返回 (ok, 原因)。
+
+    **为什么必须静态查**：sherpa-onnx 在 provider 不可用时不抛异常，只打一行
+    C++ 日志然后照常返回。那句日志走 Windows 控制台句柄而不是 fd 2（Python
+    重定向实测抓到 0 字节），识别器对象也不暴露 provider。所以不提前挡，
+    就会出现"报 cuda、实跑 CPU、金样本还照样通过"——CPU 算得对，自检挡不住
+    降档。
+
+    三道检查对应 pip 包的形态与系统前提：
+      * 包内 lib/ 下有没有 onnxruntime_providers_cuda.dll —— 没有就是纯 CPU 版；
+      * 系统有没有 NVIDIA 驱动（System32 下的 nvcuda.dll）—— 有 CUDA 版 ORT 但没驱动
+        时 ORT 一样回落；
+      * 该 EP DLL 的全部静态依赖（cublas/cublasLt/cudart/cudnn/cufft 12.x）是否就位
+        —— LoadLibrary 少一个就整体失败，而 sherpa 只打一行日志。
+    两道都过之后仍可能因驱动/显卡算力过低回落，这点查不出来；调用方据此把
+    结论标成"静态确认"而不是"运行时确认"。
+    """
+    try:
+        import sherpa_onnx
+    except Exception as exc:  # noqa: BLE001 - 装不上就是不能用
+        return False, f"import sherpa_onnx 失败：{exc}"
+    pkg = Path(sherpa_onnx.__file__).parent
+    dlls = list(pkg.rglob("*.dll"))
+    names = {f.name.lower() for f in dlls}
+    if _CUDA_EP_DLL.lower() not in names:
+        cpu_ort = next((f.stat().st_size for f in dlls
+                        if f.name.lower() == "onnxruntime.dll"), 0)
+        return False, (
+            f"sherpa-onnx 是纯 CPU 版（包内无 {_CUDA_EP_DLL}，"
+            f"随包 onnxruntime.dll 仅 {cpu_ort / 1048576:.1f} MB）；"
+            f"要 CUDA 请装 sherpa-onnx==<版本>+cuda")
+    if not _has_nv_driver():
+        return False, (f"包内有 {_CUDA_EP_DLL} 但系统没有 NVIDIA 驱动"
+                       f"（System32 缺 {_NV_DRIVER_DLL}），跑不起来")
+    missing = [n for n in _CUDA_RUNTIME_DLLS if not _find_dll(n, pkg)]
+    if missing:
+        return False, (
+            f"包内有 {_CUDA_EP_DLL}，但缺 CUDA 12 运行库：{', '.join(missing)}；"
+            f"缺任意一个 ORT 都加载不了 CUDA EP（会静默回落 CPU）。"
+            f"pip install nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 "
+            f"nvidia-cuda-runtime-cu12，或装对应 CUDA 12 版本运行时")
+    return True, ""
+
+
+def _capability(backend_id, engine, runtime_dir):
+    """该档在当前环境能不能用。cpu 恒可用；npu / ov-* 在这里挡"包不完整"。
+
+    llama 的 gpu 档只静态确认「运行时在不在」——有没有显卡、是不是核显，由
+    LlamaBackend.load() 里 --list-devices 现查，查不到就退回 CPU（那是设计行为，
+    不是降档失败）。所以这里不重复判显卡，只挡"包不完整"。
+
+    OpenVINO 三档同理：这里只确认运行库和推理实现都在，具体设备枚举留给
+    OvBackend.load()——它拿得到 available_devices，能报出"本机有哪些、缺哪个"。
+    """
+    if engine == _ENGINE_LLAMA and backend_id == "gpu":
+        if not runtime_dir:
+            return False, "清单里没有 runtime 目录"
+        if not (Path(runtime_dir) / "llama-server.exe").is_file():
+            return False, f"runtime 目录里没有 llama-server.exe：{runtime_dir}"
+        return True, ""
+    if backend_id in _OV_TARGETS:
+        if engine != _ENGINE_ONNX:
+            # GGUF 包没有 OpenVINO 路径，这里放行让 NpuBackend.load() 去说
+            # "该装 NPU 包"——报"缺 qwen3_ort.py"会让用户以为是文件丢了。
+            return True, ""
+        try:
+            import openvino  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            return False, (f"没有 openvino（{exc}）；"
+                           f"NPU / Intel GPU 只有 OpenVINO 原生这条路")
+        if not Path(__file__).with_name("qwen3_ort.py").is_file():
+            return False, "worker 同级目录缺 qwen3_ort.py（三段 OpenVINO 推理实现）"
+        return True, ""
+    if backend_id == "cuda":
+        return _cuda_ready()
+    return True, ""
+
+def _provider_note(backend_id, engine):
+    """provider 值的确信程度，跟着 JSON 一起给宿主，别让人以为查过运行时。"""
+    if engine == _ENGINE_LLAMA and backend_id == "gpu":
+        return "provider 由 llama-server --list-devices 现选"
+    if backend_id in _OV_TARGETS:
+        return "provider 由 OpenVINO 编译后读 FULL_DEVICE_NAME 回读"
+    if backend_id == "cuda":
+        return "provider 静态确认，无运行时校验接口"
+    return "cpu 无需确认"
+
+def _make_backend(backend_id, engine, model_dir, runtime_dir, threads):
+    if backend_id == "ov-npu":
+        # onnx 引擎的 NPU 是真后端（OpenVINO），llama 引擎没有这条路。
+        if engine == _ENGINE_ONNX:
+            return OvBackend(backend_id, model_dir, threads)
+        return NpuBackend()
+    if backend_id in _OV_TARGETS:
+        return OvBackend(backend_id, model_dir, threads)
+    provider, display = _BACKENDS[backend_id]
+    if engine == _ENGINE_LLAMA:
+        return LlamaBackend(backend_id, display, model_dir, runtime_dir, threads,
+                            want_gpu=(backend_id == "gpu"))
+    return SherpaBackend(backend_id, provider, display, model_dir, threads)
 
 
 # --------------------------------------------------------------------------
@@ -584,6 +1006,24 @@ def _downmix(raw, channels, positions):
 
     keep = [c for ch, c in index.items() if ch != AV_LOW_FREQUENCY]
     return raw[:, keep or list(index.values())].mean(axis=1)
+
+
+def _resample_to_16k(mono, rate):
+    """任意采样率 -> 16 kHz。soxr 在时装（快且带抗混叠），否则 np.interp 退化。"""
+    if rate == TARGET_RATE or len(mono) == 0:
+        return np.asarray(mono, dtype=np.float32)
+    try:
+        # 函数内 import：soxr 是可选加速项，装在不在都要能跑，且不该让本模块
+        # 的导入因为缺它而失败。
+        import soxr
+    except ImportError:
+        n = int(round(len(mono) * TARGET_RATE / rate))
+        if n <= 0:
+            return np.zeros(0, dtype=np.float32)
+        return np.interp(
+            np.linspace(0, len(mono) - 1, n),
+            np.arange(len(mono)), mono).astype(np.float32)
+    return np.asarray(soxr.resample(mono, rate, TARGET_RATE), dtype=np.float32)
 
 
 class WindowBuilder:
@@ -649,16 +1089,7 @@ class WindowBuilder:
         keep = int(round((last_end - first_pos) * rate / 1e7)) - skip
         mono = mono[skip:skip + max(0, keep)]
         # Resample to 16 kHz for the model.
-        if rate != self.target_rate:
-            try:
-                import soxr
-                mono = soxr.resample(mono, rate, self.target_rate)
-            except ImportError:
-                n = int(round(len(mono) * self.target_rate / rate))
-                mono = np.interp(
-                    np.linspace(0, len(mono) - 1, n),
-                    np.arange(len(mono)), mono).astype(np.float32)
-        return mono.astype(np.float32)
+        return _resample_to_16k(mono, rate)
 
     def poll(self, now_end100ns):
         """Return (start, end, samples) when a window is due, else None."""
@@ -710,17 +1141,17 @@ def looks_degenerate(text):
 def looks_like_prompt_leak(text):
     """模型是不是把 instruction 当内容输出了？
 
-    实测（2026-10-25，`zh-wiki` 语音稀疏段）：转写结果整句就是服务端拼的模板串
-    `Transcribe audio to text`。它不是识别结果，也不是噪声——上屏等于告诉用户
-    "模型在胡说"。判出来的窗直接丢掉，并和失控编字共用一次提示（见调用处）。
+    实测（2026-10-25，`zh-wiki` 语音稀疏段）：转写结果整句就是拼进 prompt 的
+    模板串 `Transcribe audio to text`。它不是识别结果，也不是噪声——上屏等于告诉
+    用户"模型在胡说"。判出来的窗直接丢掉，并和失控编字共用一次提示。
 
     两类命中：
       * 模板短语（大小写/标点不敏感），仅在文本短得像一句指令时才算——长段对白里
         偶尔出现 transcribe 一词不该被杀。
       * chat 模板标记残留（`asr_text` / `<|im_start|>` 等），一旦出现即泄漏，不看长度。
 
-    正常的 {"language X<asr_text> 正文"} 前缀已在 transcribe() 里被剥离，这里只看
-    剩下的正文，所以不会误伤带语言头的正常结果。
+    正常的 {"language X<asr_text> 正文"} 前缀已在 SherpaBackend.transcribe() 里被
+    剥离，这里只看剩下的正文，所以不会误伤带语言头的正常结果。
     """
     s = " ".join((text or "").split())
     if not s:
@@ -733,8 +1164,8 @@ def looks_like_prompt_leak(text):
     # 折完只剩那句短语，按残串判长度会把它误杀。
     if len(s) > _PROMPT_LEAK_MAX_LEN:
         return False
-    # 模板串是服务端拼的英文指令，整句就是它。中文（或日韩文）正文里夹一句
-    # 英文指令不是泄漏——讲 ASR 教程的长句正好长这样，别杀。
+    # 模板串是英文指令，整句就是它。中文（或日韩文）正文里夹一句英文指令不是
+    # 泄漏——讲 ASR 教程的长句正好长这样，别杀。
     cjk = len(_CJK_RE.findall(s))
     if cjk > _PROMPT_LEAK_MAX_CJK_RATIO * len(s):
         return False
@@ -742,215 +1173,277 @@ def looks_like_prompt_leak(text):
     return any(p in folded for p in _PROMPT_LEAK_PHRASES)
 
 
-def transcribe(server, samples, tmpdir, session, language=None):
-    """Write the window as 16k mono PCM16, POST it, return (language, text).
+# --------------------------------------------------------------------------
+# 金样本自检
+#
+# 为什么必须有：provider 写错、CUDA 版 onnxruntime 没装、tokenizer 目录指错，
+# 这三种情况的共同表现都是"加载成功、转写出来是乱码或空"。用户只会看到一句
+# "字幕全白"，而日志里一切正常。拿一段已知内容的音频跑一遍，用编辑距离卡
+# 0.30，就能在 ready 之前把"加载了但不对"的设备拦下来并降档。
+#
+# 样本是可选的：没有 selftest.wav / selftest.txt 就跳过（打一行日志），不阻塞
+# 正常使用 —— 自检是保险，不是前置条件。
+# --------------------------------------------------------------------------
 
-    language is the model-facing English name ("Chinese"), never an ISO code:
-    llama-server pastes the string straight into the prompt and the model only
-    recognises the names it was trained on. None = let the model decide.
+
+def _read_wav_mono(path):
+    """读 16-bit PCM wav -> (float32 mono [-1,1], rate)。
+
+    自检样本是我们自己给的，只需要支持 16-bit（录音笔/ffmpeg 的默认输出）。
+    多声道按等权平均：样本里没有 AVChannel 位置表，_downmix 无从下手。
     """
-    import re
-    path = Path(tmpdir) / f"win_{uuid.uuid4().hex}.wav"
+    with wave.open(str(path), "rb") as w:
+        channels = w.getnchannels()
+        width = w.getsampwidth()
+        rate = w.getframerate()
+        raw = w.readframes(w.getnframes())
+    if width != 2:
+        raise ValueError(f"只支持 16-bit PCM 样本，这份是 {width * 8}-bit")
+    data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    if channels > 1:
+        data = data.reshape(-1, channels).mean(axis=1)
+    return data, rate
+
+
+def _normalize_for_compare(text):
+    """比对前归一：去空白、去标点、转小写。
+
+    编辑距离对全角/半角标点、句末句号极其敏感，不归一的话同一句话能差出两三个
+    字符的"错"——那和"权重配错了"没法区分。用 Unicode 类别判，比列一张标点表
+    少漏（中文的「，。、」都是 P 类）。
+    """
+    out = []
+    for ch in str(text or "").lower():
+        if unicodedata.category(ch)[0] in ("P", "Z", "C"):
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _edit_distance(a, b):
+    """字符级 Levenshtein 距离（两行滚动，样本短，不必上库）。"""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1,          # 删除
+                           cur[j - 1] + 1,       # 插入
+                           prev[j - 1] + (ca != cb)))  # 替换
+        prev = cur
+    return prev[-1]
+
+
+def _run_selftest(backend, model_dir):
+    """跑金样本自检，返回 (ok, detail)。没有样本时 ok=True 并说明跳过了。"""
+    model_dir = Path(model_dir)
+    wav_path = model_dir / "selftest.wav"
+    txt_path = model_dir / "selftest.txt"
+    if not wav_path.exists() or not txt_path.exists():
+        log("未提供自检样本（model_dir 下缺 selftest.wav 或 selftest.txt），跳过自检")
+        return True, "未提供自检样本，跳过"
     try:
-        sf.write(str(path), samples, TARGET_RATE, subtype="PCM_16")
-        data = {"model": server.model_id or "qwen3-asr", "response_format": "json"}
-        if language:
-            data["language"] = language
-        with open(path, "rb") as fh:
-            r = session.post(
-                f"http://127.0.0.1:{server.port}/v1/audio/transcriptions",
-                files={"file": (path.name, fh, "audio/wav")},
-                data=data,
-                # 单窗超时。原来 120s：一窗卡住两分钟，后面的窗口全在排队，字幕
-                # 永久滞后于画面（实测失控窗就是 27s）。窗口最长 30s、正常转写
-                # 远快于实时，30s 已经很宽；超时只是丢这一窗，worker 继续跑。
-                timeout=_INFER_TIMEOUT_S)
-        if r.status_code != 200:
-            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
-        text = r.json().get("text", "")
-        m = re.match(r"^language\s+([A-Za-z\-]+)<asr_text>\s*(.*)$", text, re.S)
-        if m:
-            return m.group(1).lower(), m.group(2).strip()
-        return "", text.strip()
-    finally:
-        path.unlink(missing_ok=True)
+        audio, rate = _read_wav_mono(wav_path)
+        # utf-8-sig：Windows 记事本存的中文样本常带 BOM，不剥掉会多出一个字符。
+        expected = _normalize_for_compare(
+            txt_path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:  # noqa: BLE001 - 样本坏了不算设备坏了
+        log(f"自检样本不可用（{type(exc).__name__}: {exc}），跳过自检")
+        return True, f"自检样本不可用，跳过：{exc}"
+    if not audio.size:
+        return True, "自检样本是空音频，跳过"
+    audio = _resample_to_16k(audio, rate)
+    try:
+        _, text = backend.transcribe(audio)
+    except Exception as exc:  # noqa: BLE001 - 转写失败就是自检失败
+        return False, f"自检转写失败：{exc}"
+    got = _normalize_for_compare(text)
+    cer = _edit_distance(got, expected) / max(1, len(expected))
+    ok = cer <= _SELFTEST_MAX_CER
+    detail = (f"CER={cer:.2f}{'（通过）' if ok else '（超阈值）'} "
+              f"期望={expected[:24]!r} 实得={got[:24]!r}")
+    return ok, detail
 
 
-def read_exact(stream, n):
-    data = b""
-    while len(data) < n:
-        chunk = stream.read(n - len(data))
-        if not chunk:
-            return None
-        data += chunk
-    return data
+def _select_backend(request, engine, model_dir, runtime_dir, threads):
+    """按 _CANDIDATES[engine] 逐个试，第一个"加载成功且自检通过"的胜出。
+
+    这是**唯一**一处回落。CUDA 没装、卡不在、NPU 没实现，全都表现为 load() 抛
+    异常 —— 不需要为每种情况各写一条分支，也不该有第二层重试。
+    返回 (backend|None, 每一步的说明, 采用者的自检说明)。
+    """
+    notes = []
+    for backend_id in _CANDIDATES[engine][request]:
+        # 先在设备表外挡一道：cuda 的 provider 是包形态决定的，等 load() 报错
+        # 就晚了——它根本不报错，只打一行日志然后静默跑 CPU。
+        ready, why = _capability(backend_id, engine, runtime_dir)
+        if not ready:
+            log(f"{backend_id} 跳过：{why}")
+            notes.append(f"{backend_id} 跳过（{why}）")
+            continue
+        backend = _make_backend(backend_id, engine, model_dir, runtime_dir, threads)
+        try:
+            backend.load()
+        except Exception as exc:  # noqa: BLE001 - 设备不可用是常态，不是崩溃
+            log(f"{backend_id} 不可用：{exc}")
+            notes.append(f"{backend_id} 不可用（{exc}）")
+            backend.close()
+            continue
+        ok, detail = _run_selftest(backend, model_dir)
+        if ok:
+            log(f"{backend_id} 采用：{detail}")
+            return backend, notes, detail
+        log(f"{backend_id} 自检不通过，降档：{detail}")
+        notes.append(f"{backend_id} 自检不通过（{detail}）")
+        backend.close()
+    return None, notes, ""
 
 
 def build_arg_parser():
-    """worker 的 CLI 解析器。单独抽出供回归测试 import 真解析器（测试复刻一
-    行 --llama-arg 会随主体漂移，测的就不是真东西了——M1 漏测根因即此类）。"""
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", required=True)
-    ap.add_argument("--quant", default="Q8_0")
-    ap.add_argument("--mmproj-quant", default="Q8_0")
-    # 扩展包可以把两个权重文件的路径直接写进清单（--model / --mmproj），
-    # 优先于 --model-dir + --quant 的文件名拼接 —— 这样清单能自描述任意量化档。
-    ap.add_argument("--model", default="")
-    ap.add_argument("--mmproj", default="")
-    ap.add_argument("--llama-server", default="llama-server.exe")
-    # 0 = 自己挑一个空闲端口。宿主总是传 0：两个播放器窗口（或双路对比）各起
-    # 一份 worker，固定端口会让第二份 llama-server 绑不上。
-    ap.add_argument("--port", type=int, default=0)
+    # 设备只有一个旋钮：auto 先试 cuda 再退 cpu；cpu / cuda 仍保留降档（指定 cuda
+    # 但机器没 N 卡时不该直接罢工）；npu 是占位，见 NpuBackend。未知值一律当 auto。
+    ap.add_argument("--device", default="auto")
     ap.add_argument("--window", type=float, default=5.0)
     ap.add_argument("--step", type=float, default=5.0)
-    # 推理设备。--llama-servers 是 {后端: 二进制} 的 JSON：换后端在 llama.cpp
-    # 这边等于换二进制，所以由扩展包清单提供映射，本体只负责"用户选了哪一类"。
-    ap.add_argument("--device-backend", default="auto")
-    ap.add_argument("--device-index", type=int, default=-1)
-    ap.add_argument("--llama-servers", default="")
-    ap.add_argument("--threads", type=int, default=0)
-    # 卸载到显卡的层数（llama-server --n-gpu-layers）。默认 -1 = 不覆盖：
-    # auto/指定后端由 resolve_device 定（GPU 全卸 999，CPU 0）；>=0 时用户显式
-    # 指定 —— 显存吃紧的机器填小数（本模型 28 层，如 16 = 一半权重在显存），
-    # 0 = 一层都不卸（与选 CPU 不同：device 仍是 GPU，部分算子还在卡上）。
-    ap.add_argument("--ngl", type=int, default=-1)
-    # 字幕语言：auto = 不传 language 字段，让模型自判；其余按 ISO 代码或英文名
-    # 给（"zh" 或 "Chinese" 都收）。注意这只是软提示，不翻译、也不保证标签。
+    # 字幕语言：auto = 不指定；其余按 ISO 代码或英文名给（"zh" 或 "Chinese" 都收）。
+    # 注意该运行时不给语言标签，所以它只影响日志与 matched，不拦结果。
     ap.add_argument("--language", default="auto")
-    # 临时目录根：宿主把它亲眼验证过可写的目录传进来（扩展包目录或程序目录下的
-    # tmp）。不传或不可写时 worker 自己回退（见 pick_tmpdir）—— schtasks 派发等
-    # 环境下系统临时目录可能整个不可用，Python 会在 mkdtemp 直接
-    # FileNotFoundError 退出，字幕全白（2026-10-23 完整跑实测）。
-    ap.add_argument("--tmp-dir", default="")
-    # llama-server 附加参数逃生门：每个 token 一次（"--llama-arg=--ctx-size"
-    # "--llama-arg=8192"），扩展包清单的 llamaArgs 数组逐项映射到这里。等号
-    # 形式是硬约束：append action 不收以 -- 开头的值，拆成两个 token 传会被
-    # argparse 判 expected one argument 直接 exit 2。worker 的固定默认值
-    # （ctx-size/temp/缓存策略）遇同名 flag 自动让位（见 _user_first）——
-    # 换模型时调这些参数不必改 worker 源码。
-    ap.add_argument("--llama-arg", action="append", default=[], dest="llama_arg")
+    # 0 = 自动（min(6, 核数)）。CPU 上线程数直接决定速度；超过 6 在 P+E 混合
+    # 架构上会退化（见 main() 里的实测数字）。GPU 上够采样即可。
+    ap.add_argument("--threads", type=int, default=0)
+    # 诊断模式：只做"加载 + 自检"，打一行结果 JSON 就退出。宿主排障时用它区分
+    # "模型坏了"和"协议/管道坏了"。
+    ap.add_argument("--selftest", action="store_true", dest="selftest")
+    # 引擎：auto = 按模型目录里的容器自己判（有 *.gguf 就是 llama，否则 onnx）。
+    # 清单里写了 engine 时宿主会显式传进来；传错也不致命，因为模型文件是唯一真相，
+    # 这里只做一次交叉校验，不一致就按文件判并记一行日志。
+    ap.add_argument("--engine", default="auto")
+    # llama 引擎的原生运行时目录（含 llama-server.exe 与 ggml-*.dll）。
+    # 缺省取 模型目录的兄弟目录 runtime/vulkan，也就是便携包的标准布局。
+    ap.add_argument("--runtime-dir", default="")
     return ap
+
+
+def _resolve_runtime_dir(explicit, model_dir):
+    """返回绝对的运行时目录；显式值也绝对化（理由同 main 里的 model_dir）。"""
+    if explicit:
+        return str(Path(explicit).expanduser().resolve())
+    guess = Path(model_dir).parent / "runtime" / "vulkan"
+    return str(guess) if guess.is_dir() else ""
 
 
 def main():
     args = build_arg_parser().parse_args()
 
     sys.stdout.reconfigure(encoding="utf-8")
-    # stderr 同样必须钉死 UTF-8：宿主按 UTF-8 解码 stderr 管道（Ai字幕管道.vb
-    # 的 StandardErrorEncoding=UTF8），而默认 python 的 stderr 管道走 ANSI 代码
-    # 页——zh-CN 机落 GBK 进 ai-subtitles.log 全是 mojibake，cp1252 机更是在
-    # log() 写中文那行直接 UnicodeEncodeError，worker 起不来。errors=replace
-    # 保证任何环境都"最多样一个替换符"，绝不因编码崩掉诊断通道。
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     model_dir = Path(args.model_dir)
-    if args.model:
-        model = Path(args.model)
-        if args.mmproj:
-            mmproj = Path(args.mmproj)
-        else:
-            # 只给了主模型：在它旁边找投影（mmproj-*.gguf）；找不到就当单文件
-            # 模型处理（mmproj=None，不传 --mmproj）—— 由 llama-server 自己
-            # 决定能不能加载；加载失败的真实原因在它的 stderr，已落盘脚本旁
-            # llama-server.log（见 LlamaServer.start）。
-            cands = sorted(model.parent.glob("mmproj-*.gguf"))
-            mmproj = cands[0] if cands else None
-    else:
-        # 老路径（包没写 model 字段）：按约定文件名拼双文件，缺一个就是配错了，
-        # 保持严格报错——那是 Qwen3-ASR 双文件包的既定契约。
-        model = model_dir / f"Qwen3-ASR-0.6B-{args.quant}.gguf"
-        mmproj = model_dir / f"mmproj-Qwen3-ASR-0.6B-{args.mmproj_quant}.gguf"
-    if not model.exists():
-        emit({"type": "status", "state": "error", "detail": f"missing {model}"})
-        return 2
-    if mmproj is not None and not mmproj.exists():
-        emit({"type": "status", "state": "error", "detail": f"missing {mmproj}"})
+    # 🔴 必须绝对化：llama-server 是以 cwd=runtime 目录起的（为了让它找得到同目录的
+    # ggml-*.dll），子进程里的相对路径会被解析到 runtime/vulkan/model 去 —— 表现是
+    # 「failed to load model」而不是路径错误。宿主传的相对路径（便携包的 model）就
+    # 正好踩这个坑。绝对化之后 cwd 设成哪里都无所谓。
+    model_dir = model_dir.expanduser().resolve()
+    engine = _detect_engine(model_dir)
+    declared = (args.engine or "auto").strip().lower()
+    if declared in (_ENGINE_LLAMA, _ENGINE_ONNX) and declared != engine:
+        log(f"清单声明 engine={declared}，但模型目录里是 {engine} 的容器；按文件判")
+    missing = _missing_items(model_dir, engine)
+    if missing:
+        emit({"type": "status", "state": "error", "fatal": True,
+              "detail": f"模型目录 {model_dir} 有问题：{'；'.join(missing)}"})
         return 2
 
-    backend = (args.device_backend or "auto").strip().lower()
-    if backend != "auto" and backend not in BACKEND_ALIASES:
-        log(f"unknown backend {backend!r}; falling back to auto")
-        backend = "auto"
+    runtime_dir = _resolve_runtime_dir(args.runtime_dir, model_dir)
+    if engine == _ENGINE_LLAMA and not runtime_dir:
+        emit({"type": "status", "state": "error", "fatal": True,
+              "detail": "这是 GGUF 包，但找不到 llama 运行时：清单里要写 runtime 目录"
+                        "（便携包标准布局是 runtime/vulkan）"})
+        return 2
+    log(f"engine={engine} model={model_dir} runtime={runtime_dir or '(无)'}")
 
-    servers = {}
-    if args.llama_servers:
-        try:
-            servers = {str(k).strip().lower(): str(v)
-                       for k, v in json.loads(args.llama_servers).items() if v}
-        except Exception as e:  # noqa: BLE001 - 坏 JSON 不该让字幕整个停摆
-            log(f"bad --llama-servers json: {e}")
-    exe = servers.get(backend) or args.llama_server
-    threads = args.threads if args.threads > 0 else auto_threads(backend)
-    port = args.port if args.port > 0 else free_port()
+    request = _normalize_request(args.device, engine)
+    if request != (args.device or "").strip().lower():
+        # 设备值是宿主的自由文本，拼错不该让字幕整个起不来：当成 auto 继续跑，
+        # 只在日志里留下原值。
+        log(f"设备值 {args.device!r} 在 {engine} 引擎下不认识，按 {request} 处理")
 
-    builder = WindowBuilder(args.window, args.step)
-    session = _HTTP
+    # 上限 6 是实测卡出来的，不是拍的：这台 6P+8E 的机器上超过 6 个线程会有
+    # 线程被排到 E-core，慢核拖住同步点，rtf 从 0.91 一路涨到 1.05(8) / 1.64(10)
+    # / 4.70(20)。5 s 窗口 rtf 0.907 才勉强跟上实时，8 线程就 1.05 追不上了。
+    # 物理核拓扑 Python 拿不到，取保守上限比取满安全 —— 何况播放器还要解码视频。
+    threads = args.threads if args.threads > 0 else min(6, os.cpu_count() or 4)
     target_language = normalize_language(args.language)
     if target_language:
-        log(f"language hint: {target_language} (soft prompt, not a hard constraint)")
+        # 闸门强不强取决于**最终选中的后端**，不是引擎：llama 自报语言；
+        # OpenVINO 那条腿（qwen3_ort.Engine）也从 `language X<asr_text>` 模板里抠，
+        # 实测能回 cantonese；只有 sherpa 的 result 没有独立 language 字段。
+        # 选后端是下一步的事，所以这里只说目标，结论留给 ready 行。
+        log(f"language target: {target_language}")
 
-    emit({"type": "status", "state": "loading", "detail": "starting llama-server"})
-    device, ngl, note = resolve_device(exe, backend, args.device_index)
-    # 用户显式指定层数时覆盖自动决策（-1 = 不覆盖）。999 是"全部"的约定写法，
-    # llama-server 自己会按模型层数 clamp；填 0 在 GPU 后端下表示不卸层。
-    if args.ngl >= 0:
-        if args.ngl != ngl:
-            note += f"；用户指定层数 {args.ngl}（原自动值 {ngl}）"
-        ngl = args.ngl
-    log(note)
-    if note.startswith("WARNING"):
-        emit({"type": "status", "state": "warning", "detail": note})
     emit({"type": "status", "state": "loading",
-          "detail": f"backend={backend} device={device or 'default'} ngl={ngl} "
-                    f"threads={threads} port={port} exe={exe}"})
-    server = LlamaServer(exe, model, mmproj, port,
-                         device=device, ngl=ngl, threads=threads,
-                         extra=args.llama_arg)
-    # 临时目录必须在起 llama-server 之前定好：选不出来的话走协议报 fatal，
-    # 让宿主记一行日志，而不是一句 traceback 崩掉（2026-10-23 完整跑的教训）。
-    try:
-        tmpdir = pick_tmpdir(args.tmp_dir)
-    except Exception as e:  # noqa: BLE001 - report through the protocol
+          "detail": f"engine={engine} device={request} "
+                    f"候选={'、'.join(_CANDIDATES[engine][request])} "
+                    f"threads={threads}"})
+
+    backend, notes, selfcheck = _select_backend(request, engine, model_dir,
+                                                runtime_dir, threads)
+    if backend is None:
         emit({"type": "status", "state": "error", "fatal": True,
-              "detail": f"no writable temp dir: {e}"})
-        return 5
-    log(f"tmpdir: {tmpdir}")
+              "detail": "没有可用的推理设备：" + ("；".join(notes) or "无候选")})
+        return 3
+
+    if args.selftest:
+        # 自检模式把"最终跑在哪个设备、为什么没跑在首选设备、自检结论"打成一行：
+        # 排障时读这一行就够，不必再去翻 stderr。
+        emit({"type": "selftest", "ok": True, "device": backend.id,
+              "provider": backend.provider, "detail": selfcheck,
+              "provider_note": _provider_note(backend.id, engine),
+              "notes": notes})
+        backend.close()
+        return 0
+
+    # 请求的档没拿到（指定了 cuda / npu 却降了档）：说一句，别让用户以为自己
+    # 选错了。auto 不报 —— 它本来就是"有什么用什么"，落到 cpu 是预期行为，
+    # 每次启动都弹一条 warning 只会把真正的告警淹掉。只报一次：进程整个生命周期
+    # 里设备不会再变。
+    if request != "auto" and backend.id != _CANDIDATES[engine][request][0]:
+        emit({"type": "status", "state": "warning",
+              "detail": f"请求 {request}，实际用 {backend.id}"
+                        f"（{backend.display}）：" + "；".join(notes)})
+
+    # 语言闸门的强度按**后端**分，不是按引擎：sherpa 的 result 只有 text，报 on 等于
+    # 骗人；llama 与 OpenVINO（qwen3_ort.Engine）都从 `language X<asr_text>` 模板里
+    # 拿到自报语言，闸门真的生效。
+    自报语言 = engine == _ENGINE_LLAMA or backend.id in _OV_TARGETS
+    if not target_language:
+        lang_detail = "lang=auto"
+    elif 自报语言:
+        lang_detail = f"lang={target_language} lang-gate=on"
+    else:
+        lang_detail = f"lang={target_language} lang-gate=off"
+    emit({"type": "status", "state": "ready",
+          "detail": f"window={args.window}s step={args.step}s device={backend.id} "
+                    f"provider={backend.provider} threads={threads} {lang_detail} "
+                    f"[{_provider_note(backend.id, engine)}]"})
+    log(f"ready; reading frames from stdin（{selfcheck}）")
+
+    builder = WindowBuilder(args.window, args.step)
     windows = dropped = failures = 0
-    audio_seconds = 0.0
-    # 失控（模型重复同一个字）只报一次：它通常整段片子都在发生，每窗报一次会
-    # 把信息图层刷成刷屏。
-    已报失控 = False
+    # 三种"这一窗没内容"只提示一次：它们通常整段片子都在发生，每窗报一次会把
+    # 信息图层刷成刷屏。
+    已报污染 = False
     infer_seconds = []
     last_stats = time.time()
     generation = 0
-
-    try:
-        server.start()
-        # 先把音频路径预热掉：否则第一个真窗口要额外付一笔构图代价，用户看到的
-        # 第一句字幕会明显迟到（详见 warm_audio 的注释）。实测（2026-10-25，
-        # CUDA0）这笔代价是 57~60s 量级、且前 1~2 个请求都要付，不只是 warm
-        # 一次就完——宿主那边的首启提示按「约 1 分钟」写，别再写「十几秒」。
-        if not server.warm_audio(tmpdir=tmpdir):
-            # warm 失败 = 这个模型不认音频请求（端点 404 / 模型不认音频输入）。
-            # 不判 fatal——转写窗口失败本来就有既有降级路径，但必须让用户看见
-            # 原因，而不是对着一片白屏猜。
-            emit({"type": "status", "state": "warning",
-                  "detail": "音频端点探测失败：该模型可能不是音频转写模型"
-                            "（llama-server 能加载它，但 /v1/audio/transcriptions"
-                            " 不可用）；字幕会空白，详见 ai-subtitles.log"})
-    except Exception as e:  # noqa: BLE001 - report through the protocol
-        # 先收子进程再报错：health timeout（90s）那条路 llama-server 还活着，
-        # 不 stop 就是孤儿进程——继续占着显存/端口/内存，而用户只看到一行错误
-        # 还以为是自己的机器闹鬼（2026-10-25 审查实测确认的泄漏路径）。
-        server.stop()
-        emit({"type": "status", "state": "error", "detail": str(e)})
-        return 3
-
-    emit({"type": "status", "state": "ready",
-          "detail": f"window={args.window}s step={args.step}s" +
-                    (f" lang={target_language}" if target_language else " lang=auto")})
-    log("ready; reading frames from stdin")
-
     stdin = sys.stdin.buffer
+
     try:
         while True:
             head = read_exact(stdin, 4)
@@ -963,18 +1456,10 @@ def main():
                 break
             try:
                 meta = json.loads(meta_bytes.decode("utf-8"))
-                if not isinstance(meta, dict):
-                    raise ValueError("frame meta is not a JSON object")
-            except Exception as e:
-                # 长度前缀流无法重同步：元数据坏一帧，后面的 PCM 边界全不可信。
-                # 历史版本在这里试图"跳过本帧 PCM 继续"，但 except 分支里 meta
-                # 根本没绑定（首帧 NameError 直接崩，后续帧沿用上一帧的陈旧
-                # bytes 把流错位越搞越深）。唯一自洽的做法是放弃流、退场，
-                # 让宿主的存活检查去重启一个干净的 worker。
-                log(f"bad frame meta ({e}); stream is unsyncable, exiting")
-                emit({"type": "status", "state": "error", "fatal": True,
-                      "detail": f"bad frame meta: {e}"})
-                return 4
+            except Exception:
+                # Resync is impossible on a length-prefixed stream; drop PCM.
+                read_exact(stdin, meta.get("bytes", 0) if isinstance(meta, dict) else 0)
+                continue
             pcm = read_exact(stdin, meta.get("bytes", 0))
             if pcm is None:
                 break
@@ -999,7 +1484,8 @@ def main():
                     # mean(axis=1) hid this because an average does not care about
                     # the grouping; picking a specific channel does.
                     arr = np.frombuffer(pcm, dtype="<f4").reshape(channels, -1).T
-                else:  # packed float32 (AV_SAMPLE_FMT_FLT)
+                else:
+                    # 剩下的是打包（交错）float32，即 AV_SAMPLE_FMT_FLT。
                     arr = np.frombuffer(pcm, dtype="<f4").reshape(-1, channels)
             except ValueError:
                 dropped += 1
@@ -1016,11 +1502,9 @@ def main():
 
             t0 = time.perf_counter()
             try:
-                server.ensure()
-                language, text = transcribe(server, samples, tmpdir, session,
-                                            target_language)
+                language, text = backend.transcribe(samples)
                 failures = 0
-            except Exception as e:  # noqa: BLE001 - retry, never block playback
+            except Exception as e:  # noqa: BLE001 - 丢这一窗，绝不让播放等它
                 failures += 1
                 # fatal=False: this window failed, the worker keeps running and
                 # retries. The host must not treat it as "worker died" -- doing so
@@ -1034,6 +1518,7 @@ def main():
                     return 4
                 continue
             dt = time.perf_counter() - t0
+
             # 三种"这一窗没有有效内容"，一律丢弃不上屏（宁可不出字幕，也不要
             # 把一屏编造的字糊在画面上——那比没字幕更像"功能坏了"）：
             #   empty      —— 只有语言头、正文为空（静音段的常见形态）
@@ -1049,21 +1534,17 @@ def main():
                 原因 = ""
             if 原因:
                 dropped += 1
-                if not 已报失控:
-                    已报失控 = True
+                if not 已报污染:
+                    已报污染 = True
                     emit({"type": "status", "state": "warning",
                           "detail": "这段音频疑似没有语音或语种不受支持（模型在重复同一个"
                                     "字，或把指令当内容输出），已跳过；字幕不会凭空编字"})
                 log(f"{原因} dropped [{start100ns/1e7:.2f}s..{end100ns/1e7:.2f}s] "
                     f"len={len(text)} preview={text[:40]!r}")
                 continue
+
             infer_seconds.append(dt)
             windows += 1
-            # 累计的是每窗实际音频秒（len(samples)/TARGET_RATE），不是 windows×step：
-            # 预置里 window≠step 的档（灵敏 2/1、均衡 5/3、完整 8/4）用步长当分母
-            # 会把 rtf 系统性抬高 window/step 倍（灵敏档 2 倍虚高）。rtf 是文档
-            # 体系里唯一的实时性判据，还被宿主状态行原样上屏，必须按真实音频量计。
-            audio_seconds += len(samples) / TARGET_RATE
             # matched 只是"报给宿主看"：worker 从不自己丢结果（宿主可选择丢弃，
             # 而且那个开关不该逼 worker 重启）。
             matched = same_language(language, target_language)
@@ -1077,20 +1558,17 @@ def main():
                 f" rtf={dt/max(0.001, len(samples)/TARGET_RATE):.3f} :: {text[:60]}")
 
             if time.time() - last_stats >= 30.0:
-                rtf = (sum(infer_seconds) / max(0.001, audio_seconds)) if windows else 0.0
+                rtf = (sum(infer_seconds) /
+                       max(0.001, windows * args.step)) if windows else 0.0
                 emit({"type": "stats", "rtf": round(rtf, 3),
                       "windows": windows, "dropped": dropped})
                 last_stats = time.time()
     finally:
-        server.stop()
-        try:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        except Exception:
-            pass
+        backend.close()
+
     # Final stats carry the real cumulative rtf (this used to hardcode 0.0, which
     # made every shutdown look like "no inference ever ran").
-    final_rtf = (sum(infer_seconds) / max(0.001, audio_seconds)) if windows else 0.0
+    final_rtf = (sum(infer_seconds) / max(0.001, windows * args.step)) if windows else 0.0
     emit({"type": "stats", "rtf": round(final_rtf, 3),
           "windows": windows, "dropped": dropped})
     return 0

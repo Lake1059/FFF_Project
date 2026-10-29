@@ -31,6 +31,7 @@ Partial Class Form设置_HDR
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MCB_真实HDR峰值亮度选项 = New LakeUI.ModernComboBox()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
+        MCK_自动切换到真实HDR高亮模式 = New LakeUI.ModernCheckBox()
         ModernPanel1.SuspendLayout()
         Panel1.SuspendLayout()
         Panel2.SuspendLayout()
@@ -44,10 +45,11 @@ Partial Class Form设置_HDR
         ModernPanel1.Controls.Add(HtmlColorLabel2)
         ModernPanel1.Controls.Add(Panel2)
         ModernPanel1.Controls.Add(HtmlColorLabel1)
+        ModernPanel1.Controls.Add(MCK_自动切换到真实HDR高亮模式)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(10, 20, 20, 20)
+        ModernPanel1.Padding = New Padding(15, 20, 20, 20)
         ModernPanel1.Size = New Size(697, 494)
         ModernPanel1.TabIndex = 0
         ' 
@@ -58,10 +60,10 @@ Partial Class Form设置_HDR
         Panel1.BorderSize = 0
         Panel1.Controls.Add(ETB_HDR映射SDR亮度)
         Panel1.Dock = DockStyle.Top
-        Panel1.Location = New Point(10, 128)
+        Panel1.Location = New Point(15, 182)
         Panel1.Name = "Panel1"
         Panel1.Padding = New Padding(0, 10, 0, 0)
-        Panel1.Size = New Size(667, 42)
+        Panel1.Size = New Size(662, 42)
         Panel1.TabIndex = 19
         ' 
         ' ETB_HDR映射SDR亮度
@@ -76,7 +78,7 @@ Partial Class Form设置_HDR
         ETB_HDR映射SDR亮度.Maximum = 500R
         ETB_HDR映射SDR亮度.Minimum = 1R
         ETB_HDR映射SDR亮度.Name = "ETB_HDR映射SDR亮度"
-        ETB_HDR映射SDR亮度.Size = New Size(667, 32)
+        ETB_HDR映射SDR亮度.Size = New Size(662, 32)
         ETB_HDR映射SDR亮度.TabIndex = 30
         ETB_HDR映射SDR亮度.ThumbBorderWidth = 0
         ETB_HDR映射SDR亮度.ThumbColor = Color.OliveDrab
@@ -94,13 +96,13 @@ Partial Class Form设置_HDR
         HtmlColorLabel2.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel2.Dock = DockStyle.Top
         HtmlColorLabel2.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        HtmlColorLabel2.Location = New Point(10, 85)
+        HtmlColorLabel2.Location = New Point(15, 141)
         HtmlColorLabel2.Margin = New Padding(2)
         HtmlColorLabel2.Name = "HtmlColorLabel2"
         HtmlColorLabel2.Padding = New Padding(0, 20, 0, 0)
-        HtmlColorLabel2.Size = New Size(667, 43)
+        HtmlColorLabel2.Size = New Size(662, 41)
         HtmlColorLabel2.TabIndex = 18
-        HtmlColorLabel2.Text = "<span style=""font-size:13; color:Silver"">映射 SDR 参考亮度</span>   仅影响 HDR 片源的映射 SDR 模式"
+        HtmlColorLabel2.Text = "<span style=""font-size:12; color:Silver"">映射 SDR 参考亮度</span>   仅影响 HDR 片源的映射 SDR 模式"
         ' 
         ' Panel2
         ' 
@@ -111,10 +113,10 @@ Partial Class Form设置_HDR
         Panel2.Controls.Add(JustEmptyControl1)
         Panel2.Controls.Add(MCB_真实HDR峰值亮度选项)
         Panel2.Dock = DockStyle.Top
-        Panel2.Location = New Point(10, 43)
+        Panel2.Location = New Point(15, 99)
         Panel2.Name = "Panel2"
         Panel2.Padding = New Padding(0, 10, 0, 0)
-        Panel2.Size = New Size(667, 42)
+        Panel2.Size = New Size(662, 42)
         Panel2.TabIndex = 17
         ' 
         ' MTB_自定义真实HDR峰值亮度
@@ -185,12 +187,33 @@ Partial Class Form设置_HDR
         HtmlColorLabel1.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel1.Dock = DockStyle.Top
         HtmlColorLabel1.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        HtmlColorLabel1.Location = New Point(10, 20)
+        HtmlColorLabel1.Location = New Point(15, 78)
         HtmlColorLabel1.Margin = New Padding(2)
         HtmlColorLabel1.Name = "HtmlColorLabel1"
-        HtmlColorLabel1.Size = New Size(667, 23)
+        HtmlColorLabel1.Size = New Size(662, 21)
         HtmlColorLabel1.TabIndex = 16
-        HtmlColorLabel1.Text = "<span style=""font-size:13; color:Silver"">真实 HDR 峰值亮度</span>   仅影响 HDR 片源的真实 HDR 模式"
+        HtmlColorLabel1.Text = "<span style=""font-size:12; color:Silver"">真实 HDR 峰值亮度</span>   仅影响 HDR 片源的真实 HDR 模式"
+        ' 
+        ' MCK_自动切换到真实HDR高亮模式
+        ' 
+        MCK_自动切换到真实HDR高亮模式.AutoSize = True
+        MCK_自动切换到真实HDR高亮模式.BackColor = Color.Transparent
+        MCK_自动切换到真实HDR高亮模式.BoxBorderRadius = 5
+        MCK_自动切换到真实HDR高亮模式.BoxBorderSize = 0
+        MCK_自动切换到真实HDR高亮模式.BoxCheckedBackColor = Color.OliveDrab
+        MCK_自动切换到真实HDR高亮模式.BoxInnerPadding = 6
+        MCK_自动切换到真实HDR高亮模式.BoxSize = 24
+        MCK_自动切换到真实HDR高亮模式.BoxTextSpacing = 10
+        MCK_自动切换到真实HDR高亮模式.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCK_自动切换到真实HDR高亮模式.Checked = True
+        MCK_自动切换到真实HDR高亮模式.Dock = DockStyle.Top
+        MCK_自动切换到真实HDR高亮模式.Location = New Point(15, 20)
+        MCK_自动切换到真实HDR高亮模式.Name = "MCK_自动切换到真实HDR高亮模式"
+        MCK_自动切换到真实HDR高亮模式.Padding = New Padding(0, 0, 0, 20)
+        MCK_自动切换到真实HDR高亮模式.Size = New Size(662, 58)
+        MCK_自动切换到真实HDR高亮模式.SubText = "需要显式回报 HDR 支持的显示器"
+        MCK_自动切换到真实HDR高亮模式.TabIndex = 30
+        MCK_自动切换到真实HDR高亮模式.Text = "检测到 HDR 源自动切换到真实 HDR 高亮"
         ' 
         ' Form设置_HDR
         ' 
@@ -215,8 +238,9 @@ Partial Class Form设置_HDR
     Friend WithEvents MTB_自定义真实HDR峰值亮度 As LakeUI.ModernTextBox
     Friend WithEvents JustEmptyControl1 As LakeUI.JustEmptyControl
     Friend WithEvents MCB_真实HDR峰值亮度选项 As LakeUI.ModernComboBox
-    Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel2 As LakeUI.HtmlColorLabel
     Friend WithEvents ETB_HDR映射SDR亮度 As LakeUI.ExcellentTrackBar
+    Friend WithEvents MCK_自动切换到真实HDR高亮模式 As LakeUI.ModernCheckBox
+    Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
 End Class

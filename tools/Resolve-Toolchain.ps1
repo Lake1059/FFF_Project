@@ -270,9 +270,8 @@ function Assert-ProductFrameworkPair {
         [switch]$AllowMismatch
     )
 
-    # 两个产品是两条独立的发布命令，所以"同框架"不是任何一个工程的属性，而是
-    # 已经躺在输出目录里的那一对产物的属性。把每个产品解析出的框架记在旁边的
-    # 账上，后一个与之不一致就直接拒绝，而不是让用户自己发现。
+    # Record the full TFM, but compare the .NET runtime version: a Windows SDK
+    # target version affects API projections, not the shared .NET runtime version.
     $manifest = Join-Path $OutputDirectory ".product-frameworks.txt"
     $entries = @{}
     if (Test-Path -LiteralPath $manifest -PathType Leaf) {
@@ -286,8 +285,12 @@ function Assert-ProductFrameworkPair {
     foreach ($name in @($entries.Keys)) {
         if ($name -eq $Product) { continue }
         if ($entries[$name] -eq $Framework) { continue }
+        $otherMatch = [regex]::Match($entries[$name], '^(net\d+\.\d+)-windows(?:\d+(?:\.\d+)*)?$', 'IgnoreCase')
+        $currentMatch = [regex]::Match($Framework, '^(net\d+\.\d+)-windows(?:\d+(?:\.\d+)*)?$', 'IgnoreCase')
+        if ($otherMatch.Success -and $currentMatch.Success -and
+            $otherMatch.Groups[1].Value -eq $currentMatch.Groups[1].Value) { continue }
         $message = ("$name in $OutputDirectory was published for $($entries[$name]) but " +
-            "$Product resolves to $Framework. Re-publish both with the same -NetTFM, " +
+            "$Product resolves to $Framework. Re-publish both for the same .NET runtime version, " +
             "or pass -AllowFrameworkMismatch on purpose.")
         if (-not $AllowMismatch) { throw $message }
         Write-Warning $message

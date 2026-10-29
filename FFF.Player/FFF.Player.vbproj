@@ -4,7 +4,7 @@
   <PropertyGroup>
       <OutputType>WinExe</OutputType>
       <!-- TFM 就地定义：默认与上游一致（.NET 10）。切 .NET 11 用 -p:NetTFM=net11.0-windows10.0.26100.0 -->
-      <NetTFM Condition="'$(NetTFM)' == ''">net10.0-windows10.0.26100.0</NetTFM>
+      <NetTFM Condition="'$(NetTFM)' == ''">net10.0-windows</NetTFM>
       <TargetFramework>$(NetTFM)</TargetFramework>
       <!-- LakeUI 是外部商业兄弟仓，构建节奏独立，单独一个 TFM 参数 -->
       <LakeUITfm Condition="'$(LakeUITfm)' == ''">net10.0-windows10.0.17763.0</LakeUITfm>
@@ -19,15 +19,16 @@
       <!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
       <Authors>1059 Studio</Authors>
       <Company>1059 Studio</Company>
-      <AssemblyVersion>2026.10.23</AssemblyVersion>
-      <FileVersion>2026.10.23</FileVersion>
-      <Version>2026.10.23</Version>
+      <AssemblyVersion>2026.10.29</AssemblyVersion>
+      <FileVersion>2026.10.29</FileVersion>
+      <Version>2026.10.29</Version>
       <Title>FFF.Player</Title>
       <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
       <ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
       <PlatformTarget>x64</PlatformTarget>
       <Prefer32Bit>false</Prefer32Bit>
-      <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+      <SupportedOSPlatformVersion Condition="$(NetTFM.EndsWith('-windows'))">7.0</SupportedOSPlatformVersion>
+      <SupportedOSPlatformVersion Condition="!$(NetTFM.EndsWith('-windows'))">10.0.19041.0</SupportedOSPlatformVersion>
       <ApplicationIcon>ICO.ico</ApplicationIcon>
 
       <PlayerApiVersion>20</PlayerApiVersion>
@@ -253,6 +254,49 @@
       <PrivateColorExtension Include="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == 'FFF.DolbyVision.Test.dll'" />
     </ItemGroup>
     <Error Condition="'@(PrivateColorExtension)' != ''" Text="侵权护栏：旧商标私有 DLL FFF.DolbyVision.Test.dll 不得发布或打包；中性模块请使用 FFF.HDRdp.Test.dll。" />
+  </Target>
+
+  <!-- WinRT 投影配对护栏（2026-10-29）：
+       曾尝试从交付剔除 Microsoft.Windows.SDK.NET.dll（~27.2 MB，应用零 WinRT 使用），
+       但引用闭包实测证伪：Vortice.Mathematics.dll 引用 Microsoft.Windows.SDK.NET（且被
+       Vortice.DXGI/Direct3D11 广泛使用），Vortice.DirectX.dll 引用 WinRT.Runtime——两件
+       均不可剔（分析全程见 docs/105 §五/§六/§八）。
+       本护栏不再做剔除，而是锁住“引用⇒随包”配对：任何随包托管件引用了这两个投影件，
+       交付里就必须有它们；将来若有人重新尝试剔除（或 SDK 行为变化导致漏拷），构建当场报错。 -->
+  <UsingTask TaskName="AssertWindowsSdkProjectionPairing" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <ScanDirectory ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.Collections.Generic" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Text" />
+      <Code Type="Fragment" Language="cs">
+        <![CDATA[
+        var selfNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "Microsoft.Windows.SDK.NET.dll", "WinRT.Runtime.dll" };
+        bool needSdk = false, needRt = false, hasSdk = false, hasRt = false;
+        foreach (var file in Directory.GetFiles(ScanDirectory, "*.dll"))
+        {
+            var fileName = Path.GetFileName(file);
+            if (fileName.Equals("Microsoft.Windows.SDK.NET.dll", StringComparison.OrdinalIgnoreCase)) { hasSdk = true; continue; }
+            if (fileName.Equals("WinRT.Runtime.dll", StringComparison.OrdinalIgnoreCase)) { hasRt = true; continue; }
+            var text = Encoding.GetEncoding(28591).GetString(File.ReadAllBytes(file));
+            if (text.Contains("Microsoft.Windows.SDK.NET")) needSdk = true;
+            if (text.Contains("WinRT.Runtime")) needRt = true;
+        }
+        if (needSdk && !hasSdk)
+            Log.LogError("WinRT 投影配对护栏：随包托管件引用了 Microsoft.Windows.SDK.NET，但交付缺少该文件——剔除/漏拷会静默破坏运行时，请恢复或先解除引用闭包。", Array.Empty<object>());
+        if (needRt && !hasRt)
+            Log.LogError("WinRT 投影配对护栏：随包托管件引用了 WinRT.Runtime，但交付缺少该文件——剔除/漏拷会静默破坏运行时，请恢复或先解除引用闭包。", Array.Empty<object>());
+        ]]>
+      </Code>
+    </Task>
+  </UsingTask>
+  <Target Name="AssertWindowsSdkProjectionPairing" AfterTargets="Build">
+    <AssertWindowsSdkProjectionPairing ScanDirectory="$(OutDir)" />
   </Target>
 
   <ItemGroup>

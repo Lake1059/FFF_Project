@@ -9,6 +9,10 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     Private ReadOnly 快照提供器 As Func(Of 播放器快照)
     Private ReadOnly 字幕提供器 As Func(Of 外部字幕轨道)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
+    ' AI 实时字幕（docs/ai-subtitles/）：可选注入点。Nothing = 未接入，本类行为与从前一致。
+    ' 签名取（播放位置, 时间轴代次）→ 文本：控制器自己管 worker 与状态机，呈现器只问
+    ' 「这一帧该显示哪句」，不持有任何 ASR 类型，也不参与它的启停。
+    Private ReadOnly AI字幕提供器 As Func(Of TimeSpan, ULong, String)
     Private ReadOnly SRT绘制项 As New List(Of SRT字幕绘制项)()
     Private ReadOnly SRT行测量 As New List(Of 字幕行测量结果)()
     Private ReadOnly SRT测量缓存 As New Dictionary(Of 字幕行测量键, 字幕行测量结果)()
@@ -85,7 +89,8 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
 
     Friend Sub New(画面控件 As 播放器画面控件, 快照提供器 As Func(Of 播放器快照),
                    字幕提供器 As Func(Of 外部字幕轨道),
-                   提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single))
+                   提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single),
+                   Optional AI字幕提供器 As Func(Of TimeSpan, ULong, String) = Nothing)
         ArgumentNullException.ThrowIfNull(画面控件)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(字幕提供器)
@@ -94,6 +99,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
         Me.快照提供器 = 快照提供器
         Me.字幕提供器 = 字幕提供器
         Me.提交图层 = 提交图层
+        Me.AI字幕提供器 = AI字幕提供器
         刷新计时器 = New LakeUI.PrecisionTimer With {
             .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
             .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop
@@ -113,7 +119,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     ''' 默认 False：既有行为是"没有画面就不画字幕"。只有 AI 字幕会置 True —— 它是按媒体
     ''' 时间轴来的文字，不依赖画面，而纯音频恰好是它最该出场的场景。
     ''' 打开后本图层仍<b>不画外部字幕</b>（提交时字幕传 Nothing），所以既有的纯音频行为
-    ''' 一字不改；只有订阅了 <see cref="绘制扩展定时文字"/> 的一方会拿到绘制机会。</summary>
+    ''' 一字不改；AI 字幕经构造参数 AI字幕提供器 注入，装了包才打开本开关。</summary>
     Friend Property 无视频时也绘制 As Boolean
         Get
             Return Volatile.Read(无视频回退标志) <> 0
@@ -126,7 +132,6 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
         End Set
     End Property
 
-    Friend Event 绘制扩展定时文字 As EventHandler(Of 定时文字图层绘制事件参数)
     Private Sub 刷新计时器_Tick(sender As Object, e As EventArgs)
         SyncLock 生命周期锁
             If 已释放标志 <> 0 Then Return
@@ -138,19 +143,8 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
             Dim 客户区大小 = New Size(Volatile.Read(缓存客户区宽度), Volatile.Read(缓存客户区高度))
             Dim DPI = BitConverter.Int32BitsToSingle(Volatile.Read(缓存DPI位元))
             If 快照 Is Nothing OrElse 客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return
-            Dim 无视频 = (快照.视频宽度 = 0 OrElse 快照.视频高度 = 0)
-            If 无视频 AndAlso Volatile.Read(无视频回退标志) = 0 Then Return
-            If 无视频 Then
-                ' 纯音频：没有画面可对齐，就用一个铺满客户区的虚拟显示区让文字有位置可放。
-                ' 外部字幕一律不画（字幕传 Nothing）——既有行为不因本开关改变，
-                ' 需要文字的一方只能走 绘制扩展定时文字 事件。
-                If Not Single.IsFinite(DPI) OrElse DPI <= 0 Then DPI = 96.0F
-                Dim 缩放 = DPI / 96.0F
-                Dim 虚拟宽 = CUInt(Math.Max(1, CInt(Math.Round(客户区大小.Width / 缩放))))
-                Dim 虚拟高 = CUInt(Math.Max(1, CInt(Math.Round(客户区大小.Height / 缩放))))
-                提交当前帧(客户区大小, 虚拟宽, 虚拟高, 快照.播放位置, Nothing, DPI, 快照.时间轴代次)
-                Return
-            End If
+            ' 纯音频：没有画面就没有"画面区域"，但 AI 字幕仍然要上屏（音乐/播客场景）。
+            If (快照.视频宽度 = 0 OrElse 快照.视频高度 = 0) AndAlso Not 无视频时也绘制 Then Return
             Dim 字幕 = 字幕提供器()
             提交当前帧(客户区大小, 快照.视频宽度, 快照.视频高度,
                      快照.播放位置, 字幕, DPI, 快照.时间轴代次)
@@ -184,14 +178,24 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
                          Optional 时间轴代次 As ULong = 0) As IReadOnlyList(Of 定时文字命令)
         图层命令.Clear()
         命令对象使用数 = 0
-        If Volatile.Read(已释放标志) <> 0 OrElse 视频宽度 = 0 OrElse 视频高度 = 0 OrElse
+        Dim 无视频 = 视频宽度 = 0 OrElse 视频高度 = 0
+        If Volatile.Read(已释放标志) <> 0 OrElse (无视频 AndAlso Not 无视频时也绘制) OrElse
             客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return 图层命令
         If Not Single.IsFinite(DPI) OrElse DPI <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(DPI))
         ' WinForms 的 ClientSize 已经是物理像素；先换回 DIP，再交给字幕/弹幕共用的
         ' 视频显示区域换算，避免高 DPI 下重复放大。
         Dim DPI缩放 = DPI / 96.0F
-        Dim 区域 = 视频显示区域.计算(客户区大小.Width / DPI缩放, 客户区大小.Height / DPI缩放, DPI,
+        Dim 区域 As 视频显示区域
+        If 无视频 Then
+            ' 纯音频：没有画面可让位，整个客户区就是"视频区域"，AI 字幕照它定底边。
+            ' 计算() 对 0 尺寸抛异常，所以这条分支必须绕开它，而不是塞一个假的 1×1。
+            Dim 画布宽 = 客户区大小.Width / DPI缩放
+            Dim 画布高 = 客户区大小.Height / DPI缩放
+            区域 = New 视频显示区域(0.0F, 0.0F, 画布宽, 画布高, 画布高 / 1080.0F, DPI)
+        Else
+            区域 = 视频显示区域.计算(客户区大小.Width / DPI缩放, 客户区大小.Height / DPI缩放, DPI,
                                       CInt(视频宽度), CInt(视频高度))
+        End If
         If 字幕 IsNot Nothing AndAlso 字幕.尝试进入使用() Then
             Try
                 Select Case 字幕.格式
@@ -214,12 +218,169 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
                 字幕.离开使用()
             End Try
         End If
-        ' 扩展绘制锚点：外部字幕命令生成完毕后无条件触发（无订阅者即空操作）。
-        ' AI 实时字幕经此把自己的那一行追加进 图层命令（Form1.OnAi字幕绘制扩展），
-        ' 与外部 SRT 同底并存。参数带时间轴代次，订阅方用它做跨时间线丢弃。
-        RaiseEvent 绘制扩展定时文字(Me,
-            New 定时文字图层绘制事件参数(图层命令, 播放位置, 区域, 时间轴代次))
+        ' AI 字幕排在既有命令之后：同一图层、同一帧，与外部字幕同底并存、AI 上移一行。
+        If AI字幕提供器 IsNot Nothing Then 追加AI字幕命令(播放位置, 时间轴代次, 区域)
         Return 图层命令
+    End Function
+
+    ''' <summary>AI 实时字幕：向本帧图层追加一条文字命令。
+    ''' 「有没有同底文字」按本帧图层已有几条命令判，而不是按有没有字幕轨 —— 纯音频
+    ''' 回退路径不画外部字幕，按字幕轨判会让 AI 那行悬在底部上方两行的空位上。</summary>
+    ''' <summary>AI 实时字幕：向本帧图层追加文字命令（长句折行为至多 3 行堆叠）。
+    ''' 「有没有同底文字」按本帧图层已有几条命令判，而不是按有没有字幕轨 —— 纯音频
+    ''' 回退路径不画外部字幕，按字幕轨判会让 AI 那行悬在底部上方两行的空位上。</summary>
+    Private Sub 追加AI字幕命令(播放位置 As TimeSpan, 时间轴代次 As ULong, 区域 As 视频显示区域)
+        Try
+            Dim 文本 = AI字幕提供器(播放位置, 时间轴代次)
+            If String.IsNullOrWhiteSpace(文本) Then Return
+            If 区域.宽度像素 <= 1 OrElse 区域.高度像素 <= 1 Then Return
+            Dim 基准字号 = 区域.高度像素 / 22.0F
+            Dim 字体 = 设置.实例对象.字幕第一行字体
+            ' 长句折行：DirectWrite 实测宽度按字素二分断行，至多 3 行堆叠，
+            ' 放不下逐级缩字号；行高用渲染同源的布局高度，堆叠不裁切不叠行。
+            Dim 行集 = 生成AI字幕行(文本, 字体, 基准字号, 区域.宽度像素)
+            Dim 描边宽度 = 行集.字号 * 0.08F
+            Dim 行间距 = 行集.字号 * 0.1F
+            Dim 行高(行集.行.Length - 1) As Single
+            Dim 总高度 = 0.0F
+            For 索引 = 0 To 行集.行.Length - 1
+                行高(索引) = 测量AI字幕行高(行集.行(索引), 字体, 行集.字号, 区域.宽度像素, 描边宽度)
+                总高度 += 行高(索引)
+            Next
+            总高度 += 行间距 * (行集.行.Length - 1)
+            Dim 有同底文字 = 图层命令.Count > 0
+            Dim y = 区域.Y像素 + 区域.高度像素 - If(有同底文字, 1.2F, 0.2F) * 行集.字号 - 总高度
+            For 索引 = 0 To 行集.行.Length - 1
+                添加文字命令(行集.行(索引), 字体, 行集.字号,
+                    New RectangleF(区域.X像素, y, 区域.宽度像素, 行高(索引)),
+                    &HFFFFFFFFUI, &HF0000000UI, 描边宽度,
+                    定时文字对齐.居中, 定时文字对齐.靠前)
+                y += 行高(索引) + 行间距
+            Next
+        Catch
+            ' AI 字幕是可选图层：任何失败只当这一帧没有它，绝不影响既有字幕。
+        End Try
+    End Sub
+
+    ' —— AI 字幕折行：宽度与行高都走渲染同源的 DirectWrite 测量接口，断行结果即绘制结果 ——
+
+    Private Const AI字幕最大行数 As Integer = 3
+    Private Const AI字幕换行缓存上限 As Integer = 512
+    Private Const AI字幕最小缩放 As Single = 0.62F
+    Private ReadOnly AI字幕换行缓存 As New Dictionary(
+        Of (文本 As String, 字体 As String, 字号位元 As Integer, 最大宽度 As Integer), String())
+
+    ''' <summary>把整句折成至多 AI字幕最大行数 行；任一档字号放不下就逐级缩小
+    ''' （1.0 → 0.62），到下限仍超出则截尾加省略号。返回最终行数组与采用的字号。</summary>
+    Private Function 生成AI字幕行(文本 As String, 字体 As String, 基准字号 As Single,
+                              最大宽度 As Single) As (行 As String(), 字号 As Single)
+        Dim 行 As String() = {文本}
+        For Each 缩放 In {1.0F, 0.88F, 0.78F, 0.7F, AI字幕最小缩放}
+            Dim 字号 = 基准字号 * 缩放
+            行 = 折行AI字幕文本(文本, 字体, 字号, 最大宽度)
+            If 行.Length <= AI字幕最大行数 Then Return (行, 字号)
+        Next
+        Dim 字号下限 = 基准字号 * AI字幕最小缩放
+        Dim 截断(AI字幕最大行数 - 1) As String
+        Array.Copy(行, 截断, AI字幕最大行数)
+        ' 尾行换成"折行后能放下的最长前缀"——折行函数保证首行不超宽。
+        截断(AI字幕最大行数 - 1) = 折行AI字幕文本(
+            行(AI字幕最大行数 - 1) & "…", 字体, 字号下限, 最大宽度)(0)
+        Return (截断, 字号下限)
+    End Function
+
+    ''' <summary>按字素二分找每行能放下的最长前缀，西文优先在空格处断行
+    '''（策略与 播放器歌词呈现器.按字素换行 一致），宽度用
+    ''' FFF3FP_MeasureTimedTextWidth 实测，按（文本,字体,字号,宽度）缓存。
+    ''' 本方法与绘制同在字幕呈现的刷新线程串行调用，缓存无需加锁
+    '''（SRT测量缓存 同款约定）。</summary>
+    Private Function 折行AI字幕文本(文本 As String, 字体 As String, 字号 As Single,
+                                最大宽度 As Single) As String()
+        Dim 宽度上限 = Math.Max(1, CInt(Math.Floor(最大宽度)))
+        Dim 键 = (文本, 字体, BitConverter.SingleToInt32Bits(字号), 宽度上限)
+        Dim 已折 As String() = Nothing
+        If AI字幕换行缓存.TryGetValue(键, 已折) Then Return 已折
+
+        Dim 实测宽度 As Single
+        If 测量AI字幕宽度(文本, 字体, 字号, 实测宽度) AndAlso 实测宽度 <= 宽度上限 Then
+            已折 = {文本}
+        Else
+            Dim starts = System.Globalization.StringInfo.ParseCombiningCharacters(文本)
+            Dim 结果 As New List(Of String)()
+            Dim 起点 = 0
+            While 起点 < starts.Length
+                While 起点 < starts.Length AndAlso Char.IsWhiteSpace(文本, starts(起点))
+                    起点 += 1
+                End While
+                If 起点 >= starts.Length Then Exit While
+
+                Dim 低 = 起点 + 1
+                Dim 高 = starts.Length
+                Dim 适配终点 = 低
+                While 低 <= 高
+                    Dim 中 = 低 + ((高 - 低) \ 2)
+                    If 测量AI字幕宽度(取得字素前缀(文本, starts, 起点, 中), 字体, 字号, 实测宽度) AndAlso
+                        实测宽度 <= 宽度上限 Then
+                        适配终点 = 中
+                        低 = 中 + 1
+                    Else
+                        高 = 中 - 1
+                    End If
+                End While
+
+                Dim 断点 = 适配终点
+                If 适配终点 < starts.Length Then
+                    For 索引 = 适配终点 - 1 To 起点 + 1 Step -1
+                        If Char.IsWhiteSpace(文本, starts(索引)) Then
+                            断点 = 索引
+                            Exit For
+                        End If
+                    Next
+                End If
+                Dim 行 = 取得字素前缀(文本, starts, 起点, 断点).TrimEnd()
+                If 行.Length > 0 Then 结果.Add(行)
+                起点 = Math.Max(断点, 起点 + 1)
+            End While
+            已折 = If(结果.Count = 0, {文本}, 结果.ToArray())
+        End If
+        If AI字幕换行缓存.Count >= AI字幕换行缓存上限 Then AI字幕换行缓存.Clear()
+        AI字幕换行缓存(键) = 已折
+        Return 已折
+    End Function
+
+    Private Shared Function 取得字素前缀(文本 As String, starts As Integer(),
+                                    起点 As Integer, 终点 As Integer) As String
+        Dim 起始索引 = starts(起点)
+        Dim 结束索引 = If(终点 < starts.Length, starts(终点), 文本.Length)
+        Return 文本.Substring(起始索引, 结束索引 - 起始索引)
+    End Function
+
+    Private Shared Function 测量AI字幕宽度(文本 As String, 字体 As String, 字号 As Single,
+                                      ByRef 宽度 As Single) As Boolean
+        宽度 = 0
+        Try
+            Return 播放器原生接口.FFF3FP_MeasureTimedTextWidth(
+                文本, 字体, 字号, 原生定时文字标志.无, 宽度) = 原生播放器结果.成功 AndAlso
+                Single.IsFinite(宽度) AndAlso 宽度 >= 0
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function 测量AI字幕行高(文本 As String, 字体 As String, 字号 As Single,
+                                      最大宽度 As Single, 描边宽度 As Single) As Single
+        Try
+            Dim 原生 As New 原生定时文字测量 With {
+                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字测量)()), .版本 = 20UI}
+            If 播放器原生接口.FFF3FP_MeasureTimedText(
+                文本, 字体, 字号, 原生定时文字标志.无, Math.Max(最大宽度, 1.0F),
+                描边宽度, 0.0F, 0.0F, 0UI, 原生) = 原生播放器结果.成功 AndAlso
+                Single.IsFinite(原生.布局高度) AndAlso 原生.布局高度 > 0 Then
+                Return 原生.布局高度
+            End If
+        Catch
+        End Try
+        Return 字号 * 1.2F ' 测量不可用时的保守行高
     End Function
 
     Friend Sub 提交当前帧(客户区大小 As Size, 视频宽度 As UInteger, 视频高度 As UInteger,
@@ -483,20 +644,3 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     End Sub
 End Class
 
-Friend NotInheritable Class 定时文字图层绘制事件参数
-    Inherits EventArgs
-
-    Friend Sub New(命令 As ICollection(Of 定时文字命令), 播放位置 As TimeSpan, 视频区域 As 视频显示区域,
-                   Optional 时间轴代次 As ULong = 0)
-        Me.命令 = 命令
-        Me.播放位置 = 播放位置
-        Me.视频区域 = 视频区域
-        Me.时间轴代次 = 时间轴代次
-    End Sub
-
-    Friend ReadOnly Property 命令 As ICollection(Of 定时文字命令)
-    Friend ReadOnly Property 播放位置 As TimeSpan
-    Friend ReadOnly Property 视频区域 As 视频显示区域
-    ' 由 生成命令 的同一实参透传；AI 字幕状态机靠它识别 seek 代次跳变并立即清空。
-    Friend ReadOnly Property 时间轴代次 As ULong
-End Class

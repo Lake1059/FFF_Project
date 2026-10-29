@@ -34,6 +34,7 @@ Partial Class Form设置
         Dim ModernTabPage10 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         Dim ModernTabPage11 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         Dim ModernTabPage12 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
+        Dim ModernTabPage13 As LakeUI.ModernTabListControl.ModernTabPage = New LakeUI.ModernTabListControl.ModernTabPage()
         ModernTabListControl1 = New LakeUI.ModernTabListControl()
         SuspendLayout()
         ' 
@@ -46,13 +47,14 @@ Partial Class Form设置
         ModernTabPage3.Text = "支持者"
         ModernTabPage4.IsSeparator = True
         ModernTabPage5.Text = "界面与尺寸"
-        ModernTabPage6.Text = "HDR"
-        ModernTabPage7.Text = "字幕"
-        ModernTabPage8.Text = "弹幕"
-        ModernTabPage9.Text = "音乐与歌词"
-        ModernTabPage10.Text = "文件关联"
-        ModernTabPage11.Text = "视频超分辨率"
-        ModernTabPage12.Text = "AI 字幕"
+        ModernTabPage6.Text = "设备与性能"
+        ModernTabPage7.Text = "HDR"
+        ModernTabPage8.Text = "字幕"
+        ModernTabPage9.Text = "弹幕"
+        ModernTabPage10.Text = "音乐与歌词"
+        ModernTabPage11.Text = "文件关联"
+        ModernTabPage12.Text = "RTX 视频增强"
+        ModernTabPage13.Text = "AI 字幕"
         ModernTabListControl1.Items.Add(ModernTabPage1)
         ModernTabListControl1.Items.Add(ModernTabPage2)
         ModernTabListControl1.Items.Add(ModernTabPage3)
@@ -65,6 +67,7 @@ Partial Class Form设置
         ModernTabListControl1.Items.Add(ModernTabPage10)
         ModernTabListControl1.Items.Add(ModernTabPage11)
         ModernTabListControl1.Items.Add(ModernTabPage12)
+        ModernTabListControl1.Items.Add(ModernTabPage13)
         ModernTabListControl1.Location = New Point(0, 0)
         ModernTabListControl1.Name = "ModernTabListControl1"
         ModernTabListControl1.ScrollBarThumbColor = Color.FromArgb(CByte(40), CByte(200), CByte(200), CByte(200))

@@ -141,11 +141,6 @@ Friend NotInheritable Class 文件关联管理器
         End Try
     End Function
 
-    Friend Shared Sub 同步用于测试(选项 As 文件关联选项, executablePath As String,
-                              注册表位置 As 文件关联注册表位置)
-        同步核心(选项, executablePath, 注册表位置, False)
-    End Sub
-
     Private Shared Sub 同步核心(选项 As 文件关联选项, executablePath As String,
                            注册表位置 As 文件关联注册表位置, 通知资源管理器 As Boolean,
                            Optional 仅同步已启用 As Boolean = False)

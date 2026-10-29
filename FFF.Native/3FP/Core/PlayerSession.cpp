@@ -1201,6 +1201,23 @@ bool PlayerSession::PresentAudioBoundary() noexcept {
     return true;
 }
 
+FFFResult PlayerSession::ConfigurePlaybackPerformance(
+    const std::int32_t decodeAdapterIndex, const std::uint32_t videoBufferPolicy,
+    const std::uint32_t audioBufferPolicy) noexcept {
+    if (decodeAdapterIndex < -1 || decodeAdapterIndex > 15 ||
+        videoBufferPolicy > 2 || audioBufferPolicy > 2)
+        return FFFResult::InvalidArgument;
+    if (state_.load(std::memory_order_acquire) != FFF3FPState::Idle)
+        return FFFResult::InvalidState;
+    Enqueue([this, decodeAdapterIndex, videoBufferPolicy, audioBufferPolicy] {
+        decodeAdapterIndex_ = decodeAdapterIndex;
+        performance_ = {videoBufferPolicy, audioBufferPolicy};
+        audioTargetBuffer100ns_ = performance_.AudioInitial();
+        unsupportedHardwareRoutes_.clear();
+    });
+    return FFFResult::Success;
+}
+
 FFFResult PlayerSession::Open(const char* path) noexcept {
     std::string normalized, error;
     if (!NormalizeLocalPath(path, normalized, error)) { ReportError(FFFResult::InvalidArgument, std::move(error), "open"); return FFFResult::InvalidArgument; }
@@ -3578,7 +3595,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // an immediate replacement while the previous chain is still retiring.
     DoClose(FFF3FPState::Opening, true);
     // A new file is a new audio-pool round: back to the default target.
-    audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
+    audioTargetBuffer100ns_ = performance_.AudioInitial();
     seenAudioUnderruns_ = 0;
     seenAudioJitterFrames_ = 0;
     seenAudioDiscontinuities_ = 0;
@@ -4356,7 +4373,7 @@ void PlayerSession::PumpPlayback() noexcept {
     if (movingWindow) {
         // 移动窗口前主动增加解码储备；本轮保留已增加的水位，避免连续拖动反复欠载。
         audioTargetBuffer100ns_ = std::max(audioTargetBuffer100ns_,
-            kInteractiveMoveAudioTargetBuffer100ns);
+            performance_.AudioMoveFloor());
     }
     if (format_ == nullptr) { SetState(FFF3FPState::Failed); return; }
     // The host asked for an auxiliary composition: open the second video
@@ -4440,8 +4457,9 @@ void PlayerSession::PumpPlayback() noexcept {
         track(audioRenderer_->DroppedOverlapFrames(), seenAudioDroppedOverlap_);
         if (grew) {
             const auto previousTarget = audioTargetBuffer100ns_;
-            audioTargetBuffer100ns_ = std::min(kMaximumAudioTargetBuffer100ns,
-                audioTargetBuffer100ns_ + kAudioTargetBufferStep100ns);
+            const auto deviceFloor = audioRenderer_->DeviceBufferDuration100ns();
+            audioTargetBuffer100ns_ = std::max(deviceFloor, std::min(performance_.AudioMaximum(),
+                audioTargetBuffer100ns_ + kAudioTargetBufferStep100ns));
             if (GetEnvironmentVariableW(L"FFF_AUDIO_TARGET_TRACE", nullptr, 0))
                 std::fprintf(stderr, "AUDIO_TARGET underruns=%llu jitter=%llu disc=%llu target=%lld -> %lld buffered=%lld\n",
                     static_cast<unsigned long long>(underruns),
@@ -6748,7 +6766,7 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         ReleaseIamfDecoder();
         audioDecoder_ = replacement; audioStream_ = index; snapshot_.selectedAudioStream = index;
         // A new audio track is a new pool round, same as a new file.
-        audioTargetBuffer100ns_ = kDefaultAudioTargetBuffer100ns;
+        audioTargetBuffer100ns_ = performance_.AudioInitial();
         seenAudioUnderruns_ = 0;
         seenAudioJitterFrames_ = 0;
         seenAudioDiscontinuities_ = 0;

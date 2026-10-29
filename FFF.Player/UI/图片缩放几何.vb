@@ -1,7 +1,4 @@
-' 图片模式缩放律：全部纯函数，宿主控制器与 FFF.Player.Tests 调同一份。
-'
-' 为什么要抽出来：体感类改动最难验的就是"测的不是真正跑的那份逻辑"。钳位、换算、
-' 弹簧步进放这里，回归可以直接拿数字判；只有计时器/双击这类 GUI 接线留在控制器里。
+' 图片模式缩放律：钳位、换算和弹簧步进由宿主控制器共用。
 '
 ' 基准口径：缩放值 z 是**相对适配盒**的倍数（内核 VideoRenderer.cpp:5913
 ' zoomedWidth = fittedWidth * zoom），而 z=1 时一个源像素占的屏幕像素数 f = Min(1, 适应比)。
@@ -29,8 +26,7 @@ Public Module 图片缩放几何
     ''' f ∈ [1/64, 1/32)（源边长在视口边长 32~64 倍之间）这一带判成"1:1 够得着"，
     ''' 而双击实际只能停在 32×fit（=1:1 的一半），且因为 够不到一比一 没置位，
     ''' 播报里那句"窗口太小…够不到 1:1"被省掉，用户只看到"已到最大缩放（80%）"
-    ''' （S16 实测量：32×f = 32×0.025 = 0.8 ⇒ 80%，即 1:1 的那 100% 永远到不了）。
-    ''' 判据：ImageZoomRegression 的 1/64~1/32 带 + ImageZoomLiveRegression S16 真双击。</summary>
+    ''' （例如 32×f = 32×0.025 = 0.8 ⇒ 80%，即 1:1 的那 100% 永远到不了）。</summary>
     Public Const 内核最大缩放 As Single = 32.0F
 
     ''' <summary>对齐 LakeUI PixelPictureBox.vb:289 的「最大像素边长」默认 64：
@@ -53,7 +49,7 @@ Public Module 图片缩放几何
     Public Const 静止速度相对比 As Single = 0.02F
 
     ''' <summary>缩放弹簧的阻尼时间。**按停表预算实测定的数**：0.05s 时一格 ×1.25
-    ''' 约 0.2s 停表；0.18s 时约 0.9s。判据见 ImageZoomRegression 的"停表预算"条。</summary>
+    ''' 约 0.2s 停表；0.18s 时约 0.9s。</summary>
     Public Const 缩放阻尼时间秒 As Single = 0.05F
 
     ''' <summary>适应比 = 整图入窗时"一个源像素占多少屏幕像素"。</summary>

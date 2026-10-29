@@ -386,6 +386,7 @@ public:
     // single place that decides it, for Render() and for the refresh above.
     std::uint32_t ResolveDecodeTransfer(const HdrFrameState& hdrState) const noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
+    bool OwnsD3D11Texture(ID3D11Texture2D* texture) const noexcept;
     /// Zero-cost capability probe for D3D11VA hardware decoding.
     ///
     /// Ask the driver instead of consulting a table: the answer describes this GPU
@@ -1298,12 +1299,14 @@ private:
     std::atomic<std::uint32_t> playbackWorkPending_;
     std::atomic<bool> interactiveMove_;
     std::atomic<bool> lyricsLayoutEnabled_;
-    // An audio-only source has no picture, so the timed-text presenter has no
-    // reason to own a swap chain -- unless something actually wants to draw
-    // words on it. The lyrics layer already had this latch; the subtitle layer
-    // needs one too since AI subtitles render into it and a media file with an
-    // audio track but no video track would otherwise never reach the screen.
-    std::atomic<bool> subtitleLayoutEnabled_;
+    // Pure-audio overlay (no video stream at all): set when the subtitle slot
+    // receives a non-empty layer, so PresentTimedText composes subtitles over a
+    // black canvas instead of returning early. Canvas dims size the swap chain
+    // so the layer's canvas-to-swap scale is 1:1 (the same geometry the video
+    // path gets from canvas == source).
+    std::atomic<bool> subtitleOverlayEnabled_;
+    std::atomic<std::uint32_t> subtitleOverlayCanvasWidth_;
+    std::atomic<std::uint32_t> subtitleOverlayCanvasHeight_;
     std::atomic<std::uint32_t> coverBackdropBlurRadiusBits_;
     std::atomic<std::uint32_t> coverBackdropBlurPasses_;
     std::atomic<std::uint32_t> coverBackdropDownsampleFactor_;

@@ -1,7 +1,6 @@
 Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Threading
-Imports System.Threading.Tasks
 
 Public Class Form1
     Private 光盘控制器 As 播放器光盘控制器
@@ -47,9 +46,13 @@ Public Class Form1
     Private 图片浏览控制器 As 播放器图片浏览控制器
     Private 视图旋转控制器 As 播放器视图旋转控制器
     Private 视频超分辨率控制器 As 播放器视频超分辨率控制器
-    Private 视频自动HDR控制器 As 播放器视频自动HDR控制器
     ' AI 实时字幕（docs/ai-subtitles/）：默认关；开启后由控制器自理 worker 生命周期。
     Private AI字幕控制器 As 播放器AI字幕控制器
+    ' 实机性能采样：仅当 FFF3FP_PERF_OUT / FFF3FP_PERF_SECONDS 同时给出时才会被创建，
+    ' 正常使用时恒为 Nothing。
+    Private 性能采样 As 性能采样器
+    Private 视频自动HDR控制器 As 播放器视频自动HDR控制器
+    ' AI 实时字幕（docs/ai-subtitles/）：默认关；开启后由控制器自理 worker 生命周期。
     Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
@@ -142,25 +145,25 @@ Public Class Form1
         界面呈现器 = 创建界面呈现器()
         界面呈现器.设置音量百分比(设置.实例对象.音量百分比)
         播放控制器.设置音量(CSng(设置.实例对象.音量百分比 / 100.0F))
-        字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
-            AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
-            AddressOf 播放控制器.提交定时文字图层)
-        ' AI 实时字幕：经字幕图层的"绘制扩展"事件注入，与外部 SRT 同底并存、
-        ' AI 上移一行（决策 D4）。worker 起停/菜单开关/媒体切换重装 tap 全在控制器里，
-        ' Form1 只保留这一处订阅与一个绘制处理器（失败静默，绝不影响既有字幕）。
+        ' AI 实时字幕：必须在字幕图层呈现器之前建 —— 呈现器要拿它的「取当前条目」
+        ' 委托当绘制扩展。worker 起停／菜单开关／媒体切换重装 tap 全在控制器里，
+        ' Form1 只保留这一处传参和一个事件订阅（失败静默，绝不影响既有字幕）。
         AI字幕控制器 = New 播放器AI字幕控制器(
             MCM_AI字幕,
             Function() 播放控制器.取当前句柄(),
             Function() 播放控制器.安全读取媒体信息(),
-            Sub(文本) 安全显示操作信息(文本),
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI),
             Sub(值) 设置.实例对象.Ai字幕已停用 = 值,
             AddressOf 打开Ai字幕设置)
+        字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
+            AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
+            AddressOf 播放控制器.提交定时文字图层,
+            AddressOf AI字幕控制器.取当前条目)
         ' 启动时就读一次包：装了就起，没装就完全不动（本体默认不带任何 ASR 能力）。
         AI字幕控制器.应用设置()
-        ' 纯音频（无视频轨）原本不驱动字幕图层，AI 字幕就永远上不了屏。装了有效包才打开
-        ' 这条回退路径：没装包时呈现器行为与从前完全一致。
+        ' 纯音频（无视频轨）原本不驱动字幕图层，AI 字幕就永远上不了屏。装了有效包才
+        ' 打开这条回退路径：没装包时呈现器行为与从前完全一致。
         字幕图层呈现器.无视频时也绘制 = AI字幕控制器.启用
-        AddHandler 字幕图层呈现器.绘制扩展定时文字, AddressOf OnAi字幕绘制扩展
         AddHandler 播放控制器.媒体已打开, AddressOf AI字幕控制器.媒体已打开
         ' 弹幕与字幕分轨：弹幕有自己的呈现器，节拍跟随视频（见 播放器弹幕图层呈现器）。
         ' 字幕仍走 播放器字幕叠加呈现器，保留它那套为静态内容设计的节拍与去重。
@@ -291,6 +294,13 @@ Public Class Form1
         PerformLayout()
         窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
         核心文件检查通过 = True
+        ' 实机性能采样：环境变量没给全就是 Nothing，此处等价于没这几行。
+        ' 放在 Load 末尾是因为要拿到画面控件（视口口径）与播放控制器（快照来源）。
+        性能采样 = 性能采样器.尝试创建(
+            Function() 播放控制器?.安全读取快照(),
+            Function() If(画面控件 Is Nothing, ClientSize, 画面控件.ClientSize),
+            Me)
+        性能采样?.启动()
 
     End Sub
 
@@ -563,6 +573,7 @@ Public Class Form1
 
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
         正在关闭 = True
+        播放列表数据.取消自动扫描()
         停止解锁轮询()
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
@@ -593,6 +604,18 @@ Public Class Form1
             End If
             视频自动HDR控制器.Dispose()
         End If
+        If AI字幕控制器 IsNot Nothing Then
+            ' 必须在 字幕图层呈现器 释放之前：控制器 Dispose 内部先停 worker 再放状态机，
+            ' 而卸 tap 要用播放控制器的会话句柄 —— 此时它还活着。
+            If 播放控制器 IsNot Nothing Then
+                RemoveHandler 播放控制器.媒体已打开,
+                    New EventHandler(Of 播放器媒体事件参数)(AddressOf AI字幕控制器.媒体已打开)
+            End If
+            AI字幕控制器.Dispose()
+            AI字幕控制器 = Nothing
+        End If
+        性能采样?.Dispose()
+        性能采样 = Nothing
         光盘控制器?.Dispose()
         画面菜单控制器?.Dispose()
         窗口布局控制器?.释放()
@@ -602,7 +625,6 @@ Public Class Form1
         弹幕图层呈现器?.释放()
         If AI字幕控制器 IsNot Nothing Then
             If 字幕图层呈现器 IsNot Nothing Then
-                RemoveHandler 字幕图层呈现器.绘制扩展定时文字, AddressOf OnAi字幕绘制扩展
             End If
             If 播放控制器 IsNot Nothing Then
                 RemoveHandler 播放控制器.媒体已打开,
@@ -720,6 +742,7 @@ Public Class Form1
                                       播放列表.是支持的媒体文件(x)).ToArray()
         If 媒体文件.Length = 0 Then Return
 
+        播放列表数据.取消自动扫描()
         播放列表数据.添加多个(媒体文件)
         Dim 首个路径 = 媒体文件(0)
         播放列表数据.选择路径(首个路径)
@@ -737,11 +760,10 @@ Public Class Form1
             播放控制器.当前媒体是视频 Then
             播放控制器.加载外部音轨(路径)
         Else
-            If 播放列表.是图片文件(路径) Then
-                ' 图片按同目录建列表：系列签名匹配（视频用的那条）对图片会退化成只含自己。
-                启动后台任务(播放列表数据.用同目录图片替换Async(路径))
-            ElseIf Not 光盘路径.是光盘路径(路径) Then
-                启动后台任务(播放列表数据.从媒体创建并扫描相似文件Async(路径))
+            If Not 光盘路径.是光盘路径(路径) Then
+                启动后台任务(播放列表数据.从媒体扫描同目录Async(路径))
+            Else
+                播放列表数据.取消自动扫描()
             End If
             播放控制器.打开媒体(路径)
         End If
@@ -802,170 +824,14 @@ Public Class Form1
     ''' 字幕整体永不越出视频区域。
     ''' 铁律：命令对象每帧新建、append 后不得修改——D3D present 线程会在提交期读它。
     ''' 任何失败只当本帧没有 AI 字幕，绝不影响既有字幕图层。</summary>
-    Private Sub OnAi字幕绘制扩展(sender As Object, e As 定时文字图层绘制事件参数)
-        Try
-            If AI字幕控制器 Is Nothing Then Return
-            Dim 文本 = AI字幕控制器.取当前条目(e.播放位置, e.时间轴代次)
-            If String.IsNullOrWhiteSpace(文本) Then Return
-            Dim 区域 = e.视频区域
-            If 区域.宽度像素 <= 1 OrElse 区域.高度像素 <= 1 Then Return
-            Dim 基准字号 = 区域.高度像素 / 22.0F
-            Dim 字体 = 设置.实例对象.字幕第一行字体
-            Dim 行集 = 生成AI字幕行(文本, 字体, 基准字号, 区域.宽度像素)
-            Dim 描边宽度 = 行集.字号 * 0.08F
-            Dim 行间距 = 行集.字号 * 0.1F
-            ' 每行高度取渲染同源的 DirectWrite 布局高度（SRT 路径同款），
-            ' 行距以此为准，堆叠时字形不会被裁切、行与行不会叠上。
-            Dim 行高(行集.行.Length - 1) As Single
-            Dim 总高度 = 0.0F
-            For 索引 = 0 To 行集.行.Length - 1
-                行高(索引) = 测量AI字幕行高(行集.行(索引), 字体, 行集.字号, 区域.宽度像素, 描边宽度)
-                总高度 += 行高(索引)
-            Next
-            总高度 += 行间距 * (行集.行.Length - 1)
-            ' 判据用"本帧图层里已经有几条命令"而不是"有没有外挂字幕轨"：纯音频回退路径
-            ' 不画外部字幕，若仍按字幕轨判断，AI 那一行会悬在底部上方两行的空位上。
-            Dim 有同底文字 = e.命令.Count > 0
-            Dim y = 区域.Y像素 + 区域.高度像素 - If(有同底文字, 1.2F, 0.2F) * 行集.字号 - 总高度
-            For 索引 = 0 To 行集.行.Length - 1
-                Dim cmd = 定时文字命令.创建文字(行集.行(索引), 字体, 行集.字号,
-                             New RectangleF(区域.X像素, y, 区域.宽度像素, 行高(索引)),
-                             &HFFFFFFFFUI, &HF0000000UI, 描边宽度,
-                             定时文字对齐.居中, 定时文字对齐.靠前)
-                e.命令.Add(cmd)
-                y += 行高(索引) + 行间距
-            Next
-        Catch
-            ' AI 字幕是可选图层：任何失败只当本帧没有 AI 字幕。
-        End Try
-    End Sub
-
-    ' —— AI 字幕折行：宽度与行高都走渲染同源的 DirectWrite 测量接口，断行结果即绘制结果 ——
-
-    Private Const AI字幕最大行数 As Integer = 3
-    Private Const AI字幕换行缓存上限 As Integer = 512
-    Private Const AI字幕最小缩放 As Single = 0.62F
-    Private ReadOnly AI字幕换行缓存 As New Dictionary(
-        Of (文本 As String, 字体 As String, 字号位元 As Integer, 最大宽度 As Integer), String())
-
-    ''' <summary>把整句折成至多 AI字幕最大行数 行；任一档字号放不下就逐级缩小
-    ''' （1.0 → 0.62），到下限仍超出则截尾加省略号。返回最终行数组与采用的字号。</summary>
-    Private Function 生成AI字幕行(文本 As String, 字体 As String, 基准字号 As Single,
-                              最大宽度 As Single) As (行 As String(), 字号 As Single)
-        Dim 行 As String() = {文本}
-        For Each 缩放 In {1.0F, 0.88F, 0.78F, 0.7F, AI字幕最小缩放}
-            Dim 字号 = 基准字号 * 缩放
-            行 = 折行AI字幕文本(文本, 字体, 字号, 最大宽度)
-            If 行.Length <= AI字幕最大行数 Then Return (行, 字号)
-        Next
-        Dim 字号下限 = 基准字号 * AI字幕最小缩放
-        Dim 截断(AI字幕最大行数 - 1) As String
-        Array.Copy(行, 截断, AI字幕最大行数)
-        ' 尾行换成"折行后能放下的最长前缀"——折行函数保证首行不超宽。
-        截断(AI字幕最大行数 - 1) = 折行AI字幕文本(
-            行(AI字幕最大行数 - 1) & "…", 字体, 字号下限, 最大宽度)(0)
-        Return (截断, 字号下限)
-    End Function
-
-    ''' <summary>按字素二分找每行能放下的最长前缀，西文优先在空格处断行
-    '''（策略与 播放器歌词呈现器.按字素换行 一致），宽度用
-    ''' FFF3FP_MeasureTimedTextWidth 实测，按（文本,字体,字号,宽度）缓存。
-    ''' 本方法与绘制扩展同在字幕呈现的 PrecisionTimer 线程串行调用，缓存无需加锁
-    '''（SRT测量缓存 同款约定）。</summary>
-    Private Function 折行AI字幕文本(文本 As String, 字体 As String, 字号 As Single,
-                                最大宽度 As Single) As String()
-        Dim 宽度上限 = Math.Max(1, CInt(Math.Floor(最大宽度)))
-        Dim 键 = (文本, 字体, BitConverter.SingleToInt32Bits(字号), 宽度上限)
-        Dim 已折 As String() = Nothing
-        If AI字幕换行缓存.TryGetValue(键, 已折) Then Return 已折
-
-        Dim 实测宽度 As Single
-        If 测量AI字幕宽度(文本, 字体, 字号, 实测宽度) AndAlso 实测宽度 <= 宽度上限 Then
-            已折 = {文本}
-        Else
-            Dim starts = System.Globalization.StringInfo.ParseCombiningCharacters(文本)
-            Dim 结果 As New List(Of String)()
-            Dim 起点 = 0
-            While 起点 < starts.Length
-                While 起点 < starts.Length AndAlso Char.IsWhiteSpace(文本, starts(起点))
-                    起点 += 1
-                End While
-                If 起点 >= starts.Length Then Exit While
-
-                Dim 低 = 起点 + 1
-                Dim 高 = starts.Length
-                Dim 适配终点 = 低
-                While 低 <= 高
-                    Dim 中 = 低 + ((高 - 低) \ 2)
-                    If 测量AI字幕宽度(取得字素前缀(文本, starts, 起点, 中), 字体, 字号, 实测宽度) AndAlso
-                        实测宽度 <= 宽度上限 Then
-                        适配终点 = 中
-                        低 = 中 + 1
-                    Else
-                        高 = 中 - 1
-                    End If
-                End While
-
-                Dim 断点 = 适配终点
-                If 适配终点 < starts.Length Then
-                    For 索引 = 适配终点 - 1 To 起点 + 1 Step -1
-                        If Char.IsWhiteSpace(文本, starts(索引)) Then
-                            断点 = 索引
-                            Exit For
-                        End If
-                    Next
-                End If
-                Dim 行 = 取得字素前缀(文本, starts, 起点, 断点).TrimEnd()
-                If 行.Length > 0 Then 结果.Add(行)
-                起点 = Math.Max(断点, 起点 + 1)
-            End While
-            已折 = If(结果.Count = 0, {文本}, 结果.ToArray())
-        End If
-        If AI字幕换行缓存.Count >= AI字幕换行缓存上限 Then AI字幕换行缓存.Clear()
-        AI字幕换行缓存(键) = 已折
-        Return 已折
-    End Function
-
-    Private Shared Function 取得字素前缀(文本 As String, starts As Integer(),
-                                    起点 As Integer, 终点 As Integer) As String
-        Dim 起始索引 = starts(起点)
-        Dim 结束索引 = If(终点 < starts.Length, starts(终点), 文本.Length)
-        Return 文本.Substring(起始索引, 结束索引 - 起始索引)
-    End Function
-
-    Private Shared Function 测量AI字幕宽度(文本 As String, 字体 As String, 字号 As Single,
-                                      ByRef 宽度 As Single) As Boolean
-        宽度 = 0
-        Try
-            Return 播放器原生接口.FFF3FP_MeasureTimedTextWidth(
-                文本, 字体, 字号, 原生定时文字标志.无, 宽度) = 原生播放器结果.成功 AndAlso
-                Single.IsFinite(宽度) AndAlso 宽度 >= 0
-        Catch
-            Return False
-        End Try
-    End Function
-
-    Private Shared Function 测量AI字幕行高(文本 As String, 字体 As String, 字号 As Single,
-                                      最大宽度 As Single, 描边宽度 As Single) As Single
-        Try
-            Dim 原生 As New 原生定时文字测量 With {
-                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字测量)()), .版本 = 20UI}
-            If 播放器原生接口.FFF3FP_MeasureTimedText(
-                文本, 字体, 字号, 原生定时文字标志.无, Math.Max(最大宽度, 1.0F),
-                描边宽度, 0.0F, 0.0F, 0UI, 原生) = 原生播放器结果.成功 AndAlso
-                Single.IsFinite(原生.布局高度) AndAlso 原生.布局高度 > 0 Then
-                Return 原生.布局高度
-            End If
-        Catch
-        End Try
-        Return 字号 * 1.2F ' 测量不可用时的保守行高
-    End Function
-
     Private Sub 播放控制器_播放结束(sender As Object, e As EventArgs)
         If 光盘路径.是光盘路径(播放控制器.当前媒体路径) Then Return
         If 正在关闭 Then Return
         Dim 下一项 = 播放列表数据.移动到播放结束后的项目()
-        If 下一项 IsNot Nothing Then 播放控制器.打开媒体(下一项.路径)
+        If 下一项 IsNot Nothing Then
+            播放列表数据.取消自动扫描()
+            播放控制器.打开媒体(下一项.路径)
+        End If
     End Sub
 
     Private Sub 播放控制器_播放错误(sender As Object, e As 播放器错误事件参数)
@@ -1139,6 +1005,14 @@ Public Class Form1
         播放控制器?.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
     End Sub
 
+    Friend Sub 应用自动HDR模式设置()
+        播放控制器?.应用自动HDR模式设置()
+    End Sub
+
+    Friend Sub 应用空间音频设置()
+        播放控制器?.应用空间音频设置()
+    End Sub
+
     Friend Sub 应用字幕设置()
         播放控制器?.当前字幕?.SRT生成器?.设置样式(设置.实例对象.创建SRT字幕样式())
         字幕图层呈现器?.使图层失效()
@@ -1223,6 +1097,14 @@ Public Class Form1
                                   Color.FromArgb(251, 114, 153), Color.Silver)
     End Sub
 
+
+    ''' <summary>打开设置窗口并直接定位到「AI 字幕」页（「AI 字幕设置…」菜单项用）。
+    ''' 它在设置窗口里是一个独立分类，位于分类列表最末。</summary>
+    Friend Sub 打开Ai字幕设置()
+        If 设置窗口 Is Nothing OrElse 设置窗口.IsDisposed Then 设置窗口 = New Form设置()
+        设置窗口.显示Ai字幕页()
+    End Sub
+
     Private Sub 更新弹幕按钮可见性()
         Dim 当前弹幕 = 播放控制器?.当前弹幕
         Dim 有可用弹幕 = 当前弹幕 IsNot Nothing AndAlso 当前弹幕.数量 > 0
@@ -1298,7 +1180,10 @@ Public Class Form1
 
     Private Sub 播放相邻项目(方向 As Integer)
         Dim 项目 = 播放列表数据.移动到相邻项目(方向)
-        If 项目 IsNot Nothing Then 播放控制器.打开媒体(项目.路径)
+        If 项目 IsNot Nothing Then
+            播放列表数据.取消自动扫描()
+            播放控制器.打开媒体(项目.路径)
+        End If
     End Sub
 
     Private Sub MB_软件解码或硬件解码_Click(sender As Object, e As EventArgs) Handles MB_软件解码或硬件解码.Click
@@ -1466,6 +1351,7 @@ Public Class Form1
 
     Private Sub 播放列表请求播放(索引 As Integer)
         If 正在关闭 OrElse 索引 < 0 OrElse 索引 >= 播放列表数据.数量 Then Return
+        播放列表数据.取消自动扫描()
         播放列表数据.选择(索引)
         Dim 项目 = 播放列表数据.当前项目
         If 项目 IsNot Nothing Then 播放控制器.打开媒体(项目.路径)
@@ -1504,12 +1390,6 @@ Public Class Form1
         设置窗口.显示窗口()
     End Sub
 
-    ''' <summary>打开设置窗口并直接定位到“AI 字幕”页（“AI 字幕设置…”菜单项用）。
-    ''' 它在设置窗口里是一个独立分类，位于分类列表最末。</summary>
-    Friend Sub 打开Ai字幕设置()
-        If 设置窗口 Is Nothing OrElse 设置窗口.IsDisposed Then 设置窗口 = New Form设置()
-        设置窗口.显示Ai字幕页()
-    End Sub
 
     Private Sub MB_标题栏菜单按钮_Click(sender As Object, e As EventArgs) Handles MB_标题栏菜单按钮.Click
         光盘控制器?.请求扫描光驱()

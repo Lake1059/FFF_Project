@@ -45,8 +45,8 @@ Partial Class Form设置_视频超分辨率
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(10, 20, 20, 20)
-        ModernPanel1.Size = New Size(626, 469)
+        ModernPanel1.Padding = New Padding(15, 20, 20, 20)
+        ModernPanel1.Size = New Size(608, 432)
         ModernPanel1.TabIndex = 0
         ' 
         ' HCL_自动HDR状态读数
@@ -54,11 +54,12 @@ Partial Class Form设置_视频超分辨率
         HCL_自动HDR状态读数.AutoSize = True
         HCL_自动HDR状态读数.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HCL_自动HDR状态读数.BackColor = Color.Transparent
-        HCL_自动HDR状态读数.Location = New Point(20, 306)
+        HCL_自动HDR状态读数.Dock = DockStyle.Top
+        HCL_自动HDR状态读数.Location = New Point(15, 265)
         HCL_自动HDR状态读数.Margin = New Padding(2)
         HCL_自动HDR状态读数.Name = "HCL_自动HDR状态读数"
         HCL_自动HDR状态读数.Padding = New Padding(0, 10, 0, 0)
-        HCL_自动HDR状态读数.Size = New Size(80, 27)
+        HCL_自动HDR状态读数.Size = New Size(573, 27)
         HCL_自动HDR状态读数.TabIndex = 53
         HCL_自动HDR状态读数.Text = "状态：未读取"
         ' 
@@ -68,12 +69,13 @@ Partial Class Form设置_视频超分辨率
         MB_自动HDR调整与读数.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_自动HDR调整与读数.BorderRadius = 10
         MB_自动HDR调整与读数.BorderSize = 0
+        MB_自动HDR调整与读数.Dock = DockStyle.Top
         MB_自动HDR调整与读数.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_自动HDR调整与读数.Location = New Point(20, 272)
+        MB_自动HDR调整与读数.Location = New Point(15, 231)
         MB_自动HDR调整与读数.Margin = New Padding(2)
         MB_自动HDR调整与读数.Name = "MB_自动HDR调整与读数"
         MB_自动HDR调整与读数.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_自动HDR调整与读数.Size = New Size(596, 34)
+        MB_自动HDR调整与读数.Size = New Size(573, 34)
         MB_自动HDR调整与读数.TabIndex = 52
         MB_自动HDR调整与读数.Text = "调整与内核读数"
         ' 
@@ -88,37 +90,40 @@ Partial Class Form设置_视频超分辨率
         MCK_启用视频自动HDR.BoxSize = 24
         MCK_启用视频自动HDR.BoxTextSpacing = 10
         MCK_启用视频自动HDR.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_启用视频自动HDR.Location = New Point(20, 238)
+        MCK_启用视频自动HDR.Dock = DockStyle.Top
+        MCK_启用视频自动HDR.Location = New Point(15, 197)
         MCK_启用视频自动HDR.Name = "MCK_启用视频自动HDR"
         MCK_启用视频自动HDR.Padding = New Padding(0, 0, 0, 10)
-        MCK_启用视频自动HDR.Size = New Size(250, 34)
+        MCK_启用视频自动HDR.Size = New Size(573, 34)
         MCK_启用视频自动HDR.TabIndex = 51
-        MCK_启用视频自动HDR.Text = "请求自动 HDR（SDR → HDR10）"
+        MCK_启用视频自动HDR.Text = "请求自动 HDR"
         ' 
         ' HCL_自动HDR说明
         ' 
         HCL_自动HDR说明.AutoSize = True
         HCL_自动HDR说明.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HCL_自动HDR说明.BackColor = Color.Transparent
+        HCL_自动HDR说明.Dock = DockStyle.Top
         HCL_自动HDR说明.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        HCL_自动HDR说明.Location = New Point(20, 168)
+        HCL_自动HDR说明.Location = New Point(15, 146)
         HCL_自动HDR说明.Margin = New Padding(2)
         HCL_自动HDR说明.Name = "HCL_自动HDR说明"
         HCL_自动HDR说明.Padding = New Padding(0, 20, 0, 10)
-        HCL_自动HDR说明.Size = New Size(478, 70)
+        HCL_自动HDR说明.Size = New Size(573, 51)
         HCL_自动HDR说明.TabIndex = 50
-        HCL_自动HDR说明.Text = "<span style=""font-size:13; color:Silver"">NVIDIA 视频处理器私有流扩展自动 HDR</span><br>把 SDR 帧转换为 HDR10（BT.2020 + PQ，1000 nit）强度档位归 NVIDIA App"
+        HCL_自动HDR说明.Text = "<span style=""font-size:12; color:Silver"">RTX 视频增强：HDR</span>   在 NVIDIA APP 中调整详细设置"
         ' 
         ' HCL_状态读数
         ' 
         HCL_状态读数.AutoSize = True
         HCL_状态读数.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HCL_状态读数.BackColor = Color.Transparent
-        HCL_状态读数.Location = New Point(20, 141)
+        HCL_状态读数.Dock = DockStyle.Top
+        HCL_状态读数.Location = New Point(15, 119)
         HCL_状态读数.Margin = New Padding(2)
         HCL_状态读数.Name = "HCL_状态读数"
         HCL_状态读数.Padding = New Padding(0, 10, 0, 0)
-        HCL_状态读数.Size = New Size(80, 27)
+        HCL_状态读数.Size = New Size(573, 27)
         HCL_状态读数.TabIndex = 43
         HCL_状态读数.Text = "状态：未读取"
         ' 
@@ -128,12 +133,13 @@ Partial Class Form设置_视频超分辨率
         MB_调整与读数.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         MB_调整与读数.BorderRadius = 10
         MB_调整与读数.BorderSize = 0
+        MB_调整与读数.Dock = DockStyle.Top
         MB_调整与读数.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_调整与读数.Location = New Point(20, 107)
+        MB_调整与读数.Location = New Point(15, 85)
         MB_调整与读数.Margin = New Padding(2)
         MB_调整与读数.Name = "MB_调整与读数"
         MB_调整与读数.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_调整与读数.Size = New Size(596, 34)
+        MB_调整与读数.Size = New Size(573, 34)
         MB_调整与读数.TabIndex = 42
         MB_调整与读数.Text = "调整与内核读数"
         ' 
@@ -148,10 +154,11 @@ Partial Class Form设置_视频超分辨率
         MCK_启用RTX视频超分辨率.BoxSize = 24
         MCK_启用RTX视频超分辨率.BoxTextSpacing = 10
         MCK_启用RTX视频超分辨率.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_启用RTX视频超分辨率.Location = New Point(20, 73)
+        MCK_启用RTX视频超分辨率.Dock = DockStyle.Top
+        MCK_启用RTX视频超分辨率.Location = New Point(15, 51)
         MCK_启用RTX视频超分辨率.Name = "MCK_启用RTX视频超分辨率"
         MCK_启用RTX视频超分辨率.Padding = New Padding(0, 0, 0, 10)
-        MCK_启用RTX视频超分辨率.Size = New Size(180, 34)
+        MCK_启用RTX视频超分辨率.Size = New Size(573, 34)
         MCK_启用RTX视频超分辨率.TabIndex = 41
         MCK_启用RTX视频超分辨率.Text = "请求 RTX 视频超分辨率"
         ' 
@@ -160,21 +167,22 @@ Partial Class Form设置_视频超分辨率
         HCL_说明.AutoSize = True
         HCL_说明.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HCL_说明.BackColor = Color.Transparent
+        HCL_说明.Dock = DockStyle.Top
         HCL_说明.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        HCL_说明.Location = New Point(20, 40)
+        HCL_说明.Location = New Point(15, 20)
         HCL_说明.Margin = New Padding(2)
         HCL_说明.Name = "HCL_说明"
         HCL_说明.Padding = New Padding(0, 0, 0, 10)
-        HCL_说明.Size = New Size(301, 33)
+        HCL_说明.Size = New Size(573, 31)
         HCL_说明.TabIndex = 40
-        HCL_说明.Text = "<span style=""font-size:13; color:Silver"">RTX 视频超分辨率</span>   由内核逐帧判定是否使用"
+        HCL_说明.Text = "<span style=""font-size:12; color:Silver"">RTX 视频增强：超分辨率</span>   在 NVIDIA APP 中调整详细设置"
         ' 
         ' Form设置_视频超分辨率
         ' 
         AutoScaleDimensions = New SizeF(96F, 96F)
         AutoScaleMode = AutoScaleMode.Dpi
         BackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))
-        ClientSize = New Size(626, 469)
+        ClientSize = New Size(608, 432)
         Controls.Add(ModernPanel1)
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver

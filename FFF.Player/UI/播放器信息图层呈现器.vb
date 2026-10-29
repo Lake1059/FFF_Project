@@ -341,7 +341,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             ' RTX 视频超分辨率与 RTX 自动 HDR（TrueHDR）各一行。这两行存在的理由相同：
             ' 内核逐帧跳过时**完全静默**（软解源没有 D3D11_BIND_DECODER、窗口没放大、
             ' 输出不是 10 位 HDR 契约……），用户能看到的只有"勾了但没效果"。
-            ' 文本由 播放器会话 侧组好：判词（已激活/已启用 · 未开启 · 未生效）+ 一句人话，
+            ' 文本由 播放器会话 侧组好：判词（已激活/已启用 · 未生效）+ 一句人话，
             ' 这里只按判词着色——判词取自内核的 生效 字段，不是用户的勾选态。
             Dim 超分行 = 安全获取(获取超分状态)
             If 超分行 IsNot Nothing Then
@@ -349,7 +349,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             End If
             Dim 自动HDR行 = 安全获取(获取自动HDR状态)
             If 自动HDR行 IsNot Nothing Then
-                添加配对行如果有值(结果, "自动HDR：", 自动HDR行, 判词颜色(自动HDR行))
+                添加配对行如果有值(结果, "自动 HDR：", 自动HDR行, 判词颜色(自动HDR行))
             End If
         End If
 
@@ -406,25 +406,6 @@ Friend NotInheritable Class 播放器信息图层呈现器
             $"延迟 {图层延迟(弹幕状态)}"))
         结果.Add(配对行("字幕：", 字幕文本, 青色, 8))
         结果.Add(配对行("弹幕：", 弹幕文本, 橙色))
-        Return 结果
-    End Function
-
-    Friend Function 读取调试文本行(信息 As 媒体信息, 快照 As 播放器快照,
-                                 媒体路径 As String) As IReadOnlyList(Of String)
-        Dim 行 = 创建调试行(信息, 快照, 媒体路径)
-        Dim 结果(行.Count - 1) As String
-        For 行索引 = 0 To 行.Count - 1
-            Dim 段 = 行(行索引).文本段
-            If 段.Length = 1 Then
-                结果(行索引) = 段(0).文本
-            Else
-                Dim 文本 As New Text.StringBuilder()
-                For 段索引 = 0 To 段.Length - 1
-                    文本.Append(段(段索引).文本)
-                Next
-                结果(行索引) = 文本.ToString()
-            End If
-        Next
         Return 结果
     End Function
 
@@ -514,12 +495,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return New 信息行(空隙前, New 文本段(标签, 标签颜色), New 文本段(值, 值颜色))
     End Function
 
-    ''' <summary>RTX 两行判词的配色。跳过态用告警色而不是青色，是为了不让它被读成又一条
-    ''' 常规读数；未开启是常规态（超分与自动 HDR 默认都关），涂成告警色等于把常规读数
-    ''' 报成异常——正是本文件给告警色写的那条理由反过来。判词由 播放器会话 侧固定三态开头。</summary>
+    ''' <summary>RTX 两行判词的配色：未生效用告警色，已生效用绿色。</summary>
     Friend Shared Function 判词颜色(文本 As String) As UInteger
         If 文本.StartsWith("未生效", StringComparison.Ordinal) Then Return 告警色
-        If 文本.StartsWith("未开启", StringComparison.Ordinal) Then Return 青色
         Return 绿色
     End Function
 
@@ -657,14 +635,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
 
     Private Shared Function 音频输入(流 As 媒体流信息, 实时比特率 As ULong) As String
         ' 编码名打头（AAC/OPUS/EAC3…）：输入行的身份来自编码，采样/声道是它的属性。
-        ' 位深只对无损/PCM 流有意义：有损编码（AAC 等）的 bitsPerCodedSample 是
-        ' 编码槽宽（32 = fltp 的尺寸），不是源位深，显示出来就是假信息。
         Dim 编码 = If(String.IsNullOrWhiteSpace(流.编码), String.Empty, 流.编码.ToUpperInvariant())
-        Dim 位深 As String = String.Empty
-        If 流.无损 OrElse 流.压缩模式 <> "有损" Then
-            Dim 位 = If(流.原始采样位数 > 0, 流.原始采样位数, 流.编码采样位数)
-            If 位 > 0 Then 位深 = $"位深 {位}bit"
-        End If
+        Dim 位深 = 音频采样格式化.输入位深(流)
         ' 声道数带布局（5.1 / 7.1.4 / 6.1…，FFmpeg 布局描述原样）；mono/stereo
         ' 不加——声道数 1/2 已经说明，括号只服务多声道布局这层信息。
         Dim 声道 As String = String.Empty
@@ -678,7 +650,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return 合并字段(
             编码,
             If(流.采样率 > 0, $"采样 {流.采样率}Hz", String.Empty),
-            位深,
+            If(位深.Length > 0, "位深 " & 位深, String.Empty),
             声道,
             If(实时比特率 > 0, $"实时码率 {格式化比特率(实时比特率)}", String.Empty))
     End Function

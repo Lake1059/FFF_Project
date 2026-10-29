@@ -108,24 +108,20 @@ Friend NotInheritable Class Ai字幕管道
     ''' <summary>
     ''' 启动 worker 并开泵。已在运行则直接返回 True。
     ''' </summary>
-    ''' <param name="配置">已校验通过的扩展包；worker / python / 模型 / llama-server 全在里面。</param>
+    ''' <param name="配置">已校验通过的扩展包；worker / python / 模型目录全在里面。</param>
     ''' <param name="窗口覆盖">大于 0 时覆盖包清单的窗口秒；否则跟随清单。</param>
     ''' <param name="步长覆盖">大于 0 时覆盖包清单的步长秒；否则跟随清单（仍会压到不超过窗口）。</param>
-    ''' <param name="后端">推理后端（Ai字幕后端 的标识）。设备探测与回落由 worker 问
-    ''' llama-server 的 --list-devices 完成，本体不猜设备名。</param>
-    ''' <param name="序号">同一后端下的第几块设备；负数 = 不指定。</param>
-    ''' <param name="Gpu层数">卸载到显卡的层数；负数 = 自动（GPU 后端全卸、CPU 不卸）。
-    ''' 显存吃紧的机器填小数（模型 28 层，填 16 = 一半权重在显存）。</param>
-    ''' <param name="语言">字幕语言标识（zh/en/…）或 auto。串到 worker 的 --language，
-    ''' 由它换成模型认识的英文名 —— 实测 llama-server 只认英文名，ISO 代码会被忽略。</param>
-    ''' <param name="用户附加参数">设置页高级框里用户填的 llama-server 附加参数（每行一个
-    ''' token，# 开头是注释）。与清单 llamaArgs 合并后排后、同名 flag 覆盖清单的
-    ''' （见 <see cref="合并附加参数"/>）——换模型调 ctx-size / temp 时用户不必改包。</param>
+    ''' <param name="后端">推理后端（Ai字幕推理档 的标识：auto / cpu / cuda / dml /
+    ''' ov-cpu / ov-gpu / ov-npu）。设备维只决定下拉列出什么，真正传参的就是它；
+    ''' 加载失败与金样本自检全部在 worker 进程内完成。</param>
+    ''' <param name="语言">字幕语言标识（zh/en/…）或 auto，串到 worker 的 --language。</param>
+    ''' <param name="模型档">模型档名（清单 models 的键）。空或未命中 = 默认档。</param>
+    ''' <param name="线程数">推理线程数。0 = 交给 worker 取 min(6, 核数)。</param>
     Public Function 启动(配置 As Ai字幕包配置, 窗口覆盖 As Double, 步长覆盖 As Double,
-                        后端 As String, 序号 As Integer, Gpu层数 As Integer,
+                       后端 As String,
                         Optional 语言 As String = "",
                         Optional 模型档 As String = "",
-                        Optional 用户附加参数 As String = "") As Boolean
+                        Optional 线程数 As Integer = 0) As Boolean
         If _已释放 Then Return False
         If 配置 Is Nothing Then Return False
         If String.IsNullOrWhiteSpace(配置.Worker脚本) OrElse Not IO.File.Exists(配置.Worker脚本) Then
@@ -136,55 +132,33 @@ Friend NotInheritable Class Ai字幕管道
         Dim 步长秒 = If(步长覆盖 > 0, 步长覆盖, 配置.步长秒)
         ' 步长大于窗口会在窗口之间留下音频空洞，这里再压一次（包与覆盖各自都已校过，但两者组合时可能出现）。
         If 步长秒 > 窗口秒 Then 步长秒 = 窗口秒
-        ' worker 的 --model-dir 仍是必填项：包没写 model 时给它包目录（它会按默认量化档自己拼）；
-        ' 写了就给模型所在目录，再由 --model 精确指定文件。
-        ' 模型档：档名命中就用那一档的权重；未命中（老设置里的档名随换包消失）回落到默认档。
-        ' 绝不因为档名对不上就拒绝启动 —— 那会让用户以为整个功能坏了。
-        Dim 生效模型 = 配置.模型文件
-        Dim 生效投影 = 配置.投影文件
+        ' worker 的 --model-dir 直接就是模型目录：sherpa-onnx 按固定文件名找
+        ' conv_frontend.onnx / encoder.onnx / decoder.onnx / tokenizer/。不再有
+        ' --model / --mmproj 两个独立路径，也不再需要临时目录 —— 音频以 numpy
+        ' 数组进推理、不落盘（2026-10-23「系统临时目录整个不可用导致字幕全白」
+        ' 那个坑随 wav 文件一起消失了）。
+        Dim 模型目录 = 配置.模型目录
         Dim 档说明 = "默认档"
         If Not String.IsNullOrWhiteSpace(模型档) Then
             Dim 档命中 As Boolean
             Dim 档 = 配置.取模型档(模型档, 档命中)
-            If 档命中 Then
-                生效模型 = 档.模型文件
-                生效投影 = 档.投影文件
+            If 档命中 AndAlso Not String.IsNullOrWhiteSpace(档.模型目录) Then
+                模型目录 = 档.模型目录
                 档说明 = 档.档名
             Else
                 档说明 = $"默认档（{模型档} 不在本包内，已回落）"
             End If
         End If
-        Dim 模型目录 = 配置.包目录
-        If Not String.IsNullOrWhiteSpace(生效模型) Then
-            Try
-                模型目录 = IO.Path.GetDirectoryName(配置.模型文件)
-            Catch
-            End Try
-        End If
-        If String.IsNullOrWhiteSpace(模型目录) Then 模型目录 = 配置.包目录
+        ' 宿主侧已经按「设备 × 后端」解析成一个标识，这里只做一次防御性归位：
+        ' 空串当 auto，大小写拉平。真实的设备探测与降档都在 worker 里。
+        Dim 推理档 = If(String.IsNullOrWhiteSpace(后端), Ai字幕推理档.后端自动,
+                        后端.Trim().ToLowerInvariant())
         SyncLock 锁
             If _进程 IsNot Nothing AndAlso Not _进程.HasExited Then Return True
-            ' 临时目录挑选必须在存活检查之后：媒体已打开会让 启动() 重入一次，
-            ' worker 活着时根本用不到新临时目录，却要白扫一遍候选目录。2026-10-25
-            ' 实测 E 盘扩展包目录的探测被文件过滤驱动拒绝（UnauthorizedAccessException），
-            ' 于是每次切文件/切解码器都刷一条告警——挪下来就只在真正要起 worker 时探测。
-            ' 候选与回退语义不变：扩展包目录下的 tmp → 程序目录下的 tmp，都不可写
-            ' 就不传 --tmp-dir，worker 有自己的回退链兜底（脚本旁 tmp → cwd → 系统临时目录）。
-            Dim 临时根 = 挑选临时目录(IO.Path.Combine(配置.包目录, "tmp"))
-            If String.IsNullOrEmpty(临时根) Then
-                临时根 = 挑选临时目录(IO.Path.Combine(程序目录, "tmp"))
-            End If
-            ' 收编残留的上一代取数线程。worker 在空转期死亡时（暂停/播完/tap 环
-            ' 长期无数据），旧 pump 的写帧失败这条退出路径走不到，它会一直活在
-            ' 空转等待里；不先等它退场就起新线程，同一 stdin 上会有两条取数线程
-            ' 交错写帧，帧协议直接打碎（worker 侧 json.loads 必炸）。停止事件在
-            ' 这里短暂置位只用于收人，随后立刻 Reset，新线程看到的是干净状态。
-            If _pump线程 IsNot Nothing AndAlso _pump线程.IsAlive Then
-                _停止事件.Set()
-                If Not _pump线程.Join(1000) Then
-                    记录("AI 字幕：旧取数线程 1s 内未退场（将在下轮存活检查自灭）")
-                End If
-            End If
+            ' 合并裁定（forkfb/prbranch 3e0b27d / cf7b6c6）：llama 版的模型目录推导与
+            ' 临时目录探测不适用于 sherpa 版 —— 音频以 numpy 进推理不落盘，worker
+            ' 没有 --tmp-dir 参数；探测反而正是 cf7b6c6 要消掉的噪声源。代次 gate
+            ' （_结果线程代）已随自动合并进入本文件，那个才是两边都要的修复。
             _停止事件.Reset()
             Dim 启动信息 As New ProcessStartInfo With {
                 .FileName = If(String.IsNullOrWhiteSpace(配置.Python), "python", 配置.Python),
@@ -200,81 +174,36 @@ Friend NotInheritable Class Ai字幕管道
             启动信息.ArgumentList.Add(配置.Worker脚本)
             启动信息.ArgumentList.Add("--model-dir")
             启动信息.ArgumentList.Add(模型目录)
-            If Not String.IsNullOrWhiteSpace(生效模型) Then
-                启动信息.ArgumentList.Add("--model")
-                启动信息.ArgumentList.Add(生效模型)
-            End If
-            If Not String.IsNullOrWhiteSpace(生效投影) Then
-                启动信息.ArgumentList.Add("--mmproj")
-                启动信息.ArgumentList.Add(生效投影)
-            End If
             启动信息.ArgumentList.Add("--window")
             启动信息.ArgumentList.Add(窗口秒.ToString("0.###", Globalization.CultureInfo.InvariantCulture))
             启动信息.ArgumentList.Add("--step")
             启动信息.ArgumentList.Add(步长秒.ToString("0.###", Globalization.CultureInfo.InvariantCulture))
-            If Not String.IsNullOrWhiteSpace(配置.LlamaServer) Then
-                启动信息.ArgumentList.Add("--llama-server")
-                启动信息.ArgumentList.Add(配置.LlamaServer)
+            启动信息.ArgumentList.Add("--device")
+            启动信息.ArgumentList.Add(推理档)
+            ' llama 引擎的原生运行时（llama-server.exe）由清单指定。worker 拿不到它
+            ' 就只能猜 runtime/vulkan —— 包作者把运行时放到别处时猜错，报错会很难懂。
+            启动信息.ArgumentList.Add("--engine")
+            启动信息.ArgumentList.Add(配置.引擎)
+            If Not String.IsNullOrWhiteSpace(配置.运行时目录) Then
+                启动信息.ArgumentList.Add("--runtime-dir")
+                启动信息.ArgumentList.Add(配置.运行时目录)
             End If
-            启动信息.ArgumentList.Add("--device-backend")
-            启动信息.ArgumentList.Add(Ai字幕后端.规整(后端))
             ' auto 也显式传：让 worker 日志里能看出这一路到底有没有语言提示。
             启动信息.ArgumentList.Add("--language")
             启动信息.ArgumentList.Add(Ai字幕语言.传参值(语言))
-            ' 0 = 让 worker 自己挑空闲端口。固定端口在多实例下必冲突（同时开两个
-            ' 播放器窗口、或双路对比时各起一份 worker），而端口本身对宿主不可见。
-            启动信息.ArgumentList.Add("--port")
-            启动信息.ArgumentList.Add("0")
-            If 序号 >= 0 Then
-                启动信息.ArgumentList.Add("--device-index")
-                启动信息.ArgumentList.Add(序号.ToString(Globalization.CultureInfo.InvariantCulture))
+            ' 负数 / 脏值一律当 0（自动）：num_threads 传负数会被 ORT 当成非法值。
+            启动信息.ArgumentList.Add("--threads")
+            启动信息.ArgumentList.Add(Math.Max(0, 线程数).ToString(Globalization.CultureInfo.InvariantCulture))
+            记录($"AI 字幕：模型 {档说明}（{模型目录}）")
+            记录($"AI 字幕：推理后端 {Ai字幕推理档.后端显示名(推理档, 配置.引擎)}（--device {推理档}，" &
+                 $"线程 {(If(线程数 > 0, 线程数.ToString(Globalization.CultureInfo.InvariantCulture), "自动"))}）")
+            If Not Ai字幕推理档.当前worker可用(推理档, 配置.引擎) Then
+                ' worker 不认这个后端（例如 GGUF 包收到 dml），它会按 auto 处理。
+                ' 这句必须提前说：否则用户会以为选了 DirectML 就在 DirectML 上跑。
+                记录($"AI 字幕：{配置.引擎} 引擎不认后端 {推理档}，会被按 auto 处理")
             End If
-            ' 层数只在用户显式指定时传：不传就由 worker 按后端自动决策
-            '（GPU 全卸 / CPU 不卸），默认行为完全不变。
-            If Gpu层数 >= 0 Then
-                启动信息.ArgumentList.Add("--ngl")
-                启动信息.ArgumentList.Add(Gpu层数.ToString(Globalization.CultureInfo.InvariantCulture))
-            End If
-            If 配置.服务器映射.Count > 0 Then
-                ' 换后端 = 换二进制，所以把整张"后端 → llama-server"表交给 worker。
-                启动信息.ArgumentList.Add("--llama-servers")
-                启动信息.ArgumentList.Add(JsonSerializer.Serialize(配置.服务器映射))
-            End If
-            ' 扩展包逃生门：清单 llamaArgs + 设置页用户框（Ai字幕附加参数）两个来源，
-            ' 合并后逐 token 映射为 --llama-arg，worker 的固定默认值遇同名 flag 让位。
-            ' 换模型要调 ctx-size / temp / 后端专属开关时走这里，本体与 worker 都不用改。
-            ' 等号形式不是风格选择：argparse 的 append action 不收以 -- 开头的值，
-            ' 拆成两个 token 传（"--llama-arg" "--ctx-size"）会被判 expected one
-            ' argument 直接 exit 2——文档的标准示例 ["--ctx-size","8192"] 恰恰
-            ' 每个值都以 -- 开头。"--llama-arg=--ctx-size" 才收集得到（2026-10-25
-            ' 审查实测：拆分形式 SystemExit(2)，等号形式 Namespace 正常）。
-            Dim 用户参数 = 解析附加参数(用户附加参数)
-            Dim 合并参数 = 合并附加参数(配置.额外参数, 用户参数)
-            For Each 附加 In 合并参数
-                启动信息.ArgumentList.Add("--llama-arg=" & 附加)
-            Next
-            If 合并参数.Count > 0 Then
-                记录($"AI 字幕：llama-server 附加参数 {合并参数.Count} 条" &
-                     $"（清单 {配置.额外参数.Count} + 用户 {用户参数.Count}，同名 flag 以用户为准）")
-            End If
-            If Not String.IsNullOrEmpty(临时根) Then
-                ' 显式指定 + 把子进程的 TEMP/TMP 一并指过去：llama-server 是 worker
-                ' 的子进程，环境变量整棵树继承，哪一层要写临时文件都有着落。
-                启动信息.ArgumentList.Add("--tmp-dir")
-                启动信息.ArgumentList.Add(临时根)
-                启动信息.EnvironmentVariables("TEMP") = 临时根
-                启动信息.EnvironmentVariables("TMP") = 临时根
-            End If
-            记录($"AI 字幕：模型 {档说明}" & If(模型目录 <> 配置.包目录, $"（{模型目录}）", ""))
-            记录($"AI 字幕：临时目录 {If(String.IsNullOrEmpty(临时根), "系统默认（worker 自选）", 临时根)}")
-            记录($"AI 字幕：推理后端 {Ai字幕后端.规整(后端)}" &
-                 If(序号 >= 0, $"，设备序号 {序号}", "") &
-                 If(配置.服务器映射.Count > 0, $"（包内专用二进制 {配置.服务器映射.Count} 份）", "（用包默认二进制）"))
             记录($"AI 字幕：字幕语言 {Ai字幕语言.显示名(语言)}" &
-                 If(设置.实例对象.Ai字幕仅所选语言, "（只显示该语言）", "（提示，不筛除）"))
-            ' 上一代 worker 的 Process 包装在替换前释放：进程已死但句柄还捏在
-            ' 字段里，全靠终结器回收的话，改设置反复重启会一路累积。
-            _进程?.Dispose()
+                 If(设置.实例对象.Ai字幕仅所选语言, "（要求只显示该语言）", "（提示，不筛除）"))
             Try
                 _进程 = Process.Start(启动信息)
             Catch ex As Exception
@@ -327,11 +256,6 @@ Friend NotInheritable Class Ai字幕管道
         Catch ex As Exception
             记录($"AI 字幕：停止时异常 {ex.Message}")
         End Try
-        Try
-            进程本地.Dispose()
-        Catch
-            ' 已由内核/子进程管理方先收走等场景，无碍。
-        End Try
         状态机?.通知Worker已退出()
         记录("AI 字幕：worker 已停止")
     End Sub
@@ -351,16 +275,6 @@ Friend NotInheritable Class Ai字幕管道
                 ' 若让异常杀死取数线程，切到下一个文件时 worker 明明在运行却
                 ' 再也收不到帧，而 启动() 又会因"已在运行"直接返回 True。
                 Try
-                    ' worker 死了本线程必须退场。"写帧失败退出"只在有数据可写时
-                    ' 走得到；空转期（暂停/播完/环无数据）worker 死亡走不到那里，
-                    ' 而残留的旧取数线程会让下一次 启动() 变成双写 stdin。读到已
-                    ' 释放的包装实例属停止竞态，落进下方兜底 Catch 后下轮必走
-                    ' Nothing 分支干净退场。
-                    Dim 当前进程 = _进程
-                    If 当前进程 Is Nothing OrElse 当前进程.HasExited Then
-                        记录("AI 字幕：worker 已不在，取数线程退场")
-                        Return
-                    End If
                     Dim 句柄 = 句柄提供器()
                     If 句柄 Is Nothing OrElse 句柄.IsInvalid Then
                         If _停止事件.Wait(200) Then Return
@@ -466,7 +380,7 @@ Friend NotInheritable Class Ai字幕管道
                 Dim 行 = 读取器.ReadLine()
                 If 行 Is Nothing Then Exit While     ' EOF：worker 退出
                 If 行.Length = 0 Then Continue While
-                处理结果行(行, 代)
+                处理结果行(行)
             End While
             记录("AI 字幕：worker 输出流结束")
         Catch ex As Exception
@@ -481,7 +395,7 @@ Friend NotInheritable Class Ai字幕管道
         End Try
     End Sub
 
-    Private Sub 处理结果行(行 As String, 代 As Integer)
+    Private Sub 处理结果行(行 As String)
         Try
             Using 文档 = JsonDocument.Parse(行)
                 Dim 根 = 文档.RootElement
@@ -521,17 +435,7 @@ Friend NotInheritable Class Ai字幕管道
                             ' 但必须让"这一窗推理失败、我继续重试"（fatal=false）走开——否则本地 HTTP
                             ' 抖一次就把字幕永久关掉，而 worker 其实活得好好的。
                             If 状态 = "error" AndAlso 取布尔(根, "fatal", True) Then
-                                ' 代次 gate 与 EOF 收尾同款：停止/重启瞬间旧 worker
-                                ' 在途的第 5 连败 fatal 行会晚于新 worker 启动才被
-                                ' 旧结果线程处理，裸置"已退出"会把新 worker 的全部
-                                ' 结果当噪声丢掉——字幕永久沉默且无日志（与 2026-10-25
-                                ' 修的 EOF 收尾同类残洞）。只有"当前这一代"线程亲历
-                                ' 的死亡才作数。fatal 还必须上屏：只进日志的话用户
-                                ' 面对的是空白字幕+菜单仍打勾+零解释。
-                                If Volatile.Read(_结果线程代) = 代 Then
-                                    状态机?.通知Worker已退出()
-                                    记警告(If(String.IsNullOrEmpty(详情), "worker 已退出", $"worker 已退出：{详情}"))
-                                End If
+                                状态机?.通知Worker已退出()
                             End If
                         Case "stats"
                             SyncLock 诊断锁
@@ -675,81 +579,6 @@ Friend NotInheritable Class Ai字幕管道
         Return 缺省
     End Function
 
-    ''' <summary>
-    ''' 挑一个可写的临时目录根（不存在则创建；以"写探针文件再删掉"验证真的可写——
-    ''' 只建目录不够：只读媒体/权限异常的盘上 CreateDirectory 也可能失败或建出来也写不了）。
-    ''' 任一候选不可写就换下一个，全不可写返回空串：调用方据此不传 --tmp-dir，
-    ''' 由 worker 的回退链（系统临时目录 → 脚本旁 tmp → cwd）自己兜底。
-    ''' </summary>
-    Private Function 挑选临时目录(ParamArray 候选 As String()) As String
-        For Each 目录 In 候选
-            If String.IsNullOrWhiteSpace(目录) Then Continue For
-            Try
-                IO.Directory.CreateDirectory(目录)
-                Dim 探针 = IO.Path.Combine(目录, ".writable-probe")
-                IO.File.WriteAllText(探针, "ok")
-                IO.File.Delete(探针)
-                Return 目录
-            Catch ex As Exception
-                记录($"AI 字幕：临时目录候选不可写（{目录}）{ex.GetType().Name} {ex.Message}")
-            End Try
-        Next
-        Return String.Empty
-    End Function
-
-    ''' <summary>解析用户附加参数文本（设置页高级框）：每行一个 token。空行忽略；
-    ''' # 开头是注释行 —— 写给用户自己看的说明，不进 llama-server 命令行；
-    ''' 其余 Trim 后原样收取（"--ctx-size" 与 "8192" 各一行，或单行 "--ctx-size=8192"）。
-    ''' Friend：设置页状态行要数一眼用户填了几条（不解析就得在两处各写一遍）。</summary>
-    Friend Shared Function 解析附加参数(文本 As String) As List(Of String)
-        Dim 结果 As New List(Of String)
-        If String.IsNullOrWhiteSpace(文本) Then Return 结果
-        For Each 行 In 文本.Split(New String() {vbCrLf, vbLf, vbCr}, StringSplitOptions.RemoveEmptyEntries)
-            Dim 值 = 行.Trim()
-            ' RemoveEmptyEntries 只挡"真空行"，挡不住纯空格行——Trim 后是空串的
-            ' 一律跳过：塞个空 token 进 --llama-arg=，llama-server 会当位置参数报错。
-            If 值.Length = 0 Then Continue For
-            If 值.StartsWith("#"c, StringComparison.Ordinal) Then Continue For
-            结果.Add(值)
-        Next
-        Return 结果
-    End Function
-
-    ''' <summary>合并包清单与用户的附加参数：用户参数排后（llama-server 侧后者生效），
-    ''' 且用户点名过的 flag 连同它在包参数里的值一起剔除 —— 即"用户覆盖包"。
-    ''' 与 worker 的 <c>_user_first</c> 同一套语义（值 = 下一个不以 -- 开头的 token），
-    ''' 两边一致才不会出现"清单给 4096、用户给 8192，命令行两个都在"——某些 llama-server
-    ''' 版本对重复 --ctx-size 直接报错，那会让用户以为整个功能坏了。</summary>
-    Private Shared Function 合并附加参数(包参数 As IList(Of String), 用户参数 As IList(Of String)) As List(Of String)
-        If 用户参数.Count = 0 Then Return New List(Of String)(包参数)
-        Dim 点名 As New HashSet(Of String)(StringComparer.Ordinal)
-        For Each 项 In 用户参数
-            If 项.StartsWith("--", StringComparison.Ordinal) Then 点名.Add(取Flag名(项))
-        Next
-        Dim 结果 As New List(Of String)
-        Dim i As Integer = 0
-        While i < 包参数.Count
-            Dim 令牌 = 包参数(i)
-            If 令牌.StartsWith("--", StringComparison.Ordinal) AndAlso 点名.Contains(取Flag名(令牌)) Then
-                ' 删 flag 顺带删它的值：只删 flag 会把包里的旧值留给 llama-server 当位置
-                ' 参数，报出来的错比"重复参数"更难懂。等号形态（--flag=value）是单 token，
-                ' 下一个 token 必是别的 flag，不会多吃。
-                i += If(i + 1 < 包参数.Count AndAlso
-                        Not 包参数(i + 1).StartsWith("--", StringComparison.Ordinal), 2, 1)
-                Continue While
-            End If
-            结果.Add(令牌)
-            i += 1
-        End While
-        结果.AddRange(用户参数)
-        Return 结果
-    End Function
-
-    ''' <summary>token 的 flag 名：--flag=value 取 --flag 部分（等号形态在用户框里很常见）。</summary>
-    Private Shared Function 取Flag名(令牌 As String) As String
-        Dim 等号 = 令牌.IndexOf("="c)
-        Return If(等号 > 0, 令牌.Substring(0, 等号), 令牌)
-    End Function
 
     Private Sub 记录(消息 As String)
         Try

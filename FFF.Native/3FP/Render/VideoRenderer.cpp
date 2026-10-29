@@ -2702,7 +2702,9 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       playbackWorkPending_(0),
       interactiveMove_(false),
       lyricsLayoutEnabled_(false),
-      subtitleLayoutEnabled_(false),
+      subtitleOverlayEnabled_(false),
+      subtitleOverlayCanvasWidth_(0),
+      subtitleOverlayCanvasHeight_(0),
       coverBackdropBlurRadiusBits_(std::bit_cast<std::uint32_t>(30.0f)),
       coverBackdropBlurPasses_(3), coverBackdropDownsampleFactor_(4),
       coverBackdropTintArgb_(0x78000000u),
@@ -3291,6 +3293,14 @@ bool PlayerVideoRenderer::OutputSupportsHdr() noexcept {
     }
     hdrProcessor_.SetDisplayCapabilities({});
     return forceHdrOutput_;
+}
+
+bool PlayerVideoRenderer::OwnsD3D11Texture(ID3D11Texture2D* const texture) const noexcept {
+    if (!texture) return false;
+    ComPtr<ID3D11Device> source;
+    texture->GetDevice(&source);
+    std::lock_guard deviceLock(deviceMutex_);
+    return source.Get() == device_;
 }
 
 FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** output) noexcept {
@@ -5695,13 +5705,25 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
                 coverBackdropBlurSettingsGeneration_.fetch_add(1, std::memory_order_acq_rel);
             if (blurSettingsChanged) RequestCoverBackdropRender(true);
         } else if (slot == TimedTextLayerSlot::Subtitle) {
-            subtitleLayoutEnabled_.store(!retained->commands.empty(), std::memory_order_release);
         }
         {
             std::lock_guard lock(timedTextMutex_);
             if (retained->sequence == 0)
                 retained->sequence = timedTextLayers_[slotIndex]
                     ? timedTextLayers_[slotIndex]->sequence + 1 : 1;
+            if (slot == TimedTextLayerSlot::Subtitle) {
+                // Publish the pure-audio overlay state before the move: an
+                // audio-only session never draws a video frame, so without this
+                // PresentTimedText's early-return gate would keep subtitles off
+                // the screen forever. The lyrics slot's flag covers music-mode
+                // layouts only; AI subtitles ride the subtitle slot.
+                subtitleOverlayEnabled_.store(!retained->commands.empty(),
+                    std::memory_order_release);
+                subtitleOverlayCanvasWidth_.store(retained->canvasWidth,
+                    std::memory_order_release);
+                subtitleOverlayCanvasHeight_.store(retained->canvasHeight,
+                    std::memory_order_release);
+            }
             timedTextLayers_[slotIndex] = std::move(retained);
             presentationFrameRate_ = DetectDisplayRefreshRate(window_);
             bool hasVisibleLayer = false;
@@ -8844,21 +8866,25 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
 FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     std::unique_lock deviceLock(deviceMutex_);
     const auto lyricsLayout = lyricsLayoutEnabled_.load(std::memory_order_acquire);
-    // The subtitle latch is what lets an audio-only file show words at all: with
-    // no picture and no lyrics, there would otherwise be nothing to justify a
-    // swap chain, and the first subtitle layer is exactly what creates one. Every
-    // later presentation passes on swapChain_ != nullptr, so clearing the layer
-    // still reaches the screen.
-    const auto subtitleLayout = subtitleLayoutEnabled_.load(std::memory_order_acquire);
+    const auto subtitleOverlay = subtitleOverlayEnabled_.load(std::memory_order_acquire);
     if (window_ == nullptr ||
-        (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout && !subtitleLayout))
+        (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout && !subtitleOverlay))
         return FFFResult::Success;
     // Hold both locks across EnsureSwapChain: it may resize or recreate the
     // swap chain, and Present must never overlap that rewrite (the same
     // invariant the main render path enforces).
     std::unique_lock presentLock(presentMutex_);
-    const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : 1,
-        hasCachedVideo_ ? sourceHeight_ : 1, hasCachedVideo_ ? sourceBitDepth_ : 8);
+    // No video: the chain is sized to the pending overlay canvas when one is
+    // published (canvas-to-swap scale 1:1, stretched to the window by DXGI --
+    // the same geometry a video session gets from canvas == source size). The
+    // old 1x1 request made every canvas-scaled layer a single pixel wide.
+    const auto overlayChainWidth = subtitleOverlay
+        ? std::max(subtitleOverlayCanvasWidth_.load(std::memory_order_acquire), 1u) : 1u;
+    const auto overlayChainHeight = subtitleOverlay
+        ? std::max(subtitleOverlayCanvasHeight_.load(std::memory_order_acquire), 1u) : 1u;
+    const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : overlayChainWidth,
+        hasCachedVideo_ ? sourceHeight_ : overlayChainHeight,
+        hasCachedVideo_ ? sourceBitDepth_ : 8);
     if (chainResult != FFFResult::Success || swapChain_ == nullptr) return chainResult;
     // Clear before drawing so an input arriving during this frame can publish a
     // fresh generation instead of being hidden by the current presentation.
@@ -9064,7 +9090,9 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     sourceCoverArt_ = false;
     sourceImageMode_ = false;
     hasCachedVideo_ = false;
-    subtitleLayoutEnabled_.store(false, std::memory_order_release);
+    subtitleOverlayEnabled_.store(false, std::memory_order_release);
+    subtitleOverlayCanvasWidth_.store(0, std::memory_order_release);
+    subtitleOverlayCanvasHeight_.store(0, std::memory_order_release);
     hdrMonitor_ = nullptr;
     hdrSupportValid_ = false;
     hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
@@ -9126,7 +9154,9 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     view360PitchBits_.store(std::bit_cast<float>(0.0f), std::memory_order_relaxed);
     view360FovYBits_.store(std::bit_cast<float>(90.0f), std::memory_order_relaxed);
     lyricsLayoutEnabled_.store(false, std::memory_order_release);
-    subtitleLayoutEnabled_.store(false, std::memory_order_release);
+    subtitleOverlayEnabled_.store(false, std::memory_order_release);
+    subtitleOverlayCanvasWidth_.store(0, std::memory_order_release);
+    subtitleOverlayCanvasHeight_.store(0, std::memory_order_release);
     // Same reason as the constructor: nothing on this path has drawn yet, so
     // resetting to D3D11VideoProcessor would advertise a scaling mechanism that
     // cannot have run.
