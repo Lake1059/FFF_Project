@@ -549,6 +549,19 @@ Friend NotInheritable Class Ai字幕推理档
     ''' 两边分叉就是「下拉里有、引擎不认」）。下拉里出现的是 设备后端 过滤后的子集。</summary>
     Friend Shared ReadOnly 后端全部 As String() = {后端自动, 后端Cpu, 后端Cuda, 后端Dml, 后端OvCpu, 后端OvGpu, 后端OvNpu}
 
+    ''' <summary>这个设备在当前引擎下是不是真能落地。GGUF 包没有 NPU 路径
+    ''' （weight-only 量化进不了 NPU 的执行单元，NpuBackend.load() 必失败 → 落 CPU），
+    ''' 列出来就是「勾着 NPU、实际跑 CPU」。菜单没有 tooltip 可补这一句，所以直接
+    ''' 不摆 —— 与「单档不做子菜单」「双语不在 ONNX 包出现」是同一条纪律。
+    ''' 设置页保留 NPU 不在此列：那一格会把「需独立包 / 会落 CPU」写进项文字与提示。</summary>
+    Friend Shared Function 设备可用(设备 As String,
+                                    Optional 引擎 As String = Ai字幕包.引擎Onnx) As Boolean
+        If 引擎 = Ai字幕包.引擎Llama Then
+            Return 规整设备(设备) <> 设备Npu
+        End If
+        Return True
+    End Function
+
     ''' <summary>该设备上可选的后端，第一个是该设备的推荐项（换设备后默认落到它）。
     ''' 顺序即下拉顺序：厂商加速在前，通用 / 兜底在后。auto 设备只剩 auto 一项，
     ''' 界面上置灰并把原因写进项文字 —— 下拉水印在 SelectedIndex ≥ 0 时看不见。</summary>
@@ -714,6 +727,23 @@ Friend NotInheritable Class Ai字幕推理档
     ''' <summary>worker 当前认得的 --device 值。**必须与 asr_worker._CANDIDATES 对齐**，
     ''' 否则界面显示"可用"而 worker 静默按 auto 处理（或反过来，明明是有效档却
     ''' 标成不认）。dml 两边都还没有：包里没有 DirectML 版 ONNX Runtime。</summary>
+    ''' <summary>该后端会不会把模型自报的语言标签送回来（决定「只显示…」是不是真在筛）。
+    ''' 与 asr_worker 的 `自报语言 = engine == llama or backend.id in _OV_TARGETS` 同一
+    ''' 判据：llama 与 OpenVINO 都从 `language X<asr_text>` 模板里取到自报语言，闸门真生效；
+    ''' sherpa（ONNX 的 cpu / cuda）的 result 只有 text，闸门形同虚设。
+    ''' 这条必须与 worker 同步 —— 两边分叉，界面就会把「在筛」说成「不筛」或反之。</summary>
+    Friend Shared Function 后端自报语言(值 As String,
+                                        Optional 引擎 As String = Ai字幕包.引擎Onnx) As Boolean
+        If 引擎 = Ai字幕包.引擎Llama Then Return True
+        Select Case (If(值, String.Empty)).Trim().ToLowerInvariant()
+            Case 后端OvCpu, 后端OvGpu, 后端OvNpu
+                Return True
+            Case Else
+                ' auto 最终落到哪个后端由 worker 决定，不能替它断言"能筛"。
+                Return False
+        End Select
+    End Function
+
     Friend Shared Function 当前worker可用(值 As String,
                                         Optional 引擎 As String = Ai字幕包.引擎Onnx) As Boolean
         If 引擎 = Ai字幕包.引擎Llama Then
@@ -726,7 +756,8 @@ Friend NotInheritable Class Ai字幕推理档
             End Select
         End If
         Select Case (If(值, String.Empty)).Trim().ToLowerInvariant()
-            Case 后端自动, 后端Cpu, 后端Cuda, 后端Gpu, 后端OvNpu, 后端OvGpu, 后端OvCpu
+            Case 后端自动, 后端Cpu, 后端Cuda, 后端Gpu, 后端OvNpu, 后端OvGpu, 后端OvCpu,
+                 后端Dml
                 Return True
             Case Else
                 Return False

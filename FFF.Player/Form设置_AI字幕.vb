@@ -460,8 +460,12 @@ Friend Class Form设置_AI字幕
         If Not Ai字幕推理档.当前worker可用(后端, 配置.引擎) Then
             LBL_状态.ForeColor = Color.Orange
             LBL_状态.Text &= vbCrLf & "注意：worker 尚未接入该后端（本版只认 CPU / CUDA），会按自动处理。"
-        ElseIf 设置.实例对象.Ai字幕仅所选语言 Then
-            LBL_状态.Text &= vbCrLf & "注意：当前运行时不返回语言标签，只显示所选语言实际不筛除。"
+        ElseIf 设置.实例对象.Ai字幕仅所选语言 AndAlso
+               Not Ai字幕推理档.后端自报语言(后端, 配置.引擎) Then
+            ' 只有真拿不到语言标签的后端才说这句。llama 与 OpenVINO 都把自报语言送回来，
+            ' 闸门真的在丢窗 —— 那句「不筛除」写上去就是把在干活的闸门说成摆设。
+            LBL_状态.ForeColor = Color.Orange
+            LBL_状态.Text &= vbCrLf & "注意：该后端不返回语言标签，「只显示…」实际不筛除。"
         End If
     End Sub
 

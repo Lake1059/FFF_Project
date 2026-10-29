@@ -204,13 +204,20 @@ _BACKENDS = {
 #            NpuBackend.load() 必失败 → 落 cpu，notes 里说清"该装 NPU 包"。
 _CANDIDATES = {
     _ENGINE_ONNX: {
-        "auto": ("cuda", "cpu"),
+        # auto / gpu 的顺序与 qwen3_ort.AUTO_ORDER 一致，也与设置页那句
+        # 「按 CUDA → DirectML → OpenVINO GPU → CPU 试」一致。以前这张表漏了
+        # dml，UI 却在承诺它 —— 传进来被 _normalize_request 静默归 auto，
+        # 等于「选了 AMD 显卡，实际去试 CUDA」。dml 在 qwen3_ort 里早已实现
+        # （DmlExecutionProvider），这里补的只是登记。
+        "auto": ("cuda", "dml", "ov-gpu", "cpu"),
         # gpu 不是 cuda 的别名：它按"这台机器能用的显卡"依次试 —— NVIDIA 走 CUDA EP，
         # Intel 走 OpenVINO 原生（NPU 包里没有 CUDA 版 ORT，不这么排就会直接掉 CPU，
         # 等于把用户点的"显卡"静默作废）。没有 openvino 的老 ONNX 包会在
         # _capability 里跳过 ov-gpu，行为与从前一致。
-        "gpu": ("cuda", "ov-gpu", "cpu"),
+        "gpu": ("cuda", "dml", "ov-gpu", "cpu"),
         "cuda": ("cuda", "cpu"),
+        # AMD 在 Windows 上的唯一显卡路径（ROCm / MIGraphX 没有 Windows 构件）。
+        "dml": ("dml", "cpu"),
         "cpu": ("cpu",),
         "ov-npu": ("ov-npu", "cpu"),
         "ov-gpu": ("ov-gpu", "cpu"),
@@ -1039,6 +1046,14 @@ def _capability(backend_id, engine, runtime_dir):
         return True, ""
     if backend_id == "cuda":
         return _cuda_ready()
+    if backend_id == "dml":
+        # DirectML 走 qwen3_ort 的 DmlExecutionProvider。装的是 onnxruntime 的
+        # 哪个变体（cpu / gpu / directml）要 import 之后才知道，所以模块缺失不
+        # 在这里挡 —— 交给 load() 抛异常，由 _select_backend 记成一条明确的
+        # 降档说明，而不是悄悄退化成 auto。
+        if not Path(__file__).with_name("qwen3_ort.py").is_file():
+            return False, "worker 同级目录缺 qwen3_ort.py（DirectML 推理实现）"
+        return True, ""
     return True, ""
 
 def _provider_note(backend_id, engine):

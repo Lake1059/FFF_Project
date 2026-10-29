@@ -169,7 +169,10 @@ Friend NotInheritable Class Ai字幕菜单
         设备子菜单 = 创建子菜单()
         设备项 = 加项(根菜单, 设备文字)
         设备项.SubMenu = 设备子菜单
+        Dim 引擎 = 当前引擎()
         For Each id In Ai字幕推理档.设备全部
+            ' 不可达的设备不摆出来：菜单没有 tooltip，勾上却静默降档就是说谎。
+            If Not Ai字幕推理档.设备可用(id, 引擎) Then Continue For
             Dim 子项 = 加项(设备子菜单, Ai字幕推理档.设备显示名(id))
             设备项表.Add(New KeyValuePair(Of LakeUI.ModernContextMenu.ModernMenuItem, String)(子项, id))
             AddHandler 子项.Click, AddressOf 设备_Click
