@@ -1358,32 +1358,6 @@ Partial Class Form1
         MCM_标题栏菜单.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
         MCM_标题栏菜单.SeparatorHeight = 20
         '
-        ' MCM_AI字幕（AI 实时字幕子菜单，项由 播放器AI字幕控制器 添加）
-        '
-        MCM_AI字幕.AnimationFPS = 120
-        MCM_AI字幕.BackColor = Color.Transparent
-        MCM_AI字幕.BackdropBlurRadius = 30
-        MCM_AI字幕.BackdropMode = LakeUI.ModernContextMenu.BackdropModeEnum.Auto
-        MCM_AI字幕.BackdropNoiseOpacity = CByte(0)
-        MCM_AI字幕.BackdropTintColor = Color.FromArgb(CByte(160), CByte(0), CByte(0), CByte(0))
-        MCM_AI字幕.BorderSize = 0
-        MCM_AI字幕.DescriptionFont = New Font("Microsoft YaHei UI", 9F)
-        MCM_AI字幕.DescriptionForeColor = Color.YellowGreen
-        MCM_AI字幕.HoverBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCM_AI字幕.HoverRadius = 5
-        MCM_AI字幕.IconSize = 0
-        MCM_AI字幕.ItemHeight = 28
-        MCM_AI字幕.ItemPadding = New Padding(10, 0, 10, 0)
-        MCM_AI字幕.MenuFont = New Font("Microsoft YaHei UI", 10F)
-        MCM_AI字幕.MenuPadding = New Padding(10)
-        MCM_AI字幕.PressedBackColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MCM_AI字幕.SeparatorColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MCM_AI字幕.SeparatorHeight = 20
-        ModernMenuItem28.Font = Nothing
-        ModernMenuItem28.SubMenu = MCM_AI字幕
-        ModernMenuItem28.Text = "AI 实时字幕"
-        MCM_标题栏菜单.Items.Add(ModernMenuItem28)
-        '
         ' Form1
         '
         AutoScaleDimensions = New SizeF(96F, 96F)

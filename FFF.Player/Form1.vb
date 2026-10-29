@@ -154,7 +154,8 @@ Public Class Form1
             Function() 播放控制器.安全读取媒体信息(),
             Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI),
             Sub(值) 设置.实例对象.Ai字幕已停用 = 值,
-            AddressOf 打开Ai字幕设置)
+            AddressOf 打开Ai字幕设置,
+            AddressOf 同步AI字幕派生状态)
         字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
             AddressOf 播放控制器.提交定时文字图层,
@@ -1023,17 +1024,26 @@ Public Class Form1
         更新弹幕按钮状态()
     End Sub
 
-    ''' <summary>设置页 → AI 字幕 的后端：只把启用开关同步进控制器（起停 worker、
-    ''' 菜单复选状态、持久化都在控制器里）；相等时控制器自然空转。</summary>
+    ''' <summary>设置页 → AI 字幕 的后端：只把设置同步进控制器（起停 worker、
+    ''' 菜单复选状态、持久化都在控制器里）；相等时控制器自然空转。
+    ''' 宿主侧的派生状态由控制器回调 <see cref="同步AI字幕派生状态"/> 收敛，
+    ''' 标题栏菜单与设置页两条入口因此走同一条路。</summary>
     Friend Sub 应用Ai字幕设置()
         If AI字幕控制器 Is Nothing Then Return
         Try
             AI字幕控制器.应用设置()
-            字幕图层呈现器?.使图层失效()
-            If 字幕图层呈现器 IsNot Nothing Then 字幕图层呈现器.无视频时也绘制 = AI字幕控制器.启用
         Catch
             ' 同步失败不影响设置落盘；下次打开媒体时按设置值再试。
         End Try
+    End Sub
+
+    ''' <summary>AI 字幕启用态一变就要跟着动的宿主侧状态：
+    ''' 纯音频（无视频轨）原本不驱动字幕图层，装了有效包才打开这条回退路径。
+    ''' 关掉 AI 字幕就该把这条路径一起收回，否则呈现器还在按"有字幕要画"空转。</summary>
+    Private Sub 同步AI字幕派生状态()
+        If 字幕图层呈现器 Is Nothing Then Return
+        字幕图层呈现器.使图层失效()
+        字幕图层呈现器.无视频时也绘制 = AI字幕控制器 IsNot Nothing AndAlso AI字幕控制器.启用
     End Sub
 
     ' ── 设置页 → 视频超分辨率 的后端（10-18 从标题栏菜单移到这里）───────────────
