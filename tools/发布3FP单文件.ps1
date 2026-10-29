@@ -9,6 +9,11 @@ param(
     [string]$LakeUITfm = "",
     # 跨产品框架配对：默认拒绝不同 .NET 运行时版本，见 Resolve-Toolchain.ps1。
     [switch]$AllowFrameworkMismatch,
+    # ReadyToRun：默认关闭（JIT 交付），参数保留作为体积/启动权衡的余量开关：
+    # -ReadyToRun 实测冷启动 T2 中位 1717 ms（JIT 1893，−176 ms，docs/105 §十二同窗对照），
+    # 代价 +7.84 MB 托管体积。勿同时开 PublishReadyToRunEmitSymbols
+    #（与 -p:DebugType=None 冲突，docs/17 §4.1）。
+    [switch]$ReadyToRun,
     # IAMF 空间音频：默认强制携带（缺料即报错，而非静默编译成无 IAMF 内核）。
     # 体积敏感/无准备环境用 -SkipIamf 显式放弃该能力（docs/105 §十三/§十四）。
     [switch]$SkipIamf
@@ -64,11 +69,14 @@ try {
     $TfmArgs = @()
     if (-not [string]::IsNullOrWhiteSpace($NetTFM)) { $TfmArgs += "-p:NetTFM=$NetTFM" }
     if (-not [string]::IsNullOrWhiteSpace($LakeUITfm)) { $TfmArgs += "-p:LakeUITfm=$LakeUITfm" }
+    # ReadyToRun 参数包：默认关闭（JIT 交付），-ReadyToRun 时展开（余量开关，见参数说明）。
+    $R2rArgs = @()
+    if ($ReadyToRun) { $R2rArgs += "-p:PublishReadyToRun=true" }
     & $DotNet publish (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
         -c $Configuration -r win-x64 --self-contained false -o $StagingDirectory `
         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
         -p:PublishDocumentationFiles=false `
-        -p:DebugType=None -p:DebugSymbols=false @TfmArgs
+        -p:DebugType=None -p:DebugSymbols=false @TfmArgs @R2rArgs
     if ($LASTEXITCODE -ne 0) { throw "FFF.Player single-file publish failed." }
     $UnexpectedFiles = @(Get-ChildItem -LiteralPath $StagingDirectory -File | Where-Object { $_.Name -ne "FFF.Player.exe" })
     if ($UnexpectedFiles) { throw "Unexpected files in single-file output: $($UnexpectedFiles.Name -join ', ')" }
