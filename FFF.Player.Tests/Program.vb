@@ -1,10 +1,17 @@
 Imports System.IO
+Imports System.Linq
 Imports System.Threading
 Imports FFF.Player
 
 Friend Module Program
     <STAThread>
     Public Function Main(args As String()) As Integer
+        ' 外部色彩变换 kind=3 注入回归（真内核 + 真模块 DLL；票据须由驱动预铸，见回归文件头）。
+        If args.Length > 0 AndAlso String.Equals(args(0), "--color-transform-injection",
+                StringComparison.OrdinalIgnoreCase) Then
+            Return ColorTransformInjectionRegression.运行(args.Skip(1).ToArray())
+        End If
+
         If args.Length > 0 Then
             Console.Error.WriteLine($"未知测试入口：{args(0)}。未运行任何测试。")
             Return 1
