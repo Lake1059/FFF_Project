@@ -412,6 +412,17 @@ def main():
         "L0-7 停/启两条路径都作废旧结果线程代次",
         "少一处自增就留一个竞态窗口（进程退场 ≠ 线程退场）")
 
+    # ---------------- L0-8：分窗语义不许退化 ----------------
+    # 触发阈值必须是 window_s。用 step_s 的话窗长会退化成 Δ + (window - step)，
+    # Δ 是采集块间隔（几十毫秒）—— 默认 5/3 实际每窗只有 ~2 秒音频进模型，
+    # 「完整 8 s / 4 s」实际约 4 秒，窗口秒这一格名不副实。
+    断言("now_end100ns - self.window_start < int(self.window_s * 1e7)" in worker,
+        "L0-8 出窗阈值是 window_s（攒够窗口才出，不是过了步长就出）",
+        "阈值又退回 step_s —— 窗长会退化成 window-step，窗口秒这一格等于骗人")
+    断言("self.window_start = end - int((self.window_s - self.step_s) * 1e7)" in worker,
+        "L0-8 出窗后按 (window - step) 推进左边界（窗长恒为 window 时即步进 = step）",
+        "advance 写法变了 —— 要先确认步进仍是 step_s")
+
     print(f"\n通过 {通过} / 失败 {失败}")
     return 失败
 

@@ -47,7 +47,8 @@ llama-server.exe -m <model.gguf> --mmproj <mmproj.gguf>
   --temp 0.6 --n-predict 512 --cache-ram 0
   # --n-predict 512：输出长度上限（无语音段失控护栏，见 USER_GUIDE §4）。
   # --no-cache-idle-slots 已随失控修复移除（实测会把长输出请求拖到 171s），
-  # 内存仍由 --cache-ram 0 兜住；要更省请用 llamaArgs 自己加回。
+  # 内存仍由 --cache-ram 0 兜住（llamaArgs 入口 2026-10-29 已删除，
+  # 不再有用户侧加回的口子）。
   --device CUDA0            # 非 auto 后端才出现；CPU 臂是 --device none
 ```
 
@@ -83,7 +84,7 @@ BACKEND_ALIASES = {
 1. 取一份 CUDA 构建的 `llama-server`（本机 `llama-b11669/cuda/`，随包带 `ggml-cuda.dll`
    与 cublas 的 DLL）。
 2. 清单写 `"device": "cuda"`，`servers.cuda` 指向它。
-3. 多卡时用户在设置里填"设备序号"（`CUDA0`/`CUDA1`/… 的第几块）。
+3. 多卡由 worker 的 `--list-devices` 现选（自动档跳过核显）；「设备序号」这一项已于 2026-10-29 删除。
 4. 显存：Q8_0 实测增量 **1991 MiB**，Q6_K **1642 MiB**（RTX 4060 Laptop 8 GB）。
 
 ### 3.2 Intel Arc（SYCL）
@@ -143,9 +144,11 @@ CPU 上的调参建议（都在设置页"高级选项"里）：
 
 设置 → **AI 字幕** 页：
 
-- **推理设备**（主行，下拉）：自动（跟随扩展包）/ CPU（不用显卡）/
-  NVIDIA 显卡（CUDA）/ 通用显卡（Vulkan）/ AMD 显卡（ROCm/HIP）/ Intel 显卡（SYCL）
-- **设备序号**（高级选项里）：多显卡时选第几块，留空 = 由 llama-server 自选
+- **推理设备**（主行，下拉）：自动（按能力挑）/ CPU（不用显卡）/ NVIDIA 显卡 /
+  AMD 显卡 / Intel 显卡 / NPU（Core Ultra）。**GGUF 包不列 NPU**（那条腿没实现）。
+- **推理后端**（随设备变，下拉）：CUDA / DirectML / OpenVINO GPU·CPU·NPU。
+  AMD 在 Windows 上只有 DirectML 一条路（ROCm / MIGraphX 没有 Windows 构件）。
+- ~~设备序号~~：2026-10-29 删除
 - 状态行会告诉你真正的落点，例如：
 
   - `推理设备：NVIDIA 显卡（CUDA）（第 1 块）`

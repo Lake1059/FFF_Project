@@ -1224,7 +1224,12 @@ class WindowBuilder:
         """Return (start, end, samples) when a window is due, else None."""
         if self.window_start is None or not self.buf:
             return None
-        if now_end100ns - self.window_start < int(self.step_s * 1e7):
+        # 攒够 window 才出窗，不是过了 step 就出。用 step 当阈值会让窗长退化成
+        # Δ + (window - step)（Δ = poll 间隔，宿主按采集块投喂只有几十毫秒），
+        # 默认 5/3 实测每窗只有 ~2 秒 —— 窗口秒这一格因此名不副实。
+        # advance 仍用 (window - step)，窗长恒为 window 时它等价于 window_start
+        # += step，步进不受影响。代价是首窗要等满 window（本来就该等）。
+        if now_end100ns - self.window_start < int(self.window_s * 1e7):
             return None
         # Media-time jump (pause/seek residue) larger than 2x window: cut,
         # never bridge across the gap (section 6.3).
