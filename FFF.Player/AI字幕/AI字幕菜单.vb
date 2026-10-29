@@ -125,7 +125,7 @@ Friend NotInheritable Class Ai字幕菜单
         启用项 = 加项(根菜单, 启用文字)
         AddHandler 启用项.Click, AddressOf 启用_Click
 
-        根菜单.Items.Add(分隔线())
+        加分隔线()
 
         语言子菜单 = 创建子菜单()
         语言项 = 加项(根菜单, 语言文字)
@@ -175,7 +175,7 @@ Friend NotInheritable Class Ai字幕菜单
             AddHandler 子项.Click, AddressOf 设备_Click
         Next
 
-        根菜单.Items.Add(分隔线())
+        加分隔线()
 
         设置项 = 加项(根菜单, 设置文字)
         AddHandler 设置项.Click, AddressOf 设置_Click
@@ -191,6 +191,15 @@ Friend NotInheritable Class Ai字幕菜单
         If 父 Is 根菜单 Then 已加项.Add(项)
         Return 项
     End Function
+
+    ''' <summary>往根菜单加一条分割线。**必须**走 已加项 追踪：拆树按这张表摘项，
+    ''' 分割线一旦漏记，下次重建（包从无到有必然发生一次）它就残留在子菜单顶部 ——
+    ''' 表现为菜单头部多出一块空白，悬停时整块高亮。</summary>
+    Private Sub 加分隔线()
+        Dim 线 = 分隔线()
+        根菜单.Items.Add(线)
+        已加项.Add(线)
+    End Sub
 
     Private Shared Function 分隔线() As LakeUI.ModernContextMenu.ModernMenuItem
         Return New LakeUI.ModernContextMenu.ModernMenuItem With {.IsSeparator = True}
