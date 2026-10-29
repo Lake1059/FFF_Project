@@ -2702,6 +2702,9 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       playbackWorkPending_(0),
       interactiveMove_(false),
       lyricsLayoutEnabled_(false),
+      subtitleOverlayEnabled_(false),
+      subtitleOverlayCanvasWidth_(0),
+      subtitleOverlayCanvasHeight_(0),
       coverBackdropBlurRadiusBits_(std::bit_cast<std::uint32_t>(30.0f)),
       coverBackdropBlurPasses_(3), coverBackdropDownsampleFactor_(4),
       coverBackdropTintArgb_(0x78000000u),
@@ -5707,6 +5710,19 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
             if (retained->sequence == 0)
                 retained->sequence = timedTextLayers_[slotIndex]
                     ? timedTextLayers_[slotIndex]->sequence + 1 : 1;
+            if (slot == TimedTextLayerSlot::Subtitle) {
+                // Publish the pure-audio overlay state before the move: an
+                // audio-only session never draws a video frame, so without this
+                // PresentTimedText's early-return gate would keep subtitles off
+                // the screen forever. The lyrics slot's flag covers music-mode
+                // layouts only; AI subtitles ride the subtitle slot.
+                subtitleOverlayEnabled_.store(!retained->commands.empty(),
+                    std::memory_order_release);
+                subtitleOverlayCanvasWidth_.store(retained->canvasWidth,
+                    std::memory_order_release);
+                subtitleOverlayCanvasHeight_.store(retained->canvasHeight,
+                    std::memory_order_release);
+            }
             timedTextLayers_[slotIndex] = std::move(retained);
             presentationFrameRate_ = DetectDisplayRefreshRate(window_);
             bool hasVisibleLayer = false;
@@ -8849,14 +8865,25 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
 FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     std::unique_lock deviceLock(deviceMutex_);
     const auto lyricsLayout = lyricsLayoutEnabled_.load(std::memory_order_acquire);
-    if (window_ == nullptr || (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout))
+    const auto subtitleOverlay = subtitleOverlayEnabled_.load(std::memory_order_acquire);
+    if (window_ == nullptr ||
+        (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout && !subtitleOverlay))
         return FFFResult::Success;
     // Hold both locks across EnsureSwapChain: it may resize or recreate the
     // swap chain, and Present must never overlap that rewrite (the same
     // invariant the main render path enforces).
     std::unique_lock presentLock(presentMutex_);
-    const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : 1,
-        hasCachedVideo_ ? sourceHeight_ : 1, hasCachedVideo_ ? sourceBitDepth_ : 8);
+    // No video: the chain is sized to the pending overlay canvas when one is
+    // published (canvas-to-swap scale 1:1, stretched to the window by DXGI --
+    // the same geometry a video session gets from canvas == source size). The
+    // old 1x1 request made every canvas-scaled layer a single pixel wide.
+    const auto overlayChainWidth = subtitleOverlay
+        ? std::max(subtitleOverlayCanvasWidth_.load(std::memory_order_acquire), 1u) : 1u;
+    const auto overlayChainHeight = subtitleOverlay
+        ? std::max(subtitleOverlayCanvasHeight_.load(std::memory_order_acquire), 1u) : 1u;
+    const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : overlayChainWidth,
+        hasCachedVideo_ ? sourceHeight_ : overlayChainHeight,
+        hasCachedVideo_ ? sourceBitDepth_ : 8);
     if (chainResult != FFFResult::Success || swapChain_ == nullptr) return chainResult;
     // Clear before drawing so an input arriving during this frame can publish a
     // fresh generation instead of being hidden by the current presentation.
@@ -9123,6 +9150,9 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     view360PitchBits_.store(std::bit_cast<float>(0.0f), std::memory_order_relaxed);
     view360FovYBits_.store(std::bit_cast<float>(90.0f), std::memory_order_relaxed);
     lyricsLayoutEnabled_.store(false, std::memory_order_release);
+    subtitleOverlayEnabled_.store(false, std::memory_order_release);
+    subtitleOverlayCanvasWidth_.store(0, std::memory_order_release);
+    subtitleOverlayCanvasHeight_.store(0, std::memory_order_release);
     // Same reason as the constructor: nothing on this path has drawn yet, so
     // resetting to D3D11VideoProcessor would advertise a scaling mechanism that
     // cannot have run.

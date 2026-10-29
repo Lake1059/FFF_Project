@@ -557,7 +557,12 @@ class LlamaBackend(InferenceBackend):
         log(f"llama: {why}")
 
         self._port = _free_port()
-        self._tmp = tempfile.mkdtemp(prefix=_LLAMA_TEMP_PREFIX)
+        # 临时目录不能无条件用系统 TEMP：实测 schtasks 派发的宿主子进程对 C:\Users\<user>\AppData\Local\Temp 真实写被拒（os.access 还骗真），tempfile 全候选失败报 "No usable temporary directory"。包根与宿主同盘部署、宿主能写日志就能写包根，故优先用包根，失败再退回系统 TEMP。
+        try:
+            self._tmp = tempfile.mkdtemp(prefix=_LLAMA_TEMP_PREFIX,
+                                         dir=str(self.model_dir.parent))
+        except OSError:
+            self._tmp = tempfile.mkdtemp(prefix=_LLAMA_TEMP_PREFIX)
         self._log_path = os.path.join(self._tmp, "llama-server.log")
         self._log = open(self._log_path, "wb")
         cmd = [str(exe), "-m", str(main), "--mmproj", str(mmproj),

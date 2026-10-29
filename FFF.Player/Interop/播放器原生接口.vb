@@ -980,11 +980,16 @@ Friend Module 播放器原生接口
             .版本 = 音频Tap版本
         }
         If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
-        Dim 钉住 = GCHandle.Alloc(统计, GCHandleType.Pinned)
+        ' 不能用 GCHandle.Alloc(统计, Pinned)：结构体实参装箱后钉住的是箱内副本，
+        ' 内核写进箱子、本侧局部变量永远是初始零值。走非托管缓冲再拷回。
+        Dim 缓冲 = Marshal.AllocHGlobal(Marshal.SizeOf(Of 原生音频Tap统计)())
         Try
-            Return 函数(播放器.DangerousGetHandle(), 钉住.AddrOfPinnedObject())
+            Marshal.StructureToPtr(统计, 缓冲, False)
+            Dim 结果 = 函数(播放器.DangerousGetHandle(), 缓冲)
+            统计 = Marshal.PtrToStructure(Of 原生音频Tap统计)(缓冲)
+            Return 结果
         Finally
-            钉住.Free()
+            Marshal.FreeHGlobal(缓冲)
         End Try
     End Function
 

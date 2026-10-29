@@ -1299,6 +1299,14 @@ private:
     std::atomic<std::uint32_t> playbackWorkPending_;
     std::atomic<bool> interactiveMove_;
     std::atomic<bool> lyricsLayoutEnabled_;
+    // Pure-audio overlay (no video stream at all): set when the subtitle slot
+    // receives a non-empty layer, so PresentTimedText composes subtitles over a
+    // black canvas instead of returning early. Canvas dims size the swap chain
+    // so the layer's canvas-to-swap scale is 1:1 (the same geometry the video
+    // path gets from canvas == source).
+    std::atomic<bool> subtitleOverlayEnabled_;
+    std::atomic<std::uint32_t> subtitleOverlayCanvasWidth_;
+    std::atomic<std::uint32_t> subtitleOverlayCanvasHeight_;
     std::atomic<std::uint32_t> coverBackdropBlurRadiusBits_;
     std::atomic<std::uint32_t> coverBackdropBlurPasses_;
     std::atomic<std::uint32_t> coverBackdropDownsampleFactor_;
