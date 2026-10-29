@@ -542,6 +542,7 @@ Public Class Form1
 
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
         正在关闭 = True
+        播放列表数据.取消自动扫描()
         停止解锁轮询()
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
@@ -688,6 +689,7 @@ Public Class Form1
                                       播放列表.是支持的媒体文件(x)).ToArray()
         If 媒体文件.Length = 0 Then Return
 
+        播放列表数据.取消自动扫描()
         播放列表数据.添加多个(媒体文件)
         Dim 首个路径 = 媒体文件(0)
         播放列表数据.选择路径(首个路径)
@@ -705,11 +707,10 @@ Public Class Form1
             播放控制器.当前媒体是视频 Then
             播放控制器.加载外部音轨(路径)
         Else
-            If 播放列表.是图片文件(路径) Then
-                ' 图片按同目录建列表：系列签名匹配（视频用的那条）对图片会退化成只含自己。
-                启动后台任务(播放列表数据.用同目录图片替换Async(路径))
-            ElseIf Not 光盘路径.是光盘路径(路径) Then
-                启动后台任务(播放列表数据.从媒体创建并扫描相似文件Async(路径))
+            If Not 光盘路径.是光盘路径(路径) Then
+                启动后台任务(播放列表数据.从媒体扫描同目录Async(路径))
+            Else
+                播放列表数据.取消自动扫描()
             End If
             播放控制器.打开媒体(路径)
         End If
@@ -768,7 +769,10 @@ Public Class Form1
         If 光盘路径.是光盘路径(播放控制器.当前媒体路径) Then Return
         If 正在关闭 Then Return
         Dim 下一项 = 播放列表数据.移动到播放结束后的项目()
-        If 下一项 IsNot Nothing Then 播放控制器.打开媒体(下一项.路径)
+        If 下一项 IsNot Nothing Then
+            播放列表数据.取消自动扫描()
+            播放控制器.打开媒体(下一项.路径)
+        End If
     End Sub
 
     Private Sub 播放控制器_播放错误(sender As Object, e As 播放器错误事件参数)
@@ -1074,7 +1078,10 @@ Public Class Form1
 
     Private Sub 播放相邻项目(方向 As Integer)
         Dim 项目 = 播放列表数据.移动到相邻项目(方向)
-        If 项目 IsNot Nothing Then 播放控制器.打开媒体(项目.路径)
+        If 项目 IsNot Nothing Then
+            播放列表数据.取消自动扫描()
+            播放控制器.打开媒体(项目.路径)
+        End If
     End Sub
 
     Private Sub MB_软件解码或硬件解码_Click(sender As Object, e As EventArgs) Handles MB_软件解码或硬件解码.Click
@@ -1242,6 +1249,7 @@ Public Class Form1
 
     Private Sub 播放列表请求播放(索引 As Integer)
         If 正在关闭 OrElse 索引 < 0 OrElse 索引 >= 播放列表数据.数量 Then Return
+        播放列表数据.取消自动扫描()
         播放列表数据.选择(索引)
         Dim 项目 = 播放列表数据.当前项目
         If 项目 IsNot Nothing Then 播放控制器.打开媒体(项目.路径)

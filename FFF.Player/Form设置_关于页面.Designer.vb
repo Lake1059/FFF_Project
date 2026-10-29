@@ -39,7 +39,7 @@ Partial Class Form设置_关于页面
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(20)
+        ModernPanel1.Padding = New Padding(15, 20, 20, 20)
         ModernPanel1.Size = New Size(580, 450)
         ModernPanel1.TabIndex = 0
         ' 
@@ -50,11 +50,11 @@ Partial Class Form设置_关于页面
         HtmlColorLabel3.Dock = DockStyle.Top
         HtmlColorLabel3.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         HtmlColorLabel3.LineSpacing = 3
-        HtmlColorLabel3.Location = New Point(20, 186)
+        HtmlColorLabel3.Location = New Point(15, 186)
         HtmlColorLabel3.Margin = New Padding(2)
         HtmlColorLabel3.Name = "HtmlColorLabel3"
         HtmlColorLabel3.Padding = New Padding(0, 20, 0, 0)
-        HtmlColorLabel3.Size = New Size(540, 83)
+        HtmlColorLabel3.Size = New Size(545, 83)
         HtmlColorLabel3.TabIndex = 21
         HtmlColorLabel3.Text = "<span style=""font-size:13; color:Silver"">技术声明</span><br>3FP 不是套壳播放器，其渲染管线完全独立搭建<br>不会支持任何外部渲染器和特效插件"
         ' 
@@ -65,11 +65,11 @@ Partial Class Form设置_关于页面
         HtmlColorLabel2.Dock = DockStyle.Top
         HtmlColorLabel2.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         HtmlColorLabel2.LineSpacing = 3
-        HtmlColorLabel2.Location = New Point(20, 83)
+        HtmlColorLabel2.Location = New Point(15, 83)
         HtmlColorLabel2.Margin = New Padding(2)
         HtmlColorLabel2.Name = "HtmlColorLabel2"
         HtmlColorLabel2.Padding = New Padding(0, 20, 0, 0)
-        HtmlColorLabel2.Size = New Size(540, 103)
+        HtmlColorLabel2.Size = New Size(545, 103)
         HtmlColorLabel2.TabIndex = 20
         HtmlColorLabel2.Text = "<span style=""font-size:13; color:Silver"">核心用途和发展方向</span><br>3FP 最初只是为了向 3FUI 提供帧级精确的剪辑区间时间戳<br>后续开发不是为了对标市面上任何播放器产品，而是完全技术测试方向<br>因此不要提任何舒适度的需求，也不要幻想任何花里胡哨的功能"
         ' 
@@ -80,10 +80,10 @@ Partial Class Form设置_关于页面
         HtmlColorLabel1.Dock = DockStyle.Top
         HtmlColorLabel1.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         HtmlColorLabel1.LineSpacing = 3
-        HtmlColorLabel1.Location = New Point(20, 20)
+        HtmlColorLabel1.Location = New Point(15, 20)
         HtmlColorLabel1.Margin = New Padding(2)
         HtmlColorLabel1.Name = "HtmlColorLabel1"
-        HtmlColorLabel1.Size = New Size(540, 63)
+        HtmlColorLabel1.Size = New Size(545, 63)
         HtmlColorLabel1.TabIndex = 19
         HtmlColorLabel1.Text = "<span style=""font-size:13; color:Silver"">3FP 极简本地播放器</span><br>确保将 Shared FFmpeg 的所有 dll 放在程序目录或环境变量中才可正常播放<br>理论上编码是否支持取决于该版本的 FFmpeg 能否支持"
         ' 

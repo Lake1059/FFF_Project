@@ -2,7 +2,7 @@ param(
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Debug",
 
-    # 目标框架。留空 = 用各工程自身默认值（当前 net10.0-windows10.0.26100.0）。
+    # 目标框架。留空 = 用播放器默认值（当前 net10.0-windows）。
     # .NET 11 正式版发布后改为：构建3FP.ps1 -NetTFM net11.0-windows10.0.26100.0
     [string]$NetTFM = "",
 

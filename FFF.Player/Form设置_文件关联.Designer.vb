@@ -51,7 +51,7 @@ Partial Class Form设置_文件关联
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(20)
+        ModernPanel1.Padding = New Padding(15, 20, 20, 20)
         ModernPanel1.Size = New Size(554, 419)
         ModernPanel1.TabIndex = 0
         ' 
@@ -67,9 +67,9 @@ Partial Class Form设置_文件关联
         MCK_关联老旧图片.BoxTextSpacing = 10
         MCK_关联老旧图片.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_关联老旧图片.Dock = DockStyle.Top
-        MCK_关联老旧图片.Location = New Point(20, 292)
+        MCK_关联老旧图片.Location = New Point(15, 292)
         MCK_关联老旧图片.Name = "MCK_关联老旧图片"
-        MCK_关联老旧图片.Size = New Size(514, 24)
+        MCK_关联老旧图片.Size = New Size(519, 24)
         MCK_关联老旧图片.TabIndex = 38
         MCK_关联老旧图片.Text = "老旧图片"
         ' 
@@ -85,10 +85,10 @@ Partial Class Form设置_文件关联
         MCK_关联不常见图片.BoxTextSpacing = 10
         MCK_关联不常见图片.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_关联不常见图片.Dock = DockStyle.Top
-        MCK_关联不常见图片.Location = New Point(20, 258)
+        MCK_关联不常见图片.Location = New Point(15, 258)
         MCK_关联不常见图片.Name = "MCK_关联不常见图片"
         MCK_关联不常见图片.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联不常见图片.Size = New Size(514, 34)
+        MCK_关联不常见图片.Size = New Size(519, 34)
         MCK_关联不常见图片.TabIndex = 37
         MCK_关联不常见图片.Text = "不常见图片"
         ' 
@@ -104,10 +104,10 @@ Partial Class Form设置_文件关联
         MCK_关联常见图片.BoxTextSpacing = 10
         MCK_关联常见图片.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_关联常见图片.Dock = DockStyle.Top
-        MCK_关联常见图片.Location = New Point(20, 224)
+        MCK_关联常见图片.Location = New Point(15, 224)
         MCK_关联常见图片.Name = "MCK_关联常见图片"
         MCK_关联常见图片.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联常见图片.Size = New Size(514, 34)
+        MCK_关联常见图片.Size = New Size(519, 34)
         MCK_关联常见图片.TabIndex = 36
         MCK_关联常见图片.Text = "常见图片"
         ' 
@@ -123,10 +123,10 @@ Partial Class Form设置_文件关联
         MCK_关联老旧音频.BoxTextSpacing = 10
         MCK_关联老旧音频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_关联老旧音频.Dock = DockStyle.Top
-        MCK_关联老旧音频.Location = New Point(20, 190)
+        MCK_关联老旧音频.Location = New Point(15, 190)
         MCK_关联老旧音频.Name = "MCK_关联老旧音频"
         MCK_关联老旧音频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联老旧音频.Size = New Size(514, 34)
+        MCK_关联老旧音频.Size = New Size(519, 34)
         MCK_关联老旧音频.TabIndex = 35
         MCK_关联老旧音频.Text = "老旧音频"
         ' 
@@ -142,10 +142,10 @@ Partial Class Form设置_文件关联
         MCK_关联不常见音频.BoxTextSpacing = 10
         MCK_关联不常见音频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_关联不常见音频.Dock = DockStyle.Top
-        MCK_关联不常见音频.Location = New Point(20, 156)
+        MCK_关联不常见音频.Location = New Point(15, 156)
         MCK_关联不常见音频.Name = "MCK_关联不常见音频"
         MCK_关联不常见音频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联不常见音频.Size = New Size(514, 34)
+        MCK_关联不常见音频.Size = New Size(519, 34)
         MCK_关联不常见音频.TabIndex = 34
         MCK_关联不常见音频.Text = "不常见音频"
         ' 
@@ -161,10 +161,10 @@ Partial Class Form设置_文件关联
         MCK_关联常见音频.BoxTextSpacing = 10
         MCK_关联常见音频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_关联常见音频.Dock = DockStyle.Top
-        MCK_关联常见音频.Location = New Point(20, 122)
+        MCK_关联常见音频.Location = New Point(15, 122)
         MCK_关联常见音频.Name = "MCK_关联常见音频"
         MCK_关联常见音频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联常见音频.Size = New Size(514, 34)
+        MCK_关联常见音频.Size = New Size(519, 34)
         MCK_关联常见音频.TabIndex = 33
         MCK_关联常见音频.Text = "常见音频"
         ' 
@@ -180,10 +180,10 @@ Partial Class Form设置_文件关联
         MCK_关联老旧视频.BoxTextSpacing = 10
         MCK_关联老旧视频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_关联老旧视频.Dock = DockStyle.Top
-        MCK_关联老旧视频.Location = New Point(20, 88)
+        MCK_关联老旧视频.Location = New Point(15, 88)
         MCK_关联老旧视频.Name = "MCK_关联老旧视频"
         MCK_关联老旧视频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联老旧视频.Size = New Size(514, 34)
+        MCK_关联老旧视频.Size = New Size(519, 34)
         MCK_关联老旧视频.TabIndex = 32
         MCK_关联老旧视频.Text = "老旧视频"
         ' 
@@ -199,10 +199,10 @@ Partial Class Form设置_文件关联
         MCK_关联不常见视频.BoxTextSpacing = 10
         MCK_关联不常见视频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_关联不常见视频.Dock = DockStyle.Top
-        MCK_关联不常见视频.Location = New Point(20, 54)
+        MCK_关联不常见视频.Location = New Point(15, 54)
         MCK_关联不常见视频.Name = "MCK_关联不常见视频"
         MCK_关联不常见视频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联不常见视频.Size = New Size(514, 34)
+        MCK_关联不常见视频.Size = New Size(519, 34)
         MCK_关联不常见视频.TabIndex = 31
         MCK_关联不常见视频.Text = "不常见视频"
         ' 
@@ -218,10 +218,10 @@ Partial Class Form设置_文件关联
         MCK_关联常见视频.BoxTextSpacing = 10
         MCK_关联常见视频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCK_关联常见视频.Dock = DockStyle.Top
-        MCK_关联常见视频.Location = New Point(20, 20)
+        MCK_关联常见视频.Location = New Point(15, 20)
         MCK_关联常见视频.Name = "MCK_关联常见视频"
         MCK_关联常见视频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联常见视频.Size = New Size(514, 34)
+        MCK_关联常见视频.Size = New Size(519, 34)
         MCK_关联常见视频.TabIndex = 30
         MCK_关联常见视频.Text = "常见视频"
         ' 
