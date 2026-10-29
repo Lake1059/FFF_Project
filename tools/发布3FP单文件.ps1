@@ -8,7 +8,10 @@ param(
     # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
     [string]$LakeUITfm = "",
     # 跨产品框架配对：默认拒绝不同 .NET 运行时版本，见 Resolve-Toolchain.ps1。
-    [switch]$AllowFrameworkMismatch
+    [switch]$AllowFrameworkMismatch,
+    # IAMF 空间音频：默认强制携带（缺料即报错，而非静默编译成无 IAMF 内核）。
+    # 体积敏感/无准备环境用 -SkipIamf 显式放弃该能力（docs/105 §十三/§十四）。
+    [switch]$SkipIamf
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,7 +38,22 @@ foreach ($library in @("bluray.lib")) {
     }
 }
 
-& $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal
+# IAMF 空间音频：官方交付默认携带。HaveLibiamf 的自动探测在缺料时会静默降级成
+# 无 IAMF 内核（docs/105 §十三/§十四：上游发布即此形态），故这里前置校验 + 强制门禁；
+# -SkipIamf 显式放弃时不校验、并显式传 HaveLibiamf=false。
+if (-not $SkipIamf) {
+    $LibiamfHeader = Join-Path $ProjectRoot "third_party\libiamf\include\IAMF_decoder.h"
+    $LibiamfImportLib = Join-Path $ProjectRoot "third_party\libiamf\lib\x64\iamf.lib"
+    if (-not (Test-Path -LiteralPath $LibiamfHeader -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $LibiamfImportLib -PathType Leaf)) {
+        throw "IAMF 空间音频依赖未就绪：缺少 $LibiamfHeader 或 $LibiamfImportLib。请先运行 tools/准备Libiamf.ps1，或用 -SkipIamf 显式放弃该能力。"
+    }
+}
+
+$NativeArgs = @()
+if ($SkipIamf) { $NativeArgs += "/p:HaveLibiamf=false" } else { $NativeArgs += "/p:FFF_FORCE_LIBIAMF=true" }
+
+& $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") /p:Configuration=$Configuration /p:Platform=x64 @NativeArgs /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }
 
 $StagingDirectory = Join-Path ([IO.Path]::GetTempPath()) ("3FP-publish-" + [Guid]::NewGuid().ToString("N"))
