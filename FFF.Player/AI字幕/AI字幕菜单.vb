@@ -23,6 +23,7 @@ Friend NotInheritable Class Ai字幕菜单
 
     Private Const 启用文字 As String = "启用 AI 实时字幕"
     Private Const 语言文字 As String = "字幕语言"
+    Private Const 双语文字 As String = "双语字幕"
     Private Const 模型档文字 As String = "模型档"
     Private Const 设备文字 As String = "推理设备"
     Private Const 设置文字 As String = "AI 字幕设置…"
@@ -37,6 +38,8 @@ Friend NotInheritable Class Ai字幕菜单
     Private 启用项 As LakeUI.ModernContextMenu.ModernMenuItem
     Private 语言项 As LakeUI.ModernContextMenu.ModernMenuItem
     Private 语言子菜单 As LakeUI.ModernContextMenu
+    Private 双语项 As LakeUI.ModernContextMenu.ModernMenuItem
+    Private 双语子菜单 As LakeUI.ModernContextMenu
     Private 档项 As LakeUI.ModernContextMenu.ModernMenuItem
     Private 档子菜单 As LakeUI.ModernContextMenu
     Private 设备项 As LakeUI.ModernContextMenu.ModernMenuItem
@@ -46,6 +49,7 @@ Friend NotInheritable Class Ai字幕菜单
     ' 项 ↔ 标识。用「项 + 统一处理器 + 查表」而不是给每项挂一个闭包：
     ' 拆树时能一次性 RemoveHandler，不留一堆匿名委托互相引用。
     Private ReadOnly 语言项表 As New List(Of KeyValuePair(Of LakeUI.ModernContextMenu.ModernMenuItem, String))
+    Private ReadOnly 双语项表 As New List(Of KeyValuePair(Of LakeUI.ModernContextMenu.ModernMenuItem, String))
     Private ReadOnly 档项表 As New List(Of KeyValuePair(Of LakeUI.ModernContextMenu.ModernMenuItem, String))
     Private ReadOnly 设备项表 As New List(Of KeyValuePair(Of LakeUI.ModernContextMenu.ModernMenuItem, String))
 
@@ -87,12 +91,13 @@ Friend NotInheritable Class Ai字幕菜单
         For Each 档 In 配置.模型档表
             档名.Add(档.档名)
         Next
-        Return 配置.包目录 & "→" & String.Join("|", 档名)
+        Return 配置.引擎 & "|" & 配置.包目录 & "→" & String.Join("|", 档名)
     End Function
 
     Private Sub 拆树()
         If 启用项 IsNot Nothing Then RemoveHandler 启用项.Click, AddressOf 启用_Click
         If 语言项 IsNot Nothing Then RemoveHandler 语言项.Click, AddressOf 语言_Click
+        If 双语项 IsNot Nothing Then RemoveHandler 双语项.Click, AddressOf 双语_Click
         If 档项 IsNot Nothing Then RemoveHandler 档项.Click, AddressOf 档_Click
         If 设备项 IsNot Nothing Then RemoveHandler 设备项.Click, AddressOf 设备_Click
         If 设置项 IsNot Nothing Then RemoveHandler 设置项.Click, AddressOf 设置_Click
@@ -101,11 +106,14 @@ Friend NotInheritable Class Ai字幕菜单
         Next
         已加项.Clear()
         语言项表.Clear()
+        双语项表.Clear()
         档项表.Clear()
         设备项表.Clear()
         启用项 = Nothing
         语言项 = Nothing
         语言子菜单 = Nothing
+        双语项 = Nothing
+        双语子菜单 = Nothing
         档项 = Nothing
         档子菜单 = Nothing
         设备项 = Nothing
@@ -127,6 +135,20 @@ Friend NotInheritable Class Ai字幕菜单
             语言项表.Add(New KeyValuePair(Of LakeUI.ModernContextMenu.ModernMenuItem, String)(子项, id))
             AddHandler 子项.Click, AddressOf 语言_Click
         Next
+
+        ' 双语只有 GGUF 引擎做得到（同一 llama-server 多打一个 /completion 续写）。
+        ' ONNX 那条腿是纯 ASR，没有文本生成能力 —— 那就**不摆出来**，而不是摆成灰色：
+        ' 置灰仍在暗示"你能选"，与「单档不做子菜单」是同一条纪律。
+        If 当前引擎() = Ai字幕包.引擎Llama Then
+            双语子菜单 = 创建子菜单()
+            双语项 = 加项(根菜单, 双语文字)
+            双语项.SubMenu = 双语子菜单
+            For Each id In Ai字幕双语.全部
+                Dim 子项 = 加项(双语子菜单, Ai字幕双语.短名(id))
+                双语项表.Add(New KeyValuePair(Of LakeUI.ModernContextMenu.ModernMenuItem, String)(子项, id))
+                AddHandler 子项.Click, AddressOf 双语_Click
+            Next
+        End If
 
         ' 只有包里真放了第二套权重才给模型档子菜单；单档是事实，不是选项。
         If 配置 IsNot Nothing AndAlso 配置.模型档表.Count > 1 Then
@@ -216,6 +238,11 @@ Friend NotInheritable Class Ai字幕菜单
             对.Key.Checked = String.Equals(对.Value, 档名, StringComparison.OrdinalIgnoreCase)
         Next
 
+        Dim 双语 = Ai字幕双语.规整(设置.实例对象.Ai字幕双语)
+        For Each 对 In 双语项表
+            对.Key.Checked = String.Equals(对.Value, 双语, StringComparison.Ordinal)
+        Next
+
         Dim 设备 = Ai字幕推理档.规整设备(设置.实例对象.Ai字幕运行设备)
         For Each 对 In 设备项表
             对.Key.Checked = String.Equals(对.Value, 设备, StringComparison.Ordinal)
@@ -238,6 +265,13 @@ Friend NotInheritable Class Ai字幕菜单
         If Not Ai字幕语言.已指定(设置.实例对象.Ai字幕语言) Then
             设置.实例对象.Ai字幕仅所选语言 = False
         End If
+        提交()
+    End Sub
+
+    Private Sub 双语_Click(sender As Object, e As EventArgs)
+        Dim id = 查标识(双语项表, TryCast(sender, LakeUI.ModernContextMenu.ModernMenuItem))
+        If id Is Nothing Then Return
+        设置.实例对象.Ai字幕双语 = Ai字幕双语.规整(id)
         提交()
     End Sub
 

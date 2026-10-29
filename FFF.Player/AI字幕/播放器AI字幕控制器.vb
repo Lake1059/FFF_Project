@@ -63,6 +63,8 @@ Friend NotInheritable Class 播放器AI字幕控制器
     ' 线程数同样是启动期参数（worker 只在进程启动时拿一次 --threads）。初值 -1 与
     ' 任何合法值都不同，但首次启动时 管道 IsNot Nothing 为假，不会误判成"变过"。
     Private 已启动线程 As Integer = -1
+    ' 双语也是启动期参数：worker 只在进程启动时拿一次 --bilingual，中途改必须重启。
+    Private 已启动双语 As String = Ai字幕双语.关闭
     ' 日志滚动：-1 = 还没量过现有文件长度（首次写时取实际大小，这样跨进程追加也准）。
     Private Const 日志上限字节 As Long = 2L * 1024L * 1024L
     Private Shared 日志字节 As Long = -1L
@@ -129,10 +131,12 @@ Friend NotInheritable Class 播放器AI字幕控制器
         Dim 新线程 = Math.Max(0, 设置对象.Ai字幕线程数)
         ' 判据只剩四个：档（决定跑在哪）、语言、模型档、线程数。序号 / 层数 /
         ' 精确设备这些中间量已经不存在了。
+        Dim 新双语 = Ai字幕双语.规整(设置对象.Ai字幕双语)
         If 管道 IsNot Nothing AndAlso (已启动后端 <> 新后端 OrElse
                                        已启动语言 <> 新语言 OrElse
                                        已启动模型档 <> 新模型档 OrElse
-                                       已启动线程 <> 新线程) Then
+                                       已启动线程 <> 新线程 OrElse
+                                       已启动双语 <> 新双语) Then
             停止()
         End If
         ' 驻留偏移是纯显示侧（状态机守卫判定用）：不触发重启，这里同步即可，
@@ -167,19 +171,23 @@ Friend NotInheritable Class 播放器AI字幕控制器
 
     ''' <summary>此刻应显示的 AI 字幕文本；未启用/无有效条目返回空串。
     ''' 只在 PrecisionTimer 线程（字幕图层绘制事件）调用。</summary>
-    Friend Function 取当前条目(播放位置 As TimeSpan, 时间轴代次 As ULong) As String
-        If 已释放 OrElse Not 启用 Then Return String.Empty
-        Dim 文本 = 状态机.取当前条目(播放位置, 时间轴代次)
-        If Not String.Equals(文本, 已上屏文本, StringComparison.Ordinal) Then
-            已上屏文本 = 文本
-            If Not String.IsNullOrEmpty(文本) Then
-                记日志($"字幕[代次 {时间轴代次}] {文本}")
+    Friend Function 取当前条目(播放位置 As TimeSpan, 时间轴代次 As ULong) As (主 As String, 副 As String)
+        If 已释放 OrElse Not 启用 Then Return (String.Empty, String.Empty)
+        Dim 两行 = 状态机.取当前两行(播放位置, 时间轴代次)
+        ' 日志签名把两行拼起来算：只比主行的话，英文行变化（主行不变）不会留痕，
+        ' 排查"译文有没有跟上"时就成瞎的。
+        Dim 签名 = 两行.主 & vbLf & 两行.副
+        If Not String.Equals(签名, 已上屏文本, StringComparison.Ordinal) Then
+            已上屏文本 = 签名
+            If Not String.IsNullOrEmpty(两行.主) Then
+                记日志($"字幕[代次 {时间轴代次}] {两行.主}" &
+                       If(String.IsNullOrEmpty(两行.副), "", $" ‖ {两行.副}"))
             End If
         End If
         ' 诊断采样与"文本变化"解耦：整段只有一句话时文本不变，采样却必须继续，
         ' 否则丢块/呈现计数会整段空白（旧实现挂在文本变化分支上，正是这个毛病）。
         采样诊断()
-        Return 文本
+        Return 两行
     End Function
 
     ''' <summary>每 5 秒读一次内核侧的字幕图层状态与音频 tap 计数，落一行日志。
@@ -314,8 +322,9 @@ Friend NotInheritable Class 播放器AI字幕控制器
             Dim 后端 = 生效后端(包)
             Dim 语言 = Ai字幕语言.规整(设置对象.Ai字幕语言)
             Dim 新模型档 = If(设置对象.Ai字幕模型档, String.Empty).Trim()
+            Dim 新双语 = Ai字幕双语.规整(设置对象.Ai字幕双语)
             If Not 管道.启动(包, 设置对象.Ai字幕窗口秒覆盖, 设置对象.Ai字幕步长秒覆盖,
-                             后端, 语言, 新模型档, 设置对象.Ai字幕线程数) Then
+                             后端, 语言, 新模型档, 设置对象.Ai字幕线程数, 新双语) Then
                 管道 = Nothing
                 操作提示("AI 字幕：worker 启动失败，详见日志")
             Else
@@ -323,6 +332,7 @@ Friend NotInheritable Class 播放器AI字幕控制器
                 已启动语言 = 语言
                 已启动模型档 = 新模型档
                 已启动线程 = Math.Max(0, 设置对象.Ai字幕线程数)
+                已启动双语 = 新双语
             End If
         Catch ex As Exception
             记日志($"AI 字幕：启动路径异常 {ex.GetType().Name} {ex.Message}")

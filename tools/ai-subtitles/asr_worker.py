@@ -456,6 +456,61 @@ def _http_json(port, path, timeout=10.0):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+# ---- 双语对照（上行 / 下行）----------------------------------------------
+# Qwen3-ASR 是纯转写权重：language 与 prompt 都改不动它的输出（实测 A/B/C 三组
+# 逐字相同，D 组只把个别中文词替换成英文词 —— 那是提示词污染，不是翻译）。
+# 但它的底座文本能力还在：**绕开 ASR 的 chat 模板**、用原始 /completion 续写，
+# 就能做中英互译（实测 zh->en 0.13 s/句，与 ASR 交替调用互不污染）。
+# 所以双语不引入第二个模型、不碰任何权重，同一个 llama-server 进程多打一个请求。
+_ZH_FAMILY = {"zh", "chinese", "cantonese", "mandarin", "yue", "cmn", "中文", "粤语", "普通话"}
+_EN_FAMILY = {"en", "english", "英文", "英语"}
+_BILINGUAL_PAIRS = {"zh-en": ("zh", "en"), "en-zh": ("en", "zh")}
+
+
+def language_family(value):
+    """把模型自报的语种名归到 zh / en；不认识的按原样返回（第三种语言）。"""
+    v = (value or "").strip().lower()
+    if v in _ZH_FAMILY:
+        return "zh"
+    if v in _EN_FAMILY:
+        return "en"
+    return v
+
+
+def normalize_bilingual(value):
+    """返回 (上行语言, 下行语言)；关闭时返回 ("", "")。
+
+    zh-en 就是「中文在上、英文在下」。只给一个目标语言时把它当下行，
+    另一种语言自动补到上行 —— 界面只需要暴露这两档。
+    """
+    v = (value or "").strip().lower()
+    if v in ("", "off", "none", "0"):
+        return ("", "")
+    if v in _BILINGUAL_PAIRS:
+        return _BILINGUAL_PAIRS[v]
+    fam = language_family(v)
+    if fam in ("zh", "en"):
+        return (("en" if fam == "zh" else "zh"), fam)
+    return ("", "")
+
+
+_QUOTE_STRIP = "\"'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f \t"
+_TRANSLATION_MARKERS = ("translation:", "english:", "\u4e2d\u6587:", "\u8bd1\u6587:",
+                        "translated:")
+
+
+def clean_translation(text):
+    """译文常带引号、译名标签或复述指令。只做保守清洗，不猜内容。"""
+    s = (text or "").strip()
+    low = s.lower()
+    for marker in _TRANSLATION_MARKERS:
+        if low.startswith(marker):
+            s = s[len(marker):].strip()
+            break
+    s = s.split("\n")[0].strip(_QUOTE_STRIP)
+    return s
+
+
 def _post_wav(port, wav_bytes, model_id, timeout=600.0):
     """multipart 手拼字节。不为一个 POST 引入 requests —— 包里只有 numpy。"""
     boundary = uuid.uuid4().hex
@@ -467,6 +522,16 @@ def _post_wav(port, wav_bytes, model_id, timeout=600.0):
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/audio/transcriptions", data=body,
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def _post_json(port, path, payload, timeout=180.0):
+    """llama-server 的 JSON 端点。翻译走 /completion（裸续写），不走 chat 模板。"""
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", data=body,
+        headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
 
@@ -623,6 +688,55 @@ class LlamaBackend(InferenceBackend):
         if m:
             return m.group(1).lower(), m.group(2).strip()
         return "", raw
+
+    # ---- 双语 ----
+    def translate(self, text, target):
+        """把 text 译成 target（zh / en）。
+
+        必须走原始 /completion：/v1/chat/completions 与 /v1/audio/transcriptions
+        都会被 ASR 的 chat 模板包住，模型只会往回吐 `language X<asr_text>` 加原文
+        （实测三种 chat 写法全部如此）。裸续写才摸得到底座的文本能力。
+
+        失败返回空串：副行留白比错译好，更不能因为翻译挂了把这一窗字幕整条丢掉。
+        """
+        text = (text or "").strip()
+        if not text or self._proc is None or self._proc.poll() is not None:
+            return ""
+        if target == "en":
+            prompt = f"把下面这句译成英文，只输出译文：\n{text}\nEnglish:"
+        elif target == "zh":
+            prompt = f"把下面这句译成简体中文，只输出译文：\n{text}\n中文:"
+        else:
+            return ""
+        try:
+            out = _post_json(self._port, "/completion", {
+                "prompt": prompt, "temperature": 0, "n_predict": 256,
+                "stream": False, "cache_prompt": False,
+                "stop": ["\n\n", "\nEnglish:", "\n中文:", "<|im_end|>"]})
+        except Exception as exc:  # noqa: BLE001 - 翻译失败只影响副行
+            log(f"translate failed: {exc}")
+            return ""
+        return clean_translation(out.get("content") or "")
+
+    def bilingual(self, text, detected, up_lang, down_lang):
+        """把一次转写排成 (上行, 下行)。原文属于哪一行就留在哪一行，另一行翻译。
+
+        第三种语言（模型自报日/韩等）两行都要译：用户要的是"中文在上英文在下"，
+        把原文塞进任何一行都不符合这个约定；两译皆空才退回把原文放上行。
+        """
+        text = (text or "").strip()
+        if not text:
+            return ("", "")
+        src = language_family(detected)
+        if src == up_lang:
+            return (text, self.translate(text, down_lang))
+        if src == down_lang:
+            return (self.translate(text, up_lang), text)
+        up = self.translate(text, up_lang)
+        down = self.translate(text, down_lang)
+        if not up and not down:
+            return (text, "")
+        return (up, down)
 
     def close(self):
         if self._proc is not None:
@@ -1328,6 +1442,10 @@ def build_arg_parser():
     # llama 引擎的原生运行时目录（含 llama-server.exe 与 ggml-*.dll）。
     # 缺省取 模型目录的兄弟目录 runtime/vulkan，也就是便携包的标准布局。
     ap.add_argument("--runtime-dir", default="")
+    # 双语对照："zh-en" = 中文在上英文在下，"en-zh" 反之，空/off = 关闭。
+    # 只有 GGUF（llama）引擎做得到 —— 它靠同一进程的原始 /completion 续写，
+    # ONNX 那条腿是纯 ASR，没有文本生成能力，见 main() 里的降级告警。
+    ap.add_argument("--bilingual", default="")
     return ap
 
 
@@ -1398,6 +1516,20 @@ def main():
         emit({"type": "status", "state": "error", "fatal": True,
               "detail": "没有可用的推理设备：" + ("；".join(notes) or "无候选")})
         return 3
+
+    # 双语能力只跟"后端能不能产出文本"有关，不跟引擎名有关：llama 有
+    # translate/bilingual，sherpa 与 OpenVINO 三件套没有。用 hasattr 判，
+    # 将来给某条腿补上文本能力时不用回来改这里。
+    up_lang, down_lang = normalize_bilingual(args.bilingual)
+    bilingual_ok = bool(up_lang) and hasattr(backend, "bilingual")
+    if up_lang and not bilingual_ok:
+        emit({"type": "status", "state": "warning",
+              "detail": f"双语字幕需要 GGUF 引擎（当前 {engine} 引擎没有文本生成能力），"
+                        f"已按单语输出"})
+        log(f"bilingual requested ({args.bilingual}) but backend {backend.id} cannot translate")
+    if bilingual_ok:
+        log(f"bilingual: up={up_lang} down={down_lang}"
+            f"（同一 llama-server 的 /completion，不额外加载模型）")
 
     if args.selftest:
         # 自检模式把"最终跑在哪个设备、为什么没跑在首选设备、自检结论"打成一行：
@@ -1548,14 +1680,32 @@ def main():
             # matched 只是"报给宿主看"：worker 从不自己丢结果（宿主可选择丢弃，
             # 而且那个开关不该逼 worker 重启）。
             matched = same_language(language, target_language)
+            # 双语在"这一窗已经确认有有效内容"之后才做：丢弃判定用原文，
+            # 不给被丢掉的窗口白付一次翻译。
+            up_text, down_text = text, ""
+            if bilingual_ok:
+                t1 = time.perf_counter()
+                try:
+                    up_text, down_text = backend.bilingual(text, language, up_lang, down_lang)
+                except Exception as exc:  # noqa: BLE001 - 翻译坏了也只掉副行
+                    log(f"bilingual failed: {exc}")
+                    up_text, down_text = text, ""
+                dt += time.perf_counter() - t1
+                # 翻译也是这一窗推理成本，rtf 必须算进去，否则统计把人骗了。
+                if infer_seconds:
+                    infer_seconds[-1] = dt
+                if not up_text:
+                    up_text = text
             emit({"type": "final", "generation": generation,
                   "start100ns": start100ns, "end100ns": end100ns,
-                  "text": text, "language": language,
+                  "text": up_text, "text2": down_text, "bilingual": bilingual_ok,
+                  "language": language,
                   "target": target_language or "", "matched": matched})
             log(f"final [{start100ns/1e7:.2f}s..{end100ns/1e7:.2f}s] "
                 f"lang={language or '?'}"
                 f"{'' if matched else f' (target={target_language}, mismatched)'}"
-                f" rtf={dt/max(0.001, len(samples)/TARGET_RATE):.3f} :: {text[:60]}")
+                f" rtf={dt/max(0.001, len(samples)/TARGET_RATE):.3f} :: {text[:60]}"
+                + (f" || {down_text[:60]}" if down_text else ""))
 
             if time.time() - last_stats >= 30.0:
                 rtf = (sum(infer_seconds) /

@@ -143,6 +143,12 @@ Public Class 设置
     ' 只显示所选语言：模型自报语言与所选不符时该窗不上屏。现在恒不触发（见上），
     ' 保留字段是为了不丢老设置，界面按"暂不可用"置灰显示。
     Public Property Ai字幕仅所选语言 As Boolean = False
+    ' 双语对照："" = 关闭；"zh-en" = 中文在上、English 在下；"en-zh" 反之。
+    ' 它不改变识别本身，只让 worker 在同一窗里多译一行 —— 用的是同一个 llama-server
+    ' 的原始 /completion 续写，不额外加载模型、不改任何权重。
+    ' ONNX（NPU / Intel）那条腿是纯 ASR，没有文本生成能力，worker 会降级成单语并报
+    ' 一条 warning，不静默。
+    Public Property Ai字幕双语 As String = ""
     ' 模型档位："" = 跟包清单的默认档（清单 model 字段指向的目录）；其余取清单 models 里的键。
     ' 它属于启动期参数 —— 换档就是换一套 ONNX 权重，必须重启 worker 才生效。
     Public Property Ai字幕模型档 As String = ""
