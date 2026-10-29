@@ -709,7 +709,7 @@ Friend NotInheritable Class Ai字幕推理档
             Case 后端OvGpu
                 Return "已验证（conv 上显卡，int8 两段留 CPU）"
             Case 后端OvNpu
-                Return "NPU 包已验证编译链（conv 可编到 NPU 架构）；NPU 上执行未实测"
+                Return "conv 段已真机实测（偏差 0.001）；端到端未实测（conv 只占约 1%）"
             Case Else
                 Return "自动"
         End Select

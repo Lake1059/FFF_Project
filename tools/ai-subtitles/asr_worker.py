@@ -808,6 +808,38 @@ _OV_TARGETS = {
 }
 
 
+def _ov_device_name(core, dev):
+    """读设备的真实名字，读不到返回空串（OpenVINO 允许这个属性查不出来）。"""
+    try:
+        return str(core.get_property(dev, "FULL_DEVICE_NAME") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _pick_intel_gpu(core, devices):
+    """在 GPU.x 里挑 Intel 那一块，返回具体设备名；判定不了返回 None。
+
+    为什么要挑：OpenVINO 会把 N 卡 / A 卡也列进 GPU.x（第三方实测那台机器就是
+    GPU.0=Intel Arc 140T、GPU.1=RTX 5060 Laptop），而设备名 "GPU" 默认取第一块。
+    不钉的话"选 Intel 显卡"可能编到 NVIDIA 上，而且**不报错** —— 编译照样成功、
+    conv 照样算出数，正是要防的那种假绿。
+    """
+    gpus = [d for d in devices if d.upper().startswith("GPU")]
+    if not gpus:
+        return None
+    names = {d: _ov_device_name(core, d) for d in gpus}
+    for d in gpus:
+        if "intel" in names[d].lower():
+            return d
+    if any(names.values()):
+        # 名字都读得到，却没有一块是 Intel → 明确失败，别去编别家的卡。
+        raise RuntimeError(
+            "本机没有 Intel 显卡（OpenVINO 看到 "
+            + "、".join(f"{d}={names[d]}" for d in gpus)
+            + "）；选 Intel 显卡会编到别家设备上，拒绝继续")
+    return None
+
+
 class OvBackend(InferenceBackend):
     """OpenVINO 原生三段推理。目标设备不存在时**明确失败**，不假装跑在加速器上。"""
 
@@ -841,6 +873,10 @@ class OvBackend(InferenceBackend):
         if not have:
             raise RuntimeError(
                 f"本机没有 {want} 设备（OpenVINO 只看到 {'、'.join(devices) or '无'}）")
+        # 只有 GPU 家族需要挑：NPU / CPU 不存在"同族不同厂商"的问题。
+        ov_dev = _pick_intel_gpu(core, have) if want.upper() == "GPU" else None
+        if ov_dev and ov_dev != want:
+            log(f"OpenVINO {want} 钉到 {ov_dev}（{_ov_device_name(core, ov_dev)}）")
 
         # NPU 编译器只吃"有上界"的形状，conv_frontend 的帧维是 INT64_MAX，直接编
         # 会报 Upper bounds are not specified。给上界就能过（离线实测 NPU4000：
@@ -860,7 +896,8 @@ class OvBackend(InferenceBackend):
         try:
             self._engine = qv.Engine(self.model_dir, device=self.id,
                                      threads=self.threads,
-                                     conv_bounded_frames=bounded)
+                                     conv_bounded_frames=bounded,
+                                     ov_device=ov_dev)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"OpenVINO 三段编译失败：{exc}") from exc
 

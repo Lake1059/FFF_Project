@@ -20,6 +20,7 @@ import io
 import os
 import re
 import sys
+import unicodedata
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 VB_LANG = os.path.join(ROOT, "FFF.Player", "AI字幕", "Ai字幕语言.vb")
@@ -34,6 +35,7 @@ VB_CTRLER = os.path.join(ROOT, "FFF.Player", "Core", "播放器控制器.vb")
 CPP_SESSION = os.path.join(ROOT, "FFF.Native", "3FP", "Core", "PlayerSession.cpp")
 CPP_RENDER = os.path.join(ROOT, "FFF.Native", "3FP", "Render", "VideoRenderer.cpp")
 WORKER = os.path.join(ROOT, "tools", "ai-subtitles", "asr_worker.py")
+PY_ORT = os.path.join(ROOT, "tools", "ai-subtitles", "qwen3_ort.py")
 
 通过 = 0
 失败 = 0
@@ -422,6 +424,52 @@ def main():
     断言("self.window_start = end - int((self.window_s - self.step_s) * 1e7)" in worker,
         "L0-8 出窗后按 (window - step) 推进左边界（窗长恒为 window 时即步进 = step）",
         "advance 写法变了 —— 要先确认步进仍是 step_s")
+
+    # ---------------- L0-9：NPU 路径的两条不变量 ----------------
+    # 第三方在 Ultra 9 285H 上的实测（2026-10-29）给了两个以前只能靠推理的事实：
+    #   A. 无上界的动态维不是"编不过"，是 LLVM ERROR + 退出码 127 直接 abort。
+    #      abort 不经过 Python 的异常处理，worker 会当场消失，连"降档到 CPU"的
+    #      机会都没有 —— 所以必须在 compile_model 之前把它变成一次普通异常。
+    #   B. 那台机器 GPU.0=Intel Arc 140T、GPU.1=RTX 5060：OpenVINO 把 N 卡也列进
+    #      GPU.x，而设备名 "GPU" 取第一块。不按厂商钉，"选 Intel 显卡"会编到
+    #      NVIDIA 上，且编译成功、数值也对 —— 无从察觉。
+    ort = read(PY_ORT)
+    断言("_assert_bounded(self.model" in ort,
+        "L0-9 NPU 编译前断言输入维有有限上界",
+        "找不到 _assert_bounded 调用 —— 无上界会让 vpux 编译器 abort（退出码 127），"
+        "Python 抓不到，worker 会当场消失而不是降档")
+    断言("if bounded_frames and backend.target" not in ort,
+        "L0-9 上界缺失时不许静默跳过 reshape",
+        "又写成 bounded_frames and ... —— 没传上界就跳过 reshape 去硬编译，正是会崩的那种写法")
+    断言("def _assert_bounded(" in ort and "def _reshape_bounded(" in ort,
+        "L0-9 上界处理是两个独立函数（reshape + 断言）",
+        "reshape 与断言被合并或删掉了 —— 改回去要确认两件事仍都做到")
+    断言("def _pick_intel_gpu(" in worker and "_pick_intel_gpu(core, have)" in worker,
+        "L0-9 ov-gpu 按厂商挑 Intel 那块（多显卡时不许编到别家）",
+        "找不到 _pick_intel_gpu —— OpenVINO 把 N 卡也列进 GPU.x，"
+        "不钉就会在 NVIDIA 上编译还不报错")
+    断言("ov_device=ov_dev" in worker,
+        "L0-9 挑到的设备真的传进了 Engine",
+        "Engine 调用没有 ov_device —— 挑了不用，等于没挑")
+
+    # ---------------- L0-2b：设置页状态/说明文案不许超出单行宽度 ----------------
+    # LBL_状态 是 568x112 的固定 Label，五行封顶（包/节奏、设备+后端+模型、说明、
+    # 状态、注意项）。任一行换行就会把下一行顶出可视区 —— 用户看到的是"少一行"，
+    # 不会报错。前缀「状态：」「说明：」约 48px，所以文案本体卡在 520px。
+    def 像素宽(s):
+        return sum(14 if unicodedata.east_asian_width(c) in ("W", "F") else 7
+                   for c in s)
+
+    超宽 = []
+    for 函数 in ("后端状态", "后端说明"):
+        块 = re.search(r"Function " + 函数 + r"\((.*?)End Function", pack, re.S)
+        断言(块 is not None, f"L0-2b 能解析出 {函数}", "找不到该函数")
+        for 字面 in re.findall(r'Return\s+"((?:[^"]|"")*)"', 块.group(1)):
+            w = 像素宽(字面.replace('""', '"'))
+            if w > 520:
+                超宽.append(f"{函数} {w}px：{字面}")
+    断言(not 超宽, "L0-2b 状态/说明文案单行放得下（LBL_状态 568px，五行封顶）",
+        "；".join(超宽))
 
     print(f"\n通过 {通过} / 失败 {失败}")
     return 失败

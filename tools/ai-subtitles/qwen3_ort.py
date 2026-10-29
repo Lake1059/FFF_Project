@@ -72,6 +72,7 @@ CLI
     python qwen3_ort.py --model-dir <dir> --selftest
     python qwen3_ort.py --model-dir <dir> --wav a.wav --device cpu
     python qwen3_ort.py --model-dir <dir> --wav a.wav --device cuda
+    python qwen3_ort.py --model-dir <dir> --wav a.wav --device ov-npu --npu-frames 6000
 
 `--device` 一个值就够：加速后端（cuda / dml / ov-gpu / ov-npu）缺省只把 fp32 的
 conv 送上去，int8 两段留 CPU（STAGE_DEFAULTS，依据见 Engine 文档注释）。
@@ -449,14 +450,75 @@ class OrtStage:
         return dict(zip(self.names, outs))
 
 
+def _reshape_bounded(model, ov, bounded_frames, index=0):
+    """给第 index 个输入的帧维加有限上界（NPU 唯一需要的模型改动）。
+
+    reshape 只改内存里的 shape 元数据，**onnx 文件一个字节都不动**。
+    """
+    ps = model.input(index).partial_shape
+    # rank 在这个版本是属性（Dimension），不是方法 —— 写成 rank() 只有
+    # NPU 分支会执行到，CPU/GPU 永远测不出来。
+    if not (ps.rank.is_static and len(ps) == 3):
+        raise BackendError(
+            f"输入 {index} 的 shape 是 {ps}（rank 不是 3），没法按 [1, 1..N, mel] "
+            "给帧维加上界；NPU 需要这个上界，拒绝在没有它的情况下编译。")
+    n_mels = ps[2].get_length() if ps[2].is_static else 128
+    model.reshape({index: ov.PartialShape(
+        [(1, 1), (1, bounded_frames), (n_mels, n_mels)])})
+
+
+# NPU 帧维上界的默认值：宿主窗口上限 30 s（3000 帧 @10 ms），留两成余量。
+# worker 显式传 3200；CLI 直接 --device ov-npu 时用它，更长的音频用 --npu-frames 调大
+# （超过上界是 OpenVINO 报错，不是崩进程 —— 两者代价完全不同）。
+NPU_DEFAULT_FRAMES = 3200
+
+# 上界大到这个量级就当"没给上界"：真有上界的是几千，没给的是 INT64_MAX 级。
+_UNBOUNDED_MAX = 1 << 31
+
+
+def _assert_bounded(model, label):
+    """编译前兜底：任一输入维没有有限上界就明确抛错。
+
+    这条不是洁癖。第三方在 Ultra 9 285H 上实测：无上界的动态维会让 vpux 编译器
+    在 Pad/ShapeOf 处 `LLVM ERROR: Failed to infer result type(s)`，进程以退出码
+    127 直接死掉 —— 那是 abort()，Python 的 try/except **抓不到**，连"降档"的
+    机会都没有。所以在 compile_model 之前把它变成一次普通的 BackendError。
+    """
+    for i, inp in enumerate(model.inputs):
+        ps = inp.partial_shape
+        if not ps.rank.is_static:
+            raise BackendError(
+                f"{label} 输入 {i} 的 rank 不静态（{ps}），无法确认上界；"
+                "NPU 不接受这种模型。")
+        for j in range(len(ps)):
+            d = ps[j]
+            if d.is_static:
+                continue
+            try:
+                hi = d.get_max_length()
+            except Exception:  # noqa: BLE001 - 取不到就是没上界
+                hi = -1
+            if hi < 0 or hi > _UNBOUNDED_MAX:
+                raise BackendError(
+                    f"{label} 输入 {i} 第 {j} 维没有有限上界（{ps}）——NPU 编译器会在"
+                    "Pad/ShapeOf 处 LLVM ERROR 硬崩（退出码 127，Python 抓不到）。"
+                    "先 reshape 给上界（conv_bounded_frames）。")
+
+
 class OvStage:
     """一个 OpenVINO CompiledModel。动态形状原生支持，每步不用重编译。
 
     `bounded_frames` 只给 NPU 用：NPU 编译器拒绝"上界为 INT64_MAX"的动态维，
     报的是一串看着像算子不支持的错（`Upper bounds are not specified`）。给
     conv 的帧维一个上界就能编过（实测 NPU4000 离线编译：500 帧、3000 帧、以及
-    `[1, 1..3000]` 带界动态形状三种都成功）。`reshape` 只改内存里的 shape 元数据，
-    **onnx 文件一个字节都不动**。
+    `[1, 1..3000]` 带界动态形状三种都成功；第三方在 Ultra 9 285H 上真机执行
+    同一段，rel_err 0.001、比 CPU 快 1.5~1.9 倍）。`reshape` 只改内存里的 shape
+    元数据，**onnx 文件一个字节都不动**。
+
+    注意"带界动态"与"静态"是两件事：带上界之后**一次编译覆盖 1..N 任意帧数**，
+    不需要为每种音频长度各编一份，也不需要把音频 padding/trimming 到离散档
+    （那会真丢音频、改 mel 内容）。第三方报告把它写成"NPU 不支持动态形状"，
+    照那个结论去做"预定义帧数集合 + 形状路由"是白伤精度。
     """
 
     kind = "ov"
@@ -464,14 +526,14 @@ class OvStage:
     def __init__(self, path, backend, threads, bounded_frames=None):
         ov, core = openvino_core()
         self.model = core.read_model(path)
-        if bounded_frames and backend.target.upper().startswith("NPU"):
-            ps = self.model.input(0).partial_shape
-            # rank 在这个版本是属性（Dimension），不是方法 —— 写成 rank() 只有
-            # NPU 分支会执行到，CPU/GPU 永远测不出来。
-            if ps.rank.is_static and len(ps) == 3:
-                n_mels = ps[2].get_length() if ps[2].is_static else 128
-                self.model.reshape({0: ov.PartialShape(
-                    [(1, 1), (1, bounded_frames), (n_mels, n_mels)])})
+        if backend.target.upper().startswith("NPU"):
+            # 无上界的动态维会让 NPU 编译器 abort（退出码 127，Python 抓不到），
+            # 所以这里做两件事：先 reshape 给上界，再在编译前断言上界确实有限。
+            # 以前写的是 "bounded_frames and ..."：没传上界就悄悄跳过 reshape，
+            # 直接进 compile_model 硬崩 —— 这正是第三方报告里那次崩溃的形态。
+            # 没显式给就用默认值（CLI 走的是这条路），断言仍然兜底。
+            _reshape_bounded(self.model, ov, bounded_frames or NPU_DEFAULT_FRAMES)
+            _assert_bounded(self.model, os.path.basename(path))
         cfg = {"PERFORMANCE_HINT": "LATENCY"}
         if backend.target.upper().startswith("CPU"):
             cfg["INFERENCE_NUM_THREADS"] = str(threads)
@@ -801,7 +863,9 @@ def main(argv=None):
                         encoder_device=opt("--encoder-device"),
                         decoder_device=opt("--decoder-device"),
                         threads=int(threads) if threads else None,
-                        ov_device=opt("--ov-device"))
+                        ov_device=opt("--ov-device"),
+                        conv_bounded_frames=(int(opt("--npu-frames"))
+                                             if opt("--npu-frames") else None))
     except BackendError as e:
         print(f"[后端不可用] {e}", file=sys.stderr)
         return 2
