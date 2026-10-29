@@ -47,7 +47,7 @@ Partial Class Form设置_界面与尺寸
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(20)
+        ModernPanel1.Padding = New Padding(15, 20, 20, 20)
         ModernPanel1.Size = New Size(700, 539)
         ModernPanel1.TabIndex = 0
         ' 
@@ -57,11 +57,11 @@ Partial Class Form设置_界面与尺寸
         HtmlColorLabel4.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel4.Dock = DockStyle.Top
         HtmlColorLabel4.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        HtmlColorLabel4.Location = New Point(20, 104)
+        HtmlColorLabel4.Location = New Point(15, 104)
         HtmlColorLabel4.Margin = New Padding(2)
         HtmlColorLabel4.Name = "HtmlColorLabel4"
         HtmlColorLabel4.Padding = New Padding(0, 0, 0, 10)
-        HtmlColorLabel4.Size = New Size(660, 27)
+        HtmlColorLabel4.Size = New Size(665, 27)
         HtmlColorLabel4.TabIndex = 20
         HtmlColorLabel4.Text = "每次启动软件后视频渲染区域的尺寸，会跟随 DPI 缩放"
         ' 
@@ -76,10 +76,10 @@ Partial Class Form设置_界面与尺寸
         Panel2.Controls.Add(JustEmptyControl1)
         Panel2.Controls.Add(MCB_初始画面尺寸选项)
         Panel2.Dock = DockStyle.Top
-        Panel2.Location = New Point(20, 62)
+        Panel2.Location = New Point(15, 62)
         Panel2.Name = "Panel2"
         Panel2.Padding = New Padding(0, 0, 0, 10)
-        Panel2.Size = New Size(660, 42)
+        Panel2.Size = New Size(665, 42)
         Panel2.TabIndex = 15
         ' 
         ' MTB_自定义初始画面尺寸高度
@@ -179,10 +179,10 @@ Partial Class Form设置_界面与尺寸
         Panel1.BorderSize = 0
         Panel1.Controls.Add(MCB_全局字体)
         Panel1.Dock = DockStyle.Top
-        Panel1.Location = New Point(20, 20)
+        Panel1.Location = New Point(15, 20)
         Panel1.Name = "Panel1"
         Panel1.Padding = New Padding(0, 0, 0, 10)
-        Panel1.Size = New Size(660, 42)
+        Panel1.Size = New Size(665, 42)
         Panel1.TabIndex = 17
         ' 
         ' MCB_全局字体

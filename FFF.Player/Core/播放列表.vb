@@ -31,19 +31,19 @@ Public NotInheritable Class 播放列表
         ".png", ".jpg", ".jpeg", ".jpe", ".gif", ".apng", ".webp", ".jxl", ".bmp", ".tif", ".tiff",
         ".ico", ".avif", ".avifs", ".heic", ".heif", ".jxr", ".wdp", ".hdp"
     }
-    ' 图片模式：与 视频扩展名 平行的一份集合。看图要按目录建列表，
-    ' 而 视频扩展名 只用来判断"这是不是视频"，不能反过来当"是不是图片"用。
+    ' 图片模式用此集合判断当前媒体是否为图片。
     Private Shared ReadOnly 图片扩展名 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
         ".png", ".jpg", ".jpeg", ".jpe", ".gif", ".apng", ".webp", ".jxl", ".bmp", ".tif", ".tiff",
         ".ico", ".avif", ".avifs", ".heic", ".heif", ".jxr", ".wdp", ".hdp"
     }
-    Private Shared ReadOnly 视频扩展名 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-        ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".webm", ".flv", ".ts", ".m2ts", ".mts",
-        ".mpg", ".mpeg", ".vob", ".ogv", ".3gp", ".3g2", ".rm", ".rmvb", ".asf", ".divx"
-    }
-    Private Shared ReadOnly 末尾数字 As New Regex("^(?<prefix>.*?)(?<number>\d+)(?<suffix>\D*)$", RegexOptions.Compiled Or RegexOptions.CultureInvariant)
+    Private Const 自动列表最大数量 As Integer = 1000
+    Private Shared ReadOnly 自动列表比较器 As IComparer(Of 播放列表项) = Comparer(Of 播放列表项).Create(
+        Function(a, b) 比较媒体路径(a.路径, b.路径))
     Private ReadOnly 项目 As New List(Of 播放列表项)()
     Private 当前值 As Integer = -1
+    Private 扫描版本 As Integer
+    Private 缓存版本 As Integer = -1
+    Private 缓存目录时间 As DateTime
 
     Public Event 列表变化 As EventHandler
     Public Property 播放模式 As 列表播放模式 = 列表播放模式.播完停止
@@ -82,6 +82,7 @@ Public NotInheritable Class 播放列表
         Dim 新项目 As New 播放列表项(本地路径)
         SyncLock 项目
             If 项目.Any(Function(x) String.Equals(x.路径, 新项目.路径, StringComparison.OrdinalIgnoreCase)) Then Return
+            Interlocked.Increment(扫描版本)
             项目.Add(新项目)
             If 当前值 < 0 Then 当前值 = 0
         End SyncLock
@@ -100,6 +101,7 @@ Public NotInheritable Class 播放列表
                 If 已存在路径.Add(项.路径) Then 新项目.Add(项)
             Next
             If 新项目.Count = 0 Then Return
+            Interlocked.Increment(扫描版本)
             项目.AddRange(新项目)
             If 当前值 < 0 Then 当前值 = 项目.Count - 新项目.Count
         End SyncLock
@@ -109,6 +111,7 @@ Public NotInheritable Class 播放列表
     Public Sub 移除(索引 As Integer)
         SyncLock 项目
             If 索引 < 0 OrElse 索引 >= 项目.Count Then Throw New ArgumentOutOfRangeException(NameOf(索引))
+            Interlocked.Increment(扫描版本)
             Dim 移除当前项目 = 当前值 = 索引
             项目.RemoveAt(索引)
             If 项目.Count = 0 OrElse 移除当前项目 Then
@@ -124,6 +127,7 @@ Public NotInheritable Class 播放列表
         SyncLock 项目
             If 原索引 < 0 OrElse 原索引 >= 项目.Count Then Throw New ArgumentOutOfRangeException(NameOf(原索引))
             If 新索引 < 0 OrElse 新索引 >= 项目.Count Then Throw New ArgumentOutOfRangeException(NameOf(新索引))
+            Interlocked.Increment(扫描版本)
             Dim 当前路径 = If(当前值 >= 0, 项目(当前值).路径, Nothing)
             Dim 值 = 项目(原索引)
             项目.RemoveAt(原索引)
@@ -143,6 +147,7 @@ Public NotInheritable Class 播放列表
                 新顺序.Any(Function(x) Not 原项目.ContainsKey(x)) Then
                 Throw New ArgumentException("新顺序中的项目与当前播放列表不一致。", NameOf(路径顺序))
             End If
+            Interlocked.Increment(扫描版本)
             Dim 当前路径 = If(当前值 >= 0 AndAlso 当前值 < 项目.Count, 项目(当前值).路径, Nothing)
             项目.Clear()
             项目.AddRange(新顺序.Select(Function(x) 原项目(x)))
@@ -176,92 +181,137 @@ Public NotInheritable Class 播放列表
 
     Public Sub 清空()
         SyncLock 项目
+            Interlocked.Increment(扫描版本)
             项目.Clear()
             当前值 = -1
         End SyncLock
         RaiseEvent 列表变化(Me, EventArgs.Empty)
     End Sub
 
-    Public Sub 从媒体创建并扫描相似文件(本地路径 As String,
-                                   Optional 取消令牌 As CancellationToken = Nothing)
-        取消令牌.ThrowIfCancellationRequested()
-        Dim 当前路径 = 规范本地文件(本地路径)
-        Dim 当前名称 = IO.Path.GetFileNameWithoutExtension(当前路径)
-        Dim 签名 = 取得系列签名(当前名称)
-        Dim 当前是视频文件 = 视频扩展名.Contains(IO.Path.GetExtension(当前路径))
-        Dim 新列表 As New List(Of 播放列表项)()
-        If 签名 IsNot Nothing Then
-            For Each 文件 In IO.Directory.EnumerateFiles(IO.Path.GetDirectoryName(当前路径))
-                取消令牌.ThrowIfCancellationRequested()
-                If Not 媒体扩展名.Contains(IO.Path.GetExtension(文件)) Then Continue For
-                If 当前是视频文件 AndAlso 外部音频自动加载器.是支持的音频文件(文件) Then Continue For
-                If String.Equals(取得系列签名(IO.Path.GetFileNameWithoutExtension(文件)), 签名, StringComparison.OrdinalIgnoreCase) Then
-                    Try
-                        新列表.Add(New 播放列表项(文件))
-                    Catch
-                    End Try
-                End If
-            Next
-        End If
-        If Not 新列表.Any(Function(x) String.Equals(x.路径, 当前路径, StringComparison.OrdinalIgnoreCase)) Then 新列表.Add(New 播放列表项(当前路径))
-        新列表.Sort(Function(a, b) 自然文件名比较器.实例.Compare(IO.Path.GetFileName(a.路径), IO.Path.GetFileName(b.路径)))
-        取消令牌.ThrowIfCancellationRequested()
+    Public Sub 取消自动扫描()
         SyncLock 项目
+            Interlocked.Increment(扫描版本)
+        End SyncLock
+    End Sub
+
+    Public Function 从媒体扫描同目录Async(本地路径 As String,
+                                      Optional 取消令牌 As CancellationToken = Nothing) As Task
+        Dim 版本 As Integer
+        Dim 可复用 As Boolean
+        Dim 目录时间 As DateTime
+        SyncLock 项目
+            可复用 = 缓存版本 = 扫描版本 AndAlso
+                项目.Any(Function(x) String.Equals(x.路径, 本地路径, StringComparison.OrdinalIgnoreCase))
+            目录时间 = 缓存目录时间
+            版本 = Interlocked.Increment(扫描版本)
+        End SyncLock
+        Return Task.Run(Sub()
+                            If 可复用 AndAlso 复用同目录列表(本地路径, 版本, 目录时间, 取消令牌) Then Return
+                            扫描同目录(本地路径, 版本, 取消令牌)
+                        End Sub, 取消令牌)
+    End Function
+
+    Private Function 复用同目录列表(本地路径 As String, 版本 As Integer, 目录时间 As DateTime, 取消令牌 As CancellationToken) As Boolean
+        取消令牌.ThrowIfCancellationRequested()
+        If IO.Directory.GetLastWriteTimeUtc(IO.Path.GetDirectoryName(本地路径)) <> 目录时间 Then Return False
+        Dim 已变化 As Boolean
+        SyncLock 项目
+            If 扫描版本 <> 版本 OrElse 取消令牌.IsCancellationRequested Then Return True
+            Dim 索引 = 项目.FindIndex(Function(x) String.Equals(x.路径, 本地路径, StringComparison.OrdinalIgnoreCase))
+            If 索引 < 0 Then Return False
+            已变化 = 当前值 <> 索引
+            当前值 = 索引
+            缓存版本 = 版本
+        End SyncLock
+        If 已变化 Then RaiseEvent 列表变化(Me, EventArgs.Empty)
+        Return True
+    End Function
+
+    Private Sub 扫描同目录(本地路径 As String, 版本 As Integer, 取消令牌 As CancellationToken)
+        取消令牌.ThrowIfCancellationRequested()
+        Dim 当前项目 As New 播放列表项(本地路径)
+        Dim 当前路径 = 当前项目.路径
+        Dim 新列表 As New List(Of 播放列表项) From {当前项目}
+        Dim 前项 As New SortedSet(Of 播放列表项)(自动列表比较器)
+        Dim 后项 As New SortedSet(Of 播放列表项)(自动列表比较器)
+        Dim 目录 = IO.Path.GetDirectoryName(当前路径)
+        Dim 目录时间 = IO.Directory.GetLastWriteTimeUtc(目录)
+        Dim 扫描完整 = True
+        Try
+            For Each 文件 In IO.Directory.EnumerateFiles(目录)
+                取消令牌.ThrowIfCancellationRequested()
+                If Volatile.Read(扫描版本) <> 版本 Then Return
+                If Not 是支持的媒体文件(文件) OrElse String.Equals(文件, 当前路径, StringComparison.OrdinalIgnoreCase) Then Continue For
+                Try
+                    Dim 在前 = 比较媒体路径(文件, 当前路径) < 0
+                    Dim 集合 = If(在前, 前项, 后项)
+                    If 集合.Count >= 自动列表最大数量 - 1 Then
+                        Dim 最远 = If(在前, 集合.Min, 集合.Max)
+                        Dim 比较 = 比较媒体路径(文件, 最远.路径)
+                        If If(在前, 比较 <= 0, 比较 >= 0) Then Continue For
+                    End If
+                    Dim 候选 As New 播放列表项(文件)
+                    If 集合.Count >= 自动列表最大数量 - 1 Then
+                        Dim 最远 = If(在前, 集合.Min, 集合.Max)
+                        集合.Remove(最远)
+                    End If
+                    集合.Add(候选)
+                Catch ex As IOException
+                    扫描完整 = False
+                    Continue For
+                Catch ex As UnauthorizedAccessException
+                    扫描完整 = False
+                    Continue For
+                Catch ex As ArgumentException
+                    扫描完整 = False
+                    Continue For
+                End Try
+            Next
+        Catch ex As IOException
+            扫描完整 = False
+        Catch ex As UnauthorizedAccessException
+            扫描完整 = False
+        End Try
+        Using 前枚举 As IEnumerator(Of 播放列表项) = 前项.Reverse().GetEnumerator(),
+              后枚举 As IEnumerator(Of 播放列表项) = DirectCast(后项, IEnumerable(Of 播放列表项)).GetEnumerator()
+            Dim 有前 = 前枚举.MoveNext()
+            Dim 有后 = 后枚举.MoveNext()
+            While 新列表.Count < 自动列表最大数量 AndAlso (有前 OrElse 有后)
+                取消令牌.ThrowIfCancellationRequested()
+                If Volatile.Read(扫描版本) <> 版本 Then Return
+                If 有前 Then
+                    新列表.Add(前枚举.Current)
+                    有前 = 前枚举.MoveNext()
+                End If
+                If 新列表.Count < 自动列表最大数量 AndAlso 有后 Then
+                    新列表.Add(后枚举.Current)
+                    有后 = 后枚举.MoveNext()
+                End If
+            End While
+        End Using
+        新列表.Sort(自动列表比较器)
+        取消令牌.ThrowIfCancellationRequested()
+        Dim 可缓存 = 扫描完整 AndAlso 新列表.Count < 自动列表最大数量 AndAlso
+            目录时间 = IO.Directory.GetLastWriteTimeUtc(目录)
+        SyncLock 项目
+            If 扫描版本 <> 版本 OrElse 取消令牌.IsCancellationRequested Then Return
             项目.Clear()
             项目.AddRange(新列表)
             当前值 = 项目.FindIndex(Function(x) String.Equals(x.路径, 当前路径, StringComparison.OrdinalIgnoreCase))
+            缓存版本 = If(可缓存, 版本, -1)
+            缓存目录时间 = 目录时间
         End SyncLock
         RaiseEvent 列表变化(Me, EventArgs.Empty)
     End Sub
 
-    Public Function 从媒体创建并扫描相似文件Async(本地路径 As String,
-                                                 Optional 取消令牌 As CancellationToken = Nothing) As Task
-        Return Task.Run(Sub() 从媒体创建并扫描相似文件(本地路径, 取消令牌), 取消令牌)
+    Private Shared Function 比较媒体路径(a As String, b As String) As Integer
+        Dim 结果 = 自然文件名比较器.实例.Compare(IO.Path.GetFileName(a), IO.Path.GetFileName(b))
+        Return If(结果 <> 0, 结果, StringComparer.OrdinalIgnoreCase.Compare(a, b))
     End Function
 
     ''' <summary>图片模式：按扩展名判断是不是图片（不含视频与音频）。</summary>
     Friend Shared Function 是图片文件(路径 As String) As Boolean
         Return Not String.IsNullOrWhiteSpace(路径) AndAlso 图片扩展名.Contains(IO.Path.GetExtension(路径))
-    End Function
-
-    ''' <summary>图片模式：扫描同目录下的全部图片文件，自然排序，当前文件必在其中。
-    ''' 为什么不复用 从媒体创建并扫描相似文件：那个按"系列签名"匹配，
-    ''' IMG_0001.jpg 与 风景.jpg 签名不同，结果只剩自己，看图时根本翻不动。</summary>
-    Friend Shared Function 扫描同目录图片文件(本地路径 As String) As String()
-        Dim 当前路径 = 规范本地文件(本地路径)
-        If Not 是图片文件(当前路径) Then Return {当前路径}
-        Dim 目录 = IO.Path.GetDirectoryName(当前路径)
-        If String.IsNullOrEmpty(目录) Then Return {当前路径}
-        Dim 结果 As New List(Of String)()
-        For Each 文件 In IO.Directory.EnumerateFiles(目录)
-            If Not 是图片文件(文件) Then Continue For
-            Try
-                结果.Add(规范本地文件(文件))
-            Catch
-                ' 跳过重解析点 / 已消失的文件
-            End Try
-        Next
-        If Not 结果.Any(Function(x) String.Equals(x, 当前路径, StringComparison.OrdinalIgnoreCase)) Then
-            结果.Add(当前路径)
-        End If
-        结果.Sort(Function(a, b) 自然文件名比较器.实例.Compare(IO.Path.GetFileName(a), IO.Path.GetFileName(b)))
-        Return 结果.ToArray()
-    End Function
-
-    ''' <summary>图片模式：用同目录的图片重建播放列表，并把当前项定位到这张图。</summary>
-    Public Sub 用同目录图片替换(本地路径 As String)
-        Dim 文件 = 扫描同目录图片文件(本地路径)
-        SyncLock 项目
-            项目.Clear()
-            当前值 = -1
-        End SyncLock
-        添加多个(文件)
-        选择路径(本地路径)
-        RaiseEvent 列表变化(Me, EventArgs.Empty)
-    End Sub
-
-    Public Function 用同目录图片替换Async(本地路径 As String) As Task
-        Return Task.Run(Sub() 用同目录图片替换(本地路径))
     End Function
 
     Public Sub 导出M3U8(列表路径 As String)
@@ -292,6 +342,7 @@ Public NotInheritable Class 播放列表
             If 已发现.Add(值.路径) Then 新列表.Add(值)
         Next
         SyncLock 项目
+            Interlocked.Increment(扫描版本)
             Dim 当前路径 = If(当前值 >= 0 AndAlso 当前值 < 项目.Count, 项目(当前值).路径, Nothing)
             项目.Clear()
             项目.AddRange(新列表)
@@ -359,14 +410,6 @@ Public NotInheritable Class 播放列表
         If Not IO.File.Exists(完整路径) Then Throw New FileNotFoundException("找不到本地文件。", 完整路径)
         If (IO.File.GetAttributes(完整路径) And IO.FileAttributes.ReparsePoint) <> 0 Then Throw New ArgumentException("不允许重解析点文件。", NameOf(值))
         Return 完整路径
-    End Function
-
-    Private Shared Function 取得系列签名(名称 As String) As String
-        Dim 匹配 = 末尾数字.Match(名称)
-        If Not 匹配.Success Then Return Nothing
-        Dim 前缀 = Regex.Replace(匹配.Groups("prefix").Value.Trim(), "[\s._-]+", " ")
-        Dim 后缀 = Regex.Replace(匹配.Groups("suffix").Value.Trim(), "[\s._-]+", " ")
-        Return (前缀 & "#" & 后缀).ToUpperInvariant()
     End Function
 
     Private NotInheritable Class 自然文件名比较器

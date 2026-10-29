@@ -4,7 +4,7 @@
   <PropertyGroup>
       <OutputType>WinExe</OutputType>
       <!-- TFM 就地定义：默认与上游一致（.NET 10）。切 .NET 11 用 -p:NetTFM=net11.0-windows10.0.26100.0 -->
-      <NetTFM Condition="'$(NetTFM)' == ''">net10.0-windows10.0.26100.0</NetTFM>
+      <NetTFM Condition="'$(NetTFM)' == ''">net10.0-windows</NetTFM>
       <TargetFramework>$(NetTFM)</TargetFramework>
       <!-- LakeUI 是外部商业兄弟仓，构建节奏独立，单独一个 TFM 参数 -->
       <LakeUITfm Condition="'$(LakeUITfm)' == ''">net10.0-windows10.0.17763.0</LakeUITfm>
@@ -19,15 +19,16 @@
       <!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
       <Authors>1059 Studio</Authors>
       <Company>1059 Studio</Company>
-      <AssemblyVersion>2026.10.28</AssemblyVersion>
-      <FileVersion>2026.10.28</FileVersion>
-      <Version>2026.10.28</Version>
+      <AssemblyVersion>2026.10.29</AssemblyVersion>
+      <FileVersion>2026.10.29</FileVersion>
+      <Version>2026.10.29</Version>
       <Title>FFF.Player</Title>
       <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
       <ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
       <PlatformTarget>x64</PlatformTarget>
       <Prefer32Bit>false</Prefer32Bit>
-      <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+      <SupportedOSPlatformVersion Condition="$(NetTFM.EndsWith('-windows'))">7.0</SupportedOSPlatformVersion>
+      <SupportedOSPlatformVersion Condition="!$(NetTFM.EndsWith('-windows'))">10.0.19041.0</SupportedOSPlatformVersion>
       <ApplicationIcon>ICO.ico</ApplicationIcon>
 
       <PlayerApiVersion>20</PlayerApiVersion>
