@@ -9,6 +9,10 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     Private ReadOnly 快照提供器 As Func(Of 播放器快照)
     Private ReadOnly 字幕提供器 As Func(Of 外部字幕轨道)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
+    ' AI 实时字幕（docs/ai-subtitles/）：可选注入点。Nothing = 未接入，本类行为与从前一致。
+    ' 签名取（播放位置, 时间轴代次）→ 文本：控制器自己管 worker 与状态机，呈现器只问
+    ' 「这一帧该显示哪句」，不持有任何 ASR 类型，也不参与它的启停。
+    Private ReadOnly AI字幕提供器 As Func(Of TimeSpan, ULong, String)
     Private ReadOnly SRT绘制项 As New List(Of SRT字幕绘制项)()
     Private ReadOnly SRT行测量 As New List(Of 字幕行测量结果)()
     Private ReadOnly SRT测量缓存 As New Dictionary(Of 字幕行测量键, 字幕行测量结果)()
@@ -82,7 +86,8 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
 
     Friend Sub New(画面控件 As 播放器画面控件, 快照提供器 As Func(Of 播放器快照),
                    字幕提供器 As Func(Of 外部字幕轨道),
-                   提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single))
+                   提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single),
+                   Optional AI字幕提供器 As Func(Of TimeSpan, ULong, String) = Nothing)
         ArgumentNullException.ThrowIfNull(画面控件)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(字幕提供器)
@@ -91,6 +96,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
         Me.快照提供器 = 快照提供器
         Me.字幕提供器 = 字幕提供器
         Me.提交图层 = 提交图层
+        Me.AI字幕提供器 = AI字幕提供器
         刷新计时器 = New LakeUI.PrecisionTimer With {
             .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
             .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop
@@ -116,8 +122,9 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
             Dim 快照 = 快照提供器()
             Dim 客户区大小 = New Size(Volatile.Read(缓存客户区宽度), Volatile.Read(缓存客户区高度))
             Dim DPI = BitConverter.Int32BitsToSingle(Volatile.Read(缓存DPI位元))
-            If 快照 Is Nothing OrElse 快照.视频宽度 = 0 OrElse 快照.视频高度 = 0 OrElse
-                客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return
+            If 快照 Is Nothing OrElse 客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return
+            ' 纯音频：没有画面就没有"画面区域"，但 AI 字幕仍然要上屏（音乐/播客场景）。
+            If (快照.视频宽度 = 0 OrElse 快照.视频高度 = 0) AndAlso Not 无视频时也绘制 Then Return
             Dim 字幕 = 字幕提供器()
             提交当前帧(客户区大小, 快照.视频宽度, 快照.视频高度,
                      快照.播放位置, 字幕, DPI, 快照.时间轴代次)
@@ -151,14 +158,24 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
                          Optional 时间轴代次 As ULong = 0) As IReadOnlyList(Of 定时文字命令)
         图层命令.Clear()
         命令对象使用数 = 0
-        If Volatile.Read(已释放标志) <> 0 OrElse 视频宽度 = 0 OrElse 视频高度 = 0 OrElse
+        Dim 无视频 = 视频宽度 = 0 OrElse 视频高度 = 0
+        If Volatile.Read(已释放标志) <> 0 OrElse (无视频 AndAlso Not 无视频时也绘制) OrElse
             客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return 图层命令
         If Not Single.IsFinite(DPI) OrElse DPI <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(DPI))
         ' WinForms 的 ClientSize 已经是物理像素；先换回 DIP，再交给字幕/弹幕共用的
         ' 视频显示区域换算，避免高 DPI 下重复放大。
         Dim DPI缩放 = DPI / 96.0F
-        Dim 区域 = 视频显示区域.计算(客户区大小.Width / DPI缩放, 客户区大小.Height / DPI缩放, DPI,
+        Dim 区域 As 视频显示区域
+        If 无视频 Then
+            ' 纯音频：没有画面可让位，整个客户区就是"视频区域"，AI 字幕照它定底边。
+            ' 计算() 对 0 尺寸抛异常，所以这条分支必须绕开它，而不是塞一个假的 1×1。
+            Dim 画布宽 = 客户区大小.Width / DPI缩放
+            Dim 画布高 = 客户区大小.Height / DPI缩放
+            区域 = New 视频显示区域(0.0F, 0.0F, 画布宽, 画布高, 画布高 / 1080.0F, DPI)
+        Else
+            区域 = 视频显示区域.计算(客户区大小.Width / DPI缩放, 客户区大小.Height / DPI缩放, DPI,
                                       CInt(视频宽度), CInt(视频高度))
+        End If
         If 字幕 IsNot Nothing AndAlso 字幕.尝试进入使用() Then
             Try
                 Select Case 字幕.格式
@@ -181,8 +198,29 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
                 字幕.离开使用()
             End Try
         End If
+        ' AI 字幕排在既有命令之后：同一图层、同一帧，与外部字幕同底并存、AI 上移一行。
+        If AI字幕提供器 IsNot Nothing Then 追加AI字幕命令(播放位置, 时间轴代次, 区域)
         Return 图层命令
     End Function
+
+    ''' <summary>AI 实时字幕：向本帧图层追加一条文字命令。
+    ''' 「有没有同底文字」按本帧图层已有几条命令判，而不是按有没有字幕轨 —— 纯音频
+    ''' 回退路径不画外部字幕，按字幕轨判会让 AI 那行悬在底部上方两行的空位上。</summary>
+    Private Sub 追加AI字幕命令(播放位置 As TimeSpan, 时间轴代次 As ULong, 区域 As 视频显示区域)
+        Try
+            Dim 文本 = AI字幕提供器(播放位置, 时间轴代次)
+            If String.IsNullOrWhiteSpace(文本) Then Return
+            Dim 行高 = 区域.高度像素 / 22.0F
+            Dim 有同底文字 = 图层命令.Count > 0
+            Dim y = 区域.Y像素 + 区域.高度像素 - If(有同底文字, 行高 * 2.2F, 行高 * 1.2F)
+            添加文字命令(文本, 设置.实例对象.字幕第一行字体, 行高,
+                New RectangleF(区域.X像素, y, 区域.宽度像素, 行高),
+                &HFFFFFFFFUI, &HF0000000UI, 行高 * 0.08F,
+                定时文字对齐.居中, 定时文字对齐.靠前)
+        Catch
+            ' AI 字幕是可选层：任何失败只当这一帧没有它，绝不影响既有字幕。
+        End Try
+    End Sub
 
     Friend Sub 提交当前帧(客户区大小 As Size, 视频宽度 As UInteger, 视频高度 As UInteger,
                        播放位置 As TimeSpan, 字幕 As 外部字幕轨道,
@@ -205,6 +243,11 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     Friend Sub 使图层失效()
         Volatile.Write(图层签名有效标志, 0)
     End Sub
+
+    ''' <summary>纯音频（无视频轨）时是否仍然生成本图层。AI 字幕装在音乐/播客上必须打开：
+    ''' 否则视频宽高为 0，刷新泵直接返回，字幕永远上不了屏。默认关 —— 没装 AI 字幕包时
+    ''' 呈现器行为与从前完全一致。</summary>
+    Friend Property 无视频时也绘制 As Boolean
 
     Private Shared Function 计算图层签名(画布大小 As Size,
                                       commands As IReadOnlyList(Of 定时文字命令)) As ULong

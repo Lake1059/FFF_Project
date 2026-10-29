@@ -46,6 +46,11 @@ Public Class Form1
     Private 图片浏览控制器 As 播放器图片浏览控制器
     Private 视图旋转控制器 As 播放器视图旋转控制器
     Private 视频超分辨率控制器 As 播放器视频超分辨率控制器
+    ' AI 实时字幕（docs/ai-subtitles/）：默认关；开启后由控制器自理 worker 生命周期。
+    Private AI字幕控制器 As 播放器AI字幕控制器
+    ' 实机性能采样：仅当 FFF3FP_PERF_OUT / FFF3FP_PERF_SECONDS 同时给出时才会被创建，
+    ' 正常使用时恒为 Nothing。
+    Private 性能采样 As 性能采样器
     Private 视频自动HDR控制器 As 播放器视频自动HDR控制器
     Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
@@ -139,9 +144,26 @@ Public Class Form1
         界面呈现器 = 创建界面呈现器()
         界面呈现器.设置音量百分比(设置.实例对象.音量百分比)
         播放控制器.设置音量(CSng(设置.实例对象.音量百分比 / 100.0F))
+        ' AI 实时字幕：必须在字幕图层呈现器之前建 —— 呈现器要拿它的「取当前条目」
+        ' 委托当绘制扩展。worker 起停／菜单开关／媒体切换重装 tap 全在控制器里，
+        ' Form1 只保留这一处传参和一个事件订阅（失败静默，绝不影响既有字幕）。
+        AI字幕控制器 = New 播放器AI字幕控制器(
+            MCM_AI字幕,
+            Function() 播放控制器.取当前句柄(),
+            Function() 播放控制器.安全读取媒体信息(),
+            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI),
+            Sub(值) 设置.实例对象.Ai字幕已停用 = 值,
+            AddressOf 打开Ai字幕设置)
         字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
-            AddressOf 播放控制器.提交定时文字图层)
+            AddressOf 播放控制器.提交定时文字图层,
+            AddressOf AI字幕控制器.取当前条目)
+        ' 启动时就读一次包：装了就起，没装就完全不动（本体默认不带任何 ASR 能力）。
+        AI字幕控制器.应用设置()
+        ' 纯音频（无视频轨）原本不驱动字幕图层，AI 字幕就永远上不了屏。装了有效包才
+        ' 打开这条回退路径：没装包时呈现器行为与从前完全一致。
+        字幕图层呈现器.无视频时也绘制 = AI字幕控制器.启用
+        AddHandler 播放控制器.媒体已打开, AddressOf AI字幕控制器.媒体已打开
         ' 弹幕与字幕分轨：弹幕有自己的呈现器，节拍跟随视频（见 播放器弹幕图层呈现器）。
         ' 字幕仍走 播放器字幕叠加呈现器，保留它那套为静态内容设计的节拍与去重。
         弹幕图层呈现器 = New 播放器弹幕图层呈现器(画面控件,
@@ -270,6 +292,13 @@ Public Class Form1
         PerformLayout()
         窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
         核心文件检查通过 = True
+        ' 实机性能采样：环境变量没给全就是 Nothing，此处等价于没这几行。
+        ' 放在 Load 末尾是因为要拿到画面控件（视口口径）与播放控制器（快照来源）。
+        性能采样 = 性能采样器.尝试创建(
+            Function() 播放控制器?.安全读取快照(),
+            Function() If(画面控件 Is Nothing, ClientSize, 画面控件.ClientSize),
+            Me)
+        性能采样?.启动()
 
     End Sub
 
@@ -573,6 +602,18 @@ Public Class Form1
             End If
             视频自动HDR控制器.Dispose()
         End If
+        If AI字幕控制器 IsNot Nothing Then
+            ' 必须在 字幕图层呈现器 释放之前：控制器 Dispose 内部先停 worker 再放状态机，
+            ' 而卸 tap 要用播放控制器的会话句柄 —— 此时它还活着。
+            If 播放控制器 IsNot Nothing Then
+                RemoveHandler 播放控制器.媒体已打开,
+                    New EventHandler(Of 播放器媒体事件参数)(AddressOf AI字幕控制器.媒体已打开)
+            End If
+            AI字幕控制器.Dispose()
+            AI字幕控制器 = Nothing
+        End If
+        性能采样?.Dispose()
+        性能采样 = Nothing
         光盘控制器?.Dispose()
         画面菜单控制器?.Dispose()
         窗口布局控制器?.释放()
@@ -1003,6 +1044,26 @@ Public Class Form1
     Private Sub 更新弹幕按钮状态()
         MB_弹幕开关.ForeColor = If(设置.实例对象.弹幕已启用,
                                   Color.FromArgb(251, 114, 153), Color.Silver)
+    End Sub
+
+    ''' <summary>设置页 → AI 字幕 的后端：只把启用开关同步进控制器（起停 worker、
+    ''' 菜单复选状态、持久化都在控制器里）；相等时控制器自然空转。</summary>
+    Friend Sub 应用Ai字幕设置()
+        If AI字幕控制器 Is Nothing Then Return
+        Try
+            AI字幕控制器.应用设置()
+            字幕图层呈现器?.使图层失效()
+            If 字幕图层呈现器 IsNot Nothing Then 字幕图层呈现器.无视频时也绘制 = AI字幕控制器.启用
+        Catch
+            ' 同步失败不影响设置落盘；下次打开媒体时按设置值再试。
+        End Try
+    End Sub
+
+    ''' <summary>打开设置窗口并直接定位到「AI 字幕」页（「AI 字幕设置…」菜单项用）。
+    ''' 它在设置窗口里是一个独立分类，位于分类列表最末。</summary>
+    Friend Sub 打开Ai字幕设置()
+        If 设置窗口 Is Nothing OrElse 设置窗口.IsDisposed Then 设置窗口 = New Form设置()
+        设置窗口.显示Ai字幕页()
     End Sub
 
     Private Sub 更新弹幕按钮可见性()

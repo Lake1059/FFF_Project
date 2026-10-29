@@ -124,6 +124,17 @@ public:
     // be replaced at any moment by a device switch.
     void GetAudioRenderPlugState(std::uint32_t& active, std::string& name,
         std::uint64_t& framesRendered, std::uint64_t& framesDeclined) const noexcept;
+    // ASR audio tap (3FP/Api/FFF.Player.AudioTap.h): raw decoded frames out to
+    // a speech-recognition worker. The session owns the tap; the renderer only
+    // holds it while installed, so a device switch re-installs it into the
+    // successor instead of inheriting an instance's ownership. Enable/Disable
+    // are API-thread calls that post the renderer install to the worker; the
+    // read-back never touches the renderer either.
+    FFFResult EnableAudioTap(const FFF3FPAudioTapConfig* config) noexcept;
+    void DisableAudioTap() noexcept;
+    FFFResult ReadAudioTap(void* dst, std::uint32_t capacity,
+        FFF3FPAudioTapBlock* block) const noexcept;
+    FFFResult GetAudioTapStats(FFF3FPAudioTapStats* stats) const noexcept;
     FFFResult SetTimedTextLayer(const FFF3FPTimedTextLayer& layer) noexcept;
     // RTX Video Super Resolution opt-in switch (default Off).
     FFFResult SetVideoSuperResolution(FFF3FPVideoSuperResolution mode) noexcept;
@@ -201,6 +212,10 @@ private:
         Keyframe
     };
     void Enqueue(Command command) noexcept;
+    // Stamps the current timeline generation into the ASR tap and drops
+    // everything it has buffered. Called on the worker thread from open and
+    // seek; a no-op while no tap is installed.
+    void NoteTapGeneration() noexcept;
     void NotifyAudioRestart() noexcept;
     void NotifyVideoRecovery() noexcept;
     FFFResult ScheduleStep(StepOperation operation, std::int32_t direction) noexcept;
@@ -598,6 +613,16 @@ private:
     // queued commands, and whatever is still parked here at that point is released
     // there rather than leaked.
     std::vector<FFF3FPAudioRenderPlug> audioPlugRetired_;
+    // ASR audio tap (FFF.Player.AudioTap.h). A shared_ptr rather than the plug's
+    // copied struct: the host's pump thread can be inside FFF3FP_ReadAudioTap --
+    // holding its own reference -- at the moment a DisableAudioTap drops the
+    // session's, and the object must outlive that call. The renderer borrows a
+    // reference installed on the worker thread (SetAsrTap), which is what makes
+    // a device switch safe without a retire list. asrTapMutex_ guards only the
+    // pointer swaps (API thread) and the copy-outs (worker / API thread); the
+    // audio path never takes it.
+    mutable std::mutex asrTapMutex_;
+    std::shared_ptr<AsrAudioTap> asrTap_;
     PlayerVideoRenderer videoRenderer_;
     std::wstring audioEndpointId_;
     bool audioExclusive_;

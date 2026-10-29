@@ -323,6 +323,52 @@ Friend Structure 原生音频峰值
     Public 输入峰值 As Single()
 End Structure
 
+
+' ---- ASR 音频 tap（FFF.Player.AudioTap.h，可选导出） ----
+' 内核新增面：旧内核没有这四个入口时能力属性答 False，AI 字幕整条通路静默降级。
+' 结构是纯 POD，禁止出现任何 FFmpeg 类型；声道位置是 AVChannel 值（-1 = 无此槽）。
+
+Friend Module 音频Tap常量
+    Public Const 音频Tap版本 As UInteger = 1UI
+    Public Const 音频Tap最大声道数 As Integer = 24
+    Public Const 音频Tap默认环字节数 As UInteger = 32UI * 1024UI * 1024UI
+    Public Const 音频Tap最小环字节数 As UInteger = 1UI * 1024UI * 1024UI
+    Public Const 音频Tap最大环字节数 As UInteger = 256UI * 1024UI * 1024UI
+End Module
+
+<StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生音频Tap配置
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 环容量字节 As UInteger   ' 0 = 默认；内核钳到 [最小, 最大] 并向上取 2 的幂
+    Public 标志 As UInteger         ' v1 全零预留
+End Structure
+
+<StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生音频Tap块
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 已写字节数 As UInteger
+    Public 需要字节数 As UInteger
+    Public 代次 As ULong
+    Public 位置100纳秒 As Long      ' 首样本媒体位置；INT64_MIN = 无时间戳
+    Public 帧数 As UInteger
+    Public 采样率 As UInteger
+    Public 声道数 As UInteger
+    <MarshalAs(UnmanagedType.ByValArray, SizeConst:=24)>
+    Public 声道位置 As Integer()    ' AVChannel 值；-1 = 无此槽
+    Public 采样格式 As Integer      ' AVSampleFormat
+End Structure
+
+<StructLayout(LayoutKind.Sequential)>
+Friend Structure 原生音频Tap统计
+    Public 大小 As UInteger
+    Public 版本 As UInteger
+    Public 已产块数 As ULong
+    Public 已丢块数 As ULong
+    Public 缓冲字节数 As ULong
+End Structure
+
 <Flags>
 Friend Enum 原生位图字幕标志 As UInteger
     无 = 0
@@ -570,6 +616,79 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+
+    ' ---- 进程级内核日志槽（FFF3FP_SetLogCallback，可选导出） ----
+    ' 内核的诊断只有这一个出口：VSR 的逐帧跳过（VideoRenderer.cpp 的 skip lambda，按原因
+    ' 去重）与每一次 PlayerSession::Fail 都写到这里。槽位默认是 null，所以宿主不注册就等于
+    ' 把"为什么开着却看不见"的唯一证据直接丢掉——出货宿主此前正是这个状态。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Sub 原生日志回调(上下文 As IntPtr, 行UTF8 As IntPtr)
+
+    ' 首参按函数指针传（与 播放器会话 交给内核的 回调 字段同一套做法），
+    ' 这样委托的封送只有"被调用"这一个方向，不依赖嵌套委托参数的封送规则。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Sub 设置日志回调原型(回调 As IntPtr, 上下文 As IntPtr)
+
+    Private ReadOnly 设置日志回调函数 As 设置日志回调原型 =
+        解析可选导出(Of 设置日志回调原型)("FFF3FP_SetLogCallback")
+
+    ' 委托必须活得比内核所有线程久：GC 一收，原生侧手里就是野指针。挂在本模块的静态字段上
+    ' （模块类型随进程存活），并且**只装不摘**——注销后仍可能有行在飞，落进已拆掉的运行时
+    ' 就是 CLR 致命错误（FFF.Player.Api.h:488-491）。
+    Private 内核日志钩子 As 原生日志回调
+    Private ReadOnly 内核日志锁 As New Object()
+    ' 上限是必要的而不是讲究：内核把每一次 Fail 都镜像进来，反复失败的片源能把文件写大。
+    ' 只留一份历史（.log → .log.1），与 ai-subtitles.log 同规矩。
+    Private Const 内核日志上限字节 As Long = 2L * 1024L * 1024L
+    Private 内核日志字节 As Long = -1L
+
+    ''' <summary>把内核日志接到 程序目录\kernel.log（追加，带锁，失败即丢）。
+    ''' 启动早期调一次；旧内核没有该导出时静默跳过。</summary>
+    Friend Sub 注册内核日志()
+        Dim 函数 = 设置日志回调函数
+        If 函数 Is Nothing OrElse 内核日志钩子 IsNot Nothing Then Return
+        内核日志钩子 = AddressOf 收内核日志
+        Try
+            函数(Marshal.GetFunctionPointerForDelegate(内核日志钩子), IntPtr.Zero)
+        Catch ex As Exception
+            ' 装日志不该影响启动，装不上就没有这一路诊断而已。
+        End Try
+    End Sub
+
+    ''' <summary>跑在内核的解码/呈现线程上：绝不碰任何 Control 成员，异常必须在这里吞干净
+    ''' ——从这里逃出去就是终止进程（FFF.Player.Api.h:492-494）。</summary>
+    Private Sub 收内核日志(上下文 As IntPtr, 行UTF8 As IntPtr)
+        Try
+            Dim 文本 = Marshal.PtrToStringUTF8(行UTF8)
+            If String.IsNullOrEmpty(文本) Then Return
+            Dim 行 = $"[{DateTime.Now:HH:mm:ss}] {文本}" & vbCrLf
+            Dim 字节数 = System.Text.Encoding.UTF8.GetByteCount(行)
+            SyncLock 内核日志锁
+                Dim 路径 = IO.Path.Combine(程序目录, "kernel.log")
+                If 内核日志字节 < 0L Then
+                    Try
+                        内核日志字节 = If(IO.File.Exists(路径), New IO.FileInfo(路径).Length, 0L)
+                    Catch
+                        内核日志字节 = 0L
+                    End Try
+                End If
+                If 内核日志字节 + 字节数 > 内核日志上限字节 Then
+                    Try
+                        Dim 历史 = 路径 & ".1"
+                        If IO.File.Exists(历史) Then IO.File.Delete(历史)
+                        IO.File.Move(路径, 历史)
+                    Catch
+                    End Try
+                    内核日志字节 = 0L
+                End If
+                IO.File.AppendAllText(路径, 行, System.Text.Encoding.UTF8)
+                内核日志字节 += 字节数
+            End SyncLock
+        Catch
+            ' 日志失败必须安静。
+        End Try
+    End Sub
+
     ' DEPRECATED: the private color-extension module no longer exists, so this
     ' callback is never invoked. Retained to mirror the native ABI.
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
@@ -765,6 +884,110 @@ Friend Module 播放器原生接口
     Friend Function FFF3FP_ConfigurePlaybackPerformance(播放器 As 播放器原生句柄,
         解码适配器索引 As Integer, 视频缓冲区策略 As UInteger, 音频缓冲区策略 As UInteger) As 原生播放器结果
     End Function
+
+    ' ---- ASR 音频 tap（可选导出，与字幕流探测同一动态解析模式） ----
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 启用音频Tap原型(播放器 As IntPtr, 配置 As IntPtr) As 原生播放器结果
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 停用音频Tap原型(播放器 As IntPtr) As 原生播放器结果
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读音频Tap原型(播放器 As IntPtr, 目标 As IntPtr,
+        容量 As UInteger, 块 As IntPtr) As 原生播放器结果
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 音频Tap统计原型(播放器 As IntPtr, 统计 As IntPtr) As 原生播放器结果
+
+    Private ReadOnly 启用音频Tap函数 As 启用音频Tap原型 =
+        解析可选导出(Of 启用音频Tap原型)("FFF3FP_EnableAudioTap")
+    Private ReadOnly 停用音频Tap函数 As 停用音频Tap原型 =
+        解析可选导出(Of 停用音频Tap原型)("FFF3FP_DisableAudioTap")
+    Private ReadOnly 读音频Tap函数 As 读音频Tap原型 =
+        解析可选导出(Of 读音频Tap原型)("FFF3FP_ReadAudioTap")
+    Private ReadOnly 音频Tap统计函数 As 音频Tap统计原型 =
+        解析可选导出(Of 音频Tap统计原型)("FFF3FP_GetAudioTapStats")
+
+    ''' <summary>内核是否提供 ASR 音频 tap（旧内核缺席 → AI 字幕静默降级）。</summary>
+    Friend ReadOnly Property 支持音频Tap As Boolean
+        Get
+            Return 启用音频Tap函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>安装 tap；环容量传 0 用默认（32 MiB）。已安装则重建（旧内容不保留）。</summary>
+    Friend Function 启用音频Tap(播放器 As 播放器原生句柄, 环容量字节 As UInteger) As 原生播放器结果
+        Dim 函数 = 启用音频Tap函数
+        If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
+        Dim 配置 As New 原生音频Tap配置 With {
+            .大小 = CUInt(Marshal.SizeOf(Of 原生音频Tap配置)()),
+            .版本 = 音频Tap版本,
+            .环容量字节 = 环容量字节,
+            .标志 = 0UI
+        }
+        Dim 钉住 = GCHandle.Alloc(配置, GCHandleType.Pinned)
+        Try
+            Return 函数(播放器.DangerousGetHandle(), 钉住.AddrOfPinnedObject())
+        Finally
+            钉住.Free()
+        End Try
+    End Function
+
+    ''' <summary>卸载 tap 并释放环。未安装时也安全；此后读取报空环、统计报零。</summary>
+    Friend Function 停用音频Tap(播放器 As 播放器原生句柄) As 原生播放器结果
+        Dim 函数 = 停用音频Tap函数
+        If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
+        Return 函数(播放器.DangerousGetHandle())
+    End Function
+
+    ''' <summary>非阻塞取至多一块：元数据进 <paramref name="块"/>，PCM 进
+    ''' <paramref name="缓冲区"/>（平面格式按 extended_data 逐平面排布）。空环答成功且
+    ''' 已写字节数 = 0；容量不足答 <see cref="原生播放器结果.缓冲区不足"/>、块不消费。</summary>
+    Friend Function 读音频Tap(播放器 As 播放器原生句柄, 缓冲区 As Byte(),
+                              ByRef 块 As 原生音频Tap块) As 原生播放器结果
+        Dim 函数 = 读音频Tap函数
+        块 = New 原生音频Tap块 With {
+            .大小 = CUInt(Marshal.SizeOf(Of 原生音频Tap块)()),
+            .版本 = 音频Tap版本,
+            .声道位置 = New Integer(音频Tap最大声道数 - 1) {}
+        }
+        If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
+        Dim 容量 As UInteger = 0UI
+        Dim 缓冲钉住 As GCHandle = Nothing
+        ' 块不能钉住：它含 Integer() 字段（ByValArray），是引用 ⇒ 非 blittable，
+        ' GCHandle.Alloc(..., Pinned) 直接抛 "Object contains references"。
+        ' 改走非托管内存 + StructureToPtr/PtrToStructure，由 marshaller 处理 ByValArray。
+        Dim 块地址 As IntPtr = Marshal.AllocHGlobal(Marshal.SizeOf(Of 原生音频Tap块)())
+        Dim 缓冲地址 As IntPtr = IntPtr.Zero
+        Try
+            Marshal.StructureToPtr(块, 块地址, False)
+            If 缓冲区 IsNot Nothing Then
+                容量 = CUInt(缓冲区.Length)
+                缓冲钉住 = GCHandle.Alloc(缓冲区, GCHandleType.Pinned)
+                缓冲地址 = 缓冲钉住.AddrOfPinnedObject()
+            End If
+            Dim 结果 = 函数(播放器.DangerousGetHandle(), 缓冲地址, 容量, 块地址)
+            块 = Marshal.PtrToStructure(Of 原生音频Tap块)(块地址)
+            Return 结果
+        Finally
+            Marshal.FreeHGlobal(块地址)
+            If 缓冲钉住.IsAllocated Then 缓冲钉住.Free()
+        End Try
+    End Function
+
+    ''' <summary>tap 自安装起的单调计数（已丢块数非零 = 消费端跟不上，仅诊断）。</summary>
+    Friend Function 取音频Tap统计(播放器 As 播放器原生句柄, ByRef 统计 As 原生音频Tap统计) As 原生播放器结果
+        Dim 函数 = 音频Tap统计函数
+        统计 = New 原生音频Tap统计 With {
+            .大小 = CUInt(Marshal.SizeOf(Of 原生音频Tap统计)()),
+            .版本 = 音频Tap版本
+        }
+        If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
+        Dim 钉住 = GCHandle.Alloc(统计, GCHandleType.Pinned)
+        Try
+            Return 函数(播放器.DangerousGetHandle(), 钉住.AddrOfPinnedObject())
+        Finally
+            钉住.Free()
+        End Try
+    End Function
+
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_Open(播放器 As 播放器原生句柄, 路径UTF8 As IntPtr) As 原生播放器结果
     End Function
