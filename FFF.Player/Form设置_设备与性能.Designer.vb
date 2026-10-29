@@ -55,7 +55,7 @@ Partial Class Form设置_设备与性能
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(20)
+        ModernPanel1.Padding = New Padding(15, 20, 20, 20)
         ModernPanel1.Size = New Size(652, 493)
         ModernPanel1.TabIndex = 1
         ' 
@@ -66,10 +66,10 @@ Partial Class Form设置_设备与性能
         ModernPanel5.BorderSize = 0
         ModernPanel5.Controls.Add(MCB_空间音频)
         ModernPanel5.Dock = DockStyle.Top
-        ModernPanel5.Location = New Point(20, 215)
+        ModernPanel5.Location = New Point(15, 215)
         ModernPanel5.Name = "ModernPanel5"
         ModernPanel5.Padding = New Padding(0, 10, 0, 0)
-        ModernPanel5.Size = New Size(612, 42)
+        ModernPanel5.Size = New Size(617, 42)
         ModernPanel5.TabIndex = 22
         ' 
         ' MCB_空间音频
@@ -112,10 +112,10 @@ Partial Class Form设置_设备与性能
         ModernPanel4.BorderSize = 0
         ModernPanel4.Controls.Add(MCB_视频缩放质量)
         ModernPanel4.Dock = DockStyle.Top
-        ModernPanel4.Location = New Point(20, 173)
+        ModernPanel4.Location = New Point(15, 173)
         ModernPanel4.Name = "ModernPanel4"
         ModernPanel4.Padding = New Padding(0, 10, 0, 0)
-        ModernPanel4.Size = New Size(612, 42)
+        ModernPanel4.Size = New Size(617, 42)
         ModernPanel4.TabIndex = 21
         ' 
         ' MCB_视频缩放质量
@@ -158,10 +158,10 @@ Partial Class Form设置_设备与性能
         ModernPanel3.BorderSize = 0
         ModernPanel3.Controls.Add(MCB_音频缓冲区策略)
         ModernPanel3.Dock = DockStyle.Top
-        ModernPanel3.Location = New Point(20, 131)
+        ModernPanel3.Location = New Point(15, 131)
         ModernPanel3.Name = "ModernPanel3"
         ModernPanel3.Padding = New Padding(0, 10, 0, 0)
-        ModernPanel3.Size = New Size(612, 42)
+        ModernPanel3.Size = New Size(617, 42)
         ModernPanel3.TabIndex = 20
         ' 
         ' MCB_音频缓冲区策略
@@ -191,7 +191,7 @@ Partial Class Form设置_设备与性能
         MCB_音频缓冲区策略.PrefixGap = 10
         MCB_音频缓冲区策略.PrefixText = "音频缓冲区策略"
         MCB_音频缓冲区策略.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_音频缓冲区策略.Size = New Size(612, 32)
+        MCB_音频缓冲区策略.Size = New Size(617, 32)
         MCB_音频缓冲区策略.TabIndex = 0
         MCB_音频缓冲区策略.ToolTipGap = -1
         MCB_音频缓冲区策略.ToolTipMaxWidth = 350
@@ -205,10 +205,10 @@ Partial Class Form设置_设备与性能
         ModernPanel2.BorderSize = 0
         ModernPanel2.Controls.Add(MCB_视频缓冲区策略)
         ModernPanel2.Dock = DockStyle.Top
-        ModernPanel2.Location = New Point(20, 89)
+        ModernPanel2.Location = New Point(15, 89)
         ModernPanel2.Name = "ModernPanel2"
         ModernPanel2.Padding = New Padding(0, 10, 0, 0)
-        ModernPanel2.Size = New Size(612, 42)
+        ModernPanel2.Size = New Size(617, 42)
         ModernPanel2.TabIndex = 19
         ' 
         ' MCB_视频缓冲区策略
@@ -238,7 +238,7 @@ Partial Class Form设置_设备与性能
         MCB_视频缓冲区策略.PrefixGap = 10
         MCB_视频缓冲区策略.PrefixText = "视频缓冲区策略"
         MCB_视频缓冲区策略.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_视频缓冲区策略.Size = New Size(612, 32)
+        MCB_视频缓冲区策略.Size = New Size(617, 32)
         MCB_视频缓冲区策略.TabIndex = 0
         MCB_视频缓冲区策略.ToolTipGap = -1
         MCB_视频缓冲区策略.ToolTipMaxWidth = 350
@@ -251,11 +251,11 @@ Partial Class Form设置_设备与性能
         HtmlColorLabel1.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel1.Dock = DockStyle.Top
         HtmlColorLabel1.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        HtmlColorLabel1.Location = New Point(20, 62)
+        HtmlColorLabel1.Location = New Point(15, 62)
         HtmlColorLabel1.Margin = New Padding(2)
         HtmlColorLabel1.Name = "HtmlColorLabel1"
         HtmlColorLabel1.Padding = New Padding(0, 0, 0, 10)
-        HtmlColorLabel1.Size = New Size(612, 27)
+        HtmlColorLabel1.Size = New Size(617, 27)
         HtmlColorLabel1.TabIndex = 18
         HtmlColorLabel1.Text = "渲染呈现 和 LakeUI 总是使用主显示器的 GPU"
         ' 
@@ -266,10 +266,10 @@ Partial Class Form设置_设备与性能
         Panel1.BorderSize = 0
         Panel1.Controls.Add(MCB_GPU解码设备)
         Panel1.Dock = DockStyle.Top
-        Panel1.Location = New Point(20, 20)
+        Panel1.Location = New Point(15, 20)
         Panel1.Name = "Panel1"
         Panel1.Padding = New Padding(0, 0, 0, 10)
-        Panel1.Size = New Size(612, 42)
+        Panel1.Size = New Size(617, 42)
         Panel1.TabIndex = 17
         ' 
         ' MCB_GPU解码设备
@@ -296,7 +296,7 @@ Partial Class Form设置_设备与性能
         MCB_GPU解码设备.PrefixGap = 10
         MCB_GPU解码设备.PrefixText = "GPU 解码设备"
         MCB_GPU解码设备.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_GPU解码设备.Size = New Size(612, 32)
+        MCB_GPU解码设备.Size = New Size(617, 32)
         MCB_GPU解码设备.TabIndex = 0
         MCB_GPU解码设备.ToolTipGap = -1
         MCB_GPU解码设备.ToolTipMaxWidth = 350

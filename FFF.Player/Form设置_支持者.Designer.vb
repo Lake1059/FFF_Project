@@ -51,7 +51,7 @@ Partial Class Form设置_支持者
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(20)
+        ModernPanel1.Padding = New Padding(15, 20, 20, 20)
         ModernPanel1.Size = New Size(654, 450)
         ModernPanel1.TabIndex = 1
         ' 
@@ -66,13 +66,13 @@ Partial Class Form设置_支持者
         MemberWall1.CardRadius = 10
         MemberWall1.CardSpacing = 10
         MemberWall1.Dock = DockStyle.Fill
-        MemberWall1.Location = New Point(20, 99)
+        MemberWall1.Location = New Point(15, 99)
         MemberWall1.Name = "MemberWall1"
         MemberWall1.Padding = New Padding(10)
         MemberWall1.ScrollBarThumbColor = Color.FromArgb(CByte(40), CByte(200), CByte(200), CByte(200))
         MemberWall1.ScrollBarThumbHoverColor = Color.FromArgb(CByte(80), CByte(200), CByte(200), CByte(200))
         MemberWall1.ScrollBarTrackColor = Color.FromArgb(CByte(20), CByte(200), CByte(200), CByte(200))
-        MemberWall1.Size = New Size(614, 331)
+        MemberWall1.Size = New Size(619, 331)
         MemberWall1.TabIndex = 133
         ' 
         ' Panel4
@@ -92,10 +92,10 @@ Partial Class Form设置_支持者
         Panel4.Controls.Add(ModernButton1)
         Panel4.Controls.Add(ModernButton5)
         Panel4.Dock = DockStyle.Top
-        Panel4.Location = New Point(20, 37)
+        Panel4.Location = New Point(15, 37)
         Panel4.Name = "Panel4"
         Panel4.Padding = New Padding(0, 10, 0, 20)
-        Panel4.Size = New Size(614, 62)
+        Panel4.Size = New Size(619, 62)
         Panel4.TabIndex = 132
         ' 
         ' ModernTextBox1
@@ -111,7 +111,7 @@ Partial Class Form设置_支持者
         ModernTextBox1.Name = "ModernTextBox1"
         ModernTextBox1.Padding = New Padding(10, 0, 10, 0)
         ModernTextBox1.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        ModernTextBox1.Size = New Size(134, 32)
+        ModernTextBox1.Size = New Size(139, 32)
         ModernTextBox1.TabIndex = 12
         ModernTextBox1.WaterText = "搜索支持者"
         ModernTextBox1.WaterTextForeColor = Color.DarkGray
@@ -119,7 +119,7 @@ Partial Class Form设置_支持者
         ' JustEmptyControl5
         ' 
         JustEmptyControl5.Dock = DockStyle.Right
-        JustEmptyControl5.Location = New Point(534, 10)
+        JustEmptyControl5.Location = New Point(539, 10)
         JustEmptyControl5.Name = "JustEmptyControl5"
         JustEmptyControl5.Size = New Size(10, 32)
         JustEmptyControl5.TabIndex = 14
@@ -228,7 +228,7 @@ Partial Class Form设置_支持者
         ModernButton5.Dock = DockStyle.Right
         ModernButton5.ForeColor = Color.Gainsboro
         ModernButton5.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        ModernButton5.Location = New Point(544, 10)
+        ModernButton5.Location = New Point(549, 10)
         ModernButton5.Margin = New Padding(2)
         ModernButton5.Name = "ModernButton5"
         ModernButton5.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
@@ -242,10 +242,10 @@ Partial Class Form设置_支持者
         HtmlColorLabel2.AutoSizeMode = AutoSizeMode.GrowAndShrink
         HtmlColorLabel2.Dock = DockStyle.Top
         HtmlColorLabel2.ForeColor = Color.DarkGray
-        HtmlColorLabel2.Location = New Point(20, 20)
+        HtmlColorLabel2.Location = New Point(15, 20)
         HtmlColorLabel2.Margin = New Padding(2)
         HtmlColorLabel2.Name = "HtmlColorLabel2"
-        HtmlColorLabel2.Size = New Size(614, 17)
+        HtmlColorLabel2.Size = New Size(619, 17)
         HtmlColorLabel2.TabIndex = 131
         HtmlColorLabel2.Text = "感谢所有向 3FP 的开发工作提供资金支持和技术支持的用户"
         ' 

@@ -2,12 +2,12 @@ param(
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
     [string]$OutputDirectory = "",
-    # 目标框架。留空 = 用各工程自身默认值（当前 net10.0-windows10.0.26100.0）。
+    # 目标框架。留空 = 用播放器默认值（当前 net10.0-windows）。
     # .NET 11 正式版发布后改为：发布3FP.ps1 -NetTFM net11.0-windows10.0.26100.0
     [string]$NetTFM = "",
     # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
     [string]$LakeUITfm = "",
-    # 跨产品框架配对：默认拒绝与输出目录里已发布的对家产品框架不一致，见 Resolve-Toolchain.ps1。
+    # 跨产品框架配对：默认拒绝不同 .NET 运行时版本，见 Resolve-Toolchain.ps1。
     [switch]$AllowFrameworkMismatch
 )
 
