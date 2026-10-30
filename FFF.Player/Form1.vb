@@ -424,6 +424,20 @@ Public Class Form1
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
         待打开外部文件 = String.Empty
         If Not String.IsNullOrEmpty(请求文件) Then BeginInvoke(Sub() 打开外部文件(请求文件))
+
+        ' 启动期优先级借让收尾：HIGH 只需要覆盖到首帧附近。Shown 后 600 ms 降回
+        ' Normal（T2 通常在 Shown 后 ~100 ms 内），不与内核 PlacementPolicy 的
+        ' 播放期 Boost 状态机抢同一个旋钮——它到播放泵启动后才首次采样。
+        If My.MyApplication.启动优先级已拉高 Then
+            Dim 降回线程 As New Thread(Sub()
+                Try
+                    Thread.Sleep(600)
+                    System.Diagnostics.Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.Normal
+                Catch
+                End Try
+            End Sub) With {.IsBackground = True, .Name = "启动优先级降回"}
+            降回线程.Start()
+        End If
     End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
