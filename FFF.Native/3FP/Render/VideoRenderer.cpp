@@ -7211,6 +7211,15 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     auto uploadHeight = height;
     auto uploadPlanes = frame->data;
     auto uploadLines = frame->linesize;
+    // A session with no window has nowhere to put the picture: the conversion below
+    // would be computed and then thrown away by the null-window return further down.
+    // This is not a rare path -- the first present of every startup runs before the
+    // window exists -- so the wasted work was measured as ~4.5 ms per open of pure
+    // sws traffic (softwareConvert100ns). Return before it instead.
+    if (window_ == nullptr) {
+        ++presentedVideoFrames_;
+        return FFFResult::Success;
+    }
     if (!directYuv && !floatRgb) {
         const auto* sourceDescriptor = av_pix_fmt_desc_get(
             static_cast<AVPixelFormat>(frame->format));
@@ -7276,10 +7285,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         std::chrono::nanoseconds>(std::chrono::steady_clock::now() - deviceWaitStart).count() / 100));
     // Keep the logical render counter useful for headless/clip-mode sessions;
     // swapChainPresents remains the separate counter for real DXGI presents.
-    if (window_ == nullptr) {
-        ++presentedVideoFrames_;
-        return FFFResult::Success;
-    }
+    // (The null-window case already returned above, before paying for the conversion.)
     // Ordinary SDR uploads do not access the back buffer. Avoid waiting for a
     // blocking Present when the chain's size/precision/color contract is stable.
     // All resize, HDR and output reconfiguration still take both locks.
