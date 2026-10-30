@@ -14,7 +14,32 @@ Namespace My
         Private Sub MyApplication_Startup(sender As Object, e As StartupEventArgs) Handles Me.Startup
             启动期拉高优先级()
             启动期预取大件()
+            启动期预热GPU设备()
             记录初次启动命令行(e.CommandLine)
+        End Sub
+
+        ''' <summary>
+        ''' 启动期 GPU 设备预热：Attach 里的首渲染会同步创建 D3D11/D2D/DXGI/DWrite
+        ''' 设备，实测 266 ms，全部压在 Form1_Load 的调用栈上。设备创建本来就在
+        ''' D3D_DeviceGlobals 的锁保护下、与界面线程的控件树构建无依赖，这里用一条
+        ''' 后台线程把它提前做掉；Attach 首次渲染时 _initialized 已为 True，直接跳过。
+        ''' 仅取 D2D Device（不动 DeviceContext——那个必须在 UI 线程用）。
+        ''' FFF_NO_GPU_WARMUP=1 退出。
+        ''' </summary>
+        Private Sub 启动期预热GPU设备()
+            Try
+                If Environment.GetEnvironmentVariable("FFF_NO_GPU_WARMUP") = "1" Then Return
+                Dim 预热线程 As New Thread(Sub()
+                    Try
+                        Dim 设备 = LakeUI.D3D_DeviceGlobals.GetD2DDevice()
+                        GC.KeepAlive(设备)
+                    Catch ex As Exception
+                        ' 预热失败不影响启动：Attach 里仍会按需创建（并走它自己的错误处理）。
+                    End Try
+                End Sub) With {.IsBackground = True, .Name = "GPU预热"}
+                预热线程.Start()
+            Catch
+            End Try
         End Sub
 
         ''' <summary>
