@@ -65,11 +65,15 @@ Namespace My
         ''' 那时 UI 线程正忙，磁盘读是在给启动计时器加时。这里用一条 BelowNormal
         ''' 后台线程把磁盘读提前做掉，后续映射变成缓存命中。首跑（单文件解包刚把
         ''' 文件写完）本来就在缓存里，收益≈0；收益在第二跑以后。
-        ''' FFF_NO_PREFETCH=1 退出。
+        ''' FFF_PREFETCH=1 可重新开启（默认关闭，见下方实测）。
         ''' </summary>
         Private Sub 启动期预取大件()
             Try
-                If Environment.GetEnvironmentVariable("FFF_NO_PREFETCH") = "1" Then Return
+                ' 【2026-11-01 实测】预取在快窗里是净亏：同 exe 只切 FFF_NO_PREFETCH，配对 14 轮
+                ' 关掉后 T2 −96.4 ms（U=41, p=0.009；两侧 28/28 全 fast 档）。它把 113 MB 读进
+                ' 文件缓存，与 UI 线程争磁盘/内存带宽，而内核真正映射这批大件时缓存往往已经太晚。
+                ' ⇒ 默认关闭。这是 PR #48 第 4 项的一半，本机判为负收益。
+                If Environment.GetEnvironmentVariable("FFF_PREFETCH") <> "1" Then Return
                 Dim 文件名前缀 = {"avcodec", "avfilter", "avformat", "avutil", "swresample", "swscale", "libshaderc_shared"}
                 Dim 候选目录 As New List(Of String)
                 Dim exe目录 = Path.GetDirectoryName(Environment.ProcessPath)
