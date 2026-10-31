@@ -136,13 +136,22 @@ Public Class 设置
     ' 与设备是一对：换设备后旧后端可能不在新设备的候选表里，读取时由
     ' Ai字幕推理档.规整后端 一次性归位，不落盘（用户一动下拉就写回正确值）。
     Public Property Ai字幕推理后端 As String = ""
-    ' 字幕语言："" / "auto" = 让模型自判（默认）；其余取 Ai字幕语言 的标识（zh/en/…）。
+    ' 字幕语言："" / "auto" = 不筛（默认，模型按窗自判）；其余取 Ai字幕语言 的
+    ' 标识（zh/en/zh-en），配合 仅所选语言 形成过滤器，见 Ai字幕语言 类文档。
     ' ⚠ 换到 sherpa-onnx 之后这条降级为**无操作**：该运行时只返回文本、不返回语言
     ' 标签，所以 worker 报上来的 language 恒为空，下面那个闸门也就压不住任何东西。
     Public Property Ai字幕语言 As String = ""
-    ' 只显示所选语言：模型自报语言与所选不符时该窗不上屏。现在恒不触发（见上），
+    ' 只显示所选语言：模型自报语言与所选不符时该窗不上屏。能不能真判取决于**最终
+    ' 选中的后端**（llama 与 OpenVINO 自报语言，闸门真生效；sherpa 只有 text，闸门
+    ' 形同虚设），见 Ai字幕推理档.后端自报语言 —— 别再写"恒不触发"，那是旧事实。
     ' 保留字段是为了不丢老设置，界面按"暂不可用"置灰显示。
     Public Property Ai字幕仅所选语言 As Boolean = False
+    ' 双语对照："" = 关闭；"zh-en" = 中文在上、English 在下；"en-zh" 反之。
+    ' 它不改变识别本身，只让 worker 在同一窗里多译一行 —— 用的是同一个 llama-server
+    ' 的原始 /completion 续写，不额外加载模型、不改任何权重。
+    ' ONNX（NPU / Intel）那条腿是纯 ASR，没有文本生成能力，worker 会降级成单语并报
+    ' 一条 warning，不静默。
+    Public Property Ai字幕双语 As String = ""
     ' 模型档位："" = 跟包清单的默认档（清单 model 字段指向的目录）；其余取清单 models 里的键。
     ' 它属于启动期参数 —— 换档就是换一套 ONNX 权重，必须重启 worker 才生效。
     Public Property Ai字幕模型档 As String = ""

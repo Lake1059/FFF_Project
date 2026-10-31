@@ -26,17 +26,17 @@ Imports System.Runtime.InteropServices
 Friend NotInheritable Class 播放器AI字幕控制器
     Implements IDisposable
 
-    Private Const 开关文字 As String = "启用 AI 实时字幕"
-    Private Const 设置文字 As String = "AI 字幕设置…"
-
     Private ReadOnly AI菜单 As LakeUI.ModernContextMenu
     Private ReadOnly 句柄提供器 As Func(Of 播放器原生句柄)
     Private ReadOnly 媒体信息提供器 As Func(Of 媒体信息)
     Private ReadOnly 操作提示 As Action(Of String)
     Private ReadOnly 保存停用偏好 As Action(Of Boolean)
     Private ReadOnly 打开设置页 As Action
-    Private ReadOnly 开关菜单项 As LakeUI.ModernContextMenu.ModernMenuItem
-    Private ReadOnly 设置菜单项 As LakeUI.ModernContextMenu.ModernMenuItem
+    ' 宿主侧派生状态（「纯音频也要驱动字幕图层」那个标志）跟着启用态走。
+    ' 控制器不方便直接认识呈现器，交给宿主回调 —— 菜单与设置页两条入口才收敛到一处。
+    Private ReadOnly 同步宿主 As Action
+    ' 标题栏菜单里的整棵 AI 子树：开关 + 语言 / 模型档 / 推理设备 三个二级子菜单。
+    Private ReadOnly 字幕菜单 As Ai字幕菜单
 
     ' 状态机与管道都是本控制器私有：Form1 只经由 取当前条目 看见字幕文本。
     Private ReadOnly 状态机 As New Ai字幕状态机()
@@ -63,6 +63,8 @@ Friend NotInheritable Class 播放器AI字幕控制器
     ' 线程数同样是启动期参数（worker 只在进程启动时拿一次 --threads）。初值 -1 与
     ' 任何合法值都不同，但首次启动时 管道 IsNot Nothing 为假，不会误判成"变过"。
     Private 已启动线程 As Integer = -1
+    ' 双语也是启动期参数：worker 只在进程启动时拿一次 --bilingual，中途改必须重启。
+    Private 已启动双语 As String = Ai字幕双语.关闭
     ' 日志滚动：-1 = 还没量过现有文件长度（首次写时取实际大小，这样跨进程追加也准）。
     Private Const 日志上限字节 As Long = 2L * 1024L * 1024L
     Private Shared 日志字节 As Long = -1L
@@ -76,13 +78,15 @@ Friend NotInheritable Class 播放器AI字幕控制器
                    媒体信息提供器值 As Func(Of 媒体信息),
                    操作提示值 As Action(Of String),
                    保存停用偏好值 As Action(Of Boolean),
-                   打开设置页值 As Action)
+                   打开设置页值 As Action,
+                   同步宿主值 As Action)
         ArgumentNullException.ThrowIfNull(AI菜单)
         ArgumentNullException.ThrowIfNull(句柄提供器值)
         ArgumentNullException.ThrowIfNull(媒体信息提供器值)
         ArgumentNullException.ThrowIfNull(操作提示值)
         ArgumentNullException.ThrowIfNull(保存停用偏好值)
         ArgumentNullException.ThrowIfNull(打开设置页值)
+        ArgumentNullException.ThrowIfNull(同步宿主值)
         ' 字段与参数同名，必须 Me. 限定：否则是参数自我赋值，字段恒为 Nothing。
         Me.AI菜单 = AI菜单
         句柄提供器 = 句柄提供器值
@@ -90,20 +94,12 @@ Friend NotInheritable Class 播放器AI字幕控制器
         操作提示 = 操作提示值
         保存停用偏好 = 保存停用偏好值
         打开设置页 = 打开设置页值
+        同步宿主 = 同步宿主值
         停用 = 设置.实例对象.Ai字幕已停用
 
-        开关菜单项 = New LakeUI.ModernContextMenu.ModernMenuItem With {
-            .Text = 开关文字, .ToggleCheckOnClick = False, .CloseOnClick = True
-        }
-        Me.AI菜单.Items.Add(开关菜单项)
-        AddHandler 开关菜单项.Click, AddressOf 开关_Click
-        ' 包在设置窗口里有独立一页（分类列表末尾），这里给一条直达路径，
-        ' 免得用户在十几个分类里翻。
-        设置菜单项 = New LakeUI.ModernContextMenu.ModernMenuItem With {
-            .Text = 设置文字, .ToggleCheckOnClick = False, .CloseOnClick = True
-        }
-        Me.AI菜单.Items.Add(设置菜单项)
-        AddHandler 设置菜单项.Click, AddressOf 设置_Click
+        ' 菜单树在这里一次建好。此刻包还没载入，模型档子菜单等 应用设置 拿到包后补上
+        ' （结构签名变了才重建，不会每次刷新都拆一次）。
+        字幕菜单 = New Ai字幕菜单(Me.AI菜单, Me)
     End Sub
 
     ''' <summary>设置变化后重新读包：装了有效包就起，包没了/坏了就停。
@@ -121,11 +117,11 @@ Friend NotInheritable Class 播放器AI字幕控制器
                 记日志($"AI 字幕：扩展包不可用（{错误}）")
             End If
             停止()
-            开关菜单项.Checked = False
+            字幕菜单.刷新(Nothing)
+            同步宿主()
             Return
         End If
         已报告跳过 = False
-        开关菜单项.Checked = Not 停用
         Dim 设置对象 = 设置.实例对象
         Dim 新后端 = 生效后端(包)
         Dim 新语言 = Ai字幕语言.规整(设置对象.Ai字幕语言)
@@ -135,10 +131,12 @@ Friend NotInheritable Class 播放器AI字幕控制器
         Dim 新线程 = Math.Max(0, 设置对象.Ai字幕线程数)
         ' 判据只剩四个：档（决定跑在哪）、语言、模型档、线程数。序号 / 层数 /
         ' 精确设备这些中间量已经不存在了。
+        Dim 新双语 = Ai字幕双语.规整(设置对象.Ai字幕双语)
         If 管道 IsNot Nothing AndAlso (已启动后端 <> 新后端 OrElse
                                        已启动语言 <> 新语言 OrElse
                                        已启动模型档 <> 新模型档 OrElse
-                                       已启动线程 <> 新线程) Then
+                                       已启动线程 <> 新线程 OrElse
+                                       已启动双语 <> 新双语) Then
             停止()
         End If
         ' 驻留偏移是纯显示侧（状态机守卫判定用）：不触发重启，这里同步即可，
@@ -149,6 +147,10 @@ Friend NotInheritable Class 播放器AI字幕控制器
         Else
             尝试启动(Nothing)
         End If
+        ' 包 / 档表 / 设备任一变化都要反映到菜单勾选；宿主派生状态也在这里收敛，
+        ' 免得"菜单开了、设置页没开"时两处状态各说各话。
+        字幕菜单.刷新(新包)
+        同步宿主()
     End Sub
 
     ''' <summary>这台机器上真正要用的推理后端：设备 + 后端两个下拉解析成一个标识
@@ -169,19 +171,23 @@ Friend NotInheritable Class 播放器AI字幕控制器
 
     ''' <summary>此刻应显示的 AI 字幕文本；未启用/无有效条目返回空串。
     ''' 只在 PrecisionTimer 线程（字幕图层绘制事件）调用。</summary>
-    Friend Function 取当前条目(播放位置 As TimeSpan, 时间轴代次 As ULong) As String
-        If 已释放 OrElse Not 启用 Then Return String.Empty
-        Dim 文本 = 状态机.取当前条目(播放位置, 时间轴代次)
-        If Not String.Equals(文本, 已上屏文本, StringComparison.Ordinal) Then
-            已上屏文本 = 文本
-            If Not String.IsNullOrEmpty(文本) Then
-                记日志($"字幕[代次 {时间轴代次}] {文本}")
+    Friend Function 取当前条目(播放位置 As TimeSpan, 时间轴代次 As ULong) As (主 As String, 副 As String)
+        If 已释放 OrElse Not 启用 Then Return (String.Empty, String.Empty)
+        Dim 两行 = 状态机.取当前两行(播放位置, 时间轴代次)
+        ' 日志签名把两行拼起来算：只比主行的话，英文行变化（主行不变）不会留痕，
+        ' 排查"译文有没有跟上"时就成瞎的。
+        Dim 签名 = 两行.主 & vbLf & 两行.副
+        If Not String.Equals(签名, 已上屏文本, StringComparison.Ordinal) Then
+            已上屏文本 = 签名
+            If Not String.IsNullOrEmpty(两行.主) Then
+                记日志($"字幕[代次 {时间轴代次}] {两行.主}" &
+                       If(String.IsNullOrEmpty(两行.副), "", $" ‖ {两行.副}"))
             End If
         End If
         ' 诊断采样与"文本变化"解耦：整段只有一句话时文本不变，采样却必须继续，
         ' 否则丢块/呈现计数会整段空白（旧实现挂在文本变化分支上，正是这个毛病）。
         采样诊断()
-        Return 文本
+        Return 两行
     End Function
 
     ''' <summary>每 5 秒读一次内核侧的字幕图层状态与音频 tap 计数，落一行日志。
@@ -316,8 +322,9 @@ Friend NotInheritable Class 播放器AI字幕控制器
             Dim 后端 = 生效后端(包)
             Dim 语言 = Ai字幕语言.规整(设置对象.Ai字幕语言)
             Dim 新模型档 = If(设置对象.Ai字幕模型档, String.Empty).Trim()
+            Dim 新双语 = Ai字幕双语.规整(设置对象.Ai字幕双语)
             If Not 管道.启动(包, 设置对象.Ai字幕窗口秒覆盖, 设置对象.Ai字幕步长秒覆盖,
-                             后端, 语言, 新模型档, 设置对象.Ai字幕线程数) Then
+                             后端, 语言, 新模型档, 设置对象.Ai字幕线程数, 新双语) Then
                 管道 = Nothing
                 操作提示("AI 字幕：worker 启动失败，详见日志")
             Else
@@ -325,6 +332,7 @@ Friend NotInheritable Class 播放器AI字幕控制器
                 已启动语言 = 语言
                 已启动模型档 = 新模型档
                 已启动线程 = Math.Max(0, 设置对象.Ai字幕线程数)
+                已启动双语 = 新双语
             End If
         Catch ex As Exception
             记日志($"AI 字幕：启动路径异常 {ex.GetType().Name} {ex.Message}")
@@ -371,20 +379,18 @@ Friend NotInheritable Class 播放器AI字幕控制器
         End Try
     End Sub
 
-    Private Sub 开关_Click(sender As Object, e As EventArgs)
+    ''' <summary>菜单里的开关。起停 worker/tap、提示、持久化偏好全在这里
+    ''' （菜单类只管勾选与文字，不碰进程）。</summary>
+    Friend Sub 切换启用()
         If 已释放 Then Return
         If 包 Is Nothing Then
             ' 没装包：开关点了也没意义，直接把人送到设置页去选包。
             操作提示("AI 字幕：请先在设置里选择扩展包")
-            Try
-                打开设置页()
-            Catch
-            End Try
+            请求打开设置页()
             Return
         End If
         停用 = 启用   ' 当前启用 → 拨成停用；当前停用 → 拨回启用
         保存停用偏好(停用)
-        开关菜单项.Checked = Not 停用
         If 停用 Then
             停止()
             操作提示("已关闭 AI 实时字幕")
@@ -392,9 +398,18 @@ Friend NotInheritable Class 播放器AI字幕控制器
             操作提示("已启用 AI 实时字幕")
             尝试启动(Nothing)
         End If
+        字幕菜单.刷新(包)
+        同步宿主()
     End Sub
 
-    Private Sub 设置_Click(sender As Object, e As EventArgs)
+    ''' <summary>菜单里语言 / 模型档 / 推理设备改完之后进来。
+    ''' 是否重启 worker 由 应用设置 比对启动期参数决定，这里不另做判断。</summary>
+    Friend Sub 设置已变更()
+        If 已释放 Then Return
+        应用设置()
+    End Sub
+
+    Friend Sub 请求打开设置页()
         If 已释放 Then Return
         Try
             打开设置页()
@@ -403,11 +418,18 @@ Friend NotInheritable Class 播放器AI字幕控制器
         End Try
     End Sub
 
+    ''' <summary>菜单要判断「包里有没有第二套权重」，只读地拿当前配置。
+    ''' 给的是内部引用，调用方只能读 —— 换包仍必须经过 应用设置。</summary>
+    Friend ReadOnly Property 当前包配置 As Ai字幕包配置
+        Get
+            Return 包
+        End Get
+    End Property
+
     Public Sub Dispose() Implements IDisposable.Dispose
         If 已释放 Then Return
         已释放 = True
-        RemoveHandler 开关菜单项.Click, AddressOf 开关_Click
-        RemoveHandler 设置菜单项.Click, AddressOf 设置_Click
+        字幕菜单?.Dispose()
         停止()
         Try
             状态机.Dispose()

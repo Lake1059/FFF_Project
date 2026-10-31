@@ -29,14 +29,18 @@ Friend NotInheritable Class Ai字幕状态机
         Public ReadOnly Property 结束100纳秒 As Long
         Public ReadOnly Property 文本 As String
         Public ReadOnly Property 语言 As String
+        ' 双语的下行文本。未开双语或翻译失败时为空串 —— 空串就只画上行一行，
+        ' 不会在屏幕上留一条空白行。
+        Public ReadOnly Property 副文本 As String
 
         Public Sub New(代次 As ULong, 起始100纳秒 As Long, 结束100纳秒 As Long,
-                       文本 As String, 语言 As String)
+                       文本 As String, 语言 As String, Optional 副文本 As String = Nothing)
             Me.代次 = 代次
             Me.起始100纳秒 = 起始100纳秒
             Me.结束100纳秒 = 结束100纳秒
             Me.文本 = If(文本, String.Empty)
             Me.语言 = If(语言, String.Empty)
+            Me.副文本 = If(副文本, String.Empty)
         End Sub
     End Class
 
@@ -144,35 +148,43 @@ Friend NotInheritable Class Ai字幕状态机
     End Sub
 
     ''' <summary>取当前应显示的文本；无有效条目返回空串。只在 PrecisionTimer 线程调用。</summary>
+    ''' <summary>只取上行文本；等价于 取当前两行 的主行，留着给只关心一行的调用方。</summary>
     Public Function 取当前条目(播放位置 As TimeSpan, 时间轴代次 As ULong) As String
+        Return 取当前两行(播放位置, 时间轴代次).主
+    End Function
+
+    ''' <summary>此刻应显示的两行文本（上行 / 下行）。下行空串 = 不是双语或译文没出来。
+    ''' 守卫（代次 / 跨时间条 / 陈旧）与单语时代完全一致，只是把一次判定同时喂给两行：
+    ''' 分成两次调用会出现"上行过守卫、下行没过"的撕裂帧。</summary>
+    Public Function 取当前两行(播放位置 As TimeSpan, 时间轴代次 As ULong) As (主 As String, 副 As String)
         Try
             处理待决结果()
-            If _worker已退出 Then Return String.Empty
+            If _worker已退出 Then Return (String.Empty, String.Empty)
             SyncLock 锁
-                If 当前条目 Is Nothing OrElse Not 已见代次 Then Return String.Empty
+                If 当前条目 Is Nothing OrElse Not 已见代次 Then Return (String.Empty, String.Empty)
                 If 时间轴代次 <> 0UL AndAlso 当前条目代次 <> 时间轴代次 Then
                     ' seek 已作废这批结果：立即清空，不等 worker 确认。
                     当前条目 = Nothing
-                    Return String.Empty
+                    Return (String.Empty, String.Empty)
                 End If
-                If String.IsNullOrWhiteSpace(当前条目.文本) Then Return String.Empty
+                If String.IsNullOrWhiteSpace(当前条目.文本) Then Return (String.Empty, String.Empty)
                 ' 守卫判定位置 = 实际播放位置 − 驻留偏移（见 时间偏移100纳秒：正值多留）。
                 Dim 播放位置100纳秒 = CLng(播放位置.Ticks) - 时间偏移100纳秒
                 ' 跨时间条守卫：切文件后 worker 在途的旧结果（起始远大播放位置）。
                 If 当前条目.起始100纳秒 - 播放位置100纳秒 > 未来余量100纳秒 Then
                     当前条目 = Nothing
-                    Return String.Empty
+                    Return (String.Empty, String.Empty)
                 End If
                 ' 陈旧守卫：推理卡住时字幕不得僵在屏上。
                 If 当前条目.结束100纳秒 + 陈旧余量100纳秒 < 播放位置100纳秒 Then
                     当前条目 = Nothing
-                    Return String.Empty
+                    Return (String.Empty, String.Empty)
                 End If
-                Return 当前条目.文本
+                Return (当前条目.文本, 当前条目.副文本)
             End SyncLock
         Catch
             ' 任何意外都只当"本帧没有 AI 字幕"。
-            Return String.Empty
+            Return (String.Empty, String.Empty)
         End Try
     End Function
 

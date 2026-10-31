@@ -121,7 +121,8 @@ Friend NotInheritable Class Ai字幕管道
                        后端 As String,
                         Optional 语言 As String = "",
                         Optional 模型档 As String = "",
-                        Optional 线程数 As Integer = 0) As Boolean
+                        Optional 线程数 As Integer = 0,
+                        Optional 双语 As String = "") As Boolean
         If _已释放 Then Return False
         If 配置 Is Nothing Then Return False
         If String.IsNullOrWhiteSpace(配置.Worker脚本) OrElse Not IO.File.Exists(配置.Worker脚本) Then
@@ -194,16 +195,27 @@ Friend NotInheritable Class Ai字幕管道
             ' 负数 / 脏值一律当 0（自动）：num_threads 传负数会被 ORT 当成非法值。
             启动信息.ArgumentList.Add("--threads")
             启动信息.ArgumentList.Add(Math.Max(0, 线程数).ToString(Globalization.CultureInfo.InvariantCulture))
+            ' 双语空串也显式传：worker 日志里能直接看出这一路是关着还是开着。
+            启动信息.ArgumentList.Add("--bilingual")
+            启动信息.ArgumentList.Add(Ai字幕双语.传参值(双语))
             记录($"AI 字幕：模型 {档说明}（{模型目录}）")
             记录($"AI 字幕：推理后端 {Ai字幕推理档.后端显示名(推理档, 配置.引擎)}（--device {推理档}，" &
                  $"线程 {(If(线程数 > 0, 线程数.ToString(Globalization.CultureInfo.InvariantCulture), "自动"))}）")
+            If Ai字幕双语.已启用(双语) AndAlso
+               Not String.Equals(配置.引擎, Ai字幕包.引擎Llama, StringComparison.OrdinalIgnoreCase) Then
+                ' 双语靠 llama 的 /completion 续写，ONNX 那条腿没有文本生成能力。
+                ' 提前说清楚：否则用户要等到一行译文都不出现才发现"这个包不支持"。
+                记录($"AI 字幕：{配置.引擎} 引擎没有文本生成能力，双语已降级为单语")
+            End If
             If Not Ai字幕推理档.当前worker可用(推理档, 配置.引擎) Then
                 ' worker 不认这个后端（例如 GGUF 包收到 dml），它会按 auto 处理。
                 ' 这句必须提前说：否则用户会以为选了 DirectML 就在 DirectML 上跑。
                 记录($"AI 字幕：{配置.引擎} 引擎不认后端 {推理档}，会被按 auto 处理")
             End If
+            ' 「（提示，不筛除）」是旧文案：worker 已不接受语言提示，且闸门开不开由
+            ' 设置决定、不由这句决定。写"提示"等于告诉用户有个不存在的提示通道。
             记录($"AI 字幕：字幕语言 {Ai字幕语言.显示名(语言)}" &
-                 If(设置.实例对象.Ai字幕仅所选语言, "（要求只显示该语言）", "（提示，不筛除）"))
+                 If(设置.实例对象.Ai字幕仅所选语言, "（开闸门，不符的窗不上屏）", "（不筛选）"))
             Try
                 _进程 = Process.Start(启动信息)
             Catch ex As Exception
@@ -413,12 +425,15 @@ Friend NotInheritable Class Ai字幕管道
                                 _语言不符丢弃 += 1
                                 记语言不符(语言值)
                             Else
+                                ' text2 是双语的下行；旧 worker 没这个字段，取不到就是空串，
+                                ' 呈现器按单行画 —— 协议向后兼容，不需要版本判断。
                                 Dim 条目 As New Ai字幕状态机.Ai字幕条目(
                                     取ULong(根, "generation"),
                                     取Long(根, "start100ns"),
                                     取Long(根, "end100ns"),
                                     取字符串(根, "text"),
-                                    语言值)
+                                    语言值,
+                                    取字符串(根, "text2"))
                                 状态机?.提交结果(条目)
                             End If
                         Case "status"
@@ -479,7 +494,7 @@ Friend NotInheritable Class Ai字幕管道
            (现在 - _上次语言日志) / CDbl(Stopwatch.Frequency) < 30.0 Then Return
         _上次语言日志 = 现在
         记录($"AI 字幕：语言不符已丢弃 {_语言不符丢弃} 条（实际 {If(实际语言, "未知")}，" &
-             $"只显示 {Ai字幕语言.显示名(设置.实例对象.Ai字幕语言)}）")
+             $"只显示 {Ai字幕语言.短名(设置.实例对象.Ai字幕语言)}）")
     End Sub
 
     ' ---------------- worker warning → 用户可见 ----------------

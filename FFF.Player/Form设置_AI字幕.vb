@@ -263,6 +263,17 @@ Friend Class Form设置_AI字幕
     Private Sub MCB_语言_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_语言.SelectedIndexChanged
         If 正在初始化 OrElse MCB_语言.SelectedIndex < 0 Then Return
         设置.实例对象.Ai字幕语言 = 语言标识(MCB_语言.SelectedIndex)
+        ' 与菜单同一条规则：语言项的文案是结果句（"只显示中文"），选定即开闸、
+        ' 选回自动即关闸，复选框跟着走。用户之后仍可手动改复选框——那是显式选择。
+        If Ai字幕语言.已指定(设置.实例对象.Ai字幕语言) Then
+            设置.实例对象.Ai字幕仅所选语言 = True
+            正在初始化 = True
+            Try
+                MCK_仅所选语言.Checked = True
+            Finally
+                正在初始化 = False
+            End Try
+        End If
         刷新语言可用性()
         刷新状态()
         ' 语言是 worker 的启动期参数，改它必须重启管道；控制器自己比对后端口语决定。
@@ -420,9 +431,11 @@ Friend Class Form设置_AI字幕
         Dim 语言id = Ai字幕语言.规整(设置.实例对象.Ai字幕语言)
         Dim 语言说明 = Ai字幕语言.显示名(语言id)
         ' 第二行要一起放下设备 / 后端 / 模型档，语言只留短名 + 闸门标记；
-        ' 长句留给最后一行的注意项。
-        If Ai字幕语言.已指定(语言id) Then
-            语言说明 &= If(设置.实例对象.Ai字幕仅所选语言, "（只显示）", "（提示，不筛除）")
+        ' 长句留给最后一行的注意项。闸门关着时显示名那句「只显示…」不成立，
+        ' 必须换成短名 +（不筛选）——状态行说谎比没有状态行更糟。
+        ' （"（提示，不筛除）"也一并废除：worker 已不接受语言提示，那是旧文案。）
+        If Ai字幕语言.已指定(语言id) AndAlso Not 设置.实例对象.Ai字幕仅所选语言 Then
+            语言说明 = Ai字幕语言.短名(语言id) & "（不筛选）"
         End If
         ' 第二行报的是「实际在跑什么」。单档时直接用形态（int8），不写「默认档」——
         ' 那是个位置名词，用户看不出这包跑的是什么精度。
@@ -447,8 +460,12 @@ Friend Class Form设置_AI字幕
         If Not Ai字幕推理档.当前worker可用(后端, 配置.引擎) Then
             LBL_状态.ForeColor = Color.Orange
             LBL_状态.Text &= vbCrLf & "注意：worker 尚未接入该后端（本版只认 CPU / CUDA），会按自动处理。"
-        ElseIf 设置.实例对象.Ai字幕仅所选语言 Then
-            LBL_状态.Text &= vbCrLf & "注意：当前运行时不返回语言标签，只显示所选语言实际不筛除。"
+        ElseIf 设置.实例对象.Ai字幕仅所选语言 AndAlso
+               Not Ai字幕推理档.后端自报语言(后端, 配置.引擎) Then
+            ' 只有真拿不到语言标签的后端才说这句。llama 与 OpenVINO 都把自报语言送回来，
+            ' 闸门真的在丢窗 —— 那句「不筛除」写上去就是把在干活的闸门说成摆设。
+            LBL_状态.ForeColor = Color.Orange
+            LBL_状态.Text &= vbCrLf & "注意：该后端不返回语言标签，「只显示…」实际不筛除。"
         End If
     End Sub
 

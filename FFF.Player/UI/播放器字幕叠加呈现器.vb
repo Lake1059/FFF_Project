@@ -12,7 +12,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     ' AI 实时字幕（docs/ai-subtitles/）：可选注入点。Nothing = 未接入，本类行为与从前一致。
     ' 签名取（播放位置, 时间轴代次）→ 文本：控制器自己管 worker 与状态机，呈现器只问
     ' 「这一帧该显示哪句」，不持有任何 ASR 类型，也不参与它的启停。
-    Private ReadOnly AI字幕提供器 As Func(Of TimeSpan, ULong, String)
+    Private ReadOnly AI字幕提供器 As Func(Of TimeSpan, ULong, (主 As String, 副 As String))
     Private ReadOnly SRT绘制项 As New List(Of SRT字幕绘制项)()
     Private ReadOnly SRT行测量 As New List(Of 字幕行测量结果)()
     Private ReadOnly SRT测量缓存 As New Dictionary(Of 字幕行测量键, 字幕行测量结果)()
@@ -90,7 +90,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     Friend Sub New(画面控件 As 播放器画面控件, 快照提供器 As Func(Of 播放器快照),
                    字幕提供器 As Func(Of 外部字幕轨道),
                    提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single),
-                   Optional AI字幕提供器 As Func(Of TimeSpan, ULong, String) = Nothing)
+                   Optional AI字幕提供器 As Func(Of TimeSpan, ULong, (主 As String, 副 As String)) = Nothing)
         ArgumentNullException.ThrowIfNull(画面控件)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(字幕提供器)
@@ -231,31 +231,65 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     ''' 回退路径不画外部字幕，按字幕轨判会让 AI 那行悬在底部上方两行的空位上。</summary>
     Private Sub 追加AI字幕命令(播放位置 As TimeSpan, 时间轴代次 As ULong, 区域 As 视频显示区域)
         Try
-            Dim 文本 = AI字幕提供器(播放位置, 时间轴代次)
-            If String.IsNullOrWhiteSpace(文本) Then Return
+            Dim 两行 = AI字幕提供器(播放位置, 时间轴代次)
+            Dim 上行 = If(两行.主, String.Empty)
+            Dim 下行 = If(两行.副, String.Empty)
+            If String.IsNullOrWhiteSpace(上行) AndAlso String.IsNullOrWhiteSpace(下行) Then Return
             If 区域.宽度像素 <= 1 OrElse 区域.高度像素 <= 1 Then Return
             Dim 基准字号 = 区域.高度像素 / 22.0F
             Dim 字体 = 设置.实例对象.字幕第一行字体
-            ' 长句折行：DirectWrite 实测宽度按字素二分断行，至多 3 行堆叠，
-            ' 放不下逐级缩字号；行高用渲染同源的布局高度，堆叠不裁切不叠行。
-            Dim 行集 = 生成AI字幕行(文本, 字体, 基准字号, 区域.宽度像素)
-            Dim 描边宽度 = 行集.字号 * 0.08F
-            Dim 行间距 = 行集.字号 * 0.1F
-            Dim 行高(行集.行.Length - 1) As Single
-            Dim 总高度 = 0.0F
-            For 索引 = 0 To 行集.行.Length - 1
-                行高(索引) = 测量AI字幕行高(行集.行(索引), 字体, 行集.字号, 区域.宽度像素, 描边宽度)
-                总高度 += 行高(索引)
+
+            ' 双语时两段共用一次布局：上行在前、下行在后，整体底边对齐。
+            ' 分两趟各自"贴底"会让翻译行压在原文上 —— 位置只能由总高一次算出来。
+            ' 副行取 0.82× 字号：两行同大时主次不分，读者第一眼分不清哪行是原文。
+            ' 单语路径一个字都没变（只算上行、上限仍是 3 行）。
+            Dim 有下行 = Not String.IsNullOrWhiteSpace(下行)
+            Dim 上行集 = 生成AI字幕行(上行, 字体, 基准字号, 区域.宽度像素,
+                                    If(有下行, 2, AI字幕最大行数))
+            Dim 下行内容 As String() = Array.Empty(Of String)()
+            Dim 下行字号 As Single = 0.0F
+            If 有下行 Then
+                Dim 下行集 = 生成AI字幕行(下行, 字体, 基准字号 * 0.82F, 区域.宽度像素, 2)
+                下行内容 = 下行集.行
+                下行字号 = 下行集.字号
+            End If
+
+            Dim 排版 As New List(Of (内容 As String, 字号 As Single, 行高 As Single, 描边 As Single))()
+            Dim 上行描边 = 上行集.字号 * 0.08F
+            For Each 行 In 上行集.行
+                排版.Add((行, 上行集.字号,
+                          测量AI字幕行高(行, 字体, 上行集.字号, 区域.宽度像素, 上行描边), 上行描边))
             Next
-            总高度 += 行间距 * (行集.行.Length - 1)
+            Dim 行间距 = 上行集.字号 * 0.1F
+            If 下行内容.Length > 0 Then
+                Dim 下行描边 = 下行字号 * 0.08F
+                For Each 行 In 下行内容
+                    排版.Add((行, 下行字号,
+                              测量AI字幕行高(行, 字体, 下行字号, 区域.宽度像素, 下行描边), 下行描边))
+                Next
+                行间距 = Math.Min(上行集.字号, 下行字号) * 0.1F
+            End If
+            If 排版.Count = 0 Then Return
+
+            Dim 总高度 = 0.0F
+            For Each 行 In 排版
+                总高度 += 行.行高
+            Next
+            ' 段间留 3.5 个行距的气口，比段内 1 个行距明显，读者才知道换了一种语言。
+            Dim 段间歇 = If(下行内容.Length > 0 AndAlso 上行集.行.Length > 0, 行间距 * 3.5F, 0.0F)
+            总高度 += 段间歇 + 行间距 * (排版.Count - 1)
+
             Dim 有同底文字 = 图层命令.Count > 0
-            Dim y = 区域.Y像素 + 区域.高度像素 - If(有同底文字, 1.2F, 0.2F) * 行集.字号 - 总高度
-            For 索引 = 0 To 行集.行.Length - 1
-                添加文字命令(行集.行(索引), 字体, 行集.字号,
-                    New RectangleF(区域.X像素, y, 区域.宽度像素, 行高(索引)),
-                    &HFFFFFFFFUI, &HF0000000UI, 描边宽度,
+            Dim y = 区域.Y像素 + 区域.高度像素 - If(有同底文字, 1.2F, 0.2F) * 上行集.字号 - 总高度
+            Dim 已画 = 0
+            For Each 行 In 排版
+                If 已画 = 上行集.行.Length Then y += 段间歇
+                添加文字命令(行.内容, 字体, 行.字号,
+                    New RectangleF(区域.X像素, y, 区域.宽度像素, 行.行高),
+                    &HFFFFFFFFUI, &HF0000000UI, 行.描边,
                     定时文字对齐.居中, 定时文字对齐.靠前)
-                y += 行高(索引) + 行间距
+                y += 行.行高 + 行间距
+                已画 += 1
             Next
         Catch
             ' AI 字幕是可选图层：任何失败只当这一帧没有它，绝不影响既有字幕。
@@ -273,19 +307,22 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     ''' <summary>把整句折成至多 AI字幕最大行数 行；任一档字号放不下就逐级缩小
     ''' （1.0 → 0.62），到下限仍超出则截尾加省略号。返回最终行数组与采用的字号。</summary>
     Private Function 生成AI字幕行(文本 As String, 字体 As String, 基准字号 As Single,
-                              最大宽度 As Single) As (行 As String(), 字号 As Single)
+                              最大宽度 As Single,
+                              Optional 最大行数 As Integer = AI字幕最大行数) As (行 As String(), 字号 As Single)
+        If String.IsNullOrWhiteSpace(文本) Then Return (Array.Empty(Of String)(), 基准字号)
+        If 最大行数 < 1 Then 最大行数 = 1
         Dim 行 As String() = {文本}
         For Each 缩放 In {1.0F, 0.88F, 0.78F, 0.7F, AI字幕最小缩放}
             Dim 字号 = 基准字号 * 缩放
             行 = 折行AI字幕文本(文本, 字体, 字号, 最大宽度)
-            If 行.Length <= AI字幕最大行数 Then Return (行, 字号)
+            If 行.Length <= 最大行数 Then Return (行, 字号)
         Next
         Dim 字号下限 = 基准字号 * AI字幕最小缩放
-        Dim 截断(AI字幕最大行数 - 1) As String
-        Array.Copy(行, 截断, AI字幕最大行数)
+        Dim 截断(最大行数 - 1) As String
+        Array.Copy(行, 截断, 最大行数)
         ' 尾行换成"折行后能放下的最长前缀"——折行函数保证首行不超宽。
-        截断(AI字幕最大行数 - 1) = 折行AI字幕文本(
-            行(AI字幕最大行数 - 1) & "…", 字体, 字号下限, 最大宽度)(0)
+        截断(最大行数 - 1) = 折行AI字幕文本(
+            行(最大行数 - 1) & "…", 字体, 字号下限, 最大宽度)(0)
         Return (截断, 字号下限)
     End Function
 

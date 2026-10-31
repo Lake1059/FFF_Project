@@ -419,6 +419,10 @@ NPU 编译器只吃**有上界**的形状，而 `conv_frontend.onnx` 的帧维�
 model.reshape({0: ov.PartialShape([(1, 1), (1, 3200), (128, 128)])})
 ```
 
+上界缺省取 3200（`qwen3_ort.NPU_DEFAULT_FRAMES`，worker 显式传同一个值）；音频更长时用
+`--npu-frames` 调大。**超过上界是 OpenVINO 报错，不是崩进程** —— 这也是给上界的意义：
+把"LLVM ERROR + 退出码 127"换成一次能被 Python 接住的普通异常。
+
 **这是内存里的 shape 元数据，onnx 文件一个字节没动。** 实测（离线 `NPU_PLATFORM=NPU4000`）：
 
 | 形状 | 结果 |
@@ -439,6 +443,29 @@ runtime\python\python.exe npu_precheck.py --model-dir model
 ```
 
 发包里的 `自检-NPU.bat` 就是它 + 金样本自检两步。
+
+**真机执行过的证据**（第三方，2026-10-29，Ultra 9 285H + Arc 140T + AI Boost，
+OpenVINO 2026.4.1；原文见 `docs/ai-subtitles/NPU-第三方实测-2026-10-29.md`）：
+
+| 设备 | 100 帧 | 500 帧 | 动态形状 | conv 相对误差 |
+| --- | --- | --- | --- | --- |
+| CPU（Ultra 9 285H） | 6.0 ms | 20.5 ms | 原生 | 基准 |
+| NPU（AI Boost） | 3.9 ms | 11.1 ms | **带上界即可** | 0.00104 |
+| iGPU（Arc 140T） | 1.1 ms | 3.4 ms | 原生 | 0.00022 |
+
+两条必须讲清，否则照着错的结论改代码：
+
+1. **不要做「预定义帧数集合 + 形状路由 + padding/trimming」。** 第三方把失败读成
+   "NPU 不支持动态形状"，但报错是 `Upper bounds are not specified` —— 拒的是上界，
+   不是"维度会变"。带上界后一次编译覆盖 1..3200 帧，不需要为每种长度各编一份；
+   而 trimming 会真丢音频、padding 到离散档会改 mel 内容。
+2. **1.5~1.9× 是 conv 单段的加速比，不是端到端的。** conv 每窗只跑一次前向
+   （毫秒级），端到端是秒级（`OvBackend` pad30=False 实测 rtf 0.96），
+   **conv 只占链路约 1%**。所以 NPU 这条腿是「能用、省电」，不是「更快」。
+
+首次编译有两个口径：离线 `NPU_PLATFORM` 冷编译约 20 s（含 96 MB 的 vcl 编译器
+初始化），真机在线编译第三方报 0.6~1.2 s。别在文档里写死一个数，看日志里的
+`compile_s`。命中 `runtime/npu-cache/` 之后两处都不再付这笔钱。
 
 ---
 

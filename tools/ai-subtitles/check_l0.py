@@ -20,6 +20,7 @@ import io
 import os
 import re
 import sys
+import unicodedata
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 VB_LANG = os.path.join(ROOT, "FFF.Player", "AI字幕", "Ai字幕语言.vb")
@@ -34,6 +35,7 @@ VB_CTRLER = os.path.join(ROOT, "FFF.Player", "Core", "播放器控制器.vb")
 CPP_SESSION = os.path.join(ROOT, "FFF.Native", "3FP", "Core", "PlayerSession.cpp")
 CPP_RENDER = os.path.join(ROOT, "FFF.Native", "3FP", "Render", "VideoRenderer.cpp")
 WORKER = os.path.join(ROOT, "tools", "ai-subtitles", "asr_worker.py")
+PY_ORT = os.path.join(ROOT, "tools", "ai-subtitles", "qwen3_ort.py")
 
 通过 = 0
 失败 = 0
@@ -71,7 +73,7 @@ def parse_vb():
     cases = re.findall(r'Case "([^"]*)" : Return "([^"]*)"', src)
     # 混说那一行用的是常量（Case 混说），不是字符串字面量，单独补进表里。
     if "Case 混说" in src:
-        cases.append(("zh-en", "中文 · English（中英混说）"))
+        cases.append(("zh-en", "只显示中文和 English"))
     return ids, dict(pairs), dict(cases)
 
 
@@ -117,13 +119,16 @@ def main():
     断言(下标块 is not None and 下标块.group(1) == "主项",
         "L0-1b 语言下标映射只认主项",
         "实际引用：" + (下标块.group(1) if 下标块 else "（没找到语言下标循环）"))
-    # GPU 层数控件是后加进高级区的：必须挂进 显示高级 的可见性切换，否则折叠
-    # 高级区时它还杵在面板上（与模型档同一批加，同一批漏过可见性的先例）。
-    高级块 = re.search(r"Private Sub 显示高级\(显示 As Boolean\)(.*?)End Sub", form, re.S)
-    断言(高级块 is not None and "LBL_Gpu层数.Visible = 显示" in 高级块.group(1)
-        and "MCB_Gpu层数.Visible = 显示" in 高级块.group(1),
-        "L0-1b GPU 层数控件挂进高级区可见性切换",
-        "显示高级 里找不到 LBL_Gpu层数/MCB_Gpu层数 的 Visible 行")
+    # GPU 层数 / 附加参数 / 设备序号 三项已于 2026-10-29 从设置页删除：llama-server
+    # 的参数全部由 worker 决定，用户逃生门没有可传的对象（见 Form设置_AI字幕 头部
+    # 注释「删掉的老东西不再复活」）。所以这里钉的是**不许复活** —— 只把控件加回来
+    # 而不接链路，就是「UI 看着能改、实际不生效」，比没有这项更糟。
+    dsg = read(VB_DESIGNER)
+    for 控件 in ("LBL_Gpu层数", "MCB_Gpu层数", "LBL_附加参数", "MTB_附加参数",
+                 "LBL_设备序号", "MCB_设备序号"):
+        断言(控件 not in dsg,
+            f"L0-1b {控件} 未复活（旧 llama.cpp 时代控件已删）",
+            f"Designer 里又出现了 {控件} —— 要恢复就得把整条链路接回，见 L0-4 / L0-5")
 
     # ---------------- L0-2：设置页几何 ----------------
     src = read(VB_DESIGNER)
@@ -154,12 +159,31 @@ def main():
     越界 = [b[0] for b in boxes if b[1] + b[3] > cw or b[2] + b[4] > ch]
     断言(not 越界, "L0-2 所有控件在客户区内", "越界：" + str(越界))
 
-    # 视觉行的重叠：只比同一水平带上真正可能互相压的（跳过隐藏的高级区标签与输入框）
+    # 视觉行的重叠：只比同一水平带上真正可能互相压的。
+    # 同一坐标放两个控件、靠 Visible 二选一是**刻意设计**（单档显示只读标签、
+    # 多档显示下拉）。静态几何读不到运行时显隐，直接比会误报 —— 所以先把这类对
+    # 从比较里剔除，再**反过来钉住它们真的互斥**：哪天有人把互斥条件改掉而没挪
+    # 位置，重叠就从"设计"变成"真压住了"，这条会立刻报出来。
+    互斥 = []
+    for line in read(VB_FORM).splitlines():
+        m = re.match(r"\s*(\w+)\.Visible = 显示 AndAlso (Not )?_有多档\s*$", line)
+        if m:
+            互斥.append((m.group(1), m.group(2) is None))
+    a组 = [n for n, v in 互斥 if v]
+    b组 = [n for n, v in 互斥 if not v]
+    互斥对 = {(x, y) for x in a组 for y in b组} | {(y, x) for x in a组 for y in b组}
+    断言(len(a组) >= 1 and len(b组) >= 1,
+        "L0-2 模型档位二选一靠 Visible 互斥（静态几何要先排除这对）",
+        "找不到 `X.Visible = 显示 AndAlso _有多档` / `Not _有多档` 这一组 —— "
+        "同位置的两个控件若不再互斥，就是真重叠")
+
     重叠 = []
     for i in range(len(boxes)):
         for j in range(i + 1, len(boxes)):
             n1, x1, y1, w1, h1 = boxes[i]
             n2, x2, y2, w2, h2 = boxes[j]
+            if (n1, n2) in 互斥对:
+                continue
             if x1 < x2 + w2 and x2 < x1 + w1 and y1 < y2 + h2 and y2 < y1 + h1:
                 重叠.append((n1, n2))
     断言(not 重叠, "L0-2 无控件重叠", str(重叠))
@@ -184,42 +208,72 @@ def main():
     # 让扩展包能带任意 llama-server 能加载的 gguf。三条链任断一环，
     # 现象都是"塞了新模型但跑的还是老行为/参数不生效"，且不抛异常：
     worker = read(WORKER)
-    断言(re.search(r'add_argument\("--llama-arg".*action="append"', worker),
-        "L0-4 worker 收 --llama-arg（append 多值）",
-        "找不到 --llama-arg 的 add_argument（或不是 append）")
-    断言("_user_first(defaults, self.extra)" in worker,
-        "L0-4 worker 固定默认值遇同名 flag 让位（_user_first）",
-        "start() 里没有走 _user_first —— 用户的 llamaArgs 会被固定参数压掉")
-    断言("if self.mmproj:" in worker,
-        "L0-4 worker 的 --mmproj 条件传（单文件模型不传投影）",
-        "找不到 if self.mmproj: —— 无投影的模型会被塞一个空路径")
-    断言('"--mmproj", str(self.mmproj)' in worker,
-        "L0-4 worker 仍保留 mmproj 支持（拆约束不是删功能）",
-        "start() 里找不到 --mmproj 传参 —— 双文件模型被改坏了")
+    # 附加参数（--llama-arg）这条链 2026-10-29 整体废止：worker 自己决定
+    # llama-server 的全部参数（--temp 0 / ctx / 模板），没有可交给用户的口子。
+    # 钉"不许复活"而不是"必须有" —— 只把口子加回来而没有 UI 链，等于埋一个
+    # 永不生效的参数。
+    断言(not re.search(r'add_argument\("--llama-arg"', worker),
+        "L0-4 worker 不收 --llama-arg（附加参数链已废止）",
+        "worker 又有 --llama-arg 了 —— 要么把整条 UI 链接回，要么删掉这个口子")
+
+    # mmproj 是另一回事：它是**音频编码器**，不是可调项，双文件模型必须有。
+    # 找的是真实写法（_llama_weights 校验后无条件传），不是某一版的条件传形状 ——
+    # 按旧形状找会误报"功能被删了"，而它其实是缺了就转不动音频的硬依赖。
+    断言('"--mmproj", str(mmproj)' in worker,
+        "L0-4 worker 仍传 --mmproj（音频编码器，缺了只认文字不认音频）",
+        "start() 里找不到 --mmproj 传参 —— 模型会退化成纯文字")
+    断言(re.search(r"没有 mmproj", worker),
+        "L0-4 worker 强制校验 mmproj 存在（缺了要报错，不能静默退化）",
+        "找不到缺 mmproj 的报错 —— 静默退化成纯文字模型是最难排查的一类")
 
     pipe = read(VB_PIPE)
     映射块 = re.search(r'For Each 附加 In 合并参数(.*?)Next', pipe, re.S)
     # 必须是等号形式（"--llama-arg=" & 附加）：拆成两个 token 传的话，argparse 的
     # append action 不收以 -- 开头的值，llamaArgs 的标准用法（["--ctx-size","8192"]）
     # 会让 worker 启动即 exit 2（2026-10-25 审查实测，见 PACK_FORMAT §2.5）。
-    断言(映射块 is not None and '"--llama-arg=" & 附加' in (映射块.group(1) if 映射块 else ""),
-        "L0-4 管道把（合并后的）附加参数逐项映射为 --llama-arg=（等号形式）",
-        "找不到 For Each 附加 In 合并参数 → --llama-arg= 的映射（或退回了拆分形式）")
-    断言(re.search(r"合并附加参数\(配置\.额外参数,", pipe),
-        "L0-4 包清单 llamaArgs 仍进命令行（走合并入口，不是被用户参数顶掉）",
-        "启动路径里找不到 合并附加参数(配置.额外参数, …)——清单参数被改丢了")
+    断言(映射块 is None,
+        "L0-4 管道不再映射 --llama-arg=（附加参数链已废止）",
+        "管道又在拼 --llama-arg —— worker 已经不认这个参数，拼了等于启动即退出")
 
     pack = read(VB_PACK)
-    断言('TryGetProperty("llamaArgs"' in pack,
-        "L0-4 包载入读 llamaArgs 字段",
-        "Ai字幕包.vb 里找不到 llamaArgs 的读取")
-    断言(re.search(r"Friend Property 额外参数 As New List\(Of String\)", pack),
-        "L0-4 包配置带 额外参数 字段",
-        "Ai字幕包配置 里没有 额外参数 字段")
-    # 方法还在但没人调 = 白写：载入路径必须真的走到 读附加参数（区别于函数定义行）。
-    断言('读附加参数(根, 配置)' in pack,
-        "L0-4 载入路径调用 读附加参数（方法有被调用）",
-        "找不到 读附加参数(根, 配置) 调用点 —— 字段读了也没人填")
+    # ---------------- L0-3b：UI 摆出来的后端必须是 worker 真认的 ----------------
+    # 宿主下拉里每一项都要能在 worker 的 _CANDIDATES 里找到落脚点。找不到的话
+    # _normalize_request 会把请求值静默归 auto —— 用户选了「AMD 显卡 / DirectML」，
+    # 实际跑的是 CUDA 或 CPU，而且**没有任何降档日志**（auto 本来就会走 CUDA）。
+    # 这是最难自查的一类：界面上一切正常，只是那个选择从来没生效过。
+    dml_段 = re.search(r"_ENGINE_ONNX:\s*\{(.*?)_ENGINE_LLAMA:", worker, re.S)
+    onnx_键 = set(re.findall(r'"([\w\-]+)":\s*\(', dml_段.group(1))) if dml_段 else set()
+    llama_段 = re.search(r"_ENGINE_LLAMA:\s*\{(.*?)\n\}", worker, re.S)
+    llama_键 = set(re.findall(r'"([\w\-]+)":\s*\(', llama_段.group(1))) if llama_段 else set()
+    全部键 = onnx_键 | llama_键
+    # 宿主后端全集（Ai字幕推理档.后端全部）
+    全集块 = re.search(r"后端全部 As String\(\) = \{([^}]*)\}", pack)
+    断言(全集块 is not None, "L0-3b 能从宿主解析出后端全集", "找不到 后端全部 定义")
+    后端全集 = set(re.findall(r"后端(\w+)", 全集块.group(1)))
+    常量值 = dict(re.findall(r'后端(\w+) As String = "([\w\-]+)"', pack))
+    落空 = sorted(常量值[k] for k in 后端全集 if 常量值.get(k) not in 全部键)
+    断言(not 落空,
+        "L0-3b 宿主每个后端都在 worker 调度表里登记（不许静默归 auto）",
+        "这些后端 UI 上有、worker 表里没有：" + str(落空) +
+        " —— 选中后 _normalize_request 会静默归 auto，等于选了没选")
+    # DirectML 是这条坑的原爆点，单独钉一条：它是 AMD 在 Windows 上的唯一显卡路径
+    # （ROCm / MIGraphX 都没有 Windows 构件），缺了它整个设备项就是空话。
+    断言("dml" in onnx_键,
+        "L0-3b worker 的 ONNX 调度表登记了 dml（AMD 唯一显卡路径）",
+        "onnx 候选里没有 dml —— AMD 用户选「AMD 显卡」会被静默按 auto 处理")
+    断言('if backend_id == "dml":' in worker,
+        "L0-3b dml 有独立的 _capability 预检（缺 qwen3_ort 要明确跳过）",
+        "_capability 不认 dml —— 缺实现文件时会静默放行到 load() 才炸")
+    # 同上：整条链废止，包清单也不再读 llamaArgs。留着字段而没人用 = 埋雷。
+    断言(not re.search(r'"llamaArgs"', pack),
+        "L0-4 包载入不再读 llamaArgs（附加参数链已废止）",
+        "Ai字幕包.vb 又在读 llamaArgs —— 读了要给谁用？")
+    断言(not re.search(r"Friend Property 额外参数 As", pack),
+        "L0-4 包配置不带 额外参数 字段（已废止）",
+        "Ai字幕包配置 又有 额外参数 —— 没有消费方就是死字段")
+    断言(not re.search(r"读附加参数", pack),
+        "L0-4 载入路径不再调 读附加参数（已废止）",
+        "还有 读附加参数 的调用 —— 链路复活要整条接，不能只接一半")
 
     # ---------------- L0-5：「扩展 UI + 按模型能力开放」契约不许回退 ----------------
     # 2026-10-25 这一轮把设置页从"只认 Qwen3-ASR 双文件 28 层"扩成按包声明的能力
@@ -227,20 +281,22 @@ def main():
     # 驻留偏移进状态机、新控件全部挂进折叠区。任一处断链，现象都是"UI 看着能改、
     # 实际不生效"或"折叠后控件杵在面板上"，且不抛异常。
     st = read(VB_SET)
-    断言('Public Property Ai字幕附加参数 As String' in st,
-        "L0-5 设置带 Ai字幕附加参数（用户侧 llamaArgs 逃生门）",
-        "设置.vb 里没有 Ai字幕附加参数 —— 用户框填了没处存")
+    断言('Ai字幕附加参数' not in st,
+        "L0-5 设置不再带 Ai字幕附加参数（逃生门已废止）",
+        "设置.vb 又有 Ai字幕附加参数 —— 存了没有消费方，等于用户填了个空")
     断言('Public Property Ai字幕字幕偏移秒 As Double' in st,
         "L0-5 设置带 Ai字幕字幕偏移秒（字幕驻留偏移）")
     断言(re.search(r'Ai字幕字幕偏移秒 < -3\.0 OrElse Ai字幕字幕偏移秒 > 3\.0', st),
         "L0-5 偏移规范化钳在 [-3, +3]",
         "规范化() 里找不到偏移的区间钳制——脏设置会把字幕守卫带飞")
 
-    断言(re.search(r'读整数\(根, "layers"', pack),
-        "L0-5 包载入读 layers 字段（模型层数，走通用整数助手）",
-        "Ai字幕包.vb 里找不到 layers 的读取——GPU 层数表又变回写死 28 层")
-    断言(re.search(r"Friend Property 模型层数 As Integer", pack),
-        "L0-5 包配置带 模型层数 字段")
+    # layers（GPU 层数）同样废止：EP 自己决定算子落在哪，没有"卸几层"这回事。
+    断言(not re.search(r'"layers"', pack),
+        "L0-5 包载入不再读 layers（GPU 层数控件已废止）",
+        "Ai字幕包.vb 又在读 layers —— 层数不是可调项，读了也只能摆个无效下拉")
+    断言(not re.search(r"Friend Property 模型层数 As", pack),
+        "L0-5 包配置不带 模型层数 字段（已废止）",
+        "Ai字幕包配置 又有 模型层数 —— 同上，没有消费方")
 
     fsm = read(VB_FSM)
     断言(re.search(r"Public Property 时间偏移100纳秒 As Long", fsm),
@@ -251,33 +307,28 @@ def main():
 
     form = read(VB_FORM)
     高级块 = re.search(r"Private Sub 显示高级\(显示 As Boolean\)(.*?)End Sub", form, re.S)
-    for 控件 in ("LBL_附加参数", "MTB_附加参数", "LBL_偏移", "MTB_偏移", "LBL_预置", "MCB_预置"):
+    for 控件 in ("LBL_偏移", "MTB_偏移", "LBL_预置", "MCB_预置"):
         断言(高级块 is not None and f"{控件}.Visible = 显示" in 高级块.group(1),
             f"L0-5 {控件} 挂进高级区可见性切换",
             "显示高级 里找不到该控件的 Visible 行——折起来它还杵在面板上")
-    断言(re.search(r"Private Sub 重建层数下拉", form),
-        "L0-5 GPU 层数下拉按包 layers 动态重建",
-        "找不到 重建层数下拉 —— 层数表写死，换架构模型时预置档全是错的")
-    断言(re.search(r"MTB_附加参数\.Enabled = 有效", form),
-        "L0-5 附加参数框按包有效性开放/置灰（没包时不能填）")
-    断言(re.search(r"解析附加参数\(设置\.实例对象\.Ai字幕附加参数\)", form),
-        "L0-5 状态行数一眼用户附加参数条数（能力行数据源）")
+    断言(not re.search(r"Private Sub 重建层数下拉", form),
+        "L0-5 不再有 GPU 层数下拉（层数控件已废止）",
+        "重建层数下拉 回来了 —— 层数不是可调项，重建了也是假选项")
+    断言(not re.search(r"MTB_附加参数", form),
+        "L0-5 设置页不再有附加参数框（已废止）",
+        "MTB_附加参数 回来了 —— 没有消费方的输入框是说谎")
+    断言(not re.search(r"解析附加参数", form),
+        "L0-5 状态行不再数附加参数（已废止）",
+        "状态行又去数附加参数 —— 那一行会说一个不存在的条数")
 
-    断言(re.search(r"Friend Shared Function 解析附加参数", pipe),
-        "L0-5 管道解析用户附加参数（按行拆分、# 注释、去空行）")
-    断言(re.search(r"Private Shared Function 合并附加参数", pipe),
-        "L0-5 管道合并包清单与用户附加参数（同名 flag 用户覆盖包）",
-        "找不到 合并附加参数——用户参数会与清单参数重复传给 llama-server")
-    断言(re.search(r"解析附加参数\(用户附加参数\)", pipe),
-        "L0-5 启动路径解析用户附加参数文本")
-    断言(re.search(r"合并附加参数\(配置\.额外参数, 用户参数\)", pipe),
-        "L0-5 启动路径真的走合并（两个来源都进命令行）",
-        "启动() 里找不到 合并附加参数(配置.额外参数, 用户参数)——用户参数被丢了")
+    断言(not re.search(r"附加参数", pipe),
+        "L0-5 管道不再处理附加参数（已废止）",
+        "管道里又出现 附加参数 —— 解析/合并都得有消费方，否则是死代码")
 
     ctrl = read(VB_CTRL)
-    断言(re.search(r"已启动附加参数 <> 设置对象\.Ai字幕附加参数", ctrl),
-        "L0-5 控制器把附加参数纳入重启判定",
-        "应用设置 的重启条件里没有 已启动附加参数——改了参数不重启，命令行还是旧的")
+    断言(not re.search(r"已启动附加参数", ctrl),
+        "L0-5 控制器不再判附加参数（已废止）",
+        "控制器又在判 已启动附加参数 —— 判一个不存在的设置项，条件永远为假")
     断言(re.search(r"状态机\.时间偏移100纳秒 = CLng\(", ctrl),
         "L0-5 控制器把偏移同步进状态机（应用设置即生效，不重启 worker）")
     # 文案与实测对齐：早期写「十几秒」，实测（2026-10-25，CUDA0）前 1~2 个转写
@@ -362,6 +413,63 @@ def main():
     断言(pipe.count("Interlocked.Increment(_结果线程代)") >= 2,
         "L0-7 停/启两条路径都作废旧结果线程代次",
         "少一处自增就留一个竞态窗口（进程退场 ≠ 线程退场）")
+
+    # ---------------- L0-8：分窗语义不许退化 ----------------
+    # 触发阈值必须是 window_s。用 step_s 的话窗长会退化成 Δ + (window - step)，
+    # Δ 是采集块间隔（几十毫秒）—— 默认 5/3 实际每窗只有 ~2 秒音频进模型，
+    # 「完整 8 s / 4 s」实际约 4 秒，窗口秒这一格名不副实。
+    断言("now_end100ns - self.window_start < int(self.window_s * 1e7)" in worker,
+        "L0-8 出窗阈值是 window_s（攒够窗口才出，不是过了步长就出）",
+        "阈值又退回 step_s —— 窗长会退化成 window-step，窗口秒这一格等于骗人")
+    断言("self.window_start = end - int((self.window_s - self.step_s) * 1e7)" in worker,
+        "L0-8 出窗后按 (window - step) 推进左边界（窗长恒为 window 时即步进 = step）",
+        "advance 写法变了 —— 要先确认步进仍是 step_s")
+
+    # ---------------- L0-9：NPU 路径的两条不变量 ----------------
+    # 第三方在 Ultra 9 285H 上的实测（2026-10-29）给了两个以前只能靠推理的事实：
+    #   A. 无上界的动态维不是"编不过"，是 LLVM ERROR + 退出码 127 直接 abort。
+    #      abort 不经过 Python 的异常处理，worker 会当场消失，连"降档到 CPU"的
+    #      机会都没有 —— 所以必须在 compile_model 之前把它变成一次普通异常。
+    #   B. 那台机器 GPU.0=Intel Arc 140T、GPU.1=RTX 5060：OpenVINO 把 N 卡也列进
+    #      GPU.x，而设备名 "GPU" 取第一块。不按厂商钉，"选 Intel 显卡"会编到
+    #      NVIDIA 上，且编译成功、数值也对 —— 无从察觉。
+    ort = read(PY_ORT)
+    断言("_assert_bounded(self.model" in ort,
+        "L0-9 NPU 编译前断言输入维有有限上界",
+        "找不到 _assert_bounded 调用 —— 无上界会让 vpux 编译器 abort（退出码 127），"
+        "Python 抓不到，worker 会当场消失而不是降档")
+    断言("if bounded_frames and backend.target" not in ort,
+        "L0-9 上界缺失时不许静默跳过 reshape",
+        "又写成 bounded_frames and ... —— 没传上界就跳过 reshape 去硬编译，正是会崩的那种写法")
+    断言("def _assert_bounded(" in ort and "def _reshape_bounded(" in ort,
+        "L0-9 上界处理是两个独立函数（reshape + 断言）",
+        "reshape 与断言被合并或删掉了 —— 改回去要确认两件事仍都做到")
+    断言("def _pick_intel_gpu(" in worker and "_pick_intel_gpu(core, have)" in worker,
+        "L0-9 ov-gpu 按厂商挑 Intel 那块（多显卡时不许编到别家）",
+        "找不到 _pick_intel_gpu —— OpenVINO 把 N 卡也列进 GPU.x，"
+        "不钉就会在 NVIDIA 上编译还不报错")
+    断言("ov_device=ov_dev" in worker,
+        "L0-9 挑到的设备真的传进了 Engine",
+        "Engine 调用没有 ov_device —— 挑了不用，等于没挑")
+
+    # ---------------- L0-2b：设置页状态/说明文案不许超出单行宽度 ----------------
+    # LBL_状态 是 568x112 的固定 Label，五行封顶（包/节奏、设备+后端+模型、说明、
+    # 状态、注意项）。任一行换行就会把下一行顶出可视区 —— 用户看到的是"少一行"，
+    # 不会报错。前缀「状态：」「说明：」约 48px，所以文案本体卡在 520px。
+    def 像素宽(s):
+        return sum(14 if unicodedata.east_asian_width(c) in ("W", "F") else 7
+                   for c in s)
+
+    超宽 = []
+    for 函数 in ("后端状态", "后端说明"):
+        块 = re.search(r"Function " + 函数 + r"\((.*?)End Function", pack, re.S)
+        断言(块 is not None, f"L0-2b 能解析出 {函数}", "找不到该函数")
+        for 字面 in re.findall(r'Return\s+"((?:[^"]|"")*)"', 块.group(1)):
+            w = 像素宽(字面.replace('""', '"'))
+            if w > 520:
+                超宽.append(f"{函数} {w}px：{字面}")
+    断言(not 超宽, "L0-2b 状态/说明文案单行放得下（LBL_状态 568px，五行封顶）",
+        "；".join(超宽))
 
     print(f"\n通过 {通过} / 失败 {失败}")
     return 失败
