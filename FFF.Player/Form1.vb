@@ -143,35 +143,10 @@ Public Class Form1
         界面呈现器 = 创建界面呈现器()
         界面呈现器.设置音量百分比(设置.实例对象.音量百分比)
         播放控制器.设置音量(CSng(设置.实例对象.音量百分比 / 100.0F))
-        字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
-            AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
-            AddressOf 播放控制器.提交定时文字图层)
-        ' 弹幕与字幕分轨：弹幕有自己的呈现器，节拍跟随视频（见 播放器弹幕图层呈现器）。
-        ' 字幕仍走 播放器字幕叠加呈现器，保留它那套为静态内容设计的节拍与去重。
-        弹幕图层呈现器 = New 播放器弹幕图层呈现器(画面控件,
-            AddressOf 播放控制器.安全读取快照,
-            AddressOf 播放控制器.提交弹幕图层,
-            Function() If(设置.实例对象.弹幕已启用, 播放控制器.当前弹幕, Nothing),
-            设置.实例对象.创建弹幕显示配置())
-        歌词图层呈现器 = New 播放器歌词呈现器(画面控件,
-            AddressOf 播放控制器.安全读取快照,
-            Function() If(设置.实例对象.启用歌词支持, 播放控制器.当前歌词, Nothing),
-            Function() 设置.实例对象.渲染封面图 AndAlso 播放控制器.当前音乐有封面,
-            AddressOf 播放控制器.提交歌词图层, AddressOf 创建歌词呈现设置)
+        ' 【2026-10-31 启动优化】四个图层呈现器（字幕/弹幕/歌词/信息）的构造已延后：
+        ' 原在此处吃掉 24_streamsel_done→25_layers_done 段 177.5 ms。
+        ' 现在由 Form1_Shown 在派发开图之后调用 创建图层呈现器()。
         AddHandler 画面控件.Ctrl滚轮, AddressOf 画面控件_Ctrl滚轮
-        ' VSR 与自动 HDR 的逐帧判定态进 Tab 图层：内核静默跳过时，那是用户唯一能看见它的地方。
-        ' 两者都现读，不走各自控制器的缓存——那份只在开页与勾选时更新，恰好错过内核真正
-        ' 做判定的那一刻。文本由 播放器会话 侧组好（判词 + 一句人话），图层不再拼字段。
-        信息图层呈现器 = New 播放器信息图层呈现器(画面控件,
-            AddressOf 播放控制器.安全读取快照, AddressOf 播放控制器.安全读取媒体信息,
-            Function() 播放控制器.当前媒体路径, Function() 播放控制器.当前字幕,
-            Function() 播放控制器.当前弹幕, AddressOf 播放控制器.读取定时文字状态,
-            AddressOf 播放控制器.读取弹幕状态, Function() 播放控制器.WASAPI模式,
-            AddressOf 播放控制器.读取色彩变换内容描述,
-            AddressOf 播放控制器.提交播放器信息图层,
-            AddressOf 播放控制器.读取视频超分辨率图层文本,
-            AddressOf 播放控制器.读取视频自动HDR图层文本)
-        信息图层呈现器.应用全局字体(设置.实例对象.字体)
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
         画面菜单控制器 = New 播放器画面菜单控制器(
@@ -271,7 +246,12 @@ Public Class Form1
         AddHandler 方向键快捷键已请求, AddressOf 剪辑区间控制器.处理方向键快捷键
         界面呈现器.启动()
         更新弹幕按钮状态()
-        PerformLayout()
+        ' 【2026-10-31 实验】Form1_Load 里这次 PerformLayout 与控制器内部 应用画面尺寸() 里的
+        ' 窗体.PerformLayout() 重复（docs/123 §12.2 记"重复是真的，但不要钱"——本轮重测）。
+        ' FFF_SKIP_EXPLICIT_LAYOUT=1 时跳过本处，用于同 exe A/B。
+        If Environment.GetEnvironmentVariable("FFF_SKIP_EXPLICIT_LAYOUT") <> "1" Then
+            PerformLayout()
+        End If
         窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
         核心文件检查通过 = True
 
@@ -408,6 +388,45 @@ Public Class Form1
         按钮图标.应用(MB_选择流, 播放器按钮图标.流选择)
     End Sub
 
+    ''' <summary>
+    ''' 四个图层呈现器（字幕/弹幕/歌词/信息）的构造。**延后到首帧之后调用**
+    ''' （2026-10-31 启动优化）：它们原在 Form1_Load 里，实测吃掉
+    ''' 24_streamsel_done→25_layers_done 段 177.5 ms，且各自 ctor 内会 Start 60 Hz 计时器
+    ''' （三条泵 = 6 条线程）。外部引用点全部带 `?.`/`IsNot Nothing` 守卫，晚建不会 NPE。
+    ''' 唯一的裸调用（信息图层呈现器.应用全局字体）已一并搬到这里。
+    ''' </summary>
+    Private Sub 创建图层呈现器()
+        If 字幕图层呈现器 IsNot Nothing Then Return
+            字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
+                AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
+                AddressOf 播放控制器.提交定时文字图层)
+            ' 弹幕与字幕分轨：弹幕有自己的呈现器，节拍跟随视频（见 播放器弹幕图层呈现器）。
+            ' 字幕仍走 播放器字幕叠加呈现器，保留它那套为静态内容设计的节拍与去重。
+            弹幕图层呈现器 = New 播放器弹幕图层呈现器(画面控件,
+                AddressOf 播放控制器.安全读取快照,
+                AddressOf 播放控制器.提交弹幕图层,
+                Function() If(设置.实例对象.弹幕已启用, 播放控制器.当前弹幕, Nothing),
+                设置.实例对象.创建弹幕显示配置())
+            歌词图层呈现器 = New 播放器歌词呈现器(画面控件,
+                AddressOf 播放控制器.安全读取快照,
+                Function() If(设置.实例对象.启用歌词支持, 播放控制器.当前歌词, Nothing),
+                Function() 设置.实例对象.渲染封面图 AndAlso 播放控制器.当前音乐有封面,
+                AddressOf 播放控制器.提交歌词图层, AddressOf 创建歌词呈现设置)
+            ' VSR 与自动 HDR 的逐帧判定态进 Tab 图层：内核静默跳过时，那是用户唯一能看见它的地方。
+            ' 两者都现读，不走各自控制器的缓存——那份只在开页与勾选时更新，恰好错过内核真正
+            ' 做判定的那一刻。文本由 播放器会话 侧组好（判词 + 一句人话），图层不再拼字段。
+            信息图层呈现器 = New 播放器信息图层呈现器(画面控件,
+                AddressOf 播放控制器.安全读取快照, AddressOf 播放控制器.安全读取媒体信息,
+                Function() 播放控制器.当前媒体路径, Function() 播放控制器.当前字幕,
+                Function() 播放控制器.当前弹幕, AddressOf 播放控制器.读取定时文字状态,
+                AddressOf 播放控制器.读取弹幕状态, Function() 播放控制器.WASAPI模式,
+                AddressOf 播放控制器.读取色彩变换内容描述,
+                AddressOf 播放控制器.提交播放器信息图层,
+                AddressOf 播放控制器.读取视频超分辨率图层文本,
+                AddressOf 播放控制器.读取视频自动HDR图层文本)
+            信息图层呈现器.应用全局字体(设置.实例对象.字体)
+    End Sub
+
     Private Sub Form1_Shown(sender As Object, e As EventArgs) Handles Me.Shown
         If Not 核心文件检查通过 Then
             BeginInvoke(Sub()
@@ -423,7 +442,18 @@ Public Class Form1
         Dim 启动文件 = My.Application.取出待处理启动文件()
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
         待打开外部文件 = String.Empty
-        If Not String.IsNullOrEmpty(请求文件) Then BeginInvoke(Sub() 打开外部文件(请求文件))
+        ' 【2026-10-31 启动优化】执行顺序说明（这决定它能不能真的省时间）：
+        '   BeginInvoke 只是**排进消息队列**，本过程返回后才轮到它。若把 创建图层呈现器()
+        '   写成同步调用，它会**抢在开图前面**跑 ⇒ 等于没延后（第一版实测只有 −107.9，
+        '   一部分就是被这个顺序吃掉的）。
+        '   这里：先 BeginInvoke 开图，再把图层构造**也**排队（排在开图之后），
+        '   让开图/解码先跑、图层构造随后与它重叠。
+        If Not String.IsNullOrEmpty(请求文件) Then
+            BeginInvoke(Sub() 打开外部文件(请求文件))
+            BeginInvoke(Sub() 创建图层呈现器())
+        Else
+            创建图层呈现器()
+        End If
 
         ' 启动期优先级借让收尾：HIGH 只需要覆盖到首帧附近。Shown 后 600 ms 降回
         ' Normal（T2 通常在 Shown 后 ~100 ms 内），不与内核 PlacementPolicy 的
