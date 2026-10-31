@@ -29,6 +29,10 @@ Public Class Form1
         "swresample",
         "swscale"
     }
+    ' O3（2026-10-29）：探测即预载——命中内核会搜索的目录时，句柄保留到进程结束，
+    ' 内核稍后 delay-load 同一模块只做引用计数自增，不再把整条闭包重新映射一遍。
+    ' 依据：3fp/build/imgperf/o3o4_analysis.md §1.4；实测探测段 85–92 ms。
+    Private Shared ReadOnly 保留的核心文件句柄 As New List(Of IntPtr)
 
     Private 画面控件 As 播放器画面控件
     Private 播放控制器 As 播放器控制器
@@ -288,16 +292,36 @@ Public Class Form1
         Dim 句柄 = IntPtr.Zero
         Try
             If Path.IsPathFullyQualified(文件名) Then
-                Return NativeLibrary.TryLoad(文件名, 句柄)
+                If Not NativeLibrary.TryLoad(文件名, 句柄) Then Return False
+            ElseIf Not NativeLibrary.TryLoad(文件名, GetType(Form1).Assembly, Nothing, 句柄) Then
+                Return False
             End If
-            Return NativeLibrary.TryLoad(文件名, GetType(Form1).Assembly, Nothing, 句柄)
+            ' 内核稍后用 delay-load 打开同一模块（FfmpegRuntime.cpp:65-112）。保留句柄 = 只加引用计数，
+            ' 省掉开窗段把整条 FFmpeg 闭包再映射一遍（实测 ~15-35 ms）。
+            ' 但内核只搜「FFF.Native 所在目录 → exe 目录」，从不搜 PATH：PATH 命中不保留，
+            ' 否则会把内核根本不用的模块钉死在进程里。
+            If 属于内核搜索目录(文件名) Then
+                保留的核心文件句柄.Add(句柄)
+            Else
+                NativeLibrary.Free(句柄)
+            End If
+            Return True
         Catch ex As BadImageFormatException
             Return False
         Catch ex As DllNotFoundException
             Return False
-        Finally
-            If 句柄 <> IntPtr.Zero Then NativeLibrary.Free(句柄)
         End Try
+    End Function
+
+    ' 内核 delay-load 的目录序（FfmpegRuntime.cpp:93-112）：FFF.Native 所在目录 → exe 目录。
+    ' 裸文件名（FFF.Native.dll）由程序集解析落在程序目录，与内核同址，视为保留目标。
+    Private Shared Function 属于内核搜索目录(文件名 As String) As Boolean
+        If Not Path.IsPathFullyQualified(文件名) Then Return True
+        Dim 目录 = Path.GetDirectoryName(Path.GetFullPath(文件名))
+        If String.IsNullOrEmpty(目录) Then Return False
+        Dim 目标目录 = {AppContext.BaseDirectory, Path.GetDirectoryName(GetType(Form1).Assembly.Location)}
+        Return 目标目录.Any(Function(候选) Not String.IsNullOrEmpty(候选) AndAlso
+            String.Equals(目录.TrimEnd("\"c, "/"c), 候选.TrimEnd("\"c, "/"c), StringComparison.OrdinalIgnoreCase))
     End Function
 
     Private Shared Iterator Function 枚举可加载核心文件(前缀 As String) As IEnumerable(Of String)
@@ -326,12 +350,14 @@ Public Class Form1
             If 已检查目录.Any(Function(已检查) String.Equals(已检查, 完整目录, StringComparison.OrdinalIgnoreCase)) Then Continue For
             已检查目录.Add(完整目录)
 
+            ' 排序与内核候选规则对齐（FfmpegRuntime.cpp:78-84：无同名文件时取字典序最大 = 版本号最大）。
+            ' 现状每个前缀只有一份，此序无行为差异；保留句柄后它决定「钉住的是哪一份」。
             Dim 候选文件 As IEnumerable(Of String)
             Try
                 候选文件 = Directory.EnumerateFiles(完整目录, 前缀 & "*.dll", SearchOption.TopDirectoryOnly).
                     Where(Function(路径) 是支持的核心文件名(Path.GetFileName(路径), 前缀)).
                     OrderByDescending(Function(路径) String.Equals(Path.GetFileName(路径), 前缀 & ".dll", StringComparison.OrdinalIgnoreCase)).
-                    ThenBy(Function(路径) Path.GetFileName(路径), StringComparer.OrdinalIgnoreCase).
+                    ThenByDescending(Function(路径) Path.GetFileName(路径), StringComparer.OrdinalIgnoreCase).
                     ToArray()
             Catch ex As IOException
                 Continue For
@@ -398,6 +424,20 @@ Public Class Form1
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
         待打开外部文件 = String.Empty
         If Not String.IsNullOrEmpty(请求文件) Then BeginInvoke(Sub() 打开外部文件(请求文件))
+
+        ' 启动期优先级借让收尾：HIGH 只需要覆盖到首帧附近。Shown 后 600 ms 降回
+        ' Normal（T2 通常在 Shown 后 ~100 ms 内），不与内核 PlacementPolicy 的
+        ' 播放期 Boost 状态机抢同一个旋钮——它到播放泵启动后才首次采样。
+        If My.MyApplication.启动优先级已拉高 Then
+            Dim 降回线程 As New Thread(Sub()
+                Try
+                    Thread.Sleep(600)
+                    System.Diagnostics.Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.Normal
+                Catch
+                End Try
+            End Sub) With {.IsBackground = True, .Name = "启动优先级降回"}
+            降回线程.Start()
+        End If
     End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════

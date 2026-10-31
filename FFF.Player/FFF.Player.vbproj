@@ -68,7 +68,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Svg" Version="3.4.8" />
+    <!-- O4（2026-10-30）：图标改为烘焙 PNG 后，运行时不再需要 Svg（及传递依赖 ExCSS）。
+       现无改色/换肤通路（11 个 SVG 描边写死 #dcdcdc，无 currentColor/CSS 变量）；改图标时重跑 bake_icons.ps1。
+  <PackageReference Include="Svg" Version="3.4.8" />
+  -->
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectComposition" Version="3.8.3" />
@@ -77,17 +80,20 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Resources\播放器按钮\播放.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Play.svg" />
-    <EmbeddedResource Include="Resources\播放器按钮\暂停.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Pause.svg" />
-    <EmbeddedResource Include="Resources\播放器按钮\停止.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Stop.svg" />
-    <EmbeddedResource Include="Resources\播放器按钮\倒退或上一个.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Previous.svg" />
-    <EmbeddedResource Include="Resources\播放器按钮\前进或下一个.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Next.svg" />
-    <EmbeddedResource Include="Resources\播放器按钮\打开.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Open.svg" />
-    <EmbeddedResource Include="Resources\播放器按钮\设置.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Settings.svg" />
-    <EmbeddedResource Include="Resources\播放器按钮\播放列表.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Playlist.svg" />
-    <EmbeddedResource Include="Resources\播放器按钮\剪辑区间.svg" LogicalName="FFF.Player.Resources.PlayerButtons.ClipRange.svg" />
-    <EmbeddedResource Include="Resources\播放器按钮\元数据.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Metadata.svg" />
-    <EmbeddedResource Include="Resources\播放器按钮\流选择.svg" LogicalName="FFF.Player.Resources.PlayerButtons.Streams.svg" />
+    <!-- O4（2026-10-30）：按钮图标改为构建期烘焙的 PNG（设计源 svg 仍留在仓内，不进包）。
+         依据 imgperf/o3o4_analysis.md §2.4：11/11 像素级一致，运行时不再需要 Svg/ExCSS/Xml 首触。 -->
+    <None Include="Resources\播放器按钮\*.svg" />
+    <EmbeddedResource Include="Resources\播放器按钮\播放.png" LogicalName="FFF.Player.Resources.PlayerButtons.Play.png" />
+    <EmbeddedResource Include="Resources\播放器按钮\暂停.png" LogicalName="FFF.Player.Resources.PlayerButtons.Pause.png" />
+    <EmbeddedResource Include="Resources\播放器按钮\停止.png" LogicalName="FFF.Player.Resources.PlayerButtons.Stop.png" />
+    <EmbeddedResource Include="Resources\播放器按钮\倒退或上一个.png" LogicalName="FFF.Player.Resources.PlayerButtons.Previous.png" />
+    <EmbeddedResource Include="Resources\播放器按钮\前进或下一个.png" LogicalName="FFF.Player.Resources.PlayerButtons.Next.png" />
+    <EmbeddedResource Include="Resources\播放器按钮\打开.png" LogicalName="FFF.Player.Resources.PlayerButtons.Open.png" />
+    <EmbeddedResource Include="Resources\播放器按钮\设置.png" LogicalName="FFF.Player.Resources.PlayerButtons.Settings.png" />
+    <EmbeddedResource Include="Resources\播放器按钮\播放列表.png" LogicalName="FFF.Player.Resources.PlayerButtons.Playlist.png" />
+    <EmbeddedResource Include="Resources\播放器按钮\剪辑区间.png" LogicalName="FFF.Player.Resources.PlayerButtons.ClipRange.png" />
+    <EmbeddedResource Include="Resources\播放器按钮\元数据.png" LogicalName="FFF.Player.Resources.PlayerButtons.Metadata.png" />
+    <EmbeddedResource Include="Resources\播放器按钮\流选择.png" LogicalName="FFF.Player.Resources.PlayerButtons.Streams.png" />
   </ItemGroup>
 
   <ItemGroup>

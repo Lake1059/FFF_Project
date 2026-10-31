@@ -442,6 +442,21 @@ bool StillCudaFallbackEnabled() noexcept {
     return !(value[0] == L'0' && value[1] == L'\0');
 }
 
+// JPEG stills stay on the CPU decoder by policy: opening the hardware session costs
+// ~204 ms per open, the same for a 320x240 and a 1920x1080 frame, and a second open in
+// the same process is not cheaper (docs/123 section 16), while the two routes differ by
+// at most 3/255 on 4:2:0. FFF3FP_STILL_JPEG_HW=1 restores the hardware attempt for A/B.
+bool StillJpegHardwareEnabled() noexcept {
+    wchar_t value[8]{};
+    if (GetEnvironmentVariableW(L"FFF3FP_STILL_JPEG_HW", value, 8) == 0) return false;
+    return value[0] == L'1' && value[1] == L'\0';
+}
+
+bool IsJpegCodec(const AVCodecID codecId) noexcept {
+    return codecId == AV_CODEC_ID_MJPEG || codecId == AV_CODEC_ID_MJPEGB ||
+        codecId == AV_CODEC_ID_LJPEG;
+}
+
 // What the hardware route is capable of depends on the codec, the profile, the pixel
 // format and the frame size, and on nothing else in the stream description. Two files
 // that agree on those four agree on the answer, which is what makes a key out of them
@@ -3540,24 +3555,29 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     bool hardwareFallback = false;
     std::string hardwareFailureReason;
     if (videoStream_ >= 0) {
-        // Still images are included here on purpose: the hardware decoder is tried
-        // first for every media type and the retry below takes the CPU decoder when the
-        // GPU refuses. Formats with no hardware path (PNG, WebP, TIFF, JPEG XL, JXR) are
-        // refused inside the hardware open before any device is created, so probing them
-        // costs nothing.
+        // Still images are included here on purpose, except JPEG: the hardware decoder
+        // is tried first for every media type and the retry below takes the CPU decoder
+        // when the GPU refuses. Formats with no hardware path (PNG, WebP, TIFF, JPEG XL,
+        // JXR) are refused inside the hardware open before any device is created, so
+        // probing them costs nothing. JPEG stills are the measured exception and skip
+        // the attempt outright (see StillJpegHardwareEnabled).
         // A tiled still is assembled on the CPU, so a hardware decoder would only
         // add a device per tile and a download per tile: ask for the CPU decoder
         // outright and say so in the snapshot, which reports the route actually used.
         // A stream the GPU already refused in this session is not asked again: the
         // attempt costs a decoder open plus a reopened demux for the trial packets,
         // and the answer cannot have changed.
+        const bool stillJpegCpuPolicy = staticImage_ && !StillJpegHardwareEnabled() &&
+            IsJpegCodec(format_->streams[videoStream_]->codecpar->codec_id);
         const auto tryHardware = decodeMode_ == FFF3FPDecodeMode::D3D11 &&
-            !HardwareRouteKnownUnsupported(format_->streams[videoStream_]);
+            !HardwareRouteKnownUnsupported(format_->streams[videoStream_]) && !stillJpegCpuPolicy;
         auto result = tileGrid_ || !tryHardware
             ? OpenDecoder(format_, videoStream_, true, &videoDecoder_, -1, nullptr, false)
             : OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_, &hardwareFailureReason);
         if (result == FFFResult::Success && tileGrid_) snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
-        if (result == FFFResult::Success && !tileGrid_ && !tryHardware &&
+        if (result == FFFResult::Success && stillJpegCpuPolicy)
+            snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
+        if (result == FFFResult::Success && !tileGrid_ && !tryHardware && !stillJpegCpuPolicy &&
             decodeMode_ == FFF3FPDecodeMode::D3D11) {
             // Took the CPU route from memory. Report the route actually used, and say
             // why, so a host that surfaces the fallback can explain it.
