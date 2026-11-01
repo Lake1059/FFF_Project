@@ -49,6 +49,18 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
     Private 已释放标志 As Integer
     Private ReadOnly 刷新计时器 As LakeUI.PrecisionTimer
 
+    ' ── 空闲降频（2026-11-01）──────────────────────────────────────────────
+    ' 本类的 tick 早就有「非播放 ⇒ 早退」（刷新计时器_Tick 的跳过分支），但那只是省了
+    ' **工作**：PrecisionTimer 的调度线程仍按目标帧率唤醒，并在每刻度的最后 0.5 ms 用
+    ' SpinWait 忙等精磨（PrecisionTimer.vb:509-531）。没有可提交内容时这份忙等是纯开销。
+    ' 消融矩阵实测三台泵合计 51 ms/s 常驻 CPU（地板 66 → 15 ms/s）。
+    '
+    ' 与累积截止点的配合：更新下一节拍() 已有「|现在-下次| > 2×周期 ⇒ 重设基准」的保护
+    ' （见 下次刷新时间戳 处），所以从 200 ms 空闲档切回工作档不会赶工补发过期节拍；
+    ' 唤醒() 里再把基准清零，保证下一拍立即按新节拍武装。
+    Private Const 空闲间隔毫秒 As Integer = 200
+    Private 处于空闲档 As Boolean
+
     ''' <summary>最近一次唤醒间隔；整数毫秒交替调度以保持平均目标帧率。</summary>
     Friend ReadOnly Property 目标帧率 As Integer
         Get
@@ -141,9 +153,15 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
         End SyncLock
         Try
             Dim 快照 = 快照提供器()
-            If 快照 Is Nothing OrElse 快照.视频宽度 = 0 OrElse 快照.视频高度 = 0 Then Return
+            If 快照 Is Nothing OrElse 快照.视频宽度 = 0 OrElse 快照.视频高度 = 0 Then
+                进入空闲档()
+                Return
+            End If
             Dim 客户区大小 = New Size(Volatile.Read(缓存客户区宽度), Volatile.Read(缓存客户区高度))
-            If 客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return
+            If 客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then
+                进入空闲档()
+                Return
+            End If
             Dim DPI = BitConverter.Int32BitsToSingle(Volatile.Read(缓存DPI位元))
             If Not Single.IsFinite(DPI) OrElse DPI <= 0 Then DPI = 96.0F
 
@@ -159,9 +177,13 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
             Dim 需要强制 = Volatile.Read(强制提交标志) <> 0
             If Not (正在播放 OrElse 需要重建 OrElse 需要强制) Then
                 Interlocked.Increment(跳过次数)
+                ' 跳过工作不等于跳过忙等：调度线程仍按当前间隔唤醒并 SpinWait 精磨。
+                ' 这里降到空闲档，把 CPU 让出来；恢复由 使图层失效()/播放状态变化触发。
+                进入空闲档()
                 Return
             End If
 
+            退出空闲档()
             Volatile.Write(强制提交标志, 0)
             更新下一节拍()
             提交当前帧(客户区大小, 快照.视频宽度, 快照.视频高度, 快照.播放位置,
@@ -172,6 +194,28 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
                 If 活动刷新数 = 0 Then 刷新空闲.Set()
             End SyncLock
         End Try
+    End Sub
+
+    ''' <summary>
+    ''' 降到空闲档：把调度间隔拉到 空闲间隔毫秒。PrecisionTimer 的 Interval setter 只写
+    ''' 字段、调度线程每刻度重读（PrecisionTimer.vb:133-141, 497），从后台 Tick 改是安全的。
+    ''' 幂等：已在空闲档就不再写，避免每拍都触发调度线程重读。
+    ''' </summary>
+    Private Sub 进入空闲档()
+        If 处于空闲档 Then Return
+        处于空闲档 = True
+        刷新计时器.Interval = 空闲间隔毫秒
+    End Sub
+
+    ''' <summary>
+    ''' 回到工作档。必须同时清 下次刷新时间戳：空闲档期间它停在很久以前，
+    ''' 若不清零，更新下一节拍() 会先按 2×周期 的保护重设基准——那是对的，但显式清零
+    ''' 让语义不依赖那条保护，且下一拍立即按新节拍武装。
+    ''' </summary>
+    Private Sub 退出空闲档()
+        If Not 处于空闲档 Then Return
+        处于空闲档 = False
+        下次刷新时间戳 = 0
     End Sub
 
     Private Sub 更新下一节拍()
