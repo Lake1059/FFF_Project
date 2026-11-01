@@ -1186,6 +1186,18 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetPlaybackRate(播放器 As 播放器原生句柄, 倍速 As Double) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetAudioEffects(播放器 As 播放器原生句柄, <MarshalAs(UnmanagedType.I1)> 启用 As Boolean, <[In]> 增益 As Single(), 音量 As Single) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetScalingMode(播放器 As 播放器原生句柄, 模式 As UInteger) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_Redraw(播放器 As 播放器原生句柄) As 原生播放器结果
+    End Function
     ' 图片模式：缩放 + 平移。zoom=1 为适应窗口，pan 为相对未缩放画面的归一化偏移 [-1,1]。
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetViewTransform(播放器 As 播放器原生句柄,
