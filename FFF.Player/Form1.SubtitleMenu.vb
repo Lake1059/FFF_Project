@@ -23,6 +23,8 @@ Partial Public Class Form1
         Dim 媒体路径 = 播放控制器.当前媒体路径
         Dim 候选字幕 As IReadOnlyList(Of 外部字幕候选) = If(String.IsNullOrWhiteSpace(媒体路径),
             Array.Empty(Of 外部字幕候选)(), 外部字幕自动加载器.扫描同名字幕(媒体路径))
+        ' 媒体信息是一次完整的原生往返 + JSON 反序列化，与槽无关，提出循环外只取一次。
+        Dim 信息 = 播放控制器.安全读取媒体信息()
         For Each 槽 In {0, 1}
             Dim 插槽 = 槽
             Dim 轨道菜单 As New LakeUI.ModernContextMenu With {.CornerRadius = 8, .HoverRadius = 5}
@@ -49,7 +51,6 @@ Partial Public Class Form1
                     添加字幕选择项(轨道菜单, $"MKS 轨 {索引 + 1} · {轨.编码} · {语言}", 已选挂载 AndAlso 当前.流索引 = 索引, Sub() 选择字幕文件(插槽, 挂载路径, 索引))
                 Next
             End If
-            Dim 信息 = 播放控制器.安全读取媒体信息()
             If 信息 IsNot Nothing Then
                 Dim 序号 = 0
                 For Each 轨 In 信息.流.Where(Function(x) x.类型 = "subtitle")
@@ -121,7 +122,10 @@ Partial Public Class Form1
         Try
             If String.IsNullOrWhiteSpace(媒体) Then Return
             If 内嵌 Then
-                Dim 流 = 播放控制器.安全读取媒体信息().流.First(Function(x) x.索引 = 索引)
+                ' 菜单构建与点击之间媒体可能已关闭：媒体信息或目标流取不到时静默放弃。
+                Dim 快照 = 播放控制器.安全读取媒体信息()
+                Dim 流 = 快照?.流?.FirstOrDefault(Function(x) x.索引 = 索引)
+                If 流 Is Nothing Then Return
                 轨道 = Await Task.Run(Function() 外部字幕自动加载器.加载内嵌字幕(媒体, 流, 取消.Token), 取消.Token)
             Else
                 轨道 = Await 外部字幕自动加载器.加载字幕Async(路径, 媒体, 取消.Token, 索引)

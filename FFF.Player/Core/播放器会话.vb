@@ -550,17 +550,51 @@ Public NotInheritable Class 播放器会话
         设置视图旋转(If(顺时针, (当前 + 1UI) Mod 4UI, (当前 + 3UI) Mod 4UI))
     End Sub
 
+    ' 以下四个导出是 additive 新增（内核 API 版本号未升），旧内核 DLL 没有这些符号；
+    ' 静态 DllImport 在符号缺失时会抛 EntryPointNotFoundException，而启动时的
+    ' FFF3FP_GetApiVersion 版本门探测不出这种差异。与 读取音频渲染插槽状态() 的既有
+    ' 惯例一致：调用点捕获并降级（倍速/均衡器/缩放算法静默回退内核默认，Redraw 跳过），
+    ' 并缓存判定结果，避免旧内核下每次调用都走异常路径。
+    Private 支持倍速导出 As Boolean? = Nothing
+    Private 支持均衡器导出 As Boolean? = Nothing
+    Private 支持缩放导出 As Boolean? = Nothing
+    Private 支持重绘导出 As Boolean? = Nothing
+
     Friend Sub 设置播放倍速(倍速 As Double)
-        检查结果(播放器原生接口.FFF3FP_SetPlaybackRate(取得句柄(), 倍速))
+        If 支持倍速导出.HasValue AndAlso Not 支持倍速导出.Value Then Return
+        Try
+            检查结果(播放器原生接口.FFF3FP_SetPlaybackRate(取得句柄(), 倍速))
+            支持倍速导出 = True
+        Catch ex As EntryPointNotFoundException
+            支持倍速导出 = False
+        End Try
     End Sub
     Friend Sub 设置均衡器(启用 As Boolean, 增益 As Single())
-        检查结果(播放器原生接口.FFF3FP_SetAudioEffects(取得句柄(), 启用, 增益, 1.0F))
+        If 支持均衡器导出.HasValue AndAlso Not 支持均衡器导出.Value Then Return
+        Try
+            检查结果(播放器原生接口.FFF3FP_SetAudioEffects(取得句柄(), 启用, 增益, 1.0F))
+            支持均衡器导出 = True
+        Catch ex As EntryPointNotFoundException
+            支持均衡器导出 = False
+        End Try
     End Sub
     Friend Sub 重绘画面()
-        播放器原生接口.FFF3FP_Redraw(取得句柄())
+        If 支持重绘导出.HasValue AndAlso Not 支持重绘导出.Value Then Return
+        Try
+            播放器原生接口.FFF3FP_Redraw(取得句柄())
+            支持重绘导出 = True
+        Catch ex As EntryPointNotFoundException
+            支持重绘导出 = False
+        End Try
     End Sub
     Friend Sub 设置缩放算法(模式 As UInteger)
-        检查结果(播放器原生接口.FFF3FP_SetScalingMode(取得句柄(), 模式))
+        If 支持缩放导出.HasValue AndAlso Not 支持缩放导出.Value Then Return
+        Try
+            检查结果(播放器原生接口.FFF3FP_SetScalingMode(取得句柄(), 模式))
+            支持缩放导出 = True
+        Catch ex As EntryPointNotFoundException
+            支持缩放导出 = False
+        End Try
     End Sub
     ''' <summary>图片模式：设置缩放与平移。缩放=1 表示适应窗口。</summary>
     Public Sub 设置视图变换(缩放 As Single, 水平平移 As Single, 垂直平移 As Single)
