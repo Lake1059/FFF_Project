@@ -629,6 +629,10 @@ Public NotInheritable Class 播放器控制器
         Next
     End Sub
 
+    Friend Sub 卸载挂载字幕()
+        释放当前字幕()
+        RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
+    End Sub
     Public Sub 关闭字幕()
         If 已释放 Then Return
         If 读取光盘状态().已打开 Then 光盘导航(光盘命令.字幕, 0)
@@ -1000,6 +1004,18 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    Friend Sub 设置播放倍速(倍速 As Double)
+        会话?.设置播放倍速(倍速)
+    End Sub
+    Friend Sub 设置均衡器(启用 As Boolean, 增益 As Single())
+        会话?.设置均衡器(启用, 增益)
+    End Sub
+    Friend Sub 重绘画面()
+        会话?.重绘画面()
+    End Sub
+    Friend Sub 设置缩放算法(模式 As UInteger)
+        会话?.设置缩放算法(模式)
+    End Sub
     Public Sub 设置音量(音量值 As Single)
         当前音量 = Math.Clamp(音量值, 0.0F, 1.0F)
         If 当前音量 > 0 Then 已静音 = False
