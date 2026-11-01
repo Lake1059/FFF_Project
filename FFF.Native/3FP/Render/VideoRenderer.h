@@ -670,8 +670,9 @@ private:
         float sampleScale = 1, yOffset = 0, yScale = 1;
         float cOffset = 0.5f, cScale = 1, kr = 0.2126f, kb = 0.0722f;
         // imageModeX drives the still-image pixel-block enlargement in SampleVideo;
-        // it reuses what used to be a padding slot, so the constant-buffer layout
-        // stays the same size.
+        // padding2 carries the selected scaling mode (SetScalingMode writes it,
+        // SampleVideo dispatches on ImageMode.y). Both reuse what used to be
+        // padding slots, so the constant-buffer layout stays the same size.
         float chromaOffsetX = 0, chromaOffsetY = 0, imageModeX = 0, padding2 = 0;
         std::uint32_t projection360 = 0;
         float viewYaw = 0, viewPitch = 0, viewFovY = 90;

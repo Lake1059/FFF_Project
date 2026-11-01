@@ -1350,7 +1350,9 @@ struct ShaderSettings {
     float sampleScale, yOffset, yScale;
     float cOffset, cScale, kr, kb;
     // imageModeX drives the still-image pixel-block enlargement in SampleVideo;
-    // padding2 stays reserved. Both reuse what the HLSL cbuffer calls ImageMode.
+    // imageModeY (padding2) carries the selected scaling mode (0=Lanczos3,
+    // 1=Jinc, 2=Lanczos4, 3=Hermite; written by SetScalingMode). Both reuse
+    // what the HLSL cbuffer calls ImageMode.
     float chromaOffsetX, chromaOffsetY, imageModeX, padding2;
     std::uint32_t projection360;
     float viewYaw, viewPitch, viewFovY;
@@ -2822,7 +2824,10 @@ FFFResult PlayerVideoRenderer::SetScalingMode(std::uint32_t mode) noexcept {
     if (mode > 3) return FFFResult::InvalidArgument;
     std::lock_guard lock(deviceMutex_);
     scalingMode_ = mode;
-    scalingQuality_ = FFF3FPVideoScalingQuality::HighQuality;
+    // Leave scalingQuality_ alone: mode != 0 never reads it (SelectScaleFilter
+    // short-circuits on mode 2/3 and mode 1 bypasses the scale pass), and
+    // overwriting it would silently discard the host's quality choice for when
+    // the host switches back to mode 0.
     ReleaseScaleResources();
     cachedVideoSettings_.padding2 = static_cast<float>(mode);
     return FFFResult::Success;
