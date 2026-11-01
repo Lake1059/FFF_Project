@@ -51,6 +51,10 @@ Friend NotInheritable Class 播放器画面控件
     Friend Property 光盘交互已启用 As Boolean
     Friend Event 光盘鼠标移动 As EventHandler(Of MouseEventArgs)
     Friend Event 光盘鼠标确认 As EventHandler(Of MouseEventArgs)
+    Friend Event 画面右键 As EventHandler(Of MouseEventArgs)
+    Friend Event 视频缩放滚轮 As EventHandler(Of HandledMouseEventArgs)
+    <DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)>
+    Friend Property 视频滚轮缩放 As Boolean
     Friend Event 音量滚轮 As EventHandler(Of MouseEventArgs)
     Friend Event Ctrl滚轮 As EventHandler(Of HandledMouseEventArgs)
     Friend Event 全景视场角滚轮 As EventHandler(Of MouseEventArgs)
@@ -152,6 +156,7 @@ Friend NotInheritable Class 播放器画面控件
     End Sub
 
     Private Sub 视频输出窗口_MouseUp(sender As Object, e As MouseEventArgs)
+        If e.Button = MouseButtons.Right Then RaiseEvent 画面右键(Me, e)
         If e.Button <> MouseButtons.Left Then Return
         If 正在拖动图片 Then
             正在拖动图片 = False
@@ -180,6 +185,13 @@ Friend NotInheritable Class 播放器画面控件
             RaiseEvent 图片缩放滚轮(Me, e)
             Return
         End If
+        If 视频滚轮缩放 AndAlso Not 全景交互已启用 Then
+            Dim 参数 = TryCast(e, HandledMouseEventArgs)
+            If 参数 IsNot Nothing AndAlso 参数.Handled Then Return
+            挡住滚轮冒泡(e)
+            RaiseEvent 视频缩放滚轮(Me, New HandledMouseEventArgs(e.Button, e.Clicks, e.X, e.Y, e.Delta))
+            Return
+        End If
         RaiseEvent 音量滚轮(Me, e)
     End Sub
 
@@ -189,6 +201,13 @@ Friend NotInheritable Class 播放器画面控件
         If 图片交互启用值 Then
             挡住滚轮冒泡(e)
             RaiseEvent 图片缩放滚轮(Me, e)
+            Return
+        End If
+        If 视频滚轮缩放 AndAlso Not 全景交互已启用 Then
+            Dim 参数 = TryCast(e, HandledMouseEventArgs)
+            If 参数 IsNot Nothing AndAlso 参数.Handled Then Return
+            挡住滚轮冒泡(e)
+            RaiseEvent 视频缩放滚轮(Me, New HandledMouseEventArgs(e.Button, e.Clicks, e.X, e.Y, e.Delta))
             Return
         End If
         RaiseEvent 音量滚轮(Me, e)

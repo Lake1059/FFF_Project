@@ -416,7 +416,7 @@ Friend NotInheritable Class 播放器界面呈现器
         占位.Visible = 可见
     End Sub
 
-    Private Shared Sub 更新自适应宽度(控件 As Control)
+    Friend Shared Sub 更新自适应宽度(控件 As Control)
         If TypeOf 控件 Is LakeUI.HtmlColorLabel Then
             Dim 标签 = DirectCast(控件, LakeUI.HtmlColorLabel)
             控件.Width = Math.Max(1, 标签.GetPreferredSize(Size.Empty).Width)

@@ -504,3 +504,7 @@ FFFResult FFF3FP_GetAudioRenderPlugState(const FFF3FPHandle player,
     }
     return FFFResult::Success;
 }
+
+FFFResult FFF3FP_SetPlaybackRate(FFF3FPHandle p, double r) noexcept { return p ? static_cast<PlayerSession*>(p)->SetPlaybackRate(r) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_SetAudioEffects(FFF3FPHandle p, bool e, const float* g, float w) noexcept { return p ? static_cast<PlayerSession*>(p)->SetAudioEffects(e,g,w) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_SetScalingMode(FFF3FPHandle p, std::uint32_t m) noexcept { return p ? static_cast<PlayerSession*>(p)->SetScalingMode(m) : FFFResult::InvalidArgument; }

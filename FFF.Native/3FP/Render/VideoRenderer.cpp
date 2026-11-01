@@ -831,6 +831,34 @@ float4 SamplePanorama(Texture2D<float4> sourceTexture,float2 uv) {
     sourceTexture.GetDimensions(width,height);
     return SampleLanczos3Panorama(sourceTexture,uv,uint2(width,height));
 }
+float Sinc4(float x){return abs(x)<0.00001?1:sin(3.14159265359*x)/(3.14159265359*x);}
+float Jinc(float x) {
+    if(abs(x)<0.00001)return 0.5;
+    float term=x*0.5,sum=term;
+    [unroll] for(int k=1;k<=12;++k){term*=-x*x/(4.0*k*(k+1));sum+=term;}
+    return sum/x;
+}
+// EWA sampler for the selectable modes: Jinc (ImageMode.y==1) uses the Jinc(3.83170597*r)
+// kernel rolled off by a second Jinc lobe at 1.21966989 -- the window does not reach zero
+// at the r=2 truncation, so the 50% min/max blend below absorbs the residual step and the
+// kernel's negative lobe. Lanczos-4 (ImageMode.y==2) is the separable Sinc4 window below.
+float4 SampleSelected(Texture2D<float4> tex,float2 uv,uint2 dim) {
+    float2 p=uv*float2(dim)-0.5;
+    float2 scale=min(float2(OutputWidth,OutputHeight)/float2(dim),1.0);
+    float support=ImageMode.y<1.5?2.0:4.0;
+    int2 lo=int2(ceil(p-support/scale)),hi=int2(floor(p+support/scale));
+    float4 total=0,low=1e20,high=-1e20;float weights=0;
+    [loop] for(int y=lo.y;y<=hi.y;++y){[loop] for(int x=lo.x;x<=hi.x;++x){
+        float2 delta=(float2(x,y)-p)*scale;float w;
+        if(ImageMode.y<1.5){float r=length(delta);w=r>=2?0: Jinc(3.83170597*r)*Jinc(1.21966989*r);}
+        else {w=abs(delta.x)>=4||abs(delta.y)>=4?0:Sinc4(delta.x)*Sinc4(delta.x/4)*Sinc4(delta.y)*Sinc4(delta.y/4);}
+        float4 v=tex.Load(int3(clamp(int2(x,y),int2(0,0),int2(dim)-1),0));
+        if(all(abs(float2(x,y)-p)<=1)){low=min(low,v);high=max(high,v);}
+        total+=v*w;weights+=w;
+    }}
+    float4 value=total/max(weights,0.000001);
+    return ImageMode.y<1.5?lerp(value,clamp(value,low,high),0.5):value;
+}
 float4 SampleVideo(Texture2D<float4> sourceTexture,float2 uv) {
     uint width,height;
     sourceTexture.GetDimensions(width,height);
@@ -846,6 +874,12 @@ float4 SampleVideo(Texture2D<float4> sourceTexture,float2 uv) {
         const int2 texel=int2(floor(uv*float2(dimensions)));
         return sourceTexture.Load(int3(clamp(texel,int2(0,0),int2(dimensions)-1),0));
     }
+    if(ImageMode.y>2.5) {
+        float2 p=uv*float2(dimensions)-0.5, f=frac(p);
+        f=f*f*(3.0-2.0*f);
+        return sourceTexture.SampleLevel(LinearSampler,(floor(p)+f+0.5)/float2(dimensions),0);
+    }
+    if(ImageMode.y>0.5)return SampleSelected(sourceTexture,uv,dimensions);
     return SampleLanczos3(sourceTexture,uv,dimensions);
 }
 // Nearest code of one auxiliary plane at the base layer's sampling coordinate.
@@ -1151,14 +1185,15 @@ float ScaleWeight(float value) {
         return value>=1.0?0.0:((2.0*value-3.0)*value*value+1.0);
     if(Filter==2)
         return value<0.5?1.0:0.0;
-    return value>=3.0?0.0:Sinc(value)*Sinc(value/3.0);
+    float radius=Filter==3?4.0:3.0;
+    return value>=radius?0.0:Sinc(value)*Sinc(value/radius);
 }
 float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     const int2 outputPixel=int2(position.xy);
     const float sourceExtent=Axis==0?SourceSize.x:SourceSize.y;
     const float destinationExtent=Axis==0?DestinationSize.x:DestinationSize.y;
     const float scale=min(destinationExtent/sourceExtent,1.0);
-    const float radius=Filter==2?0.5:(Filter==0?1.0:3.0);
+    const float radius=Filter==2?0.5:(Filter==0?1.0:(Filter==3?4.0:3.0));
     const float support=radius/max(scale,0.000001);
     const float sourcePosition=((Axis==0?float(outputPixel.x):float(outputPixel.y))+0.5)
         *sourceExtent/destinationExtent-0.5;
@@ -1319,7 +1354,9 @@ struct ShaderSettings {
     float sampleScale, yOffset, yScale;
     float cOffset, cScale, kr, kb;
     // imageModeX drives the still-image pixel-block enlargement in SampleVideo;
-    // padding2 stays reserved. Both reuse what the HLSL cbuffer calls ImageMode.
+    // imageModeY (padding2) carries the selected scaling mode (0=Lanczos3,
+    // 1=Jinc, 2=Lanczos4, 3=Hermite; written by SetScalingMode). Both reuse
+    // what the HLSL cbuffer calls ImageMode.
     float chromaOffsetX, chromaOffsetY, imageModeX, padding2;
     std::uint32_t projection360;
     float viewYaw, viewPitch, viewFovY;
@@ -2785,6 +2822,19 @@ FFFResult PlayerVideoRenderer::SetPreferredAdapterIndex(const std::int32_t index
 
 void PlayerVideoRenderer::SetInteractiveMove(const bool enabled) noexcept {
     interactiveMove_.store(enabled, std::memory_order_release);
+}
+
+FFFResult PlayerVideoRenderer::SetScalingMode(std::uint32_t mode) noexcept {
+    if (mode > 3) return FFFResult::InvalidArgument;
+    std::lock_guard lock(deviceMutex_);
+    scalingMode_ = mode;
+    // Leave scalingQuality_ alone: mode != 0 never reads it (SelectScaleFilter
+    // short-circuits on mode 2/3 and mode 1 bypasses the scale pass), and
+    // overwriting it would silently discard the host's quality choice for when
+    // the host switches back to mode 0.
+    ReleaseScaleResources();
+    cachedVideoSettings_.padding2 = static_cast<float>(mode);
+    return FFFResult::Success;
 }
 
 FFFResult PlayerVideoRenderer::SetScalingQuality(
@@ -5167,6 +5217,7 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     // Image pixel-block sampling applies only while enlarging. The destination rect
     // passed in is the final fitted box, so comparing it with the cached source size
     // is the authoritative test -- the earlier size-based checks cannot see the fit.
+    cachedVideoSettings_.padding2 = static_cast<float>(scalingMode_);
     cachedVideoSettings_.imageModeX = sourceImageMode_ &&
         (width > cachedVideoSettings_.sourceWidth || height > cachedVideoSettings_.sourceHeight)
         ? 1.0f : 0.0f;
@@ -5383,6 +5434,11 @@ std::uint32_t PlayerVideoRenderer::SelectScaleFilter(const float scaleX,
     const float scaleY) const noexcept {
     const auto upscaling = scaleX > 1.0f || scaleY > 1.0f;
     const auto downscaling = scaleX < 1.0f || scaleY < 1.0f;
+    // Still images enlarge by whole pixel blocks in every mode; the mode filters
+    // apply to video in both directions and to image downscaling.
+    const auto imageBlockUpscale = sourceImageMode_ && upscaling && !downscaling;
+    if (scalingMode_ == 2 && !imageBlockUpscale) return 3;
+    if (scalingMode_ == 3 && !imageBlockUpscale) return 0;
 
     if (sourceImageMode_) {
         // A photograph or drawing is enlarged by whole pixel blocks: each source pixel
@@ -5499,6 +5555,14 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
     const bool rgbSource) noexcept {
     if (views == nullptr || outputWidth == 0 || outputHeight == 0)
         return FFFResult::InvalidArgument;
+    // Mode 1 (Jinc) has no dedicated bypass: the scale chain below is what keeps
+    // its EWA loop affordable and correct --
+    //   - minification runs the chain's halving passes first, so the per-pixel
+    //     Jinc loop works near 1:1 instead of over support/scale taps;
+    //   - the chain input is effectiveSourceViews_, so VSR and TrueHDR surfaces
+    //     stay in the loop instead of being silently dropped;
+    //   - upscaling leaves the chain untouched (it refuses target > source), which
+    //     is exactly the from-source EWA this mode wants.
     const auto generation = videoGeneration_.load(std::memory_order_acquire);
     // The cache key includes the VSR state: VSR swaps the effective source for an
     // upscaled surface of a different size, and that changes the result even
@@ -7658,6 +7722,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // source) switches SampleVideo to pixel-block sampling so the picture keeps its
     // own pixel grid. Shrinking one still needs the smoothing kernel, so the flag is
     // only set when the destination actually exceeds the source.
+    settings.padding2 = static_cast<float>(scalingMode_);
     settings.imageModeX = 0.0f;
     sourceColorSpace_ = frame->colorspace;
     sourceChromaLocation_ = chromaLocation;
