@@ -8,8 +8,14 @@ Namespace My
     Partial Friend Class MyApplication
         Private 待处理启动文件 As String = String.Empty
 
-        ''' <summary>启动期把进程拉到过 HIGH 的标记；Form1_Shown 后由宿主降回 Normal。</summary>
+        ''' <summary>启动期把进程拉到过 HIGH 的标记；Form1_Shown 后由宿主降回原始优先级。</summary>
         Friend Shared 启动优先级已拉高 As Boolean = False
+
+        ''' <summary>拉高之前保存的进程原始 PriorityClass；降回线程据此恢复原值而非常量 Normal（start /high 启动时恢复 High）。</summary>
+        Friend Shared 启动期原始优先级 As ProcessPriorityClass = ProcessPriorityClass.Normal
+
+        ''' <summary>启动期 GPU 预热后台线程；UI 线程须在首个 D2D 触点（Form1_Load）前 Join 它，使 D3D_DeviceGlobals 的设备创建与 UI 使用在时间上互斥。</summary>
+        Friend Shared GPU预热线程 As Threading.Thread
 
         Private Sub MyApplication_Startup(sender As Object, e As StartupEventArgs) Handles Me.Startup
             启动期拉高优先级()
@@ -24,12 +30,14 @@ Namespace My
         ''' D3D_DeviceGlobals 的锁保护下、与界面线程的控件树构建无依赖，这里用一条
         ''' 后台线程把它提前做掉；Attach 首次渲染时 _initialized 已为 True，直接跳过。
         ''' 仅取 D2D Device（不动 DeviceContext——那个必须在 UI 线程用）。
+        ''' 线程对象保存于 GPU预热线程 字段：UI 线程在首个 D2D 触点前 Join 它，
+        ''' 使设备创建与 UI 线程的使用串行（LakeUI 侧双检/双锁并非严格互斥，不能并发）。
         ''' FFF_NO_GPU_WARMUP=1 退出。
         ''' </summary>
         Private Sub 启动期预热GPU设备()
             Try
                 If Environment.GetEnvironmentVariable("FFF_NO_GPU_WARMUP") = "1" Then Return
-                Dim 预热线程 As New Thread(Sub()
+                GPU预热线程 = New Thread(Sub()
                     Try
                         Dim 设备 = LakeUI.D3D_DeviceGlobals.GetD2DDevice()
                         GC.KeepAlive(设备)
@@ -37,14 +45,15 @@ Namespace My
                         ' 预热失败不影响启动：Attach 里仍会按需创建（并走它自己的错误处理）。
                     End Try
                 End Sub) With {.IsBackground = True, .Name = "GPU预热"}
-                预热线程.Start()
+                GPU预热线程.Start()
             Catch
             End Try
         End Sub
 
         ''' <summary>
         ''' 启动期优先级：Main 到首帧之间进程还在 NORMAL，排在前面的往往是机器上其
-        ''' 它忙线程。拉到 HIGH 覆盖整个启动窗口，Form1_Shown 之后由宿主降回 Normal。
+        ''' 它忙线程。拉到 HIGH 覆盖整个启动窗口，Form1_Shown 之后由宿主降回拉高前
+        ''' 保存的原始优先级（启动期原始优先级 字段，非常量 Normal）。
         ''' 空闲机上收益≈0（没有争抢者），负载机上是把排队的启动时间抢回来。
         ''' 内核 PlacementPolicy 的播放期 Boost 用的也是这个旋钮，但它最早在播放泵
         ''' 启动后才触发且会恢复基线——本处在它之前拉、之后降，互不踩踏。
@@ -53,7 +62,13 @@ Namespace My
         Private Sub 启动期拉高优先级()
             Try
                 If Environment.GetEnvironmentVariable("FFF_NO_STARTUP_PRIORITY") = "1" Then Return
-                Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High
+                Dim _p = Process.GetCurrentProcess()
+                Using _p
+                    ' 拉高前先保存原始 PriorityClass（同一处完成 Process 的 Using 释放）；
+                    ' 读优先级失败会抛异常走外层 Catch：不拉高、不置 启动优先级已拉高。
+                    启动期原始优先级 = _p.PriorityClass
+                    _p.PriorityClass = ProcessPriorityClass.High
+                End Using
                 启动优先级已拉高 = True
             Catch
                 ' 优先级不是启动的前提：拿不到就按原样跑。
