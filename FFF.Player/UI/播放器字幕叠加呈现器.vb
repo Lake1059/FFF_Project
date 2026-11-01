@@ -29,6 +29,22 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     Private 活动刷新数 As Integer
     Private 已释放标志 As Integer
 
+    ' ── 空闲降频（2026-11-01）──────────────────────────────────────────────
+    ' 三台图层泵各占一条 PrecisionTimer 调度线程，而调度线程的设计是在每个刻度的
+    ' 最后 0.5 ms 用 SpinWait 忙等精磨（PrecisionTimer.vb:509-531）。16 ms 间隔下
+    ' 每台约 3% 单核，消融矩阵实测三台合计 51 ms/s 常驻 CPU（地板 66 → 15 ms/s）。
+    ' 没有字幕轨道时这份忙等毫无产出。
+    '
+    ' 判据取「有没有轨道」而不是「当前时刻有没有字幕行」：后者只能靠 tick 自己发现，
+    ' 降频会让字幕晚 200 ms 出现；前者是事件驱动的——轨道加载/卸载都会走
+    ' 使图层失效()，在那里拉回工作档即可。
+    '
+    ' 只调频率、不改提交条件：提交当前帧() 内部已有图层签名去重，无字幕时那一拍
+    ' 是几次整数运算。不自己记「屏幕上是不是空的」，以免复制它的职责后漏掉状态迁移。
+    Private Const 工作间隔毫秒 As Integer = 16
+    Private Const 空闲间隔毫秒 As Integer = 200
+    Private 当前间隔毫秒 As Integer = 工作间隔毫秒
+
     Private Structure 字幕行测量键
         Implements IEquatable(Of 字幕行测量键)
 
@@ -115,10 +131,22 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
         Try
             Dim 快照 = 快照提供器()
             Dim 客户区大小 = New Size(Volatile.Read(缓存客户区宽度), Volatile.Read(缓存客户区高度))
-            Dim DPI = BitConverter.Int32BitsToSingle(Volatile.Read(缓存DPI位元))
             If 快照 Is Nothing OrElse 快照.视频宽度 = 0 OrElse 快照.视频高度 = 0 OrElse
-                客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return
+                客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then
+                ' 没有画面就谈不上图层：与旧行为一样直接返回，只把调度降下来。
+                设置间隔(空闲间隔毫秒)
+                Return
+            End If
+            ' 有画面 ⇒ 一律照常提交，**不在这里判断"有没有内容要画"**。
+            ' 为什么这样而不是自己维护一个「已清空」标志：提交当前帧() 内部已有
+            ' 图层签名去重（signature = 画布大小 + commands，相同即早退），
+            ' 无字幕时 commands 为空、签名恒定 ⇒ 那一拍只是几次整数运算。
+            ' 自己再记一份"屏幕上是不是空的"等于复制它的职责，一旦漏了某条
+            ' 状态迁移（加载→卸载、seek、改设置…）就会把残影永久留在屏幕上。
+            ' 所以这里只调**频率**，把"要不要真画"的判断留给已有的去重机制。
             Dim 字幕 = 字幕提供器()
+            设置间隔(If(字幕 Is Nothing, 空闲间隔毫秒, 工作间隔毫秒))
+            Dim DPI = BitConverter.Int32BitsToSingle(Volatile.Read(缓存DPI位元))
             提交当前帧(客户区大小, 快照.视频宽度, 快照.视频高度,
                      快照.播放位置, 字幕, DPI, 快照.时间轴代次)
         Finally
@@ -127,6 +155,17 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
                 If 活动刷新数 = 0 Then 刷新空闲.Set()
             End SyncLock
         End Try
+    End Sub
+
+    ''' <summary>
+    ''' 改调度间隔。PrecisionTimer.Interval 的 setter 只写一个字段、调度线程每刻度重读
+    ''' （PrecisionTimer.vb:497），因此从后台 Tick 里改是安全的，且下一刻度即生效。
+    ''' 相同值直接跳过，避免每拍都写。
+    ''' </summary>
+    Private Sub 设置间隔(毫秒 As Integer)
+        If 当前间隔毫秒 = 毫秒 Then Return
+        当前间隔毫秒 = 毫秒
+        刷新计时器.Interval = 毫秒
     End Sub
 
     Private Sub 画面几何已变化(sender As Object, e As EventArgs)
@@ -204,6 +243,13 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
 
     Friend Sub 使图层失效()
         Volatile.Write(图层签名有效标志, 0)
+        ' 注意：**这里不碰计时器间隔**。间隔只由 tick 线程写（单写者原则）。
+        ' 从 UI 线程写会与 tick 里的写交错，可能让「守卫字段」与真实 Interval 脱钩，
+        ' 结果是泵在有内容时永久停在空闲档（推演：UI 读到旧值→写守卫字段=16，
+        ' tick 随后写 Interval=200 ⇒ 守卫说 16、硬件是 200，下一拍守卫相等即早退，
+        ' 再也不会修正）。而且它想省的延迟本来也省不掉：调度线程当前这一拍已按旧
+        ' 间隔武装（PrecisionTimer.vb:508-524），改字段不会缩短在途的 wait。
+        ' 轨道到达后最坏等一个空闲拍（200 ms）恢复 60 Hz，只影响首行字幕出场。
     End Sub
 
     Private Shared Function 计算图层签名(画布大小 As Size,

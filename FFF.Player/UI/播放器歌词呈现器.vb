@@ -78,6 +78,22 @@ Friend NotInheritable Class 播放器歌词呈现器
     Private 已释放标志 As Integer
     Private 临时字号偏移磅值 As Single
 
+    ' ── 空闲降频（2026-11-01）──────────────────────────────────────────────
+    ' 与字幕泵同因：PrecisionTimer 调度线程每刻度最后 0.5 ms 用 SpinWait 忙等精磨
+    ' （PrecisionTimer.vb:509-531），没有歌词时这份忙等是纯开销。
+    ' 消融矩阵实测三台泵合计 51 ms/s 常驻 CPU（地板 66 → 15 ms/s）。
+    '
+    ' 判据取「有没有歌词资料」：生成命令() 在 歌词 Is Nothing OrElse 歌词.条目.Count = 0
+    ' 时返回空列表（本文件 生成命令 处），所以无资料 ⇒ 图层必然为空，无需 60 Hz 轮询。
+    ' 封面不算独立内容：它只在 计算歌词区域 里作为布局参数，无歌词时不单独成层。
+    '
+    ' 只调频率、不改提交条件：提交当前帧() 内部已有图层签名去重，无歌词时那一拍
+    ' 是几次整数运算。不自己记「屏幕上是不是空的」，以免复制它的职责后漏掉状态迁移
+    ' 而把最后一行歌词留在屏幕上。
+    Private Const 工作间隔毫秒 As Integer = 16
+    Private Const 空闲间隔毫秒 As Integer = 200
+    Private 当前间隔毫秒 As Integer = 工作间隔毫秒
+
     Friend Sub New(画面控件值 As 播放器画面控件, 快照提供器值 As Func(Of 播放器快照),
                    歌词提供器值 As Func(Of LRC歌词资料), 封面状态提供器值 As Func(Of Boolean),
                    提交图层值 As Func(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single,
@@ -116,14 +132,33 @@ Friend NotInheritable Class 播放器歌词呈现器
             Dim snapshot = 快照提供器()
             Dim size = New Size(Volatile.Read(缓存客户区宽度), Volatile.Read(缓存客户区高度))
             Dim dpi = BitConverter.Int32BitsToSingle(Volatile.Read(缓存DPI位元))
-            If snapshot Is Nothing OrElse size.Width <= 0 OrElse size.Height <= 0 Then Return
-            提交当前帧(size, snapshot.播放位置, 歌词提供器(), 封面状态提供器(), dpi)
+            If snapshot Is Nothing OrElse size.Width <= 0 OrElse size.Height <= 0 Then
+                设置间隔(空闲间隔毫秒)
+                Return
+            End If
+            ' 与字幕泵同一原则：有画面就一律照常提交，只调**频率**，不自己记
+            ' 「屏幕上是不是空的」。提交当前帧() 内部已有图层签名去重
+            ' （signature = 画布大小 + 有封面 + commands + 呈现设置，相同即早退），
+            ' 无歌词时 commands 为空、签名恒定 ⇒ 那一拍只是几次整数运算。
+            ' 自己复制这份职责一旦漏掉某条状态迁移，就会把最后一行歌词留在屏幕上。
+            Dim 歌词 = 歌词提供器()
+            Dim 有歌词 = 歌词 IsNot Nothing AndAlso 歌词.条目.Count > 0
+            设置间隔(If(有歌词, 工作间隔毫秒, 空闲间隔毫秒))
+            提交当前帧(size, snapshot.播放位置, 歌词, 封面状态提供器(), dpi)
         Finally
             SyncLock 生命周期锁
                 活动刷新数 -= 1
                 If 活动刷新数 = 0 Then 刷新空闲.Set()
             End SyncLock
         End Try
+    End Sub
+
+    ''' <summary>改调度间隔；PrecisionTimer 的 Interval setter 只写字段、调度线程每刻度重读，
+    ''' 从后台 Tick 调用安全。相同值跳过，避免每拍都写。</summary>
+    Private Sub 设置间隔(毫秒 As Integer)
+        If 当前间隔毫秒 = 毫秒 Then Return
+        当前间隔毫秒 = 毫秒
+        刷新计时器.Interval = 毫秒
     End Sub
 
     Private Sub 画面几何已变化(sender As Object, e As EventArgs)
@@ -442,6 +477,13 @@ Friend NotInheritable Class 播放器歌词呈现器
 
     Friend Sub 使图层失效()
         Volatile.Write(图层签名有效标志, 0)
+        ' 注意：**这里不碰计时器间隔**，间隔只由 tick 线程写（单写者原则）。
+        ' 从 UI 线程写会与 tick 的写交错，可能让守卫字段与真实 Interval 脱钩：
+        ' tick 想写 200（无歌词）与 UI 想写 16（轨道刚到）同时发生，末态可以是
+        ' 守卫=16 而 Interval=200；下一拍 tick 见歌词已到、想设 16，却发现守卫
+        ' 已经是 16 ⇒ 早退，再也不会修正，泵在有歌词时永久停在 5 Hz。
+        ' 而且它想省的延迟本来也省不掉：调度线程当前这一拍已按旧间隔武装
+        ' （PrecisionTimer.vb:508-524），改字段不会缩短在途的 wait。
     End Sub
 
     Private Shared Function 计算图层签名(画布大小 As Size, 有封面 As Boolean,
