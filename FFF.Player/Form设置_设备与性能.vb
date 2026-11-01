@@ -59,6 +59,7 @@
             配置.音频缓冲区策略 = 控件.SelectedIndex
         ElseIf 控件 Is MCB_视频缩放质量 Then
             配置.视频缩放质量选项 = 控件.SelectedIndex
+            Form1.当前主窗体?.应用视频缩放设置()
         ElseIf 控件 Is MCB_空间音频 Then
             配置.启用空间音频 = 控件.SelectedIndex = 0
             Form1.当前主窗体?.应用空间音频设置()

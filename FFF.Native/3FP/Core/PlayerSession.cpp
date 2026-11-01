@@ -113,6 +113,18 @@ constexpr double PaceDeficitFraction = 0.95;            // only a measured defic
 constexpr std::int64_t PaceEstimateMinSpan100ns = 1'000'000; // 100 ms of streak for a rate estimate
 constexpr std::uint32_t PaceWindowFrames = 32;              // rolling window for oscillating deficits
 constexpr double PaceWindowLateShare = 0.40;                // late share inside it that counts as a deficit
+// Video decode-skip ladder: the fourth output of the load analyzer below, next to the
+// thread ladder, the software pool and the placement path. Coarse, and strictly up-only:
+// a rung is never undone by the mechanism itself -- not by a rate change, not by a pause,
+// not by a seek. Only opening/closing the media re-arms it (a new decode baseline), which
+// is also the only point where a descent cannot strand a reference chain. See
+// EvaluateVideoSkipRung.
+constexpr std::uint32_t SkipMaxRung = 2;                 // 0 = decode all, 1 = non-reference frames, 2 = keyframes only
+constexpr std::int64_t SkipWindow100ns = 20'000'000;     // 2 s, the same window the thread ladder uses
+constexpr double SkipStarvedShare = 0.50;                // queue starved in >= 50% of the ticks: decode supply deficit
+constexpr double SkipWasteShare = 0.50;                  // decoded and then discarded: > 50% of the decode is wasted
+constexpr double SkipKeyframeRateFloor = 4.0;            // NONKEY is a slideshow; only where that is the expected look
+constexpr std::uint32_t SkipEscalateWindows = 2;         // consecutive deficit windows that earn a rung
 constexpr std::uint32_t MaximumSoftwareDecoderThreads = 8;
 // Thread budget for the software decoder. Its workers share the machine with the
 // threads the player itself runs -- the worker (demux, decode drive, present pacing),
@@ -1118,7 +1130,15 @@ void PlayerSession::UpdateDrainedAudioClock() noexcept {
     if (audioClockFinished_ || playbackPreroll_ || !audioRenderer_) return;
     const auto drained = externalFormat_ != nullptr ? externalAudioDrained_ : audioDecoderDrained_;
     if (!drained || audioRenderer_->Buffered100ns() > 0) return;
-    const auto position = audioRenderer_->Position100ns();
+    // ×rate remap applies from tempoOrigin_ onward; before it (renderer-seeded
+    // silence while the stream starts after the seek target) the renderer's own
+    // timeline is already media time. Identity meets rate× at tempoOrigin_, so
+    // the transition is continuous.
+    const auto rendererPos = audioRenderer_->Position100ns();
+    const auto origin = tempoOrigin_.load(std::memory_order_relaxed);
+    const auto position = rendererPos < origin
+        ? rendererPos
+        : origin + static_cast<std::int64_t>((rendererPos - origin) * playbackRate_.load());
     audioClockFinished_ = true;
     ResetClock(position);
 }
@@ -1127,6 +1147,7 @@ void PlayerSession::DrainInternalAudio() noexcept {
     if (!demuxEnded_ || !pendingAudioPackets_.empty() || audioDecoderDrained_ || externalFormat_ != nullptr) return;
     audioDecoderDrained_ = true;
     if (audioDecoder_) DecodePacket(audioDecoder_, nullptr, false, format_);
+    if (audioRenderer_ && tempoGraph_) TempoAudio(nullptr, 0);
     if (audioRenderer_ && audioRenderer_->Finish() != FFFResult::Success)
         Fail(FFFResult::FfmpegFailure, "Could not drain audio output.", "audio-drain");
 }
@@ -2241,6 +2262,139 @@ FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
     });
     return FFFResult::Success;
 }
+FFFResult PlayerSession::SetPlaybackRate(const double rate) noexcept {
+    if (!std::isfinite(rate) || rate < 0.1 || rate > 16.0) return FFFResult::InvalidArgument;
+    Enqueue([this, rate] {
+        const auto position = state_.load() == FFF3FPState::Playing ? ClockPosition() : snapshot_.position100ns;
+        playbackRate_ = rate;
+        // The skip rung is not touched here: the ladder only rises within a media, and a
+        // rate change is not a new media. The seek below keeps the rung too.
+        DoSeek(position);
+    });
+    return FFFResult::Success;
+}
+void PlayerSession::ResetTempo(const std::int64_t position) noexcept {
+    if (tempoGraph_) avfilter_graph_free(&tempoGraph_);
+    tempoInput_ = nullptr; tempoOutput_ = nullptr; tempoSamples_.store(0, std::memory_order_relaxed); tempoOrigin_.store(position, std::memory_order_relaxed);
+}
+FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position, const std::int64_t timestampResolution) noexcept {
+    const double rate = playbackRate_.load();
+    const bool passthrough = rate == 1.0 && !equalizerEnabled_ && waveVolume_ == 1;
+    // A flush request (frame == nullptr) in the pass-through state is a no-op: there
+    // is nothing buffered anywhere, and the renderer's Enqueue treats a null frame
+    // as an invalid argument rather than a flush, so never forward it.
+    if (passthrough && !frame) return FFFResult::Success;
+    if (passthrough) return audioRenderer_->Enqueue(frame, position, timestampResolution);
+    // tempoOrigin_/tempoSamples_ are atomics: the playback-clock readers on other
+    // threads sample them without taking the command-queue lock. This thread owns
+    // all writes, so relaxed ordering is sufficient.
+    auto origin = tempoOrigin_.load(std::memory_order_relaxed);
+    if (!tempoGraph_) {
+        if (!frame) return FFFResult::Success;
+        if(position!=AV_NOPTS_VALUE){
+            origin = std::max(origin, position);
+            tempoOrigin_.store(origin, std::memory_order_relaxed);
+        }
+        // Build into locals and publish only on success. A half-configured graph left
+        // in tempoGraph_ would make every later call skip the rebuild (the !tempoGraph_
+        // gate above) and fail on each frame, which then disables the whole audio track
+        // via DisableFailedInternalAudio until the next seek or stream switch.
+        AVFilterGraph* graph = avfilter_graph_alloc();
+        if (!graph) return FFFResult::NativeFailure;
+        const auto abandon = [&graph]() noexcept { avfilter_graph_free(&graph); return FFFResult::FfmpegFailure; };
+        AVFilterContext* graphInput = nullptr;
+        AVFilterContext* graphSink = nullptr;
+        char layout[128]{};AVChannelLayout channels{};
+        if(frame->ch_layout.order==AV_CHANNEL_ORDER_UNSPEC)av_channel_layout_default(&channels,frame->ch_layout.nb_channels);
+        else if(av_channel_layout_copy(&channels,&frame->ch_layout) < 0){av_channel_layout_uninit(&channels);return abandon();}
+        if(av_channel_layout_describe(&channels,layout,sizeof(layout)) < 0){av_channel_layout_uninit(&channels);return abandon();}
+        av_channel_layout_uninit(&channels);
+        std::ostringstream args;
+        args << "time_base=1/" << frame->sample_rate << ":sample_rate=" << frame->sample_rate
+             << ":sample_fmt=" << av_get_sample_fmt_name(static_cast<AVSampleFormat>(frame->format)) << ":channel_layout=" << layout;
+        if (avfilter_graph_create_filter(&graphInput, avfilter_get_by_name("abuffer"), "input", args.str().c_str(), nullptr, graph) < 0 ||
+            avfilter_graph_create_filter(&graphSink, avfilter_get_by_name("abuffersink"), "output", nullptr, nullptr, graph) < 0) return abandon();
+        AVFilterContext* previous = graphInput;
+        double remainder = rate; int index = 0;
+        do {
+            const auto factor = std::clamp(remainder, 0.5, 2.0);
+            AVFilterContext* filter = nullptr;
+            const auto name = "tempo" + std::to_string(index++);
+            const auto factorText = std::to_string(factor);
+            if (avfilter_graph_create_filter(&filter, avfilter_get_by_name("atempo"), name.c_str(), factorText.c_str(), nullptr, graph) < 0 ||
+                avfilter_link(previous, 0, filter, 0) < 0) return abandon();
+            previous = filter; remainder /= factor;
+        } while (std::abs(remainder - 1.0) > 0.00001);
+        if (equalizerEnabled_) {
+            constexpr int frequencies[]{60,170,310,600,1000,3000,6000,12000,14000,16000};
+            for (int band=0;band<10;++band) {
+                if (frequencies[band]>=frame->sample_rate/2) continue;
+                AVFilterContext* filter=nullptr;
+                const auto name="eq"+std::to_string(band);
+                const auto options="f="+std::to_string(frequencies[band])+":t=o:w=1:g="+std::to_string(equalizerGains_[band]);
+                if(avfilter_graph_create_filter(&filter,avfilter_get_by_name("equalizer"),name.c_str(),options.c_str(),nullptr,graph)<0 || avfilter_link(previous,0,filter,0)<0)return abandon();
+                previous=filter;
+            }
+        }
+        if(waveVolume_!=1) {
+            AVFilterContext* filter=nullptr;const auto options=std::to_string(waveVolume_);
+            if(avfilter_graph_create_filter(&filter,avfilter_get_by_name("volume"),"wave",options.c_str(),nullptr,graph)<0 || avfilter_link(previous,0,filter,0)<0)return abandon();
+            previous=filter;
+        }
+        if (avfilter_link(previous, 0, graphSink, 0) < 0 || avfilter_graph_config(graph, nullptr) < 0) return abandon();
+        tempoGraph_ = graph;
+        tempoInput_ = graphInput;
+        tempoOutput_ = graphSink;
+    }
+    AVFrame* input = frame ? av_frame_clone(frame) : nullptr;
+    if (frame && !input) return FFFResult::NativeFailure;
+    if (input) {
+        if(input->ch_layout.order==AV_CHANNEL_ORDER_UNSPEC){const int count=input->ch_layout.nb_channels;av_channel_layout_uninit(&input->ch_layout);av_channel_layout_default(&input->ch_layout,count);}
+        const auto skipped = position != AV_NOPTS_VALUE && position < origin
+            ? std::min<std::int64_t>(input->nb_samples, av_rescale_rnd(origin - position, input->sample_rate, 10000000, AV_ROUND_UP)) : 0;
+        if (skipped >= input->nb_samples) { av_frame_free(&input); return FFFResult::Success; }
+        if (skipped) {
+            const auto format = static_cast<AVSampleFormat>(input->format);
+            const auto planar = av_sample_fmt_is_planar(format);
+            const auto planes = planar ? input->ch_layout.nb_channels : 1;
+            const auto offset = skipped * av_get_bytes_per_sample(format) * (planar ? 1 : input->ch_layout.nb_channels);
+            for (int plane = 0; plane < planes; ++plane) { input->extended_data[plane] += offset; if (plane < AV_NUM_DATA_POINTERS) input->data[plane] = input->extended_data[plane]; }
+            input->nb_samples -= static_cast<int>(skipped);
+        }
+        input->pts = position == AV_NOPTS_VALUE ? AV_NOPTS_VALUE : av_rescale_q(position - origin, AVRational{1, 10000000}, AVRational{1, frame->sample_rate}) + skipped;
+    }
+    const auto sent = av_buffersrc_add_frame_flags(tempoInput_, input, AV_BUFFERSRC_FLAG_KEEP_REF);
+    av_frame_free(&input);
+    if (sent < 0) return FFFResult::FfmpegFailure;
+    AVFrame* output = av_frame_alloc();
+    if (!output) return FFFResult::NativeFailure;
+    FFFResult result = FFFResult::Success;
+    while (av_buffersink_get_frame(tempoOutput_, output) >= 0) {
+        const auto outSamples = tempoSamples_.load(std::memory_order_relaxed);
+        const auto outputPosition = origin + av_rescale(outSamples, 10000000, output->sample_rate);
+        result = audioRenderer_->Enqueue(output, outputPosition, 0);
+        tempoSamples_.store(outSamples + output->nb_samples, std::memory_order_relaxed);
+        av_frame_unref(output);
+        if (result != FFFResult::Success) break;
+    }
+    av_frame_free(&output); return result;
+}
+FFFResult PlayerSession::SetAudioEffects(const bool enabled,const float* gains,const float wave) noexcept {
+    if((enabled && !gains) || !std::isfinite(wave) || wave<0 || wave>1)return FFFResult::InvalidArgument;
+    std::array<float,10> values{};
+    if(gains)for(int i=0;i<10;++i){if(!std::isfinite(gains[i]) || gains[i]<-12 || gains[i]>12)return FFFResult::InvalidArgument;values[i]=gains[i];}
+    Enqueue([this,enabled,values,wave]{
+        const bool reuse=tempoGraph_ && equalizerEnabled_==enabled && waveVolume_==wave;
+        equalizerEnabled_=enabled;waveVolume_=wave;
+        for(int i=0;i<10;++i)equalizerGains_[i]=values[i];
+        if(reuse) {
+            bool updated=true;
+            for(int i=0;enabled && i<10;++i){const auto name="eq"+std::to_string(i);if(!avfilter_graph_get_filter(tempoGraph_,name.c_str()))continue;const auto gain=std::to_string(values[i]);if(avfilter_graph_send_command(tempoGraph_,name.c_str(),"gain",gain.c_str(),nullptr,0,0)<0)updated=false;}
+            if(updated)return;
+        }
+        ResetTempo(audioRenderer_?audioRenderer_->Position100ns():snapshot_.position100ns);
+    });return FFFResult::Success;
+}
 FFFResult PlayerSession::SetVolume(const float volume, const bool muted) noexcept { if (!std::isfinite(volume) || volume < 0 || volume > 1) return FFFResult::InvalidArgument; Enqueue([this, volume, muted] { volume_ = volume; muted_ = muted; if (audioRenderer_) audioRenderer_->SetVolume(volume_, muted_); }); return FFFResult::Success; }
 
 FFFResult PlayerSession::SetAudioRenderPlug(const FFF3FPAudioRenderPlug* const plug) noexcept {
@@ -2677,7 +2831,24 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
         QueryPerformanceCounter(&now);
         const auto elapsed = sampledQpc > 0 && now.QuadPart > sampledQpc && qpcFrequency_ > 0
             ? (now.QuadPart - sampledQpc) * TicksPerSecond / qpcFrequency_ : 0;
-        output.position100ns = sampledPosition + std::min(elapsed,
+        // Segmented extrapolation matching the audio-clock mapping: below
+        // tempoOrigin_ (renderer-seeded pre-content silence) the media position
+        // advances 1:1 with the wall clock, and only from tempoOrigin_ on does it
+        // advance at the playback rate; the two arms meet at tempoOrigin_. The
+        // QPC-clock path (no audio stream, or a drained one) publishes already
+        // remapped positions, so it keeps the plain linear extrapolation.
+        const double rate = playbackRate_.load(std::memory_order_relaxed);
+        const auto origin = tempoOrigin_.load(std::memory_order_relaxed);
+        std::int64_t advanced;
+        if (audioRenderer_ && !audioClockFinished_ && sampledPosition < origin) {
+            const auto toOrigin = static_cast<double>(origin - sampledPosition);
+            const auto normal = std::min(static_cast<double>(elapsed), toOrigin);
+            const auto accelerated = std::max(0.0, elapsed - normal);
+            advanced = static_cast<std::int64_t>(normal) + static_cast<std::int64_t>(accelerated * rate);
+        } else {
+            advanced = static_cast<std::int64_t>(elapsed * rate);
+        }
+        output.position100ns = sampledPosition + std::min(advanced,
             std::max<std::int64_t>(0, limit - sampledPosition));
         if (output.duration100ns > 0) output.position100ns = std::min(output.position100ns, output.duration100ns);
     }
@@ -4193,6 +4364,106 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
             current, next, presentedFps, sourceFps);
 }
 
+void PlayerSession::EvaluateVideoSkipRung() noexcept {
+    if (format_ == nullptr || videoStream_ < 0 || videoDecoder_ == nullptr) return;
+    // Only a playing session has a decode demand. The idle path drops the rung back to
+    // full decoding: a rung left over from 16x playback would make frame stepping and
+    // paused previews keyframe-only.
+    if (state_.load() != FFF3FPState::Playing || staticImage_ || animatedImage_ || disc_ ||
+        seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_) {
+        // The ladder never descends: the rung survives pauses, seeks and rate changes,
+        // and only a new media re-arms it. A paused or single-step decode still has to
+        // be handed every frame the decoder produces, so the context is temporarily put
+        // back to DEFAULT for those decodes; appliedSkipRung_ != videoSkipRung_ makes
+        // the next playing tick re-apply the rung.
+        if (videoSkipRung_ != 0 && appliedSkipRung_ != 0) {
+            {
+                std::lock_guard lock(softwareVideoCodecMutex_);
+                videoDecoder_->skip_frame = AVDISCARD_DEFAULT;
+            }
+            appliedSkipRung_ = 0;
+        }
+        skipWindowStart100ns_ = 0;
+        skipDeficitWindows_ = 0;
+        return;
+    }
+    // A ladder reopen or a software fallback installs a new context; skip_frame is a
+    // context property, so the new one starts at DEFAULT and has to be written again.
+    if (appliedSkipDecoder_ != videoDecoder_ || appliedSkipRung_ != videoSkipRung_) {
+        ApplyVideoSkipRung();
+    }
+    const auto now = CurrentSteadyTicks();
+    if (skipWindowStart100ns_ == 0) {
+        skipWindowStart100ns_ = now;
+        skipWindowDecoded_ = snapshot_.decodedVideoFrames;
+        skipWindowPresented_ = snapshot_.presentedVideoFrames;
+        skipWindowIterations_ = 0;
+        skipWindowStarvedIterations_ = 0;
+        return;
+    }
+    if (now - skipWindowStart100ns_ < SkipWindow100ns) return;
+
+    const auto decodedDelta = snapshot_.decodedVideoFrames - skipWindowDecoded_;
+    const auto presentedDelta = snapshot_.presentedVideoFrames - skipWindowPresented_;
+    const auto windowIters = skipWindowIterations_;
+    const auto windowStarved = skipWindowStarvedIterations_;
+    skipWindowStart100ns_ = now;
+    skipWindowDecoded_ = snapshot_.decodedVideoFrames;
+    skipWindowPresented_ = snapshot_.presentedVideoFrames;
+    skipWindowIterations_ = 0;
+    skipWindowStarvedIterations_ = 0;
+    if (windowIters == 0 || decodedDelta == 0) {
+        skipDeficitWindows_ = 0;
+        return;
+    }
+    const auto starvedShare = static_cast<double>(windowStarved) / static_cast<double>(windowIters);
+    const auto wasteShare = 1.0 - static_cast<double>(presentedDelta) / static_cast<double>(decodedDelta);
+    const auto deficit = starvedShare >= SkipStarvedShare || wasteShare >= SkipWasteShare;
+    if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+        std::fprintf(stderr,
+            "[skip] window decoded=%llu presented=%llu starved=%.2f waste=%.2f rung=%u streak=%u\n",
+            static_cast<unsigned long long>(decodedDelta),
+            static_cast<unsigned long long>(presentedDelta), starvedShare, wasteShare,
+            videoSkipRung_, skipDeficitWindows_);
+    if (!deficit) {
+        skipDeficitWindows_ = 0;
+        return;
+    }
+    if (++skipDeficitWindows_ < SkipEscalateWindows) return;
+    skipDeficitWindows_ = 0;
+    // Rung 2 decodes keyframes only, which reads as a slideshow -- correct at 4x and
+    // above where nothing else is watchable, wrong at 1-2x where it would trade smooth
+    // playback for a decode saving the user never asked for. Rung 1 (NONREF) leaves
+    // every reference frame in the chain and is safe at any rate.
+    const auto maxRung = playbackRate_.load(std::memory_order_relaxed) >= SkipKeyframeRateFloor
+        ? SkipMaxRung : 1u;
+    if (videoSkipRung_ >= maxRung) return;
+    ++videoSkipRung_;
+    ApplyVideoSkipRung();
+}
+
+void PlayerSession::ApplyVideoSkipRung() noexcept {
+    if (videoDecoder_ == nullptr) return;
+    // 0/1/2 -> AVDISCARD_DEFAULT / NONREF / NONKEY. NONREF by definition leaves every
+    // reference frame in the chain, and NONKEY starts a fresh chain at each keyframe,
+    // so neither can corrupt the frames that are actually shown. A rung is always
+    // needed: at 2x half of a 48 fps decode is thrown away at presentation, and at 16x
+    // no decoder can decode every frame of 4K content fast enough.
+    const auto discard = videoSkipRung_ == 0 ? AVDISCARD_DEFAULT :
+        (videoSkipRung_ == 1 ? AVDISCARD_NONREF : AVDISCARD_NONKEY);
+    {
+        // The software-decode offload thread submits packets to this same context under
+        // this mutex; a skip_frame write outside it would race the next send.
+        std::lock_guard lock(softwareVideoCodecMutex_);
+        videoDecoder_->skip_frame = discard;
+    }
+    appliedSkipRung_ = videoSkipRung_;
+    appliedSkipDecoder_ = videoDecoder_;
+    if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+        std::fprintf(stderr, "[skip] video decoder discard=%d rung=%u\n",
+            static_cast<int>(discard), videoSkipRung_);
+}
+
 FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noexcept {
     StopSoftwareVideoDecode();
     if (format_ == nullptr || videoStream_ < 0 || snapshot_.decodeMode != FFF3FPDecodeMode::Gpu)
@@ -4253,6 +4524,10 @@ void PlayerSession::PumpPlayback() noexcept {
     // the gating (a pool or presentation fingerprint).
     if (VideoQueueSaturated()) ++pumpQueueBoundIterations_;
     if (videoFrameQueue_.size() < MinimumQueuedVideoFrames) ++pumpStarvedIterations_;
+    // The same per-tick evidence feeds the decode-skip ladder, in its own counters:
+    // EvaluateDecoderLoad consumes and resets its baselines each window.
+    ++skipWindowIterations_;
+    if (videoFrameQueue_.size() < MinimumQueuedVideoFrames) ++skipWindowStarvedIterations_;
     if (disc_) {
         PublishDisc();
         if (disc_->RestartRequired() && !disc_->Held()) {
@@ -4271,6 +4546,7 @@ void PlayerSession::PumpPlayback() noexcept {
     // counters are already fresh, and it runs on the worker thread that owns the
     // decoder, so a rung change cannot race a decode in progress.
     EvaluateDecoderLoad();
+    EvaluateVideoSkipRung();
     if (cadenceModeRefreshPending_) {
         cadenceModeRefreshPending_ = false;
         RebuildMediaInfo();
@@ -5952,7 +6228,7 @@ void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, cons
     }
     ++snapshot_.decodedAudioFrames;
     const auto timestampResolution = av_rescale_q(1, stream->time_base, AVRational{1, TicksPerSecond});
-    const auto result = audioRenderer_->Enqueue(frame, position, timestampResolution);
+    const auto result = TempoAudio(frame, position, timestampResolution);
     if (result == FFFResult::Success && owner == format_) internalAudioDecodeErrorCount_ = 0;
     if (result == FFFResult::BufferTooSmall) ++snapshot_.audioRejectedFrames;
     else if (result != FFFResult::Success) {
@@ -6153,6 +6429,10 @@ void PlayerSession::PumpExternalAudio() noexcept {
         }
         externalAudioDrained_ = true;
         DecodePacket(externalAudioDecoder_, nullptr, false, externalFormat_);
+        // EOF the tempo graph as well, or its internal buffer (atempo/equalizer
+        // latency) holds back the tail of the track and Finish() below ends
+        // rendering before that tail ever plays out.
+        if (audioRenderer_ && tempoGraph_) TempoAudio(nullptr, 0);
         if (audioRenderer_ && audioRenderer_->Finish() != FFFResult::Success)
             Fail(FFFResult::FfmpegFailure, "Could not drain external audio output.", "external-audio");
         return;
@@ -6504,6 +6784,12 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
             "seek");
         return FFFResult::FfmpegFailure;
     }
+    ResetTempo(position);
+    // A seek re-arms the decode-skip window at the flush point; the rung itself
+    // survives (skip_frame lives on the context, and a seek lands on a keyframe, which
+    // every rung decodes).
+    skipWindowStart100ns_ = 0;
+    skipDeficitWindows_ = 0;
     ClearVideoQueue();
     ResetBitRateTracking();
     if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);
@@ -6693,6 +6979,12 @@ void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t req
 }
 
 void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVideoOutput) noexcept {
+    ResetTempo(0);
+    videoSkipRung_ = 0;
+    appliedSkipRung_ = 0;
+    appliedSkipDecoder_ = nullptr;
+    skipWindowStart100ns_ = 0;
+    skipDeficitWindows_ = 0;
     StopSoftwareVideoDecode();
     placement_.Release();
     if (audioRenderer_) { audioRenderer_->Stop(); audioRenderer_.reset(); }
@@ -7189,13 +7481,23 @@ std::int64_t PlayerSession::ClockPosition() const noexcept {
         return position;
     }
     if (!audioClockFinished_ && audioRenderer_ && (audioStream_ >= 0 || externalAudioStream_ >= 0)) {
-        const auto audioPosition = audioRenderer_->Position100ns();
-        PublishPlaybackClock(audioPosition, audioRenderer_->TimelineLimit100ns());
+        // See UpdateDrainedAudioClock: pass the renderer timeline through below
+        // tempoOrigin_ (pre-content silence seeded by the renderer) and apply the
+        // ×rate remap from tempoOrigin_ on; the two arms meet at tempoOrigin_.
+        const auto rendererPos = audioRenderer_->Position100ns();
+        const auto origin = tempoOrigin_.load(std::memory_order_relaxed);
+        const auto audioPosition = rendererPos < origin
+            ? rendererPos
+            : origin + static_cast<std::int64_t>((rendererPos - origin) * playbackRate_.load());
+        const auto rendererLimit = audioRenderer_->TimelineLimit100ns();
+        PublishPlaybackClock(audioPosition, rendererLimit < origin
+            ? rendererLimit
+            : origin + static_cast<std::int64_t>((rendererLimit - origin) * playbackRate_.load()));
         return audioPosition;
     }
     LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
     const auto origin = clockOriginQpc_.load(); if (origin == 0 || qpcFrequency_ <= 0) return clockOriginPosition100ns_.load();
-    const auto position = clockOriginPosition100ns_.load() + (now.QuadPart - origin) * TicksPerSecond / qpcFrequency_;
+    const auto position = clockOriginPosition100ns_.load() + static_cast<std::int64_t>((now.QuadPart - origin) * double(TicksPerSecond) * playbackRate_.load() / qpcFrequency_);
     PublishPlaybackClock(position, snapshot_.duration100ns > 0
         ? snapshot_.duration100ns : (std::numeric_limits<std::int64_t>::max)());
     return position;
