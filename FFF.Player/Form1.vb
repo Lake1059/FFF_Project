@@ -59,6 +59,10 @@ Public Class Form1
     Private 播放列表窗口 As Form播放列表
     Private 当前弹幕路径 As String = String.Empty
     Private 待打开外部文件 As String = String.Empty
+
+    ' 【2026-11-01 图片优先启动】chrome 默认延后时为 True。只在 Form1_Load 与
+    ' Form1_Shown 两个 UI 线程点读/写，无跨线程问题。
+    Private 延后窗口Attach As Boolean
     Private 待选中播放列表路径 As String = String.Empty
     Private 正在关闭 As Boolean
     Private 核心文件检查通过 As Boolean
@@ -94,7 +98,20 @@ Public Class Form1
         LakeUI.FloatingToolTipForm.BackdropTintColor = Color.FromArgb(120, 0, 0, 0)
         LakeUI.FloatingToolTipForm.BackdropBlurRadius = 30
         LakeUI.FloatingToolTipForm.BackdropBlurPasses = 2
-        ThisIsYourWindow1.Attach(Me)
+        ' 【2026-11-01 图片优先启动】chrome（Attach）默认延后到图片上屏之后（Form1_Shown
+        ' 的消息队列里排在开图之后）。依据：用户定位"窗口无所谓，先看见图片"；
+        ' 图片渲染走画面控件的子窗口句柄，不依赖 chrome。同 exe A/B（n=16）：
+        ' T1 1151→792、T2 1251→919（−331.6 ms，p=0，0 废轮）——Attach 与开图在
+        ' 消息队列里重叠，故收益略小于其 440 ms 全额。
+        ' 代价（实测，attachverify 两臂各 8 帧）：窗口先以标准边框出现，chrome 接管
+        ' 时几何微调一次（客户区 1303×874 → chrome 形态，约 1.4%），顶/底部条带
+        ' 统计与正常模式一致（差 0.1）⇒ chrome 完整接管，之后帧间 diff=0（无闪烁）。
+        ' FFF_ATTACH_EARLY=1 恢复旧顺序（Load 内同步 Attach）。
+        If Environment.GetEnvironmentVariable("FFF_ATTACH_EARLY") = "1" Then
+            ThisIsYourWindow1.Attach(Me)
+        Else
+            延后窗口Attach = True
+        End If
         KeyPreview = True
         MinimumSize = New Size(875, 500)
         更新弹幕按钮可见性()
@@ -450,8 +467,13 @@ Public Class Form1
         '   让开图/解码先跑、图层构造随后与它重叠。
         If Not String.IsNullOrEmpty(请求文件) Then
             BeginInvoke(Sub() 打开外部文件(请求文件))
+            ' 【2026-11-01 图片优先】延后的 chrome 排在**开图之后**：消息队列按序执行，
+            ' Attach 要等图片先上屏（这正是延后的目的）。无启动文件时没有"先看图"
+            ' 诉求，Shown 里同步 Attach，窗口立即带完整 chrome。
+            If 延后窗口Attach Then BeginInvoke(Sub() ThisIsYourWindow1.Attach(Me))
             BeginInvoke(Sub() 创建图层呈现器())
         Else
+            If 延后窗口Attach Then ThisIsYourWindow1.Attach(Me)
             创建图层呈现器()
         End If
 
