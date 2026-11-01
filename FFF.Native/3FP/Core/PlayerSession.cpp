@@ -2257,30 +2257,43 @@ void PlayerSession::ResetTempo(const std::int64_t position) noexcept {
 }
 FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position, const std::int64_t timestampResolution) noexcept {
     const double rate = playbackRate_.load();
-    if (rate == 1.0 && !equalizerEnabled_ && waveVolume_ == 1) return audioRenderer_->Enqueue(frame, position, timestampResolution);
+    const bool passthrough = rate == 1.0 && !equalizerEnabled_ && waveVolume_ == 1;
+    // A flush request (frame == nullptr) in the pass-through state is a no-op: there
+    // is nothing buffered anywhere, and the renderer's Enqueue treats a null frame
+    // as an invalid argument rather than a flush, so never forward it.
+    if (passthrough && !frame) return FFFResult::Success;
+    if (passthrough) return audioRenderer_->Enqueue(frame, position, timestampResolution);
     if (!tempoGraph_) {
         if (!frame) return FFFResult::Success;
         if(position!=AV_NOPTS_VALUE)tempoOrigin_=std::max(tempoOrigin_,position);
-        tempoGraph_ = avfilter_graph_alloc();
-        if (!tempoGraph_) return FFFResult::NativeFailure;
+        // Build into locals and publish only on success. A half-configured graph left
+        // in tempoGraph_ would make every later call skip the rebuild (the !tempoGraph_
+        // gate above) and fail on each frame, which then disables the whole audio track
+        // via DisableFailedInternalAudio until the next seek or stream switch.
+        AVFilterGraph* graph = avfilter_graph_alloc();
+        if (!graph) return FFFResult::NativeFailure;
+        const auto abandon = [&graph]() noexcept { avfilter_graph_free(&graph); return FFFResult::FfmpegFailure; };
+        AVFilterContext* graphInput = nullptr;
+        AVFilterContext* graphSink = nullptr;
         char layout[128]{};AVChannelLayout channels{};
         if(frame->ch_layout.order==AV_CHANNEL_ORDER_UNSPEC)av_channel_layout_default(&channels,frame->ch_layout.nb_channels);
-        else av_channel_layout_copy(&channels,&frame->ch_layout);
-        av_channel_layout_describe(&channels,layout,sizeof(layout));av_channel_layout_uninit(&channels);
+        else if(av_channel_layout_copy(&channels,&frame->ch_layout) < 0){av_channel_layout_uninit(&channels);return abandon();}
+        if(av_channel_layout_describe(&channels,layout,sizeof(layout)) < 0){av_channel_layout_uninit(&channels);return abandon();}
+        av_channel_layout_uninit(&channels);
         std::ostringstream args;
         args << "time_base=1/" << frame->sample_rate << ":sample_rate=" << frame->sample_rate
              << ":sample_fmt=" << av_get_sample_fmt_name(static_cast<AVSampleFormat>(frame->format)) << ":channel_layout=" << layout;
-        if (avfilter_graph_create_filter(&tempoInput_, avfilter_get_by_name("abuffer"), "input", args.str().c_str(), nullptr, tempoGraph_) < 0 ||
-            avfilter_graph_create_filter(&tempoOutput_, avfilter_get_by_name("abuffersink"), "output", nullptr, nullptr, tempoGraph_) < 0) return FFFResult::FfmpegFailure;
-        AVFilterContext* previous = tempoInput_;
+        if (avfilter_graph_create_filter(&graphInput, avfilter_get_by_name("abuffer"), "input", args.str().c_str(), nullptr, graph) < 0 ||
+            avfilter_graph_create_filter(&graphSink, avfilter_get_by_name("abuffersink"), "output", nullptr, nullptr, graph) < 0) return abandon();
+        AVFilterContext* previous = graphInput;
         double remainder = rate; int index = 0;
         do {
             const auto factor = std::clamp(remainder, 0.5, 2.0);
             AVFilterContext* filter = nullptr;
             const auto name = "tempo" + std::to_string(index++);
             const auto factorText = std::to_string(factor);
-            if (avfilter_graph_create_filter(&filter, avfilter_get_by_name("atempo"), name.c_str(), factorText.c_str(), nullptr, tempoGraph_) < 0 ||
-                avfilter_link(previous, 0, filter, 0) < 0) return FFFResult::FfmpegFailure;
+            if (avfilter_graph_create_filter(&filter, avfilter_get_by_name("atempo"), name.c_str(), factorText.c_str(), nullptr, graph) < 0 ||
+                avfilter_link(previous, 0, filter, 0) < 0) return abandon();
             previous = filter; remainder /= factor;
         } while (std::abs(remainder - 1.0) > 0.00001);
         if (equalizerEnabled_) {
@@ -2290,16 +2303,19 @@ FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position,
                 AVFilterContext* filter=nullptr;
                 const auto name="eq"+std::to_string(band);
                 const auto options="f="+std::to_string(frequencies[band])+":t=o:w=1:g="+std::to_string(equalizerGains_[band]);
-                if(avfilter_graph_create_filter(&filter,avfilter_get_by_name("equalizer"),name.c_str(),options.c_str(),nullptr,tempoGraph_)<0 || avfilter_link(previous,0,filter,0)<0)return FFFResult::FfmpegFailure;
+                if(avfilter_graph_create_filter(&filter,avfilter_get_by_name("equalizer"),name.c_str(),options.c_str(),nullptr,graph)<0 || avfilter_link(previous,0,filter,0)<0)return abandon();
                 previous=filter;
             }
         }
         if(waveVolume_!=1) {
             AVFilterContext* filter=nullptr;const auto options=std::to_string(waveVolume_);
-            if(avfilter_graph_create_filter(&filter,avfilter_get_by_name("volume"),"wave",options.c_str(),nullptr,tempoGraph_)<0 || avfilter_link(previous,0,filter,0)<0)return FFFResult::FfmpegFailure;
+            if(avfilter_graph_create_filter(&filter,avfilter_get_by_name("volume"),"wave",options.c_str(),nullptr,graph)<0 || avfilter_link(previous,0,filter,0)<0)return abandon();
             previous=filter;
         }
-        if (avfilter_link(previous, 0, tempoOutput_, 0) < 0 || avfilter_graph_config(tempoGraph_, nullptr) < 0) return FFFResult::FfmpegFailure;
+        if (avfilter_link(previous, 0, graphSink, 0) < 0 || avfilter_graph_config(graph, nullptr) < 0) return abandon();
+        tempoGraph_ = graph;
+        tempoInput_ = graphInput;
+        tempoOutput_ = graphSink;
     }
     AVFrame* input = frame ? av_frame_clone(frame) : nullptr;
     if (frame && !input) return FFFResult::NativeFailure;
@@ -6260,6 +6276,10 @@ void PlayerSession::PumpExternalAudio() noexcept {
         }
         externalAudioDrained_ = true;
         DecodePacket(externalAudioDecoder_, nullptr, false, externalFormat_);
+        // EOF the tempo graph as well, or its internal buffer (atempo/equalizer
+        // latency) holds back the tail of the track and Finish() below ends
+        // rendering before that tail ever plays out.
+        if (audioRenderer_ && tempoGraph_) TempoAudio(nullptr, 0);
         if (audioRenderer_ && audioRenderer_->Finish() != FFFResult::Success)
             Fail(FFFResult::FfmpegFailure, "Could not drain external audio output.", "external-audio");
         return;
