@@ -48,7 +48,9 @@ Public Class Form设置
 
     Friend Sub 显示字幕设置()
         显示窗口()
-        BeginInvoke(Sub() ModernTabListControl1.SelectedIndex = 6)
+        ' SelectedIndex 按 Items 原始列表计且分隔符占一位（3=分隔符）：6 是 HDR，7 才是字幕。
+        ' 改用页对象定位，避免日后增删页或调整顺序时再次错位。
+        BeginInvoke(Sub() ModernTabListControl1.SelectedTabPage = ModernTabListControl1.Items(7))
     End Sub
     Friend Sub 显示窗口()
         If Visible Then
