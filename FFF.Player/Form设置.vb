@@ -46,6 +46,10 @@ Public Class Form设置
         应用字体(设置.实例对象.字体)
     End Sub
 
+    Friend Sub 显示字幕设置()
+        显示窗口()
+        BeginInvoke(Sub() ModernTabListControl1.SelectedIndex = 6)
+    End Sub
     Friend Sub 显示窗口()
         If Visible Then
             初始化所有页面()

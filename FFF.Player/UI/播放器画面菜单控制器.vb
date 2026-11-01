@@ -142,6 +142,21 @@ Friend NotInheritable Class 播放器画面菜单控制器
         End Try
     End Sub
 
+    Friend Sub 保存到指定路径(原始 As Boolean)
+        Using 对话框 As New FolderBrowserDialog With {.Description = "选择截图保存文件夹", .UseDescriptionForTitle = True, .SelectedPath = Path.GetDirectoryName(生成截图路径())}
+            If 对话框.ShowDialog(宿主窗口) <> DialogResult.OK Then Return
+            Try
+                Dim 保存路径 = Path.Combine(对话框.SelectedPath, Path.GetFileName(生成截图路径()))
+                Using 图像 = If(原始, 截取原始画面(), 截取实际渲染())
+                    图像.Save(保存路径, ImageFormat.Png)
+                End Using
+                操作提示($"画面已保存到 {保存路径}")
+            Catch ex As Exception
+                显示错误("无法保存截图", ex.Message)
+            End Try
+        End Using
+    End Sub
+
     Private Sub 执行截图菜单项(菜单文字 As String)
         If 已释放 OrElse 宿主窗口.IsDisposed Then Return
         Try

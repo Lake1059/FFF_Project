@@ -111,6 +111,9 @@ public:
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;
     FFFResult SetAudioExclusiveMode(bool exclusive) noexcept;
+    FFFResult SetPlaybackRate(double rate) noexcept;
+    FFFResult SetAudioEffects(bool enabled, const float* gains, float wave) noexcept;
+    FFFResult SetScalingMode(std::uint32_t mode) noexcept { const auto r = videoRenderer_.SetScalingMode(mode); if (r == FFFResult::Success) (void)Redraw(); return r; }
     FFFResult SetVolume(float volume, bool muted) noexcept;
     // External bed render plug (3FP/Api/FFF.Player.AudioRenderPlug.h). Install,
     // replace or clear; the session owns the context from the call that installs it
@@ -195,6 +198,8 @@ public:
     std::string LastError() const;
 
 private:
+    void ResetTempo(std::int64_t position) noexcept;
+    FFFResult TempoAudio(AVFrame* frame, std::int64_t position, std::int64_t timestampResolution = 0) noexcept;
     using Command = std::function<void()>;
     enum class StepOperation {
         Frame,
@@ -582,6 +587,14 @@ private:
     std::string externalAudioPath_;
     PlayerAudioRuntimeState audioRuntimeState_;
     std::unique_ptr<PlayerWasapiRenderer> audioRenderer_;
+    std::atomic<double> playbackRate_{1.0};
+    AVFilterGraph* tempoGraph_ = nullptr;
+    AVFilterContext* tempoInput_ = nullptr;
+    AVFilterContext* tempoOutput_ = nullptr;
+    std::int64_t tempoSamples_ = 0, tempoOrigin_ = 0;
+    bool equalizerEnabled_ = false;
+    float equalizerGains_[10]{};
+    float waveVolume_ = 1;
     // The bed render plug the host installed. Copied, because the caller may free
     // its own struct the moment the call returns; `context` is the kernel's from
     // then on and only this class releases it (see SetAudioRenderPlug / ~PlayerSession).
