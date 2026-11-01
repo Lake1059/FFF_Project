@@ -135,6 +135,8 @@ Partial Class Form设置_设备与性能
         MCB_视频缩放质量.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
         MCB_视频缩放质量.Items.Add("均衡 Hermite")
         MCB_视频缩放质量.Items.Add("高质量 Lanczos3")
+        MCB_视频缩放质量.Items.Add("高质量 Lanczos4")
+        MCB_视频缩放质量.Items.Add("Jinc anti alias")
         MCB_视频缩放质量.Location = New Point(0, 10)
         MCB_视频缩放质量.Margin = New Padding(2, 2, 2, 2)
         MCB_视频缩放质量.MaxDropDownItems = 16

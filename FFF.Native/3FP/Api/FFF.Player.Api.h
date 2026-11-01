@@ -1796,3 +1796,10 @@ static_assert(sizeof(FFF3FPAuxiliaryComposition) == 32,
 
 FFF3FP_API FFFResult FFF3FP_SetAuxiliaryComposition(FFF3FPHandle player,
     const FFF3FPAuxiliaryComposition* composition) noexcept;
+
+// Playback rate range: 0.1 through 16. Audio tempo processing preserves pitch.
+FFF3FP_API FFFResult FFF3FP_SetPlaybackRate(FFF3FPHandle player, double rate) noexcept;
+// gains points to ten band gains in dB (-12 through 12); wave is in [0, 1].
+FFF3FP_API FFFResult FFF3FP_SetAudioEffects(FFF3FPHandle player, bool enabled, const float* gains, float wave) noexcept;
+// Algorithm IDs: 0 = Lanczos3, 1 = Jinc anti alias, 2 = Lanczos4, 3 = Hermite.
+FFF3FP_API FFFResult FFF3FP_SetScalingMode(FFF3FPHandle player, std::uint32_t mode) noexcept;

@@ -1118,7 +1118,7 @@ void PlayerSession::UpdateDrainedAudioClock() noexcept {
     if (audioClockFinished_ || playbackPreroll_ || !audioRenderer_) return;
     const auto drained = externalFormat_ != nullptr ? externalAudioDrained_ : audioDecoderDrained_;
     if (!drained || audioRenderer_->Buffered100ns() > 0) return;
-    const auto position = audioRenderer_->Position100ns();
+    const auto position = tempoOrigin_ + static_cast<std::int64_t>((audioRenderer_->Position100ns() - tempoOrigin_) * playbackRate_.load());
     audioClockFinished_ = true;
     ResetClock(position);
 }
@@ -1127,6 +1127,7 @@ void PlayerSession::DrainInternalAudio() noexcept {
     if (!demuxEnded_ || !pendingAudioPackets_.empty() || audioDecoderDrained_ || externalFormat_ != nullptr) return;
     audioDecoderDrained_ = true;
     if (audioDecoder_) DecodePacket(audioDecoder_, nullptr, false, format_);
+    if (audioRenderer_ && tempoGraph_) TempoAudio(nullptr, 0);
     if (audioRenderer_ && audioRenderer_->Finish() != FFFResult::Success)
         Fail(FFFResult::FfmpegFailure, "Could not drain audio output.", "audio-drain");
 }
@@ -2241,6 +2242,112 @@ FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
     });
     return FFFResult::Success;
 }
+FFFResult PlayerSession::SetPlaybackRate(const double rate) noexcept {
+    if (!std::isfinite(rate) || rate < 0.1 || rate > 16.0) return FFFResult::InvalidArgument;
+    Enqueue([this, rate] {
+        const auto position = state_.load() == FFF3FPState::Playing ? ClockPosition() : snapshot_.position100ns;
+        playbackRate_ = rate;
+        DoSeek(position);
+    });
+    return FFFResult::Success;
+}
+void PlayerSession::ResetTempo(const std::int64_t position) noexcept {
+    if (tempoGraph_) avfilter_graph_free(&tempoGraph_);
+    tempoInput_ = nullptr; tempoOutput_ = nullptr; tempoSamples_ = 0; tempoOrigin_ = position;
+}
+FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position, const std::int64_t timestampResolution) noexcept {
+    const double rate = playbackRate_.load();
+    if (rate == 1.0 && !equalizerEnabled_ && waveVolume_ == 1) return audioRenderer_->Enqueue(frame, position, timestampResolution);
+    if (!tempoGraph_) {
+        if (!frame) return FFFResult::Success;
+        if(position!=AV_NOPTS_VALUE)tempoOrigin_=std::max(tempoOrigin_,position);
+        tempoGraph_ = avfilter_graph_alloc();
+        if (!tempoGraph_) return FFFResult::NativeFailure;
+        char layout[128]{};AVChannelLayout channels{};
+        if(frame->ch_layout.order==AV_CHANNEL_ORDER_UNSPEC)av_channel_layout_default(&channels,frame->ch_layout.nb_channels);
+        else av_channel_layout_copy(&channels,&frame->ch_layout);
+        av_channel_layout_describe(&channels,layout,sizeof(layout));av_channel_layout_uninit(&channels);
+        std::ostringstream args;
+        args << "time_base=1/" << frame->sample_rate << ":sample_rate=" << frame->sample_rate
+             << ":sample_fmt=" << av_get_sample_fmt_name(static_cast<AVSampleFormat>(frame->format)) << ":channel_layout=" << layout;
+        if (avfilter_graph_create_filter(&tempoInput_, avfilter_get_by_name("abuffer"), "input", args.str().c_str(), nullptr, tempoGraph_) < 0 ||
+            avfilter_graph_create_filter(&tempoOutput_, avfilter_get_by_name("abuffersink"), "output", nullptr, nullptr, tempoGraph_) < 0) return FFFResult::FfmpegFailure;
+        AVFilterContext* previous = tempoInput_;
+        double remainder = rate; int index = 0;
+        do {
+            const auto factor = std::clamp(remainder, 0.5, 2.0);
+            AVFilterContext* filter = nullptr;
+            const auto name = "tempo" + std::to_string(index++);
+            const auto factorText = std::to_string(factor);
+            if (avfilter_graph_create_filter(&filter, avfilter_get_by_name("atempo"), name.c_str(), factorText.c_str(), nullptr, tempoGraph_) < 0 ||
+                avfilter_link(previous, 0, filter, 0) < 0) return FFFResult::FfmpegFailure;
+            previous = filter; remainder /= factor;
+        } while (std::abs(remainder - 1.0) > 0.00001);
+        if (equalizerEnabled_) {
+            constexpr int frequencies[]{60,170,310,600,1000,3000,6000,12000,14000,16000};
+            for (int band=0;band<10;++band) {
+                if (frequencies[band]>=frame->sample_rate/2) continue;
+                AVFilterContext* filter=nullptr;
+                const auto name="eq"+std::to_string(band);
+                const auto options="f="+std::to_string(frequencies[band])+":t=o:w=1:g="+std::to_string(equalizerGains_[band]);
+                if(avfilter_graph_create_filter(&filter,avfilter_get_by_name("equalizer"),name.c_str(),options.c_str(),nullptr,tempoGraph_)<0 || avfilter_link(previous,0,filter,0)<0)return FFFResult::FfmpegFailure;
+                previous=filter;
+            }
+        }
+        if(waveVolume_!=1) {
+            AVFilterContext* filter=nullptr;const auto options=std::to_string(waveVolume_);
+            if(avfilter_graph_create_filter(&filter,avfilter_get_by_name("volume"),"wave",options.c_str(),nullptr,tempoGraph_)<0 || avfilter_link(previous,0,filter,0)<0)return FFFResult::FfmpegFailure;
+            previous=filter;
+        }
+        if (avfilter_link(previous, 0, tempoOutput_, 0) < 0 || avfilter_graph_config(tempoGraph_, nullptr) < 0) return FFFResult::FfmpegFailure;
+    }
+    AVFrame* input = frame ? av_frame_clone(frame) : nullptr;
+    if (frame && !input) return FFFResult::NativeFailure;
+    if (input) {
+        if(input->ch_layout.order==AV_CHANNEL_ORDER_UNSPEC){const int count=input->ch_layout.nb_channels;av_channel_layout_uninit(&input->ch_layout);av_channel_layout_default(&input->ch_layout,count);}
+        const auto skipped = position != AV_NOPTS_VALUE && position < tempoOrigin_
+            ? std::min<std::int64_t>(input->nb_samples, av_rescale_rnd(tempoOrigin_ - position, input->sample_rate, 10000000, AV_ROUND_UP)) : 0;
+        if (skipped >= input->nb_samples) { av_frame_free(&input); return FFFResult::Success; }
+        if (skipped) {
+            const auto format = static_cast<AVSampleFormat>(input->format);
+            const auto planar = av_sample_fmt_is_planar(format);
+            const auto planes = planar ? input->ch_layout.nb_channels : 1;
+            const auto offset = skipped * av_get_bytes_per_sample(format) * (planar ? 1 : input->ch_layout.nb_channels);
+            for (int plane = 0; plane < planes; ++plane) { input->extended_data[plane] += offset; if (plane < AV_NUM_DATA_POINTERS) input->data[plane] = input->extended_data[plane]; }
+            input->nb_samples -= static_cast<int>(skipped);
+        }
+        input->pts = position == AV_NOPTS_VALUE ? AV_NOPTS_VALUE : av_rescale_q(position - tempoOrigin_, AVRational{1, 10000000}, AVRational{1, frame->sample_rate}) + skipped;
+    }
+    const auto sent = av_buffersrc_add_frame_flags(tempoInput_, input, AV_BUFFERSRC_FLAG_KEEP_REF);
+    av_frame_free(&input);
+    if (sent < 0) return FFFResult::FfmpegFailure;
+    AVFrame* output = av_frame_alloc();
+    if (!output) return FFFResult::NativeFailure;
+    FFFResult result = FFFResult::Success;
+    while (av_buffersink_get_frame(tempoOutput_, output) >= 0) {
+        const auto outputPosition = tempoOrigin_ + av_rescale(tempoSamples_, 10000000, output->sample_rate);
+        result = audioRenderer_->Enqueue(output, outputPosition, 0);
+        tempoSamples_ += output->nb_samples;
+        av_frame_unref(output);
+        if (result != FFFResult::Success) break;
+    }
+    av_frame_free(&output); return result;
+}
+FFFResult PlayerSession::SetAudioEffects(const bool enabled,const float* gains,const float wave) noexcept {
+    if(!gains || !std::isfinite(wave) || wave<0 || wave>1)return FFFResult::InvalidArgument;
+    std::array<float,10> values{};for(int i=0;i<10;++i){if(!std::isfinite(gains[i]) || gains[i]<-12 || gains[i]>12)return FFFResult::InvalidArgument;values[i]=gains[i];}
+    Enqueue([this,enabled,values,wave]{
+        const bool reuse=tempoGraph_ && equalizerEnabled_==enabled && waveVolume_==wave;
+        equalizerEnabled_=enabled;waveVolume_=wave;
+        for(int i=0;i<10;++i)equalizerGains_[i]=values[i];
+        if(reuse) {
+            bool updated=true;
+            for(int i=0;enabled && i<10;++i){const auto name="eq"+std::to_string(i);if(!avfilter_graph_get_filter(tempoGraph_,name.c_str()))continue;const auto gain=std::to_string(values[i]);if(avfilter_graph_send_command(tempoGraph_,name.c_str(),"gain",gain.c_str(),nullptr,0,0)<0)updated=false;}
+            if(updated)return;
+        }
+        ResetTempo(audioRenderer_?audioRenderer_->Position100ns():snapshot_.position100ns);
+    });return FFFResult::Success;
+}
 FFFResult PlayerSession::SetVolume(const float volume, const bool muted) noexcept { if (!std::isfinite(volume) || volume < 0 || volume > 1) return FFFResult::InvalidArgument; Enqueue([this, volume, muted] { volume_ = volume; muted_ = muted; if (audioRenderer_) audioRenderer_->SetVolume(volume_, muted_); }); return FFFResult::Success; }
 
 FFFResult PlayerSession::SetAudioRenderPlug(const FFF3FPAudioRenderPlug* const plug) noexcept {
@@ -2677,7 +2784,7 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
         QueryPerformanceCounter(&now);
         const auto elapsed = sampledQpc > 0 && now.QuadPart > sampledQpc && qpcFrequency_ > 0
             ? (now.QuadPart - sampledQpc) * TicksPerSecond / qpcFrequency_ : 0;
-        output.position100ns = sampledPosition + std::min(elapsed,
+        output.position100ns = sampledPosition + std::min(static_cast<std::int64_t>(elapsed * playbackRate_.load()),
             std::max<std::int64_t>(0, limit - sampledPosition));
         if (output.duration100ns > 0) output.position100ns = std::min(output.position100ns, output.duration100ns);
     }
@@ -5952,7 +6059,7 @@ void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, cons
     }
     ++snapshot_.decodedAudioFrames;
     const auto timestampResolution = av_rescale_q(1, stream->time_base, AVRational{1, TicksPerSecond});
-    const auto result = audioRenderer_->Enqueue(frame, position, timestampResolution);
+    const auto result = TempoAudio(frame, position, timestampResolution);
     if (result == FFFResult::Success && owner == format_) internalAudioDecodeErrorCount_ = 0;
     if (result == FFFResult::BufferTooSmall) ++snapshot_.audioRejectedFrames;
     else if (result != FFFResult::Success) {
@@ -6504,6 +6611,7 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
             "seek");
         return FFFResult::FfmpegFailure;
     }
+    ResetTempo(position);
     ClearVideoQueue();
     ResetBitRateTracking();
     if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);
@@ -6693,6 +6801,7 @@ void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t req
 }
 
 void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVideoOutput) noexcept {
+    ResetTempo(0);
     StopSoftwareVideoDecode();
     placement_.Release();
     if (audioRenderer_) { audioRenderer_->Stop(); audioRenderer_.reset(); }
@@ -7189,13 +7298,13 @@ std::int64_t PlayerSession::ClockPosition() const noexcept {
         return position;
     }
     if (!audioClockFinished_ && audioRenderer_ && (audioStream_ >= 0 || externalAudioStream_ >= 0)) {
-        const auto audioPosition = audioRenderer_->Position100ns();
-        PublishPlaybackClock(audioPosition, audioRenderer_->TimelineLimit100ns());
+        const auto audioPosition = tempoOrigin_ + static_cast<std::int64_t>((audioRenderer_->Position100ns() - tempoOrigin_) * playbackRate_.load());
+        PublishPlaybackClock(audioPosition, tempoOrigin_ + static_cast<std::int64_t>((audioRenderer_->TimelineLimit100ns() - tempoOrigin_) * playbackRate_.load()));
         return audioPosition;
     }
     LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
     const auto origin = clockOriginQpc_.load(); if (origin == 0 || qpcFrequency_ <= 0) return clockOriginPosition100ns_.load();
-    const auto position = clockOriginPosition100ns_.load() + (now.QuadPart - origin) * TicksPerSecond / qpcFrequency_;
+    const auto position = clockOriginPosition100ns_.load() + static_cast<std::int64_t>((now.QuadPart - origin) * double(TicksPerSecond) * playbackRate_.load() / qpcFrequency_);
     PublishPlaybackClock(position, snapshot_.duration100ns > 0
         ? snapshot_.duration100ns : (std::numeric_limits<std::int64_t>::max)());
     return position;

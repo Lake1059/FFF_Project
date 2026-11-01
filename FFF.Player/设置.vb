@@ -5,6 +5,9 @@ Imports System.Text.Json
 Public Class 设置
     Public Shared Property 实例对象 As New 设置()
 
+    Public Property 播放倍速 As Double = 1
+    Public Property 滚轮放大视频 As Boolean
+    Public Property 显示字幕 As Boolean = True
     Public Property 字体 As String = SystemFonts.DefaultFont.FontFamily.Name
     Public Property 初始画面尺寸选项 As Integer = 2
     Public Property 自定义初始画面宽度 As Integer = 1024
@@ -15,6 +18,7 @@ Public Class 设置
     ' 注意：本默认值只在设置文件不存在/解析失败时生效；老设置文件里已持久化的值原样尊重
     ' （文件只存 1/2，分不出"从没设置过"与"显式选过 CPU"，故不做迁移）。
     Public Property 解码方式 As 解码模式 = 解码模式.GPU
+    ' 0=Hermite、1=Lanczos3、2=Lanczos4、3=Jinc；保留旧配置 0/1 的含义。
     Public Property 视频缩放质量选项 As Integer = CInt(视频缩放质量.高画质)
     Public Property GPU解码设备标识 As String = String.Empty
     ' 0 均衡自适应，1 更多缓冲，2 小缓冲压力测试。旧配置缺项时保持原有策略。
@@ -180,7 +184,7 @@ Public Class 设置
         If 解码方式 <> CInt(解码模式.CPU) AndAlso 解码方式 <> CInt(解码模式.GPU) Then
             解码方式 = CInt(解码模式.GPU)
         End If
-        视频缩放质量选项 = Math.Clamp(视频缩放质量选项, 0, 1)
+        视频缩放质量选项 = Math.Clamp(视频缩放质量选项, 0, 3)
         GPU解码设备标识 = If(GPU解码设备标识, String.Empty).Trim()
         If 视频缓冲区策略 < 0 OrElse 视频缓冲区策略 > 2 Then 视频缓冲区策略 = 0
         If 音频缓冲区策略 < 0 OrElse 音频缓冲区策略 > 2 Then 音频缓冲区策略 = 0

@@ -194,6 +194,7 @@ public:
     FFFResult SetPreferredAdapterIndex(std::int32_t index) noexcept;
     void SetDiscAspect(double aspect) noexcept { discAspect_.store(static_cast<float>(aspect)); }
     void SetInteractiveMove(bool enabled) noexcept;
+    FFFResult SetScalingMode(std::uint32_t mode) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
     // Adaptive downscale-before-upload: opt-in, software-decode only, and engaged
     // only while frames are being dropped. See the API field for the rationale.
@@ -1188,6 +1189,7 @@ private:
     // what makes VSR switching safe mid-stream.
     ID3D11ShaderResourceView* effectiveSourceViews_[3]{};
     FFF3FPVideoScalingQuality scalingQuality_;
+    std::uint32_t scalingMode_ = 0;
     // Adaptive downscale-before-upload state. The policy samples a rolling window of
     // frame outcomes rather than reacting to any single drop.
     std::atomic<bool> adaptiveDownscaleEnabled_{false};

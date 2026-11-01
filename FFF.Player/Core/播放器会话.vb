@@ -550,6 +550,18 @@ Public NotInheritable Class 播放器会话
         设置视图旋转(If(顺时针, (当前 + 1UI) Mod 4UI, (当前 + 3UI) Mod 4UI))
     End Sub
 
+    Friend Sub 设置播放倍速(倍速 As Double)
+        检查结果(播放器原生接口.FFF3FP_SetPlaybackRate(取得句柄(), 倍速))
+    End Sub
+    Friend Sub 设置均衡器(启用 As Boolean, 增益 As Single())
+        检查结果(播放器原生接口.FFF3FP_SetAudioEffects(取得句柄(), 启用, 增益, 1.0F))
+    End Sub
+    Friend Sub 重绘画面()
+        播放器原生接口.FFF3FP_Redraw(取得句柄())
+    End Sub
+    Friend Sub 设置缩放算法(模式 As UInteger)
+        检查结果(播放器原生接口.FFF3FP_SetScalingMode(取得句柄(), 模式))
+    End Sub
     ''' <summary>图片模式：设置缩放与平移。缩放=1 表示适应窗口。</summary>
     Public Sub 设置视图变换(缩放 As Single, 水平平移 As Single, 垂直平移 As Single)
         If Not Single.IsFinite(缩放) OrElse 缩放 <= 0.0F OrElse
