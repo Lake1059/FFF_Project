@@ -111,6 +111,9 @@ public:
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;
     FFFResult SetAudioExclusiveMode(bool exclusive) noexcept;
+    FFFResult SetPlaybackRate(double rate) noexcept;
+    FFFResult SetAudioEffects(bool enabled, const float* gains, float wave) noexcept;
+    FFFResult SetScalingMode(std::uint32_t mode) noexcept { const auto r = videoRenderer_.SetScalingMode(mode); if (r == FFFResult::Success) (void)Redraw(); return r; }
     FFFResult SetVolume(float volume, bool muted) noexcept;
     // External bed render plug (3FP/Api/FFF.Player.AudioRenderPlug.h). Install,
     // replace or clear; the session owns the context from the call that installs it
@@ -195,6 +198,8 @@ public:
     std::string LastError() const;
 
 private:
+    void ResetTempo(std::int64_t position) noexcept;
+    FFFResult TempoAudio(AVFrame* frame, std::int64_t position, std::int64_t timestampResolution = 0) noexcept;
     using Command = std::function<void()>;
     enum class StepOperation {
         Frame,
@@ -300,6 +305,18 @@ private:
     // Evaluates measured decode load and, when the decoder is the constraint, reopens
     // it at the next rung. Never descends.
     void EvaluateDecoderLoad() noexcept;
+    // Decode-skip ladder: 0 = AVDISCARD_DEFAULT, 1 = AVDISCARD_NONREF, 2 = AVDISCARD_NONKEY.
+    // A second consumer of the same per-tick load evidence, with its own 2 s window:
+    // when the decoder cannot keep the queue fed, or more than half of what it decodes
+    // is discarded at presentation, one rung is spent instead of a worker reopen. Strictly
+    // up-only: the rung survives rate changes, pauses and seeks; only a new media re-arms
+    // it. Runs for every decode mode, including hardware, where it saves
+    // presentation-pipeline work even if the GPU still decodes.
+    void EvaluateVideoSkipRung() noexcept;
+    // Writes videoSkipRung_ into the video decoder context. Worker-thread-only; takes
+    // softwareVideoCodecMutex_ because the software-decode offload thread submits
+    // packets to the same context under it.
+    void ApplyVideoSkipRung() noexcept;
     FFFResult CompleteHardwareFallback(const char* failureMessage) noexcept;
     // Presents the first frame while the session stays stopped. Used for a still
     // picture and for an animated one, both of which must show a frame without
@@ -582,6 +599,19 @@ private:
     std::string externalAudioPath_;
     PlayerAudioRuntimeState audioRuntimeState_;
     std::unique_ptr<PlayerWasapiRenderer> audioRenderer_;
+    std::atomic<double> playbackRate_{1.0};
+    AVFilterGraph* tempoGraph_ = nullptr;
+    AVFilterContext* tempoInput_ = nullptr;
+    AVFilterContext* tempoOutput_ = nullptr;
+    // Atomics because the playback-clock readers (ClockPosition / GetSnapshot /
+    // UpdateDrainedAudioClock) run on other threads than the command-queue worker
+    // that owns all writes; relaxed is enough (independent scalars, no ordering
+    // requirements beyond eventual visibility).
+    std::atomic<std::int64_t> tempoSamples_{0};
+    std::atomic<std::int64_t> tempoOrigin_{0};
+    bool equalizerEnabled_ = false;
+    float equalizerGains_[10]{};
+    float waveVolume_ = 1;
     // The bed render plug the host installed. Copied, because the caller may free
     // its own struct the moment the call returns; `context` is the kernel's from
     // then on and only this class releases it (see SetAudioRenderPlug / ~PlayerSession).
@@ -641,6 +671,19 @@ private:
     // constant 上（实测过这个形状：12b 的 40fps 段要到第 ~40 帧才进散布）。
     const char* publishedFrameRateMode_ = nullptr;
     static constexpr std::int32_t MinimumCadenceModeSamples = 12;
+    // --- Video decode-skip ladder (see EvaluateVideoSkipRung) ---
+    // Worker-thread-only. The rung is the policy; appliedSkip* record what was actually
+    // written to which context so a ladder reopen or a software fallback (both install a
+    // fresh AVCodecContext) re-applies it on the next playback tick.
+    std::uint32_t videoSkipRung_ = 0;
+    std::uint32_t appliedSkipRung_ = 0;
+    AVCodecContext* appliedSkipDecoder_ = nullptr;
+    std::uint32_t skipWindowIterations_ = 0;
+    std::uint32_t skipWindowStarvedIterations_ = 0;
+    std::uint64_t skipWindowDecoded_ = 0;
+    std::uint64_t skipWindowPresented_ = 0;
+    std::int64_t skipWindowStart100ns_ = 0;
+    std::uint32_t skipDeficitWindows_ = 0;
     // --- Adaptive presentation pacing (see the late branch of PresentVideoFrame) ---
     // Worker-thread-only. When the pipeline falls behind the media clock the classic
     // answer is to discard late pictures; the pacer instead holds every picture at a
