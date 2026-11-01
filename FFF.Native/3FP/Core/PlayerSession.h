@@ -305,6 +305,18 @@ private:
     // Evaluates measured decode load and, when the decoder is the constraint, reopens
     // it at the next rung. Never descends.
     void EvaluateDecoderLoad() noexcept;
+    // Decode-skip ladder: 0 = AVDISCARD_DEFAULT, 1 = AVDISCARD_NONREF, 2 = AVDISCARD_NONKEY.
+    // A second consumer of the same per-tick load evidence, with its own 2 s window:
+    // when the decoder cannot keep the queue fed, or more than half of what it decodes
+    // is discarded at presentation, one rung is spent instead of a worker reopen. The
+    // rung resets at the boundaries that establish a new decode baseline (open, close,
+    // rate change) and never descends mid-run. Runs for every decode mode, including
+    // hardware, where it saves presentation-pipeline work even if the GPU still decodes.
+    void EvaluateVideoSkipRung() noexcept;
+    // Writes videoSkipRung_ into the video decoder context. Worker-thread-only; takes
+    // softwareVideoCodecMutex_ because the software-decode offload thread submits
+    // packets to the same context under it.
+    void ApplyVideoSkipRung() noexcept;
     FFFResult CompleteHardwareFallback(const char* failureMessage) noexcept;
     // Presents the first frame while the session stays stopped. Used for a still
     // picture and for an animated one, both of which must show a frame without
@@ -659,6 +671,19 @@ private:
     // constant 上（实测过这个形状：12b 的 40fps 段要到第 ~40 帧才进散布）。
     const char* publishedFrameRateMode_ = nullptr;
     static constexpr std::int32_t MinimumCadenceModeSamples = 12;
+    // --- Video decode-skip ladder (see EvaluateVideoSkipRung) ---
+    // Worker-thread-only. The rung is the policy; appliedSkip* record what was actually
+    // written to which context so a ladder reopen or a software fallback (both install a
+    // fresh AVCodecContext) re-applies it on the next playback tick.
+    std::uint32_t videoSkipRung_ = 0;
+    std::uint32_t appliedSkipRung_ = 0;
+    AVCodecContext* appliedSkipDecoder_ = nullptr;
+    std::uint32_t skipWindowIterations_ = 0;
+    std::uint32_t skipWindowStarvedIterations_ = 0;
+    std::uint64_t skipWindowDecoded_ = 0;
+    std::uint64_t skipWindowPresented_ = 0;
+    std::int64_t skipWindowStart100ns_ = 0;
+    std::uint32_t skipDeficitWindows_ = 0;
     // --- Adaptive presentation pacing (see the late branch of PresentVideoFrame) ---
     // Worker-thread-only. When the pipeline falls behind the media clock the classic
     // answer is to discard late pictures; the pacer instead holds every picture at a
