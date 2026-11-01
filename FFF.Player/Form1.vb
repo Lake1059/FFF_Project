@@ -1,5 +1,6 @@
 Imports System.IO
 Imports System.Runtime.InteropServices
+Imports System.Text
 Imports System.Threading
 
 Partial Public Class Form1
@@ -87,6 +88,13 @@ Partial Public Class Form1
 
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         当前主窗体 = Me
+        ' GPU 预热串行化（VBS.001，C-WARMUP-J@1）：UI 线程首次触碰 D3D_DeviceGlobals/D2D
+        ' 之前等预热线程收尾，消除 LakeUI 弱双检/双锁分裂的跨线程并发窗口
+        ' （T1 实测等待 ≈0 ms：预热与 Load 早段并行）。Join 异常走 Catch 兜底，不中断启动链。
+        Try
+            My.MyApplication.GPU预热线程?.Join()
+        Catch
+        End Try
         LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Outline
         LakeUI.MessageDialogOptions.BackdropEnabled = True
         LakeUI.MessageDialogOptions.BackdropMode = LakeUI.PopupBackdropMode.Auto
@@ -161,6 +169,7 @@ Partial Public Class Form1
         界面呈现器 = 创建界面呈现器()
         界面呈现器.设置音量百分比(设置.实例对象.音量百分比)
         播放控制器.设置音量(CSng(设置.实例对象.音量百分比 / 100.0F))
+
         ' 【2026-10-31 启动优化】四个图层呈现器（字幕/弹幕/歌词/信息）的构造已延后：
         ' 原在此处吃掉 24_streamsel_done→25_layers_done 段 177.5 ms。
         ' 现在由 Form1_Shown 在派发开图之后调用 创建图层呈现器()。
@@ -288,6 +297,12 @@ Partial Public Class Form1
         Return 尝试加载核心文件(文件名)
     End Function
 
+    ' 裸名 TryLoad 命中后的实际路径解析（C-LDR-PATH-VALIDATE@1）：LoadLibrary 默认搜索序
+    ' 与 .NET NuGet 探测实际命中的文件，凭传入的名字无法定位，须向句柄问路。仅本文件使用。
+    <DllImport("kernel32.dll", CharSet:=CharSet.Unicode)>
+    Private Shared Function GetModuleFileNameW(hModule As IntPtr, 缓冲 As StringBuilder, 长度 As Integer) As UInteger
+    End Function
+
     Private Shared Function 尝试加载核心文件(文件名 As String) As Boolean
         Dim 句柄 = IntPtr.Zero
         Try
@@ -298,13 +313,31 @@ Partial Public Class Form1
             End If
             ' 内核稍后用 delay-load 打开同一模块（FfmpegRuntime.cpp:65-112）。保留句柄 = 只加引用计数，
             ' 省掉开窗段把整条 FFmpeg 闭包再映射一遍（实测 ~15-35 ms）。
-            ' 但内核只搜「FFF.Native 所在目录 → exe 目录」，从不搜 PATH：PATH 命中不保留，
-            ' 否则会把内核根本不用的模块钉死在进程里。
-            If 属于内核搜索目录(文件名) Then
-                保留的核心文件句柄.Add(句柄)
-            Else
-                NativeLibrary.Free(句柄)
-            End If
+            ' 但内核只搜「FFF.Native 所在目录 → exe 目录」，从不搜 PATH：裸名 TryLoad 走
+            ' LoadLibrary 默认搜索序 + NuGet 探测，实际命中路径可能不在该序内——凭名字
+            ' 推断不了同址，必须用 GetModuleFileNameW 向句柄问实际命中路径再做目录校验；
+            ' 命中路径不属于内核搜索序时 Free 释放（含解析失败），让内核按自己的搜索序
+            ' 重新解析，否则会把内核根本不用的模块钉死在进程里。
+            Try
+                Dim 判定路径 = 文件名
+                If Not Path.IsPathFullyQualified(文件名) Then
+                    Dim 缓冲 As New StringBuilder(1024)
+                    If GetModuleFileNameW(句柄, 缓冲, 缓冲.Capacity) = 0UI Then
+                        判定路径 = String.Empty
+                    Else
+                        判定路径 = 缓冲.ToString()
+                    End If
+                End If
+                If 属于内核搜索目录(判定路径) Then
+                    保留的核心文件句柄.Add(句柄)
+                Else
+                    NativeLibrary.Free(句柄)
+                End If
+            Catch ex As Exception
+                ' TryLoad 成功后的决策段兜底：句柄不得以「既未保留也未释放」漏出（R4-a）。
+                If 句柄 <> IntPtr.Zero Then NativeLibrary.Free(句柄)
+                Return False
+            End Try
             Return True
         Catch ex As BadImageFormatException
             Return False
@@ -314,9 +347,10 @@ Partial Public Class Form1
     End Function
 
     ' 内核 delay-load 的目录序（FfmpegRuntime.cpp:93-112）：FFF.Native 所在目录 → exe 目录。
-    ' 裸文件名（FFF.Native.dll）由程序集解析落在程序目录，与内核同址，视为保留目标。
+    ' 只接受完全限定路径：裸名场景由调用方先用 GetModuleFileNameW 解析出实际命中路径再传入
+    ' （旧版「裸名恒 True」凭名字推断同址，多版本共存时会钉错版本，已废弃——LDR.003）。
     Private Shared Function 属于内核搜索目录(文件名 As String) As Boolean
-        If Not Path.IsPathFullyQualified(文件名) Then Return True
+        If Not Path.IsPathFullyQualified(文件名) Then Return False
         Dim 目录 = Path.GetDirectoryName(Path.GetFullPath(文件名))
         If String.IsNullOrEmpty(目录) Then Return False
         Dim 目标目录 = {AppContext.BaseDirectory, Path.GetDirectoryName(GetType(Form1).Assembly.Location)}
@@ -416,36 +450,40 @@ Partial Public Class Form1
     ''' 唯一的裸调用（信息图层呈现器.应用全局字体）已一并搬到这里。
     ''' </summary>
     Private Sub 创建图层呈现器()
-        If 字幕图层呈现器 IsNot Nothing Then Return
-            字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
-                AddressOf 播放控制器.安全读取快照, Function() If(字幕显示, 播放控制器.当前字幕, Nothing),
-                AddressOf 播放控制器.提交定时文字图层,
-                Function() If(字幕显示, Threading.Volatile.Read(当前次字幕), Nothing))
-            ' 弹幕与字幕分轨：弹幕有自己的呈现器，节拍跟随视频（见 播放器弹幕图层呈现器）。
-            ' 字幕仍走 播放器字幕叠加呈现器，保留它那套为静态内容设计的节拍与去重。
-            弹幕图层呈现器 = New 播放器弹幕图层呈现器(画面控件,
-                AddressOf 播放控制器.安全读取快照,
-                AddressOf 播放控制器.提交弹幕图层,
-                Function() If(设置.实例对象.弹幕已启用, 播放控制器.当前弹幕, Nothing),
-                设置.实例对象.创建弹幕显示配置())
-            歌词图层呈现器 = New 播放器歌词呈现器(画面控件,
-                AddressOf 播放控制器.安全读取快照,
-                Function() If(设置.实例对象.启用歌词支持, 播放控制器.当前歌词, Nothing),
-                Function() 设置.实例对象.渲染封面图 AndAlso 播放控制器.当前音乐有封面,
-                AddressOf 播放控制器.提交歌词图层, AddressOf 创建歌词呈现设置)
-            ' VSR 与自动 HDR 的逐帧判定态进 Tab 图层：内核静默跳过时，那是用户唯一能看见它的地方。
-            ' 两者都现读，不走各自控制器的缓存——那份只在开页与勾选时更新，恰好错过内核真正
-            ' 做判定的那一刻。文本由 播放器会话 侧组好（判词 + 一句人话），图层不再拼字段。
-            信息图层呈现器 = New 播放器信息图层呈现器(画面控件,
-                AddressOf 播放控制器.安全读取快照, AddressOf 播放控制器.安全读取媒体信息,
-                Function() 播放控制器.当前媒体路径, Function() 播放控制器.当前字幕,
-                Function() 播放控制器.当前弹幕, AddressOf 播放控制器.读取定时文字状态,
-                AddressOf 播放控制器.读取弹幕状态, Function() 播放控制器.WASAPI模式,
-                AddressOf 播放控制器.读取色彩变换内容描述,
-                AddressOf 播放控制器.提交播放器信息图层,
-                AddressOf 播放控制器.读取视频超分辨率图层文本,
-                AddressOf 播放控制器.读取视频自动HDR图层文本)
-            信息图层呈现器.应用全局字体(设置.实例对象.字体)
+        ' 幂等早退（已构造则跳过）+ 关闭竞争守卫（LIFECYCLE）：窗体已进入关闭流程时
+        ' 不再构造呈现器，避免 BeginInvoke 队列里的延迟调用在已 Closed 的窗体上启动泵线程。
+        If 正在关闭 OrElse 字幕图层呈现器 IsNot Nothing Then
+            Return
+        End If
+        字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
+            AddressOf 播放控制器.安全读取快照, Function() If(字幕显示, 播放控制器.当前字幕, Nothing),
+            AddressOf 播放控制器.提交定时文字图层,
+            Function() If(字幕显示, Threading.Volatile.Read(当前次字幕), Nothing))
+        ' 弹幕与字幕分轨：弹幕有自己的呈现器，节拍跟随视频（见 播放器弹幕图层呈现器）。
+        ' 字幕仍走 播放器字幕叠加呈现器，保留它那套为静态内容设计的节拍与去重。
+        弹幕图层呈现器 = New 播放器弹幕图层呈现器(画面控件,
+            AddressOf 播放控制器.安全读取快照,
+            AddressOf 播放控制器.提交弹幕图层,
+            Function() If(设置.实例对象.弹幕已启用, 播放控制器.当前弹幕, Nothing),
+            设置.实例对象.创建弹幕显示配置())
+        歌词图层呈现器 = New 播放器歌词呈现器(画面控件,
+            AddressOf 播放控制器.安全读取快照,
+            Function() If(设置.实例对象.启用歌词支持, 播放控制器.当前歌词, Nothing),
+            Function() 设置.实例对象.渲染封面图 AndAlso 播放控制器.当前音乐有封面,
+            AddressOf 播放控制器.提交歌词图层, AddressOf 创建歌词呈现设置)
+        ' VSR 与自动 HDR 的逐帧判定态进 Tab 图层：内核静默跳过时，那是用户唯一能看见它的地方。
+        ' 两者都现读，不走各自控制器的缓存——那份只在开页与勾选时更新，恰好错过内核真正
+        ' 做判定的那一刻。文本由 播放器会话 侧组好（判词 + 一句人话），图层不再拼字段。
+        信息图层呈现器 = New 播放器信息图层呈现器(画面控件,
+            AddressOf 播放控制器.安全读取快照, AddressOf 播放控制器.安全读取媒体信息,
+            Function() 播放控制器.当前媒体路径, Function() 播放控制器.当前字幕,
+            Function() 播放控制器.当前弹幕, AddressOf 播放控制器.读取定时文字状态,
+            AddressOf 播放控制器.读取弹幕状态, Function() 播放控制器.WASAPI模式,
+            AddressOf 播放控制器.读取色彩变换内容描述,
+            AddressOf 播放控制器.提交播放器信息图层,
+            AddressOf 播放控制器.读取视频超分辨率图层文本,
+            AddressOf 播放控制器.读取视频自动HDR图层文本)
+        信息图层呈现器.应用全局字体(设置.实例对象.字体)
     End Sub
 
     Private Sub Form1_Shown(sender As Object, e As EventArgs) Handles Me.Shown
@@ -474,21 +512,34 @@ Partial Public Class Form1
             ' 【2026-11-01 图片优先】延后的 chrome 排在**开图之后**：消息队列按序执行，
             ' Attach 要等图片先上屏（这正是延后的目的）。无启动文件时没有"先看图"
             ' 诉求，Shown 里同步 Attach，窗口立即带完整 chrome。
-            If 延后窗口Attach Then BeginInvoke(Sub() ThisIsYourWindow1.Attach(Me))
+            If 延后窗口Attach Then
+                BeginInvoke(Sub()
+                                ' 关闭竞争守卫（LIFECYCLE）：队列消化前窗体可能已进入关闭流程，此时不 Attach。
+                                If 正在关闭 Then Return
+                                ThisIsYourWindow1.Attach(Me)
+                            End Sub)
+            End If
             BeginInvoke(Sub() 创建图层呈现器())
         Else
             If 延后窗口Attach Then ThisIsYourWindow1.Attach(Me)
             创建图层呈现器()
         End If
 
-        ' 启动期优先级借让收尾：HIGH 只需要覆盖到首帧附近。Shown 后 600 ms 降回
-        ' Normal（T2 通常在 Shown 后 ~100 ms 内），不与内核 PlacementPolicy 的
-        ' 播放期 Boost 状态机抢同一个旋钮——它到播放泵启动后才首次采样。
+        ' 启动期优先级借让收尾：HIGH 只需要覆盖到首帧附近。Shown 后 600 ms 恢复
+        ' 拉高前保存的原始 PriorityClass（My.MyApplication.启动期原始优先级）而非常量
+        ' Normal——start /high 启动时原始值就是 High，不被降级；且仅当到点仍是 High
+        ' 时才改写（内核 PlacementPolicy 若已接管则不动，不与它的播放期 Boost 状态机
+        ' 抢同一个旋钮——它到播放泵启动后才首次采样）。
         If My.MyApplication.启动优先级已拉高 Then
             Dim 降回线程 As New Thread(Sub()
                 Try
                     Thread.Sleep(600)
-                    System.Diagnostics.Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.Normal
+                    Using 降回进程 As System.Diagnostics.Process = System.Diagnostics.Process.GetCurrentProcess()
+                        If My.MyApplication.启动优先级已拉高 AndAlso
+                            降回进程.PriorityClass = ProcessPriorityClass.High Then
+                            降回进程.PriorityClass = My.MyApplication.启动期原始优先级
+                        End If
+                    End Using
                 Catch
                 End Try
             End Sub) With {.IsBackground = True, .Name = "启动优先级降回"}
@@ -504,7 +555,7 @@ Partial Public Class Form1
     '    ② 每进程至多一次：取消 / 输完（成功或错满）后本次会话不再弹，重启软件才恢复；
     '    ③ 没 DLL / 旧件 / 已解锁 ⇒ 不弹（探测只回答"要不要弹"）。
     '  ● 解锁入口只此一处：码 → 模块铸票（票据落 exe 旁或 %LOCALAPPDATA%\FFF.HDRdp.Test）；
-    '    解锁后本体行为才改变（kind=3 注入 + 「内容：」行）。
+    '    解锁后本体行为才改变（kind=3 注入 + HDR 行的杜比等级段）。
     '  ● 三条纪律：① 解锁码绝不进任何日志——只记"接受 / 拒绝 / 够不到"；② 文案用本体
     '    自有的中性措辞，不引用模块自带文本；③ 探测/轮询异常静默吞掉，不让启动链断在这里。
     ' ═══════════════════════════════════════════════════════════════════════════
