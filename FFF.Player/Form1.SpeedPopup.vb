@@ -6,6 +6,11 @@ Partial Public Class Form1
             倍速弹窗.Close()
             Return
         End If
+        ' 点击倍速按钮时弹窗先因失活被关闭、本方法随后才跑：把"刚因点击按钮而关闭"识别为
+        ' 用户的关闭意图，不再立刻重开（否则开关切换被击败）。游标不在按钮上（如点空白处
+        ' 关闭）或已超时则照常打开。
+        If Math.Abs(Environment.TickCount - 倍速弹窗停用时刻) < 250 AndAlso
+           倍速按钮.ClientRectangle.Contains(倍速按钮.PointToClient(Cursor.Position)) Then Return
         Dim 比例 = DeviceDpi / 96.0F
         Dim 弹窗 As New Form With {.FormBorderStyle = FormBorderStyle.None, .ShowInTaskbar = False, .StartPosition = FormStartPosition.Manual, .AutoScaleMode = AutoScaleMode.Dpi, .AutoScaleDimensions = New SizeF(DeviceDpi, DeviceDpi), .ClientSize = New Size(CInt(258 * 比例), CInt(194 * 比例)), .BackColor = BackColor, .Font = MB_软件解码或硬件解码.Font, .KeyPreview = True}
         倍速弹窗 = 弹窗
@@ -60,7 +65,11 @@ Partial Public Class Form1
         Next
         Dim 提交输入 As Action = Sub()
                                     Dim 值 As Decimal
-                                    If Decimal.TryParse(倍速输入.Text, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture, 值) Then
+                                    ' 显示用 InvariantCulture，解析也先按它来；失败再按当前区域兜底
+                                    ' （逗号小数区域输入「1,5」不再静默回到旧值）。
+                                    Dim 已解析 = Decimal.TryParse(倍速输入.Text, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture, 值)
+                                    If Not 已解析 Then 已解析 = Decimal.TryParse(倍速输入.Text, Globalization.NumberStyles.Float, Globalization.CultureInfo.CurrentCulture, 值)
+                                    If 已解析 Then
                                         值 = Math.Clamp(值, 0.1D, 16D)
                                         应用倍速(CDbl(Math.Round(值 / 0.05D, 0, MidpointRounding.AwayFromZero) * 0.05D))
                                     End If
@@ -73,7 +82,10 @@ Partial Public Class Form1
                                           提交输入()
                                       End If
                                   End Sub
-        AddHandler 弹窗.Deactivate, Sub() 弹窗.Close()
+        AddHandler 弹窗.Deactivate, Sub()
+                                        倍速弹窗停用时刻 = Environment.TickCount
+                                        弹窗.Close()
+                                    End Sub
         AddHandler 弹窗.KeyDown, Sub(sender, e)
                                   If e.KeyCode = Keys.Escape Then 弹窗.Close()
                               End Sub
