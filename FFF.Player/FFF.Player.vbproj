@@ -68,10 +68,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- O4（2026-10-30）：图标改为烘焙 PNG 后，运行时不再需要 Svg（及传递依赖 ExCSS）。
+    <!-- O4（2026-10-30）：图标改为烘焙 PNG 后，运行时代码不再直接使用 Svg（及传递依赖 ExCSS）。
        现无改色/换肤通路（11 个 SVG 描边写死 #dcdcdc，无 currentColor/CSS 变量）；改图标时重跑 bake_icons.ps1。
+       【2026-11-01 修复】曾移除本 PackageReference 以减包体，但在含 upstream PR #49 的合并构建
+       （PublishReadyToRun）下触发启动 ~417ms CLR FailFast（0xC0000602，三无：stderr/事件日志/WER 全空）；
+       恢复引用后消融验证双向成立（移除=崩、恢复=活、事后拷 DLL 不救，属构建期差异而非运行时缺文件）。
+       故保留该引用（代价仅输出目录被动文件 ~0.6MB，启动路径不加载），烘焙收益全部保留。 -->
   <PackageReference Include="Svg" Version="3.4.8" />
-  -->
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectComposition" Version="3.8.3" />
