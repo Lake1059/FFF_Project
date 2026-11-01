@@ -1118,7 +1118,14 @@ void PlayerSession::UpdateDrainedAudioClock() noexcept {
     if (audioClockFinished_ || playbackPreroll_ || !audioRenderer_) return;
     const auto drained = externalFormat_ != nullptr ? externalAudioDrained_ : audioDecoderDrained_;
     if (!drained || audioRenderer_->Buffered100ns() > 0) return;
-    const auto position = tempoOrigin_ + static_cast<std::int64_t>((audioRenderer_->Position100ns() - tempoOrigin_) * playbackRate_.load());
+    // ×rate remap applies from tempoOrigin_ onward; before it (renderer-seeded
+    // silence while the stream starts after the seek target) the renderer's own
+    // timeline is already media time. Identity meets rate× at tempoOrigin_, so
+    // the transition is continuous.
+    const auto rendererPos = audioRenderer_->Position100ns();
+    const auto position = rendererPos < tempoOrigin_
+        ? rendererPos
+        : tempoOrigin_ + static_cast<std::int64_t>((rendererPos - tempoOrigin_) * playbackRate_.load());
     audioClockFinished_ = true;
     ResetClock(position);
 }
@@ -2350,8 +2357,9 @@ FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position,
     av_frame_free(&output); return result;
 }
 FFFResult PlayerSession::SetAudioEffects(const bool enabled,const float* gains,const float wave) noexcept {
-    if(!gains || !std::isfinite(wave) || wave<0 || wave>1)return FFFResult::InvalidArgument;
-    std::array<float,10> values{};for(int i=0;i<10;++i){if(!std::isfinite(gains[i]) || gains[i]<-12 || gains[i]>12)return FFFResult::InvalidArgument;values[i]=gains[i];}
+    if((enabled && !gains) || !std::isfinite(wave) || wave<0 || wave>1)return FFFResult::InvalidArgument;
+    std::array<float,10> values{};
+    if(gains)for(int i=0;i<10;++i){if(!std::isfinite(gains[i]) || gains[i]<-12 || gains[i]>12)return FFFResult::InvalidArgument;values[i]=gains[i];}
     Enqueue([this,enabled,values,wave]{
         const bool reuse=tempoGraph_ && equalizerEnabled_==enabled && waveVolume_==wave;
         equalizerEnabled_=enabled;waveVolume_=wave;
@@ -7318,8 +7326,17 @@ std::int64_t PlayerSession::ClockPosition() const noexcept {
         return position;
     }
     if (!audioClockFinished_ && audioRenderer_ && (audioStream_ >= 0 || externalAudioStream_ >= 0)) {
-        const auto audioPosition = tempoOrigin_ + static_cast<std::int64_t>((audioRenderer_->Position100ns() - tempoOrigin_) * playbackRate_.load());
-        PublishPlaybackClock(audioPosition, tempoOrigin_ + static_cast<std::int64_t>((audioRenderer_->TimelineLimit100ns() - tempoOrigin_) * playbackRate_.load()));
+        // See UpdateDrainedAudioClock: pass the renderer timeline through below
+        // tempoOrigin_ (pre-content silence seeded by the renderer) and apply the
+        // ×rate remap from tempoOrigin_ on; the two arms meet at tempoOrigin_.
+        const auto rendererPos = audioRenderer_->Position100ns();
+        const auto audioPosition = rendererPos < tempoOrigin_
+            ? rendererPos
+            : tempoOrigin_ + static_cast<std::int64_t>((rendererPos - tempoOrigin_) * playbackRate_.load());
+        const auto rendererLimit = audioRenderer_->TimelineLimit100ns();
+        PublishPlaybackClock(audioPosition, rendererLimit < tempoOrigin_
+            ? rendererLimit
+            : tempoOrigin_ + static_cast<std::int64_t>((rendererLimit - tempoOrigin_) * playbackRate_.load()));
         return audioPosition;
     }
     LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
