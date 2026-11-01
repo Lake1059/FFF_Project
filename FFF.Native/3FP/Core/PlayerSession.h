@@ -591,7 +591,12 @@ private:
     AVFilterGraph* tempoGraph_ = nullptr;
     AVFilterContext* tempoInput_ = nullptr;
     AVFilterContext* tempoOutput_ = nullptr;
-    std::int64_t tempoSamples_ = 0, tempoOrigin_ = 0;
+    // Atomics because the playback-clock readers (ClockPosition / GetSnapshot /
+    // UpdateDrainedAudioClock) run on other threads than the command-queue worker
+    // that owns all writes; relaxed is enough (independent scalars, no ordering
+    // requirements beyond eventual visibility).
+    std::atomic<std::int64_t> tempoSamples_{0};
+    std::atomic<std::int64_t> tempoOrigin_{0};
     bool equalizerEnabled_ = false;
     float equalizerGains_[10]{};
     float waveVolume_ = 1;

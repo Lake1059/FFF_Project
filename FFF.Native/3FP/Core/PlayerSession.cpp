@@ -1123,9 +1123,10 @@ void PlayerSession::UpdateDrainedAudioClock() noexcept {
     // timeline is already media time. Identity meets rate× at tempoOrigin_, so
     // the transition is continuous.
     const auto rendererPos = audioRenderer_->Position100ns();
-    const auto position = rendererPos < tempoOrigin_
+    const auto origin = tempoOrigin_.load(std::memory_order_relaxed);
+    const auto position = rendererPos < origin
         ? rendererPos
-        : tempoOrigin_ + static_cast<std::int64_t>((rendererPos - tempoOrigin_) * playbackRate_.load());
+        : origin + static_cast<std::int64_t>((rendererPos - origin) * playbackRate_.load());
     audioClockFinished_ = true;
     ResetClock(position);
 }
@@ -2260,7 +2261,7 @@ FFFResult PlayerSession::SetPlaybackRate(const double rate) noexcept {
 }
 void PlayerSession::ResetTempo(const std::int64_t position) noexcept {
     if (tempoGraph_) avfilter_graph_free(&tempoGraph_);
-    tempoInput_ = nullptr; tempoOutput_ = nullptr; tempoSamples_ = 0; tempoOrigin_ = position;
+    tempoInput_ = nullptr; tempoOutput_ = nullptr; tempoSamples_.store(0, std::memory_order_relaxed); tempoOrigin_.store(position, std::memory_order_relaxed);
 }
 FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position, const std::int64_t timestampResolution) noexcept {
     const double rate = playbackRate_.load();
@@ -2270,9 +2271,16 @@ FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position,
     // as an invalid argument rather than a flush, so never forward it.
     if (passthrough && !frame) return FFFResult::Success;
     if (passthrough) return audioRenderer_->Enqueue(frame, position, timestampResolution);
+    // tempoOrigin_/tempoSamples_ are atomics: the playback-clock readers on other
+    // threads sample them without taking the command-queue lock. This thread owns
+    // all writes, so relaxed ordering is sufficient.
+    auto origin = tempoOrigin_.load(std::memory_order_relaxed);
     if (!tempoGraph_) {
         if (!frame) return FFFResult::Success;
-        if(position!=AV_NOPTS_VALUE)tempoOrigin_=std::max(tempoOrigin_,position);
+        if(position!=AV_NOPTS_VALUE){
+            origin = std::max(origin, position);
+            tempoOrigin_.store(origin, std::memory_order_relaxed);
+        }
         // Build into locals and publish only on success. A half-configured graph left
         // in tempoGraph_ would make every later call skip the rebuild (the !tempoGraph_
         // gate above) and fail on each frame, which then disables the whole audio track
@@ -2328,8 +2336,8 @@ FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position,
     if (frame && !input) return FFFResult::NativeFailure;
     if (input) {
         if(input->ch_layout.order==AV_CHANNEL_ORDER_UNSPEC){const int count=input->ch_layout.nb_channels;av_channel_layout_uninit(&input->ch_layout);av_channel_layout_default(&input->ch_layout,count);}
-        const auto skipped = position != AV_NOPTS_VALUE && position < tempoOrigin_
-            ? std::min<std::int64_t>(input->nb_samples, av_rescale_rnd(tempoOrigin_ - position, input->sample_rate, 10000000, AV_ROUND_UP)) : 0;
+        const auto skipped = position != AV_NOPTS_VALUE && position < origin
+            ? std::min<std::int64_t>(input->nb_samples, av_rescale_rnd(origin - position, input->sample_rate, 10000000, AV_ROUND_UP)) : 0;
         if (skipped >= input->nb_samples) { av_frame_free(&input); return FFFResult::Success; }
         if (skipped) {
             const auto format = static_cast<AVSampleFormat>(input->format);
@@ -2339,7 +2347,7 @@ FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position,
             for (int plane = 0; plane < planes; ++plane) { input->extended_data[plane] += offset; if (plane < AV_NUM_DATA_POINTERS) input->data[plane] = input->extended_data[plane]; }
             input->nb_samples -= static_cast<int>(skipped);
         }
-        input->pts = position == AV_NOPTS_VALUE ? AV_NOPTS_VALUE : av_rescale_q(position - tempoOrigin_, AVRational{1, 10000000}, AVRational{1, frame->sample_rate}) + skipped;
+        input->pts = position == AV_NOPTS_VALUE ? AV_NOPTS_VALUE : av_rescale_q(position - origin, AVRational{1, 10000000}, AVRational{1, frame->sample_rate}) + skipped;
     }
     const auto sent = av_buffersrc_add_frame_flags(tempoInput_, input, AV_BUFFERSRC_FLAG_KEEP_REF);
     av_frame_free(&input);
@@ -2348,9 +2356,10 @@ FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position,
     if (!output) return FFFResult::NativeFailure;
     FFFResult result = FFFResult::Success;
     while (av_buffersink_get_frame(tempoOutput_, output) >= 0) {
-        const auto outputPosition = tempoOrigin_ + av_rescale(tempoSamples_, 10000000, output->sample_rate);
+        const auto outSamples = tempoSamples_.load(std::memory_order_relaxed);
+        const auto outputPosition = origin + av_rescale(outSamples, 10000000, output->sample_rate);
         result = audioRenderer_->Enqueue(output, outputPosition, 0);
-        tempoSamples_ += output->nb_samples;
+        tempoSamples_.store(outSamples + output->nb_samples, std::memory_order_relaxed);
         av_frame_unref(output);
         if (result != FFFResult::Success) break;
     }
@@ -2808,7 +2817,24 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
         QueryPerformanceCounter(&now);
         const auto elapsed = sampledQpc > 0 && now.QuadPart > sampledQpc && qpcFrequency_ > 0
             ? (now.QuadPart - sampledQpc) * TicksPerSecond / qpcFrequency_ : 0;
-        output.position100ns = sampledPosition + std::min(static_cast<std::int64_t>(elapsed * playbackRate_.load()),
+        // Segmented extrapolation matching the audio-clock mapping: below
+        // tempoOrigin_ (renderer-seeded pre-content silence) the media position
+        // advances 1:1 with the wall clock, and only from tempoOrigin_ on does it
+        // advance at the playback rate; the two arms meet at tempoOrigin_. The
+        // QPC-clock path (no audio stream, or a drained one) publishes already
+        // remapped positions, so it keeps the plain linear extrapolation.
+        const double rate = playbackRate_.load(std::memory_order_relaxed);
+        const auto origin = tempoOrigin_.load(std::memory_order_relaxed);
+        std::int64_t advanced;
+        if (audioRenderer_ && !audioClockFinished_ && sampledPosition < origin) {
+            const auto toOrigin = static_cast<double>(origin - sampledPosition);
+            const auto normal = std::min(static_cast<double>(elapsed), toOrigin);
+            const auto accelerated = std::max(0.0, elapsed - normal);
+            advanced = static_cast<std::int64_t>(normal) + static_cast<std::int64_t>(accelerated * rate);
+        } else {
+            advanced = static_cast<std::int64_t>(elapsed * rate);
+        }
+        output.position100ns = sampledPosition + std::min(advanced,
             std::max<std::int64_t>(0, limit - sampledPosition));
         if (output.duration100ns > 0) output.position100ns = std::min(output.position100ns, output.duration100ns);
     }
@@ -7330,13 +7356,14 @@ std::int64_t PlayerSession::ClockPosition() const noexcept {
         // tempoOrigin_ (pre-content silence seeded by the renderer) and apply the
         // ×rate remap from tempoOrigin_ on; the two arms meet at tempoOrigin_.
         const auto rendererPos = audioRenderer_->Position100ns();
-        const auto audioPosition = rendererPos < tempoOrigin_
+        const auto origin = tempoOrigin_.load(std::memory_order_relaxed);
+        const auto audioPosition = rendererPos < origin
             ? rendererPos
-            : tempoOrigin_ + static_cast<std::int64_t>((rendererPos - tempoOrigin_) * playbackRate_.load());
+            : origin + static_cast<std::int64_t>((rendererPos - origin) * playbackRate_.load());
         const auto rendererLimit = audioRenderer_->TimelineLimit100ns();
-        PublishPlaybackClock(audioPosition, rendererLimit < tempoOrigin_
+        PublishPlaybackClock(audioPosition, rendererLimit < origin
             ? rendererLimit
-            : tempoOrigin_ + static_cast<std::int64_t>((rendererLimit - tempoOrigin_) * playbackRate_.load()));
+            : origin + static_cast<std::int64_t>((rendererLimit - origin) * playbackRate_.load()));
         return audioPosition;
     }
     LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
