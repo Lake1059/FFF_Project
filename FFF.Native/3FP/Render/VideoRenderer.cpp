@@ -838,6 +838,10 @@ float Jinc(float x) {
     [unroll] for(int k=1;k<=12;++k){term*=-x*x/(4.0*k*(k+1));sum+=term;}
     return sum/x;
 }
+// EWA sampler for the selectable modes: Jinc (ImageMode.y==1) uses the Jinc(3.83170597*r)
+// kernel rolled off by a second Jinc lobe at 1.21966989 -- the window does not reach zero
+// at the r=2 truncation, so the 50% min/max blend below absorbs the residual step and the
+// kernel's negative lobe. Lanczos-4 (ImageMode.y==2) is the separable Sinc4 window below.
 float4 SampleSelected(Texture2D<float4> tex,float2 uv,uint2 dim) {
     float2 p=uv*float2(dim)-0.5;
     float2 scale=min(float2(OutputWidth,OutputHeight)/float2(dim),1.0);
@@ -4202,7 +4206,6 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
 }
 
 bool PlayerVideoRenderer::CanUseDirectVideoProcessor() const noexcept {
-    if (scalingMode_ != 0) return false;
     if (hdrProcessor_.RequiresMetadataAwareShader()) return false;
     if (!sourceExternal_ || sourceInputLayout_ != 2 || sourceTextures_[0] == nullptr ||
         sourceBitDepth_ > 10 || sourceInterlaced_ ||
@@ -5429,10 +5432,13 @@ FFFResult PlayerVideoRenderer::ExecuteScalePass(ID3D11ShaderResourceView* source
 
 std::uint32_t PlayerVideoRenderer::SelectScaleFilter(const float scaleX,
     const float scaleY) const noexcept {
-    if (scalingMode_ == 2) return 3;
-    if (scalingMode_ == 3) return 0;
     const auto upscaling = scaleX > 1.0f || scaleY > 1.0f;
     const auto downscaling = scaleX < 1.0f || scaleY < 1.0f;
+    // Still images enlarge by whole pixel blocks in every mode; the mode filters
+    // apply to video in both directions and to image downscaling.
+    const auto imageBlockUpscale = sourceImageMode_ && upscaling && !downscaling;
+    if (scalingMode_ == 2 && !imageBlockUpscale) return 3;
+    if (scalingMode_ == 3 && !imageBlockUpscale) return 0;
 
     if (sourceImageMode_) {
         // A photograph or drawing is enlarged by whole pixel blocks: each source pixel
@@ -5549,10 +5555,14 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
     const bool rgbSource) noexcept {
     if (views == nullptr || outputWidth == 0 || outputHeight == 0)
         return FFFResult::InvalidArgument;
-    if (scalingMode_ == 1) {
-        for (unsigned i = 0; i < 3; ++i) views[i] = sourceViews_[i];
-        return FFFResult::Success;
-    }
+    // Mode 1 (Jinc) has no dedicated bypass: the scale chain below is what keeps
+    // its EWA loop affordable and correct --
+    //   - minification runs the chain's halving passes first, so the per-pixel
+    //     Jinc loop works near 1:1 instead of over support/scale taps;
+    //   - the chain input is effectiveSourceViews_, so VSR and TrueHDR surfaces
+    //     stay in the loop instead of being silently dropped;
+    //   - upscaling leaves the chain untouched (it refuses target > source), which
+    //     is exactly the from-source EWA this mode wants.
     const auto generation = videoGeneration_.load(std::memory_order_acquire);
     // The cache key includes the VSR state: VSR swaps the effective source for an
     // upscaled surface of a different size, and that changes the result even
