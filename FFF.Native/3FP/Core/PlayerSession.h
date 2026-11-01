@@ -308,10 +308,10 @@ private:
     // Decode-skip ladder: 0 = AVDISCARD_DEFAULT, 1 = AVDISCARD_NONREF, 2 = AVDISCARD_NONKEY.
     // A second consumer of the same per-tick load evidence, with its own 2 s window:
     // when the decoder cannot keep the queue fed, or more than half of what it decodes
-    // is discarded at presentation, one rung is spent instead of a worker reopen. The
-    // rung resets at the boundaries that establish a new decode baseline (open, close,
-    // rate change) and never descends mid-run. Runs for every decode mode, including
-    // hardware, where it saves presentation-pipeline work even if the GPU still decodes.
+    // is discarded at presentation, one rung is spent instead of a worker reopen. Strictly
+    // up-only: the rung survives rate changes, pauses and seeks; only a new media re-arms
+    // it. Runs for every decode mode, including hardware, where it saves
+    // presentation-pipeline work even if the GPU still decodes.
     void EvaluateVideoSkipRung() noexcept;
     // Writes videoSkipRung_ into the video decoder context. Worker-thread-only; takes
     // softwareVideoCodecMutex_ because the software-decode offload thread submits

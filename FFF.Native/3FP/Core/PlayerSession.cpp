@@ -114,11 +114,11 @@ constexpr std::int64_t PaceEstimateMinSpan100ns = 1'000'000; // 100 ms of streak
 constexpr std::uint32_t PaceWindowFrames = 32;              // rolling window for oscillating deficits
 constexpr double PaceWindowLateShare = 0.40;                // late share inside it that counts as a deficit
 // Video decode-skip ladder: the fourth output of the load analyzer below, next to the
-// thread ladder, the software pool and the placement path. Coarse, and up-only during a
-// playback run: a rung is undone by the boundaries that establish a new decode baseline
-// (open, close, rate change), not by a descent -- changing skip_frame mid-run and then
-// going back to full decoding would have to cross a flush to rebuild the reference
-// chain. See EvaluateVideoSkipRung.
+// thread ladder, the software pool and the placement path. Coarse, and strictly up-only:
+// a rung is never undone by the mechanism itself -- not by a rate change, not by a pause,
+// not by a seek. Only opening/closing the media re-arms it (a new decode baseline), which
+// is also the only point where a descent cannot strand a reference chain. See
+// EvaluateVideoSkipRung.
 constexpr std::uint32_t SkipMaxRung = 2;                 // 0 = decode all, 1 = non-reference frames, 2 = keyframes only
 constexpr std::int64_t SkipWindow100ns = 20'000'000;     // 2 s, the same window the thread ladder uses
 constexpr double SkipStarvedShare = 0.50;                // queue starved in >= 50% of the ticks: decode supply deficit
@@ -2267,13 +2267,8 @@ FFFResult PlayerSession::SetPlaybackRate(const double rate) noexcept {
     Enqueue([this, rate] {
         const auto position = state_.load() == FFF3FPState::Playing ? ClockPosition() : snapshot_.position100ns;
         playbackRate_ = rate;
-        // A new rate is a new decode baseline. Drop the skip rung before the seek below
-        // flushes the decoder: that seek re-primes from a keyframe, which every rung
-        // decodes, so the reset cannot strand the new run on an incomplete chain.
-        if (videoSkipRung_ != 0) {
-            videoSkipRung_ = 0;
-            ApplyVideoSkipRung();
-        }
+        // The skip rung is not touched here: the ladder only rises within a media, and a
+        // rate change is not a new media. The seek below keeps the rung too.
         DoSeek(position);
     });
     return FFFResult::Success;
@@ -4376,9 +4371,17 @@ void PlayerSession::EvaluateVideoSkipRung() noexcept {
     // paused previews keyframe-only.
     if (state_.load() != FFF3FPState::Playing || staticImage_ || animatedImage_ || disc_ ||
         seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_) {
-        if (videoSkipRung_ != 0) {
-            videoSkipRung_ = 0;
-            ApplyVideoSkipRung();
+        // The ladder never descends: the rung survives pauses, seeks and rate changes,
+        // and only a new media re-arms it. A paused or single-step decode still has to
+        // be handed every frame the decoder produces, so the context is temporarily put
+        // back to DEFAULT for those decodes; appliedSkipRung_ != videoSkipRung_ makes
+        // the next playing tick re-apply the rung.
+        if (videoSkipRung_ != 0 && appliedSkipRung_ != 0) {
+            {
+                std::lock_guard lock(softwareVideoCodecMutex_);
+                videoDecoder_->skip_frame = AVDISCARD_DEFAULT;
+            }
+            appliedSkipRung_ = 0;
         }
         skipWindowStart100ns_ = 0;
         skipDeficitWindows_ = 0;
