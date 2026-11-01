@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Core/AvifIlocShim.h"
+#include "3FP/Core/Fmp4FragmentScanner.h"
 #include "3FP/Core/MediaText.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Core/DecodeDeviceSelection.h"
@@ -43,6 +44,14 @@ using PlayerMediaText::AppendDictionaryJson;
 using PlayerMediaText::EscapeJson;
 using PlayerMediaText::CodecTagName;
 constexpr std::int64_t TicksPerSecond = 10'000'000;
+// fMP4 前向 seek 的顺序预滚包数上限（R2.5 防死滚保险丝）。正常预滚只需滚过目标
+// 之前的少数几个 moof；上限只对病态文件（无限 moof 链、判停点永不满足）生效。
+// 2e6 包 ≈ 9 小时 60fps / 18 小时 30fps 的参考流样本总量，超过它判定目标不可达，
+// 转 B2 重开还原而不是无限预滚（过大→卡顿，过小→大文件长跳失败率上升）。
+constexpr std::int64_t MaximumSeekPrerollPackets = 2'000'000;
+// 预滚循环内检查 terminate_（acquire）与刷新扫描表快照的包间隔（契约上限 1024），
+// 决定关闭请求的最坏响应延迟。
+constexpr std::int64_t SeekPrerollInterruptInterval = 1024;
 constexpr std::size_t MaxQueuedVideoFrames = 8;
 constexpr std::size_t MinimumQueuedVideoFrames = 3;
 constexpr std::size_t MinimumMemoryBoundVideoFrames = 2;
@@ -252,7 +261,7 @@ void ApplyHdrState(FFF3FPSnapshot& snapshot, const HdrFrameState& stream,
     snapshot.hdrProcessingPath = stream.processingPath;
     snapshot.hdrDpProfile = 0;  // deprecated: no longer classified
     snapshot.hdrDpLevel = 0;  // deprecated: no longer classified
-    snapshot.hasHDRdpRpu = 0;  // deprecated: no longer classified
+    snapshot.hasHdrDpMetadata = 0;  // deprecated: no longer classified
     snapshot.dynamicHdrMetadataActive = stream.dynamicMetadata ? 1u : 0u;
     snapshot.hdrFallbackActive = stream.fallback ? 1u : 0u;
     snapshot.displayMinLuminanceMilliNits = toUnsigned(stream.display.minimumNits, 1000.0f);
@@ -1598,6 +1607,75 @@ void PlayerSession::DoStepKeyframe(const std::int32_t direction) {
         currentTimestamp = av_rescale_q(snapshot_.position100ns + TimelineOrigin100ns(format_),
             AVRational{1, static_cast<int>(TicksPerSecond)}, stream->time_base);
     }
+    // —— C-STEP-KEYFRAME-FRAGMENTED@1 分派（fragmentedMp4_ 只在这个块里生效）——
+    // K2：fragmented 且扫描表非空 → 用后台扫描表选目标 fragment。CopyTable 随时返回
+    // 前缀快照（部分表容忍）：按 K2 语义"表前缀内无满足项"是正常情况，直接走边界
+    // 分支收尾，不等待扫描完成（无阻塞 join）、不把部分表当全量真值。
+    // current 与 entry 时间同轴：两侧都用 StreamTimestampPosition100ns 公式
+    // （av_rescale_q + TimelineOrigin100ns 已减）换算到 100ns 播放时间轴，
+    // 与 snapshot_.position100ns 同一坐标系，直接比较，不再换算。
+    if (fragmentedMp4_ && fragmentScanner_ != nullptr) {
+        std::vector<Fmp4FragmentEntry> fragments;
+        bool tableUsable = false;
+        try { tableUsable = fragmentScanner_->CopyTable(fragments) > 0; }
+        catch (...) { tableUsable = false; }   // 表快照分配失败 → 按 K1 回退现有逻辑
+        if (tableUsable) {
+            const auto current100ns = StreamTimestampPosition100ns(
+                format_, videoStream_, currentTimestamp);
+            const Fmp4FragmentEntry* target = nullptr;
+            bool tableHasKeyframe = false;
+            if (current100ns != AV_NOPTS_VALUE) {
+                for (const auto& fragment : fragments) {
+                    if (!fragment.hasKeyframe) continue;
+                    tableHasKeyframe = true;
+                    if (direction < 0) {
+                        // 向后：满足 startDecodeTime100ns < current 的最大 hasKeyframe entry。
+                        if (fragment.startDecodeTime100ns < current100ns &&
+                            (target == nullptr ||
+                                fragment.startDecodeTime100ns > target->startDecodeTime100ns))
+                            target = &fragment;
+                    } else {
+                        // 向前：满足 startDecodeTime100ns > current 的最小 hasKeyframe entry。
+                        if (fragment.startDecodeTime100ns > current100ns &&
+                            (target == nullptr ||
+                                fragment.startDecodeTime100ns < target->startDecodeTime100ns))
+                            target = &fragment;
+                    }
+                }
+            }
+            if (target != nullptr) {
+                // 命中目标：DoSeek 经 C-SEEK-FRAGMENTED@1 分派——目标在已解析前缀内
+                // 走 F2 av_seek_frame，越过前缀走 F3 顺序预滚。
+                if (DoSeek(target->startDecodeTime100ns, -1, false) != FFFResult::Success) {
+                    // DoSeek 失败（如预滚未命中走 B2 还原后报 FfmpegFailure）：按现有
+                    // 失败语义收尾——不发 OperationCompleted，状态 Paused。
+                    SetState(FFF3FPState::Paused, "step-keyframe");
+                    return;
+                }
+                DecodeUntilSeekTarget();
+                SetState(FFF3FPState::Paused, "step-keyframe");
+                Emit(FFF3FPEvent::OperationCompleted,
+                    "{\"operation\":\"step-keyframe\",\"direction\":" +
+                    std::to_string(direction) + ",\"position100ns\":" +
+                    std::to_string(snapshot_.position100ns) + "}");
+                return;
+            }
+            if (tableHasKeyframe) {
+                // 表非空且有 hasKeyframe entry、但没有满足方向条件的 entry（向后：
+                // 已扫前缀内退无可退；向前：无更晚关键帧 fragment）→ 与现有边界分支
+                // 同语义（R4.3），事件协议逐字一致（boundary:true）。
+                SetState(FFF3FPState::Paused, "step-keyframe");
+                Emit(FFF3FPEvent::OperationCompleted,
+                    "{\"operation\":\"step-keyframe\",\"direction\":" +
+                    std::to_string(direction) + ",\"position100ns\":" +
+                    std::to_string(snapshot_.position100ns) + ",\"boundary\":true}");
+                return;
+            }
+            // K3：表非空但无任何 hasKeyframe entry（病态文件）→ 回退 K1 现有逻辑。
+        }
+        // K1：非 fragmented 或 CopyTable 为空表 → 现有逻辑原样（R4.2）。
+    }
+
     const auto searchTimestamp = currentTimestamp + direction;
     const auto flags = direction < 0 ? AVSEEK_FLAG_BACKWARD : 0;
     const auto entryIndex = av_index_search_timestamp(stream, searchTimestamp, flags);
@@ -3658,6 +3736,12 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
     // Remembered so the IAMF decoder can re-open the file and drive the raw OBU stream.
     mediaPath_ = path;
+    // fragmented MP4（fMP4）判定（R1.1，C-FMP4-DETECT@1）：独立旁路只读句柄扫顶层
+    // box 头，判定失败/非 fragmented 都不影响打开成功（R1.2/R1.3）。此处 staticImage_
+    // 尚未定值（下文 IsStillImage 才赋值），但 DoClose 已把它清零，且静图容器
+    // （AVIF/HEIC）不含 mvex，DetectFragmented 自身就会返回 false，双保险。
+    fragmentedMp4_ = !disc_ && !staticImage_ &&
+        Fmp4FragmentScanner::DetectFragmented(path.c_str());
     videoStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_VIDEO);
     animatedImage_ = IsLoopAwareImageDemuxer(format_ != nullptr ? format_->iformat : nullptr);
     // An AVIF/HEIC image sequence keeps its animation on a later track than the
@@ -3792,6 +3876,11 @@ void PlayerSession::DoOpen(std::string path) noexcept {
             audioRenderer_.reset();
         }
     }
+    // 后台 moof 扫描启动（R1.4）：流选择与解码器打开完成后参考流的 time_base 与
+    // track id 已定，此处挂载。启动失败不影响打开成功（R1.2）：fragmentedMp4_
+    // 保持 true，F3 预滚退化为以 target 为判停点继续可用，R2.1 的字节估算禁用
+    // 与 B2 重开还原照常生效。
+    StartFragmentScanIfNeeded(mediaPath_);
     if (videoStream_ < 0 && coverArtStream_ >= 0) {
         const auto result = LoadCoverArt();
         if (result != FFFResult::Success) { Fail(result, "Could not decode or render the attached cover art.", "cover-art"); return; }
@@ -6755,12 +6844,36 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     // 文件不 seek 能正常播 88 帧）。所以"定位失败＝没有副作用"不能只写在注释里，必须
     // 真的把读位置还原；avformat_flush 是文档规定的配套调用（绕过解容器去 seek AVIO 之后）。
     const auto byteOffsetBeforeSeek = format_->pb != nullptr ? avio_tell(format_->pb) : -1;
+    // —— C-SEEK-FRAGMENTED@1 分派（fragmentedMp4_ 只在这几个分支里生效，F1 路径不受影响）——
+    // F3（向前跳）：fragmented 文件的时间↔字节线性估算不成立（moof 在文件中稀疏
+    // 分布），改用顺序预滚把 demux 推到目标 fragment 开头；命中后 demux 起点已是
+    // 目标，直接落入下方现有成功收尾，keyframeSeekPending_ 机制照常生效（R2.3）。
+    // F2（向回跳，target ≤ 当前 demux 已解析参考点）：照走主路径 av_seek_frame
+    // BACKWARD——mov demuxer 对 fragmented 的回跳 seek 可靠；但下方字节估算回退
+    // 与 position==0 byte-seek 兜底对 fragmented 一律禁用（R2.1），
+    // byteOffsetBeforeSeek 只保留给失败还原的诊断日志。
+    bool fragmentedPrerollHit = false;
+    if (fragmentedMp4_ && position > snapshot_.position100ns) {
+        fragmentedPrerollHit = SeekFragmentedPreroll(position);
+        if (GetEnvironmentVariableW(L"FFF_SEEK_TRACE", nullptr, 0))
+            std::fprintf(stderr, "SEEK fmp4 preroll hit=%d target=%lld ref=%lld\n",
+                fragmentedPrerollHit ? 1 : 0, (long long)position,
+                (long long)snapshot_.position100ns);
+        if (!fragmentedPrerollHit) {
+            // 预滚 EOF/错误/超限/terminate → C-SEEK-ROLLBACK@1 (B2)。
+            (void)ReopenFormatForSeek(snapshot_.position100ns);
+            return FFFResult::FfmpegFailure;
+        }
+    }
     auto timestamp = av_rescale_q(position + TimelineOrigin100ns(format_),
         AVRational{1, static_cast<int>(TicksPerSecond)},
         format_->streams[referenceStream]->time_base);
-    auto seekResult = av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD);
+    // 预滚命中时不能真的再 av_seek_frame（会把已推进的读位置甩回去）；0 即
+    // "主路径已成功"的等价信号。非 fragmented 时三元取原调用，行为与现状一致。
+    auto seekResult = fragmentedPrerollHit ? 0
+        : av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD);
     if (seekResult < 0 && format_->pb != nullptr &&
-        (format_->pb->seekable & AVIO_SEEKABLE_NORMAL) != 0) {
+        (format_->pb->seekable & AVIO_SEEKABLE_NORMAL) != 0 && !fragmentedMp4_) {
         const auto fileSize = avio_size(format_->pb);
         const auto timelineExtent = snapshot_.duration100ns > 0
             ? snapshot_.duration100ns
@@ -6789,6 +6902,13 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
             std::fprintf(stderr, "SEEK fail rc=%d before=%lld after=%lld seekable=%d\n", seekResult,
                 (long long)byteOffsetBeforeSeek, format_->pb ? (long long)avio_tell(format_->pb) : -1,
                 format_->pb ? (int)(format_->pb->seekable & AVIO_SEEKABLE_NORMAL) : -1);
+        // C-SEEK-ROLLBACK@1 (B2)：fragmented 时 avio_seek 回原字节偏移的还原不可靠
+        // （原偏移多半落在访问单元中间，解出来"读得到包、一帧都不出"），改为整个
+        // demux 句柄重开再回定位；B1 的 avio_seek+avformat_flush 只保留给非 fragmented。
+        if (fragmentedMp4_) {
+            (void)ReopenFormatForSeek(snapshot_.position100ns);
+            return FFFResult::FfmpegFailure;
+        }
         // 还原读位置，让"playback remained active"这句话真的成立。还原失败时不再含糊其辞，
         // 直接把输入已到末尾这件事写进消息——那种情况下会话确实会继续走到结束。
         auto rolledBack = false;
@@ -6857,6 +6977,153 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
         iamfProducedAnyAudio_ = false;
     }
     return FFFResult::Success;
+}
+
+bool PlayerSession::SeekFragmentedPreroll(std::int64_t target100ns) noexcept {
+    // C-SEEK-FRAGMENTED@1 F3：fragmented 文件无法用字节估算定位（moof 稀疏分布，
+    // 时间↔字节线性假设不成立），从当前 demux 位置把参考流包顺序读完，直到越过
+    // 判停点（目标 fragment 的起点）。只丢包不入队：解码与入队交给随后的
+    // DecodeUntilSeekTarget（keyframeSeekPending_ 机制照常生效，R2.2/R2.3）。
+    // worker 线程内同步执行；不等待扫描线程完成（无阻塞 join，契约一致性规则）。
+    if (format_ == nullptr) return false;
+    const auto referenceStream = videoStream_ >= 0 ? videoStream_ : audioStream_;
+    if (referenceStream < 0 ||
+        referenceStream >= static_cast<std::int32_t>(format_->nb_streams) ||
+        format_->streams[referenceStream] == nullptr) return false;
+    if (playbackPacket_ == nullptr) playbackPacket_ = av_packet_alloc();
+    if (playbackPacket_ == nullptr) return false;
+    const auto* referenceTimeBase = &format_->streams[referenceStream]->time_base;
+    const auto origin = TimelineOrigin100ns(format_);
+    // "当前 demux 已解析参考点"：初值取当前位置（已知下界），每读到一个参考流包
+    // 推进到其中的最大解码时间。换算与扫描表/步进比较同轴（TimelineOrigin100ns 已减）。
+    std::int64_t demuxReference100ns = snapshot_.position100ns;
+    std::int64_t stopPoint100ns = target100ns;   // 表不可用时的判停点：target 本身
+    bool stopPointFromTable = false;             // 当前判停点是否来自扫描表
+    std::uint64_t stopPointTableCount = 0;       // 判停点所基于的表条目数（脏检查）
+    std::vector<Fmp4FragmentEntry> table;        // 复用的表快照缓冲
+    // 判停点刷新（F3.b）：有表 → 取 startDecodeTime100ns ≥ target 的第一个 hasKeyframe
+    // entry 的 start（不存在则用表尾 entry 的 end）；表不可用（空表，扫描仍在进行或
+    // 扫描完仍无参考流条目）→ 以 target 本身为判停点继续滚，宁可多滚也不卡死。
+    // CopyTable 的 O(表长) 拷贝用 ScannedCount 脏检查挡掉，只在表真的增长时发生。
+    const auto refreshStopPoint = [&]() noexcept {
+        try {
+            if (fragmentScanner_ == nullptr) { stopPointFromTable = false; stopPoint100ns = target100ns; return; }
+            const auto scanned = static_cast<std::uint64_t>(fragmentScanner_->ScannedCount());
+            if (stopPointFromTable && scanned == stopPointTableCount) return;   // 表未增长，沿用
+            table.clear();
+            if (fragmentScanner_->CopyTable(table) == 0) {
+                stopPointFromTable = false;
+                stopPoint100ns = target100ns;
+                return;
+            }
+            stopPointTableCount = scanned;
+            stopPointFromTable = true;
+            const Fmp4FragmentEntry* chosen = nullptr;
+            for (const auto& entry : table)
+                if (entry.hasKeyframe && entry.startDecodeTime100ns >= target100ns) { chosen = &entry; break; }
+            // 表尾 entry 兜底时判停点用它的 endDecodeTime100ns（目标已越过已扫范围）。
+            stopPoint100ns = chosen != nullptr ? chosen->startDecodeTime100ns
+                : table.back().endDecodeTime100ns;
+        } catch (...) {
+            // 表快照分配失败：退回 target 判停（预滚语义不变，只是少了 fragment 级精度）。
+            stopPointFromTable = false;
+            stopPoint100ns = target100ns;
+        }
+    };
+    refreshStopPoint();
+    std::int64_t packetsRead = 0;
+    while (true) {
+        const auto readResult = av_read_frame(format_, playbackPacket_);
+        if (readResult < 0) {
+            av_packet_unref(playbackPacket_);
+            return false;   // EOF（目标超出内容）/IO 错误 → B2 还原
+        }
+        ++packetsRead;
+        if (playbackPacket_->stream_index == referenceStream) {
+            auto decodeTs = playbackPacket_->dts;
+            if (decodeTs == AV_NOPTS_VALUE) decodeTs = playbackPacket_->pts;   // dts 缺失回落 pts
+            if (decodeTs != AV_NOPTS_VALUE) {
+                const auto packetPosition = av_rescale_q(decodeTs, *referenceTimeBase,
+                    AVRational{1, static_cast<int>(TicksPerSecond)}) - origin;
+                if (packetPosition > demuxReference100ns) demuxReference100ns = packetPosition;
+            }
+        }
+        // 不属参考流的包直接丢弃；全部包 unref——预滚不解码、不入任何队列（R2.2）。
+        av_packet_unref(playbackPacket_);
+        if (demuxReference100ns >= stopPoint100ns) return true;   // 判停命中（此后不校验是否恰好关键帧）
+        if (packetsRead % SeekPrerollInterruptInterval == 0) {
+            if (terminate_.load(std::memory_order_acquire)) return false;   // 关闭请求 → B2
+            refreshStopPoint();
+        }
+        if (packetsRead >= MaximumSeekPrerollPackets) return false;   // R2.5 上限 → B2
+    }
+}
+
+bool PlayerSession::ReopenFormatForSeek(std::int64_t recallPosition100ns) noexcept {
+    // C-SEEK-ROLLBACK@1 B2：fragmented 文件上 avio_seek 回原字节偏移的还原不可靠
+    // （原偏移多半落在访问单元中间），改为整个 demux 句柄重开：流表由 moov 决定、
+    // 确定不变，重开后从 recallPosition 回定位，会话保持可继续（R3.4）。
+    const auto previousStreamCount = format_ != nullptr ? format_->nb_streams : 0;
+    CloseFormat(&format_, formatIo_);
+    std::string reopenError;
+    const auto reopenResult = OpenFormat(mediaPath_, &format_, formatIo_, reopenError);
+    if (reopenResult != FFFResult::Success || format_ == nullptr) {
+        // OpenFormat 失败时已自清 output/io；这里兜底再清一次半开状态（幂等），
+        // 然后走现有 Fail 会话失败路径（R3.2）。
+        CloseFormat(&format_, formatIo_);
+        Fail(reopenResult, reopenError.empty()
+            ? "The demuxer could not be reopened after a failed seek." : reopenError, "seek");
+        return false;
+    }
+    if (format_->nb_streams != previousStreamCount) {
+        // 流表一致性校验（契约要求）：解码器是按重开前的流索引绑的，流数量/顺序
+        // 漂移时按重开失败处理（防御 demuxer 行为漂移）。
+        CloseFormat(&format_, formatIo_);
+        Fail(FFFResult::FfmpegFailure,
+            "The reopened demuxer reports a different stream table; playback cannot continue after the failed seek.",
+            "seek");
+        return false;
+    }
+    // 解码器不持有 AVStream 指针（extradata 已内嵌，同一文件流表确定不变），
+    // flush 即可，无需重开。
+    if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);
+    if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
+    const auto referenceStream = videoStream_ >= 0 ? videoStream_ : audioStream_;
+    if (referenceStream >= 0 &&
+        referenceStream < static_cast<std::int32_t>(format_->nb_streams) &&
+        format_->streams[referenceStream] != nullptr) {
+        const auto timestamp = av_rescale_q(recallPosition100ns + TimelineOrigin100ns(format_),
+            AVRational{1, static_cast<int>(TicksPerSecond)},
+            format_->streams[referenceStream]->time_base);
+        // 回定位失败不升级错误：会话已处于重开后的确定状态（文件头附近），随后的
+        // 顺序播放会自然推进——比 B1 的字节还原可靠。
+        av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD);
+    }
+    ArmAudioUntilVideoFrame();
+    // 消息语义与 B1 的"playback remained active"一致（R3.4）：seek 没到目标，但播放继续。
+    ReportError(FFFResult::FfmpegFailure,
+        "FFmpeg could not seek to the requested position; the demuxer was reopened and playback remained active.",
+        "seek");
+    return true;
+}
+
+void PlayerSession::StartFragmentScanIfNeeded(const std::string& path) noexcept {
+    // C-FMP4-SCANNER@1 挂载点（R1.4）：仅在 fragmented 判定成立时构造扫描器并
+    // 启动后台 moof 扫描线程。视频优先、无视频用音频；参考流缺失时保持
+    // fragmentedMp4_（F3 预滚会失败走 B2，不会退回字节估算毒源）。
+    if (!fragmentedMp4_ || staticImage_ || format_ == nullptr) return;
+    const auto referenceStream = videoStream_ >= 0 ? videoStream_ : audioStream_;
+    if (referenceStream < 0 ||
+        referenceStream >= static_cast<std::int32_t>(format_->nb_streams) ||
+        format_->streams[referenceStream] == nullptr) return;
+    try { fragmentScanner_ = std::make_unique<Fmp4FragmentScanner>(); }
+    catch (...) { return; }   // 分配失败：无扫描器（预滚退化为 target 判停），不影响打开
+    // Start 失败（旁路打开失败、time_base 非法等）不产生线程：保留 fragmentedMp4_，
+    // 让 R2.1 的字节估算禁用与 B2 重开还原照常生效。
+    if (!fragmentScanner_->Start(path.c_str(), format_->streams[referenceStream]->time_base,
+        TimelineOrigin100ns(format_),
+        static_cast<std::int32_t>(format_->streams[referenceStream]->id)))
+        fragmentScanner_.reset();
 }
 
 void PlayerSession::DecodeUntilSeekTarget() noexcept {
@@ -7008,6 +7275,11 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     StopSoftwareVideoDecode();
     placement_.Release();
     if (audioRenderer_) { audioRenderer_->Stop(); audioRenderer_.reset(); }
+    // 后台 moof 扫描收敛（R5.2）：扫描线程持有独立的旁路 IO，不与 demux 句柄共享，
+    // 先 StopAndJoin 再 reset，避免 close 期间后台还在读文件。StopAndJoin 幂等；
+    // 扫描器不依赖 worker 存活，此处在 worker 线程内执行是安全的。
+    if (fragmentScanner_) fragmentScanner_->StopAndJoin();
+    fragmentScanner_.reset();
     // SetTimedTextLayer is intentionally callable outside the session command
     // queue. Gate renderer teardown with its content lock so a final timer tick
     // cannot restart the presenter while this close is joining it.
@@ -7059,6 +7331,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     demuxEnded_ = audioDecoderDrained_ = externalAudioDrained_ = audioClockFinished_ = false;
     staticImage_ = false;
     animatedImage_ = false;
+    fragmentedMp4_ = false;
     sessionWrapLoop_ = false; sessionWrapFailures_ = 0;
     { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = false; }
     audioBlockedUntilVideoFrame_ = false;

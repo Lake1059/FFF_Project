@@ -29,12 +29,12 @@ Imports System.Threading
 '    才认定“这条流模块不接”并清表。单帧不清：偶发无据帧（数据不自证、结构坏、未知档）
 '    保留旧表是既定降级口径，阈值就是防这个的。
 '
-'  ● 🔴 宿主零 DV 语义（红线 B，2026-10-21 隔离修正）：本泵**不解析边数据内容**——
-'    不读 RPU 头、不判增强层、不解释任何档位字段，一切按模块的回答行事。边数据对宿主
+'  ● 🔴 宿主零外部格式语义（红线 B，2026-10-21 隔离修正）：本泵**不解析边数据内容**——
+'    不读元数据头、不判增强层、不解释任何档位字段，一切按模块的回答行事。边数据对宿主
 '    只是不透明字节；模块拒烘焙（无论坏帧还是携带未合成增强层残差）在宿主侧同构：
 '    都是 NoMetadata ⇒ 都走上面的统一阈值。代价：真双层流的前几帧会多套几帧 BL-only
 '    旧表（阈值帧数），合规优先。曾加的“live EL 首帧即清”分支已删——它要求宿主读
-'    AVDOVIRpuDataHeader 字段偏移，属 DV 语义外泄。
+'    外部格式的字段偏移，属格式语义外泄。
 '
 '  ● 配置记录通道：容器码流配置记录是**流级**常量（在 codecpar 上，不在逐帧环里），
 '    由内核导出 FFF3FP_CopyStreamSideData 取回、缓存一次、喂给模块 分析帧 的追加字段；
@@ -104,9 +104,16 @@ Friend Class 色彩变换注入泵
     ' 模块答"未授权"之后是否已经通知过内核丢表。只做一次：未授权是逐帧回答，
     ' 每帧都调一次内核既无意义也会把日志刷满。重新注入成功后复位。
     Private _已清注入表 As Boolean
-    ' 连续“模块答无元数据”的帧数（宿主零 DV 语义：不区分无据原因，统一计数）。
+    ' 连续“模块答无元数据”的帧数（宿主零外部格式语义：不区分无据原因，统一计数）。
     ' 成功注入或流重启时归零。只由泵线程读写。
     Private _连续无元数据帧数 As Integer
+    ' EL 残差合成的粘滞诊断位：一旦内核**确认收到**启用状态的合成请求就保持 True，
+    ' 清表（授权失效 / stale-table 防护）与流重启（seek/换文件/换轨）时复位。
+    ' 信息图层 HDR 行的“EL残差已合成”段读它——合成是逐帧口径，实时显示会横跳；
+    ' "见过即常显"与动态段同策略，但划界不同（动态段按媒体键跨 seek 保留，本位按
+    ' 流重启复位），是有意的：残差合成需要随表重新建立。
+    ' 写入点两处（泵线程的请求确认路径、跨线程的复位路径）⇒ 一律 Volatile。
+    Private _合成已见过 As Boolean
 
     ' ---- 配置记录通道（容器码流配置记录：流级常量，取首次出现的一条并缓存） ----
     Private _配置记录 As Byte()
@@ -148,6 +155,14 @@ Friend Class 色彩变换注入泵
             Return "模块已采用（布局版本 " & _模块.布局版本.ToString() & "）"
         End SyncLock
     End Function
+
+    ''' <summary>是否为某帧发出过启用状态的 EL 残差合成请求（粘滞位，流重启后复位）。
+    ''' 诊断用：把“模块答双层”与“残差真的在被合成”分成两个可读的信号。</summary>
+    Public ReadOnly Property 合成已启用过 As Boolean
+        Get
+            Return Volatile.Read(_合成已见过)
+        End Get
+    End Property
 
     Public Sub New(会话 As 播放器会话)
         If 会话 Is Nothing Then Throw New ArgumentNullException(NameOf(会话))
@@ -372,7 +387,7 @@ Friend Class 色彩变换注入泵
                 Return False
 
             Case 色彩变换模块接口.结果无元数据
-                ' 本帧无可换算据。宿主零 DV 语义（红线 B）：不区分原因——数据不自证、
+                ' 本帧无可换算据。宿主零外部格式语义（红线 B）：不区分原因——数据不自证、
                 ' 结构坏、未知档、携带未合成增强层残差，在宿主侧同构，统一按连续计数处理。
                 ' 偶发无据帧保留旧表是既定降级口径；连续达阈值才认定"这条流模块不接"并清表
                 ' （旧表继续套着就是 stale-table：seek/换段后旧 LUT 会套在内容不同的帧上）。
@@ -419,8 +434,12 @@ Friend Class 色彩变换注入泵
                 Debug.WriteLine("色彩变换注入泵：清注入表未被内核接受（" & 结果.ToString() & "）")
             ElseIf _已消费帧号 >= 0 Then
                 ' 表没了，合成也必须停：否则画面继续带着老参数合成，而宿主这边已经
-                ' 没有任何供给源（症状与"表没清"互为镜像）。
-                发送合成请求(_已消费帧号, New 色彩变换模块接口.原生合成参数())
+                ' 没有任何供给源（症状与"表没清"互为镜像）。内核确认丢弃合成面后，
+                ' 粘滞位同步复位——"EL残差已合成"再常显就是假陈述（授权失效、
+                ' stale-table 清表都走这里，两个终态场景都不该留给下一拍）。
+                If 发送合成请求(_已消费帧号, New 色彩变换模块接口.原生合成参数()) Then
+                    Volatile.Write(_合成已见过, False)
+                End If
             End If
         Catch ex As Exception
             ' 句柄可能正在销毁：清不掉也不能把泵带倒。
@@ -559,6 +578,7 @@ Friend Class 色彩变换注入泵
         _末次注入帧号 = -1
         _已消费帧号 = -1
         _连续无元数据帧数 = 0
+        Volatile.Write(_合成已见过, False)
         ' 新时间线还没有任何注入：允许下一次"未授权"再通知一次内核。
         _已清注入表 = False
         ' 换文件后帧率可能变了：清掉缓存让下一拍重读。
@@ -618,25 +638,32 @@ Friend Class 色彩变换注入泵
                 .载荷 = 钉住.AddrOfPinnedObject()
             }
             Dim 注入结果 = 播放器原生接口.设置动态元数据(句柄, {包}) = 原生播放器结果.成功
-            If 注入结果 AndAlso 合成已分析 Then 发送合成请求(帧序号, 合成参数)
+            If 注入结果 AndAlso 合成已分析 Then Call 发送合成请求(帧序号, 合成参数)
             Return 注入结果
         Finally
             钉住.Free()
         End Try
     End Function
 
-    ''' <summary>把模块给出的合成参数原样交给内核。宿主不解释任何字段（红线 B）。</summary>
-    Private Sub 发送合成请求(帧序号 As Long, 参数 As 色彩变换模块接口.原生合成参数)
-        If Not 播放器原生接口.支持辅层合成 Then Return
+    ''' <summary>把模块给出的合成参数原样交给内核。宿主不解释任何字段（红线 B）。
+    ''' 返回内核是否确认接收（<c>已交</c>）：清表路径用返回值决定是否复位粘滞位。</summary>
+    Private Function 发送合成请求(帧序号 As Long, 参数 As 色彩变换模块接口.原生合成参数) As Boolean
+        If Not 播放器原生接口.支持辅层合成 Then Return False
         Dim 句柄 = _会话.取得句柄()
-        If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return
+        If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return False
         Dim 已交 = 播放器原生接口.设置辅层合成(句柄, 帧序号, 参数.是否启用 <> 0UI,
             参数.残差中心, 参数.残差移位, 参数.最大值)
+        ' 粘滞诊断位：**内核确认收到** enable=1 的请求才置位（句柄失效/被拒收不置，
+        ' "EL残差已合成"才不撒谎）；清表路径用返回值在 enable=0 交到内核后复位。
+        ' 生命周期按流重启划界，与呈现器动态段的媒体键划界不同——有意（动态元数据
+        ' 逐帧持续供给，而残差合成需要随表重新建立），UI 上 seek 后两段不同步。
+        If 已交 AndAlso 参数.是否启用 <> 0UI Then Volatile.Write(_合成已见过, True)
         ' 诊断（FFF_EL_TRACE）：合成请求跟着表走，一条表一条请求，量很小。
         If Environment.GetEnvironmentVariable("FFF_EL_TRACE") = "1" Then
             Console.Error.WriteLine($"CT-EL req frame={帧序号} enabled={参数.是否启用} shift={参数.残差移位} center={参数.残差中心} max={参数.最大值} ok={已交}")
         End If
-    End Sub
+        Return 已交
+    End Function
 
     ''' <summary>两份载荷的前 <paramref name="大小"/> 字节是否逐位相同。</summary>
     Private Shared Function 载荷相同(左 As Byte(), 大小 As Integer, 右 As Byte()) As Boolean
