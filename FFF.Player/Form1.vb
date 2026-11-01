@@ -2,7 +2,7 @@ Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Threading
 
-Public Class Form1
+Partial Public Class Form1
     Private 光盘控制器 As 播放器光盘控制器
     Private Const WM_ENTERSIZEMOVE As Integer = &H231
     Private Const WM_EXITSIZEMOVE As Integer = &H232
@@ -133,6 +133,7 @@ Public Class Form1
         剪辑区间控制器 = New 播放器剪辑区间控制器(播放控制器, 画面控件,
             MB_剪辑区间模式, MP_剪辑区间操作容器, P_剪辑区间进度条容器,
             P_剪辑区间按钮容器, MB_传给3FUI)
+        初始化VSP功能()
         更新WASAPI按钮()
         流选择器 = New 播放器流选择器(Me, MP_DX视频容器, MCM_流选择器, 播放控制器)
         流选择器.应用全局字体(设置.实例对象.字体)
@@ -140,8 +141,8 @@ Public Class Form1
         界面呈现器.设置音量百分比(设置.实例对象.音量百分比)
         播放控制器.设置音量(CSng(设置.实例对象.音量百分比 / 100.0F))
         字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
-            AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
-            AddressOf 播放控制器.提交定时文字图层)
+            AddressOf 播放控制器.安全读取快照, Function() If(字幕显示, 播放控制器.当前字幕, Nothing),
+            AddressOf 播放控制器.提交定时文字图层, Function() If(字幕显示, Threading.Volatile.Read(当前次字幕), Nothing))
         ' 弹幕与字幕分轨：弹幕有自己的呈现器，节拍跟随视频（见 播放器弹幕图层呈现器）。
         ' 字幕仍走 播放器字幕叠加呈现器，保留它那套为静态内容设计的节拍与去重。
         弹幕图层呈现器 = New 播放器弹幕图层呈现器(画面控件,
@@ -935,6 +936,7 @@ Public Class Form1
     End Sub
 
     Friend Sub 应用字幕设置()
+        Threading.Volatile.Read(当前次字幕)?.SRT生成器?.设置样式(设置.实例对象.创建SRT字幕样式())
         播放控制器?.当前字幕?.SRT生成器?.设置样式(设置.实例对象.创建SRT字幕样式())
         字幕图层呈现器?.使图层失效()
     End Sub

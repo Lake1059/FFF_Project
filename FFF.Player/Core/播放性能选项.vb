@@ -9,7 +9,7 @@ Friend Structure 播放性能选项
     Friend ReadOnly 启用空间音频 As Boolean
 
     Friend Sub New(配置 As 设置, Optional 枚举设备 As Func(Of IReadOnlyList(Of GPU解码设备)) = Nothing)
-        缩放质量 = CType(配置.视频缩放质量选项, 视频缩放质量)
+        缩放质量 = If(配置.视频缩放质量选项 = 0, 视频缩放质量.均衡, 视频缩放质量.高画质)
         GPU设备标识 = 配置.GPU解码设备标识
         GPU设备索引 = -1
         If Not String.IsNullOrEmpty(GPU设备标识) Then

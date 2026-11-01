@@ -7,6 +7,8 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
 
     Private ReadOnly 画面控件 As 播放器画面控件
     Private ReadOnly 快照提供器 As Func(Of 播放器快照)
+    Private ReadOnly 次字幕提供器 As Func(Of 外部字幕轨道)
+    Private ReadOnly 次字幕命令生成器 As 播放器字幕叠加呈现器
     Private ReadOnly 字幕提供器 As Func(Of 外部字幕轨道)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
     Private ReadOnly SRT绘制项 As New List(Of SRT字幕绘制项)()
@@ -82,13 +84,19 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
 
     Friend Sub New(画面控件 As 播放器画面控件, 快照提供器 As Func(Of 播放器快照),
                    字幕提供器 As Func(Of 外部字幕轨道),
-                   提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single))
+                   提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single),
+                   Optional 次字幕提供器 As Func(Of 外部字幕轨道) = Nothing, Optional 仅生成命令 As Boolean = False)
         ArgumentNullException.ThrowIfNull(画面控件)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(字幕提供器)
         ArgumentNullException.ThrowIfNull(提交图层)
         Me.画面控件 = 画面控件
         Me.快照提供器 = 快照提供器
+        Me.次字幕提供器 = 次字幕提供器
+        If 次字幕提供器 IsNot Nothing Then
+            次字幕命令生成器 = New 播放器字幕叠加呈现器(画面控件, 快照提供器, 次字幕提供器, Sub(a, b, c, d)
+                                                                                         End Sub, 仅生成命令:=True)
+        End If
         Me.字幕提供器 = 字幕提供器
         Me.提交图层 = 提交图层
         刷新计时器 = New LakeUI.PrecisionTimer With {
@@ -103,7 +111,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
         AddHandler 画面控件.DpiChangedAfterParent, AddressOf 画面几何已变化
         AddHandler 刷新计时器.Tick, AddressOf 刷新计时器_Tick
         更新刷新间隔()
-        刷新计时器.Start()
+        If Not 仅生成命令 Then 刷新计时器.Start()
     End Sub
 
     Private Sub 刷新计时器_Tick(sender As Object, e As EventArgs)
@@ -191,6 +199,20 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
         Try
             Dim commands = 生成命令(客户区大小, 视频宽度, 视频高度, 播放位置, 字幕,
                 DPI, 时间轴代次)
+            If 次字幕命令生成器 IsNot Nothing Then
+                Dim 顶部 = 次字幕命令生成器.生成命令(客户区大小, 视频宽度, 视频高度, 播放位置, 次字幕提供器(), DPI, 时间轴代次)
+                If 顶部.Count > 0 Then
+                    Dim 混合 = commands.ToList()
+                    Dim 比例 = Math.Min(客户区大小.Width / CSng(视频宽度), 客户区大小.Height / CSng(视频高度))
+                    Dim 顶部边距 = (客户区大小.Height - 视频高度 * 比例) / 2 + 48 * 视频高度 * 比例 / 1080
+                    Dim 偏移 = 顶部边距 - 顶部.Min(Function(x) x.Y)
+                    For Each 命令 In 顶部
+                        命令.Y += 偏移
+                        混合.Add(命令)
+                    Next
+                    commands = 混合
+                End If
+            End If
             Dim signature = 计算图层签名(客户区大小, commands)
             If Volatile.Read(图层签名有效标志) <> 0 AndAlso signature = 上次图层签名 Then Return
             上次图层签名 = signature
@@ -431,6 +453,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
         ' 进入的后台 Tick 退出，保证清空图层之后旧命令不可能再次提交。
         刷新空闲.Wait()
         刷新计时器.Dispose()
+        次字幕命令生成器?.释放()
         RemoveHandler 画面控件.ClientSizeChanged, AddressOf 画面几何已变化
         RemoveHandler 画面控件.DpiChangedAfterParent, AddressOf 画面几何已变化
         Try
