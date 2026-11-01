@@ -5,8 +5,11 @@ Imports System.Text.Json
 Public Class 设置
     Public Shared Property 实例对象 As New 设置()
 
+    ' 上次使用的播放倍速（0.1–16）：打开媒体后按它恢复，随"退出时保存设置"落盘。
     Public Property 播放倍速 As Double = 1
+    ' 画面滚轮职责：False=音量调节，True=视频缩放（右键「鼠标滚轮」菜单可切换）。
     Public Property 滚轮放大视频 As Boolean
+    ' 主/次字幕总开关（右键「显示字幕」切换，关闭时两层字幕都不绘制）。
     Public Property 显示字幕 As Boolean = True
     Public Property 字体 As String = SystemFonts.DefaultFont.FontFamily.Name
     Public Property 初始画面尺寸选项 As Integer = 2

@@ -11,17 +11,33 @@ Partial Public Class Form1
     Private 视频缩放 As Single = 1
     Private 缩放滚轮余量 As Integer
     Private 倍速按钮 As LakeUI.ModernButton
+    Private 倍速弹窗停用时刻 As Integer
 
     Private Sub 添加功能菜单(菜单 As LakeUI.ModernContextMenu, 文本 As String, 操作 As Action)
         Dim 项 As New LakeUI.ModernContextMenu.ModernMenuItem With {.Text = 文本}
-        AddHandler 项.Click, Sub() BeginInvoke(Sub()
-                                                   Try
-                                                       操作()
-                                                   Catch ex As Exception
-                                                       LakeUI.ExOverlayMsgBox(Me, ex.Message, MsgBoxStyle.Critical Or MsgBoxStyle.OkOnly, "操作失败")
-                                                   End Try
-                                               End Sub)
+        AddHandler 项.Click, Sub()
+                                ' 菜单点击与窗体关闭存在竞态：BeginInvoke 及其回调都可能落在关闭之后。
+                                If IsDisposed OrElse Disposing Then Return
+                                Try
+                                    BeginInvoke(Sub()
+                                                    If IsDisposed OrElse Disposing Then Return
+                                                    Try
+                                                        操作()
+                                                    Catch ex As Exception
+                                                        LakeUI.ExOverlayMsgBox(Me, ex.Message, MsgBoxStyle.Critical Or MsgBoxStyle.OkOnly, "操作失败")
+                                                    End Try
+                                                End Sub)
+                                Catch ex As InvalidOperationException
+                                End Try
+                            End Sub
         菜单.Items.Add(项)
+    End Sub
+
+    Private Shared Sub 释放菜单树(菜单 As LakeUI.ModernContextMenu)
+        For Each 项 In 菜单.Items
+            If 项.SubMenu IsNot Nothing Then 释放菜单树(项.SubMenu)
+        Next
+        菜单.Dispose()
     End Sub
 
     Private Sub 初始化VSP功能()
@@ -80,10 +96,11 @@ Partial Public Class Form1
                                                 If 播放控制器.光标锚定缩放(新缩放 / 视频缩放, Math.Clamp(锚点.X / CSng(Math.Max(1, 画面控件.Width)), 0, 1), Math.Clamp(锚点.Y / CSng(Math.Max(1, 画面控件.Height)), 0, 1), 结果) Then
                                                     视频缩放 = 结果
                                                     播放控制器.重绘画面()
+                                                    ' 缩放未生效（如旧内核缺 ZoomViewAt）时不提示，避免"没缩放却报百分比"的误导。
+                                                    信息图层呈现器?.显示操作信息($"视频缩放 {视频缩放:P0}", &HFF69DF8BUI)
                                                 End If
                                                 还原画面按钮.Visible = 视频缩放 <> 1
                                                 还原画面按钮.BringToFront()
-                                                信息图层呈现器?.显示操作信息($"视频缩放 {视频缩放:P0}", &HFF69DF8BUI)
                                             End Sub
         Dim 比例 = DeviceDpi / 96.0F
         还原画面按钮 = New LakeUI.ModernButton With {.Text = "还原画面", .Bounds = New Rectangle(CInt(8 * 比例), CInt(8 * 比例), CInt(100 * 比例), CInt(30 * 比例)), .BorderRadius = 5, .Visible = False, .Font = MB_软件解码或硬件解码.Font, .BackColor1 = MB_软件解码或硬件解码.BackColor1}
@@ -121,7 +138,8 @@ Partial Public Class Form1
                                                If 当前倍速 <> 1 Then 播放控制器.设置播放倍速(当前倍速)
                                            End Sub
         AddHandler FormClosed, Sub()
-                                   视频菜单.Dispose()
+                                   ' ModernContextMenu.Dispose 不递归子菜单，先收叶子再收根。
+                                   释放菜单树(视频菜单)
                                    倍速弹窗?.Dispose()
                                    清除次字幕()
                                End Sub
