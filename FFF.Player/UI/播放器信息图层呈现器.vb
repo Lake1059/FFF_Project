@@ -67,6 +67,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取弹幕状态 As Func(Of 定时文字状态)
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
     Private ReadOnly 获取内容描述 As Func(Of String)
+    Private ReadOnly 获取EL合成状态 As Func(Of Boolean)
     Private ReadOnly 获取超分状态 As Func(Of String)
     Private ReadOnly 获取自动HDR状态 As Func(Of String)
     ' AI 实时字幕是否正在跑（worker 进程活着）。字幕行用它区分"真的没有字幕"
@@ -123,6 +124,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
                    图层提交器 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single),
                    Optional 超分状态提供器 As Func(Of String) = Nothing,
                    Optional 自动HDR状态提供器 As Func(Of String) = Nothing,
+                   Optional EL合成状态提供器 As Func(Of Boolean) = Nothing,
                    Optional AI字幕活动提供器 As Func(Of Boolean) = Nothing)
         ArgumentNullException.ThrowIfNull(画面)
         ArgumentNullException.ThrowIfNull(快照提供器)
@@ -135,6 +137,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取字幕状态 = 字幕状态提供器 : 获取弹幕状态 = 弹幕状态提供器
         获取WASAPI模式 = WASAPI模式提供器
         获取内容描述 = 内容描述提供器
+        获取EL合成状态 = EL合成状态提供器
         获取超分状态 = 超分状态提供器
         获取自动HDR状态 = 自动HDR状态提供器
         获取AI字幕活动 = AI字幕活动提供器
@@ -309,8 +312,12 @@ Friend NotInheritable Class 播放器信息图层呈现器
             添加配对行如果有值(结果, "输入：", 视频输入(视频, 快照.视频实时比特率), 紫色)
             添加配对行如果有值(结果, "色彩：", 视频色彩(视频), 蓝色)
             ' 内容分类由外部模块产出（解锁后才非空）；宿主只显示不解释，"空值自然不出现"。
-            ' HDR 行里把等级插在规格之后（HDR10 P8.1 动态元数据已用于处理 …），与「内容：」行同源。
+            ' 用户裁定（2026-11-01）：外部增强等级不再单独成行，注入态由模块供给 "+P…" 文本，
+            ' 本体只拼 "HDR" & 文本 = "HDR+P8.1 …"（规格词整体替换，HDR10 等基础词不显示），
+            ' 信息图层里没有独立的「内容：」行。EL 残差合成的粘滞位同源（模块文本说
+            ' 层词只是内容形态，合成位才是处理确认）。
             Dim 内容描述 = 安全获取(获取内容描述)
+            Dim EL合成已见过 = 安全获取(获取EL合成状态)
             ' 粘滞窗口按 媒体路径|视频流 划界：跨过边界一律从头累计。
             Dim 粘滞键 = $"{媒体路径}|{快照.当前视频流}"
             If 粘滞键 <> 粘滞动态媒体键 Then
@@ -334,8 +341,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
                 粘滞目标尼特 = 快照.HDR有效目标峰值尼特
                 粘滞回退 = 快照.HDR回退有效
             End If
-            添加配对行如果有值(结果, "HDR：", 视频HDR(视频, 快照, 内容描述), 橙色)
-            添加配对行如果有值(结果, "内容：", 内容描述, 橙色)
+            添加配对行如果有值(结果, "HDR：", 视频HDR(视频, 快照, 内容描述, EL合成已见过), 橙色)
+
             添加配对行如果有值(结果, "输出：", 视频输出(快照, 画面控件.ClientSize), 绿色)
             添加配对行如果有值(结果, "渲染：", 视频渲染(快照), 黄色)
             ' RTX 视频超分辨率与 RTX 自动 HDR（TrueHDR）各一行。这两行存在的理由相同：
@@ -590,32 +597,56 @@ Friend NotInheritable Class 播放器信息图层呈现器
             $"色彩模式 {色彩模式文本(快照)}")
     End Function
 
-    Private Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照, 内容描述 As String) As String
-        If Not 快照.是HDR源 AndAlso Not 流.是HDR Then Return String.Empty
+    Private Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照,
+                             内容描述 As String, EL合成已见过 As Boolean) As String
+        ' 外部模块算出的增强规格词（"+P8.1 …"，解锁后才有值）：宿主零外部格式语义，
+        ' "+" 与 P 号都来自模块文本。空值自然不出现。
+        Dim 等级 = If(String.IsNullOrWhiteSpace(内容描述), String.Empty, 内容描述.Trim())
+        ' 门控：HDR 源照常；但外部增强流可能被本体判成 SDR 基底（如 P5 无色彩标记）——
+        ' 模块在场时这是"SDR 分类 + 外部色彩变换"的合法形态，不能因 SDR 就整行消失。
+        If Not 快照.是HDR源 AndAlso Not 流.是HDR AndAlso 等级.Length = 0 Then Return String.Empty
         ' 规格优先流级口径（媒体 JSON 已与逐帧状态脱钩）；流只声明 SDR/缺声明时
         ' 才回退快照枚举 —— 且读的是"开流取一次"的锁存值，不再逐帧横跳。
-        Dim 规格 = If(String.IsNullOrWhiteSpace(流.HDR格式) OrElse 流.HDR格式 = "SDR",
-                    HDR规格文本(粘滞HDR规格枚举, 流.HDR格式), 流.HDR格式)
-        ' 外部模块算出的 P 等级（解锁后才有值）插在规格之后；宿主只显示不解释，空值自然不出现。
-        Dim 等级 = If(String.IsNullOrWhiteSpace(内容描述), String.Empty, 内容描述.Trim())
-        ' 动态段是粘滞位（见 创建调试行），逐帧回落不再把这段抹掉。
-        Dim 动态 = If(粘滞动态已见过, "动态元数据已用于处理", String.Empty)
+        ' 用户裁定（2026-11-01）：基础 HDR 用传输函数表述（HDR PQ / HDR HLG）；
+        ' 模块注入后规格整体变为 "HDR"+模块文本（HDR+P8.1 …），基础规格词不显示。
+        Dim 基础规格 = If(String.IsNullOrWhiteSpace(流.HDR格式) OrElse 流.HDR格式 = "SDR",
+                    规格显示文本(粘滞HDR规格枚举, 流.HDR格式),
+                    规格显示文本(HDR格式.SDR, 流.HDR格式))
+        Dim 规格 = If(等级.Length > 0, "HDR" & 等级, 基础规格)
+        ' 动态段是粘滞位（见 创建调试行），逐帧回落不再把这段抹掉。外部增强流上这份
+        ' 动态元数据就是模块烘焙的外部映射表 ⇒ 文案升级为外部映射口径；HDR10+/Vivid 流
+        ' （模块文本为空）维持原口径。
+        Dim 动态 = If(粘滞动态已见过,
+                    If(等级.Length = 0, "动态元数据已用于处理", "外部映射已用于处理"),
+                    String.Empty)
+        ' EL 残差合成状态（粘滞位，泵置位/流重启复位）：模块文本里的层词只是
+        ' 内容形态，这一段才是“残差真的在被合成”的处理确认；单层/无残差双层流永不出现。
+        Dim 合成 = If(EL合成已见过, "EL残差已合成", String.Empty)
         ' 亮度段与回退位同走锁存值：显示目标只在锁存时刻处于峰值映射档才出现。
         Dim 亮度 = If(粘滞源峰值 > 0, $"源峰值 {粘滞源峰值:0}尼特", String.Empty)
         If 粘滞目标有效 Then
             亮度 = 合并字段(亮度, $"显示目标 {粘滞目标尼特:0}尼特")
         End If
         Dim 回退 = If(粘滞回退, "HDR fallback", String.Empty)
-        Return 合并字段(规格, 等级, 动态, 亮度, 回退)
+        Return 合并字段(规格, 动态, 合成, 亮度, 回退)
     End Function
 
-    Private Shared Function HDR规格文本(规格 As HDR格式, 媒体文本 As String) As String
+    ''' <summary>HDR 行的规格词（2026-11-01 口径）：基础 HDR 用传输函数表述 ——
+    ''' HDR10 ⇒ "HDR PQ"、HLG ⇒ "HDR HLG"；HDR10+/Vivid 保持注册名。枚举判不出的
+    ''' （SDR/未知）回退媒体文本，且对常见的 "HDR10"/"HLG" 字样做同一映射。
+    ''' 外部增强注入态不走这里 —— 模块的 "+P…" 文本直接拼在 "HDR" 后（见 视频HDR）。</summary>
+    Private Shared Function 规格显示文本(规格 As HDR格式, 媒体文本 As String) As String
         Select Case 规格
-            Case HDR格式.HDR10 : Return "HDR10"
+            Case HDR格式.HDR10 : Return "HDR PQ"
             Case HDR格式.HDR10Plus : Return "HDR10+"
-            Case HDR格式.HLG : Return "HLG"
+            Case HDR格式.HLG : Return "HDR HLG"
             Case HDR格式.HDRVivid : Return "HDR Vivid"
-            Case Else : Return 媒体文本
+            Case Else
+                Select Case 媒体文本
+                    Case "HDR10" : Return "HDR PQ"
+                    Case "HLG" : Return "HDR HLG"
+                    Case Else : Return 媒体文本
+                End Select
         End Select
     End Function
 
@@ -730,7 +761,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
                 ' SDR 源现在也会被放到这条链上（默认策略：位深 >8 优先 16bit scRGB），
                 ' 所以"真实高亮"必须按**源**说话——把高位深 SDR 报成 HDR 是假陈述。
                 If 快照.是HDR源 Then
-                    Return $"{HDR规格文本(快照.HDR规格, "HDR")} 真实高亮"
+                    Return $"{规格显示文本(快照.HDR规格, "HDR")} 真实高亮"
                 End If
                 Return "scRGB 高位深（SDR 源）"
             Case 色彩输出模式.原始HDR按SDR呈现 : Return "原始 HDR 灰"

@@ -161,6 +161,7 @@
     <ClCompile Include="3FP\Audio\WasapiRenderer.cpp" />
     <ClCompile Include="3FP\Audio\IamfAudioDecoder.cpp" />
     <ClCompile Include="3FP\Core\PlayerSession.cpp" />
+    <ClCompile Include="3FP\Core\Fmp4FragmentScanner.cpp" />
     <ClCompile Include="3FP\Core\DecodeDeviceSelection.cpp" />
     <ClCompile Include="3FP\Core\AvifIlocShim.cpp" />
     <ClCompile Include="3FP\Core\AvifTileGridComposer.cpp" />
