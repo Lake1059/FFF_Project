@@ -39,7 +39,7 @@ Public Enum HDR处理路径 As UInteger
     HLG显示器映射 = 3
     ' DEPRECATED ABI mirror: never produced by the kernel any more.
     HDRdp兼容基础层回退 = 4
-    HDRdpFEL基础层回退 = 5
+    HDRdp层回退 = 5
     HDRVivid动态映射 = 6
     外部色彩变换 = 7
 End Enum
@@ -47,8 +47,8 @@ End Enum
 ' DEPRECATED ABI mirror: never produced by the kernel any more.
 Public Enum HDRdp增强层类型 As UInteger
     无 = 0
-    MEL = 1
-    FEL = 2
+    无残差 = 1
+    有残差 = 2
     未知 = 3
 End Enum
 
@@ -185,7 +185,7 @@ Public NotInheritable Class 播放器快照
         ' 以下为废弃 ABI 镜像：内核不再分类，恒为 0 / False / 无。
         HDRdp配置档次 = CInt(值.HDRdp配置档次)
         HDRdp级别 = CInt(值.HDRdp级别)
-        有HDRdpRPU = 值.有HDRdpRPU <> 0
+        有HDRdp元数据 = 值.有HDRdp元数据 <> 0
         有HDRdp增强层 = 值.有HDRdp增强层 <> 0
         HDRdp增强层类型 = CType(值.HDRdp增强层类型, HDRdp增强层类型)
         动态HDR元数据有效 = 值.动态HDR元数据有效 <> 0
@@ -272,7 +272,7 @@ Public NotInheritable Class 播放器快照
     ' DEPRECATED ABI mirror: the kernel no longer classifies these.
     Public ReadOnly Property HDRdp配置档次 As Integer
     Public ReadOnly Property HDRdp级别 As Integer
-    Public ReadOnly Property 有HDRdpRPU As Boolean
+    Public ReadOnly Property 有HDRdp元数据 As Boolean
     Public ReadOnly Property 有HDRdp增强层 As Boolean
     Public ReadOnly Property HDRdp增强层类型 As HDRdp增强层类型
     Public ReadOnly Property 动态HDR元数据有效 As Boolean
@@ -702,8 +702,8 @@ Public NotInheritable Class 媒体流信息
     Public Property HDRdp配置档次 As Integer
     <JsonPropertyName("hdrDpLevel")>
     Public Property HDRdp级别 As Integer
-    <JsonPropertyName("hdrDpRpu")>
-    Public Property 有HDRdpRPU As Boolean
+    <JsonPropertyName("hdrDpMetadata")>
+    Public Property 有HDRdp元数据 As Boolean
     <JsonPropertyName("hdrDpEnhancementLayer")>
     Public Property HDRdp增强层 As String = String.Empty
     <JsonPropertyName("hdrFallback")>

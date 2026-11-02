@@ -152,7 +152,7 @@ Friend Structure 原生播放器快照
     ' DEPRECATED ABI slots: layout must match FFF3FPSnapshot; always zero.
     Public HDRdp配置档次 As UInteger
     Public HDRdp级别 As UInteger
-    Public 有HDRdpRPU As UInteger
+    Public 有HDRdp元数据 As UInteger
     Public 有HDRdp增强层 As UInteger
     Public HDRdp增强层类型 As UInteger
     Public 动态HDR元数据有效 As UInteger

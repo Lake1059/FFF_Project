@@ -36,6 +36,7 @@ struct AVPacket;
 struct AVBufferRef;
 struct AVFilterGraph;
 struct AVFilterContext;
+class Fmp4FragmentScanner;
 
 class PlayerSession final {
 public:
@@ -241,6 +242,15 @@ private:
     FFFResult DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1,
         bool exact = true) noexcept;
     void DecodeUntilSeekTarget() noexcept;
+    // —— fragmented MP4（fMP4）seek 支撑（C-SEEK-FRAGMENTED@1 / C-SEEK-ROLLBACK@1）——
+    // DoOpen 挂载：fragmented 判定成立时构造扫描器并启动后台 moof 扫描线程。
+    void StartFragmentScanIfNeeded(const std::string& path) noexcept;
+    // F3 顺序预滚：从当前 demux 位置把参考流包顺序读完直到判停点。true=判停命中
+    //（落入现有成功收尾）；false=走 B2 重开还原。
+    bool SeekFragmentedPreroll(std::int64_t target100ns) noexcept;
+    // B2 重开还原：CloseFormat→OpenFormat→flush→重定位→ReportError。返回 false 表示
+    // 重开失败、已走 Fail 会话失败路径，调用方返回 FfmpegFailure 即可。
+    bool ReopenFormatForSeek(std::int64_t recallPosition100ns) noexcept;
     void DoSelectStream(std::int32_t streamIndex, bool video) noexcept;
     void DoLoadExternalAudio(std::string pathUtf8, std::int32_t streamIndex,
         std::int64_t offset100ns) noexcept;
@@ -514,6 +524,11 @@ private:
     // Path of the media currently open. Kept because the IAMF descriptor OBUs
     // must be re-read from the file after the demuxer has consumed them.
     std::string mediaPath_;
+    // fMP4（mvex）判定结果（C-FMP4-DETECT@1）：DoOpen 挂载时检测，决定 DoSeek 的
+    // F1/F2/F3 分派与 B1/B2 还原分叉。
+    bool fragmentedMp4_ = false;
+    // 后台 moof 扫描表（C-FMP4-SCANNER@1）；析构内 StopAndJoin 兜底（R5.2）。
+    std::unique_ptr<class Fmp4FragmentScanner> fragmentScanner_;
     // 临时诊断开关（默认关）：排查 IAMF 泵是否在跑。
     /// Opens the AOM reference decoder when the track is IAMF. False means the
     /// caller must use the ordinary FFmpeg decoder.
@@ -635,6 +650,12 @@ private:
     bool muted_;
     FFF3FPSnapshot snapshot_;
     FFF3FPSnapshot publishedSnapshot_;
+    // F-A duration refill (C-DURATION-REFILL@1): upper bound of the playback-timeline
+    // range the demuxer has actually seen (100 ns, same axis as snapshot_.position100ns).
+    // Monotonic max accumulator that grows snapshot_.duration100ns for media whose
+    // container carries no duration. Worker thread only: DoOpen, PumpPlayback and
+    // DoClose all run serially on the command-queue worker, so no extra lock guards it.
+    std::int64_t demuxedExtent100ns_ = 0;
     // Image details for GetImageInfo, built once on the worker thread at the end
     // of DoOpen and handed out under snapshotMutex_ - the decoder-owned frames
     // the build reads must not be touched from the caller's thread.

@@ -57,7 +57,7 @@ enum class FFF3FPHdrProcessingPath : std::uint32_t {
     Hdr10PlusDynamic = 2,
     HlgDisplayMapped = 3,
     HDRdpHdr10Fallback = 4,
-    HDRdpFelFallback = 5,
+    HDRdpLayerFallback = 5,
     HdrVividDynamic = 6,
     ExternalDynamic = 7,
 };
@@ -67,8 +67,8 @@ enum class FFF3FPHdrProcessingPath : std::uint32_t {
 // layouts stay byte-identical for hosts built against earlier headers.
 enum class FFF3FPHDRdpEnhancementLayer : std::uint32_t {
     None = 0,
-    Mel = 1,
-    Fel = 2,
+    ResidualFree = 1,
+    ResidualFull = 2,
     Unknown = 3,
 };
 
@@ -269,7 +269,7 @@ struct FFF3FPSnapshot {
     // classified as carrying external metadata; its base layer is plain HDR10.
     std::uint32_t hdrDpProfile;
     std::uint32_t hdrDpLevel;
-    std::uint32_t hasHDRdpRpu;
+    std::uint32_t hasHdrDpMetadata;
     std::uint32_t hasHDRdpEnhancementLayer;
     FFF3FPHDRdpEnhancementLayer hdrDpEnhancementLayer;
     std::uint32_t dynamicHdrMetadataActive;
@@ -678,7 +678,7 @@ struct FFF3FPColorTransform {
 // The hdrDp* inputs below are DEPRECATED ABI (slots retained): they are
 // validated but no longer influence the result -- a stream carrying external
 // classified through its transfer characteristic alone. HdrDp residual:
-// 0=unknown/not present, 1=MEL, 2=FEL.
+// 0=unknown/not present, 1=dual layer without residual, 2=dual layer with residual.
 struct FFF3FPHdrProcessingProbe {
     std::uint32_t size;
     std::uint32_t version;
@@ -686,7 +686,7 @@ struct FFF3FPHdrProcessingProbe {
     std::uint32_t hdrDpProfile;
     std::uint32_t hdrDpLevel;
     std::uint32_t hdrDpCompatibilityId;
-    std::uint32_t hdrDpRpu;
+    std::uint32_t hdrDpMetadata;
     std::uint32_t hdrDpEnhancementLayer;
     std::uint32_t hdrDpResidual;
     std::uint32_t hdr10PlusMetadata;
