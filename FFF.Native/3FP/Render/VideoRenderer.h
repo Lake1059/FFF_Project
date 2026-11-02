@@ -194,7 +194,6 @@ public:
     FFFResult SetPreferredAdapterIndex(std::int32_t index) noexcept;
     void SetDiscAspect(double aspect) noexcept { discAspect_.store(static_cast<float>(aspect)); }
     void SetInteractiveMove(bool enabled) noexcept;
-    FFFResult SetScalingMode(std::uint32_t mode) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
     // Adaptive downscale-before-upload: opt-in, software-decode only, and engaged
     // only while frames are being dropped. See the API field for the rationale.
@@ -670,9 +669,8 @@ private:
         float sampleScale = 1, yOffset = 0, yScale = 1;
         float cOffset = 0.5f, cScale = 1, kr = 0.2126f, kb = 0.0722f;
         // imageModeX drives the still-image pixel-block enlargement in SampleVideo;
-        // padding2 carries the selected scaling mode (SetScalingMode writes it,
-        // SampleVideo dispatches on ImageMode.y). Both reuse what used to be
-        // padding slots, so the constant-buffer layout stays the same size.
+        // it reuses what used to be a padding slot, so the constant-buffer layout
+        // stays the same size.
         float chromaOffsetX = 0, chromaOffsetY = 0, imageModeX = 0, padding2 = 0;
         std::uint32_t projection360 = 0;
         float viewYaw = 0, viewPitch = 0, viewFovY = 90;
@@ -1190,7 +1188,6 @@ private:
     // what makes VSR switching safe mid-stream.
     ID3D11ShaderResourceView* effectiveSourceViews_[3]{};
     FFF3FPVideoScalingQuality scalingQuality_;
-    std::uint32_t scalingMode_ = 0;
     // Adaptive downscale-before-upload state. The policy samples a rolling window of
     // frame outcomes rather than reacting to any single drop.
     std::atomic<bool> adaptiveDownscaleEnabled_{false};
