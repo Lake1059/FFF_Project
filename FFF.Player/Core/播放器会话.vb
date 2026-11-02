@@ -1071,6 +1071,16 @@ Public NotInheritable Class 播放器会话
         End Get
     End Property
 
+    ''' <summary>色彩变换通路是否为某帧发出过启用状态的 EL 残差合成请求
+    ''' （粘滞位，流重启后复位；泵未启动时 False）。</summary>
+    Friend ReadOnly Property 色彩变换EL合成已见过 As Boolean
+        Get
+            Dim 泵 = 注入泵
+            If 泵 Is Nothing Then Return False
+            Return 泵.合成已启用过
+        End Get
+    End Property
+
     Public Sub 释放() Implements IDisposable.Dispose
         If Interlocked.Exchange(已释放, 1) <> 0 Then Return
         释放取消源.Cancel()
