@@ -264,9 +264,15 @@ Public NotInheritable Class 播放器控制器
     End Function
 
     ''' <summary>色彩变换通路已读到的内容分类文本（模块产出；无会话 / 未解锁 / 无分类时答空串）。
-    ''' 供信息图层“内容：”行与测试读取，任何时候都能安全问。</summary>
+    ''' 供信息图层 HDR 行的外部增强等级段与测试读取，任何时候都能安全问。</summary>
     Public Function 读取色彩变换内容描述() As String
         Return 安全读取会话(Function(目标) 目标.色彩变换内容描述, String.Empty)
+    End Function
+
+    ''' <summary>色彩变换通路已发出过 EL 残差合成请求（粘滞位，流重启后复位）。
+    ''' 供信息图层 HDR 行的 EL 状态段与测试读取，任何时候都能安全问。</summary>
+    Public Function 读取色彩变换EL合成已见过() As Boolean
+        Return 安全读取会话(Function(目标) 目标.色彩变换EL合成已见过, False)
     End Function
 
     ''' <summary>解锁成功后调用：把注入通路从“补装载已放弃”里拉回来。
@@ -1981,12 +1987,13 @@ Public NotInheritable Class 播放器控制器
         End Select
     End Function
 
+    ''' <summary>操作提示用的 HDR 规格词（与信息图层 HDR 行同口径：HDR PQ / HDR HLG）。</summary>
     Private Shared Function HDR规格文本(快照 As 播放器快照) As String
         Select Case 快照.HDR规格
             Case HDR格式.HDR10Plus : Return "HDR10+"
-            Case HDR格式.HLG : Return "HLG"
+            Case HDR格式.HLG : Return "HDR HLG"
             Case HDR格式.HDRVivid : Return "HDR Vivid"
-            Case Else : Return "HDR10"
+            Case Else : Return "HDR PQ"
         End Select
     End Function
 

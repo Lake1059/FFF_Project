@@ -19,6 +19,8 @@ Friend NotInheritable Class 播放器按钮图标资源
     Implements IDisposable
 
     Private Const 资源前缀 = "FFF.Player.Resources.PlayerButtons."
+    ''' <summary>运行时资源扩展名。O4（2026-10-30）：图标改为构建期烘焙 PNG，不再运行时光栅化 SVG。</summary>
+    Private Const 资源扩展名 = ".png"
     Private ReadOnly 图像 As New Dictionary(Of 播放器按钮图标, Image)
     Private 已释放 As Boolean
 
@@ -52,30 +54,32 @@ Friend NotInheritable Class 播放器按钮图标资源
     End Sub
 
     Private Shared Function 读取图像(图标 As 播放器按钮图标) As Image
-        Dim 资源名称 = 资源前缀 & 取得资源文件名(图标)
+        Dim 资源名称 = 资源前缀 & 取得资源文件名(图标) & 资源扩展名
         Dim 程序集 = Assembly.GetExecutingAssembly()
         Using 资源流 = 程序集.GetManifestResourceStream(资源名称)
             If 资源流 Is Nothing Then
                 Throw New InvalidOperationException($"找不到播放器按钮资源：{资源名称}")
             End If
-            Dim 文档 = Svg.SvgDocument.Open(Of Svg.SvgDocument)(资源流)
-            Return 文档.Draw(48, 48)
+            ' GDI+ 的图像会惰性回读流：必须在流存活期间复制一份独立位图，不能把 Image 直接交出去。
+            Using 原始 = New Bitmap(资源流)
+                Return New Bitmap(原始)
+            End Using
         End Using
     End Function
 
     Private Shared Function 取得资源文件名(图标 As 播放器按钮图标) As String
         Select Case 图标
-            Case 播放器按钮图标.播放 : Return "Play.svg"
-            Case 播放器按钮图标.暂停 : Return "Pause.svg"
-            Case 播放器按钮图标.停止 : Return "Stop.svg"
-            Case 播放器按钮图标.倒退或上一个 : Return "Previous.svg"
-            Case 播放器按钮图标.前进或下一个 : Return "Next.svg"
-            Case 播放器按钮图标.打开 : Return "Open.svg"
-            Case 播放器按钮图标.设置 : Return "Settings.svg"
-            Case 播放器按钮图标.播放列表 : Return "Playlist.svg"
-            Case 播放器按钮图标.剪辑区间 : Return "ClipRange.svg"
-            Case 播放器按钮图标.元数据 : Return "Metadata.svg"
-            Case 播放器按钮图标.流选择 : Return "Streams.svg"
+            Case 播放器按钮图标.播放 : Return "Play"
+            Case 播放器按钮图标.暂停 : Return "Pause"
+            Case 播放器按钮图标.停止 : Return "Stop"
+            Case 播放器按钮图标.倒退或上一个 : Return "Previous"
+            Case 播放器按钮图标.前进或下一个 : Return "Next"
+            Case 播放器按钮图标.打开 : Return "Open"
+            Case 播放器按钮图标.设置 : Return "Settings"
+            Case 播放器按钮图标.播放列表 : Return "Playlist"
+            Case 播放器按钮图标.剪辑区间 : Return "ClipRange"
+            Case 播放器按钮图标.元数据 : Return "Metadata"
+            Case 播放器按钮图标.流选择 : Return "Streams"
             Case Else : Throw New ArgumentOutOfRangeException(NameOf(图标))
         End Select
     End Function

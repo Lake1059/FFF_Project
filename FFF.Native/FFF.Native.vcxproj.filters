@@ -158,6 +158,9 @@
     <ClCompile Include="3FP\Core\PlayerSession.cpp">
       <Filter>3FP\Core</Filter>
     </ClCompile>
+    <ClCompile Include="3FP\Core\Fmp4FragmentScanner.cpp">
+      <Filter>3FP\Core</Filter>
+    </ClCompile>
     <ClCompile Include="3FP\Core\AvifIlocShim.cpp">
       <Filter>3FP\Core</Filter>
     </ClCompile>

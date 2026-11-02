@@ -45,6 +45,16 @@ Friend NotInheritable Class 播放器界面呈现器
     Private 显示精确时间戳 As Boolean
     Private 滚轮余量 As Integer
     Private 未知时长已知上限毫秒 As Double
+
+    ' 未知时长媒体（容器不携带时长，如无音频流式封装）起步阶段的虚拟进度量程（毫秒）。
+    ' TrackBar 在 Maximum=Minimum 时点击换算恒得 0（"点击落 0"），而起步阶段已探明
+    ' 上限=0，必须由该常量撑起非退化量程，点击位置才能换算出有意义的时间戳
+    ' （如点击 50% → 30s）。取 60s 是换算精度的可逆实现选择（可在 30s-120s 内微调）：
+    ' 覆盖多数短片段的可预估范围，长媒体起步阶段的点击精度也可接受；换算目标超出
+    ' 实际时长时由 native 侧 DoSeek（duration=0 不夹上界）→ demux 到 EOF → Ended 兜底，
+    ' 不影响正确性。
+    Private Const 未知时长虚拟上限毫秒 As Double = 60000
+
     Private 上次时间戳测量文本 As String
     Private 图片模式已启用 As Boolean
 
@@ -167,9 +177,13 @@ Friend NotInheritable Class 播放器界面呈现器
                     Dim 当前位置 = Math.Max(0, 快照.播放位置.TotalMilliseconds)
                     未知时长已知上限毫秒 = Math.Max(未知时长已知上限毫秒, 当前位置)
                     If 进度条.Minimum <> 0 Then 进度条.Minimum = 0
-                    If 进度条.Maximum <> 未知时长已知上限毫秒 Then
-                        进度条.Maximum = 未知时长已知上限毫秒
+                    ' 未知时长模式以虚拟上限维持非退化量程（见 未知时长虚拟上限毫秒 注释），
+                    ' 保证起步阶段点击不落 0；已探明范围超过虚拟上限后量程跟随增长。
+                    Dim 量程上限 = Math.Max(未知时长已知上限毫秒, 未知时长虚拟上限毫秒)
+                    If 进度条.Maximum <> 量程上限 Then
+                        进度条.Maximum = 量程上限
                     End If
+                    ' 显示值仍 clamp 在已见位置（未知时长已知上限毫秒）之内，不超前于实际播放范围。
                     Dim 新值 = Math.Min(当前位置, 未知时长已知上限毫秒)
                     If 进度条.Value <> 新值 Then 进度条.Value = 新值
                 End If
@@ -284,6 +298,8 @@ Friend NotInheritable Class 播放器界面呈现器
         Dim width = 10.0F * scale
         Dim height = 8.0F * scale
         Dim distance = 2.0F * scale
+        ' 章节标记命中按量程（Maximum-Minimum）比例换算；未知时长文件通常无章节标记，
+        ' 循环自然跳过，无需为虚拟量程做特殊处理。
         For index = 进度条.ChapterMarkers.Count - 1 To 0 Step -1
             Dim marker = 进度条.ChapterMarkers(index)
             If Double.IsNaN(marker.Position) OrElse marker.Position < 进度条.Minimum OrElse marker.Position > 进度条.Maximum Then Continue For
@@ -334,16 +350,25 @@ Friend NotInheritable Class 播放器界面呈现器
 
     Private Sub 请求跳转()
         If Not 进度条可调整() Then Return
+        ' 未知时长模式下换算目标可能超出实际媒体时长：native DoSeek 在 duration=0 时
+        ' 不夹上界，demux 按目标推进到 EOF 后由 FlushAtEnd→Ended 兜底，属既有可接受语义。
         RaiseEvent 请求跳转到关键帧(Me,
             New 播放器跳转请求事件参数(TimeSpan.FromMilliseconds(进度条.Value)))
     End Sub
 
     Private Function 进度条可调整() As Boolean
-        If 进度条.Maximum <= 进度条.Minimum OrElse 正在切换提供器() Then Return False
+        If 正在切换提供器() Then Return False
         Dim 快照 = 快照提供器()
-        Return 快照 IsNot Nothing AndAlso
-            (快照.总时长 > TimeSpan.Zero OrElse 未知时长已知上限毫秒 > 0) AndAlso
-            播放器控制器.可操作(快照.状态)
+        If 快照 Is Nothing Then Return False
+        If Not 播放器控制器.可操作(快照.状态) Then Return False
+        If 快照.总时长 > TimeSpan.Zero Then
+            ' 已知时长模式：保持原 Maximum>Minimum 量程门槛，行为不变（R2.2 回归不变式）。
+            Return 进度条.Maximum > 进度条.Minimum
+        End If
+        ' 未知时长模式（R1.1/R1.2）：起步阶段 Maximum=Minimum=0，原量程门槛会拦下全部
+        ' 点击，此处放宽为可点击，点击换算基准由刷新播放状态维护的虚拟上限量程保证不落 0。
+        ' 静态图片/loop-aware 图像解容器的时长同样被有意置 0，必须维持进度条禁用（R1.5）。
+        Return Not 图片模式已启用
     End Function
 
     Private Sub 更新播放按钮(状态 As 播放状态)
