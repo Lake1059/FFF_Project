@@ -29,7 +29,12 @@ Imports System.Threading
 Friend NotInheritable Class Ai字幕管道
     Implements IDisposable
 
-    Private Const 停止等待毫秒 As Integer = 2000
+    ' 优雅退出只值这么点等待：worker 主循环阻塞在 read_exact(stdin) 上，关 stdin
+    ' 即 EOF，正常几十毫秒内自己退出。超过这个窗口还没走，只可能是正卡在一窗推理
+    ' 里 —— 那是"追不上画面"的状态，再等也不会变好，而这段等待发生在 UI 线程
+    ' （菜单改设置 / 设置页下拉 / 切文件），直接表现为消息泵停转。原值 2000 ms
+    ' 曾让一次下拉最长冻 2 秒（P1，2026-11-02 审查定案）；压到 500 ms 后照样 Kill。
+    Private Const 停止等待毫秒 As Integer = 500
     Private Const 初始缓冲字节 As Integer = 1 << 20        ' 1 MiB：5.1×1024 帧块仅 24 KiB
     Private Const 空转睡眠毫秒 As Integer = 1
 
@@ -261,8 +266,11 @@ Friend NotInheritable Class Ai字幕管道
                 ' 关 stdin：worker 的读帧循环见到 EOF 即优雅退出。
                 进程本地.StandardInput.Close()
                 If Not 进程本地.WaitForExit(停止等待毫秒) Then
-                    记录("AI 字幕：worker 未在 2s 内退出，Kill")
+                    记录($"AI 字幕：worker 未在 {停止等待毫秒}ms 内退出，Kill")
                     进程本地.Kill(entireProcessTree:=True)
+                    ' Kill 是异步的：再等一小会儿让进程树真的退干净。重启路径紧接着
+                    ' 就会拉新 worker（llama 引擎会绑固定端口），不看它离场可能撞端口。
+                    进程本地.WaitForExit(1000)
                 End If
             End If
         Catch ex As Exception

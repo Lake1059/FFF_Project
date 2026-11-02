@@ -109,6 +109,18 @@ Friend NotInheritable Class Ai字幕菜单
         双语项表.Clear()
         档项表.Clear()
         设备项表.Clear()
+        ' 二级子菜单是本类 New 的 Component（ModernContextMenu : Component，持有
+        ' D2D/Surface 资源），拆树后根菜单已经摘不到它们 —— 不 Dispose 就等
+        ' GC 终结器去回收原生资源（P2，2026-11-02 审查定案）。根菜单是宿主的，不动。
+        For Each 子 In {语言子菜单, 双语子菜单, 档子菜单, 设备子菜单}
+            If 子 IsNot Nothing Then
+                Try
+                    子.Dispose()
+                Catch
+                    ' 双重释放/句柄已销毁：丢弃即可。
+                End Try
+            End If
+        Next
         启用项 = Nothing
         语言项 = Nothing
         语言子菜单 = Nothing

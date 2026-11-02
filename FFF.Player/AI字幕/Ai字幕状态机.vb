@@ -2,6 +2,7 @@ Option Strict On
 Option Explicit On
 
 Imports System.Collections.Concurrent
+Imports System.Threading
 
 ''' <summary>
 ''' AI 字幕状态机：收 worker 的识别结果，按"最新 wins + 陈旧守卫 + 代次清空"策略
@@ -53,7 +54,17 @@ Friend NotInheritable Class Ai字幕状态机
     Private 已见代次 As Boolean = False
 
     ' worker 生命周期信号（由管道在 worker 退出时置位）。
-    Private _worker已退出 As Boolean = False
+    ' 跨线程：result 线程/UI 线程写，呈现泵线程读 ⇒ 必须 Volatile，否则读侧
+    ' 可能长期看不到置位（或看到已复位的旧值），与 当前条目 的锁口径也不一致
+    ' （P2，2026-11-02 审查定案）。用 Integer 存 0/1：Volatile.Read/Write 对
+    ' Boolean 的泛型重载在 VB 里容易踩装箱，整数最省事且语义等价。
+    Private _worker已退出标志 As Integer
+
+    Private ReadOnly Property Worker已退出 As Boolean
+        Get
+            Return Volatile.Read(_worker已退出标志) <> 0
+        End Get
+    End Property
 
     ''' <summary>条目过期余量：媒体结束时间 + 2×窗口 仍早于播放位置则隐藏。</summary>
     Public Property 陈旧余量100纳秒 As Long = 10L * 10_000_000L   ' 默认 2×5s 窗口
@@ -87,7 +98,7 @@ Friend NotInheritable Class Ai字幕状态机
 
     ''' <summary>worker 退出通知：此后 worker 在途的一切结果作废，显示立即清空。</summary>
     Public Sub 通知Worker已退出()
-        _worker已退出 = True
+        Volatile.Write(_worker已退出标志, 1)
         SyncLock 锁
             当前条目 = Nothing
         End SyncLock
@@ -102,7 +113,7 @@ Friend NotInheritable Class Ai字幕状态机
     ''' 之后，进程余生所有结果都被丢弃，字幕永久空白，只有重启播放器能救。
     ''' </summary>
     Public Sub 复位Worker退出()
-        _worker已退出 = False
+        Volatile.Write(_worker已退出标志, 0)
     End Sub
 
     ''' <summary>重置（切文件/切列表项/起 worker 前调用）：清空当前条目与在途结果，
@@ -138,7 +149,7 @@ Friend NotInheritable Class Ai字幕状态机
             Catch
                 Return
             End Try
-            If 条目 Is Nothing OrElse _worker已退出 Then Continue While
+            If 条目 Is Nothing OrElse Worker已退出 Then Continue While
             SyncLock 锁
                 当前条目 = 条目
                 当前条目代次 = 条目.代次
@@ -159,7 +170,7 @@ Friend NotInheritable Class Ai字幕状态机
     Public Function 取当前两行(播放位置 As TimeSpan, 时间轴代次 As ULong) As (主 As String, 副 As String)
         Try
             处理待决结果()
-            If _worker已退出 Then Return (String.Empty, String.Empty)
+            If Worker已退出 Then Return (String.Empty, String.Empty)
             SyncLock 锁
                 If 当前条目 Is Nothing OrElse Not 已见代次 Then Return (String.Empty, String.Empty)
                 If 时间轴代次 <> 0UL AndAlso 当前条目代次 <> 时间轴代次 Then

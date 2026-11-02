@@ -53,16 +53,16 @@
 | 19 | ~~「GPU 层数」下拉~~ | **2026-10-29 删除**，无此控件 | `check_l0.py` L0-1b 钉住 Designer 里不许再出现 `MCB_GpuLayers` |
 | 20 | ~~「推理设备」选 CPU 时看「GPU 层数」~~ | **同上，已删除** | 目视确认设置页没有层数 / 设备序号 / 附加参数三项 |
 | 21 | 扩展包目录清空时看「模型档位」 | 下拉置灰，**下拉里直接写着**"需先选择有效扩展包"（作为可见项，不是水印——选中态≥0 时水印不可见）；换一个只有单档的包时可见项写"此包仅一个档位" | 目视 |
-| 22 | 清单加 `llamaArgs: ["--ctx-size","2048"]` 后启用字幕 | 字幕正常出；日志里 llama-server 命令行只有一个 `--ctx-size`（值 2048，worker 的 4096 默认整项让位）。grep 时注意 argv 形态是 `--llama-arg=--ctx-size`（等号，2026-10-25 修复：拆分形式会被 argparse 判 expected one argument，worker 启动即 exit 2） | worker 日志 `starting llama-server:` 行；实测（2026-10-25，真 CUDA llama-server）：ready 4.4s、warm 0.4s、转写 200 返回 `嗯。` |
+| 22 | ~~清单加 `llamaArgs: ["--ctx-size","2048"]` 后启用字幕~~ | **2026-10-29 删除**：llamaArgs 逃生门整体废止（worker 不认 `--llama-arg`，宿主也不再传），写进清单也不会被消费 | `check_l0.py` L0-4 钉住两侧不复活；旧实测数字（2026-10-25）随功能一起作废 |
 | 23 | 清单只给主权重、不给 mmproj（单文件模型）启用字幕 | llama-server 能起（纯 LLM 模式）；转写失败时**不是白屏**：日志有 llama-server 原话（`HTTP 501 ... does not support audio input`）+ worker 的 warning「音频端点探测失败：该模型可能不是音频转写模型」+ **屏幕信息图层出一次提示**（节流 30s，不只进日志） | worker 日志 `audio path warmup skipped (...)` 行 + ai-subtitles.log 的 warning 行 + 信息图层提示；实测（2026-10-25）：warm 失败、错误含 HTTP 状态码可读 |
 | 24 | 换一个 llama-server 加载不了的权重（截断的 gguf / 架构不认） | worker 走 error 路径关字幕、播放不受影响；**包目录（或程序目录）的 `llama-server.log` 里有 llama-server 的真实报错**，不是只有一句 `exited early rc=1`；不留孤儿 llama-server 进程（任务管理器无残留） | llama-server.log 文件内容 + 关字幕后无 llama-server.exe 残留（2026-10-25 修复：stderr 落盘 + start 失败即 stop） |
-| 25 | 高级区「llama-server 附加参数」填两行：`--temp`、`0.2`（改内容会重启 worker） | 字幕继续正常出；宿主日志出现合并条数行 `AI 字幕：llama-server 附加参数 2 条（清单 0 + 用户 2，同名 flag 以用户为准）`；`ai-subtitles.log` 的 `starting llama-server:` 命令行里 `--temp 0.2` 只出现一次（worker 的 0.6 默认整项让位） | `ai-subtitles.log` 的合并条数行 + `starting llama-server:` 行 |
-| 26 | 包清单写 `"llamaArgs": ["--ctx-size","4096"]`，「llama-server 附加参数」框填单行 `--ctx-size=8192` | 命令行里 `--ctx-size` 只出现一次且取用户值 8192（用户覆盖包：包的 flag 连同它的值一起剔除，不会把 4096 留给 llama-server 当位置参数） | `ai-subtitles.log` 的 `starting llama-server:` 行（宿主→worker 的 argv 是等号形式 `--llama-arg=--ctx-size=8192`，2026-10-25 修复）+ 合并条数行「清单 2 + 用户 1」 |
-| 27 | 「llama-server 附加参数」框填四行：`# 这行是注释`、空行、纯空格行、`--metrics` | `starting llama-server:` 命令行里只有 `--metrics`：`#` 注释行、空行与纯空格行都不进 llama-server | `ai-subtitles.log` 的 `starting llama-server:` 行 |
+| 25 | ~~高级区「llama-server 附加参数」填两行：`--temp`、`0.2`~~ | **2026-10-29 删除**：设置页多行框已不存在，worker 自己决定全部 llama-server 参数（见 `MODEL_TIERS.md` §7.3），无可测项 | `check_l0.py` L0-1b 钉住 Designer 无附加参数控件 |
+| 26 | ~~包清单写 `"llamaArgs": [...]` +「附加参数」框同填~~ | **2026-10-29 删除**：两侧入口都已移除，「用户覆盖包」的合并逻辑随实现一起消失 | `check_l0.py` L0-4 |
+| 27 | ~~「llama-server 附加参数」框填注释/空行~~ | **2026-10-29 删除**：框已不存在，注释/空行清洗逻辑随实现消失 | `check_l0.py` L0-1b |
 | 28 | 「字幕驻留偏移（秒）」填 +2 播一段对白，再填 −2 播一段 | +2 后每行字幕比填 0 时明显多驻留约 2 秒；−2 则提前收起。**不指望它让字幕更早出现**——出现时机由窗口/步长决定，偏移只调驻留 | 目视（相对音画听句尾停留时间）；改它不重启 worker，播放中立即可见 |
-| 29 | 「窗口 / 步长预置」选「灵敏」 | 窗口/步长两个框变成 2 / 1；状态行第 1 行出现后缀 `（高级覆盖生效）`。**注意它不会立刻改变转写行为**：窗口/步长是 worker 的启动期参数，而重启判定不含这两项，改预置不触发重启——要看到 2 s 窗需再手动触发一次重启（例如改一下附加参数再改回来） | 目视 + 状态行；生效与否看 worker 日志 `final [x.xxs..y.yys]` 的窗长 |
-| 30 | 包清单加 `"layers": 32` 后重新选一次包目录 | 「GPU 层数」下拉出现「全部 32 层」（预置 32/28/24/…/0，每 4 层一档）；状态行第 3 行能力行写 `GPU 层数表：包声明 32 层` | 目视；状态行第 3 行 |
-| 31 | 没选包（或包无效）时看「llama-server 附加参数」框 | 置灰，水印提示「需先选择有效扩展包（含 ai-subtitles.json）」；选到有效包后可编辑 | 目视 |
+| 29 | 「窗口 / 步长预置」选「灵敏」 | 窗口/步长两个框变成 2 / 1；状态行第 1 行出现后缀 `（高级覆盖生效）`。**注意它不会立刻改变转写行为**：窗口/步长是 worker 的启动期参数，而重启判定不含这两项，改预置不触发重启——要看到 2 s 窗需再手动触发一次重启（例如改一下推理线程数再改回来） | 目视 + 状态行；生效与否看 worker 日志 `final [x.xxs..y.yys]` 的窗长 |
+| 30 | ~~包清单加 `"layers": 32`~~ | **2026-10-29 删除**：GPU 层数随 sherpa 重建移除（EP 自己决定算子落在哪，没有「卸几层」这回事），清单 `layers` 不再被消费 | `check_l0.py` L0-1b 钉住 Designer 无层数控件 |
+| 31 | ~~没选包（或包无效）时看「llama-server 附加参数」框~~ | **2026-10-29 删除**：框已不存在 | 目视（无此控件） |
 
 ### 判据勘误（2026-10-25 开测前排雷，照原判据跑必失败）
 
@@ -286,7 +286,7 @@ llama-server b11669，5 秒窗口、单实例（两个实例会争抢 GPU，数�
 | Q8 | 指令泄漏 | 模型把 prompt instruction 原样当内容输出时（`Transcribe audio to text`）必须丢弃，且**正常对白不得被误杀** | `zh-wiki` @60 s / @90 s（带语言提示）→ `drop=leak`；英语访谈 / 英语讲座 / 中英混说 → `drop` 为空（2026-10-25 复测） |
 | Q5 | 空音频（抽不出的段） | 不崩、不因此连续失败退出 | llama-server 回 HTTP 400，worker 计单窗失败 |
 | Q6 | 输出护栏 | 输出长度受 `--n-predict` 约束，不得超过 ctx | 修复前 3808 字（撞满 4096），修复后受 512 限制 |
-| Q7 | 参数回归 | 默认命令行不得再出现 `--no-cache-idle-slots` | 由 `test_argv_chain.py` S1b 钉死 |
+| Q7 | 参数回归 | 默认命令行不得再出现 `--no-cache-idle-slots` | worker 日志 `starting llama-server:` 行 grep（2026-11-02 起 `test_argv_chain.py` 已随 llamaArgs 逃生门一并删除，不再有脚本钉这条） |
 
 ### 已知会踩的坑（别当产品 bug）
 

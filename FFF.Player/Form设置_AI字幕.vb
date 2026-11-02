@@ -24,6 +24,9 @@ Imports System.Windows.Forms
 ''' </summary>
 Friend Class Form设置_AI字幕
     Private 正在初始化 As Boolean
+    ' 设备项提示按引擎重建的记账（null = 还没建过）。构造期按 ONNX 口径填过一次，
+    ' 换成 GGUF 包后那套 CUDA/DirectML 说法一句都不会发生，必须重填。
+    Private _设备提示引擎 As String = Nothing
 
     ' 设备下拉当前项 ↔ 标识的映射由 Ai字幕推理档.设备全部 现算（存的是标识字符串
     ' 不是下标，所以顺序可以安全调整）。
@@ -363,9 +366,17 @@ Friend Class Form设置_AI字幕
     Private Sub 同步线程下拉()
         Dim 值 = 设置.实例对象.Ai字幕线程数
         Dim 下标 = 0
+        Dim 命中 = False
         For i = 0 To _线程值.Length - 1
-            If _线程值(i) = 值 Then 下标 = i
+            If _线程值(i) = 值 Then
+                下标 = i
+                命中 = True
+            End If
         Next
+        ' 落「自动」时必须**同时写回设置**：否则界面说"自动（最多 6）"，
+        ' 而 控制器→管道 照旧把这个残留值当 --threads 传给 worker —— 界面与
+        ' 实跑不一致，同页语言脏值是写回内存的，这里漏了（P1，2026-11-02 定案）。
+        If Not 命中 AndAlso 值 <> 0 Then 设置.实例对象.Ai字幕线程数 = 0
         Dim 外层初始化 = 正在初始化
         正在初始化 = True
         Try
@@ -395,6 +406,22 @@ Friend Class Form设置_AI字幕
         MCB_预置.Visible = 显示
     End Sub
 
+    ''' <summary>重建设备项提示（内容随引擎变）。只在引擎真的变了时才动 ——
+    ''' ToolTipEntryCollection 是列表 + 派生的字典，反复 Add 同一项只会越堆越多。</summary>
+    Private Sub 重建设备提示(引擎 As String)
+        If String.Equals(_设备提示引擎, 引擎, StringComparison.Ordinal) Then Return
+        _设备提示引擎 = 引擎
+        Try
+            MCB_设备.ItemToolTips.Clear()
+            For Each id In Ai字幕推理档.设备全部
+                MCB_设备.ItemToolTips.Add(Ai字幕推理档.设备显示名(id),
+                                          Ai字幕推理档.设备说明(id, 引擎))
+            Next
+        Catch
+            ' 提示只是辅助信息：建不出来不能把设置页带倒。
+        End Try
+    End Sub
+
     ' ---------------- 状态行 ----------------
 
     ''' <summary>状态行：包是否有效、实际生效的窗口/步长、设备+后端、模型档、语言，
@@ -407,6 +434,8 @@ Friend Class Form设置_AI字幕
         Dim 配置 = Ai字幕包.载入(目录, 错误)
         If 配置 Is Nothing Then
             刷新模型档(Nothing)
+            ' 没有包就没有引擎可判：设备项提示回落到 ONNX 口径（构造期填的就是它）。
+            重建设备提示(Ai字幕包.引擎Onnx)
             If String.IsNullOrWhiteSpace(目录) Then
                 LBL_状态.ForeColor = Color.Gray
                 LBL_状态.Text = "未启用。选择一个扩展包目录（含 ai-subtitles.json）即可启用。"
@@ -425,6 +454,9 @@ Friend Class Form设置_AI字幕
         If 覆盖步长 > 0 Then 步长 = Math.Min(覆盖步长, 窗口)
 
         刷新模型档(配置)
+        ' 设备项提示跟着引擎走：GGUF 包下 CUDA/DirectML/OpenVINO 那套说法全是假的
+        ' （P1，2026-11-02 定案）。换包/换引擎时在这里重填一次。
+        重建设备提示(配置.引擎)
 
         Dim 设备 = Ai字幕推理档.规整设备(设置.实例对象.Ai字幕运行设备)
         Dim 后端 = Ai字幕推理档.解析(设备, 设置.实例对象.Ai字幕推理后端, 配置.引擎)
@@ -451,7 +483,7 @@ Friend Class Form设置_AI字幕
         ' 五行封顶（Label 是 568x112）：包/节奏、设备+后端+模型、后端做什么、
         ' 验证到哪一步、必须现在说清的注意事项。每行都压在一行内，越界会换行顶掉下一行。
         LBL_状态.Text = $"已启用：{配置.名称} —— 窗口 {窗口:0.###}s / 步长 {步长:0.###}s{后缀}" & vbCrLf &
-                        $"设备：{Ai字幕推理档.设备显示名(设备)}　后端：{Ai字幕推理档.后端显示名(后端, 配置.引擎)}　模型：{档名}" & vbCrLf &
+                        $"设备：{Ai字幕推理档.设备显示名(设备)}　后端：{Ai字幕推理档.后端显示名(后端, 配置.引擎)}　模型：{档名}　语言：{语言说明}" & vbCrLf &
                         $"说明：{Ai字幕推理档.后端说明(后端, 配置.引擎)}" & vbCrLf &
                         $"状态：{Ai字幕推理档.后端状态(后端, 配置.引擎)}"
         ' 第五行只放「现在就影响结果」的事，且最多一条：worker 还没接这个后端时，
@@ -459,7 +491,9 @@ Friend Class Form设置_AI字幕
         ' 以为选了什么就在跑什么。
         If Not Ai字幕推理档.当前worker可用(后端, 配置.引擎) Then
             LBL_状态.ForeColor = Color.Orange
-            LBL_状态.Text &= vbCrLf & "注意：worker 尚未接入该后端（本版只认 CPU / CUDA），会按自动处理。"
+            ' 不再写「本版只认 CPU / CUDA」：worker 已认 8 个键，那句话与实际相反
+            ' （P2，2026-11-02 审查定案）。
+            LBL_状态.Text &= vbCrLf & "注意：worker 尚未接入该后端，会被按自动处理（详见日志）。"
         ElseIf 设置.实例对象.Ai字幕仅所选语言 AndAlso
                Not Ai字幕推理档.后端自报语言(后端, 配置.引擎) Then
             ' 只有真拿不到语言标签的后端才说这句。llama 与 OpenVINO 都把自报语言送回来，

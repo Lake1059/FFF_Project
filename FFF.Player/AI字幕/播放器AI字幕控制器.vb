@@ -132,6 +132,13 @@ Friend NotInheritable Class 播放器AI字幕控制器
         ' 判据只剩四个：档（决定跑在哪）、语言、模型档、线程数。序号 / 层数 /
         ' 精确设备这些中间量已经不存在了。
         Dim 新双语 = Ai字幕双语.规整(设置对象.Ai字幕双语)
+        ' 双语靠 llama 的文本续写；ONNX 包下这个开关根本不出现（菜单只在 llama 建树），
+        ' 残留值用户无处关闭。换包时在这里归位，否则它会在下次换回 GGUF 包时诈尸
+        ' （P2，2026-11-02 审查定案）。
+        If 新包.引擎 <> Ai字幕包.引擎Llama AndAlso Not String.IsNullOrEmpty(新双语) Then
+            新双语 = String.Empty
+            设置对象.Ai字幕双语 = String.Empty
+        End If
         If 管道 IsNot Nothing AndAlso (已启动后端 <> 新后端 OrElse
                                        已启动语言 <> 新语言 OrElse
                                        已启动模型档 <> 新模型档 OrElse

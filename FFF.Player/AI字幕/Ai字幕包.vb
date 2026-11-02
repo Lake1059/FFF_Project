@@ -514,9 +514,22 @@ Friend NotInheritable Class Ai字幕推理档
         End Select
     End Function
 
-    ''' <summary>选中该设备时「接下来会发生什么」，给状态行用。不是文案修辞 ——
-    ''' 每一句都对应一条实测边界（交接文档 §17.3 / §20.4）。</summary>
-    Friend Shared Function 设备说明(id As String) As String
+    ''' <summary>选中该设备时「接下来会发生什么」，给状态行/项提示用。不是文案修辞 ——
+    ''' 每一句都对应一条实测边界（交接文档 §17.3 / §20.4）。
+    ''' ⚠ 必须带引擎：llama 只有一份 Vulkan 运行时，说 CUDA/DirectML/OpenVINO 那套
+    ''' 就是在描述不会发生的事（P1，2026-11-02 审查定案）。</summary>
+    Friend Shared Function 设备说明(id As String,
+                                    Optional 引擎 As String = Ai字幕包.引擎Onnx) As String
+        If 引擎 = Ai字幕包.引擎Llama Then
+            Select Case 规整设备(id)
+                Case 设备Cpu
+                    Return "全在处理器上算，不上显卡"
+                Case 设备Npu
+                    Return "GGUF 包没有 NPU 路径：weight-only 量化进不了 NPU 执行单元"
+                Case Else
+                    Return "整份权重放进显存，Vulkan 一份运行时覆盖 NVIDIA / AMD / Intel"
+            End Select
+        End If
         Select Case 规整设备(id)
             Case 设备Cpu
                 Return "全在处理器上算，不占显卡"
@@ -703,9 +716,15 @@ Friend NotInheritable Class Ai字幕推理档
             Case 后端Cuda
                 Return "已验证（要 CUDA 12 运行库 + cuDNN 9）"
             Case 后端Dml
-                Return "本包没有 DirectML 版 ONNX Runtime，选了会退回自动"
+                ' worker 侧登记是 ("dml","cpu")：dml 是 AMD 在 Windows 上唯一的显卡
+                ' 路径，缺 DML 版 ONNX Runtime 时**落到 CPU**，不是回到自动。
+                ' 原文「本包没有 DirectML 版 ORT / 退回自动」两句都与实现相反
+                ' （P2，2026-11-02 审查定案）。
+                Return "AMD 显卡在 Windows 上的唯一路径；缺 DML 版 ORT 时落 CPU"
             Case 后端OvCpu
-                Return "可用但慢（三段都走 OpenVINO，比 sherpa 慢约 5 倍），仅供排障"
+                ' 数字与 asr_worker._CANDIDATES 的注释同源（OpenVINO CPU 比 sherpa
+                ' 慢 2.3 倍），此前这里写 5 倍，两处不一致（P2，2026-11-02）。
+                Return "可用但慢（比 sherpa 慢约 2.3 倍），仅供排障"
             Case 后端OvGpu
                 Return "已验证（conv 上显卡，int8 两段留 CPU）"
             Case 后端OvNpu

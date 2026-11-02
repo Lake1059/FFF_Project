@@ -183,7 +183,7 @@ Public Class Form1
             MCM_AI字幕,
             Function() 播放控制器.取当前句柄(),
             Function() 播放控制器.安全读取媒体信息(),
-            Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI),
+            AddressOf 安全显示操作信息,  ' 封送包装：worker 结果线程也会调它，裸调即跨线程写 UI
             Sub(值) 设置.实例对象.Ai字幕已停用 = 值,
             AddressOf 打开Ai字幕设置,
             AddressOf 同步AI字幕派生状态)

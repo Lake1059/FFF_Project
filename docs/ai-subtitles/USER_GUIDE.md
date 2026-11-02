@@ -191,8 +191,10 @@ CUDA DLL 有 30%+ 空间（cublasLt 445→308 MB）；固实吃到的主要是 v
   归位：不在当前预置表里的值，≥ N 记为 N，其余归「自动」（只改内存、不主动落盘，
   用户一动界面就写回）——界面显示什么，实际就是什么。
 - 其余 llama-server 参数（温度、上下文、缓存策略等）为什么带这些默认值，见 `MODEL_TIERS.md` §7
-  的参数盘点——那一节写明了每项的实测依据；要覆盖它们，用扩展包清单的 `llamaArgs`
-  或设置页高级区的「llama-server 附加参数」文本框（见 §3.5 与 `PACK_FORMAT.md` §2.5），不再是绝对锁死。
+  的参数盘点——那一节写明了每项的实测依据。**没有覆盖入口**（2026-10-29 起：清单
+  `llamaArgs` 与设置页「llama-server 附加参数」框都已删除，worker 自己决定全部参数）；
+  要改默认值只能动 worker 源码（`tools/ai-subtitles/asr_worker.py`），并过 `check_l0.py`
+  L0-4 的"不许复活"门禁。
 
 细节与实测数据见 `BACKEND_MATRIX.md`。
 
