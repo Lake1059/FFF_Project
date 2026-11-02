@@ -18,11 +18,11 @@ class SharedFileInput;
 // 一个 moof fragment 的定位记录；时间轴为 3FP 的 100ns 播放时间轴
 // （已减去 timelineOrigin100ns，与 snapshot_.position100ns 同一坐标系）。
 struct Fmp4FragmentEntry {
-    std::int64_t  moofOffset;           // 该 fragment 的 moof box 在文件中的字节偏移
-    std::int64_t  startDecodeTime100ns; // 参考流在本 fragment 的第一个样本解码时间
-    std::int64_t  endDecodeTime100ns;   // start + 参考流本 fragment 全部样本时长之和
-    std::uint32_t sequenceNumber;       // mfhd sequence_number（文件序单调递增）
-    bool          hasKeyframe;          // 参考流在本 fragment 内存在关键帧样本
+    std::int64_t  moofOffset{};           // 该 fragment 的 moof box 在文件中的字节偏移
+    std::int64_t  startDecodeTime100ns{}; // 参考流在本 fragment 的第一个样本解码时间
+    std::int64_t  endDecodeTime100ns{};   // start + 参考流本 fragment 全部样本时长之和
+    std::uint32_t sequenceNumber{};       // mfhd sequence_number（文件序单调递增）
+    bool          hasKeyframe{};          // 参考流在本 fragment 内存在关键帧样本
 };
 
 // Background scanner for fragmented MP4 (C-FMP4-DETECT@1 / C-FMP4-SCANNER@1).
