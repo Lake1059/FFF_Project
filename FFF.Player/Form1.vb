@@ -3,7 +3,7 @@ Imports System.Runtime.InteropServices
 Imports System.Text
 Imports System.Threading
 
-Partial Public Class Form1
+Public Class Form1
     Private 光盘控制器 As 播放器光盘控制器
     Private Const WM_ENTERSIZEMOVE As Integer = &H231
     Private Const WM_EXITSIZEMOVE As Integer = &H232
@@ -162,7 +162,6 @@ Partial Public Class Form1
         剪辑区间控制器 = New 播放器剪辑区间控制器(播放控制器, 画面控件,
             MB_剪辑区间模式, MP_剪辑区间操作容器, P_剪辑区间进度条容器,
             P_剪辑区间按钮容器, MB_传给3FUI)
-        初始化VSP功能()
         更新WASAPI按钮()
         流选择器 = New 播放器流选择器(Me, MP_DX视频容器, MCM_流选择器, 播放控制器)
         流选择器.应用全局字体(设置.实例对象.字体)
@@ -173,8 +172,7 @@ Partial Public Class Form1
         ' 【2026-10-31 启动优化】四个图层呈现器（字幕/弹幕/歌词/信息）的构造已延后：
         ' 原在此处吃掉 24_streamsel_done→25_layers_done 段 177.5 ms。
         ' 现在由 Form1_Shown 在派发开图之后调用 创建图层呈现器()。
-        ' 注：upstream 的次字幕（双语第二轨）与「字幕显示」总开关参数，已随延后构造
-        ' 一并移植到 创建图层呈现器() 内（见该方法里的 5 参数构造），不因延后丢功能。
+        ' 注：此处不再构造任何呈现器，全部由 创建图层呈现器() 承担。
         AddHandler 画面控件.Ctrl滚轮, AddressOf 画面控件_Ctrl滚轮
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
@@ -456,9 +454,8 @@ Partial Public Class Form1
             Return
         End If
         字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
-            AddressOf 播放控制器.安全读取快照, Function() If(字幕显示, 播放控制器.当前字幕, Nothing),
-            AddressOf 播放控制器.提交定时文字图层,
-            Function() If(字幕显示, Threading.Volatile.Read(当前次字幕), Nothing))
+            AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
+            AddressOf 播放控制器.提交定时文字图层)
         ' 弹幕与字幕分轨：弹幕有自己的呈现器，节拍跟随视频（见 播放器弹幕图层呈现器）。
         ' 字幕仍走 播放器字幕叠加呈现器，保留它那套为静态内容设计的节拍与去重。
         弹幕图层呈现器 = New 播放器弹幕图层呈现器(画面控件,
@@ -1083,7 +1080,6 @@ Partial Public Class Form1
     End Sub
 
     Friend Sub 应用字幕设置()
-        Threading.Volatile.Read(当前次字幕)?.SRT生成器?.设置样式(设置.实例对象.创建SRT字幕样式())
         播放控制器?.当前字幕?.SRT生成器?.设置样式(设置.实例对象.创建SRT字幕样式())
         字幕图层呈现器?.使图层失效()
     End Sub
