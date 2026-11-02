@@ -59,7 +59,7 @@ Friend Module 色彩变换模块接口
 
     ''' <summary>函数表版本门。2 = 握手新增"未授权即拒"（表形状未变）。
     ''' 停在 1 会被模块拒，于是整链按"模块缺席"静默降级——症状与不装模块一模一样。</summary>
-    Friend Const 表版本 As UInteger = 2UI
+    Friend Const 表版本 As UInteger = 3UI
 
     ''' <summary>外部床渲染函数表的导出名（本模块的第二个能力面，中性词汇）。
     ''' 未授权时模块拒交这张表 ⇒ 内核继续走它自己的矩阵折叠，症状与"模块不在盘上"同形。</summary>
@@ -217,7 +217,9 @@ Friend Module 色彩变换模块接口
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Friend Delegate Sub 复位原型()
 
-    ''' <summary>能力表：size + version + 三个函数指针（32 B，与模块 FFFColorTransformApi 同布局）。</summary>
+    ''' <summary>能力表：size + version + 函数指针（32 B v2 布局；40 B v3 尾加
+    ''' 设置显示目标 列）。旧模块 32 B 表 + 新宿主 40 B 镜像 ⇒ 绑定处按 size 归一，
+    ''' 缺列读作零指针 = 通道缺席（bake 回落经典 100-nit SDR 目标）。</summary>
     <StructLayout(LayoutKind.Sequential)>
     Friend Structure 色彩变换能力表
         Public 大小 As UInteger
@@ -225,7 +227,11 @@ Friend Module 色彩变换模块接口
         Public 变换版本 As IntPtr
         Public 分析帧 As IntPtr
         Public 复位 As IntPtr
+        Public 设置显示目标 As IntPtr
     End Structure
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Sub 设置显示目标原型(尼特 As Single)
 
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Friend Delegate Function 取音频表原型(版本 As UInteger, 表地址 As IntPtr) As Integer
@@ -556,10 +562,15 @@ Friend Module 色彩变换模块接口
                 表句柄.Free()
             End Try
 
+            ' 旧模块的 32 B 表不含尾列：40 B 镜像的 PtrToStructure 会把表外的堆内存
+            ' 读进尾列 —— 按 size 归一，缺列读作零指针 = 通道缺席（bake 回落 100-nit）。
+            If 表.大小 < CUInt(Marshal.SizeOf(Of 色彩变换能力表)()) Then
+                表.设置显示目标 = IntPtr.Zero
+            End If
+
             If 入口返回 <> 0 OrElse 表.版本 <> 表版本 OrElse
                表.大小 < CUInt(Marshal.SizeOf(Of 色彩变换能力表)()) OrElse
-               表.分析帧 = IntPtr.Zero OrElse 表.复位 = IntPtr.Zero Then
-                ' 握手被拒有三种完全不同的原因，画面却一模一样，必须分开留痕：
+               表.分析帧 = IntPtr.Zero OrElse 表.复位 = IntPtr.Zero Then                ' 握手被拒有三种完全不同的原因，画面却一模一样，必须分开留痕：
                 '   1) 盘上是早于 ABI 版本 2 的旧件（不含授权层，也不认这个版本门）
                 '   2) 模块在、但未解锁——授权门的设计结果，不是故障
                 '   3) 模块自称已解锁却仍被拒——真故障（两侧 ABI 版本没对上）
@@ -713,6 +724,18 @@ Friend Class 色彩变换模块实例
             If _已释放 OrElse _表.复位 = IntPtr.Zero Then Return
             Dim 复位函数 = CType(Marshal.GetDelegateForFunctionPointer(_表.复位, GetType(复位原型)), 复位原型)
             复位函数()
+        End SyncLock
+    End Sub
+
+    ''' <summary>会话级显示目标（尼特）：bake 尾按它编码映射表（"跟随显示器最大亮度"
+    ''' 读数），渲染端用同一个数解码。旧模块缺列时是 no-op（bake 回落经典
+    ''' 100-nit SDR 目标）；零值同样回落。</summary>
+    Public Sub 设置显示目标尼特(尼特 As Single)
+        SyncLock _锁
+            If _已释放 OrElse _表.设置显示目标 = IntPtr.Zero Then Return
+            Dim 设置函数 = CType(Marshal.GetDelegateForFunctionPointer(_表.设置显示目标,
+                GetType(设置显示目标原型)), 设置显示目标原型)
+            设置函数(尼特)
         End SyncLock
     End Sub
 

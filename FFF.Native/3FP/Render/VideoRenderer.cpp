@@ -1094,7 +1094,11 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
         if(Gamut==1)rgb=ToBt709(To709(ToLinear709(rgb)));
         return float4(rgb,1);
     }
-    float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):(Transfer==3?rgb:ToLinear709(rgb)*PaperWhite));
+    float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):(Transfer==3?rgb:ToLinear709(rgb)*((TransformEnabled!=0&&TransformDomain==0)?DynamicTargetPeak:PaperWhite)));
+    // Kind-3 domain-0 tables are encoded relative to the display target the
+    // host resolved (the bake tail tone-maps onto it and divides by it), so the
+    // decode white follows that same number instead of the SDR paper white.
+    // Domain-1 tables and plain SDR sources keep PaperWhite.
     // Kind-3 output matrix: applied to the linear-light signal after transfer
     // decoding and before any gamut conversion, on both the scRGB and the
     // tone-mapped SDR paths below.
