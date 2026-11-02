@@ -650,6 +650,12 @@ private:
     bool muted_;
     FFF3FPSnapshot snapshot_;
     FFF3FPSnapshot publishedSnapshot_;
+    // F-A duration refill (C-DURATION-REFILL@1): upper bound of the playback-timeline
+    // range the demuxer has actually seen (100 ns, same axis as snapshot_.position100ns).
+    // Monotonic max accumulator that grows snapshot_.duration100ns for media whose
+    // container carries no duration. Worker thread only: DoOpen, PumpPlayback and
+    // DoClose all run serially on the command-queue worker, so no extra lock guards it.
+    std::int64_t demuxedExtent100ns_ = 0;
     // Image details for GetImageInfo, built once on the worker thread at the end
     // of DoOpen and handed out under snapshotMutex_ - the decoder-owned frames
     // the build reads must not be touched from the caller's thread.

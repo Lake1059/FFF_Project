@@ -1681,10 +1681,55 @@ void PlayerSession::DoStepKeyframe(const std::int32_t direction) {
     const auto entryIndex = av_index_search_timestamp(stream, searchTimestamp, flags);
     const auto* entry = entryIndex >= 0 ? avformat_index_get_entry(stream, entryIndex) : nullptr;
 
+    // F-C keyframe stepping (C-K1-STEP@2, direction a): the FFmpeg 8 runtime's
+    // av_index_search_timestamp is keyframe-aware ("only keyframes otherwise"
+    // unless AVSEEK_FLAG_ANY is passed), so the hit entry is already a keyframe
+    // entry. DoSeek's internal av_seek_frame BACKWARD keyframe alignment always
+    // lands one keyframe earlier (measured invariant): a +1 step handed the hit
+    // entry directly would stay on the current GOP head, so +1 selects the NEXT
+    // keyframe entry after the hit one and the fixed one-keyframe pull lands
+    // exactly on the expected next keyframe. A -1 step keeps its pre-fix chain
+    // verbatim - the hit "previous keyframe" entry pulled one further back is
+    // precisely the expected previous-keyframe landing (probe baseline:
+    // audio_test 95.05s / noaudio_test 95.00s). The DoSeek call shape (-1, false)
+    // is unchanged.
     if (entry != nullptr) {
-        const auto targetPosition = std::max<std::int64_t>(0,
-            StreamTimestampPosition100ns(format_, videoStream_, entry->timestamp));
-        DoSeek(targetPosition, -1, false);
+        if (direction < 0) {
+            // -1: pre-fix behaviour verbatim (C-K1-STEP@2 §2, zero change).
+            const auto targetPosition = std::max<std::int64_t>(0,
+                StreamTimestampPosition100ns(format_, videoStream_, entry->timestamp));
+            DoSeek(targetPosition, -1, false);
+        } else {
+            // +1 (C-K1-STEP@2 §1): first keyframe entry strictly after the hit
+            // entry; none left → boundary (the hit entry is the last keyframe).
+            const auto entryCount = avformat_index_get_entries_count(stream);
+            int nextKeyframeIndex = -1;
+            for (int i = entryIndex + 1; i < entryCount; ++i) {
+                const auto* candidate = avformat_index_get_entry(stream, i);
+                if (candidate != nullptr && (candidate->flags & AVINDEX_KEYFRAME) != 0) {
+                    nextKeyframeIndex = i;
+                    break;
+                }
+            }
+            if (nextKeyframeIndex >= 0) {
+                const auto* nextKeyframeEntry =
+                    avformat_index_get_entry(stream, nextKeyframeIndex);
+                const auto targetPosition = std::max<std::int64_t>(0,
+                    StreamTimestampPosition100ns(format_, videoStream_,
+                        nextKeyframeEntry->timestamp));
+                DoSeek(targetPosition, -1, false);
+            } else {
+                // The hit entry is the last keyframe in the index → boundary: stay
+                // where we are, same semantics as the K2 tableHasKeyframe branch
+                // above (SetState + boundary:true event, position untouched).
+                SetState(FFF3FPState::Paused, "step-keyframe");
+                Emit(FFF3FPEvent::OperationCompleted,
+                    "{\"operation\":\"step-keyframe\",\"direction\":" +
+                    std::to_string(direction) + ",\"position100ns\":" +
+                    std::to_string(snapshot_.position100ns) + ",\"boundary\":true}");
+                return;
+            }
+        }
     } else {
         if (av_seek_frame(format_, videoStream_, searchTimestamp, flags) < 0) {
             SetState(FFF3FPState::Paused, "step-keyframe");
@@ -3901,6 +3946,10 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         std::lock_guard lock(mutex_);
         snapshot_.duration100ns = IsLoopAwareImageDemuxer(format_->iformat)
             ? 0 : EstimateDuration100ns(format_);
+        // The refill accumulator is per-media state like the duration it feeds;
+        // restart it here so the next media grows from its own packets
+        // (C-DURATION-REFILL@1 §3).
+        demuxedExtent100ns_ = 0;
         snapshot_.position100ns = 0; snapshot_.frameIndex = -1; snapshot_.framePts = AV_NOPTS_VALUE;
         snapshot_.selectedVideoStream = videoStream_; snapshot_.selectedAudioStream = audioStream_;
         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
@@ -4783,6 +4832,40 @@ void PlayerSession::PumpPlayback() noexcept {
         FlushAtEnd(); return;
     }
     TrackPacketBitRate(playbackPacket_, format_);
+    // F-A duration refill (C-DURATION-REFILL@1): every packet proves how far the
+    // demuxer has reached on the playback timeline. Containers that estimate to 0
+    // on open (streaming WebM/MP4 without a duration) grow snapshot_.duration100ns
+    // from what the packets have actually shown. dts first, pts when the stream
+    // carries no dts, skip when neither exists. Every stream counts, not just the
+    // reference one; the external-audio pump feeds a separate container and must
+    // not touch this axis. Max-only accumulation: seeks backward or a reopened
+    // demux never shrink what has been seen, and for files whose open-time estimate
+    // is already valid the seen extent stays below it, so the synthesized value
+    // never fires and their duration stays byte-identical (R2.1).
+    {
+        const auto packetStreamIndex = playbackPacket_->stream_index;
+        if (packetStreamIndex >= 0 &&
+            packetStreamIndex < static_cast<std::int32_t>(format_->nb_streams)) {
+            auto packetTimestamp = playbackPacket_->dts;
+            if (packetTimestamp == AV_NOPTS_VALUE) packetTimestamp = playbackPacket_->pts;
+            if (packetTimestamp != AV_NOPTS_VALUE) {
+                const auto* packetStream = format_->streams[packetStreamIndex];
+                auto extent = StreamTimestampPosition100ns(format_, packetStreamIndex,
+                    packetTimestamp);
+                if (extent != AV_NOPTS_VALUE) {
+                    if (playbackPacket_->duration > 0 && packetStream != nullptr) {
+                        extent += av_rescale_q(playbackPacket_->duration, packetStream->time_base,
+                            AVRational{1, static_cast<int>(TicksPerSecond)});
+                    }
+                    demuxedExtent100ns_ = std::max(demuxedExtent100ns_, extent);
+                    if (demuxedExtent100ns_ > snapshot_.duration100ns) {
+                        snapshot_.duration100ns = demuxedExtent100ns_;
+                        PublishSnapshot();
+                    }
+                }
+            }
+        }
+    }
     discInvalidPackets_ = 0;
     if (playbackPacket_->stream_index == videoStream_) {
         // The decoder can free an input slot while av_read_frame runs. New
@@ -7367,6 +7450,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     ResetBitRateTracking();
     {
         std::lock_guard lock(mutex_); snapshot_.state = finalState; snapshot_.position100ns = 0; snapshot_.duration100ns = 0;
+        demuxedExtent100ns_ = 0;   // F-A refill accumulator is per-media state (C-DURATION-REFILL@1 §4).
         snapshot_.frameIndex = -1; snapshot_.selectedVideoStream = -1; snapshot_.selectedAudioStream = -1;
         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
         snapshot_.isExternalAudio = 0; snapshot_.externalAudioOffset100ns = 0;
