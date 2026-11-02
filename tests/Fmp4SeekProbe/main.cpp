@@ -660,7 +660,9 @@ StepRow RunEndedSemantics(FFF3FPHandle player, const std::int64_t target100ns,
     row.name += tag;
     row.name += ")";
     // Ended only happens while playing; resume first if paused.
-    FFF3FPSnapshot snap;
+    // G.UINIT.001: value-initialize so the timeout tail can never read
+    // indeterminate members even if every ReadSnapshot in the window failed.
+    FFF3FPSnapshot snap{};
     if (ReadSnapshot(player, &snap) && snap.state == FFF3FPState::Paused) {
         const FFFResult prc = FFF3FP_Play(player);
         row.rc = "play=";
@@ -921,12 +923,23 @@ int wmain(int argc, wchar_t** argv) {
         semanticsFailures > 0 ? " [semantics-check deviations present — see matrix]"
                               : "");
     if (failures != 0 || semanticsFailures != 0) {
-        // Attach the tail of the session log to every failing run for offline analysis.
-        std::lock_guard<std::mutex> lock(g_logMutex);
-        const std::size_t skip = g_recentLines.size() > 30 ? g_recentLines.size() - 30 : 0;
+        // Attach the tail of the session log to every failing run for offline
+        // analysis. G.CON.02-CPP: copy the tail snapshot under the lock, then
+        // log it WITHOUT holding g_logMutex — LogRaw() locks the same
+        // non-recursive mutex internally, so re-entering it here would be
+        // undefined behavior (self-deadlock on the exact "tests failing" path
+        // where this diagnostic matters most).
+        std::vector<std::string> tail;
+        {
+            std::lock_guard<std::mutex> lock(g_logMutex);
+            const std::size_t skip = g_recentLines.size() > 30
+                ? g_recentLines.size() - 30 : 0;
+            tail.assign(g_recentLines.begin() + static_cast<std::ptrdiff_t>(skip),
+                        g_recentLines.end());
+        }
         LogRaw("---- last 30 log lines ----");
-        for (std::size_t i = skip; i < g_recentLines.size(); ++i)
-            LogRaw(g_recentLines[i].c_str());
+        for (const std::string& line : tail)
+            LogRaw(line.c_str());
     }
     if (g_logFile != nullptr) {
         std::fclose(g_logFile);
