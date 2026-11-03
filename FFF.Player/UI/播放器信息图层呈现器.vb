@@ -312,8 +312,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
             添加配对行如果有值(结果, "输入：", 视频输入(视频, 快照.视频实时比特率), 紫色)
             添加配对行如果有值(结果, "色彩：", 视频色彩(视频), 蓝色)
             ' 内容分类由外部模块产出（解锁后才非空）；宿主只显示不解释，"空值自然不出现"。
-            ' 用户裁定（2026-11-01）：外部增强等级不再单独成行，注入态由模块供给 "+P…" 文本，
-            ' 本体只拼 "HDR" & 文本 = "HDR+P8.1 …"（规格词整体替换，HDR10 等基础词不显示），
+            ' 用户裁定（2026-11-02）：外部增强等级不再单独成行，注入态由模块供给 "P…" 文本，
+            ' 本体只拼 "HDR " & 文本 = "HDR P8.1 …"（规格词整体替换，HDR10 等基础词不显示），
             ' 信息图层里没有独立的「内容：」行。EL 残差合成的粘滞位同源（模块文本说
             ' 层词只是内容形态，合成位才是处理确认）。
             Dim 内容描述 = 安全获取(获取内容描述)
@@ -599,20 +599,20 @@ Friend NotInheritable Class 播放器信息图层呈现器
 
     Private Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照,
                              内容描述 As String, EL合成已见过 As Boolean) As String
-        ' 外部模块算出的增强规格词（"+P8.1 …"，解锁后才有值）：宿主零外部格式语义，
-        ' "+" 与 P 号都来自模块文本。空值自然不出现。
+        ' 外部模块算出的增强规格词（"P8.1 …"，解锁后才有值）：宿主零外部格式语义，
+        ' P 号与层词都来自模块文本。空值自然不出现。
         Dim 等级 = If(String.IsNullOrWhiteSpace(内容描述), String.Empty, 内容描述.Trim())
         ' 门控：HDR 源照常；但外部增强流可能被本体判成 SDR 基底（如 P5 无色彩标记）——
         ' 模块在场时这是"SDR 分类 + 外部色彩变换"的合法形态，不能因 SDR 就整行消失。
         If Not 快照.是HDR源 AndAlso Not 流.是HDR AndAlso 等级.Length = 0 Then Return String.Empty
         ' 规格优先流级口径（媒体 JSON 已与逐帧状态脱钩）；流只声明 SDR/缺声明时
         ' 才回退快照枚举 —— 且读的是"开流取一次"的锁存值，不再逐帧横跳。
-        ' 用户裁定（2026-11-01）：基础 HDR 用传输函数表述（HDR PQ / HDR HLG）；
-        ' 模块注入后规格整体变为 "HDR"+模块文本（HDR+P8.1 …），基础规格词不显示。
+        ' 用户裁定（2026-11-02）：基础 HDR 用传输函数表述（HDR10 PQ / HDR HLG）；
+        ' 模块注入后规格整体变为 "HDR "+模块文本（HDR P8.1 …），基础规格词不显示。
         Dim 基础规格 = If(String.IsNullOrWhiteSpace(流.HDR格式) OrElse 流.HDR格式 = "SDR",
                     规格显示文本(粘滞HDR规格枚举, 流.HDR格式),
                     规格显示文本(HDR格式.SDR, 流.HDR格式))
-        Dim 规格 = If(等级.Length > 0, "HDR" & 等级, 基础规格)
+        Dim 规格 = If(等级.Length > 0, "HDR " & 等级, 基础规格)
         ' 动态段是粘滞位（见 创建调试行），逐帧回落不再把这段抹掉。外部增强流上这份
         ' 动态元数据就是模块烘焙的外部映射表 ⇒ 文案升级为外部映射口径；HDR10+/Vivid 流
         ' （模块文本为空）维持原口径。
@@ -631,19 +631,19 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Return 合并字段(规格, 动态, 合成, 亮度, 回退)
     End Function
 
-    ''' <summary>HDR 行的规格词（2026-11-01 口径）：基础 HDR 用传输函数表述 ——
-    ''' HDR10 ⇒ "HDR PQ"、HLG ⇒ "HDR HLG"；HDR10+/Vivid 保持注册名。枚举判不出的
+    ''' <summary>HDR 行的规格词（2026-11-02 口径）：基础 HDR 用传输函数表述 ——
+    ''' HDR10 ⇒ "HDR10 PQ"、HLG ⇒ "HDR HLG"；HDR10+/Vivid 保持注册名。枚举判不出的
     ''' （SDR/未知）回退媒体文本，且对常见的 "HDR10"/"HLG" 字样做同一映射。
-    ''' 外部增强注入态不走这里 —— 模块的 "+P…" 文本直接拼在 "HDR" 后（见 视频HDR）。</summary>
+    ''' 外部增强注入态不走这里 —— 模块的 "P…" 文本拼在 "HDR " 后（见 视频HDR）。</summary>
     Private Shared Function 规格显示文本(规格 As HDR格式, 媒体文本 As String) As String
         Select Case 规格
-            Case HDR格式.HDR10 : Return "HDR PQ"
+            Case HDR格式.HDR10 : Return "HDR10 PQ"
             Case HDR格式.HDR10Plus : Return "HDR10+"
             Case HDR格式.HLG : Return "HDR HLG"
             Case HDR格式.HDRVivid : Return "HDR Vivid"
             Case Else
                 Select Case 媒体文本
-                    Case "HDR10" : Return "HDR PQ"
+                    Case "HDR10" : Return "HDR10 PQ"
                     Case "HLG" : Return "HDR HLG"
                     Case Else : Return 媒体文本
                 End Select

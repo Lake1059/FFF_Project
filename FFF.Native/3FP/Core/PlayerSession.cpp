@@ -1006,6 +1006,27 @@ std::int64_t PlayerSession::TimelineOrigin100ns(const AVFormatContext* owner) co
     return origin == AV_NOPTS_VALUE ? 0 : origin;
 }
 
+// 病态容器字段（极端 dts/duration）可把 av_rescale_q 推到不可表示的结果
+// （FFmpeg 返回 INT64_MIN），随后的加减会有符号溢出（UB）。饱和化处理：
+// 时间轴极端值裁到 int64 边界，避免未定义行为（G.INT.OVERFLOW.001）。
+namespace {
+std::int64_t SaturatingAddInt64(std::int64_t left, std::int64_t right) noexcept {
+    if (right >= 0 && left > std::numeric_limits<std::int64_t>::max() - right)
+        return std::numeric_limits<std::int64_t>::max();
+    if (right < 0 && left < std::numeric_limits<std::int64_t>::min() - right)
+        return std::numeric_limits<std::int64_t>::min();
+    return left + right;
+}
+
+std::int64_t SaturatingSubInt64(std::int64_t left, std::int64_t right) noexcept {
+    if (right >= 0 && left < std::numeric_limits<std::int64_t>::min() + right)
+        return std::numeric_limits<std::int64_t>::min();
+    if (right < 0 && left > std::numeric_limits<std::int64_t>::max() + right)
+        return std::numeric_limits<std::int64_t>::max();
+    return left - right;
+}
+} // namespace
+
 std::int64_t PlayerSession::StreamTimestampPosition100ns(const AVFormatContext* owner,
     const std::int32_t streamIndex, const std::int64_t timestamp) const noexcept {
     if (owner == nullptr || streamIndex < 0 ||
@@ -4720,8 +4741,11 @@ void PlayerSession::PumpPlayback() noexcept {
                     packetTimestamp);
                 if (extent != AV_NOPTS_VALUE) {
                     if (playbackPacket_->duration > 0 && packetStream != nullptr) {
-                        extent += av_rescale_q(playbackPacket_->duration, packetStream->time_base,
-                            AVRational{1, static_cast<int>(TicksPerSecond)});
+                        // 病态 duration 极值下 av_rescale_q 可能返回不可表示值，
+                        // 饱和化避免有符号溢出（G.INT.OVERFLOW.001）。
+                        extent = SaturatingAddInt64(extent, av_rescale_q(
+                            playbackPacket_->duration, packetStream->time_base,
+                            AVRational{1, static_cast<int>(TicksPerSecond)}));
                     }
                     demuxedExtent100ns_ = std::max(demuxedExtent100ns_, extent);
                     if (demuxedExtent100ns_ > snapshot_.duration100ns) {
@@ -6986,8 +7010,11 @@ bool PlayerSession::SeekFragmentedPreroll(std::int64_t target100ns) noexcept {
             auto decodeTs = playbackPacket_->dts;
             if (decodeTs == AV_NOPTS_VALUE) decodeTs = playbackPacket_->pts;   // dts 缺失回落 pts
             if (decodeTs != AV_NOPTS_VALUE) {
-                const auto packetPosition = av_rescale_q(decodeTs, *referenceTimeBase,
-                    AVRational{1, static_cast<int>(TicksPerSecond)}) - origin;
+                // 病态 dts 极值下 av_rescale_q 可能返回不可表示值，饱和化减法
+                // 避免 timelineOrigin 相减的有符号溢出（G.INT.OVERFLOW.001）。
+                const auto packetPosition = SaturatingSubInt64(
+                    av_rescale_q(decodeTs, *referenceTimeBase,
+                        AVRational{1, static_cast<int>(TicksPerSecond)}), origin);
                 if (packetPosition > demuxReference100ns) demuxReference100ns = packetPosition;
             }
         }

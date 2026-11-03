@@ -92,6 +92,25 @@ std::int64_t SaturatingToInt64(std::uint64_t value) noexcept {
         : static_cast<std::int64_t>(value);
 }
 
+// 有符号饱和加减：病态容器字段（近 2^63 的 tfdt 基准、极端 trun 时长）经
+// av_rescale_q 得到不可表示结果时直接相减/相加会有符号溢出（UB，G.INT.OVERFLOW.001）。
+// 饱和化把时间轴极端值裁到 int64 边界，后果仅为一条 fragment 时间轴记录失真。
+std::int64_t SaturatingAddInt64(std::int64_t left, std::int64_t right) noexcept {
+    if (right >= 0 && left > std::numeric_limits<std::int64_t>::max() - right)
+        return std::numeric_limits<std::int64_t>::max();
+    if (right < 0 && left < std::numeric_limits<std::int64_t>::min() - right)
+        return std::numeric_limits<std::int64_t>::min();
+    return left + right;
+}
+
+std::int64_t SaturatingSubInt64(std::int64_t left, std::int64_t right) noexcept {
+    if (right >= 0 && left < std::numeric_limits<std::int64_t>::min() + right)
+        return std::numeric_limits<std::int64_t>::min();
+    if (right < 0 && left > std::numeric_limits<std::int64_t>::max() + right)
+        return std::numeric_limits<std::int64_t>::max();
+    return left - right;
+}
+
 // 返回文件大小；无法确定（<0 或 0）时返回 0（0 不是合法的绝对终点，调用方据此判失败）。
 std::uint64_t ResolveEndOfFile(AVIOContext* io) noexcept {
     const auto size = avio_size(io);
@@ -475,10 +494,12 @@ bool Fmp4FragmentScanner::ParseMoof(AVIOContext* io, std::int64_t moofOffset,
                     }
                     if (!hasBaseTime) {
                         // 契约第 5 条基准换算（与 PlayerSession 同一坐标系）。
-                        startDecodeTime100ns = av_rescale_q(
+                        // tfdt 是文件直读的 uint64，极端值经 av_rescale_q 后与
+                        // origin 相减需饱和化（G.INT.OVERFLOW.001）。
+                        startDecodeTime100ns = SaturatingSubInt64(av_rescale_q(
                             static_cast<std::int64_t>(baseMediaDecodeTime), timeBase,
-                            AVRational{1, static_cast<int>(PlaybackTicksPerSecond)}) -
-                            timelineOrigin100ns;
+                            AVRational{1, static_cast<int>(PlaybackTicksPerSecond)}),
+                            timelineOrigin100ns);
                         hasBaseTime = true;
                     }
                 } else if (sub.type == BoxTypeTrun && trackIdKnown &&
@@ -517,9 +538,11 @@ bool Fmp4FragmentScanner::ParseMoof(AVIOContext* io, std::int64_t moofOffset,
         entry.moofOffset = moofOffset;
         entry.sequenceNumber = sequenceNumber;
         entry.startDecodeTime100ns = startDecodeTime100ns;
-        entry.endDecodeTime100ns = startDecodeTime100ns + av_rescale_q(
+        // end = start + 参考流样本总时长；总和已饱和化，此处再加权换算结果仍需
+        // 饱和化相加（极端 tfdt 基准 + 极端时长叠加，G.INT.OVERFLOW.001）。
+        entry.endDecodeTime100ns = SaturatingAddInt64(startDecodeTime100ns, av_rescale_q(
             SaturatingToInt64(totalDurationTicks), timeBase,
-            AVRational{1, static_cast<int>(PlaybackTicksPerSecond)});
+            AVRational{1, static_cast<int>(PlaybackTicksPerSecond)}));
         entry.hasKeyframe = hasKeyframe;
         // 样本时长全缺省（per-sample 与 tfhd default 皆无）时 totalDurationTicks==0，
         // end==start（时长 0，消费方须容忍）。
