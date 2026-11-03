@@ -1978,13 +1978,13 @@ Public NotInheritable Class 播放器控制器
         End Select
     End Function
 
-    ''' <summary>操作提示用的 HDR 规格词（与信息图层 HDR 行同口径：HDR PQ / HDR HLG）。</summary>
+    ''' <summary>操作提示用的 HDR 规格词（与信息图层 HDR 行同口径：HDR10 PQ / HDR HLG）。</summary>
     Private Shared Function HDR规格文本(快照 As 播放器快照) As String
         Select Case 快照.HDR规格
             Case HDR格式.HDR10Plus : Return "HDR10+"
             Case HDR格式.HLG : Return "HDR HLG"
             Case HDR格式.HDRVivid : Return "HDR Vivid"
-            Case Else : Return "HDR PQ"
+            Case Else : Return "HDR10 PQ"
         End Select
     End Function
 
