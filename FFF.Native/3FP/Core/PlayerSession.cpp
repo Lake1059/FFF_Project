@@ -2208,9 +2208,14 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
     if (format_ != nullptr && videoStream_ >= 0) {
         // The device is new, so a stream the GPU refused before is worth asking about
         // again -- unless the refusal was about the stream rather than the device, in
-        // which case it is remembered and the attempt is skipped here too.
+        // which case it is remembered and the attempt is skipped here too. The still
+        // JPEG CPU policy from the open path applies here as well: device recovery
+        // must not re-open the hardware session the policy already declined for a
+        // picture that decodes on the CPU just fine.
+        const bool stillJpegCpuPolicy = staticImage_ && !StillJpegHardwareEnabled() &&
+            IsJpegCodec(format_->streams[videoStream_]->codecpar->codec_id);
         const auto tryHardware = decodeMode_ == FFF3FPDecodeMode::D3D11 &&
-            !HardwareRouteKnownUnsupported(format_->streams[videoStream_]);
+            !HardwareRouteKnownUnsupported(format_->streams[videoStream_]) && !stillJpegCpuPolicy;
         if (tryHardware) {
             result = OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_,
                 &hardwareFailureReason);
@@ -2224,7 +2229,9 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
                 -1, nullptr, false);
             if (result == FFFResult::Success && decodeMode_ == FFF3FPDecodeMode::D3D11) {
                 hardwareFallback = true;
-                hardwareFailureReason = "The GPU decoder was rejected for this stream earlier in this session; playback is using CPU decoding.";
+                hardwareFailureReason = stillJpegCpuPolicy
+                    ? "The still-image CPU decode policy applies to this stream; playback is using CPU decoding."
+                    : "The GPU decoder was rejected for this stream earlier in this session; playback is using CPU decoding.";
             }
         }
         if (result != FFFResult::Success) {
@@ -6983,9 +6990,13 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
     AVCodecContext* replacement = nullptr;
     const auto previousDecodeMode = snapshot_.decodeMode;
     // Same memory as the open path: a track whose hardware route was already refused
-    // is opened on the CPU directly instead of asking the GPU again.
+    // is opened on the CPU directly instead of asking the GPU again. The still-JPEG
+    // CPU policy from the open path applies here too -- switching streams must not
+    // re-open a hardware session the policy already decided against.
+    const bool stillJpegCpuPolicy = video && staticImage_ && !StillJpegHardwareEnabled() &&
+        IsJpegCodec(format_->streams[index]->codecpar->codec_id);
     const auto tryHardware = video && decodeMode_ == FFF3FPDecodeMode::D3D11 &&
-        !HardwareRouteKnownUnsupported(format_->streams[index]);
+        !HardwareRouteKnownUnsupported(format_->streams[index]) && !stillJpegCpuPolicy;
     auto result = tryHardware
         ? OpenHardwareVideoDecoder(format_, index, &replacement)
         : OpenDecoder(format_, index, video, &replacement, -1, nullptr, false);
