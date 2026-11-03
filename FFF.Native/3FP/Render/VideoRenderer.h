@@ -474,6 +474,10 @@ public:
     std::uint64_t UploadCount() const noexcept;
     std::uint64_t UploadCopyBytes() const noexcept;
     std::uint32_t UploadPath() const noexcept;
+    std::uint64_t TrueHdrBlit100ns() const noexcept;
+    std::uint64_t VsrBlit100ns() const noexcept;
+    std::uint64_t MainDraw100ns() const noexcept;
+    std::uint64_t ScalePass100ns() const noexcept;
     std::uint32_t OutputBitDepth() const noexcept;
     FFF3FPVideoScalingMode ActualVideoScalingMode() const noexcept;
     // Presentation diagnostics for the ST 2094 paths; see FFF3FPHdrSignalDiagnostics.
@@ -1296,6 +1300,14 @@ private:
     std::atomic<std::uint64_t> uploadCount_;
     std::atomic<std::uint64_t> uploadCopyBytes_;
     std::atomic<std::uint32_t> uploadPath_;
+    // Render-stage timers for the snapshot fields of the same names: the
+    // TrueHDR / super-resolution blits, the main shader draw and the scale-chain
+    // passes previously had no metric at all, so a render-side regression could
+    // not be told apart from an upload or decode one.
+    std::atomic<std::uint64_t> trueHdrBlit100ns_{0};
+    std::atomic<std::uint64_t> vsrBlit100ns_{0};
+    std::atomic<std::uint64_t> mainDraw100ns_{0};
+    std::atomic<std::uint64_t> scalePass100ns_{0};
     std::atomic<std::uint32_t> playbackWorkPending_;
     std::atomic<bool> interactiveMove_;
     std::atomic<bool> lyricsLayoutEnabled_;

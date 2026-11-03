@@ -269,10 +269,17 @@ Public NotInheritable Class 播放器控制器
         Return 安全读取会话(Function(目标) 目标.色彩变换内容描述, String.Empty)
     End Function
 
-    ''' <summary>色彩变换通路已发出过 EL 残差合成请求（粘滞位，流重启后复位）。
-    ''' 供信息图层 HDR 行的 EL 状态段与测试读取，任何时候都能安全问。</summary>
-    Public Function 读取色彩变换EL合成已见过() As Boolean
-        Return 安全读取会话(Function(目标) 目标.色彩变换EL合成已见过, False)
+    ''' <summary>色彩变换通路最近一帧的逐帧峰值（尼特；无会话 / 未解锁 / 无 L1 时 0）。
+    ''' 供信息图层 HDR 行的逐帧源峰值段读取，任何时候都能安全问。</summary>
+    Public Function 读取色彩变换外部峰值尼特() As Single
+        Return 安全读取会话(Function(目标) 目标.色彩变换外部峰值尼特, 0F)
+    End Function
+
+    ''' <summary>模块自发布的残差合成状态行（模块自己的措辞，宿主原样显示不解释；
+    ''' 通路未跑 / 模块没说时为空串）。
+    ''' 供信息图层 HDR 行的合成状态段与测试读取，任何时候都能安全问。</summary>
+    Public Function 读取色彩变换合成文本() As String
+        Return 安全读取会话(Function(目标) 目标.色彩变换合成文本, String.Empty)
     End Function
 
     ''' <summary>解锁成功后调用：把注入通路从“补装载已放弃”里拉回来。
@@ -1414,6 +1421,14 @@ Public NotInheritable Class 播放器控制器
                 Try
                     原会话.播放()
                 Catch ex As 播放器异常
+                End Try
+                ' 候选会话在打开时就把注入泵从旧会话手上接管过去了（泵是进程级单例，
+                ' 一个进程只有一份）。候选随后被释放、泵随之归零 —— 既然回退到旧会话
+                ' 继续播，就得把它的通路重新拉起来，否则画面还在、信息图层再没有读数。
+                Try
+                    原会话.唤醒色彩变换通路()
+                Catch ex As Exception
+                    ' 通路唤醒失败不影响回退播放本身；信息图层按空值显示。
                 End Try
             End If
             If 打开异常 IsNot Nothing AndAlso Not 已释放 AndAlso

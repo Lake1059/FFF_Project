@@ -55,9 +55,15 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// Pinned inside PlayerApi.cpp (= 20). Host must fill size AND version before
-// FFF3FP_Create / FFF3FP_GetSnapshot, otherwise both reject with InvalidArgument.
-constexpr std::uint32_t kPlayerApiVersion = 20;
+// Two independent version gates, both strict equality, both filled by the host
+// on every call. They are separate numbers because they answer separate
+// questions: PlayerApiVersion counts the export surface (PlayerApi.cpp), while
+// the snapshot carries its own version (PlayerSession.cpp) that moves whenever
+// the struct grows. Folding them into one constant reads like tidiness and is
+// the opposite: the config below would then declare a version FFF3FP_Create
+// does not accept, and the probe would fail before it measured anything.
+constexpr std::uint32_t kPlayerApiVersion = 20; // PlayerApi.cpp
+constexpr std::uint32_t kSnapshotVersion = 21;  // PlayerSession.cpp, tail appended 2026-11-03
 // BACKWARD keyframe semantics: the landing may sit before the target; allow 3 s.
 constexpr std::int64_t kSeekTolerance100ns = 30'000'000;
 
@@ -203,7 +209,7 @@ void PumpMessages() {
 bool ReadSnapshot(FFF3FPHandle player, FFF3FPSnapshot* out) noexcept {
     *out = FFF3FPSnapshot{};
     out->size = sizeof(FFF3FPSnapshot);
-    out->version = kPlayerApiVersion;
+    out->version = kSnapshotVersion;
     return FFF3FP_GetSnapshot(player, out) == FFFResult::Success;
 }
 

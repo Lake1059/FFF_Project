@@ -42,11 +42,17 @@ Public NotInheritable Class 播放器会话
     Private 已释放 As Integer
     Private 事件排程中 As Integer
     Private 空间音频已启用 As Integer = 1
-    ''' <summary>外部色彩变换注入泵（模块缺席/未解锁/内核无环导出时为 Nothing，通路整体静默）。</summary>
-    Private 注入泵 As 色彩变换注入泵
+    ' （宿主注入泵已整体删除：逐帧注入搬进模块的自驱动泵 FFF_GetInjectionApi，
+    '   宿主只 start/stop 并读它的状态快照——见 启动色彩变换通路 与 色彩变换合成文本。）
 
     ''' <summary>宿主对应的原生 API 版本，须与 PlayerApi.cpp 的 PlayerApiVersion 同步。</summary>
     Friend Const 期望API版本 As UInteger = 20UI
+
+    ''' <summary>快照自己的版本，须与 PlayerSession.cpp 的 SnapshotVersion 同步。</summary>
+    ''' <remarks>与 期望API版本 是两个独立的门，都是严格相等：导出面只追加所以 API 轴很少动，
+    ''' 快照结构一追字段这个数就动。混版时 GetSnapshot 每次都返回 InvalidArgument，
+    ''' 而 Create 照样成功——宿主会拿到一个能播放但快照全空的会话。</remarks>
+    Friend Const 原生播放器快照版本 As UInteger = 21UI
 
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
@@ -112,6 +118,21 @@ Public NotInheritable Class 播放器会话
             释放()
             Throw
         End Try
+        ' 快照轴是第二个版本门，Create 不查它：混版（旧 FFF.Native.dll + 新播放器）时
+        ' 每次快照读取都吃 InvalidArgument，界面上只是信息图层一路空白、时长与解码器全空，
+        ' 没有任何一处会报错。这里在会话建好后立刻打一枪，把混版压在启动期。
+        Try
+            Dim 试探 As New 原生播放器快照 With {
+                .大小 = 原生播放器快照大小, .版本 = 原生播放器快照版本}
+            If 播放器原生接口.FFF3FP_GetSnapshot(句柄, 试探) <> 原生播放器结果.成功 Then
+                Throw New InvalidOperationException(
+                    $"FFF.Native 的快照版本不匹配：内核拒绝了声明 v{原生播放器快照版本} 的快照请求。" &
+                    "请确认 FFF.Native.dll 与播放器来自同一次发布（两者必须一起替换）。")
+            End If
+        Catch
+            释放()
+            Throw
+        End Try
     End Sub
 
     Public Event 播放器事件 As EventHandler(Of 播放器事件参数)
@@ -124,75 +145,132 @@ Public NotInheritable Class 播放器会话
     Public Event 设备变化 As EventHandler(Of 播放器事件参数)
 
     Public Sub 打开(本地路径 As String)
+        ' 计时戳从打开入口起算：下面这条通路同步串在 UI 线程上，与内核 worker 的 DoOpen
+        ' 并行；它到底吃掉了多少、有没有被等待窗吸收，只有单独量出来才答得了。
+        ' 未设 FFF_CT_LOAD_TRACE=1 时这里连一次分配都不做。
+        Dim 计时 As 通路计时 = Nothing
+        If 色彩变换装载计时已启用 Then 计时 = New 通路计时()
         调用路径(AddressOf 播放器原生接口.FFF3FP_Open, 本地路径)
         ' 呈现策略一次性接上：请求 VRR 低时延路径（tearing present）。偏好语义——
         ' 渲染侧只在自适应降速（pace）真正介入时兑现，健康播放仍是 vblank 钳制；
         ' 旧内核没有该导出时静默跳过，不影响播放。
         播放器原生接口.设置呈现配置(取得句柄(), True)
-        启动色彩变换通路()
+        启动色彩变换通路(计时)
+    End Sub
+
+    ' ---- 色彩变换通路装载计时（仅 FFF_CT_LOAD_TRACE=1） ----
+    ' 写文件而不是 Debug/ETW：沙箱按路径白名单写盘，用户 TEMP 可能拒写，包根目录
+    ' （AppContext.BaseDirectory）是稳定可写的那个点。环境变量在类型初始化时读一次，
+    ' 之后每个打点只做一次布尔判断，未开启时没有 IO、没有分配。
+    Private Shared ReadOnly 色彩变换装载计时已启用 As Boolean =
+        (Environment.GetEnvironmentVariable("FFF_CT_LOAD_TRACE") = "1")
+
+    Private NotInheritable Class 通路计时
+        Private ReadOnly 表 As Stopwatch
+        Private 上一刻 As Long
+        ' 默认 -1 = 这一段没走到（旧内核缺导出、模块缺席等提前返回），不是 0 ms。
+        Public 探测 As Long = -1
+        Public 装载 As Long = -1
+        Public 插槽 As Long = -1
+        Public 启动注入 As Long = -1
+
+        Public Sub New()
+            表 = Stopwatch.StartNew()
+            上一刻 = 表.ElapsedTicks
+        End Sub
+
+        ''' <summary>自上一刻度起的毫秒数，并把刻度推进到现在。</summary>
+        Public Function 打点() As Long
+            Dim 现在 = 表.ElapsedTicks
+            Dim 毫秒 = CLng((现在 - 上一刻) * 1000.0# / Stopwatch.Frequency)
+            上一刻 = 现在
+            Return 毫秒
+        End Function
+
+        ''' <summary>构造（即 打开() 入口）到现在，覆盖整条装载串。</summary>
+        Public ReadOnly Property 总毫秒 As Long
+            Get
+                Return CLng(表.ElapsedTicks * 1000.0# / Stopwatch.Frequency)
+            End Get
+        End Property
+    End Class
+
+    Private Shared Sub 写装载计时(计时 As 通路计时)
+        Try
+            Dim 行 = $"[CT] 探测={计时.探测}ms 装载={计时.装载}ms 插槽={计时.插槽}ms " &
+                     $"启动注入={计时.启动注入}ms 总={计时.总毫秒}ms"
+            IO.File.AppendAllText(IO.Path.Combine(AppContext.BaseDirectory, "ct_load_trace.log"),
+                                  行 & Environment.NewLine, System.Text.Encoding.UTF8)
+        Catch
+            ' 计时绝不能影响启动：只读目录、文件被占用、磁盘满，一律吞掉。
+        End Try
     End Sub
 
     ' ---- 外部色彩变换通路（kind=3 注入） ----
-    ' 三态探测：缺席 / 旧件 ⇒ 静默（绝大多数用户）；已解锁 ⇒ 装载建泵；
-    ' 已锁定 ⇒ 建泵走 60 秒补装载（用户可能在启动弹框里输码，也可能切出去找码）。
-    ' 铁律：任何意外都按“没有这条通路”处理，绝不能把一个好会话弄坏。
-    Private Sub 启动色彩变换通路()
+    ' 三态探测：缺席 / 旧件 ⇒ 静默（绝大多数用户）；就绪 ⇒ 装载并把内核会话句柄交给
+    ' 模块的自驱动注入泵（逐帧取环、烘焙、投表、回退探测全在模块内部，宿主没有泵线程）。
+    ' 铁律不变：任何意外都按“没有这条通路”处理，绝不能把一个好会话弄坏。
+    Private Sub 启动色彩变换通路(计时 As 通路计时)
         If Volatile.Read(已释放) <> 0 Then Return
         Try
-            ' 旧内核没有环/注入导出：这条路不存在，静默。
+            ' 旧内核没有环/注入导出：模块泵要用的就是这几支，缺席即静默。
             If Not 播放器原生接口.支持帧边数据环 OrElse Not 播放器原生接口.支持动态元数据注入 Then Return
 
             Dim 原因 As String = Nothing
             Dim 形态 = 色彩变换模块接口.探测(原因)
+            If 计时 IsNot Nothing Then 计时.探测 = 计时.打点()
             If 形态 = 色彩变换模块接口.模块在场形态.缺席 OrElse
               形态 = 色彩变换模块接口.模块在场形态.旧件 Then
                 Debug.WriteLine("色彩变换模块：" & 原因)
                 Return
             End If
 
-            If 注入泵 Is Nothing Then 注入泵 = New 色彩变换注入泵(Me)
-
-            ' 已解锁且泵里还没有活模块时才装载：避免每次打开文件都重载一遍（431 KB 钉住缓冲 + 握手）。
-            If 形态 = 色彩变换模块接口.模块在场形态.就绪 AndAlso Not 注入泵.通路可用 Then
+            ' 实例缺席时才装载：实例与床渲染插槽共用这一份映射，重复装载会多钉一份
+            ' 431 KB 载荷缓冲。未解锁时装载会失败（握手拒交函数表）⇒ 这里什么都不建，
+            ' 等解锁成功后的 唤醒色彩变换通路 再来。
+            If 形态 = 色彩变换模块接口.模块在场形态.就绪 AndAlso 色彩模块实例 Is Nothing Then
                 Dim 模块 = 色彩变换模块接口.尝试装载(原因)
                 If 模块 Is Nothing Then
                     Debug.WriteLine("色彩变换模块：" & 原因)
                 Else
-                    注入泵.采用模块(模块)
-                    ' 泵与床渲染插槽共用这一个活实例：再走一次 尝试装载 会再钉一份
-                    ' 431 KB 载荷缓冲，而交出去的函数表必须绑在同一份模块映射上。
                     色彩模块实例 = 模块
                 End If
             End If
+            If 计时 IsNot Nothing Then 计时.装载 = 计时.打点()
 
             ' 模块在场且已解锁 ⇒ 把外部床渲染函数表交给内核。未解锁或旧模块时一次都不叫，
             ' 床继续由内核自己的矩阵折叠处理——那是现网行为，不是新的失败分支。
             安装音频渲染插槽()
+            If 计时 IsNot Nothing Then 计时.插槽 = 计时.打点()
 
-            ' 已锁定时泵是空转起步的：后台按 2 秒节流补装载，票据一落盘下一拍就转入正常节拍。
-            注入泵.启动()
-            注入泵.流重启()
+            ' 把内核会话句柄交给模块的自驱动注入泵。未解锁/泵拒绝都按静默处理：
+            ' 状态读数为空，界面自然不显示。seek/换流/换文件不需要宿主通知——
+            ' 泵用内核快照（frameIndex 落后游标 + 呈现前进）自己判回退并清表重建。
+            Dim 实例 = 色彩模块实例
+            If 实例 IsNot Nothing AndAlso 实例.支持注入 Then
+                Dim 句柄 = 取得句柄()
+                If 句柄 IsNot Nothing AndAlso Not 句柄.IsInvalid Then
+                    实例.启动注入(句柄.DangerousGetHandle())
+                End If
+            End If
+            If 计时 IsNot Nothing Then 计时.启动注入 = 计时.打点()
         Catch ex As Exception
             Debug.WriteLine("色彩变换模块：通路启动异常（已忽略）：" & ex.GetType().Name & ": " & ex.Message)
+        Finally
+            ' 提前返回（旧内核/模块缺席）也落一行：-1 表示那段没走到，比缺行好判。
+            If 计时 IsNot Nothing Then 写装载计时(计时)
         End Try
     End Sub
 
-    ''' <summary>流重启通知：seek / 帧步进 / 停止 / 换文件 / 换轨之后调。
-    ''' 内核在这些点把边数据环整个丢掉、presentation index 从那里重来。</summary>
-    Private Sub 通知注入泵流重启()
-        Try
-            注入泵?.流重启()
-        Catch ex As Exception
-            ' 复位失败不该把调用方（可能是 UI 线程的播放控制）带倒。
-        End Try
-    End Sub
+    ' （流重启通知已随宿主泵删除：模块泵用内核快照自己判回退/换流并清表，
+    '   宿主在 seek / 帧步进 / 停止 / 换文件 / 换轨这些点上不再需要做事。）
 
-    ''' <summary>解锁成功后由 UI 线程调用：把通路从“已放弃 / 未采用”里拉回来。
-    ''' <para>为什么需要它：泵的补装载预算只有 60 秒（30 × 2s）。用户切出去找码、
-    ''' 再回来输码很容易超时；超时后泵线程自行退场，而票据此刻才落盘 —— 不显式
-    ''' 唤醒的话这一场播放永远不会开始注入，界面上却已经报了“已解锁”。</para>
-    ''' <para>只做探测/装载/采用/启动，不碰流状态：解锁不改变时间线，泵会从环里
-    ''' 现有条目接着取。任何失败都答 False，绝不抛。</para></summary>
+    ''' <summary>解锁成功后由 UI 线程调用：装载模块（解锁前握手被拒，实例不在）并把
+    ''' 内核会话句柄交给模块的自驱动注入泵。<para>为什么需要它：打开文件时若模块还锁着，
+    ''' 装载失败、通路缺席；票据此刻才落盘 —— 不显式唤醒的话这一场播放永远不会开始
+    ''' 注入，界面上却已经报了“已解锁”。</para>
+    ''' <para>只做探测/装载/启动，不碰流状态：解锁不改变时间线，泵从环里现有条目
+    ''' 接着取。任何失败都答 False，绝不抛。</para></summary>
     Public Function 唤醒色彩变换通路() As Boolean
         If Volatile.Read(已释放) <> 0 Then Return False
         Try
@@ -207,24 +285,23 @@ Public NotInheritable Class 播放器会话
                 Return False
             End If
 
-            If 注入泵 Is Nothing Then 注入泵 = New 色彩变换注入泵(Me)
-
-            If Not 注入泵.通路可用 Then
+            If 色彩模块实例 Is Nothing Then
                 Dim 模块 = 色彩变换模块接口.尝试装载(原因)
                 If 模块 Is Nothing Then
                     Debug.WriteLine("色彩变换模块：解锁后装载失败（" & 原因 & "）")
                     Return False
                 End If
-                注入泵.采用模块(模块)
-                ' 与 启动色彩变换通路 同一份实例：泵与床渲染插槽必须绑在同一份映射上。
+                ' 与 启动色彩变换通路 同一份实例：注入泵与床渲染插槽必须绑在同一份映射上。
                 色彩模块实例 = 模块
                 ' 解锁也可能刚刚让音频那一面可用（未解锁时模块拒交那张表）。
                 安装音频渲染插槽()
             End If
 
-            ' 线程已退场（补装载预算用尽）时这里重启；还活着则是空操作。
-            注入泵.启动()
-            Return 注入泵.通路可用
+            Dim 实例 = 色彩模块实例
+            If 实例 Is Nothing OrElse Not 实例.支持注入 Then Return False
+            Dim 句柄 = 取得句柄()
+            If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return False
+            Return 实例.启动注入(句柄.DangerousGetHandle())
         Catch ex As Exception
             Debug.WriteLine("色彩变换模块：解锁后唤醒异常（已忽略）：" & ex.GetType().Name)
             Return False
@@ -292,46 +369,36 @@ Public NotInheritable Class 播放器会话
     End Sub
     Public Sub 停止()
         检查结果(播放器原生接口.FFF3FP_Stop(取得句柄()))
-        通知注入泵流重启()
     End Sub
     Public Sub 关闭媒体()
         检查结果(播放器原生接口.FFF3FP_Close(取得句柄()))
-        通知注入泵流重启()
     End Sub
     Public Sub 跳转(位置 As TimeSpan)
         If 位置 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(位置))
         检查结果(播放器原生接口.FFF3FP_Seek(取得句柄(), 位置.Ticks))
-        通知注入泵流重启()
     End Sub
     Public Sub 跳转到关键帧(位置 As TimeSpan)
         If 位置 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(位置))
         检查结果(播放器原生接口.FFF3FP_SeekKeyframe(取得句柄(), 位置.Ticks))
-        通知注入泵流重启()
     End Sub
     Public Sub 跳转到帧(帧序号 As Long)
         If 帧序号 < 0 Then Throw New ArgumentOutOfRangeException(NameOf(帧序号))
         检查结果(播放器原生接口.FFF3FP_SeekFrame(取得句柄(), 帧序号))
-        通知注入泵流重启()
     End Sub
     Public Sub 上一帧()
         检查结果(播放器原生接口.FFF3FP_StepFrame(取得句柄(), -1))
-        通知注入泵流重启()
     End Sub
     Public Sub 下一帧()
         检查结果(播放器原生接口.FFF3FP_StepFrame(取得句柄(), 1))
-        通知注入泵流重启()
     End Sub
     Public Sub 上一关键帧()
         检查结果(播放器原生接口.FFF3FP_StepKeyframe(取得句柄(), -1))
-        通知注入泵流重启()
     End Sub
     Public Sub 下一关键帧()
         检查结果(播放器原生接口.FFF3FP_StepKeyframe(取得句柄(), 1))
-        通知注入泵流重启()
     End Sub
     Public Sub 选择视频流(索引 As Integer)
         检查结果(播放器原生接口.FFF3FP_SelectVideoStream(取得句柄(), 索引))
-        通知注入泵流重启()
     End Sub
     Public Sub 选择音频流(索引 As Integer)
         检查结果(播放器原生接口.FFF3FP_SelectAudioStream(取得句柄(), 索引))
@@ -875,7 +942,7 @@ Public NotInheritable Class 播放器会话
     ''' <remarks>命中 .NET 11 的 WFO2000（getter 内构造新引用实例），已在 .editorconfig 中按本文件作用域抑制；理由见那里。</remarks>
     Public ReadOnly Property 当前快照 As 播放器快照
         Get
-            Dim 值 As New 原生播放器快照 With {.大小 = 原生播放器快照大小, .版本 = 20UI}
+            Dim 值 As New 原生播放器快照 With {.大小 = 原生播放器快照大小, .版本 = 原生播放器快照版本}
             检查结果(播放器原生接口.FFF3FP_GetSnapshot(取得句柄(), 值))
             Return New 播放器快照(值)
         End Get
@@ -1010,41 +1077,85 @@ Public NotInheritable Class 播放器会话
     ''' <summary>色彩变换通路的诊断摘要（测试与日志用；通路未启动时答“未启动”）。</summary>
     Friend ReadOnly Property 色彩变换诊断 As String
         Get
-            Dim 泵 = 注入泵
-            If 泵 Is Nothing Then Return "通路未启动（模块缺席、未装载或内核无环导出）"
-            Return 泵.描述计数器() & "；" & 泵.描述模块态()
+            Dim 实例 = 色彩模块实例
+            If 实例 Is Nothing Then Return "通路未启动（模块缺席、未装载或未解锁）"
+            If Not 实例.支持注入 Then Return "模块已装载（旧模块，无自驱动注入面）"
+            Dim 状态 As 色彩变换模块接口.注入状态 = Nothing
+            If Not 实例.读取注入状态(状态) Then Return "模块已装载（注入快照不可读）"
+            Return $"注入 {状态.注入帧数} 帧，未变 {状态.未变帧数} 帧，跳过 {状态.跳过帧数} 帧，" &
+                   $"无据 {状态.无据帧数} 帧，末帧 {状态.末帧帧号}；泵 {If(状态.运行 <> 0UI, "运行中", "已停止")}"
         End Get
     End Property
 
-    ''' <summary>色彩变换通路已读到的内容分类文本（模块产出；泵未启动 / 未解锁 / 无分类时答空串）。</summary>
+    ''' <summary>色彩变换通路已读到的内容分类文本（模块泵产出；通路未跑 / 无分类时答空串）。</summary>
     Friend ReadOnly Property 色彩变换内容描述 As String
         Get
-            Dim 泵 = 注入泵
-            If 泵 Is Nothing Then Return String.Empty
-            Return 泵.读取内容描述()
+            Dim 实例 = 色彩模块实例
+            If 实例 Is Nothing OrElse Not 实例.支持注入 Then Return String.Empty
+            Dim 状态 As 色彩变换模块接口.注入状态 = Nothing
+            If Not 实例.读取注入状态(状态) Then Return String.Empty
+            ' 泵停了就不再拿它最后一次写下的文本当"当前"：模块的 stop 不清状态，
+            ' 余下的是一份冻结的读数。换文件时新会话的泵还没起，这里若不判运行位，
+            ' 信息图层会把上一部片的内容等级接着显示下去（HDR 行的门控又是"等级非空
+            ' 即成行"，于是 SDR 片源也会长出一整条 HDR 行）。
+            If 状态.运行 = 0UI Then Return String.Empty
+            Return 色彩变换模块接口.注入文本(状态.内容文本字节)
         End Get
     End Property
 
-    ''' <summary>色彩变换通路是否为某帧发出过启用状态的 EL 残差合成请求
-    ''' （粘滞位，流重启后复位；泵未启动时 False）。</summary>
-    Friend ReadOnly Property 色彩变换EL合成已见过 As Boolean
+    ''' <summary>色彩变换通路最近一帧的逐帧峰值（尼特；通路未跑答 -1，无 L1 答 0）。</summary>
+    Friend ReadOnly Property 色彩变换外部峰值尼特 As Single
         Get
-            Dim 泵 = 注入泵
-            If 泵 Is Nothing Then Return False
-            Return 泵.合成已启用过
+            Dim 实例 = 色彩模块实例
+            If 实例 Is Nothing OrElse Not 实例.支持注入 Then Return 0F
+            Dim 状态 As 色彩变换模块接口.注入状态 = Nothing
+            If Not 实例.读取注入状态(状态) Then Return 0F
+            ' -1 是"通路没在跑"，与 0"本帧无 L1"分开：显示层的粘滞位靠 0 保末值
+            ' （避免读数逐帧回跳），靠 -1 才敢作废 —— 泵死之后再指着旧读数说"逐帧"，
+            ' 那是拿一个不再更新的数字冒充实时。
+            If 状态.运行 = 0UI Then Return -1F
+            Return 状态.末帧峰值尼特
+        End Get
+    End Property
+
+    ''' <summary>模块自发布的残差合成状态行（模块自己的措辞，宿主原样显示不解释；
+    ''' 通路未跑 / 模块没说时为空串）。取代旧宿主泵的"EL合成已见过"粘滞位——
+    ''' 旧位是宿主对模块意图的转述，快照文本才是泵线程自己的连贯口径。</summary>
+    Friend ReadOnly Property 色彩变换合成文本 As String
+        Get
+            Dim 实例 = 色彩模块实例
+            If 实例 Is Nothing OrElse Not 实例.支持注入 Then Return String.Empty
+            Dim 状态 As 色彩变换模块接口.注入状态 = Nothing
+            If Not 实例.读取注入状态(状态) Then Return String.Empty
+            ' 同 色彩变换内容描述：泵停后模块不清状态，冻结的措辞不能当现状显示。
+            If 状态.运行 = 0UI Then Return String.Empty
+            Return 色彩变换模块接口.注入文本(状态.合成文本字节)
         End Get
     End Property
 
     Public Sub 释放() Implements IDisposable.Dispose
         If Interlocked.Exchange(已释放, 1) <> 0 Then Return
         释放取消源.Cancel()
-        ' 先停注入泵：泵的每次原生调用都要用活句柄，停止（含线程 join）必须在句柄销毁前，
-        ' 否则就是拿着正在销毁的句柄进 CopyFrameSideDataAfter（use-after-free）。
+        ' 先停模块注入泵：泵的每次原生调用都要用活句柄，停止（含线程 join）必须在
+        ' 句柄销毁前，否则就是拿着正在销毁的句柄进内核导出（use-after-free）。
+        ' 交出句柄让它自己判归属：泵是进程级单例，换文件时它可能已经归了新会话，
+        ' 那一边不能因为这里释放旧会话就被顺手停死。
         Try
-            注入泵?.Dispose()
+            If 色彩模块实例 IsNot Nothing AndAlso 句柄 IsNot Nothing Then
+                色彩模块实例.停止注入(句柄.DangerousGetHandle())
+            End If
         Catch ex As Exception
             ' 停泵失败不该阻断会话的其余清理。
         End Try
+        ' 模块实例的 Dispose 是唯一会 FreeLibrary 的地方：停泵之后再做，否则泵线程
+        ' 会继续拿着已卸载模块里的导出地址。每会话一份实例，之前从没人 Dispose，
+        ' 泄漏的是每会话一份 pinned 载荷表（约 431KB）与一个模块引用计数。
+        Try
+            色彩模块实例?.Dispose()
+        Catch ex As Exception
+            ' 卸载失败不该阻断会话的其余清理（模块自己的 PROCESS_DETACH 会兜底）。
+        End Try
+        色彩模块实例 = Nothing
         SyncLock 定时文字提交锁
             句柄.Dispose()
             If 定时文字原生缓冲句柄.IsAllocated Then 定时文字原生缓冲句柄.Free()

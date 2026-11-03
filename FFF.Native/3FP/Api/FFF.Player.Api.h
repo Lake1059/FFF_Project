@@ -407,6 +407,24 @@ struct FFF3FPSnapshot {
     // by this field instead of being silently averaged in.
     // Appended at the end for the offset reason above.
     std::uint32_t uploadPath;
+    // Cumulative wall-clock costs of the pipeline stages that previously had no
+    // metric at all, in the same 100 ns base as the other diagnostics:
+    //   videoDecode100ns - video decoding (both the generic/hardware arm and the
+    //                      software decode worker; measured around the actual
+    //                      send/receive decode work, not the queue wait).
+    //   demuxRead100ns   - demux av_read_frame calls. Back-pressure sleeps are
+    //                      not included.
+    //   trueHdrBlit100ns / vsrBlit100ns - the ApplyTrueHdr / ApplySuperResolution
+    //                      blits inside DrawCachedVideo.
+    //   mainDraw100ns    - the whole DrawWithShader call (state setup + draw).
+    //   scalePass100ns   - each ExecuteScalePass, draw included.
+    // Appended at the end for the offset reason above.
+    std::uint64_t videoDecode100ns;
+    std::uint64_t demuxRead100ns;
+    std::uint64_t trueHdrBlit100ns;
+    std::uint64_t vsrBlit100ns;
+    std::uint64_t mainDraw100ns;
+    std::uint64_t scalePass100ns;
 };
 // Layout teeth. FFF3FPSnapshot is read by fixed offset from the VB/C# hosts and from
 // the probes, which is why it is append-only; that rule is unenforceable until the
@@ -414,7 +432,7 @@ struct FFF3FPSnapshot {
 // shifting a host's view of the struct at runtime.
 // Values below were measured by compiling a probe against this header (cl /std:c++20,
 // offsetof/sizeof printed) -- not derived from a field table.
-static_assert(sizeof(FFF3FPSnapshot) == 464,
+static_assert(sizeof(FFF3FPSnapshot) == 512,
     "FFF3FPSnapshot size changed: hosts and probes read it by fixed offset");
 static_assert(offsetof(FFF3FPSnapshot, externalAudioOffset100ns) == 88, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, iamfActive) == 364, "offset pin");
@@ -432,6 +450,12 @@ static_assert(offsetof(FFF3FPSnapshot, scalePassCount) == 432, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, uploadCount) == 440, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, uploadCopyBytes) == 448, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, uploadPath) == 456, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, videoDecode100ns) == 464, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, demuxRead100ns) == 472, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, trueHdrBlit100ns) == 480, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, vsrBlit100ns) == 488, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, mainDraw100ns) == 496, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, scalePass100ns) == 504, "offset pin");
 
 
 struct FFF3FPAudioPeakLevels {
@@ -1629,11 +1653,12 @@ FFF3FP_API FFFResult FFF3FP_GetViewRotation(FFF3FPHandle player,
 // The snapshot field it reports through is not optional, and that is the part with
 // teeth: GetSnapshot rejects a caller whose declared size is smaller than
 // sizeof(FFF3FPSnapshot), so growing the struct forces every snapshot consumer to be
-// rebuilt against this header in lockstep with PlayerApiVersion -- for the same reason
-// the previous snapshot growth took a version bump. In this tree that version is 20;
-// the bump itself belongs to the version pass, not to this feature. A host built
-// against the older header failing with InvalidArgument is the contract working, not a
-// defect.
+// rebuilt against this header in lockstep with the snapshot's own version. That number
+// is separate from PlayerApiVersion -- the export surface is append-only and rarely
+// moves, the snapshot version moves whenever a field is appended -- and the bump belongs
+// to whichever change grows the struct, not to the feature that adds one field. A host
+// built against the older header failing with InvalidArgument is the contract working,
+// not a defect.
 //
 // Positive = audio plays later than the video (lip-sync correction). Bounded to
 // +/- 10 minutes; outside that bound, or called outside Ready/Playing/Paused/Ended, the
