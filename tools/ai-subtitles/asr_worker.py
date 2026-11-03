@@ -43,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import unicodedata
 import urllib.request
 import uuid
@@ -333,6 +334,59 @@ def read_exact(stream, n):
             return None
         data += chunk
     return data
+
+
+# AVSampleFormat 枚举值（libavutil/samplefmt.h）：tap 的 meta["sampleFormat"]
+# 原样携带解码器输出格式，这里必须认识全部十种（见 decode_pcm_frame）。
+_AV_FMT_U8, _AV_FMT_S16, _AV_FMT_S32, _AV_FMT_FLT, _AV_FMT_DBL = 0, 1, 2, 3, 4
+_AV_FMT_U8P, _AV_FMT_S16P, _AV_FMT_S32P, _AV_FMT_FLTP, _AV_FMT_DBLP = 5, 6, 7, 8, 9
+# 宿主单帧元数据约 500 B；超过 64 KiB 只可能是流已错位，不再尝试读取。
+_META_BYTES_MAX = 64 * 1024
+
+_PLANAR_DTYPES = {_AV_FMT_U8P: np.uint8, _AV_FMT_S16P: np.dtype("<i2"),
+                  _AV_FMT_S32P: np.dtype("<i4"), _AV_FMT_FLTP: np.dtype("<f4"),
+                  _AV_FMT_DBLP: np.dtype("<f8")}
+_PACKED_DTYPES = {_AV_FMT_U8: np.uint8, _AV_FMT_S16: np.dtype("<i2"),
+                  _AV_FMT_S32: np.dtype("<i4"), _AV_FMT_FLT: np.dtype("<f4"),
+                  _AV_FMT_DBL: np.dtype("<f8")}
+
+
+def decode_pcm_frame(pcm, fmt, channels):
+    """内核 tap 的一帧原始 PCM -> (帧数, 声道) 的 float32 交错矩阵。
+
+    tap 有意送**未经任何转换的解码床**（FFF.Player.AudioTap.h §1），所以这里
+    必须认识解码器可能吐出的每一种 AVSampleFormat。旧实现只认 FLTP、其余一律
+    按打包 float32 重解释 —— FLAC(s32p)/PCM WAV(s16)/ALAC 那类源会整段产出
+    乱码识别文本（P1，2026-11-03 审查定案）。定标判据与 C++ 侧
+    UpdateInputAudioPeakLevels 是同一套，两处必须同步改。
+
+    布局无法解释（未知格式/长度不齐/空块）时返回 None，调用方计 dropped。
+    """
+    dtype = _PLANAR_DTYPES.get(fmt) or _PACKED_DTYPES.get(fmt)
+    if dtype is None or channels <= 0 or not pcm:
+        return None
+    planar = fmt >= _AV_FMT_U8P
+    try:
+        if planar:
+            # 平面：内核按 [ch0 整平面][ch1 整平面]…背靠背写出（AsrAudioTap
+            # Produce 的 planar 分支），reshape 成 (声道, 帧) 再转置成交错。
+            arr = np.frombuffer(pcm, dtype=dtype).reshape(channels, -1).T
+        else:
+            arr = np.frombuffer(pcm, dtype=dtype).reshape(-1, channels)
+    except ValueError:
+        return None
+    if arr.size == 0:
+        return None
+    if fmt in (_AV_FMT_S16, _AV_FMT_S16P):
+        arr = arr.astype(np.float32) / 32768.0
+    elif fmt in (_AV_FMT_S32, _AV_FMT_S32P):
+        arr = arr.astype(np.float32) / 2147483648.0
+    elif fmt in (_AV_FMT_U8, _AV_FMT_U8P):
+        # u8 无符号、静音在中点 128。
+        arr = (arr.astype(np.float32) - 128.0) / 128.0
+    elif fmt in (_AV_FMT_DBL, _AV_FMT_DBLP):
+        arr = arr.astype(np.float32)
+    return np.ascontiguousarray(arr, dtype=np.float32)
 
 
 # --------------------------------------------------------------------------
@@ -1640,15 +1694,24 @@ def main():
                 log("stdin EOF; shutting down")
                 break
             meta_len = int.from_bytes(head, "little")
+            if meta_len <= 0 or meta_len > _META_BYTES_MAX:
+                # 长度前缀被写坏 ⇒ 帧边界已丢，长度前缀流无法重同步——继续读
+                # 只会把 PCM 当元数据，错误滚雪球。停 worker：宿主收到 EOF 后
+                # 关字幕，播放不受影响（P2，2026-11-03 审查定案）。
+                log(f"stdin 帧头长度异常（{meta_len}），流边界已丢失；shutting down")
+                break
             meta_bytes = read_exact(stdin, meta_len)
             if meta_bytes is None:
                 break
             try:
                 meta = json.loads(meta_bytes.decode("utf-8"))
             except Exception:
-                # Resync is impossible on a length-prefixed stream; drop PCM.
-                read_exact(stdin, meta.get("bytes", 0) if isinstance(meta, dict) else 0)
-                continue
+                # 长度前缀流一旦错位就无法重同步。旧代码在这里按"上一帧的
+                # bytes"盲读 PCM（首帧时 meta 未定义，直接 NameError）——两种
+                # 结果都是把后面每一帧全部读歪。帧边界已丢，唯一正确的动作
+                # 是停 worker（P2，2026-11-03 审查定案）。
+                log("stdin 元数据不是合法 JSON，流边界已丢失；shutting down")
+                break
             pcm = read_exact(stdin, meta.get("bytes", 0))
             if pcm is None:
                 break
@@ -1665,18 +1728,11 @@ def main():
             if frames <= 0 or channels <= 0:
                 dropped += 1
                 continue
-            try:
-                if fmt == AV_SAMPLE_FMT_FLTP:
-                    # Planar: kernel writes one plane per channel back to back, so
-                    # the flat array is [ch0 frames][ch1 frames]... -- reshaping it
-                    # as interleaved would pair up unrelated samples. The old
-                    # mean(axis=1) hid this because an average does not care about
-                    # the grouping; picking a specific channel does.
-                    arr = np.frombuffer(pcm, dtype="<f4").reshape(channels, -1).T
-                else:
-                    # 剩下的是打包（交错）float32，即 AV_SAMPLE_FMT_FLT。
-                    arr = np.frombuffer(pcm, dtype="<f4").reshape(-1, channels)
-            except ValueError:
+            # tap 原样携带解码器输出（设计如此，AudioTap.h §1），所以每种
+            # AVSampleFormat 都要在这里落成 float32 —— 旧实现只认 FLTP 时
+            # FLAC(s32p)/PCM WAV(s16) 整段乱码（P1，2026-11-03 审查定案）。
+            arr = decode_pcm_frame(pcm, fmt, channels)
+            if arr is None:
                 dropped += 1
                 continue
 
@@ -1770,6 +1826,13 @@ def main():
                 emit({"type": "stats", "rtf": round(rtf, 3),
                       "windows": windows, "dropped": dropped})
                 last_stats = time.time()
+    except Exception as e:  # noqa: BLE001 - 兜底上报后按失败退出
+        # 循环里任何未捕获异常过去会直接打死 worker 且一个字不吐：宿主只见
+        # EOF，用户面对空白字幕且无解释。兜住并上报一次 fatal（P2，2026-11-03）。
+        traceback.print_exc()
+        emit({"type": "status", "state": "error", "fatal": True,
+              "detail": f"worker 主循环异常退出：{type(e).__name__}: {e}"})
+        return 1
     finally:
         backend.close()
 
