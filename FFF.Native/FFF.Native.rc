@@ -31,7 +31,7 @@ BEGIN
             VALUE "FileDescription", "FFF.Native - 3FP media player kernel"
             VALUE "FileVersion", "20.0.0.0"
             VALUE "InternalName", "FFF.Native"
-            VALUE "LegalCopyright", "MIT License"
+            VALUE "LegalCopyright", "Copyright (c) 2026 1059 Studio"
             VALUE "OriginalFilename", "FFF.Native.dll"
             VALUE "ProductName", "3FP Player Kernel"
             VALUE "ProductVersion", "0.3.0 (api 20)"
