@@ -8813,6 +8813,13 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     const auto tearing = swapAllowTearing_ &&
         tearingRequested_.load(std::memory_order_acquire) &&
         paceFloorHz_.load(std::memory_order_acquire) > 0.0;
+    // Window-move flips are the one tearing path that needs neither the host's
+    // request nor a pace floor: the move loop repaints faster than the cadence can
+    // serve, so the flip goes out with SyncInterval 0 for the duration of the drag.
+    // On a fixed-refresh panel that simply tears for a few frames -- deliberate
+    // drag-latency relief, DXGI-legal because the chain carries the flag, and there
+    // is deliberately no switch for it: steady-state playback (everything outside
+    // the move loop) remains gated by the tearing request below.
     const auto present = interactiveMove
         ? chain->Present(0, swapAllowTearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0)
         : tearing ? chain->Present(0, DXGI_PRESENT_ALLOW_TEARING) : chain->Present(1, 0);
