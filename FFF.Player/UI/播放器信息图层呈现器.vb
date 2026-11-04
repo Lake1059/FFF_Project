@@ -67,7 +67,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取弹幕状态 As Func(Of 定时文字状态)
     Private ReadOnly 获取WASAPI模式 As Func(Of WASAPI共享模式)
     Private ReadOnly 获取内容描述 As Func(Of String)
-    Private ReadOnly 获取EL合成状态 As Func(Of Boolean)
+    ' 模块侧逐帧峰值（DLL 解锁后经裸导出回注；0 = 无）。
+    Private ReadOnly 获取外部峰值 As Func(Of Single)
+    Private ReadOnly 获取合成文本 As Func(Of String)
     Private ReadOnly 获取超分状态 As Func(Of String)
     Private ReadOnly 获取自动HDR状态 As Func(Of String)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
@@ -103,6 +105,11 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private 粘滞HDR已取 As Boolean
     Private 粘滞HDR规格枚举 As HDR格式 = HDR格式.SDR
     Private 粘滞源峰值 As UInteger
+    ' 外部模块的逐帧峰值：与源峰值的“开流取一次”不同，这一项点名要动态显示——
+    ' 启用位粘滞（见过一帧就固定走逐帧口径，无 L1 的帧保持末值不回跳），
+    ' 数值随 UI 刷新取泵最新发布；换片/换流时随动态键重置。
+    Private 粘滞外部峰值已见过 As Boolean
+    Private 粘滞外部峰值 As UInteger
     Private 粘滞目标有效 As Boolean
     Private 粘滞目标尼特 As UInteger
     Private 粘滞回退 As Boolean
@@ -118,10 +125,11 @@ Friend NotInheritable Class 播放器信息图层呈现器
                    弹幕状态提供器 As Func(Of 定时文字状态),
                    WASAPI模式提供器 As Func(Of WASAPI共享模式),
                    内容描述提供器 As Func(Of String),
+                   外部峰值提供器 As Func(Of Single),
                    图层提交器 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single),
                    Optional 超分状态提供器 As Func(Of String) = Nothing,
                    Optional 自动HDR状态提供器 As Func(Of String) = Nothing,
-                   Optional EL合成状态提供器 As Func(Of Boolean) = Nothing)
+                   Optional 合成文本提供器 As Func(Of String) = Nothing)
         ArgumentNullException.ThrowIfNull(画面)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(媒体信息提供器)
@@ -133,7 +141,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取字幕状态 = 字幕状态提供器 : 获取弹幕状态 = 弹幕状态提供器
         获取WASAPI模式 = WASAPI模式提供器
         获取内容描述 = 内容描述提供器
-        获取EL合成状态 = EL合成状态提供器
+        获取外部峰值 = 外部峰值提供器
+        获取合成文本 = 合成文本提供器
         获取超分状态 = 超分状态提供器
         获取自动HDR状态 = 自动HDR状态提供器
         提交图层 = 图层提交器
@@ -306,20 +315,36 @@ Friend NotInheritable Class 播放器信息图层呈现器
             添加配对行如果有值(结果, "视频：", 视频概要, 品红, 8)
             添加配对行如果有值(结果, "输入：", 视频输入(视频, 快照.视频实时比特率), 紫色)
             添加配对行如果有值(结果, "色彩：", 视频色彩(视频), 蓝色)
-            ' 内容分类由外部模块产出（解锁后才非空）；宿主只显示不解释，"空值自然不出现"。
-            ' 用户裁定（2026-11-02）：外部增强等级不再单独成行，注入态由模块供给 "P…" 文本，
-            ' 本体只拼 "HDR " & 文本 = "HDR P8.1 …"（规格词整体替换，HDR10 等基础词不显示），
-            ' 信息图层里没有独立的「内容：」行。EL 残差合成的粘滞位同源（模块文本说
-            ' 层词只是内容形态，合成位才是处理确认）。
+            ' 内容分类与合成状态都由外部模块的注入泵产出（解锁后才非空）；宿主只显示
+            ' 不解释，"空值自然不出现"。用户裁定（2026-11-02）：外部增强等级不再单独成行，
+            ' 注入态由模块供给 "P…" 文本，本体只拼 "HDR " & 文本 = "HDR P8.1 …"（规格词
+            ' 整体替换，HDR10 等基础词不显示），信息图层里没有独立的「内容：」行。
+            ' 合成段同源：显示模块快照文本自己的措辞（"已请求"≠"已合成"，措辞由模块负责）。
             Dim 内容描述 = 安全获取(获取内容描述)
-            Dim EL合成已见过 = 安全获取(获取EL合成状态)
+            Dim 合成文本 = 安全获取(获取合成文本)
             ' 粘滞窗口按 媒体路径|视频流 划界：跨过边界一律从头累计。
             Dim 粘滞键 = $"{媒体路径}|{快照.当前视频流}"
             If 粘滞键 <> 粘滞动态媒体键 Then
                 粘滞动态媒体键 = 粘滞键
                 粘滞动态已见过 = False
+                粘滞外部峰值已见过 = False
             End If
             If 快照.动态HDR元数据有效 Then 粘滞动态已见过 = True
+            ' 外部逐帧峰值：>0 即启用粘滞并跟随刷新（换片/换流时随键重置；
+            ' 0 是“本帧无 L1/未解锁”，保持末值，不把读数回跳到零）。
+            ' -1 是“通路没在跑”（泵已停）：末值已经冻结，粘滞位必须作废，
+            ' 否则泵死之后这一行还挂着“逐帧”两字，把静态旧读数冒充成实时。
+            Dim 外部峰值 = 安全获取(获取外部峰值)
+            ' 上界防护放在取数之后、转换之前：安全获取 只管"读"这一步，转换在外面。
+            ' NaN 本身是安全的（NaN 的比较恒为 False，不进分支），但 +Infinity 会穿过
+            ' >0.5F 后在 CUInt 抛出 OverflowException，直接冲到图层绘制线程上。
+            ' 100000 尼特远超任何真实读数量级，越界的按"无数据"处理（保持末值）。
+            If 外部峰值 < 0F Then
+                粘滞外部峰值已见过 = False
+            ElseIf 外部峰值 > 0.5F AndAlso 外部峰值 < 100000F Then
+                粘滞外部峰值已见过 = True
+                粘滞外部峰值 = CUInt(Math.Round(外部峰值))
+            End If
             ' HDR 行"开流取一次"锁存：换片/换流/用户换档跨过键界才重取，
             ' 其余时刻不再读快照的逐帧派生段 —— 显示层从此没有逐帧输入。
             Dim HDR键 = $"{媒体路径}|{快照.当前视频流}|{快照.请求色彩模式}"
@@ -336,7 +361,17 @@ Friend NotInheritable Class 播放器信息图层呈现器
                 粘滞目标尼特 = 快照.HDR有效目标峰值尼特
                 粘滞回退 = 快照.HDR回退有效
             End If
-            添加配对行如果有值(结果, "HDR：", 视频HDR(视频, 快照, 内容描述, EL合成已见过), 橙色)
+            ' 显示目标的迟到补取：显示器能力（DXGI 查询）与峰值映射档的落地都晚于
+            ' 开流，开流一刻常读到无效或兜底读数 ⇒ 只补目标段：快照一旦报出有效
+            ' 目标且与已锁存值不同，就一次性升级（取到后照旧冻结；目标不是逐帧量，
+            ' 内核侧只在真实显示/配置变化时改写它，不存在横跳输入）。
+            If 快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
+                快照.HDR有效目标峰值尼特 > 0 AndAlso
+                (Not 粘滞目标有效 OrElse 粘滞目标尼特 <> 快照.HDR有效目标峰值尼特) Then
+                粘滞目标有效 = True
+                粘滞目标尼特 = 快照.HDR有效目标峰值尼特
+            End If
+            添加配对行如果有值(结果, "HDR：", 视频HDR(视频, 快照, 内容描述, 合成文本), 橙色)
 
             添加配对行如果有值(结果, "输出：", 视频输出(快照, 画面控件.ClientSize), 绿色)
             添加配对行如果有值(结果, "渲染：", 视频渲染(快照), 黄色)
@@ -584,7 +619,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Function
 
     Private Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照,
-                             内容描述 As String, EL合成已见过 As Boolean) As String
+                             内容描述 As String, 合成文本 As String) As String
         ' 外部模块算出的增强规格词（"P8.1 …"，解锁后才有值）：宿主零外部格式语义，
         ' P 号与层词都来自模块文本。空值自然不出现。
         Dim 等级 = If(String.IsNullOrWhiteSpace(内容描述), String.Empty, 内容描述.Trim())
@@ -605,11 +640,15 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 动态 = If(粘滞动态已见过,
                     If(等级.Length = 0, "动态元数据已用于处理", "外部映射已用于处理"),
                     String.Empty)
-        ' EL 残差合成状态（粘滞位，泵置位/流重启复位）：模块文本里的层词只是
-        ' 内容形态，这一段才是“残差真的在被合成”的处理确认；单层/无残差双层流永不出现。
-        Dim 合成 = If(EL合成已见过, "EL残差已合成", String.Empty)
-        ' 亮度段与回退位同走锁存值：显示目标只在锁存时刻处于峰值映射档才出现。
-        Dim 亮度 = If(粘滞源峰值 > 0, $"源峰值 {粘滞源峰值:0}尼特", String.Empty)
+        ' EL 残差合成状态：模块注入泵自己的措辞，原样显示（模块说"已请求"就是请求——
+        ' 配对与否宿主无从知晓，也不许宿主替模块下结论）。泵没说时这段自然不出现。
+        Dim 合成 = 合成文本
+        ' 亮度段：模块解锁且已读到逐帧峰值时走动态口径（用户点名：DLL 回注的
+        ' 动态每帧亮度直接进这一行，“逐帧”字样标明口径与静态锁存的区别）；
+        ' 模块缺席/未解锁/流无 L1（HDR10+ 等）维持开流锁存值。
+        Dim 亮度 = If(粘滞外部峰值已见过,
+                    $"源峰值 {粘滞外部峰值:0}尼特 逐帧",
+                    If(粘滞源峰值 > 0, $"源峰值 {粘滞源峰值:0}尼特", String.Empty))
         If 粘滞目标有效 Then
             亮度 = 合并字段(亮度, $"显示目标 {粘滞目标尼特:0}尼特")
         End If

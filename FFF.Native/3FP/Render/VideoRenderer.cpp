@@ -5360,6 +5360,9 @@ FFFResult PlayerVideoRenderer::ExecuteScalePass(ID3D11ShaderResourceView* source
     if (source == nullptr || pass.target == nullptr || context_ == nullptr ||
         scalePixelShader_ == nullptr || scaleConstants_ == nullptr)
         return FFFResult::InvalidState;
+    // Whole pass, setup and Draw included. The early InvalidState return above
+    // drew nothing and deliberately records nothing.
+    const auto scalePassStart = std::chrono::steady_clock::now();
     const ScaleShaderSettings settings{
         static_cast<float>(sourceWidth), static_cast<float>(sourceHeight),
         static_cast<float>(pass.width), static_cast<float>(pass.height),
@@ -5380,6 +5383,8 @@ FFFResult PlayerVideoRenderer::ExecuteScalePass(ID3D11ShaderResourceView* source
     ID3D11ShaderResourceView* nullView = nullptr;
     context_->PSSetShaderResources(0, 1, &nullView);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
+    scalePass100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - scalePassStart),
+        std::memory_order_relaxed);
     return FFFResult::Success;
 }
 
@@ -8555,9 +8560,12 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
         // is no NV12/P010 intermediate for VSR to feed and the planar shader
         // arm must not run. When it does not engage, VSR owns the pass exactly
         // as before -- including the retry after a latched TrueHDR rejection.
+        const auto trueHdrBlitStart = std::chrono::steady_clock::now();
+        const auto trueHdrResult = ApplyTrueHdr(destination.width, destination.height);
+        trueHdrBlit100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - trueHdrBlitStart),
+            std::memory_order_relaxed);
         const auto trueHdrEngaged =
-            ApplyTrueHdr(destination.width, destination.height) ==
-                FFFResult::Success &&
+            trueHdrResult == FFFResult::Success &&
             videoTrueHdrActive_.load(std::memory_order_acquire) &&
             trueHdrView_ != nullptr;
         if (trueHdrEngaged) {
@@ -8585,8 +8593,13 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
                 videoSuperResolutionReason_.store(
                     FFF3FPVideoSuperResolutionReason::YieldedToAutoHdr,
                     std::memory_order_release);
-        } else if (ApplySuperResolution(destination.width, destination.height) ==
-                FFFResult::Success &&
+        } else if ([&] {
+                const auto vsrBlitStart = std::chrono::steady_clock::now();
+                const auto blitResult = ApplySuperResolution(destination.width, destination.height);
+                vsrBlit100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - vsrBlitStart),
+                    std::memory_order_relaxed);
+                return blitResult;
+            }() == FFFResult::Success &&
             videoSuperResolutionActive_.load(std::memory_order_acquire)) {
             for (std::size_t plane = 0; plane < ARRAYSIZE(effectiveSourceViews_); ++plane)
                 effectiveSourceViews_[plane] = superResolutionViews_[plane];
@@ -8605,9 +8618,13 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
     // scaler discrepancy.  SDR still writes ordinary Rec.709 code values to
     // the implicit SDR swap-chain contract, so DWM remains the sole owner of
     // the Windows HDR SDR-white adjustment.
+    // mainDraw 口径 = 整个 DrawWithShader 调用（含内部状态设置与最终 Draw）。
+    const auto mainDrawStart = std::chrono::steady_clock::now();
     const auto result = DrawWithShader(target, static_cast<float>(destination.x),
         static_cast<float>(destination.y), static_cast<float>(destination.width),
         static_cast<float>(destination.height), 0, presentationViews);
+    mainDraw100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - mainDrawStart),
+        std::memory_order_relaxed);
     if (result == FFFResult::Success) {
         // Report the path that actually produced the frame. A VP-upscaled frame
         // leaves PrepareScaledVideo with zero passes (source already equals the
@@ -9145,6 +9162,8 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     uploadMapWait100ns_.store(0); uploadCopy100ns_.store(0);
     downscaleResample100ns_.store(0); scalePassCount_.store(0);
     uploadCount_.store(0); uploadCopyBytes_.store(0); uploadPath_.store(0);
+    trueHdrBlit100ns_.store(0); vsrBlit100ns_.store(0);
+    mainDraw100ns_.store(0); scalePass100ns_.store(0);
     {
         std::lock_guard lock(timedTextMutex_);
         ++presentationGeneration_;
@@ -9274,6 +9293,10 @@ std::uint64_t PlayerVideoRenderer::ScalePassCount() const noexcept { return scal
 std::uint64_t PlayerVideoRenderer::UploadCount() const noexcept { return uploadCount_.load(); }
 std::uint64_t PlayerVideoRenderer::UploadCopyBytes() const noexcept { return uploadCopyBytes_.load(); }
 std::uint32_t PlayerVideoRenderer::UploadPath() const noexcept { return uploadPath_.load(); }
+std::uint64_t PlayerVideoRenderer::TrueHdrBlit100ns() const noexcept { return trueHdrBlit100ns_.load(); }
+std::uint64_t PlayerVideoRenderer::VsrBlit100ns() const noexcept { return vsrBlit100ns_.load(); }
+std::uint64_t PlayerVideoRenderer::MainDraw100ns() const noexcept { return mainDraw100ns_.load(); }
+std::uint64_t PlayerVideoRenderer::ScalePass100ns() const noexcept { return scalePass100ns_.load(); }
 std::uint32_t PlayerVideoRenderer::OutputBitDepth() const noexcept {
     return swapOutputBits_.load(std::memory_order_acquire);
 }
