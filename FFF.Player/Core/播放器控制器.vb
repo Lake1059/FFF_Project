@@ -54,6 +54,7 @@ Public NotInheritable Class 播放器控制器
     Private 强制HDR输出 As Boolean
     Private 当前WASAPI模式 As WASAPI共享模式 = WASAPI共享模式.共享
     Private 当前音量 As Single = 1.0F
+    Private 当前播放速度 As Double = 1.0R
     Private 已静音 As Boolean
     Private 正在切换会话 As Boolean
     Private 已释放 As Boolean
@@ -1013,6 +1014,14 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    Public Sub 设置播放速度(速度 As Double)
+        If Not Double.IsFinite(速度) OrElse 速度 < 0.1R OrElse 速度 > 5.0R Then
+            Throw New ArgumentOutOfRangeException(NameOf(速度))
+        End If
+        当前播放速度 = 速度
+        会话?.设置播放速度(速度)
+    End Sub
+
     Public Sub 设置音量(音量值 As Single)
         当前音量 = Math.Clamp(音量值, 0.0F, 1.0F)
         If 当前音量 > 0 Then 已静音 = False
@@ -1090,12 +1099,13 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
-    Friend Sub 应用空间音频设置()
+    Friend Sub 应用音频效果设置()
         If 已释放 OrElse 会话 Is Nothing Then Return
         Try
-            会话.设置空间音频(设置.实例对象.启用空间音频)
+            Dim 配置 = 设置.实例对象
+            会话.设置音频效果(配置.启用空间音频, 配置.启用单声道音频)
         Catch ex As 播放器异常
-            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用空间音频设置"))
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用音频效果设置"))
         End Try
     End Sub
 
@@ -1352,6 +1362,7 @@ Public NotInheritable Class 播放器控制器
                     Function() 创建会话(解码器, 候选色彩输出, 性能选项),
                     此次取消.Token)
                 候选会话.设置音量(当前音量, 已静音)
+                候选会话.设置播放速度(当前播放速度)
                 Await 候选会话.打开Async(路径, 此次取消.Token)
                 此次取消.Token.ThrowIfCancellationRequested()
                 Dim 初始快照 = 候选会话.当前快照
@@ -1515,6 +1526,7 @@ Public NotInheritable Class 播放器控制器
             .视频缓冲区策略 = 性能.视频缓冲区策略,
             .音频缓冲区策略 = 性能.音频缓冲区策略,
             .启用空间音频 = 性能.启用空间音频,
+            .启用单声道音频 = 性能.启用单声道音频,
             .输出窗口句柄 = IntPtr.Zero,
             .事件同步上下文 = 事件同步上下文
         })
@@ -1605,7 +1617,18 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Private Sub 会话_操作完成(sender As Object, e As 播放器事件参数)
-        If sender Is 会话 Then RaiseEvent 状态已变化(Me, EventArgs.Empty)
+        If sender IsNot 会话 Then Return
+        Try
+            Using 文档 = JsonDocument.Parse(e.详情JSON)
+                Dim 操作 As JsonElement
+                If 文档.RootElement.TryGetProperty("operation", 操作) AndAlso
+                    操作.GetString() = "seek-unavailable" Then
+                    RaiseEvent 操作提示(Me, New 播放器操作提示事件参数("目标位置尚未写入，继续播放现有数据"))
+                End If
+            End Using
+        Catch ex As JsonException
+        End Try
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
     End Sub
 
     Private Sub 会话_播放结束(sender As Object, e As 播放器事件参数)

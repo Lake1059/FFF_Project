@@ -21,6 +21,8 @@ Public Class 设置
     Public Property 视频缓冲区策略 As Integer = 0
     Public Property 音频缓冲区策略 As Integer = 0
     Public Property 启用空间音频 As Boolean = True
+    ' 保留旧空间音频字段以兼容已保存的设置；三种效果互斥，单声道优先。
+    Public Property 启用单声道音频 As Boolean = False
     Public Property 自动切换到真实HDR高亮 As Boolean = True
     Public Property HDR峰值亮度选项 As Integer = 0
     Public Property HDR峰值亮度 As Integer = 0
@@ -184,6 +186,7 @@ Public Class 设置
         GPU解码设备标识 = If(GPU解码设备标识, String.Empty).Trim()
         If 视频缓冲区策略 < 0 OrElse 视频缓冲区策略 > 2 Then 视频缓冲区策略 = 0
         If 音频缓冲区策略 < 0 OrElse 音频缓冲区策略 > 2 Then 音频缓冲区策略 = 0
+        If 启用单声道音频 Then 启用空间音频 = False
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
         HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)
