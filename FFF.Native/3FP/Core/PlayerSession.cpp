@@ -4462,8 +4462,12 @@ void PlayerSession::EvaluateVideoSkipRung() noexcept {
     // above where nothing else is watchable, wrong at 1-2x where it would trade smooth
     // playback for a decode saving the user never asked for. Rung 1 (NONREF) leaves
     // every reference frame in the chain and is safe at any rate.
-    const auto maxRung = playbackRate_.load(std::memory_order_relaxed) >= SkipKeyframeRateFloor
-        ? SkipMaxRung : 1u;
+    //
+    // The rung-2 gate hangs on the playback rate. The playback-rate feature surface is
+    // reverted upstream (PR #49 revert), so the rate is pinned at 1.0 and rung 2 is
+    // unreachable; the ladder still climbs to NONREF exactly as measured. Restore the
+    // playbackRate_ comparison when the rate surface returns.
+    const auto maxRung = 1u;
     if (videoSkipRung_ >= maxRung) return;
     ++videoSkipRung_;
     ApplyVideoSkipRung();
