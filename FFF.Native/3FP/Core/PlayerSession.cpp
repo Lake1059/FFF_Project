@@ -135,6 +135,18 @@ constexpr double PaceDeficitFraction = 0.95;            // only a measured defic
 constexpr std::int64_t PaceEstimateMinSpan100ns = 1'000'000; // 100 ms of streak for a rate estimate
 constexpr std::uint32_t PaceWindowFrames = 32;              // rolling window for oscillating deficits
 constexpr double PaceWindowLateShare = 0.40;                // late share inside it that counts as a deficit
+// Video decode-skip ladder: the fourth output of the load analyzer below, next to the
+// thread ladder, the software pool and the placement path. Coarse, and strictly up-only:
+// a rung is never undone by the mechanism itself -- not by a rate change, not by a pause,
+// not by a seek. Only opening/closing the media re-arms it (a new decode baseline), which
+// is also the only point where a descent cannot strand a reference chain. See
+// EvaluateVideoSkipRung.
+constexpr std::uint32_t SkipMaxRung = 2;                 // 0 = decode all, 1 = non-reference frames, 2 = keyframes only
+constexpr std::int64_t SkipWindow100ns = 20'000'000;     // 2 s, the same window the thread ladder uses
+constexpr double SkipStarvedShare = 0.50;                // queue starved in >= 50% of the ticks: decode supply deficit
+constexpr double SkipWasteShare = 0.50;                  // decoded and then discarded: > 50% of the decode is wasted
+constexpr double SkipKeyframeRateFloor = 4.0;            // NONKEY is a slideshow; only where that is the expected look
+constexpr std::uint32_t SkipEscalateWindows = 2;         // consecutive deficit windows that earn a rung
 constexpr std::uint32_t MaximumSoftwareDecoderThreads = 8;
 // Thread budget for the software decoder. Its workers share the machine with the
 // threads the player itself runs -- the worker (demux, decode drive, present pacing),
@@ -2221,9 +2233,14 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
     if (format_ != nullptr && videoStream_ >= 0) {
         // The device is new, so a stream the GPU refused before is worth asking about
         // again -- unless the refusal was about the stream rather than the device, in
-        // which case it is remembered and the attempt is skipped here too.
+        // which case it is remembered and the attempt is skipped here too. The still
+        // JPEG CPU policy from the open path applies here as well: device recovery
+        // must not re-open the hardware session the policy already declined for a
+        // picture that decodes on the CPU just fine.
+        const bool stillJpegCpuPolicy = staticImage_ && !StillJpegHardwareEnabled() &&
+            IsJpegCodec(format_->streams[videoStream_]->codecpar->codec_id);
         const auto tryHardware = decodeMode_ == FFF3FPDecodeMode::D3D11 &&
-            !HardwareRouteKnownUnsupported(format_->streams[videoStream_]);
+            !HardwareRouteKnownUnsupported(format_->streams[videoStream_]) && !stillJpegCpuPolicy;
         if (tryHardware) {
             result = OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_,
                 &hardwareFailureReason);
@@ -2237,7 +2254,9 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
                 -1, nullptr, false);
             if (result == FFFResult::Success && decodeMode_ == FFF3FPDecodeMode::D3D11) {
                 hardwareFallback = true;
-                hardwareFailureReason = "The GPU decoder was rejected for this stream earlier in this session; playback is using CPU decoding.";
+                hardwareFailureReason = stillJpegCpuPolicy
+                    ? "The still-image CPU decode policy applies to this stream; playback is using CPU decoding."
+                    : "The GPU decoder was rejected for this stream earlier in this session; playback is using CPU decoding.";
             }
         }
         if (result != FFFResult::Success) {
@@ -4394,6 +4413,110 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
             current, next, presentedFps, sourceFps);
 }
 
+void PlayerSession::EvaluateVideoSkipRung() noexcept {
+    if (format_ == nullptr || videoStream_ < 0 || videoDecoder_ == nullptr) return;
+    // Only a playing session has a decode demand. The idle path drops the rung back to
+    // full decoding: a rung left over from 16x playback would make frame stepping and
+    // paused previews keyframe-only.
+    if (state_.load() != FFF3FPState::Playing || staticImage_ || animatedImage_ || disc_ ||
+        seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_) {
+        // The ladder never descends: the rung survives pauses, seeks and rate changes,
+        // and only a new media re-arms it. A paused or single-step decode still has to
+        // be handed every frame the decoder produces, so the context is temporarily put
+        // back to DEFAULT for those decodes; appliedSkipRung_ != videoSkipRung_ makes
+        // the next playing tick re-apply the rung.
+        if (videoSkipRung_ != 0 && appliedSkipRung_ != 0) {
+            {
+                std::lock_guard lock(softwareVideoCodecMutex_);
+                videoDecoder_->skip_frame = AVDISCARD_DEFAULT;
+            }
+            appliedSkipRung_ = 0;
+        }
+        skipWindowStart100ns_ = 0;
+        skipDeficitWindows_ = 0;
+        return;
+    }
+    // A ladder reopen or a software fallback installs a new context; skip_frame is a
+    // context property, so the new one starts at DEFAULT and has to be written again.
+    if (appliedSkipDecoder_ != videoDecoder_ || appliedSkipRung_ != videoSkipRung_) {
+        ApplyVideoSkipRung();
+    }
+    const auto now = CurrentSteadyTicks();
+    if (skipWindowStart100ns_ == 0) {
+        skipWindowStart100ns_ = now;
+        skipWindowDecoded_ = snapshot_.decodedVideoFrames;
+        skipWindowPresented_ = snapshot_.presentedVideoFrames;
+        skipWindowIterations_ = 0;
+        skipWindowStarvedIterations_ = 0;
+        return;
+    }
+    if (now - skipWindowStart100ns_ < SkipWindow100ns) return;
+
+    const auto decodedDelta = snapshot_.decodedVideoFrames - skipWindowDecoded_;
+    const auto presentedDelta = snapshot_.presentedVideoFrames - skipWindowPresented_;
+    const auto windowIters = skipWindowIterations_;
+    const auto windowStarved = skipWindowStarvedIterations_;
+    skipWindowStart100ns_ = now;
+    skipWindowDecoded_ = snapshot_.decodedVideoFrames;
+    skipWindowPresented_ = snapshot_.presentedVideoFrames;
+    skipWindowIterations_ = 0;
+    skipWindowStarvedIterations_ = 0;
+    if (windowIters == 0 || decodedDelta == 0) {
+        skipDeficitWindows_ = 0;
+        return;
+    }
+    const auto starvedShare = static_cast<double>(windowStarved) / static_cast<double>(windowIters);
+    const auto wasteShare = 1.0 - static_cast<double>(presentedDelta) / static_cast<double>(decodedDelta);
+    const auto deficit = starvedShare >= SkipStarvedShare || wasteShare >= SkipWasteShare;
+    if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+        std::fprintf(stderr,
+            "[skip] window decoded=%llu presented=%llu starved=%.2f waste=%.2f rung=%u streak=%u\n",
+            static_cast<unsigned long long>(decodedDelta),
+            static_cast<unsigned long long>(presentedDelta), starvedShare, wasteShare,
+            videoSkipRung_, skipDeficitWindows_);
+    if (!deficit) {
+        skipDeficitWindows_ = 0;
+        return;
+    }
+    if (++skipDeficitWindows_ < SkipEscalateWindows) return;
+    skipDeficitWindows_ = 0;
+    // Rung 2 decodes keyframes only, which reads as a slideshow -- correct at 4x and
+    // above where nothing else is watchable, wrong at 1-2x where it would trade smooth
+    // playback for a decode saving the user never asked for. Rung 1 (NONREF) leaves
+    // every reference frame in the chain and is safe at any rate.
+    //
+    // The rung-2 gate hangs on the playback rate. The playback-rate feature surface is
+    // reverted upstream (PR #49 revert), so the rate is pinned at 1.0 and rung 2 is
+    // unreachable; the ladder still climbs to NONREF exactly as measured. Restore the
+    // playbackRate_ comparison when the rate surface returns.
+    const auto maxRung = 1u;
+    if (videoSkipRung_ >= maxRung) return;
+    ++videoSkipRung_;
+    ApplyVideoSkipRung();
+}
+
+void PlayerSession::ApplyVideoSkipRung() noexcept {
+    if (videoDecoder_ == nullptr) return;
+    // 0/1/2 -> AVDISCARD_DEFAULT / NONREF / NONKEY. NONREF by definition leaves every
+    // reference frame in the chain, and NONKEY starts a fresh chain at each keyframe,
+    // so neither can corrupt the frames that are actually shown. A rung is always
+    // needed: at 2x half of a 48 fps decode is thrown away at presentation, and at 16x
+    // no decoder can decode every frame of 4K content fast enough.
+    const auto discard = videoSkipRung_ == 0 ? AVDISCARD_DEFAULT :
+        (videoSkipRung_ == 1 ? AVDISCARD_NONREF : AVDISCARD_NONKEY);
+    {
+        // The software-decode offload thread submits packets to this same context under
+        // this mutex; a skip_frame write outside it would race the next send.
+        std::lock_guard lock(softwareVideoCodecMutex_);
+        videoDecoder_->skip_frame = discard;
+    }
+    appliedSkipRung_ = videoSkipRung_;
+    appliedSkipDecoder_ = videoDecoder_;
+    if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
+        std::fprintf(stderr, "[skip] video decoder discard=%d rung=%u\n",
+            static_cast<int>(discard), videoSkipRung_);
+}
+
 FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noexcept {
     StopSoftwareVideoDecode();
     if (format_ == nullptr || videoStream_ < 0 || snapshot_.decodeMode != FFF3FPDecodeMode::Gpu)
@@ -4454,6 +4577,10 @@ void PlayerSession::PumpPlayback() noexcept {
     // the gating (a pool or presentation fingerprint).
     if (VideoQueueSaturated()) ++pumpQueueBoundIterations_;
     if (videoFrameQueue_.size() < MinimumQueuedVideoFrames) ++pumpStarvedIterations_;
+    // The same per-tick evidence feeds the decode-skip ladder, in its own counters:
+    // EvaluateDecoderLoad consumes and resets its baselines each window.
+    ++skipWindowIterations_;
+    if (videoFrameQueue_.size() < MinimumQueuedVideoFrames) ++skipWindowStarvedIterations_;
     if (disc_) {
         PublishDisc();
         if (disc_->RestartRequired() && !disc_->Held()) {
@@ -4472,6 +4599,7 @@ void PlayerSession::PumpPlayback() noexcept {
     // counters are already fresh, and it runs on the worker thread that owns the
     // decoder, so a rung change cannot race a decode in progress.
     EvaluateDecoderLoad();
+    EvaluateVideoSkipRung();
     if (cadenceModeRefreshPending_) {
         cadenceModeRefreshPending_ = false;
         RebuildMediaInfo();
@@ -6794,6 +6922,11 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
             "seek");
         return FFFResult::FfmpegFailure;
     }
+    // A seek re-arms the decode-skip window at the flush point; the rung itself
+    // survives (skip_frame lives on the context, and a seek lands on a keyframe, which
+    // every rung decodes).
+    skipWindowStart100ns_ = 0;
+    skipDeficitWindows_ = 0;
     ClearVideoQueue();
     ResetBitRateTracking();
     if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);
@@ -7026,9 +7159,13 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
     AVCodecContext* replacement = nullptr;
     const auto previousDecodeMode = snapshot_.decodeMode;
     // Same memory as the open path: a track whose hardware route was already refused
-    // is opened on the CPU directly instead of asking the GPU again.
+    // is opened on the CPU directly instead of asking the GPU again. The still-JPEG
+    // CPU policy from the open path applies here too -- switching streams must not
+    // re-open a hardware session the policy already decided against.
+    const bool stillJpegCpuPolicy = video && staticImage_ && !StillJpegHardwareEnabled() &&
+        IsJpegCodec(format_->streams[index]->codecpar->codec_id);
     const auto tryHardware = video && decodeMode_ == FFF3FPDecodeMode::D3D11 &&
-        !HardwareRouteKnownUnsupported(format_->streams[index]);
+        !HardwareRouteKnownUnsupported(format_->streams[index]) && !stillJpegCpuPolicy;
     auto result = tryHardware
         ? OpenHardwareVideoDecoder(format_, index, &replacement)
         : OpenDecoder(format_, index, video, &replacement, -1, nullptr, false);
@@ -7133,6 +7270,11 @@ void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t req
 }
 
 void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVideoOutput) noexcept {
+    videoSkipRung_ = 0;
+    appliedSkipRung_ = 0;
+    appliedSkipDecoder_ = nullptr;
+    skipWindowStart100ns_ = 0;
+    skipDeficitWindows_ = 0;
     StopSoftwareVideoDecode();
     placement_.Release();
     if (audioRenderer_) { audioRenderer_->Stop(); audioRenderer_.reset(); }

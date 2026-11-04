@@ -162,8 +162,10 @@ Friend NotInheritable Class 播放器360视角控制器
     End Sub
 
     Public Function PreFilterMessage(ByRef m As Message) As Boolean Implements IMessageFilter.PreFilterMessage
-        If 画面控件.光盘交互已启用 Then Return False
+        ' 守卫顺序：先查自身布尔（零成本、且已释放时读控件属性本身不安全），再读
+        ' 画面控件属性——这是每条窗口消息都会走的路径，属性读放在最后一环。
         If 已释放 OrElse Not 模式已启用 OrElse Form.ActiveForm IsNot 宿主窗口 Then Return False
+        If 画面控件.光盘交互已启用 Then Return False
         If m.Msg <> WM_KEYDOWN AndAlso m.Msg <> WM_SYSKEYDOWN AndAlso
             m.Msg <> WM_KEYUP AndAlso m.Msg <> WM_SYSKEYUP Then Return False
         Dim 按键 = CType(m.WParam.ToInt32() And &HFFFF, Keys) And Keys.KeyCode
