@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Debug",
 
@@ -13,6 +13,8 @@ param(
 
     [switch]$SkipDependencyPreparation,
 
+    [switch]$SkipIamf,
+
     [switch]$SkipTests
 )
 
@@ -22,33 +24,10 @@ $ScriptDirectory = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
 } else { $PSScriptRoot }
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $ScriptDirectory ".."))
 . (Join-Path $ScriptDirectory "Resolve-Toolchain.ps1")
+. (Join-Path $ScriptDirectory "Resolve-NativeDependencies.ps1")
 
 $MSBuild = Get-MSBuildTool
 $DotNet = Get-DotNetTool
-
-if (-not $SkipDependencyPreparation) {
-    $PrepareLibassScript = Get-ChildItem -LiteralPath $ScriptDirectory -Filter "*Libass.ps1" -File |
-        Select-Object -First 1
-    if ($null -eq $PrepareLibassScript) { throw "The libass preparation script was not found." }
-    & $PrepareLibassScript.FullName
-}
-
-$RequiredFfmpegFiles = @(
-    (Join-Path $ProjectRoot "third_party\ffmpeg\include\libavcodec\avcodec.h"),
-    (Join-Path $ProjectRoot "third_party\ffmpeg\lib\x64\avcodec-63.lib"),
-    (Join-Path $ProjectRoot "runtime\avcodec-63.dll")
-)
-$MissingFfmpegFiles = @($RequiredFfmpegFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
-if ($MissingFfmpegFiles.Count -ne 0) {
-    $PrepareFfmpegScript = Get-ChildItem -LiteralPath $ScriptDirectory -Filter "*FFmpeg.ps1" -File |
-        Select-Object -First 1
-    if ($null -eq $PrepareFfmpegScript) { throw "The FFmpeg preparation script was not found." }
-    & $PrepareFfmpegScript.FullName
-    $MissingFfmpegFiles = @($RequiredFfmpegFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
-    if ($MissingFfmpegFiles.Count -ne 0) {
-        throw "FFmpeg preparation completed without all required development files."
-    }
-}
 
 # FFF.Player references the UI library by hint path
 # (..\..\LakeUI\LakeUI\bin\Debug\...\LakeUI.dll). LakeUI is a sibling repository
@@ -56,21 +35,25 @@ if ($MissingFfmpegFiles.Count -ne 0) {
 # build dies with hundreds of "undefined type LakeUI.*" errors that never name the
 # real cause. Say what to do instead of letting the compiler shout.
 $LakeUiRoot = Join-Path (Split-Path -Parent $ProjectRoot) "LakeUI\LakeUI\bin\Debug"
-$LakeUiFound = 0
-if (Test-Path -LiteralPath $LakeUiRoot) {
-    $LakeUiFound = @(Get-ChildItem -LiteralPath $LakeUiRoot -Recurse -Filter "LakeUI.dll" -File).Count
+[xml]$PlayerProject = [IO.File]::ReadAllText((Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj"))
+$RequiredLakeUITfm = if ($LakeUITfm) { $LakeUITfm } else {
+    [string]@($PlayerProject.Project.PropertyGroup.LakeUITfm | Where-Object { $_ })[0].InnerText
 }
-if ($LakeUiFound -eq 0) {
-    throw "LakeUI has not been built. FFF.Player hints a DLL under ..\..\LakeUI\LakeUI\bin\Debug, and LakeUI is a sibling repository that is not vendored here. Build it first: dotnet build <this repo>\..\LakeUI\LakeUI\LakeUI.vbproj -c Debug"
+if (-not (Test-Path -LiteralPath (Join-Path $LakeUiRoot "$RequiredLakeUITfm\LakeUI.dll") -PathType Leaf)) {
+    throw "LakeUI.dll is missing for $RequiredLakeUITfm under $LakeUiRoot. Build ..\LakeUI\LakeUI\LakeUI.vbproj -c Debug for that framework, or specify -LakeUITfm."
 }
+
+Initialize-NativeDependencies -ProjectRoot $ProjectRoot -Configuration $Configuration `
+    -SkipPreparation:$SkipDependencyPreparation -SkipIamf:$SkipIamf
 
 # TFM 参数包：留空时展开为 0 个参数，命令行与改动前逐字符一致。
 $TfmArgs = @()
 if (-not [string]::IsNullOrWhiteSpace($NetTFM)) { $TfmArgs += "-p:NetTFM=$NetTFM" }
 if (-not [string]::IsNullOrWhiteSpace($LakeUITfm)) { $TfmArgs += "-p:LakeUITfm=$LakeUITfm" }
 
+$NativeArgs = @(if ($SkipIamf) { '/p:HaveLibiamf=false' } else { '/p:FFF_FORCE_LIBIAMF=true' })
 & $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") `
-    /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal
+    /p:Configuration=$Configuration /p:Platform=x64 @NativeArgs /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }
 
 & $DotNet build (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
