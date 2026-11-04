@@ -229,6 +229,17 @@ Friend Structure 原生播放器快照
     Public 超分合成耗时100纳秒 As ULong
     Public 主绘制耗时100纳秒 As ULong
     Public 缩放通道耗时100纳秒 As ULong
+    Public 传入数据包异常 As ULong
+    Public 时间戳异常 As ULong
+    Public 读取过慢 As ULong
+    Public 读取错误 As ULong
+    Public 解码错误 As ULong
+    Public 数据未写入 As ULong
+    Public 已读取范围100纳秒 As Long
+    Public 已知总时长 As UInteger
+    Public 等待文件写入 As UInteger
+    Public 播放速度 As Double
+    Public 音频故障次数 As ULong
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -1177,6 +1188,14 @@ Friend Module 播放器原生接口
                                                    ByRef 已渲染帧数 As ULong,
                                                    ByRef 已拒绝帧数 As ULong) As 原生播放器结果
     End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetPlaybackRate(播放器 As 播放器原生句柄, 速度 As Double) As 原生播放器结果
+    End Function
+
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetMonoAudio(播放器 As 播放器原生句柄, 启用 As UInteger) As 原生播放器结果
+    End Function
+
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetVolume(播放器 As 播放器原生句柄, 音量 As Single, 静音 As UInteger) As 原生播放器结果
     End Function

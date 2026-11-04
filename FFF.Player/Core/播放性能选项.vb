@@ -7,6 +7,7 @@ Friend Structure 播放性能选项
     Friend ReadOnly 视频缓冲区策略 As Integer
     Friend ReadOnly 音频缓冲区策略 As Integer
     Friend ReadOnly 启用空间音频 As Boolean
+    Friend ReadOnly 启用单声道音频 As Boolean
 
     Friend Sub New(配置 As 设置, Optional 枚举设备 As Func(Of IReadOnlyList(Of GPU解码设备)) = Nothing)
         缩放质量 = CType(配置.视频缩放质量选项, 视频缩放质量)
@@ -24,6 +25,7 @@ Friend Structure 播放性能选项
         End If
         视频缓冲区策略 = 配置.视频缓冲区策略
         音频缓冲区策略 = 配置.音频缓冲区策略
-        启用空间音频 = 配置.启用空间音频
+        启用空间音频 = 配置.启用空间音频 AndAlso Not 配置.启用单声道音频
+        启用单声道音频 = 配置.启用单声道音频
     End Sub
 End Structure

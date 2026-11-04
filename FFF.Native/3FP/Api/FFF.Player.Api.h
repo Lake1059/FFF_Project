@@ -425,6 +425,21 @@ struct FFF3FPSnapshot {
     std::uint64_t vsrBlit100ns;
     std::uint64_t mainDraw100ns;
     std::uint64_t scalePass100ns;
+    // Session totals; seeking clears timestamp baselines, not recorded faults.
+    std::uint64_t corruptPackets;
+    std::uint64_t timestampAnomalies;
+    std::uint64_t slowReads;
+    std::uint64_t readErrors;
+    std::uint64_t decodeErrors;
+    std::uint64_t incompleteReads;
+    // Highest packet end observed; does not assert that every earlier byte exists.
+    std::int64_t availableDuration100ns;
+    // The container declared a duration, or normal EOF established the final end.
+    // A bitrate estimate and the growing observed extent do not set this flag.
+    std::uint32_t durationKnown;
+    std::uint32_t waitingForInput;
+    double playbackRate;
+    std::uint64_t audioFailures;
 };
 // Layout teeth. FFF3FPSnapshot is read by fixed offset from the VB/C# hosts and from
 // the probes, which is why it is append-only; that rule is unenforceable until the
@@ -432,7 +447,7 @@ struct FFF3FPSnapshot {
 // shifting a host's view of the struct at runtime.
 // Values below were measured by compiling a probe against this header (cl /std:c++20,
 // offsetof/sizeof printed) -- not derived from a field table.
-static_assert(sizeof(FFF3FPSnapshot) == 512,
+static_assert(sizeof(FFF3FPSnapshot) == 592,
     "FFF3FPSnapshot size changed: hosts and probes read it by fixed offset");
 static_assert(offsetof(FFF3FPSnapshot, externalAudioOffset100ns) == 88, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, iamfActive) == 364, "offset pin");
@@ -456,6 +471,10 @@ static_assert(offsetof(FFF3FPSnapshot, trueHdrBlit100ns) == 480, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, vsrBlit100ns) == 488, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, mainDraw100ns) == 496, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, scalePass100ns) == 504, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, corruptPackets) == 512, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, durationKnown) == 568, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, playbackRate) == 576, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, audioFailures) == 584, "offset pin");
 
 
 struct FFF3FPAudioPeakLevels {
@@ -907,6 +926,10 @@ FFF3FP_API FFFResult FFF3FP_Pause(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_DiscardAudioOutput(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Stop(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Close(FFF3FPHandle player) noexcept;
+FFF3FP_API FFFResult FFF3FP_SetPlaybackRate(FFF3FPHandle player, double rate) noexcept;
+// Accessibility mono: average every decoded input channel (including LFE), then
+// send that same signal to every output channel. Does not change the endpoint layout.
+FFF3FP_API FFFResult FFF3FP_SetMonoAudio(FFF3FPHandle player, std::uint32_t enabled) noexcept;
 FFF3FP_API FFFResult FFF3FP_Seek(FFF3FPHandle player, std::int64_t position100ns) noexcept;
 FFF3FP_API FFFResult FFF3FP_SeekKeyframe(FFF3FPHandle player, std::int64_t position100ns) noexcept;
 FFF3FP_API FFFResult FFF3FP_SeekFrame(FFF3FPHandle player, std::int64_t frameIndex) noexcept;

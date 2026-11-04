@@ -300,10 +300,11 @@ Friend NotInheritable Class 播放器信息图层呈现器
                     Math.Clamp(快照.播放位置.TotalMilliseconds / 快照.总时长.TotalMilliseconds * 100.0R, 0, 100), 0)
         添加配对行如果有值(结果, "文件名：", 文件名, 黄色)
         Dim 时间戳 = 格式化时间(快照.播放位置)
-        If 快照.总时长 > TimeSpan.Zero Then
+        If 快照.已知总时长 AndAlso 快照.总时长 > TimeSpan.Zero Then
             时间戳 &= $" / {格式化时间(快照.总时长)} ({百分比:0}%)"
         End If
         结果.Add(配对行("时间戳：", 时间戳, 青色))
+        添加配对行如果有值(结果, "文件异常：", 文件异常(快照), 告警色)
 
         If 视频 IsNot Nothing Then
             Dim 解码器 = If(快照.解码器 = 解码模式.GPU, "GPU",
@@ -410,18 +411,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
             End If
             添加配对行如果有值(结果, "输入：", 音频输入(音频, 快照.音频实时比特率), 紫色)
             添加配对行如果有值(结果, "输出：", 音频输出(音频, 快照), 绿色)
-            ' 音频健康度：只在**异常时**出现。
-            '
-            ' 这一行的由来值得记录：本轮排查中发现的 IAMF 时间戳 208 倍误差
-            ' （导致排队 207 秒静音）和抖动计数 100% 误报，都是**任何现有指标都没报警**
-            ' 的缺陷 —— 前者把 207 秒静音推给端点，后者让"抖动"永远非零而失去意义。
-            ' 管线本身不缺正确性，缺的是"出问题时能被发现"。
-            '
-            ' 因此这里刻意不常驻：正常播放多一行数字只会稀释真正重要的信息，
-            ' 而异常一旦出现就必须显眼（用告警色而不是普通信息色）。
-            Dim 音频告警 = 音频健康度(快照)
-            添加配对行如果有值(结果, "音频告警：", 音频告警, 告警色)
         End If
+        添加配对行如果有值(结果, "音频故障：", 音频健康度(快照), 告警色)
 
         Dim 字幕文本 = If(字幕 Is Nothing, "未加载", 合并字段(
             字幕.格式.ToString().ToUpperInvariant(),
@@ -587,9 +578,10 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Sub
 
     Private Shared Function 视频输入(流 As 媒体流信息, 实时比特率 As ULong) As String
+        Dim 格式 = If(String.IsNullOrWhiteSpace(流.解码表面像素格式), 流.像素格式, 流.解码表面像素格式)
         Return 合并字段(
-            If(String.IsNullOrWhiteSpace(流.像素格式), String.Empty,
-               $"格式 {流.像素格式.ToUpperInvariant()}"),
+            If(String.IsNullOrWhiteSpace(格式), String.Empty,
+               $"格式 {格式.ToUpperInvariant()}"),
             If(流.宽度 > 0 AndAlso 流.高度 > 0, $"分辨率 {流.宽度}x{流.高度}", String.Empty),
             If(流.平均帧率 > 0, $"帧率 {流.平均帧率:0.###}fps", String.Empty),
             If(实时比特率 > 0, $"实时码率 {格式化比特率(实时比特率)}", String.Empty))
@@ -724,26 +716,26 @@ Friend NotInheritable Class 播放器信息图层呈现器
             If(采样率 > 0, $"采样 {采样率}Hz", String.Empty),
             If(位深 > 0, $"位深 {位深}bit", String.Empty),
             If(声道 > 0, $"声道数 {声道}", String.Empty),
-            $"缓冲区 {快照.音频缓冲时长.TotalMilliseconds:0}ms",
-            $"欠载 {快照.音频欠载次数}")
+            $"缓冲区 {快照.音频缓冲时长.TotalMilliseconds:0}ms")
     End Function
 
     ''' <summary>音频健康度：只在异常时返回非空，正常播放不占一行。</summary>
-    ''' <remarks>
-    ''' 为什么需要它：本轮排查发现的 IAMF 时间戳 208 倍误差（排队 207 秒静音）和
-    ''' 抖动计数 100% 误报，都是现有指标**没有报警**的缺陷 —— 前者把大量静音推给
-    ''' 端点并让播放卡在末尾，后者让"抖动"永远非零因而失去意义。
-    '''
-    ''' 「缓冲区」已在"输出"行常驻显示，所以这里**只报真正不可见的那几个**：
-    ''' 欠载、抖动、不连续、插入静音、丢弃重叠、拒绝帧。欠载虽然在"输出"行有
-    ''' 累计数字，但它在空间解码（双耳床）路线上是缓冲池抬升的直接触发器
-    ''' （内核按欠载批次单调抬高目标缓冲），告警行同报让"出过欠载"在异常
-    ''' 场景里显眼而不必去常驻行里找。刻意不常驻：正常播放多一行数字只会
-    ''' 稀释重要信息，异常出现时才需要显眼。
-    ''' </remarks>
+    Private Shared Function 文件异常(快照 As 播放器快照) As String
+        Dim 问题 As New List(Of String)
+        If 快照.传入数据包异常 > 0 Then 问题.Add($"传入数据包异常 {快照.传入数据包异常}")
+        If 快照.时间戳异常 > 0 Then 问题.Add($"时间戳异常 {快照.时间戳异常}")
+        If 快照.读取过慢 > 0 Then 问题.Add($"读取速度太慢 {快照.读取过慢}")
+        If 快照.读取错误 > 0 Then 问题.Add($"读取错误 {快照.读取错误}")
+        If 快照.解码错误 > 0 Then 问题.Add($"解码错误 {快照.解码错误}")
+        If 快照.数据未写入 > 0 Then 问题.Add($"数据未写入 {快照.数据未写入}")
+        If 快照.等待文件写入 Then 问题.Add("等待文件写入")
+        Return 合并字段(问题.ToArray())
+    End Function
+
     Private Shared Function 音频健康度(快照 As 播放器快照) As String
         If 快照 Is Nothing Then Return String.Empty
         Dim 问题 As New List(Of String)
+        If 快照.音频故障次数 > 0 Then 问题.Add($"故障 {快照.音频故障次数}")
         If 快照.音频欠载次数 > 0 Then 问题.Add($"欠载 {快照.音频欠载次数}")
         If 快照.音频不连续次数 > 0 Then 问题.Add($"不连续 {快照.音频不连续次数}")
         If 快照.音频时间戳抖动帧数 > 0 Then 问题.Add($"抖动 {快照.音频时间戳抖动帧数}")

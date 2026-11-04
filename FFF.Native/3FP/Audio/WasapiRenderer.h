@@ -110,6 +110,7 @@ public:
     void SetPaused(bool paused) noexcept;
     void Reset(std::int64_t position100ns) noexcept;
     void SetVolume(float volume, bool muted) noexcept;
+    void SetMonoAudio(bool enabled) noexcept;
     std::int64_t Position100ns() const noexcept;
     std::int64_t TimelineLimit100ns() const noexcept;
     std::int64_t Buffered100ns() const noexcept;
@@ -208,6 +209,7 @@ private:
     std::deque<std::vector<std::uint8_t>> reusableBuffers_;
     std::size_t queuedBytes_;
     SwrContext* resampler_;
+    bool monoAudio_ = false; // Only accessed by the session worker, like resampler_.
     AVChannelLayout inputChannelLayout_;
     std::int32_t inputSampleRate_;
     std::int32_t inputSampleFormat_;

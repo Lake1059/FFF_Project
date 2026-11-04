@@ -1339,6 +1339,7 @@ Partial Class Form1
         Controls.Add(MP_DX视频容器)
         Controls.Add(MP_剪辑区间操作容器)
         Controls.Add(ModernPanel1)
+        DoubleBuffered = True
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver
         Icon = CType(resources.GetObject("$this.Icon"), Icon)

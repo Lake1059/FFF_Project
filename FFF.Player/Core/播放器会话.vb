@@ -52,12 +52,12 @@ Public NotInheritable Class 播放器会话
     ''' <remarks>与 期望API版本 是两个独立的门，都是严格相等：导出面只追加所以 API 轴很少动，
     ''' 快照结构一追字段这个数就动。混版时 GetSnapshot 每次都返回 InvalidArgument，
     ''' 而 Create 照样成功——宿主会拿到一个能播放但快照全空的会话。</remarks>
-    Friend Const 原生播放器快照版本 As UInteger = 21UI
+    Friend Const 原生播放器快照版本 As UInteger = 22UI
 
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
         配置.验证()
-        空间音频已启用 = If(配置.启用空间音频, 1, 0)
+        空间音频已启用 = If(配置.启用空间音频 AndAlso Not 配置.启用单声道音频, 1, 0)
         ' 创建前检查实际加载的内核版本；配置大小仍由 FFF3FP_Create 校验。
         Dim 内核API版本 = 播放器原生接口.FFF3FP_GetApiVersion()
         If 内核API版本 <> 期望API版本 Then
@@ -114,6 +114,7 @@ Public NotInheritable Class 播放器会话
         Try
             检查结果(播放器原生接口.FFF3FP_ConfigurePlaybackPerformance(句柄,
                 配置.首选解码适配器索引, CUInt(配置.视频缓冲区策略), CUInt(配置.音频缓冲区策略)))
+            检查结果(播放器原生接口.FFF3FP_SetMonoAudio(句柄, If(配置.启用单声道音频, 1UI, 0UI)))
         Catch
             释放()
             Throw
@@ -727,6 +728,13 @@ Public NotInheritable Class 播放器会话
         End Try
     End Sub
 
+    Public Sub 设置音频效果(启用空间音频 As Boolean, 启用单声道音频 As Boolean)
+        SyncLock 音频插槽锁
+            设置空间音频(启用空间音频 AndAlso Not 启用单声道音频)
+            检查结果(播放器原生接口.FFF3FP_SetMonoAudio(取得句柄(), If(启用单声道音频, 1UI, 0UI)))
+        End SyncLock
+    End Sub
+
     Public Sub 设置空间音频(启用 As Boolean)
         SyncLock 音频插槽锁
             Volatile.Write(空间音频已启用, If(启用, 1, 0))
@@ -766,6 +774,10 @@ Public NotInheritable Class 播放器会话
     Public Sub 设置WASAPI独占模式(独占 As Boolean)
         检查结果(播放器原生接口.FFF3FP_SetAudioExclusiveMode(取得句柄(), If(独占, 1UI, 0UI)))
     End Sub
+    Public Sub 设置播放速度(速度 As Double)
+        检查结果(播放器原生接口.FFF3FP_SetPlaybackRate(取得句柄(), 速度))
+    End Sub
+
     Public Sub 设置音量(音量 As Single, Optional 静音 As Boolean = False)
         If Not Single.IsFinite(音量) OrElse 音量 < 0 OrElse 音量 > 1 Then Throw New ArgumentOutOfRangeException(NameOf(音量))
         检查结果(播放器原生接口.FFF3FP_SetVolume(取得句柄(), 音量, If(静音, 1UI, 0UI)))
