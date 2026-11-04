@@ -696,6 +696,12 @@ private:
     // apart from snapshot_.droppedVideoFrames (which means "the pipeline fell behind the
     // media clock"). Read from the API thread, written on the worker thread.
     std::atomic<std::uint64_t> displayRateDiscardedFrames_{ 0 };
+    // Cumulative stage timings in the same 100 ns base as the snapshot fields of
+    // the same name. Written from the decode/demux worker threads with relaxed
+    // fetch_add (same pattern as VideoRenderer's timing atomics), read by
+    // GetSnapshot on the API thread.
+    std::atomic<std::uint64_t> videoDecode100ns_{ 0 };
+    std::atomic<std::uint64_t> demuxRead100ns_{ 0 };
     std::int64_t nextUntimedVideoPosition100ns_;
     std::deque<std::int64_t> framePtsIndex_;
     std::int64_t framePtsIndexBase_;
