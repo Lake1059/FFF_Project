@@ -8,6 +8,7 @@ Public Class Form1
     Private Const WM_ENTERSIZEMOVE As Integer = &H231
     Private Const WM_EXITSIZEMOVE As Integer = &H232
     Private Const WM_APPCOMMAND As Integer = &H319
+    Private Const DWMWA_CLOAK As Integer = 13
     Private Enum 多媒体操作
         下一项 = 11
         上一项 = 12
@@ -30,9 +31,7 @@ Public Class Form1
         "swresample",
         "swscale"
     }
-    ' O3（2026-10-29）：探测即预载——命中内核会搜索的目录时，句柄保留到进程结束，
-    ' 内核稍后 delay-load 同一模块只做引用计数自增，不再把整条闭包重新映射一遍。
-    ' 依据：3fp/build/imgperf/o3o4_analysis.md §1.4；实测探测段 85–92 ms。
+    ' 保留预载句柄，供内核稍后复用同一份模块。
     Private Shared ReadOnly 保留的核心文件句柄 As New List(Of IntPtr)
 
     Private 画面控件 As 播放器画面控件
@@ -61,31 +60,8 @@ Public Class Form1
     Private 当前弹幕路径 As String = String.Empty
     Private 待打开外部文件 As String = String.Empty
 
-    ' 【2026-11-01 图片优先启动】chrome 默认延后时为 True。只在 Form1_Load 与
-    ' Form1_Shown 两个 UI 线程点读/写，无跨线程问题。
-    Private 延后窗口Attach As Boolean
+    Private 界面首绘已完成 As Boolean
 
-    ' 【2026-11-02 UI 优先启动】默认顺序由「画面优先、UI 随后」改为「四周 UI 就绪、
-    ' 再显示画面」：chrome 接管 → 四层图层构造 → 布局落定 → 最后开图。
-    ' FFF_PICTURE_FIRST=1 强制老顺序（画面优先），用于同 exe A/B。
-    Private ReadOnly 图片优先启动 As Boolean =
-        (Environment.GetEnvironmentVariable("FFF_PICTURE_FIRST") = "1")
-
-    ' 【2026-11-02 按媒体类型分流】顺序不再一刀切，而按本次启动要开的**文件类型**选：
-    '   视频（含音频/未归类）⇒ UI 优先——它本来就要解码、建链，值得用 ~0.6 s 换
-    '                          "画面一出现，四周已经是最终形态"；
-    '   图片             ⇒ 画面优先（老顺序）——静图是秒开的，把 chrome + 四层图层
-    '                          挡在它前面等于把"立刻看到图"这件事整段推后。
-    ' 判据只能用扩展名：此刻内核还没 probe，媒体信息.是静态图片 尚不可得。所幸
-    ' 播放列表.是图片文件 与图片模式用的是同一张扩展名表（播放列表.vb:34 注释即此意），
-    ' 预判口径与开图后的真实判定一致。
-    ' 在 Form1_Load 早期算定一次，Shown 与启动期优先级降回都只读它。
-    Private 本次启动UI优先 As Boolean
-
-    ' chrome 注入（Attach）会改变视频容器上下被占用的高度，Load 末尾那次「初始画面尺寸」
-    ' 校正若发生在注入之前，口径必然偏（多算进注入后才会出现的标题栏/工具栏）。
-    ' 走 UI 优先路径时把那次校正整体挪到 Shown 里 Attach 之后，账记在这里。
-    Private 初始画面尺寸待Attach后校正 As Boolean
     Private 待选中播放列表路径 As String = String.Empty
     Private 正在关闭 As Boolean
     Private 核心文件检查通过 As Boolean
@@ -93,26 +69,53 @@ Public Class Form1
     Private 正在显示HDR强制确认 As Boolean
     Private 已跳过HDR强制确认 As Boolean
 
-    ' ---- 打开完成事件链计时（FFF_OPEN_CHAIN_TRACE=1，默认关） ----
-    ' 既有里程碑只把「媒体已打开」的派发记成一对粗粒度入口/出口，链内谁在吃时间不知道。
-    ' 这里不改链上任何处理器的成败与顺序：只在链首/链尾各挂一个纯计时处理器（它们本来
-    ' 就排在两端），再在 Form1 自己的处理器里按语句块打点。未开 env 时一个时钟都不读。
-    Private Shared ReadOnly 打开链计时已启用 As Boolean =
-        (Environment.GetEnvironmentVariable("FFF_OPEN_CHAIN_TRACE") = "1")
-    Private 打开链入口刻 As Long
-    Private 打开链Form1出口刻 As Long
-    Private 打开链前置 As Long
-    Private 打开链预处理 As Long
-    Private 打开链界面媒体已打开 As Long
-    Private 打开链更新媒体信息 As Long
-    Private 打开链IAMF As Long
-    Private 打开链视角360 As Long
-    Private 打开链图片浏览 As Long
-    Private 打开链图片模式 As Long
-    Private 打开链刷新 As Long
-    Private 打开链Form1段 As Long
-
     Private Event 方向键快捷键已请求 As KeyEventHandler
+
+    <DllImport("dwmapi.dll")>
+    Private Shared Function DwmSetWindowAttribute(hwnd As IntPtr, attribute As Integer,
+                                                  ByRef value As Integer, size As Integer) As Integer
+    End Function
+
+    <DllImport("dwmapi.dll")>
+    Private Shared Function DwmFlush() As Integer
+    End Function
+
+    Protected Overrides Sub OnHandleCreated(e As EventArgs)
+        ' Cloak 保留逻辑可见性，让 LakeUI 的子窗口可以完成 GPU 首绘。
+        If Not 界面首绘已完成 AndAlso Not DesignMode AndAlso
+            ComponentModel.LicenseManager.UsageMode <> ComponentModel.LicenseUsageMode.Designtime Then
+            Dim 隐藏 = 1
+            Marshal.ThrowExceptionForHR(DwmSetWindowAttribute(Handle, DWMWA_CLOAK, 隐藏, 4))
+        End If
+        MyBase.OnHandleCreated(e)
+    End Sub
+
+    Private Shared Sub 同步绘制控件树(控件 As Control)
+        If Not 控件.Visible OrElse 控件.IsDisposed Then Return
+        控件.CreateControl()
+        控件.Refresh()
+        Dim GPU控件 = TryCast(控件, LakeUI.D3D_IGpuRenderable)
+        If GPU控件 IsNot Nothing AndAlso 控件.ClientSize.Width > 0 AndAlso 控件.ClientSize.Height > 0 Then
+            ' Cloak 后 WM_PAINT 可能被裁掉；通过 LakeUI 的同步桥接提交首帧。
+            Using 图形 = 控件.CreateGraphics(),
+                  绘制参数 As New PaintEventArgs(图形, 控件.ClientRectangle)
+                LakeUI.D3D_PaintBridge.PaintRenderable(绘制参数, 控件, GPU控件)
+            End Using
+        End If
+        For Each 子控件 As Control In 控件.Controls
+            同步绘制控件树(子控件)
+        Next
+    End Sub
+
+    Private Sub 完成界面首绘()
+        If 正在关闭 OrElse 界面首绘已完成 Then Return
+        PerformLayout()
+        同步绘制控件树(Me)
+        Marshal.ThrowExceptionForHR(DwmFlush())
+        Dim 隐藏 = 0
+        Marshal.ThrowExceptionForHR(DwmSetWindowAttribute(Handle, DWMWA_CLOAK, 隐藏, 4))
+        界面首绘已完成 = True
+    End Sub
 
     Protected Overrides Sub WndProc(ByRef m As Message)
         If m.Msg = WM_APPCOMMAND AndAlso 窗口当前有焦点() Then
@@ -129,9 +132,7 @@ Public Class Form1
 
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         当前主窗体 = Me
-        ' GPU 预热串行化（VBS.001，C-WARMUP-J@1）：UI 线程首次触碰 D3D_DeviceGlobals/D2D
-        ' 之前等预热线程收尾，消除 LakeUI 弱双检/双锁分裂的跨线程并发窗口
-        ' （T1 实测等待 ≈0 ms：预热与 Load 早段并行）。Join 异常走 Catch 兜底，不中断启动链。
+        ' LakeUI 设备创建与 UI 首次使用必须串行，避免预热线程竞争。
         Try
             My.MyApplication.GPU预热线程?.Join()
         Catch
@@ -147,28 +148,7 @@ Public Class Form1
         LakeUI.FloatingToolTipForm.BackdropTintColor = Color.FromArgb(120, 0, 0, 0)
         LakeUI.FloatingToolTipForm.BackdropBlurRadius = 30
         LakeUI.FloatingToolTipForm.BackdropBlurPasses = 2
-        ' 【2026-11-01 图片优先启动】chrome（Attach）默认延后到图片上屏之后（Form1_Shown
-        ' 的消息队列里排在开图之后）。依据：用户定位"窗口无所谓，先看见图片"；
-        ' 图片渲染走画面控件的子窗口句柄，不依赖 chrome。同 exe A/B（n=16）：
-        ' T1 1151→792、T2 1251→919（−331.6 ms，p=0，0 废轮）——Attach 与开图在
-        ' 消息队列里重叠，故收益略小于其 440 ms 全额。
-        ' 代价（实测，attachverify 两臂各 8 帧）：窗口先以标准边框出现，chrome 接管
-        ' 时几何微调一次（客户区 1303×874 → chrome 形态，约 1.4%），顶/底部条带
-        ' 统计与正常模式一致（差 0.1）⇒ chrome 完整接管，之后帧间 diff=0（无闪烁）。
-        ' FFF_ATTACH_EARLY=1 恢复旧顺序（Load 内同步 Attach）。
-        If Environment.GetEnvironmentVariable("FFF_ATTACH_EARLY") = "1" Then
-            ThisIsYourWindow1.Attach(Me)
-        Else
-            延后窗口Attach = True
-        End If
-        ' 【2026-11-02 UI 优先启动】默认顺序下 chrome 注入发生在 Shown，此刻视频容器的
-        ' Top/Bottom 还是「无 chrome」形态 ⇒ Load 末尾那次初始画面尺寸校正会算偏。
-        ' 这里只记账、把校正整体推迟，尺寸仍只定一次（不会二次跳变）。
-        ' 只有本次走 UI 优先时才记账；图片走画面优先，校正仍在 Load 末尾做（老口径：
-        ' 按无 chrome 的容器算，与 2026-11-01 那版图片优先启动完全一致）。
-        ' FFF_ATTACH_EARLY=1（Attach 已在 Load 同步做完）也不受影响。
-        本次启动UI优先 = 判定本次启动UI优先()
-        If 延后窗口Attach AndAlso 本次启动UI优先 Then 初始画面尺寸待Attach后校正 = True
+        ThisIsYourWindow1.Attach(Me)
         KeyPreview = True
         MinimumSize = New Size(875, 500)
         更新弹幕按钮可见性()
@@ -205,9 +185,6 @@ Public Class Form1
         播放控制器 = New 播放器控制器(
             Function() 画面控件.输出窗口句柄, SynchronizationContext.Current,
             CType(设置.实例对象.解码方式, 解码模式))
-        ' 链首计时器：注册在所有业务处理器之前（视图旋转/超分/自动HDR/本窗体/剪辑区间那批），
-        ' 只记一个时钟。关掉 env 时这条分支不执行，事件链与现网一字不差。
-        If 打开链计时已启用 Then AddHandler 播放控制器.媒体已打开, AddressOf 打开链首探针
         显示器唤醒 = New 显示器唤醒请求()
         播放控制器.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
         播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
@@ -221,10 +198,6 @@ Public Class Form1
         界面呈现器.设置音量百分比(设置.实例对象.音量百分比)
         播放控制器.设置音量(CSng(设置.实例对象.音量百分比 / 100.0F))
 
-        ' 【2026-10-31 启动优化】四个图层呈现器（字幕/弹幕/歌词/信息）的构造已延后：
-        ' 原在此处吃掉 24_streamsel_done→25_layers_done 段 177.5 ms。
-        ' 现在由 Form1_Shown 在派发开图之后调用 创建图层呈现器()。
-        ' 注：此处不再构造任何呈现器，全部由 创建图层呈现器() 承担。
         AddHandler 画面控件.Ctrl滚轮, AddressOf 画面控件_Ctrl滚轮
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
@@ -235,6 +208,7 @@ Public Class Form1
             Function() 播放控制器.当前媒体路径,
             Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI),
             Function() 播放控制器.读取原始帧(),
+            AddressOf 播放控制器.设置播放速度,
             Function() 播放控制器.当前视图旋转,
             AddressOf 播放控制器.安全读取媒体信息)
         视角360控制器 = New 播放器360视角控制器(
@@ -298,8 +272,6 @@ Public Class Form1
         AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开
         AddHandler 播放控制器.播放结束, AddressOf 播放控制器_播放结束
         AddHandler 播放控制器.媒体已打开, AddressOf 剪辑区间控制器.媒体已打开
-        ' 链尾计时器：注册在全部业务处理器之后，负责落盘一行。两个探针都只在 env 开启时挂。
-        If 打开链计时已启用 Then AddHandler 播放控制器.媒体已打开, AddressOf 打开链尾探针
         AddHandler 播放控制器.播放错误, AddressOf 播放控制器_播放错误
         AddHandler 播放控制器.操作提示, AddressOf 播放控制器_操作提示
         AddHandler 播放控制器.HDR输出状态已确认, AddressOf 播放控制器_HDR输出状态已确认
@@ -327,37 +299,11 @@ Public Class Form1
         AddHandler 方向键快捷键已请求, AddressOf 剪辑区间控制器.处理方向键快捷键
         界面呈现器.启动()
         更新弹幕按钮状态()
-        ' 【2026-10-31 实验】Form1_Load 里这次 PerformLayout 与控制器内部 应用画面尺寸() 里的
-        ' 窗体.PerformLayout() 重复（docs/123 §12.2 记"重复是真的，但不要钱"——本轮重测）。
-        ' FFF_SKIP_EXPLICIT_LAYOUT=1 时跳过本处，用于同 exe A/B。
-        If Environment.GetEnvironmentVariable("FFF_SKIP_EXPLICIT_LAYOUT") <> "1" Then
-            PerformLayout()
-        End If
-        ' UI 优先路径下这次校正被推迟到 Shown 里 Attach 之后（见 初始画面尺寸待Attach后校正）。
-        If Not 初始画面尺寸待Attach后校正 Then
-            窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
-        End If
+        创建图层呈现器()
+        窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
+        PerformLayout()
         核心文件检查通过 = True
-
     End Sub
-
-    ''' <summary>
-    ''' 本次启动走「UI 优先」（四周 UI 就绪后再开图）还是「画面优先」（先出画面、UI 随后追）。
-    ''' 判定顺序：
-    '''   ① FFF_PICTURE_FIRST=1 ⇒ 一律画面优先（同 exe A/B 用，压过类型分流）；
-    '''   ② 启动没带文件       ⇒ UI 优先（没有画面在抢时间，等 UI 不花任何代价）；
-    '''   ③ 带的是图片         ⇒ 画面优先（静图秒开，不该被 chrome/图层挡在后面）；
-    '''   ④ 其余（视频/音频/未归类扩展名）⇒ UI 优先。
-    ''' 只看扩展名：内核 probe 要到开图之后才给 媒体信息.是静态图片，而顺序必须在开图
-    ''' 之前定死。扩展名这一侧与图片模式共用同一张表（播放列表.图片扩展名），不会分叉。
-    ''' </summary>
-    Private Function 判定本次启动UI优先() As Boolean
-        If 图片优先启动 Then Return False
-        Dim 预览文件 = If(String.IsNullOrEmpty(待打开外部文件),
-                          My.Application.待处理启动文件快照(), 待打开外部文件)
-        If String.IsNullOrEmpty(预览文件) Then Return True
-        Return Not 播放列表.是图片文件(预览文件)
-    End Function
 
     Private Shared Function 可以加载核心文件(文件名 As String) As Boolean
         If FFmpeg核心文件前缀.Any(Function(前缀) String.Equals(前缀, 文件名, StringComparison.OrdinalIgnoreCase)) Then
@@ -515,16 +461,8 @@ Public Class Form1
         按钮图标.应用(MB_选择流, 播放器按钮图标.流选择)
     End Sub
 
-    ''' <summary>
-    ''' 四个图层呈现器（字幕/弹幕/歌词/信息）的构造。**延后到首帧之后调用**
-    ''' （2026-10-31 启动优化）：它们原在 Form1_Load 里，实测吃掉
-    ''' 24_streamsel_done→25_layers_done 段 177.5 ms，且各自 ctor 内会 Start 60 Hz 计时器
-    ''' （三条泵 = 6 条线程）。外部引用点全部带 `?.`/`IsNot Nothing` 守卫，晚建不会 NPE。
-    ''' 唯一的裸调用（信息图层呈现器.应用全局字体）已一并搬到这里。
-    ''' </summary>
     Private Sub 创建图层呈现器()
-        ' 幂等早退（已构造则跳过）+ 关闭竞争守卫（LIFECYCLE）：窗体已进入关闭流程时
-        ' 不再构造呈现器，避免 BeginInvoke 队列里的延迟调用在已 Closed 的窗体上启动泵线程。
+        ' 关闭之后不再创建图层及其计时器。
         If 正在关闭 OrElse 字幕图层呈现器 IsNot Nothing Then
             Return
         End If
@@ -562,6 +500,7 @@ Public Class Form1
 
     Private Sub Form1_Shown(sender As Object, e As EventArgs) Handles Me.Shown
         If Not 核心文件检查通过 Then
+            完成界面首绘()
             BeginInvoke(Sub()
                             LakeUI.ExOverlayMsgBox(Me, 核心文件错误说明,
                                 MsgBoxStyle.Critical Or MsgBoxStyle.OkOnly, "播放器核心文件缺失")
@@ -575,99 +514,16 @@ Public Class Form1
         Dim 启动文件 = My.Application.取出待处理启动文件()
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
         待打开外部文件 = String.Empty
-        ' 启动顺序（两种策略，同 exe 可 A/B）：
-        '   默认按媒体类型分流（见 判定本次启动UI优先）：视频走「UI 优先」——四周 UI
-        '   全部就绪后才开图，画面一出现即最终形态；图片走「画面优先」——静图秒开，
-        '   UI 不挡在前面。
-        '   FFF_PICTURE_FIRST=1 强制「画面优先」。
-        If Not 本次启动UI优先 Then
-            ' ── 画面优先（图片 / FFF_PICTURE_FIRST=1）：开图先跑，UI 随后追 ──────────
-            ' 【2026-10-31 启动优化】执行顺序说明（这决定它能不能真的省时间）：
-            '   BeginInvoke 只是**排进消息队列**，本过程返回后才轮到它。若把 创建图层呈现器()
-            '   写成同步调用，它会**抢在开图前面**跑 ⇒ 等于没延后（第一版实测只有 −107.9，
-            '   一部分就是被这个顺序吃掉的）。
-            '   这里：先 BeginInvoke 开图，再把图层构造**也**排队（排在开图之后），
-            '   让开图/解码先跑、图层构造随后与它重叠。
-            If Not String.IsNullOrEmpty(请求文件) Then
-                BeginInvoke(Sub() 打开外部文件(请求文件))
-                ' 【2026-11-01 图片优先】延后的 chrome 排在**开图之后**：消息队列按序执行，
-                ' Attach 要等图片先上屏（这正是延后的目的）。无启动文件时没有"先看图"
-                ' 诉求，Shown 里同步 Attach，窗口立即带完整 chrome。
-                If 延后窗口Attach Then
-                    BeginInvoke(Sub()
-                                    ' 关闭竞争守卫（LIFECYCLE）：队列消化前窗体可能已进入关闭流程，此时不 Attach。
-                                    If 正在关闭 Then Return
-                                    ThisIsYourWindow1.Attach(Me)
-                                End Sub)
-                End If
-                BeginInvoke(Sub() 创建图层呈现器())
-            Else
-                If 延后窗口Attach Then ThisIsYourWindow1.Attach(Me)
-                创建图层呈现器()
-            End If
-        Else
-            ' ── UI 优先（视频/音频/未归类，2026-11-02）：四周 UI 就绪 → 再显示画面 ─────
-            ' 老顺序的代价是「先看见画面、随后 chrome 接管」，每一步都会让用户看到一次
-            ' 形态变化：系统标准边框 → 自定义 chrome、几何微调、图层一到四逐个出现。
-            ' 新顺序把这些全部提到开图之前：画面一出现，四周就已经是最终形态。
-            ' 代价是首帧晚约 chrome(+图层) 的构造耗时（本机实测量级 ~0.6 s），换零跳变。
-            ' 只对视频这样：静图不付这笔等待（见 判定本次启动UI优先）。
-            '
-            ' ① chrome 接管。必须**同步**——排进消息队列就等于又把顺序让给开图。
-            '    UI 是装饰、画面才是主功能：这一步失败只降级（保留系统边框），不阻断开图。
-            If 延后窗口Attach Then
-                If Not 正在关闭 Then
-                    Try
-                        ThisIsYourWindow1.Attach(Me)
-                    Catch ex As Exception
-                        Debug.WriteLine("启动 UI 优先：chrome 接管异常（已忽略，照常开图）：" & ex.GetType().Name)
-                    End Try
-                End If
-            End If
-            ' ② 四个图层呈现器（各起 60 Hz 计时器）。同样同步，让计时器在首帧到达前就位，
-            '    首帧那一拍就有图层可绘，不会出现"画面先来、信息行后补"的观感差。
-            Try
-                创建图层呈现器()
-            Catch ex As Exception
-                Debug.WriteLine("启动 UI 优先：图层呈现器构造异常（已忽略，照常开图）：" & ex.GetType().Name)
-            End Try
-            ' ③ 布局落定。chrome 注入后视频容器上下被占用的高度才是最终值，初始画面尺寸
-            '    在这里定（Load 里那次已记账跳过），随后 PerformLayout 让注入后的布局落地。
-            '    画面尚未开始解码，此处任何几何变化用户都看不到。
-            Try
-                If 初始画面尺寸待Attach后校正 Then
-                    初始画面尺寸待Attach后校正 = False
-                    窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
-                End If
-                ' 与 Load 里那处同口径：FFF_SKIP_EXPLICIT_LAYOUT=1 是同 exe A/B 显式布局
-                ' 收益的诊断开关，只放过一处会让量到的收益掺进 Shown 这一步。
-                If Environment.GetEnvironmentVariable("FFF_SKIP_EXPLICIT_LAYOUT") <> "1" Then
-                    PerformLayout()
-                End If
-            Catch ex As Exception
-                Debug.WriteLine("启动 UI 优先：布局校正异常（已忽略，照常开图）：" & ex.GetType().Name)
-            End Try
-            ' ④ 最后开图。开图仍是异步派发：本过程先返回，让上面几步的绘制（chrome 首绘、
-            '    图层计时器首拍）有机会先落地，再由消息队列轮到解码/首帧。
-            If Not String.IsNullOrEmpty(请求文件) Then
-                BeginInvoke(Sub() 打开外部文件(请求文件))
-            End If
-        End If
+        ' 排在 Load/Shown 产生的布局回调之后，再同步提交整棵控件树。
+        BeginInvoke(Sub()
+                        完成界面首绘()
+                        If Not String.IsNullOrEmpty(请求文件) Then 打开外部文件(请求文件)
+                    End Sub)
 
-        ' 启动期优先级借让收尾：HIGH 只需要覆盖到首帧附近。Shown 后恢复
-        ' 拉高前保存的原始 PriorityClass（My.MyApplication.启动期原始优先级）而非常量
-        ' Normal——start /high 启动时原始值就是 High，不被降级；且仅当到点仍是 High
-        ' 时才改写（内核 PlacementPolicy 若已接管则不动，不与它的播放期 Boost 状态机
-        ' 抢同一个旋钮——它到播放泵启动后才首次采样）。
-        ' 【2026-11-02 UI 优先启动】延回时长随启动顺序变：画面优先 Shown 后约 300–500 ms 就
-        ' 出首帧，600 ms 足够覆盖（保持原值）；UI 优先把 Attach + 四层图层 + 布局都搬到
-        ' 开图之前，Shown 返回后还要再等首帧——实测 Shown≈2.3 s、首帧≈3.3 s（间隔约 1.0 s），
-        ' 600 ms 会在首帧前就把 HIGH 撤掉、让启动期借让落空。UI 优先按 1500 ms 覆盖到首帧之后。
         If My.MyApplication.启动优先级已拉高 Then
-            Dim 降回延迟 = If(本次启动UI优先, 1500, 600)
             Dim 降回线程 As New Thread(Sub()
                 Try
-                    Thread.Sleep(降回延迟)
+                    Thread.Sleep(1500)
                     Using 降回进程 As System.Diagnostics.Process = System.Diagnostics.Process.GetCurrentProcess()
                         If My.MyApplication.启动优先级已拉高 AndAlso
                             降回进程.PriorityClass = ProcessPriorityClass.High Then
@@ -1005,59 +861,8 @@ Public Class Form1
         End If
     End Sub
 
-    ' ---- 打开完成事件链的两个计时探针（只在 FFF_OPEN_CHAIN_TRACE=1 时挂上） ----
-    Private Shared Function 毫秒差(起 As Long, 止 As Long) As Long
-        Return CLng((止 - 起) * 1000.0# / Stopwatch.Frequency)
-    End Function
-
-    ''' <summary>自上一刻度起的毫秒数并推进刻度；未开 trace 时立即返回 -1，不读时钟。</summary>
-    Private Function 打开链打点(ByRef 上一刻 As Long) As Long
-        If Not 打开链计时已启用 Then Return -1
-        Dim 现在 = Stopwatch.GetTimestamp()
-        Dim 毫秒 = 毫秒差(上一刻, 现在)
-        上一刻 = 现在
-        Return 毫秒
-    End Function
-
-    ' 链首：媒体已打开 在 UI 线程同步派发，字段不需要跨线程保护。
-    Private Sub 打开链首探针(sender As Object, e As 播放器媒体事件参数)
-        If Not 打开链计时已启用 Then Return
-        打开链入口刻 = Stopwatch.GetTimestamp()
-        打开链Form1出口刻 = 0
-        打开链前置 = -1
-        打开链Form1段 = -1
-    End Sub
-
-    ' 链尾：落一行再看走没走完；处理器里提前返回（正在关闭）时出口刻仍为 0，直接不记。
-    Private Sub 打开链尾探针(sender As Object, e As 播放器媒体事件参数)
-        If Not 打开链计时已启用 Then Return
-        If 打开链入口刻 = 0 OrElse 打开链Form1出口刻 = 0 Then Return
-        Dim 现在 = Stopwatch.GetTimestamp()
-        Dim 后续 = 毫秒差(打开链Form1出口刻, 现在)
-        Dim 总 = 毫秒差(打开链入口刻, 现在)
-        Try
-            Dim 行 = $"[OC] 前置={打开链前置}ms 预处理={打开链预处理}ms " &
-                     $"界面媒体已打开={打开链界面媒体已打开}ms 更新媒体信息={打开链更新媒体信息}ms " &
-                     $"IAMF={打开链IAMF}ms 视角360={打开链视角360}ms 图片浏览={打开链图片浏览}ms " &
-                     $"图片模式={打开链图片模式}ms 刷新={打开链刷新}ms " &
-                     $"Form1段={打开链Form1段}ms 后续={后续}ms 总={总}ms"
-            IO.File.AppendAllText(IO.Path.Combine(AppContext.BaseDirectory, "open_chain_trace.log"),
-                                  行 & Environment.NewLine, System.Text.Encoding.UTF8)
-        Catch
-            ' 计时绝不能影响打开：只读目录、文件被占用，一律吞掉。
-        End Try
-        打开链入口刻 = 0
-    End Sub
-
     Private Sub 播放控制器_媒体已打开(sender As Object, e As 播放器媒体事件参数)
         If 正在关闭 Then Return
-        Dim 段起 As Long = 0
-        Dim 上 As Long = 0
-        If 打开链计时已启用 Then
-            段起 = Stopwatch.GetTimestamp()
-            上 = 段起
-            打开链前置 = If(打开链入口刻 = 0, -1L, 毫秒差(打开链入口刻, 段起))
-        End If
         显示器唤醒?.更新(e.快照)
         If Not 播放列表数据.选择路径(e.文件路径) Then
             待选中播放列表路径 = e.文件路径
@@ -1073,11 +878,8 @@ Public Class Form1
         信息图层呈现器?.使内容失效()
         Dim 光盘标题 = If(光盘路径.是光盘路径(e.文件路径) AndAlso Directory.Exists(e.文件路径), e.文件路径.TrimEnd("\"c, "/"c), Path.GetFileName(e.文件路径))
         Text = 光盘标题
-        打开链预处理 = 打开链打点(上)
         界面呈现器.媒体已打开(e.保留剪辑区间)
-        打开链界面媒体已打开 = 打开链打点(上)
         界面呈现器.更新媒体信息(e.媒体信息, e.快照)
-        打开链更新媒体信息 = 打开链打点(上)
         ' IAMF 空间音频声明（docs/52 验收 #6 的产品拍板：UI 声明即可）。
         ' 调试层的"声场："行要手动开信息层才可见；libiamf 接管与否决定用户听到
         ' 的是沉浸声渲染还是降级下混，值得在打开媒体时主动声明一次。
@@ -1094,20 +896,10 @@ Public Class Form1
             End If
             信息图层呈现器?.显示操作信息(声明, &HFF55E7EAUI, "IAMF")
         End If
-        打开链IAMF = 打开链打点(上)
         视角360控制器?.媒体已打开(e.文件路径, e.媒体信息, e.快照)
-        打开链视角360 = 打开链打点(上)
         图片浏览控制器?.媒体已打开(e.媒体信息, e.快照)
-        打开链图片浏览 = 打开链打点(上)
         界面呈现器.设置图片模式(图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.图片模式已启用)
-        打开链图片模式 = 打开链打点(上)
         界面呈现器.刷新()
-        打开链刷新 = 打开链打点(上)
-        If 打开链计时已启用 Then
-            Dim 收尾刻 = Stopwatch.GetTimestamp()
-            打开链Form1段 = 毫秒差(段起, 收尾刻)
-            打开链Form1出口刻 = 收尾刻
-        End If
     End Sub
 
     Private Sub 播放控制器_播放结束(sender As Object, e As EventArgs)
@@ -1275,8 +1067,8 @@ Public Class Form1
         播放控制器?.应用自动HDR模式设置()
     End Sub
 
-    Friend Sub 应用空间音频设置()
-        播放控制器?.应用空间音频设置()
+    Friend Sub 应用音频效果设置()
+        播放控制器?.应用音频效果设置()
     End Sub
 
     Friend Sub 应用字幕设置()

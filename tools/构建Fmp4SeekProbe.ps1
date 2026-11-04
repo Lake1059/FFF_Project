@@ -1,4 +1,4 @@
-# 构建 Fmp4SeekProbe.ps1 — build the session-level headless seek probe host.
+# 构建 Fmp4SeekProbe.ps1 — build the native test entry point.
 #
 # Toolchain discovery mirrors tools\Resolve-Toolchain.ps1 (vswhere -> VS install ->
 # latest MSVC toolset), but this script configures INCLUDE/LIB itself and invokes
@@ -6,7 +6,7 @@
 # quoting traps. cl must be invoked via pwsh (pwsh -File this script); invoking it
 # from a git-bash pipe is known to hang silently.
 #
-# Run:  pwsh -NoProfile -File <repo>\3fp\kernel\tools\构建Fmp4SeekProbe.ps1
+# Run:  pwsh -NoProfile -File <repo>\tools\构建Fmp4SeekProbe.ps1
 
 $ErrorActionPreference = "Stop"
 
@@ -83,5 +83,6 @@ $source = Join-Path $ProbeDir "main.cpp"
 if ($LASTEXITCODE -ne 0) { throw "cl.exe failed with exit code $LASTEXITCODE" }
 
 $exePath = Join-Path $ProbeDir "Fmp4SeekProbe.exe"
+New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 Copy-Item -LiteralPath $exePath -Destination (Join-Path $BuildDir "Fmp4SeekProbe.exe") -Force
 Write-Host "BUILD OK: $BuildDir\Fmp4SeekProbe.exe (obj: $ObjDir)"

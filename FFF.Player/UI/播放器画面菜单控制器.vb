@@ -23,6 +23,7 @@ Friend NotInheritable Class 播放器画面菜单控制器
     Private ReadOnly 标题栏菜单 As LakeUI.ModernContextMenu
     Private ReadOnly 尺寸菜单 As LakeUI.ModernContextMenu
     Private ReadOnly 截图菜单 As LakeUI.ModernContextMenu
+    Private ReadOnly 速度菜单 As LakeUI.ModernContextMenu
     Private ReadOnly 窗口布局控制器 As 播放器窗口布局控制器
     Private ReadOnly 快照提供器 As Func(Of 播放器快照)
     Private ReadOnly 初始画面尺寸提供器 As Func(Of Size)
@@ -46,6 +47,7 @@ Friend NotInheritable Class 播放器画面菜单控制器
                    当前媒体路径提供器值 As Func(Of String),
                    操作提示值 As Action(Of String),
                    原始帧提供器值 As Func(Of Bitmap),
+                   设置播放速度 As Action(Of Double),
                    Optional 当前旋转提供器值 As Func(Of UInteger) = Nothing,
                    Optional 媒体信息提供器值 As Func(Of 媒体信息) = Nothing)
         ArgumentNullException.ThrowIfNull(宿主窗口值)
@@ -59,6 +61,7 @@ Friend NotInheritable Class 播放器画面菜单控制器
         ArgumentNullException.ThrowIfNull(当前媒体路径提供器值)
         ArgumentNullException.ThrowIfNull(操作提示值)
         ArgumentNullException.ThrowIfNull(原始帧提供器值)
+        ArgumentNullException.ThrowIfNull(设置播放速度)
 
         宿主窗口 = 宿主窗口值
         画面控件 = 画面控件值
@@ -73,6 +76,48 @@ Friend NotInheritable Class 播放器画面菜单控制器
         原始帧提供器 = 原始帧提供器值
         当前旋转提供器 = 当前旋转提供器值
         媒体信息提供器 = 媒体信息提供器值
+
+        速度菜单 = New LakeUI.ModernContextMenu With {
+            .AnimationFPS = 尺寸菜单.AnimationFPS,
+            .BackColor = 尺寸菜单.BackColor,
+            .BackdropBlurRadius = 尺寸菜单.BackdropBlurRadius,
+            .BackdropMode = 尺寸菜单.BackdropMode,
+            .BackdropNoiseOpacity = 尺寸菜单.BackdropNoiseOpacity,
+            .BackdropTintColor = 尺寸菜单.BackdropTintColor,
+            .BorderSize = 尺寸菜单.BorderSize,
+            .DescriptionFont = CType(尺寸菜单.DescriptionFont.Clone(), Font),
+            .DescriptionForeColor = 尺寸菜单.DescriptionForeColor,
+            .HoverBackColor = 尺寸菜单.HoverBackColor,
+            .HoverRadius = 尺寸菜单.HoverRadius,
+            .IconSize = 尺寸菜单.IconSize,
+            .ItemHeight = 尺寸菜单.ItemHeight,
+            .ItemPadding = 尺寸菜单.ItemPadding,
+            .MenuFont = CType(尺寸菜单.MenuFont.Clone(), Font),
+            .MenuPadding = 尺寸菜单.MenuPadding,
+            .PressedBackColor = 尺寸菜单.PressedBackColor,
+            .SeparatorColor = 尺寸菜单.SeparatorColor,
+            .SeparatorHeight = 尺寸菜单.SeparatorHeight
+        }
+        For Each 速度 In {0.1R, 0.2R, 0.25R, 0.5R, 0.75R, 1.0R, 1.25R, 1.5R, 1.75R, 2.0R, 3.0R, 4.0R, 5.0R}
+            Dim 当前速度 = 速度
+            Dim 项 As New LakeUI.ModernContextMenu.ModernMenuItem With {
+                .Text = 当前速度.ToString("0.##", CultureInfo.InvariantCulture),
+                .Checked = 当前速度 = 1.0R,
+                .ToggleCheckOnClick = False,
+                .CloseOnClick = True
+            }
+            AddHandler 项.Click, Sub()
+                设置播放速度(当前速度)
+                For Each 选项 In 速度菜单.Items
+                    选项.Checked = ReferenceEquals(选项, 项)
+                Next
+                操作提示($"播放速度 {项.Text}")
+            End Sub
+            速度菜单.Items.Add(项)
+        Next
+        Dim 位置 = 标题栏菜单.Items.FindIndex(Function(项) 读取菜单文字(项) = "截取当前画面")
+        标题栏菜单.Items.Insert(Math.Max(0, 位置 + 1),
+            New LakeUI.ModernContextMenu.ModernMenuItem With {.Text = "播放速度", .SubMenu = 速度菜单})
 
         挂接菜单()
     End Sub
@@ -398,5 +443,6 @@ Friend NotInheritable Class 播放器画面菜单控制器
         For Each 菜单项 In 截图菜单.Items
             RemoveHandler 菜单项.Click, AddressOf 截图菜单项_Click
         Next
+        速度菜单.Dispose()
     End Sub
 End Class

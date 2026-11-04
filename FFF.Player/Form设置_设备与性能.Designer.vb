@@ -24,7 +24,7 @@ Partial Class Form设置_设备与性能
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
         ModernPanel5 = New LakeUI.ModernPanel()
-        MCB_空间音频 = New LakeUI.ModernComboBox()
+        MCB_音频效果 = New LakeUI.ModernComboBox()
         ModernPanel4 = New LakeUI.ModernPanel()
         MCB_视频缩放质量 = New LakeUI.ModernComboBox()
         ModernPanel3 = New LakeUI.ModernPanel()
@@ -64,7 +64,7 @@ Partial Class Form设置_设备与性能
         ModernPanel5.BackColor = Color.Transparent
         ModernPanel5.BackColor1 = Color.Transparent
         ModernPanel5.BorderSize = 0
-        ModernPanel5.Controls.Add(MCB_空间音频)
+        ModernPanel5.Controls.Add(MCB_音频效果)
         ModernPanel5.Dock = DockStyle.Top
         ModernPanel5.Location = New Point(15, 215)
         ModernPanel5.Name = "ModernPanel5"
@@ -72,38 +72,39 @@ Partial Class Form设置_设备与性能
         ModernPanel5.Size = New Size(617, 42)
         ModernPanel5.TabIndex = 22
         ' 
-        ' MCB_空间音频
+        ' MCB_音频效果
         ' 
-        MCB_空间音频.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_空间音频.BorderRadius = 10
-        MCB_空间音频.BorderSize = 0
-        MCB_空间音频.Dock = DockStyle.Left
-        MCB_空间音频.DropDownBackdropBlurPasses = 2
-        MCB_空间音频.DropDownBackdropBlurRadius = 30
-        MCB_空间音频.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
-        MCB_空间音频.DropDownHoverColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
-        MCB_空间音频.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
-        MCB_空间音频.DropDownPadding = New Padding(10)
-        MCB_空间音频.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_空间音频.DropDownSelectedForeColor = Color.White
-        MCB_空间音频.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_空间音频.Items.Add("自动启用")
-        MCB_空间音频.Items.Add("不使用")
-        MCB_空间音频.Location = New Point(0, 10)
-        MCB_空间音频.Margin = New Padding(2, 2, 2, 2)
-        MCB_空间音频.MaxDropDownItems = 16
-        MCB_空间音频.Name = "MCB_空间音频"
-        MCB_空间音频.Padding = New Padding(10, 0, 10, 0)
-        MCB_空间音频.PrefixForeColor = Color.YellowGreen
-        MCB_空间音频.PrefixGap = 10
-        MCB_空间音频.PrefixText = "空间音频"
-        MCB_空间音频.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_空间音频.Size = New Size(250, 32)
-        MCB_空间音频.TabIndex = 0
-        MCB_空间音频.ToolTipGap = -1
-        MCB_空间音频.ToolTipMaxWidth = 350
-        MCB_空间音频.ToolTipPadding = New Padding(15)
-        MCB_空间音频.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MCB_音频效果.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_音频效果.BorderRadius = 10
+        MCB_音频效果.BorderSize = 0
+        MCB_音频效果.Dock = DockStyle.Left
+        MCB_音频效果.DropDownBackdropBlurPasses = 2
+        MCB_音频效果.DropDownBackdropBlurRadius = 30
+        MCB_音频效果.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_音频效果.DropDownHoverColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MCB_音频效果.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_音频效果.DropDownPadding = New Padding(10)
+        MCB_音频效果.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_音频效果.DropDownSelectedForeColor = Color.White
+        MCB_音频效果.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCB_音频效果.Items.Add("无")
+        MCB_音频效果.Items.Add("自动 HRTF 空间音频")
+        MCB_音频效果.Items.Add("单声道音频")
+        MCB_音频效果.Location = New Point(0, 10)
+        MCB_音频效果.Margin = New Padding(2, 2, 2, 2)
+        MCB_音频效果.MaxDropDownItems = 16
+        MCB_音频效果.Name = "MCB_音频效果"
+        MCB_音频效果.Padding = New Padding(10, 0, 10, 0)
+        MCB_音频效果.PrefixForeColor = Color.YellowGreen
+        MCB_音频效果.PrefixGap = 10
+        MCB_音频效果.PrefixText = "音频效果"
+        MCB_音频效果.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_音频效果.Size = New Size(300, 32)
+        MCB_音频效果.TabIndex = 0
+        MCB_音频效果.ToolTipGap = -1
+        MCB_音频效果.ToolTipMaxWidth = 350
+        MCB_音频效果.ToolTipPadding = New Padding(15)
+        MCB_音频效果.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ' 
         ' ModernPanel4
         ' 
@@ -335,5 +336,5 @@ Partial Class Form设置_设备与性能
     Friend WithEvents ModernPanel4 As LakeUI.ModernPanel
     Friend WithEvents MCB_视频缩放质量 As LakeUI.ModernComboBox
     Friend WithEvents ModernPanel5 As LakeUI.ModernPanel
-    Friend WithEvents MCB_空间音频 As LakeUI.ModernComboBox
+    Friend WithEvents MCB_音频效果 As LakeUI.ModernComboBox
 End Class

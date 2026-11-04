@@ -112,6 +112,8 @@ public:
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;
     FFFResult SetAudioExclusiveMode(bool exclusive) noexcept;
+    FFFResult SetPlaybackRate(double rate) noexcept;
+    FFFResult SetMonoAudio(bool enabled) noexcept;
     FFFResult SetVolume(float volume, bool muted) noexcept;
     // External bed render plug (3FP/Api/FFF.Player.AudioRenderPlug.h). Install,
     // replace or clear; the session owns the context from the call that installs it
@@ -243,6 +245,7 @@ private:
     // F3 顺序预滚：从当前 demux 位置把参考流包顺序读完直到判停点。true=判停命中
     //（落入现有成功收尾）；false=走 B2 重开还原。
     bool SeekFragmentedPreroll(std::int64_t target100ns) noexcept;
+    bool PrepareGrowingSeek(std::int64_t position100ns) noexcept;
     // B2 重开还原：CloseFormat→OpenFormat→flush→重定位→ReportError。返回 false 表示
     // 重开失败、已走 Fail 会话失败路径，调用方返回 FfmpegFailure 即可。
     bool ReopenFormatForSeek(std::int64_t recallPosition100ns) noexcept;
@@ -445,6 +448,10 @@ private:
     void PublishPlaybackClock(std::int64_t position100ns,
         std::int64_t limit100ns) const noexcept;
     void ResetClock(std::int64_t position100ns) noexcept;
+    void ResetTempo(std::int64_t position100ns) noexcept;
+    FFFResult TempoAudio(AVFrame* frame, std::int64_t position100ns,
+        std::int64_t timestampResolution100ns = 0) noexcept;
+    std::int64_t AudioMediaPosition(std::int64_t position100ns) const noexcept;
     static bool NormalizeLocalPath(const char* pathUtf8, std::string& normalized,
         std::string& error) noexcept;
 
@@ -609,6 +616,7 @@ private:
     std::string externalAudioPath_;
     PlayerAudioRuntimeState audioRuntimeState_;
     std::unique_ptr<PlayerWasapiRenderer> audioRenderer_;
+    bool monoAudio_ = false; // Worker-owned; survives seeks, media and endpoint changes.
     // The bed render plug the host installed. Copied, because the caller may free
     // its own struct the moment the call returns; `context` is the kernel's from
     // then on and only this class releases it (see SetAudioRenderPlug / ~PlayerSession).
@@ -625,6 +633,15 @@ private:
     // queued commands, and whatever is still parked here at that point is released
     // there rather than leaked.
     std::vector<FFF3FPAudioRenderPlug> audioPlugRetired_;
+    AVFilterGraph* tempoGraph_ = nullptr;
+    AVFilterContext* tempoInput_ = nullptr;
+    AVFilterContext* tempoOutput_ = nullptr;
+    std::atomic<std::int64_t> tempoOrigin_{0};
+    std::int64_t tempoSamples_ = 0;
+    std::atomic<double> playbackRate_{1.0};
+    std::atomic<std::uint64_t> audioFailures_{0};
+    mutable std::atomic<double> playbackClockRate_{1.0};
+    mutable std::atomic<std::int64_t> playbackClockIdentityUntil_{0};
     PlayerVideoRenderer videoRenderer_;
     std::wstring audioEndpointId_;
     bool audioExclusive_;
@@ -638,6 +655,15 @@ private:
     // container carries no duration. Worker thread only: DoOpen, PumpPlayback and
     // DoClose all run serially on the command-queue worker, so no extra lock guards it.
     std::int64_t demuxedExtent100ns_ = 0;
+    std::vector<std::int64_t> lastPacketDts_;
+    bool growingInput_ = false;
+    bool inputReadBlocked_ = false;
+    std::int64_t inputRetryTick_ = 0;
+    std::atomic<ULONGLONG> inputDeadlineTick_{0};
+    std::int64_t inputResumePosition100ns_ = 0;
+    std::int32_t decodedSurfaceFormat_ = -1;
+    AVCodecContext* decodedSurfaceDecoder_ = nullptr;
+    bool surfaceFormatRefreshPending_ = false;
     // Image details for GetImageInfo, built once on the worker thread at the end
     // of DoOpen and handed out under snapshotMutex_ - the decoder-owned frames
     // the build reads must not be touched from the caller's thread.

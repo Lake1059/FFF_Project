@@ -46,13 +46,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private 滚轮余量 As Integer
     Private 未知时长已知上限毫秒 As Double
 
-    ' 未知时长媒体（容器不携带时长，如无音频流式封装）起步阶段的虚拟进度量程（毫秒）。
-    ' TrackBar 在 Maximum=Minimum 时点击换算恒得 0（"点击落 0"），而起步阶段已探明
-    ' 上限=0，必须由该常量撑起非退化量程，点击位置才能换算出有意义的时间戳
-    ' （如点击 50% → 30s）。取 60s 是换算精度的可逆实现选择（可在 30s-120s 内微调）：
-    ' 覆盖多数短片段的可预估范围，长媒体起步阶段的点击精度也可接受；换算目标超出
-    ' 实际时长时由 native 侧 DoSeek（duration=0 不夹上界）→ demux 到 EOF → Ended 兜底，
-    ' 不影响正确性。
+    ' 未知总时长时保留可拖动的初始量程；已读取范围超过它后继续扩展。
     Private Const 未知时长虚拟上限毫秒 As Double = 60000
 
     Private 上次时间戳测量文本 As String
@@ -111,6 +105,8 @@ Friend NotInheritable Class 播放器界面呈现器
         AddHandler 进度条.MouseUp, AddressOf 进度条_MouseUp
         AddHandler 进度条.ValueChanged, AddressOf 进度条_ValueChanged
         AddHandler 音量条.ValueChanged, AddressOf 音量条_ValueChanged
+        AddHandler 时间标签.MouseDoubleClick, AddressOf 时间标签_MouseDoubleClick
+        AddHandler 时间标签.MouseClick, AddressOf 时间标签_MouseClick
         AddHandler 画面控件.音量滚轮, AddressOf 画面控件_音量滚轮
         AddHandler 刷新计时器.Tick, AddressOf 刷新计时器_Tick
 
@@ -166,7 +162,7 @@ Friend NotInheritable Class 播放器界面呈现器
         If Not 正在拖动进度条 Then
             正在更新进度条 = True
             Try
-                If 快照.总时长 > TimeSpan.Zero Then
+                If 快照.已知总时长 AndAlso 快照.总时长 > TimeSpan.Zero Then
                     未知时长已知上限毫秒 = 0
                     Dim 最大值 = 快照.总时长.TotalMilliseconds
                     If 进度条.Minimum <> 0 Then 进度条.Minimum = 0
@@ -175,7 +171,7 @@ Friend NotInheritable Class 播放器界面呈现器
                     If 进度条.Value <> 新值 Then 进度条.Value = 新值
                 Else
                     Dim 当前位置 = Math.Max(0, 快照.播放位置.TotalMilliseconds)
-                    未知时长已知上限毫秒 = Math.Max(未知时长已知上限毫秒, 当前位置)
+                    未知时长已知上限毫秒 = Math.Max(未知时长已知上限毫秒, Math.Max(当前位置, 快照.已读取范围.TotalMilliseconds))
                     If 进度条.Minimum <> 0 Then 进度条.Minimum = 0
                     ' 未知时长模式以虚拟上限维持非退化量程（见 未知时长虚拟上限毫秒 注释），
                     ' 保证起步阶段点击不落 0；已探明范围超过虚拟上限后量程跟随增长。
@@ -190,7 +186,7 @@ Friend NotInheritable Class 播放器界面呈现器
             Finally
                 正在更新进度条 = False
             End Try
-            设置时间戳文本(快照.播放位置, 快照.总时长)
+            设置时间戳文本(快照.播放位置, If(快照.已知总时长, 快照.总时长, TimeSpan.Zero))
         End If
         刷新HDR按钮(快照)
         RaiseEvent 播放状态已刷新(Me, EventArgs.Empty)
@@ -259,7 +255,7 @@ Friend NotInheritable Class 播放器界面呈现器
         If 快照 Is Nothing Then
             设置时间戳文本(TimeSpan.Zero, TimeSpan.Zero)
         Else
-            设置时间戳文本(快照.播放位置, 快照.总时长)
+            设置时间戳文本(快照.播放位置, If(快照.已知总时长, 快照.总时长, TimeSpan.Zero))
         End If
     End Sub
 
@@ -333,6 +329,38 @@ Friend NotInheritable Class 播放器界面呈现器
         If Not 正在拖动进度条 Then 请求跳转()
     End Sub
 
+    Private Sub 时间标签_MouseDoubleClick(sender As Object, e As MouseEventArgs)
+        If e.Button = MouseButtons.Left Then 复制时间戳(False)
+    End Sub
+
+    Private Sub 时间标签_MouseClick(sender As Object, e As MouseEventArgs)
+        If e.Button = MouseButtons.Right Then 复制时间戳(True)
+    End Sub
+
+    Private Sub 复制时间戳(复制总时长 As Boolean)
+        If 已释放 OrElse 图片模式已启用 OrElse Not 有媒体快照 OrElse 正在切换提供器() Then Return
+        Dim 快照 = 快照提供器()
+        If 快照 Is Nothing OrElse Not 播放器控制器.可操作(快照.状态) Then Return
+        If 复制总时长 Then
+            If Not 快照.已知总时长 OrElse 快照.总时长 <= TimeSpan.Zero Then Return
+        ElseIf 快照.播放位置 < TimeSpan.Zero Then
+            Return
+        End If
+
+        ' 复制标签实际显示的精度（包括剪辑模式的毫秒），不带颜色标记。
+        Dim 时间文本 = System.Text.RegularExpressions.Regex.Replace(时间标签.Text, "<[^>]*>", String.Empty).Split("/"c)
+        If 时间文本.Length <> 2 Then Return
+        Dim 文本 = 时间文本(If(复制总时长, 1, 0)).Trim()
+        If Not System.Text.RegularExpressions.Regex.IsMatch(文本, "^\d+(?::\d{2}){0,2}(?:\.\d{3})?$") Then Return
+        Try
+            Clipboard.SetText(文本)
+        Catch ex As System.Runtime.InteropServices.ExternalException
+            ' 剪贴板被占用时不显示成功提示。
+            Return
+        End Try
+        LakeUI.ExFloatingTip(时间标签, If(复制总时长, "已复制总时间戳", "已复制当前时间戳"))
+    End Sub
+
     Private Sub 音量条_ValueChanged(sender As Object, e As EventArgs)
         If 已释放 Then Return
         RaiseEvent 音量已变更(Me, New 播放器音量事件参数(CSng(音量条.Value / 100.0F)))
@@ -350,8 +378,6 @@ Friend NotInheritable Class 播放器界面呈现器
 
     Private Sub 请求跳转()
         If Not 进度条可调整() Then Return
-        ' 未知时长模式下换算目标可能超出实际媒体时长：native DoSeek 在 duration=0 时
-        ' 不夹上界，demux 按目标推进到 EOF 后由 FlushAtEnd→Ended 兜底，属既有可接受语义。
         RaiseEvent 请求跳转到关键帧(Me,
             New 播放器跳转请求事件参数(TimeSpan.FromMilliseconds(进度条.Value)))
     End Sub
@@ -361,7 +387,7 @@ Friend NotInheritable Class 播放器界面呈现器
         Dim 快照 = 快照提供器()
         If 快照 Is Nothing Then Return False
         If Not 播放器控制器.可操作(快照.状态) Then Return False
-        If 快照.总时长 > TimeSpan.Zero Then
+        If 快照.已知总时长 AndAlso 快照.总时长 > TimeSpan.Zero Then
             ' 已知时长模式：保持原 Maximum>Minimum 量程门槛，行为不变（R2.2 回归不变式）。
             Return 进度条.Maximum > 进度条.Minimum
         End If
@@ -569,6 +595,8 @@ Friend NotInheritable Class 播放器界面呈现器
         RemoveHandler 进度条.MouseUp, AddressOf 进度条_MouseUp
         RemoveHandler 进度条.ValueChanged, AddressOf 进度条_ValueChanged
         RemoveHandler 音量条.ValueChanged, AddressOf 音量条_ValueChanged
+        RemoveHandler 时间标签.MouseDoubleClick, AddressOf 时间标签_MouseDoubleClick
+        RemoveHandler 时间标签.MouseClick, AddressOf 时间标签_MouseClick
         RemoveHandler 画面控件.音量滚轮, AddressOf 画面控件_音量滚轮
         RemoveHandler 刷新计时器.Tick, AddressOf 刷新计时器_Tick
         刷新计时器.Dispose()

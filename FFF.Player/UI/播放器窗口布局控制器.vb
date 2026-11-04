@@ -63,10 +63,11 @@ Friend NotInheritable Class 播放器窗口布局控制器
         If 已释放 OrElse 窗体.IsDisposed OrElse Not 窗体.IsHandleCreated OrElse
             目标画面大小.Width <= 0 OrElse 目标画面大小.Height <= 0 Then Return
         If 窗体.WindowState <> FormWindowState.Normal Then 窗体.WindowState = FormWindowState.Normal
-        应用画面尺寸(目标画面大小, 使用物理像素)
+        应用画面尺寸(目标画面大小, 使用物理像素, 居中窗口:=False)
     End Sub
 
-    Private Sub 应用画面尺寸(目标画面大小 As Size, Optional 使用物理像素 As Boolean = False)
+    Private Sub 应用画面尺寸(目标画面大小 As Size, Optional 使用物理像素 As Boolean = False,
+                        Optional 居中窗口 As Boolean = True)
         窗体.PerformLayout()
         Dim 目标画面设备大小 = 计算目标画面设备大小(目标画面大小, 窗体.DeviceDpi, 使用物理像素)
         Dim 客户区非视频宽度 = Math.Max(0, 窗体.ClientSize.Width - 视频容器.ClientSize.Width)
@@ -79,7 +80,11 @@ Friend NotInheritable Class 播放器窗口布局控制器
         Dim 最终大小 = New Size(Math.Clamp(目标宽度, 窗体.MinimumSize.Width, workingArea.Width),
                                Math.Clamp(目标高度, 窗体.MinimumSize.Height, workingArea.Height))
         窗体.StartPosition = FormStartPosition.Manual
-        窗体.Bounds = 计算工作区居中边界(最终大小, workingArea)
+        If 居中窗口 Then
+            窗体.Bounds = 计算工作区居中边界(最终大小, workingArea)
+        Else
+            窗体.Size = 最终大小
+        End If
     End Sub
 
     Friend Shared Function 计算目标画面设备大小(目标画面大小 As Size, DPI As Integer,
