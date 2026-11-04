@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
     [string]$OutputDirectory = "",
@@ -8,7 +8,9 @@ param(
     # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
     [string]$LakeUITfm = "",
     # 跨产品框架配对：默认拒绝不同 .NET 运行时版本，见 Resolve-Toolchain.ps1。
-    [switch]$AllowFrameworkMismatch
+    [switch]$AllowFrameworkMismatch,
+    [switch]$SkipIamf,
+    [switch]$SkipDependencyPreparation
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,13 +29,13 @@ $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 . (Join-Path $ScriptDirectory "Resolve-Toolchain.ps1")
 $MSBuild = Get-MSBuildTool
 $DotNet = Get-DotNetTool
-$LibassReadyMarker = Join-Path $ProjectRoot "third_party\vcpkg_installed\x64-windows\share\3f-project\libass-ready.txt"
-if (-not (Test-Path -LiteralPath $LibassReadyMarker -PathType Leaf)) {
-    throw "libass is not prepared. Run the *Libass.ps1 preparation script in tools first."
-}
+. (Join-Path $ScriptDirectory "Resolve-NativeDependencies.ps1")
+Initialize-NativeDependencies -ProjectRoot $ProjectRoot -Configuration $Configuration `
+    -SkipPreparation:$SkipDependencyPreparation -SkipIamf:$SkipIamf
+$NativeArgs = @(if ($SkipIamf) { '/p:HaveLibiamf=false' } else { '/p:FFF_FORCE_LIBIAMF=true' })
 
 & $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") `
-    /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal
+    /p:Configuration=$Configuration /p:Platform=x64 @NativeArgs /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }
 
 $StagingDirectory = Join-Path ([IO.Path]::GetTempPath()) ("3FR-publish-" + [Guid]::NewGuid().ToString("N"))
@@ -73,9 +75,10 @@ try {
     $PendingExecutable = Join-Path $OutputDirectory ("FFF.Recorder.exe.new-" + [Guid]::NewGuid().ToString("N"))
     Copy-Item -LiteralPath $PublishedExecutable -Destination $PendingExecutable
     if (Test-Path -LiteralPath $Executable -PathType Leaf) {
-        Remove-Item -LiteralPath $Executable -Force
+        [IO.File]::Replace($PendingExecutable, $Executable, [NullString]::Value)
+    } else {
+        Move-Item -LiteralPath $PendingExecutable -Destination $Executable
     }
-    Move-Item -LiteralPath $PendingExecutable -Destination $Executable
     $PendingExecutable = $null
     $PublishedFile = Get-Item -LiteralPath $Executable
     Write-Host "Single-file publish completed: $($PublishedFile.FullName) ($($PublishedFile.Length) bytes)"
