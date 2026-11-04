@@ -44,6 +44,19 @@ using PlayerMediaText::AppendDictionaryJson;
 using PlayerMediaText::EscapeJson;
 using PlayerMediaText::CodecTagName;
 constexpr std::int64_t TicksPerSecond = 10'000'000;
+// The published snapshot carries its own version, separate from PlayerApiVersion:
+// the export surface is append-only and rarely moves, while this number moves
+// every time the struct grows. GetSnapshot rejects any other value outright, so
+// it has to be one symbol rather than a literal repeated at the publish site and
+// the gate -- a mismatch between those two reads as "every snapshot call fails"
+// with no other symptom.
+constexpr std::uint32_t SnapshotVersion = 21;
+// Every snapshot timing field counts 100 ns units; this keeps the new split
+// counters from repeating the duration_cast boilerplate at each site.
+inline std::uint64_t To100ns(const std::chrono::steady_clock::duration& d) noexcept {
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+    return static_cast<std::uint64_t>(ns > 0 ? ns / 100 : 0);
+}
 // fMP4 前向 seek 的顺序预滚包数上限（R2.5 防死滚保险丝）。正常预滚只需滚过目标
 // 之前的少数几个 moof；上限只对病态文件（无限 moof 链、判停点永不满足）生效。
 // 2e6 包 ≈ 9 小时 60fps / 18 小时 30fps 的参考流样本总量，超过它判定目标不可达，
@@ -867,7 +880,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       hardwareFallbackPending_(false), internalAudioFailurePending_(false),
       internalAudioFailureResult_(FFFResult::Success), internalAudioDecodeErrorCount_(0) {
     snapshot_ = {};
-    snapshot_.size = sizeof(snapshot_); snapshot_.version = 20; snapshot_.state = FFF3FPState::Idle;
+    snapshot_.size = sizeof(snapshot_); snapshot_.version = SnapshotVersion; snapshot_.state = FFF3FPState::Idle;
     snapshot_.decodeMode = decodeMode_; snapshot_.requestedColorMode = configuration.colorMode;
     snapshot_.actualColorMode = FFF3FPColorMode::MapToSdr; snapshot_.frameIndex = -1;
     snapshot_.framePts = AV_NOPTS_VALUE; snapshot_.selectedVideoStream = -1; snapshot_.selectedAudioStream = -1;
@@ -2790,7 +2803,7 @@ FFFResult PlayerSession::GetHdrSignalDiagnostics(
 }
 
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
-    if (output.size < sizeof(FFF3FPSnapshot) || output.version != 20) return FFFResult::InvalidArgument;
+    if (output.size < sizeof(FFF3FPSnapshot) || output.version != SnapshotVersion) return FFFResult::InvalidArgument;
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
     // Presentation completes asynchronously on the dedicated swap-chain owner;
     // expose its live counters even if no later decode-frame snapshot was needed.
@@ -2816,6 +2829,15 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     output.uploadCount = videoRenderer_.UploadCount();
     output.uploadCopyBytes = videoRenderer_.UploadCopyBytes();
     output.uploadPath = videoRenderer_.UploadPath();
+    // Session-owned stage timers: the decode/demux accumulators live on the
+    // session (not the renderer), mirrored live like presentWait100ns above so
+    // an audio-only or idle session still reports fresh numbers.
+    output.videoDecode100ns = videoDecode100ns_.load(std::memory_order_relaxed);
+    output.demuxRead100ns = demuxRead100ns_.load(std::memory_order_relaxed);
+    output.trueHdrBlit100ns = videoRenderer_.TrueHdrBlit100ns();
+    output.vsrBlit100ns = videoRenderer_.VsrBlit100ns();
+    output.mainDraw100ns = videoRenderer_.MainDraw100ns();
+    output.scalePass100ns = videoRenderer_.ScalePass100ns();
     output.videoOutputBitDepth = videoRenderer_.OutputBitDepth();
     output.videoScalingMode = videoRenderer_.ActualVideoScalingMode();
     if (output.state == FFF3FPState::Playing) {
@@ -4553,7 +4575,12 @@ void PlayerSession::PumpPlayback() noexcept {
     }
     if (playbackPacket_ == nullptr) playbackPacket_ = av_packet_alloc();
     if (playbackPacket_ == nullptr) { Fail(FFFResult::NativeFailure, "Could not allocate a playback packet."); return; }
+    // Demux read cost only: the back-pressure Sleep(1)s above are queue
+    // waiting, not demuxer work, and stay outside the timer.
+    const auto demuxReadStart = std::chrono::steady_clock::now();
     const auto result = av_read_frame(format_, playbackPacket_);
+    demuxRead100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - demuxReadStart),
+        std::memory_order_relaxed);
     if (GetEnvironmentVariableW(L"FFF_SEEK_TRACE", nullptr, 0) && ++readTraceCount_ <= 6)
         std::fprintf(stderr, "READ rc=%d tell=%lld pendingV=%zu q=%zu demuxEnded=%d\n", result,
             format_->pb ? (long long)avio_tell(format_->pb) : -1, pendingVideoPackets_.size(),
@@ -4928,12 +4955,18 @@ void PlayerSession::SoftwareVideoDecodeWorker(AVCodecContext* decoder) noexcept 
             std::lock_guard lock(softwareVideoCodecMutex_);
             return frame ? avcodec_send_packet(decoder, packet) : AVERROR(ENOMEM);
         };
+        // One round of the worker's actual decode workload: the send/receive
+        // pair against the codec (both hold softwareVideoCodecMutex_ inside the
+        // lambdas). The queue wait above stays outside on purpose.
+        const auto decodeStart = std::chrono::steady_clock::now();
         auto result = send();
         if (result == AVERROR(EAGAIN)) {
             result = receive();
             if (result == AVERROR(EAGAIN)) result = send();
         }
         if (result >= 0 || result == AVERROR_EOF) result = receive();
+        videoDecode100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - decodeStart),
+            std::memory_order_relaxed);
         av_packet_free(&packet);
         {
             std::lock_guard lock(softwareVideoMutex_);
@@ -5040,6 +5073,13 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
     if (video) {
         FilterAv1HardwareTimecodeMetadata(decoder, packet);
     }
+    // Generic/hardware decode arm timing. Only the video path feeds
+    // videoDecode100ns_ (audio decoding has its own story and the software video
+    // worker records its own arm); early returns below (fallbacks, failures,
+    // the software-queue diversion) simply do not record a round.
+    const bool timeDecode = video;
+    const auto decodeStart = timeDecode ? std::chrono::steady_clock::now()
+                                        : std::chrono::steady_clock::time_point{};
     auto result = avcodec_send_packet(decoder, packet);
     if (result == AVERROR(EAGAIN)) {
         const auto receiveResult = receiveFrames();
@@ -5098,6 +5138,9 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
             "The selected audio track stopped decoding: " + FfmpegError(result));
         return FFFResult::FfmpegFailure;
     }
+    if (timeDecode)
+        videoDecode100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - decodeStart),
+            std::memory_order_relaxed);
     return result == AVERROR(EAGAIN) || result == AVERROR_EOF ? FFFResult::Success : FFFResult::FfmpegFailure;
 }
 
@@ -7642,6 +7685,12 @@ void PlayerSession::PublishSnapshot() noexcept {
     snapshot_.uploadCount = videoRenderer_.UploadCount();
     snapshot_.uploadCopyBytes = videoRenderer_.UploadCopyBytes();
     snapshot_.uploadPath = videoRenderer_.UploadPath();
+    snapshot_.videoDecode100ns = videoDecode100ns_.load(std::memory_order_relaxed);
+    snapshot_.demuxRead100ns = demuxRead100ns_.load(std::memory_order_relaxed);
+    snapshot_.trueHdrBlit100ns = videoRenderer_.TrueHdrBlit100ns();
+    snapshot_.vsrBlit100ns = videoRenderer_.VsrBlit100ns();
+    snapshot_.mainDraw100ns = videoRenderer_.MainDraw100ns();
+    snapshot_.scalePass100ns = videoRenderer_.ScalePass100ns();
     std::lock_guard lock(snapshotMutex_);
     publishedSnapshot_ = snapshot_;
 }
