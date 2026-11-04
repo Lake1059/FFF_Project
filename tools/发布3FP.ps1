@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
     [string]$OutputDirectory = "",
@@ -11,7 +11,8 @@ param(
     [switch]$AllowFrameworkMismatch,
     # IAMF 空间音频：默认强制携带（缺料即报错，而非静默编译成无 IAMF 内核）。
     # 体积敏感/无准备环境用 -SkipIamf 显式放弃该能力（docs/105 §十三/§十四）。
-    [switch]$SkipIamf
+    [switch]$SkipIamf,
+    [switch]$SkipDependencyPreparation
 )
 
 # 传统散装发布：产出「FFF.Player.exe + 全部依赖 DLL 同目录」的目录形态。
@@ -37,25 +38,9 @@ if (Test-Path -LiteralPath (Join-Path $OutputDirectory "FFF.DolbyVision.Test.dll
 . (Join-Path $ScriptDirectory "Resolve-Toolchain.ps1")
 $MSBuild = Get-MSBuildTool
 $DotNet = Get-DotNetTool
-$LibassReadyMarker = Join-Path $ProjectRoot "third_party\vcpkg_installed\x64-windows\share\3f-project\libass-ready.txt"
-if (-not (Test-Path -LiteralPath $LibassReadyMarker -PathType Leaf)) {
-    throw "缺少 libass，请先运行 tools\准备Libass.ps1。"
-}
-if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "third_party\vcpkg_installed\x64-windows\lib\bluray.lib") -PathType Leaf)) {
-    throw "缺少光盘库，请先运行 tools\准备光盘库.ps1。"
-}
-
-# IAMF 空间音频：交付默认携带（与 发布3FP单文件.ps1 同口径）。HaveLibiamf 的自动探测在缺料时会
-# 静默降级成无 IAMF 内核（docs/105 §十三/§十四：上游发布即此形态），故这里前置校验 + 强制门禁；
-# -SkipIamf 显式放弃时不校验、并显式传 HaveLibiamf=false。
-if (-not $SkipIamf) {
-    $LibiamfHeader = Join-Path $ProjectRoot "third_party\libiamf\include\IAMF_decoder.h"
-    $LibiamfImportLib = Join-Path $ProjectRoot "third_party\libiamf\lib\x64\iamf.lib"
-    if (-not (Test-Path -LiteralPath $LibiamfHeader -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $LibiamfImportLib -PathType Leaf)) {
-        throw "IAMF 空间音频依赖未就绪：缺少 $LibiamfHeader 或 $LibiamfImportLib。请先运行 tools/准备Libiamf.ps1，或用 -SkipIamf 显式放弃该能力。"
-    }
-}
+. (Join-Path $ScriptDirectory "Resolve-NativeDependencies.ps1")
+Initialize-NativeDependencies -ProjectRoot $ProjectRoot -Configuration $Configuration `
+    -SkipPreparation:$SkipDependencyPreparation -SkipIamf:$SkipIamf
 
 $NativeArgs = @()
 if ($SkipIamf) { $NativeArgs += "/p:HaveLibiamf=false" } else { $NativeArgs += "/p:FFF_FORCE_LIBIAMF=true" }
