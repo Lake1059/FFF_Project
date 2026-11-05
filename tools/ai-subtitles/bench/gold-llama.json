@@ -1,0 +1,34 @@
+{
+  "engine": "llama",
+  "pad30": null,
+  "threads": 6,
+  "boot_s": 49.3,
+  "rows": [
+    {
+      "wav": "selftest.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        1.241,
+        1.276,
+        1.242
+      ],
+      "median_s": 1.242,
+      "min_s": 1.241,
+      "rtf": 0.248,
+      "text": "今次寻寻觅觅，终于搵到《My Princess》，肯借个场俾我哋玩。你知啦，喺香。"
+    },
+    {
+      "wav": "A-perf-en-int-w5.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        0.965,
+        0.948,
+        0.98
+      ],
+      "median_s": 0.965,
+      "min_s": 0.948,
+      "rtf": 0.193,
+      "text": "They're going to say, \"Oh, great, come on in.\" That's just the kind of devout. I mean."
+    }
+  ]
+}

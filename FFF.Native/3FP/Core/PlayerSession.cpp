@@ -3,7 +3,6 @@
 #include "3FP/Core/Fmp4FragmentScanner.h"
 #include "3FP/Core/MediaText.h"
 #include "3FP/Core/PlayerSession.h"
-#include "3FP/Core/DecodeDeviceSelection.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -93,11 +92,11 @@ constexpr std::size_t SoftwarePoolRungCount =
 // divided by the frame, clamped to the rung's frame cap. The in-flight subtraction
 // VideoQueueLimit applies on top is constant across rungs for one media, so this
 // relative depth is what the climb gate compares.
-std::size_t SoftwarePoolRungDepth(std::size_t rung,
-    std::size_t bytesPerFrame, const PlaybackPerformancePolicy& policy) noexcept {
-    const auto cap = policy.VideoFrames(SoftwarePoolFrameCaps[rung]);
+constexpr std::size_t SoftwarePoolRungDepth(std::size_t rung,
+                                            std::size_t bytesPerFrame) noexcept {
+    const auto cap = SoftwarePoolFrameCaps[rung];
     if (bytesPerFrame == 0) return cap;
-    const auto byBudget = policy.VideoBudget(SoftwarePoolBudgets[rung]) / bytesPerFrame;
+    const auto byBudget = SoftwarePoolBudgets[rung] / bytesPerFrame;
     return byBudget < 2 ? std::size_t{2} : (std::min)(byBudget, cap);
 }
 // The pool climbs only when the pool itself starved the pipeline. A window that
@@ -158,6 +157,7 @@ constexpr std::uint32_t SchedulerHeadroomThreads = 1;    // one core left for th
 // A hardware decoder is driven from the calling thread and never runs a worker pool,
 // so its decode part is exactly one thread.
 constexpr std::uint32_t HardwareDecoderThreads = 1;
+constexpr std::int64_t TargetVideoLookAhead100ns = 1'500'000;
 // Buffered100ns includes both application PCM and samples already submitted to
 // WASAPI.  Keep the complete audible queue short so seek, stream/volume changes
 // and the information overlay reflect a low-latency local playback pipeline.
@@ -239,17 +239,16 @@ bool AnimQueueReserveEnabled() noexcept {
 std::size_t VideoFrameQueueLimit(const std::deque<AVFrame*>& queue,
     const std::size_t pipelineFrames, const bool softwareVideo,
     const std::size_t softwarePoolBudgetBytes,
-    const std::size_t softwarePoolFrameCap,
-    const PlaybackPerformancePolicy& policy) noexcept {
-    if (queue.empty()) return policy.VideoFrames(MaxQueuedVideoFrames);
+    const std::size_t softwarePoolFrameCap) noexcept {
+    if (queue.empty()) return MaxQueuedVideoFrames;
     const auto bytesPerFrame = EstimateDecodedFrameBytes(queue.back());
-    if (bytesPerFrame == 0) return policy.VideoFrames(MaxQueuedVideoFrames);
+    if (bytesPerFrame == 0) return MaxQueuedVideoFrames;
     // Software decoding needs look-ahead while the session feeds audio and uploads; its
     // budget and frame cap are the pool ladder's current rung (SoftwarePoolBudgets).
     // The hardware and animated-image paths keep the fixed 128 MB / 8 frames split.
     const auto software = softwareVideo && queue.back()->hw_frames_ctx == nullptr;
-    const auto budget = policy.VideoBudget(software ? softwarePoolBudgetBytes : DecodedVideoQueueBudgetBytes);
-    const auto cap = policy.VideoFrames(software ? softwarePoolFrameCap : MaxQueuedVideoFrames);
+    const auto budget = software ? softwarePoolBudgetBytes : DecodedVideoQueueBudgetBytes;
+    const auto cap = software ? softwarePoolFrameCap : MaxQueuedVideoFrames;
     const auto memoryBound = static_cast<std::size_t>(budget / bytesPerFrame);
     const auto queueBound = memoryBound > pipelineFrames ? memoryBound - pipelineFrames : 0;
     return std::clamp(queueBound, MinimumMemoryBoundVideoFrames, cap);
@@ -1126,7 +1125,7 @@ std::size_t PlayerSession::VideoQueueLimit() const noexcept {
     const auto pipelineFrames = VideoQueuePipelineReservation();
     const auto originalLimit = VideoFrameQueueLimit(videoFrameQueue_, pipelineFrames,
         !staticImage_ && !animatedImage_, SoftwarePoolBudgets[softwarePoolRung_],
-        SoftwarePoolFrameCaps[softwarePoolRung_], performance_);
+        SoftwarePoolFrameCaps[softwarePoolRung_]);
     const auto limit = std::max(MinimumMemoryBoundVideoFrames,
         originalLimit - std::min(originalLimit - 1, static_cast<std::size_t>(softwareVideoOutputLimit_ - 1)));
     // The two numbers this slice stands on, said by the kernel itself: whether frame
@@ -1153,7 +1152,7 @@ bool PlayerSession::VideoQueueSaturated() const noexcept {
     const auto queueLimit = VideoQueueLimit();
     return videoFrameQueue_.size() >= std::max<std::size_t>(1, queueLimit - 1) ||
         (videoFrameQueue_.size() >= MinimumQueuedVideoFrames &&
-            lookAhead >= performance_.VideoLookAhead());
+            lookAhead >= TargetVideoLookAhead100ns);
 }
 
 void PlayerSession::TryCompletePlaybackPreroll() noexcept {
@@ -1172,7 +1171,7 @@ void PlayerSession::TryCompletePlaybackPreroll() noexcept {
         videoRenderer_.HasOutputWindow()) {
         auto* frame = videoFrameQueue_.front();
         AVFrame* transferred = nullptr;
-        if (IsHardwareFrame(frame) && !CanPresentHardwareFrameDirectly(frame, videoRenderer_)) {
+        if (IsHardwareFrame(frame) && frame->format != AV_PIX_FMT_D3D11) {
             transferred = av_frame_alloc();
             if (transferred == nullptr || av_hwframe_transfer_data(transferred, frame, 0) < 0) {
                 av_frame_free(&transferred);
@@ -1952,16 +1951,25 @@ FFFResult PlayerSession::SetOutputWindow(void* window) noexcept {
         // 刻意丢弃（Renderer 不替无窗会话保管 GPU 缓存），Redraw 此时必然空转，
         // 于是一个暂停/就绪态的新会话永远等不到首帧——换解码器、切文件后黑屏
         // 就是这么来的。改用 PresentAfterBind() 把交换链建起来并呈交一帧。
+        const bool presentAfterBind =
+            window != nullptr && videoStream_ >= 0 && !videoRenderer_.HasCachedVideo();
         const auto redrawResult = staticImage_ && stillImageFrame_ != nullptr && window != nullptr
             ? videoRenderer_.Render(stillImageFrame_, snapshot_.frameIndex, true, false, false, true)
             : coverArtFrame_ != nullptr && videoStream_ < 0 && window != nullptr
                 ? videoRenderer_.Render(coverArtFrame_, HdrProcessor::kUnknownFrameIndex, true, true)
-                : window != nullptr && videoStream_ >= 0 && !videoRenderer_.HasCachedVideo()
+                : presentAfterBind
                     ? videoRenderer_.PresentAfterBind()
                     : videoRenderer_.Redraw();
         if (redrawResult == FFFResult::DeviceFailure &&
             videoRenderer_.RequestRecoveryIfDeviceLost()) return;
         if (redrawResult != FFFResult::Success) {
+            // PresentAfterBind 是尽力而为的补呈，不是解码管线的一环：它替代的
+            // Redraw() 在无缓存帧时本可"空转成功"。设备未丢（真丢失上面已经
+            // 走恢复分支）时的失败是窗口/DXGI 瞬时不可用——典型如旧 flip chain
+            // 尚未 retire 完时 CreateSwapChainForHwnd 被拒。这种失败不能把整个
+            // 暂停/就绪会话升级成 Failed：宿主的重绑重试与下一次布局变更都会
+            // 再走到这里，链一旦能建起来画面就补上了。
+            if (presentAfterBind) return;
             Fail(FFFResult::DeviceFailure, videoRenderer_.LastError(), "redraw");
             return;
         }
@@ -2101,6 +2109,15 @@ FFFResult PlayerSession::RecreateAudioRenderer(const std::wstring& endpointId,
             // it. The context is borrowed, never owned here.
             std::lock_guard lock(audioPlugMutex_);
             if (audioPlugInstalled_) replacement->SetAudioRenderPlug(&audioPlug_);
+        }
+        // The ASR tap outlives the renderer for exactly the same reason, and by
+        // the same mechanism: the session owns it, the successor borrows a
+        // reference for as long as it is installed. The local copy keeps the
+        // object alive across the install even if a Disable lands in between.
+        {
+            std::shared_ptr<AsrAudioTap> tap;
+            { std::lock_guard lock(asrTapMutex_); tap = asrTap_; }
+            if (tap != nullptr) replacement->SetAsrTap(std::move(tap));
         }
         audioRenderer_ = std::move(replacement);
         // Floor latch: the pool may never target less than the buffer WASAPI
@@ -2639,6 +2656,108 @@ void PlayerSession::GetAudioRenderPlugState(std::uint32_t& active, std::string& 
     // seam numbers; a seek deliberately does not clear them.
     framesRendered = audioRuntimeState_.plugFramesRendered.load(std::memory_order_relaxed);
     framesDeclined = audioRuntimeState_.plugFramesDeclined.load(std::memory_order_relaxed);
+}
+
+void PlayerSession::NoteTapGeneration() noexcept {
+    std::shared_ptr<AsrAudioTap> tap;
+    { std::lock_guard lock(asrTapMutex_); tap = asrTap_; }
+    if (tap != nullptr) tap->NoteGeneration(snapshot_.timelineGeneration);
+}
+
+FFFResult PlayerSession::EnableAudioTap(const FFF3FPAudioTapConfig* const config) noexcept {
+    // Validate on the caller's thread, before anything moves: a struct that is
+    // not this ABI's size/version is refused and any installed tap stays put --
+    // the same "a bad call cannot half-apply" rule the plug install follows.
+    if (config != nullptr && (config->size != sizeof(FFF3FPAudioTapConfig) ||
+        config->version != FFF3FP_AUDIO_TAP_VERSION))
+        return FFFResult::InvalidArgument;
+    auto capacity = config != nullptr && config->ringCapacityBytes != 0
+        ? config->ringCapacityBytes : FFF3FP_AUDIO_TAP_DEFAULT_RING_BYTES;
+    capacity = std::min(std::max(capacity, FFF3FP_AUDIO_TAP_MIN_RING_BYTES),
+        FFF3FP_AUDIO_TAP_MAX_RING_BYTES);
+    std::shared_ptr<AsrAudioTap> tap;
+    try {
+        tap = std::make_shared<AsrAudioTap>(capacity);
+    } catch (...) {
+        return FFFResult::NativeFailure;   // no memory for the ring
+    }
+    {
+        std::lock_guard lock(asrTapMutex_);
+        asrTap_ = std::move(tap);
+    }
+    // Install on the worker thread: the renderer reads the tap from the same
+    // thread that calls Enqueue, so the swap must happen there. The command
+    // holds its own reference for its lifetime, so a Disable racing this call
+    // can never leave the renderer pointing at a freed object -- worst case the
+    // install command finds the member already replaced and installs null.
+    // Stamp the new tap with the session's current timeline generation before
+    // it goes live: a fresh AsrAudioTap starts at generation 0, and a host that
+    // re-installs the tap on every media open (which is exactly what the AI
+    // subtitle controller does) would otherwise leave the tap at 0 while the
+    // snapshot keeps reporting the post-seek generation -- every block would
+    // then be discarded by the host's generation guard and subtitles would go
+    // permanently silent after a file switch. DoOpen/DoSeek re-stamp the tap
+    // they find; this closes the gap for the tap installed after them.
+    Enqueue([this] {
+        std::shared_ptr<AsrAudioTap> installed;
+        { std::lock_guard lock(asrTapMutex_); installed = asrTap_; }
+        if (installed != nullptr) installed->NoteGeneration(snapshot_.timelineGeneration);
+        if (audioRenderer_ != nullptr) audioRenderer_->SetAsrTap(std::move(installed));
+    });
+    return FFFResult::Success;
+}
+
+void PlayerSession::DisableAudioTap() noexcept {
+    std::shared_ptr<AsrAudioTap> tap;
+    { std::lock_guard lock(asrTapMutex_); tap.swap(asrTap_); }
+    // Uninstall on the worker thread first: Produce runs there, and the tap must
+    // be unreachable from the renderer before the last reference can release
+    // it. That last reference is this capture, dropped when the command runs --
+    // the earliest safe point. A host ReadAudioTap call in flight holds its own
+    // copy and finishes safely either way.
+    Enqueue([this, tap] {
+        if (audioRenderer_ != nullptr) audioRenderer_->SetAsrTap(nullptr);
+    });
+}
+
+FFFResult PlayerSession::ReadAudioTap(void* const dst, const std::uint32_t capacity,
+    FFF3FPAudioTapBlock* const block) const noexcept {
+    if (block == nullptr) return FFFResult::InvalidArgument;
+    std::shared_ptr<AsrAudioTap> tap;
+    { std::lock_guard lock(asrTapMutex_); tap = asrTap_; }
+    block->size = sizeof(FFF3FPAudioTapBlock);
+    block->version = FFF3FP_AUDIO_TAP_VERSION;
+    if (tap == nullptr) {
+        // Feature off: an empty read rather than an error, so a pump loop that
+        // is still draining after a Disable exits quietly.
+        block->bytesWritten = 0;
+        block->requiredBytes = 0;
+        return FFFResult::Success;
+    }
+    if (dst == nullptr && capacity > 0) return FFFResult::InvalidArgument;
+    switch (tap->Consume(dst, capacity, *block)) {
+    case AsrAudioTap::ConsumeResult::Ok:
+        return FFFResult::Success;
+    case AsrAudioTap::ConsumeResult::Empty:
+        block->bytesWritten = 0;
+        block->requiredBytes = 0;
+        return FFFResult::Success;
+    case AsrAudioTap::ConsumeResult::BufferTooSmall:
+        return FFFResult::BufferTooSmall;
+    }
+    return FFFResult::NativeFailure;
+}
+
+FFFResult PlayerSession::GetAudioTapStats(FFF3FPAudioTapStats* const stats) const noexcept {
+    if (stats == nullptr) return FFFResult::InvalidArgument;
+    stats->size = sizeof(FFF3FPAudioTapStats);
+    stats->version = FFF3FP_AUDIO_TAP_VERSION;
+    std::shared_ptr<AsrAudioTap> tap;
+    { std::lock_guard lock(asrTapMutex_); tap = asrTap_; }
+    stats->blocksProduced = tap != nullptr ? tap->BlocksProduced() : 0;
+    stats->blocksDropped = tap != nullptr ? tap->BlocksDropped() : 0;
+    stats->bufferedBytes = tap != nullptr ? tap->BufferedBytes() : 0;
+    return FFFResult::Success;
 }
 
 FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) noexcept {
@@ -3398,11 +3517,11 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
         // the demux feed gated while the pipeline is still filling. Require room for
         // MinimumPoolLookAheadFrames frames plus one frame of accounting slack;
         // smaller-frame classes still open at the floor rung.
-        if (bytesPerFrame > 0 && performance_.video != 2) {
-            const auto floorBytes = (performance_.VideoFrames(MinimumPoolLookAheadFrames) + 1) * bytesPerFrame;
+        if (bytesPerFrame > 0) {
+            const auto floorBytes = (MinimumPoolLookAheadFrames + 1) * bytesPerFrame;
             std::size_t opening = 0;
             while (opening + 1 < SoftwarePoolRungCount &&
-                   performance_.VideoBudget(SoftwarePoolBudgets[opening]) < floorBytes)
+                   SoftwarePoolBudgets[opening] < floorBytes)
                 ++opening;
             if (opening > softwarePoolRung_) {
                 softwarePoolRung_ = static_cast<std::uint8_t>(opening);
@@ -3475,9 +3594,15 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
         constexpr int ExtraHardwareFrames = 3;
         context->extra_hw_frames = std::max(context->extra_hw_frames, ExtraHardwareFrames);
         AVBufferRef* hardwareDevice = nullptr;
-        result = CreateDecodeHardwareDevice(&hardwareDevice, deviceType, decodeAdapterIndex_, videoRenderer_);
-        if (result < 0)
-            setFailure("FFmpeg could not create the selected decode device: " + FfmpegError(result));
+        if (deviceType == AV_HWDEVICE_TYPE_D3D11VA) {
+            const auto shared = videoRenderer_.CreateD3D11HardwareDeviceContext(&hardwareDevice);
+            result = shared == FFFResult::Success ? 0 : AVERROR(ENODEV);
+            if (result < 0) setFailure(videoRenderer_.LastError());
+        } else {
+            result = av_hwdevice_ctx_create(&hardwareDevice, deviceType, nullptr, nullptr, 0);
+            if (result < 0)
+                setFailure("FFmpeg could not create the hardware device: " + FfmpegError(result));
+        }
         if (result >= 0) {
             context->hw_device_ctx = av_buffer_ref(hardwareDevice);
             context->opaque = reinterpret_cast<void*>(static_cast<std::intptr_t>(selectedHardwareFormat));
@@ -3601,7 +3726,7 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
                 // "does a decoder configuration exist" -- never "is it fast enough",
                 // because throughput has no standard API and single-stream decoding is
                 // assumed to fit.
-                if (decodeAdapterIndex_ < 0 && backend == AV_HWDEVICE_TYPE_D3D11VA && HardwareCapabilityProbeEnabled()) {
+                if (backend == AV_HWDEVICE_TYPE_D3D11VA && HardwareCapabilityProbeEnabled()) {
                     const auto* probe = owner->streams[index]->codecpar;
                     const auto support = videoRenderer_.QueryD3D11DecodeSupport(
                         static_cast<std::int32_t>(probe->codec_id), probe->profile,
@@ -3810,6 +3935,23 @@ bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const s
 }
 
 void PlayerSession::DoOpen(std::string path) noexcept {
+    // A new file is a new timeline: whatever the tap buffered from the previous
+    // one must not survive into it -- and neither may what the ASR worker has
+    // accumulated. The worker's only re-anchor mechanism is a generation change
+    // (it drops its sample buffer and position clock when the meta generation
+    // moves), so re-stamping the *same* value is not enough: the generation has
+    // to advance here, exactly as a seek advances it. Stamping then clears the
+    // kernel-side ring. 2026-10-25 实机：只换文件不换解码器时代次不变，worker
+    // 端着旧文件的尾音继续按旧时钟报位置，宿主侧代次守卫又对不上，字幕整段沉默。
+    // The stamp must precede DoClose, not follow it: the host's pump does not
+    // stop for a file switch, and DoClose tears the demuxer/decoder down for
+    // tens of milliseconds during which the pump can still drain old-file tail
+    // blocks stamped with the old generation -- the worker's per-block guard
+    // reads those as "current" and transcribes them. Stamping at the entry
+    // empties the ring first, so the DoClose window cannot leak the previous
+    // file's tail into the new timeline.
+    ++snapshot_.timelineGeneration;
+    NoteTapGeneration();
     // Keep the flip-model chain for a same-HWND media switch. DXGI can reject
     // an immediate replacement while the previous chain is still retiring.
     DoClose(FFF3FPState::Opening, true);
@@ -4459,7 +4601,7 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
         case PoolVerdict::Stalled: poolVerdictName = "stalled"; break;
         case PoolVerdict::Hold: break;
     }
-    if (performance_.video != 2 && poolVerdict == PoolVerdict::Climb && softwarePoolRung_ + 1 < SoftwarePoolRungCount) {
+    if (poolVerdict == PoolVerdict::Climb && softwarePoolRung_ + 1 < SoftwarePoolRungCount) {
         const auto bytesPerFrame = videoFrameQueue_.empty()
             ? std::size_t{0} : EstimateDecodedFrameBytes(videoFrameQueue_.back());
         // Skip rungs that would not deepen the queue for this frame size: a budget
@@ -4469,8 +4611,8 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
         do {
             ++target;
         } while (target + 1 < SoftwarePoolRungCount &&
-                 SoftwarePoolRungDepth(target, bytesPerFrame, performance_) <=
-                     SoftwarePoolRungDepth(softwarePoolRung_, bytesPerFrame, performance_));
+                 SoftwarePoolRungDepth(target, bytesPerFrame) <=
+                     SoftwarePoolRungDepth(softwarePoolRung_, bytesPerFrame));
         const auto previousBudget = SoftwarePoolBudgets[softwarePoolRung_];
         const auto previousFrames = SoftwarePoolFrameCaps[softwarePoolRung_];
         softwarePoolRung_ = static_cast<std::uint8_t>(target);
@@ -5497,7 +5639,7 @@ bool PlayerSession::PumpVideoPresentation() noexcept {
     const auto queueLimit = VideoQueueLimit();
     const auto saturated = videoFrameQueue_.size() >= std::max<std::size_t>(1, queueLimit - 1) ||
         (videoFrameQueue_.size() >= MinimumQueuedVideoFrames &&
-            lookAhead >= performance_.VideoLookAhead());
+            lookAhead >= TargetVideoLookAhead100ns);
     // Continue demuxing toward audio while video is ahead, retaining compressed
     // video packets instead of several additional full decoded 4K frames.
     const auto audioNeedsData = audioRenderer_ &&
@@ -6391,7 +6533,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     // (docs/99 section 13). Downloading puts both arms on the route that already matched
     // HEVC and every >=1920x1080 sample exactly.
     if (IsHardwareFrame(frame) &&
-        (!CanPresentHardwareFrameDirectly(frame, videoRenderer_) || (staticImage_ && owner == format_))) {
+        (frame->format != AV_PIX_FMT_D3D11 || (staticImage_ && owner == format_))) {
         if (videoTransferFrame_ == nullptr) videoTransferFrame_ = av_frame_alloc();
         if (videoTransferFrame_ == nullptr) {
             Fail(FFFResult::NativeFailure, "Could not allocate the reusable hardware-transfer frame.");
@@ -7184,6 +7326,10 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     snapshot_.position100ns = position;
     snapshot_.frameIndex = targetFrame >= 0 && position > 0 ? targetFrame - 1 : -1;
     ++snapshot_.timelineGeneration;
+    // The tap's ring is seek-invalidated here, in the kernel: blocks stamped
+    // with the previous generation can never reach a consumer that already
+    // re-anchored, and neither the host nor the worker has to be polite about it.
+    NoteTapGeneration();
     ResetClock(position);
     if (audioRenderer_) audioRenderer_->Reset(position);
     if (state_.load() == FFF3FPState::Ended)
@@ -8007,8 +8153,8 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                      << ",\"presentationLayout\":\""
                      << EscapeJson(iamf.presentationLayoutName) << "\"}";
             }
-            // Keep effective precision distinct from the coded width (e.g. ADPCM codewords).
-            json << ",\"rawSampleBits\":" << parameters->bits_per_raw_sample
+            const auto rawBits = std::max(parameters->bits_per_raw_sample, parameters->bits_per_coded_sample);
+            json << ",\"rawSampleBits\":" << rawBits
                  << ",\"compressionMode\":\"" << (isLossless ? "无损" : "有损") << "\"";
             if (parameters->codec_id == AV_CODEC_ID_FLAC && parameters->extradata != nullptr && parameters->extradata_size >= 16) {
                 static constexpr char Hex[] = "0123456789ABCDEF";
