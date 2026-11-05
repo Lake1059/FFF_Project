@@ -578,6 +578,10 @@ Public NotInheritable Class 媒体信息
     Public Property 探测可信度 As Integer
     <JsonPropertyName("staticImage")>
     Public Property 是静态图片 As Boolean
+    ' 内核对当前流 hw_config 表的理论判定。默认 True：JSON 缺字段（旧内核）时
+    ' 不锁定，宁可不拦、不误拦。
+    <JsonPropertyName("hardwareDecodable")>
+    Public Property 是硬件可解码 As Boolean = True
     <JsonPropertyName("metadata")>
     Public Property 元数据 As Dictionary(Of String, String) = New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
     <JsonPropertyName("chapters")>

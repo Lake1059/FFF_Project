@@ -1301,14 +1301,24 @@ Public Class Form1
 
     Private Sub MB_倒退或上一个_MouseClick(sender As Object, e As MouseEventArgs) Handles MB_倒退或上一个.MouseClick
         Select Case e.Button
-            Case MouseButtons.Left : 播放控制器.相对跳转(-跳转秒数)
+            Case MouseButtons.Left
+                If 图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.图片模式已启用 Then
+                    播放相邻项目(-1)
+                Else
+                    播放控制器.相对跳转(-跳转秒数)
+                End If
             Case MouseButtons.Right : 播放相邻项目(-1)
         End Select
     End Sub
 
     Private Sub MB_快进或下一个_MouseClick(sender As Object, e As MouseEventArgs) Handles MB_快进或下一个.MouseClick
         Select Case e.Button
-            Case MouseButtons.Left : 播放控制器.相对跳转(跳转秒数)
+            Case MouseButtons.Left
+                If 图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.图片模式已启用 Then
+                    播放相邻项目(1)
+                Else
+                    播放控制器.相对跳转(跳转秒数)
+                End If
             Case MouseButtons.Right : 播放相邻项目(1)
         End Select
     End Sub
@@ -1322,6 +1332,14 @@ Public Class Form1
     End Sub
 
     Private Sub MB_软件解码或硬件解码_Click(sender As Object, e As EventArgs) Handles MB_软件解码或硬件解码.Click
+        If 图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.图片模式已启用 Then
+            If Not 播放控制器.当前媒体允许切换解码器 Then
+                信息图层呈现器?.显示操作信息("此图片不支持 GPU 解码，已锁定 CPU 解码。", &HFFF0D35DUI, "解码")
+                Return
+            End If
+            ' 可硬解静图（AVIF/HEIC 等）：放行，走下方正常切换；TDR 风暴由
+            ' RecoverVideoDevice 的 5 次/20 秒风暴防护兜底。
+        End If
         If Not String.IsNullOrEmpty(播放控制器.切换解码器()) Then
             设置.实例对象.解码方式 = CInt(播放控制器.解码器偏好)
         End If

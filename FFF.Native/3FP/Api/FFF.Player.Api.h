@@ -402,6 +402,13 @@ struct FFF3FPSnapshot {
     //     the whole upload). Bytes are the NV12/P010/P016 texture size, so the
     //     bandwidth column stays comparable with the CPU arms. Before 2026-10-20
     //     this branch recorded nothing and hardware runs showed uploads=0/upath=0.
+    //   8 CUDA->D3D11 interop direct paste -- the decoded CUDA surface is copied
+    //     into the shader textures by the driver (cuMemcpy2D into the registered
+    //     planes), no PCIe traffic in either direction. upload100ns ==
+    //     uploadCopy100ns and there is no separate map-wait interval. Bytes are
+    //     the planar YUV size (1 byte per sample at 8 bit, 2 above). When the
+    //     interop refuses a frame, the fallback download records paths 1/2/6
+    //     like any CPU planar frame, so a run that mixed both shows both.
     // uploadCopyBytes is exact for 1 and 2; the UpdateSubresource arms do not know
     // their own byte total here, so they leave it untouched and stay identifiable
     // by this field instead of being silently averaged in.

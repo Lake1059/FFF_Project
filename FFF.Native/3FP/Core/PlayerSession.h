@@ -250,7 +250,7 @@ private:
     void PublishDisc();
     bool HoldDisc();
     void DoClose(FFF3FPState finalState = FFF3FPState::Closed,
-        bool preserveVideoOutput = false) noexcept;
+        bool preserveVideoOutput = false, bool keepStillImage = false) noexcept;
     FFFResult DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1,
         bool exact = true) noexcept;
     void DecodeUntilSeekTarget() noexcept;
@@ -313,6 +313,9 @@ private:
     // route that works as soon as another view closes.
     bool HardwareRouteKnownUnsupported(const AVStream* stream) const noexcept;
     void RememberUnsupportedHardwareRoute(const AVStream* stream) noexcept;
+    // Pure hw_config-table answer for the *current* stream under the still-image
+    // backend restriction; published in the media info as hardwareDecodable.
+    bool HardwareDecodableForCurrentStream() const noexcept;
     FFFResult FallbackToSoftwareVideoDecoder(const char* reason) noexcept;
     // Maximum workers the shared thread budget allows: the CPU count minus the player's
     // own threads (worker, audio renderer, present thread) minus one core of scheduler
@@ -880,6 +883,11 @@ private:
     // not a still image, but it is still a picture: it must show its first frame
     // while stopped and it must report the animated flag.
     bool animatedImage_;
+    // Device-recovery storm guard: RecoverVideoDevice counts back-to-back
+    // recoveries inside a time window and stops playback once the driver keeps
+    // losing the device faster than it can be rebuilt.
+    std::atomic<std::uint32_t> videoRecoveryStreakCount_{0};
+    std::atomic<std::uint64_t> videoRecoveryLastSteadyMs_{0};
     // Last [queue] trace values, so an animation logs its depth accounting once per
     // distinct combination instead of once per pump. Worker thread only.
     mutable std::int64_t tracedQueuePipelineFrames_ = -1;
