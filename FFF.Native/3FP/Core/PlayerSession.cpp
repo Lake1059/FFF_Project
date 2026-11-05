@@ -1171,7 +1171,14 @@ void PlayerSession::TryCompletePlaybackPreroll() noexcept {
         videoRenderer_.HasOutputWindow()) {
         auto* frame = videoFrameQueue_.front();
         AVFrame* transferred = nullptr;
-        if (IsHardwareFrame(frame) && frame->format != AV_PIX_FMT_D3D11) {
+        // A CUDA surface is the one hardware frame the renderer can take without a
+        // transfer; CanImportCudaFrame is its cheap half (format, gate, refusal latch,
+        // frames-context). Probe still decides for real inside Render, and a refusal
+        // there falls back to the download route, so letting the frame through cannot
+        // leave the preroll without a picture. D3D11 retained-surface frames skip the
+        // transfer the same way, now decided by format directly.
+        if (IsHardwareFrame(frame) && frame->format != AV_PIX_FMT_D3D11 &&
+            !videoRenderer_.CanImportCudaFrame(frame)) {
             transferred = av_frame_alloc();
             if (transferred == nullptr || av_hwframe_transfer_data(transferred, frame, 0) < 0) {
                 av_frame_free(&transferred);
@@ -2227,6 +2234,27 @@ bool PlayerSession::RecoverAudioDevice() noexcept {
 
 bool PlayerSession::RecoverVideoDevice() noexcept {
     if (!videoRenderer_.DeviceRecoveryRequested()) return false;
+    // A driver stuck in a TDR storm re-loses the device as fast as it is rebuilt;
+    // the loops above (and the render that follows) would otherwise rebuild the
+    // device forever. Cap the streak within a window and surface a failure
+    // instead of hammering the GPU.
+    constexpr std::uint32_t kMaxVideoRecoveryStreak = 5;
+    constexpr std::uint64_t kRecoveryStreakWindowMs = 20000;
+    const auto nowMs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    if (videoRecoveryLastSteadyMs_.load() != 0 &&
+        nowMs - videoRecoveryLastSteadyMs_.load() > kRecoveryStreakWindowMs)
+        videoRecoveryStreakCount_.store(0);
+    videoRecoveryLastSteadyMs_.store(nowMs);
+    if (videoRecoveryStreakCount_.fetch_add(1) >= kMaxVideoRecoveryStreak) {
+        videoRenderer_.ClearDeviceRecoveryRequest();
+        Fail(FFFResult::DeviceFailure,
+            "The graphics device kept failing after repeated recovery attempts; playback stopped. "
+            "Close and reopen the file to try again.",
+            "video-device-recovery");
+        return true;
+    }
     StopSoftwareVideoDecode();
 
     const auto previousState = state_.load();
@@ -3695,8 +3723,10 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
     // still decodes on the GPU instead of falling all the way to the CPU. The backend
     // order is what makes this a fallback -- CUDA is only reached after a refusal,
     // never before. FFF3FP_HWCAP_STILL_CUDA=0 restores the D3D11VA-only list. Video
-    // keeps the full list either way: there a CUDA or QSV frame is transferred every
-    // frame anyway, and the semi-planar upload in VideoRenderer is what carries it.
+    // keeps the full list either way: there a CUDA frame is downloaded every frame only
+    // when the D3D11 interop refuses it (it is on by default, opt out with
+    // FFF3FP_CUDA_D3D11_INTEROP=0), and a QSV frame always is; the CPU upload in
+    // VideoRenderer is what carries those.
     const std::size_t backendCount =
         (staticImage_ && !StillCudaFallbackEnabled()) ? 1u : std::size(Backends);
     std::string lastFailure = "No compatible hardware decoder was found.";
@@ -3791,6 +3821,26 @@ bool PlayerSession::HardwareRouteKnownUnsupported(const AVStream* stream) const 
     const auto key = HardwareRouteKey(stream->codecpar);
     for (const auto remembered : unsupportedHardwareRoutes_)
         if (remembered == key) return true;
+    return false;
+}
+
+bool PlayerSession::HardwareDecodableForCurrentStream() const noexcept {
+    // Theoretical capability only: walk the same backend list the decoder opener
+    // would use (including the still-image restriction) and check the hw_config
+    // tables. No device is created and no decoder is opened.
+    if (format_ == nullptr || videoStream_ < 0 ||
+        videoStream_ >= static_cast<std::int32_t>(format_->nb_streams)) return false;
+    const auto* parameters = format_->streams[videoStream_]->codecpar;
+    if (parameters == nullptr) return false;
+    const auto* codec = avcodec_find_decoder(parameters->codec_id);
+    if (codec == nullptr) return false;
+    // Same elements and still-image restriction as the local Backends array in
+    // OpenHardwareVideoDecoder.
+    const AVHWDeviceType Backends[] = { AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_CUDA };
+    const std::size_t backendCount =
+        (staticImage_ && !StillCudaFallbackEnabled()) ? 1u : std::size(Backends);
+    for (std::size_t index = 0; index < backendCount; ++index)
+        if (FindHardwareFormat(codec, Backends[index]) != AV_PIX_FMT_NONE) return true;
     return false;
 }
 
@@ -3954,7 +4004,10 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     NoteTapGeneration();
     // Keep the flip-model chain for a same-HWND media switch. DXGI can reject
     // an immediate replacement while the previous chain is still retiring.
-    DoClose(FFF3FPState::Opening, true);
+    // Snapshot before DoClose clears the flag: the previous file being a still
+    // image is what makes the close keep the cached picture on screen.
+    const bool keepStillImage = staticImage_;
+    DoClose(FFF3FPState::Opening, true, keepStillImage);
     // A new file is a new audio-pool round: back to the default target.
     audioTargetBuffer100ns_ = performance_.AudioInitial();
     seenAudioUnderruns_ = 0;
@@ -4001,6 +4054,12 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Select session rewind only after stream classification is available.
     sessionWrapLoop_ = IsAnimatedImageSequence(format_);
     staticImage_ = IsStillImage(format_, videoStream_);
+    // A still image kept alive across the close is now switching to a video:
+    // release the retained frame here (the video path never overwrites it).
+    // The renderer keeps showing the cached texture until the video's first
+    // frame renders over it -- an acceptable transition, and the video
+    // decode/present pipeline is untouched.
+    if (!staticImage_ && stillImageFrame_) av_frame_free(&stillImageFrame_);
     // A tiled still image is one stream per tile, so the stream picked above is only
     // the first tile. Recognize such a file from its tile grid group and read every
     // tile's packets now, while the demuxer is still at the start of the file: the
@@ -4197,6 +4256,13 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // DoOpen's leading DoClose already cleared it, this makes the line self-evident.
     videoRenderer_.SetMediaFrameRateCeilingHz(0.0);
     ArmAudioUntilVideoFrame();
+    if (keepStillImage) {
+        // The retained still image carries the previous zoom/pan; ResetMedia was
+        // skipped, so zero the view here -- the renderer-level call redraws
+        // nothing (the session-level wrapper is the one that asks for a redraw),
+        // and the new image is then rendered already fitted to the window.
+        videoRenderer_.SetViewTransform(1.0f, 0.0f, 0.0f);
+    }
     // Ready sessions do not pump playback, so present the first image frame here.
     if (staticImage_ || animatedImage_) {
         const auto imageResult = DecodeInitialFrame();
@@ -4209,6 +4275,9 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         }
     }
     RebuildMediaInfo(); SetState(FFF3FPState::Ready, "open");
+    // A freshly opened file resets the device-recovery storm streak.
+    videoRecoveryStreakCount_.store(0);
+    videoRecoveryLastSteadyMs_.store(0);
     // Publish the image details once, from the worker thread while the decoded
     // frames (and their side data) are still owned by this one - GetImageInfo
     // hands out this copy under snapshotMutex_ instead of touching them.
@@ -6522,8 +6591,11 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     }
 
     AVFrame* renderFrame = frame;
-    // Only a D3D11 surface can be handed to the renderer as-is. Anything else (the CUDA
-    // backend, or QSV) has to come back to CPU memory first as a semi-planar frame.
+    // A D3D11 surface can be handed to the renderer as-is; so can a CUDA surface when
+    // the default-on interop path accepts it (CanImportCudaFrame is the cheap half -- the
+    // device-side Probe still runs inside Render and falls back to a download). Anything
+    // else (QSV, CUDA with FFF3FP_CUDA_D3D11_INTEROP=0, or a driver/adapter refusal) has
+    // to come back to CPU memory first as a semi-planar frame.
     // A still image is downloaded even when it is a D3D11 surface, because the two routes
     // do not agree on chroma siting: the texture route substitutes AVCHROMA_LOC_LEFT for an
     // unspecified site (VideoRenderer::ResolveChromaOffset's caller) while the plane route
@@ -6532,8 +6604,10 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
     // the CPU arm on 1.07%-2.24% of pixels, in full-height vertical stripes up to 0.518
     // (docs/99 section 13). Downloading puts both arms on the route that already matched
     // HEVC and every >=1920x1080 sample exactly.
+    const auto cudaDirect = videoRenderer_.CanImportCudaFrame(frame);
     if (IsHardwareFrame(frame) &&
-        (frame->format != AV_PIX_FMT_D3D11 || (staticImage_ && owner == format_))) {
+        ((frame->format != AV_PIX_FMT_D3D11 && !cudaDirect) ||
+            (staticImage_ && owner == format_))) {
         if (videoTransferFrame_ == nullptr) videoTransferFrame_ = av_frame_alloc();
         if (videoTransferFrame_ == nullptr) {
             Fail(FFFResult::NativeFailure, "Could not allocate the reusable hardware-transfer frame.");
@@ -7709,7 +7783,8 @@ void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t req
     Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"load-external-audio\",\"stream\":" + std::to_string(index) + "}");
 }
 
-void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVideoOutput) noexcept {
+void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVideoOutput,
+    const bool keepStillImage) noexcept {
     ResetTempo(0);
     audioFailures_ = 0;
     growingInput_ = false;
@@ -7739,8 +7814,20 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     // queue. Gate renderer teardown with its content lock so a final timer tick
     // cannot restart the presenter while this close is joining it.
     std::unique_lock contentLock(timedTextContentMutex_);
-    if (preserveVideoOutput) videoRenderer_.ResetMedia();
-    else videoRenderer_.Close();
+    if (preserveVideoOutput) {
+        if (keepStillImage) {
+            // Still-image transition: keep the cached textures, the view state and
+            // the presenter thread exactly as they are, so the previous picture
+            // stays on screen until DoOpen decodes and renders the next one. The
+            // per-media renderer state is overwritten by the new image's
+            // EnsurePipeline/settings; OpenFormat failure simply leaves the old
+            // picture up (better than a black frame plus an error box).
+        } else {
+            videoRenderer_.ResetMedia();
+        }
+    } else {
+        videoRenderer_.Close();
+    }
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); CloseFormat(&externalFormat_, externalFormatIo_);
     CloseAuxiliaryLayer();
     if (videoDecoder_) avcodec_free_context(&videoDecoder_);
@@ -7748,7 +7835,10 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     ReleaseIamfDecoder();
     if (coverArtFrame_) av_frame_free(&coverArtFrame_);
     ReleasePrimariesCarrierFilter();
-    if (stillImageFrame_) av_frame_free(&stillImageFrame_);
+    // keepStillImage defers the release: PresentVideoFrame's unref/ref overwrites
+    // the reference when the next still image is retained, and the video path
+    // frees it right after staticImage_ turns false.
+    if (stillImageFrame_ && !keepStillImage) av_frame_free(&stillImageFrame_);
     if (videoDecodeFrame_) av_frame_free(&videoDecodeFrame_);
     if (videoTransferFrame_) av_frame_free(&videoTransferFrame_);
     if (audioDecodeFrame_) av_frame_free(&audioDecodeFrame_);
@@ -7938,6 +8028,7 @@ void PlayerSession::RebuildMediaInfo() noexcept {
         << ",\"fileSize\":" << std::max<std::int64_t>(0, format_->pb ? avio_size(format_->pb) : 0)
         << ",\"probeScore\":" << format_->probe_score
         << ",\"staticImage\":" << (staticImage_ ? "true" : "false")
+        << ",\"hardwareDecodable\":" << (HardwareDecodableForCurrentStream() ? "true" : "false")
         << ",\"tileGrid\":" << (tileGrid_ ? "true" : "false")
         << ",\"tileGridWidth\":" << tileGridWidth_
         << ",\"tileGridHeight\":" << tileGridHeight_

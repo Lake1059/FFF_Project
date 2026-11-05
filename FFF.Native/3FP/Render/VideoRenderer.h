@@ -3,6 +3,7 @@
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Hdr/HdrProcessor.h"
 #include "3FP/Hdr/HdrToneCurve.h"
+#include "3FP/Render/CudaD3D11Interop.h"
 
 #include <array>
 #include <cstdint>
@@ -178,6 +179,18 @@ struct ElCompositionSettings {
 };
 static_assert(sizeof(ElCompositionSettings) == 16,
     "ElCompositionSettings must stay in lockstep with the HLSL ElComposition cbuffer");
+
+// The decoder-side description of the frame the renderer is about to upload,
+// resolved by DescribeInput() in VideoRenderer.cpp -- the format table and its
+// static_assert matrix stay next to DescribeInput in the .cpp. Data only, and
+// carried through as one argument to UploadPlanarFrames.
+struct InputDescription {
+    std::uint32_t layout = 0;
+    std::uint32_t bitDepth = 16;
+    float sampleScale = 1.0f;
+    std::uint32_t chromaWidthShift = 0;
+    std::uint32_t chromaHeightShift = 0;
+};
 
 class PlayerVideoRenderer final {
 public:
@@ -387,6 +400,20 @@ public:
     std::uint32_t ResolveDecodeTransfer(const HdrFrameState& hdrState) const noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     bool OwnsD3D11Texture(ID3D11Texture2D* texture) const noexcept;
+    /// True when a CUDA-decoded frame can be pasted into this renderer instead of being
+    /// downloaded to CPU planes first. Enabled by default; FFF3FP_CUDA_D3D11_INTEROP=0
+    /// turns it off. A non-NVIDIA output adapter is refused by the device-side probe.
+    ///
+    /// This is the caller's licence to skip av_hwframe_transfer_data: it answers yes
+    /// only for a CUDA frame whose software format matches the renderer's three-plane
+    /// shader arm and whose hardware device this renderer may share. No D3D11 or CUDA
+    /// call is made here, so it is safe from the session's thread; the device-side half
+    /// (context and adapter check, texture registration) runs on the present path under
+    /// the device lock, and Render still falls back to a download if the driver refuses.
+    bool CanImportCudaFrame(const AVFrame* frame) const noexcept;
+    // Registers the current sourceTextures_ planes with the CUDA context Probe() found.
+    // False means the driver refused: the caller rebuilds them CPU-writable.
+    bool RegisterCudaInteropPlanes(std::uint32_t planeCount) noexcept;
     /// Zero-cost capability probe for D3D11VA hardware decoding.
     ///
     /// Ask the driver instead of consulting a table: the answer describes this GPU
@@ -437,6 +464,7 @@ public:
     bool DeviceRecoveryRequested() const noexcept;
     bool RequestRecoveryIfDeviceLost() noexcept;
     FFFResult RecreateDeviceResources() noexcept;
+    void ClearDeviceRecoveryRequest() noexcept;
     void ResetMedia() noexcept;
     void Close() noexcept;
 
@@ -587,7 +615,14 @@ private:
     FFFResult EnsurePipeline(std::uint32_t sourceWidth, std::uint32_t sourceHeight,
         std::uint32_t inputLayout, std::uint32_t bitDepth,
         std::uint32_t chromaWidthShift, std::uint32_t chromaHeightShift,
-        bool externalSource = false) noexcept;
+        bool externalSource = false, bool cudaInteropSource = false) noexcept;
+    // The ordinary planar upload: staging ring (1) / Map WRITE_DISCARD (2) /
+    // packed UpdateSubresource (3) / env-gated UpdateSubresource arm (6), exactly
+    // the code the directYuv arm of Render has always run. Returns the same
+    // FFFResult the inline code would have.
+    FFFResult UploadPlanarFrames(const std::uint8_t* const* uploadPlanes,
+        const int* uploadLines, std::uint32_t uploadWidth, std::uint32_t uploadHeight,
+        const InputDescription& input) noexcept;
     FFFResult EnsureVideoProcessor(ID3D11Texture2D* inputTexture,
         ID3D11Texture2D* outputTexture, std::uint32_t inputColorSpace,
         std::uint32_t outputColorSpace) noexcept;
@@ -853,6 +888,16 @@ private:
     bool hdrMetadataValid_ = false;
     ID3D11Texture2D* sourceTextures_[3];
     ID3D11ShaderResourceView* sourceViews_[3];
+    // CUDA -> D3D11 paste for the decoded frames the D3D11VA pool cannot hold. Binds
+    // sourceTextures_ while sourceCudaInterop_ is set; Reset() must run before those
+    // textures are released, because the CUDA driver still holds a reference to them.
+    CudaD3D11Interop cudaInterop_;
+    // Latched off the first time the driver refuses the interop, so a stream that
+    // cannot use it does not pay a registration attempt on every pipeline rebuild.
+    std::atomic<bool> cudaInteropRefused_{ false };
+    // One-shot download for a CUDA frame the interop could not take. Kept so the
+    // fallback does not allocate on the frame that hits it.
+    AVFrame* cudaTransferFrame_ = nullptr;
     // Upload-capacity state, read by WantsStagingUpload. Both are atomic because the
     // device (and its reset of the refusal) can be created off the session worker
     // thread that runs Render / EnsurePipeline.
@@ -1030,6 +1075,9 @@ private:
     std::uint32_t sourceChromaWidthShift_;
     std::uint32_t sourceChromaHeightShift_;
     bool sourceExternal_;
+    // The plane textures currently standing in for a CUDA surface: DEFAULT usage, and
+    // registered with the decoder's CUDA context by cudaInterop_.
+    bool sourceCudaInterop_;
     bool sourceLimitedToNativeSize_;
     bool sourceCoverArt_;
     // Still-image source. Selects the image scaling policy: pixel-block enlargement

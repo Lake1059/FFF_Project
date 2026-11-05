@@ -1040,8 +1040,23 @@ Public NotInheritable Class 播放器控制器
         应用音量()
     End Sub
 
+    ''' <summary>当前媒体是否允许切换解码器：静图仅在内核判定其可硬解时放行
+    ''' （PNG/BMP 等无 hw_config 的格式锁定 CPU，切换入口失效）。</summary>
+    Public ReadOnly Property 当前媒体允许切换解码器 As Boolean
+        Get
+            Dim 信息 = 安全读取媒体信息()
+            Return 信息 Is Nothing OrElse Not 信息.是静态图片 OrElse 信息.是硬件可解码
+        End Get
+    End Property
+
     Public Function 切换解码器() As String
         If 已释放 OrElse 正在切换会话 Then Return String.Empty
+        ' 内核权威判定兜底：不支持 GPU 解码的静图无论怎么点都在 CPU。
+        Dim 锁定信息 = 安全读取媒体信息()
+        If 锁定信息 IsNot Nothing AndAlso 锁定信息.是静态图片 AndAlso Not 锁定信息.是硬件可解码 Then
+            RaiseEvent 状态已变化(Me, EventArgs.Empty)
+            Return String.Empty
+        End If
         Dim 新解码器 = If(用户解码器偏好 = 解码模式.CPU, 解码模式.GPU, 解码模式.CPU)
         If 会话 Is Nothing OrElse String.IsNullOrEmpty(当前文件路径) Then
             用户解码器偏好 = 新解码器

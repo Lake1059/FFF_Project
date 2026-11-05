@@ -1485,13 +1485,6 @@ static_assert(CalculateLyricsCoverDestination(512, 512, 800, 400,
     CalculateLyricsCoverDestination(512, 512, 800, 400,
     50.0f, 50.0f, 7.5f, 0.0f, 7.5f).width == 340);
 
-struct InputDescription {
-    std::uint32_t layout = 0;
-    std::uint32_t bitDepth = 16;
-    float sampleScale = 1.0f;
-    std::uint32_t chromaWidthShift = 0;
-    std::uint32_t chromaHeightShift = 0;
-};
 
 // Filter identifiers understood by ScalePixelShader's ScaleWeight().
 enum class ScaleKernel : std::uint32_t {
@@ -1734,13 +1727,21 @@ constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
         return {1, 12, 65535.0f / 4095.0f, 1, 0};
     case AV_PIX_FMT_YUV422P16LE:
         return {1, 16, 1.0f, 1, 0};
-    case AV_PIX_FMT_YUV444P:
-    case AV_PIX_FMT_YUVJ444P:
+    case AV_PIX_FMT_YUV444P: case AV_PIX_FMT_YUVJ444P:
         return {1, 8, 1.0f, 0, 0};
     case AV_PIX_FMT_YUV444P10LE:
         return {1, 10, 65535.0f / 1023.0f, 0, 0};
     case AV_PIX_FMT_YUV444P12LE:
         return {1, 12, 65535.0f / 4095.0f, 0, 0};
+    // The FFmpeg CUDA hwframe pool hands 10/12-bit 4:4:4 back as the MSB-aligned
+    // variants (yuv444p10msble / yuv444p12msble): the sample sits in the top bits of
+    // the 16-bit word, so the texture is still R16_UNORM but the shader has to divide
+    // by 65472 / 65520 rather than 1023 / 4095. Getting this wrong is a silent 64x
+    // colour error, hence the pinned assertions below.
+    case AV_PIX_FMT_YUV444P10MSBLE:
+        return {1, 10, 65535.0f / 65472.0f, 0, 0};
+    case AV_PIX_FMT_YUV444P12MSBLE:
+        return {1, 12, 65535.0f / 65520.0f, 0, 0};
     case AV_PIX_FMT_YUV444P16LE:
         return {1, 16, 1.0f, 0, 0};
     case AV_PIX_FMT_NV12:
@@ -1815,6 +1816,12 @@ static_assert(DescribeInput(AV_PIX_FMT_YUV444P).layout == 1 &&
     DescribeInput(AV_PIX_FMT_YUV444P).chromaHeightShift == 0);
 static_assert(DescribeInput(AV_PIX_FMT_YUV444P10LE).layout == 1 &&
     DescribeInput(AV_PIX_FMT_YUV444P10LE).bitDepth == 10);
+static_assert(DescribeInput(AV_PIX_FMT_YUV444P10MSBLE).layout == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV444P10MSBLE).bitDepth == 10 &&
+    DescribeInput(AV_PIX_FMT_YUV444P10MSBLE).sampleScale == 65535.0f / 65472.0f);
+static_assert(DescribeInput(AV_PIX_FMT_YUV444P12MSBLE).layout == 1 &&
+    DescribeInput(AV_PIX_FMT_YUV444P12MSBLE).bitDepth == 12 &&
+    DescribeInput(AV_PIX_FMT_YUV444P12MSBLE).sampleScale == 65535.0f / 65520.0f);
 static_assert(DescribeInput(AV_PIX_FMT_P010LE).sampleScale == 65535.0f / 65472.0f &&
     DescribeInput(AV_PIX_FMT_P012LE).sampleScale == 65535.0f / 65520.0f &&
     DescribeInput(AV_PIX_FMT_P210LE).sampleScale == 65535.0f / 65472.0f &&
@@ -2658,7 +2665,8 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       swapWidth_(0), swapHeight_(0), swapHdr_(false), swapAllowTearing_(false), swapOutputBits_(8), sourceWidth_(0), sourceHeight_(0),
       sourceInputLayout_(UINT32_MAX), sourceBitDepth_(0),
       sourceChromaWidthShift_(0), sourceChromaHeightShift_(0),
-      sourceExternal_(false), sourceLimitedToNativeSize_(false), sourceCoverArt_(false),
+      sourceExternal_(false), sourceCudaInterop_(false), sourceLimitedToNativeSize_(false),
+      sourceCoverArt_(false),
       coverBackdropWidth_(0), coverBackdropHeight_(0),
       coverBackdropVideoGeneration_(0),
       coverBackdropAppliedBlurSettingsGeneration_(0),
@@ -3905,7 +3913,8 @@ bool PlayerVideoRenderer::WantsStagingUpload(const std::uint32_t width,
 FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
     const std::uint32_t sourceHeight, const std::uint32_t inputLayout,
     const std::uint32_t bitDepth, const std::uint32_t chromaWidthShift,
-    const std::uint32_t chromaHeightShift, const bool externalSource) noexcept {
+    const std::uint32_t chromaHeightShift, const bool externalSource,
+    const bool cudaInteropSource) noexcept {
     if (vertexShader_ == nullptr || pixelShader_ == nullptr || scalePixelShader_ == nullptr ||
         coverBackdropPixelShader_ == nullptr || timedTextPixelShader_ == nullptr ||
         sampler_ == nullptr || pointSampler_ == nullptr || panoramaSampler_ == nullptr ||
@@ -4001,11 +4010,15 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             elCompositionBuffer_ = nullptr;
     }
     if (sourceTextures_[0] != nullptr && sourceExternal_ == externalSource &&
+        sourceCudaInterop_ == cudaInteropSource &&
         sourceWidth_ == sourceWidth && sourceHeight_ == sourceHeight &&
         sourceInputLayout_ == inputLayout && sourceBitDepth_ == bitDepth &&
         sourceChromaWidthShift_ == chromaWidthShift &&
         sourceChromaHeightShift_ == chromaHeightShift)
         return FFFResult::Success;
+    // The CUDA driver holds a reference to every registered plane, so the binding has
+    // to go first -- releasing the textures underneath it would leave dangling handles.
+    cudaInterop_.Reset();
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         ReleaseCom(sourceViews_[plane]);
         ReleaseCom(sourceTextures_[plane]);
@@ -4128,11 +4141,14 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         return true;
     };
     const auto planarInput = inputLayout == 1 || inputLayout == 2;
-    const auto wantsRing = !externalSource && planarInput &&
+    // A CUDA surface is pasted into these textures on the GPU, and the CUDA driver can
+    // only adopt DEFAULT storage -- so the interop arm rules out both the dynamic
+    // (Map) shape and the staging ring, exactly like externalSource does.
+    const auto wantsRing = !externalSource && !cudaInteropSource && planarInput &&
         WantsStagingUpload(sourceWidth, sourceHeight);
     // Same predicate the upload branch reads: DEFAULT only when the ring is really
     // going to exist, because Map(WRITE_DISCARD) cannot target a DEFAULT texture.
-    const auto dynamicPlanes = !externalSource && planarInput && !wantsRing;
+    const auto dynamicPlanes = !externalSource && !cudaInteropSource && planarInput && !wantsRing;
     if (!buildSourceTextures(dynamicPlanes)) return FFFResult::DeviceFailure;
     uploadSlot_ = 0;
     if (wantsRing && !buildUploadRing()) {
@@ -4140,6 +4156,7 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         // should. Fall back to the one-transfer Map path instead of taking playback
         // down with it: release everything the attempt left behind, remember the
         // refusal for this device, and rebuild the frame textures CPU-writable.
+        cudaInterop_.Reset();
         for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
             ReleaseCom(sourceViews_[plane]);
             ReleaseCom(sourceTextures_[plane]);
@@ -4154,12 +4171,91 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
                 sourceWidth, sourceHeight);
         if (!buildSourceTextures(true)) return FFFResult::DeviceFailure;
     }
+    if (cudaInteropSource && !RegisterCudaInteropPlanes(planeCount)) {
+        // The driver would not take the planes. Keep the picture: rebuild them
+        // CPU-writable and let the ordinary planar upload (`UploadPlanarFrames`,
+        // called from Render's CUDA fallback) carry the frame, and latch
+        // the refusal so the session stops handing CUDA frames over for this stream.
+        cudaInteropRefused_.store(true, std::memory_order_relaxed);
+        for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
+            ReleaseCom(sourceViews_[plane]);
+            ReleaseCom(sourceTextures_[plane]);
+            ReleaseCom(uploadViews_[plane]);
+            ReleaseCom(uploadTextures_[plane]);
+            for (auto& slot : uploadStaging_) ReleaseCom(slot[plane]);
+        }
+        if (!buildSourceTextures(true)) return FFFResult::DeviceFailure;
+    }
     sourceWidth_ = sourceWidth; sourceHeight_ = sourceHeight;
     sourceInputLayout_ = inputLayout; sourceBitDepth_ = bitDepth;
     sourceExternal_ = externalSource;
+    // What the textures really are, not what was asked for: the refusal above leaves
+    // them CPU-writable, and the next call has to agree or it would return early on a
+    // pipeline that no longer matches.
+    sourceCudaInterop_ = cudaInteropSource && cudaInterop_.Bound();
     sourceChromaWidthShift_ = chromaWidthShift;
     sourceChromaHeightShift_ = chromaHeightShift;
     return FFFResult::Success;
+}
+
+bool PlayerVideoRenderer::RegisterCudaInteropPlanes(const std::uint32_t planeCount) noexcept {
+    if (planeCount == 0 || planeCount > ARRAYSIZE(sourceTextures_)) return false;
+    const auto status = cudaInterop_.Bind(sourceTextures_, planeCount);
+    if (status != CudaD3D11Interop::Status::Success) {
+        static const bool trace = [] {
+            wchar_t value[8]{};
+            return GetEnvironmentVariableW(L"FFF_CUDA_INTEROP_TRACE", value, 8) != 0 &&
+                value[0] == L'1' && value[1] == L'\0';
+        }();
+        if (trace) {
+            std::fprintf(stderr, "[cuda] bind refused (status=%d planes=%u)\n",
+                static_cast<int>(status), planeCount);
+            for (std::uint32_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
+                if (sourceTextures_[plane] == nullptr) continue;
+                D3D11_TEXTURE2D_DESC desc{};
+                sourceTextures_[plane]->GetDesc(&desc);
+                std::fprintf(stderr,
+                    "[cuda]   plane%u %ux%u fmt=%d usage=%d mips=%u array=%u\n", plane,
+                    desc.Width, desc.Height, static_cast<int>(desc.Format),
+                    static_cast<int>(desc.Usage), desc.MipLevels, desc.ArraySize);
+            }
+        }
+    }
+    return status == CudaD3D11Interop::Status::Success;
+}
+
+bool PlayerVideoRenderer::CanImportCudaFrame(const AVFrame* const frame) const noexcept {
+    // One-shot diagnostic: FFF_CUDA_INTEROP_TRACE=1 prints which gate said no. The check
+    // runs once per frame, so the switch is resolved once per process.
+    static const bool trace = [] {
+        wchar_t value[8]{};
+        return GetEnvironmentVariableW(L"FFF_CUDA_INTEROP_TRACE", value, 8) != 0 &&
+            value[0] == L'1' && value[1] == L'\0';
+    }();
+    const auto deny = [](const char* const reason) noexcept {
+        if (trace) std::fprintf(stderr, "[cuda] refuse: %s\n", reason);
+        return false;
+    };
+    if (frame == nullptr) return false;
+    // Called for every frame, including D3D11 and software ones: those are the normal
+    // answer "no" and must not turn the trace switch into per-frame spam.
+    if (frame->format != AV_PIX_FMT_CUDA) return false;
+    if (frame->hw_frames_ctx == nullptr) return deny("no hw_frames_ctx");
+    if (!CudaD3D11Interop::Enabled()) return deny("gate off (FFF3FP_CUDA_D3D11_INTEROP=0)");
+    if (cudaInteropRefused_.load(std::memory_order_relaxed)) return deny("refusal latched");
+    const auto* const frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
+    if (frames == nullptr || frames->device_ref == nullptr) return deny("hw_frames_ctx incomplete");
+    const auto* const device = reinterpret_cast<const AVHWDeviceContext*>(frames->device_ref->data);
+    if (device == nullptr || device->type != AV_HWDEVICE_TYPE_CUDA) return deny("frames not CUDA device");
+    // The interop hands the planes to the three-plane shader arm as one R8/R16 texture
+    // per plane; a semi-planar surface would need a second sampling layout and is left
+    // on the download route.
+    if (!CudaD3D11Interop::SupportsPixelFormat(static_cast<std::int32_t>(frames->sw_format))) {
+        if (trace) std::fprintf(stderr, "[cuda] refuse: sw_format %d unsupported\n",
+            static_cast<int>(frames->sw_format));
+        return false;
+    }
+    return true;
 }
 
 bool PlayerVideoRenderer::CanUseDirectVideoProcessor() const noexcept {
@@ -5460,6 +5556,13 @@ bool PlayerVideoRenderer::PrepareAdaptiveDownscale(const AVFrame* frame,
     const std::uint32_t width, const std::uint32_t height,
     const std::uint32_t outputWidth, const std::uint32_t outputHeight) noexcept {
     if (frame == nullptr) return false;
+    // The policy exists to save the CPU upload of a software-decoded frame; a hardware
+    // frame has no CPU planes to resize and its data[] entries are device addresses.
+    // The session never feeds a hardware frame to the policy, but the active flag can
+    // still be latched from an earlier software file, and resampling a CUDA surface
+    // with sws_scale would dereference those device addresses as host memory.
+    const auto* descriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format));
+    if (descriptor != nullptr && (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL) != 0) return false;
     if (!adaptiveDownscaleEnabled_.load(std::memory_order_acquire)) return false;
     if (!adaptiveDownscaleActive_.load(std::memory_order_acquire)) return false;
     if (outputWidth == 0 || outputHeight == 0) return false;
@@ -7183,6 +7286,150 @@ void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
     }
 }
 
+// The planar upload of Render's directYuv arm, extracted verbatim so the CUDA
+// fallback (and any future caller that has just rebuilt the textures CPU-writable)
+// runs exactly the code the ordinary directYuv frame has always run.
+// Call invariants, all guaranteed at the call sites:
+//  1. Shape: EnsurePipeline has just succeeded for (uploadWidth, uploadHeight,
+//     input.layout, input.bitDepth, the chroma shifts, externalSource=false,
+//     cudaInteropSource=false), and cudaInterop_.Bound() is false -- the
+//     doubleRing std::swap of sourceTextures_/uploadTextures_ below would
+//     otherwise swap away a registered texture.
+//  2. Lock domain: deviceMutex_ is held; only the DrawCachedVideo call chain
+//     can reach this.
+//  3. Pointers: uploadPlanes/uploadLines point at decoded CPU planes whose
+//     per-plane row width is >= the destination texture row bytes.
+//  4. Consumption: Map/UpdateSubresource copy synchronously, so the planes may
+//     be released or reused once this returns.
+//  5. Accounting: the function records uploadCount_ (+1 exactly once),
+//     upload100ns_ once and uploadPath_ per arm (1/2/3/6); the caller must not
+//     account again.
+FFFResult PlayerVideoRenderer::UploadPlanarFrames(const std::uint8_t* const* uploadPlanes,
+    const int* uploadLines, std::uint32_t uploadWidth, std::uint32_t uploadHeight,
+    const InputDescription& input) noexcept {
+    const auto uploadStart = std::chrono::steady_clock::now();
+    // uploadPlanes/uploadLines already point at the resampled copy when the
+    // adaptive policy engaged, and uploadWidth/uploadHeight match the textures
+    // EnsurePipeline just created for that size.
+    const auto largeFrame = WantsStagingUpload(uploadWidth, uploadHeight);
+    if (input.layout == 1 || input.layout == 2) {
+        const auto planeCount = input.layout == 1 ? 3u : 2u;
+        if (largeFrame && ResolveUploadCopyModeCached() == UploadCopyMode::UpdateSubresource) {
+            // 实验臂：回到 #25 之前的做法，让驱动自己搬，CPU 不直接碰 staging。
+            // 字节量在这里仍然是可精确算出的——交给驱动的就是那 box 的整帧数据，
+            // 所以照常记账，否则这一臂会显示"搬了 0 字节"而和 STAGING 臂不可比。
+            const auto copyStart = std::chrono::steady_clock::now();
+            std::size_t moved = 0;
+            for (unsigned plane = 0; plane < planeCount; ++plane) {
+                const auto xs = plane == 0 ? 0u : input.chromaWidthShift;
+                const auto ys = plane == 0 ? 0u : input.chromaHeightShift;
+                const auto rows = (uploadHeight + (1u << ys) - 1) >> ys;
+                const auto rowBytes = ((uploadWidth + (1u << xs) - 1) >> xs) *
+                    (input.layout == 2 && plane != 0 ? 2u : 1u) * (input.bitDepth > 8 ? 2u : 1u);
+                context_->UpdateSubresource(sourceTextures_[plane], 0, nullptr,
+                    uploadPlanes[plane], uploadLines[plane], 0);
+                moved += rows * rowBytes;
+            }
+            uploadCopy100ns_.fetch_add(To100ns(
+                std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
+            uploadCopyBytes_.fetch_add(moved, std::memory_order_relaxed);
+            // uploadCount_ is NOT touched here: the tail of the directYuv block
+            // already counts one per picture. Counting it twice made bytes_per_upload
+            // read half of the truth and per-upload times read double.
+            uploadPath_.store(6, std::memory_order_relaxed);
+        } else if (largeFrame) {
+            const bool doubleRing = UploadRingDepthCached() >= 2u;
+            // Alternate sampled textures and CPU-write staging resources so
+            // uploading the next picture can overlap sampling the last one.
+            for (unsigned plane = 0; plane < planeCount; ++plane) {
+                if (doubleRing) {
+                    std::swap(sourceTextures_[plane], uploadTextures_[plane]);
+                    std::swap(sourceViews_[plane], uploadViews_[plane]);
+                }
+                auto* staging = uploadStaging_[doubleRing ? uploadSlot_ : 0u][plane];
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                const auto mapStart = std::chrono::steady_clock::now();
+                if (FAILED(context_->Map(staging, 0, D3D11_MAP_WRITE, 0, &mapped))) {
+                    SetError("Could not map the upload staging texture.");
+                    return FFFResult::DeviceFailure;
+                }
+                uploadMapWait100ns_.fetch_add(To100ns(
+                    std::chrono::steady_clock::now() - mapStart), std::memory_order_relaxed);
+                const auto xs = plane == 0 ? 0u : input.chromaWidthShift;
+                const auto ys = plane == 0 ? 0u : input.chromaHeightShift;
+                const auto rows = (uploadHeight + (1u << ys) - 1) >> ys;
+                const auto rowBytes = ((uploadWidth + (1u << xs) - 1) >> xs) *
+                    (input.layout == 2 && plane != 0 ? 2u : 1u) * (input.bitDepth > 8 ? 2u : 1u);
+                const auto copyStart = std::chrono::steady_clock::now();
+                const std::size_t moved = CopyUploadPlane(
+                    static_cast<std::uint8_t*>(mapped.pData),
+                    static_cast<std::size_t>(mapped.RowPitch),
+                    uploadPlanes[plane], static_cast<std::size_t>(uploadLines[plane]),
+                    rowBytes, rows, ResolveUploadCopyModeCached());
+                uploadCopy100ns_.fetch_add(To100ns(
+                    std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
+                uploadCopyBytes_.fetch_add(moved, std::memory_order_relaxed);
+                context_->Unmap(staging, 0);
+                context_->CopyResource(sourceTextures_[plane], staging);
+            }
+            if (doubleRing) uploadSlot_ = (uploadSlot_ + 1) % 2;
+            uploadPath_.store(1, std::memory_order_relaxed);
+        } else {
+            for (unsigned plane = 0; plane < planeCount; ++plane) {
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                const auto mapStart = std::chrono::steady_clock::now();
+                if (FAILED(context_->Map(sourceTextures_[plane], 0,
+                    D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                    SetError("Could not map the decoded frame plane.");
+                    return FFFResult::DeviceFailure;
+                }
+                uploadMapWait100ns_.fetch_add(To100ns(
+                    std::chrono::steady_clock::now() - mapStart), std::memory_order_relaxed);
+                const auto xShift = plane == 0 ? 0u : input.chromaWidthShift;
+                const auto yShift = plane == 0 ? 0u : input.chromaHeightShift;
+                const auto rows = (uploadHeight + (1u << yShift) - 1) >> yShift;
+                // A row of the destination texture is (texels x samples-per-texel x
+                // bytes-per-sample). Semi-planar chroma packs U and V into one R8G8 /
+                // R16G16 texel, so it carries two samples per texel -- skipping that
+                // factor copies half of every chroma row and leaves the rest at the
+                // zeroed pages a freshly created texture starts with, which samples
+                // as (U=0, V=0) and reads as a strong green cast. Planar formats
+                // (and the luma plane) are one sample per texel, so they are
+                // unaffected. The >= 4K staging arm multiplies the same factor, so
+                // it never had this either -- it is not a route that bypasses the
+                // arithmetic, contrary to what this note used to claim.
+                const auto samplesPerTexel = (input.layout == 2 && plane != 0) ? 2u : 1u;
+                const auto rowBytes = ((uploadWidth + (1u << xShift) - 1) >> xShift) *
+                    samplesPerTexel * (input.bitDepth > 8 ? 2u : 1u);
+                const auto copyStart = std::chrono::steady_clock::now();
+                const std::size_t moved = CopyUploadPlane(
+                    static_cast<std::uint8_t*>(mapped.pData),
+                    static_cast<std::size_t>(mapped.RowPitch),
+                    uploadPlanes[plane], static_cast<std::size_t>(uploadLines[plane]),
+                    rowBytes, rows, ResolveUploadCopyModeCached());
+                uploadCopy100ns_.fetch_add(To100ns(
+                    std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
+                uploadCopyBytes_.fetch_add(moved, std::memory_order_relaxed);
+                context_->Unmap(sourceTextures_[plane], 0);
+            }
+            uploadPath_.store(2, std::memory_order_relaxed);
+        }
+    } else {
+        const auto copyStart = std::chrono::steady_clock::now();
+        context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, uploadPlanes[0],
+            uploadLines[0], 0);
+        uploadCopy100ns_.fetch_add(To100ns(
+            std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
+        // The driver owns the byte count here, so this arm records no bytes and
+        // stays identifiable by path 3 rather than diluting bytes-per-upload.
+        uploadPath_.store(3, std::memory_order_relaxed);
+    }
+    uploadCount_.fetch_add(1, std::memory_order_relaxed);
+    upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::nanoseconds>(std::chrono::steady_clock::now() - uploadStart).count() / 100));
+    return FFFResult::Success;
+}
+
 FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t frameIndex,
     const bool limitToNativeSize,
     const bool coverArt, const bool prepareOnly, const bool imageMode,
@@ -7217,7 +7464,14 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     const auto gamut = ResolveSourceGamut(frame, hdrState.format != FFF3FPHdrFormat::Sdr);
     auto input = DescribeInput(static_cast<AVPixelFormat>(frame->format));
     const auto d3d11Frame = frame->format == AV_PIX_FMT_D3D11;
+    const auto cudaFrame = frame->format == AV_PIX_FMT_CUDA;
     if (d3d11Frame && frame->hw_frames_ctx != nullptr) {
+        const auto* frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
+        input = DescribeInput(frames->sw_format);
+    }
+    // A CUDA surface describes its layout the same way: AV_PIX_FMT_CUDA says "on the
+    // GPU", the frames context says which planes those are.
+    if (cudaFrame && frame->hw_frames_ctx != nullptr) {
         const auto* frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
         input = DescribeInput(frames->sw_format);
     }
@@ -7344,10 +7598,105 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         uploadPlanes = AdaptivePlanes();
         uploadLines = AdaptiveLines();
     }
+    // Whether this frame can be pasted into the sampled textures instead of being
+    // downloaded first. Probe() is the device-side half of CanImportCudaFrame and runs
+    // here, under the device lock, because it pushes the decoder's CUDA context.
+    auto cudaInteropSource = false;
+    if (cudaFrame) {
+        const auto probeStatus = CanImportCudaFrame(frame)
+            ? cudaInterop_.Probe(frame, device_) : CudaD3D11Interop::Status::Refused;
+        cudaInteropSource = probeStatus == CudaD3D11Interop::Status::Success;
+        if (!cudaInteropSource) {
+            static const bool trace = [] {
+                wchar_t value[8]{};
+                return GetEnvironmentVariableW(L"FFF_CUDA_INTEROP_TRACE", value, 8) != 0 &&
+                    value[0] == L'1' && value[1] == L'\0';
+            }();
+            if (trace) std::fprintf(stderr, "[cuda] probe refused (status=%d)\n",
+                static_cast<int>(probeStatus));
+        }
+    }
     const auto pipelineResult = EnsurePipeline(uploadWidth, uploadHeight, input.layout, input.bitDepth,
-        input.chromaWidthShift, input.chromaHeightShift, d3d11Frame);
+        input.chromaWidthShift, input.chromaHeightShift, d3d11Frame, cudaInteropSource);
     if (pipelineResult != FFFResult::Success) return pipelineResult;
-    if (d3d11Frame) {
+    if (cudaFrame) {
+        // Telemetry (uploadPath 8): a GPU-to-GPU paste with no PCIe traffic in either
+        // direction. uploadCopy100ns is the whole copy -- cuMemcpy2D is synchronous, so
+        // there is no separate map-wait interval to record.
+        const auto importStart = std::chrono::steady_clock::now();
+        auto imported = CudaD3D11Interop::Status::Refused;
+        if (cudaInteropSource && sourceCudaInterop_)
+            imported = cudaInterop_.Import(frame);
+        static const bool traceImport = [] {
+            wchar_t value[8]{};
+            return GetEnvironmentVariableW(L"FFF_CUDA_INTEROP_TRACE", value, 8) != 0 &&
+                value[0] == L'1' && value[1] == L'\0';
+        }();
+        if (imported == CudaD3D11Interop::Status::Success) {
+            const auto importNs = std::chrono::steady_clock::now() - importStart;
+            upload100ns_.fetch_add(To100ns(importNs), std::memory_order_relaxed);
+            uploadCopy100ns_.fetch_add(To100ns(importNs), std::memory_order_relaxed);
+            // Exactly what moved: three planes, the chroma ones at the input's own
+            // subsampling, one byte per sample at 8 bit and two above it.
+            const auto lumaSamples = static_cast<std::uint64_t>(uploadWidth) * uploadHeight;
+            const auto chromaSamples =
+                static_cast<std::uint64_t>((uploadWidth + (1u << input.chromaWidthShift) - 1) >>
+                    input.chromaWidthShift) *
+                ((uploadHeight + (1u << input.chromaHeightShift) - 1) >>
+                    input.chromaHeightShift);
+            uploadCopyBytes_.fetch_add(static_cast<std::size_t>(
+                (lumaSamples + 2u * chromaSamples) * (input.bitDepth <= 8 ? 1u : 2u)),
+                std::memory_order_relaxed);
+            uploadCount_.fetch_add(1, std::memory_order_relaxed);
+            uploadPath_.store(8, std::memory_order_relaxed);
+            if (traceImport) std::fprintf(stderr,
+                "[cuda] import ok %ux%u layout=%u copy_us=%lld\n",
+                uploadWidth, uploadHeight, static_cast<unsigned>(input.layout),
+                static_cast<long long>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(importNs).count()));
+        } else {
+            // The driver would not take it after all. Download this frame and rebuild
+            // the textures CPU-writable, so the picture is carried by the ordinary
+            // planar upload (`UploadPlanarFrames`) rather than dropped; the refusal
+            // is latched for the stream.
+            if (traceImport) {
+                std::fprintf(stderr,
+                    "[cuda] import refused (status=%d bound=%d import=%dx%d planes=%u)\n",
+                    static_cast<int>(imported), sourceCudaInterop_ ? 1 : 0,
+                    uploadWidth, uploadHeight, static_cast<unsigned>(input.layout));
+                for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
+                    if (sourceTextures_[plane] == nullptr) continue;
+                    D3D11_TEXTURE2D_DESC desc{};
+                    sourceTextures_[plane]->GetDesc(&desc);
+                    std::fprintf(stderr,
+                        "[cuda]   plane%zu %ux%u fmt=%d usage=%d mips=%u array=%u\n", plane,
+                        desc.Width, desc.Height, static_cast<int>(desc.Format),
+                        static_cast<int>(desc.Usage), desc.MipLevels, desc.ArraySize);
+                }
+            }
+            cudaInteropRefused_.store(true, std::memory_order_relaxed);
+            if (cudaTransferFrame_ == nullptr) cudaTransferFrame_ = av_frame_alloc();
+            if (cudaTransferFrame_ == nullptr) {
+                SetError("Could not allocate the hardware frame transfer target.");
+                return FFFResult::NativeFailure;
+            }
+            av_frame_unref(cudaTransferFrame_);
+            if (av_hwframe_transfer_data(cudaTransferFrame_, frame, 0) < 0) {
+                SetError("Could not transfer the hardware-decoded frame for presentation.");
+                return FFFResult::FfmpegFailure;
+            }
+            av_frame_copy_props(cudaTransferFrame_, frame);
+            frame = cudaTransferFrame_;
+            uploadPlanes = frame->data;
+            uploadLines = frame->linesize;
+            const auto rebuild = EnsurePipeline(uploadWidth, uploadHeight, input.layout,
+                input.bitDepth, input.chromaWidthShift, input.chromaHeightShift, false, false);
+            if (rebuild != FFFResult::Success) return rebuild;
+            const auto uploaded = UploadPlanarFrames(uploadPlanes, uploadLines,
+                uploadWidth, uploadHeight, input);
+            if (uploaded != FFFResult::Success) return uploaded;
+        }
+    } else if (d3d11Frame) {
         auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
         const auto slice = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
         if (texture == nullptr || input.layout != 2) {
@@ -7393,126 +7742,9 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         //  - Opt-in (FFF3FP_UPLOAD_FORCE_STAGING=1, >= 4K): CPU-write STAGING ->
         //    alternating DEFAULT textures, keeping upload and sampling on separate
         //    resources. EnsurePipeline creates the matching resource ring.
-        const auto uploadStart = std::chrono::steady_clock::now();
-        // uploadPlanes/uploadLines already point at the resampled copy when the
-        // adaptive policy engaged, and uploadWidth/uploadHeight match the textures
-        // EnsurePipeline just created for that size.
-        const auto largeFrame = WantsStagingUpload(uploadWidth, uploadHeight);
-        if (input.layout == 1 || input.layout == 2) {
-            const auto planeCount = input.layout == 1 ? 3u : 2u;
-            if (largeFrame && ResolveUploadCopyModeCached() == UploadCopyMode::UpdateSubresource) {
-                // 实验臂：回到 #25 之前的做法，让驱动自己搬，CPU 不直接碰 staging。
-                // 字节量在这里仍然是可精确算出的——交给驱动的就是那 box 的整帧数据，
-                // 所以照常记账，否则这一臂会显示"搬了 0 字节"而和 STAGING 臂不可比。
-                const auto copyStart = std::chrono::steady_clock::now();
-                std::size_t moved = 0;
-                for (unsigned plane = 0; plane < planeCount; ++plane) {
-                    const auto xs = plane == 0 ? 0u : input.chromaWidthShift;
-                    const auto ys = plane == 0 ? 0u : input.chromaHeightShift;
-                    const auto rows = (uploadHeight + (1u << ys) - 1) >> ys;
-                    const auto rowBytes = ((uploadWidth + (1u << xs) - 1) >> xs) *
-                        (input.layout == 2 && plane != 0 ? 2u : 1u) * (input.bitDepth > 8 ? 2u : 1u);
-                    context_->UpdateSubresource(sourceTextures_[plane], 0, nullptr,
-                        uploadPlanes[plane], uploadLines[plane], 0);
-                    moved += rows * rowBytes;
-                }
-                uploadCopy100ns_.fetch_add(To100ns(
-                    std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
-                uploadCopyBytes_.fetch_add(moved, std::memory_order_relaxed);
-                // uploadCount_ is NOT touched here: the tail of the directYuv block
-                // already counts one per picture. Counting it twice made bytes_per_upload
-                // read half of the truth and per-upload times read double.
-                uploadPath_.store(6, std::memory_order_relaxed);
-            } else if (largeFrame) {
-                const bool doubleRing = UploadRingDepthCached() >= 2u;
-                // Alternate sampled textures and CPU-write staging resources so
-                // uploading the next picture can overlap sampling the last one.
-                for (unsigned plane = 0; plane < planeCount; ++plane) {
-                    if (doubleRing) {
-                        std::swap(sourceTextures_[plane], uploadTextures_[plane]);
-                        std::swap(sourceViews_[plane], uploadViews_[plane]);
-                    }
-                    auto* staging = uploadStaging_[doubleRing ? uploadSlot_ : 0u][plane];
-                    D3D11_MAPPED_SUBRESOURCE mapped{};
-                    const auto mapStart = std::chrono::steady_clock::now();
-                    if (FAILED(context_->Map(staging, 0, D3D11_MAP_WRITE, 0, &mapped))) {
-                        SetError("Could not map the upload staging texture.");
-                        return FFFResult::DeviceFailure;
-                    }
-                    uploadMapWait100ns_.fetch_add(To100ns(
-                        std::chrono::steady_clock::now() - mapStart), std::memory_order_relaxed);
-                    const auto xs = plane == 0 ? 0u : input.chromaWidthShift;
-                    const auto ys = plane == 0 ? 0u : input.chromaHeightShift;
-                    const auto rows = (uploadHeight + (1u << ys) - 1) >> ys;
-                    const auto rowBytes = ((uploadWidth + (1u << xs) - 1) >> xs) *
-                        (input.layout == 2 && plane != 0 ? 2u : 1u) * (input.bitDepth > 8 ? 2u : 1u);
-                    const auto copyStart = std::chrono::steady_clock::now();
-                    const std::size_t moved = CopyUploadPlane(
-                        static_cast<std::uint8_t*>(mapped.pData),
-                        static_cast<std::size_t>(mapped.RowPitch),
-                        uploadPlanes[plane], static_cast<std::size_t>(uploadLines[plane]),
-                        rowBytes, rows, ResolveUploadCopyModeCached());
-                    uploadCopy100ns_.fetch_add(To100ns(
-                        std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
-                    uploadCopyBytes_.fetch_add(moved, std::memory_order_relaxed);
-                    context_->Unmap(staging, 0);
-                    context_->CopyResource(sourceTextures_[plane], staging);
-                }
-                if (doubleRing) uploadSlot_ = (uploadSlot_ + 1) % 2;
-                uploadPath_.store(1, std::memory_order_relaxed);
-            } else {
-                for (unsigned plane = 0; plane < planeCount; ++plane) {
-                    D3D11_MAPPED_SUBRESOURCE mapped{};
-                    const auto mapStart = std::chrono::steady_clock::now();
-                    if (FAILED(context_->Map(sourceTextures_[plane], 0,
-                        D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-                        SetError("Could not map the decoded frame plane.");
-                        return FFFResult::DeviceFailure;
-                    }
-                    uploadMapWait100ns_.fetch_add(To100ns(
-                        std::chrono::steady_clock::now() - mapStart), std::memory_order_relaxed);
-                    const auto xShift = plane == 0 ? 0u : input.chromaWidthShift;
-                    const auto yShift = plane == 0 ? 0u : input.chromaHeightShift;
-                    const auto rows = (uploadHeight + (1u << yShift) - 1) >> yShift;
-                    // A row of the destination texture is (texels x samples-per-texel x
-                    // bytes-per-sample). Semi-planar chroma packs U and V into one R8G8 /
-                    // R16G16 texel, so it carries two samples per texel -- skipping that
-                    // factor copies half of every chroma row and leaves the rest at the
-                    // zeroed pages a freshly created texture starts with, which samples
-                    // as (U=0, V=0) and reads as a strong green cast. Planar formats
-                    // (and the luma plane) are one sample per texel, so they are
-                    // unaffected. The >= 4K staging arm multiplies the same factor, so
-                    // it never had this either -- it is not a route that bypasses the
-                    // arithmetic, contrary to what this note used to claim.
-                    const auto samplesPerTexel = (input.layout == 2 && plane != 0) ? 2u : 1u;
-                    const auto rowBytes = ((uploadWidth + (1u << xShift) - 1) >> xShift) *
-                        samplesPerTexel * (input.bitDepth > 8 ? 2u : 1u);
-                    const auto copyStart = std::chrono::steady_clock::now();
-                    const std::size_t moved = CopyUploadPlane(
-                        static_cast<std::uint8_t*>(mapped.pData),
-                        static_cast<std::size_t>(mapped.RowPitch),
-                        uploadPlanes[plane], static_cast<std::size_t>(uploadLines[plane]),
-                        rowBytes, rows, ResolveUploadCopyModeCached());
-                    uploadCopy100ns_.fetch_add(To100ns(
-                        std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
-                    uploadCopyBytes_.fetch_add(moved, std::memory_order_relaxed);
-                    context_->Unmap(sourceTextures_[plane], 0);
-                }
-                uploadPath_.store(2, std::memory_order_relaxed);
-            }
-        } else {
-            const auto copyStart = std::chrono::steady_clock::now();
-            context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, uploadPlanes[0],
-                uploadLines[0], 0);
-            uploadCopy100ns_.fetch_add(To100ns(
-                std::chrono::steady_clock::now() - copyStart), std::memory_order_relaxed);
-            // The driver owns the byte count here, so this arm records no bytes and
-            // stays identifiable by path 3 rather than diluting bytes-per-upload.
-            uploadPath_.store(3, std::memory_order_relaxed);
-        }
-        uploadCount_.fetch_add(1, std::memory_order_relaxed);
-        upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
-            std::chrono::nanoseconds>(std::chrono::steady_clock::now() - uploadStart).count() / 100));
+        const auto uploaded = UploadPlanarFrames(uploadPlanes, uploadLines,
+            uploadWidth, uploadHeight, input);
+        if (uploaded != FFFResult::Success) return uploaded;
     } else if (floatRgb) {
         // Verbatim (no quantisation) so negatives and super-whites survive; taken from uploadPlanes/
         // uploadLines, like directYuv above, so an engaged downscale cannot leave a top-left crop.
@@ -9081,6 +9313,10 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
         swapChain_->Release();
         swapChain_ = nullptr;
     }
+    // Unregister before the textures go away: the CUDA driver holds a reference to
+    // every registered plane and would be left with dangling handles.
+    cudaInterop_.Reset();
+    if (cudaTransferFrame_ != nullptr) av_frame_free(&cudaTransferFrame_);
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         ReleaseCom(sourceViews_[plane]);
         ReleaseCom(sourceTextures_[plane]);
@@ -9144,6 +9380,10 @@ FFFResult PlayerVideoRenderer::RecreateDeviceResources() noexcept {
     return result;
 }
 
+void PlayerVideoRenderer::ClearDeviceRecoveryRequest() noexcept {
+    deviceRecoveryRequested_.store(false, std::memory_order_release);
+}
+
 void PlayerVideoRenderer::ResetMedia() noexcept {
     StopCoverBackdropThread();
     StopTimedTextThread();
@@ -9158,6 +9398,11 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     ReleaseOffscreenTarget();
     ReleaseCoverBackdropResources();
     ReleaseScaleResources();
+    // Media boundary: drop the CUDA binding before the planes it refers to, and forget
+    // a refusal -- the next stream may be opened on another adapter entirely.
+    cudaInterop_.Reset();
+    cudaInteropRefused_.store(false, std::memory_order_relaxed);
+    if (cudaTransferFrame_ != nullptr) av_frame_free(&cudaTransferFrame_);
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         ReleaseCom(sourceViews_[plane]);
         ReleaseCom(sourceTextures_[plane]);
@@ -9177,7 +9422,8 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     // A previous 8K/RGBA64 source can leave hundreds of MiB in this staging
     // vector. Media replacement is already a pipeline boundary, so release it.
     std::vector<std::uint8_t>().swap(convertedRgb_);
-    hasCachedVideo_ = false; sourceExternal_ = false; sourceLimitedToNativeSize_ = false;
+    hasCachedVideo_ = false; sourceExternal_ = false; sourceCudaInterop_ = false;
+    sourceLimitedToNativeSize_ = false;
     sourceCoverArt_ = false;
     sourceImageMode_ = false;
     viewZoomBits_.store(1.0f, std::memory_order_relaxed);
