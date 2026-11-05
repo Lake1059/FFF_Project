@@ -407,6 +407,39 @@ struct FFF3FPSnapshot {
     // by this field instead of being silently averaged in.
     // Appended at the end for the offset reason above.
     std::uint32_t uploadPath;
+    // Cumulative wall-clock costs of the pipeline stages that previously had no
+    // metric at all, in the same 100 ns base as the other diagnostics:
+    //   videoDecode100ns - video decoding (both the generic/hardware arm and the
+    //                      software decode worker; measured around the actual
+    //                      send/receive decode work, not the queue wait).
+    //   demuxRead100ns   - demux av_read_frame calls. Back-pressure sleeps are
+    //                      not included.
+    //   trueHdrBlit100ns / vsrBlit100ns - the ApplyTrueHdr / ApplySuperResolution
+    //                      blits inside DrawCachedVideo.
+    //   mainDraw100ns    - the whole DrawWithShader call (state setup + draw).
+    //   scalePass100ns   - each ExecuteScalePass, draw included.
+    // Appended at the end for the offset reason above.
+    std::uint64_t videoDecode100ns;
+    std::uint64_t demuxRead100ns;
+    std::uint64_t trueHdrBlit100ns;
+    std::uint64_t vsrBlit100ns;
+    std::uint64_t mainDraw100ns;
+    std::uint64_t scalePass100ns;
+    // Session totals; seeking clears timestamp baselines, not recorded faults.
+    std::uint64_t corruptPackets;
+    std::uint64_t timestampAnomalies;
+    std::uint64_t slowReads;
+    std::uint64_t readErrors;
+    std::uint64_t decodeErrors;
+    std::uint64_t incompleteReads;
+    // Highest packet end observed; does not assert that every earlier byte exists.
+    std::int64_t availableDuration100ns;
+    // The container declared a duration, or normal EOF established the final end.
+    // A bitrate estimate and the growing observed extent do not set this flag.
+    std::uint32_t durationKnown;
+    std::uint32_t waitingForInput;
+    double playbackRate;
+    std::uint64_t audioFailures;
 };
 // Layout teeth. FFF3FPSnapshot is read by fixed offset from the VB/C# hosts and from
 // the probes, which is why it is append-only; that rule is unenforceable until the
@@ -414,7 +447,7 @@ struct FFF3FPSnapshot {
 // shifting a host's view of the struct at runtime.
 // Values below were measured by compiling a probe against this header (cl /std:c++20,
 // offsetof/sizeof printed) -- not derived from a field table.
-static_assert(sizeof(FFF3FPSnapshot) == 464,
+static_assert(sizeof(FFF3FPSnapshot) == 592,
     "FFF3FPSnapshot size changed: hosts and probes read it by fixed offset");
 static_assert(offsetof(FFF3FPSnapshot, externalAudioOffset100ns) == 88, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, iamfActive) == 364, "offset pin");
@@ -432,6 +465,16 @@ static_assert(offsetof(FFF3FPSnapshot, scalePassCount) == 432, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, uploadCount) == 440, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, uploadCopyBytes) == 448, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, uploadPath) == 456, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, videoDecode100ns) == 464, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, demuxRead100ns) == 472, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, trueHdrBlit100ns) == 480, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, vsrBlit100ns) == 488, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, mainDraw100ns) == 496, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, scalePass100ns) == 504, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, corruptPackets) == 512, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, durationKnown) == 568, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, playbackRate) == 576, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, audioFailures) == 584, "offset pin");
 
 
 struct FFF3FPAudioPeakLevels {
@@ -883,6 +926,10 @@ FFF3FP_API FFFResult FFF3FP_Pause(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_DiscardAudioOutput(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Stop(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Close(FFF3FPHandle player) noexcept;
+FFF3FP_API FFFResult FFF3FP_SetPlaybackRate(FFF3FPHandle player, double rate) noexcept;
+// Accessibility mono: average every decoded input channel (including LFE), then
+// send that same signal to every output channel. Does not change the endpoint layout.
+FFF3FP_API FFFResult FFF3FP_SetMonoAudio(FFF3FPHandle player, std::uint32_t enabled) noexcept;
 FFF3FP_API FFFResult FFF3FP_Seek(FFF3FPHandle player, std::int64_t position100ns) noexcept;
 FFF3FP_API FFFResult FFF3FP_SeekKeyframe(FFF3FPHandle player, std::int64_t position100ns) noexcept;
 FFF3FP_API FFFResult FFF3FP_SeekFrame(FFF3FPHandle player, std::int64_t frameIndex) noexcept;
@@ -906,14 +953,22 @@ FFF3FP_API FFFResult FFF3FP_SetColorMode(FFF3FPHandle player, FFF3FPColorMode mo
     float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits,
     std::uint32_t forceHdrOutput) noexcept;
 // Present pacing (VRR / G-SYNC / FreeSync low-latency path):
-// enableTearing = 1 selects Present(0, DXGI_PRESENT_ALLOW_TEARING) so a VRR display
+// enableTearing = 1 requests Present(0, DXGI_PRESENT_ALLOW_TEARING) so a VRR display
 // can scan out on its own schedule; 0 keeps the default vsync-locked Present(1, 0).
+// The request alone does not change the present mode: the off-vblank flip is only
+// ever issued while the adaptive pacer is holding a pace floor -- that is, the
+// cadence has deliberately slowed because the pipeline is behind the media clock --
+// so healthy playback stays vsync-locked for every host regardless of this request.
 // Swap chains are created with the ALLOW_TEARING capability flag whenever the OS
-// reports support, so toggling does not require chain recreation. The request is a
-// preference: it is remembered across device/chain re-creation, and where the chain
-// was created without the ALLOW_TEARING flag (the OS reports no support) the renderer
-// simply keeps the vsync-locked path. Only enableTearing > 1 is rejected
+// reports support, so a later request does not require chain recreation. The request
+// is remembered across device/chain re-creation, and where the chain was created
+// without the ALLOW_TEARING flag (the OS reports no support) the renderer simply
+// keeps the vsync-locked path. Only enableTearing > 1 is rejected
 // (InvalidArgument); a successful call does not by itself prove tearing will happen.
+// There is no setter for the pace floor: it is internal session state, which also
+// means this call is a preference, not a switch -- to observe what the renderer is
+// actually doing, read GetPresentPacingStatus (pacingBypass == 1 marks the flips
+// that do go out off-vblank).
 FFF3FP_API FFFResult FFF3FP_SetPresentConfig(FFF3FPHandle player,
     std::uint32_t enableTearing) noexcept;
 // The window's flip-rate bound is automatic and not configurable:
@@ -945,12 +1000,15 @@ struct FFF3FPPresentPacingStatus {
     // layer's target frame rate but never above the declared panel rate. The adaptive
     // pace floor can lower it further while the pipeline is behind the media clock.
     float frameRateBoundHz;
-    std::uint32_t gridLocked;       // 1 = flips are snapped to the refresh grid
-    // Why the grid is not in charge when gridLocked is 0:
-    //   0 = locked, or there was nothing to pace against
-    //   1 = variable-refresh path requested (the display paces itself; snapping to a fixed
-    //       grid would only add latency)
-    //   2 = the grid is not calibrated yet (needs two frame-statistics samples)
+    std::uint32_t gridLocked;       // 1 = the flip-rate bound (frameRateBoundHz) is in
+                                    // charge of this flip; 0 = one of the bypass reasons
+                                    // below applies
+    // Why the flip-rate bound is not in charge when gridLocked is 0:
+    //   0 = the bound is in charge, or there was nothing to pace against
+    //   1 = variable-refresh path active: tearing requested AND the adaptive pacer
+    //       holds a floor (the display paces itself; snapping to a fixed grid would
+    //       only add latency). A request without a floor never lands here.
+    //   2 = no output window, or the declared panel rate could not be read
     //   3 = the native window-move loop owns the cadence for this flip
     std::uint32_t pacingBypass;
     // Signed error of the last flip's submit against the instant it was told to submit at
@@ -1629,11 +1687,12 @@ FFF3FP_API FFFResult FFF3FP_GetViewRotation(FFF3FPHandle player,
 // The snapshot field it reports through is not optional, and that is the part with
 // teeth: GetSnapshot rejects a caller whose declared size is smaller than
 // sizeof(FFF3FPSnapshot), so growing the struct forces every snapshot consumer to be
-// rebuilt against this header in lockstep with PlayerApiVersion -- for the same reason
-// the previous snapshot growth took a version bump. In this tree that version is 20;
-// the bump itself belongs to the version pass, not to this feature. A host built
-// against the older header failing with InvalidArgument is the contract working, not a
-// defect.
+// rebuilt against this header in lockstep with the snapshot's own version. That number
+// is separate from PlayerApiVersion -- the export surface is append-only and rarely
+// moves, the snapshot version moves whenever a field is appended -- and the bump belongs
+// to whichever change grows the struct, not to the feature that adds one field. A host
+// built against the older header failing with InvalidArgument is the contract working,
+// not a defect.
 //
 // Positive = audio plays later than the video (lip-sync correction). Bounded to
 // +/- 10 minutes; outside that bound, or called outside Ready/Playing/Paused/Ended, the

@@ -47,6 +47,10 @@ Friend Module 色彩变换模块接口
     ''' 旧模块没有它 ⇒ 解析不到即答空串，静默降级。</summary>
     Friend Const 内容文本入口名 As String = "FFF_ColorTransformContentText"
 
+    ''' <summary>最近帧峰值裸导出：调用线程上最近一次 分析帧 的 DV L1 逐帧峰值（尼特）。
+    ''' 旧模块没有它 ⇒ 解析不到即答 0（= 无），静默降级。</summary>
+    Friend Const 峰值入口名 As String = "FFF_ColorTransformLastFramePeakNits"
+
     ''' <summary>Authenticate 的三态返回（与模块 AuthenticateResult 同水）。</summary>
     Friend Const 解锁被拒 As Integer = 0
     Friend Const 解锁已落盘 As Integer = 1
@@ -74,6 +78,14 @@ Friend Module 色彩变换模块接口
 
     ''' <summary>音频函数表版本门，与内核 FFF3FP_AUDIO_PLUG_VERSION 同水；数值漂移即握手失败。</summary>
     Friend Const 音频表版本 As UInteger = 1UI
+
+    ''' <summary>可选自驱动注入面的导出名：逐帧注入泵（泵线程、游标、回退探测全部在
+    ''' 模块内部，宿主只交一次内核会话句柄）。旧模块没有这个导出 ⇒ 宿主不启动注入，
+    ''' 与"未解锁"同形静默。</summary>
+    Friend Const 注入面入口名 As String = "FFF_GetInjectionApi"
+
+    ''' <summary>可选注入面的版本门（模块 FFFInjectionVersion）。</summary>
+    Friend Const 注入面版本 As UInteger = 1UI
 
     ''' <summary>音频函数表字节数 = sizeof(FFF3FPAudioRenderPlug)：两枚 UInteger + 六枚指针（x64）。
     ''' 装载点会拿 音频渲染能力表 的 Marshal.SizeOf 当场对撞，不等就不把表交给内核。</summary>
@@ -208,6 +220,11 @@ Friend Module 色彩变换模块接口
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Friend Delegate Function 内容文本原型() As IntPtr
 
+    ''' <summary>最近帧峰值裸导出（无参数，答尼特值；0 = 无）。
+    ''' 与分类文本同一线程契约：只在刚调用过 分析帧 的线程上读。</summary>
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Function 峰值原型() As Single
+
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Friend Delegate Function 变换版本原型() As UInteger
 
@@ -326,6 +343,54 @@ Friend Module 色彩变换模块接口
 
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Friend Delegate Function 合成分析原型(输入地址 As IntPtr, 输出地址 As IntPtr) As Integer
+
+    ''' <summary>FFFInjectionStatus 镜像（184 B）：注入泵自己的连贯快照——计数、峰值、
+    ''' 两段文本由泵线程一次写好，宿主读到的是同一拍的值。文本是 UTF-8 NUL 结尾、
+    ''' 模块自己的措辞，宿主原样显示、不解释；泵未跑时为空。</summary>
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 注入状态
+        Public 大小 As UInteger
+        Public 运行 As UInteger
+        Public 注入帧数 As ULong
+        Public 未变帧数 As ULong
+        Public 跳过帧数 As ULong
+        Public 无据帧数 As ULong
+        Public 末帧帧号 As Long
+        Public 末帧峰值尼特 As Single
+        <MarshalAs(UnmanagedType.ByValArray, SizeConst:=64)> Public 内容文本字节 As Byte()
+        <MarshalAs(UnmanagedType.ByValArray, SizeConst:=64)> Public 合成文本字节 As Byte()
+    End Structure
+
+    ''' <summary>FFFInjectionApi 镜像：启动 / 停止 / 读快照。内核会话句柄对宿主与模块都不透明。</summary>
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 注入能力表
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 启动 As IntPtr
+        Public 停止 As IntPtr
+        Public 读状态 As IntPtr
+    End Structure
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Function 取注入表原型(版本 As UInteger, 表地址 As IntPtr) As Integer
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Function 注入启动原型(内核句柄 As IntPtr) As Integer
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Sub 注入停止原型()
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Sub 注入读状态原型(ByRef 状态 As 注入状态)
+
+    ''' <summary>把状态里一段 NUL 结尾的 UTF-8 文本拷成托管串（空段/缺省答空串）。</summary>
+    Friend Function 注入文本(字节 As Byte()) As String
+        If 字节 Is Nothing Then Return String.Empty
+        Dim 结束 = Array.IndexOf(字节, CByte(0))
+        If 结束 < 0 Then 结束 = 字节.Length
+        If 结束 <= 0 Then Return String.Empty
+        Return System.Text.Encoding.UTF8.GetString(字节, 0, 结束)
+    End Function
 
     ' ---- 搜索目录：三个入口必须同一份口径，否则"探测说在、解锁说够不到"自相矛盾 ----
 
@@ -617,10 +682,14 @@ Friend Module 色彩变换模块接口
             载荷句柄 = GCHandle.Alloc(载荷缓冲区, GCHandleType.Pinned)
             ' 分类文本裸导出：缺了（旧模块）只是"没有内容可显示"，不影响换算本身。
             Dim 内容文本地址 = 解析导出(句柄, 内容文本入口名)
+            ' 逐帧峰值裸导出：缺了（旧模块）只是"没有逐帧读数"，同上静默降级。
+            Dim 峰值地址 = 解析导出(句柄, 峰值入口名)
             ' 床渲染函数表的导出地址：旧模块没有它只是"没有这条通路"，不影响色彩侧装载。
             Dim 音频表地址 = 解析导出(句柄, 音频能力表入口名)
+            ' 自驱动注入面的导出地址：旧模块没有它 ⇒ 宿主不启动注入，通路只剩显示。
+            Dim 注入面地址 = 解析导出(句柄, 注入面入口名)
             Dim 实例 As New 色彩变换模块实例(句柄, 表, 载荷缓冲区, 载荷句柄, 内容文本地址,
-                                          音频表地址, 合成分析地址) With {.布局版本 = 布局版本}
+                                          峰值地址, 音频表地址, 合成分析地址, 注入面地址) With {.布局版本 = 布局版本}
             ' 装载成功：模块句柄的所有权已移交给实例（Dispose 时释放），别再走 Finally 的释放。
             句柄 = IntPtr.Zero
             载荷句柄 = Nothing
@@ -673,10 +742,14 @@ Friend Class 色彩变换模块实例
     Private ReadOnly _载荷句柄 As GCHandle
     ' 分类文本裸导出的地址（模块函数表之外；装载时解析一次）。
     Private ReadOnly _内容文本地址 As IntPtr
+    ' 最近帧峰值裸导出的地址（装载时解析一次）——0 = 盘上是还没有这一导出的旧模块。
+    Private ReadOnly _峰值地址 As IntPtr
     ' 外部床渲染函数表裸导出的地址（装载时解析一次）——0 = 盘上是还没有这一面的旧模块。
     Private ReadOnly _音频表入口地址 As IntPtr
     ' 可选合成面的分析入口（装载时解析一次）。0 = 旧模块/未授权/表不合格 ⇒ 不请求合成。
     Private ReadOnly _合成分析地址 As IntPtr
+    ' 可选自驱动注入面的导出地址（装载时解析一次）。0 = 旧模块 ⇒ 宿主不启动注入。
+    Private ReadOnly _注入表入口地址 As IntPtr
     ' 表一旦交给内核就必须留着模块：内核持有的是指向本模块代码段的裸函数指针与它自己
     ' 分配的 context，FreeLibrary 之后下一次渲染调用就是踩空。所以交出成功后 Dispose
     ' 跳过卸载（代价是这一份映射陪进程到结束，与"功能可用"相比是可接受的）。
@@ -684,18 +757,34 @@ Friend Class 色彩变换模块实例
     Private _音频表函数 As 取音频表原型
     ' GetDelegateForFunctionPointer 的结果按需缓存一次；字段必须显式写类型。
     Private _内容文本函数 As 内容文本原型
+    Private _峰值函数 As 峰值原型
+    Private _注入表函数 As 取注入表原型
+    Private _注入启动 As 注入启动原型
+    Private _注入停止 As 注入停止原型
+    Private _注入读状态 As 注入读状态原型
+    ' 自驱动泵是**进程级单例**（模块内部一个全局运行标志、停止无参），而宿主按会话持有
+    ' 一份实例。这两个字段把"泵此刻绑的是哪个内核句柄"记在进程级（Shared），否则换会话
+    ' 时会出现：新会话 start 被"已在跑"拒掉、宿主按快照判成功，紧接着旧会话释放时
+    ' 无参停止把泵停掉 —— 新会话再也没有泵，且没有任何一处会报错。
+    Private Shared ReadOnly _泵锁 As New Object()
+    Private Shared _泵当前句柄 As IntPtr
+    ' 本实例启动过的那一份（Dispose 只能停自己起的，不能停别人的）。
+    Private _本实例泵句柄 As IntPtr
     Private ReadOnly _锁 As New Object()
     Private _已释放 As Boolean
 
     Friend Sub New(模块 As IntPtr, 表 As 色彩变换能力表, 载荷缓冲区 As Byte(), 载荷句柄 As GCHandle,
-                   内容文本地址 As IntPtr, 音频表入口地址 As IntPtr, 合成分析地址 As IntPtr)
+                   内容文本地址 As IntPtr, 峰值地址 As IntPtr, 音频表入口地址 As IntPtr, 合成分析地址 As IntPtr,
+                   注入表入口地址 As IntPtr)
         _模块 = 模块
         _表 = 表
         _载荷缓冲区 = 载荷缓冲区
         _载荷句柄 = 载荷句柄
         _内容文本地址 = 内容文本地址
+        _峰值地址 = 峰值地址
         _音频表入口地址 = 音频表入口地址
         _合成分析地址 = 合成分析地址
+        _注入表入口地址 = 注入表入口地址
     End Sub
 
     ''' <summary>模块提供了可选合成面（它解释自己的逐帧参数；像素合成仍由内核完成）。
@@ -898,6 +987,158 @@ Friend Class 色彩变换模块实例
         End Try
     End Function
 
+    ''' <summary>调用线程上最近一次 <see cref="分析帧"/> 读到的 DV L1 逐帧峰值（尼特）。
+    ''' <para>⚠ 与 取内容描述 同一线程契约：只能在**刚调用过 分析帧 的同一线程**（泵线程）上读
+    ''' （模块侧按线程保存快照）。</para>
+    ''' <para>导出缺失（早于该 ABI 的模块）、未解锁、本帧无 blob 或无 L1 块时答 0；不抛。</para></summary>
+    Public Function 取最近帧峰值() As Single
+        If _峰值地址 = IntPtr.Zero Then Return 0F
+        Try
+            Dim 函数 = _峰值函数
+            If 函数 Is Nothing Then
+                函数 = CType(Marshal.GetDelegateForFunctionPointer(_峰值地址, GetType(峰值原型)), 峰值原型)
+                _峰值函数 = 函数
+            End If
+            Return 函数()
+        Catch ex As Exception
+            Return 0F
+        End Try
+    End Function
+
+    ''' <summary>模块提供了自驱动注入面（逐帧注入泵整只活在模块内部）。缺席时宿主
+    ''' 不启动注入，内容/峰值/合成三段显示随之没来源，按空串静默。</summary>
+    Public ReadOnly Property 支持注入 As Boolean
+        Get
+            Return _注入表入口地址 <> IntPtr.Zero
+        End Get
+    End Property
+
+    ''' <summary>启动自驱动注入泵：交给它内核会话句柄（对双方都不透明），泵自己解析
+    ''' 内核导出、自己追环、自己判回退。<para>幂等口径：泵已在跑时 start 被模块拒绝，
+    ''' 此时若快照说"运行中"按成功算（重复 start 不是故障）。未解锁也算成功——泵在
+    ''' 模块内部按 250ms 重试解析自己的分析面，票据落盘后自恢复。</para>
+    ''' <para>答 False 的仅有的情形：模块没有注入面 / 握手不合格 / 泵拒绝且确实没在跑。
+    ''' 不抛。</para></summary>
+    Public Function 启动注入(内核句柄 As IntPtr) As Boolean
+        If _注入表入口地址 = IntPtr.Zero OrElse 内核句柄 = IntPtr.Zero Then Return False
+        If _已释放 Then Return False
+        Try
+            SyncLock _泵锁
+                ' 已经在给这个句柄跑。重复 start 不是故障 —— 但也绝不能顺手 stop 一次，
+                ' 那会把自己刚接管的泵停掉。
+                If _泵当前句柄 = 内核句柄 Then
+                    _本实例泵句柄 = 内核句柄
+                    Return True
+                End If
+                If Not 确保注入委托() Then Return False
+                ' 泵归别的会话（模块是进程级单例，两个会话没法并存）：先真停掉它
+                ' （模块的 stop 含线程 join，同步返回），再交到自己的句柄上。
+                ' 不这么做就会留下"新会话 start 被拒、宿主按快照判成功、泵其实还绑在
+                ' 旧句柄上"的局面 —— 旧会话一释放把泵停掉，新会话从此静默无泵。
+                If _泵当前句柄 <> IntPtr.Zero Then 真停泵()
+                If _注入启动(内核句柄) = 0 Then
+                    _泵当前句柄 = 内核句柄
+                    _本实例泵句柄 = 内核句柄
+                    Return True
+                End If
+                ' 拒绝。唯一非故障的含义是"已在跑"，可我们刚停过、停是同步的，此刻仍在跑
+                ' 只能是别处并发起的 —— 归属不可确认，按未生效答 False：宁可信息图层不显示，
+                ' 也不把一份不属于本会话的读数显示成生效。
+                Return False
+            End SyncLock
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>把注入表的三支函数指针解析成委托（幂等；表只取一次，委托只解一次）。</summary>
+    Private Function 确保注入委托() As Boolean
+        If _注入表入口地址 = IntPtr.Zero Then Return False
+        If _注入启动 IsNot Nothing AndAlso _注入停止 IsNot Nothing AndAlso _注入读状态 IsNot Nothing Then
+            Return True
+        End If
+        If _注入表函数 Is Nothing Then
+            _注入表函数 = CType(Marshal.GetDelegateForFunctionPointer(
+                _注入表入口地址, GetType(取注入表原型)), 取注入表原型)
+        End If
+        Dim 表 As New 注入能力表 With {.大小 = CUInt(Marshal.SizeOf(Of 注入能力表)()), .版本 = 0UI}
+        Dim 钉住 = GCHandle.Alloc(表, GCHandleType.Pinned)
+        Dim 返回 As Integer
+        Try
+            返回 = _注入表函数(注入面版本, 钉住.AddrOfPinnedObject())
+            表 = CType(Marshal.PtrToStructure(钉住.AddrOfPinnedObject(), GetType(注入能力表)), 注入能力表)
+        Finally
+            钉住.Free()
+        End Try
+        If 返回 <> 0 OrElse 表.版本 <> 注入面版本 OrElse
+           表.大小 < CUInt(Marshal.SizeOf(Of 注入能力表)()) OrElse
+           表.启动 = IntPtr.Zero OrElse 表.停止 = IntPtr.Zero OrElse 表.读状态 = IntPtr.Zero Then
+            Return False
+        End If
+        _注入启动 = CType(Marshal.GetDelegateForFunctionPointer(表.启动, GetType(注入启动原型)), 注入启动原型)
+        _注入停止 = CType(Marshal.GetDelegateForFunctionPointer(表.停止, GetType(注入停止原型)), 注入停止原型)
+        _注入读状态 = CType(Marshal.GetDelegateForFunctionPointer(表.读状态, GetType(注入读状态原型)), 注入读状态原型)
+        Return True
+    End Function
+
+    ''' <summary>停掉进程级那一份泵并清空归属。调用方必须已持 <c>_泵锁</c>。</summary>
+    Private Sub 真停泵()
+        Try
+            If _注入停止 IsNot Nothing Then _注入停止()
+        Catch ex As Exception
+            ' 停泵失败不该把调用方拖死：模块 PROCESS_DETACH 兜底还会再停一次。
+        End Try
+        _泵当前句柄 = IntPtr.Zero
+        _本实例泵句柄 = IntPtr.Zero
+    End Sub
+
+    ''' <summary>停泵（幂等、不抛）。必须在内核会话句柄销毁**之前**调用——泵的每次
+    ''' 原生调用都要用活句柄，句柄销毁后泵线程再进内核就是 use-after-free。</summary>
+    ''' <param name="内核句柄">本会话的句柄。只有泵正绑在它上面时才真停；泵归别的会话时
+    ''' 放手不动 —— 否则"换文件"里旧会话的释放会把新会话刚接管的泵停死。传 Nothing 表示
+    ''' 无条件停（进程级复位用；常规路径一律传句柄）。</param>
+    Public Sub 停止注入(Optional 内核句柄 As IntPtr = Nothing)
+        Try
+            SyncLock _泵锁
+                If _泵当前句柄 = IntPtr.Zero Then
+                    ' 泵已经不在（进程级那份没了）：本实例的记录一并作废，
+                    ' 免得 Dispose 拿它去停一个不存在的泵。
+                    _本实例泵句柄 = IntPtr.Zero
+                    Return
+                End If
+                If 内核句柄 <> IntPtr.Zero AndAlso _泵当前句柄 <> 内核句柄 Then Return
+                If Not 确保注入委托() Then
+                    _泵当前句柄 = IntPtr.Zero
+                    _本实例泵句柄 = IntPtr.Zero
+                    Return
+                End If
+                真停泵()
+            End SyncLock
+        Catch ex As Exception
+            ' 停泵失败不阻断会话清理；模块自身的 PROCESS_DETACH 兜底还会再停一次。
+        End Try
+    End Sub
+
+    ''' <summary>读泵的连贯快照（同拍计数 + 文本 + 峰值）。泵没启动 / 无注入面 / 异常时
+    ''' 答 False 且把状态清零（末帧帧号 = -1）。</summary>
+    Public Function 读取注入状态(ByRef 状态 As 注入状态) As Boolean
+        状态 = New 注入状态 With {.末帧帧号 = -1L}
+        ' 卸载之后绝不进模块代码：FreeLibrary 已回收它的代码段，委托指针指向的
+        ' 就是别的模块的地址了。释放与界面读快照不在同一线程时，这条是唯一的护栏。
+        If _已释放 Then Return False
+        If _注入读状态 Is Nothing Then Return False
+        Try
+            Dim 本地 As 注入状态 = 状态
+            本地.大小 = CUInt(Marshal.SizeOf(Of 注入状态)())
+            _注入读状态(本地)
+            状态 = 本地
+            Return True
+        Catch ex As Exception
+            状态 = New 注入状态 With {.末帧帧号 = -1L}
+            Return False
+        End Try
+    End Function
+
     ''' <summary>握手取外部床渲染函数表。旧模块没有这一面 / 未授权 / 表不合格 ⇒ 返回 Nothing
     ''' 并给出只进日志的原因，按既定口径与"模块不在盘上"同等处理：不提示、不报错、
     ''' 床继续由内核自己的矩阵折叠处理（那是现网行为，不是新的失败分支）。</summary>
@@ -958,16 +1199,21 @@ Friend Class 色彩变换模块实例
             If _已释放 Then Return
             _已释放 = True
         End SyncLock
+        ' 先停自驱动注入泵：泵线程拿着内核会话句柄与模块导出地址，会话句柄销毁或
+        ' FreeLibrary 之后泵再进循环就是踩空。只停本实例起的那一份 —— 泵是进程级
+        ' 单例，已经交给别的会话的泵不归这里管。幂等、不抛。
+        If _本实例泵句柄 <> IntPtr.Zero Then 停止注入(_本实例泵句柄)
+        ' 音频表一旦交给内核，这条映射与载荷缓冲都还活在内核的渲染路径上：内核持有
+        ' 的是表里的裸函数指针和它自己那份指向载荷缓冲的地址。此时回收任何一样都会
+        ' 让下一次渲染调用踩空，所以整份实例搁置到进程结束（_已释放 已置位，读取
+        ' 路径不再进模块）。这段早退必须排在 Free 载荷句柄之前。
+        If _音频表已交出 Then Return
         Try
             If _载荷句柄.IsAllocated Then _载荷句柄.Free()
         Catch
             ' 释放失败不应掩盖后续清理
         End Try
         If _模块 <> IntPtr.Zero Then
-            If _音频表已交出 Then
-                ' 见 _音频表已交出 的说明：内核还拿着这张表里的指针，不能卸载。
-                Return
-            End If
             Try
                 FreeLibrary(_模块)
             Catch ex As DllNotFoundException

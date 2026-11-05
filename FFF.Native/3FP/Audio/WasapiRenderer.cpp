@@ -306,6 +306,28 @@ FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame, const BedR
     setRematrixOption("lfe_mix_level", LfeMixLevel);
     if (rejectedOptions != 0)
         SetError("WASAPI downmix options were partially rejected; using FFmpeg defaults.");
+    if (monoAudio_) {
+        // Explicitly include ALL source channels, even LFE and height channels.
+        // Averaging bounds coherent full-scale inputs; identical rows replicate
+        // the mono mix to every physical output, without a spatial downmix first.
+        const auto channels = effective.layout.nb_channels;
+        if (channels <= 0) {
+            swr_free(&resampler_);
+            return FFFResult::InvalidArgument;
+        }
+        try {
+            const std::vector<double> matrix(static_cast<std::size_t>(channels) * outputChannels_,
+                1.0 / channels);
+            if (swr_set_matrix(resampler_, matrix.data(), channels) < 0) {
+                swr_free(&resampler_);
+                SetError("FFmpeg could not configure the mono audio matrix.");
+                return FFFResult::FfmpegFailure;
+            }
+        } catch (...) {
+            swr_free(&resampler_);
+            return FFFResult::NativeFailure;
+        }
+    }
     if (swr_init(resampler_) < 0) {
         if (resampler_ != nullptr) swr_free(&resampler_);
         av_channel_layout_uninit(&inputChannelLayout_);
@@ -314,6 +336,14 @@ FFFResult PlayerWasapiRenderer::EnsureResampler(const AVFrame* frame, const BedR
         return FFFResult::FfmpegFailure;
     }
     return FFFResult::Success;
+}
+
+void PlayerWasapiRenderer::SetMonoAudio(const bool enabled) noexcept {
+    if (monoAudio_ == enabled) return;
+    monoAudio_ = enabled;
+    if (resampler_ != nullptr) swr_free(&resampler_);
+    bedRenderedByPlug_ = false;
+    PublishRuntimeDiagnostics();
 }
 
 void PlayerWasapiRenderer::SetAudioRenderPlug(const FFF3FPAudioRenderPlug* const plug) noexcept {
@@ -355,7 +385,7 @@ void PlayerWasapiRenderer::SetAsrTap(std::shared_ptr<AsrAudioTap> tap) noexcept 
 }
 
 PlayerWasapiRenderer::BedRoute PlayerWasapiRenderer::SelectBedRoute(const AVFrame* const frame) noexcept {
-    if (!plugInstalled_.load(std::memory_order_acquire)) return BedRoute::Native;
+    if (monoAudio_ || !plugInstalled_.load(std::memory_order_acquire)) return BedRoute::Native;
     // The seam renders a stereo pair, so it owns the bed only against a 2-channel
     // endpoint. A multichannel device keeps today's route, unchanged.
     if (outputChannels_ != 2) return BedRoute::Native;

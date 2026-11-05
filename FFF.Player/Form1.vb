@@ -8,6 +8,7 @@ Public Class Form1
     Private Const WM_ENTERSIZEMOVE As Integer = &H231
     Private Const WM_EXITSIZEMOVE As Integer = &H232
     Private Const WM_APPCOMMAND As Integer = &H319
+    Private Const DWMWA_CLOAK As Integer = 13
     Private Enum 多媒体操作
         下一项 = 11
         上一项 = 12
@@ -30,9 +31,7 @@ Public Class Form1
         "swresample",
         "swscale"
     }
-    ' O3（2026-10-29）：探测即预载——命中内核会搜索的目录时，句柄保留到进程结束，
-    ' 内核稍后 delay-load 同一模块只做引用计数自增，不再把整条闭包重新映射一遍。
-    ' 依据：3fp/build/imgperf/o3o4_analysis.md §1.4；实测探测段 85–92 ms。
+    ' 保留预载句柄，供内核稍后复用同一份模块。
     Private Shared ReadOnly 保留的核心文件句柄 As New List(Of IntPtr)
 
     Private 画面控件 As 播放器画面控件
@@ -53,11 +52,7 @@ Public Class Form1
     Private 视频超分辨率控制器 As 播放器视频超分辨率控制器
     ' AI 实时字幕（docs/ai-subtitles/）：默认关；开启后由控制器自理 worker 生命周期。
     Private AI字幕控制器 As 播放器AI字幕控制器
-    ' 实机性能采样：仅当 FFF3FP_PERF_OUT / FFF3FP_PERF_SECONDS 同时给出时才会被创建，
-    ' 正常使用时恒为 Nothing。
-    Private 性能采样 As 性能采样器
     Private 视频自动HDR控制器 As 播放器视频自动HDR控制器
-    ' AI 实时字幕（docs/ai-subtitles/）：默认关；开启后由控制器自理 worker 生命周期。
     Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
@@ -67,9 +62,8 @@ Public Class Form1
     Private 当前弹幕路径 As String = String.Empty
     Private 待打开外部文件 As String = String.Empty
 
-    ' 【2026-11-01 图片优先启动】chrome 默认延后时为 True。只在 Form1_Load 与
-    ' Form1_Shown 两个 UI 线程点读/写，无跨线程问题。
-    Private 延后窗口Attach As Boolean
+    Private 界面首绘已完成 As Boolean
+
     Private 待选中播放列表路径 As String = String.Empty
     Private 正在关闭 As Boolean
     Private 核心文件检查通过 As Boolean
@@ -78,6 +72,52 @@ Public Class Form1
     Private 已跳过HDR强制确认 As Boolean
 
     Private Event 方向键快捷键已请求 As KeyEventHandler
+
+    <DllImport("dwmapi.dll")>
+    Private Shared Function DwmSetWindowAttribute(hwnd As IntPtr, attribute As Integer,
+                                                  ByRef value As Integer, size As Integer) As Integer
+    End Function
+
+    <DllImport("dwmapi.dll")>
+    Private Shared Function DwmFlush() As Integer
+    End Function
+
+    Protected Overrides Sub OnHandleCreated(e As EventArgs)
+        ' Cloak 保留逻辑可见性，让 LakeUI 的子窗口可以完成 GPU 首绘。
+        If Not 界面首绘已完成 AndAlso Not DesignMode AndAlso
+            ComponentModel.LicenseManager.UsageMode <> ComponentModel.LicenseUsageMode.Designtime Then
+            Dim 隐藏 = 1
+            Marshal.ThrowExceptionForHR(DwmSetWindowAttribute(Handle, DWMWA_CLOAK, 隐藏, 4))
+        End If
+        MyBase.OnHandleCreated(e)
+    End Sub
+
+    Private Shared Sub 同步绘制控件树(控件 As Control)
+        If Not 控件.Visible OrElse 控件.IsDisposed Then Return
+        控件.CreateControl()
+        控件.Refresh()
+        Dim GPU控件 = TryCast(控件, LakeUI.D3D_IGpuRenderable)
+        If GPU控件 IsNot Nothing AndAlso 控件.ClientSize.Width > 0 AndAlso 控件.ClientSize.Height > 0 Then
+            ' Cloak 后 WM_PAINT 可能被裁掉；通过 LakeUI 的同步桥接提交首帧。
+            Using 图形 = 控件.CreateGraphics(),
+                  绘制参数 As New PaintEventArgs(图形, 控件.ClientRectangle)
+                LakeUI.D3D_PaintBridge.PaintRenderable(绘制参数, 控件, GPU控件)
+            End Using
+        End If
+        For Each 子控件 As Control In 控件.Controls
+            同步绘制控件树(子控件)
+        Next
+    End Sub
+
+    Private Sub 完成界面首绘()
+        If 正在关闭 OrElse 界面首绘已完成 Then Return
+        PerformLayout()
+        同步绘制控件树(Me)
+        Marshal.ThrowExceptionForHR(DwmFlush())
+        Dim 隐藏 = 0
+        Marshal.ThrowExceptionForHR(DwmSetWindowAttribute(Handle, DWMWA_CLOAK, 隐藏, 4))
+        界面首绘已完成 = True
+    End Sub
 
     Protected Overrides Sub WndProc(ByRef m As Message)
         If m.Msg = WM_APPCOMMAND AndAlso 窗口当前有焦点() Then
@@ -94,9 +134,7 @@ Public Class Form1
 
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         当前主窗体 = Me
-        ' GPU 预热串行化（VBS.001，C-WARMUP-J@1）：UI 线程首次触碰 D3D_DeviceGlobals/D2D
-        ' 之前等预热线程收尾，消除 LakeUI 弱双检/双锁分裂的跨线程并发窗口
-        ' （T1 实测等待 ≈0 ms：预热与 Load 早段并行）。Join 异常走 Catch 兜底，不中断启动链。
+        ' LakeUI 设备创建与 UI 首次使用必须串行，避免预热线程竞争。
         Try
             My.MyApplication.GPU预热线程?.Join()
         Catch
@@ -112,20 +150,7 @@ Public Class Form1
         LakeUI.FloatingToolTipForm.BackdropTintColor = Color.FromArgb(120, 0, 0, 0)
         LakeUI.FloatingToolTipForm.BackdropBlurRadius = 30
         LakeUI.FloatingToolTipForm.BackdropBlurPasses = 2
-        ' 【2026-11-01 图片优先启动】chrome（Attach）默认延后到图片上屏之后（Form1_Shown
-        ' 的消息队列里排在开图之后）。依据：用户定位"窗口无所谓，先看见图片"；
-        ' 图片渲染走画面控件的子窗口句柄，不依赖 chrome。同 exe A/B（n=16）：
-        ' T1 1151→792、T2 1251→919（−331.6 ms，p=0，0 废轮）——Attach 与开图在
-        ' 消息队列里重叠，故收益略小于其 440 ms 全额。
-        ' 代价（实测，attachverify 两臂各 8 帧）：窗口先以标准边框出现，chrome 接管
-        ' 时几何微调一次（客户区 1303×874 → chrome 形态，约 1.4%），顶/底部条带
-        ' 统计与正常模式一致（差 0.1）⇒ chrome 完整接管，之后帧间 diff=0（无闪烁）。
-        ' FFF_ATTACH_EARLY=1 恢复旧顺序（Load 内同步 Attach）。
-        If Environment.GetEnvironmentVariable("FFF_ATTACH_EARLY") = "1" Then
-            ThisIsYourWindow1.Attach(Me)
-        Else
-            延后窗口Attach = True
-        End If
+        ThisIsYourWindow1.Attach(Me)
         KeyPreview = True
         MinimumSize = New Size(875, 500)
         更新弹幕按钮可见性()
@@ -177,8 +202,7 @@ Public Class Form1
         ' AI 实时字幕：必须在字幕图层呈现器之前建 —— 呈现器要拿它的「取当前条目」
         ' 委托当绘制扩展。worker 起停／菜单开关／媒体切换重装 tap 全在控制器里，
         ' Form1 只保留这一处传参和一个事件订阅（失败静默，绝不影响既有字幕）。
-        ' ⚠ 控制器本身**不**跟着图层呈现器延后：它是 创建图层呈现器() 的输入，
-        '   而那个方法要到 Form1_Shown 才跑。控制器只建对象、不开线程，代价可忽略。
+        ' 控制器只建对象、不开线程，代价可忽略。
         AI字幕控制器 = New 播放器AI字幕控制器(
             MCM_AI字幕,
             Function() 播放控制器.取当前句柄(),
@@ -191,10 +215,6 @@ Public Class Form1
         AI字幕控制器.应用设置()
         AddHandler 播放控制器.媒体已打开, AddressOf AI字幕控制器.媒体已打开
 
-        ' 【2026-10-31 启动优化】四个图层呈现器（字幕/弹幕/歌词/信息）的构造已延后：
-        ' 原在此处吃掉 24_streamsel_done→25_layers_done 段 177.5 ms。
-        ' 现在由 Form1_Shown 在派发开图之后调用 创建图层呈现器()。
-        ' 注：此处不再构造任何呈现器，全部由 创建图层呈现器() 承担。
         AddHandler 画面控件.Ctrl滚轮, AddressOf 画面控件_Ctrl滚轮
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
             AddressOf 播放控制器.重绑输出窗口)
@@ -205,6 +225,7 @@ Public Class Form1
             Function() 播放控制器.当前媒体路径,
             Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI),
             Function() 播放控制器.读取原始帧(),
+            AddressOf 播放控制器.设置播放速度,
             Function() 播放控制器.当前视图旋转,
             AddressOf 播放控制器.安全读取媒体信息)
         视角360控制器 = New 播放器360视角控制器(
@@ -295,22 +316,10 @@ Public Class Form1
         AddHandler 方向键快捷键已请求, AddressOf 剪辑区间控制器.处理方向键快捷键
         界面呈现器.启动()
         更新弹幕按钮状态()
-        ' 【2026-10-31 实验】Form1_Load 里这次 PerformLayout 与控制器内部 应用画面尺寸() 里的
-        ' 窗体.PerformLayout() 重复（docs/123 §12.2 记"重复是真的，但不要钱"——本轮重测）。
-        ' FFF_SKIP_EXPLICIT_LAYOUT=1 时跳过本处，用于同 exe A/B。
-        If Environment.GetEnvironmentVariable("FFF_SKIP_EXPLICIT_LAYOUT") <> "1" Then
-            PerformLayout()
-        End If
+        创建图层呈现器()
         窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
+        PerformLayout()
         核心文件检查通过 = True
-        ' 实机性能采样：环境变量没给全就是 Nothing，此处等价于没这几行。
-        ' 放在 Load 末尾是因为要拿到画面控件（视口口径）与播放控制器（快照来源）。
-        性能采样 = 性能采样器.尝试创建(
-            Function() 播放控制器?.安全读取快照(),
-            Function() If(画面控件 Is Nothing, ClientSize, 画面控件.ClientSize),
-            Me)
-        性能采样?.启动()
-
     End Sub
 
     Private Shared Function 可以加载核心文件(文件名 As String) As Boolean
@@ -469,16 +478,8 @@ Public Class Form1
         按钮图标.应用(MB_选择流, 播放器按钮图标.流选择)
     End Sub
 
-    ''' <summary>
-    ''' 四个图层呈现器（字幕/弹幕/歌词/信息）的构造。**延后到首帧之后调用**
-    ''' （2026-10-31 启动优化）：它们原在 Form1_Load 里，实测吃掉
-    ''' 24_streamsel_done→25_layers_done 段 177.5 ms，且各自 ctor 内会 Start 60 Hz 计时器
-    ''' （三条泵 = 6 条线程）。外部引用点全部带 `?.`/`IsNot Nothing` 守卫，晚建不会 NPE。
-    ''' 唯一的裸调用（信息图层呈现器.应用全局字体）已一并搬到这里。
-    ''' </summary>
     Private Sub 创建图层呈现器()
-        ' 幂等早退（已构造则跳过）+ 关闭竞争守卫（LIFECYCLE）：窗体已进入关闭流程时
-        ' 不再构造呈现器，避免 BeginInvoke 队列里的延迟调用在已 Closed 的窗体上启动泵线程。
+        ' 关闭之后不再创建图层及其计时器。
         If 正在关闭 OrElse 字幕图层呈现器 IsNot Nothing Then
             Return
         End If
@@ -510,16 +511,18 @@ Public Class Form1
             Function() 播放控制器.当前弹幕, AddressOf 播放控制器.读取定时文字状态,
             AddressOf 播放控制器.读取弹幕状态, Function() 播放控制器.WASAPI模式,
             AddressOf 播放控制器.读取色彩变换内容描述,
+            AddressOf 播放控制器.读取色彩变换外部峰值尼特,
             AddressOf 播放控制器.提交播放器信息图层,
             AddressOf 播放控制器.读取视频超分辨率图层文本,
             AddressOf 播放控制器.读取视频自动HDR图层文本,
-            EL合成状态提供器:=AddressOf 播放控制器.读取色彩变换EL合成已见过,
+            AddressOf 播放控制器.读取色彩变换合成文本,
             AI字幕活动提供器:=Function() AI字幕控制器 IsNot Nothing AndAlso AI字幕控制器.Worker运行中)
         信息图层呈现器.应用全局字体(设置.实例对象.字体)
     End Sub
 
     Private Sub Form1_Shown(sender As Object, e As EventArgs) Handles Me.Shown
         If Not 核心文件检查通过 Then
+            完成界面首绘()
             BeginInvoke(Sub()
                             LakeUI.ExOverlayMsgBox(Me, 核心文件错误说明,
                                 MsgBoxStyle.Critical Or MsgBoxStyle.OkOnly, "播放器核心文件缺失")
@@ -533,39 +536,16 @@ Public Class Form1
         Dim 启动文件 = My.Application.取出待处理启动文件()
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
         待打开外部文件 = String.Empty
-        ' 【2026-10-31 启动优化】执行顺序说明（这决定它能不能真的省时间）：
-        '   BeginInvoke 只是**排进消息队列**，本过程返回后才轮到它。若把 创建图层呈现器()
-        '   写成同步调用，它会**抢在开图前面**跑 ⇒ 等于没延后（第一版实测只有 −107.9，
-        '   一部分就是被这个顺序吃掉的）。
-        '   这里：先 BeginInvoke 开图，再把图层构造**也**排队（排在开图之后），
-        '   让开图/解码先跑、图层构造随后与它重叠。
-        If Not String.IsNullOrEmpty(请求文件) Then
-            BeginInvoke(Sub() 打开外部文件(请求文件))
-            ' 【2026-11-01 图片优先】延后的 chrome 排在**开图之后**：消息队列按序执行，
-            ' Attach 要等图片先上屏（这正是延后的目的）。无启动文件时没有"先看图"
-            ' 诉求，Shown 里同步 Attach，窗口立即带完整 chrome。
-            If 延后窗口Attach Then
-                BeginInvoke(Sub()
-                                ' 关闭竞争守卫（LIFECYCLE）：队列消化前窗体可能已进入关闭流程，此时不 Attach。
-                                If 正在关闭 Then Return
-                                ThisIsYourWindow1.Attach(Me)
-                            End Sub)
-            End If
-            BeginInvoke(Sub() 创建图层呈现器())
-        Else
-            If 延后窗口Attach Then ThisIsYourWindow1.Attach(Me)
-            创建图层呈现器()
-        End If
+        ' 排在 Load/Shown 产生的布局回调之后，再同步提交整棵控件树。
+        BeginInvoke(Sub()
+                        完成界面首绘()
+                        If Not String.IsNullOrEmpty(请求文件) Then 打开外部文件(请求文件)
+                    End Sub)
 
-        ' 启动期优先级借让收尾：HIGH 只需要覆盖到首帧附近。Shown 后 600 ms 恢复
-        ' 拉高前保存的原始 PriorityClass（My.MyApplication.启动期原始优先级）而非常量
-        ' Normal——start /high 启动时原始值就是 High，不被降级；且仅当到点仍是 High
-        ' 时才改写（内核 PlacementPolicy 若已接管则不动，不与它的播放期 Boost 状态机
-        ' 抢同一个旋钮——它到播放泵启动后才首次采样）。
         If My.MyApplication.启动优先级已拉高 Then
             Dim 降回线程 As New Thread(Sub()
                 Try
-                    Thread.Sleep(600)
+                    Thread.Sleep(1500)
                     Using 降回进程 As System.Diagnostics.Process = System.Diagnostics.Process.GetCurrentProcess()
                         If My.MyApplication.启动优先级已拉高 AndAlso
                             降回进程.PriorityClass = ProcessPriorityClass.High Then
@@ -762,8 +742,6 @@ Public Class Form1
             AI字幕控制器.Dispose()
             AI字幕控制器 = Nothing
         End If
-        性能采样?.Dispose()
-        性能采样 = Nothing
         光盘控制器?.Dispose()
         画面菜单控制器?.Dispose()
         窗口布局控制器?.释放()
@@ -1157,8 +1135,8 @@ Public Class Form1
         播放控制器?.应用自动HDR模式设置()
     End Sub
 
-    Friend Sub 应用空间音频设置()
-        播放控制器?.应用空间音频设置()
+    Friend Sub 应用音频效果设置()
+        播放控制器?.应用音频效果设置()
     End Sub
 
     Friend Sub 应用字幕设置()

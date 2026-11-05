@@ -166,6 +166,23 @@ struct FFF3FPSnapshot {
     public ulong uploadCount;
     public ulong uploadCopyBytes;
     public uint uploadPath;
+    public ulong videoDecode100ns;
+    public ulong demuxRead100ns;
+    public ulong trueHdrBlit100ns;
+    public ulong vsrBlit100ns;
+    public ulong mainDraw100ns;
+    public ulong scalePass100ns;
+    public ulong corruptPackets;
+    public ulong timestampAnomalies;
+    public ulong slowReads;
+    public ulong readErrors;
+    public ulong decodeErrors;
+    public ulong incompleteReads;
+    public long availableDuration100ns;
+    public uint durationKnown;
+    public uint waitingForInput;
+    public double playbackRate;
+    public ulong audioFailures;
 }
 
 enum FFFResult : int { Success = 0, InvalidArgument = -1, InvalidState = -2, BufferTooSmall = -3 }
@@ -173,6 +190,8 @@ enum FFFResult : int { Success = 0, InvalidArgument = -1, InvalidState = -2, Buf
 static class Native {
     public const string DllName = "FFF.Native.dll";
     public const uint FFF3FP_AUDIO_TAP_VERSION = 1u;
+    // FFF3FPSnapshot carries its own version, independent of the API version.
+    public const uint FFF3FP_SNAPSHOT_VERSION = 22u;
     public const uint FFF3FP_AUDIO_TAP_DEFAULT_RING_BYTES = 32u * 1024u * 1024u;
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -335,7 +354,7 @@ static class Program {
         if (Native.FFF3FP_Close(player) != FFFResult.Success) { /* not open yet */ }
         var open = Native.FFF3FP_Open(player, media);
         if (open != FFFResult.Success) { Console.WriteLine($"FAIL: Open = {Name(open)}"); return false; }
-        var snap = new FFF3FPSnapshot { size = (uint)Marshal.SizeOf<FFF3FPSnapshot>(), version = Native.FFF3FP_GetApiVersion() };
+        var snap = new FFF3FPSnapshot { size = (uint)Marshal.SizeOf<FFF3FPSnapshot>(), version = Native.FFF3FP_SNAPSHOT_VERSION };
         for (int i = 0; i < waitMs / 50; i++) {
             if (Native.FFF3FP_GetSnapshot(player, ref snap) == FFFResult.Success && snap.state >= FFF3FPState.Ready) break;
             Thread.Sleep(50);
@@ -420,7 +439,7 @@ static class Program {
         var open = Native.FFF3FP_Open(player, media);
         Console.WriteLine($"open({media}) = {Name(open)}  (snapshot size = {Marshal.SizeOf<FFF3FPSnapshot>()})");
         if (open != FFFResult.Success) { Native.FFF3FP_Destroy(player); return; }
-        var snap = new FFF3FPSnapshot { size = (uint)Marshal.SizeOf<FFF3FPSnapshot>(), version = Native.FFF3FP_GetApiVersion() };
+        var snap = new FFF3FPSnapshot { size = (uint)Marshal.SizeOf<FFF3FPSnapshot>(), version = Native.FFF3FP_SNAPSHOT_VERSION };
         for (int i = 0; i < 100; i++) {
             Thread.Sleep(100);
             if (Native.FFF3FP_GetSnapshot(player, ref snap) != FFFResult.Success) {

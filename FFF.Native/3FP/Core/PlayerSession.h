@@ -112,6 +112,8 @@ public:
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;
     FFFResult SetAudioExclusiveMode(bool exclusive) noexcept;
+    FFFResult SetPlaybackRate(double rate) noexcept;
+    FFFResult SetMonoAudio(bool enabled) noexcept;
     FFFResult SetVolume(float volume, bool muted) noexcept;
     // External bed render plug (3FP/Api/FFF.Player.AudioRenderPlug.h). Install,
     // replace or clear; the session owns the context from the call that installs it
@@ -258,6 +260,7 @@ private:
     // F3 顺序预滚：从当前 demux 位置把参考流包顺序读完直到判停点。true=判停命中
     //（落入现有成功收尾）；false=走 B2 重开还原。
     bool SeekFragmentedPreroll(std::int64_t target100ns) noexcept;
+    bool PrepareGrowingSeek(std::int64_t position100ns) noexcept;
     // B2 重开还原：CloseFormat→OpenFormat→flush→重定位→ReportError。返回 false 表示
     // 重开失败、已走 Fail 会话失败路径，调用方返回 FfmpegFailure 即可。
     bool ReopenFormatForSeek(std::int64_t recallPosition100ns) noexcept;
@@ -325,6 +328,18 @@ private:
     // Evaluates measured decode load and, when the decoder is the constraint, reopens
     // it at the next rung. Never descends.
     void EvaluateDecoderLoad() noexcept;
+    // Decode-skip ladder: 0 = AVDISCARD_DEFAULT, 1 = AVDISCARD_NONREF, 2 = AVDISCARD_NONKEY.
+    // A second consumer of the same per-tick load evidence, with its own 2 s window:
+    // when the decoder cannot keep the queue fed, or more than half of what it decodes
+    // is discarded at presentation, one rung is spent instead of a worker reopen. Strictly
+    // up-only: the rung survives rate changes, pauses and seeks; only a new media re-arms
+    // it. Runs for every decode mode, including hardware, where it saves
+    // presentation-pipeline work even if the GPU still decodes.
+    void EvaluateVideoSkipRung() noexcept;
+    // Writes videoSkipRung_ into the video decoder context. Worker-thread-only; takes
+    // softwareVideoCodecMutex_ because the software-decode offload thread submits
+    // packets to the same context under it.
+    void ApplyVideoSkipRung() noexcept;
     FFFResult CompleteHardwareFallback(const char* failureMessage) noexcept;
     // Presents the first frame while the session stays stopped. Used for a still
     // picture and for an animated one, both of which must show a frame without
@@ -448,6 +463,10 @@ private:
     void PublishPlaybackClock(std::int64_t position100ns,
         std::int64_t limit100ns) const noexcept;
     void ResetClock(std::int64_t position100ns) noexcept;
+    void ResetTempo(std::int64_t position100ns) noexcept;
+    FFFResult TempoAudio(AVFrame* frame, std::int64_t position100ns,
+        std::int64_t timestampResolution100ns = 0) noexcept;
+    std::int64_t AudioMediaPosition(std::int64_t position100ns) const noexcept;
     static bool NormalizeLocalPath(const char* pathUtf8, std::string& normalized,
         std::string& error) noexcept;
 
@@ -612,6 +631,7 @@ private:
     std::string externalAudioPath_;
     PlayerAudioRuntimeState audioRuntimeState_;
     std::unique_ptr<PlayerWasapiRenderer> audioRenderer_;
+    bool monoAudio_ = false; // Worker-owned; survives seeks, media and endpoint changes.
     // The bed render plug the host installed. Copied, because the caller may free
     // its own struct the moment the call returns; `context` is the kernel's from
     // then on and only this class releases it (see SetAudioRenderPlug / ~PlayerSession).
@@ -638,6 +658,15 @@ private:
     // audio path never takes it.
     mutable std::mutex asrTapMutex_;
     std::shared_ptr<AsrAudioTap> asrTap_;
+    AVFilterGraph* tempoGraph_ = nullptr;
+    AVFilterContext* tempoInput_ = nullptr;
+    AVFilterContext* tempoOutput_ = nullptr;
+    std::atomic<std::int64_t> tempoOrigin_{0};
+    std::int64_t tempoSamples_ = 0;
+    std::atomic<double> playbackRate_{1.0};
+    std::atomic<std::uint64_t> audioFailures_{0};
+    mutable std::atomic<double> playbackClockRate_{1.0};
+    mutable std::atomic<std::int64_t> playbackClockIdentityUntil_{0};
     PlayerVideoRenderer videoRenderer_;
     std::wstring audioEndpointId_;
     bool audioExclusive_;
@@ -651,6 +680,15 @@ private:
     // container carries no duration. Worker thread only: DoOpen, PumpPlayback and
     // DoClose all run serially on the command-queue worker, so no extra lock guards it.
     std::int64_t demuxedExtent100ns_ = 0;
+    std::vector<std::int64_t> lastPacketDts_;
+    bool growingInput_ = false;
+    bool inputReadBlocked_ = false;
+    std::int64_t inputRetryTick_ = 0;
+    std::atomic<ULONGLONG> inputDeadlineTick_{0};
+    std::int64_t inputResumePosition100ns_ = 0;
+    std::int32_t decodedSurfaceFormat_ = -1;
+    AVCodecContext* decodedSurfaceDecoder_ = nullptr;
+    bool surfaceFormatRefreshPending_ = false;
     // Image details for GetImageInfo, built once on the worker thread at the end
     // of DoOpen and handed out under snapshotMutex_ - the decoder-owned frames
     // the build reads must not be touched from the caller's thread.
@@ -687,6 +725,19 @@ private:
     // constant 上（实测过这个形状：12b 的 40fps 段要到第 ~40 帧才进散布）。
     const char* publishedFrameRateMode_ = nullptr;
     static constexpr std::int32_t MinimumCadenceModeSamples = 12;
+    // --- Video decode-skip ladder (see EvaluateVideoSkipRung) ---
+    // Worker-thread-only. The rung is the policy; appliedSkip* record what was actually
+    // written to which context so a ladder reopen or a software fallback (both install a
+    // fresh AVCodecContext) re-applies it on the next playback tick.
+    std::uint32_t videoSkipRung_ = 0;
+    std::uint32_t appliedSkipRung_ = 0;
+    AVCodecContext* appliedSkipDecoder_ = nullptr;
+    std::uint32_t skipWindowIterations_ = 0;
+    std::uint32_t skipWindowStarvedIterations_ = 0;
+    std::uint64_t skipWindowDecoded_ = 0;
+    std::uint64_t skipWindowPresented_ = 0;
+    std::int64_t skipWindowStart100ns_ = 0;
+    std::uint32_t skipDeficitWindows_ = 0;
     // --- Adaptive presentation pacing (see the late branch of PresentVideoFrame) ---
     // Worker-thread-only. When the pipeline falls behind the media clock the classic
     // answer is to discard late pictures; the pacer instead holds every picture at a
@@ -721,6 +772,12 @@ private:
     // apart from snapshot_.droppedVideoFrames (which means "the pipeline fell behind the
     // media clock"). Read from the API thread, written on the worker thread.
     std::atomic<std::uint64_t> displayRateDiscardedFrames_{ 0 };
+    // Cumulative stage timings in the same 100 ns base as the snapshot fields of
+    // the same name. Written from the decode/demux worker threads with relaxed
+    // fetch_add (same pattern as VideoRenderer's timing atomics), read by
+    // GetSnapshot on the API thread.
+    std::atomic<std::uint64_t> videoDecode100ns_{ 0 };
+    std::atomic<std::uint64_t> demuxRead100ns_{ 0 };
     std::int64_t nextUntimedVideoPosition100ns_;
     std::deque<std::int64_t> framePtsIndex_;
     std::int64_t framePtsIndexBase_;

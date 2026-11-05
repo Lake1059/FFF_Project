@@ -91,6 +91,7 @@ Public NotInheritable Class 播放器配置
     Public Property 视频缓冲区策略 As Integer
     Public Property 音频缓冲区策略 As Integer
     Public Property 启用空间音频 As Boolean = True
+    Public Property 启用单声道音频 As Boolean = False
     ' SDR 源的 scRGB 呈现策略，对应内核 FFF3FPConfiguration.sdrScRgbMode。
     ' 1 = 自动（默认）：位深 >8 的 SDR 源优先上 16bit scRGB 链；
     ' 0 = 从不：留在 8/10bit gamma 链（历史行为，留作退回开关）。
@@ -216,6 +217,17 @@ Public NotInheritable Class 播放器快照
         上传次数 = 值.上传次数
         上传复制字节 = 值.上传复制字节
         上传路径 = 值.上传路径
+        播放速度 = 值.播放速度
+        音频故障次数 = 值.音频故障次数
+        传入数据包异常 = 值.传入数据包异常
+        时间戳异常 = 值.时间戳异常
+        读取过慢 = 值.读取过慢
+        读取错误 = 值.读取错误
+        解码错误 = 值.解码错误
+        数据未写入 = 值.数据未写入
+        已知总时长 = 值.已知总时长 <> 0
+        等待文件写入 = 值.等待文件写入 <> 0
+        已读取范围 = TimeSpan.FromTicks(Math.Max(0, 值.已读取范围100纳秒))
     End Sub
 
     Public ReadOnly Property 状态 As 播放状态
@@ -223,6 +235,17 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 请求色彩模式 As 色彩输出模式
     Public ReadOnly Property 实际色彩模式 As 色彩输出模式
     Public ReadOnly Property 播放位置 As TimeSpan
+    Public ReadOnly Property 播放速度 As Double
+    Public ReadOnly Property 音频故障次数 As ULong
+    Public ReadOnly Property 已知总时长 As Boolean
+    Public ReadOnly Property 等待文件写入 As Boolean
+    Public ReadOnly Property 已读取范围 As TimeSpan
+    Public ReadOnly Property 传入数据包异常 As ULong
+    Public ReadOnly Property 时间戳异常 As ULong
+    Public ReadOnly Property 读取过慢 As ULong
+    Public ReadOnly Property 读取错误 As ULong
+    Public ReadOnly Property 解码错误 As ULong
+    Public ReadOnly Property 数据未写入 As ULong
     Public ReadOnly Property 总时长 As TimeSpan
     Public ReadOnly Property 帧序号 As Long
     Public ReadOnly Property 原始帧PTS As Long

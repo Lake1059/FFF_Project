@@ -54,6 +54,7 @@ Public NotInheritable Class 播放器控制器
     Private 强制HDR输出 As Boolean
     Private 当前WASAPI模式 As WASAPI共享模式 = WASAPI共享模式.共享
     Private 当前音量 As Single = 1.0F
+    Private 当前播放速度 As Double = 1.0R
     Private 已静音 As Boolean
     Private 正在切换会话 As Boolean
     Private 已释放 As Boolean
@@ -276,10 +277,17 @@ Public NotInheritable Class 播放器控制器
         Return 安全读取会话(Function(目标) 目标.色彩变换内容描述, String.Empty)
     End Function
 
-    ''' <summary>色彩变换通路已发出过 EL 残差合成请求（粘滞位，流重启后复位）。
-    ''' 供信息图层 HDR 行的 EL 状态段与测试读取，任何时候都能安全问。</summary>
-    Public Function 读取色彩变换EL合成已见过() As Boolean
-        Return 安全读取会话(Function(目标) 目标.色彩变换EL合成已见过, False)
+    ''' <summary>色彩变换通路最近一帧的逐帧峰值（尼特；无会话 / 未解锁 / 无 L1 时 0）。
+    ''' 供信息图层 HDR 行的逐帧源峰值段读取，任何时候都能安全问。</summary>
+    Public Function 读取色彩变换外部峰值尼特() As Single
+        Return 安全读取会话(Function(目标) 目标.色彩变换外部峰值尼特, 0F)
+    End Function
+
+    ''' <summary>模块自发布的残差合成状态行（模块自己的措辞，宿主原样显示不解释；
+    ''' 通路未跑 / 模块没说时为空串）。
+    ''' 供信息图层 HDR 行的合成状态段与测试读取，任何时候都能安全问。</summary>
+    Public Function 读取色彩变换合成文本() As String
+        Return 安全读取会话(Function(目标) 目标.色彩变换合成文本, String.Empty)
     End Function
 
     ''' <summary>解锁成功后调用：把注入通路从“补装载已放弃”里拉回来。
@@ -1013,6 +1021,14 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    Public Sub 设置播放速度(速度 As Double)
+        If Not Double.IsFinite(速度) OrElse 速度 < 0.1R OrElse 速度 > 5.0R Then
+            Throw New ArgumentOutOfRangeException(NameOf(速度))
+        End If
+        当前播放速度 = 速度
+        会话?.设置播放速度(速度)
+    End Sub
+
     Public Sub 设置音量(音量值 As Single)
         当前音量 = Math.Clamp(音量值, 0.0F, 1.0F)
         If 当前音量 > 0 Then 已静音 = False
@@ -1090,12 +1106,13 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
-    Friend Sub 应用空间音频设置()
+    Friend Sub 应用音频效果设置()
         If 已释放 OrElse 会话 Is Nothing Then Return
         Try
-            会话.设置空间音频(设置.实例对象.启用空间音频)
+            Dim 配置 = 设置.实例对象
+            会话.设置音频效果(配置.启用空间音频, 配置.启用单声道音频)
         Catch ex As 播放器异常
-            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用空间音频设置"))
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用音频效果设置"))
         End Try
     End Sub
 
@@ -1352,6 +1369,7 @@ Public NotInheritable Class 播放器控制器
                     Function() 创建会话(解码器, 候选色彩输出, 性能选项),
                     此次取消.Token)
                 候选会话.设置音量(当前音量, 已静音)
+                候选会话.设置播放速度(当前播放速度)
                 Await 候选会话.打开Async(路径, 此次取消.Token)
                 此次取消.Token.ThrowIfCancellationRequested()
                 Dim 初始快照 = 候选会话.当前快照
@@ -1421,6 +1439,14 @@ Public NotInheritable Class 播放器控制器
                 Try
                     原会话.播放()
                 Catch ex As 播放器异常
+                End Try
+                ' 候选会话在打开时就把注入泵从旧会话手上接管过去了（泵是进程级单例，
+                ' 一个进程只有一份）。候选随后被释放、泵随之归零 —— 既然回退到旧会话
+                ' 继续播，就得把它的通路重新拉起来，否则画面还在、信息图层再没有读数。
+                Try
+                    原会话.唤醒色彩变换通路()
+                Catch ex As Exception
+                    ' 通路唤醒失败不影响回退播放本身；信息图层按空值显示。
                 End Try
             End If
             If 打开异常 IsNot Nothing AndAlso Not 已释放 AndAlso
@@ -1507,6 +1533,7 @@ Public NotInheritable Class 播放器控制器
             .视频缓冲区策略 = 性能.视频缓冲区策略,
             .音频缓冲区策略 = 性能.音频缓冲区策略,
             .启用空间音频 = 性能.启用空间音频,
+            .启用单声道音频 = 性能.启用单声道音频,
             .输出窗口句柄 = IntPtr.Zero,
             .事件同步上下文 = 事件同步上下文
         })
@@ -1597,7 +1624,18 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Private Sub 会话_操作完成(sender As Object, e As 播放器事件参数)
-        If sender Is 会话 Then RaiseEvent 状态已变化(Me, EventArgs.Empty)
+        If sender IsNot 会话 Then Return
+        Try
+            Using 文档 = JsonDocument.Parse(e.详情JSON)
+                Dim 操作 As JsonElement
+                If 文档.RootElement.TryGetProperty("operation", 操作) AndAlso
+                    操作.GetString() = "seek-unavailable" Then
+                    RaiseEvent 操作提示(Me, New 播放器操作提示事件参数("目标位置尚未写入，继续播放现有数据"))
+                End If
+            End Using
+        Catch ex As JsonException
+        End Try
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
     End Sub
 
     Private Sub 会话_播放结束(sender As Object, e As 播放器事件参数)

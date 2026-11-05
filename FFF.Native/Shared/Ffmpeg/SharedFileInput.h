@@ -26,6 +26,9 @@ public:
         std::size_t size, std::string& error) noexcept;
 
     AVIOContext* Context() const noexcept { return context_; }
+    bool HasWriter() const noexcept;
+    void SetInterrupt(AVIOInterruptCB interrupt) noexcept { interrupt_ = interrupt; }
+    void DetectUnwrittenData(bool enabled) noexcept { detectUnwrittenData_ = enabled; }
 
 private:
     static int Read(void* opaque, std::uint8_t* buffer, int bufferSize) noexcept;
@@ -37,4 +40,7 @@ private:
     std::uint8_t* data_{};      // owned copy of the in-memory media, when used
     std::int64_t position_{};   // read cursor for the in-memory media
     std::int64_t size_{};
+    std::wstring path_;
+    bool detectUnwrittenData_ = false;
+    AVIOInterruptCB interrupt_{};
 };

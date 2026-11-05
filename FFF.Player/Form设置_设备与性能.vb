@@ -38,7 +38,7 @@
             MCB_视频缓冲区策略.SelectedIndex = 配置.视频缓冲区策略
             MCB_音频缓冲区策略.SelectedIndex = 配置.音频缓冲区策略
             MCB_视频缩放质量.SelectedIndex = 配置.视频缩放质量选项
-            MCB_空间音频.SelectedIndex = If(配置.启用空间音频, 0, 1)
+            MCB_音频效果.SelectedIndex = If(配置.启用单声道音频, 2, If(配置.启用空间音频, 1, 0))
         Finally
             正在初始化 = False
         End Try
@@ -46,7 +46,7 @@
 
     Private Sub 选项_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_GPU解码设备.SelectedIndexChanged,
         MCB_视频缓冲区策略.SelectedIndexChanged, MCB_音频缓冲区策略.SelectedIndexChanged,
-        MCB_视频缩放质量.SelectedIndexChanged, MCB_空间音频.SelectedIndexChanged
+        MCB_视频缩放质量.SelectedIndexChanged, MCB_音频效果.SelectedIndexChanged
         If 正在初始化 Then Return
         Dim 控件 = DirectCast(sender, LakeUI.ModernComboBox)
         If 控件.SelectedIndex < 0 Then Return
@@ -59,9 +59,10 @@
             配置.音频缓冲区策略 = 控件.SelectedIndex
         ElseIf 控件 Is MCB_视频缩放质量 Then
             配置.视频缩放质量选项 = 控件.SelectedIndex
-        ElseIf 控件 Is MCB_空间音频 Then
-            配置.启用空间音频 = 控件.SelectedIndex = 0
-            Form1.当前主窗体?.应用空间音频设置()
+        ElseIf 控件 Is MCB_音频效果 Then
+            配置.启用空间音频 = 控件.SelectedIndex = 1
+            配置.启用单声道音频 = 控件.SelectedIndex = 2
+            Form1.当前主窗体?.应用音频效果设置()
         End If
     End Sub
 End Class

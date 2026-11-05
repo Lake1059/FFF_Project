@@ -135,6 +135,11 @@ FFFResult FFF3FP_Pause(const FFF3FPHandle player) noexcept { return player ? sta
 FFFResult FFF3FP_DiscardAudioOutput(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->DiscardAudioOutput() : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_Stop(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->Stop() : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_Close(const FFF3FPHandle player) noexcept { return player ? static_cast<PlayerSession*>(player)->Close() : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_SetPlaybackRate(const FFF3FPHandle player, const double rate) noexcept { return player ? static_cast<PlayerSession*>(player)->SetPlaybackRate(rate) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_SetMonoAudio(const FFF3FPHandle player, const std::uint32_t enabled) noexcept {
+    return player && enabled <= 1 ? static_cast<PlayerSession*>(player)->SetMonoAudio(enabled != 0)
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_Seek(const FFF3FPHandle player, const std::int64_t position) noexcept { return player ? static_cast<PlayerSession*>(player)->Seek(position) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SeekKeyframe(const FFF3FPHandle player, const std::int64_t position) noexcept { return player ? static_cast<PlayerSession*>(player)->SeekKeyframe(position) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SeekFrame(const FFF3FPHandle player, const std::int64_t frame) noexcept { return player ? static_cast<PlayerSession*>(player)->SeekFrame(frame) : FFFResult::InvalidArgument; }

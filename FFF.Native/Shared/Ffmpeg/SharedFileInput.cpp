@@ -75,6 +75,7 @@ std::unique_ptr<SharedFileInput> SharedFileInput::Open(const char* pathUtf8,
         }
 
         auto input = std::make_unique<SharedFileInput>();
+        input->path_ = path;
         input->file_ = CreateFileW(path.c_str(), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -82,13 +83,6 @@ std::unique_ptr<SharedFileInput> SharedFileInput::Open(const char* pathUtf8,
             error = "Could not open local media with shared access: " + LastWin32Error();
             return nullptr;
         }
-
-        LARGE_INTEGER fileSize{};
-        if (!GetFileSizeEx(input->file_, &fileSize) || fileSize.QuadPart < 0) {
-            error = "Could not read the local media size: " + LastWin32Error();
-            return nullptr;
-        }
-        input->size_ = fileSize.QuadPart;
 
         input->buffer_ = static_cast<std::uint8_t*>(av_malloc(AvioBufferSize));
         if (input->buffer_ == nullptr) {
@@ -151,6 +145,7 @@ int SharedFileInput::Read(void* opaque, std::uint8_t* buffer,
     auto* input = static_cast<SharedFileInput*>(opaque);
     if (input == nullptr || buffer == nullptr || bufferSize < 0)
         return AVERROR(EINVAL);
+    if (input->interrupt_.callback && input->interrupt_.callback(input->interrupt_.opaque)) return AVERROR_EXIT;
     // In-memory media: copy what is left of the buffer and advance the cursor.
     if (input->file_ == INVALID_HANDLE_VALUE) {
         if (input->data_ == nullptr) return AVERROR(EINVAL);
@@ -168,7 +163,25 @@ int SharedFileInput::Read(void* opaque, std::uint8_t* buffer,
     if (!ReadFile(input->file_, buffer, static_cast<DWORD>(bufferSize),
         &bytesRead, nullptr))
         return AVERROR(EIO);
+    // Incomplete Matroska allocations contain unwritten zero blocks. Do not let
+    // the EBML resynchronizer scan gigabytes past the download frontier.
+    if (input->detectUnwrittenData_ && bytesRead >= 4096 &&
+        std::all_of(buffer, buffer + bytesRead, [](std::uint8_t value) { return value == 0; })) {
+        LARGE_INTEGER rewind{};
+        rewind.QuadPart = -static_cast<std::int64_t>(bytesRead);
+        SetFilePointerEx(input->file_, rewind, nullptr, FILE_CURRENT);
+        return AVERROR(EAGAIN);
+    }
     return bytesRead == 0 ? AVERROR_EOF : static_cast<int>(bytesRead);
+}
+
+bool SharedFileInput::HasWriter() const noexcept {
+    if (file_ == INVALID_HANDLE_VALUE || path_.empty()) return false;
+    const auto probe = CreateFileW(path_.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (probe == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_SHARING_VIOLATION;
+    CloseHandle(probe);
+    return false;
 }
 
 std::int64_t SharedFileInput::Seek(void* opaque, const std::int64_t offset,
@@ -176,7 +189,11 @@ std::int64_t SharedFileInput::Seek(void* opaque, const std::int64_t offset,
     auto* input = static_cast<SharedFileInput*>(opaque);
     if (input == nullptr) return AVERROR(EINVAL);
     const auto origin = whence & ~AVSEEK_FORCE;
-    if (origin == AVSEEK_SIZE) return input->size_;
+    if (origin == AVSEEK_SIZE) {
+        if (input->file_ == INVALID_HANDLE_VALUE) return input->size_;
+        LARGE_INTEGER fileSize{};
+        return GetFileSizeEx(input->file_, &fileSize) ? fileSize.QuadPart : AVERROR(EIO);
+    }
     // In-memory media: the cursor is all there is to move.
     if (input->file_ == INVALID_HANDLE_VALUE) {
         if (input->data_ == nullptr) return AVERROR(EINVAL);

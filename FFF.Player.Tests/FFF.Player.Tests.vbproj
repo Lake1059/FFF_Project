@@ -13,6 +13,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FFF.Player\FFF.Player.vbproj" />
+    <None Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" Link="FFF.Native.dll"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
