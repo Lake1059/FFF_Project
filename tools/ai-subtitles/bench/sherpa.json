@@ -1,0 +1,34 @@
+{
+  "engine": "sherpa",
+  "pad30": true,
+  "threads": 6,
+  "build_s": 5.85,
+  "rows": [
+    {
+      "wav": "A-perf-en-int-w5.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        2.505,
+        2.457,
+        2.34
+      ],
+      "median_s": 2.457,
+      "min_s": 2.34,
+      "rtf": 0.491,
+      "text": "They're going to say, \"Oh, great, come on in.\" That's just the kind of devout. I mean, every."
+    },
+    {
+      "wav": "A-perf-zh-wiki-w5.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        0.981,
+        0.955,
+        0.995
+      ],
+      "median_s": 0.981,
+      "min_s": 0.955,
+      "rtf": 0.196,
+      "text": ""
+    }
+  ]
+}
