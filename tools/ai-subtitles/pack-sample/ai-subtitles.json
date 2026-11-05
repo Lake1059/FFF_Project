@@ -1,0 +1,19 @@
+{
+  "_说明": "复制这个文件到你的扩展包目录里再改。相对路径相对包根，绝对路径原样。字段完整说明见 docs/ai-subtitles/PACK_FORMAT.md。",
+  "version": 2,
+  "name": "Qwen3-ASR-0.6B（ONNX）",
+
+  "worker": "asr_worker.py",
+  "_说明worker": "必填。通常就是包根下的 asr_worker.py。",
+
+  "python": "runtime/python/python.exe",
+  "_说明python": "留空 = PATH 上的 python。这个 python 必须已 pip install sherpa-onnx —— 原生库与 ONNX Runtime 都随那个 pip 包走，3FP 本体不带任何推理 DLL。",
+
+  "model": "model",
+  "_说明model": "模型目录；留空等同于包根下的 model/。目录内三 onnx 只钉主干名（encoder.onnx 或 encoder.int8.onnx 都收，一个目录只留一份）+ tokenizer/（子目录）。可选 selftest.wav + selftest.txt，缺了就跳过金样本自检。",
+
+  "_说明models": "一般不要写。只有同一个包里真并排放了第二套权重（各占一个目录）才用，格式：档名 -> 目录，或 { \"dir\": \"目录\" }。路径不存在、缺文件、或档名写的量化形态（int8 / int4 / fp16 / fp32）与目录里实际的 encoder 文件名不符的，整档丢弃。",
+
+  "window": 5.0,
+  "step": 5.0
+}

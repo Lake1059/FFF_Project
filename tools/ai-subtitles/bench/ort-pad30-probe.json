@@ -1,0 +1,41 @@
+{
+  "engine": "ort",
+  "pad30": true,
+  "threads": 6,
+  "build_s": 9.09,
+  "rows": [
+    {
+      "wav": "A-perf-zh-wiki-w5.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        3.154
+      ],
+      "median_s": 3.154,
+      "min_s": 3.154,
+      "rtf": 0.631,
+      "text": ""
+    },
+    {
+      "wav": "B-lang-zh-auto.wav",
+      "dur_s": 5.02,
+      "runs_s": [
+        3.03
+      ],
+      "median_s": 3.03,
+      "min_s": 3.03,
+      "rtf": 0.603,
+      "text": ""
+    },
+    {
+      "wav": "A-perf-en-int-w5.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        5.492
+      ],
+      "median_s": 5.492,
+      "min_s": 5.492,
+      "rtf": 1.098,
+      "text": "They're going to say, \"Oh, great, come on in.\" That's just the kind of devout. I mean."
+    }
+  ]
+}

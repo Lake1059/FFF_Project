@@ -1,0 +1,52 @@
+{
+  "engine": "sherpa",
+  "pad30": true,
+  "threads": 6,
+  "build_s": 5.9,
+  "rows": [
+    {
+      "wav": "A-perf-zh-wiki-w5.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        0.923
+      ],
+      "median_s": 0.923,
+      "min_s": 0.923,
+      "rtf": 0.185,
+      "text": ""
+    },
+    {
+      "wav": "A-perf-zh-wiki-w20.wav",
+      "dur_s": 20.0,
+      "runs_s": [
+        2.636
+      ],
+      "median_s": 2.636,
+      "min_s": 2.636,
+      "rtf": 0.132,
+      "text": ""
+    },
+    {
+      "wav": "B-lang-zh-auto.wav",
+      "dur_s": 5.02,
+      "runs_s": [
+        1.249
+      ],
+      "median_s": 1.249,
+      "min_s": 1.249,
+      "rtf": 0.249,
+      "text": "系统。"
+    },
+    {
+      "wav": "A-perf-en-int-w5.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        2.953
+      ],
+      "median_s": 2.953,
+      "min_s": 2.953,
+      "rtf": 0.591,
+      "text": "They're going to say, \"Oh, great, come on in.\" That's just the kind of devout. I mean, every."
+    }
+  ]
+}
