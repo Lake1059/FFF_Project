@@ -1,0 +1,34 @@
+{
+  "engine": "sherpa",
+  "pad30": true,
+  "threads": 6,
+  "build_s": 6.14,
+  "rows": [
+    {
+      "wav": "C:/PLAN/3FCompare/_3fc_tmp/ai-pack/model/selftest.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        2.751,
+        2.668,
+        2.767
+      ],
+      "median_s": 2.751,
+      "min_s": 2.668,
+      "rtf": 0.55,
+      "text": "今次寻寻觅觅，终于揾到My Princess，肯借个场俾我哋玩。你知啦，喺香港。"
+    },
+    {
+      "wav": "C:/PLAN/3FCompare/_3fc_tmp/asr_probe/A-perf-en-int-w5.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        2.544,
+        2.361,
+        2.728
+      ],
+      "median_s": 2.544,
+      "min_s": 2.361,
+      "rtf": 0.509,
+      "text": "They're going to say, \"Oh, great, come on in.\" That's just the kind of devout. I mean, every."
+    }
+  ]
+}

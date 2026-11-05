@@ -1,0 +1,34 @@
+{
+  "engine": "ort",
+  "pad30": true,
+  "threads": 6,
+  "build_s": 8.93,
+  "rows": [
+    {
+      "wav": "C:/PLAN/3FCompare/_3fc_tmp/ai-pack/model/selftest.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        6.232,
+        6.156,
+        6.219
+      ],
+      "median_s": 6.219,
+      "min_s": 6.156,
+      "rtf": 1.244,
+      "text": "今次沉沉密密，終於揾到My Princess，肯借個場俾我哋玩。你知啦，係香。"
+    },
+    {
+      "wav": "C:/PLAN/3FCompare/_3fc_tmp/asr_probe/A-perf-en-int-w5.wav",
+      "dur_s": 5.0,
+      "runs_s": [
+        5.581,
+        9.384,
+        10.023
+      ],
+      "median_s": 9.384,
+      "min_s": 5.581,
+      "rtf": 1.877,
+      "text": "They're going to say, \"Oh, great, come on in.\" That's just the kind of devout. I mean."
+    }
+  ]
+}
