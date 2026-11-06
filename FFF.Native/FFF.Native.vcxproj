@@ -137,6 +137,7 @@
     <ClInclude Include="3FP\Core\MediaText.h" />
     <ClInclude Include="3FP\Subtitle\SubtitleProbe.h" />
     <ClInclude Include="3FP\Render\NvidiaVideoExtensions.h" />
+    <ClInclude Include="3FP\Render\CudaD3D11Interop.h" />
     <ClInclude Include="3FP\Hdr\HdrProcessor.h" />
     <ClInclude Include="3FP\Hdr\HdrDynamicMetadata.h" />
     <ClInclude Include="3FP\Hdr\HdrMetadataParse.h" />
@@ -173,6 +174,7 @@
     <ClCompile Include="3FP\Hdr\HdrToneCurve.cpp" />
     <ClCompile Include="3FP\Render\VideoRenderer.cpp" />
     <ClCompile Include="3FP\Render\NvidiaVideoExtensions.cpp" />
+    <ClCompile Include="3FP\Render\CudaD3D11Interop.cpp" />
     <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp" />
     <ClCompile Include="3FP\Subtitle\SubtitleProbe.cpp" />
     <ClCompile Include="3FP\Subtitle\BitmapSubtitleDecoder.cpp" />
