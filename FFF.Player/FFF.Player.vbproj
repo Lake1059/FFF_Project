@@ -8,6 +8,10 @@
       <TargetFramework>$(NetTFM)</TargetFramework>
       <!-- LakeUI 是外部商业兄弟仓，构建节奏独立，单独一个 TFM 参数 -->
       <LakeUITfm Condition="'$(LakeUITfm)' == ''">net10.0-windows10.0.17763.0</LakeUITfm>
+      <!-- LakeUI 产物配置：默认 Release + R2R（兄弟仓以 dotnet publish -p:PublishReadyToRun=true
+           产出带本机码的预编译件，宿主启动免去 LakeUI 全量 JIT）。
+           回退旧行为（Debug IL 产物）：-p:LakeUIConfig=Debug -->
+      <LakeUIConfig Condition="'$(LakeUIConfig)' == ''">Release</LakeUIConfig>
       <StartupObject>Sub Main</StartupObject>
       <UseWindowsForms>true</UseWindowsForms>
       <MyType>WindowsForms</MyType>
@@ -310,7 +314,7 @@
 
   <ItemGroup>
     <Reference Include="LakeUI">
-      <HintPath>..\..\LakeUI\LakeUI\bin\Debug\$(LakeUITfm)\LakeUI.dll</HintPath>
+      <HintPath>..\..\LakeUI\LakeUI\bin\$(LakeUIConfig)\$(LakeUITfm)\LakeUI.dll</HintPath>
     </Reference>
   </ItemGroup>
 
@@ -343,7 +347,7 @@
        默认（宿主与 LakeUI 同为 .NET 10）不发任何消息，行为与改动前一致。 -->
   <Target Name="VerifyLakeUIReference" BeforeTargets="BeforeBuild;ResolveAssemblyReferences">
     <PropertyGroup>
-      <_LakeUIRef>$(MSBuildThisFileDirectory)..\..\LakeUI\LakeUI\bin\Debug\$(LakeUITfm)\LakeUI.dll</_LakeUIRef>
+      <_LakeUIRef>$(MSBuildThisFileDirectory)..\..\LakeUI\LakeUI\bin\$(LakeUIConfig)\$(LakeUITfm)\LakeUI.dll</_LakeUIRef>
       <!-- 大版本号（net10.0-... -> 10.0），仅用于混血检测。先判长度再取子串：
            短串（如 net8.0）会让 Substring 自己抛越界，取代本要给出的明确报错。 -->
       <_NetTfmMajor Condition="$(NetTFM.Length) &gt;= 7">$(NetTFM.Substring(3, 4))</_NetTfmMajor>
@@ -352,7 +356,7 @@
     <Error Condition="'$(_NetTfmMajor)' == '' Or '$(_LakeUiTfmMajor)' == ''"
            Text="无法从 TFM 解析大版本号（NetTFM='$(NetTFM)'，LakeUITfm='$(LakeUITfm)'）。期望形如 net10.0-windows10.0.26100.0；混血检测靠它，解析不了就不能放行。" />
     <Error Condition="!Exists('$(_LakeUIRef)')"
-           Text="LakeUI 引用缺失，未找到：$(_LakeUIRef)（当前 LakeUITfm=$(LakeUITfm)）。请先在兄弟仓 LakeUI 用该目标框架构建 Debug 配置，或对本工程传入 -p:LakeUITfm=某已有目标框架 指向既有产物。" />
+           Text="LakeUI 引用缺失，未找到：$(_LakeUIRef)（当前 LakeUIConfig=$(LakeUIConfig)，LakeUITfm=$(LakeUITfm)）。请先在兄弟仓 LakeUI 用该配置与目标框架产出产物：Release 档必须是 R2R 件（dotnet publish -c Release -r win-x64 --self-contained false -p:PublishReadyToRun=true，纯 build 产物不含本机码不算 R2R），Debug 档用 dotnet build -c Debug 即可；也可对本工程传 -p:LakeUIConfig=Debug 回退，或 -p:LakeUITfm=某已有目标框架 指向既有产物。" />
     <Warning Condition="'$(_NetTfmMajor)' != '$(_LakeUiTfmMajor)'"
              Text="宿主 TFM ($(NetTFM)) 与 LakeUI TFM ($(LakeUITfm)) 大版本不一致 —— 当前是「宿主 .NET $(_NetTfmMajor) + UI 库 .NET $(_LakeUiTfmMajor)」的混血状态。运行时可工作（程序集引用向下兼容），但 LakeUI 上游一旦重建别的 TFM，本 HintPath 会静默失效。建议推进 LakeUI 同步升级到与宿主一致的目标框架。" />
   </Target>

@@ -62,6 +62,12 @@ Public Class Form1
     Private 当前弹幕路径 As String = String.Empty
     Private 待打开外部文件 As String = String.Empty
 
+    ' 【2026-11-06 图片/视频启动分流】图片/视频启动顺序不同：视频与音乐（含无文件启动）
+    ' 遵循上游 30b2a7e 的 DWM Cloak 方案（Load 内同步 chrome+图层，首绘后开图，逐字不变）；
+    ' 图片走画面优先（a8934a2 + 43a7f90）：chrome（Attach）与图层群延后到图片上屏之后。
+    ' 在 Form1_Load 早期算定一次，Shown 只读它。只读不消费快照（取出仍归 Shown）。
+    Private 本次启动图片优先 As Boolean
+
     Private 界面首绘已完成 As Boolean
 
     Private 待选中播放列表路径 As String = String.Empty
@@ -132,6 +138,19 @@ Public Class Form1
         If m.Msg = WM_EXITSIZEMOVE Then 播放控制器?.设置窗口移动状态(False)
     End Sub
 
+    ''' <summary>
+    ''' 本次启动是否走「画面优先」（仅图片）。视频/音乐/无文件启动一律 False（上游现行）。
+    ''' 判据只能用扩展名：此刻内核还没 probe，媒体信息.是静态图片 尚不可得。扩展名这一侧
+    ''' 与图片模式共用同一张表（播放列表.是图片文件），预判口径与开图后的真实判定一致。
+    ''' 快照为空（不带文件启动）没有"先看图"诉求 ⇒ 上游现行方案。
+    ''' </summary>
+    Private Function 判定本次启动图片优先() As Boolean
+        Dim 预览文件 = If(String.IsNullOrEmpty(待打开外部文件),
+                          My.Application.待处理启动文件快照(), 待打开外部文件)
+        If String.IsNullOrEmpty(预览文件) Then Return False
+        Return 播放列表.是图片文件(预览文件)
+    End Function
+
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         当前主窗体 = Me
         ' LakeUI 设备创建与 UI 首次使用必须串行，避免预热线程竞争。
@@ -150,7 +169,15 @@ Public Class Form1
         LakeUI.FloatingToolTipForm.BackdropTintColor = Color.FromArgb(120, 0, 0, 0)
         LakeUI.FloatingToolTipForm.BackdropBlurRadius = 30
         LakeUI.FloatingToolTipForm.BackdropBlurPasses = 2
-        ThisIsYourWindow1.Attach(Me)
+        ' 【2026-11-06 图片/视频启动分流】图片启动时 chrome（Attach）延后到图片上屏之后
+        ' （Shown 的消息队列里排在开图之后）。依据 a8934a2：图片渲染走画面控件的子窗口
+        ' 句柄，一丁点都不依赖 chrome；Attach 实测 440.2 ms（其中 SetWindowPos
+        ' (SWP_FRAMECHANGED) 258.5 ms 是固有成本），挡在开图前就是纯等待。
+        ' 视频/音乐/无文件启动保持上游顺序：Load 内同步 Attach（30b2a7e DWM Cloak 方案）。
+        本次启动图片优先 = 判定本次启动图片优先()
+        If Not 本次启动图片优先 Then
+            ThisIsYourWindow1.Attach(Me)
+        End If
         KeyPreview = True
         MinimumSize = New Size(875, 500)
         更新弹幕按钮可见性()
@@ -316,7 +343,16 @@ Public Class Form1
         AddHandler 方向键快捷键已请求, AddressOf 剪辑区间控制器.处理方向键快捷键
         界面呈现器.启动()
         更新弹幕按钮状态()
-        创建图层呈现器()
+        ' 【2026-11-06 图片/视频启动分流】图片启动时四个图层呈现器（字幕/弹幕/歌词/信息）
+        ' 的构造延后到图片上屏之后（Shown 的消息队列里排在开图之后）。依据 43a7f90：
+        ' 它们实测吃掉 24_streamsel_done→25_layers_done 段 177.5 ms，且各自 ctor 内
+        ' Start 60 Hz 计时器（三条泵 = 6 条线程）；外部引用点全部带 ?./IsNot Nothing 守卫，
+        ' 晚建不会 NPE。视频/音乐/无文件启动保持上游顺序：Load 内同步构造（30b2a7e）。
+        ' 图片路径下这次 应用初始画面尺寸 按无 chrome 口径计算（Attach 已延后），
+        ' 与 a8934a2 图片优先启动完全一致；chrome 接管后的几何微调由 Shown 队列自然完成。
+        If Not 本次启动图片优先 Then
+            创建图层呈现器()
+        End If
         窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
         PerformLayout()
         核心文件检查通过 = True
@@ -541,6 +577,20 @@ Public Class Form1
                         完成界面首绘()
                         If Not String.IsNullOrEmpty(请求文件) Then 打开外部文件(请求文件)
                     End Sub)
+        ' 【2026-11-06 图片/视频启动分流】图片启动（画面优先）：chrome 与图层群延后到
+        ' 图片上屏之后——消息队列按序执行，上面的委托先完成首绘 + 开图（图片上屏），
+        ' 才轮到这两条。这正是延后的目的：BeginInvoke 只是排队，若同步调用就会抢在
+        ' 图片前面（43a7f90 的关键细节）。a8934a2 同 exe A/B（n=16）：T2 −352.5 ms
+        ' （p=0，32/32 无废轮）——Attach/图层与开图在消息队列里重叠，不挡首帧。
+        ' 关闭竞争守卫（LIFECYCLE）：队列消化前窗体可能已进入关闭流程，此时不 Attach；
+        ' 创建图层呈现器 自带幂等早退。视频/音乐/无文件启动不加队列（chrome+图层
+        ' 已在 Load 同步完成，上游 30b2a7e 形态逐字不变）。
+        If 本次启动图片优先 Then
+            BeginInvoke(Sub()
+                            If Not 正在关闭 Then ThisIsYourWindow1.Attach(Me)
+                        End Sub)
+            BeginInvoke(Sub() 创建图层呈现器())
+        End If
 
         If My.MyApplication.启动优先级已拉高 Then
             Dim 降回线程 As New Thread(Sub()
