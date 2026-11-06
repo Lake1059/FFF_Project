@@ -140,6 +140,16 @@ Namespace My
             Return 文件路径
         End Function
 
+        ''' <summary>
+        ''' 只读窥视初次启动命令行带来的文件（**不消费**，Shown 里仍由 取出待处理启动文件 取走）。
+        ''' 用途：Form1_Load 要按媒体类型决定本次启动走「UI 优先」还是「画面优先」，
+        ''' 而顺序在 Load 里就定死了，那时还没有别的途径知道要开什么文件。
+        ''' 第二实例转发（StartupNextInstance）时主窗体已存在，走的是直接开图，与此无关。
+        ''' </summary>
+        Friend Function 待处理启动文件快照() As String
+            Return 待处理启动文件
+        End Function
+
         Friend Sub 记录初次启动命令行(参数 As IEnumerable(Of String))
             待处理启动文件 = Form1.取得命令行文件(参数)
         End Sub

@@ -11,6 +11,10 @@
     #   -NetTFM net11.0-windows10.0.26100.0 -LakeUITfm net10.0-windows10.0.17763.0
     [string]$LakeUITfm = "",
 
+    # LakeUI 产物配置。默认 Release（R2R 件：兄弟仓以 dotnet publish -p:PublishReadyToRun=true
+    # 产出带本机码的预编译件）。回退旧行为（Debug IL 产物）：-LakeUIConfig Debug
+    [string]$LakeUIConfig = "Release",
+
     [switch]$SkipDependencyPreparation,
 
     [switch]$SkipIamf,
@@ -30,17 +34,18 @@ $MSBuild = Get-MSBuildTool
 $DotNet = Get-DotNetTool
 
 # FFF.Player references the UI library by hint path
-# (..\..\LakeUI\LakeUI\bin\Debug\...\LakeUI.dll). LakeUI is a sibling repository
+# (..\..\LakeUI\LakeUI\bin\<LakeUIConfig>\...\LakeUI.dll, default Release = R2R artifact).
+# LakeUI is a sibling repository
 # that is not part of this one and ships no binaries, so on a fresh machine the host
 # build dies with hundreds of "undefined type LakeUI.*" errors that never name the
 # real cause. Say what to do instead of letting the compiler shout.
-$LakeUiRoot = Join-Path (Split-Path -Parent $ProjectRoot) "LakeUI\LakeUI\bin\Debug"
+$LakeUiRoot = Join-Path (Split-Path -Parent $ProjectRoot) "LakeUI\LakeUI\bin\$LakeUIConfig"
 [xml]$PlayerProject = [IO.File]::ReadAllText((Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj"))
 $RequiredLakeUITfm = if ($LakeUITfm) { $LakeUITfm } else {
     [string]@($PlayerProject.Project.PropertyGroup.LakeUITfm | Where-Object { $_ })[0].InnerText
 }
 if (-not (Test-Path -LiteralPath (Join-Path $LakeUiRoot "$RequiredLakeUITfm\LakeUI.dll") -PathType Leaf)) {
-    throw "LakeUI.dll is missing for $RequiredLakeUITfm under $LakeUiRoot. Build ..\LakeUI\LakeUI\LakeUI.vbproj -c Debug for that framework, or specify -LakeUITfm."
+    throw "LakeUI.dll is missing for $RequiredLakeUITfm under $LakeUiRoot (LakeUIConfig=$LakeUIConfig). For Release (default) the artifact must be an R2R build: dotnet publish -c Release -r win-x64 --self-contained false -p:PublishReadyToRun=true, then place the publish output's LakeUI.dll under bin\Release\<tfm>\ (a plain build output is NOT R2R). Debug fallback: dotnet build -c Debug. Or specify -LakeUIConfig / -LakeUITfm."
 }
 
 Initialize-NativeDependencies -ProjectRoot $ProjectRoot -Configuration $Configuration `
@@ -50,6 +55,7 @@ Initialize-NativeDependencies -ProjectRoot $ProjectRoot -Configuration $Configur
 $TfmArgs = @()
 if (-not [string]::IsNullOrWhiteSpace($NetTFM)) { $TfmArgs += "-p:NetTFM=$NetTFM" }
 if (-not [string]::IsNullOrWhiteSpace($LakeUITfm)) { $TfmArgs += "-p:LakeUITfm=$LakeUITfm" }
+if (-not [string]::IsNullOrWhiteSpace($LakeUIConfig)) { $TfmArgs += "-p:LakeUIConfig=$LakeUIConfig" }
 
 $NativeArgs = @(if ($SkipIamf) { '/p:HaveLibiamf=false' } else { '/p:FFF_FORCE_LIBIAMF=true' })
 & $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") `
