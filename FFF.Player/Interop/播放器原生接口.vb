@@ -240,6 +240,19 @@ Friend Structure 原生播放器快照
     Public 等待文件写入 As UInteger
     Public 播放速度 As Double
     Public 音频故障次数 As ULong
+    ' 音频源码直通（内核中性缝的尾追加三字段，2026-11-07）：
+    '   音频直通已接管 —— 1 = 直通通道拥有当前音轨（模块打包 IEC 61937 burst、
+    '                     独占非 PCM 端点），0 = 常规解码。模块缺席恒 0（静默回退
+    '                     是"今天的模样"，不是故障分支）。
+    '   音频直通模式   —— 实际生效的路由：0=解码折叠，1=IEC 码流直通；2 为
+    '                     HT 端点共享模式预留（P4），本通道不会写出。
+    '                     （宿主偏好 自动/强制/关 走 FFF3FP_SetAudioPassthroughMode，
+    '                     与这里的"生效路由"是两根轴，两处注释各自点明。）
+    '   音频直通编解码 —— 接管轨的内核编解码枚举（FFF3FPAudioPassthroughCodec），
+    '                     未接管为 0。
+    Public 音频直通已接管 As UInteger
+    Public 音频直通模式 As UInteger
+    Public 音频直通编解码 As Integer
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -1420,6 +1433,30 @@ Friend Module 播放器原生接口
 
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetMonoAudio(播放器 As 播放器原生句柄, 启用 As UInteger) As 原生播放器结果
+    End Function
+
+    ' 音频源码直通三导出（附加导出：不抬 API 版本）。表由模块产出、宿主钉住后整张
+    ' 交出，内核在装载点拷贝一份，调用返回即可解钉；IntPtr.Zero 表示撤下插槽、
+    ' 整体回到解码路径。偏好模式：0=自动 1=强制 2=关。
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetAudioPassthroughApi(播放器 As 播放器原生句柄,
+                                                  表地址 As IntPtr) As 原生播放器结果
+    End Function
+
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetAudioPassthroughMode(播放器 As 播放器原生句柄,
+                                                   模式 As UInteger) As 原生播放器结果
+    End Function
+
+    ' 生效=1 表示直通通道拥有音轨；模式回读的是宿主偏好（不是快照里的生效路由）；
+    ' 名称缓冲/编解码/突发计数都可给零——按契约它们是可选输出。
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetAudioPassthroughState(播放器 As 播放器原生句柄,
+                                                    ByRef 生效 As UInteger,
+                                                    ByRef 模式 As UInteger,
+                                                    ByRef 编解码 As UInteger,
+                                                    名称缓冲 As IntPtr, 名称容量 As UInteger,
+                                                    ByRef 突发数 As ULong) As 原生播放器结果
     End Function
 
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>

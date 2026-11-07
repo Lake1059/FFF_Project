@@ -552,7 +552,8 @@ Public Class Form1
             AddressOf 播放控制器.读取视频超分辨率图层文本,
             AddressOf 播放控制器.读取视频自动HDR图层文本,
             AddressOf 播放控制器.读取色彩变换合成文本,
-            AI字幕活动提供器:=Function() AI字幕控制器 IsNot Nothing AndAlso AI字幕控制器.Worker运行中)
+            AI字幕活动提供器:=Function() AI字幕控制器 IsNot Nothing AndAlso AI字幕控制器.Worker运行中,
+            直通文本提供器:=AddressOf 播放控制器.音频直通图层文本)
         信息图层呈现器.应用全局字体(设置.实例对象.字体)
     End Sub
 
@@ -1187,6 +1188,12 @@ Public Class Form1
 
     Friend Sub 应用音频效果设置()
         播放控制器?.应用音频效果设置()
+    End Sub
+
+    ''' <summary>设置页 → 音频直通 的后端：把三态偏好同步进控制器（钉表/撤表与内核
+    ''' 偏好都在会话侧），并在独占未开且非"关"时提示需要独占。</summary>
+    Friend Sub 应用音频直通设置()
+        播放控制器?.应用音频直通设置()
     End Sub
 
     Friend Sub 应用字幕设置()

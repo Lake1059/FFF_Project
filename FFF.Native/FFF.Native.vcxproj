@@ -124,9 +124,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="3FP\Api\FFF.Player.Api.h" />
+    <ClInclude Include="3FP\Api\FFF.Player.AudioPassthrough.h" />
     <ClInclude Include="3FP\Api\FFF.Player.AudioTap.h" />
     <ClInclude Include="3FP\Disc\DiscInput.h" />
     <ClInclude Include="3FP\Audio\AsrAudioTap.h" />
+    <ClInclude Include="3FP\Audio\AudioPassthrough.h" />
     <ClInclude Include="3FP\Audio\WasapiRenderer.h" />
     <ClInclude Include="3FP\Core\PlayerSession.h" />
     <ClInclude Include="3FP\Core\AvifIlocShim.h" />
@@ -161,6 +163,7 @@
     <ClCompile Include="3FP\Disc\DiscInput.cpp" />
     <ClCompile Include="3FP\Core\PlayerSessionDisc.cpp" />
     <ClCompile Include="3FP\Audio\AsrAudioTap.cpp" />
+    <ClCompile Include="3FP\Audio\AudioPassthrough.cpp" />
     <ClCompile Include="3FP\Audio\WasapiRenderer.cpp" />
     <ClCompile Include="3FP\Audio\IamfAudioDecoder.cpp" />
     <ClCompile Include="3FP\Core\PlayerSession.cpp" />

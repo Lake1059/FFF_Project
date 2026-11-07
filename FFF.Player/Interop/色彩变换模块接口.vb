@@ -69,6 +69,19 @@ Friend Module 色彩变换模块接口
     ''' 未授权时模块拒交这张表 ⇒ 内核继续走它自己的矩阵折叠，症状与"模块不在盘上"同形。</summary>
     Friend Const 音频能力表入口名 As String = "FFF_GetAudioRenderApi"
 
+    ''' <summary>音频源码直通函数表的导出名（第三张能力面）：帧解析 + IEC 61937 打包 +
+    ''' 格式语义仲裁全在模块，内核只做字节搬运与设备协商。旧模块没有这个导出 ⇒
+    ''' 宿主不钉表，内核整体回退解码路径——与"模块不在盘上"同形静默。</summary>
+    Friend Const 音频直通表入口名 As String = "FFF_GetAudioPassthroughApi"
+
+    ''' <summary>音频直通函数表版本门（FFF3FP_AUDIO_PASSTHROUGH_VERSION）。</summary>
+    Friend Const 音频直通表版本 As UInteger = 1UI
+
+    ''' <summary>音频直通函数表字节数 = sizeof(FFF3FPAudioPassthroughApi)：
+    ''' 两枚 UInteger + 五枚指针（上下文/描述/打包/复位/释放，x64）= 48。
+    ''' 装载点拿 镜像尺寸 当场对撞，不等就不把表交给内核（与 :90-91 的床表护栏同型）。</summary>
+    Friend Const 音频直通表大小 As UInteger = 48UI
+
     ''' <summary>可选合成面的导出名：只交逐帧参数，不交任何像素代码。
     ''' 旧模块没有这个导出 ⇒ 宿主不请求合成，整条通路与今天逐位一致。</summary>
     Friend Const 合成能力表入口名 As String = "FFF_GetElCompositionApi"
@@ -252,6 +265,24 @@ Friend Module 色彩变换模块接口
 
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Friend Delegate Function 取音频表原型(版本 As UInteger, 表地址 As IntPtr) As Integer
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Function 取直通表原型(版本 As UInteger, 表地址 As IntPtr) As Integer
+
+    ''' <summary>音频直通函数表的宿主镜像（48 B，全 blittable，与
+    ''' FFF3FPAudioPassthroughApi 同布局同序）。与床表同一纪律：宿主只把整张表
+    ''' 钉住转交给内核，自己不逐枚调用任何一列，因此不为它们声明委托原型——
+    ''' 唯一的例外是 释放（内核拒收时归还模块上下文用）。</summary>
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 音频直通能力表
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 上下文 As IntPtr
+        Public 描述 As IntPtr
+        Public 打包 As IntPtr
+        Public 复位 As IntPtr
+        Public 释放 As IntPtr
+    End Structure
 
     ''' <summary>外部床渲染函数表的宿主镜像（56 B，全 blittable）。字段次序就是 ABI：
     ''' 宿主只把整张表转交给内核（内核在装载点拷贝一份，所以调用期间钉住即可），
@@ -686,10 +717,12 @@ Friend Module 色彩变换模块接口
             Dim 峰值地址 = 解析导出(句柄, 峰值入口名)
             ' 床渲染函数表的导出地址：旧模块没有它只是"没有这条通路"，不影响色彩侧装载。
             Dim 音频表地址 = 解析导出(句柄, 音频能力表入口名)
+            ' 音频直通函数表的导出地址：旧模块没有它 ⇒ 内核整体回退解码，同上静默。
+            Dim 直通表地址 = 解析导出(句柄, 音频直通表入口名)
             ' 自驱动注入面的导出地址：旧模块没有它 ⇒ 宿主不启动注入，通路只剩显示。
             Dim 注入面地址 = 解析导出(句柄, 注入面入口名)
             Dim 实例 As New 色彩变换模块实例(句柄, 表, 载荷缓冲区, 载荷句柄, 内容文本地址,
-                                          峰值地址, 音频表地址, 合成分析地址, 注入面地址) With {.布局版本 = 布局版本}
+                                          峰值地址, 音频表地址, 直通表地址, 合成分析地址, 注入面地址) With {.布局版本 = 布局版本}
             ' 装载成功：模块句柄的所有权已移交给实例（Dispose 时释放），别再走 Finally 的释放。
             句柄 = IntPtr.Zero
             载荷句柄 = Nothing
@@ -746,6 +779,8 @@ Friend Class 色彩变换模块实例
     Private ReadOnly _峰值地址 As IntPtr
     ' 外部床渲染函数表裸导出的地址（装载时解析一次）——0 = 盘上是还没有这一面的旧模块。
     Private ReadOnly _音频表入口地址 As IntPtr
+    ' 音频直通函数表裸导出的地址（装载时解析一次）——0 = 旧模块 ⇒ 内核整体回退解码。
+    Private ReadOnly _直通表入口地址 As IntPtr
     ' 可选合成面的分析入口（装载时解析一次）。0 = 旧模块/未授权/表不合格 ⇒ 不请求合成。
     Private ReadOnly _合成分析地址 As IntPtr
     ' 可选自驱动注入面的导出地址（装载时解析一次）。0 = 旧模块 ⇒ 宿主不启动注入。
@@ -755,6 +790,8 @@ Friend Class 色彩变换模块实例
     ' 跳过卸载（代价是这一份映射陪进程到结束，与"功能可用"相比是可接受的）。
     Private _音频表已交出 As Boolean
     Private _音频表函数 As 取音频表原型
+    Private _直通表已交出 As Boolean
+    Private _直通表函数 As 取直通表原型
     ' GetDelegateForFunctionPointer 的结果按需缓存一次；字段必须显式写类型。
     Private _内容文本函数 As 内容文本原型
     Private _峰值函数 As 峰值原型
@@ -774,8 +811,8 @@ Friend Class 色彩变换模块实例
     Private _已释放 As Boolean
 
     Friend Sub New(模块 As IntPtr, 表 As 色彩变换能力表, 载荷缓冲区 As Byte(), 载荷句柄 As GCHandle,
-                   内容文本地址 As IntPtr, 峰值地址 As IntPtr, 音频表入口地址 As IntPtr, 合成分析地址 As IntPtr,
-                   注入表入口地址 As IntPtr)
+                   内容文本地址 As IntPtr, 峰值地址 As IntPtr, 音频表入口地址 As IntPtr,
+                   直通表入口地址 As IntPtr, 合成分析地址 As IntPtr, 注入表入口地址 As IntPtr)
         _模块 = 模块
         _表 = 表
         _载荷缓冲区 = 载荷缓冲区
@@ -783,9 +820,18 @@ Friend Class 色彩变换模块实例
         _内容文本地址 = 内容文本地址
         _峰值地址 = 峰值地址
         _音频表入口地址 = 音频表入口地址
+        _直通表入口地址 = 直通表入口地址
         _合成分析地址 = 合成分析地址
         _注入表入口地址 = 注入表入口地址
     End Sub
+
+    ''' <summary>模块提供了音频直通函数表（旧模块没有这个导出 ⇒ 内核整体回退解码，
+    ''' 与"模块不在盘上"同形）。</summary>
+    Public ReadOnly Property 支持音频直通 As Boolean
+        Get
+            Return _直通表入口地址 <> IntPtr.Zero
+        End Get
+    End Property
 
     ''' <summary>模块提供了可选合成面（它解释自己的逐帧参数；像素合成仍由内核完成）。
     ''' 缺席时宿主不请求合成，整条通路与今天逐位一致。</summary>
@@ -1193,6 +1239,61 @@ Friend Class 色彩变换模块实例
             Return _音频表已交出
         End Get
     End Property
+
+    ''' <summary>模块已被交出的直通函数表绑住时，本属性为真；只给日志与测试用。</summary>
+    Public ReadOnly Property 直通表已交出 As Boolean
+        Get
+            Return _直通表已交出
+        End Get
+    End Property
+
+    ''' <summary>握手取音频直通函数表。旧模块没有这一面 / 未授权 / 表不合格 ⇒ 返回
+    ''' Nothing 并给出只进日志的原因，按既定口径与"模块不在盘上"同等处理：
+    ''' 不提示、不报错、内核整体回退解码路径（那是现网行为，不是新的失败分支）。</summary>
+    Public Function 尝试取音频直通表(<Out> ByRef 原因 As String) As Nullable(Of 音频直通能力表)
+        原因 = Nothing
+        If _直通表入口地址 = IntPtr.Zero Then
+            原因 = 模块文件名 & " 里没有导出 " & 音频直通表入口名 & "——直通整体回退解码，静默降级"
+            Return Nothing
+        End If
+        Try
+            If CUInt(Marshal.SizeOf(Of 音频直通能力表)()) <> 音频直通表大小 Then
+                ' 镜像与内核契约不同水：把这张表交给内核就是让内核按错的偏移读指针。
+                原因 = "音频直通函数表镜像尺寸 " & Marshal.SizeOf(Of 音频直通能力表)().ToString() &
+                        " 与契约 " & 音频直通表大小.ToString() & " 不同水——不交出表"
+                Return Nothing
+            End If
+            If _直通表函数 Is Nothing Then
+                _直通表函数 = CType(Marshal.GetDelegateForFunctionPointer(
+                    _直通表入口地址, GetType(取直通表原型)), 取直通表原型)
+            End If
+            Dim 表 As New 音频直通能力表 With {.大小 = 音频直通表大小, .版本 = 0UI}
+            Dim 钉住 = GCHandle.Alloc(表, GCHandleType.Pinned)
+            Dim 返回 As Integer
+            Try
+                返回 = _直通表函数(音频直通表版本, 钉住.AddrOfPinnedObject())
+                表 = CType(Marshal.PtrToStructure(钉住.AddrOfPinnedObject(),
+                        GetType(音频直通能力表)), 音频直通能力表)
+            Finally
+                钉住.Free()
+            End Try
+            If 返回 <> 0 OrElse 表.版本 <> 音频直通表版本 OrElse 表.大小 < 音频直通表大小 OrElse
+               表.上下文 = IntPtr.Zero OrElse 表.描述 = IntPtr.Zero OrElse
+               表.打包 = IntPtr.Zero OrElse 表.复位 = IntPtr.Zero Then
+                ' 与色彩侧同一套三分法：旧件没有这一面、模块在但未解锁（设计结果）、
+                ' 自称已解锁却仍被拒（真故障）。日志必须分得开。
+                原因 = 音频直通表入口名 & " 返回 " & 返回.ToString() &
+                        "（version=" & 表.版本.ToString() & " size=" & 表.大小.ToString() &
+                        " context=" & 表.上下文.ToString() & "）——直通整体回退解码"
+                Return Nothing
+            End If
+            _直通表已交出 = True
+            Return 表
+        Catch ex As Exception
+            原因 = "音频直通握手异常 " & ex.GetType().Name & ": " & ex.Message
+            Return Nothing
+        End Try
+    End Function
 
     Public Sub Dispose() Implements IDisposable.Dispose
         SyncLock _锁

@@ -1,4 +1,4 @@
-﻿<Global.Microsoft.VisualBasic.CompilerServices.DesignerGenerated()> _
+<Global.Microsoft.VisualBasic.CompilerServices.DesignerGenerated()> _
 Partial Class Form设置_设备与性能
     Inherits System.Windows.Forms.Form
 
@@ -22,6 +22,8 @@ Partial Class Form设置_设备与性能
     '不要使用代码编辑器修改它。
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
+        ModernPanel6 = New LakeUI.ModernPanel()
+        MCB_音频直通 = New LakeUI.ModernComboBox()
         ModernPanel1 = New LakeUI.ModernPanel()
         ModernPanel5 = New LakeUI.ModernPanel()
         MCB_音频效果 = New LakeUI.ModernComboBox()
@@ -35,6 +37,7 @@ Partial Class Form设置_设备与性能
         Panel1 = New LakeUI.ModernPanel()
         MCB_GPU解码设备 = New LakeUI.ModernComboBox()
         ModernPanel1.SuspendLayout()
+        ModernPanel6.SuspendLayout()
         ModernPanel5.SuspendLayout()
         ModernPanel4.SuspendLayout()
         ModernPanel3.SuspendLayout()
@@ -46,6 +49,9 @@ Partial Class Form设置_设备与性能
         ' 
         ModernPanel1.BackColor1 = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ModernPanel1.BorderSize = 0
+        ' Dock=Top 的停靠次序与 Controls.Add 相反（后加者靠上）：ModernPanel6 最先加，
+        ' 因此排在最底 —— 「音频直通」位于「音频效果」之下。
+        ModernPanel1.Controls.Add(ModernPanel6)
         ModernPanel1.Controls.Add(ModernPanel5)
         ModernPanel1.Controls.Add(ModernPanel4)
         ModernPanel1.Controls.Add(ModernPanel3)
@@ -105,6 +111,53 @@ Partial Class Form设置_设备与性能
         MCB_音频效果.ToolTipMaxWidth = 350
         MCB_音频效果.ToolTipPadding = New Padding(15)
         MCB_音频效果.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        ' 
+        ' ModernPanel6
+        ' 
+        ModernPanel6.BackColor = Color.Transparent
+        ModernPanel6.BackColor1 = Color.Transparent
+        ModernPanel6.BorderSize = 0
+        ModernPanel6.Controls.Add(MCB_音频直通)
+        ModernPanel6.Dock = DockStyle.Top
+        ModernPanel6.Location = New Point(15, 257)
+        ModernPanel6.Name = "ModernPanel6"
+        ModernPanel6.Padding = New Padding(0, 10, 0, 0)
+        ModernPanel6.Size = New Size(617, 42)
+        ModernPanel6.TabIndex = 23
+        ' 
+        ' MCB_音频直通
+        ' 
+        MCB_音频直通.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_音频直通.BorderRadius = 10
+        MCB_音频直通.BorderSize = 0
+        MCB_音频直通.Dock = DockStyle.Left
+        MCB_音频直通.DropDownBackdropBlurPasses = 2
+        MCB_音频直通.DropDownBackdropBlurRadius = 30
+        MCB_音频直通.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_音频直通.DropDownHoverColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MCB_音频直通.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_音频直通.DropDownPadding = New Padding(10)
+        MCB_音频直通.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_音频直通.DropDownSelectedForeColor = Color.White
+        MCB_音频直通.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCB_音频直通.Items.Add("自动（支持时源码直通）")
+        MCB_音频直通.Items.Add("强制（失败时显式提示）")
+        MCB_音频直通.Items.Add("关")
+        MCB_音频直通.Location = New Point(0, 10)
+        MCB_音频直通.Margin = New Padding(2, 2, 2, 2)
+        MCB_音频直通.MaxDropDownItems = 16
+        MCB_音频直通.Name = "MCB_音频直通"
+        MCB_音频直通.Padding = New Padding(10, 0, 10, 0)
+        MCB_音频直通.PrefixForeColor = Color.YellowGreen
+        MCB_音频直通.PrefixGap = 10
+        MCB_音频直通.PrefixText = "音频源码直通"
+        MCB_音频直通.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_音频直通.Size = New Size(300, 32)
+        MCB_音频直通.TabIndex = 0
+        MCB_音频直通.ToolTipGap = -1
+        MCB_音频直通.ToolTipMaxWidth = 350
+        MCB_音频直通.ToolTipPadding = New Padding(15)
+        MCB_音频直通.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ' 
         ' ModernPanel4
         ' 
@@ -317,6 +370,7 @@ Partial Class Form设置_设备与性能
         Text = "Form设置_设备与性能"
         ModernPanel1.ResumeLayout(False)
         ModernPanel1.PerformLayout()
+        ModernPanel6.ResumeLayout(False)
         ModernPanel5.ResumeLayout(False)
         ModernPanel4.ResumeLayout(False)
         ModernPanel3.ResumeLayout(False)
@@ -337,4 +391,6 @@ Partial Class Form设置_设备与性能
     Friend WithEvents MCB_视频缩放质量 As LakeUI.ModernComboBox
     Friend WithEvents ModernPanel5 As LakeUI.ModernPanel
     Friend WithEvents MCB_音频效果 As LakeUI.ModernComboBox
+    Friend WithEvents ModernPanel6 As LakeUI.ModernPanel
+    Friend WithEvents MCB_音频直通 As LakeUI.ModernComboBox
 End Class

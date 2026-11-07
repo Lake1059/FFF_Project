@@ -447,6 +447,27 @@ struct FFF3FPSnapshot {
     std::uint32_t waitingForInput;
     double playbackRate;
     std::uint64_t audioFailures;
+    // Audio bitstream passthrough (neutral kernel seam). Appended at
+    // the end for the same offset reason as every field above: hosts and probes
+    // read this struct by fixed offset.
+    //   audioPassthroughActive - 1 while the passthrough lane OWNS the audio track
+    //     (the external module packs IEC 61937 bursts and the renderer drives an
+    //     exclusive non-PCM endpoint), 0 for the ordinary decode path. Module
+    //     absent => always 0: the kernel falls back silently, which is today's
+    //     behaviour, not a failure branch.
+    //   audioPassthroughMode - the route actually in force: 0 = decoded PCM
+    //     (matrix fold), 1 = IEC 61937 bitstream via the module. 2 is reserved for
+//     a shared-mode route reserved for the module (phase P4,
+//     module flag 2) and is never written by this lane. (The *host preference* AUTO/FORCE/OFF travels
+    //     through FFF3FP_SetAudioPassthroughMode and is answered by
+    //     FFF3FP_GetAudioPassthroughState -- the two "modes" are deliberately
+    //     different axes and each site documents which one it means.)
+    //   audioPassthroughCodec - FFF3FPAudioPassthroughCodec of the engaged track,
+    //     0 (= _NONE) while inactive. Written by UpdateAudioDiagnostics like the
+    //     other audio diagnostics.
+    std::uint32_t audioPassthroughActive;
+    std::uint32_t audioPassthroughMode;
+    std::int32_t audioPassthroughCodec;
 };
 // Layout teeth. FFF3FPSnapshot is read by fixed offset from the VB/C# hosts and from
 // the probes, which is why it is append-only; that rule is unenforceable until the
@@ -454,7 +475,7 @@ struct FFF3FPSnapshot {
 // shifting a host's view of the struct at runtime.
 // Values below were measured by compiling a probe against this header (cl /std:c++20,
 // offsetof/sizeof printed) -- not derived from a field table.
-static_assert(sizeof(FFF3FPSnapshot) == 592,
+static_assert(sizeof(FFF3FPSnapshot) == 608,
     "FFF3FPSnapshot size changed: hosts and probes read it by fixed offset");
 static_assert(offsetof(FFF3FPSnapshot, externalAudioOffset100ns) == 88, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, iamfActive) == 364, "offset pin");
@@ -482,6 +503,12 @@ static_assert(offsetof(FFF3FPSnapshot, corruptPackets) == 512, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, durationKnown) == 568, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, playbackRate) == 576, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, audioFailures) == 584, "offset pin");
+// Passthrough tail (2026-11-07): three fields grew the struct 592 -> 608 (the old
+// 8-byte alignment tail padding was consumed and a new 4-byte tail follows; the
+// teeth above keep every earlier offset frozen).
+static_assert(offsetof(FFF3FPSnapshot, audioPassthroughActive) == 592, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, audioPassthroughMode) == 596, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, audioPassthroughCodec) == 600, "offset pin");
 
 
 struct FFF3FPAudioPeakLevels {
@@ -1862,3 +1889,16 @@ static_assert(sizeof(FFF3FPAuxiliaryComposition) == 32,
 
 FFF3FP_API FFFResult FFF3FP_SetAuxiliaryComposition(FFF3FPHandle player,
     const FFF3FPAuxiliaryComposition* composition) noexcept;
+
+// --- Audio bitstream passthrough seam (neutral kernel socket) ---------------
+//
+// Appended after the auxiliary-composition surface in the same additive style:
+// PlayerApiVersion is unchanged, hosts resolve these dynamically and degrade to
+// exactly today's behaviour when the module (or these exports) are absent. The
+// ABI -- TrackInfo/Format/Api function table and the three exports below -- is
+// owned by 3FP/Api/FFF.Player.AudioPassthrough.h, included here so that a
+// session build that already pulls in the API surface sees the exports too.
+// That header is pure POD and FFmpeg-free by design (it is mirrored into the
+// module's contract snapshot); it includes this file, so the pragma-once cycle
+// resolves with the definitions above already complete.
+#include "3FP/Api/FFF.Player.AudioPassthrough.h"

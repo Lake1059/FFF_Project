@@ -398,3 +398,8 @@ FFF.HDRdp.Test.*
 # Matches at any depth — the existing "third_party/vcpkg_installed/" entry does not
 # cover a vcpkg_installed/ directly under the repo root or other subdirectories.
 vcpkg_installed/
+
+# 测试文件统一存放 test/（本树历史目录名 tests/），一律不入库。
+# 两种拼写都排除，防止把样本/产物误 add 进提交。
+test/
+tests/

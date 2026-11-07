@@ -548,3 +548,51 @@ FFFResult FFF3FP_GetAudioTapStats(const FFF3FPHandle player,
         ? static_cast<PlayerSession*>(player)->GetAudioTapStats(stats)
         : FFFResult::InvalidArgument;
 }
+
+// Audio bitstream passthrough (3FP/Api/FFF.Player.AudioPassthrough.h). Appended
+// after the tap entries with the same additive discipline: PlayerApiVersion
+// stays at 20 and a host that never resolves these three keeps loading this DLL
+// unchanged. The seam is neutral by construction -- complete frames go out, IEC
+// 61937 bursts come back, and every codec/format decision lives in the module.
+FFFResult FFF3FP_SetAudioPassthroughApi(const FFF3FPHandle player,
+    const FFF3FPAudioPassthroughApi* api) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetAudioPassthroughApi(api)
+        : FFFResult::InvalidArgument;
+}
+
+FFFResult FFF3FP_SetAudioPassthroughMode(const FFF3FPHandle player,
+    const std::uint32_t mode) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetAudioPassthroughMode(mode)
+        : FFFResult::InvalidArgument;
+}
+
+// active: 1 = the passthrough lane owns the audio track, 0 = ordinary decode.
+// mode:   the host preference in force (FFF3FP_PT_MODE_*) -- NOT the snapshot's
+//         effective-route field, which the session writes separately.
+// codecId/name/burstsRendered are optional outputs like GetAudioRenderPlugState's.
+FFFResult FFF3FP_GetAudioPassthroughState(const FFF3FPHandle player,
+    std::uint32_t* active, std::uint32_t* mode, std::uint32_t* codecId,
+    char* name, const std::uint32_t nameCapacity,
+    std::uint64_t* burstsRendered) noexcept {
+    if (player == nullptr || active == nullptr) return FFFResult::InvalidArgument;
+    std::uint32_t activeValue = 0;
+    std::uint32_t modeValue = 0;
+    std::uint32_t codecValue = 0;
+    std::string laneName;
+    std::uint64_t bursts = 0;
+    static_cast<PlayerSession*>(player)->GetAudioPassthroughState(activeValue, modeValue,
+        codecValue, laneName, bursts);
+    *active = activeValue;
+    if (mode != nullptr) *mode = modeValue;
+    if (codecId != nullptr) *codecId = codecValue;
+    if (burstsRendered != nullptr) *burstsRendered = bursts;
+    if (name != nullptr && nameCapacity > 0) {
+        name[0] = '\0';
+        const auto copied = CopyUtf8(laneName, name, nameCapacity, nullptr);
+        if (copied != FFFResult::Success && nameCapacity > 1) {
+            std::memcpy(name, laneName.c_str(), nameCapacity - 1);
+            name[nameCapacity - 1] = '\0';
+        }
+    }
+    return FFFResult::Success;
+}

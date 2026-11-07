@@ -68,6 +68,14 @@ Public Enum WASAPI共享模式
     独占
 End Enum
 
+''' <summary>音频源码直通偏好（内核 FFF3FP_PT_MODE_*）：自动=条件满足即接管；
+''' 强制=同自动但宿主把失败当显式提示；关=整体回退解码。</summary>
+Public Enum 音频直通模式
+    自动 = 0
+    强制 = 1
+    关 = 2
+End Enum
+
 Public Enum 播放器事件类型 As UInteger
     状态变化 = 1
     打开完成 = 2
@@ -92,6 +100,9 @@ Public NotInheritable Class 播放器配置
     Public Property 音频缓冲区策略 As Integer
     Public Property 启用空间音频 As Boolean = True
     Public Property 启用单声道音频 As Boolean = False
+    ''' <summary>音频源码直通偏好（自动/强制/关，默认自动）。只有模块在场且端点支持
+    ''' 模块决策的格式时才接管；缺席/不支持一律静默回退解码。</summary>
+    Public Property 音频直通 As 音频直通模式 = 音频直通模式.自动
     ' SDR 源的 scRGB 呈现策略，对应内核 FFF3FPConfiguration.sdrScRgbMode。
     ' 1 = 自动（默认）：位深 >8 的 SDR 源优先上 16bit scRGB 链；
     ' 0 = 从不：留在 8/10bit gamma 链（历史行为，留作退回开关）。
@@ -112,6 +123,7 @@ Public NotInheritable Class 播放器配置
         If 首选解码适配器索引 < -1 OrElse 首选解码适配器索引 > 15 Then Throw New ArgumentOutOfRangeException(NameOf(首选解码适配器索引))
         If 视频缓冲区策略 < 0 OrElse 视频缓冲区策略 > 2 Then Throw New ArgumentOutOfRangeException(NameOf(视频缓冲区策略))
         If 音频缓冲区策略 < 0 OrElse 音频缓冲区策略 > 2 Then Throw New ArgumentOutOfRangeException(NameOf(音频缓冲区策略))
+        If 音频直通 < 音频直通模式.自动 OrElse 音频直通 > 音频直通模式.关 Then Throw New ArgumentOutOfRangeException(NameOf(音频直通))
     End Sub
 End Class
 
@@ -219,6 +231,10 @@ Public NotInheritable Class 播放器快照
         上传路径 = 值.上传路径
         播放速度 = 值.播放速度
         音频故障次数 = 值.音频故障次数
+        ' 音频直通尾追加字段（2026-11-07）：生效路由 0=解码折叠 1=IEC 码流直通。
+        音频直通已接管 = 值.音频直通已接管 <> 0
+        音频直通路由 = 值.音频直通模式
+        音频直通编解码 = 值.音频直通编解码
         传入数据包异常 = 值.传入数据包异常
         时间戳异常 = 值.时间戳异常
         读取过慢 = 值.读取过慢
@@ -346,6 +362,14 @@ Public NotInheritable Class 播放器快照
             Return 原生IAMF声场系统.布局名(IAMF声场系统)
         End Get
     End Property
+
+    ''' <summary>音频源码直通通道拥有当前音轨（模块打包 IEC 码流 + 独占非 PCM 端点）。
+    ''' 模块缺席恒为假——那是现网解码路径，不是降级故障。</summary>
+    Public ReadOnly Property 音频直通已接管 As Boolean
+    ''' <summary>实际生效路由：0=解码折叠，1=IEC 码流直通（2 为 HT 端点预留）。</summary>
+    Public ReadOnly Property 音频直通路由 As UInteger
+    ''' <summary>接管轨的内核编解码枚举（FFF3FPAudioPassthroughCodec），未接管为 0。</summary>
+    Public ReadOnly Property 音频直通编解码 As Integer
 
     ' <summary>状态栏/信息图层用的完整描述。
     ' 内容声道数与渲染目标一致时（7.1.4 素材）显示 "IAMF 7.1.4（12 声道）"；
@@ -742,15 +766,15 @@ Public NotInheritable Class 媒体流信息
     <JsonPropertyName("externalColorExtensionActive")>
     Public Property 外部色彩变换已启用 As Boolean
     <JsonPropertyName("masteringPrimaries")>
-    Public Property 主显示器色域 As String = String.Empty
+    Public Property 制片显示器色彩原色 As String = String.Empty
     <JsonPropertyName("masteringMinLuminance")>
-    Public Property 主显示器最小亮度 As Double
+    Public Property 制片显示器最小亮度 As Double
     <JsonPropertyName("masteringMaxLuminance")>
-    Public Property 主显示器最大亮度 As Double
+    Public Property 制片显示器最大亮度 As Double
     <JsonPropertyName("maxCLL")>
-    Public Property 最大内容光照 As Integer
+    Public Property 最大内容亮度 As Integer
     <JsonPropertyName("maxFALL")>
-    Public Property 最大帧平均光照 As Integer
+    Public Property 最大帧平均亮度 As Integer
     <JsonPropertyName("codecConfigurationBox")>
     Public Property 编码配置盒 As String = String.Empty
     <JsonPropertyName("sampleRate")>

@@ -72,6 +72,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取合成文本 As Func(Of String)
     Private ReadOnly 获取超分状态 As Func(Of String)
     Private ReadOnly 获取自动HDR状态 As Func(Of String)
+    Private ReadOnly 获取直通文本 As Func(Of String)
     ' AI 实时字幕是否正在跑（worker 进程活着）。字幕行用它区分"真的没有字幕"
     ' 与"没有外挂字幕但 AI 在实时转写"——后者显示"未加载"是口径错误。
     Private ReadOnly 获取AI字幕活动 As Func(Of Boolean)
@@ -133,7 +134,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
                    Optional 超分状态提供器 As Func(Of String) = Nothing,
                    Optional 自动HDR状态提供器 As Func(Of String) = Nothing,
                    Optional 合成文本提供器 As Func(Of String) = Nothing,
-                   Optional AI字幕活动提供器 As Func(Of Boolean) = Nothing)
+                   Optional AI字幕活动提供器 As Func(Of Boolean) = Nothing,
+                   Optional 直通文本提供器 As Func(Of String) = Nothing)
         ArgumentNullException.ThrowIfNull(画面)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(媒体信息提供器)
@@ -149,6 +151,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取合成文本 = 合成文本提供器
         获取超分状态 = 超分状态提供器
         获取自动HDR状态 = 自动HDR状态提供器
+        获取直通文本 = 直通文本提供器
         获取AI字幕活动 = AI字幕活动提供器
         提交图层 = 图层提交器
         文本测量格式 = DirectCast(StringFormat.GenericTypographic.Clone(), StringFormat)
@@ -414,6 +417,13 @@ Friend NotInheritable Class 播放器信息图层呈现器
             If 快照.音频双耳渲染生效 Then
                 添加配对行如果有值(结果, "双耳：", "HRTF 空间音频", 青色)
             End If
+            ' 源码直通通道拥有音轨时才出现这一行：显示名由模块注入、宿主原样打印
+            ' 不解释（格式身份是模块的语义，宿主只搬运）。缺席/未接管
+            ' 不出现——那是现网解码路径，不是需要向用户解释的降级。
+            Dim 直通行 = 安全获取(获取直通文本)
+            If 直通行 IsNot Nothing Then
+                添加配对行如果有值(结果, "直通：", 直通行, 青色)
+            End If
             添加配对行如果有值(结果, "输入：", 音频输入(音频, 快照.音频实时比特率), 紫色)
             添加配对行如果有值(结果, "输出：", 音频输出(音频, 快照), 绿色)
         End If
@@ -602,17 +612,21 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Function
 
     Private Shared Function 视频色彩(流 As 媒体流信息) As String
-        Dim 采样 = 格式化色度抽样(流.色度抽样)
-        Dim 矩阵 = 色彩空间(流.色彩空间)
-        Dim 色域 = 色彩原色(流.色彩原色)
-        Dim 传输 = 色彩传递(流.色彩传递)
-        Dim 范围 = 色彩范围(流.色彩范围)
+        ' 色度一行只写色度本身，值用标准写法（4:2:0 / 4:2:2 / 4:4:4）。
+        ' 抽掉冒号会让读者以为是一个数字编号。
+        Dim 采样 = If(流.色度抽样 Is Nothing, String.Empty, 流.色度抽样.Trim())
+        ' 标准表述统一走 色彩表述 模块（Core\色彩表述.vb）：标签与媒体信息窗体
+        ' 同口径（色彩标准/传输曲线/色彩矩阵/色彩范围），元数据缺席的字段不出现。
+        Dim 矩阵 = 色彩表述.色彩矩阵(流.色彩空间)
+        Dim 标准 = 色彩表述.色彩标准(流.色彩原色)
+        Dim 传输 = 色彩表述.传输曲线(流.色彩传递)
+        Dim 范围 = 色彩表述.色彩范围(流.色彩范围)
         Return 合并字段(
-            If(String.IsNullOrEmpty(采样), String.Empty, $"采样 {采样}"),
-            If(String.IsNullOrEmpty(矩阵), String.Empty, $"颜色矩阵 {矩阵}"),
-            If(String.IsNullOrEmpty(色域), String.Empty, $"色域 {色域}"),
-            If(String.IsNullOrEmpty(传输), String.Empty, $"传输特性 {传输}"),
-            If(String.IsNullOrEmpty(范围), String.Empty, $"范围 {范围}"))
+            If(String.IsNullOrEmpty(采样), String.Empty, $"色度 {采样}"),
+            If(String.IsNullOrEmpty(标准), String.Empty, $"色彩标准 {标准}"),
+            If(String.IsNullOrEmpty(传输), String.Empty, $"传输曲线 {传输}"),
+            If(String.IsNullOrEmpty(矩阵), String.Empty, $"色彩矩阵 {矩阵}"),
+            If(String.IsNullOrEmpty(范围), String.Empty, $"色彩范围 {范围}"))
     End Function
 
     Private Shared Function 视频输出(快照 As 播放器快照, 输出大小 As Size) As String
@@ -800,42 +814,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
         End Select
     End Function
 
-    Private Shared Function 色彩范围(值 As Integer) As String
-        Return If(值 = 1, "Limited", If(值 = 2, "Full", String.Empty))
-    End Function
-
-    Private Shared Function 色彩原色(值 As Integer) As String
-        Select Case 值
-            Case 1 : Return "BT.709"
-            Case 9 : Return "BT.2020"
-            Case 12 : Return "P3-D65"
-            Case Else : Return String.Empty
-        End Select
-    End Function
-
-    Private Shared Function 色彩传递(值 As Integer) As String
-        Select Case 值
-            Case 1 : Return "BT.709"
-            Case 13 : Return "sRGB"
-            Case 16 : Return "PQ"
-            Case 18 : Return "HLG"
-            Case Else : Return String.Empty
-        End Select
-    End Function
-
-    Private Shared Function 色彩空间(值 As Integer) As String
-        Select Case 值
-            Case 1 : Return "BT.709"
-            Case 5, 6 : Return "BT.601"
-            Case 9, 10 : Return "BT.2020"
-            Case Else : Return String.Empty
-        End Select
-    End Function
-
-    Private Shared Function 格式化色度抽样(值 As String) As String
-        If String.IsNullOrWhiteSpace(值) Then Return String.Empty
-        Return 值.Replace(":"c, String.Empty).Replace("-"c, String.Empty).Replace(" "c, String.Empty)
-    End Function
+    ' 色彩范围/色彩标准/传输曲线/色彩矩阵的标准表述统一在 色彩表述 模块
+    ' （Core\色彩表述.vb）：信息图层与媒体信息窗体共用一份映射，口径不漂移。
 
     Private Shared Function 视频输出格式(位深 As Integer) As String
         Select Case 位深

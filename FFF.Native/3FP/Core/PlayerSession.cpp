@@ -34,6 +34,7 @@ extern "C" {
 #include <filesystem>
 #include <iomanip>
 #include <limits>
+#include <sstream>
 #include <cmath>
 #include <chrono>
 
@@ -49,7 +50,10 @@ constexpr std::int64_t TicksPerSecond = 10'000'000;
 // it has to be one symbol rather than a literal repeated at the publish site and
 // the gate -- a mismatch between those two reads as "every snapshot call fails"
 // with no other symptom.
-constexpr std::uint32_t SnapshotVersion = 22;
+// 22 -> 23: FFF3FPSnapshot gained the audio bitstream passthrough diagnostics at
+// its tail (audioPassthroughActive/Mode/Codec). Hosts must be
+// rebuilt in lockstep with the header; the export surface itself is untouched.
+constexpr std::uint32_t SnapshotVersion = 23;
 // Every snapshot timing field counts 100 ns units; this keeps the new split
 // counters from repeating the duration_cast boilerplate at each site.
 inline std::uint64_t To100ns(const std::chrono::steady_clock::duration& d) noexcept {
@@ -1005,6 +1009,10 @@ PlayerSession::~PlayerSession() {
         if (holding && held.destroy != nullptr && held.context != nullptr)
             held.destroy(held.context);
     }
+    // Passthrough parser scratch belongs to the worker; the join above guarantees
+    // nothing is inside av_parser_parse2. The lane destructor (member teardown)
+    // destroys the module context it still owns, same ownership rule as the plug.
+    ReleasePassthroughParserState();
     // Must run AFTER the join: the worker's P3 still-image path
     // (ConvertPrimariesToBt2020) is still using the gamutGraph_ filter graph, so
     // releasing it first would be a use-after-free. DoClose(Closed) on the worker's
@@ -2180,6 +2188,14 @@ FFFResult PlayerSession::ResumeAudioRenderer() noexcept {
             EscapeJson(reason + " The media continued in shared mode without audio output.") + "\"}");
         return FFFResult::Success;
     }
+    // The renderer was rebuilt, so the endpoint capability answer may differ:
+    // re-arm an engaged lane and let the next packet re-describe and re-open the
+    // bitstream route (or fall back cleanly), instead of trusting the old
+    // decision against a device this session never probed.
+    if (ptLane_.Engaged()) {
+        ptLane_.RearmForReopen();
+        ptArmedCodec_ = ptArmedCodec_ != 0 ? ptArmedCodec_ : ptLane_.EngagedCodec();
+    }
     DoSeek(position);
     RebuildMediaInfo();
     if (fellBackToShared) {
@@ -2216,6 +2232,10 @@ bool PlayerSession::RecoverAudioDevice() noexcept {
         return true;
     }
     snapshot_.position100ns = position;
+    // Device hot switch: the new endpoint's format support is
+    // unknown, so an engaged lane re-walks the whole TryOpen path on the next
+    // packet instead of assuming the old decision still holds.
+    if (ptLane_.Engaged()) ptLane_.RearmForReopen();
     DoSeek(position);
     RebuildMediaInfo();
     Emit(FFF3FPEvent::DeviceChanged,
@@ -2501,6 +2521,16 @@ FFFResult PlayerSession::SetAudioExclusiveMode(const bool exclusive) noexcept {
 }
 FFFResult PlayerSession::SetPlaybackRate(const double rate) noexcept {
     if (!std::isfinite(rate) || rate < 0.1 || rate > 5.0) return FFFResult::InvalidArgument;
+    // Mutual exclusion with the bitstream route: bursts are
+    // opaque carrier bytes -- there is no PCM to time-stretch, and a seek-driven
+    // re-anchor of the tempo graph would corrupt the burst clock. Chosen over
+    // "queue until fallback" because a queued rate change would silently apply
+    // at an unpredictable moment after an uncontrolled fallback; a refusal is
+    // deterministic and the host UI disables the control while engaged.
+    if (ptLane_.Engaged()) {
+        EmitPassthroughMutexHint("SetPlaybackRate");
+        return FFFResult::InvalidState;
+    }
     Enqueue([this, rate] {
         if (rate == playbackRate_.load()) return;
         const auto position = state_.load() == FFF3FPState::Playing ? ClockPosition() : snapshot_.position100ns;
@@ -2514,6 +2544,14 @@ FFFResult PlayerSession::SetPlaybackRate(const double rate) noexcept {
     return FFFResult::Success;
 }
 FFFResult PlayerSession::SetMonoAudio(const bool enabled) noexcept {
+    // Mutual exclusion with the bitstream route: folding bursts to mono is
+    // stream decoding, which the neutral kernel deliberately cannot do (and the
+    // renderer's bitstream path bypasses ApplyGain entirely). Direct refusal for
+    // the same deterministic-visibility reason as SetPlaybackRate above.
+    if (enabled && ptLane_.Engaged()) {
+        EmitPassthroughMutexHint("SetMonoAudio");
+        return FFFResult::InvalidState;
+    }
     Enqueue([this, enabled] {
         monoAudio_ = enabled;
         if (audioRenderer_) audioRenderer_->SetMonoAudio(enabled);
@@ -2637,6 +2675,14 @@ FFFResult PlayerSession::SetAudioRenderPlug(const FFF3FPAudioRenderPlug* const p
         plug->version != FFF3FP_AUDIO_PLUG_VERSION || plug->supports == nullptr ||
         plug->render == nullptr || plug->reset == nullptr || plug->context == nullptr))
         return FFFResult::InvalidArgument;
+    // Mutual exclusion with the bitstream route: a bed renderer consumes decoded
+    // PCM frames, and while the lane owns the track no decoded frame exists. The
+    // install itself would only take effect after the fallback re-opens the
+    // decoder; refusing now keeps "what did my plug install do" answerable.
+    if (plug != nullptr && ptLane_.Engaged()) {
+        EmitPassthroughMutexHint("SetAudioRenderPlug");
+        return FFFResult::InvalidState;
+    }
     {
         std::lock_guard lock(audioPlugMutex_);
         if (audioPlugInstalled_) {
@@ -4160,6 +4206,13 @@ void PlayerSession::DoOpen(std::string path) noexcept {
             audioDecoder_ = nullptr;
         } else if (OpenDecoder(format_, audioStream_, false, &audioDecoder_) != FFFResult::Success) {
             audioStream_ = -1;
+        } else {
+            // Passthrough arm: guards live in the lane (module
+            // table installed, mode != OFF, codec accepted). The FFmpeg decoder
+            // STAYS open until the lane actually engages on the first complete
+            // frame -- a decline then costs nothing, and engagement releases this
+            // decoder (release-then-own, the DoSelectStream IAMF ordering).
+            ArmPassthroughForTrack(format_->streams[audioStream_]);
         }
     }
     videoRenderer_.ConfigureHdrStream(videoStream_ >= 0 ?
@@ -5071,6 +5124,10 @@ void PlayerSession::PumpPlayback() noexcept {
     if (demuxEnded_) {
         if (pendingVideoPackets_.empty()) FlushAtEnd();
         else Sleep(1);
+        // Bitstream drain: with no decoder to report EOF, the lane's own queue is
+        // the end-of-audio signal -- once every packet is packed and every burst
+        // is queued, the audio side is drained.
+        if (ptLane_.Engaged() && pendingAudioPackets_.empty()) audioDecoderDrained_ = true;
         return;
     }
     const auto videoPacketsFull = pendingVideoPackets_.size() >= MaximumPendingVideoPackets ||
@@ -5200,6 +5257,10 @@ void PlayerSession::PumpPlayback() noexcept {
         // substream mixing FFmpeg does not implement. Queue buffering stays the
         // same either way, so a saturated audio queue is handled identically.
         const auto decodeAudioPacket = [this]() {
+            // Passthrough seam (armed or engaged) consumes the packet first: the
+            // parser normalizes it and the module packs it; bursts go straight to
+            // the renderer. Returns true => consumed, nothing for FFmpeg to do.
+            if (HandlePassthroughPacket(playbackPacket_)) return;
             if (iamfDecoder_ != nullptr) {
                 // PumpFile and Decode share handle_, the pcm_ scratch buffer and the
                 // byte cursor, so feeding a demuxer packet into the same pass in which
@@ -5431,6 +5492,358 @@ FFFResult PlayerSession::DecodeIamfPacket(AVPacket* packet) noexcept {
         return FFFResult::Success;
     }
     return FFFResult::Success;
+}
+
+// ══════════ audio bitstream passthrough (neutral seam) ══════════
+// Shape mirrors the IAMF bypass: arm at track bind, intercept the packet loop,
+// fall back by re-opening FFmpeg. The kernel's job ends at "complete frame in,
+// burst out, exclusive non-PCM endpoint open" -- every format decision lives
+// in the module behind FFF3FPAudioPassthroughApi.
+
+// The mapping below uses only FFmpeg's public AV_CODEC_ID values and profiles;
+// the target family numbering is owned by the module (contract header) and is
+// never interpreted on this side.
+std::uint32_t PlayerSession::PassthroughCodecIdFor(const AVStream* stream) noexcept {
+    if (stream == nullptr || stream->codecpar == nullptr) return FFF3FP_PT_CODEC_NONE;
+    switch (stream->codecpar->codec_id) {
+        case AV_CODEC_ID_AC3: return FFF3FP_PT_CODEC_TYPE1;
+        case AV_CODEC_ID_EAC3: return FFF3FP_PT_CODEC_TYPE2;
+        case AV_CODEC_ID_DTS:
+            // AV_CODEC_ID_DTS covers both the core and the HD-extension
+            // profiles; the profile tag only decides which family number
+            // travels in TrackInfo::codecId. The module re-checks the frame.
+            if (stream->codecpar->profile == AV_PROFILE_DTS_HD_HRA ||
+                stream->codecpar->profile == AV_PROFILE_DTS_HD_MA)
+                return FFF3FP_PT_CODEC_TYPE4;
+            return FFF3FP_PT_CODEC_TYPE3;
+        case AV_CODEC_ID_TRUEHD: return FFF3FP_PT_CODEC_TYPE5;
+        default: return FFF3FP_PT_CODEC_NONE;
+    }
+}
+
+void PlayerSession::ArmPassthroughForTrack(const AVStream* stream) noexcept {
+    const auto codecId = PassthroughCodecIdFor(stream);
+    if (!ptLane_.WantsTrack(codecId)) return;
+    ptArmedCodec_ = codecId;
+    ptLane_.Arm();
+    // Parser for the seam (kernel-owned frame-boundary guarantee:
+    // av_parser_parse2 is a generic pipeline piece, not packing). Rebuild it per
+    // track -- parsers are codec-specific -- and throw away any half-frame the
+    // previous track left.
+    ReleasePassthroughParserState();
+    EnsurePassthroughParser(stream->codecpar->codec_id);
+}
+
+bool PlayerSession::EnsurePassthroughParser(const int avCodecId) noexcept {
+    if (ptParser_ != nullptr) return true;
+    const AVCodec* parserCodec = avcodec_find_decoder(static_cast<AVCodecID>(avCodecId));
+    ptParserCodecCtx_ = avcodec_alloc_context3(parserCodec);
+    ptParser_ = av_parser_init(static_cast<AVCodecID>(avCodecId));
+    ptParserCodecId_ = ptArmedCodec_;
+    ptParserAvCodecId_ = avCodecId;
+    if (ptParser_ == nullptr || ptParserCodecCtx_ == nullptr) {
+        // No parser for this container/codec pairing: packets are fed as-is. For
+        // MKV/MP4 the blocks are frame-aligned for these codecs; the defensive
+        // merge only matters for pathological splitters, and a missing parser
+        // must not disable the route outright (the module re-checks sync).
+        avcodec_free_context(&ptParserCodecCtx_);
+        ptParser_ = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void PlayerSession::ReleasePassthroughParserState() noexcept {
+    if (ptParser_) av_parser_close(ptParser_);
+    ptParser_ = nullptr;
+    if (ptParserCodecCtx_) avcodec_free_context(&ptParserCodecCtx_);
+    ptParserCodecId_ = 0;
+    ptParserAvCodecId_ = -1;
+}
+
+void PlayerSession::ReleasePassthroughTrack() noexcept {
+    if (ptLane_.Engaged()) {
+        // The renderer still holds burst bytes queued from the track; its next
+        // Reset clears them (DoClose stops the renderer right after).
+        ptLane_.ModuleReset();
+    }
+    ptLane_.Disarm();
+    ptArmedCodec_ = 0;
+    ReleasePassthroughParserState();
+    snapshot_.audioPassthroughActive = 0;
+    snapshot_.audioPassthroughMode = 0;
+    snapshot_.audioPassthroughCodec = 0;
+    ptMutexHintEmitted_ = false;
+}
+
+void PlayerSession::NotePassthroughSeek() noexcept {
+    if (!ptLane_.Engaged() && !ptLane_.Armed()) return;
+    ptLane_.ModuleReset();
+    // This FFmpeg has no av_parser_flush: rebuild the parser instead, so no
+    // half-frame from before the seek can leak into the new burst stream.
+    if (ptParser_ != nullptr) {
+        const auto avCodecId = ptParserAvCodecId_;
+        ReleasePassthroughParserState();
+        EnsurePassthroughParser(avCodecId);
+    }
+}
+
+void PlayerSession::EmitPassthroughMutexHint(const char* control) noexcept {
+    if (ptMutexHintEmitted_) return;
+    ptMutexHintEmitted_ = true;
+    Emit(FFF3FPEvent::OperationCompleted,
+        std::string("{\"operation\":\"passthrough-mutex\",\"refused\":\"") +
+        EscapeJson(control) + "\"}");
+}
+
+FFFResult PlayerSession::SetAudioPassthroughApi(const FFF3FPAudioPassthroughApi* api) noexcept {
+    const auto result = ptLane_.InstallTable(api);
+    if (result != FFFResult::Success) return result;
+    // A table change re-arms nothing retroactively: the active track keeps its
+    // route until the next open/track switch (same contract as the mode change).
+    return FFFResult::Success;
+}
+
+FFFResult PlayerSession::SetAudioPassthroughMode(const std::uint32_t mode) noexcept {
+    if (!ptLane_.SetMode(mode)) return FFFResult::InvalidArgument;
+    return FFFResult::Success;
+}
+
+void PlayerSession::GetAudioPassthroughState(std::uint32_t& active, std::uint32_t& mode,
+    std::uint32_t& codecId, std::string& name, std::uint64_t& burstsRendered) const noexcept {
+    const bool engaged = ptLane_.Engaged();
+    active = engaged ? 1u : 0u;
+    // Host preference, not the effective route (which the snapshot carries).
+    mode = ptLane_.Mode();
+    codecId = engaged ? ptLane_.EngagedCodec() : FFF3FP_PT_CODEC_NONE;
+    name = engaged ? ptLane_.DisplayName() : std::string{};
+    burstsRendered = audioRuntimeState_.ptBurstsRendered.load(std::memory_order_relaxed);
+}
+
+bool PlayerSession::EngagePassthrough(const std::uint8_t* firstFrame,
+    const std::uint32_t firstFrameSize) noexcept {
+    FFF3FPAudioPassthroughTrackInfo info{};
+    info.size = sizeof(info);
+    info.version = FFF3FP_AUDIO_PASSTHROUGH_VERSION;
+    info.codecId = ptArmedCodec_;
+    info.endpointHint = nullptr;  // P4 wires the shared-mode endpoint hint (module flag 2)
+    if (format_ != nullptr && audioStream_ >= 0 &&
+        audioStream_ < static_cast<std::int32_t>(format_->nb_streams)) {
+        const auto* parameters = format_->streams[audioStream_]->codecpar;
+        info.sampleRate = static_cast<std::uint32_t>(std::max(0, parameters->sample_rate));
+        info.channelCount = static_cast<std::uint32_t>(std::max(0, parameters->ch_layout.nb_channels));
+    }
+    info.firstFrame = firstFrame;
+    info.firstFrameSize = firstFrameSize;
+    if (!ptLane_.DescribeTrack(info)) {
+        FallBackFromPassthrough("module-declined");
+        return false;
+    }
+    // Renderer: exclusive non-PCM with the decided format. Engagement recreates
+    // the renderer (the decision must be armed before the endpoint opens), which
+    // is cheap here -- the first packet arrives during preroll, when the queue is
+    // still empty. Everything runs on this worker, so no burst can slip into an
+    // in-between renderer.
+    const bool paused = state_.load() != FFF3FPState::Playing;
+    std::string error;
+    std::int64_t initHresult = 0;
+    bool formatRejected = false;
+    const auto result = RecreateAudioRendererWithBitstream(ptLane_.Format(), paused, error,
+        initHresult, formatRejected);
+    if (result != FFFResult::Success) {
+        // Distinguish the two endpoint failures a host can act on: the endpoint
+        // refused the format outright vs another owner holds exclusive mode.
+        FallBackFromPassthrough(formatRejected ? "endpoint-unsupported"
+            : (initHresult == AUDCLNT_E_DEVICE_IN_USE ? "exclusive-busy"
+                : "endpoint-unsupported"));
+        return false;
+    }
+    ptLane_.MarkEngaged(ptArmedCodec_);
+    ptLane_.NoteEndpointSupport(ptArmedCodec_);
+    ptMutexHintEmitted_ = false;
+    UpdateAudioDiagnostics();
+    PublishSnapshot();
+    const auto displayName = ptLane_.DisplayName();
+    const auto ptFlags = ptLane_.TrackFlags();
+    const auto linkRate = ptLane_.Format().linkSampleRate;
+    const auto burstBytes = ptLane_.Format().burstBytes;
+    // Identity lives in displayName, injected by the module; codecId/flags are
+    // the neutral numbers of the contract header, never interpreted here.
+    Emit(FFF3FPEvent::DeviceChanged,
+        std::string("{\"type\":\"audio\",\"passthrough\":true,\"engaged\":true,\"codecId\":") +
+        std::to_string(ptArmedCodec_) +
+        ",\"flags\":" + std::to_string(ptFlags) +
+        ",\"displayName\":\"" + EscapeJson(displayName) +
+        "\",\"linkRate\":" + std::to_string(linkRate) +
+        ",\"burstBytes\":" + std::to_string(burstBytes) + "}");
+    return true;
+}
+
+void PlayerSession::FallBackFromPassthrough(const char* reason) noexcept {
+    // Release the lane first: the module's accumulation is dead either way, and
+    // the FFmpeg decoder below takes the whole track back (FallBackFromIamf's
+    // shape -- the demuxer is untouched, so packets already read stay valid).
+    ptLane_.Disarm();
+    ptArmedCodec_ = 0;
+    ReleasePassthroughParserState();
+    snapshot_.audioPassthroughActive = 0;
+    snapshot_.audioPassthroughMode = 0;
+    snapshot_.audioPassthroughCodec = 0;
+    ptMutexHintEmitted_ = false;
+    // A failed engagement may have just torn the renderer down
+    // (RecreateAudioRendererWithBitstream resets before it creates): restore an
+    // ordinary shared renderer so decoded audio keeps flowing.
+    if (audioRenderer_ == nullptr) {
+        std::string rendererError;
+        if (RecreateAudioRenderer(audioEndpointId_, false, false, rendererError) != FFFResult::Success)
+            audioRenderer_.reset();
+    }
+    // Re-open the ordinary decoder for the same stream if the seam had already
+    // taken it over. The FFmpeg decoder is reopened exactly as the IAMF
+    // fallback does it (5377-5381 of the pre-change file).
+    if (audioDecoder_ == nullptr && format_ != nullptr && audioStream_ >= 0 &&
+        audioStream_ < static_cast<std::int32_t>(format_->nb_streams)) {
+        AVCodecContext* replacement = nullptr;
+        if (OpenDecoder(format_, audioStream_, false, &replacement) == FFFResult::Success)
+            audioDecoder_ = replacement;
+    }
+    UpdateAudioDiagnostics();
+    PublishSnapshot();
+    Emit(FFF3FPEvent::DeviceChanged,
+        std::string("{\"type\":\"audio\",\"passthrough\":true,\"fallback\":true,\"reason\":\"") +
+        EscapeJson(reason ? reason : "unknown") + "\"}");
+}
+
+FFFResult PlayerSession::RecreateAudioRendererWithBitstream(
+    const FFF3FPAudioPassthroughFormat& format, const bool paused, std::string& error,
+    std::int64_t& initHresult, bool& formatRejected) noexcept {
+    initHresult = 0;
+    formatRejected = false;
+    try {
+        audioRenderer_.reset();
+        auto replacement = std::make_unique<PlayerWasapiRenderer>(audioEndpointId_, true,
+            &audioRuntimeState_, [this] { NotifyAudioRestart(); });
+        // The one-step GUID degrade lives in the lane (endpoint negotiation is
+        // kernel-owned); the renderer calls it between format probes.
+        if (!replacement->SetBitstreamFormat(format, [this](FFF3FPAudioPassthroughFormat& f) {
+                return ptLane_.DegradeCachedFormat()
+                    ? (f = ptLane_.Format(), true) : false;
+            })) {
+            error = "The module's passthrough format decision is not usable.";
+            return FFFResult::InvalidArgument;
+        }
+        const auto result = replacement->Start();
+        if (result != FFFResult::Success) {
+            audioFailures_.fetch_add(1, std::memory_order_relaxed);
+            error = replacement->LastError();
+            initHresult = replacement->LastInitHresult();
+            formatRejected = replacement->BitstreamFormatRejected();
+            return result;
+        }
+        replacement->SetPaused(paused ||
+            (state_.load() == FFF3FPState::Playing && videoStream_ >= 0));
+        audioRenderer_ = std::move(replacement);
+        audioTargetBuffer100ns_ = std::max(audioTargetBuffer100ns_,
+            audioRenderer_->DeviceBufferDuration100ns());
+        return FFFResult::Success;
+    } catch (...) {
+        error = "Could not allocate the exclusive bitstream renderer.";
+        return FFFResult::NativeFailure;
+    }
+}
+
+bool PlayerSession::HandlePassthroughPacket(const AVPacket* packet) noexcept {
+    if (packet == nullptr || packet->size <= 0) return false;
+    if (!ptLane_.Armed() && !ptLane_.Engaged()) return false;
+    if (format_ == nullptr || audioStream_ < 0 ||
+        audioStream_ >= static_cast<std::int32_t>(format_->nb_streams)) return false;
+    // No renderer (device failed at open): there is nowhere for bursts to go.
+    // Let the ordinary path run so the track still decodes if the renderer comes
+    // back through ResumeAudioRenderer.
+    if (!ptLane_.Engaged() && audioRenderer_ == nullptr) return false;
+
+    // -- kernel-owned frame boundary guarantee: normalize the
+    // container packet into complete access units before the module sees it. MKV
+    // splitters may split or merge frames; the parser is the generic pipeline
+    // piece that repairs this, NOT a packer.
+    const uint8_t* frameData = packet->data;
+    int frameSize = packet->size;
+    uint8_t* parserOutput = nullptr;
+    int parserSize = 0;
+    std::int64_t parserPts = AV_NOPTS_VALUE;
+    std::int64_t parserDts = AV_NOPTS_VALUE;
+    if (ptParser_ != nullptr) {
+        const auto consumed = av_parser_parse2(ptParser_, ptParserCodecCtx_,
+            &parserOutput, &parserSize, packet->data, packet->size,
+            packet->pts, packet->dts, packet->pos);
+        if (consumed < 0) {
+            // Parser failure: fall back for the track (a stream the parser cannot
+            // keep in frame bounds cannot be burst-ordered safely either).
+            FallBackFromPassthrough("pack-error");
+            return true;
+        }
+        if (parserSize <= 0 || parserOutput == nullptr) return true;  // accumulating
+        frameData = parserOutput;
+        frameSize = parserSize;
+        // PTS: the parser emits the frame completed by THIS call's input; for the
+        // common one-packet-one-frame case that is exactly the packet's own
+        // timestamp. Straddled frames carry a bounded one-frame anchor error,
+        // which only the seek filter reads -- the clock anchors on the first
+        // burst and then follows the link clock (see updateMediaClock).
+        parserPts = packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
+        parserDts = packet->dts;
+    }
+    if (frameData == nullptr || frameSize <= 0) return true;
+
+    auto position100ns = AV_NOPTS_VALUE;
+    if (parserPts != AV_NOPTS_VALUE) {
+        position100ns = StreamTimestampPosition100ns(format_, audioStream_, parserPts);
+        if (position100ns != AV_NOPTS_VALUE) position100ns += audioDelay100ns_;
+    }
+
+    if (ptLane_.Armed()) {
+        // First complete frame: describe + endpoint decision. Engaging frees the
+        // FFmpeg decoder (release-then-own, as in DoOpen's IAMF branch); a
+        // decline falls back with the decoder still in place.
+        if (!EngagePassthrough(frameData, static_cast<std::uint32_t>(frameSize))) return true;
+    }
+    if (!ptLane_.Engaged()) return true;
+
+    // -- seek filter (QueueAudioFrame's rule): frames entirely before the seek
+    // target are preroll the decoder would have trimmed; bursts must not queue
+    // them or the clock would start before the requested position.
+    if (position100ns != AV_NOPTS_VALUE && seekTarget100ns_ >= 0) {
+        const auto stream = format_->streams[audioStream_];
+        const auto frameDuration = packet->duration > 0
+            ? av_rescale_q(packet->duration, stream->time_base,
+                AVRational{1, static_cast<int>(TicksPerSecond)})
+            : av_rescale(frameSize, TicksPerSecond,
+                std::max(1, static_cast<int>(ptLane_.Format().linkSampleRate) * 4 * 8));
+        if (position100ns + frameDuration < seekTarget100ns_) return true;
+    }
+
+    if (ptBurstBuffer_.size() < FFF3FP_AUDIO_PASSTHROUGH_BURST_CAPACITY_MIN)
+        ptBurstBuffer_.resize(FFF3FP_AUDIO_PASSTHROUGH_BURST_CAPACITY_MIN);
+    std::uint32_t burstSize = 0;
+    std::int64_t burstPts = AV_NOPTS_VALUE;
+    std::int64_t burstDuration = 0;
+    auto reason = AudioPassthroughLane::Reason::None;
+    const auto packResult = ptLane_.Pack(frameData, static_cast<std::uint32_t>(frameSize),
+        position100ns, ptBurstBuffer_.data(),
+        static_cast<std::uint32_t>(ptBurstBuffer_.size()), &burstSize, &burstPts,
+        &burstDuration, &reason);
+    if (packResult < 0) {
+        FallBackFromPassthrough(AudioPassthroughLane::ReasonName(reason));
+        return true;
+    }
+    if (burstSize > 0 && audioRenderer_ != nullptr) {
+        ++snapshot_.decodedAudioFrames;
+        // The burst's media duration meters the queue lead (Buffered100ns); the
+        // PTS anchors the clock. No preroll/gain/tempo/plug path applies here.
+        (void)audioRenderer_->EnqueueBitstream(ptBurstBuffer_.data(), burstSize,
+            burstPts, burstDuration);
+    }
+    return true;
 }
 
 FFFResult PlayerSession::QueueSoftwareVideoDecode(AVPacket* packet) noexcept {
@@ -6095,6 +6508,12 @@ void PlayerSession::DecodePendingPacket(const bool video) noexcept {
     // track and no pump is feeding it, otherwise buffered packets would silently
     // play through FFmpeg. With the pump alive the packet is dropped: one owner
     // per shared libiamf handle (see the same rule in PumpPlayback).
+    // The passthrough seam has the same first claim: an armed/engaged lane
+    // normalizes and packs the packet instead of decoding it.
+    if (!video && HandlePassthroughPacket(packet)) {
+        av_packet_free(&packet);
+        return;
+    }
     if (!video && iamfDecoder_ != nullptr && audioRenderer_ != nullptr) {
         av_packet_free(&packet);
         return;
@@ -6833,6 +7252,7 @@ void PlayerSession::DisableFailedInternalAudio(const FFFResult result, std::stri
         const auto position = std::max<std::int64_t>(0, snapshot_.position100ns);
         if (audioDecoder_ != nullptr) avcodec_free_context(&audioDecoder_);
         ReleaseIamfDecoder();
+        ReleasePassthroughTrack();
         if (audioDecodeFrame_ != nullptr) av_frame_unref(audioDecodeFrame_);
         audioStream_ = -1;
         snapshot_.selectedAudioStream = -1;
@@ -6858,6 +7278,13 @@ void PlayerSession::DisableFailedInternalAudio(const FFFResult result, std::stri
 }
 
 void PlayerSession::UpdateAudioDiagnostics() noexcept {
+    // Passthrough fields are renderer-independent (the lane owns them), so they
+    // are written on both arms of the renderer-null split below.
+    snapshot_.audioPassthroughActive = ptLane_.Engaged() ? 1u : 0u;
+    // Effective route: 0 = decoded PCM fold, 1 = IEC bitstream.
+    snapshot_.audioPassthroughMode = ptLane_.Engaged() ? 1u : 0u;
+    snapshot_.audioPassthroughCodec = ptLane_.Engaged()
+        ? static_cast<std::int32_t>(ptLane_.EngagedCodec()) : 0;
     if (audioRenderer_ == nullptr) {
         snapshot_.audioPosition100ns = 0;
         snapshot_.bufferedAudio100ns = 0;
@@ -7437,6 +7864,11 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
         }
         iamfProducedAnyAudio_ = false;
     }
+    // Passthrough: the renderer Reset above already cleared the burst queue and
+    // the clock anchor; here the module drops its accumulation state and the
+    // parser forgets half-frames, so the next complete frame re-packs from the
+    // seek target (the module re-waits for the next complete frame).
+    NotePassthroughSeek();
     return FFFResult::Success;
 }
 
@@ -7709,6 +8141,9 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
     else {
         if (audioDecoder_) avcodec_free_context(&audioDecoder_);
         ReleaseIamfDecoder();
+        // The previous track's passthrough ownership dies with it: the new track
+        // re-arms below (module reset happens in the release, bursts stop here).
+        ReleasePassthroughTrack();
         audioDecoder_ = replacement; audioStream_ = index; snapshot_.selectedAudioStream = index;
         // A new audio track is a new pool round, same as a new file.
         audioTargetBuffer100ns_ = performance_.AudioInitial();
@@ -7723,6 +8158,8 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         // have already opened the FFmpeg decoder above.
         if (TryOpenIamfAudioDecoder()) {
             avcodec_free_context(&audioDecoder_);
+        } else {
+            ArmPassthroughForTrack(format_->streams[index]);
         }
         internalAudioFailurePending_ = false;
         internalAudioFailureResult_ = FFFResult::Success;
@@ -7833,6 +8270,9 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     if (videoDecoder_) avcodec_free_context(&videoDecoder_);
     if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     ReleaseIamfDecoder();
+    // The track (and its passthrough ownership) ends with the media. The
+    // renderer was stopped above, so no burst can be inside the module here.
+    ReleasePassthroughTrack();
     if (coverArtFrame_) av_frame_free(&coverArtFrame_);
     ReleasePrimariesCarrierFilter();
     // keepStillImage defers the release: PresentVideoFrame's unref/ref overwrites
@@ -8111,6 +8551,24 @@ void PlayerSession::RebuildMediaInfo() noexcept {
         const auto* profile = avcodec_profile_name(parameters->codec_id, parameters->profile);
         if (profile != nullptr) json << ",\"profile\":\"" << EscapeJson(profile) << "\"";
         if (parameters->codec_type == AVMEDIA_TYPE_VIDEO) {
+            // 容器允许不写色彩元数据（Matroska 的 Colour、MP4 的 colr 都是可选项），
+            // 而码流自身的 VUI/SPS 里有真值；解码器打开后会把它解析进 AVCodecContext。
+            // 所以 codecpar 的 UNSPECIFIED 在「当前播放的视频流」上回退到解码器上下文，
+            // 否则一条带 VUI 的 HDR 片会被报成「未标注」。
+            const auto isCurrentVideoStream =
+                static_cast<std::int32_t>(index) == videoStream_ && videoDecoder_ != nullptr;
+            const auto effectivePrimaries =
+                parameters->color_primaries != AVCOL_PRI_UNSPECIFIED || !isCurrentVideoStream
+                ? parameters->color_primaries : videoDecoder_->color_primaries;
+            const auto effectiveTransfer =
+                parameters->color_trc != AVCOL_TRC_UNSPECIFIED || !isCurrentVideoStream
+                ? parameters->color_trc : videoDecoder_->color_trc;
+            const auto effectiveSpace =
+                parameters->color_space != AVCOL_SPC_UNSPECIFIED || !isCurrentVideoStream
+                ? parameters->color_space : videoDecoder_->colorspace;
+            const auto effectiveRange =
+                parameters->color_range != AVCOL_RANGE_UNSPECIFIED || !isCurrentVideoStream
+                ? parameters->color_range : videoDecoder_->color_range;
             json << ",\"width\":" << parameters->width << ",\"height\":" << parameters->height
                  << ",\"averageFrameRateNumerator\":" << frameRate.num
                  << ",\"averageFrameRateDenominator\":" << frameRate.den
@@ -8123,8 +8581,8 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                  << ",\"sampleAspectDenominator\":" << sampleAspect.den
                  << ",\"displayAspectNumerator\":" << displayAspect.num
                  << ",\"displayAspectDenominator\":" << displayAspect.den
-                  << ",\"hdr\":" << ((parameters->color_trc == AVCOL_TRC_SMPTE2084 ||
-                    parameters->color_trc == AVCOL_TRC_ARIB_STD_B67 ||
+                  << ",\"hdr\":" << ((effectiveTransfer == AVCOL_TRC_SMPTE2084 ||
+                    effectiveTransfer == AVCOL_TRC_ARIB_STD_B67 ||
                     av_packet_side_data_get(parameters->coded_side_data,
                         parameters->nb_coded_side_data, AV_PKT_DATA_DYNAMIC_HDR10_PLUS) != nullptr) ? "true" : "false")
                   << ",\"attachedPicture\":" << ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0 ? "true" : "false");
@@ -8136,22 +8594,63 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                 if (projectionName != nullptr)
                     json << ",\"projection\":\"" << EscapeJson(projectionName) << "\"";
             }
-            const auto pixelFormat = static_cast<AVPixelFormat>(parameters->format);
-            const auto* pixelFormatName = av_get_pix_fmt_name(pixelFormat);
+            // 同一回事：容器可以只写编码格式而不写像素格式，此时 codecpar->format
+            // 是 AV_PIX_FMT_NONE，色度抽样/色彩模型/位深并非「不存在」而是「还没探测到」。
+            // 解码器已解析出的格式（解码表面优先，其次解码输出、再次软件格式）才是
+            // 能落地的答案，用它顶上来，避免实际可解的 4:2:0 显示成空白。
+            auto formatForDescription = static_cast<AVPixelFormat>(parameters->format);
+            if (av_pix_fmt_desc_get(formatForDescription) == nullptr && isCurrentVideoStream) {
+                const AVPixelFormat candidates[] = {
+                    decodedSurfaceDecoder_ == videoDecoder_ && decodedSurfaceFormat_ >= 0
+                        ? static_cast<AVPixelFormat>(decodedSurfaceFormat_) : AV_PIX_FMT_NONE,
+                    videoDecoder_->pix_fmt, videoDecoder_->sw_pix_fmt};
+                for (const auto candidate : candidates) {
+                    if (av_pix_fmt_desc_get(candidate) == nullptr) continue;
+                    formatForDescription = candidate;
+                    break;
+                }
+            }
+            const auto* pixelFormatName = av_get_pix_fmt_name(formatForDescription);
             if (pixelFormatName != nullptr)
                 json << ",\"pixelFormat\":\"" << EscapeJson(pixelFormatName) << "\"";
             const auto sourceBitDepth = std::max(parameters->bits_per_raw_sample,
-                PixelFormatBitDepth(pixelFormat));
+                PixelFormatBitDepth(formatForDescription));
             if (sourceBitDepth > 0)
                 json << ",\"bitDepth\":" << sourceBitDepth;
-            const bool rgb = pixelDescriptor != nullptr && (pixelDescriptor->flags & AV_PIX_FMT_FLAG_RGB) != 0;
-            const auto colorModel = pixelDescriptor == nullptr ? "" :
-                (rgb ? (pixelDescriptor->nb_components == 1 ? "灰度" : "RGB") : "YUV");
+            const auto* colorDescriptor = av_pix_fmt_desc_get(formatForDescription);
+            const bool rgb = colorDescriptor != nullptr && (colorDescriptor->flags & AV_PIX_FMT_FLAG_RGB) != 0;
+            const bool paletted = colorDescriptor != nullptr && (colorDescriptor->flags & AV_PIX_FMT_FLAG_PAL) != 0;
+            const bool hardwareSurface = colorDescriptor != nullptr &&
+                (colorDescriptor->flags & AV_PIX_FMT_FLAG_HWACCEL) != 0;
+            // 色彩模型按分量数判，不能按 RGB 旗标判：实测 gray/gray10le 的 flags 里
+            // 并没有 AV_PIX_FMT_FLAG_RGB，以前一律落进「YUV / 4:4:4」分支，等于把黑白片
+            // 说成 4:4:4。pal8 是调色板索引，硬件表面是 0 分量，两者都不是 YUV。
+            // 色度抽样只对真正带独立色度分量的格式成立。
+            const bool xyz = colorDescriptor != nullptr && (colorDescriptor->flags & AV_PIX_FMT_FLAG_XYZ) != 0;
+            // bayer（拜耳 CFA）描述符自带 RGB 旗标且 nb=3（实测 bayer_bggr8 等
+            // log2 全 0、flags=RGB|BAYER），不查 BAYER 会落进「RGB」支。
+            const bool bayer = colorDescriptor != nullptr && (colorDescriptor->flags & AV_PIX_FMT_FLAG_BAYER) != 0;
+            const bool hasChroma = colorDescriptor != nullptr && !hardwareSurface && !paletted && !rgb && !xyz && !bayer &&
+                colorDescriptor->nb_components >= 3;
+            const auto colorModel = colorDescriptor == nullptr || hardwareSurface ||
+                colorDescriptor->nb_components == 0 ? "" :
+                (paletted ? "调色板" :
+                 (xyz ? "XYZ" :
+                  (bayer ? "拜耳阵列" :
+                   (hasChroma ? "YUV" :
+                    (rgb && colorDescriptor->nb_components >= 3 ? "RGB" : "灰度")))));
             std::string chromaSubsampling;
-            if (pixelDescriptor != nullptr && !rgb) {
-                if (pixelDescriptor->log2_chroma_w == 1 && pixelDescriptor->log2_chroma_h == 1) chromaSubsampling = "4:2:0";
-                else if (pixelDescriptor->log2_chroma_w == 1 && pixelDescriptor->log2_chroma_h == 0) chromaSubsampling = "4:2:2";
-                else if (pixelDescriptor->log2_chroma_w == 0 && pixelDescriptor->log2_chroma_h == 0) chromaSubsampling = "4:4:4";
+            if (hasChroma) {
+                // 已覆盖抽样比：4:2:0（1,1）、4:2:2（1,0）、4:1:1（2,0）、4:4:0（0,1）、
+                // 4:4:4（0,0）、4:1:0（2,2）；其余比值不落表，「色度」留空。
+                const int log2W = colorDescriptor->log2_chroma_w;
+                const int log2H = colorDescriptor->log2_chroma_h;
+                if (log2W == 1 && log2H == 1) chromaSubsampling = "4:2:0";
+                else if (log2W == 1 && log2H == 0) chromaSubsampling = "4:2:2";
+                else if (log2W == 2 && log2H == 0) chromaSubsampling = "4:1:1";
+                else if (log2W == 0 && log2H == 1) chromaSubsampling = "4:4:0";
+                else if (log2W == 0 && log2H == 0) chromaSubsampling = "4:4:4";
+                else if (log2W == 2 && log2H == 2) chromaSubsampling = "4:1:0";
             }
             json << ",\"colorModel\":\"" << EscapeJson(colorModel)
                  << "\",\"chromaSubsampling\":\"" << EscapeJson(chromaSubsampling) << "\"";
@@ -8172,10 +8671,10 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                 if (!acceleration.empty())
                     json << ",\"hardwareAcceleration\":\"" << EscapeJson(acceleration) << "\"";
             }
-            json << ",\"colorRange\":" << parameters->color_range
-                 << ",\"colorSpace\":" << parameters->color_space
-                 << ",\"colorPrimaries\":" << parameters->color_primaries
-                 << ",\"colorTransfer\":" << parameters->color_trc
+            json << ",\"colorRange\":" << effectiveRange
+                 << ",\"colorSpace\":" << effectiveSpace
+                 << ",\"colorPrimaries\":" << effectivePrimaries
+                 << ",\"colorTransfer\":" << effectiveTransfer
                  << ",\"chromaLocation\":" << parameters->chroma_location
                  << ",\"fieldOrder\":" << parameters->field_order
                  << ",\"level\":" << parameters->level;
@@ -8197,13 +8696,79 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                 const auto* mastering = reinterpret_cast<const AVMasteringDisplayMetadata*>(masteringData->data);
                 std::string primaries;
                 if (mastering->has_primaries) {
-                    const auto redX = av_q2d(mastering->display_primaries[0][0]);
-                    const auto redY = av_q2d(mastering->display_primaries[0][1]);
-                    const auto greenX = av_q2d(mastering->display_primaries[1][0]);
-                    const auto greenY = av_q2d(mastering->display_primaries[1][1]);
-                    if (std::abs(redX - 0.68) < 0.015 && std::abs(redY - 0.32) < 0.015 &&
-                        std::abs(greenX - 0.265) < 0.015 && std::abs(greenY - 0.69) < 0.015) primaries = "Display P3";
-                    else primaries = "自定义";
+                    // 制片显示器色彩原色（SMPTE ST 2086 / CTA-861.3）：按坐标等于哪套标准
+                    // 报标准名，而不是只认 Display P3、其余一律丢给「自定义」——
+                    // HDR10 的制片显示器绝大多数就是 BT.2020，报成自定义等于没说。坐标是
+                    // 小分母有理数，0.002 的绝对容差已经足够宽；DCI-P3 与 Display P3
+                    // 原色三角相同，靠白点区分（DCI 0.314/0.351，D65 0.3127/0.3290）。
+                    // 实在对不上任何标准时报出坐标本身，让读者自己判断。
+                    const auto px = [mastering](int i, int c) {
+                        return av_q2d(mastering->display_primaries[i][c]);
+                    };
+                    const auto IsClose = [](double value, double reference) {
+                        return std::abs(value - reference) < 0.002;
+                    };
+                    const auto redX = px(0, 0);
+                    const auto redY = px(0, 1);
+                    const auto greenX = px(1, 0);
+                    const auto greenY = px(1, 1);
+                    const auto blueX = px(2, 0);
+                    const auto blueY = px(2, 1);
+                    const auto whiteX = av_q2d(mastering->white_point[0]);
+                    const auto whiteY = av_q2d(mastering->white_point[1]);
+                    // 脏值闸（同 HdrProcessor.cpp 的 ValidChromaticity 语义，那是另一编译
+                    // 单元的内部函数，不能直接调）：白点/原色是小分母有理数，分母为 0
+                    // 会得 NaN，0/50000 会得 0.0000，直接拼进用户可见串等于输出脏数据。
+                    const auto validChromaticity = [](double value) {
+                        return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+                    };
+                    const bool whiteValid = validChromaticity(whiteX) && validChromaticity(whiteY) &&
+                        whiteX > 0.0 && whiteY > 0.0;
+                    const bool coordsValid = validChromaticity(redX) && validChromaticity(redY) &&
+                        validChromaticity(greenX) && validChromaticity(greenY) &&
+                        validChromaticity(blueX) && validChromaticity(blueY);
+                    const auto describeCustom = [&]() {
+                        std::ostringstream text;
+                        text << std::fixed << std::setprecision(4)
+                             << "自定义 (R " << redX << "," << redY
+                             << " G " << greenX << "," << greenY
+                             << " B " << blueX << "," << blueY;
+                        if (whiteValid)
+                            text << " W " << whiteX << "," << whiteY;
+                        text << ")";
+                        return text.str();
+                    };
+                    const auto appendWhite = [&](const char* name) {
+                        std::ostringstream text;
+                        text << std::fixed << std::setprecision(4)
+                             << name << " (W " << whiteX << "," << whiteY << ")";
+                        return text.str();
+                    };
+                    if (!coordsValid) {
+                        // 六个原色坐标任一非法：按缺席口径处理（整行不显示），不打印 NaN。
+                        primaries.clear();
+                    } else if (IsClose(redX, 0.708) && IsClose(redY, 0.292) && IsClose(greenX, 0.170) &&
+                               IsClose(greenY, 0.797) && IsClose(blueX, 0.131) && IsClose(blueY, 0.046)) {
+                        // 正常 HDR10 的白点就是 D65 或缺席；白点有效且偏离 D65 才括注实际白点。
+                        primaries = whiteValid && !(IsClose(whiteX, 0.3127) && IsClose(whiteY, 0.3290))
+                            ? appendWhite("BT.2020") : std::string("BT.2020");
+                    } else if (IsClose(redX, 0.680) && IsClose(redY, 0.320) && IsClose(greenX, 0.265) &&
+                               IsClose(greenY, 0.690) && IsClose(blueX, 0.150) && IsClose(blueY, 0.060)) {
+                        // 同一组原色三角对应 DCI-P3 与 Display P3，只有白点能区分：
+                        // DCI 用 0.314/0.351，Display P3 用 D65 0.3127/0.3290。以前只要不是 DCI
+                        // 白点就报 Display P3，白点缺失时等于替片子编了个白点。
+                        // 白点无效或两个都对不上就报坐标，不替读者下结论。
+                        if (!whiteValid) primaries = describeCustom();
+                        else if (IsClose(whiteX, 0.314) && IsClose(whiteY, 0.351)) primaries = "DCI-P3";
+                        else if (IsClose(whiteX, 0.3127) && IsClose(whiteY, 0.3290)) primaries = "Display P3";
+                        else primaries = describeCustom();
+                    } else if (IsClose(redX, 0.640) && IsClose(redY, 0.330) && IsClose(greenX, 0.300) &&
+                               IsClose(greenY, 0.600) && IsClose(blueX, 0.150) && IsClose(blueY, 0.060)) {
+                        primaries = whiteValid && !(IsClose(whiteX, 0.3127) && IsClose(whiteY, 0.3290))
+                            ? appendWhite("BT.709") : std::string("BT.709");
+                    } else {
+                        primaries = describeCustom();
+                    }
                 }
                 json << ",\"masteringPrimaries\":\"" << EscapeJson(primaries) << "\"";
                 if (mastering->has_luminance)
@@ -8264,6 +8829,22 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                      << ",\"outputBitsPerSample\":" << audioRenderer_->OutputBitsPerSample()
                      << ",\"outputValidBitsPerSample\":" << validBits
                      << ",\"outputFloat\":" << (audioRenderer_->OutputIsFloat() ? "true" : "false");
+            }
+            // Passthrough seam facts for the selected track.
+            // supported = codec families the module engaged on a REAL endpoint
+            // this session (measured, not a capability table); flags = the
+            // module's cached decision bits for the current track, meaning
+            // owned by the module. Only present when the lane is armed/engaged
+            // -- module absent keeps the media info unchanged.
+            if (static_cast<std::int32_t>(index) == audioStream_ &&
+                (ptLane_.Engaged() || ptLane_.Armed())) {
+                const auto supported = ptLane_.EndpointSupportedCodecs();
+                json << ",\"passthrough\":{\"supported\":[";
+                for (std::size_t entry = 0; entry < supported.size(); ++entry) {
+                    if (entry > 0) json << ",";
+                    json << supported[entry];
+                }
+                json << "],\"flags\":" << ptLane_.TrackFlags() << "}";
             }
         }
         AVDictionaryEntry* language = av_dict_get(stream->metadata, "language", nullptr, 0);

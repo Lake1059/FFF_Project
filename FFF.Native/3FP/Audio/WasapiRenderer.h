@@ -2,6 +2,7 @@
 
 #include "3FR/Api/FFF.Native.Api.h"
 #include "3FP/Api/FFF.Player.AudioRenderPlug.h"
+#include "3FP/Api/FFF.Player.AudioPassthrough.h"
 #include "3FP/Audio/AsrAudioTap.h"
 
 extern "C" {
@@ -95,6 +96,13 @@ struct PlayerAudioRuntimeState final {
     std::atomic<std::uint32_t> plugBedActive{0};
     std::atomic<std::uint64_t> plugFramesRendered{0};
     std::atomic<std::uint64_t> plugFramesDeclined{0};
+    // Bitstream passthrough seam (FFF.Player.AudioPassthrough.h). Published with
+    // the same reasoning as the plug counters above: the API thread that answers
+    // FFF3FP_GetAudioPassthroughState must never dereference the renderer, which
+    // a device switch may replace at any moment. Bursts rendered by the current
+    // renderer instance; a seek deliberately does not clear it (a seek is a
+    // re-anchor, not an erasure of what was already played).
+    std::atomic<std::uint64_t> ptBurstsRendered{0};
 };
 
 class PlayerWasapiRenderer final {
@@ -157,6 +165,30 @@ public:
     // replace or free it across a device switch without a retire list.
     void SetAsrTap(std::shared_ptr<AsrAudioTap> tap) noexcept;
 
+    // ---- bitstream passthrough (FFF.Player.AudioPassthrough.h) ----
+    // Arms the non-PCM exclusive route with the module's format decision. Must
+    // be called BEFORE Start() (the session recreates the renderer when the lane
+    // engages, so this is always true) -- a decision is not retro-fitted onto a
+    // live endpoint. `degrade` is the session's one-step GUID fallback for a
+    // rejected format probe (variant -> generic carrier, see the lane); it runs on
+    // the render thread before the device is initialized and is invoked at most
+    // once. Passing a null format with a decision already armed is refused.
+    bool SetBitstreamFormat(const FFF3FPAudioPassthroughFormat& format,
+        std::function<bool(FFF3FPAudioPassthroughFormat&)> degrade) noexcept;
+    // True while the armed decision is in force (device not necessarily open yet).
+    bool BitstreamActive() const noexcept { return bitstreamActive_; }
+    // One burst of packed IEC 61937 bytes (s16le sample words, already
+    // byte-order-prepared by the module). Runs on the session worker next to
+    // Enqueue; bytes queue strictly in arrival order and are metered by the
+    // burst's own media duration, never by swr/gain/tempo logic.
+    FFFResult EnqueueBitstream(const std::uint8_t* burst, std::uint32_t burstSize,
+        std::int64_t pts100ns, std::int64_t duration100ns) noexcept;
+    // Diagnostics for the session's fallback decisions: the HRESULT the last
+    // exclusive Initialize failed with, and whether the endpoint rejected the
+    // bitstream *format* itself (as opposed to being busy with another owner).
+    std::int64_t LastInitHresult() const noexcept { return lastInitHresult_; }
+    bool BitstreamFormatRejected() const noexcept { return bitstreamFormatRejected_; }
+
 private:
     // Which route one decoded frame takes through the seam.
     enum class BedRoute {
@@ -170,6 +202,12 @@ private:
         // In the seam, and the plug accepted this bed: every frame of it is handed
         // to plug->render() and only rate-converted afterwards.
         Plug,
+        // Bitstream passthrough. Never returned by SelectBedRoute:
+        // that seam sees decoded PCM frames only. This route is armed explicitly
+        // via SetBitstreamFormat and switches the WHOLE renderer to the burst byte
+        // queue -- Enqueue() refuses frames while it is active, because mixing
+        // packed IEC 61937 bursts with resampled PCM on one endpoint is noise.
+        Bitstream,
     };
     struct AudioChunk {
         std::vector<std::uint8_t> bytes;
@@ -261,6 +299,35 @@ private:
     // instance's ownership). Touched only on the session worker, like the plug
     // view above; Enqueue reads it there and nowhere else.
     std::shared_ptr<AsrAudioTap> asrTap_;
+    // ---- bitstream passthrough state ----------------------------------------
+    // The decision is armed before Start() and never flipped on a live renderer
+    // (engagement re-creates the renderer), so the render thread may read
+    // bitstreamActive_ without a lock. The burst queue shares mutex_ with the
+    // PCM queue on purpose: Reset/consumption must stay atomic against bytes,
+    // whichever queue they live in.
+    bool bitstreamActive_ = false;
+    FFF3FPAudioPassthroughFormat bitstreamFormat_{};
+    std::function<bool(FFF3FPAudioPassthroughFormat&)> bitstreamDegrade_;
+    struct BitstreamBurst final {
+        std::vector<std::uint8_t> bytes;
+        // Device-period boundaries need not align with burst boundaries, so a
+        // burst can straddle two callbacks; the drain resumes at this offset.
+        std::size_t offset = 0;
+        std::int64_t pts100ns = 0;
+        std::int64_t duration100ns = 0;
+    };
+    std::deque<BitstreamBurst> bitstreamQueue_;
+    std::size_t bitstreamQueuedBytes_ = 0;
+    // (Link rate / channel count of the open endpoint live in outputSampleRate_ /
+    // outputChannels_: the bitstream device IS initialized at the link format, so
+    // the two are the same numbers by construction.)
+    // Clock anchor for the content timeline (see updateMediaClock): the media
+    // PTS of the first burst queued after the last reset.
+    bool bitstreamPtsAnchored_ = false;
+    std::int64_t bitstreamPtsAnchor100ns_ = 0;
+    std::atomic<std::uint64_t> ptBurstsRendered_{0};
+    std::int64_t lastInitHresult_ = 0;
+    bool bitstreamFormatRejected_ = false;
     // Scratch, kept as members so a steady-state stream allocates nothing per frame.
     std::vector<float> bedPlaneScratch_;    // channelCount planes, stride below
     std::vector<float> plugLeftScratch_;

@@ -1131,6 +1131,43 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    ''' <summary>设置页 → 音频直通三态的接线（Form设置_设备与性能 → Form1 → 本方法 →
+    ''' 会话.设置音频直通模式）。会话侧负责表的钉入/撤下与内核偏好；这里补一条人话：
+    ''' 直通要整轨接管并抢 WASAPI 独占，独占未开且偏好≠关时提前说明，免得用户以
+    ''' 为"开了没效果"。</summary>
+    Friend Sub 应用音频直通设置()
+        If 已释放 Then Return
+        Dim 模式 = Math.Clamp(设置.实例对象.音频直通选项, 0, 2)
+        Try
+            会话?.设置音频直通模式(CUInt(模式))
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用音频直通设置"))
+            Return
+        End Try
+        If 模式 <> CInt(音频直通模式.关) AndAlso 当前WASAPI模式 <> WASAPI共享模式.独占 Then
+            RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(
+                "音频源码直通需要 WASAPI 独占模式。当前为共享模式，直通不会接管；" &
+                "请在设置中开启独占输出后再播放相应片源。"))
+        End If
+    End Sub
+
+    ''' <summary>信息图层的直通行文本：接管时"直通：<模块显示名>"，缺席/未接管返回
+    ''' 空串（那一行不出现——与双耳行同一纪律，现网解码不是需要解释的降级）。</summary>
+    Friend Function 音频直通图层文本() As String
+        If 已释放 OrElse 会话 Is Nothing Then Return String.Empty
+        Try
+            Dim 状态 = 会话.读取音频直通状态()
+            If 状态.生效 = 0 Then Return String.Empty
+            Dim 名称 = 状态.名称
+            If String.IsNullOrWhiteSpace(名称) Then
+                名称 = 状态.编解码.ToString()
+            End If
+            Return 名称
+        Catch
+            Return String.Empty
+        End Try
+    End Function
+
     Public Sub 强制开启HDR模式()
         Dim 目标 = 会话
         Dim 快照 = 安全读取快照()
@@ -1685,6 +1722,10 @@ Public NotInheritable Class 播放器控制器
         ' 误报成 "GPU 解码已回退到 CPU"。
         Dim 音频IAMF回退 = False
         Dim 音频IAMF回退原因 As String = String.Empty
+        ' 音频直通回退：内核在直通通道（模块打包/独占非 PCM 端点）半路放弃时发
+        ' {"type":"audio","passthrough":true,"fallback":true,"reason":"..."}，与 IAMF 同构甄别。
+        Dim 音频直通回退 = False
+        Dim 音频直通回退原因 As String = String.Empty
         Try
             Using 文档 = JsonDocument.Parse(e.详情JSON)
                 Dim 音频类型 As JsonElement
@@ -1693,13 +1734,24 @@ Public NotInheritable Class 播放器控制器
                     音频类型.GetString() = "audio" AndAlso
                     文档.RootElement.TryGetProperty("iamf", 音频类型) AndAlso
                     音频类型.ValueKind = JsonValueKind.True
+                Dim 是音频直通 = 文档.RootElement.TryGetProperty("type", 音频类型) AndAlso
+                    音频类型.ValueKind = JsonValueKind.String AndAlso
+                    音频类型.GetString() = "audio" AndAlso
+                    文档.RootElement.TryGetProperty("passthrough", 音频类型) AndAlso
+                    音频类型.ValueKind = JsonValueKind.True
                 Dim 独占 As JsonElement
                 If 文档.RootElement.TryGetProperty("exclusive", 独占) Then
                     当前WASAPI模式 = If(独占.GetBoolean(), WASAPI共享模式.独占, WASAPI共享模式.共享)
                 End If
                 Dim 回退 As JsonElement
                 If 文档.RootElement.TryGetProperty("fallback", 回退) Then
-                    If 是音频IAMF Then 音频IAMF回退 = 回退.GetBoolean() Else 解码回退 = 回退.GetBoolean()
+                    If 是音频IAMF Then
+                        音频IAMF回退 = 回退.GetBoolean()
+                    ElseIf 是音频直通 Then
+                        音频直通回退 = 回退.GetBoolean()
+                    Else
+                        解码回退 = 回退.GetBoolean()
+                    End If
                 ElseIf 文档.RootElement.TryGetProperty("hardwareFallback", 回退) Then
                     解码回退 = 回退.GetBoolean()
                 End If
@@ -1708,6 +1760,8 @@ Public NotInheritable Class 播放器控制器
                     原因.ValueKind = JsonValueKind.String Then 回退原因 = 原因.GetString()
                 If 音频IAMF回退 AndAlso 文档.RootElement.TryGetProperty("reason", 原因) AndAlso
                     原因.ValueKind = JsonValueKind.String Then 音频IAMF回退原因 = 原因.GetString()
+                If 音频直通回退 AndAlso 文档.RootElement.TryGetProperty("reason", 原因) AndAlso
+                    原因.ValueKind = JsonValueKind.String Then 音频直通回退原因 = 原因.GetString()
                 Dim 独占回退值 As JsonElement
                 If 文档.RootElement.TryGetProperty("exclusiveFallback", 独占回退值) Then
                     独占回退 = 独占回退值.GetBoolean()
@@ -1731,6 +1785,13 @@ Public NotInheritable Class 播放器控制器
         If 音频IAMF回退 Then
             Dim 说明 = "IAMF 空间音频已回退到常规解码，声场以容器声明为准。"
             If Not String.IsNullOrWhiteSpace(音频IAMF回退原因) Then 说明 &= $"：{音频IAMF回退原因.Trim()}"
+            RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(说明))
+        End If
+        If 音频直通回退 Then
+            ' 直通回退话术（reason 枚举由内核给出）：模块拒绝/端点不支持/独占被占/
+            ' 打包出错。模块缺席不发这条事件——那与"没有这个功能"同形。
+            Dim 说明 = "音频源码直通未生效，已回退到常规解码，播放不中断。"
+            If Not String.IsNullOrWhiteSpace(音频直通回退原因) Then 说明 &= $"：{音频直通回退原因.Trim()}"
             RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(说明))
         End If
         If 独占回退 Then

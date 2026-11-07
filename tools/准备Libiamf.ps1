@@ -1,4 +1,4 @@
-﻿# 准备 Libiamf：把 IAMF 参考解码器落到 third_party\libiamf，供 FFF.Native 链接。
+# 准备 Libiamf：把 IAMF 参考解码器落到 third_party\libiamf，供 FFF.Native 链接。
 #
 # 为什么需要这个脚本：内核用 libiamf 渲染 IAMF 空间音频（FFmpeg 只能给出子流，混不成目标
 # 布局），而 third_party\ 被 .gitignore 排除，与 FFmpeg/Libass 同一策略 —— 所以新克隆必须
@@ -103,11 +103,17 @@ try {
 
 # 动态 CRT 是硬要求：Release /MD、Debug /MDd，与 FFF.Native 配置一致。用 /MT 会报
 # __imp_realloc / __imp_fmax / __imp__localtime64 等未解析外部符号。
+# /DNDEBUG 显式注入（2026-11-07，docs/139 §欠账2）：上游 code\CMakeLists.txt 会向
+# CMAKE_C_FLAGS 追加全局旗标（`set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3")`），为防未来
+# 上游改写 per-config 旗标让断言代码回归成品（docs/110 §三 实测过断言串进出货件），
+# 这里把 Release 的 C/C++ 旗标显式写死（与 CMake 默认值等价，仅显式化）；Debug 不动，
+# 保留 /RTC1 与断言语义。产物串实测：11-6 构建（默认旗标已含 NDEBUG）断言串已为 0。
 Write-Host "configure（iamf + oar + OBR 双耳链）"
 & $CmakeExe -S (Join-Path $RepoPath "code") -B $BuildDir -A x64 '-DCMAKE_CONFIGURATION_TYPES=Debug;Release' `
     '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>DLL' -DBUILD_SHARED_LIBS=OFF `
     -DBUILD_TESTING=OFF -DEIGEN_BUILD_TESTING=OFF -DIAMF_TEST_TOOL=OFF `
-    -DIAMF_BUILD_SHARED_LIB=OFF -DIAMF_ENABLE_BINAURALIZER=ON
+    -DIAMF_BUILD_SHARED_LIB=OFF -DIAMF_ENABLE_BINAURALIZER=ON `
+    '-DCMAKE_C_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG' '-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG'
 if ($LASTEXITCODE -ne 0) { throw "cmake configure 失败（rc=$LASTEXITCODE）" }
 & $CmakeExe --build $BuildDir --config $Configuration --target iamf --parallel $Parallel
 if ($LASTEXITCODE -ne 0) { throw "cmake build 失败（rc=$LASTEXITCODE）" }

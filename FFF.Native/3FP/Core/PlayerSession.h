@@ -2,7 +2,9 @@
 
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Api/FFF.Player.AudioRenderPlug.h"
+#include "3FP/Api/FFF.Player.AudioPassthrough.h"
 #include "3FP/Audio/WasapiRenderer.h"
+#include "3FP/Audio/AudioPassthrough.h"
 #include "3FP/Core/AvifTileGridComposer.h"
 #include "3FP/Core/PlacementPolicy.h"
 #include "3FP/Core/PlaybackPerformancePolicy.h"
@@ -127,6 +129,15 @@ public:
     // be replaced at any moment by a device switch.
     void GetAudioRenderPlugState(std::uint32_t& active, std::string& name,
         std::uint64_t& framesRendered, std::uint64_t& framesDeclined) const noexcept;
+    // Audio bitstream passthrough (3FP/Audio/AudioPassthrough.h).
+    // Install/clear the module's function table; set the host preference
+    // (FFF3FP_PT_MODE_*); read back the seam state for
+    // FFF3FP_GetAudioPassthroughState (mode = the host preference there, not the
+    // snapshot's effective-route field).
+    FFFResult SetAudioPassthroughApi(const FFF3FPAudioPassthroughApi* api) noexcept;
+    FFFResult SetAudioPassthroughMode(std::uint32_t mode) noexcept;
+    void GetAudioPassthroughState(std::uint32_t& active, std::uint32_t& mode,
+        std::uint32_t& codecId, std::string& name, std::uint64_t& burstsRendered) const noexcept;
     // ASR audio tap (3FP/Api/FFF.Player.AudioTap.h): raw decoded frames out to
     // a speech-recognition worker. The session owns the tap; the renderer only
     // holds it while installed, so a device switch re-installs it into the
@@ -561,6 +572,61 @@ private:
     void FallBackFromIamf(const std::string& reason) noexcept;
     void ReleaseIamfDecoder() noexcept;
     std::int32_t videoStream_;
+    // ---- audio bitstream passthrough (3FP/Audio/AudioPassthrough.h) ---------
+    // The neutral seam, IAMF-bypass-shaped (TryOpen -> intercept -> fallback).
+    // Worker-thread-owned like the rest of the audio decode path; the lane
+    // object itself is internally locked for the API-thread install/set calls.
+    // Codec identity mapping for the seam: kernel AV_CODEC_ID_* -> the
+    // contract's kernel-owned enum. 0 = not a passthrough candidate.
+    static std::uint32_t PassthroughCodecIdFor(const AVStream* stream) noexcept;
+    // Binds the just-selected track for passthrough (guards live inside the
+    // lane: table installed, mode != OFF, codec accepted). Engagement itself
+    // happens on the first complete frame, when describe() can see it.
+    void ArmPassthroughForTrack(const AVStream* stream) noexcept;
+    // Worker: true when the packet was consumed by the seam (armed or engaged).
+    // Normalizes the packet into complete frames with av_parser_parse2, runs
+    // describe()/pack(), and writes bursts straight into the renderer's
+    // bitstream queue. Falls back on any module or endpoint failure.
+    bool HandlePassthroughPacket(const AVPacket* packet) noexcept;
+    // describe() success path: recreate the renderer in exclusive non-PCM mode
+    // with the module's format decision and flip the lane to engaged.
+    bool EngagePassthrough(const std::uint8_t* firstFrame, std::uint32_t firstFrameSize) noexcept;
+    // Release the engaged/armed lane and re-open the FFmpeg decoder for the
+    // same track (FallBackFromIamf's shape), emitting the fallback event.
+    void FallBackFromPassthrough(const char* reason) noexcept;
+    // Parser teardown for the seam (per-track rebuild, seek flush is separate).
+    void ReleasePassthroughParserState() noexcept;
+    // (Re)creates the seam parser for an AVCodecID; false when FFmpeg has none
+    // for this pairing (packets then flow to the module as-is).
+    bool EnsurePassthroughParser(int avCodecId) noexcept;
+    // Track teardown (close / stream switch): lane off, module reset, parser
+    // freed, snapshot fields zeroed. No event -- the surrounding operation
+    // already announces the change.
+    void ReleasePassthroughTrack() noexcept;
+    // Seek: module reset + parser flush; the renderer Reset clears its burst
+    // queue (called just after the shared audioRenderer_->Reset).
+    void NotePassthroughSeek() noexcept;
+    // One-shot user hint that a control the bitstream route cannot honour was
+    // refused (mono/rate/plug while engaged).
+    void EmitPassthroughMutexHint(const char* control) noexcept;
+    // RecreateAudioRenderer variant that arms the module's format decision
+    // BEFORE the render thread opens the endpoint. Failure reporting mirrors
+    // RecreateAudioRenderer; the HRESULT distinguishes endpoint-busy from
+    // format-rejected for the fallback reason.
+    FFFResult RecreateAudioRendererWithBitstream(
+        const FFF3FPAudioPassthroughFormat& format, bool paused,
+        std::string& error, std::int64_t& initHresult, bool& formatRejected) noexcept;
+    // Scratch burst buffer, sized once from the contract's capacity minimum.
+    std::vector<std::uint8_t> ptBurstBuffer_;
+    AVCodecParserContext* ptParser_ = nullptr;
+    AVCodecContext* ptParserCodecCtx_ = nullptr;   // parser-only scratch, never opened
+    std::uint32_t ptParserCodecId_ = 0;            // FFF3FPAudioPassthroughCodec the parser is for
+    int ptParserAvCodecId_ = -1;                   // AVCodecID the parser was built for (seek rebuild)
+    // Armed without engagement yet: the first complete frame feeds describe().
+    std::uint32_t ptArmedCodec_ = 0;
+    // The one-shot mutual-exclusion hint (reset on every engage/fallback).
+    bool ptMutexHintEmitted_ = false;
+    AudioPassthroughLane ptLane_;
     // Software-decoder thread ladder. Driven by measured load, not by resolution: a
     // resolution says nothing about whether this machine can keep up with this codec.
     // It starts at the floor and only ever climbs -- one step per starving window,

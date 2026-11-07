@@ -23,6 +23,9 @@ Public Class 设置
     Public Property 启用空间音频 As Boolean = True
     ' 保留旧空间音频字段以兼容已保存的设置；三种效果互斥，单声道优先。
     Public Property 启用单声道音频 As Boolean = False
+    ' 音频源码直通三态（0=自动 1=强制 2=关，默认自动）。直通要接管整条轨并抢 WASAPI
+    ' 独占，与单声道/变速/床渲染天然互斥——内核侧直接拒绝，UI 侧在这里联动提示。
+    Public Property 音频直通选项 As Integer = 0
     Public Property 自动切换到真实HDR高亮 As Boolean = True
     Public Property HDR峰值亮度选项 As Integer = 0
     Public Property HDR峰值亮度 As Integer = 0
@@ -256,6 +259,7 @@ Public Class 设置
         If 视频缓冲区策略 < 0 OrElse 视频缓冲区策略 > 2 Then 视频缓冲区策略 = 0
         If 音频缓冲区策略 < 0 OrElse 音频缓冲区策略 > 2 Then 音频缓冲区策略 = 0
         If 启用单声道音频 Then 启用空间音频 = False
+        If 音频直通选项 < 0 OrElse 音频直通选项 > 2 Then 音频直通选项 = 0
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
         HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)
