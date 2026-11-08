@@ -271,7 +271,8 @@ Public Class Form1
             AddressOf 图片光标锚定缩放,
             AddressOf 播放控制器.平移视图,
             Function() 播放控制器.当前视图旋转,
-            AddressOf 播放控制器.读取图片缩放)
+            AddressOf 播放控制器.读取图片缩放,
+            Function() 播放控制器.读取呈现计数)
         ' 图片模式通过 Handled 接管左右方向键，用于切换图片。
         AddHandler 方向键快捷键已请求, AddressOf 图片浏览控制器.处理方向键快捷键
         AddHandler 图片浏览控制器.图片模式已变化, AddressOf 图片浏览控制器_图片模式已变化
@@ -851,7 +852,7 @@ Public Class Form1
         If 正在关闭 Then Return
         Using 对话框 As New OpenFileDialog With {
             .CheckFileExists = True,
-            .Filter = "所有文件|*.*",
+            .Filter = "所有文件|*.*|" & 播放列表.相机RAW格式筛选器,
             .Multiselect = True,
             .RestoreDirectory = True,
             .Title = "打开媒体或替换歌词/字幕/弹幕"
@@ -917,6 +918,8 @@ Public Class Form1
     Private Sub 添加并打开多个媒体文件(路径 As IEnumerable(Of String))
         Dim 媒体文件 = 路径.Where(Function(x) File.Exists(x) AndAlso
                                       播放列表.是支持的媒体文件(x)).ToArray()
+        Dim 被排除的RAW = 路径.Where(Function(x) 播放列表.是相机RAW文件(x)).ToArray()
+        If 被排除的RAW.Length > 0 Then 提示相机RAW格式不支持(被排除的RAW(0))
         If 媒体文件.Length = 0 Then Return
 
         播放列表数据.取消自动扫描()
@@ -926,7 +929,19 @@ Public Class Form1
         播放控制器.打开媒体(首个路径)
     End Sub
 
+    Private Sub 提示相机RAW格式不支持(路径 As String)
+        If 正在关闭 Then Return
+        LakeUI.ExOverlayMsgBox(Me,
+            $"当前 FFmpeg 不支持该格式：{IO.Path.GetFileName(路径)}（相机 RAW 相关格式）。" & vbCrLf &
+            "请转码为受支持的图片或视频后再打开。",
+            MsgBoxStyle.Exclamation Or MsgBoxStyle.OkOnly, "格式不支持")
+    End Sub
+
     Private Sub 打开或替换单个文件(路径 As String)
+        If 播放列表.是相机RAW文件(路径) Then
+            提示相机RAW格式不支持(路径)
+            Return
+        End If
         If LRC歌词自动加载器.是支持的歌词文件(路径) Then
             播放控制器.替换歌词(路径)
         ElseIf 外部字幕自动加载器.是支持的字幕文件(路径) Then

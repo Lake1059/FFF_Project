@@ -3157,6 +3157,10 @@ FFFResult PlayerSession::GetHdrSignalDiagnostics(
     return FFFResult::Success;
 }
 
+std::uint64_t PlayerSession::PresentationCounter() const noexcept {
+    return videoRenderer_.SwapChainPresents();
+}
+
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     if (output.size < sizeof(FFF3FPSnapshot) || output.version != SnapshotVersion) return FFFResult::InvalidArgument;
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }

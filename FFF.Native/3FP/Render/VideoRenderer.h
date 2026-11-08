@@ -741,6 +741,10 @@ private:
     }
     FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
         std::uint64_t renderedVideoGeneration) noexcept;
+    // True for a short window after the last still-image Redraw(). The gesture
+    // timer's intermediate states are only useful inside their own tick, so the
+    // presenter skips its cadence hold and submits an off-vblank flip instead.
+    bool InteractiveViewActive() const noexcept;
     // Pacing bookkeeping, once per flip, on the presenter thread: mirrors the declared panel
     // rate into the readouts, re-polls it when the calibrated value drifts from it (see the
     // body -- the output window belongs to the host, so this is the only hook available), and
@@ -1358,6 +1362,10 @@ private:
     std::atomic<std::uint64_t> scalePass100ns_{0};
     std::atomic<std::uint32_t> playbackWorkPending_;
     std::atomic<bool> interactiveMove_;
+    // QPC timestamp of the last still-image Redraw(). Expires on its own (see
+    // InteractiveViewActive), so no host-side engage/release can leak into the
+    // video pacing state (paceEngaged_/ResetPaceWindow and friends).
+    std::atomic<std::int64_t> lastInteractiveRedrawQpc_{ 0 };
     std::atomic<bool> lyricsLayoutEnabled_;
     // Pure-audio overlay (no video stream at all): set when the subtitle slot
     // receives a non-empty layer, so PresentTimedText composes subtitles over a

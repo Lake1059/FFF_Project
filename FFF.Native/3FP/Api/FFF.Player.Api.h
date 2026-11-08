@@ -1132,6 +1132,13 @@ FFF3FP_API FFFResult FFF3FP_SetVolume(FFF3FPHandle player, float volume, std::ui
 FFF3FP_API FFFResult FFF3FP_SetTimedTextLayer(FFF3FPHandle player,
     const FFF3FPTimedTextLayer* layer) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetSnapshot(FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept;
+// Live swap-chain presentation counter. Append-only export: the export surface
+// does not move for additive entries, so PlayerApiVersion and the snapshot
+// layout/version stay unchanged. The still-image gesture timer reads it to
+// submit view updates on the real presentation cadence instead of a fixed
+// 8 ms tick, which removes the phase drift between host submissions and flips.
+FFF3FP_API FFFResult FFF3FP_GetPresentationCounter(FFF3FPHandle player,
+    std::uint64_t* counter) noexcept;
 // HDR presentation diagnostics: whether the ST 2094 curve actually shaped the drawn
 // frame, and whether/what per-frame HDR metadata reached the swap chain. Counters are
 // process-lifetime for this session, not reset per seek.

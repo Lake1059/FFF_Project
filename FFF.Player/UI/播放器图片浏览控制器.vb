@@ -9,20 +9,38 @@ Friend NotInheritable Class 播放器图片浏览控制器
     Private Const 缩放阻尼毫秒 As Integer = 300
     Private Const 平移阻尼毫秒 As Integer = 150
     Private Const 缩放提示间隔秒 As Double = 0.1
+    ' P0-2：几何下发按真实呈现节拍走。连续三个 tick 计数没推进就强制放行一次，
+    ' 避免"只有自己的 Redraw 才推进计数"时互相等死。
+    Private Const 呈现门最长跳过 As Integer = 3
+    Private Const 呈现计数不可用 As ULong = ULong.MaxValue
+    ' P1-3：准备视图 的完整内核回读按 32ms 节流，其余 tick 用缓存。
+    Private Const 视图检测间隔秒 As Double = 0.032
 
     ' 与 LakeUI.PixelPictureZoomMotion 相同的临界阻尼解析解，连续输入保留速度。
     Private NotInheritable Class 阻尼运动
         Friend 值 As Double
         Friend 目标 As Double
         Friend 速度 As Double
+        ' P0-1：缩放运动用「本次运动跨度」定停表阈值；平移保持旧口径，免得
+        ' 大像素位移被相对阈值提前判静止（拖拽惯性会跳一截）。
+        Friend 使用跨度 As Boolean = False
+        Private 运动起点 As Double
+        Private 上次目标 As Double
+        Private 运动跨度 As Double = 0.0
+        Private 跟踪中 As Boolean = False
 
         Friend Sub 重置(初值 As Double)
             值 = 初值
             目标 = 初值
             速度 = 0
+            运动起点 = 初值
+            上次目标 = 初值
+            运动跨度 = 0.0
+            跟踪中 = False
         End Sub
 
         Friend Function 推进(间隔秒 As Double, 阻尼毫秒 As Integer) As Boolean
+            Dim 起始值 = 值
             Dim 角频率 = 8.0 / (阻尼毫秒 / 1000.0)
             Dim 差值 = 值 - 目标
             Dim 系数 = 速度 + 角频率 * 差值
@@ -32,10 +50,24 @@ Friend NotInheritable Class 播放器图片浏览控制器
             ' 停表判据必须用几何层的**相对**阈值，不能留在这里的绝对 1e-7/1e-6：
             ' 临界阻尼的尾部是渐近的，绝对阈值在 z=1（对数空间目标为 0）附近永远
             ' 差一点点 —— 实测真计时器下单格滚轮要发 78 次、末次 596 ms，且判定
-            ' 静止后再等 0.4 s 仍在涨。几何层的 已静止 把位移/速度按目标幅度缩放并
+            ' 静止后再等 0.4 s 仍在涨。几何层的 已静止 把位移/速度按运动幅度缩放并
             ' 各留一个下限，正是为这两种失败写的。阻尼常数与积分保持本控制器自己的
             ' 一套（0.3 s），不借用 阻尼步进 —— 那会顺手改掉手感。
-            If 图片缩放几何.已静止(CSng(值), CSng(目标), CSng(速度)) Then
+            Dim 阈值基准 As Single = -1.0F
+            If 使用跨度 Then
+                If Not 跟踪中 Then
+                    运动起点 = 起始值
+                    跟踪中 = True
+                End If
+                ' 连续滚轮也算一次运动：跨度从本次动画起点量到最新目标，
+                ' 放大与缩小因此得到同一套阈值。
+                If 目标 <> 上次目标 OrElse 运动跨度 = 0.0 Then
+                    运动跨度 = Math.Max(Math.Abs(运动起点 - 目标), Math.Abs(起始值 - 目标))
+                    上次目标 = 目标
+                End If
+                阈值基准 = CSng(运动跨度)
+            End If
+            If 图片缩放几何.已静止(CSng(值), CSng(目标), CSng(速度), 阈值基准) Then
                 重置(目标)
                 Return False
             End If
@@ -53,11 +85,12 @@ Friend NotInheritable Class 播放器图片浏览控制器
     Private ReadOnly 锚定缩放 As 锚定缩放委托
     Private ReadOnly 平移视图 As Func(Of Single, Single, Boolean)
     Private ReadOnly 读取缩放 As 读取缩放委托
+    Private ReadOnly 读取呈现计数 As Func(Of ULong)
     Private ReadOnly 切换图片 As Action(Of Integer)
     Private ReadOnly 操作提示 As Action(Of String)
     Private ReadOnly 当前旋转 As Func(Of UInteger)
     Private ReadOnly 动画计时器 As LakeUI.PrecisionTimer
-    Private ReadOnly 缩放运动 As New 阻尼运动()
+    Private ReadOnly 缩放运动 As New 阻尼运动() With {.使用跨度 = True}
     Private ReadOnly 水平运动 As New 阻尼运动()
     Private ReadOnly 垂直运动 As New 阻尼运动()
 
@@ -80,6 +113,10 @@ Friend NotInheritable Class 播放器图片浏览控制器
     Private 缩放提示累计秒 As Double = 缩放提示间隔秒
     Private 图片模式已启用值 As Boolean
     Private 已释放 As Boolean
+    Private 上次呈现计数 As ULong = 呈现计数不可用
+    Private 跳过下发次数 As Integer
+    Private 上次完整视图检测 As Long
+    Private 视图检测缓存有效 As Boolean
     ' 双击 1:1 的来源尺寸：内核封顶之后"适应"与"1:1"是不是同档全看它。
     Private 源宽 As UInteger
     Private 源高 As UInteger
@@ -92,7 +129,8 @@ Friend NotInheritable Class 播放器图片浏览控制器
                    切换图片值 As Action(Of Integer), 操作提示值 As Action(Of String),
                    锚定缩放值 As 锚定缩放委托,
                    平移视图值 As Func(Of Single, Single, Boolean),
-                   当前旋转值 As Func(Of UInteger), 读取缩放值 As 读取缩放委托)
+                   当前旋转值 As Func(Of UInteger), 读取缩放值 As 读取缩放委托,
+                   读取呈现计数值 As Func(Of ULong))
         ArgumentNullException.ThrowIfNull(画面控件值)
         ArgumentNullException.ThrowIfNull(应用视图值)
         ArgumentNullException.ThrowIfNull(切换图片值)
@@ -101,6 +139,7 @@ Friend NotInheritable Class 播放器图片浏览控制器
         ArgumentNullException.ThrowIfNull(平移视图值)
         ArgumentNullException.ThrowIfNull(当前旋转值)
         ArgumentNullException.ThrowIfNull(读取缩放值)
+        ArgumentNullException.ThrowIfNull(读取呈现计数值)
         画面控件 = 画面控件值
         应用视图 = 应用视图值
         切换图片 = 切换图片值
@@ -109,6 +148,7 @@ Friend NotInheritable Class 播放器图片浏览控制器
         平移视图 = 平移视图值
         当前旋转 = 当前旋转值
         读取缩放 = 读取缩放值
+        读取呈现计数 = 读取呈现计数值
         动画计时器 = New LakeUI.PrecisionTimer With {
             .Interval = 8,
             .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
@@ -259,7 +299,15 @@ Friend NotInheritable Class 播放器图片浏览控制器
         启动动画()
     End Sub
 
-    Private Function 准备视图() As Boolean
+    Private Function 准备视图(Optional 允许节流 As Boolean = False) As Boolean
+        ' P1-3：动画 tick 每 8ms 走一次，外部回读按 32ms 节流即可；期间
+        ' 最小/最大倍率与视图尺寸/旋转沿用缓存，下发后的 实际倍率 由内核
+        ' 回读的 结果倍率 直接更新，不会与缓存打架。入口（滚轮/拖动/双击）
+        ' 一律走完整检测，停止动画会让缓存失效。
+        If 允许节流 AndAlso 视图检测缓存有效 AndAlso 视图已初始化 AndAlso
+            (Stopwatch.GetTimestamp() - 上次完整视图检测) / CDbl(Stopwatch.Frequency) < 视图检测间隔秒 Then
+            Return True
+        End If
         Dim 当前 As Single
         Dim 最小 As Single
         Dim 最大 As Single
@@ -296,6 +344,8 @@ Friend NotInheritable Class 播放器图片浏览控制器
         End If
         最小倍率 = 最小
         最大倍率 = 最大
+        上次完整视图检测 = Stopwatch.GetTimestamp()
+        视图检测缓存有效 = True
         Return True
     End Function
 
@@ -328,28 +378,46 @@ Friend NotInheritable Class 播放器图片浏览控制器
     End Sub
 
     Private Sub 推进动画(间隔秒 As Double)
-        If Not 准备视图() Then Return
+        If Not 准备视图(True) Then Return
+        ' 弹簧按真实经过时间推进，跟有没有下发无关。
         Dim 缩放未结束 = 缩放运动.推进(间隔秒, 缩放阻尼毫秒)
-        Dim 新倍率 = CSng(Math.Clamp(Math.Exp(缩放运动.值), CDbl(最小倍率), CDbl(最大倍率)))
-        If 新倍率 <> 实际倍率 Then
-            Dim 结果倍率 As Single
-            If Not 锚定缩放(新倍率 / 实际倍率, 锚点水平, 锚点垂直, 结果倍率) Then
-                停止动画()
-                Return
-            End If
-            实际倍率 = 结果倍率
-        End If
         Dim 水平未结束 = 水平运动.推进(间隔秒, 平移阻尼毫秒)
         Dim 垂直未结束 = 垂直运动.推进(间隔秒, 平移阻尼毫秒)
-        Dim 水平增量 = CSng(水平运动.值 - 已提交水平)
-        Dim 垂直增量 = CSng(垂直运动.值 - 已提交垂直)
-        If 水平增量 <> 0 OrElse 垂直增量 <> 0 Then
-            If Not 平移视图(水平增量, 垂直增量) Then
-                停止动画()
-                Return
+        Dim 本次静止 = Not (缩放未结束 OrElse 水平未结束 OrElse 垂直未结束)
+        ' P0-2：只在交换链呈现计数推进后下发。8ms 提交与 vblank 节拍错相时，
+        ' presenter 会把若干次提交合并成一帧，中间态数量随相位随机变化；
+        ' 等计数推进再发，就把提交钉在呈现节拍上。旧内核没有该导出时
+        ' 读取呈现计数 返回哨兵，退化为「每 tick 都下发」的既有行为。
+        Dim 计数 = 读取呈现计数()
+        Dim 门可用 = 计数 <> 呈现计数不可用
+        Dim 允许下发 = 本次静止 OrElse Not 门可用 OrElse
+            上次呈现计数 = 呈现计数不可用 OrElse 计数 <> 上次呈现计数 OrElse
+            跳过下发次数 >= 呈现门最长跳过
+        If 允许下发 Then
+            Dim 新倍率 = CSng(Math.Clamp(Math.Exp(缩放运动.值), CDbl(最小倍率), CDbl(最大倍率)))
+            If 新倍率 <> 实际倍率 Then
+                Dim 结果倍率 As Single
+                If Not 锚定缩放(新倍率 / 实际倍率, 锚点水平, 锚点垂直, 结果倍率) Then
+                    停止动画()
+                    Return
+                End If
+                实际倍率 = 结果倍率
             End If
-            已提交水平 = 水平运动.值
-            已提交垂直 = 垂直运动.值
+            Dim 水平增量 = CSng(水平运动.值 - 已提交水平)
+            Dim 垂直增量 = CSng(垂直运动.值 - 已提交垂直)
+            If 水平增量 <> 0 OrElse 垂直增量 <> 0 Then
+                If Not 平移视图(水平增量, 垂直增量) Then
+                    停止动画()
+                    Return
+                End If
+                已提交水平 = 水平运动.值
+                已提交垂直 = 垂直运动.值
+            End If
+            跳过下发次数 = 0
+            If 门可用 Then 上次呈现计数 = 计数
+        Else
+            ' 累积位移不丢：下一个放行 tick 一次性按 新倍率/实际倍率 补齐。
+            跳过下发次数 += 1
         End If
         Dim 提示 = $"缩放：{实际倍率 * 视图单位屏幕比 * 100.0F:0.##}%"
         缩放提示累计秒 += 间隔秒
@@ -386,6 +454,9 @@ Friend NotInheritable Class 播放器图片浏览控制器
         够不到一比一 = False
         动画计时器.Stop()
         视图已初始化 = False
+        视图检测缓存有效 = False
+        上次呈现计数 = 呈现计数不可用
+        跳过下发次数 = 0
         水平运动.重置(0)
         垂直运动.重置(0)
         已提交水平 = 0

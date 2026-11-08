@@ -1392,6 +1392,26 @@ Friend Module 播放器原生接口
         Return 光标锚定缩放函数
     End Function
 
+    ' P0-2 呈现计数：追加导出，旧内核缺失时返回哨兵 ULong.MaxValue，
+    ' 调用方据此退化为「每 tick 都下发」，不会把能力不可用升级成起不来。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取呈现计数原型(播放器 As 播放器原生句柄,
+        ByRef 计数 As ULong) As 原生播放器结果
+
+    Private ReadOnly 读取呈现计数函数 As 读取呈现计数原型 =
+        解析可选导出(Of 读取呈现计数原型)("FFF3FP_GetPresentationCounter")
+
+    Friend Function 读取呈现计数(播放器 As 播放器原生句柄) As ULong
+        Dim 函数 = 读取呈现计数函数
+        If 函数 Is Nothing Then Return ULong.MaxValue
+        Try
+            Dim 计数 As ULong
+            Return If(函数(播放器, 计数) = 原生播放器结果.成功, 计数, ULong.MaxValue)
+        Catch ex As Exception
+            Return ULong.MaxValue
+        End Try
+    End Function
+
     ' 视口封顶：非 0 时适配盒不超过源原生尺寸，于是"缩放"变成绝对的 屏幕:视频 像素比
     ' （缩放=1 即逐像素 1:1，窗口比源大时四周留黑边）。0 = 沿用"铺满窗口"的历史行为。
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>

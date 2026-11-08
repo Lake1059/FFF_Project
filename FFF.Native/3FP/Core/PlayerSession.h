@@ -168,6 +168,9 @@ public:
     FFFResult GetVideoAutoHdrStatus(
         FFF3FPVideoAutoHdrStatus& status) const noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
+    // Live swap-chain flip count, read without copying the 608-byte snapshot.
+    // Used by the still-image view timer to align submissions with flips.
+    std::uint64_t PresentationCounter() const noexcept;
     // HDR presentation diagnostics (see FFF3FPHdrSignalDiagnostics in
     // FFF.Player.Api.h): which ST 2094 mechanism actually ran for the frames drawn
     // so far, and whether the per-frame display signaling reached DXGI.

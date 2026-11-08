@@ -521,6 +521,19 @@ Public NotInheritable Class 播放器控制器
         Return False
     End Function
 
+    ''' <summary>交换链呈现计数（P0-2）。旧内核或会话不可用时返回 ULong.MaxValue 哨兵，
+    ''' 调用方据此退化为「每 tick 都下发」，不会把能力不可用升级成动画停摆。</summary>
+    Friend Function 读取呈现计数() As ULong
+        Dim 目标 = 会话
+        If 已释放 OrElse 正在切换会话 OrElse 目标 Is Nothing Then Return ULong.MaxValue
+        Try
+            Return 目标.读取呈现计数()
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+        Return ULong.MaxValue
+    End Function
+
     ''' <summary>返回图片信息；失败或非图片返回 Nothing。</summary>
     Friend Function 取图片信息() As 原生图片信息?
         Dim 目标 = 会话

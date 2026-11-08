@@ -5914,10 +5914,14 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
                 // video-generation clause for the same reason -- a newly decoded
                 // frame must not cut the hold short.
                 const auto paceEngaged = paceFloorHz_.load(std::memory_order_acquire) > 0.0;
+                const auto interactiveView = InteractiveViewActive();
                 // Decode and 360-view updates present immediately; overlay-only
                 // updates obey their cadence. The swap chain paces the display.
+                // A still-image gesture is the exception: its intermediate view
+                // states are only useful inside their own timer tick, so skip the
+                // cadence hold while the low-latency window is live.
                 if (const auto now = std::chrono::steady_clock::now();
-                    !cameraLive && (paceEngaged || !videoChanged) &&
+                    !cameraLive && (paceEngaged || !videoChanged) && !interactiveView &&
                     nextPresentation != std::chrono::steady_clock::time_point::min() &&
                     now < nextPresentation) {
                     if (paceEngaged)
@@ -7946,13 +7950,47 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     return FFFResult::Success;
 }
 
+bool PlayerVideoRenderer::InteractiveViewActive() const noexcept {
+    // A still-image gesture (wheel zoom / drag pan / double-click fit) issues a
+    // Redraw() per timer sample. Holding a short low-latency window around the
+    // last request lets the presenter skip its cadence hold and submit the flip
+    // without waiting for a vblank, so each intermediate state reaches the swap
+    // chain inside the same 8 ms tick. It expires 250 ms after the last request,
+    // with no host-side engage/release to leak into video pacing.
+    // Only a chain created with ALLOW_TEARING can honour an off-vblank flip.
+    // On a fixed-refresh desktop the flag is absent and Present(0,0) is still
+    // composited by DWM on a vblank: an ungated window bought no latency win and
+    // instead filled the frame-latency queue (measured 23/46/66 ms spikes, vs
+    // the stable 13.9-17.1 ms baseline). Gate the whole path on the capability
+    // so such hosts keep the vblank-clamped cadence exactly as before.
+    if (!swapAllowTearing_) return false;
+    // Same benign cross-thread read as the other source flags in DrawCachedVideo:
+    // sourceImageMode_ only changes when a new medium is opened, and a stale
+    // answer here costs at most one off-vblank flip. It also keeps a lingering
+    // gesture window from following a still image into the next video.
+    if (!sourceImageMode_) return false;
+    const auto last = lastInteractiveRedrawQpc_.load(std::memory_order_acquire);
+    if (last <= 0) return false;
+    const auto elapsed = QpcNowValue() - last;
+    return elapsed >= 0 && elapsed < QpcTicks() / 4;
+}
+
 FFFResult PlayerVideoRenderer::Redraw() noexcept {
+    if (sourceImageMode_)
+        lastInteractiveRedrawQpc_.store(QpcNowValue(), std::memory_order_release);
     {
         std::lock_guard deviceLock(deviceMutex_);
         if (!hasCachedVideo_ || window_ == nullptr) return FFFResult::Success;
-        std::lock_guard presentLock(presentMutex_);
-        const auto chainResult = EnsureSwapChain(sourceWidth_, sourceHeight_, sourceBitDepth_);
-        if (chainResult != FFFResult::Success) return chainResult;
+        // The presenter owns presentMutex_ across the flip. Blocking the UI
+        // thread here for a whole vblank is what made wheel/timer samples drop.
+        // PresentTimedText re-checks (and creates) the chain itself, so a failed
+        // try_lock is safe: the generation bump below is the wake-up that keeps
+        // the newest view state from being lost.
+        std::unique_lock presentLock(presentMutex_, std::try_to_lock);
+        if (presentLock.owns_lock()) {
+            const auto chainResult = EnsureSwapChain(sourceWidth_, sourceHeight_, sourceBitDepth_);
+            if (chainResult != FFFResult::Success) return chainResult;
+        }
     }
     {
         std::lock_guard lock(timedTextMutex_);
@@ -8715,6 +8753,12 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
     if (outputWidth == 0 || outputHeight == 0) return FFFResult::InvalidArgument;
     const auto projection360 = projection360Enabled_.load(std::memory_order_acquire) != 0;
     VideoDestination destination{};
+    // The destination rect is integral because diagnostics/hit testing read it
+    // back as integers. Keep the sub-pixel remainder of the zoom transform and
+    // add it back at the shader call: lround()/truncation used to swallow every
+    // move below half a pixel, which read as the picture "climbing a grid".
+    float subPixelX = 0.0f, subPixelY = 0.0f;
+    float subPixelW = 0.0f, subPixelH = 0.0f;
     if (lyricsLayoutEnabled_.load(std::memory_order_acquire) && sourceLimitedToNativeSize_) {
         destination = CalculateLyricsCoverDestination(sourceWidth_, sourceHeight_,
             outputWidth, outputHeight,
@@ -8776,12 +8820,16 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
         // travels with the pointer. Adding the offset instead of subtracting matches that.
         const float offsetX = panX * std::abs(zoomedWidth - fittedWidth) / 2.0f;
         const float offsetY = panY * std::abs(zoomedHeight - fittedHeight) / 2.0f;
-        destination.x = static_cast<std::int32_t>(std::lround(
-            std::clamp((minX + maxX) * 0.5f + offsetX, minX, maxX)));
-        destination.y = static_cast<std::int32_t>(std::lround(
-            std::clamp((minY + maxY) * 0.5f + offsetY, minY, maxY)));
+        const float originX = std::clamp((minX + maxX) * 0.5f + offsetX, minX, maxX);
+        const float originY = std::clamp((minY + maxY) * 0.5f + offsetY, minY, maxY);
+        destination.x = static_cast<std::int32_t>(std::lround(originX));
+        destination.y = static_cast<std::int32_t>(std::lround(originY));
         destination.width = static_cast<std::uint32_t>(zoomedWidth);
         destination.height = static_cast<std::uint32_t>(zoomedHeight);
+        subPixelX = originX - static_cast<float>(destination.x);
+        subPixelY = originY - static_cast<float>(destination.y);
+        subPixelW = zoomedWidth - static_cast<float>(destination.width);
+        subPixelH = zoomedHeight - static_cast<float>(destination.height);
     }
     ID3D11ShaderResourceView* presentationViews[3]{};
     if (projection360) {
@@ -8869,9 +8917,11 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
     // the Windows HDR SDR-white adjustment.
     // mainDraw 口径 = 整个 DrawWithShader 调用（含内部状态设置与最终 Draw）。
     const auto mainDrawStart = std::chrono::steady_clock::now();
-    const auto result = DrawWithShader(target, static_cast<float>(destination.x),
-        static_cast<float>(destination.y), static_cast<float>(destination.width),
-        static_cast<float>(destination.height), 0, presentationViews);
+    const auto result = DrawWithShader(target,
+        static_cast<float>(destination.x) + subPixelX,
+        static_cast<float>(destination.y) + subPixelY,
+        static_cast<float>(destination.width) + subPixelW,
+        static_cast<float>(destination.height) + subPixelH, 0, presentationViews);
     mainDraw100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - mainDrawStart),
         std::memory_order_relaxed);
     if (result == FFFResult::Success) {
@@ -9086,7 +9136,12 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     // drag-latency relief, DXGI-legal because the chain carries the flag, and there
     // is deliberately no switch for it: steady-state playback (everything outside
     // the move loop) remains gated by the tearing request below.
-    const auto present = interactiveMove
+    // Still-image gestures take the same off-vblank path as a window move. The
+    // 15 ms that zoom_cost_probe measured per wheel step was Present(1,0)
+    // waiting for a vblank; the interactive window above keeps that path off
+    // steady playback and expires 250 ms after the last Redraw().
+    const auto interactiveView = InteractiveViewActive();
+    const auto present = (interactiveMove || interactiveView)
         ? chain->Present(0, swapAllowTearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0)
         : tearing ? chain->Present(0, DXGI_PRESENT_ALLOW_TEARING) : chain->Present(1, 0);
     presentWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<

@@ -643,6 +643,11 @@ Public NotInheritable Class 播放器会话
         Return 播放器原生接口.读取图片缩放(取得句柄(), 当前倍率, 最小倍率, 最大倍率)
     End Function
 
+    ''' <summary>交换链呈现计数（P0-2）。旧内核没有该导出时返回 ULong.MaxValue 哨兵。</summary>
+    Public Function 读取呈现计数() As ULong
+        Return 播放器原生接口.读取呈现计数(取得句柄())
+    End Function
+
     ''' <summary>图片模式：以光标为锚做一次缩放步进（放大 1.25 / 缩小 0.8）。
     ''' 锚点按客户区归一化到 [0,1]，由内核保持该点下的画面内容不动。
     ''' 成功时 结果缩放 返回缩放后的绝对值，便于宿主同步本地缓存。

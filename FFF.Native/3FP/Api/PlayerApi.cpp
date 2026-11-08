@@ -172,6 +172,15 @@ FFFResult FFF3FP_GetPresentPacingStatus(const FFF3FPHandle player,
         ? static_cast<PlayerSession*>(player)->GetPresentPacingStatus(*status)
         : FFFResult::InvalidArgument;
 }
+// Live presentation counter for the still-image gesture timer. Additive export:
+// a host built against an older header resolves it dynamically and simply
+// falls back to submitting on every timer tick.
+FFFResult FFF3FP_GetPresentationCounter(const FFF3FPHandle player,
+    std::uint64_t* counter) noexcept {
+    if (player == nullptr || counter == nullptr) return FFFResult::InvalidArgument;
+    *counter = static_cast<PlayerSession*>(player)->PresentationCounter();
+    return FFFResult::Success;
+}
 FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetInteractiveMove(const FFF3FPHandle player, const std::uint32_t enabled) noexcept {
     return player && enabled <= 1 ? static_cast<PlayerSession*>(player)->SetInteractiveMove(enabled != 0)
