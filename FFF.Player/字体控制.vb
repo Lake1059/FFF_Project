@@ -68,6 +68,20 @@ Public NotInheritable Class 字体控制
             Dim 当前字体 = 控件.Font
             Dim 新字体 As New Font(字体名称, 当前字体.Size, 当前字体.Style, 当前字体.Unit)
             字体属性.SetValue(控件, 新字体)
+            ' 动画帧率搭字体管道的车（3FUI 同款，其设置页注释原文「帧率属性的更新与
+            ' 字体更新绑定，动一下字体或者重启来应用」）。LakeUI 的 AnimationFPS 分布在
+            ' 17 个控件上且无共同基类，只能逐控件反射；DropDownAnimationFPS 在 LakeUI
+            ' 5.116 不存在，反射落空即静默跳过（?. 语义）。值没变就不写——部分控件的
+            ' FPS setter 会重启动画节拍，空写等于无谓抖动。
+            Dim 目标帧率 = 设置.实例对象.LakeUI动画帧率
+            Dim 动画属性 = 控件.GetType().GetProperty("AnimationFPS", BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic)
+            If 动画属性?.CanWrite Then
+                Dim 当前帧率 = 动画属性.GetValue(控件)
+                If 当前帧率 IsNot Nothing AndAlso CInt(当前帧率) <> 目标帧率 Then
+                    动画属性.SetValue(控件, 目标帧率)
+                End If
+            End If
+            控件.GetType().GetProperty("DropDownAnimationFPS", BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic)?.SetValue(控件, 目标帧率)
         Catch
         End Try
     End Sub

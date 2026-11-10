@@ -41,6 +41,29 @@ Public Class 设置
     ' 203 = ITU-R BT.2408-4 §2.1 定义的漫反射白（100% 朗伯反射体在 PQ 上的标称亮度），
     ' 也是 libplacebo / mpv 的 PL_COLOR_SDR_WHITE 取值。不是面板峰值。
     Public Property HDR映射SDR参考亮度 As Integer = 203
+
+    ' ── LakeUI 呈现引擎性能选项（2026-11-11，自 3FUI/FFmpegFreeUI 同款移植）──────
+    ' 3FUI 把 LakeUI.GlobalOptions 的引擎旋钮全部暴露成设置项，这里是同一套：
+    ' 字段存「档位下标」，档位数值表在 应用图形性能设置() 上方；设置页下拉的
+    ' Items 顺序必须与档位表逐位对齐（两处都有一致性注释）。
+    ' 默认值铁律：与移植前宿主行为逐位一致 —— 文字渲染原是 Form1_Load 顶部
+    ' 硬编码 Outline（档 3），其余取 LakeUI 引擎默认（PerPrimitive / SSAA OFF /
+    ' GPU 128MiB / 画刷 256 / 字体 128 / CPU 96MiB / 脏区 8 区+60% / 分桶 64px /
+    ' 动画 60FPS）。老设置文件没有这些键 → 反序列化留默认 → 升级不改观感。
+    Public Property LakeUI抗锯齿 As Integer = 0
+    Public Property LakeUI文字渲染 As Integer = 3
+    Public Property LakeUI超采样 As Integer = 0
+    Public Property LakeUI_GPU缓存档 As Integer = 2
+    Public Property LakeUI_画刷缓存档 As Integer = 6
+    Public Property LakeUI_字体缓存档 As Integer = 3
+    Public Property LakeUI_CPU缓存档 As Integer = 3
+    Public Property LakeUI_背景脏区档 As Integer = 4
+    Public Property LakeUI_SSAA分桶档 As Integer = 1
+    ' 界面控件动画帧率：0 = 不限制（LakeUI 语义，会尽量快地请求重绘）。
+    ' 经 字体控制 的控件树遍历反射下发到每个控件的 AnimationFPS；3FUI 的注释是
+    ' 「帧率属性的更新与字体更新绑定」——这里同样搭字体管道的车，不另设遍历。
+    Public Property LakeUI动画帧率 As Integer = 60
+
     Public Property 音量百分比 As Integer = 100
 
     ' 360°视场角由快捷键调整；该字段没有对应的设置控件，但仍随设置文件持久化。
@@ -278,6 +301,19 @@ Public Class 设置
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
         HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)
+        ' LakeUI 图形性能档：越界/脏数据归默认档（与字段默认一致），不把用户按在极端档上。
+        LakeUI抗锯齿 = Math.Clamp(LakeUI抗锯齿, 0, 1)
+        LakeUI文字渲染 = Math.Clamp(LakeUI文字渲染, 0, 3)
+        LakeUI超采样 = Math.Clamp(LakeUI超采样, 0, 3)
+        LakeUI_GPU缓存档 = Math.Clamp(LakeUI_GPU缓存档, 0, 8)
+        LakeUI_画刷缓存档 = Math.Clamp(LakeUI_画刷缓存档, 0, 8)
+        LakeUI_字体缓存档 = Math.Clamp(LakeUI_字体缓存档, 0, 6)
+        LakeUI_CPU缓存档 = Math.Clamp(LakeUI_CPU缓存档, 0, 8)
+        LakeUI_背景脏区档 = Math.Clamp(LakeUI_背景脏区档, 0, 8)
+        LakeUI_SSAA分桶档 = Math.Clamp(LakeUI_SSAA分桶档, 0, 8)
+        ' 帧率只认档位表里的离散值；手改 json 塞进来的脏值（如 75）归默认 60，
+        ' 否则反射下发会把所有控件的动画节拍设成一个没对齐过的数。
+        If Array.IndexOf(LakeUI动画帧率档, LakeUI动画帧率) < 0 Then LakeUI动画帧率 = 60
         音量百分比 = Math.Clamp(音量百分比, 0, 100)
         If Not Single.IsFinite(视角360视场角) Then 视角360视场角 = 90.0F
         视角360视场角 = Math.Clamp(视角360视场角, 30.0F, 90.0F)
@@ -402,6 +438,62 @@ Public Class 设置
         Dim 合成Alpha = CUInt((原始Alpha * CULng(限定不透明度) + 127UL) \ 255UL)
         Return (value And &HFFFFFFUI) Or (合成Alpha << 24)
     End Function
+
+    ' ── LakeUI 图形性能档位表（与 Form设置_设备与性能 各下拉 Items 逐位对齐）──────
+    ' 首档 0 = 「禁用缓存」：3FUI 在 2026-07 两次迭代后把禁用档排到最前（省内存模式
+    ' 首选），这里沿用。GPU/CPU 预算按进程总量约束（LakeUI GlobalOptions 注释原文：
+    ' 「可见合成表面是必要显示工作集，只参与计量并促使其他缓存收缩，不会为满足预算而销毁」）。
+    Private Shared ReadOnly LakeUI_GPU缓存预算选项MiB As Long() =
+        {0L, 64L, 128L, 256L, 512L, 1024L, 2048L, 4096L, 8192L}
+    Private Shared ReadOnly LakeUI_CPU缓存预算选项MiB As Long() =
+        {0L, 32L, 64L, 96L, 128L, 256L, 512L, 1024L, 2048L}
+    Private Shared ReadOnly LakeUI_缓存条目选项 As Integer() =
+        {0, 8, 16, 32, 64, 128, 256, 512, 1024}
+    Private Shared ReadOnly LakeUI_字体缓存条目选项 As Integer() =
+        {0, 32, 64, 128, 256, 512, 1024}
+    Private Shared ReadOnly LakeUI_背景脏区数量选项 As Integer() =
+        {4, 4, 4, 8, 8, 8, 16, 16, 16}
+    Private Shared ReadOnly LakeUI_背景脏区完整重采阈值选项 As Single() =
+        {0.4F, 0.6F, 0.8F, 0.4F, 0.6F, 0.8F, 0.4F, 0.6F, 0.8F}
+    Private Shared ReadOnly LakeUI_SSAA分桶粒度选项 As Integer() =
+        {32, 64, 96, 128, 192, 256, 384, 512, 1024}
+    Friend Shared ReadOnly LakeUI动画帧率档 As Integer() = {0, 15, 30, 45, 50, 60, 90, 120}
+
+    ''' <summary>
+    ''' 把 LakeUI 图形性能选项写入 LakeUI.GlobalOptions。启动时（设置加载后）与
+    ''' 设置页改动时各调一次；GlobalOptions 是进程级静态，写入即对后续绘制生效，
+    ''' 不需要触发全量重绘（HDR 那种"改档位要预热曲线表"的路径宿主不暴露）。
+    ''' </summary>
+    Public Shared Sub 应用图形性能设置()
+        LakeUI.GlobalOptions.GlobalAntialiasMode = If(实例对象.LakeUI抗锯齿 = 1,
+            Vortice.Direct2D1.AntialiasMode.Aliased, Vortice.Direct2D1.AntialiasMode.PerPrimitive)
+        Select Case 实例对象.LakeUI文字渲染
+            Case 0 : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.ClearType
+            Case 1 : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Grayscale
+            Case 2 : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Aliased
+            Case Else : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Outline
+        End Select
+        Select Case 实例对象.LakeUI超采样
+            Case 1 : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.x2
+            Case 2 : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.x3
+            Case 3 : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.x4
+            Case Else : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.OFF
+        End Select
+        LakeUI.GlobalOptions.GpuCacheBudgetBytes =
+            LakeUI_GPU缓存预算选项MiB(Math.Clamp(实例对象.LakeUI_GPU缓存档, 0, LakeUI_GPU缓存预算选项MiB.Length - 1)) * 1024L * 1024L
+        LakeUI.GlobalOptions.CpuCacheBudgetBytes =
+            LakeUI_CPU缓存预算选项MiB(Math.Clamp(实例对象.LakeUI_CPU缓存档, 0, LakeUI_CPU缓存预算选项MiB.Length - 1)) * 1024L * 1024L
+        LakeUI.GlobalOptions.BrushCacheLimit =
+            LakeUI_缓存条目选项(Math.Clamp(实例对象.LakeUI_画刷缓存档, 0, LakeUI_缓存条目选项.Length - 1))
+        Dim 字体上限 = LakeUI_字体缓存条目选项(Math.Clamp(实例对象.LakeUI_字体缓存档, 0, LakeUI_字体缓存条目选项.Length - 1))
+        LakeUI.GlobalOptions.TextFormatCacheLimit = 字体上限
+        LakeUI.GlobalOptions.FontResolveCacheLimit = 字体上限
+        Dim 脏区索引 = Math.Clamp(实例对象.LakeUI_背景脏区档, 0, LakeUI_背景脏区数量选项.Length - 1)
+        LakeUI.GlobalOptions.BackgroundDirtyRectLimit = LakeUI_背景脏区数量选项(脏区索引)
+        LakeUI.GlobalOptions.BackgroundFullDirtyRatio = LakeUI_背景脏区完整重采阈值选项(脏区索引)
+        LakeUI.GlobalOptions.SsaaBucketSize =
+            LakeUI_SSAA分桶粒度选项(Math.Clamp(实例对象.LakeUI_SSAA分桶档, 0, LakeUI_SSAA分桶粒度选项.Length - 1))
+    End Sub
 
     Public Shared Sub 应用SP个性化设置()
         If Not SP_UnLock OrElse Form1.当前主窗体 Is Nothing Then Return

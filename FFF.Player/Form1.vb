@@ -159,7 +159,10 @@ Public Class Form1
             My.MyApplication.GPU预热线程?.Join()
         Catch
         End Try
-        LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Outline
+        ' LakeUI 文字渲染质量原先在这里硬编码 Outline；2026-11-11 起由设置驱动
+        ' （设置.应用图形性能设置()，默认档 = Outline，行为不变）。调用点挪到了
+        ' 下面 启动时加载设置() 之后——它读的就是设置值，太早调用拿到的是默认对象。
+        ' Attach（chrome 句柄）不画字，晚于它设置文字质量没有观感差异。
         LakeUI.MessageDialogOptions.BackdropEnabled = True
         LakeUI.MessageDialogOptions.BackdropMode = LakeUI.PopupBackdropMode.Auto
         LakeUI.MessageDialogOptions.BackdropTintColor = Color.FromArgb(120, 0, 0, 0)
@@ -184,6 +187,9 @@ Public Class Form1
         更新弹幕按钮可见性()
         SP加载器.启动时加载()
         设置.启动时加载设置()
+        ' LakeUI 图形性能选项（文字渲染/抗锯齿/SSAA/缓存预算/脏区策略）在设置加载后
+        ' 一次性下发；动画帧率不走这里，搭下面字体管道的车（见 字体控制.替换字体）。
+        设置.应用图形性能设置()
         文件关联管理器.启动后台同步(文件关联选项.从设置(设置.实例对象))
         字体控制.更新所有控件字体属性()
         设置.应用SP个性化设置()
