@@ -116,6 +116,16 @@ public:
     FFFResult SetAudioExclusiveMode(bool exclusive) noexcept;
     FFFResult SetPlaybackRate(double rate) noexcept;
     FFFResult SetMonoAudio(bool enabled) noexcept;
+    // Binaural bed-render policy (FFF3FP_SetAudioBinauralPolicy): 0 = automatic,
+    // decided by the endpoint's form factor; 1 = force binaural; 2 = force stereo.
+    // The session holds it because the renderer is rebuilt on every device switch
+    // and would otherwise forget the user's choice on a hot-plug.
+    FFFResult SetAudioBinauralPolicy(std::uint32_t policy) noexcept;
+    // Read-back for FFF3FP_GetAudioBinauralStatus. Everything comes from the shared
+    // runtime state plus the session's own policy: the API thread must not
+    // dereference the renderer, which a device switch can replace between calls.
+    void GetAudioBinauralStatus(std::uint32_t& policy, std::uint32_t& formFactor,
+        std::uint32_t& wanted, std::uint32_t& available) const noexcept;
     FFFResult SetVolume(float volume, bool muted) noexcept;
     // External bed render plug (3FP/Api/FFF.Player.AudioRenderPlug.h). Install,
     // replace or clear; the session owns the context from the call that installs it
@@ -267,7 +277,10 @@ private:
         bool preserveVideoOutput = false, bool keepStillImage = false) noexcept;
     FFFResult DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1,
         bool exact = true) noexcept;
-    void DecodeUntilSeekTarget() noexcept;
+    // timeSliced=true（播放态批量臂）：循环每 250 ms 让出一次 worker，命令与快照
+    // 得以在片间处理，seek 目标保持挂起由下一 tick 续推。默认 false：暂停态的
+    // 一次性调用保持「一次解到位」语义。
+    void DecodeUntilSeekTarget(bool timeSliced = false) noexcept;
     // —— fragmented MP4（fMP4）seek 支撑（C-SEEK-FRAGMENTED@1 / C-SEEK-ROLLBACK@1）——
     // DoOpen 挂载：fragmented 判定成立时构造扫描器并启动后台 moof 扫描线程。
     void StartFragmentScanIfNeeded(const std::string& path) noexcept;
@@ -303,7 +316,8 @@ private:
     FFFResult OpenDecoder(AVFormatContext* format, std::int32_t streamIndex, bool video,
         AVCodecContext** decoder, std::int32_t hardwareDeviceType = -1,
         std::int32_t* hardwarePixelFormat = nullptr, bool useConfiguredHardware = true,
-        const AVCodec* codecOverride = nullptr, std::string* failureReason = nullptr) noexcept;
+        const AVCodec* codecOverride = nullptr, std::string* failureReason = nullptr,
+        std::int32_t decodeAdapterIndex = -1) noexcept;
     FFFResult OpenHardwareVideoDecoder(AVFormatContext* format, std::int32_t streamIndex,
         AVCodecContext** decoder, std::string* failureReason = nullptr) noexcept;
     // The one hardware gate: feed the stream's first packets through a decoder that
@@ -391,6 +405,9 @@ private:
     void QueueVideoFrame(AVFrame* frame) noexcept;
     void ClearVideoQueue() noexcept;
     // Copies the side data of one about-to-be-presented frame into the ring.
+    // seek 期间被跳过的帧不会走 PresentVideoFrame 的索引维护；不补的话索引会缺条目，
+    // seek 之后的帧号整体偏小（实测全解 121、跳帧 67），而双流辅层合成按帧号对齐。
+    void IndexVideoPacketTimestamp(std::int64_t pts) noexcept;
     void CacheFrameSideData(const AVFrame* frame, std::int64_t frameIndex) noexcept;
     void ClearSideDataRing() noexcept;
     // Captures / drops the stream-level coded side data of a bound video
@@ -403,7 +420,16 @@ private:
     void DecodePendingPacket(bool video) noexcept;
     void NormalizeVideoFrameTimestamp(AVFrame* frame) noexcept;
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
-    void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
+    void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
+        bool seekPreview = false) noexcept;
+    // True at most once per seek: the first picture decoded on the way to the
+    // target may go on screen so the key press has a visible answer, but it must
+    // not retire the seek (see PresentVideoFrame's seekPreview parameter).
+    bool ShouldPreviewSeekFrame(const AVFrame* frame, const AVFormatContext* owner) noexcept;
+    // Distance from the seek target inside which no preview is shown: a preview
+    // there would be immediately overwritten by the target picture, buying nothing
+    // and paying one extra vblank.
+    std::int64_t SeekPreviewMargin100ns() const noexcept;
     // --- optional auxiliary video layer -------------------------------------
     // One host request, keyed by the presentation index it belongs to.
     struct AuxCompositionRequest {
@@ -704,6 +730,11 @@ private:
     PlayerAudioRuntimeState audioRuntimeState_;
     std::unique_ptr<PlayerWasapiRenderer> audioRenderer_;
     bool monoAudio_ = false; // Worker-owned; survives seeks, media and endpoint changes.
+    // Binaural bed-render policy. Atomic rather than worker-owned because the reader
+    // is the API thread (GetAudioBinauralStatus) and the writer is a queued command;
+    // it also has to survive every renderer rebuild, so it cannot live on the
+    // renderer.
+    std::atomic<std::uint32_t> binauralPolicy_{0};
     // The bed render plug the host installed. Copied, because the caller may free
     // its own struct the moment the call returns; `context` is the kernel's from
     // then on and only this class releases it (see SetAudioRenderPlug / ~PlayerSession).
@@ -779,6 +810,22 @@ private:
     std::int64_t seekTarget100ns_;
     std::int64_t seekTargetFrame_;
     bool keyframeSeekPending_;
+    // --- seek preview (progressive presentation) ---
+    // A seek is exact: the target picture waits for its whole reference chain.
+    // That wait is unavoidable, but leaving the previous picture frozen on screen
+    // through it is not -- it is what a seek feels like a stall. One picture from
+    // the head of the chain is put on screen instead, without moving the timeline.
+    // Worker-thread-only state, like the three fields above.
+    bool seekPreviewAllowed_ = true;
+    // Wall clock of the previous DoSeek, used to tell a single press from a held key.
+    std::int64_t lastSeekStartedMs_ = 0;
+    bool seekPreviewPresented_ = false;
+    std::int64_t seekPreviewMargin100ns_ = 0;
+    // Pictures decoded and offered to the presenter while a seek is outstanding.
+    // They never reach QueueVideoFrame, so decodedVideoFrames cannot see them --
+    // deliberately: that counter feeds the decode-skip ladder, which measures
+    // steady-state decoding and would misread a seek burst as a regression.
+    std::uint64_t seekDecodedFrames_ = 0;
     std::int64_t lastVideoFrameDuration100ns_;
     // 帧率模式的实测依据：呈现出来的逐帧间距散布。容器那两个字段单独不够定"恒定/可变"——
     // 实测真 VFR 的 .ts 在会话里 av_guess_frame_rate() 与 r_frame_rate 同为 20/1，比较它们

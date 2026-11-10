@@ -1412,6 +1412,120 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+    ' ---- 运行期前后预取计划（FFF.Player.Prefetch.h，可选导出） ----
+    ' 内核新增面：旧内核没有这两个入口时 支持前后预取 = False，整条通路静默降级，
+    ' 不影响任何播放。两个结构都是纯 POD，size/version 由调用方填好；快照布局与
+    ' PlayerApiVersion(20)/SnapshotVersion(23) 都不动。
+    ' reserved 用独立字段而不是 ByValArray，避开数组封送坑（与 原生图片信息 同款）。
+
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 前后预取计划
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 代次 As UInteger
+        Public 标志 As UInteger
+        ' UTF-8、vbLf 分隔的路径串：首项是当前媒体，其后是邻居（由近及远）。
+        ' 空/Null 表示取消全部工作。用 IntPtr 让 x86/x64 指针宽度自动对齐。
+        Public 路径表UTF8 As IntPtr
+        Public 保留1 As UInteger
+        Public 保留2 As UInteger
+        Public 保留3 As UInteger
+        Public 保留4 As UInteger
+    End Structure
+
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 前后预取状态
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        Public 已启用 As UInteger
+        Public 档位 As UInteger
+        Public 助手进程运行中 As UInteger
+        Public 工作线程运行中 As UInteger
+        Public 缓存静图帧数 As UInteger
+        Public 缓存探测条目数 As UInteger
+        Public 已缓存字节 As UInt64
+        Public 预算字节 As UInt64
+        Public 命中次数 As UInt64
+        Public 未命中次数 As UInt64
+        Public 已释放帧数 As UInt64
+        Public 助手失败次数 As UInt64
+        Public 保留1 As UInteger
+        Public 保留2 As UInteger
+        Public 保留3 As UInteger
+        Public 保留4 As UInteger
+        Public 保留5 As UInteger
+        Public 保留6 As UInteger
+        Public 保留7 As UInteger
+        Public 保留8 As UInteger
+    End Structure
+
+    Private Const 前后预取计划版本 As UInteger = 1UI
+    Private Const 前后预取状态版本 As UInteger = 1UI
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置前后预取计划原型(ByRef 计划 As 前后预取计划) As 原生播放器结果
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取前后预取状态原型(ByRef 状态 As 前后预取状态) As 原生播放器结果
+
+    Private ReadOnly 设置前后预取计划函数 As 设置前后预取计划原型 =
+        解析可选导出(Of 设置前后预取计划原型)("FFF3FP_SetPrefetchPlan")
+    Private ReadOnly 读取前后预取状态函数 As 读取前后预取状态原型 =
+        解析可选导出(Of 读取前后预取状态原型)("FFF3FP_GetPrefetchStatus")
+
+    ''' <summary>当前内核是否提供前后预取两个入口（旧内核返回 False，静默禁用）。</summary>
+    Friend ReadOnly Property 支持前后预取 As Boolean
+        Get
+            Return 设置前后预取计划函数 IsNot Nothing AndAlso 读取前后预取状态函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>下发前后预取计划。路径用 vbLf 拼成单个 UTF-8 串，首项是当前媒体。
+    ''' 空列表下发空 plan（pathsUtf8 = IntPtr.Zero）取消当前代次全部工作；
+    ''' 无导出或调用失败返回 False，不抛异常。</summary>
+    Friend Function 设置前后预取计划(路径列表 As IReadOnlyList(Of String),
+                                    代次 As UInteger, 标志 As UInteger) As Boolean
+        Dim 函数 = 设置前后预取计划函数
+        If 函数 Is Nothing Then Return False
+        Dim 路径指针 As IntPtr = IntPtr.Zero
+        Try
+            Dim 计划 As New 前后预取计划 With {
+                .大小 = CUInt(Marshal.SizeOf(Of 前后预取计划)()),
+                .版本 = 前后预取计划版本,
+                .代次 = 代次,
+                .标志 = 标志
+            }
+            If 路径列表 IsNot Nothing AndAlso 路径列表.Count > 0 Then
+                路径指针 = Marshal.StringToCoTaskMemUTF8(String.Join(vbLf, 路径列表))
+                计划.路径表UTF8 = 路径指针
+            Else
+                计划.路径表UTF8 = IntPtr.Zero
+            End If
+            Return 函数(计划) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        Finally
+            If 路径指针 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(路径指针)
+        End Try
+    End Function
+
+    ''' <summary>读取前后预取状态。调用前必须填好 大小 与 版本（与 FFF3FP_GetImageInfo 同规矩）。
+    ''' 无导出或调用失败返回 Nothing。</summary>
+    Friend Function 读取前后预取状态() As 前后预取状态?
+        Dim 函数 = 读取前后预取状态函数
+        If 函数 Is Nothing Then Return Nothing
+        Try
+            Dim 状态 As New 前后预取状态 With {
+                .大小 = CUInt(Marshal.SizeOf(Of 前后预取状态)()),
+                .版本 = 前后预取状态版本
+            }
+            If 函数(状态) <> 原生播放器结果.成功 Then Return Nothing
+            Return 状态
+        Catch ex As Exception
+            Return Nothing
+        End Try
+    End Function
+
     ' 视口封顶：非 0 时适配盒不超过源原生尺寸，于是"缩放"变成绝对的 屏幕:视频 像素比
     ' （缩放=1 即逐像素 1:1，窗口比源大时四周留黑边）。0 = 沿用"铺满窗口"的历史行为。
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
@@ -1454,6 +1568,26 @@ Friend Module 播放器原生接口
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetMonoAudio(播放器 As 播放器原生句柄, 启用 As UInteger) As 原生播放器结果
     End Function
+
+    ' 双耳床渲染策略（附加导出：不抬 API 版本，不动快照布局）。
+    ' 0=自动（按端点形态判定：3=耳机、5=头戴式） 1=强制双耳 2=强制立体声。
+    ' 策略存在会话上，渲染器每次因设备切换重建都会重放它。
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_SetAudioBinauralPolicy(播放器 As 播放器原生句柄,
+                                                 策略 As UInteger) As 原生播放器结果
+    End Function
+
+    ' 策略回读：四个输出都可给零。形态是内核渲染器真正打开的那个端点的
+    ' EndpointFormFactor 原值（0=属性存储没回答）；期望=策略与形态合起来是否
+    ' 该把床双耳化；可用=插槽已装且端点是 2 声道（否则宿主应当隐藏控件）。
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetAudioBinauralStatus(播放器 As 播放器原生句柄,
+                                                  ByRef 策略 As UInteger,
+                                                  ByRef 端点形态 As UInteger,
+                                                  ByRef 期望双耳 As UInteger,
+                                                  ByRef 可用 As UInteger) As 原生播放器结果
+    End Function
+
 
     ' 音频源码直通三导出（附加导出：不抬 API 版本）。表由模块产出、宿主钉住后整张
     ' 交出，内核在装载点拷贝一份，调用返回即可解钉；IntPtr.Zero 表示撤下插槽、

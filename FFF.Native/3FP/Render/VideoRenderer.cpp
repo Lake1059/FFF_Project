@@ -197,43 +197,58 @@ bool QueryDisplayConfigInfo(Packet& packet) noexcept {
 
 // Same system value as AdvancedColorInfo::SdrWhiteLevelInNits, read through
 // DISPLAYCONFIG instead of WinRT: no RoInitialize, works where the WinRT call
-// briefly fails. Heeds the pitfalls recorded above (QDC_DATABASE_CURRENT only;
-// GET_SDR_WHITE_LEVEL's header.id is the TARGET id).
+// briefly fails. GET_SDR_WHITE_LEVEL's header.id is the TARGET id.
+//
+// QDC_DATABASE_CURRENT is the documented starting point, but drivers may reject
+// it outright with ERROR_INVALID_PARAMETER (87). Measured here on a 10-bit HDR
+// panel over a USB-C link: QDC_DATABASE_CURRENT -> 87, QDC_ALL_PATHS -> OK and
+// SDR_WHITE_LEVEL reads 100 nits (the value WinRT reports on the same desktop).
+// So the flagship query is retried with the unfiltered enumeration rather than
+// silently returning 0, and an unfiltered list only counts active paths.
 bool ReadSdrWhiteLevelDisplayConfig(const HMONITOR monitor, float& nits) noexcept {
     nits = 0.0f;
     if (monitor == nullptr) return false;
     MONITORINFOEXW monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
     if (!GetMonitorInfoW(monitor, &monitorInfo)) return false;
-    UINT32 pathCount = 0;
-    UINT32 modeCount = 0;
-    if (GetDisplayConfigBufferSizes(QDC_DATABASE_CURRENT, &pathCount, &modeCount) != ERROR_SUCCESS)
-        return false;
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
-    if (QueryDisplayConfig(QDC_DATABASE_CURRENT, &pathCount, paths.data(), &modeCount,
-                           modes.data(), nullptr) != ERROR_SUCCESS)
-        return false;
-    for (UINT32 index = 0; index < pathCount; ++index) {
-        DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
-        source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-        source.header.adapterId = paths[index].sourceInfo.adapterId;
-        source.header.id = paths[index].sourceInfo.id;
-        if (!QueryDisplayConfigInfo(source)) continue;
-        if (_wcsicmp(source.viewGdiDeviceName, monitorInfo.szDevice) != 0) continue;
-        DISPLAYCONFIG_SDR_WHITE_LEVEL sdr{};
-        sdr.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
-        sdr.header.adapterId = paths[index].sourceInfo.adapterId;
-        sdr.header.id = paths[index].targetInfo.id;
-        if (!QueryDisplayConfigInfo(sdr)) return false;
-        const auto value = static_cast<float>(sdr.SDRWhiteLevel) / 1000.0f * 80.0f;
-        if (std::isfinite(value) && value > 0.0f) {
-            nits = value;
-            return true;
+
+    const auto query = [&monitorInfo, &nits](const UINT32 flags) noexcept -> bool {
+        UINT32 pathCount = 0;
+        UINT32 modeCount = 0;
+        if (GetDisplayConfigBufferSizes(flags, &pathCount, &modeCount) != ERROR_SUCCESS)
+            return false;
+        std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+        std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+        if (QueryDisplayConfig(flags, &pathCount, paths.data(), &modeCount, modes.data(),
+                               nullptr) != ERROR_SUCCESS)
+            return false;
+        for (UINT32 index = 0; index < pathCount; ++index) {
+            // QDC_ALL_PATHS also lists disconnected targets and stale clones.
+            if (flags != QDC_DATABASE_CURRENT &&
+                (paths[index].flags & DISPLAYCONFIG_PATH_ACTIVE) == 0)
+                continue;
+            DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+            source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            source.header.adapterId = paths[index].sourceInfo.adapterId;
+            source.header.id = paths[index].sourceInfo.id;
+            if (!QueryDisplayConfigInfo(source)) continue;
+            if (_wcsicmp(source.viewGdiDeviceName, monitorInfo.szDevice) != 0) continue;
+            DISPLAYCONFIG_SDR_WHITE_LEVEL sdr{};
+            sdr.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+            sdr.header.adapterId = paths[index].sourceInfo.adapterId;
+            sdr.header.id = paths[index].targetInfo.id;
+            // A target that refuses the query must not veto its siblings.
+            if (!QueryDisplayConfigInfo(sdr)) continue;
+            const auto value = static_cast<float>(sdr.SDRWhiteLevel) / 1000.0f * 80.0f;
+            if (std::isfinite(value) && value > 0.0f) {
+                nits = value;
+                return true;
+            }
         }
         return false;
-    }
-    return false;
+    };
+    if (query(QDC_DATABASE_CURRENT)) return true;
+    return query(QDC_ALL_PATHS);
 }
 
 constexpr std::uint32_t OutputBitDepthForSource(const std::uint32_t sourceBitDepth,
@@ -405,14 +420,17 @@ float NitsToPq(float nits) noexcept {
     return std::pow((c1 + c2 * powered) / (1.0f + c3 * powered), m2);
 }
 
-float HlgToNits(float value) noexcept {
+float HlgInvOetf(float value) noexcept {
     constexpr float a = 0.17883277f;
     constexpr float b = 0.28466892f;
     constexpr float c = 0.55991073f;
-    value = Clamp01(value);
-    const auto scene = value <= 0.5f ? value * value / 3.0f :
+    // No input clamp on purpose: the shader arm does not clamp either, and the
+    // two must agree on out-of-range signals (P010 superwhites land slightly
+    // above 1.0 and the exponential branch maps them past 1000 nits, which the
+    // DWM rolloff then compresses). Clamping here would silently cap the
+    // diagnostic path a reference below the production path.
+    return value <= 0.5f ? value * value / 3.0f :
         (std::exp((value - c) / a) + b) / 12.0f;
-    return 1000.0f * std::pow(std::max(scene, 0.0f), 1.2f);
 }
 
 float Bt709ToLinear(float value) noexcept {
@@ -477,6 +495,21 @@ float Bt2390HdrToSdrPq(const float pq, const float sourcePeak,
 }
 
 struct Float3 { float r, g, b; };
+
+// BT.2100 HLG reference OOTF folded in (gamma = 1.2, nominal peak 1000 nits):
+// Yd = alpha * Ys^(gamma-1) * Yc. The gamma is taken on the scene LUMINANCE
+// Yc = dot(E, BT.2020 weights) and the one resulting scale multiplies all
+// three channels. Pow-ing each channel on its own is only equivalent for
+// grays; on saturated pixels it effectively multiplies every channel by
+// Yc^(-0.2) -- up to 1.76x on pure blue -- which is exactly the
+// saturated-highlight over-brightening the DWM rolloff renders as blown-out
+// HDR (see docs/141).
+Float3 HlgToNits(const Float3 value) noexcept {
+    const Float3 scene{HlgInvOetf(value.r), HlgInvOetf(value.g), HlgInvOetf(value.b)};
+    const auto yc = 0.2627f * scene.r + 0.6780f * scene.g + 0.0593f * scene.b;
+    const auto scale = 1000.0f * std::pow(std::max(yc, 0.0f), 0.2f);
+    return {scale * scene.r, scale * scene.g, scale * scene.b};
+}
 
 Float3 Linear2020NitsToIpt(const Float3 value) noexcept {
     const Float3 lms{
@@ -635,12 +668,22 @@ float3 NitsToPq(float3 v) {
     const float m1=2610.0/16384.0, m2=2523.0/32.0, c1=3424.0/4096.0, c2=2413.0/128.0, c3=2392.0/128.0;
     v=pow(saturate(v/10000.0),m1); return pow((c1+c2*v)/(1.0+c3*v),m2);
 }
-float HlgOne(float v) {
+float HlgInvOetf(float v) {
     const float a=0.17883277,b=0.28466892,c=0.55991073;
-    float scene = v<=0.5 ? v*v/3.0 : (exp((v-c)/a)+b)/12.0;
-    return 1000.0*pow(max(scene,0.0),1.2);
+    return v<=0.5 ? v*v/3.0 : (exp((v-c)/a)+b)/12.0;
 }
-float3 HlgToNits(float3 v) { return float3(HlgOne(v.r),HlgOne(v.g),HlgOne(v.b)); }
+// BT.2100 reference OOTF (gamma=1.2, nominal peak 1000 nits) folded in. The
+// gamma acts on the scene LUMINANCE Yc, and the single resulting scale
+// multiplies all three channels. Pow-ing each channel on its own is only
+// equivalent for grays; on saturated pixels it effectively multiplies every
+// channel by Yc^(-0.2) -- up to 1.76x on pure blue -- which is exactly the
+// saturated-highlight over-brightening the DWM rolloff renders as blown-out
+// HDR (see docs/141).
+float3 HlgToNits(float3 v) {
+    const float3 e=max(float3(HlgInvOetf(v.r),HlgInvOetf(v.g),HlgInvOetf(v.b)),0.0);
+    const float yc=dot(e,float3(0.2627,0.6780,0.0593));
+    return 1000.0*pow(max(yc,0.0),0.2)*e;
+}
 float LinearOne(float v) { v=saturate(v); return v<0.081 ? v/4.5 : pow((v+0.099)/1.099,1.0/0.45); }
 float3 ToLinear709(float3 v) { return float3(LinearOne(v.r),LinearOne(v.g),LinearOne(v.b)); }
 float BtOne(float v) { v=max(v,0.0); return saturate(v<0.018 ? 4.5*v : 1.099*pow(v,0.45)-0.099); }
@@ -2449,7 +2492,7 @@ FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept 
             if (transform.transfer == FFF3FPColorTransfer::Pq)
                 nits = {PqToNits(rgb.r), PqToNits(rgb.g), PqToNits(rgb.b)};
             else if (transform.transfer == FFF3FPColorTransfer::Hlg)
-                nits = {HlgToNits(rgb.r), HlgToNits(rgb.g), HlgToNits(rgb.b)};
+                nits = HlgToNits(rgb);
             else
                 nits = {Bt709ToLinear(rgb.r) * transform.paperWhiteNits,
                     Bt709ToLinear(rgb.g) * transform.paperWhiteNits,
@@ -2684,7 +2727,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       actualVideoScalingMode_(FFF3FPVideoScalingMode::Shader),
       scalingQuality_(FFF3FPVideoScalingQuality::HighQuality),
       requestedMode_(FFF3FPColorMode::MapToSdr), actualMode_(FFF3FPColorMode::MapToSdr),
-      sdrPeakNits_(100.0f), hdrPeakNits_(0.0f),
+      sdrPeakNits_(203.0f), hdrPeakNits_(0.0f),
       paperWhiteNits_(203.0f), sdrWhiteLevelNits_(0.0f), sourcePeakNits_(100.0f),
       viewZoomBits_(std::bit_cast<float>(1.0f)),
       sourceWideGamut_(false),
@@ -3313,6 +3356,52 @@ bool PlayerVideoRenderer::OwnsD3D11Texture(ID3D11Texture2D* const texture) const
     texture->GetDevice(&source);
     std::lock_guard deviceLock(deviceMutex_);
     return source.Get() == device_;
+}
+
+std::int32_t PlayerVideoRenderer::DeviceAdapterIndex() const noexcept {
+    std::lock_guard deviceLock(deviceMutex_);
+    if (device_ != nullptr) {
+        ComPtr<IDXGIDevice> dxgiDevice;
+        ComPtr<IDXGIAdapter> adapter;
+        DXGI_ADAPTER_DESC own{};
+        if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
+            FAILED(dxgiDevice->GetAdapter(&adapter)) ||
+            FAILED(adapter->GetDesc(&own))) return -1;
+        ComPtr<IDXGIFactory1> factory;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return -1;
+        for (UINT index = 0; index < 16; ++index) {
+            ComPtr<IDXGIAdapter1> candidate;
+            if (factory->EnumAdapters1(index, &candidate) == DXGI_ERROR_NOT_FOUND) break;
+            DXGI_ADAPTER_DESC1 description{};
+            if (FAILED(candidate->GetDesc1(&description))) continue;
+            if (description.AdapterLuid.HighPart == own.AdapterLuid.HighPart &&
+                description.AdapterLuid.LowPart == own.AdapterLuid.LowPart)
+                return static_cast<std::int32_t>(index);
+        }
+        return -1;
+    }
+    // No device yet: the host binds the final HWND after it opens a session, and
+    // creating a device here would select the default adapter before the monitor
+    // match could run. Resolve EnsureDevice's policy read-only instead. -1 means
+    // unknown, which only costs a redundant candidate, never a wrong decision.
+    const auto preferred = preferredAdapterIndex_.load(std::memory_order_acquire);
+    if (preferred >= 0) return preferred;
+    if (window_ == nullptr || !IsWindow(window_)) return -1;
+    const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return -1;
+    for (UINT adapterIndex = 0; adapterIndex < 16; ++adapterIndex) {
+        ComPtr<IDXGIAdapter1> candidate;
+        if (factory->EnumAdapters1(adapterIndex, &candidate) == DXGI_ERROR_NOT_FOUND) break;
+        for (UINT outputIndex = 0;; ++outputIndex) {
+            ComPtr<IDXGIOutput> output;
+            if (candidate->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) break;
+            DXGI_OUTPUT_DESC description{};
+            if (SUCCEEDED(output->GetDesc(&description)) && description.Monitor == monitor)
+                return static_cast<std::int32_t>(adapterIndex);
+        }
+    }
+    return -1;
 }
 
 FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** output) noexcept {
@@ -7440,6 +7529,27 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     const AVFrame* auxiliaryFrame,
     const FFF3FPAuxiliaryComposition* auxiliaryComposition) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
+    // A decoder on another adapter hands us a D3D11 texture this device cannot
+    // sample. CopySubresourceRegion is only legal between resources of the same
+    // device, so bring such a frame back to CPU planes before any pipeline, HDR or
+    // input-layout decision is made. The session normally does this already; this
+    // keeps cover-art, retained-still and device-recovery callers correct too.
+    if (frame->format == AV_PIX_FMT_D3D11 && frame->data[0] != nullptr &&
+        !OwnsD3D11Texture(reinterpret_cast<ID3D11Texture2D*>(frame->data[0]))) {
+        std::lock_guard transferLock(deviceMutex_);
+        if (d3d11TransferFrame_ == nullptr) d3d11TransferFrame_ = av_frame_alloc();
+        if (d3d11TransferFrame_ == nullptr) {
+            SetError("Could not allocate the cross-adapter frame transfer target.");
+            return FFFResult::NativeFailure;
+        }
+        av_frame_unref(d3d11TransferFrame_);
+        if (av_hwframe_transfer_data(d3d11TransferFrame_, frame, 0) < 0) {
+            SetError("Could not transfer a hardware frame decoded on another adapter.");
+            return FFFResult::FfmpegFailure;
+        }
+        av_frame_copy_props(d3d11TransferFrame_, frame);
+        frame = d3d11TransferFrame_;
+    }
     const auto hdrState = hdrProcessor_.ProcessFrame(
         frame, hdrPeakNits_, paperWhiteNits_, frameIndex);
     struct PlaybackWorkGuard final {
@@ -9372,6 +9482,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     // every registered plane and would be left with dangling handles.
     cudaInterop_.Reset();
     if (cudaTransferFrame_ != nullptr) av_frame_free(&cudaTransferFrame_);
+    if (d3d11TransferFrame_ != nullptr) av_frame_free(&d3d11TransferFrame_);
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         ReleaseCom(sourceViews_[plane]);
         ReleaseCom(sourceTextures_[plane]);
@@ -9458,6 +9569,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     cudaInterop_.Reset();
     cudaInteropRefused_.store(false, std::memory_order_relaxed);
     if (cudaTransferFrame_ != nullptr) av_frame_free(&cudaTransferFrame_);
+    if (d3d11TransferFrame_ != nullptr) av_frame_free(&d3d11TransferFrame_);
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         ReleaseCom(sourceViews_[plane]);
         ReleaseCom(sourceTextures_[plane]);

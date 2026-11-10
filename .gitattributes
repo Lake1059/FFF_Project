@@ -65,3 +65,7 @@
 # 预编译着色器字节码（tools/generate_shader_bytecode.py 再生成），不计入语言统计。
 FFF.Native/3FP/Render/ShaderBytecode.h linguist-generated
 FFF.Native/3FP/Render/SdrShaderBytecode.h linguist-generated
+
+# 生成头固定 LF（autocrlf 会把工作树改写成 CRLF，令两头永远假脏）。
+FFF.Native/3FP/Render/ShaderBytecode.h text eol=lf
+FFF.Native/3FP/Render/SdrShaderBytecode.h text eol=lf

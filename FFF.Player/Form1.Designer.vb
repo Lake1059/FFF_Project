@@ -66,6 +66,8 @@ Partial Class Form1
         JEC_弹幕开关前面的空白占位 = New LakeUI.JustEmptyControl()
         MB_当前声道数显示 = New LakeUI.ModernButton()
         JEC_当前声道数显示前面的空白占位 = New LakeUI.JustEmptyControl()
+        MB_双耳模式 = New LakeUI.ModernButton()
+        JEC_双耳模式前面的空白占位 = New LakeUI.JustEmptyControl()
         MB_当前音频编码显示 = New LakeUI.ModernButton()
         JEC_当前音频编码显示前面的空白占位 = New LakeUI.JustEmptyControl()
         MB_当前视频编码显示 = New LakeUI.ModernButton()
@@ -373,6 +375,8 @@ Partial Class Form1
         Panel4.Controls.Add(JEC_弹幕开关前面的空白占位)
         Panel4.Controls.Add(MB_当前声道数显示)
         Panel4.Controls.Add(JEC_当前声道数显示前面的空白占位)
+        Panel4.Controls.Add(MB_双耳模式)
+        Panel4.Controls.Add(JEC_双耳模式前面的空白占位)
         Panel4.Controls.Add(MB_当前音频编码显示)
         Panel4.Controls.Add(JEC_当前音频编码显示前面的空白占位)
         Panel4.Controls.Add(MB_当前视频编码显示)
@@ -417,6 +421,35 @@ Partial Class Form1
         JEC_弹幕开关前面的空白占位.Size = New Size(5, 24)
         JEC_弹幕开关前面的空白占位.TabIndex = 43
         JEC_弹幕开关前面的空白占位.Visible = False
+        ' 
+        ' MB_双耳模式
+        ' 
+        MB_双耳模式.BackColor = Color.Transparent
+        MB_双耳模式.BackColor1 = Color.FromArgb(CByte(40), CByte(0), CByte(0), CByte(0))
+        MB_双耳模式.BorderColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_双耳模式.BorderRadius = 5
+        MB_双耳模式.Dock = DockStyle.Left
+        MB_双耳模式.Font = New Font("Microsoft YaHei UI", 9F)
+        MB_双耳模式.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_双耳模式.Location = New Point(180, 8)
+        MB_双耳模式.Margin = New Padding(2)
+        MB_双耳模式.Name = "MB_双耳模式"
+        MB_双耳模式.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_双耳模式.Size = New Size(40, 24)
+        MB_双耳模式.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_双耳模式.TabIndex = 44
+        MB_双耳模式.Text = "HRTF"
+        MB_双耳模式.ToolTipPadding = New Padding(5)
+        MB_双耳模式.ToolTipShowDelaySeconds = 1R
+        MB_双耳模式.ToolTipText = "双耳空间音频：点击切回立体声"
+        ' 
+        ' JEC_双耳模式前面的空白占位
+        ' 
+        JEC_双耳模式前面的空白占位.Dock = DockStyle.Left
+        JEC_双耳模式前面的空白占位.Location = New Point(175, 8)
+        JEC_双耳模式前面的空白占位.Name = "JEC_双耳模式前面的空白占位"
+        JEC_双耳模式前面的空白占位.Size = New Size(5, 24)
+        JEC_双耳模式前面的空白占位.TabIndex = 45
         ' 
         ' MB_当前声道数显示
         ' 
@@ -1419,6 +1452,8 @@ Partial Class Form1
     Friend WithEvents MB_软件解码或硬件解码 As LakeUI.ModernButton
     Friend WithEvents MB_当前声道数显示 As LakeUI.ModernButton
     Friend WithEvents JEC_当前声道数显示前面的空白占位 As LakeUI.JustEmptyControl
+    Friend WithEvents MB_双耳模式 As LakeUI.ModernButton
+    Friend WithEvents JEC_双耳模式前面的空白占位 As LakeUI.JustEmptyControl
     Friend WithEvents MB_当前音频编码显示 As LakeUI.ModernButton
     Friend WithEvents JEC_当前音频编码显示前面的空白占位 As LakeUI.JustEmptyControl
     Friend WithEvents MB_当前视频编码显示 As LakeUI.ModernButton

@@ -1128,6 +1128,37 @@ FFF3FP_API FFFResult FFF3FP_SetAudioEndpoint(FFF3FPHandle player,
 // streams stay intact; playback resumes at the current media position.
 FFF3FP_API FFFResult FFF3FP_SetAudioExclusiveMode(FFF3FPHandle player,
     std::uint32_t exclusive) noexcept;
+// How a stereo endpoint is addressed decides whether a channel bed is placed
+// binaurally. 0 = automatic: the endpoint's own form factor decides
+// (EndpointFormFactor 3 = Headphones, 5 = Headset, mmdeviceapi.h), which is what
+// Windows' own Sound panel uses to tell 耳机 from 扬声器. 1 = force binaural, 2 =
+// force stereo. Forcing exists because Windows reports most USB DACs and every
+// Bluetooth and HDMI sink as something other than Headphones, so the automatic
+// answer is wrong for those and only the user knows.
+//
+// The policy is evaluated per bed frame against the endpoint the audio renderer
+// actually opened, so a change lands on the next frame without re-opening the
+// device or re-handshaking the external render plug. It survives every renderer
+// rebuild, including the one a headphone hot-plug causes.
+//
+// This entry point moves no FFF3FPSnapshot field and changes no offset pin; like
+// the audio render plug seam, the export surface is additive.
+FFF3FP_API FFFResult FFF3FP_SetAudioBinauralPolicy(FFF3FPHandle player,
+    std::uint32_t policy) noexcept;
+// Read-back for a host badge. Outputs are optional (a null pointer is ignored):
+//   policy      -- the value last set through FFF3FP_SetAudioBinauralPolicy
+//   formFactor  -- raw EndpointFormFactor of the endpoint in use, 0 when the
+//                  property store did not answer
+//   wanted      -- 1 when the policy and the endpoint shape together say a bed
+//                  should be placed binaurally, 0 otherwise
+//   available   -- 1 when the seam can act at all right now: an external render
+//                  plug is installed and the endpoint is 2-channel. A host should
+//                  hide its control rather than show a switch that cannot move.
+// Everything here is answered from published runtime state; the API thread never
+// touches the renderer, which a device switch may replace between calls.
+FFF3FP_API FFFResult FFF3FP_GetAudioBinauralStatus(FFF3FPHandle player,
+    std::uint32_t* policy, std::uint32_t* formFactor,
+    std::uint32_t* wanted, std::uint32_t* available) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetVolume(FFF3FPHandle player, float volume, std::uint32_t muted) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetTimedTextLayer(FFF3FPHandle player,
     const FFF3FPTimedTextLayer* layer) noexcept;

@@ -10,6 +10,7 @@
 #include <cmath>
 #include <atomic>
 #include <cstring>
+#include <cstddef>
 
 namespace {
 // Configuration layout and version must match the public header exactly.
@@ -226,6 +227,30 @@ FFFResult FFF3FP_SetAudioEndpoint(const FFF3FPHandle player, const char* endpoin
 FFFResult FFF3FP_SetAudioExclusiveMode(const FFF3FPHandle player, const std::uint32_t exclusive) noexcept {
     return player && exclusive <= 1 ? static_cast<PlayerSession*>(player)->SetAudioExclusiveMode(exclusive != 0)
         : FFFResult::InvalidArgument;
+}
+// Binaural bed-render policy. Validation lives in the session (it also owns the
+// stored value, which has to outlive every renderer rebuild); here only the handle
+// and the null-pointer contract are enforced.
+FFFResult FFF3FP_SetAudioBinauralPolicy(const FFF3FPHandle player,
+    const std::uint32_t policy) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetAudioBinauralPolicy(policy)
+        : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_GetAudioBinauralStatus(const FFF3FPHandle player,
+    std::uint32_t* policy, std::uint32_t* formFactor,
+    std::uint32_t* wanted, std::uint32_t* available) noexcept {
+    if (player == nullptr) return FFFResult::InvalidArgument;
+    std::uint32_t policyValue = 0;
+    std::uint32_t formFactorValue = 0;
+    std::uint32_t wantedValue = 0;
+    std::uint32_t availableValue = 0;
+    static_cast<PlayerSession*>(player)->GetAudioBinauralStatus(policyValue,
+        formFactorValue, wantedValue, availableValue);
+    if (policy != nullptr) *policy = policyValue;
+    if (formFactor != nullptr) *formFactor = formFactorValue;
+    if (wanted != nullptr) *wanted = wantedValue;
+    if (available != nullptr) *available = availableValue;
+    return FFFResult::Success;
 }
 FFFResult FFF3FP_SetVolume(const FFF3FPHandle player, const float volume, const std::uint32_t muted) noexcept { return player ? static_cast<PlayerSession*>(player)->SetVolume(volume, muted != 0) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetTimedTextLayer(const FFF3FPHandle player,
@@ -604,4 +629,19 @@ FFFResult FFF3FP_GetAudioPassthroughState(const FFF3FPHandle player,
         }
     }
     return FFFResult::Success;
+}
+
+// Runtime prefetch control surface (3FP/Api/FFF.Player.Prefetch.h).
+// Appended additively, exactly like the audio tap / passthrough entries:
+// PlayerApiVersion stays at 20, SnapshotVersion at 23, and the 608-byte
+// snapshot layout is untouched. A host that never resolves these two exports
+// keeps today's behaviour byte-for-byte.
+#include "3FP/Prefetch/PrefetchService.h"
+
+FFFResult FFF3FP_SetPrefetchPlan(const FFF3FPPrefetchPlan* plan) noexcept {
+    return FFFPrefetch::PrefetchService::Instance().SetPlan(plan);
+}
+
+FFFResult FFF3FP_GetPrefetchStatus(FFF3FPPrefetchStatus* status) noexcept {
+    return FFFPrefetch::PrefetchService::Instance().GetStatus(status);
 }

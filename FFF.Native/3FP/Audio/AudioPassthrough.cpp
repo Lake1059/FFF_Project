@@ -185,7 +185,11 @@ void AudioPassthroughLane::NoteEndpointSupport(const std::uint32_t codecId) noex
     endpointSupportedCodecs_.push_back(codecId);
 }
 
-const FFF3FPAudioPassthroughFormat& AudioPassthroughLane::Format() const noexcept {
+FFF3FPAudioPassthroughFormat AudioPassthroughLane::Format() const noexcept {
+    // By value on purpose: the lock guards only the read below. A const
+    // reference would escape it, so any third thread calling
+    // DegradeCachedFormat() concurrently would turn the caller's next member
+    // access into a data race. The struct is a small POD -- the copy is free.
     std::lock_guard lock(mutex_);
     return format_;
 }

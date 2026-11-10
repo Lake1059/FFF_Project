@@ -86,7 +86,9 @@ public:
     // The cached decision (valid only while describe succeeded). One-step GUID
     // degrade for the endpoint negotiation retry: variant carrier -> generic
     // carrier of the same family. Returns false when nothing to degrade to.
-    const FFF3FPAudioPassthroughFormat& Format() const noexcept;
+    // Returns by value: the mutex guards the read, and a reference would outlive
+    // it (Format may race DegradeCachedFormat from other threads).
+    FFF3FPAudioPassthroughFormat Format() const noexcept;
     bool DegradeCachedFormat() noexcept;
 
     // Track facts for events / snapshot / media info. TrackFlags() reports the

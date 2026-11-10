@@ -103,7 +103,30 @@ struct PlayerAudioRuntimeState final {
     // renderer instance; a seek deliberately does not clear it (a seek is a
     // re-anchor, not an erasure of what was already played).
     std::atomic<std::uint64_t> ptBurstsRendered{0};
+    // Endpoint shape and the binaural route policy, published for the same reason
+    // as the counters above: the API thread that answers
+    // FFF3FP_GetAudioBinauralStatus must never dereference the renderer, which a
+    // device switch may replace at any moment. `endpointFormFactor` is the raw
+    // EndpointFormFactor Windows reports for the endpoint the renderer actually
+    // opened (0 = the property store did not answer, which the auto policy reads
+    // as "not a headphone"). `endpointChannels` is the device mix format's channel
+    // count, written once per renderer instance as soon as the device opens.
+    // Neither is part of a FFF3FPSnapshot: the seam added no snapshot member and
+    // this one deliberately adds none either.
+    std::atomic<std::uint32_t> endpointFormFactor{0};
+    std::atomic<std::uint32_t> endpointChannels{0};
+    std::atomic<std::uint32_t> plugInstalled{0};
 };
+
+// EndpointFormFactor values that mean "worn on the head" (mmdeviceapi.h
+// EndpointFormFactor): 3 = Headphones, 5 = Headset. Everything else -- Speakers,
+// LineLevel, DigitalAudioDisplayDevice (HDMI/DP and most USB DACs), SPDIF -- is a
+// room-filling or unbounded target where binaural placement is wrong. This is the
+// one predicate both the renderer's route decision and the session's read-back
+// use, so they cannot disagree about what counts as a headphone.
+inline bool IsHeadphoneEndpointFormFactor(const std::uint32_t formFactor) noexcept {
+    return formFactor == 3u || formFactor == 5u;
+}
 
 class PlayerWasapiRenderer final {
 public:
@@ -121,6 +144,21 @@ public:
     void Reset(std::int64_t position100ns) noexcept;
     void SetVolume(float volume, bool muted) noexcept;
     void SetMonoAudio(bool enabled) noexcept;
+    // 0 = automatic (endpoint shape decides), 1 = force binaural, 2 = force stereo.
+    // Read per bed frame, so a change lands on the next frame boundary without
+    // touching the plug, the device or the renderer instance.
+    void SetBinauralPolicy(std::uint32_t policy) noexcept;
+    // The policy half of the bed-route decision. Public because the session's
+    // read-back has to answer with this exact rule rather than a second copy of it,
+    // and inline because that is what lets a probe exercise the shipped rule
+    // directly (see 3fp/tools/audio_binaural_probe.cpp).
+    static bool BinauralWantedFor(std::uint32_t policy, std::uint32_t formFactor) noexcept {
+        if (policy == 1u) return true;   // force binaural
+        if (policy == 2u) return false;  // force stereo
+        return IsHeadphoneEndpointFormFactor(formFactor);
+    }
+    // Raw EndpointFormFactor read when this instance opened its device.
+    std::uint32_t EndpointFormFactor() const noexcept;
     std::int64_t Position100ns() const noexcept;
     std::int64_t TimelineLimit100ns() const noexcept;
     std::int64_t Buffered100ns() const noexcept;
@@ -226,6 +264,7 @@ private:
     // sample rate untouched. Skipped entirely when the frame already is FLTP.
     FFFResult EnsureBedConverter(const AVFrame* frame) noexcept;
     BedRoute SelectBedRoute(const AVFrame* frame) noexcept;
+    bool BinauralWanted() const noexcept;
     // Renders one whole bed frame through the plug into plugLeft_/plugRight_.
     // Returns the frame count produced, or <= 0 when the plug declines this frame.
     std::int32_t RenderBedWithPlug(const AVFrame* frame, std::int64_t position100ns) noexcept;
@@ -347,6 +386,12 @@ private:
     std::atomic<bool> paused_;
     std::atomic<bool> resetRequested_;
     std::atomic<bool> restartRequested_;
+    // Binaural route policy (0 auto / 1 force / 2 off) and the device shape read
+    // once per renderer instance. Both are plain atomics read on the bed path: no
+    // lock, no COM, no property store on the audio thread after open.
+    std::atomic<std::uint32_t> binauralPolicy_{0};
+    std::atomic<std::uint32_t> endpointFormFactor_{0};
+
     std::atomic<std::int64_t> resetPosition100ns_;
     // IAudioClock is sampled on the event thread. Readers interpolate between
     // samples with the correlated QPC timestamp, but never beyond audio that

@@ -131,6 +131,16 @@ struct CoTaskMemDeleter final {
     void operator()(void* value) const noexcept { CoTaskMemFree(value); }
 };
 
+// PKEY_AudioEndpoint_FormFactor ({1da5d803-d492-4edd-8c23-e0c0ffee7f0e}, 0).
+// functiondiscoverykeys_devpkey.h only declares these keys: DEFINE_PROPERTYKEY
+// emits a definition solely when INITGUID precedes the include, which a
+// precompiled-header build cannot arrange, and the pch already pulled the header
+// in. Spelling the key out here keeps the module free of a second GUID mechanism
+// and of a link dependency on a symbol nothing defines. Same 8/4/4/4/4 shape the
+// macro would produce.
+const PROPERTYKEY kAudioEndpointFormFactorKey = {
+    { 0x1da5d803, 0xd492, 0x4edd, { 0x8c, 0x23, 0xe0, 0xc0, 0xff, 0xee, 0x7f, 0x0e } }, 0 };
+
 bool IsAudioDeviceLost(const HRESULT result) noexcept {
     return result == AUDCLNT_E_DEVICE_INVALIDATED ||
         result == AUDCLNT_E_RESOURCES_INVALIDATED ||
@@ -418,6 +428,24 @@ void PlayerWasapiRenderer::SetMonoAudio(const bool enabled) noexcept {
     PublishRuntimeDiagnostics();
 }
 
+void PlayerWasapiRenderer::SetBinauralPolicy(const std::uint32_t policy) noexcept {
+    if (binauralPolicy_.exchange(policy, std::memory_order_relaxed) == policy) return;
+    // Runs on the session worker, like SetMonoAudio. Nothing else has to move: the
+    // route is re-decided per bed frame and EnsureResampler keys its cache on the
+    // route, so a flip rebuilds the resampler through the same check a plug that
+    // bails mid-stream already goes through. Publish so the read-back cannot lag.
+    PublishRuntimeDiagnostics();
+}
+
+std::uint32_t PlayerWasapiRenderer::EndpointFormFactor() const noexcept {
+    return endpointFormFactor_.load(std::memory_order_relaxed);
+}
+
+bool PlayerWasapiRenderer::BinauralWanted() const noexcept {
+    return BinauralWantedFor(binauralPolicy_.load(std::memory_order_relaxed),
+        endpointFormFactor_.load(std::memory_order_relaxed));
+}
+
 void PlayerWasapiRenderer::SetAudioRenderPlug(const FFF3FPAudioRenderPlug* const plug) noexcept {
     // Runs on the session worker -- the same thread that calls Enqueue and Reset --
     // so this swap cannot interrupt a render() call. Frames already inside the PCM
@@ -461,6 +489,13 @@ PlayerWasapiRenderer::BedRoute PlayerWasapiRenderer::SelectBedRoute(const AVFram
     // The seam renders a stereo pair, so it owns the bed only against a 2-channel
     // endpoint. A multichannel device keeps today's route, unchanged.
     if (outputChannels_ != 2) return BedRoute::Native;
+    // Who the endpoint is addressed to decides next, and it decides before the bed
+    // is even described: binaural placement is an earphone construct. On stereo
+    // speakers a 5.1 bed belongs in the matrix fold-down -- which is exactly what
+    // happened for every bed before this seam existed, and what the automatic
+    // policy restores. The forced policies still let a user override it, because
+    // Windows reports most USB DACs as DigitalAudioDisplayDevice, not Headphones.
+    if (!BinauralWanted()) return BedRoute::Native;
     const auto channels = frame->ch_layout.nb_channels;
     if (channels <= 0) return BedRoute::Native;
     // 2.0 already is the device target: the route could only reproduce swr's
@@ -1140,6 +1175,34 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         return;
     }
     format.reset(rawFormat);
+    // Endpoint shape, read once per renderer instance. PKEY_AudioEndpoint_FormFactor
+    // is what Windows itself uses in the Sound control panel to tell 耳机 from
+    // 扬声器, and it is the only signal the automatic binaural policy trusts.
+    // Hot-plug needs no separate notification path: the loop below already polls the
+    // default endpoint every 500 ms and calls RequestRestart when it moves, which
+    // rebuilds this whole object and re-reads the property here.
+    {
+        PROPVARIANT formFactorValue;
+        PropVariantInit(&formFactorValue);
+        ComPtr<IPropertyStore> store;
+        if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &store)) &&
+            SUCCEEDED(store->GetValue(kAudioEndpointFormFactorKey, &formFactorValue)) &&
+            formFactorValue.vt == VT_UI4) {
+            endpointFormFactor_.store(formFactorValue.ulVal, std::memory_order_relaxed);
+            if (runtimeState_ != nullptr)
+                runtimeState_->endpointFormFactor.store(formFactorValue.ulVal,
+                    std::memory_order_relaxed);
+        }
+        PropVariantClear(&formFactorValue);
+        // Published before the loop starts so a paused or audio-only session can
+        // answer the status read-back without waiting for the first bed frame.
+        // `plugInstalled` is deliberately NOT written here: the session owns that
+        // flag (it installs the plug after Start returns), so writing it from this
+        // thread could land a stale 0 on top of a freshly installed plug.
+        if (runtimeState_ != nullptr)
+            runtimeState_->endpointChannels.store(
+                static_cast<std::uint32_t>(rawFormat->nChannels), std::memory_order_relaxed);
+    }
     // Shared mode lets the engine perform conversion and resampling.  Exclusive
     // mode deliberately bypasses that mixer: the device must accept the exact
     // endpoint format and the client owns the complete hardware period.

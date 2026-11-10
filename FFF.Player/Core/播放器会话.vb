@@ -767,6 +767,29 @@ Public NotInheritable Class 播放器会话
         Return (CInt(生效UI), 已渲染, 已拒绝)
     End Function
 
+    ''' <summary>双耳策略：0=自动（端点形态判定）1=强制双耳 2=强制立体声。
+    ''' 与"空间音频总开关"是两层：总开关决定插槽装不装，策略决定床走不走双耳。
+    ''' 旧内核没有这条导出时静默忽略——徽章因"不可用"而不出现，不会假绿。</summary>
+    Public Sub 设置双耳策略(策略 As UInteger)
+        Try
+            检查结果(播放器原生接口.FFF3FP_SetAudioBinauralPolicy(取得句柄(), 策略))
+        Catch ex As EntryPointNotFoundException
+        End Try
+    End Sub
+
+    ''' <summary>双耳状态回读。可用=插槽已装且端点是 2 声道；期望=策略与端点形态
+    ''' 合起来是否该双耳化。旧内核缺席时返回"不可用"，调用方据此隐藏控件。</summary>
+    Public Function 读取双耳状态() As 双耳状态
+        Dim 策略 As UInteger, 形态 As UInteger, 期望 As UInteger, 可用UI As UInteger
+        Try
+            Dim 结果 = 播放器原生接口.FFF3FP_GetAudioBinauralStatus(取得句柄(), 策略, 形态, 期望, 可用UI)
+            If 结果 <> 原生播放器结果.成功 Then Return 双耳状态.不可用
+        Catch ex As EntryPointNotFoundException
+            Return 双耳状态.不可用
+        End Try
+        Return New 双耳状态(CType(Math.Min(策略, 2UI), 双耳策略), 形态, 期望 <> 0UI, 可用UI <> 0UI)
+    End Function
+
     ' ---- 音频源码直通（内核中性缝的宿主侧） ----
     ' 表由模块产出、宿主钉住后整张交内核；偏好模式单独走 FFF3FP_SetAudioPassthroughMode。
     ' 模块缺席/旧件/未解锁 ⇒ 与"模块不在"同形静默，内核整体回退解码。

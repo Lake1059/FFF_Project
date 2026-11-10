@@ -23,13 +23,24 @@ Public Class 设置
     Public Property 启用空间音频 As Boolean = True
     ' 保留旧空间音频字段以兼容已保存的设置；三种效果互斥，单声道优先。
     Public Property 启用单声道音频 As Boolean = False
+    ' 双耳床渲染策略：0=自动（按端点形态）1=强制双耳 2=强制立体声。
+    ' 强制只在"当前端点的形态与当初强制时相同"才下发给内核（见
+    ' 播放器控制器.折算双耳策略）：否则在 USB DAC 上强开的双耳会跟着用户
+    ' 一路跑到 HDMI 电视上，而那正是这次要修掉的那种误开。
+    Public Property 双耳策略选项 As Integer = 0
+    ' 强制时的 EndpointFormFactor 原值。0 表示没强制过；USB DAC 与 HDMI 都报 9，
+    ' 所以这两类设备之间仍会互相沿用，属已知且可一键纠正的边界。
+    Public Property 双耳策略形态 As Integer = 0
     ' 音频源码直通三态（0=自动 1=强制 2=关，默认自动）。直通要接管整条轨并抢 WASAPI
     ' 独占，与单声道/变速/床渲染天然互斥——内核侧直接拒绝，UI 侧在这里联动提示。
     Public Property 音频直通选项 As Integer = 0
     Public Property 自动切换到真实HDR高亮 As Boolean = True
     Public Property HDR峰值亮度选项 As Integer = 0
     Public Property HDR峰值亮度 As Integer = 0
-    Public Property HDR映射SDR参考亮度 As Integer = 250
+    ' HDR→SDR 映射的目标：SDR 参考白（BT.2408 的 HDR Reference White）。
+    ' 203 = ITU-R BT.2408-4 §2.1 定义的漫反射白（100% 朗伯反射体在 PQ 上的标称亮度），
+    ' 也是 libplacebo / mpv 的 PL_COLOR_SDR_WHITE 取值。不是面板峰值。
+    Public Property HDR映射SDR参考亮度 As Integer = 203
     Public Property 音量百分比 As Integer = 100
 
     ' 360°视场角由快捷键调整；该字段没有对应的设置控件，但仍随设置文件持久化。
@@ -259,6 +270,10 @@ Public Class 设置
         If 视频缓冲区策略 < 0 OrElse 视频缓冲区策略 > 2 Then 视频缓冲区策略 = 0
         If 音频缓冲区策略 < 0 OrElse 音频缓冲区策略 > 2 Then 音频缓冲区策略 = 0
         If 启用单声道音频 Then 启用空间音频 = False
+        ' 非法档归一到"自动"：破损/越界的配置不该把用户按在某一种强制上。
+        If 双耳策略选项 < CInt(双耳策略.自动) OrElse 双耳策略选项 > CInt(双耳策略.强制立体声) Then 双耳策略选项 = 0
+        If 双耳策略选项 = CInt(双耳策略.自动) Then 双耳策略形态 = 0
+        If 双耳策略形态 < 0 OrElse 双耳策略形态 > 10 Then 双耳策略形态 = 0
         If 音频直通选项 < 0 OrElse 音频直通选项 > 2 Then 音频直通选项 = 0
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0

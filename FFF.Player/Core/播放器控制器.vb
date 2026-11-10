@@ -10,7 +10,9 @@ Imports System.Threading
 Public NotInheritable Class 播放器控制器
     Implements IDisposable
 
-    Private Const 默认SDR峰值尼特 As Single = 100.0F
+    ' HDR→SDR 的目标参考白：BT.2408 的 203 nit（漫反射白），不是面板峰值。
+    ' 启动后 Form1 会立刻用设置里的值覆盖它，这里只保证「没有设置时」也是规范值。
+    Private Const 默认SDR峰值尼特 As Single = 203.0F
     Private 当前SDR峰值尼特 As Single = 默认SDR峰值尼特
     Private 当前HDR输出峰值尼特 As Single = 0.0F
     Private Const SDR纸白尼特 As Single = 203.0F
@@ -1142,7 +1144,59 @@ Public NotInheritable Class 播放器控制器
         Catch ex As 播放器异常
             RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用音频效果设置"))
         End Try
+        ' 总开关刚动过，插槽可能刚装上或刚撤下，策略要跟着重放一遍。
+        同步双耳策略()
     End Sub
+
+    ''' <summary>读一次双耳状态。会话缺席时给"不可用"，控件据此隐藏。</summary>
+    Friend Function 读取双耳状态() As 双耳状态
+        If 已释放 OrElse 会话 Is Nothing Then Return 双耳状态.不可用
+        Return 会话.读取双耳状态()
+    End Function
+
+    ''' <summary>把持久化的强制策略折算成实际下发的策略。端点形态与当时强制的不
+    ''' 同就回落到"自动"——否则在 USB DAC 上强开的双耳会跟着用户跑到 HDMI 输出上。
+    ''' 状态里的形态来自内核回读，不是宿主自己猜的。</summary>
+    Friend Function 折算双耳策略(状态 As 双耳状态) As 双耳策略
+        Dim 配置 = 设置.实例对象
+        If 配置.双耳策略选项 = CInt(双耳策略.自动) Then Return 双耳策略.自动
+        If CUInt(配置.双耳策略形态) <> 状态.端点形态 Then Return 双耳策略.自动
+        Return CType(配置.双耳策略选项, 双耳策略)
+    End Function
+
+    ''' <summary>把折算后的策略下发给内核。幂等：目标与内核现值相同就不发命令。
+    ''' 打开媒体后要再走一遍——渲染器此时才真正打开端点，形态只有那时才有值。</summary>
+    Friend Sub 同步双耳策略()
+        If 已释放 OrElse 会话 Is Nothing Then Return
+        Dim 状态 = 读取双耳状态()
+        Dim 目标 = 折算双耳策略(状态)
+        If 状态.策略 = 目标 Then Return
+        Try
+            会话.设置双耳策略(CUInt(目标))
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用双耳空间音频设置"))
+        End Try
+    End Sub
+
+    ''' <summary>底部徽章的一次点击。已强制 ⇒ 回到自动；自动 ⇒ 压成"与现状相反"
+    ''' 的那一档，并记下当时的端点形态作为适用条件。返回是否真的改了。</summary>
+    Friend Function 切换双耳模式() As Boolean
+        If 已释放 OrElse 会话 Is Nothing Then Return False
+        Dim 状态 = 读取双耳状态()
+        If Not 状态.可用 Then Return False
+        Dim 配置 = 设置.实例对象
+        If 折算双耳策略(状态) <> 双耳策略.自动 Then
+            配置.双耳策略选项 = CInt(双耳策略.自动)
+            配置.双耳策略形态 = 0
+        Else
+            配置.双耳策略选项 = If(状态.期望双耳,
+                CInt(双耳策略.强制立体声), CInt(双耳策略.强制双耳))
+            配置.双耳策略形态 = CInt(状态.端点形态)
+        End If
+        同步双耳策略()
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
+        Return True
+    End Function
 
     ''' <summary>设置页 → 音频直通三态的接线（Form设置_设备与性能 → Form1 → 本方法 →
     ''' 会话.设置音频直通模式）。会话侧负责表的钉入/撤下与内核偏好；这里补一条人话：

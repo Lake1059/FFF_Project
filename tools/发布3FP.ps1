@@ -48,6 +48,13 @@ if ($SkipIamf) { $NativeArgs += "/p:HaveLibiamf=false" } else { $NativeArgs += "
 & $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") /p:Configuration=$Configuration /p:Platform=x64 @NativeArgs /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration 构建失败。" }
 
+# 前后预加载小助手是独立 C++ 进程，必须与内核一起构建：否则 vbproj 的
+# Exists 条件会跳过拷贝，下面 $Required 的散装校验就会自相矛盾地判红。
+New-Item -ItemType Directory -Force -Path (Join-Path $ProjectRoot "..\build") | Out-Null
+$global:LASTEXITCODE = $null
+& $MSBuild (Join-Path $ProjectRoot "FFF.PrefetchHost\FFF.PrefetchHost.vcxproj") /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal /nologo
+if ($LASTEXITCODE -ne 0) { throw "FFF.PrefetchHost x64 $Configuration 构建失败。" }
+
 $StagingDirectory = Join-Path ([IO.Path]::GetTempPath()) ("3FP-publish-loose-" + [Guid]::NewGuid().ToString("N"))
 try {
     New-Item -ItemType Directory -Path $StagingDirectory | Out-Null
@@ -67,7 +74,8 @@ try {
         'avcodec-63.dll', 'avformat-63.dll', 'avutil-61.dll',
         'avfilter-12.dll', 'swresample-7.dll', 'swscale-10.dll',
         'ass-9.dll', 'bluray-3.dll', 'udfread-3.dll',
-        'libxml2.dll', 'iconv-2.dll', 'charset-1.dll'
+        'libxml2.dll', 'iconv-2.dll', 'charset-1.dll',
+        'FFF.PrefetchHost.exe'
     )
     $Missing = @($Required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $StagingDirectory $_) -PathType Leaf) })
     if ($Missing) { throw "发布产物缺少文件：$($Missing -join ', ')" }

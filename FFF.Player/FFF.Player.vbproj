@@ -59,6 +59,10 @@
 
   <ItemGroup>
     <ProductNative Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" />
+    <!-- Side-lane helper is optional: when it has not been built the kernel
+         degrades to the in-process lane, so an empty item must not break build. -->
+    <PrefetchHelper Include="..\build\FFF.PrefetchHost.exe"
+                    Condition="Exists('..\build\FFF.PrefetchHost.exe')" />
     <DevelopmentRuntime Include="..\runtime\avcodec*.dll" />
     <DevelopmentRuntime Include="..\runtime\avformat*.dll" />
     <DevelopmentRuntime Include="..\runtime\avutil*.dll" />
@@ -250,14 +254,14 @@
   <Target Name="CopyNativeRuntime" AfterTargets="Build">
     <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
     <Error Condition="'@(LibassMainRuntime)' == ''" Text="缺少 libass 运行库；请先运行 tools\准备Libass.ps1。" />
-    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime);@(LibassRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime);@(LibassRuntime);@(PrefetchHelper)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 
 
   <Target Name="CopyProductNativeToPublish" AfterTargets="Publish" Condition="'$(PublishSingleFile)' != 'true'">
     <Error Condition="'@(DevelopmentRuntime)' == ''"
            Text="找不到 FFmpeg 运行库（..\runtime\av*.dll 等）。请确认 kernel\runtime 已就位后再发布。" />
-    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime);@(LibassRuntime)"
+    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime);@(LibassRuntime);@(PrefetchHelper)"
           DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
   </Target>
 

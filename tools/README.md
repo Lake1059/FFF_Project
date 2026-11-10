@@ -14,6 +14,8 @@
 
 构建和发布会检查当前配置所需的 FFmpeg、libass、光盘库及 IAMF 文件，仅在缺失时调用准备脚本。修复 FFmpeg 开发文件时优先复用 `runtime` 中的现有 DLL。
 
+发布脚本会额外构建 `FFF.PrefetchHost.vcxproj`（前后预加载小助手，独立进程）。它由 `FFF.Player.vbproj` 的 `@(PrefetchHelper)` 随 `dotnet publish` 拷入交付目录；内核 `EnsureHelper()` 按自身 DLL 所在目录查找它；缺件时**只**降级 helper 侧的 WARM/PROBE，进程内静图解码线与静图缓存命中不受影响，播放不受影响。单文件发布形态（`发布3FP单文件.ps1`）按白名单只保留 `FFF.Player.exe`，不会携带这枚伴随 exe。
+
 - `-SkipDependencyPreparation`：只检查本地原生依赖，缺件直接报错，不调用准备脚本；`dotnet` 仍按正常流程还原 NuGet 包。
 - `-SkipIamf`：显式禁用 IAMF，传入 `HaveLibiamf=false`；默认要求完整 IAMF 依赖。
 - `-SkipTests`：构建时跳过测试工程的编译。目前 `FFF.Player.Tests` 尚未注册测试项，编译成功不代表运行回归测试。

@@ -400,6 +400,10 @@ public:
     std::uint32_t ResolveDecodeTransfer(const HdrFrameState& hdrState) const noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     bool OwnsD3D11Texture(ID3D11Texture2D* texture) const noexcept;
+    // DXGI index of the adapter owning the playback D3D11 device, resolved by
+    // LUID rather than by whatever enumeration order a caller happened to use.
+    // -1 when the device was never created or the adapter cannot be identified.
+    std::int32_t DeviceAdapterIndex() const noexcept;
     /// True when a CUDA-decoded frame can be pasted into this renderer instead of being
     /// downloaded to CPU planes first. Enabled by default; FFF3FP_CUDA_D3D11_INTEROP=0
     /// turns it off. A non-NVIDIA output adapter is refused by the device-side probe.
@@ -702,7 +706,8 @@ private:
     struct CachedVideoSettings {
         // gamut: 0 = Rec.709, 1 = Rec.2020, 2 = P3 (DCI/Display).
         std::uint32_t colorMode = 0, transfer = 0, gamut = 0, reserved = 0;
-        float sdrPeak = 100, hdrPeak = 100, paperWhite = 203, targetPeak = 1000;
+        // sdrPeak is the SDR reference white (BT.2408 = 203 nits), not the panel peak.
+        float sdrPeak = 203, hdrPeak = 100, paperWhite = 203, targetPeak = 1000;
         float sourceWidth = 0, sourceHeight = 0, outputWidth = 0, outputHeight = 0;
         std::uint32_t inputLayout = 0;
         float sampleScale = 1, yOffset = 0, yScale = 1;
@@ -902,6 +907,10 @@ private:
     // One-shot download for a CUDA frame the interop could not take. Kept so the
     // fallback does not allocate on the frame that hits it.
     AVFrame* cudaTransferFrame_ = nullptr;
+    // One-shot download for a D3D11 surface decoded on a different adapter.
+    // A cross-device CopySubresourceRegion is not legal, so such a frame is
+    // turned into ordinary CPU planes at the entry of Render().
+    AVFrame* d3d11TransferFrame_ = nullptr;
     // Upload-capacity state, read by WantsStagingUpload. Both are atomic because the
     // device (and its reset of the refusal) can be created off the session worker
     // thread that runs Render / EnsurePipeline.

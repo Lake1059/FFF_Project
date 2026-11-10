@@ -7,6 +7,10 @@ Friend NotInheritable Class 播放器界面呈现器
 
     Private Const 图片时间戳文本 As String = "图片"
 
+    ' 与信息图层"双耳：HRTF 空间音频"那一行同色，同一件事在状态栏与信息层里
+    ' 必须长得一样，否则用户会以为它们是两件事。
+    Private Shared ReadOnly 双耳高亮色 As Color = Color.FromArgb(CByte(255), CByte(&H55), CByte(&HE7), CByte(&HEA))
+
     Private Enum 时间戳精度
         秒
         分钟
@@ -23,14 +27,17 @@ Friend NotInheritable Class 播放器界面呈现器
     Private ReadOnly 视频编码按钮 As LakeUI.ModernButton
     Private ReadOnly 音频编码按钮 As LakeUI.ModernButton
     Private ReadOnly 声道数按钮 As LakeUI.ModernButton
+    Private ReadOnly 双耳按钮 As LakeUI.ModernButton
     Private ReadOnly 时间标签 As LakeUI.HtmlColorLabel
     Private ReadOnly 状态栏 As LakeUI.ModernPanel
     Private ReadOnly HDR占位 As Control
     Private ReadOnly 视频编码占位 As Control
     Private ReadOnly 音频编码占位 As Control
     Private ReadOnly 声道数占位 As Control
+    Private ReadOnly 双耳占位 As Control
     Private ReadOnly 画面控件 As 播放器画面控件
     Private ReadOnly 快照提供器 As Func(Of 播放器快照)
+    Private ReadOnly 双耳状态提供器 As Func(Of 双耳状态)
     Private ReadOnly 正在切换提供器 As Func(Of Boolean)
     Private ReadOnly 解码器提供器 As Func(Of 解码模式)
     Private ReadOnly 刷新计时器 As LakeUI.PrecisionTimer
@@ -62,14 +69,17 @@ Friend NotInheritable Class 播放器界面呈现器
                    视频编码按钮 As LakeUI.ModernButton,
                    音频编码按钮 As LakeUI.ModernButton,
                    声道数按钮 As LakeUI.ModernButton,
+                   双耳按钮 As LakeUI.ModernButton,
                    时间标签 As LakeUI.HtmlColorLabel,
                    状态栏 As LakeUI.ModernPanel,
                    HDR占位 As Control,
                    视频编码占位 As Control,
                    音频编码占位 As Control,
                    声道数占位 As Control,
+                   双耳占位 As Control,
                    画面控件 As 播放器画面控件,
                    快照提供器 As Func(Of 播放器快照),
+                   双耳状态提供器 As Func(Of 双耳状态),
                    正在切换提供器 As Func(Of Boolean),
                    解码器提供器 As Func(Of 解码模式))
         Me.进度条 = 进度条
@@ -82,14 +92,17 @@ Friend NotInheritable Class 播放器界面呈现器
         Me.视频编码按钮 = 视频编码按钮
         Me.音频编码按钮 = 音频编码按钮
         Me.声道数按钮 = 声道数按钮
+        Me.双耳按钮 = 双耳按钮
         Me.时间标签 = 时间标签
         Me.状态栏 = 状态栏
         Me.HDR占位 = HDR占位
         Me.视频编码占位 = 视频编码占位
         Me.音频编码占位 = 音频编码占位
         Me.声道数占位 = 声道数占位
+        Me.双耳占位 = 双耳占位
         Me.画面控件 = 画面控件
         Me.快照提供器 = 快照提供器
+        Me.双耳状态提供器 = 双耳状态提供器
         Me.正在切换提供器 = 正在切换提供器
         Me.解码器提供器 = 解码器提供器
         刷新计时器 = New LakeUI.PrecisionTimer With {
@@ -114,6 +127,8 @@ Friend NotInheritable Class 播放器界面呈现器
         更新媒体信息(Nothing, Nothing)
         更新播放按钮(播放状态.空闲)
         更新解码按钮()
+        ' 初始就要藏起来：否则状态栏上会先闪一个还没接上会话的 "HRTF"。
+        刷新双耳按钮()
         设置时间戳文本(TimeSpan.Zero, TimeSpan.Zero)
     End Sub
 
@@ -139,6 +154,9 @@ Friend NotInheritable Class 播放器界面呈现器
     Friend Sub 刷新()
         If 已释放 Then Return
         更新解码按钮()
+        ' 双耳徽章挂在会话上而不是快照上：设备一换、插槽一装，它就该变，不必等
+        ' 下一帧解码。会话缺席时提供器给"不可用"，徽章自己隐藏。
+        刷新双耳按钮()
         Dim 快照 = 快照提供器()
         If 快照 Is Nothing Then
             If 有媒体快照 Then 清除媒体()
@@ -431,6 +449,17 @@ Friend NotInheritable Class 播放器界面呈现器
         设置自适应文本(解码按钮, If(解码器提供器() = 解码模式.GPU, "GPU", "CPU"))
     End Sub
 
+    ''' <summary>双耳徽章：可用才出现（模块已授权且端点是 2 声道），文本写"现在
+    ''' 听到的是什么"。同一行里唯一的操作是"点一下换一种"，所以文本必须是结果
+    ''' 而不是意愿——用户点完立刻能看到它反过来。</summary>
+    Private Sub 刷新双耳按钮()
+        Dim 状态 = 双耳状态提供器()
+        设置配对可见(双耳按钮, 双耳占位, 状态.可用)
+        If Not 状态.可用 Then Return
+        设置自适应文本(双耳按钮, If(状态.期望双耳, "HRTF", "立体声"))
+        双耳按钮.ForeColor = If(状态.期望双耳, 双耳高亮色, Color.Silver)
+    End Sub
+
     Private Sub 刷新HDR按钮(快照 As 播放器快照)
         Dim 可见 = 快照 IsNot Nothing AndAlso 快照.是HDR源
         设置配对可见(HDR按钮, HDR占位, 可见)
@@ -449,7 +478,7 @@ Friend NotInheritable Class 播放器界面呈现器
     End Sub
 
     Private Sub 更新全部自适应宽度()
-        For Each 按钮 In {解码按钮, HDR按钮, 视频编码按钮, 音频编码按钮, 声道数按钮}
+        For Each 按钮 In {解码按钮, HDR按钮, 视频编码按钮, 音频编码按钮, 声道数按钮, 双耳按钮}
             更新自适应宽度(按钮)
         Next
         更新时间戳自适应宽度(创建时间戳测量文本(时间标签.Text), True)

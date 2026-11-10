@@ -58,6 +58,7 @@ Public Class Form1
     Private 设置窗口 As Form设置
     Private 媒体信息窗口 As Form媒体信息
     Private ReadOnly 播放列表数据 As New 播放列表 With {.播放模式 = 列表播放模式.顺序播放}
+    Private 前后预取控制器 As 前后预取控制器
     Private 播放列表窗口 As Form播放列表
     Private 当前弹幕路径 As String = String.Empty
     Private 待打开外部文件 As String = String.Empty
@@ -214,6 +215,7 @@ Public Class Form1
         播放控制器 = New 播放器控制器(
             Function() 画面控件.输出窗口句柄, SynchronizationContext.Current,
             CType(设置.实例对象.解码方式, 解码模式))
+        前后预取控制器 = New 前后预取控制器(播放列表数据, Function() 播放控制器.当前媒体路径)
         显示器唤醒 = New 显示器唤醒请求()
         播放控制器.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
         播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
@@ -315,6 +317,7 @@ Public Class Form1
         AddHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         AddHandler 播放控制器.状态已变化, AddressOf 播放控制器_状态已变化
         AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开
+        AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开_前后预取
         AddHandler 播放控制器.播放结束, AddressOf 播放控制器_播放结束
         AddHandler 播放控制器.媒体已打开, AddressOf 剪辑区间控制器.媒体已打开
         AddHandler 播放控制器.播放错误, AddressOf 播放控制器_播放错误
@@ -327,6 +330,10 @@ Public Class Form1
         AddHandler 界面呈现器.请求跳转到关键帧, AddressOf 界面呈现器_请求跳转到关键帧
         AddHandler 界面呈现器.音量已变更, AddressOf 界面呈现器_音量已变更
         AddHandler 界面呈现器.播放状态已刷新, AddressOf 剪辑区间控制器.播放状态已刷新
+        ' 双耳策略的"跟随设备"就靠这条 100 ms 心跳：内核在默认端点变化后自己会重建
+        ' 渲染器并重读端点形态，这里再把"形态还适不适用"折算一次下发。不另开
+        ' 通知线程，也不给内核加设备回调。
+        AddHandler 界面呈现器.播放状态已刷新, AddressOf 播放控制器_同步双耳策略
         AddHandler 剪辑区间控制器.模式已变化, AddressOf 剪辑区间控制器_模式已变化
         AddHandler MB_剪辑区间模式.Click, AddressOf 剪辑区间控制器.切换模式
         AddHandler P_剪辑区间按钮容器.SizeChanged, AddressOf 剪辑区间控制器.按钮容器大小已变化
@@ -494,10 +501,12 @@ Public Class Form1
             ETB_媒体进度条, ETB_音量条, MB_播放和暂停,
             按钮图标.取得(播放器按钮图标.播放), 按钮图标.取得(播放器按钮图标.暂停),
             MB_软件解码或硬件解码, MB_HDR模式,
-            MB_当前视频编码显示, MB_当前音频编码显示, MB_当前声道数显示, HCL_时间戳显示, Panel4,
+            MB_当前视频编码显示, MB_当前音频编码显示, MB_当前声道数显示, MB_双耳模式, HCL_时间戳显示, Panel4,
             JEC_HDR选项前面的空白占位, JEC_当前视频编码显示前面的空白占位,
-            JEC_当前音频编码显示前面的空白占位, JEC_当前声道数显示前面的空白占位, 画面控件,
+            JEC_当前音频编码显示前面的空白占位, JEC_当前声道数显示前面的空白占位,
+            JEC_双耳模式前面的空白占位, 画面控件,
             AddressOf 播放控制器.安全读取快照,
+            AddressOf 播放控制器.读取双耳状态,
             Function() 播放控制器.是否正在切换,
             Function() 播放控制器.解码器)
     End Function
@@ -754,6 +763,7 @@ Public Class Form1
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
         正在关闭 = True
         播放列表数据.取消自动扫描()
+        前后预取控制器?.释放()
         停止解锁轮询()
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
@@ -1008,6 +1018,29 @@ Public Class Form1
         图片浏览控制器?.媒体已打开(e.媒体信息, e.快照)
         界面呈现器.设置图片模式(图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.图片模式已启用)
         界面呈现器.刷新()
+    End Sub
+
+    Private Sub 播放控制器_媒体已打开_前后预取(sender As Object, e As 播放器媒体事件参数)
+        前后预取控制器?.媒体已打开(e.文件路径)
+    End Sub
+
+    ''' <summary>界面心跳里的双耳策略重放。幂等：目标与内核现值相同就不发命令，
+    ''' 所以这条 100 ms 路径在稳态下只有四次原子读。</summary>
+    Private Sub 播放控制器_同步双耳策略(sender As Object, e As EventArgs)
+        If 正在关闭 Then Return
+        播放控制器?.同步双耳策略()
+    End Sub
+
+    ''' <summary>双耳徽章：点一下换一种听法。可用性由内核回读决定——模块缺席、
+    ''' 未解锁或端点是多声道时控件本就不出现，这里再判一次防误触。</summary>
+    Private Sub MB_双耳模式_Click(sender As Object, e As EventArgs) Handles MB_双耳模式.Click
+        If 正在关闭 OrElse Not 播放控制器.是否有媒体 Then Return
+        Dim 状态 = 播放控制器.读取双耳状态()
+        If Not 状态.可用 Then Return
+        If Not 播放控制器.切换双耳模式() Then Return
+        Dim 新状态 = 播放控制器.读取双耳状态()
+        信息图层呈现器?.显示操作信息(If(新状态.期望双耳,
+            "双耳：HRTF 空间音频", "双耳：立体声"), &HFF55E7EAUI)
     End Sub
 
     ''' <summary>AI 字幕绘制扩展（PrecisionTimer 线程）：同一帧、同一图层 append
@@ -1588,6 +1621,7 @@ Public Class Form1
             BeginInvoke(Sub() 播放列表数据_列表变化(sender, e))
             Return
         End If
+        前后预取控制器?.列表变化()
         If String.IsNullOrEmpty(待选中播放列表路径) Then Return
         If 播放列表数据.选择路径(待选中播放列表路径) Then
             待选中播放列表路径 = String.Empty

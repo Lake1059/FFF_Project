@@ -313,17 +313,34 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
     }
 
     auto dynamicSourcePeak = false;
-    if (next.format == FFF3FPHdrFormat::Sdr) {
+    // The container's stream-level transfer label is a guess; the frame's own
+    // color_trc is evidence. Reclassify in BOTH directions while no
+    // dynamic-metadata path owns the state: the shader already follows the
+    // frame (ResolveDecodeTransfer prefers lastTransferFromFrame_), so keeping
+    // the stream-level classification here would leave metadata, peaks and HUD
+    // disagreeing with the picture whenever the container mislabels the
+    // transfer -- the docs/21 failure shape (HLG tagged SMPTE2084 decodes as
+    // PQ, overestimating signal 0.75 by ~7.7x). Streams that really carry
+    // Vivid/HDR10+ are unaffected: their frames declare UNSPECIFIED trc
+    // (verified on the FATE vectors, see the Vivid comment below), and formats
+    // owned by dynamic metadata are never touched.
+    const bool reclassifiable = next.format == FFF3FPHdrFormat::Sdr ||
+        next.format == FFF3FPHdrFormat::Hlg || next.format == FFF3FPHdrFormat::Hdr10;
+    if (!next.dynamicMetadata && reclassifiable) {
         if (frame->color_trc == AVCOL_TRC_ARIB_STD_B67) {
-            next.format = FFF3FPHdrFormat::Hlg;
-            next.compatibility = Compatibility(FFF3FPHdrCompatibility::Hlg);
-            next.processingPath = FFF3FPHdrProcessingPath::HlgDisplayMapped;
-            next.sourcePeakNits = 1000.0f;
+            if (next.format != FFF3FPHdrFormat::Hlg) {
+                next.format = FFF3FPHdrFormat::Hlg;
+                next.compatibility = Compatibility(FFF3FPHdrCompatibility::Hlg);
+                next.processingPath = FFF3FPHdrProcessingPath::HlgDisplayMapped;
+                next.sourcePeakNits = 1000.0f;
+            }
         } else if (frame->color_trc == AVCOL_TRC_SMPTE2084) {
-            next.format = FFF3FPHdrFormat::Hdr10;
-            next.compatibility = Compatibility(FFF3FPHdrCompatibility::Hdr10);
-            next.processingPath = FFF3FPHdrProcessingPath::StaticHdr10;
-            next.sourcePeakNits = 1000.0f;
+            if (next.format != FFF3FPHdrFormat::Hdr10) {
+                next.format = FFF3FPHdrFormat::Hdr10;
+                next.compatibility = Compatibility(FFF3FPHdrCompatibility::Hdr10);
+                next.processingPath = FFF3FPHdrProcessingPath::StaticHdr10;
+                next.sourcePeakNits = 1000.0f;
+            }
         }
     }
 
@@ -855,7 +872,13 @@ void HdrProcessor::BuildDxgiHdr10Metadata(DXGI_HDR_METADATA_HDR10& metadata) con
             maxFall = dynamicAverage;
     }
     metadata.MaxMasteringLuminance = DxgiNits(masteringPeak);
-    metadata.MinMasteringLuminance = DxgiMinNits(source.minimumLuminanceNits);
+    // A stream without mastering side data keeps the struct default of 0 here.
+    // CTA 861 and DXGI both treat 0 as an invalid minimum (the smallest
+    // representable value is one unit = 0.0001 nits, which is also what
+    // BuildTrueHdrMetadata sends), so floor the field instead of passing the
+    // default through.
+    metadata.MinMasteringLuminance = DxgiMinNits(source.minimumLuminanceNits > 0.0f
+        ? source.minimumLuminanceNits : 0.0001f);
     metadata.MaxContentLightLevel = DxgiContentLight(maxCll);
     metadata.MaxFrameAverageLightLevel = DxgiContentLight(maxFall);
 }

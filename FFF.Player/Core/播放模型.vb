@@ -76,6 +76,35 @@ Public Enum 音频直通模式
     关 = 2
 End Enum
 
+''' <summary>双耳床渲染策略（内核 FFF3FP_SetAudioBinauralPolicy）。
+''' 自动＝由端点形态决定（耳机/头戴式才双耳化）；强制＝用户压过形态判定。</summary>
+Public Enum 双耳策略
+    自动 = 0
+    强制双耳 = 1
+    强制立体声 = 2
+End Enum
+
+''' <summary>双耳状态快照（内核 FFF3FP_GetAudioBinauralStatus 的四个输出）。
+''' 形态是内核渲染器真正打开的那个端点的 EndpointFormFactor 原值：
+''' 1=扬声器 3=耳机 5=头戴式 9=数字输出（HDMI/USB DAC 都在这一档）。</summary>
+Public Structure 双耳状态
+    Public ReadOnly 策略 As 双耳策略
+    Public ReadOnly 端点形态 As UInteger
+    ''' <summary>策略与端点形态合起来是否该把床双耳化。</summary>
+    Public ReadOnly 期望双耳 As Boolean
+    ''' <summary>插槽已装且端点是 2 声道：控件能动作的前提，否则应当隐藏。</summary>
+    Public ReadOnly 可用 As Boolean
+
+    Public Sub New(策略 As 双耳策略, 端点形态 As UInteger, 期望双耳 As Boolean, 可用 As Boolean)
+        Me.策略 = 策略
+        Me.端点形态 = 端点形态
+        Me.期望双耳 = 期望双耳
+        Me.可用 = 可用
+    End Sub
+
+    Public Shared ReadOnly 不可用 As New 双耳状态(双耳策略.自动, 0UI, False, False)
+End Structure
+
 Public Enum 播放器事件类型 As UInteger
     状态变化 = 1
     打开完成 = 2
@@ -89,7 +118,8 @@ End Enum
 Public NotInheritable Class 播放器配置
     Public Property 解码器 As 解码模式
     Public Property 色彩模式 As 色彩输出模式 = 色彩输出模式.映射到SDR
-    Public Property SDR峰值尼特 As Single = 100.0F
+    ' HDR→SDR 的目标参考白（BT.2408 的 203 nit 漫反射白），与设置项同一口径。
+    Public Property SDR峰值尼特 As Single = 203.0F
     ' 0 = 自动使用显示器能力；正值由未来的用户峰值设置覆盖。
     Public Property HDR峰值尼特 As Single = 0.0F
     Public Property SDR纸白尼特 As Single = 203.0F
