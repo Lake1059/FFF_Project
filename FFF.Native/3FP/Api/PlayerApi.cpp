@@ -3,6 +3,8 @@
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Api/FFF.Player.AudioRenderPlug.h"
 #include "3FP/Api/FFF.Player.AudioTap.h"
+#include "3FP/Api/FFF.Player.CpuPlacement.h"
+#include "3FP/Core/PlacementPolicy.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Render/VideoRenderer.h"
 #include "3FP/Subtitle/SubtitleProbe.h"
@@ -644,4 +646,15 @@ FFFResult FFF3FP_SetPrefetchPlan(const FFF3FPPrefetchPlan* plan) noexcept {
 
 FFFResult FFF3FP_GetPrefetchStatus(FFF3FPPrefetchStatus* status) noexcept {
     return FFFPrefetch::PrefetchService::Instance().GetStatus(status);
+}
+
+// Startup CPU placement (3FP/Api/FFF.Player.CpuPlacement.h), appended additively:
+// PlayerApiVersion/SnapshotVersion unchanged, hosts resolve both exports dynamically.
+// Everything interesting lives in PlacementPolicy; these are the plain C entry points.
+int FFF3FP_BeginStartupCpuPlacement() noexcept {
+    return PlacementPolicy::BeginProcessStartupPlacement() ? 1 : 0;
+}
+
+void FFF3FP_EndStartupCpuPlacement() noexcept {
+    PlacementPolicy::EndProcessStartupPlacement("host");
 }

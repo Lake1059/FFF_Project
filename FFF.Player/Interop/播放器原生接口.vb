@@ -1526,6 +1526,50 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+    ' ---- 启动期 CPU 放置（FFF.Player.CpuPlacement.h，可选导出） ----
+    ' 默认关：宿主先在环境里看到 FFF_STARTUP_PLACEMENT=1 才肯碰这两个入口，否则调用
+    ' 本身就会把 FFF.Native 提前加载，改变所有人的启动时序。旧内核没有导出 ⇒
+    ' 支持启动期CPU放置 = False，整条通路静默不启用（不抬 API 版本、不动快照布局）。
+    ' 放置是 CPU Sets 软亲和：Intel = P-core 组；AMD 多 CCD = UI 线程当前所在 L3 域。
+    ' 正常由内核在首帧呈现时自己结束；没有媒体可放时宿主 3 s 兜底（见 Form1_Shown）。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 启动期CPU放置开始原型() As Integer
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Sub 启动期CPU放置结束原型()
+
+    Private ReadOnly 启动期CPU放置开始函数 As 启动期CPU放置开始原型 =
+        解析可选导出(Of 启动期CPU放置开始原型)("FFF3FP_BeginStartupCpuPlacement")
+    Private ReadOnly 启动期CPU放置结束函数 As 启动期CPU放置结束原型 =
+        解析可选导出(Of 启动期CPU放置结束原型)("FFF3FP_EndStartupCpuPlacement")
+
+    Friend ReadOnly Property 支持启动期CPU放置 As Boolean
+        Get
+            Return 启动期CPU放置开始函数 IsNot Nothing AndAlso 启动期CPU放置结束函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>启用启动期 CPU 放置；返回内核是否真的写了进程默认 CPU 集合。</summary>
+    Friend Function 启动期CPU放置开始() As Boolean
+        Dim 函数 = 启动期CPU放置开始函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Return 函数() <> 0
+        Catch
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>结束启动期 CPU 放置（幂等；会话已接管进程默认集合时内核会自行保留）。</summary>
+    Friend Sub 启动期CPU放置结束()
+        Dim 函数 = 启动期CPU放置结束函数
+        If 函数 Is Nothing Then Return
+        Try
+            函数()
+        Catch
+        End Try
+    End Sub
+
     ' 视口封顶：非 0 时适配盒不超过源原生尺寸，于是"缩放"变成绝对的 屏幕:视频 像素比
     ' （缩放=1 即逐像素 1:1，窗口比源大时四周留黑边）。0 = 沿用"铺满窗口"的历史行为。
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>

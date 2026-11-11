@@ -17,7 +17,11 @@ Namespace My
         ''' <summary>启动期 GPU 预热后台线程；UI 线程须在首个 D2D 触点（Form1_Load）前 Join 它，使 D3D_DeviceGlobals 的设备创建与 UI 使用在时间上互斥。</summary>
         Friend Shared GPU预热线程 As Threading.Thread
 
+        ''' <summary>启动期 CPU 放置（docs/146）是否真的写下了进程默认 CPU 集合；Form1_Shown 的 3 s 兜底据此决定要不要发结束。</summary>
+        Friend Shared 启动CPU放置已启用 As Boolean = False
+
         Private Sub MyApplication_Startup(sender As Object, e As StartupEventArgs) Handles Me.Startup
+            启动期CPU放置开始()
             启动期拉高优先级()
             启动期预取大件()
             启动期预热GPU设备()
@@ -72,6 +76,25 @@ Namespace My
                 启动优先级已拉高 = True
             Catch
                 ' 优先级不是启动的前提：拿不到就按原样跑。
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' 启动期 CPU 放置（docs/146）：把启动窗口的进程默认 CPU 集合软限制到首选域——
+        ''' Intel 大小核 = EfficiencyClass 最高的 P-core 组；AMD 多 CCD = UI 线程当前所在的
+        ''' L3 域（Windows 不暴露 CCD 编号，"主 CCD"没有权威定义，所以不猜、只保局部性）；
+        ''' 多 processor group 的机型内核会拒绝（CPU Set 跨 group 赋值会被 OS 忽略）。
+        ''' 只在 FFF_STARTUP_PLACEMENT=1 时启用：默认关，未做 A/B 之前不叠进启动路径；
+        ''' 这个判断必须放在调用内核导出之前，否则调用本身就会把 FFF.Native 提前加载。
+        ''' 结束由内核在首帧呈现时自己做，没有媒体可放时 Form1_Shown 起 3 s 兜底。
+        ''' </summary>
+        Private Sub 启动期CPU放置开始()
+            Try
+                If Environment.GetEnvironmentVariable("FFF_STARTUP_PLACEMENT") <> "1" Then Return
+                If Not 播放器原生接口.支持启动期CPU放置 Then Return
+                启动CPU放置已启用 = 播放器原生接口.启动期CPU放置开始()
+            Catch
+                ' 放置不是启动的前提：拿不到就按原样跑。
             End Try
         End Sub
 

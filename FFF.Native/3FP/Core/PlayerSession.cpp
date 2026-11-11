@@ -7518,7 +7518,13 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
     ApplyHdrState(snapshot_, videoRenderer_.StreamHdrState(), videoRenderer_.HdrState());
     UpdateAudioDiagnostics();
     PublishSnapshot();
-    if (firstFrameForMedia && !seekPreview) RebuildMediaInfo();
+    if (firstFrameForMedia && !seekPreview) {
+        RebuildMediaInfo();
+        // docs/146: the startup CPU-set window ends with the first picture on screen.
+        // Idempotent, and a no-op unless FFF_STARTUP_PLACEMENT was enabled; the host keeps
+        // a timeout fallback for sessions that never present anything.
+        PlacementPolicy::EndProcessStartupPlacement("first-frame");
+    }
     if (snapshot_.actualColorMode != previousColorMode) {
         std::ostringstream json; json << "{\"requested\":" << static_cast<unsigned>(snapshot_.requestedColorMode)
             << ",\"actual\":" << static_cast<unsigned>(snapshot_.actualColorMode) << ",\"reason\":\""

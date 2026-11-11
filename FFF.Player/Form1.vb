@@ -624,6 +624,20 @@ Public Class Form1
             End Sub) With {.IsBackground = True, .Name = "启动优先级降回"}
             降回线程.Start()
         End If
+
+        ' 启动期 CPU 放置的兜底释放（docs/146）：正常路径由内核在首帧呈现时自己结束；
+        ' 用户只是打开软件、没有媒体可放时首帧永远不来，这里 3 s 兜底，避免进程默认
+        ' CPU 集合常驻到播放期（那会静默改变解码/音频线程的落点）。
+        If My.MyApplication.启动CPU放置已启用 Then
+            Dim 放置结束线程 As New Thread(Sub()
+                Try
+                    Thread.Sleep(3000)
+                    播放器原生接口.启动期CPU放置结束()
+                Catch
+                End Try
+            End Sub) With {.IsBackground = True, .Name = "启动CPU放置结束"}
+            放置结束线程.Start()
+        End If
     End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════

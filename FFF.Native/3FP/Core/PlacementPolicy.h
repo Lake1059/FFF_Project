@@ -66,6 +66,19 @@ public:
     /// One step down (boost -> spill -> preferred). Returns true when it changed state.
     bool Recover() noexcept;
 
+    /// Process-wide startup placement (docs/146). Reuses the same discovery as the
+    /// playback policy but writes only the process-default CPU set, so it works before
+    /// any session exists. Opt-in through FFF_STARTUP_PLACEMENT; returns true when the
+    /// process default was actually written. Intel hybrid prefers the fastest
+    /// EfficiencyClass group; multi-CCD AMD keeps the L3 domain the calling (UI) thread
+    /// is already on, because "main CCD" has no public Windows definition. Multi-group
+    /// machines are refused: the OS ignores CPU Set assignments that do not match the
+    /// thread's affinity group. See docs/146 for the evidence behind those choices.
+    static bool BeginProcessStartupPlacement() noexcept;
+    /// Clears the startup process-default assignment. Safe to call repeatedly; leaves a
+    /// session-owned assignment alone (the playback policy owns it from then on).
+    static void EndProcessStartupPlacement(const char* reason) noexcept;
+
     /// Standalone priority overlay for the "software threads == CPU threads" rule: raises
     /// the process class and the present thread's priority exactly like Boost(), but
     /// leaves the CPU-set tiers (and hence where the decoder workers may run) where they
@@ -113,6 +126,9 @@ private:
     void Discover() noexcept;
     bool ApplyTier(Tier tier) noexcept;
     void BuildTiers(std::uint32_t minimumWorkers) noexcept;
+    /// CPU set ids the startup window should prefer. Calls Discover() first; returns
+    /// false when no usable domain exists or the machine spans processor groups.
+    bool BuildStartupCpuSetIds(std::vector<std::uint32_t>& ids) noexcept;
     bool ReadProcessorTimes(std::vector<std::uint64_t>& idle,
                             std::vector<std::uint64_t>& busy) noexcept;
     void ChooseCacheDomain() noexcept;
@@ -152,6 +168,10 @@ private:
     std::vector<std::uint32_t> domainLp1_;
     // domainLp0_'s size, exposed for the decode ladder's step boundary.
     std::uint32_t preferredDomainThreads_ = 0;
+    // Processor groups seen at discovery. CPU Set assignments whose group does not match
+    // a thread's affinity group are ignored by the OS, so the startup placement refuses
+    // such machines instead of half-applying (docs/146 §四).
+    std::uint32_t groupCount_ = 1;
 
     // cache-domain load sampling
     std::vector<std::uint64_t> prevIdle_;
