@@ -1,4 +1,4 @@
-﻿<Global.Microsoft.VisualBasic.CompilerServices.DesignerGenerated()>
+<Global.Microsoft.VisualBasic.CompilerServices.DesignerGenerated()>
 Partial Class Form1
     Inherits System.Windows.Forms.Form
 
@@ -441,7 +441,7 @@ Partial Class Form1
         MB_双耳模式.Text = "HRTF"
         MB_双耳模式.ToolTipPadding = New Padding(5)
         MB_双耳模式.ToolTipShowDelaySeconds = 1R
-        MB_双耳模式.ToolTipText = "双耳空间音频：点击切回立体声"
+        MB_双耳模式.ToolTipText = "音频输出：点击循环 传统多声道 / HRTF / 源码直通"
         ' 
         ' JEC_双耳模式前面的空白占位
         ' 
@@ -1403,7 +1403,10 @@ Partial Class Form1
         DoubleBuffered = True
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver
-        Icon = CType(resources.GetObject("$this.Icon"), Icon)
+        ' 图标不再走 resx 二进制条目（MSBuild 18.9+ MOTW 检查在本机误判第一方 resx）：
+        ' 运行时从随 exe 部署的 ICO.ico 加载；文件缺席时保持默认图标，不影响启动。
+        Dim 图标路径 As String = IO.Path.Combine(AppContext.BaseDirectory, "ICO.ico")
+        If IO.File.Exists(图标路径) Then Icon = New Icon(图标路径)
         Name = "Form1"
         StartPosition = FormStartPosition.CenterScreen
         Text = "FFF.Player"
