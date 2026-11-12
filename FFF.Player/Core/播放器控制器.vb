@@ -1279,21 +1279,25 @@ Public NotInheritable Class 播放器控制器
         End If
     End Sub
 
-    ''' <summary>信息图层的直通行文本：接管时"直通：<模块显示名>"，缺席/未接管返回
-    ''' 空串（那一行不出现——与双耳行同一纪律，现网解码不是需要解释的降级）。</summary>
+    ''' <summary>信息图层的直通行文本：接管时原样显示模块注入的显示名；模块没给名称
+    ''' 时退回中性“已接管”，不造格式身份名。未接管返回空串（那一行不出现）。</summary>
     Friend Function 音频直通图层文本() As String
         If 已释放 OrElse 会话 Is Nothing Then Return String.Empty
         Try
             Dim 状态 = 会话.读取音频直通状态()
-            If 状态.生效 = 0 Then Return String.Empty
-            Dim 名称 = 状态.名称
-            If String.IsNullOrWhiteSpace(名称) Then
-                名称 = 状态.编解码.ToString()
-            End If
-            Return 名称
+            Return 直通图层文本(状态.生效, 状态.名称)
         Catch
             Return String.Empty
         End Try
+    End Function
+
+    ''' <summary>直通行的纯映射：生效=0 ⇒ 空串；模块给了显示名就原样返回；模块没给
+    ''' 名称时只报宿主中性的“已接管”状态，不造编解码名/格式身份名。宿主不解释模块
+    ''' 文本，也不把这一行直接藏掉。</summary>
+    Friend Shared Function 直通图层文本(生效 As Integer, 模块名 As String) As String
+        If 生效 = 0 Then Return String.Empty
+        If String.IsNullOrWhiteSpace(模块名) Then Return "已接管"
+        Return 模块名.Trim()
     End Function
 
     Public Sub 强制开启HDR模式()

@@ -69,7 +69,7 @@ Friend Module 色彩变换模块接口
     ''' 未授权时模块拒交这张表 ⇒ 内核继续走它自己的矩阵折叠，症状与"模块不在盘上"同形。</summary>
     Friend Const 音频能力表入口名 As String = "FFF_GetAudioRenderApi"
 
-    ''' <summary>音频源码直通函数表的导出名（第三张能力面）：帧解析 + IEC 61937 打包 +
+    ''' <summary>音频源码直通函数表的导出名（第三张能力面）：帧解析 + 标准码流打包 +
     ''' 格式语义仲裁全在模块，内核只做字节搬运与设备协商。旧模块没有这个导出 ⇒
     ''' 宿主不钉表，内核整体回退解码路径——与"模块不在盘上"同形静默。</summary>
     Friend Const 音频直通表入口名 As String = "FFF_GetAudioPassthroughApi"
