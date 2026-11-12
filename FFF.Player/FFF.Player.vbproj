@@ -57,6 +57,27 @@
     <InternalsVisibleTo Include="FFF.Player.Tests" />
   </ItemGroup>
 
+  <!-- AI 字幕包下载器要能就地生成扩展包：worker 脚本随播放器部署（包契约要求
+       worker 在包根，下载器从程序目录的这份复制过去）。源=kernel/tools 的维护版。
+       qwen3_ort.py 同理：NPU 包的三段 OpenVINO 推理实现，须与 worker 同级（docs/157）。 -->
+  <ItemGroup>
+    <None Include="..\tools\ai-subtitles\asr_worker.py">
+      <Link>ai-subtitles\asr_worker.py</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\tools\ai-subtitles\qwen3_ort.py">
+      <Link>ai-subtitles\qwen3_ort.py</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- 窗口图标运行时从 ICO.ico 加载（Form1.Designer.vb），随 exe 部署。 -->
+  <ItemGroup>
+    <None Include="ICO.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
   <ItemGroup>
     <ProductNative Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" />
     <!-- Side-lane helper is optional: when it has not been built the kernel

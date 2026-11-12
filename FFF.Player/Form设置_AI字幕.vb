@@ -4,6 +4,10 @@ Option Explicit On
 Imports System.Collections.Generic
 Imports System.Drawing
 Imports System.Globalization
+Imports System.IO
+Imports System.Net
+Imports System.Threading
+Imports System.Threading.Tasks
 Imports System.Windows.Forms
 
 ''' <summary>
@@ -59,6 +63,15 @@ Friend Class Form设置_AI字幕
         "8 线程：P+E 混合架构上通常更慢；全大核机器可以试",
         "12 线程：只有全大核且核数足够时才可能有用"}
 
+    ' 包类型下拉：两种包是不同引擎、不同运行时，下载前必须先选（docs/157）。
+    ' 下标 ↔ Ai字幕包下载器.包类型：0=GpuCpu（GGUF/Vulkan），1=Npu（ONNX/OpenVINO）。
+    ' 两种包都有完整公共源链（模型直链官方 HF 仓 + 运行时官方构建/PyPI），零上传零配置。
+    Private Shared ReadOnly _包类型显示 As String() = {
+        "GPU+CPU 包（GGUF · Vulkan）", "NPU 包（ONNX · OpenVINO）"}
+    Private Shared ReadOnly _包类型说明 As String() = {
+        "通用包：NVIDIA / AMD / Intel 显卡用 Vulkan 加速，无独显落 CPU。模型直链 ggml-org 官方仓。",
+        "Intel Core Ultra 的 NPU 专用：conv 前端上 NPU，int8 两段仍留 CPU。模型直链 sherpa 官方仓，运行时来自 python.org + PyPI。"}
+
     Public Sub New()
         正在初始化 = True
         Try
@@ -79,6 +92,12 @@ Friend Class Form设置_AI字幕
                 MCB_线程.Items.Add(_线程显示(i))
                 MCB_线程.ItemToolTips.Add(_线程显示(i), _线程说明(i))
             Next
+            ' 包类型下拉是静态表：两种包不同引擎，下载前选。默认 GPU+CPU（有公共源）。
+            For i = 0 To _包类型显示.Length - 1
+                MCB_包类型.Items.Add(_包类型显示(i))
+                MCB_包类型.ItemToolTips.Add(_包类型显示(i), _包类型说明(i))
+            Next
+            MCB_包类型.SelectedIndex = 0
             ' 设备下拉是静态表：它问的是「这台机器有哪类硬件」，与装没装运行时无关。
             ' 真正能不能跑由 worker 在启动时试（试不到就降档并回报一句），这一页
             ' 不需要为此扫描任何东西。
@@ -123,6 +142,7 @@ Friend Class Form设置_AI字幕
             MTB_偏移.Text = 偏移文本(设置.实例对象.Ai字幕字幕偏移秒)
             同步预置下拉()
             同步线程下拉()
+            刷新包类型说明()
             显示高级(MCK_显示高级.Checked)
             刷新状态()
         Finally
@@ -157,6 +177,138 @@ Friend Class Form设置_AI字幕
         Catch
             ' 浏览失败不该打断设置页。
         End Try
+    End Sub
+
+    ' ---------------- 包的获取与移除 ----------------
+
+    Private _下载中 As Boolean
+    Private _下载取消 As CancellationTokenSource
+
+    ''' <summary>包类型下拉下标 → 下载器枚举。越界落 GPU+CPU（默认）。</summary>
+    Private Function 当前包类型() As Ai字幕包下载器.包类型
+        If MCB_包类型.SelectedIndex = 1 Then Return Ai字幕包下载器.包类型.Npu
+        Return Ai字幕包下载器.包类型.GpuCpu
+    End Function
+
+    ''' <summary>下载目标目录：两种包引擎不同（GGUF vs ONNX），不能混在同一目录，
+    ''' 所以各用独立的默认子目录。用户已在目录框填了路径则尊重它（高级用法）。</summary>
+    Private Function 下载目标目录() As String
+        Dim 填 = MTB_包目录.Text.Trim()
+        If Not String.IsNullOrWhiteSpace(填) Then Return 填
+        Dim 子目录 = If(当前包类型() = Ai字幕包下载器.包类型.Npu,
+                        "3FP-AI-Subtitles-NPU", "3FP-AI-Subtitles")
+        Return IO.Path.Combine(AppContext.BaseDirectory, 子目录)
+    End Function
+
+    Private Sub MB_下载包_Click(sender As Object, e As EventArgs) Handles MB_下载包.Click
+        If _下载中 Then Return
+        Dim 目录 = 下载目标目录()
+        ' 已经是有效包就不用再下（重下是浪费 1 GB）。
+        Dim 错误 As String = String.Empty
+        If Ai字幕包.载入(目录, 错误) IsNot Nothing Then
+            HCL_下载状态.Text = 状态富文本("#808080", "该目录已是有效扩展包，无需下载。")
+            Return
+        End If
+        开始下载(目录)
+    End Sub
+
+    ''' <summary>下载整包并自动启用。worker/清单/运行时/模型全部由 下载器 落地；
+    ''' 完成后走与手工选包完全相同的路径（写设置 → 应用 → 刷新状态）。
+    ''' 进度回调同时驱动进度条（整体百分比）与状态行文本。</summary>
+    Private Async Sub 开始下载(目录 As String)
+        _下载中 = True
+        _下载取消 = New CancellationTokenSource()
+        设置下载中(True)
+        Try
+            Dim 进度 = New Progress(Of Ai字幕包下载器.下载进度)(
+                Sub(p)
+                    EPB_下载.Value = Math.Min(100, Math.Max(0, p.总百分比))
+                    HCL_下载进度.Text = 状态富文本("#FFA500", p.文本)
+                End Sub)
+            Dim 错误 As String = String.Empty
+            Try
+                错误 = Await Ai字幕包下载器.下载包Async(目录, 当前包类型(), 进度, _下载取消.Token)
+            Catch oce As OperationCanceledException
+                错误 = ""
+            Catch ex As Exception
+                错误 = ex.Message
+            End Try
+            If 错误 = "" Then
+                EPB_下载.Value = 100
+                MTB_包目录.Text = 目录
+                设置.实例对象.Ai字幕包目录 = 目录
+                HCL_下载状态.Text = 状态富文本("#6B8E23", "下载完成：扩展包已生成并启用。")
+                Form1.当前主窗体?.应用Ai字幕设置()
+                刷新状态()
+            ElseIf _下载取消 IsNot Nothing AndAlso _下载取消.IsCancellationRequested Then
+                HCL_下载状态.Text = 状态富文本("#808080",
+                    "已取消。已下载的部分保留（.part），再次点击「下载官方包…」会从断点继续。")
+            Else
+                HCL_下载状态.Text = 状态富文本("#FF4500", 错误)
+            End If
+        Finally
+            _下载中 = False
+            _下载取消?.Dispose()
+            _下载取消 = Nothing
+            设置下载中(False)
+        End Try
+    End Sub
+
+    Private Sub MB_取消下载_Click(sender As Object, e As EventArgs) Handles MB_取消下载.Click
+        _下载取消?.Cancel()
+    End Sub
+
+    ''' <summary>删除当前选中的有效扩展包：先清目录引用并停 worker（避免文件占用），
+    ''' 再删盘。只针对"载入校验通过"的目录，防止误删任意文件夹。</summary>
+    Private Async Sub MB_删除包_Click(sender As Object, e As EventArgs) Handles MB_删除包.Click
+        If _下载中 Then Return
+        Dim 目录 = MTB_包目录.Text.Trim()
+        If String.IsNullOrWhiteSpace(目录) Then Return
+        Dim 错误 As String = String.Empty
+        Dim 配置 = Ai字幕包.载入(目录, 错误)
+        If 配置 Is Nothing Then
+            HCL_下载状态.Text = 状态富文本("#808080", "当前目录不是有效的 AI 字幕包；删除只针对有效包。")
+            Return
+        End If
+        Dim 体积 As Long = 0
+        Try
+            For Each 文件 In New DirectoryInfo(目录).EnumerateFiles("*", IO.SearchOption.AllDirectories)
+                体积 += 文件.Length
+            Next
+        Catch
+        End Try
+        If LakeUI.ExOverlayMsgBox(Me,
+            $"确定删除这个 AI 字幕扩展包？{vbCrLf}{vbCrLf}{配置.名称}{vbCrLf}{目录}{vbCrLf}" &
+            $"体积 {体积 \ 1048576} MB。删除后 worker 停止，想再用需要重新下载或重新放置。",
+            {"删除", "现在不"}, "删除 AI 字幕扩展包", MsgBoxStyle.Exclamation, 1) <> 0 Then Return
+        ' 先停 worker：清掉目录引用并应用（控制器会据此停管道）。
+        设置.实例对象.Ai字幕包目录 = ""
+        MTB_包目录.Text = ""
+        Form1.当前主窗体?.应用Ai字幕设置()
+        Try
+            Await Task.Run(Sub() Directory.Delete(目录, True))
+            HCL_下载状态.Text = 状态富文本("#6B8E23", "已删除。")
+        Catch ex As Exception
+            HCL_下载状态.Text = 状态富文本("#FF4500",
+                $"删除失败（多半被占用，稍后再试或手动删）：{ex.Message}")
+        End Try
+        刷新状态()
+    End Sub
+
+    Private Sub 设置下载中(下载中 As Boolean)
+        MB_下载包.Enabled = Not 下载中
+        MB_取消下载.Enabled = 下载中
+        MB_删除包.Enabled = Not 下载中
+        MB_浏览.Enabled = Not 下载中
+        MCB_包类型.Enabled = Not 下载中
+        MTB_包目录.ReadOnly = 下载中
+        PanelAI11.Visible = 下载中
+        If 下载中 Then
+            HCL_下载状态.Text = 状态富文本("#FFA500", "正在下载…")
+        Else
+            EPB_下载.Value = 0
+            HCL_下载进度.Text = ""
+        End If
     End Sub
 
     ' ---------------- 推理档 ----------------
@@ -362,6 +514,25 @@ Friend Class Form设置_AI字幕
         Form1.当前主窗体?.应用Ai字幕设置()
     End Sub
 
+    ''' <summary>包类型切换：只影响「下载哪种包」，不碰当前已启用的包。说明标签随之
+    ''' 更新。同时把目录框重置为该类型的默认目录——两种包引擎不同，留着旧引擎的目录
+    ''' 会让下载误判「已是有效包」（GGUF 目录对 NPU 无效，反之亦然）。</summary>
+    Private Sub MCB_包类型_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_包类型.SelectedIndexChanged
+        If 正在初始化 OrElse MCB_包类型.SelectedIndex < 0 Then Return
+        刷新包类型说明()
+        Dim 子目录 = If(当前包类型() = Ai字幕包下载器.包类型.Npu,
+                        "3FP-AI-Subtitles-NPU", "3FP-AI-Subtitles")
+        MTB_包目录.Text = IO.Path.Combine(AppContext.BaseDirectory, 子目录)
+    End Sub
+
+    Private Sub 刷新包类型说明()
+        Dim 是Npu = MCB_包类型.SelectedIndex = 1
+        Dim 文案 = If(是Npu,
+            "NPU 专用（Core Ultra）——模型直链 sherpa 官方仓，约 1.1 GB",
+            "GPU+CPU 通用——模型直链 ggml-org 官方仓，约 1 GB")
+        HCL_包类型.Text = 状态富文本("#DCDCDC", 文案)
+    End Sub
+
     ''' <summary>设置值 → 下拉下标。未知值（老设置里的 3、16）落「自动」，与 0 同义。</summary>
     Private Sub 同步线程下拉()
         Dim 值 = 设置.实例对象.Ai字幕线程数
@@ -392,18 +563,12 @@ Friend Class Form设置_AI字幕
     End Sub
 
     Private Sub 显示高级(显示 As Boolean)
-        LBL_窗口秒.Visible = 显示
-        MTB_窗口秒.Visible = 显示
-        LBL_步长秒.Visible = 显示
-        MTB_步长秒.Visible = 显示
-        LBL_模型档.Visible = 显示
-        切换模型控件(显示)
-        LBL_偏移.Visible = 显示
-        MTB_偏移.Visible = 显示
-        LBL_线程.Visible = 显示
-        MCB_线程.Visible = 显示
-        LBL_预置.Visible = 显示
-        MCB_预置.Visible = 显示
+        ' 高级区整体是四个行容器（Dock=Top），隐藏行容器布局自动回流，
+        ' 不再逐个控件切 Visible。
+        PanelAI6.Visible = 显示
+        PanelAI7.Visible = 显示
+        PanelAI8.Visible = 显示
+        PanelAI9.Visible = 显示
     End Sub
 
     ''' <summary>重建设备项提示（内容随引擎变）。只在引擎真的变了时才动 ——
@@ -424,6 +589,16 @@ Friend Class Form设置_AI字幕
 
     ' ---------------- 状态行 ----------------
 
+    ''' <summary>状态区富文本：HtmlColorLabel 吃内联 HTML，行用 &lt;br&gt; 拼接。
+    ''' 只转义结构字符（&lt; &gt; &amp;），保留 · 等可读字符原样——WebUtility.HtmlEncode
+    ''' 会把 · 变成 &#183; 字面显示（HtmlColorLabel 不解码实体）。颜色沿用旧 ForeColor 语义：
+    ''' 灰=未启用、橙红=目录无效、黄绿=正常、橙=带注意项。</summary>
+    Private Shared Function 状态富文本(颜色 As String, ParamArray 行() As String) As String
+        Dim 编码行 = Array.ConvertAll(行,
+            Function(s As String) s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;"))
+        Return $"<font color=""{颜色}"">{String.Join("<br>", 编码行)}</font>"
+    End Function
+
     ''' <summary>状态行：包是否有效、实际生效的窗口/步长、设备+后端、模型档、语言，
     ''' 外加「这个后端把哪一段放到加速器上」和「验证到哪一步」。
     ''' 只描述"将会怎么跑"，不再有"包内有没有该后端二进制"这类问题 —— 已经没有
@@ -437,11 +612,10 @@ Friend Class Form设置_AI字幕
             ' 没有包就没有引擎可判：设备项提示回落到 ONNX 口径（构造期填的就是它）。
             重建设备提示(Ai字幕包.引擎Onnx)
             If String.IsNullOrWhiteSpace(目录) Then
-                LBL_状态.ForeColor = Color.Gray
-                LBL_状态.Text = "未启用。选择一个扩展包目录（含 ai-subtitles.json）即可启用。"
+                HCL_状态.Text = 状态富文本("#808080",
+                    "未启用。选择一个扩展包目录（含 ai-subtitles.json）即可启用。")
             Else
-                LBL_状态.ForeColor = Color.OrangeRed
-                LBL_状态.Text = "未启用：" & 错误
+                HCL_状态.Text = 状态富文本("#FF4500", "未启用：" & 错误)
             End If
             Return
         End If
@@ -478,29 +652,31 @@ Friend Class Form设置_AI字幕
             If 档命中 Then 档名 = 档.档名
         End If
 
-        LBL_状态.ForeColor = Color.OliveDrab
         Dim 后缀 = If(覆盖窗口 > 0 OrElse 覆盖步长 > 0, "（高级覆盖生效）", "")
-        ' 五行封顶（Label 是 568x112）：包/节奏、设备+后端+模型、后端做什么、
-        ' 验证到哪一步、必须现在说清的注意事项。每行都压在一行内，越界会换行顶掉下一行。
-        LBL_状态.Text = $"已启用：{配置.名称} —— 窗口 {窗口:0.###}s / 步长 {步长:0.###}s{后缀}" & vbCrLf &
-                        $"设备：{Ai字幕推理档.设备显示名(设备)}　后端：{Ai字幕推理档.后端显示名(后端, 配置.引擎)}　模型：{档名}　语言：{语言说明}" & vbCrLf &
-                        $"说明：{Ai字幕推理档.后端说明(后端, 配置.引擎)}" & vbCrLf &
-                        $"状态：{Ai字幕推理档.后端状态(后端, 配置.引擎)}"
-        ' 第五行只放「现在就影响结果」的事，且最多一条：worker 还没接这个后端时，
-        ' 它比语言闸门重要得多 —— 前者决定跑在哪，后者只是不筛。说不清就是让用户
-        ' 以为选了什么就在跑什么。
+        ' 行序：包/节奏、设备+后端+模型、后端做什么、验证到哪一步，最后一条留给
+        ' 「现在就影响结果」的注意项（最多一条：worker 还没接这个后端时，它比语言
+        ' 闸门重要得多 —— 前者决定跑在哪，后者只是不筛。说不清就是让用户以为选了
+        ' 什么就在跑什么）。
+        Dim 行 As New List(Of String) From {
+            $"已启用：{配置.名称} —— 窗口 {窗口:0.###}s / 步长 {步长:0.###}s{后缀}",
+            $"设备：{Ai字幕推理档.设备显示名(设备)}　后端：{Ai字幕推理档.后端显示名(后端, 配置.引擎)}　模型：{档名}　语言：{语言说明}",
+            $"说明：{Ai字幕推理档.后端说明(后端, 配置.引擎)}",
+            $"状态：{Ai字幕推理档.后端状态(后端, 配置.引擎)}"
+        }
+        Dim 颜色 As String = "#6B8E23"
         If Not Ai字幕推理档.当前worker可用(后端, 配置.引擎) Then
-            LBL_状态.ForeColor = Color.Orange
+            颜色 = "#FFA500"
             ' 不再写「本版只认 CPU / CUDA」：worker 已认 8 个键，那句话与实际相反
             ' （P2，2026-11-02 审查定案）。
-            LBL_状态.Text &= vbCrLf & "注意：worker 尚未接入该后端，会被按自动处理（详见日志）。"
+            行.Add("注意：worker 尚未接入该后端，会被按自动处理（详见日志）。")
         ElseIf 设置.实例对象.Ai字幕仅所选语言 AndAlso
                Not Ai字幕推理档.后端自报语言(后端, 配置.引擎) Then
             ' 只有真拿不到语言标签的后端才说这句。llama 与 OpenVINO 都把自报语言送回来，
             ' 闸门真的在丢窗 —— 那句「不筛除」写上去就是把在干活的闸门说成摆设。
-            LBL_状态.ForeColor = Color.Orange
-            LBL_状态.Text &= vbCrLf & "注意：该后端不返回语言标签，「只显示…」实际不筛除。"
+            颜色 = "#FFA500"
+            行.Add("注意：该后端不返回语言标签，「只显示…」实际不筛除。")
         End If
+        HCL_状态.Text = 状态富文本(颜色, 行.ToArray())
     End Sub
 
     ' ---------------- 模型 ----------------
@@ -600,12 +776,10 @@ Friend Class Form设置_AI字幕
 
         ' 事实行。没包时也要给理由 —— 空白格子会被当成「还在加载」。
         If 配置 Is Nothing Then
-            LBL_模型档值.Text = "未选择扩展包"
-            LBL_模型档值.ForeColor = Color.DarkOrange
+            HCL_模型档值.Text = 状态富文本("#FF8C00", "未选择扩展包")
         Else
             Dim 详 = 默认档提示(配置)
-            LBL_模型档值.Text = If(详 = "", "未标注量化形态", 详)
-            LBL_模型档值.ForeColor = Color.Gainsboro
+            HCL_模型档值.Text = 状态富文本("#DCDCDC", If(详 = "", "未标注量化形态", 详))
         End If
         切换模型控件(MCK_显示高级.Checked)
     End Sub
@@ -614,7 +788,7 @@ Friend Class Form设置_AI字幕
     ''' 这个位置上写的是事实，不是一个「点了也没别的」的控件。</summary>
     Private Sub 切换模型控件(显示 As Boolean)
         MCB_模型档.Visible = 显示 AndAlso _有多档
-        LBL_模型档值.Visible = 显示 AndAlso Not _有多档
+        HCL_模型档值.Visible = 显示 AndAlso Not _有多档
     End Sub
 
     Private Sub MCB_模型档_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_模型档.SelectedIndexChanged
