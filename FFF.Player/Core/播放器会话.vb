@@ -807,6 +807,9 @@ Public NotInheritable Class 播放器会话
 
     Private Sub 安装音频直通插槽核心()
         If 音频直通模式偏好 = 2UI OrElse 直通插槽已装 OrElse 色彩模块实例 Is Nothing Then Return
+        ' 旧内核没有这组附加导出时整条直通通路缺席：在装载点就退出，
+        ' 而不是让异常穿出 Try 块打死同一路径上的模块注入泵启动。
+        If Not 播放器原生接口.支持音频直通 Then Return
         Dim 原因 As String = Nothing
         Dim 表 = 色彩模块实例.尝试取音频直通表(原因)
         If Not 表.HasValue Then
@@ -836,6 +839,7 @@ Public NotInheritable Class 播放器会话
         SyncLock 直通插槽锁
             音频直通模式偏好 = 模式
             If 取得句柄() Is Nothing Then Return
+            If Not 播放器原生接口.支持音频直通 Then Return
             Try
                 检查结果(播放器原生接口.FFF3FP_SetAudioPassthroughMode(取得句柄(), 模式))
             Catch ex As EntryPointNotFoundException
@@ -857,6 +861,7 @@ Public NotInheritable Class 播放器会话
                                             名称 As String, 突发数 As ULong)
         Dim 生效UI As UInteger, 模式UI As UInteger, 编解码UI As UInteger, 突发 As ULong
         Dim 名称缓冲 As IntPtr = IntPtr.Zero
+        If Not 播放器原生接口.支持音频直通 Then Return (0, 0UI, 0UI, String.Empty, 0UL)
         Try
             ' 名称是 UTF-8；按现有导出的截断契约，容量给足即可，读不到保持空串。
             名称缓冲 = Marshal.AllocCoTaskMem(256)

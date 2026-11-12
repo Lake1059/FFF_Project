@@ -1692,45 +1692,116 @@ Friend Module 播放器原生接口
     ' 双耳床渲染策略（附加导出：不抬 API 版本，不动快照布局）。
     ' 0=自动（按端点形态判定：3=耳机、5=头戴式） 1=强制双耳 2=强制立体声。
     ' 策略存在会话上，渲染器每次因设备切换重建都会重放它。
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
-    Friend Function FFF3FP_SetAudioBinauralPolicy(播放器 As 播放器原生句柄,
+    '
+    ' 这些导出一律动态解析：旧内核（版本 23 但晚于 SnapshotVersion 的首批提交）
+    ' 可能根本没有符号。静态 DllImport 会在调用点抛 EntryPointNotFoundException，
+    ' 而 安装音频直通插槽核心 的调用点没有本地捕获——异常会连带跳过同一 Try 块里
+    ' 的模块注入泵启动。动态解析把「不支持」变成正常分支，并给出能力位。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置音频双耳策略原型(播放器 As 播放器原生句柄,
                                                  策略 As UInteger) As 原生播放器结果
-    End Function
+
+    Private ReadOnly 设置音频双耳策略函数 As 设置音频双耳策略原型 =
+        解析可选导出(Of 设置音频双耳策略原型)("FFF3FP_SetAudioBinauralPolicy")
 
     ' 策略回读：四个输出都可给零。形态是内核渲染器真正打开的那个端点的
     ' EndpointFormFactor 原值（0=属性存储没回答）；期望=策略与形态合起来是否
     ' 该把床双耳化；可用=插槽已装且端点是 2 声道（否则宿主应当隐藏控件）。
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取音频双耳状态原型(播放器 As 播放器原生句柄,
+                                                  ByRef 策略 As UInteger,
+                                                  ByRef 端点形态 As UInteger,
+                                                  ByRef 期望双耳 As UInteger,
+                                                  ByRef 可用 As UInteger) As 原生播放器结果
+
+    Private ReadOnly 读取音频双耳状态函数 As 读取音频双耳状态原型 =
+        解析可选导出(Of 读取音频双耳状态原型)("FFF3FP_GetAudioBinauralStatus")
+
+    ' 音频源码直通三导出（附加导出：不抬 API 版本）。表由模块产出、宿主钉住后整张
+    ' 交出，内核在装载点拷贝一份，调用返回即可解钉；IntPtr.Zero 表示撤下插槽、
+    ' 整体回到解码路径。偏好模式：0=自动 1=强制 2=关。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置音频直通表原型(播放器 As 播放器原生句柄,
+                                                  表地址 As IntPtr) As 原生播放器结果
+
+    Private ReadOnly 设置音频直通表函数 As 设置音频直通表原型 =
+        解析可选导出(Of 设置音频直通表原型)("FFF3FP_SetAudioPassthroughApi")
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置音频直通模式原型(播放器 As 播放器原生句柄,
+                                                   模式 As UInteger) As 原生播放器结果
+
+    Private ReadOnly 设置音频直通模式函数 As 设置音频直通模式原型 =
+        解析可选导出(Of 设置音频直通模式原型)("FFF3FP_SetAudioPassthroughMode")
+
+    ' 生效=1 表示直通通道拥有音轨；模式回读的是宿主偏好（不是快照里的生效路由）；
+    ' 名称缓冲/编解码/突发计数都可给零——按契约它们是可选输出。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取音频直通状态原型(播放器 As 播放器原生句柄,
+                                                    ByRef 生效 As UInteger,
+                                                    ByRef 模式 As UInteger,
+                                                    ByRef 编解码 As UInteger,
+                                                    名称缓冲 As IntPtr, 名称容量 As UInteger,
+                                                    ByRef 突发数 As ULong) As 原生播放器结果
+
+    Private ReadOnly 读取音频直通状态函数 As 读取音频直通状态原型 =
+        解析可选导出(Of 读取音频直通状态原型)("FFF3FP_GetAudioPassthroughState")
+
+    ''' <summary>当前内核是否同时提供双耳策略的写与读（旧内核返回 False）。</summary>
+    Friend ReadOnly Property 支持双耳策略 As Boolean
+        Get
+            Return 设置音频双耳策略函数 IsNot Nothing AndAlso 读取音频双耳状态函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>当前内核是否同时提供直通表、模式与状态回读（旧内核返回 False）。</summary>
+    Friend ReadOnly Property 支持音频直通 As Boolean
+        Get
+            Return 设置音频直通表函数 IsNot Nothing AndAlso 设置音频直通模式函数 IsNot Nothing AndAlso
+                   读取音频直通状态函数 IsNot Nothing
+        End Get
+    End Property
+
+    Friend Function FFF3FP_SetAudioBinauralPolicy(播放器 As 播放器原生句柄,
+                                                  策略 As UInteger) As 原生播放器结果
+        Dim 函数 = 设置音频双耳策略函数
+        If 函数 Is Nothing Then Return 原生播放器结果.不支持
+        Return 函数(播放器, 策略)
+    End Function
+
     Friend Function FFF3FP_GetAudioBinauralStatus(播放器 As 播放器原生句柄,
                                                   ByRef 策略 As UInteger,
                                                   ByRef 端点形态 As UInteger,
                                                   ByRef 期望双耳 As UInteger,
                                                   ByRef 可用 As UInteger) As 原生播放器结果
+        Dim 函数 = 读取音频双耳状态函数
+        If 函数 Is Nothing Then Return 原生播放器结果.不支持
+        Return 函数(播放器, 策略, 端点形态, 期望双耳, 可用)
     End Function
 
-
-    ' 音频源码直通三导出（附加导出：不抬 API 版本）。表由模块产出、宿主钉住后整张
-    ' 交出，内核在装载点拷贝一份，调用返回即可解钉；IntPtr.Zero 表示撤下插槽、
-    ' 整体回到解码路径。偏好模式：0=自动 1=强制 2=关。
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetAudioPassthroughApi(播放器 As 播放器原生句柄,
                                                   表地址 As IntPtr) As 原生播放器结果
+        Dim 函数 = 设置音频直通表函数
+        If 函数 Is Nothing Then Return 原生播放器结果.不支持
+        Return 函数(播放器, 表地址)
     End Function
 
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_SetAudioPassthroughMode(播放器 As 播放器原生句柄,
                                                    模式 As UInteger) As 原生播放器结果
+        Dim 函数 = 设置音频直通模式函数
+        If 函数 Is Nothing Then Return 原生播放器结果.不支持
+        Return 函数(播放器, 模式)
     End Function
 
-    ' 生效=1 表示直通通道拥有音轨；模式回读的是宿主偏好（不是快照里的生效路由）；
-    ' 名称缓冲/编解码/突发计数都可给零——按契约它们是可选输出。
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetAudioPassthroughState(播放器 As 播放器原生句柄,
                                                     ByRef 生效 As UInteger,
                                                     ByRef 模式 As UInteger,
                                                     ByRef 编解码 As UInteger,
                                                     名称缓冲 As IntPtr, 名称容量 As UInteger,
                                                     ByRef 突发数 As ULong) As 原生播放器结果
+        Dim 函数 = 读取音频直通状态函数
+        If 函数 Is Nothing Then Return 原生播放器结果.不支持
+        Return 函数(播放器, 生效, 模式, 编解码, 名称缓冲, 名称容量, 突发数)
     End Function
 
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
