@@ -2879,6 +2879,12 @@ FFFResult PlayerSession::EnableAudioTap(const FFF3FPAudioTapConfig* const config
         std::shared_ptr<AsrAudioTap> installed;
         { std::lock_guard lock(asrTapMutex_); installed = asrTap_; }
         if (installed != nullptr) installed->NoteGeneration(snapshot_.timelineGeneration);
+        // Publish the worker-side view before the move: the passthrough shadow
+        // decode reads this pointer from HandlePassthroughPacket on this same
+        // thread, and asrTap_ keeps the object alive after the renderer takes it.
+        asrTapWorkerRaw_ = installed.get();
+        asrShadowErrors_ = 0;
+        asrShadowDisabled_ = false;
         if (audioRenderer_ != nullptr) audioRenderer_->SetAsrTap(std::move(installed));
     });
     return FFFResult::Success;
@@ -2893,8 +2899,68 @@ void PlayerSession::DisableAudioTap() noexcept {
     // the earliest safe point. A host ReadAudioTap call in flight holds its own
     // copy and finishes safely either way.
     Enqueue([this, tap] {
+        asrTapWorkerRaw_ = nullptr;
+        asrShadowErrors_ = 0;
+        asrShadowDisabled_ = false;
         if (audioRenderer_ != nullptr) audioRenderer_->SetAsrTap(nullptr);
     });
+}
+
+void PlayerSession::FeedAsrShadow(const std::uint8_t* const data, const std::size_t size,
+    const std::int64_t position100ns) noexcept {
+    // Passthrough is the one route with no decoded PCM in the session: the tap's
+    // only producer lives in the PCM renderer (PlayerWasapiRenderer::Enqueue).
+    // While a tap is installed and the bitstream lane is engaged, run the SAME
+    // parsed access unit through the playback decoder and hand the frames to the
+    // tap only -- they must never reach the bitstream renderer, which owns the
+    // endpoint for the whole track.
+    if (asrTapWorkerRaw_ == nullptr || asrShadowDisabled_) return;
+    if (audioDecoder_ == nullptr || data == nullptr || size == 0) return;
+    if (size > 0x7fffffffu) return;   // AVPacket::size is int
+    AVPacket packet{};
+    packet.data = const_cast<std::uint8_t*>(data);
+    packet.size = static_cast<int>(size);
+    // The decoder wants the stream time base (the normal decode path feeds it
+    // that way). position100ns is exactly what the parser produced, converted
+    // back, so a later fallback drain sees continuous timestamps.
+    auto packetPts = AV_NOPTS_VALUE;
+    if (position100ns != AV_NOPTS_VALUE && format_ != nullptr && audioStream_ >= 0 &&
+        audioStream_ < static_cast<std::int32_t>(format_->nb_streams)) {
+        packetPts = av_rescale_q(position100ns,
+            AVRational{1, static_cast<int>(TicksPerSecond)},
+            format_->streams[audioStream_]->time_base);
+    }
+    packet.pts = packetPts;
+    packet.dts = packetPts;
+    // avcodec_send_packet copies a packet without AVBufferRef, so the parser /
+    // demuxer buffer can be reused by the caller as soon as this returns.
+    const auto sent = avcodec_send_packet(audioDecoder_, &packet);
+    if (sent < 0 && sent != AVERROR(EAGAIN)) {
+        // A resume opens TrueHD/DTS-HD before the first major sync; every AU
+        // errors until sync arrives. The threshold is wide on purpose, and any
+        // decoded frame resets it.
+        if (++asrShadowErrors_ > 200) asrShadowDisabled_ = true;
+        return;
+    }
+    if (audioDecodeFrame_ == nullptr) {
+        audioDecodeFrame_ = av_frame_alloc();
+        if (audioDecodeFrame_ == nullptr) {
+            asrShadowDisabled_ = true;
+            return;
+        }
+    }
+    while (true) {
+        const auto received = avcodec_receive_frame(audioDecoder_, audioDecodeFrame_);
+        if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) break;
+        if (received < 0) {
+            if (++asrShadowErrors_ > 200) asrShadowDisabled_ = true;
+            break;
+        }
+        asrShadowErrors_ = 0;
+        // Same call the PCM route makes: raw decoded bed, before any bed route /
+        // fold-down / resample, with the session-computed media position.
+        asrTapWorkerRaw_->Produce(audioDecodeFrame_, position100ns);
+    }
 }
 
 FFFResult PlayerSession::ReadAudioTap(void* const dst, const std::uint32_t capacity,
@@ -4421,9 +4487,9 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         } else {
             // Passthrough arm: guards live in the lane (module
             // table installed, mode != OFF, codec accepted). The FFmpeg decoder
-            // STAYS open until the lane actually engages on the first complete
-            // frame -- a decline then costs nothing, and engagement releases this
-            // decoder (release-then-own, the DoSelectStream IAMF ordering).
+            // STAYS open for the whole track: it is the ASR shadow decode source
+            // when a tap is installed, and keeping it warm makes
+            // FallBackFromPassthrough seamless. With no tap it is simply idle.
             ArmPassthroughForTrack(format_->streams[audioStream_]);
         }
     }
@@ -6127,8 +6193,10 @@ bool PlayerSession::HandlePassthroughPacket(const AVPacket* packet) noexcept {
     }
 
     if (ptLane_.Armed()) {
-        // First complete frame: describe + endpoint decision. Engaging frees the
-        // FFmpeg decoder (release-then-own, as in DoOpen's IAMF branch); a
+        // First complete frame: describe + endpoint decision. The FFmpeg decoder
+        // STAYS open: it is the ASR shadow source when a tap is installed, and
+        // keeping it warm makes a fallback seamless (a decoder opened from
+        // scratch mid-stream would wait for the codec's next sync point). A
         // decline falls back with the decoder still in place.
         if (!EngagePassthrough(frameData, static_cast<std::uint32_t>(frameSize))) return true;
     }
@@ -6143,7 +6211,8 @@ bool PlayerSession::HandlePassthroughPacket(const AVPacket* packet) noexcept {
             ? av_rescale_q(packet->duration, stream->time_base,
                 AVRational{1, static_cast<int>(TicksPerSecond)})
             : av_rescale(frameSize, TicksPerSecond,
-                std::max(1, static_cast<int>(ptLane_.Format().linkSampleRate) * 4 * 8));
+                std::max(1, static_cast<int>(ptLane_.Format().linkSampleRate) * 2 *
+                    static_cast<int>(ptLane_.Format().linkChannels)));
         if (position100ns + frameDuration < seekTarget100ns_) return true;
     }
 
@@ -6168,6 +6237,10 @@ bool PlayerSession::HandlePassthroughPacket(const AVPacket* packet) noexcept {
         (void)audioRenderer_->EnqueueBitstream(ptBurstBuffer_.data(), burstSize,
             burstPts, burstDuration);
     }
+    // AI subtitles on the bitstream route: decode this same AU for the tap only.
+    // Deliberately after EnqueueBitstream so the renderer's lead never waits on
+    // decoding work; the burst bank (>= 61440 bytes) absorbs a single frame.
+    FeedAsrShadow(frameData, static_cast<std::size_t>(frameSize), position100ns);
     return true;
 }
 
@@ -8219,6 +8292,13 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     ResetBitRateTracking();
     if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);
     if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
+    // The shadow decode shares this decoder: after a flush it must resync to the
+    // new timeline before counting errors again (TrueHD waits for a major sync).
+    asrShadowErrors_ = 0;
+    // A seek can land on a major sync even when the previous position never had
+    // one; allow the shadow to try again instead of staying disabled for the
+    // rest of the track. If there is still no sync, the 200-AU threshold re-arms.
+    asrShadowDisabled_ = false;
     internalAudioDecodeErrorCount_ = 0;
     seekTarget100ns_ = position; seekTargetFrame_ = targetFrame;
     keyframeSeekPending_ = !exact && videoStream_ >= 0; draining_ = false;
@@ -8845,6 +8925,10 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     if (externalAudioDecoder_) avcodec_free_context(&externalAudioDecoder_); CloseFormat(&externalFormat_, externalFormatIo_);
     CloseAuxiliaryLayer();
     if (videoDecoder_) avcodec_free_context(&videoDecoder_);
+    // Drop the worker-side tap view before the decoder/frame it feeds: the
+    // shared_ptr in asrTap_ may outlive this close (a host read can still hold
+    // its own reference), but nothing may Produce into it from here on.
+    asrTapWorkerRaw_ = nullptr;
     if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     ReleaseIamfDecoder();
     // The track (and its passthrough ownership) ends with the media. The

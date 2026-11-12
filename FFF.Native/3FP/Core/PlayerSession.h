@@ -159,6 +159,12 @@ public:
     // read-back never touches the renderer either.
     FFFResult EnableAudioTap(const FFF3FPAudioTapConfig* config) noexcept;
     void DisableAudioTap() noexcept;
+    // Passthrough keeps the FFmpeg audio decoder open but never feeds it. When a
+    // tap is installed, this pushes each parsed access unit through that same
+    // decoder and hands the PCM to the tap only, so AI subtitles work on the
+    // bitstream route. Worker thread only (HandlePassthroughPacket).
+    void FeedAsrShadow(const std::uint8_t* data, std::size_t size,
+        std::int64_t position100ns) noexcept;
     FFFResult ReadAudioTap(void* dst, std::uint32_t capacity,
         FFF3FPAudioTapBlock* block) const noexcept;
     FFFResult GetAudioTapStats(FFF3FPAudioTapStats* stats) const noexcept;
@@ -768,6 +774,17 @@ private:
     // audio path never takes it.
     mutable std::mutex asrTapMutex_;
     std::shared_ptr<AsrAudioTap> asrTap_;
+    // Worker-side view of asrTap_ for the passthrough shadow decode. A bare
+    // pointer, not a shared_ptr: the audio hot path must not take asrTapMutex_,
+    // and the worker owns every write (install/uninstall commands) while
+    // asrTap_ keeps the object alive. Cleared on DisableAudioTap and on close.
+    AsrAudioTap* asrTapWorkerRaw_ = nullptr;
+    // Shadow-decode failure policy: TrueHD/DTS-HD opened mid-stream error on
+    // every AU until the next major sync, so the threshold is deliberately wide.
+    // Any decoded frame resets the count; only a persistent failure disables the
+    // shadow for this tap generation (playback is never affected).
+    std::uint32_t asrShadowErrors_ = 0;
+    bool asrShadowDisabled_ = false;
     AVFilterGraph* tempoGraph_ = nullptr;
     AVFilterContext* tempoInput_ = nullptr;
     AVFilterContext* tempoOutput_ = nullptr;
