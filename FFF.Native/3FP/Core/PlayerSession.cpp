@@ -2645,8 +2645,11 @@ void PlayerSession::GetAudioBinauralStatus(std::uint32_t& policy,
     policy = binauralPolicy_.load(std::memory_order_acquire);
     formFactor = audioRuntimeState_.endpointFormFactor.load(std::memory_order_relaxed);
     // One rule, shared with the renderer's per-frame decision: the two must agree or
-    // the badge would describe a route the audio thread is not taking.
-    wanted = PlayerWasapiRenderer::BinauralWantedFor(policy, formFactor) ? 1u : 0u;
+    // the badge would describe a route the audio thread is not taking. Since the
+    // 2026-11-12 product decision the automatic policy keys on the endpoint's mix
+    // channel count (2 => binaural default), not the form factor.
+    wanted = PlayerWasapiRenderer::BinauralWantedFor(policy,
+        audioRuntimeState_.endpointChannels.load(std::memory_order_relaxed)) ? 1u : 0u;
     // Whether the seam can act at all right now: a plug is installed and the device
     // is a stereo endpoint. Both come from published state, never from the renderer.
     available = (audioRuntimeState_.plugInstalled.load(std::memory_order_relaxed) != 0u &&

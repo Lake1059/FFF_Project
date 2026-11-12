@@ -443,7 +443,7 @@ std::uint32_t PlayerWasapiRenderer::EndpointFormFactor() const noexcept {
 
 bool PlayerWasapiRenderer::BinauralWanted() const noexcept {
     return BinauralWantedFor(binauralPolicy_.load(std::memory_order_relaxed),
-        endpointFormFactor_.load(std::memory_order_relaxed));
+        outputChannels_);
 }
 
 void PlayerWasapiRenderer::SetAudioRenderPlug(const FFF3FPAudioRenderPlug* const plug) noexcept {
@@ -489,12 +489,11 @@ PlayerWasapiRenderer::BedRoute PlayerWasapiRenderer::SelectBedRoute(const AVFram
     // The seam renders a stereo pair, so it owns the bed only against a 2-channel
     // endpoint. A multichannel device keeps today's route, unchanged.
     if (outputChannels_ != 2) return BedRoute::Native;
-    // Who the endpoint is addressed to decides next, and it decides before the bed
-    // is even described: binaural placement is an earphone construct. On stereo
-    // speakers a 5.1 bed belongs in the matrix fold-down -- which is exactly what
-    // happened for every bed before this seam existed, and what the automatic
-    // policy restores. The forced policies still let a user override it, because
-    // Windows reports most USB DACs as DigitalAudioDisplayDevice, not Headphones.
+    // Product default (2026-11-12): a 2-channel endpoint defaults to binaural and
+    // a multichannel endpoint falls back to the matrix fold-down -- regardless of
+    // the EndpointFormFactor Windows reports, which calls most USB DACs "digital
+    // audio devices" even though their mix format is stereo. The forced policies
+    // still override the default in both directions.
     if (!BinauralWanted()) return BedRoute::Native;
     const auto channels = frame->ch_layout.nb_channels;
     if (channels <= 0) return BedRoute::Native;
@@ -1150,6 +1149,7 @@ void PlayerWasapiRenderer::PublishRuntimeDiagnostics() noexcept {
 }
 
 void PlayerWasapiRenderer::RenderThread() noexcept {
+    FFFThreadNaming::SetCurrentThreadName("FFF.Player.WasapiRender");
     const ComInitialization com;
     const auto comResult = com.Result();
     ComPtr<IMMDeviceEnumerator> enumerator;

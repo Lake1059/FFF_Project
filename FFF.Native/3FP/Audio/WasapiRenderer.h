@@ -108,9 +108,10 @@ struct PlayerAudioRuntimeState final {
     // FFF3FP_GetAudioBinauralStatus must never dereference the renderer, which a
     // device switch may replace at any moment. `endpointFormFactor` is the raw
     // EndpointFormFactor Windows reports for the endpoint the renderer actually
-    // opened (0 = the property store did not answer, which the auto policy reads
-    // as "not a headphone"). `endpointChannels` is the device mix format's channel
-    // count, written once per renderer instance as soon as the device opens.
+    // opened; it is informational now (the automatic policy keys on the channel
+    // count, not the shape -- product decision 2026-11-12). `endpointChannels` is
+    // the device mix format's channel count, written once per renderer instance
+    // as soon as the device opens, and IS the automatic policy's input.
     // Neither is part of a FFF3FPSnapshot: the seam added no snapshot member and
     // this one deliberately adds none either.
     std::atomic<std::uint32_t> endpointFormFactor{0};
@@ -118,14 +119,20 @@ struct PlayerAudioRuntimeState final {
     std::atomic<std::uint32_t> plugInstalled{0};
 };
 
-// EndpointFormFactor values that mean "worn on the head" (mmdeviceapi.h
-// EndpointFormFactor): 3 = Headphones, 5 = Headset. Everything else -- Speakers,
-// LineLevel, DigitalAudioDisplayDevice (HDMI/DP and most USB DACs), SPDIF -- is a
-// room-filling or unbounded target where binaural placement is wrong. This is the
-// one predicate both the renderer's route decision and the session's read-back
-// use, so they cannot disagree about what counts as a headphone.
-inline bool IsHeadphoneEndpointFormFactor(const std::uint32_t formFactor) noexcept {
-    return formFactor == 3u || formFactor == 5u;
+// Bed-route rule (product decision 2026-11-12, supersedes the old "headphone
+// form factor 3/5" rule): the automatic policy defaults binaural ON for any
+// 2-channel endpoint and falls back to the matrix fold-down for multichannel
+// endpoints. Windows classifies most USB DACs as DigitalAudioDisplayDevice (9)
+// even though their mix format is stereo, which under the old rule silently
+// disabled the default the product wants; the channel count is the ground truth
+// the renderer actually opens with. Forced policies still override: 1 forces
+// binaural, 2 forces fold-down. This is the one predicate both the renderer's
+// per-frame route decision and the session's read-back use, so they cannot
+// disagree about what counts as binaural output.
+inline bool BinauralWantedFor(std::uint32_t policy, std::uint32_t endpointChannels) noexcept {
+    if (policy == 1u) return true;   // force binaural
+    if (policy == 2u) return false;  // force stereo
+    return endpointChannels == 2u;   // automatic: stereo endpoint => binaural default
 }
 
 class PlayerWasapiRenderer final {
@@ -144,7 +151,8 @@ public:
     void Reset(std::int64_t position100ns) noexcept;
     void SetVolume(float volume, bool muted) noexcept;
     void SetMonoAudio(bool enabled) noexcept;
-    // 0 = automatic (endpoint shape decides), 1 = force binaural, 2 = force stereo.
+    // 0 = automatic (2-channel endpoint => binaural default; multichannel =>
+    // matrix fold-down), 1 = force binaural, 2 = force stereo.
     // Read per bed frame, so a change lands on the next frame boundary without
     // touching the plug, the device or the renderer instance.
     void SetBinauralPolicy(std::uint32_t policy) noexcept;
@@ -152,10 +160,10 @@ public:
     // read-back has to answer with this exact rule rather than a second copy of it,
     // and inline because that is what lets a probe exercise the shipped rule
     // directly (see 3fp/tools/audio_binaural_probe.cpp).
-    static bool BinauralWantedFor(std::uint32_t policy, std::uint32_t formFactor) noexcept {
+    static bool BinauralWantedFor(std::uint32_t policy, std::uint32_t endpointChannels) noexcept {
         if (policy == 1u) return true;   // force binaural
         if (policy == 2u) return false;  // force stereo
-        return IsHeadphoneEndpointFormFactor(formFactor);
+        return endpointChannels == 2u;   // automatic: stereo endpoint => binaural default
     }
     // Raw EndpointFormFactor read when this instance opened its device.
     std::uint32_t EndpointFormFactor() const noexcept;

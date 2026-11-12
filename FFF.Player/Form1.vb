@@ -2,6 +2,7 @@ Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Text
 Imports System.Threading
+Imports System.Threading.Tasks
 
 Public Class Form1
     Private 光盘控制器 As 播放器光盘控制器
@@ -228,7 +229,6 @@ Public Class Form1
         剪辑区间控制器 = New 播放器剪辑区间控制器(播放控制器, 画面控件,
             MB_剪辑区间模式, MP_剪辑区间操作容器, P_剪辑区间进度条容器,
             P_剪辑区间按钮容器, MB_传给3FUI)
-        更新WASAPI按钮()
         流选择器 = New 播放器流选择器(Me, MP_DX视频容器, MCM_流选择器, 播放控制器)
         流选择器.应用全局字体(设置.实例对象.字体)
         界面呈现器 = 创建界面呈现器()
@@ -609,6 +609,9 @@ Public Class Form1
             BeginInvoke(Sub() 创建图层呈现器())
         End If
 
+        ' 启动优先级降回（P0-1：只在显式 opt-in FFF_STARTUP_PRIORITY=1 时存在）：默认路径
+        ' 不拉高，启动优先级已拉高 恒为 False，本线程根本不起（判断在 ApplicationEvents.vb）。
+        ' 守卫仍用字段而非常量，保留 start /high 等外部启动的原始 class 恢复语义；逻辑不动。
         If My.MyApplication.启动优先级已拉高 Then
             Dim 降回线程 As New Thread(Sub()
                 Try
@@ -994,8 +997,11 @@ Public Class Form1
     Private Sub 播放控制器_状态已变化(sender As Object, e As EventArgs)
         If Not 正在关闭 Then
             显示器唤醒?.更新(播放控制器.安全读取快照())
+            ' 设备热切换/WASAPI 模式变化/回退都会走到这里：重探一次媒体信息，
+            ' 让输出徽章的传统态布局跟着真实端点走（媒体信息里的输出声道数
+            ' 是内核按当前 renderer 的 mix 格式回的）。
+            界面呈现器.更新音频流信息(播放控制器.安全读取媒体信息())
             界面呈现器.刷新()
-            更新WASAPI按钮()
         End If
     End Sub
 
@@ -1051,16 +1057,93 @@ Public Class Form1
         播放控制器?.同步双耳策略()
     End Sub
 
-    ''' <summary>双耳徽章：点一下换一种听法。可用性由内核回读决定——模块缺席、
-    ''' 未解锁或端点是多声道时控件本就不出现，这里再判一次防误触。</summary>
-    Private Sub MB_双耳模式_Click(sender As Object, e As EventArgs) Handles MB_双耳模式.Click
-        If 正在关闭 OrElse Not 播放控制器.是否有媒体 Then Return
+    ''' <summary>用户拒绝直通后不立刻再问：这一次按跳过直通，下一次回到拒绝前的
+    ''' 状态，第三次才重新弹。用户口径（2026-11-12）。</summary>
+    Private 直通跳过一次 As Boolean
+    ''' <summary>直通切换要等渲染器重建/回读，期间忽略连点，免得连弹窗。</summary>
+    Private 正在切换音频输出 As Boolean
+
+    ''' <summary>音频输出徽章：一个按钮循环"传统多声道 → HRTF → 源码直通"。
+    ''' 徽章文本与点击位置都以**真实输出**为准（直通接管/双耳床被外部渲染器拥有），
+    ''' 路由意图只作为"已请求但尚未生效"的过渡位。直通要独占模式，进之前弹一次
+    ''' 确认；拒绝后按跳过规则走。退出直通同时回共享模式。</summary>
+    Private Async Sub MB_双耳模式_Click(sender As Object, e As EventArgs) Handles MB_双耳模式.Click
+        If 正在关闭 OrElse 正在切换音频输出 OrElse Not 播放控制器.是否有媒体 Then Return
+        Dim 快照 = 播放控制器.安全读取快照()
+        If 快照 Is Nothing Then Return
         Dim 状态 = 播放控制器.读取双耳状态()
-        If Not 状态.可用 Then Return
-        If Not 播放控制器.切换双耳模式() Then Return
-        Dim 新状态 = 播放控制器.读取双耳状态()
-        信息图层呈现器?.显示操作信息(If(新状态.期望双耳,
-            "双耳：HRTF 空间音频", "双耳：立体声"), &HFF55E7EAUI)
+
+        ' 直通中：点一下退出直通，回到传统多声道/立体声。
+        If 快照.音频直通已接管 Then
+            播放控制器.设置音频直通偏好(音频直通模式.关)
+            If 播放控制器.WASAPI模式 = WASAPI共享模式.独占 Then 播放控制器.切换WASAPI模式()
+            应用传统音频输出(状态)
+            显示音频输出提示("音频输出：已退出源码直通", &HFFFFA85AUI)
+            Return
+        End If
+
+        ' HRTF 真在渲染（或已请求且这条轨有床可渲染）：下一站是直通。
+        Dim 有床可双耳 = 界面呈现器.当前音频声道数 > 2
+        If 快照.音频双耳渲染生效 OrElse
+            (有床可双耳 AndAlso 播放控制器.折算双耳策略(状态) = 双耳策略.强制双耳) Then
+            Await 尝试进入源码直通Async()
+            Return
+        End If
+
+        ' 传统：双耳可用且这条轨有床（>2 声道）才进 HRTF，否则 HRTF 对这条轨
+        ' 永远不生效（2.0 没有床），直接尝试直通，不让用户点了个寂寞。
+        If 状态.可用 AndAlso 有床可双耳 Then
+            播放控制器.设置双耳策略(双耳策略.强制双耳)
+            显示音频输出提示("双耳：HRTF 空间音频", &HFF55E7EAUI)
+            Return
+        End If
+        Await 尝试进入源码直通Async()
+    End Sub
+
+    ''' <summary>传统输出：双声道端点压成强制立体声，多声道端点交回自动（跟随端点布局）。</summary>
+    Private Sub 应用传统音频输出(状态 As 双耳状态)
+        If 状态.可用 Then
+            播放控制器.设置双耳策略(双耳策略.强制立体声)
+        Else
+            播放控制器.设置双耳策略(双耳策略.自动)
+        End If
+    End Sub
+
+    Private Async Function 尝试进入源码直通Async() As Task
+        If 直通跳过一次 Then
+            直通跳过一次 = False
+            应用传统音频输出(播放控制器.读取双耳状态())
+            显示音频输出提示("音频输出：已跳过源码直通", &HFFFFA85AUI)
+            Return
+        End If
+        If Not 确认切换到WASAPI独占模式() Then
+            直通跳过一次 = True
+            Return
+        End If
+        If 正在关闭 OrElse Not 播放控制器.是否有媒体 Then Return
+        正在切换音频输出 = True
+        Try
+            If 播放控制器.WASAPI模式 = WASAPI共享模式.共享 Then 播放控制器.切换WASAPI模式()
+            播放控制器.设置音频直通偏好(音频直通模式.自动)
+            显示音频输出提示("正在进入源码直通…", &HFFFFA85AUI)
+            ' 渲染器重建后内核会在下一个音频包重试接管；给一个短窗口回读，
+            ' 没接管就把偏好和独占退回，避免徽章停在"直通"而实际还在解码。
+            Await Task.Delay(1500)
+            Dim 新快照 = 播放控制器.安全读取快照()
+            If 新快照 IsNot Nothing AndAlso 新快照.音频直通已接管 Then
+                显示音频输出提示("源码直通：已接管", &HFFFFA85AUI)
+            Else
+                播放控制器.设置音频直通偏好(音频直通模式.关)
+                If 播放控制器.WASAPI模式 = WASAPI共享模式.独占 Then 播放控制器.切换WASAPI模式()
+                显示音频输出提示("源码直通未生效，已回退解码", &HFFFFA85AUI)
+            End If
+        Finally
+            正在切换音频输出 = False
+        End Try
+    End Function
+
+    Private Sub 显示音频输出提示(文本 As String, 颜色 As UInteger)
+        信息图层呈现器?.显示操作信息(文本, 颜色)
     End Sub
 
     ''' <summary>AI 字幕绘制扩展（PrecisionTimer 线程）：同一帧、同一图层 append
@@ -1199,20 +1282,10 @@ Public Class Form1
         If 画面控件 IsNot Nothing AndAlso 画面控件.CanFocus Then 画面控件.Focus()
     End Sub
 
-    Private Sub MB_当前声道数显示_Click(sender As Object, e As EventArgs) Handles MB_当前声道数显示.Click
-        If 正在关闭 OrElse Not 播放控制器.是否有媒体 Then Return
-        Dim 原模式 = 播放控制器.WASAPI模式
-        If 原模式 = WASAPI共享模式.共享 AndAlso Not 确认切换到WASAPI独占模式() Then Return
-        If 正在关闭 OrElse Not 播放控制器.是否有媒体 OrElse 播放控制器.WASAPI模式 <> 原模式 Then Return
-        播放控制器.切换WASAPI模式()
-        信息图层呈现器?.显示操作信息(If(原模式 = WASAPI共享模式.共享,
-            "正在切换到 WASAPI 独占模式", "正在切换到 WASAPI 共享模式"), &HFFFFA85AUI)
-    End Sub
-
     <CodeAnalysis.SuppressMessage("Performance", "CA1861:不要将常量数组作为参数", Justification:="<挂起>")>
     Private Function 确认切换到WASAPI独占模式() As Boolean
         Dim 内容 = String.Join(vbCrLf, {String.Empty,
-            "是否切换到 WASAPI 独占模式？",
+            "源码直通需要切换到 WASAPI 独占模式。是否继续？",
             String.Empty,
             "独占模式直通设备，能提供理论最佳音质，但也有诸多要求和限制：",
             String.Empty,
@@ -1227,11 +1300,6 @@ Public Class Form1
             "如果您正戴着耳机，请立即取下！",
             MsgBoxStyle.Exclamation, 1) = 0
     End Function
-
-    Private Sub 更新WASAPI按钮()
-        If 播放控制器 Is Nothing Then Return
-        MB_当前声道数显示.ForeColor = If(播放控制器.WASAPI模式 = WASAPI共享模式.独占, Color.IndianRed, Color.Silver)
-    End Sub
 
     Private Sub 播放控制器_外部弹幕已加载(sender As Object, e As 播放器弹幕事件参数)
         If 正在关闭 Then Return

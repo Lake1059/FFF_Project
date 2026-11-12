@@ -10,6 +10,9 @@ Friend NotInheritable Class 播放器界面呈现器
     ' 与信息图层"双耳：HRTF 空间音频"那一行同色，同一件事在状态栏与信息层里
     ' 必须长得一样，否则用户会以为它们是两件事。
     Private Shared ReadOnly 双耳高亮色 As Color = Color.FromArgb(CByte(255), CByte(&H55), CByte(&HE7), CByte(&HEA))
+    ' 直通是另一类输出（码流整轨交给端点），用告警橙与"双耳/多声道"区分开；
+    ' 与切换到独占模式时的操作提示同色，用户一眼能连起来。
+    Private Shared ReadOnly 直通高亮色 As Color = Color.FromArgb(CByte(255), CByte(&HFF), CByte(&HA8), CByte(&H5A))
 
     Private Enum 时间戳精度
         秒
@@ -46,6 +49,8 @@ Friend NotInheritable Class 播放器界面呈现器
     Private 正在拖动进度条 As Boolean
     Private 有媒体快照 As Boolean
     Private 当前媒体信息 As 媒体信息
+    ' 音频输出徽章的文本要写"输出侧"，需要当前音频流的输出采样格式（WASAPI mix）。
+        Private 当前音频流信息 As 媒体流信息
     Private 已显示视频流索引 As Integer = -1
     Private 已显示音频流索引 As Integer = -1
     Private 已释放 As Boolean
@@ -114,6 +119,8 @@ Friend NotInheritable Class 播放器界面呈现器
 
         配置控件()
         时间标签.AutoSize = False
+        ' 声道数徽章并入"音频输出"徽章（输出侧状态），旧控件只保留字段不显示。
+        设置配对可见(声道数按钮, 声道数占位, False)
         AddHandler 进度条.MouseDown, AddressOf 进度条_MouseDown
         AddHandler 进度条.MouseUp, AddressOf 进度条_MouseUp
         AddHandler 进度条.ValueChanged, AddressOf 进度条_ValueChanged
@@ -128,7 +135,7 @@ Friend NotInheritable Class 播放器界面呈现器
         更新播放按钮(播放状态.空闲)
         更新解码按钮()
         ' 初始就要藏起来：否则状态栏上会先闪一个还没接上会话的 "HRTF"。
-        刷新双耳按钮()
+        刷新音频输出按钮()
         设置时间戳文本(TimeSpan.Zero, TimeSpan.Zero)
     End Sub
 
@@ -154,9 +161,9 @@ Friend NotInheritable Class 播放器界面呈现器
     Friend Sub 刷新()
         If 已释放 Then Return
         更新解码按钮()
-        ' 双耳徽章挂在会话上而不是快照上：设备一换、插槽一装，它就该变，不必等
-        ' 下一帧解码。会话缺席时提供器给"不可用"，徽章自己隐藏。
-        刷新双耳按钮()
+        ' 音频输出徽章挂在会话/快照上而不是媒体信息上：设备一换、直通一接管，
+        ' 它就该变，不必等下一帧解码。会话缺席时提供器给"不可用"，徽章自己隐藏。
+        刷新音频输出按钮()
         Dim 快照 = 快照提供器()
         If 快照 Is Nothing Then
             If 有媒体快照 Then 清除媒体()
@@ -228,12 +235,11 @@ Friend NotInheritable Class 播放器界面呈现器
         Try
             设置配对可见(视频编码按钮, 视频编码占位, 视频流 IsNot Nothing)
             设置配对可见(音频编码按钮, 音频编码占位, 音频流 IsNot Nothing)
-            设置配对可见(声道数按钮, 声道数占位, 音频流 IsNot Nothing AndAlso 音频流.声道数 > 0)
+            当前音频流信息 = 音频流
 
             If 视频流 IsNot Nothing Then 设置自适应文本(视频编码按钮, 格式化视频编码(视频流.编码))
             If 音频流 IsNot Nothing Then
                 设置自适应文本(音频编码按钮, 音频流.编码.ToUpperInvariant())
-                设置自适应文本(声道数按钮, 格式化声道数(音频流.声道数))
             End If
         Finally
             状态栏.ResumeLayout(True)
@@ -449,16 +455,111 @@ Friend NotInheritable Class 播放器界面呈现器
         设置自适应文本(解码按钮, If(解码器提供器() = 解码模式.GPU, "GPU", "CPU"))
     End Sub
 
-    ''' <summary>双耳徽章：可用才出现（模块已授权且端点是 2 声道），文本写"现在
-    ''' 听到的是什么"。同一行里唯一的操作是"点一下换一种"，所以文本必须是结果
-    ''' 而不是意愿——用户点完立刻能看到它反过来。</summary>
-    Private Sub 刷新双耳按钮()
+    ''' <summary>音频输出徽章：把原来并排的"双耳"与"声道数"合成一个输出侧状态。
+    ''' 只写**真实情况**：直通/IAMF/HRTF 三个状态都以内核回读的"实际接管"为准
+    ''' （音频直通已接管 / IAMF已接管 / 音频双耳渲染生效——床真的被外部渲染器拥有），
+    ''' 不用"策略×形态"的路由意图；传统态布局用内核回报的输出声道数（WASAPI mix），
+    ''' 设备热切换后由 Form1 经 更新音频流信息 重探。点击循环由 Form1 负责。</summary>
+    Private Sub 刷新音频输出按钮()
         Dim 状态 = 双耳状态提供器()
-        设置配对可见(双耳按钮, 双耳占位, 状态.可用)
-        If Not 状态.可用 Then Return
-        设置自适应文本(双耳按钮, If(状态.期望双耳, "HRTF", "立体声"))
-        双耳按钮.ForeColor = If(状态.期望双耳, 双耳高亮色, Color.Silver)
+        Dim 快照 = 快照提供器()
+        Dim 直通中 = 快照 IsNot Nothing AndAlso 快照.音频直通已接管
+        Dim 双耳生效 = 快照 IsNot Nothing AndAlso 快照.音频双耳渲染生效
+        Dim 可见 = 直通中 OrElse 双耳生效 OrElse 状态.可用 OrElse 当前音频流信息 IsNot Nothing
+        设置配对可见(双耳按钮, 双耳占位, 可见)
+        If Not 可见 Then Return
+
+        Dim 文本 As String
+        Dim 颜色 As Color
+        If 直通中 Then
+            文本 = "直通"
+            颜色 = 直通高亮色
+        ElseIf 快照 IsNot Nothing AndAlso 快照.IAMF已接管 Then
+            ' IAMF 由外部渲染器接管声场，布局就是它渲染的目标（7.1.4 等）。
+            文本 = 格式化IAMF布局(快照)
+            颜色 = Color.Silver
+        ElseIf 双耳生效 Then
+            文本 = "HRTF"
+            颜色 = 双耳高亮色
+        Else
+            文本 = 格式化输出布局(当前音频流信息)
+            颜色 = Color.Silver
+        End If
+        设置自适应文本(双耳按钮, 文本)
+        If 双耳按钮.ForeColor <> 颜色 Then 双耳按钮.ForeColor = 颜色
+
+        Dim 提示 = 输出徽章提示(文本, 状态, 快照, 直通中, 双耳生效)
+        If Not String.Equals(双耳按钮.ToolTipText, 提示, StringComparison.Ordinal) Then
+            双耳按钮.ToolTipText = 提示
+        End If
     End Sub
+
+    ''' <summary>输出侧布局名：内核回报的输出声道数优先（WASAPI mix），缺席时退回源流。</summary>
+    Private Shared Function 格式化输出布局(流 As 媒体流信息) As String
+        If 流 Is Nothing Then Return "音频"
+        Dim 声道 = If(流.输出声道数 > 0, 流.输出声道数, 流.声道数)
+        Return 格式化声道数(声道)
+    End Function
+
+    Private Shared Function 格式化IAMF布局(快照 As 播放器快照) As String
+        Dim 布局 = 快照.IAMF布局名
+        If Not String.IsNullOrWhiteSpace(布局) Then Return 布局
+        Return 格式化声道数(快照.IAMF声道数)
+    End Function
+
+    Private Function 输出徽章提示(文本 As String, 状态 As 双耳状态, 快照 As 播放器快照,
+                                  直通中 As Boolean, 双耳生效 As Boolean) As String
+        If 直通中 Then Return "输出：源码直通（点击退出直通）"
+        Dim 源 = String.Empty
+        If 当前音频流信息 IsNot Nothing AndAlso 当前音频流信息.声道数 > 0 Then
+            源 = " · 源 " & 格式化声道数(当前音频流信息.声道数)
+        End If
+        If 快照 IsNot Nothing AndAlso 快照.IAMF已接管 Then
+            Return $"输出：IAMF {文本}（点击循环：传统/HRTF/直通）"
+        End If
+        If 双耳生效 Then
+            Return "输出：HRTF 双耳空间音频（点击切换到其它输出）" & 源
+        End If
+        If 状态.可用 AndAlso 状态.期望双耳 AndAlso 当前音频流信息 IsNot Nothing AndAlso
+            当前音频流信息.声道数 = 2 Then
+            ' 双耳路由已就绪（耳机+自动/强制），但 2.0 没有床可交给渲染器——
+            ' 直说"输出就是立体声"，不假绿。
+            Return "输出：立体声（耳机双耳已就绪；当前音轨 2.0，无床可渲染）" & 源
+        End If
+        If Not 状态.可用 Then
+            ' 可用=False 有两个真实原因，tooltip 必须分开说，不能都赖端点：
+            '  a) 多声道端点（HRTF 只对 2 声道端点有意义）；
+            '  b) 床渲染插槽未装——HRTF 的渲染实现由授权模块经函数表提供（本体只有
+            '     接缝+折叠，见 FFF.Player.AudioRenderPlug.h 头注），模块缺席/未解锁
+            '     时本体按设计静默回退折叠。按"缺席静默"纪律，措辞不提模块与授权。
+            If 当前音频流信息 IsNot Nothing AndAlso 当前音频流信息.输出声道数 > 2 Then
+                Return $"输出：{文本}（多声道输出，HRTF 不适用；点击循环 传统/直通）" & 源
+            End If
+            Return $"输出：{文本}（HRTF 渲染器未就绪；点击循环 传统/直通）" & 源
+        End If
+        Return $"输出：{文本}（点击循环：传统/HRTF/直通）" & 源
+    End Function
+
+    ''' <summary>设备热切换/WASAPI 模式变化后的轻量重探：只换音频流的输出采样信息
+    ''' 并立即刷新徽章，不动章节标记与编码徽章（完整更新走 更新媒体信息）。</summary>
+    Friend Sub 更新音频流信息(信息 As 媒体信息)
+        If 已释放 Then Return
+        Dim 快照 = 快照提供器()
+        If 信息 Is Nothing Then
+            当前音频流信息 = Nothing
+        Else
+            当前音频流信息 = 信息.流.FirstOrDefault(Function(x) x.类型 = "audio" AndAlso
+                (快照 Is Nothing OrElse x.索引 = 快照.当前音频流))
+        End If
+        刷新音频输出按钮()
+    End Sub
+
+    ''' <summary>点击循环用：当前音轨的源声道数（决定 HRTF 有没有床可渲染）。</summary>
+    Friend ReadOnly Property 当前音频声道数 As Integer
+        Get
+            Return If(当前音频流信息?.声道数, 0)
+        End Get
+    End Property
 
     Private Sub 刷新HDR按钮(快照 As 播放器快照)
         Dim 可见 = 快照 IsNot Nothing AndAlso 快照.是HDR源
@@ -478,7 +579,7 @@ Friend NotInheritable Class 播放器界面呈现器
     End Sub
 
     Private Sub 更新全部自适应宽度()
-        For Each 按钮 In {解码按钮, HDR按钮, 视频编码按钮, 音频编码按钮, 声道数按钮, 双耳按钮}
+        For Each 按钮 In {解码按钮, HDR按钮, 视频编码按钮, 音频编码按钮, 双耳按钮}
             更新自适应宽度(按钮)
         Next
         更新时间戳自适应宽度(创建时间戳测量文本(时间标签.Text), True)
@@ -523,10 +624,12 @@ Friend NotInheritable Class 播放器界面呈现器
 
     Private Shared Function 格式化声道数(声道数 As Integer) As String
         Select Case 声道数
-            Case 1 : Return "1.0"
-            Case 2 : Return "2.0"
+            Case 1 : Return "单声道"
+            Case 2 : Return "立体声"
             Case 6 : Return "5.1"
             Case 8 : Return "7.1"
+            Case 10 : Return "5.1.4"
+            Case 12 : Return "7.1.4"
             Case Else : Return $"{声道数}ch"
         End Select
     End Function

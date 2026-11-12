@@ -1198,13 +1198,40 @@ Public NotInheritable Class 播放器控制器
         Return True
     End Function
 
-    ''' <summary>设置页 → 音频直通三态的接线（Form设置_设备与性能 → Form1 → 本方法 →
-    ''' 会话.设置音频直通模式）。会话侧负责表的钉入/撤下与内核偏好；这里补一条人话：
-    ''' 直通要整轨接管并抢 WASAPI 独占，独占未开且偏好≠关时提前说明，免得用户以
-    ''' 为"开了没效果"。</summary>
+    ''' <summary>按明确策略设置双耳（音频输出徽章三态用）：自动 / 强制双耳 / 强制立体声。
+    ''' 与 切换双耳模式 同一条持久化路径：形态记当前端点，端点一变就折算回自动。</summary>
+    Friend Sub 设置双耳策略(策略 As 双耳策略)
+        If 已释放 OrElse 会话 Is Nothing Then Return
+        Dim 状态 = 读取双耳状态()
+        If Not 状态.可用 Then Return
+        Dim 配置 = 设置.实例对象
+        配置.双耳策略选项 = CInt(策略)
+        配置.双耳策略形态 = If(策略 = 双耳策略.自动, 0, CInt(状态.端点形态))
+        同步双耳策略()
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
+    End Sub
+
+    ''' <summary>音频输出徽章的直通态：写三态偏好并立即下发。独占模式由调用方先切好，
+    ''' 内核是否真的接管由快照回读决定（模块/端点不支持时会留在解码路径）。</summary>
+    Friend Sub 设置音频直通偏好(模式 As 音频直通模式)
+        If 已释放 Then Return
+        设置.实例对象.音频直通选项 = CInt(模式)
+        应用音频直通设置()
+    End Sub
+
+    ''' <summary>设置页 / 音频输出徽章 → 音频直通三态的接线（Form设置_设备与性能 / Form1 →
+    ''' 本方法 → 会话.设置音频直通模式）。会话侧负责表的钉入/撤下与内核偏好；这里补一条
+    ''' 人话：直通要整轨接管并抢 WASAPI 独占，独占未开且偏好≠关时提前说明，免得用户以
+    ''' 为"开了没效果"。内核对"同值重设"回 InvalidArgument（SetMode 只在变化时报真），
+    ''' 所以先读内核现值，相同就不发——设置页与徽章两条路都幂等。</summary>
     Friend Sub 应用音频直通设置()
         If 已释放 Then Return
         Dim 模式 = Math.Clamp(设置.实例对象.音频直通选项, 0, 2)
+        Try
+            If 会话 IsNot Nothing AndAlso 会话.读取音频直通状态().模式 = CUInt(模式) Then Return
+        Catch
+            ' 回读失败就照旧下发，让内核当裁判。
+        End Try
         Try
             会话?.设置音频直通模式(CUInt(模式))
         Catch ex As 播放器异常
