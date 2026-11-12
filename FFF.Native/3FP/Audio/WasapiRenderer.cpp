@@ -1067,9 +1067,10 @@ std::int64_t PlayerWasapiRenderer::Buffered100ns() const noexcept {
     std::lock_guard lock(mutex_);
     if (outputSampleRate_ == 0 || outputBlockAlign_ == 0) return 0;
     // Bitstream route: the queued bytes are packed bursts consumed by the
-    // endpoint at the LINK rate (s16 words, so 4 bytes per frame per channel
-    // pair -- nBlockAlign covers it). Same lead/buffer metric as PCM, only the
-    // byte rate differs; no swr delay exists on this route.
+    // endpoint at the LINK rate (s16 words, so nBlockAlign = 2 bytes per
+    // channel: 4 for the 2ch carrier, 16 for the 8ch HBR carrier). Same
+    // lead/buffer metric as PCM, only the byte rate differs; no swr delay
+    // exists on this route.
     if (bitstreamActive_) {
         const auto queuedFrames = bitstreamQueuedBytes_ / outputBlockAlign_ +
             pendingMediaFrames_.load();
@@ -1246,8 +1247,14 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             exclusiveCandidate.Format.nChannels = static_cast<WORD>(decided.linkChannels);
             exclusiveCandidate.Format.nSamplesPerSec = decided.linkSampleRate;
             exclusiveCandidate.Format.wBitsPerSample = 16;
+            // IEC 61937 carrier: 16-bit words on the wire, so a link frame is
+            // 2 bytes per channel -- 4 bytes for the 2ch carrier, 16 for the
+            // 8ch HBR carrier. Describing 32-bit samples here (4*nChannels)
+            // made every burst meter at twice its real byte cost: the queue
+            // drained at 2x and the endpoint either rejected the format or
+            // underran immediately.
             exclusiveCandidate.Format.nBlockAlign =
-                static_cast<WORD>(4 * exclusiveCandidate.Format.nChannels);
+                static_cast<WORD>(2 * exclusiveCandidate.Format.nChannels);
             exclusiveCandidate.Format.nAvgBytesPerSec =
                 decided.linkSampleRate * exclusiveCandidate.Format.nBlockAlign;
             exclusiveCandidate.Format.cbSize = 22;  // drivers dislike the 34-byte IEC61937 struct
@@ -1385,6 +1392,20 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         deviceBufferDuration100ns_ = outputSampleRate_ > 0
             ? static_cast<std::int64_t>(bufferFrames) * 10'000'000 / outputSampleRate_ : 0;
         initializationResult_ = FFFResult::Success; initializationFinished_ = true;
+    }
+    if (bitstreamActive_) {
+        // One-line endpoint fact so a machine log can tell "driver rejected the
+        // carrier" from "driver accepted it but the queue was metered at 2x".
+        // blockAlign must read 4 (2ch) or 16 (8ch HBR); 8/32 means the P0-1
+        // formula regressed.
+        char text[160]{};
+        wsprintfA(text, "pt-endpoint: bits=%u blockAlign=%u avg=%lu linkRate=%u linkCh=%u\n",
+            static_cast<unsigned>(outputBitsPerSample_),
+            static_cast<unsigned>(outputBlockAlign_),
+            static_cast<unsigned long>(outputSampleRate_) * outputBlockAlign_,
+            static_cast<unsigned>(outputSampleRate_),
+            static_cast<unsigned>(outputChannels_));
+        OutputDebugStringA(text);
     }
     if (runtimeState_ != nullptr) runtimeState_->SetChannels(activeFormat->nChannels);
     initializedCondition_.notify_all();
@@ -1578,9 +1599,10 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             // otherwise Reset could clear the queue between GetBuffer and copy.
             std::lock_guard lock(mutex_);
             // Bitstream route meters from the burst byte queue; decoded-PCM route
-            // from queue_, exactly as before. Both are "queued link frames" in
-            // this section -- the bitstream endpoint runs at the link format, so
-            // outputBlockAlign_/outputSampleRate_ already speak link units.
+            // from queue_, exactly as before. Both count "queued endpoint frames"
+            // here: the bitstream endpoint runs at the link format, and
+            // outputBlockAlign_ speaks link units only because the probeFormat
+            // contract is nBlockAlign = 2*nChannels (s16 carrier words).
             copied = std::min<std::size_t>(static_cast<std::size_t>(wantedFrames) * outputBlockAlign_,
                 bitstreamActive_ ? bitstreamQueuedBytes_ : queuedBytes_);
             renderedFrames = static_cast<UINT32>(copied / outputBlockAlign_);
