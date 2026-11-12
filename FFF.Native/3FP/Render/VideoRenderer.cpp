@@ -98,19 +98,36 @@ bool HdrStepTraceEnabled() noexcept {
 // once the ceiling allows it. This process otherwise runs at the default system timer
 // resolution -- the release cadence measured here had a 15.7 ms median, i.e. the quantisation
 // is coarser than the period it has to wait out -- so no condition_variable::wait_for in this
-// process can keep a high-ceiling schedule. The presenter therefore raises the resolution for
-// as long as it owns the cadence and restores it on the way out.
+// process can keep a high-ceiling schedule. The presenter therefore raises the resolution
+// while it is presenting and releases it as soon as a wake-up has nothing to present.
 //
 // Deliberately scoped to the presenter thread rather than to a call site, because it is
 // process-wide and refcounted: the session's own Sleep(1)/wait_for release loop gets the
-// same correction, which is half the defect. The cost is a higher timer interrupt rate for
-// as long as something is playing.
+// same correction while the request is held. The cost is a higher timer interrupt rate while
+// frames are flowing; a parked presenter (paused / ended / still image) releases it on the
+// first idle poll instead of keeping the process paying it until the thread exits (P2-8).
 struct PresenterTimerResolution {
     bool raised = false;
-    PresenterTimerResolution() noexcept { raised = timeBeginPeriod(1) == 0; }
-    ~PresenterTimerResolution() noexcept { if (raised) timeEndPeriod(1); }
+
+    PresenterTimerResolution() noexcept { Raise(); }
+    ~PresenterTimerResolution() noexcept { Release(); }
     PresenterTimerResolution(const PresenterTimerResolution&) = delete;
     PresenterTimerResolution& operator=(const PresenterTimerResolution&) = delete;
+
+    // Idempotent on purpose: the presenter calls these once per wake-up, so a request that
+    // is already held must not be counted twice -- timeBeginPeriod/timeEndPeriod are
+    // process-wide and refcounted, and an extra timeEndPeriod would drop a 1 ms request
+    // this process still relies on.
+    void Raise() noexcept {
+        if (raised) return;
+        raised = timeBeginPeriod(1) == 0;
+    }
+
+    void Release() noexcept {
+        if (!raised) return;
+        timeEndPeriod(1);
+        raised = false;
+    }
 };
 
 float DetectDisplayRefreshRate(const HWND window) noexcept {
@@ -1715,24 +1732,33 @@ constexpr std::uint32_t DefaultUploadHeightThreshold = 2160;
 // A gate that only moved the Render decision would make Map(WRITE_DISCARD) target
 // a DEFAULT texture and fail, so the two decisions have to keep reading the same
 // answer.
+// 变量解析一次就缓存（同 ResolveUploadCopyModeCached 的写法）：上传路线在进程生命周期
+// 内不应当变，A/B 脚本在启动前设好 env 即可。运行期再改这两个 env 不再生效是刻意的——
+// 两条上传分支必须始终读同一个答案，半途换答案会让为旧路线创建的纹理走到新分支。
 inline bool ForceStagingUploadCached() noexcept {
-    char* buffer = nullptr;
-    std::size_t length = 0;
-    if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_FORCE_STAGING") != 0 || buffer == nullptr)
-        return false;
-    const std::string value(buffer);
-    free(buffer);
-    return value == "1";
+    static const bool enabled = [] {
+        char* buffer = nullptr;
+        std::size_t length = 0;
+        if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_FORCE_STAGING") != 0 || buffer == nullptr)
+            return false;
+        const std::string value(buffer);
+        free(buffer);
+        return value == "1";
+    }();
+    return enabled;
 }
 
 inline bool ForceDynamicUploadCached() noexcept {
-    char* buffer = nullptr;
-    std::size_t length = 0;
-    if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_FORCE_DYNAMIC") != 0 || buffer == nullptr)
-        return false;
-    const std::string value(buffer);
-    free(buffer);
-    return value == "1";
+    static const bool enabled = [] {
+        char* buffer = nullptr;
+        std::size_t length = 0;
+        if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_FORCE_DYNAMIC") != 0 || buffer == nullptr)
+            return false;
+        const std::string value(buffer);
+        free(buffer);
+        return value == "1";
+    }();
+    return enabled;
 }
 
 inline bool UseDefaultUploadForSize(const std::uint32_t width,
@@ -5965,8 +5991,11 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
 }
 
 void PlayerVideoRenderer::TimedTextThread() noexcept {
-    // Held for the whole thread: this is the thread that owns the presentation cadence, and
-    // its waits are what hold the flip rate down to the ceiling.
+    FFFThreadNaming::SetCurrentThreadName("FFF.Player.Present");
+    timedTextThreadId_.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    // Owns the presentation cadence while it is presenting; its waits are what hold the flip
+    // rate down to the ceiling. The 1 ms request is released again on idle polls and on every
+    // exit path (P2-8), so a parked presenter no longer holds it for the whole thread life.
     PresenterTimerResolution timerResolution;
     std::uint64_t observedPresentationGeneration = 0;
     std::uint64_t observedVideoGeneration = 0;
@@ -5990,10 +6019,21 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
                 devicePollOnly = true;
             }
             if (!timedTextThreadRunning_) {
+                // Defensive arm: today running_ only drops after the join in
+                // StopTimedTextThread, so this is not observable here. Release anyway
+                // rather than hold a process-wide 1 ms request for a thread that has
+                // nothing left to present.
+                timerResolution.Release();
                 observedPresentationGeneration = presentationGeneration_;
                 observedVideoGeneration = videoGeneration_.load();
                 continue;
             }
+            // P2-8: the 1 ms request is only worth its interrupt rate while this wake-up
+            // is going to pace or present a flip. Raise it before the cadence wait_until /
+            // PresentTimedText below; a pure device-poll tick releases it. Both calls are
+            // idempotent, so a steady 60 Hz stream does not re-count the request.
+            if (devicePollOnly) timerResolution.Release();
+            else timerResolution.Raise();
             if (!devicePollOnly) {
                 videoChanged = videoGeneration_.load() != observedVideoGeneration;
                 const auto cameraLive = projection360Enabled_.load(std::memory_order_acquire) != 0;
@@ -6070,6 +6110,7 @@ void PlayerVideoRenderer::StopTimedTextThread() noexcept {
     }
     timedTextCondition_.notify_all();
     if (timedTextThread_.joinable()) timedTextThread_.join();
+    timedTextThreadId_.store(0, std::memory_order_relaxed);
     std::lock_guard lock(timedTextMutex_);
     timedTextThreadRunning_ = false;
 }
