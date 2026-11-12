@@ -149,9 +149,12 @@ Public Class 设置
     ' 模型 / llama-server 在哪一律由包自己说清。于是这里只剩一个路径。
     ' 未选包（默认空）就完全不启用：不拉进程、不占显存、不碰播放路径。
     Public Property Ai字幕包目录 As String = ""
-    ' 选到有效包之后，用户仍可在菜单里临时关掉。它只决定"这次要不要起 worker"，
+    ' 选到有效包之后，用户仍可在字幕来源里关掉它。它只决定"这次要不要起 worker"，
     ' 与"装了哪个包"是两件事，所以分开存。
-    Public Property Ai字幕已停用 As Boolean = False
+    ' 默认 True（关）：AI 实时字幕是字幕来源之一，不该在装包后自动抢走普通字幕的
+    ' 位置。键名保持 Ai字幕已停用 不变 —— 存量设置文件里显式写 False 的用户仍按
+    ' 原样恢复，升级不改变他们的既有行为。
+    Public Property Ai字幕已停用 As Boolean = True
     ' 高级项：覆盖清单里的窗口/步长（秒）。0 = 跟随清单；包自身已做钳制，这里只挡脏数据。
     Public Property Ai字幕窗口秒覆盖 As Double = 0
     Public Property Ai字幕步长秒覆盖 As Double = 0

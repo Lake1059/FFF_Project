@@ -665,8 +665,38 @@ Public NotInheritable Class 播放器控制器
         Next
     End Sub
 
-    Public Sub 关闭字幕()
+    ''' <summary>AI 实时字幕控制器（Form1 注入）。字幕来源是一个四选一：
+    ''' 关 / 内嵌 / 外挂 / AI 实时；这里不建它，只负责互斥。</summary>
+    Friend Property AI字幕 As 播放器AI字幕控制器
+
+    ''' <summary>字幕列表是否该摆出「AI 实时字幕」这一项（装了有效包才摆）。</summary>
+    Friend ReadOnly Property 可显示AI字幕 As Boolean
+        Get
+            Return AI字幕 IsNot Nothing AndAlso AI字幕.有可用包
+        End Get
+    End Property
+
+    ''' <summary>AI 字幕此刻是不是当前字幕来源（列表勾选态用它）。</summary>
+    Friend ReadOnly Property AI字幕已启用 As Boolean
+        Get
+            Return AI字幕 IsNot Nothing AndAlso AI字幕.启用
+        End Get
+    End Property
+
+    ''' <summary>把 AI 字幕选为当前字幕来源：普通字幕让位，worker/tap 由控制器起。</summary>
+    Public Sub 选择AI字幕()
         If 已释放 Then Return
+        Dim AI = AI字幕
+        If AI Is Nothing Then Return
+        ' 清普通字幕由控制器的 清除普通字幕 回调统一做（避免这里重复清两次）。
+        AI.作为字幕源启用()
+    End Sub
+
+    ''' <summary>关闭字幕。<paramref name="保留AI字幕"/>=True 只清普通字幕，
+    ''' 供 AI 字幕启用路径内部使用，避免自己把自己关掉。</summary>
+    Public Sub 关闭字幕(Optional 保留AI字幕 As Boolean = False)
+        If 已释放 Then Return
+        If Not 保留AI字幕 Then AI字幕?.作为字幕源停用()
         If 读取光盘状态().已打开 Then 光盘导航(光盘命令.字幕, 0)
         取消字幕加载()
         Dim 待释放内嵌 = Interlocked.Exchange(当前内嵌字幕, Nothing)
@@ -679,6 +709,7 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 选择外部字幕()
         If 已释放 Then Return
+        AI字幕?.作为字幕源停用()
         Dim 外部 = Volatile.Read(已导入外部字幕)
         If 外部 Is Nothing Then Return
         取消字幕加载()
@@ -693,6 +724,7 @@ Public NotInheritable Class 播放器控制器
     ''' <summary>选择外部字幕；字幕容器（MKS）可带轨索引切轨，-1 表示文件本身。</summary>
     Public Sub 选择外部字幕(路径 As String, Optional 指定流索引 As Integer = -1)
         If 已释放 OrElse String.IsNullOrWhiteSpace(路径) Then Return
+        AI字幕?.作为字幕源停用()
         Dim 完整路径 = Path.GetFullPath(路径)
         Dim 已加载 = Volatile.Read(已导入外部字幕)
         If 已加载 IsNot Nothing AndAlso
@@ -710,6 +742,8 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 选择内嵌字幕(流索引 As Integer)
         If 已释放 OrElse 正在切换会话 OrElse 流索引 < 0 Then Return
+        ' 选任何一条普通字幕轨都意味着离开 AI 字幕来源，即使索引与当前相同。
+        AI字幕?.作为字幕源停用()
         Dim 光盘 = 读取光盘状态()
         If 光盘.已打开 Then
             Dim 字幕信息 = 安全读取媒体信息()?.流.Where(Function(x) x.类型 = "subtitle").ToArray()

@@ -390,21 +390,58 @@ Friend NotInheritable Class 播放器AI字幕控制器
     ''' （菜单类只管勾选与文字，不碰进程）。</summary>
     Friend Sub 切换启用()
         If 已释放 Then Return
+        If 启用 Then
+            作为字幕源停用()
+            操作提示("已关闭 AI 实时字幕")
+        Else
+            作为字幕源启用()
+        End If
+    End Sub
+
+    ''' <summary>宿主侧回调：清掉当前的内嵌/外挂字幕，给 AI 字幕让位。
+    ''' 由 Form1 注入（走 播放控制器.关闭字幕(保留AI字幕:=True)）。</summary>
+    Friend Property 清除普通字幕 As Action
+
+    ''' <summary>是否装了一个可用的扩展包。字幕列表用它决定这一项摆不摆。</summary>
+    Friend ReadOnly Property 有可用包 As Boolean
+        Get
+            Return 包 IsNot Nothing AndAlso Not 已释放
+        End Get
+    End Property
+
+    ''' <summary>把 AI 字幕选为当前字幕来源：普通字幕让位 → 置偏好 → 起 worker/tap。
+    ''' 与「关闭 / 内嵌 / 外挂」互斥；重复调用幂等。</summary>
+    Friend Sub 作为字幕源启用()
+        If 已释放 Then Return
         If 包 Is Nothing Then
-            ' 没装包：开关点了也没意义，直接把人送到设置页去选包。
+            ' 没装包：这一项点了也没意义，直接把人送到设置页去选包。
             操作提示("AI 字幕：请先在设置里选择扩展包")
             请求打开设置页()
             Return
         End If
-        停用 = 启用   ' 当前启用 → 拨成停用；当前停用 → 拨回启用
-        保存停用偏好(停用)
-        If 停用 Then
-            停止()
-            操作提示("已关闭 AI 实时字幕")
-        Else
-            操作提示("已启用 AI 实时字幕")
-            尝试启动(Nothing)
-        End If
+        If 启用 Then Return
+        Try
+            清除普通字幕?.Invoke()
+        Catch
+            ' 清普通字幕失败不该挡住 AI 字幕；下一次选择字幕时会再收敛。
+        End Try
+        停用 = False
+        保存停用偏好(False)
+        尝试启动(Nothing)
+        ' 与 应用设置 同一条收敛路径：菜单勾选、宿主派生状态都要跟着变。
+        字幕菜单.刷新(包)
+        同步宿主()
+        操作提示("已启用 AI 实时字幕")
+    End Sub
+
+    ''' <summary>普通字幕接管时把 AI 字幕停掉（偏好也落盘，下次打开不会抢回来）。
+    ''' 已停用时空转，供字幕选择的每条路径无脑调用。</summary>
+    Friend Sub 作为字幕源停用()
+        ' 没有包就没有 AI 字幕可停：不要因此往设置里写一个假的「已停用」偏好。
+        If 已释放 OrElse 停用 OrElse 包 Is Nothing Then Return
+        停用 = True
+        保存停用偏好(True)
+        停止()
         字幕菜单.刷新(包)
         同步宿主()
     End Sub
