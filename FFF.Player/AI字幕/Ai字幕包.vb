@@ -102,6 +102,51 @@ End Class
 Friend NotInheritable Class Ai字幕包
     Friend Const 清单文件名 As String = "ai-subtitles.json"
 
+    ''' <summary>包归属哨兵：只有本程序下载时才会写它。删除包按钮只认这个标记，
+    ''' 避免「目录里恰好有个 ai-subtitles.json」就把用户的媒体/资料目录整个删掉。</summary>
+    Friend Const 哨兵文件名 As String = ".3fp-package.json"
+    Friend Const 哨兵归属 As String = "3FCompare/AI字幕"
+
+    ''' <summary>读哨兵的 owner；文件不存在 / 读不了 / 不是本程序写的都返回 Nothing。</summary>
+    Friend Shared Function 读取哨兵归属(目录 As String) As String
+        Try
+            Dim 路径 = Path.Combine(目录, 哨兵文件名)
+            If Not File.Exists(路径) Then Return Nothing
+            Using 文档 = JsonDocument.Parse(File.ReadAllText(路径, Text.Encoding.UTF8))
+                Dim 根 = 文档.RootElement
+                If 根.ValueKind <> JsonValueKind.Object Then Return Nothing
+                Dim 归属 As JsonElement
+                If Not 根.TryGetProperty("owner", 归属) Then Return Nothing
+                If 归属.ValueKind <> JsonValueKind.String Then Return Nothing
+                Return 归属.GetString()
+            End Using
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    Friend Shared Function 有归属哨兵(目录 As String) As Boolean
+        Return String.Equals(读取哨兵归属(目录), 哨兵归属, StringComparison.Ordinal)
+    End Function
+
+    ''' <summary>在包根写归属哨兵。返回 False 表示目录只读/无权限，调用方应放弃下载。</summary>
+    Friend Shared Function 写归属哨兵(目录 As String, 包名称 As String) As Boolean
+        Try
+            Directory.CreateDirectory(目录)
+            Dim 内容 As String =
+                "{" & vbCrLf &
+                $"  ""owner"": ""{哨兵归属}""," & vbCrLf &
+                "  ""version"": 1," & vbCrLf &
+                $"  ""name"": {JsonSerializer.Serialize(If(包名称, String.Empty))}," & vbCrLf &
+                $"  ""createdUtc"": ""{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ssZ}""" & vbCrLf &
+                "}"
+            File.WriteAllText(Path.Combine(目录, 哨兵文件名), 内容, Text.Encoding.UTF8)
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
     ''' <summary>模型容器标识。与 worker 的 _ENGINE_* 逐一对应，改一边要改另一边。</summary>
     Friend Const 引擎Llama As String = "llama"
     Friend Const 引擎Onnx As String = "onnx"

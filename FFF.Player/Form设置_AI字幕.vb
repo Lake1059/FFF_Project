@@ -270,6 +270,14 @@ Friend Class Form设置_AI字幕
             HCL_下载状态.Text = 状态富文本("#808080", "当前目录不是有效的 AI 字幕包；删除只针对有效包。")
             Return
         End If
+        ' 有效性不等于归属：目录里只要有一份 ai-subtitles.json 就能骗过载入校验。
+        ' 删除只认本程序下载时写的哨兵，否则用户把包下到媒体目录就会连视频一起删。
+        If Not Ai字幕包.有归属哨兵(目录) Then
+            HCL_下载状态.Text = 状态富文本("#FF8C00",
+                "这个包不是本程序下载的（缺归属标记 .3fp-package.json）。" &
+                "为避免误删你的其它文件，删除按钮不处理它；请确认内容后手动删除目录。")
+            Return
+        End If
         Dim 体积 As Long = 0
         Try
             For Each 文件 In New DirectoryInfo(目录).EnumerateFiles("*", IO.SearchOption.AllDirectories)

@@ -248,6 +248,36 @@ Friend NotInheritable Class Ai字幕包下载器
         Friend 文本 As String
     End Class
 
+    ''' <summary>下载目标白名单：不存在的目录 / 空目录 / 已有本程序哨兵的目录。
+    ''' 返回空串表示放行，否则是给用户看的原因。</summary>
+    Private Shared Function 校验下载目标(根 As String) As String
+        If String.IsNullOrWhiteSpace(根) Then Return "下载目录为空。"
+        Dim 全 = Path.GetFullPath(根).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+        Dim 盘根 = Path.GetPathRoot(全)
+        If 盘根 IsNot Nothing AndAlso
+           String.Equals(全, 盘根.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                         StringComparison.OrdinalIgnoreCase) Then
+            Return "不能直接下载到盘符根目录，请选一个专用子目录（例如 D:\AI字幕包）。"
+        End If
+        Dim 用户目录 = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+        If Not String.IsNullOrWhiteSpace(用户目录) AndAlso
+           String.Equals(全, 用户目录.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                         StringComparison.OrdinalIgnoreCase) Then
+            Return "不能把用户主目录当成下载目录，请选一个专用子目录。"
+        End If
+        If Not Directory.Exists(全) Then Return ""
+        If Ai字幕包.有归属哨兵(全) Then Return ""
+        Try
+            For Each 项 In Directory.EnumerateFileSystemEntries(全)
+                Return "这个目录已经有其它文件，且不是本程序创建的 AI 字幕包目录。" &
+                       "请换一个空目录，避免把包文件和你的资料混在一起。"
+            Next
+        Catch ex As Exception
+            Return $"目录不可读：{ex.Message}"
+        End Try
+        Return ""
+    End Function
+
     ''' <summary>下载整包。返回空串=成功并已生成 ai-subtitles.json；否则返回人话错误
     ''' （.part 保留，可再次点击续传）。进度为结构化：总百分比（0-100，跨文件累计）
     ''' + 状态行文本。类型决定清单与生成清单的引擎（GGUF/llama 或 ONNX/onnx）。
@@ -280,6 +310,15 @@ Friend NotInheritable Class Ai字幕包下载器
                    End Sub
 
         Dim 根 = Path.GetFullPath(目标目录)
+        ' 归属与误删防护的第一道闸：绝不往「盘符根 / 用户主目录 / 有内容却非本程序建的
+        ' 目录」里下载。旧版下载器只看「文件已存在就跳过」，配合删除按钮的
+        ' Directory.Delete(True) 可以整目录抹掉用户资料。
+        Dim 目标错误 = 校验下载目标(根)
+        If 目标错误 <> "" Then Return 目标错误
+        ' 先落哨兵再下文件：中途失败/取消后目录仍归本程序所有，删除按钮仍可用。
+        If Not Ai字幕包.写归属哨兵(根, 类型.ToString()) Then
+            Return $"无法在下载目录写入归属标记（目录只读或没有权限）：{根}"
+        End If
         Dim 驱动器 As New DriveInfo(Path.GetPathRoot(根))
         If 驱动器.AvailableFreeSpace < 总字节 + (总字节 \ 10) Then
             Return $"磁盘空间不足：需要约 {总字节 \ 1048576} MB（含余量），" &
