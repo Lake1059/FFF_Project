@@ -38,6 +38,9 @@ struct AVPacket;
 struct AVBufferRef;
 struct AVFilterGraph;
 struct AVFilterContext;
+// ABI struct appended to 3FP/Api/FFF.Player.CpuPlacement.h (P3-12). Forward-declared so
+// this header does not depend on the public diagnostic header; the .cpp includes it.
+struct FFF3FPCpuPlacementSnapshot;
 class Fmp4FragmentScanner;
 
 class PlayerSession final {
@@ -178,6 +181,10 @@ public:
     FFFResult GetVideoAutoHdrStatus(
         FFF3FPVideoAutoHdrStatus& status) const noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
+    // CPU placement diagnostics (appended export FFF3FP_GetCpuPlacementSnapshot, P3-12).
+    // Advisory read-only snapshot: it deliberately takes no session lock and changes no
+    // behaviour, so a field may be one state transition old while it is being filled.
+    FFFResult GetCpuPlacementSnapshot(FFF3FPCpuPlacementSnapshot& snapshot) const noexcept;
     // Live swap-chain flip count, read without copying the 608-byte snapshot.
     // Used by the still-image view timer to align submissions with flips.
     std::uint64_t PresentationCounter() const noexcept;

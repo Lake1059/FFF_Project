@@ -490,6 +490,12 @@ public:
     std::uint64_t PresentedVideoGeneration() const noexcept;
     bool HasPendingVideoPresentation() const noexcept;
     bool HasOutputWindow() const noexcept;
+    /// Thread id of the independent timed-text presenter, or 0 while it is not running.
+    /// Published at TimedTextThread entry and cleared by StopTimedTextThread; the CPU
+    /// placement snapshot uses it to name the present thread (diagnostic only).
+    std::uint32_t TimedTextThreadId() const noexcept {
+        return timedTextThreadId_.load(std::memory_order_relaxed);
+    }
     /// Whether a decoded frame is currently sitting in the cached surface.
     /// Unsynchronized on purpose: the only caller is the session command queue
     /// deciding between Redraw() and PresentAfterBind() at bind time, and a
@@ -1308,6 +1314,10 @@ private:
     std::thread coverBackdropThread_;
     bool timedTextThreadStop_;
     bool timedTextThreadRunning_;
+    // Diagnostic read-out only: the presenter stores its own thread id here so the CPU
+    // placement snapshot can report where the present thread was actually placed.
+    // 0 = the presenter is not running (started lazily, stopped by Close/ResetMedia).
+    std::atomic<std::uint32_t> timedTextThreadId_{ 0 };
     bool coverBackdropThreadStop_;
     bool coverBackdropRequestPending_;
     std::uint64_t coverBackdropRequestGeneration_;

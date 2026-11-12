@@ -658,3 +658,19 @@ int FFF3FP_BeginStartupCpuPlacement() noexcept {
 void FFF3FP_EndStartupCpuPlacement() noexcept {
     PlacementPolicy::EndProcessStartupPlacement("host");
 }
+
+// CPU placement diagnostic snapshot (3FP/Api/FFF.Player.CpuPlacement.h, P3-12), appended
+// additively at the tail like the startup entries above: PlayerApiVersion/SnapshotVersion
+// unchanged, no FFF3FPHandle lifetime semantics added, hosts resolve it by name and fall
+// back to today's behaviour when an older kernel does not export it.
+FFFResult FFF3FP_GetCpuPlacementSnapshot(const FFF3FPHandle player,
+    FFF3FPCpuPlacementSnapshot* snapshot) noexcept {
+    if (player == nullptr || snapshot == nullptr) return FFFResult::InvalidArgument;
+    // The host declares the ABI it was built against; reject a mismatch before the
+    // session overwrites the caller's struct with the version-1 layout.
+    if (snapshot->version != FFF3FP_CPUPLACEMENT_SNAPSHOT_VERSION ||
+        snapshot->size < sizeof(FFF3FPCpuPlacementSnapshot)) {
+        return FFFResult::InvalidArgument;
+    }
+    return static_cast<PlayerSession*>(player)->GetCpuPlacementSnapshot(*snapshot);
+}

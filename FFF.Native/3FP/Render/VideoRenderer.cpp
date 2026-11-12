@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Render/VideoRenderer.h"
+#include "3FP/Core/ThreadNaming.h"
 #include "3FP/Render/ShaderBytecode.h"
 #include "3FP/Render/SdrShaderBytecode.h"
 #include <emmintrin.h>
@@ -8329,6 +8330,7 @@ void PlayerVideoRenderer::RequestCoverBackdropRender(const bool force) noexcept 
 }
 
 void PlayerVideoRenderer::CoverBackdropThread() noexcept {
+    FFFThreadNaming::SetCurrentThreadName("FFF.Player.CoverBackdrop");
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     std::uint64_t observedRequest = 0;
     for (;;) {

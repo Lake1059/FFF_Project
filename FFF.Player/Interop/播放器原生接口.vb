@@ -1570,6 +1570,82 @@ Friend Module 播放器原生接口
         End Try
     End Sub
 
+    ' ---- CPU 策略诊断快照（FFF.Player.CpuPlacement.h，可选导出，P3-12） ----
+    ' 内核追加 FFF3FP_GetCpuPlacementSnapshot：旧内核没有该入口时 支持CPU策略快照 = False，
+    ' 整条通路静默降级，不影响任何播放。调用前由本文件自动填 大小/版本，与
+    ' FFF3FP_GetImageInfo 同规矩（内核按 size/version 校验，字段少一个或类型不对会被判
+    ' InvalidArgument）。字段顺序×类型与 C 头逐字节一致：22 × 4B = 88B，纯 POD。
+    ' 属追加导出：不 bump PlayerApiVersion(20) / SnapshotVersion(23)，也不新增句柄生命周期语义。
+    ' 保留1..保留4 用独立字段而不是 ByValArray（避开数组封送坑，与 前后预取计划 同款）。
+    ' 计数/ID/class 取不到的用 0xFFFFFFFF 哨兵（内核 FFF3FP_CPUPLACEMENT_UNKNOWN），
+    ' 消费方须按哨兵判「未知」而不是当成真值 0。
+
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 原生CPU策略快照
+        ' 字段类型与顺序须与内核 FFF3FPCpuPlacementSnapshot 一致。
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        ' 放置域：0=无 1=EfficiencyClass 2=CacheDomain；放置层级：0=无 1=首选 2=溢出 3=提升。
+        Public 放置域 As UInteger
+        Public 放置层级 As UInteger
+        ' 位标志：AVAILABLE/DISABLED/FORCED/CLASS_RAISED/OVERLAY_PRIORITY/
+        ' PRIORITY_SAVED/STARTUP_APPLIED/WORKER_PINNED，各占 1 位。
+        Public 标志 As UInteger
+        Public 进程优先级类 As Integer
+        Public 基线优先级类 As Integer
+        Public Tier0集合数 As UInteger
+        Public Tier1集合数 As UInteger
+        Public 进程默认集合数 As UInteger
+        Public 首选域线程数 As UInteger
+        Public 处理器组数 As UInteger
+        Public Worker线程ID As UInteger
+        Public Worker线程优先级 As Integer
+        Public Worker显式集合数 As UInteger
+        Public 呈现线程ID As UInteger
+        Public 呈现线程显式集合数 As UInteger
+        Public 解码线程数 As UInteger
+        Public 保留1 As UInteger
+        Public 保留2 As UInteger
+        Public 保留3 As UInteger
+        Public 保留4 As UInteger
+    End Structure
+
+    Private Const CPU策略快照版本 As UInteger = 1UI
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取CPU策略快照原型(播放器 As 播放器原生句柄,
+        ByRef 快照 As 原生CPU策略快照) As 原生播放器结果
+
+    Private ReadOnly 读取CPU策略快照函数 As 读取CPU策略快照原型 =
+        解析可选导出(Of 读取CPU策略快照原型)("FFF3FP_GetCpuPlacementSnapshot")
+
+    ''' <summary>当前内核是否提供 CPU 策略诊断快照（旧内核返回 False，静默降级）。</summary>
+    Friend ReadOnly Property 支持CPU策略快照 As Boolean
+        Get
+            Return 读取CPU策略快照函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>读取当前 CPU 策略诊断快照（放置域/层级/标志、tier0/tier1 集合数、进程
+    ''' 优先级类与基线、worker 线程优先级、解码线程数、呈现线程是否已被钉）。
+    ''' 调用前自动填 大小=Marshal.SizeOf、版本=1；无导出、句柄为空或调用失败返回 False，
+    ''' 不抛异常。未知计数是 0xFFFFFFFF 哨兵，按「未知」处理即可。</summary>
+    Friend Function 读取CPU策略快照(播放器 As 播放器原生句柄,
+                                     ByRef 快照 As 原生CPU策略快照) As Boolean
+        Dim 函数 = 读取CPU策略快照函数
+        If 函数 Is Nothing Then Return False
+        If 播放器 Is Nothing Then Return False
+        Try
+            快照 = New 原生CPU策略快照 With {
+                .大小 = CUInt(Marshal.SizeOf(Of 原生CPU策略快照)()),
+                .版本 = CPU策略快照版本
+            }
+            Return 函数(播放器, 快照) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     ' 视口封顶：非 0 时适配盒不超过源原生尺寸，于是"缩放"变成绝对的 屏幕:视频 像素比
     ' （缩放=1 即逐像素 1:1，窗口比源大时四周留黑边）。0 = 沿用"铺满窗口"的历史行为。
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>

@@ -488,11 +488,11 @@ Public Class 设置
         Dim 字体上限 = LakeUI_字体缓存条目选项(Math.Clamp(实例对象.LakeUI_字体缓存档, 0, LakeUI_字体缓存条目选项.Length - 1))
         LakeUI.GlobalOptions.TextFormatCacheLimit = 字体上限
         LakeUI.GlobalOptions.FontResolveCacheLimit = 字体上限
-        Dim 脏区索引 = Math.Clamp(实例对象.LakeUI_背景脏区档, 0, LakeUI_背景脏区数量选项.Length - 1)
-        LakeUI.GlobalOptions.BackgroundDirtyRectLimit = LakeUI_背景脏区数量选项(脏区索引)
-        LakeUI.GlobalOptions.BackgroundFullDirtyRatio = LakeUI_背景脏区完整重采阈值选项(脏区索引)
-        LakeUI.GlobalOptions.SsaaBucketSize =
-            LakeUI_SSAA分桶粒度选项(Math.Clamp(实例对象.LakeUI_SSAA分桶档, 0, LakeUI_SSAA分桶粒度选项.Length - 1))
+        ' 【P2-9】LakeUI 的 BackgroundDirtyRectLimit / BackgroundFullDirtyRatio / SsaaBucketSize
+        ' 在本 LakeUI 构建里除定义外零读取方（E2：GlobalOptions.vb:142 / :194 / :198），写进去
+        ' 也不会被任何绘制路径读到 ⇒ 三处写入已删（连同 脏区索引）。档位数组（LakeUI_背景脏区
+        ' 数量选项 / LakeUI_背景脏区完整重采阈值选项 / LakeUI_SSAA分桶粒度选项）、设置属性与
+        ' 设置页控件全部保留：这三个旋钮当前是 no-op，删设置还是补实现待 P3-13 决定。
     End Sub
 
     Public Shared Sub 应用SP个性化设置()

@@ -3,6 +3,7 @@
 
 #include "3FP/Prefetch/MemoryGuard.h"
 #include "3FP/Prefetch/PrefetchProtocol.h"
+#include "3FP/Core/ThreadNaming.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -327,6 +328,7 @@ PrefetchService::PrefetchService() noexcept {
 }
 
 void PrefetchService::GuardLoop() noexcept {
+    FFFThreadNaming::SetCurrentThreadName("FFF.Player.PrefetchGuard");
     // One wait line, never a timer. Low is a persistent level meaning "almost
     // out of physical memory": release everything, then wait for High before
     // re-arming, so the dead band between the two cannot cause a spin.
@@ -644,6 +646,7 @@ void PrefetchService::StopHelper() noexcept {
 }
 
 void PrefetchService::WorkerLoop() noexcept {
+    FFFThreadNaming::SetCurrentThreadName("FFF.Player.Prefetch");
     for (;;) {
         std::vector<std::string> paths;
         std::uint32_t flags = 0;

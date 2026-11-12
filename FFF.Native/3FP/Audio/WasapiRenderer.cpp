@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Audio/WasapiRenderer.h"
+#include "3FP/Core/ThreadNaming.h"
 
 extern "C" {
 #include <libavutil/channel_layout.h>

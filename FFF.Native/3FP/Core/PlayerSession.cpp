@@ -4,6 +4,8 @@
 #include "3FP/Core/Fmp4FragmentScanner.h"
 #include "3FP/Core/MediaText.h"
 #include "3FP/Core/PlayerSession.h"
+#include "3FP/Core/ThreadNaming.h"
+#include "3FP/Api/FFF.Player.CpuPlacement.h"
 #include "3FP/Prefetch/PrefetchService.h"
 
 extern "C" {
@@ -3258,6 +3260,28 @@ FFFResult PlayerSession::GetHdrSignalDiagnostics(
     return FFFResult::Success;
 }
 
+FFFResult PlayerSession::GetCpuPlacementSnapshot(
+    FFF3FPCpuPlacementSnapshot& snapshot) const noexcept {
+    // Zero fill first: the ABI struct is pure POD, reserved[] must read as zero, and the
+    // two thread-id fields default to "not running" (0). size/version describe the
+    // caller's buffer and are set here; the export validates the caller's copy first.
+    std::memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.size = sizeof(FFF3FPCpuPlacementSnapshot);
+    snapshot.version = FFF3FP_CPUPLACEMENT_SNAPSHOT_VERSION;
+    placement_.FillDiagnosticSnapshot(snapshot);
+    // Session-level fields. decoderThreads_ is worker-owned (the thread ladder writes it
+    // on the session worker thread); this is a diagnostic read taken without mutex_,
+    // exactly like the trace line -- a stale rung is acceptable and cannot affect
+    // playback.
+    snapshot.decoderThreadCount = decoderThreads_;
+    snapshot.presentThreadId = videoRenderer_.TimedTextThreadId();
+    // 0 while the presenter is not running; a failed OpenThread reports the sentinel
+    // instead, so "not running" and "cannot measure" do not collapse into one value.
+    snapshot.presentSelectedSetCount =
+        PlacementPolicy::QueryThreadSelectedCpuSetCount(snapshot.presentThreadId);
+    return FFFResult::Success;
+}
+
 std::uint64_t PlayerSession::PresentationCounter() const noexcept {
     return videoRenderer_.SwapChainPresents();
 }
@@ -3379,6 +3403,7 @@ std::string PlayerSession::MediaInfo() const { std::lock_guard lock(mutex_); ret
 std::string PlayerSession::LastError() const { std::lock_guard lock(errorMutex_); return lastError_; }
 
 void PlayerSession::Worker() noexcept {
+    FFFThreadNaming::SetCurrentThreadName("FFF.Player.SessionWorker");
     workerThreadId_ = GetCurrentThreadId();
     for (;;) {
         Command command;
@@ -6170,6 +6195,7 @@ FFFResult PlayerSession::QueueSoftwareVideoDecode(AVPacket* packet) noexcept {
 }
 
 void PlayerSession::SoftwareVideoDecodeWorker(AVCodecContext* decoder) noexcept {
+    FFFThreadNaming::SetCurrentThreadName("FFF.Player.SoftwareDecode");
     auto* frame = av_frame_alloc();
     const auto receive = [&] {
         int result;
@@ -9413,8 +9439,41 @@ void PlayerSession::SetState(const FFF3FPState state, const char* operation) noe
     // CPU placement follows the playing state: tier 3 is dropped as soon as playback
     // stops, and tier 1 is (re)applied on every start. Placement is cheap enough to do
     // inline, and doing it here keeps every state transition in one place.
-    if (state == FFF3FPState::Playing) placement_.OnPlaybackStart(workerThreadId_);
-    else if (previous == FFF3FPState::Playing) placement_.OnPlaybackStop();
+    if (state == FFF3FPState::Playing) {
+        placement_.OnPlaybackStart(workerThreadId_);
+        // Diagnostic-only trace: one PLACEMENT_SNAPSHOT line when FFF_PLACEMENT_TRACE was
+        // set at construction. It reads worker-owned scalars and publishes thread ids
+        // without taking mutex_ -- it is a snapshot for A/B read-outs, never a control
+        // path, so it must not block or perturb the state transition.
+        if (placement_.TraceEnabled()) {
+            FFF3FPCpuPlacementSnapshot placementSnapshot{};
+            (void)GetCpuPlacementSnapshot(placementSnapshot);
+            char line[320] = {};
+            std::snprintf(line, sizeof(line),
+                          "PLACEMENT_SNAPSHOT domain=%u tier=%u flags=0x%X class=%d"
+                          " baseline=%d tier0=%u tier1=%u procDefault=%u preferred=%u"
+                          " groups=%u worker=%u workerPrio=%d workerSets=%u"
+                          " present=%u presentSets=%u decoders=%u",
+                          placementSnapshot.domain, placementSnapshot.tier,
+                          static_cast<unsigned>(placementSnapshot.flags),
+                          static_cast<int>(placementSnapshot.processPriorityClass),
+                          static_cast<int>(placementSnapshot.baselinePriorityClass),
+                          placementSnapshot.tier0SetCount, placementSnapshot.tier1SetCount,
+                          placementSnapshot.processDefaultSetCount,
+                          placementSnapshot.preferredDomainThreads,
+                          placementSnapshot.processorGroupCount,
+                          placementSnapshot.workerThreadId,
+                          static_cast<int>(placementSnapshot.workerThreadPriority),
+                          placementSnapshot.workerSelectedSetCount,
+                          placementSnapshot.presentThreadId,
+                          placementSnapshot.presentSelectedSetCount,
+                          placementSnapshot.decoderThreadCount);
+            extern void FFF3FP_KernelLogImpl(const char*) noexcept;
+            FFF3FP_KernelLogImpl(line);
+        }
+    } else if (previous == FFF3FPState::Playing) {
+        placement_.OnPlaybackStop();
+    }
     std::string json = "{\"state\":" + std::to_string(static_cast<unsigned>(state));
     if (operation) json += ",\"operation\":\"" + EscapeJson(operation) + "\""; json += '}';
     Emit(FFF3FPEvent::StateChanged, json);

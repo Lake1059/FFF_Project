@@ -4,6 +4,11 @@
 #include <string>
 #include <vector>
 
+// ABI struct from 3FP/Api/FFF.Player.CpuPlacement.h. Forward-declared so this header
+// does not pull the public API surface into every translation unit; the implementation
+// file includes the public header.
+struct FFF3FPCpuPlacementSnapshot;
+
 /// Adaptive CPU placement for machines whose cores are not interchangeable: Intel
 /// hybrid parts (performance/efficiency classes) and multi-CCD AMD parts (one L3
 /// domain per die).
@@ -101,6 +106,23 @@ public:
     /// One line describing the decision, including why it is Unavailable. Never empty.
     const std::string& Describe() const noexcept { return description_; }
 
+    /// FFF_PLACEMENT_TRACE presence read at construction. Diagnostics only: the session
+    /// uses it to gate its PLACEMENT_SNAPSHOT trace line, never a behaviour change.
+    bool TraceEnabled() const noexcept { return trace_; }
+
+    /// Diagnostic read-out for FFF3FP_GetCpuPlacementSnapshot (P3-12). Fills the
+    /// placement-owned fields of `snapshot` with what the policy believes is in force
+    /// plus a live read of the process priority class and the worker thread. It never
+    /// takes a lock and never changes placement; the caller zero-fills the struct and
+    /// sets size/version. The struct itself is defined in the public API header.
+    void FillDiagnosticSnapshot(FFF3FPCpuPlacementSnapshot& snapshot) const noexcept;
+
+    /// Explicit CPU sets currently selected on a thread, or FFF3FP_CPUPLACEMENT_UNKNOWN
+    /// (0xFFFFFFFF) when the query fails. Thread id 0 means "no such thread" and reports
+    /// 0. Shared by the session-level snapshot so the worker and the present thread are
+    /// measured with exactly the same rule.
+    static std::uint32_t QueryThreadSelectedCpuSetCount(std::uint32_t threadId) noexcept;
+
     /// Logical processors in the preferred group: the fastest efficiency class on a
     /// hybrid part, one L3 domain (one CCD) on a multi-CCD part -- widened onto the
     /// next group(s) when a caller asked for more seats than the fastest group alone
@@ -197,6 +219,10 @@ private:
     bool classRaised_ = false;
     bool overlayPriority_ = false;   // Prioritize(): outlives tier changes, cleared on Release
     int baselineThreadPriority_ = 0;   // THREAD_PRIORITY_NORMAL
+    // CPU set ids this policy last wrote as the process default (0 again after Release).
+    // Maintained at the SetProcessDefaultCpuSets sites; the diagnostic snapshot reports
+    // what the policy put there instead of re-querying the OS on every call.
+    std::uint32_t processDefaultSetCount_ = 0;
 
     std::string description_;
 };

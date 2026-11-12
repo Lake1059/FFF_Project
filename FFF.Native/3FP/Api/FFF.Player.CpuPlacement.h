@@ -30,3 +30,88 @@
 //   FFF3FP_EndStartupCpuPlacement: void; idempotent.
 FFF3FP_API int FFF3FP_BeginStartupCpuPlacement() noexcept;
 FFF3FP_API void FFF3FP_EndStartupCpuPlacement() noexcept;
+
+// ---- CPU placement diagnostics (P3-12, docs/148 §四) ------------------------------
+//
+// Read-only snapshot of what the placement policy decided and what the OS currently says
+// about the worker / present threads. Appended additively to this header, exactly like
+// the startup entries above: it is NOT included from FFF.Player.Api.h, adds no
+// FFF3FPSnapshot field, and moves neither PlayerApiVersion (20) nor SnapshotVersion (23).
+// Hosts resolve FFF3FP_GetCpuPlacementSnapshot dynamically; a kernel that lacks the
+// export degrades to "no snapshot", never to a behaviour change.
+//
+// Two kinds of value are reported side by side:
+//   * what the policy believes it put in force (domain / tier / flags / the set counts
+//     it wrote), and
+//   * what the OS answers right now about the worker and present threads (priority,
+//     explicit CPU set count). Those reads can legitimately fail once a thread exits;
+//     such a field is FFF3FP_CPUPLACEMENT_UNKNOWN, never a guessed zero.
+//
+// The snapshot is advisory: it is filled without taking the session lock, so the fields
+// were not all sampled at the same instant. For A/B harnesses, not for control.
+#define FFF3FP_CPUPLACEMENT_SNAPSHOT_VERSION 1u
+// Sentinel for "cannot be measured" (thread gone, query refused, query unsupported).
+#define FFF3FP_CPUPLACEMENT_UNKNOWN 0xFFFFFFFFu
+
+// Which topology split the policy chose. None = uniform machine, or FFF_PLACEMENT=off.
+enum class FFF3FPCpuPlacementDomain : std::uint32_t {
+    NONE = 0,
+    EFFICIENCY_CLASS = 1,   // Intel hybrid P/E classes
+    CACHE_DOMAIN = 2,       // AMD multi-CCD L3 domains
+};
+
+// How far up the escalation ladder the policy currently stands.
+enum class FFF3FPCpuPlacementTier : std::uint32_t {
+    NONE = 0,
+    PREFERRED = 1,
+    SPILLED = 2,
+    BOOSTED = 3,
+};
+
+// Bits for FFF3FPCpuPlacementSnapshot::flags: what is in force, not what is wanted.
+enum class FFF3FPCpuPlacementFlags : std::uint32_t {
+    AVAILABLE = 1u << 0,          // a usable domain was discovered
+    DISABLED = 1u << 1,           // FFF_PLACEMENT=off negative-control arm
+    FORCED = 1u << 2,             // FFF_PLACEMENT=prefer|spill|boost
+    CLASS_RAISED = 1u << 3,       // this policy raised the process priority class
+    OVERLAY_PRIORITY = 1u << 4,   // Prioritize() overlay is held
+    PRIORITY_SAVED = 1u << 5,     // baselinePriorityClass holds a real value
+    STARTUP_APPLIED = 1u << 6,    // startup placement applied once in this process
+    WORKER_PINNED = 1u << 7,      // worker thread holds an explicit CPU set
+};
+
+// 22 x 4-byte fields = 88 bytes, pure POD. Field order and widths are frozen: the host
+// mirrors this layout with <StructLayout(LayoutKind.Sequential)> and checks size before
+// calling, so any drift has to bump FFF3FP_CPUPLACEMENT_SNAPSHOT_VERSION.
+struct FFF3FPCpuPlacementSnapshot {
+    std::uint32_t size;                    // caller sets sizeof(...) before the call
+    std::uint32_t version;                 // FFF3FP_CPUPLACEMENT_SNAPSHOT_VERSION
+    std::uint32_t domain;                  // FFF3FPCpuPlacementDomain
+    std::uint32_t tier;                    // FFF3FPCpuPlacementTier
+    std::uint32_t flags;                   // FFF3FPCpuPlacementFlags bits
+    std::int32_t processPriorityClass;     // GetPriorityClass; unknown sentinel
+    std::int32_t baselinePriorityClass;    // class at playback start; same sentinel
+    std::uint32_t tier0SetCount;           // preferred CPU set ids the policy wrote
+    std::uint32_t tier1SetCount;           // spill candidate set ids
+    std::uint32_t processDefaultSetCount;  // ids last written as the process default
+    std::uint32_t preferredDomainThreads;  // decode ladder's step boundary
+    std::uint32_t processorGroupCount;     // >1 refuses CPU set placement
+    std::uint32_t workerThreadId;          // session worker; 0 = not started
+    std::int32_t workerThreadPriority;     // GetThreadPriority; unknown sentinel
+    std::uint32_t workerSelectedSetCount;  // explicit selection; unknown sentinel
+    std::uint32_t presentThreadId;         // timed-text presenter; 0 = not running
+    std::uint32_t presentSelectedSetCount; // 0 while the presenter is not running
+    std::uint32_t decoderThreadCount;      // software decoder rung; 0 = not chosen
+    std::uint32_t reserved[4];             // future fields; zero-filled
+};
+
+static_assert(sizeof(FFF3FPCpuPlacementSnapshot) == 88,
+    "FFF3FPCpuPlacementSnapshot layout changed: bump the snapshot version and mirror it "
+    "in the host's VB structure (the P3-12 ABI is frozen).");
+
+// Fills `snapshot` for a session. InvalidArgument when player or snapshot is null, when
+// version != FFF3FP_CPUPLACEMENT_SNAPSHOT_VERSION, or when size is smaller than the
+// struct. On success the caller's struct is overwritten end to end (size/version
+// included) and reserved[] reads as zero.
+FFF3FP_API FFFResult FFF3FP_GetCpuPlacementSnapshot(FFF3FPHandle player,
+    FFF3FPCpuPlacementSnapshot* snapshot) noexcept;
