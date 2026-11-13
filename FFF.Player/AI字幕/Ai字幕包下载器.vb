@@ -386,6 +386,37 @@ Friend NotInheritable Class Ai字幕包下载器
         End If
         File.Copy(本体worker, Path.Combine(根, "asr_worker.py"), True)
 
+        ' 第三方许可/来源与处理声明：随播放器部署，包根必须有一份；缺了就说明安装不完整。
+        Dim 本体声明 = Path.Combine(AppContext.BaseDirectory, "ai-subtitles", "AI字幕包声明.txt")
+        If Not File.Exists(本体声明) Then
+            Return "随播放器部署的 ai-subtitles\AI字幕包声明.txt 缺失（安装不完整），无法生成扩展包"
+        End If
+        File.Copy(本体声明, Path.Combine(根, "AI字幕包声明.txt"), True)
+
+        ' 包内第一方 worker/适配代码仍按 MIT；没有 LICENSE.txt 就谈不上保留版权声明。
+        Dim 本体许可 = Path.Combine(AppContext.BaseDirectory, "LICENSE.txt")
+        If Not File.Exists(本体许可) Then
+            Return "随播放器部署的 LICENSE.txt 缺失（安装不完整），无法生成扩展包"
+        End If
+        File.Copy(本体许可, Path.Combine(根, "LICENSE.txt"), True)
+
+        ' 第三方许可原文：随播放器部署在 licenses\ai，整目录复制进包；
+        ' 缺目录即视为安装不完整，不在包内留下指向不存在的路径。
+        Dim 许可源 = Path.Combine(AppContext.BaseDirectory, "licenses", "ai")
+        If Not Directory.Exists(许可源) Then
+            Return "随播放器部署的 licenses\ai 缺失（安装不完整），无法生成扩展包"
+        End If
+        Dim 许可文件列表 = Directory.GetFiles(许可源, "*", SearchOption.AllDirectories)
+        If 许可文件列表.Length = 0 Then
+            Return "随播放器部署的 licenses\ai 为空（安装不完整），无法生成扩展包"
+        End If
+        For Each 许可文件 In 许可文件列表
+            Dim 相对 = 许可文件.Substring(许可源.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            Dim 目标 = Path.Combine(根, "licenses", "ai", 相对)
+            Directory.CreateDirectory(Path.GetDirectoryName(目标))
+            File.Copy(许可文件, 目标, True)
+        Next
+
         If 类型 = 包类型.Npu Then
             ' qwen3_ort.py：我们自己的推理实现，随 exe 部署（与 worker 同一套路），
             ' 复制进包根——worker 用 Path(__file__).with_name 找它。
@@ -423,7 +454,9 @@ Friend NotInheritable Class Ai字幕包下载器
                 $"  ""python"": ""{清单Python}""," & vbCrLf &
                 "  ""model"": ""model""," & vbCrLf &
                 "  ""window"": 5.0," & vbCrLf &
-                "  ""step"": 5.0" & vbCrLf &
+                "  ""step"": 5.0," & vbCrLf &
+                "  ""notice"": ""AI字幕包声明.txt""," & vbCrLf &
+                "  ""license"": ""licenses/ai""" & vbCrLf &
                 "}"
         Else
             清单内容 =
@@ -436,7 +469,9 @@ Friend NotInheritable Class Ai字幕包下载器
                 "  ""model"": ""model""," & vbCrLf &
                 "  ""runtime"": ""runtime/vulkan""," & vbCrLf &
                 "  ""window"": 5.0," & vbCrLf &
-                "  ""step"": 5.0" & vbCrLf &
+                "  ""step"": 5.0," & vbCrLf &
+                "  ""notice"": ""AI字幕包声明.txt""," & vbCrLf &
+                "  ""license"": ""licenses/ai""" & vbCrLf &
                 "}"
         End If
         File.WriteAllText(Path.Combine(根, Ai字幕包.清单文件名), 清单内容, Text.Encoding.UTF8)

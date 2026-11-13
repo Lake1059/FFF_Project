@@ -1,0 +1,62 @@
+3FP AI 字幕包 · 第三方组件与处理声明
+版本：2026-11-13
+
+一、这个包是什么
+本包由 3FP 播放器按用户选择，从公开官方源下载并组装，包含 AI 字幕所需的模型、推理运行时和 Python 运行时。它不是 3FP 本体安装包的一部分；删除本包不会删除用户的媒体文件。
+
+二、第三方组件、许可与来源
+1. Qwen3-ASR-0.6B（GGUF Q8_0 / ONNX int8）
+   许可：Apache-2.0
+   来源：https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF
+         https://huggingface.co/csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25
+   说明：模型权重由上述公开仓库提供；3FP 不主张模型版权。
+
+2. llama.cpp（GGUF 推理运行时）
+   许可：MIT
+   来源：https://github.com/ggml-org/llama.cpp
+
+3. sherpa-onnx
+   许可：Apache-2.0
+   来源：https://github.com/k2-fsa/sherpa-onnx
+
+4. OpenVINO
+   许可：Apache-2.0
+   来源：https://github.com/openvinotoolkit/openvino
+   附注：NPU 包包含 openvino_telemetry 组件。该组件用于 OpenVINO 的匿名使用统计，是否发送取决于其 consent 文件/opt_in_out 设置；3FP 不会把音频或字幕正文发送给该组件。3FP 在 consent 文件不存在时写入“0”（拒绝），已有“1”（同意）的用户选择会被尊重。如需手动关闭，可在包内 Python 环境执行：
+   python -m openvino_telemetry.opt_in_out --opt_out
+
+5. Python 3.12 embeddable
+   许可：PSF-2.0
+   来源：https://www.python.org/
+
+6. NumPy
+   许可：BSD-3-Clause
+   来源：https://numpy.org/
+
+7. ONNX Runtime
+   许可：MIT
+   来源：https://github.com/microsoft/onnxruntime
+
+三、许可文本
+本包 `licenses\ai\` 目录随附：
+- Apache-2.0.txt
+- MIT.txt
+- BSD-3-Clause.txt
+- PSF-2.0.txt
+- NOTICE.txt（组件版本、来源与版权说明）
+以上组件均为宽松许可，但要求保留版权、许可和 NOTICE；再分发时请保留本声明及对应许可。
+本包内 3FP 自有的 worker/适配代码按 MIT 许可，全文见包根 `LICENSE.txt`。
+
+四、AI 生成与本地处理
+1. AI 字幕由本机 worker 离线生成，音频只在本机处理，不上传。
+2. AI 生成字幕可能存在错字、漏句、语言误判或时间偏移，仅供参考，应以原音/原字幕为准。
+3. 在导出、分享或公开传播 AI 字幕时，请保留“AI 生成字幕”提示；不得故意删除、篡改或隐匿该提示。
+4. 如产品面向公众提供生成合成内容服务，还应按《人工智能生成合成内容标识办法》及配套标准评估显式/隐式标识义务。
+
+五、安全边界
+1. 下载器使用固定 URL + SHA256 校验；哈希不符会拒绝落位。
+2. 下载目录必须是空目录或本程序创建的包目录；删除只认本程序的归属哨兵。
+3. 用户手动选择的第三方包会执行其中的 Python worker；请只使用可信来源的包。
+
+六、本声明的边界
+本声明是第三方组件与处理方式的说明，不构成法律意见；许可条款以各组件版权人发布的原文为准。

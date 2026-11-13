@@ -1,106 +1,115 @@
-# 第三方组件与许可清单 / Third-Party Notices（3FP 内核与播放器）
+# 第三方组件、许可与来源声明 / Third-Party Notices
 
-本文件覆盖 `3fp/kernel` 这条发布链**随包分发**的东西：`FFF.Native.dll`、`FFF.Player.exe`
-及其运行期依赖（FFmpeg / libass 一族 / LakeUI / NuGet 件）。
-每项许可标识都注明**证据来源**；读不到的写 **未判定**，不猜。
-是否合规、要不要授权 → **需法务**，本文件只交事实。
+适用范围：`FFF.Player`（3FP）、`FFF.Native.dll`、随包运行库与 AI 字幕扩展包。
+本文件是**事实与分发边界清单**，不是法律意见；许可条款以各组件原文为准。
+最后核对：2026-11-13。
 
-- 与主仓根目录的 `THIRD-PARTY-NOTICES.md`（那条链是 3FCompare 比对工具，
-  载荷表不同，两处都要维护）。本文件由 `tools\发布3FP.ps1` 的许可步骤强制随包，缺席即发布失败。
-- 许可文本原件：由同一条步骤从 vcpkg / FFmpeg / LakeUI 的在盘位置收进包内 `licenses\`；
-  读不到即中止（可用 `FFF_ALLOW_MISSING_LICENSES=1` 显式降级）。
+## 0. 本仓自身
 
----
-
-## 1. FFmpeg 运行期件（13 个 DLL）
-
-| 项 | 读数 |
+| 项 | 声明 |
 |---|---|
-| 在包件 | `avcodec-63` `avformat-63` `avutil-61` `avfilter-12` `swscale-10` `swresample-7` `avdevice-63` + 伴生件（`libc++` `libunwind` `libwinpthread-1` `libomp` `libshaderc_shared` `libSPIRV-Tools-shared`） |
-| 取得方式 | `tools\准备FFmpeg.ps1` 下载后放入 `third_party\ffmpeg\`（编译期）与 `runtime\`（运行期） |
-| 盘上实测变体（本树 `runtime\`，即播放器实际带的这一套） | **12 件里 6 件带 configuration 串，这 6 件全部含 `--enable-nonfree`**，同时含 `--enable-gpl --enable-version3 --enable-libx264 --enable-libx265 --enable-libfdk-aac`，`--prefix=/home/dominic/ffmpeg/bin`（BtbN 构建农场）。逐件偏移：avcodec 67 441 853 / avfilter 10 144 029 / avformat 6 515 309 / avutil 1 309 255 / swresample 361 117 / swscale 2 235 900 |
-| 同一判据扫主仓发货源（3FCompare 那条链，`publish\PLAN\ffmpeg-full`） | 13 件里 7 件带串、7 件全 nonfree（多出来的一件是 `avdevice-63.dll`） |
-| 链接方式 | **动态 + 延迟加载**：`FFF.Native.vcxproj:79-81/105-107` 链的是 DLL 导入库（`.def` 首行 `LIBRARY "avcodec-63"`），运行期由 `Shared/Ffmpeg/FfmpegRuntime.cpp:89-116` 的自定义 delay hook 按 `prefix*.dll` 定位 ⇒ `FFF.Native.dll` 不内嵌 FFmpeg 机器码 |
-| 仓内许可文本 | 只有 `COPYING.LGPLv2.1`、`COPYING.LGPLv3`；**无 GPLv2/GPLv3、无 `LICENSE.md`** |
+| 项目 | FFF Project / 3FP |
+| 版权人 | Copyright (c) 2026 1059 Studio |
+| 许可 | MIT，全文见根目录 `LICENSE.txt` |
+| 文件级标识 | 新增第一方源码建议使用 `SPDX-FileCopyrightText: 2026 1059 Studio` + `SPDX-License-Identifier: MIT`；历史文件不批量改写，避免制造无意义 diff |
+| Windows 版本资源 | `FFF.Native.rc` 的 `LegalCopyright` 与 `LICENSE.txt` 一致 |
+| 归属声明 | 根目录 `NOTICE`；第三方清单为本文件；文件级许可说明见 `LICENSING.md`；许可原文在 `licenses/` |
 
-⚠ **未解决**：分发的是 gpl+nonfree 组合而 GPL 文本缺席；该组合的分发条件需回上游原文核对（**需法务**）。
+`third_party/` 下的上游代码、头文件、静态库和运行时**不适用**本仓 MIT；它们保留各自版权与许可，只按各自条款使用。
 
-## 2. libass 字幕栈（vcpkg 传递依赖，随包 12 个 DLL）
+## 1. 分发形态与 FFmpeg 边界
 
-证据源：`third_party\vcpkg_installed\x64-windows\share\<port>\vcpkg.spdx.json` 的 `licenseConcluded`
-（`licenseDeclared` 全为 `NOASSERTION`）+ 该 port 的 `copyright` 文件首行。
+- **3FP 本体**：`FFF.Player.exe`、`FFF.Native.dll`、本仓第一方代码与 .NET 运行依赖。**本体不内嵌 FFmpeg**；FFmpeg 是用户自备或另行分发的**外部/独立运行时**。
+- **完整运行时包**：`发布3FP.ps1` 当前仍按完整包检查并复制 `avcodec-*` / `avformat-*` / `avutil-*` / `avfilter-*` / `swresample-*` / `swscale-*` 六个 DLL；这属于完整运行时包，不是本体的一部分。完整包必须按 FFmpeg 自身许可单独合规。
+- 当前树 `runtime/` 的实测构建串含 `--enable-gpl --enable-version3 --enable-libx264 --enable-libx265 --enable-libfdk-aac`，其中六个 DLL 还含 `--enable-nonfree`。`third_party/ffmpeg/` 有 `COPYING.LGPLv2.1`、`COPYING.LGPLv3`；GPLv2/GPLv3 原文已补到 `licenses/GPL-2.0-only.txt`、`licenses/GPL-3.0-only.txt`（完整运行时包适用）。
+- 因此：**本体包不得出现 FFmpeg DLL**；若另行分发完整运行时包，必须补齐对应 GPL/LGPL 文本、源码获取方式，并按 `--enable-nonfree` 构建的实际条件处理。`FFF_ALLOW_NONFREE=1` 只能作为显式承担后果的放行，不是正常公开 Release 开关。
+- FFmpeg 许可说明：<https://ffmpeg.org/legal.html>。
+
+## 2. libass 字幕栈（vcpkg 传递依赖，随完整包 12 个 DLL）
+
+证据源：`third_party/vcpkg_installed/x64-windows/share/<port>/vcpkg.spdx.json` 的 `licenseConcluded` 与 `copyright` 文件。
 
 | port | 许可 | 随包件 |
 |---|---|---|
-| libass | **ISC** | `ass-9.dll` |
-| libbluray | **LGPL-2.1-or-later** | `bluray-3.dll` |
-| libudfread | **LGPL-2.1-or-later** | `udfread-3.dll` |
-| libiconv | **LGPL**（其 `COPYING.LIB` 自述；vcpkg 未映射 SPDX） | `iconv-2.dll`、`charset-1.dll` |
-| fribidi | **LGPL-2.1-or-later** | `fribidi-0.dll` |
-| freetype | **FTL OR GPL-2.0-or-later** | `freetype.dll` |
-| harfbuzz | **MIT-Modern-Variant** | `harfbuzz.dll` |
-| brotli | **MIT** | `brotlicommon.dll`、`brotlidec.dll` |
-| bzip2 | **bzip2-1.0.6** | `bz2.dll` |
-| libpng | **libpng-2.0** | `libpng16.dll` |
-| zlib | **Zlib** | `z.dll` |
-| libxml2 | **MIT** | `libxml2.dll` |
+| libass | ISC | `ass-9.dll` |
+| libbluray | LGPL-2.1-or-later | `bluray-3.dll` |
+| libudfread | LGPL-2.1-or-later | `udfread-3.dll` |
+| libiconv | LGPL（其 `COPYING.LIB` 自述） | `iconv-2.dll`、`charset-1.dll` |
+| fribidi | LGPL-2.1-or-later | `fribidi-0.dll` |
+| freetype | FTL OR GPL-2.0-or-later | `freetype.dll` |
+| harfbuzz | MIT-Modern-Variant | `harfbuzz.dll` |
+| brotli | MIT | `brotlicommon.dll`、`brotlidec.dll` |
+| bzip2 | bzip2-1.0.6 | `bz2.dll` |
+| libpng | libpng-2.0 | `libpng16.dll` |
+| zlib | Zlib | `z.dll` |
+| libxml2 | MIT | `libxml2.dll` |
 
-`vcpkg.json` 只声明 `libass` + `libbluray`，其余是传递依赖。
+LGPL 组件如随完整包分发，应保留许可文本，并提供对应源码/可重新链接的获取方式；该项仍未闭环，发布前按 `83` 报告 §9 处理。
 
-## 3. 静态链进 `FFF.Native.dll` 的 libiamf 一族
+## 3. 静态链进 FFF.Native.dll 的 libiamf 一族
 
-`FFF.Native.vcxproj` 的 `HaveLibiamf` 分支链入 `iamf.lib; oar.lib; obr_capi.lib; obr.lib; pffft.lib;
-FLAC.lib; opus.lib` + **59** 个 `absl_*.lib`（磁盘 59 个逐名相符）。这些 `.lib` 均为 `!<arch>` 静态归档、
-体内 0 个 `.dll` 名引用；PDB 内 `FLAC__` 180 / `IAMF` 183 / `opus_multistream` 7 命中。
+`FFF.Native.vcxproj` 的 `HaveLibiamf` 分支链入 `iamf.lib; oar.lib; obr_capi.lib; obr.lib; pffft.lib; FLAC.lib; opus.lib` + 59 个 `absl_*.lib`。
 
-| 组件 | 许可（按上游；原文收集状态 2026-11-07 更新，文件在本仓 `licenses\`） |
+| 组件 | 许可/状态 | 原文位置 |
+|---|---|---|
+| libiamf | BSD-3-Clause Clear（AOM，2022） | `licenses/libiamf-LICENSE.txt`、`licenses/libiamf-PATENTS.txt` |
+| OAR | BSD-3-Clause Clear（AOM，2022） | `licenses/oar-LICENSE.txt`、`licenses/oar-LICENSE-main-branch.txt` |
+| OBR | 随 oar 仓分发；上游无独立 LICENSE，按宿主仓 oar 的 BSD-3-Clause Clear 对待；具体授权含义未判定 | `licenses/OBR-NOTICE.txt`（说明性，不是替代许可） |
+| FLAC | BSD-3-Clause（Xiph）；免版税公开授权 | `licenses/FLAC-BSD-3-Clause.txt` |
+| opus | BSD-3-Clause（Xiph）；免版税公开授权；含专利许可说明 | `licenses/opus-BSD-3-Clause.txt` |
+| pffft | FFTPACK/UCAR 条款（Julien Pommier 2013 + Hayati Ayguen 2020 修改） | `licenses/pffft-license-header.txt` |
+| abseil-cpp（59 件） | Apache-2.0 | `licenses/abseil-cpp-LICENSE` |
+| fdk-aac | 上游许可原文未随 libiamf 仓提供；当前链接闭包对其符号为零引用，**代码未进包** | `licenses/fdk-aac-NOTICE.txt`（说明，不是许可文本） |
+
+若未来链接闭包变化使 fdk-aac 代码被抽取，必须先收原文、重新评估再发布；不要把“当前零进包”当成永久豁免。
+
+## 4. LakeUI
+
+- 本仓引用 `third_party/LakeUI`（`FFF.Player.vbproj` 的 `LakeUI` HintPath；`FFF.Recorder.vbproj` 的 `LakeUI.Notifications`）。
+- 上游 `LICENSE.txt` 为 **GPL-3.0-only**，README 说明公开产品使用需取得许可。
+- 项目所有者已确认**已有上游直接授权**；仓库内目前没有书面凭证。发布前应归档授权书/邮件/合同，并确认覆盖 `FFF.Player`、`FFF.Recorder`、`LakeUI.Notifications` 与当前分发方式。授权凭证不能由本清单替代。
+- 许可原文：`licenses/LakeUI-GPL-3.0.txt`（由发布脚本从 `third_party/LakeUI/LICENSE.txt` 收集）。
+
+## 5. NuGet 直接引用
+
+| 包 | 许可 |
 |---|---|
-| libiamf | BSD-3-Clause Clear（Alliance for Open Media，2022）；原文已收：`licenses\libiamf-LICENSE.txt`（上游 main）+ `licenses\libiamf-PATENTS.txt`（同仓专利声明）；构建副本为 `third_party\libiamf\LICENSE.libiamf.txt`（钉定版本 `b276f437`） |
-| OAR | BSD-3-Clause Clear（AOM，2022）；原文已收：`licenses\oar-LICENSE.txt`（自 libiamf 钉定版本的 oar 子模块 `ca14b543` 收取，与上游 main 现行文本存在版本差异，main 版留档 `licenses\oar-LICENSE-main-branch.txt`） |
-| OBR | 随 oar 仓分发（`oar\src\renderer\obr\obr_capi\obr`，README 自述 Open Binaural Renderer）；**上游无独立 LICENSE 文件**，按宿主仓 oar 的 BSD-3-Clause Clear 对待；具体授权含义**未判定** |
-| FLAC | BSD-3-Clause（Xiph）；**未判定**（无原文；libiamf 的 `dep_codecs\` 只给 bin/include/lib 预编译件，无许可文本） |
-| opus | BSD-3-Clause（Xiph）；**未判定**（无原文，同上） |
-| pffft | FFTPACK/UCAR 条款（Julien Pommier 2013 原作 + Hayati Ayguen 2020 修改）；原文头部已收：`licenses\pffft-license-header.txt`（hayguen/pffft master；libiamf 树内无 pffft 源码与许可件，bazel 经 `external\pffft.BUILD` 拉取） |
-| abseil-cpp（59 件） | Apache-2.0；原文已收：`licenses\abseil-cpp-LICENSE` |
+| `Svg 3.4.8` | MS-PL |
+| `Vortice.Direct2D1 / Direct3D11 / DirectComposition / DirectX / DXGI 3.8.3` | MIT ×5 |
 
-**`fdk-aac.lib` 链接行状态**：`FFF.Native.vcxproj:122` 链接 `fdk-aac.lib`，
-`tools\准备Libiamf.ps1:151` 将其 staging。静态库按引用按需抽取；对成品
-`FFF.Native.dll` 的符号串核对显示该库代码**零进包**，因此不构成随包分发义务。
-链接行与 staging 保持不动（防御性保留）：若未来链接闭包变化使该成员被抽取，
-缺件会以链接错误立即暴露，而不是静默产出残缺二进制。
+NuGet 包的完整许可文本按其 `.nuspec`/包内 LICENSE 保留；发布包应带 NuGet notices 汇总，目前仍需补齐。
 
-- **许可**：fdk-aac 的许可原文**不在** libiamf 仓内（`code\dep_codecs\` 仅 bin/include/lib
-  预编译件），**未判定**；若未来该代码进包，必须先收原文再发布。
+## 6. AI 字幕扩展包（运行期下载，不属于本体）
 
-## 4. LakeUI —— **GPL-3.0-only，且作者声明商用需取得许可**
+AI 字幕包由 `FFF.Player` 的下载器按用户选择，从公开官方源组装；它不是 3FP 本体安装包的一部分。组件与许可见 `tools/ai-subtitles/AI字幕包声明.txt`，许可原文在 `licenses/ai/`。
 
-- `third_party\LakeUI\LICENSE.txt` 35 149 B，正文头两行 `GNU GENERAL PUBLIC LICENSE / Version 3, 29 June 2007`，无运行库例外条款。
-- `third_party\LakeUI\README.md:84` 原文："请注意，LakeUI 是收费软件，要在公开发布的产品中使用必须取得对应许可"；`:35` 为购买链接。
-- 引用点：`FFF.Player.vbproj:294` `<HintPath>..\..\LakeUI\LakeUI\bin\Debug\…\LakeUI.dll</HintPath>`（**Debug 配置产物**）；
-  `FFF.Recorder.vbproj:76` `<PackageReference Include="LakeUI.Notifications" Version="1.0.0" />`（许可 **未判定**：本机 NuGet 缓存无包可读）。
+| 组件 | 许可 | 来源 |
+|---|---|---|
+| Qwen3-ASR-0.6B（GGUF Q8_0 / ONNX int8） | Apache-2.0 | `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF`；`https://huggingface.co/csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25` |
+| llama.cpp | MIT | `https://github.com/ggml-org/llama.cpp` |
+| sherpa-onnx | Apache-2.0 | `https://github.com/k2-fsa/sherpa-onnx` |
+| OpenVINO | Apache-2.0 | `https://github.com/openvinotoolkit/openvino` |
+| Python 3.12 embeddable | PSF-2.0 | `https://www.python.org/` |
+| NumPy | BSD-3-Clause | `https://numpy.org/` |
+| ONNX Runtime | MIT | `https://github.com/microsoft/onnxruntime` |
+| openvino_telemetry | Apache-2.0 | OpenVINO 包内组件 |
 
-⚠ 本产物链把 GPL-3.0-only 的库静态引用进宿主 exe。是否必须先取得作者许可、以及由此产生的整体许可后果：**需法务**。
+- 宽松许可不等于免通知：MIT/BSD/PSF/Apache 均要求保留版权、许可和 NOTICE（如有）。下载器**已实现**把 `AI字幕包声明.txt`、包根 `LICENSE.txt`（3FP 自有 worker/适配代码 MIT）与 `licenses/ai/` 随包复制，manifest 写入 `notice`/`license`；缺声明、许可目录或许可全文时下载器返回“安装不完整”。
+- OpenVINO 遥测：`openvino_telemetry` 存在匿名使用统计；`Ai字幕管道.vb` 已在 worker 启动前**仅在 consent 文件不存在时写入 `0`（拒绝）**，尊重用户已有的 `1`（同意）选择；写入失败时静默，不阻断字幕。
+- AI 生成字幕的界面标识与本地处理声明见 `83` 报告 §8.4；AI 生成内容标识按《人工智能生成合成内容标识办法》按场景评估。
 
-## 5. NuGet 直接引用（`FFF.Player.vbproj:77-82`）
+## 7. 许可文本目录与发布门禁
 
-| 包 | 许可（`.nuspec` 的 `<license>` 原文） |
-|---|---|
-| `Svg 3.4.8` | **MS-PL** |
-| `Vortice.Direct2D1 / Direct3D11 / DirectComposition / DirectX / DXGI 3.8.3` | **MIT** ×5 |
+- `licenses/`：本仓第一方收集的第三方许可原文（abseil、libiamf、OAR、pffft、FLAC、opus、OBR/fdk 说明、GPLv2/GPLv3、LakeUI GPL-3.0 等）。
+- `licenses/ai/`：AI 扩展包用的 Apache-2.0、MIT、BSD-3-Clause、PSF-2.0 与 AI NOTICE。
+- `tools/发布3FP.ps1` **已实现**在打包时收集 `NOTICE`、本文件、`LICENSING.md`、`licenses/` 与 vcpkg/FFmpeg/LakeUI 文本；缺件默认中止，`FFF_ALLOW_MISSING_LICENSES=1` 只能显式放行。
+- 完整包/本体包分层：本体包出现 FFmpeg DLL 直接 fail；完整包按 FFmpeg 自身许可单独扫描。
 
-## 6. 运行时形态与内核源码本体
+## 8. 仍未闭环（不是“已合规”）
 
-- `tools\发布3FP.ps1:45` 为 `--self-contained false`（框架依赖，需本机 .NET 10 桌面运行时）；
-  `tools\发布3FP单文件.ps1:40` 为 `PublishSingleFile + IncludeNativeLibrariesForSelfExtract`，产物 ~45 MB < 单个 `avcodec` 76 MB ⇒ FFmpeg 未内嵌。
-- **本仓源码的归属**：`HEAD` 251 个被跟踪文件里 **212 个（84.5%）与上游根提交逐字节相同**（作者 `1059 Studio <vb1059@outlook.com>`）；本仓自研部分为 33 改 / 6 增 / 3 删。
-- `LICENSE.txt:3` 是**未填写的 MIT 模板**（`Copyright (c) [year] [fullname]`）⇒ "本仓按 MIT 授权"缺少可读回的版权人声明；`FFF.Native.rc` 的 `LegalCopyright` 值为 `"MIT License"`。两者的口径差异在此登记，修正需要版权人本人署名（**不由本仓使用者代填**）。
-
-## 7. 随包发布仍需处理（缺口，不是结论）
-
-1. §1 的 GPL 文本与"对应源码"要约（gpl+nonfree 构建）——未取得前不应对外分发。
-2. §3 的许可**原文**缺口（2026-11-07 更新）：已收 libiamf（LICENSE+PATENTS）、OAR、pffft（头部声明）、
-   abseil 四族入 `licenses\`（`tools\发布3FP.ps1` 的许可步骤需同步收集该目录）；仍缺 **FLAC / opus**
-   （Xiph 原文）、**OBR 单独文本**（上游无独立文件）、**fdk-aac**（libiamf 仓 `dep_codecs\` 只给预编译件；
-   其代码当前零进包，见 §3）。
-3. §4 LakeUI 的许可取得状态待确认。
-4. 本文件与 §2 各 port 的 `copyright` 由 `tools\发布3FP.ps1` 的许可步骤随包；缺件默认中止。
+1. 完整运行时包的 FFmpeg 源码获取方式与 nonfree 构建条件；GPLv2/v3/LGPL 文本已补到 `licenses/`。
+2. libass/LGPL 组件的 source offer 与可重新链接说明。
+3. LakeUI 书面授权凭证归档；仓库内目前只有 GPL 文本。
+4. OBR 独立授权文本、fdk-aac 原文（当前零进包）；若链接闭包变化需重新评估。
+5. NuGet notices 汇总；AI `licenses/ai/` 已随构建输出验证，真实下载/运行与遥测实测仍待。
+6. `THIRD-PARTY-NOTICES.md` 与 README 的维护：README 标注“AI 禁止修改”，由人工维护；本文件可随代码更新。

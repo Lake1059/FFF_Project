@@ -209,6 +209,19 @@ Friend Class Form设置_AI字幕
             HCL_下载状态.Text = 状态富文本("#808080", "该目录已是有效扩展包，无需下载。")
             Return
         End If
+        ' 下载前把“包含哪些第三方组件、音频是否上传、AI 字幕是否标注”说清楚，
+        ' 而不是等下载完再让用户去包目录里找声明。
+        Dim 确认 = MessageBox.Show(
+            "本包会从公开官方源下载 AI 字幕所需的第三方模型/运行时：" & vbCrLf &
+            "Qwen3-ASR、llama.cpp、sherpa-onnx、OpenVINO、Python、NumPy、ONNX Runtime。" & vbCrLf & vbCrLf &
+            "许可与来源见下载后的 AI字幕包声明.txt 与 licenses\ai\；音频只在本机处理，不上传；" & vbCrLf &
+            "AI 生成字幕可能不准确，仅供参考。" & vbCrLf & vbCrLf &
+            "继续下载？",
+            "AI 字幕包声明",
+            MessageBoxButtons.OKCancel,
+            MessageBoxIcon.Information,
+            MessageBoxDefaultButton.Button2)
+        If 确认 <> DialogResult.OK Then Return
         开始下载(目录)
     End Sub
 
@@ -669,7 +682,8 @@ Friend Class Form设置_AI字幕
             $"已启用：{配置.名称} —— 窗口 {窗口:0.###}s / 步长 {步长:0.###}s{后缀}",
             $"设备：{Ai字幕推理档.设备显示名(设备)}　后端：{Ai字幕推理档.后端显示名(后端, 配置.引擎)}　模型：{档名}　语言：{语言说明}",
             $"说明：{Ai字幕推理档.后端说明(后端, 配置.引擎)}",
-            $"状态：{Ai字幕推理档.后端状态(后端, 配置.引擎)}"
+            $"状态：{Ai字幕推理档.后端状态(后端, 配置.引擎)}",
+            "声明：包内 AI字幕包声明.txt 与 licenses\ai\ 列明第三方许可/来源；音频只在本机处理，不上传；AI 生成字幕仅供参考。"
         }
         Dim 颜色 As String = "#6B8E23"
         If Not Ai字幕推理档.当前worker可用(后端, 配置.引擎) Then

@@ -23,6 +23,7 @@
       <!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
       <Authors>1059 Studio</Authors>
       <Company>1059 Studio</Company>
+      <Copyright>Copyright (c) 2026 1059 Studio</Copyright>
       <AssemblyVersion>2026.11.5</AssemblyVersion>
       <FileVersion>2026.11.5</FileVersion>
       <Version>2026.11.5</Version>
@@ -67,6 +68,35 @@
     </None>
     <None Include="..\tools\ai-subtitles\qwen3_ort.py">
       <Link>ai-subtitles\qwen3_ort.py</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\tools\ai-subtitles\AI字幕包声明.txt">
+      <Link>ai-subtitles\AI字幕包声明.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\LICENSE.txt">
+      <Link>LICENSE.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- AI 扩展包第三方许可原文：随播放器部署到 licenses\ai，下载器再复制进包。 -->
+    <None Include="..\licenses\ai\Apache-2.0.txt">
+      <Link>licenses\ai\Apache-2.0.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\licenses\ai\MIT.txt">
+      <Link>licenses\ai\MIT.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\licenses\ai\BSD-3-Clause.txt">
+      <Link>licenses\ai\BSD-3-Clause.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\licenses\ai\PSF-2.0.txt">
+      <Link>licenses\ai\PSF-2.0.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\licenses\ai\NOTICE.txt">
+      <Link>licenses\ai\NOTICE.txt</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

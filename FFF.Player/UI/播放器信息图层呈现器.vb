@@ -436,13 +436,13 @@ Friend NotInheritable Class 播放器信息图层呈现器
         ' AI 标记，两种来源一眼可分。
         Dim AI活动 = 安全获取(获取AI字幕活动)
         Dim 字幕文本 = If(字幕 Is Nothing,
-            If(AI活动, "已加载 AI实时识别", "未加载"),
+            If(AI活动, "已加载 AI生成字幕（实时识别）", "未加载"),
             合并字段(
                 字幕.格式.ToString().ToUpperInvariant(),
                 $"总数量 {字幕条目数(字幕)}",
                 If(字幕状态 Is Nothing, String.Empty, $"正在渲染 {字幕状态.命令数}"),
                 $"延迟 {图层延迟(字幕状态)}",
-                If(AI活动, "AI实时识别", String.Empty)))
+                If(AI活动, "AI生成字幕", String.Empty)))
         Dim 弹幕文本 = If(弹幕 Is Nothing, "未加载", 合并字段(
             "哔哩哔哩 XML", $"总数量 {弹幕.数量}",
             If(弹幕状态 Is Nothing, String.Empty, $"正在渲染 {弹幕状态.命令数}"),

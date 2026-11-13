@@ -93,6 +93,13 @@ try {
     # ── 许可随包步骤（与主仓 pack.ps1 的 F4b/F10/F4a 同一口径）──
     # 分发第三方件却不附清单与许可全文 = 义务没落地。这一步把"有没有"变成有牙的门：
     # 缺哪件、为什么缺，逐件点名，不许静默少收；放行必须显式设环境变量。
+    $LicenseCandidates = @(
+        (Join-Path $ProjectRoot "LICENSE.txt"),
+        (Join-Path ([IO.Path]::GetFullPath((Join-Path $ProjectRoot "..\.."))) "LICENSE.txt"))
+    $LicenseSrc = @($LicenseCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    if ($LicenseSrc.Count -eq 0) { throw ("没有 LICENSE.txt（找过：$($LicenseCandidates -join '；')）—— 第一方 MIT 全文缺席即不发。") }
+    Copy-Item -LiteralPath $LicenseSrc[0] -Destination (Join-Path $StagingDirectory "LICENSE.txt") -Force
+    Write-Host "   ✅ 第一方 MIT 许可已入包：$($LicenseSrc[0])" -ForegroundColor Green
     $NoticesCandidates = @(
         (Join-Path $ProjectRoot "THIRD-PARTY-NOTICES.md"),
         (Join-Path ([IO.Path]::GetFullPath((Join-Path $ProjectRoot "..\.."))) "THIRD-PARTY-NOTICES.md"))
@@ -102,6 +109,27 @@ try {
                "本包自带 FFmpeg/libass 一族/LakeUI 等第三方件，清单缺席即不发。")
     }
     Copy-Item -LiteralPath $NoticesSrc[0] -Destination $StagingDirectory -Force
+    $NoticeCandidates = @(
+        (Join-Path $ProjectRoot "NOTICE"),
+        (Join-Path ([IO.Path]::GetFullPath((Join-Path $ProjectRoot "..\.."))) "NOTICE"))
+    $NoticeSrc = @($NoticeCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    if ($NoticeSrc.Count -eq 0) {
+        throw ("没有 NOTICE（找过：$($NoticeCandidates -join '；')）—— 版权归属声明缺席即不发。")
+    }
+    Copy-Item -LiteralPath $NoticeSrc[0] -Destination (Join-Path $StagingDirectory "NOTICE") -Force
+    $NoticeText = [IO.File]::ReadAllText($NoticeSrc[0])
+    if ($NoticeText.Length -lt 200) { throw "NOTICE 不像有效归属声明（$($NoticeText.Length) 字符）：$($NoticeSrc[0])" }
+    if (-not (Test-Path -LiteralPath (Join-Path $StagingDirectory "THIRD-PARTY-NOTICES.md") -PathType Leaf)) {
+        throw "THIRD-PARTY-NOTICES.md 未进入 staging，版权/第三方清单不完整。"
+    }
+    Write-Host "   ✅ 版权归属 NOTICE 已入包：$($NoticeSrc[0])" -ForegroundColor Green
+    $LicensingCandidates = @(
+        (Join-Path $ProjectRoot "LICENSING.md"),
+        (Join-Path ([IO.Path]::GetFullPath((Join-Path $ProjectRoot "..\.."))) "LICENSING.md"))
+    $LicensingSrc = @($LicensingCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    if ($LicensingSrc.Count -eq 0) { throw ("没有 LICENSING.md（找过：$($LicensingCandidates -join '；')）—— 归属说明缺席即不发。") }
+    Copy-Item -LiteralPath $LicensingSrc[0] -Destination (Join-Path $StagingDirectory "LICENSING.md") -Force
+    Write-Host "   ✅ 许可/贡献说明已入包：$($LicensingSrc[0])" -ForegroundColor Green
     $NoticesText = [IO.File]::ReadAllText($NoticesSrc[0])
     if ($NoticesText.Length -lt 400 -or -not $NoticesText.Contains('--enable-nonfree')) {
         throw "包内清单不像实测文件（$($NoticesText.Length) 字符 / 未登记 nonfree 构建串）：$($NoticesSrc[0])"
@@ -143,14 +171,32 @@ try {
             $licCopied += $e.Name
         } else { $licMissing += "$($e.Name)（找过：$($e.Cands -join '；')）" }
     }
-    $licWant = $LicPorts.Count + 3
+    # 本仓 licenses/ 下的静态库/专利/说明文本；AI 子目录单独递归，随完整包保留，
+    # 便于用户在同一包内看到 AI 扩展包的许可原文。
+    $LocalLicDir = Join-Path $ProjectRoot "licenses"
+    $LocalLicFiles = @(Get-ChildItem -LiteralPath $LocalLicDir -File -ErrorAction SilentlyContinue)
+    foreach ($f in $LocalLicFiles) {
+        Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $LicStage $f.Name) -Force
+        $licCopied += "local-$($f.Name)"
+    }
+    $AiLicDir = Join-Path $LocalLicDir "ai"
+    $AiLicFiles = @(Get-ChildItem -LiteralPath $AiLicDir -File -ErrorAction SilentlyContinue)
+    if ($AiLicFiles.Count -gt 0) {
+        $AiStage = Join-Path $LicStage "ai"
+        New-Item -ItemType Directory -Force -Path $AiStage | Out-Null
+        foreach ($f in $AiLicFiles) {
+            Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $AiStage $f.Name) -Force
+            $licCopied += "ai-$($f.Name)"
+        }
+    }
+    $licWant = $LicPorts.Count + $LicExtra.Count + $LocalLicFiles.Count + $AiLicFiles.Count
     if ($licMissing.Count -gt 0) {
         $msg = "许可文本缺 $($licMissing.Count)/$licWant 件：$($licMissing -join '；')"
         if ($env:FFF_ALLOW_MISSING_LICENSES -eq '1') {
             Write-Host "   ⚠ 已放行：$msg" -ForegroundColor Yellow
         } else { throw "$msg —— 分发第三方件却不附许可全文；确认可接受后再设 FFF_ALLOW_MISSING_LICENSES=1" }
     }
-    $licEmpty = @(Get-ChildItem -LiteralPath $LicStage -Filter *.txt -File | Where-Object { $_.Length -eq 0 })
+    $licEmpty = @(Get-ChildItem -LiteralPath $LicStage -File -Recurse | Where-Object { $_.Length -eq 0 })
     if ($licEmpty.Count -gt 0) { throw "licenses\ 里有 $($licEmpty.Count) 个 0 字节文件：$(($licEmpty | ForEach-Object { $_.Name }) -join ', ')" }
     if ($licMissing.Count -eq 0) {
         Write-Host "   ✅ 许可文本已入包 licenses/（$($licCopied.Count)/$licWant 件）" -ForegroundColor Green

@@ -1,0 +1,19 @@
+3FP / FFF Project
+Copyright (c) 2026 1059 Studio
+
+This product includes software and assets developed by third parties.
+See THIRD-PARTY-NOTICES.md for the component list, license identifiers,
+source locations and distribution boundaries, and licenses/ for the
+corresponding license texts. First-party licensing and contribution rules are
+summarized in LICENSING.md. The AI subtitle runtime is downloaded
+separately; its notice is ai-subtitles/AI字幕包声明.txt (repo path:
+tools/ai-subtitles/AI字幕包声明.txt), and its license texts are
+licenses/ai/ when an AI package is assembled.
+
+Third-party names and trademarks remain the property of their respective
+owners. Nothing in this NOTICE grants permission to use any third-party
+trademark, logo or product name beyond reasonable, customary attribution.
+
+This NOTICE is informational and does not replace the license texts. If a
+component's license conflicts with this summary, the component's own license
+text controls.
