@@ -9,6 +9,9 @@ Public Class 设置
     Public Property 初始画面尺寸选项 As Integer = 2
     Public Property 自定义初始画面宽度 As Integer = 1024
     Public Property 自定义初始画面高度 As Integer = 576
+    ' 打开媒体时按内容原始像素 1:1 设置窗口；内容达到显示器工作区时最大化。
+    ' 默认 False：不改变既有“初始画面尺寸”行为，旧设置文件缺键也落到 False。
+    Public Property 内容原始尺寸模式 As Boolean = False
     ' 解码方式默认 GPU（2026-10-21 起，此前为 CPU）。理由：硬解不通时内核自己会回退 CPU
     ' （打开时试解首包 + 播放中失败即切换，均已实机验证），用户侧没有"选错就放不出"的风险，
     ' 而默认 CPU 等于让大多数机器白白放弃硬解。主界面「解码」按钮仍可随时翻转，并写回本项。

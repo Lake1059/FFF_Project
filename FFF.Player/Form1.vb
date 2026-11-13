@@ -256,7 +256,10 @@ Public Class Form1
 
         AddHandler 画面控件.Ctrl滚轮, AddressOf 画面控件_Ctrl滚轮
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
-            AddressOf 播放控制器.重绑输出窗口)
+            AddressOf 播放控制器.重绑输出窗口,
+            AddressOf 播放控制器.尝试设置原生尺寸封顶,
+            Not 本次启动图片优先)
+        窗口布局控制器.设置内容尺寸模式(设置.实例对象.内容原始尺寸模式)
         画面菜单控制器 = New 播放器画面菜单控制器(
             Me, 画面控件, MCM_标题栏菜单, MCM_调整渲染区域大小, MCM_截取当前画面,
             窗口布局控制器, AddressOf 播放控制器.安全读取快照,
@@ -295,7 +298,8 @@ Public Class Form1
             Function() 播放控制器.当前视图旋转,
             Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "旋转"),
             设置.实例对象.自动转正,
-            Sub(值) 设置.实例对象.自动转正 = 值)
+            Sub(值) 设置.实例对象.自动转正 = 值,
+            Sub(值) 窗口布局控制器?.更新内容旋转(值))
         AddHandler 播放控制器.媒体已打开, AddressOf 视图旋转控制器.媒体已打开
         ' RTX 视频超分辨率：内核逐帧判定，宿主只负责"请求/取消"与把原因摊开。
         ' 媒体打开后重放偏好是必需的——VSR 请求是会话内状态，新会话从内核默认的 Off 起步。
@@ -371,7 +375,11 @@ Public Class Form1
         If Not 本次启动图片优先 Then
             创建图层呈现器()
         End If
-        窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
+        ' 内容原始尺寸模式在打开媒体后才决定窗口；启动阶段保留设计器默认尺寸，
+        ' 避免先按 854×480 落位再被媒体事件改一次。
+        If Not 设置.实例对象.内容原始尺寸模式 Then
+            窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
+        End If
         PerformLayout()
         核心文件检查通过 = True
     End Sub
@@ -608,7 +616,11 @@ Public Class Form1
         ' 已在 Load 同步完成，上游 30b2a7e 形态逐字不变）。
         If 本次启动图片优先 Then
             BeginInvoke(Sub()
-                            If Not 正在关闭 Then ThisIsYourWindow1.Attach(Me)
+                            If Not 正在关闭 Then
+                                ThisIsYourWindow1.Attach(Me)
+                                ' 图片打开事件可能发生在 Attach 之前；chrome 接管后重放一次内容尺寸。
+                                窗口布局控制器?.界面已就绪()
+                            End If
                         End Sub)
             BeginInvoke(Sub() 创建图层呈现器())
         End If
@@ -864,7 +876,10 @@ Public Class Form1
 
     Private Sub ThisIsYourWindow1_FullScreenChanged(
         sender As Object, e As LakeUI.ThisIsYourWindow.FullScreenChangedEventArgs)
-        If e.HostForm Is Me AndAlso Not 正在关闭 Then 全屏交互控制器?.设置全屏状态(e.IsFullScreen)
+        If e.HostForm Is Me AndAlso Not 正在关闭 Then
+            全屏交互控制器?.设置全屏状态(e.IsFullScreen)
+            窗口布局控制器?.设置全屏状态(e.IsFullScreen)
+        End If
     End Sub
 
     Private Sub 剪辑区间控制器_模式已变化(sender As Object, e As 剪辑区间模式变化事件参数)
@@ -1048,7 +1063,29 @@ Public Class Form1
         图片浏览控制器?.媒体已打开(e.媒体信息, e.快照)
         界面呈现器.设置图片模式(图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.图片模式已启用)
         界面呈现器.刷新()
+        ' 内容尺寸模式：每次打开媒体重算一次；普通播放过程中不逐帧跟随，避免窗口抖动。
+        Dim 内容尺寸 = 解析内容尺寸(e.快照, e.媒体信息)
+        窗口布局控制器?.应用内容原始尺寸(内容尺寸, 播放控制器.当前视图旋转)
+        ' 纯音频/无视频没有内容尺寸；内容模式启动时跳过了初始画面尺寸，这里补回默认画面尺寸，
+        ' 否则会停在设计器默认的大窗口。图片和视频的内容尺寸非空，不会走到这里。
+        If 内容尺寸.IsEmpty AndAlso Not 播放控制器.当前媒体是视频 Then
+            窗口布局控制器?.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
+        End If
     End Sub
+
+    ''' <summary>快照优先；快照尺寸缺失时回落到媒体信息里的当前视频流。纯音频/无视频返回空。</summary>
+    Private Shared Function 解析内容尺寸(快照 As 播放器快照, 信息 As 媒体信息) As Size
+        If 快照 IsNot Nothing AndAlso 快照.视频宽度 > 0UI AndAlso 快照.视频高度 > 0UI Then
+            Return New Size(CInt(快照.视频宽度), CInt(快照.视频高度))
+        End If
+        If 信息?.流 Is Nothing Then Return Size.Empty
+        Dim 当前索引 = If(快照 Is Nothing, -1, 快照.当前视频流)
+        Dim 视频流 = 信息.流.FirstOrDefault(
+            Function(流) 流.类型 = "video" AndAlso Not 流.是封面图 AndAlso
+                (当前索引 < 0 OrElse 流.索引 = 当前索引))
+        If 视频流 Is Nothing OrElse 视频流.宽度 <= 0 OrElse 视频流.高度 <= 0 Then Return Size.Empty
+        Return New Size(视频流.宽度, 视频流.高度)
+    End Function
 
     Private Sub 播放控制器_媒体已打开_前后预取(sender As Object, e As 播放器媒体事件参数)
         前后预取控制器?.媒体已打开(e.文件路径)
@@ -1549,6 +1586,14 @@ Public Class Form1
 
     Private Sub Form1_DpiChanged(sender As Object, e As DpiChangedEventArgs) Handles Me.DpiChanged
         界面呈现器?.更新Dpi()
+        ' DPI 改变后 chrome 尺寸变化；内容区仍要按物理像素重算。
+        窗口布局控制器?.重新应用内容尺寸()
+    End Sub
+
+    ''' <summary>设置页勾选“内容原始尺寸 1:1”后立即作用于当前媒体（没有媒体时自然早退）。</summary>
+    Friend Sub 应用内容尺寸模式设置()
+        If 正在关闭 Then Return
+        窗口布局控制器?.设置内容尺寸模式(设置.实例对象.内容原始尺寸模式)
     End Sub
 
     Protected Overrides Function ProcessDialogKey(keyData As Keys) As Boolean

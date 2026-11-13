@@ -675,9 +675,10 @@ Public NotInheritable Class 播放器会话
 
     ' 视口封顶开关（API 16 新增导出）：开启后适配盒不超过源原生尺寸，缩放值就是绝对的
     ' 屏幕:视频 像素比。内核把这一偏好存在渲染器里，设备重建后不丢，所以不必在恢复路径重发。
-    Public Sub 设置原生尺寸封顶(开启 As Boolean)
-        检查结果(播放器原生接口.FFF3FP_SetFitLimitToNative(取得句柄(), If(开启, 1UI, 0UI)))
-    End Sub
+    ' 旧内核没有该导出时返回 False，调用方继续走窗口尺寸逻辑。
+    Public Function 尝试设置原生尺寸封顶(开启 As Boolean) As Boolean
+        Return 播放器原生接口.尝试设置原生尺寸封顶(取得句柄(), 开启)
+    End Function
 
     ''' <summary>图片模式：读取帧数、动画标志、EXIF 旋转、源格式位深、ICC 大小与色彩信息。
     ''' 当前媒体不支持图片信息时返回 Nothing。</summary>

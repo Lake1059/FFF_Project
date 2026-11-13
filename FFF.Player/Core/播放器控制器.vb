@@ -252,6 +252,11 @@ Public NotInheritable Class 播放器控制器
         Return 安全读取会话(Function(目标) 目标.当前快照)
     End Function
 
+    ''' <summary>视口封顶是会话内状态；旧内核缺导出时返回 False，不打断窗口尺寸逻辑。</summary>
+    Friend Function 尝试设置原生尺寸封顶(开启 As Boolean) As Boolean
+        Return 安全读取会话(Function(目标) 目标.尝试设置原生尺寸封顶(开启), False)
+    End Function
+
     ''' <summary>截图用：离屏回读一帧（源分辨率）。内核不支持或没有画面时返回 Nothing，
     ''' 由调用方回落到屏幕抓取。</summary>
     Friend Function 读取原始帧() As Bitmap

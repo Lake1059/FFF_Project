@@ -1648,9 +1648,31 @@ Friend Module 播放器原生接口
 
     ' 视口封顶：非 0 时适配盒不超过源原生尺寸，于是"缩放"变成绝对的 屏幕:视频 像素比
     ' （缩放=1 即逐像素 1:1，窗口比源大时四周留黑边）。0 = 沿用"铺满窗口"的历史行为。
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
-    Friend Function FFF3FP_SetFitLimitToNative(播放器 As 播放器原生句柄,
-                                               开启 As UInteger) As 原生播放器结果
+    ' 可选导出：旧内核没有这个入口时不能抛 EntryPointNotFoundException，调用方按能力位回退。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Friend Delegate Function 设置原生尺寸封顶原型(播放器 As 播放器原生句柄,
+                                                     开启 As UInteger) As 原生播放器结果
+
+    Private ReadOnly 设置原生尺寸封顶函数 As 设置原生尺寸封顶原型 =
+        解析可选导出(Of 设置原生尺寸封顶原型)("FFF3FP_SetFitLimitToNative")
+
+    ''' <summary>当前内核是否提供视口封顶能力（旧内核返回 False）。</summary>
+    Friend ReadOnly Property 支持原生尺寸封顶 As Boolean
+        Get
+            Return 设置原生尺寸封顶函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>尝试设置视口封顶；旧内核缺失入口或调用失败时返回 False，不抛异常。</summary>
+    Friend Function 尝试设置原生尺寸封顶(播放器 As 播放器原生句柄,
+                                         开启 As Boolean) As Boolean
+        Dim 函数 = 设置原生尺寸封顶函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Return 函数(播放器, If(开启, 1UI, 0UI)) = 原生播放器结果.成功
+        Catch
+            Return False
+        End Try
     End Function
     ' 图片信息（帧数/动画/EXIF 旋转/格式位深/ICC/alpha/色彩原色）。调用前必须填好 大小 与 版本。
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
