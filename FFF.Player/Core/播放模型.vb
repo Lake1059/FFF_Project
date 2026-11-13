@@ -130,8 +130,7 @@ Public NotInheritable Class 播放器配置
     Public Property 音频缓冲区策略 As Integer
     Public Property 启用空间音频 As Boolean = True
     Public Property 启用单声道音频 As Boolean = False
-    ''' <summary>音频源码直通偏好（自动/强制/关，默认自动）。只有模块在场且端点支持
-    ''' 模块决策的格式时才接管；缺席/不支持一律静默回退解码。</summary>
+    ''' <summary>音频直通偏好；只有模块在场且端点支持时才接管。</summary>
     Public Property 音频直通 As 音频直通模式 = 音频直通模式.自动
     ' SDR 源的 scRGB 呈现策略，对应内核 FFF3FPConfiguration.sdrScRgbMode。
     ' 1 = 自动（默认）：位深 >8 的 SDR 源优先上 16bit scRGB 链；
@@ -240,8 +239,7 @@ Public NotInheritable Class 播放器快照
         IAMF已接管 = 值.IAMF已接管 <> 0
         IAMF声道数 = CInt(值.IAMF声道数)
         IAMF声场系统 = CInt(值.IAMF声场系统)
-        ' 床由谁渲染：内核侧的接缝写这个字段（外部渲染器拥有床=1，矩阵折叠=0）。
-        ' 它此前在 ABI 里躺了很久却没有写入者，接缝落地后才有真值。
+        ' 接缝写入床归属：外部渲染器拥有为 1，矩阵折叠为 0。
         音频双耳渲染生效 = 值.音频双耳渲染 <> 0
         IAMF内容声道数 = CInt(值.IAMF内容声道数)
         ' 上传耗时是追加字段；与其它微秒级计时一样保留 100ns 精度。
@@ -313,8 +311,7 @@ Public NotInheritable Class 播放器快照
     Public ReadOnly Property 视频队列帧数 As Integer
     Public ReadOnly Property 源峰值尼特 As UInteger
     Public ReadOnly Property 已解码音频帧数 As ULong
-    ''' <summary>床当前由外部渲染器拥有（HRTF 双耳）而非内核的矩阵折叠。
-    ''' 真值只在接缝生效时出现；缺席、旧件、未解锁一律为假——那是现网行为，不是降级故障。</summary>
+    ''' <summary>床由外部渲染器拥有；缺席或未解锁时为假。</summary>
     Public ReadOnly Property 音频双耳渲染生效 As Boolean
     Public ReadOnly Property 音频位置 As TimeSpan
     Public ReadOnly Property 音频缓冲时长 As TimeSpan
@@ -393,8 +390,7 @@ Public NotInheritable Class 播放器快照
         End Get
     End Property
 
-    ''' <summary>音频源码直通通道拥有当前音轨（模块打包标准码流 + 独占非 PCM 端点）。
-    ''' 模块缺席恒为假——那是现网解码路径，不是降级故障。</summary>
+    ''' <summary>音频直通已接管当前音轨；模块缺席恒为假。</summary>
     Public ReadOnly Property 音频直通已接管 As Boolean
     ''' <summary>实际生效路由：0=解码折叠，1=IEC 码流直通（2 为 HT 端点预留）。</summary>
     Public ReadOnly Property 音频直通路由 As UInteger
