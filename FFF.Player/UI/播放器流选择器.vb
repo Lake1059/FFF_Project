@@ -82,12 +82,26 @@ Friend NotInheritable Class 播放器流选择器
 
         菜单.Items.Add(创建分隔线())
         Dim 外部字幕 = 播放控制器.可用外部字幕
-        添加标题("字幕流", 字幕流.Length + 外部字幕.Count)
+        Dim 有AI字幕 = 播放控制器.可显示AI字幕
+        添加标题("字幕流", 字幕流.Length + 外部字幕.Count + If(有AI字幕, 1, 0))
         Dim 当前字幕索引 = 播放控制器.当前字幕流索引
         Dim 当前字幕 = 播放控制器.当前字幕
-        Dim 关闭项 = 创建流项("关闭字幕", 当前字幕索引 = -2)
+        Dim 关闭项 = 创建流项("关闭字幕", 当前字幕索引 = -2 AndAlso Not 播放控制器.AI字幕已启用)
         AddHandler 关闭项.Click, Sub() 播放控制器.关闭字幕()
         菜单.Items.Add(关闭项)
+
+        ' AI 实时字幕是字幕来源的第四项，与内嵌/外挂互斥（选中它会把普通字幕清掉）。
+        ' 只在装了有效扩展包时摆出来：没包时点它只能弹设置页，不如干脆不摆。
+        If 有AI字幕 Then
+            Dim AI配置 = 播放控制器.AI字幕.当前包配置
+            Dim AI文字 = "AI 实时字幕"
+            If AI配置 IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(AI配置.名称) Then
+                AI文字 &= " · " & 缩短文本(AI配置.名称, 24)
+            End If
+            Dim AI项 = 创建流项(AI文字, 播放控制器.AI字幕已启用)
+            AddHandler AI项.Click, Sub() 播放控制器.选择AI字幕()
+            菜单.Items.Add(AI项)
+        End If
 
         For Each 流 In 字幕流
             Dim 流索引 = 流.索引

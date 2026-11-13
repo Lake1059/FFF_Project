@@ -1,0 +1,13 @@
+fdk-aac — 当前链接闭包说明
+2026-11-13
+
+`FFF.Native.vcxproj` 保留 `fdk-aac.lib` 链接行，`tools/准备Libiamf.ps1` 也会
+staging 该预编译件；但对当前成品 `FFF.Native.dll` 的符号串核对显示 fdk-aac
+代码零进包，因此当前不产生随包分发义务。
+
+- fdk-aac 的许可原文不在 libiamf 仓的 `dep_codecs/` 内（该目录只给
+  bin/include/lib 预编译件）。
+- 若未来链接闭包变化使 fdk-aac 成员被抽取，必须先取得并随包附上上游许可原文，
+  再重新评估分发条件；不要把“当前零进包”当成永久豁免。
+
+本说明不是许可文本，也不是法律意见。

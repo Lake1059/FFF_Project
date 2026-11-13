@@ -19,6 +19,7 @@ Friend NotInheritable Class 播放器视图旋转控制器
     Private ReadOnly 取得旋转 As Func(Of UInteger)
     Private ReadOnly 操作提示 As Action(Of String)
     Private ReadOnly 保存自动转正偏好 As Action(Of Boolean)
+    Private ReadOnly 旋转已应用 As Action(Of UInteger)
     Private ReadOnly 顺时针菜单项 As LakeUI.ModernContextMenu.ModernMenuItem
     Private ReadOnly 逆时针菜单项 As LakeUI.ModernContextMenu.ModernMenuItem
     Private ReadOnly 复位菜单项 As LakeUI.ModernContextMenu.ModernMenuItem
@@ -33,7 +34,8 @@ Friend NotInheritable Class 播放器视图旋转控制器
                    取得旋转值 As Func(Of UInteger),
                    操作提示值 As Action(Of String),
                    自动转正初值 As Boolean,
-                   保存自动转正 As Action(Of Boolean))
+                   保存自动转正 As Action(Of Boolean),
+                   Optional 旋转已应用值 As Action(Of UInteger) = Nothing)
         ArgumentNullException.ThrowIfNull(旋转菜单)
         ArgumentNullException.ThrowIfNull(应用旋转值)
         ArgumentNullException.ThrowIfNull(取得旋转值)
@@ -43,6 +45,7 @@ Friend NotInheritable Class 播放器视图旋转控制器
         取得旋转 = 取得旋转值
         操作提示 = 操作提示值
         保存自动转正偏好 = 保存自动转正
+        旋转已应用 = 旋转已应用值
         自动转正已启用值 = 自动转正初值
 
         顺时针菜单项 = New LakeUI.ModernContextMenu.ModernMenuItem With {
@@ -86,7 +89,7 @@ Friend NotInheritable Class 播放器视图旋转控制器
         If 已释放 Then Return
         Dim 当前 = 安全取旋转()
         Dim 下一个 = If(顺时针, (当前 + 1UI) Mod 4UI, (当前 + 3UI) Mod 4UI)
-        应用旋转(下一个)
+        应用并通知(下一个)
         报告方向(下一个)
     End Sub
 
@@ -94,7 +97,7 @@ Friend NotInheritable Class 播放器视图旋转控制器
     Friend Sub 复位()
         If 已释放 Then Return
         Dim 目标 = If(自动转正已启用值, 源旋转值, 0UI)
-        应用旋转(目标)
+        应用并通知(目标)
         操作提示(If(目标 = 0UI, "已复原方向", $"已回到源方向 {CInt(目标) * 90}°"))
     End Sub
 
@@ -105,9 +108,14 @@ Friend NotInheritable Class 播放器视图旋转控制器
         If 已释放 Then Return
         源旋转值 = 安全取旋转()
         If Not 自动转正已启用值 AndAlso 源旋转值 <> 0UI Then
-            应用旋转(0UI)
+            应用并通知(0UI)
             操作提示("已按设置保持原始方向")
         End If
+    End Sub
+
+    Private Sub 应用并通知(四分一转 As UInteger)
+        应用旋转(四分一转)
+        旋转已应用?.Invoke(四分一转)
     End Sub
 
     Private Function 安全取旋转() As UInteger
@@ -144,10 +152,10 @@ Friend NotInheritable Class 播放器视图旋转控制器
         ' 打开设置：立即回到源方向（把内核套用的值再套一次，幂等）。
         ' 关闭设置：立即归零，让用户看到"原始方向"。
         If 自动转正已启用值 Then
-            应用旋转(源旋转值)
+            应用并通知(源旋转值)
             操作提示("已启用按源方向自动转正")
         Else
-            应用旋转(0UI)
+            应用并通知(0UI)
             操作提示("已关闭自动转正（保持原始方向）")
         End If
     End Sub

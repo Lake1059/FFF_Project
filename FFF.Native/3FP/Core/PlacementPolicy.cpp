@@ -1,11 +1,14 @@
 #include "pch.h"
 #include "3FP/Core/PlacementPolicy.h"
+#include "3FP/Api/FFF.Player.CpuPlacement.h"
 
 #include <windows.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <mutex>
+#include <set>
 
 extern void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept;
 
@@ -56,6 +59,36 @@ int ClassRank(DWORD value) noexcept {
         case REALTIME_PRIORITY_CLASS: return 5;
         default: return -1;
     }
+}
+
+// Process-wide startup placement state (docs/146). The startup assignment is opt-in
+// (FFF_STARTUP_PLACEMENT) and is released by the host fallback or by the first
+// presented frame. A playback session takes ownership of the process-default CPU set
+// as soon as its own tier writes it, and the startup release must not clear that.
+std::mutex g_startupPlacementMutex;
+bool g_startupPlacementActive = false;
+bool g_sessionOwnsProcessDefaultCpuSets = false;
+
+// Startup placement history for the diagnostic snapshot (P3-12): 1 = Begin applied the
+// process default, 2 = the last Begin was refused or disabled, 0 = Begin never ran.
+// End deliberately leaves this untouched: the flag answers "did the startup window ever
+// apply its placement in this process", which stays true after the window closes.
+std::atomic<std::uint32_t> g_startupPlacementHistory{0};
+
+void MarkStartupPlacementHistory(const std::uint32_t state) noexcept {
+    g_startupPlacementHistory.store(state, std::memory_order_relaxed);
+}
+
+std::uint32_t StartupPlacementHistory() noexcept {
+    return g_startupPlacementHistory.load(std::memory_order_relaxed);
+}
+
+// ABI sentinel for the int32 fields of the snapshot: "cannot be measured".
+constexpr std::int32_t kUnknownInt =
+    static_cast<std::int32_t>(FFF3FP_CPUPLACEMENT_UNKNOWN);
+
+constexpr std::uint32_t Flag(const FFF3FPCpuPlacementFlags flag) noexcept {
+    return static_cast<std::uint32_t>(flag);
 }
 
 }  // namespace
@@ -137,6 +170,7 @@ void PlacementPolicy::Discover() noexcept {
     struct Entry { std::uint32_t id; std::uint32_t lp; };
     std::map<unsigned char, std::vector<Entry>> byEfficiency;
     std::map<unsigned char, std::vector<Entry>> byCache;
+    std::set<WORD> groupsSeen;
     const std::size_t count = written / sizeof(SYSTEM_CPU_SET_INFORMATION);
     for (std::size_t i = 0; i < count; ++i) {
         const auto& cpu = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data())[i].CpuSet;
@@ -145,7 +179,9 @@ void PlacementPolicy::Discover() noexcept {
         all_.push_back(entry.id);
         byEfficiency[cpu.EfficiencyClass].push_back(entry);
         byCache[cpu.LastLevelCacheIndex].push_back(entry);
+        groupsSeen.insert(cpu.Group);
     }
+    groupCount_ = groupsSeen.empty() ? 1u : static_cast<std::uint32_t>(groupsSeen.size());
     if (all_.empty()) {
         kind_ = Domain::None;
         description_ = "PLACEMENT_NONE reason=no-cpu-sets";
@@ -539,21 +575,34 @@ bool PlacementPolicy::ApplyTier(Tier wanted) noexcept {
     // 1. process-wide default: tier0 while preferred, every set once spilled, none on release
     if (Available()) {
         BOOL ok = FALSE;
+        std::uint32_t defaultSetCount = 0;
         if (wanted == Tier::Preferred) {
             ok = SetProcessDefaultCpuSets(GetCurrentProcess(),
                                           reinterpret_cast<const ULONG*>(tier0_.data()),
                                           static_cast<ULONG>(tier0_.size()));
+            defaultSetCount = static_cast<std::uint32_t>(tier0_.size());
         } else if (restricted) {
             ok = SetProcessDefaultCpuSets(GetCurrentProcess(),
                                           reinterpret_cast<const ULONG*>(all_.data()),
                                           static_cast<ULONG>(all_.size()));
+            defaultSetCount = static_cast<std::uint32_t>(all_.size());
         } else {
             ok = SetProcessDefaultCpuSets(GetCurrentProcess(), nullptr, 0);
+        }
+        // The session owns the process default from here on (see the startup placement in
+        // docs/146): its release must not be mistaken for the startup one.
+        if (ok) {
+            g_sessionOwnsProcessDefaultCpuSets = restricted;
+            // Diagnostic bookkeeping only (P3-12): what this policy last put there.
+            processDefaultSetCount_ = defaultSetCount;
         }
         if (!ok) note("SetProcessDefaultCpuSets");
     } else if (wanted == Tier::None) {
         if (!SetProcessDefaultCpuSets(GetCurrentProcess(), nullptr, 0))
             note("SetProcessDefaultCpuSets");
+        else
+            processDefaultSetCount_ = 0;
+        g_sessionOwnsProcessDefaultCpuSets = false;
     }
 
     // 2. the present thread keeps the preferred domain at every tier: it is the one
@@ -614,6 +663,10 @@ bool PlacementPolicy::Spill() noexcept {
     return ApplyTier(Tier::Spilled);
 }
 
+// 规则锚点（docs/150「进程优先级写者规则」，P0-2）：进程 priority class 只允许内核按
+// 测量升级，并且只恢复到播放开始时的基线（baselinePriorityClass_）；宿主启动期默认
+// 不再写进程 class（docs/145 两次实测零收益，P0-1 已删启动 HIGH）。Boost() 是这条规则
+// 的升级入口之一，所以它只在最贵的一档动作，且从不把已经更高的宿主降下来。
 bool PlacementPolicy::Boost() noexcept {
     if (disabled_ || tier_ == Tier::None) return false;
     if (tier_ >= ceiling_) return false;
@@ -627,6 +680,10 @@ bool PlacementPolicy::Recover() noexcept {
     return false;
 }
 
+// 规则锚点（docs/150「进程优先级写者规则」，P0-2）：Prioritize() 也只写"进程 class +
+// 呈现线程"这一层，由测出的线程饥饿触发；LakeUI PrecisionTimer 的线程级 AboveNormal
+// 属于另一层（单个计时线程），两者不能混算成"进程被拉高了"。进程 class 的底线仍是
+// 播放开始时的基线：降档 / Release 都按 baselinePriorityClass_ 回退。
 bool PlacementPolicy::Prioritize() noexcept {
     if (disabled_ || tier_ == Tier::None) return false;
     if (ceiling_ != Tier::Boosted) return false;   // forced negative-control arms stay pure
@@ -658,4 +715,208 @@ bool PlacementPolicy::Prioritize() noexcept {
         FFF3FP_KernelLogImpl(line);
     }
     return changed;
+}
+
+// ---- Process-wide startup placement (docs/146) -------------------------------------
+//
+// Same discovery as the playback policy, but only the process-default CPU set is
+// written: this runs before any session exists. Everything here is a soft preference;
+// the scheduler may still use other CPUs. See FFF.Player.CpuPlacement.h for the
+// contract and docs/146 for why the domain is chosen this way.
+
+bool PlacementPolicy::BuildStartupCpuSetIds(std::vector<std::uint32_t>& ids) noexcept {
+    ids.clear();
+    Discover();
+    if (kind_ == Domain::None || orderedGroups_.empty()) return false;
+    // CPU Set assignments are honored only inside the thread's processor group. The
+    // discovery does not model that, so a machine with several groups (more than 64
+    // logical processors) is refused instead of half-applied.
+    if (groupCount_ > 1) return false;
+    if (kind_ == Domain::EfficiencyClass) {
+        // Fastest class first: the P-core group on Intel hybrid parts.
+        ids = orderedGroups_.front().ids;
+        return !ids.empty();
+    }
+    // Multi-CCD AMD: "main CCD" is not exposed by any public Win32 API. The definition
+    // that cannot be wrong is "stay on the L3 domain the UI thread was already given" --
+    // it still buys locality (no cross-CCD migration, same L3) without guessing which
+    // die is "main" or trading cache for clock on X3D parts (docs/146 §四).
+    PROCESSOR_NUMBER current{};
+    GetCurrentProcessorNumberEx(&current);
+    for (const auto& group : orderedGroups_) {
+        bool onThisDomain = false;
+        for (const auto lp : group.lps) {
+            if (lp == current.Number) { onThisDomain = true; break; }
+        }
+        if (onThisDomain) {
+            ids = group.ids;
+            return !ids.empty();
+        }
+    }
+    ids = orderedGroups_.front().ids;
+    return !ids.empty();
+}
+
+bool PlacementPolicy::BeginProcessStartupPlacement() noexcept {
+    // Opt-in by name and by value. The host checks the same variable before its first
+    // export call, so an absent/off switch never even loads the kernel early.
+    wchar_t mode[16] = {};
+    const DWORD length = GetEnvironmentVariableW(L"FFF_STARTUP_PLACEMENT", mode, 16);
+    if (length == 0) {
+        MarkStartupPlacementHistory(2);   // disabled: no opt-in
+        return false;
+    }
+    if (_wcsicmp(mode, L"1") != 0 && _wcsicmp(mode, L"on") != 0 &&
+        _wcsicmp(mode, L"true") != 0) {
+        MarkStartupPlacementHistory(2);
+        return false;
+    }
+    try {
+        std::lock_guard<std::mutex> lock(g_startupPlacementMutex);
+        if (g_startupPlacementActive) {
+            MarkStartupPlacementHistory(1);
+            return true;
+        }
+        if (g_sessionOwnsProcessDefaultCpuSets) {
+            MarkStartupPlacementHistory(2);
+            return false;
+        }
+        // Deliberately a function-local static: the startup placement lives for the whole
+        // process, and the playback policy stays per session.
+        static PlacementPolicy policy;
+        if (policy.disabled_) {
+            MarkStartupPlacementHistory(2);
+            FFF3FP_KernelLogImpl("PLACEMENT_STARTUP skip reason=FFF_PLACEMENT=off");
+            return false;
+        }
+        std::vector<std::uint32_t> ids;
+        if (!policy.BuildStartupCpuSetIds(ids)) {
+            MarkStartupPlacementHistory(2);
+            char line[160] = {};
+            std::snprintf(line, sizeof(line),
+                          "PLACEMENT_STARTUP skip reason=no-preferred-domain groups=%u",
+                          static_cast<unsigned>(policy.groupCount_));
+            FFF3FP_KernelLogImpl(line);
+            return false;
+        }
+        if (!SetProcessDefaultCpuSets(GetCurrentProcess(),
+                                      reinterpret_cast<const ULONG*>(ids.data()),
+                                      static_cast<ULONG>(ids.size()))) {
+            MarkStartupPlacementHistory(2);
+            FFF3FP_KernelLogImpl("PLACEMENT_STARTUP fail api=SetProcessDefaultCpuSets");
+            return false;
+        }
+        g_startupPlacementActive = true;
+        MarkStartupPlacementHistory(1);
+        char line[192] = {};
+        std::snprintf(line, sizeof(line),
+                      "PLACEMENT_STARTUP begin kind=%s ids=%zu groups=%u",
+                      policy.kind_ == Domain::EfficiencyClass ? "Hybrid" : "CacheDomain",
+                      ids.size(), static_cast<unsigned>(policy.groupCount_));
+        FFF3FP_KernelLogImpl(line);
+        return true;
+    } catch (...) {
+        MarkStartupPlacementHistory(2);
+        return false;
+    }
+}
+
+void PlacementPolicy::EndProcessStartupPlacement(const char* reason) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_startupPlacementMutex);
+        if (!g_startupPlacementActive) return;
+        g_startupPlacementActive = false;
+        const bool sessionOwned = g_sessionOwnsProcessDefaultCpuSets;
+        if (!sessionOwned) SetProcessDefaultCpuSets(GetCurrentProcess(), nullptr, 0);
+        char line[192] = {};
+        std::snprintf(line, sizeof(line), "PLACEMENT_STARTUP end reason=%s session-owned=%d",
+                      reason != nullptr ? reason : "unknown", sessionOwned ? 1 : 0);
+        FFF3FP_KernelLogImpl(line);
+    } catch (...) {
+    }
+}
+
+// ---- CPU placement diagnostics (P3-12, docs/148 §四) -------------------------------
+//
+// One read-only summary for the host's A/B harness: what the policy decided, and what
+// the OS currently says about the worker thread. Nothing here changes placement; the
+// thread queries open a THREAD_QUERY_LIMITED_INFORMATION handle and close it at once.
+
+std::uint32_t PlacementPolicy::QueryThreadSelectedCpuSetCount(
+    const std::uint32_t threadId) noexcept {
+    if (threadId == 0) return 0;   // no such thread: "not running", not "unknown"
+    const HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, threadId);
+    if (thread == nullptr) return FFF3FP_CPUPLACEMENT_UNKNOWN;
+    // A NULL buffer with capacity 0 asks for the count only: the call returns TRUE and
+    // reports 0 when the thread has no explicit selection, and fails with
+    // ERROR_INSUFFICIENT_BUFFER (putting the required count in `required`) when it has
+    // one -- see the GetThreadSelectedCpuSets contract.
+    ULONG required = 0;
+    std::uint32_t count = FFF3FP_CPUPLACEMENT_UNKNOWN;
+    if (GetThreadSelectedCpuSets(thread, nullptr, 0, &required)) count = 0;
+    else if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) count = required;
+    CloseHandle(thread);
+    return count;
+}
+
+void PlacementPolicy::FillDiagnosticSnapshot(FFF3FPCpuPlacementSnapshot& snapshot) const noexcept {
+    FFF3FPCpuPlacementDomain domain = FFF3FPCpuPlacementDomain::NONE;
+    if (kind_ == Domain::EfficiencyClass) domain = FFF3FPCpuPlacementDomain::EFFICIENCY_CLASS;
+    else if (kind_ == Domain::CacheDomain) domain = FFF3FPCpuPlacementDomain::CACHE_DOMAIN;
+    snapshot.domain = static_cast<std::uint32_t>(domain);
+
+    FFF3FPCpuPlacementTier tier = FFF3FPCpuPlacementTier::NONE;
+    if (tier_ == Tier::Preferred) tier = FFF3FPCpuPlacementTier::PREFERRED;
+    else if (tier_ == Tier::Spilled) tier = FFF3FPCpuPlacementTier::SPILLED;
+    else if (tier_ == Tier::Boosted) tier = FFF3FPCpuPlacementTier::BOOSTED;
+    snapshot.tier = static_cast<std::uint32_t>(tier);
+
+    std::uint32_t flags = 0;
+    if (Available()) flags |= Flag(FFF3FPCpuPlacementFlags::AVAILABLE);
+    if (disabled_) flags |= Flag(FFF3FPCpuPlacementFlags::DISABLED);
+    if (forced_) flags |= Flag(FFF3FPCpuPlacementFlags::FORCED);
+    if (classRaised_) flags |= Flag(FFF3FPCpuPlacementFlags::CLASS_RAISED);
+    if (overlayPriority_) flags |= Flag(FFF3FPCpuPlacementFlags::OVERLAY_PRIORITY);
+    if (prioritySaved_) flags |= Flag(FFF3FPCpuPlacementFlags::PRIORITY_SAVED);
+    // Startup history is process-wide, not session state: Begin applied it before any
+    // session existed and End intentionally does not clear it (docs/146).
+    if (StartupPlacementHistory() == 1) flags |= Flag(FFF3FPCpuPlacementFlags::STARTUP_APPLIED);
+    // The worker holds an explicit set exactly while a restricted tier is in force and a
+    // usable domain exists (ApplyTier step 2). This mirrors the apply path; the actual
+    // thread selection is reported separately as workerSelectedSetCount.
+    if (Available() && started_ && tier_ != Tier::None)
+        flags |= Flag(FFF3FPCpuPlacementFlags::WORKER_PINNED);
+    snapshot.flags = flags;
+
+    const DWORD processClass = GetPriorityClass(GetCurrentProcess());
+    snapshot.processPriorityClass = processClass != 0
+        ? static_cast<std::int32_t>(processClass) : kUnknownInt;
+    snapshot.baselinePriorityClass = prioritySaved_
+        ? static_cast<std::int32_t>(baselinePriorityClass_) : kUnknownInt;
+
+    snapshot.tier0SetCount = static_cast<std::uint32_t>(tier0_.size());
+    snapshot.tier1SetCount = static_cast<std::uint32_t>(tier1_.size());
+    snapshot.processDefaultSetCount = processDefaultSetCount_;
+    snapshot.preferredDomainThreads = preferredDomainThreads_;
+    snapshot.processorGroupCount = groupCount_;
+    snapshot.workerThreadId = workerThreadId_;
+
+    // The worker may have exited (Close) or never started: OpenThread then fails and both
+    // thread-level fields stay at the sentinel instead of a misleading zero.
+    if (workerThreadId_ == 0) {
+        snapshot.workerThreadPriority = kUnknownInt;
+        snapshot.workerSelectedSetCount = FFF3FP_CPUPLACEMENT_UNKNOWN;
+    } else {
+        snapshot.workerSelectedSetCount = QueryThreadSelectedCpuSetCount(workerThreadId_);
+        const HANDLE worker =
+            OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, workerThreadId_);
+        if (worker == nullptr) {
+            snapshot.workerThreadPriority = kUnknownInt;
+        } else {
+            const int priority = GetThreadPriority(worker);
+            snapshot.workerThreadPriority =
+                priority != THREAD_PRIORITY_ERROR_RETURN ? priority : kUnknownInt;
+            CloseHandle(worker);
+        }
+    }
 }

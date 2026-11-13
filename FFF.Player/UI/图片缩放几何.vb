@@ -159,12 +159,17 @@ Public Module 图片缩放几何
         Return 目标值 + (差值 + 临时速度) * 衰减
     End Function
 
-    ''' <summary>是否已静止：位移与速度都要低过**按目标幅度缩放**的阈值。
+    ''' <summary>是否已静止：位移与速度都要低过**按运动幅度缩放**的阈值。
     ''' 只量位移会在"慢慢爬"时提前停表，留下一个肉眼可见的错位终点；
-    ''' 用绝对阈值则会在大倍数档位上迟迟不停表。</summary>
-    Public Function 已静止(当前值 As Single, 目标值 As Single, 当前速度 As Single) As Boolean
-        Dim 位移阈值 = Math.Max(0.0002F, Math.Abs(目标值) * 静止位移相对比)
-        Dim 速度阈值 = Math.Max(0.0005F, Math.Abs(目标值) * 静止速度相对比)
+    ''' 用绝对阈值则会在大倍数档位上迟迟不停表。
+    ''' 阈值基准是本次运动的跨度 |起点−目标|，不是目标绝对值：缩放跑在对数
+    ''' 空间，缩回 z=1 时目标恰为 0，按 |目标| 取阈值会退化成绝对下限，实测
+    ''' 缩小比放大多拖约 88ms。传负数表示沿用旧口径（平移运动保留原收敛性）。</summary>
+    Public Function 已静止(当前值 As Single, 目标值 As Single, 当前速度 As Single,
+                             Optional 运动跨度 As Single = -1.0F) As Boolean
+        Dim 基准 = If(运动跨度 >= 0.0F, 运动跨度, Math.Abs(目标值))
+        Dim 位移阈值 = Math.Max(0.0002F, 基准 * 静止位移相对比)
+        Dim 速度阈值 = Math.Max(0.0005F, 基准 * 静止速度相对比)
         Return Abs(当前值 - 目标值) < 位移阈值 AndAlso Abs(当前速度) < 速度阈值
     End Function
 End Module

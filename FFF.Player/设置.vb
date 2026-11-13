@@ -9,6 +9,9 @@ Public Class 设置
     Public Property 初始画面尺寸选项 As Integer = 2
     Public Property 自定义初始画面宽度 As Integer = 1024
     Public Property 自定义初始画面高度 As Integer = 576
+    ' 打开媒体时按内容原始像素 1:1 设置窗口；内容达到显示器工作区时最大化。
+    ' 默认 False：不改变既有“初始画面尺寸”行为，旧设置文件缺键也落到 False。
+    Public Property 内容原始尺寸模式 As Boolean = False
     ' 解码方式默认 GPU（2026-10-21 起，此前为 CPU）。理由：硬解不通时内核自己会回退 CPU
     ' （打开时试解首包 + 播放中失败即切换，均已实机验证），用户侧没有"选错就放不出"的风险，
     ' 而默认 CPU 等于让大多数机器白白放弃硬解。主界面「解码」按钮仍可随时翻转，并写回本项。
@@ -23,10 +26,47 @@ Public Class 设置
     Public Property 启用空间音频 As Boolean = True
     ' 保留旧空间音频字段以兼容已保存的设置；三种效果互斥，单声道优先。
     Public Property 启用单声道音频 As Boolean = False
+    ' 双耳床渲染策略：0=自动（按端点形态）1=强制双耳 2=强制立体声。
+    ' 强制只在"当前端点的形态与当初强制时相同"才下发给内核（见
+    ' 播放器控制器.折算双耳策略）：否则在 USB DAC 上强开的双耳会跟着用户
+    ' 一路跑到 HDMI 电视上，而那正是这次要修掉的那种误开。
+    Public Property 双耳策略选项 As Integer = 0
+    ' 强制时的 EndpointFormFactor 原值。0 表示没强制过；USB DAC 与 HDMI 都报 9，
+    ' 所以这两类设备之间仍会互相沿用，属已知且可一键纠正的边界。
+    Public Property 双耳策略形态 As Integer = 0
+    ' 音频源码直通三态（0=自动 1=强制 2=关，默认自动）。直通要接管整条轨并抢 WASAPI
+    ' 独占，与单声道/变速/床渲染天然互斥——内核侧直接拒绝，UI 侧在这里联动提示。
+    Public Property 音频直通选项 As Integer = 0
     Public Property 自动切换到真实HDR高亮 As Boolean = True
     Public Property HDR峰值亮度选项 As Integer = 0
     Public Property HDR峰值亮度 As Integer = 0
-    Public Property HDR映射SDR参考亮度 As Integer = 250
+    ' HDR→SDR 映射的目标：SDR 参考白（BT.2408 的 HDR Reference White）。
+    ' 203 = ITU-R BT.2408-4 §2.1 定义的漫反射白（100% 朗伯反射体在 PQ 上的标称亮度），
+    ' 也是 libplacebo / mpv 的 PL_COLOR_SDR_WHITE 取值。不是面板峰值。
+    Public Property HDR映射SDR参考亮度 As Integer = 203
+
+    ' ── LakeUI 呈现引擎性能选项（2026-11-11，自 3FUI/FFmpegFreeUI 同款移植）──────
+    ' 3FUI 把 LakeUI.GlobalOptions 的引擎旋钮全部暴露成设置项，这里是同一套：
+    ' 字段存「档位下标」，档位数值表在 应用图形性能设置() 上方；设置页下拉的
+    ' Items 顺序必须与档位表逐位对齐（两处都有一致性注释）。
+    ' 默认值铁律：与移植前宿主行为逐位一致 —— 文字渲染原是 Form1_Load 顶部
+    ' 硬编码 Outline（档 3），其余取 LakeUI 引擎默认（PerPrimitive / SSAA OFF /
+    ' GPU 128MiB / 画刷 256 / 字体 128 / CPU 96MiB / 脏区 8 区+60% / 分桶 64px /
+    ' 动画 60FPS）。老设置文件没有这些键 → 反序列化留默认 → 升级不改观感。
+    Public Property LakeUI抗锯齿 As Integer = 0
+    Public Property LakeUI文字渲染 As Integer = 3
+    Public Property LakeUI超采样 As Integer = 0
+    Public Property LakeUI_GPU缓存档 As Integer = 2
+    Public Property LakeUI_画刷缓存档 As Integer = 6
+    Public Property LakeUI_字体缓存档 As Integer = 3
+    Public Property LakeUI_CPU缓存档 As Integer = 3
+    Public Property LakeUI_背景脏区档 As Integer = 4
+    Public Property LakeUI_SSAA分桶档 As Integer = 1
+    ' 界面控件动画帧率：0 = 不限制（LakeUI 语义，会尽量快地请求重绘）。
+    ' 经 字体控制 的控件树遍历反射下发到每个控件的 AnimationFPS；3FUI 的注释是
+    ' 「帧率属性的更新与字体更新绑定」——这里同样搭字体管道的车，不另设遍历。
+    Public Property LakeUI动画帧率 As Integer = 60
+
     Public Property 音量百分比 As Integer = 100
 
     ' 360°视场角由快捷键调整；该字段没有对应的设置控件，但仍随设置文件持久化。
@@ -112,9 +152,12 @@ Public Class 设置
     ' 模型 / llama-server 在哪一律由包自己说清。于是这里只剩一个路径。
     ' 未选包（默认空）就完全不启用：不拉进程、不占显存、不碰播放路径。
     Public Property Ai字幕包目录 As String = ""
-    ' 选到有效包之后，用户仍可在菜单里临时关掉。它只决定"这次要不要起 worker"，
+    ' 选到有效包之后，用户仍可在字幕来源里关掉它。它只决定"这次要不要起 worker"，
     ' 与"装了哪个包"是两件事，所以分开存。
-    Public Property Ai字幕已停用 As Boolean = False
+    ' 默认 True（关）：AI 实时字幕是字幕来源之一，不该在装包后自动抢走普通字幕的
+    ' 位置。键名保持 Ai字幕已停用 不变 —— 存量设置文件里显式写 False 的用户仍按
+    ' 原样恢复，升级不改变他们的既有行为。
+    Public Property Ai字幕已停用 As Boolean = True
     ' 高级项：覆盖清单里的窗口/步长（秒）。0 = 跟随清单；包自身已做钳制，这里只挡脏数据。
     Public Property Ai字幕窗口秒覆盖 As Double = 0
     Public Property Ai字幕步长秒覆盖 As Double = 0
@@ -256,9 +299,27 @@ Public Class 设置
         If 视频缓冲区策略 < 0 OrElse 视频缓冲区策略 > 2 Then 视频缓冲区策略 = 0
         If 音频缓冲区策略 < 0 OrElse 音频缓冲区策略 > 2 Then 音频缓冲区策略 = 0
         If 启用单声道音频 Then 启用空间音频 = False
+        ' 非法档归一到"自动"：破损/越界的配置不该把用户按在某一种强制上。
+        If 双耳策略选项 < CInt(双耳策略.自动) OrElse 双耳策略选项 > CInt(双耳策略.强制立体声) Then 双耳策略选项 = 0
+        If 双耳策略选项 = CInt(双耳策略.自动) Then 双耳策略形态 = 0
+        If 双耳策略形态 < 0 OrElse 双耳策略形态 > 10 Then 双耳策略形态 = 0
+        If 音频直通选项 < 0 OrElse 音频直通选项 > 2 Then 音频直通选项 = 0
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
         HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)
+        ' LakeUI 图形性能档：越界/脏数据归默认档（与字段默认一致），不把用户按在极端档上。
+        LakeUI抗锯齿 = Math.Clamp(LakeUI抗锯齿, 0, 1)
+        LakeUI文字渲染 = Math.Clamp(LakeUI文字渲染, 0, 3)
+        LakeUI超采样 = Math.Clamp(LakeUI超采样, 0, 3)
+        LakeUI_GPU缓存档 = Math.Clamp(LakeUI_GPU缓存档, 0, 8)
+        LakeUI_画刷缓存档 = Math.Clamp(LakeUI_画刷缓存档, 0, 8)
+        LakeUI_字体缓存档 = Math.Clamp(LakeUI_字体缓存档, 0, 6)
+        LakeUI_CPU缓存档 = Math.Clamp(LakeUI_CPU缓存档, 0, 8)
+        LakeUI_背景脏区档 = Math.Clamp(LakeUI_背景脏区档, 0, 8)
+        LakeUI_SSAA分桶档 = Math.Clamp(LakeUI_SSAA分桶档, 0, 8)
+        ' 帧率只认档位表里的离散值；手改 json 塞进来的脏值（如 75）归默认 60，
+        ' 否则反射下发会把所有控件的动画节拍设成一个没对齐过的数。
+        If Array.IndexOf(LakeUI动画帧率档, LakeUI动画帧率) < 0 Then LakeUI动画帧率 = 60
         音量百分比 = Math.Clamp(音量百分比, 0, 100)
         If Not Single.IsFinite(视角360视场角) Then 视角360视场角 = 90.0F
         视角360视场角 = Math.Clamp(视角360视场角, 30.0F, 90.0F)
@@ -383,6 +444,62 @@ Public Class 设置
         Dim 合成Alpha = CUInt((原始Alpha * CULng(限定不透明度) + 127UL) \ 255UL)
         Return (value And &HFFFFFFUI) Or (合成Alpha << 24)
     End Function
+
+    ' ── LakeUI 图形性能档位表（与 Form设置_设备与性能 各下拉 Items 逐位对齐）──────
+    ' 首档 0 = 「禁用缓存」：3FUI 在 2026-07 两次迭代后把禁用档排到最前（省内存模式
+    ' 首选），这里沿用。GPU/CPU 预算按进程总量约束（LakeUI GlobalOptions 注释原文：
+    ' 「可见合成表面是必要显示工作集，只参与计量并促使其他缓存收缩，不会为满足预算而销毁」）。
+    Private Shared ReadOnly LakeUI_GPU缓存预算选项MiB As Long() =
+        {0L, 64L, 128L, 256L, 512L, 1024L, 2048L, 4096L, 8192L}
+    Private Shared ReadOnly LakeUI_CPU缓存预算选项MiB As Long() =
+        {0L, 32L, 64L, 96L, 128L, 256L, 512L, 1024L, 2048L}
+    Private Shared ReadOnly LakeUI_缓存条目选项 As Integer() =
+        {0, 8, 16, 32, 64, 128, 256, 512, 1024}
+    Private Shared ReadOnly LakeUI_字体缓存条目选项 As Integer() =
+        {0, 32, 64, 128, 256, 512, 1024}
+    Private Shared ReadOnly LakeUI_背景脏区数量选项 As Integer() =
+        {4, 4, 4, 8, 8, 8, 16, 16, 16}
+    Private Shared ReadOnly LakeUI_背景脏区完整重采阈值选项 As Single() =
+        {0.4F, 0.6F, 0.8F, 0.4F, 0.6F, 0.8F, 0.4F, 0.6F, 0.8F}
+    Private Shared ReadOnly LakeUI_SSAA分桶粒度选项 As Integer() =
+        {32, 64, 96, 128, 192, 256, 384, 512, 1024}
+    Friend Shared ReadOnly LakeUI动画帧率档 As Integer() = {0, 15, 30, 45, 50, 60, 90, 120}
+
+    ''' <summary>
+    ''' 把 LakeUI 图形性能选项写入 LakeUI.GlobalOptions。启动时（设置加载后）与
+    ''' 设置页改动时各调一次；GlobalOptions 是进程级静态，写入即对后续绘制生效，
+    ''' 不需要触发全量重绘（HDR 那种"改档位要预热曲线表"的路径宿主不暴露）。
+    ''' </summary>
+    Public Shared Sub 应用图形性能设置()
+        LakeUI.GlobalOptions.GlobalAntialiasMode = If(实例对象.LakeUI抗锯齿 = 1,
+            Vortice.Direct2D1.AntialiasMode.Aliased, Vortice.Direct2D1.AntialiasMode.PerPrimitive)
+        Select Case 实例对象.LakeUI文字渲染
+            Case 0 : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.ClearType
+            Case 1 : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Grayscale
+            Case 2 : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Aliased
+            Case Else : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Outline
+        End Select
+        Select Case 实例对象.LakeUI超采样
+            Case 1 : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.x2
+            Case 2 : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.x3
+            Case 3 : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.x4
+            Case Else : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.OFF
+        End Select
+        LakeUI.GlobalOptions.GpuCacheBudgetBytes =
+            LakeUI_GPU缓存预算选项MiB(Math.Clamp(实例对象.LakeUI_GPU缓存档, 0, LakeUI_GPU缓存预算选项MiB.Length - 1)) * 1024L * 1024L
+        LakeUI.GlobalOptions.CpuCacheBudgetBytes =
+            LakeUI_CPU缓存预算选项MiB(Math.Clamp(实例对象.LakeUI_CPU缓存档, 0, LakeUI_CPU缓存预算选项MiB.Length - 1)) * 1024L * 1024L
+        LakeUI.GlobalOptions.BrushCacheLimit =
+            LakeUI_缓存条目选项(Math.Clamp(实例对象.LakeUI_画刷缓存档, 0, LakeUI_缓存条目选项.Length - 1))
+        Dim 字体上限 = LakeUI_字体缓存条目选项(Math.Clamp(实例对象.LakeUI_字体缓存档, 0, LakeUI_字体缓存条目选项.Length - 1))
+        LakeUI.GlobalOptions.TextFormatCacheLimit = 字体上限
+        LakeUI.GlobalOptions.FontResolveCacheLimit = 字体上限
+        ' 【P2-9】LakeUI 的 BackgroundDirtyRectLimit / BackgroundFullDirtyRatio / SsaaBucketSize
+        ' 在本 LakeUI 构建里除定义外零读取方（E2：GlobalOptions.vb:142 / :194 / :198），写进去
+        ' 也不会被任何绘制路径读到 ⇒ 三处写入已删（连同 脏区索引）。档位数组（LakeUI_背景脏区
+        ' 数量选项 / LakeUI_背景脏区完整重采阈值选项 / LakeUI_SSAA分桶粒度选项）、设置属性与
+        ' 设置页控件全部保留：这三个旋钮当前是 no-op，删设置还是补实现待 P3-13 决定。
+    End Sub
 
     Public Shared Sub 应用SP个性化设置()
         If Not SP_UnLock OrElse Form1.当前主窗体 Is Nothing Then Return

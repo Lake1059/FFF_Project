@@ -72,6 +72,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取合成文本 As Func(Of String)
     Private ReadOnly 获取超分状态 As Func(Of String)
     Private ReadOnly 获取自动HDR状态 As Func(Of String)
+    Private ReadOnly 获取直通文本 As Func(Of String)
     ' AI 实时字幕是否正在跑（worker 进程活着）。字幕行用它区分"真的没有字幕"
     ' 与"没有外挂字幕但 AI 在实时转写"——后者显示"未加载"是口径错误。
     Private ReadOnly 获取AI字幕活动 As Func(Of Boolean)
@@ -109,7 +110,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private 粘滞HDR规格枚举 As HDR格式 = HDR格式.SDR
     Private 粘滞源峰值 As UInteger
     ' 外部模块的逐帧峰值：与源峰值的“开流取一次”不同，这一项点名要动态显示——
-    ' 启用位粘滞（见过一帧就固定走逐帧口径，无 L1 的帧保持末值不回跳），
+    ' 启用位粘滞（见过一帧就固定走逐帧口径，无模块峰值的帧保持末值不回跳），
     ' 数值随 UI 刷新取泵最新发布；换片/换流时随动态键重置。
     Private 粘滞外部峰值已见过 As Boolean
     Private 粘滞外部峰值 As UInteger
@@ -133,7 +134,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
                    Optional 超分状态提供器 As Func(Of String) = Nothing,
                    Optional 自动HDR状态提供器 As Func(Of String) = Nothing,
                    Optional 合成文本提供器 As Func(Of String) = Nothing,
-                   Optional AI字幕活动提供器 As Func(Of Boolean) = Nothing)
+                   Optional AI字幕活动提供器 As Func(Of Boolean) = Nothing,
+                   Optional 直通文本提供器 As Func(Of String) = Nothing)
         ArgumentNullException.ThrowIfNull(画面)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(媒体信息提供器)
@@ -149,6 +151,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取合成文本 = 合成文本提供器
         获取超分状态 = 超分状态提供器
         获取自动HDR状态 = 自动HDR状态提供器
+        获取直通文本 = 直通文本提供器
         获取AI字幕活动 = AI字幕活动提供器
         提交图层 = 图层提交器
         文本测量格式 = DirectCast(StringFormat.GenericTypographic.Clone(), StringFormat)
@@ -322,10 +325,10 @@ Friend NotInheritable Class 播放器信息图层呈现器
             添加配对行如果有值(结果, "输入：", 视频输入(视频, 快照.视频实时比特率), 紫色)
             添加配对行如果有值(结果, "色彩：", 视频色彩(视频), 蓝色)
             ' 内容分类与合成状态都由外部模块的注入泵产出（解锁后才非空）；宿主只显示
-            ' 不解释，"空值自然不出现"。用户裁定（2026-11-02）：外部增强等级不再单独成行，
-            ' 注入态由模块供给 "P…" 文本，本体只拼 "HDR " & 文本 = "HDR P8.1 …"（规格词
-            ' 整体替换，HDR10 等基础词不显示），信息图层里没有独立的「内容：」行。
-            ' 合成段同源：显示模块快照文本自己的措辞（"已请求"≠"已合成"，措辞由模块负责）。
+            ' 不解释，"空值自然不出现"。当前口径：模块激活时**额外注入**——基础 HDR
+            ' 规格照常显示，模块文本以「内容：P…」一段追加，不替换基础词、也不把
+            ' 宿主段抹掉。合成段同源：显示模块快照文本自己的措辞（"已请求"≠"已合成"，
+            ' 措辞由模块负责）。
             Dim 内容描述 = 安全获取(获取内容描述)
             Dim 合成文本 = 安全获取(获取合成文本)
             ' 粘滞窗口按 媒体路径|视频流 划界：跨过边界一律从头累计。
@@ -337,7 +340,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             End If
             If 快照.动态HDR元数据有效 Then 粘滞动态已见过 = True
             ' 外部逐帧峰值：>0 即启用粘滞并跟随刷新（换片/换流时随键重置；
-            ' 0 是“本帧无 L1/未解锁”，保持末值，不把读数回跳到零）。
+            ' 0 是“本帧无模块峰值/未解锁”，保持末值，不把读数回跳到零）。
             ' -1 是“通路没在跑”（泵已停）：末值已经冻结，粘滞位必须作废，
             ' 否则泵死之后这一行还挂着“逐帧”两字，把静态旧读数冒充成实时。
             Dim 外部峰值 = 安全获取(获取外部峰值)
@@ -377,6 +380,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
                 粘滞目标有效 = True
                 粘滞目标尼特 = 快照.HDR有效目标峰值尼特
             End If
+            ' HDR 基础规格来自公开标准元数据（HDR10/HLG 等），宿主可独立显示，不依赖模块；
+            ' 只有「内容：」「模块峰值」「合成」这些模块自有语义段是模块激活后的额外信息。
             添加配对行如果有值(结果, "HDR：", 视频HDR(视频, 快照, 内容描述, 合成文本), 橙色)
 
             添加配对行如果有值(结果, "输出：", 视频输出(快照, 画面控件.ClientSize), 绿色)
@@ -414,6 +419,13 @@ Friend NotInheritable Class 播放器信息图层呈现器
             If 快照.音频双耳渲染生效 Then
                 添加配对行如果有值(结果, "双耳：", "HRTF 空间音频", 青色)
             End If
+            ' 源码直通通道拥有音轨时才出现这一行：显示名由模块注入、宿主原样打印
+            ' 不解释（格式身份是模块的语义，宿主只搬运）。缺席/未接管
+            ' 不出现——那是现网解码路径，不是需要向用户解释的降级。
+            Dim 直通行 = 安全获取(获取直通文本)
+            If 直通行 IsNot Nothing Then
+                添加配对行如果有值(结果, "直通：", 直通行, 青色)
+            End If
             添加配对行如果有值(结果, "输入：", 音频输入(音频, 快照.音频实时比特率), 紫色)
             添加配对行如果有值(结果, "输出：", 音频输出(音频, 快照), 绿色)
         End If
@@ -426,13 +438,13 @@ Friend NotInheritable Class 播放器信息图层呈现器
         ' AI 标记，两种来源一眼可分。
         Dim AI活动 = 安全获取(获取AI字幕活动)
         Dim 字幕文本 = If(字幕 Is Nothing,
-            If(AI活动, "已加载 AI实时识别", "未加载"),
+            If(AI活动, "已加载 AI生成字幕（实时识别）", "未加载"),
             合并字段(
                 字幕.格式.ToString().ToUpperInvariant(),
                 $"总数量 {字幕条目数(字幕)}",
                 If(字幕状态 Is Nothing, String.Empty, $"正在渲染 {字幕状态.命令数}"),
                 $"延迟 {图层延迟(字幕状态)}",
-                If(AI活动, "AI实时识别", String.Empty)))
+                If(AI活动, "AI生成字幕", String.Empty)))
         Dim 弹幕文本 = If(弹幕 Is Nothing, "未加载", 合并字段(
             "哔哩哔哩 XML", $"总数量 {弹幕.数量}",
             If(弹幕状态 Is Nothing, String.Empty, $"正在渲染 {弹幕状态.命令数}"),
@@ -602,17 +614,21 @@ Friend NotInheritable Class 播放器信息图层呈现器
     End Function
 
     Private Shared Function 视频色彩(流 As 媒体流信息) As String
-        Dim 采样 = 格式化色度抽样(流.色度抽样)
-        Dim 矩阵 = 色彩空间(流.色彩空间)
-        Dim 色域 = 色彩原色(流.色彩原色)
-        Dim 传输 = 色彩传递(流.色彩传递)
-        Dim 范围 = 色彩范围(流.色彩范围)
+        ' 色度一行只写色度本身，值用标准写法（4:2:0 / 4:2:2 / 4:4:4）。
+        ' 抽掉冒号会让读者以为是一个数字编号。
+        Dim 采样 = If(流.色度抽样 Is Nothing, String.Empty, 流.色度抽样.Trim())
+        ' 标准表述统一走 色彩表述 模块（Core\色彩表述.vb）：标签与媒体信息窗体
+        ' 同口径（色彩标准/传输曲线/色彩矩阵/色彩范围），元数据缺席的字段不出现。
+        Dim 矩阵 = 色彩表述.色彩矩阵(流.色彩空间)
+        Dim 标准 = 色彩表述.色彩标准(流.色彩原色)
+        Dim 传输 = 色彩表述.传输曲线(流.色彩传递)
+        Dim 范围 = 色彩表述.色彩范围(流.色彩范围)
         Return 合并字段(
-            If(String.IsNullOrEmpty(采样), String.Empty, $"采样 {采样}"),
-            If(String.IsNullOrEmpty(矩阵), String.Empty, $"颜色矩阵 {矩阵}"),
-            If(String.IsNullOrEmpty(色域), String.Empty, $"色域 {色域}"),
-            If(String.IsNullOrEmpty(传输), String.Empty, $"传输特性 {传输}"),
-            If(String.IsNullOrEmpty(范围), String.Empty, $"范围 {范围}"))
+            If(String.IsNullOrEmpty(采样), String.Empty, $"色度 {采样}"),
+            If(String.IsNullOrEmpty(标准), String.Empty, $"色彩标准 {标准}"),
+            If(String.IsNullOrEmpty(传输), String.Empty, $"传输曲线 {传输}"),
+            If(String.IsNullOrEmpty(矩阵), String.Empty, $"色彩矩阵 {矩阵}"),
+            If(String.IsNullOrEmpty(范围), String.Empty, $"色彩范围 {范围}"))
     End Function
 
     Private Shared Function 视频输出(快照 As 播放器快照, 输出大小 As Size) As String
@@ -626,40 +642,42 @@ Friend NotInheritable Class 播放器信息图层呈现器
 
     Private Function 视频HDR(流 As 媒体流信息, 快照 As 播放器快照,
                              内容描述 As String, 合成文本 As String) As String
-        ' 外部模块算出的增强规格词（"P8.1 …"，解锁后才有值）：宿主零外部格式语义，
-        ' P 号与层词都来自模块文本。空值自然不出现。
+        ' 模块注入的文本（模块自定义的等级描述，解锁后才有值）：宿主不解释，只作为额外段显示。
         Dim 等级 = If(String.IsNullOrWhiteSpace(内容描述), String.Empty, 内容描述.Trim())
-        ' 门控：HDR 源照常；但外部增强流可能被本体判成 SDR 基底（如 P5 无色彩标记）——
+        ' 门控：HDR 源照常；外部增强流可能被本体判成 SDR 基底（如无色彩标记的增强流）——
         ' 模块在场时这是"SDR 分类 + 外部色彩变换"的合法形态，不能因 SDR 就整行消失。
         If Not 快照.是HDR源 AndAlso Not 流.是HDR AndAlso 等级.Length = 0 Then Return String.Empty
-        ' 规格优先流级口径（媒体 JSON 已与逐帧状态脱钩）；流只声明 SDR/缺声明时
-        ' 才回退快照枚举 —— 且读的是"开流取一次"的锁存值，不再逐帧横跳。
-        ' 用户裁定（2026-11-02）：基础 HDR 用传输函数表述（HDR10 PQ / HDR HLG）；
-        ' 模块注入后规格整体变为 "HDR "+模块文本（HDR P8.1 …），基础规格词不显示。
+        ' 基础规格始终保留；模块激活时把它的文本作为"内容："额外段追加，绝不替换
+        ' 基础词、也不因为模块有文本就把宿主段抹掉（用户口径：额外注入，不是二选一）。
         Dim 基础规格 = If(String.IsNullOrWhiteSpace(流.HDR格式) OrElse 流.HDR格式 = "SDR",
                     规格显示文本(粘滞HDR规格枚举, 流.HDR格式),
                     规格显示文本(HDR格式.SDR, 流.HDR格式))
-        Dim 规格 = If(等级.Length > 0, "HDR " & 等级, 基础规格)
-        ' 动态段是粘滞位（见 创建调试行），逐帧回落不再把这段抹掉。外部增强流上这份
-        ' 动态元数据就是模块烘焙的外部映射表 ⇒ 文案升级为外部映射口径；HDR10+/Vivid 流
-        ' （模块文本为空）维持原口径。
-        Dim 动态 = If(粘滞动态已见过,
-                    If(等级.Length = 0, "动态元数据已用于处理", "外部映射已用于处理"),
-                    String.Empty)
-        ' EL 残差合成状态：模块注入泵自己的措辞，原样显示（模块说"已请求"就是请求——
+        ' 动态段与模块内容并存：模块注入的是额外内容，宿主的动态判定不因此消失。
+        Dim 动态 = If(粘滞动态已见过, "动态元数据已用于处理", String.Empty)
+        ' EL 残差合成状态：模块注入泵自己的措辞，原样追加（模块说"已请求"就是请求——
         ' 配对与否宿主无从知晓，也不许宿主替模块下结论）。泵没说时这段自然不出现。
         Dim 合成 = 合成文本
-        ' 亮度段：模块解锁且已读到逐帧峰值时走动态口径（用户点名：DLL 回注的
-        ' 动态每帧亮度直接进这一行，“逐帧”字样标明口径与静态锁存的区别）；
-        ' 模块缺席/未解锁/流无 L1（HDR10+ 等）维持开流锁存值。
-        Dim 亮度 = If(粘滞外部峰值已见过,
-                    $"源峰值 {粘滞外部峰值:0}尼特 逐帧",
-                    If(粘滞源峰值 > 0, $"源峰值 {粘滞源峰值:0}尼特", String.Empty))
+        ' 亮度段同样走加法：宿主自己的源峰值照常显示；模块激活且回注了逐帧峰值时，
+        ' 再追加一段模块峰值，不覆盖宿主读数（两者口径不同，合并展示才不丢信息）。
+        Dim 宿主峰值 = If(粘滞源峰值 > 0, $"源峰值 {粘滞源峰值:0}尼特", String.Empty)
+        Dim 模块峰值 = If(粘滞外部峰值已见过,
+                    $"模块峰值 {粘滞外部峰值:0}尼特 逐帧", String.Empty)
+        Dim 亮度 = 合并字段(宿主峰值, 模块峰值)
         If 粘滞目标有效 Then
             亮度 = 合并字段(亮度, $"显示目标 {粘滞目标尼特:0}尼特")
         End If
         Dim 回退 = If(粘滞回退, "HDR fallback", String.Empty)
-        Return 合并字段(规格, 动态, 合成, 亮度, 回退)
+        Return HDR行文本(基础规格, 等级, 动态, 合成, 亮度, 回退)
+    End Function
+
+    ''' <summary>HDR 行拼装：基础规格保留，模块内容作为「内容：」额外段追加。
+    ''' 宿主只做字段搬运，不解释模块文本；纯函数供回归锁“加法而非替换”。</summary>
+    Friend Shared Function HDR行文本(基础规格 As String, 模块内容 As String,
+                                     动态 As String, 合成 As String,
+                                     亮度 As String, 回退 As String) As String
+        Dim 内容段 = If(String.IsNullOrWhiteSpace(模块内容), String.Empty,
+                      "内容：" & 模块内容.Trim())
+        Return 合并字段(基础规格, 内容段, 动态, 合成, 亮度, 回退)
     End Function
 
     ''' <summary>HDR 行的规格词（2026-11-02 口径）：基础 HDR 用传输函数表述 ——
@@ -800,42 +818,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
         End Select
     End Function
 
-    Private Shared Function 色彩范围(值 As Integer) As String
-        Return If(值 = 1, "Limited", If(值 = 2, "Full", String.Empty))
-    End Function
-
-    Private Shared Function 色彩原色(值 As Integer) As String
-        Select Case 值
-            Case 1 : Return "BT.709"
-            Case 9 : Return "BT.2020"
-            Case 12 : Return "P3-D65"
-            Case Else : Return String.Empty
-        End Select
-    End Function
-
-    Private Shared Function 色彩传递(值 As Integer) As String
-        Select Case 值
-            Case 1 : Return "BT.709"
-            Case 13 : Return "sRGB"
-            Case 16 : Return "PQ"
-            Case 18 : Return "HLG"
-            Case Else : Return String.Empty
-        End Select
-    End Function
-
-    Private Shared Function 色彩空间(值 As Integer) As String
-        Select Case 值
-            Case 1 : Return "BT.709"
-            Case 5, 6 : Return "BT.601"
-            Case 9, 10 : Return "BT.2020"
-            Case Else : Return String.Empty
-        End Select
-    End Function
-
-    Private Shared Function 格式化色度抽样(值 As String) As String
-        If String.IsNullOrWhiteSpace(值) Then Return String.Empty
-        Return 值.Replace(":"c, String.Empty).Replace("-"c, String.Empty).Replace(" "c, String.Empty)
-    End Function
+    ' 色彩范围/色彩标准/传输曲线/色彩矩阵的标准表述统一在 色彩表述 模块
+    ' （Core\色彩表述.vb）：信息图层与媒体信息窗体共用一份映射，口径不漂移。
 
     Private Shared Function 视频输出格式(位深 As Integer) As String
         Select Case 位深

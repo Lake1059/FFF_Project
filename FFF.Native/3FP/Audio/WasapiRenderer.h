@@ -2,6 +2,7 @@
 
 #include "3FR/Api/FFF.Native.Api.h"
 #include "3FP/Api/FFF.Player.AudioRenderPlug.h"
+#include "3FP/Api/FFF.Player.AudioPassthrough.h"
 #include "3FP/Audio/AsrAudioTap.h"
 
 extern "C" {
@@ -95,7 +96,44 @@ struct PlayerAudioRuntimeState final {
     std::atomic<std::uint32_t> plugBedActive{0};
     std::atomic<std::uint64_t> plugFramesRendered{0};
     std::atomic<std::uint64_t> plugFramesDeclined{0};
+    // Bitstream passthrough seam (FFF.Player.AudioPassthrough.h). Published with
+    // the same reasoning as the plug counters above: the API thread that answers
+    // FFF3FP_GetAudioPassthroughState must never dereference the renderer, which
+    // a device switch may replace at any moment. Bursts rendered by the current
+    // renderer instance; a seek deliberately does not clear it (a seek is a
+    // re-anchor, not an erasure of what was already played).
+    std::atomic<std::uint64_t> ptBurstsRendered{0};
+    // Endpoint shape and the binaural route policy, published for the same reason
+    // as the counters above: the API thread that answers
+    // FFF3FP_GetAudioBinauralStatus must never dereference the renderer, which a
+    // device switch may replace at any moment. `endpointFormFactor` is the raw
+    // EndpointFormFactor Windows reports for the endpoint the renderer actually
+    // opened; it is informational now (the automatic policy keys on the channel
+    // count, not the shape -- product decision 2026-11-12). `endpointChannels` is
+    // the device mix format's channel count, written once per renderer instance
+    // as soon as the device opens, and IS the automatic policy's input.
+    // Neither is part of a FFF3FPSnapshot: the seam added no snapshot member and
+    // this one deliberately adds none either.
+    std::atomic<std::uint32_t> endpointFormFactor{0};
+    std::atomic<std::uint32_t> endpointChannels{0};
+    std::atomic<std::uint32_t> plugInstalled{0};
 };
+
+// Bed-route rule (product decision 2026-11-12, supersedes the old "headphone
+// form factor 3/5" rule): the automatic policy defaults binaural ON for any
+// 2-channel endpoint and falls back to the matrix fold-down for multichannel
+// endpoints. Windows classifies most USB DACs as DigitalAudioDisplayDevice (9)
+// even though their mix format is stereo, which under the old rule silently
+// disabled the default the product wants; the channel count is the ground truth
+// the renderer actually opens with. Forced policies still override: 1 forces
+// binaural, 2 forces fold-down. This is the one predicate both the renderer's
+// per-frame route decision and the session's read-back use, so they cannot
+// disagree about what counts as binaural output.
+inline bool BinauralWantedFor(std::uint32_t policy, std::uint32_t endpointChannels) noexcept {
+    if (policy == 1u) return true;   // force binaural
+    if (policy == 2u) return false;  // force stereo
+    return endpointChannels == 2u;   // automatic: stereo endpoint => binaural default
+}
 
 class PlayerWasapiRenderer final {
 public:
@@ -113,6 +151,22 @@ public:
     void Reset(std::int64_t position100ns) noexcept;
     void SetVolume(float volume, bool muted) noexcept;
     void SetMonoAudio(bool enabled) noexcept;
+    // 0 = automatic (2-channel endpoint => binaural default; multichannel =>
+    // matrix fold-down), 1 = force binaural, 2 = force stereo.
+    // Read per bed frame, so a change lands on the next frame boundary without
+    // touching the plug, the device or the renderer instance.
+    void SetBinauralPolicy(std::uint32_t policy) noexcept;
+    // The policy half of the bed-route decision. Public because the session's
+    // read-back has to answer with this exact rule rather than a second copy of it,
+    // and inline because that is what lets a probe exercise the shipped rule
+    // directly (see 3fp/tools/audio_binaural_probe.cpp).
+    static bool BinauralWantedFor(std::uint32_t policy, std::uint32_t endpointChannels) noexcept {
+        if (policy == 1u) return true;   // force binaural
+        if (policy == 2u) return false;  // force stereo
+        return endpointChannels == 2u;   // automatic: stereo endpoint => binaural default
+    }
+    // Raw EndpointFormFactor read when this instance opened its device.
+    std::uint32_t EndpointFormFactor() const noexcept;
     std::int64_t Position100ns() const noexcept;
     std::int64_t TimelineLimit100ns() const noexcept;
     std::int64_t Buffered100ns() const noexcept;
@@ -157,6 +211,30 @@ public:
     // replace or free it across a device switch without a retire list.
     void SetAsrTap(std::shared_ptr<AsrAudioTap> tap) noexcept;
 
+    // ---- bitstream passthrough (FFF.Player.AudioPassthrough.h) ----
+    // Arms the non-PCM exclusive route with the module's format decision. Must
+    // be called BEFORE Start() (the session recreates the renderer when the lane
+    // engages, so this is always true) -- a decision is not retro-fitted onto a
+    // live endpoint. `degrade` is the session's one-step GUID fallback for a
+    // rejected format probe (variant -> generic carrier, see the lane); it runs on
+    // the render thread before the device is initialized and is invoked at most
+    // once. Passing a null format with a decision already armed is refused.
+    bool SetBitstreamFormat(const FFF3FPAudioPassthroughFormat& format,
+        std::function<bool(FFF3FPAudioPassthroughFormat&)> degrade) noexcept;
+    // True while the armed decision is in force (device not necessarily open yet).
+    bool BitstreamActive() const noexcept { return bitstreamActive_; }
+    // One burst of packed IEC 61937 bytes (s16le sample words, already
+    // byte-order-prepared by the module). Runs on the session worker next to
+    // Enqueue; bytes queue strictly in arrival order and are metered by the
+    // burst's own media duration, never by swr/gain/tempo logic.
+    FFFResult EnqueueBitstream(const std::uint8_t* burst, std::uint32_t burstSize,
+        std::int64_t pts100ns, std::int64_t duration100ns) noexcept;
+    // Diagnostics for the session's fallback decisions: the HRESULT the last
+    // exclusive Initialize failed with, and whether the endpoint rejected the
+    // bitstream *format* itself (as opposed to being busy with another owner).
+    std::int64_t LastInitHresult() const noexcept { return lastInitHresult_; }
+    bool BitstreamFormatRejected() const noexcept { return bitstreamFormatRejected_; }
+
 private:
     // Which route one decoded frame takes through the seam.
     enum class BedRoute {
@@ -170,6 +248,12 @@ private:
         // In the seam, and the plug accepted this bed: every frame of it is handed
         // to plug->render() and only rate-converted afterwards.
         Plug,
+        // Bitstream passthrough. Never returned by SelectBedRoute:
+        // that seam sees decoded PCM frames only. This route is armed explicitly
+        // via SetBitstreamFormat and switches the WHOLE renderer to the burst byte
+        // queue -- Enqueue() refuses frames while it is active, because mixing
+        // packed IEC 61937 bursts with resampled PCM on one endpoint is noise.
+        Bitstream,
     };
     struct AudioChunk {
         std::vector<std::uint8_t> bytes;
@@ -188,6 +272,7 @@ private:
     // sample rate untouched. Skipped entirely when the frame already is FLTP.
     FFFResult EnsureBedConverter(const AVFrame* frame) noexcept;
     BedRoute SelectBedRoute(const AVFrame* frame) noexcept;
+    bool BinauralWanted() const noexcept;
     // Renders one whole bed frame through the plug into plugLeft_/plugRight_.
     // Returns the frame count produced, or <= 0 when the plug declines this frame.
     std::int32_t RenderBedWithPlug(const AVFrame* frame, std::int64_t position100ns) noexcept;
@@ -261,6 +346,35 @@ private:
     // instance's ownership). Touched only on the session worker, like the plug
     // view above; Enqueue reads it there and nowhere else.
     std::shared_ptr<AsrAudioTap> asrTap_;
+    // ---- bitstream passthrough state ----------------------------------------
+    // The decision is armed before Start() and never flipped on a live renderer
+    // (engagement re-creates the renderer), so the render thread may read
+    // bitstreamActive_ without a lock. The burst queue shares mutex_ with the
+    // PCM queue on purpose: Reset/consumption must stay atomic against bytes,
+    // whichever queue they live in.
+    bool bitstreamActive_ = false;
+    FFF3FPAudioPassthroughFormat bitstreamFormat_{};
+    std::function<bool(FFF3FPAudioPassthroughFormat&)> bitstreamDegrade_;
+    struct BitstreamBurst final {
+        std::vector<std::uint8_t> bytes;
+        // Device-period boundaries need not align with burst boundaries, so a
+        // burst can straddle two callbacks; the drain resumes at this offset.
+        std::size_t offset = 0;
+        std::int64_t pts100ns = 0;
+        std::int64_t duration100ns = 0;
+    };
+    std::deque<BitstreamBurst> bitstreamQueue_;
+    std::size_t bitstreamQueuedBytes_ = 0;
+    // (Link rate / channel count of the open endpoint live in outputSampleRate_ /
+    // outputChannels_: the bitstream device IS initialized at the link format, so
+    // the two are the same numbers by construction.)
+    // Clock anchor for the content timeline (see updateMediaClock): the media
+    // PTS of the first burst queued after the last reset.
+    bool bitstreamPtsAnchored_ = false;
+    std::int64_t bitstreamPtsAnchor100ns_ = 0;
+    std::atomic<std::uint64_t> ptBurstsRendered_{0};
+    std::int64_t lastInitHresult_ = 0;
+    bool bitstreamFormatRejected_ = false;
     // Scratch, kept as members so a steady-state stream allocates nothing per frame.
     std::vector<float> bedPlaneScratch_;    // channelCount planes, stride below
     std::vector<float> plugLeftScratch_;
@@ -280,6 +394,12 @@ private:
     std::atomic<bool> paused_;
     std::atomic<bool> resetRequested_;
     std::atomic<bool> restartRequested_;
+    // Binaural route policy (0 auto / 1 force / 2 off) and the device shape read
+    // once per renderer instance. Both are plain atomics read on the bed path: no
+    // lock, no COM, no property store on the audio thread after open.
+    std::atomic<std::uint32_t> binauralPolicy_{0};
+    std::atomic<std::uint32_t> endpointFormFactor_{0};
+
     std::atomic<std::int64_t> resetPosition100ns_;
     // IAudioClock is sampled on the event thread. Readers interpolate between
     // samples with the correlated QPC timestamp, but never beyond audio that

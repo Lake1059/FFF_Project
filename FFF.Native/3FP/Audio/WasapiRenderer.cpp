@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Audio/WasapiRenderer.h"
+#include "3FP/Core/ThreadNaming.h"
 
 extern "C" {
 #include <libavutil/channel_layout.h>
@@ -131,6 +132,16 @@ struct CoTaskMemDeleter final {
     void operator()(void* value) const noexcept { CoTaskMemFree(value); }
 };
 
+// PKEY_AudioEndpoint_FormFactor ({1da5d803-d492-4edd-8c23-e0c0ffee7f0e}, 0).
+// functiondiscoverykeys_devpkey.h only declares these keys: DEFINE_PROPERTYKEY
+// emits a definition solely when INITGUID precedes the include, which a
+// precompiled-header build cannot arrange, and the pch already pulled the header
+// in. Spelling the key out here keeps the module free of a second GUID mechanism
+// and of a link dependency on a symbol nothing defines. Same 8/4/4/4/4 shape the
+// macro would produce.
+const PROPERTYKEY kAudioEndpointFormFactorKey = {
+    { 0x1da5d803, 0xd492, 0x4edd, { 0x8c, 0x23, 0xe0, 0xc0, 0xff, 0xee, 0x7f, 0x0e } }, 0 };
+
 bool IsAudioDeviceLost(const HRESULT result) noexcept {
     return result == AUDCLNT_E_DEVICE_INVALIDATED ||
         result == AUDCLNT_E_RESOURCES_INVALIDATED ||
@@ -164,6 +175,20 @@ std::int64_t QpcNow100ns() noexcept {
     const auto remainder = value.QuadPart % frequency;
     return seconds * 10'000'000 + remainder * 10'000'000 / frequency;
 }
+
+// Builds a GUID from the contract's little-endian field order (Data1, Data2,
+// Data3, Data4[8]; see FFF3FPAudioPassthroughFormat::subFormat). The two u32
+// words holding Data4 are memcpy'd as-is, which on this little-endian target
+// reproduces the byte sequence the module stored.
+GUID BitstreamSubFormat(const FFF3FPAudioPassthroughFormat& format) noexcept {
+    GUID sub{};
+    sub.Data1 = format.subFormat[0];
+    sub.Data2 = static_cast<WORD>(format.subFormat[1] & 0xFFFFu);
+    sub.Data3 = static_cast<WORD>(format.subFormat[1] >> 16);
+    std::memcpy(&sub.Data4[0], &format.subFormat[2], 4);
+    std::memcpy(&sub.Data4[4], &format.subFormat[3], 4);
+    return sub;
+}
 }
 
 PlayerWasapiRenderer::PlayerWasapiRenderer(std::wstring endpointId, const bool exclusive,
@@ -185,10 +210,63 @@ PlayerWasapiRenderer::PlayerWasapiRenderer(std::wstring endpointId, const bool e
       timestampJitterCount_(0), discontinuityCount_(0), insertedSilenceFrames_(0),
       droppedOverlapFrames_(0) {}
 
+bool PlayerWasapiRenderer::SetBitstreamFormat(const FFF3FPAudioPassthroughFormat& format,
+    std::function<bool(FFF3FPAudioPassthroughFormat&)> degrade) noexcept {
+    if (format.size != sizeof(FFF3FPAudioPassthroughFormat) ||
+        format.version != FFF3FP_AUDIO_PASSTHROUGH_VERSION ||
+        format.linkSampleRate == 0 || format.linkChannels == 0 || format.burstBytes == 0)
+        return false;
+    bitstreamFormat_ = format;
+    bitstreamDegrade_ = std::move(degrade);
+    bitstreamActive_ = true;
+    return true;
+}
+
+FFFResult PlayerWasapiRenderer::EnqueueBitstream(const std::uint8_t* const burst,
+    const std::uint32_t burstSize, const std::int64_t pts100ns,
+    const std::int64_t duration100ns) noexcept {
+    if (burst == nullptr || burstSize == 0) return FFFResult::InvalidArgument;
+    if (!bitstreamActive_) return FFFResult::InvalidState;
+    endOfStream_ = false;
+    try {
+        std::lock_guard lock(mutex_);
+        BitstreamBurst entry;
+        entry.bytes.assign(burst, burst + burstSize);
+        entry.pts100ns = pts100ns;
+        entry.duration100ns = duration100ns;
+        bitstreamQueuedBytes_ += entry.bytes.size();
+        // The clock anchors on the first burst after a reset: its PTS names the
+        // media position the link clock starts consuming from (formula in
+        // updateMediaClock). Bursts arrive in order, so the first one wins.
+        if (!bitstreamPtsAnchored_ && pts100ns != AV_NOPTS_VALUE) {
+            bitstreamPtsAnchored_ = true;
+            bitstreamPtsAnchor100ns_ = pts100ns;
+        }
+        bitstreamQueue_.push_back(std::move(entry));
+    } catch (...) {
+        SetError("Could not queue a bitstream burst.");
+        return FFFResult::NativeFailure;
+    }
+    PublishRuntimeDiagnostics();
+    if (controlEvent_ != nullptr) SetEvent(controlEvent_);
+    return FFFResult::Success;
+}
+
 PlayerWasapiRenderer::~PlayerWasapiRenderer() { Stop(); }
 
 FFFResult PlayerWasapiRenderer::Start() noexcept {
     if (running_.exchange(true)) return FFFResult::Success;
+    // Bitstream passthrough is an exclusive, non-PCM route by construction: the
+    // module's bursts would land on the shared engine's mixer as s16 garbage.
+    // Report it here so the session's fallback chain (recreate shared decode)
+    // starts immediately instead of after a thread spin-up.
+    if (!exclusive_ && bitstreamActive_) {
+        running_ = false;
+        SetError("Bitstream passthrough requires WASAPI exclusive mode.");
+        return FFFResult::NotSupported;
+    }
+    bitstreamFormatRejected_ = false;
+    lastInitHresult_ = 0;
     restartRequested_ = false;
     {
         std::lock_guard lock(mutex_);
@@ -227,6 +305,11 @@ void PlayerWasapiRenderer::Stop() noexcept {
     running_ = false;
     clockRunning_ = false;
     CloseEvents();
+    {
+        std::lock_guard lock(mutex_);
+        bitstreamQueue_.clear();
+        bitstreamQueuedBytes_ = 0;
+    }
     if (resampler_ != nullptr) { swr_free(&resampler_); }
     av_channel_layout_uninit(&inputChannelLayout_);
     inputSampleRate_ = 0; inputSampleFormat_ = -1;
@@ -346,6 +429,24 @@ void PlayerWasapiRenderer::SetMonoAudio(const bool enabled) noexcept {
     PublishRuntimeDiagnostics();
 }
 
+void PlayerWasapiRenderer::SetBinauralPolicy(const std::uint32_t policy) noexcept {
+    if (binauralPolicy_.exchange(policy, std::memory_order_relaxed) == policy) return;
+    // Runs on the session worker, like SetMonoAudio. Nothing else has to move: the
+    // route is re-decided per bed frame and EnsureResampler keys its cache on the
+    // route, so a flip rebuilds the resampler through the same check a plug that
+    // bails mid-stream already goes through. Publish so the read-back cannot lag.
+    PublishRuntimeDiagnostics();
+}
+
+std::uint32_t PlayerWasapiRenderer::EndpointFormFactor() const noexcept {
+    return endpointFormFactor_.load(std::memory_order_relaxed);
+}
+
+bool PlayerWasapiRenderer::BinauralWanted() const noexcept {
+    return BinauralWantedFor(binauralPolicy_.load(std::memory_order_relaxed),
+        outputChannels_);
+}
+
 void PlayerWasapiRenderer::SetAudioRenderPlug(const FFF3FPAudioRenderPlug* const plug) noexcept {
     // Runs on the session worker -- the same thread that calls Enqueue and Reset --
     // so this swap cannot interrupt a render() call. Frames already inside the PCM
@@ -389,6 +490,12 @@ PlayerWasapiRenderer::BedRoute PlayerWasapiRenderer::SelectBedRoute(const AVFram
     // The seam renders a stereo pair, so it owns the bed only against a 2-channel
     // endpoint. A multichannel device keeps today's route, unchanged.
     if (outputChannels_ != 2) return BedRoute::Native;
+    // Product default (2026-11-12): a 2-channel endpoint defaults to binaural and
+    // a multichannel endpoint falls back to the matrix fold-down -- regardless of
+    // the EndpointFormFactor Windows reports, which calls most USB DACs "digital
+    // audio devices" even though their mix format is stereo. The forced policies
+    // still override the default in both directions.
+    if (!BinauralWanted()) return BedRoute::Native;
     const auto channels = frame->ch_layout.nb_channels;
     if (channels <= 0) return BedRoute::Native;
     // 2.0 already is the device target: the route could only reproduce swr's
@@ -616,6 +723,10 @@ void PlayerWasapiRenderer::ReleaseBedSeamBuffers() noexcept {
 FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t position100ns,
     const std::int64_t timestampResolution100ns) noexcept {
     if (frame == nullptr || frame->nb_samples <= 0) return FFFResult::InvalidArgument;
+    // The bitstream route owns the endpoint exclusively; a decoded PCM frame
+    // arriving here means the session's release of the lane lagged its engage.
+    // Refuse loudly instead of interleaving bursts and PCM on one device.
+    if (bitstreamActive_) return FFFResult::InvalidState;
     endOfStream_ = false;
     // ASR tap: the raw decoded bed, ahead of any bed route, fold-down, resample
     // or gain (FFF.Player.AudioTap.h). One pointer load while the tap is off;
@@ -886,6 +997,14 @@ void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
     {
         std::lock_guard lock(mutex_);
         queue_.clear(); queuedBytes_ = 0; timelineAnchored_ = false; producedTimelineFrames_ = 0;
+        // A seek drops the queued bursts as well: the module's own reset (called
+        // by the session on the same worker pass) re-packs from the seek target,
+        // so bytes queued from before the seek belong to abandoned timeline
+        // positions. The clock anchor re-forms on the first new burst.
+        bitstreamQueue_.clear();
+        bitstreamQueuedBytes_ = 0;
+        bitstreamPtsAnchored_ = false;
+        bitstreamPtsAnchor100ns_ = 0;
         fadeInFramesRemaining_ = outputSampleRate_ == 0 ? 0 :
             std::max<std::uint32_t>(1, outputSampleRate_ * StartupFadeInMilliseconds / 1000);
     }
@@ -947,6 +1066,16 @@ std::int64_t PlayerWasapiRenderer::TimelineLimit100ns() const noexcept {
 std::int64_t PlayerWasapiRenderer::Buffered100ns() const noexcept {
     std::lock_guard lock(mutex_);
     if (outputSampleRate_ == 0 || outputBlockAlign_ == 0) return 0;
+    // Bitstream route: the queued bytes are packed bursts consumed by the
+    // endpoint at the LINK rate (s16 words, so nBlockAlign = 2 bytes per
+    // channel: 4 for the 2ch carrier, 16 for the 8ch HBR carrier). Same
+    // lead/buffer metric as PCM, only the byte rate differs; no swr delay
+    // exists on this route.
+    if (bitstreamActive_) {
+        const auto queuedFrames = bitstreamQueuedBytes_ / outputBlockAlign_ +
+            pendingMediaFrames_.load();
+        return static_cast<std::int64_t>(queuedFrames) * 10'000'000 / outputSampleRate_;
+    }
     // This is the amount of decoded PCM still ahead of the endpoint playback
     // cursor: application PCM waiting to be submitted plus samples already
     // owned by WASAPI. It is a queue lead/buffer duration, not hardware's
@@ -1017,9 +1146,12 @@ void PlayerWasapiRenderer::PublishRuntimeDiagnostics() noexcept {
         std::memory_order_relaxed);
     runtimeState_->plugFramesRendered.store(plugFramesRendered_.load(), std::memory_order_relaxed);
     runtimeState_->plugFramesDeclined.store(plugFramesDeclined_.load(), std::memory_order_relaxed);
+    // Passthrough readout, same lifetime rules as the plug counters above.
+    runtimeState_->ptBurstsRendered.store(ptBurstsRendered_.load(), std::memory_order_relaxed);
 }
 
 void PlayerWasapiRenderer::RenderThread() noexcept {
+    FFFThreadNaming::SetCurrentThreadName("FFF.Player.WasapiRender");
     const ComInitialization com;
     const auto comResult = com.Result();
     ComPtr<IMMDeviceEnumerator> enumerator;
@@ -1045,6 +1177,34 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         return;
     }
     format.reset(rawFormat);
+    // Endpoint shape, read once per renderer instance. PKEY_AudioEndpoint_FormFactor
+    // is what Windows itself uses in the Sound control panel to tell 耳机 from
+    // 扬声器, and it is the only signal the automatic binaural policy trusts.
+    // Hot-plug needs no separate notification path: the loop below already polls the
+    // default endpoint every 500 ms and calls RequestRestart when it moves, which
+    // rebuilds this whole object and re-reads the property here.
+    {
+        PROPVARIANT formFactorValue;
+        PropVariantInit(&formFactorValue);
+        ComPtr<IPropertyStore> store;
+        if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &store)) &&
+            SUCCEEDED(store->GetValue(kAudioEndpointFormFactorKey, &formFactorValue)) &&
+            formFactorValue.vt == VT_UI4) {
+            endpointFormFactor_.store(formFactorValue.ulVal, std::memory_order_relaxed);
+            if (runtimeState_ != nullptr)
+                runtimeState_->endpointFormFactor.store(formFactorValue.ulVal,
+                    std::memory_order_relaxed);
+        }
+        PropVariantClear(&formFactorValue);
+        // Published before the loop starts so a paused or audio-only session can
+        // answer the status read-back without waiting for the first bed frame.
+        // `plugInstalled` is deliberately NOT written here: the session owns that
+        // flag (it installs the plug after Start returns), so writing it from this
+        // thread could land a stale 0 on top of a freshly installed plug.
+        if (runtimeState_ != nullptr)
+            runtimeState_->endpointChannels.store(
+                static_cast<std::uint32_t>(rawFormat->nChannels), std::memory_order_relaxed);
+    }
     // Shared mode lets the engine perform conversion and resampling.  Exclusive
     // mode deliberately bypasses that mixer: the device must accept the exact
     // endpoint format and the client owns the complete hardware period.
@@ -1065,7 +1225,63 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         bufferDuration = std::clamp(sharedDefaultPeriod * 3,
             static_cast<REFERENCE_TIME>(300'000), static_cast<REFERENCE_TIME>(500'000));
     }
-    if (exclusive_) {
+    if (exclusive_ && bitstreamActive_) {
+        // Non-PCM exclusive open: the module's decision
+        // names the exact SubFormat, link rate and channel count, so there is no
+        // PCM ladder to walk. Mask strategy: the 2ch IEC
+        // carrier presents itself as 5.1, an 8ch carrier as 7.1 surround; some
+        // drivers only accept the carrier with DIRECTOUT, so that is the first
+        // retry. If every mask fails, the session's one-step GUID degrade
+        // (variant -> generic carrier of the same family) runs once and the mask
+        // pair is retried; a second miss leaves bitstreamFormatRejected_ set and
+        // the session falls back to the decode path (recovery from here is the
+        // caller's job -- this thread just reports why).
+        const auto maskFor = [](const WORD channels) noexcept -> DWORD {
+            if (channels >= 8) return KSAUDIO_SPEAKER_7POINT1_SURROUND;
+            return KSAUDIO_SPEAKER_5POINT1;
+        };
+        auto decided = bitstreamFormat_;
+        auto probeFormat = [&](const DWORD mask) noexcept {
+            exclusiveCandidate = {};
+            exclusiveCandidate.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+            exclusiveCandidate.Format.nChannels = static_cast<WORD>(decided.linkChannels);
+            exclusiveCandidate.Format.nSamplesPerSec = decided.linkSampleRate;
+            exclusiveCandidate.Format.wBitsPerSample = 16;
+            // IEC 61937 carrier: 16-bit words on the wire, so a link frame is
+            // 2 bytes per channel -- 4 bytes for the 2ch carrier, 16 for the
+            // 8ch HBR carrier. Describing 32-bit samples here (4*nChannels)
+            // made every burst meter at twice its real byte cost: the queue
+            // drained at 2x and the endpoint either rejected the format or
+            // underran immediately.
+            exclusiveCandidate.Format.nBlockAlign =
+                static_cast<WORD>(2 * exclusiveCandidate.Format.nChannels);
+            exclusiveCandidate.Format.nAvgBytesPerSec =
+                decided.linkSampleRate * exclusiveCandidate.Format.nBlockAlign;
+            exclusiveCandidate.Format.cbSize = 22;  // drivers dislike the 34-byte IEC61937 struct
+            exclusiveCandidate.Samples.wValidBitsPerSample = 16;
+            exclusiveCandidate.dwChannelMask = mask;
+            exclusiveCandidate.SubFormat = BitstreamSubFormat(decided);
+            return SUCCEEDED(client->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE,
+                &exclusiveCandidate.Format, nullptr));
+        };
+        bool supported = false;
+        for (int attempt = 0; attempt < 2 && !supported; ++attempt) {
+            for (const DWORD mask : {maskFor(static_cast<WORD>(decided.linkChannels)),
+                                     static_cast<DWORD>(KSAUDIO_SPEAKER_DIRECTOUT)}) {
+                if (probeFormat(mask)) { supported = true; break; }
+            }
+            if (!supported) {
+                if (attempt == 0 && bitstreamDegrade_ && bitstreamDegrade_(decided)) continue;
+                break;
+            }
+        }
+        if (!supported) {
+            bitstreamFormatRejected_ = true;
+            fail("The selected endpoint rejected the module's IEC 61937 bitstream format in exclusive mode.");
+            return;
+        }
+        activeFormat = &exclusiveCandidate.Format;
+    } else if (exclusive_) {
         const bool nativeFormatSupported = SUCCEEDED(client->IsFormatSupported(
             AUDCLNT_SHAREMODE_EXCLUSIVE, activeFormat, nullptr)) &&
             (activeFormat->wBitsPerSample == 16 || activeFormat->wBitsPerSample == 32);
@@ -1109,6 +1325,8 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
                 return;
             }
         }
+    }
+    if (exclusive_) {
         REFERENCE_TIME defaultPeriod = 0;
         REFERENCE_TIME minimumPeriod = 0;
         if (FAILED(client->GetDevicePeriod(&defaultPeriod, &minimumPeriod))) {
@@ -1124,6 +1342,10 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
     // Exclusive event-driven clients must use a whole number of device frames.
     // Many endpoints report a period that rounds differently at 44.1/96 kHz and
     // return AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED on the first Initialize call.
+    // (Format-agnostic: the retry recomputes the duration from GetBufferSize and
+    // re-Initializes with the SAME format, so a non-PCM bitstream format walks it
+    // exactly like a PCM one -- confirmed by reading, the mechanism touches only
+    // buffer arithmetic.)
     if (exclusive_ && initializeResult == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
         UINT32 alignedFrames = 0;
         const auto sampleRate = activeFormat->nSamplesPerSec;
@@ -1136,6 +1358,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
                     alignedDuration, activeFormat, nullptr);
         }
     }
+    lastInitHresult_ = initializeResult;
     auto wasapiResult = initializeResult;
     if (SUCCEEDED(wasapiResult)) wasapiResult = client->SetEventHandle(sampleEvent_);
     if (SUCCEEDED(wasapiResult)) wasapiResult = client->GetBufferSize(&bufferFrames);
@@ -1169,6 +1392,20 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         deviceBufferDuration100ns_ = outputSampleRate_ > 0
             ? static_cast<std::int64_t>(bufferFrames) * 10'000'000 / outputSampleRate_ : 0;
         initializationResult_ = FFFResult::Success; initializationFinished_ = true;
+    }
+    if (bitstreamActive_) {
+        // One-line endpoint fact so a machine log can tell "driver rejected the
+        // carrier" from "driver accepted it but the queue was metered at 2x".
+        // blockAlign must read 4 (2ch) or 16 (8ch HBR); 8/32 means the P0-1
+        // formula regressed.
+        char text[160]{};
+        wsprintfA(text, "pt-endpoint: bits=%u blockAlign=%u avg=%lu linkRate=%u linkCh=%u\n",
+            static_cast<unsigned>(outputBitsPerSample_),
+            static_cast<unsigned>(outputBlockAlign_),
+            static_cast<unsigned long>(outputSampleRate_) * outputBlockAlign_,
+            static_cast<unsigned>(outputSampleRate_),
+            static_cast<unsigned>(outputChannels_));
+        OutputDebugStringA(text);
     }
     if (runtimeState_ != nullptr) runtimeState_->SetChannels(activeFormat->nChannels);
     initializedCondition_.notify_all();
@@ -1205,16 +1442,30 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         const auto elapsedFrames = static_cast<std::uint64_t>(
             static_cast<long double>(elapsedUnits) * outputSampleRate_ / clockFrequency);
         const auto playedFrames = std::min(deviceSubmittedFrames, elapsedFrames);
+        // Bitstream route: the content timeline hangs off the FIRST burst's media
+        // PTS rather than the seek target. Conversion formula (design note):
+        //     position100ns = anchor.pts + playedLinkFrames * 10'000'000 / linkRate
+        // The endpoint was opened AT the link format, so outputSampleRate_ == the
+        // decision's linkSampleRate and every consumed s16 word advances the link
+        // clock at that rate; each burst covers exactly the media time its byte
+        // count needs, so media time advances 1:1 with wall time from the anchor.
+        // Until the first burst anchors (queue empty after a seek), the fallback
+        // anchor is the reset position -- identical to the PCM formula.
+        std::int64_t anchorMedia100ns = resetPosition100ns_.load();
+        {
+            std::lock_guard queueLock(mutex_);
+            if (bitstreamActive_ && bitstreamPtsAnchored_)
+                anchorMedia100ns = bitstreamPtsAnchor100ns_;
+        }
         std::lock_guard lock(clockMutex_);
         if (activeClockEpoch != clockEpoch_) return;
         const auto advancing = devicePosition > clientStartDevicePosition;
         clockRunning_ = advancing;
         playedMediaFrames_ = playedFrames;
         pendingMediaFrames_ = deviceSubmittedFrames - playedFrames;
-        const auto resetPosition = resetPosition100ns_.load();
-        clockPosition100ns_ = resetPosition +
+        clockPosition100ns_ = anchorMedia100ns +
             static_cast<std::int64_t>(playedFrames * 10'000'000 / outputSampleRate_);
-        clockLimitPosition100ns_ = resetPosition +
+        clockLimitPosition100ns_ = anchorMedia100ns +
             static_cast<std::int64_t>(deviceSubmittedFrames * 10'000'000 / outputSampleRate_);
         clockSampleQpc100ns_ = advancing && qpcPosition100ns != 0
             ? static_cast<std::int64_t>(qpcPosition100ns) : QpcNow100ns();
@@ -1347,8 +1598,13 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             // Keep reset and consumption atomic with respect to the PCM bytes;
             // otherwise Reset could clear the queue between GetBuffer and copy.
             std::lock_guard lock(mutex_);
+            // Bitstream route meters from the burst byte queue; decoded-PCM route
+            // from queue_, exactly as before. Both count "queued endpoint frames"
+            // here: the bitstream endpoint runs at the link format, and
+            // outputBlockAlign_ speaks link units only because the probeFormat
+            // contract is nBlockAlign = 2*nChannels (s16 carrier words).
             copied = std::min<std::size_t>(static_cast<std::size_t>(wantedFrames) * outputBlockAlign_,
-                queuedBytes_);
+                bitstreamActive_ ? bitstreamQueuedBytes_ : queuedBytes_);
             renderedFrames = static_cast<UINT32>(copied / outputBlockAlign_);
             if (renderedFrames == 0 && (!exclusive_ || !clientStarted || !deviceEvent)) {
                 if (!shouldPause && clientStarted && hasSubmittedAudio_.load() && !endOfStream_.load() && padding == 0 && !starved) {
@@ -1380,33 +1636,58 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             }
             auto remaining = copied;
             auto* write = destination;
-            while (remaining > 0 && !queue_.empty()) {
-                auto& chunk = queue_.front();
-                const auto silence = std::min(remaining, chunk.silenceBytes);
-                if (silence > 0) {
-                    std::memset(write, 0, silence);
-                    chunk.silenceBytes -= silence; write += silence; remaining -= silence;
-                }
-                if (remaining > 0 && chunk.offset < chunk.bytes.size()) {
-                    const auto bytes = std::min(remaining, chunk.bytes.size() - chunk.offset);
-                    std::memcpy(write, chunk.bytes.data() + chunk.offset, bytes);
-                    chunk.offset += bytes; write += bytes; remaining -= bytes;
-                }
-                if (chunk.silenceBytes == 0 && chunk.offset == chunk.bytes.size()) {
-                    if (chunk.bytes.capacity() <= MaximumReusableAudioBufferBytes &&
-                        reusableBuffers_.size() < MaximumReusableAudioBuffers) {
-                        chunk.bytes.clear();
-                        reusableBuffers_.push_back(std::move(chunk.bytes));
+            if (bitstreamActive_) {
+                // Passthrough: copy s16le burst bytes in arrival order, straight
+                // into the endpoint buffer. Everything the PCM path does around
+                // this (swr, preroll/gap synthesis, gain/fade, tempo, plug bed,
+                // peak meters) is deliberately absent here -- a burst is opaque
+                // carrier bytes and any rewrite of them is corruption. Underflow
+                // zero-fills the remainder and counts through underrunCount_ like
+                // the PCM path; emitting an IEC pause burst (type 0x03) instead is
+                // a follow-up improvement (pause bursts need the current format's
+                // burst period, which the kernel does not track).
+                while (remaining > 0 && !bitstreamQueue_.empty()) {
+                    auto& burst = bitstreamQueue_.front();
+                    if (burst.offset < burst.bytes.size()) {
+                        const auto bytes = std::min(remaining, burst.bytes.size() - burst.offset);
+                        std::memcpy(write, burst.bytes.data() + burst.offset, bytes);
+                        burst.offset += bytes; write += bytes; remaining -= bytes;
                     }
-                    queue_.pop_front();
+                    if (burst.offset >= burst.bytes.size()) {
+                        bitstreamQueue_.pop_front();
+                        ++ptBurstsRendered_;
+                    }
                 }
+                bitstreamQueuedBytes_ -= copied;
+            } else {
+                while (remaining > 0 && !queue_.empty()) {
+                    auto& chunk = queue_.front();
+                    const auto silence = std::min(remaining, chunk.silenceBytes);
+                    if (silence > 0) {
+                        std::memset(write, 0, silence);
+                        chunk.silenceBytes -= silence; write += silence; remaining -= silence;
+                    }
+                    if (remaining > 0 && chunk.offset < chunk.bytes.size()) {
+                        const auto bytes = std::min(remaining, chunk.bytes.size() - chunk.offset);
+                        std::memcpy(write, chunk.bytes.data() + chunk.offset, bytes);
+                        chunk.offset += bytes; write += bytes; remaining -= bytes;
+                    }
+                    if (chunk.silenceBytes == 0 && chunk.offset == chunk.bytes.size()) {
+                        if (chunk.bytes.capacity() <= MaximumReusableAudioBufferBytes &&
+                            reusableBuffers_.size() < MaximumReusableAudioBuffers) {
+                            chunk.bytes.clear();
+                            reusableBuffers_.push_back(std::move(chunk.bytes));
+                        }
+                        queue_.pop_front();
+                    }
+                }
+                queuedBytes_ -= copied;
             }
             const auto submittedBytes = static_cast<std::size_t>(renderedFrames) * outputBlockAlign_;
             if (submittedBytes > copied) std::memset(destination + copied, 0, submittedBytes - copied);
-            queuedBytes_ -= copied;
             pendingMediaFrames_.fetch_add(mediaFrames);
         }
-        UpdatePeakLevels(destination, renderedFrames);
+        if (!bitstreamActive_) UpdatePeakLevels(destination, renderedFrames);
         UINT64 anchorCandidate = 0;
         bool hasAnchorCandidate = false;
         if (!clockAnchorValid) {
@@ -1420,6 +1701,15 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
         const auto releaseResult = renderer->ReleaseBuffer(renderedFrames, 0);
         if (SUCCEEDED(releaseResult)) {
             if (exclusive_) exclusiveBufferPrimed = true;
+            // Anchor for this round's limit line, read under mutex_ BEFORE taking
+            // clockMutex_ (updateMediaClock takes them in that order too -- never
+            // inverted). Bitstream routes the limit through the burst anchor so
+            // position and limit describe the same content timeline.
+            const std::int64_t anchorForLimit = [&] {
+                std::lock_guard queueLock(mutex_);
+                return (bitstreamActive_ && bitstreamPtsAnchored_)
+                    ? bitstreamPtsAnchor100ns_ : resetPosition100ns_.load();
+            }();
             {
                 std::lock_guard lock(clockMutex_);
                 if (activeClockEpoch == clockEpoch_) {
@@ -1429,7 +1719,7 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
                     }
                     deviceSubmittedFrames += mediaFrames;
                     pendingMediaFrames_ = deviceSubmittedFrames - playedMediaFrames_.load();
-                    clockLimitPosition100ns_ = resetPosition100ns_.load() +
+                    clockLimitPosition100ns_ = anchorForLimit +
                         static_cast<std::int64_t>(deviceSubmittedFrames * 10'000'000 / outputSampleRate_);
                 }
             }

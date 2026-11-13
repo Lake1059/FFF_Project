@@ -2,6 +2,7 @@ Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Text
 Imports System.Threading
+Imports System.Threading.Tasks
 
 Public Class Form1
     Private 光盘控制器 As 播放器光盘控制器
@@ -58,6 +59,7 @@ Public Class Form1
     Private 设置窗口 As Form设置
     Private 媒体信息窗口 As Form媒体信息
     Private ReadOnly 播放列表数据 As New 播放列表 With {.播放模式 = 列表播放模式.顺序播放}
+    Private 前后预取控制器 As 前后预取控制器
     Private 播放列表窗口 As Form播放列表
     Private 当前弹幕路径 As String = String.Empty
     Private 待打开外部文件 As String = String.Empty
@@ -158,7 +160,10 @@ Public Class Form1
             My.MyApplication.GPU预热线程?.Join()
         Catch
         End Try
-        LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Outline
+        ' LakeUI 文字渲染质量原先在这里硬编码 Outline；2026-11-11 起由设置驱动
+        ' （设置.应用图形性能设置()，默认档 = Outline，行为不变）。调用点挪到了
+        ' 下面 启动时加载设置() 之后——它读的就是设置值，太早调用拿到的是默认对象。
+        ' Attach（chrome 句柄）不画字，晚于它设置文字质量没有观感差异。
         LakeUI.MessageDialogOptions.BackdropEnabled = True
         LakeUI.MessageDialogOptions.BackdropMode = LakeUI.PopupBackdropMode.Auto
         LakeUI.MessageDialogOptions.BackdropTintColor = Color.FromArgb(120, 0, 0, 0)
@@ -183,6 +188,9 @@ Public Class Form1
         更新弹幕按钮可见性()
         SP加载器.启动时加载()
         设置.启动时加载设置()
+        ' LakeUI 图形性能选项（文字渲染/抗锯齿/SSAA/缓存预算/脏区策略）在设置加载后
+        ' 一次性下发；动画帧率不走这里，搭下面字体管道的车（见 字体控制.替换字体）。
+        设置.应用图形性能设置()
         文件关联管理器.启动后台同步(文件关联选项.从设置(设置.实例对象))
         字体控制.更新所有控件字体属性()
         设置.应用SP个性化设置()
@@ -214,13 +222,13 @@ Public Class Form1
         播放控制器 = New 播放器控制器(
             Function() 画面控件.输出窗口句柄, SynchronizationContext.Current,
             CType(设置.实例对象.解码方式, 解码模式))
+        前后预取控制器 = New 前后预取控制器(播放列表数据, Function() 播放控制器.当前媒体路径)
         显示器唤醒 = New 显示器唤醒请求()
         播放控制器.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
         播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
         剪辑区间控制器 = New 播放器剪辑区间控制器(播放控制器, 画面控件,
             MB_剪辑区间模式, MP_剪辑区间操作容器, P_剪辑区间进度条容器,
             P_剪辑区间按钮容器, MB_传给3FUI)
-        更新WASAPI按钮()
         流选择器 = New 播放器流选择器(Me, MP_DX视频容器, MCM_流选择器, 播放控制器)
         流选择器.应用全局字体(设置.实例对象.字体)
         界面呈现器 = 创建界面呈现器()
@@ -238,13 +246,20 @@ Public Class Form1
             Sub(值) 设置.实例对象.Ai字幕已停用 = 值,
             AddressOf 打开Ai字幕设置,
             AddressOf 同步AI字幕派生状态)
+        ' 字幕来源是一个四选一：关 / 内嵌 / 外挂 / AI 实时。两条互斥边都从这里接上：
+        ' 控制器启用前清掉普通字幕；播放控制器选普通字幕时把 AI 停掉。
+        播放控制器.AI字幕 = AI字幕控制器
+        AI字幕控制器.清除普通字幕 = Sub() 播放控制器.关闭字幕(保留AI字幕:=True)
         ' 启动时就读一次包：装了就起，没装就完全不动（本体默认不带任何 ASR 能力）。
         AI字幕控制器.应用设置()
         AddHandler 播放控制器.媒体已打开, AddressOf AI字幕控制器.媒体已打开
 
         AddHandler 画面控件.Ctrl滚轮, AddressOf 画面控件_Ctrl滚轮
         窗口布局控制器 = New 播放器窗口布局控制器(Me, MP_DX视频容器, 画面控件,
-            AddressOf 播放控制器.重绑输出窗口)
+            AddressOf 播放控制器.重绑输出窗口,
+            AddressOf 播放控制器.尝试设置原生尺寸封顶,
+            Not 本次启动图片优先)
+        窗口布局控制器.设置内容尺寸模式(设置.实例对象.内容原始尺寸模式)
         画面菜单控制器 = New 播放器画面菜单控制器(
             Me, 画面控件, MCM_标题栏菜单, MCM_调整渲染区域大小, MCM_截取当前画面,
             窗口布局控制器, AddressOf 播放控制器.安全读取快照,
@@ -271,7 +286,8 @@ Public Class Form1
             AddressOf 图片光标锚定缩放,
             AddressOf 播放控制器.平移视图,
             Function() 播放控制器.当前视图旋转,
-            AddressOf 播放控制器.读取图片缩放)
+            AddressOf 播放控制器.读取图片缩放,
+            Function() 播放控制器.读取呈现计数)
         ' 图片模式通过 Handled 接管左右方向键，用于切换图片。
         AddHandler 方向键快捷键已请求, AddressOf 图片浏览控制器.处理方向键快捷键
         AddHandler 图片浏览控制器.图片模式已变化, AddressOf 图片浏览控制器_图片模式已变化
@@ -282,7 +298,8 @@ Public Class Form1
             Function() 播放控制器.当前视图旋转,
             Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "旋转"),
             设置.实例对象.自动转正,
-            Sub(值) 设置.实例对象.自动转正 = 值)
+            Sub(值) 设置.实例对象.自动转正 = 值,
+            Sub(值) 窗口布局控制器?.更新内容旋转(值))
         AddHandler 播放控制器.媒体已打开, AddressOf 视图旋转控制器.媒体已打开
         ' RTX 视频超分辨率：内核逐帧判定，宿主只负责"请求/取消"与把原因摊开。
         ' 媒体打开后重放偏好是必需的——VSR 请求是会话内状态，新会话从内核默认的 Off 起步。
@@ -314,6 +331,7 @@ Public Class Form1
         AddHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         AddHandler 播放控制器.状态已变化, AddressOf 播放控制器_状态已变化
         AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开
+        AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开_前后预取
         AddHandler 播放控制器.播放结束, AddressOf 播放控制器_播放结束
         AddHandler 播放控制器.媒体已打开, AddressOf 剪辑区间控制器.媒体已打开
         AddHandler 播放控制器.播放错误, AddressOf 播放控制器_播放错误
@@ -326,6 +344,10 @@ Public Class Form1
         AddHandler 界面呈现器.请求跳转到关键帧, AddressOf 界面呈现器_请求跳转到关键帧
         AddHandler 界面呈现器.音量已变更, AddressOf 界面呈现器_音量已变更
         AddHandler 界面呈现器.播放状态已刷新, AddressOf 剪辑区间控制器.播放状态已刷新
+        ' 双耳策略的"跟随设备"就靠这条 100 ms 心跳：内核在默认端点变化后自己会重建
+        ' 渲染器并重读端点形态，这里再把"形态还适不适用"折算一次下发。不另开
+        ' 通知线程，也不给内核加设备回调。
+        AddHandler 界面呈现器.播放状态已刷新, AddressOf 播放控制器_同步双耳策略
         AddHandler 剪辑区间控制器.模式已变化, AddressOf 剪辑区间控制器_模式已变化
         AddHandler MB_剪辑区间模式.Click, AddressOf 剪辑区间控制器.切换模式
         AddHandler P_剪辑区间按钮容器.SizeChanged, AddressOf 剪辑区间控制器.按钮容器大小已变化
@@ -353,7 +375,11 @@ Public Class Form1
         If Not 本次启动图片优先 Then
             创建图层呈现器()
         End If
-        窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
+        ' 内容原始尺寸模式在打开媒体后才决定窗口；启动阶段保留设计器默认尺寸，
+        ' 避免先按 854×480 落位再被媒体事件改一次。
+        If Not 设置.实例对象.内容原始尺寸模式 Then
+            窗口布局控制器.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
+        End If
         PerformLayout()
         核心文件检查通过 = True
     End Sub
@@ -493,10 +519,12 @@ Public Class Form1
             ETB_媒体进度条, ETB_音量条, MB_播放和暂停,
             按钮图标.取得(播放器按钮图标.播放), 按钮图标.取得(播放器按钮图标.暂停),
             MB_软件解码或硬件解码, MB_HDR模式,
-            MB_当前视频编码显示, MB_当前音频编码显示, MB_当前声道数显示, HCL_时间戳显示, Panel4,
+            MB_当前视频编码显示, MB_当前音频编码显示, MB_当前声道数显示, MB_双耳模式, HCL_时间戳显示, Panel4,
             JEC_HDR选项前面的空白占位, JEC_当前视频编码显示前面的空白占位,
-            JEC_当前音频编码显示前面的空白占位, JEC_当前声道数显示前面的空白占位, 画面控件,
+            JEC_当前音频编码显示前面的空白占位, JEC_当前声道数显示前面的空白占位,
+            JEC_双耳模式前面的空白占位, 画面控件,
             AddressOf 播放控制器.安全读取快照,
+            AddressOf 播放控制器.读取双耳状态,
             Function() 播放控制器.是否正在切换,
             Function() 播放控制器.解码器)
     End Function
@@ -552,7 +580,8 @@ Public Class Form1
             AddressOf 播放控制器.读取视频超分辨率图层文本,
             AddressOf 播放控制器.读取视频自动HDR图层文本,
             AddressOf 播放控制器.读取色彩变换合成文本,
-            AI字幕活动提供器:=Function() AI字幕控制器 IsNot Nothing AndAlso AI字幕控制器.Worker运行中)
+            AI字幕活动提供器:=Function() AI字幕控制器 IsNot Nothing AndAlso AI字幕控制器.Worker运行中,
+            直通文本提供器:=AddressOf 播放控制器.音频直通图层文本)
         信息图层呈现器.应用全局字体(设置.实例对象.字体)
     End Sub
 
@@ -587,11 +616,18 @@ Public Class Form1
         ' 已在 Load 同步完成，上游 30b2a7e 形态逐字不变）。
         If 本次启动图片优先 Then
             BeginInvoke(Sub()
-                            If Not 正在关闭 Then ThisIsYourWindow1.Attach(Me)
+                            If Not 正在关闭 Then
+                                ThisIsYourWindow1.Attach(Me)
+                                ' 图片打开事件可能发生在 Attach 之前；chrome 接管后重放一次内容尺寸。
+                                窗口布局控制器?.界面已就绪()
+                            End If
                         End Sub)
             BeginInvoke(Sub() 创建图层呈现器())
         End If
 
+        ' 启动优先级降回（P0-1：只在显式 opt-in FFF_STARTUP_PRIORITY=1 时存在）：默认路径
+        ' 不拉高，启动优先级已拉高 恒为 False，本线程根本不起（判断在 ApplicationEvents.vb）。
+        ' 守卫仍用字段而非常量，保留 start /high 等外部启动的原始 class 恢复语义；逻辑不动。
         If My.MyApplication.启动优先级已拉高 Then
             Dim 降回线程 As New Thread(Sub()
                 Try
@@ -606,6 +642,20 @@ Public Class Form1
                 End Try
             End Sub) With {.IsBackground = True, .Name = "启动优先级降回"}
             降回线程.Start()
+        End If
+
+        ' 启动期 CPU 放置的兜底释放（docs/146）：正常路径由内核在首帧呈现时自己结束；
+        ' 用户只是打开软件、没有媒体可放时首帧永远不来，这里 3 s 兜底，避免进程默认
+        ' CPU 集合常驻到播放期（那会静默改变解码/音频线程的落点）。
+        If My.MyApplication.启动CPU放置已启用 Then
+            Dim 放置结束线程 As New Thread(Sub()
+                Try
+                    Thread.Sleep(3000)
+                    播放器原生接口.启动期CPU放置结束()
+                Catch
+                End Try
+            End Sub) With {.IsBackground = True, .Name = "启动CPU放置结束"}
+            放置结束线程.Start()
         End If
     End Sub
 
@@ -752,6 +802,7 @@ Public Class Form1
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
         正在关闭 = True
         播放列表数据.取消自动扫描()
+        前后预取控制器?.释放()
         停止解锁轮询()
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
@@ -825,7 +876,10 @@ Public Class Form1
 
     Private Sub ThisIsYourWindow1_FullScreenChanged(
         sender As Object, e As LakeUI.ThisIsYourWindow.FullScreenChangedEventArgs)
-        If e.HostForm Is Me AndAlso Not 正在关闭 Then 全屏交互控制器?.设置全屏状态(e.IsFullScreen)
+        If e.HostForm Is Me AndAlso Not 正在关闭 Then
+            全屏交互控制器?.设置全屏状态(e.IsFullScreen)
+            窗口布局控制器?.设置全屏状态(e.IsFullScreen)
+        End If
     End Sub
 
     Private Sub 剪辑区间控制器_模式已变化(sender As Object, e As 剪辑区间模式变化事件参数)
@@ -850,7 +904,7 @@ Public Class Form1
         If 正在关闭 Then Return
         Using 对话框 As New OpenFileDialog With {
             .CheckFileExists = True,
-            .Filter = "所有文件|*.*",
+            .Filter = "所有文件|*.*|" & 播放列表.相机RAW格式筛选器,
             .Multiselect = True,
             .RestoreDirectory = True,
             .Title = "打开媒体或替换歌词/字幕/弹幕"
@@ -916,6 +970,8 @@ Public Class Form1
     Private Sub 添加并打开多个媒体文件(路径 As IEnumerable(Of String))
         Dim 媒体文件 = 路径.Where(Function(x) File.Exists(x) AndAlso
                                       播放列表.是支持的媒体文件(x)).ToArray()
+        Dim 被排除的RAW = 路径.Where(Function(x) 播放列表.是相机RAW文件(x)).ToArray()
+        If 被排除的RAW.Length > 0 Then 提示相机RAW格式不支持(被排除的RAW(0))
         If 媒体文件.Length = 0 Then Return
 
         播放列表数据.取消自动扫描()
@@ -925,7 +981,19 @@ Public Class Form1
         播放控制器.打开媒体(首个路径)
     End Sub
 
+    Private Sub 提示相机RAW格式不支持(路径 As String)
+        If 正在关闭 Then Return
+        LakeUI.ExOverlayMsgBox(Me,
+            $"当前 FFmpeg 不支持该格式：{IO.Path.GetFileName(路径)}（相机 RAW 相关格式）。" & vbCrLf &
+            "请转码为受支持的图片或视频后再打开。",
+            MsgBoxStyle.Exclamation Or MsgBoxStyle.OkOnly, "格式不支持")
+    End Sub
+
     Private Sub 打开或替换单个文件(路径 As String)
+        If 播放列表.是相机RAW文件(路径) Then
+            提示相机RAW格式不支持(路径)
+            Return
+        End If
         If LRC歌词自动加载器.是支持的歌词文件(路径) Then
             播放控制器.替换歌词(路径)
         ElseIf 外部字幕自动加载器.是支持的字幕文件(路径) Then
@@ -948,8 +1016,11 @@ Public Class Form1
     Private Sub 播放控制器_状态已变化(sender As Object, e As EventArgs)
         If Not 正在关闭 Then
             显示器唤醒?.更新(播放控制器.安全读取快照())
+            ' 设备热切换/WASAPI 模式变化/回退都会走到这里：重探一次媒体信息，
+            ' 让输出徽章的传统态布局跟着真实端点走（媒体信息里的输出声道数
+            ' 是内核按当前 renderer 的 mix 格式回的）。
+            界面呈现器.更新音频流信息(播放控制器.安全读取媒体信息())
             界面呈现器.刷新()
-            更新WASAPI按钮()
         End If
     End Sub
 
@@ -992,6 +1063,128 @@ Public Class Form1
         图片浏览控制器?.媒体已打开(e.媒体信息, e.快照)
         界面呈现器.设置图片模式(图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.图片模式已启用)
         界面呈现器.刷新()
+        ' 内容尺寸模式：每次打开媒体重算一次；普通播放过程中不逐帧跟随，避免窗口抖动。
+        Dim 内容尺寸 = 解析内容尺寸(e.快照, e.媒体信息)
+        窗口布局控制器?.应用内容原始尺寸(内容尺寸, 播放控制器.当前视图旋转)
+        ' 纯音频/无视频没有内容尺寸；内容模式启动时跳过了初始画面尺寸，这里补回默认画面尺寸，
+        ' 否则会停在设计器默认的大窗口。图片和视频的内容尺寸非空，不会走到这里。
+        If 内容尺寸.IsEmpty AndAlso Not 播放控制器.当前媒体是视频 Then
+            窗口布局控制器?.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
+        End If
+    End Sub
+
+    ''' <summary>快照优先；快照尺寸缺失时回落到媒体信息里的当前视频流。纯音频/无视频返回空。</summary>
+    Private Shared Function 解析内容尺寸(快照 As 播放器快照, 信息 As 媒体信息) As Size
+        If 快照 IsNot Nothing AndAlso 快照.视频宽度 > 0UI AndAlso 快照.视频高度 > 0UI Then
+            Return New Size(CInt(快照.视频宽度), CInt(快照.视频高度))
+        End If
+        If 信息?.流 Is Nothing Then Return Size.Empty
+        Dim 当前索引 = If(快照 Is Nothing, -1, 快照.当前视频流)
+        Dim 视频流 = 信息.流.FirstOrDefault(
+            Function(流) 流.类型 = "video" AndAlso Not 流.是封面图 AndAlso
+                (当前索引 < 0 OrElse 流.索引 = 当前索引))
+        If 视频流 Is Nothing OrElse 视频流.宽度 <= 0 OrElse 视频流.高度 <= 0 Then Return Size.Empty
+        Return New Size(视频流.宽度, 视频流.高度)
+    End Function
+
+    Private Sub 播放控制器_媒体已打开_前后预取(sender As Object, e As 播放器媒体事件参数)
+        前后预取控制器?.媒体已打开(e.文件路径)
+    End Sub
+
+    ''' <summary>界面心跳里的双耳策略重放。幂等：目标与内核现值相同就不发命令，
+    ''' 所以这条 100 ms 路径在稳态下只有四次原子读。</summary>
+    Private Sub 播放控制器_同步双耳策略(sender As Object, e As EventArgs)
+        If 正在关闭 Then Return
+        播放控制器?.同步双耳策略()
+    End Sub
+
+    ''' <summary>用户拒绝直通后不立刻再问：这一次按跳过直通，下一次回到拒绝前的
+    ''' 状态，第三次才重新弹。用户口径（2026-11-12）。</summary>
+    Private 直通跳过一次 As Boolean
+    ''' <summary>直通切换要等渲染器重建/回读，期间忽略连点，免得连弹窗。</summary>
+    Private 正在切换音频输出 As Boolean
+
+    ''' <summary>音频输出徽章：一个按钮循环"传统多声道 → HRTF → 源码直通"。
+    ''' 徽章文本与点击位置都以**真实输出**为准（直通接管/双耳床被外部渲染器拥有），
+    ''' 路由意图只作为"已请求但尚未生效"的过渡位。直通要独占模式，进之前弹一次
+    ''' 确认；拒绝后按跳过规则走。退出直通同时回共享模式。</summary>
+    Private Async Sub MB_双耳模式_Click(sender As Object, e As EventArgs) Handles MB_双耳模式.Click
+        If 正在关闭 OrElse 正在切换音频输出 OrElse Not 播放控制器.是否有媒体 Then Return
+        Dim 快照 = 播放控制器.安全读取快照()
+        If 快照 Is Nothing Then Return
+        Dim 状态 = 播放控制器.读取双耳状态()
+
+        ' 直通中：点一下退出直通，回到传统多声道/立体声。
+        If 快照.音频直通已接管 Then
+            播放控制器.设置音频直通偏好(音频直通模式.关)
+            If 播放控制器.WASAPI模式 = WASAPI共享模式.独占 Then 播放控制器.切换WASAPI模式()
+            应用传统音频输出(状态)
+            显示音频输出提示("音频输出：已退出源码直通", &HFFFFA85AUI)
+            Return
+        End If
+
+        ' HRTF 真在渲染（或已请求且这条轨有床可渲染）：下一站是直通。
+        Dim 有床可双耳 = 界面呈现器.当前音频声道数 > 2
+        If 快照.音频双耳渲染生效 OrElse
+            (有床可双耳 AndAlso 播放控制器.折算双耳策略(状态) = 双耳策略.强制双耳) Then
+            Await 尝试进入源码直通Async()
+            Return
+        End If
+
+        ' 传统：双耳可用且这条轨有床（>2 声道）才进 HRTF，否则 HRTF 对这条轨
+        ' 永远不生效（2.0 没有床），直接尝试直通，不让用户点了个寂寞。
+        If 状态.可用 AndAlso 有床可双耳 Then
+            播放控制器.设置双耳策略(双耳策略.强制双耳)
+            显示音频输出提示("双耳：HRTF 空间音频", &HFF55E7EAUI)
+            Return
+        End If
+        Await 尝试进入源码直通Async()
+    End Sub
+
+    ''' <summary>传统输出：双声道端点压成强制立体声，多声道端点交回自动（跟随端点布局）。</summary>
+    Private Sub 应用传统音频输出(状态 As 双耳状态)
+        If 状态.可用 Then
+            播放控制器.设置双耳策略(双耳策略.强制立体声)
+        Else
+            播放控制器.设置双耳策略(双耳策略.自动)
+        End If
+    End Sub
+
+    Private Async Function 尝试进入源码直通Async() As Task
+        If 直通跳过一次 Then
+            直通跳过一次 = False
+            应用传统音频输出(播放控制器.读取双耳状态())
+            显示音频输出提示("音频输出：已跳过源码直通", &HFFFFA85AUI)
+            Return
+        End If
+        If Not 确认切换到WASAPI独占模式() Then
+            直通跳过一次 = True
+            Return
+        End If
+        If 正在关闭 OrElse Not 播放控制器.是否有媒体 Then Return
+        正在切换音频输出 = True
+        Try
+            If 播放控制器.WASAPI模式 = WASAPI共享模式.共享 Then 播放控制器.切换WASAPI模式()
+            播放控制器.设置音频直通偏好(音频直通模式.自动)
+            显示音频输出提示("正在进入源码直通…", &HFFFFA85AUI)
+            ' 渲染器重建后内核会在下一个音频包重试接管；给一个短窗口回读，
+            ' 没接管就把偏好和独占退回，避免徽章停在"直通"而实际还在解码。
+            Await Task.Delay(1500)
+            Dim 新快照 = 播放控制器.安全读取快照()
+            If 新快照 IsNot Nothing AndAlso 新快照.音频直通已接管 Then
+                显示音频输出提示("源码直通：已接管", &HFFFFA85AUI)
+            Else
+                播放控制器.设置音频直通偏好(音频直通模式.关)
+                If 播放控制器.WASAPI模式 = WASAPI共享模式.独占 Then 播放控制器.切换WASAPI模式()
+                显示音频输出提示("源码直通未生效，已回退解码", &HFFFFA85AUI)
+            End If
+        Finally
+            正在切换音频输出 = False
+        End Try
+    End Function
+
+    Private Sub 显示音频输出提示(文本 As String, 颜色 As UInteger)
+        信息图层呈现器?.显示操作信息(文本, 颜色)
     End Sub
 
     ''' <summary>AI 字幕绘制扩展（PrecisionTimer 线程）：同一帧、同一图层 append
@@ -1130,20 +1323,10 @@ Public Class Form1
         If 画面控件 IsNot Nothing AndAlso 画面控件.CanFocus Then 画面控件.Focus()
     End Sub
 
-    Private Sub MB_当前声道数显示_Click(sender As Object, e As EventArgs) Handles MB_当前声道数显示.Click
-        If 正在关闭 OrElse Not 播放控制器.是否有媒体 Then Return
-        Dim 原模式 = 播放控制器.WASAPI模式
-        If 原模式 = WASAPI共享模式.共享 AndAlso Not 确认切换到WASAPI独占模式() Then Return
-        If 正在关闭 OrElse Not 播放控制器.是否有媒体 OrElse 播放控制器.WASAPI模式 <> 原模式 Then Return
-        播放控制器.切换WASAPI模式()
-        信息图层呈现器?.显示操作信息(If(原模式 = WASAPI共享模式.共享,
-            "正在切换到 WASAPI 独占模式", "正在切换到 WASAPI 共享模式"), &HFFFFA85AUI)
-    End Sub
-
     <CodeAnalysis.SuppressMessage("Performance", "CA1861:不要将常量数组作为参数", Justification:="<挂起>")>
     Private Function 确认切换到WASAPI独占模式() As Boolean
         Dim 内容 = String.Join(vbCrLf, {String.Empty,
-            "是否切换到 WASAPI 独占模式？",
+            "源码直通需要切换到 WASAPI 独占模式。是否继续？",
             String.Empty,
             "独占模式直通设备，能提供理论最佳音质，但也有诸多要求和限制：",
             String.Empty,
@@ -1158,11 +1341,6 @@ Public Class Form1
             "如果您正戴着耳机，请立即取下！",
             MsgBoxStyle.Exclamation, 1) = 0
     End Function
-
-    Private Sub 更新WASAPI按钮()
-        If 播放控制器 Is Nothing Then Return
-        MB_当前声道数显示.ForeColor = If(播放控制器.WASAPI模式 = WASAPI共享模式.独占, Color.IndianRed, Color.Silver)
-    End Sub
 
     Private Sub 播放控制器_外部弹幕已加载(sender As Object, e As 播放器弹幕事件参数)
         If 正在关闭 Then Return
@@ -1187,6 +1365,12 @@ Public Class Form1
 
     Friend Sub 应用音频效果设置()
         播放控制器?.应用音频效果设置()
+    End Sub
+
+    ''' <summary>设置页 → 音频直通 的后端：把三态偏好同步进控制器（钉表/撤表与内核
+    ''' 偏好都在会话侧），并在独占未开且非"关"时提示需要独占。</summary>
+    Friend Sub 应用音频直通设置()
+        播放控制器?.应用音频直通设置()
     End Sub
 
     Friend Sub 应用字幕设置()
@@ -1402,6 +1586,14 @@ Public Class Form1
 
     Private Sub Form1_DpiChanged(sender As Object, e As DpiChangedEventArgs) Handles Me.DpiChanged
         界面呈现器?.更新Dpi()
+        ' DPI 改变后 chrome 尺寸变化；内容区仍要按物理像素重算。
+        窗口布局控制器?.重新应用内容尺寸()
+    End Sub
+
+    ''' <summary>设置页勾选“内容原始尺寸 1:1”后立即作用于当前媒体（没有媒体时自然早退）。</summary>
+    Friend Sub 应用内容尺寸模式设置()
+        If 正在关闭 Then Return
+        窗口布局控制器?.设置内容尺寸模式(设置.实例对象.内容原始尺寸模式)
     End Sub
 
     Protected Overrides Function ProcessDialogKey(keyData As Keys) As Boolean
@@ -1566,6 +1758,7 @@ Public Class Form1
             BeginInvoke(Sub() 播放列表数据_列表变化(sender, e))
             Return
         End If
+        前后预取控制器?.列表变化()
         If String.IsNullOrEmpty(待选中播放列表路径) Then Return
         If 播放列表数据.选择路径(待选中播放列表路径) Then
             待选中播放列表路径 = String.Empty

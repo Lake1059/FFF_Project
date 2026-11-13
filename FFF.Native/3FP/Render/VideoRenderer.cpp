@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Render/VideoRenderer.h"
+#include "3FP/Core/ThreadNaming.h"
 #include "3FP/Render/ShaderBytecode.h"
 #include "3FP/Render/SdrShaderBytecode.h"
 #include <emmintrin.h>
@@ -97,19 +98,36 @@ bool HdrStepTraceEnabled() noexcept {
 // once the ceiling allows it. This process otherwise runs at the default system timer
 // resolution -- the release cadence measured here had a 15.7 ms median, i.e. the quantisation
 // is coarser than the period it has to wait out -- so no condition_variable::wait_for in this
-// process can keep a high-ceiling schedule. The presenter therefore raises the resolution for
-// as long as it owns the cadence and restores it on the way out.
+// process can keep a high-ceiling schedule. The presenter therefore raises the resolution
+// while it is presenting and releases it as soon as a wake-up has nothing to present.
 //
 // Deliberately scoped to the presenter thread rather than to a call site, because it is
 // process-wide and refcounted: the session's own Sleep(1)/wait_for release loop gets the
-// same correction, which is half the defect. The cost is a higher timer interrupt rate for
-// as long as something is playing.
+// same correction while the request is held. The cost is a higher timer interrupt rate while
+// frames are flowing; a parked presenter (paused / ended / still image) releases it on the
+// first idle poll instead of keeping the process paying it until the thread exits (P2-8).
 struct PresenterTimerResolution {
     bool raised = false;
-    PresenterTimerResolution() noexcept { raised = timeBeginPeriod(1) == 0; }
-    ~PresenterTimerResolution() noexcept { if (raised) timeEndPeriod(1); }
+
+    PresenterTimerResolution() noexcept { Raise(); }
+    ~PresenterTimerResolution() noexcept { Release(); }
     PresenterTimerResolution(const PresenterTimerResolution&) = delete;
     PresenterTimerResolution& operator=(const PresenterTimerResolution&) = delete;
+
+    // Idempotent on purpose: the presenter calls these once per wake-up, so a request that
+    // is already held must not be counted twice -- timeBeginPeriod/timeEndPeriod are
+    // process-wide and refcounted, and an extra timeEndPeriod would drop a 1 ms request
+    // this process still relies on.
+    void Raise() noexcept {
+        if (raised) return;
+        raised = timeBeginPeriod(1) == 0;
+    }
+
+    void Release() noexcept {
+        if (!raised) return;
+        timeEndPeriod(1);
+        raised = false;
+    }
 };
 
 float DetectDisplayRefreshRate(const HWND window) noexcept {
@@ -197,43 +215,58 @@ bool QueryDisplayConfigInfo(Packet& packet) noexcept {
 
 // Same system value as AdvancedColorInfo::SdrWhiteLevelInNits, read through
 // DISPLAYCONFIG instead of WinRT: no RoInitialize, works where the WinRT call
-// briefly fails. Heeds the pitfalls recorded above (QDC_DATABASE_CURRENT only;
-// GET_SDR_WHITE_LEVEL's header.id is the TARGET id).
+// briefly fails. GET_SDR_WHITE_LEVEL's header.id is the TARGET id.
+//
+// QDC_DATABASE_CURRENT is the documented starting point, but drivers may reject
+// it outright with ERROR_INVALID_PARAMETER (87). Measured here on a 10-bit HDR
+// panel over a USB-C link: QDC_DATABASE_CURRENT -> 87, QDC_ALL_PATHS -> OK and
+// SDR_WHITE_LEVEL reads 100 nits (the value WinRT reports on the same desktop).
+// So the flagship query is retried with the unfiltered enumeration rather than
+// silently returning 0, and an unfiltered list only counts active paths.
 bool ReadSdrWhiteLevelDisplayConfig(const HMONITOR monitor, float& nits) noexcept {
     nits = 0.0f;
     if (monitor == nullptr) return false;
     MONITORINFOEXW monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
     if (!GetMonitorInfoW(monitor, &monitorInfo)) return false;
-    UINT32 pathCount = 0;
-    UINT32 modeCount = 0;
-    if (GetDisplayConfigBufferSizes(QDC_DATABASE_CURRENT, &pathCount, &modeCount) != ERROR_SUCCESS)
-        return false;
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
-    if (QueryDisplayConfig(QDC_DATABASE_CURRENT, &pathCount, paths.data(), &modeCount,
-                           modes.data(), nullptr) != ERROR_SUCCESS)
-        return false;
-    for (UINT32 index = 0; index < pathCount; ++index) {
-        DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
-        source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-        source.header.adapterId = paths[index].sourceInfo.adapterId;
-        source.header.id = paths[index].sourceInfo.id;
-        if (!QueryDisplayConfigInfo(source)) continue;
-        if (_wcsicmp(source.viewGdiDeviceName, monitorInfo.szDevice) != 0) continue;
-        DISPLAYCONFIG_SDR_WHITE_LEVEL sdr{};
-        sdr.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
-        sdr.header.adapterId = paths[index].sourceInfo.adapterId;
-        sdr.header.id = paths[index].targetInfo.id;
-        if (!QueryDisplayConfigInfo(sdr)) return false;
-        const auto value = static_cast<float>(sdr.SDRWhiteLevel) / 1000.0f * 80.0f;
-        if (std::isfinite(value) && value > 0.0f) {
-            nits = value;
-            return true;
+
+    const auto query = [&monitorInfo, &nits](const UINT32 flags) noexcept -> bool {
+        UINT32 pathCount = 0;
+        UINT32 modeCount = 0;
+        if (GetDisplayConfigBufferSizes(flags, &pathCount, &modeCount) != ERROR_SUCCESS)
+            return false;
+        std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+        std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+        if (QueryDisplayConfig(flags, &pathCount, paths.data(), &modeCount, modes.data(),
+                               nullptr) != ERROR_SUCCESS)
+            return false;
+        for (UINT32 index = 0; index < pathCount; ++index) {
+            // QDC_ALL_PATHS also lists disconnected targets and stale clones.
+            if (flags != QDC_DATABASE_CURRENT &&
+                (paths[index].flags & DISPLAYCONFIG_PATH_ACTIVE) == 0)
+                continue;
+            DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+            source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            source.header.adapterId = paths[index].sourceInfo.adapterId;
+            source.header.id = paths[index].sourceInfo.id;
+            if (!QueryDisplayConfigInfo(source)) continue;
+            if (_wcsicmp(source.viewGdiDeviceName, monitorInfo.szDevice) != 0) continue;
+            DISPLAYCONFIG_SDR_WHITE_LEVEL sdr{};
+            sdr.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+            sdr.header.adapterId = paths[index].sourceInfo.adapterId;
+            sdr.header.id = paths[index].targetInfo.id;
+            // A target that refuses the query must not veto its siblings.
+            if (!QueryDisplayConfigInfo(sdr)) continue;
+            const auto value = static_cast<float>(sdr.SDRWhiteLevel) / 1000.0f * 80.0f;
+            if (std::isfinite(value) && value > 0.0f) {
+                nits = value;
+                return true;
+            }
         }
         return false;
-    }
-    return false;
+    };
+    if (query(QDC_DATABASE_CURRENT)) return true;
+    return query(QDC_ALL_PATHS);
 }
 
 constexpr std::uint32_t OutputBitDepthForSource(const std::uint32_t sourceBitDepth,
@@ -405,14 +438,17 @@ float NitsToPq(float nits) noexcept {
     return std::pow((c1 + c2 * powered) / (1.0f + c3 * powered), m2);
 }
 
-float HlgToNits(float value) noexcept {
+float HlgInvOetf(float value) noexcept {
     constexpr float a = 0.17883277f;
     constexpr float b = 0.28466892f;
     constexpr float c = 0.55991073f;
-    value = Clamp01(value);
-    const auto scene = value <= 0.5f ? value * value / 3.0f :
+    // No input clamp on purpose: the shader arm does not clamp either, and the
+    // two must agree on out-of-range signals (P010 superwhites land slightly
+    // above 1.0 and the exponential branch maps them past 1000 nits, which the
+    // DWM rolloff then compresses). Clamping here would silently cap the
+    // diagnostic path a reference below the production path.
+    return value <= 0.5f ? value * value / 3.0f :
         (std::exp((value - c) / a) + b) / 12.0f;
-    return 1000.0f * std::pow(std::max(scene, 0.0f), 1.2f);
 }
 
 float Bt709ToLinear(float value) noexcept {
@@ -477,6 +513,21 @@ float Bt2390HdrToSdrPq(const float pq, const float sourcePeak,
 }
 
 struct Float3 { float r, g, b; };
+
+// BT.2100 HLG reference OOTF folded in (gamma = 1.2, nominal peak 1000 nits):
+// Yd = alpha * Ys^(gamma-1) * Yc. The gamma is taken on the scene LUMINANCE
+// Yc = dot(E, BT.2020 weights) and the one resulting scale multiplies all
+// three channels. Pow-ing each channel on its own is only equivalent for
+// grays; on saturated pixels it effectively multiplies every channel by
+// Yc^(-0.2) -- up to 1.76x on pure blue -- which is exactly the
+// saturated-highlight over-brightening the DWM rolloff renders as blown-out
+// HDR (see docs/141).
+Float3 HlgToNits(const Float3 value) noexcept {
+    const Float3 scene{HlgInvOetf(value.r), HlgInvOetf(value.g), HlgInvOetf(value.b)};
+    const auto yc = 0.2627f * scene.r + 0.6780f * scene.g + 0.0593f * scene.b;
+    const auto scale = 1000.0f * std::pow(std::max(yc, 0.0f), 0.2f);
+    return {scale * scene.r, scale * scene.g, scale * scene.b};
+}
 
 Float3 Linear2020NitsToIpt(const Float3 value) noexcept {
     const Float3 lms{
@@ -635,12 +686,22 @@ float3 NitsToPq(float3 v) {
     const float m1=2610.0/16384.0, m2=2523.0/32.0, c1=3424.0/4096.0, c2=2413.0/128.0, c3=2392.0/128.0;
     v=pow(saturate(v/10000.0),m1); return pow((c1+c2*v)/(1.0+c3*v),m2);
 }
-float HlgOne(float v) {
+float HlgInvOetf(float v) {
     const float a=0.17883277,b=0.28466892,c=0.55991073;
-    float scene = v<=0.5 ? v*v/3.0 : (exp((v-c)/a)+b)/12.0;
-    return 1000.0*pow(max(scene,0.0),1.2);
+    return v<=0.5 ? v*v/3.0 : (exp((v-c)/a)+b)/12.0;
 }
-float3 HlgToNits(float3 v) { return float3(HlgOne(v.r),HlgOne(v.g),HlgOne(v.b)); }
+// BT.2100 reference OOTF (gamma=1.2, nominal peak 1000 nits) folded in. The
+// gamma acts on the scene LUMINANCE Yc, and the single resulting scale
+// multiplies all three channels. Pow-ing each channel on its own is only
+// equivalent for grays; on saturated pixels it effectively multiplies every
+// channel by Yc^(-0.2) -- up to 1.76x on pure blue -- which is exactly the
+// saturated-highlight over-brightening the DWM rolloff renders as blown-out
+// HDR (see docs/141).
+float3 HlgToNits(float3 v) {
+    const float3 e=max(float3(HlgInvOetf(v.r),HlgInvOetf(v.g),HlgInvOetf(v.b)),0.0);
+    const float yc=dot(e,float3(0.2627,0.6780,0.0593));
+    return 1000.0*pow(max(yc,0.0),0.2)*e;
+}
 float LinearOne(float v) { v=saturate(v); return v<0.081 ? v/4.5 : pow((v+0.099)/1.099,1.0/0.45); }
 float3 ToLinear709(float3 v) { return float3(LinearOne(v.r),LinearOne(v.g),LinearOne(v.b)); }
 float BtOne(float v) { v=max(v,0.0); return saturate(v<0.018 ? 4.5*v : 1.099*pow(v,0.45)-0.099); }
@@ -1671,24 +1732,33 @@ constexpr std::uint32_t DefaultUploadHeightThreshold = 2160;
 // A gate that only moved the Render decision would make Map(WRITE_DISCARD) target
 // a DEFAULT texture and fail, so the two decisions have to keep reading the same
 // answer.
+// 变量解析一次就缓存（同 ResolveUploadCopyModeCached 的写法）：上传路线在进程生命周期
+// 内不应当变，A/B 脚本在启动前设好 env 即可。运行期再改这两个 env 不再生效是刻意的——
+// 两条上传分支必须始终读同一个答案，半途换答案会让为旧路线创建的纹理走到新分支。
 inline bool ForceStagingUploadCached() noexcept {
-    char* buffer = nullptr;
-    std::size_t length = 0;
-    if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_FORCE_STAGING") != 0 || buffer == nullptr)
-        return false;
-    const std::string value(buffer);
-    free(buffer);
-    return value == "1";
+    static const bool enabled = [] {
+        char* buffer = nullptr;
+        std::size_t length = 0;
+        if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_FORCE_STAGING") != 0 || buffer == nullptr)
+            return false;
+        const std::string value(buffer);
+        free(buffer);
+        return value == "1";
+    }();
+    return enabled;
 }
 
 inline bool ForceDynamicUploadCached() noexcept {
-    char* buffer = nullptr;
-    std::size_t length = 0;
-    if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_FORCE_DYNAMIC") != 0 || buffer == nullptr)
-        return false;
-    const std::string value(buffer);
-    free(buffer);
-    return value == "1";
+    static const bool enabled = [] {
+        char* buffer = nullptr;
+        std::size_t length = 0;
+        if (_dupenv_s(&buffer, &length, "FFF3FP_UPLOAD_FORCE_DYNAMIC") != 0 || buffer == nullptr)
+            return false;
+        const std::string value(buffer);
+        free(buffer);
+        return value == "1";
+    }();
+    return enabled;
 }
 
 inline bool UseDefaultUploadForSize(const std::uint32_t width,
@@ -2449,7 +2519,7 @@ FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept 
             if (transform.transfer == FFF3FPColorTransfer::Pq)
                 nits = {PqToNits(rgb.r), PqToNits(rgb.g), PqToNits(rgb.b)};
             else if (transform.transfer == FFF3FPColorTransfer::Hlg)
-                nits = {HlgToNits(rgb.r), HlgToNits(rgb.g), HlgToNits(rgb.b)};
+                nits = HlgToNits(rgb);
             else
                 nits = {Bt709ToLinear(rgb.r) * transform.paperWhiteNits,
                     Bt709ToLinear(rgb.g) * transform.paperWhiteNits,
@@ -2684,7 +2754,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       actualVideoScalingMode_(FFF3FPVideoScalingMode::Shader),
       scalingQuality_(FFF3FPVideoScalingQuality::HighQuality),
       requestedMode_(FFF3FPColorMode::MapToSdr), actualMode_(FFF3FPColorMode::MapToSdr),
-      sdrPeakNits_(100.0f), hdrPeakNits_(0.0f),
+      sdrPeakNits_(203.0f), hdrPeakNits_(0.0f),
       paperWhiteNits_(203.0f), sdrWhiteLevelNits_(0.0f), sourcePeakNits_(100.0f),
       viewZoomBits_(std::bit_cast<float>(1.0f)),
       sourceWideGamut_(false),
@@ -3313,6 +3383,52 @@ bool PlayerVideoRenderer::OwnsD3D11Texture(ID3D11Texture2D* const texture) const
     texture->GetDevice(&source);
     std::lock_guard deviceLock(deviceMutex_);
     return source.Get() == device_;
+}
+
+std::int32_t PlayerVideoRenderer::DeviceAdapterIndex() const noexcept {
+    std::lock_guard deviceLock(deviceMutex_);
+    if (device_ != nullptr) {
+        ComPtr<IDXGIDevice> dxgiDevice;
+        ComPtr<IDXGIAdapter> adapter;
+        DXGI_ADAPTER_DESC own{};
+        if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
+            FAILED(dxgiDevice->GetAdapter(&adapter)) ||
+            FAILED(adapter->GetDesc(&own))) return -1;
+        ComPtr<IDXGIFactory1> factory;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return -1;
+        for (UINT index = 0; index < 16; ++index) {
+            ComPtr<IDXGIAdapter1> candidate;
+            if (factory->EnumAdapters1(index, &candidate) == DXGI_ERROR_NOT_FOUND) break;
+            DXGI_ADAPTER_DESC1 description{};
+            if (FAILED(candidate->GetDesc1(&description))) continue;
+            if (description.AdapterLuid.HighPart == own.AdapterLuid.HighPart &&
+                description.AdapterLuid.LowPart == own.AdapterLuid.LowPart)
+                return static_cast<std::int32_t>(index);
+        }
+        return -1;
+    }
+    // No device yet: the host binds the final HWND after it opens a session, and
+    // creating a device here would select the default adapter before the monitor
+    // match could run. Resolve EnsureDevice's policy read-only instead. -1 means
+    // unknown, which only costs a redundant candidate, never a wrong decision.
+    const auto preferred = preferredAdapterIndex_.load(std::memory_order_acquire);
+    if (preferred >= 0) return preferred;
+    if (window_ == nullptr || !IsWindow(window_)) return -1;
+    const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return -1;
+    for (UINT adapterIndex = 0; adapterIndex < 16; ++adapterIndex) {
+        ComPtr<IDXGIAdapter1> candidate;
+        if (factory->EnumAdapters1(adapterIndex, &candidate) == DXGI_ERROR_NOT_FOUND) break;
+        for (UINT outputIndex = 0;; ++outputIndex) {
+            ComPtr<IDXGIOutput> output;
+            if (candidate->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) break;
+            DXGI_OUTPUT_DESC description{};
+            if (SUCCEEDED(output->GetDesc(&description)) && description.Monitor == monitor)
+                return static_cast<std::int32_t>(adapterIndex);
+        }
+    }
+    return -1;
 }
 
 FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** output) noexcept {
@@ -5875,8 +5991,11 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
 }
 
 void PlayerVideoRenderer::TimedTextThread() noexcept {
-    // Held for the whole thread: this is the thread that owns the presentation cadence, and
-    // its waits are what hold the flip rate down to the ceiling.
+    FFFThreadNaming::SetCurrentThreadName("FFF.Player.Present");
+    timedTextThreadId_.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    // Owns the presentation cadence while it is presenting; its waits are what hold the flip
+    // rate down to the ceiling. The 1 ms request is released again on idle polls and on every
+    // exit path (P2-8), so a parked presenter no longer holds it for the whole thread life.
     PresenterTimerResolution timerResolution;
     std::uint64_t observedPresentationGeneration = 0;
     std::uint64_t observedVideoGeneration = 0;
@@ -5900,10 +6019,21 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
                 devicePollOnly = true;
             }
             if (!timedTextThreadRunning_) {
+                // Defensive arm: today running_ only drops after the join in
+                // StopTimedTextThread, so this is not observable here. Release anyway
+                // rather than hold a process-wide 1 ms request for a thread that has
+                // nothing left to present.
+                timerResolution.Release();
                 observedPresentationGeneration = presentationGeneration_;
                 observedVideoGeneration = videoGeneration_.load();
                 continue;
             }
+            // P2-8: the 1 ms request is only worth its interrupt rate while this wake-up
+            // is going to pace or present a flip. Raise it before the cadence wait_until /
+            // PresentTimedText below; a pure device-poll tick releases it. Both calls are
+            // idempotent, so a steady 60 Hz stream does not re-count the request.
+            if (devicePollOnly) timerResolution.Release();
+            else timerResolution.Raise();
             if (!devicePollOnly) {
                 videoChanged = videoGeneration_.load() != observedVideoGeneration;
                 const auto cameraLive = projection360Enabled_.load(std::memory_order_acquire) != 0;
@@ -5914,10 +6044,14 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
                 // video-generation clause for the same reason -- a newly decoded
                 // frame must not cut the hold short.
                 const auto paceEngaged = paceFloorHz_.load(std::memory_order_acquire) > 0.0;
+                const auto interactiveView = InteractiveViewActive();
                 // Decode and 360-view updates present immediately; overlay-only
                 // updates obey their cadence. The swap chain paces the display.
+                // A still-image gesture is the exception: its intermediate view
+                // states are only useful inside their own timer tick, so skip the
+                // cadence hold while the low-latency window is live.
                 if (const auto now = std::chrono::steady_clock::now();
-                    !cameraLive && (paceEngaged || !videoChanged) &&
+                    !cameraLive && (paceEngaged || !videoChanged) && !interactiveView &&
                     nextPresentation != std::chrono::steady_clock::time_point::min() &&
                     now < nextPresentation) {
                     if (paceEngaged)
@@ -5976,6 +6110,7 @@ void PlayerVideoRenderer::StopTimedTextThread() noexcept {
     }
     timedTextCondition_.notify_all();
     if (timedTextThread_.joinable()) timedTextThread_.join();
+    timedTextThreadId_.store(0, std::memory_order_relaxed);
     std::lock_guard lock(timedTextMutex_);
     timedTextThreadRunning_ = false;
 }
@@ -7436,6 +7571,27 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     const AVFrame* auxiliaryFrame,
     const FFF3FPAuxiliaryComposition* auxiliaryComposition) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
+    // A decoder on another adapter hands us a D3D11 texture this device cannot
+    // sample. CopySubresourceRegion is only legal between resources of the same
+    // device, so bring such a frame back to CPU planes before any pipeline, HDR or
+    // input-layout decision is made. The session normally does this already; this
+    // keeps cover-art, retained-still and device-recovery callers correct too.
+    if (frame->format == AV_PIX_FMT_D3D11 && frame->data[0] != nullptr &&
+        !OwnsD3D11Texture(reinterpret_cast<ID3D11Texture2D*>(frame->data[0]))) {
+        std::lock_guard transferLock(deviceMutex_);
+        if (d3d11TransferFrame_ == nullptr) d3d11TransferFrame_ = av_frame_alloc();
+        if (d3d11TransferFrame_ == nullptr) {
+            SetError("Could not allocate the cross-adapter frame transfer target.");
+            return FFFResult::NativeFailure;
+        }
+        av_frame_unref(d3d11TransferFrame_);
+        if (av_hwframe_transfer_data(d3d11TransferFrame_, frame, 0) < 0) {
+            SetError("Could not transfer a hardware frame decoded on another adapter.");
+            return FFFResult::FfmpegFailure;
+        }
+        av_frame_copy_props(d3d11TransferFrame_, frame);
+        frame = d3d11TransferFrame_;
+    }
     const auto hdrState = hdrProcessor_.ProcessFrame(
         frame, hdrPeakNits_, paperWhiteNits_, frameIndex);
     struct PlaybackWorkGuard final {
@@ -7946,13 +8102,47 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     return FFFResult::Success;
 }
 
+bool PlayerVideoRenderer::InteractiveViewActive() const noexcept {
+    // A still-image gesture (wheel zoom / drag pan / double-click fit) issues a
+    // Redraw() per timer sample. Holding a short low-latency window around the
+    // last request lets the presenter skip its cadence hold and submit the flip
+    // without waiting for a vblank, so each intermediate state reaches the swap
+    // chain inside the same 8 ms tick. It expires 250 ms after the last request,
+    // with no host-side engage/release to leak into video pacing.
+    // Only a chain created with ALLOW_TEARING can honour an off-vblank flip.
+    // On a fixed-refresh desktop the flag is absent and Present(0,0) is still
+    // composited by DWM on a vblank: an ungated window bought no latency win and
+    // instead filled the frame-latency queue (measured 23/46/66 ms spikes, vs
+    // the stable 13.9-17.1 ms baseline). Gate the whole path on the capability
+    // so such hosts keep the vblank-clamped cadence exactly as before.
+    if (!swapAllowTearing_) return false;
+    // Same benign cross-thread read as the other source flags in DrawCachedVideo:
+    // sourceImageMode_ only changes when a new medium is opened, and a stale
+    // answer here costs at most one off-vblank flip. It also keeps a lingering
+    // gesture window from following a still image into the next video.
+    if (!sourceImageMode_) return false;
+    const auto last = lastInteractiveRedrawQpc_.load(std::memory_order_acquire);
+    if (last <= 0) return false;
+    const auto elapsed = QpcNowValue() - last;
+    return elapsed >= 0 && elapsed < QpcTicks() / 4;
+}
+
 FFFResult PlayerVideoRenderer::Redraw() noexcept {
+    if (sourceImageMode_)
+        lastInteractiveRedrawQpc_.store(QpcNowValue(), std::memory_order_release);
     {
         std::lock_guard deviceLock(deviceMutex_);
         if (!hasCachedVideo_ || window_ == nullptr) return FFFResult::Success;
-        std::lock_guard presentLock(presentMutex_);
-        const auto chainResult = EnsureSwapChain(sourceWidth_, sourceHeight_, sourceBitDepth_);
-        if (chainResult != FFFResult::Success) return chainResult;
+        // The presenter owns presentMutex_ across the flip. Blocking the UI
+        // thread here for a whole vblank is what made wheel/timer samples drop.
+        // PresentTimedText re-checks (and creates) the chain itself, so a failed
+        // try_lock is safe: the generation bump below is the wake-up that keeps
+        // the newest view state from being lost.
+        std::unique_lock presentLock(presentMutex_, std::try_to_lock);
+        if (presentLock.owns_lock()) {
+            const auto chainResult = EnsureSwapChain(sourceWidth_, sourceHeight_, sourceBitDepth_);
+            if (chainResult != FFFResult::Success) return chainResult;
+        }
     }
     {
         std::lock_guard lock(timedTextMutex_);
@@ -8181,6 +8371,7 @@ void PlayerVideoRenderer::RequestCoverBackdropRender(const bool force) noexcept 
 }
 
 void PlayerVideoRenderer::CoverBackdropThread() noexcept {
+    FFFThreadNaming::SetCurrentThreadName("FFF.Player.CoverBackdrop");
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     std::uint64_t observedRequest = 0;
     for (;;) {
@@ -8715,6 +8906,12 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
     if (outputWidth == 0 || outputHeight == 0) return FFFResult::InvalidArgument;
     const auto projection360 = projection360Enabled_.load(std::memory_order_acquire) != 0;
     VideoDestination destination{};
+    // The destination rect is integral because diagnostics/hit testing read it
+    // back as integers. Keep the sub-pixel remainder of the zoom transform and
+    // add it back at the shader call: lround()/truncation used to swallow every
+    // move below half a pixel, which read as the picture "climbing a grid".
+    float subPixelX = 0.0f, subPixelY = 0.0f;
+    float subPixelW = 0.0f, subPixelH = 0.0f;
     if (lyricsLayoutEnabled_.load(std::memory_order_acquire) && sourceLimitedToNativeSize_) {
         destination = CalculateLyricsCoverDestination(sourceWidth_, sourceHeight_,
             outputWidth, outputHeight,
@@ -8776,12 +8973,16 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
         // travels with the pointer. Adding the offset instead of subtracting matches that.
         const float offsetX = panX * std::abs(zoomedWidth - fittedWidth) / 2.0f;
         const float offsetY = panY * std::abs(zoomedHeight - fittedHeight) / 2.0f;
-        destination.x = static_cast<std::int32_t>(std::lround(
-            std::clamp((minX + maxX) * 0.5f + offsetX, minX, maxX)));
-        destination.y = static_cast<std::int32_t>(std::lround(
-            std::clamp((minY + maxY) * 0.5f + offsetY, minY, maxY)));
+        const float originX = std::clamp((minX + maxX) * 0.5f + offsetX, minX, maxX);
+        const float originY = std::clamp((minY + maxY) * 0.5f + offsetY, minY, maxY);
+        destination.x = static_cast<std::int32_t>(std::lround(originX));
+        destination.y = static_cast<std::int32_t>(std::lround(originY));
         destination.width = static_cast<std::uint32_t>(zoomedWidth);
         destination.height = static_cast<std::uint32_t>(zoomedHeight);
+        subPixelX = originX - static_cast<float>(destination.x);
+        subPixelY = originY - static_cast<float>(destination.y);
+        subPixelW = zoomedWidth - static_cast<float>(destination.width);
+        subPixelH = zoomedHeight - static_cast<float>(destination.height);
     }
     ID3D11ShaderResourceView* presentationViews[3]{};
     if (projection360) {
@@ -8869,9 +9070,11 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
     // the Windows HDR SDR-white adjustment.
     // mainDraw 口径 = 整个 DrawWithShader 调用（含内部状态设置与最终 Draw）。
     const auto mainDrawStart = std::chrono::steady_clock::now();
-    const auto result = DrawWithShader(target, static_cast<float>(destination.x),
-        static_cast<float>(destination.y), static_cast<float>(destination.width),
-        static_cast<float>(destination.height), 0, presentationViews);
+    const auto result = DrawWithShader(target,
+        static_cast<float>(destination.x) + subPixelX,
+        static_cast<float>(destination.y) + subPixelY,
+        static_cast<float>(destination.width) + subPixelW,
+        static_cast<float>(destination.height) + subPixelH, 0, presentationViews);
     mainDraw100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - mainDrawStart),
         std::memory_order_relaxed);
     if (result == FFFResult::Success) {
@@ -9086,7 +9289,12 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     // drag-latency relief, DXGI-legal because the chain carries the flag, and there
     // is deliberately no switch for it: steady-state playback (everything outside
     // the move loop) remains gated by the tearing request below.
-    const auto present = interactiveMove
+    // Still-image gestures take the same off-vblank path as a window move. The
+    // 15 ms that zoom_cost_probe measured per wheel step was Present(1,0)
+    // waiting for a vblank; the interactive window above keeps that path off
+    // steady playback and expires 250 ms after the last Redraw().
+    const auto interactiveView = InteractiveViewActive();
+    const auto present = (interactiveMove || interactiveView)
         ? chain->Present(0, swapAllowTearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0)
         : tearing ? chain->Present(0, DXGI_PRESENT_ALLOW_TEARING) : chain->Present(1, 0);
     presentWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
@@ -9317,6 +9525,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     // every registered plane and would be left with dangling handles.
     cudaInterop_.Reset();
     if (cudaTransferFrame_ != nullptr) av_frame_free(&cudaTransferFrame_);
+    if (d3d11TransferFrame_ != nullptr) av_frame_free(&d3d11TransferFrame_);
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         ReleaseCom(sourceViews_[plane]);
         ReleaseCom(sourceTextures_[plane]);
@@ -9403,6 +9612,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     cudaInterop_.Reset();
     cudaInteropRefused_.store(false, std::memory_order_relaxed);
     if (cudaTransferFrame_ != nullptr) av_frame_free(&cudaTransferFrame_);
+    if (d3d11TransferFrame_ != nullptr) av_frame_free(&d3d11TransferFrame_);
     for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
         ReleaseCom(sourceViews_[plane]);
         ReleaseCom(sourceTextures_[plane]);

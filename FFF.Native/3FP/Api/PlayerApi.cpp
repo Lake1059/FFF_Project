@@ -3,6 +3,8 @@
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Api/FFF.Player.AudioRenderPlug.h"
 #include "3FP/Api/FFF.Player.AudioTap.h"
+#include "3FP/Api/FFF.Player.CpuPlacement.h"
+#include "3FP/Core/PlacementPolicy.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Render/VideoRenderer.h"
 #include "3FP/Subtitle/SubtitleProbe.h"
@@ -10,6 +12,7 @@
 #include <cmath>
 #include <atomic>
 #include <cstring>
+#include <cstddef>
 
 namespace {
 // Configuration layout and version must match the public header exactly.
@@ -172,6 +175,15 @@ FFFResult FFF3FP_GetPresentPacingStatus(const FFF3FPHandle player,
         ? static_cast<PlayerSession*>(player)->GetPresentPacingStatus(*status)
         : FFFResult::InvalidArgument;
 }
+// Live presentation counter for the still-image gesture timer. Additive export:
+// a host built against an older header resolves it dynamically and simply
+// falls back to submitting on every timer tick.
+FFFResult FFF3FP_GetPresentationCounter(const FFF3FPHandle player,
+    std::uint64_t* counter) noexcept {
+    if (player == nullptr || counter == nullptr) return FFFResult::InvalidArgument;
+    *counter = static_cast<PlayerSession*>(player)->PresentationCounter();
+    return FFFResult::Success;
+}
 FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetInteractiveMove(const FFF3FPHandle player, const std::uint32_t enabled) noexcept {
     return player && enabled <= 1 ? static_cast<PlayerSession*>(player)->SetInteractiveMove(enabled != 0)
@@ -217,6 +229,30 @@ FFFResult FFF3FP_SetAudioEndpoint(const FFF3FPHandle player, const char* endpoin
 FFFResult FFF3FP_SetAudioExclusiveMode(const FFF3FPHandle player, const std::uint32_t exclusive) noexcept {
     return player && exclusive <= 1 ? static_cast<PlayerSession*>(player)->SetAudioExclusiveMode(exclusive != 0)
         : FFFResult::InvalidArgument;
+}
+// Binaural bed-render policy. Validation lives in the session (it also owns the
+// stored value, which has to outlive every renderer rebuild); here only the handle
+// and the null-pointer contract are enforced.
+FFFResult FFF3FP_SetAudioBinauralPolicy(const FFF3FPHandle player,
+    const std::uint32_t policy) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetAudioBinauralPolicy(policy)
+        : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_GetAudioBinauralStatus(const FFF3FPHandle player,
+    std::uint32_t* policy, std::uint32_t* formFactor,
+    std::uint32_t* wanted, std::uint32_t* available) noexcept {
+    if (player == nullptr) return FFFResult::InvalidArgument;
+    std::uint32_t policyValue = 0;
+    std::uint32_t formFactorValue = 0;
+    std::uint32_t wantedValue = 0;
+    std::uint32_t availableValue = 0;
+    static_cast<PlayerSession*>(player)->GetAudioBinauralStatus(policyValue,
+        formFactorValue, wantedValue, availableValue);
+    if (policy != nullptr) *policy = policyValue;
+    if (formFactor != nullptr) *formFactor = formFactorValue;
+    if (wanted != nullptr) *wanted = wantedValue;
+    if (available != nullptr) *available = availableValue;
+    return FFFResult::Success;
 }
 FFFResult FFF3FP_SetVolume(const FFF3FPHandle player, const float volume, const std::uint32_t muted) noexcept { return player ? static_cast<PlayerSession*>(player)->SetVolume(volume, muted != 0) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetTimedTextLayer(const FFF3FPHandle player,
@@ -547,4 +583,94 @@ FFFResult FFF3FP_GetAudioTapStats(const FFF3FPHandle player,
     return player != nullptr
         ? static_cast<PlayerSession*>(player)->GetAudioTapStats(stats)
         : FFFResult::InvalidArgument;
+}
+
+// Audio bitstream passthrough (3FP/Api/FFF.Player.AudioPassthrough.h). Appended
+// after the tap entries with the same additive discipline: PlayerApiVersion
+// stays at 20 and a host that never resolves these three keeps loading this DLL
+// unchanged. The seam is neutral by construction -- complete frames go out, IEC
+// 61937 bursts come back, and every codec/format decision lives in the module.
+FFFResult FFF3FP_SetAudioPassthroughApi(const FFF3FPHandle player,
+    const FFF3FPAudioPassthroughApi* api) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetAudioPassthroughApi(api)
+        : FFFResult::InvalidArgument;
+}
+
+FFFResult FFF3FP_SetAudioPassthroughMode(const FFF3FPHandle player,
+    const std::uint32_t mode) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetAudioPassthroughMode(mode)
+        : FFFResult::InvalidArgument;
+}
+
+// active: 1 = the passthrough lane owns the audio track, 0 = ordinary decode.
+// mode:   the host preference in force (FFF3FP_PT_MODE_*) -- NOT the snapshot's
+//         effective-route field, which the session writes separately.
+// codecId/name/burstsRendered are optional outputs like GetAudioRenderPlugState's.
+FFFResult FFF3FP_GetAudioPassthroughState(const FFF3FPHandle player,
+    std::uint32_t* active, std::uint32_t* mode, std::uint32_t* codecId,
+    char* name, const std::uint32_t nameCapacity,
+    std::uint64_t* burstsRendered) noexcept {
+    if (player == nullptr || active == nullptr) return FFFResult::InvalidArgument;
+    std::uint32_t activeValue = 0;
+    std::uint32_t modeValue = 0;
+    std::uint32_t codecValue = 0;
+    std::string laneName;
+    std::uint64_t bursts = 0;
+    static_cast<PlayerSession*>(player)->GetAudioPassthroughState(activeValue, modeValue,
+        codecValue, laneName, bursts);
+    *active = activeValue;
+    if (mode != nullptr) *mode = modeValue;
+    if (codecId != nullptr) *codecId = codecValue;
+    if (burstsRendered != nullptr) *burstsRendered = bursts;
+    if (name != nullptr && nameCapacity > 0) {
+        name[0] = '\0';
+        const auto copied = CopyUtf8(laneName, name, nameCapacity, nullptr);
+        if (copied != FFFResult::Success && nameCapacity > 1) {
+            std::memcpy(name, laneName.c_str(), nameCapacity - 1);
+            name[nameCapacity - 1] = '\0';
+        }
+    }
+    return FFFResult::Success;
+}
+
+// Runtime prefetch control surface (3FP/Api/FFF.Player.Prefetch.h).
+// Appended additively, exactly like the audio tap / passthrough entries:
+// PlayerApiVersion stays at 20, SnapshotVersion at 23, and the 608-byte
+// snapshot layout is untouched. A host that never resolves these two exports
+// keeps today's behaviour byte-for-byte.
+#include "3FP/Prefetch/PrefetchService.h"
+
+FFFResult FFF3FP_SetPrefetchPlan(const FFF3FPPrefetchPlan* plan) noexcept {
+    return FFFPrefetch::PrefetchService::Instance().SetPlan(plan);
+}
+
+FFFResult FFF3FP_GetPrefetchStatus(FFF3FPPrefetchStatus* status) noexcept {
+    return FFFPrefetch::PrefetchService::Instance().GetStatus(status);
+}
+
+// Startup CPU placement (3FP/Api/FFF.Player.CpuPlacement.h), appended additively:
+// PlayerApiVersion/SnapshotVersion unchanged, hosts resolve both exports dynamically.
+// Everything interesting lives in PlacementPolicy; these are the plain C entry points.
+int FFF3FP_BeginStartupCpuPlacement() noexcept {
+    return PlacementPolicy::BeginProcessStartupPlacement() ? 1 : 0;
+}
+
+void FFF3FP_EndStartupCpuPlacement() noexcept {
+    PlacementPolicy::EndProcessStartupPlacement("host");
+}
+
+// CPU placement diagnostic snapshot (3FP/Api/FFF.Player.CpuPlacement.h, P3-12), appended
+// additively at the tail like the startup entries above: PlayerApiVersion/SnapshotVersion
+// unchanged, no FFF3FPHandle lifetime semantics added, hosts resolve it by name and fall
+// back to today's behaviour when an older kernel does not export it.
+FFFResult FFF3FP_GetCpuPlacementSnapshot(const FFF3FPHandle player,
+    FFF3FPCpuPlacementSnapshot* snapshot) noexcept {
+    if (player == nullptr || snapshot == nullptr) return FFFResult::InvalidArgument;
+    // The host declares the ABI it was built against; reject a mismatch before the
+    // session overwrites the caller's struct with the version-1 layout.
+    if (snapshot->version != FFF3FP_CPUPLACEMENT_SNAPSHOT_VERSION ||
+        snapshot->size < sizeof(FFF3FPCpuPlacementSnapshot)) {
+        return FFFResult::InvalidArgument;
+    }
+    return static_cast<PlayerSession*>(player)->GetCpuPlacementSnapshot(*snapshot);
 }

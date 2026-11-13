@@ -1,0 +1,14 @@
+OBR / Open Binaural Renderer — 归属与许可说明
+2026-11-13
+
+OBR 随 OAR（Open Audio Renderer）仓分发，位于 oar/src/renderer/obr/obr_capi/obr。
+上游没有为 OBR 单独提供 LICENSE 文件；OBR 作为 OAR 仓库的子目录，按 OAR 仓的
+BSD-3-Clause Clear（Alliance for Open Media, 2022）分发。本说明不是独立许可
+文本，完整许可见 licenses/OBR-LICENSE.txt（OAR 许可原文副本）。
+
+- OAR 许可原文：licenses/oar-LICENSE.txt
+- OBR 许可副本：licenses/OBR-LICENSE.txt
+- OAR main 分支对照：licenses/oar-LICENSE-main-branch.txt
+- 如未来上游为 OBR 补充独立许可，以该原文为准并更新本文件。
+
+本说明不是法律意见；如 OBR 上游另有条款，以该条款为准。

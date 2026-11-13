@@ -1,0 +1,53 @@
+AI 字幕扩展包 — 第三方组件 NOTICE
+2026-11-13
+
+本 NOTICE 随 AI 字幕扩展包分发，列出版本、许可标识与来源；完整许可原文在
+本目录（licenses/ai/）。本 NOTICE 不替代许可原文。
+
+1. Qwen3-ASR-0.6B（GGUF Q8_0 / ONNX int8）
+   License: Apache-2.0
+   Source: https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF
+           https://huggingface.co/csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25
+   Copyright: Qwen team / Alibaba Group and contributors; model card terms apply.
+
+2. llama.cpp
+   License: MIT
+   Source: https://github.com/ggml-org/llama.cpp
+   Copyright: llama.cpp contributors.
+
+3. sherpa-onnx
+   License: Apache-2.0
+   Source: https://github.com/k2-fsa/sherpa-onnx
+   Copyright: k2-fsa / sherpa-onnx contributors.
+
+4. OpenVINO
+   License: Apache-2.0
+   Source: https://github.com/openvinotoolkit/openvino
+   Copyright: Intel Corporation and OpenVINO contributors.
+   Includes openvino_telemetry (Apache-2.0); telemetry is controlled by OpenVINO's
+   consent file / opt_in_out. 3FP defaults new consent files to "0" (declined) and
+   does not send audio or subtitle text to telemetry.
+
+5. Python 3.12 embeddable
+   License: PSF-2.0
+   Source: https://www.python.org/
+   Copyright: Python Software Foundation.
+
+6. NumPy
+   License: BSD-3-Clause
+   Source: https://numpy.org/
+   Copyright: NumPy contributors.
+
+7. ONNX Runtime
+   License: MIT
+   Source: https://github.com/microsoft/onnxruntime
+   Copyright: Microsoft Corporation and ONNX Runtime contributors.
+
+License texts in this directory:
+- Apache-2.0.txt
+- MIT.txt
+- BSD-3-Clause.txt
+- PSF-2.0.txt
+
+If a component's own license text conflicts with this NOTICE, the component's
+license text controls. This is not legal advice.

@@ -2,7 +2,9 @@
 
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Api/FFF.Player.AudioRenderPlug.h"
+#include "3FP/Api/FFF.Player.AudioPassthrough.h"
 #include "3FP/Audio/WasapiRenderer.h"
+#include "3FP/Audio/AudioPassthrough.h"
 #include "3FP/Core/AvifTileGridComposer.h"
 #include "3FP/Core/PlacementPolicy.h"
 #include "3FP/Core/PlaybackPerformancePolicy.h"
@@ -36,6 +38,9 @@ struct AVPacket;
 struct AVBufferRef;
 struct AVFilterGraph;
 struct AVFilterContext;
+// ABI struct appended to 3FP/Api/FFF.Player.CpuPlacement.h (P3-12). Forward-declared so
+// this header does not depend on the public diagnostic header; the .cpp includes it.
+struct FFF3FPCpuPlacementSnapshot;
 class Fmp4FragmentScanner;
 
 class PlayerSession final {
@@ -114,6 +119,16 @@ public:
     FFFResult SetAudioExclusiveMode(bool exclusive) noexcept;
     FFFResult SetPlaybackRate(double rate) noexcept;
     FFFResult SetMonoAudio(bool enabled) noexcept;
+    // Binaural bed-render policy (FFF3FP_SetAudioBinauralPolicy): 0 = automatic,
+    // decided by the endpoint's form factor; 1 = force binaural; 2 = force stereo.
+    // The session holds it because the renderer is rebuilt on every device switch
+    // and would otherwise forget the user's choice on a hot-plug.
+    FFFResult SetAudioBinauralPolicy(std::uint32_t policy) noexcept;
+    // Read-back for FFF3FP_GetAudioBinauralStatus. Everything comes from the shared
+    // runtime state plus the session's own policy: the API thread must not
+    // dereference the renderer, which a device switch can replace between calls.
+    void GetAudioBinauralStatus(std::uint32_t& policy, std::uint32_t& formFactor,
+        std::uint32_t& wanted, std::uint32_t& available) const noexcept;
     FFFResult SetVolume(float volume, bool muted) noexcept;
     // External bed render plug (3FP/Api/FFF.Player.AudioRenderPlug.h). Install,
     // replace or clear; the session owns the context from the call that installs it
@@ -127,6 +142,15 @@ public:
     // be replaced at any moment by a device switch.
     void GetAudioRenderPlugState(std::uint32_t& active, std::string& name,
         std::uint64_t& framesRendered, std::uint64_t& framesDeclined) const noexcept;
+    // Audio bitstream passthrough (3FP/Audio/AudioPassthrough.h).
+    // Install/clear the module's function table; set the host preference
+    // (FFF3FP_PT_MODE_*); read back the seam state for
+    // FFF3FP_GetAudioPassthroughState (mode = the host preference there, not the
+    // snapshot's effective-route field).
+    FFFResult SetAudioPassthroughApi(const FFF3FPAudioPassthroughApi* api) noexcept;
+    FFFResult SetAudioPassthroughMode(std::uint32_t mode) noexcept;
+    void GetAudioPassthroughState(std::uint32_t& active, std::uint32_t& mode,
+        std::uint32_t& codecId, std::string& name, std::uint64_t& burstsRendered) const noexcept;
     // ASR audio tap (3FP/Api/FFF.Player.AudioTap.h): raw decoded frames out to
     // a speech-recognition worker. The session owns the tap; the renderer only
     // holds it while installed, so a device switch re-installs it into the
@@ -135,6 +159,12 @@ public:
     // read-back never touches the renderer either.
     FFFResult EnableAudioTap(const FFF3FPAudioTapConfig* config) noexcept;
     void DisableAudioTap() noexcept;
+    // Passthrough keeps the FFmpeg audio decoder open but never feeds it. When a
+    // tap is installed, this pushes each parsed access unit through that same
+    // decoder and hands the PCM to the tap only, so AI subtitles work on the
+    // bitstream route. Worker thread only (HandlePassthroughPacket).
+    void FeedAsrShadow(const std::uint8_t* data, std::size_t size,
+        std::int64_t position100ns) noexcept;
     FFFResult ReadAudioTap(void* dst, std::uint32_t capacity,
         FFF3FPAudioTapBlock* block) const noexcept;
     FFFResult GetAudioTapStats(FFF3FPAudioTapStats* stats) const noexcept;
@@ -157,6 +187,13 @@ public:
     FFFResult GetVideoAutoHdrStatus(
         FFF3FPVideoAutoHdrStatus& status) const noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
+    // CPU placement diagnostics (appended export FFF3FP_GetCpuPlacementSnapshot, P3-12).
+    // Advisory read-only snapshot: it deliberately takes no session lock and changes no
+    // behaviour, so a field may be one state transition old while it is being filled.
+    FFFResult GetCpuPlacementSnapshot(FFF3FPCpuPlacementSnapshot& snapshot) const noexcept;
+    // Live swap-chain flip count, read without copying the 608-byte snapshot.
+    // Used by the still-image view timer to align submissions with flips.
+    std::uint64_t PresentationCounter() const noexcept;
     // HDR presentation diagnostics (see FFF3FPHdrSignalDiagnostics in
     // FFF.Player.Api.h): which ST 2094 mechanism actually ran for the frames drawn
     // so far, and whether the per-frame display signaling reached DXGI.
@@ -253,7 +290,10 @@ private:
         bool preserveVideoOutput = false, bool keepStillImage = false) noexcept;
     FFFResult DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1,
         bool exact = true) noexcept;
-    void DecodeUntilSeekTarget() noexcept;
+    // timeSliced=true（播放态批量臂）：循环每 250 ms 让出一次 worker，命令与快照
+    // 得以在片间处理，seek 目标保持挂起由下一 tick 续推。默认 false：暂停态的
+    // 一次性调用保持「一次解到位」语义。
+    void DecodeUntilSeekTarget(bool timeSliced = false) noexcept;
     // —— fragmented MP4（fMP4）seek 支撑（C-SEEK-FRAGMENTED@1 / C-SEEK-ROLLBACK@1）——
     // DoOpen 挂载：fragmented 判定成立时构造扫描器并启动后台 moof 扫描线程。
     void StartFragmentScanIfNeeded(const std::string& path) noexcept;
@@ -289,7 +329,8 @@ private:
     FFFResult OpenDecoder(AVFormatContext* format, std::int32_t streamIndex, bool video,
         AVCodecContext** decoder, std::int32_t hardwareDeviceType = -1,
         std::int32_t* hardwarePixelFormat = nullptr, bool useConfiguredHardware = true,
-        const AVCodec* codecOverride = nullptr, std::string* failureReason = nullptr) noexcept;
+        const AVCodec* codecOverride = nullptr, std::string* failureReason = nullptr,
+        std::int32_t decodeAdapterIndex = -1) noexcept;
     FFFResult OpenHardwareVideoDecoder(AVFormatContext* format, std::int32_t streamIndex,
         AVCodecContext** decoder, std::string* failureReason = nullptr) noexcept;
     // The one hardware gate: feed the stream's first packets through a decoder that
@@ -377,6 +418,9 @@ private:
     void QueueVideoFrame(AVFrame* frame) noexcept;
     void ClearVideoQueue() noexcept;
     // Copies the side data of one about-to-be-presented frame into the ring.
+    // seek 期间被跳过的帧不会走 PresentVideoFrame 的索引维护；不补的话索引会缺条目，
+    // seek 之后的帧号整体偏小（实测全解 121、跳帧 67），而双流辅层合成按帧号对齐。
+    void IndexVideoPacketTimestamp(std::int64_t pts) noexcept;
     void CacheFrameSideData(const AVFrame* frame, std::int64_t frameIndex) noexcept;
     void ClearSideDataRing() noexcept;
     // Captures / drops the stream-level coded side data of a bound video
@@ -389,7 +433,16 @@ private:
     void DecodePendingPacket(bool video) noexcept;
     void NormalizeVideoFrameTimestamp(AVFrame* frame) noexcept;
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
-    void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) noexcept;
+    void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
+        bool seekPreview = false) noexcept;
+    // True at most once per seek: the first picture decoded on the way to the
+    // target may go on screen so the key press has a visible answer, but it must
+    // not retire the seek (see PresentVideoFrame's seekPreview parameter).
+    bool ShouldPreviewSeekFrame(const AVFrame* frame, const AVFormatContext* owner) noexcept;
+    // Distance from the seek target inside which no preview is shown: a preview
+    // there would be immediately overwritten by the target picture, buying nothing
+    // and paying one extra vblank.
+    std::int64_t SeekPreviewMargin100ns() const noexcept;
     // --- optional auxiliary video layer -------------------------------------
     // One host request, keyed by the presentation index it belongs to.
     struct AuxCompositionRequest {
@@ -561,6 +614,61 @@ private:
     void FallBackFromIamf(const std::string& reason) noexcept;
     void ReleaseIamfDecoder() noexcept;
     std::int32_t videoStream_;
+    // ---- audio bitstream passthrough (3FP/Audio/AudioPassthrough.h) ---------
+    // The neutral seam, IAMF-bypass-shaped (TryOpen -> intercept -> fallback).
+    // Worker-thread-owned like the rest of the audio decode path; the lane
+    // object itself is internally locked for the API-thread install/set calls.
+    // Codec identity mapping for the seam: kernel AV_CODEC_ID_* -> the
+    // contract's kernel-owned enum. 0 = not a passthrough candidate.
+    static std::uint32_t PassthroughCodecIdFor(const AVStream* stream) noexcept;
+    // Binds the just-selected track for passthrough (guards live inside the
+    // lane: table installed, mode != OFF, codec accepted). Engagement itself
+    // happens on the first complete frame, when describe() can see it.
+    void ArmPassthroughForTrack(const AVStream* stream) noexcept;
+    // Worker: true when the packet was consumed by the seam (armed or engaged).
+    // Normalizes the packet into complete frames with av_parser_parse2, runs
+    // describe()/pack(), and writes bursts straight into the renderer's
+    // bitstream queue. Falls back on any module or endpoint failure.
+    bool HandlePassthroughPacket(const AVPacket* packet) noexcept;
+    // describe() success path: recreate the renderer in exclusive non-PCM mode
+    // with the module's format decision and flip the lane to engaged.
+    bool EngagePassthrough(const std::uint8_t* firstFrame, std::uint32_t firstFrameSize) noexcept;
+    // Release the engaged/armed lane and re-open the FFmpeg decoder for the
+    // same track (FallBackFromIamf's shape), emitting the fallback event.
+    void FallBackFromPassthrough(const char* reason) noexcept;
+    // Parser teardown for the seam (per-track rebuild, seek flush is separate).
+    void ReleasePassthroughParserState() noexcept;
+    // (Re)creates the seam parser for an AVCodecID; false when FFmpeg has none
+    // for this pairing (packets then flow to the module as-is).
+    bool EnsurePassthroughParser(int avCodecId) noexcept;
+    // Track teardown (close / stream switch): lane off, module reset, parser
+    // freed, snapshot fields zeroed. No event -- the surrounding operation
+    // already announces the change.
+    void ReleasePassthroughTrack() noexcept;
+    // Seek: module reset + parser flush; the renderer Reset clears its burst
+    // queue (called just after the shared audioRenderer_->Reset).
+    void NotePassthroughSeek() noexcept;
+    // One-shot user hint that a control the bitstream route cannot honour was
+    // refused (mono/rate/plug while engaged).
+    void EmitPassthroughMutexHint(const char* control) noexcept;
+    // RecreateAudioRenderer variant that arms the module's format decision
+    // BEFORE the render thread opens the endpoint. Failure reporting mirrors
+    // RecreateAudioRenderer; the HRESULT distinguishes endpoint-busy from
+    // format-rejected for the fallback reason.
+    FFFResult RecreateAudioRendererWithBitstream(
+        const FFF3FPAudioPassthroughFormat& format, bool paused,
+        std::string& error, std::int64_t& initHresult, bool& formatRejected) noexcept;
+    // Scratch burst buffer, sized once from the contract's capacity minimum.
+    std::vector<std::uint8_t> ptBurstBuffer_;
+    AVCodecParserContext* ptParser_ = nullptr;
+    AVCodecContext* ptParserCodecCtx_ = nullptr;   // parser-only scratch, never opened
+    std::uint32_t ptParserCodecId_ = 0;            // FFF3FPAudioPassthroughCodec the parser is for
+    int ptParserAvCodecId_ = -1;                   // AVCodecID the parser was built for (seek rebuild)
+    // Armed without engagement yet: the first complete frame feeds describe().
+    std::uint32_t ptArmedCodec_ = 0;
+    // The one-shot mutual-exclusion hint (reset on every engage/fallback).
+    bool ptMutexHintEmitted_ = false;
+    AudioPassthroughLane ptLane_;
     // Software-decoder thread ladder. Driven by measured load, not by resolution: a
     // resolution says nothing about whether this machine can keep up with this codec.
     // It starts at the floor and only ever climbs -- one step per starving window,
@@ -635,6 +743,11 @@ private:
     PlayerAudioRuntimeState audioRuntimeState_;
     std::unique_ptr<PlayerWasapiRenderer> audioRenderer_;
     bool monoAudio_ = false; // Worker-owned; survives seeks, media and endpoint changes.
+    // Binaural bed-render policy. Atomic rather than worker-owned because the reader
+    // is the API thread (GetAudioBinauralStatus) and the writer is a queued command;
+    // it also has to survive every renderer rebuild, so it cannot live on the
+    // renderer.
+    std::atomic<std::uint32_t> binauralPolicy_{0};
     // The bed render plug the host installed. Copied, because the caller may free
     // its own struct the moment the call returns; `context` is the kernel's from
     // then on and only this class releases it (see SetAudioRenderPlug / ~PlayerSession).
@@ -661,6 +774,17 @@ private:
     // audio path never takes it.
     mutable std::mutex asrTapMutex_;
     std::shared_ptr<AsrAudioTap> asrTap_;
+    // Worker-side view of asrTap_ for the passthrough shadow decode. A bare
+    // pointer, not a shared_ptr: the audio hot path must not take asrTapMutex_,
+    // and the worker owns every write (install/uninstall commands) while
+    // asrTap_ keeps the object alive. Cleared on DisableAudioTap and on close.
+    AsrAudioTap* asrTapWorkerRaw_ = nullptr;
+    // Shadow-decode failure policy: TrueHD/DTS-HD opened mid-stream error on
+    // every AU until the next major sync, so the threshold is deliberately wide.
+    // Any decoded frame resets the count; only a persistent failure disables the
+    // shadow for this tap generation (playback is never affected).
+    std::uint32_t asrShadowErrors_ = 0;
+    bool asrShadowDisabled_ = false;
     AVFilterGraph* tempoGraph_ = nullptr;
     AVFilterContext* tempoInput_ = nullptr;
     AVFilterContext* tempoOutput_ = nullptr;
@@ -710,6 +834,22 @@ private:
     std::int64_t seekTarget100ns_;
     std::int64_t seekTargetFrame_;
     bool keyframeSeekPending_;
+    // --- seek preview (progressive presentation) ---
+    // A seek is exact: the target picture waits for its whole reference chain.
+    // That wait is unavoidable, but leaving the previous picture frozen on screen
+    // through it is not -- it is what a seek feels like a stall. One picture from
+    // the head of the chain is put on screen instead, without moving the timeline.
+    // Worker-thread-only state, like the three fields above.
+    bool seekPreviewAllowed_ = true;
+    // Wall clock of the previous DoSeek, used to tell a single press from a held key.
+    std::int64_t lastSeekStartedMs_ = 0;
+    bool seekPreviewPresented_ = false;
+    std::int64_t seekPreviewMargin100ns_ = 0;
+    // Pictures decoded and offered to the presenter while a seek is outstanding.
+    // They never reach QueueVideoFrame, so decodedVideoFrames cannot see them --
+    // deliberately: that counter feeds the decode-skip ladder, which measures
+    // steady-state decoding and would misread a seek burst as a regression.
+    std::uint64_t seekDecodedFrames_ = 0;
     std::int64_t lastVideoFrameDuration100ns_;
     // 帧率模式的实测依据：呈现出来的逐帧间距散布。容器那两个字段单独不够定"恒定/可变"——
     // 实测真 VFR 的 .ts 在会话里 av_guess_frame_rate() 与 r_frame_rate 同为 20/1，比较它们
