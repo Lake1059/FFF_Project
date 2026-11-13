@@ -31,13 +31,16 @@ BSD-3-Clause、PSF-2.0）条件下使用。该组许可允许嵌入、复制与�
 
 ## 3. 分发时的归属规则
 
-1. 本体包保留 `LICENSE.txt`、`NOTICE`、`THIRD-PARTY-NOTICES.md` 与 `licenses/`。
-2. 完整运行时包如包含 FFmpeg/libass 等第三方件，按各自许可补齐文本、版权声明
-   和源码获取方式；不要把“本体不内嵌 FFmpeg”当成“完整包无需处理”。
+1. 本体包保留 `LICENSE.txt`、`NOTICE`、`THIRD-PARTY-NOTICES.md`、`ASSETS.md` 与 `licenses/`。
+2. `发布3FP.ps1` 默认生成本体包，不包含外部 FFmpeg runtime；完整运行时包需显式
+   `-IncludeExternalRuntime`，并按各自许可补齐文本、版权声明和源码获取方式。
+   不要把“本体不内嵌 FFmpeg”当成“完整包无需处理”。
 3. AI 字幕宿主集成随本体按 MIT 分发；第三方模型/运行时如随包嵌入，保留
    `AI字幕包声明.txt`、`licenses/ai/` 与 manifest 的 `notice`/`license` 字段；
    运行期下载包同样必须带这些文件。
-4. 第三方名称、商标、Logo 归各自权利人；本仓只做合理、惯常的归属说明，
+4. 第一方界面图标、应用图标与默认背景图的来源见 `ASSETS.md`；新增美术资产必须
+   同步登记来源/作者/许可，不得把来源不明的网络素材放入 `Resources` 或 `Assets`。
+5. 第三方名称、商标、Logo 归各自权利人；本仓只做合理、惯常的归属说明，
    不授予商标许可。
 
 ## 4. 贡献

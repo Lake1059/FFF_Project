@@ -322,9 +322,14 @@
 
 
   <Target Name="CopyProductNativeToPublish" AfterTargets="Publish" Condition="'$(PublishSingleFile)' != 'true'">
-    <Error Condition="'@(DevelopmentRuntime)' == ''"
-           Text="找不到 FFmpeg 运行库（..\runtime\av*.dll 等）。请确认 kernel\runtime 已就位后再发布。" />
-    <Copy SourceFiles="@(ProductNative);@(DevelopmentRuntime);@(LibassRuntime);@(PrefetchHelper)"
+    <Error Condition="'@(DevelopmentRuntime)' == '' and '$(BodyOnly)' != 'true'"
+           Text="找不到 FFmpeg 运行库（..\runtime\av*.dll 等）。请确认 kernel\runtime 已就位，或使用 BodyOnly=true 生成本体包。" />
+    <ItemGroup>
+      <!-- BodyOnly=true 时只复制本体与 libass 栈，不把外部 FFmpeg runtime 带进 publish。 -->
+      <_ProductPublishFiles Include="@(ProductNative);@(LibassRuntime);@(PrefetchHelper)" />
+      <_ProductPublishFiles Include="@(DevelopmentRuntime)" Condition="'$(BodyOnly)' != 'true'" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ProductPublishFiles)"
           DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
   </Target>
 
