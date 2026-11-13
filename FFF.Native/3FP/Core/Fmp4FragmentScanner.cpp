@@ -2,6 +2,7 @@
 #include "3FP/Core/Fmp4FragmentScanner.h"
 
 #include "Shared/Ffmpeg/SharedFileInput.h"
+#include "3FP/Core/ThreadNaming.h"
 
 extern "C" {
 #include <libavutil/mathematics.h>  // av_rescale_q（avformat.h 已传递包含，显式引入表明意图）
@@ -347,6 +348,7 @@ bool Fmp4FragmentScanner::AppendEntry(const Fmp4FragmentEntry& entry) noexcept {
 void Fmp4FragmentScanner::ScanWorker(AVRational referenceStreamTimeBase,
     std::int64_t timelineOrigin100ns, std::int32_t referenceTrackId,
     std::unique_ptr<SharedFileInput> input) noexcept {
+    FFFThreadNaming::SetCurrentThreadName("FFF.Player.Fmp4Scan");
     try {
         auto* io = input ? input->Context() : nullptr;
         if (io == nullptr) return;

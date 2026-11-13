@@ -45,6 +45,50 @@ bool SameAdapter(ID3D11Device* device, IDXGIAdapter1* desired) noexcept {
         actual.AdapterLuid.HighPart == target.AdapterLuid.HighPart &&
         actual.AdapterLuid.LowPart == target.AdapterLuid.LowPart;
 }
+
+bool HardwareAdapter(const std::int32_t index, IDXGIFactory1* const factory) noexcept {
+    if (index < 0 || factory == nullptr) return false;
+    ComPtr<IDXGIAdapter1> adapter;
+    if (FAILED(factory->EnumAdapters1(static_cast<UINT>(index), &adapter))) return false;
+    DXGI_ADAPTER_DESC1 description{};
+    if (FAILED(adapter->GetDesc1(&description))) return false;
+    return (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0;
+}
+}
+
+DecodeAdapterPlan BuildDecodeAdapterPlan(const std::int32_t preferredIndex,
+    PlayerVideoRenderer& renderer, const bool multiAdapter) noexcept {
+    DecodeAdapterPlan plan{};
+    // Read-only: the host binds its output window after Open, and SetWindow does
+    // not rebuild the device. Creating one here would pin the renderer to the
+    // default adapter before the monitor match could run.
+    plan.rendererIndex = renderer.DeviceAdapterIndex();
+    const auto append = [&plan](const std::int32_t index) noexcept {
+        for (std::size_t i = 0; i < plan.count; ++i)
+            if (plan.indices[i] == index) return;
+        if (plan.count >= DecodeAdapterPlan::Capacity) return;
+        plan.indices[plan.count++] = index;
+    };
+    ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) factory.Reset();
+    // A manual index that names a software adapter or no adapter at all cannot
+    // carry a hardware decoder; drop it instead of spending a trial on WARP.
+    const std::int32_t manual = preferredIndex >= 0 && factory.Get() != nullptr &&
+        HardwareAdapter(preferredIndex, factory.Get()) ? preferredIndex : -1;
+    if (manual >= 0) append(manual);
+    // -1 is the playback GPU: the renderer's own D3D11 device for zero-copy
+    // presentation, and FFmpeg's default CUDA device. Keep it even when the manual
+    // index names that same adapter, because its CUDA ordinal lookup may fail while
+    // the default CUDA device still works. append() deduplicates.
+    append(-1);
+    if (!multiAdapter || factory.Get() == nullptr) return plan;
+    for (std::int32_t index = 0;
+        index < static_cast<std::int32_t>(DecodeAdapterPlan::Capacity) &&
+        plan.count < DecodeAdapterPlan::Capacity; ++index) {
+        if (index == plan.rendererIndex || index == manual) continue;
+        if (HardwareAdapter(index, factory.Get())) append(index);
+    }
+    return plan;
 }
 
 int CreateDecodeHardwareDevice(AVBufferRef** const output, const int deviceType,
@@ -63,7 +107,19 @@ int CreateDecodeHardwareDevice(AVBufferRef** const output, const int deviceType,
             av_buffer_unref(output);
         }
         const auto name = std::to_string(adapterIndex);
-        return av_hwdevice_ctx_create(output, type, name.c_str(), nullptr, 0);
+        const auto created = av_hwdevice_ctx_create(output, type, name.c_str(), nullptr, 0);
+        if (created < 0) { av_buffer_unref(output); return created; }
+        // FFmpeg resolves the device string through its own DXGI enumeration.
+        // Confirm by LUID that the device it opened really is the requested
+        // adapter: a factory ordering difference must not silently decode on a
+        // GPU the caller did not ask for.
+        const auto* context = reinterpret_cast<const AVHWDeviceContext*>((*output)->data);
+        const auto* d3d = static_cast<const AVD3D11VADeviceContext*>(context->hwctx);
+        if (d3d == nullptr || !SameAdapter(d3d->device, desired.Get())) {
+            av_buffer_unref(output);
+            return AVERROR(ENODEV);
+        }
+        return 0;
     }
     if (type == AV_HWDEVICE_TYPE_CUDA && adapterIndex >= 0) {
         const auto desired = FindAdapter(adapterIndex);

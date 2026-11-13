@@ -1,4 +1,4 @@
-﻿Public Class Form设置_设备与性能
+Public Class Form设置_设备与性能
 
     Private 正在初始化 As Boolean = True
     Private 设备列表 As New List(Of GPU解码设备)
@@ -39,6 +39,22 @@
             MCB_音频缓冲区策略.SelectedIndex = 配置.音频缓冲区策略
             MCB_视频缩放质量.SelectedIndex = 配置.视频缩放质量选项
             MCB_音频效果.SelectedIndex = If(配置.启用单声道音频, 2, If(配置.启用空间音频, 1, 0))
+            MCB_音频直通.SelectedIndex = 配置.音频直通选项
+            ' LakeUI 图形性能组：档位下标直接回显；下拉 Items 与 设置.vb 档位表逐位对齐
+            ' （一致性由两处注释互相钉住，改任何一边必须同步另一边）。
+            MCB_LakeUI抗锯齿.SelectedIndex = 配置.LakeUI抗锯齿
+            MCB_LakeUI文字渲染.SelectedIndex = 配置.LakeUI文字渲染
+            MCB_LakeUI超采样.SelectedIndex = 配置.LakeUI超采样
+            MCB_LakeUI_GPU缓存.SelectedIndex = 配置.LakeUI_GPU缓存档
+            MCB_LakeUI_画刷缓存.SelectedIndex = 配置.LakeUI_画刷缓存档
+            MCB_LakeUI_字体缓存.SelectedIndex = 配置.LakeUI_字体缓存档
+            MCB_LakeUI_CPU缓存.SelectedIndex = 配置.LakeUI_CPU缓存档
+            MCB_LakeUI_背景脏区.SelectedIndex = 配置.LakeUI_背景脏区档
+            MCB_LakeUI_SSAA分桶.SelectedIndex = 配置.LakeUI_SSAA分桶档
+            Dim 帧率档 = Array.IndexOf(设置.LakeUI动画帧率档, 配置.LakeUI动画帧率)
+            MCB_LakeUI动画帧率.SelectedIndex = If(帧率档 >= 0, 帧率档, 5)
+            ' 清理是动作不是状态，永远空档；规范化保证上面每个下标都落在合法区间。
+            MCB_LakeUI缓存清理.SelectedIndex = -1
         Finally
             正在初始化 = False
         End Try
@@ -46,7 +62,8 @@
 
     Private Sub 选项_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_GPU解码设备.SelectedIndexChanged,
         MCB_视频缓冲区策略.SelectedIndexChanged, MCB_音频缓冲区策略.SelectedIndexChanged,
-        MCB_视频缩放质量.SelectedIndexChanged, MCB_音频效果.SelectedIndexChanged
+        MCB_视频缩放质量.SelectedIndexChanged, MCB_音频效果.SelectedIndexChanged,
+        MCB_音频直通.SelectedIndexChanged
         If 正在初始化 Then Return
         Dim 控件 = DirectCast(sender, LakeUI.ModernComboBox)
         If 控件.SelectedIndex < 0 Then Return
@@ -63,6 +80,89 @@
             配置.启用空间音频 = 控件.SelectedIndex = 1
             配置.启用单声道音频 = 控件.SelectedIndex = 2
             Form1.当前主窗体?.应用音频效果设置()
+        ElseIf 控件 Is MCB_音频直通 Then
+            配置.音频直通选项 = 控件.SelectedIndex
+            Form1.当前主窗体?.应用音频直通设置()
         End If
     End Sub
+
+    ' LakeUI 图形性能组（2026-11-11 自 3FUI 移植）：写档位下标 → 统一走
+    ' 设置.应用图形性能设置() 下发 GlobalOptions。动画帧率例外——它不走
+    ' GlobalOptions，靠字体管道反射下发，所以这里触发一次全量字体重放。
+    Private Sub 图形性能选项_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_LakeUI抗锯齿.SelectedIndexChanged,
+        MCB_LakeUI文字渲染.SelectedIndexChanged, MCB_LakeUI超采样.SelectedIndexChanged,
+        MCB_LakeUI_GPU缓存.SelectedIndexChanged, MCB_LakeUI_画刷缓存.SelectedIndexChanged,
+        MCB_LakeUI_字体缓存.SelectedIndexChanged, MCB_LakeUI_CPU缓存.SelectedIndexChanged,
+        MCB_LakeUI_背景脏区.SelectedIndexChanged, MCB_LakeUI_SSAA分桶.SelectedIndexChanged,
+        MCB_LakeUI动画帧率.SelectedIndexChanged
+        If 正在初始化 Then Return
+        Dim 控件 = DirectCast(sender, LakeUI.ModernComboBox)
+        If 控件.SelectedIndex < 0 Then Return
+        Dim 配置 = 设置.实例对象
+        If 控件 Is MCB_LakeUI抗锯齿 Then
+            配置.LakeUI抗锯齿 = 控件.SelectedIndex
+        ElseIf 控件 Is MCB_LakeUI文字渲染 Then
+            配置.LakeUI文字渲染 = 控件.SelectedIndex
+        ElseIf 控件 Is MCB_LakeUI超采样 Then
+            配置.LakeUI超采样 = 控件.SelectedIndex
+        ElseIf 控件 Is MCB_LakeUI_GPU缓存 Then
+            配置.LakeUI_GPU缓存档 = 控件.SelectedIndex
+        ElseIf 控件 Is MCB_LakeUI_画刷缓存 Then
+            配置.LakeUI_画刷缓存档 = 控件.SelectedIndex
+        ElseIf 控件 Is MCB_LakeUI_字体缓存 Then
+            配置.LakeUI_字体缓存档 = 控件.SelectedIndex
+        ElseIf 控件 Is MCB_LakeUI_CPU缓存 Then
+            配置.LakeUI_CPU缓存档 = 控件.SelectedIndex
+        ElseIf 控件 Is MCB_LakeUI_背景脏区 Then
+            配置.LakeUI_背景脏区档 = 控件.SelectedIndex
+        ElseIf 控件 Is MCB_LakeUI_SSAA分桶 Then
+            配置.LakeUI_SSAA分桶档 = 控件.SelectedIndex
+        ElseIf 控件 Is MCB_LakeUI动画帧率 Then
+            配置.LakeUI动画帧率 = 设置.LakeUI动画帧率档(控件.SelectedIndex)
+            ' 帧率搭字体管道下发（3FUI 语义：动字体才生效），这里主动重放一次
+            ' 让改动即时到达主窗体与设置窗全部控件；后开窗体由各自 Load 的字体
+            ' 应用自然带上。
+            字体控制.更新所有控件字体属性()
+            Return
+        End If
+        设置.应用图形性能设置()
+    End Sub
+
+    ' 缓存清理是「动作」不是「设置」：执行完把下拉弹回空档（3FUI 起始页同款交互），
+    ' 用户的清理诉求不落盘，也不该在下一次打开设置页时被重放。
+    Private Sub MCB_LakeUI缓存清理_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_LakeUI缓存清理.SelectedIndexChanged
+        If 正在初始化 Then Return
+        Select Case MCB_LakeUI缓存清理.SelectedIndex
+            Case 0
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, True, True)
+                GC.WaitForPendingFinalizers()
+            Case 1
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, True, True)
+                GC.WaitForPendingFinalizers()
+                EmptyWorkingSet(System.Diagnostics.Process.GetCurrentProcess().Handle)
+            Case 2
+                LakeUI.D3D_PaintBridge.CleanupD2DResources(LakeUI.D3DCacheCleanupLevel.TrimToBudget, Me)
+            Case 3
+                LakeUI.D3D_PaintBridge.CleanupD2DResources(LakeUI.D3DCacheCleanupLevel.ReleaseAllCaches, Me)
+            Case 4
+                ' 最重的一档：连 D2D 设备一起重建。播放画面走内核自己的交换链不受影响，
+                ' 受影响的只是 LakeUI 控件的下一次重绘（会按需重建资源）。
+                LakeUI.D3D_PaintBridge.CleanupD2DResources(LakeUI.D3DCacheCleanupLevel.ReleaseEverything, Me)
+        End Select
+        MCB_LakeUI缓存清理.SelectedIndex = -1
+    End Sub
+
+    ' 与 Form设置_AI字幕 同款：根面板绝对定位 + AutoScroll，宽度跟容器走。
+    Private Sub 对齐面板宽度()
+        Dim 宽 = Math.Max(652, ClientSize.Width)
+        If Math.Abs(ModernPanel1.Width - 宽) > 2 Then ModernPanel1.Width = 宽
+    End Sub
+
+    Private Sub Form设置_设备与性能_Resize(sender As Object, e As EventArgs) Handles MyBase.Resize
+        对齐面板宽度()
+    End Sub
+
+    <Runtime.InteropServices.DllImport("psapi.dll")>
+    Private Shared Function EmptyWorkingSet(hProcess As IntPtr) As Boolean
+    End Function
 End Class

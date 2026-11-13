@@ -36,6 +36,15 @@ Public NotInheritable Class 播放列表
         ".png", ".jpg", ".jpeg", ".jpe", ".gif", ".apng", ".webp", ".jxl", ".bmp", ".tif", ".tiff",
         ".ico", ".avif", ".avifs", ".heic", ".heif", ".jxr", ".wdp", ".hdp"
     }
+    ' 相机 RAW 只作为「当前不支持」的识别口径：目标 FFmpeg 构建不含 dcraw，且它们
+    ' 不在上面两个白名单内。刻意不收 .dng/.raw/.yuv/.rgb —— 这些可能落到 image2 或
+    ' rawvideo 通用通路，交给 FFmpeg 自己判定，不能提前拦死。
+    Private Shared ReadOnly 相机RAW扩展名 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+        ".cr2", ".cr3", ".nef", ".nrw", ".arw", ".srf", ".sr2",
+        ".rw2", ".orf", ".raf", ".pef", ".srw", ".3fr", ".fff",
+        ".iiq", ".k25", ".kdc", ".mrw", ".rwl", ".x3f"
+    }
+    Friend Const 相机RAW格式筛选器 As String = "相机 RAW 相关格式（当前不支持）|*.cr2;*.cr3;*.nef;*.nrw;*.arw;*.srf;*.sr2;*.rw2;*.orf;*.raf;*.pef;*.srw;*.3fr;*.fff;*.iiq;*.k25;*.kdc;*.mrw;*.rwl;*.x3f"
     Private Const 自动列表最大数量 As Integer = 1000
     Private Shared ReadOnly 自动列表比较器 As IComparer(Of 播放列表项) = Comparer(Of 播放列表项).Create(
         Function(a, b) 比较媒体路径(a.路径, b.路径))
@@ -401,6 +410,10 @@ Public NotInheritable Class 播放列表
 
     Friend Shared Function 是支持的媒体文件(路径 As String) As Boolean
         Return Not String.IsNullOrWhiteSpace(路径) AndAlso 媒体扩展名.Contains(IO.Path.GetExtension(路径))
+    End Function
+
+    Friend Shared Function 是相机RAW文件(路径 As String) As Boolean
+        Return Not String.IsNullOrWhiteSpace(路径) AndAlso 相机RAW扩展名.Contains(IO.Path.GetExtension(路径))
     End Function
 
     Friend Shared Function 规范本地文件(值 As String) As String

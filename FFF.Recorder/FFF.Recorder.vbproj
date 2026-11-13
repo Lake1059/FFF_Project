@@ -22,6 +22,7 @@
 	<!--<EnableCompressionInSingleFile>True</EnableCompressionInSingleFile>-->
 	<Authors>1059 Studio</Authors>
 	<Company>1059 Studio</Company>
+	<Copyright>Copyright (c) 2026 1059 Studio</Copyright>
 	<AssemblyVersion>2026.9.14</AssemblyVersion>
 	<FileVersion>2026.9.14</FileVersion>
 	<Version>2026.9.14</Version>
