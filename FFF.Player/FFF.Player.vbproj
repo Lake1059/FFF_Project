@@ -78,6 +78,18 @@
       <Link>LICENSE.txt</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\NOTICE">
+      <Link>NOTICE</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\LICENSING.md">
+      <Link>LICENSING.md</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\THIRD-PARTY-NOTICES.md">
+      <Link>THIRD-PARTY-NOTICES.md</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <!-- AI 扩展包第三方许可原文：随播放器部署到 licenses\ai，下载器再复制进包。 -->
     <None Include="..\licenses\ai\Apache-2.0.txt">
       <Link>licenses\ai\Apache-2.0.txt</Link>

@@ -154,9 +154,9 @@ Friend Module PR57修复回归
     ''' <summary>模块激活是加法：基础 HDR 规格与宿主动态段保留，模块内容作为额外段。</summary>
     Private Sub 测HDR额外注入()
         Dim 注入行 = 播放器信息图层呈现器.HDR行文本(
-            "HDR10 PQ", "P8.1", "动态元数据已用于处理", "模块合成文本", "", "")
+            "HDR10 PQ", "模块等级文本", "动态元数据已用于处理", "模块合成文本", "", "")
         检查("基础规格保留", 注入行.Contains("HDR10 PQ", StringComparison.Ordinal), True)
-        检查("模块内容作为额外段", 注入行.Contains("内容：P8.1", StringComparison.Ordinal), True)
+        检查("模块内容作为额外段", 注入行.Contains("内容：模块等级文本", StringComparison.Ordinal), True)
         检查("宿主动态段保留", 注入行.Contains("动态元数据已用于处理", StringComparison.Ordinal), True)
         检查("模块合成文本保留", 注入行.Contains("模块合成文本", StringComparison.Ordinal), True)
         检查("模块缺席只留基础", 播放器信息图层呈现器.HDR行文本("HDR10 PQ", "", "", "", "", ""),

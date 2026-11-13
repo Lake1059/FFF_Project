@@ -17,11 +17,12 @@ Imports System.Runtime.InteropServices
 '  ● 静默降级是既定口径：模块不在盘上 / 装载失败 / 不含授权层 ⇒ 与"没这功能"同形，
 '    不提示、不报错、不改默认行为。
 '
-'  ● 商标合规：本文件（及整个 3FP 本体）只出现中性名 FFF.HDRdp.Test.dll 与中性词汇，
-'    不含任何专有算法、常量或文案——专有内容全部封装在模块二进制内部。
+'  ● 边界：本文件只保留模块装载入口与中性显示通道；模块的专有算法、常量和文案
+'    全部封装在模块二进制内部，不进入本体。FFF.HDRdp.Test.dll 只是运行时文件名，
+'    不随本体发布，也不代表对模块内部内容的授权或商标许可。
 '    发布护栏（FFF.Player.vbproj 的“禁止私有模块发布”目标 + 发布脚本同款检查）以某个
 '    历史文件名作为匹配键，那是发布链路的既有资产：不得改名，也不在本文件复述全名。
-'    ⇒ 宿主源码一律用中性名；需要引用护栏时给出 vbproj 目标名，不抄文件名。
+'    ⇒ 宿主源码只引用装载入口和中性显示字段；模块内容仅在模块激活并解锁后追加显示。
 ' ═══════════════════════════════════════════════════════════════════════════
 
 Friend Module 色彩变换模块接口
@@ -47,7 +48,7 @@ Friend Module 色彩变换模块接口
     ''' 旧模块没有它 ⇒ 解析不到即答空串，静默降级。</summary>
     Friend Const 内容文本入口名 As String = "FFF_ColorTransformContentText"
 
-    ''' <summary>最近帧峰值裸导出：调用线程上最近一次 分析帧 的 DV L1 逐帧峰值（尼特）。
+    ''' <summary>最近帧峰值裸导出：调用线程上最近一次 分析帧 的模块侧逐帧峰值（尼特）。
     ''' 旧模块没有它 ⇒ 解析不到即答 0（= 无），静默降级。</summary>
     Friend Const 峰值入口名 As String = "FFF_ColorTransformLastFramePeakNits"
 
@@ -1033,10 +1034,10 @@ Friend Class 色彩变换模块实例
         End Try
     End Function
 
-    ''' <summary>调用线程上最近一次 <see cref="分析帧"/> 读到的 DV L1 逐帧峰值（尼特）。
+    ''' <summary>调用线程上最近一次 <see cref="分析帧"/> 读到的模块侧逐帧峰值（尼特）。
     ''' <para>⚠ 与 取内容描述 同一线程契约：只能在**刚调用过 分析帧 的同一线程**（泵线程）上读
     ''' （模块侧按线程保存快照）。</para>
-    ''' <para>导出缺失（早于该 ABI 的模块）、未解锁、本帧无 blob 或无 L1 块时答 0；不抛。</para></summary>
+    ''' <para>导出缺失（早于该 ABI 的模块）、未解锁、本帧无 blob 或无模块峰值块时答 0；不抛。</para></summary>
     Public Function 取最近帧峰值() As Single
         If _峰值地址 = IntPtr.Zero Then Return 0F
         Try

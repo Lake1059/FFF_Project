@@ -178,7 +178,7 @@ constexpr std::size_t MaximumPendingAudioPackets = 512;
 constexpr std::size_t MaximumPendingAudioPacketBytes = 8 * 1024 * 1024;
 // Frame side-data ring (CopyFrameSideDataAfter). Sized from measurement, not
 // guesswork -- see 3fp/tools/sidedata_size_probe.cpp, compiled against the
-// bundled FFmpeg headers: an AV_FRAME_DATA_DOVI_METADATA blob is a
+// bundled FFmpeg headers: a dynamic HDR metadata side-data blob is a
 // self-relative structure of 48 B of offsets + 20 B external-metadata header + 5144 B data
 // mapping + 196 B colour metadata + 76 B per display-management extension
 // (~5.5-7.5 KB in practice), AV_FRAME_DATA_DYNAMIC_HDR_PLUS is 11304 B,

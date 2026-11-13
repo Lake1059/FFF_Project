@@ -23,13 +23,20 @@
 `licenses/`。AI 字幕扩展包另见 `tools/ai-subtitles/AI字幕包声明.txt` 与
 `licenses/ai/`。
 
+AI 字幕的宿主侧集成代码（控制器、菜单、设置页、worker 启动与状态机）属于第一方
+代码，按本仓 MIT 使用；第三方模型/运行时只在其自身宽松许可（Apache-2.0、MIT、
+BSD-3-Clause、PSF-2.0）条件下使用。该组许可允许嵌入、复制与再分发，前提是保留
+版权、许可、NOTICE 与来源说明；因此宿主可以内建 AI 字幕能力，但必须保留
+`AI字幕包声明.txt`、`licenses/ai/` 和界面上的“AI生成字幕”标识。
+
 ## 3. 分发时的归属规则
 
 1. 本体包保留 `LICENSE.txt`、`NOTICE`、`THIRD-PARTY-NOTICES.md` 与 `licenses/`。
 2. 完整运行时包如包含 FFmpeg/libass 等第三方件，按各自许可补齐文本、版权声明
    和源码获取方式；不要把“本体不内嵌 FFmpeg”当成“完整包无需处理”。
-3. AI 扩展包保留 `AI字幕包声明.txt`、`licenses/ai/` 与 manifest 的
-   `notice`/`license` 字段。
+3. AI 字幕宿主集成随本体按 MIT 分发；第三方模型/运行时如随包嵌入，保留
+   `AI字幕包声明.txt`、`licenses/ai/` 与 manifest 的 `notice`/`license` 字段；
+   运行期下载包同样必须带这些文件。
 4. 第三方名称、商标、Logo 归各自权利人；本仓只做合理、惯常的归属说明，
    不授予商标许可。
 

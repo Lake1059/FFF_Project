@@ -5,10 +5,16 @@ This product includes software and assets developed by third parties.
 See THIRD-PARTY-NOTICES.md for the component list, license identifiers,
 source locations and distribution boundaries, and licenses/ for the
 corresponding license texts. First-party licensing and contribution rules are
-summarized in LICENSING.md. The AI subtitle runtime is downloaded
-separately; its notice is ai-subtitles/AI字幕包声明.txt (repo path:
-tools/ai-subtitles/AI字幕包声明.txt), and its license texts are
-licenses/ai/ when an AI package is assembled.
+summarized in LICENSING.md.
+
+The AI subtitle host integration is first-party code under the repository
+MIT license. The third-party AI models and runtimes (Qwen3-ASR, llama.cpp,
+sherpa-onnx, OpenVINO, Python, NumPy and ONNX Runtime) are downloaded
+separately at the user's choice; their notices are in
+ai-subtitles/AI字幕包声明.txt (repo path:
+tools/ai-subtitles/AI字幕包声明.txt), and their license texts are in
+licenses/ai/. Those permissive licenses allow embedding/redistribution when
+their copyright, license and NOTICE conditions are preserved.
 
 Third-party names and trademarks remain the property of their respective
 owners. Nothing in this NOTICE grants permission to use any third-party

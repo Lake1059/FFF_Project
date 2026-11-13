@@ -284,7 +284,7 @@ Public NotInheritable Class 播放器控制器
         Return 安全读取会话(Function(目标) 目标.色彩变换内容描述, String.Empty)
     End Function
 
-    ''' <summary>色彩变换通路最近一帧的逐帧峰值（尼特；无会话 / 未解锁 / 无 L1 时 0）。
+    ''' <summary>色彩变换通路最近一帧的逐帧峰值（尼特；无会话 / 未解锁 / 无模块峰值块时 0）。
     ''' 供信息图层 HDR 行的逐帧源峰值段读取，任何时候都能安全问。</summary>
     Public Function 读取色彩变换外部峰值尼特() As Single
         Return 安全读取会话(Function(目标) 目标.色彩变换外部峰值尼特, 0F)

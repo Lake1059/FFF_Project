@@ -46,7 +46,7 @@ Friend NotInheritable Class 播放器AI字幕控制器
     Private 停用 As Boolean
     Private 已报告跳过 As Boolean
     Private 已释放 As Boolean
-    ' 已上屏的文本（仅变化时落一行日志：P5 端到端验收的机器可验证据，
+    ' 已上屏的文本（仅变化时落一行日志：端到端验收的机器可验证据，
     ' 也是"字幕确实走到了显示路径"的唯一自动探针）。
     Private 已上屏文本 As String = String.Empty
     ' 内核侧"字幕图层真的被呈现了几次"的采样节流（每 10 秒一次）。宿主侧日志只能证明

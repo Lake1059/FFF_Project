@@ -1237,14 +1237,14 @@ Public NotInheritable Class 播放器会话
         End Get
     End Property
 
-    ''' <summary>色彩变换通路最近一帧的逐帧峰值（尼特；通路未跑答 -1，无 L1 答 0）。</summary>
+    ''' <summary>色彩变换通路最近一帧的逐帧峰值（尼特；通路未跑答 -1，无模块峰值块答 0）。</summary>
     Friend ReadOnly Property 色彩变换外部峰值尼特 As Single
         Get
             Dim 实例 = 色彩模块实例
             If 实例 Is Nothing OrElse Not 实例.支持注入 Then Return 0F
             Dim 状态 As 色彩变换模块接口.注入状态 = Nothing
             If Not 实例.读取注入状态(状态) Then Return 0F
-            ' -1 是"通路没在跑"，与 0"本帧无 L1"分开：显示层的粘滞位靠 0 保末值
+            ' -1 是"通路没在跑"，与 0"本帧无模块峰值块"分开：显示层的粘滞位靠 0 保末值
             ' （避免读数逐帧回跳），靠 -1 才敢作废 —— 泵死之后再指着旧读数说"逐帧"，
             ' 那是拿一个不再更新的数字冒充实时。
             If 状态.运行 = 0UI Then Return -1F
