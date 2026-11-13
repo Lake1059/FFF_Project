@@ -36,8 +36,10 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $ProjectRoot $OutputDirectory
 }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
-if (Test-Path -LiteralPath (Join-Path $OutputDirectory "FFF.DolbyVision.Test.dll")) {
-    throw "发布目录含旧商标私有 DLL（FFF.DolbyVision.Test.dll），请使用干净的发布目录；中性模块请使用 FFF.HDRdp.Test.dll。"
+$ForbiddenOutputModules = @(Get-ChildItem -LiteralPath $OutputDirectory -File -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like "*ExternalModule*.dll" -or $_.Name -like "*.Test.dll" })
+if ($ForbiddenOutputModules.Count -gt 0) {
+    throw "发布目录含外部模块 DLL（$($ForbiddenOutputModules.Name -join ', ')），请使用干净的发布目录；本体包不随包发布任何外部模块。"
 }
 . (Join-Path $ScriptDirectory "Resolve-Toolchain.ps1")
 $MSBuild = Get-MSBuildTool
@@ -93,14 +95,13 @@ try {
             throw "本体包出现外部 FFmpeg DLL：$($UnexpectedFfmpeg.Name -join ', ')。请勿把开发输出或完整运行时包当成本体包；如确需完整包，请使用 -IncludeExternalRuntime。"
         }
     }
-    # 侵权护栏（tripwire）：旧商标私有 DLL 不得随包发布。2026-10-14 恢复——
-    # 中性模块 FFF.HDRdp.Test.dll 自此随包发布，"旧名不在树里=>护栏无用"的判断随之反转。
-    # 散装发布是 dotnet publish + 本脚本 Copy 两步，vbproj 的
-    # RejectPrivateColorExtensionPublish 只覆盖 MSBuild 自己解析到的文件，
-    # 手工误放入 staging 的件必须在脚本层拦死。
-    $ForbiddenLegacy = @(Get-ChildItem -LiteralPath $StagingDirectory -Filter "FFF.DolbyVision.Test.dll" -File -ErrorAction SilentlyContinue)
-    if ($ForbiddenLegacy.Count -gt 0) {
-        throw "侵权护栏：staging 目录出现旧商标私有 DLL FFF.DolbyVision.Test.dll（$($ForbiddenLegacy.FullName -join ', ')）——必须移除；中性模块请使用 FFF.HDRdp.Test.dll。"
+    # 侵权护栏（tripwire）：任何外部模块 DLL 都不得随本体包发布。散装发布是
+    # dotnet publish + 本脚本 Copy 两步，vbproj 的 RejectPrivateColorExtensionPublish
+    # 只覆盖 MSBuild 自己解析到的文件，手工误放入 staging 的件必须在脚本层拦死。
+    $ForbiddenModules = @(Get-ChildItem -LiteralPath $StagingDirectory -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -in $ForbiddenModuleNames -or $_.Name -like "*ExternalModule*.dll" })
+    if ($ForbiddenModules.Count -gt 0) {
+        throw "侵权护栏：staging 目录出现外部模块 DLL（$($ForbiddenModules.FullName -join ', ')）——必须移除；本体包不随包发布任何外部模块。"
     }
 
     # ── 许可随包步骤（与主仓 pack.ps1 的 F4b/F10/F4a 同一口径）──

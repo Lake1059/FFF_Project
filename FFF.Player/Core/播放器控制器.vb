@@ -306,7 +306,7 @@ Public NotInheritable Class 播放器控制器
             Return 目标.唤醒色彩变换通路()
         Catch ex As ObjectDisposedException
         Catch ex As Exception
-            Debug.WriteLine("色彩变换模块：唤醒通路异常（已忽略）：" & ex.GetType().Name)
+            Debug.WriteLine("扩展模块：唤醒通路异常（已忽略）：" & ex.GetType().Name)
         End Try
         Return False
     End Function
