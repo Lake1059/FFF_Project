@@ -44,6 +44,8 @@ if ($SkipIamf) { $NativeArgs += "/p:HaveLibiamf=false" } else { $NativeArgs += "
 & $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") /p:Configuration=$Configuration /p:Platform=x64 @NativeArgs /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }
 
+# 单文件形态按项目分发策略：只输出 FFF.Player.exe，不复制 licenses/ 或其他
+# 许可文件；许可入口由“关于”页的项目主页链接和仓库主页提供。
 $StagingDirectory = Join-Path ([IO.Path]::GetTempPath()) ("3FP-publish-" + [Guid]::NewGuid().ToString("N"))
 $PendingExecutable = $null
 try {
@@ -61,15 +63,23 @@ try {
         -p:PublishDocumentationFiles=false `
         -p:DebugType=None -p:DebugSymbols=false @TfmArgs @R2rArgs
     if ($LASTEXITCODE -ne 0) { throw "FFF.Player single-file publish failed." }
+    # 单文件本体包只交付 exe：发布输出里可能被 None 项带出的许可文本、许可目录、
+    # AI 包声明与 ICO sidecar 在这里清掉；UI 图标回退到 exe 内嵌图标。
+    foreach ($Name in @("LICENSE.txt", "LICENSING.md", "NOTICE", "THIRD-PARTY-NOTICES.md", "ICO.ico")) {
+        $Path = Join-Path $StagingDirectory $Name
+        if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force }
+    }
+    $LicenseDirectory = Join-Path $StagingDirectory "licenses"
+    if (Test-Path -LiteralPath $LicenseDirectory -PathType Container) { Remove-Item -LiteralPath $LicenseDirectory -Recurse -Force }
+    $AiNotice = Join-Path $StagingDirectory "ai-subtitles\AI字幕包声明.txt"
+    if (Test-Path -LiteralPath $AiNotice -PathType Leaf) { Remove-Item -LiteralPath $AiNotice -Force }
     $UnexpectedFiles = @(Get-ChildItem -LiteralPath $StagingDirectory -File | Where-Object { $_.Name -ne "FFF.Player.exe" })
     if ($UnexpectedFiles) { throw "Unexpected files in single-file output: $($UnexpectedFiles.Name -join ', ')" }
-    # 侵权护栏（tripwire）：单文件 bundle 由 GenerateSingleFileBundle 生成，vbproj 的
-    # RejectPrivateColorExtensionPublish（BeforeTargets=GenerateSingleFileBundle）已拦一道；
-    # 这里再查一次 staging 做双保险。旧商标名 FFF.DolbyVision.Test.dll 永不入包；
-    # 中性模块 FFF.HDRdp.Test.dll 按设计放行（条件精确匹配旧名，不误伤新名）。
-    $ForbiddenLegacy = @(Get-ChildItem -LiteralPath $StagingDirectory -Filter "FFF.DolbyVision.Test.dll" -File -ErrorAction SilentlyContinue)
-    if ($ForbiddenLegacy.Count -gt 0) {
-        throw "侵权护栏：staging 目录出现旧商标私有 DLL FFF.DolbyVision.Test.dll（$($ForbiddenLegacy.FullName -join ', ')）——必须移除；中性模块请使用 FFF.HDRdp.Test.dll。"
+    # staging 双保险：本体包不随包发布任何外部模块 DLL。
+    $ForbiddenModules = @(Get-ChildItem -LiteralPath $StagingDirectory -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "*ExternalModule*.dll" -or $_.Name -like "*.Test.dll" })
+    if ($ForbiddenModules.Count -gt 0) {
+        throw "staging 目录出现外部模块 DLL（$($ForbiddenModules.FullName -join ', ')）——必须移除；本体包不随包发布任何外部模块。"
     }
     $PublishedExecutable = Join-Path $StagingDirectory "FFF.Player.exe"
     if (-not (Test-Path -LiteralPath $PublishedExecutable -PathType Leaf)) { throw "FFF.Player.exe is missing from publish output." }

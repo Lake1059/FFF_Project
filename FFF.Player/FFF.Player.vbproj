@@ -336,18 +336,12 @@
 
   <Target Name="RejectPrivateColorExtensionPublish" AfterTargets="ComputeFilesToPublish" BeforeTargets="GenerateSingleFileBundle">
     <ItemGroup>
-      <PrivateColorExtension Include="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == 'FFF.DolbyVision.Test.dll'" />
+      <PrivateColorExtension Include="@(ResolvedFileToPublish)" Condition="$([System.String]::Copy('%(Filename)').Contains('ExternalModule')) Or $([System.String]::Copy('%(Filename)').EndsWith('.Test'))" />
     </ItemGroup>
-    <Error Condition="'@(PrivateColorExtension)' != ''" Text="侵权护栏：旧商标私有 DLL FFF.DolbyVision.Test.dll 不得发布或打包；中性模块请使用 FFF.HDRdp.Test.dll。" />
+    <Error Condition="'@(PrivateColorExtension)' != ''" Text="外部模块 DLL 不得发布或打包；外部模块是可选外部件。" />
   </Target>
 
-  <!-- WinRT 投影配对护栏（2026-10-29）：
-       曾尝试从交付剔除 Microsoft.Windows.SDK.NET.dll（~27.2 MB，应用零 WinRT 使用），
-       但引用闭包实测证伪：Vortice.Mathematics.dll 引用 Microsoft.Windows.SDK.NET（且被
-       Vortice.DXGI/Direct3D11 广泛使用），Vortice.DirectX.dll 引用 WinRT.Runtime——两件
-       均不可剔（分析全程见 docs/105 §五/§六/§八）。
-       本护栏不再做剔除，而是锁住“引用⇒随包”配对：任何随包托管件引用了这两个投影件，
-       交付里就必须有它们；将来若有人重新尝试剔除（或 SDK 行为变化导致漏拷），构建当场报错。 -->
+  <!-- WinRT 投影配对护栏：随包托管件引用投影件时必须同时存在。 -->
   <UsingTask TaskName="AssertWindowsSdkProjectionPairing" TaskFactory="RoslynCodeTaskFactory"
              AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
     <ParameterGroup>
