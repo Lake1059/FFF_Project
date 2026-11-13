@@ -92,7 +92,15 @@ Public Class Form媒体信息
         HCL_视频输入帧率和实际渲染.Text = 标签("帧率", If(视频 Is Nothing, "—", $"输入 {帧率(视频.平均帧率)} → 实际 {最近实际帧率:F2} fps"), "#B7D7F0")
         HCL_视频实时比特率.Text = 标签("视频实时比特率", 比特率(If(快照 Is Nothing, 0UL, 快照.视频实时比特率)), "#CDB6EA")
         Dim 模式 = If(获取WASAPI模式 Is Nothing, WASAPI共享模式.共享, 安全获取(获取WASAPI模式))
-        HCL_音频编码.Text = 标签("音频 WASAPI", If(音频 Is Nothing, $"— · {模式}", $"{音频.编码.ToUpperInvariant()} | {模式}"), If(模式 = WASAPI共享模式.独占, "IndianRed", "#9ED7C5"))
+        ' 直通接管时红标模式（独占非 PCM 载波本身就是"特殊状态"）：编码列换成模块
+        ' 显示名承载不进标签，用"独占直通"点名路由；颜色沿用独占行的告警色。
+        Dim 音频标签颜色 = If(模式 = WASAPI共享模式.独占, "IndianRed", "#9ED7C5")
+        Dim 模式文本 = 模式.ToString()
+        If 快照 IsNot Nothing AndAlso 快照.音频直通已接管 Then
+            模式文本 = $"独占直通 ({快照.音频直通编解码})"
+            音频标签颜色 = "IndianRed"
+        End If
+        HCL_音频编码.Text = 标签("音频 WASAPI", If(音频 Is Nothing, $"— · {模式文本}", $"{音频.编码.ToUpperInvariant()} | {模式文本}"), 音频标签颜色)
         HCL_音频输入格式.Text = 标签("输入格式", If(音频 Is Nothing, "—", 音频输入格式(音频)), "#B7D7F0")
         HCL_音频输出格式.Text = 标签("输出格式", If(音频 Is Nothing, "—", 音频输出格式(音频)), "#9ED7C5")
         HCL_音频实时比特率.Text = 标签("音频实时比特率", 比特率(If(快照 Is Nothing, 0UL, 快照.音频实时比特率)), "#CDB6EA")
@@ -130,9 +138,15 @@ Public Class Form媒体信息
         ' x.HDR处理说明 / x.动态HDR元数据），它们的任何变化仍在签名里。
         Dim HDR签名 = If(快照 Is Nothing, String.Empty,
             $"{快照.当前视频流}:{快照.实际色彩模式}:{快照.HDR回退有效}:{快照.显示器峰值尼特}:{快照.HDR有效目标峰值尼特}")
-        Dim 签名 = If(信息 Is Nothing, "", $"{信息.格式}|{信息.文件大小}|{信息.时长100纳秒}|{HDR签名}|{String.Join(";", 信息.流.Select(Function(x) $"{x.索引}:{x.流ID}:{x.编码}:{x.比特率}:{x.流大小}:{x.位深度}:{x.标称帧率分子}/{x.标称帧率分母}:{x.HDR格式}:{x.HDR兼容规格}:{x.HDR处理说明}:{x.增强层解码像素格式}:{x.增强层硬件加速}:{x.主显示器色域}:{x.最大内容光照}:{x.原始采样位数}:{x.未压缩内容MD5}"))}")
+        Dim 签名 = If(信息 Is Nothing, "", $"{信息.格式}|{信息.文件大小}|{信息.时长100纳秒}|{HDR签名}|{String.Join(";", 信息.流.Select(Function(x) $"{x.索引}:{x.流ID}:{x.编码}:{x.比特率}:{x.流大小}:{x.位深度}:{x.标称帧率分子}/{x.标称帧率分母}:{x.HDR格式}:{x.HDR兼容规格}:{x.HDR处理说明}:{x.增强层解码像素格式}:{x.增强层硬件加速}:{x.制片显示器色彩原色}:{x.最大内容亮度}:{x.色彩模型}:{x.色度抽样}:{x.色彩原色}:{x.色彩传递}:{x.色彩空间}:{x.色彩范围}:{x.场序}:{x.原始采样位数}:{x.未压缩内容MD5}"))}")
         If 签名 = 元数据签名 Then Return
         元数据签名 = 签名
+        ' 重建前捕获选中项的稳定标识（分组名 + 首子项文本），填充完成后恢复；
+        ' 条目已不存在（换片、行消失）则自然放弃，不报错。
+        Dim 选中标识 As New HashSet(Of String)(StringComparer.Ordinal)
+        For Each 选中项 In UltraDetailListView1.SelectedItems
+            选中标识.Add($"{选中项.GroupName}|{If(选中项.SubItems.Count > 0, 选中项.SubItems(0).Text, String.Empty)}")
+        Next
         UltraDetailListView1.BeginUpdate()
         Try
             UltraDetailListView1.Groups.Clear() : UltraDetailListView1.Items.Clear()
@@ -191,20 +205,18 @@ Public Class Form媒体信息
                     添加条目(group, "帧率模式", If(流.帧率模式 = "constant", "恒定", If(流.帧率模式 = "variable", "可变", "—")))
                     添加条目(group, "帧率", 帧率分数(流))
                     添加条目(group, "色彩模型", 空值(流.色彩模型))
-                    添加条目(group, "色度抽样", 空值(流.色度抽样))
+                    添加条目(group, "色度", 空值(流.色度抽样))
                     添加条目(group, "位深", 位深(流))
                     添加条目(group, "扫描类型", 扫描类型(流.场序))
                     添加条目如果有值(group, "位/像素/帧", 位像素帧(流))
                     添加条目如果有值(group, "流大小", 流大小(流, 信息.文件大小))
                     添加条目如果有值(group, "写入库", 元数据值(流.元数据, "encoder", "writing_library"))
-                    添加条目(group, "色彩范围", 色彩范围(流.色彩范围))
-                    添加条目(group, "色彩原色", 色彩原色(流.色彩原色))
-                    添加条目(group, "传递特性", 色彩传递(流.色彩传递))
-                    添加条目(group, "矩阵系数", 色彩空间(流.色彩空间))
-                    添加条目如果有值(group, "主显示器色域", 流.主显示器色域)
-                    If 流.主显示器最大亮度 > 0 Then 添加条目(group, "主显示器亮度", $"最小 {流.主显示器最小亮度:0.####} cd/m²，最大 {流.主显示器最大亮度:0.##} cd/m²")
-                    If 流.最大内容光照 > 0 Then 添加条目(group, "最大内容光照", $"{流.最大内容光照} cd/m²")
-                    If 流.最大帧平均光照 > 0 Then 添加条目(group, "最大帧平均光照", $"{流.最大帧平均光照} cd/m²")
+                    添加条目(group, "色彩标准", 色彩表述.色彩标准(流.色彩原色))
+                    添加条目(group, "传输曲线", 色彩表述.传输曲线(流.色彩传递))
+                    添加条目(group, "色彩矩阵", 色彩表述.色彩矩阵(流.色彩空间))
+                    添加条目(group, "色彩范围", 色彩表述.色彩范围(流.色彩范围))
+                    添加条目如果有值(group, "制片显示器色彩原色", 流.制片显示器色彩原色)
+                    ' 亮度不在色彩段重复：HDR 那一行已经给出源峰值与显示目标（尼特）。
                     添加条目如果有值(group, "编码配置盒", 流.编码配置盒)
                 Else
                     添加条目(group, "ID", If(流.流ID >= 0, 流.流ID.ToString(), 流.索引.ToString()))
@@ -227,6 +239,12 @@ Public Class Form媒体信息
                     添加条目如果有值(group, "未压缩内容 MD5", 流.未压缩内容MD5)
                 End If
             Next
+            ' 恢复重建前的选中（EndUpdate 统一重建选中索引，比逐条刷新便宜）。
+            If 选中标识.Count > 0 Then
+                For Each 项 In UltraDetailListView1.Items
+                    If 选中标识.Contains($"{项.GroupName}|{If(项.SubItems.Count > 0, 项.SubItems(0).Text, String.Empty)}") Then 项.Selected = True
+                Next
+            End If
         Finally
             UltraDetailListView1.EndUpdate() : UltraDetailListView1.RefreshItems()
         End Try
@@ -455,7 +473,13 @@ Public Class Form媒体信息
         Return "—"
     End Function
     Private Shared Function 扫描类型(fieldOrder As Integer) As String
-        Return If(fieldOrder = 1, "Progressive", If(fieldOrder = 2 OrElse fieldOrder = 6, "Interlaced", "—"))
+        ' AVFieldOrder（libavcodec/defs.h）：0 未指定、1 逐行、2 TT、3 BB、4 TB、5 BT。
+        ' 后四者都是隔行，差别只在先编码与先显示的是哪一场，用户口径只区分逐行/隔行。
+        Select Case fieldOrder
+            Case 1 : Return "Progressive"
+            Case 2, 3, 4, 5 : Return "Interlaced"
+            Case Else : Return "—"
+        End Select
     End Function
     Private Shared Function 位像素帧(stream As 媒体流信息) As String
         If stream Is Nothing OrElse stream.宽度 <= 0 OrElse stream.高度 <= 0 OrElse stream.比特率 <= 0 Then Return ""
@@ -476,33 +500,8 @@ Public Class Form媒体信息
         Next
         Return "—"
     End Function
-    Private Shared Function 色彩范围(value As Integer) As String
-        Return If(value = 1, "Limited", If(value = 2, "Full", "—"))
-    End Function
-    Private Shared Function 色彩原色(value As Integer) As String
-        Select Case value
-            Case 1 : Return "BT.709"
-            Case 9 : Return "BT.2020"
-            Case 12 : Return "Display P3"
-            Case Else : Return "—"
-        End Select
-    End Function
-    Private Shared Function 色彩传递(value As Integer) As String
-        Select Case value
-            Case 1 : Return "BT.709"
-            Case 16 : Return "PQ"
-            Case 18 : Return "HLG"
-            Case Else : Return "—"
-        End Select
-    End Function
-    Private Shared Function 色彩空间(value As Integer) As String
-        Select Case value
-            Case 1 : Return "BT.709"
-            Case 9 : Return "BT.2020 non-constant"
-            Case 10 : Return "BT.2020 constant"
-            Case Else : Return "—"
-        End Select
-    End Function
+    ' 色彩范围/色彩标准/传输曲线/色彩矩阵的标准表述统一在 色彩表述 模块
+    ' （Core\色彩表述.vb）：媒体信息窗体与信息图层共用一份映射，口径不漂移。
     Private Shared Function 输出色彩(stream As 媒体流信息, snapshot As 播放器快照) As String
         If stream Is Nothing Then Return "—"
         Dim sourceBits = If(stream.位深度 > 0, stream.位深度, stream.解码输出位深度)

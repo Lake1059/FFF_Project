@@ -3,6 +3,7 @@ Option Explicit On
 
 Imports System.Collections.Concurrent
 Imports System.Diagnostics
+Imports System.IO
 Imports System.Text
 Imports System.Text.Json
 Imports System.Threading
@@ -221,6 +222,12 @@ Friend NotInheritable Class Ai字幕管道
             ' 设置决定、不由这句决定。写"提示"等于告诉用户有个不存在的提示通道。
             记录($"AI 字幕：字幕语言 {Ai字幕语言.显示名(语言)}" &
                  If(设置.实例对象.Ai字幕仅所选语言, "（开闸门，不符的窗不上屏）", "（不筛选）"))
+            ' OpenVINO 的匿名遥测默认收集；worker 是隐藏窗口、无 TTY，不能指望它弹
+            ' consent 对话框。仅在 consent 文件不存在时写 "0"（拒绝），已有 "1"
+            ' （用户明确同意）不覆盖——这既避免静默上报，也不篡改用户选择。
+            If String.Equals(配置.引擎, Ai字幕包.引擎Onnx, StringComparison.OrdinalIgnoreCase) Then
+                确保OpenVINO遥测默认关闭()
+            End If
             Try
                 _进程 = Process.Start(启动信息)
             Catch ex As Exception
@@ -601,6 +608,23 @@ Friend NotInheritable Class Ai字幕管道
         End If
         Return 缺省
     End Function
+
+
+    ''' <summary>OpenVINO consent 文件不存在时写入 "0"（拒绝遥测）；已有选择不覆盖。
+    ''' 失败只影响遥测偏好，不影响字幕启动。</summary>
+    Private Shared Sub 确保OpenVINO遥测默认关闭()
+        Try
+            Dim 目录 = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Intel Corporation")
+            Dim 文件 = Path.Combine(目录, "openvino_telemetry")
+            If Not File.Exists(文件) Then
+                Directory.CreateDirectory(目录)
+                File.WriteAllText(文件, "0", Encoding.ASCII)
+            End If
+        Catch
+        End Try
+    End Sub
 
 
     Private Sub 记录(消息 As String)

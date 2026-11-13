@@ -400,6 +400,10 @@ public:
     std::uint32_t ResolveDecodeTransfer(const HdrFrameState& hdrState) const noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     bool OwnsD3D11Texture(ID3D11Texture2D* texture) const noexcept;
+    // DXGI index of the adapter owning the playback D3D11 device, resolved by
+    // LUID rather than by whatever enumeration order a caller happened to use.
+    // -1 when the device was never created or the adapter cannot be identified.
+    std::int32_t DeviceAdapterIndex() const noexcept;
     /// True when a CUDA-decoded frame can be pasted into this renderer instead of being
     /// downloaded to CPU planes first. Enabled by default; FFF3FP_CUDA_D3D11_INTEROP=0
     /// turns it off. A non-NVIDIA output adapter is refused by the device-side probe.
@@ -486,6 +490,12 @@ public:
     std::uint64_t PresentedVideoGeneration() const noexcept;
     bool HasPendingVideoPresentation() const noexcept;
     bool HasOutputWindow() const noexcept;
+    /// Thread id of the independent timed-text presenter, or 0 while it is not running.
+    /// Published at TimedTextThread entry and cleared by StopTimedTextThread; the CPU
+    /// placement snapshot uses it to name the present thread (diagnostic only).
+    std::uint32_t TimedTextThreadId() const noexcept {
+        return timedTextThreadId_.load(std::memory_order_relaxed);
+    }
     /// Whether a decoded frame is currently sitting in the cached surface.
     /// Unsynchronized on purpose: the only caller is the session command queue
     /// deciding between Redraw() and PresentAfterBind() at bind time, and a
@@ -702,7 +712,8 @@ private:
     struct CachedVideoSettings {
         // gamut: 0 = Rec.709, 1 = Rec.2020, 2 = P3 (DCI/Display).
         std::uint32_t colorMode = 0, transfer = 0, gamut = 0, reserved = 0;
-        float sdrPeak = 100, hdrPeak = 100, paperWhite = 203, targetPeak = 1000;
+        // sdrPeak is the SDR reference white (BT.2408 = 203 nits), not the panel peak.
+        float sdrPeak = 203, hdrPeak = 100, paperWhite = 203, targetPeak = 1000;
         float sourceWidth = 0, sourceHeight = 0, outputWidth = 0, outputHeight = 0;
         std::uint32_t inputLayout = 0;
         float sampleScale = 1, yOffset = 0, yScale = 1;
@@ -741,6 +752,10 @@ private:
     }
     FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
         std::uint64_t renderedVideoGeneration) noexcept;
+    // True for a short window after the last still-image Redraw(). The gesture
+    // timer's intermediate states are only useful inside their own tick, so the
+    // presenter skips its cadence hold and submits an off-vblank flip instead.
+    bool InteractiveViewActive() const noexcept;
     // Pacing bookkeeping, once per flip, on the presenter thread: mirrors the declared panel
     // rate into the readouts, re-polls it when the calibrated value drifts from it (see the
     // body -- the output window belongs to the host, so this is the only hook available), and
@@ -898,6 +913,10 @@ private:
     // One-shot download for a CUDA frame the interop could not take. Kept so the
     // fallback does not allocate on the frame that hits it.
     AVFrame* cudaTransferFrame_ = nullptr;
+    // One-shot download for a D3D11 surface decoded on a different adapter.
+    // A cross-device CopySubresourceRegion is not legal, so such a frame is
+    // turned into ordinary CPU planes at the entry of Render().
+    AVFrame* d3d11TransferFrame_ = nullptr;
     // Upload-capacity state, read by WantsStagingUpload. Both are atomic because the
     // device (and its reset of the refusal) can be created off the session worker
     // thread that runs Render / EnsurePipeline.
@@ -1295,6 +1314,10 @@ private:
     std::thread coverBackdropThread_;
     bool timedTextThreadStop_;
     bool timedTextThreadRunning_;
+    // Diagnostic read-out only: the presenter stores its own thread id here so the CPU
+    // placement snapshot can report where the present thread was actually placed.
+    // 0 = the presenter is not running (started lazily, stopped by Close/ResetMedia).
+    std::atomic<std::uint32_t> timedTextThreadId_{ 0 };
     bool coverBackdropThreadStop_;
     bool coverBackdropRequestPending_;
     std::uint64_t coverBackdropRequestGeneration_;
@@ -1358,6 +1381,10 @@ private:
     std::atomic<std::uint64_t> scalePass100ns_{0};
     std::atomic<std::uint32_t> playbackWorkPending_;
     std::atomic<bool> interactiveMove_;
+    // QPC timestamp of the last still-image Redraw(). Expires on its own (see
+    // InteractiveViewActive), so no host-side engage/release can leak into the
+    // video pacing state (paceEngaged_/ResetPaceWindow and friends).
+    std::atomic<std::int64_t> lastInteractiveRedrawQpc_{ 0 };
     std::atomic<bool> lyricsLayoutEnabled_;
     // Pure-audio overlay (no video stream at all): set when the subtitle slot
     // receives a non-empty layer, so PresentTimedText composes subtitles over a

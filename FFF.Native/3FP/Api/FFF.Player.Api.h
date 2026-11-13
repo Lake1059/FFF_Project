@@ -447,6 +447,27 @@ struct FFF3FPSnapshot {
     std::uint32_t waitingForInput;
     double playbackRate;
     std::uint64_t audioFailures;
+    // Audio bitstream passthrough (neutral kernel seam). Appended at
+    // the end for the same offset reason as every field above: hosts and probes
+    // read this struct by fixed offset.
+    //   audioPassthroughActive - 1 while the passthrough lane OWNS the audio track
+    //     (the external module packs IEC 61937 bursts and the renderer drives an
+    //     exclusive non-PCM endpoint), 0 for the ordinary decode path. Module
+    //     absent => always 0: the kernel falls back silently, which is today's
+    //     behaviour, not a failure branch.
+    //   audioPassthroughMode - the route actually in force: 0 = decoded PCM
+    //     (matrix fold), 1 = IEC 61937 bitstream via the module. 2 is reserved for
+//     a shared-mode route reserved for the module (phase P4,
+//     module flag 2) and is never written by this lane. (The *host preference* AUTO/FORCE/OFF travels
+    //     through FFF3FP_SetAudioPassthroughMode and is answered by
+    //     FFF3FP_GetAudioPassthroughState -- the two "modes" are deliberately
+    //     different axes and each site documents which one it means.)
+    //   audioPassthroughCodec - FFF3FPAudioPassthroughCodec of the engaged track,
+    //     0 (= _NONE) while inactive. Written by UpdateAudioDiagnostics like the
+    //     other audio diagnostics.
+    std::uint32_t audioPassthroughActive;
+    std::uint32_t audioPassthroughMode;
+    std::int32_t audioPassthroughCodec;
 };
 // Layout teeth. FFF3FPSnapshot is read by fixed offset from the VB/C# hosts and from
 // the probes, which is why it is append-only; that rule is unenforceable until the
@@ -454,7 +475,7 @@ struct FFF3FPSnapshot {
 // shifting a host's view of the struct at runtime.
 // Values below were measured by compiling a probe against this header (cl /std:c++20,
 // offsetof/sizeof printed) -- not derived from a field table.
-static_assert(sizeof(FFF3FPSnapshot) == 592,
+static_assert(sizeof(FFF3FPSnapshot) == 608,
     "FFF3FPSnapshot size changed: hosts and probes read it by fixed offset");
 static_assert(offsetof(FFF3FPSnapshot, externalAudioOffset100ns) == 88, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, iamfActive) == 364, "offset pin");
@@ -482,6 +503,12 @@ static_assert(offsetof(FFF3FPSnapshot, corruptPackets) == 512, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, durationKnown) == 568, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, playbackRate) == 576, "offset pin");
 static_assert(offsetof(FFF3FPSnapshot, audioFailures) == 584, "offset pin");
+// Passthrough tail (2026-11-07): three fields grew the struct 592 -> 608 (the old
+// 8-byte alignment tail padding was consumed and a new 4-byte tail follows; the
+// teeth above keep every earlier offset frozen).
+static_assert(offsetof(FFF3FPSnapshot, audioPassthroughActive) == 592, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, audioPassthroughMode) == 596, "offset pin");
+static_assert(offsetof(FFF3FPSnapshot, audioPassthroughCodec) == 600, "offset pin");
 
 
 struct FFF3FPAudioPeakLevels {
@@ -1101,10 +1128,48 @@ FFF3FP_API FFFResult FFF3FP_SetAudioEndpoint(FFF3FPHandle player,
 // streams stay intact; playback resumes at the current media position.
 FFF3FP_API FFFResult FFF3FP_SetAudioExclusiveMode(FFF3FPHandle player,
     std::uint32_t exclusive) noexcept;
+// How a stereo endpoint is addressed decides whether a channel bed is placed
+// binaurally. 0 = automatic: the endpoint's own form factor decides
+// (EndpointFormFactor 3 = Headphones, 5 = Headset, mmdeviceapi.h), which is what
+// Windows' own Sound panel uses to tell 耳机 from 扬声器. 1 = force binaural, 2 =
+// force stereo. Forcing exists because Windows reports most USB DACs and every
+// Bluetooth and HDMI sink as something other than Headphones, so the automatic
+// answer is wrong for those and only the user knows.
+//
+// The policy is evaluated per bed frame against the endpoint the audio renderer
+// actually opened, so a change lands on the next frame without re-opening the
+// device or re-handshaking the external render plug. It survives every renderer
+// rebuild, including the one a headphone hot-plug causes.
+//
+// This entry point moves no FFF3FPSnapshot field and changes no offset pin; like
+// the audio render plug seam, the export surface is additive.
+FFF3FP_API FFFResult FFF3FP_SetAudioBinauralPolicy(FFF3FPHandle player,
+    std::uint32_t policy) noexcept;
+// Read-back for a host badge. Outputs are optional (a null pointer is ignored):
+//   policy      -- the value last set through FFF3FP_SetAudioBinauralPolicy
+//   formFactor  -- raw EndpointFormFactor of the endpoint in use, 0 when the
+//                  property store did not answer
+//   wanted      -- 1 when the policy and the endpoint shape together say a bed
+//                  should be placed binaurally, 0 otherwise
+//   available   -- 1 when the seam can act at all right now: an external render
+//                  plug is installed and the endpoint is 2-channel. A host should
+//                  hide its control rather than show a switch that cannot move.
+// Everything here is answered from published runtime state; the API thread never
+// touches the renderer, which a device switch may replace between calls.
+FFF3FP_API FFFResult FFF3FP_GetAudioBinauralStatus(FFF3FPHandle player,
+    std::uint32_t* policy, std::uint32_t* formFactor,
+    std::uint32_t* wanted, std::uint32_t* available) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetVolume(FFF3FPHandle player, float volume, std::uint32_t muted) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetTimedTextLayer(FFF3FPHandle player,
     const FFF3FPTimedTextLayer* layer) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetSnapshot(FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept;
+// Live swap-chain presentation counter. Append-only export: the export surface
+// does not move for additive entries, so PlayerApiVersion and the snapshot
+// layout/version stay unchanged. The still-image gesture timer reads it to
+// submit view updates on the real presentation cadence instead of a fixed
+// 8 ms tick, which removes the phase drift between host submissions and flips.
+FFF3FP_API FFFResult FFF3FP_GetPresentationCounter(FFF3FPHandle player,
+    std::uint64_t* counter) noexcept;
 // HDR presentation diagnostics: whether the ST 2094 curve actually shaped the drawn
 // frame, and whether/what per-frame HDR metadata reached the swap chain. Counters are
 // process-lifetime for this session, not reset per seek.
@@ -1862,3 +1927,16 @@ static_assert(sizeof(FFF3FPAuxiliaryComposition) == 32,
 
 FFF3FP_API FFFResult FFF3FP_SetAuxiliaryComposition(FFF3FPHandle player,
     const FFF3FPAuxiliaryComposition* composition) noexcept;
+
+// --- Audio bitstream passthrough seam (neutral kernel socket) ---------------
+//
+// Appended after the auxiliary-composition surface in the same additive style:
+// PlayerApiVersion is unchanged, hosts resolve these dynamically and degrade to
+// exactly today's behaviour when the module (or these exports) are absent. The
+// ABI -- TrackInfo/Format/Api function table and the three exports below -- is
+// owned by 3FP/Api/FFF.Player.AudioPassthrough.h, included here so that a
+// session build that already pulls in the API surface sees the exports too.
+// That header is pure POD and FFmpeg-free by design (it is mirrored into the
+// module's contract snapshot); it includes this file, so the pragma-once cycle
+// resolves with the definitions above already complete.
+#include "3FP/Api/FFF.Player.AudioPassthrough.h"

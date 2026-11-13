@@ -88,7 +88,7 @@ Partial Class Form设置_HDR
         ETB_HDR映射SDR亮度.ThumbWidth = 38
         ETB_HDR映射SDR亮度.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_HDR映射SDR亮度.TrackFillColor = Color.Transparent
-        ETB_HDR映射SDR亮度.Value = 250R
+        ETB_HDR映射SDR亮度.Value = 203R
         ' 
         ' HtmlColorLabel2
         ' 
