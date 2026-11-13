@@ -30,6 +30,7 @@ Partial Class Form设置_界面与尺寸
         MTB_自定义初始画面尺寸宽度 = New LakeUI.ModernTextBox()
         JustEmptyControl1 = New LakeUI.JustEmptyControl()
         MCB_初始画面尺寸选项 = New LakeUI.ModernComboBox()
+        MCK_内容原始尺寸 = New LakeUI.ModernCheckBox()
         Panel1 = New LakeUI.ModernPanel()
         MCB_全局字体 = New LakeUI.ModernComboBox()
         ModernPanel1.SuspendLayout()
@@ -75,6 +76,7 @@ Partial Class Form设置_界面与尺寸
         Panel2.Controls.Add(MTB_自定义初始画面尺寸宽度)
         Panel2.Controls.Add(JustEmptyControl1)
         Panel2.Controls.Add(MCB_初始画面尺寸选项)
+        Panel2.Controls.Add(MCK_内容原始尺寸)
         Panel2.Dock = DockStyle.Top
         Panel2.Location = New Point(15, 62)
         Panel2.Name = "Panel2"
@@ -172,6 +174,27 @@ Partial Class Form设置_界面与尺寸
         MCB_初始画面尺寸选项.ToolTipPadding = New Padding(15)
         MCB_初始画面尺寸选项.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ' 
+        ' MCK_内容原始尺寸
+        '
+        MCK_内容原始尺寸.AutoSize = False
+        MCK_内容原始尺寸.BackColor = Color.Transparent
+        MCK_内容原始尺寸.BoxBorderRadius = 5
+        MCK_内容原始尺寸.BoxBorderSize = 0
+        MCK_内容原始尺寸.BoxCheckedBackColor = Color.OliveDrab
+        MCK_内容原始尺寸.BoxInnerPadding = 6
+        MCK_内容原始尺寸.BoxSize = 24
+        MCK_内容原始尺寸.BoxTextSpacing = 10
+        MCK_内容原始尺寸.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCK_内容原始尺寸.Checked = False
+        MCK_内容原始尺寸.Dock = DockStyle.Left
+        MCK_内容原始尺寸.Location = New Point(470, 0)
+        MCK_内容原始尺寸.Margin = New Padding(2)
+        MCK_内容原始尺寸.Name = "MCK_内容原始尺寸"
+        MCK_内容原始尺寸.Padding = New Padding(0)
+        MCK_内容原始尺寸.Size = New Size(170, 32)
+        MCK_内容原始尺寸.TabIndex = 19
+        MCK_内容原始尺寸.Text = "内容原始尺寸 1:1"
+        '
         ' Panel1
         ' 
         Panel1.BackColor = Color.Transparent
@@ -237,6 +260,7 @@ Partial Class Form设置_界面与尺寸
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
     Friend WithEvents Panel2 As LakeUI.ModernPanel
     Friend WithEvents MCB_初始画面尺寸选项 As LakeUI.ModernComboBox
+    Friend WithEvents MCK_内容原始尺寸 As LakeUI.ModernCheckBox
     Friend WithEvents MTB_自定义初始画面尺寸高度 As LakeUI.ModernTextBox
     Friend WithEvents JustEmptyControl2 As LakeUI.JustEmptyControl
     Friend WithEvents MTB_自定义初始画面尺寸宽度 As LakeUI.ModernTextBox

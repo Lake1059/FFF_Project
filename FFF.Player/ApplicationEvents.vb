@@ -8,16 +8,22 @@ Namespace My
     Partial Friend Class MyApplication
         Private 待处理启动文件 As String = String.Empty
 
-        ''' <summary>启动期把进程拉到过 HIGH 的标记；Form1_Shown 后由宿主降回原始优先级。</summary>
+        ''' <summary>启动期把进程拉到过 HIGH 的标记；Form1_Shown 后由宿主降回原始优先级。
+        ''' P0-1 起只有显式 opt-in（FFF_STARTUP_PRIORITY=1）才会置 True；默认 False 是 Form1
+        ''' 降回线程的关键守卫——默认路径不会出现该线程，也不会写 PriorityClass。</summary>
         Friend Shared 启动优先级已拉高 As Boolean = False
 
-        ''' <summary>拉高之前保存的进程原始 PriorityClass；降回线程据此恢复原值而非常量 Normal（start /high 启动时恢复 High）。</summary>
+        ''' <summary>拉高之前保存的进程原始 PriorityClass；降回线程据此恢复原值而非常量 Normal（start /high 启动时恢复 High）。仅在显式 opt-in 臂里被写入。</summary>
         Friend Shared 启动期原始优先级 As ProcessPriorityClass = ProcessPriorityClass.Normal
 
         ''' <summary>启动期 GPU 预热后台线程；UI 线程须在首个 D2D 触点（Form1_Load）前 Join 它，使 D3D_DeviceGlobals 的设备创建与 UI 使用在时间上互斥。</summary>
         Friend Shared GPU预热线程 As Threading.Thread
 
+        ''' <summary>启动期 CPU 放置（docs/146）是否真的写下了进程默认 CPU 集合；Form1_Shown 的 3 s 兜底据此决定要不要发结束。</summary>
+        Friend Shared 启动CPU放置已启用 As Boolean = False
+
         Private Sub MyApplication_Startup(sender As Object, e As StartupEventArgs) Handles Me.Startup
+            启动期CPU放置开始()
             启动期拉高优先级()
             启动期预取大件()
             启动期预热GPU设备()
@@ -51,17 +57,28 @@ Namespace My
         End Sub
 
         ''' <summary>
-        ''' 启动期优先级：Main 到首帧之间进程还在 NORMAL，排在前面的往往是机器上其
-        ''' 它忙线程。拉到 HIGH 覆盖整个启动窗口，Form1_Shown 之后由宿主降回拉高前
-        ''' 保存的原始优先级（启动期原始优先级 字段，非常量 Normal）。
-        ''' 空闲机上收益≈0（没有争抢者），负载机上是把排队的启动时间抢回来。
-        ''' 内核 PlacementPolicy 的播放期 Boost 用的也是这个旋钮，但它最早在播放泵
-        ''' 启动后才触发且会恢复基线——本处在它之前拉、之后降，互不踩踏。
-        ''' FFF_NO_STARTUP_PRIORITY=1 退出。
+        ''' 启动期优先级（P0-1 起默认关）：只有显式 opt-in（FFF_STARTUP_PRIORITY=1）才在
+        ''' Main 到首帧之间把进程拉到 HIGH，Form1_Shown 之后由宿主降回拉高前保存的原始
+        ''' 优先级（启动期原始优先级 字段，非常量 Normal）。默认路径**完全不碰**
+        ''' Process.PriorityClass —— 进程优先级是内核 PlacementPolicy 的领地，宿主只在
+        ''' 显式 A/B 负控时临时扮演旧行为。
+        ''' 默认关的理由：docs/145 两次独立实测都不支持它有效 —— 唯一一次支持性读数
+        ''' （docs/120 的 −111.7 ms）是「预取+优先级」合测的归因伪影，拆开后优先级单独测
+        ''' 是 Δ +4.4 ms、p=0.783（docs/124 §2.3，14 轮交替），落在噪声内且符号对 ON 不利。
+        ''' 附带收益：docs/124 §4.1 的基线竞态降级为「默认不可能发生」——内核 PlacementPolicy
+        ''' 在首次播放 OnPlaybackStart 采样 baselinePriorityClass_，若播放泵在 Shown+1500 ms
+        ''' 之前启动就会把 HIGH 记成基线；默认不写 class 时这里根本不存在 HIGH 窗口。
+        ''' 内核 PlacementPolicy 的播放期 Boost 与本处互不踩踏：它最早在播放泵启动后才触发
+        ''' 且会恢复基线。
+        ''' A/B 负控用法：FFF_STARTUP_PRIORITY=1 恢复旧行为（旧 exe 的默认臂）；
+        ''' FFF_NO_STARTUP_PRIORITY=1 保留为兼容 no-op，两个都设时 NO 优先（不拉高）。
         ''' </summary>
         Private Sub 启动期拉高优先级()
             Try
+                ' 兼容旧开关：显式 NO 一律不碰 PriorityClass（与旧 exe 语义一致），且优先于 opt-in。
                 If Environment.GetEnvironmentVariable("FFF_NO_STARTUP_PRIORITY") = "1" Then Return
+                ' 显式 opt-in：未设置或非 "1" 都不拉高。默认路径在第一次 Process.GetCurrentProcess 前返回。
+                If Environment.GetEnvironmentVariable("FFF_STARTUP_PRIORITY") <> "1" Then Return
                 Dim _p = Process.GetCurrentProcess()
                 Using _p
                     ' 拉高前先保存原始 PriorityClass（同一处完成 Process 的 Using 释放）；
@@ -72,6 +89,25 @@ Namespace My
                 启动优先级已拉高 = True
             Catch
                 ' 优先级不是启动的前提：拿不到就按原样跑。
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' 启动期 CPU 放置（docs/146）：把启动窗口的进程默认 CPU 集合软限制到首选域——
+        ''' Intel 大小核 = EfficiencyClass 最高的 P-core 组；AMD 多 CCD = UI 线程当前所在的
+        ''' L3 域（Windows 不暴露 CCD 编号，"主 CCD"没有权威定义，所以不猜、只保局部性）；
+        ''' 多 processor group 的机型内核会拒绝（CPU Set 跨 group 赋值会被 OS 忽略）。
+        ''' 只在 FFF_STARTUP_PLACEMENT=1 时启用：默认关，未做 A/B 之前不叠进启动路径；
+        ''' 这个判断必须放在调用内核导出之前，否则调用本身就会把 FFF.Native 提前加载。
+        ''' 结束由内核在首帧呈现时自己做，没有媒体可放时 Form1_Shown 起 3 s 兜底。
+        ''' </summary>
+        Private Sub 启动期CPU放置开始()
+            Try
+                If Environment.GetEnvironmentVariable("FFF_STARTUP_PLACEMENT") <> "1" Then Return
+                If Not 播放器原生接口.支持启动期CPU放置 Then Return
+                启动CPU放置已启用 = 播放器原生接口.启动期CPU放置开始()
+            Catch
+                ' 放置不是启动的前提：拿不到就按原样跑。
             End Try
         End Sub
 

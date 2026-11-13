@@ -22,9 +22,11 @@ Friend NotInheritable Class 播放器360视角控制器
     ' 16 ms WinForms timer; native coalescing keeps slower displays bounded.
     Private Const 输入刷新间隔毫秒 As Integer = 8
 
-    Private Shared ReadOnly 全景元数据键 As String() = {
-        "projection", "projection_type", "spherical", "spherical_video", "stitching_software"
-    }
+    ' 键名先归一化（去掉 _ 和 -、转小写）再比对：MKV 会把 SimpleTag 名大写化
+    ' 成 PROJECTIONTYPE，而工具也会写 projection_type / projection-type ——这三种是同一个键。
+    ' 分两组是为了键值配对：按“任意键 + 任意值”匹配会把 PTGui 之类拼接软件名也当成 360 证据。
+    Private Shared ReadOnly 投影类型键 As String() = {"projection", "projectiontype"}
+    Private Shared ReadOnly 球形声明键 As String() = {"spherical", "sphericalvideo"}
 
     Private ReadOnly 宿主窗口 As Form
     Private ReadOnly 画面控件 As 播放器画面控件
@@ -98,25 +100,66 @@ Friend NotInheritable Class 播放器360视角控制器
                                                 String.Equals(流.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso
                                                 Not 流.是封面图)
         If 视频流 Is Nothing Then Return False
-        If If(视频流.投影, String.Empty).Contains("equirectangular", StringComparison.OrdinalIgnoreCase) Then Return True
-        If 包含360元数据(信息.元数据) OrElse 包含360元数据(视频流.元数据) Then Return True
-        Return 视频流.宽度 > 0 AndAlso 视频流.高度 > 0 AndAlso
-            CLng(视频流.宽度) = CLng(视频流.高度) * 2L
+        ' 只认元数据，不做任何几何推断（宽 == 高×2 已实证会误判普通 2:1 图，STATUS.md P1）。
+        ' side data 是权威投影声明：有它就只按它判，不再看 tag——两者冲突时不能靠 tag 翻案。
+        ' 只认完整等距柱状：tiled / half equirectangular 也含 "equirectangular" 子串，
+        ' 但着色器的 EquirectangularUv 只实现了整球映射，认了就会画错。
+        Dim 投影 = If(视频流.投影, String.Empty).Trim()
+        If 投影.Length > 0 Then
+            Return String.Equals(投影, "equirectangular", StringComparison.OrdinalIgnoreCase)
+        End If
+        ' 容器级 tag 没有流归属信息：多视频流容器里把它套给每一路，
+        ' 会把非 360 的第二路也认领成 360。只有「唯一的那个视频流」才接受容器级声明；
+        ' 流自己的 metadata 随时可认。
+        If 视频流数(信息) <= 1 AndAlso 包含360元数据(信息.元数据) Then Return True
+        Return 包含360元数据(视频流.元数据)
+    End Function
+
+    ' 封面图不算视频流（音乐文件里它不是画面）。
+    Private Shared Function 视频流数(信息 As 媒体信息) As Integer
+        Dim 计数 = 0
+        For Each 流 In 信息.流
+            If String.Equals(流.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso
+                Not 流.是封面图 Then 计数 += 1
+        Next
+        Return 计数
     End Function
 
     Private Shared Function 包含360元数据(元数据 As IDictionary(Of String, String)) As Boolean
         If 元数据 Is Nothing Then Return False
+        ' 先否定扫描。同一字典里 projection=cubemap 与 spherical=true 并存时，
+        ' 「先看到谁算谁」会让返回值依赖字典遍历顺序。
+        ' 明确的非等距柱状声明一票否决，不能靠另一个键翻案。
         For Each 项目 In 元数据
-            Dim 键 = If(项目.Key, String.Empty).Trim()
+            If 是否否定投影声明(项目) Then Return False
+        Next
+        For Each 项目 In 元数据
+            Dim 键 = 归一化元数据键(项目.Key)
             Dim 值 = If(项目.Value, String.Empty).Trim()
-            If 全景元数据键.Any(Function(候选) String.Equals(候选, 键, StringComparison.OrdinalIgnoreCase)) AndAlso
-                (值.Contains("equirectangular", StringComparison.OrdinalIgnoreCase) OrElse
-                 值.Contains("spherical", StringComparison.OrdinalIgnoreCase) OrElse
-                 值.Contains("360", StringComparison.OrdinalIgnoreCase) OrElse
-                 String.Equals(值, "1", StringComparison.OrdinalIgnoreCase) OrElse
-                 String.Equals(值, "true", StringComparison.OrdinalIgnoreCase)) Then Return True
+            If 键.Length = 0 OrElse 值.Length = 0 Then Continue For
+            ' 键和值必须配对：投影类型键只认 equirectangular（half / tiled 要骗不过精确相等），
+            ' 布尔声明键只认 1 / true。不做跨键的「值里含 360」匹配：
+            ' 那既不是任何规范的投影写法，也是 360p 之类分辨率标记的误判入口。
+            If Array.IndexOf(投影类型键, 键) >= 0 Then
+                If String.Equals(值, "equirectangular", StringComparison.OrdinalIgnoreCase) Then Return True
+            ElseIf Array.IndexOf(球形声明键, 键) >= 0 Then
+                If String.Equals(值, "1", StringComparison.OrdinalIgnoreCase) OrElse
+                    String.Equals(值, "true", StringComparison.OrdinalIgnoreCase) Then Return True
+            End If
         Next
         Return False
+    End Function
+
+    Private Shared Function 是否否定投影声明(项目 As KeyValuePair(Of String, String)) As Boolean
+        If Array.IndexOf(投影类型键, 归一化元数据键(项目.Key)) < 0 Then Return False
+        Dim 值 = If(项目.Value, String.Empty).Trim()
+        Return 值.Length > 0 AndAlso
+            Not String.Equals(值, "equirectangular", StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Shared Function 归一化元数据键(键 As String) As String
+        If String.IsNullOrEmpty(键) Then Return String.Empty
+        Return 键.Replace("_", String.Empty).Replace("-", String.Empty).Trim().ToLowerInvariant()
     End Function
 
     Private Sub 模式菜单项_Click(sender As Object, e As EventArgs)

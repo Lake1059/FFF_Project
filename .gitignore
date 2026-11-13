@@ -398,3 +398,14 @@ FFF.HDRdp.Test.*
 # Matches at any depth — the existing "third_party/vcpkg_installed/" entry does not
 # cover a vcpkg_installed/ directly under the repo root or other subdirectories.
 vcpkg_installed/
+
+# 测试文件统一存放 test/（本树历史目录名 tests/），一律不入库。
+# 两种拼写都排除，防止把样本/产物误 add 进提交。
+test/
+tests/
+
+# 探针编译输出与 PrefetchHost 中间目录（2026-11-11 审查补：此前未覆盖，
+# 以未跟踪状态暴露在 git status，有误提交风险）。
+build/
+FFF.PrefetchHost/obj/
+FFF.PrefetchHost/x64/

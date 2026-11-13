@@ -52,7 +52,7 @@ Public NotInheritable Class 播放器会话
     ''' <remarks>与 期望API版本 是两个独立的门，都是严格相等：导出面只追加所以 API 轴很少动，
     ''' 快照结构一追字段这个数就动。混版时 GetSnapshot 每次都返回 InvalidArgument，
     ''' 而 Create 照样成功——宿主会拿到一个能播放但快照全空的会话。</remarks>
-    Friend Const 原生播放器快照版本 As UInteger = 22UI
+    Friend Const 原生播放器快照版本 As UInteger = 23UI
 
     Public Sub New(配置 As 播放器配置)
         ArgumentNullException.ThrowIfNull(配置)
@@ -242,6 +242,8 @@ Public NotInheritable Class 播放器会话
             ' 模块在场且已解锁 ⇒ 把外部床渲染函数表交给内核。未解锁或旧模块时一次都不叫，
             ' 床继续由内核自己的矩阵折叠处理——那是现网行为，不是新的失败分支。
             安装音频渲染插槽()
+            ' 音频直通表同理：模式≠关 且模块有这一面才钉入（见 安装音频直通插槽）。
+            安装音频直通插槽()
             If 计时 IsNot Nothing Then 计时.插槽 = 计时.打点()
 
             ' 把内核会话句柄交给模块的自驱动注入泵。未解锁/泵拒绝都按静默处理：
@@ -296,6 +298,7 @@ Public NotInheritable Class 播放器会话
                 色彩模块实例 = 模块
                 ' 解锁也可能刚刚让音频那一面可用（未解锁时模块拒交那张表）。
                 安装音频渲染插槽()
+                安装音频直通插槽()
             End If
 
             Dim 实例 = 色彩模块实例
@@ -640,6 +643,11 @@ Public NotInheritable Class 播放器会话
         Return 播放器原生接口.读取图片缩放(取得句柄(), 当前倍率, 最小倍率, 最大倍率)
     End Function
 
+    ''' <summary>交换链呈现计数（P0-2）。旧内核没有该导出时返回 ULong.MaxValue 哨兵。</summary>
+    Public Function 读取呈现计数() As ULong
+        Return 播放器原生接口.读取呈现计数(取得句柄())
+    End Function
+
     ''' <summary>图片模式：以光标为锚做一次缩放步进（放大 1.25 / 缩小 0.8）。
     ''' 锚点按客户区归一化到 [0,1]，由内核保持该点下的画面内容不动。
     ''' 成功时 结果缩放 返回缩放后的绝对值，便于宿主同步本地缓存。
@@ -667,9 +675,10 @@ Public NotInheritable Class 播放器会话
 
     ' 视口封顶开关（API 16 新增导出）：开启后适配盒不超过源原生尺寸，缩放值就是绝对的
     ' 屏幕:视频 像素比。内核把这一偏好存在渲染器里，设备重建后不丢，所以不必在恢复路径重发。
-    Public Sub 设置原生尺寸封顶(开启 As Boolean)
-        检查结果(播放器原生接口.FFF3FP_SetFitLimitToNative(取得句柄(), If(开启, 1UI, 0UI)))
-    End Sub
+    ' 旧内核没有该导出时返回 False，调用方继续走窗口尺寸逻辑。
+    Public Function 尝试设置原生尺寸封顶(开启 As Boolean) As Boolean
+        Return 播放器原生接口.尝试设置原生尺寸封顶(取得句柄(), 开启)
+    End Function
 
     ''' <summary>图片模式：读取帧数、动画标志、EXIF 旋转、源格式位深、ICC 大小与色彩信息。
     ''' 当前媒体不支持图片信息时返回 Nothing。</summary>
@@ -757,6 +766,119 @@ Public NotInheritable Class 播放器会话
             Return (0UL, 0UL, 0UL)
         End Try
         Return (CInt(生效UI), 已渲染, 已拒绝)
+    End Function
+
+    ''' <summary>双耳策略：0=自动（端点形态判定）1=强制双耳 2=强制立体声。
+    ''' 与"空间音频总开关"是两层：总开关决定插槽装不装，策略决定床走不走双耳。
+    ''' 旧内核没有这条导出时静默忽略——徽章因"不可用"而不出现，不会假绿。</summary>
+    Public Sub 设置双耳策略(策略 As UInteger)
+        Try
+            检查结果(播放器原生接口.FFF3FP_SetAudioBinauralPolicy(取得句柄(), 策略))
+        Catch ex As EntryPointNotFoundException
+        End Try
+    End Sub
+
+    ''' <summary>双耳状态回读。可用=插槽已装且端点是 2 声道；期望=策略与端点形态
+    ''' 合起来是否该双耳化。旧内核缺席时返回"不可用"，调用方据此隐藏控件。</summary>
+    Public Function 读取双耳状态() As 双耳状态
+        Dim 策略 As UInteger, 形态 As UInteger, 期望 As UInteger, 可用UI As UInteger
+        Try
+            Dim 结果 = 播放器原生接口.FFF3FP_GetAudioBinauralStatus(取得句柄(), 策略, 形态, 期望, 可用UI)
+            If 结果 <> 原生播放器结果.成功 Then Return 双耳状态.不可用
+        Catch ex As EntryPointNotFoundException
+            Return 双耳状态.不可用
+        End Try
+        Return New 双耳状态(CType(Math.Min(策略, 2UI), 双耳策略), 形态, 期望 <> 0UI, 可用UI <> 0UI)
+    End Function
+
+    ' ---- 音频源码直通（内核中性缝的宿主侧） ----
+    ' 表由模块产出、宿主钉住后整张交内核；偏好模式单独走 FFF3FP_SetAudioPassthroughMode。
+    ' 模块缺席/旧件/未解锁 ⇒ 与"模块不在"同形静默，内核整体回退解码。
+    Private 直通插槽已装 As Boolean
+    Private ReadOnly 直通插槽锁 As New Object()
+    Private 音频直通模式偏好 As UInteger = 0UI   ' 0=自动 1=强制 2=关
+
+    ''' <summary>把模块的音频直通函数表交给本会话的内核（偏好≠关时）。任何一步不成立
+    ''' 都静默返回：缺席、旧件、未解锁、镜像尺寸不同水、内核拒绝——全部保持解码路径。</summary>
+    Private Sub 安装音频直通插槽()
+        SyncLock 直通插槽锁
+            安装音频直通插槽核心()
+        End SyncLock
+    End Sub
+
+    Private Sub 安装音频直通插槽核心()
+        If 音频直通模式偏好 = 2UI OrElse 直通插槽已装 OrElse 色彩模块实例 Is Nothing Then Return
+        ' 旧内核没有这组附加导出时整条直通通路缺席：在装载点就退出，
+        ' 而不是让异常穿出 Try 块打死同一路径上的模块注入泵启动。
+        If Not 播放器原生接口.支持音频直通 Then Return
+        Dim 原因 As String = Nothing
+        Dim 表 = 色彩模块实例.尝试取音频直通表(原因)
+        If Not 表.HasValue Then
+            If 原因 IsNot Nothing Then Debug.WriteLine("音频直通插槽：" & 原因)
+            Return
+        End If
+        Dim 本地表 = 表.Value
+        Dim 钉住 = GCHandle.Alloc(本地表, GCHandleType.Pinned)
+        Try
+            ' 偏好先于表：内核收到表后按当前偏好决定下一次轨开启是否接管。
+            检查结果(播放器原生接口.FFF3FP_SetAudioPassthroughMode(取得句柄(), 音频直通模式偏好))
+            Dim 结果 = 播放器原生接口.FFF3FP_SetAudioPassthroughApi(取得句柄(), 钉住.AddrOfPinnedObject())
+            If 结果 = 原生播放器结果.成功 Then
+                直通插槽已装 = True
+            Else
+                Debug.WriteLine("音频直通插槽：内核拒绝 " & 结果.ToString())
+            End If
+        Finally
+            钉住.Free()
+        End Try
+    End Sub
+
+    ''' <summary>设置音频直通偏好（0=自动 1=强制 2=关）。即存即生效于下一次轨开启；
+    ''' 模块表随偏好一起装卸：关 ⇒ 撤表（内核回到解码）；非关 ⇒ 表在场才钉入。</summary>
+    Public Sub 设置音频直通模式(模式 As UInteger)
+        If 模式 > 2UI Then Throw New ArgumentOutOfRangeException(NameOf(模式))
+        SyncLock 直通插槽锁
+            音频直通模式偏好 = 模式
+            If 取得句柄() Is Nothing Then Return
+            If Not 播放器原生接口.支持音频直通 Then Return
+            Try
+                检查结果(播放器原生接口.FFF3FP_SetAudioPassthroughMode(取得句柄(), 模式))
+            Catch ex As EntryPointNotFoundException
+                ' 旧内核没有这一导出：整条直通通路缺席，静默保持现网行为。
+                Return
+            End Try
+            If 模式 = 2UI AndAlso 直通插槽已装 Then
+                检查结果(播放器原生接口.FFF3FP_SetAudioPassthroughApi(取得句柄(), IntPtr.Zero))
+                直通插槽已装 = False
+            ElseIf 模式 <> 2UI AndAlso Not 直通插槽已装 Then
+                安装音频直通插槽核心()
+            End If
+        End SyncLock
+    End Sub
+
+    ''' <summary>直通读数：生效（0/1）、宿主偏好、编解码枚举、模块显示名与已渲染突发数。
+    ''' 给信息层与测试用，不抛；旧内核答全零。</summary>
+    Public Function 读取音频直通状态() As (生效 As Integer, 模式 As UInteger, 编解码 As UInteger,
+                                            名称 As String, 突发数 As ULong)
+        Dim 生效UI As UInteger, 模式UI As UInteger, 编解码UI As UInteger, 突发 As ULong
+        Dim 名称缓冲 As IntPtr = IntPtr.Zero
+        If Not 播放器原生接口.支持音频直通 Then Return (0, 0UI, 0UI, String.Empty, 0UL)
+        Try
+            ' 名称是 UTF-8；按现有导出的截断契约，容量给足即可，读不到保持空串。
+            名称缓冲 = Marshal.AllocCoTaskMem(256)
+            播放器原生接口.FFF3FP_GetAudioPassthroughState(取得句柄(), 生效UI, 模式UI, 编解码UI,
+                                                            名称缓冲, 256UI, 突发)
+            Dim 名称 As String = String.Empty
+            If 生效UI <> 0UI Then
+                名称 = Marshal.PtrToStringUTF8(名称缓冲)
+                If 名称 Is Nothing Then 名称 = String.Empty
+            End If
+            Return (CInt(生效UI), 模式UI, 编解码UI, 名称, 突发)
+        Catch ex As EntryPointNotFoundException
+            Return (0, 0UI, 0UI, String.Empty, 0UL)
+        Finally
+            If 名称缓冲 <> IntPtr.Zero Then Marshal.FreeCoTaskMem(名称缓冲)
+        End Try
     End Function
 
     Public Sub 设置音频端点(端点标识 As String)
@@ -1115,14 +1237,14 @@ Public NotInheritable Class 播放器会话
         End Get
     End Property
 
-    ''' <summary>色彩变换通路最近一帧的逐帧峰值（尼特；通路未跑答 -1，无 L1 答 0）。</summary>
+    ''' <summary>色彩变换通路最近一帧的逐帧峰值（尼特；通路未跑答 -1，无模块峰值块答 0）。</summary>
     Friend ReadOnly Property 色彩变换外部峰值尼特 As Single
         Get
             Dim 实例 = 色彩模块实例
             If 实例 Is Nothing OrElse Not 实例.支持注入 Then Return 0F
             Dim 状态 As 色彩变换模块接口.注入状态 = Nothing
             If Not 实例.读取注入状态(状态) Then Return 0F
-            ' -1 是"通路没在跑"，与 0"本帧无 L1"分开：显示层的粘滞位靠 0 保末值
+            ' -1 是"通路没在跑"，与 0"本帧无模块峰值块"分开：显示层的粘滞位靠 0 保末值
             ' （避免读数逐帧回跳），靠 -1 才敢作废 —— 泵死之后再指着旧读数说"逐帧"，
             ' 那是拿一个不再更新的数字冒充实时。
             If 状态.运行 = 0UI Then Return -1F
@@ -1158,6 +1280,13 @@ Public NotInheritable Class 播放器会话
             End If
         Catch ex As Exception
             ' 停泵失败不该阻断会话的其余清理。
+        End Try
+        ' 直通表先撤再销毁句柄：撤表会让内核对模块 context 调 destroy，而 destroy
+        ' 的函数指针指向模块代码段——模块 Dispose（FreeLibrary）之前做才是安全的。
+        Try
+            If 句柄 IsNot Nothing Then 播放器原生接口.FFF3FP_SetAudioPassthroughApi(句柄, IntPtr.Zero)
+        Catch ex As Exception
+            ' 撤表失败不阻断会话清理（句柄销毁时内核析构路径还会再释放一次）。
         End Try
         ' 模块实例的 Dispose 是唯一会 FreeLibrary 的地方：停泵之后再做，否则泵线程
         ' 会继续拿着已卸载模块里的导出地址。每会话一份实例，之前从没人 Dispose，

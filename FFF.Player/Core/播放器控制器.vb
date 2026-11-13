@@ -10,7 +10,9 @@ Imports System.Threading
 Public NotInheritable Class 播放器控制器
     Implements IDisposable
 
-    Private Const 默认SDR峰值尼特 As Single = 100.0F
+    ' HDR→SDR 的目标参考白：BT.2408 的 203 nit（漫反射白），不是面板峰值。
+    ' 启动后 Form1 会立刻用设置里的值覆盖它，这里只保证「没有设置时」也是规范值。
+    Private Const 默认SDR峰值尼特 As Single = 203.0F
     Private 当前SDR峰值尼特 As Single = 默认SDR峰值尼特
     Private 当前HDR输出峰值尼特 As Single = 0.0F
     Private Const SDR纸白尼特 As Single = 203.0F
@@ -250,6 +252,11 @@ Public NotInheritable Class 播放器控制器
         Return 安全读取会话(Function(目标) 目标.当前快照)
     End Function
 
+    ''' <summary>视口封顶是会话内状态；旧内核缺导出时返回 False，不打断窗口尺寸逻辑。</summary>
+    Friend Function 尝试设置原生尺寸封顶(开启 As Boolean) As Boolean
+        Return 安全读取会话(Function(目标) 目标.尝试设置原生尺寸封顶(开启), False)
+    End Function
+
     ''' <summary>截图用：离屏回读一帧（源分辨率）。内核不支持或没有画面时返回 Nothing，
     ''' 由调用方回落到屏幕抓取。</summary>
     Friend Function 读取原始帧() As Bitmap
@@ -277,7 +284,7 @@ Public NotInheritable Class 播放器控制器
         Return 安全读取会话(Function(目标) 目标.色彩变换内容描述, String.Empty)
     End Function
 
-    ''' <summary>色彩变换通路最近一帧的逐帧峰值（尼特；无会话 / 未解锁 / 无 L1 时 0）。
+    ''' <summary>色彩变换通路最近一帧的逐帧峰值（尼特；无会话 / 未解锁 / 无模块峰值块时 0）。
     ''' 供信息图层 HDR 行的逐帧源峰值段读取，任何时候都能安全问。</summary>
     Public Function 读取色彩变换外部峰值尼特() As Single
         Return 安全读取会话(Function(目标) 目标.色彩变换外部峰值尼特, 0F)
@@ -521,6 +528,19 @@ Public NotInheritable Class 播放器控制器
         Return False
     End Function
 
+    ''' <summary>交换链呈现计数（P0-2）。旧内核或会话不可用时返回 ULong.MaxValue 哨兵，
+    ''' 调用方据此退化为「每 tick 都下发」，不会把能力不可用升级成动画停摆。</summary>
+    Friend Function 读取呈现计数() As ULong
+        Dim 目标 = 会话
+        If 已释放 OrElse 正在切换会话 OrElse 目标 Is Nothing Then Return ULong.MaxValue
+        Try
+            Return 目标.读取呈现计数()
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        End Try
+        Return ULong.MaxValue
+    End Function
+
     ''' <summary>返回图片信息；失败或非图片返回 Nothing。</summary>
     Friend Function 取图片信息() As 原生图片信息?
         Dim 目标 = 会话
@@ -650,8 +670,38 @@ Public NotInheritable Class 播放器控制器
         Next
     End Sub
 
-    Public Sub 关闭字幕()
+    ''' <summary>AI 实时字幕控制器（Form1 注入）。字幕来源是一个四选一：
+    ''' 关 / 内嵌 / 外挂 / AI 实时；这里不建它，只负责互斥。</summary>
+    Friend Property AI字幕 As 播放器AI字幕控制器
+
+    ''' <summary>字幕列表是否该摆出「AI 实时字幕」这一项（装了有效包才摆）。</summary>
+    Friend ReadOnly Property 可显示AI字幕 As Boolean
+        Get
+            Return AI字幕 IsNot Nothing AndAlso AI字幕.有可用包
+        End Get
+    End Property
+
+    ''' <summary>AI 字幕此刻是不是当前字幕来源（列表勾选态用它）。</summary>
+    Friend ReadOnly Property AI字幕已启用 As Boolean
+        Get
+            Return AI字幕 IsNot Nothing AndAlso AI字幕.启用
+        End Get
+    End Property
+
+    ''' <summary>把 AI 字幕选为当前字幕来源：普通字幕让位，worker/tap 由控制器起。</summary>
+    Public Sub 选择AI字幕()
         If 已释放 Then Return
+        Dim AI = AI字幕
+        If AI Is Nothing Then Return
+        ' 清普通字幕由控制器的 清除普通字幕 回调统一做（避免这里重复清两次）。
+        AI.作为字幕源启用()
+    End Sub
+
+    ''' <summary>关闭字幕。<paramref name="保留AI字幕"/>=True 只清普通字幕，
+    ''' 供 AI 字幕启用路径内部使用，避免自己把自己关掉。</summary>
+    Public Sub 关闭字幕(Optional 保留AI字幕 As Boolean = False)
+        If 已释放 Then Return
+        If Not 保留AI字幕 Then AI字幕?.作为字幕源停用()
         If 读取光盘状态().已打开 Then 光盘导航(光盘命令.字幕, 0)
         取消字幕加载()
         Dim 待释放内嵌 = Interlocked.Exchange(当前内嵌字幕, Nothing)
@@ -664,6 +714,7 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 选择外部字幕()
         If 已释放 Then Return
+        AI字幕?.作为字幕源停用()
         Dim 外部 = Volatile.Read(已导入外部字幕)
         If 外部 Is Nothing Then Return
         取消字幕加载()
@@ -678,6 +729,7 @@ Public NotInheritable Class 播放器控制器
     ''' <summary>选择外部字幕；字幕容器（MKS）可带轨索引切轨，-1 表示文件本身。</summary>
     Public Sub 选择外部字幕(路径 As String, Optional 指定流索引 As Integer = -1)
         If 已释放 OrElse String.IsNullOrWhiteSpace(路径) Then Return
+        AI字幕?.作为字幕源停用()
         Dim 完整路径 = Path.GetFullPath(路径)
         Dim 已加载 = Volatile.Read(已导入外部字幕)
         If 已加载 IsNot Nothing AndAlso
@@ -695,6 +747,8 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 选择内嵌字幕(流索引 As Integer)
         If 已释放 OrElse 正在切换会话 OrElse 流索引 < 0 Then Return
+        ' 选任何一条普通字幕轨都意味着离开 AI 字幕来源，即使索引与当前相同。
+        AI字幕?.作为字幕源停用()
         Dim 光盘 = 读取光盘状态()
         If 光盘.已打开 Then
             Dim 字幕信息 = 安全读取媒体信息()?.流.Where(Function(x) x.类型 = "subtitle").ToArray()
@@ -1129,7 +1183,127 @@ Public NotInheritable Class 播放器控制器
         Catch ex As 播放器异常
             RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用音频效果设置"))
         End Try
+        ' 总开关刚动过，插槽可能刚装上或刚撤下，策略要跟着重放一遍。
+        同步双耳策略()
     End Sub
+
+    ''' <summary>读一次双耳状态。会话缺席时给"不可用"，控件据此隐藏。</summary>
+    Friend Function 读取双耳状态() As 双耳状态
+        If 已释放 OrElse 会话 Is Nothing Then Return 双耳状态.不可用
+        Return 会话.读取双耳状态()
+    End Function
+
+    ''' <summary>把持久化的强制策略折算成实际下发的策略。端点形态与当时强制的不
+    ''' 同就回落到"自动"——否则在 USB DAC 上强开的双耳会跟着用户跑到 HDMI 输出上。
+    ''' 状态里的形态来自内核回读，不是宿主自己猜的。</summary>
+    Friend Function 折算双耳策略(状态 As 双耳状态) As 双耳策略
+        Dim 配置 = 设置.实例对象
+        If 配置.双耳策略选项 = CInt(双耳策略.自动) Then Return 双耳策略.自动
+        If CUInt(配置.双耳策略形态) <> 状态.端点形态 Then Return 双耳策略.自动
+        Return CType(配置.双耳策略选项, 双耳策略)
+    End Function
+
+    ''' <summary>把折算后的策略下发给内核。幂等：目标与内核现值相同就不发命令。
+    ''' 打开媒体后要再走一遍——渲染器此时才真正打开端点，形态只有那时才有值。</summary>
+    Friend Sub 同步双耳策略()
+        If 已释放 OrElse 会话 Is Nothing Then Return
+        Dim 状态 = 读取双耳状态()
+        Dim 目标 = 折算双耳策略(状态)
+        If 状态.策略 = 目标 Then Return
+        Try
+            会话.设置双耳策略(CUInt(目标))
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用双耳空间音频设置"))
+        End Try
+    End Sub
+
+    ''' <summary>底部徽章的一次点击。已强制 ⇒ 回到自动；自动 ⇒ 压成"与现状相反"
+    ''' 的那一档，并记下当时的端点形态作为适用条件。返回是否真的改了。</summary>
+    Friend Function 切换双耳模式() As Boolean
+        If 已释放 OrElse 会话 Is Nothing Then Return False
+        Dim 状态 = 读取双耳状态()
+        If Not 状态.可用 Then Return False
+        Dim 配置 = 设置.实例对象
+        If 折算双耳策略(状态) <> 双耳策略.自动 Then
+            配置.双耳策略选项 = CInt(双耳策略.自动)
+            配置.双耳策略形态 = 0
+        Else
+            配置.双耳策略选项 = If(状态.期望双耳,
+                CInt(双耳策略.强制立体声), CInt(双耳策略.强制双耳))
+            配置.双耳策略形态 = CInt(状态.端点形态)
+        End If
+        同步双耳策略()
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
+        Return True
+    End Function
+
+    ''' <summary>按明确策略设置双耳（音频输出徽章三态用）：自动 / 强制双耳 / 强制立体声。
+    ''' 与 切换双耳模式 同一条持久化路径：形态记当前端点，端点一变就折算回自动。</summary>
+    Friend Sub 设置双耳策略(策略 As 双耳策略)
+        If 已释放 OrElse 会话 Is Nothing Then Return
+        Dim 状态 = 读取双耳状态()
+        If Not 状态.可用 Then Return
+        Dim 配置 = 设置.实例对象
+        配置.双耳策略选项 = CInt(策略)
+        配置.双耳策略形态 = If(策略 = 双耳策略.自动, 0, CInt(状态.端点形态))
+        同步双耳策略()
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
+    End Sub
+
+    ''' <summary>音频输出徽章的直通态：写三态偏好并立即下发。独占模式由调用方先切好，
+    ''' 内核是否真的接管由快照回读决定（模块/端点不支持时会留在解码路径）。</summary>
+    Friend Sub 设置音频直通偏好(模式 As 音频直通模式)
+        If 已释放 Then Return
+        设置.实例对象.音频直通选项 = CInt(模式)
+        应用音频直通设置()
+    End Sub
+
+    ''' <summary>设置页 / 音频输出徽章 → 音频直通三态的接线（Form设置_设备与性能 / Form1 →
+    ''' 本方法 → 会话.设置音频直通模式）。会话侧负责表的钉入/撤下与内核偏好；这里补一条
+    ''' 人话：直通要整轨接管并抢 WASAPI 独占，独占未开且偏好≠关时提前说明，免得用户以
+    ''' 为"开了没效果"。内核对"同值重设"回 InvalidArgument（SetMode 只在变化时报真），
+    ''' 所以先读内核现值，相同就不发——设置页与徽章两条路都幂等。</summary>
+    Friend Sub 应用音频直通设置()
+        If 已释放 Then Return
+        Dim 模式 = Math.Clamp(设置.实例对象.音频直通选项, 0, 2)
+        Try
+            If 会话 IsNot Nothing AndAlso 会话.读取音频直通状态().模式 = CUInt(模式) Then Return
+        Catch
+            ' 回读失败就照旧下发，让内核当裁判。
+        End Try
+        Try
+            会话?.设置音频直通模式(CUInt(模式))
+        Catch ex As 播放器异常
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用音频直通设置"))
+            Return
+        End Try
+        If 模式 <> CInt(音频直通模式.关) AndAlso 当前WASAPI模式 <> WASAPI共享模式.独占 Then
+            RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(
+                "音频源码直通需要 WASAPI 独占模式。当前为共享模式，直通不会接管；" &
+                "请在设置中开启独占输出后再播放相应片源。"))
+        End If
+    End Sub
+
+    ''' <summary>信息图层的直通行文本：接管时原样显示模块注入的显示名；模块没给名称
+    ''' 时退回中性“已接管”，不造格式身份名。未接管返回空串（那一行不出现）。</summary>
+    Friend Function 音频直通图层文本() As String
+        If 已释放 OrElse 会话 Is Nothing Then Return String.Empty
+        Try
+            Dim 状态 = 会话.读取音频直通状态()
+            Return 直通图层文本(状态.生效, 状态.名称)
+        Catch
+            Return String.Empty
+        End Try
+    End Function
+
+    ''' <summary>直通行的纯映射：生效=0 ⇒ 空串；模块给了显示名就原样返回；模块没给
+    ''' 名称时只报宿主中性的“已接管”状态，不造编解码名/格式身份名。宿主不解释模块
+    ''' 文本，也不把这一行直接藏掉。</summary>
+    Friend Shared Function 直通图层文本(生效 As Integer, 模块名 As String) As String
+        If 生效 = 0 Then Return String.Empty
+        If String.IsNullOrWhiteSpace(模块名) Then Return "已接管"
+        Return 模块名.Trim()
+    End Function
 
     Public Sub 强制开启HDR模式()
         Dim 目标 = 会话
@@ -1685,6 +1859,10 @@ Public NotInheritable Class 播放器控制器
         ' 误报成 "GPU 解码已回退到 CPU"。
         Dim 音频IAMF回退 = False
         Dim 音频IAMF回退原因 As String = String.Empty
+        ' 音频直通回退：内核在直通通道（模块打包/独占非 PCM 端点）半路放弃时发
+        ' {"type":"audio","passthrough":true,"fallback":true,"reason":"..."}，与 IAMF 同构甄别。
+        Dim 音频直通回退 = False
+        Dim 音频直通回退原因 As String = String.Empty
         Try
             Using 文档 = JsonDocument.Parse(e.详情JSON)
                 Dim 音频类型 As JsonElement
@@ -1693,13 +1871,24 @@ Public NotInheritable Class 播放器控制器
                     音频类型.GetString() = "audio" AndAlso
                     文档.RootElement.TryGetProperty("iamf", 音频类型) AndAlso
                     音频类型.ValueKind = JsonValueKind.True
+                Dim 是音频直通 = 文档.RootElement.TryGetProperty("type", 音频类型) AndAlso
+                    音频类型.ValueKind = JsonValueKind.String AndAlso
+                    音频类型.GetString() = "audio" AndAlso
+                    文档.RootElement.TryGetProperty("passthrough", 音频类型) AndAlso
+                    音频类型.ValueKind = JsonValueKind.True
                 Dim 独占 As JsonElement
                 If 文档.RootElement.TryGetProperty("exclusive", 独占) Then
                     当前WASAPI模式 = If(独占.GetBoolean(), WASAPI共享模式.独占, WASAPI共享模式.共享)
                 End If
                 Dim 回退 As JsonElement
                 If 文档.RootElement.TryGetProperty("fallback", 回退) Then
-                    If 是音频IAMF Then 音频IAMF回退 = 回退.GetBoolean() Else 解码回退 = 回退.GetBoolean()
+                    If 是音频IAMF Then
+                        音频IAMF回退 = 回退.GetBoolean()
+                    ElseIf 是音频直通 Then
+                        音频直通回退 = 回退.GetBoolean()
+                    Else
+                        解码回退 = 回退.GetBoolean()
+                    End If
                 ElseIf 文档.RootElement.TryGetProperty("hardwareFallback", 回退) Then
                     解码回退 = 回退.GetBoolean()
                 End If
@@ -1708,6 +1897,8 @@ Public NotInheritable Class 播放器控制器
                     原因.ValueKind = JsonValueKind.String Then 回退原因 = 原因.GetString()
                 If 音频IAMF回退 AndAlso 文档.RootElement.TryGetProperty("reason", 原因) AndAlso
                     原因.ValueKind = JsonValueKind.String Then 音频IAMF回退原因 = 原因.GetString()
+                If 音频直通回退 AndAlso 文档.RootElement.TryGetProperty("reason", 原因) AndAlso
+                    原因.ValueKind = JsonValueKind.String Then 音频直通回退原因 = 原因.GetString()
                 Dim 独占回退值 As JsonElement
                 If 文档.RootElement.TryGetProperty("exclusiveFallback", 独占回退值) Then
                     独占回退 = 独占回退值.GetBoolean()
@@ -1731,6 +1922,13 @@ Public NotInheritable Class 播放器控制器
         If 音频IAMF回退 Then
             Dim 说明 = "IAMF 空间音频已回退到常规解码，声场以容器声明为准。"
             If Not String.IsNullOrWhiteSpace(音频IAMF回退原因) Then 说明 &= $"：{音频IAMF回退原因.Trim()}"
+            RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(说明))
+        End If
+        If 音频直通回退 Then
+            ' 直通回退话术（reason 枚举由内核给出）：模块拒绝/端点不支持/独占被占/
+            ' 打包出错。模块缺席不发这条事件——那与"没有这个功能"同形。
+            Dim 说明 = "音频源码直通未生效，已回退到常规解码，播放不中断。"
+            If Not String.IsNullOrWhiteSpace(音频直通回退原因) Then 说明 &= $"：{音频直通回退原因.Trim()}"
             RaiseEvent 操作提示(Me, New 播放器操作提示事件参数(说明))
         End If
         If 独占回退 Then

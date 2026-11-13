@@ -13,12 +13,17 @@ namespace {
 // One-shot diagnostic switch: FFF_CUDA_INTEROP_TRACE=1 makes the import arm report
 // which driver call refused, so a silent conversion to the download route can be
 // told apart from a wrong geometry.
+// Shared read for the three switches: a value counts when it STARTS with the
+// lead character (empty values never match). Reading only the leading character
+// is deliberate -- the earlier strict "0\0"/"1\0" comparisons turned "00" and
+// "0 " (trailing space) into ENABLED, the opposite of the "=0 disables" intent.
+bool CudaEnvStartsWith(const wchar_t* name, const wchar_t lead) noexcept {
+    wchar_t value[8]{};
+    return GetEnvironmentVariableW(name, value, 8) != 0 && value[0] == lead;
+}
+
 bool InteropTraceEnabled() noexcept {
-    static const bool enabled = [] {
-        wchar_t value[8]{};
-        return GetEnvironmentVariableW(L"FFF_CUDA_INTEROP_TRACE", value, 8) != 0 &&
-            value[0] == L'1' && value[1] == L'\0';
-    }();
+    static const bool enabled = CudaEnvStartsWith(L"FFF_CUDA_INTEROP_TRACE", L'1');
     return enabled;
 }
 
@@ -197,9 +202,7 @@ bool CudaD3D11Interop::Enabled() noexcept {
         // pixel format or a failed registration -- falls back to the download path for
         // that stream. FFF3FP_CUDA_D3D11_INTEROP=0 restores the old unconditional
         // transfer, which is also the escape hatch if a driver misbehaves.
-        wchar_t value[8]{};
-        if (GetEnvironmentVariableW(L"FFF3FP_CUDA_D3D11_INTEROP", value, 8) == 0) return true;
-        return !(value[0] == L'0' && value[1] == L'\0');
+        return !CudaEnvStartsWith(L"FFF3FP_CUDA_D3D11_INTEROP", L'0');
     }();
     return enabled;
 }
@@ -231,11 +234,8 @@ CudaD3D11Interop::Status CudaD3D11Interop::Probe(const AVFrame* const frame,
     // device-side probe refuse every stream, which drives Render's CUDA fallback
     // (download + UploadPlanarFrames + latch) without needing a misbehaving
     // driver. Same family as FFF_CUDA_INTEROP_TRACE; off by default.
-    static const bool probeRefuse = [] {
-        wchar_t value[8]{};
-        return GetEnvironmentVariableW(L"FFF_CUDA_INTEROP_PROBE_REFUSE", value, 8) != 0 &&
-            value[0] == L'1' && value[1] == L'\0';
-    }();
+    static const bool probeRefuse =
+        CudaEnvStartsWith(L"FFF_CUDA_INTEROP_PROBE_REFUSE", L'1');
     if (probeRefuse) return Status::Refused;
     if (frame->format != AV_PIX_FMT_CUDA || frame->hw_frames_ctx == nullptr) return Status::Refused;
     const auto* const frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
@@ -255,6 +255,12 @@ CudaD3D11Interop::Status CudaD3D11Interop::Probe(const AVFrame* const frame,
     }
     // Remember the context even when the answer is no: a stream that will never
     // qualify must not pay a driver round trip on every frame.
+    // The registered planes belong to the OLD context and unregistering is
+    // context-bound, so drop them through Reset() BEFORE the context pointer
+    // below is replaced. Otherwise the later Reset() would push the NEW
+    // context, silently fail to release the old registrations, and Import
+    // would stay on the fallback arm for the rest of the stream.
+    if (state_->planeCount != 0) Reset();
     state_->probed = true;
     state_->probeOk = false;
     state_->context = cudaContext;
@@ -434,8 +440,17 @@ void CudaD3D11Interop::Reset() noexcept {
     // only one allowed to drop it.
     if (driver.ctxPushCurrent != nullptr && state_->context != nullptr &&
         driver.ctxPushCurrent(state_->context) == CudaSuccess) {
-        for (std::uint32_t plane = 0; plane < state_->planeCount; ++plane)
-            driver.graphicsUnregisterResource(state_->resources[plane]);
+        for (std::uint32_t plane = 0; plane < state_->planeCount; ++plane) {
+            // A per-plane failure means the registration is stale (its context
+            // moved on or died). It cannot be leaked indefinitely -- the driver
+            // drops registrations when their context is destroyed -- but the
+            // condition must not pass silently.
+            if (driver.graphicsUnregisterResource(state_->resources[plane]) != CudaSuccess &&
+                InteropTraceEnabled()) {
+                std::fprintf(stderr, "[cuda] reset unregister failed for plane %u; "
+                    "the registration dies with its context\n", plane);
+            }
+        }
         CUcontext popped = nullptr;
         driver.ctxPopCurrent(&popped);
     } else if (state_->planeCount != 0 && InteropTraceEnabled()) {
