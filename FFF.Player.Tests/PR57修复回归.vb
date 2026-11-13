@@ -144,10 +144,10 @@ Friend Module PR57修复回归
 
     ''' <summary>模块文本按 UTF-8 原样解码、NUL 截断；宿主只搬运不改写。</summary>
     Private Sub 测模块文本注入()
-        检查("Nothing 答空", 色彩变换模块接口.注入文本(Nothing), "")
-        检查("全零答空", 色彩变换模块接口.注入文本(New Byte() {0, 0, 0}), "")
-        检查("NUL 截断", 色彩变换模块接口.注入文本(New Byte() {65, 0, 66}), "A")
-        检查("UTF-8 原样", 色彩变换模块接口.注入文本(System.Text.Encoding.UTF8.GetBytes("模块自述文本")),
+        检查("Nothing 答空", 外部模块接口.注入文本(Nothing), "")
+        检查("全零答空", 外部模块接口.注入文本(New Byte() {0, 0, 0}), "")
+        检查("NUL 截断", 外部模块接口.注入文本(New Byte() {65, 0, 66}), "A")
+        检查("UTF-8 原样", 外部模块接口.注入文本(System.Text.Encoding.UTF8.GetBytes("模块自述文本")),
             "模块自述文本")
     End Sub
 

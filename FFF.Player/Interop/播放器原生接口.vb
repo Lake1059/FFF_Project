@@ -728,26 +728,9 @@ Friend Module 播放器原生接口
         End Try
     End Sub
 
-    ' DEPRECATED: the private color-extension module no longer exists, so this
-    ' callback is never invoked. Retained to mirror the native ABI.
-    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
-    Friend Delegate Function 原生授权对话框回调(代码UTF8 As IntPtr, 容量 As UInteger) As Integer
-
-    ' DEPRECATED: same reason; the matching exports are stubbed in the kernel.
-    Friend Const 扩展授权文本用途 As UInteger = 3UI
-
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetApiVersion() As UInteger
     End Function
-    ' DEPRECATED: stubbed in the kernel (always returns IntPtr.Zero).
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
-    Friend Function FFF3FP_GetColorExtensionStatusText(statusCode As UInteger, textKind As UInteger) As IntPtr
-    End Function
-    ' DEPRECATED: stubbed in the kernel (no-op).
-    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
-    Friend Sub FFF3FP_SetColorExtensionAuthorizationPrompt(callback As 原生授权对话框回调)
-    End Sub
-
     ' ---- 动态元数据注入与帧边数据环（外部色彩变换 kind=3 通路） ----
     ' 这三个导出按"可选导出"动态解析（与字幕流探测同一模式）：旧内核没有它们时
     ' 能力属性答 False，整条通路按"内核不支持"静默降级。若改用静态 DllImport，
@@ -755,24 +738,6 @@ Friend Module 播放器原生接口
 
     ' （帧/流边数据类型键与 FFF3FPDynamicMetadataPacket 镜像已随宿主泵删除：类型键
     '   属模块—内核的载荷语义，宿主不该持有字面值——语义完全由模块内部处理。）
-
-    ''' <summary>FFF3FPColorTransformPayload（431296 B）：3×3 线性光矩阵 + 33³×3 LUT。
-    ''' 域 0 = 表替换源的成分→RGB 转换；域 1 = 表作用在内核自己的转换之后。全零矩阵 = 恒等。</summary>
-    <StructLayout(LayoutKind.Sequential)>
-    Friend Structure 原生色彩变换载荷
-        Public 大小 As UInteger
-        Public 版本 As UInteger
-        Public 表分辨率 As UInteger
-        Public 表域 As UInteger
-        <MarshalAs(UnmanagedType.ByValArray, SizeConst:=9)>
-        Public 输出矩阵 As Single()
-        <MarshalAs(UnmanagedType.ByValArray, SizeConst:=107811)>
-        Public 查找表 As Single()
-    End Structure
-
-    ''' <summary>载荷结构的托管尺寸对账：与内核 static_assert（431296）必须同水，
-    ''' 否则每一帧都会被内核整批拒绝——在这里炸，比在每次注入时炸好。</summary>
-    Friend ReadOnly 色彩变换载荷尺寸 As Integer = Marshal.SizeOf(Of 原生色彩变换载荷)()
 
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Private Delegate Function 设置动态元数据原型(播放器 As IntPtr, 包数组 As IntPtr,

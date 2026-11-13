@@ -23,6 +23,7 @@
 - **3FP 本体包**：`FFF.Player.exe`、`FFF.Native.dll`、本仓第一方代码、libass 字幕栈与 .NET 运行依赖。**本体不内嵌、不随包 FFmpeg**；FFmpeg 是用户自备或另行分发的**外部/独立运行时**。
 - **完整运行时包（可选）**：仅在显式使用 `发布3FP.ps1 -IncludeExternalRuntime` 时，才会检查并复制 `avcodec-*` / `avformat-*` / `avutil-*` / `avfilter-*` / `swresample-*` / `swscale-*` 六个 DLL；该模式是“外部运行时打包”，不是 3FP 本体的一部分。
 - 默认 `发布3FP.ps1` 生成本体包，并在 staging 层拒绝任何 `av*.dll`；不得把开发输出目录 `bin` 直接当发布包分发。
+- 单文件形态（`tools/发布3FP单文件.ps1`）按项目分发策略只产出 `FFF.Player.exe`，不内嵌、不随包 `LICENSE.txt`、`NOTICE`、本文件或 `licenses/`；程序“关于”页提供本仓主页链接（<https://github.com/Lake1059/FFF_Project>），许可入口以仓库主页与 `LICENSING.md` 为准。散装本体包仍按上一款保留上述文件。
 - 当前树 `runtime/` 的实测构建串含 `--enable-gpl --enable-version3 --enable-libx264 --enable-libx265 --enable-libfdk-aac`，其中六个 DLL 还含 `--enable-nonfree`。`third_party/ffmpeg/` 有 `COPYING.LGPLv2.1`、`COPYING.LGPLv3`；GPLv2/GPLv3 原文已补到 `licenses/GPL-2.0-only.txt`、`licenses/GPL-3.0-only.txt`（完整运行时包适用）。
 - 因此：**本体包不得出现 FFmpeg DLL**；若另行分发完整运行时包，必须补齐对应 GPL/LGPL 文本、源码获取方式，并按 `--enable-nonfree` 构建的实际条件处理。`FFF_ALLOW_NONFREE=1` 只能作为显式承担后果的放行，不是正常公开 Release 开关。
 - FFmpeg 许可说明：<https://ffmpeg.org/legal.html>。
