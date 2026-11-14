@@ -2,6 +2,32 @@ Imports System.Runtime.InteropServices
 Imports System.Text.RegularExpressions
 Imports Microsoft.Win32
 
+''' <summary>默认输出端点的设备格式（WAVEFORMATEX / WAVEFORMATEXTENSIBLE）。
+''' 只描述 Windows 实际送给蓝牙驱动的 PCM 形态，不代表 A2DP codec。</summary>
+Public Class 音频输出格式
+    Public Property 已获取 As Boolean = False
+    Public Property 采样率 As Integer = 0
+    Public Property 声道数 As Integer = 0
+    Public Property 位深 As Integer = 0
+    Public Property 有效位深 As Integer = 0
+    Public Property 格式标签 As Integer = 0
+    Public Property 格式名称 As String = "未知"
+
+    Public ReadOnly Property 描述 As String
+        Get
+            If Not 已获取 Then Return "格式未知"
+            Dim 声道文本 As String
+            Select Case 声道数
+                Case 1 : 声道文本 = "单声道"
+                Case 2 : 声道文本 = "立体声"
+                Case Else : 声道文本 = 声道数.ToString() & " 声道"
+            End Select
+            Return (采样率 / 1000.0).ToString("0.#") & " kHz / " &
+                声道文本 & " / " & 位深.ToString() & " bit"
+        End Get
+    End Property
+End Class
+
 ''' <summary>当前默认输出端点的蓝牙音频画像。探测层只填事实，补偿量由纯算术策略计算。</summary>
 Public Class 蓝牙音频信息
     Public Property 是蓝牙 As Boolean = False
@@ -10,6 +36,7 @@ Public Class 蓝牙音频信息
     Public Property 协议名称 As String = ""
     Public Property 延迟下界毫秒 As Integer = 0
     Public Property 延迟上界毫秒 As Integer = 0
+    Public Property 输出格式 As 音频输出格式 = Nothing
     Public Property 设备名称 As String = ""
     Public Property 端点名称 As String = ""
     Public Property 设备地址 As String = ""
@@ -49,6 +76,12 @@ Public Module 蓝牙音频延迟策略
     Public Const 未知下界毫秒 As Integer = 150
     Public Const 未知上界毫秒 As Integer = 300
 
+    ''' <summary>端点 PCM 格式带来的主机侧额外开销（不是蓝牙 codec 延迟）。</summary>
+    Public Const 多声道格式开销毫秒 As Double = 8.0
+    Public Const 高采样率格式开销毫秒 As Double = 6.0
+    Public Const 高位深格式开销毫秒 As Double = 3.0
+    Public Const 最大格式开销毫秒 As Double = 20.0
+
     ''' <summary>协议级延迟区间（耳机侧，不含主机缓冲）。</summary>
     Public Function 协议区间(协议 As 蓝牙音频协议) As (下界 As Integer, 上界 As Integer)
         Select Case 协议
@@ -66,11 +99,24 @@ Public Module 蓝牙音频延迟策略
     End Function
 
     ''' <summary>按刷新率估计“媒体时钟到期 → 像素发光”的软件侧延迟：
-    ''' 2 个刷新周期（DWM 合成 + 扫描）+ 5ms（面板响应/调度余量），钳到 [10,60]ms。</summary>
+    ''' 2 个刷新周期（DWM 合成 + 扫描）+ 5ms（面板响应/调度余量）。
+    ''' 低刷新率必须保留完整两帧（24Hz 约 88ms），所以上限放到 100ms；
+    ''' 高刷新率下限仍为 10ms，避免 500Hz 以上把调度余量压没。</summary>
     Public Function 估计屏幕延迟毫秒(刷新率 As Integer) As Double
         Dim 赫兹 = If(刷新率 >= 24 AndAlso 刷新率 <= 500, 刷新率, 60)
         Dim 毫秒 = 2.0 * 1000.0 / 赫兹 + 5.0
-        Return Math.Max(10.0, Math.Min(60.0, 毫秒))
+        Return Math.Max(10.0, Math.Min(100.0, 毫秒))
+    End Function
+
+    ''' <summary>端点 PCM 格式的主机侧开销：多声道 downmix、96k/192k 重采样、
+    ''' 24bit 以上转换各占一项。未知格式返回 0，完全退回协议区间。</summary>
+    Public Function 格式开销毫秒(格式 As 音频输出格式) As Double
+        If 格式 Is Nothing OrElse Not 格式.已获取 Then Return 0.0
+        Dim 开销 As Double = 0.0
+        If 格式.声道数 > 2 Then 开销 += 多声道格式开销毫秒
+        If 格式.采样率 >= 88200 Then 开销 += 高采样率格式开销毫秒
+        If Math.Max(格式.位深, 格式.有效位深) >= 24 Then 开销 += 高位深格式开销毫秒
+        Return Math.Min(最大格式开销毫秒, 开销)
     End Function
 
     ''' <summary>计算应下发的 SetAudioDelay 值（100ns）。未启用、非蓝牙、未连接都返回 0。</summary>
@@ -88,7 +134,7 @@ Public Module 蓝牙音频延迟策略
         End If
         If 下界 <= 0 OrElse 上界 <= 0 Then Return 0
 
-        Dim 蓝牙毫秒 = (下界 + 上界) / 2.0
+        Dim 蓝牙毫秒 = (下界 + 上界) / 2.0 + 格式开销毫秒(信息.输出格式)
         Dim 屏幕毫秒 = 估计屏幕延迟毫秒(刷新率)
         Dim 微调 = Math.Max(-100, Math.Min(100, 额外提前量毫秒))
         Dim 延迟毫秒 = 屏幕毫秒 - 蓝牙毫秒 - 微调
@@ -102,8 +148,10 @@ Public Module 蓝牙音频延迟策略
 End Module
 
 ''' <summary>默认输出端点的蓝牙 profile 探测（Windows 用户态）。
-''' 能拿到：MMDevices 端点 → ContainerID → BTHENUM/BTHLE 服务节点 → Service / HardwareID。
-''' 拿不到：具体 codec（SBC/AAC/aptX/LDAC）与 AVDTP Delay Reporting；只输出协议级区间，不伪造 codec。</summary>
+''' 能拿到：MMDevices 端点 → ContainerID / DeviceState / PKEY_AudioEngine_DeviceFormat
+''' → BTHENUM/BTHLE 服务节点 → Service / HardwareID。
+''' 拿不到：具体 codec（SBC/AAC/aptX/LDAC）与 AVDTP Delay Reporting；只输出协议级区间，
+''' 端点 PCM 格式仅用于主机侧格式开销，不伪造 codec。</summary>
 Public Module 蓝牙音频检测器
     Private Const 渲染根 As String = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render"
     Private Const 枚举根 As String = "SYSTEM\CurrentControlSet\Enum"
@@ -115,6 +163,12 @@ Public Module 蓝牙音频检测器
     Private Const 容器标识键 As String = "{8c7ed206-3f8a-4827-b3ab-ae9e1faefc6c},2"
     Private Const 父设备旧键 As String = "{b3f8fa53-0004-438e-9003-51a46e139bfc},39"
     Private Const 父设备键 As String = "{4340a6c5-93fa-4706-972c-7b648008a5a7},8"
+    ' PKEY_AudioEngine_DeviceFormat：MMDevices 端点默认设备格式（VT_BLOB，前 8 字节为
+    ' PROPVARIANT 头，后面才是 WAVEFORMATEX）。
+    Private Const 设备格式键 As String = "{f19f064d-082c-4e27-bc73-6882a1bb8e4c},0"
+    Private Const 扩展格式标签 As Integer = &HFFFE
+    Private ReadOnly PCM子格式 As New Guid("00000001-0000-0010-8000-00AA00389B71")
+    Private ReadOnly Float子格式 As New Guid("00000003-0000-0010-8000-00AA00389B71")
 
     Private ReadOnly 服务标识正则 As New Regex(
         "\{([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\}",
@@ -135,6 +189,7 @@ Public Module 蓝牙音频检测器
         Public 设备描述 As String = ""
         Public 状态 As Integer = 0
         Public 父设备实例 As String = ""
+        Public 格式 As 音频输出格式 = Nothing
     End Class
 
     Private Class 蓝牙节点
@@ -168,23 +223,27 @@ Public Module 蓝牙音频检测器
         If 节点 IsNot Nothing Then Return 构建(端点, 节点)
 
         Dim 父设备 = 端点.父设备实例
-        If Not String.IsNullOrWhiteSpace(父设备) AndAlso
-            (父设备.IndexOf("BTHENUM", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-             父设备.IndexOf("BTHLE", StringComparison.OrdinalIgnoreCase) >= 0) Then
+        Dim 是蓝牙端点 = 父设备.IndexOf("BTHENUM", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+            父设备.IndexOf("BTHLE", StringComparison.OrdinalIgnoreCase) >= 0
+        If Not String.IsNullOrWhiteSpace(父设备) AndAlso 是蓝牙端点 Then
             节点 = 读取节点(父设备)
+            If 节点 Is Nothing Then 节点 = 从父设备推断节点(父设备, 端点)
             If 节点 IsNot Nothing Then Return 构建(端点, 节点)
         End If
 
         Dim 结果 As New 蓝牙音频信息 With {
-            .是蓝牙 = False,
+            .是蓝牙 = 是蓝牙端点,
             .已连接 = 端点.状态 = 1,
-            .协议 = 蓝牙音频协议.无,
+            .协议 = If(是蓝牙端点, 蓝牙音频协议.未知, 蓝牙音频协议.无),
+            .输出格式 = 端点.格式,
             .端点标识 = 端点标识,
             .端点名称 = 端点.友好名称,
             .端点状态 = 端点.状态,
-            .说明 = If(端点.容器标识.Length > 0,
-                "端点容器未匹配到蓝牙服务节点（可能不是蓝牙设备）",
-                "端点没有 ContainerID（无法判定是否为蓝牙）")
+            .说明 = If(是蓝牙端点,
+                "已由父设备识别为蓝牙端点，但服务节点当前不可用；按未知蓝牙协议兜底",
+                If(端点.容器标识.Length > 0,
+                    "端点容器未匹配到蓝牙服务节点（可能不是蓝牙设备）",
+                    "端点没有 ContainerID（无法判定是否为蓝牙）"))
         }
         Return 结果
     End Function
@@ -222,6 +281,7 @@ Public Module 蓝牙音频检测器
             .协议名称 = 协议名称(协议, 节点.服务),
             .延迟下界毫秒 = 区间.下界,
             .延迟上界毫秒 = 区间.上界,
+            .输出格式 = 端点.格式,
             .设备名称 = 型号,
             .端点名称 = 端点.友好名称,
             .设备地址 = 节点.地址,
@@ -290,7 +350,8 @@ Public Module 蓝牙音频检测器
                         .友好名称 = 名称,
                         .设备描述 = 描述,
                         .状态 = 状态,
-                        .父设备实例 = 父设备
+                        .父设备实例 = 父设备,
+                        .格式 = 读取音频格式(属性键.GetValue(设备格式键))
                     }
                 End Using
             End Using
@@ -309,6 +370,58 @@ Public Module 蓝牙音频检测器
         End If
         Dim 文本 = 读取字符串(原始)
         Return If(文本 Is Nothing, "", 文本.Trim().ToUpperInvariant())
+    End Function
+
+    ''' <summary>解析 MMDevices 的 PKEY_AudioEngine_DeviceFormat。
+    ''' 原始 blob 前 8 字节是 PROPVARIANT 头，之后是 WAVEFORMATEX；
+    ''' 扩展格式在 +18 读有效位深、+24 读子格式 GUID。</summary>
+    Private Function 读取音频格式(原始 As Object) As 音频输出格式
+        If Not TypeOf 原始 Is Byte() Then Return Nothing
+        Dim 字节 = DirectCast(原始, Byte())
+        Const 头长度 As Integer = 8
+        If 字节.Length < 头长度 + 18 Then Return Nothing
+
+        Dim 标签 = BitConverter.ToUInt16(字节, 头长度)
+        Dim 声道 = BitConverter.ToUInt16(字节, 头长度 + 2)
+        Dim 采样 = BitConverter.ToUInt32(字节, 头长度 + 4)
+        Dim 位深 = BitConverter.ToUInt16(字节, 头长度 + 14)
+        If 声道 = 0 OrElse 采样 = 0 OrElse 位深 = 0 Then Return Nothing
+
+        Dim 有效位深 = 位深
+        Dim 名称 = 格式标签名称(标签)
+        If 标签 = 扩展格式标签 AndAlso 字节.Length >= 头长度 + 40 Then
+            Dim 扩展有效位 = BitConverter.ToUInt16(字节, 头长度 + 18)
+            If 扩展有效位 > 0 Then 有效位深 = 扩展有效位
+            Dim 子格式字节(15) As Byte
+            Array.Copy(字节, 头长度 + 24, 子格式字节, 0, 16)
+            Dim 子格式 As New Guid(子格式字节)
+            名称 = 子格式名称(子格式)
+        End If
+
+        Return New 音频输出格式 With {
+            .已获取 = True,
+            .采样率 = CInt(采样),
+            .声道数 = CInt(声道),
+            .位深 = CInt(位深),
+            .有效位深 = CInt(有效位深),
+            .格式标签 = CInt(标签),
+            .格式名称 = 名称
+        }
+    End Function
+
+    Private Function 格式标签名称(标签 As Integer) As String
+        Select Case 标签
+            Case 1 : Return "PCM"
+            Case 3 : Return "Float"
+            Case 扩展格式标签 : Return "Extensible"
+            Case Else : Return "Codec 0x" & 标签.ToString("X4")
+        End Select
+    End Function
+
+    Private Function 子格式名称(子格式 As Guid) As String
+        If 子格式 = PCM子格式 Then Return "PCM"
+        If 子格式 = Float子格式 Then Return "Float"
+        Return "Extensible"
     End Function
 
     Private Function 最后标识(文本 As String) As String
@@ -366,12 +479,58 @@ Public Module 蓝牙音频检测器
     End Function
 
     Private Function 读取节点(实例路径 As String) As 蓝牙节点
+        Dim 路径 = 规范化实例路径(实例路径)
+        If 路径.Length = 0 Then Return Nothing
         Using 根 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64)
-            Using 键 = 根.OpenSubKey(枚举根 & "\" & 实例路径)
+            Using 键 = 根.OpenSubKey(枚举根 & "\" & 路径)
                 If 键 Is Nothing Then Return Nothing
-                Return 读取节点键(键, 实例路径)
+                Return 读取节点键(键, 路径)
             End Using
         End Using
+    End Function
+
+    ''' <summary>MMDevices 的父设备实例常带 "{1}." 前缀（如 {1}.BTHENUM\...）。
+    ''' 去掉前缀，只保留从 BTHENUM\ / BTHLE\ 开始的枚举路径。</summary>
+    Private Function 规范化实例路径(实例路径 As String) As String
+        If String.IsNullOrWhiteSpace(实例路径) Then Return ""
+        Dim 文本 = 实例路径.Trim()
+        For Each 根名 In {蓝牙枚举根, 蓝牙低功耗根}
+            Dim 索引 = 文本.IndexOf(根名 & "\", StringComparison.OrdinalIgnoreCase)
+            If 索引 >= 0 Then Return 文本.Substring(索引)
+        Next
+        Return 文本
+    End Function
+
+    ''' <summary>服务节点在设备未连接时可能暂时不存在；此时从父设备路径的服务 UUID
+    ''' 推断协议，至少保留“是蓝牙/未连接”的事实，不让设置页误报非蓝牙。</summary>
+    Private Function 从父设备推断节点(父设备 As String, 端点 As 端点记录) As 蓝牙节点
+        Dim 路径 = 规范化实例路径(父设备)
+        If 路径.Length = 0 Then Return Nothing
+        If Not (路径.StartsWith(蓝牙枚举根 & "\", StringComparison.OrdinalIgnoreCase) OrElse
+                路径.StartsWith(蓝牙低功耗根 & "\", StringComparison.OrdinalIgnoreCase)) Then Return Nothing
+
+        Dim 服务 = 推断服务(路径)
+        If 服务.Length = 0 Then Return Nothing
+        Dim 叶节点 = 路径.Substring(路径.LastIndexOf("\"c) + 1)
+        Return New 蓝牙节点 With {
+            .容器标识 = 端点.容器标识,
+            .服务 = 服务,
+            .硬件标识 = 路径,
+            .友好名称 = 端点.友好名称,
+            .实例路径 = 路径,
+            .地址 = 格式化地址(叶节点)
+        }
+    End Function
+
+    Private Function 推断服务(路径 As String) As String
+        If 路径.StartsWith(蓝牙低功耗根 & "\", StringComparison.OrdinalIgnoreCase) Then Return "BthLEAudio"
+        Dim 标识 = 提取服务标识(路径)
+        If 标识 IsNot Nothing Then
+            Dim 大写 = 标识.ToUpperInvariant()
+            If 大写 = 标识A2DP Then Return "BthA2dp"
+            If 大写 = 标识HFP OrElse 大写 = 标识HFPAG OrElse 大写 = 标识HSP Then Return "BthHFEnum"
+        End If
+        Return ""
     End Function
 
     Private Function 读取节点键(键 As RegistryKey, 实例路径 As String) As 蓝牙节点

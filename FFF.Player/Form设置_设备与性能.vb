@@ -311,7 +311,10 @@ Public Class Form设置_设备与性能
         Dim 文本 As String
         If 信息.是蓝牙 Then
             Dim 设备 = If(String.IsNullOrWhiteSpace(信息.设备名称), "蓝牙音频", 信息.设备名称)
-            文本 = 设备 & "｜" & 信息.协议名称 & "｜" &
+            Dim 格式 = If(信息.输出格式 IsNot Nothing AndAlso 信息.输出格式.已获取,
+                信息.输出格式.描述, "格式未知")
+            文本 = 设备 & "｜" & 信息.协议名称 & "｜" & 格式 & "｜" &
+                CStr(刷新率) & " Hz｜" &
                 CStr(信息.延迟下界毫秒) & "–" & CStr(信息.延迟上界毫秒) & " ms｜" & 信息.说明
             If Not 信息.已连接 Then
                 文本 &= "｜未连接，不补偿"
