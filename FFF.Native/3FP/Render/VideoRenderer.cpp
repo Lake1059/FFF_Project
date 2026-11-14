@@ -50,6 +50,11 @@ extern "C" {
 
 using Microsoft::WRL::ComPtr;
 
+// Kernel log sink (PlayerApi.cpp). Declared at global scope with external linkage, the
+// same way PrefetchService/PlacementPolicy reach it: a declaration inside the unnamed
+// namespace below would bind to a different, internal-linkage entity.
+extern void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept;
+
 namespace {
 template<class T> void ReleaseCom(T*& resource) noexcept {
     if (resource != nullptr) { resource->Release(); resource = nullptr; }
@@ -739,8 +744,10 @@ float3 DecodeYuv(float y,float2 c) {
 
 float3 To2020(float3 v) { return mul(float3x3(0.627404,0.329283,0.043313, 0.069097,0.919540,0.011362, 0.016392,0.088013,0.895595),v); }
 float3 To709(float3 v) { return mul(float3x3(1.660491,-0.587641,-0.072850, -0.124550,1.132900,-0.008349, -0.018151,-0.100579,1.118730),v); }
-// Display P3 / DCI-P3 (D65) to linear Rec.709. Not clamped: P3 red maps to a
+// Display P3 (D65) to linear Rec.709. Not clamped: P3 red maps to a
 // negative green and blue, which the FP16 scRGB swap chain carries verbatim.
+// DCI-P3 is the same primaries under the cinema white point and has its own
+// Bradford-adapted matrix below (DciTo709), selected by Gamut==3.
 float3 P3To709(float3 v) { return mul(float3x3(1.224810,-0.224970,-0.000025, -0.042043,1.042084,0.000018, -0.019642,-0.078649,1.098527),v); }
 // DCI-P3 uses its cinema white point; Bradford-adapt to D65 before Rec.709.
 float3 DciTo709(float3 v) { return mul(float3x3(1.157516406,-0.154962378,-0.002554028, -0.041500072,1.045567923,-0.004067852, -0.018050039,-0.078578273,1.096628312),v); }
@@ -1372,16 +1379,33 @@ constexpr auto HdrSupportProbeCacheDuration = std::chrono::milliseconds(750);
 // chain re-creation each time (see OutputSupportsHdr).
 constexpr auto ScRgbChainRejectionBackoff = std::chrono::seconds(10);
 
-void ResizeVideoConversionBuffer(std::vector<std::uint8_t>& buffer,
-    const std::size_t requiredBytes) {
-    const auto capacity = buffer.capacity();
-    if (requiredBytes < capacity / 2 &&
-        capacity - requiredBytes > VideoConversionBufferSlackBytes) {
-        std::vector<std::uint8_t> replacement(requiredBytes);
-        buffer.swap(replacement);
-        return;
+// Every staging buffer here is resized on the presentation path, inside Render(), which
+// is noexcept: a std::bad_alloc escaping resize() is a std::terminate -- an 8K frame
+// turning into a process exit instead of an error return. Report it instead of throwing,
+// and keep the "shrink only when it really pays" policy the byte buffer always had.
+// The slack comparison is expressed in elements so one constant serves both buffers.
+template <class Element>
+bool ResizeStagingBuffer(std::vector<Element>& buffer,
+    const std::size_t requiredElements) noexcept {
+    constexpr std::size_t slackElements = VideoConversionBufferSlackBytes / sizeof(Element) > 0 ?
+        VideoConversionBufferSlackBytes / sizeof(Element) : 1;
+    try {
+        const auto capacity = buffer.capacity();
+        if (requiredElements < capacity / 2 && capacity - requiredElements > slackElements) {
+            std::vector<Element> replacement(requiredElements);
+            buffer.swap(replacement);
+            return true;
+        }
+        buffer.resize(requiredElements);
+        return true;
+    } catch (...) {
+        return false;
     }
-    buffer.resize(requiredBytes);
+}
+
+bool ResizeVideoConversionBuffer(std::vector<std::uint8_t>& buffer,
+    const std::size_t requiredBytes) noexcept {
+    return ResizeStagingBuffer(buffer, requiredBytes);
 }
 
 struct ShaderSettings {
@@ -7378,8 +7402,27 @@ std::uint32_t PlayerVideoRenderer::ResolveDecodeTransfer(
     //   1) Otherwise follow the frame's own color_trc when it declares one.
     //   2) Fall back to the format-based inference for frames that declare
     //      nothing (previous behaviour).
-    if (lastFrameDeclaresTrc_)
+    //
+    // The frame tag wins because it is the only place a cICP chunk (PNG/AVIF) or a
+    // per-picture VUI can state its own encoding -- that is the whole point of the
+    // explicit-tag fix. It must not win when it *contradicts* a stream already known
+    // to be HDR: a PQ/HLG stream cannot also be BT.709- or sRGB-encoded, and a remux
+    // that overwrote the VUI with a display-referred SDR transfer would then push PQ
+    // code values through the 709 curve -- the entire picture goes dark with lifted
+    // blacks, which is far worse than the colour error the tag was meant to prevent.
+    // Only the display-referred transfers are treated as contradictions; linear and
+    // 240M are left to the tag because they are plausible HDR encodings.
+    const bool displayReferredSdrTag = lastTransferFromFrame_ == 0u ||
+        lastTransferFromFrame_ == 4u || lastTransferFromFrame_ == 5u ||
+        lastTransferFromFrame_ == 6u || lastTransferFromFrame_ == 8u;
+    if (lastFrameDeclaresTrc_ &&
+        !(hdrState.format != FFF3FPHdrFormat::Sdr && displayReferredSdrTag))
         return lastTransferFromFrame_;
+    if (lastFrameDeclaresTrc_ && hdrState.format != FFF3FPHdrFormat::Sdr &&
+        !warnedSdrTagOnHdr_.exchange(true, std::memory_order_relaxed)) {
+        FFF3FP_KernelLogImpl("CICP: frame declares a display-referred SDR transfer on an "
+            "HDR stream; using the stream's own encoding (PQ/HLG) instead of the tag.");
+    }
     return hdrState.format == FFF3FPHdrFormat::Hlg ? 2u :
         (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
 }
@@ -7615,7 +7658,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     const auto originalFormat = static_cast<AVPixelFormat>(frame->format);
     const bool planarFloat = originalFormat == AV_PIX_FMT_GBRPF16LE || originalFormat == AV_PIX_FMT_GBRPF32LE;
     const bool grayFloat = originalFormat == AV_PIX_FMT_GRAYF16LE || originalFormat == AV_PIX_FMT_GRAYF32LE;
-    std::vector<float> packedFloat;
     AVFrame packedFrame{};
     if (planarFloat || grayFloat) {
         const bool half = originalFormat == AV_PIX_FMT_GBRPF16LE || originalFormat == AV_PIX_FMT_GRAYF16LE;
@@ -7625,7 +7667,13 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
             SetError("The floating frame dimensions exceed the upload buffer limits.");
             return FFFResult::InvalidArgument;
         }
-        packedFloat.resize(width * height * 4);
+        // Member buffer, reused across frames: at 8K this is 530 MB, and the previous
+        // per-frame allocation both paid that cost every frame and, on failure, threw
+        // out of a noexcept function.
+        if (!ResizeStagingBuffer(packedFloat_, width * height * 4)) {
+            SetError("Could not allocate the packed floating-point upload buffer.");
+            return FFFResult::NotSupported;
+        }
         const auto component = [frame, half](const int plane, const std::size_t x, const std::size_t y) {
             const auto* row = frame->data[plane] + static_cast<std::ptrdiff_t>(y) * frame->linesize[plane];
             if (half) {
@@ -7639,7 +7687,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         };
         for (std::size_t y = 0; y < height; ++y)
             for (std::size_t x = 0; x < width; ++x) {
-                auto* rgba = packedFloat.data() + (y * width + x) * 4;
+                auto* rgba = packedFloat_.data() + (y * width + x) * 4;
                 rgba[0] = component(planarFloat ? 2 : 0, x, y);
                 rgba[1] = component(0, x, y);
                 rgba[2] = component(planarFloat ? 1 : 0, x, y);
@@ -7648,8 +7696,12 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         // Shallow metadata view: no AVFrame ownership is transferred or released here.
         packedFrame = *frame;
         packedFrame.format = AV_PIX_FMT_RGBAF32LE;
-        packedFrame.data[0] = reinterpret_cast<std::uint8_t*>(packedFloat.data());
+        packedFrame.data[0] = reinterpret_cast<std::uint8_t*>(packedFloat_.data());
         packedFrame.linesize[0] = static_cast<int>(width * 16);
+        // The shallow copy left extended_data pointing at this frame's original planes.
+        // Nothing in the present path reads it today, but a frame view whose data[0]
+        // and extended_data[0] disagree is a booby trap for the next caller.
+        packedFrame.extended_data = packedFrame.data;
         frame = &packedFrame;
     }
     const auto hdrState = hdrProcessor_.ProcessFrame(
@@ -7666,14 +7718,23 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // Captured here, before any early return: the refresh path re-resolves the
     // transfer from these, and pairing this frame's format with the previous
     // frame's trc is exactly what the frame's own declaration is there to prevent.
+    // An unrecognised primaries or transfer code is not a reason to refuse the picture.
+    // Refusing one costs the whole file: PlayerSession retries the frame through the
+    // software decoder and then fails the session, so a single unfamiliar tag turns
+    // "colours slightly off" into "will not open". Degrade to the defaults that were in
+    // force before the tags were read (709 for SDR, 2020 for HDR) and say so once.
+    // Hard failure stays reserved for the YUV matrix below: an unknown component
+    // transform has no approximated inverse, so there is nothing honest to fall back to.
+    bool supportedPrimaries = true;
     switch (frame->color_primaries) {
     case AVCOL_PRI_RESERVED0: case AVCOL_PRI_UNSPECIFIED: case AVCOL_PRI_BT709:
     case AVCOL_PRI_BT470BG: case AVCOL_PRI_SMPTE170M: case AVCOL_PRI_SMPTE240M:
     case AVCOL_PRI_BT2020: case AVCOL_PRI_SMPTE431: case AVCOL_PRI_SMPTE432: break;
     default:
-        SetError("The source color primaries are not supported by this display path.");
-        return FFFResult::NotSupported;
+        supportedPrimaries = false;
+        break;
     }
+    bool supportedTransfer = true;
     switch (frame->color_trc) {
     case AVCOL_TRC_RESERVED0: case AVCOL_TRC_UNSPECIFIED: case AVCOL_TRC_BT709:
     case AVCOL_TRC_GAMMA22: case AVCOL_TRC_GAMMA28: case AVCOL_TRC_SMPTE170M:
@@ -7681,10 +7742,17 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     case AVCOL_TRC_BT2020_10: case AVCOL_TRC_BT2020_12:
     case AVCOL_TRC_SMPTE2084: case AVCOL_TRC_ARIB_STD_B67: break;
     default:
-        SetError("The source transfer function is not supported by this display path.");
-        return FFFResult::NotSupported;
+        supportedTransfer = false;
+        break;
     }
-    const bool frameDeclaresTrc = frame->color_trc != AVCOL_TRC_UNSPECIFIED && frame->color_trc != AVCOL_TRC_RESERVED0;
+    if (!supportedPrimaries && !warnedUnsupportedPrimaries_.exchange(true, std::memory_order_relaxed))
+        FFF3FP_KernelLogImpl("CICP: unsupported color primaries ignored; using the default "
+            "gamut (Rec.709 for SDR, Rec.2020 for HDR).");
+    if (!supportedTransfer && !warnedUnsupportedTransfer_.exchange(true, std::memory_order_relaxed))
+        FFF3FP_KernelLogImpl("CICP: unsupported transfer function ignored; using the "
+            "stream's declared encoding instead of the tag.");
+    const bool frameDeclaresTrc = supportedTransfer &&
+        frame->color_trc != AVCOL_TRC_UNSPECIFIED && frame->color_trc != AVCOL_TRC_RESERVED0;
     auto transferFromFrame = 0u;
     if (frameDeclaresTrc) {
         switch (frame->color_trc) {
@@ -7702,8 +7770,12 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     lastTransferFromFrame_ = transferFromFrame;
     // YUV matrix selection stays a property of the transfer/colorspace pair;
     // the shader's gamut switch is driven by the primaries instead.
-    const auto source2020 = hdrState.format != FFF3FPHdrFormat::Sdr || IsRec2020(frame);
-    const auto gamut = ResolveSourceGamut(frame, hdrState.format != FFF3FPHdrFormat::Sdr);
+    const bool hdrSource = hdrState.format != FFF3FPHdrFormat::Sdr;
+    const auto source2020 = hdrSource || IsRec2020(frame);
+    // An ignored (unsupported) primaries code must not silently pin an HDR stream to the
+    // Rec.709 gamut, which is what ResolveSourceGamut's "any specified primaries -> 0"
+    // rule would otherwise do.
+    const auto gamut = !supportedPrimaries && hdrSource ? 1u : ResolveSourceGamut(frame, hdrSource);
     auto input = DescribeInput(static_cast<AVPixelFormat>(frame->format));
     const auto d3d11Frame = frame->format == AV_PIX_FMT_D3D11;
     const auto cudaFrame = frame->format == AV_PIX_FMT_CUDA;
@@ -7761,10 +7833,10 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         return FFFResult::Success;
     }
     if (!directYuv && !floatRgb) {
-        const auto* sourceDescriptor = av_pix_fmt_desc_get(
+        const auto* yuvDescriptor = av_pix_fmt_desc_get(
             static_cast<AVPixelFormat>(frame->format));
-        if (sourceDescriptor != nullptr && sourceDescriptor->nb_components > 0)
-            input.bitDepth = std::max(8, sourceDescriptor->comp[0].depth);
+        if (yuvDescriptor != nullptr && yuvDescriptor->nb_components > 0)
+            input.bitDepth = std::max(8, yuvDescriptor->comp[0].depth);
         const auto conversionStart = std::chrono::steady_clock::now();
         // CPU pixel conversion does not touch D3D state. Keeping it outside the
         // immediate-context critical section lets the 60 Hz overlay presenter
@@ -7809,8 +7881,11 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
             SetError("FFmpeg could not configure the frame color matrix and range.");
             return FFFResult::FfmpegFailure;
         }
-        ResizeVideoConversionBuffer(convertedRgb_,
-            static_cast<std::size_t>(uploadWidth) * uploadHeight * bytesPerPixel);
+        if (!ResizeVideoConversionBuffer(convertedRgb_,
+            static_cast<std::size_t>(uploadWidth) * uploadHeight * bytesPerPixel)) {
+            SetError("Could not allocate the video conversion buffer.");
+            return FFFResult::NotSupported;
+        }
         std::uint8_t* outputData[] = { convertedRgb_.data(), nullptr, nullptr, nullptr };
         int outputLines[] = { static_cast<int>(uploadWidth * bytesPerPixel), 0, 0, 0 };
         if (sws_scale(scaler_, frame->data, frame->linesize, 0, frame->height, outputData, outputLines) <= 0) {
@@ -8060,6 +8135,23 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         settings.transfer = 3u; // absolute scRGB units: 1.0 = 80 nits
         settings.gamut = 0u;
     }
+    // Planar float RGB has no CICP of its own and only a few decoders deliver it:
+    // FFmpeg's EXR and PFM paths hand out gbrpf32le/gbrapf32le, and both are linear
+    // light by definition. With nothing declared, "unspecified transfer" previously
+    // fell through as BT.709-coded, so linear samples were read through a ~2.2 curve:
+    // 18% grey came out at 46/255 instead of 118/255 (washed out), and on an HDR
+    // output the same frame was multiplied by the paper white and went dark.
+    // An explicit tag always wins; this only fills the silence, and only for the
+    // planar shapes nothing else produces. In this tree FFmpeg's EXR decoder already
+    // reports linear itself (ffprobe: color_transfer=linear), so EXR does not take
+    // this branch; it is a backstop for PFM-shaped input and for decoder builds that
+    // do not propagate the tag, not the reason EXR looks right today.
+    if (floatRgb && planarFloat && !frameDeclaresTrc &&
+        (frame->color_primaries == AVCOL_PRI_UNSPECIFIED ||
+            frame->color_primaries == AVCOL_PRI_RESERVED0)) {
+        settings.transfer = 7u; // linear light: relative units, 1.0 = display white
+        settings.gamut = 0u;
+    }
     // Stash the frame's decode transfer for the TrueHDR gate and the draw
     // baseline. The memcpy below lands this value in cachedVideoSettings_, but
     // DrawWithShader's TrueHDR re-tag later overwrites THAT field with 1 (PQ)
@@ -8080,6 +8172,14 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         actualMode_ != FFF3FPColorMode::MapToHdr &&
         actualMode_ != FFF3FPColorMode::RawHdrAsSdr &&
         BuildDynamicToneSettings(hdrState.dynamic, dynamicSettings, dynamicCurves);
+    // The gate result is applied to the buffer that is actually uploaded, the same way
+    // RefreshHdrShaderInputs does it, instead of being computed and dropped: a variable
+    // that decides nothing reads like a gate that is not enforced (and is what the
+    // compiler was reporting as C4189).
+    if (!useDynamicCurve) {
+        dynamicSettings = DynamicShaderSettings{};
+        dynamicCurves = {};
+    }
     // Upload unconditionally so the GPU state never keeps a previous frame's
     // curve when this frame has none: the buffer and texture are bound on every
     // draw, and a stale table with enabled==0 would still be sampled if the
@@ -8158,9 +8258,10 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         settings.cScale = 1.0f;
     }
     YuvCoefficients(frame, source2020, settings.kr, settings.kb);
-    // DXGI exposes NV12/P010 processor color spaces with left chroma siting.
-    // Hardware-decoded surfaces without bitstream siting metadata follow that
-    // API convention so VP and shader A/B paths sample the same phase.
+    // DXGI exposes NV12/P010 processor color spaces with left chroma siting, and that is
+    // the phase every decoder/hardware surface without bitstream siting metadata is
+    // assumed to follow -- software planes included, so VP and shader A/B paths sample
+    // the same phase.
     const auto chromaLocation = frame->chroma_location != AVCHROMA_LOC_UNSPECIFIED
         ? frame->chroma_location
         : IsJpegFullRangeFormat(static_cast<AVPixelFormat>(frame->format)) ? AVCHROMA_LOC_CENTER
