@@ -225,6 +225,15 @@ FFFResult FFF3FP_GetImageInfo(const FFF3FPHandle player, FFF3FPImageInfo* info) 
     return player && info ? static_cast<PlayerSession*>(player)->GetImageInfo(*info)
         : FFFResult::InvalidArgument;
 }
+FFFResult FFF3FP_SetRawProcessingOptions(const FFF3FPHandle player,
+    const FFF3FPRawOptions* options) noexcept {
+    return player && options ? static_cast<PlayerSession*>(player)->SetRawProcessingOptions(*options)
+        : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_GetRawInfo(const FFF3FPHandle player, FFF3FPRawInfo* info) noexcept {
+    return player && info ? static_cast<PlayerSession*>(player)->GetRawInfo(*info)
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_SetAudioEndpoint(const FFF3FPHandle player, const char* endpoint) noexcept { return player ? static_cast<PlayerSession*>(player)->SetAudioEndpoint(endpoint) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetAudioExclusiveMode(const FFF3FPHandle player, const std::uint32_t exclusive) noexcept {
     return player && exclusive <= 1 ? static_cast<PlayerSession*>(player)->SetAudioExclusiveMode(exclusive != 0)
