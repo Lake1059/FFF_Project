@@ -37,6 +37,9 @@ Public Class Form1
 
     Private 画面控件 As 播放器画面控件
     Private 播放控制器 As 播放器控制器
+    ' 蓝牙端点/协议可能在播放中切换（耳机回连、A2DP 与 HFP 互换），500ms 复查一次默认端点；
+    ' 只有补偿值变化才真正下发，空闲时只探测不 re-seek。
+    Private 蓝牙延迟计时器 As System.Windows.Forms.Timer
     Private 界面呈现器 As 播放器界面呈现器
     Private 窗口布局控制器 As 播放器窗口布局控制器
     Private 字幕图层呈现器 As 播放器字幕叠加呈现器
@@ -223,6 +226,7 @@ Public Class Form1
             Function() 画面控件.输出窗口句柄, SynchronizationContext.Current,
             CType(设置.实例对象.解码方式, 解码模式))
         前后预取控制器 = New 前后预取控制器(播放列表数据, Function() 播放控制器.当前媒体路径)
+        启动蓝牙延迟计时器()
         显示器唤醒 = New 显示器唤醒请求()
         播放控制器.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
         播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
@@ -729,6 +733,35 @@ Public Class Form1
         End If
     End Sub
 
+    Private Sub 启动蓝牙延迟计时器()
+        停止蓝牙延迟计时器()
+        蓝牙延迟计时器 = New System.Windows.Forms.Timer With {.Interval = 500}
+        AddHandler 蓝牙延迟计时器.Tick, AddressOf 蓝牙延迟计时器_Tick
+        蓝牙延迟计时器.Start()
+    End Sub
+
+    Private Sub 停止蓝牙延迟计时器()
+        If 蓝牙延迟计时器 IsNot Nothing Then
+            蓝牙延迟计时器.Stop()
+            RemoveHandler 蓝牙延迟计时器.Tick, AddressOf 蓝牙延迟计时器_Tick
+            蓝牙延迟计时器.Dispose()
+            蓝牙延迟计时器 = Nothing
+        End If
+    End Sub
+
+    Private Sub 蓝牙延迟计时器_Tick(sender As Object, e As EventArgs)
+        Try
+            播放控制器?.应用蓝牙音频延迟()
+        Catch ex As Exception
+            Debug.WriteLine("蓝牙音频延迟：轮询异常（已忽略）：" & ex.GetType().Name)
+        End Try
+    End Sub
+
+    ' 设置页改开关/额外提前量后立即生效；不等下一次 500ms 轮询。
+    Friend Sub 应用蓝牙音频延迟()
+        播放控制器?.应用蓝牙音频延迟()
+    End Sub
+
     ''' <summary>输码闭环：输入 → 提交 → 错了再来（有上限）→ 接受或放弃。码不落日志。
     ''' 只由 <see cref="解锁轮询_Tick"/> 调用（每进程至多一次）。</summary>
     Private Sub 解锁对话框循环()
@@ -792,6 +825,7 @@ Public Class Form1
         播放列表数据.取消自动扫描()
         前后预取控制器?.释放()
         停止解锁轮询()
+        停止蓝牙延迟计时器()
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
