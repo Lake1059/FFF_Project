@@ -15,6 +15,7 @@ Friend Enum 文件关联类别
     常见图片
     不常见图片
     老旧图片
+    相机RAW
 End Enum
 
 Friend NotInheritable Class 文件关联选项
@@ -27,6 +28,7 @@ Friend NotInheritable Class 文件关联选项
     Public Property 关联常见图片 As Boolean
     Public Property 关联不常见图片 As Boolean
     Public Property 关联老旧图片 As Boolean
+    Public Property 关联相机RAW As Boolean
 
     Friend Shared Function 从设置(值 As 设置) As 文件关联选项
         ArgumentNullException.ThrowIfNull(值)
@@ -39,7 +41,8 @@ Friend NotInheritable Class 文件关联选项
             .关联老旧音频 = 值.关联老旧音频,
             .关联常见图片 = 值.关联常见图片,
             .关联不常见图片 = 值.关联不常见图片,
-            .关联老旧图片 = 值.关联老旧图片
+            .关联老旧图片 = 值.关联老旧图片,
+            .关联相机RAW = 值.关联相机RAW
         }
     End Function
 
@@ -54,6 +57,7 @@ Friend NotInheritable Class 文件关联选项
             Case 文件关联类别.常见图片 : Return 关联常见图片
             Case 文件关联类别.不常见图片 : Return 关联不常见图片
             Case 文件关联类别.老旧图片 : Return 关联老旧图片
+            Case 文件关联类别.相机RAW : Return 关联相机RAW
             Case Else : Throw New ArgumentOutOfRangeException(NameOf(类别))
         End Select
     End Function
@@ -445,14 +449,16 @@ Friend NotInheritable Class 文件关联管理器
         Return True
     End Function
 
-    ' 列表顺序即设置页分组：视频 → 音频 → 图片，每档再按 常见 / 不常见 / 老旧 分级。
+    ' 列表顺序即设置页分组：视频 → 音频 → 图片 → 相机 RAW，每档再按 常见 / 不常见 / 老旧 分级。
     ' 图片三档全部默认不勾选（与视频/音频一致，由用户在设置页主动委托）。
     ' 图片档的入选判据是「随包内核实测能打开且呈现≥1帧」（tools/cover_probe.sh），
     ' 不是「FFmpeg 名义上有解码器」——实测不过的 .dib / .pcd 已按此判据排除。
+    ' 相机 RAW 档的单一条目由 Raw格式.扩展名列表 生成，必须与内核
+    ' RawStillSource::LooksLikeRawPath 的扩展名表保持一致；不能只按 LibRaw 名义支持扩张。
     ' ⚠ 分组说明只能写在函数上方：注释行会截断多行数组初始化器的隐式续行，
     '   写在列表中间（上一项以逗号结尾之后）会报 BC30201/BC30035。
     Private Shared Function 创建文件类型() As IReadOnlyList(Of 文件类型定义)
-        Return New 文件类型定义() {
+        Dim 结果 As New List(Of 文件类型定义) From {
             New 文件类型定义(文件关联类别.常见视频, ".mp4", "video/mp4", "video"),
             New 文件类型定义(文件关联类别.常见视频, ".mkv", "video/x-matroska", "video"),
             New 文件类型定义(文件关联类别.常见视频, ".mov", "video/quicktime", "video"),
@@ -538,6 +544,11 @@ Friend NotInheritable Class 文件关联管理器
             New 文件类型定义(文件关联类别.老旧图片, ".ras", "image/x-sun-raster", "image"),
             New 文件类型定义(文件关联类别.老旧图片, ".sgi", "image/x-sgi-rgb", "image")
         }
+        For Each 扩展名 In Raw格式.扩展名列表
+            结果.Add(New 文件类型定义(文件关联类别.相机RAW, 扩展名,
+                Raw格式.内容类型(扩展名), "image"))
+        Next
+        Return 结果
     End Function
 
     <DllImport("shell32.dll")>
@@ -565,8 +576,10 @@ Friend NotInheritable Class 文件关联管理器
             Get
                 Dim 是图片 = 类别 = 文件关联类别.常见图片 OrElse
                                类别 = 文件关联类别.不常见图片 OrElse
-                               类别 = 文件关联类别.老旧图片
-                Dim 后缀 = If(是图片, "图片文件", "媒体文件")
+                               类别 = 文件关联类别.老旧图片 OrElse
+                               类别 = 文件关联类别.相机RAW
+                Dim 后缀 = If(类别 = 文件关联类别.相机RAW, "RAW 图片文件",
+                              If(是图片, "图片文件", "媒体文件"))
                 Return 扩展名.TrimStart("."c).ToUpperInvariant() & " " & 后缀
             End Get
         End Property

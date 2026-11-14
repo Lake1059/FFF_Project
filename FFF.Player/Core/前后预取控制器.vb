@@ -7,7 +7,7 @@ Imports System.Threading
 ' 旧内核没有这两个可选导出时 设置前后预取计划 直接返回 False，通路静默禁用。
 Friend NotInheritable Class 前后预取控制器
     Private Shared ReadOnly 排除扩展名 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-        ".dng", ".raw", ".yuv", ".rgb"
+        ".yuv", ".rgb"
     }
 
     Private ReadOnly 列表 As 播放列表
@@ -69,6 +69,8 @@ Friend NotInheritable Class 前后预取控制器
                 Dim 邻居索引 = 当前索引 + 偏移
                 If 邻居索引 < 0 OrElse 邻居索引 >= 项目.Count Then Continue For
                 Dim 邻居路径 = 项目(邻居索引).路径
+                ' RAW 由 LibRaw 整帧解码，邻居预取会同时压 3~6 张高像素图；只保留当前文件，
+                ' 不把 RAW 邻居塞进预取计划。打开/切换仍由播放控制器正常解码。
                 If 播放列表.是相机RAW文件(邻居路径) Then Continue For
                 If 排除扩展名.Contains(Path.GetExtension(邻居路径)) Then Continue For
                 If Not 播放列表.是支持的媒体文件(邻居路径) Then Continue For

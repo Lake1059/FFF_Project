@@ -23,6 +23,7 @@ Partial Class Form设置_文件关联
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
+        MCK_关联相机RAW = New LakeUI.ModernCheckBox()
         MCK_关联老旧图片 = New LakeUI.ModernCheckBox()
         MCK_关联不常见图片 = New LakeUI.ModernCheckBox()
         MCK_关联常见图片 = New LakeUI.ModernCheckBox()
@@ -39,6 +40,7 @@ Partial Class Form设置_文件关联
         ' 
         ModernPanel1.BackColor1 = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ModernPanel1.BorderSize = 0
+        ModernPanel1.Controls.Add(MCK_关联相机RAW)
         ModernPanel1.Controls.Add(MCK_关联老旧图片)
         ModernPanel1.Controls.Add(MCK_关联不常见图片)
         ModernPanel1.Controls.Add(MCK_关联常见图片)
@@ -73,6 +75,24 @@ Partial Class Form设置_文件关联
         MCK_关联老旧图片.TabIndex = 38
         MCK_关联老旧图片.Text = "老旧图片"
         ' 
+        ' MCK_关联相机RAW
+        '
+        MCK_关联相机RAW.AutoSize = True
+        MCK_关联相机RAW.BackColor = Color.Transparent
+        MCK_关联相机RAW.BoxBorderRadius = 5
+        MCK_关联相机RAW.BoxBorderSize = 0
+        MCK_关联相机RAW.BoxCheckedBackColor = Color.OliveDrab
+        MCK_关联相机RAW.BoxInnerPadding = 6
+        MCK_关联相机RAW.BoxSize = 24
+        MCK_关联相机RAW.BoxTextSpacing = 10
+        MCK_关联相机RAW.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCK_关联相机RAW.Dock = DockStyle.Top
+        MCK_关联相机RAW.Location = New Point(15, 326)
+        MCK_关联相机RAW.Name = "MCK_关联相机RAW"
+        MCK_关联相机RAW.Size = New Size(519, 24)
+        MCK_关联相机RAW.TabIndex = 39
+        MCK_关联相机RAW.Text = "相机 RAW"
+        '
         ' MCK_关联不常见图片
         ' 
         MCK_关联不常见图片.AutoSize = True
@@ -251,4 +271,5 @@ Partial Class Form设置_文件关联
     Friend WithEvents MCK_关联常见图片 As LakeUI.ModernCheckBox
     Friend WithEvents MCK_关联不常见图片 As LakeUI.ModernCheckBox
     Friend WithEvents MCK_关联老旧图片 As LakeUI.ModernCheckBox
+    Friend WithEvents MCK_关联相机RAW As LakeUI.ModernCheckBox
 End Class

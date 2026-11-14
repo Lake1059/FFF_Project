@@ -15,8 +15,11 @@ Friend Module Program
                String.Equals(项, "--external-module-abi-regression", StringComparison.OrdinalIgnoreCase) Then
                 Return 外部模块ABI回归.运行()
             End If
+            If String.Equals(项, "--raw-file-association-regression", StringComparison.OrdinalIgnoreCase) Then
+                Return 文件关联回归.运行()
+            End If
         Next
-        Console.WriteLine("可用套件：--360-identification-regression  --pr57-fixes-regression  --content-size-regression  --module-abi-regression")
+        Console.WriteLine("可用套件：--360-identification-regression  --pr57-fixes-regression  --content-size-regression  --module-abi-regression  --raw-file-association-regression")
         Return 2
     End Function
 End Module
