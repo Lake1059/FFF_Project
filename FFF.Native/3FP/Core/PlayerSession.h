@@ -8,6 +8,7 @@
 #include "3FP/Core/AvifTileGridComposer.h"
 #include "3FP/Core/PlacementPolicy.h"
 #include "3FP/Core/PlaybackPerformancePolicy.h"
+#include "3FP/Core/RawStillSource.h"
 // IAMF needs the AOM reference decoder: FFmpeg splits an IAMF element into
 // dependent substreams and never mixes them (see IamfAudioDecoder.h).
 #include "3FP/Audio/IamfAudioDecoder.h"
@@ -52,6 +53,11 @@ public:
     FFFResult ConfigurePlaybackPerformance(std::int32_t decodeAdapterIndex,
         std::uint32_t videoBufferPolicy, std::uint32_t audioBufferPolicy) noexcept;
     FFFResult GetImageInfo(FFF3FPImageInfo& info) const noexcept;
+    // RAW development options are applied on the next Open; GetRawInfo is valid
+    // only while a RAW source is open. Both are additive exports, so no host
+    // built against an older header changes behaviour.
+    FFFResult SetRawProcessingOptions(const FFF3FPRawOptions& options) noexcept;
+    FFFResult GetRawInfo(FFF3FPRawInfo& info) const noexcept;
 
     // Wide-gamut carrier: P3 sources are converted to BT.2020 once, because the
     // shader only knows Rec.709 and Rec.2020, and an SDR swap chain cannot hold
@@ -560,6 +566,11 @@ private:
     bool softwareVideoStopping_ = false;
     int softwareVideoResult_ = 0;
     AVFormatContext* format_;
+    // Non-null only while the current media is a LibRaw still. It owns the
+    // synthetic AVFormatContext that format_ points at, and its lifetime is
+    // exactly the open that created it (worker thread only).
+    std::unique_ptr<RawStillSource> rawStill_;
+    FFF3FPRawOptions rawOptions_{};
     std::unique_ptr<DiscInput> disc_;
     std::atomic<bool> discCancel_{false};
     // Caller-thread disc checks use this atomic mirror, never the worker-owned disc_.
@@ -821,6 +832,10 @@ private:
     // the build reads must not be touched from the caller's thread.
     bool hasPublishedImageInfo_ = false;
     FFF3FPImageInfo publishedImageInfo_{};
+    // RAW metadata is published alongside the image info; false means the
+    // current media is not a RAW (or Open has not reached the publish point).
+    bool hasPublishedRawInfo_ = false;
+    FFF3FPRawInfo publishedRawInfo_{};
     std::string mediaInfoJson_;
     std::string lastError_;
     std::atomic<std::int64_t> clockOriginPosition100ns_;

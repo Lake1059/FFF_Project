@@ -24,6 +24,7 @@
             MCK_关联常见图片.Checked = 设置.实例对象.关联常见图片
             MCK_关联不常见图片.Checked = 设置.实例对象.关联不常见图片
             MCK_关联老旧图片.Checked = 设置.实例对象.关联老旧图片
+            MCK_关联相机RAW.Checked = 设置.实例对象.关联相机RAW
         Finally
             正在初始化 = False
         End Try
@@ -39,6 +40,7 @@
         MCK_关联常见图片.SubText = 取得扩展名说明(文件关联类别.常见图片)
         MCK_关联不常见图片.SubText = 取得扩展名说明(文件关联类别.不常见图片)
         MCK_关联老旧图片.SubText = 取得扩展名说明(文件关联类别.老旧图片)
+        MCK_关联相机RAW.SubText = 取得扩展名说明(文件关联类别.相机RAW)
     End Sub
 
     Private Shared Function 取得扩展名说明(类别 As 文件关联类别) As String
@@ -50,7 +52,7 @@
         MCK_关联老旧视频.CheckedChanged, MCK_关联常见音频.CheckedChanged,
         MCK_关联不常见音频.CheckedChanged, MCK_关联老旧音频.CheckedChanged,
         MCK_关联常见图片.CheckedChanged, MCK_关联不常见图片.CheckedChanged,
-        MCK_关联老旧图片.CheckedChanged
+        MCK_关联老旧图片.CheckedChanged, MCK_关联相机RAW.CheckedChanged
 
         If 正在初始化 Then Return
         Dim checkBox = DirectCast(sender, LakeUI.ModernCheckBox)
@@ -72,6 +74,8 @@
             设置.实例对象.关联不常见图片 = checkBox.Checked
         ElseIf ReferenceEquals(checkBox, MCK_关联老旧图片) Then
             设置.实例对象.关联老旧图片 = checkBox.Checked
+        ElseIf ReferenceEquals(checkBox, MCK_关联相机RAW) Then
+            设置.实例对象.关联相机RAW = checkBox.Checked
         Else
             Return
         End If
