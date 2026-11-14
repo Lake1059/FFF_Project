@@ -198,23 +198,6 @@ Friend Module 蓝牙延迟策略测试
         }
     End Function
 
-    ''' <summary>打印当前默认端点的探测事实，便于现场核对格式/协议，不参与断言。
-    ''' 可选传入端点 ID（非 -- 开头的参数），用于检查未连接/非默认的蓝牙端点。</summary>
-    Public Function 探测(参数 As String()) As Integer
-        Dim 指定端点 As String = ""
-        For Each 项 In 参数
-            If Not 项.StartsWith("--", StringComparison.Ordinal) Then 指定端点 = 项
-        Next
-        Dim 信息 = If(指定端点.Length = 0, 蓝牙音频检测器.检测默认输出(),
-            蓝牙音频检测器.检测指定端点(指定端点))
-        Dim 格式文本 = If(信息.输出格式 IsNot Nothing AndAlso 信息.输出格式.已获取,
-            信息.输出格式.描述 & "（" & 信息.输出格式.格式名称 & "）", "格式未知")
-        Console.WriteLine($"蓝牙={信息.是蓝牙} 已连接={信息.已连接} 协议={信息.协议名称} " &
-            $"区间={信息.延迟下界毫秒}-{信息.延迟上界毫秒}ms 格式={格式文本} " &
-            $"设备={信息.设备名称} 端点={信息.端点名称} 状态={信息.端点状态} 说明={信息.说明}")
-        Return 0
-    End Function
-
     Private Sub 断言(条件 As Boolean, 名称 As String, ByRef 失败 As Integer)
         If 条件 Then Return
         Console.WriteLine("FAIL " & 名称)
