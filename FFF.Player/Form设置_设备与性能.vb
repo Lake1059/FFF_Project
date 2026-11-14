@@ -4,6 +4,15 @@ Public Class Form设置_设备与性能
     Private 设备列表 As New List(Of GPU解码设备)
     Private ReadOnly 枚举设备 As Func(Of IReadOnlyList(Of GPU解码设备))
 
+    ' 蓝牙行加在页面最底部（后加者靠上，因此显式 SetChildIndex 到 0/1），
+    ' 不挤占既有的 GPU/缓冲/音频效果行；这一页底部本来就有空白。
+    Private ReadOnly 蓝牙开关 As New LakeUI.ModernCheckBox()
+    Private ReadOnly 蓝牙提前量 As New LakeUI.ModernTextBox()
+    Private ReadOnly 蓝牙检测按钮 As New LakeUI.ModernButton()
+    Private ReadOnly 蓝牙控制行 As New LakeUI.ModernPanel()
+    Private ReadOnly 蓝牙状态行 As New LakeUI.ModernPanel()
+    Private ReadOnly 蓝牙状态 As New Label()
+
     Public Sub New()
         Me.New(AddressOf GPU解码设备.枚举)
     End Sub
@@ -11,6 +20,7 @@ Public Class Form设置_设备与性能
     Friend Sub New(枚举设备 As Func(Of IReadOnlyList(Of GPU解码设备)))
         Me.枚举设备 = 枚举设备
         InitializeComponent()
+        初始化蓝牙区域()
         正在初始化 = False
     End Sub
 
@@ -55,6 +65,9 @@ Public Class Form设置_设备与性能
             MCB_LakeUI动画帧率.SelectedIndex = If(帧率档 >= 0, 帧率档, 5)
             ' 清理是动作不是状态，永远空档；规范化保证上面每个下标都落在合法区间。
             MCB_LakeUI缓存清理.SelectedIndex = -1
+            蓝牙开关.Checked = 配置.蓝牙低延迟模式
+            蓝牙提前量.Text = CStr(配置.蓝牙额外提前量毫秒)
+            刷新蓝牙状态()
         Finally
             正在初始化 = False
         End Try
@@ -156,6 +169,8 @@ Public Class Form设置_设备与性能
     Private Sub 对齐面板宽度()
         Dim 宽 = Math.Max(652, ClientSize.Width)
         If Math.Abs(ModernPanel1.Width - 宽) > 2 Then ModernPanel1.Width = 宽
+        蓝牙控制行.Width = Math.Max(617, 宽 - 35)
+        蓝牙状态行.Width = Math.Max(617, 宽 - 35)
     End Sub
 
     Private Sub Form设置_设备与性能_Resize(sender As Object, e As EventArgs) Handles MyBase.Resize
@@ -165,4 +180,141 @@ Public Class Form设置_设备与性能
     <Runtime.InteropServices.DllImport("psapi.dll")>
     Private Shared Function EmptyWorkingSet(hProcess As IntPtr) As Boolean
     End Function
+
+    Private Sub 初始化蓝牙区域()
+        蓝牙控制行.BackColor = Color.Transparent
+        蓝牙控制行.BackColor1 = Color.Transparent
+        蓝牙控制行.BorderSize = 0
+        蓝牙控制行.Dock = DockStyle.None
+        蓝牙控制行.Location = New Point(15, 835)
+        蓝牙控制行.Padding = New Padding(0, 10, 0, 0)
+        蓝牙控制行.Size = New Size(617, 42)
+
+        蓝牙开关.BackColor = Color.Transparent
+        蓝牙开关.BoxBorderRadius = 5
+        蓝牙开关.BoxBorderSize = 0
+        蓝牙开关.BoxCheckedBackColor = Color.CornflowerBlue
+        蓝牙开关.BoxInnerPadding = 7
+        蓝牙开关.BoxSize = 24
+        蓝牙开关.BoxTextSpacing = 10
+        蓝牙开关.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        蓝牙开关.ClickAnywhere = True
+        蓝牙开关.Dock = DockStyle.Left
+        蓝牙开关.Size = New Size(200, 32)
+        蓝牙开关.Text = "蓝牙低延迟模式"
+
+        Dim 提前量标签 As New Label With {
+            .AutoSize = False,
+            .Dock = DockStyle.Left,
+            .ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255)),
+            .Text = "额外提前量 ms",
+            .TextAlign = ContentAlignment.MiddleLeft,
+            .Size = New Size(90, 32)
+        }
+
+        蓝牙提前量.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        蓝牙提前量.BorderRadius = 10
+        蓝牙提前量.BorderSize = 0
+        蓝牙提前量.Dock = DockStyle.Left
+        蓝牙提前量.Padding = New Padding(10, 0, 10, 0)
+        蓝牙提前量.Size = New Size(80, 32)
+        蓝牙提前量.WaterText = "0"
+        蓝牙提前量.WaterTextForeColor = Color.DarkGray
+
+        蓝牙检测按钮.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        蓝牙检测按钮.BorderRadius = 10
+        蓝牙检测按钮.BorderSize = 0
+        蓝牙检测按钮.Dock = DockStyle.Left
+        蓝牙检测按钮.Size = New Size(90, 32)
+        蓝牙检测按钮.Text = "重新检测"
+
+        Dim 蓝牙说明 As New Label With {
+            .AutoSize = False,
+            .Dock = DockStyle.Fill,
+            .ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255)),
+            .Text = "正 = 音频更早",
+            .TextAlign = ContentAlignment.MiddleLeft,
+            .Padding = New Padding(10, 0, 0, 0)
+        }
+        ' 行内 Dock=Left 后加者靠左：说明填满剩余宽度，按钮/输入框/标签/开关依次向左。
+        蓝牙控制行.Controls.Add(蓝牙说明)
+        蓝牙控制行.Controls.Add(蓝牙检测按钮)
+        蓝牙控制行.Controls.Add(蓝牙提前量)
+        蓝牙控制行.Controls.Add(提前量标签)
+        蓝牙控制行.Controls.Add(蓝牙开关)
+
+        蓝牙状态行.BackColor = Color.Transparent
+        蓝牙状态行.BackColor1 = Color.Transparent
+        蓝牙状态行.BorderSize = 0
+        蓝牙状态行.Dock = DockStyle.None
+        蓝牙状态行.Location = New Point(15, 885)
+        蓝牙状态行.Size = New Size(617, 54)
+
+        蓝牙状态.AutoSize = False
+        蓝牙状态.Dock = DockStyle.Fill
+        蓝牙状态.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        蓝牙状态.TextAlign = ContentAlignment.MiddleLeft
+        蓝牙状态.Text = "尚未检测蓝牙输出"
+        蓝牙状态行.Controls.Add(蓝牙状态)
+
+        ' 最新页面是 652×835 的绝对定位根面板 + AutoScroll，既有行排到 y=815；
+        ' 蓝牙区接在其后，不依赖 Dock 次序，避免插进 LakeUI 图形性能组中间。
+        ModernPanel1.Controls.Add(蓝牙状态行)
+        ModernPanel1.Controls.Add(蓝牙控制行)
+        ModernPanel1.Height = Math.Max(ModernPanel1.Height, 959)
+
+        AddHandler 蓝牙开关.CheckedChanged, AddressOf 蓝牙开关_CheckedChanged
+        AddHandler 蓝牙提前量.Leave, AddressOf 蓝牙提前量_Leave
+        AddHandler 蓝牙检测按钮.Click, AddressOf 蓝牙检测按钮_Click
+    End Sub
+
+    Private Sub 蓝牙开关_CheckedChanged(sender As Object, e As EventArgs)
+        If 正在初始化 Then Return
+        设置.实例对象.蓝牙低延迟模式 = 蓝牙开关.Checked
+        刷新蓝牙状态()
+        Form1.当前主窗体?.应用蓝牙音频延迟()
+    End Sub
+
+    Private Sub 蓝牙提前量_Leave(sender As Object, e As EventArgs)
+        If 正在初始化 Then Return
+        Dim 值 As Integer = 0
+        Integer.TryParse(蓝牙提前量.Text.Trim(), 值)
+        值 = Math.Clamp(值, -100, 100)
+        设置.实例对象.蓝牙额外提前量毫秒 = 值
+        蓝牙提前量.Text = CStr(值)
+        刷新蓝牙状态()
+        Form1.当前主窗体?.应用蓝牙音频延迟()
+    End Sub
+
+    Private Sub 蓝牙检测按钮_Click(sender As Object, e As EventArgs)
+        If 正在初始化 Then Return
+        刷新蓝牙状态()
+        Form1.当前主窗体?.应用蓝牙音频延迟()
+    End Sub
+
+    Private Sub 刷新蓝牙状态()
+        Dim 配置 = 设置.实例对象
+        Dim 信息 = 蓝牙音频检测器.检测默认输出()
+        Dim 刷新率 = 蓝牙音频检测器.取刷新率(IntPtr.Zero)
+        Dim 补偿 = 蓝牙音频延迟策略.计算补偿100纳秒(
+            配置.蓝牙低延迟模式, 信息, 刷新率, 配置.蓝牙额外提前量毫秒)
+
+        Dim 文本 As String
+        If 信息.是蓝牙 Then
+            Dim 设备 = If(String.IsNullOrWhiteSpace(信息.设备名称), "蓝牙音频", 信息.设备名称)
+            文本 = 设备 & "｜" & 信息.协议名称 & "｜" &
+                CStr(信息.延迟下界毫秒) & "–" & CStr(信息.延迟上界毫秒) & " ms｜" & 信息.说明
+            If Not 信息.已连接 Then
+                文本 &= "｜未连接，不补偿"
+            Else
+                文本 &= "｜补偿 " & 蓝牙音频延迟策略.格式化毫秒(补偿)
+            End If
+        Else
+            文本 = 信息.说明
+        End If
+        If Not 配置.蓝牙低延迟模式 Then 文本 &= "｜模式未启用"
+        蓝牙状态.Text = 文本
+        蓝牙状态.ForeColor = If(信息.是蓝牙 AndAlso 信息.已连接,
+            Color.LightGreen, Color.FromArgb(CByte(150), CByte(220), CByte(220), CByte(220)))
+    End Sub
 End Class

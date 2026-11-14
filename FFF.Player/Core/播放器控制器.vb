@@ -55,6 +55,9 @@ Public NotInheritable Class 播放器控制器
     Private 用户请求过HDR As Boolean
     Private 强制HDR输出 As Boolean
     Private 当前WASAPI模式 As WASAPI共享模式 = WASAPI共享模式.共享
+    ' 蓝牙补偿是会话级偏好：新会话先归零，只有实际改变时才下发，避免每次打开都触发一次
+    ' 无意义的 re-seek。失败时不记账，等下一轮轮询/打开完成再试。
+    Private 上次蓝牙补偿100纳秒 As Long = Long.MinValue
     Private 当前音量 As Single = 1.0F
     Private 当前播放速度 As Double = 1.0R
     Private 已静音 As Boolean
@@ -1305,6 +1308,29 @@ Public NotInheritable Class 播放器控制器
         Return 模块名.Trim()
     End Function
 
+    ''' <summary>把当前默认蓝牙端点的协议区间换算成内核音频时间线偏移。
+    ''' 只在值真正变化时下发；新会话由 会话_打开完成 调用，播放中由主窗体 500ms 轮询调用。</summary>
+    Friend Sub 应用蓝牙音频延迟()
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing OrElse Not 是否有媒体 Then Return
+        Try
+            Dim 配置 = 设置.实例对象
+            Dim 信息 = 蓝牙音频检测器.检测默认输出()
+            Dim 刷新率 = 蓝牙音频检测器.取刷新率(输出窗口提供器())
+            Dim 补偿 = 蓝牙音频延迟策略.计算补偿100纳秒(
+                配置.蓝牙低延迟模式, 信息, 刷新率, 配置.蓝牙额外提前量毫秒)
+            If 补偿 = 上次蓝牙补偿100纳秒 Then Return
+            If 补偿 = 0 AndAlso 上次蓝牙补偿100纳秒 = Long.MinValue Then
+                上次蓝牙补偿100纳秒 = 0
+                Return
+            End If
+            目标.设置音频延迟(TimeSpan.FromTicks(补偿))
+            上次蓝牙补偿100纳秒 = 补偿
+        Catch ex As Exception
+            Debug.WriteLine("蓝牙音频延迟：下发失败（保留上次值）：" & ex.Message)
+        End Try
+    End Sub
+
     Public Sub 强制开启HDR模式()
         Dim 目标 = 会话
         Dim 快照 = 安全读取快照()
@@ -1710,6 +1736,7 @@ Public NotInheritable Class 播放器控制器
 
     Private Function 创建会话(解码器 As 解码模式, 色彩模式 As 色彩输出模式,
                             性能 As 播放性能选项) As 播放器会话
+        上次蓝牙补偿100纳秒 = Long.MinValue
         Return New 播放器会话(New 播放器配置 With {
             .解码器 = 解码器,
             .色彩模式 = 色彩模式,
@@ -1805,6 +1832,7 @@ Public NotInheritable Class 播放器控制器
 
     Private Sub 会话_打开完成(sender As Object, e As 播放器事件参数)
         If sender IsNot 会话 Then Return
+        应用蓝牙音频延迟()
         Try
             RaiseEvent 媒体已打开(Me,
                 New 播放器媒体事件参数(当前文件路径, 会话.当前媒体信息, 会话.当前快照, False))
