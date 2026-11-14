@@ -46,6 +46,15 @@ if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }
 
 # 单文件形态按项目分发策略：只输出 FFF.Player.exe，不复制 licenses/ 或其他
 # 许可文件；许可入口由“关于”页的项目主页链接和仓库主页提供。
+# 单文件模式最容易出的坑是“内核更新了、libraw.dll 没进 bundle”：内核自解压到临时目录后
+# 从自身目录找 libraw.dll，而发布目录只有一个 exe。这里先卡内核 RAW 标识；bundling 由
+# FFF.Player.vbproj 的 PublishSingleFile Content 项负责（libraw.dll 与内核同批自解压）。
+$KernelDllBuilt = Join-Path $ProjectRoot "FFF.Native\x64\$Configuration\FFF.Native.dll"
+$KernelAscii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($KernelDllBuilt))
+if (-not ($KernelAscii.Contains('libraw.dll') -and $KernelAscii.Contains('FFF3FP_GetRawInfo'))) {
+    throw "发布中止：$KernelDllBuilt 不含 RAW 标识（libraw.dll / FFF3FP_GetRawInfo）—— 单文件包会带着旧内核发布。"
+}
+
 $StagingDirectory = Join-Path ([IO.Path]::GetTempPath()) ("3FP-publish-" + [Guid]::NewGuid().ToString("N"))
 $PendingExecutable = $null
 try {

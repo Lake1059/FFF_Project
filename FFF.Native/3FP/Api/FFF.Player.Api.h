@@ -1245,6 +1245,95 @@ struct FFF3FPImageInfo {
 // Returns NotSupported on a native build predating this entry point, so hosts
 // degrade instead of failing.
 FFF3FP_API FFFResult FFF3FP_GetImageInfo(FFF3FPHandle player, FFF3FPImageInfo* info) noexcept;
+
+// RAW development controls. These are deliberately NOT appended to
+// FFF3FPConfiguration: FFF3FP_Create validates size < sizeof, so adding fields
+// there would break every existing host. Call the setter before Open; the
+// session keeps the last accepted values across re-opens.
+enum class FFF3FPRawDemosaic : std::int32_t {
+    Linear = 0,
+    Vng = 1,
+    Ppg = 2,
+    Ahd = 3,
+    Dcb = 4,
+};
+
+enum class FFF3FPRawWhiteBalance : std::int32_t {
+    Camera = 0,
+    Auto = 1,
+    Daylight = 2,
+};
+
+enum class FFF3FPRawOutputColor : std::int32_t {
+    Srgb = 0,
+    LinearSrgb = 1,
+    // Reserved for M2. The setter rejects these until colour management lands.
+    AdobeRgb = 2,
+    ProPhoto = 3,
+};
+
+enum class FFF3FPRawHighlight : std::int32_t {
+    Clip = 0,
+    Blend = 1,
+};
+
+struct FFF3FPRawOptions {
+    std::uint32_t size;       // sizeof(FFF3FPRawOptions)
+    std::uint32_t version;    // 1
+    std::int32_t demosaic;    // FFF3FPRawDemosaic
+    std::int32_t whiteBalance;// FFF3FPRawWhiteBalance
+    float kelvin;             // reserved for Custom WB (M2); ignored today
+    float tint;               // reserved for Custom WB (M2); ignored today
+    float exposureEv;         // reserved; M1 does not change exposure
+    std::int32_t outputColor; // FFF3FPRawOutputColor
+    std::int32_t halfSize;    // 1 = half-size (default), 0 = full-size
+    std::int32_t applyToneCurve; // 1 = LibRaw default gamma, 0 = linear
+    std::int32_t highlight;   // FFF3FPRawHighlight
+    std::int32_t maxOutputSide; // 0 = unrestricted; else longest side limit
+    std::uint32_t reserved[8];
+};
+
+struct FFF3FPRawInfo {
+    std::uint32_t size;       // sizeof(FFF3FPRawInfo)
+    std::uint32_t version;    // 1
+    char cameraMake[64];
+    char cameraModel[64];
+    char lens[128];
+    std::int32_t iso;
+    float shutterSeconds;
+    float aperture;
+    float focalLengthMm;
+    std::int64_t timestampUnix;
+    std::int32_t rawWidth;
+    std::int32_t rawHeight;
+    std::int32_t outputWidth;
+    std::int32_t outputHeight;
+    std::int32_t flip;        // LibRaw sizes.flip; output is already upright
+    char cfaDescription[8];   // e.g. "RGBG"; empty when not a CFA source
+    std::int32_t cfaPattern;  // 0 unknown, 1 RGGB, 2 BGGR, 3 GRBG, 4 GBRG
+    std::uint32_t blackLevel;
+    std::uint32_t whiteLevel;
+    float cameraMultipliers[4]; // LibRaw cam_mul before WB application
+    std::int32_t rawBits;     // sensor bit depth when reported, else 0
+    char libRawVersion[32];
+    std::int32_t demosaic;    // the options actually used for this frame
+    std::int32_t whiteBalance;
+    std::int32_t outputColor;
+    std::int32_t halfSize;
+    std::int32_t applyToneCurve;
+    std::int32_t highlight;
+    std::int32_t maxOutputSide;
+    std::uint32_t reserved[8];
+};
+
+// Set RAW development options for the next Open. Returns InvalidArgument for
+// an unsupported size/version or a value outside the enums above.
+FFF3FP_API FFFResult FFF3FP_SetRawProcessingOptions(FFF3FPHandle player,
+    const FFF3FPRawOptions* options) noexcept;
+// Valid after Open returns Success and the file is a RAW. On a non-RAW source
+// returns NotSupported; Info is zeroed with version/size filled.
+FFF3FP_API FFFResult FFF3FP_GetRawInfo(FFF3FPHandle player,
+    FFF3FPRawInfo* info) noexcept;
 // Probes the subtitle streams of a container file without opening a playback
 // session. The JSON output reuses the stream shape of FFF3FP_GetMediaInfo and
 // adds a top-level startTimeSeconds (containers may carry a nonzero start
