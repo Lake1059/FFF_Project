@@ -54,6 +54,14 @@ if ($SkipIamf) { $NativeArgs += "/p:HaveLibiamf=false" } else { $NativeArgs += "
 & $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") /p:Configuration=$Configuration /p:Platform=x64 @NativeArgs /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration 构建失败。" }
 
+# RAW 能力闸：内核必须真的把 libraw.dll 记成 delay-load 依赖，否则发布包里即使
+# 有 libraw.dll 也永远不会被加载；只查文件存在会漏掉“旧内核 + 新 DLL”的假配。
+$KernelDllBuilt = Join-Path $ProjectRoot "FFF.Native\x64\$Configuration\FFF.Native.dll"
+$KernelAscii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($KernelDllBuilt))
+if (-not ($KernelAscii.Contains('libraw.dll') -and $KernelAscii.Contains('FFF3FP_GetRawInfo'))) {
+    throw "发布中止：$KernelDllBuilt 不含 RAW 标识（libraw.dll / FFF3FP_GetRawInfo）—— 这是旧内核，发出去也打不开 RAW。"
+}
+
 # 前后预加载小助手是独立 C++ 进程，必须与内核一起构建：否则 vbproj 的
 # Exists 条件会跳过拷贝，下面 $Required 的散装校验就会自相矛盾地判红。
 New-Item -ItemType Directory -Force -Path (Join-Path $ProjectRoot "..\build") | Out-Null
@@ -77,7 +85,7 @@ try {
     # 确认运行依赖齐全后，再替换发布目录。
     # 本体包不包含外部 FFmpeg runtime；完整包才要求 av*.dll。
     $Required = @(
-        'FFF.Player.exe', 'FFF.Native.dll',
+        'FFF.Player.exe', 'FFF.Native.dll', 'libraw.dll',
         'ass-9.dll', 'bluray-3.dll', 'udfread-3.dll',
         'libxml2.dll', 'iconv-2.dll', 'charset-1.dll',
         'FFF.PrefetchHost.exe'
@@ -197,7 +205,16 @@ try {
         [pscustomobject]@{ Name = 'LakeUI-GPL-3.0';
                            Cands = @((Join-Path $ProjectRoot "third_party\LakeUI\LICENSE.txt"),
                                      (Join-Path $MainRoot "third_party\LakeUI\LICENSE.txt"),
-                                     (Join-Path $ProjectRoot "..\LakeUI\LICENSE.txt")) })
+                                     (Join-Path $ProjectRoot "..\LakeUI\LICENSE.txt")) },
+        [pscustomobject]@{ Name = 'libraw-LICENSE.LGPL';
+                           Cands = @((Join-Path $ProjectRoot "third_party\libraw\LICENSE.LGPL"),
+                                     (Join-Path $MainRoot "third_party\fff_project\third_party\libraw\LICENSE.LGPL")) },
+        [pscustomobject]@{ Name = 'libraw-LICENSE.CDDL';
+                           Cands = @((Join-Path $ProjectRoot "third_party\libraw\LICENSE.CDDL"),
+                                     (Join-Path $MainRoot "third_party\fff_project\third_party\libraw\LICENSE.CDDL")) },
+        [pscustomobject]@{ Name = 'libraw-COPYRIGHT';
+                           Cands = @((Join-Path $ProjectRoot "third_party\libraw\COPYRIGHT"),
+                                     (Join-Path $MainRoot "third_party\fff_project\third_party\libraw\COPYRIGHT")) })
     if ($IncludeExternalRuntime) {
         $LicExtra += @(
             [pscustomobject]@{ Name = 'ffmpeg-COPYING.LGPLv2.1';

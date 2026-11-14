@@ -703,6 +703,47 @@ bool IsIncompleteDownloadName(const std::string& path) noexcept {
     return false;
 }
 
+// ".raw" is a shared extension: raw video/audio uses it as well as cameras.
+// LibRaw gets first refusal, but a failed LibRaw open must not turn those
+// non-camera files into NotSupported; fall through to FFmpeg instead.
+bool IsAmbiguousRawFallbackName(const std::string& path) noexcept {
+    const auto dot = path.find_last_of('.');
+    if (dot == std::string::npos || dot + 1 >= path.size()) return false;
+    const std::string_view extension(path.data() + dot + 1, path.size() - dot - 1);
+    return extension.size() == 3 &&
+        (extension[0] == 'r' || extension[0] == 'R') &&
+        (extension[1] == 'a' || extension[1] == 'A') &&
+        (extension[2] == 'w' || extension[2] == 'W');
+}
+
+// The FFmpeg fallback is only valid when it found real media. A camera raw
+// (or an unrelated TIFF) opened through FFmpeg's still-image demuxer must
+// stay NotSupported, otherwise the embedded preview looks like a decode.
+bool HasOnlyStillImageStreams(const AVFormatContext* format) noexcept {
+    if (format == nullptr) return true;
+    bool hasStream = false;
+    for (unsigned index = 0; index < format->nb_streams; ++index) {
+        const AVCodecParameters* parameters = format->streams[index] == nullptr
+            ? nullptr : format->streams[index]->codecpar;
+        if (parameters == nullptr) continue;
+        if (parameters->codec_type == AVMEDIA_TYPE_AUDIO) return false;
+        if (parameters->codec_type != AVMEDIA_TYPE_VIDEO) continue;
+        hasStream = true;
+        switch (parameters->codec_id) {
+        case AV_CODEC_ID_TIFF:
+        case AV_CODEC_ID_JPEG2000:
+        case AV_CODEC_ID_PNG:
+        case AV_CODEC_ID_WEBP:
+        case AV_CODEC_ID_BMP:
+        case AV_CODEC_ID_MJPEG:
+            continue;
+        default:
+            return false;
+        }
+    }
+    return hasStream;
+}
+
 std::int64_t EstimateDuration100ns(const AVFormatContext* format, bool* declared = nullptr) noexcept {
     if (declared) *declared = false;
     if (format == nullptr) return 0;
@@ -973,6 +1014,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       hardwareFallbackPending_(false), internalAudioFailurePending_(false),
       internalAudioFailureResult_(FFFResult::Success), internalAudioDecodeErrorCount_(0) {
     snapshot_ = {};
+    rawOptions_ = DefaultRawOptions();
     snapshot_.size = sizeof(snapshot_); snapshot_.version = SnapshotVersion; snapshot_.state = FFF3FPState::Idle;
     snapshot_.decodeMode = decodeMode_; snapshot_.requestedColorMode = configuration.colorMode;
     snapshot_.actualColorMode = FFF3FPColorMode::MapToSdr; snapshot_.frameIndex = -1;
@@ -1392,6 +1434,10 @@ FFFResult PlayerSession::Open(const char* path) noexcept {
     Enqueue([this, value = std::move(normalized)] { DoOpen(value); }); return FFFResult::Success;
 }
 FFFResult PlayerSession::Play() noexcept {
+    RawTrace("Play enter");
+    // A LibRaw still has no timeline and no decoder: Play is a no-op, exactly
+    // like the existing still-image path, but without entering the decode loop.
+    if (rawStill_ != nullptr) return FFFResult::Success;
     const auto state = state_.load();
     if (state != FFF3FPState::Ready && state != FFF3FPState::Paused &&
         state != FFF3FPState::Ended) return FFFResult::InvalidState;
@@ -1482,15 +1528,17 @@ FFFResult PlayerSession::DiscardAudioOutput() noexcept {
     }
 }
 FFFResult PlayerSession::Stop() noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this] { DoClose(FFF3FPState::Idle); }); return FFFResult::Success; }
-FFFResult PlayerSession::Close() noexcept { discCancel_.store(true); Enqueue([this] { DoClose(); }); return FFFResult::Success; }
-FFFResult PlayerSession::Seek(const std::int64_t value) noexcept { if (value < 0) return FFFResult::InvalidArgument; const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, value] {
+FFFResult PlayerSession::Close() noexcept { RawTrace("Close enter"); discCancel_.store(true); Enqueue([this] { DoClose(); }); return FFFResult::Success; }
+FFFResult PlayerSession::Seek(const std::int64_t value) noexcept { RawTrace("Seek enter"); if (value < 0) return FFFResult::InvalidArgument; const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; if (rawStill_ != nullptr) { Enqueue([this] { Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":0}"); }); return FFFResult::Success; } Enqueue([this, value] {
+        RawTrace("Seek worker enter");
         // 定位失败时 DoSeek 会提前返回：不动队列、不装 seekTarget100ns_、也不改位置。这时
         // 照常去 DecodeUntilSeekTarget()，就是朝一个"根本没装上的靶"抽干 demuxer——EOF 一到
         // 而 pendingVideoPackets_ 已空，FlushAtEnd 直接把会话判成 Ended，而 DoSeek 自己的
         // 错误消息写的是 "playback remained active"。实测裸 Annex-B：探针一句 Seek(0) ⇒
         // 解码 0 帧＋state=Ended；跳过那句 seek，同一个文件正常播（88 帧、位置推进 3.41s）。
         const auto seeked = DoSeek(value);
-        if (seeked == FFFResult::Success && state_.load() != FFF3FPState::Playing) DecodeUntilSeekTarget(); Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":" + std::to_string(snapshot_.position100ns) + "}"); }); return FFFResult::Success; }
+        if (seeked == FFFResult::Success && state_.load() != FFF3FPState::Playing &&
+            rawStill_ == nullptr) DecodeUntilSeekTarget(); Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":" + std::to_string(snapshot_.position100ns) + "}"); }); return FFFResult::Success; }
 FFFResult PlayerSession::SeekKeyframe(const std::int64_t value) noexcept {
     if (value < 0) return FFFResult::InvalidArgument;
     const auto state = state_.load();
@@ -1511,6 +1559,13 @@ FFFResult PlayerSession::SeekFrame(const std::int64_t value) noexcept {
     if (value < 0) return FFFResult::InvalidArgument;
     const auto state = state_.load();
     { std::lock_guard lock(snapshotMutex_); if ((state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) || publishedSnapshot_.selectedVideoStream < 0) return FFFResult::InvalidState; }
+    if (rawStill_ != nullptr) {
+        Enqueue([this] {
+            Emit(FFF3FPEvent::OperationCompleted,
+                "{\"operation\":\"seek-frame\",\"frame\":0}");
+        });
+        return FFFResult::Success;
+    }
     Enqueue([this, value] {
         const auto end = framePtsIndexBase_ + static_cast<std::int64_t>(framePtsIndex_.size());
         if (value >= framePtsIndexBase_ && value < end) {
@@ -1963,6 +2018,7 @@ FFFResult PlayerSession::GetPresentPacingStatus(
 }
 FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sdr, const float hdr,
     const float paper, const bool forceHdrOutput) noexcept {
+    RawTrace("SetColorMode enter");
     if (mode > FFF3FPColorMode::MapToHdr || !std::isfinite(sdr) || sdr <= 0 ||
         !std::isfinite(hdr) || hdr < 0 || hdr > 10000 || !std::isfinite(paper) || paper <= 0)
         return FFFResult::InvalidArgument;
@@ -3353,6 +3409,7 @@ std::uint64_t PlayerSession::PresentationCounter() const noexcept {
 }
 
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
+    RawTrace("GetSnapshot enter");
     if (output.size < sizeof(FFF3FPSnapshot) || output.version != SnapshotVersion) return FFFResult::InvalidArgument;
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
     // Presentation completes asynchronously on the dedicated swap-chain owner;
@@ -3465,7 +3522,7 @@ FFFResult PlayerSession::GetAudioPeakLevels(FFF3FPAudioPeakLevels& output) const
     }
     return FFFResult::Success;
 }
-std::string PlayerSession::MediaInfo() const { std::lock_guard lock(mutex_); return mediaInfoJson_; }
+std::string PlayerSession::MediaInfo() const { RawTrace("MediaInfo enter"); std::lock_guard lock(mutex_); return mediaInfoJson_; }
 std::string PlayerSession::LastError() const { std::lock_guard lock(errorMutex_); return lastError_; }
 
 void PlayerSession::Worker() noexcept {
@@ -3494,6 +3551,35 @@ void PlayerSession::Worker() noexcept {
 
 FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** output,
     std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept {
+    // RAW is a deliberate front branch, not a fallback: FFmpeg's bundled build
+    // recognizes CR2/NEF/ARW/DNG as TIFF containers and reports a successful
+    // open that decodes nothing (or only the embedded preview), so letting it
+    // try first would turn "unsupported" into a convincing empty picture.
+    bool rawFallback = false;
+    if (RawStillSource::LooksLikeRawPath(path)) {
+        RawTrace("OpenFormat: RAW extension branch");
+        auto candidate = std::make_unique<RawStillSource>();
+        if (!candidate->Open(path, rawOptions_, error)) {
+            if (!IsAmbiguousRawFallbackName(path)) {
+                error = "RAW decode failed: " + error;
+                return FFFResult::NotSupported;
+            }
+            RawTrace("OpenFormat: ambiguous .raw falls through to FFmpeg");
+            error.clear();
+            rawFallback = true;
+        } else {
+            AVFormatContext* rawContext = candidate->CreateFormatContext(error);
+            if (rawContext == nullptr) {
+                error = "RAW decode failed: " + error;
+                return FFFResult::NativeFailure;
+            }
+            *output = rawContext;
+            io.reset();
+            rawStill_ = std::move(candidate);
+            RawTrace("OpenFormat: RAW context ready");
+            return FFFResult::Success;
+        }
+    }
     AVDictionary* options = nullptr;
     av_dict_set(&options, "protocol_whitelist", "file,crypto,data", 0);
     av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
@@ -3568,6 +3654,11 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
     }
     result = avformat_find_stream_info(*output, nullptr);
     if (result < 0) { CloseFormat(output, io); error = "Could not read media streams: " + FfmpegError(result); return FFFResult::FfmpegFailure; }
+    if (rawFallback && (IsStaticImageDemuxer((*output)->iformat) || HasOnlyStillImageStreams(*output))) {
+        CloseFormat(output, io);
+        error = "Ambiguous .raw was not a LibRaw file and FFmpeg found only a still image.";
+        return FFFResult::NotSupported;
+    }
     return FFFResult::Success;
 }
 
@@ -4329,6 +4420,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         } catch (...) { openResult = FFFResult::NativeFailure; openError = "Could not open the disc."; }
     } else openResult = OpenFormat(path, &format_, formatIo_, openError);
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
+    RawTrace("DoOpen: OpenFormat succeeded");
     // Remembered so the IAMF decoder can re-open the file and drive the raw OBU stream.
     mediaPath_ = path;
     // fragmented MP4（fMP4）判定（R1.1，C-FMP4-DETECT@1）：独立旁路只读句柄扫顶层
@@ -4338,6 +4430,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     fragmentedMp4_ = !disc_ && !staticImage_ &&
         Fmp4FragmentScanner::DetectFragmented(path.c_str());
     videoStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_VIDEO);
+    RawTrace("DoOpen: stream selected");
     animatedImage_ = IsLoopAwareImageDemuxer(format_ != nullptr ? format_->iformat : nullptr);
     // An AVIF/HEIC image sequence keeps its animation on a later track than the
     // primary still item, so switch to that track before anything reads the
@@ -4357,6 +4450,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Select session rewind only after stream classification is available.
     sessionWrapLoop_ = IsAnimatedImageSequence(format_);
     staticImage_ = IsStillImage(format_, videoStream_);
+    RawTrace("DoOpen: staticImage classified");
     // P1-a read side: restore a hardware-trial refusal remembered for THIS
     // file before OpenDecoder reaches HardwareRouteKnownUnsupported(). The
     // main AVFormatContext is untouched; only the decision is replayed. A
@@ -4389,7 +4483,8 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // tile's packets now, while the demuxer is still at the start of the file: the
     // canvas is assembled from them, and a still image has no timeline to rewind.
     ResetTileGrid();
-    if (staticImage_ &&
+    RawTrace("DoOpen: tile grid reset");
+    if (staticImage_ && rawStill_ == nullptr &&
         AvifTileGridComposer::Describe(format_, tileGridWidth_, tileGridHeight_,
             tileGridTiles_, tileGridBackground_)) {
         tileGrid_ = true;
@@ -4402,6 +4497,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // the pixel pipeline, where it would otherwise have to be re-applied after
     // every hardware-transfer / colour step.
     sourceRotation_ = SourceRotationQuarterTurns(format_, videoStream_);
+    RawTrace("DoOpen: rotation read");
     (void)videoRenderer_.SetViewRotation(sourceRotation_);
     // Still images are uploaded as one texture, so an oversized source can only
     // fail later inside the renderer ("open-image" with an opaque reason).
@@ -4425,13 +4521,19 @@ void PlayerSession::DoOpen(std::string path) noexcept {
             return;
         }
     }
+    RawTrace("DoOpen: size check done");
     coverArtStream_ = FindCoverArtStream(format_);
     audioStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_AUDIO);
+    RawTrace("DoOpen: cover/audio selected");
     if (videoStream_ < 0 && audioStream_ < 0) { Fail(FFFResult::NotSupported, "The file contains no playable video or audio stream.", "open"); return; }
     snapshot_.decodeMode = decodeMode_;
+    // LibRaw develops on the CPU; there is no GPU decoder for a synthetic raw
+    // stream. Report the route that actually runs so the snapshot does not
+    // claim a D3D11 path that was never opened.
+    if (rawStill_ != nullptr) snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
     bool hardwareFallback = false;
     std::string hardwareFailureReason;
-    if (videoStream_ >= 0) {
+    if (videoStream_ >= 0 && rawStill_ == nullptr) {
         // Still images are included here on purpose, except JPEG: the hardware decoder
         // is tried first for every media type and the retry below takes the CPU decoder
         // when the GPU refuses. Formats with no hardware path (PNG, WebP, TIFF, JPEG XL,
@@ -4495,6 +4597,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     }
     videoRenderer_.ConfigureHdrStream(videoStream_ >= 0 ?
         format_->streams[videoStream_]->codecpar : nullptr);
+    RawTrace("DoOpen: hdr stream configured");
     if (audioStream_ >= 0 && !audioExclusive_) {
         std::string audioError;
         const auto result = RecreateAudioRenderer(audioEndpointId_, audioExclusive_, true, audioError);
@@ -4510,6 +4613,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // 保持 true，F3 预滚退化为以 target 为判停点继续可用，R2.1 的字节估算禁用
     // 与 B2 重开还原照常生效。
     StartFragmentScanIfNeeded(mediaPath_);
+    RawTrace("DoOpen: fragment scan step done");
     if (videoStream_ < 0 && coverArtStream_ >= 0) {
         const auto result = LoadCoverArt();
         if (result != FFFResult::Success) { Fail(result, "Could not decode or render the attached cover art.", "cover-art"); return; }
@@ -4547,7 +4651,12 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
         // A tiled still image is presented as its canvas, so that is what the host
         // has to see: the decoder belongs to one tile and would report a fraction.
-        if (videoStream_ >= 0) {
+        if (videoStream_ >= 0 && rawStill_ != nullptr) {
+            snapshot_.videoWidth = rawStill_->OutputWidth();
+            snapshot_.videoHeight = rawStill_->OutputHeight();
+            ApplyHdrState(snapshot_, videoRenderer_.StreamHdrState(), videoRenderer_.HdrState());
+        }
+        else if (videoStream_ >= 0) {
             snapshot_.videoWidth = tileGrid_ ? tileGridWidth_ : videoDecoder_->width;
             snapshot_.videoHeight = tileGrid_ ? tileGridHeight_ : videoDecoder_->height;
             ApplyHdrState(snapshot_, videoRenderer_.StreamHdrState(), videoRenderer_.HdrState());
@@ -4596,6 +4705,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     }
     // Ready sessions do not pump playback, so present the first image frame here.
     if (staticImage_ || animatedImage_) {
+        RawTrace("DoOpen: DecodeInitialFrame enter");
         const auto imageResult = DecodeInitialFrame();
         if (imageResult != FFFResult::Success) {
             Fail(imageResult, animatedImage_
@@ -4606,6 +4716,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         }
     }
     RebuildMediaInfo(); SetState(FFF3FPState::Ready, "open");
+    RawTrace("DoOpen: media info rebuilt");
     // A freshly opened file resets the device-recovery storm streak.
     videoRecoveryStreakCount_.store(0);
     videoRecoveryLastSteadyMs_.store(0);
@@ -4614,10 +4725,21 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // hands out this copy under snapshotMutex_ instead of touching them.
     if (staticImage_ || animatedImage_) {
         BuildImageInfo(publishedImageInfo_);
-        { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = true; }
+        RawTrace("DoOpen: image info built");
+        { std::lock_guard lock(snapshotMutex_);
+          hasPublishedImageInfo_ = true;
+          if (rawStill_ != nullptr) {
+              publishedRawInfo_ = rawStill_->Info();
+              hasPublishedRawInfo_ = true;
+          } else {
+              hasPublishedRawInfo_ = false;
+          }
+        }
     }
     PublishDisc();
+    RawTrace("DoOpen: publish disc done");
     Emit(FFF3FPEvent::OpenCompleted, "{\"success\":true}");
+    RawTrace("DoOpen: open completed emitted");
     if (hardwareFallback)
         Emit(FFF3FPEvent::DeviceChanged,
             "{\"type\":\"video\",\"decodeMode\":1,\"fallback\":true,\"reason\":\"" +
@@ -4709,6 +4831,27 @@ FFFResult PlayerSession::ComposeTileGridFrame() noexcept {
 }
 
 FFFResult PlayerSession::DecodeInitialFrame() noexcept {
+    // RAW never reaches OpenDecoder: the synthetic stream has codecpar only,
+    // and LibRaw is the decoder. Develop synchronously in M1; the preview-first
+    // and background full-size paths are M2.
+    if (rawStill_ != nullptr) {
+        RawTrace("DecodeInitialFrame: RAW branch enter");
+        if (format_ == nullptr || videoStream_ < 0) return FFFResult::InvalidState;
+        AVFrame* rawFrame = nullptr;
+        std::string rawError;
+        if (!rawStill_->Decode(&rawFrame, rawError) || rawFrame == nullptr)
+            return FFFResult::FfmpegFailure;
+        RawTrace("DecodeInitialFrame: RAW frame ready");
+        const auto before = videoRenderer_.PresentedVideoFrames();
+        PresentVideoFrame(rawFrame, format_);
+        RawTrace("DecodeInitialFrame: RAW frame presented");
+        av_frame_free(&rawFrame);
+        RawTrace("DecodeInitialFrame: RAW temp frame freed");
+        if (state_.load() == FFF3FPState::Failed) return FFFResult::DeviceFailure;
+        RawTrace("DecodeInitialFrame: RAW state check ok");
+        if (videoRenderer_.PresentedVideoFrames() <= before) return FFFResult::FfmpegFailure;
+        return FFFResult::Success;
+    }
     if (format_ == nullptr || videoDecoder_ == nullptr || videoStream_ < 0)
         return FFFResult::InvalidState;
     if (!staticImage_ && !animatedImage_) return FFFResult::InvalidState;
@@ -7887,6 +8030,7 @@ void PlayerSession::PumpExternalAudio() noexcept {
 }
 
 FFFResult PlayerSession::GetImageInfo(FFF3FPImageInfo& info) const noexcept {
+    RawTrace("GetImageInfo enter");
     if (info.size < sizeof(FFF3FPImageInfo) || info.version != 20) return FFFResult::InvalidArgument;
     // The details were built on the worker thread while the media was opened;
     // handing out that copy keeps the decoder-owned frames off the caller's
@@ -7894,6 +8038,27 @@ FFFResult PlayerSession::GetImageInfo(FFF3FPImageInfo& info) const noexcept {
     { std::lock_guard lock(snapshotMutex_);
       if (!hasPublishedImageInfo_) return FFFResult::InvalidState;
       info = publishedImageInfo_; }
+    return FFFResult::Success;
+}
+
+FFFResult PlayerSession::SetRawProcessingOptions(const FFF3FPRawOptions& options) noexcept {
+    if (!ValidateRawOptions(options)) return FFFResult::InvalidArgument;
+    // The worker owns rawOptions_; queueing the write keeps the setter safe from
+    // any thread and guarantees it lands before a subsequent Open command.
+    Enqueue([this, options] { rawOptions_ = options; });
+    return FFFResult::Success;
+}
+
+FFFResult PlayerSession::GetRawInfo(FFF3FPRawInfo& info) const noexcept {
+    if (info.size < sizeof(FFF3FPRawInfo) || info.version != 1) return FFFResult::InvalidArgument;
+    std::lock_guard lock(snapshotMutex_);
+    if (!hasPublishedRawInfo_) {
+        info = {};
+        info.size = sizeof(FFF3FPRawInfo);
+        info.version = 1;
+        return FFFResult::NotSupported;
+    }
+    info = publishedRawInfo_;
     return FFFResult::Success;
 }
 
@@ -7919,8 +8084,11 @@ void PlayerSession::BuildImageInfo(FFF3FPImageInfo& info) const noexcept {
     // EXIF orientation arrives as a display matrix on the decoded frame.
     // av_display_rotation_get returns NaN when there is no usable matrix, which
     // stays reported as unknown rather than silently meaning "no rotation".
+    // LibRaw already applies sizes.flip inside dcraw_make_mem_image, so the
+    // retained frame is upright and the renderer must not rotate it again.
     info.rotationQuarterTurns = 0xFFFFFFFFu;
-    if (frame != nullptr) {
+    if (rawStill_ != nullptr) info.rotationQuarterTurns = 0;
+    if (frame != nullptr && rawStill_ == nullptr) {
         const auto* matrix = av_frame_get_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX);
         if (matrix != nullptr && matrix->size >= 9 * sizeof(std::int32_t)) {
             const auto angle = av_display_rotation_get(
@@ -8171,6 +8339,7 @@ void PlayerSession::FlushAtEnd() noexcept {
 
 FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame,
     const bool exact) noexcept {
+    RawTrace("DoSeek enter");
     if (!growingInput_) StopSoftwareVideoDecode();
     if (disc_) {
         if (!disc_->Seek(position)) { ReportError(FFFResult::NotSupported, "This disc position cannot be seeked.", "seek"); return FFFResult::NotSupported; }
@@ -8181,8 +8350,7 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     if (!format_) return FFFResult::Success;
     position = std::clamp<std::int64_t>(position, 0, snapshot_.durationKnown ? snapshot_.duration100ns : position);
     // Still-image seek is a no-op: single-image demuxers have no seekable timeline.
-    if (staticImage_) { PublishSnapshot(); return FFFResult::Success; }
-    auto decodeStartPosition = position;
+    if (staticImage_) { PublishSnapshot(); return FFFResult::Success; }    auto decodeStartPosition = position;
     const auto referenceStream = videoStream_ >= 0 ? videoStream_ : audioStream_;
     // 时间戳定位对"没有 read_seek 的解容器"会退到去找一对时间戳——那要把输入一路读下去。
     // 找不到时它返回失败，可输入指针已经停在末尾：裸 Annex-B 就是这个形状，Seek 返回 -5
@@ -8956,6 +9124,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     // observe the flag after the object is gone.
     if (disc_) { discOpened_.store(false, std::memory_order_release); disc_->CloseDemux(&format_); disc_.reset(); }
     else CloseFormat(&format_, formatIo_);
+    rawStill_.reset();
     discPositionOffset_ = 0; discGraphicsSequence_ = 0; discDrained_ = false;
     discInvalidPackets_ = 0;
     videoRenderer_.SetDiscAspect(0);
@@ -8979,7 +9148,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     animatedImage_ = false;
     fragmentedMp4_ = false;
     sessionWrapLoop_ = false; sessionWrapFailures_ = 0;
-    { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = false; }
+    { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = false; hasPublishedRawInfo_ = false; publishedRawInfo_ = {}; }
     audioBlockedUntilVideoFrame_ = false;
     playbackPreroll_ = false;
     audioUnblockVideoGeneration_ = 0;
@@ -9097,6 +9266,7 @@ double PlayerSession::MediaFrameRateCeilingHz(const AVStream* stream) const noex
 }
 
 void PlayerSession::RebuildMediaInfo() noexcept {
+    RawTrace("RebuildMediaInfo enter");
     std::lock_guard codecLock(softwareVideoCodecMutex_);
     if (!format_) return;
     // Publish the per-media frame-rate ceiling on every media-info rebuild. This runs

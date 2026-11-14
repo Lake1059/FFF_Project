@@ -221,6 +221,7 @@ Public Class 设置
     Public Property 关联常见图片 As Boolean = False
     Public Property 关联不常见图片 As Boolean = False
     Public Property 关联老旧图片 As Boolean = False
+    Public Property 关联相机RAW As Boolean = False
 
     Public Property SP_窗口边框颜色_A As Integer = 255
     Public Property SP_窗口边框颜色_R As Integer = Color.Gray.R

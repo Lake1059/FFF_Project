@@ -36,15 +36,15 @@ Public NotInheritable Class 播放列表
         ".png", ".jpg", ".jpeg", ".jpe", ".gif", ".apng", ".webp", ".jxl", ".bmp", ".tif", ".tiff",
         ".ico", ".avif", ".avifs", ".heic", ".heif", ".jxr", ".wdp", ".hdp"
     }
-    ' 相机 RAW 只作为「当前不支持」的识别口径：目标 FFmpeg 构建不含 dcraw，且它们
-    ' 不在上面两个白名单内。刻意不收 .dng/.raw/.yuv/.rgb —— 这些可能落到 image2 或
-    ' rawvideo 通用通路，交给 FFmpeg 自己判定，不能提前拦死。
-    Private Shared ReadOnly 相机RAW扩展名 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-        ".cr2", ".cr3", ".nef", ".nrw", ".arw", ".srf", ".sr2",
-        ".rw2", ".orf", ".raf", ".pef", ".srw", ".3fr", ".fff",
-        ".iiq", ".k25", ".kdc", ".mrw", ".rwl", ".x3f"
-    }
-    Friend Const 相机RAW格式筛选器 As String = "相机 RAW 相关格式（当前不支持）|*.cr2;*.cr3;*.nef;*.nrw;*.arw;*.srf;*.sr2;*.rw2;*.orf;*.raf;*.pef;*.srw;*.3fr;*.fff;*.iiq;*.k25;*.kdc;*.mrw;*.rwl;*.x3f"
+
+    Shared Sub New()
+        ' RAW 由内核的 LibRaw 前置分支解码（RawStillSource），宿主把它当静态图片。
+        ' 两个白名单都并入同一份清单：只加媒体列表会让“图片模式/前后预取”仍把它当视频。
+        媒体扩展名.UnionWith(Raw格式.扩展名)
+        图片扩展名.UnionWith(Raw格式.扩展名)
+    End Sub
+
+    Friend Shared ReadOnly 相机RAW格式筛选器 As String = Raw格式.筛选器
     Private Const 自动列表最大数量 As Integer = 1000
     Private Shared ReadOnly 自动列表比较器 As IComparer(Of 播放列表项) = Comparer(Of 播放列表项).Create(
         Function(a, b) 比较媒体路径(a.路径, b.路径))
@@ -413,7 +413,7 @@ Public NotInheritable Class 播放列表
     End Function
 
     Friend Shared Function 是相机RAW文件(路径 As String) As Boolean
-        Return Not String.IsNullOrWhiteSpace(路径) AndAlso 相机RAW扩展名.Contains(IO.Path.GetExtension(路径))
+        Return Raw格式.是RAW(路径)
     End Function
 
     Friend Shared Function 规范本地文件(值 As String) As String

@@ -15,6 +15,10 @@
     <ProjectReference Include="..\FFF.Player\FFF.Player.vbproj" />
     <None Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" Link="FFF.Native.dll"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- 关联回归用 Raw格式.X3F可用 判断随包 LibRaw 的能力位；测试进程必须能加载同一份 DLL。 -->
+    <None Include="..\third_party\libraw\bin\x64\libraw.dll" Link="libraw.dll"
+          Condition="Exists('..\third_party\libraw\bin\x64\libraw.dll')"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
