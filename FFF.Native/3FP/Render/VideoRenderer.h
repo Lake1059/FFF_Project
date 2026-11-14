@@ -895,6 +895,13 @@ private:
     // what Render() computed: metadata arriving later must not change how samples decode.
     bool lastFrameDeclaresTrc_ = false;
     std::uint32_t lastTransferFromFrame_ = 0u;
+    // One-shot diagnostics. A contradictory or unrepresentable CICP tag is a property of
+    // the stream, not of a frame, so it is worth one log line per session rather than one
+    // per frame -- and a player that silently renders the wrong curve is undebuggable.
+    // mutable: ResolveDecodeTransfer is const and owns the HDR-contrary-tag report.
+    mutable std::atomic<bool> warnedSdrTagOnHdr_{ false };
+    mutable std::atomic<bool> warnedUnsupportedPrimaries_{ false };
+    mutable std::atomic<bool> warnedUnsupportedTransfer_{ false };
     // Last HDR10 metadata block handed to the swap chain. With ST 2094 metadata
     // the content-light fields vary per scene, and re-submitting every frame
     // makes the display tone mapping hunt, so submissions are gated on a real
@@ -1304,6 +1311,10 @@ private:
     float sourcePeakNits_;
     HdrProcessor hdrProcessor_;
     std::vector<std::uint8_t> convertedRgb_;
+    // Packed RGBA32F staging for planar/half GBR frames. A member for the same reason
+    // convertedRgb_ is one: reallocating a 4K/8K buffer (132 MB / 530 MB) every frame is
+    // both a cost and, inside Render's noexcept frame, a std::terminate on bad_alloc.
+    std::vector<float> packedFloat_;
     mutable std::mutex deviceMutex_;
     mutable std::mutex presentMutex_;
     mutable std::mutex timedTextMutex_;

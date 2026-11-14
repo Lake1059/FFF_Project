@@ -296,6 +296,7 @@ void HdrProcessor::ConfigureStream(const AVCodecParameters* parameters) noexcept
     next.targetPeakNits = ResolveTargetPeak(targetPeakOverrideNits_, next.display);
     streamState_ = next;
     frameState_ = next;
+    lastBitstreamFrameIndex_ = kUnknownFrameIndex;
 }
 
 HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
@@ -311,6 +312,13 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         frameState_ = next;
         return frameState_;
     }
+
+    // Never carry a bitstream curve from a later frame across a backward seek
+    // or a repeated frame. Injected scene tables are resolved separately below.
+    if (frameIndex != kUnknownFrameIndex && lastBitstreamFrameIndex_ != kUnknownFrameIndex &&
+        frameIndex <= lastBitstreamFrameIndex_)
+        frameState_.dynamic = {};
+    lastBitstreamFrameIndex_ = frameIndex;
 
     auto dynamicSourcePeak = false;
     // The container's stream-level transfer label is a guess; the frame's own
@@ -429,8 +437,18 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         // bounded number of frames: past that the stream is treated as not
         // carrying dynamic metadata at all, which also stops a stale snapshot
         // surviving a seek.
+        // A stream declared as HDR10+ can omit this frame's SEI entirely.
+        // Capture whether *this* frame carried its own dynamic payload before the kind
+        // is retained: everything below is about frames that carry nothing, and must
+        // never overwrite or drop a curve that was parsed a few lines above.
+        const bool freshDynamic = next.dynamic.kind != HdrMetadataKind::None;
+        // Retain only the kind here; the bounded branch below owns the curve.
+        if (!freshDynamic &&
+            streamState_.format == FFF3FPHdrFormat::Hdr10Plus &&
+            frameState_.dynamic.kind == HdrMetadataKind::Hdr10Plus)
+            next.dynamic.kind = HdrMetadataKind::Hdr10Plus;
         const bool carriedMetadata = next.dynamic.kind != HdrMetadataKind::None;
-        if (carriedMetadata && !dynamicSourcePeak && !injectedActive_) {
+        if (!freshDynamic && carriedMetadata && !dynamicSourcePeak && !injectedActive_) {
             if (frameState_.dynamic.kind == next.dynamic.kind &&
                 frameState_.dynamic.heldFrames < kHdrMetadataHoldFrameLimit) {
                 next.dynamic = frameState_.dynamic;
@@ -442,7 +460,12 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
                     dynamicSourcePeak = true;
                 }
             } else if (frameState_.dynamic.heldFrames >= kHdrMetadataHoldFrameLimit) {
-                // Stale beyond the limit: drop it so the static path takes over.
+                // Stale beyond the limit: drop it so the static path takes over. This
+                // branch is only reachable for frames that carry no payload of their
+                // own (see freshDynamic above), so a curve parsed this frame cannot be
+                // discarded here -- that was the one case where the limit ate fresh
+                // evidence: a 60-frame gap followed by an SEI whose maxscl had no
+                // usable peak.
                 next.dynamic = HdrDynamicMetadata{};
                 next.dynamicMetadata = false;
             }
@@ -493,6 +516,7 @@ void HdrProcessor::Reset() noexcept {
     lastUninjectedState_ = {};
     haveUninjectedState_ = false;
     lastLookupIndex_ = kUnknownFrameIndex;
+    lastBitstreamFrameIndex_ = kUnknownFrameIndex;
     // Cleared here too: until the new stream's first frame is resolved, reporting
     // the previous stream's Injected source would be a claim with nothing behind it.
     injectedActive_ = false;

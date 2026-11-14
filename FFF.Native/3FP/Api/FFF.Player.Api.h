@@ -259,9 +259,10 @@ struct FFF3FPSnapshot {
     // Advances only after a real demuxer seek succeeds and the new media
     // position has been published. Overlay producers use it to discard old state.
     std::uint64_t timelineGeneration;
-    // API v7 HDR diagnostics. Dynamic metadata is copied into renderer-owned
-    // state before the decoded AVFrame is released, so these values always
-    // describe the cached/presented frame rather than the next decoded frame.
+    // API v7 HDR diagnostics. hdrFormat/hdrProcessingPath/dynamicHdrMetadataActive
+    // come from the stream-level classification (container tags plus coded side
+    // data), re-resolved on display/target changes; they do not follow per-frame
+    // SEI presence. The per-frame ST 2094 readouts are the dynamicMetadata* fields.
     FFF3FPHdrFormat hdrFormat;
     std::uint32_t compatibleHdrFormats;
     FFF3FPHdrProcessingPath hdrProcessingPath;
