@@ -37,6 +37,13 @@ Public Class 设置
     ' 音频源码直通三态（0=自动 1=强制 2=关，默认自动）。直通要接管整条轨并抢 WASAPI
     ' 独占，与单声道/变速/床渲染天然互斥——内核侧直接拒绝，UI 侧在这里联动提示。
     Public Property 音频直通选项 As Integer = 0
+    ' 蓝牙低延迟：仅在默认输出被识别为已连接蓝牙端点时生效。额外提前量为正 = 音频更早，
+    ' 用于吸收设备型号/固件与屏幕响应差异；0 表示只按协议区间中值补偿。
+    Public Property 蓝牙低延迟模式 As Boolean = False
+    Public Property 蓝牙额外提前量毫秒 As Integer = 0
+    ' 0=自动（按协议区间），1..9 对应 A2DP/LE codec 手动覆盖。Windows 用户态不暴露
+    ' 活动 codec，所以这里不做“自动识别 codec”的假承诺；用户按耳机/驱动实际编码选择。
+    Public Property 蓝牙音频编码 As Integer = 0
     Public Property 自动切换到真实HDR高亮 As Boolean = True
     Public Property HDR峰值亮度选项 As Integer = 0
     Public Property HDR峰值亮度 As Integer = 0
@@ -304,6 +311,8 @@ Public Class 设置
         If 双耳策略选项 = CInt(双耳策略.自动) Then 双耳策略形态 = 0
         If 双耳策略形态 < 0 OrElse 双耳策略形态 > 10 Then 双耳策略形态 = 0
         If 音频直通选项 < 0 OrElse 音频直通选项 > 2 Then 音频直通选项 = 0
+        蓝牙额外提前量毫秒 = Math.Clamp(蓝牙额外提前量毫秒, -100, 100)
+        蓝牙音频编码 = Math.Clamp(蓝牙音频编码, 0, 9)
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
         HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)
