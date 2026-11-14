@@ -67,6 +67,21 @@ Public Enum 蓝牙音频协议
     未知 = 4
 End Enum
 
+''' <summary>A2DP/LE Audio 编码。自动 = 按协议区间；其余为用户手动指定。
+''' Windows 用户态不暴露活动 codec，所以这里不假装能自动识别。</summary>
+Public Enum 蓝牙音频编码
+    自动 = 0
+    SBC = 1
+    AAC = 2
+    AptX = 3
+    AptXHD = 4
+    AptXLL = 5
+    LDAC = 6
+    LHDC = 7
+    L2HC = 8
+    LC3 = 9
+End Enum
+
 ''' <summary>蓝牙延迟补偿的纯算术层。内核 FFF3FP_SetAudioDelay 正值 = 音频更晚；
 ''' 蓝牙让声音晚到 L_BT，屏幕让画面晚到 L_disp，所以 d = L_disp - L_BT - 用户额外提前量。</summary>
 Public Module 蓝牙音频延迟策略
@@ -98,6 +113,72 @@ Public Module 蓝牙音频延迟策略
         End Select
     End Function
 
+    ''' <summary>编码的厂商标称/经验延迟区间；中值对应常见 codec 表的预估值。
+    ''' aptX LL 表只标“≤40ms”，这里取 40ms 作为保守上限，避免少补。
+    ''' 自动返回 (0,0)，由调用方退回协议区间。</summary>
+    Public Function 编码区间(编码 As 蓝牙音频编码) As (下界 As Integer, 上界 As Integer)
+        Select Case 编码
+            Case 蓝牙音频编码.SBC : Return (190, 210)
+            Case 蓝牙音频编码.AAC : Return (140, 160)
+            Case 蓝牙音频编码.AptX : Return (110, 130)
+            Case 蓝牙音频编码.AptXHD : Return (120, 140)
+            Case 蓝牙音频编码.AptXLL : Return (40, 40)
+            Case 蓝牙音频编码.LDAC : Return (120, 140)
+            Case 蓝牙音频编码.LHDC : Return (110, 130)
+            Case 蓝牙音频编码.L2HC : Return (80, 100)
+            Case 蓝牙音频编码.LC3 : Return (30, 100)
+            Case Else : Return (0, 0)
+        End Select
+    End Function
+
+    Public Function 编码名称(编码 As 蓝牙音频编码) As String
+        Select Case 编码
+            Case 蓝牙音频编码.SBC : Return "SBC"
+            Case 蓝牙音频编码.AAC : Return "AAC"
+            Case 蓝牙音频编码.AptX : Return "aptX"
+            Case 蓝牙音频编码.AptXHD : Return "aptX HD"
+            Case 蓝牙音频编码.AptXLL : Return "aptX LL"
+            Case 蓝牙音频编码.LDAC : Return "LDAC"
+            Case 蓝牙音频编码.LHDC : Return "LHDC/HWA"
+            Case 蓝牙音频编码.L2HC : Return "L2HC"
+            Case 蓝牙音频编码.LC3 : Return "LC3"
+            Case Else : Return "自动"
+        End Select
+    End Function
+
+    ''' <summary>手动编码是否覆盖当前协议：A2DP 接受表内 A2DP 编码（不含 LE 的 LC3）；
+    ''' LE 只接受 LC3；未知蓝牙允许用户声明；HFP 不接受。</summary>
+    Public Function 是否使用编码(协议 As 蓝牙音频协议, 编码 As 蓝牙音频编码) As Boolean
+        If 编码 = 蓝牙音频编码.自动 Then Return False
+        Select Case 协议
+            Case 蓝牙音频协议.A2DP
+                Return 编码 <> 蓝牙音频编码.LC3
+            Case 蓝牙音频协议.LEAudio
+                Return 编码 = 蓝牙音频编码.LC3
+            Case 蓝牙音频协议.未知
+                Return True
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    ''' <summary>本次补偿实际采用的蓝牙侧区间：手动编码优先，其次端点探测区间，
+    ''' 最后回退协议区间。状态行与计算共用，避免显示值/下发值不一致。</summary>
+    Public Function 有效延迟区间(信息 As 蓝牙音频信息,
+                                 编码 As 蓝牙音频编码) As (下界 As Integer, 上界 As Integer)
+        If 信息 Is Nothing Then Return (0, 0)
+        If 是否使用编码(信息.协议, 编码) Then
+            Dim 编码范围 = 编码区间(编码)
+            If 编码范围.下界 > 0 AndAlso 编码范围.上界 > 0 Then Return 编码范围
+        End If
+        If 信息.延迟下界毫秒 > 0 AndAlso 信息.延迟上界毫秒 > 0 AndAlso
+            信息.延迟上界毫秒 >= 信息.延迟下界毫秒 Then
+            Return (信息.延迟下界毫秒, 信息.延迟上界毫秒)
+        End If
+        Dim 回退协议 = If(信息.协议 = 蓝牙音频协议.无, 蓝牙音频协议.未知, 信息.协议)
+        Return 协议区间(回退协议)
+    End Function
+
     ''' <summary>按刷新率估计“媒体时钟到期 → 像素发光”的软件侧延迟：
     ''' 2 个刷新周期（DWM 合成 + 扫描）+ 5ms（面板响应/调度余量）。
     ''' 低刷新率必须保留完整两帧（24Hz 约 88ms），所以上限放到 100ms；
@@ -119,22 +200,17 @@ Public Module 蓝牙音频延迟策略
         Return Math.Min(最大格式开销毫秒, 开销)
     End Function
 
-    ''' <summary>计算应下发的 SetAudioDelay 值（100ns）。未启用、非蓝牙、未连接都返回 0。</summary>
+    ''' <summary>计算应下发的 SetAudioDelay 值（100ns）。未启用、非蓝牙、未连接都返回 0。
+    ''' 指定编码只在 A2DP/未知蓝牙（LE 仅 LC3）时覆盖协议区间；HFP 仍按 HFP 区间。</summary>
     Public Function 计算补偿100纳秒(启用 As Boolean, 信息 As 蓝牙音频信息,
-                                    刷新率 As Integer, 额外提前量毫秒 As Integer) As Long
+                                    刷新率 As Integer, 额外提前量毫秒 As Integer,
+                                    Optional 编码 As 蓝牙音频编码 = 蓝牙音频编码.自动) As Long
         If Not 启用 OrElse 信息 Is Nothing OrElse Not 信息.是蓝牙 OrElse Not 信息.已连接 Then Return 0
 
-        Dim 下界 = 信息.延迟下界毫秒
-        Dim 上界 = 信息.延迟上界毫秒
-        If 下界 <= 0 OrElse 上界 <= 0 OrElse 上界 < 下界 Then
-            Dim 回退协议 = If(信息.协议 = 蓝牙音频协议.无, 蓝牙音频协议.未知, 信息.协议)
-            Dim 区间 = 协议区间(回退协议)
-            下界 = 区间.下界
-            上界 = 区间.上界
-        End If
-        If 下界 <= 0 OrElse 上界 <= 0 Then Return 0
+        Dim 区间 = 有效延迟区间(信息, 编码)
+        If 区间.下界 <= 0 OrElse 区间.上界 <= 0 Then Return 0
 
-        Dim 蓝牙毫秒 = (下界 + 上界) / 2.0 + 格式开销毫秒(信息.输出格式)
+        Dim 蓝牙毫秒 = (区间.下界 + 区间.上界) / 2.0 + 格式开销毫秒(信息.输出格式)
         Dim 屏幕毫秒 = 估计屏幕延迟毫秒(刷新率)
         Dim 微调 = Math.Max(-100, Math.Min(100, 额外提前量毫秒))
         Dim 延迟毫秒 = 屏幕毫秒 - 蓝牙毫秒 - 微调
@@ -150,8 +226,8 @@ End Module
 ''' <summary>默认输出端点的蓝牙 profile 探测（Windows 用户态）。
 ''' 能拿到：MMDevices 端点 → ContainerID / DeviceState / PKEY_AudioEngine_DeviceFormat
 ''' → BTHENUM/BTHLE 服务节点 → Service / HardwareID。
-''' 拿不到：具体 codec（SBC/AAC/aptX/LDAC）与 AVDTP Delay Reporting；只输出协议级区间，
-''' 端点 PCM 格式仅用于主机侧格式开销，不伪造 codec。</summary>
+''' 拿不到：活动 codec（SBC/AAC/aptX/LDAC）与 AVDTP Delay Reporting；这些由设置页
+''' 手动指定，策略层用 codec 表覆盖协议区间。端点 PCM 格式仅用于主机侧格式开销。</summary>
 Public Module 蓝牙音频检测器
     Private Const 渲染根 As String = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render"
     Private Const 枚举根 As String = "SYSTEM\CurrentControlSet\Enum"
