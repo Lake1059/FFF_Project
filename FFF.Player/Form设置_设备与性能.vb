@@ -169,8 +169,6 @@ Public Class Form设置_设备与性能
     Private Sub 对齐面板宽度()
         Dim 宽 = Math.Max(652, ClientSize.Width)
         If Math.Abs(ModernPanel1.Width - 宽) > 2 Then ModernPanel1.Width = 宽
-        蓝牙控制行.Width = Math.Max(617, 宽 - 35)
-        蓝牙状态行.Width = Math.Max(617, 宽 - 35)
     End Sub
 
     Private Sub Form设置_设备与性能_Resize(sender As Object, e As EventArgs) Handles MyBase.Resize
@@ -185,8 +183,8 @@ Public Class Form设置_设备与性能
         蓝牙控制行.BackColor = Color.Transparent
         蓝牙控制行.BackColor1 = Color.Transparent
         蓝牙控制行.BorderSize = 0
-        蓝牙控制行.Dock = DockStyle.None
-        蓝牙控制行.Location = New Point(15, 835)
+        蓝牙控制行.Dock = DockStyle.Top
+        蓝牙控制行.Name = "蓝牙控制行"
         蓝牙控制行.Padding = New Padding(0, 10, 0, 0)
         蓝牙控制行.Size = New Size(617, 42)
 
@@ -246,8 +244,8 @@ Public Class Form设置_设备与性能
         蓝牙状态行.BackColor = Color.Transparent
         蓝牙状态行.BackColor1 = Color.Transparent
         蓝牙状态行.BorderSize = 0
-        蓝牙状态行.Dock = DockStyle.None
-        蓝牙状态行.Location = New Point(15, 885)
+        蓝牙状态行.Dock = DockStyle.Top
+        蓝牙状态行.Name = "蓝牙状态行"
         蓝牙状态行.Size = New Size(617, 54)
 
         蓝牙状态.AutoSize = False
@@ -257,11 +255,22 @@ Public Class Form设置_设备与性能
         蓝牙状态.Text = "尚未检测蓝牙输出"
         蓝牙状态行.Controls.Add(蓝牙状态)
 
-        ' 最新页面是 652×835 的绝对定位根面板 + AutoScroll，既有行排到 y=815；
-        ' 蓝牙区接在其后，不依赖 Dock 次序，避免插进 LakeUI 图形性能组中间。
+        ' 页面是 652×835 的 Dock=Top 栈 + 窗体 AutoScroll；Dock 次序与 Add 相反，
+        ' 后加者靠上，所以把蓝牙两行插到最底部（索引 0/1），不依赖固定 y 坐标。
+        ' 运行时新增的控件不会参与 InitializeComponent 的 Dpi 自动缩放，这里按页面
+        ' 已缩放的 835 高度反推倍率，补做一次 Scale，避免 150% 下变成小号控件。
+        Dim 缩放 = CSng(Math.Max(1.0, ModernPanel1.Height / 835.0))
+        If 缩放 > 1.01 Then
+            蓝牙控制行.Scale(New SizeF(缩放, 缩放))
+            蓝牙状态行.Scale(New SizeF(缩放, 缩放))
+        End If
         ModernPanel1.Controls.Add(蓝牙状态行)
+        ModernPanel1.Controls.SetChildIndex(蓝牙状态行, 0)
         ModernPanel1.Controls.Add(蓝牙控制行)
-        ModernPanel1.Height = Math.Max(ModernPanel1.Height, 959)
+        ModernPanel1.Controls.SetChildIndex(蓝牙控制行, 1)
+        ' 设计高度 959 = 既有内容底 815 + 控制行 42 + 间隔 8 + 状态行 54 + 底部 20。
+        ' 保持与 Dpi 缩放一致的页面高度，AutoScroll 才能滚到新增区域。
+        ModernPanel1.Height = Math.Max(ModernPanel1.Height, CInt(959 * 缩放))
 
         AddHandler 蓝牙开关.CheckedChanged, AddressOf 蓝牙开关_CheckedChanged
         AddHandler 蓝牙提前量.Leave, AddressOf 蓝牙提前量_Leave
