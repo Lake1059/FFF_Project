@@ -7656,11 +7656,19 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         frame = d3d11TransferFrame_;
     }
     const auto originalFormat = static_cast<AVPixelFormat>(frame->format);
-    const bool planarFloat = originalFormat == AV_PIX_FMT_GBRPF16LE || originalFormat == AV_PIX_FMT_GBRPF32LE;
+    // FFmpeg's EXR and PFM decoders hand out planar float, with or without an alpha
+    // plane. Both shapes carry linear light and values outside [0,1]; the alpha variant
+    // used to fall through to sws, which clamps those values into 16-bit integers.
+    const bool planarFloat = originalFormat == AV_PIX_FMT_GBRPF16LE ||
+        originalFormat == AV_PIX_FMT_GBRPF32LE ||
+        originalFormat == AV_PIX_FMT_GBRAPF16LE ||
+        originalFormat == AV_PIX_FMT_GBRAPF32LE;
     const bool grayFloat = originalFormat == AV_PIX_FMT_GRAYF16LE || originalFormat == AV_PIX_FMT_GRAYF32LE;
     AVFrame packedFrame{};
     if (planarFloat || grayFloat) {
-        const bool half = originalFormat == AV_PIX_FMT_GBRPF16LE || originalFormat == AV_PIX_FMT_GRAYF16LE;
+        const bool half = originalFormat == AV_PIX_FMT_GBRPF16LE ||
+            originalFormat == AV_PIX_FMT_GRAYF16LE ||
+            originalFormat == AV_PIX_FMT_GBRAPF16LE;
         const auto width = static_cast<std::size_t>(frame->width);
         const auto height = static_cast<std::size_t>(frame->height);
         if (width > SIZE_MAX / height / 4 || width > static_cast<std::size_t>(INT_MAX) / 16) {
@@ -7685,13 +7693,16 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
             std::memcpy(&value, row + x * 4, 4);
             return value;
         };
+        const bool alphaPlane = planarFloat &&
+            (originalFormat == AV_PIX_FMT_GBRAPF16LE || originalFormat == AV_PIX_FMT_GBRAPF32LE) &&
+            frame->data[3] != nullptr;
         for (std::size_t y = 0; y < height; ++y)
             for (std::size_t x = 0; x < width; ++x) {
                 auto* rgba = packedFloat_.data() + (y * width + x) * 4;
                 rgba[0] = component(planarFloat ? 2 : 0, x, y);
                 rgba[1] = component(0, x, y);
                 rgba[2] = component(planarFloat ? 1 : 0, x, y);
-                rgba[3] = 1.0f;
+                rgba[3] = alphaPlane ? component(3, x, y) : 1.0f;
             }
         // Shallow metadata view: no AVFrame ownership is transferred or released here.
         packedFrame = *frame;
