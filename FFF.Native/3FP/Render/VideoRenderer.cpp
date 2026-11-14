@@ -4,6 +4,7 @@
 #include "3FP/Render/ShaderBytecode.h"
 #include "3FP/Render/SdrShaderBytecode.h"
 #include <emmintrin.h>
+#include <climits>
 #include "3FP/Render/NvidiaVideoExtensions.h"
 
 // Used only by the presenter thread, to keep its waits in reach of the pacing ceiling.
@@ -385,18 +386,18 @@ bool IsRec2020(const AVFrame* frame) noexcept {
         IsBt2020ColorSpace(frame->colorspace);
 }
 
-bool IsP3Primaries(const AVFrame* frame) noexcept {
-    return frame->color_primaries == AVCOL_PRI_SMPTE431 ||
-        frame->color_primaries == AVCOL_PRI_SMPTE432;
-}
-
 // Regenerate ShaderBytecode.h with tools/generate_shader_bytecode.py after HLSL changes.
-// Gamut is tri-state (709/2020/P3); source and bytecode must stay in sync.
+// Gamut and Transfer indices below must stay in sync with the shader bytecode.
 
-// Gamut: 0=709, 1=2020, 2=P3. Test primaries before matrix tags:
+// Gamut: 0=709, 1=2020, 2=Display P3, 3=DCI-P3, 4=SMPTE C, 5=PAL.
 // P3 video commonly uses BT2020_NCL matrix coefficients.
 std::uint32_t ResolveSourceGamut(const AVFrame* frame, const bool hdrSource) noexcept {
-    if (IsP3Primaries(frame)) return 2u;
+    if (frame->color_primaries == AVCOL_PRI_SMPTE431) return 3u;
+    if (frame->color_primaries == AVCOL_PRI_SMPTE432) return 2u;
+    if (frame->color_primaries == AVCOL_PRI_BT2020) return 1u;
+    if (frame->color_primaries == AVCOL_PRI_SMPTE170M || frame->color_primaries == AVCOL_PRI_SMPTE240M) return 4u;
+    if (frame->color_primaries == AVCOL_PRI_BT470BG) return 5u;
+    if (frame->color_primaries != AVCOL_PRI_UNSPECIFIED && frame->color_primaries != AVCOL_PRI_RESERVED0) return 0u;
     if (hdrSource || IsRec2020(frame)) return 1u;
     return 0u;
 }
@@ -704,13 +705,54 @@ float3 HlgToNits(float3 v) {
 }
 float LinearOne(float v) { v=saturate(v); return v<0.081 ? v/4.5 : pow((v+0.099)/1.099,1.0/0.45); }
 float3 ToLinear709(float3 v) { return float3(LinearOne(v.r),LinearOne(v.g),LinearOne(v.b)); }
-float BtOne(float v) { v=max(v,0.0); return saturate(v<0.018 ? 4.5*v : 1.099*pow(v,0.45)-0.099); }
-float3 ToBt709(float3 v) { return float3(BtOne(v.r),BtOne(v.g),BtOne(v.b)); }
+float SrgbDecode(float v) { return v<=0.04045?v/12.92:pow((v+0.055)/1.055,2.4); }
+float SrgbEncode(float v) { return v<=0.0031308?12.92*v:1.055*pow(v,1.0/2.4)-0.055; }
+float3 ToSrgb(float3 v) { return float3(SrgbEncode(v.r),SrgbEncode(v.g),SrgbEncode(v.b)); }
+float ClLinear(float v);
+// Transfer: 0=709, 1=PQ, 2=HLG, 3=scRGB, 4=sRGB, 5=gamma2.2, 6=gamma2.8, 7=linear, 8=240M.
+float DecodeSdrOne(float v) {
+    if(Transfer==0 && Kr==-1.0)return ClLinear(v);
+    if(Transfer==4)return SrgbDecode(v);
+    if(Transfer==5)return pow(max(v,0.0),2.2);
+    if(Transfer==6)return pow(max(v,0.0),2.8);
+    if(Transfer==7)return v;
+    if(Transfer==8)return v<0.0912?v/4.0:pow((v+0.1115)/1.1115,1.0/0.45);
+    return LinearOne(v);
+}
+float3 DecodeSdr(float3 v) { return float3(DecodeSdrOne(v.r),DecodeSdrOne(v.g),DecodeSdrOne(v.b)); }
+float ClLinear(float v) { return v<0.081242858298635?v/4.5:pow(max((v+0.09929682680944)/1.09929682680944,0.0),1.0/0.45); }
+float ClEncode(float v) { return v<0.018053968510807?4.5*v:1.09929682680944*pow(max(v,0.0),0.45)-0.09929682680944; }
+float3 DecodeYuv(float y,float2 c) {
+    // Negative Kr values identify non-matrix encodings without changing the cbuffer ABI.
+    if(Kr==-1.0){
+        float r=y+c.y*(c.y<=0.0?1.7184:0.9936);
+        float b=y+c.x*(c.x<=0.0?1.9404:1.5816);
+        float g=ClEncode((ClLinear(y)-0.2627*ClLinear(r)-0.0593*ClLinear(b))/0.6780);
+        return float3(r,g,b);
+    }
+    if(Kr==-2.0)return float3(y+c.y-c.x,y+c.x,y-c.y-c.x);
+    float kg=1.0-Kr-Kb;
+    return float3(y+(2.0-2.0*Kr)*c.y,
+        y-Kb*(2.0-2.0*Kb)/kg*c.x-Kr*(2.0-2.0*Kr)/kg*c.y,
+        y+(2.0-2.0*Kb)*c.x);
+}
+
 float3 To2020(float3 v) { return mul(float3x3(0.627404,0.329283,0.043313, 0.069097,0.919540,0.011362, 0.016392,0.088013,0.895595),v); }
 float3 To709(float3 v) { return mul(float3x3(1.660491,-0.587641,-0.072850, -0.124550,1.132900,-0.008349, -0.018151,-0.100579,1.118730),v); }
 // Display P3 / DCI-P3 (D65) to linear Rec.709. Not clamped: P3 red maps to a
 // negative green and blue, which the FP16 scRGB swap chain carries verbatim.
 float3 P3To709(float3 v) { return mul(float3x3(1.224810,-0.224970,-0.000025, -0.042043,1.042084,0.000018, -0.019642,-0.078649,1.098527),v); }
+// DCI-P3 uses its cinema white point; Bradford-adapt to D65 before Rec.709.
+float3 DciTo709(float3 v) { return mul(float3x3(1.157516406,-0.154962378,-0.002554028, -0.041500072,1.045567923,-0.004067852, -0.018050039,-0.078578273,1.096628312),v); }
+float3 SourceTo709(float3 v) {
+    if(Gamut==1)return To709(v);
+    if(Gamut==2)return P3To709(v);
+    if(Gamut==3)return DciTo709(v);
+    if(Gamut==4)return mul(float3x3(0.939542064,0.050181357,0.010276579, 0.017772223,0.965792862,0.016434914, -0.001621600,-0.004369750,1.005991350),v);
+    if(Gamut==5)return mul(float3x3(1.044043209,-0.044043209,0, 0,1,0, 0,0.011793378,0.988206622),v);
+    return v;
+}
+
 float Bt2390HdrToSdrPq(float value,float sourcePeak,float targetPeak) {
     float sourceMaximum=max(sourcePeak,1.0);
     float targetMaximum=clamp(targetPeak,1.0,sourceMaximum);
@@ -975,10 +1017,7 @@ float3 ReadSource(float2 uv) {
         return TransformLut.SampleLevel(LinearSampler,float3(y,chroma),0);
     y=(y-YOffset)*YScale;
     chroma=(chroma-COffset)*CScale;
-    float kg=1.0-Kr-Kb;
-    return float3(y+(2.0-2.0*Kr)*chroma.y,
-        y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
-        y+(2.0-2.0*Kb)*chroma.x);
+    return DecodeYuv(y,chroma);
 }
 float3 ReadSourceLinear(float2 uv) {
     if(InputLayout==0||InputLayout==3){
@@ -1001,10 +1040,7 @@ float3 ReadSourceLinear(float2 uv) {
         return TransformLut.SampleLevel(LinearSampler,float3(y,chroma),0);
     y=(y-YOffset)*YScale;
     chroma=(chroma-COffset)*CScale;
-    float kg=1.0-Kr-Kb;
-    return float3(y+(2.0-2.0*Kr)*chroma.y,
-        y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
-        y+(2.0-2.0*Kb)*chroma.x);
+    return DecodeYuv(y,chroma);
 }
 float2 CoverFillUv(float2 uv) {
     float sourceAspect=SourceWidth/max(SourceHeight,1.0);
@@ -1039,10 +1075,7 @@ float3 ReadSourcePanorama(float2 uv) {
         return TransformLut.SampleLevel(LinearSampler,float3(y,chroma),0);
     y=(y-YOffset)*YScale;
     chroma=(chroma-COffset)*CScale;
-    float kg=1.0-Kr-Kb;
-    return float3(y+(2.0-2.0*Kr)*chroma.y,
-        y-Kb*(2.0-2.0*Kb)/kg*chroma.x-Kr*(2.0-2.0*Kr)/kg*chroma.y,
-        y+(2.0-2.0*Kb)*chroma.x);
+    return DecodeYuv(y,chroma);
 }
 float2 EquirectangularUv(float2 uv) {
     const float radiansPerDegree=0.0174532925199433;
@@ -1085,43 +1118,19 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
     if(TransformEnabled!=0&&TransformDomain==1)
         rgb=TransformLut.SampleLevel(LinearSampler,rgb,0);
     if(ColorMode==1)return float4(rgb,1);
-    // Transfer==3: the source is already linear light (JPEG XR decodes to scRGB, whose
-    // gamma is 1.0 -- see jxrlib JXRGlue.h "scRGB formats. Gamma is 1.0", docs/70).
-    // Running the sRGB decode below would both apply the wrong curve and re-clamp the
-    // negatives/super-whites through saturate(), so pass the value through untouched.
-    // The SDR chain below still folds Rec.2020 and scales by PaperWhite, which is the
-    // correct treatment for linear input.
-    if(Transfer==3){
-        float3 alreadyLinear=rgb;
-        if(ColorMode==0){
-            // Kind-3 output matrix: this path already holds linear light, so the
-            // matrix applies directly, before the gamut conversion.
-            if(TransformEnabled!=0)
-                alreadyLinear=mul(float3x3(
-                    TransformMatrix0.x,TransformMatrix0.y,TransformMatrix0.z,
-                    TransformMatrix1.x,TransformMatrix1.y,TransformMatrix1.z,
-                    TransformMatrix2.x,TransformMatrix2.y,TransformMatrix2.z),alreadyLinear);
-            if(Gamut==1)alreadyLinear=ToBt709(To709(alreadyLinear));
-            // No saturate() here on purpose: this is the SDR chain, and its surface is
-            // UNORM -- R10G10B10A2 for sources deeper than 8-bit, B8G8R8A8 for 8-bit
-            // ones (OutputBitDepthForSource never hands SDR a float surface). Neither
-            // can hold >1.0 or <0.0, so let that conversion clamp: the limit stays a
-            // visible property of the surface, not a hidden edit to the source (docs/65).
-            return float4(alreadyLinear,1);
-        }
+    if(ColorMode==0 && Transfer!=1 && Transfer!=2){
+        // Preserve the established ordinary Rec.709 passthrough. Every explicit
+        // alternate transfer or gamut conversion ends on the sRGB SDR surface.
+        if(Transfer==0 && Gamut==0)return float4(rgb,1);
+        float3 linearRgb=Transfer==3?rgb*(80.0/SdrPeak):DecodeSdr(rgb);
+        if(TransformEnabled!=0)
+            linearRgb=mul(float3x3(
+                TransformMatrix0.x,TransformMatrix0.y,TransformMatrix0.z,
+                TransformMatrix1.x,TransformMatrix1.y,TransformMatrix1.z,
+                TransformMatrix2.x,TransformMatrix2.y,TransformMatrix2.z),linearRgb);
+        return float4(ToSrgb(SourceTo709(linearRgb)),1);
     }
-    if(ColorMode==0&&Transfer==0){
-        // Rec.2020 is folded into Rec.709 here because the SDR chain cannot hold
-        // it. P3 keeps its historical Rec.709 passthrough on this path.
-        //
-        // The kind-3 output matrix deliberately does not run here: with Gamut == 0
-        // this path returns the *coded* signal untouched (the surface is sRGB-encoded),
-        // and the matrix is defined on linear light. The kind-3 table itself still
-        // runs -- it lives in the coded domain, upstream of this point.
-        if(Gamut==1)rgb=ToBt709(To709(ToLinear709(rgb)));
-        return float4(rgb,1);
-    }
-    float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):(Transfer==3?rgb:ToLinear709(rgb)*((TransformEnabled!=0&&TransformDomain==0)?DynamicTargetPeak:PaperWhite)));
+    float3 nits=Transfer==1?PqToNits(rgb):(Transfer==2?HlgToNits(rgb):(Transfer==3?rgb*80.0:DecodeSdr(rgb)*((TransformEnabled!=0&&TransformDomain==0)?DynamicTargetPeak:PaperWhite)));
     // Kind-3 domain-0 tables are encoded relative to the display target the
     // host resolved (the bake tail tone-maps onto it and divides by it), so the
     // decode white follows that same number instead of the SDR paper white.
@@ -1140,10 +1149,10 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
         // Tone mapping is delegated to the display via the HDR metadata.
         // Gamut 2 (P3) uses its own matrix; both are pure linear maps whose
         // negative components FP16 carries as-is.
-        float3 rec709Nits=Gamut==0?nits:(Gamut==1?To709(nits):P3To709(nits));
+        float3 rec709Nits=SourceTo709(nits);
         return float4(rec709Nits/80.0,1);
     }
-    if(Gamut==0)nits=To2020(nits);
+    if(Gamut!=1)nits=To2020(SourceTo709(nits));
     // BT.2390 operates on IPT intensity before Rec.2020-to-Rec.709 gamut
     // conversion. Chroma follows the reduced IPT gamut hull.
     if(DynamicEnabled!=0) {
@@ -1188,10 +1197,10 @@ float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
             ipt.yz*=chromaScale;
         }
         float3 mapped2020=IptToLinear2020Nits(ipt);
-        float3 sdr=ToBt709(To709(mapped2020)/SdrPeak);
+        float3 sdr=ToSrgb(To709(mapped2020)/SdrPeak);
         return float4(sdr,1);
     }
-    float3 sdr=ToBt709(To709(ToneHdrToSdr(nits,HdrPeak,SdrPeak))/SdrPeak);
+    float3 sdr=ToSrgb(To709(ToneHdrToSdr(nits,HdrPeak,SdrPeak))/SdrPeak);
     return float4(sdr,1);
 })";
 
@@ -1863,6 +1872,8 @@ constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
     // carries. See docs/65 (measured saturation 2.79%-10.73%) and docs/68.
     case AV_PIX_FMT_RGBAF16LE:
         return {3, 16, 1.0f, 0, 0};
+    case AV_PIX_FMT_RGBAF32LE:
+        return {3, 32, 1.0f, 0, 0};
     default:
         return {};
     }
@@ -1963,7 +1974,15 @@ void YuvCoefficients(const AVFrame* frame, const bool rec2020Fallback,
     float& kr, float& kb) noexcept {
     const auto colorSpace = frame != nullptr ? frame->colorspace : AVCOL_SPC_UNSPECIFIED;
     const auto width = frame != nullptr ? frame->width : 0;
-    if (IsBt2020ColorSpace(colorSpace) ||
+    if (colorSpace == AVCOL_SPC_BT2020_CL) {
+        kr = -1.0f; kb = 0.0593f;
+    } else if (colorSpace == AVCOL_SPC_YCGCO) {
+        kr = -2.0f; kb = 0.0f;
+    } else if (colorSpace == AVCOL_SPC_FCC) {
+        kr = 0.30f; kb = 0.11f;
+    } else if (colorSpace == AVCOL_SPC_SMPTE240M) {
+        kr = 0.212f; kb = 0.087f;
+    } else if (IsBt2020ColorSpace(colorSpace) ||
         (colorSpace == AVCOL_SPC_UNSPECIFIED && rec2020Fallback)) {
         kr = 0.2627f; kb = 0.0593f;
     } else if (colorSpace == AVCOL_SPC_BT709 || (colorSpace == AVCOL_SPC_UNSPECIFIED && width >= 1280)) {
@@ -4200,7 +4219,7 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             if (inputLayout == 3)
                 // Fully general floating-point range: negatives and super-whites survive.
                 // Half-float is bit-compatible with rgba f16, so no swscale is involved.
-                texture.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                texture.Format = bitDepth == 32 ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R16G16B16A16_FLOAT;
             else if (inputLayout == 0) texture.Format = bitDepth <= 8 ?
                 DXGI_FORMAT_B8G8R8A8_UNORM : DXGI_FORMAT_R16G16B16A16_UNORM;
             else if (inputLayout == 2 && plane == 1)
@@ -5774,9 +5793,10 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
         // Layout 3 (float RGB) is interleaved RGBA in a single plane, exactly like
         // layout 0, so it must use the same 4-channel float format. Without this the
         // `else` arm below degrades it to R16_FLOAT and only the red channel survives.
-        const auto format = layout == 0 || layout == 3 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+        const auto format = layout == 3 && sourceBitDepth_ == 32 ? DXGI_FORMAT_R32G32B32A32_FLOAT :
+            (layout == 0 || layout == 3 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
             (layout == 2 && plane == 1 ? DXGI_FORMAT_R16G16_FLOAT :
-                DXGI_FORMAT_R16_FLOAT);
+                DXGI_FORMAT_R16_FLOAT));
         const auto ensure = EnsurePlaneScaleChain(plane, planeWidth, planeHeight,
             targetWidth, targetHeight, static_cast<std::uint32_t>(format));
         if (ensure != FFFResult::Success) return ensure;
@@ -7358,8 +7378,7 @@ std::uint32_t PlayerVideoRenderer::ResolveDecodeTransfer(
     //   1) Otherwise follow the frame's own color_trc when it declares one.
     //   2) Fall back to the format-based inference for frames that declare
     //      nothing (previous behaviour).
-    if (hdrState.format != FFF3FPHdrFormat::Sdr && lastFrameDeclaresTrc_ &&
-        lastTransferFromFrame_ != 0u)
+    if (lastFrameDeclaresTrc_)
         return lastTransferFromFrame_;
     return hdrState.format == FFF3FPHdrFormat::Hlg ? 2u :
         (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
@@ -7371,9 +7390,10 @@ void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
     // thread that received FFF3FP_SetHdrDynamicMetadata.
     if (!hasCachedVideo_ || context_ == nullptr) return;
     const auto hdrState = hdrProcessor_.State();
-    cachedVideoSettings_.transfer = ResolveDecodeTransfer(hdrState);
-    cachedVideoSettings_.hdrPeak = cachedVideoSettings_.transfer == 0 ?
-        100.0f : hdrState.sourcePeakNits;
+    cachedVideoSettings_.transfer = decodedTransfer_.load(std::memory_order_acquire) == 3u ?
+        3u : ResolveDecodeTransfer(hdrState);
+    cachedVideoSettings_.hdrPeak = cachedVideoSettings_.transfer == 1 || cachedVideoSettings_.transfer == 2 ?
+        hdrState.sourcePeakNits : 100.0f;
     sourcePeakNits_ = cachedVideoSettings_.hdrPeak;
     cachedVideoSettings_.paperWhite = EffectivePaperWhiteNits();
     cachedVideoSettings_.targetPeak = hdrState.targetPeakNits;
@@ -7381,7 +7401,7 @@ void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
     // frame path would have refused.
     DynamicShaderSettings dynamicSettings{};
     std::array<float, kDynamicCurveLutWidth * kHdrMaxProcessingWindows> dynamicCurves{};
-    const bool useDynamicCurve = cachedVideoSettings_.transfer != 0 &&
+    const bool useDynamicCurve = (cachedVideoSettings_.transfer == 1 || cachedVideoSettings_.transfer == 2) &&
         actualMode_ != FFF3FPColorMode::MapToHdr &&
         actualMode_ != FFF3FPColorMode::RawHdrAsSdr &&
         BuildDynamicToneSettings(hdrState.dynamic, dynamicSettings, dynamicCurves);
@@ -7592,6 +7612,46 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         av_frame_copy_props(d3d11TransferFrame_, frame);
         frame = d3d11TransferFrame_;
     }
+    const auto originalFormat = static_cast<AVPixelFormat>(frame->format);
+    const bool planarFloat = originalFormat == AV_PIX_FMT_GBRPF16LE || originalFormat == AV_PIX_FMT_GBRPF32LE;
+    const bool grayFloat = originalFormat == AV_PIX_FMT_GRAYF16LE || originalFormat == AV_PIX_FMT_GRAYF32LE;
+    std::vector<float> packedFloat;
+    AVFrame packedFrame{};
+    if (planarFloat || grayFloat) {
+        const bool half = originalFormat == AV_PIX_FMT_GBRPF16LE || originalFormat == AV_PIX_FMT_GRAYF16LE;
+        const auto width = static_cast<std::size_t>(frame->width);
+        const auto height = static_cast<std::size_t>(frame->height);
+        if (width > SIZE_MAX / height / 4 || width > static_cast<std::size_t>(INT_MAX) / 16) {
+            SetError("The floating frame dimensions exceed the upload buffer limits.");
+            return FFFResult::InvalidArgument;
+        }
+        packedFloat.resize(width * height * 4);
+        const auto component = [frame, half](const int plane, const std::size_t x, const std::size_t y) {
+            const auto* row = frame->data[plane] + static_cast<std::ptrdiff_t>(y) * frame->linesize[plane];
+            if (half) {
+                std::uint16_t value;
+                std::memcpy(&value, row + x * 2, 2);
+                return DirectX::PackedVector::XMConvertHalfToFloat(value);
+            }
+            float value;
+            std::memcpy(&value, row + x * 4, 4);
+            return value;
+        };
+        for (std::size_t y = 0; y < height; ++y)
+            for (std::size_t x = 0; x < width; ++x) {
+                auto* rgba = packedFloat.data() + (y * width + x) * 4;
+                rgba[0] = component(planarFloat ? 2 : 0, x, y);
+                rgba[1] = component(0, x, y);
+                rgba[2] = component(planarFloat ? 1 : 0, x, y);
+                rgba[3] = 1.0f;
+            }
+        // Shallow metadata view: no AVFrame ownership is transferred or released here.
+        packedFrame = *frame;
+        packedFrame.format = AV_PIX_FMT_RGBAF32LE;
+        packedFrame.data[0] = reinterpret_cast<std::uint8_t*>(packedFloat.data());
+        packedFrame.linesize[0] = static_cast<int>(width * 16);
+        frame = &packedFrame;
+    }
     const auto hdrState = hdrProcessor_.ProcessFrame(
         frame, hdrPeakNits_, paperWhiteNits_, frameIndex);
     struct PlaybackWorkGuard final {
@@ -7606,11 +7666,37 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // Captured here, before any early return: the refresh path re-resolves the
     // transfer from these, and pairing this frame's format with the previous
     // frame's trc is exactly what the frame's own declaration is there to prevent.
-    const bool frameDeclaresTrc = frame != nullptr && frame->color_trc != AVCOL_TRC_UNSPECIFIED;
+    switch (frame->color_primaries) {
+    case AVCOL_PRI_RESERVED0: case AVCOL_PRI_UNSPECIFIED: case AVCOL_PRI_BT709:
+    case AVCOL_PRI_BT470BG: case AVCOL_PRI_SMPTE170M: case AVCOL_PRI_SMPTE240M:
+    case AVCOL_PRI_BT2020: case AVCOL_PRI_SMPTE431: case AVCOL_PRI_SMPTE432: break;
+    default:
+        SetError("The source color primaries are not supported by this display path.");
+        return FFFResult::NotSupported;
+    }
+    switch (frame->color_trc) {
+    case AVCOL_TRC_RESERVED0: case AVCOL_TRC_UNSPECIFIED: case AVCOL_TRC_BT709:
+    case AVCOL_TRC_GAMMA22: case AVCOL_TRC_GAMMA28: case AVCOL_TRC_SMPTE170M:
+    case AVCOL_TRC_SMPTE240M: case AVCOL_TRC_LINEAR: case AVCOL_TRC_IEC61966_2_1:
+    case AVCOL_TRC_BT2020_10: case AVCOL_TRC_BT2020_12:
+    case AVCOL_TRC_SMPTE2084: case AVCOL_TRC_ARIB_STD_B67: break;
+    default:
+        SetError("The source transfer function is not supported by this display path.");
+        return FFFResult::NotSupported;
+    }
+    const bool frameDeclaresTrc = frame->color_trc != AVCOL_TRC_UNSPECIFIED && frame->color_trc != AVCOL_TRC_RESERVED0;
     auto transferFromFrame = 0u;
     if (frameDeclaresTrc) {
-        transferFromFrame = frame->color_trc == AVCOL_TRC_ARIB_STD_B67 ? 2u :
-            frame->color_trc == AVCOL_TRC_SMPTE2084 ? 1u : 0u;
+        switch (frame->color_trc) {
+        case AVCOL_TRC_SMPTE2084: transferFromFrame = 1u; break;
+        case AVCOL_TRC_ARIB_STD_B67: transferFromFrame = 2u; break;
+        case AVCOL_TRC_IEC61966_2_1: transferFromFrame = 4u; break;
+        case AVCOL_TRC_GAMMA22: transferFromFrame = 5u; break;
+        case AVCOL_TRC_GAMMA28: transferFromFrame = 6u; break;
+        case AVCOL_TRC_LINEAR: transferFromFrame = 7u; break;
+        case AVCOL_TRC_SMPTE240M: transferFromFrame = 8u; break;
+        default: break;
+        }
     }
     lastFrameDeclaresTrc_ = frameDeclaresTrc;
     lastTransferFromFrame_ = transferFromFrame;
@@ -7639,6 +7725,24 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // negatives and super-whites float RGB legitimately carries (see docs/65, docs/70).
     const auto floatRgb = input.layout == 3;
     const auto directYuv = input.layout != 0 && !floatRgb;
+    const auto* sourceDescriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format));
+    const bool packedYuv = !directYuv && !floatRgb && sourceDescriptor != nullptr &&
+        (sourceDescriptor->flags & AV_PIX_FMT_FLAG_RGB) == 0;
+    if (packedYuv && (frame->colorspace == AVCOL_SPC_BT2020_CL || frame->colorspace == AVCOL_SPC_YCGCO)) {
+        SetError("The packed source requires a planar CL or YCgCo component transform.");
+        return FFFResult::NotSupported;
+    }
+
+    const bool sourceYuv = directYuv || (packedYuv && sourceDescriptor->nb_components >= 3);
+    if (sourceYuv && frame->colorspace != AVCOL_SPC_UNSPECIFIED &&
+        frame->colorspace != AVCOL_SPC_BT709 && frame->colorspace != AVCOL_SPC_BT470BG &&
+        frame->colorspace != AVCOL_SPC_SMPTE170M && frame->colorspace != AVCOL_SPC_FCC &&
+        frame->colorspace != AVCOL_SPC_SMPTE240M && frame->colorspace != AVCOL_SPC_YCGCO &&
+        frame->colorspace != AVCOL_SPC_BT2020_NCL && frame->colorspace != AVCOL_SPC_BT2020_CL) {
+        SetError("The source YUV matrix requires an unsupported component transform.");
+        return FFFResult::NotSupported;
+    }
+
     // The size that gets uploaded has to be settled before the CPU conversion below,
     // because the layout-0 arm folds an engaged downscale into that conversion (see the
     // fold inside it). The planar arms and float RGB keep deciding at the pipeline, where
@@ -7911,6 +8015,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
             std::chrono::nanoseconds>(floatUploadNs).count() / 100));
         uploadCopy100ns_.fetch_add(To100ns(floatUploadNs), std::memory_order_relaxed);
         uploadCount_.fetch_add(1, std::memory_order_relaxed);
+        uploadCopyBytes_.fetch_add(static_cast<std::uint64_t>(uploadWidth) * uploadHeight * (input.bitDepth == 32 ? 16u : 8u), std::memory_order_relaxed);
         uploadPath_.store(4, std::memory_order_relaxed);
     } else {
         // Layout 0: convertedRgb_ already holds the frame at uploadWidth x uploadHeight,
@@ -7947,20 +8052,12 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // injection refresh path.
     settings.transfer = ResolveDecodeTransfer(hdrState);
     settings.gamut = gamut;
-    // Half-float RGB (JPEG XR's rgbaf16le) is linear scRGB by construction: jxrlib
-    // documents these formats as "scRGB formats. Gamma is 1.0", and the decoder sets
-    // no colour tags at all, so every metadata-driven guess above would be wrong --
-    // it would land on transfer 0 and sRGB-decode already-linear pixels, clipping the
-    // negatives and super-whites the FP16 texture was chosen to preserve.
-    //
-    // Keyed on the PIXEL FORMAT rather than a measured dynamic range: WIC's rule is
-    // that integer RGB is sRGB and float RGB is scRGB, independent of how wide the
-    // values happen to be (FH4-HDR.jxr peaks at only 4.56, so a ">1.0 means linear"
-    // heuristic would misfire). Transfer 3 means "already linear, do not decode".
-    // Gamut is forced to 709 after `gamut` is assigned, not before -- scRGB is defined
-    // on Rec.709 primaries, and assigning it earlier would be silently overwritten.
-    if (floatRgb) {
-        settings.transfer = 3u;
+    // Preserve the known native JPEG XR convention only for an untagged packed
+    // half-float source. Planar float and explicitly tagged RGB follow CICP.
+    if (floatRgb && originalFormat == AV_PIX_FMT_RGBAF16LE &&
+        !frameDeclaresTrc && (frame->color_primaries == AVCOL_PRI_UNSPECIFIED ||
+            frame->color_primaries == AVCOL_PRI_RESERVED0)) {
+        settings.transfer = 3u; // absolute scRGB units: 1.0 = 80 nits
         settings.gamut = 0u;
     }
     // Stash the frame's decode transfer for the TrueHDR gate and the draw
@@ -7971,7 +8068,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // decodedTransfer_ in the header.
     decodedTransfer_.store(settings.transfer, std::memory_order_relaxed);
     settings.sdrPeak = sdrPeakNits_;
-    settings.hdrPeak = settings.transfer == 0 ? 100.0f : hdrProcessor_.State().sourcePeakNits;
+    settings.hdrPeak = settings.transfer == 1 || settings.transfer == 2 ? hdrProcessor_.State().sourcePeakNits : 100.0f;
     sourcePeakNits_ = settings.hdrPeak;
     // ST 2094 dynamic tone mapping owns the SDR mapping path only. The HDR
     // (scRGB) path hands linear light to the display unchanged, so a curve there
@@ -7979,7 +8076,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // (SetHdrMetadata).
     DynamicShaderSettings dynamicSettings{};
     std::array<float, kDynamicCurveLutWidth * kHdrMaxProcessingWindows> dynamicCurves{};
-    const bool useDynamicCurve = !prepareOnly && settings.transfer != 0 &&
+    const bool useDynamicCurve = !prepareOnly && (settings.transfer == 1 || settings.transfer == 2) &&
         actualMode_ != FFF3FPColorMode::MapToHdr &&
         actualMode_ != FFF3FPColorMode::RawHdrAsSdr &&
         BuildDynamicToneSettings(hdrState.dynamic, dynamicSettings, dynamicCurves);
@@ -8048,8 +8145,8 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     settings.sampleScale = input.sampleScale;
     cachedOriginalInputLayout_ = input.layout;
     cachedOriginalSampleScale_ = input.sampleScale;
-    const auto maximum = static_cast<float>((1u << input.bitDepth) - 1u);
-    const auto shift = input.bitDepth > 8 ? input.bitDepth - 8 : 0;
+    const auto maximum = floatRgb ? 1.0f : static_cast<float>((1u << input.bitDepth) - 1u);
+    const auto shift = !floatRgb && input.bitDepth > 8 ? input.bitDepth - 8 : 0;
     if (directYuv && !IsFullRange(frame)) {
         settings.yOffset = static_cast<float>(16u << shift) / maximum;
         settings.yScale = maximum / static_cast<float>(219u << shift);
@@ -8057,15 +8154,17 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         settings.cScale = maximum / static_cast<float>(224u << shift);
     } else {
         settings.yOffset = 0.0f; settings.yScale = 1.0f;
-        settings.cOffset = FullRangeChromaOffset(input.bitDepth);
+        settings.cOffset = floatRgb ? 0.0f : FullRangeChromaOffset(input.bitDepth);
         settings.cScale = 1.0f;
     }
     YuvCoefficients(frame, source2020, settings.kr, settings.kb);
     // DXGI exposes NV12/P010 processor color spaces with left chroma siting.
     // Hardware-decoded surfaces without bitstream siting metadata follow that
     // API convention so VP and shader A/B paths sample the same phase.
-    const auto chromaLocation = d3d11Frame && frame->chroma_location == AVCHROMA_LOC_UNSPECIFIED
-        ? AVCHROMA_LOC_LEFT : frame->chroma_location;
+    const auto chromaLocation = frame->chroma_location != AVCHROMA_LOC_UNSPECIFIED
+        ? frame->chroma_location
+        : IsJpegFullRangeFormat(static_cast<AVPixelFormat>(frame->format)) ? AVCHROMA_LOC_CENTER
+        : (input.chromaWidthShift || input.chromaHeightShift) ? AVCHROMA_LOC_LEFT : AVCHROMA_LOC_UNSPECIFIED;
     ResolveChromaOffset(frame, input, chromaLocation,
         settings.chromaOffsetX, settings.chromaOffsetY);
     // A still image that is being enlarged (its fitted destination is larger than the

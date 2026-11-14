@@ -171,6 +171,7 @@ private:
     float targetPeakOverrideNits_ = 0.0f;
     HdrFrameState streamState_;
     HdrFrameState frameState_;
+    std::int64_t lastBitstreamFrameIndex_ = kUnknownFrameIndex;
     // Injected table, kept sorted by frameIndex. Bounded so a host cannot grow
     // it without limit; scene lists are naturally small.
     std::vector<InjectedEntry> injected_;
