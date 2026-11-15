@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Core/AvifIlocShim.h"
+#include "3FP/Core/GainMapProbe.h"
 #include "3FP/Core/DecodeDeviceSelection.h"
 #include "3FP/Core/Fmp4FragmentScanner.h"
 #include "3FP/Core/MediaText.h"
@@ -4522,6 +4523,24 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         }
     }
     RawTrace("DoOpen: size check done");
+    // Private gainmap detection (still images only). We run the probe in
+    // base-only mode: container + metadata + gainmap decode are identified and
+    // the verdict recorded; the per-pixel HDR application on the player's own
+    // decoded AVFrame is a follow-up (see docs/GAINMAP_PRIVATE_2026-11-15.md).
+    // Fail-closed: a malformed gainmap carrier is logged but never promotes SDR
+    // to HDR or changes the existing still-image decode path.
+    gainmapInfo_ = GainMapProbeResult{};
+    if (staticImage_ && IsStillImageContainerName(path)) {
+        try {
+            // Full probe: decode base + gainmap and apply the math. The applied
+            // RGBA buffer is later used to replace the decoded AVFrame before
+            // presentation (single source of truth: same math as the CLI probe).
+            gainmapInfo_ = GainMapProbe::Probe(path, /*baseOnly=*/false);
+        } catch (...) {
+            gainmapInfo_ = GainMapProbeResult{};
+        }
+        RawTrace(("DoOpen: gainmap verdict=" + gainmapInfo_.verdict).c_str());
+    }
     coverArtStream_ = FindCoverArtStream(format_);
     audioStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_AUDIO);
     RawTrace("DoOpen: cover/audio selected");
@@ -6556,14 +6575,40 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
     const auto handleFrame = [this, video, owner, pausedSeek](AVFrame* decoded) {
         if (video) {
             NormalizeVideoFrameTimestamp(decoded);
-            const auto seeking = seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_;
-            if (!seeking && (state_.load() == FFF3FPState::Playing || pausedSeek)) QueueVideoFrame(decoded);
-            else {
-                // Seeking: this picture is decoded but will not be queued, so it is
-                // invisible to decodedVideoFrames. Count it separately (diagnostics only).
-                if (seeking) ++seekDecodedFrames_;
-                PresentVideoFrame(decoded, owner, ShouldPreviewSeekFrame(decoded, owner));
+            // GainMap application: if the open-time probe successfully decoded and
+            // applied the gainmap, replace the decoded SDR frame with the applied
+            // linear-RGBA HDR frame. This is the single presentation-path touchpoint.
+            AVFrame* presentFrame = decoded;
+            AVFrame* gainFrame = nullptr;
+            if (gainmapInfo_.applyOk && !gainmapInfo_.appliedRgba.empty() &&
+                gainmapInfo_.outW > 0 && gainmapInfo_.outH > 0) {
+                gainFrame = av_frame_alloc();
+                if (gainFrame) {
+                    gainFrame->format = AV_PIX_FMT_RGBAF32LE;
+                    gainFrame->width = gainmapInfo_.outW;
+                    gainFrame->height = gainmapInfo_.outH;
+                    gainFrame->color_primaries = AVCOL_PRI_BT709;
+                    gainFrame->color_trc = AVCOL_TRC_LINEAR;
+                    gainFrame->colorspace = AVCOL_SPC_RGB;
+                    gainFrame->color_range = AVCOL_RANGE_JPEG;
+                    gainFrame->pts = decoded->pts;
+                    gainFrame->best_effort_timestamp = decoded->best_effort_timestamp;
+                    if (av_frame_get_buffer(gainFrame, 0) >= 0) {
+                        const size_t bytes = (size_t)gainmapInfo_.outW * gainmapInfo_.outH * 4 * sizeof(float);
+                        memcpy(gainFrame->data[0], gainmapInfo_.appliedRgba.data(), bytes);
+                        presentFrame = gainFrame;
+                    } else {
+                        av_frame_free(&gainFrame);
+                    }
+                }
             }
+            const auto seeking = seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_;
+            if (!seeking && (state_.load() == FFF3FPState::Playing || pausedSeek)) QueueVideoFrame(presentFrame);
+            else {
+                if (seeking) ++seekDecodedFrames_;
+                PresentVideoFrame(presentFrame, owner, ShouldPreviewSeekFrame(presentFrame, owner));
+            }
+            if (gainFrame) av_frame_free(&gainFrame);
         } else QueueAudioFrame(decoded, owner, owner == format_ ? audioStream_ : externalAudioStream_);
     };
     auto receiveFrames = [&]() {
@@ -9154,6 +9199,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     staticImage_ = false;
     animatedImage_ = false;
     fragmentedMp4_ = false;
+    gainmapInfo_ = GainMapProbeResult{};
     sessionWrapLoop_ = false; sessionWrapFailures_ = 0;
     { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = false; hasPublishedRawInfo_ = false; publishedRawInfo_ = {}; }
     audioBlockedUntilVideoFrame_ = false;
@@ -9518,6 +9564,11 @@ void PlayerSession::RebuildMediaInfo() noexcept {
         << ",\"tileGridWidth\":" << tileGridWidth_
         << ",\"tileGridHeight\":" << tileGridHeight_
         << ",\"tileGridTileCount\":" << tileGridTiles_.size()
+        << ",\"gainmap\":{\"present\":" << (gainmapInfo_.present ? "true" : "false")
+        << ",\"form\":\"" << EscapeJson(gainmapInfo_.form) << "\""
+        << ",\"verdict\":\"" << EscapeJson(gainmapInfo_.verdict) << "\""
+        << ",\"headroom\":" << gainmapInfo_.headroom
+        << ",\"reason\":\"" << EscapeJson(gainmapInfo_.reason) << "\"}"
         << ",\"metadata\":";
     AppendDictionaryJson(json, format_->metadata);
     json << ",\"chapters\":[";

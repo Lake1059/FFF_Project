@@ -6,6 +6,7 @@
 #include "3FP/Audio/WasapiRenderer.h"
 #include "3FP/Audio/AudioPassthrough.h"
 #include "3FP/Core/AvifTileGridComposer.h"
+#include "3FP/Core/GainMapProbe.h"
 #include "3FP/Core/PlacementPolicy.h"
 #include "3FP/Core/PlaybackPerformancePolicy.h"
 #include "3FP/Core/RawStillSource.h"
@@ -1035,6 +1036,9 @@ private:
     std::uint8_t tileGridBackground_[4];
     std::vector<AvifTileGridComposer::Tile> tileGridTiles_;
     std::vector<AvifTileGridComposer::TileSource> tileGridSources_;
+    // Private gainmap detection result for the current still image. Reset on
+    // open; verdict drives whether the host knows this is an HDR gainmap still.
+    GainMapProbeResult gainmapInfo_;
     // A picture that moves: either a loop-aware image demuxer (GIF/APNG/WebP) or
     // an image sequence carried by the mov demuxer (AVIF/HEIC). Such a file is
     // not a still image, but it is still a picture: it must show its first frame
