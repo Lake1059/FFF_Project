@@ -440,7 +440,7 @@ bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consu
             int tn = (int)Be32(d + p); p += 4;
             m.gainMin[c] = rd(mn, dn);
             m.gainMax[c] = rd(xn, dn);
-            float g = rd(gn, dn); m.gammaC[c] = g <= 0 ? 1.f : g;
+            float g = rd(gn, dn); m.gammaC[c] = g; // gamma<=0 checked after loop
             m.offSdr[c] = rd(sn, dn);
             m.offHdr[c] = rd(tn, dn);
         }
@@ -458,7 +458,7 @@ bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consu
             int tn = (int)Be32(d + p), td = (int)Be32(d + p + 4); p += 8;
             m.gainMin[c] = rd(mn, md);
             m.gainMax[c] = rd(xn, xd);
-            float g = rd(gn, gd); m.gammaC[c] = g == 0 ? 1.f : g;
+            float g = rd(gn, gd); m.gammaC[c] = g; // gamma<=0 checked after loop
             m.offSdr[c] = rd(sn, sd);
             m.offHdr[c] = rd(tn, td);
         }
@@ -469,7 +469,7 @@ bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consu
             m.gammaC[c] = m.gammaC[0]; m.offSdr[c] = m.offSdr[0]; m.offHdr[c] = m.offHdr[0];
         }
     }
-    for (int c = 0; c < 3; c++) if (m.gammaC[c] <= 0) m.gammaC[c] = 1.f;
+    for (int c = 0; c < 3; c++) if (m.gammaC[c] <= 0) return false; // gamma=0 invalid metadata
     consumed = p - off;
     return true;
 }
@@ -1016,6 +1016,15 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     std::string containerWhy;
     bool containerWhyUnsupported = false;
 
+    if (tmapId >= 0) {
+        // libavif: without "tmap" brand in ftyp, ignore gainmap even if tmap item exists.
+        bool hasTmapBrand = false;
+        for (auto& b : R.compatibleBrands) if (b == "tmap") { hasTmapBrand = true; break; }
+        if (!hasTmapBrand) {
+            R.notes.push_back("tmap item present but no tmap brand in ftyp; ignoring gainmap");
+            tmapId = -1;
+        }
+    }
     if (tmapId >= 0) {
         R.present = true;
         // dimg targets: collect coded/grid items referenced alongside tmap.
