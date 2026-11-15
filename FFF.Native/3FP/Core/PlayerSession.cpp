@@ -4706,11 +4706,14 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Ready sessions do not pump playback, so present the first image frame here.
     if (staticImage_ || animatedImage_) {
         RawTrace("DoOpen: DecodeInitialFrame enter");
-        const auto imageResult = DecodeInitialFrame();
+        std::string decodeDetail;
+        const auto imageResult = DecodeInitialFrame(&decodeDetail);
         if (imageResult != FFFResult::Success) {
-            Fail(imageResult, animatedImage_
+            const char* generic = animatedImage_
                 ? "Could not decode or render the first frame of the animation during open."
-                : "Could not decode or render the still image during open.",
+                : "Could not decode or render the still image during open.";
+            Fail(imageResult,
+                decodeDetail.empty() ? generic : decodeDetail,
                 animatedImage_ ? "open-animation" : "open-image");
             return;
         }
@@ -4830,7 +4833,7 @@ FFFResult PlayerSession::ComposeTileGridFrame() noexcept {
     return FFFResult::Success;
 }
 
-FFFResult PlayerSession::DecodeInitialFrame() noexcept {
+FFFResult PlayerSession::DecodeInitialFrame(std::string* detailOut) noexcept {
     // RAW never reaches OpenDecoder: the synthetic stream has codecpar only,
     // and LibRaw is the decoder. Develop synchronously in M1; the preview-first
     // and background full-size paths are M2.
@@ -4839,8 +4842,12 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
         if (format_ == nullptr || videoStream_ < 0) return FFFResult::InvalidState;
         AVFrame* rawFrame = nullptr;
         std::string rawError;
-        if (!rawStill_->Decode(&rawFrame, rawError) || rawFrame == nullptr)
+        if (!rawStill_->Decode(&rawFrame, rawError) || rawFrame == nullptr) {
+            if (detailOut != nullptr) {
+                detailOut->assign("RAW decode failed: ").append(rawError);
+            }
             return FFFResult::FfmpegFailure;
+        }
         RawTrace("DecodeInitialFrame: RAW frame ready");
         const auto before = videoRenderer_.PresentedVideoFrames();
         PresentVideoFrame(rawFrame, format_);

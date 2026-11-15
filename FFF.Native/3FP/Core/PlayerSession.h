@@ -394,7 +394,9 @@ private:
     // Presents the first frame while the session stays stopped. Used for a still
     // picture and for an animated one, both of which must show a frame without
     // playback running; rewinds afterwards so play starts from the beginning.
-    FFFResult DecodeInitialFrame() noexcept;
+    // detailOut (optional) receives a human-readable failure reason on a
+    // non-success return; it is internal-only and does not touch the ABI.
+    FFFResult DecodeInitialFrame(std::string* detailOut = nullptr) noexcept;
     // A tiled still image (grid AVIF/HEIC) has no pre-assembled picture anywhere in
     // the file: it is one stream per tile plus a grid group saying where the tiles
     // go. This decodes them and presents the canvas they make, and it can run again
