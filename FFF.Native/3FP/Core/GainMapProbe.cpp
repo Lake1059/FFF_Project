@@ -407,7 +407,8 @@ bool FindIspe(const ParsedContainer& c, const std::vector<uint8_t>& d, int itemI
 // ── ISO 21496-1 GainMapMetadata ──────────────────────────────────────────────
 struct IsoMeta {
     int channels = 1;
-    bool useBaseColorSpace = false; // bit 0x80: base IS HDR, don't apply SDR->HDR lift
+    uint8_t rawFlags = 0; // tmap gain-map flags byte: 0xc0=SDR base(apply), 0x80=HDR base
+    bool useBaseColorSpace = false;
     float hdrCapacityMin = 0.f, hdrCapacityMax = 0.f;
     float gainMin[3] = {0,0,0}, gainMax[3] = {0,0,0};
     float gammaC[3] = {1,1,1};
@@ -422,8 +423,7 @@ bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consu
     if (minVersion != 0) return false;
     p += 2; // writer_version
     uint8_t flags = d[p++];
-    // Note: bit 0x80 in the fullbox flags (not this payload byte) is useBaseColorSpace.
-    // Channel count is detected from the decoded gainmap image, not from this byte.
+    m.rawFlags = flags;
     int channels = 1;
     bool commonDenom = (flags & 0x08) != 0;
     m.channels = channels;
@@ -1545,14 +1545,14 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         R.metaFamily = "none"; R.metaSource = "default";
         return R;
     }
-    // HDR base: valid gainmap exists but base is PQ/HLG — display HDR base as-is.
-    {
-        int baseTrc = (baseColorTrc != 2) ? baseColorTrc : decTrcOuter;
-        if (baseTrc == 16 || baseTrc == 18) {
+    // HDR base: tmap flags bit 0x40 clear (0x80 = HDR base, 0xc0 = SDR base).
+    // Anchor: seine_sdr_gainmap_srgb=0xc0(apply), seine_hdr_gainmap_srgb=0x80(skip).
+    if (metaOk && ap.iso.channels > 0) {
+        if (!(ap.iso.rawFlags & 0x40)) {
             R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
             R.verdict = "decoded_not_applied";
             R.applyOk = false; R.applyMode = "none";
-            R.reason = "hdr base displayed as-is; gain map not applied";
+            R.reason = "hdr base displayed as-is; gain map not applied (tmap flags 0x80)";
             return R;
         }
     }
