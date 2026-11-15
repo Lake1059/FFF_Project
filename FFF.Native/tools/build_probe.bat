@@ -10,7 +10,7 @@ set LIBPATH=/LIBPATH:"%ROOT%\..\third_party\ffmpeg\lib\x64"
 if not exist "%ROOT%\tools\build_out" mkdir "%ROOT%\tools\build_out"
 
 cl /O2 /EHsc /MD /std:c++17 /D_CRT_SECURE_NO_WARNINGS /DNDEBUG %INC% ^
-   "%ROOT%\tools\gainmap_probe.cpp" "%ROOT%\3FP\Core\GainMapProbe.cpp" ^
+   "%ROOT%\tools\gainmap_probe.cpp" "%ROOT%\3FP\Core\GainMapProbe.cpp" "%ROOT%\3FP\Core\GainMapJpeg.cpp" ^
    /Fe:"%ROOT%\tools\build_out\gainmap_probe.exe" ^
    /Fo:"%ROOT%\tools\build_out\\" ^
    /link %LIBPATH% %LIBS%

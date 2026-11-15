@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "GainMapProbe.h"
 #include "GainMapAppleMeta.h"
+#include "GainMapJpeg.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -828,22 +829,54 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     fclose(f);
     if (sz < 16) { R.reason = "file too small"; return R; }
 
-    // ── Non-ISO-BMFF gainmap containers: detect as unsupported (not silent SDR) ──
-    // JPEG Ultra HDR: SOI 0xFFD8 + XMP gainmap metadata.
+    // ── JPEG / WebP gainmap containers ──
     if (d.size() >= 3 && d[0] == 0xFF && d[1] == 0xD8) {
-        std::string_view sv((const char*)d.data(), d.size());
-        bool hasGainMap = sv.find("GainMap") != std::string_view::npos ||
-                          sv.find("hdrgm") != std::string_view::npos;
-        if (hasGainMap) {
-            R.present = true;
-            R.form = "jpeg_hdr";
-            R.metaFamily = "iso";
-            R.metaSource = "xmp";
-            R.verdict = "fail_closed_unsupported";
-            R.reason = "[container] JPEG Ultra HDR (jpeg_hdr) not supported in this build (XMP gainmap metadata detected)";
+        fp3::JpegGainMapHit jh;
+        ProbeJpegGainMap(std::wstring(pathUtf8.begin(), pathUtf8.end()), jh);
+        if (!jh.found) {
+            R.verdict = "not_gainmap"; R.reason = jh.reason.empty() ? "no gainmap in JPEG" : jh.reason;
             return R;
         }
-        R.reason = "not ISO-BMFF (JPEG, no gainmap XMP)";
+        R.present = true;
+        R.form = jh.containerKind;
+        R.metaFamily = jh.family;
+        R.metaSource = jh.metaSource;
+        // Decode gainmap to verify it's valid
+        std::string why;
+        std::vector<float> gmRgba; int gmW=0, gmH=0;
+        if (!DecodeBufferToRgba(jh.gainBytes, -1, gmRgba, gmW, gmH, why)) {
+            R.verdict = "fail_closed_malformed"; R.reason = "jpeg gain decode: " + why; return R;
+        }
+        // Decode base
+        std::vector<float> baseRgba; int baseW=0, baseH=0;
+        int baseTrc = 2;
+        if (!DecodeBufferToRgba(jh.baseBytes, -1, baseRgba, baseW, baseH, why, nullptr, &baseTrc)) {
+            R.verdict = "fail_closed_malformed"; R.reason = "jpeg base decode: " + why; return R;
+        }
+        R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
+        R.decodeCodec = "mjpeg";
+        R.baseRgba = baseRgba; R.outW = baseW; R.outH = baseH;
+        // HDR base check
+        if (baseTrc == 16 || baseTrc == 18) {
+            R.verdict = "decoded_not_applied"; R.applyOk = false;
+            R.reason = "hdr base displayed as-is; gain map not applied"; return R;
+        }
+        // Set metadata
+        if (jh.family == "apple") {
+            R.headroom = powf(2.f, jh.headroom);
+            R.gamma = 1.f;
+        } else {
+            for (int c = 0; c < 3; c++) {
+                R.logBoostMin[c] = jh.logBoost[c*2];
+                R.logBoostMax[c] = jh.logBoost[c*2+1];
+                R.offsetSdr[c] = jh.offsetSdr[c];
+                R.offsetHdr[c] = jh.offsetHdr[c];
+            }
+            R.headroom = jh.headroom > 0 ? powf(2.f, jh.headroom) : 1.f;
+            R.gamma = jh.gamma;
+        }
+        R.applyOk = true; R.applyMode = "jpeg";
+        R.verdict = "applied";
         return R;
     }
     // JPEG XL container: first box type "JXL ". Only flag as gainmap if jhgm box present.
@@ -1202,7 +1235,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         std::vector<uint8_t> gp; std::string why;
         if (!SliceItem(d, C, gainmapItemId, gp, why)) { containerWhy = "grid slice: " + why; }
         else {
-            if (gp.size() < 4) containerWhy = "grid payload too short";
+            if (gp.size() < 6) containerWhy = "grid payload too short";
             else if (gp[0] != 0) containerWhy = "grid version != 0";
             else {
                 gridFlags = gp[1];
@@ -1213,14 +1246,13 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                     if ((long)gp.size() < q + 8) { containerWhy = "grid flags=1 missing w/h"; }
                     else { gridW = Be32(gp.data()+q); gridH = Be32(gp.data()+q+4); }
                 } else {
-                    // flags=0: tail carries 2xu16 w/h on private (DJI/MiHE) files.
                     if ((long)gp.size() >= q + 4) {
                         gridTailW = Be16(gp.data()+q); gridTailH = Be16(gp.data()+q+2);
                         gridTail = (gridTailW > 0 && gridTailH > 0);
                     }
                     if (gridTail) { gridW = gridTailW; gridH = gridTailH; }
                     else {
-                        containerWhy = "grid flags=0 but no tail w/h (cannot determine canvas size)";
+                        containerWhy = "grid flags=0 but no tail w/h";
                     }
                 }
                 // tile ids from dimg of grid
@@ -1317,9 +1349,12 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         if (!SliceItem(d, C, C.primary, gridPayload, why)) {
             R.verdict="fail_closed_malformed"; R.reason="base grid slice: " + why; return R;
         }
+        { char dbg[128]; std::string hx; for(int i=0;i<(int)gridPayload.size()&&i<12;i++){char h[4];sprintf(h,"%02x ",gridPayload[i]);hx+=h;} R.notes.push_back("gridPayload: "+hx); }
         int gRows=0, gCols=0, gW=0, gH=0, gFlags=0;
         if (gridPayload.size() < 6) { R.verdict="fail_closed_malformed"; R.reason="base grid payload too short"; return R; }
-        gRows = gridPayload[1] + 1; gCols = gridPayload[2] + 1; gFlags = gridPayload[3];
+        // Grid item payload: version(1) + flags(1) + rows_minus1(1) + cols_minus1(1) + dims
+        gFlags = gridPayload[1];
+        gRows = gridPayload[2] + 1; gCols = gridPayload[3] + 1;
         long q = 4;
         if (gFlags & 1) {
             if (gridPayload.size() < 12) { R.verdict="fail_closed_malformed"; R.reason="base grid large: payload < 12 bytes"; return R; }
