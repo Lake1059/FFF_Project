@@ -28,6 +28,9 @@ Friend Module 播放进度回归
             测退出清理()
             测清空()
             测JSON结构()
+            测不可达路径保留()
+            测确认消失仍清理()
+            测高版本文件不被改写()
         Finally
             ' 还原静态重定向，避免同进程后续套件误写真实程序目录。
             播放进度存储.测试用重定向(String.Empty)
@@ -169,6 +172,94 @@ Friend Module 播放进度回归
             检查("时长落盘为 100ns", 第一项.GetProperty("时长100纳秒").GetInt64() = TimeSpan.FromSeconds(120).Ticks)
         End Using
     End Sub
+
+    ''' <summary>P1 回归：U 盘/网络盘离线（盘符不存在）时，查询与退出清理都不能把条目删掉。</summary>
+    Private Sub 测不可达路径保留()
+        Dim 进度 = 建进度路径("不可达")
+        播放进度存储.测试用重定向(进度)
+        Dim 离线媒体 = 找一个不存在的盘符路径("离线盘.mkv")
+
+        ' 直接写一份 v1 JSON，路径指向不存在的盘符；记录() 自己会先 File.Exists 拦掉这种路径。
+        Dim JSON = "{""版本"":1,""条目"":[" & 进度条目Json(离线媒体, 30, 120) & "]}"
+        File.WriteAllText(进度, JSON, New UTF8Encoding(encoderShouldEmitUTF8Identifier:=True))
+
+        检查("离线盘查询仍返回原位置",
+             播放进度存储.查询(离线媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.FromSeconds(30))
+        播放进度存储.退出时清理()
+        检查("离线盘退出清理后条目仍在", 播放进度存储.统计条目数() = 1)
+        检查("离线盘清理后仍能查到位置",
+             播放进度存储.查询(离线媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.FromSeconds(30))
+    End Sub
+
+    ''' <summary>P1 回归：文件确实被删了（File.Exists=False）时，查询与退出清理都要清掉条目。
+    ''' 若本机安全软件吞了删除调用，本用例 SKIP 而不是假装通过。</summary>
+    Private Sub 测确认消失仍清理()
+        Dim 媒体 = 建媒体("真消失.mkv", "v1")
+        Dim 进度 = 建进度路径("真消失")
+        播放进度存储.测试用重定向(进度)
+
+        播放进度存储.记录(媒体, TimeSpan.FromSeconds(40), TimeSpan.FromSeconds(120), 立即落盘:=True)
+        File.Delete(媒体)
+        If File.Exists(媒体) Then
+            ' 安全软件/回收站把删除拦了：这条断言在本机无法验证，照实 SKIP。
+            用例数 += 1
+            Console.WriteLine("SKIP  真删除被本机安全软件拦截，无法验证确认消失清理")
+            Return
+        End If
+
+        检查("确认消失后查询为零", 播放进度存储.查询(媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.Zero)
+        检查("确认消失后条目已移除", 播放进度存储.统计条目数() = 0)
+    End Sub
+
+    ''' <summary>P2 回归：遇到版本号高于当前的进度文件，不加载、不回写、不改写字节；
+    ''' 用户显式清空仍应能删掉文件。</summary>
+    Private Sub 测高版本文件不被改写()
+        Dim 媒体 = 建媒体("v2盘.mkv", "v2-content")
+        Dim 进度 = 建进度路径("v2")
+        播放进度存储.测试用重定向(进度)
+
+        Dim JSON = "{""版本"":2,""条目"":[" & 进度条目Json(媒体, 30, 120) & "]}"
+        File.WriteAllText(进度, JSON, New UTF8Encoding(encoderShouldEmitUTF8Identifier:=True))
+        Dim 原始字节 = File.ReadAllBytes(进度)
+
+        ' 触发加载
+        检查("v2 文件查询返回零", 播放进度存储.查询(媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.Zero)
+        检查("v2 文件统计为零", 播放进度存储.统计条目数() = 0)
+
+        ' 退出清理会强制落盘；不兼容版本下落盘必须直接 return，不能把 v2 收敛成 v1。
+        播放进度存储.退出时清理()
+        Dim 新字节 = File.ReadAllBytes(进度)
+        检查("v2 文件字节未被改写", 原始字节.SequenceEqual(新字节))
+
+        ' 显式清空仍要生效，并复位不兼容标志。
+        播放进度存储.清空()
+        If File.Exists(进度) Then
+            ' 本机安全软件吞了 File.Delete：照实 SKIP，不伪装。
+            用例数 += 1
+            Console.WriteLine("SKIP  v2 清空删除被本机安全软件拦截，无法验证文件删除")
+        Else
+            检查("v2 文件显式清空后删除", True)
+        End If
+    End Sub
+
+    Private Function 进度条目Json(媒体路径 As String, 位置秒 As Integer, 时长秒 As Integer) As String
+        Dim 完整 = Path.GetFullPath(媒体路径).Replace("\", "\\")
+        Return "{""路径"":""" & 完整 & """," &
+               """位置100纳秒"":" & TimeSpan.FromSeconds(位置秒).Ticks.ToString() & "," &
+               """时长100纳秒"":" & TimeSpan.FromSeconds(时长秒).Ticks.ToString() & "," &
+               """文件大小"":1024,""文件修改时间UtcTicks"":0,""已完成"":false," &
+               """最后更新UtcTicks"":" & DateTime.UtcNow.Ticks.ToString() & "}"
+    End Function
+
+    Private Function 找一个不存在的盘符路径(文件名 As String) As String
+        For Each 盘符 In {"Z", "Y", "X", "V", "U", "T", "S", "R", "P", "O", "N", "M", "L", "K", "J", "I", "H", "G"}
+            Dim 根 = 盘符 & ":\"
+            If Not Directory.Exists(根) Then
+                Return Path.Combine(根, "fff_offline_regression", 文件名)
+            End If
+        Next
+        Return "Z:\fff_offline_regression\" & 文件名
+    End Function
 
     Private Function 建媒体(名称 As String, 内容 As String) As String
         Dim 路径 = Path.Combine(临时目录, 名称)

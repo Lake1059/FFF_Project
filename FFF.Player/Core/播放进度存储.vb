@@ -50,6 +50,8 @@ Public NotInheritable Class 播放进度存储
     Private Shared _脏 As Boolean
     Private Shared _上次写盘 As Long = Environment.TickCount64
     Private Shared _测试路径 As String
+    ''' <summary>进度文件版本高于当前可识别版本：只读不写，避免把未来版本的字段静默收敛成 v1。</summary>
+    Private Shared _不兼容版本 As Boolean
 
     Private Sub New()
     End Sub
@@ -89,6 +91,7 @@ Public NotInheritable Class 播放进度存储
         If Not 播放进度记忆已启用() Then Return TimeSpan.Zero
         If String.IsNullOrWhiteSpace(路径) OrElse 时长100纳秒 <= 0 Then Return TimeSpan.Zero
         确保已加载()
+        If _不兼容版本 Then Return TimeSpan.Zero
         Dim 键 = 规范化路径(路径)
         SyncLock 锁
             Dim 项 As 进度条目 = Nothing
@@ -127,6 +130,7 @@ Public NotInheritable Class 播放进度存储
     ''' <summary>设置页显示用：当前已有记录条数。功能关闭时仍可读，方便看清要清理什么。</summary>
     Public Shared Function 统计条目数() As Integer
         确保已加载()
+        If _不兼容版本 Then Return 0
         SyncLock 锁
             Return 条目.Count
         End SyncLock
@@ -145,6 +149,7 @@ Public NotInheritable Class 播放进度存储
         Dim 位置100纳秒 = Math.Clamp(位置.Ticks, 0L, 时长100纳秒)
         Dim 键 = 规范化路径(路径)
         确保已加载()
+        If _不兼容版本 Then Return
         SyncLock 锁
             Dim 完成值 = 已完成 OrElse 位置100纳秒 >= 时长100纳秒 - 完成判定余量(时长100纳秒)
 
@@ -183,6 +188,7 @@ Public NotInheritable Class 播放进度存储
     ''' <summary>把内存里的进度原子写入 JSON。失败保留旧文件，下次再试。</summary>
     Public Shared Sub 落盘(Optional 强制 As Boolean = False)
         SyncLock 锁
+            If _不兼容版本 Then Return
             If Not _已加载 Then Return
             If Not _脏 AndAlso Not 强制 Then Return
 
@@ -213,7 +219,14 @@ Public NotInheritable Class 播放进度存储
                 Dim 目录 = Path.GetDirectoryName(路径)
                 If Not String.IsNullOrEmpty(目录) Then Directory.CreateDirectory(目录)
                 临时路径 = 路径 & ".tmp-" & Guid.NewGuid().ToString("N")
-                File.WriteAllText(临时路径, JSON, Encoding.UTF8)
+                ' 先写临时文件并 Flush(True) 把内核缓冲刷到盘，再原子改名；
+                ' 避免掉电时留下半截 JSON 直接顶掉旧进度。编码仍带 BOM，与历史文件一致。
+                Dim 编码 As New UTF8Encoding(encoderShouldEmitUTF8Identifier:=True)
+                Using fs As New FileStream(临时路径, FileMode.Create, FileAccess.Write, FileShare.None)
+                    Dim 字节 = 编码.GetBytes(JSON)
+                    fs.Write(字节, 0, 字节.Length)
+                    fs.Flush(True)
+                End Using
                 File.Move(临时路径, 路径, True)
                 _脏 = False
                 _上次写盘 = Environment.TickCount64
@@ -271,6 +284,7 @@ Public NotInheritable Class 播放进度存储
     Public Shared Sub 清空()
         SyncLock 锁
             _已加载 = True
+            _不兼容版本 = False
             条目.Clear()
             _脏 = False
             Dim 路径 = 文件路径
@@ -290,6 +304,7 @@ Public NotInheritable Class 播放进度存储
             _测试路径 = 路径
             _已加载 = False
             _脏 = False
+            _不兼容版本 = False
             条目.Clear()
             _上次写盘 = Environment.TickCount64
         End SyncLock
@@ -307,10 +322,10 @@ Public NotInheritable Class 播放进度存储
                 Dim 文件 = JsonSerializer.Deserialize(Of 进度文件)(文本, JsonSO)
                 If 文件 Is Nothing OrElse 文件.条目 Is Nothing Then Return
                 If 文件.版本 > 当前版本 Then
-                    ' 不理解的版本：仍按已知字段读，但留一行诊断。真正改语义时应调高当前版本
-                    ' 并在下面加迁移分支，而不是靠"读不懂也硬读"。
-                    Debug.WriteLine("播放进度：文件版本 " & 文件.版本.ToString() &
-                                    " 高于当前 " & 当前版本.ToString() & "，按当前结构收敛")
+                    ' 不理解的版本：不把任何条目读进内存，也不允许回写覆盖原文件，
+                    ' 避免未来版本新增的字段被静默丢弃。用户仍可显式清空（见 清空）。
+                    _不兼容版本 = True
+                    Return
                 End If
 
                 For Each 项 In 文件.条目
@@ -357,36 +372,79 @@ Public NotInheritable Class 播放进度存储
         End Try
     End Function
 
+    Private Enum 指纹状态
+        ''' <summary>能 stat 到文件，大小/修改时间可信。</summary>
+        可用
+        ''' <summary>文件现在读不到（权限/锁/网络盘离线/U盘拔出），但不能确认它永久消失。
+        ''' 此时保留条目，等下次能访问时再校验。</summary>
+        暂不可读
+        ''' <summary>文件/父目录确实不存在：可以安全清理。</summary>
+        已确认消失
+    End Enum
+
     Private Structure 文件指纹
+        Public 状态 As 指纹状态
         Public 大小 As Long
         Public 修改时间UtcTicks As Long
     End Structure
 
     Private Shared Function 读取指纹(路径 As String) As 文件指纹
         Try
+            ' File.GetAttributes 对不存在的路径抛 FileNotFoundException / DirectoryNotFoundException；
+            ' 对无权限、文件被占用、网络盘离线、U盘拔出抛 UnauthorizedAccessException / IOException。
+            ' 这两类语义完全不同：前者是"可以安全删条目"，后者是"千万别删，下次可能又能看到"。
+            File.GetAttributes(路径)
             Dim 信息 As New FileInfo(路径)
-            If Not 信息.Exists Then
-                Return New 文件指纹 With {.大小 = -1L, .修改时间UtcTicks = -1L}
-            End If
             Return New 文件指纹 With {
+                .状态 = 指纹状态.可用,
                 .大小 = 信息.Length,
                 .修改时间UtcTicks = 信息.LastWriteTimeUtc.Ticks
             }
+        Catch ex As FileNotFoundException
+            ' 文件不存在，但父目录可达：确认消失。
+            Return New 文件指纹 With {.状态 = 指纹状态.已确认消失}
+        Catch ex As DirectoryNotFoundException
+            ' 两种情况都抛这个：① 父目录在可达盘上被删了 → 确认消失；
+            ' ② 整个盘符根不可达（U 盘拔出 / 网络盘离线 / 盘符不存在）→ 暂不可读。
+            ' 用盘符根是否可达区分。
+            If 盘符根可达(路径) Then
+                Return New 文件指纹 With {.状态 = 指纹状态.已确认消失}
+            End If
+            Return New 文件指纹 With {.状态 = 指纹状态.暂不可读}
         Catch
-            Return New 文件指纹 With {.大小 = -1L, .修改时间UtcTicks = -1L}
+            Return New 文件指纹 With {.状态 = 指纹状态.暂不可读}
+        End Try
+    End Function
+
+    ''' <summary>判断路径所在的盘符根是否可达。根不可达 = U 盘被拔 / 网络盘离线 / 盘符不存在。</summary>
+    Private Shared Function 盘符根可达(路径 As String) As Boolean
+        Try
+            Dim 根 = Path.GetPathRoot(Path.GetFullPath(路径))
+            If String.IsNullOrEmpty(根) Then Return True
+            Return Directory.Exists(根)
+        Catch
+            ' 探测本身就失败：保守按不可达处理，保留条目。
+            Return False
         End Try
     End Function
 
     ''' <summary>记录时的文件是否还是同一份。大小与写入时间都要对得上；
-    ''' 记录侧读不到的维度（-1）不参与判定，避免网络盘/权限问题把有效进度全判死。</summary>
+    ''' 记录侧读不到的维度（-1）不参与判定。读不到但不能确认消失（U盘拔出/网络盘离线）
+    ''' 时保留条目，避免误删用户下次插回来还要用的续播位置。</summary>
     Private Shared Function 指纹匹配(项 As 进度条目) As Boolean
         If 项 Is Nothing Then Return False
         Dim 指纹 = 读取指纹(项.路径)
-        If 指纹.大小 < 0 Then Return False
-        If 项.文件大小 >= 0 AndAlso 项.文件大小 <> 指纹.大小 Then Return False
-        If 项.文件修改时间UtcTicks >= 0 AndAlso
-           项.文件修改时间UtcTicks <> 指纹.修改时间UtcTicks Then Return False
-        Return True
+        Select Case 指纹.状态
+            Case 指纹状态.暂不可读
+                Return True
+            Case 指纹状态.已确认消失
+                Return False
+            Case Else ' 可用
+                If 项.文件大小 >= 0 AndAlso 项.文件大小 <> 指纹.大小 Then Return False
+                If 项.文件修改时间UtcTicks >= 0 AndAlso
+                   项.文件修改时间UtcTicks <> 指纹.修改时间UtcTicks Then Return False
+                Return True
+        End Select
     End Function
 
 End Class
