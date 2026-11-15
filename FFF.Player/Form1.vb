@@ -676,7 +676,8 @@ Public Class Form1
     Private Sub 启动时探测扩展模块()
         Try
             Dim 原因 As String = Nothing
-            Debug.WriteLine("扩展模块：" & 外部模块接口.探测(原因).ToString() &
+            ' Release 下 Debug.WriteLine 被剥离：启动探测结论落 扩展模块.log（装载明细由接口层指纹节流落盘）。
+            外部模块接口.记录扩展模块诊断("扩展模块：" & 外部模块接口.探测(原因).ToString() &
                 If(String.IsNullOrEmpty(原因), "", "（" & 原因 & "）"))
         Catch ex As Exception
             Debug.WriteLine("扩展模块：启动时探测异常（已忽略）：" & ex.GetType().Name)
