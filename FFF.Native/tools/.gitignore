@@ -1,1 +1,3 @@
 build_out/
+build_out_jpeg/
+build_out_asan/
