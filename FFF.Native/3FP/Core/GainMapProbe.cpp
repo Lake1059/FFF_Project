@@ -1804,11 +1804,17 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     }
 
     // Apply: sRGB-linearize base
+    float baseMax = 0;
     for (size_t i = 0; i < baseRgba.size(); i += 4) {
         baseRgba[i] = SrgbToLinear(baseRgba[i]);
         baseRgba[i+1] = SrgbToLinear(baseRgba[i+1]);
         baseRgba[i+2] = SrgbToLinear(baseRgba[i+2]);
+        float m = fmaxf(baseRgba[i], fmaxf(baseRgba[i+1], baseRgba[i+2]));
+        if (m > baseMax) baseMax = m;
     }
+    { char dbg[128]; sprintf(dbg, "apply: headroom=%.4f baseMaxLin=%.4f gainMax=%.4f gainMin=%.4f gamma=%.4f channels=%d",
+        R.headroom, baseMax, ap.iso.gainMax[0], ap.iso.gainMin[0], ap.iso.gammaC[0], ap.iso.channels);
+      R.notes.push_back(dbg); }
     std::vector<float> out((size_t)baseW * baseH * 4, 0.f);
 
     for (int y = 0; y < baseH; y++) for (int x = 0; x < baseW; x++) {
