@@ -51,6 +51,75 @@ Friend Module 外部模块ABI回归
         检查整数("aux.frame offset", CInt(Marshal.OffsetOf(Of 原生辅层合成)(NameOf(原生辅层合成.帧序号))), 8)
         检查整数("aux.enabled offset", CInt(Marshal.OffsetOf(Of 原生辅层合成)(NameOf(原生辅层合成.是否启用))), 16)
         检查整数("aux.max offset", CInt(Marshal.OffsetOf(Of 原生辅层合成)(NameOf(原生辅层合成.最大值))), 28)
+
+        ' ---- 全量 Sequential 结构 ABI 矩阵（2026-11-15）----
+        ' 每个结构至少 size + 关键字段 offset；值与 FFF.Player.Api.h 的 static_assert pin 一致。
+        ' size 对齐：
+        检查整数("config 112 B", Marshal.SizeOf(Of 原生播放器配置)(), 112)
+        检查整数("pacing 80 B", Marshal.SizeOf(Of 原生呈现节律状态)(), 80)
+        检查整数("snapshot 608 B", Marshal.SizeOf(Of 原生播放器快照)(), 608)
+        检查整数("imageInfo 64 B", Marshal.SizeOf(Of 原生图片信息)(), 64)
+        检查整数("pixelProbe 48 B", Marshal.SizeOf(Of 原生视频像素探针)(), 48)
+        检查整数("audioPeak 80 B", Marshal.SizeOf(Of 原生音频峰值)(), 80)
+        检查整数("tapConfig 16 B", Marshal.SizeOf(Of 原生音频Tap配置)(), 16)
+        检查整数("tapBlock 144 B", Marshal.SizeOf(Of 原生音频Tap块)(), 144)
+        检查整数("tapStats 32 B", Marshal.SizeOf(Of 原生音频Tap统计)(), 32)
+        检查整数("bitmapSub 72 B", Marshal.SizeOf(Of 原生位图字幕帧)(), 72)
+        检查整数("timedTextCmd 120 B", Marshal.SizeOf(Of 原生定时文字命令)(), 120)
+        检查整数("timedTextMeasure 20 B", Marshal.SizeOf(Of 原生定时文字测量)(), 20)
+        检查整数("timedTextLayer 88 B", Marshal.SizeOf(Of 原生定时文字图层)(), 88)
+        检查整数("timedTextStatus 80 B", Marshal.SizeOf(Of 原生定时文字状态)(), 80)
+        检查整数("vsrStatus 44 B", Marshal.SizeOf(Of 原生视频超分辨率状态)(), 44)
+        检查整数("autoHdrStatus 44 B", Marshal.SizeOf(Of 原生视频自动HDR状态)(), 44)
+        检查整数("prefetchPlan 40 B", Marshal.SizeOf(Of 前后预取计划)(), 40)
+        检查整数("prefetchStatus 112 B", Marshal.SizeOf(Of 前后预取状态)(), 112)
+        检查整数("cpuSnapshot 88 B", Marshal.SizeOf(Of 原生CPU策略快照)(), 88)
+
+        ' config 关键字段 offset：
+        检查整数("config.outputWindow offset", CInt(Marshal.OffsetOf(Of 原生播放器配置)(NameOf(原生播放器配置.输出窗口))), 8)
+        检查整数("config.audioEndpoint offset", CInt(Marshal.OffsetOf(Of 原生播放器配置)(NameOf(原生播放器配置.音频端点UTF8))), 40)
+        检查整数("config.callback offset", CInt(Marshal.OffsetOf(Of 原生播放器配置)(NameOf(原生播放器配置.回调))), 48)
+        检查整数("config.adaptiveDownscale offset", CInt(Marshal.OffsetOf(Of 原生播放器配置)(NameOf(原生播放器配置.自适应CPU预缩放))), 80)
+
+        ' pacing 关键字段 offset：
+        检查整数("pacing.slotError offset", CInt(Marshal.OffsetOf(Of 原生呈现节律状态)(NameOf(原生呈现节律状态.上限节奏误差100纳秒))), 32)
+        检查整数("pacing.holdSampled offset", CInt(Marshal.OffsetOf(Of 原生呈现节律状态)(NameOf(原生呈现节律状态.停留采样数))), 40)
+
+        ' snapshot C 侧 static_assert pin（line 481-512）：
+        检查整数("snap.extAudioOffset offset", CInt(Marshal.OffsetOf(Of 原生播放器快照)(NameOf(原生播放器快照.外部音轨偏移100纳秒))), 88)
+        检查整数("snap.iamfActive offset", CInt(Marshal.OffsetOf(Of 原生播放器快照)(NameOf(原生播放器快照.IAMF已接管))), 364)
+        检查整数("snap.videoUpload offset", CInt(Marshal.OffsetOf(Of 原生播放器快照)(NameOf(原生播放器快照.视频上传100纳秒))), 376)
+        检查整数("snap.audioDelay offset", CInt(Marshal.OffsetOf(Of 原生播放器快照)(NameOf(原生播放器快照.音频延迟100纳秒))), 400)
+        检查整数("snap.uploadPath offset", CInt(Marshal.OffsetOf(Of 原生播放器快照)(NameOf(原生播放器快照.上传路径))), 456)
+        检查整数("snap.playbackRate offset", CInt(Marshal.OffsetOf(Of 原生播放器快照)(NameOf(原生播放器快照.播放速度))), 576)
+        检查整数("snap.ptActive offset", CInt(Marshal.OffsetOf(Of 原生播放器快照)(NameOf(原生播放器快照.音频直通已接管))), 592)
+
+        ' imageInfo：
+        检查整数("imgInfo.frameCount offset", CInt(Marshal.OffsetOf(Of 原生图片信息)(NameOf(原生图片信息.帧数))), 8)
+        检查整数("imgInfo.reserved1 offset", CInt(Marshal.OffsetOf(Of 原生图片信息)(NameOf(原生图片信息.保留1))), 48)
+
+        ' tapBlock：
+        检查整数("tapBlock.generation offset", CInt(Marshal.OffsetOf(Of 原生音频Tap块)(NameOf(原生音频Tap块.代次))), 16)
+        检查整数("tapBlock.positions offset", CInt(Marshal.OffsetOf(Of 原生音频Tap块)(NameOf(原生音频Tap块.声道位置))), 44)
+        检查整数("tapBlock.sampleFormat offset", CInt(Marshal.OffsetOf(Of 原生音频Tap块)(NameOf(原生音频Tap块.采样格式))), 140)
+
+        ' bitmapSubtitle：
+        检查整数("bitmapSub.start offset", CInt(Marshal.OffsetOf(Of 原生位图字幕帧)(NameOf(原生位图字幕帧.开始100纳秒))), 16)
+        检查整数("bitmapSub.seq offset", CInt(Marshal.OffsetOf(Of 原生位图字幕帧)(NameOf(原生位图字幕帧.序号))), 64)
+
+        ' timedText：
+        检查整数("ttCmd.textUtf8 offset", CInt(Marshal.OffsetOf(Of 原生定时文字命令)(NameOf(原生定时文字命令.文本UTF8))), 56)
+        检查整数("ttCmd.contentId offset", CInt(Marshal.OffsetOf(Of 原生定时文字命令)(NameOf(原生定时文字命令.内容标识))), 96)
+        检查整数("ttLayer.seq offset", CInt(Marshal.OffsetOf(Of 原生定时文字图层)(NameOf(原生定时文字图层.序号))), 24)
+        检查整数("ttLayer.commands offset", CInt(Marshal.OffsetOf(Of 原生定时文字图层)(NameOf(原生定时文字图层.命令))), 32)
+        检查整数("ttStatus.submitted offset", CInt(Marshal.OffsetOf(Of 原生定时文字状态)(NameOf(原生定时文字状态.已提交序号))), 8)
+
+        ' prefetch：
+        检查整数("prefetchPlan.paths offset", CInt(Marshal.OffsetOf(Of 前后预取计划)(NameOf(前后预取计划.路径表UTF8))), 16)
+        检查整数("prefetchStatus.cachedBytes offset", CInt(Marshal.OffsetOf(Of 前后预取状态)(NameOf(前后预取状态.已缓存字节))), 32)
+
+        ' cpuSnapshot：
+        检查整数("cpuSnap.domain offset", CInt(Marshal.OffsetOf(Of 原生CPU策略快照)(NameOf(原生CPU策略快照.放置域))), 8)
     End Sub
 
     Private Sub 测模块缺席()
