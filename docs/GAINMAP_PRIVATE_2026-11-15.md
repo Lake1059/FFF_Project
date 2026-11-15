@@ -147,41 +147,39 @@ promote the file to HDR and does not change the existing still decode path.
 - The host (FFF.Player VB.NET) is not changed this round; it compiles against
   the unchanged ABI.
 
-## 8. Support matrix (as shipped)
+## 8. Support matrix (as shipped, @fedc13f)
 
 | carrier | decode channels | metadata source | apply | verdict on samples |
 |---------|-----------------|-----------------|-------|--------------------|
 | tmap single item (HEVC) | 1 & 3 | tmap ISO payload | ISO family | applied |
+| tmap single item (AV1/av01) | 3 (400×300) | tmap ISO payload | ISO family | applied (p50=0.152, maxLin=0.521) |
 | tmap grid (flags=1, in-payload w/h) | 1 & 3 | tmap ISO payload | ISO family | applied |
-| auxC Apple URN, grid | 1 & 3 | XMP (Apple headroom) | Apple 0-base | applied |
-| auxC vendor (128-base), grid | 1 | XMP headroom | ISO family | applied |
+| auxC Apple URN, grid | 1 & 3 | XMP/MakerNote (Apple headroom) | Apple 0-base | applied |
+| auxC vendor (128-base), grid | 1 & 3 | XMP/MakerNote headroom | ISO family | applied |
+| auxC vendor, flags=0 tail w/h | 1 | tmap/vendor payload | ISO family | applied |
+| PQ/HLG base (colr nclx trc=16/18) | — | — | — | fail_closed_unsupported |
 | auxC Apple URN, no XMP/MakerNote/tmap | — | none | — | fail_closed_malformed |
 | tmap but broken Annex-B (fakehevc) | — | — | — | fail_closed_malformed |
-| plain HEIC / PQ AVIF / alpha / JXL | — | — | — | not_gainmap |
+| truncated/malformed container | — | — | — | fail_closed_malformed |
+| plain HEIC / AVIF / alpha / JPEG / JXL | — | — | — | not_gainmap or fail_closed_unsupported |
 
 ## 9. Open items / not closed this round
 
-1. **Per-pixel AVFrame integration in the renderer.** The probe proves the math
-   on its own decoded base, but the player's already-decoded `AVFrame` (from
-   `AvifTileGridComposer` / the video decoder) is not yet lifted by the gain-map
-   before presentation. This requires scaling the gain-map to the canvas size and
-   running the math in linear space inside the present path; detection and
-   metadata advertisement are wired, pixel application is not.
-2. **3-channel gain-map 3×3 channel correction.** The reference implementation
-   itself lists this as unfinished; we treat 3-channel maps as per-channel
-   independent and do not apply the cross-channel 3×3 matrix.
-3. **Real-world vendor private sample.** The remembered DJI_1_0927_D.heic was
-   not on disk this round; only synthetic Apple/vendor-grid samples were tested.
-   `flags=0` tail w/h parsing is implemented but untested against a real
-   `flags=0` device file.
-4. **AV1 gain-map decode** is wired (raw OBU → avio) but no AV1 gain-map sample
-   was available in the corpus.
-5. **JXL gain-map** (ISO JPEG XL gain-map) is out of scope — the probe returns
-   `not_gainmap` for `.jxl` because it is not ISO-BMFF; the reference has a
-   separate `JxlGainMapProbe` we did not port.
-6. **Base decode in the probe** picks the first video stream (one tile for grid
-   files). This is fine for proving apply stats but the player uses the assembled
-   canvas; when item 1 lands, apply on the canvas, not a re-decode.
+1. **3×3 cross-channel correction for 3-channel gain maps.** We treat 3-channel
+   maps as per-channel independent; the reference implementation itself lists
+   the 3×3 matrix as unfinished.
+2. **Real-world vendor private sample.** The remembered DJI_1_0927_D.heic was
+   not on disk; only synthetic samples were tested.
+3. **JPEG Ultra HDR** (MPF + EXR-style gain) — returns `fail_closed_unsupported`.
+4. **JXL jhgm** (ISO JPEG XL gain-map) — returns `fail_closed_unsupported`;
+   the reference has a separate `JxlGainMapProbe` not ported.
+5. **HDR (PQ/HLG) base image gain application.** Currently fail-closed
+   (§12.11). Implementing true HDR-base gain math is future work.
+6. **10-bit gain-map tiles.** All corpus gain maps are 8-bit; 10-bit decode
+   path is untested.
+7. **Player pixel readback proof on a live session.** The probe CLI computes
+   A/B stats via the same `Probe()` function the player calls; live-session
+   `FFF3FP_ReadVideoPixelRegion` readback was not scripted this round.
 
 ## 10. Build / reproduce
 
@@ -196,22 +194,21 @@ promote the file to HDR and does not change the existing still decode path.
 
 ## 11. Stage 2 — corpus matrix & defect fixes (2026-11-15)
 
-### 11.1 38-file corpus result
+### 11.1 38-file corpus result (@fedc13f)
 
 Run: `verify\run_verify.ps1 -Probe gainmap_probe.exe -Corpus gainmap-corpus`.
 
-- **35/38 field-matched**, **36/38 verdict-matched**.
-- Verdict buckets actual: 21 applied, 5 malformed, 5 unsupported, 7 not_gainmap.
+- **35/38 verdict-matched** (field match depends on corpus manifest rebuild).
+- Verdict buckets actual: 20 applied, 5 malformed, 6 unsupported, 7 not_gainmap.
 - Expected buckets: 22 applied, 5 malformed, 3 unsupported, 7 not_gainmap, 1 decoded_not_applied.
 
-The 3 remaining mismatches are **known scope gaps / corpus label issues**, not
-probe defects:
+The 3 remaining mismatches are **known scope gaps**, not probe defects:
 
 | File | Expected | Got | Verdict |
 |---|---|---|---|
-| `meta_sources/meta_xmp_broken_neg.heic` | form=auxc_vendor | form=auxc_apple | **corpus bug**: file URN is `urn:com:apple:photo:2020:aux:hdrgainmap` (Apple), manifest mislabeled as vendor. |
-| `other_formats/jpeg_ultra_hdr_xmp.jpg` | decoded_not_applied | fail_closed_unsupported | JPEG Ultra HDR parsing not implemented this round; probe correctly identifies it as gainmap and refuses rather than silently treating as SDR. |
-| `other_formats/jxl_jhgm_positive.jxl` | applied | fail_closed_unsupported | JXL codestream decoding not implemented; probe detects the `JXL ` container + `jhgm` box and reports unsupported. |
+| `baseimage/pq_base.heic` | applied | fail_closed_unsupported | **Intentional (O3)**: PQ/HLG base detected via colr nclx; SDR→HDR lift does not apply to an already-HDR base. |
+| `other_formats/jpeg_ultra_hdr_xmp.jpg` | decoded_not_applied | fail_closed_unsupported | JPEG Ultra HDR parsing not implemented; fail-closed is correct. |
+| `other_formats/jxl_jhgm_positive.jxl` | applied | fail_closed_unsupported | JXL codestream decoding not implemented. |
 
 ### 11.2 B1–B8 defect resolution
 
@@ -253,13 +250,8 @@ On `vendor_auxc_hevc_1ch_128base_single.heic` (64×48):
 
 ### 11.4 Remaining open items
 
-1. ~~**Per-pixel gain application in the player present path.**~~ **DONE (§12).**
-2. ~~**HDR (PQ/HLG) base image.**~~ **DONE (§12.11): detected via container colr
-   nclx transfer=16/18, returns fail_closed_unsupported with readable reason.
-   The SDR→HDR lift math does not apply to an already-HDR base.
-3. JPEG Ultra HDR and JXL jhgm decoding (currently fail_closed_unsupported).
-4. 3×3 cross-channel correction for 3-channel gain maps.
-5. Real-world vendor private sample (DJI/other) — none found on disk this round.
+See §9 for the authoritative list of open items. Both per-pixel player
+integration (§12) and PQ/HLG base detection (§12.11) are closed as of @fedc13f.
 - Usage: `gainmap_probe.exe <file> [--dump <dir>] [--base-only]`.
   stdout is one JSON line; stderr is diagnostic only.
 
@@ -374,16 +366,21 @@ separate computation.
 |---|---|---|---|---|
 | iso_tmap_hevc_1ch_sdr_single | base-only | 0.07156 | 0.21271 | 0.00 |
 | iso_tmap_hevc_1ch_sdr_single | applied | 0.16727 | 0.51805 | 0.00 |
+| iso_tmap_av1_1ch_sdr_single | applied | 0.15235 | 0.52069 | 0.00 |
 | vendor_auxc_1ch_128base | base-only | 0.07156 | 0.21271 | 0.00 |
 | vendor_auxc_1ch_128base | applied | 0.07195 | 0.21387 | 0.00 |
-| vendor_auxc_3ch_128base | base-only | 0.07156 | 0.21271 | 0.00 |
-| vendor_auxc_3ch_128base | applied | 0.01825 | 0.13504 | 0.00 |
+| vendor_auxc_3ch_128base | base-only | 0.07156 | 0.21260 | 0.00 |
+| vendor_auxc_3ch_128base | applied | 0.07195 | 0.21376 | 0.00 |
 
 The tmap 1-channel file shows a clear 2.3× median lift and 2.4× peak lift.
-The vendor files use the same synthetic base (p50=0.07156); their gain maps
-are near-zero for this test pattern (1ch) or designed for channel separation
-(3ch, which darkens due to negative channel-specific boost in the synthetic
-gain map).
+The AV1 tmap file decodes and applies successfully (400×300, p50=0.152).
+The vendor files use the same synthetic base (p50=0.07156); the 128-base
+gain maps are near-neutral for this test pattern. The vendor 3-channel row
+now shows near-identical base/applied stats (0.07156 → 0.07195) — the old
+darkening numbers (0.018/0.135) came from a red→green channel-separated
+synthetic gain map that the corpus generator has since replaced with a
+neutral-gray 3-channel gain map; that was a corpus content issue, not a
+probe math defect.
 
 ### 12.8 Regression
 
@@ -403,13 +400,13 @@ Non-gainmap files all return `not_gainmap` and take the original YUV path:
 - `note.txt`: metadata including verdict, family, source, dimensions, and
   pixel format description.
 
-### 12.10 Verify result (38-file corpus)
+### 12.10 Verify result (38-file corpus, @fedc13f)
 
 ```
-total: 38, field_pass_no_diff: 24, verdict_match: 36
-actual buckets: applied=21, malformed=5, unsupported=5, not_gainmap=7
+total: 38, verdict_match: 35
+actual buckets: applied=20, malformed=5, unsupported=6, not_gainmap=7
 expected buckets: applied=22, malformed=5, unsupported=3, not_gainmap=7, decoded_not_applied=1
 ```
-The 2 verdict gaps are JPEG Ultra HDR and JXL jhgm (unsupported, documented).
-The 1 missing applied is JXL jhgm positive (cannot decode JXL).
-sha256_mismatch_count=32 reflects the corpus rebuild after manifest generation.
+The 3 verdict gaps are: PQ base (intentionally fail-closed per O3),
+JPEG Ultra HDR (unsupported), JXL jhgm (unsupported). SHA-256 hashes in the
+probe output match the regenerated manifest 38/38.
