@@ -383,23 +383,30 @@ bool ProbeWebp(const Buf& b, JpegGainMapHit& out) {
         p = body + sz + (sz & 1);
     }
     // A self-contained WebP gain map needs a base frame AND gain-map metadata
-    // (EXIF/XMP carrying hdrgm). This corpus has none:
-    //   * spruit-...-gainmap.webp  = 24KB bare VP8 gain layer (no base, no meta).
-    //   * spruit_sunrise_4k.webp   = 1.5MB plain SDR photo (no gain-map wrapper).
-    // Without metadata we cannot prove gain-ness; a small auxiliary-sized VP8 is
-    // reported as a bare gain-map layer, a large one as plain SDR.
+    // (EXIF/XMP carrying hdrgm). This corpus has none, so every WebP here is
+    // found=false; the reason string MUST stay discriminative because the player
+    // routes the two negatives differently:
+    //   * spruit-...-gainmap.webp = 24KB bare VP8 gain LAYER (has gain-map data
+    //     but NO base in-file) -> fail_closed_unsupported: recognized as a gain
+    //     map but cannot be applied standalone.
+    //   * spruit_sunrise_4k.webp  = 1.5MB plain SDR photo (no gain-map wrapper
+    //     at all) -> not_gainmap.
+    // Heuristic: an auxiliary-sized VP8 (<64KB, no metadata) is the bare layer;
+    // a large VP8 is a plain SDR frame.
     bool hasGainMeta = false;
     if (hasVpx && !hasGainMeta && !hasAnim) {
         out.found = false;
         out.containerKind = "webp_gainmap";
         out.family = "iso";
         out.metaSource = "gcontainer";
-        bool bareLayer = (vp8Len < 65536); // auxiliary-sized -> likely a gain layer
+        bool bareLayer = (vp8Len < 65536);
         if (bareLayer) {
-            out.reason = "bare gain-map VP8 layer without base image; cannot be applied standalone "
-                         "(RIFF chunks: " + chunks + ")";
+            out.reason = "BARE_GAINMAP_LAYER_NO_BASE: gain-map VP8 layer present but no "
+                         "base image in file; recognized as gain map yet cannot be applied "
+                         "standalone (RIFF chunks: " + chunks + ")";
         } else {
-            out.reason = "plain SDR WebP; no gain-map wrapper/metadata (RIFF chunks: " + chunks + ")";
+            out.reason = "PLAIN_SDR_WEBP: ordinary lossy SDR WebP; no gain-map wrapper or "
+                         "hdrgm metadata (RIFF chunks: " + chunks + ")";
         }
         if (b.ok(vp8Off, vp8Len)) out.gainBytes.assign(b.d+vp8Off, b.d+vp8Off+vp8Len);
         return false;
@@ -456,6 +463,23 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
                 b.u8(s.payload+2)=='F'&&b.u8(s.payload+3)==0) {
                 mpfPayload = s.payload + 4; mpfLen = s.len - 4;
             } else if (s.len >= 26 && memcmp(b.d+s.payload, "urn:iso:std:iso:ts:21496:-1", 26) == 0) {
+                // ISO 21496-1 APP2 binary metadata box. Layout (per libultrahdr /
+                // GainMapDecoder.ParseIso21496), all multi-byte fields BIG-ENDIAN:
+                //   payload[0..25]  "urn:iso:std:iso:ts:21496:-1" (26 ASCII)
+                //   payload[26]     NUL
+                //   payload[27..28] min_version u16   (must be 0 for v0)
+                //   payload[29..30] writer_version u16
+                //   payload[31]     FLAGS u8
+                //     bit7 0x80 = multi-channel (3-ch)
+                //     bit6 0x40 = useBaseColorSpace
+                //     bit3 0x08 = commonDenominator
+                //     bit2 0x04 = backwardDirection (BaseRenditionIsHdr)
+                //   then per-channel min/max/gamma/offsets (rational or common-denom).
+                // i.e. the flags byte absolute file offset = s.payload + 31.
+                //   flags=0xc0 -> useBaseColorSpace=1, SDR base  -> apply gainmap (applied)
+                //   flags=0x80 -> useBaseColorSpace=0, HDR base  -> decoded_not_applied
+                // (The skia test files write a degenerate "1\0" version here; the
+                // main implementer parses the box when present and tolerates that.)
                 isoPayload = s.payload; isoLen = s.len;
             }
         } else if (s.marker == 0xE1) {
@@ -543,33 +567,42 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
         out.found = false; return false;
     }
 
-    // ---- Negative-control guard: a same-size second photo is NOT a gain map.
-    // A real gain map is either declared (GContainer / ISO-URN / Apple) or is a
-    // smaller (downsampled / pseudo-map) sub-image. Two equal-resolution full
-    // photos = an MPO pair, not base+gainmap.
+    // ---- Non-declared Ultra HDR: require real parameters, reject full-res twins.
+    //
+    // Without an authoritative container declaration (Google GContainer
+    // Container:Directory / ISO 21496-1 APP2 URN / Apple HDRGainMap namespace),
+    // an MPF pair is only trusted as base+gainmap when the secondary XMP
+    // ACTUALLY parses to GainMapMin AND GainMapMax triples. A bare hdrgm
+    // namespace declaration (or a stray header on a normal photo) must NOT flip
+    // us into the HDR apply path.
+    //
+    // Even with parameters, a gain map is a DOWNSAMPLED auxiliary; a second
+    // image that is the same pixel grid as a large base (>=1024px) is an MPO
+    // photo pair (e.g. 02.jpg / 03.jpg: two 3000px camera frames), not a
+    // gain map. sein (400x300) stays accepted: it has real min/max params and
+    // the base is small, so the same-size secondary is a pseudo-map, not a photo.
     bool secondaryDownsampled = (gainImg->w < baseImg.w && gainImg->h < baseImg.h);
     bool authoritative = hasGContainer || hasIsoUrn || hasAppleNs;
+    bool hasRealParams = !gMin.empty() && !gMax.empty();
+    (void)secondaryDownsampled;
 
-    if (!authoritative && !secondaryDownsampled) {
-        // Same-size second image: reject unless hdrgm metadata genuinely declares
-        // a small pseudo-map. sein-like small test images (both dims <= 512) are
-        // accepted; full-res equal pairs (02/03) are not.
-        bool smallPair = (std::max(baseImg.w, baseImg.h) <= 512);
-        if (!smallPair) {
+    if (!authoritative) {
+        if (!hasRealParams) {
             out.found = false;
             out.containerKind = "jpeg_uhdr";
-            out.reason = "mpf images same size (" + std::to_string(baseImg.w) + "x" +
-                         std::to_string(baseImg.h) + " == " + std::to_string(gainImg->w) + "x" +
-                         std::to_string(gainImg->h) + "); no gain map (no GContainer/ISO-URN/Apple declaration)";
+            out.reason = "hdrgm namespace without GainMapMin/Max (no GContainer/ISO/Apple declaration)";
             return false;
         }
-    }
-
-    // Require credible metadata.
-    if (!authoritative && !hdrgmParams) {
-        out.found = false;
-        out.reason = "hdrgm namespace only, no GainMapMin/Max parameters";
-        return false;
+        bool fullResTwin = (gainImg->w == baseImg.w && gainImg->h == baseImg.h &&
+                            std::max(baseImg.w, baseImg.h) >= 1024);
+        if (fullResTwin) {
+            out.found = false;
+            out.containerKind = "jpeg_uhdr";
+            out.reason = "mpf secondary is a full-resolution equal-size photo (" +
+                         std::to_string(baseImg.w) + "x" + std::to_string(baseImg.h) +
+                         "), not a downsampled gain map (MPO pair)";
+            return false;
+        }
     }
 
     // ---- Carve bytes ----

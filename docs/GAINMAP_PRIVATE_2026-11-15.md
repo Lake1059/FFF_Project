@@ -152,7 +152,7 @@ promote the file to HDR and does not change the existing still decode path.
 | carrier | decode channels | metadata source | apply | verdict on samples |
 |---------|-----------------|-----------------|-------|--------------------|
 | tmap single item (HEVC) | 1 & 3 | tmap ISO payload | ISO family | applied |
-| tmap single item (AV1/av01) | 3 (400×300) | tmap ISO payload | ISO family | applied (p50=0.152, maxLin=0.521) |
+| tmap single item (AV1/av01) | 1 (400×300) | tmap ISO payload | ISO family | applied (p50=0.154, maxLin=0.521) — verified on `iso_tmap_av1_1ch_sdr_single.avif` and `codec_av1_av01.avif` |
 | tmap grid (flags=1, in-payload w/h) | 1 & 3 | tmap ISO payload | ISO family | applied |
 | auxC Apple URN, grid | 1 & 3 | XMP/MakerNote (Apple headroom) | Apple 0-base | applied |
 | auxC vendor (128-base), grid | 1 & 3 | XMP/MakerNote headroom | ISO family | applied |
@@ -169,12 +169,15 @@ promote the file to HDR and does not change the existing still decode path.
    maps as per-channel independent; the reference implementation itself lists
    the 3×3 matrix as unfinished.
 2. **Real-world vendor private sample.** The remembered DJI_1_0927_D.heic was
-   not on disk; only synthetic samples were tested.
-3. **JPEG Ultra HDR** (MPF + EXR-style gain) — returns `fail_closed_unsupported`.
+   not on disk; only synthetic samples were tested. (Apple iPhone HEIC
+   `apple_hdr_sample_imazen.heic` has been wired and verified at 7.37× headroom.)
+3. **JPEG Ultra HDR** — wired via `GainMapJpeg` module; 10 JPEG/WebP samples
+   pass. Remaining edge cases: skia HDR-base JPEG flag detection.
 4. **JXL jhgm** (ISO JPEG XL gain-map) — returns `fail_closed_unsupported`;
    the reference has a separate `JxlGainMapProbe` not ported.
-5. **HDR (PQ/HLG) base image gain application.** Currently fail-closed
-   (§12.11). Implementing true HDR-base gain math is future work.
+5. **HDR (PQ/HLG) base image gain application.** HDR base now returns
+   `decoded_not_applied` (base displayed as-is). True HDR-base→HDR-base gain
+   math is future work.
 6. **10-bit gain-map tiles.** All corpus gain maps are 8-bit; 10-bit decode
    path is untested.
 7. **Player pixel readback proof on a live session.** The probe CLI computes
