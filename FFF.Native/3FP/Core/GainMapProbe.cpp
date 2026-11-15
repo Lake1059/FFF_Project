@@ -448,6 +448,9 @@ bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consu
     p += 2; // writer_version
     uint8_t flags = d[p++];
     m.rawFlags = flags;
+    // flags bit 0x80 = 1 → three channels (per-channel gainmap)
+    // flags bit 0x80 = 0 → single channel (luma-only gainmap)
+    // Verified by tmap payload length: 142 bytes = 3ch layout (16 + 3*40)
     int channels = (flags & 0x80) ? 3 : 1;
     bool commonDenom = (flags & 0x08) != 0;
     m.channels = channels;
@@ -1673,7 +1676,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             // Verify payload length matches canonical v0 layout (detect writer with extra bytes)
             {
                 uint8_t fl = tmapPayload[5]; // flags byte at offset 5 (after version+minVer+writerVer)
-                int ch = (fl & 0x80) ? 3 : 1;
+                int ch = (fl & 0x80) ? 3 : 1;  // 0x80 set → three channels (verified by 142-byte payload)
                 bool cd = (fl & 0x08) != 0;
                 long expected = 6 + (cd ? (12 + ch * 20) : (16 + ch * 40));
                 if ((long)tmapPayload.size() > expected) {
