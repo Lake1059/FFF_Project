@@ -1363,6 +1363,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                 char b[120]; sprintf(b, "base tile %d extract: %s", ti, tWhy.c_str());
                 R.verdict="fail_closed_malformed"; R.reason=b; return R;
             }
+            if (tStream.empty() || tStream.size() < 4) {
+                char b[120]; sprintf(b, "base tile %d: stream too small (%zu)", ti, tStream.size());
+                R.verdict="fail_closed_malformed"; R.reason=b; return R;
+            }
             std::vector<float> tile; int tw=0, th=0;
             if (!DecodeBufferToRgba(tStream, -1, tile, tw, th, tWhy, tileHint, &decTrc)) {
                 char b[120]; sprintf(b, "base tile %d decode: %s", ti, tWhy.c_str());
@@ -1437,6 +1441,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         int idx = 0;
         for (int ty = 0; ty < gridRows; ty++) for (int tx = 0; tx < gridCols; tx++) {
             if (idx >= (int)gainmapStreams.size()) break;
+            if (gainmapStreams[idx].empty() || gainmapStreams[idx].size() < 4) {
+                char b[120]; sprintf(b, "gm tile %d: stream too small (%zu)", idx, gainmapStreams[idx].size());
+                R.verdict = "fail_closed_malformed"; R.reason = b; return R;
+            }
             std::vector<float> tile; int tw=0, th=0; std::string why;
             if (!DecodeBufferToRgba(gainmapStreams[idx], -1, tile, tw, th, why)) {
                 char b[120]; sprintf(b, "gm tile %d decode: %s", idx, why.c_str());
@@ -1546,15 +1554,13 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         return R;
     }
     // HDR base: tmap flags bit 0x40 clear (0x80 = HDR base, 0xc0 = SDR base).
-    // Anchor: seine_sdr_gainmap_srgb=0xc0(apply), seine_hdr_gainmap_srgb=0x80(skip).
-    if (metaOk && ap.iso.channels > 0) {
-        if (!(ap.iso.rawFlags & 0x40)) {
-            R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
-            R.verdict = "decoded_not_applied";
-            R.applyOk = false; R.applyMode = "none";
-            R.reason = "hdr base displayed as-is; gain map not applied (tmap flags 0x80)";
-            return R;
-        }
+    // Only applies to tmap-sourced metadata, not Apple/XMP.
+    if (metaOk && R.metaSource == "tmap" && !(ap.iso.rawFlags & 0x40)) {
+        R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
+        R.verdict = "decoded_not_applied";
+        R.applyOk = false; R.applyMode = "none";
+        R.reason = "hdr base displayed as-is; gain map not applied (tmap flags 0x80)";
+        return R;
     }
 
     if (baseOnly) {
