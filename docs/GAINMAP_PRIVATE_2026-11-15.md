@@ -193,5 +193,73 @@ promote the file to HDR and does not change the existing still decode path.
   → `FFF.Native\x64\Release\FFF.Native.dll`, 0 errors.
 - Probe CLI: `FFF.Native\tools\build_probe.bat` (cl.exe direct link against the
   same FFmpeg/libav libraries), runtime DLLs copied next to the exe.
+
+## 11. Stage 2 — corpus matrix & defect fixes (2026-11-15)
+
+### 11.1 38-file corpus result
+
+Run: `verify\run_verify.ps1 -Probe gainmap_probe.exe -Corpus gainmap-corpus`.
+
+- **35/38 field-matched**, **36/38 verdict-matched**.
+- Verdict buckets actual: 21 applied, 5 malformed, 5 unsupported, 7 not_gainmap.
+- Expected buckets: 22 applied, 5 malformed, 3 unsupported, 7 not_gainmap, 1 decoded_not_applied.
+
+The 3 remaining mismatches are **known scope gaps / corpus label issues**, not
+probe defects:
+
+| File | Expected | Got | Verdict |
+|---|---|---|---|
+| `meta_sources/meta_xmp_broken_neg.heic` | form=auxc_vendor | form=auxc_apple | **corpus bug**: file URN is `urn:com:apple:photo:2020:aux:hdrgainmap` (Apple), manifest mislabeled as vendor. |
+| `other_formats/jpeg_ultra_hdr_xmp.jpg` | decoded_not_applied | fail_closed_unsupported | JPEG Ultra HDR parsing not implemented this round; probe correctly identifies it as gainmap and refuses rather than silently treating as SDR. |
+| `other_formats/jxl_jhgm_positive.jxl` | applied | fail_closed_unsupported | JXL codestream decoding not implemented; probe detects the `JXL ` container + `jhgm` box and reports unsupported. |
+
+### 11.2 B1–B8 defect resolution
+
+- **B1 (base decode no frame)**: Root cause was twofold: (a) opening the whole
+  file with avformat on tmap containers fails ("Derived Image item not
+  implemented"); fixed by extracting the primary item via iloc → Annex-B →
+  in-memory avio. (b) The corpus generator's `split_annexb` only searched for
+  4-byte start codes, dropping 3-byte NALs (SEI/slice) produced by libx265;
+  fixed in `gen/build_corpus.py`.
+- **B2 (tmap form not wired)**: tmap dimg candidates now union tmap out-edges
+  and any reference pointing *to* the tmap (corpus layout is primary→[tmap,
+  gainmap], not tmap→gainmap).
+- **B3 (vendor URN misclassified as apple)**: `ClassifyAuxUrn` now requires
+  exact match on the Apple URN string; any other URN containing `hdrgainmap`
+  is vendor.
+- **B4 (grid tail w/h missing)**: grid payload parsed for rows/cols/flags
+  immediately; flags=0 reads trailing 2×u16 w/h. Dimensions are reported even
+  if later tile validation fails.
+- **B5 (truncated grid → not_gainmap)**: malformed containers now return
+  `fail_closed_malformed` with a readable reason instead of falling through to
+  not_gainmap.
+- **B6 (unsupported vs malformed priority)**: added `containerWhyUnsupported`
+  flag; non-codec/non-grid aux items → unsupported, not malformed.
+- **B7 (JPEG/JXL silent SDR)**: JPEG SOI + `GainMap` XMP and JXL `JXL ` box +
+  `jhgm` box are detected and reported as `fail_closed_unsupported` with a
+  reason, never as not_gainmap.
+- **B8 (sha256 wrong)**: hand-rolled SHA-256 had a signed-left-shift UB bug on
+  uint8_t inputs ≥ 0x80. Replaced with Windows CNG (BCrypt) — verified against
+  `Get-FileHash`.
+
+### 11.3 A/B evidence (--dump)
+
+On `vendor_auxc_hevc_1ch_128base_single.heic` (64×48):
+- `--base-only`: p50 ≈ 0.072 (sRGB base after sRGB→linear), maxLinear ≈ 0.214.
+- Applied path: p50 ≈ 0.072 (unchanged midtones), maxLinear lifted by the
+  vendor 128-base gain map. The `--dump` mode writes `base.pfm` and
+  `applied.pfm` (32-bit float RGB, PFM format) plus `note.txt` for independent
+  ISO/Apple formula recomputation.
+
+### 11.4 Remaining open items
+
+1. **Per-pixel gain application in the player present path.** The probe's
+   apply math is the single source of truth; the player's `DecodeInitialFrame`
+   / `ComposeTileGridFrame` → `VideoRenderer` pipeline does not yet call it on
+   the already-decoded AVFrame. Detection and metadata broadcast to
+   `RebuildMediaInfo` JSON are wired.
+2. JPEG Ultra HDR and JXL jhgm decoding (currently fail_closed_unsupported).
+3. 3×3 cross-channel correction for 3-channel gain maps.
+4. Real-world vendor private sample (DJI/other) — none found on disk this round.
 - Usage: `gainmap_probe.exe <file> [--dump <dir>] [--base-only]`.
   stdout is one JSON line; stderr is diagnostic only.

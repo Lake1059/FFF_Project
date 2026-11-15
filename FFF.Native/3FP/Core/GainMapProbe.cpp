@@ -192,9 +192,11 @@ int ClassifyAuxUrn(const std::string& urn) {
     std::string u; u.reserve(urn.size());
     for (char c : urn) u.push_back((char)tolower((unsigned char)c));
     if (u.find("21496") != std::string::npos) return 1;
+    // Exact Apple URN is Apple; any other hdrgainmap-ish URN is an unregistered vendor.
+    if (u == "urn:com:apple:photo:2020:aux:hdrgainmap") return 2;
     if (u.find("hdrgainmap") != std::string::npos ||
         u.find("hdr-gain-map") != std::string::npos ||
-        u.find("hdr_gain_map") != std::string::npos) return 2;
+        u.find("hdr_gain_map") != std::string::npos) return 4;
     if (u.find("auxid:1") != std::string::npos ||
         u.find("auxiliary:alpha") != std::string::npos) return 3;
     if (u.find("depth") != std::string::npos || u.find("disparity") != std::string::npos ||
@@ -358,6 +360,30 @@ bool ToAnnexB(const std::vector<uint8_t>& item, int lengthSize,
     for (auto& n : nals) {
         emitStart(); memcpy(out.data() + w, item.data() + n.first, (size_t)n.second); w += n.second;
     }
+    return true;
+}
+
+// Extract a coded image item (hvc1/av01) into a decodable byte stream:
+// AV1 OBU items pass through raw; HEVC items are converted to Annex-B.
+// Returns false with a readable reason on any structural problem.
+bool ExtractCodedStream(const std::vector<uint8_t>& d, const ParsedContainer& c,
+                        int itemId, std::vector<uint8_t>& out, std::string& why,
+                        std::string* outCodec = nullptr) {
+    auto it = c.items.find(itemId);
+    if (it == c.items.end()) { why = "item not found"; return false; }
+    const std::string& codec = it->second;
+    if (!IsCodecItem(codec)) { why = "not a codec item: " + codec; return false; }
+    if (outCodec) *outCodec = codec;
+    std::vector<uint8_t> raw;
+    if (!SliceItem(d, c, itemId, raw, why)) return false;
+    if (codec == "av01") { out = std::move(raw); return true; }
+    long ho, hl; std::string hw;
+    if (!FindHvcC(c, itemId, ho, hl, hw)) { why = "hvcC: " + hw; return false; }
+    int ls; std::vector<std::vector<uint8_t>> ps; std::string pw;
+    if (!ParseHvcC(d, ho, hl, ls, ps, pw)) { why = "hvcC parse: " + pw; return false; }
+    std::vector<uint8_t> ann; std::string cw;
+    if (!ToAnnexB(raw, ls, ps, ann, cw)) { why = "annexB: " + cw; return false; }
+    out = std::move(ann);
     return true;
 }
 
@@ -621,7 +647,8 @@ static bool FrameToRgbaFloat(const AVFrame* frame, std::vector<float>& rgbaOut,
 // `streamHint` selects stream index if >=0; otherwise picks first video stream.
 // Puts decoded frame into packed RGBA float (0..1) in rgbaOut, with w/h.
 bool DecodeBufferToRgba(const std::vector<uint8_t>& buf, int streamIdx,
-                        std::vector<float>& rgbaOut, int& w, int& h, std::string& why) {
+                        std::vector<float>& rgbaOut, int& w, int& h, std::string& why,
+                        const char* fmtHint = nullptr) {
     rgbaOut.clear(); w = h = 0;
     if (buf.empty()) { why = "empty buffer"; return false; }
     MemCtx mc{buf.data(), buf.size(), 0};
@@ -633,48 +660,59 @@ bool DecodeBufferToRgba(const std::vector<uint8_t>& buf, int streamIdx,
     AVFormatContext* fmt = avformat_alloc_context();
     fmt->pb = avio;
     fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
-    if (avformat_open_input(&fmt, nullptr, nullptr, nullptr) < 0) {
-        why = "avformat_open_input failed";
-        avio_context_free(&avio); av_free(avioBuf);
+    fmt->probesize = 1 << 20;
+    fmt->max_analyze_duration = AV_TIME_BASE;
+    const AVInputFormat* fmtH = fmtHint ? av_find_input_format(fmtHint) : nullptr;
+    int rc = avformat_open_input(&fmt, nullptr, fmtH, nullptr);
+    if (rc < 0 && fmtH) {
+        // forced demuxer rejected (e.g. wrong codec); retry auto.
+        avio_seek(avio, 0, SEEK_SET); mc.pos = 0;
+        fmt = avformat_alloc_context(); fmt->pb = avio;
+        fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+        fmt->probesize = 1 << 20;
+        rc = avformat_open_input(&fmt, nullptr, nullptr, nullptr);
+    }
+    if (rc < 0) {
+        char b[80]; sprintf(b, "avformat_open_input failed rc=%d", rc);
+        why = b;
         return false;
     }
-    if (avformat_find_stream_info(fmt, nullptr) < 0) {
-        why = "find_stream_info";
-        avformat_close_input(&fmt); avio_context_free(&avio); av_free(avioBuf);
-        return false;
-    }
+    // For small raw buffers, skip find_stream_info: it consumes the whole buffer
+    // and re-reading after a seek double-feeds the demuxer. The hinted demuxer
+    // already exposes a stream with codecpar populated at open time.
+    avio_seek(avio, 0, SEEK_SET);
     int vstream = -1;
     if (streamIdx >= 0 && streamIdx < (int)fmt->nb_streams) vstream = streamIdx;
     else {
         for (unsigned i = 0; i < fmt->nb_streams; i++)
             if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) { vstream = i; break; }
     }
-    if (vstream < 0) { why = "no video stream"; avformat_close_input(&fmt); avio_context_free(&avio); av_free(avioBuf); return false; }
+    if (vstream < 0) { why = "no video stream"; avformat_close_input(&fmt); return false; }
     AVStream* st = fmt->streams[vstream];
     const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
-    if (!codec) { why = "no decoder"; avformat_close_input(&fmt); avio_context_free(&avio); av_free(avioBuf); return false; }
+    if (!codec) { why = "no decoder"; avformat_close_input(&fmt); return false; }
     AVCodecContext* cc = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(cc, st->codecpar);
     cc->pkt_timebase = st->time_base;
-    if (avcodec_open2(cc, codec, nullptr) < 0) { why = "avcodec_open2"; avcodec_free_context(&cc); avformat_close_input(&fmt); avio_context_free(&avio); av_free(avioBuf); return false; }
+    if (avcodec_open2(cc, codec, nullptr) < 0) { why = "avcodec_open2"; avcodec_free_context(&cc); avformat_close_input(&fmt); return false; }
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     bool got = false;
     while (av_read_frame(fmt, pkt) >= 0) {
         if (pkt->stream_index != vstream) { av_packet_unref(pkt); continue; }
-        if (avcodec_send_packet(cc, pkt) == 0) {
-            if (avcodec_receive_frame(cc, frame) == 0) { got = true; av_packet_unref(pkt); break; }
-        }
+        int sr = avcodec_send_packet(cc, pkt);
+        int rr = avcodec_receive_frame(cc, frame);
+        if (sr == 0 && rr == 0) { got = true; av_packet_unref(pkt); break; }
         av_packet_unref(pkt);
     }
-    // Some single-frame streams need a flush
+    // Flush the decoder; loop until it drains.
     if (!got) {
         avcodec_send_packet(cc, nullptr);
-        if (avcodec_receive_frame(cc, frame) == 0) got = true;
+        while (avcodec_receive_frame(cc, frame) == 0) { got = true; break; }
     }
-    if (!got) { why = "no frame decoded"; av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); avformat_close_input(&fmt); avio_context_free(&avio); av_free(avioBuf); return false; }
+    if (!got) { why = "no frame decoded"; av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); avformat_close_input(&fmt); return false; }
     w = frame->width; h = frame->height;
-    if (!FrameToRgbaFloat(frame, rgbaOut, w, h, why)) { av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); avformat_close_input(&fmt); avio_context_free(&avio); av_free(avioBuf); return false; }
+    if (!FrameToRgbaFloat(frame, rgbaOut, w, h, why)) { av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); avformat_close_input(&fmt); return false; }
     av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc);
     avformat_close_input(&fmt);
     // Custom-IO avio cleanup: this FFmpeg build's close_input may already have
@@ -705,9 +743,9 @@ bool DecodeFileBaseToRgba(const std::string& path, std::vector<float>& rgbaOut, 
     bool got = false;
     while (av_read_frame(fmt, pkt) >= 0) {
         if (pkt->stream_index != vstream) { av_packet_unref(pkt); continue; }
-        if (avcodec_send_packet(cc, pkt) == 0) {
-            if (avcodec_receive_frame(cc, frame) == 0) { got = true; av_packet_unref(pkt); break; }
-        }
+        int sr = avcodec_send_packet(cc, pkt);
+        int rr = avcodec_receive_frame(cc, frame);
+        if (sr == 0 && rr == 0) { got = true; av_packet_unref(pkt); break; }
         av_packet_unref(pkt);
     }
     if (!got) { avcodec_send_packet(cc, nullptr); if (avcodec_receive_frame(cc, frame) == 0) got = true; }
@@ -784,6 +822,41 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     fclose(f);
     if (sz < 16) { R.reason = "file too small"; return R; }
 
+    // ── Non-ISO-BMFF gainmap containers: detect as unsupported (not silent SDR) ──
+    // JPEG Ultra HDR: SOI 0xFFD8 + XMP gainmap metadata.
+    if (d.size() >= 3 && d[0] == 0xFF && d[1] == 0xD8) {
+        std::string_view sv((const char*)d.data(), d.size());
+        bool hasGainMap = sv.find("GainMap") != std::string_view::npos ||
+                          sv.find("hdrgm") != std::string_view::npos;
+        if (hasGainMap) {
+            R.present = true;
+            R.form = "jpeg_hdr";
+            R.metaFamily = "iso";
+            R.metaSource = "xmp";
+            R.verdict = "fail_closed_unsupported";
+            R.reason = "[container] JPEG Ultra HDR (jpeg_hdr) not supported in this build (XMP gainmap metadata detected)";
+            return R;
+        }
+        R.reason = "not ISO-BMFF (JPEG, no gainmap XMP)";
+        return R;
+    }
+    // JPEG XL container: first box type "JXL ". Only flag as gainmap if jhgm box present.
+    if (d.size() >= 8 && memcmp(d.data() + 4, "JXL ", 4) == 0) {
+        std::string_view sv((const char*)d.data(), d.size());
+        bool hasJhgm = sv.find("jhgm") != std::string_view::npos;
+        if (hasJhgm) {
+            R.present = true;
+            R.form = "jhgm";
+            R.metaFamily = "iso";
+            R.metaSource = "tmap";
+            R.verdict = "fail_closed_unsupported";
+            R.reason = "[container] JPEG XL (jhgm) not supported in this build";
+            return R;
+        }
+        R.reason = "JPEG XL container (no jhgm gainmap box)";
+        return R;
+    }
+
     // sha256 placeholder (we don't link crypto; emit empty string)
     // parse ftyp
     {
@@ -794,6 +867,16 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         R.majorBrand = std::string((const char*)d.data() + 8, 4);
         for (long p = 16; p + 4 <= bsize; p += 4)
             R.compatibleBrands.push_back(std::string((const char*)d.data() + p, 4));
+        // JXL container (ISOBMFF-based JPEG XL): unsupported in this build.
+        if (R.majorBrand == "JXL ") {
+            R.present = true;
+            R.form = "jhgm";
+            R.metaFamily = "iso";
+            R.metaSource = "tmap";
+            R.verdict = "fail_closed_unsupported";
+            R.reason = "[container] JPEG XL (jhgm) not supported in this build";
+            return R;
+        }
         // still brand heuristic
         static const char* stillBrands[] = {"heic","heix","heif","avif","avis","mif1","msf1","MiHE","hevc","hevx"};
         for (auto& b : R.compatibleBrands) for (auto s : stillBrands) if (b == s) R.isStill = true;
@@ -887,6 +970,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     // Determine form
     int tmapId = -1;
     for (auto& kv : C.items) if (kv.second == "tmap") { tmapId = kv.first; break; }
+    if (tmapId >= 0) { R.present = true; R.metaFamily = "iso"; R.metaSource = "tmap"; }
 
     // Helper: find item ids that own an auxC of given kind
     auto findAuxOwner = [&](int kind, int& owner) -> int {
@@ -916,19 +1000,47 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     bool gridTail = false;
     int gridTailW = 0, gridTailH = 0;
     std::string containerWhy;
+    bool containerWhyUnsupported = false;
 
     if (tmapId >= 0) {
         R.present = true;
-        // dimg from tmap -> targets (exclude primary)
+        // dimg targets: collect coded/grid items referenced alongside tmap.
+        // Two layouts exist: (a) tmap -> its gainmap image; (b) primary -> [tmap, gainmap].
+        // Union both directions.
         std::vector<int> codecCands, gridCands;
-        for (auto& rf : C.refs) {
-            if (rf.type != "dimg" || rf.from != tmapId) continue;
-            for (int to : rf.to) {
-                if (to == C.primary) continue;
-                auto it = C.items.find(to);
-                if (it == C.items.end()) continue;
-                if (IsCodecItem(it->second)) { if (std::find(codecCands.begin(), codecCands.end(), to) == codecCands.end()) codecCands.push_back(to); }
-                else if (it->second == "grid") { if (std::find(gridCands.begin(), gridCands.end(), to) == gridCands.end()) gridCands.push_back(to); }
+        auto collectCandidates = [&](int refFrom, int excludeTo) {
+            for (auto& rf : C.refs) {
+                if (rf.type != "dimg" || rf.from != refFrom) continue;
+                for (int to : rf.to) {
+                    if (to == C.primary || to == excludeTo) continue;
+                    auto it = C.items.find(to);
+                    if (it == C.items.end()) continue;
+                    if (IsCodecItem(it->second)) { if (std::find(codecCands.begin(), codecCands.end(), to) == codecCands.end()) codecCands.push_back(to); }
+                    else if (it->second == "grid") { if (std::find(gridCands.begin(), gridCands.end(), to) == gridCands.end()) gridCands.push_back(to); }
+                }
+            }
+        };
+        collectCandidates(tmapId, -1);            // layout (a): tmap -> gainmap
+        for (auto& rf : C.refs) {                  // layout (b): primary -> [tmap, gainmap]
+            if (rf.type != "dimg") continue;
+            bool pointsAtTmap = false; for (int to : rf.to) if (to == tmapId) pointsAtTmap = true;
+            if (pointsAtTmap) collectCandidates(rf.from, tmapId);
+        }
+        // Layout (c): no dimg links tmap to its gainmap image. The gainmap image
+        // is the grid/codec item that is neither primary nor the tmap itself.
+        if (codecCands.empty() && gridCands.empty()) {
+            for (auto& kv : C.items) {
+                int id = kv.first; const std::string& t = kv.second;
+                if (id == C.primary || id == tmapId) continue;
+                if (t == "grid") { if (std::find(gridCands.begin(), gridCands.end(), id) == gridCands.end()) gridCands.push_back(id); }
+            }
+            // Only fall back to a single coded item if there is no grid.
+            if (gridCands.empty()) {
+                for (auto& kv : C.items) {
+                    int id = kv.first; const std::string& t = kv.second;
+                    if (id == C.primary || id == tmapId) continue;
+                    if (IsCodecItem(t)) { if (std::find(codecCands.begin(), codecCands.end(), id) == codecCands.end()) codecCands.push_back(id); }
+                }
             }
         }
         if (codecCands.size() == 1 && gridCands.empty()) {
@@ -964,6 +1076,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         }
         std::string why;
         if (!SliceItem(d, C, tmapId, tmapPayload, why)) containerWhy = "tmap payload: " + why;
+        else if (!tmapPayload.empty() && tmapPayload[0] != 0) {
+            containerWhy = "tmap version != 0";
+            R.metaFamily = "none"; R.metaSource = "default";
+        }
     } else {
         // auxC paths
         int appleOwner = -1, vendorOwner = -1, isoOwner = -1;
@@ -976,9 +1092,11 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         } else if (nApple == 1) {
             form = Form::AuxApple; gainmapItemId = appleOwner;
             R.present = true;
+            R.metaFamily = "apple";
         } else if (nVendor == 1 && hasXmpAppleHeadroom) {
             form = Form::AuxVendor; gainmapItemId = vendorOwner;
             R.present = true;
+            R.metaFamily = "vendor128";
         } else {
             // no gainmap
             if (nApple == 1) { R.auxCUrn = "hdrgainmap-but-no-auxl?"; }
@@ -1012,6 +1130,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                 codecType = it->second;
                 if (codecType == "grid") {
                     gainmapIsGrid = true;
+                    R.form = "auxc_grid";
                 } else if (IsCodecItem(codecType)) {
                     std::string why; std::vector<uint8_t> raw;
                     if (!SliceItem(d, C, gainmapItemId, raw, why)) containerWhy = "aux slice: " + why;
@@ -1032,7 +1151,8 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                         }
                     }
                 } else {
-                    containerWhy = "aux item type not codec/grid: " + codecType;
+                    containerWhy = "unsupported: aux item type not codec/grid: " + codecType;
+                    containerWhyUnsupported = true;
                 }
             }
             // set form string
@@ -1059,19 +1179,32 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             else {
                 gridFlags = gp[1];
                 gridRows = gp[2] + 1; gridCols = gp[3] + 1;
+                R.gridPresent = true; R.gridRows = gridRows; R.gridCols = gridCols; R.gridFlags = gridFlags;
                 long q = 4;
                 if (gridFlags & 1) {
-                    if ((long)gp.size() < q + 8) containerWhy = "grid declares w/h but truncated";
+                    if ((long)gp.size() < q + 8) { containerWhy = "grid flags=1 missing w/h"; }
                     else { gridW = Be32(gp.data()+q); gridH = Be32(gp.data()+q+4); }
-                } else if ((long)gp.size() >= q + 4) {
-                    gridTailW = Be16(gp.data()+q); gridTailH = Be16(gp.data()+q+2);
-                    gridTail = (gridTailW > 0 && gridTailH > 0);
+                } else {
+                    // flags=0: tail carries 2xu16 w/h on private (DJI/MiHE) files.
+                    if ((long)gp.size() >= q + 4) {
+                        gridTailW = Be16(gp.data()+q); gridTailH = Be16(gp.data()+q+2);
+                        gridTail = (gridTailW > 0 && gridTailH > 0);
+                    }
+                    if (gridTail) { gridW = gridTailW; gridH = gridTailH; }
+                    else {
+                        containerWhy = "grid flags=0 but no tail w/h (cannot determine canvas size)";
+                    }
                 }
                 // tile ids from dimg of grid
                 std::vector<int> tileIds;
                 for (auto& rf : C.refs) {
-                    if (rf.type != "dimg" || rf.from != gainmapItemId) continue;
-                    for (int to : rf.to) if (std::find(tileIds.begin(), tileIds.end(), to) == tileIds.end()) tileIds.push_back(to);
+                    if (rf.type != "dimg") continue;
+                    bool pointsAtGrid = false; for (int to : rf.to) if (to == gainmapItemId) pointsAtGrid = true;
+                    if (rf.from != gainmapItemId && !pointsAtGrid) continue;
+                    for (int to : rf.to) {
+                        if (to == gainmapItemId || to == C.primary) continue;
+                        if (std::find(tileIds.begin(), tileIds.end(), to) == tileIds.end()) tileIds.push_back(to);
+                    }
                 }
                 int expect = gridRows * gridCols;
                 if ((int)tileIds.size() != expect) {
@@ -1081,9 +1214,13 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                     // tile ispe
                     if (!FindIspe(C, d, tileIds[0], tileW, tileH)) containerWhy = "no tile ispe";
                     else {
-                        if (gridW <= 0 || gridH <= 0 || gridW > gridCols*tileW || gridH > gridRows*tileH) {
-                            gridW = gridCols*tileW; gridH = gridRows*tileH; gridTail = false;
+                        // Validate canvas: tail w/h must fit within the tiled extent.
+                        if (gridW <= 0 || gridH <= 0) {
+                            gridW = gridCols*tileW; gridH = gridRows*tileH;
+                        } else if (gridW > gridCols*tileW || gridH > gridRows*tileH) {
+                            containerWhy = "grid tail w/h exceeds tiled extent";
                         }
+                        if (containerWhy.empty()) {
                         R.gridPresent = true; R.gridRows = gridRows; R.gridCols = gridCols;
                         R.gridFlags = gridFlags; R.gridTailPresent = gridTail;
                         R.gridTailW = gridTailW; R.gridTailH = gridTailH;
@@ -1106,6 +1243,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                         }
                         if (okAll && form == Form::TmapGrid) R.form = "tmap_grid";
                         else if (okAll) R.form = "auxc_grid";
+                        }
                     }
                 }
             }
@@ -1114,6 +1252,9 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
 
     if (form == Form::TmapSingle) R.form = "tmap";
     if (form == Form::AuxIso) { R.form = "tmap"; } // ISO aux treated as tmap-family
+    // If the gainmap item is a grid (even if tile parsing failed), report the grid form.
+    if (gainmapIsGrid && (R.form == "auxc_apple" || R.form == "auxc_vendor" || R.form == "tmap"))
+        R.form = "auxc_grid";
 
     // Not gainmap?
     if (!R.present) {
@@ -1123,8 +1264,16 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
 
     // Malformed / unsupported container
     if (!containerWhy.empty()) {
-        R.verdict = "fail_closed_malformed";
+        bool isUnsupported = containerWhyUnsupported ||
+            containerWhy.rfind("unsupported:", 0) == 0;
+        R.verdict = isUnsupported ? "fail_closed_unsupported" : "fail_closed_malformed";
         R.reason = "[container] " + containerWhy;
+        // Even when the container is malformed, surface XMP metadata source if present.
+        if (!isUnsupported && R.metaSource == "default" && XmpContains(d, "HDRGainMapHeadroom")) {
+            R.metaSource = "xmp";
+            if (R.metaFamily == "none") R.metaFamily = "vendor128";
+        }
+        if (!isUnsupported && R.metaFamily == "none") { R.metaSource = "default"; }
         return R;
     }
 
@@ -1133,11 +1282,20 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     int baseW = 0, baseH = 0;
     {
         std::string why;
-        if (!DecodeFileBaseToRgba(pathUtf8, baseRgba, baseW, baseH, why)) {
+        std::vector<uint8_t> baseStream;
+        std::string baseCodec;
+        if (!ExtractCodedStream(d, C, C.primary, baseStream, why, &baseCodec)) {
+            R.verdict = "fail_closed_malformed";
+            R.reason = "base extract: " + why;
+            return R;
+        }
+        const char* fmtHint = (baseCodec == "av01") ? "av1" : "hevc";
+        if (!DecodeBufferToRgba(baseStream, -1, baseRgba, baseW, baseH, why, fmtHint)) {
             R.verdict = "fail_closed_malformed";
             R.reason = "base decode: " + why;
             return R;
         }
+        FindIspe(C, d, C.primary, baseW, baseH); // prefer declared ispe over decoded dims
     }
     R.baseRgba = baseRgba; R.outW = baseW; R.outH = baseH;
 
@@ -1255,9 +1413,9 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         }
     }
     if (!metaOk) {
-        R.verdict = "fail_closed_malformed";
-        R.reason = "no credible gain metadata (tmap/makenote/xmp all absent or invalid)";
-        R.metaFamily = "none"; R.metaSource = "none";
+        R.verdict = "fail_closed_unsupported";
+        R.reason = "gain-map carrier recognized but no credible gain metadata (tmap/makenote/xmp all absent or invalid)";
+        R.metaFamily = "none"; R.metaSource = "default";
         return R;
     }
 

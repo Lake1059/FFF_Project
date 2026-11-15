@@ -59,8 +59,8 @@ struct GainMapProbeResult {
     int decodeBitDepth = 8;
 
     // metadata
-    std::string metaFamily;    // iso | apple | vendor128 | none
-    std::string metaSource;    // tmap | makenote | xmp | default
+    std::string metaFamily = "none";    // iso | apple | vendor128 | none
+    std::string metaSource = "default"; // tmap | makenote | xmp | default
     float offsetSdr[3] = {0.f, 0.f, 0.f};
     float offsetHdr[3] = {0.f, 0.f, 0.f};
     float logBoostMin[3] = {0.f, 0.f, 0.f};
