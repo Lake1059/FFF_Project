@@ -480,9 +480,10 @@ Friend NotInheritable Class Ai字幕包下载器
 
     ''' <summary>下载单个文件：逐源尝试（Range 续传 .part → 校验字节与 SHA256 → 落位）。
     ''' 一切失败保留 .part 供续传；取消原样抛出。进度含整体百分比（基数=此前文件累计）。</summary>
-    Private Shared Async Function 下载文件Async(目标 As String, 项 As 包文件项, 基数 As Long,
+    Friend Shared Async Function 下载文件Async(目标 As String, 项 As 包文件项, 基数 As Long,
                                                 总字节 As Long, 进度 As IProgress(Of 下载进度),
-                                                取消 As CancellationToken) As Task(Of String)
+                                                取消 As CancellationToken,
+                                                Optional 客户端 As HttpClient = Nothing) As Task(Of String)
         Dim 临时 = 目标 & ".part"
         ' 进度上报（文件字节 → 整体字节 → 百分比）。放在源循环外：校验阶段也要上报。
         ' 文本一行放得下（进度条下方的整行宽标签）：百分比 + 总量 + 当前文件名。
@@ -501,51 +502,59 @@ Friend NotInheritable Class Ai字幕包下载器
                     已有 = 0L
                 End If
 
-                Using 请求 As New HttpRequestMessage(HttpMethod.Get, 源.网址)
-                    If 已有 > 0 Then
-                        请求.Headers.Range = New RangeHeaderValue(已有, Nothing)
-                    End If
-                    Using 响应 = Await _客户端.SendAsync(请求, HttpCompletionOption.ResponseHeadersRead, 取消)
-                        If Not 响应.IsSuccessStatusCode Then Continue For
-                        Dim 总长 = If(响应.Content.Headers.ContentLength.HasValue,
-                                      响应.Content.Headers.ContentLength.Value + 已有,
-                                      源.字节)
-                        If 总长 <> 源.字节 Then
-                            Return $"{项.相对路径}：上游文件大小不符（期望 {源.字节}，得到 {总长}）" &
-                                   "——上游可能已更新，请更新下载清单"
+                If 已有 < 源.字节 Then
+                    Using 请求 As New HttpRequestMessage(HttpMethod.Get, 源.网址)
+                        If 已有 > 0 Then
+                            请求.Headers.Range = New RangeHeaderValue(已有, Nothing)
                         End If
-
-                                                Dim 写入模式 = If(已有 > 0, FileMode.Append, FileMode.Create)
-                        Dim 文件流 As FileStream = Nothing
-                        Dim 内容流 As Stream = Nothing
-                        Try
-                            文件流 = New FileStream(临时, 写入模式, FileAccess.Write,
-                                                    FileShare.None, 1048576,
-                                                    FileOptions.SequentialScan)
-                            内容流 = Await 响应.Content.ReadAsStreamAsync(取消)
-                            Dim 缓冲(65536 - 1) As Byte
-                            Dim 收到 = 已有
-                            Dim 上次报告字节 = 已有
-                            Dim 上次报告时刻 = DateTime.UtcNow
-                            While True
-                                Dim 读到 = Await 内容流.ReadAsync(缓冲, 0, 缓冲.Length, 取消)
-                                If 读到 = 0 Then Exit While
-                                Await 文件流.WriteAsync(缓冲, 0, 读到, 取消)
-                                收到 += 读到
-                                If 收到 - 上次报告字节 >= 4194304 OrElse
-                                   (DateTime.UtcNow - 上次报告时刻).TotalSeconds >= 1.0 Then
-                                    报告(收到, "", 源.字节)
-                                    上次报告字节 = 收到
-                                    上次报告时刻 = DateTime.UtcNow
+                        Using 响应 = Await If(客户端, _客户端).SendAsync(请求, HttpCompletionOption.ResponseHeadersRead, 取消)
+                            If Not 响应.IsSuccessStatusCode Then Continue For
+                            If 响应.StatusCode = Net.HttpStatusCode.OK Then
+                                ' A server may ignore Range. Restart instead of appending a full response.
+                                已有 = 0
+                            ElseIf 响应.StatusCode = Net.HttpStatusCode.PartialContent Then
+                                Dim 范围 = 响应.Content.Headers.ContentRange
+                                If 范围 Is Nothing OrElse Not 范围.HasRange OrElse
+                                   Not String.Equals(范围.Unit, "bytes", StringComparison.OrdinalIgnoreCase) OrElse
+                                   范围.From.Value <> 已有 OrElse Not 范围.HasLength OrElse 范围.Length.Value <> 源.字节 Then
+                                    Return $"{项.相对路径}：续传范围不符，未写入响应。"
                                 End If
-                            End While
-                            报告(源.字节, " 完成", 源.字节)
-                        Finally
-                            内容流?.Dispose()
-                            文件流?.Dispose()
-                        End Try
+                            Else
+                                Continue For
+                            End If
+                            If 响应.Content.Headers.ContentLength.HasValue AndAlso
+                               响应.Content.Headers.ContentLength.Value <> 源.字节 - 已有 Then
+                                Return $"{项.相对路径}：上游文件大小不符（期望剩余 {源.字节 - 已有}，得到 {响应.Content.Headers.ContentLength.Value}）" &
+                                       "——上游可能已更新，请更新下载清单"
+                            End If
+
+                            Dim 写入模式 = If(已有 > 0, FileMode.Append, FileMode.Create)
+                            Dim 文件流 As FileStream = Nothing
+                            Dim 内容流 As Stream = Nothing
+                            Try
+                                文件流 = New FileStream(临时, 写入模式, FileAccess.Write,
+                                                        FileShare.None, 1048576,
+                                                        FileOptions.SequentialScan)
+                                内容流 = Await 响应.Content.ReadAsStreamAsync(取消)
+                                Dim 上次报告字节 = 已有
+                                Dim 上次报告时刻 = DateTime.UtcNow
+                                Await 复制受限响应Async(内容流, 文件流, 已有, 源.字节,
+                                    Sub(收到)
+                                        If 收到 - 上次报告字节 >= 4194304 OrElse
+                                           (DateTime.UtcNow - 上次报告时刻).TotalSeconds >= 1.0 Then
+                                            报告(收到, "", 源.字节)
+                                            上次报告字节 = 收到
+                                            上次报告时刻 = DateTime.UtcNow
+                                        End If
+                                    End Sub, 取消)
+                                报告(源.字节, " 完成", 源.字节)
+                            Finally
+                                内容流?.Dispose()
+                                文件流?.Dispose()
+                            End Try
+                        End Using
                     End Using
-                End Using
+                End If
 
                 If New FileInfo(临时).Length <> 源.字节 Then
                     Return $"{项.相对路径}：下载不完整（连接中断），已保留 .part 可续传"
@@ -561,13 +570,38 @@ Friend NotInheritable Class Ai字幕包下载器
 
                 File.Move(临时, 目标, True)
                 Return ""
+            Catch oce As OperationCanceledException When Not 取消.IsCancellationRequested
+                ' The response body stalled. Keep the bounded prefix and try the next source.
             Catch oce As OperationCanceledException
                 Throw
+            Catch ex As InvalidDataException
+                Return $"{项.相对路径}：{ex.Message}"
             Catch
                 ' 网络/IO 失败：保留 .part，试下一个源。
             End Try
         Next
         Return $"{项.相对路径}：所有下载源都失败了（已保留 .part，再次点击继续续传）"
+    End Function
+
+    Friend Shared Async Function 复制受限响应Async(内容 As Stream, 输出 As Stream,
+                                                   已有 As Long, 期望 As Long,
+                                                   报告 As Action(Of Long),
+                                                   取消 As CancellationToken) As Task
+        If 已有 < 0 OrElse 期望 < 已有 Then Throw New ArgumentOutOfRangeException(NameOf(已有))
+        Dim 缓冲(65535) As Byte
+        Dim 收到 = 已有
+        Using 读取超时 = CancellationTokenSource.CreateLinkedTokenSource(取消)
+            Do
+                读取超时.CancelAfter(TimeSpan.FromSeconds(30))
+                Dim 本次上限 = CInt(Math.Min(CLng(缓冲.Length), 期望 - 收到 + If(期望 - 收到 < 缓冲.Length, 1L, 0L)))
+                Dim 读到 = Await 内容.ReadAsync(缓冲, 0, 本次上限, 读取超时.Token)
+                If 读到 = 0 Then Exit Do
+                If 读到 > 期望 - 收到 Then Throw New InvalidDataException("下载响应超过清单大小，已停止写入。")
+                Await 输出.WriteAsync(缓冲, 0, 读到, 读取超时.Token)
+                收到 += 读到
+                报告?.Invoke(收到)
+            Loop
+        End Using
     End Function
 
     Private Shared Function 计算哈希(路径 As String) As String

@@ -1193,9 +1193,11 @@ std::int64_t PlayerSession::StreamTimestampPosition100ns(const AVFormatContext* 
         timestamp == AV_NOPTS_VALUE) return AV_NOPTS_VALUE;
     const auto* stream = owner->streams[streamIndex];
     if (stream == nullptr) return AV_NOPTS_VALUE;
-    return av_rescale_q(timestamp, stream->time_base,
-        AVRational{1, static_cast<int>(TicksPerSecond)}) - TimelineOrigin100ns(owner) +
-        (disc_ && owner == format_ ? discPositionOffset_ : 0);
+    const auto position = av_rescale_q(timestamp, stream->time_base,
+        AVRational{1, static_cast<int>(TicksPerSecond)});
+    if (position == AV_NOPTS_VALUE) return AV_NOPTS_VALUE;
+    return SaturatingAddInt64(SaturatingSubInt64(position, TimelineOrigin100ns(owner)),
+        disc_ && owner == format_ ? discPositionOffset_ : 0);
 }
 
 bool PlayerSession::ShouldGateAudioAtVideoStart() const noexcept {
@@ -2786,8 +2788,10 @@ FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position,
             av_channel_layout_uninit(&input->ch_layout);
             av_channel_layout_default(&input->ch_layout, count);
         }
-        const auto skipped = position != AV_NOPTS_VALUE && position < origin
-            ? std::min<std::int64_t>(input->nb_samples, av_rescale_rnd(origin - position, input->sample_rate, 10000000, AV_ROUND_UP)) : 0;
+        const auto trimSamples = position != AV_NOPTS_VALUE && position < origin
+            ? av_rescale_rnd(SaturatingSubInt64(origin, position), input->sample_rate, 10000000, AV_ROUND_UP) : 0;
+        if (trimSamples < 0) { av_frame_free(&input); return FFFResult::FfmpegFailure; }
+        const auto skipped = std::min<std::int64_t>(input->nb_samples, trimSamples);
         if (skipped >= input->nb_samples) { av_frame_free(&input); return FFFResult::Success; }
         if (skipped) {
             const auto format = static_cast<AVSampleFormat>(input->format);
@@ -2800,7 +2804,9 @@ FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position,
             }
             input->nb_samples -= static_cast<int>(skipped);
         }
-        input->pts = position == AV_NOPTS_VALUE ? AV_NOPTS_VALUE : av_rescale_q(position - origin, AVRational{1, 10000000}, AVRational{1, frame->sample_rate}) + skipped;
+        const auto relativePts = position == AV_NOPTS_VALUE ? AV_NOPTS_VALUE :
+            av_rescale_q(SaturatingSubInt64(position, origin), AVRational{1, 10000000}, AVRational{1, frame->sample_rate});
+        input->pts = relativePts == AV_NOPTS_VALUE ? AV_NOPTS_VALUE : SaturatingAddInt64(relativePts, skipped);
     }
     const auto sent = av_buffersrc_add_frame_flags(tempoInput_, input, AV_BUFFERSRC_FLAG_KEEP_REF);
     av_frame_free(&input);
@@ -2810,9 +2816,9 @@ FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position,
     FFFResult result = FFFResult::Success;
     while (av_buffersink_get_frame(tempoOutput_, output) >= 0) {
         const auto outSamples = tempoSamples_;
-        const auto outputPosition = origin + av_rescale(outSamples, 10000000, output->sample_rate);
+        const auto outputPosition = SaturatingAddInt64(origin, av_rescale(outSamples, 10000000, output->sample_rate));
         result = audioRenderer_->Enqueue(output, outputPosition, 0);
-        tempoSamples_ += output->nb_samples;
+        tempoSamples_ = SaturatingAddInt64(tempoSamples_, output->nb_samples);
         av_frame_unref(output);
         if (result != FFFResult::Success) break;
     }
@@ -2942,10 +2948,9 @@ FFFResult PlayerSession::EnableAudioTap(const FFF3FPAudioTapConfig* const config
         std::shared_ptr<AsrAudioTap> installed;
         { std::lock_guard lock(asrTapMutex_); installed = asrTap_; }
         if (installed != nullptr) installed->NoteGeneration(snapshot_.timelineGeneration);
-        // Publish the worker-side view before the move: the passthrough shadow
-        // decode reads this pointer from HandlePassthroughPacket on this same
-        // thread, and asrTap_ keeps the object alive after the renderer takes it.
-        asrTapWorkerRaw_ = installed.get();
+        // The worker owns its view independently of API-thread replacements and
+        // of renderer reconstruction when switching to bitstream output.
+        asrTapWorker_ = installed;
         asrShadowErrors_ = 0;
         asrShadowDisabled_ = false;
         if (audioRenderer_ != nullptr) audioRenderer_->SetAsrTap(std::move(installed));
@@ -2962,7 +2967,7 @@ void PlayerSession::DisableAudioTap() noexcept {
     // the earliest safe point. A host ReadAudioTap call in flight holds its own
     // copy and finishes safely either way.
     Enqueue([this, tap] {
-        asrTapWorkerRaw_ = nullptr;
+        asrTapWorker_.reset();
         asrShadowErrors_ = 0;
         asrShadowDisabled_ = false;
         if (audioRenderer_ != nullptr) audioRenderer_->SetAsrTap(nullptr);
@@ -2977,7 +2982,7 @@ void PlayerSession::FeedAsrShadow(const std::uint8_t* const data, const std::siz
     // parsed access unit through the playback decoder and hand the frames to the
     // tap only -- they must never reach the bitstream renderer, which owns the
     // endpoint for the whole track.
-    if (asrTapWorkerRaw_ == nullptr || asrShadowDisabled_) return;
+    if (asrTapWorker_ == nullptr || asrShadowDisabled_) return;
     if (audioDecoder_ == nullptr || data == nullptr || size == 0) return;
     if (size > 0x7fffffffu) return;   // AVPacket::size is int
     AVPacket packet{};
@@ -3022,7 +3027,7 @@ void PlayerSession::FeedAsrShadow(const std::uint8_t* const data, const std::siz
         asrShadowErrors_ = 0;
         // Same call the PCM route makes: raw decoded bed, before any bed route /
         // fold-down / resample, with the session-computed media position.
-        asrTapWorkerRaw_->Produce(audioDecodeFrame_, position100ns);
+        asrTapWorker_->Produce(audioDecodeFrame_, position100ns);
     }
 }
 
@@ -9237,7 +9242,6 @@ void PlayerSession::DecodeUntilSeekTarget(const bool timeSliced) noexcept {
     // 目标帧自己可能就是非参考帧，跳过它就落不到目标上。
     // 只对 H.264/HEVC 启用：AV1/VP9 的「一个包 = 一帧」不成立（show_existing_frame /
     // superframe），按包时间估算的安全边界不适用。
-    AVCodecContext* seekDecoder = videoDecoder_;
     const auto seekCodecId = videoStream_ >= 0 && format_->streams[videoStream_] != nullptr
         ? format_->streams[videoStream_]->codecpar->codec_id : AV_CODEC_ID_NONE;
     wchar_t seekSkipEnv[8] = {};
@@ -9252,11 +9256,11 @@ void PlayerSession::DecodeUntilSeekTarget(const bool timeSliced) noexcept {
     // 只留一两帧余量会在 B 帧金字塔上把目标帧跳掉。预览帧用同一把尺子：离目标
     // 不足这个距离时不预览，否则预览帧会紧接着被目标帧覆盖，白付一次 vblank。
     const auto seekNearMargin100ns = seekSkipEnabled ? SeekPreviewMargin100ns() : 0;
-    const auto setSeekSkip = [seekDecoder, this](const AVDiscard discard) {
-        if (seekDecoder->skip_frame == discard) return;
+    const auto setSeekSkip = [this](const AVDiscard discard) {
         // 软件解码卸载线程向同一上下文送包，字段必须在同一把锁下写。
         std::lock_guard lock(softwareVideoCodecMutex_);
-        seekDecoder->skip_frame = discard;
+        // DecodePacket may replace the context during a GPU fallback.
+        if (videoDecoder_ != nullptr) videoDecoder_->skip_frame = discard;
     };
     while ((seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_) && !terminate_) {
         if (std::chrono::steady_clock::now() >= batchDeadline) break;
@@ -9314,8 +9318,7 @@ void PlayerSession::DecodeUntilSeekTarget(const bool timeSliced) noexcept {
         // 静默丢掉（EvaluateVideoSkipRung 只看 appliedSkipRung_，不会重写同值上下文）。
         const auto restore = appliedSkipRung_ == 0 ? AVDISCARD_DEFAULT :
             (appliedSkipRung_ == 1 ? AVDISCARD_NONREF : AVDISCARD_NONKEY);
-        std::lock_guard lock(softwareVideoCodecMutex_);
-        seekDecoder->skip_frame = restore;
+        setSeekSkip(restore);
     }
     if (seekTrace) {
         const auto wallMs = std::chrono::duration<double, std::milli>(
@@ -9504,7 +9507,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     // Drop the worker-side tap view before the decoder/frame it feeds: the
     // shared_ptr in asrTap_ may outlive this close (a host read can still hold
     // its own reference), but nothing may Produce into it from here on.
-    asrTapWorkerRaw_ = nullptr;
+    asrTapWorker_.reset();
     if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     ReleaseIamfDecoder();
     // The track (and its passthrough ownership) ends with the media. The
@@ -10500,6 +10503,10 @@ bool PlayerSession::NormalizeLocalPath(const char* path, std::string& normalized
             wide.rfind(L"\\\\.\\", 0) == 0 || wide.rfind(L"\\\\?\\GLOBALROOT", 0) == 0) { error = "Network, device and pipe paths are disabled."; return false; }
         std::vector<wchar_t> full(32768); const auto length = GetFullPathNameW(wide.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr);
         if (length == 0 || length >= full.size()) { error = "The local path is invalid."; return false; }
+        if (length >= 2 && (full[0] == L'\\' || full[0] == L'/') &&
+            (full[1] == L'\\' || full[1] == L'/')) {
+            error = "Network, device and pipe paths are disabled."; return false;
+        }
         const auto attributes = GetFileAttributesW(full.data());
         if (attributes == INVALID_FILE_ATTRIBUTES ||
             (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) { error = "The path must identify an existing regular local file."; return false; }

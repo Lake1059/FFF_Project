@@ -385,12 +385,13 @@ Friend NotInheritable Class 播放器歌词呈现器
         Return result
     End Function
 
-    Private Shared Function 按字素换行(text As String, font As Font, maximumWidth As Integer) As String()
+    Private Function 按字素换行(text As String, font As Font, maximumWidth As Integer) As String()
         Dim starts = StringInfo.ParseCombiningCharacters(text)
         If starts.Length = 0 Then Return {String.Empty}
         Dim result As New List(Of String)()
         Dim startElement = 0
         While startElement < starts.Length
+            If Threading.Volatile.Read(已释放标志) <> 0 Then Return Array.Empty(Of String)()
             While startElement < starts.Length AndAlso
                 Char.IsWhiteSpace(text, starts(startElement))
                 startElement += 1
@@ -398,8 +399,17 @@ Friend NotInheritable Class 播放器歌词呈现器
             If startElement >= starts.Length Then Exit While
 
             Dim low = startElement + 1
-            Dim high = starts.Length
+            Dim high = low
             Dim fittedEnd = low
+            ' Find a bound for this line before binary search; never start with
+            ' half of the entire remaining lyric on every short display line.
+            While high < starts.Length
+                If 测量文本宽度(取得字素范围(text, starts, startElement, high), font) > maximumWidth Then Exit While
+                fittedEnd = high
+                low = high + 1
+                high = startElement + CInt(Math.Min(CLng(starts.Length - startElement),
+                                                    CLng(high - startElement) * 2))
+            End While
             While low <= high
                 Dim middle = low + ((high - low) \ 2)
                 Dim candidate = 取得字素范围(text, starts, startElement, middle)

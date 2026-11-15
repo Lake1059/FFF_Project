@@ -62,6 +62,9 @@ struct RoutePod {
 };
 
 class PrefetchService final {
+#ifdef FFF_SECURITY_REGRESSION_TESTS
+    friend struct PrefetchSecurityRegression;
+#endif
 public:
     static PrefetchService& Instance() noexcept;
 
@@ -106,7 +109,7 @@ private:
     void EvaluatePressure() noexcept;
     void ReleaseAllLocked() noexcept;
     void TrimToHalfLocked() noexcept;
-    void EnforceBudgetLocked(std::uint64_t incoming) noexcept;
+    bool EnforceBudgetLocked(std::uint64_t incoming) noexcept;
     void PruneToPlanLocked(const std::vector<std::string>& paths) noexcept;
     bool AllowsWork() noexcept;
     bool Cancelled(std::uint32_t generation) noexcept;

@@ -2,6 +2,9 @@ Friend Module Program
     <STAThread>
     Public Function Main(参数 As String()) As Integer
         For Each 项 In 参数
+            If String.Equals(项, "--security-regression", StringComparison.OrdinalIgnoreCase) Then
+                Return 安全修复回归.运行()
+            End If
             If String.Equals(项, "--360-identification-regression", StringComparison.OrdinalIgnoreCase) Then
                 Return 播放器360识别回归.运行()
             End If
@@ -31,7 +34,7 @@ Friend Module Program
                 Return 系统媒体会话冒烟.运行()
             End If
         Next
-        Console.WriteLine("可用套件：--360-identification-regression  --pr57-fixes-regression  --content-size-regression  --module-abi-regression  --raw-file-association-regression  --bluetooth-latency-regression  --playback-progress-regression  --smtc-mapping-regression  --smtc-runtime-smoke")
+        Console.WriteLine("可用套件：--security-regression  --360-identification-regression  --pr57-fixes-regression  --content-size-regression  --module-abi-regression  --raw-file-association-regression  --bluetooth-latency-regression  --playback-progress-regression  --smtc-mapping-regression  --smtc-runtime-smoke")
         Return 2
     End Function
 End Module

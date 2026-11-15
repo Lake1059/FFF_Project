@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <cerrno>
 #include "3FP/Core/MediaText.h"
 #include "3FP/Api/FFF.Player.Api.h"
 #include "Shared/Ffmpeg/SharedFileInput.h"
@@ -34,7 +35,16 @@ public:
         if (format_ == nullptr) return Fail("Could not allocate the bitmap subtitle input context.");
         format_->pb = sharedInput_->Context();
         format_->flags |= AVFMT_FLAG_CUSTOM_IO;
-        const auto openResult = avformat_open_input(&format_, path, nullptr, nullptr);
+        // Subtitles and attachments must come from the already-open source.
+        // Protocol allowlists alone still permit file: device/UNC references.
+        format_->io_open = [](AVFormatContext*, AVIOContext**, const char*, int, AVDictionary**) -> int {
+            return AVERROR(EPERM);
+        };
+        AVDictionary* options = nullptr;
+        av_dict_set(&options, "protocol_whitelist", "file,crypto,data", 0);
+        av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
+        const auto openResult = avformat_open_input(&format_, path, nullptr, &options);
+        av_dict_free(&options);
         if (openResult < 0) return Fail("Could not open the bitmap subtitle: " + FfmpegError(openResult));
         const auto requestedStreamReady = requestedStream >= 0 &&
             requestedStream < static_cast<std::int32_t>(format_->nb_streams) &&
