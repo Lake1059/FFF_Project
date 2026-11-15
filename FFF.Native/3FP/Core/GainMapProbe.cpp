@@ -407,6 +407,7 @@ bool FindIspe(const ParsedContainer& c, const std::vector<uint8_t>& d, int itemI
 // ── ISO 21496-1 GainMapMetadata ──────────────────────────────────────────────
 struct IsoMeta {
     int channels = 1;
+    bool useBaseColorSpace = false; // bit 0x80: base IS HDR, don't apply SDR->HDR lift
     float hdrCapacityMin = 0.f, hdrCapacityMax = 0.f;
     float gainMin[3] = {0,0,0}, gainMax[3] = {0,0,0};
     float gammaC[3] = {1,1,1};
@@ -421,7 +422,9 @@ bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consu
     if (minVersion != 0) return false;
     p += 2; // writer_version
     uint8_t flags = d[p++];
-    int channels = (flags & 0x80) ? 3 : 1;
+    // Note: bit 0x80 in the fullbox flags (not this payload byte) is useBaseColorSpace.
+    // Channel count is detected from the decoded gainmap image, not from this byte.
+    int channels = 1;
     bool commonDenom = (flags & 0x08) != 0;
     m.channels = channels;
     auto rd = [](int n, int dd) -> float { return dd == 0 ? 0.f : (float)((double)n / dd); };
@@ -1405,18 +1408,11 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         FindIspe(C, d, C.primary, baseW, baseH); // prefer declared ispe over decoded dims
         decTrcOuter = decTrc;
     }
-    bool hdrBase = false;
-    // HDR base (PQ/HLG): display base as-is, skip gainmap apply.
-    {
-        int baseTrc = (baseColorTrc != 2) ? baseColorTrc : decTrcOuter;
-        if (baseTrc == 16 || baseTrc == 18) hdrBase = true;
-    }
     R.baseRgba = baseRgba; R.outW = baseW; R.outH = baseH;
-    if (hdrBase) {
+    // Gainmap was ignored (no brand / unsupported version / etc.) but base decoded:
+    if (!R.present) {
         R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
-        R.verdict = "decoded_not_applied";
-        R.applyOk = false; R.applyMode = "none";
-        R.reason = "hdr base displayed as-is; gain map not applied";
+        R.verdict = "not_gainmap"; R.reason = "gainmap not recognized for this file";
         return R;
     }
 
@@ -1430,21 +1426,30 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         }
     } else if (gainmapStreams.size() > 1 && gainmapIsGrid) {
         // decode each tile and stitch
+        int totalTiles = gridRows * gridCols;
+        if (totalTiles <= 0 || (int)gainmapStreams.size() < totalTiles) {
+            R.verdict = "fail_closed_malformed"; R.reason = "gainmap grid: tile count mismatch"; return R;
+        }
+        if (gridW <= 0 || gridH <= 0 || tileH <= 0) {
+            R.verdict = "fail_closed_malformed"; R.reason = "gainmap grid: bad dimensions"; return R;
+        }
         std::vector<float> canvas((size_t)gridW * gridH * 4, 0.f);
         int idx = 0;
-        bool ok = true;
         for (int ty = 0; ty < gridRows; ty++) for (int tx = 0; tx < gridCols; tx++) {
-            std::vector<float> tile; int tw, th; std::string why;
+            if (idx >= (int)gainmapStreams.size()) break;
+            std::vector<float> tile; int tw=0, th=0; std::string why;
             if (!DecodeBufferToRgba(gainmapStreams[idx], -1, tile, tw, th, why)) {
-                char b[120]; sprintf(b, "tile %d decode: %s", idx, why.c_str());
+                char b[120]; sprintf(b, "gm tile %d decode: %s", idx, why.c_str());
                 R.verdict = "fail_closed_malformed"; R.reason = b; return R;
             }
-            // blit
-            for (int y = 0; y < th; y++) {
-                int dy = ty*tileH + y; if (dy >= gridH) break;
-                for (int x = 0; x < tw; x++) {
-                    int dx = tx*tileW + x; if (dx >= gridW) break;
+            int copyW = (tw < tileW) ? tw : tileW;
+            int copyH = (th < tileH) ? th : tileH;
+            for (int y = 0; y < copyH; y++) {
+                int dy = ty*tileH + y; if (dy < 0 || dy >= gridH) continue;
+                for (int x = 0; x < copyW; x++) {
+                    int dx = tx*tileW + x; if (dx < 0 || dx >= gridW) continue;
                     long si = ((long)y*tw + x)*4, di = ((long)dy*gridW + dx)*4;
+                    if (si+3 >= (long)tile.size() || di+3 >= (long)canvas.size()) continue;
                     canvas[di] = tile[si]; canvas[di+1] = tile[si+1]; canvas[di+2] = tile[si+2]; canvas[di+3] = 1.f;
                 }
             }
@@ -1539,6 +1544,17 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         R.reason = "gain-map carrier recognized but no credible gain metadata (tmap/makenote/xmp all absent or invalid)";
         R.metaFamily = "none"; R.metaSource = "default";
         return R;
+    }
+    // HDR base: valid gainmap exists but base is PQ/HLG — display HDR base as-is.
+    {
+        int baseTrc = (baseColorTrc != 2) ? baseColorTrc : decTrcOuter;
+        if (baseTrc == 16 || baseTrc == 18) {
+            R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
+            R.verdict = "decoded_not_applied";
+            R.applyOk = false; R.applyMode = "none";
+            R.reason = "hdr base displayed as-is; gain map not applied";
+            return R;
+        }
     }
 
     if (baseOnly) {
