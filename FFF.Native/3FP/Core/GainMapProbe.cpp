@@ -73,6 +73,11 @@ struct PropBox {
     long size = 0;  // content size
 };
 
+struct GrpGroup {
+    uint32_t groupId;
+    std::vector<int> entities; // item IDs in order
+};
+
 struct ParsedContainer {
     std::string majorBrand;
     std::vector<std::string> compatibleBrands;
@@ -81,6 +86,7 @@ struct ParsedContainer {
     std::map<int, std::string> items;            // id -> infe type
     std::map<int, IlocEntry> locs;
     std::vector<RefEntry> refs;
+    std::vector<GrpGroup> groups;                // grpl groups (altr etc)
     std::vector<PropBox> ipco;
     std::map<int, std::vector<int>> ipma;        // item -> 1-based prop indices
     long idatStart = -1, idatEnd = -1;
@@ -187,6 +193,23 @@ void ParseIref(const std::vector<uint8_t>& d, long start, long end,
         }
         refs.push_back(r);
         p += size;
+    }
+}
+
+void ParseGrpl(const std::vector<uint8_t>& d, long start, long end,
+               std::vector<GrpGroup>& groups) {
+    if (start + 12 > end) return;
+    // FullBox: version(1) + flags(3) = 4 bytes, then group_id u32, num_entities u32, entities u32[]
+    long p = start + 4; // skip FullBox header
+    while (p + 8 <= end) {
+        GrpGroup g;
+        g.groupId = Be32(d.data() + p); p += 4;
+        uint32_t n = Be32(d.data() + p); p += 4;
+        for (uint32_t i = 0; i < n && p + 4 <= end; i++) {
+            g.entities.push_back((int)Be32(d.data() + p)); p += 4;
+        }
+        groups.push_back(g);
+        // Next group starts here (grpl contains multiple group boxes concatenated)
     }
 }
 
@@ -961,6 +984,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         } else if (t == "iinf") ParseIinf(d, cs, ce, C.items, itemTypeUnknown);
         else if (t == "iloc") ParseIloc(d, cs, ce, C.locs, ilocIncomplete);
         else if (t == "iref") ParseIref(d, cs, ce, C.refs);
+        else if (t == "grpl") ParseGrpl(d, cs, ce, C.groups);
         else if (t == "iprp") {
             std::vector<AuxCProp> auxC;
             ParseIprp(d, cs, ce, C.ipco, C.ipma, auxC);
@@ -1361,19 +1385,33 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         return R;
     }
 
-    // altr check: if gainmap item is listed as an alternate of the primary image,
-    // it's not the preferred rendition → ignore gainmap (not_gainmap).
-    if (gainmapItemId > 0 && R.present) {
-        for (const auto& rf : C.refs) {
-            if (rf.type == "altr" && rf.from == C.primary) {
-                for (int to : rf.to) {
-                    if (to == gainmapItemId) {
-                        R.present = false;
-                        R.form = "none";
-                        R.verdict = "not_gainmap";
-                        R.reason = "gainmap is alternate rendition (altr), not preferred; ignored";
-                        return R;
-                    }
+    // grpl/altr order check: if an altr group contains both primary and gainmap items,
+    // the first entity MUST be the gainmap side. If primary is first → wrong order → ignore gainmap.
+    {
+        char dbg[64]; sprintf(dbg, "groups count=%d", (int)C.groups.size()); R.notes.push_back(dbg);
+        for (size_t gi = 0; gi < C.groups.size(); gi++) {
+            const auto& g = C.groups[gi];
+            std::string ents; for (int e : g.entities) { ents += std::to_string(e) + " "; }
+            R.notes.push_back("grp id=" + std::to_string(g.groupId) + " ent=[" + ents + "]");
+        }
+    }
+    if (gainmapItemId > 0 && R.present && !C.groups.empty()) {
+        for (const auto& g : C.groups) {
+            bool hasPrimary = false, hasGainSide = false;
+            int primaryIdx = -1, gainSideIdx = -1;
+            for (size_t i = 0; i < g.entities.size(); i++) {
+                if (g.entities[i] == C.primary) { hasPrimary = true; primaryIdx = (int)i; }
+                // Gain side = tmap item OR gainmap coded image
+                if (g.entities[i] == gainmapItemId || g.entities[i] == tmapId) { hasGainSide = true; gainSideIdx = (int)i; }
+            }
+            if (hasPrimary && hasGainSide && primaryIdx >= 0 && gainSideIdx >= 0) {
+                // Both in group: if primary comes before gain side → wrong order → not_gainmap
+                if (primaryIdx < gainSideIdx) {
+                    R.present = false;
+                    R.form = "none";
+                    R.verdict = "not_gainmap";
+                    R.reason = "altr group has primary before gainmap (wrong order); gainmap ignored";
+                    return R;
                 }
             }
         }
