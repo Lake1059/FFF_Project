@@ -160,11 +160,25 @@ AVPixelFormat PixelFormatFor(int colors, int bits) noexcept {
 // (KF-03); that requires subprocess isolation, deferred until a real fuzzer
 // crash or user-visible hang justifies the IPC cost.
 constexpr int kRawSehBase = -10000;
+// SEH codes occupy bits 0..15 of GetExceptionCode(); we keep the low 15 bits
+// (& 0x7FFF) and subtract, so a wrapped SEH result lands in
+// [kRawSehBase - 0x7FFF, kRawSehBase] = [-42767, -10000].
+//
+// LibRaw's own error codes are NOT in that range: ordinary errors are
+// -1..-9 (LIBRAW_UNSPECIFIED_ERROR..LIBRAW_REQUEST_FOR_NONEXISTENT_THUMBNAIL)
+// and the fatal family is below -100000 (LIBRAW_FATAL_ERROR(ec) = ec < -100000,
+// e.g. LIBRAW_IO_ERROR=-100009, LIBRAW_TOO_BIG=-100012,
+// LIBRAW_UNSUFFICIENT_MEMORY=-100007). A plain `result <= kRawSehBase` test
+// would mislabel those fatal LibRaw failures as "crashed (SEH)" and hide the
+// real reason; the inclusive interval below keeps the two families apart.
+constexpr int kRawSehMin = kRawSehBase - 0x7FFF;
+inline bool IsRawSehResult(int result) noexcept {
+    return result >= kRawSehMin && result <= kRawSehBase;
+}
 
-// Encode an SEH fault as a negative int well below any real LibRaw error
-// code (those are in roughly -1..-64). Subtraction keeps the whole range
-// <= kRawSehBase so `result <= kRawSehBase` is a valid discriminator; OR
-// would wrap around in two's complement and produce small negatives.
+// Encode an SEH fault as a negative int inside the [kRawSehMin, kRawSehBase]
+// window described above. Subtraction keeps the whole range inside the window;
+// OR would wrap around in two's complement and produce small negatives.
 int SehOpenFile(LibRaw* raw, const char* path) noexcept {
     __try {
         return raw->open_file(path);
@@ -357,7 +371,7 @@ bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& o
 
     const int openResult = SehOpenFile(impl_->raw.get(), pathUtf8.c_str());
     if (openResult != LIBRAW_SUCCESS) {
-        if (openResult <= kRawSehBase) {
+        if (IsRawSehResult(openResult)) {
             error = "LibRaw open_file crashed (SEH)";
         } else {
             error = std::string("LibRaw open_file: ") + RawError(openResult);
@@ -498,7 +512,7 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
 
     int result = SehUnpack(&raw);
     if (result != LIBRAW_SUCCESS) {
-        error = (result <= kRawSehBase)
+        error = IsRawSehResult(result)
             ? "LibRaw unpack crashed (SEH)"
             : std::string("LibRaw unpack: ") + RawError(result);
         return false;
@@ -506,7 +520,7 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
     RawTrace("RawStillSource::unpack ok");
     result = SehDcrawProcess(&raw);
     if (result != LIBRAW_SUCCESS) {
-        error = (result <= kRawSehBase)
+        error = IsRawSehResult(result)
             ? "LibRaw dcraw_process crashed (SEH)"
             : std::string("LibRaw dcraw_process: ") + RawError(result);
         return false;
@@ -516,7 +530,7 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
     int memError = LIBRAW_SUCCESS;
     libraw_processed_image_t* mem = SehMakeMemImage(&raw, &memError);
     if (mem == nullptr || memError != LIBRAW_SUCCESS) {
-        error = (memError <= kRawSehBase)
+        error = IsRawSehResult(memError)
             ? "LibRaw dcraw_make_mem_image crashed (SEH)"
             : std::string("LibRaw dcraw_make_mem_image: ") + RawError(memError);
         return false;
