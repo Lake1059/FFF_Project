@@ -4532,7 +4532,10 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     gainmapInfo_ = GainMapProbeResult{};
     if (staticImage_ && IsStillImageContainerName(path)) {
         try {
-            gainmapInfo_ = GainMapProbe::Probe(path, /*baseOnly=*/true);
+            // Full probe: decode base + gainmap and apply the math. The applied
+            // RGBA buffer is later used to replace the decoded AVFrame before
+            // presentation (single source of truth: same math as the CLI probe).
+            gainmapInfo_ = GainMapProbe::Probe(path, /*baseOnly=*/false);
         } catch (...) {
             gainmapInfo_ = GainMapProbeResult{};
         }
@@ -6572,14 +6575,40 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
     const auto handleFrame = [this, video, owner, pausedSeek](AVFrame* decoded) {
         if (video) {
             NormalizeVideoFrameTimestamp(decoded);
-            const auto seeking = seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_;
-            if (!seeking && (state_.load() == FFF3FPState::Playing || pausedSeek)) QueueVideoFrame(decoded);
-            else {
-                // Seeking: this picture is decoded but will not be queued, so it is
-                // invisible to decodedVideoFrames. Count it separately (diagnostics only).
-                if (seeking) ++seekDecodedFrames_;
-                PresentVideoFrame(decoded, owner, ShouldPreviewSeekFrame(decoded, owner));
+            // GainMap application: if the open-time probe successfully decoded and
+            // applied the gainmap, replace the decoded SDR frame with the applied
+            // linear-RGBA HDR frame. This is the single presentation-path touchpoint.
+            AVFrame* presentFrame = decoded;
+            AVFrame* gainFrame = nullptr;
+            if (gainmapInfo_.applyOk && !gainmapInfo_.appliedRgba.empty() &&
+                gainmapInfo_.outW > 0 && gainmapInfo_.outH > 0) {
+                gainFrame = av_frame_alloc();
+                if (gainFrame) {
+                    gainFrame->format = AV_PIX_FMT_RGBAF32LE;
+                    gainFrame->width = gainmapInfo_.outW;
+                    gainFrame->height = gainmapInfo_.outH;
+                    gainFrame->color_primaries = AVCOL_PRI_BT709;
+                    gainFrame->color_trc = AVCOL_TRC_LINEAR;
+                    gainFrame->colorspace = AVCOL_SPC_RGB;
+                    gainFrame->color_range = AVCOL_RANGE_JPEG;
+                    gainFrame->pts = decoded->pts;
+                    gainFrame->best_effort_timestamp = decoded->best_effort_timestamp;
+                    if (av_frame_get_buffer(gainFrame, 0) >= 0) {
+                        const size_t bytes = (size_t)gainmapInfo_.outW * gainmapInfo_.outH * 4 * sizeof(float);
+                        memcpy(gainFrame->data[0], gainmapInfo_.appliedRgba.data(), bytes);
+                        presentFrame = gainFrame;
+                    } else {
+                        av_frame_free(&gainFrame);
+                    }
+                }
             }
+            const auto seeking = seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_;
+            if (!seeking && (state_.load() == FFF3FPState::Playing || pausedSeek)) QueueVideoFrame(presentFrame);
+            else {
+                if (seeking) ++seekDecodedFrames_;
+                PresentVideoFrame(presentFrame, owner, ShouldPreviewSeekFrame(presentFrame, owner));
+            }
+            if (gainFrame) av_frame_free(&gainFrame);
         } else QueueAudioFrame(decoded, owner, owner == format_ ? audioStream_ : externalAudioStream_);
     };
     auto receiveFrames = [&]() {

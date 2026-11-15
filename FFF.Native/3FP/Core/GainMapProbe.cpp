@@ -1420,10 +1420,35 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     }
 
     if (baseOnly) {
+        // sRGB-linearize the base for a fair linear-space comparison.
+        for (size_t i = 0; i < baseRgba.size(); i += 4) {
+            baseRgba[i] = SrgbToLinear(baseRgba[i]);
+            baseRgba[i+1] = SrgbToLinear(baseRgba[i+1]);
+            baseRgba[i+2] = SrgbToLinear(baseRgba[i+2]);
+        }
         R.applyOk = false; R.applyMode = "none";
         R.reason = "base-only requested";
         R.verdict = "decoded_not_applied";
         R.appliedRgba = baseRgba;
+        R.baseRgba = baseRgba;
+        R.outW = baseW; R.outH = baseH;
+        // stats on base
+        {
+            int n = baseW * baseH;
+            std::vector<float> lum; lum.reserve(n);
+            double maxLin = 0; long over1 = 0;
+            for (int i = 0; i < n; i++) {
+                long o = (long)i*4;
+                float l = Luma(baseRgba[o], baseRgba[o+1], baseRgba[o+2]);
+                lum.push_back(l);
+                if (l > maxLin) maxLin = l;
+                if (l > 1.0) over1++;
+            }
+            std::sort(lum.begin(), lum.end());
+            R.statsP50 = lum.empty() ? 0.0 : (double)lum[n/2];
+            R.statsMaxLinear = maxLin;
+            R.statsOver1Pct = n > 0 ? (double)over1 * 100.0 / n : 0.0;
+        }
         return R;
     }
 

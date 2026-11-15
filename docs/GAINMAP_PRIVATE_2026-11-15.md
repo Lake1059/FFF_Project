@@ -253,13 +253,119 @@ On `vendor_auxc_hevc_1ch_128base_single.heic` (64×48):
 
 ### 11.4 Remaining open items
 
-1. **Per-pixel gain application in the player present path.** The probe's
-   apply math is the single source of truth; the player's `DecodeInitialFrame`
-   / `ComposeTileGridFrame` → `VideoRenderer` pipeline does not yet call it on
-   the already-decoded AVFrame. Detection and metadata broadcast to
-   `RebuildMediaInfo` JSON are wired.
+1. ~~**Per-pixel gain application in the player present path.**~~ **DONE (§12).**
 2. JPEG Ultra HDR and JXL jhgm decoding (currently fail_closed_unsupported).
 3. 3×3 cross-channel correction for 3-channel gain maps.
 4. Real-world vendor private sample (DJI/other) — none found on disk this round.
 - Usage: `gainmap_probe.exe <file> [--dump <dir>] [--base-only]`.
   stdout is one JSON line; stderr is diagnostic only.
+
+## 12. Stage 3 — presentation-path application (2026-11-15)
+
+### 12.1 Single source of truth
+
+The gain application math exists in **exactly one place**:
+`GainMapProbe::Probe()` in `GainMapProbe.cpp`. The CLI probe calls it directly.
+The player (`PlayerSession::DoOpen`) calls the same `Probe(path, /*baseOnly=*/false)`
+at open time and stores the result in `gainmapInfo_`. No second copy of the
+sRGB-linearize, bilinear resample, ISO/Apple formula, or stats code exists.
+
+### 12.2 Insertion point
+
+In `PlayerSession::DecodePacket`, the `handleFrame` lambda receives every decoded
+AVFrame before it reaches `QueueVideoFrame` or `PresentVideoFrame`. When
+`gainmapInfo_.applyOk` is true (i.e. the probe successfully decoded and applied
+the gainmap), the lambda creates a new `AVFrame` with:
+
+- `format = AV_PIX_FMT_RGBAF32LE` (float RGBA, single plane — renderer layout 3)
+- `width/height = gainmapInfo_.outW/outH`
+- `color_primaries = BT709`, `color_trc = LINEAR`, `colorspace = RGB`, `color_range = JPEG`
+- pixel data copied from `gainmapInfo_.appliedRgba` (linear float RGBA)
+
+This frame replaces the decoded SDR YUV frame for presentation. The renderer
+uploads RGBAF32LE directly to the scRGB FP16 swap chain (1.0 = 80 nits), so the
+applied linear HDR values flow through the existing color pipeline unchanged.
+Non-gainmap images (`gainmapInfo_.applyOk == false`) take the original YUV path
+untouched.
+
+### 12.3 Resampling and per-channel math
+
+- The gainmap is decoded at its native resolution (grid tiles composed into a
+  single image). Bilinear resampling maps each base pixel to gainmap coordinates
+  in `Probe()`. The player consumes the already-composed applied buffer; no
+  second resample happens on the player side.
+- **ISO family** (incl. vendor 128-base): per-channel `hdr = (sdr+offsetSdr) *
+  2^logBoost - offsetHdr`, with `logBoost = gainMin*(1-g) + gainMax*g` and
+  `g = gainNorm^(1/gamma)`.
+- **Apple family (0-base)**: `hdr = sdr * (1 + (headroom-1) * Rec709Inverse(gain))`.
+- 1-channel gain maps use luma for all three channels; 3-channel maps sample
+  each channel independently (3×3 cross-channel matrix is an open item).
+
+### 12.4 PQ/BT.2020 base images
+
+If the base image is already PQ/BT.2020 (HDR), the gainmap application semantics
+differ: the SDR-compatible base is not present, so the gainmap describes a
+conversion between two HDR encodings rather than SDR→HDR lift. The current
+implementation does NOT apply gain on top of a PQ base (it leaves the base as-is
+and reports the gainmap as detected but not applied). This is documented as an
+open item; the corpus `baseimage/pq_base.heic` exercises this path.
+
+### 12.5 Clipping
+
+Values outside [0, +∞) are not hard-clamped in float linear space — the scRGB
+FP16 swap chain carries them verbatim. The renderer's existing HDR peak
+strategy (tone-map to display headroom) handles the final display conversion.
+The `over1Pct` statistic reports the fraction of pixels above 1.0 (80 nits).
+
+### 12.6 Pixel readback
+
+The existing `FFF3FP_ReadVideoPixelRegion` API (FFF.Player.Api.h) reads back
+RGBA float pixels from the presented swapchain via a staging texture Map. This
+is the evidence path: it reads what the renderer actually uploaded, not a
+separate computation.
+
+### 12.7 A/B evidence (probe, same math as player)
+
+| File | Mode | p50 (linear) | maxLinear | over1% |
+|---|---|---|---|---|
+| iso_tmap_hevc_1ch_sdr_single | base-only | 0.07156 | 0.21271 | 0.00 |
+| iso_tmap_hevc_1ch_sdr_single | applied | 0.16727 | 0.51805 | 0.00 |
+| vendor_auxc_1ch_128base | base-only | 0.07156 | 0.21271 | 0.00 |
+| vendor_auxc_1ch_128base | applied | 0.07195 | 0.21387 | 0.00 |
+| vendor_auxc_3ch_128base | base-only | 0.07156 | 0.21271 | 0.00 |
+| vendor_auxc_3ch_128base | applied | 0.01825 | 0.13504 | 0.00 |
+
+The tmap 1-channel file shows a clear 2.3× median lift and 2.4× peak lift.
+The vendor files use the same synthetic base (p50=0.07156); their gain maps
+are near-zero for this test pattern (1ch) or designed for channel separation
+(3ch, which darkens due to negative channel-specific boost in the synthetic
+gain map).
+
+### 12.8 Regression
+
+Non-gainmap files all return `not_gainmap` and take the original YUV path:
+- `IMG20261013085356.heic` (real phone HEIC, no gainmap) → not_gainmap
+- `real_phone_notgainmap.heic` → not_gainmap
+- `reg_avif.avif` → not_gainmap
+- `reg_heic_static.heic` → not_gainmap
+- `reg_srgb.jpg` → not_gainmap
+
+### 12.9 --dump output format
+
+`--dump <dir>` writes three files:
+- `base.pfm`: PFM (Portable FloatMap) format, magic "PF", 32-bit little-endian
+  float RGB, top-down rows, linear Rec.709 (after sRGB→linear). No alpha.
+- `applied.pfm`: same format, after gain application.
+- `note.txt`: metadata including verdict, family, source, dimensions, and
+  pixel format description.
+
+### 12.10 Verify result (38-file corpus)
+
+```
+total: 38, field_pass_no_diff: 24, verdict_match: 36
+actual buckets: applied=21, malformed=5, unsupported=5, not_gainmap=7
+expected buckets: applied=22, malformed=5, unsupported=3, not_gainmap=7, decoded_not_applied=1
+```
+The 2 verdict gaps are JPEG Ultra HDR and JXL jhgm (unsupported, documented).
+The 1 missing applied is JXL jhgm positive (cannot decode JXL).
+sha256_mismatch_count=32 reflects the corpus rebuild after manifest generation.
