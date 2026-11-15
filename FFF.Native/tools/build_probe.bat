@@ -2,11 +2,11 @@
 REM Build gainmap_probe.exe standalone (Release x64).
 call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
 
-REM Explicit Windows SDK include/lib (vcvars64 doesn't register them on this machine)
+REM Append Windows SDK paths AFTER vcvars (vcvars overwrites INCLUDE/LIB)
 set SDKINC=C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0
 set SDKLIB=C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0
-set INCLUDE=%SDKINC%\ucrt;%SDKINC%\um;%SDKINC%\shared;%SDKINC%\winrt;%INCLUDE%
-set LIB=%SDKLIB%\ucrt\x64;%SDKLIB%\um\x64;%LIB%
+set INCLUDE=%INCLUDE%;%SDKINC%\ucrt;%SDKINC%\um;%SDKINC%\shared;%SDKINC%\winrt
+set LIB=%LIB%;%SDKLIB%\ucrt\x64;%SDKLIB%\um\x64
 
 set ROOT=C:\PLAN\3FCompare\_wt_gainmap\FFF.Native
 set INC=/I"%ROOT%" /I"%ROOT%\3FR" /I"%ROOT%\..\third_party\ffmpeg\include" /I"%ROOT%\..\third_party\libraw\include"

@@ -1361,6 +1361,24 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         return R;
     }
 
+    // altr check: if gainmap item is listed as an alternate of the primary image,
+    // it's not the preferred rendition → ignore gainmap (not_gainmap).
+    if (gainmapItemId > 0 && R.present) {
+        for (const auto& rf : C.refs) {
+            if (rf.type == "altr" && rf.from == C.primary) {
+                for (int to : rf.to) {
+                    if (to == gainmapItemId) {
+                        R.present = false;
+                        R.form = "none";
+                        R.verdict = "not_gainmap";
+                        R.reason = "gainmap is alternate rendition (altr), not preferred; ignored";
+                        return R;
+                    }
+                }
+            }
+        }
+    }
+
     // Decode base
     std::vector<float> baseRgba;
     int baseW = 0, baseH = 0;
@@ -1549,6 +1567,19 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         long consumed; IsoMeta m;
         { char dbg[80]; std::string hx; for(int i=0;i<(int)tmapPayload.size()&&i<12;i++){char h[4];sprintf(h,"%02x ",tmapPayload[i]);hx+=h;} R.notes.push_back("tmapPayload: "+hx); }
         if (ParseIso21496(tmapPayload.data(), 1, (long)tmapPayload.size() - 1, m, consumed)) {
+            // Verify payload length matches canonical v0 layout (detect writer with extra bytes)
+            {
+                uint8_t fl = tmapPayload[5]; // flags byte at offset 5 (after version+minVer+writerVer)
+                int ch = (fl & 0x80) ? 3 : 1;
+                bool cd = (fl & 0x08) != 0;
+                long expected = 6 + (cd ? (12 + ch * 20) : (16 + ch * 40));
+                if ((long)tmapPayload.size() > expected) {
+                    R.verdict = "fail_closed_unsupported";
+                    R.reason = "tmap: " + std::to_string((long)tmapPayload.size() - expected) + " trailing bytes beyond v0 layout";
+                    R.decodeOk = false; R.applyOk = false;
+                    return R;
+                }
+            }
             // gamma must be > 0
             if (m.gammaC[0] <= 0.f) {
                 R.verdict = "fail_closed_malformed";
@@ -1620,7 +1651,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         }
     }
     if (!metaOk) {
-        R.verdict = "fail_closed_unsupported";
+        // If we have a tmap form but metadata parsing failed → malformed (bad data),
+        // not unsupported (missing feature).
+        bool isTmapForm = (R.form == "tmap" || R.form == "tmap_grid");
+        R.verdict = isTmapForm ? "fail_closed_malformed" : "fail_closed_unsupported";
         R.reason = "gain-map carrier recognized but no credible gain metadata (tmap/makenote/xmp all absent or invalid)";
         R.metaFamily = "none"; R.metaSource = "default";
         return R;
