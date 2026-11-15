@@ -87,6 +87,9 @@ Friend NotInheritable Class 播放器窗口布局控制器
             ' 纯音频/无视频：清掉上一次媒体的尺寸，避免 DPI 变化时拿旧尺寸改窗口。
             最后内容原始大小 = Size.Empty
             最后内容设备大小 = Size.Empty
+            ' 没有内容可 1:1，临时放宽的 MinimumSize 与视口封顶都要撤回默认。
+            复位最小尺寸到默认()
+            设置封顶(False)
             Return
         End If
         最后内容原始大小 = 内容大小
@@ -153,6 +156,17 @@ Friend NotInheritable Class 播放器窗口布局控制器
         应用代数 += 1
         ' 手动尺寸按菜单语义缩放适配，不能继续用 1:1 封顶把画面钉在源尺寸。
         设置封顶(False)
+        ' 离开内容模式自动布局：把临时放宽的 MinimumSize 收回设计默认，
+        ' 否则后续 Math.Clamp 仍夹在上次小内容留下的放宽下限里。
+        复位最小尺寸到默认()
+    End Sub
+
+    ''' <summary>把 MinimumSize 恢复为构造时捕获的设计默认值。
+    ''' MinimumSize 是状态不变量：只在 应用内容尺寸布局 里按内容放宽，
+    ''' 在每个离开自动布局的出口（纯音频/手动覆盖/关模式）成对复位，不在 OnResize 兜底。</summary>
+    Private Sub 复位最小尺寸到默认()
+        If 窗体.IsDisposed OrElse 窗体.MinimumSize.Equals(默认最小尺寸) Then Return
+        窗体.MinimumSize = 默认最小尺寸
     End Sub
 
     Friend Sub 调整画面尺寸(目标画面大小 As Size, Optional 使用物理像素 As Boolean = False)
