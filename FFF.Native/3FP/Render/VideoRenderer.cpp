@@ -9937,6 +9937,7 @@ bool PlayerVideoRenderer::WantsScRgbPresentationPath(const std::uint32_t bitDept
 float PlayerVideoRenderer::SourcePeakNits() const noexcept { return sourcePeakNits_; }
 HdrFrameState PlayerVideoRenderer::HdrState() const noexcept { return hdrProcessor_.State(); }
 HdrFrameState PlayerVideoRenderer::StreamHdrState() const noexcept { return hdrProcessor_.StreamState(); }
+HdrSourceColor PlayerVideoRenderer::FrameSourceColor() const noexcept { return hdrProcessor_.SourceColor(); }
 bool PlayerVideoRenderer::IsHdrSourceStream() const noexcept { return hdrProcessor_.IsHdrSourceStream(); }
 std::uint64_t PlayerVideoRenderer::PresentedVideoFrames() const noexcept { return presentedVideoFrames_.load(); }
 std::uint64_t PlayerVideoRenderer::CoalescedVideoFrames() const noexcept { return coalescedVideoFrames_.load(); }

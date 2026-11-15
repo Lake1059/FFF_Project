@@ -762,6 +762,26 @@ Public NotInheritable Class 媒体流信息
     Public Property 色彩原色 As Integer
     <JsonPropertyName("colorTransfer")>
     Public Property 色彩传递 As Integer
+    ' 内核实际用于转换的色彩基础（元数据 + 码流/帧识别 + 推断），声明值缺席时
+    ' 信息图层与媒体信息窗体据此显示，而不是整项消失。默认 -1：旧内核没有这些
+    ' 字段，不能把 0（色彩矩阵里的 RGB）误当成有效值。
+    <JsonPropertyName("colorPrimariesApplied")>
+    Public Property 色彩原色应用 As Integer = -1
+    <JsonPropertyName("colorTransferApplied")>
+    Public Property 色彩传递应用 As Integer = -1
+    <JsonPropertyName("colorSpaceApplied")>
+    Public Property 色彩空间应用 As Integer = -1
+    <JsonPropertyName("colorRangeApplied")>
+    Public Property 色彩范围应用 As Integer
+    ' 每个应用值的证据来源：frame / bitstream / container / inferred。
+    <JsonPropertyName("colorPrimariesAppliedSource")>
+    Public Property 色彩原色应用来源 As String = String.Empty
+    <JsonPropertyName("colorTransferAppliedSource")>
+    Public Property 色彩传递应用来源 As String = String.Empty
+    <JsonPropertyName("colorSpaceAppliedSource")>
+    Public Property 色彩空间应用来源 As String = String.Empty
+    <JsonPropertyName("colorRangeAppliedSource")>
+    Public Property 色彩范围应用来源 As String = String.Empty
     <JsonPropertyName("chromaLocation")>
     Public Property 色度位置 As Integer
     <JsonPropertyName("fieldOrder")>
@@ -841,6 +861,18 @@ Public NotInheritable Class 媒体流信息
     Public Property 语言 As String = String.Empty
     <JsonPropertyName("title")>
     Public Property 标题 As String = String.Empty
+    ' 媒体信息窗体刷新签名用：声明值与应用值/来源任一变化都必须触发重建，否则
+    ' 首帧后从 VUI/帧补出的色彩基础不会出现在窗体上（与 D3 同一失效形状）。
+    <JsonIgnore>
+    Public ReadOnly Property 色彩签名 As String
+        Get
+            Return $"{色彩原色}/{色彩传递}/{色彩空间}/{色彩范围}/" &
+                $"{色彩原色应用}:{色彩原色应用来源}/" &
+                $"{色彩传递应用}:{色彩传递应用来源}/" &
+                $"{色彩空间应用}:{色彩空间应用来源}/" &
+                $"{色彩范围应用}:{色彩范围应用来源}"
+        End Get
+    End Property
 End Class
 
 ''' <summary>

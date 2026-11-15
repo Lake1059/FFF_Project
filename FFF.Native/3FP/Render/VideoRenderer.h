@@ -482,6 +482,8 @@ public:
     HdrFrameState HdrState() const noexcept;
     // Stream declaration counterpart of HdrState(): never changes per frame.
     HdrFrameState StreamHdrState() const noexcept;
+    // Colour tags the most recently decoded frame declared (see HdrProcessor).
+    HdrSourceColor FrameSourceColor() const noexcept;
     bool IsHdrSourceStream() const noexcept;
     std::uint64_t PresentedVideoFrames() const noexcept;
     std::uint64_t CoalescedVideoFrames() const noexcept;

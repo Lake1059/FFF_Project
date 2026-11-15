@@ -9265,6 +9265,213 @@ double PlayerSession::MediaFrameRateCeilingHz(const AVStream* stream) const noex
     return 0.0;
 }
 
+namespace {
+
+// Media-info colour resolution.
+//
+// RebuildMediaInfo used to publish only the container's colour tags (with a
+// decoder-context fallback). When a source legally omits them the host received
+// "unknown" and dropped the colour items entirely, even though the render path
+// was already decoding that frame with concrete values. The resolver below
+// reports the values the render path actually applies, with the evidence each
+// one came from, so an information surface can show "BT.709 (inferred)" instead
+// of a gap. It mirrors VideoRenderer::ResolveDecodeTransfer / ResolveSourceGamut /
+// ToSwsColorSpace / IsFullRange rather than inventing a second colour policy.
+enum class MediaColorSource : std::uint8_t {
+    Unspecified = 0,
+    Container,
+    Bitstream,
+    Frame,
+    Inferred,
+};
+
+const char* MediaColorSourceName(const MediaColorSource source) noexcept {
+    switch (source) {
+    case MediaColorSource::Container: return "container";
+    case MediaColorSource::Bitstream: return "bitstream";
+    case MediaColorSource::Frame: return "frame";
+    case MediaColorSource::Inferred: return "inferred";
+    default: return "";
+    }
+}
+
+struct MediaColorField {
+    std::int32_t value = 0;
+    MediaColorSource source = MediaColorSource::Unspecified;
+};
+
+struct MediaColorResolution {
+    MediaColorField primaries{};
+    MediaColorField transfer{};
+    MediaColorField space{};
+    MediaColorField range{};
+};
+
+enum class MediaColorKind : std::uint8_t { Primaries, Transfer, Space, Range };
+
+bool IsSpecifiedColor(const MediaColorKind kind, const std::int32_t value) noexcept {
+    switch (kind) {
+    case MediaColorKind::Primaries:
+        return value != AVCOL_PRI_UNSPECIFIED && value != AVCOL_PRI_RESERVED0 &&
+            value != AVCOL_PRI_RESERVED;
+    case MediaColorKind::Transfer:
+        return value != AVCOL_TRC_UNSPECIFIED && value != AVCOL_TRC_RESERVED0 &&
+            value != AVCOL_TRC_RESERVED;
+    case MediaColorKind::Space:
+        return value != AVCOL_SPC_UNSPECIFIED && value != AVCOL_SPC_RESERVED;
+    case MediaColorKind::Range:
+        return value == AVCOL_RANGE_MPEG || value == AVCOL_RANGE_JPEG;
+    }
+    return false;
+}
+
+// Evidence order follows the render path: the frame is what the shader reads,
+// the decoder context is what the bitstream's VUI/SPS declared, the container
+// tag is last. A missing tag is not evidence; it falls through to the next leg.
+MediaColorField PickDeclaredColor(const MediaColorKind kind,
+    const AVCodecParameters* parameters, const AVCodecContext* decoder,
+    const bool decoderAvailable, const HdrSourceColor& frame,
+    const bool frameAvailable) noexcept {
+    const auto* frameValue = [&]() -> const std::int32_t* {
+        if (!frameAvailable || !frame.observed) return nullptr;
+        switch (kind) {
+        case MediaColorKind::Primaries: return &frame.primaries;
+        case MediaColorKind::Transfer: return &frame.transfer;
+        case MediaColorKind::Space: return &frame.space;
+        case MediaColorKind::Range: return &frame.range;
+        }
+        return nullptr;
+    }();
+    if (frameValue != nullptr && IsSpecifiedColor(kind, *frameValue))
+        return {*frameValue, MediaColorSource::Frame};
+    const auto decoderValue = [&]() -> std::int32_t {
+        if (!decoderAvailable || decoder == nullptr) return 0;
+        switch (kind) {
+        case MediaColorKind::Primaries: return decoder->color_primaries;
+        case MediaColorKind::Transfer: return decoder->color_trc;
+        case MediaColorKind::Space: return decoder->colorspace;
+        case MediaColorKind::Range: return decoder->color_range;
+        }
+        return 0;
+    }();
+    if (decoderAvailable && decoder != nullptr && IsSpecifiedColor(kind, decoderValue))
+        return {decoderValue, MediaColorSource::Bitstream};
+    const auto containerValue = [&]() -> std::int32_t {
+        switch (kind) {
+        case MediaColorKind::Primaries: return parameters->color_primaries;
+        case MediaColorKind::Transfer: return parameters->color_trc;
+        case MediaColorKind::Space: return parameters->color_space;
+        case MediaColorKind::Range: return parameters->color_range;
+        }
+        return 0;
+    }();
+    if (IsSpecifiedColor(kind, containerValue))
+        return {containerValue, MediaColorSource::Container};
+    return {};
+}
+
+bool IsBt2020Space(const std::int32_t value) noexcept {
+    return value == AVCOL_SPC_BT2020_NCL || value == AVCOL_SPC_BT2020_CL;
+}
+
+bool IsJpegFullRangeFormat(const AVPixelFormat format) noexcept {
+    switch (format) {
+    case AV_PIX_FMT_YUVJ420P:
+    case AV_PIX_FMT_YUVJ422P:
+    case AV_PIX_FMT_YUVJ444P:
+    case AV_PIX_FMT_YUVJ440P:
+    case AV_PIX_FMT_YUVJ411P:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool IsRgbPixelFormat(const AVPixelFormat format) noexcept {
+    const auto* descriptor = av_pix_fmt_desc_get(format);
+    return descriptor != nullptr && (descriptor->flags & AV_PIX_FMT_FLAG_RGB) != 0;
+}
+
+MediaColorResolution ResolveAppliedMediaColor(
+    const AVCodecParameters* parameters, const AVCodecContext* decoder,
+    const bool decoderAvailable, const HdrSourceColor& frame,
+    const bool frameAvailable, const FFF3FPHdrFormat hdrFormat,
+    const AVPixelFormat formatForDescription) noexcept {
+    MediaColorResolution result;
+    result.primaries = PickDeclaredColor(MediaColorKind::Primaries, parameters,
+        decoder, decoderAvailable, frame, frameAvailable);
+    result.transfer = PickDeclaredColor(MediaColorKind::Transfer, parameters,
+        decoder, decoderAvailable, frame, frameAvailable);
+    result.space = PickDeclaredColor(MediaColorKind::Space, parameters,
+        decoder, decoderAvailable, frame, frameAvailable);
+    result.range = PickDeclaredColor(MediaColorKind::Range, parameters,
+        decoder, decoderAvailable, frame, frameAvailable);
+
+    // HDR class in force. A stream-level SDR classification is promoted only when
+    // evidence says so: dynamic HDR10+ side data, or a declared PQ/HLG transfer.
+    // This is the same promotion ProcessFrame performs from frame color_trc.
+    auto effectiveHdr = hdrFormat;
+    if (effectiveHdr == FFF3FPHdrFormat::Sdr) {
+        if (av_packet_side_data_get(parameters->coded_side_data,
+            parameters->nb_coded_side_data, AV_PKT_DATA_DYNAMIC_HDR10_PLUS) != nullptr) {
+            effectiveHdr = FFF3FPHdrFormat::Hdr10Plus;
+        } else if (result.transfer.value == AVCOL_TRC_SMPTE2084) {
+            effectiveHdr = FFF3FPHdrFormat::Hdr10;
+        } else if (result.transfer.value == AVCOL_TRC_ARIB_STD_B67) {
+            effectiveHdr = FFF3FPHdrFormat::Hlg;
+        }
+    }
+
+    // Transfer: non-SDR sources decode through the fixed PQ/HLG shader paths,
+    // exactly as ResolveDecodeTransfer selects (Vivid's baseline ends up on PQ
+    // unless the frame declares otherwise). SDR decodes through the BT.709 path.
+    if (effectiveHdr != FFF3FPHdrFormat::Sdr) {
+        const auto appliedTransfer = effectiveHdr == FFF3FPHdrFormat::Hlg
+            ? AVCOL_TRC_ARIB_STD_B67 : AVCOL_TRC_SMPTE2084;
+        if (result.transfer.value == appliedTransfer)
+            result.transfer.source = result.transfer.source == MediaColorSource::Unspecified
+                ? MediaColorSource::Inferred : result.transfer.source;
+        else
+            result.transfer = {appliedTransfer, MediaColorSource::Inferred};
+    } else if (result.transfer.source == MediaColorSource::Unspecified) {
+        result.transfer = {AVCOL_TRC_BT709, MediaColorSource::Inferred};
+    }
+
+    // Primaries: declared wins; otherwise the gamut the renderer picks (BT.2020
+    // for HDR or a BT.2020 matrix, BT.709 everywhere else). DCI/Display P3 can
+    // only come from a declaration, never from an inference.
+    if (result.primaries.source == MediaColorSource::Unspecified) {
+        if (effectiveHdr != FFF3FPHdrFormat::Sdr || IsBt2020Space(result.space.value))
+            result.primaries = {AVCOL_PRI_BT2020, MediaColorSource::Inferred};
+        else
+            result.primaries = {AVCOL_PRI_BT709, MediaColorSource::Inferred};
+    }
+
+    // Matrix: same rule as ToSwsColorSpace — HDR falls back to BT.2020 NCL,
+    // SDR picks BT.709 at HD/UHD and BT.601 below 1280 columns.
+    if (result.space.source == MediaColorSource::Unspecified) {
+        if (effectiveHdr != FFF3FPHdrFormat::Sdr)
+            result.space = {AVCOL_SPC_BT2020_NCL, MediaColorSource::Inferred};
+        else if (parameters->width >= 1280)
+            result.space = {AVCOL_SPC_BT709, MediaColorSource::Inferred};
+        else
+            result.space = {AVCOL_SPC_SMPTE170M, MediaColorSource::Inferred};
+    }
+
+    // Range: the renderer treats full-range YUV and RGB as JPEG range, everything
+    // else as limited (IsFullRange). An omitted tag does not make the range unknown
+    // to the shader; it has already committed to one of the two.
+    if (result.range.source == MediaColorSource::Unspecified) {
+        result.range = IsJpegFullRangeFormat(formatForDescription) ||
+            IsRgbPixelFormat(formatForDescription)
+            ? MediaColorField{AVCOL_RANGE_JPEG, MediaColorSource::Inferred}
+            : MediaColorField{AVCOL_RANGE_MPEG, MediaColorSource::Inferred};
+    }
+    return result;
+}
+
+}  // namespace
+
 void PlayerSession::RebuildMediaInfo() noexcept {
     RawTrace("RebuildMediaInfo enter");
     std::lock_guard codecLock(softwareVideoCodecMutex_);
@@ -9502,10 +9709,34 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                 if (!acceleration.empty())
                     json << ",\"hardwareAcceleration\":\"" << EscapeJson(acceleration) << "\"";
             }
+            // Applied colour basis: what the render path is actually using right now.
+            // Evidence order is frame -> decoder VUI/SPS -> container tag -> inferred
+            // fallback, mirroring ResolveDecodeTransfer / ResolveSourceGamut /
+            // ToSwsColorSpace / IsFullRange. The raw tags above stay untouched for
+            // consumers that need the declaration itself; these fields are the
+            // "do not leave the colour line blank" leg, with provenance attached.
+            HdrProcessor streamHdr;
+            streamHdr.ConfigureStream(parameters);
+            const auto hdr = streamHdr.State();
+            const auto frameColor = isCurrentVideoStream
+                ? videoRenderer_.FrameSourceColor() : HdrSourceColor{};
+            const auto hdrForApplied = isCurrentVideoStream && frameColor.observed
+                ? videoRenderer_.HdrState() : hdr;
+            const auto appliedColor = ResolveAppliedMediaColor(parameters, videoDecoder_,
+                isCurrentVideoStream, frameColor, isCurrentVideoStream,
+                hdrForApplied.format, formatForDescription);
             json << ",\"colorRange\":" << effectiveRange
                  << ",\"colorSpace\":" << effectiveSpace
                  << ",\"colorPrimaries\":" << effectivePrimaries
                  << ",\"colorTransfer\":" << effectiveTransfer
+                 << ",\"colorRangeApplied\":" << appliedColor.range.value
+                 << ",\"colorSpaceApplied\":" << appliedColor.space.value
+                 << ",\"colorPrimariesApplied\":" << appliedColor.primaries.value
+                 << ",\"colorTransferApplied\":" << appliedColor.transfer.value
+                 << ",\"colorRangeAppliedSource\":\"" << MediaColorSourceName(appliedColor.range.source) << "\""
+                 << ",\"colorSpaceAppliedSource\":\"" << MediaColorSourceName(appliedColor.space.source) << "\""
+                 << ",\"colorPrimariesAppliedSource\":\"" << MediaColorSourceName(appliedColor.primaries.source) << "\""
+                 << ",\"colorTransferAppliedSource\":\"" << MediaColorSourceName(appliedColor.transfer.source) << "\""
                  << ",\"chromaLocation\":" << parameters->chroma_location
                  << ",\"fieldOrder\":" << parameters->field_order
                  << ",\"level\":" << parameters->level;
@@ -9513,9 +9744,6 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                 parameters->nb_coded_side_data, AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
             const auto* lightData = av_packet_side_data_get(parameters->coded_side_data,
                 parameters->nb_coded_side_data, AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
-            HdrProcessor streamHdr;
-            streamHdr.ConfigureStream(parameters);
-            const auto hdr = streamHdr.State();
             const auto formatName = std::string(HdrProcessor::FormatName(hdr.format));
             const auto processingPath = std::string(HdrProcessor::ProcessingPathName(hdr.processingPath));
             json << ",\"hdrFormat\":\"" << EscapeJson(formatName) << "\""
