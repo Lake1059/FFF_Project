@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Core/AvifIlocShim.h"
+#include "3FP/Core/GainMapProbe.h"
 #include "3FP/Core/DecodeDeviceSelection.h"
 #include "3FP/Core/Fmp4FragmentScanner.h"
 #include "3FP/Core/MediaText.h"
@@ -4522,6 +4523,21 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         }
     }
     RawTrace("DoOpen: size check done");
+    // Private gainmap detection (still images only). We run the probe in
+    // base-only mode: container + metadata + gainmap decode are identified and
+    // the verdict recorded; the per-pixel HDR application on the player's own
+    // decoded AVFrame is a follow-up (see docs/GAINMAP_PRIVATE_2026-11-15.md).
+    // Fail-closed: a malformed gainmap carrier is logged but never promotes SDR
+    // to HDR or changes the existing still-image decode path.
+    gainmapInfo_ = GainMapProbeResult{};
+    if (staticImage_ && IsStillImageContainerName(path)) {
+        try {
+            gainmapInfo_ = GainMapProbe::Probe(path, /*baseOnly=*/true);
+        } catch (...) {
+            gainmapInfo_ = GainMapProbeResult{};
+        }
+        RawTrace(("DoOpen: gainmap verdict=" + gainmapInfo_.verdict).c_str());
+    }
     coverArtStream_ = FindCoverArtStream(format_);
     audioStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_AUDIO);
     RawTrace("DoOpen: cover/audio selected");
@@ -9154,6 +9170,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     staticImage_ = false;
     animatedImage_ = false;
     fragmentedMp4_ = false;
+    gainmapInfo_ = GainMapProbeResult{};
     sessionWrapLoop_ = false; sessionWrapFailures_ = 0;
     { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = false; hasPublishedRawInfo_ = false; publishedRawInfo_ = {}; }
     audioBlockedUntilVideoFrame_ = false;
@@ -9518,6 +9535,11 @@ void PlayerSession::RebuildMediaInfo() noexcept {
         << ",\"tileGridWidth\":" << tileGridWidth_
         << ",\"tileGridHeight\":" << tileGridHeight_
         << ",\"tileGridTileCount\":" << tileGridTiles_.size()
+        << ",\"gainmap\":{\"present\":" << (gainmapInfo_.present ? "true" : "false")
+        << ",\"form\":\"" << EscapeJson(gainmapInfo_.form) << "\""
+        << ",\"verdict\":\"" << EscapeJson(gainmapInfo_.verdict) << "\""
+        << ",\"headroom\":" << gainmapInfo_.headroom
+        << ",\"reason\":\"" << EscapeJson(gainmapInfo_.reason) << "\"}"
         << ",\"metadata\":";
     AppendDictionaryJson(json, format_->metadata);
     json << ",\"chapters\":[";
