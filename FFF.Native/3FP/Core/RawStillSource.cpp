@@ -128,6 +128,15 @@ std::pair<int, int> ClampOutputSide(int width, int height, int maxSide) noexcept
     return {w, h};
 }
 
+// Hard safety caps for untrusted RAW dimensions. A malformed DNG can claim
+// raw_width=65535; even a legitimate 100 MP+ medium-frame sensor would drive
+// dcraw_process to allocate gigabytes. The caps are generous enough for every
+// shipping camera (GFX100 is 11648x8732; Phase One IQ4 150 MP is
+// ~19500x13000). This is a reject, not a clamp.
+constexpr int kMaxRawOutputSide = 16384;
+constexpr std::uint64_t kMaxRawOutputPixels = 120'000'000;
+constexpr std::uint64_t kMaxRawSensorPixels = 160'000'000;
+
 AVPixelFormat PixelFormatFor(int colors, int bits) noexcept {
     if (colors == 4) return bits == 16 ? AV_PIX_FMT_RGBA64LE : AV_PIX_FMT_RGBA;
     if (colors == 1) return bits == 16 ? AV_PIX_FMT_GRAY16LE : AV_PIX_FMT_GRAY8;
@@ -320,6 +329,19 @@ bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& o
     const auto clamped = ClampOutputSide(width, height, impl_->options.maxOutputSide);
     width = clamped.first;
     height = clamped.second;
+    // Hard reject dimensions that would blow memory. Promote to uint64 before
+    // multiplying: width/height are int and width*height would overflow at
+    // ~46341^2 otherwise. Both gates are active: 16384^2 = 268 MP, larger than
+    // the 120 MP pixel gate, so neither masks the other. Worst-case frame is
+    // 120 MP * 3ch * 2B = ~720 MB, plus one frame of LibRaw scratch, ~1.5 GB.
+    const auto outputPixels = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
+    const auto sensorPixels = static_cast<std::uint64_t>(sizes.raw_width) * static_cast<std::uint64_t>(sizes.raw_height);
+    if (width > kMaxRawOutputSide || height > kMaxRawOutputSide ||
+        outputPixels > kMaxRawOutputPixels || sensorPixels > kMaxRawSensorPixels) {
+        error = "RAW dimensions exceed safety limits";
+        impl_->raw.reset();
+        return false;
+    }
     if (width <= 0 || height <= 0) {
         error = "LibRaw reported empty output dimensions";
         impl_->raw.reset();
@@ -450,6 +472,15 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
     f->format = format;
     f->width = static_cast<int>(mem->width);
     f->height = static_cast<int>(mem->height);
+    // Defensive re-check: dcraw_process could disagree with the Open-side
+    // clamp on a malformed file. Reject anything that escapes the same caps.
+    const auto decodedPixels = static_cast<std::uint64_t>(f->width) * static_cast<std::uint64_t>(f->height);
+    if (f->width > kMaxRawOutputSide || f->height > kMaxRawOutputSide ||
+        decodedPixels > kMaxRawOutputPixels) {
+        error = "RAW decoded dimensions exceed safety limits";
+        LibRaw::dcraw_clear_mem(mem);
+        return false;
+    }
     f->pts = 0;
     f->pkt_dts = AV_NOPTS_VALUE;
     f->best_effort_timestamp = 0;
