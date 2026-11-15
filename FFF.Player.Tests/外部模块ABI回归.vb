@@ -31,6 +31,11 @@ Friend Module 外部模块ABI回归
         检查整数("audio render 56 B", Marshal.SizeOf(Of 音频渲染能力表)(), 56)
         检查整数("audio passthrough 48 B", Marshal.SizeOf(Of 音频直通能力表)(), 48)
         检查整数("injection status 184 B", Marshal.SizeOf(Of 注入状态)(), 184)
+        ' 影子镜像：注入状态 镜像模块 legacy FFFInjectionStatus（184 B，无 version 字段）。
+        ' 宿主现行路径不经它跨边界（读取注入状态 先读 192 B hub 状态再逐字段翻译），
+        ' 但字段排布与 C 侧 FFFColorTransformApi.h:384 逐字对齐，留 pin 防止后续漂移。
+        检查整数("injection.contentText offset", CInt(Marshal.OffsetOf(Of 注入状态)(NameOf(注入状态.内容文本字节))), 52)
+        检查整数("injection.compositionText offset", CInt(Marshal.OffsetOf(Of 注入状态)(NameOf(注入状态.合成文本字节))), 116)
         检查整数("auxiliary composition 32 B", Marshal.SizeOf(Of 原生辅层合成)(), 32)
         检查整数("status.processedFrames offset", CInt(Marshal.OffsetOf(Of 外部处理器状态)(NameOf(外部处理器状态.已处理帧数))), 16)
         检查整数("status.lastFrameIndex offset", CInt(Marshal.OffsetOf(Of 外部处理器状态)(NameOf(外部处理器状态.末帧帧号))), 48)
