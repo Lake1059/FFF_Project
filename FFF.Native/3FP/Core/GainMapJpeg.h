@@ -47,16 +47,33 @@ struct JpegGainMapHit {
     float offsetHdr[3] = {0.f, 0.f, 0.f};
     float logBoost[6]  = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f}; // [minR,maxR,minG,maxG,minB,maxB]
 
-    // Apple family: headroom in log2 units (8x = 3.0). 0 when not Apple.
-    float headroom = 0.f;
+    // ---- Headroom metadata (ALL in log2 stops; linear multiplier = 2^value) ----
+    //
+    // hasHdrCapacity is true only when the container ACTUALLY declared both
+    // sides: XMP hdrgm:HDRCapacityMin/Max, or the ISO 21496-1 APP2 box's
+    // baseHdrHeadroom/alternateHdrHeadroom. When false, the two fields below are
+    // 0 and the consumer must NOT fabricate a headroom (fail-closed).
+    bool  hasHdrCapacity       = false;
+    float baseHdrHeadroomLog2  = 0.f;  // hB: HDRCapacityMin  / APP2 baseHdrHeadroom
+    float altHdrHeadroomLog2   = 0.f;  // hA: HDRCapacityMax  / APP2 alternateHdrHeadroom
+
+    // Apple family (v1/v2/v3): headroom in log2 stops (8x = 3.0). 0 when not
+    // Apple. This is the alternate-side headroom for an SDR base. Renamed from
+    // the old ambiguous `headroom` field (which mixed linear/log2 units across
+    // paths); consumers must now read *Log2 fields.
+    float headroomLog2 = 0.f;
 
     // Gain gamma (single-channel fallback when no per-channel triple).
     float gamma = 1.f;
 
     // APP2 ISO 21496-1 box flags byte (0 if not parsed / not present).
-    // bit6 (0x40) = useBaseColorSpace (SDR base = apply gainmap).
-    uint8_t app2Flags = 0;
-    bool hasApp2Flags = false;
+    //   bit7 0x80 = multi-channel (3-ch)
+    //   bit6 0x40 = useBaseColorSpace (SDR base = apply gainmap)
+    // bits 0x3F are RESERVED: app2ReservedNonZero is set when any of them is
+    // non-zero; the consumer MUST fail-closed on it.
+    uint8_t app2Flags           = 0;
+    bool    hasApp2Flags        = false;
+    bool    app2ReservedNonZero = false;
 
     // Carved bytes. baseBytes is the primary JPEG/WebP frame (when the container
     // splits them); gainBytes is the gain-map code stream (JPEG or WebP/VP8L).
