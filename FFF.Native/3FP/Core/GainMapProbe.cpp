@@ -648,7 +648,7 @@ static bool FrameToRgbaFloat(const AVFrame* frame, std::vector<float>& rgbaOut,
 // Puts decoded frame into packed RGBA float (0..1) in rgbaOut, with w/h.
 bool DecodeBufferToRgba(const std::vector<uint8_t>& buf, int streamIdx,
                         std::vector<float>& rgbaOut, int& w, int& h, std::string& why,
-                        const char* fmtHint = nullptr) {
+                        const char* fmtHint = nullptr, int* outColorTrc = nullptr) {
     rgbaOut.clear(); w = h = 0;
     if (buf.empty()) { why = "empty buffer"; return false; }
     MemCtx mc{buf.data(), buf.size(), 0};
@@ -712,6 +712,7 @@ bool DecodeBufferToRgba(const std::vector<uint8_t>& buf, int streamIdx,
     }
     if (!got) { why = "no frame decoded"; av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); avformat_close_input(&fmt); return false; }
     w = frame->width; h = frame->height;
+    if (outColorTrc) *outColorTrc = frame->color_trc;
     if (!FrameToRgbaFloat(frame, rgbaOut, w, h, why)) { av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); avformat_close_input(&fmt); return false; }
     av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc);
     avformat_close_input(&fmt);
@@ -969,6 +970,17 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
 
     // Determine form
     int tmapId = -1;
+    // Parse colr nclx from already-parsed ipco: detect PQ/HLG transfer.
+    int baseColorTrc = 2;
+    for (auto& pb : C.ipco) {
+        if (pb.type == "colr" && pb.size >= 11) {
+            long cs = pb.off;
+            if (d[cs]=='n'&&d[cs+1]=='c'&&d[cs+2]=='l'&&d[cs+3]=='x') {
+                // nclx: type(4) + primaries(2 BE) + transfer(2 BE) + matrix(2 BE) + range(1)
+                baseColorTrc = (d[cs+6] << 8) | d[cs+7];
+            }
+        }
+    }
     for (auto& kv : C.items) if (kv.second == "tmap") { tmapId = kv.first; break; }
     if (tmapId >= 0) { R.present = true; R.metaFamily = "iso"; R.metaSource = "tmap"; }
 
@@ -1290,9 +1302,18 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             return R;
         }
         const char* fmtHint = (baseCodec == "av01") ? "av1" : "hevc";
-        if (!DecodeBufferToRgba(baseStream, -1, baseRgba, baseW, baseH, why, fmtHint)) {
+        int decTrc = 2;
+        if (!DecodeBufferToRgba(baseStream, -1, baseRgba, baseW, baseH, why, fmtHint, &decTrc)) {
             R.verdict = "fail_closed_malformed";
             R.reason = "base decode: " + why;
+            return R;
+        }
+        // HDR base (PQ/HLG): trust container colr nclx; fall back to decoder trc.
+        int baseTrc = (baseColorTrc != 2) ? baseColorTrc : decTrc;
+        if (baseTrc == 16 || baseTrc == 18) {
+            R.verdict = "fail_closed_unsupported";
+            R.reason = "[container] HDR base (PQ/HLG) gain map not implemented; cannot lift an already-HDR base";
+            containerWhyUnsupported = true;
             return R;
         }
         FindIspe(C, d, C.primary, baseW, baseH); // prefer declared ispe over decoded dims

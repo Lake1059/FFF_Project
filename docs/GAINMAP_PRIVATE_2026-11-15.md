@@ -254,11 +254,55 @@ On `vendor_auxc_hevc_1ch_128base_single.heic` (64×48):
 ### 11.4 Remaining open items
 
 1. ~~**Per-pixel gain application in the player present path.**~~ **DONE (§12).**
-2. JPEG Ultra HDR and JXL jhgm decoding (currently fail_closed_unsupported).
-3. 3×3 cross-channel correction for 3-channel gain maps.
-4. Real-world vendor private sample (DJI/other) — none found on disk this round.
+2. ~~**HDR (PQ/HLG) base image.**~~ **DONE (§12.11): detected via container colr
+   nclx transfer=16/18, returns fail_closed_unsupported with readable reason.
+   The SDR→HDR lift math does not apply to an already-HDR base.
+3. JPEG Ultra HDR and JXL jhgm decoding (currently fail_closed_unsupported).
+4. 3×3 cross-channel correction for 3-channel gain maps.
+5. Real-world vendor private sample (DJI/other) — none found on disk this round.
 - Usage: `gainmap_probe.exe <file> [--dump <dir>] [--base-only]`.
   stdout is one JSON line; stderr is diagnostic only.
+
+### 12.11 PQ/HLG base detection
+
+The probe reads the container `colr` nclx box (primaries/transfer/matrix,
+2-byte big-endian each after the `nclx` type tag). If transfer_characteristics
+is 16 (SMPTE ST 2084 / PQ) or 18 (ARIB STD-B67 / HLG), the base image is
+already HDR. The SDR→HDR lift formula (sRGB-linear base × gain) is
+semantically wrong on an HDR base, so the probe returns
+`fail_closed_unsupported` with reason `[container] HDR base (PQ/HLG) gain
+map not implemented; cannot lift an already-HDR base`. The decoder's own
+color_trc is also checked as a fallback (raw Annex-B streams usually report
+unspecified=2).
+
+### 12.12 logBoost field schema
+
+`meta.logBoost` is a flat float array. Its length and meaning depend on
+`meta.family`:
+
+| family | length | meaning |
+|---|---|---|
+| `iso` | 6 | `[minR, maxR, minG, maxG, minB, maxB]` — per-channel gain min/max in linear space, used as `2^logBoost` in the ISO formula |
+| `apple` | 6 | always `[0,0,0,0,0,0]` — Apple/0-base family uses `headroom` instead; logBoost is not used in the apply math |
+| `vendor128` | 6 | same layout as `iso` (per-channel min/max) |
+| `none` | 0 | empty array |
+
+When reproducing the math independently: for iso/vendor128, interpret
+logBoost as 3 pairs of (channel_min, channel_max); for apple, use
+`headroom` (a single float) and ignore logBoost entirely.
+
+### 12.13 --base-only safety
+
+In `--base-only` mode the probe:
+- Decodes the base image, sRGB-linearizes it, and computes stats (p50,
+  maxLinear, over1Pct) on the linear base for A/B comparison.
+- Sets `apply.ok=false`, `apply.mode="none"`, `verdict="decoded_not_applied"`.
+- Does NOT run the gainmap decode or apply math.
+- On PQ/HLG base: still returns `fail_closed_unsupported` (same detection as
+  normal mode), NOT `decoded_not_applied`.
+- On non-gainmap files: returns `not_gainmap` regardless of --base-only.
+- --base-only never sets `apply.ok=true`, so it cannot be mistaken for a
+  successful application.
 
 ## 12. Stage 3 — presentation-path application (2026-11-15)
 
