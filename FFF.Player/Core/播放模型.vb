@@ -772,7 +772,7 @@ Public NotInheritable Class 媒体流信息
     <JsonPropertyName("colorSpaceApplied")>
     Public Property 色彩空间应用 As Integer = -1
     <JsonPropertyName("colorRangeApplied")>
-    Public Property 色彩范围应用 As Integer
+    Public Property 色彩范围应用 As Integer = -1
     ' 每个应用值的证据来源：frame / bitstream / container / inferred。
     <JsonPropertyName("colorPrimariesAppliedSource")>
     Public Property 色彩原色应用来源 As String = String.Empty
