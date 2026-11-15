@@ -53,6 +53,11 @@ struct JpegGainMapHit {
     // Gain gamma (single-channel fallback when no per-channel triple).
     float gamma = 1.f;
 
+    // APP2 ISO 21496-1 box flags byte (0 if not parsed / not present).
+    // bit6 (0x40) = useBaseColorSpace (SDR base = apply gainmap).
+    uint8_t app2Flags = 0;
+    bool hasApp2Flags = false;
+
     // Carved bytes. baseBytes is the primary JPEG/WebP frame (when the container
     // splits them); gainBytes is the gain-map code stream (JPEG or WebP/VP8L).
     std::vector<uint8_t> baseBytes;

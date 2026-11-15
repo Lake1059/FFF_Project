@@ -481,6 +481,11 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
                 // (The skia test files write a degenerate "1\0" version here; the
                 // main implementer parses the box when present and tolerates that.)
                 isoPayload = s.payload; isoLen = s.len;
+                // Read flags byte at offset 31 (0-indexed within APP2 payload)
+                if (s.len >= 32) {
+                    out.app2Flags = b.u8(s.payload + 31);
+                    out.hasApp2Flags = true;
+                }
             }
         } else if (s.marker == 0xE1) {
             // XMP: "http://ns.adobe.com/xap/1.0/\0" (28 chars + NUL = 29 bytes)

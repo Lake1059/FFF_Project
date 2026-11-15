@@ -830,11 +830,20 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     if (sz < 16) { R.reason = "file too small"; return R; }
 
     // ── JPEG / WebP gainmap containers ──
-    if (d.size() >= 3 && d[0] == 0xFF && d[1] == 0xD8) {
+    bool isJpeg = (d.size() >= 3 && d[0] == 0xFF && d[1] == 0xD8);
+    bool isWebp = (d.size() >= 12 && memcmp(d.data(), "RIFF", 4) == 0 && memcmp(d.data() + 8, "WEBP", 4) == 0);
+    if (isJpeg || isWebp) {
         fp3::JpegGainMapHit jh;
         ProbeJpegGainMap(std::wstring(pathUtf8.begin(), pathUtf8.end()), jh);
         if (!jh.found) {
-            R.verdict = "not_gainmap"; R.reason = jh.reason.empty() ? "no gainmap in JPEG" : jh.reason;
+            // Route by reason prefix: bare gain layer → unsupported, plain SDR → not_gainmap
+            if (jh.reason.rfind("BARE_GAINMAP_LAYER_NO_BASE:", 0) == 0) {
+                R.verdict = "fail_closed_unsupported";
+                R.reason = jh.reason;
+            } else {
+                R.verdict = "not_gainmap";
+                R.reason = jh.reason.empty() ? "no gainmap" : jh.reason;
+            }
             return R;
         }
         R.present = true;
@@ -856,8 +865,14 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
         R.decodeCodec = "mjpeg";
         R.baseRgba = baseRgba; R.outW = baseW; R.outH = baseH;
-        // HDR base check
-        if (baseTrc == 16 || baseTrc == 18) {
+        // HDR base check: from APP2 flags (bit6=0x40 = useBaseColorSpace)
+        // If flags present and 0x40 NOT set → HDR base → decoded_not_applied
+        // If flags present and 0x40 IS set → SDR base → applied
+        // If flags not present → trust module's found=true (it already validated the container)
+        if (jh.metaSource == "app2" && jh.hasApp2Flags && !(jh.app2Flags & 0x40)) {
+            R.verdict = "decoded_not_applied"; R.applyOk = false;
+            R.reason = "hdr base displayed as-is; gain map not applied (APP2 flags 0x80)"; return R;
+        } else if (baseTrc == 16 || baseTrc == 18) {
             R.verdict = "decoded_not_applied"; R.applyOk = false;
             R.reason = "hdr base displayed as-is; gain map not applied"; return R;
         }
@@ -1140,6 +1155,15 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             tmapPayload.clear();
             R.present = false;
             R.form = "none";
+        }
+        else if (tmapPayload.size() >= 3 && tmapPayload[0] == 0) {
+            // Check ISO minVersion (u16 at offset 1): if non-zero, gainmap is too new → ignore.
+            int isoMinVer = Be16(tmapPayload.data() + 1);
+            if (isoMinVer != 0) {
+                tmapPayload.clear();
+                R.present = false;
+                R.form = "none";
+            }
         }
     } else {
         // auxC paths
@@ -1523,7 +1547,15 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     // 1) tmap payload ISO 21496
     if (!tmapPayload.empty() && tmapPayload.size() >= 2 && tmapPayload[0] == 0) {
         long consumed; IsoMeta m;
+        { char dbg[80]; std::string hx; for(int i=0;i<(int)tmapPayload.size()&&i<12;i++){char h[4];sprintf(h,"%02x ",tmapPayload[i]);hx+=h;} R.notes.push_back("tmapPayload: "+hx); }
         if (ParseIso21496(tmapPayload.data(), 1, (long)tmapPayload.size() - 1, m, consumed)) {
+            // gamma must be > 0
+            if (m.gammaC[0] <= 0.f) {
+                R.verdict = "fail_closed_malformed";
+                R.reason = "tmap: gamma=" + std::to_string(m.gammaC[0]) + " (must be > 0)";
+                R.decodeOk = false; R.applyOk = false;
+                return R;
+            }
             ap.iso = m; ap.isAppleFamily = false;
             R.metaFamily = "iso"; R.metaSource = "tmap";
             for (int c = 0; c < 3; c++) {
@@ -1593,9 +1625,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         R.metaFamily = "none"; R.metaSource = "default";
         return R;
     }
-    // HDR base: tmap flags bit 0x40 clear (0x80 = HDR base, 0xc0 = SDR base).
-    // Only applies to tmap-sourced metadata, not Apple/XMP.
-    if (metaOk && R.metaSource == "tmap" && !(ap.iso.rawFlags & 0x40)) {
+    // HDR base: tmap flags bit 0x40 clear AND bit 0x80 set (0x80=HDR base, 0xc0=SDR base).
+    // Only apply this check when 0x80 bit is present (validated tmap format);
+    // flags=0x00 means unrecognized format, don't assume HDR base.
+    if (metaOk && R.metaSource == "tmap" && (ap.iso.rawFlags & 0x80) && !(ap.iso.rawFlags & 0x40)) {
         R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
         R.verdict = "decoded_not_applied";
         R.applyOk = false; R.applyMode = "none";
