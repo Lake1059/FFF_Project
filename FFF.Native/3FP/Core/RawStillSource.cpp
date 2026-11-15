@@ -144,6 +144,59 @@ AVPixelFormat PixelFormatFor(int colors, int bits) noexcept {
     return AV_PIX_FMT_NONE;
 }
 
+// SEH wall around the four LibRaw entry points. Each helper is a pure POD
+// free function: only raw pointers cross its frame, no C++ object with a
+// destructor lives there, so MSVC allows __try/__except. Putting __try
+// directly inside Open()/Decode() would hit C2712 because those functions
+// own std::string error out-params and std::shared_ptr<LibRaw>.
+//
+// We stay on /EHsc (the vcxproj default, no <ExceptionHandling> override):
+// __try/__except catches access violations (0xC0000005) and stack overflow
+// (0xC00000FD) regardless of /EHs. /EHa would only make catch(...) swallow
+// heap corruption process-wide, which is worse.
+//
+// These wrappers do NOT catch heap-lock deadlocks or infinite dcraw loops
+// (KF-03); that requires subprocess isolation, deferred until a real fuzzer
+// crash or user-visible hang justifies the IPC cost.
+constexpr int kRawSehBase = -10000;
+
+// Encode an SEH fault as a negative int well below any real LibRaw error
+// code (those are in roughly -1..-64). Subtraction keeps the whole range
+// <= kRawSehBase so `result <= kRawSehBase` is a valid discriminator; OR
+// would wrap around in two's complement and produce small negatives.
+int SehOpenFile(LibRaw* raw, const char* path) noexcept {
+    __try {
+        return raw->open_file(path);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return kRawSehBase - static_cast<int>(GetExceptionCode() & 0x7FFF);
+    }
+}
+
+int SehUnpack(LibRaw* raw) noexcept {
+    __try {
+        return raw->unpack();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return kRawSehBase - static_cast<int>(GetExceptionCode() & 0x7FFF);
+    }
+}
+
+int SehDcrawProcess(LibRaw* raw) noexcept {
+    __try {
+        return raw->dcraw_process();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return kRawSehBase - static_cast<int>(GetExceptionCode() & 0x7FFF);
+    }
+}
+
+libraw_processed_image_t* SehMakeMemImage(LibRaw* raw, int* memError) noexcept {
+    __try {
+        return raw->dcraw_make_mem_image(memError);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *memError = kRawSehBase - static_cast<int>(GetExceptionCode() & 0x7FFF);
+        return nullptr;
+    }
+}
+
 struct RawMemOwner {
     // The AVFrame may outlive the RawStillSource that produced it: the
     // session keeps a still-image frame across the next Open so the old
@@ -301,9 +354,13 @@ bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& o
         return false;
     }
 
-    const int openResult = impl_->raw->open_file(pathUtf8.c_str());
+    const int openResult = SehOpenFile(impl_->raw.get(), pathUtf8.c_str());
     if (openResult != LIBRAW_SUCCESS) {
-        error = std::string("LibRaw open_file: ") + RawError(openResult);
+        if (openResult <= kRawSehBase) {
+            error = "LibRaw open_file crashed (SEH)";
+        } else {
+            error = std::string("LibRaw open_file: ") + RawError(openResult);
+        }
         impl_->raw.reset();
         return false;
     }
@@ -436,23 +493,29 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
     params.user_flip = -1;
     params.no_auto_bright = 0;
 
-    int result = raw.unpack();
+    int result = SehUnpack(&raw);
     if (result != LIBRAW_SUCCESS) {
-        error = std::string("LibRaw unpack: ") + RawError(result);
+        error = (result <= kRawSehBase)
+            ? "LibRaw unpack crashed (SEH)"
+            : std::string("LibRaw unpack: ") + RawError(result);
         return false;
     }
     RawTrace("RawStillSource::unpack ok");
-    result = raw.dcraw_process();
+    result = SehDcrawProcess(&raw);
     if (result != LIBRAW_SUCCESS) {
-        error = std::string("LibRaw dcraw_process: ") + RawError(result);
+        error = (result <= kRawSehBase)
+            ? "LibRaw dcraw_process crashed (SEH)"
+            : std::string("LibRaw dcraw_process: ") + RawError(result);
         return false;
     }
     RawTrace("RawStillSource::dcraw_process ok");
 
     int memError = LIBRAW_SUCCESS;
-    libraw_processed_image_t* mem = raw.dcraw_make_mem_image(&memError);
+    libraw_processed_image_t* mem = SehMakeMemImage(&raw, &memError);
     if (mem == nullptr || memError != LIBRAW_SUCCESS) {
-        error = std::string("LibRaw dcraw_make_mem_image: ") + RawError(memError);
+        error = (memError <= kRawSehBase)
+            ? "LibRaw dcraw_make_mem_image crashed (SEH)"
+            : std::string("LibRaw dcraw_make_mem_image: ") + RawError(memError);
         return false;
     }
     RawTrace("RawStillSource::mem_image ok");
