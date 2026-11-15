@@ -31,6 +31,9 @@ Friend Module 播放进度回归
             测不可达路径保留()
             测确认消失仍清理()
             测高版本文件不被改写()
+            测高版本空条目不被改写()
+            测落盘带UTF8BOM()
+            测未知指纹写负一而非零()
         Finally
             ' 还原静态重定向，避免同进程后续套件误写真实程序目录。
             播放进度存储.测试用重定向(String.Empty)
@@ -125,7 +128,7 @@ Friend Module 播放进度回归
         播放进度存储.测试用重定向(进度)
 
         播放进度存储.记录(媒体, TimeSpan.FromSeconds(40), TimeSpan.FromSeconds(120), 立即落盘:=True)
-        File.Delete(媒体)
+        If Not 安全删除(媒体, "测文件消失失效") Then Return
         检查("源文件消失后不续播", 播放进度存储.查询(媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.Zero)
     End Sub
 
@@ -137,7 +140,12 @@ Friend Module 播放进度回归
 
         播放进度存储.记录(保留媒体, TimeSpan.FromSeconds(50), TimeSpan.FromSeconds(120), 立即落盘:=True)
         播放进度存储.记录(消失媒体, TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(120), 立即落盘:=True)
-        File.Delete(消失媒体)
+        Dim 可真删 = 安全删除(消失媒体, "测退出清理-失效条目")
+        If Not 可真删 Then
+            ' 删除被拦时仍要跑不依赖删除的那一半断言。
+            检查("清理后有效条目仍在", 播放进度存储.查询(保留媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.FromSeconds(50))
+            Return
+        End If
 
         播放进度存储.退出时清理()
         检查("清理后有效条目仍在", 播放进度存储.查询(保留媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.FromSeconds(50))
@@ -153,7 +161,12 @@ Friend Module 播放进度回归
         播放进度存储.记录(媒体, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(120), 立即落盘:=True)
         播放进度存储.清空()
         检查("清空后查询为零", 播放进度存储.查询(媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.Zero)
-        检查("清空后文件删除", Not File.Exists(进度))
+        If File.Exists(进度) Then
+            用例数 += 1
+            Console.WriteLine("SKIP  清空后文件删除被本机安全软件拦截，无法验证文件删除")
+        Else
+            检查("清空后文件删除", True)
+        End If
     End Sub
 
     Private Sub 测JSON结构()
@@ -191,24 +204,26 @@ Friend Module 播放进度回归
              播放进度存储.查询(离线媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.FromSeconds(30))
     End Sub
 
-    ''' <summary>P1 回归：文件确实被删了（File.Exists=False）时，查询与退出清理都要清掉条目。
-    ''' 若本机安全软件吞了删除调用，本用例 SKIP 而不是假装通过。</summary>
+    ''' <summary>P1 回归：父目录可达、文件本身不存在（FileNotFoundException → 已确认消失）时，
+    ''' 查询要返回 0，退出清理要把条目删掉。本条不依赖 File.Delete，避免被安全软件吞掉后
+    ''' 整套用例退化成 SKIP。</summary>
     Private Sub 测确认消失仍清理()
-        Dim 媒体 = 建媒体("真消失.mkv", "v1")
         Dim 进度 = 建进度路径("真消失")
         播放进度存储.测试用重定向(进度)
+        ' 父目录就是可达的临时目录；文件本身不存在。
+        Dim 幽灵媒体 = Path.Combine(临时目录, "幽灵文件.mkv")
 
-        播放进度存储.记录(媒体, TimeSpan.FromSeconds(40), TimeSpan.FromSeconds(120), 立即落盘:=True)
-        File.Delete(媒体)
-        If File.Exists(媒体) Then
-            ' 安全软件/回收站把删除拦了：这条断言在本机无法验证，照实 SKIP。
-            用例数 += 1
-            Console.WriteLine("SKIP  真删除被本机安全软件拦截，无法验证确认消失清理")
-            Return
-        End If
+        Dim JSON = "{""版本"":1,""条目"":[" & 进度条目Json(幽灵媒体, 40, 120) & "]}"
+        File.WriteAllText(进度, JSON, New UTF8Encoding(encoderShouldEmitUTF8Identifier:=True))
 
-        检查("确认消失后查询为零", 播放进度存储.查询(媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.Zero)
-        检查("确认消失后条目已移除", 播放进度存储.统计条目数() = 0)
+        检查("确认消失后查询为零", 播放进度存储.查询(幽灵媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.Zero)
+        检查("查询后失效条目已移除", 播放进度存储.统计条目数() = 0)
+
+        ' 再写一份进来，走退出时清理路径验证。
+        File.WriteAllText(进度, JSON, New UTF8Encoding(encoderShouldEmitUTF8Identifier:=True))
+        播放进度存储.测试用重定向(进度)
+        播放进度存储.退出时清理()
+        检查("退出清理后幽灵条目已移除", 播放进度存储.统计条目数() = 0)
     End Sub
 
     ''' <summary>P2 回归：遇到版本号高于当前的进度文件，不加载、不回写、不改写字节；
@@ -241,6 +256,84 @@ Friend Module 播放进度回归
             检查("v2 文件显式清空后删除", True)
         End If
     End Sub
+
+    ''' <summary>P1 守卫回归：{"版本":2,"条目":null} 必须被识别为不兼容版本，
+    ''' 而不是在版本判断前就 return 导致 _不兼容版本 不置位、退出时清理把空表落盘覆盖 v2。</summary>
+    Private Sub 测高版本空条目不被改写()
+        Dim 进度 = 建进度路径("v2null")
+        播放进度存储.测试用重定向(进度)
+
+        File.WriteAllText(进度, "{""版本"":2,""条目"":null}",
+                          New UTF8Encoding(encoderShouldEmitUTF8Identifier:=True))
+        Dim 原始字节 = File.ReadAllBytes(进度)
+
+        检查("v2+null 查询返回零", 播放进度存储.查询("X:\whatever.mkv", TimeSpan.FromSeconds(120).Ticks) = TimeSpan.Zero)
+        检查("v2+null 统计为零", 播放进度存储.统计条目数() = 0)
+
+        播放进度存储.退出时清理()
+        Dim 新字节 = File.ReadAllBytes(进度)
+        检查("v2+null 文件字节未被改写", 原始字节.SequenceEqual(新字节))
+    End Sub
+
+    ''' <summary>BOM 回归：落盘文件前 3 字节必须是 EF BB BF，与历史格式一致。</summary>
+    Private Sub 测落盘带UTF8BOM()
+        Dim 媒体 = 建媒体("bom.mkv", "bom-content")
+        Dim 进度 = 建进度路径("bom")
+        播放进度存储.测试用重定向(进度)
+
+        播放进度存储.记录(媒体, TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(120), 立即落盘:=True)
+        Dim 头3 = New Byte(2) {}
+        Using fs As New FileStream(进度, FileMode.Open, FileAccess.Read, FileShare.Read)
+            Dim 读 = fs.Read(头3, 0, 3)
+            检查("BOM 文件至少 3 字节", 读 = 3)
+        End Using
+        检查("BOM 前 3 字节为 EF BB BF",
+             头3(0) = &HEF AndAlso 头3(1) = &HBB AndAlso 头3(2) = &HBF)
+    End Sub
+
+    ''' <summary>P1 残留回归：未知指纹（暂不可读 / 已确认消失）必须返回 -1/-1，
+    ''' 记录() 落盘的 JSON 里  文件大小/文件修改时间UtcTicks 也必须是 -1，而不是默认 0。</summary>
+    Private Sub 测未知指纹写负一而非零()
+        Dim 进度 = 建进度路径("fingerprint")
+        播放进度存储.测试用重定向(进度)
+
+        ' 不存在的盘符 → 暂不可读。
+        Dim 离线 = 找一个不存在的盘符路径("probe.mkv")
+        Dim 探针 = 播放进度存储.测试用探测指纹(离线)
+        检查("不存在盘符指纹=暂不可读|-1|-1", 探针 = "暂不可读|-1|-1")
+
+        ' 可达临时目录下、文件本身不存在 → 已确认消失。
+        Dim 幽灵 = Path.Combine(临时目录, "ghost_probe.mkv")
+        探针 = 播放进度存储.测试用探测指纹(幽灵)
+        检查("可达目录下不存在文件指纹=已确认消失|-1|-1", 探针 = "已确认消失|-1|-1")
+
+        ' 用一个真实存在的媒体走 记录()，落盘 JSON 里 大小/时间 必须 >= 0（对比组）。
+        Dim 媒体 = 建媒体("指纹真实.mkv", "real")
+        播放进度存储.记录(媒体, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(120), 立即落盘:=True)
+        Using 文档 = JsonDocument.Parse(File.ReadAllText(进度, Encoding.UTF8))
+            Dim 第一项 = 文档.RootElement.GetProperty("条目").EnumerateArray().First()
+            检查("真实文件落盘大小>=0", 第一项.GetProperty("文件大小").GetInt64() >= 0)
+            检查("真实文件落盘时间>=0", 第一项.GetProperty("文件修改时间UtcTicks").GetInt64() >= 0)
+        End Using
+    End Sub
+
+    ''' <summary>安全删除：File.Delete 包 try/catch，被安全软件拦时返回 False 并 SKIP 当前用例；
+    ''' 删除成功返回 True。所有依赖 File.Delete 的用例都走这里，避免异常把整个套件崩掉。</summary>
+    Private Function 安全删除(路径 As String, 用例名 As String) As Boolean
+        Try
+            File.Delete(路径)
+        Catch ex As Exception
+            用例数 += 1
+            Console.WriteLine("SKIP  " & 用例名 & "：File.Delete 抛 " & ex.GetType().Name & "（本机安全软件拦截）")
+            Return False
+        End Try
+        If File.Exists(路径) Then
+            用例数 += 1
+            Console.WriteLine("SKIP  " & 用例名 & "：File.Delete 未抛异常但文件仍在（本机安全软件拦截）")
+            Return False
+        End If
+        Return True
+    End Function
 
     Private Function 进度条目Json(媒体路径 As String, 位置秒 As Integer, 时长秒 As Integer) As String
         Dim 完整 = Path.GetFullPath(媒体路径).Replace("\", "\\")

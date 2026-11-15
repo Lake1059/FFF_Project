@@ -173,8 +173,15 @@ Public NotInheritable Class 播放进度存储
             Dim 指纹 = 读取指纹(键)
             项.位置100纳秒 = 位置100纳秒
             项.时长100纳秒 = 时长100纳秒
-            项.文件大小 = 指纹.大小
-            项.文件修改时间UtcTicks = 指纹.修改时间UtcTicks
+            ' 只有能 stat 到文件时才写真实大小/时间；暂不可读/已确认消失时一律写 -1，
+            ' 避免把"读不到"误写成"大小=0、时间=0"的假指纹，下次可用时必然判定不匹配。
+            If 指纹.状态 = 指纹状态.可用 Then
+                项.文件大小 = 指纹.大小
+                项.文件修改时间UtcTicks = 指纹.修改时间UtcTicks
+            Else
+                项.文件大小 = -1L
+                项.文件修改时间UtcTicks = -1L
+            End If
             项.已完成 = 完成值
             项.最后更新UtcTicks = DateTime.UtcNow.Ticks
             _脏 = True
@@ -219,10 +226,12 @@ Public NotInheritable Class 播放进度存储
                 Dim 目录 = Path.GetDirectoryName(路径)
                 If Not String.IsNullOrEmpty(目录) Then Directory.CreateDirectory(目录)
                 临时路径 = 路径 & ".tmp-" & Guid.NewGuid().ToString("N")
-                ' 先写临时文件并 Flush(True) 把内核缓冲刷到盘，再原子改名；
-                ' 避免掉电时留下半截 JSON 直接顶掉旧进度。编码仍带 BOM，与历史文件一致。
+                ' 先写 UTF-8 BOM preamble 再写正文；GetBytes 本身不带 preamble，
+                ' 必须显式 Write(GetPreamble())，否则落盘文件缺 EF BB BF，与历史格式不一致。
                 Dim 编码 As New UTF8Encoding(encoderShouldEmitUTF8Identifier:=True)
                 Using fs As New FileStream(临时路径, FileMode.Create, FileAccess.Write, FileShare.None)
+                    Dim 前导 = 编码.GetPreamble()
+                    If 前导.Length > 0 Then fs.Write(前导, 0, 前导.Length)
                     Dim 字节 = 编码.GetBytes(JSON)
                     fs.Write(字节, 0, 字节.Length)
                     fs.Flush(True)
@@ -320,13 +329,17 @@ Public NotInheritable Class 播放进度存储
             Try
                 Dim 文本 = File.ReadAllText(路径, Encoding.UTF8)
                 Dim 文件 = JsonSerializer.Deserialize(Of 进度文件)(文本, JsonSO)
-                If 文件 Is Nothing OrElse 文件.条目 Is Nothing Then Return
+                If 文件 Is Nothing Then Return
+                ' 版本判断必须在「条目 Is Nothing」之前：{"版本":2,"条目":null} 也要被识别为
+                ' 不兼容，否则会在版本判断前就 return，_不兼容版本 不置位，随后退出时清理
+                ' 会把空表落盘，把 v2 文件覆盖成 v1 空表。
                 If 文件.版本 > 当前版本 Then
                     ' 不理解的版本：不把任何条目读进内存，也不允许回写覆盖原文件，
                     ' 避免未来版本新增的字段被静默丢弃。用户仍可显式清空（见 清空）。
                     _不兼容版本 = True
                     Return
                 End If
+                If 文件.条目 Is Nothing Then Return
 
                 For Each 项 In 文件.条目
                     If 项 Is Nothing OrElse String.IsNullOrWhiteSpace(项.路径) Then Continue For
@@ -401,19 +414,26 @@ Public NotInheritable Class 播放进度存储
                 .修改时间UtcTicks = 信息.LastWriteTimeUtc.Ticks
             }
         Catch ex As FileNotFoundException
-            ' 文件不存在，但父目录可达：确认消失。
-            Return New 文件指纹 With {.状态 = 指纹状态.已确认消失}
+            ' 文件不存在，但父目录可达：确认消失。大小/时间返回 -1，表示"读不到、别拿来比"。
+            Return New 文件指纹 With {.状态 = 指纹状态.已确认消失, .大小 = -1L, .修改时间UtcTicks = -1L}
         Catch ex As DirectoryNotFoundException
             ' 两种情况都抛这个：① 父目录在可达盘上被删了 → 确认消失；
             ' ② 整个盘符根不可达（U 盘拔出 / 网络盘离线 / 盘符不存在）→ 暂不可读。
             ' 用盘符根是否可达区分。
             If 盘符根可达(路径) Then
-                Return New 文件指纹 With {.状态 = 指纹状态.已确认消失}
+                Return New 文件指纹 With {.状态 = 指纹状态.已确认消失, .大小 = -1L, .修改时间UtcTicks = -1L}
             End If
-            Return New 文件指纹 With {.状态 = 指纹状态.暂不可读}
+            Return New 文件指纹 With {.状态 = 指纹状态.暂不可读, .大小 = -1L, .修改时间UtcTicks = -1L}
         Catch
-            Return New 文件指纹 With {.状态 = 指纹状态.暂不可读}
+            Return New 文件指纹 With {.状态 = 指纹状态.暂不可读, .大小 = -1L, .修改时间UtcTicks = -1L}
         End Try
+    End Function
+
+    ''' <summary>测试钩子：探测指纹并以可比较字符串返回，避免 Private 类型跨程序集可见。
+    ''' 形如 "暂不可读|-1|-1"。仅测试用。</summary>
+    Friend Shared Function 测试用探测指纹(路径 As String) As String
+        Dim f = 读取指纹(路径)
+        Return f.状态.ToString() & "|" & f.大小.ToString() & "|" & f.修改时间UtcTicks.ToString()
     End Function
 
     ''' <summary>判断路径所在的盘符根是否可达。根不可达 = U 盘被拔 / 网络盘离线 / 盘符不存在。</summary>

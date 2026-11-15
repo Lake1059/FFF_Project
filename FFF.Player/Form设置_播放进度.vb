@@ -1,3 +1,4 @@
+Imports System.IO
 Imports System.Net
 
 ''' <summary>播放进度记忆开关。进度文件与设置文件分离；关闭后不再读写，
@@ -15,7 +16,9 @@ Public Class Form设置_播放进度
         Try
             MCK_记住播放进度.Checked = 设置.实例对象.播放进度记忆
             Dim 数量 = 播放进度存储.统计条目数()
-            MB_清除播放进度.Enabled = 数量 > 0
+            ' 即使条目数为 0，只要文件存在也允许清除（版本不兼容时 统计条目数 返回 0，
+            ' 但磁盘上仍有 v2/v3 文件；用户需要一个显式入口把它删掉）。
+            MB_清除播放进度.Enabled = 数量 > 0 OrElse File.Exists(播放进度存储.文件路径)
             HCL_状态读数.Text = 状态文本(数量)
         Finally
             正在初始化 = False
