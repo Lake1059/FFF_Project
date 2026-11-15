@@ -21,8 +21,11 @@ Friend Module Program
             If String.Equals(项, "--bluetooth-latency-regression", StringComparison.OrdinalIgnoreCase) Then
                 Return 蓝牙延迟策略测试.运行()
             End If
+            If String.Equals(项, "--playback-progress-regression", StringComparison.OrdinalIgnoreCase) Then
+                Return 播放进度回归.运行()
+            End If
         Next
-        Console.WriteLine("可用套件：--360-identification-regression  --pr57-fixes-regression  --content-size-regression  --module-abi-regression  --raw-file-association-regression  --bluetooth-latency-regression")
+        Console.WriteLine("可用套件：--360-identification-regression  --pr57-fixes-regression  --content-size-regression  --module-abi-regression  --raw-file-association-regression  --bluetooth-latency-regression  --playback-progress-regression")
         Return 2
     End Function
 End Module

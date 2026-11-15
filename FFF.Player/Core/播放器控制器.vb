@@ -599,7 +599,10 @@ Public NotInheritable Class 播放器控制器
         If 已释放 OrElse Not 光盘路径.媒体存在(路径) Then
             Return Task.CompletedTask
         End If
-        Return 切换媒体会话Async(Path.GetFullPath(路径), 用户解码器偏好, TimeSpan.Zero, True, -1, -1, False)
+        ' 只有「用户打开媒体」这一路读进度记忆；换解码器 / 换流等内部切换仍以调用方
+        ' 传入的恢复位置为准——那条路上"当前位置"必须原样保留，不能被历史进度覆盖。
+        Return 切换媒体会话Async(Path.GetFullPath(路径), 用户解码器偏好, TimeSpan.Zero,
+                                  True, -1, -1, False, 使用进度记忆:=True)
     End Function
 
     ''' <summary>
@@ -911,9 +914,13 @@ Public NotInheritable Class 播放器控制器
             Select Case 快照.状态
                 Case 播放状态.正在播放
                     目标.暂停()
+                    ' 暂停是用户离开前的最后一个稳定时刻：立刻落一笔，不等 15 秒定时器。
+                    保存当前播放进度(立即落盘:=True)
                 Case 播放状态.就绪, 播放状态.已暂停, 播放状态.播放结束
                     If 快照.总时长 > TimeSpan.Zero AndAlso 快照.播放位置 >= 快照.总时长 Then
                         目标.跳转(TimeSpan.Zero)
+                        ' 从片尾回到开头：旧记录已经到期，清掉，下次按"从头开始"处理。
+                        记录跳转位置(TimeSpan.Zero, 快照.总时长)
                     End If
                     目标.播放()
             End Select
@@ -924,6 +931,8 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 停止()
         If 已释放 Then Return
+        ' 停止会释放会话；位置必须先取出来，否则这次观看就白记了。
+        保存当前播放进度(立即落盘:=True)
         Dim 取消源 = Interlocked.Exchange(会话操作取消, Nothing)
         取消源?.Cancel()
         释放当前会话()
@@ -942,6 +951,7 @@ Public NotInheritable Class 播放器控制器
             If 新位置 < TimeSpan.Zero Then 新位置 = TimeSpan.Zero
             If 快照.总时长 > TimeSpan.Zero Then 新位置 = 最小时间(新位置, 快照.总时长)
             目标.跳转(新位置)
+            记录跳转位置(新位置, 快照.总时长)
         Catch ex As 播放器异常
         End Try
     End Sub
@@ -955,6 +965,7 @@ Public NotInheritable Class 播放器控制器
             If 可操作(快照.状态) Then
                 If 读取光盘状态().已打开 Then Return
                 目标.跳转(限定跳转位置(位置, 快照.总时长))
+                记录跳转位置(位置, 快照.总时长)
             End If
         Catch ex As 播放器异常
         End Try
@@ -963,6 +974,60 @@ Public NotInheritable Class 播放器控制器
     Friend Shared Function 限定跳转位置(位置 As TimeSpan, 总时长 As TimeSpan) As TimeSpan
         If 位置 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(位置))
         Return If(总时长 > TimeSpan.Zero, 最小时间(位置, 总时长), 位置)
+    End Function
+
+    ''' <summary>把当前会话的播放位置写进进度文件。定时器、暂停、跳转、换片、停止、退出都调它。
+    ''' 进度不是播放的前提：任何读取/写入失败都只留一行诊断，不弹窗、不打断播放。</summary>
+    ''' <param name="已完成">看到片尾后调用；下次打开从头开始。</param>
+    ''' <param name="立即落盘">True 用于显式保存点，不等 10 秒合并窗口。</param>
+    Public Sub 保存当前播放进度(Optional 已完成 As Boolean = False, Optional 立即落盘 As Boolean = False)
+        If Not 设置.实例对象.播放进度记忆 Then Return
+        Dim 目标 = 会话
+        If 目标 Is Nothing Then Return
+        Dim 路径 = 当前文件路径
+        If String.IsNullOrWhiteSpace(路径) Then Return
+
+        Try
+            Dim 快照 = 目标.当前快照
+            If 快照 Is Nothing Then Return
+            Select Case 快照.状态
+                Case 播放状态.空闲, 播放状态.正在打开, 播放状态.失败, 播放状态.已关闭
+                    Return
+            End Select
+            ' 图片的 总时长 是 0；光盘是目录。两者都不该进"视频播放进度"。
+            If 快照.总时长 <= TimeSpan.Zero Then Return
+            播放进度存储.记录(路径, 快照.播放位置, 快照.总时长, 已完成, 立即落盘)
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        Catch ex As Exception
+            Debug.WriteLine("播放进度：采集失败（已忽略）：" & ex.GetType().Name)
+        End Try
+    End Sub
+
+    ''' <summary>跳转成功后立刻记目标位置；下一次 100ms 心跳会把实际落点校正回来。</summary>
+    Private Sub 记录跳转位置(位置 As TimeSpan, 总时长 As TimeSpan)
+        If 总时长 <= TimeSpan.Zero Then Return
+        Try
+            播放进度存储.记录(当前文件路径, 位置, 总时长, 立即落盘:=True)
+        Catch ex As Exception
+            Debug.WriteLine("播放进度：跳转记录失败（已忽略）：" & ex.GetType().Name)
+        End Try
+    End Sub
+
+    ''' <summary>用户打开媒体时的恢复位置：显式恢复位置优先；否则读进度记忆，
+    ''' 并按本次实际片长再夹一次（同名文件被替换时，旧位置可能已经越过片尾）。</summary>
+    Private Shared Function 解析进度恢复位置(路径 As String, 显式位置 As TimeSpan,
+                                              实际总时长 As TimeSpan, 使用进度记忆 As Boolean) As TimeSpan
+        If Not 使用进度记忆 Then Return 显式位置
+        If Not 设置.实例对象.播放进度记忆 Then Return 显式位置
+        If 显式位置 > TimeSpan.Zero Then Return 显式位置
+        If 实际总时长 <= TimeSpan.Zero Then Return TimeSpan.Zero
+        Try
+            Return 播放进度存储.查询(路径, 实际总时长.Ticks)
+        Catch ex As Exception
+            Debug.WriteLine("播放进度：读取失败（已忽略）：" & ex.GetType().Name)
+            Return TimeSpan.Zero
+        End Try
     End Function
 
     Friend Function 读取输入音频峰值() As Single()
@@ -1432,8 +1497,10 @@ Public NotInheritable Class 播放器控制器
 
     Private Sub 切换媒体会话(路径 As String, 解码器 As 解码模式, 恢复位置 As TimeSpan,
                               恢复播放 As Boolean, 视频流 As Integer, 音频流 As Integer,
-                              Optional 保留已加载字幕 As Boolean = False)
-        启动后台任务(切换媒体会话Async(路径, 解码器, 恢复位置, 恢复播放, 视频流, 音频流, 保留已加载字幕))
+                              Optional 保留已加载字幕 As Boolean = False,
+                              Optional 使用进度记忆 As Boolean = False)
+        启动后台任务(切换媒体会话Async(路径, 解码器, 恢复位置, 恢复播放, 视频流, 音频流,
+                                      保留已加载字幕, 使用进度记忆))
     End Sub
 
     Private Shared Sub 启动后台任务(任务 As Task)
@@ -1453,7 +1520,11 @@ Public NotInheritable Class 播放器控制器
 
     Private Async Function 切换媒体会话Async(路径 As String, 解码器 As 解码模式, 恢复位置 As TimeSpan,
                                               恢复播放 As Boolean, 视频流 As Integer, 音频流 As Integer,
-                                              保留已加载字幕 As Boolean) As Task
+                                              保留已加载字幕 As Boolean,
+                                              Optional 使用进度记忆 As Boolean = False) As Task
+        ' 旧会话的读数只有接管前才拿得到。先把旧媒体最后位置落盘；
+        ' 失败回退时旧会话仍在播，这笔记录不会造成任何状态变化。
+        If 会话 IsNot Nothing Then 保存当前播放进度(立即落盘:=True)
         取消外部音频加载()
         Dim 此次取消 As New CancellationTokenSource()
         Dim 上次取消 = Interlocked.Exchange(会话操作取消, 此次取消)
@@ -1512,7 +1583,10 @@ Public NotInheritable Class 播放器控制器
                         Dim 原位包含封面 = 原位是纯音频 AndAlso 原位媒体信息.流.Any(
                             Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso x.是封面图)
                         恢复流选择(原会话, 原位媒体信息, 视频流, 音频流)
-                        Await 恢复媒体位置Async(原会话, 原光盘状态, 恢复位置, 原位初始快照.总时长, 此次取消.Token)
+                        Dim 原位恢复位置 = 解析进度恢复位置(路径, 恢复位置, 原位初始快照.总时长, 使用进度记忆)
+                        Dim 原位已恢复进度 As TimeSpan? = Nothing
+                        If 原位恢复位置 > TimeSpan.Zero Then 原位已恢复进度 = 原位恢复位置
+                        Await 恢复媒体位置Async(原会话, 原光盘状态, 原位恢复位置, 原位初始快照.总时长, 此次取消.Token)
                         Dim 原位快照 = 原会话.当前快照
                         Dim 原位保留当前字幕 = 保留已加载字幕 AndAlso
                             String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase)
@@ -1535,7 +1609,8 @@ Public NotInheritable Class 播放器控制器
 
                         正在切换会话 = False
                         RaiseEvent 媒体已打开(Me,
-                            New 播放器媒体事件参数(当前文件路径, 原位媒体信息, 原位快照, 原位保留当前字幕))
+                            New 播放器媒体事件参数(当前文件路径, 原位媒体信息, 原位快照, 原位保留当前字幕,
+                                                   原位已恢复进度))
                         开始自动加载外部音频(当前文件路径)
                         If Not 原位保留当前字幕 Then
                             开始自动加载字幕(当前文件路径)
@@ -1598,7 +1673,10 @@ Public NotInheritable Class 播放器控制器
                 Dim 候选包含封面 = 候选是纯音频 AndAlso 媒体信息.流.Any(
                 Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso x.是封面图)
                 恢复流选择(候选会话, 媒体信息, 视频流, 音频流)
-                Await 恢复媒体位置Async(候选会话, 原光盘状态, 恢复位置, 初始快照.总时长, 此次取消.Token)
+                Dim 候选恢复位置 = 解析进度恢复位置(路径, 恢复位置, 初始快照.总时长, 使用进度记忆)
+                Dim 候选已恢复进度 As TimeSpan? = Nothing
+                If 候选恢复位置 > TimeSpan.Zero Then 候选已恢复进度 = 候选恢复位置
+                Await 恢复媒体位置Async(候选会话, 原光盘状态, 候选恢复位置, 初始快照.总时长, 此次取消.Token)
                 Dim 快照 = 候选会话.当前快照
 
                 Dim 保留当前字幕 = 保留已加载字幕 AndAlso
@@ -1636,7 +1714,7 @@ Public NotInheritable Class 播放器控制器
                 ' 因而不能等到 Finally 才清除切换标记，否则首个操作会被静默忽略。
                 正在切换会话 = False
                 RaiseEvent 媒体已打开(Me,
-                New 播放器媒体事件参数(当前文件路径, 媒体信息, 快照, 保留当前字幕))
+                New 播放器媒体事件参数(当前文件路径, 媒体信息, 快照, 保留当前字幕, 候选已恢复进度))
                 开始自动加载外部音频(当前文件路径)
                 If Not 保留当前字幕 Then
                     开始自动加载字幕(当前文件路径)
@@ -1857,7 +1935,10 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Private Sub 会话_播放结束(sender As Object, e As 播放器事件参数)
-        If sender Is 会话 Then RaiseEvent 播放结束(Me, EventArgs.Empty)
+        If sender IsNot 会话 Then Return
+        ' 先记成"已完成"，再通知列表前进：续播条不会再从片尾跳一次。
+        保存当前播放进度(已完成:=True, 立即落盘:=True)
+        RaiseEvent 播放结束(Me, EventArgs.Empty)
     End Sub
 
     Private Sub 会话_色彩模式变化(sender As Object, e As 播放器事件参数)
@@ -2323,17 +2404,20 @@ Public NotInheritable Class 播放器媒体事件参数
     Inherits EventArgs
 
     Public Sub New(文件路径 As String, 媒体信息 As 媒体信息, 快照 As 播放器快照,
-                   保留剪辑区间 As Boolean)
+                   保留剪辑区间 As Boolean, Optional 恢复进度 As TimeSpan? = Nothing)
         Me.文件路径 = 文件路径
         Me.媒体信息 = 媒体信息
         Me.快照 = 快照
         Me.保留剪辑区间 = 保留剪辑区间
+        Me.恢复进度 = 恢复进度
     End Sub
 
     Public ReadOnly Property 文件路径 As String
     Public ReadOnly Property 媒体信息 As 媒体信息
     Public ReadOnly Property 快照 As 播放器快照
     Public ReadOnly Property 保留剪辑区间 As Boolean
+    ''' <summary>非空表示这次打开确实从历史位置续播；供界面提示，不参与播放逻辑。</summary>
+    Public ReadOnly Property 恢复进度 As TimeSpan?
 End Class
 
 Public NotInheritable Class 播放器错误事件参数

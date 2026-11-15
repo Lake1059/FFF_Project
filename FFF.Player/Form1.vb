@@ -40,6 +40,9 @@ Public Class Form1
     ' 蓝牙端点/协议可能在播放中切换（耳机回连、A2DP 与 HFP 互换），500ms 复查一次默认端点；
     ' 只有补偿值变化才真正下发，空闲时只探测不 re-seek。
     Private 蓝牙延迟计时器 As System.Windows.Forms.Timer
+    ' 播放进度兜底：暂停/跳转/换片/停止/退出都有显式保存点，这个 15 秒计时器
+    ' 只覆盖"一直在播、没有任何用户动作"的场景（异常退出最多丢 15 秒）。
+    Private 播放进度计时器 As System.Windows.Forms.Timer
     Private 界面呈现器 As 播放器界面呈现器
     Private 窗口布局控制器 As 播放器窗口布局控制器
     Private 字幕图层呈现器 As 播放器字幕叠加呈现器
@@ -227,6 +230,7 @@ Public Class Form1
             CType(设置.实例对象.解码方式, 解码模式))
         前后预取控制器 = New 前后预取控制器(播放列表数据, Function() 播放控制器.当前媒体路径)
         启动蓝牙延迟计时器()
+        启动播放进度计时器()
         显示器唤醒 = New 显示器唤醒请求()
         播放控制器.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
         播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
@@ -750,6 +754,31 @@ Public Class Form1
         End If
     End Sub
 
+    Private Sub 启动播放进度计时器()
+        停止播放进度计时器()
+        播放进度计时器 = New System.Windows.Forms.Timer With {.Interval = 15000}
+        AddHandler 播放进度计时器.Tick, AddressOf 播放进度计时器_Tick
+        播放进度计时器.Start()
+    End Sub
+
+    Private Sub 停止播放进度计时器()
+        If 播放进度计时器 IsNot Nothing Then
+            播放进度计时器.Stop()
+            RemoveHandler 播放进度计时器.Tick, AddressOf 播放进度计时器_Tick
+            播放进度计时器.Dispose()
+            播放进度计时器 = Nothing
+        End If
+    End Sub
+
+    Private Sub 播放进度计时器_Tick(sender As Object, e As EventArgs)
+        If 正在关闭 Then Return
+        Try
+            播放控制器?.保存当前播放进度()
+        Catch ex As Exception
+            Debug.WriteLine("播放进度：定时保存失败（已忽略）：" & ex.GetType().Name)
+        End Try
+    End Sub
+
     Private Sub 蓝牙延迟计时器_Tick(sender As Object, e As EventArgs)
         Try
             播放控制器?.应用蓝牙音频延迟()
@@ -827,6 +856,20 @@ Public Class Form1
         前后预取控制器?.释放()
         停止解锁轮询()
         停止蓝牙延迟计时器()
+        ' 播放进度：先抓当前会话最后一笔，再清理失效条目。两者失败都不影响退出，
+        ' 所以不弹窗、不阻断——进度文件只是可丢的运行数据。
+        停止播放进度计时器()
+        Try
+            If 设置.实例对象.播放进度记忆 Then
+                播放控制器?.保存当前播放进度(立即落盘:=True)
+                播放进度存储.退出时清理()
+            Else
+                ' 开关关闭：不再保留进度。退出即清空，避免关闭后仍留下含路径的 JSON。
+                播放进度存储.清空()
+            End If
+        Catch ex As Exception
+            Debug.WriteLine("播放进度：退出收尾失败（已忽略）：" & ex.GetType().Name)
+        End Try
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
@@ -1072,6 +1115,10 @@ Public Class Form1
         图片浏览控制器?.媒体已打开(e.媒体信息, e.快照)
         界面呈现器.设置图片模式(图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.图片模式已启用)
         界面呈现器.刷新()
+        If e.恢复进度 IsNot Nothing AndAlso e.恢复进度.Value > TimeSpan.FromSeconds(1) Then
+            信息图层呈现器?.显示操作信息(
+                "已从 " & 格式化播放进度(e.恢复进度.Value) & " 继续播放", &HFF69DF8BUI, "播放进度")
+        End If
         ' 内容尺寸模式：每次打开媒体重算一次；普通播放过程中不逐帧跟随，避免窗口抖动。
         Dim 内容尺寸 = 解析内容尺寸(e.快照, e.媒体信息)
         窗口布局控制器?.应用内容原始尺寸(内容尺寸, 播放控制器.当前视图旋转)
@@ -1094,6 +1141,18 @@ Public Class Form1
                 (当前索引 < 0 OrElse 流.索引 = 当前索引))
         If 视频流 Is Nothing OrElse 视频流.宽度 <= 0 OrElse 视频流.高度 <= 0 Then Return Size.Empty
         Return New Size(视频流.宽度, 视频流.高度)
+    End Function
+
+    ''' <summary>续播提示用：不足 1 小时显示 m:ss，超过显示 h:mm:ss。</summary>
+    Private Shared Function 格式化播放进度(位置 As TimeSpan) As String
+        Dim 总秒 = CLng(Math.Max(0.0R, 位置.TotalSeconds))
+        Dim 时 = 总秒 \ 3600L
+        Dim 分 = (总秒 Mod 3600L) \ 60L
+        Dim 秒 = 总秒 Mod 60L
+        If 时 > 0 Then
+            Return 时.ToString() & ":" & 分.ToString("00") & ":" & 秒.ToString("00")
+        End If
+        Return 分.ToString() & ":" & 秒.ToString("00")
     End Function
 
     Private Sub 播放控制器_媒体已打开_前后预取(sender As Object, e As 播放器媒体事件参数)
