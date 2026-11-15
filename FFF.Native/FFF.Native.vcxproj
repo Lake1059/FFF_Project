@@ -139,6 +139,7 @@
     <ClInclude Include="3FP\Core\AvifIlocShim.h" />
     <ClInclude Include="3FP\Core\AvifTileGridComposer.h" />
     <ClInclude Include="3FP\Core\GainMapProbe.h" />
+    <ClInclude Include="3FP\Core\GainMapJpeg.h" />
     <ClInclude Include="3FP\Core\PlacementPolicy.h" />
     <ClInclude Include="3FP\Core\PlaybackPerformancePolicy.h" />
     <ClInclude Include="3FP\Core\DecodeDeviceSelection.h" />
@@ -181,6 +182,10 @@
     <ClCompile Include="3FP\Core\AvifIlocShim.cpp" />
     <ClCompile Include="3FP\Core\AvifTileGridComposer.cpp" />
     <ClCompile Include="3FP\Core\GainMapProbe.cpp" />
+    <ClCompile Include="3FP\Core\GainMapJpeg.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PrecompiledHeaderFile />
+    </ClCompile>
     <ClCompile Include="3FP\Core\PlacementPolicy.cpp" />
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp" />
     <ClCompile Include="3FP\Hdr\HdrMetadataParse.cpp" />
