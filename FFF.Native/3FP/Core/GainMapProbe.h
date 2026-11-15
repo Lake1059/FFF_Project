@@ -66,8 +66,16 @@ struct GainMapProbeResult {
     float offsetHdr[3] = {0.f, 0.f, 0.f};
     float logBoostMin[3] = {0.f, 0.f, 0.f};
     float logBoostMax[3] = {0.f, 0.f, 0.f};
-    float headroom = 0.f;      // linear headroom (apple family)
     float gamma = 1.f;
+
+    // Headroom units (plan §2.3). All *Log2 fields are in log2 stops
+    // (linear multiplier = 2^x). There is intentionally no bare `headroom`:
+    // consumers must see the unit. headroomLinear is display-only.
+    double baseHdrHeadroomLog2 = 0.0;  // hB: base-side headroom (log2 stops)
+    double altHdrHeadroomLog2 = 0.0;   // hA: alternate/HDR-side headroom (log2 stops)
+    double headroomLinear = 0.0;       // display-only linear multiplier = 2^max(hB,hA)
+    double targetHeadroomLog2 = 0.0;   // player target (log2 stops), default 4.9
+    double applyWeight = 0.0;          // [0,1] interpolation weight actually applied
 
     // apply
     bool applyOk = false;
@@ -90,7 +98,15 @@ struct GainMapProbeResult {
 
 class GainMapProbe final {
 public:
+    // Player target headroom in log2 stops. 4.9 ≈ HDR10 reference viewing
+    // condition (≈1000-nit display vs ≈120-nit SDR: 2^4.9 ≈ 29.5×). Used to
+    // interpolate applyWeight between base (hB) and alternate (hA) headroom.
+    static constexpr double kDefaultTargetHeadroomLog2 = 4.9;
+
     // Probe `pathUtf8`. When `baseOnly` is true, decode the SDR base but skip
-    // the gain apply (used for A/B dumps). The result carries verdict.
-    static GainMapProbeResult Probe(const std::string& pathUtf8, bool baseOnly);
+    // the gain apply (used for A/B dumps). `targetHeadroomLog2` selects the
+    // player target headroom (log2 stops); defaults to kDefaultTargetHeadroomLog2.
+    // The result carries verdict.
+    static GainMapProbeResult Probe(const std::string& pathUtf8, bool baseOnly,
+                                    double targetHeadroomLog2 = kDefaultTargetHeadroomLog2);
 };

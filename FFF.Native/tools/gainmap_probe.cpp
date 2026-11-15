@@ -67,22 +67,26 @@ static void WritePfm(const std::string& path, const std::vector<float>& rgba, in
 
 int main(int argc, char** argv){
     if (argc < 2) {
-        fprintf(stderr, "usage: gainmap_probe <file> [--dump <dir>] [--base-only]\n");
+        fprintf(stderr, "usage: gainmap_probe <file> [--dump <dir>] [--base-only] [--target-headroom <stops>]\n");
         return 2;
     }
     std::string path = argv[1];
     std::string dumpDir;
     bool baseOnly = false;
+    // Player target headroom in log2 stops. 4.9 ≈ HDR10 reference viewing
+    // condition (≈1000-nit display vs ≈120-nit SDR base; 2^4.9 ≈ 29.5×).
+    double targetHeadroom = GainMapProbe::kDefaultTargetHeadroomLog2;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--base-only") baseOnly = true;
         else if (a == "--dump" && i+1 < argc) { dumpDir = argv[++i]; }
+        else if (a == "--target-headroom" && i+1 < argc) { targetHeadroom = atof(argv[++i]); }
     }
 
     // sha256 of file (Windows CNG)
     std::string sha = Sha256File(path);
 
-    GainMapProbeResult R = GainMapProbe::Probe(path, baseOnly);
+    GainMapProbeResult R = GainMapProbe::Probe(path, baseOnly, targetHeadroom);
 
     // dump
     if (!dumpDir.empty()) {
@@ -95,6 +99,9 @@ int main(int argc, char** argv){
         note << "decode " << R.decodeW << "x" << R.decodeH << " ch=" << R.decodeChannels << " codec=" << R.decodeCodec << "\n";
         note << "apply.ok=" << R.applyOk << " mode=" << R.applyMode << "\n";
         note << "stats p50=" << R.statsP50 << " maxLinear=" << R.statsMaxLinear << " over1Pct=" << R.statsOver1Pct << "\n";
+        note << "headroom: baseLog2=" << R.baseHdrHeadroomLog2 << " altLog2=" << R.altHdrHeadroomLog2
+             << " linear=" << R.headroomLinear << " targetLog2=" << R.targetHeadroomLog2
+             << " weight=" << R.applyWeight << "\n";
         note << "applied.pfm = linear RGB float after gain apply (top-down in file; PFM convention is bottom-up)\n";
         note << "base.pfm    = linear RGB float SDR base (after sRGB->linear), no gain\n";
     }
@@ -136,7 +143,12 @@ int main(int argc, char** argv){
       << ",\"offsetSdr\":[" << R.offsetSdr[0] << "," << R.offsetSdr[1] << "," << R.offsetSdr[2] << "]"
       << ",\"offsetHdr\":[" << R.offsetHdr[0] << "," << R.offsetHdr[1] << "," << R.offsetHdr[2] << "]"
       << ",\"logBoost\":[" << R.logBoostMin[0] << "," << R.logBoostMax[0] << "," << R.logBoostMin[1] << "," << R.logBoostMax[1] << "," << R.logBoostMin[2] << "," << R.logBoostMax[2] << "]"
-      << ",\"headroom\":" << R.headroom << ",\"gamma\":" << R.gamma << "}";
+      << ",\"baseHdrHeadroomLog2\":" << R.baseHdrHeadroomLog2
+      << ",\"altHdrHeadroomLog2\":" << R.altHdrHeadroomLog2
+      << ",\"headroomLinear\":" << R.headroomLinear
+      << ",\"targetHeadroomLog2\":" << R.targetHeadroomLog2
+      << ",\"applyWeight\":" << R.applyWeight
+      << ",\"gamma\":" << R.gamma << "}";
     j << ",\"apply\":{\"ok\":" << (R.applyOk ? "true" : "false")
       << ",\"mode\":\"" << JsonEscape(R.applyMode) << "\""
       << ",\"stats\":{\"p50\":" << R.statsP50 << ",\"maxLinear\":" << R.statsMaxLinear

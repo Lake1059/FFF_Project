@@ -20,6 +20,14 @@ extern "C" {
 #include <sstream>
 #include <vector>
 
+// Set to 1 once Impl-Jpeg lands the plan §3 JpegGainMapHit contract fields
+// (hasHdrCapacity / baseHdrHeadroomLog2 / altHdrHeadroomLog2 / headroomLog2 /
+// app2ReservedNonZero). Until then the JPEG path derives hB/hA from legacy
+// fields; the decision itself already goes through the shared DecideApplyWeight.
+#ifndef FP3_JPEG_CONTRACT
+#define FP3_JPEG_CONTRACT 0
+#endif
+
 namespace {
 
 // ── byte helpers ─────────────────────────────────────────────────────────────
@@ -431,82 +439,71 @@ bool FindIspe(const ParsedContainer& c, const std::vector<uint8_t>& d, int itemI
 // ── ISO 21496-1 GainMapMetadata ──────────────────────────────────────────────
 struct IsoMeta {
     int channels = 1;
-    uint8_t rawFlags = 0; // tmap gain-map flags byte: 0xc0=SDR base(apply), 0x80=HDR base
+    uint8_t rawFlags = 0; // tmap gain-map flags byte: 0x80=is_multichannel, 0x40=use_base_colour_space, 0x3F=reserved
     bool useBaseColorSpace = false;
-    float hdrCapacityMin = 0.f, hdrCapacityMax = 0.f;
+    // Headroom of the base (SDR/HDR) and alternate sides, in log2 stops.
+    // These are the ONLY basis for the HDR-base / apply-weight decision.
+    float baseHdrHeadroomLog2 = 0.f, altHdrHeadroomLog2 = 0.f;
     float gainMin[3] = {0,0,0}, gainMax[3] = {0,0,0};
     float gammaC[3] = {1,1,1};
     float offSdr[3] = {0,0,0}, offHdr[3] = {0,0,0};
 };
 
-bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consumed) {
-    consumed = 0;
+// Result of parsing the ISO 21496-1 metadata box.
+enum class IsoParse { Ok, Malformed, Unsupported };
+
+IsoParse ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consumed,
+                   std::string& err) {
+    consumed = 0; err.clear();
     long end = off + len, p = off;
-    if (p + 5 > end) return false;
+    if (p + 5 > end) { err = "tmap metadata too short"; return IsoParse::Malformed; }
     int minVersion = (Be16(d + p)); p += 2;
-    if (minVersion != 0) return false;
+    if (minVersion != 0) { err = "tmap minVersion != 0"; return IsoParse::Unsupported; }
     p += 2; // writer_version
     uint8_t flags = d[p++];
     m.rawFlags = flags;
-    bool commonDenom = (flags & 0x08) != 0;
-    // Derive channel count from payload length (don't guess from flags):
-    //   Non-commonDenom: 8 bytes hdrMin + 8 bytes hdrMax + channels * 40 bytes
-    //   commonDenom:     4 bytes denom + 4 bytes hdrMin + 4 bytes hdrMax + channels * 20 bytes
-    // After the 5-byte header (minVer+writerVer+flags), remaining bytes determine n.
-    // Tolerate trailing bytes: parse as many channels as fit, don't fail on remainder.
-    long remaining = end - p;
-    int channels = 0;
-    if (!commonDenom) {
-        if (remaining < 16) return false;
-        long chBytes = remaining - 16;
-        channels = (int)(chBytes / 40);
-        consumed = p - off + 16 + channels * 40;
-    } else {
-        if (remaining < 12) return false;
-        long chBytes = remaining - 12;
-        channels = (int)(chBytes / 20);
-        consumed = p - off + 12 + channels * 20;
+    m.useBaseColorSpace = (flags & 0x40) != 0;
+    // Plan §2.4.4: bits 0x3F are reserved. Only 0x80 (is_multichannel) and
+    // 0x40 (use_base_colour_space) are defined. Any reserved bit set ⇒ reject.
+    if (flags & 0x3F) {
+        char b[96]; sprintf(b, "tmap flags reserved bits set: 0x%02X (only 0x80/0x40 defined)", flags);
+        err = b; return IsoParse::Unsupported;
     }
-    if (channels < 1) return false;
+    // Always use the per-channel-denominator layout (40 bytes/channel):
+    //   16 bytes baseHdrHeadroom (num/den) + 16 bytes altHdrHeadroom (num/den)
+    //   + channels * (5 rationals * 8 bytes).
+    // The old shared-denominator layout was selected by reserved bit 0x08,
+    // which is now rejected above (dead branch removed, plan §2.4).
+    long remaining = end - p;
+    if (remaining < 16) { err = "tmap metadata shorter than hdrMin+hdrMax"; return IsoParse::Malformed; }
+    long chBytes = remaining - 16;
+    int channels = (int)(chBytes / 40);
+    consumed = p - off + 16 + (long)channels * 40;
+    if (channels < 1) { err = "tmap metadata has no channel block"; return IsoParse::Malformed; }
     if (channels > 3) channels = 3;  // cap at 3 channels
-    // Mono gainmap (1ch metadata): apply channel 0 to all channels (luma-only gainmap).
     m.channels = channels;
-    auto rd = [](int n, int dd) -> float { return dd == 0 ? 0.f : (float)((double)n / dd); };
-    if (commonDenom) {
-        int dn = (int)Be32(d + p); p += 4;
-        int bhn = (int)Be32(d + p); p += 4;
-        int ahn = (int)Be32(d + p); p += 4;
-        m.hdrCapacityMin = rd(bhn, dn);
-        m.hdrCapacityMax = rd(ahn, dn);
-        for (int c = 0; c < channels; c++) {
-            int mn = (int)Be32(d + p); p += 4;  // s32 numerator
-            int xn = (int)Be32(d + p); p += 4;  // s32 numerator
-            int gn = (int)Be32(d + p); p += 4;  // s32 numerator
-            int sn = (int)Be32(d + p); p += 4;
-            int tn = (int)Be32(d + p); p += 4;
-            m.gainMin[c] = rd(mn, dn);
-            m.gainMax[c] = rd(xn, dn);
-            float g = rd(gn, dn); m.gammaC[c] = g; // gamma<=0 checked after loop
-            m.offSdr[c] = rd(sn, dn);
-            m.offHdr[c] = rd(tn, dn);
+
+    // Read a signed 32-bit numerator / unsigned 32-bit denominator rational.
+    // Denominator must be > 0 (plan §2.4.3): zero/negative ⇒ malformed.
+    auto readRat = [&](float& out, const char* what, int ch) -> bool {
+        int num = (int)Be32(d + p);
+        uint32_t den = Be32(d + p + 4);
+        p += 8;
+        if (den == 0) {
+            char b[128]; sprintf(b, "tmap %s[ch%d] denominator == 0", what, ch);
+            err = b; return false;
         }
-    } else {
-        int bhn = (int)Be32(d + p), bhd = (int)Be32(d + p + 4); p += 8;
-        int ahn = (int)Be32(d + p), ahd = (int)Be32(d + p + 4); p += 8;
-        m.hdrCapacityMax = rd(ahn, ahd);
-        m.hdrCapacityMin = rd(bhn, bhd);
-        for (int c = 0; c < channels; c++) {
-            int mn = (int)Be32(d + p), md = (int)Be32(d + p + 4); p += 8;  // s32 num / u32 denom
-            int xn = (int)Be32(d + p), xd = (int)Be32(d + p + 4); p += 8;
-            int gn = (int)Be32(d + p), gd = (int)Be32(d + p + 4); p += 8;
-            int sn = (int)Be32(d + p), sd = (int)Be32(d + p + 4); p += 8;
-            int tn = (int)Be32(d + p), td = (int)Be32(d + p + 4); p += 8;
-            m.gainMin[c] = rd(mn, md);
-            m.gainMax[c] = rd(xn, xd);
-            float g = rd(gn, gd); m.gammaC[c] = g; // gamma<=0 checked after loop
-            m.offSdr[c] = rd(sn, sd);
-            m.offHdr[c] = rd(tn, td);
-        }
+        out = (float)((double)num / (double)den);
+        return true;
+    };
+    if (!readRat(m.baseHdrHeadroomLog2, "baseHdrHeadroom", 0)) return IsoParse::Malformed;
+    if (!readRat(m.altHdrHeadroomLog2, "altHdrHeadroom", 0)) return IsoParse::Malformed;
+    for (int c = 0; c < channels; c++) {
+        if (!readRat(m.gainMin[c], "gainMin", c)) return IsoParse::Malformed;
+        if (!readRat(m.gainMax[c], "gainMax", c)) return IsoParse::Malformed;
+        if (!readRat(m.gammaC[c], "gamma", c)) return IsoParse::Malformed;
+        if (!readRat(m.offSdr[c], "offSdr", c)) return IsoParse::Malformed;
+        if (!readRat(m.offHdr[c], "offHdr", c)) return IsoParse::Malformed;
     }
     if (channels == 1) {
         // Mono gainmap: channel 0 parameters applied to all RGB channels.
@@ -515,9 +512,19 @@ bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consu
             m.gammaC[c] = m.gammaC[0]; m.offSdr[c] = m.offSdr[0]; m.offHdr[c] = m.offHdr[0];
         }
     }
-    for (int c = 0; c < 3; c++) if (m.gammaC[c] <= 0) return false; // gamma=0 invalid metadata
+    // Plan §2.4.1/2: per-channel gainMin <= gainMax and gamma > 0.
+    for (int c = 0; c < 3; c++) {
+        if (m.gainMin[c] > m.gainMax[c]) {
+            char b[128]; sprintf(b, "tmap gainMin[ch%d]=%.6g > gainMax[ch%d]=%.6g", c, m.gainMin[c], c, m.gainMax[c]);
+            err = b; return IsoParse::Malformed;
+        }
+        if (!(m.gammaC[c] > 0.f)) {
+            char b[96]; sprintf(b, "tmap gamma[ch%d]=%.6g must be > 0", c, m.gammaC[c]);
+            err = b; return IsoParse::Malformed;
+        }
+    }
     consumed = p - off;
-    return true;
+    return IsoParse::Ok;
 }
 
 // ── Apple MakerNote tag33/48 ─────────────────────────────────────────────────
@@ -820,15 +827,63 @@ float Luma(float r, float g, float b) { return 0.2126f*r + 0.7152f*g + 0.0722f*b
 struct GainApplyParams {
     bool isAppleFamily = false;      // Apple 0-base formula
     bool isVendor128 = false;        // 128-base (uses ISO math with min=-h,max=+h)
-    float headroomLinear = 1.f;      // for apple 0-base
+    float headroomLinear = 1.f;      // for apple 0-base (display multiplier)
+    float headroomLog2 = 0.f;        // apple alternate-side headroom (log2 stops)
     IsoMeta iso;                     // for iso / vendor128
 };
 
-float ApplyChannelIso(float gainNorm, int c, float baseLinear, const IsoMeta& m) {
+// Plan §2.1 — single entry point for the HDR-base / apply-weight decision.
+// Both the ISO-BMFF (tmap/HEIC/AVIF) path and the JPEG/WebP APP2 path call
+// THIS function; the verdict never depends on flags bytes.
+//   hB = base-side headroom (log2 stops), hA = alternate-side headroom (log2 stops).
+//   target = player target headroom (log2 stops).
+// Returns true  -> caller should apply; *weight is set in [0,1].
+// Returns false -> base is already HDR (hB > hA); *weight=0, *reason filled and
+//                  caller must display base as-is (verdict decoded_not_applied).
+// On hA == hB the weight is forced to 1.0 and a note is appended.
+bool DecideApplyWeight(double hB, double hA, double target,
+                       double& weight, std::string& reason,
+                       std::vector<std::string>* notes) {
+    if (hB > hA) {
+        weight = 0.0;
+        char b[160];
+        sprintf(b, "base HDR (baseHdrHeadroomLog2=%.6g > altHdrHeadroomLog2=%.6g); base displayed as-is, gain not applied",
+                hB, hA);
+        reason = b;
+        return false;
+    }
+    if (hA == hB) {
+        weight = 1.0;
+        if (notes) notes->push_back("altHdrHeadroomLog2 == baseHdrHeadroomLog2; applyWeight forced to 1.0");
+    } else {
+        double w = (target - hB) / (hA - hB);
+        if (w < 0.0) w = 0.0;
+        if (w > 1.0) w = 1.0;
+        weight = w;
+    }
+    return true;
+}
+
+// Plan §2.2 — weighted ISO-family apply (single/three channel, incl. vendor128).
+//   g        = gainNormalized^(1/gamma)          (gamma>0 already validated)
+//   log2Gain = gainMin[c] + (gainMax[c]-gainMin[c])*g   (log2 stops, signed)
+//   mult     = pow2(weight * log2Gain)
+//   out      = (base + weight*offSdr[c])*mult - weight*offHdr[c], clamped >= 0
+// weight==0 ⇒ identity (returns base). gainMax is NEVER used as a raw multiplier.
+float ApplyChannelIso(float gainNorm, int c, float baseLinear, const IsoMeta& m, float weight) {
+    if (weight <= 0.f) return baseLinear;
     float gamma = m.gammaC[c];
     float g = (gamma != 1.f && gamma > 0.f) ? powf(gainNorm, 1.f / gamma) : gainNorm;
-    float logBoost = m.gainMin[c] * (1.f - g) + m.gainMax[c] * g;
-    return (baseLinear + m.offSdr[c]) * powf(2.f, logBoost) - m.offHdr[c];
+    float log2Gain = m.gainMin[c] * (1.f - g) + m.gainMax[c] * g;
+    // Physical headroom cap: the gain map must not push a channel beyond the
+    // declared alternate-side headroom. A malformed/inconsistent box can carry a
+    // gainMax far larger than altHdrHeadroomLog2 (e.g. gainMax=11 vs hA=1.3);
+    // trust the headroom endpoint, not the per-channel range, for the ceiling.
+    if (log2Gain > m.altHdrHeadroomLog2) log2Gain = m.altHdrHeadroomLog2;
+    float mult = powf(2.f, weight * log2Gain);
+    float out = (baseLinear + weight * m.offSdr[c]) * mult - weight * m.offHdr[c];
+    if (out < 0.f) out = 0.f;
+    return out;
 }
 
 bool HasDistinctChannels(const std::vector<float>& gm, int px) {
@@ -859,9 +914,11 @@ float P05Percentile(const std::vector<float>& gm, int px) {
 
 } // namespace
 
-GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnly) {
+GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnly,
+                                       double targetHeadroomLog2) {
     GainMapProbeResult R;
     R.verdict = "not_gainmap";
+    R.targetHeadroomLog2 = targetHeadroomLog2;
     // read file
     FILE* f = fopen(pathUtf8.c_str(), "rb");
     if (!f) { R.verdict = "fail_closed_malformed"; R.reason = "cannot open file"; return R; }
@@ -878,14 +935,24 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         fp3::JpegGainMapHit jh;
         ProbeJpegGainMap(std::wstring(pathUtf8.begin(), pathUtf8.end()), jh);
         if (!jh.found) {
-            // Route by reason prefix: bare gain layer → unsupported, plain SDR → not_gainmap
+            // Route by reason prefix (JPEG side emits these):
+            //   BARE_GAINMAP_LAYER_NO_BASE:      -> unsupported (no reconstructable base)
+            //   MALFORMED_GAINMAP:               -> malformed (e.g. min>max in APP2/XMP)
+            //   APPLE_V1_NO_MAKERNOTE:           -> unsupported (cannot derive headroom)
+            //   APPLE_V2/V3_NO_XMP_HEADROOM:     -> unsupported (no headroom metadata)
+            //   otherwise                        -> not_gainmap (plain SDR / unrelated)
             if (jh.reason.rfind("BARE_GAINMAP_LAYER_NO_BASE:", 0) == 0) {
                 R.verdict = "fail_closed_unsupported";
-                R.reason = jh.reason;
+            } else if (jh.reason.rfind("MALFORMED_GAINMAP:", 0) == 0) {
+                R.verdict = "fail_closed_malformed";
+            } else if (jh.reason.rfind("APPLE_V1_NO_MAKERNOTE:", 0) == 0) {
+                R.verdict = "fail_closed_unsupported";
+            } else if (jh.reason.rfind("APPLE_V2/V3_NO_XMP_HEADROOM:", 0) == 0) {
+                R.verdict = "fail_closed_unsupported";
             } else {
                 R.verdict = "not_gainmap";
-                R.reason = jh.reason.empty() ? "no gainmap" : jh.reason;
             }
+            R.reason = jh.reason.empty() ? "no gainmap" : jh.reason;
             return R;
         }
         R.present = true;
@@ -906,22 +973,41 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         }
         R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
         R.decodeCodec = "mjpeg";
-        R.baseRgba = baseRgba; R.outW = baseW; R.outH = baseH;
-        // HDR base check: from APP2 flags (bit6=0x40 = useBaseColorSpace)
-        // If flags present and 0x40 NOT set → HDR base → decoded_not_applied
-        // If flags present and 0x40 IS set → SDR base → applied
-        // If flags not present → trust module's found=true (it already validated the container)
-        if (jh.metaSource == "app2" && jh.hasApp2Flags && !(jh.app2Flags & 0x40)) {
-            R.verdict = "decoded_not_applied"; R.applyOk = false;
-            R.reason = "hdr base displayed as-is; gain map not applied (APP2 flags 0x80)"; return R;
-        } else if (baseTrc == 16 || baseTrc == 18) {
-            R.verdict = "decoded_not_applied"; R.applyOk = false;
-            R.reason = "hdr base displayed as-is; gain map not applied"; return R;
-        }
-        // Set metadata
+        R.decodeChannels = 1; // JPEG gainmaps are 1-channel
+
+        // ── Headroom decision (plan §2.1/§3): hB/hA drive the verdict ──
+        // We call the SAME DecideApplyWeight as the tmap/HEIC path. The §3
+        // contract fields are owned by Impl-Jpeg in GainMapJpeg.h.
         bool isApple = (jh.family == "apple");
+        if (jh.app2ReservedNonZero) {
+            R.verdict = "fail_closed_unsupported";
+            R.reason = "jpeg app2 reserved flags (0x3F) non-zero";
+            return R;
+        }
+        float jB, jA, jhHrLog2;
         if (isApple) {
-            R.headroom = powf(2.f, jh.headroom);
+            // Apple v1/v2/v3: SDR base, alternate headroom = headroomLog2.
+            jB = 0.f; jA = jh.headroomLog2; jhHrLog2 = jh.headroomLog2;
+            if (!(jA > 0.f)) {
+                R.verdict = "fail_closed_unsupported";
+                R.reason = "jpeg apple gainmap without credible headroom (headroomLog2<=0)";
+                return R;
+            }
+        } else {
+            // ISO / Ultra HDR JPEG: hB/hA must come from HDRCapacity (APP2/XMP).
+            if (!jh.hasHdrCapacity) {
+                R.verdict = "fail_closed_unsupported";
+                R.reason = "jpeg gainmap located but no HDRCapacity headroom declared";
+                return R;
+            }
+            jB = jh.baseHdrHeadroomLog2;
+            jA = jh.altHdrHeadroomLog2;
+            jhHrLog2 = 0.f;
+        }
+        R.baseHdrHeadroomLog2 = jB;
+        R.altHdrHeadroomLog2 = jA;
+        // echo per-channel params into the result
+        if (isApple) {
             R.gamma = 1.f;
         } else {
             for (int c = 0; c < 3; c++) {
@@ -930,20 +1016,68 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                 R.offsetSdr[c] = jh.offsetSdr[c];
                 R.offsetHdr[c] = jh.offsetHdr[c];
             }
-            R.headroom = jh.headroom > 0 ? powf(2.f, jh.headroom) : 1.f;
             R.gamma = jh.gamma;
         }
-        R.decodeChannels = 1; // JPEG gainmaps are 1-channel
-        // sRGB-linearize base
+        R.headroomLinear = pow(2.0, (double)fmaxf(jB, jA));
+
+        // sRGB-linearize the base once (used for both display and apply).
+        std::vector<float> lin = baseRgba;
         {
             long px = (long)baseW * baseH * 4;
             for (long i = 0; i < px; i += 4) {
-                baseRgba[i] = SrgbToLinear(baseRgba[i]);
-                baseRgba[i+1] = SrgbToLinear(baseRgba[i+1]);
-                baseRgba[i+2] = SrgbToLinear(baseRgba[i+2]);
+                lin[i]   = SrgbToLinear(lin[i]);
+                lin[i+1] = SrgbToLinear(lin[i+1]);
+                lin[i+2] = SrgbToLinear(lin[i+2]);
             }
         }
-        // Apply gainmap pixels
+
+        std::string decideReason;
+        double jw = 0.0;
+        bool apply = DecideApplyWeight(jB, jA, targetHeadroomLog2, jw, decideReason, &R.notes);
+        R.applyWeight = jw;
+        R.baseRgba = lin; R.outW = baseW; R.outH = baseH;
+
+        auto statsOn = [&](const std::vector<float>& px) {
+            int n = baseW * baseH;
+            double maxLin = 0; long over1 = 0;
+            std::vector<float> lum;
+            for (int i = 0; i < n; i++) {
+                float l = Luma(px[i*4], px[i*4+1], px[i*4+2]);
+                lum.push_back(l);
+                if (l > maxLin) maxLin = l;
+                if (l > 1.0) over1++;
+            }
+            std::sort(lum.begin(), lum.end());
+            R.statsP50 = n > 0 ? lum[n/2] : 0;
+            R.statsMaxLinear = maxLin;
+            R.statsOver1Pct = n > 0 ? (double)over1 * 100.0 / (double)n : 0;
+        };
+
+        if (!apply) {
+            // Base is already HDR: display base as-is, no gain applied.
+            R.appliedRgba = lin;
+            R.applyOk = false; R.applyMode = "none";
+            R.verdict = "decoded_not_applied";
+            R.reason = decideReason;
+            statsOn(lin);
+            return R;
+        }
+
+        // Build an IsoMeta for the ISO-family weighted apply (dedup math).
+        IsoMeta jm;
+        jm.baseHdrHeadroomLog2 = jB;
+        jm.altHdrHeadroomLog2 = jA;
+        if (!isApple) {
+            for (int c = 0; c < 3; c++) {
+                jm.gainMin[c] = jh.logBoost[c*2];
+                jm.gainMax[c] = jh.logBoost[c*2+1];
+                jm.gammaC[c] = jh.gamma;
+                jm.offSdr[c] = jh.offsetSdr[c];
+                jm.offHdr[c] = jh.offsetHdr[c];
+            }
+        }
+        float fw = (float)jw;
+        // Apply gainmap pixels (weighted, plan §2.2)
         std::vector<float> out((long)baseW * baseH * 4, 0.f);
         for (int y = 0; y < baseH; y++) {
             float gy = (baseH <= 1) ? 0.f : (float)y * (float)(gmH - 1) / (float)(baseH - 1);
@@ -961,18 +1095,16 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                          + Luma(gmRgba[e], gmRgba[e+1], gmRgba[e+2]) * fx*fy;
                 long o = ((long)y*baseW + x)*4;
                 if (isApple) {
+                    // Apple 0-base: out = base * (1 + (2^(w*headroomLog2)-1) * gApple)
                     float gl = Rec709Inverse(gv);
-                    float scale = 1.f + (powf(2.f, jh.headroom) - 1.f) * gl;
-                    out[o] = baseRgba[o] * scale;
-                    out[o+1] = baseRgba[o+1] * scale;
-                    out[o+2] = baseRgba[o+2] * scale;
+                    float linMult = powf(2.f, fw * jhHrLog2);
+                    float scale = 1.f + (linMult - 1.f) * gl;
+                    out[o]   = lin[o]   * scale;
+                    out[o+1] = lin[o+1] * scale;
+                    out[o+2] = lin[o+2] * scale;
                 } else {
-                    // ISO family: ApplyChannelIso with jh.logBoost/gamma
-                    for (int ch = 0; ch < 3; ch++) {
-                        float t = powf(gv, 1.f / jh.gamma);
-                        float lb = jh.logBoost[ch*2] * (1-t) + jh.logBoost[ch*2+1] * t;
-                        out[o+ch] = (baseRgba[o+ch] + jh.offsetSdr[ch]) * powf(2.f, lb) - jh.offsetHdr[ch];
-                    }
+                    for (int ch = 0; ch < 3; ch++)
+                        out[o+ch] = ApplyChannelIso(gv, ch, lin[o+ch], jm, fw);
                 }
                 out[o+3] = 1.f;
             }
@@ -980,22 +1112,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         R.appliedRgba = out;
         R.applyOk = true; R.applyMode = "jpeg";
         R.verdict = "applied";
-        // stats
-        {
-            int n = baseW * baseH;
-            double maxLin = 0; long over1 = 0;
-            std::vector<float> lum;
-            for (int i = 0; i < n; i++) {
-                float l = Luma(out[i*4], out[i*4+1], out[i*4+2]);
-                lum.push_back(l);
-                if (l > maxLin) maxLin = l;
-                if (l > 1.0) over1++;
-            }
-            std::sort(lum.begin(), lum.end());
-            R.statsP50 = n > 0 ? lum[n/2] : 0;
-            R.statsMaxLinear = (double)maxLin;
-            R.statsOver1Pct = n > 0 ? (double)over1 * 100.0 / (double)n : 0;
-        }
+        statsOn(out);
         return R;
     }
     // JPEG XL container: first box type "JXL ". Only flag as gainmap if jhgm box present.
@@ -1683,42 +1800,37 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     bool metaOk = false;
     // 1) tmap payload ISO 21496
     if (!tmapPayload.empty() && tmapPayload.size() >= 2 && tmapPayload[0] == 0) {
-        long consumed; IsoMeta m;
+        long consumed; IsoMeta m; std::string perr;
         { char dbg[200]; std::string hx; for(int i=0;i<(int)tmapPayload.size()&&i<64;i++){char h[4];sprintf(h,"%02x ",tmapPayload[i]);hx+=h;} R.notes.push_back("tmapPayload(" + std::to_string(tmapPayload.size()) + "): "+hx); }
-        if (ParseIso21496(tmapPayload.data(), 1, (long)tmapPayload.size() - 1, m, consumed)) {
-            { char dbg[160]; sprintf(dbg, "tmap parsed ok: size=%ld consumed=%ld hdrMin=%.4f hdrMax=%.4f gainMin0=%.4f gainMax0=%.4f gamma0=%.4f ch=%d",
-                (long)tmapPayload.size(), consumed, m.hdrCapacityMin, m.hdrCapacityMax, m.gainMin[0], m.gainMax[0], m.gammaC[0], m.channels);
-              R.notes.push_back(dbg); }
-            // Verify payload length matches canonical v0 layout (detect writer with extra bytes)
-            {
-                // consumed = total bytes parsed by ParseIso21496 (from off=1)
-                // tmapPayload[0] = version byte, so total used = consumed + 1
-                long used = consumed + 1;
-                long trailing = (long)tmapPayload.size() - used;
-                if (trailing > 0) {
-                    R.verdict = "fail_closed_unsupported";
-                    R.reason = "tmap: " + std::to_string(trailing) + " trailing bytes beyond v0 layout";
-                    R.decodeOk = false; R.applyOk = false;
-                    return R;
-                }
-            }
-            // gamma must be > 0
-            if (m.gammaC[0] <= 0.f) {
-                R.verdict = "fail_closed_malformed";
-                R.reason = "tmap: gamma=" + std::to_string(m.gammaC[0]) + " (must be > 0)";
+        IsoParse pr = ParseIso21496(tmapPayload.data(), 1, (long)tmapPayload.size() - 1, m, consumed, perr);
+        if (pr != IsoParse::Ok) {
+            R.verdict = (pr == IsoParse::Unsupported) ? "fail_closed_unsupported" : "fail_closed_malformed";
+            R.reason = "tmap: " + perr;
+            R.decodeOk = false; R.applyOk = false;
+            return R;
+        }
+        { char dbg[200]; sprintf(dbg, "tmap parsed ok: size=%ld consumed=%ld baseHdrLog2=%.4f altHdrLog2=%.4f gainMin0=%.4f gainMax0=%.4f gamma0=%.4f ch=%d flags=0x%02X",
+            (long)tmapPayload.size(), consumed, m.baseHdrHeadroomLog2, m.altHdrHeadroomLog2, m.gainMin[0], m.gainMax[0], m.gammaC[0], m.channels, m.rawFlags);
+          R.notes.push_back(dbg); }
+        // Verify payload length matches canonical v0 layout (detect writer with extra bytes)
+        {
+            long used = consumed + 1;  // +1 for the version byte at tmapPayload[0]
+            long trailing = (long)tmapPayload.size() - used;
+            if (trailing > 0) {
+                R.verdict = "fail_closed_unsupported";
+                R.reason = "tmap: " + std::to_string(trailing) + " trailing bytes beyond v0 layout";
                 R.decodeOk = false; R.applyOk = false;
                 return R;
             }
-            ap.iso = m; ap.isAppleFamily = false;
-            R.metaFamily = "iso"; R.metaSource = "tmap";
-            for (int c = 0; c < 3; c++) {
-                R.offsetSdr[c] = m.offSdr[c]; R.offsetHdr[c] = m.offHdr[c];
-                R.logBoostMin[c] = m.gainMin[c]; R.logBoostMax[c] = m.gainMax[c];
-            }
-            R.gamma = m.gammaC[0];
-            R.headroom = powf(2.f, m.hdrCapacityMax);
-            metaOk = true;
         }
+        ap.iso = m; ap.isAppleFamily = false;
+        R.metaFamily = "iso"; R.metaSource = "tmap";
+        for (int c = 0; c < 3; c++) {
+            R.offsetSdr[c] = m.offSdr[c]; R.offsetHdr[c] = m.offHdr[c];
+            R.logBoostMin[c] = m.gainMin[c]; R.logBoostMax[c] = m.gainMax[c];
+        }
+        R.gamma = m.gammaC[0];
+        metaOk = true;
     }
     // 2) Apple MakerNote tag33/48
     if (!metaOk && !exifData.empty()) {
@@ -1737,11 +1849,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                     ap.isVendor128 = true; ap.isAppleFamily = false;
                     R.metaFamily = "vendor128";
                 } else {
-                    ap.isAppleFamily = true; ap.headroomLinear = headroomLin;
+                    ap.isAppleFamily = true; ap.headroomLinear = headroomLin; ap.headroomLog2 = hrLog2;
                     R.metaFamily = "apple";
                 }
                 R.metaSource = "makenote";
-                R.headroom = headroomLin;
                 R.gamma = 1.f;
                 metaOk = true;
             } else {
@@ -1763,11 +1874,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                 ap.isVendor128 = true; ap.isAppleFamily = false;
                 R.metaFamily = "vendor128";
             } else {
-                ap.isAppleFamily = true; ap.headroomLinear = powf(2.f, hr);
+                ap.isAppleFamily = true; ap.headroomLinear = powf(2.f, hr); ap.headroomLog2 = hr;
                 R.metaFamily = "apple";
             }
             R.metaSource = "xmp";
-            R.headroom = powf(2.f, hr);
             R.gamma = 1.f;
             metaOk = true;
         }
@@ -1781,14 +1891,54 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         R.metaFamily = "none"; R.metaSource = "default";
         return R;
     }
-    // HDR base: tmap flags bit 0x40 clear AND bit 0x80 set (0x80=HDR base, 0xc0=SDR base).
-    // Only apply this check when 0x80 bit is present (validated tmap format);
-    // flags=0x00 means unrecognized format, don't assume HDR base.
-    if (metaOk && R.metaSource == "tmap" && (ap.iso.rawFlags & 0x80) && !(ap.iso.rawFlags & 0x40)) {
+
+    // ── Plan §2.1: the ONLY HDR-base / weight decision, shared with JPEG path.
+    // hB/hA in log2 stops. tmap carries them explicitly; apple/vendor128 are
+    // SDR-base (hB=0) with alternate headroom = headroomLog2.
+    double hB, hA;
+    if (R.metaSource == "tmap") {
+        hB = ap.iso.baseHdrHeadroomLog2;
+        hA = ap.iso.altHdrHeadroomLog2;
+    } else {
+        hB = 0.0;
+        hA = (double)ap.headroomLog2;
+    }
+    R.baseHdrHeadroomLog2 = hB;
+    R.altHdrHeadroomLog2 = hA;
+    R.headroomLinear = pow(2.0, (hB > hA ? hB : hA));
+    std::string decideReason;
+    double w = 0.0;
+    bool apply = DecideApplyWeight(hB, hA, targetHeadroomLog2, w, decideReason, &R.notes);
+    R.applyWeight = w;
+    if (!apply) {
+        // Base is already HDR: display base as-is, no gain applied.
+        for (size_t i = 0; i < baseRgba.size(); i += 4) {
+            baseRgba[i]   = SrgbToLinear(baseRgba[i]);
+            baseRgba[i+1] = SrgbToLinear(baseRgba[i+1]);
+            baseRgba[i+2] = SrgbToLinear(baseRgba[i+2]);
+        }
         R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
-        R.verdict = "decoded_not_applied";
+        R.appliedRgba = baseRgba; R.baseRgba = baseRgba;
+        R.outW = baseW; R.outH = baseH;
         R.applyOk = false; R.applyMode = "none";
-        R.reason = "hdr base displayed as-is; gain map not applied (tmap flags 0x80)";
+        R.verdict = "decoded_not_applied";
+        R.reason = decideReason;
+        {
+            int n = baseW * baseH;
+            std::vector<float> lum; lum.reserve(n);
+            double maxLin = 0; long over1 = 0;
+            for (int i = 0; i < n; i++) {
+                long o = (long)i*4;
+                float l = Luma(baseRgba[o], baseRgba[o+1], baseRgba[o+2]);
+                lum.push_back(l);
+                if (l > maxLin) maxLin = l;
+                if (l > 1.0) over1++;
+            }
+            std::sort(lum.begin(), lum.end());
+            R.statsP50 = lum.empty() ? 0.0 : (double)lum[n/2];
+            R.statsMaxLinear = maxLin;
+            R.statsOver1Pct = n > 0 ? (double)over1 * 100.0 / n : 0.0;
+        }
         return R;
     }
 
@@ -1834,9 +1984,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         float m = fmaxf(baseRgba[i], fmaxf(baseRgba[i+1], baseRgba[i+2]));
         if (m > baseMax) baseMax = m;
     }
-    { char dbg[128]; sprintf(dbg, "apply: headroom=%.4f baseMaxLin=%.4f gainMax=%.4f gainMin=%.4f gamma=%.4f channels=%d",
-        R.headroom, baseMax, ap.iso.gainMax[0], ap.iso.gainMin[0], ap.iso.gammaC[0], ap.iso.channels);
+    { char dbg[160]; sprintf(dbg, "apply: w=%.4f hB=%.4f hA=%.4f headroomLin=%.4f baseMaxLin=%.4f gainMax=%.4f gainMin=%.4f gamma=%.4f channels=%d",
+        w, hB, hA, R.headroomLinear, baseMax, ap.iso.gainMax[0], ap.iso.gainMin[0], ap.iso.gammaC[0], ap.iso.channels);
       R.notes.push_back(dbg); }
+    float fw = (float)w;
     std::vector<float> out((size_t)baseW * baseH * 4, 0.f);
 
     for (int y = 0; y < baseH; y++) for (int x = 0; x < baseW; x++) {
@@ -1867,17 +2018,19 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         if (ap.isAppleFamily) {
             float gv = sampleGray();
             float gl = Rec709Inverse(gv);
-            float scale = 1.f + (ap.headroomLinear - 1.f) * gl;
+            // Plan §2.2: out = base * (1 + (2^(w*headroomLog2)-1) * gApple)
+            float linMult = powf(2.f, fw * ap.headroomLog2);
+            float scale = 1.f + (linMult - 1.f) * gl;
             out[o] = baseRgba[o] * scale;
             out[o+1] = baseRgba[o+1] * scale;
             out[o+2] = baseRgba[o+2] * scale;
         } else {
-            // ISO family (incl. vendor128)
+            // ISO family (incl. vendor128) — weight applied inside ApplyChannelIso
             if (R.decodeChannels <= 1) {
                 float gv = sampleGray();
-                for (int ch = 0; ch < 3; ch++) out[o+ch] = ApplyChannelIso(gv, ch, baseRgba[o+ch], ap.iso);
+                for (int ch = 0; ch < 3; ch++) out[o+ch] = ApplyChannelIso(gv, ch, baseRgba[o+ch], ap.iso, fw);
             } else {
-                for (int ch = 0; ch < 3; ch++) out[o+ch] = ApplyChannelIso(sampleCh(ch), ch, baseRgba[o+ch], ap.iso);
+                for (int ch = 0; ch < 3; ch++) { out[o+ch] = ApplyChannelIso(sampleCh(ch), ch, baseRgba[o+ch], ap.iso, fw); }
             }
         }
         out[o+3] = 1.f;
