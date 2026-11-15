@@ -900,7 +900,8 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             R.reason = "hdr base displayed as-is; gain map not applied"; return R;
         }
         // Set metadata
-        if (jh.family == "apple") {
+        bool isApple = (jh.family == "apple");
+        if (isApple) {
             R.headroom = powf(2.f, jh.headroom);
             R.gamma = 1.f;
         } else {
@@ -913,8 +914,69 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             R.headroom = jh.headroom > 0 ? powf(2.f, jh.headroom) : 1.f;
             R.gamma = jh.gamma;
         }
+        R.decodeChannels = 1; // JPEG gainmaps are 1-channel
+        // sRGB-linearize base
+        {
+            long px = (long)baseW * baseH * 4;
+            for (long i = 0; i < px; i += 4) {
+                baseRgba[i] = SrgbToLinear(baseRgba[i]);
+                baseRgba[i+1] = SrgbToLinear(baseRgba[i+1]);
+                baseRgba[i+2] = SrgbToLinear(baseRgba[i+2]);
+            }
+        }
+        // Apply gainmap pixels
+        std::vector<float> out((long)baseW * baseH * 4, 0.f);
+        for (int y = 0; y < baseH; y++) {
+            float gy = (baseH <= 1) ? 0.f : (float)y * (float)(gmH - 1) / (float)(baseH - 1);
+            int y0 = (int)gy, y1 = std::min(y0 + 1, gmH - 1);
+            float fy = gy - y0;
+            for (int x = 0; x < baseW; x++) {
+                float gx = (baseW <= 1) ? 0.f : (float)x * (float)(gmW - 1) / (float)(baseW - 1);
+                int x0 = (int)gx, x1 = std::min(x0 + 1, gmW - 1);
+                float fx = gx - x0;
+                long a = ((long)y0*gmW + x0)*4, b = ((long)y0*gmW + x1)*4;
+                long c = ((long)y1*gmW + x0)*4, e = ((long)y1*gmW + x1)*4;
+                float gv = Luma(gmRgba[a], gmRgba[a+1], gmRgba[a+2]) * (1-fx)*(1-fy)
+                         + Luma(gmRgba[b], gmRgba[b+1], gmRgba[b+2]) * fx*(1-fy)
+                         + Luma(gmRgba[c], gmRgba[c+1], gmRgba[c+2]) * (1-fx)*fy
+                         + Luma(gmRgba[e], gmRgba[e+1], gmRgba[e+2]) * fx*fy;
+                long o = ((long)y*baseW + x)*4;
+                if (isApple) {
+                    float gl = Rec709Inverse(gv);
+                    float scale = 1.f + (powf(2.f, jh.headroom) - 1.f) * gl;
+                    out[o] = baseRgba[o] * scale;
+                    out[o+1] = baseRgba[o+1] * scale;
+                    out[o+2] = baseRgba[o+2] * scale;
+                } else {
+                    // ISO family: ApplyChannelIso with jh.logBoost/gamma
+                    for (int ch = 0; ch < 3; ch++) {
+                        float t = powf(gv, 1.f / jh.gamma);
+                        float lb = jh.logBoost[ch*2] * (1-t) + jh.logBoost[ch*2+1] * t;
+                        out[o+ch] = (baseRgba[o+ch] + jh.offsetSdr[ch]) * powf(2.f, lb) - jh.offsetHdr[ch];
+                    }
+                }
+                out[o+3] = 1.f;
+            }
+        }
+        R.appliedRgba = out;
         R.applyOk = true; R.applyMode = "jpeg";
         R.verdict = "applied";
+        // stats
+        {
+            int n = baseW * baseH;
+            double maxLin = 0; long over1 = 0;
+            std::vector<float> lum;
+            for (int i = 0; i < n; i++) {
+                float l = Luma(out[i*4], out[i*4+1], out[i*4+2]);
+                lum.push_back(l);
+                if (l > maxLin) maxLin = l;
+                if (l > 1.0) over1++;
+            }
+            std::sort(lum.begin(), lum.end());
+            R.applyStats.p50 = n > 0 ? lum[n/2] : 0;
+            R.applyStats.maxLinear = (float)maxLin;
+            R.applyStats.over1Pct = n > 0 ? (float)over1 * 100.f / (float)n : 0;
+        }
         return R;
     }
     // JPEG XL container: first box type "JXL ". Only flag as gainmap if jhgm box present.
