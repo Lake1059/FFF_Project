@@ -128,11 +128,74 @@ std::pair<int, int> ClampOutputSide(int width, int height, int maxSide) noexcept
     return {w, h};
 }
 
+// Hard safety caps for untrusted RAW dimensions. A malformed DNG can claim
+// raw_width=65535; the output side and output-pixel gates are the real memory
+// limit (they already reflect halfSize because Open() divides width/height by
+// 2 above). The sensor-pixel gate is only a backstop against absurdly forged
+// dimensions: it is set well above any shipping camera (Phase One IQ4 150 MP
+// is ~19500x13000 = 253 MP) but far below 65535^2 = 4.29 GP.
+constexpr int kMaxRawOutputSide = 16384;
+constexpr std::uint64_t kMaxRawOutputPixels = 120'000'000;
+constexpr std::uint64_t kMaxRawSensorPixels = 400'000'000;
+
 AVPixelFormat PixelFormatFor(int colors, int bits) noexcept {
     if (colors == 4) return bits == 16 ? AV_PIX_FMT_RGBA64LE : AV_PIX_FMT_RGBA;
     if (colors == 1) return bits == 16 ? AV_PIX_FMT_GRAY16LE : AV_PIX_FMT_GRAY8;
     if (colors == 3) return bits == 16 ? AV_PIX_FMT_RGB48LE : AV_PIX_FMT_RGB24;
     return AV_PIX_FMT_NONE;
+}
+
+// SEH wall around the four LibRaw entry points. Each helper is a pure POD
+// free function: only raw pointers cross its frame, no C++ object with a
+// destructor lives there, so MSVC allows __try/__except. Putting __try
+// directly inside Open()/Decode() would hit C2712 because those functions
+// own std::string error out-params and std::shared_ptr<LibRaw>.
+//
+// We stay on /EHsc (the vcxproj default, no <ExceptionHandling> override):
+// __try/__except catches access violations (0xC0000005) and stack overflow
+// (0xC00000FD) regardless of /EHs. /EHa would only make catch(...) swallow
+// heap corruption process-wide, which is worse.
+//
+// These wrappers do NOT catch heap-lock deadlocks or infinite dcraw loops
+// (KF-03); that requires subprocess isolation, deferred until a real fuzzer
+// crash or user-visible hang justifies the IPC cost.
+constexpr int kRawSehBase = -10000;
+
+// Encode an SEH fault as a negative int well below any real LibRaw error
+// code (those are in roughly -1..-64). Subtraction keeps the whole range
+// <= kRawSehBase so `result <= kRawSehBase` is a valid discriminator; OR
+// would wrap around in two's complement and produce small negatives.
+int SehOpenFile(LibRaw* raw, const char* path) noexcept {
+    __try {
+        return raw->open_file(path);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return kRawSehBase - static_cast<int>(GetExceptionCode() & 0x7FFF);
+    }
+}
+
+int SehUnpack(LibRaw* raw) noexcept {
+    __try {
+        return raw->unpack();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return kRawSehBase - static_cast<int>(GetExceptionCode() & 0x7FFF);
+    }
+}
+
+int SehDcrawProcess(LibRaw* raw) noexcept {
+    __try {
+        return raw->dcraw_process();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return kRawSehBase - static_cast<int>(GetExceptionCode() & 0x7FFF);
+    }
+}
+
+libraw_processed_image_t* SehMakeMemImage(LibRaw* raw, int* memError) noexcept {
+    __try {
+        return raw->dcraw_make_mem_image(memError);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *memError = kRawSehBase - static_cast<int>(GetExceptionCode() & 0x7FFF);
+        return nullptr;
+    }
 }
 
 struct RawMemOwner {
@@ -292,9 +355,13 @@ bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& o
         return false;
     }
 
-    const int openResult = impl_->raw->open_file(pathUtf8.c_str());
+    const int openResult = SehOpenFile(impl_->raw.get(), pathUtf8.c_str());
     if (openResult != LIBRAW_SUCCESS) {
-        error = std::string("LibRaw open_file: ") + RawError(openResult);
+        if (openResult <= kRawSehBase) {
+            error = "LibRaw open_file crashed (SEH)";
+        } else {
+            error = std::string("LibRaw open_file: ") + RawError(openResult);
+        }
         impl_->raw.reset();
         return false;
     }
@@ -320,6 +387,21 @@ bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& o
     const auto clamped = ClampOutputSide(width, height, impl_->options.maxOutputSide);
     width = clamped.first;
     height = clamped.second;
+    // Hard reject dimensions that would blow memory. Promote to uint64 before
+    // multiplying: width/height are int and width*height would overflow at
+    // ~46341^2 otherwise. By this point width/height have already been halved
+    // if options.halfSize is set (see above), so outputPixels IS the predicted
+    // decoded frame budget. sizes.raw_width/raw_height are the unhalved sensor
+    // dims; sensorPixels is only a forged-value backstop. Worst-case accepted
+    // frame is 120 MP * 3ch * 2B = ~720 MB, plus one frame of LibRaw scratch.
+    const auto outputPixels = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
+    const auto sensorPixels = static_cast<std::uint64_t>(sizes.raw_width) * static_cast<std::uint64_t>(sizes.raw_height);
+    if (width > kMaxRawOutputSide || height > kMaxRawOutputSide ||
+        outputPixels > kMaxRawOutputPixels || sensorPixels > kMaxRawSensorPixels) {
+        error = "RAW dimensions exceed safety limits";
+        impl_->raw.reset();
+        return false;
+    }
     if (width <= 0 || height <= 0) {
         error = "LibRaw reported empty output dimensions";
         impl_->raw.reset();
@@ -414,23 +496,29 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
     params.user_flip = -1;
     params.no_auto_bright = 0;
 
-    int result = raw.unpack();
+    int result = SehUnpack(&raw);
     if (result != LIBRAW_SUCCESS) {
-        error = std::string("LibRaw unpack: ") + RawError(result);
+        error = (result <= kRawSehBase)
+            ? "LibRaw unpack crashed (SEH)"
+            : std::string("LibRaw unpack: ") + RawError(result);
         return false;
     }
     RawTrace("RawStillSource::unpack ok");
-    result = raw.dcraw_process();
+    result = SehDcrawProcess(&raw);
     if (result != LIBRAW_SUCCESS) {
-        error = std::string("LibRaw dcraw_process: ") + RawError(result);
+        error = (result <= kRawSehBase)
+            ? "LibRaw dcraw_process crashed (SEH)"
+            : std::string("LibRaw dcraw_process: ") + RawError(result);
         return false;
     }
     RawTrace("RawStillSource::dcraw_process ok");
 
     int memError = LIBRAW_SUCCESS;
-    libraw_processed_image_t* mem = raw.dcraw_make_mem_image(&memError);
+    libraw_processed_image_t* mem = SehMakeMemImage(&raw, &memError);
     if (mem == nullptr || memError != LIBRAW_SUCCESS) {
-        error = std::string("LibRaw dcraw_make_mem_image: ") + RawError(memError);
+        error = (memError <= kRawSehBase)
+            ? "LibRaw dcraw_make_mem_image crashed (SEH)"
+            : std::string("LibRaw dcraw_make_mem_image: ") + RawError(memError);
         return false;
     }
     RawTrace("RawStillSource::mem_image ok");
@@ -450,6 +538,15 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
     f->format = format;
     f->width = static_cast<int>(mem->width);
     f->height = static_cast<int>(mem->height);
+    // Defensive re-check: dcraw_process could disagree with the Open-side
+    // clamp on a malformed file. Reject anything that escapes the same caps.
+    const auto decodedPixels = static_cast<std::uint64_t>(f->width) * static_cast<std::uint64_t>(f->height);
+    if (f->width > kMaxRawOutputSide || f->height > kMaxRawOutputSide ||
+        decodedPixels > kMaxRawOutputPixels) {
+        error = "RAW decoded dimensions exceed safety limits";
+        LibRaw::dcraw_clear_mem(mem);
+        return false;
+    }
     f->pts = 0;
     f->pkt_dts = AV_NOPTS_VALUE;
     f->best_effort_timestamp = 0;
