@@ -448,7 +448,7 @@ bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consu
     p += 2; // writer_version
     uint8_t flags = d[p++];
     m.rawFlags = flags;
-    int channels = 1;
+    int channels = (flags & 0x80) ? 3 : 1;
     bool commonDenom = (flags & 0x08) != 0;
     m.channels = channels;
     auto rd = [](int n, int dd) -> float { return dd == 0 ? 0.f : (float)((double)n / dd); };
@@ -973,9 +973,9 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                 if (l > 1.0) over1++;
             }
             std::sort(lum.begin(), lum.end());
-            R.applyStats.p50 = n > 0 ? lum[n/2] : 0;
-            R.applyStats.maxLinear = (float)maxLin;
-            R.applyStats.over1Pct = n > 0 ? (float)over1 * 100.f / (float)n : 0;
+            R.statsP50 = n > 0 ? lum[n/2] : 0;
+            R.statsMaxLinear = (double)maxLin;
+            R.statsOver1Pct = n > 0 ? (double)over1 * 100.0 / (double)n : 0;
         }
         return R;
     }
@@ -1665,8 +1665,11 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     // 1) tmap payload ISO 21496
     if (!tmapPayload.empty() && tmapPayload.size() >= 2 && tmapPayload[0] == 0) {
         long consumed; IsoMeta m;
-        { char dbg[80]; std::string hx; for(int i=0;i<(int)tmapPayload.size()&&i<12;i++){char h[4];sprintf(h,"%02x ",tmapPayload[i]);hx+=h;} R.notes.push_back("tmapPayload: "+hx); }
+        { char dbg[200]; std::string hx; for(int i=0;i<(int)tmapPayload.size()&&i<64;i++){char h[4];sprintf(h,"%02x ",tmapPayload[i]);hx+=h;} R.notes.push_back("tmapPayload(" + std::to_string(tmapPayload.size()) + "): "+hx); }
         if (ParseIso21496(tmapPayload.data(), 1, (long)tmapPayload.size() - 1, m, consumed)) {
+            { char dbg[160]; sprintf(dbg, "tmap parsed ok: size=%ld consumed=%ld hdrMin=%.4f hdrMax=%.4f gainMin0=%.4f gainMax0=%.4f gamma0=%.4f ch=%d",
+                (long)tmapPayload.size(), consumed, m.hdrCapacityMin, m.hdrCapacityMax, m.gainMin[0], m.gainMax[0], m.gammaC[0], m.channels);
+              R.notes.push_back(dbg); }
             // Verify payload length matches canonical v0 layout (detect writer with extra bytes)
             {
                 uint8_t fl = tmapPayload[5]; // flags byte at offset 5 (after version+minVer+writerVer)
