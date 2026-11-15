@@ -117,6 +117,23 @@ float ParseFloat(const std::string& s, float dflt=0.f) {
     try { return (float)std::stod(s); } catch(...) { return dflt; }
 }
 
+// Grab a hdrgm channel triple in EITHER Ultra HDR form:
+//   (a) element  <hdrgm:Tag><rdf:Seq><rdf:li>..</rdf:li>..</hdrgm:Tag>   (per-channel)
+//   (b) attribute hdrgm:Tag="scalar"                                   (broadcast to 3 ch)
+// Real writers mix them (spruit uses all-attributes; paris writes only
+// GainMapMax as an rdf:Seq). Returns empty only when the tag is absent in
+// BOTH forms.
+static std::vector<float> XmpTripleBoth(const std::string& xml, const std::string& tag) {
+    std::vector<float> v = XmpTriple(xml, tag);
+    if (!v.empty()) return v;
+    std::string s = XmpAttr(xml, tag);
+    if (!s.empty()) {
+        float f = ParseFloat(s);
+        return {f, f, f};
+    }
+    return {};
+}
+
 // ---------- JPEG structures ----------
 struct Img {
     size_t start = 0;      // SOI offset
@@ -124,7 +141,7 @@ struct Img {
     int w = 0, h = 0, nf = 0;
 };
 
-struct MpfEntry { uint32_t attr=0, size=0, offset=0; };
+struct MpfEntry { uint32_t attr=0, size=0, offset=0; uint32_t imageType=0; };
 
 struct Seg {
     int marker = 0;        // 0xE1 / 0xE2 ...
@@ -217,6 +234,11 @@ bool ParseMpf(const Buf& b, size_t tiffStart, std::vector<MpfEntry>& entries, bo
         me.attr  = b.u32(o, be);
         me.size  = b.u32(o+4, be);
         me.offset= b.u32(o+8, be);
+        // CIPA DC-007 MPF entry attribute, bits 26-24:
+        //   0 = base/representative image
+        //   1 = dependent child image
+        //   2 = dependent child image of primary image (the gain map)
+        me.imageType = (me.attr >> 24) & 0x07;
         entries.push_back(me);
     }
     return entries.size() >= 2;
@@ -462,30 +484,15 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
             if (b.ok(s.payload+4,0) && b.u8(s.payload)=='M'&&b.u8(s.payload+1)=='P'&&
                 b.u8(s.payload+2)=='F'&&b.u8(s.payload+3)==0) {
                 mpfPayload = s.payload + 4; mpfLen = s.len - 4;
-            } else if (s.len >= 26 && memcmp(b.d+s.payload, "urn:iso:std:iso:ts:21496:-1", 26) == 0) {
-                // ISO 21496-1 APP2 binary metadata box. Layout (per libultrahdr /
-                // GainMapDecoder.ParseIso21496), all multi-byte fields BIG-ENDIAN:
-                //   payload[0..25]  "urn:iso:std:iso:ts:21496:-1" (26 ASCII)
-                //   payload[26]     NUL
-                //   payload[27..28] min_version u16   (must be 0 for v0)
-                //   payload[29..30] writer_version u16
-                //   payload[31]     FLAGS u8
-                //     bit7 0x80 = multi-channel (3-ch)
-                //     bit6 0x40 = useBaseColorSpace
-                //     bit3 0x08 = commonDenominator
-                //     bit2 0x04 = backwardDirection (BaseRenditionIsHdr)
-                //   then per-channel min/max/gamma/offsets (rational or common-denom).
-                // i.e. the flags byte absolute file offset = s.payload + 31.
-                //   flags=0xc0 -> useBaseColorSpace=1, SDR base  -> apply gainmap (applied)
-                //   flags=0x80 -> useBaseColorSpace=0, HDR base  -> decoded_not_applied
-                // (The skia test files write a degenerate "1\0" version here; the
-                // main implementer parses the box when present and tolerates that.)
-                isoPayload = s.payload; isoLen = s.len;
-                // Read flags byte: URN(27) + NUL(1) + minVer(2) + writerVer(2) = 32 → flags at +32
-                if (s.len >= 33) {
-                    out.app2Flags = b.u8(s.payload + 32);
-                    out.hasApp2Flags = true;
-                }
+            } else if (s.len >= 27 && memcmp(b.d+s.payload, "urn:iso:std:iso:ts:21496:-1", 27) == 0) {
+                // ISO 21496-1 APP2 binary metadata box. A file may carry MORE THAN
+                // ONE such segment: skia writes a degenerate 32-byte URN-only box
+                // (no flags/headroom/channels) in the primary image AND the full
+                // metadata box in the gain-map image. Keep the LONGEST segment —
+                // that is the one carrying flags/headroom/per-channel data. The
+                // degenerate URN-only box is tolerated but yields no headroom and
+                // MUST NOT be used to fabricate one.
+                if (s.len > isoLen) { isoPayload = s.payload; isoLen = s.len; }
             }
         } else if (s.marker == 0xE1) {
             // XMP: "http://ns.adobe.com/xap/1.0/\0" (28 chars + NUL = 29 bytes)
@@ -531,14 +538,75 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
     // hdrgm parameters (legacy Ultra HDR)
     bool hdrgmDecl = allXmp.find("hdr-gain-map/1.0") != std::string::npos;
     std::string ver = XmpAttr(allXmp, "hdrgm:Version");
-    auto gMin = XmpTriple(allXmp, "hdrgm:GainMapMin");
-    auto gMax = XmpTriple(allXmp, "hdrgm:GainMapMax");
-    auto gam  = XmpTriple(allXmp, "hdrgm:Gamma");
+    auto gMin = XmpTripleBoth(allXmp, "hdrgm:GainMapMin");
+    auto gMax = XmpTripleBoth(allXmp, "hdrgm:GainMapMax");
+    auto gam  = XmpTripleBoth(allXmp, "hdrgm:Gamma");
+    // Ultra HDR spec: GainMapMin defaults to 0 when a writer omits it while
+    // emitting GainMapMax (paris family does this). This is the spec default
+    // for the gain-map lower bound, not a fabricated headroom.
+    if (gMin.empty() && !gMax.empty()) gMin = {0.f, 0.f, 0.f};
     float offS = ParseFloat(XmpAttr(allXmp,"hdrgm:OffsetSDR"));
     float offH = ParseFloat(XmpAttr(allXmp,"hdrgm:OffsetHDR"));
-    float hdrCapMax = ParseFloat(XmpAttr(allXmp,"hdrgm:HDRCapacityMin"), 0.f);
-    float hdrCapMaxV = ParseFloat(XmpAttr(allXmp,"hdrgm:HDRCapacityMax"), 1.f);
+    // Ultra HDR HDRCapacity: Min = BASE-side headroom (hB), Max = ALTERNATE-side
+    // headroom (hA). (The old variable names hdrCapMax* were misleading: the Min
+    // attribute is the base side, not a "max".) Units are log2 stops.
+    std::string hbXmpStr = XmpAttr(allXmp, "hdrgm:HDRCapacityMin");
+    std::string haXmpStr = XmpAttr(allXmp, "hdrgm:HDRCapacityMax");
+    bool hasXmpCapacity = !hbXmpStr.empty() && !haXmpStr.empty();
+    float xmpBaseHdr = hasXmpCapacity ? ParseFloat(hbXmpStr) : 0.f;
+    float xmpAltHdr  = hasXmpCapacity ? ParseFloat(haXmpStr)  : 0.f;
     bool hdrgmParams = !gMax.empty() && gMax[0] != 0.f;
+
+    // ---- Parse the FULL ISO 21496-1 APP2 box (longest URN segment) ----
+    // All multi-byte fields BIG-ENDIAN. Layout:
+    //   +0..+26  URN "urn:iso:std:iso:ts:21496:-1" (27 bytes)
+    //   +27      NUL
+    //   +28..+29 min_version u16
+    //   +30..+31 writer_version u16
+    //   +32      flags u8            (only when box >= 33 bytes)
+    //   +33..+40 baseHdrHeadroom   rational: num s32, den u32  (log2 stops)
+    //   +41..+48 alternateHdrHeadroom rational: num s32, den u32
+    //   +49..    per-channel 40 bytes: min/max/gamma/offSDR/offHDR (num s32, den u32)
+    // A degenerate box (len==32, skia primary image) has none of flags/headroom/
+    // channels: tolerated, but yields NO headroom (never fabricate).
+    float app2BaseHdr = 0.f, app2AltHdr = 0.f;
+    bool  app2GotHdr = false;
+    float app2Min[3]={0,0,0}, app2Max[3]={0,0,0}, app2Gamma[3]={1,1,1};
+    float app2OffSdr[3]={0,0,0}, app2OffHdr[3]={0,0,0};
+    int   app2Ch = 0;
+    if (isoPayload && isoLen >= 33) {
+        out.app2Flags = b.u8(isoPayload + 32);
+        out.hasApp2Flags = true;
+        // bits 0x3F are reserved: any set bit => consumer must fail-closed.
+        out.app2ReservedNonZero = (out.app2Flags & 0x3F) != 0;
+        size_t p = 33;
+        if (isoLen >= p + 16) {
+            int32_t bhn = b.s32(isoPayload+p, true); uint32_t bhd = b.u32(isoPayload+p+4, true); p += 8;
+            int32_t ahn = b.s32(isoPayload+p, true); uint32_t ahd = b.u32(isoPayload+p+4, true); p += 8;
+            if (bhd != 0 && ahd != 0) {
+                app2BaseHdr = (float)bhn / (float)bhd;
+                app2AltHdr  = (float)ahn / (float)ahd;
+                app2GotHdr = true;
+            }
+        }
+        while (app2Ch < 3 && isoLen >= p + 40) {
+            int32_t mn=b.s32(isoPayload+p,true); uint32_t md=b.u32(isoPayload+p+4,true); p+=8;
+            int32_t mx=b.s32(isoPayload+p,true); uint32_t mxd=b.u32(isoPayload+p+4,true); p+=8;
+            int32_t gm=b.s32(isoPayload+p,true); uint32_t gd=b.u32(isoPayload+p+4,true); p+=8;
+            int32_t bo=b.s32(isoPayload+p,true); uint32_t bod=b.u32(isoPayload+p+4,true); p+=8;
+            int32_t ao=b.s32(isoPayload+p,true); uint32_t aod=b.u32(isoPayload+p+4,true); p+=8;
+            if (md && mxd && gd && bod && aod) {
+                app2Min[app2Ch]    = (float)mn/(float)md;
+                app2Max[app2Ch]    = (float)mx/(float)mxd;
+                app2Gamma[app2Ch]  = (float)gm/(float)gd;
+                app2OffSdr[app2Ch] = (float)bo/(float)bod;
+                app2OffHdr[app2Ch] = (float)ao/(float)aod;
+                app2Ch++;
+            } else {
+                break; // zero denominator -> malformed; stop rather than divide
+            }
+        }
+    }
 
     // Apple XMP headroom (v2/v3)
     float appleXmpHeadroom = ParseFloat(XmpElem(allXmp, "HDRGainMap:HDRGainMapHeadroom"));
@@ -572,32 +640,35 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
         out.found = false; return false;
     }
 
-    // ---- Non-declared Ultra HDR: require real parameters, reject full-res twins.
+    // ---- Who is base / who is gain: priority order ----
     //
-    // Without an authoritative container declaration (Google GContainer
-    // Container:Directory / ISO 21496-1 APP2 URN / Apple HDRGainMap namespace),
-    // an MPF pair is only trusted as base+gainmap when the secondary XMP
-    // ACTUALLY parses to GainMapMin AND GainMapMax triples. A bare hdrgm
-    // namespace declaration (or a stray header on a normal photo) must NOT flip
-    // us into the HDR apply path.
-    //
-    // Even with parameters, a gain map is a DOWNSAMPLED auxiliary; a second
-    // image that is the same pixel grid as a large base (>=1024px) is an MPO
-    // photo pair (e.g. 02.jpg / 03.jpg: two 3000px camera frames), not a
-    // gain map. sein (400x300) stays accepted: it has real min/max params and
-    // the base is small, so the same-size secondary is a pseudo-map, not a photo.
-    bool secondaryDownsampled = (gainImg->w < baseImg.w && gainImg->h < baseImg.h);
+    //  (1) Authoritative container declaration wins outright: Google GContainer
+    //      Container:Directory / ISO 21496-1 APP2 URN / Apple HDRGainMap ns.
+    //  (2) Without a declaration, an MPF pair is trusted as base+gainmap ONLY
+    //      when the secondary XMP ACTUALLY parses GainMapMin AND GainMapMax.
+    //  (3) MPF image type (CIPA DC-007 entry attr bits 26-24): a proper gain-map
+    //      writer marks the secondary as a dependent child (type 1/2). If the MPF
+    //      explicitly types the secondary as a second BASE (type 0) AND there is
+    //      neither an authoritative declaration nor real GainMapMin/Max, it is an
+    //      MPO photo pair, not a gain map. (Many real writers — skia/libavif/
+    //      Apple — leave the type field 0 and rely on (1)/(2), so type 0 alone
+    //      never rejects a file that (1) or (2) already confirms.)
+    //  (4) Fallback heuristic: equal-size secondary on a large base (>=1024px) is
+    //      an MPO twin (02.jpg / 03.jpg: two 3000px camera frames). sein (400x300)
+    //      stays accepted: real params, small base.
     bool authoritative = hasGContainer || hasIsoUrn || hasAppleNs;
     bool hasRealParams = !gMin.empty() && !gMax.empty();
-    (void)secondaryDownsampled;
+    uint32_t secondaryType = (mpf.size() >= 2) ? mpf[1].imageType : 0;
 
     if (!authoritative) {
         if (!hasRealParams) {
             out.found = false;
             out.containerKind = "jpeg_uhdr";
-            out.reason = "hdrgm namespace without GainMapMin/Max (no GContainer/ISO/Apple declaration)";
+            out.reason = "hdrgm namespace without GainMapMin/Max (no GContainer/ISO/Apple"
+                         " declaration; MPF secondary image type=" + std::to_string(secondaryType) + ")";
             return false;
         }
+        // (4) fallback: equal-size secondary on a large base => MPO twin.
         bool fullResTwin = (gainImg->w == baseImg.w && gainImg->h == baseImg.h &&
                             std::max(baseImg.w, baseImg.h) >= 1024);
         if (fullResTwin) {
@@ -605,7 +676,8 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
             out.containerKind = "jpeg_uhdr";
             out.reason = "mpf secondary is a full-resolution equal-size photo (" +
                          std::to_string(baseImg.w) + "x" + std::to_string(baseImg.h) +
-                         "), not a downsampled gain map (MPO pair)";
+                         "), not a downsampled gain map (MPO pair; secondary type=" +
+                         std::to_string(secondaryType) + ")";
             return false;
         }
     }
@@ -623,27 +695,55 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
         // v3 = version 131072 AND HDRToneMap/adobe hdr-gain-map block present.
         bool hasHdrToneMap = allXmp.find("HDRToneMap:") != std::string::npos ||
                              allXmp.find("ns.adobe.com/hdr-gain-map") != std::string::npos;
+        float appleHeadroomLog2 = 0.f;
         if (appleVer > 0 && appleVer < 131072) {
             out.containerKind = "jpeg_apple_v1";
-            // v1: headroom from Exif MakerNote
+            // v1: headroom MUST come from the Exif AppleMakerNote (tag 33/48).
+            // Fail-closed: no/unparseable MakerNote => NOT a gain map. Never assume
+            // 8x/log2=3 (this was the P0-4 bug: a missing MakerNote silently
+            // produced a fabricated 3.0 stops).
             float hm = 0; std::string w;
             if (exifPayload && ParseAppleMakerNoteHeadroom(b, exifPayload, hm, w)) {
-                out.headroom = hm; out.metaSource = "exif";
+                appleHeadroomLog2 = hm; out.metaSource = "exif";
             } else {
-                out.headroom = 3.0f; out.metaSource = "exif";
-                out.reason = "apple v1: maker note unavailable (" + w + "); assumed 8x (log2=3)";
+                out.found = false;
+                out.reason = "APPLE_V1_NO_MAKERNOTE: HDRGainMapVersion=1 but Exif "
+                             "AppleMakerNote headroom unavailable (" + w +
+                             "); refusing fixed-multiplier fallback (fail-closed)";
+                return false;
             }
         } else if (!hasHdrToneMap) {
             out.containerKind = "jpeg_apple_v2";
-            out.headroom = appleXmpHeadroom; out.metaSource = "xmp";
+            out.metaSource = "xmp";
+            if (appleXmpHeadroom > 0.f) {
+                appleHeadroomLog2 = appleXmpHeadroom;
+            } else {
+                out.found = false;
+                out.reason = "APPLE_V2_NO_XMP_HEADROOM: HDRGainMapVersion=2 but XMP "
+                             "HDRGainMap:HDRGainMapHeadroom missing/<=0; refusing guess (fail-closed)";
+                return false;
+            }
         } else {
             out.containerKind = "jpeg_apple_v3";
-            out.headroom = appleXmpHeadroom; out.metaSource = "xmp";
+            out.metaSource = "xmp";
+            if (appleXmpHeadroom > 0.f) {
+                appleHeadroomLog2 = appleXmpHeadroom;
+            } else {
+                out.found = false;
+                out.reason = "APPLE_V3_NO_XMP_HEADROOM: HDRGainMapVersion=3 but XMP "
+                             "HDRGainMap:HDRGainMapHeadroom missing/<=0; refusing guess (fail-closed)";
+                return false;
+            }
         }
+        out.headroomLog2 = appleHeadroomLog2;
+        // Apple 0-base family: SDR base (hB=0), alternate headroom = hA.
+        out.hasHdrCapacity = true;
+        out.baseHdrHeadroomLog2 = 0.f;
+        out.altHdrHeadroomLog2  = appleHeadroomLog2;
         out.gamma = 1.f;
-        out.logBoost[0]=0; out.logBoost[1]=out.headroom;
-        out.logBoost[2]=0; out.logBoost[3]=out.headroom;
-        out.logBoost[4]=0; out.logBoost[5]=out.headroom;
+        out.logBoost[0]=0; out.logBoost[1]=appleHeadroomLog2;
+        out.logBoost[2]=0; out.logBoost[3]=appleHeadroomLog2;
+        out.logBoost[4]=0; out.logBoost[5]=appleHeadroomLog2;
     } else {
         out.family = "iso";
         if (hasIsoUrn) {
@@ -656,19 +756,75 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
             out.containerKind = "jpeg_uhdr";
             out.metaSource = "xmp";
         }
-        // hdrgm values -> logBoost triple.
-        auto fill = [&](float* dst, const std::vector<float>& v, float dflt) {
-            for (int i=0;i<3;i++) dst[i] = (i < (int)v.size()) ? v[i] : dflt;
-        };
-        fill(out.offsetSdr, {offS,offS,offS}, offS);
-        fill(out.offsetHdr, {offH,offH,offH}, offH);
-        // logBoost layout [minR,maxR,minG,maxG,minB,maxB]
-        for (int c=0;c<3;c++) {
-            out.logBoost[c*2+0] = (c < (int)gMin.size()) ? gMin[c] : 0.f;
-            out.logBoost[c*2+1] = (c < (int)gMax.size()) ? gMax[c] : 1.f;
+
+        // Resolve hB/hA: XMP hdrgm:HDRCapacityMin/Max wins; else the APP2 box.
+        if (hasXmpCapacity) {
+            out.hasHdrCapacity = true;
+            out.baseHdrHeadroomLog2 = xmpBaseHdr;
+            out.altHdrHeadroomLog2  = xmpAltHdr;
+        } else if (app2GotHdr) {
+            out.hasHdrCapacity = true;
+            out.baseHdrHeadroomLog2 = app2BaseHdr;
+            out.altHdrHeadroomLog2  = app2AltHdr;
         }
-        out.gamma = (!gam.empty()) ? gam[0] : 1.f;
-        (void)hdrCapMax; (void)hdrCapMaxV;
+
+        // Resolve gain min/max/gamma/offsets: XMP hdrgm triples win; else the
+        // per-channel rationals from the APP2 box (skia files put the only copy
+        // of the gain-map metadata in the APP2 box, not in XMP).
+        bool xmpTriples = !gMin.empty() && !gMax.empty();
+        if (xmpTriples) {
+            auto fill = [&](float* dst, const std::vector<float>& v, float dflt) {
+                for (int i=0;i<3;i++) dst[i] = (i < (int)v.size()) ? v[i] : dflt;
+            };
+            fill(out.offsetSdr, {offS,offS,offS}, offS);
+            fill(out.offsetHdr, {offH,offH,offH}, offH);
+            // logBoost layout [minR,maxR,minG,maxG,minB,maxB]
+            for (int c=0;c<3;c++) {
+                out.logBoost[c*2+0] = (c < (int)gMin.size()) ? gMin[c] : 0.f;
+                out.logBoost[c*2+1] = (c < (int)gMax.size()) ? gMax[c] : 1.f;
+            }
+            out.gamma = (!gam.empty()) ? gam[0] : 1.f;
+        } else if (app2Ch > 0) {
+            for (int c=0;c<3;c++) {
+                out.logBoost[c*2+0] = app2Min[c];
+                out.logBoost[c*2+1] = app2Max[c];
+                out.offsetSdr[c] = app2OffSdr[c];
+                out.offsetHdr[c] = app2OffHdr[c];
+            }
+            out.gamma = app2Gamma[0];
+        } else {
+            out.found = false;
+            out.reason = "NO_GAINMAP_PARAMS: MPF pair but neither XMP hdrgm "
+                         "GainMapMin/Max nor APP2 ISO box channel data present";
+            return false;
+        }
+    }
+
+    // ---- Monotonicity / sanity (fail-closed on the APPLY path) ----
+    // gainMin[c] <= gainMax[c] and gamma > 0. A violation means the gain map
+    // cannot be applied without nonsense math. We only reject when we would
+    // actually apply, i.e. the base is SDR (hB <= hA, or headroom unknown). When
+    // hB > hA the base rendition is already HDR and the consumer emits
+    // decoded_not_applied without touching the gain map, so a malformed gain-map
+    // body must NOT force found=false (it would hide the HDR-base verdict).
+    bool baseIsAlreadyHdr = out.hasHdrCapacity &&
+                            out.baseHdrHeadroomLog2 > out.altHdrHeadroomLog2;
+    if (!baseIsAlreadyHdr) {
+        for (int c = 0; c < 3; c++) {
+            float gmin = out.logBoost[c*2+0], gmax = out.logBoost[c*2+1];
+            if (gmin > gmax) {
+                out.found = false;
+                out.reason = "MALFORMED_GAINMAP: channel " + std::to_string(c) +
+                             " GainMapMin(" + std::to_string(gmin) +
+                             ") > GainMapMax(" + std::to_string(gmax) + ")";
+                return false;
+            }
+        }
+        if (!(out.gamma > 0.f)) {
+            out.found = false;
+            out.reason = "MALFORMED_GAINMAP: gamma(" + std::to_string(out.gamma) + ") <= 0";
+            return false;
+        }
     }
 
     out.found = true;
