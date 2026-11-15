@@ -129,13 +129,14 @@ std::pair<int, int> ClampOutputSide(int width, int height, int maxSide) noexcept
 }
 
 // Hard safety caps for untrusted RAW dimensions. A malformed DNG can claim
-// raw_width=65535; even a legitimate 100 MP+ medium-frame sensor would drive
-// dcraw_process to allocate gigabytes. The caps are generous enough for every
-// shipping camera (GFX100 is 11648x8732; Phase One IQ4 150 MP is
-// ~19500x13000). This is a reject, not a clamp.
+// raw_width=65535; the output side and output-pixel gates are the real memory
+// limit (they already reflect halfSize because Open() divides width/height by
+// 2 above). The sensor-pixel gate is only a backstop against absurdly forged
+// dimensions: it is set well above any shipping camera (Phase One IQ4 150 MP
+// is ~19500x13000 = 253 MP) but far below 65535^2 = 4.29 GP.
 constexpr int kMaxRawOutputSide = 16384;
 constexpr std::uint64_t kMaxRawOutputPixels = 120'000'000;
-constexpr std::uint64_t kMaxRawSensorPixels = 160'000'000;
+constexpr std::uint64_t kMaxRawSensorPixels = 400'000'000;
 
 AVPixelFormat PixelFormatFor(int colors, int bits) noexcept {
     if (colors == 4) return bits == 16 ? AV_PIX_FMT_RGBA64LE : AV_PIX_FMT_RGBA;
@@ -388,9 +389,11 @@ bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& o
     height = clamped.second;
     // Hard reject dimensions that would blow memory. Promote to uint64 before
     // multiplying: width/height are int and width*height would overflow at
-    // ~46341^2 otherwise. Both gates are active: 16384^2 = 268 MP, larger than
-    // the 120 MP pixel gate, so neither masks the other. Worst-case frame is
-    // 120 MP * 3ch * 2B = ~720 MB, plus one frame of LibRaw scratch, ~1.5 GB.
+    // ~46341^2 otherwise. By this point width/height have already been halved
+    // if options.halfSize is set (see above), so outputPixels IS the predicted
+    // decoded frame budget. sizes.raw_width/raw_height are the unhalved sensor
+    // dims; sensorPixels is only a forged-value backstop. Worst-case accepted
+    // frame is 120 MP * 3ch * 2B = ~720 MB, plus one frame of LibRaw scratch.
     const auto outputPixels = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
     const auto sensorPixels = static_cast<std::uint64_t>(sizes.raw_width) * static_cast<std::uint64_t>(sizes.raw_height);
     if (width > kMaxRawOutputSide || height > kMaxRawOutputSide ||
