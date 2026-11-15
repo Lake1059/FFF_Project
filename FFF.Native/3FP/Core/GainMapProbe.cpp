@@ -1321,8 +1321,13 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         if (gridPayload.size() < 6) { R.verdict="fail_closed_malformed"; R.reason="base grid payload too short"; return R; }
         gRows = gridPayload[1] + 1; gCols = gridPayload[2] + 1; gFlags = gridPayload[3];
         long q = 4;
-        if (gFlags & 1) { gW = Be32(gridPayload.data()+q); gH = Be32(gridPayload.data()+q+4); }
-        else { gW = Be16(gridPayload.data()+q); gH = Be16(gridPayload.data()+q+2); }
+        if (gFlags & 1) {
+            if (gridPayload.size() < 12) { R.verdict="fail_closed_malformed"; R.reason="base grid large: payload < 12 bytes"; return R; }
+            gW = Be32(gridPayload.data()+q); gH = Be32(gridPayload.data()+q+4);
+        } else {
+            if (gridPayload.size() < 8) { R.verdict="fail_closed_malformed"; R.reason="base grid: payload < 8 bytes"; return R; }
+            gW = Be16(gridPayload.data()+q); gH = Be16(gridPayload.data()+q+2);
+        }
         // Find tile IDs via dimg from primary (only codec items, skip alpha/aux)
         std::vector<int> tileIds;
         for (auto& rf : C.refs) {
