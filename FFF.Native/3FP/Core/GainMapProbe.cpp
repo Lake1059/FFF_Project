@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "GainMapProbe.h"
+#include "GainMapAppleMeta.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -536,15 +537,16 @@ bool AppleMakerNote(const std::vector<uint8_t>& exif, float& m33, float& m48, st
             if (!MnU16(exif, p, be, tag)) return false;
             MnU16(exif, p+2, be, type); MnU32(exif, p+4, be, cnt);
             if (tag != tagWant) continue;
-            if (type == 5) {
+            if (type == 5 || type == 10) {
                 int off; MnU32(exif, p+8, be, off);
                 long v = mnAbs + off;
                 if (v + 8 > (long)exif.size()) return false;
-                int num, den; MnU32(exif, v, be, num); MnU32(exif, v+4, be, den);
+                int num, den;
+                MnU32(exif, v, be, num); MnU32(exif, v+4, be, den);
                 if (den == 0) return false;
                 outv = (float)((double)num / den); return true;
             }
-            if (type == 11) {
+            if (type == 9 || type == 11) {
                 int bits; MnU32(exif, p+8, be, bits);
                 float f; memcpy(&f, &bits, 4);
                 outv = f; return true;
@@ -1089,8 +1091,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         std::string why;
         if (!SliceItem(d, C, tmapId, tmapPayload, why)) containerWhy = "tmap payload: " + why;
         else if (!tmapPayload.empty() && tmapPayload[0] != 0) {
-            containerWhy = "tmap version != 0";
-            R.metaFamily = "none"; R.metaSource = "default";
+            // Unsupported tmap version: ignore gainmap, display base as-is.
+            tmapPayload.clear();
+            R.present = false;
+            R.form = "none";
         }
     } else {
         // auxC paths
@@ -1292,7 +1296,85 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     // Decode base
     std::vector<float> baseRgba;
     int baseW = 0, baseH = 0;
-    {
+    int decTrcOuter = 2;
+    bool baseIsGrid = (C.items.count(C.primary) && C.items[C.primary] == "grid");
+    if (baseIsGrid) {
+        // Primary item type is "grid": the item's own data IS the grid payload.
+        std::string why;
+        std::vector<uint8_t> gridPayload;
+        if (!SliceItem(d, C, C.primary, gridPayload, why)) {
+            R.verdict="fail_closed_malformed"; R.reason="base grid slice: " + why; return R;
+        }
+        int gRows=0, gCols=0, gW=0, gH=0, gFlags=0;
+        if (gridPayload.size() < 6) { R.verdict="fail_closed_malformed"; R.reason="base grid payload too short"; return R; }
+        gRows = gridPayload[1] + 1; gCols = gridPayload[2] + 1; gFlags = gridPayload[3];
+        long q = 4;
+        if (gFlags & 1) { gW = Be32(gridPayload.data()+q); gH = Be32(gridPayload.data()+q+4); }
+        else { gW = Be16(gridPayload.data()+q); gH = Be16(gridPayload.data()+q+2); }
+        // Find tile IDs via dimg from primary (only codec items, skip alpha/aux)
+        std::vector<int> tileIds;
+        for (auto& rf : C.refs) {
+            if (rf.type != "dimg" || rf.from != C.primary) continue;
+            for (int to : rf.to) {
+                auto it = C.items.find(to);
+                if (it == C.items.end()) continue;
+                if (!IsCodecItem(it->second)) continue; // skip alpha/aux
+                if (std::find(tileIds.begin(), tileIds.end(), to) == tileIds.end()) tileIds.push_back(to);
+            }
+        }
+        int expect = gRows * gCols;
+        if ((int)tileIds.size() < expect) {
+            char b[120]; sprintf(b, "base grid tiles=%zu expected>=%d (codec-only)", tileIds.size(), expect);
+            R.verdict="fail_closed_malformed"; R.reason=b; return R;
+        }
+        tileIds.resize(expect);
+        // Validate all tile IDs exist as codec items
+        for (int tid : tileIds) {
+            if (!C.items.count(tid) || !IsCodecItem(C.items[tid])) {
+                R.verdict="fail_closed_malformed"; R.reason="base grid: tile not codec"; return R;
+            }
+        }
+        // Find tile dimensions from first tile's ispe
+        int tileW=0, tileH=0;
+        FindIspe(C, d, tileIds[0], tileW, tileH);
+        if (tileW <= 0 || tileH <= 0) { R.verdict="fail_closed_malformed"; R.reason="base grid: no tile ispe"; return R; }
+        if (gW <= 0 || gH <= 0) { gW = gCols*tileW; gH = gRows*tileH; }
+        if (gW <= 0 || gH <= 0) { R.verdict="fail_closed_malformed"; R.reason="base grid: invalid dimensions"; return R; }
+        // Decode and compose tiles
+        std::string tileCodec = C.items[tileIds[0]];
+        const char* tileHint = (tileCodec == "av01") ? "obu" : "hevc";
+        std::vector<float> canvas((size_t)gW*gH*4, 0.f);
+        int decTrc = 2;
+        for (int ti = 0; ti < expect; ti++) {
+            std::vector<uint8_t> tStream; std::string tWhy;
+            if (!ExtractCodedStream(d, C, tileIds[ti], tStream, tWhy, nullptr)) {
+                char b[120]; sprintf(b, "base tile %d extract: %s", ti, tWhy.c_str());
+                R.verdict="fail_closed_malformed"; R.reason=b; return R;
+            }
+            std::vector<float> tile; int tw=0, th=0;
+            if (!DecodeBufferToRgba(tStream, -1, tile, tw, th, tWhy, tileHint, &decTrc)) {
+                char b[120]; sprintf(b, "base tile %d decode: %s", ti, tWhy.c_str());
+                R.verdict="fail_closed_malformed"; R.reason=b; return R;
+            }
+            int ty = ti / gCols, tx = ti % gCols;
+            int copyW = (tw < tileW) ? tw : tileW;
+            int copyH = (th < tileH) ? th : tileH;
+            for (int y = 0; y < copyH; y++) {
+                int dy = ty*tileH + y; if (dy < 0 || dy >= gH) continue;
+                for (int x = 0; x < copyW; x++) {
+                    int dx = tx*tileW + x; if (dx < 0 || dx >= gW) continue;
+                    long si = ((long)y*tw + x)*4;
+                    long di = ((long)dy*gW + dx)*4;
+                    if (si+3 >= (long)tile.size() || di+3 >= (long)canvas.size()) continue;
+                    canvas[di] = tile[si]; canvas[di+1] = tile[si+1]; canvas[di+2] = tile[si+2]; canvas[di+3] = 1.f;
+                }
+            }
+        }
+        baseRgba = std::move(canvas); baseW = gW; baseH = gH;
+        R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
+        R.decodeCodec = tileCodec;
+        decTrcOuter = decTrc;
+    } else {
         std::string why;
         std::vector<uint8_t> baseStream;
         std::string baseCodec;
@@ -1301,24 +1383,33 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             R.reason = "base extract: " + why;
             return R;
         }
-        const char* fmtHint = (baseCodec == "av01") ? "av1" : "hevc";
+        const char* fmtHint = (baseCodec == "av01") ? "obu" : "hevc";
         int decTrc = 2;
         if (!DecodeBufferToRgba(baseStream, -1, baseRgba, baseW, baseH, why, fmtHint, &decTrc)) {
             R.verdict = "fail_closed_malformed";
             R.reason = "base decode: " + why;
-            return R;
-        }
-        // HDR base (PQ/HLG): trust container colr nclx; fall back to decoder trc.
-        int baseTrc = (baseColorTrc != 2) ? baseColorTrc : decTrc;
-        if (baseTrc == 16 || baseTrc == 18) {
-            R.verdict = "fail_closed_unsupported";
-            R.reason = "[container] HDR base (PQ/HLG) gain map not implemented; cannot lift an already-HDR base";
-            containerWhyUnsupported = true;
+            R.decodeOk = false;
+            R.decodeReason = why;
+            R.decodeCodec = (baseCodec == "av01") ? "av1" : "hevc";
             return R;
         }
         FindIspe(C, d, C.primary, baseW, baseH); // prefer declared ispe over decoded dims
+        decTrcOuter = decTrc;
+    }
+    bool hdrBase = false;
+    // HDR base (PQ/HLG): display base as-is, skip gainmap apply.
+    {
+        int baseTrc = (baseColorTrc != 2) ? baseColorTrc : decTrcOuter;
+        if (baseTrc == 16 || baseTrc == 18) hdrBase = true;
     }
     R.baseRgba = baseRgba; R.outW = baseW; R.outH = baseH;
+    if (hdrBase) {
+        R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
+        R.verdict = "decoded_not_applied";
+        R.applyOk = false; R.applyMode = "none";
+        R.reason = "hdr base displayed as-is; gain map not applied";
+        return R;
+    }
 
     // Decode gainmap
     std::vector<float> gmRgba;
@@ -1386,27 +1477,28 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     if (!metaOk && !exifData.empty()) {
         float m33, m48; std::string why;
         if (AppleMakerNote(exifData, m33, m48, why)) {
-            float hrLog2;
-            if (BuildAppleMeta(m33, m48, hrLog2, why)) {
+            auto hr = gainmap_apple::ComputeHeadroomFromMakerNote(m33, m48, 0);
+            if (hr.ok) {
+                float hrLog2 = hr.headroomLog2;
+                float headroomLin = hr.headroom;
                 // decide 0-base vs 128-base by p0.5
                 float p05 = P05Percentile(gmRgba, px);
                 if (p05 * 255.f >= 16.f) {
-                    // 128-base: use ISO math with min=-h, max=+h, gamma=1
                     ap.iso = IsoMeta{};
                     for (int c = 0; c < 3; c++) { ap.iso.gainMin[c] = -hrLog2; ap.iso.gainMax[c] = hrLog2; ap.iso.gammaC[c] = 1.f; }
                     ap.iso.channels = distinct ? 3 : 1;
                     ap.isVendor128 = true; ap.isAppleFamily = false;
                     R.metaFamily = "vendor128";
                 } else {
-                    ap.isAppleFamily = true; ap.headroomLinear = powf(2.f, hrLog2);
+                    ap.isAppleFamily = true; ap.headroomLinear = headroomLin;
                     R.metaFamily = "apple";
                 }
                 R.metaSource = "makenote";
-                R.headroom = powf(2.f, hrLog2);
+                R.headroom = headroomLin;
                 R.gamma = 1.f;
                 metaOk = true;
             } else {
-                R.notes.push_back("makenote unusable: " + why);
+                R.notes.push_back("makenote unusable: " + hr.why);
             }
         } else {
             R.notes.push_back("makenote parse: " + why);

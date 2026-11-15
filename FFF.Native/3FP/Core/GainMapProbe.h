@@ -57,6 +57,7 @@ struct GainMapProbeResult {
     int decodeH = 0;
     int decodeChannels = 0;    // 1 or 3 (corrected from actual pixels)
     int decodeBitDepth = 8;
+    std::string decodeReason;   // readable failure reason when decodeOk=false
 
     // metadata
     std::string metaFamily = "none";    // iso | apple | vendor128 | none

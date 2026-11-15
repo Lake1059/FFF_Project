@@ -130,7 +130,7 @@ int main(int argc, char** argv){
       << ",\"codec\":\"" << JsonEscape(R.decodeCodec) << "\""
       << ",\"width\":" << R.decodeW << ",\"height\":" << R.decodeH
       << ",\"channels\":" << R.decodeChannels << ",\"bitDepth\":" << R.decodeBitDepth
-      << ",\"reason\":\"" << JsonEscape(R.reason.empty() && !R.decodeOk ? "" : "") << "\"}";
+      << ",\"reason\":\"" << JsonEscape(R.decodeReason) << "\"}";
     j << ",\"meta\":{\"family\":\"" << JsonEscape(R.metaFamily) << "\""
       << ",\"source\":\"" << JsonEscape(R.metaSource) << "\""
       << ",\"offsetSdr\":[" << R.offsetSdr[0] << "," << R.offsetSdr[1] << "," << R.offsetSdr[2] << "]"
