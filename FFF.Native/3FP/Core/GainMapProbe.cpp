@@ -448,24 +448,40 @@ bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consu
     p += 2; // writer_version
     uint8_t flags = d[p++];
     m.rawFlags = flags;
-    // flags bit 0x80 = 1 → three channels (per-channel gainmap)
-    // flags bit 0x80 = 0 → single channel (luma-only gainmap)
-    // Verified by tmap payload length: 142 bytes = 3ch layout (16 + 3*40)
-    int channels = (flags & 0x80) ? 3 : 1;
     bool commonDenom = (flags & 0x08) != 0;
+    // Derive channel count from payload length (don't guess from flags):
+    //   Non-commonDenom: 8 bytes hdrMin + 8 bytes hdrMax + channels * 40 bytes
+    //   commonDenom:     4 bytes denom + 4 bytes hdrMin + 4 bytes hdrMax + channels * 20 bytes
+    // After the 5-byte header (minVer+writerVer+flags), remaining bytes determine n.
+    // Tolerate trailing bytes: parse as many channels as fit, don't fail on remainder.
+    long remaining = end - p;
+    int channels = 0;
+    if (!commonDenom) {
+        if (remaining < 16) return false;
+        long chBytes = remaining - 16;
+        channels = (int)(chBytes / 40);
+        consumed = p - off + 16 + channels * 40;
+    } else {
+        if (remaining < 12) return false;
+        long chBytes = remaining - 12;
+        channels = (int)(chBytes / 20);
+        consumed = p - off + 12 + channels * 20;
+    }
+    if (channels < 1) return false;
+    if (channels > 3) channels = 3;  // cap at 3 channels
+    // Mono gainmap (1ch metadata): apply channel 0 to all channels (luma-only gainmap).
     m.channels = channels;
     auto rd = [](int n, int dd) -> float { return dd == 0 ? 0.f : (float)((double)n / dd); };
     if (commonDenom) {
-        if (p + 12 + channels * 20 > end) return false;
         int dn = (int)Be32(d + p); p += 4;
         int bhn = (int)Be32(d + p); p += 4;
         int ahn = (int)Be32(d + p); p += 4;
         m.hdrCapacityMin = rd(bhn, dn);
         m.hdrCapacityMax = rd(ahn, dn);
         for (int c = 0; c < channels; c++) {
-            int mn = (int)Be32(d + p); p += 4;
-            int xn = (int)Be32(d + p); p += 4;
-            int gn = (int)Be32(d + p); p += 4;
+            int mn = (int)Be32(d + p); p += 4;  // s32 numerator
+            int xn = (int)Be32(d + p); p += 4;  // s32 numerator
+            int gn = (int)Be32(d + p); p += 4;  // s32 numerator
             int sn = (int)Be32(d + p); p += 4;
             int tn = (int)Be32(d + p); p += 4;
             m.gainMin[c] = rd(mn, dn);
@@ -475,13 +491,12 @@ bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consu
             m.offHdr[c] = rd(tn, dn);
         }
     } else {
-        if (p + 16 + channels * 40 > end) return false;
         int bhn = (int)Be32(d + p), bhd = (int)Be32(d + p + 4); p += 8;
         int ahn = (int)Be32(d + p), ahd = (int)Be32(d + p + 4); p += 8;
         m.hdrCapacityMax = rd(ahn, ahd);
         m.hdrCapacityMin = rd(bhn, bhd);
         for (int c = 0; c < channels; c++) {
-            int mn = (int)Be32(d + p), md = (int)Be32(d + p + 4); p += 8;
+            int mn = (int)Be32(d + p), md = (int)Be32(d + p + 4); p += 8;  // s32 num / u32 denom
             int xn = (int)Be32(d + p), xd = (int)Be32(d + p + 4); p += 8;
             int gn = (int)Be32(d + p), gd = (int)Be32(d + p + 4); p += 8;
             int sn = (int)Be32(d + p), sd = (int)Be32(d + p + 4); p += 8;
@@ -494,6 +509,7 @@ bool ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& consu
         }
     }
     if (channels == 1) {
+        // Mono gainmap: channel 0 parameters applied to all RGB channels.
         for (int c = 1; c < 3; c++) {
             m.gainMin[c] = m.gainMin[0]; m.gainMax[c] = m.gainMax[0];
             m.gammaC[c] = m.gammaC[0]; m.offSdr[c] = m.offSdr[0]; m.offHdr[c] = m.offHdr[0];
@@ -1675,13 +1691,13 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
               R.notes.push_back(dbg); }
             // Verify payload length matches canonical v0 layout (detect writer with extra bytes)
             {
-                uint8_t fl = tmapPayload[5]; // flags byte at offset 5 (after version+minVer+writerVer)
-                int ch = (fl & 0x80) ? 3 : 1;  // 0x80 set → three channels (verified by 142-byte payload)
-                bool cd = (fl & 0x08) != 0;
-                long expected = 6 + (cd ? (12 + ch * 20) : (16 + ch * 40));
-                if ((long)tmapPayload.size() > expected) {
+                // consumed = total bytes parsed by ParseIso21496 (from off=1)
+                // tmapPayload[0] = version byte, so total used = consumed + 1
+                long used = consumed + 1;
+                long trailing = (long)tmapPayload.size() - used;
+                if (trailing > 0) {
                     R.verdict = "fail_closed_unsupported";
-                    R.reason = "tmap: " + std::to_string((long)tmapPayload.size() - expected) + " trailing bytes beyond v0 layout";
+                    R.reason = "tmap: " + std::to_string(trailing) + " trailing bytes beyond v0 layout";
                     R.decodeOk = false; R.applyOk = false;
                     return R;
                 }
