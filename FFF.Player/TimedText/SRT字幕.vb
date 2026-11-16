@@ -287,7 +287,7 @@ Public NotInheritable Class SRT字幕解析器
     Private Sub New()
     End Sub
 
-    Private Shared ReadOnly 内嵌标签正则 As New Regex("\{([^}]*)\}", RegexOptions.Compiled)
+    Private Shared ReadOnly 内嵌标签正则 As New Regex("\{([^}]*)\}", RegexOptions.Compiled Or RegexOptions.NonBacktracking)
     Private Shared ReadOnly 位置正则 As New Regex("\\pos\s*\(\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*\)", RegexOptions.Compiled Or RegexOptions.IgnoreCase)
     Private Shared ReadOnly 对齐正则 As New Regex("\\an\s*([1-9])", RegexOptions.Compiled Or RegexOptions.IgnoreCase)
 
@@ -376,20 +376,24 @@ Public NotInheritable Class SRT字幕解析器
     Private Shared Function 清理显示文本(value As String) As String
         Dim builder As New StringBuilder(value.Length)
         Dim i = 0
+        Dim 无剩余花括号闭合 As Boolean
+        Dim 无剩余尖括号闭合 As Boolean
         While i < value.Length
-            If value(i) = "{"c AndAlso i + 1 < value.Length AndAlso value(i + 1) = "\"c Then
+            If Not 无剩余花括号闭合 AndAlso value(i) = "{"c AndAlso i + 1 < value.Length AndAlso value(i + 1) = "\"c Then
                 Dim close = value.IndexOf("}"c, i + 2)
                 If close >= 0 Then
                     i = close + 1
                     Continue While
                 End If
+                无剩余花括号闭合 = True
             End If
-            If value(i) = "<"c Then
+            If Not 无剩余尖括号闭合 AndAlso value(i) = "<"c Then
                 Dim close = value.IndexOf(">"c, i + 1)
                 If close >= 0 Then
                     i = close + 1
                     Continue While
                 End If
+                无剩余尖括号闭合 = True
             End If
             builder.Append(value(i))
             i += 1

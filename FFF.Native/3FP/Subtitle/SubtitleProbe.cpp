@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <cerrno>
 #include "3FP/Core/MediaText.h"
 #include "3FP/Subtitle/SubtitleProbe.h"
 #include "Shared/Ffmpeg/SharedFileInput.h"
@@ -131,7 +132,16 @@ FFFResult ProbeSubtitleStreams(const char* localPathUtf8, char* outputUtf8,
         }
         format->pb = sharedInput->Context();
         format->flags |= AVFMT_FLAG_CUSTOM_IO;
-        auto result = avformat_open_input(&format, localPathUtf8, nullptr, nullptr);
+        // Subtitles and attachments must come from the already-open source.
+        // Protocol allowlists alone still permit file: device/UNC references.
+        format->io_open = [](AVFormatContext*, AVIOContext**, const char*, int, AVDictionary**) -> int {
+            return AVERROR(EPERM);
+        };
+        AVDictionary* options = nullptr;
+        av_dict_set(&options, "protocol_whitelist", "file,crypto,data", 0);
+        av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
+        auto result = avformat_open_input(&format, localPathUtf8, nullptr, &options);
+        av_dict_free(&options);
         if (result < 0) {
             cleanup();
             return FFFResult::FfmpegFailure;

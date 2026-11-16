@@ -1,3 +1,4 @@
+Imports System.Text.Json
 Imports System.Text.Json.Serialization
 
 Public Enum 解码模式 As UInteger
@@ -113,6 +114,9 @@ Public Enum 播放器事件类型 As UInteger
     错误 = 5
     色彩模式变化 = 6
     设备变化 = 7
+    ''' <summary>首帧已呈现（原生每 Open 发一次）。detail JSON 带 presented/total/width/height。
+    ''' 数值必须与 FFF.Native/3FP/Api/FFF.Player.Api.h 的 FFF3FPEvent::FirstFramePresented=8 一致。</summary>
+    首帧呈现 = 8
 End Enum
 
 Public NotInheritable Class 播放器配置
@@ -948,6 +952,63 @@ Public NotInheritable Class 播放器事件参数
     End Sub
     Public ReadOnly Property 类型 As 播放器事件类型
     Public ReadOnly Property 详情JSON As String
+End Class
+
+''' <summary>首帧呈现事件（FFF3FPEvent::FirstFramePresented=8）的强类型载荷。
+''' 原生在每 Open 成功后、第一帧真正上屏时发一次，detail JSON 形如
+''' {"presented":1,"total":1,"width":1920,"height":1080}。宿主据此可以点亮窗口/取消
+''' “打开中”光标，而不必自己再解析一遍裸 JSON。解析在 <see cref="解析"/> 中完成，
+''' 任何缺字段/坏 JSON 都落 0，绝不向播放路径抛异常。</summary>
+Public NotInheritable Class 首帧呈现事件参数
+    Inherits EventArgs
+
+    Friend Sub New(呈现帧数 As UInteger, 总帧数值 As UInteger, 视频宽 As UInteger, 视频高 As UInteger)
+        已呈现帧数 = 呈现帧数
+        总帧数 = 总帧数值
+        视频宽度 = 视频宽
+        视频高度 = 视频高
+    End Sub
+
+    Public ReadOnly Property 已呈现帧数 As UInteger
+    Public ReadOnly Property 总帧数 As UInteger
+    Public ReadOnly Property 视频宽度 As UInteger
+    Public ReadOnly Property 视频高度 As UInteger
+
+    ''' <summary>从原生 detail JSON 解析首帧载荷。Friend 以便 FFF.Player.Tests 直接喂真实
+    ''' JSON 字符串做回归断言（而不是只断言“不抛”）。任何字段缺失/类型不符/JSON 损坏都
+    ''' 让该字段落 0，与原生“best-effort 上报”语义一致。</summary>
+    Friend Shared Function 解析(详情JSON As String) As 首帧呈现事件参数
+        Dim presented As UInteger = 0
+        Dim total As UInteger = 0
+        Dim width As UInteger = 0
+        Dim height As UInteger = 0
+        Try
+            Using 文档 = JsonDocument.Parse(If(详情JSON, "{}"))
+                Dim 根 = 文档.RootElement
+                presented = 读UInt(根, "presented")
+                total = 读UInt(根, "total")
+                width = 读UInt(根, "width")
+                height = 读UInt(根, "height")
+            End Using
+        Catch
+            ' 坏 JSON 不应拖垮首帧路径；返回全 0 的载荷。
+        End Try
+        Return New 首帧呈现事件参数(presented, total, width, height)
+    End Function
+
+    Private Shared Function 读UInt(根 As JsonElement, 键 As String) As UInteger
+        Dim 值 As JsonElement
+        If Not 根.TryGetProperty(键, 值) Then Return 0
+        If 值.ValueKind <> JsonValueKind.Number Then Return 0
+        Try
+            ' GetUInt64 容纳负号/超大值；钳到 UInteger，避免溢出把坏字节变成大尺寸。
+            Dim 原始 = 值.GetUInt64()
+            If 原始 > UInteger.MaxValue Then Return UInteger.MaxValue
+            Return CUInt(原始)
+        Catch
+            Return 0
+        End Try
+    End Function
 End Class
 
 Public NotInheritable Class 播放器异常

@@ -208,26 +208,63 @@ to it).
 # Full run over the internal corpus (38 entries in manifest.json)
 .\tools\run_corpus.ps1
 
+# Run the EXTERNAL array-shaped manifest (probeVerdict/probeForm/probeReason),
+# or any corpus dir, by pointing -Corpus at it:
+.\tools\run_corpus.ps1 -Corpus ..\testmedia\gainmap-corpus\external
+
+# Recommended: run BOTH corpora against the versioned, in-repo expected table.
+# -Expected makes per-file expectations come from docs\gainmap-corpus-expectations.json
+# (matched by relative path), overriding whatever each manifest embeds:
+.\tools\run_corpus.ps1 -Corpus ..\testmedia\gainmap-corpus          -Expected docs\gainmap-corpus-expectations.json
+.\tools\run_corpus.ps1 -Corpus ..\testmedia\gainmap-corpus\external -Expected docs\gainmap-corpus-expectations.json
+
 # Run a single file subset
 .\tools\run_corpus.ps1 -Filter 'negative/not_gainmap_plain'
+
+# Gate a run (exit non-zero on any mismatch):
+.\tools\run_corpus.ps1 -Expected docs\gainmap-corpus-expectations.json -FailOnDiff
 ```
+
+**Match-rate policy (read this before quoting any number).** There is intentionally NO
+hard-coded "41/41 final" claim in this doc. The real match rate is whatever the last run
+printed as `TOTAL / MATCHED / DIFF` and wrote into `docs/corpus_matrix.json` — **that file
+is the single source of truth for the current rate**, and it is regenerated every run. The
+SHA-256 "41/41" statements in §3–§4 refer to *byte-integrity* (files on disk match the
+recorded hashes), NOT to probe verdict correctness.
+
+**Expected table.** `docs/gainmap-corpus-expectations.json` is the versioned in-repo
+expectation list (38 internal + 41 external = 79 entries). It compares
+`verdict / form / family / metaSource / gainmapPresent`. An entry's `rationale` is non-empty
+only where the adopted expectation DIFFERS from the old v1 external probeVerdict, or for JXL.
+
+**JXL is NOT implemented.** JPEG XL gain-map (`form=jhgm`) is intentionally
+`fail_closed_unsupported` with `reason=jxl_gainmap_not_implemented`. The two `synth_jxl_*.jxl`
+and the internal `other_formats/jxl_jhgm_*.jxl` fixtures must stay `fail_closed_unsupported`;
+they must NOT be expected as `applied`.
+
+**`FFF.Recorder.Tests` does NOT participate in this acceptance.** That project currently has
+no registered test cases and exits non-zero by design (L1-P2-01); do not treat its presence
+as a passing suite.
 
 Parameters / environment variables (first non-empty wins: explicit param → env → default):
 
 | Param | Env var | Default | Meaning |
 |---|---|---|---|
 | `-Root` | `FFF_ROOT` | parent of `tools\` | FFF repo root |
-| `-Corpus` | `FFF_CORPUS_ROOT` | `<Root>\..\testmedia\gainmap-corpus` | corpus root containing `manifest.json` |
+| `-Corpus` | `FFF_CORPUS_ROOT` | `<Root>\..\testmedia\gainmap-corpus` | corpus root containing `manifest.json` (object or array schema) |
+| `-Expected` | — | (none) | path to `docs\gainmap-corpus-expectations.json`; per-file expected values override the manifest |
 | `-ProbeExe` | `FFF_PROBE_EXE` | `<Root>\FFF.Native\tools\build_out\gainmap_probe.exe` | probe binary |
 | `-FfmpegDir` | `FFF_FFMPEG_DIR` | `<Root>\third_party\ffmpeg` | prebuilt ffmpeg (informational; DLLs sit next to the exe) |
 | `-OutFile` | `FFF_CORPUS_OUT` | `<Root>\docs\corpus_matrix.json` | machine-readable result table |
 | `-TargetHeadroom` | — | (probe default 4.9) | appended as `--target-headroom <v>` |
 | `-Filter` | — | (none) | substring on manifest file path |
+| `-FailOnDiff` | — | off | exit non-zero when any row mismatches |
 | `-DryRun` | — | off | resolve + print only |
 
 The probe contract: `gainmap_probe.exe <file> [--target-headroom <stops>]` prints a
-single-line JSON object (`gainmap.present/form/auxCUrn/grid`, `meta.family/source/...`,
-`apply.stats`, `verdict`). `run_corpus.ps1` diffs that against `expected.*` and prints
+single-line JSON object (`gainmap.present/form/…`, `meta.family/source/…`, `verdict`).
+`run_corpus.ps1` reads BOTH schemas (internal `files[].expected.*` and external array
+`probeVerdict/probeForm/probeReason`), diffs against the expected table, and prints
 `TOTAL / MATCHED / DIFF`.
 
 ---
@@ -243,7 +280,7 @@ and the XMP / Exif MakerNote blocks) per the rules below. Fields:
 | `expectedVerdict` | One of `applied`, `decoded_not_applied`, `fail_closed_unsupported`, `fail_closed_malformed`, `not_gainmap`. |
 | `expectedForm` | Container form: `tmap`, `tmap_grid`, `auxc_apple`, `auxc_vendor`, `auxc_grid`, `jpeg_hdr`, `jpeg_apple_v1/v2/v3`, `jpeg_adobe_gcontainer`, `webp_gainmap`, `jhgm`, or `none`. |
 | `gainmapPresent` | Whether any gain-map metadata box / APP2 / XMP was located at all. |
-| `family` | `iso` (ISO 21496-1), `apple` (Apple 0-base family), `vendor128` (128-base), or `none`. |
+| `family` | `iso` (ISO 21496-1), `apple` (Apple 0-base family), `vendor128` (128-base), or `none`. NOTE: the JPEG/WebP gain-map forms `jpeg_uhdr`, `jpeg_adobe_gcontainer`, `webp_gainmap` ALL carry `family=iso` — there is no `ultra_hdr`/`adobe`/`webp` family (do not confuse the form name with the family). JXL (`form=jhgm`) always uses `family=none`, `metaSource=default`, `verdict=fail_closed_unsupported` (`reason=jxl_gainmap_not_implemented`); JXL identity is carried by `form`, never by a `jxl`/`jhgm` family or metaSource. |
 | `channels` | Gain-map channel count from the tmap flags byte (`0x80` = multichannel ⇒ 3, else 1). |
 | `itemType` | Primary image codec (`hvc1`, `av01`, `mjpeg`, `jxl`, …). |
 | `byteFacts` | Raw-byte evidence (XMP scalars, MPF dimensions, URN, headroom source). |
@@ -281,9 +318,12 @@ Derivation rules (the only source of truth; do not infer from old probe output):
 
 ## 7. CI
 
-`.github/workflows/gainmap-probe.yml` runs on `workflow_dispatch` only (no push/PR
-triggers, to avoid noise). On `windows-latest` it builds `FFF.Native`
-(`Release|x64` via MSBuild) and, because the repo vendors **no** GainMap sample file,
-runs a build-only smoke check (`gainmap_probe.exe --help` / exe existence) and uploads
-logs. It intentionally does **not** download this external corpus — reproducing the
-41-file matrix is a local, manual step documented above.
+`.github/workflows/gainmap-probe.yml` runs on `workflow_dispatch` ONLY — there is no
+push/PR/merge trigger, so it is **not a pull-request gate**. It targets a **self-hosted**
+runner (a hosted runner cannot link the unvendored `third_party/ffmpeg` deps). On that
+runner it builds `FFF.Native` (`Release|x64` via MSBuild) and runs a hard-fail probe smoke:
+if `gainmap_probe.exe` is not produced, or `gainmap_probe.exe --help` exits non-zero, the
+job is RED — there is no `::notice` that swallows the failure. It intentionally does NOT
+download this external corpus; reproducing the 38+41 matrix is a local, manual step
+documented above (`tools/run_corpus.ps1 -Expected docs\gainmap-corpus-expectations.json`),
+and the resulting match rate lives in `docs/corpus_matrix.json`.
