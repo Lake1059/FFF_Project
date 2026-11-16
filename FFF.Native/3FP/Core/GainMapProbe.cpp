@@ -870,7 +870,8 @@ bool DecideApplyWeight(double hB, double hA, double target,
 //   mult     = pow2(weight * log2Gain)
 //   out      = (base + weight*offSdr[c])*mult - weight*offHdr[c], clamped >= 0
 // weight==0 ⇒ identity (returns base). gainMax is NEVER used as a raw multiplier.
-float ApplyChannelIso(float gainNorm, int c, float baseLinear, const IsoMeta& m, float weight) {
+float ApplyChannelIso(float gainNorm, int c, float baseLinear, const IsoMeta& m, float weight,
+                      bool* pClamped = nullptr) {
     if (weight <= 0.f) return baseLinear;
     float gamma = m.gammaC[c];
     float g = (gamma != 1.f && gamma > 0.f) ? powf(gainNorm, 1.f / gamma) : gainNorm;
@@ -879,7 +880,10 @@ float ApplyChannelIso(float gainNorm, int c, float baseLinear, const IsoMeta& m,
     // declared alternate-side headroom. A malformed/inconsistent box can carry a
     // gainMax far larger than altHdrHeadroomLog2 (e.g. gainMax=11 vs hA=1.3);
     // trust the headroom endpoint, not the per-channel range, for the ceiling.
-    if (log2Gain > m.altHdrHeadroomLog2) log2Gain = m.altHdrHeadroomLog2;
+    if (log2Gain > m.altHdrHeadroomLog2) {
+        log2Gain = m.altHdrHeadroomLog2;
+        if (pClamped) *pClamped = true;
+    }
     float mult = powf(2.f, weight * log2Gain);
     float out = (baseLinear + weight * m.offSdr[c]) * mult - weight * m.offHdr[c];
     if (out < 0.f) out = 0.f;
@@ -1079,6 +1083,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         float fw = (float)jw;
         // Apply gainmap pixels (weighted, plan §2.2)
         std::vector<float> out((long)baseW * baseH * 4, 0.f);
+        bool jClampFired = false; int jClampCh = -1; float jClampGainMax = 0.f;
         for (int y = 0; y < baseH; y++) {
             float gy = (baseH <= 1) ? 0.f : (float)y * (float)(gmH - 1) / (float)(baseH - 1);
             int y0 = (int)gy, y1 = std::min(y0 + 1, gmH - 1);
@@ -1103,12 +1108,16 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                     out[o+1] = lin[o+1] * scale;
                     out[o+2] = lin[o+2] * scale;
                 } else {
-                    for (int ch = 0; ch < 3; ch++)
-                        out[o+ch] = ApplyChannelIso(gv, ch, lin[o+ch], jm, fw);
+                    for (int ch = 0; ch < 3; ch++) {
+                        bool cl=false;
+                        out[o+ch] = ApplyChannelIso(gv, ch, lin[o+ch], jm, fw, &cl);
+                        if(cl && jm.gainMax[ch]>jClampGainMax){jClampFired=true;jClampCh=ch;jClampGainMax=jm.gainMax[ch];}
+                    }
                 }
                 out[o+3] = 1.f;
             }
         }
+        if (jClampFired) { char cn[160]; sprintf(cn, "gain clamped to alternate headroom (gainMax=%.4f > hA=%.4f, ch=%d)", jClampGainMax, jA, jClampCh); R.notes.push_back(cn); }
         R.appliedRgba = out;
         R.applyOk = true; R.applyMode = "jpeg";
         R.verdict = "applied";
@@ -1989,6 +1998,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
       R.notes.push_back(dbg); }
     float fw = (float)w;
     std::vector<float> out((size_t)baseW * baseH * 4, 0.f);
+    bool clampFired = false; int clampCh = -1; float clampGainMax = 0.f;
 
     for (int y = 0; y < baseH; y++) for (int x = 0; x < baseW; x++) {
         long o = ((long)y*baseW + x) * 4;
@@ -2028,13 +2038,14 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             // ISO family (incl. vendor128) — weight applied inside ApplyChannelIso
             if (R.decodeChannels <= 1) {
                 float gv = sampleGray();
-                for (int ch = 0; ch < 3; ch++) out[o+ch] = ApplyChannelIso(gv, ch, baseRgba[o+ch], ap.iso, fw);
+                for (int ch = 0; ch < 3; ch++) { bool cl=false; out[o+ch] = ApplyChannelIso(gv, ch, baseRgba[o+ch], ap.iso, fw, &cl); if(cl && ap.iso.gainMax[ch]>clampGainMax){clampFired=true;clampCh=ch;clampGainMax=ap.iso.gainMax[ch];} }
             } else {
-                for (int ch = 0; ch < 3; ch++) { out[o+ch] = ApplyChannelIso(sampleCh(ch), ch, baseRgba[o+ch], ap.iso, fw); }
+                for (int ch = 0; ch < 3; ch++) { bool cl=false; out[o+ch] = ApplyChannelIso(sampleCh(ch), ch, baseRgba[o+ch], ap.iso, fw, &cl); if(cl && ap.iso.gainMax[ch]>clampGainMax){clampFired=true;clampCh=ch;clampGainMax=ap.iso.gainMax[ch];} }
             }
         }
         out[o+3] = 1.f;
     }
+    if (clampFired) { char cn[160]; sprintf(cn, "gain clamped to alternate headroom (gainMax=%.4f > hA=%.4f, ch=%d)", clampGainMax, hA, clampCh); R.notes.push_back(cn); }
 
     R.appliedRgba = out;
     R.applyOk = true;
