@@ -7632,8 +7632,11 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     const bool limitToNativeSize,
     const bool coverArt, const bool prepareOnly, const bool imageMode,
     const AVFrame* auxiliaryFrame,
-    const FFF3FPAuxiliaryComposition* auxiliaryComposition) noexcept {
+    const FFF3FPAuxiliaryComposition* auxiliaryComposition,
+    const std::uint32_t displayWidth, const std::uint32_t displayHeight) noexcept {
     if (frame == nullptr || frame->width <= 0 || frame->height <= 0) return FFFResult::InvalidArgument;
+    displayWidth_ = displayWidth;
+    displayHeight_ = displayHeight;
     // A decoder on another adapter hands us a D3D11 texture this device cannot
     // sample. CopySubresourceRegion is only legal between resources of the same
     // device, so bring such a frame back to CPU planes before any pipeline, HDR or
@@ -9145,8 +9148,10 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
         // photo keeps a landscape box and is letterboxed into a sliver.
         const auto rotation = viewRotation_.load(std::memory_order_acquire);
         const auto swapAxes = (rotation & 1u) != 0;
-        const auto layoutWidth = swapAxes ? sourceHeight_ : sourceWidth_;
-        const auto layoutHeight = swapAxes ? sourceWidth_ : sourceHeight_;
+        const auto boxWidth = displayWidth_ > 0 ? displayWidth_ : sourceWidth_;
+        const auto boxHeight = displayHeight_ > 0 ? displayHeight_ : sourceHeight_;
+        const auto layoutWidth = swapAxes ? boxHeight : boxWidth;
+        const auto layoutHeight = swapAxes ? boxWidth : boxHeight;
         destination = CalculateVideoDestination(
             aspect > 0 ? static_cast<unsigned>(layoutHeight * aspect + 0.5f) : layoutWidth,
             layoutHeight, outputWidth, outputHeight,
@@ -9505,7 +9510,13 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     // waiting for a vblank; the interactive window above keeps that path off
     // steady playback and expires 250 ms after the last Redraw().
     const auto interactiveView = InteractiveViewActive();
-    const auto present = (interactiveMove || interactiveView)
+    // Off-vblank without ALLOW_TEARING is not a latency win: DWM still composites
+    // on a vblank and the extra queued frames can make the open slower. Only take
+    // this path when the chain can actually tear; otherwise the still keeps the
+    // normal vblank-clamped Present(1,0).
+    const auto progressiveStill = progressiveStillPresentation_.load(std::memory_order_acquire)
+        && swapAllowTearing_;
+    const auto present = (interactiveMove || interactiveView || progressiveStill)
         ? chain->Present(0, swapAllowTearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0)
         : tearing ? chain->Present(0, DXGI_PRESENT_ALLOW_TEARING) : chain->Present(1, 0);
     presentWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
@@ -9770,6 +9781,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseCom(context_);
     ReleaseCom(device_);
     swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
+    displayWidth_ = displayHeight_ = 0;
     swapHdr_ = false;
     swapOutputBits_ = 8;
     sourceInputLayout_ = UINT32_MAX;
@@ -9832,6 +9844,7 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
         for (auto& slot : uploadStaging_) ReleaseCom(slot[plane]);
     }
     sourceWidth_ = sourceHeight_ = 0;
+    displayWidth_ = displayHeight_ = 0;
     sourceInputLayout_ = UINT32_MAX;
     sourceBitDepth_ = 0;
     sourceChromaWidthShift_ = sourceChromaHeightShift_ = 0;
@@ -9940,6 +9953,9 @@ HdrFrameState PlayerVideoRenderer::StreamHdrState() const noexcept { return hdrP
 HdrSourceColor PlayerVideoRenderer::FrameSourceColor() const noexcept { return hdrProcessor_.SourceColor(); }
 bool PlayerVideoRenderer::IsHdrSourceStream() const noexcept { return hdrProcessor_.IsHdrSourceStream(); }
 std::uint64_t PlayerVideoRenderer::PresentedVideoFrames() const noexcept { return presentedVideoFrames_.load(); }
+void PlayerVideoRenderer::SetProgressiveStillPresentation(const bool enabled) noexcept {
+    progressiveStillPresentation_.store(enabled, std::memory_order_release);
+}
 std::uint64_t PlayerVideoRenderer::CoalescedVideoFrames() const noexcept { return coalescedVideoFrames_.load(); }
 std::uint64_t PlayerVideoRenderer::SwapChainPresents() const noexcept { return swapChainPresents_.load(); }
 std::uint64_t PlayerVideoRenderer::SubmittedVideoGeneration() const noexcept { return videoGeneration_.load(); }

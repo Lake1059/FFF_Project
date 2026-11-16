@@ -30,6 +30,7 @@ Partial Class Form设置_音乐与歌词
         MCK_是否启用歌词支持 = New LakeUI.ModernCheckBox()
         MCK_是否渲染封面图毛玻璃背景 = New LakeUI.ModernCheckBox()
         MCK_是否渲染封面图 = New LakeUI.ModernCheckBox()
+        MCK_启用系统媒体集成 = New LakeUI.ModernCheckBox()
         ModernPanel1.SuspendLayout()
         Panel1.SuspendLayout()
         SuspendLayout()
@@ -42,6 +43,7 @@ Partial Class Form设置_音乐与歌词
         ModernPanel1.Controls.Add(MCK_是否启用歌词支持)
         ModernPanel1.Controls.Add(MCK_是否渲染封面图毛玻璃背景)
         ModernPanel1.Controls.Add(MCK_是否渲染封面图)
+        ModernPanel1.Controls.Add(MCK_启用系统媒体集成)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
@@ -161,6 +163,26 @@ Partial Class Form设置_音乐与歌词
         MCK_是否渲染封面图.TabIndex = 29
         MCK_是否渲染封面图.Text = "渲染封面图"
         ' 
+        ' MCK_启用系统媒体集成
+        ' 
+        MCK_启用系统媒体集成.AutoSize = True
+        MCK_启用系统媒体集成.BackColor = Color.Transparent
+        MCK_启用系统媒体集成.BoxBorderRadius = 5
+        MCK_启用系统媒体集成.BoxBorderSize = 0
+        MCK_启用系统媒体集成.BoxCheckedBackColor = Color.OliveDrab
+        MCK_启用系统媒体集成.BoxInnerPadding = 6
+        MCK_启用系统媒体集成.BoxSize = 24
+        MCK_启用系统媒体集成.BoxTextSpacing = 10
+        MCK_启用系统媒体集成.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCK_启用系统媒体集成.Checked = True
+        MCK_启用系统媒体集成.Dock = DockStyle.Top
+        MCK_启用系统媒体集成.Location = New Point(15, 20)
+        MCK_启用系统媒体集成.Name = "MCK_启用系统媒体集成"
+        MCK_启用系统媒体集成.Padding = New Padding(0, 0, 0, 10)
+        MCK_启用系统媒体集成.Size = New Size(563, 34)
+        MCK_启用系统媒体集成.TabIndex = 33
+        MCK_启用系统媒体集成.Text = "显示系统媒体控制（Windows 媒体面板）"
+        ' 
         ' Form设置_音乐与歌词
         ' 
         AutoScaleDimensions = New SizeF(96F, 96F)
@@ -182,6 +204,7 @@ Partial Class Form设置_音乐与歌词
     Friend WithEvents MCK_是否启用歌词支持 As LakeUI.ModernCheckBox
     Friend WithEvents MCK_是否渲染封面图毛玻璃背景 As LakeUI.ModernCheckBox
     Friend WithEvents MCK_是否渲染封面图 As LakeUI.ModernCheckBox
+    Friend WithEvents MCK_启用系统媒体集成 As LakeUI.ModernCheckBox
     Friend WithEvents Panel1 As LakeUI.ModernPanel
     Friend WithEvents MB_重置歌词字体样式 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl2 As LakeUI.JustEmptyControl

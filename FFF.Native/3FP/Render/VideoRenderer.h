@@ -376,7 +376,8 @@ public:
         bool limitToNativeSize = false,
         bool coverArt = false, bool prepareOnly = false, bool imageMode = false,
         const AVFrame* auxiliaryFrame = nullptr,
-        const FFF3FPAuxiliaryComposition* auxiliaryComposition = nullptr) noexcept;
+        const FFF3FPAuxiliaryComposition* auxiliaryComposition = nullptr,
+        std::uint32_t displayWidth = 0, std::uint32_t displayHeight = 0) noexcept;
     FFFResult Redraw() noexcept;
     /// Establish the presentation chain for a freshly bound output window and
     /// present exactly one frame. Redraw() is a no-op while no decoded frame is
@@ -388,6 +389,12 @@ public:
     /// Safe from the session command queue: it takes the same locks the
     /// presenter thread takes, in the same order.
     FFFResult PresentAfterBind() noexcept;
+    // A still image that is being assembled in stages (layered AVIF, grid tiles,
+    // J2K lowres) does not need each intermediate canvas to wait for a vblank.
+    // The session raises this for the open-time still decode and lowers it
+    // immediately after; the final presentation still uses the same path, which
+    // is deliberate: a static picture has no cadence to preserve.
+    void SetProgressiveStillPresentation(bool enabled) noexcept;
     // Re-pull the HDR classification and the ST 2094-40 curve from the processor and
     // refresh the shader inputs for the frame already sitting in the cached surface, so
     // installing or clearing a metadata table shows up in the picture without waiting for
@@ -1098,6 +1105,11 @@ private:
     std::atomic<std::uint32_t> lastDestHeight_{ 0 };
     std::uint32_t sourceWidth_;
     std::uint32_t sourceHeight_;
+    // The box this picture should occupy, when it differs from the decoded
+    // texture size (a coarse layer of a layered still is smaller than the final
+    // image). 0 means "same as sourceWidth_/sourceHeight_".
+    std::uint32_t displayWidth_ = 0;
+    std::uint32_t displayHeight_ = 0;
     std::uint32_t sourceInputLayout_;
     std::uint32_t sourceBitDepth_;
     std::uint32_t sourceChromaWidthShift_;
@@ -1361,6 +1373,10 @@ private:
     std::atomic<std::uint64_t> presentedVideoGeneration_;
     std::atomic<std::uint64_t> countedVideoGeneration_;
     std::atomic<std::uint64_t> presentedVideoFrames_;
+    // Set only while the session is decoding a still image at open. Intermediate
+    // canvases submit with Present(0,0); the final canvas may also use it because
+    // a static picture has no cadence to protect.
+    std::atomic<bool> progressiveStillPresentation_{false};
     std::atomic<std::uint64_t> coalescedVideoFrames_;
     std::atomic<std::uint64_t> swapChainPresents_;
     std::atomic<std::uint64_t> presentWait100ns_;

@@ -5,6 +5,7 @@
 #include "3FP/Api/FFF.Player.AudioPassthrough.h"
 #include "3FP/Audio/WasapiRenderer.h"
 #include "3FP/Audio/AudioPassthrough.h"
+#include "3FP/Core/AvifItemProbe.h"
 #include "3FP/Core/AvifTileGridComposer.h"
 #include "3FP/Core/GainMapProbe.h"
 #include "3FP/Core/PlacementPolicy.h"
@@ -328,7 +329,8 @@ private:
     bool RecoverAudioDevice() noexcept;
     bool RecoverVideoDevice() noexcept;
     FFFResult OpenFormat(const std::string& pathUtf8, AVFormatContext** format,
-        std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept;
+        std::unique_ptr<SharedFileInput>& io, std::string& error,
+        std::int32_t* mergedExtents = nullptr, AvifItemInfo* avifInfo = nullptr) noexcept;
     // A second demuxer for the trial decode, opened under the same IO policy as
     // OpenFormat (protocol allow/deny lists, the same file-or-repaired-memory
     // input, the same demuxer gate) and additionally wired to the session's
@@ -336,7 +338,8 @@ private:
     // avformat_find_stream_info: the trial needs only the stream table, which the
     // header already carries.
     FFFResult OpenProbeFormat(const std::string& pathUtf8, AVFormatContext** format,
-        std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept;
+        std::unique_ptr<SharedFileInput>& io, std::string& error,
+        std::int32_t* mergedExtents = nullptr, AvifItemInfo* avifInfo = nullptr) noexcept;
     static int ProbeInterrupt(void* opaque) noexcept;
     void CloseFormat(AVFormatContext** format,
         std::unique_ptr<SharedFileInput>& io) noexcept;
@@ -407,8 +410,9 @@ private:
     FFFResult DecodeInitialFrame(std::string* detailOut = nullptr) noexcept;
     // A tiled still image (grid AVIF/HEIC) has no pre-assembled picture anywhere in
     // the file: it is one stream per tile plus a grid group saying where the tiles
-    // go. This decodes them and presents the canvas they make, and it can run again
-    // after a device change because the tile packets were read at open.
+    // go. This decodes the tiles one by one and presents the canvas after each
+    // placement, so the picture fills in progressively; it can run again after a
+    // device change because the tile packets were read at open.
     FFFResult ComposeTileGridFrame() noexcept;
     // Reads each tile's packets once, in draw order's stream set, so the canvas can
     // be rebuilt without a demuxer rewind (a still image has no timeline to seek to).
@@ -1065,6 +1069,33 @@ private:
     // One-shot guard for the toggle-off fallback note (baseRgba unavailable):
     // RawTrace at most once per open so a still frame never floods the log.
     bool gainMapBaseFallbackNoted_ = false;
+    // A layered ("progressive") AV1 still image: the primary item was stored as
+    // several contiguous extents, which is the shape AvifIlocShim repairs. Set at
+    // open only for a static, non-grid AV1 file; the decode side uses it to ask
+    // libdav1d for every spatial layer and to present the coarse base layer before
+    // the finished one.
+    bool layeredStillImage_;
+    // Standard layered-image signals from the primary item's property associations.
+    // The extent count alone is only a libavif storage convention; a1lx and lsel are
+    // what a conformant file declares. layerCount 0 means "not declared".
+    std::int32_t layeredLayerCount_ = 0;
+    bool layeredLsel_ = false;
+    // -1 = no selector, 0xFFFF = all layers, 0..3 = one selected layer.
+    std::int32_t layeredLayerId_ = -1;
+    std::int32_t layeredOpIndex_ = -1;
+    // Runtime ordinal of the AV1 frame being presented while a still image is
+    // draining. Used only when lsel selects one layer.
+    std::int32_t layeredPresentOrdinal_ = 0;
+    bool layeredPresentDone_ = false;
+    // Emits FirstFramePresented once per Open(), after the first successful
+    // renderer submission. Reset on the API thread before DoOpen is enqueued, so
+    // a reopen cannot inherit the previous media's event state.
+    std::atomic<bool> firstFramePresentedEmitted_{false};
+    // The size the still image is meant to occupy on screen. A 400x300 base layer
+    // of an 800x600 image keeps its 800x600 presentation box while the coarse
+    // texture is shown; 0 means "same as the frame".
+    std::int32_t stillDisplayWidth_ = 0;
+    std::int32_t stillDisplayHeight_ = 0;
     // A picture that moves: either a loop-aware image demuxer (GIF/APNG/WebP) or
     // an image sequence carried by the mov demuxer (AVIF/HEIC). Such a file is
     // not a still image, but it is still a picture: it must show its first frame

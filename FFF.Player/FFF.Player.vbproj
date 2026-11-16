@@ -3,8 +3,12 @@
   <Import Project="..\tools\DiscRuntime.props" />
   <PropertyGroup>
       <OutputType>WinExe</OutputType>
-      <!-- TFM 就地定义：默认与上游一致（.NET 10）。切 .NET 11 用 -p:NetTFM=net11.0-windows10.0.26100.0 -->
-      <NetTFM Condition="'$(NetTFM)' == ''">net10.0-windows</NetTFM>
+      <!-- TFM 就地定义：默认与上游 .NET 10 对齐，但必须带 Windows SDK 版本。
+           原因：系统媒体集成要引用 Windows.Media.SystemMediaTransportControlsInterop，
+           而 net10.0-windows（不带 SDK 版本）的还原资产里没有 Microsoft.Windows.SDK.NET
+           投影，Imports Windows.Media 会直接编译失败。26100 已是测试工程与 publish 的
+           现网口径；切 .NET 11 用 -p:NetTFM=net11.0-windows10.0.26100.0。 -->
+      <NetTFM Condition="'$(NetTFM)' == ''">net10.0-windows10.0.26100.0</NetTFM>
       <TargetFramework>$(NetTFM)</TargetFramework>
       <!-- LakeUI 是外部商业兄弟仓，构建节奏独立，单独一个 TFM 参数 -->
       <LakeUITfm Condition="'$(LakeUITfm)' == ''">net10.0-windows10.0.17763.0</LakeUITfm>
