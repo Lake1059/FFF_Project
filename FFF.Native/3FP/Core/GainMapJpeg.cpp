@@ -37,8 +37,6 @@ struct Buf {
     }
 };
 
-std::string Quote(const std::string& s) { return s; }
-
 std::string ToLower(std::string s) {
     for (char& c : s) c = (char)std::tolower((unsigned char)c);
     return s;
@@ -321,57 +319,6 @@ bool ParseAppleMakerNoteHeadroom(const Buf& b, size_t exifPayload, float& headro
     return true;
 }
 
-// Compute SHA-256 (FIPS 180-3) of a byte span.
-void Sha256(const uint8_t* data, size_t len, uint8_t out[32]) {
-    static const uint32_t K[64] = {
-        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xabc5ed5b,
-        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
-        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
-        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
-        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf4e5346f,0x106aa070,
-        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
-        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
-    uint32_t H[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
-    uint64_t bitLen = (uint64_t)len * 8;
-    // pad
-    std::vector<uint8_t> m(data, data+len);
-    m.push_back(0x80);
-    while (m.size() % 64 != 56) m.push_back(0);
-    for (int i=7;i>=0;i--) m.push_back((uint8_t)(bitLen >> (i*8)));
-    for (size_t off=0; off<m.size(); off+=64) {
-        uint32_t w[64];
-        for (int i=0;i<16;i++) w[i] = (uint32_t(m[off+i*4])<<24)|(uint32_t(m[off+i*4+1])<<16)|(uint32_t(m[off+i*4+2])<<8)|m[off+i*4+3];
-        for (int i=16;i<64;i++) {
-            uint32_t s1 = (w[i-15]>>7 | w[i-15]<<25) ^ (w[i-15]>>18 | w[i-15]<<14) ^ (w[i-15]>>3);
-            uint32_t s2 = (w[i-2]>>17 | w[i-2]<<15) ^ (w[i-2]>>19 | w[i-2]<<13) ^ (w[i-2]>>10);
-            w[i] = w[i-16] + s1 + w[i-7] + s2;
-        }
-        uint32_t a=H[0],b=H[1],c=H[2],cc=H[3],d=H[4],e=H[5],f=H[6],g=H[7];
-        for (int i=0;i<64;i++) {
-            uint32_t S1=(e>>6|e<<26)^(e>>11|e<<21)^(e>>25|e<<7);
-            uint32_t ch=(e&f)^(~e&g);
-            uint32_t t1=g+S1+ch+K[i]+w[i];
-            uint32_t S0=(a>>2|a<<30)^(a>>13|a<<19)^(a>>22|a<<10);
-            uint32_t maj=(a&b)^(a&cc)^(b&cc);
-            uint32_t t2=S0+maj;
-            g=f;f=e;e=cc+t1;cc=d;d=c;c=b;b=a;a=t1+t2;
-        }
-        H[0]+=a;H[1]+=b;H[2]+=c;H[3]+=cc;H[4]+=d;H[5]+=e;H[6]+=f;H[7]+=g;
-    }
-    for (int i=0;i<8;i++) {
-        out[i*4+0]=(uint8_t)(H[i]>>24); out[i*4+1]=(uint8_t)(H[i]>>16);
-        out[i*4+2]=(uint8_t)(H[i]>>8);  out[i*4+3]=(uint8_t)(H[i]);
-    }
-}
-
-std::string Hex(const uint8_t* p, size_t n) {
-    static const char* H = "0123456789abcdef";
-    std::string s; s.resize(n*2);
-    for (size_t i=0;i<n;i++) { s[i*2]=H[p[i]>>4]; s[i*2+1]=H[p[i]&15]; }
-    return s;
-}
-
 // ---------- WebP probe ----------
 bool ProbeWebp(const Buf& b, JpegGainMapHit& out) {
     out.gainCodec = "webp";
@@ -381,6 +328,7 @@ bool ProbeWebp(const Buf& b, JpegGainMapHit& out) {
     bool hasVpx = false, hasExif = false, hasXmp = false, hasAnim = false;
     size_t vp8Off = 0, vp8Len = 0;
     std::string chunks;
+    std::string xmpBody;
     size_t p = 12;
     while (p + 8 <= b.n) {
         char id[5] = {0}; memcpy(id, b.d+p, 4);
@@ -401,27 +349,43 @@ bool ProbeWebp(const Buf& b, JpegGainMapHit& out) {
             hasExif = true;
         } else if (memcmp(id,"XMP ",4)==0) {
             hasXmp = true;
+            if (b.ok(body, sz)) xmpBody.assign((const char*)b.d+body, sz);
         }
         p = body + sz + (sz & 1);
     }
-    // A self-contained WebP gain map needs a base frame AND gain-map metadata
-    // (EXIF/XMP carrying hdrgm). This corpus has none, so every WebP here is
-    // found=false; the reason string MUST stay discriminative because the player
-    // routes the two negatives differently:
-    //   * spruit-...-gainmap.webp = 24KB bare VP8 gain LAYER (has gain-map data
-    //     but NO base in-file) -> fail_closed_unsupported: recognized as a gain
-    //     map but cannot be applied standalone.
-    //   * spruit_sunrise_4k.webp  = 1.5MB plain SDR photo (no gain-map wrapper
-    //     at all) -> not_gainmap.
-    // Heuristic: an auxiliary-sized VP8 (<64KB, no metadata) is the bare layer;
-    // a large VP8 is a plain SDR frame.
-    bool hasGainMeta = false;
-    if (hasVpx && !hasGainMeta && !hasAnim) {
-        out.found = false;
+    // Real hdr-gain-map detection: scan the XMP packet (and the whole file) for
+    // Ultra-HDR / Apple gain-map metadata. The old code set `hasGainMeta=false`
+    // as a dead constant and never actually scanned anything.
+    bool hasHdrgmMeta = false;
+    {
+        std::string_view all((const char*)b.d, b.n);
+        hasHdrgmMeta = all.find("hdr-gain-map") != std::string_view::npos
+                    || all.find("HDRGainMap") != std::string_view::npos
+                    || all.find("GainMapMin") != std::string_view::npos
+                    || all.find("hdrgm") != std::string_view::npos;
+    }
+    out.found = false;
+    // A WebP that actually carries hdr-gain-map metadata is a real gain-map file
+    // we cannot decode -> honest unsupported (present=true upstream).
+    if (hasHdrgmMeta) {
         out.containerKind = "webp_gainmap";
         out.family = "iso";
-        out.metaSource = "gcontainer";
-        bool bareLayer = (vp8Len < 65536);
+        out.metaSource = "xmp";
+        out.reason = "UNSUPPORTED_WEBP_GAINMAP: hdr-gain-map metadata present in WebP "
+                     "but WebP gain-map decode not implemented";
+        return false;
+    }
+    // No positive gain-map metadata. Distinguish a bare auxiliary gain layer
+    // (recognized as a gain map, cannot apply standalone) from a plain SDR WebP.
+    // A gain map is a downscaled auxiliary layer, so a lone small lossy VP8 frame
+    // is treated as the bare layer; a large lone VP8 is an ordinary SDR photo.
+    if (hasVpx && !hasAnim) {
+        out.containerKind = "webp_gainmap";
+        out.family = "iso";
+        // WebP gain-map metadata lives in an XMP hdrgm chunk; GContainer is a
+        // JPEG-only XMP construct and never applies to WebP → source is "xmp".
+        out.metaSource = "xmp";
+        bool bareLayer = (vp8Len <= 256u * 1024u);
         if (bareLayer) {
             out.reason = "BARE_GAINMAP_LAYER_NO_BASE: gain-map VP8 layer present but no "
                          "base image in file; recognized as gain map yet cannot be applied "
@@ -433,7 +397,6 @@ bool ProbeWebp(const Buf& b, JpegGainMapHit& out) {
         if (b.ok(vp8Off, vp8Len)) out.gainBytes.assign(b.d+vp8Off, b.d+vp8Off+vp8Len);
         return false;
     }
-    out.found = false;
     out.reason = "no gain-map wrapper in WebP (chunks: " + chunks + ")";
     return false;
 }
@@ -612,10 +575,18 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
     float appleXmpHeadroom = ParseFloat(XmpElem(allXmp, "HDRGainMap:HDRGainMapHeadroom"));
     int appleVer = (int)ParseFloat(XmpElem(allXmp, "HDRGainMap:HDRGainMapVersion"), 0.f);
 
-    // No MPF at all -> not a gain map JPEG (plain SDR).
+    // No MPF at all. If the JPEG still declares HDR gain-map headroom in XMP
+    // (Apple HDRGainMapHeadroom or hdr-gain-map), it is an HDR base rendition
+    // with no separable gain-map image: route upstream to present=true /
+    // form=jpeg_hdr / decoded_not_applied instead of a flat not_gainmap.
     if (!hasMpf || mpf.size() < 2) {
-        if (hdrgmDecl && hdrgmParams) {
-            out.reason = "hdrgm XMP present but no MPF second image";
+        bool hdrHeadroomDeclared = (appleXmpHeadroom > 0.f) ||
+                                   (hdrgmDecl && hdrgmParams);
+        if (hdrHeadroomDeclared) {
+            char b[160];
+            sprintf(b, "JPEG_HDR_BASE_NO_GAINMAP: HDR headroom declared in XMP (headroomLog2=%.3f) "
+                       "but no MPF gain-map second image", (double)appleXmpHeadroom);
+            out.reason = b;
         } else if (hdrgmDecl) {
             out.reason = "hdrgm namespace only, no parameters and no MPF second image";
         } else {
@@ -746,11 +717,16 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
         out.logBoost[4]=0; out.logBoost[5]=appleHeadroomLog2;
     } else {
         out.family = "iso";
+        // Adobe "GContainer" form requires the ISO 21496-1 APP2 URN. The plain
+        // hdrgm Ultra HDR XMP also emits Container:Directory/Item:Semantic (to
+        // point at the MPF gainmap image), so hasGContainer alone must NOT be
+        // read as the Adobe container; without the URN it is classic Ultra HDR.
         if (hasIsoUrn) {
             out.containerKind = "jpeg_adobe_gcontainer";
-            out.metaSource = "app2";
-        } else if (hasGContainer) {
-            out.containerKind = "jpeg_adobe_gcontainer";
+            // Adobe GContainer form: the gain-map metadata comes from the XMP
+            // Container:Directory (GContainer), never from the APP2 segment itself
+            // (APP2 only carries the URN marker). "app2" is the carrier segment,
+            // not the metadata source → always "gcontainer".
             out.metaSource = "gcontainer";
         } else {
             out.containerKind = "jpeg_uhdr";
