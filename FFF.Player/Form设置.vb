@@ -13,6 +13,9 @@ Public Class Form设置
     ' AI 实时字幕页。放在注册表最末：导航项是 Designer 里按添加顺序硬绑的，
     ' 中间插一项会把后面每一页都错位，而这一页的位置没有硬约束。
     Private ReadOnly AI字幕页面 As New Form设置_AI字幕()
+    ' 播放进度页。同样放在注册表最末：导航项按 Designer 添加顺序硬绑，
+    ' 中间插一项会把它后面的每一页都错位。追加在 AI 字幕之后没有硬约束。
+    Private ReadOnly 播放进度页面 As New Form设置_播放进度()
     Private ReadOnly 页面注册 As (页面 As Form, 初始化 As Action)()
 
     Public Sub New()
@@ -30,7 +33,8 @@ Public Class Form设置
             (音乐与歌词页面, AddressOf 音乐与歌词页面.初始化页面),
             (文件关联页面, AddressOf 文件关联页面.初始化页面),
             (视频超分辨率页面, AddressOf 视频超分辨率页面.初始化页面),
-            (AI字幕页面, AddressOf AI字幕页面.初始化页面)
+            (AI字幕页面, AddressOf AI字幕页面.初始化页面),
+            (播放进度页面, AddressOf 播放进度页面.初始化页面)
         }
         Dim 导航项 = ModernTabListControl1.Items.Where(Function(x) Not x.IsSeparator).ToArray()
         If 导航项.Length <> 页面注册.Length Then Throw New InvalidOperationException("设置导航与页面注册数量不一致。")

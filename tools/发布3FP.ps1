@@ -2,7 +2,8 @@
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
     [string]$OutputDirectory = "",
-    # 目标框架。留空 = 用播放器默认值（当前 net10.0-windows）。
+    # 目标框架。留空 = 用播放器默认值（当前 net10.0-windows10.0.26100.0；
+    # 带 Windows SDK 版本是为了系统媒体集成（SMTC）的 WinRT 投影）。
     # .NET 11 正式版发布后改为：发布3FP.ps1 -NetTFM net11.0-windows10.0.26100.0
     [string]$NetTFM = "",
     # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。

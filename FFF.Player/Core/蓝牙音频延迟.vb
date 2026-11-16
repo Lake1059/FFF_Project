@@ -609,13 +609,32 @@ Public Module 蓝牙音频检测器
         Return ""
     End Function
 
+    ''' <summary>判定一个 BTHENUM/BTHLE 节点是否音频服务节点。
+    ''' 第一道：Windows inbox 驱动写的 Service 名子串（既有行为）。
+    ''' 第二道：厂商自定义节点 Service 可能为空/命名不规范，按实例路径里的 SIG 音频
+    ''' profile UUID 判定（与 推断服务()/映射协议() 同一张表）；GATT({fd9a})、
+    ''' 厂商({101020}) 等非音频 UUID 不在表内，仍拒收，不会误纳 HID/AVRCP。</summary>
+    Private Function 是音频服务节点(服务 As String, 实例路径 As String) As Boolean
+        If 服务.IndexOf("BthA2dp", StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+        If 服务.IndexOf("BthHF", StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+        If 服务.IndexOf("BthHsp", StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+        If 服务.IndexOf("BthLEAudio", StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+
+        If 实例路径.IndexOf(蓝牙低功耗根, StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+        Dim 标识 = 提取服务标识(实例路径)
+        If 标识 IsNot Nothing Then
+            Dim 大写 = 标识.ToUpperInvariant()
+            If 大写 = 标识A2DP OrElse 大写 = 标识HFP OrElse 大写 = 标识HFPAG OrElse 大写 = 标识HSP Then
+                Return True
+            End If
+        End If
+        Return False
+    End Function
+
     Private Function 读取节点键(键 As RegistryKey, 实例路径 As String) As 蓝牙节点
         Dim 服务 = 读取字符串(键.GetValue("Service"))
         If 服务 Is Nothing Then 服务 = ""
-        If Not (服务.IndexOf("BthA2dp", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-                服务.IndexOf("BthHF", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-                服务.IndexOf("BthHsp", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-                服务.IndexOf("BthLEAudio", StringComparison.OrdinalIgnoreCase) >= 0) Then Return Nothing
+        If Not 是音频服务节点(服务, 实例路径) Then Return Nothing
 
         Dim 硬件 = 首个字符串(键.GetValue("HardwareID"))
         If 硬件 Is Nothing Then 硬件 = ""

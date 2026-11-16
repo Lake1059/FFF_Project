@@ -87,6 +87,41 @@ Public NotInheritable Class 播放列表
         End SyncLock
     End Function
 
+    ''' <summary>
+    ''' 只读查询：当前项自然播完后，播放列表是否还会给出下一项。
+    ''' 不能调用 <see cref="移动到播放结束后的项目"/> 来判断——那个方法会推进当前索引。
+    ''' </summary>
+    Public Function 播放结束后是否有下一项() As Boolean
+        SyncLock 项目
+            If 项目 Is Nothing OrElse 项目.Count = 0 OrElse 当前值 < 0 Then Return False
+            Select Case 播放模式
+                Case 列表播放模式.播完停止
+                    Return False
+                Case 列表播放模式.顺序播放
+                    Return 当前值 + 1 < 项目.Count
+                Case 列表播放模式.单项循环, 列表播放模式.列表循环, 列表播放模式.随机播放
+                    ' 单曲循环、列表循环（含单曲）、随机（含单曲）都会重新打开一项；
+                    ' 播放结束对它们不是“停止”，只是“换下一项”的过渡。
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End SyncLock
+    End Function
+
+    ''' <summary>
+    ''' 只读查询：当前项在指定方向是否还有相邻项。用于 SMTC 上/下一曲按钮的可用性，
+    ''' 不推进索引；到头/到尾返回 False（与 <see cref="移动到相邻项目"/> 的边界一致）。
+    ''' </summary>
+    Public Function 是否存在相邻项目(方向 As Integer) As Boolean
+        If 方向 <> -1 AndAlso 方向 <> 1 Then Throw New ArgumentOutOfRangeException(NameOf(方向))
+        SyncLock 项目
+            If 项目 Is Nothing OrElse 项目.Count = 0 OrElse 当前值 < 0 Then Return False
+            Dim 目标索引 = 当前值 + 方向
+            Return 目标索引 >= 0 AndAlso 目标索引 < 项目.Count
+        End SyncLock
+    End Function
+
     Public Sub 添加(本地路径 As String)
         Dim 新项目 As New 播放列表项(本地路径)
         SyncLock 项目

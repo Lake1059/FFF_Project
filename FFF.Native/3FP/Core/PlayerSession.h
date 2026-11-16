@@ -5,9 +5,14 @@
 #include "3FP/Api/FFF.Player.AudioPassthrough.h"
 #include "3FP/Audio/WasapiRenderer.h"
 #include "3FP/Audio/AudioPassthrough.h"
+#include "3FP/Core/AvifItemProbe.h"
 #include "3FP/Core/AvifTileGridComposer.h"
+#include "3FP/Core/GainMapProbe.h"
 #include "3FP/Core/PlacementPolicy.h"
 #include "3FP/Core/PlaybackPerformancePolicy.h"
+// Contract v1 (header-only in this step): pulling it in here makes the layout and
+// value static_asserts compile instead of sitting uninstantiated in a header.
+#include "3FP/Core/MemoryBudgetArbiter.h"
 #include "3FP/Core/RawStillSource.h"
 // IAMF needs the AOM reference decoder: FFmpeg splits an IAMF element into
 // dependent substreams and never mixes them (see IamfAudioDecoder.h).
@@ -45,6 +50,9 @@ struct FFF3FPCpuPlacementSnapshot;
 class Fmp4FragmentScanner;
 
 class PlayerSession final {
+#ifdef FFF_SECURITY_REGRESSION_TESTS
+    friend struct PlayerSecurityRegression;
+#endif
 public:
     explicit PlayerSession(const FFF3FPConfiguration& configuration);
     ~PlayerSession();
@@ -192,6 +200,13 @@ public:
     FFF3FPVideoAutoHdr RequestedVideoAutoHdr() const noexcept;
     FFFResult GetVideoAutoHdrStatus(
         FFF3FPVideoAutoHdrStatus& status) const noexcept;
+    // Still-image GainMap apply toggle (FFF3FP_SetGainMapEnabled). enabled=true
+    // presents the applied HDR buffer the open-time probe produced; enabled=false
+    // presents the linear SDR base buffer. The probe buffers stay in memory and
+    // are never rebuilt: this repacks one of them and re-presents the retained
+    // still frame once. Video / non-applicable images are rejected and the flag
+    // stays untouched (a failure never half-applies).
+    FFFResult SetGainMapEnabled(bool enabled) noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
     // CPU placement diagnostics (appended export FFF3FP_GetCpuPlacementSnapshot, P3-12).
     // Advisory read-only snapshot: it deliberately takes no session lock and changes no
@@ -250,6 +265,11 @@ public:
     FFFResult SetAuxiliaryComposition(const FFF3FPAuxiliaryComposition& composition) noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
+    // Structural ICC profile report built at open from the decoded frame's side
+    // data. Always returns a valid JSON document ({"status":"absent"} when the
+    // media carries no usable side-data profile); mirrors MediaInfo()'s lock
+    // discipline so the caller never touches worker-owned decoder frames.
+    std::string IccProfileJson() const;
 
 private:
     using Command = std::function<void()>;
@@ -320,7 +340,8 @@ private:
     bool RecoverAudioDevice() noexcept;
     bool RecoverVideoDevice() noexcept;
     FFFResult OpenFormat(const std::string& pathUtf8, AVFormatContext** format,
-        std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept;
+        std::unique_ptr<SharedFileInput>& io, std::string& error,
+        std::int32_t* mergedExtents = nullptr, AvifItemInfo* avifInfo = nullptr) noexcept;
     // A second demuxer for the trial decode, opened under the same IO policy as
     // OpenFormat (protocol allow/deny lists, the same file-or-repaired-memory
     // input, the same demuxer gate) and additionally wired to the session's
@@ -328,7 +349,8 @@ private:
     // avformat_find_stream_info: the trial needs only the stream table, which the
     // header already carries.
     FFFResult OpenProbeFormat(const std::string& pathUtf8, AVFormatContext** format,
-        std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept;
+        std::unique_ptr<SharedFileInput>& io, std::string& error,
+        std::int32_t* mergedExtents = nullptr, AvifItemInfo* avifInfo = nullptr) noexcept;
     static int ProbeInterrupt(void* opaque) noexcept;
     void CloseFormat(AVFormatContext** format,
         std::unique_ptr<SharedFileInput>& io) noexcept;
@@ -394,11 +416,14 @@ private:
     // Presents the first frame while the session stays stopped. Used for a still
     // picture and for an animated one, both of which must show a frame without
     // playback running; rewinds afterwards so play starts from the beginning.
-    FFFResult DecodeInitialFrame() noexcept;
+    // detailOut (optional) receives a human-readable failure reason on a
+    // non-success return; it is internal-only and does not touch the ABI.
+    FFFResult DecodeInitialFrame(std::string* detailOut = nullptr) noexcept;
     // A tiled still image (grid AVIF/HEIC) has no pre-assembled picture anywhere in
     // the file: it is one stream per tile plus a grid group saying where the tiles
-    // go. This decodes them and presents the canvas they make, and it can run again
-    // after a device change because the tile packets were read at open.
+    // go. This decodes the tiles one by one and presents the canvas after each
+    // placement, so the picture fills in progressively; it can run again after a
+    // device change because the tile packets were read at open.
     FFFResult ComposeTileGridFrame() noexcept;
     // Reads each tile's packets once, in draw order's stream set, so the canvas can
     // be rebuilt without a demuxer rewind (a still image has no timeline to seek to).
@@ -409,8 +434,11 @@ private:
     void ApplyRotationFromDecodedFrame() noexcept;
     // Fills `info` from the session state. Only ever runs on the worker thread
     // (called at the end of DoOpen) because it reads decoder-owned frames; the
-    // public GetImageInfo hands out the published copy instead.
-    void BuildImageInfo(FFF3FPImageInfo& info) const noexcept;
+    // public GetImageInfo hands out the published copy instead. Non-const on
+    // purpose: it also publishes the captured ICC profile bytes and their parsed
+    // JSON into the members below, which the appended FFF3FP_GetIccProfileInfo
+    // export reads back under snapshotMutex_.
+    void BuildImageInfo(FFF3FPImageInfo& info) noexcept;
     FFFResult LoadCoverArt() noexcept;
     FFFResult DecodePacket(AVCodecContext* decoder, AVPacket* packet, bool video,
         AVFormatContext* owner) noexcept;
@@ -441,6 +469,17 @@ private:
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
         bool seekPreview = false) noexcept;
+    // Builds a presentation-ready RGBAF32LE frame (BT.709 / LINEAR / RGB / JPEG
+    // range, the gainmap contract's exact attributes) out of one of the open-time
+    // probe buffers. Caller owns the returned frame; nullptr when the buffer is
+    // unusable. Used both by the frame path and by SetGainMapEnabled's redraw, so
+    // the two paths never drift apart in pixel layout.
+    AVFrame* BuildGainMapPresentationFrame(const std::vector<float>* buffer,
+        int width, int height, std::int64_t pts, std::int64_t bestEffortPts) noexcept;
+    // Worker-thread half of SetGainMapEnabled: validates the session really is a
+    // gainmap still that can switch, then flips gainMapEnabled_ and re-presents
+    // the retained frame once. Never re-probes, re-decodes or touches the queue.
+    FFFResult ApplyGainMapEnabledOnWorker(bool enabled) noexcept;
     // True at most once per seek: the first picture decoded on the way to the
     // target may go on screen so the key press has a visible answer, but it must
     // not retire the seek (see PresentVideoFrame's seekPreview parameter).
@@ -690,6 +729,13 @@ private:
     std::uint32_t threadLadderMin_ = 4;            // floor / first rung (soft-decode minimum)
     std::uint32_t threadLadderMax_ = 32;
     std::uint32_t decoderThreads_ = 0;             // current rung; 0 = not yet chosen
+    // Σfloor precheck cap (docs/108 M-17): when ResolveFloors lands on step 2
+    // (DecodeFourThreads) the arbiter granted a floor built on a 4-worker decode
+    // pipeline, so the real worker count must never exceed 4 for this open. 0 = no
+    // precheck cap (the ladder's own ceiling rules). It is folded onto the value
+    // SelectSoftwareDecoderThreads picks AND onto the runtime ladder ceiling, so the
+    // runtime ladder can never climb back above the budget the precheck assumed.
+    std::uint32_t precheckDecoderThreadCap_ = 0;
     std::uint64_t ladderWindowDecoded_ = 0;        // counters when the window armed
     std::uint64_t ladderWindowPresented_ = 0;
     std::int64_t ladderWindowStart100ns_ = 0;
@@ -707,7 +753,7 @@ private:
     std::uint64_t ladderWindowConvert100ns_ = 0;
     std::uint64_t ladderWindowDropped_ = 0;
     // Current rung of the software look-ahead pool ladder: indexes SoftwarePoolBudgets
-    // / SoftwarePoolFrameCaps (128 MB / 4 frames at the floor, 1024 MB / 16 at the top).
+    // / SoftwarePoolFrameCaps (128 MB / 4 frames at the floor, 2048 MB / 24 at the top).
     // Climbs one rung per window the pool gate finds pool-starved; like the thread
     // ladder it never descends, and it resets per media (see DoClose).
     std::uint8_t softwarePoolRung_ = 0;
@@ -785,11 +831,9 @@ private:
     // audio path never takes it.
     mutable std::mutex asrTapMutex_;
     std::shared_ptr<AsrAudioTap> asrTap_;
-    // Worker-side view of asrTap_ for the passthrough shadow decode. A bare
-    // pointer, not a shared_ptr: the audio hot path must not take asrTapMutex_,
-    // and the worker owns every write (install/uninstall commands) while
-    // asrTap_ keeps the object alive. Cleared on DisableAudioTap and on close.
-    AsrAudioTap* asrTapWorkerRaw_ = nullptr;
+    // Worker-owned reference for shadow decode. Only the worker changes it,
+    // so Produce takes no mutex and API replacement cannot release its ring.
+    std::shared_ptr<AsrAudioTap> asrTapWorker_;
     // Shadow-decode failure policy: TrueHD/DTS-HD opened mid-stream error on
     // every AU until the next major sync, so the threshold is deliberately wide.
     // Any decoded frame resets the count; only a persistent failure disables the
@@ -832,6 +876,18 @@ private:
     // the build reads must not be touched from the caller's thread.
     bool hasPublishedImageInfo_ = false;
     FFF3FPImageInfo publishedImageInfo_{};
+    // ICC profile captured from the decoded frame's side data at open. This is
+    // deliberately NOT part of the 16 KiB side-data ring (which skips ICC as too
+    // large and useless to the colour analyser): the raw bytes are kept whole so
+    // an exporter can hand them back, alongside the structural parse result
+    // projected to JSON at build time. BuildImageInfo writes these on the worker
+    // thread; the publish flag flips under snapshotMutex_ together with
+    // hasPublishedImageInfo_. lastIccStatus_ mirrors the parser StatusName for
+    // diagnostics ("absent" when no side data was seen at all).
+    bool hasPublishedIcc_ = false;
+    std::vector<std::uint8_t> publishedIccProfile_;
+    std::string publishedIccJson_;
+    std::string lastIccStatus_;
     // RAW metadata is published alongside the image info; false means the
     // current media is not a RAW (or Open has not reached the publish point).
     bool hasPublishedRawInfo_ = false;
@@ -1001,7 +1057,60 @@ private:
     // steps it down -- and reset to the default by DoOpen and by an audio-track
     // change. Everything that touches it runs on the session worker thread.
     static constexpr std::int64_t kAudioTargetBufferStep100ns = 300'000;
-    std::int64_t audioTargetBuffer100ns_ = performance_.AudioInitial();
+    std::int64_t audioTargetBuffer100ns_ = performance_.AudioInitial100ns();
+
+    // ── Unified memory budget ledger (docs/108, contract v1) ──────────────────
+    // Every value below is bytes unless the name says 100ns. All of it is inert
+    // when FFF3FP_MEMARB=0: the ledger is never attached and every consumer keeps
+    // reading its own static table.
+    void AttachMemoryBudgetLedger() noexcept;
+    void DetachMemoryBudgetLedger() noexcept;
+    void RefreshMemoryBudgetLedger() noexcept;
+    void ApplyMemoryBudgetMask(std::uint32_t changedMask) noexcept;
+    void EnsureVideoBudgetClaim(std::uint64_t grantedBytes) const noexcept;
+    void ApplyAudioMemoryCap() noexcept;
+    // docs/108 §4.3: refuse to open a stream whose Σfloor cannot fit the pool. Runs
+    // before any decoder/surface exists, so a refusal leaves nothing half-built.
+    FFFResult PrecheckMemoryBudget() noexcept;
+    // docs/111 D-04: a seek or a track switch needs room for the pre-seek tail to
+    // drain while the new position refills. Borrowing is capped (one device buffer)
+    // and time-boxed (5 s); Reconcile returns it on expiry or once the queue is
+    // back under the target.
+    void TryAudioHeadroomBorrow(const char* reason) noexcept;
+    void ReconcileAudioHeadroomBorrow() noexcept;
+    // docs/109 A-03/A-04: the water level may come back down, but only when the
+    // stream is demonstrably calm, and a rollback after a short wrong step locks
+    // the automatic adjustment for a minute.
+    void MaybeLowerAudioWatermark() noexcept;
+    std::int64_t audioLastDecrease100ns_ = 0;        // 100ns
+    std::int64_t audioDecreaseLockUntil100ns_ = 0;   // 100ns
+    std::uint32_t audioQuietBufferedTicks_ = 0;
+    std::uint32_t audioRollbackCount_ = 0;
+    std::uint64_t audioWatermarkUnderrunBaseline_ = 0;
+    std::size_t VideoFrameCapTier() const noexcept;
+    std::uint64_t AudioBytesPerSecond() const noexcept;
+    void TraceMemoryBudget(const char* event, std::size_t limitFrames,
+        std::uint64_t grantedBytes, std::int64_t now100ns) const noexcept;
+    bool memoryBudgetAttached_ = false;
+    // Verdict of the open-time Σfloor precheck (docs/108 §4.3), as DegradeStep.
+    // 0 = no degradation, 1 = video floor 2 frames, 2 = decode 4 threads, 3 = refused.
+    // The video claim below reads it so the degraded floor is the one actually claimed.
+    std::uint8_t precheckFloorStep_ = 0;
+    std::int64_t nextMemoryBudgetSample100ns_ = 0;   // 100ns, 250 ms throttle
+    std::uint32_t lastMemoryBudgetMask_ = 0;
+    std::uint32_t memoryBudgetInvariantSeen_ = 0;
+    mutable std::uint64_t videoBudgetFloorBytes_ = 0;
+    // Borrowed audio headroom (docs/111 D-04) and the deadline that caps it.
+    std::uint64_t audioBorrowedBytes_ = 0;
+    std::int64_t audioBorrowDeadline100ns_ = 0;      // 100ns
+    std::uint32_t audioBorrowHits_ = 0;
+    std::uint32_t audioBorrowMisses_ = 0;
+    mutable std::uint64_t videoBudgetCeilingBytes_ = 0;
+    mutable std::uint64_t arbiterVideoGrantSeenBytes_ = 0;
+    mutable std::size_t arbiterVideoLimitFrames_ = 0;
+    mutable std::int64_t arbiterVideoLimitStamp100ns_ = 0;   // 100ns
+    mutable std::uint32_t arbiterVideoRecomputeCount_ = 0;
+    mutable std::uint32_t arbiterVideoSuppressCount_ = 0;
     std::atomic<bool> interactiveMove_{false};
     // Last-seen values of the renderer's warning counters. Any growth since the
     // previous pump buys one step of target headroom -- underruns are the hard
@@ -1033,6 +1142,48 @@ private:
     std::uint8_t tileGridBackground_[4];
     std::vector<AvifTileGridComposer::Tile> tileGridTiles_;
     std::vector<AvifTileGridComposer::TileSource> tileGridSources_;
+    // Private gainmap detection result for the current still image. Reset on
+    // open; verdict drives whether the host knows this is an HDR gainmap still.
+    GainMapProbeResult gainmapInfo_;
+    // User-facing toggle for the GainMap application. Defaults to true on every
+    // open (each picture starts on its applied HDR buffer) and flips only through
+    // SetGainMapEnabled. Worker-thread state: read in the frame path, written by
+    // the queued setter command.
+    bool gainMapEnabled_ = true;
+    // SetGainMapEnabled's 5 s wait is not a guarantee that the command ran.
+    // On timeout the caller bumps this generation; a queued toggle that has not
+    // started yet sees the mismatch and returns without touching the session.
+    std::atomic<std::uint64_t> gainMapToggleGeneration_{0};
+    // One-shot guard for the toggle-off fallback note (baseRgba unavailable):
+    // RawTrace at most once per open so a still frame never floods the log.
+    bool gainMapBaseFallbackNoted_ = false;
+    // A layered ("progressive") AV1 still image: the primary item was stored as
+    // several contiguous extents, which is the shape AvifIlocShim repairs. Set at
+    // open only for a static, non-grid AV1 file; the decode side uses it to ask
+    // libdav1d for every spatial layer and to present the coarse base layer before
+    // the finished one.
+    bool layeredStillImage_;
+    // Standard layered-image signals from the primary item's property associations.
+    // The extent count alone is only a libavif storage convention; a1lx and lsel are
+    // what a conformant file declares. layerCount 0 means "not declared".
+    std::int32_t layeredLayerCount_ = 0;
+    bool layeredLsel_ = false;
+    // -1 = no selector, 0xFFFF = all layers, 0..3 = one selected layer.
+    std::int32_t layeredLayerId_ = -1;
+    std::int32_t layeredOpIndex_ = -1;
+    // Runtime ordinal of the AV1 frame being presented while a still image is
+    // draining. Used only when lsel selects one layer.
+    std::int32_t layeredPresentOrdinal_ = 0;
+    bool layeredPresentDone_ = false;
+    // Emits FirstFramePresented once per Open(), after the first successful
+    // renderer submission. Reset on the API thread before DoOpen is enqueued, so
+    // a reopen cannot inherit the previous media's event state.
+    std::atomic<bool> firstFramePresentedEmitted_{false};
+    // The size the still image is meant to occupy on screen. A 400x300 base layer
+    // of an 800x600 image keeps its 800x600 presentation box while the coarse
+    // texture is shown; 0 means "same as the frame".
+    std::int32_t stillDisplayWidth_ = 0;
+    std::int32_t stillDisplayHeight_ = 0;
     // A picture that moves: either a loop-aware image demuxer (GIF/APNG/WebP) or
     // an image sequence carried by the mov demuxer (AVIF/HEIC). Such a file is
     // not a still image, but it is still a picture: it must show its first frame

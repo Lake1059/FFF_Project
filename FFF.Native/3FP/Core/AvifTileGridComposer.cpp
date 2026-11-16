@@ -7,6 +7,7 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/mem.h>
 #include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
 }
 
 #include <algorithm>
@@ -23,6 +24,34 @@ std::int32_t StreamIndex(const AVFormatContext* format, const AVStream* stream) 
     return -1;
 }
 
+// Fills the whole canvas with the group's background colour. A zero background
+// keeps the old black-fill path (and its exact limited/full-range behaviour);
+// anything else goes through swscale, which writes the native components of the
+// canvas pixel format instead of treating RGBA bytes as already-YUV.
+bool FillCanvasBackground(AVFrame* canvas, const std::uint8_t background[4]) noexcept {
+    if (canvas == nullptr || background == nullptr) return false;
+    const auto allZero = background[0] == 0 && background[1] == 0 &&
+        background[2] == 0 && background[3] == 0;
+    ptrdiff_t stride[AV_NUM_DATA_POINTERS] = {};
+    for (int plane = 0; plane < AV_NUM_DATA_POINTERS; ++plane)
+        stride[plane] = canvas->linesize[plane];
+    if (allZero) {
+        return av_image_fill_black(canvas->data, stride,
+            static_cast<AVPixelFormat>(canvas->format), canvas->color_range,
+            canvas->width, canvas->height) >= 0;
+    }
+    auto* sws = sws_getContext(1, 1, AV_PIX_FMT_RGBA,
+        canvas->width, canvas->height, static_cast<AVPixelFormat>(canvas->format),
+        SWS_POINT, nullptr, nullptr, nullptr);
+    if (sws == nullptr) return false;
+    std::uint8_t sourcePixel[4] = {background[0], background[1], background[2], background[3]};
+    std::uint8_t* sourceData[4] = {sourcePixel, nullptr, nullptr, nullptr};
+    int sourceStride[4] = {4, 0, 0, 0};
+    const auto scaled = sws_scale(sws, sourceData, sourceStride, 0, 1, canvas->data, canvas->linesize);
+    sws_freeContext(sws);
+    return scaled > 0;
+}
+
 }  // namespace
 
 bool AvifTileGridComposer::Describe(AVFormatContext* format, std::int32_t& width,
@@ -35,8 +64,16 @@ bool AvifTileGridComposer::Describe(AVFormatContext* format, std::int32_t& width
         if (grid == nullptr || grid->nb_tiles == 0 || grid->coded_width <= 0 || grid->coded_height <= 0)
             return false;
         if (grid->nb_tiles > entry->nb_streams) return false;
-        width = grid->coded_width;
-        height = grid->coded_height;
+        // grid->coded_width/height describe the coded canvas; width/height are
+        // the final presentation size after the group's right/bottom crop. The
+        // old code used coded_width/height, so a cropped grid showed the cropped
+        // band. Draw straight into the presented box and shift tile offsets by
+        // the crop origin.
+        const auto cropX = std::max(0, grid->horizontal_offset);
+        const auto cropY = std::max(0, grid->vertical_offset);
+        width = grid->width > 0 ? grid->width : grid->coded_width - cropX;
+        height = grid->height > 0 ? grid->height : grid->coded_height - cropY;
+        if (width <= 0 || height <= 0) return false;
         std::memcpy(background, grid->background, 4);
         tiles.clear();
         tiles.reserve(grid->nb_tiles);
@@ -44,8 +81,8 @@ bool AvifTileGridComposer::Describe(AVFormatContext* format, std::int32_t& width
             if (grid->offsets[tile].idx >= entry->nb_streams) return false;
             Tile placement;
             placement.streamIndex = StreamIndex(format, entry->streams[grid->offsets[tile].idx]);
-            placement.left = grid->offsets[tile].horizontal;
-            placement.top = grid->offsets[tile].vertical;
+            placement.left = grid->offsets[tile].horizontal - cropX;
+            placement.top = grid->offsets[tile].vertical - cropY;
             if (placement.streamIndex < 0) return false;
             tiles.push_back(placement);
         }
@@ -136,54 +173,86 @@ void AvifTileGridComposer::Blit(const AVFrame* source, AVFrame* destination,
     }
 }
 
+AVFrame* AvifTileGridComposer::BeginCanvas(AVFormatContext* format,
+    const TileSource& firstSource, const Tile& firstTile,
+    const std::int32_t width, const std::int32_t height,
+    const std::uint8_t background[4]) noexcept {
+    if (format == nullptr || firstSource.streamIndex != firstTile.streamIndex ||
+        width <= 0 || height <= 0) return nullptr;
+    AVFrame* first = DecodeTile(format, firstSource);
+    if (first == nullptr || first->format == AV_PIX_FMT_NONE) {
+        av_frame_free(&first);
+        return nullptr;
+    }
+    auto* canvas = av_frame_alloc();
+    if (canvas == nullptr) {
+        av_frame_free(&first);
+        return nullptr;
+    }
+    canvas->format = first->format;
+    canvas->width = width;
+    canvas->height = height;
+    // The decoded frame, not codecpar, is authoritative: a container without a
+    // pixi property reports AV_PIX_FMT_NONE, and alpha/bit-depth drift between
+    // codecpar and the bitstream would otherwise size the canvas for the wrong
+    // pixel layout. The black fill therefore also uses the bitstream's range.
+    canvas->color_range = first->color_range;
+    canvas->color_primaries = first->color_primaries;
+    canvas->color_trc = first->color_trc;
+    canvas->colorspace = first->colorspace;
+    canvas->chroma_location = first->chroma_location;
+    if (av_frame_get_buffer(canvas, 0) < 0) {
+        av_frame_free(&first);
+        av_frame_free(&canvas);
+        return nullptr;
+    }
+    // Canvas pixels no tile covers take the group's declared background colour;
+    // a fully covered canvas costs only the fill. A zero background keeps the
+    // previous black fill (and its exact range handling).
+    if (!FillCanvasBackground(canvas, background)) {
+        av_frame_free(&first);
+        av_frame_free(&canvas);
+        return nullptr;
+    }
+    Blit(first, canvas, firstTile.left, firstTile.top);
+    av_frame_free(&first);
+    return canvas;
+}
+
+bool AvifTileGridComposer::ComposeTileOnto(AVFormatContext* format, const TileSource& source,
+    const Tile& tile, AVFrame* canvas) noexcept {
+    if (format == nullptr || canvas == nullptr || source.streamIndex != tile.streamIndex) return false;
+    AVFrame* frame = DecodeTile(format, source);
+    if (frame == nullptr) return false;
+    if (frame->format != canvas->format) {
+        av_frame_free(&frame);
+        return false;
+    }
+    Blit(frame, canvas, tile.left, tile.top);
+    av_frame_free(&frame);
+    return true;
+}
+
 AVFrame* AvifTileGridComposer::Compose(AVFormatContext* format, const std::vector<Tile>& tiles,
     const std::vector<TileSource>& sources, const std::int32_t width, const std::int32_t height,
     const std::uint8_t background[4]) noexcept {
-    if (format == nullptr || tiles.empty() || width <= 0 || height <= 0) return nullptr;
-    std::vector<AVFrame*> decoded;
-    decoded.reserve(tiles.size());
-    AVFrame* canvas = nullptr;
-    for (const auto& tile : tiles) {
-        AVFrame* frame = nullptr;
-        for (const auto& source : sources) {
-            if (source.streamIndex != tile.streamIndex) continue;
-            frame = DecodeTile(format, source);
-            break;
+    if (format == nullptr || tiles.empty()) return nullptr;
+    const TileSource* firstSource = nullptr;
+    for (const auto& candidate : sources) {
+        if (candidate.streamIndex == tiles.front().streamIndex) { firstSource = &candidate; break; }
+    }
+    if (firstSource == nullptr) return nullptr;
+    auto* canvas = BeginCanvas(format, *firstSource, tiles.front(), width, height, background);
+    if (canvas == nullptr) return nullptr;
+    for (std::size_t index = 1; index < tiles.size(); ++index) {
+        const TileSource* source = nullptr;
+        for (const auto& candidate : sources) {
+            if (candidate.streamIndex == tiles[index].streamIndex) { source = &candidate; break; }
         }
-        if (frame == nullptr) {
-            for (auto* done : decoded) av_frame_free(&done);
+        if (source == nullptr || !ComposeTileOnto(format, *source, tiles[index], canvas)) {
+            av_frame_free(&canvas);
             return nullptr;
         }
-        decoded.push_back(frame);
     }
-    canvas = av_frame_alloc();
-    if (canvas == nullptr) {
-        for (auto* done : decoded) av_frame_free(&done);
-        return nullptr;
-    }
-    canvas->format = decoded.front()->format;
-    canvas->width = width;
-    canvas->height = height;
-    canvas->color_range = decoded.front()->color_range;
-    canvas->color_primaries = decoded.front()->color_primaries;
-    canvas->color_trc = decoded.front()->color_trc;
-    canvas->colorspace = decoded.front()->colorspace;
-    canvas->chroma_location = decoded.front()->chroma_location;
-    if (av_frame_get_buffer(canvas, 0) < 0) {
-        av_frame_free(&canvas);
-        for (auto* done : decoded) av_frame_free(&done);
-        return nullptr;
-    }
-    // The canvas pixels no tile covers take the group's background colour; the
-    // usual case is a fully covered canvas, where this costs nothing.
-    ptrdiff_t blackStride[AV_NUM_DATA_POINTERS] = {};
-    for (int plane = 0; plane < AV_NUM_DATA_POINTERS; ++plane)
-        blackStride[plane] = canvas->linesize[plane];
-    av_image_fill_black(canvas->data, blackStride,
-        static_cast<AVPixelFormat>(canvas->format), canvas->color_range, width, height);
-    (void)background;
-    for (std::size_t index = 0; index < tiles.size(); ++index)
-        Blit(decoded[index], canvas, tiles[index].left, tiles[index].top);
-    for (auto* done : decoded) av_frame_free(&done);
     return canvas;
 }
