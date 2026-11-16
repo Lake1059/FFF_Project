@@ -287,7 +287,10 @@ bool AvifIlocShim::RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& 
     }
 
     // Compute the rebuilt box size without writing it: the target loses all but
-    // one extent and its base_offset becomes zero, so its fields shrink.
+    // one extent and its base_offset becomes zero, so its fields shrink. The
+    // in-place repair contract requires the output file to be byte-for-byte the
+    // same length as the input, so the bytes freed by merging extents must be
+    // re-inserted inside the meta box rather than dropped.
     const auto itemCountWidth = version < 2 ? 2 : 4;
     const auto ilocHeader = static_cast<std::int32_t>(iloc.body - iloc.start);
     std::uint64_t payloadSize = 4u + 2u + static_cast<std::uint64_t>(itemCountWidth);
@@ -301,14 +304,36 @@ bool AvifIlocShim::RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& 
         payloadSize += static_cast<std::uint64_t>(extentCount) *
             static_cast<std::uint64_t>(offsetSize + lengthSize);
     }
-    const auto newIlocSize = static_cast<std::uint64_t>(ilocHeader) + payloadSize;
-    if (newIlocSize > UINT32_MAX) { detail = "The rebuilt item location box is too large."; return false; }
+    const auto naturalIlocSize = static_cast<std::uint64_t>(ilocHeader) + payloadSize;
+    if (naturalIlocSize > UINT32_MAX) { detail = "The rebuilt item location box is too large."; return false; }
     const auto oldMetaSize = meta.end - meta.start;
     const auto metaHeader = static_cast<std::int32_t>(meta.body - meta.start);
     const auto childrenBefore = static_cast<std::uint64_t>(iloc.start - (meta.body + 4));
     const auto childrenAfter = static_cast<std::uint64_t>(meta.end - iloc.end);
+    // The merge shrinks the target item's extent list by
+    // (originalExtentCount-1)*(offsetSize+lengthSize) bytes. We pad meta back
+    // to its original size so the file length is unchanged. A `free` box is the
+    // canonical ISOBMFF no-op padding that demuxers skip; if the gap is smaller
+    // than a free box header (8 bytes) we instead pad the iloc body with
+    // trailing zeros -- parsers walk item_count/extent_count and never read
+    // past the last extent, so that padding is also invisible.
+    const auto naturalMetaSize = static_cast<std::uint64_t>(metaHeader) + 4u +
+        childrenBefore + naturalIlocSize + childrenAfter;
+    const std::int64_t metaPad = static_cast<std::int64_t>(oldMetaSize) - static_cast<std::int64_t>(naturalMetaSize);
+    if (metaPad < 0) { detail = "The rebuilt meta box would grow past the original size."; return false; }
+    std::uint64_t ilocTrailingPad = 0;
+    std::uint64_t freeBoxPad = 0;
+    if (metaPad >= 8) {
+        freeBoxPad = static_cast<std::uint64_t>(metaPad);
+    } else if (metaPad > 0) {
+        ilocTrailingPad = static_cast<std::uint64_t>(metaPad);
+    }
+    const auto newIlocSize = naturalIlocSize + ilocTrailingPad;
     const auto newMetaSize = static_cast<std::uint64_t>(metaHeader) + 4u +
-        childrenBefore + newIlocSize + childrenAfter;
+        childrenBefore + newIlocSize + freeBoxPad + childrenAfter;
+    // By construction newMetaSize == oldMetaSize, so delta == 0 and no offset
+    // shifting is needed: every child box of meta and every mdat offset stays
+    // exactly where it was.
     const auto delta = static_cast<std::int64_t>(newMetaSize) - oldMetaSize;
     const auto newSize = static_cast<std::int64_t>(size) + delta + static_cast<std::int64_t>(copied.size());
     if (newSize < 0 || newSize > static_cast<std::int64_t>(UINT32_MAX)) {
@@ -398,6 +423,10 @@ bool AvifIlocShim::RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& 
             }
         }
     }
+    // Trailing zero padding inside the iloc body (only for gaps too small to
+    // hold a free box header). Parsers that walk item_count/extent_count never
+    // read past the last extent, so this is invisible.
+    for (std::uint64_t i = 0; i < ilocTrailingPad; ++i) newIloc.push_back(0);
 
     std::vector<std::uint8_t> newMeta;
     newMeta.reserve(static_cast<std::size_t>(newMetaSize));
@@ -415,6 +444,14 @@ bool AvifIlocShim::RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& 
         bytes.begin() + static_cast<std::ptrdiff_t>(meta.body + 4),
         bytes.begin() + static_cast<std::ptrdiff_t>(iloc.start));
     newMeta.insert(newMeta.end(), newIloc.begin(), newIloc.end());
+    // Re-insert the bytes freed by merging extents as a `free` box, so the meta
+    // box -- and hence the whole file -- stays byte-for-byte the same length.
+    // `free` is a well-known ISOBMFF no-op container; demuxers skip it.
+    if (freeBoxPad > 0) {
+        writeField(newMeta, 4, freeBoxPad);
+        newMeta.insert(newMeta.end(), {'f', 'r', 'e', 'e'});
+        for (std::uint64_t i = 8; i < freeBoxPad; ++i) newMeta.push_back(0);
+    }
     newMeta.insert(newMeta.end(),
         bytes.begin() + static_cast<std::ptrdiff_t>(iloc.end),
         bytes.begin() + static_cast<std::ptrdiff_t>(meta.end));
@@ -431,7 +468,11 @@ bool AvifIlocShim::RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& 
         " extents of primary item " + std::to_string(primaryItemId) + " into one.";
     bytes = std::move(output);
     detail = std::move(success);
-    if (mergedExtents != nullptr) *mergedExtents = static_cast<std::int32_t>(target->extents.size());
+    // Post-repair extent count for the primary item: the repair always collapses
+    // it to exactly one extent. (target->extents.size() here is the pre-merge
+    // count and must not be reported -- the contract is "how many extents does
+    // the item have after repair".)
+    if (mergedExtents != nullptr) *mergedExtents = 1;
     return true;
 } catch (...) {
     detail.clear();
