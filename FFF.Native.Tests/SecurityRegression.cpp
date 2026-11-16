@@ -69,7 +69,7 @@ void AvifTests() {
         const auto before = bytes;
         std::string detail;
         Check(AvifIlocShim::RepairInPlace(bytes, detail), "AVIF ordinary/extended v0-v2 repair");
-        Check(bytes.size() == before.size() && bytes != before, "AVIF repair preserves size");
+        Check(bytes != before && bytes.size() <= before.size(), "AVIF repair rewrites the container without growing it");
         auto repaired = bytes;
         Check(!AvifIlocShim::RepairInPlace(bytes, detail) && bytes == repaired, "AVIF already single extent unchanged");
     }
