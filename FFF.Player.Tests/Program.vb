@@ -24,8 +24,14 @@ Friend Module Program
             If String.Equals(项, "--playback-progress-regression", StringComparison.OrdinalIgnoreCase) Then
                 Return 播放进度回归.运行()
             End If
+            If String.Equals(项, "--smtc-mapping-regression", StringComparison.OrdinalIgnoreCase) Then
+                Return 系统媒体映射回归.运行()
+            End If
+            If String.Equals(项, "--smtc-runtime-smoke", StringComparison.OrdinalIgnoreCase) Then
+                Return 系统媒体会话冒烟.运行()
+            End If
         Next
-        Console.WriteLine("可用套件：--360-identification-regression  --pr57-fixes-regression  --content-size-regression  --module-abi-regression  --raw-file-association-regression  --bluetooth-latency-regression  --playback-progress-regression")
+        Console.WriteLine("可用套件：--360-identification-regression  --pr57-fixes-regression  --content-size-regression  --module-abi-regression  --raw-file-association-regression  --bluetooth-latency-regression  --playback-progress-regression  --smtc-mapping-regression  --smtc-runtime-smoke")
         Return 2
     End Function
 End Module

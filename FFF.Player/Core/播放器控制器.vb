@@ -88,6 +88,9 @@ Public NotInheritable Class 播放器控制器
     Public Event 字幕选择已变化 As EventHandler
     Public Event 外部弹幕已加载 As EventHandler(Of 播放器弹幕事件参数)
     Public Event 外部歌词已加载 As EventHandler(Of 播放器歌词事件参数)
+    ' 播放速度变化只用于宿主侧同步（SMTC PlaybackRate）；内核不产生该事件，
+    ' 由本类的 设置播放速度 成功下发后主动 raise。事件在调用线程上同步触发。
+    Public Event 播放速度已变化 As EventHandler
 
     Public ReadOnly Property 解码器 As 解码模式
         Get
@@ -116,6 +119,13 @@ Public NotInheritable Class 播放器控制器
     Public ReadOnly Property 静音 As Boolean
         Get
             Return 已静音
+        End Get
+    End Property
+
+    ''' <summary>当前播放速度（1.0 = 原速）。SMTC 的 PlaybackRate 从这里读，不读内核会话。</summary>
+    Public ReadOnly Property 播放速度 As Double
+        Get
+            Return 当前播放速度
         End Get
     End Property
 
@@ -1149,8 +1159,10 @@ Public NotInheritable Class 播放器控制器
         If Not Double.IsFinite(速度) OrElse 速度 < 0.1R OrElse 速度 > 5.0R Then
             Throw New ArgumentOutOfRangeException(NameOf(速度))
         End If
+        Dim 旧速度 = 当前播放速度
         当前播放速度 = 速度
         会话?.设置播放速度(速度)
+        If 旧速度 <> 速度 Then RaiseEvent 播放速度已变化(Me, EventArgs.Empty)
     End Sub
 
     Public Sub 设置音量(音量值 As Single)

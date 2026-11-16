@@ -121,6 +121,12 @@ Public Class 设置
     Public Property 渲染封面图毛玻璃背景 As Boolean = True
     Public Property 渲染封面图 As Boolean = True
 
+    ' 系统媒体面板（Windows SMTC）集成：默认开启。它只把“3FP 正在播什么/能不能控制”
+    ' 告诉系统，不改变任何播放路径；第一次真正打开音视频时才惰性创建会话，冷启动
+    ' 不加载 Microsoft.Windows.SDK.NET.dll。关闭它或设置环境变量 FFF_SMTC=0 都回退到
+    ' “没有系统媒体卡”，但仍保留原有的前台媒体键。
+    Public Property 启用系统媒体集成 As Boolean = True
+
     ' 按源的旋转信息自动转正（EXIF / 容器 rotate / display matrix），图片与视频通用。
     ' 默认 True：手机竖拍照片与旋转过的视频本该以正确方向呈现，这属于"本该如此"，
     ' 而不是一个需要用户先发现的选项。关掉它纯粹是给"我要看原始像素"的场景留口子。
