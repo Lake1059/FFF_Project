@@ -59,6 +59,21 @@ struct HdrFrameState {
     HdrDynamicMetadata dynamic;
 };
 
+// Colour tags the most recently decoded frame declared, as the decoder resolved
+// them from the bitstream (VUI/SPS). A container may legally omit its colour tags
+// while the bitstream still carries them; media-information surfaces need this
+// real-frame evidence to report the colour basis the render path applies instead
+// of leaving every field blank. Values keep FFmpeg's UNSPECIFIED sentinels when
+// the frame declared nothing; `observed` separates "no frame decoded yet" from
+// "decoded, but the bitstream said nothing".
+struct HdrSourceColor {
+    std::int32_t primaries = 2;  // AVCOL_PRI_UNSPECIFIED
+    std::int32_t transfer = 2;   // AVCOL_TRC_UNSPECIFIED
+    std::int32_t space = 2;      // AVCOL_SPC_UNSPECIFIED
+    std::int32_t range = 0;      // AVCOL_RANGE_UNSPECIFIED
+    bool observed = false;
+};
+
 // Owns HDR stream classification, per-frame metadata extraction and
 // source/display luminance resolution. AVFrame side data
 // never escapes ProcessFrame, keeping cached renderer state aligned with its frame.
@@ -82,6 +97,10 @@ public:
     // State(): a frame without HDR10+ SEI must not pull the reported caliber
     // back to the stream default while the next frame pushes it forward again.
     HdrFrameState StreamState() const noexcept;
+    // Bitstream evidence from the most recent frame, independent of container tags.
+    // Cleared by Reset(); a frame that omits a tag does not erase a previous frame's
+    // declared value, so one sparse SEI cannot blank an otherwise signalled stream.
+    HdrSourceColor SourceColor() const noexcept;
     bool IsHdrSource() const noexcept;
     // Stream-level counterpart of IsHdrSource(): the presentation-path gates
     // must not depend on whether the current frame happens to carry SEI.
@@ -171,6 +190,8 @@ private:
     float targetPeakOverrideNits_ = 0.0f;
     HdrFrameState streamState_;
     HdrFrameState frameState_;
+    // Latest bitstream-declared colour tags seen on a frame (see SourceColor()).
+    HdrSourceColor sourceColor_;
     std::int64_t lastBitstreamFrameIndex_ = kUnknownFrameIndex;
     // Injected table, kept sorted by frameIndex. Bounded so a host cannot grow
     // it without limit; scene lists are naturally small.

@@ -103,9 +103,32 @@ bool AvifIlocShim::IsStillImageBrand(const std::vector<std::uint8_t>& bytes, con
     return false;
 }
 
+bool AvifIlocShim::ParsePitm(const std::vector<std::uint8_t>& bytes, const Box& meta,
+    std::uint32_t& itemId, std::string& detail) noexcept {
+    Box pitm{};
+    if (!FindBox(bytes, meta.body + 4, meta.end, "pitm", pitm)) {
+        detail = "The metadata box has no primary item box.";
+        return false;
+    }
+    auto position = pitm.body;
+    std::uint64_t raw = 0;
+    if (!ReadUInt(bytes, position, pitm.end, 1, raw)) {
+        detail = "The primary item box is truncated.";
+        return false;
+    }
+    const auto version = static_cast<std::int32_t>(raw);
+    if (!ReadUInt(bytes, position, pitm.end, 3, raw) ||
+        !ReadUInt(bytes, position, pitm.end, version < 1 ? 2 : 4, raw)) {
+        detail = "The primary item box is truncated.";
+        return false;
+    }
+    itemId = static_cast<std::uint32_t>(raw);
+    return itemId != 0;
+}
+
 bool AvifIlocShim::ParseIloc(const std::vector<std::uint8_t>& bytes, const Box& iloc,
     std::int32_t& version, std::int32_t& offsetSize, std::int32_t& lengthSize,
-    std::vector<Item>& items, std::string& detail) noexcept {
+    std::int32_t& baseOffsetSize, std::vector<Item>& items, std::string& detail) noexcept {
     // Field order here is the order FFmpeg's mov_read_iloc reads them, not the
     // plain ISO 14496-12 one: HEIF gives every item a data_reference_index, in
     // version 0 as well, and HEIF version 1/2 add an index before each extent.
@@ -120,7 +143,7 @@ bool AvifIlocShim::ParseIloc(const std::vector<std::uint8_t>& bytes, const Box& 
     offsetSize = static_cast<std::int32_t>(packed >> 4);
     lengthSize = static_cast<std::int32_t>(packed & 0xF);
     if (!ReadUInt(bytes, position, end, 1, packed)) { detail = "The item location box is truncated."; return false; }
-    const auto baseOffsetSize = static_cast<std::int32_t>(packed >> 4);
+    baseOffsetSize = static_cast<std::int32_t>(packed >> 4);
     const auto indexSize = version ? static_cast<std::int32_t>(packed & 0xF) : 0;
     if (indexSize != 0) { detail = "The item location box indexes its extents; that layout is not repaired."; return false; }
     if (offsetSize > 8 || lengthSize > 8 || baseOffsetSize > 8) { detail = "The item location box uses unsupported field widths."; return false; }
@@ -139,18 +162,20 @@ bool AvifIlocShim::ParseIloc(const std::vector<std::uint8_t>& bytes, const Box& 
         }
         // data_reference_index.
         if (!ReadUInt(bytes, position, end, 2, raw)) { detail = "The item location box is truncated."; return false; }
+        item.dataReferenceIndex = static_cast<std::uint16_t>(raw);
         std::uint64_t baseOffset = 0;
         if (!ReadUInt(bytes, position, end, baseOffsetSize, baseOffset)) { detail = "The item location box is truncated."; return false; }
+        item.baseOffset = baseOffset;
         item.extentCountField = position;
         std::uint64_t extentCount = 0;
         if (!ReadUInt(bytes, position, end, 2, extentCount)) { detail = "The item location box is truncated."; return false; }
         auto firstOffsetField = position;
         for (std::uint64_t extent = 0; extent < extentCount; ++extent) {
             Extent entry;
-            if (!ReadUInt(bytes, position, end, offsetSize, entry.offset)) { detail = "The item location box is truncated."; return false; }
+            if (!ReadUInt(bytes, position, end, offsetSize, entry.relativeOffset)) { detail = "The item location box is truncated."; return false; }
             entry.lengthField = position;
             if (!ReadUInt(bytes, position, end, lengthSize, entry.length)) { detail = "The item location box is truncated."; return false; }
-            entry.offset += baseOffset;
+            entry.offset = entry.relativeOffset + baseOffset;
             if (extent == 0) item.offsetField = firstOffsetField;
             item.extents.push_back(entry);
         }
@@ -159,7 +184,9 @@ bool AvifIlocShim::ParseIloc(const std::vector<std::uint8_t>& bytes, const Box& 
     return true;
 }
 
-bool AvifIlocShim::RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& detail) noexcept {
+bool AvifIlocShim::RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& detail,
+    std::int32_t* mergedExtents) noexcept {
+    if (mergedExtents != nullptr) *mergedExtents = 0;
     const auto size = static_cast<std::int64_t>(bytes.size());
     Box ftyp{};
     if (!FindBox(bytes, 0, size, "ftyp", ftyp)) { detail = "The file has no file type box."; return false; }
@@ -172,57 +199,226 @@ bool AvifIlocShim::RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& 
     Box iloc{};
     if (!FindBox(bytes, metaChildren, meta.end, "iloc", iloc)) { detail = "The file has no item location box."; return false; }
 
+    std::uint32_t primaryItemId = 0;
+    const bool hasPitm = ParsePitm(bytes, meta, primaryItemId, detail);
     std::int32_t version = 0;
     std::int32_t offsetSize = 0;
     std::int32_t lengthSize = 0;
+    std::int32_t baseOffsetSize = 0;
     std::vector<Item> items;
-    if (!ParseIloc(bytes, iloc, version, offsetSize, lengthSize, items, detail)) return false;
+    if (!ParseIloc(bytes, iloc, version, offsetSize, lengthSize, baseOffsetSize, items, detail))
+        return false;
     if (items.empty()) { detail = "The item location box lists no items."; return false; }
+    // The standard names the primary item. A legacy file without pitm keeps the
+    // old "last item" fallback, but only when there is no primary box at all.
+    if (!hasPitm) {
+        primaryItemId = items.back().id;
+        detail = "The metadata box has no primary item box; using the last item.";
+    }
+    Item* target = nullptr;
+    for (auto& item : items) {
+        if (item.id == primaryItemId) { target = &item; break; }
+    }
+    if (target == nullptr) { detail = "The primary item is not listed in the item location box."; return false; }
+    if (target->extents.size() < 2) { detail = "The primary item is stored as a single extent."; return false; }
+    if (target->constructionMethod != 0) { detail = "The item does not use plain file offsets."; return false; }
+    if (target->dataReferenceIndex != 0) { detail = "The primary item's data is in an external file."; return false; }
+    if (offsetSize <= 0 || lengthSize <= 0 || baseOffsetSize < 0 || baseOffsetSize > 8) {
+        detail = "The item location box uses unusable field widths.";
+        return false;
+    }
 
-    // Only the last item can be repaired: an earlier item's leftover extents would
-    // be read as the next item's header, because the demuxer positions itself from
-    // the box size rather than from what it consumed.
-    auto& target = items.back();
-    if (target.extents.size() < 2) { detail = "The primary item is stored as a single extent."; return false; }
-    if (target.constructionMethod != 0) { detail = "The item does not use plain file offsets."; return false; }
-
-    auto ordered = target.extents;
-    std::sort(ordered.begin(), ordered.end(), [](const Extent& left, const Extent& right) {
-        return left.offset < right.offset;
-    });
+    // Merge in item order, not file order. Extents are a logical sequence (base
+    // layer, then enhancements); their file offsets may be in any order. The
+    // contiguous fast path is only when each extent starts where the previous
+    // one ended.
     std::uint64_t span = 0;
-    for (std::size_t index = 0; index < ordered.size(); ++index) {
-        if (index > 0 && ordered[index - 1].offset + ordered[index - 1].length != ordered[index].offset) {
-            detail = "The item's extents are not contiguous; they cannot be merged.";
+    bool contiguous = true;
+    for (std::size_t index = 0; index < target->extents.size(); ++index) {
+        const auto& extent = target->extents[index];
+        if (extent.length > UINT64_MAX - span) { detail = "The item's merged length overflows."; return false; }
+        if (index > 0 && target->extents[index - 1].offset + target->extents[index - 1].length !=
+            extent.offset) contiguous = false;
+        span += extent.length;
+    }
+    if (span == 0) { detail = "The item's extents are empty."; return false; }
+    const auto oldSize = static_cast<std::uint64_t>(bytes.size());
+    std::vector<std::uint8_t> copied;
+    std::uint64_t targetStart = 0;
+    if (contiguous) {
+        targetStart = target->extents.front().offset;
+        if (targetStart > oldSize || span > oldSize - targetStart) {
+            detail = "The item's extents reach outside the file.";
             return false;
         }
-        span += ordered[index].length;
-    }
-    const auto start = static_cast<std::int64_t>(ordered.front().offset);
-    if (start < 0 || start + static_cast<std::int64_t>(span) > size) {
-        detail = "The item's extents reach outside the file.";
-        return false;
+    } else {
+        copied.reserve(static_cast<std::size_t>(span));
+        for (const auto& extent : target->extents) {
+            if (extent.offset > oldSize || extent.length > oldSize - extent.offset) {
+                detail = "The item's extents reach outside the file.";
+                return false;
+            }
+            copied.insert(copied.end(),
+                bytes.begin() + static_cast<std::ptrdiff_t>(extent.offset),
+                bytes.begin() + static_cast<std::ptrdiff_t>(extent.offset + extent.length));
+        }
     }
     const auto widthBits = 8 * lengthSize;
     if (widthBits < 64 && span >= (static_cast<std::uint64_t>(1) << widthBits)) {
         detail = "The merged extent is too long for the item location box's length field.";
         return false;
     }
-    // Write the merged extent into the slot the demuxer reads, and leave the rest
-    // of the box untouched: the extents that follow become dead bytes that the
-    // box walker skips.
-    if (!WriteUInt(bytes, target.extentCountField, 2, 1) ||
-        !WriteUInt(bytes, target.offsetField, offsetSize, ordered.front().offset) ||
-        !WriteUInt(bytes, target.extents.front().lengthField, lengthSize, span)) {
-        detail = "The item location box could not be rewritten.";
+
+    // Compute the rebuilt box size without writing it: the target loses all but
+    // one extent and its base_offset becomes zero, so its fields shrink.
+    const auto itemCountWidth = version < 2 ? 2 : 4;
+    const auto ilocHeader = static_cast<std::int32_t>(iloc.body - iloc.start);
+    std::uint64_t payloadSize = 4u + 2u + static_cast<std::uint64_t>(itemCountWidth);
+    for (const auto& item : items) {
+        payloadSize += itemCountWidth;
+        if (version > 0) payloadSize += 2;
+        payloadSize += 2;  // data_reference_index
+        payloadSize += static_cast<std::uint64_t>(baseOffsetSize);
+        payloadSize += 2;  // extent_count
+        const auto extentCount = &item == target ? 1u : item.extents.size();
+        payloadSize += static_cast<std::uint64_t>(extentCount) *
+            static_cast<std::uint64_t>(offsetSize + lengthSize);
+    }
+    const auto newIlocSize = static_cast<std::uint64_t>(ilocHeader) + payloadSize;
+    if (newIlocSize > UINT32_MAX) { detail = "The rebuilt item location box is too large."; return false; }
+    const auto oldMetaSize = meta.end - meta.start;
+    const auto metaHeader = static_cast<std::int32_t>(meta.body - meta.start);
+    const auto childrenBefore = static_cast<std::uint64_t>(iloc.start - (meta.body + 4));
+    const auto childrenAfter = static_cast<std::uint64_t>(meta.end - iloc.end);
+    const auto newMetaSize = static_cast<std::uint64_t>(metaHeader) + 4u +
+        childrenBefore + newIlocSize + childrenAfter;
+    const auto delta = static_cast<std::int64_t>(newMetaSize) - oldMetaSize;
+    const auto newSize = static_cast<std::int64_t>(size) + delta + static_cast<std::int64_t>(copied.size());
+    if (newSize < 0 || newSize > static_cast<std::int64_t>(UINT32_MAX)) {
+        detail = "The repaired file would exceed the item location box's size range.";
         return false;
     }
-    detail = "Merged " + std::to_string(ordered.size()) + " contiguous extents into one.";
+
+    // An absolute offset after the edited meta box moves by delta; an offset
+    // before it does not. Appended data starts at the end of the old content,
+    // which is itself shifted by delta.
+    const auto shiftedOffset = [&](const std::uint64_t offset) noexcept {
+        return offset >= static_cast<std::uint64_t>(meta.end)
+            ? offset + static_cast<std::uint64_t>(delta)
+            : offset;
+    };
+    if (contiguous) targetStart = shiftedOffset(targetStart);
+    else targetStart = static_cast<std::uint64_t>(newSize) - copied.size();
+
+    const auto writeField = [](std::vector<std::uint8_t>& output,
+        const std::int32_t width, const std::uint64_t value) noexcept {
+        for (std::int32_t index = 0; index < width; ++index) {
+            const auto shift = 8 * (width - 1 - index);
+            output.push_back(static_cast<std::uint8_t>((value >> shift) & 0xFF));
+        }
+    };
+    const auto fitsField = [](const std::int32_t width, const std::uint64_t value) noexcept {
+        return width >= 8 || value < (static_cast<std::uint64_t>(1) << (8 * width));
+    };
+    if (!fitsField(offsetSize, targetStart)) {
+        detail = "The merged extent offset does not fit the item location box's offset field.";
+        return false;
+    }
+
+    std::vector<std::uint8_t> newIloc;
+    newIloc.reserve(static_cast<std::size_t>(newIlocSize));
+    if (ilocHeader == 16) {
+        writeField(newIloc, 4, 1);
+        newIloc.insert(newIloc.end(), {'i', 'l', 'o', 'c'});
+        writeField(newIloc, 8, newIlocSize);
+    } else {
+        writeField(newIloc, 4, newIlocSize);
+        newIloc.insert(newIloc.end(), {'i', 'l', 'o', 'c'});
+    }
+    // Preserve version and flags exactly.
+    newIloc.insert(newIloc.end(), bytes.begin() + static_cast<std::ptrdiff_t>(iloc.body),
+        bytes.begin() + static_cast<std::ptrdiff_t>(iloc.body + 4));
+    writeField(newIloc, 1, static_cast<std::uint64_t>((offsetSize << 4) | lengthSize));
+    writeField(newIloc, 1, static_cast<std::uint64_t>((baseOffsetSize << 4) |
+        (version ? 0 : 0)));
+    writeField(newIloc, itemCountWidth, items.size());
+    for (const auto& item : items) {
+        writeField(newIloc, itemCountWidth, item.id);
+        if (version > 0)
+            writeField(newIloc, 2, static_cast<std::uint64_t>(item.constructionMethod & 0xF));
+        writeField(newIloc, 2, item.dataReferenceIndex);
+        // Only construction method 0 in this file carries absolute file offsets.
+        // Items stored in idat (method 1) or in an external data reference keep
+        // their offsets relative to that store; shifting them with the meta box
+        // would point them at unrelated bytes.
+        const bool fileOffsetItem = item.constructionMethod == 0 && item.dataReferenceIndex == 0;
+        const auto newBase = &item == target ? 0u :
+            fileOffsetItem ? shiftedOffset(item.baseOffset) : item.baseOffset;
+        if (!fitsField(baseOffsetSize, newBase)) {
+            detail = "An item base offset does not fit the item location box's base offset field.";
+            return false;
+        }
+        writeField(newIloc, baseOffsetSize, newBase);
+        const auto extentCount = &item == target ? 1u : item.extents.size();
+        writeField(newIloc, 2, extentCount);
+        if (&item == target) {
+            writeField(newIloc, offsetSize, targetStart);
+            writeField(newIloc, lengthSize, span);
+        } else {
+            for (const auto& extent : item.extents) {
+                const auto absolute = fileOffsetItem ? shiftedOffset(extent.offset) : extent.offset;
+                if (absolute < newBase) {
+                    detail = "An item extent precedes its base offset.";
+                    return false;
+                }
+                const auto relative = absolute - newBase;
+                if (!fitsField(offsetSize, relative)) {
+                    detail = "An item extent offset does not fit the item location box's offset field.";
+                    return false;
+                }
+                writeField(newIloc, offsetSize, relative);
+                writeField(newIloc, lengthSize, extent.length);
+            }
+        }
+    }
+
+    std::vector<std::uint8_t> newMeta;
+    newMeta.reserve(static_cast<std::size_t>(newMetaSize));
+    if (metaHeader == 16) {
+        writeField(newMeta, 4, 1);
+        newMeta.insert(newMeta.end(), {'m', 'e', 't', 'a'});
+        writeField(newMeta, 8, newMetaSize);
+    } else {
+        writeField(newMeta, 4, newMetaSize);
+        newMeta.insert(newMeta.end(), {'m', 'e', 't', 'a'});
+    }
+    newMeta.insert(newMeta.end(), bytes.begin() + static_cast<std::ptrdiff_t>(meta.body),
+        bytes.begin() + static_cast<std::ptrdiff_t>(meta.body + 4));
+    newMeta.insert(newMeta.end(),
+        bytes.begin() + static_cast<std::ptrdiff_t>(meta.body + 4),
+        bytes.begin() + static_cast<std::ptrdiff_t>(iloc.start));
+    newMeta.insert(newMeta.end(), newIloc.begin(), newIloc.end());
+    newMeta.insert(newMeta.end(),
+        bytes.begin() + static_cast<std::ptrdiff_t>(iloc.end),
+        bytes.begin() + static_cast<std::ptrdiff_t>(meta.end));
+
+    std::vector<std::uint8_t> output;
+    output.reserve(static_cast<std::size_t>(newSize));
+    output.insert(output.end(), bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(meta.start));
+    output.insert(output.end(), newMeta.begin(), newMeta.end());
+    output.insert(output.end(), bytes.begin() + static_cast<std::ptrdiff_t>(meta.end), bytes.end());
+    output.insert(output.end(), copied.begin(), copied.end());
+    bytes = std::move(output);
+    detail = "Merged " + std::to_string(target->extents.size()) +
+        " extents of primary item " + std::to_string(primaryItemId) + " into one.";
+    if (mergedExtents != nullptr) *mergedExtents = static_cast<std::int32_t>(target->extents.size());
     return true;
 }
 
 bool AvifIlocShim::ReadAndRepair(const char* pathUtf8, const std::int64_t maxBytes,
-    std::vector<std::uint8_t>& bytes, std::string& detail) noexcept {
+    std::vector<std::uint8_t>& bytes, std::string& detail,
+    std::int32_t* mergedExtents) noexcept {
+    if (mergedExtents != nullptr) *mergedExtents = 0;
     bytes.clear();
     detail.clear();
     if (pathUtf8 == nullptr || *pathUtf8 == '\0' || maxBytes <= 0) { detail = "The path is not usable."; return false; }
@@ -249,7 +445,7 @@ bool AvifIlocShim::ReadAndRepair(const char* pathUtf8, const std::int64_t maxByt
         return false;
     }
     auto reason = std::string{};
-    if (!RepairInPlace(content, reason)) { detail = std::move(reason); return false; }
+    if (!RepairInPlace(content, reason, mergedExtents)) { detail = std::move(reason); return false; }
     bytes = std::move(content);
     detail = std::move(reason);
     return true;

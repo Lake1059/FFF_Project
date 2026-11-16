@@ -2,7 +2,8 @@
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Debug",
 
-    # 目标框架。留空 = 用播放器默认值（当前 net10.0-windows）。
+    # 目标框架。留空 = 用播放器默认值（当前 net10.0-windows10.0.26100.0；
+    # 带 Windows SDK 版本是为了系统媒体集成（SMTC）的 WinRT 投影）。
     # .NET 11 正式版发布后改为：构建3FP.ps1 -NetTFM net11.0-windows10.0.26100.0
     [string]$NetTFM = "",
 

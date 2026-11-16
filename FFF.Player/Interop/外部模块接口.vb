@@ -663,21 +663,55 @@ Friend Module 外部模块接口
             中性.Dispose()
         End Try
     End Function
-    ''' <summary>装载中性入口。失败返回 Nothing，原因只进日志。</summary>
+    ' Release 下 Debug.WriteLine 会被编译器剥离；装载失败原因必须落盘才能被现场看到。
+    ' 复刻 播放器AI字幕控制器.记日志 的既有范式：<程序目录>\扩展模块.log 追加、
+    ' 超过 2MB 滚动一次、锁内写、best-effort（写失败不影响装载决策）。
+    Private ReadOnly 扩展模块日志锁 As New Object()
+    Private Const 扩展模块日志上限字节 As Long = 2L * 1024L * 1024L
+    ' 指纹节流：1Hz 解锁轮询与信息图层周期刷新都会重复跑装载，原因串不变就不重复落盘。
+    Private 上次诊断指纹 As String = ""
+
+    Friend Sub 记录扩展模块诊断(消息 As String)
+        Try
+            System.Diagnostics.Debug.WriteLine(消息)
+            Dim 路径 = IO.Path.Combine(AppContext.BaseDirectory, "扩展模块.log")
+            SyncLock 扩展模块日志锁
+                Try
+                    Dim 现有 As New IO.FileInfo(路径)
+                    If 现有.Exists AndAlso 现有.Length > 扩展模块日志上限字节 Then
+                        Try : IO.File.Delete(路径 & ".1") : Catch : End Try
+                        Try : IO.File.Move(路径, 路径 & ".1") : Catch : End Try
+                    End If
+                Catch
+                End Try
+                IO.File.AppendAllText(路径,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") & " " & 消息 & Environment.NewLine,
+                    Text.Encoding.UTF8)
+            End SyncLock
+        Catch
+            ' 诊断通道本身失败时静默：不能因为写日志而影响模块装载。
+        End Try
+    End Sub
+
+    ''' <summary>装载中性入口。失败返回 Nothing，原因落 扩展模块.log（指纹节流）。</summary>
     Friend Function 尝试装载中性模块(ByRef 原因 As String,
                                       Optional 目录覆盖 As String = Nothing) As NeutralExternalModule
         原因 = Nothing
+        Dim 诊断行 As New List(Of String)
         For Each 候选 In 中性候选路径(目录覆盖)
             Dim 句柄 As IntPtr = IntPtr.Zero
             Try
                 句柄 = LoadLibraryExW(候选, IntPtr.Zero, 改变搜索路径旗标)
                 If 句柄 = IntPtr.Zero Then
-                    原因 = 候选 & " LoadLibrary 失败"
+                    ' 取 Win32 错误码区分：126=找不到 DLL/依赖、193=位数错配、5=拒绝访问。
+                    原因 = 候选 & " LoadLibrary 失败(Win32 " & Marshal.GetLastPInvokeError().ToString() & ")"
+                    诊断行.Add(原因)
                     Continue For
                 End If
                 Dim 入口 = GetProcAddress(句柄, 中性入口名)
                 If 入口 = IntPtr.Zero Then
                     原因 = 候选 & " 不含 " & 中性入口名
+                    诊断行.Add(原因)
                     Continue For
                 End If
                 Dim 取Api = CType(Marshal.GetDelegateForFunctionPointer(入口, GetType(取外部模块Api原型)), 取外部模块Api原型)
@@ -687,11 +721,13 @@ Friend Module 外部模块接口
                 }
                 If 取Api.Invoke(中性Abi版本, api) <> 0 Then
                     原因 = 候选 & " 的 " & 中性入口名 & " 拒绝 ABI " & 中性Abi版本.ToString()
+                    诊断行.Add(原因)
                     Continue For
                 End If
                 If api.大小 < CUInt(Marshal.SizeOf(Of 外部模块Api)()) OrElse api.版本 <> 中性Abi版本 OrElse
                    api.上下文 = IntPtr.Zero OrElse api.取描述符 = IntPtr.Zero OrElse api.取能力 = IntPtr.Zero Then
                     原因 = 候选 & " 的模块 Api 不合格"
+                    诊断行.Add(原因)
                     Continue For
                 End If
 
@@ -702,10 +738,12 @@ Friend Module 外部模块接口
                 }
                 If 取描述符.Invoke(api.上下文, 原生) <> 0 Then
                     原因 = 候选 & " 的 getDescriptor 失败"
+                    诊断行.Add(原因)
                     Continue For
                 End If
                 If 原生.大小 < CUInt(Marshal.SizeOf(Of 外部模块描述符原生)()) OrElse 原生.版本 <> 1UI Then
                     原因 = 候选 & " 的 descriptor 尺寸/版本不合格"
+                    诊断行.Add(原因)
                     Continue For
                 End If
                 Dim 描述符 As New 外部模块描述符 With {
@@ -723,11 +761,19 @@ Friend Module 外部模块接口
                 Return 模块
             Catch ex As Exception
                 原因 = "中性模块装载异常 " & ex.GetType().Name & ": " & ex.Message
+                诊断行.Add(原因)
             Finally
                 If 句柄 <> IntPtr.Zero Then FreeLibrary(句柄)
             End Try
         Next
         If String.IsNullOrEmpty(原因) Then 原因 = "未找到中性外部模块"
+        ' 全部候选走完仍无命中：把候选明细一次性落盘；指纹不变（重复轮询）就不重复写。
+        Dim 指纹 As String = String.Join("|", 诊断行) & "=>" & 原因
+        If 指纹 <> 上次诊断指纹 Then
+            上次诊断指纹 = 指纹
+            记录扩展模块诊断("外部模块探测未就绪：" & 原因 &
+                             If(诊断行.Count = 0, "", "；候选明细：" & String.Join("；", 诊断行)))
+        End If
         Return Nothing
     End Function
 

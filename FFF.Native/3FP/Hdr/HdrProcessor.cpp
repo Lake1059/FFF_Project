@@ -297,6 +297,10 @@ void HdrProcessor::ConfigureStream(const AVCodecParameters* parameters) noexcept
     streamState_ = next;
     frameState_ = next;
     lastBitstreamFrameIndex_ = kUnknownFrameIndex;
+    // A new stream must not inherit the previous stream's frame-declared colour
+    // tags: media info is rebuilt immediately on select-stream, before the new
+    // stream's first frame produces its own evidence.
+    sourceColor_ = {};
 }
 
 HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
@@ -312,6 +316,17 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         frameState_ = next;
         return frameState_;
     }
+
+    // Record what the bitstream itself declared before the frame is released:
+    // decoder-resolved VUI/SPS values are the real evidence behind a stream whose
+    // container omits its colour tags. Keep the previous value when this frame omits
+    // a tag (dynamic-metadata frames legitimately carry UNSPECIFIED trc).
+    if (frame->color_primaries != AVCOL_PRI_UNSPECIFIED) sourceColor_.primaries = frame->color_primaries;
+    if (frame->color_trc != AVCOL_TRC_UNSPECIFIED) sourceColor_.transfer = frame->color_trc;
+    if (frame->colorspace != AVCOL_SPC_UNSPECIFIED) sourceColor_.space = frame->colorspace;
+    if (frame->color_range == AVCOL_RANGE_MPEG || frame->color_range == AVCOL_RANGE_JPEG)
+        sourceColor_.range = frame->color_range;
+    sourceColor_.observed = true;
 
     // Never carry a bitstream curve from a later frame across a backward seek
     // or a repeated frame. Injected scene tables are resolved separately below.
@@ -521,6 +536,7 @@ void HdrProcessor::Reset() noexcept {
     // the previous stream's Injected source would be a claim with nothing behind it.
     injectedActive_ = false;
     activeTransform_ = nullptr;
+    sourceColor_ = {};
 }
 
 HdrFrameState HdrProcessor::State() const noexcept {
@@ -531,6 +547,11 @@ HdrFrameState HdrProcessor::State() const noexcept {
 HdrFrameState HdrProcessor::StreamState() const noexcept {
     std::lock_guard lock(mutex_);
     return streamState_;
+}
+
+HdrSourceColor HdrProcessor::SourceColor() const noexcept {
+    std::lock_guard lock(mutex_);
+    return sourceColor_;
 }
 
 bool HdrProcessor::IsHdrSource() const noexcept { return State().format != FFF3FPHdrFormat::Sdr; }

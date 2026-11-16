@@ -417,6 +417,15 @@ FFFResult FFF3FP_GetVideoAutoHdrStatus(const FFF3FPHandle player,
         : FFFResult::InvalidArgument;
 }
 
+// Still-image GainMap apply toggle. Appended like the VSR / auto-HDR exports
+// above: additive entry point, PlayerApiVersion and the snapshot version
+// unchanged, an older kernel simply fails to resolve it (treated as unavailable).
+FFFResult FFF3FP_SetGainMapEnabled(const FFF3FPHandle player,
+    const std::uint32_t enabled) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->SetGainMapEnabled(enabled != 0)
+        : FFFResult::InvalidArgument;
+}
+
 FFFResult FFF3FP_SetViewRotation(const FFF3FPHandle player,
     const std::uint32_t quarterTurnsClockwise) noexcept {
     return player
