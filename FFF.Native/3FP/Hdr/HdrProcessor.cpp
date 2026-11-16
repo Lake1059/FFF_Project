@@ -317,6 +317,21 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
         return frameState_;
     }
 
+    // Never carry a bitstream curve from a later frame across a backward seek
+    // or a repeated frame. Injected scene tables are resolved separately below.
+    // The accumulated frame-declared colour tags are dropped on the same seek:
+    // a new segment after a backward seek may carry different cICP/VUI values,
+    // and the latch below would otherwise report the previous segment's
+    // primaries/trc for the first frames of the new one. The current frame's own
+    // tags are re-accumulated immediately after this block, so a seek that lands
+    // on a tagged frame re-establishes evidence in one pass.
+    if (frameIndex != kUnknownFrameIndex && lastBitstreamFrameIndex_ != kUnknownFrameIndex &&
+        frameIndex <= lastBitstreamFrameIndex_) {
+        frameState_.dynamic = {};
+        sourceColor_ = {};
+    }
+    lastBitstreamFrameIndex_ = frameIndex;
+
     // Record what the bitstream itself declared before the frame is released:
     // decoder-resolved VUI/SPS values are the real evidence behind a stream whose
     // container omits its colour tags. Keep the previous value when this frame omits
@@ -327,13 +342,6 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
     if (frame->color_range == AVCOL_RANGE_MPEG || frame->color_range == AVCOL_RANGE_JPEG)
         sourceColor_.range = frame->color_range;
     sourceColor_.observed = true;
-
-    // Never carry a bitstream curve from a later frame across a backward seek
-    // or a repeated frame. Injected scene tables are resolved separately below.
-    if (frameIndex != kUnknownFrameIndex && lastBitstreamFrameIndex_ != kUnknownFrameIndex &&
-        frameIndex <= lastBitstreamFrameIndex_)
-        frameState_.dynamic = {};
-    lastBitstreamFrameIndex_ = frameIndex;
 
     auto dynamicSourcePeak = false;
     // The container's stream-level transfer label is a guess; the frame's own

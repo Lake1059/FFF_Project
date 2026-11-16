@@ -7,6 +7,7 @@
 #include "3FP/Core/MediaText.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Core/ThreadNaming.h"
+#include "3FP/Render/CicpSupport.h"
 #include "3FP/Api/FFF.Player.CpuPlacement.h"
 #include "3FP/Prefetch/PrefetchService.h"
 
@@ -9834,6 +9835,11 @@ const char* MediaColorSourceName(const MediaColorSource source) noexcept {
 struct MediaColorField {
     std::int32_t value = 0;
     MediaColorSource source = MediaColorSource::Unspecified;
+    // KF/L6-P1-04: a declared tag that the renderer's CICP gate does not support
+    // (BT470M/Film/SMPTE428/etc.) is not reported as frame/bitstream evidence;
+    // it is dropped to the next leg (or to inference) and flagged here so the
+    // diagnostics can show "declared but ignored" instead of silently lying.
+    bool ignored = false;
 };
 
 struct MediaColorResolution {
@@ -9861,13 +9867,74 @@ bool IsSpecifiedColor(const MediaColorKind kind, const std::int32_t value) noexc
     return false;
 }
 
+// Renderer CICP support gate. The whitelist itself lives in
+// 3FP/Render/CicpSupport.h (single source of truth with VideoRenderer.cpp);
+// the lambda inside PickDeclaredColor dispatches MediaColorKind to the right
+// Cicp*Supported function. A declared tag the renderer ignores must not be
+// reported here as "frame-identified", or the host advertises a transfer/gamut
+// the shader never actually uses.
+
+// Mirror VideoRenderer::ResolveDecodeTransfer (VideoRenderer.cpp:7415-7417):
+// these are the trc values the renderer classifies as display-referred SDR.
+// On an HDR stream such a frame tag is treated as a remux contradiction and the
+// stream-class encoding (PQ/HLG) wins; any other frame-declared trc (PQ, HLG,
+// Linear, ...) is trusted as-is. The set is derived from the renderer's
+// internal-code mapping (0=BT709/SMPTE170M/BT2020_10/BT2020_12, 4=sRGB,
+// 5=Gamma2.2, 6=Gamma2.8, 8=SMPTE240M) rather than re-derived from a policy.
+bool IsDisplayReferredSdrTransfer(const std::int32_t value) noexcept {
+    switch (value) {
+    case AVCOL_TRC_BT709:
+    case AVCOL_TRC_SMPTE170M:
+    case AVCOL_TRC_BT2020_10:
+    case AVCOL_TRC_BT2020_12:
+    case AVCOL_TRC_GAMMA22:
+    case AVCOL_TRC_GAMMA28:
+    case AVCOL_TRC_SMPTE240M:
+    case AVCOL_TRC_IEC61966_2_1:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // Evidence order follows the render path: the frame is what the shader reads,
 // the decoder context is what the bitstream's VUI/SPS declared, the container
 // tag is last. A missing tag is not evidence; it falls through to the next leg.
+//
+// Two extra rules keep the reported tags honest:
+//  * A declared value the renderer's CICP gate does not support is NOT trusted
+//    as evidence (L6-P1-04): it falls through to the next leg (or to inference)
+//    and `ignored` is set on whatever leg wins, so diagnostics can show
+//    "declared BT470M, ignored" instead of advertising a gamut the shader
+//    falls back out of.
+//  * The decoder-context value is FFmpeg's copy of the container codecpar
+//    unless the bitstream VUI actually overrode it (L6-P2-01). When decoder and
+//    container agree, the decoder leg is an echo, not independent bitstream
+//    evidence, and is labelled Container rather than Bitstream.
 MediaColorField PickDeclaredColor(const MediaColorKind kind,
     const AVCodecParameters* parameters, const AVCodecContext* decoder,
     const bool decoderAvailable, const HdrSourceColor& frame,
     const bool frameAvailable) noexcept {
+    // Dispatcher to the shared Cicp*Supported whitelist in Render/CicpSupport.h.
+    // Range has no renderer whitelist (IsFullRange treats anything that is not
+    // explicitly JPEG as limited range), so a declared range is always honoured.
+    // For Space, RGB (0) is also accepted: the renderer's matrix gate only fires
+    // on YUV frames (sourceYuv && !CicpMatrixSupported), so an RGB frame's
+    // colorspace tag is never rejected -- advertising it as frame-declared is
+    // honest and matches the pre-F2 behaviour. The genuinely unsupported YUV
+    // matrices (RESERVED=3, SMPTE2085=11, CHROMA_DERIVED_*, ICTCP, IPT_C2,
+    // YCGCO_RE/RO) are now correctly marked ignored instead of being advertised.
+    const auto rendererSupports = [kind](const std::int32_t value) noexcept -> bool {
+        switch (kind) {
+        case MediaColorKind::Primaries: return fff::render::CicpPrimariesSupported(value);
+        case MediaColorKind::Transfer:  return fff::render::CicpTransferSupported(value);
+        case MediaColorKind::Space:
+            return value == AVCOL_SPC_RGB || fff::render::CicpMatrixSupported(value);
+        case MediaColorKind::Range:     return true;
+        }
+        return true;
+    };
+    bool ignored = false;
     const auto* frameValue = [&]() -> const std::int32_t* {
         if (!frameAvailable || !frame.observed) return nullptr;
         switch (kind) {
@@ -9878,8 +9945,11 @@ MediaColorField PickDeclaredColor(const MediaColorKind kind,
         }
         return nullptr;
     }();
-    if (frameValue != nullptr && IsSpecifiedColor(kind, *frameValue))
-        return {*frameValue, MediaColorSource::Frame};
+    if (frameValue != nullptr && IsSpecifiedColor(kind, *frameValue)) {
+        if (rendererSupports(*frameValue))
+            return {*frameValue, MediaColorSource::Frame, false};
+        ignored = true;
+    }
     const auto decoderValue = [&]() -> std::int32_t {
         if (!decoderAvailable || decoder == nullptr) return 0;
         switch (kind) {
@@ -9890,8 +9960,6 @@ MediaColorField PickDeclaredColor(const MediaColorKind kind,
         }
         return 0;
     }();
-    if (decoderAvailable && decoder != nullptr && IsSpecifiedColor(kind, decoderValue))
-        return {decoderValue, MediaColorSource::Bitstream};
     const auto containerValue = [&]() -> std::int32_t {
         switch (kind) {
         case MediaColorKind::Primaries: return parameters->color_primaries;
@@ -9901,9 +9969,23 @@ MediaColorField PickDeclaredColor(const MediaColorKind kind,
         }
         return 0;
     }();
-    if (IsSpecifiedColor(kind, containerValue))
-        return {containerValue, MediaColorSource::Container};
-    return {};
+    const bool containerSpecified = IsSpecifiedColor(kind, containerValue);
+    if (decoderAvailable && decoder != nullptr && IsSpecifiedColor(kind, decoderValue)) {
+        if (rendererSupports(decoderValue)) {
+            // Decoder value that merely echoes the container tag is not
+            // independent VUI/SPS evidence: label it container.
+            const auto src = containerSpecified && decoderValue == containerValue
+                ? MediaColorSource::Container : MediaColorSource::Bitstream;
+            return {decoderValue, src, ignored};
+        }
+        ignored = true;
+    }
+    if (containerSpecified) {
+        if (rendererSupports(containerValue))
+            return {containerValue, MediaColorSource::Container, ignored};
+        ignored = true;
+    }
+    return {0, MediaColorSource::Unspecified, ignored};
 }
 
 bool IsBt2020Space(const std::int32_t value) noexcept {
@@ -9961,16 +10043,38 @@ MediaColorResolution ResolveAppliedMediaColor(
     // Transfer: non-SDR sources decode through the fixed PQ/HLG shader paths,
     // exactly as ResolveDecodeTransfer selects (Vivid's baseline ends up on PQ
     // unless the frame declares otherwise). SDR decodes through the BT.709 path.
+    //
+    // L6-P1-03: mirror ResolveDecodeTransfer's contradiction rule exactly. The
+    // frame's own trc wins UNLESS it is a display-referred SDR tag (BT.709 /
+    // sRGB / gamma / SMPTE170M / SMPTE240M / BT.2020-tr) on an HDR stream --
+    // the remux shape where a container overwrote the VUI with an SDR label and
+    // PQ code values would otherwise be pushed through the 709 curve. PQ/HLG/
+    // Linear declared by the frame are trusted as-is, so the host report and
+    // the shader agree (previously the stream-class encoding unconditionally
+    // overrode the frame, producing "host says PQ, shader runs HLG").
     if (effectiveHdr != FFF3FPHdrFormat::Sdr) {
         const auto appliedTransfer = effectiveHdr == FFF3FPHdrFormat::Hlg
             ? AVCOL_TRC_ARIB_STD_B67 : AVCOL_TRC_SMPTE2084;
-        if (result.transfer.value == appliedTransfer)
-            result.transfer.source = result.transfer.source == MediaColorSource::Unspecified
-                ? MediaColorSource::Inferred : result.transfer.source;
-        else
-            result.transfer = {appliedTransfer, MediaColorSource::Inferred};
+        const bool frameDeclaresTransfer = result.transfer.source == MediaColorSource::Frame;
+        const bool frameTagIsSdrContradiction = frameDeclaresTransfer &&
+            IsDisplayReferredSdrTransfer(result.transfer.value);
+        if (frameDeclaresTransfer && !frameTagIsSdrContradiction) {
+            // Trust the frame: the shader uses the same frame value, so leave
+            // the reported transfer and its Frame source untouched.
+        } else if (result.transfer.value == appliedTransfer &&
+                   result.transfer.source != MediaColorSource::Unspecified) {
+            // Bitstream/container already declared the stream-class encoding;
+            // keep its provenance.
+        } else {
+            // No usable frame tag, or a display-referred SDR contradiction on an
+            // HDR stream: fall back to the stream-class encoding, exactly as
+            // ResolveDecodeTransfer does.
+            result.transfer = {appliedTransfer, MediaColorSource::Inferred,
+                result.transfer.ignored};
+        }
     } else if (result.transfer.source == MediaColorSource::Unspecified) {
-        result.transfer = {AVCOL_TRC_BT709, MediaColorSource::Inferred};
+        result.transfer = {AVCOL_TRC_BT709, MediaColorSource::Inferred,
+            result.transfer.ignored};
     }
 
     // Primaries: declared wins; otherwise the gamut the renderer picks (BT.2020
@@ -9978,20 +10082,25 @@ MediaColorResolution ResolveAppliedMediaColor(
     // only come from a declaration, never from an inference.
     if (result.primaries.source == MediaColorSource::Unspecified) {
         if (effectiveHdr != FFF3FPHdrFormat::Sdr || IsBt2020Space(result.space.value))
-            result.primaries = {AVCOL_PRI_BT2020, MediaColorSource::Inferred};
+            result.primaries = {AVCOL_PRI_BT2020, MediaColorSource::Inferred,
+                result.primaries.ignored};
         else
-            result.primaries = {AVCOL_PRI_BT709, MediaColorSource::Inferred};
+            result.primaries = {AVCOL_PRI_BT709, MediaColorSource::Inferred,
+                result.primaries.ignored};
     }
 
     // Matrix: same rule as ToSwsColorSpace — HDR falls back to BT.2020 NCL,
     // SDR picks BT.709 at HD/UHD and BT.601 below 1280 columns.
     if (result.space.source == MediaColorSource::Unspecified) {
         if (effectiveHdr != FFF3FPHdrFormat::Sdr)
-            result.space = {AVCOL_SPC_BT2020_NCL, MediaColorSource::Inferred};
+            result.space = {AVCOL_SPC_BT2020_NCL, MediaColorSource::Inferred,
+                result.space.ignored};
         else if (parameters->width >= 1280)
-            result.space = {AVCOL_SPC_BT709, MediaColorSource::Inferred};
+            result.space = {AVCOL_SPC_BT709, MediaColorSource::Inferred,
+                result.space.ignored};
         else
-            result.space = {AVCOL_SPC_SMPTE170M, MediaColorSource::Inferred};
+            result.space = {AVCOL_SPC_SMPTE170M, MediaColorSource::Inferred,
+                result.space.ignored};
     }
 
     // Range: the renderer treats full-range YUV and RGB as JPEG range, everything
@@ -10000,8 +10109,10 @@ MediaColorResolution ResolveAppliedMediaColor(
     if (result.range.source == MediaColorSource::Unspecified) {
         result.range = IsJpegFullRangeFormat(formatForDescription) ||
             IsRgbPixelFormat(formatForDescription)
-            ? MediaColorField{AVCOL_RANGE_JPEG, MediaColorSource::Inferred}
-            : MediaColorField{AVCOL_RANGE_MPEG, MediaColorSource::Inferred};
+            ? MediaColorField{AVCOL_RANGE_JPEG, MediaColorSource::Inferred,
+                result.range.ignored}
+            : MediaColorField{AVCOL_RANGE_MPEG, MediaColorSource::Inferred,
+                result.range.ignored};
     }
     return result;
 }
@@ -10295,6 +10406,8 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                  << ",\"colorSpaceAppliedSource\":\"" << MediaColorSourceName(appliedColor.space.source) << "\""
                  << ",\"colorPrimariesAppliedSource\":\"" << MediaColorSourceName(appliedColor.primaries.source) << "\""
                  << ",\"colorTransferAppliedSource\":\"" << MediaColorSourceName(appliedColor.transfer.source) << "\""
+                 << ",\"colorPrimariesAppliedIgnored\":" << (appliedColor.primaries.ignored ? "true" : "false")
+                 << ",\"colorTransferAppliedIgnored\":" << (appliedColor.transfer.ignored ? "true" : "false")
                  << ",\"chromaLocation\":" << parameters->chroma_location
                  << ",\"fieldOrder\":" << parameters->field_order
                  << ",\"level\":" << parameters->level;
