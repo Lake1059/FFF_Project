@@ -638,10 +638,53 @@ Public NotInheritable Class 媒体信息
     Public Property 章节 As List(Of 媒体章节信息) = New List(Of 媒体章节信息)()
     <JsonPropertyName("streams")>
     Public Property 流 As List(Of 媒体流信息) = New List(Of 媒体流信息)()
+    ' 静态图片的 GainMap 探针结果。旧内核不发此对象时为 Nothing；
+    ' 即使发了，也只有 可用（applyOk && baseAvailable）才允许宿主显示切换按钮。
+    <JsonPropertyName("gainmap")>
+    Public Property GainMap As 媒体GainMap信息
     <JsonIgnore>
     Public ReadOnly Property 时长 As TimeSpan
         Get
             Return TimeSpan.FromTicks(时长100纳秒)
+        End Get
+    End Property
+End Class
+
+''' <summary>RebuildMediaInfo 的 gainmap 子对象（契约 §1.4）。键名与内核 JSON 逐一对齐，
+''' 缺键时按默认值落（bool=False / double=0），宿主不得把"识别到"当成"已施加"。</summary>
+Public NotInheritable Class 媒体GainMap信息
+    <JsonPropertyName("present")>
+    Public Property 有增益图 As Boolean
+    <JsonPropertyName("form")>
+    Public Property 形态 As String = String.Empty
+    <JsonPropertyName("verdict")>
+    Public Property 判定 As String = String.Empty
+    <JsonPropertyName("reason")>
+    Public Property 原因 As String = String.Empty
+    <JsonPropertyName("applyOk")>
+    Public Property 已施加成功 As Boolean
+    <JsonPropertyName("baseAvailable")>
+    Public Property 底图可用 As Boolean
+    <JsonPropertyName("outW")>
+    Public Property 输出宽 As Integer
+    <JsonPropertyName("outH")>
+    Public Property 输出高 As Integer
+    <JsonPropertyName("headroomLinear")>
+    Public Property 线性Headroom As Double
+    <JsonPropertyName("baseHdrHeadroomLog2")>
+    Public Property 基线HDRHeadroomLog2 As Double
+    <JsonPropertyName("altHdrHeadroomLog2")>
+    Public Property 替代HDRHeadroomLog2 As Double
+    <JsonPropertyName("targetHeadroomLog2")>
+    Public Property 目标HeadroomLog2 As Double
+    <JsonPropertyName("applyWeight")>
+    Public Property 施加权重 As Double
+
+    ''' <summary>能否在 GainMap 与原始底图之间来回切：真施加成功且保留了可回退的原始底图。</summary>
+    <JsonIgnore>
+    Public ReadOnly Property 可用 As Boolean
+        Get
+            Return 已施加成功 AndAlso 底图可用
         End Get
     End Property
 End Class

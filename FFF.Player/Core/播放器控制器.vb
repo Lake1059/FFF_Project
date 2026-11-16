@@ -432,6 +432,33 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    ''' <summary>静态图片 GainMap 开关的宿主镜像（原生无 Getter）。
+    ''' 原生每张开图都复位为"启用"，故 Form1 在 媒体已打开 时把它复位为 True；
+    ''' 只在一次切换成功后才随原生提交，失败保持旧值——UI 文本以此为准。</summary>
+    Friend Property GainMap已启用 As Boolean = True
+
+    ''' <summary>在 GainMap 与原始底图之间切换。
+    ''' 读当前镜像 → 调原生 setter → 成功才提交新镜像并返回 True；
+    ''' 失败（非静图 / 无可用底图 / 内核无此导出）返回 False，镜像保持旧值，由 UI 恢复并提示。</summary>
+    Friend Function 切换GainMap() As Boolean
+        Dim 目标 = 会话
+        Dim 信息 = 安全读取媒体信息()
+        If 已释放 OrElse 目标 Is Nothing OrElse 信息 Is Nothing OrElse
+            Not 信息.是静态图片 OrElse 信息.GainMap Is Nothing OrElse Not 信息.GainMap.可用 Then
+            Return False
+        End If
+        Dim 新值 = Not GainMap已启用
+        Try
+            If Not 目标.设置GainMap启用(新值) Then Return False
+            GainMap已启用 = 新值
+            Return True
+        Catch ex As ObjectDisposedException
+            Return False
+        Catch ex As 播放器异常
+            Return False
+        End Try
+    End Function
+
     ''' <summary>读取自动 HDR 状态并翻成可显示文本。读不到返回 Nothing，由 UI 显示"未读取"。</summary>
     Friend Function 视频自动HDR状态文本() As String
         Dim 目标 = 会话

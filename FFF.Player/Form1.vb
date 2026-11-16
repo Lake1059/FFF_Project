@@ -526,15 +526,16 @@ Public Class Form1
         Return New 播放器界面呈现器(
             ETB_媒体进度条, ETB_音量条, MB_播放和暂停,
             按钮图标.取得(播放器按钮图标.播放), 按钮图标.取得(播放器按钮图标.暂停),
-            MB_软件解码或硬件解码, MB_HDR模式,
+            MB_软件解码或硬件解码, MB_HDR模式, MB_GainMap切换,
             MB_当前视频编码显示, MB_当前音频编码显示, MB_当前声道数显示, MB_双耳模式, HCL_时间戳显示, Panel4,
-            JEC_HDR选项前面的空白占位, JEC_当前视频编码显示前面的空白占位,
+            JEC_HDR选项前面的空白占位, JEC_GainMap切换前面的空白占位, JEC_当前视频编码显示前面的空白占位,
             JEC_当前音频编码显示前面的空白占位, JEC_当前声道数显示前面的空白占位,
             JEC_双耳模式前面的空白占位, 画面控件,
             AddressOf 播放控制器.安全读取快照,
             AddressOf 播放控制器.读取双耳状态,
             Function() 播放控制器.是否正在切换,
-            Function() 播放控制器.解码器)
+            Function() 播放控制器.解码器,
+            Function() 播放控制器.GainMap已启用)
     End Function
 
     Private Sub 配置播放器按钮图标()
@@ -1095,6 +1096,9 @@ Public Class Form1
         Text = 光盘标题
         界面呈现器.媒体已打开(e.保留剪辑区间)
         界面呈现器.更新媒体信息(e.媒体信息, e.快照)
+        ' 原生每张开图都把 gainMapEnabled_ 复位为启用，宿主镜像同步复位——
+        ' 否则上一张图切到"原始"后，新图按钮会误显示成"原始"。
+        播放控制器.GainMap已启用 = True
         ' IAMF 空间音频声明（docs/52 验收 #6 的产品拍板：UI 声明即可）。
         ' 调试层的"声场："行要手动开信息层才可见；libiamf 接管与否决定用户听到
         ' 的是沉浸声渲染还是降级下混，值得在打开媒体时主动声明一次。
@@ -1650,6 +1654,19 @@ Public Class Form1
     Private Sub MB_HDR模式_Click(sender As Object, e As EventArgs) Handles MB_HDR模式.Click
         已跳过HDR强制确认 = False
         播放控制器.切换HDR模式()
+    End Sub
+
+    Private Sub MB_GainMap切换_Click(sender As Object, e As EventArgs) Handles MB_GainMap切换.Click
+        ' 控制器只在原生 setter 成功后才翻转镜像；失败时镜像保持旧值。
+        If 播放控制器.切换GainMap() Then
+            信息图层呈现器?.显示操作信息(
+                If(播放控制器.GainMap已启用, "已切到 GainMap 施加画面", "已切到原始底图"),
+                &HFF69DF8BUI, "GainMap")
+        Else
+            ' 非静图 / 无可用底图 / 内核无此导出：不改开关态，下一轮刷新自动收敛回原生实际状态。
+            信息图层呈现器?.显示操作信息("当前无法在 GainMap 与原始底图之间切换", &HFFF0D35DUI, "GainMap")
+        End If
+        界面呈现器?.刷新()
     End Sub
 
     Private Sub Form1_DpiChanged(sender As Object, e As DpiChangedEventArgs) Handles Me.DpiChanged
