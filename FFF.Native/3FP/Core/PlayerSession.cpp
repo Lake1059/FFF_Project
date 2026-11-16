@@ -3323,6 +3323,127 @@ FFFResult PlayerSession::Redraw() noexcept {
     return result;
 }
 
+AVFrame* PlayerSession::BuildGainMapPresentationFrame(const std::vector<float>* buffer,
+    const int width, const int height, const std::int64_t pts,
+    const std::int64_t bestEffortPts) noexcept {
+    if (buffer == nullptr || buffer->empty() || width <= 0 || height <= 0) return nullptr;
+    AVFrame* frame = av_frame_alloc();
+    if (frame == nullptr) return nullptr;
+    // Exact attribute set of the historical applied-buffer path, so the renderer
+    // treats both buffers identically.
+    frame->format = AV_PIX_FMT_RGBAF32LE;
+    frame->width = width;
+    frame->height = height;
+    frame->color_primaries = AVCOL_PRI_BT709;
+    frame->color_trc = AVCOL_TRC_LINEAR;
+    frame->colorspace = AVCOL_SPC_RGB;
+    frame->color_range = AVCOL_RANGE_JPEG;
+    frame->pts = pts;
+    frame->best_effort_timestamp = bestEffortPts;
+    if (av_frame_get_buffer(frame, 0) < 0) {
+        av_frame_free(&frame);
+        return nullptr;
+    }
+    const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4 * sizeof(float);
+    std::memcpy(frame->data[0], buffer->data(), bytes);
+    return frame;
+}
+
+FFFResult PlayerSession::ApplyGainMapEnabledOnWorker(const bool enabled) noexcept {
+    // Gate, in order: this only means something for a still image whose probe
+    // really applied the gainmap. Video, animated images and every
+    // not-applied verdict (decoded_not_applied / fail_closed_* / not_gainmap,
+    // e.g. a plain JPEG) are rejected, and the flag stays exactly what it was.
+    if (!staticImage_) return FFFResult::NotSupported;
+    if (!gainmapInfo_.present || !gainmapInfo_.applyOk ||
+        gainmapInfo_.appliedRgba.empty() || gainmapInfo_.outW <= 0 || gainmapInfo_.outH <= 0)
+        return FFFResult::InvalidState;
+    // Toggle-off only makes sense when the base picture was actually retained;
+    // otherwise there is nothing to switch to.
+    if (!enabled && gainmapInfo_.baseRgba.empty()) return FFFResult::InvalidState;
+
+    const std::vector<float>* buffer = enabled ? &gainmapInfo_.appliedRgba : &gainmapInfo_.baseRgba;
+    const std::int64_t pts = stillImageFrame_ != nullptr ? stillImageFrame_->pts : AV_NOPTS_VALUE;
+    const std::int64_t bestEffortPts =
+        stillImageFrame_ != nullptr ? stillImageFrame_->best_effort_timestamp : AV_NOPTS_VALUE;
+    AVFrame* frame = BuildGainMapPresentationFrame(buffer, gainmapInfo_.outW,
+        gainmapInfo_.outH, pts, bestEffortPts);
+    if (frame == nullptr) return FFFResult::NativeFailure;
+
+    // Present first, flip the bookkeeping only after the screen actually changed:
+    // the frame index stays the same (this is the SetOutputWindow rebind redraw
+    // entry, not a new decoded frame), the queue is untouched, playback state is
+    // untouched, and exactly one extra present happens.
+    const auto renderResult = videoRenderer_.Render(frame, snapshot_.frameIndex,
+        /*limitToNativeSize=*/true, /*coverArt=*/false, /*prepareOnly=*/false,
+        /*imageMode=*/true);
+    if (renderResult != FFFResult::Success) {
+        av_frame_free(&frame);
+        return renderResult;
+    }
+    // The renderer's cache now holds the new buffer; make the recovery truth
+    // (stillImageFrame_) match it, so a later Redraw / device rebind repaints
+    // the same picture rather than the old one.
+    if (stillImageFrame_ != nullptr) {
+        av_frame_unref(stillImageFrame_);
+        if (av_frame_ref(stillImageFrame_, frame) < 0) {
+            av_frame_unref(stillImageFrame_);
+        }
+    }
+    av_frame_free(&frame);
+    gainMapEnabled_ = enabled;
+    gainMapBaseFallbackNoted_ = false;
+    // The button state must be readable back from the native side: refresh the
+    // media-info JSON now so FFF3FP_GetMediaInfo hands the host the fresh
+    // gainmap.enabled without a new export or a version bump.
+    RebuildMediaInfo();
+    RawTrace(enabled ? "GainMap toggle: applied buffer re-presented"
+                     : "GainMap toggle: base buffer re-presented");
+    return FFFResult::Success;
+}
+
+FFFResult PlayerSession::SetGainMapEnabled(const bool enabled) noexcept {
+    // staticImage_ / gainmapInfo_ / stillImageFrame_ are worker-owned, so the
+    // validation and the redraw both run on the worker through the same blocking
+    // complete-command pattern as DiscardAudioOutput: the caller gets the verdict
+    // synchronously, and on failure gainMapEnabled_ has not moved one bit.
+    struct Completion final {
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool finished = false;
+        FFFResult result = FFFResult::NativeFailure;
+    };
+    auto completion = std::make_shared<Completion>();
+    try {
+        {
+            std::lock_guard lock(mutex_);
+            if (terminate_) return FFFResult::InvalidState;
+            commands_.push_back([this, completion, enabled] {
+                auto result = FFFResult::Success;
+                try {
+                    result = ApplyGainMapEnabledOnWorker(enabled);
+                } catch (...) {
+                    result = FFFResult::NativeFailure;
+                }
+                {
+                    std::lock_guard done(completion->mutex);
+                    completion->result = result;
+                    completion->finished = true;
+                }
+                completion->condition.notify_one();
+            });
+        }
+        commandCondition_.notify_one();
+        std::unique_lock<std::mutex> done(completion->mutex);
+        if (!completion->condition.wait_for(done, std::chrono::seconds(5),
+                [&completion] { return completion->finished; }))
+            return FFFResult::NativeFailure;
+        return completion->result;
+    } catch (...) {
+        return FFFResult::NativeFailure;
+    }
+}
+
 FFFResult PlayerSession::SetInjectedHdrMetadata(
     const FFF3FPHdrDynamicMetadataEntry* entries, const std::uint32_t count) noexcept {
     const auto result = videoRenderer_.SetInjectedHdrMetadata(entries, count);
@@ -4530,6 +4651,8 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Fail-closed: a malformed gainmap carrier is logged but never promotes SDR
     // to HDR or changes the existing still-image decode path.
     gainmapInfo_ = GainMapProbeResult{};
+    gainMapEnabled_ = true;
+    gainMapBaseFallbackNoted_ = false;
     if (staticImage_ && IsStillImageContainerName(path)) {
         try {
             // Full probe: decode base + gainmap and apply the math. The applied
@@ -6575,33 +6698,32 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
     const auto handleFrame = [this, video, owner, pausedSeek](AVFrame* decoded) {
         if (video) {
             NormalizeVideoFrameTimestamp(decoded);
-            // GainMap application: if the open-time probe successfully decoded and
-            // applied the gainmap, replace the decoded SDR frame with the applied
-            // linear-RGBA HDR frame. This is the single presentation-path touchpoint.
+            // GainMap buffer selection (contract §1.2): the open-time probe has
+            // already decoded both the applied HDR buffer and the linear SDR base
+            // buffer; this only chooses which one goes on screen. No re-probe, no
+            // re-decode -- the buffers are held in memory for the whole open.
             AVFrame* presentFrame = decoded;
-            AVFrame* gainFrame = nullptr;
-            if (gainmapInfo_.applyOk && !gainmapInfo_.appliedRgba.empty() &&
-                gainmapInfo_.outW > 0 && gainmapInfo_.outH > 0) {
-                gainFrame = av_frame_alloc();
-                if (gainFrame) {
-                    gainFrame->format = AV_PIX_FMT_RGBAF32LE;
-                    gainFrame->width = gainmapInfo_.outW;
-                    gainFrame->height = gainmapInfo_.outH;
-                    gainFrame->color_primaries = AVCOL_PRI_BT709;
-                    gainFrame->color_trc = AVCOL_TRC_LINEAR;
-                    gainFrame->colorspace = AVCOL_SPC_RGB;
-                    gainFrame->color_range = AVCOL_RANGE_JPEG;
-                    gainFrame->pts = decoded->pts;
-                    gainFrame->best_effort_timestamp = decoded->best_effort_timestamp;
-                    if (av_frame_get_buffer(gainFrame, 0) >= 0) {
-                        const size_t bytes = (size_t)gainmapInfo_.outW * gainmapInfo_.outH * 4 * sizeof(float);
-                        memcpy(gainFrame->data[0], gainmapInfo_.appliedRgba.data(), bytes);
-                        presentFrame = gainFrame;
-                    } else {
-                        av_frame_free(&gainFrame);
-                    }
+            const std::vector<float>* gainBuffer = nullptr;
+            const bool gainDimensionsOk = gainmapInfo_.outW > 0 && gainmapInfo_.outH > 0;
+            if (gainMapEnabled_ && gainmapInfo_.applyOk &&
+                !gainmapInfo_.appliedRgba.empty() && gainDimensionsOk) {
+                gainBuffer = &gainmapInfo_.appliedRgba;        // default: applied HDR picture
+            } else if (!gainMapEnabled_ && !gainmapInfo_.baseRgba.empty() && gainDimensionsOk) {
+                gainBuffer = &gainmapInfo_.baseRgba;           // user asked for the original base
+            } else if (!gainMapEnabled_ && gainmapInfo_.applyOk &&
+                !gainmapInfo_.appliedRgba.empty() && gainDimensionsOk) {
+                // Toggle-off with no retained base: stay on the applied buffer
+                // rather than going black, and say so once per open.
+                if (!gainMapBaseFallbackNoted_) {
+                    gainMapBaseFallbackNoted_ = true;
+                    RawTrace("GainMap toggle off: base buffer unavailable, staying on applied buffer");
                 }
+                gainBuffer = &gainmapInfo_.appliedRgba;
             }
+            AVFrame* gainFrame = BuildGainMapPresentationFrame(gainBuffer,
+                gainmapInfo_.outW, gainmapInfo_.outH,
+                decoded->pts, decoded->best_effort_timestamp);
+            if (gainFrame) presentFrame = gainFrame;
             const auto seeking = seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_;
             if (!seeking && (state_.load() == FFF3FPState::Playing || pausedSeek)) QueueVideoFrame(presentFrame);
             else {
@@ -9200,6 +9322,8 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     animatedImage_ = false;
     fragmentedMp4_ = false;
     gainmapInfo_ = GainMapProbeResult{};
+    gainMapEnabled_ = true;
+    gainMapBaseFallbackNoted_ = false;
     sessionWrapLoop_ = false; sessionWrapFailures_ = 0;
     { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = false; hasPublishedRawInfo_ = false; publishedRawInfo_ = {}; }
     audioBlockedUntilVideoFrame_ = false;
@@ -9570,7 +9694,15 @@ void PlayerSession::RebuildMediaInfo() noexcept {
         << ",\"headroomLinear\":" << gainmapInfo_.headroomLinear
         << ",\"baseHdrHeadroomLog2\":" << gainmapInfo_.baseHdrHeadroomLog2
         << ",\"altHdrHeadroomLog2\":" << gainmapInfo_.altHdrHeadroomLog2
-        << ",\"reason\":\"" << EscapeJson(gainmapInfo_.reason) << "\"}"
+        << ",\"reason\":\"" << EscapeJson(gainmapInfo_.reason) << "\""
+        << ",\"applyOk\":" << (gainmapInfo_.applyOk ? "true" : "false")
+        << ",\"baseAvailable\":" << (!gainmapInfo_.baseRgba.empty() ? "true" : "false")
+        << ",\"outW\":" << gainmapInfo_.outW
+        << ",\"outH\":" << gainmapInfo_.outH
+        << ",\"targetHeadroomLog2\":" << gainmapInfo_.targetHeadroomLog2
+        << ",\"applyWeight\":" << gainmapInfo_.applyWeight
+        << ",\"enabled\":" << (gainMapEnabled_ ? "true" : "false")
+        << "}"
         << ",\"metadata\":";
     AppendDictionaryJson(json, format_->metadata);
     json << ",\"chapters\":[";

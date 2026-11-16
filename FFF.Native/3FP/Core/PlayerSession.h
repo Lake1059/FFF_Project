@@ -193,6 +193,13 @@ public:
     FFF3FPVideoAutoHdr RequestedVideoAutoHdr() const noexcept;
     FFFResult GetVideoAutoHdrStatus(
         FFF3FPVideoAutoHdrStatus& status) const noexcept;
+    // Still-image GainMap apply toggle (FFF3FP_SetGainMapEnabled). enabled=true
+    // presents the applied HDR buffer the open-time probe produced; enabled=false
+    // presents the linear SDR base buffer. The probe buffers stay in memory and
+    // are never rebuilt: this repacks one of them and re-presents the retained
+    // still frame once. Video / non-applicable images are rejected and the flag
+    // stays untouched (a failure never half-applies).
+    FFFResult SetGainMapEnabled(bool enabled) noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
     // CPU placement diagnostics (appended export FFF3FP_GetCpuPlacementSnapshot, P3-12).
     // Advisory read-only snapshot: it deliberately takes no session lock and changes no
@@ -444,6 +451,17 @@ private:
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
         bool seekPreview = false) noexcept;
+    // Builds a presentation-ready RGBAF32LE frame (BT.709 / LINEAR / RGB / JPEG
+    // range, the gainmap contract's exact attributes) out of one of the open-time
+    // probe buffers. Caller owns the returned frame; nullptr when the buffer is
+    // unusable. Used both by the frame path and by SetGainMapEnabled's redraw, so
+    // the two paths never drift apart in pixel layout.
+    AVFrame* BuildGainMapPresentationFrame(const std::vector<float>* buffer,
+        int width, int height, std::int64_t pts, std::int64_t bestEffortPts) noexcept;
+    // Worker-thread half of SetGainMapEnabled: validates the session really is a
+    // gainmap still that can switch, then flips gainMapEnabled_ and re-presents
+    // the retained frame once. Never re-probes, re-decodes or touches the queue.
+    FFFResult ApplyGainMapEnabledOnWorker(bool enabled) noexcept;
     // True at most once per seek: the first picture decoded on the way to the
     // target may go on screen so the key press has a visible answer, but it must
     // not retire the seek (see PresentVideoFrame's seekPreview parameter).
@@ -1039,6 +1057,14 @@ private:
     // Private gainmap detection result for the current still image. Reset on
     // open; verdict drives whether the host knows this is an HDR gainmap still.
     GainMapProbeResult gainmapInfo_;
+    // User-facing toggle for the GainMap application. Defaults to true on every
+    // open (each picture starts on its applied HDR buffer) and flips only through
+    // SetGainMapEnabled. Worker-thread state: read in the frame path, written by
+    // the queued setter command.
+    bool gainMapEnabled_ = true;
+    // One-shot guard for the toggle-off fallback note (baseRgba unavailable):
+    // RawTrace at most once per open so a still frame never floods the log.
+    bool gainMapBaseFallbackNoted_ = false;
     // A picture that moves: either a loop-aware image demuxer (GIF/APNG/WebP) or
     // an image sequence carried by the mov demuxer (AVIF/HEIC). Such a file is
     // not a still image, but it is still a picture: it must show its first frame
