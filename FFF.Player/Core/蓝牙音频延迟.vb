@@ -258,6 +258,29 @@ Public Module 蓝牙音频检测器
     Private Const 标识HFPAG As String = "00001112-0000-1000-8000-00805F9B34FB"
     Private Const 标识HSP As String = "00001108-0000-1000-8000-00805F9B34FB"
 
+    ''' <summary>LE Audio（BLE GATT）音频 profile 的服务 UUID 白名单。BTHLE 枚举路径里只有出现
+    ''' 下面这些 UUID，节点才算音频；HID(0x1812)/心跳(0x180D)/电池(0x180F) 等 BTHLE 节点
+    ''' 一律不收。数值来自 Bluetooth SIG Assigned Numbers：
+    ''' 0x1848 ASCS(Audio Stream Control) / 0x1849 MCS(Media Control) /
+    ''' 0x184A TMCS(Telephone & Media Control) / 0x1844 TBS(Telephone Bearer Service)。</summary>
+    Private ReadOnly LE音频服务标识 As String() = {
+        "00001848-0000-1000-8000-00805F9B34FB",
+        "00001849-0000-1000-8000-00805F9B34FB",
+        "0000184A-0000-1000-8000-00805F9B34FB",
+        "00001844-0000-1000-8000-00805F9B34FB"
+    }
+
+    ''' <summary>判断任意注册表文本（实例路径/硬件标识）里是否带 LE Audio 音频 profile UUID。
+    ''' Friend 以便 FFF.Player.Tests 直接断言白名单；真实 BTHLE 节点是否真带这些 UUID 取决于设备，
+    ''' 无真实 LE Audio 设备时该路径标 U 未验证。</summary>
+    Friend Function 含LE音频服务UUID(文本 As String) As Boolean
+        If String.IsNullOrWhiteSpace(文本) Then Return False
+        For Each u In LE音频服务标识
+            If 文本.IndexOf(u, StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+        Next
+        Return False
+    End Function
+
     Private Class 端点记录
         Public 端点标识 As String = ""
         Public 容器标识 As String = ""
@@ -377,8 +400,10 @@ Public Module 蓝牙音频检测器
     End Function
 
     Private Function 映射协议(服务 As String, 硬件标识 As String, 实例路径 As String) As 蓝牙音频协议
+        ' L6-P2-02：只有 inbox 驱动明确命名 BthLEAudio，或实例路径/硬件标识真带 LE Audio
+        ' 音频 profile UUID 时，才判成 LE Audio；裸 BTHLE 节点（HID 等）落到下面的未知。
         If 服务.IndexOf("BthLEAudio", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-           实例路径.IndexOf("BTHLE", StringComparison.OrdinalIgnoreCase) >= 0 Then
+           含LE音频服务UUID(实例路径) OrElse 含LE音频服务UUID(硬件标识) Then
             Return 蓝牙音频协议.LEAudio
         End If
 
@@ -620,7 +645,11 @@ Public Module 蓝牙音频检测器
         If 服务.IndexOf("BthHsp", StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
         If 服务.IndexOf("BthLEAudio", StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
 
-        If 实例路径.IndexOf(蓝牙低功耗根, StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+        ' L6-P2-02：BTHLE 节点不再无条件收为音频。必须真带 LE Audio 音频 profile 的 GATT
+        ' 服务 UUID（ASCS/MCS/TMCS/TBS）；HID/键鼠/心率/电池等 BTHLE 节点就此被拒收。
+        If 实例路径.IndexOf(蓝牙低功耗根, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            Return 含LE音频服务UUID(实例路径)
+        End If
         Dim 标识 = 提取服务标识(实例路径)
         If 标识 IsNot Nothing Then
             Dim 大写 = 标识.ToUpperInvariant()

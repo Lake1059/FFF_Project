@@ -2027,24 +2027,20 @@ Public Class Form1
             End Try
         End If
 
+        ' 按钮 → 命令名 的映射只在 系统媒体映射.映射按钮到命令名 维护一份（测试据此断言
+        ' 每个按钮都有处理器）；这里再把命令名落到本窗体的私有多媒体操作枚举。
+        Dim 命令名 = 系统媒体映射.映射按钮到命令名(按钮)
+        If 命令名.Length = 0 Then Return False
         Dim 命令 As 多媒体操作
-        Select Case 按钮
-            Case 系统媒体按钮.播放
-                命令 = 多媒体操作.播放
-            Case 系统媒体按钮.暂停
-                命令 = 多媒体操作.暂停
-            Case 系统媒体按钮.停止
-                命令 = 多媒体操作.停止
-            Case 系统媒体按钮.快进
-                命令 = 多媒体操作.快进
-            Case 系统媒体按钮.快退
-                命令 = 多媒体操作.快退
-            Case 系统媒体按钮.下一曲
-                命令 = 多媒体操作.下一项
-            Case 系统媒体按钮.上一曲
-                命令 = 多媒体操作.上一项
-            Case Else
-                Return False
+        Select Case 命令名
+            Case "play" : 命令 = 多媒体操作.播放
+            Case "pause" : 命令 = 多媒体操作.暂停
+            Case "stop" : 命令 = 多媒体操作.停止
+            Case "fastforward" : 命令 = 多媒体操作.快进
+            Case "rewind" : 命令 = 多媒体操作.快退
+            Case "next" : 命令 = 多媒体操作.下一项
+            Case "previous" : 命令 = 多媒体操作.上一项
+            Case Else : Return False
         End Select
 
         Try

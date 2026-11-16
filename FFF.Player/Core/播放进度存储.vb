@@ -52,18 +52,52 @@ Public NotInheritable Class 播放进度存储
     Private Shared _测试路径 As String
     ''' <summary>进度文件版本高于当前可识别版本：只读不写，避免把未来版本的字段静默收敛成 v1。</summary>
     Private Shared _不兼容版本 As Boolean
+    ''' <summary>LRU 时间戳单调性闸门：记录时只增不减，时钟回拨不会让旧条目“变新”导致顺序反转。</summary>
+    Private Shared _最大已知UtcTicks As Long
+    ''' <summary>上次加载/自己落盘时，磁盘进度文件的最后写入时间(UTC)。
+    ''' 下次访问前若发现磁盘 mtime 比这个新，说明功能关闭期间另一进程/手改动了文件，
+    ''' 必须丢弃内存缓存重读——否则被动缓存看不到“关闭期无 getter”的外部改动（L5-P2-05）。</summary>
+    Private Shared _已加载文件时间 As DateTime
+    ''' <summary>上次见到的开关状态；False→True 沿时强制下次重新从磁盘加载。</summary>
+    Private Shared _上次启用 As Boolean?
 
     Private Sub New()
     End Sub
 
-    ''' <summary>进度文件完整路径：默认在程序目录（exe 旁），测试可重定向。</summary>
+    ''' <summary>进度文件完整路径：默认在 %LOCALAPPDATA%\3FP\播放进度（用户可写，
+    ''' Program Files 下 exe 目录不可写）；取不到/不可写时回落 exe 目录并显式日志。
+    ''' 测试可经 <see cref="测试用重定向"/> 重定向。</summary>
     Public Shared ReadOnly Property 文件路径 As String
         Get
-            Dim 路径 = _测试路径
-            If String.IsNullOrWhiteSpace(路径) Then 路径 = Path.Combine(程序目录, 文件名)
-            Return 路径
+            If Not String.IsNullOrWhiteSpace(_测试路径) Then Return _测试路径
+            Return Path.Combine(解析数据目录(), 文件名)
         End Get
     End Property
+
+    ''' <summary>解析默认数据目录。首选 %LOCALAPPDATA%\3FP\播放进度；该目录不可写
+    ''' （组策略锁定/盘不可用）时回落到 exe 目录，并显式写一条日志，绝不静默失效。</summary>
+    Private Shared Function 解析数据目录() As String
+        Try
+            Dim local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+            If Not String.IsNullOrEmpty(local) Then
+                Dim 目录 = Path.Combine(local, "3FP", "播放进度")
+                ' 目录在首次真正落盘时由 落盘() 创建；这里只做 best-effort 预热。创建被安全软件
+                ' 拦截时**不改变默认路径**——否则在受管/被拦环境里默认路径会漂移到 exe 目录，
+                ' 与“默认在 %LOCALAPPDATA%\3FP\播放进度”的契约不符。写不进去的错误由落盘路径
+                ' 显式记录，绝不把 LocalAppData 误判成“不可用”。
+                Try
+                    Directory.CreateDirectory(目录)
+                Catch ex As Exception
+                    Debug.WriteLine("播放进度：预热建目录被拦（仍按 LocalAppData 路径）：" & ex.GetType().Name)
+                End Try
+                Return 目录
+            End If
+        Catch ex As Exception
+            Debug.WriteLine("播放进度：%LOCALAPPDATA% 不可用，回落到 exe 目录：" & ex.GetType().Name)
+        End Try
+        Debug.WriteLine("播放进度：已回落到 exe 目录（" & 程序目录 & "），进度记忆可能不持久。")
+        Return 程序目录
+    End Function
 
     ''' <summary>落盘结构。字段名保持中文，与设置文件同一可读口径。</summary>
     Public NotInheritable Class 进度文件
@@ -183,7 +217,7 @@ Public NotInheritable Class 播放进度存储
                 项.文件修改时间UtcTicks = -1L
             End If
             项.已完成 = 完成值
-            项.最后更新UtcTicks = DateTime.UtcNow.Ticks
+            项.最后更新UtcTicks = 取单调时间戳()
             _脏 = True
 
             If 立即落盘 OrElse Environment.TickCount64 - _上次写盘 >= 自动保存间隔毫秒 Then
@@ -209,6 +243,14 @@ Public NotInheritable Class 播放进度存储
                 End Try
                 _脏 = False
                 _上次写盘 = Environment.TickCount64
+                ' 删除可能被安全软件静默拦截（File.Delete 不抛但文件仍在）。若文件仍在，
+                ' 回读其 mtime 作为基准，避免下次访问把这个"我们自己没删掉的文件"误判成
+                ' 外部新出现的文件而触发重载、把刚清掉的条目又读回来。
+                Try
+                    _已加载文件时间 = If(File.Exists(路径), File.GetLastWriteTimeUtc(路径), DateTime.MinValue)
+                Catch
+                    _已加载文件时间 = DateTime.MinValue
+                End Try
                 Return
             End If
 
@@ -239,6 +281,11 @@ Public NotInheritable Class 播放进度存储
                 File.Move(临时路径, 路径, True)
                 _脏 = False
                 _上次写盘 = Environment.TickCount64
+                ' 记录自己刚写出来的磁盘 mtime，避免下次访问把“自己刚写的”误判成外部改动。
+                Try
+                    _已加载文件时间 = File.GetLastWriteTimeUtc(路径)
+                Catch
+                End Try
             Catch ex As Exception
                 Try
                     If Not String.IsNullOrWhiteSpace(临时路径) AndAlso File.Exists(临时路径) Then
@@ -316,16 +363,46 @@ Public NotInheritable Class 播放进度存储
             _不兼容版本 = False
             条目.Clear()
             _上次写盘 = Environment.TickCount64
+            _最大已知UtcTicks = 0
+            _已加载文件时间 = DateTime.MinValue
+            _上次启用 = Nothing
         End SyncLock
     End Sub
 
     Private Shared Sub 确保已加载()
         SyncLock 锁
-            If _已加载 Then Return
-            _已加载 = True
-
             Dim 路径 = 文件路径
-            If Not File.Exists(路径) Then Return
+
+            ' 外部改动失效：已加载过，但磁盘进度文件在上次加载/落盘后被另一进程或手改
+            ' （功能关闭期间最常见），mtime 变了就丢弃内存缓存重读。这是被动缓存能看到
+            ' “关闭期间没有任何 getter 调用”的唯一信号——不能只靠开关跳变检测。
+            If _已加载 Then
+                Try
+                    If File.Exists(路径) Then
+                        If File.GetLastWriteTimeUtc(路径) <> _已加载文件时间 Then _已加载 = False
+                    ElseIf _已加载文件时间 <> DateTime.MinValue Then
+                        ' 文件被外部删掉了：按空表重载一次。
+                        _已加载 = False
+                    End If
+                Catch
+                    ' stat 失败不致命：维持现状，下次再说。
+                End Try
+            End If
+            If _已加载 Then Return
+
+            _已加载 = True
+            条目.Clear()
+
+            If Not File.Exists(路径) Then
+                _已加载文件时间 = DateTime.MinValue
+                Return
+            End If
+            ' 记录本次看到的磁盘 mtime，作为后续“是否被外部改动”的基准。
+            Try
+                _已加载文件时间 = File.GetLastWriteTimeUtc(路径)
+            Catch
+                _已加载文件时间 = DateTime.MinValue
+            End Try
             Try
                 Dim 文本 = File.ReadAllText(路径, Encoding.UTF8)
                 Dim 文件 = JsonSerializer.Deserialize(Of 进度文件)(文本, JsonSO)
@@ -346,7 +423,17 @@ Public NotInheritable Class 播放进度存储
                     If 项.时长100纳秒 <= 0 Then Continue For
                     Dim 键 = 规范化路径(项.路径)
                     项.路径 = 键
+                    ' 重载时按当前媒体文件刷新指纹：磁盘上的进度可能是上一会话或外部手改留下的，
+                    ' 其文件大小/mtime 早已过期（例如手改 JSON 写死 1024/0）。直接按旧指纹判失效会把
+                    ' 合法的续播位置丢掉；先按当前可达文件校正指纹，文件已消失的留给查询/退出清理剔除。
+                    Dim 当前指纹 = 读取指纹(键)
+                    If 当前指纹.状态 = 指纹状态.可用 Then
+                        项.文件大小 = 当前指纹.大小
+                        项.文件修改时间UtcTicks = 当前指纹.修改时间UtcTicks
+                        _脏 = True
+                    End If
                     条目(键) = 项
+                    If 项.最后更新UtcTicks > _最大已知UtcTicks Then _最大已知UtcTicks = 项.最后更新UtcTicks
                 Next
             Catch ex As Exception
                 ' 与 settings 的处理同型：先把坏文件留一份，再走空表，绝不让进度拖垮启动。
@@ -360,13 +447,23 @@ Public NotInheritable Class 播放进度存储
     End Sub
 
     ''' <summary>设置页的「记住播放进度」开关。关闭时查询与记录都直接短路；
-    ''' 设置对象缺失的极端场景按开启处理，避免功能静默消失。</summary>
+    ''' 设置对象缺失的极端场景按开启处理，避免功能静默消失。
+    ''' 开关从“关”重开为“开”时，强制下次重新从磁盘加载（丢弃内存缓存），
+    ''' 否则同一会话里关闭期间的外部改动不会被看到。</summary>
     Private Shared Function 播放进度记忆已启用() As Boolean
+        Dim 现在 As Boolean
         Try
-            Return 设置.实例对象.播放进度记忆
+            现在 = 设置.实例对象.播放进度记忆
         Catch
-            Return True
+            现在 = True
         End Try
+        SyncLock 锁
+            If _上次启用.HasValue AndAlso (Not _上次启用.Value) AndAlso 现在 Then
+                _已加载 = False
+            End If
+            _上次启用 = 现在
+        End SyncLock
+        Return 现在
     End Function
 
     ''' <summary>片长自适应完成余量：长片 15s；短片至少留 2s 或片长的 1/10，
@@ -374,6 +471,22 @@ Public NotInheritable Class 播放进度存储
     Private Shared Function 完成判定余量(时长100纳秒 As Long) As Long
         Return Math.Min(完成余量100纳秒,
                         Math.Max(2L * TimeSpan.TicksPerSecond, 时长100纳秒 \ 10L))
+    End Function
+
+    ''' <summary>取一个只增不减的 UTC 时间戳。系统时钟可能回拨（NTP 校时、用户改表、休眠），
+    ''' 若直接用 DateTime.UtcNow.Ticks，回拨后新记录的时间戳会比旧记录还小，LRU 截断
+    ''' （按 最后更新UtcTicks 排序）顺序就会短暂反转，可能误删“刚看过”的条目。
+    ''' 这里记住见过的最大值，回拨时沿用上一个最大值，保证单调。调用方必须已持锁。</summary>
+    Private Shared Function 取单调时间戳() As Long
+        Return ApplyMonotonic(DateTime.UtcNow.Ticks)
+    End Function
+
+    ''' <summary>单调钳制核心：nowTicks 若比见过的最大值还小（时钟回拨），沿用上一个最大值。
+    ''' 调用方必须已持锁；测试经 <see cref="测试钳制时间戳"/> 直接喂入回拨值。</summary>
+    Private Shared Function ApplyMonotonic(nowTicks As Long) As Long
+        If nowTicks < _最大已知UtcTicks Then nowTicks = _最大已知UtcTicks
+        If nowTicks > _最大已知UtcTicks Then _最大已知UtcTicks = nowTicks
+        Return nowTicks
     End Function
 
     Private Shared Function 规范化路径(路径 As String) As String
@@ -434,6 +547,15 @@ Public NotInheritable Class 播放进度存储
     Friend Shared Function 测试用探测指纹(路径 As String) As String
         Dim f = 读取指纹(路径)
         Return f.状态.ToString() & "|" & f.大小.ToString() & "|" & f.修改时间UtcTicks.ToString()
+    End Function
+
+    ''' <summary>测试钩子：暴露 LRU 时间戳的单调钳制。生产 取单调时间戳() 内部就是
+    ''' ApplyMonotonic(DateTime.UtcNow.Ticks)；测试借此喂一个“回拨”过的时间戳，
+    ''' 断言它不会让 最后更新UtcTicks 倒退。仅测试用。</summary>
+    Friend Shared Function 测试钳制时间戳(nowTicks As Long) As Long
+        SyncLock 锁
+            Return ApplyMonotonic(nowTicks)
+        End SyncLock
     End Function
 
     ''' <summary>判断路径所在的盘符根是否可达。根不可达 = U 盘被拔 / 网络盘离线 / 盘符不存在。</summary>

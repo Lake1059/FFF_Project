@@ -64,6 +64,25 @@ Public Module 系统媒体映射
         Return If(是视频, 系统媒体显示类型.视频, 系统媒体显示类型.音乐)
     End Function
 
+    ''' <summary>
+    ''' 系统按钮 → 播放器命令名 的唯一映射表。Form1 的 <c>处理系统媒体按钮</c> 必须经此函数
+    ''' 分派，FFF.Player.Tests 据此断言“每个枚举按钮都有对应处理器”。返回空串表示未接线，
+    ''' 调用方必须按未处理返回 False——新增 <see cref="系统媒体按钮"/> 成员却忘了接线时，
+    ''' 测试会因为这里返回空串而变红。
+    ''' </summary>
+    Public Function 映射按钮到命令名(按钮 As 系统媒体按钮) As String
+        Select Case 按钮
+            Case 系统媒体按钮.播放 : Return "play"
+            Case 系统媒体按钮.暂停 : Return "pause"
+            Case 系统媒体按钮.停止 : Return "stop"
+            Case 系统媒体按钮.快进 : Return "fastforward"
+            Case 系统媒体按钮.快退 : Return "rewind"
+            Case 系统媒体按钮.下一曲 : Return "next"
+            Case 系统媒体按钮.上一曲 : Return "previous"
+            Case Else : Return String.Empty
+        End Select
+    End Function
+
     ''' <summary>标题优先取容器 metadata，空则回落到文件名（不含扩展名）。</summary>
     Public Function 取标题(信息 As 媒体信息, 路径 As String) As String
         Dim 值 As String = Nothing
