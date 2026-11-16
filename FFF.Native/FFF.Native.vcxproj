@@ -50,6 +50,14 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <ItemDefinitionGroup Condition="'$(SecurityRegressionTests)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>FFF_SECURITY_REGRESSION_TESTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup Condition="'$(SecurityRegressionTests)'=='true'">
+    <ClCompile Include="..\FFF.Native.Tests\SecurityRegression.cpp" />
+  </ItemGroup>
   <PropertyGroup Condition="'$(Platform)'=='x64'">
     <TargetName>FFF.Native</TargetName>
     <LibassRoot>$(ProjectDir)..\third_party\vcpkg_installed\x64-windows</LibassRoot>

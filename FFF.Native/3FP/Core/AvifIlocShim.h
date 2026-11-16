@@ -85,7 +85,7 @@ private:
         std::uint32_t& itemId, std::string& detail) noexcept;
     static bool ParseIloc(const std::vector<std::uint8_t>& bytes, const Box& iloc,
         std::int32_t& version, std::int32_t& offsetSize, std::int32_t& lengthSize,
-        std::int32_t& baseOffsetSize, std::vector<Item>& items, std::string& detail) noexcept;
+        std::int32_t& baseOffsetSize, std::vector<Item>& items, std::string& detail);
     static bool ReadUInt(const std::vector<std::uint8_t>& bytes, std::int64_t& position,
         const std::int64_t end, const std::int32_t width, std::uint64_t& value) noexcept;
     static bool WriteUInt(std::vector<std::uint8_t>& bytes, const std::int64_t position,

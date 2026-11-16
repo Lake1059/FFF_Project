@@ -47,6 +47,9 @@ struct FFF3FPCpuPlacementSnapshot;
 class Fmp4FragmentScanner;
 
 class PlayerSession final {
+#ifdef FFF_SECURITY_REGRESSION_TESTS
+    friend struct PlayerSecurityRegression;
+#endif
 public:
     explicit PlayerSession(const FFF3FPConfiguration& configuration);
     ~PlayerSession();
@@ -810,11 +813,9 @@ private:
     // audio path never takes it.
     mutable std::mutex asrTapMutex_;
     std::shared_ptr<AsrAudioTap> asrTap_;
-    // Worker-side view of asrTap_ for the passthrough shadow decode. A bare
-    // pointer, not a shared_ptr: the audio hot path must not take asrTapMutex_,
-    // and the worker owns every write (install/uninstall commands) while
-    // asrTap_ keeps the object alive. Cleared on DisableAudioTap and on close.
-    AsrAudioTap* asrTapWorkerRaw_ = nullptr;
+    // Worker-owned reference for shadow decode. Only the worker changes it,
+    // so Produce takes no mutex and API replacement cannot release its ring.
+    std::shared_ptr<AsrAudioTap> asrTapWorker_;
     // Shadow-decode failure policy: TrueHD/DTS-HD opened mid-stream error on
     // every AU until the next major sync, so the threshold is deliberately wide.
     // Any decoded frame resets the count; only a persistent failure disables the
