@@ -9567,7 +9567,9 @@ void PlayerSession::RebuildMediaInfo() noexcept {
         << ",\"gainmap\":{\"present\":" << (gainmapInfo_.present ? "true" : "false")
         << ",\"form\":\"" << EscapeJson(gainmapInfo_.form) << "\""
         << ",\"verdict\":\"" << EscapeJson(gainmapInfo_.verdict) << "\""
-        << ",\"headroom\":" << gainmapInfo_.headroom
+        << ",\"headroomLinear\":" << gainmapInfo_.headroomLinear
+        << ",\"baseHdrHeadroomLog2\":" << gainmapInfo_.baseHdrHeadroomLog2
+        << ",\"altHdrHeadroomLog2\":" << gainmapInfo_.altHdrHeadroomLog2
         << ",\"reason\":\"" << EscapeJson(gainmapInfo_.reason) << "\"}"
         << ",\"metadata\":";
     AppendDictionaryJson(json, format_->metadata);
