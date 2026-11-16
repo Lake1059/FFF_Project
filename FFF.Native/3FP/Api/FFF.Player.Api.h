@@ -91,6 +91,14 @@ enum class FFF3FPEvent : std::uint32_t {
     Error = 5,
     ColorModeChanged = 6,
     DeviceChanged = 7,
+    // The first frame of a newly opened media has been submitted to the renderer.
+    // For a progressive still image this can be the base layer or the first grid
+    // tile, so a host may refresh/show the window before OpenCompleted. This is
+    // the submission boundary, not proof that the swap-chain flip has already
+    // happened on the presenter thread; the detail JSON's presented count is the
+    // count that existed before this submission. total is 0 when the codec path
+    // cannot know the number of stages (J2K, single-layer stills).
+    FirstFramePresented = 8,
 };
 
 using FFF3FPEventCallback = void(__cdecl*)(void* context, FFF3FPEvent eventType,
@@ -2030,3 +2038,24 @@ FFF3FP_API FFFResult FFF3FP_SetAuxiliaryComposition(FFF3FPHandle player,
 // module's contract snapshot); it includes this file, so the pragma-once cycle
 // resolves with the definitions above already complete.
 #include "3FP/Api/FFF.Player.AudioPassthrough.h"
+
+// --- Still-image GainMap apply toggle (FFF3FP_SetGainMapEnabled) -----------
+//
+// Appended after the passthrough seam in the same additive style: PlayerApiVersion
+// is unchanged, hosts resolve this dynamically (GetProcAddress) and degrade to
+// "no toggle" when it is absent.
+//
+// enabled != 0 presents the applied HDR buffer the open-time probe produced;
+// enabled == 0 presents the linear SDR base buffer instead. The kernel never
+// re-probes, re-decodes or re-opens the file: it repacks one of the buffers
+// already held in memory and re-presents the retained still frame exactly once,
+// without changing the frame index, the queue or the play/pause state.
+//
+// Returns InvalidArgument for a null handle. A video file, an animated image, or
+// a still whose probe did not actually apply the gainmap (decoded_not_applied,
+// fail_closed_*, not_gainmap) is refused with InvalidState / NotSupported, and
+// the toggle-off direction is also refused when the probe never kept a base
+// buffer. On failure the on-screen picture and the previous toggle state are
+// untouched -- a failure never half-applies.
+FFF3FP_API FFFResult FFF3FP_SetGainMapEnabled(FFF3FPHandle player,
+    std::uint32_t enabled) noexcept;

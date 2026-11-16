@@ -88,4 +88,47 @@ Friend Module 色彩表述
         End Select
     End Function
 
+    ''' <summary>应用值来源标签：声明值缺席时，内核实际用于转换的基础值来自哪一级证据。</summary>
+    Public Function 应用来源标签(来源 As String) As String
+        If String.IsNullOrWhiteSpace(来源) Then Return String.Empty
+        Select Case 来源.Trim().ToLowerInvariant()
+            Case "frame" : Return "（帧识别）"
+            Case "bitstream" : Return "（码流识别）"
+            Case "container" : Return "（元数据）"
+            Case "inferred" : Return "（推断）"
+            Case Else : Return String.Empty
+        End Select
+    End Function
+
+    ''' <summary>
+    ''' 显示内核实际应用的转换基础：声明值与实际应用值一致时直接用声明值；声明缺席
+    ''' 或与实际应用值冲突（容器标签写错、码流/帧有更强证据）时用应用值并标注来源。
+    ''' 这样信息图层/媒体信息窗体既不会整项留空，也不会把已被转换路径纠正的旧标签
+    ''' 继续当作生效值展示。
+    ''' </summary>
+    Public Function 色彩项文本(声明值 As Integer, 应用值 As Integer, 应用来源 As String,
+                              映射 As Func(Of Integer, String)) As String
+        Dim 声明 = 映射(声明值)
+        If 应用值 = 声明值 Then Return 声明
+        Dim 应用 = 映射(应用值)
+        If String.IsNullOrEmpty(应用) Then Return 声明
+        Return 应用 & 应用来源标签(应用来源)
+    End Function
+
+    Public Function 色彩标准显示(声明值 As Integer, 应用值 As Integer, 应用来源 As String) As String
+        Return 色彩项文本(声明值, 应用值, 应用来源, AddressOf 色彩标准)
+    End Function
+
+    Public Function 传输曲线显示(声明值 As Integer, 应用值 As Integer, 应用来源 As String) As String
+        Return 色彩项文本(声明值, 应用值, 应用来源, AddressOf 传输曲线)
+    End Function
+
+    Public Function 色彩矩阵显示(声明值 As Integer, 应用值 As Integer, 应用来源 As String) As String
+        Return 色彩项文本(声明值, 应用值, 应用来源, AddressOf 色彩矩阵)
+    End Function
+
+    Public Function 色彩范围显示(声明值 As Integer, 应用值 As Integer, 应用来源 As String) As String
+        Return 色彩项文本(声明值, 应用值, 应用来源, AddressOf 色彩范围)
+    End Function
+
 End Module

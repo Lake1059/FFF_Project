@@ -92,7 +92,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;FFFNATIVE_EXPORTS;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
@@ -137,7 +137,10 @@
     <ClInclude Include="3FP\Core\RawStillSource.h" />
     <ClInclude Include="3FP\Core\PlayerSession.h" />
     <ClInclude Include="3FP\Core\AvifIlocShim.h" />
+    <ClInclude Include="3FP\Core\AvifItemProbe.h" />
     <ClInclude Include="3FP\Core\AvifTileGridComposer.h" />
+    <ClInclude Include="3FP\Core\GainMapProbe.h" />
+    <ClInclude Include="3FP\Core\GainMapJpeg.h" />
     <ClInclude Include="3FP\Core\PlacementPolicy.h" />
     <ClInclude Include="3FP\Core\PlaybackPerformancePolicy.h" />
     <ClInclude Include="3FP\Core\DecodeDeviceSelection.h" />
@@ -178,7 +181,13 @@
     <ClCompile Include="3FP\Core\Fmp4FragmentScanner.cpp" />
     <ClCompile Include="3FP\Core\DecodeDeviceSelection.cpp" />
     <ClCompile Include="3FP\Core\AvifIlocShim.cpp" />
+    <ClCompile Include="3FP\Core\AvifItemProbe.cpp" />
     <ClCompile Include="3FP\Core\AvifTileGridComposer.cpp" />
+    <ClCompile Include="3FP\Core\GainMapProbe.cpp" />
+    <ClCompile Include="3FP\Core\GainMapJpeg.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PrecompiledHeaderFile />
+    </ClCompile>
     <ClCompile Include="3FP\Core\PlacementPolicy.cpp" />
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp" />
     <ClCompile Include="3FP\Hdr\HdrMetadataParse.cpp" />

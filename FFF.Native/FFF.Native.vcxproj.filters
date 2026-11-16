@@ -87,6 +87,9 @@
     <ClInclude Include="3FP\Core\AvifIlocShim.h">
       <Filter>3FP\Core</Filter>
     </ClInclude>
+    <ClInclude Include="3FP\Core\AvifItemProbe.h">
+      <Filter>3FP\Core</Filter>
+    </ClInclude>
     <ClInclude Include="3FP\Core\AvifTileGridComposer.h">
       <Filter>3FP\Core</Filter>
     </ClInclude>
@@ -162,6 +165,9 @@
       <Filter>3FP\Core</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Core\AvifIlocShim.cpp">
+      <Filter>3FP\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Core\AvifItemProbe.cpp">
       <Filter>3FP\Core</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Core\AvifTileGridComposer.cpp">

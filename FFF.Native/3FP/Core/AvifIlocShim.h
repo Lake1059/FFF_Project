@@ -22,35 +22,37 @@
 // same bytes as one extent, libdav1d decodes the top layer and reports the final
 // image (measured 32.0 dB PSNR against the same source encoded without layers).
 //
-// Because the extents of a layered item are contiguous, "several extents" and
-// "one extent spanning them" describe the same bytes. The repair is therefore a
-// container edit, not a re-encode: set extent_count to 1 and widen the first
-// extent's length to cover the span. Every other byte of the file is left alone.
+// The repair rebuilds the `iloc` box around the item named by `pitm`, not around
+// whichever item happens to be listed last. If the primary item is not last, the
+// old in-place trick would leave its surplus extents where the next item's
+// header is read. A rebuilt box has no surplus bytes at all, so the primary item
+// may sit anywhere; extents that are not contiguous in file order are copied to
+// a new tail extent rather than assumed to be adjacent.
 //
-// The extents that follow the first one are left in place as dead bytes. That is
-// deliberate and safe: mov_read_iloc reads one extent and returns, and mov_read_default
-// then positions itself from the box's *declared* size (`left = a.size - avio_tell(pb)
-// + start_pos; if (left > 0) avio_skip(pb, left);`), so the leftovers are skipped as
-// "garbage at atom end". That guarantee only holds for the last item in the box --
-// an earlier item's leftovers would be read as the next item's header -- so a
-// multi-extent item is only repaired when it is the last one listed.
+// Every other item's fields are preserved. A file whose meta box follows mdat
+// only needs appended data; a meta box before mdat shifts all following offsets
+// by the box-size delta, and this code adjusts them.
 //
-// Every other file is handed back untouched, including every file this code does
-// not fully understand. Nothing here throws, and a malformed box is a refusal,
-// never a failure: the caller falls back to opening the file as it is, which
-// produces FFmpeg's own error rather than one invented here.
+// Every file this code does not fully understand is handed back untouched: a
+// malformed box is a refusal, never a failure.
 class AvifIlocShim final {
 public:
     // Reads the whole file when it is small enough to hold in memory, and repairs
     // it in place when it is a layered still image. Returns true only when `bytes`
     // holds a repaired copy; on false `bytes` is left empty and `detail` says why.
+    // `mergedExtents` (optional) receives how many extents the primary item was
+    // stored as when the repair succeeded -- the signal a caller needs to treat
+    // the file as layered, since a merged item is by definition multi-extent.
     static bool ReadAndRepair(const char* pathUtf8, const std::int64_t maxBytes,
-        std::vector<std::uint8_t>& bytes, std::string& detail) noexcept;
+        std::vector<std::uint8_t>& bytes, std::string& detail,
+        std::int32_t* mergedExtents = nullptr) noexcept;
 
     // The container edit itself, exposed on bytes so it can be exercised on its own.
     // On entry `bytes` holds a complete file; on a true return it holds the repaired
     // file and nothing else was touched. On false `bytes` is unmodified.
-    static bool RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& detail) noexcept;
+    // `mergedExtents` (optional) receives the repaired item's extent count.
+    static bool RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& detail,
+        std::int32_t* mergedExtents = nullptr) noexcept;
 
 private:
     struct Box {
@@ -60,7 +62,8 @@ private:
     };
 
     struct Extent {
-        std::uint64_t offset = 0;
+        std::uint64_t offset = 0;       // absolute file offset (base_offset applied)
+        std::uint64_t relativeOffset = 0;  // value stored in the box
         std::uint64_t length = 0;
         std::int64_t lengthField = 0;  // byte position of this extent's length field
     };
@@ -68,6 +71,8 @@ private:
     struct Item {
         std::uint32_t id = 0;
         std::int32_t constructionMethod = 0;
+        std::uint16_t dataReferenceIndex = 0;
+        std::uint64_t baseOffset = 0;
         std::int64_t extentCountField = 0;  // byte position of the extent_count field
         std::int64_t offsetField = 0;       // byte position of the FIRST extent's offset
         std::vector<Extent> extents;
@@ -76,9 +81,11 @@ private:
     static bool FindBox(const std::vector<std::uint8_t>& bytes, const std::int64_t from,
         const std::int64_t to, const char type[5], Box& output) noexcept;
     static bool IsStillImageBrand(const std::vector<std::uint8_t>& bytes, const Box& ftyp) noexcept;
+    static bool ParsePitm(const std::vector<std::uint8_t>& bytes, const Box& meta,
+        std::uint32_t& itemId, std::string& detail) noexcept;
     static bool ParseIloc(const std::vector<std::uint8_t>& bytes, const Box& iloc,
         std::int32_t& version, std::int32_t& offsetSize, std::int32_t& lengthSize,
-        std::vector<Item>& items, std::string& detail) noexcept;
+        std::int32_t& baseOffsetSize, std::vector<Item>& items, std::string& detail) noexcept;
     static bool ReadUInt(const std::vector<std::uint8_t>& bytes, std::int64_t& position,
         const std::int64_t end, const std::int32_t width, std::uint64_t& value) noexcept;
     static bool WriteUInt(std::vector<std::uint8_t>& bytes, const std::int64_t position,

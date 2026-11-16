@@ -514,6 +514,22 @@ Public NotInheritable Class 播放器会话
         Return 播放器原生接口.读取视频自动HDR状态(取得句柄(), 状态)
     End Function
 
+    ''' <summary>本机加载的内核是否导出了 GainMap 切换入口（旧内核返回 False）。</summary>
+    Public ReadOnly Property 支持GainMap切换 As Boolean
+        Get
+            Return 播放器原生接口.支持GainMap切换
+        End Get
+    End Property
+
+    ''' <summary>静态图片：在 GainMap（已施加缓冲）与原始底图之间切换。
+    ''' <para>无符号 / 句柄无效 / 内核返回非成功（非静图、无可用底图等）一律返回 False，不抛——
+    ''' 与自动 HDR 同性质的可选增强，失败由 UI 恢复开关态并提示，不把会话变成错误弹窗。</para></summary>
+    Public Function 设置GainMap启用(启用 As Boolean) As Boolean
+        Dim 目标 = 取得句柄()
+        If 目标 Is Nothing OrElse 目标.IsInvalid Then Return False
+        Return 播放器原生接口.设置GainMap启用(目标, 启用)
+    End Function
+
     ''' <summary>把内核的原因码翻成人话。逐值对应 FFF3FPVideoSuperResolutionReason。
     ''' <para>最后一句是刻意的：内核的"生效"只表示驱动没有拒绝这次请求，
     ''' 该路径没有任何能力查询可用（实测连伪造的 GUID 都返回成功），

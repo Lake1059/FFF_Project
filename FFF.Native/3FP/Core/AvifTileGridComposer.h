@@ -39,11 +39,27 @@ public:
         std::vector<AVPacket*> packets;
     };
 
-    // Fills `tiles` (in draw order) and the canvas size when the file is a tiled
-    // still image. Returns false for anything else, including tile grids whose
-    // tiles do not share one pixel format.
+    // Fills `tiles` (in draw order) and the presented canvas size when the file
+    // is a tiled still image. The group's `width`/`height` are the final
+    // presentation box; the group's crop offset is subtracted from every tile
+    // offset, so the canvas never carries the cropped-away right/bottom band.
+    // Returns false for anything else, including tile grids whose tiles do not
+    // share one pixel format.
     static bool Describe(AVFormatContext* format, std::int32_t& width, std::int32_t& height,
         std::vector<Tile>& tiles, std::uint8_t background[4]) noexcept;
+
+    // Decodes the first tile, allocates the canvas in that decoded frame's pixel
+    // format (not the container's codecpar format), fills uncovered pixels with
+    // the group's RGBA background, and copies the first tile onto it. Returns
+    // nullptr if the first tile cannot be decoded.
+    static AVFrame* BeginCanvas(AVFormatContext* format, const TileSource& firstSource,
+        const Tile& firstTile, std::int32_t width, std::int32_t height,
+        const std::uint8_t background[4]) noexcept;
+
+    // Decodes one tile and copies it onto `canvas`. Returns false when the tile
+    // cannot be decoded or its decoded pixel format differs from the canvas.
+    static bool ComposeTileOnto(AVFormatContext* format, const TileSource& source,
+        const Tile& tile, AVFrame* canvas) noexcept;
 
     // Decodes one frame per tile and copies them onto a canvas of `width` x
     // `height`. Returns a frame the caller frees, or nullptr on any failure.
