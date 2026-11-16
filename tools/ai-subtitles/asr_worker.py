@@ -1249,6 +1249,9 @@ def _resample_to_16k(mono, rate):
 class WindowBuilder:
     """Media-time windowing over tap frames (section 6.2-6.4)."""
 
+    MAX_BUFFER_BYTES = 256 * 1024 * 1024
+    MAX_BUFFER_BLOCKS = 4096
+
     def __init__(self, window_s, step_s, target_rate=TARGET_RATE):
         self.window_s = window_s
         self.step_s = step_s
@@ -1258,19 +1261,32 @@ class WindowBuilder:
         self.last_rate = None
         self.last_channels = None
         self.last_positions = None
+        self.buffered_bytes = 0
 
     def reset_generation(self):
         self.buf.clear()
         self.window_start = None
+        self.buffered_bytes = 0
 
     def add(self, position100ns, samples, rate, channels, positions=None):
         """samples: float32 [frames, channels], de-interleaved (row = frame)."""
+        size = samples.nbytes
+        if size > self.MAX_BUFFER_BYTES:
+            self.reset_generation()
+            return
+        if self.buf and (position100ns < self.buf[-1][0] or
+                         self.last_rate != rate or self.last_channels != channels):
+            self.reset_generation()
+        if (len(self.buf) >= self.MAX_BUFFER_BLOCKS or
+                size > self.MAX_BUFFER_BYTES - self.buffered_bytes):
+            self.reset_generation()
         if self.window_start is None:
             self.window_start = position100ns
         self.last_rate = rate
         self.last_channels = channels
         self.last_positions = positions
         self.buf.append((position100ns, samples))
+        self.buffered_bytes += size
         # Prune anything older than the current window start (bounded memory).
         if self.buf:
             cutoff = self.window_start - int(0.5 * 1e7)  # 0.5s margin
@@ -1281,6 +1297,7 @@ class WindowBuilder:
                 else:
                     break
             if drop:
+                self.buffered_bytes -= sum(block.nbytes for _, block in self.buf[:drop])
                 del self.buf[:drop]
 
     def _slice(self, start100ns, end100ns):

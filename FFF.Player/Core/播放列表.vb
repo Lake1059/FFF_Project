@@ -455,6 +455,7 @@ Public NotInheritable Class 播放列表
         ArgumentException.ThrowIfNullOrWhiteSpace(值)
         If 值.Contains("://", StringComparison.Ordinal) OrElse 值.StartsWith("\\", StringComparison.Ordinal) OrElse 值.StartsWith("//", StringComparison.Ordinal) Then Throw New ArgumentException("只允许本地普通文件。", NameOf(值))
         Dim 完整路径 = IO.Path.GetFullPath(值)
+        If 完整路径.StartsWith("\\", StringComparison.Ordinal) OrElse 完整路径.StartsWith("//", StringComparison.Ordinal) Then Throw New ArgumentException("只允许本地普通文件。", NameOf(值))
         If Not IO.File.Exists(完整路径) Then Throw New FileNotFoundException("找不到本地文件。", 完整路径)
         If (IO.File.GetAttributes(完整路径) And IO.FileAttributes.ReparsePoint) <> 0 Then Throw New ArgumentException("不允许重解析点文件。", NameOf(值))
         Return 完整路径

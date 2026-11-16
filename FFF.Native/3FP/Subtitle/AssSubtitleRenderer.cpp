@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <cerrno>
 #include "3FP/Core/MediaText.h"
 #include "3FP/Api/FFF.Player.Api.h"
 #include "Shared/Ffmpeg/SharedFileInput.h"
@@ -403,7 +404,16 @@ private:
                 throw std::runtime_error("Could not allocate the subtitle input context.");
             format->pb = sharedInput->Context();
             format->flags |= AVFMT_FLAG_CUSTOM_IO;
-            auto result = avformat_open_input(&format, path, nullptr, nullptr);
+            // Subtitles and attachments must come from the already-open source.
+            // Protocol allowlists alone still permit file: device/UNC references.
+            format->io_open = [](AVFormatContext*, AVIOContext**, const char*, int, AVDictionary**) -> int {
+                return AVERROR(EPERM);
+            };
+            AVDictionary* options = nullptr;
+            av_dict_set(&options, "protocol_whitelist", "file,crypto,data", 0);
+            av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
+            auto result = avformat_open_input(&format, path, nullptr, &options);
+            av_dict_free(&options);
             if (result < 0)
                 throw std::runtime_error("Could not open the subtitle container: " + FfmpegError(result));
             result = avformat_find_stream_info(format, nullptr);
