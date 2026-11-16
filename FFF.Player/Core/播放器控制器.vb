@@ -438,7 +438,8 @@ Public NotInheritable Class 播放器控制器
     Friend Property GainMap已启用 As Boolean = True
 
     ''' <summary>在 GainMap 与原始底图之间切换。
-    ''' 读当前镜像 → 调原生 setter → 成功才提交新镜像并返回 True；
+    ''' 读当前镜像 → 调原生 setter → 成功后**重取一次媒体信息 JSON**，以原生上报的
+    ''' gainmap.enabled 校准镜像（原生为准）；老内核不发该键时回退到 setter 镜像。
     ''' 失败（非静图 / 无可用底图 / 内核无此导出）返回 False，镜像保持旧值，由 UI 恢复并提示。</summary>
     Friend Function 切换GainMap() As Boolean
         Dim 目标 = 会话
@@ -450,12 +451,27 @@ Public NotInheritable Class 播放器控制器
         Dim 新值 = Not GainMap已启用
         Try
             If Not 目标.设置GainMap启用(新值) Then Return False
-            GainMap已启用 = 新值
+            ' 原生无 Getter 导出，但 SetGainMapEnabled 成功后重取 GetMediaInfo JSON，
+            ' 借 gainmap.enabled 读到原生实际开关；键缺失（老内核）时回退到 setter 镜像。
+            GainMap已启用 = 读取GainMap实际开关(目标, 新值)
             Return True
         Catch ex As ObjectDisposedException
             Return False
         Catch ex As 播放器异常
             Return False
+        End Try
+    End Function
+
+    ''' <summary>从刚重取的媒体信息 JSON 读 gainmap.enabled；读不到 / 键缺失时回退到 回退值。</summary>
+    Private Shared Function 读取GainMap实际开关(目标 As 播放器会话, 回退值 As Boolean) As Boolean
+        Try
+            Dim gm = 目标.当前媒体信息?.GainMap
+            If gm Is Nothing OrElse Not gm.启用.HasValue Then Return 回退值
+            Return gm.启用.Value
+        Catch ex As ObjectDisposedException
+            Return 回退值
+        Catch ex As 播放器异常
+            Return 回退值
         End Try
     End Function
 

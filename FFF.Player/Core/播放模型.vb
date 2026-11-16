@@ -679,6 +679,11 @@ Public NotInheritable Class 媒体GainMap信息
     Public Property 目标HeadroomLog2 As Double
     <JsonPropertyName("applyWeight")>
     Public Property 施加权重 As Double
+    ' 原生实际开关（无 Getter 导出，借 RebuildMediaInfo 的 gainmap JSON 上报）。
+    ' 用可空：老内核不发此键时为 Nothing，宿主据此回退到"setter 成功 + 镜像"，
+    ' 绝不能把"键缺失"误读成 False；也绝不参与 可用/可见性判定。
+    <JsonPropertyName("enabled")>
+    Public Property 启用 As Boolean?
 
     ''' <summary>能否在 GainMap 与原始底图之间来回切：真施加成功且保留了可回退的原始底图。</summary>
     <JsonIgnore>
