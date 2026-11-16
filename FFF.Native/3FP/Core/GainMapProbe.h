@@ -86,6 +86,12 @@ struct GainMapProbeResult {
     std::string reason;
     std::string verdict;       // applied | decoded_not_applied | fail_closed_unsupported |
                                // fail_closed_malformed | not_gainmap
+    // ISO 21496-1 reader behaviour: number of bytes after the canonical tmap
+    // v0 layout that a compliant reader MUST ignore (writer padding /
+    // appended extensions). 0 when the tmap payload ended exactly at consumed.
+    // Promoted to a first-class JSON field (sibling of `verdict`); the
+    // `trailingBytesIgnored=N` note is retained for back-compat readers.
+    int trailingBytesIgnored = 0;
     std::vector<std::string> notes;
 
     // pixel buffers (linear RGBA float, outW x outH). Populated on successful
@@ -109,4 +115,12 @@ public:
     // The result carries verdict.
     static GainMapProbeResult Probe(const std::string& pathUtf8, bool baseOnly,
                                     double targetHeadroomLog2 = kDefaultTargetHeadroomLog2);
+
+    // Behavioral self-test (locked-in regression assertions for F1's fixes).
+    // Exercises internal helpers that cannot be reached via Probe() without
+    // real compressed media (tmap trailing tolerance, PQ/HLG base gate,
+    // linearize-then-assign baseRgba contract). Prints one line per check and
+    // returns the number of FAILed assertions (0 == all passed). The CLI
+    // `--selftest` driver additionally runs the end-to-end JXL container check.
+    static int RunSelftest();
 };

@@ -12,6 +12,14 @@ Imports FFF.Player
 ''' </summary>
 Friend Module 系统媒体会话冒烟
 
+    ' L5-P2-02：记录分派钩子实际收到过哪些按钮。
+    Private ReadOnly 已分派按钮 As New HashSet(Of 系统媒体按钮)()
+
+    Private Function 记录按钮(按钮 As 系统媒体按钮) As Boolean
+        已分派按钮.Add(按钮)
+        Return True
+    End Function
+
     Friend Function 运行() As Integer
         Dim 用例数 As Integer
         Dim 失败数 As Integer
@@ -27,7 +35,7 @@ Friend Module 系统媒体会话冒烟
 
             会话 = New 系统媒体会话(
                 Nothing,
-                Function(按钮 As 系统媒体按钮) False,
+                AddressOf 记录按钮,
                 Function(位置 As TimeSpan) False,
                 Function(倍速 As Double) False)
             检查("GetForWindow 初始化", 会话.初始化(窗体.Handle), 用例数, 失败数)
@@ -45,6 +53,22 @@ Friend Module 系统媒体会话冒烟
                 会话.设置按钮可用性(True, False, True, True, False, False)
                 Application.DoEvents()
                 检查("发布卡片不抛异常", True, 用例数, 失败数)
+
+                ' L5-P2-02：断言“按钮回调被注册且分派到对应播放器方法”。这里没有真实 WinRT
+                ' 按钮可按，改走测试钩子 测试用分派按钮——它与生产 控件_按钮按下 调用同一个
+                ' 命令接收器；若接收器没被挂上，下面 7 条全部收不到按钮而失败。
+                已分派按钮.Clear()
+                For Each b In {系统媒体按钮.播放, 系统媒体按钮.暂停, 系统媒体按钮.停止,
+                               系统媒体按钮.快进, 系统媒体按钮.快退, 系统媒体按钮.下一曲,
+                               系统媒体按钮.上一曲}
+                    会话.测试用分派按钮(b)
+                Next
+                For Each b In {系统媒体按钮.播放, 系统媒体按钮.暂停, 系统媒体按钮.停止,
+                               系统媒体按钮.快进, 系统媒体按钮.快退, 系统媒体按钮.下一曲,
+                               系统媒体按钮.上一曲}
+                    检查($"按钮分派到达接收器/{b}", 已分派按钮.Contains(b), 用例数, 失败数)
+                Next
+
                 会话.关闭()
                 检查("关闭后不再启用", Not 会话.已启用面板, 用例数, 失败数)
             End If

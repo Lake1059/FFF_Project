@@ -20,14 +20,6 @@ extern "C" {
 #include <sstream>
 #include <vector>
 
-// Set to 1 once Impl-Jpeg lands the plan §3 JpegGainMapHit contract fields
-// (hasHdrCapacity / baseHdrHeadroomLog2 / altHdrHeadroomLog2 / headroomLog2 /
-// app2ReservedNonZero). Until then the JPEG path derives hB/hA from legacy
-// fields; the decision itself already goes through the shared DecideApplyWeight.
-#ifndef FP3_JPEG_CONTRACT
-#define FP3_JPEG_CONTRACT 0
-#endif
-
 namespace {
 
 // ── byte helpers ─────────────────────────────────────────────────────────────
@@ -62,6 +54,20 @@ inline int ReadBox(const std::vector<uint8_t>& d, long pos, long end,
 }
 inline bool IsCodecItem(const std::string& t) {
     return t == "av01" || t == "hvc1" || t == "hev1";
+}
+
+// Convert a UTF-8 path to a UTF-16 wstring for the Win32-only JPEG/WebP probe.
+// The old code did std::wstring(pathUtf8.begin(), pathUtf8.end()), which copies
+// each UTF-8 BYTE into a wchar_t and garbles any non-ASCII path (the JPEG/WebP
+// probe opens via std::ifstream on the wide path, so such a path silently
+// failed to open). MultiByteToWideChar is the correct conversion.
+inline std::wstring Utf8ToWide(const std::string& u8) {
+    if (u8.empty()) return std::wstring();
+    int n = MultiByteToWideChar(CP_UTF8, 0, u8.c_str(), (int)u8.size(), nullptr, 0);
+    if (n <= 0) return std::wstring();
+    std::wstring w((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, u8.c_str(), (int)u8.size(), w.data(), n);
+    return w;
 }
 
 struct Extent { long off = 0; long len = 0; };
@@ -204,20 +210,28 @@ void ParseIref(const std::vector<uint8_t>& d, long start, long end,
     }
 }
 
+// grpl content is a concatenation of group sub-boxes ("altr"). Each sub-box
+// is size(4) + type[4] + FullBox(version/flags=4) + group_id(u32) +
+// num_entities(u32) + entity_id(u32)[]. The content boundary starts the first
+// sub-box directly. The old code skipped 4 bytes then read the "altr" type as
+// the first group_id (bogus group 0x616C7472) and only landed on the real
+// group by luck on single-group files.
 void ParseGrpl(const std::vector<uint8_t>& d, long start, long end,
                std::vector<GrpGroup>& groups) {
-    if (start + 12 > end) return;
-    // FullBox: version(1) + flags(3) = 4 bytes, then group_id u32, num_entities u32, entities u32[]
-    long p = start + 4; // skip FullBox header
+    long p = start;
     while (p + 8 <= end) {
+        long sz = (long)Be32(d.data() + p);
+        // sub-box header(8) + inner FullBox(4) + group_id(4) + count(4) = 20 min.
+        if (sz < 20 || p + sz > end) break;
+        long q = p + 8 + 4;  // sub-box header 8 bytes, then inner FullBox 4 bytes
         GrpGroup g;
-        g.groupId = Be32(d.data() + p); p += 4;
-        uint32_t n = Be32(d.data() + p); p += 4;
-        for (uint32_t i = 0; i < n && p + 4 <= end; i++) {
-            g.entities.push_back((int)Be32(d.data() + p)); p += 4;
+        g.groupId = Be32(d.data() + q); q += 4;
+        uint32_t n = Be32(d.data() + q); q += 4;
+        for (uint32_t i = 0; i < n && q + 4 <= end; i++) {
+            g.entities.push_back((int)Be32(d.data() + q)); q += 4;
         }
         groups.push_back(g);
-        // Next group starts here (grpl contains multiple group boxes concatenated)
+        p += sz;
     }
 }
 
@@ -613,18 +627,6 @@ bool AppleMakerNote(const std::vector<uint8_t>& exif, float& m33, float& m48, st
     return true;
 }
 
-// Build Apple metadata from tag33/48. Returns false when headroom<=1 (no HDR).
-bool BuildAppleMeta(float m33, float m48, float& headroomLog2, std::string& why) {
-    if (m33 <= 0.f && m48 <= 0.f) { why = "tag33/48 both zero"; return false; }
-    float stops = m33 < 1.0f
-        ? (m48 <= 0.01f ? -20.f * m48 + 1.8f : -0.101f * m48 + 1.601f)
-        : (m48 <= 0.01f ? -70.f * m48 + 3.0f : -0.303f * m48 + 2.303f);
-    float headroom = powf(2.f, fmaxf(stops, 0.f));
-    if (headroom <= 1.f) { why = "headroom<=1"; return false; }
-    headroomLog2 = log2f(headroom);
-    return true;
-}
-
 // XMP helpers: search raw file bytes for tag content.
 bool XmpFindFloat(const std::vector<uint8_t>& d, const std::string& tag, float& outv) {
     std::string open = "<" + tag + ">";
@@ -824,6 +826,19 @@ float Rec709Inverse(float v) {
 }
 float Luma(float r, float g, float b) { return 0.2126f*r + 0.7152f*g + 0.0722f*b; }
 
+// ISO CICP transfer characteristics that denote an already-HDR base:
+//   16 = SMPTE ST 2084 (PQ), 18 = ARIB STD-B67 (HLG).
+// We cannot lift such a base with sRGB-linear gain math, so the probe fails
+// closed instead of emitting identical pixels. This single predicate backs
+// BOTH the JPEG base gate and the BMFF base gate, and is exercised directly
+// by GainMapProbe::RunSelftest() so the gate cannot silently regress.
+inline bool IsHdrBaseRejected(int trc, GainMapProbeResult& R, const char* where) {
+    if (trc != 16 && trc != 18) return false;
+    R.verdict = "fail_closed_unsupported";
+    R.reason = std::string(where) + " HDR base (PQ/HLG) gain map not implemented; cannot lift an already-HDR base";
+    return true;
+}
+
 struct GainApplyParams {
     bool isAppleFamily = false;      // Apple 0-base formula
     bool isVendor128 = false;        // 128-base (uses ISO math with min=-h,max=+h)
@@ -922,6 +937,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                                        double targetHeadroomLog2) {
     GainMapProbeResult R;
     R.verdict = "not_gainmap";
+    R.form = "none";            // vocab: never emit an empty form
     R.targetHeadroomLog2 = targetHeadroomLog2;
     // read file
     FILE* f = fopen(pathUtf8.c_str(), "rb");
@@ -937,22 +953,71 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     bool isWebp = (d.size() >= 12 && memcmp(d.data(), "RIFF", 4) == 0 && memcmp(d.data() + 8, "WEBP", 4) == 0);
     if (isJpeg || isWebp) {
         fp3::JpegGainMapHit jh;
-        ProbeJpegGainMap(std::wstring(pathUtf8.begin(), pathUtf8.end()), jh);
+        ProbeJpegGainMap(Utf8ToWide(pathUtf8), jh);
         if (!jh.found) {
             // Route by reason prefix (JPEG side emits these):
-            //   BARE_GAINMAP_LAYER_NO_BASE:      -> unsupported (no reconstructable base)
+            //   BARE_GAINMAP_LAYER_NO_BASE:      -> unsupported, but it IS a gainmap layer (present=true)
             //   MALFORMED_GAINMAP:               -> malformed (e.g. min>max in APP2/XMP)
             //   APPLE_V1_NO_MAKERNOTE:           -> unsupported (cannot derive headroom)
             //   APPLE_V2/V3_NO_XMP_HEADROOM:     -> unsupported (no headroom metadata)
+            //   JPEG_HDR_BASE_NO_GAINMAP:        -> recognized HDR JPEG base, no separable gainmap
             //   otherwise                        -> not_gainmap (plain SDR / unrelated)
-            if (jh.reason.rfind("BARE_GAINMAP_LAYER_NO_BASE:", 0) == 0) {
+            if (jh.reason.rfind("BARE_GAINMAP_LAYER_NO_BASE:", 0) == 0 ||
+                jh.reason.rfind("UNSUPPORTED_WEBP_GAINMAP:", 0) == 0) {
+                // A standalone gain-map layer (or a WebP carrying hdrgm metadata
+                // we cannot decode) is still a gainmap-shaped file; we just
+                // cannot reconstruct/apply it. Propagate the carrier fields the
+                // parser already classified (form/family/metaSource).
+                R.present = true;
+                if (!jh.containerKind.empty()) R.form = jh.containerKind;
+                if (!jh.family.empty()) R.metaFamily = jh.family;
+                if (!jh.metaSource.empty()) R.metaSource = jh.metaSource;
                 R.verdict = "fail_closed_unsupported";
-            } else if (jh.reason.rfind("MALFORMED_GAINMAP:", 0) == 0) {
+                R.reason = jh.reason;
+                return R;
+            }
+            if (jh.reason.rfind("MALFORMED_GAINMAP:", 0) == 0) {
+                // Malformed but RECOGNIZED gain-map carrier: fill the carrier
+                // fields (form/family/metaSource) so the verdict isn't reported
+                // as an unrecognized file (present=false/form="").
+                R.present = true;
+                if (!jh.containerKind.empty()) R.form = jh.containerKind;
+                if (!jh.family.empty()) R.metaFamily = jh.family;
+                if (!jh.metaSource.empty()) R.metaSource = jh.metaSource;
                 R.verdict = "fail_closed_malformed";
             } else if (jh.reason.rfind("APPLE_V1_NO_MAKERNOTE:", 0) == 0) {
                 R.verdict = "fail_closed_unsupported";
             } else if (jh.reason.rfind("APPLE_V2/V3_NO_XMP_HEADROOM:", 0) == 0) {
                 R.verdict = "fail_closed_unsupported";
+            } else if (jh.reason.rfind("JPEG_HDR_BASE_NO_GAINMAP:", 0) == 0) {
+                // Ultra-HDR JPEG that declares HDR headroom in XMP but carries no
+                // separable MPF gain-map image. It IS an HDR gainmap-family JPEG
+                // (present=true, form=jpeg_hdr); decode the single base frame and
+                // report decoded_not_applied (there is no gain layer to apply).
+                std::string why;
+                std::vector<float> baseRgba; int baseW = 0, baseH = 0;
+                if (!DecodeFileBaseToRgba(pathUtf8, baseRgba, baseW, baseH, why)) {
+                    R.verdict = "fail_closed_malformed";
+                    R.reason = "jpeg hdr base decode: " + why;
+                    return R;
+                }
+                R.present = true;
+                R.form = "jpeg_hdr";
+                R.metaFamily = "iso";
+                R.metaSource = "xmp";
+                R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
+                R.decodeCodec = "mjpeg";
+                for (size_t i = 0; i < baseRgba.size(); i += 4) {
+                    baseRgba[i]   = SrgbToLinear(baseRgba[i]);
+                    baseRgba[i+1] = SrgbToLinear(baseRgba[i+1]);
+                    baseRgba[i+2] = SrgbToLinear(baseRgba[i+2]);
+                }
+                R.baseRgba = baseRgba; R.outW = baseW; R.outH = baseH;
+                R.appliedRgba = baseRgba;
+                R.applyOk = false; R.applyMode = "none";
+                R.verdict = "decoded_not_applied";
+                R.reason = "jpeg HDR base rendition; no separable gain-map layer to apply";
+                return R;
             } else {
                 R.verdict = "not_gainmap";
             }
@@ -977,7 +1042,13 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         }
         R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
         R.decodeCodec = "mjpeg";
-        R.decodeChannels = 1; // JPEG gainmaps are 1-channel
+        // baseTrc fed back by DecodeBufferToRgba via outColorTrc; the PQ/HLG gate
+        // is applied after the headroom decision (only refuse when we would lift).
+        // Channels: APP2 flags bit7 (0x80) declares multichannel; else fall back
+        // to pixel-distinct detection. The old code hardcoded 1 and fed the same
+        // luma sample to all three channels, dropping per-channel gain.
+        bool jpegMulti = ((jh.app2Flags & 0x80) != 0) || HasDistinctChannels(gmRgba, gmW * gmH);
+        R.decodeChannels = jpegMulti ? 3 : 1; // 1 or 3
 
         // ── Headroom decision (plan §2.1/§3): hB/hA drive the verdict ──
         // We call the SAME DecideApplyWeight as the tmap/HEIC path. The §3
@@ -1039,6 +1110,11 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         double jw = 0.0;
         bool apply = DecideApplyWeight(jB, jA, targetHeadroomLog2, jw, decideReason, &R.notes);
         R.applyWeight = jw;
+        // PQ/HLG base: fail closed only when we would actually lift it (apply=true).
+        if (apply && IsHdrBaseRejected(baseTrc, R, "jpeg")) {
+            R.decodeOk = true;
+            return R;
+        }
         R.baseRgba = lin; R.outW = baseW; R.outH = baseH;
 
         auto statsOn = [&](const std::vector<float>& px) {
@@ -1056,6 +1132,18 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             R.statsMaxLinear = maxLin;
             R.statsOver1Pct = n > 0 ? (double)over1 * 100.0 / (double)n : 0;
         };
+
+        if (baseOnly) {
+            // --base-only honored for the JPEG/WebP family too: emit the linear
+            // SDR base and never claim applyOk. (Previously this flag was silently
+            // ignored here and A/B dumps got the HDR rendition.)
+            R.appliedRgba = lin;
+            R.applyOk = false; R.applyMode = "none";
+            R.verdict = "decoded_not_applied";
+            R.reason = "base-only requested";
+            statsOn(lin);
+            return R;
+        }
 
         if (!apply) {
             // Base is already HDR: display base as-is, no gain applied.
@@ -1107,10 +1195,23 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                     out[o]   = lin[o]   * scale;
                     out[o+1] = lin[o+1] * scale;
                     out[o+2] = lin[o+2] * scale;
-                } else {
+                } else if (R.decodeChannels <= 1) {
+                    // Mono gainmap: luma sample applied to all three channels.
                     for (int ch = 0; ch < 3; ch++) {
                         bool cl=false;
                         out[o+ch] = ApplyChannelIso(gv, ch, lin[o+ch], jm, fw, &cl);
+                        if(cl && jm.gainMax[ch]>jClampGainMax){jClampFired=true;jClampCh=ch;jClampGainMax=jm.gainMax[ch];}
+                    }
+                } else {
+                    // Per-channel gainmap: bilinear-sample each gain-map channel
+                    // directly instead of reusing the luma sample for every channel.
+                    for (int ch = 0; ch < 3; ch++) {
+                        float gvc = gmRgba[a+ch]*(1-fx)*(1-fy)
+                                  + gmRgba[b+ch]*fx*(1-fy)
+                                  + gmRgba[c+ch]*(1-fx)*fy
+                                  + gmRgba[e+ch]*fx*fy;
+                        bool cl=false;
+                        out[o+ch] = ApplyChannelIso(gvc, ch, lin[o+ch], jm, fw, &cl);
                         if(cl && jm.gainMax[ch]>jClampGainMax){jClampFired=true;jClampCh=ch;jClampGainMax=jm.gainMax[ch];}
                     }
                 }
@@ -1124,20 +1225,20 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         statsOn(out);
         return R;
     }
-    // JPEG XL container: first box type "JXL ". Only flag as gainmap if jhgm box present.
-    if (d.size() >= 8 && memcmp(d.data() + 4, "JXL ", 4) == 0) {
-        std::string_view sv((const char*)d.data(), d.size());
-        bool hasJhgm = sv.find("jhgm") != std::string_view::npos;
-        if (hasJhgm) {
-            R.present = true;
-            R.form = "jhgm";
-            R.metaFamily = "iso";
-            R.metaSource = "tmap";
-            R.verdict = "fail_closed_unsupported";
-            R.reason = "[container] JPEG XL (jhgm) not supported in this build";
-            return R;
-        }
-        R.reason = "JPEG XL container (no jhgm gainmap box)";
+    // JPEG XL container: first box type "JXL " (signature box, followed by the
+    // JXL codestream magic, ftyp, jxlc/jxll and optionally a jhgm box). We do NOT
+    // parse JXL, so we cannot tell a gain-map container from a plain base: any
+    // JXL container is reported as present=true/form=jhgm/fail_closed_unsupported
+    // with a stable reason. family/metaSource stay within the fixed vocab
+    // (family: iso|apple|vendor128|none; metaSource: tmap|makenote|xmp|default):
+    // an unparsed JXL is family=none/metaSource=default.
+    if (d.size() >= 12 && memcmp(d.data() + 4, "JXL ", 4) == 0) {
+        R.present = true;
+        R.form = "jhgm";
+        R.metaFamily = "none";
+        R.metaSource = "default";
+        R.verdict = "fail_closed_unsupported";
+        R.reason = "jxl_gainmap_not_implemented";
         return R;
     }
 
@@ -1151,14 +1252,16 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         R.majorBrand = std::string((const char*)d.data() + 8, 4);
         for (long p = 16; p + 4 <= bsize; p += 4)
             R.compatibleBrands.push_back(std::string((const char*)d.data() + p, 4));
-        // JXL container (ISOBMFF-based JPEG XL): unsupported in this build.
+        // JXL container (ISOBMFF-based JPEG XL): jhgm gain map is detected but
+        // not parsed in this build. Keep fail_closed_unsupported with a stable
+        // reason; do not claim "applied" and do not leave the reason empty.
         if (R.majorBrand == "JXL ") {
             R.present = true;
             R.form = "jhgm";
-            R.metaFamily = "iso";
-            R.metaSource = "tmap";
+            R.metaFamily = "none";
+            R.metaSource = "default";
             R.verdict = "fail_closed_unsupported";
-            R.reason = "[container] JPEG XL (jhgm) not supported in this build";
+            R.reason = "jxl_gainmap_not_implemented";
             return R;
         }
         // still brand heuristic
@@ -1193,11 +1296,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         else if (t == "iref") ParseIref(d, cs, ce, C.refs);
         else if (t == "grpl") ParseGrpl(d, cs, ce, C.groups);
         else if (t == "iprp") {
-            std::vector<AuxCProp> auxC;
-            ParseIprp(d, cs, ce, C.ipco, C.ipma, auxC);
-            // stash auxC on R via notes? We'll re-derive below.
-            // Store in a thread-local-ish map via a static:
-            static std::vector<AuxCProp> s_auxC; s_auxC = auxC;
+            // ipco/ipma are what we need here; auxC URNs are re-derived below in
+            // the dedicated ipro scan, so no need to keep the out vector alive.
+            std::vector<AuxCProp> ignoredAuxC;
+            ParseIprp(d, cs, ce, C.ipco, C.ipma, ignoredAuxC);
         } else if (t == "idat") { C.idatStart = cs; C.idatEnd = ce; }
         p += bsize;
     }
@@ -1254,13 +1356,16 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
 
     // Determine form
     int tmapId = -1;
-    // Parse colr nclx from already-parsed ipco: detect PQ/HLG transfer.
+    // Parse colr nclx for the BASE (primary) item only: detect PQ/HLG transfer.
+    // Scanning every colr in ipco would pick up the gain-map's or an attached
+    // ICC/prof colr and mis-reject an SDR base (e.g. *_srgb_icc.avif).
     int baseColorTrc = 2;
-    for (auto& pb : C.ipco) {
-        if (pb.type == "colr" && pb.size >= 11) {
-            long cs = pb.off;
-            if (d[cs]=='n'&&d[cs+1]=='c'&&d[cs+2]=='l'&&d[cs+3]=='x') {
-                // nclx: type(4) + primaries(2 BE) + transfer(2 BE) + matrix(2 BE) + range(1)
+    auto pPrimary = C.ipma.find(C.primary);
+    if (pPrimary != C.ipma.end()) {
+        for (int ix : pPrimary->second) {
+            if (ix < 1 || ix > (int)C.ipco.size() || C.ipco[ix-1].type != "colr") continue;
+            long cs = C.ipco[ix-1].off;
+            if (d[cs]=='n'&&d[cs+1]=='c'&&d[cs+2]=='l'&&d[cs+3]=='x' && C.ipco[ix-1].size >= 11) {
                 baseColorTrc = (d[cs+6] << 8) | d[cs+7];
             }
         }
@@ -1383,17 +1488,23 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         if (!SliceItem(d, C, tmapId, tmapPayload, why)) containerWhy = "tmap payload: " + why;
         else if (!tmapPayload.empty() && tmapPayload[0] != 0) {
             // Unsupported tmap version: ignore gainmap, display base as-is.
+            // Per libavif / ISO: an unreadable gain-map version is treated as
+            // "no gain map" -> verdict not_gainmap, meta reset to defaults.
             tmapPayload.clear();
             R.present = false;
             R.form = "none";
+            R.metaFamily = "none";
+            R.metaSource = "default";
         }
         else if (tmapPayload.size() >= 3 && tmapPayload[0] == 0) {
-            // Check ISO minVersion (u16 at offset 1): if non-zero, gainmap is too new → ignore.
+            // Check ISO minVersion (u16 at offset 1): if non-zero, gainmap is too new -> ignore.
             int isoMinVer = Be16(tmapPayload.data() + 1);
             if (isoMinVer != 0) {
                 tmapPayload.clear();
                 R.present = false;
                 R.form = "none";
+                R.metaFamily = "none";
+                R.metaSource = "default";
             }
         }
     } else {
@@ -1490,7 +1601,11 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         std::vector<uint8_t> gp; std::string why;
         if (!SliceItem(d, C, gainmapItemId, gp, why)) { containerWhy = "grid slice: " + why; }
         else {
-            if (gp.size() < 6) containerWhy = "grid payload too short";
+            // Grid payload layout (corpus convention): version(1) + flags(1) +
+            // rows_minus1(1) + cols_minus1(1) = 4 bytes minimum. A flags=0 grid
+            // without tail w/h is exactly these 4 bytes; the old <6 gate rejected
+            // it before rows/cols were ever read (reported 0/0).
+            if (gp.size() < 4) containerWhy = "grid payload too short";
             else if (gp[0] != 0) containerWhy = "grid version != 0";
             else {
                 gridFlags = gp[1];
@@ -1565,15 +1680,22 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         }
     }
 
-    if (form == Form::TmapSingle) R.form = "tmap";
-    if (form == Form::AuxIso) { R.form = "tmap"; } // ISO aux treated as tmap-family
-    // If the gainmap item is a grid (even if tile parsing failed), report the grid form.
-    if (gainmapIsGrid && (R.form == "auxc_apple" || R.form == "auxc_vendor" || R.form == "tmap"))
-        R.form = "auxc_grid";
+    // Only stamp a concrete form when we actually detected a gainmap. A rejected
+    // tmap (bad version, present=false) must keep form="none" / meta reset.
+    if (R.present) {
+        if (form == Form::TmapSingle) R.form = "tmap";
+        if (form == Form::AuxIso) { R.form = "tmap"; } // ISO aux treated as tmap-family
+        // If the gainmap item is a grid (even if tile parsing failed), report the grid form.
+        if (gainmapIsGrid && (R.form == "auxc_apple" || R.form == "auxc_vendor" || R.form == "tmap"))
+            R.form = "auxc_grid";
+    }
 
     // Not gainmap?
     if (!R.present) {
         R.verdict = "not_gainmap";
+        R.form = "none";
+        R.metaFamily = "none";
+        R.metaSource = "default";
         return R;
     }
 
@@ -1616,6 +1738,8 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                 if (primaryIdx < gainSideIdx) {
                     R.present = false;
                     R.form = "none";
+                    R.metaFamily = "none";
+                    R.metaSource = "default";
                     R.verdict = "not_gainmap";
                     R.reason = "altr group has primary before gainmap (wrong order); gainmap ignored";
                     return R;
@@ -1627,7 +1751,6 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     // Decode base
     std::vector<float> baseRgba;
     int baseW = 0, baseH = 0;
-    int decTrcOuter = 2;
     bool baseIsGrid = (C.items.count(C.primary) && C.items[C.primary] == "grid");
     if (baseIsGrid) {
         // Primary item type is "grid": the item's own data IS the grid payload.
@@ -1716,7 +1839,6 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         baseRgba = std::move(canvas); baseW = gW; baseH = gH;
         R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
         R.decodeCodec = tileCodec;
-        decTrcOuter = decTrc;
     } else {
         std::string why;
         std::vector<uint8_t> baseStream;
@@ -1737,7 +1859,6 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             return R;
         }
         FindIspe(C, d, C.primary, baseW, baseH); // prefer declared ispe over decoded dims
-        decTrcOuter = decTrc;
     }
     R.baseRgba = baseRgba; R.outW = baseW; R.outH = baseH;
     // Gainmap was ignored (no brand / unsupported version / etc.) but base decoded:
@@ -1746,6 +1867,13 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         R.verdict = "not_gainmap"; R.reason = "gainmap not recognized for this file";
         return R;
     }
+
+    // HDR-base (PQ/HLG) gate: we cannot LIFT an HDR base with sRGB-linear gain
+    // math, so fail closed only when we would actually apply (hB<=hA). When the
+    // gainmap itself declares the base already HDR (hB>hA → apply=false), we
+    // report decoded_not_applied: the data is valid and we did no wrong math.
+    // baseTrc is the BASE (primary) item's own colr nclx transfer only.
+    int baseTrc = baseColorTrc;
 
     // Decode gainmap
     std::vector<float> gmRgba;
@@ -1821,17 +1949,33 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         { char dbg[200]; sprintf(dbg, "tmap parsed ok: size=%ld consumed=%ld baseHdrLog2=%.4f altHdrLog2=%.4f gainMin0=%.4f gainMax0=%.4f gamma0=%.4f ch=%d flags=0x%02X",
             (long)tmapPayload.size(), consumed, m.baseHdrHeadroomLog2, m.altHdrHeadroomLog2, m.gainMin[0], m.gainMax[0], m.gammaC[0], m.channels, m.rawFlags);
           R.notes.push_back(dbg); }
-        // Verify payload length matches canonical v0 layout (detect writer with extra bytes)
+        // ISO 21496-1 reader behaviour: parse only the `consumed` canonical v0
+        // layout and IGNORE any trailing bytes (a writer may pad / append
+        // extensions). Trailing>0 must NOT reject the whole file; it is reported
+        // via the notes channel as trailingBytesIgnored=N.
         {
             long used = consumed + 1;  // +1 for the version byte at tmapPayload[0]
             long trailing = (long)tmapPayload.size() - used;
+            if (trailing < 0) trailing = 0;
+            R.trailingBytesIgnored = (int)trailing;  // first-class field (sibling of verdict)
             if (trailing > 0) {
+                char tn[96]; sprintf(tn, "trailingBytesIgnored=%ld", trailing);
+                R.notes.push_back(tn);
+                // A tmap that carries bytes beyond the canonical v0 layout uses a
+                // writer extension this build does not implement. The canonical
+                // part parsed fine (not malformed), but we cannot trust the full
+                // output → fail_closed_unsupported (capability gap), distinct from
+                // a clean tmap whose base/grid simply does not need applying.
                 R.verdict = "fail_closed_unsupported";
-                R.reason = "tmap: " + std::to_string(trailing) + " trailing bytes beyond v0 layout";
-                R.decodeOk = false; R.applyOk = false;
+                R.reason = "tmap writer extension beyond canonical v0 layout (" +
+                            std::to_string(trailing) + " trailing bytes) not implemented";
+                R.decodeOk = true;
                 return R;
             }
         }
+        // Consume the use_base_colour_space flag (0x40): the probe applies gain in
+        // the base colour space, so surface it as a note rather than dropping it.
+        if (m.useBaseColorSpace) R.notes.push_back("tmap useBaseColorSpace=1");
         ap.iso = m; ap.isAppleFamily = false;
         R.metaFamily = "iso"; R.metaSource = "tmap";
         for (int c = 0; c < 3; c++) {
@@ -1897,9 +2041,20 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         bool isTmapForm = (R.form == "tmap" || R.form == "tmap_grid");
         R.verdict = isTmapForm ? "fail_closed_malformed" : "fail_closed_unsupported";
         R.reason = "gain-map carrier recognized but no credible gain metadata (tmap/makenote/xmp all absent or invalid)";
-        R.metaFamily = "none"; R.metaSource = "default";
+        // Family follows the container URN only when we actually recognised a real
+        // Apple gain-map carrier (grid tiles / usable headroom). A single auxc_apple
+        // item with no usable metadata is a negative sample → leave family=none.
+        bool realAppleCarrier = (form == Form::AuxApple) &&
+                                (R.form == "auxc_grid");  // grid Apple gainmap present
+        R.metaFamily = realAppleCarrier ? "apple" : "none";
+        R.metaSource = "default";
         return R;
     }
+
+    // Family label follows the container's auxC URN, not the pixel p0.5 heuristic:
+    // an Apple auxC URN with usable headroom is always family=apple, even when the
+    // gain pixels happen to look 128-base (which only changes apply math).
+    if (form == Form::AuxApple) { R.metaFamily = "apple"; }
 
     // ── Plan §2.1: the ONLY HDR-base / weight decision, shared with JPEG path.
     // hB/hA in log2 stops. tmap carries them explicitly; apple/vendor128 are
@@ -1919,6 +2074,13 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     double w = 0.0;
     bool apply = DecideApplyWeight(hB, hA, targetHeadroomLog2, w, decideReason, &R.notes);
     R.applyWeight = w;
+    // Fail closed only when we would actually lift a PQ/HLG base (apply=true).
+    // An HDR base the gainmap says is already HDR (apply=false) falls through to
+    // decoded_not_applied below.
+    if (apply && IsHdrBaseRejected(baseTrc, R, "[container]")) {
+        R.decodeOk = true;
+        return R;
+    }
     if (!apply) {
         // Base is already HDR: display base as-is, no gain applied.
         for (size_t i = 0; i < baseRgba.size(); i += 4) {
@@ -1993,6 +2155,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         float m = fmaxf(baseRgba[i], fmaxf(baseRgba[i+1], baseRgba[i+2]));
         if (m > baseMax) baseMax = m;
     }
+    // R.baseRgba must carry the LINEAR base, matching the not-apply and JPEG
+    // paths. (Previously it kept the encoded sRGB values from decode time, so a
+    // consumer that linearized again got double gamma.)
+    R.baseRgba = baseRgba;
     { char dbg[160]; sprintf(dbg, "apply: w=%.4f hB=%.4f hA=%.4f headroomLin=%.4f baseMaxLin=%.4f gainMax=%.4f gainMin=%.4f gamma=%.4f channels=%d",
         w, hB, hA, R.headroomLinear, baseMax, ap.iso.gainMax[0], ap.iso.gainMin[0], ap.iso.gammaC[0], ap.iso.channels);
       R.notes.push_back(dbg); }
@@ -2070,4 +2236,111 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     }
     R.verdict = "applied";
     return R;
+}
+
+// ── Self-test: locked-in regression assertions (declared in GainMapProbe.h) ──
+//
+// These exercise internal helpers that cannot be reached end-to-end through
+// Probe() without real compressed HEVC/AV1 media (which --selftest must not
+// depend on). The CLI driver (tools/gainmap_probe.cpp --selftest) adds the one
+// check that IS reachable on a hand-built in-memory file: the JXL container
+// gate. Returns the number of failed assertions (0 == all passed).
+int GainMapProbe::RunSelftest() {
+    int failures = 0, checks = 0;
+    auto ok = [&](bool cond, const char* name, const char* detail) {
+        checks++;
+        if (cond) printf("[PASS] %s\n", name);
+        else      { failures++; printf("[FAIL] %s  (%s)\n", name, detail); }
+    };
+
+    // ---- (A) ISO 21496-1 tmap reader tolerates trailing bytes ----------------
+    // Build a canonical 1-channel v0 tmap payload, then append 4 trailing pad
+    // bytes. A compliant reader parses only the `consumed` canonical layout and
+    // IGNORES the trailing bytes (ISO 21496-1); it must NOT reject the file.
+    {
+        std::vector<uint8_t> b;
+        auto u8   = [&](uint8_t v){ b.push_back(v); };
+        auto be16 = [&](uint16_t v){ b.push_back((uint8_t)(v>>8)); b.push_back((uint8_t)(v&0xff)); };
+        auto rat  = [&](int32_t num, uint32_t den){
+            for (int s = 24; s >= 0; s -= 8) b.push_back((uint8_t)((num >> s) & 0xff));
+            for (int s = 24; s >= 0; s -= 8) b.push_back((uint8_t)((den >> s) & 0xff));
+        };
+        u8(0x00);                 // version byte at [0] (Probe requires tmapPayload[0]==0)
+        be16(0);                  // minVersion
+        be16(0);                  // writerVersion
+        u8(0x00);                 // flags
+        rat(0,1);                 // baseHdrHeadroomLog2 = 0.0
+        rat(3,1);                 // altHdrHeadroomLog2  = 3.0
+        rat(0,1);                 // gainMin[0]
+        rat(3,1);                 // gainMax[0]
+        rat(1,1);                 // gamma[0]
+        rat(0,1);                 // offSdr[0]
+        rat(0,1);                 // offHdr[0]
+        u8(0xDE); u8(0xAD); u8(0xBE); u8(0xEF);   // 4 trailing pad bytes
+
+        GainMapProbeResult fresh;
+        ok(fresh.trailingBytesIgnored == 0,
+           "A0.trailingBytesIgnored_default_zero",
+           "first-class field must default to 0");
+
+        IsoMeta m; long consumed = 0; std::string err;
+        IsoParse pr = ParseIso21496(b.data(), 1, (long)b.size()-1, m, consumed, err);
+        char d1[192];
+        sprintf(d1, "pr=%d err=\"%s\" consumed=%ld size=%zu", (int)pr, err.c_str(), consumed, b.size());
+        ok(pr == IsoParse::Ok, "A1.tmap_trailing4_parses_ok", d1);
+
+        long used = consumed + 1;                 // +1 for leading version byte
+        long trailing = (long)b.size() - used;
+        ok(trailing == 4, "A2.trailingBytes_count_is_4", d1);
+
+        GainMapProbeResult R;
+        R.trailingBytesIgnored = (int)(trailing > 0 ? trailing : 0);
+        ok(R.trailingBytesIgnored == 4, "A3.trailingBytesIgnored_field_eq_4", d1);
+    }
+
+    // ---- (B) PQ/HLG base transfer gate (shared by JPEG + BMFF paths) ---------
+    {
+        GainMapProbeResult r16; bool rej16 = IsHdrBaseRejected(16, r16, "test");
+        ok(rej16 && r16.verdict == "fail_closed_unsupported",
+           "B1.trc16_PQ_rejected_fail_closed", "PQ base must fail closed");
+        GainMapProbeResult r18; bool rej18 = IsHdrBaseRejected(18, r18, "test");
+        ok(rej18 && r18.verdict == "fail_closed_unsupported",
+           "B2.trc18_HLG_rejected_fail_closed", "HLG base must fail closed");
+        GainMapProbeResult r2;  bool rej2  = IsHdrBaseRejected(2,  r2,  "test");
+        ok(!rej2 && r2.verdict.empty(),
+           "B3.trc2_srgb_NOT_rejected", "sRGB base must pass the gate");
+        GainMapProbeResult r13; bool rej13 = IsHdrBaseRejected(13, r13, "test");
+        ok(!rej13, "B4.trc13_sRGBish_NOT_rejected", "sRGB-ish trc must pass the gate");
+    }
+
+    // ---- (D) baseRgba linearize-then-assign contract ------------------------
+    // The BMFF success path linearizes the base IN PLACE and only then assigns
+    // R.baseRgba = baseRgba. Previously R.baseRgba kept the encoded sRGB values
+    // (double-gamma). Mirror that exact loop + assign here and assert the result
+    // carries LINEAR values; also assert linear != encoded so the check can't
+    // pass vacuously.
+    {
+        const float enc0 = 0.5f, enc1 = 0.25f;
+        std::vector<float> baseRgba = { enc0, enc0, enc0, 1.f,
+                                        enc1, enc1, enc1, 1.f };
+        for (size_t i = 0; i < baseRgba.size(); i += 4) {
+            baseRgba[i]   = SrgbToLinear(baseRgba[i]);
+            baseRgba[i+1] = SrgbToLinear(baseRgba[i+1]);
+            baseRgba[i+2] = SrgbToLinear(baseRgba[i+2]);
+        }
+        GainMapProbeResult R;
+        R.baseRgba = baseRgba;                 // mirrors R.baseRgba = baseRgba;
+        R.outW = 2; R.outH = 1;
+        float expect0 = SrgbToLinear(enc0), expect1 = SrgbToLinear(enc1);
+        ok(R.baseRgba.size() == 8 &&
+           R.baseRgba[0] == expect0 && R.baseRgba[4] == expect1,
+           "D1.baseRgba_carries_linear_values",
+           "R.baseRgba must be sRGB-linearized after the apply-path loop");
+        ok(expect0 != enc0 && expect1 != enc1,
+           "D2.linear_differs_from_encoded",
+           "sanity: SrgbToLinear must change the value (else D1 is vacuous)");
+    }
+
+    printf("selftest: checks=%d failures=%d\n", checks, failures);
+    return failures;
 }

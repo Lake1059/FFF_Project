@@ -40,9 +40,8 @@ public:
     // Reads the whole file when it is small enough to hold in memory, and repairs
     // it in place when it is a layered still image. Returns true only when `bytes`
     // holds a repaired copy; on false `bytes` is left empty and `detail` says why.
-    // `mergedExtents` (optional) receives how many extents the primary item was
-    // stored as when the repair succeeded -- the signal a caller needs to treat
-    // the file as layered, since a merged item is by definition multi-extent.
+    // `mergedExtents` (optional) receives the repaired primary item's extent
+    // count after a successful repair (always 1); it is 0 on failure.
     static bool ReadAndRepair(const char* pathUtf8, const std::int64_t maxBytes,
         std::vector<std::uint8_t>& bytes, std::string& detail,
         std::int32_t* mergedExtents = nullptr) noexcept;
@@ -50,7 +49,9 @@ public:
     // The container edit itself, exposed on bytes so it can be exercised on its own.
     // On entry `bytes` holds a complete file; on a true return it holds the repaired
     // file and nothing else was touched. On false `bytes` is unmodified.
-    // `mergedExtents` (optional) receives the repaired item's extent count.
+    // `mergedExtents` (optional) receives the repaired primary item's extent
+    // count after a successful repair -- always 1, since the merge collapses a
+    // multi-extent layered item to a single extent. It is 0 on failure.
     static bool RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& detail,
         std::int32_t* mergedExtents = nullptr) noexcept;
 

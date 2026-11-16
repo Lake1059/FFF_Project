@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <cerrno>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -65,9 +66,81 @@ static void WritePfm(const std::string& path, const std::vector<float>& rgba, in
     fclose(f);
 }
 
+// End-to-end JXL container gate check, using a hand-built 16-byte file.
+// Layout: box size(BE32)=16 | type "JXL " | body "jhgm" + zero pad. This is
+// enough for the probe's JXL detection (which returns before any decode) and
+// needs no real media / no ffmpeg.
+static int RunSelftestJxlE2E() {
+    // Write the hand-built fixture into a directory we control — NEVER the
+    // process cwd (that would pollute whoever invoked us, e.g. a repo checkout).
+    // Preference: system TEMP; if that is not writable (some locked-down hosts
+    // deny child writes to %TEMP%), fall back to the directory the EXE lives in
+    // (a build-output dir, not the user's cwd). PID suffix avoids collisions.
+    // The file is unlinked as soon as Probe() returns, on every path.
+    std::string path;
+    {
+        char tmpDir[MAX_PATH] = {0};
+        DWORD tn = GetTempPathA(MAX_PATH, tmpDir);
+        std::string dir = (tn > 0 && tn < MAX_PATH) ? tmpDir : "";
+        if (!dir.empty() && dir.back() != '\\') dir.push_back('\\');
+        std::string candidate = dir + "gainmap_probe_selftest_" + std::to_string(GetCurrentProcessId()) + ".jxl";
+        FILE* probe = fopen(candidate.c_str(), "wb");
+        if (probe) { fclose(probe); path = candidate; }
+    }
+    if (path.empty()) {
+        char exe[MAX_PATH] = {0};
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        std::string d = exe;
+        size_t slash = d.find_last_of('\\');
+        if (slash != std::string::npos) d = d.substr(0, slash + 1); else d = "";
+        path = d + "gainmap_probe_selftest_" + std::to_string(GetCurrentProcessId()) + ".jxl";
+    }
+
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) { printf("[FAIL] C0.jxl_cannot_write_tempfile (path=%s errno=%d:%s)\n",
+                     path.c_str(), errno, strerror(errno)); return 1; }
+    unsigned char hdr[16] = { 0,0,0,16, 'J','X','L',' ', 'j','h','g','m', 0,0,0,0 };
+    fwrite(hdr, 1, 16, f);
+    fclose(f);
+
+    GainMapProbeResult R = GainMapProbe::Probe(path, false);
+    // Cleanup regardless of assertion outcome. Retry briefly in case on-access
+    // AV holds the file; report the result so a persistent failure is visible.
+    int rc = -1;
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        rc = remove(path.c_str());
+        if (rc == 0) break;
+        Sleep(150);
+    }
+    if (rc != 0) printf("  [warn] fixture cleanup failed rc=%d errno=%d:%s (%s)\n",
+                        rc, errno, strerror(errno), path.c_str());
+
+    int fails = 0;
+    char d[220];
+    sprintf(d, "present=%d form=\"%s\" verdict=\"%s\" reason=\"%s\" fixture=%s",
+            (int)R.present, R.form.c_str(), R.verdict.c_str(), R.reason.c_str(), path.c_str());
+    auto chk = [&](bool c, const char* n){ if (c) printf("[PASS] %s\n", n); else { fails++; printf("[FAIL] %s (%s)\n", n, d); } };
+    chk(R.present == true,                       "C1.jxl_present");
+    chk(R.form == "jhgm",                        "C2.jxl_form_jhgm");
+    chk(R.verdict == "fail_closed_unsupported",  "C3.jxl_verdict_fail_closed");
+    chk(R.reason == "jxl_gainmap_not_implemented","C4.jxl_reason_stable");
+    return fails;
+}
+
 int main(int argc, char** argv){
+    if (argc >= 2 && std::string(argv[1]) == "--selftest") {
+        printf("== gainmap_probe --selftest ==\n");
+        int fails = 0;
+        printf("-- internal helper checks (tmap trailing / PQ-HLG gate / baseRgba linearize) --\n");
+        fails += GainMapProbe::RunSelftest();
+        printf("-- end-to-end JXL container check (hand-built 16-byte file) --\n");
+        fails += RunSelftestJxlE2E();
+        printf("== selftest total failures=%d ==\n", fails);
+        return fails == 0 ? 0 : 1;
+    }
     if (argc < 2) {
-        fprintf(stderr, "usage: gainmap_probe <file> [--dump <dir>] [--base-only] [--target-headroom <stops>]\n");
+        fprintf(stderr, "usage: gainmap_probe <file> [--dump <dir>] [--base-only] [--target-headroom <stops>]\n"
+                        "       gainmap_probe --selftest\n");
         return 2;
     }
     std::string path = argv[1];
@@ -155,6 +228,7 @@ int main(int argc, char** argv){
       << ",\"over1Pct\":" << R.statsOver1Pct << "}"
       << ",\"reason\":\"" << JsonEscape(R.reason) << "\"}";
     j << ",\"verdict\":\"" << R.verdict << "\"";
+    j << ",\"trailingBytesIgnored\":" << R.trailingBytesIgnored;
     j << ",\"notes\":[";
     for (size_t i = 0; i < R.notes.size(); i++) {
         if (i) j << ",";

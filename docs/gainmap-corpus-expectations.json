@@ -1,0 +1,805 @@
+{
+  "version": "1.0",
+  "corpus": "internal+external",
+  "generatedAt": "2026-11-16",
+  "note": "Versioned expected values for tools/run_corpus.ps1 (-Expected). Internal 38 + external 41 = 79. Compared fields: verdict/form/family/metaSource/gainmapPresent. rationale non-empty where expectation DIFFERS from v1 probeVerdict, for unimplemented JXL, or for oracle classification revisions. Revisions this round: (1) GM-P1-06 iso_tmap_bad_version.heic -> not_gainmap (unrecognized tmap version ignored, show base); (2) 6x jpeg_uhdr family ultra_hdr->iso, metaSource->xmp; (3) 2x jpeg_adobe_gcontainer family adobe->iso, metaSource->gcontainer; (4) webp gainmap form none->webp_gainmap. family vocabulary is ONLY iso/apple/vendor128 (GainMapJpeg.h:38); no ultra_hdr/adobe/webp family. No unimplemented capability written as applied.",
+  "fields": "verdict/form/family/metaSource/gainmapPresent",
+  "entries": [
+    {
+      "file": "apple_auxc/apple_auxc_hevc_1ch_0base_single.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_apple",
+      "family": "apple",
+      "metaSource": "makenote",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "apple_auxc/apple_auxc_hevc_grid_2x2_flags0_tail.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_grid",
+      "family": "apple",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "apple_auxc/apple_auxc_makenote00_xmp_fallback.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_apple",
+      "family": "apple",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "baseimage/pq_base.heic",
+      "corpus": "internal",
+      "verdict": "fail_closed_unsupported",
+      "form": "auxc_apple",
+      "family": "apple",
+      "metaSource": "makenote",
+      "gainmapPresent": true,
+      "rationale": "PQ/HLG 底图 lift 属未支持能力，与 GM-P1-08 一致；旧期望 applied 与规范冲突（trc=16 PQ 底图需 lift 时一律 fail-closed）。",
+      "reason": "[container] HDR base (PQ/HLG) gain map not implemented; cannot lift an already-HDR base"
+    },
+    {
+      "file": "baseimage/sdr_base.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_apple",
+      "family": "apple",
+      "metaSource": "makenote",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "bitbase/apple_0base_1ch.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_apple",
+      "family": "apple",
+      "metaSource": "makenote",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "bitbase/vendor_128base_1ch.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_vendor",
+      "family": "vendor128",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "bitbase/vendor_128base_3ch_1x1.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_vendor",
+      "family": "vendor128",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "bitbase/vendor_128base_3ch_2x2.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_grid",
+      "family": "vendor128",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "codec/codec_av1_av01.avif",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": "tmap",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "codec/codec_fake_hevc_neg.heic",
+      "corpus": "internal",
+      "verdict": "fail_closed_malformed",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": "tmap",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "codec/codec_hevc_hvc1.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": "tmap",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "iso_tmap/iso_tmap_av1_1ch_sdr_single.avif",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": "tmap",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "iso_tmap/iso_tmap_bad_version.heic",
+      "corpus": "internal",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": false,
+      "rationale": "GM-P1-06：tmap 版本不认识即忽略增益图、显示 base，与 docs 口径及 libavif 行为一致；由 fail_closed_malformed 改判 not_gainmap（无可用增益图载体）。"
+    },
+    {
+      "file": "iso_tmap/iso_tmap_hevc_1ch_sdr_single.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": "tmap",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "iso_tmap/iso_tmap_hevc_grid_2x2.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "tmap_grid",
+      "family": "iso",
+      "metaSource": "tmap",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "meta_sources/meta_makenote00_noxmp_neg.heic",
+      "corpus": "internal",
+      "verdict": "fail_closed_unsupported",
+      "form": "auxc_apple",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "meta_sources/meta_makenote00_xmp_fallback.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_apple",
+      "family": "apple",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "meta_sources/meta_makenote_valid.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_apple",
+      "family": "apple",
+      "metaSource": "makenote",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "meta_sources/meta_tmap_source.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": "tmap",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "meta_sources/meta_xmp_broken_neg.heic",
+      "corpus": "internal",
+      "verdict": "fail_closed_unsupported",
+      "form": "auxc_apple",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "negative/auxc_points_noncodec_neg.heic",
+      "corpus": "internal",
+      "verdict": "fail_closed_unsupported",
+      "form": "auxc_apple",
+      "family": "apple",
+      "metaSource": "default",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "negative/grid_tile_truncated.heic",
+      "corpus": "internal",
+      "verdict": "fail_closed_malformed",
+      "form": "auxc_grid",
+      "family": "vendor128",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "negative/iloc_offset_oob.heic",
+      "corpus": "internal",
+      "verdict": "fail_closed_malformed",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": "tmap",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "negative/not_gainmap_plain.heic",
+      "corpus": "internal",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": false,
+      "rationale": ""
+    },
+    {
+      "file": "negative/oversized_neg.heic",
+      "corpus": "internal",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": false,
+      "rationale": ""
+    },
+    {
+      "file": "other_formats/jpeg_ultra_hdr_xmp.jpg",
+      "corpus": "internal",
+      "verdict": "decoded_not_applied",
+      "form": "jpeg_hdr",
+      "family": "iso",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "other_formats/jxl_jhgm_base.jxl",
+      "corpus": "internal",
+      "verdict": "fail_closed_unsupported",
+      "form": "jhgm",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": true,
+      "rationale": "JXL 身份由 form=jhgm 承载；family 词汇表仅 iso/apple/vendor128/none（GainMapJpeg.h:38），不新增 jxl/jhgm family 或 metaSource。",
+      "reason": "jxl_gainmap_not_implemented"
+    },
+    {
+      "file": "other_formats/jxl_jhgm_positive.jxl",
+      "corpus": "internal",
+      "verdict": "fail_closed_unsupported",
+      "form": "jhgm",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": true,
+      "rationale": "JXL 身份由 form=jhgm 承载；family 词汇表仅 iso/apple/vendor128/none（GainMapJpeg.h:38），不新增 jxl/jhgm family 或 metaSource。",
+      "reason": "jxl_gainmap_not_implemented"
+    },
+    {
+      "file": "real/real_phone_notgainmap.heic",
+      "corpus": "internal",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": false,
+      "rationale": ""
+    },
+    {
+      "file": "regression/reg_avif.avif",
+      "corpus": "internal",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": false,
+      "rationale": ""
+    },
+    {
+      "file": "regression/reg_heic_static.heic",
+      "corpus": "internal",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": false,
+      "rationale": ""
+    },
+    {
+      "file": "regression/reg_srgb.jpg",
+      "corpus": "internal",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": false,
+      "rationale": ""
+    },
+    {
+      "file": "vendor_auxc/vendor_auxc_grid_2x2_flags0_notail_neg.heic",
+      "corpus": "internal",
+      "verdict": "fail_closed_malformed",
+      "form": "auxc_grid",
+      "family": "vendor128",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "vendor_auxc/vendor_auxc_grid_2x2_flags0_tail.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_grid",
+      "family": "vendor128",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "vendor_auxc/vendor_auxc_hevc_1ch_128base_single.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_vendor",
+      "family": "vendor128",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "vendor_auxc/vendor_auxc_hevc_3ch_128base_single.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_vendor",
+      "family": "vendor128",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "vendor_auxc/vendor_auxc_hevc_3ch_grid_2x2.heic",
+      "corpus": "internal",
+      "verdict": "applied",
+      "form": "auxc_grid",
+      "family": "vendor128",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "02.jpg",
+      "corpus": "external",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": null,
+      "gainmapPresent": false,
+      "rationale": "v1 probe 期望 verdict=fail_closed_unsupported/form=jpeg_hdr 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=not_gainmap/form=none。"
+    },
+    {
+      "file": "03.jpg",
+      "corpus": "external",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": null,
+      "gainmapPresent": false,
+      "rationale": "v1 probe 期望 verdict=fail_closed_unsupported/form=jpeg_hdr 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=not_gainmap/form=none。"
+    },
+    {
+      "file": "apple_gainmap_v1.jpg",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "jpeg_apple_v1",
+      "family": "apple",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_unsupported/form=jpeg_hdr 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=applied/form=jpeg_apple_v1。"
+    },
+    {
+      "file": "apple_gainmap_v2.jpg",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "jpeg_apple_v2",
+      "family": "apple",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_unsupported/form=jpeg_hdr 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=applied/form=jpeg_apple_v2。"
+    },
+    {
+      "file": "apple_gainmap_v3.jpg",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "jpeg_apple_v3",
+      "family": "apple",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_unsupported/form=jpeg_hdr 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=applied/form=jpeg_apple_v3。"
+    },
+    {
+      "file": "apple_hdr_sample_imazen.heic",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "auxc_apple",
+      "family": "apple",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=auxc_apple 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=applied/form=auxc_apple。"
+    },
+    {
+      "file": "color_grid_alpha_grid_gainmap_nogrid.avif",
+      "corpus": "external",
+      "verdict": "decoded_not_applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=decoded_not_applied/form=tmap。"
+    },
+    {
+      "file": "color_grid_gainmap_different_grid.avif",
+      "corpus": "external",
+      "verdict": "decoded_not_applied",
+      "form": "tmap_grid",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap_grid 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=decoded_not_applied/form=tmap_grid。"
+    },
+    {
+      "file": "color_nogrid_alpha_nogrid_gainmap_grid.avif",
+      "corpus": "external",
+      "verdict": "decoded_not_applied",
+      "form": "tmap_grid",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap_grid 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=decoded_not_applied/form=tmap_grid。"
+    },
+    {
+      "file": "gainmap_hevc_16x16.heic",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "paris_exif_xmp_gainmap_bigendian.jpg",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "jpeg_uhdr",
+      "family": "iso",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": "oracle 修正：探针 family 词汇表仅 iso/apple/vendor128（GainMapJpeg.h:38），jpeg_uhdr 成功路径固定 family=iso/metaSource=xmp（GainMapJpeg.cpp:717,725-726）；旧值 family=ultra_hdr 是把 form 误当 family，已改。"
+    },
+    {
+      "file": "paris_exif_xmp_gainmap_littleendian.jpg",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "jpeg_uhdr",
+      "family": "iso",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": "oracle 修正：探针 family 词汇表仅 iso/apple/vendor128（GainMapJpeg.h:38），jpeg_uhdr 成功路径固定 family=iso/metaSource=xmp（GainMapJpeg.cpp:717,725-726）；旧值 family=ultra_hdr 是把 form 误当 family，已改。"
+    },
+    {
+      "file": "paris_exif_xmp_icc_gainmap_bigendian.jpg",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "jpeg_uhdr",
+      "family": "iso",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": "oracle 修正：探针 family 词汇表仅 iso/apple/vendor128（GainMapJpeg.h:38），jpeg_uhdr 成功路径固定 family=iso/metaSource=xmp（GainMapJpeg.cpp:717,725-726）；旧值 family=ultra_hdr 是把 form 误当 family，已改。"
+    },
+    {
+      "file": "plain-jpeg.jpg",
+      "corpus": "external",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": null,
+      "gainmapPresent": false,
+      "rationale": "v1 probe 期望 verdict=not_gainmap/form= 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=not_gainmap/form=none。"
+    },
+    {
+      "file": "seine_hdr_gainmap_small_srgb.avif",
+      "corpus": "external",
+      "verdict": "decoded_not_applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=decoded_not_applied/form=tmap。"
+    },
+    {
+      "file": "seine_hdr_gainmap_srgb.avif",
+      "corpus": "external",
+      "verdict": "decoded_not_applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=decoded_not_applied/form=tmap。"
+    },
+    {
+      "file": "seine_hdr_gainmap_wrongaltr.avif",
+      "corpus": "external",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": null,
+      "gainmapPresent": false,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=not_gainmap/form=none。"
+    },
+    {
+      "file": "seine_hdr_srgb.avif",
+      "corpus": "external",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": null,
+      "gainmapPresent": false,
+      "rationale": "v1 probe 期望 verdict=not_gainmap/form= 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=not_gainmap/form=none。"
+    },
+    {
+      "file": "seine_sdr_different_gainmap_srgb.jpg",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "jpeg_uhdr",
+      "family": "iso",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": "oracle 修正：探针 family 词汇表仅 iso/apple/vendor128（GainMapJpeg.h:38），jpeg_uhdr 成功路径固定 family=iso/metaSource=xmp（GainMapJpeg.cpp:717,725-726）；旧值 family=ultra_hdr 是把 form 误当 family，已改。"
+    },
+    {
+      "file": "seine_sdr_gainmap_big_srgb.avif",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=applied/form=tmap。"
+    },
+    {
+      "file": "seine_sdr_gainmap_gammazero.avif",
+      "corpus": "external",
+      "verdict": "fail_closed_malformed",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "seine_sdr_gainmap_notmapbrand.avif",
+      "corpus": "external",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": null,
+      "gainmapPresent": false,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=not_gainmap/form=none。"
+    },
+    {
+      "file": "seine_sdr_gainmap_srgb_icc.avif",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=applied/form=tmap。"
+    },
+    {
+      "file": "seine_sdr_gainmap_srgb.avif",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=applied/form=tmap。"
+    },
+    {
+      "file": "seine_sdr_gainmap_srgb.jpg",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "jpeg_uhdr",
+      "family": "iso",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": "oracle 修正：探针 family 词汇表仅 iso/apple/vendor128（GainMapJpeg.h:38），jpeg_uhdr 成功路径固定 family=iso/metaSource=xmp（GainMapJpeg.cpp:717,725-726）；旧值 family=ultra_hdr 是把 form 误当 family，已改。"
+    },
+    {
+      "file": "skia-gainmap-iso21496-1-adobe-gcontainer.jpg",
+      "corpus": "external",
+      "verdict": "fail_closed_malformed",
+      "form": "jpeg_adobe_gcontainer",
+      "family": "iso",
+      "metaSource": "gcontainer",
+      "gainmapPresent": true,
+      "rationale": "oracle 修正：jpeg_adobe_gcontainer 路径 family=iso/metaSource=gcontainer（GainMapJpeg.cpp:719,721-723），family 词汇表无 adobe（GainMapJpeg.h:38）；form 名 jpeg_adobe_gcontainer 保持不变。"
+    },
+    {
+      "file": "skia-gainmap-iso21496-1-hdr-base.jpg",
+      "corpus": "external",
+      "verdict": "decoded_not_applied",
+      "form": "jpeg_adobe_gcontainer",
+      "family": "iso",
+      "metaSource": "gcontainer",
+      "gainmapPresent": true,
+      "rationale": "oracle 修正：jpeg_adobe_gcontainer 路径 family=iso/metaSource=gcontainer（GainMapJpeg.cpp:719,721-723），family 词汇表无 adobe（GainMapJpeg.h:38）；form 名 jpeg_adobe_gcontainer 保持不变。"
+    },
+    {
+      "file": "spruit_sunrise_4k-gainmap.webp",
+      "corpus": "external",
+      "verdict": "fail_closed_unsupported",
+      "form": "webp_gainmap",
+      "family": "iso",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": "oracle 修正：带 hdr-gain-map 元数据的 WebP form=webp_gainmap（GainMapJpeg.cpp:371；GainMapProbe.cpp:970）。family/metaSource 按解析器文档值取 iso/xmp（GainMapJpeg.cpp:372-373）；探针 UNSUPPORTED 早退路径是否回写这两字段待与实现方确认分类命名。"
+    },
+    {
+      "file": "spruit_sunrise_4k.jpg",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "jpeg_uhdr",
+      "family": "iso",
+      "metaSource": "xmp",
+      "gainmapPresent": true,
+      "rationale": "oracle 修正：探针 family 词汇表仅 iso/apple/vendor128（GainMapJpeg.h:38），jpeg_uhdr 成功路径固定 family=iso/metaSource=xmp（GainMapJpeg.cpp:717,725-726）；旧值 family=ultra_hdr 是把 form 误当 family，已改。"
+    },
+    {
+      "file": "spruit_sunrise_4k.webp",
+      "corpus": "external",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": null,
+      "gainmapPresent": false,
+      "rationale": "v1 probe 期望 verdict=not_gainmap/form= 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=not_gainmap/form=none。"
+    },
+    {
+      "file": "supported_gainmap_writer_version_with_extra_bytes.avif",
+      "corpus": "external",
+      "verdict": "fail_closed_unsupported",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=fail_closed_unsupported/form=tmap。"
+    },
+    {
+      "file": "synth_heic_gainmap.heic",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "tmap",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "synth_heic_grid_aux_gainmap_b.heic",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "auxc_grid",
+      "family": "apple",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "synth_heic_grid_aux_gainmap.heic",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "auxc_grid",
+      "family": "apple",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "synth_heic_grid_aux_noxmp.heic",
+      "corpus": "external",
+      "verdict": "fail_closed_unsupported",
+      "form": "auxc_grid",
+      "family": "apple",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "synth_heic_grid_gainmap.heic",
+      "corpus": "external",
+      "verdict": "applied",
+      "form": "tmap_grid",
+      "family": "iso",
+      "metaSource": null,
+      "gainmapPresent": true,
+      "rationale": ""
+    },
+    {
+      "file": "synth_jxl_gainmap_base.jxl",
+      "corpus": "external",
+      "verdict": "fail_closed_unsupported",
+      "form": "jhgm",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": true,
+      "rationale": "JXL 身份由 form=jhgm 承载；family 词汇表仅 iso/apple/vendor128/none（GainMapJpeg.h:38），不新增 jxl/jhgm family 或 metaSource。",
+      "reason": "jxl_gainmap_not_implemented"
+    },
+    {
+      "file": "synth_jxl_gainmap.jxl",
+      "corpus": "external",
+      "verdict": "fail_closed_unsupported",
+      "form": "jhgm",
+      "family": "none",
+      "metaSource": "default",
+      "gainmapPresent": true,
+      "rationale": "JXL 身份由 form=jhgm 承载；family 词汇表仅 iso/apple/vendor128/none（GainMapJpeg.h:38），不新增 jxl/jhgm family 或 metaSource。",
+      "reason": "jxl_gainmap_not_implemented"
+    },
+    {
+      "file": "unsupported_gainmap_minimum_version.avif",
+      "corpus": "external",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": null,
+      "gainmapPresent": false,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=not_gainmap/form=none。"
+    },
+    {
+      "file": "unsupported_gainmap_version.avif",
+      "corpus": "external",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": null,
+      "gainmapPresent": false,
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=not_gainmap/form=none。"
+    },
+    {
+      "file": "weld_sato_12B_8B_q0.avif",
+      "corpus": "external",
+      "verdict": "not_gainmap",
+      "form": "none",
+      "family": "none",
+      "metaSource": null,
+      "gainmapPresent": false,
+      "rationale": "v1 probe 期望 verdict=not_gainmap/form= 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=not_gainmap/form=none。"
+    }
+  ],
+  "revisionRound": "106-fix-F3-oracle"
+}

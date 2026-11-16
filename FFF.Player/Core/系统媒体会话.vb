@@ -246,30 +246,21 @@ Public NotInheritable Class 系统媒体会话
         End Try
     End Sub
 
-    ''' <summary>
-    ''' 设置缩略图。传入已编码的 PNG 字节；空数组表示清除。由 UI 线程调用。
-    ''' 目前预留给三期封面帧，MVP 不调用也不影响卡片。
-    ''' </summary>
-    Public Sub 设置缩略图(png字节 As Byte())
-        If 控件 Is Nothing Then Return
+    ' ---- WinRT 事件：全部回到 UI 线程，绝不直接操作播放器 ----
+
+    ''' <summary>测试钩子：不走真实 WinRT ButtonPressed，直接把按钮投给已注入的
+    ''' <see cref="命令接收器"/>。FFF.Player.Tests 借此断言“按钮 → 接收器(=播放器方法)”
+    ''' 的分派确实发生，而不是只看能不能建会话。生产路径仍由 控件_按钮按下 触发。</summary>
+    Friend Sub 测试用分派按钮(按钮 As 系统媒体按钮)
+        Dim 结果 As Boolean
         Try
-            If png字节 Is Nothing OrElse png字节.Length = 0 Then
-                控件.DisplayUpdater.Thumbnail = Nothing
-                Return
+            If 命令接收器 IsNot Nothing Then
+                结果 = 命令接收器(按钮)
             End If
-            Dim 流 As New InMemoryRandomAccessStream()
-            Dim 写入器 As New DataWriter(流.GetOutputStreamAt(0))
-            写入器.WriteBytes(png字节)
-            写入器.StoreAsync().AsTask().GetAwaiter().GetResult()
-            写入器.FlushAsync().AsTask().GetAwaiter().GetResult()
-            流.Seek(0)
-            控件.DisplayUpdater.Thumbnail = RandomAccessStreamReference.CreateFromStream(流)
         Catch ex As Exception
-            Debug.WriteLine("SMTC：缩略图设置失败（已忽略）：" & ex.GetType().Name)
+            Debug.WriteLine("SMTC：测试分派按钮回调失败（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
-
-    ' ---- WinRT 事件：全部回到 UI 线程，绝不直接操作播放器 ----
 
     Private Sub 控件_按钮按下(sender As SystemMediaTransportControls,
                               args As SystemMediaTransportControlsButtonPressedEventArgs)

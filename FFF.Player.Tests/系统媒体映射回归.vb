@@ -1,6 +1,7 @@
 Imports System
 Imports System.Collections.Generic
 Imports System.IO
+Imports System.Linq
 Imports FFF.Player
 
 ''' <summary>
@@ -26,6 +27,7 @@ Friend Module 系统媒体映射回归
             测媒体标识()
             测播放列表结束判定()
             测相邻项目判定()
+            测按钮接线()
         Finally
             Try
                 Directory.Delete(临时目录, True)
@@ -181,6 +183,32 @@ Friend Module 系统媒体映射回归
         Finally
             列表.清空()
         End Try
+    End Sub
+
+    ''' <summary>L5-P2-03：Form1 接线断言。不只测纯映射函数，而是断言“命令名 → 处理器”映射
+    ''' 存在：每个 <see cref="系统媒体按钮"/> 枚举值都必须落到一个已知命令名，否则新增按钮
+    ''' 忘了接线时这里会变红。</summary>
+    Private Sub 测按钮接线()
+        Dim 已知命令 = New HashSet(Of String)(StringComparer.Ordinal) From
+            {"play", "pause", "stop", "fastforward", "rewind", "next", "previous"}
+
+        ' 1) 每个枚举值都必须有命令名，且命令名是 Form1 认识的那一个。
+        For Each b In [Enum].GetValues(GetType(系统媒体按钮)).Cast(Of 系统媒体按钮)()
+            Dim 名 = 系统媒体映射.映射按钮到命令名(b)
+            检查($"按钮 {b} 有接线", 名.Length > 0)
+            If 名.Length > 0 Then
+                检查($"按钮 {b} 命令名已知", 已知命令.Contains(名))
+            End If
+        Next
+
+        ' 2) 关键映射逐一对死，防止有人改串。
+        检查("播放→play", 系统媒体映射.映射按钮到命令名(系统媒体按钮.播放) = "play")
+        检查("暂停→pause", 系统媒体映射.映射按钮到命令名(系统媒体按钮.暂停) = "pause")
+        检查("停止→stop", 系统媒体映射.映射按钮到命令名(系统媒体按钮.停止) = "stop")
+        检查("快进→fastforward", 系统媒体映射.映射按钮到命令名(系统媒体按钮.快进) = "fastforward")
+        检查("快退→rewind", 系统媒体映射.映射按钮到命令名(系统媒体按钮.快退) = "rewind")
+        检查("下一曲→next", 系统媒体映射.映射按钮到命令名(系统媒体按钮.下一曲) = "next")
+        检查("上一曲→previous", 系统媒体映射.映射按钮到命令名(系统媒体按钮.上一曲) = "previous")
     End Sub
 
     Private Function 建列表() As 播放列表

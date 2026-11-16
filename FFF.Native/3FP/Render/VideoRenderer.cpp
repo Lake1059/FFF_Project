@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "3FP/Render/VideoRenderer.h"
 #include "3FP/Core/ThreadNaming.h"
+#include "3FP/Render/CicpSupport.h"
 #include "3FP/Render/ShaderBytecode.h"
 #include "3FP/Render/SdrShaderBytecode.h"
 #include <emmintrin.h>
@@ -7739,26 +7740,8 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // force before the tags were read (709 for SDR, 2020 for HDR) and say so once.
     // Hard failure stays reserved for the YUV matrix below: an unknown component
     // transform has no approximated inverse, so there is nothing honest to fall back to.
-    bool supportedPrimaries = true;
-    switch (frame->color_primaries) {
-    case AVCOL_PRI_RESERVED0: case AVCOL_PRI_UNSPECIFIED: case AVCOL_PRI_BT709:
-    case AVCOL_PRI_BT470BG: case AVCOL_PRI_SMPTE170M: case AVCOL_PRI_SMPTE240M:
-    case AVCOL_PRI_BT2020: case AVCOL_PRI_SMPTE431: case AVCOL_PRI_SMPTE432: break;
-    default:
-        supportedPrimaries = false;
-        break;
-    }
-    bool supportedTransfer = true;
-    switch (frame->color_trc) {
-    case AVCOL_TRC_RESERVED0: case AVCOL_TRC_UNSPECIFIED: case AVCOL_TRC_BT709:
-    case AVCOL_TRC_GAMMA22: case AVCOL_TRC_GAMMA28: case AVCOL_TRC_SMPTE170M:
-    case AVCOL_TRC_SMPTE240M: case AVCOL_TRC_LINEAR: case AVCOL_TRC_IEC61966_2_1:
-    case AVCOL_TRC_BT2020_10: case AVCOL_TRC_BT2020_12:
-    case AVCOL_TRC_SMPTE2084: case AVCOL_TRC_ARIB_STD_B67: break;
-    default:
-        supportedTransfer = false;
-        break;
-    }
+    bool supportedPrimaries = fff::render::CicpPrimariesSupported(frame->color_primaries);
+    bool supportedTransfer = fff::render::CicpTransferSupported(frame->color_trc);
     if (!supportedPrimaries && !warnedUnsupportedPrimaries_.exchange(true, std::memory_order_relaxed))
         FFF3FP_KernelLogImpl("CICP: unsupported color primaries ignored; using the default "
             "gamut (Rec.709 for SDR, Rec.2020 for HDR).");
@@ -7820,11 +7803,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     }
 
     const bool sourceYuv = directYuv || (packedYuv && sourceDescriptor->nb_components >= 3);
-    if (sourceYuv && frame->colorspace != AVCOL_SPC_UNSPECIFIED &&
-        frame->colorspace != AVCOL_SPC_BT709 && frame->colorspace != AVCOL_SPC_BT470BG &&
-        frame->colorspace != AVCOL_SPC_SMPTE170M && frame->colorspace != AVCOL_SPC_FCC &&
-        frame->colorspace != AVCOL_SPC_SMPTE240M && frame->colorspace != AVCOL_SPC_YCGCO &&
-        frame->colorspace != AVCOL_SPC_BT2020_NCL && frame->colorspace != AVCOL_SPC_BT2020_CL) {
+    if (sourceYuv && !fff::render::CicpMatrixSupported(frame->colorspace)) {
         SetError("The source YUV matrix requires an unsupported component transform.");
         return FFFResult::NotSupported;
     }

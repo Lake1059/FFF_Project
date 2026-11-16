@@ -68,8 +68,14 @@ void AvifTests() {
         auto bytes = Avif(version, extended);
         const auto before = bytes;
         std::string detail;
-        Check(AvifIlocShim::RepairInPlace(bytes, detail), "AVIF ordinary/extended v0-v2 repair");
-        Check(bytes != before && bytes.size() <= before.size(), "AVIF repair rewrites the container without growing it");
+        // Behavioral contract: a layered AVIF stores the primary item as several extents, and
+        // FFmpeg's mov demuxer refuses iloc extent_count>1. The repair must collapse that to
+        // exactly one extent (mergedExtents==1) WITHOUT growing or shrinking the file (in-place
+        // rewrite) and WITHOUT leaving the file identical (bytes must actually change).
+        std::int32_t merged = -1;
+        Check(AvifIlocShim::RepairInPlace(bytes, detail, &merged), "AVIF ordinary/extended v0-v2 repair");
+        Check(bytes.size() == before.size() && bytes != before, "AVIF repair rewrites the container in place (same size, changed bytes)");
+        Check(merged == 1, "AVIF layered primary item collapsed to a single extent");
         auto repaired = bytes;
         Check(!AvifIlocShim::RepairInPlace(bytes, detail) && bytes == repaired, "AVIF already single extent unchanged");
     }

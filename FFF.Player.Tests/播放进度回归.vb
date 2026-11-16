@@ -34,6 +34,9 @@ Friend Module 播放进度回归
             测高版本空条目不被改写()
             测落盘带UTF8BOM()
             测未知指纹写负一而非零()
+            测默认进度目录在LocalAppData()
+            测开关重开从磁盘重载()
+            测时钟回拨时间戳不倒退()
         Finally
             ' 还原静态重定向，避免同进程后续套件误写真实程序目录。
             播放进度存储.测试用重定向(String.Empty)
@@ -315,6 +318,62 @@ Friend Module 播放进度回归
             检查("真实文件落盘大小>=0", 第一项.GetProperty("文件大小").GetInt64() >= 0)
             检查("真实文件落盘时间>=0", 第一项.GetProperty("文件修改时间UtcTicks").GetInt64() >= 0)
         End Using
+    End Sub
+
+    ''' <summary>L5-P2-04：默认进度文件必须落在 %LOCALAPPDATA%\3FP\播放进度，
+    ''' 而不是 exe 目录（Program Files 下静默不可写）。清空重定向后读默认路径。</summary>
+    Private Sub 测默认进度目录在LocalAppData()
+        播放进度存储.测试用重定向(String.Empty)
+        Dim 期望根 = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "3FP", "播放进度")
+        检查("默认进度目录在 %LOCALAPPDATA%\3FP\播放进度",
+            播放进度存储.文件路径.StartsWith(期望根, StringComparison.OrdinalIgnoreCase))
+        检查("进度文件名正确",
+            Path.GetFileName(播放进度存储.文件路径) = 播放进度存储.文件名)
+    End Sub
+
+    ''' <summary>L5-P2-05：开关从“关”重开为“开”时，必须重新从磁盘加载，
+    ''' 不能沿用同会话内的旧内存缓存（关闭期间外部改动看不到＝假重载）。</summary>
+    Private Sub 测开关重开从磁盘重载()
+        Dim 媒体 = 建媒体("重开.mkv", "reopen")
+        Dim 进度 = 建进度路径("重开")
+        播放进度存储.测试用重定向(进度)
+        Dim 原值 = 设置.实例对象.播放进度记忆
+        Try
+            设置.实例对象.播放进度记忆 = True
+            播放进度存储.记录(媒体, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(120), 立即落盘:=True)
+            设置.实例对象.播放进度记忆 = False
+
+            ' 关闭期间：外部（另一进程/手改）把磁盘上的进度改成 90s；内存里仍是 30s。
+            Dim 外部JSON = "{""版本"":1,""条目"":[" & 进度条目Json(媒体, 90, 120) & "]}"
+            File.WriteAllText(进度, 外部JSON, New UTF8Encoding(encoderShouldEmitUTF8Identifier:=True))
+
+            ' 重开开关：正确实现会在 False→True 时丢掉内存缓存，下一次查询读到磁盘上的 90s。
+            ' 若没重载，会错误地返回内存里的 30s。
+            设置.实例对象.播放进度记忆 = True
+            检查("开关重开后从磁盘重载(看到外部 90s)",
+                播放进度存储.查询(媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.FromSeconds(90))
+        Finally
+            设置.实例对象.播放进度记忆 = 原值
+        End Try
+    End Sub
+
+    ''' <summary>L5-P2-07：系统时钟回拨时，LRU 时间戳不得倒退。记录一个“现在”后，
+    ''' 喂回拨一小时的时间戳，钳制结果必须仍 >= 刚才的“现在”。</summary>
+    Private Sub 测时钟回拨时间戳不倒退()
+        Dim 媒体 = 建媒体("回拨.mkv", "skew")
+        Dim 进度 = 建进度路径("回拨")
+        播放进度存储.测试用重定向(进度)
+
+        ' 先记录一个真实条目，把单调闸门推进到真实“现在”。
+        播放进度存储.记录(媒体, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(120), 立即落盘:=True)
+        Dim 现在 = 播放进度存储.测试钳制时间戳(DateTime.UtcNow.Ticks)
+
+        ' 模拟时钟回拨到一小时前：钳制必须把它抬回到 现在，而不是让 LRU 时间戳变小。
+        Dim 回拨 = 现在 - TimeSpan.TicksPerHour
+        Dim 钳制后 = 播放进度存储.测试钳制时间戳(回拨)
+        检查("时钟回拨后时间戳不倒退", 钳制后 >= 现在)
     End Sub
 
     ''' <summary>安全删除：File.Delete 包 try/catch，被安全软件拦时返回 False 并 SKIP 当前用例；
