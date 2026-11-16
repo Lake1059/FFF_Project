@@ -137,6 +137,7 @@
     <ClInclude Include="3FP\Core\RawStillSource.h" />
     <ClInclude Include="3FP\Core\PlayerSession.h" />
     <ClInclude Include="3FP\Core\AvifIlocShim.h" />
+    <ClInclude Include="3FP\Core\AvifItemProbe.h" />
     <ClInclude Include="3FP\Core\AvifTileGridComposer.h" />
     <ClInclude Include="3FP\Core\GainMapProbe.h" />
     <ClInclude Include="3FP\Core\GainMapJpeg.h" />
@@ -180,6 +181,7 @@
     <ClCompile Include="3FP\Core\Fmp4FragmentScanner.cpp" />
     <ClCompile Include="3FP\Core\DecodeDeviceSelection.cpp" />
     <ClCompile Include="3FP\Core\AvifIlocShim.cpp" />
+    <ClCompile Include="3FP\Core\AvifItemProbe.cpp" />
     <ClCompile Include="3FP\Core\AvifTileGridComposer.cpp" />
     <ClCompile Include="3FP\Core\GainMapProbe.cpp" />
     <ClCompile Include="3FP\Core\GainMapJpeg.cpp">

@@ -91,6 +91,14 @@ enum class FFF3FPEvent : std::uint32_t {
     Error = 5,
     ColorModeChanged = 6,
     DeviceChanged = 7,
+    // The first frame of a newly opened media has been submitted to the renderer.
+    // For a progressive still image this can be the base layer or the first grid
+    // tile, so a host may refresh/show the window before OpenCompleted. This is
+    // the submission boundary, not proof that the swap-chain flip has already
+    // happened on the presenter thread; the detail JSON's presented count is the
+    // count that existed before this submission. total is 0 when the codec path
+    // cannot know the number of stages (J2K, single-layer stills).
+    FirstFramePresented = 8,
 };
 
 using FFF3FPEventCallback = void(__cdecl*)(void* context, FFF3FPEvent eventType,
