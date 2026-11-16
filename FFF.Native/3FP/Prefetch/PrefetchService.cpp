@@ -156,28 +156,48 @@ std::string CacheKey(const std::string& pathUtf8) {
 
 std::uint64_t FrameBytes(const AVFrame* frame) noexcept {
     if (frame == nullptr) return 0;
-    const int exact = av_image_get_buffer_size(
-        static_cast<AVPixelFormat>(frame->format), frame->width, frame->height, 32);
-    if (exact > 0) return static_cast<std::uint64_t>(exact);
-    const AVPixFmtDescriptor* desc =
-        av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format));
     std::uint64_t bytes = 0;
-    for (int plane = 0; plane < 4; ++plane) {
-        if (frame->data[plane] == nullptr || frame->linesize[plane] <= 0) continue;
-        int height = frame->height;
-        if (desc != nullptr && plane > 0 && plane <= 2) {
-            height = AV_CEIL_RSHIFT(height, desc->log2_chroma_h);
-        }
-        bytes += static_cast<std::uint64_t>(frame->linesize[plane]) *
-            static_cast<std::uint64_t>(height > 0 ? height : 1);
+    // Charge retained allocations, including decoder alignment and padding.
+    for (const auto* buffer : frame->buf) {
+        if (buffer == nullptr) continue;
+        if (buffer->size > UINT64_MAX - bytes) return UINT64_MAX;
+        bytes += buffer->size;
     }
-    return bytes + 4096u;
+    for (int i = 0; i < frame->nb_extended_buf; ++i) {
+        const auto* buffer = frame->extended_buf[i];
+        if (buffer == nullptr) continue;
+        if (buffer->size > UINT64_MAX - bytes) return UINT64_MAX;
+        bytes += buffer->size;
+    }
+    for (int i = 0; i < frame->nb_side_data; ++i) {
+        const auto* side = frame->side_data[i];
+        const auto size = side->buf != nullptr ? side->buf->size : side->size;
+        if (size > UINT64_MAX - bytes) return UINT64_MAX;
+        bytes += size;
+    }
+    if (frame->opaque_ref != nullptr) {
+        if (frame->opaque_ref->size > UINT64_MAX - bytes) return UINT64_MAX;
+        bytes += frame->opaque_ref->size;
+    }
+    return bytes;
 }
 
 // Decodes exactly one CPU frame on the side lane. No PlayerSession, no D3D11
 // device, no presenter, no AVFormatContext ownership transfer, no snapshot_.
-AVFrame* DecodeFirstStill(const std::string& pathUtf8, std::uint32_t generation) noexcept {
-    AVFormatContext* format = nullptr;
+AVFrame* DecodeFirstStill(const std::string& pathUtf8, std::uint32_t generation,
+    const std::uint64_t byteBudget, const std::function<bool()>& cancelled) noexcept {
+    if (byteBudget < 4) return nullptr;
+    struct Limits {
+        std::uint64_t bytes;
+        const std::function<bool()>& cancelled;
+        ULONGLONG deadline;
+    } limits{byteBudget, cancelled, GetTickCount64() + 10'000};
+    AVFormatContext* format = avformat_alloc_context();
+    if (format == nullptr) return nullptr;
+    format->interrupt_callback = {[](void* opaque) -> int {
+        const auto& limit = *static_cast<Limits*>(opaque);
+        return limit.cancelled() || GetTickCount64() >= limit.deadline;
+    }, &limits};
     AVDictionary* options = nullptr;
     av_dict_set(&options, "probesize", "8388608", 0);
     av_dict_set(&options, "max_analyze_duration", "2000000", 0);
@@ -187,10 +207,8 @@ AVFrame* DecodeFirstStill(const std::string& pathUtf8, std::uint32_t generation)
         if (format != nullptr) avformat_close_input(&format);
         return nullptr;
     }
-    if (avformat_find_stream_info(format, nullptr) < 0) {
-        avformat_close_input(&format);
-        return nullptr;
-    }
+    // Do not let find_stream_info perform an unbudgeted trial decode. Image
+    // demuxers identify the codec at open; the bounded decoder reads geometry.
     // Self-check before any decoder is opened: one stream only. A container
     // that also carries audio (or extra video tracks) is a video, whatever its
     // name says, and decoding it here would violate the split.
@@ -229,6 +247,27 @@ AVFrame* DecodeFirstStill(const std::string& pathUtf8, std::uint32_t generation)
     // OpenDecoder sets this; without it best_effort_timestamp is computed in a
     // different time base and the hit frame would carry a wrong position.
     decoder->pkt_timebase = format->streams[stream]->time_base;
+    decoder->max_pixels = static_cast<std::int64_t>(std::min<std::uint64_t>(
+        byteBudget / 4, 64ull * 1024 * 1024));
+    decoder->opaque = &limits;
+    decoder->get_buffer2 = [](AVCodecContext* context, AVFrame* frame, int flags) -> int {
+        const auto& limit = *static_cast<Limits*>(context->opaque);
+        int width = frame->width, height = frame->height;
+        int alignment[AV_NUM_DATA_POINTERS]{};
+        avcodec_align_dimensions2(context, &width, &height, alignment);
+        for (int value : alignment) if (value > 64) return AVERROR(ENOMEM);
+        const auto bytes = av_image_get_buffer_size(static_cast<AVPixelFormat>(frame->format),
+            width, height, 64);
+        if (limit.cancelled() || GetTickCount64() >= limit.deadline) return AVERROR_EXIT;
+        if (bytes <= 0 || limit.bytes < 4096 ||
+            static_cast<std::uint64_t>(bytes) > limit.bytes - 4096) return AVERROR(ENOMEM);
+        const int result = avcodec_default_get_buffer2(context, frame, flags);
+        if (result >= 0 && FrameBytes(frame) > limit.bytes) {
+            av_frame_unref(frame);
+            return AVERROR(ENOMEM);
+        }
+        return result;
+    };
     if (avcodec_open2(decoder, codec, nullptr) < 0) {
         if (decoder != nullptr) avcodec_free_context(&decoder);
         avformat_close_input(&format);
@@ -240,6 +279,7 @@ AVFrame* DecodeFirstStill(const std::string& pathUtf8, std::uint32_t generation)
     AVFrame* result = nullptr;
     if (packet != nullptr && decoded != nullptr) {
         for (int i = 0; i < 64 && result == nullptr; ++i) {
+            if (cancelled() || GetTickCount64() >= limits.deadline) break;
             if (av_read_frame(format, packet) < 0) break;
             if (packet->stream_index == stream &&
                 avcodec_send_packet(decoder, packet) >= 0 &&
@@ -258,7 +298,7 @@ AVFrame* DecodeFirstStill(const std::string& pathUtf8, std::uint32_t generation)
             }
             av_packet_unref(packet);
         }
-        if (result == nullptr) {
+        if (result == nullptr && !cancelled() && GetTickCount64() < limits.deadline) {
             avcodec_send_packet(decoder, nullptr);
             if (avcodec_receive_frame(decoder, decoded) == 0 &&
                 decoded->hw_frames_ctx == nullptr) {
@@ -270,6 +310,8 @@ AVFrame* DecodeFirstStill(const std::string& pathUtf8, std::uint32_t generation)
     if (packet != nullptr) av_packet_free(&packet);
     avcodec_free_context(&decoder);
     avformat_close_input(&format);
+    if (result != nullptr && (FrameBytes(result) == 0 || FrameBytes(result) > byteBudget))
+        av_frame_free(&result);
     return result;
 }
 
@@ -299,6 +341,13 @@ std::wstring ModuleDirectory() noexcept {
 }
 
 } // namespace
+
+#ifdef FFF_SECURITY_REGRESSION_TESTS
+AVFrame* SecurityDecodeStill(const std::string& path, std::uint64_t budget, bool cancel) {
+    return DecodeFirstStill(path, 0, budget, [cancel] { return cancel; });
+}
+std::uint64_t SecurityFrameBytes(const AVFrame* frame) { return FrameBytes(frame); }
+#endif
 
 PrefetchService& PrefetchService::Instance() noexcept {
     // Intentionally leaked: a static object with live worker threads must not
@@ -401,8 +450,9 @@ void PrefetchService::TrimToHalfLocked() noexcept {
     routes_.clear();
 }
 
-void PrefetchService::EnforceBudgetLocked(std::uint64_t incoming) noexcept {
-    while (cachedBytes_ + incoming > budgetBytes_ && !stills_.empty()) {
+bool PrefetchService::EnforceBudgetLocked(std::uint64_t incoming) noexcept {
+    if (incoming == 0 || incoming > budgetBytes_) return false;
+    while (cachedBytes_ > budgetBytes_ - incoming && !stills_.empty()) {
         auto victim = stills_.begin();
         for (auto it = stills_.begin(); it != stills_.end(); ++it) {
             if (it->second.lastUse < victim->second.lastUse) victim = it;
@@ -416,6 +466,7 @@ void PrefetchService::EnforceBudgetLocked(std::uint64_t incoming) noexcept {
             ? cachedBytes_ - victim->second.bytes : 0;
         stills_.erase(victim);
     }
+    return cachedBytes_ <= budgetBytes_ - incoming;
 }
 
 void PrefetchService::PruneToPlanLocked(const std::vector<std::string>& paths) noexcept {
@@ -703,12 +754,15 @@ void PrefetchService::WorkerLoop() noexcept {
                 if (!IsStillPath(path)) continue;
                 FileFingerprint fingerprint{};
                 if (!StatFile(path, &fingerprint)) continue;
+                std::uint64_t decodeBudget = 0;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (fingerprint.sizeBytes > budgetBytes_ / 2u ||
                         stills_.find(path) != stills_.end()) continue;
+                    decodeBudget = budgetBytes_;
                 }
-                AVFrame* frame = DecodeFirstStill(path, generation);
+                AVFrame* frame = DecodeFirstStill(path, generation, decodeBudget,
+                    [this, generation] { return Cancelled(generation); });
                 if (frame == nullptr) continue;
                 const std::uint64_t bytes = FrameBytes(frame);
                 {
@@ -717,7 +771,10 @@ void PrefetchService::WorkerLoop() noexcept {
                         av_frame_free(&frame);
                         break;
                     }
-                    EnforceBudgetLocked(bytes);
+                    if (!EnforceBudgetLocked(bytes)) {
+                        av_frame_free(&frame);
+                        continue;
+                    }
                     StillEntry entry{};
                     entry.frame = frame;
                     entry.bytes = bytes;

@@ -812,9 +812,12 @@ Friend Module 播放器原生接口
             .标志 = 0UI
         }
         Dim 钉住 = GCHandle.Alloc(配置, GCHandleType.Pinned)
+        Dim 已引用 As Boolean = False
         Try
+            播放器.DangerousAddRef(已引用)
             Return 函数(播放器.DangerousGetHandle(), 钉住.AddrOfPinnedObject())
         Finally
+            If 已引用 Then 播放器.DangerousRelease()
             钉住.Free()
         End Try
     End Function
@@ -823,7 +826,13 @@ Friend Module 播放器原生接口
     Friend Function 停用音频Tap(播放器 As 播放器原生句柄) As 原生播放器结果
         Dim 函数 = 停用音频Tap函数
         If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
-        Return 函数(播放器.DangerousGetHandle())
+        Dim 已引用 As Boolean = False
+        Try
+            播放器.DangerousAddRef(已引用)
+            Return 函数(播放器.DangerousGetHandle())
+        Finally
+            If 已引用 Then 播放器.DangerousRelease()
+        End Try
     End Function
 
     ''' <summary>非阻塞取至多一块：元数据进 <paramref name="块"/>，PCM 进
@@ -845,7 +854,9 @@ Friend Module 播放器原生接口
         ' 改走非托管内存 + StructureToPtr/PtrToStructure，由 marshaller 处理 ByValArray。
         Dim 块地址 As IntPtr = Marshal.AllocHGlobal(Marshal.SizeOf(Of 原生音频Tap块)())
         Dim 缓冲地址 As IntPtr = IntPtr.Zero
+        Dim 已引用 As Boolean = False
         Try
+            播放器.DangerousAddRef(已引用)
             Marshal.StructureToPtr(块, 块地址, False)
             If 缓冲区 IsNot Nothing Then
                 容量 = CUInt(缓冲区.Length)
@@ -856,6 +867,7 @@ Friend Module 播放器原生接口
             块 = Marshal.PtrToStructure(Of 原生音频Tap块)(块地址)
             Return 结果
         Finally
+            If 已引用 Then 播放器.DangerousRelease()
             Marshal.FreeHGlobal(块地址)
             If 缓冲钉住.IsAllocated Then 缓冲钉住.Free()
         End Try
@@ -870,9 +882,12 @@ Friend Module 播放器原生接口
         }
         If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
         Dim 钉住 = GCHandle.Alloc(统计, GCHandleType.Pinned)
+        Dim 已引用 As Boolean = False
         Try
+            播放器.DangerousAddRef(已引用)
             Return 函数(播放器.DangerousGetHandle(), 钉住.AddrOfPinnedObject())
         Finally
+            If 已引用 Then 播放器.DangerousRelease()
             钉住.Free()
         End Try
     End Function

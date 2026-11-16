@@ -212,6 +212,25 @@ libraw_processed_image_t* SehMakeMemImage(LibRaw* raw, int* memError) noexcept {
     }
 }
 
+// KF-01: the shared_ptr deleter that owns every LibRaw instance we create.
+// A LibRaw entry point can fault mid-way through its own state machine (the
+// Seh* helpers below catch that AV and hand back an error code). The object's
+// internal buffers are then corrupt: running ~LibRaw against them can AV a
+// second time, and that second fault is OUTSIDE any __try/__except here, so it
+// would become an unhandled exception and kill the process. Wrapping `delete`
+// in SEH turns a second-chance crash into an intentional one-object leak: the
+// process survives, and because the shared_ptr has already been reset before
+// delete runs, nothing references the leaked block again.
+void SehLibRawDeleter(LibRaw* p) noexcept {
+    if (p == nullptr) return;
+    __try {
+        delete p;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Intentionally leak p. Its internals are already corrupt; calling
+        // free() on them risks taking down the process heap lock.
+    }
+}
+
 struct RawMemOwner {
     // The AVFrame may outlive the RawStillSource that produced it: the
     // session keeps a still-image frame across the next Open so the old
@@ -289,9 +308,17 @@ bool ValidateRawOptions(const FFF3FPRawOptions& options) noexcept {
 }
 
 struct RawStillSource::Impl {
+    // Created through SehLibRawDeleter, never make_shared: the deleter is the
+    // SEH wall that keeps a corrupt ~LibRaw from turning a recovered fault
+    // into a second-chance process crash (KF-01).
     std::shared_ptr<LibRaw> raw;
     FFF3FPRawOptions options{};
     bool opened = false;
+    // KF-01: a LibRaw entry point faulted under SEH. The object's internals are
+    // untrustworthy, so any further Decode() must refuse rather than touch the
+    // same buffers. A fresh Open() clears this and builds a brand-new object;
+    // the destructor path is safe because raw has already been released.
+    bool poisoned = false;
 };
 
 FFF3FPRawOptions DefaultRawOptions() noexcept {    FFF3FPRawOptions o{};
@@ -342,6 +369,7 @@ bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& o
     info_.size = sizeof(info_);
     info_.version = 1;
     impl_->opened = false;
+    impl_->poisoned = false;
     impl_->raw.reset();
     impl_->options = IsValidOptions(options) ? options : DefaultRawOptions();
     info_.demosaic = impl_->options.demosaic;
@@ -363,7 +391,7 @@ bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& o
         return false;
     }
     try {
-        impl_->raw = std::make_shared<LibRaw>();
+        impl_->raw = std::shared_ptr<LibRaw>(new LibRaw(), &SehLibRawDeleter);
     } catch (...) {
         error = "LibRaw allocation failed";
         return false;
@@ -373,10 +401,17 @@ bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& o
     if (openResult != LIBRAW_SUCCESS) {
         if (IsRawSehResult(openResult)) {
             error = "LibRaw open_file crashed (SEH)";
+            // KF-01: the object is corrupt. Release it through the SEH-wrapped
+            // deleter and arm poisoned_ so a later Decode/Open-refused path
+            // cannot touch the same buffers. The release itself may fault
+            // inside ~LibRaw; SehLibRawDeleter catches that and leaks on
+            // purpose, so the worker thread survives.
+            impl_->poisoned = true;
+            impl_->raw.reset();
         } else {
             error = std::string("LibRaw open_file: ") + RawError(openResult);
+            impl_->raw.reset();
         }
-        impl_->raw.reset();
         return false;
     }
     RawTrace("RawStillSource::open_file ok");
@@ -486,6 +521,13 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
         error = "RAW source is not open";
         return false;
     }
+    // KF-01: a previous entry point faulted under SEH. The object's internals
+    // are untrustworthy; refuse rather than re-enter the same corrupt buffers.
+    // A fresh Open() clears this and builds a new LibRaw.
+    if (impl_->poisoned) {
+        error = "RAW source is poisoned by a previous LibRaw fault";
+        return false;
+    }
 
     LibRaw& raw = *impl_->raw;
     auto& params = raw.imgdata.params;
@@ -515,6 +557,13 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
         error = IsRawSehResult(result)
             ? "LibRaw unpack crashed (SEH)"
             : std::string("LibRaw unpack: ") + RawError(result);
+        if (IsRawSehResult(result)) {
+            // KF-01: object is corrupt. Release through the SEH-wrapped deleter
+            // and arm poisoned_ so a retry or the destructor cannot re-enter.
+            impl_->poisoned = true;
+            impl_->opened = false;
+            impl_->raw.reset();
+        }
         return false;
     }
     RawTrace("RawStillSource::unpack ok");
@@ -523,6 +572,11 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
         error = IsRawSehResult(result)
             ? "LibRaw dcraw_process crashed (SEH)"
             : std::string("LibRaw dcraw_process: ") + RawError(result);
+        if (IsRawSehResult(result)) {
+            impl_->poisoned = true;
+            impl_->opened = false;
+            impl_->raw.reset();
+        }
         return false;
     }
     RawTrace("RawStillSource::dcraw_process ok");
@@ -533,6 +587,11 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
         error = IsRawSehResult(memError)
             ? "LibRaw dcraw_make_mem_image crashed (SEH)"
             : std::string("LibRaw dcraw_make_mem_image: ") + RawError(memError);
+        if (IsRawSehResult(memError)) {
+            impl_->poisoned = true;
+            impl_->opened = false;
+            impl_->raw.reset();
+        }
         return false;
     }
     RawTrace("RawStillSource::mem_image ok");

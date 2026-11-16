@@ -143,6 +143,9 @@ Public NotInheritable Class 播放器会话
     Public Event 错误 As EventHandler(Of 播放器事件参数)
     Public Event 色彩模式变化 As EventHandler(Of 播放器事件参数)
     Public Event 设备变化 As EventHandler(Of 播放器事件参数)
+    ''' <summary>首帧真正上屏（FFF3FPEvent::FirstFramePresented=8）。强类型载荷已解析好
+    ''' presented/total/width/height；通用 <see cref="播放器事件"/> 仍会带原始 detail JSON。</summary>
+    Public Event 首帧呈现 As EventHandler(Of 首帧呈现事件参数)
 
     Public Sub 打开(本地路径 As String)
         ' 计时戳从打开入口起算：下面这条通路同步串在 UI 线程上，与内核 worker 的 DoOpen
@@ -1411,6 +1414,7 @@ Public NotInheritable Class 播放器会话
             Case 播放器事件类型.错误 : RaiseEvent 错误(Me, 参数)
             Case 播放器事件类型.色彩模式变化 : RaiseEvent 色彩模式变化(Me, 参数)
             Case 播放器事件类型.设备变化 : RaiseEvent 设备变化(Me, 参数)
+            Case 播放器事件类型.首帧呈现 : RaiseEvent 首帧呈现(Me, 首帧呈现事件参数.解析(参数.详情JSON))
         End Select
     End Sub
 
