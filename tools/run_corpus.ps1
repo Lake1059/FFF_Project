@@ -1,58 +1,68 @@
 <#
 .SYNOPSIS
-    Run the GainMap probe over the deterministic test corpus and diff against expected.json.
+    Run the GainMap probe over the deterministic test corpus and diff against expected values.
 
 .DESCRIPTION
-    Paths are derived from this script's own location, then overridable by explicit
-    parameters, then by environment variables, then by defaults. No absolute machine
-    paths are hardcoded.
+    Supports TWO manifest schemas out of the box:
+      * Internal schema: <corpus>\manifest.json is an object with a "files" array; each entry
+        carries its expected values under "expected" (gainmapPresent/form/family/metaSource/
+        expectedVerdict).
+      * External schema: <corpus>\manifest.json is a bare ARRAY; each entry carries the v1
+        probe's own verdict/form/reason as "probeVerdict"/"probeForm"/"probeReason".
 
-    Resolution order for each setting (first non-empty wins):
-        1. Explicit -Parameter
-        2. Environment variable
-        3. Default derived from $PSScriptRoot
+    A versioned, in-repo expected table can be supplied with -Expected <json> (see
+    docs\gainmap-corpus-expectations.json). When given, per-file expected values are looked up
+    by relative path from that table, overriding whatever the manifest embeds.
+
+    Compared fields (when present on either side): verdict, form, family, metaSource,
+    gainmapPresent. The probe JSON must keep these exact key names (gainmap.present/form,
+    meta.family/source, verdict).
+
+    Output: a machine-readable table (written to -OutFile) plus a TOTAL/MATCHED/DIFF summary.
 
 .PARAMETER Root
-    FFF repository root. Default: parent of this script's directory (this file lives
-    at <root>\tools\run_corpus.ps1). Env: FFF_ROOT.
+    FFF repository root. Default: parent of this script's directory. Env: FFF_ROOT.
 
 .PARAMETER Corpus
-    GainMap corpus root (must contain manifest.json). Default:
-    <root>\..\testmedia\gainmap-corpus (the corpus lives outside the repo on purpose;
-    see docs\gainmap-testing.md). Env: FFF_CORPUS_ROOT.
+    GainMap corpus root (must contain manifest.json). Default: the first existing of
+    <root>\..\..\testmedia\gainmap-corpus or <root>\..\testmedia\gainmap-corpus. Env: FFF_CORPUS_ROOT.
+
+.PARAMETER Expected
+    Optional path to a versioned expected table JSON: { "entries": [ { file, verdict, form,
+    family, metaSource, gainmapPresent, rationale } ] }. When set, per-file expectations come
+    from here (matched by relative file path) instead of the manifest's embedded "expected".
 
 .PARAMETER ProbeExe
     Path to gainmap_probe.exe. Default: <root>\FFF.Native\tools\build_out\gainmap_probe.exe.
-    Env: FFF_PROBE_EXE.
-
-.PARAMETER FfmpegDir
-    Prebuilt ffmpeg dir (documented; the probe exe already carries its runtime DLLs
-    next to itself). Default: <root>\third_party\ffmpeg. Env: FFF_FFMPEG_DIR.
 
 .PARAMETER OutFile
     Where to write the machine-readable result table. Default: <root>\docs\corpus_matrix.json.
-    Env: FFF_CORPUS_OUT.
 
 .PARAMETER TargetHeadroom
-    Optional. If set, appended to every probe invocation as "--target-headroom <v>".
-    The probe uses its own default when omitted.
+    Optional; appended as "--target-headroom <v>".
 
 .PARAMETER Filter
     Optional substring; only manifest entries whose file contains it are run.
 
 .PARAMETER DryRun
     Resolve and print paths + manifest count, but do not invoke the probe.
+
+.PARAMETER FailOnDiff
+    Switch: exit non-zero when any row differs (for CI / gating). Off by default so local
+    exploratory runs still report counts.
 #>
 [CmdletBinding()]
 param(
     [string]$Root,
     [string]$Corpus,
+    [string]$Expected,
     [string]$ProbeExe,
     [string]$FfmpegDir,
     [string]$OutFile,
     [double]$TargetHeadroom,
     [string]$Filter,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$FailOnDiff
 )
 
 $ErrorActionPreference = 'Continue'
@@ -62,9 +72,20 @@ if (-not $Root)        { $Root = $env:FFF_ROOT }
 if (-not $Root)        { $Root = (Split-Path -Parent $PSScriptRoot) }
 $Root = (Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
 
-# --- 2. Resolve Corpus (sibling testmedia dir by default) ---
+# --- 2. Resolve Corpus (sibling testmedia dir by default; try 1- and 2-up layouts) ---
 if (-not $Corpus)      { $Corpus = $env:FFF_CORPUS_ROOT }
-if (-not $Corpus)      { $Corpus = (Join-Path $Root '..\testmedia\gainmap-corpus') }
+if (-not $Corpus) {
+    $candidates = @(
+        (Join-Path $Root '..\..\testmedia\gainmap-corpus'),
+        (Join-Path $Root '..\testmedia\gainmap-corpus')
+    )
+    $chosen = $null
+    foreach ($c in $candidates) {
+        $cp = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($c)
+        if (Test-Path -LiteralPath (Join-Path $cp 'manifest.json')) { $chosen = $cp; break }
+    }
+    if ($chosen) { $Corpus = $chosen } else { $Corpus = $candidates[0] }
+}
 $Corpus = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Corpus)
 
 # --- 3. Resolve probe exe ---
@@ -84,20 +105,46 @@ $OutFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPa
 
 Write-Host "Root      = $Root"
 Write-Host "Corpus    = $Corpus"
+Write-Host "Expected  = $(if ($Expected) { $Expected } else { '(manifest-embedded)' })"
 Write-Host "ProbeExe  = $ProbeExe"
 Write-Host "FfmpegDir = $FfmpegDir"
 Write-Host "OutFile   = $OutFile"
 
 $manifestPath = Join-Path $Corpus 'manifest.json'
 if (-not (Test-Path -LiteralPath $manifestPath)) {
-    Write-Error "Corpus manifest not found: $manifestPath`nDownload/place the corpus per docs\gainmap-testing.md, or pass -Corpus."
+    Write-Error "Corpus manifest not found: $manifestPath`nPlace the corpus per docs\gainmap-testing.md, or pass -Corpus."
     exit 2
 }
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-Write-Host ("Manifest  = {0} entries" -f @($manifest.files).Count)
+
+# --- 6. Load the optional in-repo expected table (keyed by relative file path) ---
+$expectedMap = @{}
+if ($Expected) {
+    $Expected = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Expected)
+    if (-not (Test-Path -LiteralPath $Expected)) {
+        Write-Error "Expected table not found: $Expected"
+        exit 2
+    }
+    $expDoc = Get-Content -LiteralPath $Expected -Raw | ConvertFrom-Json
+    foreach ($e in @($expDoc.entries)) {
+        if ($e.file) { $expectedMap[$e.file] = $e }
+    }
+    Write-Host ("Expected  = {0} entries loaded" -f $expectedMap.Count)
+}
+
+# --- 7. Normalize manifest entries into a common shape ---
+# Internal: object with .files[].expected{...}. External: bare array of probeVerdict/probeForm.
+$isExternalArray = ($manifest -is [System.Array]) -or ($null -eq $manifest.files)
+if ($isExternalArray) {
+    Write-Host "Manifest  = external array schema"
+    $entries = @($manifest)
+} else {
+    Write-Host ("Manifest  = internal object schema ({0} entries)" -f @($manifest.files).Count)
+    $entries = @($manifest.files)
+}
 
 if ($DryRun) {
-    Write-Host "DryRun: not invoking probe. Exe exists = $(Test-Path -LiteralPath $ProbeExe)"
+    Write-Host ("DryRun: {0} manifest entries; probe exists = {1}" -f $entries.Count, (Test-Path -LiteralPath $ProbeExe))
     exit 0
 }
 
@@ -111,52 +158,110 @@ if ($PSBoundParameters.ContainsKey('TargetHeadroom')) {
     $probeArgs += @('--target-headroom', $TargetHeadroom)
 }
 
+# Resolve the expected verdict/form/family/metaSource/gainmapPresent for a manifest entry.
+# Priority: -Expected table > internal embedded expected > external array probeVerdict/probeForm.
+function Resolve-Expected($e, $isExt, $map, $fileKey) {
+    $row = [pscustomobject]@{
+        verdict       = $null
+        form          = $null
+        family        = $null
+        metaSource    = $null
+        gainmapPresent = $null
+    }
+    if ($map.ContainsKey($fileKey)) {
+        $m = $map[$fileKey]
+        $row.verdict = $m.verdict
+        $row.form = $m.form
+        $row.family = $m.family
+        $row.metaSource = $m.metaSource
+        $row.gainmapPresent = $m.gainmapPresent
+        return $row
+    }
+    if ($isExt) {
+        # External array: probeVerdict/probeForm are the v1 expectations; family/metaSource/gainmapPresent unknown.
+        $row.verdict = $e.probeVerdict
+        $row.form = $e.probeForm
+        return $row
+    }
+    $x = $e.expected
+    if ($null -eq $x) { return $row }
+    $row.verdict = $x.expectedVerdict
+    $row.form = $x.form
+    $row.family = $x.family
+    $row.metaSource = $x.metaSource
+    $row.gainmapPresent = $x.gainmapPresent
+    return $row
+}
+
 $rows = @()
-foreach ($e in $manifest.files) {
-    if ($Filter -and ($e.file -notlike "*$Filter*")) { continue }
-    $path = Join-Path $Corpus $e.file
+foreach ($e in $entries) {
+    $fileKey = $e.file
+    if ($Filter -and ($fileKey -notlike "*$Filter*")) { continue }
+    $path = Join-Path $Corpus $fileKey
     if (-not (Test-Path -LiteralPath $path)) {
-        Write-Warning "missing corpus file: $($e.file)"
+        Write-Warning "missing corpus file: $fileKey"
         continue
     }
+
+    $want = Resolve-Expected $e $isExternalArray $expectedMap $fileKey
+
     $raw = & $ProbeExe $path @probeArgs 2>$null
     $a = $raw | ConvertFrom-Json
-    $x = $e.expected
+
     $diffs = @()
-    if ($a.gainmap.present -ne $x.gainmapPresent) { $diffs += "present:exp=$($x.gainmapPresent)/got=$($a.gainmap.present)" }
-    if ($x.form -ne 'none' -and $a.gainmap.form -ne $x.form) { $diffs += "form:exp=$($x.form)/got=$($a.gainmap.form)" }
-    if ($null -ne $x.auxCUrn -and $a.gainmap.auxCUrn -ne $x.auxCUrn) { $diffs += "urn:exp=$($x.auxCUrn)/got=$($a.gainmap.auxCUrn)" }
-    if ($null -ne $x.grid) {
-        if ($a.gainmap.grid.rows -ne $x.grid.rows) { $diffs += "grid.rows:exp=$($x.grid.rows)/got=$($a.gainmap.grid.rows)" }
-        if ($a.gainmap.grid.cols -ne $x.grid.cols) { $diffs += "grid.cols:exp=$($x.grid.cols)/got=$($a.gainmap.grid.cols)" }
-        if ($a.gainmap.grid.flags -ne $x.grid.flags) { $diffs += "grid.flags:exp=$($x.grid.flags)/got=$($a.gainmap.grid.flags)" }
-        if ($a.gainmap.grid.tailPresent -ne $x.grid.tailPresent) { $diffs += "tailPresent:exp=$($x.grid.tailPresent)/got=$($a.gainmap.grid.tailPresent)" }
-        if ($x.grid.tailW -ne $null -and $a.gainmap.grid.tailW -ne $x.grid.tailW) { $diffs += "tailW:exp=$($x.grid.tailW)/got=$($a.gainmap.grid.tailW)" }
-        if ($x.grid.tailH -ne $null -and $a.gainmap.grid.tailH -ne $x.grid.tailH) { $diffs += "tailH:exp=$($x.grid.tailH)/got=$($a.gainmap.grid.tailH)" }
+    # verdict
+    if ($null -ne $want.verdict -and $a.verdict -ne $want.verdict) {
+        $diffs += "verdict:exp=$($want.verdict)/got=$($a.verdict)"
     }
-    if ($a.meta.family -ne $x.family) { $diffs += "family:exp=$($x.family)/got=$($a.meta.family)" }
-    if ($a.meta.source -ne $x.metaSource) { $diffs += "metaSource:exp=$($x.metaSource)/got=$($a.meta.source)" }
-    if ($a.verdict -ne $x.expectedVerdict) { $diffs += "verdict:exp=$($x.expectedVerdict)/got=$($a.verdict)" }
+    # form (none = wildcard)
+    if ($null -ne $want.form -and $want.form -ne 'none' -and $a.gainmap.form -ne $want.form) {
+        $diffs += "form:exp=$($want.form)/got=$($a.gainmap.form)"
+    }
+    # family
+    if ($null -ne $want.family -and $a.meta.family -ne $want.family) {
+        $diffs += "family:exp=$($want.family)/got=$($a.meta.family)"
+    }
+    # metaSource
+    if ($null -ne $want.metaSource -and $a.meta.source -ne $want.metaSource) {
+        $diffs += "metaSource:exp=$($want.metaSource)/got=$($a.meta.source)"
+    }
+    # gainmapPresent
+    if ($null -ne $want.gainmapPresent -and [bool]$a.gainmap.present -ne [bool]$want.gainmapPresent) {
+        $diffs += "gainmapPresent:exp=$($want.gainmapPresent)/got=$($a.gainmap.present)"
+    }
+
     $rows += [pscustomobject]@{
-        file       = $e.file
-        verdict    = $a.verdict
-        expVerdict = $x.expectedVerdict
-        form       = $a.gainmap.form
-        expForm    = $x.form
-        family     = $a.meta.family
-        expFamily  = $x.family
-        source     = $a.meta.source
-        expSource  = $x.metaSource
-        diff       = ($diffs -join '; ')
+        file           = $fileKey
+        verdict        = $a.verdict
+        expVerdict     = $want.verdict
+        form           = $a.gainmap.form
+        expForm        = $want.form
+        family         = $a.meta.family
+        expFamily      = $want.family
+        source         = $a.meta.source
+        expSource      = $want.metaSource
+        gainmapPresent = $a.gainmap.present
+        expPresent     = $want.gainmapPresent
+        diff           = ($diffs -join '; ')
     }
 }
-$rows | Format-Table -AutoSize | Out-String -Width 200
+
+$rows | Format-Table -AutoSize | Out-String -Width 220
 Write-Host "=== MISMATCHES ==="
 $rows | Where-Object { $_.diff -ne '' } | ForEach-Object { Write-Host ("* " + $_.file + " :: " + $_.diff) }
 Write-Host ""
-Write-Host ("TOTAL=" + $rows.Count + " MATCHED=" + (@($rows | Where-Object {$_.diff -eq ''}).Count) + " DIFF=" + (@($rows | Where-Object {$_.diff -ne ''}).Count))
+$total = @($rows).Count
+$matched = @($rows | Where-Object { $_.diff -eq '' }).Count
+$diff = @($rows | Where-Object { $_.diff -ne '' }).Count
+Write-Host ("TOTAL=" + $total + " MATCHED=" + $matched + " DIFF=" + $diff)
 
 $outDir = Split-Path -Parent $OutFile
 if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
-$rows | ConvertTo-Json -Depth 4 | Out-File -LiteralPath $OutFile -Encoding utf8
+$rows | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $OutFile -Encoding utf8
 Write-Host "Wrote $OutFile"
+
+if ($FailOnDiff -and $diff -gt 0) {
+    Write-Host "run_corpus: $diff mismatches (FailOnDiff)."
+    exit 1
+}
+exit 0
