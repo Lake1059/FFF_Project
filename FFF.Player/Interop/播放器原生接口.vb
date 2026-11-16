@@ -1213,6 +1213,37 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+    ' FFF3FP_SetGainMapEnabled。与自动 HDR / VSR 同源同规矩——
+    ' PlayerApiVersion 不 bump，这是"同版本号内的追加导出"。
+    ' ⚠ 必须动态解析：静态导入会让一个尚未含此符号的内核在载入期抛
+    '   EntryPointNotFoundException，把"这台内核没这能力"升级成"播放器起不来"。
+    '   缺失时 支持GainMap切换 = False，宿主隐藏按钮 / 切换返回 False，不抛。
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置GainMap启用原型(播放器 As 播放器原生句柄,
+        启用 As UInteger) As 原生播放器结果
+
+    Private ReadOnly 设置GainMap启用函数 As 设置GainMap启用原型 =
+        解析可选导出(Of 设置GainMap启用原型)("FFF3FP_SetGainMapEnabled")
+
+    ''' <summary>当前内核是否导出了 GainMap 切换入口（旧内核返回 False，UI 据此降级）。</summary>
+    Friend ReadOnly Property 支持GainMap切换 As Boolean
+        Get
+            Return 设置GainMap启用函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>请求在 GainMap（已施加）与原始底图之间切换。
+    ''' 内核不支持该导出、句柄无效、或返回非成功（非静图 / 无可用底图等）时返回 False，不抛。</summary>
+    Friend Function 设置GainMap启用(播放器 As 播放器原生句柄, 启用 As Boolean) As Boolean
+        Dim 函数 = 设置GainMap启用函数
+        If 函数 Is Nothing Then Return False
+        Try
+            Return 函数(播放器, If(启用, 1UI, 0UI)) = 原生播放器结果.成功
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
     ' 可选辅层合成参数：内核 FFF3FP_SetAuxiliaryComposition。
     '
     ' ⚠ 同款动态解析：这是"同版本号（20）内的新增导出"，静态导入会让一个还不含它的

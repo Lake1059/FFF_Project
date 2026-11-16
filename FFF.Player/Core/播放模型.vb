@@ -638,10 +638,58 @@ Public NotInheritable Class 媒体信息
     Public Property 章节 As List(Of 媒体章节信息) = New List(Of 媒体章节信息)()
     <JsonPropertyName("streams")>
     Public Property 流 As List(Of 媒体流信息) = New List(Of 媒体流信息)()
+    ' 静态图片的 GainMap 探针结果。旧内核不发此对象时为 Nothing；
+    ' 即使发了，也只有 可用（applyOk && baseAvailable）才允许宿主显示切换按钮。
+    <JsonPropertyName("gainmap")>
+    Public Property GainMap As 媒体GainMap信息
     <JsonIgnore>
     Public ReadOnly Property 时长 As TimeSpan
         Get
             Return TimeSpan.FromTicks(时长100纳秒)
+        End Get
+    End Property
+End Class
+
+''' <summary>RebuildMediaInfo 的 gainmap 子对象（契约 §1.4）。键名与内核 JSON 逐一对齐，
+''' 缺键时按默认值落（bool=False / double=0），宿主不得把"识别到"当成"已施加"。</summary>
+Public NotInheritable Class 媒体GainMap信息
+    <JsonPropertyName("present")>
+    Public Property 有增益图 As Boolean
+    <JsonPropertyName("form")>
+    Public Property 形态 As String = String.Empty
+    <JsonPropertyName("verdict")>
+    Public Property 判定 As String = String.Empty
+    <JsonPropertyName("reason")>
+    Public Property 原因 As String = String.Empty
+    <JsonPropertyName("applyOk")>
+    Public Property 已施加成功 As Boolean
+    <JsonPropertyName("baseAvailable")>
+    Public Property 底图可用 As Boolean
+    <JsonPropertyName("outW")>
+    Public Property 输出宽 As Integer
+    <JsonPropertyName("outH")>
+    Public Property 输出高 As Integer
+    <JsonPropertyName("headroomLinear")>
+    Public Property 线性Headroom As Double
+    <JsonPropertyName("baseHdrHeadroomLog2")>
+    Public Property 基线HDRHeadroomLog2 As Double
+    <JsonPropertyName("altHdrHeadroomLog2")>
+    Public Property 替代HDRHeadroomLog2 As Double
+    <JsonPropertyName("targetHeadroomLog2")>
+    Public Property 目标HeadroomLog2 As Double
+    <JsonPropertyName("applyWeight")>
+    Public Property 施加权重 As Double
+    ' 原生实际开关（无 Getter 导出，借 RebuildMediaInfo 的 gainmap JSON 上报）。
+    ' 用可空：老内核不发此键时为 Nothing，宿主据此回退到"setter 成功 + 镜像"，
+    ' 绝不能把"键缺失"误读成 False；也绝不参与 可用/可见性判定。
+    <JsonPropertyName("enabled")>
+    Public Property 启用 As Boolean?
+
+    ''' <summary>能否在 GainMap 与原始底图之间来回切：真施加成功且保留了可回退的原始底图。</summary>
+    <JsonIgnore>
+    Public ReadOnly Property 可用 As Boolean
+        Get
+            Return 已施加成功 AndAlso 底图可用
         End Get
     End Property
 End Class
@@ -762,6 +810,26 @@ Public NotInheritable Class 媒体流信息
     Public Property 色彩原色 As Integer
     <JsonPropertyName("colorTransfer")>
     Public Property 色彩传递 As Integer
+    ' 内核实际用于转换的色彩基础（元数据 + 码流/帧识别 + 推断），声明值缺席时
+    ' 信息图层与媒体信息窗体据此显示，而不是整项消失。默认 -1：旧内核没有这些
+    ' 字段，不能把 0（色彩矩阵里的 RGB）误当成有效值。
+    <JsonPropertyName("colorPrimariesApplied")>
+    Public Property 色彩原色应用 As Integer = -1
+    <JsonPropertyName("colorTransferApplied")>
+    Public Property 色彩传递应用 As Integer = -1
+    <JsonPropertyName("colorSpaceApplied")>
+    Public Property 色彩空间应用 As Integer = -1
+    <JsonPropertyName("colorRangeApplied")>
+    Public Property 色彩范围应用 As Integer = -1
+    ' 每个应用值的证据来源：frame / bitstream / container / inferred。
+    <JsonPropertyName("colorPrimariesAppliedSource")>
+    Public Property 色彩原色应用来源 As String = String.Empty
+    <JsonPropertyName("colorTransferAppliedSource")>
+    Public Property 色彩传递应用来源 As String = String.Empty
+    <JsonPropertyName("colorSpaceAppliedSource")>
+    Public Property 色彩空间应用来源 As String = String.Empty
+    <JsonPropertyName("colorRangeAppliedSource")>
+    Public Property 色彩范围应用来源 As String = String.Empty
     <JsonPropertyName("chromaLocation")>
     Public Property 色度位置 As Integer
     <JsonPropertyName("fieldOrder")>
@@ -841,6 +909,18 @@ Public NotInheritable Class 媒体流信息
     Public Property 语言 As String = String.Empty
     <JsonPropertyName("title")>
     Public Property 标题 As String = String.Empty
+    ' 媒体信息窗体刷新签名用：声明值与应用值/来源任一变化都必须触发重建，否则
+    ' 首帧后从 VUI/帧补出的色彩基础不会出现在窗体上（与 D3 同一失效形状）。
+    <JsonIgnore>
+    Public ReadOnly Property 色彩签名 As String
+        Get
+            Return $"{色彩原色}/{色彩传递}/{色彩空间}/{色彩范围}/" &
+                $"{色彩原色应用}:{色彩原色应用来源}/" &
+                $"{色彩传递应用}:{色彩传递应用来源}/" &
+                $"{色彩空间应用}:{色彩空间应用来源}/" &
+                $"{色彩范围应用}:{色彩范围应用来源}"
+        End Get
+    End Property
 End Class
 
 ''' <summary>

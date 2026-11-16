@@ -1,0 +1,75 @@
+# GainMap probe build + smoke gate.
+#
+# Trigger: workflow_dispatch ONLY (no push / pull_request triggers) so that this
+# manual, dependency-heavy build never adds noise to PR checks.
+#
+# What it does on windows-latest:
+#   1. Build FFF.Native (Release|x64) with MSBuild.
+#   2. Smoke: if a gainmap_probe.exe was produced, run it with --help.
+#      The repo vendors NO GainMap sample file, and the standalone probe links
+#      prebuilt ffmpeg (third_party/ffmpeg) which is NOT checked in. On a bare
+#      runner the link step therefore needs the native deps restored/cached first
+#      (see FFF.Native/tools/Resolve-NativeDependencies.ps1 and docs/gainmap-testing.md);
+#      the smoke step degrades to a notice instead of failing the job.
+#   3. Upload build logs as an artifact.
+#
+# NOTE: FFF.Native.vcxproj uses PlatformToolset v145 and links avcodec-63 /
+# avformat-63 / avutil-61 / swscale-10 / swresample-7 / libraw / ass. A future
+# revision should add a vcpkg / cache step for third_party before the MSBuild step.
+
+name: gainmap-probe
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke:
+    name: Build FFF.Native (Release|x64) + probe smoke
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build FFF.Native (Release|x64)
+        id: build
+        run: |
+          msbuild FFF.Native\FFF.Native.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /m `
+            /v:minimal `
+            /nologo
+
+      - name: Probe smoke (gainmap_probe.exe --help)
+        shell: pwsh
+        run: |
+          $probe = Get-ChildItem -Recurse -Filter 'gainmap_probe.exe' -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+          if ($probe) {
+            Write-Host "Found probe: $($probe.FullName)"
+            & $probe.FullName --help
+            Write-Host "probe --help exit code: $LASTEXITCODE"
+          } else {
+            Write-Host "::notice title=No probe binary::gainmap_probe.exe was not produced. The standalone probe links prebuilt ffmpeg (third_party/ffmpeg) which is not vendored in this repo, and no GainMap sample is checked in. This is a build-only smoke gate; reproduce the 41-file matrix locally per docs/gainmap-testing.md."
+          }
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gainmap-probe-logs
+          path: |
+            FFF.Native\tools\build_out\*.log
+            FFF.Native\tools\build_out_jpeg\*.log
+            FFF.Native\*.log
+          if-no-files-found: warn
+          retention-days: 14

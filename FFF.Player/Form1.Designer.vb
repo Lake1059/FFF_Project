@@ -74,6 +74,8 @@ Partial Class Form1
         JEC_当前视频编码显示前面的空白占位 = New LakeUI.JustEmptyControl()
         MB_HDR模式 = New LakeUI.ModernButton()
         JEC_HDR选项前面的空白占位 = New LakeUI.JustEmptyControl()
+        MB_GainMap切换 = New LakeUI.ModernButton()
+        JEC_GainMap切换前面的空白占位 = New LakeUI.JustEmptyControl()
         MB_软件解码或硬件解码 = New LakeUI.ModernButton()
         JustEmptyControl19 = New LakeUI.JustEmptyControl()
         MB_选择流 = New LakeUI.ModernButton()
@@ -381,6 +383,8 @@ Partial Class Form1
         Panel4.Controls.Add(JEC_当前音频编码显示前面的空白占位)
         Panel4.Controls.Add(MB_当前视频编码显示)
         Panel4.Controls.Add(JEC_当前视频编码显示前面的空白占位)
+        Panel4.Controls.Add(MB_GainMap切换)
+        Panel4.Controls.Add(JEC_GainMap切换前面的空白占位)
         Panel4.Controls.Add(MB_HDR模式)
         Panel4.Controls.Add(JEC_HDR选项前面的空白占位)
         Panel4.Controls.Add(MB_软件解码或硬件解码)
@@ -562,7 +566,36 @@ Partial Class Form1
         JEC_HDR选项前面的空白占位.Name = "JEC_HDR选项前面的空白占位"
         JEC_HDR选项前面的空白占位.Size = New Size(5, 24)
         JEC_HDR选项前面的空白占位.TabIndex = 35
-        ' 
+        '
+        ' MB_GainMap切换
+        '
+        MB_GainMap切换.BackColor = Color.Transparent
+        MB_GainMap切换.BackColor1 = Color.FromArgb(CByte(40), CByte(0), CByte(0), CByte(0))
+        MB_GainMap切换.BorderColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_GainMap切换.BorderRadius = 5
+        MB_GainMap切换.Dock = DockStyle.Left
+        MB_GainMap切换.Font = New Font("Microsoft YaHei UI", 9F)
+        MB_GainMap切换.HoverBackColor1 = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MB_GainMap切换.Location = New Point(95, 8)
+        MB_GainMap切换.Margin = New Padding(2)
+        MB_GainMap切换.Name = "MB_GainMap切换"
+        MB_GainMap切换.PressedBackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_GainMap切换.Size = New Size(40, 24)
+        MB_GainMap切换.SubTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        MB_GainMap切换.TabIndex = 43
+        MB_GainMap切换.Text = "GainMap"
+        MB_GainMap切换.ToolTipPadding = New Padding(5)
+        MB_GainMap切换.ToolTipShowDelaySeconds = 1R
+        MB_GainMap切换.ToolTipText = "点击在 GainMap 与原始底图之间切换"
+        '
+        ' JEC_GainMap切换前面的空白占位
+        '
+        JEC_GainMap切换前面的空白占位.Dock = DockStyle.Left
+        JEC_GainMap切换前面的空白占位.Location = New Point(90, 8)
+        JEC_GainMap切换前面的空白占位.Name = "JEC_GainMap切换前面的空白占位"
+        JEC_GainMap切换前面的空白占位.Size = New Size(5, 24)
+        JEC_GainMap切换前面的空白占位.TabIndex = 44
+        '
         ' MB_软件解码或硬件解码
         ' 
         MB_软件解码或硬件解码.BackColor = Color.Transparent
@@ -1471,6 +1504,8 @@ Partial Class Form1
     Friend WithEvents JEC_HDR选项前面的空白占位 As LakeUI.JustEmptyControl
     Friend WithEvents JEC_当前视频编码显示前面的空白占位 As LakeUI.JustEmptyControl
     Friend WithEvents MB_HDR模式 As LakeUI.ModernButton
+    Friend WithEvents MB_GainMap切换 As LakeUI.ModernButton
+    Friend WithEvents JEC_GainMap切换前面的空白占位 As LakeUI.JustEmptyControl
     Friend WithEvents JustEmptyControl18 As LakeUI.JustEmptyControl
     Friend WithEvents MB_查看当前媒体信息 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl19 As LakeUI.JustEmptyControl

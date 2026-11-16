@@ -1,4 +1,4 @@
-Public Class Form设置_音乐与歌词
+Public Partial Class Form设置_音乐与歌词
     Private 正在初始化 As Boolean
 
     Public Sub New()
@@ -16,6 +16,7 @@ Public Class Form设置_音乐与歌词
             MCK_是否启用歌词支持.Checked = 设置.实例对象.启用歌词支持
             MCK_是否渲染封面图毛玻璃背景.Checked = 设置.实例对象.渲染封面图毛玻璃背景
             MCK_是否渲染封面图.Checked = 设置.实例对象.渲染封面图
+            MCK_启用系统媒体集成.Checked = 设置.实例对象.启用系统媒体集成
             MCK_是否渲染封面图毛玻璃背景.Enabled = MCK_是否渲染封面图.Checked
         Finally
             正在初始化 = False
@@ -36,12 +37,14 @@ Public Class Form设置_音乐与歌词
         Form1.当前主窗体?.应用歌词设置()
     End Sub
 
-    Private Sub 选项_CheckedChanged(sender As Object, e As EventArgs) Handles MCK_是否启用歌词支持.CheckedChanged, MCK_是否渲染封面图毛玻璃背景.CheckedChanged, MCK_是否渲染封面图.CheckedChanged
+    Private Sub 选项_CheckedChanged(sender As Object, e As EventArgs) Handles MCK_是否启用歌词支持.CheckedChanged, MCK_是否渲染封面图毛玻璃背景.CheckedChanged, MCK_是否渲染封面图.CheckedChanged, MCK_启用系统媒体集成.CheckedChanged
         If 正在初始化 Then Return
         设置.实例对象.启用歌词支持 = MCK_是否启用歌词支持.Checked
         设置.实例对象.渲染封面图 = MCK_是否渲染封面图.Checked
         设置.实例对象.渲染封面图毛玻璃背景 = MCK_是否渲染封面图毛玻璃背景.Checked
+        设置.实例对象.启用系统媒体集成 = MCK_启用系统媒体集成.Checked
         MCK_是否渲染封面图毛玻璃背景.Enabled = MCK_是否渲染封面图.Checked
+        Form1.当前主窗体?.应用系统媒体设置()
         Form1.当前主窗体?.应用歌词设置()
     End Sub
 End Class

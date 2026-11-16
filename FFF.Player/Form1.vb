@@ -40,6 +40,15 @@ Public Class Form1
     ' 蓝牙端点/协议可能在播放中切换（耳机回连、A2DP 与 HFP 互换），500ms 复查一次默认端点；
     ' 只有补偿值变化才真正下发，空闲时只探测不 re-seek。
     Private 蓝牙延迟计时器 As System.Windows.Forms.Timer
+    ' 播放进度兜底：暂停/跳转/换片/停止/退出都有显式保存点，这个 15 秒计时器
+    ' 只覆盖"一直在播、没有任何用户动作"的场景（异常退出最多丢 15 秒）。
+    Private 播放进度计时器 As System.Windows.Forms.Timer
+    ' 系统媒体面板（SMTC）：首次真正打开音视频时才创建，冷启动不加载 WinRT 投影。
+    ' 心跳独立于 15 秒进度计时器和 60 Hz 渲染泵，只在 正在播放 时以 1 Hz 推送时间轴。
+    Private 系统媒体 As 系统媒体会话
+    Private 系统媒体心跳 As System.Windows.Forms.Timer
+    Private 系统媒体卡已注册 As Boolean
+    Private 系统媒体上次签名 As String = String.Empty
     Private 界面呈现器 As 播放器界面呈现器
     Private 窗口布局控制器 As 播放器窗口布局控制器
     Private 字幕图层呈现器 As 播放器字幕叠加呈现器
@@ -103,6 +112,15 @@ Public Class Form1
         MyBase.OnHandleCreated(e)
     End Sub
 
+    ''' <summary>
+    ''' SMTC 的 GetForWindow 绑定的是当前 HWND；必须在句柄销毁前主动 ClearAll + IsEnabled=False，
+    ''' 否则窗口关闭后系统面板可能保留一张无法控制的“幽灵卡片”。
+    ''' </summary>
+    Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
+        关闭系统媒体()
+        MyBase.OnFormClosing(e)
+    End Sub
+
     Private Shared Sub 同步绘制控件树(控件 As Control)
         If Not 控件.Visible OrElse 控件.IsDisposed Then Return
         控件.CreateControl()
@@ -132,6 +150,13 @@ Public Class Form1
 
     Protected Overrides Sub WndProc(ByRef m As Message)
         If m.Msg = WM_APPCOMMAND AndAlso 窗口当前有焦点() Then
+            ' 系统媒体卡启用后，媒体键由 SMTC 的 ButtonPressed 统一接管。若这里继续处理，
+            ' 同一次物理按键可能同时走 WM_APPCOMMAND、ProcessCmdKey、SMTC 三条路径，
+            ' 播放/暂停会被切换两次，表现为“按一下没反应”。卡片关闭时保留旧路径。
+            If 系统媒体卡已注册 Then
+                m.Result = IntPtr.Zero
+                Return
+            End If
             Dim 命令 = CType((m.LParam.ToInt64() >> 16) And &HFFFL, 多媒体操作)
             If 处理多媒体命令(命令) Then
                 m.Result = New IntPtr(1)
@@ -227,6 +252,7 @@ Public Class Form1
             CType(设置.实例对象.解码方式, 解码模式))
         前后预取控制器 = New 前后预取控制器(播放列表数据, Function() 播放控制器.当前媒体路径)
         启动蓝牙延迟计时器()
+        启动播放进度计时器()
         显示器唤醒 = New 显示器唤醒请求()
         播放控制器.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
         播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
@@ -337,6 +363,7 @@ Public Class Form1
         AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开
         AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开_前后预取
         AddHandler 播放控制器.播放结束, AddressOf 播放控制器_播放结束
+        AddHandler 播放控制器.播放速度已变化, AddressOf 播放控制器_播放速度已变化
         AddHandler 播放控制器.媒体已打开, AddressOf 剪辑区间控制器.媒体已打开
         AddHandler 播放控制器.播放错误, AddressOf 播放控制器_播放错误
         AddHandler 播放控制器.操作提示, AddressOf 播放控制器_操作提示
@@ -522,15 +549,16 @@ Public Class Form1
         Return New 播放器界面呈现器(
             ETB_媒体进度条, ETB_音量条, MB_播放和暂停,
             按钮图标.取得(播放器按钮图标.播放), 按钮图标.取得(播放器按钮图标.暂停),
-            MB_软件解码或硬件解码, MB_HDR模式,
+            MB_软件解码或硬件解码, MB_HDR模式, MB_GainMap切换,
             MB_当前视频编码显示, MB_当前音频编码显示, MB_当前声道数显示, MB_双耳模式, HCL_时间戳显示, Panel4,
-            JEC_HDR选项前面的空白占位, JEC_当前视频编码显示前面的空白占位,
+            JEC_HDR选项前面的空白占位, JEC_GainMap切换前面的空白占位, JEC_当前视频编码显示前面的空白占位,
             JEC_当前音频编码显示前面的空白占位, JEC_当前声道数显示前面的空白占位,
             JEC_双耳模式前面的空白占位, 画面控件,
             AddressOf 播放控制器.安全读取快照,
             AddressOf 播放控制器.读取双耳状态,
             Function() 播放控制器.是否正在切换,
-            Function() 播放控制器.解码器)
+            Function() 播放控制器.解码器,
+            Function() 播放控制器.GainMap已启用)
     End Function
 
     Private Sub 配置播放器按钮图标()
@@ -676,7 +704,8 @@ Public Class Form1
     Private Sub 启动时探测扩展模块()
         Try
             Dim 原因 As String = Nothing
-            Debug.WriteLine("扩展模块：" & 外部模块接口.探测(原因).ToString() &
+            ' Release 下 Debug.WriteLine 被剥离：启动探测结论落 扩展模块.log（装载明细由接口层指纹节流落盘）。
+            外部模块接口.记录扩展模块诊断("扩展模块：" & 外部模块接口.探测(原因).ToString() &
                 If(String.IsNullOrEmpty(原因), "", "（" & 原因 & "）"))
         Catch ex As Exception
             Debug.WriteLine("扩展模块：启动时探测异常（已忽略）：" & ex.GetType().Name)
@@ -747,6 +776,31 @@ Public Class Form1
             蓝牙延迟计时器.Dispose()
             蓝牙延迟计时器 = Nothing
         End If
+    End Sub
+
+    Private Sub 启动播放进度计时器()
+        停止播放进度计时器()
+        播放进度计时器 = New System.Windows.Forms.Timer With {.Interval = 15000}
+        AddHandler 播放进度计时器.Tick, AddressOf 播放进度计时器_Tick
+        播放进度计时器.Start()
+    End Sub
+
+    Private Sub 停止播放进度计时器()
+        If 播放进度计时器 IsNot Nothing Then
+            播放进度计时器.Stop()
+            RemoveHandler 播放进度计时器.Tick, AddressOf 播放进度计时器_Tick
+            播放进度计时器.Dispose()
+            播放进度计时器 = Nothing
+        End If
+    End Sub
+
+    Private Sub 播放进度计时器_Tick(sender As Object, e As EventArgs)
+        If 正在关闭 Then Return
+        Try
+            播放控制器?.保存当前播放进度()
+        Catch ex As Exception
+            Debug.WriteLine("播放进度：定时保存失败（已忽略）：" & ex.GetType().Name)
+        End Try
     End Sub
 
     Private Sub 蓝牙延迟计时器_Tick(sender As Object, e As EventArgs)
@@ -826,6 +880,20 @@ Public Class Form1
         前后预取控制器?.释放()
         停止解锁轮询()
         停止蓝牙延迟计时器()
+        ' 播放进度：先抓当前会话最后一笔，再清理失效条目。两者失败都不影响退出，
+        ' 所以不弹窗、不阻断——进度文件只是可丢的运行数据。
+        停止播放进度计时器()
+        Try
+            If 设置.实例对象.播放进度记忆 Then
+                播放控制器?.保存当前播放进度(立即落盘:=True)
+                播放进度存储.退出时清理()
+            Else
+                ' 开关关闭：不再保留进度。退出即清空，避免关闭后仍留下含路径的 JSON。
+                播放进度存储.清空()
+            End If
+        Catch ex As Exception
+            Debug.WriteLine("播放进度：退出收尾失败（已忽略）：" & ex.GetType().Name)
+        End Try
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
@@ -1029,6 +1097,7 @@ Public Class Form1
             ' 是内核按当前 renderer 的 mix 格式回的）。
             界面呈现器.更新音频流信息(播放控制器.安全读取媒体信息())
             界面呈现器.刷新()
+            刷新系统媒体状态()
         End If
     End Sub
 
@@ -1051,6 +1120,9 @@ Public Class Form1
         Text = 光盘标题
         界面呈现器.媒体已打开(e.保留剪辑区间)
         界面呈现器.更新媒体信息(e.媒体信息, e.快照)
+        ' 原生每张开图都把 gainMapEnabled_ 复位为启用，宿主镜像同步复位——
+        ' 否则上一张图切到"原始"后，新图按钮会误显示成"原始"。
+        播放控制器.GainMap已启用 = True
         ' IAMF 空间音频声明（docs/52 验收 #6 的产品拍板：UI 声明即可）。
         ' 调试层的"声场："行要手动开信息层才可见；libiamf 接管与否决定用户听到
         ' 的是沉浸声渲染还是降级下混，值得在打开媒体时主动声明一次。
@@ -1071,6 +1143,10 @@ Public Class Form1
         图片浏览控制器?.媒体已打开(e.媒体信息, e.快照)
         界面呈现器.设置图片模式(图片浏览控制器 IsNot Nothing AndAlso 图片浏览控制器.图片模式已启用)
         界面呈现器.刷新()
+        If e.恢复进度 IsNot Nothing AndAlso e.恢复进度.Value > TimeSpan.FromSeconds(1) Then
+            信息图层呈现器?.显示操作信息(
+                "已从 " & 格式化播放进度(e.恢复进度.Value) & " 继续播放", &HFF69DF8BUI, "播放进度")
+        End If
         ' 内容尺寸模式：每次打开媒体重算一次；普通播放过程中不逐帧跟随，避免窗口抖动。
         Dim 内容尺寸 = 解析内容尺寸(e.快照, e.媒体信息)
         窗口布局控制器?.应用内容原始尺寸(内容尺寸, 播放控制器.当前视图旋转)
@@ -1079,6 +1155,10 @@ Public Class Form1
         If 内容尺寸.IsEmpty AndAlso Not 播放控制器.当前媒体是视频 Then
             窗口布局控制器?.应用初始画面尺寸(设置.实例对象.取得初始画面尺寸())
         End If
+        ' 媒体已打开事件会在“原位重开”和“会话打开完成”两条路径各触发一次；
+        ' 注册方法内部按 路径+标题+艺术家+专辑+专辑艺术家+轨道号+显示类型 签名去重，
+        ' 重复事件不会重复 Update 卡片。
+        注册系统媒体卡片(e.媒体信息, e.文件路径)
     End Sub
 
     ''' <summary>快照优先；快照尺寸缺失时回落到媒体信息里的当前视频流。纯音频/无视频返回空。</summary>
@@ -1093,6 +1173,18 @@ Public Class Form1
                 (当前索引 < 0 OrElse 流.索引 = 当前索引))
         If 视频流 Is Nothing OrElse 视频流.宽度 <= 0 OrElse 视频流.高度 <= 0 Then Return Size.Empty
         Return New Size(视频流.宽度, 视频流.高度)
+    End Function
+
+    ''' <summary>续播提示用：不足 1 小时显示 m:ss，超过显示 h:mm:ss。</summary>
+    Private Shared Function 格式化播放进度(位置 As TimeSpan) As String
+        Dim 总秒 = CLng(Math.Max(0.0R, 位置.TotalSeconds))
+        Dim 时 = 总秒 \ 3600L
+        Dim 分 = (总秒 Mod 3600L) \ 60L
+        Dim 秒 = 总秒 Mod 60L
+        If 时 > 0 Then
+            Return 时.ToString() & ":" & 分.ToString("00") & ":" & 秒.ToString("00")
+        End If
+        Return 分.ToString() & ":" & 秒.ToString("00")
     End Function
 
     Private Sub 播放控制器_媒体已打开_前后预取(sender As Object, e As 播放器媒体事件参数)
@@ -1204,6 +1296,16 @@ Public Class Form1
     Private Sub 播放控制器_播放结束(sender As Object, e As EventArgs)
         If 光盘路径.是光盘路径(播放控制器.当前媒体路径) Then Return
         If 正在关闭 Then Return
+        ' SMTC 的“播放结束”不能一律 Stopped：有下一项时应发 Changing，
+        ' 让系统面板知道旧曲目结束、下一首正在准备，而不是用户主动停止。
+        ' 这里必须用只读 helper，不能靠 移动到播放结束后的项目() 判断——那会推进索引。
+        Dim 有下一项 = 播放列表数据.播放结束后是否有下一项()
+        发布系统媒体状态(If(有下一项, 系统媒体播放状态.变化中, 系统媒体播放状态.已停止))
+        停止系统媒体心跳()
+        ' 无下一项时状态虽然已是 Stopped，但按钮可用性还停留在上一帧 Playing；
+        ' 这里重算一次，避免系统面板仍显示可暂停/可停止。有下一项时不刷新——
+        ' 那个 Changing 是过渡态，随后打开下一项会重新发布卡片和按钮。
+        If Not 有下一项 Then 刷新系统媒体状态()
         Dim 下一项 = 播放列表数据.移动到播放结束后的项目()
         If 下一项 IsNot Nothing Then
             播放列表数据.取消自动扫描()
@@ -1213,6 +1315,7 @@ Public Class Form1
 
     Private Sub 播放控制器_播放错误(sender As Object, e As 播放器错误事件参数)
         If Not 正在关闭 Then
+            关闭系统媒体卡片()
             LakeUI.ExOverlayMsgBox(Me, e.消息, MsgBoxStyle.Critical Or MsgBoxStyle.OkOnly, e.标题)
         End If
     End Sub
@@ -1539,6 +1642,7 @@ Public Class Form1
         播放列表窗口?.更新正在播放项()
         Text = "FFF.Player"
         界面呈现器.清除媒体()
+        关闭系统媒体卡片()
     End Sub
 
     Private Sub MB_倒退或上一个_MouseClick(sender As Object, e As MouseEventArgs) Handles MB_倒退或上一个.MouseClick
@@ -1592,6 +1696,19 @@ Public Class Form1
         播放控制器.切换HDR模式()
     End Sub
 
+    Private Sub MB_GainMap切换_Click(sender As Object, e As EventArgs) Handles MB_GainMap切换.Click
+        ' 控制器只在原生 setter 成功后才翻转镜像；失败时镜像保持旧值。
+        If 播放控制器.切换GainMap() Then
+            信息图层呈现器?.显示操作信息(
+                If(播放控制器.GainMap已启用, "已切到 GainMap 施加画面", "已切到原始底图"),
+                &HFF69DF8BUI, "GainMap")
+        Else
+            ' 非静图 / 无可用底图 / 内核无此导出：不改开关态，下一轮刷新自动收敛回原生实际状态。
+            信息图层呈现器?.显示操作信息("当前无法在 GainMap 与原始底图之间切换", &HFFF0D35DUI, "GainMap")
+        End If
+        界面呈现器?.刷新()
+    End Sub
+
     Private Sub Form1_DpiChanged(sender As Object, e As DpiChangedEventArgs) Handles Me.DpiChanged
         界面呈现器?.更新Dpi()
         ' DPI 改变后 chrome 尺寸变化；内容区仍要按物理像素重算。
@@ -1628,6 +1745,8 @@ Public Class Form1
                 播放控制器.切换播放暂停()
             Case Keys.MediaPlayPause, Keys.MediaStop,
                  Keys.MediaNextTrack, Keys.MediaPreviousTrack
+                ' 同 WndProc：卡片启用后由 SMTC 统一接管，避免同一次按键重复执行。
+                If 系统媒体卡已注册 Then Return True
                 Return 处理多媒体按键(keyData)
             Case Keys.M
                 播放控制器.切换静音()
@@ -1702,6 +1821,309 @@ Public Class Form1
         End Select
         Return True
     End Function
+
+    ' ===== 系统媒体面板（SMTC）接线 =====
+    ' 设计约束（docs/165/166）：
+    '   · 只在首次真正打开音视频时惰性初始化，图片/RAW/动图/光盘/失败一律不建卡片；
+    '   · 所有 WinRT 写操作经 系统媒体会话 的 SynchronizationContext 回 UI；
+    '   · 系统按钮复用 处理多媒体命令，不另造第二套分发器；
+    '   · 时间轴走独立 1 Hz 计时器，复用不了 15 秒进度计时器和 60 Hz 渲染泵。
+
+    Private Function 系统媒体集成已开启() As Boolean
+        Try
+            If Not 设置.实例对象.启用系统媒体集成 Then Return False
+        Catch
+            Return False
+        End Try
+        Return Not String.Equals(Environment.GetEnvironmentVariable("FFF_SMTC"), "0",
+                                 StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Sub 注册系统媒体卡片(信息 As 媒体信息, 路径 As String)
+        If 正在关闭 OrElse 播放控制器 Is Nothing Then Return
+
+        ' 图片（含 RAW/动图）、光盘、无路径、打开失败都不注册；如果之前有卡片，
+        ' 主动清掉，避免“上一首的卡片继续显示、按钮却控制不到任何东西”。
+        ' 扩展名判断是内核 staticImage 之外的兜底：即使某版内核漏填该字段，
+        ' PNG/JPG/RAW 也不该在系统面板留下一个只能“播放”的假媒体卡。
+        If 信息 Is Nothing OrElse 信息.是静态图片 OrElse 播放列表.是图片文件(路径) OrElse
+            String.IsNullOrWhiteSpace(路径) OrElse 光盘路径.是光盘路径(路径) Then
+            关闭系统媒体卡片()
+            Return
+        End If
+        If Not 系统媒体集成已开启() OrElse Not IsHandleCreated Then
+            关闭系统媒体卡片()
+            Return
+        End If
+
+        Dim 签名 = 构建系统媒体签名(信息, 路径)
+        If 系统媒体卡已注册 AndAlso String.Equals(签名, 系统媒体上次签名, StringComparison.Ordinal) Then Return
+
+        If 系统媒体 Is Nothing Then
+            系统媒体 = New 系统媒体会话(SynchronizationContext.Current,
+                AddressOf 处理系统媒体按钮,
+                AddressOf 处理系统媒体跳转,
+                AddressOf 处理系统媒体倍速)
+        End If
+        If Not 系统媒体.已启用面板 AndAlso Not 系统媒体.初始化(Handle) Then Return
+
+        系统媒体.发布卡片(
+            系统媒体映射.取媒体标识(路径),
+            系统媒体映射.取标题(信息, 路径),
+            系统媒体映射.取艺术家(信息),
+            系统媒体映射.取专辑(信息),
+            系统媒体映射.取专辑艺术家(信息),
+            系统媒体映射.取轨道号(信息),
+            系统媒体映射.映射显示类型(播放控制器.当前媒体是视频),
+            播放控制器.播放速度)
+        系统媒体上次签名 = 签名
+        系统媒体卡已注册 = True
+        启动系统媒体心跳()
+        刷新系统媒体状态()
+    End Sub
+
+    Private Function 构建系统媒体签名(信息 As 媒体信息, 路径 As String) As String
+        Return 系统媒体映射.取媒体标识(路径) & "|" &
+               系统媒体映射.取标题(信息, 路径) & "|" &
+               系统媒体映射.取艺术家(信息) & "|" &
+               系统媒体映射.取专辑(信息) & "|" &
+               系统媒体映射.取专辑艺术家(信息) & "|" &
+               系统媒体映射.取轨道号(信息).ToString() & "|" &
+               If(播放控制器.当前媒体是视频, "video", "audio")
+    End Function
+
+    ''' <summary>设置页切换“显示系统媒体控制”后立即生效，不等下一次打开媒体。</summary>
+    Friend Sub 应用系统媒体设置()
+        If 正在关闭 Then Return
+        If Not 设置.实例对象.启用系统媒体集成 Then
+            关闭系统媒体卡片()
+            Return
+        End If
+        If 播放控制器 Is Nothing OrElse Not 播放控制器.是否有媒体 Then Return
+        注册系统媒体卡片(播放控制器.安全读取媒体信息(), 播放控制器.当前媒体路径)
+    End Sub
+
+    Private Sub 关闭系统媒体卡片()
+        停止系统媒体心跳()
+        系统媒体卡已注册 = False
+        系统媒体上次签名 = String.Empty
+        If 系统媒体 IsNot Nothing Then 系统媒体.清空卡片()
+    End Sub
+
+    Private Sub 关闭系统媒体()
+        停止系统媒体心跳()
+        If 系统媒体心跳 IsNot Nothing Then
+            RemoveHandler 系统媒体心跳.Tick, AddressOf 系统媒体心跳_Tick
+            系统媒体心跳.Dispose()
+            系统媒体心跳 = Nothing
+        End If
+        系统媒体卡已注册 = False
+        系统媒体上次签名 = String.Empty
+        If 系统媒体 IsNot Nothing Then
+            Try
+                系统媒体.Dispose()
+            Catch ex As Exception
+                Debug.WriteLine("SMTC：关闭会话失败（已忽略）：" & ex.GetType().Name)
+            End Try
+            系统媒体 = Nothing
+        End If
+    End Sub
+
+    Private Sub 启动系统媒体心跳()
+        If 正在关闭 OrElse Not 系统媒体卡已注册 Then Return
+        If 系统媒体心跳 Is Nothing Then
+            系统媒体心跳 = New System.Windows.Forms.Timer With {.Interval = 1000}
+            AddHandler 系统媒体心跳.Tick, AddressOf 系统媒体心跳_Tick
+        End If
+        If Not 系统媒体心跳.Enabled Then 系统媒体心跳.Start()
+    End Sub
+
+    Private Sub 停止系统媒体心跳()
+        If 系统媒体心跳 IsNot Nothing Then 系统媒体心跳.Stop()
+    End Sub
+
+    Private Sub 系统媒体心跳_Tick(sender As Object, e As EventArgs)
+        If 正在关闭 OrElse Not 系统媒体卡已注册 OrElse 系统媒体 Is Nothing Then
+            停止系统媒体心跳()
+            Return
+        End If
+        Dim 快照 = 播放控制器?.安全读取快照()
+        If 快照 Is Nothing OrElse 快照.状态 <> 播放状态.正在播放 OrElse
+            播放控制器.是否正在切换 Then
+            停止系统媒体心跳()
+            Return
+        End If
+        Try
+            系统媒体.发布时间轴和倍速(构建系统媒体时间轴(快照), 播放控制器.播放速度)
+        Catch ex As Exception
+            Debug.WriteLine("SMTC：时间轴心跳失败（已忽略）：" & ex.GetType().Name)
+        End Try
+    End Sub
+
+    Private Sub 刷新系统媒体状态()
+        If 正在关闭 OrElse 系统媒体 Is Nothing OrElse Not 系统媒体卡已注册 Then Return
+        Dim 快照 = 播放控制器?.安全读取快照()
+        If 快照 Is Nothing Then
+            ' 没有快照通常意味着会话已释放；清卡片并把注册标志复位，恢复旧的媒体键路径。
+            关闭系统媒体卡片()
+            Return
+        End If
+
+        Dim 有媒体 = 播放控制器.是否有媒体
+        If Not 有媒体 Then
+            关闭系统媒体卡片()
+            Return
+        End If
+        Dim 状态 = 系统媒体映射.映射播放状态(
+            快照.状态, 有媒体, 播放列表数据.播放结束后是否有下一项())
+        系统媒体.发布状态(状态)
+        系统媒体.设置按钮可用性(
+            可播放:=有媒体 AndAlso 快照.状态 <> 播放状态.正在播放 AndAlso
+                快照.状态 <> 播放状态.正在打开,
+            可暂停:=快照.状态 = 播放状态.正在播放,
+            可停止:=有媒体,
+            可跳转:=有媒体,
+            可下一曲:=播放列表数据.是否存在相邻项目(1),
+            可上一曲:=播放列表数据.是否存在相邻项目(-1))
+
+        Dim 时间轴 = 构建系统媒体时间轴(快照)
+        If 状态 = 系统媒体播放状态.正在播放 AndAlso Not 播放控制器.是否正在切换 Then
+            启动系统媒体心跳()
+            系统媒体.发布时间轴和倍速(时间轴, 播放控制器.播放速度)
+        Else
+            停止系统媒体心跳()
+            系统媒体.发布时间轴(时间轴)
+        End If
+    End Sub
+
+    Private Sub 发布系统媒体状态(状态 As 系统媒体播放状态)
+        If 系统媒体 IsNot Nothing AndAlso 系统媒体卡已注册 Then 系统媒体.发布状态(状态)
+    End Sub
+
+    Private Function 构建系统媒体时间轴(快照 As 播放器快照) As 系统媒体时间轴
+        Dim 终点 = If(快照.已知总时长 AndAlso 快照.总时长 > TimeSpan.Zero,
+                      快照.总时长, TimeSpan.Zero)
+        Dim 位置 = 快照.播放位置
+        If 位置 < TimeSpan.Zero Then 位置 = TimeSpan.Zero
+        If 终点 > TimeSpan.Zero AndAlso 位置 > 终点 Then 位置 = 终点
+        Return New 系统媒体时间轴 With {
+            .StartTime = TimeSpan.Zero,
+            .EndTime = 终点,
+            .Position = 位置,
+            .MinSeekTime = TimeSpan.Zero,
+            .MaxSeekTime = 终点
+        }
+    End Function
+
+    ''' <summary>系统按钮 → 现有 处理多媒体命令；WinRT 事件不在 UI 线程时先封送。</summary>
+    Private Function 处理系统媒体按钮(按钮 As 系统媒体按钮) As Boolean
+        If 正在关闭 Then Return False
+        If InvokeRequired Then
+            Try
+                BeginInvoke(New Action(Of 系统媒体按钮)(AddressOf 处理系统媒体按钮异步), 按钮)
+                Return True
+            Catch
+                Return False
+            End Try
+        End If
+
+        Dim 命令 As 多媒体操作
+        Select Case 按钮
+            Case 系统媒体按钮.播放
+                命令 = 多媒体操作.播放
+            Case 系统媒体按钮.暂停
+                命令 = 多媒体操作.暂停
+            Case 系统媒体按钮.停止
+                命令 = 多媒体操作.停止
+            Case 系统媒体按钮.快进
+                命令 = 多媒体操作.快进
+            Case 系统媒体按钮.快退
+                命令 = 多媒体操作.快退
+            Case 系统媒体按钮.下一曲
+                命令 = 多媒体操作.下一项
+            Case 系统媒体按钮.上一曲
+                命令 = 多媒体操作.上一项
+            Case Else
+                Return False
+        End Select
+
+        Try
+            Dim 已处理 = 处理多媒体命令(命令)
+            If 已处理 Then 刷新系统媒体状态()
+            Return 已处理
+        Catch ex As Exception
+            Debug.WriteLine("SMTC：按钮处理失败（已忽略）：" & ex.GetType().Name)
+            Return False
+        End Try
+    End Function
+
+    Private Sub 处理系统媒体按钮异步(按钮 As 系统媒体按钮)
+        处理系统媒体按钮(按钮)
+    End Sub
+
+    Private Function 处理系统媒体跳转(位置 As TimeSpan) As Boolean
+        If 正在关闭 Then Return False
+        If InvokeRequired Then
+            Try
+                BeginInvoke(New Action(Of TimeSpan)(AddressOf 处理系统媒体跳转异步), 位置)
+                Return True
+            Catch
+                Return False
+            End Try
+        End If
+        If 播放控制器 Is Nothing OrElse Not 播放控制器.是否有媒体 OrElse
+            播放控制器.是否正在切换 OrElse 位置 < TimeSpan.Zero Then Return False
+        Try
+            播放控制器.跳转到位置(位置)
+            刷新系统媒体状态()
+            Return True
+        Catch ex As Exception
+            Debug.WriteLine("SMTC：seek 处理失败（已忽略）：" & ex.GetType().Name)
+            Return False
+        End Try
+    End Function
+
+    Private Sub 处理系统媒体跳转异步(位置 As TimeSpan)
+        处理系统媒体跳转(位置)
+    End Sub
+
+    Private Function 处理系统媒体倍速(倍速 As Double) As Boolean
+        If 正在关闭 Then Return False
+        If InvokeRequired Then
+            Try
+                BeginInvoke(New Action(Of Double)(AddressOf 处理系统媒体倍速异步), 倍速)
+                Return True
+            Catch
+                Return False
+            End Try
+        End If
+        If 播放控制器 Is Nothing OrElse Not 播放控制器.是否有媒体 OrElse
+            播放控制器.是否正在切换 Then Return False
+        If Not Double.IsFinite(倍速) OrElse 倍速 < 0.1R OrElse 倍速 > 5.0R Then Return False
+        Try
+            播放控制器.设置播放速度(倍速)
+            If 系统媒体 IsNot Nothing AndAlso 系统媒体卡已注册 Then
+                系统媒体.发布倍速(播放控制器.播放速度)
+            End If
+            Return True
+        Catch ex As Exception
+            Debug.WriteLine("SMTC：倍速处理失败（已忽略）：" & ex.GetType().Name)
+            Return False
+        End Try
+    End Function
+
+    Private Sub 处理系统媒体倍速异步(倍速 As Double)
+        处理系统媒体倍速(倍速)
+    End Sub
+
+    Private Sub 播放控制器_播放速度已变化(sender As Object, e As EventArgs)
+        If 正在关闭 OrElse 系统媒体 Is Nothing OrElse Not 系统媒体卡已注册 Then Return
+        Try
+            系统媒体.发布倍速(播放控制器.播放速度)
+        Catch ex As Exception
+            Debug.WriteLine("SMTC：倍速同步失败（已忽略）：" & ex.GetType().Name)
+        End Try
+    End Sub
 
     Private Sub 画面控件_Ctrl滚轮(sender As Object, e As HandledMouseEventArgs)
         If Not 窗口当前有焦点() Then Return

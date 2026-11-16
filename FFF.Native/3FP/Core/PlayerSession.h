@@ -5,7 +5,9 @@
 #include "3FP/Api/FFF.Player.AudioPassthrough.h"
 #include "3FP/Audio/WasapiRenderer.h"
 #include "3FP/Audio/AudioPassthrough.h"
+#include "3FP/Core/AvifItemProbe.h"
 #include "3FP/Core/AvifTileGridComposer.h"
+#include "3FP/Core/GainMapProbe.h"
 #include "3FP/Core/PlacementPolicy.h"
 #include "3FP/Core/PlaybackPerformancePolicy.h"
 #include "3FP/Core/RawStillSource.h"
@@ -192,6 +194,13 @@ public:
     FFF3FPVideoAutoHdr RequestedVideoAutoHdr() const noexcept;
     FFFResult GetVideoAutoHdrStatus(
         FFF3FPVideoAutoHdrStatus& status) const noexcept;
+    // Still-image GainMap apply toggle (FFF3FP_SetGainMapEnabled). enabled=true
+    // presents the applied HDR buffer the open-time probe produced; enabled=false
+    // presents the linear SDR base buffer. The probe buffers stay in memory and
+    // are never rebuilt: this repacks one of them and re-presents the retained
+    // still frame once. Video / non-applicable images are rejected and the flag
+    // stays untouched (a failure never half-applies).
+    FFFResult SetGainMapEnabled(bool enabled) noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
     // CPU placement diagnostics (appended export FFF3FP_GetCpuPlacementSnapshot, P3-12).
     // Advisory read-only snapshot: it deliberately takes no session lock and changes no
@@ -320,7 +329,8 @@ private:
     bool RecoverAudioDevice() noexcept;
     bool RecoverVideoDevice() noexcept;
     FFFResult OpenFormat(const std::string& pathUtf8, AVFormatContext** format,
-        std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept;
+        std::unique_ptr<SharedFileInput>& io, std::string& error,
+        std::int32_t* mergedExtents = nullptr, AvifItemInfo* avifInfo = nullptr) noexcept;
     // A second demuxer for the trial decode, opened under the same IO policy as
     // OpenFormat (protocol allow/deny lists, the same file-or-repaired-memory
     // input, the same demuxer gate) and additionally wired to the session's
@@ -328,7 +338,8 @@ private:
     // avformat_find_stream_info: the trial needs only the stream table, which the
     // header already carries.
     FFFResult OpenProbeFormat(const std::string& pathUtf8, AVFormatContext** format,
-        std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept;
+        std::unique_ptr<SharedFileInput>& io, std::string& error,
+        std::int32_t* mergedExtents = nullptr, AvifItemInfo* avifInfo = nullptr) noexcept;
     static int ProbeInterrupt(void* opaque) noexcept;
     void CloseFormat(AVFormatContext** format,
         std::unique_ptr<SharedFileInput>& io) noexcept;
@@ -394,11 +405,14 @@ private:
     // Presents the first frame while the session stays stopped. Used for a still
     // picture and for an animated one, both of which must show a frame without
     // playback running; rewinds afterwards so play starts from the beginning.
-    FFFResult DecodeInitialFrame() noexcept;
+    // detailOut (optional) receives a human-readable failure reason on a
+    // non-success return; it is internal-only and does not touch the ABI.
+    FFFResult DecodeInitialFrame(std::string* detailOut = nullptr) noexcept;
     // A tiled still image (grid AVIF/HEIC) has no pre-assembled picture anywhere in
     // the file: it is one stream per tile plus a grid group saying where the tiles
-    // go. This decodes them and presents the canvas they make, and it can run again
-    // after a device change because the tile packets were read at open.
+    // go. This decodes the tiles one by one and presents the canvas after each
+    // placement, so the picture fills in progressively; it can run again after a
+    // device change because the tile packets were read at open.
     FFFResult ComposeTileGridFrame() noexcept;
     // Reads each tile's packets once, in draw order's stream set, so the canvas can
     // be rebuilt without a demuxer rewind (a still image has no timeline to seek to).
@@ -441,6 +455,17 @@ private:
     std::int64_t VideoFramePosition(const AVFrame* frame) const noexcept;
     void PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
         bool seekPreview = false) noexcept;
+    // Builds a presentation-ready RGBAF32LE frame (BT.709 / LINEAR / RGB / JPEG
+    // range, the gainmap contract's exact attributes) out of one of the open-time
+    // probe buffers. Caller owns the returned frame; nullptr when the buffer is
+    // unusable. Used both by the frame path and by SetGainMapEnabled's redraw, so
+    // the two paths never drift apart in pixel layout.
+    AVFrame* BuildGainMapPresentationFrame(const std::vector<float>* buffer,
+        int width, int height, std::int64_t pts, std::int64_t bestEffortPts) noexcept;
+    // Worker-thread half of SetGainMapEnabled: validates the session really is a
+    // gainmap still that can switch, then flips gainMapEnabled_ and re-presents
+    // the retained frame once. Never re-probes, re-decodes or touches the queue.
+    FFFResult ApplyGainMapEnabledOnWorker(bool enabled) noexcept;
     // True at most once per seek: the first picture decoded on the way to the
     // target may go on screen so the key press has a visible answer, but it must
     // not retire the seek (see PresentVideoFrame's seekPreview parameter).
@@ -1033,6 +1058,44 @@ private:
     std::uint8_t tileGridBackground_[4];
     std::vector<AvifTileGridComposer::Tile> tileGridTiles_;
     std::vector<AvifTileGridComposer::TileSource> tileGridSources_;
+    // Private gainmap detection result for the current still image. Reset on
+    // open; verdict drives whether the host knows this is an HDR gainmap still.
+    GainMapProbeResult gainmapInfo_;
+    // User-facing toggle for the GainMap application. Defaults to true on every
+    // open (each picture starts on its applied HDR buffer) and flips only through
+    // SetGainMapEnabled. Worker-thread state: read in the frame path, written by
+    // the queued setter command.
+    bool gainMapEnabled_ = true;
+    // One-shot guard for the toggle-off fallback note (baseRgba unavailable):
+    // RawTrace at most once per open so a still frame never floods the log.
+    bool gainMapBaseFallbackNoted_ = false;
+    // A layered ("progressive") AV1 still image: the primary item was stored as
+    // several contiguous extents, which is the shape AvifIlocShim repairs. Set at
+    // open only for a static, non-grid AV1 file; the decode side uses it to ask
+    // libdav1d for every spatial layer and to present the coarse base layer before
+    // the finished one.
+    bool layeredStillImage_;
+    // Standard layered-image signals from the primary item's property associations.
+    // The extent count alone is only a libavif storage convention; a1lx and lsel are
+    // what a conformant file declares. layerCount 0 means "not declared".
+    std::int32_t layeredLayerCount_ = 0;
+    bool layeredLsel_ = false;
+    // -1 = no selector, 0xFFFF = all layers, 0..3 = one selected layer.
+    std::int32_t layeredLayerId_ = -1;
+    std::int32_t layeredOpIndex_ = -1;
+    // Runtime ordinal of the AV1 frame being presented while a still image is
+    // draining. Used only when lsel selects one layer.
+    std::int32_t layeredPresentOrdinal_ = 0;
+    bool layeredPresentDone_ = false;
+    // Emits FirstFramePresented once per Open(), after the first successful
+    // renderer submission. Reset on the API thread before DoOpen is enqueued, so
+    // a reopen cannot inherit the previous media's event state.
+    std::atomic<bool> firstFramePresentedEmitted_{false};
+    // The size the still image is meant to occupy on screen. A 400x300 base layer
+    // of an 800x600 image keeps its 800x600 presentation box while the coarse
+    // texture is shown; 0 means "same as the frame".
+    std::int32_t stillDisplayWidth_ = 0;
+    std::int32_t stillDisplayHeight_ = 0;
     // A picture that moves: either a loop-aware image demuxer (GIF/APNG/WebP) or
     // an image sequence carried by the mov demuxer (AVIF/HEIC). Such a file is
     // not a still image, but it is still a picture: it must show its first frame

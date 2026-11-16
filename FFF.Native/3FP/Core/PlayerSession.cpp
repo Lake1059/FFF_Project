@@ -1,5 +1,7 @@
 #include "pch.h"
 #include "3FP/Core/AvifIlocShim.h"
+#include "3FP/Core/GainMapProbe.h"
+#include "3FP/Core/AvifItemProbe.h"
 #include "3FP/Core/DecodeDeviceSelection.h"
 #include "3FP/Core/Fmp4FragmentScanner.h"
 #include "3FP/Core/MediaText.h"
@@ -669,6 +671,9 @@ constexpr std::int32_t MaxStillImageDimension = 16384;
 // read whole on the way to the demuxer: everything else keeps its file-backed
 // input. 256 MiB is far above any still image that reaches here.
 constexpr std::int64_t MaxRepairedStillImageBytes = 256 * 1024 * 1024;
+// The meta box of an AVIF/HEIC still is normally in the first few KiB. This cap
+// keeps the read-only property probe cheap even for a huge grid image.
+constexpr std::int64_t MaxAvifProbeBytes = 16 * 1024 * 1024;
 
 // Cheap gate in front of AvifIlocShim, so no other media pays for the read.
 bool IsStillImageContainerName(const std::string& path) noexcept {
@@ -1011,6 +1016,7 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
       externalAudioDrained_(false), audioClockFinished_(false),
       staticImage_(false), animatedImage_(false), sessionWrapLoop_(false), sessionWrapFailures_(0),
       tileGrid_(false), tileGridWidth_(0), tileGridHeight_(0), tileGridBackground_{},
+      layeredStillImage_(false),
       hardwareFallbackPending_(false), internalAudioFailurePending_(false),
       internalAudioFailureResult_(FFFResult::Success), internalAudioDecodeErrorCount_(0) {
     snapshot_ = {};
@@ -1430,6 +1436,7 @@ FFFResult PlayerSession::Open(const char* path) noexcept {
     if (state_.exchange(FFF3FPState::Opening) == FFF3FPState::Opening) return FFFResult::InvalidState;
     { std::lock_guard lock(snapshotMutex_); publishedSnapshot_.state = FFF3FPState::Opening; }
     discCancel_.store(false);
+    firstFramePresentedEmitted_.store(false, std::memory_order_release);
     Emit(FFF3FPEvent::StateChanged, "{\"state\":1}");
     Enqueue([this, value = std::move(normalized)] { DoOpen(value); }); return FFFResult::Success;
 }
@@ -3322,6 +3329,127 @@ FFFResult PlayerSession::Redraw() noexcept {
     return result;
 }
 
+AVFrame* PlayerSession::BuildGainMapPresentationFrame(const std::vector<float>* buffer,
+    const int width, const int height, const std::int64_t pts,
+    const std::int64_t bestEffortPts) noexcept {
+    if (buffer == nullptr || buffer->empty() || width <= 0 || height <= 0) return nullptr;
+    AVFrame* frame = av_frame_alloc();
+    if (frame == nullptr) return nullptr;
+    // Exact attribute set of the historical applied-buffer path, so the renderer
+    // treats both buffers identically.
+    frame->format = AV_PIX_FMT_RGBAF32LE;
+    frame->width = width;
+    frame->height = height;
+    frame->color_primaries = AVCOL_PRI_BT709;
+    frame->color_trc = AVCOL_TRC_LINEAR;
+    frame->colorspace = AVCOL_SPC_RGB;
+    frame->color_range = AVCOL_RANGE_JPEG;
+    frame->pts = pts;
+    frame->best_effort_timestamp = bestEffortPts;
+    if (av_frame_get_buffer(frame, 0) < 0) {
+        av_frame_free(&frame);
+        return nullptr;
+    }
+    const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4 * sizeof(float);
+    std::memcpy(frame->data[0], buffer->data(), bytes);
+    return frame;
+}
+
+FFFResult PlayerSession::ApplyGainMapEnabledOnWorker(const bool enabled) noexcept {
+    // Gate, in order: this only means something for a still image whose probe
+    // really applied the gainmap. Video, animated images and every
+    // not-applied verdict (decoded_not_applied / fail_closed_* / not_gainmap,
+    // e.g. a plain JPEG) are rejected, and the flag stays exactly what it was.
+    if (!staticImage_) return FFFResult::NotSupported;
+    if (!gainmapInfo_.present || !gainmapInfo_.applyOk ||
+        gainmapInfo_.appliedRgba.empty() || gainmapInfo_.outW <= 0 || gainmapInfo_.outH <= 0)
+        return FFFResult::InvalidState;
+    // Toggle-off only makes sense when the base picture was actually retained;
+    // otherwise there is nothing to switch to.
+    if (!enabled && gainmapInfo_.baseRgba.empty()) return FFFResult::InvalidState;
+
+    const std::vector<float>* buffer = enabled ? &gainmapInfo_.appliedRgba : &gainmapInfo_.baseRgba;
+    const std::int64_t pts = stillImageFrame_ != nullptr ? stillImageFrame_->pts : AV_NOPTS_VALUE;
+    const std::int64_t bestEffortPts =
+        stillImageFrame_ != nullptr ? stillImageFrame_->best_effort_timestamp : AV_NOPTS_VALUE;
+    AVFrame* frame = BuildGainMapPresentationFrame(buffer, gainmapInfo_.outW,
+        gainmapInfo_.outH, pts, bestEffortPts);
+    if (frame == nullptr) return FFFResult::NativeFailure;
+
+    // Present first, flip the bookkeeping only after the screen actually changed:
+    // the frame index stays the same (this is the SetOutputWindow rebind redraw
+    // entry, not a new decoded frame), the queue is untouched, playback state is
+    // untouched, and exactly one extra present happens.
+    const auto renderResult = videoRenderer_.Render(frame, snapshot_.frameIndex,
+        /*limitToNativeSize=*/true, /*coverArt=*/false, /*prepareOnly=*/false,
+        /*imageMode=*/true);
+    if (renderResult != FFFResult::Success) {
+        av_frame_free(&frame);
+        return renderResult;
+    }
+    // The renderer's cache now holds the new buffer; make the recovery truth
+    // (stillImageFrame_) match it, so a later Redraw / device rebind repaints
+    // the same picture rather than the old one.
+    if (stillImageFrame_ != nullptr) {
+        av_frame_unref(stillImageFrame_);
+        if (av_frame_ref(stillImageFrame_, frame) < 0) {
+            av_frame_unref(stillImageFrame_);
+        }
+    }
+    av_frame_free(&frame);
+    gainMapEnabled_ = enabled;
+    gainMapBaseFallbackNoted_ = false;
+    // The button state must be readable back from the native side: refresh the
+    // media-info JSON now so FFF3FP_GetMediaInfo hands the host the fresh
+    // gainmap.enabled without a new export or a version bump.
+    RebuildMediaInfo();
+    RawTrace(enabled ? "GainMap toggle: applied buffer re-presented"
+                     : "GainMap toggle: base buffer re-presented");
+    return FFFResult::Success;
+}
+
+FFFResult PlayerSession::SetGainMapEnabled(const bool enabled) noexcept {
+    // staticImage_ / gainmapInfo_ / stillImageFrame_ are worker-owned, so the
+    // validation and the redraw both run on the worker through the same blocking
+    // complete-command pattern as DiscardAudioOutput: the caller gets the verdict
+    // synchronously, and on failure gainMapEnabled_ has not moved one bit.
+    struct Completion final {
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool finished = false;
+        FFFResult result = FFFResult::NativeFailure;
+    };
+    auto completion = std::make_shared<Completion>();
+    try {
+        {
+            std::lock_guard lock(mutex_);
+            if (terminate_) return FFFResult::InvalidState;
+            commands_.push_back([this, completion, enabled] {
+                auto result = FFFResult::Success;
+                try {
+                    result = ApplyGainMapEnabledOnWorker(enabled);
+                } catch (...) {
+                    result = FFFResult::NativeFailure;
+                }
+                {
+                    std::lock_guard done(completion->mutex);
+                    completion->result = result;
+                    completion->finished = true;
+                }
+                completion->condition.notify_one();
+            });
+        }
+        commandCondition_.notify_one();
+        std::unique_lock<std::mutex> done(completion->mutex);
+        if (!completion->condition.wait_for(done, std::chrono::seconds(5),
+                [&completion] { return completion->finished; }))
+            return FFFResult::NativeFailure;
+        return completion->result;
+    } catch (...) {
+        return FFFResult::NativeFailure;
+    }
+}
+
 FFFResult PlayerSession::SetInjectedHdrMetadata(
     const FFF3FPHdrDynamicMetadataEntry* entries, const std::uint32_t count) noexcept {
     const auto result = videoRenderer_.SetInjectedHdrMetadata(entries, count);
@@ -3550,7 +3678,10 @@ void PlayerSession::Worker() noexcept {
 }
 
 FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** output,
-    std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept {
+    std::unique_ptr<SharedFileInput>& io, std::string& error,
+    std::int32_t* mergedExtents, AvifItemInfo* avifInfo) noexcept {
+    if (mergedExtents != nullptr) *mergedExtents = 0;
+    if (avifInfo != nullptr) *avifInfo = AvifItemInfo{};
     // RAW is a deliberate front branch, not a fallback: FFmpeg's bundled build
     // recognizes CR2/NEF/ARW/DNG as TIFF containers and reports a successful
     // open that decodes nothing (or only the embedded preview), so letting it
@@ -3590,9 +3721,38 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
     // The gate is a container name check so nothing else pays for the read.
     std::vector<std::uint8_t> repairedBytes;
     std::string repairDetail;
-    const bool repaired = IsStillImageContainerName(path) &&
+    std::int32_t repairedExtents = 0;
+    const bool stillContainer = IsStillImageContainerName(path);
+    // The extent count is a storage layout; the primary item's a1lx/lsel/layer
+    // properties are the standard signal. Probe before the repair so a single-
+    // extent layered file (which ReadAndRepair returns false for) is still seen.
+    if (stillContainer && avifInfo != nullptr) {
+        AvifItemProbe::Read(path.c_str(), MaxAvifProbeBytes, *avifInfo, repairDetail);
+    }
+    // A single file-offset extent is already legal for the mov demuxer: there is
+    // nothing for the shim to merge. Only skip the whole-file read when the probe
+    // positively identified that safe shape; any unknown iloc still takes the
+    // repair path so a malformed/unsupported item cannot be misclassified.
+    const bool singleExtent = avifInfo != nullptr && avifInfo->valid && avifInfo->hasIloc &&
+        avifInfo->extentCount == 1 && avifInfo->constructionMethod == 0 &&
+        avifInfo->dataReferenceIndex == 0;
+    if (stillContainer && avifInfo != nullptr &&
+        GetEnvironmentVariableW(L"FFF_AVIF_TRACE", nullptr, 0)) {
+        std::fprintf(stderr,
+            "[avif] valid=%d hasIloc=%d extents=%d cm=%d dref=%d singleExtent=%d\n",
+            avifInfo->valid ? 1 : 0, avifInfo->hasIloc ? 1 : 0,
+            avifInfo->extentCount, avifInfo->constructionMethod,
+            avifInfo->dataReferenceIndex, singleExtent ? 1 : 0);
+    }
+    const bool repaired = stillContainer && !singleExtent &&
         AvifIlocShim::ReadAndRepair(path.c_str(), MaxRepairedStillImageBytes,
-            repairedBytes, repairDetail);
+            repairedBytes, repairDetail, &repairedExtents);
+    // A merged item is by definition multi-extent, which is how a layered image is
+    // stored. Report the count but do not write the session member here: this
+    // helper also opens external audio and seek-probe formats, and those must not
+    // overwrite the main file's layered signal.
+    if (mergedExtents != nullptr)
+        *mergedExtents = repaired ? repairedExtents : 0;
     io = repaired ? SharedFileInput::OpenMemory(repairedBytes.data(), repairedBytes.size(), error)
                   : SharedFileInput::Open(path.c_str(), error);
     if (io == nullptr) {
@@ -3674,7 +3834,10 @@ int PlayerSession::ProbeInterrupt(void* opaque) noexcept {
 }
 
 FFFResult PlayerSession::OpenProbeFormat(const std::string& path, AVFormatContext** output,
-    std::unique_ptr<SharedFileInput>& io, std::string& error) noexcept {
+    std::unique_ptr<SharedFileInput>& io, std::string& error,
+    std::int32_t* mergedExtents, AvifItemInfo* avifInfo) noexcept {
+    if (mergedExtents != nullptr) *mergedExtents = 0;
+    if (avifInfo != nullptr) *avifInfo = AvifItemInfo{};
     // Mirrors OpenFormat rather than avformat_open_input(path): the trial used to
     // reopen the bare url, which skipped the protocol lists, the repaired-memory
     // input for layered AVIF and every demuxer gate -- so the "same file" it
@@ -3684,9 +3847,34 @@ FFFResult PlayerSession::OpenProbeFormat(const std::string& path, AVFormatContex
     av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
     std::vector<std::uint8_t> repairedBytes;
     std::string repairDetail;
-    const bool repaired = IsStillImageContainerName(path) &&
+    std::int32_t repairedExtents = 0;
+    const bool stillContainer = IsStillImageContainerName(path);
+    // The extent count is a storage layout; the primary item's a1lx/lsel/layer
+    // properties are the standard signal. Probe before the repair so a single-
+    // extent layered file (which ReadAndRepair returns false for) is still seen.
+    if (stillContainer && avifInfo != nullptr) {
+        AvifItemProbe::Read(path.c_str(), MaxAvifProbeBytes, *avifInfo, repairDetail);
+    }
+    // A single file-offset extent is already legal for the mov demuxer: there is
+    // nothing for the shim to merge. Only skip the whole-file read when the probe
+    // positively identified that safe shape; any unknown iloc still takes the
+    // repair path so a malformed/unsupported item cannot be misclassified.
+    const bool singleExtent = avifInfo != nullptr && avifInfo->valid && avifInfo->hasIloc &&
+        avifInfo->extentCount == 1 && avifInfo->constructionMethod == 0 &&
+        avifInfo->dataReferenceIndex == 0;
+    if (stillContainer && avifInfo != nullptr &&
+        GetEnvironmentVariableW(L"FFF_AVIF_TRACE", nullptr, 0)) {
+        std::fprintf(stderr,
+            "[avif] valid=%d hasIloc=%d extents=%d cm=%d dref=%d singleExtent=%d\n",
+            avifInfo->valid ? 1 : 0, avifInfo->hasIloc ? 1 : 0,
+            avifInfo->extentCount, avifInfo->constructionMethod,
+            avifInfo->dataReferenceIndex, singleExtent ? 1 : 0);
+    }
+    const bool repaired = stillContainer && !singleExtent &&
         AvifIlocShim::ReadAndRepair(path.c_str(), MaxRepairedStillImageBytes,
-            repairedBytes, repairDetail);
+            repairedBytes, repairDetail, &repairedExtents);
+    if (mergedExtents != nullptr)
+        *mergedExtents = repaired ? repairedExtents : 0;
     io = repaired ? SharedFileInput::OpenMemory(repairedBytes.data(), repairedBytes.size(), error)
                   : SharedFileInput::Open(path.c_str(), error);
     if (io == nullptr) {
@@ -3855,6 +4043,16 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
             // dav1d's automatic delay opens only ceil(sqrt(workers)) frame
             // contexts. Single-tile AV1 needs frame parallelism as well as workers.
             const auto logical = std::max(1u, std::thread::hardware_concurrency());
+            // A layered still image only becomes presentable in two steps when
+            // dav1d hands back every spatial layer: the base layer arrives first,
+            // the finished image after it. With the default (highest layer only)
+            // there is a single picture and nothing to show early. The static
+            // gate keeps a multi-extent primary item in an animated AVIF from
+            // changing the animation decoder's output.
+            if (staticImage_ && layeredStillImage_)
+                av_opt_set_int(context->priv_data, "alllayers", 1, 0);
+            if (staticImage_ && layeredStillImage_ && layeredOpIndex_ >= 0)
+                av_opt_set_int(context->priv_data, "oppoint", layeredOpIndex_, 0);
             // Eight workers leave bandwidth and CPU time for upload, audio and subtitles.
             // 7940HX fullscreen: ~40 fps with 8/8 versus ~34 fps with 16/16.
             auto workers = heavy444 ? (std::min)(logical * 2, 32u) :
@@ -4402,6 +4600,19 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // image is what makes the close keep the cached picture on screen.
     const bool keepStillImage = staticImage_;
     DoClose(FFF3FPState::Opening, true, keepStillImage);
+    // The layered-still signal belongs to the file being opened: OpenFormat
+    // returns the iloc extent count, and DoOpen decides once staticImage_ is
+    // known. A failed repair or a non-container file must not inherit the
+    // previous file's answer.
+    layeredStillImage_ = false;
+    layeredLayerCount_ = 0;
+    layeredLsel_ = false;
+    layeredLayerId_ = -1;
+    layeredOpIndex_ = -1;
+    layeredPresentOrdinal_ = 0;
+    layeredPresentDone_ = false;
+    stillDisplayWidth_ = 0;
+    stillDisplayHeight_ = 0;
     // A new file is a new audio-pool round: back to the default target.
     audioTargetBuffer100ns_ = performance_.AudioInitial();
     seenAudioUnderruns_ = 0;
@@ -4410,6 +4621,8 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     seenAudioInsertedSilence_ = 0;
     seenAudioDroppedOverlap_ = 0;
     std::string openError;
+    std::int32_t mergedExtents = 0;
+    AvifItemInfo avifInfo{};
     auto openResult = FFFResult::Success;
     if (DiscInput::IsDiscPath(path)) {
         try {
@@ -4418,7 +4631,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
                 openResult = FFFResult::NotSupported; openError = disc_->Error();
             } else discOpened_.store(true, std::memory_order_release);
         } catch (...) { openResult = FFFResult::NativeFailure; openError = "Could not open the disc."; }
-    } else openResult = OpenFormat(path, &format_, formatIo_, openError);
+    } else openResult = OpenFormat(path, &format_, formatIo_, openError, &mergedExtents, &avifInfo);
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
     RawTrace("DoOpen: OpenFormat succeeded");
     // Remembered so the IAMF decoder can re-open the file and drive the raw OBU stream.
@@ -4490,6 +4703,45 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         tileGrid_ = true;
         ReadTileGridPackets();
     }
+    // Multi-extent is the available signal, not proof of spatial layering (a
+    // grid tile can be split, and an auxiliary item can be multi-extent). Keep
+    // the field AV1-only: HEIC has no alllayers equivalent, so claiming a
+    // layered still there would promise a progressive path that does not exist.
+    // The extent count is how libavif happens to store one layer per extent, not
+    // a standard layer signal. Prefer the primary item's a1lx/lsel properties;
+    // only a file whose meta box could not be probed keeps the old heuristic.
+    const bool av1Still = videoStream_ >= 0 && format_->streams[videoStream_] != nullptr &&
+        format_->streams[videoStream_]->codecpar->codec_id == AV_CODEC_ID_AV1;
+    const bool standardLayeredSignal = avifInfo.valid &&
+        (avifInfo.lselPresent || avifInfo.layerCount > 1);
+    const bool legacyLayeredSignal = !avifInfo.valid && mergedExtents >= 2;
+    layeredStillImage_ = staticImage_ && !tileGrid_ && av1Still &&
+        (standardLayeredSignal || legacyLayeredSignal);
+    layeredLayerCount_ = avifInfo.valid ? avifInfo.layerCount : 0;
+    layeredLsel_ = avifInfo.valid && avifInfo.lselPresent;
+    layeredLayerId_ = layeredLsel_ ? avifInfo.layerId : -1;
+    layeredOpIndex_ = avifInfo.valid ? avifInfo.opIndex : -1;
+    if (GetEnvironmentVariableW(L"FFF_AVIF_TRACE", nullptr, 0))
+        std::fprintf(stderr,
+            "[avif] valid=%d pitm=%u layers=%d a1lx=%d lsel=%d id=%d op=%d ispe=%dx%d merged=%d\n",
+            avifInfo.valid ? 1 : 0, avifInfo.primaryItemId, avifInfo.layerCount,
+            avifInfo.hasA1lx ? 1 : 0, avifInfo.lselPresent ? 1 : 0, avifInfo.layerId,
+            avifInfo.opIndex, avifInfo.ispeWidth, avifInfo.ispeHeight, mergedExtents);
+    if (layeredStillImage_ && avifInfo.valid && avifInfo.ispeWidth > 0 &&
+        avifInfo.ispeHeight > 0) {
+        // A coarse layer is smaller than the final picture. Keep the final
+        // presentation box while the low-resolution texture is on screen.
+        stillDisplayWidth_ = avifInfo.ispeWidth;
+        stillDisplayHeight_ = avifInfo.ispeHeight;
+    }
+    // JPEG 2000's lowres first pass is a smaller texture of the same final
+    // picture; its presentation box is the full codestream size.
+    if (staticImage_ && !tileGrid_ && videoStream_ >= 0 &&
+        format_->streams[videoStream_] != nullptr &&
+        format_->streams[videoStream_]->codecpar->codec_id == AV_CODEC_ID_JPEG2000) {
+        stillDisplayWidth_ = format_->streams[videoStream_]->codecpar->width;
+        stillDisplayHeight_ = format_->streams[videoStream_]->codecpar->height;
+    }
     // Rotation is a *view* property, so it is applied through the same renderer
     // path the image mode and the host's manual R key use. Decoding stays
     // untouched: the frame keeps its native orientation and only the sampling
@@ -4522,6 +4774,26 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         }
     }
     RawTrace("DoOpen: size check done");
+    // Private gainmap detection (still images only). We run the probe in
+    // base-only mode: container + metadata + gainmap decode are identified and
+    // the verdict recorded; the per-pixel HDR application on the player's own
+    // decoded AVFrame is a follow-up (see docs/GAINMAP_PRIVATE_2026-11-15.md).
+    // Fail-closed: a malformed gainmap carrier is logged but never promotes SDR
+    // to HDR or changes the existing still-image decode path.
+    gainmapInfo_ = GainMapProbeResult{};
+    gainMapEnabled_ = true;
+    gainMapBaseFallbackNoted_ = false;
+    if (staticImage_ && IsStillImageContainerName(path)) {
+        try {
+            // Full probe: decode base + gainmap and apply the math. The applied
+            // RGBA buffer is later used to replace the decoded AVFrame before
+            // presentation (single source of truth: same math as the CLI probe).
+            gainmapInfo_ = GainMapProbe::Probe(path, /*baseOnly=*/false);
+        } catch (...) {
+            gainmapInfo_ = GainMapProbeResult{};
+        }
+        RawTrace(("DoOpen: gainmap verdict=" + gainmapInfo_.verdict).c_str());
+    }
     coverArtStream_ = FindCoverArtStream(format_);
     audioStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_AUDIO);
     RawTrace("DoOpen: cover/audio selected");
@@ -4548,16 +4820,25 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         // and the answer cannot have changed.
         const bool stillJpegCpuPolicy = staticImage_ && !StillJpegHardwareEnabled() &&
             IsJpegCodec(format_->streams[videoStream_]->codecpar->codec_id);
+        // A layered still needs libdav1d with every spatial layer asked for to
+        // present the base layer first; hardware decoders hand back the finished
+        // top layer and have nothing to refine, so layered files take the CPU
+        // route outright, the way JPEG stills do.
+        const bool layeredAvifCpuPolicy = staticImage_ && layeredStillImage_ &&
+            format_->streams[videoStream_]->codecpar->codec_id == AV_CODEC_ID_AV1;
         const auto tryHardware = decodeMode_ == FFF3FPDecodeMode::D3D11 &&
-            !HardwareRouteKnownUnsupported(format_->streams[videoStream_]) && !stillJpegCpuPolicy;
+            !HardwareRouteKnownUnsupported(format_->streams[videoStream_]) &&
+            !stillJpegCpuPolicy && !layeredAvifCpuPolicy;
         auto result = tileGrid_ || !tryHardware
             ? OpenDecoder(format_, videoStream_, true, &videoDecoder_, -1, nullptr, false)
             : OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_, &hardwareFailureReason);
         if (result == FFFResult::Success && tileGrid_) snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
         if (result == FFFResult::Success && stillJpegCpuPolicy)
             snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
+        if (result == FFFResult::Success && layeredAvifCpuPolicy)
+            snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
         if (result == FFFResult::Success && !tileGrid_ && !tryHardware && !stillJpegCpuPolicy &&
-            decodeMode_ == FFF3FPDecodeMode::D3D11) {
+            !layeredAvifCpuPolicy && decodeMode_ == FFF3FPDecodeMode::D3D11) {
             // Took the CPU route from memory. Report the route actually used, and say
             // why, so a host that surfaces the fallback can explain it.
             snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
@@ -4706,11 +4987,23 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // Ready sessions do not pump playback, so present the first image frame here.
     if (staticImage_ || animatedImage_) {
         RawTrace("DoOpen: DecodeInitialFrame enter");
-        const auto imageResult = DecodeInitialFrame();
+        std::string decodeDetail;
+        // Layered AVIF, grid tiles and J2K lowres present more than one canvas
+        // while opening. Off-vblank is opt-in: on a fixed-refresh chain DWM
+        // still composites on a vblank and queued frames can make the open
+        // slower, so the default remains Present(1,0). The flag is lowered as
+        // soon as the open-time decode returns, before playback can inherit it.
+        const bool progressiveStillOpen = staticImage_ && !animatedImage_ &&
+            GetEnvironmentVariableW(L"FFF_PROGRESSIVE_OFF_VBLANK", nullptr, 0) != 0;
+        videoRenderer_.SetProgressiveStillPresentation(progressiveStillOpen);
+        const auto imageResult = DecodeInitialFrame(&decodeDetail);
+        videoRenderer_.SetProgressiveStillPresentation(false);
         if (imageResult != FFFResult::Success) {
-            Fail(imageResult, animatedImage_
+            const char* generic = animatedImage_
                 ? "Could not decode or render the first frame of the animation during open."
-                : "Could not decode or render the still image during open.",
+                : "Could not decode or render the still image during open.";
+            Fail(imageResult,
+                decodeDetail.empty() ? generic : decodeDetail,
                 animatedImage_ ? "open-animation" : "open-image");
             return;
         }
@@ -4817,20 +5110,102 @@ void PlayerSession::ReadTileGridPackets() noexcept {
 
 FFFResult PlayerSession::ComposeTileGridFrame() noexcept {
     if (format_ == nullptr) return FFFResult::InvalidState;
-    auto* canvas = AvifTileGridComposer::Compose(format_, tileGridTiles_, tileGridSources_,
-        tileGridWidth_, tileGridHeight_, tileGridBackground_);
-    if (canvas == nullptr) return FFFResult::FfmpegFailure;
-    const auto before = videoRenderer_.PresentedVideoFrames();
+    if (tileGridTiles_.empty()) return FFFResult::FfmpegFailure;
+    if (GetEnvironmentVariableW(L"FFF_AVIF_TRACE", nullptr, 0))
+        std::fprintf(stderr, "[grid] compose tiles=%zu canvas=%dx%d\n",
+            tileGridTiles_.size(), tileGridWidth_, tileGridHeight_);
+    // Hold the previous resident still aside: a tile that fails mid-assembly must
+    // put it back, or the half-drawn canvas would linger as the resident image
+    // for a device redraw while the open itself reports failure.
+    AVFrame* previous = av_frame_alloc();
+    if (previous == nullptr) return FFFResult::NativeFailure;
+    const bool hadPrevious = stillImageFrame_ != nullptr && stillImageFrame_->data[0] != nullptr;
+    if (hadPrevious && av_frame_ref(previous, stillImageFrame_) < 0) {
+        av_frame_free(&previous);
+        return FFFResult::NativeFailure;
+    }
+    const auto restore = [&]() noexcept {
+        if (!hadPrevious) {
+            // No earlier picture to put back: drop the half-drawn canvas rather
+            // than leave it as the resident image for a device redraw.
+            if (stillImageFrame_ != nullptr) av_frame_unref(stillImageFrame_);
+            return;
+        }
+        // av_frame_ref() requires a dst that is empty or freshly allocated; the
+        // resident frame still holds the canvas being assembled. Unref first so
+        // the rollback cannot leak or touch an already-referenced destination.
+        av_frame_unref(stillImageFrame_);
+        (void)av_frame_ref(stillImageFrame_, previous);
+        PresentVideoFrame(previous, format_);
+    };
+    const auto findSource = [&](const std::size_t index) noexcept
+        -> const AvifTileGridComposer::TileSource* {
+        const auto streamIndex = tileGridTiles_[index].streamIndex;
+        for (const auto& candidate : tileGridSources_)
+            if (candidate.streamIndex == streamIndex) return &candidate;
+        return nullptr;
+    };
+    const auto* firstSource = findSource(0);
+    if (firstSource == nullptr) {
+        av_frame_free(&previous);
+        return FFFResult::FfmpegFailure;
+    }
+    // BeginCanvas decodes the first tile before allocating: the canvas format and
+    // black level come from the decoded frame, not from codecpar. That keeps a
+    // file without pixi (or with alpha/bit-depth drift) from failing or writing
+    // the wrong plane layout.
+    auto* canvas = AvifTileGridComposer::BeginCanvas(format_, *firstSource,
+        tileGridTiles_.front(), tileGridWidth_, tileGridHeight_, tileGridBackground_);
+    if (canvas == nullptr) {
+        av_frame_free(&previous);
+        return FFFResult::FfmpegFailure;
+    }
     NormalizeVideoFrameTimestamp(canvas);
+    const auto before = videoRenderer_.PresentedVideoFrames();
+    // A full-canvas upload + vblank per tile is not free, and on a fixed-refresh
+    // chain it is the dominant cost of the grid path. Keep the progressive
+    // character but cap the intermediate canvases at three (first, middle,
+    // final); the final tile still gets its own present, so the resident frame
+    // and a device redraw always see the finished canvas.
+    const std::size_t tileCount = tileGridTiles_.size();
+    const std::size_t middleTile = tileCount > 2 ? tileCount / 2 : tileCount;
+    bool failed = false;
     PresentVideoFrame(canvas, format_);
+    if (state_.load() == FFF3FPState::Failed) failed = true;
+    if (!failed) {
+        for (std::size_t index = 1; index < tileCount; ++index) {
+            const auto& tile = tileGridTiles_[index];
+            const auto* source = findSource(index);
+            if (source == nullptr ||
+                !AvifTileGridComposer::ComposeTileOnto(format_, *source, tile, canvas)) {
+                failed = true;
+                break;
+            }
+            const bool finalTile = index + 1 == tileCount;
+            const bool middlePresent = index == middleTile;
+            if (!finalTile && !middlePresent) continue;
+            PresentVideoFrame(canvas, format_);
+            // PresentVideoFrame() reports a render failure through Fail(), which
+            // only sets state_; it does not return a status. Without this check a
+            // failed tile followed by a successful one would return Success and
+            // let DoOpen turn a Failed session back into Ready.
+            if (state_.load() == FFF3FPState::Failed) { failed = true; break; }
+        }
+    }
     av_frame_free(&canvas);
-    // The canvas is the only frame this picture has, so a presentation that did not
-    // happen is a failed open rather than a silently empty one.
-    if (videoRenderer_.PresentedVideoFrames() == before) return FFFResult::FfmpegFailure;
+    // A presentation that did not happen is a failed open rather than a silently
+    // empty one, and a tile failure leaves the previous picture on screen.
+    if (failed || state_.load() == FFF3FPState::Failed ||
+        videoRenderer_.PresentedVideoFrames() == before) {
+        restore();
+        av_frame_free(&previous);
+        return FFFResult::FfmpegFailure;
+    }
+    av_frame_free(&previous);
     return FFFResult::Success;
 }
 
-FFFResult PlayerSession::DecodeInitialFrame() noexcept {
+FFFResult PlayerSession::DecodeInitialFrame(std::string* detailOut) noexcept {
     // RAW never reaches OpenDecoder: the synthetic stream has codecpar only,
     // and LibRaw is the decoder. Develop synchronously in M1; the preview-first
     // and background full-size paths are M2.
@@ -4839,8 +5214,12 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
         if (format_ == nullptr || videoStream_ < 0) return FFFResult::InvalidState;
         AVFrame* rawFrame = nullptr;
         std::string rawError;
-        if (!rawStill_->Decode(&rawFrame, rawError) || rawFrame == nullptr)
+        if (!rawStill_->Decode(&rawFrame, rawError) || rawFrame == nullptr) {
+            if (detailOut != nullptr) {
+                detailOut->assign("RAW decode failed: ").append(rawError);
+            }
             return FFFResult::FfmpegFailure;
+        }
         RawTrace("DecodeInitialFrame: RAW frame ready");
         const auto before = videoRenderer_.PresentedVideoFrames();
         PresentVideoFrame(rawFrame, format_);
@@ -4857,16 +5236,20 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
     if (!staticImage_ && !animatedImage_) return FFFResult::InvalidState;
     // A tiled still image has nothing to read: its packets were taken at open and
     // the picture is the canvas assembled from them.
-    if (tileGrid_) return ComposeTileGridFrame();
-    // Runtime prefetch hit (step 2): the side lane already decoded this exact
-    // file into a CPU AVFrame. Push it through the SAME presentation chain as a
-    // normally decoded frame so the presentation counter, P3->BT.2020, the
-    // retained still-image frame and EXIF rotation behave identically. Anything
-    // doubtful falls back to the original decode path below.
-    // Only take a CPU-decoded hit when THIS open actually uses a CPU decoder.
-    // A hardware decoder would have produced GPU planes, which skip the
-    // P3->BT.2020 conversion that a cached CPU frame goes through.
-    if (staticImage_ && !animatedImage_ &&
+    if (tileGrid_) {
+        const auto composeResult = ComposeTileGridFrame();
+        if (composeResult != FFFResult::Success) return composeResult;
+        if (state_.load() == FFF3FPState::Failed) return FFFResult::DeviceFailure;
+        return FFFResult::Success;
+    }
+    const bool jpeg2000Still = staticImage_ && !animatedImage_ && !tileGrid_ &&
+        format_ != nullptr && videoStream_ >= 0 &&
+        format_->streams[videoStream_] != nullptr &&
+        format_->streams[videoStream_]->codecpar->codec_id == AV_CODEC_ID_JPEG2000;
+    // A prefetch hit would hand over the finished frame and skip the lowres
+    // first pass entirely. Progressive presentation has to win over the cache:
+    // J2K keeps its own two-stage path below.
+    if (staticImage_ && !animatedImage_ && !layeredStillImage_ && !jpeg2000Still &&
         videoDecoder_->hw_device_ctx == nullptr && PrefetchHitEnabled()) {
         AVFrame* cached = nullptr;
         if (FFFPrefetch::PrefetchService::Instance().TakeStill(mediaPath_, &cached) &&
@@ -4960,8 +5343,81 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
     if (stillImagePacket_ == nullptr) return FFFResult::NativeFailure;
     av_packet_unref(stillImagePacket_);
     const auto before = videoRenderer_.PresentedVideoFrames();
+    // JPEG 2000 has no layered-extent story in FFmpeg, but its decoder does
+    // expose lowres: a reduction factor that yields a smaller picture from the
+    // same codestream. Use it for the first presentation, then decode the same packet at full
+    // resolution through the normal decoder. This is a 3FP-side two-stage
+    // presentation, not a second decode path: no fork, no extra library, and
+    // the final pixels come from the same packet as before.
+    bool j2kFirstPacketHandled = false;
+    if (jpeg2000Still) {
+        int readResult = 0;
+        while ((readResult = av_read_frame(format_, playbackPacket_)) >= 0) {
+            if (playbackPacket_->stream_index != videoStream_) {
+                av_packet_unref(playbackPacket_);
+                continue;
+            }
+            av_packet_unref(stillImagePacket_);
+            if (av_packet_ref(stillImagePacket_, playbackPacket_) < 0) return FFFResult::NativeFailure;
+            av_packet_unref(playbackPacket_);
+            const auto* stream = format_->streams[videoStream_];
+            const auto* codec = avcodec_find_decoder(stream->codecpar->codec_id);
+            if (codec != nullptr) {
+                auto* low = avcodec_alloc_context3(codec);
+                if (low != nullptr) {
+                    if (avcodec_parameters_to_context(low, stream->codecpar) >= 0) {
+                        low->lowres = 1;
+                        low->thread_count = 1;
+                        if (avcodec_open2(low, codec, nullptr) >= 0) {
+                            AVFrame* lowFrame = av_frame_alloc();
+                            if (lowFrame != nullptr) {
+                                if (avcodec_send_packet(low, stillImagePacket_) >= 0 &&
+                                    avcodec_receive_frame(low, lowFrame) >= 0) {
+                                    if (GetEnvironmentVariableW(L"FFF_J2K_TRACE", nullptr, 0))
+                                        std::fprintf(stderr, "[j2k] lowres frame %dx%d fmt=%s\n",
+                                            lowFrame->width, lowFrame->height,
+                                            av_get_pix_fmt_name(static_cast<AVPixelFormat>(lowFrame->format)));
+                                    NormalizeVideoFrameTimestamp(lowFrame);
+                                    PresentVideoFrame(lowFrame, format_);
+                                }
+                                av_frame_free(&lowFrame);
+                            }
+                        }
+                    }
+                    avcodec_free_context(&low);
+                }
+            }
+            // The first packet is consumed; feed it to the real decoder here so
+            // the normal read loop starts at the second packet.
+            const auto decodeResult = DecodePacket(videoDecoder_, stillImagePacket_, true, format_);
+            if (decodeResult != FFFResult::Success) return decodeResult;
+            j2kFirstPacketHandled = true;
+            break;
+        }
+        if (readResult < 0 && !j2kFirstPacketHandled) {
+            // No packet reached the decoder; the normal path reports the error.
+        }
+    }
+    // A layered still hands back more than one picture for the same frame: the
+    // base layer first, the finished image after it. The first presentation must
+    // not end the loop, or the refinement would never be decoded; read to EOF and
+    // drain, so every layer arrives and the resident frame ends up finished.
+    const bool layeredAvifStill = staticImage_ && layeredStillImage_ &&
+        format_ != nullptr && videoStream_ >= 0 &&
+        format_->streams[videoStream_]->codecpar->codec_id == AV_CODEC_ID_AV1;
+    // lsel can name one layer, not "all layers". alllayers=1 is still used so the
+    // selected layer is produced, but once layeredPresentDone_ records that the
+    // selected picture has been shown there is nothing left to decode. Keeping
+    // the read loop open would decode the final layer and drop it in
+    // PresentVideoFrame, which is the cost this early stop removes.
+    const bool layeredEarlyStop = layeredAvifStill && layeredLsel_ &&
+        layeredLayerId_ >= 0 && layeredLayerId_ != 0xFFFF;
+    auto layeredNeedsMore = [&]() {
+        return layeredAvifStill && !(layeredEarlyStop && layeredPresentDone_);
+    };
     int readResult = 0;
-    while (videoRenderer_.PresentedVideoFrames() == before &&
+    while ((layeredNeedsMore() || jpeg2000Still ||
+        videoRenderer_.PresentedVideoFrames() == before) &&
         (readResult = av_read_frame(format_, playbackPacket_)) >= 0) {
         if (playbackPacket_->stream_index == videoStream_) {
             if (staticImage_) {
@@ -4975,7 +5431,8 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
             av_packet_unref(playbackPacket_);
         }
     }
-    if (videoRenderer_.PresentedVideoFrames() == before) {
+    if (layeredNeedsMore() || jpeg2000Still ||
+        videoRenderer_.PresentedVideoFrames() == before) {
         const auto drainResult = DecodePacket(videoDecoder_, nullptr, true, format_);
         if (drainResult != FFFResult::Success) return drainResult;
     }
@@ -6549,14 +7006,39 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
     const auto handleFrame = [this, video, owner, pausedSeek](AVFrame* decoded) {
         if (video) {
             NormalizeVideoFrameTimestamp(decoded);
-            const auto seeking = seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_;
-            if (!seeking && (state_.load() == FFF3FPState::Playing || pausedSeek)) QueueVideoFrame(decoded);
-            else {
-                // Seeking: this picture is decoded but will not be queued, so it is
-                // invisible to decodedVideoFrames. Count it separately (diagnostics only).
-                if (seeking) ++seekDecodedFrames_;
-                PresentVideoFrame(decoded, owner, ShouldPreviewSeekFrame(decoded, owner));
+            // GainMap buffer selection (contract §1.2): the open-time probe has
+            // already decoded both the applied HDR buffer and the linear SDR base
+            // buffer; this only chooses which one goes on screen. No re-probe, no
+            // re-decode -- the buffers are held in memory for the whole open.
+            AVFrame* presentFrame = decoded;
+            const std::vector<float>* gainBuffer = nullptr;
+            const bool gainDimensionsOk = gainmapInfo_.outW > 0 && gainmapInfo_.outH > 0;
+            if (gainMapEnabled_ && gainmapInfo_.applyOk &&
+                !gainmapInfo_.appliedRgba.empty() && gainDimensionsOk) {
+                gainBuffer = &gainmapInfo_.appliedRgba;        // default: applied HDR picture
+            } else if (!gainMapEnabled_ && !gainmapInfo_.baseRgba.empty() && gainDimensionsOk) {
+                gainBuffer = &gainmapInfo_.baseRgba;           // user asked for the original base
+            } else if (!gainMapEnabled_ && gainmapInfo_.applyOk &&
+                !gainmapInfo_.appliedRgba.empty() && gainDimensionsOk) {
+                // Toggle-off with no retained base: stay on the applied buffer
+                // rather than going black, and say so once per open.
+                if (!gainMapBaseFallbackNoted_) {
+                    gainMapBaseFallbackNoted_ = true;
+                    RawTrace("GainMap toggle off: base buffer unavailable, staying on applied buffer");
+                }
+                gainBuffer = &gainmapInfo_.appliedRgba;
             }
+            AVFrame* gainFrame = BuildGainMapPresentationFrame(gainBuffer,
+                gainmapInfo_.outW, gainmapInfo_.outH,
+                decoded->pts, decoded->best_effort_timestamp);
+            if (gainFrame) presentFrame = gainFrame;
+            const auto seeking = seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_;
+            if (!seeking && (state_.load() == FFF3FPState::Playing || pausedSeek)) QueueVideoFrame(presentFrame);
+            else {
+                if (seeking) ++seekDecodedFrames_;
+                PresentVideoFrame(presentFrame, owner, ShouldPreviewSeekFrame(presentFrame, owner));
+            }
+            if (gainFrame) av_frame_free(&gainFrame);
         } else QueueAudioFrame(decoded, owner, owner == format_ ? audioStream_ : externalAudioStream_);
     };
     auto receiveFrames = [&]() {
@@ -6564,6 +7046,20 @@ FFFResult PlayerSession::DecodePacket(AVCodecContext* decoder, AVPacket* packet,
         while ((receiveResult = avcodec_receive_frame(decoder, frame)) >= 0) {
             handleFrame(frame);
             av_frame_unref(frame);
+            // A layer-selector item has already selected the only picture it
+            // wants. alllayers=1 still makes the decoder produce the later
+            // layers from the same packet; stop receiving them instead of
+            // decoding and dropping them. The demux loop below also stops
+            // reading once this is set, so an explicit low lsel does not pay
+            // for the final layer.
+            if (video && layeredStillImage_ && layeredLsel_ && layeredLayerId_ >= 0 &&
+                layeredLayerId_ != 0xFFFF && layeredPresentDone_) {
+                // DecodePacket treats only EAGAIN/EOF as a healthy receive loop.
+                // Report the intentional stop as EAGAIN so the selected layer is
+                // a success, while leaving the unread layers unrequested.
+                receiveResult = AVERROR(EAGAIN);
+                break;
+            }
             if (hardwareFallbackPending_ || internalAudioFailurePending_) break;
         }
         return receiveResult;
@@ -7269,6 +7765,20 @@ bool PlayerSession::SettlePaceWindow(const std::int64_t lag100ns, const std::int
 
 void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
     const bool seekPreview) noexcept {
+    // lsel selects one layer of a layered AV1 item. alllayers makes dav1d hand
+    // back every layer; only the selected one belongs on screen. 0xFFFF means
+    // "all layers" and keeps the progressive presentation. The selected layer's
+    // frame is the one the item is defined to display, so presentation stops
+    // there even if more layers follow.
+    if (staticImage_ && owner == format_ && layeredStillImage_ && layeredLsel_ &&
+        layeredLayerId_ >= 0 && layeredLayerId_ != 0xFFFF) {
+        const auto ordinal = layeredPresentOrdinal_++;
+        if (layeredPresentDone_ || ordinal != layeredLayerId_) {
+            if (ordinal >= layeredLayerId_) layeredPresentDone_ = true;
+            return;
+        }
+        layeredPresentDone_ = true;
+    }
     placement_.SamplePresentThread();
     auto* stream = owner->streams[videoStream_];
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
@@ -7713,7 +8223,9 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
     }
     const auto renderResult = videoRenderer_.Render(frameToRender, nextIndex,
         staticImage_ && owner == format_, false, false, staticImage_ && owner == format_,
-        auxiliaryFrame, elCompositionRequested ? &auxiliaryComposition : nullptr);
+        auxiliaryFrame, elCompositionRequested ? &auxiliaryComposition : nullptr,
+        staticImage_ && owner == format_ ? static_cast<std::uint32_t>(stillDisplayWidth_) : 0,
+        staticImage_ && owner == format_ ? static_cast<std::uint32_t>(stillDisplayHeight_) : 0);
     // Diagnostic (FFF_EL_TRACE), the same shape as the ladder/cadence traces:
     // "requested but not paired" is the state that withholds the colour table, and
     // it is invisible in a headless session otherwise.
@@ -7740,6 +8252,24 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
             return;
         }
         Fail(renderResult, videoRenderer_.LastError(), "render"); return;
+    }
+    // The first successful submission is the point a host may ask for a redraw
+    // without waiting for every progressive stage. This is deliberately emitted
+    // even when the presenter thread has not flipped yet: the renderer owns an
+    // upload/generation, and the event says the picture is now available to its
+    // presenter. Do not emit for a seek preview: that picture belongs to an
+    // intermediate seek position, not to the newly opened media.
+    if (!seekPreview && !firstFramePresentedEmitted_.exchange(true, std::memory_order_acq_rel)) {
+        const auto total = tileGrid_
+            ? static_cast<std::int64_t>(tileGridTiles_.size())
+            : (layeredStillImage_ ? static_cast<std::int64_t>(layeredLayerCount_) : 0);
+        std::ostringstream json;
+        json << "{\"presented\":" << videoRenderer_.PresentedVideoFrames()
+             << ",\"total\":" << total
+             << ",\"width\":" << (frameToRender != nullptr ? frameToRender->width : 0)
+             << ",\"height\":" << (frameToRender != nullptr ? frameToRender->height : 0)
+             << "}";
+        Emit(FFF3FPEvent::FirstFramePresented, json.str());
     }
     // A preview opens no gate: the audio that follows a seek belongs to the target
     // position, and letting the first decoded picture release it would start sound
@@ -9147,6 +9677,9 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     staticImage_ = false;
     animatedImage_ = false;
     fragmentedMp4_ = false;
+    gainmapInfo_ = GainMapProbeResult{};
+    gainMapEnabled_ = true;
+    gainMapBaseFallbackNoted_ = false;
     sessionWrapLoop_ = false; sessionWrapFailures_ = 0;
     { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = false; hasPublishedRawInfo_ = false; publishedRawInfo_ = {}; }
     audioBlockedUntilVideoFrame_ = false;
@@ -9265,6 +9798,213 @@ double PlayerSession::MediaFrameRateCeilingHz(const AVStream* stream) const noex
     return 0.0;
 }
 
+namespace {
+
+// Media-info colour resolution.
+//
+// RebuildMediaInfo used to publish only the container's colour tags (with a
+// decoder-context fallback). When a source legally omits them the host received
+// "unknown" and dropped the colour items entirely, even though the render path
+// was already decoding that frame with concrete values. The resolver below
+// reports the values the render path actually applies, with the evidence each
+// one came from, so an information surface can show "BT.709 (inferred)" instead
+// of a gap. It mirrors VideoRenderer::ResolveDecodeTransfer / ResolveSourceGamut /
+// ToSwsColorSpace / IsFullRange rather than inventing a second colour policy.
+enum class MediaColorSource : std::uint8_t {
+    Unspecified = 0,
+    Container,
+    Bitstream,
+    Frame,
+    Inferred,
+};
+
+const char* MediaColorSourceName(const MediaColorSource source) noexcept {
+    switch (source) {
+    case MediaColorSource::Container: return "container";
+    case MediaColorSource::Bitstream: return "bitstream";
+    case MediaColorSource::Frame: return "frame";
+    case MediaColorSource::Inferred: return "inferred";
+    default: return "";
+    }
+}
+
+struct MediaColorField {
+    std::int32_t value = 0;
+    MediaColorSource source = MediaColorSource::Unspecified;
+};
+
+struct MediaColorResolution {
+    MediaColorField primaries{};
+    MediaColorField transfer{};
+    MediaColorField space{};
+    MediaColorField range{};
+};
+
+enum class MediaColorKind : std::uint8_t { Primaries, Transfer, Space, Range };
+
+bool IsSpecifiedColor(const MediaColorKind kind, const std::int32_t value) noexcept {
+    switch (kind) {
+    case MediaColorKind::Primaries:
+        return value != AVCOL_PRI_UNSPECIFIED && value != AVCOL_PRI_RESERVED0 &&
+            value != AVCOL_PRI_RESERVED;
+    case MediaColorKind::Transfer:
+        return value != AVCOL_TRC_UNSPECIFIED && value != AVCOL_TRC_RESERVED0 &&
+            value != AVCOL_TRC_RESERVED;
+    case MediaColorKind::Space:
+        return value != AVCOL_SPC_UNSPECIFIED && value != AVCOL_SPC_RESERVED;
+    case MediaColorKind::Range:
+        return value == AVCOL_RANGE_MPEG || value == AVCOL_RANGE_JPEG;
+    }
+    return false;
+}
+
+// Evidence order follows the render path: the frame is what the shader reads,
+// the decoder context is what the bitstream's VUI/SPS declared, the container
+// tag is last. A missing tag is not evidence; it falls through to the next leg.
+MediaColorField PickDeclaredColor(const MediaColorKind kind,
+    const AVCodecParameters* parameters, const AVCodecContext* decoder,
+    const bool decoderAvailable, const HdrSourceColor& frame,
+    const bool frameAvailable) noexcept {
+    const auto* frameValue = [&]() -> const std::int32_t* {
+        if (!frameAvailable || !frame.observed) return nullptr;
+        switch (kind) {
+        case MediaColorKind::Primaries: return &frame.primaries;
+        case MediaColorKind::Transfer: return &frame.transfer;
+        case MediaColorKind::Space: return &frame.space;
+        case MediaColorKind::Range: return &frame.range;
+        }
+        return nullptr;
+    }();
+    if (frameValue != nullptr && IsSpecifiedColor(kind, *frameValue))
+        return {*frameValue, MediaColorSource::Frame};
+    const auto decoderValue = [&]() -> std::int32_t {
+        if (!decoderAvailable || decoder == nullptr) return 0;
+        switch (kind) {
+        case MediaColorKind::Primaries: return decoder->color_primaries;
+        case MediaColorKind::Transfer: return decoder->color_trc;
+        case MediaColorKind::Space: return decoder->colorspace;
+        case MediaColorKind::Range: return decoder->color_range;
+        }
+        return 0;
+    }();
+    if (decoderAvailable && decoder != nullptr && IsSpecifiedColor(kind, decoderValue))
+        return {decoderValue, MediaColorSource::Bitstream};
+    const auto containerValue = [&]() -> std::int32_t {
+        switch (kind) {
+        case MediaColorKind::Primaries: return parameters->color_primaries;
+        case MediaColorKind::Transfer: return parameters->color_trc;
+        case MediaColorKind::Space: return parameters->color_space;
+        case MediaColorKind::Range: return parameters->color_range;
+        }
+        return 0;
+    }();
+    if (IsSpecifiedColor(kind, containerValue))
+        return {containerValue, MediaColorSource::Container};
+    return {};
+}
+
+bool IsBt2020Space(const std::int32_t value) noexcept {
+    return value == AVCOL_SPC_BT2020_NCL || value == AVCOL_SPC_BT2020_CL;
+}
+
+bool IsJpegFullRangeFormat(const AVPixelFormat format) noexcept {
+    switch (format) {
+    case AV_PIX_FMT_YUVJ420P:
+    case AV_PIX_FMT_YUVJ422P:
+    case AV_PIX_FMT_YUVJ444P:
+    case AV_PIX_FMT_YUVJ440P:
+    case AV_PIX_FMT_YUVJ411P:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool IsRgbPixelFormat(const AVPixelFormat format) noexcept {
+    const auto* descriptor = av_pix_fmt_desc_get(format);
+    return descriptor != nullptr && (descriptor->flags & AV_PIX_FMT_FLAG_RGB) != 0;
+}
+
+MediaColorResolution ResolveAppliedMediaColor(
+    const AVCodecParameters* parameters, const AVCodecContext* decoder,
+    const bool decoderAvailable, const HdrSourceColor& frame,
+    const bool frameAvailable, const FFF3FPHdrFormat hdrFormat,
+    const AVPixelFormat formatForDescription) noexcept {
+    MediaColorResolution result;
+    result.primaries = PickDeclaredColor(MediaColorKind::Primaries, parameters,
+        decoder, decoderAvailable, frame, frameAvailable);
+    result.transfer = PickDeclaredColor(MediaColorKind::Transfer, parameters,
+        decoder, decoderAvailable, frame, frameAvailable);
+    result.space = PickDeclaredColor(MediaColorKind::Space, parameters,
+        decoder, decoderAvailable, frame, frameAvailable);
+    result.range = PickDeclaredColor(MediaColorKind::Range, parameters,
+        decoder, decoderAvailable, frame, frameAvailable);
+
+    // HDR class in force. A stream-level SDR classification is promoted only when
+    // evidence says so: dynamic HDR10+ side data, or a declared PQ/HLG transfer.
+    // This is the same promotion ProcessFrame performs from frame color_trc.
+    auto effectiveHdr = hdrFormat;
+    if (effectiveHdr == FFF3FPHdrFormat::Sdr) {
+        if (av_packet_side_data_get(parameters->coded_side_data,
+            parameters->nb_coded_side_data, AV_PKT_DATA_DYNAMIC_HDR10_PLUS) != nullptr) {
+            effectiveHdr = FFF3FPHdrFormat::Hdr10Plus;
+        } else if (result.transfer.value == AVCOL_TRC_SMPTE2084) {
+            effectiveHdr = FFF3FPHdrFormat::Hdr10;
+        } else if (result.transfer.value == AVCOL_TRC_ARIB_STD_B67) {
+            effectiveHdr = FFF3FPHdrFormat::Hlg;
+        }
+    }
+
+    // Transfer: non-SDR sources decode through the fixed PQ/HLG shader paths,
+    // exactly as ResolveDecodeTransfer selects (Vivid's baseline ends up on PQ
+    // unless the frame declares otherwise). SDR decodes through the BT.709 path.
+    if (effectiveHdr != FFF3FPHdrFormat::Sdr) {
+        const auto appliedTransfer = effectiveHdr == FFF3FPHdrFormat::Hlg
+            ? AVCOL_TRC_ARIB_STD_B67 : AVCOL_TRC_SMPTE2084;
+        if (result.transfer.value == appliedTransfer)
+            result.transfer.source = result.transfer.source == MediaColorSource::Unspecified
+                ? MediaColorSource::Inferred : result.transfer.source;
+        else
+            result.transfer = {appliedTransfer, MediaColorSource::Inferred};
+    } else if (result.transfer.source == MediaColorSource::Unspecified) {
+        result.transfer = {AVCOL_TRC_BT709, MediaColorSource::Inferred};
+    }
+
+    // Primaries: declared wins; otherwise the gamut the renderer picks (BT.2020
+    // for HDR or a BT.2020 matrix, BT.709 everywhere else). DCI/Display P3 can
+    // only come from a declaration, never from an inference.
+    if (result.primaries.source == MediaColorSource::Unspecified) {
+        if (effectiveHdr != FFF3FPHdrFormat::Sdr || IsBt2020Space(result.space.value))
+            result.primaries = {AVCOL_PRI_BT2020, MediaColorSource::Inferred};
+        else
+            result.primaries = {AVCOL_PRI_BT709, MediaColorSource::Inferred};
+    }
+
+    // Matrix: same rule as ToSwsColorSpace — HDR falls back to BT.2020 NCL,
+    // SDR picks BT.709 at HD/UHD and BT.601 below 1280 columns.
+    if (result.space.source == MediaColorSource::Unspecified) {
+        if (effectiveHdr != FFF3FPHdrFormat::Sdr)
+            result.space = {AVCOL_SPC_BT2020_NCL, MediaColorSource::Inferred};
+        else if (parameters->width >= 1280)
+            result.space = {AVCOL_SPC_BT709, MediaColorSource::Inferred};
+        else
+            result.space = {AVCOL_SPC_SMPTE170M, MediaColorSource::Inferred};
+    }
+
+    // Range: the renderer treats full-range YUV and RGB as JPEG range, everything
+    // else as limited (IsFullRange). An omitted tag does not make the range unknown
+    // to the shader; it has already committed to one of the two.
+    if (result.range.source == MediaColorSource::Unspecified) {
+        result.range = IsJpegFullRangeFormat(formatForDescription) ||
+            IsRgbPixelFormat(formatForDescription)
+            ? MediaColorField{AVCOL_RANGE_JPEG, MediaColorSource::Inferred}
+            : MediaColorField{AVCOL_RANGE_MPEG, MediaColorSource::Inferred};
+    }
+    return result;
+}
+
+}  // namespace
+
 void PlayerSession::RebuildMediaInfo() noexcept {
     RawTrace("RebuildMediaInfo enter");
     std::lock_guard codecLock(softwareVideoCodecMutex_);
@@ -9300,10 +10040,32 @@ void PlayerSession::RebuildMediaInfo() noexcept {
         << ",\"probeScore\":" << format_->probe_score
         << ",\"staticImage\":" << (staticImage_ ? "true" : "false")
         << ",\"hardwareDecodable\":" << (HardwareDecodableForCurrentStream() ? "true" : "false")
+        << ",\"layeredStillImage\":" << (layeredStillImage_ ? "true" : "false")
+        << ",\"layeredLayerCount\":" << layeredLayerCount_
+        << ",\"layeredLsel\":" << (layeredLsel_ ? "true" : "false")
+        << ",\"layeredLayerId\":" << layeredLayerId_
+        << ",\"layeredOpIndex\":" << layeredOpIndex_
+        << ",\"stillDisplayWidth\":" << stillDisplayWidth_
+        << ",\"stillDisplayHeight\":" << stillDisplayHeight_
         << ",\"tileGrid\":" << (tileGrid_ ? "true" : "false")
         << ",\"tileGridWidth\":" << tileGridWidth_
         << ",\"tileGridHeight\":" << tileGridHeight_
         << ",\"tileGridTileCount\":" << tileGridTiles_.size()
+        << ",\"gainmap\":{\"present\":" << (gainmapInfo_.present ? "true" : "false")
+        << ",\"form\":\"" << EscapeJson(gainmapInfo_.form) << "\""
+        << ",\"verdict\":\"" << EscapeJson(gainmapInfo_.verdict) << "\""
+        << ",\"headroomLinear\":" << gainmapInfo_.headroomLinear
+        << ",\"baseHdrHeadroomLog2\":" << gainmapInfo_.baseHdrHeadroomLog2
+        << ",\"altHdrHeadroomLog2\":" << gainmapInfo_.altHdrHeadroomLog2
+        << ",\"reason\":\"" << EscapeJson(gainmapInfo_.reason) << "\""
+        << ",\"applyOk\":" << (gainmapInfo_.applyOk ? "true" : "false")
+        << ",\"baseAvailable\":" << (!gainmapInfo_.baseRgba.empty() ? "true" : "false")
+        << ",\"outW\":" << gainmapInfo_.outW
+        << ",\"outH\":" << gainmapInfo_.outH
+        << ",\"targetHeadroomLog2\":" << gainmapInfo_.targetHeadroomLog2
+        << ",\"applyWeight\":" << gainmapInfo_.applyWeight
+        << ",\"enabled\":" << (gainMapEnabled_ ? "true" : "false")
+        << "}"
         << ",\"metadata\":";
     AppendDictionaryJson(json, format_->metadata);
     json << ",\"chapters\":[";
@@ -9502,10 +10264,34 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                 if (!acceleration.empty())
                     json << ",\"hardwareAcceleration\":\"" << EscapeJson(acceleration) << "\"";
             }
+            // Applied colour basis: what the render path is actually using right now.
+            // Evidence order is frame -> decoder VUI/SPS -> container tag -> inferred
+            // fallback, mirroring ResolveDecodeTransfer / ResolveSourceGamut /
+            // ToSwsColorSpace / IsFullRange. The raw tags above stay untouched for
+            // consumers that need the declaration itself; these fields are the
+            // "do not leave the colour line blank" leg, with provenance attached.
+            HdrProcessor streamHdr;
+            streamHdr.ConfigureStream(parameters);
+            const auto hdr = streamHdr.State();
+            const auto frameColor = isCurrentVideoStream
+                ? videoRenderer_.FrameSourceColor() : HdrSourceColor{};
+            const auto hdrForApplied = isCurrentVideoStream && frameColor.observed
+                ? videoRenderer_.HdrState() : hdr;
+            const auto appliedColor = ResolveAppliedMediaColor(parameters, videoDecoder_,
+                isCurrentVideoStream, frameColor, isCurrentVideoStream,
+                hdrForApplied.format, formatForDescription);
             json << ",\"colorRange\":" << effectiveRange
                  << ",\"colorSpace\":" << effectiveSpace
                  << ",\"colorPrimaries\":" << effectivePrimaries
                  << ",\"colorTransfer\":" << effectiveTransfer
+                 << ",\"colorRangeApplied\":" << appliedColor.range.value
+                 << ",\"colorSpaceApplied\":" << appliedColor.space.value
+                 << ",\"colorPrimariesApplied\":" << appliedColor.primaries.value
+                 << ",\"colorTransferApplied\":" << appliedColor.transfer.value
+                 << ",\"colorRangeAppliedSource\":\"" << MediaColorSourceName(appliedColor.range.source) << "\""
+                 << ",\"colorSpaceAppliedSource\":\"" << MediaColorSourceName(appliedColor.space.source) << "\""
+                 << ",\"colorPrimariesAppliedSource\":\"" << MediaColorSourceName(appliedColor.primaries.source) << "\""
+                 << ",\"colorTransferAppliedSource\":\"" << MediaColorSourceName(appliedColor.transfer.source) << "\""
                  << ",\"chromaLocation\":" << parameters->chroma_location
                  << ",\"fieldOrder\":" << parameters->field_order
                  << ",\"level\":" << parameters->level;
@@ -9513,9 +10299,6 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                 parameters->nb_coded_side_data, AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
             const auto* lightData = av_packet_side_data_get(parameters->coded_side_data,
                 parameters->nb_coded_side_data, AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
-            HdrProcessor streamHdr;
-            streamHdr.ConfigureStream(parameters);
-            const auto hdr = streamHdr.State();
             const auto formatName = std::string(HdrProcessor::FormatName(hdr.format));
             const auto processingPath = std::string(HdrProcessor::ProcessingPathName(hdr.processingPath));
             json << ",\"hdrFormat\":\"" << EscapeJson(formatName) << "\""

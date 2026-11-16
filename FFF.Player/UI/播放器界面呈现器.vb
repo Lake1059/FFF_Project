@@ -27,6 +27,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private ReadOnly 暂停图标 As Image
     Private ReadOnly 解码按钮 As LakeUI.ModernButton
     Private ReadOnly HDR按钮 As LakeUI.ModernButton
+    Private ReadOnly GainMap按钮 As LakeUI.ModernButton
     Private ReadOnly 视频编码按钮 As LakeUI.ModernButton
     Private ReadOnly 音频编码按钮 As LakeUI.ModernButton
     Private ReadOnly 声道数按钮 As LakeUI.ModernButton
@@ -34,6 +35,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private ReadOnly 时间标签 As LakeUI.HtmlColorLabel
     Private ReadOnly 状态栏 As LakeUI.ModernPanel
     Private ReadOnly HDR占位 As Control
+    Private ReadOnly GainMap占位 As Control
     Private ReadOnly 视频编码占位 As Control
     Private ReadOnly 音频编码占位 As Control
     Private ReadOnly 声道数占位 As Control
@@ -43,6 +45,7 @@ Friend NotInheritable Class 播放器界面呈现器
     Private ReadOnly 双耳状态提供器 As Func(Of 双耳状态)
     Private ReadOnly 正在切换提供器 As Func(Of Boolean)
     Private ReadOnly 解码器提供器 As Func(Of 解码模式)
+    Private ReadOnly GainMap启用提供器 As Func(Of Boolean)
     Private ReadOnly 刷新计时器 As LakeUI.PrecisionTimer
 
     Private 正在更新进度条 As Boolean
@@ -71,6 +74,7 @@ Friend NotInheritable Class 播放器界面呈现器
                    暂停图标 As Image,
                    解码按钮 As LakeUI.ModernButton,
                    HDR按钮 As LakeUI.ModernButton,
+                   GainMap按钮 As LakeUI.ModernButton,
                    视频编码按钮 As LakeUI.ModernButton,
                    音频编码按钮 As LakeUI.ModernButton,
                    声道数按钮 As LakeUI.ModernButton,
@@ -78,6 +82,7 @@ Friend NotInheritable Class 播放器界面呈现器
                    时间标签 As LakeUI.HtmlColorLabel,
                    状态栏 As LakeUI.ModernPanel,
                    HDR占位 As Control,
+                   GainMap占位 As Control,
                    视频编码占位 As Control,
                    音频编码占位 As Control,
                    声道数占位 As Control,
@@ -86,7 +91,8 @@ Friend NotInheritable Class 播放器界面呈现器
                    快照提供器 As Func(Of 播放器快照),
                    双耳状态提供器 As Func(Of 双耳状态),
                    正在切换提供器 As Func(Of Boolean),
-                   解码器提供器 As Func(Of 解码模式))
+                   解码器提供器 As Func(Of 解码模式),
+                   GainMap启用提供器 As Func(Of Boolean))
         Me.进度条 = 进度条
         Me.音量条 = 音量条
         Me.播放暂停按钮 = 播放暂停按钮
@@ -94,6 +100,7 @@ Friend NotInheritable Class 播放器界面呈现器
         Me.暂停图标 = 暂停图标
         Me.解码按钮 = 解码按钮
         Me.HDR按钮 = HDR按钮
+        Me.GainMap按钮 = GainMap按钮
         Me.视频编码按钮 = 视频编码按钮
         Me.音频编码按钮 = 音频编码按钮
         Me.声道数按钮 = 声道数按钮
@@ -101,6 +108,7 @@ Friend NotInheritable Class 播放器界面呈现器
         Me.时间标签 = 时间标签
         Me.状态栏 = 状态栏
         Me.HDR占位 = HDR占位
+        Me.GainMap占位 = GainMap占位
         Me.视频编码占位 = 视频编码占位
         Me.音频编码占位 = 音频编码占位
         Me.声道数占位 = 声道数占位
@@ -110,6 +118,7 @@ Friend NotInheritable Class 播放器界面呈现器
         Me.双耳状态提供器 = 双耳状态提供器
         Me.正在切换提供器 = 正在切换提供器
         Me.解码器提供器 = 解码器提供器
+        Me.GainMap启用提供器 = GainMap启用提供器
         刷新计时器 = New LakeUI.PrecisionTimer With {
             .Interval = 100,
             .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
@@ -181,6 +190,7 @@ Friend NotInheritable Class 播放器界面呈现器
         If 图片模式已启用 Then
             设置时间戳文本(TimeSpan.Zero, TimeSpan.Zero)
             刷新HDR按钮(快照)
+            刷新GainMap按钮(快照)
             RaiseEvent 播放状态已刷新(Me, EventArgs.Empty)
             Return
         End If
@@ -214,6 +224,7 @@ Friend NotInheritable Class 播放器界面呈现器
             设置时间戳文本(快照.播放位置, If(快照.已知总时长, 快照.总时长, TimeSpan.Zero))
         End If
         刷新HDR按钮(快照)
+        刷新GainMap按钮(快照)
         RaiseEvent 播放状态已刷新(Me, EventArgs.Empty)
     End Sub
 
@@ -246,6 +257,7 @@ Friend NotInheritable Class 播放器界面呈现器
         End Try
 
         刷新HDR按钮(快照)
+        刷新GainMap按钮(快照)
     End Sub
 
     Friend Sub 媒体已打开(保留当前范围 As Boolean)
@@ -578,8 +590,25 @@ Friend NotInheritable Class 播放器界面呈现器
         End Select
     End Sub
 
+    Private Sub 刷新GainMap按钮(快照 As 播放器快照)
+        ' 判可见只用"静态图片 + gainmap.applyOk && baseAvailable"，**绝不**用 是HDR源——
+        ' GainMap 也可能出现在 SDR 源上。视频、普通无增益图、以及 decoded_not_applied /
+        ' fail_closed_*（未真施加或没有可回退底图）一律不显示按钮。
+        Dim 信息 = 当前媒体信息
+        Dim gainMap = 信息?.GainMap
+        Dim 可见 = 快照 IsNot Nothing AndAlso 信息 IsNot Nothing AndAlso
+            信息.是静态图片 AndAlso gainMap IsNot Nothing AndAlso gainMap.可用
+        设置配对可见(GainMap按钮, GainMap占位, 可见)
+        If Not 可见 Then Return
+
+        ' 文本以原生实际开关（控制器镜像，仅在原生 setter 成功后才提交）为准：
+        ' 启用 = 看到的是 GainMap 施加缓冲；关闭 = 看到的是原始底图。
+        Dim 启用 = GainMap启用提供器 IsNot Nothing AndAlso GainMap启用提供器()
+        设置自适应文本(GainMap按钮, If(启用, "GainMap", "原始"))
+    End Sub
+
     Private Sub 更新全部自适应宽度()
-        For Each 按钮 In {解码按钮, HDR按钮, 视频编码按钮, 音频编码按钮, 双耳按钮}
+        For Each 按钮 In {解码按钮, HDR按钮, GainMap按钮, 视频编码按钮, 音频编码按钮, 双耳按钮}
             更新自适应宽度(按钮)
         Next
         更新时间戳自适应宽度(创建时间戳测量文本(时间标签.Text), True)
