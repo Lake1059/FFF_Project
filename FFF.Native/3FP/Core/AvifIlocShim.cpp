@@ -425,9 +425,12 @@ bool AvifIlocShim::RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& 
     output.insert(output.end(), newMeta.begin(), newMeta.end());
     output.insert(output.end(), bytes.begin() + static_cast<std::ptrdiff_t>(meta.end), bytes.end());
     output.insert(output.end(), copied.begin(), copied.end());
-    bytes = std::move(output);
-    detail = "Merged " + std::to_string(target->extents.size()) +
+    // Build the success detail before replacing the caller's buffer: if the
+    // allocation throws inside this noexcept boundary, bytes must stay unchanged.
+    auto success = "Merged " + std::to_string(target->extents.size()) +
         " extents of primary item " + std::to_string(primaryItemId) + " into one.";
+    bytes = std::move(output);
+    detail = std::move(success);
     if (mergedExtents != nullptr) *mergedExtents = static_cast<std::int32_t>(target->extents.size());
     return true;
 } catch (...) {
