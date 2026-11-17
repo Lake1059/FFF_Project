@@ -234,7 +234,7 @@ Public Class Form设置_设备与性能
         蓝牙编码行.Size = New Size(617, 42)
 
         蓝牙编码标签.AutoSize = False
-        蓝牙编码标签.Dock = DockStyle.Left
+        蓝牙编码标签.Dock = DockStyle.None
         蓝牙编码标签.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         蓝牙编码标签.Text = "A2DP 编码"
         蓝牙编码标签.TextAlign = ContentAlignment.MiddleLeft
@@ -243,7 +243,7 @@ Public Class Form设置_设备与性能
         蓝牙编码.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         蓝牙编码.BorderRadius = 10
         蓝牙编码.BorderSize = 0
-        蓝牙编码.Dock = DockStyle.Left
+        蓝牙编码.Dock = DockStyle.None
         蓝牙编码.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
         蓝牙编码.Name = "蓝牙编码"
         蓝牙编码.Size = New Size(160, 32)
@@ -261,17 +261,18 @@ Public Class Form设置_设备与性能
 
         Dim 提前量标签 As New Label With {
             .AutoSize = False,
-            .Dock = DockStyle.Left,
+            .Dock = DockStyle.None,
             .ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255)),
             .Text = "额外提前量 ms",
             .TextAlign = ContentAlignment.MiddleLeft,
-            .Size = New Size(90, 32)
+            .Name = "蓝牙提前量标签",
+            .Size = New Size(110, 32)
         }
 
         蓝牙提前量.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         蓝牙提前量.BorderRadius = 10
         蓝牙提前量.BorderSize = 0
-        蓝牙提前量.Dock = DockStyle.Left
+        蓝牙提前量.Dock = DockStyle.None
         蓝牙提前量.Padding = New Padding(10, 0, 10, 0)
         蓝牙提前量.Size = New Size(80, 32)
         蓝牙提前量.WaterText = "0"
@@ -279,10 +280,11 @@ Public Class Form设置_设备与性能
 
         Dim 编码说明 As New Label With {
             .AutoSize = False,
-            .Dock = DockStyle.Fill,
+            .Dock = DockStyle.None,
             .ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255)),
             .Text = "自动=协议中值；手动=codec 表",
             .TextAlign = ContentAlignment.MiddleLeft,
+            .Name = "蓝牙编码说明",
             .Padding = New Padding(10, 0, 0, 0)
         }
         蓝牙编码行.Controls.Add(编码说明)
@@ -330,6 +332,35 @@ Public Class Form设置_设备与性能
         AddHandler 蓝牙提前量.Leave, AddressOf 蓝牙提前量_Leave
         AddHandler 蓝牙检测按钮.Click, AddressOf 蓝牙检测按钮_Click
         AddHandler 蓝牙编码.SelectedIndexChanged, AddressOf 蓝牙编码_SelectedIndexChanged
+        AddHandler 蓝牙编码行.Resize, AddressOf 蓝牙编码行_Resize
+        布局蓝牙编码行()
+    End Sub
+
+    ''' <summary>
+    ''' 蓝牙编码行不用 Dock=Left：Dpi 缩放后 Dock 会按旧宽度重排，标签和输入框会叠在一起。
+    ''' 这里按固定列宽做一次显式布局，列宽随行高同比缩放；说明列吃掉剩余宽度。
+    ''' </summary>
+    Private Sub 布局蓝牙编码行()
+        If 蓝牙编码行 Is Nothing OrElse 蓝牙编码行.IsDisposed Then Return
+        Dim 行宽 = 蓝牙编码行.ClientSize.Width
+        If 行宽 <= 0 Then Return
+        Dim s = Math.Max(1.0F, 蓝牙编码行.Height / 42.0F)
+        Dim 顶 = CInt(8 * s)
+        Dim 高 = CInt(32 * s)
+        ' 固定列：A2DP 编码标签 80、编码下拉 160、额外提前量标签 110、数字框 80。
+        蓝牙编码标签.SetBounds(0, 顶, CInt(80 * s), 高)
+        蓝牙编码.SetBounds(CInt(80 * s), 顶, CInt(160 * s), 高)
+        Dim 提前量标签 = TryCast(蓝牙编码行.Controls("蓝牙提前量标签"), Label)
+        If 提前量标签 IsNot Nothing Then 提前量标签.SetBounds(CInt(240 * s), 顶, CInt(110 * s), 高)
+        蓝牙提前量.SetBounds(CInt(350 * s), 顶, CInt(80 * s), 高)
+        Dim 编码说明 = TryCast(蓝牙编码行.Controls("蓝牙编码说明"), Label)
+        If 编码说明 IsNot Nothing Then
+            编码说明.SetBounds(CInt(430 * s), 顶, Math.Max(0, 行宽 - CInt(430 * s)), 高)
+        End If
+    End Sub
+
+    Private Sub 蓝牙编码行_Resize(sender As Object, e As EventArgs)
+        布局蓝牙编码行()
     End Sub
 
     Private Sub 蓝牙开关_CheckedChanged(sender As Object, e As EventArgs)

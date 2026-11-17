@@ -161,6 +161,7 @@
     <ClInclude Include="3FP\Hdr\HdrMetadataParse.h" />
     <ClInclude Include="3FP\Hdr\HdrToneCurve.h" />
     <ClInclude Include="3FP\Render\ShaderBytecode.h" />
+    <ClInclude Include="3FP\Render\SmtcController.h" />
     <ClInclude Include="3FP\Render\VideoRenderer.h" />
     <ClInclude Include="3FR\Api\FFF.Native.Api.h" />
     <ClInclude Include="3FR\Audio\AudioTrackEncoder.h" />
@@ -203,6 +204,7 @@
     <ClCompile Include="3FP\Hdr\HdrMetadataParse.cpp" />
     <ClCompile Include="3FP\Hdr\HdrToneCurve.cpp" />
     <ClCompile Include="3FP\Render\VideoRenderer.cpp" />
+    <ClCompile Include="3FP\Render\SmtcController.cpp" />
     <ClCompile Include="3FP\Render\NvidiaVideoExtensions.cpp" />
     <ClCompile Include="3FP\Render\CudaD3D11Interop.cpp" />
     <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp" />

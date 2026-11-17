@@ -80,6 +80,8 @@ Public NotInheritable Class 播放器控制器
 
     Public Event 状态已变化 As EventHandler
     Public Event 媒体已打开 As EventHandler(Of 播放器媒体事件参数)
+    ''' <summary>首帧真正上屏后转发一次；系统媒体缩略图在没有封面时用它补第一帧。</summary>
+    Public Event 首帧呈现 As EventHandler(Of 首帧呈现事件参数)
     Public Event 播放结束 As EventHandler
     Public Event 播放错误 As EventHandler(Of 播放器错误事件参数)
     Public Event 操作提示 As EventHandler(Of 播放器操作提示事件参数)
@@ -274,6 +276,28 @@ Public NotInheritable Class 播放器控制器
     ''' 由调用方回落到屏幕抓取。</summary>
     Friend Function 读取原始帧() As Bitmap
         Return 安全读取会话(Function(目标) 目标.读取原始帧(), Nothing)
+    End Function
+
+    ''' <summary>系统媒体缩略图用：优先取 SDR 合成帧（HDR 源也能得到可直接上屏的
+    ''' 8 位图像），失败再回落到源分辨率原帧；没有画面时返回 Nothing。</summary>
+    Friend Function 读取缩略图帧() As Bitmap
+        Dim 目标 = 会话
+        If 已释放 OrElse 目标 Is Nothing Then Return Nothing
+        Try
+            Return 目标.读取SDR合成帧()
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        Catch ex As Exception
+            Debug.WriteLine("SMTC：读取 SDR 缩略图帧失败（回落原帧）：" & ex.GetType().Name)
+        End Try
+        Try
+            Return 目标.读取原始帧()
+        Catch ex As ObjectDisposedException
+        Catch ex As 播放器异常
+        Catch ex As Exception
+            Debug.WriteLine("SMTC：读取原始缩略图帧失败（忽略）：" & ex.GetType().Name)
+        End Try
+        Return Nothing
     End Function
 
     Friend Function 读取音频峰值() As Single()
@@ -1945,6 +1969,7 @@ Public NotInheritable Class 播放器控制器
     Private Sub 添加会话事件(目标 As 播放器会话)
         AddHandler 目标.状态变化, AddressOf 会话_状态变化
         AddHandler 目标.打开完成, AddressOf 会话_打开完成
+        AddHandler 目标.首帧呈现, AddressOf 会话_首帧呈现
         AddHandler 目标.操作完成, AddressOf 会话_操作完成
         AddHandler 目标.播放结束, AddressOf 会话_播放结束
         AddHandler 目标.色彩模式变化, AddressOf 会话_色彩模式变化
@@ -1955,6 +1980,7 @@ Public NotInheritable Class 播放器控制器
     Private Sub 移除会话事件(目标 As 播放器会话)
         RemoveHandler 目标.状态变化, AddressOf 会话_状态变化
         RemoveHandler 目标.打开完成, AddressOf 会话_打开完成
+        RemoveHandler 目标.首帧呈现, AddressOf 会话_首帧呈现
         RemoveHandler 目标.操作完成, AddressOf 会话_操作完成
         RemoveHandler 目标.播放结束, AddressOf 会话_播放结束
         RemoveHandler 目标.色彩模式变化, AddressOf 会话_色彩模式变化
@@ -1974,6 +2000,11 @@ Public NotInheritable Class 播放器控制器
                 New 播放器媒体事件参数(当前文件路径, 会话.当前媒体信息, 会话.当前快照, False))
         Catch ex As 播放器异常
         End Try
+    End Sub
+
+    Private Sub 会话_首帧呈现(sender As Object, e As 首帧呈现事件参数)
+        If sender IsNot 会话 Then Return
+        RaiseEvent 首帧呈现(Me, e)
     End Sub
 
     Private Sub 会话_操作完成(sender As Object, e As 播放器事件参数)
