@@ -79,7 +79,7 @@ struct GainMapProbeResult {
 
     // apply
     bool applyOk = false;
-    std::string applyMode;     // half | rgb16 | none
+    std::string applyMode;     // half | rgb_f32 | jpeg | none
     double statsP50 = 0.0;
     double statsMaxLinear = 0.0;
     double statsOver1Pct = 0.0;

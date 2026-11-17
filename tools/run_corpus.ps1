@@ -167,6 +167,10 @@ function Resolve-Expected($e, $isExt, $map, $fileKey) {
         family        = $null
         metaSource    = $null
         gainmapPresent = $null
+        maxLinear     = $null
+        maxLinearTolerance = $null
+        p50           = $null
+        p50Tolerance  = $null
     }
     if ($map.ContainsKey($fileKey)) {
         $m = $map[$fileKey]
@@ -175,6 +179,10 @@ function Resolve-Expected($e, $isExt, $map, $fileKey) {
         $row.family = $m.family
         $row.metaSource = $m.metaSource
         $row.gainmapPresent = $m.gainmapPresent
+        $row.maxLinear = $m.maxLinear
+        $row.maxLinearTolerance = $m.maxLinearTolerance
+        $row.p50 = $m.p50
+        $row.p50Tolerance = $m.p50Tolerance
         return $row
     }
     if ($isExt) {
@@ -190,6 +198,10 @@ function Resolve-Expected($e, $isExt, $map, $fileKey) {
     $row.family = $x.family
     $row.metaSource = $x.metaSource
     $row.gainmapPresent = $x.gainmapPresent
+    $row.maxLinear = $x.maxLinear
+    $row.maxLinearTolerance = $x.maxLinearTolerance
+    $row.p50 = $x.p50
+    $row.p50Tolerance = $x.p50Tolerance
     return $row
 }
 
@@ -228,6 +240,20 @@ foreach ($e in $entries) {
     # gainmapPresent
     if ($null -ne $want.gainmapPresent -and [bool]$a.gainmap.present -ne [bool]$want.gainmapPresent) {
         $diffs += "gainmapPresent:exp=$($want.gainmapPresent)/got=$($a.gainmap.present)"
+    }
+    # Optional numeric oracle: catches an implementation that keeps the right
+    # verdict/form but copies the base buffer through the apply path.
+    if ($null -ne $want.maxLinear -and $null -ne $a.apply.stats.maxLinear) {
+        $tol = if ($null -ne $want.maxLinearTolerance) { [double]$want.maxLinearTolerance } else { 1e-4 }
+        if ([math]::Abs([double]$a.apply.stats.maxLinear - [double]$want.maxLinear) -gt $tol) {
+            $diffs += "maxLinear:exp=$($want.maxLinear)/got=$($a.apply.stats.maxLinear)"
+        }
+    }
+    if ($null -ne $want.p50 -and $null -ne $a.apply.stats.p50) {
+        $tol = if ($null -ne $want.p50Tolerance) { [double]$want.p50Tolerance } else { 1e-4 }
+        if ([math]::Abs([double]$a.apply.stats.p50 - [double]$want.p50) -gt $tol) {
+            $diffs += "p50:exp=$($want.p50)/got=$($a.apply.stats.p50)"
+        }
     }
 
     $rows += [pscustomobject]@{

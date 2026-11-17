@@ -1150,6 +1150,10 @@ private:
     // SetGainMapEnabled. Worker-thread state: read in the frame path, written by
     // the queued setter command.
     bool gainMapEnabled_ = true;
+    // SetGainMapEnabled's 5 s wait is not a guarantee that the command ran.
+    // On timeout the caller bumps this generation; a queued toggle that has not
+    // started yet sees the mismatch and returns without touching the session.
+    std::atomic<std::uint64_t> gainMapToggleGeneration_{0};
     // One-shot guard for the toggle-off fallback note (baseRgba unavailable):
     // RawTrace at most once per open so a still frame never floods the log.
     bool gainMapBaseFallbackNoted_ = false;

@@ -65,8 +65,9 @@ Public NotInheritable Class 播放进度存储
     End Sub
 
     ''' <summary>进度文件完整路径：默认在 %LOCALAPPDATA%\3FP\播放进度（用户可写，
-    ''' Program Files 下 exe 目录不可写）；取不到/不可写时回落 exe 目录并显式日志。
-    ''' 测试可经 <see cref="测试用重定向"/> 重定向。</summary>
+    ''' Program Files 下 exe 目录不可写）。仅在 %LOCALAPPDATA% 无法解析时回落 exe 目录并
+    ''' 显式日志；目录已解析但建目录/落盘被安全软件或组策略拦截时保持默认路径，错误由
+    ''' 落盘路径记录。测试可经 <see cref="测试用重定向"/> 重定向。</summary>
     Public Shared ReadOnly Property 文件路径 As String
         Get
             If Not String.IsNullOrWhiteSpace(_测试路径) Then Return _测试路径
@@ -74,8 +75,9 @@ Public NotInheritable Class 播放进度存储
         End Get
     End Property
 
-    ''' <summary>解析默认数据目录。首选 %LOCALAPPDATA%\3FP\播放进度；该目录不可写
-    ''' （组策略锁定/盘不可用）时回落到 exe 目录，并显式写一条日志，绝不静默失效。</summary>
+    ''' <summary>解析默认数据目录。首选 %LOCALAPPDATA%\3FP\播放进度；仅当该路径无法解析时
+    ''' 回落到 exe 目录并显式写日志。目录解析成功但 CreateDirectory 被拦截时不切换路径——
+    ''' 否则受管环境会把默认路径漂移到 exe 目录，违背默认路径契约；写入错误由落盘路径记录。</summary>
     Private Shared Function 解析数据目录() As String
         Try
             Dim local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)

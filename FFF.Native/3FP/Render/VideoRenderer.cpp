@@ -7846,10 +7846,13 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     }
 
     const bool sourceYuv = directYuv || (packedYuv && sourceDescriptor->nb_components >= 3);
-    if (sourceYuv && !fff::render::CicpMatrixSupported(frame->colorspace)) {
-        SetError("The source YUV matrix requires an unsupported component transform.");
-        return FFFResult::NotSupported;
-    }
+    // Unknown component transforms (ICTCP, IPT_C2, YCGCO_RE/RO, SMPTE2085,
+    // CHROMA_DERIVED_*) must not make a playable file fail. sws already has a
+    // documented fallback in ToSwsColorSpace: Rec.709 for HD/UHD, Rec.601 for
+    // SD. Keep the result honest by leaving the media-info Space field marked
+    // ignored (CicpMatrixSupported is still false); this path only guarantees
+    // playback, not an exact ICTCP->RGB conversion.
+    (void)sourceYuv;
 
     // The size that gets uploaded has to be settled before the CPU conversion below,
     // because the layout-0 arm folds an engaged downscale into that conversion (see the

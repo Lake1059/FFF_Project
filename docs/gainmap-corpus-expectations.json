@@ -3,7 +3,7 @@
   "corpus": "internal+external",
   "generatedAt": "2026-11-16",
   "note": "Versioned expected values for tools/run_corpus.ps1 (-Expected). Internal 38 + external 41 = 79. Compared fields: verdict/form/family/metaSource/gainmapPresent. rationale non-empty where expectation DIFFERS from v1 probeVerdict, for unimplemented JXL, or for oracle classification revisions. Revisions this round: (1) GM-P1-06 iso_tmap_bad_version.heic -> not_gainmap (unrecognized tmap version ignored, show base); (2) 6x jpeg_uhdr family ultra_hdr->iso, metaSource->xmp; (3) 2x jpeg_adobe_gcontainer family adobe->iso, metaSource->gcontainer; (4) webp gainmap form none->webp_gainmap. family vocabulary is ONLY iso/apple/vendor128 (GainMapJpeg.h:38); no ultra_hdr/adobe/webp family. No unimplemented capability written as applied.",
-  "fields": "verdict/form/family/metaSource/gainmapPresent",
+  "fields": "verdict/form/family/metaSource/gainmapPresent (+ optional maxLinear/p50 numeric oracle)",
   "entries": [
     {
       "file": "apple_auxc/apple_auxc_hevc_1ch_0base_single.heic",
@@ -64,7 +64,11 @@
       "family": "apple",
       "metaSource": "makenote",
       "gainmapPresent": true,
-      "rationale": ""
+      "rationale": "",
+      "maxLinear": 0.2126,
+      "maxLinearTolerance": 0.002,
+      "p50": 0.0715576,
+      "p50Tolerance": 0.002
     },
     {
       "file": "bitbase/vendor_128base_1ch.heic",
@@ -74,7 +78,11 @@
       "family": "vendor128",
       "metaSource": "xmp",
       "gainmapPresent": true,
-      "rationale": ""
+      "rationale": "",
+      "maxLinear": 0.2126,
+      "maxLinearTolerance": 0.002,
+      "p50": 0.0715576,
+      "p50Tolerance": 0.002
     },
     {
       "file": "bitbase/vendor_128base_3ch_1x1.heic",
@@ -134,7 +142,11 @@
       "family": "iso",
       "metaSource": "tmap",
       "gainmapPresent": true,
-      "rationale": ""
+      "rationale": "",
+      "maxLinear": 0.520687,
+      "maxLinearTolerance": 0.002,
+      "p50": 0.152348,
+      "p50Tolerance": 0.002
     },
     {
       "file": "iso_tmap/iso_tmap_bad_version.heic",
@@ -626,7 +638,11 @@
       "family": "iso",
       "metaSource": null,
       "gainmapPresent": true,
-      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=applied/form=tmap。"
+      "rationale": "v1 probe 期望 verdict=fail_closed_malformed/form=tmap 与 v2 字节级复核不符；按 raw container bytes 重判为 verdict=applied/form=tmap。",
+      "maxLinear": 2.44602,
+      "maxLinearTolerance": 0.002,
+      "p50": 0.757148,
+      "p50Tolerance": 0.002
     },
     {
       "file": "seine_sdr_gainmap_srgb.jpg",

@@ -210,10 +210,11 @@ bool ParseMpf(const Buf& b, size_t tiffStart, std::vector<MpfEntry>& entries, bo
     bool le = (b.u8(tiffStart) == 'I' && b.u8(tiffStart+1) == 'I');
     if (!be && !le) return false;
     if (b.u16(tiffStart+2, be) != 42) return false;
-    uint32_t ifd = tiffStart + b.u32(tiffStart+4, be);
+    const size_t ifd = tiffStart + static_cast<size_t>(b.u32(tiffStart+4, be));
     if (!b.ok(ifd, 2)) return false;
     uint16_t cnt = b.u16(ifd, be);
-    uint32_t arrOff = 0, arrLen = 0;
+    size_t arrOff = 0;
+    uint32_t arrLen = 0;
     size_t e = ifd + 2;
     for (uint16_t i = 0; i < cnt; i++, e += 12) {
         if (!b.ok(e, 12)) return false;
@@ -222,12 +223,14 @@ bool ParseMpf(const Buf& b, size_t tiffStart, std::vector<MpfEntry>& entries, bo
             uint16_t typ = b.u16(e+2, be);
             uint32_t c = b.u32(e+4, be);
             int sz = (typ==4||typ==3) ? (typ==3?2:4) : 4;
-            arrLen = (size_t)c * 16;
-            arrOff = (c*sz <= 4) ? (uint32_t)(e+8) : (tiffStart + b.u32(e+8, be));
+            arrLen = static_cast<uint32_t>(c) * 16u;
+            arrOff = (c*static_cast<uint32_t>(sz) <= 4u)
+                ? e + 8
+                : tiffStart + static_cast<size_t>(b.u32(e+8, be));
         }
     }
     if (!arrOff || !arrLen) return false;
-    for (uint32_t o = arrOff; o + 16 <= arrOff + arrLen; o += 16) {
+    for (size_t o = arrOff; o + 16 <= arrOff + arrLen; o += 16) {
         MpfEntry me;
         me.attr  = b.u32(o, be);
         me.size  = b.u32(o+4, be);
@@ -255,14 +258,14 @@ bool ParseAppleMakerNoteHeadroom(const Buf& b, size_t exifPayload, float& headro
     bool le = (b.u8(t)=='I' && b.u8(t+1)=='I');
     if (!be && !le) { why="no TIFF endian"; return false; }
     if (b.u16(t+2, be) != 42) { why="bad tiff magic"; return false; }
-    uint32_t ifd0 = t + b.u32(t+4, be);
+    const size_t ifd0 = t + static_cast<size_t>(b.u32(t+4, be));
     // find ExifIFD ptr 0x8769
-    uint32_t exifIfd = 0;
+    size_t exifIfd = 0;
     {
         uint16_t cnt = b.u16(ifd0, be);
         size_t e = ifd0 + 2;
         for (uint16_t i=0;i<cnt;i++,e+=12) {
-            if (b.u16(e,be)==0x8769) { exifIfd = t + b.u32(e+8,be); break; }
+            if (b.u16(e,be)==0x8769) { exifIfd = t + static_cast<size_t>(b.u32(e+8,be)); break; }
         }
     }
     if (!exifIfd) { why="no ExifIFD"; return false; }

@@ -687,8 +687,11 @@ bool IsStaticImageDemuxer(const AVInputFormat* inputFormat) noexcept {
     if (inputFormat == nullptr || inputFormat->name == nullptr) return false;
     const std::string_view name(inputFormat->name);
     // FFmpeg's single-image demuxers are image2 or codec-specific *_pipe
-    // demuxers. Animated image demuxers deliberately remain timed video.
+    // demuxers. JPEG MPF is the UltraHDR carrier: it is a still image even
+    // though its demuxer name does not end in _pipe. Animated image demuxers
+    // deliberately remain timed video.
     return name == "image2" || name == "image2pipe" || name == "ico" ||
+        name == "jpeg_mpf" ||
         (name.size() > 5 && name.ends_with("_pipe"));
 }
 
@@ -721,6 +724,39 @@ constexpr std::int64_t MaxAvifProbeBytes = 16 * 1024 * 1024;
 bool IsStillImageContainerName(const std::string& path) noexcept {
     // Compared against the extension without its dot.
     static const std::string_view kNames[] = {"avif", "avifs", "heic", "heif", "heics", "heifs"};
+    const auto dot = path.find_last_of('.');
+    if (dot == std::string::npos || dot + 1 >= path.size()) return false;
+    const std::string_view extension(path.data() + dot + 1, path.size() - dot - 1);
+    for (const auto name : kNames) {
+        if (extension.size() != name.size()) continue;
+        bool match = true;
+        for (std::size_t index = 0; index < name.size(); ++index) {
+            const auto character = extension[index];
+            const auto lower = character >= 'A' && character <= 'Z'
+                ? static_cast<char>(character - 'A' + 'a') : character;
+            if (lower != name[index]) { match = false; break; }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+// RawStillSource creates this synthetic context instead of letting a demuxer
+// own it. It has no AVIO and no demuxer private state, so avformat_close_input
+// is the wrong teardown: avformat_free_context is the matching destructor.
+bool IsSyntheticRawFormat(const AVFormatContext* format) noexcept {
+    return format != nullptr && format->iformat != nullptr &&
+        format->iformat->name != nullptr &&
+        std::string_view(format->iformat->name) == "3fp_raw_pipe";
+}
+
+// The probe can recognize JPEG/UltraHDR and WebP gainmap carriers even though
+// they are not ISO-BMFF still images. Keep this predicate separate from
+// IsStillImageContainerName: the latter gates iloc/layered repair and must stay
+// AVIF/HEIC-only.
+bool IsGainMapContainerName(const std::string& path) noexcept {
+    if (IsStillImageContainerName(path)) return true;
+    static const std::string_view kNames[] = {"jpg", "jpeg", "webp"};
     const auto dot = path.find_last_of('.');
     if (dot == std::string::npos || dot + 1 >= path.size()) return false;
     const std::string_view extension(path.data() + dot + 1, path.size() - dot - 1);
@@ -3940,8 +3976,8 @@ AVFrame* PlayerSession::BuildGainMapPresentationFrame(const std::vector<float>* 
     if (buffer == nullptr || buffer->empty() || width <= 0 || height <= 0) return nullptr;
     AVFrame* frame = av_frame_alloc();
     if (frame == nullptr) return nullptr;
-    // Exact attribute set of the historical applied-buffer path, so the renderer
-    // treats both buffers identically.
+    // RGBAF32: float gain-map values are >1.0 and the renderer's layout-3
+    // path has an explicit R32 texture branch (VideoRenderer.cpp:5858).
     frame->format = AV_PIX_FMT_RGBAF32LE;
     frame->width = width;
     frame->height = height;
@@ -3955,8 +3991,19 @@ AVFrame* PlayerSession::BuildGainMapPresentationFrame(const std::vector<float>* 
         av_frame_free(&frame);
         return nullptr;
     }
-    const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4 * sizeof(float);
-    std::memcpy(frame->data[0], buffer->data(), bytes);
+    const std::size_t rowElements = static_cast<std::size_t>(width) * 4;
+    const std::size_t requiredElements = rowElements * static_cast<std::size_t>(height);
+    const std::size_t rowBytes = rowElements * sizeof(float);
+    if (buffer->size() < requiredElements) {
+        av_frame_free(&frame);
+        return nullptr;
+    }
+    for (int y = 0; y < height; ++y) {
+        std::memcpy(
+            frame->data[0] + static_cast<std::ptrdiff_t>(y) * frame->linesize[0],
+            buffer->data() + static_cast<std::size_t>(y) * rowElements,
+            rowBytes);
+    }
     return frame;
 }
 
@@ -4026,13 +4073,20 @@ FFFResult PlayerSession::SetGainMapEnabled(const bool enabled) noexcept {
     };
     auto completion = std::make_shared<Completion>();
     try {
+        const auto generation = gainMapToggleGeneration_.load(std::memory_order_acquire);
         {
             std::lock_guard lock(mutex_);
             if (terminate_) return FFFResult::InvalidState;
-            commands_.push_back([this, completion, enabled] {
+            commands_.push_back([this, completion, enabled, generation] {
                 auto result = FFFResult::Success;
                 try {
-                    result = ApplyGainMapEnabledOnWorker(enabled);
+                    if (generation != gainMapToggleGeneration_.load(std::memory_order_acquire)) {
+                        // The caller already timed out and returned. Do not
+                        // change the screen or gainMapEnabled_ behind its back.
+                        result = FFFResult::NativeFailure;
+                    } else {
+                        result = ApplyGainMapEnabledOnWorker(enabled);
+                    }
                 } catch (...) {
                     result = FFFResult::NativeFailure;
                 }
@@ -4047,8 +4101,10 @@ FFFResult PlayerSession::SetGainMapEnabled(const bool enabled) noexcept {
         commandCondition_.notify_one();
         std::unique_lock<std::mutex> done(completion->mutex);
         if (!completion->condition.wait_for(done, std::chrono::seconds(5),
-                [&completion] { return completion->finished; }))
+                [&completion] { return completion->finished; })) {
+            gainMapToggleGeneration_.fetch_add(1, std::memory_order_release);
             return FFFResult::NativeFailure;
+        }
         return completion->result;
     } catch (...) {
         return FFFResult::NativeFailure;
@@ -4434,7 +4490,18 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
 
 void PlayerSession::CloseFormat(AVFormatContext** format,
     std::unique_ptr<SharedFileInput>& io) noexcept {
-    if (format != nullptr && *format != nullptr) avformat_close_input(format);
+    if (format != nullptr && *format != nullptr) {
+        if (IsSyntheticRawFormat(*format)) {
+            // RawStillSource::CreateFormatContext hands us a context with
+            // AVFMT_NOFILE and pb == nullptr. There is no AVIO or demuxer
+            // private allocation to close; avformat_close_input would run the
+            // demuxer teardown against that synthetic format and crash.
+            avformat_free_context(*format);
+            *format = nullptr;
+        } else {
+            avformat_close_input(format);
+        }
+    }
     io.reset();
 }
 
@@ -5427,16 +5494,15 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         }
     }
     RawTrace("DoOpen: size check done");
-    // Private gainmap detection (still images only). We run the probe in
-    // base-only mode: container + metadata + gainmap decode are identified and
-    // the verdict recorded; the per-pixel HDR application on the player's own
-    // decoded AVFrame is a follow-up (see docs/GAINMAP_PRIVATE_2026-11-15.md).
-    // Fail-closed: a malformed gainmap carrier is logged but never promotes SDR
-    // to HDR or changes the existing still-image decode path.
+    // Private gainmap detection (still images only). We run the full probe:
+    // container + metadata + gainmap decode + per-pixel application are all
+    // performed, so the applied RGBA buffer can replace the decoded AVFrame
+    // before presentation. Fail-closed: a malformed gainmap carrier is logged
+    // but never promotes SDR to HDR or changes the existing still-image path.
     gainmapInfo_ = GainMapProbeResult{};
     gainMapEnabled_ = true;
     gainMapBaseFallbackNoted_ = false;
-    if (staticImage_ && IsStillImageContainerName(path)) {
+    if (staticImage_ && IsGainMapContainerName(path)) {
         try {
             // Full probe: decode base + gainmap and apply the math. The applied
             // RGBA buffer is later used to replace the decoded AVFrame before

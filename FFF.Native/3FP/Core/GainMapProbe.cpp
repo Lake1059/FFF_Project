@@ -719,10 +719,20 @@ bool DecodeBufferToRgba(const std::vector<uint8_t>& buf, int streamIdx,
     fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
     fmt->probesize = 1 << 20;
     fmt->max_analyze_duration = AV_TIME_BASE;
+    // AVFMT_FLAG_CUSTOM_IO means avformat_close_input() must NOT be expected to
+    // free pb/buffer; the context and its av_malloc'd buffer stay ours. Player-
+    // Session calls this probe for every gainmap still, so the old short-lived
+    // "leak is fine" assumption leaked a context + 4 KiB per open.
+    auto releaseCustomIo = [&] {
+        if (fmt) avformat_close_input(&fmt);
+        if (avio) avio_context_free(&avio);
+    };
     const AVInputFormat* fmtH = fmtHint ? av_find_input_format(fmtHint) : nullptr;
     int rc = avformat_open_input(&fmt, nullptr, fmtH, nullptr);
     if (rc < 0 && fmtH) {
         // forced demuxer rejected (e.g. wrong codec); retry auto.
+        // Keep `avio` alive for the retry; free only the rejected format shell.
+        if (fmt) { avformat_free_context(fmt); fmt = nullptr; }
         avio_seek(avio, 0, SEEK_SET); mc.pos = 0;
         fmt = avformat_alloc_context(); fmt->pb = avio;
         fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
@@ -732,6 +742,7 @@ bool DecodeBufferToRgba(const std::vector<uint8_t>& buf, int streamIdx,
     if (rc < 0) {
         char b[80]; sprintf(b, "avformat_open_input failed rc=%d", rc);
         why = b;
+        releaseCustomIo();
         return false;
     }
     // For small raw buffers, skip find_stream_info: it consumes the whole buffer
@@ -744,14 +755,14 @@ bool DecodeBufferToRgba(const std::vector<uint8_t>& buf, int streamIdx,
         for (unsigned i = 0; i < fmt->nb_streams; i++)
             if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) { vstream = i; break; }
     }
-    if (vstream < 0) { why = "no video stream"; avformat_close_input(&fmt); return false; }
+    if (vstream < 0) { why = "no video stream"; releaseCustomIo(); return false; }
     AVStream* st = fmt->streams[vstream];
     const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
-    if (!codec) { why = "no decoder"; avformat_close_input(&fmt); return false; }
+    if (!codec) { why = "no decoder"; releaseCustomIo(); return false; }
     AVCodecContext* cc = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(cc, st->codecpar);
     cc->pkt_timebase = st->time_base;
-    if (avcodec_open2(cc, codec, nullptr) < 0) { why = "avcodec_open2"; avcodec_free_context(&cc); avformat_close_input(&fmt); return false; }
+    if (avcodec_open2(cc, codec, nullptr) < 0) { why = "avcodec_open2"; avcodec_free_context(&cc); releaseCustomIo(); return false; }
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     bool got = false;
@@ -767,20 +778,18 @@ bool DecodeBufferToRgba(const std::vector<uint8_t>& buf, int streamIdx,
         avcodec_send_packet(cc, nullptr);
         while (avcodec_receive_frame(cc, frame) == 0) { got = true; break; }
     }
-    if (!got) { why = "no frame decoded"; av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); avformat_close_input(&fmt); return false; }
+    if (!got) { why = "no frame decoded"; av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); releaseCustomIo(); return false; }
     w = frame->width; h = frame->height;
     if (outColorTrc) *outColorTrc = frame->color_trc;
-    if (!FrameToRgbaFloat(frame, rgbaOut, w, h, why)) { av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); avformat_close_input(&fmt); return false; }
+    if (!FrameToRgbaFloat(frame, rgbaOut, w, h, why)) { av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); releaseCustomIo(); return false; }
     av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc);
-    avformat_close_input(&fmt);
-    // Custom-IO avio cleanup: this FFmpeg build's close_input may already have
-    // torn down pb; double-freeing here corrupts the heap. Leak is fine in a
-    // short-lived probe (process exits immediately after).
+    releaseCustomIo();
     return true;
 }
 
 // Decode base image by opening the file directly.
-bool DecodeFileBaseToRgba(const std::string& path, std::vector<float>& rgbaOut, int& w, int& h, std::string& why) {
+bool DecodeFileBaseToRgba(const std::string& path, std::vector<float>& rgbaOut, int& w, int& h, std::string& why,
+                          int* outColorTrc = nullptr) {
     rgbaOut.clear(); w = h = 0;
     AVFormatContext* fmt = avformat_alloc_context();
     if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) { why = "open_input"; return false; }
@@ -809,6 +818,7 @@ bool DecodeFileBaseToRgba(const std::string& path, std::vector<float>& rgbaOut, 
     if (!got) { avcodec_send_packet(cc, nullptr); if (avcodec_receive_frame(cc, frame) == 0) got = true; }
     if (!got) { why = "no frame"; av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); avformat_close_input(&fmt); return false; }
     w = frame->width; h = frame->height;
+    if (outColorTrc) *outColorTrc = frame->color_trc;
     if (!FrameToRgbaFloat(frame, rgbaOut, w, h, why)) { av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc); avformat_close_input(&fmt); return false; }
     av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&cc);
     avformat_close_input(&fmt);
@@ -942,11 +952,47 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     // read file
     FILE* f = fopen(pathUtf8.c_str(), "rb");
     if (!f) { R.verdict = "fail_closed_malformed"; R.reason = "cannot open file"; return R; }
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    std::vector<uint8_t> d(sz);
-    if (sz > 0 && fread(d.data(), 1, sz, f) != (size_t)sz) { fclose(f); R.verdict = "fail_closed_malformed"; R.reason = "short read"; return R; }
+    // A gainmap carrier is a still image, not a multi-gigabyte archive. The
+    // previous long/ftell path silently wrapped to a negative size above 2 GiB
+    // and then constructed an unbounded vector; fail closed before allocating.
+    constexpr std::int64_t MaxProbeBytes = 256LL * 1024 * 1024;
+    if (_fseeki64(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        R.verdict = "fail_closed_malformed";
+        R.reason = "cannot seek to end";
+        return R;
+    }
+    const auto fileSize = _ftelli64(f);
+    if (fileSize < 0) {
+        fclose(f);
+        R.verdict = "fail_closed_malformed";
+        R.reason = "cannot determine file size";
+        return R;
+    }
+    if (fileSize > MaxProbeBytes) {
+        fclose(f);
+        R.verdict = "fail_closed_malformed";
+        R.reason = "file too large for gainmap probe";
+        return R;
+    }
+    if (_fseeki64(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        R.verdict = "fail_closed_malformed";
+        R.reason = "cannot rewind file";
+        return R;
+    }
+    std::vector<uint8_t> d(static_cast<size_t>(fileSize));
+    if (fileSize > 0 && fread(d.data(), 1, static_cast<size_t>(fileSize), f) != static_cast<size_t>(fileSize)) {
+        fclose(f);
+        R.verdict = "fail_closed_malformed";
+        R.reason = "short read";
+        return R;
+    }
     fclose(f);
-    if (sz < 16) { R.reason = "file too small"; return R; }
+    if (fileSize < 16) { R.reason = "file too small"; return R; }
+    // The rest of this parser predates the 64-bit guard and uses a signed long
+    // size. It is safe here because the guard above caps the file at 256 MiB.
+    const long sz = static_cast<long>(fileSize);
 
     // ── JPEG / WebP gainmap containers ──
     bool isJpeg = (d.size() >= 3 && d[0] == 0xFF && d[1] == 0xD8);
@@ -1034,11 +1080,15 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         if (!DecodeBufferToRgba(jh.gainBytes, -1, gmRgba, gmW, gmH, why)) {
             R.verdict = "fail_closed_malformed"; R.reason = "jpeg gain decode: " + why; return R;
         }
-        // Decode base
+        // Decode base. Prefer the file path here: the custom-AVIO buffer route
+        // could select the wrong jpeg_mpf member and hand the gain-map image to
+        // the base decoder (observed as a green base under the DLL build).
         std::vector<float> baseRgba; int baseW=0, baseH=0;
         int baseTrc = 2;
-        if (!DecodeBufferToRgba(jh.baseBytes, -1, baseRgba, baseW, baseH, why, nullptr, &baseTrc)) {
-            R.verdict = "fail_closed_malformed"; R.reason = "jpeg base decode: " + why; return R;
+        if (!DecodeFileBaseToRgba(pathUtf8, baseRgba, baseW, baseH, why, &baseTrc)) {
+            if (!DecodeBufferToRgba(jh.baseBytes, -1, baseRgba, baseW, baseH, why, nullptr, &baseTrc)) {
+                R.verdict = "fail_closed_malformed"; R.reason = "jpeg base decode: " + why; return R;
+            }
         }
         R.decodeOk = true; R.decodeW = baseW; R.decodeH = baseH;
         R.decodeCodec = "mjpeg";
@@ -1219,10 +1269,17 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             }
         }
         if (jClampFired) { char cn[160]; sprintf(cn, "gain clamped to alternate headroom (gainMax=%.4f > hA=%.4f, ch=%d)", jClampGainMax, jA, jClampCh); R.notes.push_back(cn); }
-        R.appliedRgba = out;
+        // The JPEG branch used to publish only appliedRgba; the toggle worker
+        // then had no base picture and no output dimensions for BuildGainMap-
+        // PresentationFrame. Keep both buffers and the geometry with the same
+        // contract as the ISO/HEIC path.
+        R.baseRgba = std::move(lin);
+        R.outW = baseW;
+        R.outH = baseH;
         R.applyOk = true; R.applyMode = "jpeg";
         R.verdict = "applied";
         statsOn(out);
+        R.appliedRgba = std::move(out);
         return R;
     }
     // JPEG XL container: first box type "JXL " (signature box, followed by the
@@ -1242,7 +1299,8 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         return R;
     }
 
-    // sha256 placeholder (we don't link crypto; emit empty string)
+    // The probe does not link a crypto library; sha256 is intentionally empty.
+    // Callers use it as a display field only, never as content identity.
     // parse ftyp
     {
         char type[5]; long bsize, bhdr;
@@ -1716,14 +1774,6 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
 
     // grpl/altr order check: if an altr group contains both primary and gainmap items,
     // the first entity MUST be the gainmap side. If primary is first → wrong order → ignore gainmap.
-    {
-        char dbg[64]; sprintf(dbg, "groups count=%d", (int)C.groups.size()); R.notes.push_back(dbg);
-        for (size_t gi = 0; gi < C.groups.size(); gi++) {
-            const auto& g = C.groups[gi];
-            std::string ents; for (int e : g.entities) { ents += std::to_string(e) + " "; }
-            R.notes.push_back("grp id=" + std::to_string(g.groupId) + " ent=[" + ents + "]");
-        }
-    }
     if (gainmapItemId > 0 && R.present && !C.groups.empty()) {
         for (const auto& g : C.groups) {
             bool hasPrimary = false, hasGainSide = false;
@@ -1759,7 +1809,6 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         if (!SliceItem(d, C, C.primary, gridPayload, why)) {
             R.verdict="fail_closed_malformed"; R.reason="base grid slice: " + why; return R;
         }
-        { char dbg[128]; std::string hx; for(int i=0;i<(int)gridPayload.size()&&i<12;i++){char h[4];sprintf(h,"%02x ",gridPayload[i]);hx+=h;} R.notes.push_back("gridPayload: "+hx); }
         int gRows=0, gCols=0, gW=0, gH=0, gFlags=0;
         if (gridPayload.size() < 6) { R.verdict="fail_closed_malformed"; R.reason="base grid payload too short"; return R; }
         // Grid item payload: version(1) + flags(1) + rows_minus1(1) + cols_minus1(1) + dims
@@ -1938,7 +1987,6 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     // 1) tmap payload ISO 21496
     if (!tmapPayload.empty() && tmapPayload.size() >= 2 && tmapPayload[0] == 0) {
         long consumed; IsoMeta m; std::string perr;
-        { char dbg[200]; std::string hx; for(int i=0;i<(int)tmapPayload.size()&&i<64;i++){char h[4];sprintf(h,"%02x ",tmapPayload[i]);hx+=h;} R.notes.push_back("tmapPayload(" + std::to_string(tmapPayload.size()) + "): "+hx); }
         IsoParse pr = ParseIso21496(tmapPayload.data(), 1, (long)tmapPayload.size() - 1, m, consumed, perr);
         if (pr != IsoParse::Ok) {
             R.verdict = (pr == IsoParse::Unsupported) ? "fail_closed_unsupported" : "fail_closed_malformed";
@@ -1946,13 +1994,6 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             R.decodeOk = false; R.applyOk = false;
             return R;
         }
-        { char dbg[200]; sprintf(dbg, "tmap parsed ok: size=%ld consumed=%ld baseHdrLog2=%.4f altHdrLog2=%.4f gainMin0=%.4f gainMax0=%.4f gamma0=%.4f ch=%d flags=0x%02X",
-            (long)tmapPayload.size(), consumed, m.baseHdrHeadroomLog2, m.altHdrHeadroomLog2, m.gainMin[0], m.gainMax[0], m.gammaC[0], m.channels, m.rawFlags);
-          R.notes.push_back(dbg); }
-        // ISO 21496-1 reader behaviour: parse only the `consumed` canonical v0
-        // layout and IGNORE any trailing bytes (a writer may pad / append
-        // extensions). Trailing>0 must NOT reject the whole file; it is reported
-        // via the notes channel as trailingBytesIgnored=N.
         {
             long used = consumed + 1;  // +1 for the version byte at tmapPayload[0]
             long trailing = (long)tmapPayload.size() - used;
@@ -2156,12 +2197,8 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         if (m > baseMax) baseMax = m;
     }
     // R.baseRgba must carry the LINEAR base, matching the not-apply and JPEG
-    // paths. (Previously it kept the encoded sRGB values from decode time, so a
-    // consumer that linearized again got double gamma.)
-    R.baseRgba = baseRgba;
-    { char dbg[160]; sprintf(dbg, "apply: w=%.4f hB=%.4f hA=%.4f headroomLin=%.4f baseMaxLin=%.4f gainMax=%.4f gainMin=%.4f gamma=%.4f channels=%d",
-        w, hB, hA, R.headroomLinear, baseMax, ap.iso.gainMax[0], ap.iso.gainMin[0], ap.iso.gammaC[0], ap.iso.channels);
-      R.notes.push_back(dbg); }
+    // paths. It is moved into the result after the apply loop, so the peak does
+    // not hold a third full-size copy while `out` is being built.
     float fw = (float)w;
     std::vector<float> out((size_t)baseW * baseH * 4, 0.f);
     bool clampFired = false; int clampCh = -1; float clampGainMax = 0.f;
@@ -2213,9 +2250,8 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     }
     if (clampFired) { char cn[160]; sprintf(cn, "gain clamped to alternate headroom (gainMax=%.4f > hA=%.4f, ch=%d)", clampGainMax, hA, clampCh); R.notes.push_back(cn); }
 
-    R.appliedRgba = out;
     R.applyOk = true;
-    R.applyMode = "rgb16";
+    R.applyMode = "rgb_f32";
 
     // stats
     {
@@ -2234,6 +2270,10 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         R.statsMaxLinear = maxLin;
         R.statsOver1Pct = n > 0 ? (100.0 * over1 / n) : 0.0;
     }
+    // Publish both buffers without a second full-size copy. The values are
+    // already in their final form; only ownership moves.
+    R.baseRgba = std::move(baseRgba);
+    R.appliedRgba = std::move(out);
     R.verdict = "applied";
     return R;
 }

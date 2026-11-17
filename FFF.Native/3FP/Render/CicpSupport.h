@@ -14,9 +14,10 @@
 //  * CicpTransferSupported   -> the `supportedTransfer` switch at ~line 7752.
 //    Unsupported transfer functions are not fatal either: the renderer keeps
 //    the stream's inferred encoding and logs once.
-//  * CicpMatrixSupported     -> the hard-failure gate at ~line 7823-7827 that
-//    rejects an unknown YUV component transform with
-//    "The source YUV matrix requires an unsupported component transform."
+//  * CicpMatrixSupported     -> the renderer no longer rejects an unknown YUV
+//    component transform at presentation time. ToSwsColorSpace keeps the
+//    established 709/601 fallback, while the media-info layer reports the
+//    matrix as ignored instead of claiming a precise ICTCP conversion.
 //    UNSPECIFIED is accepted (the sws layer picks a width-based default).
 //    Range (color_range) has no whitelist: IsFullRange treats anything that is
 //    not explicitly JPEG as limited range, so CicpMatrixSupported does NOT
@@ -78,9 +79,10 @@ inline constexpr bool CicpTransferSupported(const int value) noexcept {
 }
 
 // YUV component transforms the renderer's YUV upload path (sws_scale + the
-// shader YUV->RGB matrix) can apply. Anything outside this list on a YUV
-// frame is a hard NotSupported; on an RGB frame the value is ignored, which
-// is why the reporting layer uses this as a "declared but renderable" gate
+// shader YUV->RGB matrix) can apply precisely. Anything outside this list on
+// a YUV frame is reported as ignored and falls back to the established 709/601
+// choice in ToSwsColorSpace; on an RGB frame the value is ignored, which is
+// why the reporting layer uses this as a "declared but renderable" gate
 // rather than a fatal check.
 inline constexpr bool CicpMatrixSupported(const int value) noexcept {
     switch (value) {

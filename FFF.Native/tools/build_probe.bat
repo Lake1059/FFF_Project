@@ -30,9 +30,9 @@ set "INCLUDE=%VCROOT%\include;%VCROOT%\ATLMFC\include;%SDKINC%\ucrt;%SDKINC%\um;
 set "LIB=%VCROOT%\lib\x64;%VCROOT%\ATLMFC\lib\x64;%SDKLIB%\ucrt\x64;%SDKLIB%\um\x64"
 set "PATH=%VCROOT%\bin\Hostx64\x64;%PATH%"
 
-set "INC=/I"%ROOT%" /I"%ROOT%\3FR" /I"%FFF_FFMPEG_DIR%\include" /I"%FFF_ROOT%\third_party\libraw\include"
+set "INC=/I%ROOT% /I%ROOT%\3FR /I%FFF_FFMPEG_DIR%\include /I%FFF_ROOT%\third_party\libraw\include"
 set "LIBS=avcodec-63.lib avformat-63.lib avutil-61.lib swscale-10.lib swresample-7.lib"
-set "LIBPATH=/LIBPATH:"%FFF_FFMPEG_DIR%\lib\x64""
+set "LIBPATH=/LIBPATH:%FFF_FFMPEG_DIR%\lib\x64"
 
 if not exist "%ROOT%\tools\build_out" mkdir "%ROOT%\tools\build_out"
 
