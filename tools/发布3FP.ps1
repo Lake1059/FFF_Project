@@ -2,9 +2,9 @@
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
     [string]$OutputDirectory = "",
-    # 目标框架。留空 = 用播放器默认值（当前 net10.0-windows10.0.26100.0；
-    # 带 Windows SDK 版本是为了系统媒体集成（SMTC）的 WinRT 投影）。
-    # .NET 11 正式版发布后改为：发布3FP.ps1 -NetTFM net11.0-windows10.0.26100.0
+    # 目标框架。留空 = 用播放器默认值（当前 net11.0-windows，不带 Windows SDK 版本后缀）。
+    # 旧口径带 SDK 版本是为了 SMTC 的 WinRT 投影；SMTC 迁到内核 COM ABI 后宿主不再需要。
+    # 需要老口径/别的大版本时显式覆盖：发布3FP.ps1 -NetTFM net10.0-windows10.0.26100.0
     [string]$NetTFM = "",
     # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
     [string]$LakeUITfm = "",
@@ -23,7 +23,7 @@
 # 传统散装发布：产出「FFF.Player.exe + 全部依赖 DLL 同目录」的目录形态。
 # 与 发布3FP单文件.ps1 的区别：
 #   - 不做 PublishSingleFile ⇒ exe 只有 ~0.3 MB，其余是同目录的 DLL（可增量替换、便于排查）
-#   - 不内置 .NET 运行时（--self-contained false，需本机装 .NET 10 桌面运行时）
+#   - 不内置 .NET 运行时（--self-contained false，需本机装 .NET 11 桌面运行时）
 #   - **默认不生成本体外的 FFmpeg runtime**：BodyOnly=true 时 CopyProductNativeToPublish
 #     不复制 DevelopmentRuntime；仅 -IncludeExternalRuntime 才生成完整运行时包
 #   - R2R 经两次独立评估后按"体积优先"关闭（vbproj 里是注释态，勿被旧注释误导）。

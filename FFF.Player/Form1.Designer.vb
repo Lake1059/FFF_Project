@@ -1436,18 +1436,8 @@ Partial Class Form1
         DoubleBuffered = True
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver
-        ' 图标不再走 resx 二进制条目（MSBuild 18.9+ MOTW 检查在本机误判第一方 resx）：
-        ' 散装包从 ICO.ico 加载；单文件包不携带 sidecar，回退到 exe 内嵌图标的关联图标。
-        Dim 图标路径 As String = IO.Path.Combine(AppContext.BaseDirectory, "ICO.ico")
-        If IO.File.Exists(图标路径) Then
-            Icon = New Icon(图标路径)
-        Else
-            Try
-                Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath)
-            Catch
-                ' 图标可缺席，不影响启动。
-            End Try
-        End If
+        ' 图标加载是运行时逻辑，.NET 11 WFO3000 不允许写在 InitializeComponent 里；
+        ' 已移至 Form1.OnLoad（见 Form1.vb）。
         Name = "Form1"
         StartPosition = FormStartPosition.CenterScreen
         Text = "FFF.Player"

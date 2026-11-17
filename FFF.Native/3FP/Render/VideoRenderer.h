@@ -510,6 +510,20 @@ public:
     /// deciding between Redraw() and PresentAfterBind() at bind time, and a
     /// stale answer there costs at most one redundant present.
     bool HasCachedVideo() const noexcept { return hasCachedVideo_; }
+
+    // ── Presentation epoch (docs/111 D-01) ───────────────────────────────────
+    // The session bumps the epoch whenever the timeline it wants on screen changes
+    // (seek, track switch). Every upload stamps the epoch current at upload time,
+    // and the presenter refuses to blit a stamp that is no longer current: the
+    // pre-seek picture is then held on screen instead of being re-presented as if
+    // it were the new position. Bumping is monotonic and never reset -- a reset
+    // would let a very old frame match a fresh epoch (ABA).
+    void AdvancePresentationEpoch() noexcept;
+    std::uint64_t PresentationEpoch() const noexcept;
+    std::uint64_t StaleEpochSkipCount() const noexcept;
+    // Flips whose epoch was bumped mid-flip by a seek/track-switch worker; diagnostic
+    // counter the pressure probe reads. Never resets.
+    std::uint64_t FlipsAfterBumpCount() const noexcept;
     std::uint64_t PresentWait100ns() const noexcept;
     std::uint64_t DeviceLockWait100ns() const noexcept;
     std::uint64_t SoftwareConvert100ns() const noexcept;
@@ -754,10 +768,21 @@ private:
     /// `outputWidth` x `outputHeight`. The size is a parameter rather than always
     /// swapWidth_/swapHeight_ so the same code can also paint an off-screen surface at
     /// the source resolution (screenshot readback) without a second render path.
+    ///
+    /// `forPresent` makes the caller's contract explicit:
+    ///   true  = the eye-side present path (PresentTimedText / PresentAfterBind). This
+    ///           blit feeds a flip and is subject to the stale-epoch gate the caller
+    ///           already enforces (a pre-seek frame must not be re-presented).
+    ///   false = the CPU readback path (screenshot / pixel probe). It wants whatever
+    ///           pixels are currently resident in the texture, independent of the
+    ///           presentation epoch -- no gating.
+    /// The thread-ownership guard at the top rejects a readback that arrives on the
+    /// presenter thread (it would stall the flip cadence on a staging Map) and degrades
+    /// an off-thread present with a trace.
     FFFResult DrawCachedVideo(ID3D11RenderTargetView* target,
-        std::uint32_t outputWidth, std::uint32_t outputHeight) noexcept;
-    FFFResult DrawCachedVideo(ID3D11RenderTargetView* target) noexcept {
-        return DrawCachedVideo(target, swapWidth_, swapHeight_);
+        std::uint32_t outputWidth, std::uint32_t outputHeight, bool forPresent) noexcept;
+    FFFResult DrawCachedVideo(ID3D11RenderTargetView* target, bool forPresent) noexcept {
+        return DrawCachedVideo(target, swapWidth_, swapHeight_, forPresent);
     }
     FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
         std::uint64_t renderedVideoGeneration) noexcept;
@@ -1370,6 +1395,29 @@ private:
     CachedVideoSettings cachedVideoSettings_;
     bool hasCachedVideo_;
     std::atomic<std::uint64_t> videoGeneration_;
+    // Epoch written by the session/decode thread, read by the presenter thread.
+    // acquire/release, never plain ints and never volatile: the presenter must see
+    // the stamp that was published before the texture content it describes.
+    std::atomic<std::uint64_t> presentationEpoch_{0};
+    std::atomic<std::uint64_t> cachedFrameEpoch_{0};
+    // PTS of the texture currently resident in cachedFrameEpoch_. Diagnostic only: the
+    // epoch is not unique per frame (many frames upload under one epoch), so the probe
+    // needs the PTS itself to assert the post-seek frame sequence. Relaxed is fine -- PTS
+    // is just a label; the texture's visibility is already ordered by the epoch's
+    // release/acquire. -1 = no PTS seen yet (AV_NOPTS_VALUE prints as-is, the probe skips).
+    std::atomic<std::int64_t> cachedFramePts_{-1};
+    std::atomic<std::uint64_t> staleEpochSkips_{0};
+    std::atomic<std::uint64_t> epochAdvances_{0};
+    std::atomic<std::uint64_t> loggedStaleEpoch_{0};   // one trace line per stale epoch
+    // Flips whose epoch was bumped (seek/track-switch) by the worker thread in the window
+    // between the stale-epoch gate and the actual Present. Diagnostic only; under the
+    // "hold the last image" semantics this never double-flips new content, but the probe
+    // reads the count to prove it.
+    std::atomic<std::uint64_t> flipsAfterBump_{0};
+    // One trace per (forPresent x thread-id) DrawCachedVideo contract mismatch, so the
+    // guard never floods stderr on a caller that keeps making the same mistake.
+    std::atomic<std::uint64_t> loggedDrawContractMismatch_{0};
+
     std::atomic<std::uint64_t> presentedVideoGeneration_;
     std::atomic<std::uint64_t> countedVideoGeneration_;
     std::atomic<std::uint64_t> presentedVideoFrames_;

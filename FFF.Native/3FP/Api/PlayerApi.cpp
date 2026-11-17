@@ -225,6 +225,16 @@ FFFResult FFF3FP_GetImageInfo(const FFF3FPHandle player, FFF3FPImageInfo* info) 
     return player && info ? static_cast<PlayerSession*>(player)->GetImageInfo(*info)
         : FFFResult::InvalidArgument;
 }
+FFFResult FFF3FP_GetIccProfileInfo(const FFF3FPHandle player, char* outputUtf8,
+    const std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept {
+    if (!player) return FFFResult::InvalidArgument;
+    try {
+        return CopyUtf8(static_cast<PlayerSession*>(player)->IccProfileJson(),
+            outputUtf8, outputSize, requiredSize);
+    } catch (...) {
+        return FFFResult::NativeFailure;
+    }
+}
 FFFResult FFF3FP_SetRawProcessingOptions(const FFF3FPHandle player,
     const FFF3FPRawOptions* options) noexcept {
     return player && options ? static_cast<PlayerSession*>(player)->SetRawProcessingOptions(*options)

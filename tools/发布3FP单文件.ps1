@@ -2,9 +2,9 @@
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
     [string]$OutputDirectory = "",
-    # 目标框架。留空 = 用播放器默认值（当前 net10.0-windows10.0.26100.0；
-    # 带 Windows SDK 版本是为了系统媒体集成（SMTC）的 WinRT 投影）。
-    # .NET 11 正式版发布后改为：发布3FP单文件.ps1 -NetTFM net11.0-windows10.0.26100.0
+    # 目标框架。留空 = 用播放器默认值（当前 net11.0-windows，不带 Windows SDK 版本后缀）。
+    # 旧口径带 SDK 版本是为了 SMTC 的 WinRT 投影；SMTC 迁到内核 COM ABI 后宿主不再需要。
+    # 需要老口径/别的大版本时显式覆盖：发布3FP单文件.ps1 -NetTFM net10.0-windows10.0.26100.0
     [string]$NetTFM = "",
     # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
     [string]$LakeUITfm = "",
@@ -60,6 +60,13 @@ $StagingDirectory = Join-Path ([IO.Path]::GetTempPath()) ("3FP-publish-" + [Guid
 $PendingExecutable = $null
 try {
     New-Item -ItemType Directory -Path $StagingDirectory | Out-Null
+    # 本体单文件不携带外部 FFmpeg。上一次非本体构建可能把 av*.dll/sw*.dll 留在 host bin，
+    # IncludeNativeLibrariesForSelfExtract 会把它们一起吞进 bundle；先清掉这些构建残留。
+    $HostBinRoot = Join-Path $ProjectRoot "FFF.Player\bin\$Configuration"
+    if (Test-Path -LiteralPath $HostBinRoot) {
+        Get-ChildItem -Path $HostBinRoot -Recurse -File -Include 'av*.dll','sw*.dll' -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
     # TFM 参数包：留空时展开为 0 个参数，命令行与改动前逐字符一致。
     $TfmArgs = @()
     if (-not [string]::IsNullOrWhiteSpace($NetTFM)) { $TfmArgs += "-p:NetTFM=$NetTFM" }
@@ -70,6 +77,7 @@ try {
     & $DotNet publish (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
         -c $Configuration -r win-x64 --self-contained false -o $StagingDirectory `
         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+        -p:BodyOnly=true `
         -p:PublishDocumentationFiles=false `
         -p:DebugType=None -p:DebugSymbols=false @TfmArgs @R2rArgs
     if ($LASTEXITCODE -ne 0) { throw "FFF.Player single-file publish failed." }

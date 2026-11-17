@@ -147,6 +147,10 @@ private:
     std::uint64_t useTick_ = 0;
     std::uint64_t hits_ = 0;
     std::uint64_t misses_ = 0;
+    // Read-only observation counters (borrowed into status.reserved[0/1]).
+    // Guarded by mutex_ like hits_/misses_: every writer is already holding it.
+    std::uint64_t lruEvictions_ = 0;  // per-entry recency evictions in EnforceBudgetLocked
+    std::uint64_t budgetTrims_ = 0;   // per-entry drops by pressure trims (Tight/Critical)
     std::uint64_t releasedFrames_ = 0;
     std::uint64_t helperFailures_ = 0;
     std::uint32_t mode_ = 2;         // 0 off / 1 still / 2 still+probe / 3 reserved

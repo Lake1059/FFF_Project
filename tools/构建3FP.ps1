@@ -2,14 +2,16 @@
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Debug",
 
-    # 目标框架。留空 = 用播放器默认值（当前 net10.0-windows10.0.26100.0；
-    # 带 Windows SDK 版本是为了系统媒体集成（SMTC）的 WinRT 投影）。
-    # .NET 11 正式版发布后改为：构建3FP.ps1 -NetTFM net11.0-windows10.0.26100.0
+    # 目标框架。留空 = 用播放器默认值（当前 net11.0-windows，不带 Windows SDK 版本后缀）。
+    # 旧口径 net10.0-windows10.0.26100.0 带 SDK 版本是为了 SMTC 的 WinRT 投影；
+    # SMTC 迁到内核 COM ABI 后宿主不再需要 SDK 投影，裸 TFM 即可编译。
+    # 需要老口径/别的大版本时显式覆盖：构建3FP.ps1 -NetTFM net10.0-windows10.0.26100.0
     [string]$NetTFM = "",
 
-    # 外部商业兄弟仓 LakeUI 的目标框架。留空 = 用各工程自身默认值。
-    # 宿主升到 .NET 11 而 LakeUI 还没跟上时，可单独指向它现有产物：
-    #   -NetTFM net11.0-windows10.0.26100.0 -LakeUITfm net10.0-windows10.0.17763.0
+    # 外部商业兄弟仓 LakeUI 的目标框架。留空 = 用各工程自身默认值
+    # （当前 net11.0-windows10.0.17763.0；LakeUI 自身保留 SDK 投影）。
+    # 宿主与 LakeUI 大版本不一致时会出混血警告，可单独指向它现有产物：
+    #   -NetTFM net11.0-windows -LakeUITfm net10.0-windows10.0.17763.0
     [string]$LakeUITfm = "",
 
     # LakeUI 产物配置。默认 Release（R2R 件：兄弟仓以 dotnet publish -p:PublishReadyToRun=true
