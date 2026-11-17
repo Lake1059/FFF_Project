@@ -47,6 +47,19 @@ bool EnvIs(const wchar_t* name, const wchar_t* value) noexcept {
     return length > 0 && _wcsicmp(buffer, value) == 0;
 }
 
+// D-04: SMT brother dedup is on by default. FFF_PLACEMENT_NOSMTFILTER=1 disables it
+// and restores the historical "take every CPU set" behavior for A/B comparison.
+// Function-local static = lazy, thread-safe one-time init, read once per process.
+bool SmtFilterEnabled() noexcept {
+    static const bool enabled = [] {
+        wchar_t buf[8] = {};
+        const DWORD len = GetEnvironmentVariableW(L"FFF_PLACEMENT_NOSMTFILTER", buf, 8);
+        // Enabled unless explicitly set to "1" (presence with any other value still enables).
+        return len == 0 || _wcsicmp(buf, L"1") != 0;
+    }();
+    return enabled;
+}
+
 // Priority classes are not numerically ordered (NORMAL=0x20, ABOVE_NORMAL=0x8000), so
 // compare by rank instead of by value.
 int ClassRank(DWORD value) noexcept {
@@ -168,18 +181,26 @@ void PlacementPolicy::Discover() noexcept {
     }
 
     struct Entry { std::uint32_t id; std::uint32_t lp; };
-    std::map<unsigned char, std::vector<Entry>> byEfficiency;
-    std::map<unsigned char, std::vector<Entry>> byCache;
+    std::map<unsigned char, std::vector<Entry>> byEfficiencyPhys;
+    std::map<unsigned char, std::vector<Entry>> byEfficiencySib;
+    std::map<unsigned char, std::vector<Entry>> byCachePhys;
+    std::map<unsigned char, std::vector<Entry>> byCacheSib;
     std::set<WORD> groupsSeen;
     const std::size_t count = written / sizeof(SYSTEM_CPU_SET_INFORMATION);
+    // Collect raw records for SMT dedup (D-04). all_ still sees every id: the Spilled
+    // tier intentionally widens onto all logical processors, brothers included.
+    std::vector<placement_detail::CpuSetEntry> raw;
+    raw.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         const auto& cpu = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data())[i].CpuSet;
-        const Entry entry{ static_cast<std::uint32_t>(cpu.Id),
-                           static_cast<std::uint32_t>(cpu.LogicalProcessorIndex) };
-        all_.push_back(entry.id);
-        byEfficiency[cpu.EfficiencyClass].push_back(entry);
-        byCache[cpu.LastLevelCacheIndex].push_back(entry);
+        all_.push_back(static_cast<std::uint32_t>(cpu.Id));
         groupsSeen.insert(cpu.Group);
+        raw.push_back({ static_cast<std::uint32_t>(cpu.Id),
+                        static_cast<std::uint32_t>(cpu.LogicalProcessorIndex),
+                        static_cast<std::uint16_t>(cpu.Group),
+                        cpu.CoreIndex,
+                        static_cast<std::uint8_t>(cpu.EfficiencyClass),
+                        cpu.LastLevelCacheIndex });
     }
     groupCount_ = groupsSeen.empty() ? 1u : static_cast<std::uint32_t>(groupsSeen.size());
     if (all_.empty()) {
@@ -189,28 +210,62 @@ void PlacementPolicy::Discover() noexcept {
         return;
     }
 
-    if (byEfficiency.size() >= 2) {
+    // D-04: keep one LP per physical core (per group+CoreIndex); SMT brothers share
+    // L1/L2 and execution units, so seating a decode worker on the second brother
+    // buys no real throughput. Brothers are retained as overflow (BuildTiers spills
+    // onto them when the worker budget outgrows the physical core count).
+    // FFF_PLACEMENT_NOSMTFILTER=1 skips this and restores the historical "take all".
+    std::vector<placement_detail::CpuSetEntry> physical, siblings;
+    if (SmtFilterEnabled()) {
+        placement_detail::DedupSmtSiblings(raw, physical, siblings);
+    } else {
+        physical = std::move(raw);
+    }
+    for (const auto& e : physical) {
+        byEfficiencyPhys[e.efficiencyClass].push_back({e.id, e.lp});
+        byCachePhys[static_cast<unsigned char>(e.cacheIndex)].push_back({e.id, e.lp});
+    }
+    for (const auto& e : siblings) {
+        byEfficiencySib[e.efficiencyClass].push_back({e.id, e.lp});
+        byCacheSib[static_cast<unsigned char>(e.cacheIndex)].push_back({e.id, e.lp});
+    }
+
+    if (byEfficiencyPhys.size() >= 2) {
         // Higher value is the faster class. Do not order by count: this machine exposes
         // fewer P CPUs than E (12 vs 8) and counting would pick the wrong side. The
         // groups are retained in class order (fastest first) so the preferred set can
         // later be widened onto the next class when the decode budget outgrows the
         // fastest one -- see EnsurePreferredCapacity.
         kind_ = Domain::EfficiencyClass;
-        for (auto group = byEfficiency.rbegin(); group != byEfficiency.rend(); ++group) {
+        for (auto group = byEfficiencyPhys.rbegin(); group != byEfficiencyPhys.rend(); ++group) {
             orderedGroups_.push_back(Group{});
             for (const auto& entry : group->second) {
                 orderedGroups_.back().ids.push_back(entry.id);
                 orderedGroups_.back().lps.push_back(entry.lp);
             }
+            // SMT brothers of this class ride along as overflow seats (same efficiency
+            // class as their physical representative, so they land in the same bucket).
+            const auto sib = byEfficiencySib.find(group->first);
+            if (sib != byEfficiencySib.end()) {
+                for (const auto& entry : sib->second) {
+                    orderedGroups_.back().siblingIds.push_back(entry.id);
+                    orderedGroups_.back().siblingLps.push_back(entry.lp);
+                }
+            }
         }
         BuildTiers(0);
-    } else if (byCache.size() >= 2) {
+    } else if (byCachePhys.size() >= 2) {
         // One L3 domain per CCD. "Least busy" needs per-processor sampling; without it
         // the policy declines instead of guessing.
         std::vector<std::uint64_t> idle, total;
         if (!ReadProcessorTimes(idle, total)) {
-            kind_ = Domain::None;
-            description_ = "PLACEMENT_NONE reason=ccd-layout-but-no-load-sampling";
+            if (groupCount_ > 1) {
+                kind_ = Domain::None;
+                description_ = "PLACEMENT_NONE reason=multi-group-refused hint=single-group-only-needs-SetThreadGroupAffinity";
+            } else {
+                kind_ = Domain::None;
+                description_ = "PLACEMENT_NONE reason=ccd-layout-but-no-load-sampling";
+            }
             FFF3FP_KernelLogImpl(description_.c_str());
             return;
         }
@@ -220,11 +275,18 @@ void PlacementPolicy::Discover() noexcept {
         // budget outgrows one die (EnsurePreferredCapacity). The deterministic index
         // order is what keeps a widened membership stable across windows; the head
         // choice itself stays load-driven with hysteresis.
-        for (const auto& domain : byCache) {
+        for (const auto& domain : byCachePhys) {
             orderedGroups_.push_back(Group{});
             for (const auto& entry : domain.second) {
                 orderedGroups_.back().ids.push_back(entry.id);
                 orderedGroups_.back().lps.push_back(entry.lp);
+            }
+            const auto sib = byCacheSib.find(domain.first);
+            if (sib != byCacheSib.end()) {
+                for (const auto& entry : sib->second) {
+                    orderedGroups_.back().siblingIds.push_back(entry.id);
+                    orderedGroups_.back().siblingLps.push_back(entry.lp);
+                }
             }
         }
         BuildTiers(0);
@@ -260,17 +322,33 @@ void PlacementPolicy::BuildTiers(std::uint32_t minimumWorkers) noexcept {
     // A view over orderedGroups_: seat groups in preference order until the target is
     // met, spilling the remainder to tier1. minimumWorkers == 0 keeps the historical
     // partition -- the first (fastest / head) group alone.
+    //
+    // D-04 two-pass seating:
+    //   Pass 1 seats physical cores only (one LP per SMT pair). These are the real
+    //   seats: a decode worker on a physical core gets the whole core.
+    //   Pass 2 spills SMT brothers into tier0 as overflow ONLY when the worker budget
+    //   outgrows the physical core count. Brothers share L1/L2 and execution units, so
+    //   they buy less than a full core -- but they buy something, and a seated worker on
+    //   a brother beats an unseated one. Dedup is a preference, not a hard limit.
+    //   When FFF_PLACEMENT_NOSMTFILTER=1 the sibling vectors are empty and pass 2 is a
+    //   no-op, reproducing the historical "every CPU set is a seat" behavior.
     tier0_.clear(); tier1_.clear();
     domainLp0_.clear(); domainLp1_.clear();
     std::size_t seated = 0;
-    bool seatedAny = false;
+
+    // -- Pass 1: physical cores ---------------------------------------------------
+    bool firstGroup = true;
     for (const auto& group : orderedGroups_) {
         if (minimumWorkers == 0) {
-            auto& ids = seatedAny ? tier1_ : tier0_;
-            auto& lps = seatedAny ? domainLp1_ : domainLp0_;
-            ids.insert(ids.end(), group.ids.begin(), group.ids.end());
-            lps.insert(lps.end(), group.lps.begin(), group.lps.end());
-            seatedAny = true;
+            if (firstGroup) {
+                tier0_.insert(tier0_.end(), group.ids.begin(), group.ids.end());
+                domainLp0_.insert(domainLp0_.end(), group.lps.begin(), group.lps.end());
+                seated = group.ids.size();
+            } else {
+                tier1_.insert(tier1_.end(), group.ids.begin(), group.ids.end());
+                domainLp1_.insert(domainLp1_.end(), group.lps.begin(), group.lps.end());
+            }
+            firstGroup = false;
             continue;
         }
         if (seated >= static_cast<std::size_t>(minimumWorkers)) {
@@ -278,10 +356,10 @@ void PlacementPolicy::BuildTiers(std::uint32_t minimumWorkers) noexcept {
             domainLp1_.insert(domainLp1_.end(), group.lps.begin(), group.lps.end());
             continue;
         }
-        if (seated + group.lps.size() <= static_cast<std::size_t>(minimumWorkers)) {
+        if (seated + group.ids.size() <= static_cast<std::size_t>(minimumWorkers)) {
             tier0_.insert(tier0_.end(), group.ids.begin(), group.ids.end());
             domainLp0_.insert(domainLp0_.end(), group.lps.begin(), group.lps.end());
-            seated += group.lps.size();
+            seated += group.ids.size();
             continue;
         }
         const auto need = static_cast<std::size_t>(minimumWorkers) - seated;
@@ -289,6 +367,33 @@ void PlacementPolicy::BuildTiers(std::uint32_t minimumWorkers) noexcept {
         domainLp0_.insert(domainLp0_.end(), group.lps.begin(), group.lps.begin() + need);
         tier1_.insert(tier1_.end(), group.ids.begin() + need, group.ids.end());
         domainLp1_.insert(domainLp1_.end(), group.lps.begin() + need, group.lps.end());
+        seated = static_cast<std::size_t>(minimumWorkers);
+    }
+
+    // -- Pass 2: SMT brothers as overflow ----------------------------------------
+    for (const auto& group : orderedGroups_) {
+        if (minimumWorkers == 0) {
+            // Default partition: all brothers are extra capacity (tier1).
+            tier1_.insert(tier1_.end(), group.siblingIds.begin(), group.siblingIds.end());
+            domainLp1_.insert(domainLp1_.end(), group.siblingLps.begin(), group.siblingLps.end());
+            continue;
+        }
+        if (seated >= static_cast<std::size_t>(minimumWorkers)) {
+            tier1_.insert(tier1_.end(), group.siblingIds.begin(), group.siblingIds.end());
+            domainLp1_.insert(domainLp1_.end(), group.siblingLps.begin(), group.siblingLps.end());
+            continue;
+        }
+        if (seated + group.siblingIds.size() <= static_cast<std::size_t>(minimumWorkers)) {
+            tier0_.insert(tier0_.end(), group.siblingIds.begin(), group.siblingIds.end());
+            domainLp0_.insert(domainLp0_.end(), group.siblingLps.begin(), group.siblingLps.end());
+            seated += group.siblingIds.size();
+            continue;
+        }
+        const auto need = static_cast<std::size_t>(minimumWorkers) - seated;
+        tier0_.insert(tier0_.end(), group.siblingIds.begin(), group.siblingIds.begin() + need);
+        domainLp0_.insert(domainLp0_.end(), group.siblingLps.begin(), group.siblingLps.begin() + need);
+        tier1_.insert(tier1_.end(), group.siblingIds.begin() + need, group.siblingIds.end());
+        domainLp1_.insert(domainLp1_.end(), group.siblingLps.begin() + need, group.siblingLps.end());
         seated = static_cast<std::size_t>(minimumWorkers);
     }
     preferredDomainThreads_ = static_cast<std::uint32_t>(domainLp0_.size());
@@ -326,7 +431,13 @@ bool PlacementPolicy::ReadProcessorTimes(std::vector<std::uint64_t>& idle,
     static const auto query = reinterpret_cast<NtQuerySystemInformationFn>(
         GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation"));
     if (query == nullptr) return false;
-    if (GetMaximumProcessorGroupCount() > 1) return false;   // group 0 only
+    // D-04: multi-group machines (>64 logical processors) are refused for the
+    // cache-domain load sampler. Phase 1 keeps this refusal rather than half-applying:
+    // CPU Set assignments are honored only inside the thread's affinity group, so a
+    // cross-group set is silently ignored by the OS. The future fix is per-group
+    // SetThreadGroupAffinity + SetThreadSelectedCpuSets; the Discover() caller turns
+    // this false into a multi-group-specific log line.
+    if (GetMaximumProcessorGroupCount() > 1) return false;
 
     const DWORD processors = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
     if (processors == 0 || processors > 64) return false;
@@ -730,7 +841,10 @@ bool PlacementPolicy::BuildStartupCpuSetIds(std::vector<std::uint32_t>& ids) noe
     if (kind_ == Domain::None || orderedGroups_.empty()) return false;
     // CPU Set assignments are honored only inside the thread's processor group. The
     // discovery does not model that, so a machine with several groups (more than 64
-    // logical processors) is refused instead of half-applied.
+    // logical processors) is refused instead of half-applied. Phase 1: keep the refusal
+    // rather than guessing; the future path is SetThreadGroupAffinity + per-group
+    // SetThreadSelectedCpuSets. The caller (BeginProcessStartupPlacement) logs the
+    // refusal with a hint.
     if (groupCount_ > 1) return false;
     if (kind_ == Domain::EfficiencyClass) {
         // Fastest class first: the P-core group on Intel hybrid parts.
@@ -792,10 +906,13 @@ bool PlacementPolicy::BeginProcessStartupPlacement() noexcept {
         std::vector<std::uint32_t> ids;
         if (!policy.BuildStartupCpuSetIds(ids)) {
             MarkStartupPlacementHistory(2);
-            char line[160] = {};
+            char line[208] = {};
             std::snprintf(line, sizeof(line),
-                          "PLACEMENT_STARTUP skip reason=no-preferred-domain groups=%u",
-                          static_cast<unsigned>(policy.groupCount_));
+                          "PLACEMENT_STARTUP skip reason=no-preferred-domain groups=%u%s",
+                          static_cast<unsigned>(policy.groupCount_),
+                          policy.groupCount_ > 1
+                              ? " hint=multi-group-needs-SetThreadGroupAffinity"
+                              : "");
             FFF3FP_KernelLogImpl(line);
             return false;
         }

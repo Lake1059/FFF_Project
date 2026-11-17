@@ -151,6 +151,15 @@ public:
     void Reset(std::int64_t position100ns) noexcept;
     void SetVolume(float volume, bool muted) noexcept;
     void SetMonoAudio(bool enabled) noexcept;
+    // A-02: external hard upper bound on resident decoded-PCM bytes.
+    // hardCapBytes == 0 disables the cap and restores the previous unbounded
+    // queue; targetBytes is advisory only (logging/self-check) and never alters
+    // the existing 60->240 ms water-level logic. Called on the session worker.
+    // Setting the cap also rescales the reusable-buffer pool (A-06) under the
+    // queue lock.
+    void SetPcmBudgetBytes(std::uint64_t hardCapBytes, std::uint64_t targetBytes) noexcept;
+    std::uint64_t PcmHardCapBytes() const noexcept;
+    std::uint64_t PcmCapRejectedFrames() const noexcept;
     // 0 = automatic (2-channel endpoint => binaural default; multichannel =>
     // matrix fold-down), 1 = force binaural, 2 = force stereo.
     // Read per bed frame, so a change lands on the next frame boundary without
@@ -283,6 +292,10 @@ private:
     void RequestRestart(std::string message) noexcept;
     void CloseEvents() noexcept;
     void SetError(std::string message) noexcept;
+    // Current resident PCM bytes (queuedBytes_). Used by the Enqueue hard-cap
+    // test and by external observation; caller must hold mutex_ for a precise
+    // value.
+    std::size_t QueuedPcmBytes() const noexcept;
 
     std::wstring endpointId_;
     bool exclusive_;
@@ -303,6 +316,19 @@ private:
     std::deque<AudioChunk> queue_;
     std::deque<std::vector<std::uint8_t>> reusableBuffers_;
     std::size_t queuedBytes_;
+    // A-02 injected hard cap and the rejected-block counter. pcmHardCapBytes_ is
+    // atomic because PcmHardCapBytes() may be read on any thread; Enqueue reads
+    // it under mutex_. pcmTargetBytes_ is advisory (logging) and changes no
+    // scheduling logic.
+    std::atomic<std::uint64_t> pcmHardCapBytes_{0};
+    std::uint64_t pcmTargetBytes_ = 0;
+    std::atomic<std::uint64_t> pcmCapRejectedFrames_{0};
+    // A-06 reuse-pool targets, rescaled by SetPcmBudgetBytes_. Defaults reproduce
+    // the historical 8 x 1 MiB pool. The pool itself is never evicted here: a
+    // lower target only stops storing future returns past the cap, so buffers
+    // already lent out drain naturally on their next use.
+    std::size_t reusableBufferTargetCount_;
+    std::size_t reusableBufferTargetBytes_;
     SwrContext* resampler_;
     bool monoAudio_ = false; // Only accessed by the session worker, like resampler_.
     AVChannelLayout inputChannelLayout_;

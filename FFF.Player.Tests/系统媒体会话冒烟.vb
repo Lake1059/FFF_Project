@@ -1,4 +1,6 @@
 Imports System
+Imports System.Drawing
+Imports System.IO
 Imports System.Threading
 Imports System.Windows.Forms
 Imports FFF.Player
@@ -33,6 +35,22 @@ Friend Module 系统媒体会话冒烟
             窗体.Show()
             Application.DoEvents()
 
+            ' 缩略图编码是“没有内嵌封面 → 首帧”的最后一公里：先验证 4K 级源帧
+            ' 会被限制到 SMTC 卡片能接受的小尺寸，且输出是真 PNG。
+            Using 源 As New Bitmap(640, 360)
+                Using 图形 = Graphics.FromImage(源)
+                    图形.Clear(Color.CadetBlue)
+                End Using
+                Dim 编码 = 系统媒体缩略图.编码PNG(源)
+                检查("缩略图 PNG 编码非空", 编码.Length > 0, 用例数, 失败数)
+                Using 流 As New MemoryStream(编码), 解码 As New Bitmap(流)
+                    检查("缩略图最长边不超过 320",
+                        Math.Max(解码.Width, 解码.Height) <= 系统媒体缩略图.默认最大边长,
+                        用例数, 失败数)
+                End Using
+            End Using
+            检查("无帧缩略图返回空数组", 系统媒体缩略图.编码PNG(Nothing).Length = 0, 用例数, 失败数)
+
             会话 = New 系统媒体会话(
                 Nothing,
                 AddressOf 记录按钮,
@@ -40,8 +58,15 @@ Friend Module 系统媒体会话冒烟
                 Function(倍速 As Double) False)
             检查("GetForWindow 初始化", 会话.初始化(窗体.Handle), 用例数, 失败数)
             If 会话.已启用面板 Then
-                会话.发布卡片("smoke-id", "冒烟标题", "冒烟艺术家", "", "", 1UI,
+                会话.发布卡片("smoke-id", "冒烟标题", "冒烟艺术家", "", "冒烟专辑艺术家", 1UI,
                                 系统媒体显示类型.音乐, 1.0R)
+                ' 1x1 透明 PNG：验证 PNG 字节 → InMemoryRandomAccessStream →
+                ' RandomAccessStreamReference → DisplayUpdater.Thumbnail 的 ABI 通路不抛异常。
+                会话.设置缩略图(Convert.FromBase64String(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
+                Dim 缩略图返回码 = 会话.测试用设置缩略图(Convert.FromBase64String(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
+                检查("PNG 缩略图 ABI 返回 0", 缩略图返回码 = 0, 用例数, 失败数)
                 会话.发布状态(系统媒体播放状态.已暂停)
                 会话.发布时间轴(New 系统媒体时间轴 With {
                     .StartTime = TimeSpan.Zero,

@@ -112,6 +112,22 @@ Public Class Form1
         MyBase.OnHandleCreated(e)
     End Sub
 
+    Protected Overrides Sub OnLoad(e As EventArgs)
+        MyBase.OnLoad(e)
+        ' 图标加载（.NET 11 WFO3000：运行时逻辑不得留在 InitializeComponent，移到此处）。
+        ' 散装包从 ICO.ico 加载；单文件包不携带 sidecar，回退到 exe 内嵌图标的关联图标。
+        Dim 图标路径 As String = IO.Path.Combine(AppContext.BaseDirectory, "ICO.ico")
+        If IO.File.Exists(图标路径) Then
+            Icon = New Icon(图标路径)
+        Else
+            Try
+                Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath)
+            Catch
+                ' 图标可缺席，不影响启动。
+            End Try
+        End If
+    End Sub
+
     ''' <summary>
     ''' SMTC 的 GetForWindow 绑定的是当前 HWND；必须在句柄销毁前主动 ClearAll + IsEnabled=False，
     ''' 否则窗口关闭后系统面板可能保留一张无法控制的“幽灵卡片”。
@@ -361,6 +377,7 @@ Public Class Form1
         AddHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         AddHandler 播放控制器.状态已变化, AddressOf 播放控制器_状态已变化
         AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开
+        AddHandler 播放控制器.首帧呈现, AddressOf 播放控制器_首帧呈现
         AddHandler 播放控制器.媒体已打开, AddressOf 播放控制器_媒体已打开_前后预取
         AddHandler 播放控制器.播放结束, AddressOf 播放控制器_播放结束
         AddHandler 播放控制器.播放速度已变化, AddressOf 播放控制器_播放速度已变化
@@ -1159,6 +1176,7 @@ Public Class Form1
         ' 注册方法内部按 路径+标题+艺术家+专辑+专辑艺术家+轨道号+显示类型 签名去重，
         ' 重复事件不会重复 Update 卡片。
         注册系统媒体卡片(e.媒体信息, e.文件路径)
+        尝试发布系统媒体缩略图(首帧已呈现:=False)
     End Sub
 
     ''' <summary>快照优先；快照尺寸缺失时回落到媒体信息里的当前视频流。纯音频/无视频返回空。</summary>
@@ -1892,6 +1910,47 @@ Public Class Form1
                If(播放控制器.当前媒体是视频, "video", "audio")
     End Function
 
+    ''' <summary>
+    ''' 系统媒体卡缩略图：有内嵌封面（纯音频的 attached_pic）时取封面渲染帧；
+    ''' 视频没有封面时等首帧真正上屏后再取第一帧。媒体刚打开、视频首帧尚未
+    ''' 到达时先清掉上一首的缩略图，绝不让旧画面留在新卡片上。
+    ''' </summary>
+    Private Sub 尝试发布系统媒体缩略图(首帧已呈现 As Boolean)
+        If 正在关闭 OrElse 系统媒体 Is Nothing OrElse Not 系统媒体.已启用面板 OrElse
+            Not 系统媒体卡已注册 OrElse 播放控制器 Is Nothing OrElse Not 播放控制器.是否有媒体 Then Return
+
+        Dim 是视频 = 播放控制器.当前媒体是视频
+        Dim 有封面 = 播放控制器.当前音乐有封面
+        If Not 是视频 AndAlso Not 有封面 Then
+            系统媒体.设置缩略图(Array.Empty(Of Byte)())
+            Return
+        End If
+        If 是视频 AndAlso Not 首帧已呈现 Then
+            ' 视频 Open 完成时首帧可能还没上屏；此刻读交换链会读到上一首的残帧。
+            系统媒体.设置缩略图(Array.Empty(Of Byte)())
+            Return
+        End If
+
+        Dim 帧 As Bitmap = Nothing
+        Try
+            帧 = 播放控制器.读取缩略图帧()
+            If 帧 Is Nothing Then
+                系统媒体.设置缩略图(Array.Empty(Of Byte)())
+                Return
+            End If
+            系统媒体.设置缩略图(系统媒体缩略图.编码PNG(帧))
+        Catch ex As Exception
+            Debug.WriteLine("SMTC：生成缩略图失败（已忽略）：" & ex.GetType().Name)
+        Finally
+            帧?.Dispose()
+        End Try
+    End Sub
+
+    Private Sub 播放控制器_首帧呈现(sender As Object, e As 首帧呈现事件参数)
+        If 正在关闭 OrElse Not 系统媒体卡已注册 Then Return
+        尝试发布系统媒体缩略图(首帧已呈现:=True)
+    End Sub
+
     ''' <summary>设置页切换“显示系统媒体控制”后立即生效，不等下一次打开媒体。</summary>
     Friend Sub 应用系统媒体设置()
         If 正在关闭 Then Return
@@ -1901,6 +1960,7 @@ Public Class Form1
         End If
         If 播放控制器 Is Nothing OrElse Not 播放控制器.是否有媒体 Then Return
         注册系统媒体卡片(播放控制器.安全读取媒体信息(), 播放控制器.当前媒体路径)
+        尝试发布系统媒体缩略图(首帧已呈现:=True)
     End Sub
 
     Private Sub 关闭系统媒体卡片()

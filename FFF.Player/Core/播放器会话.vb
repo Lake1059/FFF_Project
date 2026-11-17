@@ -696,6 +696,17 @@ Public NotInheritable Class 播放器会话
         检查结果(结果)
         Return 信息
     End Function
+
+    ''' <summary>读取 ICC 配置结构化报告（单行 JSON）。无 ICC 时内核返回 {"status":"absent"}。
+    ''' 任何原生异常或旧内核缺导出时返回空串并写 Debug，不抛给调用方。</summary>
+    Friend Function 取ICC信息() As String
+        Try
+            Return 读取原生文本(AddressOf 播放器原生接口.FFF3FP_GetIccProfileInfo)
+        Catch ex As Exception
+            System.Diagnostics.Debug.WriteLine($"取ICC信息失败: {ex.Message}")
+            Return String.Empty
+        End Try
+    End Function
     ' 色彩模块实例与床渲染插槽共用同一份映射。
     Private 色彩模块实例 As 外部模块实例
     Private 音频插槽已装 As Boolean

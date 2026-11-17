@@ -1,13 +1,84 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 // ABI struct from 3FP/Api/FFF.Player.CpuPlacement.h. Forward-declared so this header
 // does not pull the public API surface into every translation unit; the implementation
 // file includes the public header.
 struct FFF3FPCpuPlacementSnapshot;
+
+// ---- Testable SMT-dedup boundary (D-04) -----------------------------------------
+//
+// The enumeration in Discover() collects SYSTEM_CPU_SET_INFORMATION records and
+// buckets them by efficiency class / cache domain. On an SMT machine two records
+// share one physical core (same CoreIndex) and its L1/L2: seating a decode worker
+// on the second brother buys no real throughput, so the preferred set keeps one
+// LP per physical core and parks the brother as overflow.
+//
+// The pure function below does that dedup over a POD mirror of the Windows record
+// (no <windows.h> in this header), so the unit test can feed synthetic topologies
+// without an OS. The .cpp converts SYSTEM_CPU_SET_INFORMATION -> CpuSetEntry and
+// calls it; everything after that (bucketing, tier seating) reads the two outputs.
+namespace placement_detail {
+
+/// Fields of SYSTEM_CPU_SET_INFORMATION::CpuSet that the policy consumes. Plain
+/// POD so it has no Windows dependency and can be built on the stack in a test.
+struct CpuSetEntry {
+    std::uint32_t id;              // CPU set Id (system-wide; what SetThreadSelectedCpuSets takes)
+    std::uint32_t lp;              // LogicalProcessorIndex (group-local, 0..63)
+    std::uint16_t group;           // Processor group number (cross-group = >64 LP machines)
+    std::uint32_t coreIndex;       // Physical core index within group; SMT brothers share it
+    std::uint8_t  efficiencyClass; // higher = faster (OS-defined: P > E on hybrid parts)
+    std::uint32_t cacheIndex;      // LastLevelCacheIndex (one L3 domain per CCD on AMD)
+};
+
+/// Deduplicate SMT brothers: keep one logical processor per (group, coreIndex).
+///
+/// Retention rule for the kept LP on a physical core:
+///   1. Higher EfficiencyClass wins (brothers of the same physical core always
+///      share it, but this is the safe tiebreaker on odd topologies);
+///   2. On a tie, the smaller CPU set Id wins (deterministic; the lower half of
+///      an SMT pair tends to be the primary LP on most boot configurations).
+///
+/// The dropped brothers are returned in `outSiblings` rather than discarded:
+/// BuildTiers spills onto them as overflow when the worker budget outgrows the
+/// physical core count. Dedup is a preference, not a hard limit.
+///
+/// Pure: no OS calls, no global state. FFF.Native.Tests/PlacementPolicyTests.cpp
+/// feeds synthetic vectors and checks the partition directly.
+inline void DedupSmtSiblings(const std::vector<CpuSetEntry>& input,
+                             std::vector<CpuSetEntry>& outPhysical,
+                             std::vector<CpuSetEntry>& outSiblings) noexcept {
+    outPhysical.clear();
+    outSiblings.clear();
+    // (group, coreIndex) -> index into outPhysical of the current best brother.
+    std::map<std::pair<std::uint16_t, std::uint32_t>, std::size_t> best;
+    for (const auto& e : input) {
+        const auto key = std::make_pair(e.group, e.coreIndex);
+        const auto it = best.find(key);
+        if (it == best.end()) {
+            best.emplace(key, outPhysical.size());
+            outPhysical.push_back(e);
+            continue;
+        }
+        CpuSetEntry& retained = outPhysical[it->second];
+        const bool eBetter =
+            e.efficiencyClass > retained.efficiencyClass ||
+            (e.efficiencyClass == retained.efficiencyClass && e.id < retained.id);
+        if (eBetter) {
+            outSiblings.push_back(retained);  // old best becomes an overflow brother
+            retained = e;
+        } else {
+            outSiblings.push_back(e);         // current record is the brother
+        }
+    }
+}
+
+}  // namespace placement_detail
 
 /// Adaptive CPU placement for machines whose cores are not interchangeable: Intel
 /// hybrid parts (performance/efficiency classes) and multi-CCD AMD parts (one L3
@@ -177,9 +248,14 @@ private:
     // The discovered groups in preference order -- efficiency classes fastest first,
     // cache domains head-first then by LLC index. tier0_/tier1_ are a view over these
     // (see BuildTiers), so widening the preferred set never has to re-read the OS.
+    // D-04: ids/lps hold one LP per physical core (SMT-deduped); siblingIds/siblingLps
+    // hold the dropped SMT brothers as overflow seats BuildTiers spills onto when the
+    // worker budget outgrows the physical core count.
     struct Group {
-        std::vector<std::uint32_t> ids;
-        std::vector<std::uint32_t> lps;
+        std::vector<std::uint32_t> ids;         // physical-core cpu set ids (one per SMT pair)
+        std::vector<std::uint32_t> lps;         // physical-core logical processor indices
+        std::vector<std::uint32_t> siblingIds; // SMT brother cpu set ids (overflow)
+        std::vector<std::uint32_t> siblingLps; // SMT brother logical processor indices
     };
     std::vector<Group> orderedGroups_;
     std::uint32_t capacityTarget_ = 0;   // seats EnsurePreferredCapacity was asked for
