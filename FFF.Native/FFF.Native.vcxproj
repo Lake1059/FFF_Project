@@ -161,6 +161,7 @@
     <ClInclude Include="3FP\Hdr\HdrMetadataParse.h" />
     <ClInclude Include="3FP\Hdr\HdrToneCurve.h" />
     <ClInclude Include="3FP\Render\ShaderBytecode.h" />
+    <ClInclude Include="3FP\Render\SmtcController.h" />
     <ClInclude Include="3FP\Render\VideoRenderer.h" />
     <ClInclude Include="3FR\Api\FFF.Native.Api.h" />
     <ClInclude Include="3FR\Audio\AudioTrackEncoder.h" />
@@ -189,6 +190,7 @@
     <ClCompile Include="3FP\Core\Fmp4FragmentScanner.cpp" />
     <ClCompile Include="3FP\Core\DecodeDeviceSelection.cpp" />
     <ClCompile Include="3FP\Core\AvifIlocShim.cpp" />
+    <ClCompile Include="3FP\Core\IccProfileParser.cpp" />
     <ClCompile Include="3FP\Core\AvifItemProbe.cpp" />
     <ClCompile Include="3FP\Core\AvifTileGridComposer.cpp" />
     <ClCompile Include="3FP\Core\GainMapProbe.cpp" />
@@ -197,10 +199,12 @@
       <PrecompiledHeaderFile />
     </ClCompile>
     <ClCompile Include="3FP\Core\PlacementPolicy.cpp" />
+    <ClCompile Include="3FP\Core\MemoryBudgetArbiter.cpp" />
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp" />
     <ClCompile Include="3FP\Hdr\HdrMetadataParse.cpp" />
     <ClCompile Include="3FP\Hdr\HdrToneCurve.cpp" />
     <ClCompile Include="3FP\Render\VideoRenderer.cpp" />
+    <ClCompile Include="3FP\Render\SmtcController.cpp" />
     <ClCompile Include="3FP\Render\NvidiaVideoExtensions.cpp" />
     <ClCompile Include="3FP\Render\CudaD3D11Interop.cpp" />
     <ClCompile Include="3FP\Subtitle\AssSubtitleRenderer.cpp" />

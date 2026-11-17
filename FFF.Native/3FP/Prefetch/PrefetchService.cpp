@@ -4,6 +4,7 @@
 #include "3FP/Prefetch/MemoryGuard.h"
 #include "3FP/Prefetch/PrefetchProtocol.h"
 #include "3FP/Core/ThreadNaming.h"
+#include "3FP/Core/MemoryBudgetArbiter.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -63,6 +64,26 @@ void Trace(const char* action, std::uint32_t generation, std::uint64_t bytes) no
     char line[192]{};
     std::snprintf(line, sizeof(line), "[prefetch] gen=%u action=%s bytes=%llu",
         generation, action, static_cast<unsigned long long>(bytes));
+    FFF3FP_KernelLogImpl(line);
+}
+
+// Memory-budget observation snapshot. Separate env gate from Trace(): this one
+// is read by the membudget probe lane, so it must not ride on the prefetch-only
+// toggle. cached/budget are byte counts. Called with mutex_ held.
+void TraceMemarbSnapshot(std::uint64_t hits, std::uint64_t misses,
+    std::uint64_t lruEvictions, std::uint64_t budgetTrims,
+    std::uint64_t cachedBytes, std::uint64_t budgetBytes) noexcept {
+    static const bool enabled = EnvOn(L"FFF_MEMARB_TRACE", false);
+    if (!enabled) return;
+    char line[256]{};
+    std::snprintf(line, sizeof(line),
+        "[prefetch] hits=%llu misses=%llu lru=%llu trim=%llu cached=%llu budget=%llu",
+        static_cast<unsigned long long>(hits),
+        static_cast<unsigned long long>(misses),
+        static_cast<unsigned long long>(lruEvictions),
+        static_cast<unsigned long long>(budgetTrims),
+        static_cast<unsigned long long>(cachedBytes),
+        static_cast<unsigned long long>(budgetBytes));
     FFF3FP_KernelLogImpl(line);
 }
 
@@ -420,6 +441,8 @@ void PrefetchService::ReleaseAllLocked() noexcept {
         if (frame != nullptr) {
             av_frame_free(&frame);
             ++releasedFrames_;
+            // Critical-tier pressure release: a cached still abandoned by the budget.
+            ++budgetTrims_;
         }
     }
     stills_.clear();
@@ -439,6 +462,8 @@ void PrefetchService::TrimToHalfLocked() noexcept {
         if (frame != nullptr) {
             av_frame_free(&frame);
             ++releasedFrames_;
+            // Tight-tier half trim: a cached still dropped by the budget pressure.
+            ++budgetTrims_;
         }
         cachedBytes_ = (cachedBytes_ > victim->second.bytes)
             ? cachedBytes_ - victim->second.bytes : 0;
@@ -462,6 +487,9 @@ bool PrefetchService::EnforceBudgetLocked(std::uint64_t incoming) noexcept {
             av_frame_free(&frame);
             ++releasedFrames_;
         }
+        // This is the one true per-entry LRU eviction: least-recently-used (by
+        // lastUse) still dropped to make room for the incoming frame.
+        ++lruEvictions_;
         cachedBytes_ = (cachedBytes_ > victim->second.bytes)
             ? cachedBytes_ - victim->second.bytes : 0;
         stills_.erase(victim);
@@ -495,6 +523,12 @@ void PrefetchService::PruneToPlanLocked(const std::vector<std::string>& paths) n
 }
 
 void PrefetchService::EvaluatePressure() noexcept {
+    // docs/108 L-01: broadcast first, then trim ourselves. The ledger is the only
+    // authority on how many bytes each consumer may hold. The prefetch cache is still
+    // the first consumer to yield, but it must yield because it was told to, not
+    // because it read the tier on its own -- otherwise it trims while the queue
+    // keeps its old budget and the same megabytes are double-counted.
+    FFFPlayer::MemoryBudgetArbiter::Instance().Evaluate();
     const PressureTier tier = MemoryGuard::Instance().Evaluate();
     std::lock_guard<std::mutex> lock(mutex_);
     if (tier == PressureTier::Critical) {
@@ -826,6 +860,10 @@ FFFResult PrefetchService::SetPlan(const FFF3FPPrefetchPlan* plan) noexcept {
         planFlags_ = plan->flags;
         planDirty_ = true;
         PruneToPlanLocked(paths);
+        // Snapshot at plan landing (this is the natural per-open checkpoint):
+        // inside the lock so the four counters agree with cachedBytes_ here.
+        TraceMemarbSnapshot(hits_, misses_, lruEvictions_, budgetTrims_,
+            cachedBytes_, budgetBytes_);
     }
     EvaluatePressure();
     cv_.notify_all();
@@ -850,6 +888,18 @@ FFFResult PrefetchService::GetStatus(FFF3FPPrefetchStatus* status) noexcept {
     status->misses = misses_;
     status->releasedFrames = releasedFrames_;
     status->helperFailures = helperFailures_;
+    // Borrowed reserved slots (u32): internal counters are u64, truncation on
+    // the way out is intentional and documented in FFF.Player.Prefetch.h.
+    status->reserved[FFF3FP_PREFETCH_STATUS_RESERVED_LRU_EVICTIONS] =
+        static_cast<std::uint32_t>(lruEvictions_);
+    status->reserved[FFF3FP_PREFETCH_STATUS_RESERVED_BUDGET_TRIMS] =
+        static_cast<std::uint32_t>(budgetTrims_);
+    // Explicitly zero the slots we do not own (reserved[2..7]): a host that does
+    // not zero-initialise its status struct must never read stale bytes here.
+    for (std::uint32_t i = 2; i < 8; ++i) status->reserved[i] = 0u;
+    // Snapshot at the moment a host reads the status (e.g. C# on session close).
+    TraceMemarbSnapshot(hits_, misses_, lruEvictions_, budgetTrims_,
+        cachedBytes_, budgetBytes_);
     return FFFResult::Success;
 }
 

@@ -3,15 +3,17 @@
   <Import Project="..\tools\DiscRuntime.props" />
   <PropertyGroup>
       <OutputType>WinExe</OutputType>
-      <!-- TFM 就地定义：默认与上游 .NET 10 对齐，但必须带 Windows SDK 版本。
-           原因：系统媒体集成要引用 Windows.Media.SystemMediaTransportControlsInterop，
-           而 net10.0-windows（不带 SDK 版本）的还原资产里没有 Microsoft.Windows.SDK.NET
-           投影，Imports Windows.Media 会直接编译失败。26100 已是测试工程与 publish 的
-           现网口径；切 .NET 11 用 -p:NetTFM=net11.0-windows10.0.26100.0。 -->
-      <NetTFM Condition="'$(NetTFM)' == ''">net10.0-windows10.0.26100.0</NetTFM>
+      <!-- TFM 就地定义：默认对齐 .NET 11 正式版。宿主用裸 net11.0-windows（不带 Windows
+           SDK 版本后缀），还原资产不再拉 Microsoft.Windows.SDK.NET.Ref 投影包。
+           旧注释"必须带 SDK 版本否则 Imports Windows.Media 编译失败"的前提已消失：
+           系统媒体集成（SMTC）已改走内核 COM ABI，宿主工程不再引用 Windows.Media
+           WinRT 投影，裸 TFM 即可编译。需要老口径或别的大版本时仍可命令行覆盖：
+           -p:NetTFM=xxx -->
+      <NetTFM Condition="'$(NetTFM)' == ''">net11.0-windows</NetTFM>
       <TargetFramework>$(NetTFM)</TargetFramework>
-      <!-- LakeUI 是外部商业兄弟仓，构建节奏独立，单独一个 TFM 参数 -->
-      <LakeUITfm Condition="'$(LakeUITfm)' == ''">net10.0-windows10.0.17763.0</LakeUITfm>
+      <!-- LakeUI 是外部商业兄弟仓，构建节奏独立，单独一个 TFM 参数；
+           LakeUI 工程自身目标即 net11.0-windows10.0.17763.0（它保留 SDK 投影，宿主不需要）。 -->
+      <LakeUITfm Condition="'$(LakeUITfm)' == ''">net11.0-windows10.0.17763.0</LakeUITfm>
       <!-- LakeUI 产物配置：默认 Release + R2R（兄弟仓以 dotnet publish -p:PublishReadyToRun=true
            产出带本机码的预编译件，宿主启动免去 LakeUI 全量 JIT）。
            回退旧行为（Debug IL 产物）：-p:LakeUIConfig=Debug -->
@@ -332,7 +334,14 @@
     <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
     <Error Condition="'@(LibassMainRuntime)' == ''" Text="缺少 libass 运行库；请先运行 tools\准备Libass.ps1。" />
     <Error Condition="'@(LibRawRuntime)' == ''" Text="缺少 LibRaw 运行库 ..\third_party\libraw\bin\x64\libraw.dll —— RAW 内核依赖它，不能构建出缺件产物。" />
-    <Copy SourceFiles="@(ProductNative);@(LibRawRuntime);@(DevelopmentRuntime);@(LibassRuntime);@(PrefetchHelper)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <ItemGroup>
+      <!-- BodyOnly=true（本体单文件/本体包）只带内核 + libraw + libass，
+           不把外部 FFmpeg runtime 复制进 bin，否则 IncludeNativeLibrariesForSelfExtract
+           会把六个 av*.dll 一起吞进单文件本体。 -->
+      <_NativeRuntimeFiles Include="@(ProductNative);@(LibRawRuntime);@(LibassRuntime);@(PrefetchHelper)" />
+      <_NativeRuntimeFiles Include="@(DevelopmentRuntime)" Condition="'$(BodyOnly)' != 'true'" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_NativeRuntimeFiles)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 
 

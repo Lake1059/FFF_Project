@@ -1255,6 +1255,17 @@ struct FFF3FPImageInfo {
 // degrade instead of failing.
 FFF3FP_API FFFResult FFF3FP_GetImageInfo(FFF3FPHandle player, FFF3FPImageInfo* info) noexcept;
 
+// Structural report of the embedded ICC profile (side-data) captured when the
+// still/animated image was opened. The JSON is built once on the worker thread;
+// this entry point only copies it. Mirror of FFF3FP_GetMediaInfo's buffer
+// contract: *requiredSize always receives the byte count including NUL; when
+// outputUtf8 is null or outputSize is too short, BufferTooSmall is returned and
+// no bytes are written. A media with no ICC side data at all succeeds with the
+// literal document {"status":"absent"} -- absence is a report, not an error.
+// Appended additively: no struct layout moved and PlayerApiVersion is unchanged.
+FFF3FP_API FFFResult FFF3FP_GetIccProfileInfo(FFF3FPHandle player, char* outputUtf8,
+    std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
+
 // RAW development controls. These are deliberately NOT appended to
 // FFF3FPConfiguration: FFF3FP_Create validates size < sizeof, so adding fields
 // there would break every existing host. Call the setter before Open; the
