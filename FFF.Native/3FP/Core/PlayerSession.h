@@ -262,6 +262,11 @@ public:
     FFFResult SetAuxiliaryComposition(const FFF3FPAuxiliaryComposition& composition) noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
+    // Structural ICC profile report built at open from the decoded frame's side
+    // data. Always returns a valid JSON document ({"status":"absent"} when the
+    // media carries no usable side-data profile); mirrors MediaInfo()'s lock
+    // discipline so the caller never touches worker-owned decoder frames.
+    std::string IccProfileJson() const;
 
 private:
     using Command = std::function<void()>;
@@ -426,8 +431,11 @@ private:
     void ApplyRotationFromDecodedFrame() noexcept;
     // Fills `info` from the session state. Only ever runs on the worker thread
     // (called at the end of DoOpen) because it reads decoder-owned frames; the
-    // public GetImageInfo hands out the published copy instead.
-    void BuildImageInfo(FFF3FPImageInfo& info) const noexcept;
+    // public GetImageInfo hands out the published copy instead. Non-const on
+    // purpose: it also publishes the captured ICC profile bytes and their parsed
+    // JSON into the members below, which the appended FFF3FP_GetIccProfileInfo
+    // export reads back under snapshotMutex_.
+    void BuildImageInfo(FFF3FPImageInfo& info) noexcept;
     FFFResult LoadCoverArt() noexcept;
     FFFResult DecodePacket(AVCodecContext* decoder, AVPacket* packet, bool video,
         AVFormatContext* owner) noexcept;
@@ -858,6 +866,18 @@ private:
     // the build reads must not be touched from the caller's thread.
     bool hasPublishedImageInfo_ = false;
     FFF3FPImageInfo publishedImageInfo_{};
+    // ICC profile captured from the decoded frame's side data at open. This is
+    // deliberately NOT part of the 16 KiB side-data ring (which skips ICC as too
+    // large and useless to the colour analyser): the raw bytes are kept whole so
+    // an exporter can hand them back, alongside the structural parse result
+    // projected to JSON at build time. BuildImageInfo writes these on the worker
+    // thread; the publish flag flips under snapshotMutex_ together with
+    // hasPublishedImageInfo_. lastIccStatus_ mirrors the parser StatusName for
+    // diagnostics ("absent" when no side data was seen at all).
+    bool hasPublishedIcc_ = false;
+    std::vector<std::uint8_t> publishedIccProfile_;
+    std::string publishedIccJson_;
+    std::string lastIccStatus_;
     // RAW metadata is published alongside the image info; false means the
     // current media is not a RAW (or Open has not reached the publish point).
     bool hasPublishedRawInfo_ = false;

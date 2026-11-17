@@ -189,6 +189,7 @@
     <ClCompile Include="3FP\Core\Fmp4FragmentScanner.cpp" />
     <ClCompile Include="3FP\Core\DecodeDeviceSelection.cpp" />
     <ClCompile Include="3FP\Core\AvifIlocShim.cpp" />
+    <ClCompile Include="3FP\Core\IccProfileParser.cpp" />
     <ClCompile Include="3FP\Core\AvifItemProbe.cpp" />
     <ClCompile Include="3FP\Core\AvifTileGridComposer.cpp" />
     <ClCompile Include="3FP\Core\GainMapProbe.cpp" />

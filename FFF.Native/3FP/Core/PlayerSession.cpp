@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "3FP/Core/AvifIlocShim.h"
 #include "3FP/Core/GainMapProbe.h"
+#include "3FP/Core/IccProfileParser.h"
 #include "3FP/Core/AvifItemProbe.h"
 #include "3FP/Core/DecodeDeviceSelection.h"
 #include "3FP/Core/Fmp4FragmentScanner.h"
@@ -3658,6 +3659,11 @@ FFFResult PlayerSession::GetAudioPeakLevels(FFF3FPAudioPeakLevels& output) const
 }
 std::string PlayerSession::MediaInfo() const { RawTrace("MediaInfo enter"); std::lock_guard lock(mutex_); return mediaInfoJson_; }
 std::string PlayerSession::LastError() const { std::lock_guard lock(errorMutex_); return lastError_; }
+std::string PlayerSession::IccProfileJson() const {
+    std::lock_guard lock(snapshotMutex_);
+    if (!hasPublishedIcc_) return R"({"status":"absent"})";
+    return publishedIccJson_.empty() ? std::string(R"({"status":"absent"})") : publishedIccJson_;
+}
 
 void PlayerSession::Worker() noexcept {
     FFFThreadNaming::SetCurrentThreadName("FFF.Player.SessionWorker");
@@ -5027,6 +5033,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         RawTrace("DoOpen: image info built");
         { std::lock_guard lock(snapshotMutex_);
           hasPublishedImageInfo_ = true;
+          hasPublishedIcc_ = true;
           if (rawStill_ != nullptr) {
               publishedRawInfo_ = rawStill_->Info();
               hasPublishedRawInfo_ = true;
@@ -8598,8 +8605,13 @@ FFFResult PlayerSession::GetRawInfo(FFF3FPRawInfo& info) const noexcept {
     return FFFResult::Success;
 }
 
-void PlayerSession::BuildImageInfo(FFF3FPImageInfo& info) const noexcept {
-    if (format_ == nullptr || videoStream_ < 0) return;
+void PlayerSession::BuildImageInfo(FFF3FPImageInfo& info) noexcept {
+    if (format_ == nullptr || videoStream_ < 0) {
+        publishedIccProfile_.clear();
+        publishedIccJson_ = R"({"status":"absent"})";
+        lastIccStatus_ = "absent";
+        return;
+    }
 
     const auto* stream = format_->streams[videoStream_];
     const auto* parameters = stream->codecpar;
@@ -8678,12 +8690,40 @@ void PlayerSession::BuildImageInfo(FFF3FPImageInfo& info) const noexcept {
     }
 
     // ICC profiles arrive as frame side data from the codecs that embed them.
+    // The raw bytes are kept whole on an independent member (the 16 KiB side-data
+    // ring deliberately skips ICC -- see MaximumCachedSideDataBlobBytes). Structural
+    // validation runs here on the worker thread while the frame is still owned:
+    // HAS_ICC is set ONLY when the parser reports the profile usable, so a host
+    // reading the flag can treat "valid embedded profile" as a fact rather than
+    // "some bytes were attached". Parse failures never throw and never touch the
+    // picture; they surface through lastIccStatus_ and the JSON export.
     info.iccProfileSizeBytes = 0;
+    publishedIccProfile_.clear();
+    publishedIccJson_.clear();
+    lastIccStatus_.clear();
     if (frame != nullptr) {
-        if (const auto* icc = av_frame_get_side_data(frame, AV_FRAME_DATA_ICC_PROFILE)) {
+        if (const auto* icc = av_frame_get_side_data(frame, AV_FRAME_DATA_ICC_PROFILE);
+            icc != nullptr && icc->data != nullptr && icc->size > 0) {
             info.iccProfileSizeBytes = static_cast<std::uint32_t>(icc->size);
-            flags |= FFF3FP_IMAGE_FLAG_HAS_ICC;
+            try {
+                publishedIccProfile_.assign(icc->data, icc->data + icc->size);
+                fff::icc::ProfileInfo parsed{};
+                const auto result = fff::icc::Parse(publishedIccProfile_.data(),
+                    publishedIccProfile_.size(), parsed);
+                lastIccStatus_ = fff::icc::StatusName(result.status);
+                if (result.usable) flags |= FFF3FP_IMAGE_FLAG_HAS_ICC;
+                publishedIccJson_ = fff::icc::ToJson(parsed, result);
+            } catch (...) {
+                // Defensive: the parser is contractually non-throwing, but the
+                // noexcept build must not std::terminate on an unexpected throw.
+                lastIccStatus_ = "exception";
+                publishedIccJson_ = R"({"status":"exception","usable":false})";
+            }
         }
+    }
+    if (lastIccStatus_.empty()) {
+        lastIccStatus_ = "absent";
+        publishedIccJson_ = R"({"status":"absent"})";
     }
 
     // Colour description. The decoded frame is authoritative when it carries
@@ -9685,7 +9725,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     gainMapEnabled_ = true;
     gainMapBaseFallbackNoted_ = false;
     sessionWrapLoop_ = false; sessionWrapFailures_ = 0;
-    { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = false; hasPublishedRawInfo_ = false; publishedRawInfo_ = {}; }
+    { std::lock_guard lock(snapshotMutex_); hasPublishedImageInfo_ = false; hasPublishedRawInfo_ = false; publishedRawInfo_ = {}; hasPublishedIcc_ = false; publishedIccProfile_.clear(); publishedIccJson_.clear(); lastIccStatus_.clear(); }
     audioBlockedUntilVideoFrame_ = false;
     playbackPreroll_ = false;
     audioUnblockVideoGeneration_ = 0;

@@ -1881,6 +1881,13 @@ Friend Module 播放器原生接口
     Friend Function FFF3FP_GetMediaInfo(播放器 As 播放器原生句柄, 输出UTF8 As IntPtr, 输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果
     End Function
 
+    ' ICC 配置结构化报告（单行 JSON）。契约与 FFF3FP_GetMediaInfo 一致：
+    ' 先以 IntPtr.Zero/0 探所需大小，再按返回的长度分配缓冲；无 ICC side-data 时
+    ' 内核仍返回成功与 {"status":"absent"}，不是错误。
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_GetIccProfileInfo(播放器 As 播放器原生句柄, 输出UTF8 As IntPtr, 输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果
+    End Function
+
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_GetDiscStatus(播放器 As 播放器原生句柄, 输出UTF8 As IntPtr, 输出大小 As UInteger, ByRef 所需大小 As UInteger) As 原生播放器结果
     End Function
