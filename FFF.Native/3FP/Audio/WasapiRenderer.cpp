@@ -197,6 +197,8 @@ PlayerWasapiRenderer::PlayerWasapiRenderer(std::wstring endpointId, const bool e
       restartCallback_(std::move(restartCallback)),
       stopEvent_(nullptr), sampleEvent_(nullptr), controlEvent_(nullptr),
       initializationFinished_(false), initializationResult_(FFFResult::InvalidState), queuedBytes_(0),
+      reusableBufferTargetCount_(MaximumReusableAudioBuffers),
+      reusableBufferTargetBytes_(MaximumReusableAudioBufferBytes),
       resampler_(nullptr),
       inputChannelLayout_{}, inputSampleRate_(0), inputSampleFormat_(-1),
       outputSampleRate_(0), outputChannels_(0), outputBlockAlign_(0), outputBitsPerSample_(0),
@@ -326,7 +328,10 @@ void PlayerWasapiRenderer::Stop() noexcept {
         runtimeState_->plugFramesDeclined.store(0, std::memory_order_relaxed);
     }
     std::lock_guard lock(mutex_);
-    queue_.clear(); reusableBuffers_.clear(); queuedBytes_ = 0; pendingMediaFrames_ = 0;
+    // A-07: swap an empty deque to release its peak block capacity, not just
+    // destroy the elements (clear() leaves the deque's buffers resident).
+    std::deque<AudioChunk>{}.swap(queue_);
+    reusableBuffers_.clear(); queuedBytes_ = 0; pendingMediaFrames_ = 0;
 }
 
 void PlayerWasapiRenderer::CloseEvents() noexcept {
@@ -878,12 +883,30 @@ FFFResult PlayerWasapiRenderer::Enqueue(const AVFrame* frame, const std::int64_t
     converted.resize(static_cast<std::size_t>(frames) * outputBlockAlign_);
     ApplyGain(converted);
     const auto gapBytes = static_cast<std::size_t>(gapFrames) * outputBlockAlign_;
+    const auto enqueueBytes = gapBytes + converted.size();
     {
         std::lock_guard lock(mutex_);
+        // A-02: reject this block (never wait, never drop already-queued older
+        // frames) when enqueuing would push resident bytes past the hard cap.
+        // hardCapBytes_ == 0 means uncapped and preserves prior behaviour.
+        const auto hardCap = pcmHardCapBytes_.load(std::memory_order_relaxed);
+        if (hardCap != 0 && QueuedPcmBytes() + enqueueBytes > hardCap) {
+            ++pcmCapRejectedFrames_;
+            // Hand the lent reusable buffer back so the pool does not lose it.
+            if (converted.capacity() <= reusableBufferTargetBytes_ &&
+                reusableBuffers_.size() < reusableBufferTargetCount_) {
+                converted.clear();
+                reusableBuffers_.push_back(std::move(converted));
+            }
+            // BufferTooSmall is the value PlayerSession (around its 8693 site)
+            // routes into audioRejectedFrames, i.e. an observable "rejected by
+            // budget" count rather than a playback failure.
+            return FFFResult::BufferTooSmall;
+        }
         AudioChunk chunk;
         chunk.silenceBytes = gapBytes;
         chunk.bytes = std::move(converted);
-        queuedBytes_ += gapBytes + chunk.bytes.size();
+        queuedBytes_ += enqueueBytes;
         queue_.push_back(std::move(chunk));
         producedTimelineFrames_ += gapFrames + static_cast<std::uint64_t>(frames);
         if (frames > 0) hasSubmittedAudio_ = true;
@@ -996,7 +1019,9 @@ void PlayerWasapiRenderer::SetPaused(const bool paused) noexcept {
 void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
     {
         std::lock_guard lock(mutex_);
-        queue_.clear(); queuedBytes_ = 0; timelineAnchored_ = false; producedTimelineFrames_ = 0;
+        // A-07: release the deque's peak block capacity on seek as well.
+        std::deque<AudioChunk>{}.swap(queue_);
+        queuedBytes_ = 0; timelineAnchored_ = false; producedTimelineFrames_ = 0;
         // A seek drops the queued bursts as well: the module's own reset (called
         // by the session on the same worker pass) re-packs from the seek target,
         // so bytes queued from before the seek belong to abandoned timeline
@@ -1092,6 +1117,46 @@ std::uint64_t PlayerWasapiRenderer::TimestampJitterCount() const noexcept { retu
 std::uint64_t PlayerWasapiRenderer::DiscontinuityCount() const noexcept { return discontinuityCount_.load(); }
 std::uint64_t PlayerWasapiRenderer::InsertedSilenceFrames() const noexcept { return insertedSilenceFrames_.load(); }
 std::uint64_t PlayerWasapiRenderer::DroppedOverlapFrames() const noexcept { return droppedOverlapFrames_.load(); }
+
+void PlayerWasapiRenderer::SetPcmBudgetBytes(const std::uint64_t hardCapBytes,
+    const std::uint64_t targetBytes) noexcept {
+    // Advisory: kept for logging/self-check only, never read by the queue logic.
+    pcmTargetBytes_ = targetBytes;
+    std::lock_guard lock(mutex_);
+    pcmHardCapBytes_.store(hardCapBytes, std::memory_order_relaxed);
+    if (hardCapBytes == 0) {
+        // Unbounded: restore the historical 8 x 1 MiB reuse pool.
+        reusableBufferTargetCount_ = MaximumReusableAudioBuffers;
+        reusableBufferTargetBytes_ = MaximumReusableAudioBufferBytes;
+        return;
+    }
+    // A-06: scale the reuse pool to the hard cap. Block size floors at 1 MiB and
+    // grows with the device block alignment (blockAlign * 4096); pool depth is
+    // the cap divided by four block sizes, clamped to [2,16]. If the device is
+    // not open yet outputBlockAlign_ is 0 and the block size falls back to 1 MiB.
+    const auto align = outputBlockAlign_ == 0
+        ? std::size_t{1} : static_cast<std::size_t>(outputBlockAlign_);
+    const auto perBlock = std::max<std::size_t>(MaximumReusableAudioBufferBytes, align * 4096u);
+    const auto depth = std::max<std::uint64_t>(hardCapBytes / (perBlock * 4u), 1ULL);
+    reusableBufferTargetBytes_ = perBlock;
+    reusableBufferTargetCount_ = static_cast<std::size_t>(std::clamp(depth, 2ULL, 16ULL));
+    // Only the *target* moves: we never evict buffers currently lent out (they
+    // live in an in-flight Enqueue's `converted` vector) or drain reusableBuffers_
+    // here. A lower target simply stops storing future returns past the new cap,
+    // so already-owned blocks release naturally as they are re-lent and freed.
+}
+
+std::uint64_t PlayerWasapiRenderer::PcmHardCapBytes() const noexcept {
+    return pcmHardCapBytes_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t PlayerWasapiRenderer::PcmCapRejectedFrames() const noexcept {
+    return pcmCapRejectedFrames_.load(std::memory_order_relaxed);
+}
+
+std::size_t PlayerWasapiRenderer::QueuedPcmBytes() const noexcept {
+    return queuedBytes_;
+}
 std::uint32_t PlayerWasapiRenderer::OutputSampleRate() const noexcept { std::lock_guard lock(mutex_); return outputSampleRate_; }
 std::uint16_t PlayerWasapiRenderer::OutputChannels() const noexcept { std::lock_guard lock(mutex_); return outputChannels_; }
 std::uint16_t PlayerWasapiRenderer::OutputBitsPerSample() const noexcept { std::lock_guard lock(mutex_); return outputBitsPerSample_; }
@@ -1152,6 +1217,26 @@ void PlayerWasapiRenderer::PublishRuntimeDiagnostics() noexcept {
 
 void PlayerWasapiRenderer::RenderThread() noexcept {
     FFFThreadNaming::SetCurrentThreadName("FFF.Player.WasapiRender");
+    // D-03: register this thread with MMCSS ("Audio") so Windows raises its
+    // scheduling class before the device loop starts. FFF_NOMMCSS=1 opts out;
+    // the switch is read once (function-local static) rather than per call. A
+    // failed call is non-fatal -- fall through at normal priority, never throw
+    // or retry. The RAII guard reverts the characteristics on every exit path.
+    HANDLE mmcssHandle = nullptr;
+    DWORD mmcssTaskIndex = 0;
+    {
+        static const bool mmcssDisabled = [] {
+            char flag[8] = {0};
+            const DWORD written = GetEnvironmentVariableA("FFF_NOMMCSS", flag, _countof(flag));
+            return written == 1 && flag[0] == '1';
+        }();
+        if (!mmcssDisabled)
+            mmcssHandle = AvSetMmThreadCharacteristicsW(L"Audio", &mmcssTaskIndex);
+    }
+    struct MmcssRevert final {
+        HANDLE& handle;
+        ~MmcssRevert() { if (handle) AvRevertMmThreadCharacteristics(handle); }
+    } mmcssRevert{mmcssHandle};
     const ComInitialization com;
     const auto comResult = com.Result();
     ComPtr<IMMDeviceEnumerator> enumerator;
@@ -1673,8 +1758,8 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
                         chunk.offset += bytes; write += bytes; remaining -= bytes;
                     }
                     if (chunk.silenceBytes == 0 && chunk.offset == chunk.bytes.size()) {
-                        if (chunk.bytes.capacity() <= MaximumReusableAudioBufferBytes &&
-                            reusableBuffers_.size() < MaximumReusableAudioBuffers) {
+                        if (chunk.bytes.capacity() <= reusableBufferTargetBytes_ &&
+                            reusableBuffers_.size() < reusableBufferTargetCount_) {
                             chunk.bytes.clear();
                             reusableBuffers_.push_back(std::move(chunk.bytes));
                         }

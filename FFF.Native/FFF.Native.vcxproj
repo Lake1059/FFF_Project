@@ -198,6 +198,7 @@
       <PrecompiledHeaderFile />
     </ClCompile>
     <ClCompile Include="3FP\Core\PlacementPolicy.cpp" />
+    <ClCompile Include="3FP\Core\MemoryBudgetArbiter.cpp" />
     <ClCompile Include="3FP\Hdr\HdrProcessor.cpp" />
     <ClCompile Include="3FP\Hdr\HdrMetadataParse.cpp" />
     <ClCompile Include="3FP\Hdr\HdrToneCurve.cpp" />

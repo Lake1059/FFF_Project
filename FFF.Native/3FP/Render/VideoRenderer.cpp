@@ -15,6 +15,41 @@
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 
+// MMCSS for the presenter thread (docs/111 D-03). Same reasoning as winmm above:
+// a source-side reference is the one no configuration can miss.
+#include <avrt.h>
+#pragma comment(lib, "avrt.lib")
+
+namespace {
+
+// RAII MMCSS registration for the presenter. FFF_NOMMCSS=1 (or any value whose
+// first character is not '0') disables it, exactly the rule the audio renderer
+// honours, so one switch turns both off for an A/B run.
+class MmcssThreadScope final {
+public:
+    explicit MmcssThreadScope(const wchar_t* taskName) noexcept {
+        static const bool disabled = [] {
+            wchar_t value[8] = {};
+            if (GetEnvironmentVariableW(L"FFF_NOMMCSS", value, 8) == 0) return false;
+            return value[0] != L'0';
+        }();
+        if (disabled || taskName == nullptr) return;
+        taskIndex_ = 0;
+        handle_ = AvSetMmThreadCharacteristicsW(taskName, &taskIndex_);
+    }
+    ~MmcssThreadScope() noexcept {
+        if (handle_ != nullptr) AvRevertMmThreadCharacteristics(handle_);
+    }
+    MmcssThreadScope(const MmcssThreadScope&) = delete;
+    MmcssThreadScope& operator=(const MmcssThreadScope&) = delete;
+
+private:
+    HANDLE handle_ = nullptr;
+    DWORD taskIndex_ = 0;
+};
+
+} // namespace
+
 extern "C" {
 #include <libavcodec/codec_par.h>
 #include <libavcodec/codec_id.h>
@@ -4035,7 +4070,9 @@ FFFResult PlayerVideoRenderer::CopyFrame(void* const pixels,
 
     constexpr float black[] = {0, 0, 0, 1};
     context_->ClearRenderTargetView(target.Get(), black);
-    const auto drawn = DrawCachedVideo(target.Get(), targetWidth, targetHeight);
+    // Readback, not present: this blit feeds a CPU screenshot, so it wants the current
+    // texture's pixels regardless of the presentation epoch -- no stale-epoch gating.
+    const auto drawn = DrawCachedVideo(target.Get(), targetWidth, targetHeight, /*forPresent=*/false);
     if (drawn != FFFResult::Success) return drawn;
     // Subtitle/danmaku/lyrics layers are composited in the same order the presenter
     // uses, so the screenshot matches what the user sees rather than video only.
@@ -6037,6 +6074,12 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
 
 void PlayerVideoRenderer::TimedTextThread() noexcept {
     FFFThreadNaming::SetCurrentThreadName("FFF.Player.Present");
+    // docs/111 D-03: the presenter works against flip deadlines. Task "Games" is the
+    // registered MMCSS name whose category is un-throttled, which is what a present
+    // loop needs; "Pro Audio" is deliberately left to the WASAPI thread, because a
+    // render hiccup must not outrank audio. Failure is ignored on purpose: the
+    // thread then runs exactly as before, just unprivileged.
+    MmcssThreadScope mmcssTask(L"Games");
     timedTextThreadId_.store(GetCurrentThreadId(), std::memory_order_relaxed);
     // Owns the presentation cadence while it is presenting; its waits are what hold the flip
     // rate down to the ceiling. The 1 ms request is released again on idle polls and on every
@@ -8278,6 +8321,26 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     if (prepareOnly) return FFFResult::Success;
     hasCachedVideo_ = true;
     videoGeneration_.fetch_add(1);
+    // docs/111 D-01: stamp the epoch at the moment the texture actually receives this
+    // frame's pixels. A seek that lands afterwards bumps the epoch and invalidates
+    // exactly this content -- the case the old build kept presenting.
+    cachedFrameEpoch_.store(presentationEpoch_.load(std::memory_order_acquire),
+        std::memory_order_release);
+    cachedFramePts_.store(frame->pts, std::memory_order_relaxed);
+    // docs/111 D-01 observability: the upload line stamps (pts, epoch) as a record; the
+    // presenter's own trace line now also carries pts, so the probe reads the post-seek
+    // frame sequence straight off the present line without joining.
+    {
+        static const bool traceEnabled = [] {
+            wchar_t value[8] = {};
+            if (GetEnvironmentVariableW(L"FFF_MEMARB_TRACE", value, 8) == 0) return false;
+            return value[0] != L'0';
+        }();
+        if (traceEnabled)
+            std::fprintf(stderr, "[epoch] upload pts=%lld epoch=%llu\n",
+                static_cast<long long>(frame->pts),
+                static_cast<unsigned long long>(cachedFrameEpoch_.load(std::memory_order_acquire)));
+    }
     if (coverArt) RequestCoverBackdropRender();
     {
         std::lock_guard lock(timedTextMutex_);
@@ -8365,7 +8428,10 @@ FFFResult PlayerVideoRenderer::PresentAfterBind() noexcept {
         backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
     if (targetResult != FFFResult::Success) return targetResult;
     if (hasCachedVideo_) {
-        const auto drawResult = DrawCachedVideo(backBufferTarget.Get());
+        // Present path: this blit feeds a bind-time repaint flip. It runs off the
+        // presenter thread (the worker/bind thread), which the contract guard degrades
+        // with a trace rather than rejects -- this one-shot repaint is the known exception.
+        const auto drawResult = DrawCachedVideo(backBufferTarget.Get(), /*forPresent=*/true);
         if (drawResult != FFFResult::Success) return drawResult;
     } else {
         // No frame was ever rendered into this window (headless open dropped
@@ -9094,7 +9160,34 @@ FFFResult PlayerVideoRenderer::Set360View(const bool enabled, const float yaw,
 }
 
 FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
-    const std::uint32_t outputWidth, const std::uint32_t outputHeight) noexcept {
+    const std::uint32_t outputWidth, const std::uint32_t outputHeight,
+    const bool forPresent) noexcept {
+    // Explicit-contract guard (docs/111 D-01): forPresent declares which timeline this
+    // blit serves. The presenter thread is the one that runs PresentTimedText; a readback
+    // arriving ON that thread would block the flip cadence on a staging Map, so reject
+    // it. A present blit arriving OFF the presenter thread is the documented
+    // PresentAfterBind bind-time repaint (a one-shot best-effort on the worker thread) --
+    // degrade: draw as today, but trace it once. We trace rather than silently tolerate
+    // because a future refactor could otherwise route a readback through the present path
+    // (or vice versa) with no signal; we do NOT hard-assert in release because the one
+    // legitimate off-thread present exists and must not crash a paused session.
+    {
+        const auto callerTid = static_cast<std::uint64_t>(::GetCurrentThreadId());
+        const auto presenterTid =
+            static_cast<std::uint64_t>(timedTextThreadId_.load(std::memory_order_relaxed));
+        const bool onPresenter = presenterTid != 0 && callerTid == presenterTid;
+        if (forPresent != onPresenter) {
+            const auto stamp = (forPresent ? 1ull : 0ull) << 32 | callerTid;
+            if (loggedDrawContractMismatch_.exchange(stamp, std::memory_order_relaxed) != stamp)
+                std::fprintf(stderr,
+                    "[epoch] draw-cached-video contract mismatch forPresent=%d onPresenter=%d tid=%llu\n",
+                    forPresent ? 1 : 0, onPresenter ? 1 : 0,
+                    static_cast<unsigned long long>(callerTid));
+            // Readback on the presenter thread is the dangerous direction (stalls flips on
+            // a staging Map): refuse. Off-thread present degrades to the historical draw.
+            if (!forPresent && onPresenter) return FFFResult::InvalidState;
+        }
+    }
     if (!hasCachedVideo_ || target == nullptr) return FFFResult::InvalidState;
     if (outputWidth == 0 || outputHeight == 0) return FFFResult::InvalidArgument;
     const auto projection360 = projection360Enabled_.load(std::memory_order_acquire) != 0;
@@ -9304,7 +9397,9 @@ FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept 
     const auto targetResult = AcquireBackBufferTarget(
         backBuffer.GetAddressOf(), target.GetAddressOf());
     if (targetResult != FFFResult::Success) return targetResult;
-    const auto drawResult = DrawCachedVideo(target.Get());
+    // Readback path: the pixel probe samples the current resident texture, independent
+    // of the presentation epoch -- no stale-epoch gating.
+    const auto drawResult = DrawCachedVideo(target.Get(), /*forPresent=*/false);
     if (drawResult != FFFResult::Success) return drawResult;
 
     D3D11_TEXTURE2D_DESC description{};
@@ -9386,7 +9481,9 @@ FFFResult PlayerVideoRenderer::ReadPixelRegion(const std::uint32_t x, const std:
     const auto targetResult = AcquireBackBufferTarget(
         backBuffer.GetAddressOf(), target.GetAddressOf());
     if (targetResult != FFFResult::Success) return targetResult;
-    const auto drawResult = DrawCachedVideo(target.Get());
+    // Readback path: batch pixel readback samples the current resident texture, epoch
+    // be damned -- the algorithm wants what is on the GPU right now, not a gated frame.
+    const auto drawResult = DrawCachedVideo(target.Get(), /*forPresent=*/false);
     if (drawResult != FFFResult::Success) return drawResult;
 
     D3D11_TEXTURE2D_DESC description{};
@@ -9538,6 +9635,35 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     return FFFResult::Success;
 }
 
+void PlayerVideoRenderer::AdvancePresentationEpoch() noexcept {
+    // Writer side is the session worker (DoSeek / track switch / format reopen);
+    // the presenter reads with acquire, so this release publishes the bump before
+    // any content uploaded afterwards can be stamped with it.
+    const auto next = presentationEpoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    epochAdvances_.store(next, std::memory_order_relaxed);
+    static const bool traceEnabled = [] {
+        wchar_t value[8] = {};
+        if (GetEnvironmentVariableW(L"FFF_MEMARB_TRACE", value, 8) == 0) return false;
+        return value[0] != L'0';
+    }();
+    if (traceEnabled)
+        std::fprintf(stderr, "[epoch] advance=%llu staleSkips=%llu\n",
+            static_cast<unsigned long long>(next),
+            static_cast<unsigned long long>(staleEpochSkips_.load(std::memory_order_relaxed)));
+}
+
+std::uint64_t PlayerVideoRenderer::PresentationEpoch() const noexcept {
+    return presentationEpoch_.load(std::memory_order_acquire);
+}
+
+std::uint64_t PlayerVideoRenderer::StaleEpochSkipCount() const noexcept {
+    return staleEpochSkips_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t PlayerVideoRenderer::FlipsAfterBumpCount() const noexcept {
+    return flipsAfterBump_.load(std::memory_order_relaxed);
+}
+
 FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     std::unique_lock deviceLock(deviceMutex_);
     const auto lyricsLayout = lyricsLayoutEnabled_.load(std::memory_order_acquire);
@@ -9545,6 +9671,26 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     if (window_ == nullptr ||
         (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout && !subtitleOverlay))
         return FFFResult::Success;
+    // docs/111 D-01: a texture uploaded before the current epoch belongs to a
+    // timeline the session has already left. Hold the last flipped image instead of
+    // re-presenting it: skipping the flip is what stops "seeked" from looking like
+    // "still playing the old position", and no flip is spent on stale content.
+    if (hasCachedVideo_ &&
+        cachedFrameEpoch_.load(std::memory_order_acquire) !=
+            presentationEpoch_.load(std::memory_order_acquire)) {
+        const auto skips = staleEpochSkips_.fetch_add(1, std::memory_order_relaxed) + 1;
+        const auto epoch = presentationEpoch_.load(std::memory_order_relaxed);
+        static const bool traceEnabled = [] {
+            wchar_t value[8] = {};
+            if (GetEnvironmentVariableW(L"FFF_MEMARB_TRACE", value, 8) == 0) return false;
+            return value[0] != L'0';
+        }();
+        if (traceEnabled && loggedStaleEpoch_.exchange(epoch, std::memory_order_relaxed) != epoch)
+            std::fprintf(stderr, "[epoch] stale-skip epoch=%llu skipped=%llu\n",
+                static_cast<unsigned long long>(epoch),
+                static_cast<unsigned long long>(skips));
+        return FFFResult::Success;
+    }
     // Hold both locks across EnsureSwapChain: it may resize or recreate the
     // swap chain, and Present must never overlap that rewrite (the same
     // invariant the main render path enforces).
@@ -9580,7 +9726,10 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
         backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
     if (targetResult != FFFResult::Success) return targetResult;
     if (hasCachedVideo_) {
-        const auto drawResult = DrawCachedVideo(backBufferTarget.Get());
+        // Present path: the eye-side flip. The stale-epoch gate above (before presentMutex_)
+        // already ran on this presenter thread and decided this frame is current; this blit
+        // is on the gated timeline, so forPresent=true.
+        const auto drawResult = DrawCachedVideo(backBufferTarget.Get(), /*forPresent=*/true);
         if (drawResult != FFFResult::Success) return drawResult;
     } else {
         constexpr float black[] = {0, 0, 0, 1};
@@ -9623,6 +9772,29 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     deviceLock.unlock();
     const auto result = PresentCurrentFrame(retainedChain.Get(), generation);
     if (result != FFFResult::Success) return result;
+    // docs/111 D-04: the stale gate above ran before this flip, but AdvancePresentationEpoch
+    // (seek / track switch) can fire on the worker thread in between. Re-reading both epochs
+    // now tells us whether this flip published content the session already moved past. Under
+    // the "hold the last image" semantics that has no visible effect, but the count lets the
+    // 4th-round probe prove it never double-flips. No lock -- this is a diagnostic observation,
+    // not a synchronization point.
+    if (hasCachedVideo_ &&
+        cachedFrameEpoch_.load(std::memory_order_acquire) !=
+            presentationEpoch_.load(std::memory_order_acquire))
+        flipsAfterBump_.fetch_add(1, std::memory_order_relaxed);
+    {
+        static const bool traceEnabled = [] {
+            wchar_t value[8] = {};
+            if (GetEnvironmentVariableW(L"FFF_MEMARB_TRACE", value, 8) == 0) return false;
+            return value[0] != L'0';
+        }();
+        if (traceEnabled && hasCachedVideo_)
+            std::fprintf(stderr, "[epoch] present pts=%lld epoch=%llu stale=%llu afterBump=%llu\n",
+                static_cast<long long>(cachedFramePts_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(presentationEpoch_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(staleEpochSkips_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(flipsAfterBump_.load(std::memory_order_relaxed)));
+    }
     // A format/color-space switch destroys and recreates the flip-model chain.
     // Drop every reference to the old chain and its back buffer before handing
     // presentMutex_ to the reconfiguration path. Otherwise CreateSwapChainForHwnd
@@ -9958,7 +10130,9 @@ FFFResult PlayerVideoRenderer::CopySdrFrame(void* pixels, std::uint32_t capacity
     D3D11_TEXTURE2D_DESC description{}; backBuffer->GetDesc(&description);
     if (description.Format != DXGI_FORMAT_B8G8R8A8_UNORM) return FFFResult::NotSupported;
     if (discOnly) { constexpr float clear[4]{}; context_->ClearRenderTargetView(target.Get(), clear); }
-    else { result = DrawCachedVideo(target.Get()); if (result != FFFResult::Success) return result; }
+    // Readback path: SDR frame copy-out feeds the host's screenshot buffer, so it paints
+    // the current texture without any stale-epoch gate.
+    else { result = DrawCachedVideo(target.Get(), /*forPresent=*/false); if (result != FFFResult::Success) return result; }
     const TimedTextLayerSlot slots[] = {TimedTextLayerSlot::Danmaku, TimedTextLayerSlot::Subtitle,
         TimedTextLayerSlot::Lyrics, TimedTextLayerSlot::Disc, TimedTextLayerSlot::PlayerInformation};
     for (auto slot : slots) {

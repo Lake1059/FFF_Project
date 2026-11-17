@@ -10,6 +10,9 @@
 #include "3FP/Core/GainMapProbe.h"
 #include "3FP/Core/PlacementPolicy.h"
 #include "3FP/Core/PlaybackPerformancePolicy.h"
+// Contract v1 (header-only in this step): pulling it in here makes the layout and
+// value static_asserts compile instead of sitting uninstantiated in a header.
+#include "3FP/Core/MemoryBudgetArbiter.h"
 #include "3FP/Core/RawStillSource.h"
 // IAMF needs the AOM reference decoder: FFmpeg splits an IAMF element into
 // dependent substreams and never mixes them (see IamfAudioDecoder.h).
@@ -726,6 +729,13 @@ private:
     std::uint32_t threadLadderMin_ = 4;            // floor / first rung (soft-decode minimum)
     std::uint32_t threadLadderMax_ = 32;
     std::uint32_t decoderThreads_ = 0;             // current rung; 0 = not yet chosen
+    // Σfloor precheck cap (docs/108 M-17): when ResolveFloors lands on step 2
+    // (DecodeFourThreads) the arbiter granted a floor built on a 4-worker decode
+    // pipeline, so the real worker count must never exceed 4 for this open. 0 = no
+    // precheck cap (the ladder's own ceiling rules). It is folded onto the value
+    // SelectSoftwareDecoderThreads picks AND onto the runtime ladder ceiling, so the
+    // runtime ladder can never climb back above the budget the precheck assumed.
+    std::uint32_t precheckDecoderThreadCap_ = 0;
     std::uint64_t ladderWindowDecoded_ = 0;        // counters when the window armed
     std::uint64_t ladderWindowPresented_ = 0;
     std::int64_t ladderWindowStart100ns_ = 0;
@@ -743,7 +753,7 @@ private:
     std::uint64_t ladderWindowConvert100ns_ = 0;
     std::uint64_t ladderWindowDropped_ = 0;
     // Current rung of the software look-ahead pool ladder: indexes SoftwarePoolBudgets
-    // / SoftwarePoolFrameCaps (128 MB / 4 frames at the floor, 1024 MB / 16 at the top).
+    // / SoftwarePoolFrameCaps (128 MB / 4 frames at the floor, 2048 MB / 24 at the top).
     // Climbs one rung per window the pool gate finds pool-starved; like the thread
     // ladder it never descends, and it resets per media (see DoClose).
     std::uint8_t softwarePoolRung_ = 0;
@@ -1047,7 +1057,60 @@ private:
     // steps it down -- and reset to the default by DoOpen and by an audio-track
     // change. Everything that touches it runs on the session worker thread.
     static constexpr std::int64_t kAudioTargetBufferStep100ns = 300'000;
-    std::int64_t audioTargetBuffer100ns_ = performance_.AudioInitial();
+    std::int64_t audioTargetBuffer100ns_ = performance_.AudioInitial100ns();
+
+    // ── Unified memory budget ledger (docs/108, contract v1) ──────────────────
+    // Every value below is bytes unless the name says 100ns. All of it is inert
+    // when FFF3FP_MEMARB=0: the ledger is never attached and every consumer keeps
+    // reading its own static table.
+    void AttachMemoryBudgetLedger() noexcept;
+    void DetachMemoryBudgetLedger() noexcept;
+    void RefreshMemoryBudgetLedger() noexcept;
+    void ApplyMemoryBudgetMask(std::uint32_t changedMask) noexcept;
+    void EnsureVideoBudgetClaim(std::uint64_t grantedBytes) const noexcept;
+    void ApplyAudioMemoryCap() noexcept;
+    // docs/108 §4.3: refuse to open a stream whose Σfloor cannot fit the pool. Runs
+    // before any decoder/surface exists, so a refusal leaves nothing half-built.
+    FFFResult PrecheckMemoryBudget() noexcept;
+    // docs/111 D-04: a seek or a track switch needs room for the pre-seek tail to
+    // drain while the new position refills. Borrowing is capped (one device buffer)
+    // and time-boxed (5 s); Reconcile returns it on expiry or once the queue is
+    // back under the target.
+    void TryAudioHeadroomBorrow(const char* reason) noexcept;
+    void ReconcileAudioHeadroomBorrow() noexcept;
+    // docs/109 A-03/A-04: the water level may come back down, but only when the
+    // stream is demonstrably calm, and a rollback after a short wrong step locks
+    // the automatic adjustment for a minute.
+    void MaybeLowerAudioWatermark() noexcept;
+    std::int64_t audioLastDecrease100ns_ = 0;        // 100ns
+    std::int64_t audioDecreaseLockUntil100ns_ = 0;   // 100ns
+    std::uint32_t audioQuietBufferedTicks_ = 0;
+    std::uint32_t audioRollbackCount_ = 0;
+    std::uint64_t audioWatermarkUnderrunBaseline_ = 0;
+    std::size_t VideoFrameCapTier() const noexcept;
+    std::uint64_t AudioBytesPerSecond() const noexcept;
+    void TraceMemoryBudget(const char* event, std::size_t limitFrames,
+        std::uint64_t grantedBytes, std::int64_t now100ns) const noexcept;
+    bool memoryBudgetAttached_ = false;
+    // Verdict of the open-time Σfloor precheck (docs/108 §4.3), as DegradeStep.
+    // 0 = no degradation, 1 = video floor 2 frames, 2 = decode 4 threads, 3 = refused.
+    // The video claim below reads it so the degraded floor is the one actually claimed.
+    std::uint8_t precheckFloorStep_ = 0;
+    std::int64_t nextMemoryBudgetSample100ns_ = 0;   // 100ns, 250 ms throttle
+    std::uint32_t lastMemoryBudgetMask_ = 0;
+    std::uint32_t memoryBudgetInvariantSeen_ = 0;
+    mutable std::uint64_t videoBudgetFloorBytes_ = 0;
+    // Borrowed audio headroom (docs/111 D-04) and the deadline that caps it.
+    std::uint64_t audioBorrowedBytes_ = 0;
+    std::int64_t audioBorrowDeadline100ns_ = 0;      // 100ns
+    std::uint32_t audioBorrowHits_ = 0;
+    std::uint32_t audioBorrowMisses_ = 0;
+    mutable std::uint64_t videoBudgetCeilingBytes_ = 0;
+    mutable std::uint64_t arbiterVideoGrantSeenBytes_ = 0;
+    mutable std::size_t arbiterVideoLimitFrames_ = 0;
+    mutable std::int64_t arbiterVideoLimitStamp100ns_ = 0;   // 100ns
+    mutable std::uint32_t arbiterVideoRecomputeCount_ = 0;
+    mutable std::uint32_t arbiterVideoSuppressCount_ = 0;
     std::atomic<bool> interactiveMove_{false};
     // Last-seen values of the renderer's warning counters. Any growth since the
     // previous pump buys one step of target headroom -- underruns are the hard
