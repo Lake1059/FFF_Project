@@ -231,6 +231,7 @@ enum class Status {
     SizeMismatch,         // declared size != supplied size
     VersionUnsupported,   // major version outside {2,4}
     TagTableTruncated,    // tag count / table runs past the file
+    TagCountTooLarge,     // tag count exceeds the implementation's hard cap
     TagOutOfBounds,       // tag data outside the profile
     TagOverlap,           // two tags claim overlapping payload ranges
     TagDataTruncated,     // declared tag size smaller than its type header
@@ -249,6 +250,15 @@ struct ParseResult {
 // Byte ceiling guards against a hostile declared size. 8 MiB is far above any
 // real-world display profile (sRGB ~ 3 KiB, large CMYK ~ 500 KiB).
 constexpr std::size_t kDefaultMaxProfileBytes = 8u * 1024u * 1024u;
+
+// A byte budget alone does not bound tag count: an 8 MiB profile can hold
+// ~699k 12-byte table entries. ICC.1 has no numeric tagCount ceiling, so the
+// implementation must supply one; 16k is far beyond real profiles while
+// keeping the table allocation and per-tag validation bounded.
+constexpr std::uint32_t kMaxIccTagCount = 16384u;
+
+// Warnings are diagnostic strings, not a second copy of the tag table.
+constexpr std::size_t kMaxIccWarnings = 4096u;
 
 // Parse `size` bytes at `data`. Never throws, never reads out of range.
 ParseResult Parse(const std::uint8_t* data, std::size_t size, ProfileInfo& out,
