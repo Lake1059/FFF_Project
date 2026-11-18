@@ -100,7 +100,7 @@ Public Class Form设置_界面与尺寸
 
     Private Sub 更新内容尺寸提示()
         If MCB_初始画面尺寸选项.SelectedIndex = 10 Then
-            HtmlColorLabel4.Text = "内容原始尺寸 1:1：视频区域按源像素显示；窗口连同边框超过屏幕工作区时自动最大化"
+            HtmlColorLabel4.Text = "按内容原始尺寸决定初始窗口；画面随窗口缩放，窗口连同边框超过屏幕工作区时自动最大化"
         Else
             HtmlColorLabel4.Text = "每次启动软件后视频渲染区域的尺寸，会跟随 DPI 缩放"
         End If
