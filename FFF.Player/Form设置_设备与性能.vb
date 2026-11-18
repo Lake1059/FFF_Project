@@ -177,8 +177,10 @@ Public Class Form设置_设备与性能
     End Function
 
     Private Sub 初始化蓝牙区域()
-        蓝牙控制行.BackColor = Color.Transparent
-        蓝牙控制行.BackColor1 = Color.Transparent
+        ' 运行时创建的 ModernPanel 不像 Designer 里的页内面板那样自动继承根面板透明，
+        ' Transparent 底色在 GPU 合成时会露黑；显式使用与上游设置页一致的 24 底色。
+        蓝牙控制行.BackColor = Color.FromArgb(24, 24, 24)
+        蓝牙控制行.BackColor1 = Color.FromArgb(24, 24, 24)
         蓝牙控制行.BorderSize = 0
         蓝牙控制行.Dock = DockStyle.Top
         蓝牙控制行.Name = "蓝牙控制行"
@@ -218,8 +220,8 @@ Public Class Form设置_设备与性能
         蓝牙控制行.Controls.Add(蓝牙检测按钮)
         蓝牙控制行.Controls.Add(蓝牙开关)
 
-        蓝牙编码行.BackColor = Color.Transparent
-        蓝牙编码行.BackColor1 = Color.Transparent
+        蓝牙编码行.BackColor = Color.FromArgb(24, 24, 24)
+        蓝牙编码行.BackColor1 = Color.FromArgb(24, 24, 24)
         蓝牙编码行.BorderSize = 0
         蓝牙编码行.Dock = DockStyle.Top
         蓝牙编码行.Name = "蓝牙编码行"
@@ -286,8 +288,8 @@ Public Class Form设置_设备与性能
         蓝牙编码行.Controls.Add(蓝牙编码)
         蓝牙编码行.Controls.Add(蓝牙编码标签)
 
-        蓝牙状态行.BackColor = Color.Transparent
-        蓝牙状态行.BackColor1 = Color.Transparent
+        蓝牙状态行.BackColor = Color.FromArgb(24, 24, 24)
+        蓝牙状态行.BackColor1 = Color.FromArgb(24, 24, 24)
         蓝牙状态行.BorderSize = 0
         蓝牙状态行.Dock = DockStyle.Top
         蓝牙状态行.Name = "蓝牙状态行"
