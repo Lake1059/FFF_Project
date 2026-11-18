@@ -1332,10 +1332,27 @@ Public Class Form1
     End Sub
 
     Private Sub 播放控制器_播放错误(sender As Object, e As 播放器错误事件参数)
-        If Not 正在关闭 Then
-            关闭系统媒体卡片()
-            LakeUI.ExOverlayMsgBox(Me, e.消息, MsgBoxStyle.Critical Or MsgBoxStyle.OkOnly, e.标题)
+        ' 错误事件可能在 controller 的会话锁内同步抛出；直接弹模态框会泵消息，
+        ' 让新的打开请求在锁内重入。统一排到下一次消息循环，等 Finally 放锁再上屏。
+        If IsHandleCreated AndAlso Not IsDisposed Then
+            Try
+                BeginInvoke(New Action(Sub() 显示播放错误提示(e)))
+            Catch ex As InvalidOperationException
+                Debug.WriteLine("播放错误提示无法排队到 UI 线程：" & ex.Message)
+            End Try
+            Return
         End If
+        Debug.WriteLine("播放错误提示丢弃：窗体句柄已销毁")
+    End Sub
+
+    Private Sub 显示播放错误提示(e As 播放器错误事件参数)
+        If 正在关闭 Then Return
+        关闭系统媒体卡片()
+        Try
+            LakeUI.ExOverlayMsgBox(Me, e.消息, MsgBoxStyle.Critical Or MsgBoxStyle.OkOnly, e.标题)
+        Catch ex As Exception
+            Debug.WriteLine("播放错误提示失败：" & ex.Message)
+        End Try
     End Sub
 
     ''' <summary>AI 字幕的操作提示：信息图层的消息列表与定时器都不是线程安全的，
