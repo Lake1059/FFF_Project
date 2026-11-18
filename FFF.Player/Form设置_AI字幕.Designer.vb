@@ -728,13 +728,16 @@ Partial Class Form设置_AI字幕
                         "包里自带 worker、模型与运行环境，本体不需要任何别的配置。<br>" &
                         "目录失效或删掉时功能自动停用，不影响播放。</span>"
         '
-        ' ModernPanel1：绝对定位 + 固定设计高（AutoScroll 靠窗体滚动，见 对齐面板宽度）
+        ' ModernPanel1：Dock.Fill + LakeUI 自绘竖滚动条；Dock=Top 子面板自然堆叠，
+        ' 面板自己负责滚轮/拖动/轨道点击，窗体不再开 AutoScroll。
         '
         ModernPanel1.BackColor1 = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ModernPanel1.BorderSize = 0
+        ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
         ModernPanel1.Padding = New Padding(15, 20, 20, 20)
+        ModernPanel1.ScrollBarMode = LakeUI.ModernPanel.ScrollMode.Vertical
         ModernPanel1.Size = New Size(598, 644)
         ModernPanel1.TabIndex = 0
         '
@@ -742,7 +745,6 @@ Partial Class Form设置_AI字幕
         '
         AutoScaleDimensions = New SizeF(96F, 96F)
         AutoScaleMode = AutoScaleMode.Dpi
-        AutoScroll = True
         BackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ClientSize = New Size(598, 644)
         Controls.Add(ModernPanel1)
