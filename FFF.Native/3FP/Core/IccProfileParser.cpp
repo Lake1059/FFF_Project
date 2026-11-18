@@ -14,10 +14,12 @@
 
 #include "3FP/Core/IccProfileParser.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace fff::icc {
@@ -1123,6 +1125,18 @@ ParseResult Parse(const uint8_t* data, size_t size, ProfileInfo& out, size_t max
                 res.message = "tag table overruns profile";
                 return res;
             }
+            // The 8 MiB profile budget permits ~699k entries, which is both an
+            // unbounded allocation and an O(n^2) validation workload. Cap the
+            // entry count itself; real display profiles are far below this.
+            if (tagCount > kMaxIccTagCount) {
+                res.status = Status::TagCountTooLarge;
+                char buf[96];
+                std::snprintf(buf, sizeof(buf),
+                              "tag count %u exceeds implementation limit %u",
+                              tagCount, kMaxIccTagCount);
+                res.message = buf;
+                return res;
+            }
             out.tags.reserve(tagCount);
             for (uint32_t i = 0; i < tagCount; i++) {
                 TagInfo ti;
@@ -1138,9 +1152,9 @@ ParseResult Parse(const uint8_t* data, size_t size, ProfileInfo& out, size_t max
             }
         }
 
-        // --- bounds + overlap check ---
+        // --- bounds check ---
         for (size_t i = 0; i < out.tags.size(); i++) {
-            TagInfo& ti = out.tags[i];
+            const TagInfo& ti = out.tags[i];
             if (static_cast<uint64_t>(ti.offset) + ti.size > size) {
                 res.status = Status::TagOutOfBounds;
                 char buf[80];
@@ -1149,22 +1163,42 @@ ParseResult Parse(const uint8_t* data, size_t size, ProfileInfo& out, size_t max
                 res.message = buf;
                 return res;
             }
-            for (size_t j = i + 1; j < out.tags.size(); j++) {
-                TagInfo& tj = out.tags[j];
-                bool overlap =
-                    static_cast<uint64_t>(ti.offset) < static_cast<uint64_t>(tj.offset) + tj.size &&
-                    static_cast<uint64_t>(tj.offset) < static_cast<uint64_t>(ti.offset) + ti.size;
-                if (!overlap) continue;
+        }
+
+        // --- overlap check, one sorted pass ---
+        // Sorting by start offset makes overlaps local: for any overlapping
+        // pair, at least one adjacent pair in this order also overlaps. This
+        // replaces the previous O(tagCount^2) double loop.
+        {
+            std::vector<size_t> order(out.tags.size());
+            for (size_t i = 0; i < order.size(); i++) order[i] = i;
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                const TagInfo& ta = out.tags[a];
+                const TagInfo& tb = out.tags[b];
+                if (ta.offset != tb.offset) return ta.offset < tb.offset;
+                if (ta.size != tb.size) return ta.size > tb.size;
+                return ta.signature < tb.signature;
+            });
+            for (size_t k = 1; k < order.size(); k++) {
+                const TagInfo& prev = out.tags[order[k - 1]];
+                const TagInfo& cur = out.tags[order[k]];
+                if (static_cast<uint64_t>(cur.offset) >=
+                    static_cast<uint64_t>(prev.offset) + prev.size) {
+                    continue;
+                }
                 // ICC allows two tags to share the exact same data range
                 // (identical offset AND size, e.g. rTRC/gTRC/bTRC pointing at
                 // one gamma curve). That is legal sharing, not a conflict.
-                bool identical = (ti.offset == tj.offset) && (ti.size == tj.size);
+                bool identical = (prev.offset == cur.offset) && (prev.size == cur.size);
                 if (identical) {
-                    char wbuf[96];
-                    std::snprintf(wbuf, sizeof(wbuf),
-                                  "tags '%s' and '%s' share payload",
-                                  Sig(ti.signature).c_str(), Sig(tj.signature).c_str());
-                    out.warnings.push_back(wbuf);
+                    if (out.warnings.size() < kMaxIccWarnings) {
+                        char wbuf[96];
+                        std::snprintf(wbuf, sizeof(wbuf),
+                                      "tags '%s' and '%s' share payload",
+                                      Sig(prev.signature).c_str(),
+                                      Sig(cur.signature).c_str());
+                        out.warnings.push_back(wbuf);
+                    }
                     continue;
                 }
                 // Partial overlap (ranges intersect but are not identical) is
@@ -1172,7 +1206,7 @@ ParseResult Parse(const uint8_t* data, size_t size, ProfileInfo& out, size_t max
                 res.status = Status::TagOverlap;
                 char buf[96];
                 std::snprintf(buf, sizeof(buf), "tags '%s' and '%s' overlap",
-                              Sig(ti.signature).c_str(), Sig(tj.signature).c_str());
+                              Sig(prev.signature).c_str(), Sig(cur.signature).c_str());
                 res.message = buf;
                 return res;
             }
@@ -1180,19 +1214,18 @@ ParseResult Parse(const uint8_t* data, size_t size, ProfileInfo& out, size_t max
 
         // --- duplicate signature warning ---
         {
-            std::vector<uint32_t> seen;
+            std::unordered_set<uint32_t> seen;
+            seen.reserve(out.tags.size());
             for (size_t i = 0; i < out.tags.size(); i++) {
                 uint32_t s = out.tags[i].signature;
-                for (uint32_t k : seen) {
-                    if (k == s) {
+                if (!seen.insert(s).second) {
+                    if (out.warnings.size() < kMaxIccWarnings) {
                         char buf[64];
                         std::snprintf(buf, sizeof(buf), "duplicate tag signature '%s'",
                                       Sig(s).c_str());
                         out.warnings.push_back(buf);
-                        break;
                     }
                 }
-                seen.push_back(s);
             }
         }
 
@@ -1352,6 +1385,7 @@ const char* StatusName(Status s) {
         case Status::SizeMismatch:        return "SizeMismatch";
         case Status::VersionUnsupported:  return "VersionUnsupported";
         case Status::TagTableTruncated:   return "TagTableTruncated";
+        case Status::TagCountTooLarge:    return "TagCountTooLarge";
         case Status::TagOutOfBounds:      return "TagOutOfBounds";
         case Status::TagOverlap:          return "TagOverlap";
         case Status::TagDataTruncated:    return "TagDataTruncated";

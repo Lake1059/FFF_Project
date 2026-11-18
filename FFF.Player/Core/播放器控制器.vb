@@ -1810,6 +1810,7 @@ Public NotInheritable Class 播放器控制器
             End Try
             If 已临时释放独占 Then Await 尝试恢复独占Async(原会话)
             If 打开异常 IsNot Nothing AndAlso 恢复播放 AndAlso
+                原会话 IsNot Nothing AndAlso
                 Not 已释放 AndAlso ReferenceEquals(会话, 原会话) Then
                 Try
                     原会话.播放()
