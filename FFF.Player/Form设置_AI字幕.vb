@@ -119,7 +119,6 @@ Friend Class Form设置_AI字幕
     Friend Sub 初始化页面()
         正在初始化 = True
         Try
-            对齐面板宽度()
             MTB_包目录.Text = 设置.实例对象.Ai字幕包目录
             MCB_设备.SelectedIndex = 设备下标(设置.实例对象.Ai字幕运行设备)
             ' 后端下拉必须在这里显式重建一次：赋值 SelectedIndex 时正在初始化，
@@ -889,17 +888,7 @@ Friend Class Form设置_AI字幕
     ' ---------------- 布局 ----------------
 
     ' 这一页设计高度 644 逻辑像素，而设置窗口的客户区只有 461（Form设置.Designer
-    ' 的 ClientSize）—— 装不下，底部 183px 原本被直接裁掉，模型 / 偏移 / 线程 /
-    ' 预置 四格在 150% DPI 下完全看不见。两处配合才修好：
-    '   * 窗体 AutoScroll = True（Designer）
-    '   * 面板不用 Dock —— Dock 的子控件不参与 AutoScroll 滚动，会被钉在原处，
-    '     滚动条于是只是空转。这里改成绝对定位 + 高度固定，宽度跟随容器。
-    Private Sub 对齐面板宽度()
-        Dim 宽 = Math.Max(598, ClientSize.Width)
-        If Math.Abs(ModernPanel1.Width - 宽) > 2 Then ModernPanel1.Width = 宽
-    End Sub
-
-    Private Sub Form设置_AI字幕_Resize(sender As Object, e As EventArgs) Handles MyBase.Resize
-        对齐面板宽度()
-    End Sub
+    ' 的 ClientSize）—— 装不下。现在由 ModernPanel1 的 ScrollBarMode=Vertical
+    ' 处理滚动：根面板 Dock=Fill，Dock=Top 子面板按设计坐标堆叠，面板自绘滑块/
+    ' 轨道并接管滚轮；窗体 AutoScroll 保持关闭，避免双滚动条。
 End Class

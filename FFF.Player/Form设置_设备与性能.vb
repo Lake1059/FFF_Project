@@ -169,15 +169,8 @@ Public Class Form设置_设备与性能
         MCB_LakeUI缓存清理.SelectedIndex = -1
     End Sub
 
-    ' 与 Form设置_AI字幕 同款：根面板绝对定位 + AutoScroll，宽度跟容器走。
-    Private Sub 对齐面板宽度()
-        Dim 宽 = Math.Max(652, ClientSize.Width)
-        If Math.Abs(ModernPanel1.Width - 宽) > 2 Then ModernPanel1.Width = 宽
-    End Sub
-
-    Private Sub Form设置_设备与性能_Resize(sender As Object, e As EventArgs) Handles MyBase.Resize
-        对齐面板宽度()
-    End Sub
+    ' 页面根面板 Dock=Fill，由 LakeUI ModernPanel 的 ScrollBarMode=Vertical
+    ' 自绘滚动条接管；不再调根面板宽度，宽度由 Dock 布局跟容器走。
 
     <Runtime.InteropServices.DllImport("psapi.dll")>
     Private Shared Function EmptyWorkingSet(hProcess As IntPtr) As Boolean
@@ -307,11 +300,12 @@ Public Class Form设置_设备与性能
         蓝牙状态.Text = "尚未检测蓝牙输出"
         蓝牙状态行.Controls.Add(蓝牙状态)
 
-        ' 页面是 652×835 的 Dock=Top 栈 + 窗体 AutoScroll；Dock 次序与 Add 相反，
-        ' 后加者靠上，所以把蓝牙三行插到最底部（索引 0/1/2），不依赖固定 y 坐标。
-        ' 运行时新增的控件不会参与 InitializeComponent 的 Dpi 自动缩放，这里按页面
-        ' 已缩放的 835 高度反推倍率，补做一次 Scale，避免 150% 下变成小号控件。
-        Dim 缩放 = CSng(Math.Max(1.0, ModernPanel1.Height / 835.0))
+        ' 页面是 652×835 的 Dock=Top 栈，根面板 Dock=Fill + ModernPanel.ScrollBarMode
+        ' 负责滚动；Dock 次序与 Add 相反，后加者靠上，所以把蓝牙三行插到最底部
+        ' （索引 0/1/2），不依赖固定 y 坐标。
+        ' 运行时新增的控件不会参与 InitializeComponent 的 Dpi 自动缩放，这里按控件
+        ' 当前 DeviceDpi 补做一次 Scale，避免 150% 下变成小号控件。
+        Dim 缩放 = CSng(Math.Max(1.0, ModernPanel1.DeviceDpi / 96.0))
         If 缩放 > 1.01 Then
             蓝牙控制行.Scale(New SizeF(缩放, 缩放))
             蓝牙编码行.Scale(New SizeF(缩放, 缩放))
@@ -323,10 +317,6 @@ Public Class Form设置_设备与性能
         ModernPanel1.Controls.SetChildIndex(蓝牙编码行, 1)
         ModernPanel1.Controls.Add(蓝牙控制行)
         ModernPanel1.Controls.SetChildIndex(蓝牙控制行, 2)
-        ' 设计高度 989 = 既有内容底 815 + 控制行 42 + 间隔 8 + 编码行 42
-        ' + 间隔 8 + 状态行 54 + 底部 20。
-        ' 保持与 Dpi 缩放一致的页面高度，AutoScroll 才能滚到新增区域。
-        ModernPanel1.Height = Math.Max(ModernPanel1.Height, CInt(989 * 缩放))
 
         AddHandler 蓝牙开关.CheckedChanged, AddressOf 蓝牙开关_CheckedChanged
         AddHandler 蓝牙提前量.Leave, AddressOf 蓝牙提前量_Leave
