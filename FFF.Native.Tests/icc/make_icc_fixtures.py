@@ -742,6 +742,26 @@ def malformed_from(base: bytes):
         "note": "duplicate tag must produce a warning, not a failure",
     })
 
+    # 12. tagCount above the implementation cap; the table itself still fits.
+    # ICC.1 does not impose a numeric tagCount ceiling, so this is an
+    # implementation-robustness limit, not a spec violation.
+    n = 16385
+    total = 128 + 4 + n * 12
+    b = bytearray(total)
+    b[0:4] = be32(total)
+    b[8:12] = be32(V4)
+    b[12:16] = b"mntr"
+    b[16:20] = b"RGB "
+    b[20:24] = b"XYZ "
+    b[36:40] = b"acsp"
+    b[68:80] = s15fixed(D50[0]) + s15fixed(D50[1]) + s15fixed(D50[2])
+    b[128:132] = be32(n)
+    out["bad_tagcount_massive.icc"] = (bytes(b), {
+        "kind": "malformed", "expect": {"status": "TagCountTooLarge", "usable": False},
+        "note": "implementation cap must reject an otherwise structurally valid "
+                "but pathological tag table before allocating/validating it",
+    })
+
     return out
 
 

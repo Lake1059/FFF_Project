@@ -299,11 +299,29 @@ Public NotInheritable Class 播放器会话
         End Try
     End Function
 
+    ''' <summary>
+    ''' 宿主打开媒体的有界等待时间。默认 10 秒，可用 FFF_OPEN_TIMEOUT_SECONDS
+    ''' 在 1..120 秒范围内覆盖，便于大文件/慢盘排障。
+    ''' </summary>
+    Private Shared Function 读取打开超时秒() As Double
+        Dim 文本 = Environment.GetEnvironmentVariable("FFF_OPEN_TIMEOUT_SECONDS")
+        Dim 值 As Double
+        If Double.TryParse(文本, Globalization.NumberStyles.Float,
+                           Globalization.CultureInfo.InvariantCulture, 值) AndAlso
+            值 >= 1 AndAlso 值 <= 120 Then
+            Return 值
+        End If
+        Return 10.0
+    End Function
+
     Public Function 打开Async(本地路径 As String, Optional 取消标记 As CancellationToken = Nothing) As Task
         If 取消标记.IsCancellationRequested Then Return Task.FromCanceled(取消标记)
         Dim 完成源 As New TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)
         Dim 联合取消 = CancellationTokenSource.CreateLinkedTokenSource(取消标记, 释放取消源.Token)
+        Dim 超时秒 = 读取打开超时秒()
+        Dim 超时源 As New CancellationTokenSource()
         Dim 取消注册 As CancellationTokenRegistration
+        Dim 超时注册 As CancellationTokenRegistration
         Dim 已结束 As Integer
         Dim 完成处理 As EventHandler(Of 播放器事件参数) = Nothing
         Dim 错误处理 As EventHandler(Of 播放器事件参数) = Nothing
@@ -311,6 +329,8 @@ Public NotInheritable Class 播放器会话
                                RemoveHandler 打开完成, 完成处理
                                RemoveHandler 错误, 错误处理
                                取消注册.Unregister()
+                               超时注册.Unregister()
+                               超时源.Dispose()
                                联合取消.Dispose()
                            End Sub
         完成处理 = Sub(sender, e)
@@ -337,6 +357,29 @@ Public NotInheritable Class 播放器会话
                 End If
                 清理()
             End Sub)
+        ' Cancellation can win synchronously during the registration above and
+        ' dispose the timeout source before we get here.
+        If Volatile.Read(已结束) <> 0 Then Return 完成源.Task
+        Try
+            超时注册 = 超时源.Token.Register(
+                Sub()
+                    If Interlocked.Exchange(已结束, 1) <> 0 Then Return
+                    完成源.TrySetException(New TimeoutException(
+                        $"打开媒体超时（{超时秒:0.#} 秒）：{本地路径}"))
+                    If Volatile.Read(已释放) = 0 Then
+                        Try
+                            播放器原生接口.FFF3FP_Close(取得句柄())
+                        Catch
+                        End Try
+                    End If
+                    清理()
+                End Sub)
+            超时源.CancelAfter(TimeSpan.FromSeconds(超时秒))
+        Catch ex As ObjectDisposedException
+            ' The cancellation path already completed and cleaned up; return the
+            ' canceled/faulted task rather than throwing from a race loser.
+            Return 完成源.Task
+        End Try
         ' Register may invoke the callback synchronously when cancellation races
         ' with registration. Do not enqueue an open after the task has completed.
         If Volatile.Read(已结束) <> 0 Then Return 完成源.Task
