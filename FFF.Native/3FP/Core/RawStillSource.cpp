@@ -2,7 +2,11 @@
 
 #include "3FP/Core/RawStillSource.h"
 
+// LibRaw emits C4251 for STL members in its exported data-stream classes.
+#pragma warning(push)
+#pragma warning(disable : 4251)
 #include <libraw/libraw.h>
+#pragma warning(pop)
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -13,7 +17,6 @@ extern "C" {
 
 #include <algorithm>
 #include <cctype>
-#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <new>
@@ -244,9 +247,7 @@ struct RawMemOwner {
 };
 
 void FreeMemImage(void* opaque, std::uint8_t* /*data*/) noexcept {
-    RawTrace("FreeMemImage enter");
     delete static_cast<RawMemOwner*>(opaque);
-    RawTrace("FreeMemImage done");
 }
 
 void SetSdrColor(AVFrame* frame, bool linear) noexcept {
@@ -288,20 +289,6 @@ AVFrame* ScaleFrame(AVFrame* source, int width, int height) noexcept {
 
 } // namespace
 
-void RawTrace(const char* text) noexcept {
-    if (text == nullptr) return;
-    // Diagnostic only. The production path must not write a log for every
-    // RAW open; set FFF_RAW_TRACE=1 when diagnosing a specific sample.
-    static const bool enabled =
-        GetEnvironmentVariableW(L"FFF_RAW_TRACE", nullptr, 0) != 0;
-    if (!enabled) return;
-    OutputDebugStringA(text);
-    std::FILE* file = nullptr;
-    if (fopen_s(&file, "rawtrace.log", "a") == 0 && file != nullptr) {
-        std::fprintf(file, "%s\n", text);
-        std::fclose(file);
-    }
-}
 
 bool ValidateRawOptions(const FFF3FPRawOptions& options) noexcept {
     return IsValidOptions(options);
@@ -363,7 +350,6 @@ bool RawStillSource::LooksLikeRawPath(const std::string& pathUtf8) noexcept {
 
 bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& options,
     std::string& error) noexcept {
-    RawTrace("RawStillSource::Open enter");
     error.clear();
     info_ = {};
     info_.size = sizeof(info_);
@@ -414,7 +400,6 @@ bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& o
         }
         return false;
     }
-    RawTrace("RawStillSource::open_file ok");
 
     const auto& sizes = impl_->raw->imgdata.sizes;
     int width = static_cast<int>(sizes.width);
@@ -505,12 +490,10 @@ bool RawStillSource::Open(const std::string& pathUtf8, const FFF3FPRawOptions& o
     }
 
     impl_->opened = true;
-    RawTrace("RawStillSource::Open done");
     return true;
 }
 
 bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
-    RawTrace("RawStillSource::Decode enter");
     error.clear();
     if (frame == nullptr) {
         error = "null output frame";
@@ -566,7 +549,6 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
         }
         return false;
     }
-    RawTrace("RawStillSource::unpack ok");
     result = SehDcrawProcess(&raw);
     if (result != LIBRAW_SUCCESS) {
         error = IsRawSehResult(result)
@@ -579,7 +561,6 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
         }
         return false;
     }
-    RawTrace("RawStillSource::dcraw_process ok");
 
     int memError = LIBRAW_SUCCESS;
     libraw_processed_image_t* mem = SehMakeMemImage(&raw, &memError);
@@ -594,7 +575,6 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
         }
         return false;
     }
-    RawTrace("RawStillSource::mem_image ok");
     AVPixelFormat format = PixelFormatFor(static_cast<int>(mem->colors), static_cast<int>(mem->bits));
     if (format == AV_PIX_FMT_NONE) {
         error = "LibRaw returned an unsupported channel/bit layout";
@@ -646,7 +626,6 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
         return false;
     }
     f->extended_data = f->data;
-    RawTrace("RawStillSource::frame buffer ok");
 
     // M1 honours maxOutputSide with a single sws pass. The common path
     // (maxOutputSide==0) never reaches this branch.
@@ -660,12 +639,10 @@ bool RawStillSource::Decode(AVFrame** frame, std::string& error) noexcept {
         f = scaled;
     }
     *frame = f;
-    RawTrace("RawStillSource::Decode done");
     return true;
 }
 
 AVFormatContext* RawStillSource::CreateFormatContext(std::string& error) noexcept {
-    RawTrace("RawStillSource::CreateFormatContext enter");
     error.clear();
     if (!impl_->opened) {
         error = "RAW source is not open";
@@ -710,6 +687,5 @@ AVFormatContext* RawStillSource::CreateFormatContext(std::string& error) noexcep
     stream->start_time = 0;
     stream->duration = 1;
     stream->nb_frames = 1;
-    RawTrace("RawStillSource::CreateFormatContext done");
     return context;
 }

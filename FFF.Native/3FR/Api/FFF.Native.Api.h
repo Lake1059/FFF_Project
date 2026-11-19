@@ -83,7 +83,7 @@ struct FFFSessionConfiguration {
     float microphoneGain;
     std::uint32_t muteSystemAudio;
     std::uint32_t muteMicrophone;
-    const char* diagnosticLogPathUtf8;
+    const char* diagnosticLogPathUtf8; // Reserved for binary compatibility.
     const char* captureBackendUtf8;
     const char* sourceDescriptionUtf8;
     const char* sourceFormatUtf8;

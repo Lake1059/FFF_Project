@@ -24,7 +24,7 @@ Partial Class Form总控台
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
         ModernPanel5 = New LakeUI.ModernPanel()
-        MTB_执行日志 = New LakeUI.ModernTextBox()
+        MTB_录制状态 = New LakeUI.ModernTextBox()
         MCK_防误触模式 = New LakeUI.ModernCheckBox()
         Panel1 = New LakeUI.ModernPanel()
         MB_启动或暂停或继续录制 = New LakeUI.ModernButton()
@@ -89,7 +89,7 @@ Partial Class Form总控台
         ModernPanel5.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
         ModernPanel5.BorderRadius = 10
         ModernPanel5.BorderSize = 0
-        ModernPanel5.Controls.Add(MTB_执行日志)
+        ModernPanel5.Controls.Add(MTB_录制状态)
         ModernPanel5.Controls.Add(MCK_防误触模式)
         ModernPanel5.Controls.Add(Panel1)
         ModernPanel5.Dock = DockStyle.Fill
@@ -100,29 +100,29 @@ Partial Class Form总控台
         ModernPanel5.Size = New Size(319, 524)
         ModernPanel5.TabIndex = 34
         ' 
-        ' MTB_执行日志
-        ' 
-        MTB_执行日志.BackColor = Color.Transparent
-        MTB_执行日志.BackColor1 = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
-        MTB_执行日志.BorderColor = Color.Transparent
-        MTB_执行日志.BorderColorFocus = Color.Empty
-        MTB_执行日志.BorderRadius = 10
-        MTB_执行日志.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
-        MTB_执行日志.Dock = DockStyle.Fill
-        MTB_执行日志.LineHeight = 20
-        MTB_执行日志.LineNumberBackColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_执行日志.LineNumberForeColor = Color.Silver
-        MTB_执行日志.Location = New Point(15, 15)
-        MTB_执行日志.Margin = New Padding(2)
-        MTB_执行日志.MultiLine = True
-        MTB_执行日志.Name = "MTB_执行日志"
-        MTB_执行日志.Padding = New Padding(10, 8, 10, 8)
-        MTB_执行日志.ReadOnly = True
-        MTB_执行日志.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_执行日志.Size = New Size(289, 390)
-        MTB_执行日志.TabIndex = 27
-        MTB_执行日志.WaterText = "执行日志"
-        MTB_执行日志.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
+        ' MTB_录制状态
+        '
+        MTB_录制状态.BackColor = Color.Transparent
+        MTB_录制状态.BackColor1 = Color.FromArgb(CByte(80), CByte(0), CByte(0), CByte(0))
+        MTB_录制状态.BorderColor = Color.Transparent
+        MTB_录制状态.BorderColorFocus = Color.Empty
+        MTB_录制状态.BorderRadius = 10
+        MTB_录制状态.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
+        MTB_录制状态.Dock = DockStyle.Fill
+        MTB_录制状态.LineHeight = 20
+        MTB_录制状态.LineNumberBackColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MTB_录制状态.LineNumberForeColor = Color.Silver
+        MTB_录制状态.Location = New Point(15, 15)
+        MTB_录制状态.Margin = New Padding(2)
+        MTB_录制状态.MultiLine = True
+        MTB_录制状态.Name = "MTB_录制状态"
+        MTB_录制状态.Padding = New Padding(10, 8, 10, 8)
+        MTB_录制状态.ReadOnly = True
+        MTB_录制状态.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MTB_录制状态.Size = New Size(289, 390)
+        MTB_录制状态.TabIndex = 27
+        MTB_录制状态.WaterText = "录制状态"
+        MTB_录制状态.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ' 
         ' MCK_防误触模式
         ' 
@@ -807,7 +807,7 @@ Partial Class Form总控台
     Friend WithEvents MCK_防误触模式 As LakeUI.ModernCheckBox
     Friend WithEvents JustEmptyControl13 As LakeUI.JustEmptyControl
     Friend WithEvents MB_分割 As LakeUI.ModernButton
-    Friend WithEvents MTB_执行日志 As LakeUI.ModernTextBox
+    Friend WithEvents MTB_录制状态 As LakeUI.ModernTextBox
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents JustEmptyControl15 As LakeUI.JustEmptyControl
     Friend WithEvents JustEmptyControl14 As LakeUI.JustEmptyControl

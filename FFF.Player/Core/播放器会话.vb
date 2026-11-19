@@ -148,69 +148,16 @@ Public NotInheritable Class 播放器会话
     Public Event 首帧呈现 As EventHandler(Of 首帧呈现事件参数)
 
     Public Sub 打开(本地路径 As String)
-        ' 计时戳从打开入口起算：下面这条通路同步串在 UI 线程上，与内核 worker 的 DoOpen
-        ' 并行；它到底吃掉了多少、有没有被等待窗吸收，只有单独量出来才答得了。
-        ' 未设 FFF_CT_LOAD_TRACE=1 时这里连一次分配都不做。
-        Dim 计时 As 通路计时 = Nothing
-        If 色彩变换装载计时已启用 Then 计时 = New 通路计时()
         调用路径(AddressOf 播放器原生接口.FFF3FP_Open, 本地路径)
         ' 呈现策略一次性接上：请求 VRR 低时延路径（tearing present）。偏好语义——
         ' 渲染侧只在自适应降速（pace）真正介入时兑现，健康播放仍是 vblank 钳制；
         ' 旧内核没有该导出时静默跳过，不影响播放。
         播放器原生接口.设置呈现配置(取得句柄(), True)
-        启动色彩变换通路(计时)
-    End Sub
-
-    ' ---- 色彩变换通路装载计时（仅 FFF_CT_LOAD_TRACE=1） ----
-    ' 写文件而不是 Debug/ETW：沙箱按路径白名单写盘，用户 TEMP 可能拒写，包根目录
-    ' （AppContext.BaseDirectory）是稳定可写的那个点。环境变量在类型初始化时读一次，
-    ' 之后每个打点只做一次布尔判断，未开启时没有 IO、没有分配。
-    Private Shared ReadOnly 色彩变换装载计时已启用 As Boolean =
-        (Environment.GetEnvironmentVariable("FFF_CT_LOAD_TRACE") = "1")
-
-    Private NotInheritable Class 通路计时
-        Private ReadOnly 表 As Stopwatch
-        Private 上一刻 As Long
-        ' 默认 -1 = 这一段没走到（旧内核缺导出、模块缺席等提前返回），不是 0 ms。
-        Public 探测 As Long = -1
-        Public 装载 As Long = -1
-        Public 插槽 As Long = -1
-        Public 启动注入 As Long = -1
-
-        Public Sub New()
-            表 = Stopwatch.StartNew()
-            上一刻 = 表.ElapsedTicks
-        End Sub
-
-        ''' <summary>自上一刻度起的毫秒数，并把刻度推进到现在。</summary>
-        Public Function 打点() As Long
-            Dim 现在 = 表.ElapsedTicks
-            Dim 毫秒 = CLng((现在 - 上一刻) * 1000.0# / Stopwatch.Frequency)
-            上一刻 = 现在
-            Return 毫秒
-        End Function
-
-        ''' <summary>构造（即 打开() 入口）到现在，覆盖整条装载串。</summary>
-        Public ReadOnly Property 总毫秒 As Long
-            Get
-                Return CLng(表.ElapsedTicks * 1000.0# / Stopwatch.Frequency)
-            End Get
-        End Property
-    End Class
-
-    Private Shared Sub 写装载计时(计时 As 通路计时)
-        Try
-            Dim 行 = $"[CT] 探测={计时.探测}ms 装载={计时.装载}ms 插槽={计时.插槽}ms " &
-                     $"启动注入={计时.启动注入}ms 总={计时.总毫秒}ms"
-            IO.File.AppendAllText(IO.Path.Combine(AppContext.BaseDirectory, "ct_load_trace.log"),
-                                  行 & Environment.NewLine, System.Text.Encoding.UTF8)
-        Catch
-            ' 计时绝不能影响启动：只读目录、文件被占用、磁盘满，一律吞掉。
-        End Try
+        启动色彩变换通路()
     End Sub
 
     ' 外部色彩变换通路：缺席静默，就绪装载并把内核会话句柄交给模块自驱动注入泵。
-    Private Sub 启动色彩变换通路(计时 As 通路计时)
+    Private Sub 启动色彩变换通路()
         If Volatile.Read(已释放) <> 0 Then Return
         Try
             ' 旧内核没有环/注入导出：模块泵要用的就是这几支，缺席即静默。
@@ -218,28 +165,20 @@ Public NotInheritable Class 播放器会话
 
             Dim 原因 As String = Nothing
             Dim 形态 = 外部模块接口.探测(原因)
-            If 计时 IsNot Nothing Then 计时.探测 = 计时.打点()
             If 形态 = 外部模块接口.模块在场形态.缺席 Then
-                Debug.WriteLine("扩展模块：" & 原因)
                 Return
             End If
 
             ' 实例与床渲染插槽共用映射；未解锁时这里不建，解锁后唤醒。
             If 形态 = 外部模块接口.模块在场形态.就绪 AndAlso 色彩模块实例 Is Nothing Then
                 Dim 模块 = 外部模块接口.尝试装载(原因)
-                If 模块 Is Nothing Then
-                    Debug.WriteLine("扩展模块：" & 原因)
-                Else
-                    色彩模块实例 = 模块
-                End If
+                If 模块 IsNot Nothing Then 色彩模块实例 = 模块
             End If
-            If 计时 IsNot Nothing Then 计时.装载 = 计时.打点()
 
             ' 已解锁才安装外部床渲染表；否则内核继续矩阵折叠。
             安装音频渲染插槽()
             ' 音频直通表同理：模式≠关 且模块有这一面才钉入（见 安装音频直通插槽）。
             安装音频直通插槽()
-            If 计时 IsNot Nothing Then 计时.插槽 = 计时.打点()
 
             ' 把内核句柄交给模块自驱动注入泵；未解锁或拒绝都静默。
             Dim 实例 = 色彩模块实例
@@ -249,12 +188,7 @@ Public NotInheritable Class 播放器会话
                     实例.启动处理器(句柄.DangerousGetHandle())
                 End If
             End If
-            If 计时 IsNot Nothing Then 计时.启动注入 = 计时.打点()
-        Catch ex As Exception
-            Debug.WriteLine("扩展模块：通路启动异常（已忽略）：" & ex.GetType().Name & ": " & ex.Message)
-        Finally
-            ' 提前返回（旧内核/模块缺席）也落一行：-1 表示那段没走到，比缺行好判。
-            If 计时 IsNot Nothing Then 写装载计时(计时)
+        Catch
         End Try
     End Sub
 
@@ -270,15 +204,12 @@ Public NotInheritable Class 播放器会话
             Dim 原因 As String = Nothing
             Dim 形态 = 外部模块接口.探测(原因)
             If 形态 <> 外部模块接口.模块在场形态.就绪 Then
-                Debug.WriteLine("扩展模块：解锁后唤醒未成（" & 形态.ToString() & "）" &
-                    If(String.IsNullOrEmpty(原因), "", "：" & 原因))
                 Return False
             End If
 
             If 色彩模块实例 Is Nothing Then
                 Dim 模块 = 外部模块接口.尝试装载(原因)
                 If 模块 Is Nothing Then
-                    Debug.WriteLine("扩展模块：解锁后装载失败（" & 原因 & "）")
                     Return False
                 End If
                 ' 与 启动色彩变换通路 同一份实例：注入泵与床渲染插槽必须绑在同一份映射上。
@@ -294,7 +225,6 @@ Public NotInheritable Class 播放器会话
             If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return False
             Return 实例.启动处理器(句柄.DangerousGetHandle())
         Catch ex As Exception
-            Debug.WriteLine("扩展模块：解锁后唤醒异常（已忽略）：" & ex.GetType().Name)
             Return False
         End Try
     End Function
@@ -746,7 +676,6 @@ Public NotInheritable Class 播放器会话
         Try
             Return 读取原生文本(AddressOf 播放器原生接口.FFF3FP_GetIccProfileInfo)
         Catch ex As Exception
-            System.Diagnostics.Debug.WriteLine($"取ICC信息失败: {ex.Message}")
             Return String.Empty
         End Try
     End Function
@@ -769,7 +698,6 @@ Public NotInheritable Class 播放器会话
         Dim 原因 As String = Nothing
         Dim 表 = 色彩模块实例.尝试取音频渲染表(原因)
         If Not 表.HasValue Then
-            If 原因 IsNot Nothing Then Debug.WriteLine("音频渲染插槽：" & 原因)
             Return
         End If
         Dim 本地表 = 表.Value
@@ -783,7 +711,6 @@ Public NotInheritable Class 播放器会话
                 ' 只有内核确实接受之后才转移所有权；握手得到表本身不转移。
                 色彩模块实例?.标记音频表所有权已转移()
             Else
-                Debug.WriteLine("音频渲染插槽：内核拒绝 " & 结果.ToString())
             End If
         Finally
             钉住.Free()
@@ -867,7 +794,6 @@ Public NotInheritable Class 播放器会话
         Dim 原因 As String = Nothing
         Dim 表 = 色彩模块实例.尝试取音频直通表(原因)
         If Not 表.HasValue Then
-            If 原因 IsNot Nothing Then Debug.WriteLine("音频直通插槽：" & 原因)
             Return
         End If
         Dim 本地表 = 表.Value
@@ -882,7 +808,6 @@ Public NotInheritable Class 播放器会话
                 直通插槽已装 = True
                 色彩模块实例?.标记直通表所有权已转移()
             Else
-                Debug.WriteLine("音频直通插槽：内核拒绝 " & 结果.ToString())
             End If
         Finally
             钉住.Free()

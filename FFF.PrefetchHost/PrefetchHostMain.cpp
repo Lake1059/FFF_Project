@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -293,33 +292,7 @@ FFFPrefetchResult MakeBaseResult(const FFFPrefetchTask& t) {
     return r;
 }
 
-HANDLE OpenLogFile() {
-    wchar_t modulePath[32768];
-    DWORD len = GetModuleFileNameW(nullptr, modulePath, 32768);
-    if (len == 0 || len >= 32768) return INVALID_HANDLE_VALUE;
-    std::wstring dir(modulePath, len);
-    std::size_t slash = dir.find_last_of(L"\\/");
-    std::wstring logPath = (slash == std::wstring::npos)
-        ? L"prefetch.log"
-        : dir.substr(0, slash + 1) + L"prefetch.log";
-    return CreateFileW(logPath.c_str(), FILE_APPEND_DATA,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL, nullptr);
-}
 
-void AppendLog(HANDLE hLog, DWORD pid, std::uint32_t gen, std::uint32_t kind,
-               std::int32_t order, std::uint64_t bytes, const char* action) {
-    if (hLog == INVALID_HANDLE_VALUE) return;
-    char line[256];
-    int n = std::snprintf(line, sizeof(line),
-        "[prefetch] pid=%lu gen=%u kind=%u order=%d bytes=%llu action=%s\r\n",
-        static_cast<unsigned long>(pid), gen, kind, static_cast<int>(order),
-        static_cast<unsigned long long>(bytes), action);
-    if (n <= 0) return;
-    DWORD toWrite = static_cast<DWORD>((std::min)(n, static_cast<int>(sizeof(line))));
-    DWORD written = 0;
-    WriteFile(hLog, line, toWrite, &written, nullptr);
-}
 
 }  // namespace
 
@@ -329,8 +302,6 @@ int main() {
 
     HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    HANDLE hLog = OpenLogFile();
-    const DWORD pid = GetCurrentProcessId();
 
     for (;;) {
         std::uint32_t len = 0;
@@ -371,17 +342,10 @@ int main() {
             r.status = -2;  // unknown kind: skipped
         }
 
-        const char* action = (task.kind == FFF_PREFETCH_TASK_PROBE) ? "probe" : "warm";
-        std::uint64_t logBytes = (task.kind == FFF_PREFETCH_TASK_PROBE)
-            ? r.fileSizeBytes : r.warmedBytes;
-        AppendLog(hLog, pid, task.generation, task.kind, task.order, logBytes, action);
-
         std::uint32_t outLen = static_cast<std::uint32_t>(sizeof(FFFPrefetchResult));
         if (!WriteExact(hOut, &outLen, 4)) break;
         if (!WriteExact(hOut, &r, outLen)) break;
     }
 
-    AppendLog(hLog, pid, 0, 0, 0, 0, "exit");
-    if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
     return 0;
 }

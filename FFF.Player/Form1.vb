@@ -645,7 +645,7 @@ Public Class Form1
             Return
         End If
 
-        启动时探测扩展模块()
+        启动解锁轮询()
 
         Dim 启动文件 = My.Application.取出待处理启动文件()
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
@@ -717,17 +717,7 @@ Public Class Form1
     Private 解锁轮询起点 As Long
     Private 解锁轮询已收工 As Boolean
 
-    ''' <summary>启动探测（只记调试读数）并排期解锁输码轮询：1s 起、60s 截止、每进程最多弹一次。</summary>
-    Private Sub 启动时探测扩展模块()
-        Try
-            Dim 原因 As String = Nothing
-            ' Release 下 Debug.WriteLine 被剥离：启动探测结论落 扩展模块.log（装载明细由接口层指纹节流落盘）。
-            外部模块接口.记录扩展模块诊断("扩展模块：" & 外部模块接口.探测(原因).ToString() &
-                If(String.IsNullOrEmpty(原因), "", "（" & 原因 & "）"))
-        Catch ex As Exception
-            Debug.WriteLine("扩展模块：启动时探测异常（已忽略）：" & ex.GetType().Name)
-        End Try
-
+    Private Sub 启动解锁轮询()
         解锁轮询起点 = Environment.TickCount64
         解锁轮询已收工 = False
         解锁轮询计时器 = New System.Windows.Forms.Timer With {.Interval = 1000}
@@ -746,7 +736,6 @@ Public Class Form1
             If 已过毫秒 > 解锁弹窗最晚毫秒 Then
                 解锁轮询已收工 = True
                 停止解锁轮询()
-                Debug.WriteLine("扩展模块：解锁提示窗口（启动后 60 秒）已过且未弹，本进程不再提示")
                 Return
             End If
 
@@ -756,7 +745,6 @@ Public Class Form1
                     ' 命中唯一该弹的一格：先收工再生弹，保证"每进程至多一次"。
                     解锁轮询已收工 = True
                     停止解锁轮询()
-                    Debug.WriteLine("扩展模块：在场未解锁，弹出输码（每进程仅一次）")
                     解锁对话框循环()
                 Case 外部模块接口.模块在场形态.缺席
                     ' DLL 可能稍后才出现：窗口内继续等。
@@ -767,7 +755,6 @@ Public Class Form1
             End Select
         Catch ex As Exception
             ' 轮询异常不打扰用户：下一跳再试，窗口到点自然收工。
-            Debug.WriteLine("扩展模块：解锁轮询异常（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
 
@@ -816,7 +803,6 @@ Public Class Form1
         Try
             播放控制器?.保存当前播放进度()
         Catch ex As Exception
-            Debug.WriteLine("播放进度：定时保存失败（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
 
@@ -824,7 +810,6 @@ Public Class Form1
         Try
             播放控制器?.应用蓝牙音频延迟()
         Catch ex As Exception
-            Debug.WriteLine("蓝牙音频延迟：轮询异常（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
 
@@ -853,7 +838,6 @@ Public Class Form1
             Dim 详情 As String = Nothing
             Select Case 外部模块接口.提交解锁码(码.Trim(), 详情)
                 Case 外部模块接口.解锁结果.已接受
-                    Debug.WriteLine("扩展模块：解锁码已被模块接受（票据已落盘）")
                     ' 泵的补装载预算可能已经用尽（用户输码慢于 60 秒）：显式唤醒，
                     ' 否则这一场播放不会开始注入，而用户已经看到“已解锁”。
                     播放控制器?.唤醒色彩变换通路()
@@ -864,7 +848,6 @@ Public Class Form1
                 Case 外部模块接口.解锁结果.已接受未落盘
                     ' 码是对的，但票据写不进目标位置（常见于装在不可写目录）：
                     ' 本次进程能用，重启后要重输。这句必须说清，否则用户以为"没成功"。
-                    Debug.WriteLine("扩展模块：解锁码已被模块接受（票据未落盘，仅本次进程）")
                     ' 这条路径的授权只活在本进程的内存里，唤醒同样必须做——
                     ' 否则用户会看到"已通过"但画面毫无变化。
                     播放控制器?.唤醒色彩变换通路()
@@ -875,19 +858,14 @@ Public Class Form1
 
                 Case 外部模块接口.解锁结果.被拒
                     ' 码不对：换文案再给一次机会（详情只进调试输出，不含码）。
-                    Debug.WriteLine("扩展模块：解锁码被拒" &
-                        If(String.IsNullOrEmpty(详情), "", "（" & 详情 & "）"))
                     Continue For
 
                 Case Else
                     ' 模块够不到解锁入口时直接放弃。
-                    Debug.WriteLine("扩展模块：无法提交解锁码" &
-                        If(String.IsNullOrEmpty(详情), "", "（" & 详情 & "）"))
                     Return
             End Select
         Next
         ' 连续错满上限：放弃，回到"本次按基础层出画"，不再打扰（重启后恢复）。
-        Debug.WriteLine("扩展模块：连续输错满 " & 解锁最大尝试次数.ToString() & " 次，放弃")
     End Sub
 
 
@@ -909,7 +887,6 @@ Public Class Form1
                 播放进度存储.清空()
             End If
         Catch ex As Exception
-            Debug.WriteLine("播放进度：退出收尾失败（已忽略）：" & ex.GetType().Name)
         End Try
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
@@ -1338,11 +1315,9 @@ Public Class Form1
             Try
                 BeginInvoke(New Action(Sub() 显示播放错误提示(e)))
             Catch ex As InvalidOperationException
-                Debug.WriteLine("播放错误提示无法排队到 UI 线程：" & ex.Message)
             End Try
             Return
         End If
-        Debug.WriteLine("播放错误提示丢弃：窗体句柄已销毁")
     End Sub
 
     Private Sub 显示播放错误提示(e As 播放器错误事件参数)
@@ -1351,7 +1326,6 @@ Public Class Form1
         Try
             LakeUI.ExOverlayMsgBox(Me, e.消息, MsgBoxStyle.Critical Or MsgBoxStyle.OkOnly, e.标题)
         Catch ex As Exception
-            Debug.WriteLine("播放错误提示失败：" & ex.Message)
         End Try
     End Sub
 
@@ -1957,7 +1931,6 @@ Public Class Form1
             End If
             系统媒体.设置缩略图(系统媒体缩略图.编码PNG(帧))
         Catch ex As Exception
-            Debug.WriteLine("SMTC：生成缩略图失败（已忽略）：" & ex.GetType().Name)
         Finally
             帧?.Dispose()
         End Try
@@ -2000,7 +1973,6 @@ Public Class Form1
             Try
                 系统媒体.Dispose()
             Catch ex As Exception
-                Debug.WriteLine("SMTC：关闭会话失败（已忽略）：" & ex.GetType().Name)
             End Try
             系统媒体 = Nothing
         End If
@@ -2033,7 +2005,6 @@ Public Class Form1
         Try
             系统媒体.发布时间轴和倍速(构建系统媒体时间轴(快照), 播放控制器.播放速度)
         Catch ex As Exception
-            Debug.WriteLine("SMTC：时间轴心跳失败（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
 
@@ -2125,7 +2096,6 @@ Public Class Form1
             If 已处理 Then 刷新系统媒体状态()
             Return 已处理
         Catch ex As Exception
-            Debug.WriteLine("SMTC：按钮处理失败（已忽略）：" & ex.GetType().Name)
             Return False
         End Try
     End Function
@@ -2151,7 +2121,6 @@ Public Class Form1
             刷新系统媒体状态()
             Return True
         Catch ex As Exception
-            Debug.WriteLine("SMTC：seek 处理失败（已忽略）：" & ex.GetType().Name)
             Return False
         End Try
     End Function
@@ -2180,7 +2149,6 @@ Public Class Form1
             End If
             Return True
         Catch ex As Exception
-            Debug.WriteLine("SMTC：倍速处理失败（已忽略）：" & ex.GetType().Name)
             Return False
         End Try
     End Function
@@ -2194,7 +2162,6 @@ Public Class Form1
         Try
             系统媒体.发布倍速(播放控制器.播放速度)
         Catch ex As Exception
-            Debug.WriteLine("SMTC：倍速同步失败（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
 

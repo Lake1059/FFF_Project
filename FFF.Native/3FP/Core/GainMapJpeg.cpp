@@ -587,7 +587,7 @@ bool ProbeJpegGainMap(const std::wstring& path, JpegGainMapHit& out) {
                                    (hdrgmDecl && hdrgmParams);
         if (hdrHeadroomDeclared) {
             char b[160];
-            sprintf(b, "JPEG_HDR_BASE_NO_GAINMAP: HDR headroom declared in XMP (headroomLog2=%.3f) "
+            std::snprintf(b, sizeof(b), "JPEG_HDR_BASE_NO_GAINMAP: HDR headroom declared in XMP (headroomLog2=%.3f) "
                        "but no MPF gain-map second image", (double)appleXmpHeadroom);
             out.reason = b;
         } else if (hdrgmDecl) {

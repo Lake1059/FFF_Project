@@ -3,18 +3,23 @@
 $ErrorActionPreference = 'Stop'
 
 function Get-LibiamfRequiredFiles {
-    param([Parameter(Mandatory = $true)][string]$ProjectRoot, [string]$Configuration = 'Release')
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [string]$Configuration = 'Release', [switch]$IncludeDebugSymbols)
 
     @('include\IAMF_decoder.h', 'include\IAMF_defines.h', 'include\vlogging_tool_sr.h',
       'oar\include\oar.h', 'oar\include\oar_base.h', 'oar\include\oar_metadata.h',
       'oar\include\animation.h')
+    $libPrefix = if ($Configuration -eq 'Debug') { 'lib\x64\debug\' } else { 'lib\x64\' }
     [xml]$project = [IO.File]::ReadAllText((Join-Path $ProjectRoot 'FFF.Native\FFF.Native.vcxproj'))
     foreach ($group in $project.Project.ItemDefinitionGroup) {
         if ($group.Condition -notlike '*HaveLibiamf*') { continue }
         foreach ($library in ([string]$group.Link.AdditionalDependencies).Split(';')) {
             if ($library.EndsWith('.lib')) {
-                $prefix = if ($Configuration -eq 'Debug') { 'lib\x64\debug\' } else { 'lib\x64\' }
-                $prefix + $library
+                $relative = $libPrefix + $library
+                $relative
+                if ($Configuration -eq 'Debug' -and $IncludeDebugSymbols) {
+                    [IO.Path]::ChangeExtension($relative, '.pdb')
+                }
             }
         }
     }
@@ -29,9 +34,11 @@ function Get-MissingDependencyFiles {
 }
 
 function Assert-LibiamfReady {
-    param([Parameter(Mandatory = $true)][string]$ProjectRoot, [string]$Configuration = 'Release')
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [string]$Configuration = 'Release', [switch]$IncludeDebugSymbols)
     $missing = @(Get-MissingDependencyFiles -Root (Join-Path $ProjectRoot 'third_party\libiamf') `
-        -RelativePaths @(Get-LibiamfRequiredFiles -ProjectRoot $ProjectRoot -Configuration $Configuration))
+        -RelativePaths @(Get-LibiamfRequiredFiles -ProjectRoot $ProjectRoot -Configuration $Configuration `
+            -IncludeDebugSymbols:$IncludeDebugSymbols))
     if ($missing.Count) { throw "Incomplete IAMF dependencies. Run tools/准备Libiamf.ps1. Missing: $($missing -join ', ')" }
 }
 
@@ -63,6 +70,18 @@ function Initialize-NativeDependencies {
     }
     if ($missing.Count) { throw "Incomplete FFmpeg dependencies. Run tools/准备FFmpeg.ps1. Missing: $($missing -join ', ')" }
 
+    $librawRoot = Join-Path $ProjectRoot 'third_party\libraw'
+    $librawFiles = @('include\libraw\libraw.h', 'include\libraw\libraw_alloc.h',
+        'include\libraw\libraw_const.h', 'include\libraw\libraw_datastream.h',
+        'include\libraw\libraw_internal.h', 'include\libraw\libraw_types.h',
+        'include\libraw\libraw_version.h', 'lib\x64\libraw.lib', 'bin\x64\libraw.dll')
+    $missing = @(Get-MissingDependencyFiles -Root $librawRoot -RelativePaths $librawFiles)
+    if ($missing.Count -and -not $SkipPreparation) {
+        & (Join-Path $toolsDirectory '准备LibRaw.ps1')
+        $missing = @(Get-MissingDependencyFiles -Root $librawRoot -RelativePaths $librawFiles)
+    }
+    if ($missing.Count) { throw "Incomplete LibRaw dependencies. Run tools/准备LibRaw.ps1. Missing: $($missing -join ', ')" }
+
     $vcpkgRoot = Join-Path $ProjectRoot 'third_party\vcpkg_installed\x64-windows'
     $libDirectory = if ($Configuration -eq 'Debug') { 'debug\lib' } else { 'lib' }
     $binDirectory = if ($Configuration -eq 'Debug') { 'debug\bin' } else { 'bin' }
@@ -82,8 +101,10 @@ function Initialize-NativeDependencies {
 
     if (-not $SkipIamf) {
         $missing = @(Get-MissingDependencyFiles -Root (Join-Path $ProjectRoot 'third_party\libiamf') `
-            -RelativePaths @(Get-LibiamfRequiredFiles -ProjectRoot $ProjectRoot -Configuration $Configuration))
+            -RelativePaths @(Get-LibiamfRequiredFiles -ProjectRoot $ProjectRoot -Configuration $Configuration `
+                -IncludeDebugSymbols:(-not $SkipPreparation)))
         if ($missing.Count -and -not $SkipPreparation) { & (Join-Path $toolsDirectory '准备Libiamf.ps1') -Configuration $Configuration }
-        Assert-LibiamfReady -ProjectRoot $ProjectRoot -Configuration $Configuration
+        Assert-LibiamfReady -ProjectRoot $ProjectRoot -Configuration $Configuration `
+            -IncludeDebugSymbols:(-not $SkipPreparation)
     }
 }

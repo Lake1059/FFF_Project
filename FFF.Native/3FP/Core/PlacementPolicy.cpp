@@ -10,7 +10,6 @@
 #include <mutex>
 #include <set>
 
-extern void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept;
 
 namespace {
 
@@ -109,7 +108,6 @@ constexpr std::uint32_t Flag(const FFF3FPCpuPlacementFlags flag) noexcept {
 PlacementPolicy::PlacementPolicy() {
     if (EnvIs(L"FFF_PLACEMENT", L"off")) {
         disabled_ = true;
-        description_ = "PLACEMENT_DISABLED reason=FFF_PLACEMENT=off";
     } else if (EnvIs(L"FFF_PLACEMENT", L"prefer")) {
         forced_ = true;
         ceiling_ = Tier::Preferred;
@@ -120,44 +118,15 @@ PlacementPolicy::PlacementPolicy() {
         forced_ = true;
         ceiling_ = Tier::Boosted;
     }
-    // Presence, not value: same convention as FFF_CADENCE_TRACE.
-    trace_ = GetEnvironmentVariableW(L"FFF_PLACEMENT_TRACE", nullptr, 0) != 0;
 }
 
 PlacementPolicy::~PlacementPolicy() { Release(); }
 
-void PlacementPolicy::Log(const char* transition) noexcept {
-    try {
-    description_.clear();
-    description_ += "PLACEMENT transition=";
-    description_ += transition;
-    description_ += " kind=";
-    switch (kind_) {
-        case Domain::EfficiencyClass: description_ += "Hybrid"; break;
-        case Domain::CacheDomain: description_ += "CacheDomain"; break;
-        default: description_ += "None"; break;
-    }
-    description_ += " tier=";
-    switch (tier_) {
-        case Tier::Preferred: description_ += "Preferred"; break;
-        case Tier::Spilled: description_ += "Spilled"; break;
-        case Tier::Boosted: description_ += "Boosted"; break;
-        default: description_ += "None"; break;
-    }
-    char counts[112] = {};
-    std::snprintf(counts, sizeof(counts), " tier0=%zu tier1=%zu total=%zu priority=0x%lX",
-                  tier0_.size(), tier1_.size(), all_.size(),
-                  static_cast<unsigned long>(GetPriorityClass(GetCurrentProcess())));
-    description_ += counts;
-    if (forced_) description_ += " forced=1";
-    FFF3FP_KernelLogImpl(description_.c_str());
-    } catch (...) {}
-}
 
 void PlacementPolicy::Discover() noexcept {
     // The off arm skips discovery unless sampling was asked for: the trace needs the
     // partition to classify samples, and reading topology is not "touching" anything.
-    if (discovered_ || (disabled_ && !trace_)) return;
+    if (discovered_ || disabled_) return;
     discovered_ = true;
     try {
 
@@ -165,8 +134,6 @@ void PlacementPolicy::Discover() noexcept {
     GetSystemCpuSetInformation(nullptr, 0, &needed, GetCurrentProcess(), 0);
     if (needed == 0 || sizeof(SYSTEM_CPU_SET_INFORMATION) < 32) {
         kind_ = Domain::None;
-        description_ = "PLACEMENT_NONE reason=cpu-set-enumeration-unavailable";
-        FFF3FP_KernelLogImpl(description_.c_str());
         return;
     }
 
@@ -175,8 +142,6 @@ void PlacementPolicy::Discover() noexcept {
     if (!GetSystemCpuSetInformation(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()),
                                     static_cast<ULONG>(buffer.size()), &written, GetCurrentProcess(), 0)) {
         kind_ = Domain::None;
-        description_ = "PLACEMENT_NONE reason=cpu-set-enumeration-failed";
-        FFF3FP_KernelLogImpl(description_.c_str());
         return;
     }
 
@@ -205,8 +170,6 @@ void PlacementPolicy::Discover() noexcept {
     groupCount_ = groupsSeen.empty() ? 1u : static_cast<std::uint32_t>(groupsSeen.size());
     if (all_.empty()) {
         kind_ = Domain::None;
-        description_ = "PLACEMENT_NONE reason=no-cpu-sets";
-        FFF3FP_KernelLogImpl(description_.c_str());
         return;
     }
 
@@ -261,12 +224,9 @@ void PlacementPolicy::Discover() noexcept {
         if (!ReadProcessorTimes(idle, total)) {
             if (groupCount_ > 1) {
                 kind_ = Domain::None;
-                description_ = "PLACEMENT_NONE reason=multi-group-refused hint=single-group-only-needs-SetThreadGroupAffinity";
             } else {
                 kind_ = Domain::None;
-                description_ = "PLACEMENT_NONE reason=ccd-layout-but-no-load-sampling";
             }
-            FFF3FP_KernelLogImpl(description_.c_str());
             return;
         }
         kind_ = Domain::CacheDomain;
@@ -298,23 +258,14 @@ void PlacementPolicy::Discover() noexcept {
         // Tick() corrects it within one window.
     } else {
         kind_ = Domain::None;
-        description_ = "PLACEMENT_NONE reason=single-domain";
-        FFF3FP_KernelLogImpl(description_.c_str());
         return;
     }
 
     // The decode ladder uses this as its first-step boundary (see the header).
     preferredDomainThreads_ = static_cast<std::uint32_t>(domainLp0_.size());
 
-    char line[176] = {};
-    std::snprintf(line, sizeof(line), "PLACEMENT_DISCOVERED kind=%s tier0=%zu ids tier1=%zu ids",
-                  kind_ == Domain::EfficiencyClass ? "Hybrid" : "CacheDomain",
-                  tier0_.size(), tier1_.size());
-    FFF3FP_KernelLogImpl(line);
     } catch (...) {
         kind_ = Domain::None;
-        description_ = "PLACEMENT_NONE reason=discovery-exception";
-        FFF3FP_KernelLogImpl(description_.c_str());
     }
 }
 
@@ -403,7 +354,6 @@ void PlacementPolicy::EnsurePreferredCapacity(std::uint32_t minimumWorkers) noex
     Discover();
     if (kind_ == Domain::None || minimumWorkers == 0) return;
     if (preferredDomainThreads_ >= minimumWorkers) return;
-    const auto before = preferredDomainThreads_;
     BuildTiers(minimumWorkers);
     capacityTarget_ = minimumWorkers;
     // The OS state follows the partition: an already-applied tier was aimed at the
@@ -412,12 +362,6 @@ void PlacementPolicy::EnsurePreferredCapacity(std::uint32_t minimumWorkers) noex
     if (started_ && tier_ != Tier::None) {
         ApplyTier(Tier::None);
         ApplyTier(tier_);
-    }
-    if (trace_) {
-        char line[192] = {};
-        std::snprintf(line, sizeof(line), "PLACEMENT_CAPACITY preferred=%u -> %zu target=%u",
-                      before, domainLp0_.size(), minimumWorkers);
-        FFF3FP_KernelLogImpl(line);
     }
 }
 
@@ -515,103 +459,21 @@ void PlacementPolicy::ApplyDomainSwap(double busy0, double busy1) noexcept {
             std::rotate(orderedGroups_.begin(), orderedGroups_.begin() + 1, orderedGroups_.end());
         BuildTiers(capacityTarget_);
         lastDomainSwitch100ns_ = static_cast<std::int64_t>(now);
-        if (ApplyTier(Tier::Preferred)) Log("domain-swap");
+        ApplyTier(Tier::Preferred);
     }
     } catch (...) {}
 }
 
 void PlacementPolicy::Tick() noexcept {
-    if (disabled_ && !trace_) return;
-    // One sampling of the machine per window: the trace reports it and, when this is the
-    // CacheDomain arm at Preferred, the same reading decides the swap. Sampling twice
-    // would leave one of the two consumers with a zero-length delta.
-    bool busyKnown = false;
-    double busy0 = 0.0, busy1 = 0.0;
-    if (trace_) {
-        busyKnown = ReadTierUtilization(busy0, busy1);
-        EmitWindowSample(busyKnown, busy0, busy1);
-    }
-    if (disabled_ || kind_ != Domain::CacheDomain) return;
-    if (tier_ != Tier::Preferred) return;   // the choice only matters while restricted
-    if (trace_) {
-        if (busyKnown) ApplyDomainSwap(busy0, busy1);
-    } else {
+    if (!disabled_ && kind_ == Domain::CacheDomain && tier_ == Tier::Preferred) {
         ChooseCacheDomain();
     }
-}
-
-int PlacementPolicy::ClassifyCurrentProcessor() const noexcept {
-    if (GetMaximumProcessorGroupCount() > 1) return -1;   // processor numbers are group-local
-    const DWORD lp = GetCurrentProcessorNumber();
-    for (const auto id : domainLp0_) if (id == lp) return 0;
-    for (const auto id : domainLp1_) if (id == lp) return 1;
-    return -1;
-}
-
-void PlacementPolicy::SamplePresentThread() noexcept {
-    if (!trace_ || domainLp0_.empty()) return;
-    switch (ClassifyCurrentProcessor()) {
-        case 0: ++sampleTier0_; ++windowTier0_; break;
-        case 1: ++sampleTier1_; ++windowTier1_; break;
-        default: ++sampleOther_; ++windowOther_; break;
-    }
-}
-
-void PlacementPolicy::EmitWindowSample(bool busyKnown, double busy0, double busy1) noexcept {
-    if (!trace_) return;
-    try {
-    ++windows_;
-    const char* tierText = "None";
-    switch (tier_) {
-        case Tier::Preferred: tierText = "Preferred"; break;
-        case Tier::Spilled: tierText = "Spilled"; break;
-        case Tier::Boosted: tierText = "Boosted"; break;
-        default: break;
-    }
-    char busyText0[8] = "na";
-    char busyText1[8] = "na";
-    if (busyKnown) {
-        std::snprintf(busyText0, sizeof(busyText0), "%d", static_cast<int>(busy0 * 100.0 + 0.5));
-        std::snprintf(busyText1, sizeof(busyText1), "%d", static_cast<int>(busy1 * 100.0 + 0.5));
-    }
-    char line[288] = {};
-    std::snprintf(line, sizeof(line),
-                  "PLACEMENT_SAMPLE window seq=%llu tier=%s present_tier0=%llu present_tier1=%llu"
-                  " present_other=%llu total_tier0=%llu total_tier1=%llu total_other=%llu"
-                  " busy0=%s busy1=%s",
-                  static_cast<unsigned long long>(windows_), tierText,
-                  static_cast<unsigned long long>(windowTier0_),
-                  static_cast<unsigned long long>(windowTier1_),
-                  static_cast<unsigned long long>(windowOther_),
-                  static_cast<unsigned long long>(sampleTier0_),
-                  static_cast<unsigned long long>(sampleTier1_),
-                  static_cast<unsigned long long>(sampleOther_),
-                  busyText0, busyText1);
-    FFF3FP_KernelLogImpl(line);
-    windowTier0_ = windowTier1_ = windowOther_ = 0;
-    } catch (...) {}
-}
-
-void PlacementPolicy::EmitFinalSample() noexcept {
-    if (!trace_ || finalSampleLogged_) return;
-    if (sampleTier0_ + sampleTier1_ + sampleOther_ == 0) return;
-    finalSampleLogged_ = true;
-    try {
-    char line[160] = {};
-    std::snprintf(line, sizeof(line), "PLACEMENT_SAMPLE final tier0=%llu tier1=%llu other=%llu windows=%llu",
-                  static_cast<unsigned long long>(sampleTier0_),
-                  static_cast<unsigned long long>(sampleTier1_),
-                  static_cast<unsigned long long>(sampleOther_),
-                  static_cast<unsigned long long>(windows_));
-    FFF3FP_KernelLogImpl(line);
-    } catch (...) {}
 }
 
 void PlacementPolicy::OnPlaybackStart(std::uint32_t workerThreadId) noexcept {
     if (disabled_) {
         // The negative control says so out loud: an off session that stays silent is
         // indistinguishable from a build without the policy. One line, no API call.
-        FFF3FP_KernelLogImpl("PLACEMENT_DISABLED reason=FFF_PLACEMENT=off");
         // The off arm applies nothing; with the trace on it still learns the partition so
         // the samples can be classified (Discover itself is read-only).
         Discover();
@@ -638,7 +500,6 @@ void PlacementPolicy::OnPlaybackStart(std::uint32_t workerThreadId) noexcept {
         // of the domains, so the state machine keeps a place for it.
         if (tier_ == Tier::None) {
             tier_ = Tier::Preferred;
-            Log("start-nodomain");
         }
         return;
     }
@@ -646,28 +507,26 @@ void PlacementPolicy::OnPlaybackStart(std::uint32_t workerThreadId) noexcept {
     // resume would re-learn the same spill two seconds later, and the pause is the one
     // moment where the pipeline is not under load anyway.
     const Tier wanted = forced_ ? ceiling_ : (tier_ == Tier::None ? Tier::Preferred : tier_);
-    if (ApplyTier(wanted)) Log("start");
+    ApplyTier(wanted);
 }
 
 void PlacementPolicy::OnPlaybackStop() noexcept {
     if (disabled_ || forced_) return;
-    if (tier_ == Tier::Boosted && ApplyTier(Tier::Spilled)) Log("stop-drop-boost");
+    if (tier_ == Tier::Boosted) ApplyTier(Tier::Spilled);
 }
 
 void PlacementPolicy::Release() noexcept {
     if (disabled_) {
-        EmitFinalSample();
         return;
     }
     const bool touched = tier_ != Tier::None && started_;
     // The priority overlay outlives tier changes; drop it before the teardown so the
     // final restore actually returns the process to its original priority class.
     overlayPriority_ = false;
-    if (ApplyTier(Tier::None)) Log("release");
+    ApplyTier(Tier::None);
     tier_ = Tier::None;
     started_ = false;
     (void)touched;
-    EmitFinalSample();
 }
 
 bool PlacementPolicy::ApplyTier(Tier wanted) noexcept {
@@ -675,14 +534,6 @@ bool PlacementPolicy::ApplyTier(Tier wanted) noexcept {
 
     const bool restricted = wanted == Tier::Preferred || wanted == Tier::Spilled ||
                             wanted == Tier::Boosted;
-    // A vendor machine can refuse these calls (a restrictive job object, a policy). Report
-    // the refusal once per apply instead of leaving the caller believing it took effect.
-    char failed[128] = {};
-    auto note = [&failed](const char* api) {
-        const size_t used = std::strlen(failed);
-        std::snprintf(failed + used, sizeof(failed) - used, "%s%s", used ? "," : "", api);
-    };
-
     // 1. process-wide default: tier0 while preferred, every set once spilled, none on release
     if (Available()) {
         BOOL ok = FALSE;
@@ -707,11 +558,8 @@ bool PlacementPolicy::ApplyTier(Tier wanted) noexcept {
             // Diagnostic bookkeeping only (P3-12): what this policy last put there.
             processDefaultSetCount_ = defaultSetCount;
         }
-        if (!ok) note("SetProcessDefaultCpuSets");
     } else if (wanted == Tier::None) {
-        if (!SetProcessDefaultCpuSets(GetCurrentProcess(), nullptr, 0))
-            note("SetProcessDefaultCpuSets");
-        else
+        if (SetProcessDefaultCpuSets(GetCurrentProcess(), nullptr, 0))
             processDefaultSetCount_ = 0;
         g_sessionOwnsProcessDefaultCpuSets = false;
     }
@@ -725,13 +573,10 @@ bool PlacementPolicy::ApplyTier(Tier wanted) noexcept {
                      FALSE, workerThreadId_)
         : nullptr;
     if (worker != nullptr) {
-        const BOOL ok = (Available() && restricted)
+        (Available() && restricted)
             ? SetThreadSelectedCpuSets(worker, reinterpret_cast<const ULONG*>(tier0_.data()),
                                        static_cast<ULONG>(tier0_.size()))
             : SetThreadSelectedCpuSets(worker, nullptr, 0);
-        if (!ok) note("SetThreadSelectedCpuSets");
-    } else if (workerThreadId_ != 0 && restricted) {
-        note("OpenThread");
     }
 
     // 3. priority only at the last tier, and never a demotion of a host that runs higher
@@ -740,9 +585,7 @@ bool PlacementPolicy::ApplyTier(Tier wanted) noexcept {
         if (ClassRank(current) >= 0 && ClassRank(current) < ClassRank(ABOVE_NORMAL_PRIORITY_CLASS)) {
             classRaised_ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS) != FALSE;
         }
-        if (worker != nullptr && !SetThreadPriority(worker, THREAD_PRIORITY_HIGHEST)) {
-            note("SetThreadPriority");
-        }
+        if (worker != nullptr) SetThreadPriority(worker, THREAD_PRIORITY_HIGHEST);
     } else {
         // The standalone priority overlay (Prioritize) outlives tier changes: while it
         // is held, stepping a tier down must not hand its priority back.
@@ -758,11 +601,6 @@ bool PlacementPolicy::ApplyTier(Tier wanted) noexcept {
     }
 
     if (worker != nullptr) CloseHandle(worker);
-    if (failed[0] != 0) {
-        char line[192] = {};
-        std::snprintf(line, sizeof(line), "PLACEMENT_APPLY_FAILED api=%s", failed);
-        FFF3FP_KernelLogImpl(line);
-    }
     tier_ = wanted;
     return true;
 }
@@ -807,7 +645,6 @@ bool PlacementPolicy::Prioritize() noexcept {
         classRaised_ = true;
         changed = true;
     }
-    char failed[128] = {};
     HANDLE worker = workerThreadId_ != 0
         ? OpenThread(THREAD_SET_LIMITED_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION |
                          THREAD_SET_INFORMATION,
@@ -815,15 +652,7 @@ bool PlacementPolicy::Prioritize() noexcept {
         : nullptr;
     if (worker != nullptr) {
         if (SetThreadPriority(worker, THREAD_PRIORITY_HIGHEST)) changed = true;
-        else std::snprintf(failed, sizeof(failed), "SetThreadPriority");
         CloseHandle(worker);
-    } else if (workerThreadId_ != 0) {
-        std::snprintf(failed, sizeof(failed), "OpenThread");
-    }
-    if (failed[0] != 0) {
-        char line[192] = {};
-        std::snprintf(line, sizeof(line), "PLACEMENT_APPLY_FAILED api=%s", failed);
-        FFF3FP_KernelLogImpl(line);
     }
     return changed;
 }
@@ -900,37 +729,21 @@ bool PlacementPolicy::BeginProcessStartupPlacement() noexcept {
         static PlacementPolicy policy;
         if (policy.disabled_) {
             MarkStartupPlacementHistory(2);
-            FFF3FP_KernelLogImpl("PLACEMENT_STARTUP skip reason=FFF_PLACEMENT=off");
             return false;
         }
         std::vector<std::uint32_t> ids;
         if (!policy.BuildStartupCpuSetIds(ids)) {
             MarkStartupPlacementHistory(2);
-            char line[208] = {};
-            std::snprintf(line, sizeof(line),
-                          "PLACEMENT_STARTUP skip reason=no-preferred-domain groups=%u%s",
-                          static_cast<unsigned>(policy.groupCount_),
-                          policy.groupCount_ > 1
-                              ? " hint=multi-group-needs-SetThreadGroupAffinity"
-                              : "");
-            FFF3FP_KernelLogImpl(line);
             return false;
         }
         if (!SetProcessDefaultCpuSets(GetCurrentProcess(),
                                       reinterpret_cast<const ULONG*>(ids.data()),
                                       static_cast<ULONG>(ids.size()))) {
             MarkStartupPlacementHistory(2);
-            FFF3FP_KernelLogImpl("PLACEMENT_STARTUP fail api=SetProcessDefaultCpuSets");
             return false;
         }
         g_startupPlacementActive = true;
         MarkStartupPlacementHistory(1);
-        char line[192] = {};
-        std::snprintf(line, sizeof(line),
-                      "PLACEMENT_STARTUP begin kind=%s ids=%zu groups=%u",
-                      policy.kind_ == Domain::EfficiencyClass ? "Hybrid" : "CacheDomain",
-                      ids.size(), static_cast<unsigned>(policy.groupCount_));
-        FFF3FP_KernelLogImpl(line);
         return true;
     } catch (...) {
         MarkStartupPlacementHistory(2);
@@ -945,10 +758,6 @@ void PlacementPolicy::EndProcessStartupPlacement(const char* reason) noexcept {
         g_startupPlacementActive = false;
         const bool sessionOwned = g_sessionOwnsProcessDefaultCpuSets;
         if (!sessionOwned) SetProcessDefaultCpuSets(GetCurrentProcess(), nullptr, 0);
-        char line[192] = {};
-        std::snprintf(line, sizeof(line), "PLACEMENT_STARTUP end reason=%s session-owned=%d",
-                      reason != nullptr ? reason : "unknown", sessionOwned ? 1 : 0);
-        FFF3FP_KernelLogImpl(line);
     } catch (...) {
     }
 }

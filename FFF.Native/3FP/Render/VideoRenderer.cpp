@@ -89,7 +89,6 @@ using Microsoft::WRL::ComPtr;
 // Kernel log sink (PlayerApi.cpp). Declared at global scope with external linkage, the
 // same way PrefetchService/PlacementPolicy reach it: a declaration inside the unnamed
 // namespace below would bind to a different, internal-linkage entity.
-extern void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept;
 
 namespace {
 template<class T> void ReleaseCom(T*& resource) noexcept {
@@ -113,28 +112,8 @@ std::int64_t QpcNowValue() noexcept {
     return value.QuadPart;
 }
 
-// 停留判带的区间账开关。残差（60fps 臂最好的一趟 95.6%、带外最差 2 格）要归因，只能
-// 把每个样本的"区间里翻了几次帧 / 其中几次没上屏 / 累计该占几格 / 实际停了几格"一次打出来：
-// 聚合读数分不开"区间真的跨了两帧"和"PresentRefreshCount 读数滞后"这两种解释，它们给出的
-// 修复方向是相反的。默认关闭，FPT_HOLD_TRACE=1 才写 stderr。
-bool HoldTraceEnabled() noexcept {
-    static const bool enabled = GetEnvironmentVariableW(L"FPT_HOLD_TRACE", nullptr, 0) != 0;
-    return enabled;
-}
-
-// RTX 超分步进账的开关：默认关闭，FPT_VSR_TRACE=1 才计时并按 300 帧写日志。
-// 关掉时连 QPC 读数都不做，所以留在生产代码里不改变渲染路径的成本结构。
-bool VsrStepTraceEnabled() noexcept {
-    static const bool enabled = GetEnvironmentVariableW(L"FPT_VSR_TRACE", nullptr, 0) != 0;
-    return enabled;
-}
-
 // TrueHDR 步进账的开关。与 VSR 分开一个变量，只因为两路会在同一帧里各重建一次，
 // 一份日志分不清是谁。
-bool HdrStepTraceEnabled() noexcept {
-    static const bool enabled = GetEnvironmentVariableW(L"FPT_HDR_TRACE", nullptr, 0) != 0;
-    return enabled;
-}
 
 // One refresh is 6.94 ms wide on a 144 Hz panel, and the presenter's waits are on that pitch
 // once the ceiling allows it. This process otherwise runs at the default system timer
@@ -1615,7 +1594,6 @@ static_assert(CalculateLyricsCoverDestination(512, 512, 800, 400,
     CalculateLyricsCoverDestination(512, 512, 800, 400,
     50.0f, 50.0f, 7.5f, 0.0f, 7.5f).width == 340);
 
-
 // Filter identifiers understood by ScalePixelShader's ScaleWeight().
 enum class ScaleKernel : std::uint32_t {
     Cubic = 0,      // Catmull-Rom cubic, radius 1 -- sharp, cheapest
@@ -2776,7 +2754,6 @@ FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8
 // installed through FFF3FP_SetLogCallback. Declared here rather than included so the
 // renderer keeps no dependency on the API translation unit; it is a plain C++ symbol
 // instead of FFF3FP_API, so referencing it adds nothing to the DLL's export table.
-void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept;
 
 PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
@@ -3317,20 +3294,6 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
                 // "not an NVIDIA adapter" instead of silently doing nothing.
                 nvidiaAdapter_ =
                     desc.VendorId == FFF3FP::NvidiaVideo::NvidiaVendorId;
-                // Fixed-size stack buffer: EnsureDevice() is noexcept, so a
-                // std::string/std::to_string allocation here would turn an
-                // OutOfMemory into std::terminate instead of a returned error.
-                char line[192]{};
-                _snprintf_s(line, sizeof(line), _TRUNCATE,
-                    "FFF.Native: device adapter requested=%d vendor=0x%04x device=0x%04x luid=%ld:%lu",
-                    preferredAdapterIndex, desc.VendorId, desc.DeviceId,
-                    static_cast<long>(desc.AdapterLuid.HighPart),
-                    static_cast<unsigned long>(desc.AdapterLuid.LowPart));
-                FFF3FP_KernelLogImpl(line);
-                OutputDebugStringA(line);
-                // The sink takes bare lines (the host adds its own framing), so the
-                // terminator is emitted separately to keep debugger output one-per-line.
-                OutputDebugStringA("\n");
             }
         }
     }
@@ -4362,10 +4325,6 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
             for (auto& slot : uploadStaging_) ReleaseCom(slot[plane]);
         }
         uploadRingUnavailable_.store(true, std::memory_order_release);
-        if (GetEnvironmentVariableW(L"FFF_LADDER_TRACE", nullptr, 0))
-            std::fprintf(stderr,
-                "[upload] staging ring refused by the device (%ux%u); fell back to Map\n",
-                sourceWidth, sourceHeight);
         if (!buildSourceTextures(true)) return FFFResult::DeviceFailure;
     }
     if (cudaInteropSource && !RegisterCudaInteropPlanes(planeCount)) {
@@ -4399,57 +4358,26 @@ bool PlayerVideoRenderer::RegisterCudaInteropPlanes(const std::uint32_t planeCou
     if (planeCount == 0 || planeCount > ARRAYSIZE(sourceTextures_)) return false;
     const auto status = cudaInterop_.Bind(sourceTextures_, planeCount);
     if (status != CudaD3D11Interop::Status::Success) {
-        static const bool trace = [] {
-            wchar_t value[8]{};
-            return GetEnvironmentVariableW(L"FFF_CUDA_INTEROP_TRACE", value, 8) != 0 &&
-                value[0] == L'1' && value[1] == L'\0';
-        }();
-        if (trace) {
-            std::fprintf(stderr, "[cuda] bind refused (status=%d planes=%u)\n",
-                static_cast<int>(status), planeCount);
-            for (std::uint32_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
-                if (sourceTextures_[plane] == nullptr) continue;
-                D3D11_TEXTURE2D_DESC desc{};
-                sourceTextures_[plane]->GetDesc(&desc);
-                std::fprintf(stderr,
-                    "[cuda]   plane%u %ux%u fmt=%d usage=%d mips=%u array=%u\n", plane,
-                    desc.Width, desc.Height, static_cast<int>(desc.Format),
-                    static_cast<int>(desc.Usage), desc.MipLevels, desc.ArraySize);
-            }
-        }
     }
     return status == CudaD3D11Interop::Status::Success;
 }
 
 bool PlayerVideoRenderer::CanImportCudaFrame(const AVFrame* const frame) const noexcept {
-    // One-shot diagnostic: FFF_CUDA_INTEROP_TRACE=1 prints which gate said no. The check
-    // runs once per frame, so the switch is resolved once per process.
-    static const bool trace = [] {
-        wchar_t value[8]{};
-        return GetEnvironmentVariableW(L"FFF_CUDA_INTEROP_TRACE", value, 8) != 0 &&
-            value[0] == L'1' && value[1] == L'\0';
-    }();
-    const auto deny = [](const char* const reason) noexcept {
-        if (trace) std::fprintf(stderr, "[cuda] refuse: %s\n", reason);
-        return false;
-    };
     if (frame == nullptr) return false;
     // Called for every frame, including D3D11 and software ones: those are the normal
     // answer "no" and must not turn the trace switch into per-frame spam.
     if (frame->format != AV_PIX_FMT_CUDA) return false;
-    if (frame->hw_frames_ctx == nullptr) return deny("no hw_frames_ctx");
-    if (!CudaD3D11Interop::Enabled()) return deny("gate off (FFF3FP_CUDA_D3D11_INTEROP=0)");
-    if (cudaInteropRefused_.load(std::memory_order_relaxed)) return deny("refusal latched");
+    if (frame->hw_frames_ctx == nullptr) return false;
+    if (!CudaD3D11Interop::Enabled()) return false;
+    if (cudaInteropRefused_.load(std::memory_order_relaxed)) return false;
     const auto* const frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
-    if (frames == nullptr || frames->device_ref == nullptr) return deny("hw_frames_ctx incomplete");
+    if (frames == nullptr || frames->device_ref == nullptr) return false;
     const auto* const device = reinterpret_cast<const AVHWDeviceContext*>(frames->device_ref->data);
-    if (device == nullptr || device->type != AV_HWDEVICE_TYPE_CUDA) return deny("frames not CUDA device");
+    if (device == nullptr || device->type != AV_HWDEVICE_TYPE_CUDA) return false;
     // The interop hands the planes to the three-plane shader arm as one R8/R16 texture
     // per plane; a semi-planar surface would need a second sampling layout and is left
     // on the download route.
     if (!CudaD3D11Interop::SupportsPixelFormat(static_cast<std::int32_t>(frames->sw_format))) {
-        if (trace) std::fprintf(stderr, "[cuda] refuse: sw_format %d unsupported\n",
-            static_cast<int>(frames->sw_format));
         return false;
     }
     return true;
@@ -4712,10 +4640,6 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
         std::string message = "NVIDIA RTX Super Resolution step failed: ";
         message += stage;
         SetError(message);
-        // Also surface it through the process log: the status block only says
-        // "DriverRejected", which cannot distinguish an unsupported driver from a
-        // bug in our own view setup.
-        FFF3FP_KernelLogImpl(message.c_str());
         return FFFResult::NotSupported;
     };
 
@@ -4725,20 +4649,6 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
     const auto skip = [this](const FFF3FPVideoSuperResolutionReason reason) noexcept {
         videoSuperResolutionActive_.store(false, std::memory_order_release);
         videoSuperResolutionReason_.store(reason, std::memory_order_release);
-        // Surface the transition in the process log; without this a silent skip
-        // (e.g. an adaptive-downscaled source with no D3D11_BIND_DECODER) is
-        // invisible. Deduplicated so a steady state does not log once per frame.
-        // A fixed stack buffer (not std::string) keeps this noexcept path free of
-        // a throwing allocation; the sink is null-safe when no host is attached.
-        const auto reasonValue = static_cast<std::uint32_t>(reason);
-        if (videoSuperResolutionLoggedReason_.exchange(reasonValue,
-                std::memory_order_acq_rel) != reasonValue) {
-            char line[128]{};
-            _snprintf_s(line, sizeof(line), _TRUNCATE,
-                "FFF.Native: RTX Super Resolution skipped: %s",
-                VideoSuperResolutionReasonText(reason));
-            FFF3FP_KernelLogImpl(line);
-        }
         return FFFResult::NotSupported;
     };
 
@@ -4802,11 +4712,6 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
         superResolutionPassTargetWidth_ == surfaceWidth &&
         superResolutionPassTargetHeight_ == surfaceHeight &&
         superResolutionSourceFormat_ == sourceFormat;
-    // 步进账（FPT_VSR_TRACE=1 才开）。只量 CPU 侧提交时间：真实管线里的残余代价落在
-    // presentwait（GPU 完成侧），所以这两个数若都很小，就恰好把代价排除在我们的 API
-    // 调用之外。rebuilt 用来判几何是否逐帧抖动。
-    const bool traceSteps = VsrStepTraceEnabled();
-    const auto stepStartQpc = traceSteps ? QpcNowValue() : 0;
     bool rebuilt = false;
     if (!sameGeometry) {
         ReleaseSuperResolutionResources();
@@ -4928,11 +4833,7 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
         rebuilt = true;
     }
 
-    const auto buildDoneQpc = traceSteps ? QpcNowValue() : 0;
     if (rebuilt) {
-        // Releasing the old pass zeroes the four diagnostic atomics along with it,
-        // so the one frame that *built* the pass would otherwise report active=1
-        // with source 0x0 -- the exact reading this publish exists to prevent.
         videoSuperResolutionSourceWidth_ = sourceWidth_;
         videoSuperResolutionSourceHeight_ = sourceHeight_;
         videoSuperResolutionTargetWidth_ = surfaceWidth;
@@ -4950,39 +4851,7 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
         return rejectAt("VideoProcessorBlt");
     }
 
-    if (traceSteps) {
-        const auto bltDoneQpc = QpcNowValue();
-        vsrBltTicks_ += (bltDoneQpc - buildDoneQpc);
-        // buildAvgMs 的分母是重建次数，分子也只能是重建耗时：每帧都累加会把
-        // 命中缓存那些帧的零头也算进"重建平均"，读数偏大且随帧数漂移。
-        if (rebuilt) {
-            vsrBuildTicks_ += (buildDoneQpc - stepStartQpc);
-            ++vsrRebuilds_;
-        }
-        // 纯 ASCII：内核日志槽按 UTF-8 交给宿主，窄字面量在 MSVC 默认下会按系统 ANSI
-        // 码页编码，混进中文只会读成乱码，反而妨碍判读。
-        if (++vsrFrames_ % 300ULL == 0ULL) {
-            char line[224]{};
-            _snprintf_s(line, sizeof(line), _TRUNCATE,
-                "FFF.Native: VSR step accounting frames=%llu rebuilds=%llu"
-                " buildAvgMs=%.3f bltSubmitAvgMs=%.3f",
-                static_cast<unsigned long long>(vsrFrames_),
-                static_cast<unsigned long long>(vsrRebuilds_),
-                vsrRebuilds_ ? static_cast<double>(vsrBuildTicks_) /
-                    static_cast<double>(vsrRebuilds_) * 1000.0 /
-                        static_cast<double>(QpcTicks()) : 0.0,
-                static_cast<double>(vsrBltTicks_) / static_cast<double>(vsrFrames_) *
-                    1000.0 / static_cast<double>(QpcTicks()));
-            FFF3FP_KernelLogImpl(line);
-        }
-    }
-
     videoSuperResolutionReason_.store(FFF3FPVideoSuperResolutionReason::None,
-        std::memory_order_release);
-    // Reset the log-dedup marker too, so a skip that follows this success logs its
-    // transition again instead of looking like the previous, already-logged state.
-    videoSuperResolutionLoggedReason_.store(
-        static_cast<std::uint32_t>(FFF3FPVideoSuperResolutionReason::None),
         std::memory_order_release);
     videoSuperResolutionActive_.store(true, std::memory_order_release);
     return FFFResult::Success;
@@ -5014,26 +4883,14 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
         std::string message = "NVIDIA automatic HDR step failed: ";
         message += stage;
         SetError(message);
-        FFF3FP_KernelLogImpl(message.c_str());
         return FFFResult::NotSupported;
     };
     const auto skip = [this](const FFF3FPVideoAutoHdrReason reason) noexcept {
         videoTrueHdrActive_.store(false, std::memory_order_release);
         videoTrueHdrReason_.store(reason, std::memory_order_release);
-        const auto reasonValue = static_cast<std::uint32_t>(reason);
-        if (videoTrueHdrLoggedReason_.exchange(reasonValue,
-                std::memory_order_acq_rel) != reasonValue) {
-            char line[128]{};
-            _snprintf_s(line, sizeof(line), _TRUNCATE,
-                "FFF.Native: NVIDIA automatic HDR skipped: %s",
-                VideoAutoHdrReasonText(reason));
-            FFF3FP_KernelLogImpl(line);
-        }
         return FFFResult::NotSupported;
     };
 
-    const bool traceSteps = HdrStepTraceEnabled();
-    const auto stepStartQpc = traceSteps ? QpcNowValue() : 0;
     bool rebuilt = false;
 
     if (requestedVideoAutoHdr_.load(std::memory_order_acquire) ==
@@ -5229,8 +5086,6 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
         rebuilt = true;
     }
 
-    const auto buildDoneQpc = traceSteps ? QpcNowValue() : 0;
-
     D3D11_VIDEO_PROCESSOR_STREAM stream{};
     stream.Enable = TRUE;
     stream.OutputIndex = 0;
@@ -5241,34 +5096,7 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
         return rejectAt("VideoProcessorBlt");
     }
 
-    if (traceSteps) {
-        const auto bltDoneQpc = QpcNowValue();
-        trueHdrBltTicks_ += (bltDoneQpc - buildDoneQpc);
-        if (rebuilt) {
-            trueHdrBuildTicks_ += (buildDoneQpc - stepStartQpc);
-            ++trueHdrRebuilds_;
-        }
-        if (++trueHdrFrames_ % 300ULL == 0ULL) {
-            char line[256]{};
-            _snprintf_s(line, sizeof(line), _TRUNCATE,
-                "FFF.Native: HDR step accounting frames=%llu rebuilds=%llu"
-                " buildAvgMs=%.3f bltSubmitAvgMs=%.3f src=%ux%u dst=%ux%u",
-                static_cast<unsigned long long>(trueHdrFrames_),
-                static_cast<unsigned long long>(trueHdrRebuilds_),
-                trueHdrRebuilds_ ? static_cast<double>(trueHdrBuildTicks_) /
-                    static_cast<double>(trueHdrRebuilds_) * 1000.0 /
-                        static_cast<double>(QpcTicks()) : 0.0,
-                static_cast<double>(trueHdrBltTicks_) / static_cast<double>(trueHdrFrames_) *
-                    1000.0 / static_cast<double>(QpcTicks()),
-                sourceWidth_, sourceHeight_, surfaceWidth, surfaceHeight);
-            FFF3FP_KernelLogImpl(line);
-        }
-    }
-
     videoTrueHdrReason_.store(FFF3FPVideoAutoHdrReason::None,
-        std::memory_order_release);
-    videoTrueHdrLoggedReason_.store(
-        static_cast<std::uint32_t>(FFF3FPVideoAutoHdrReason::None),
         std::memory_order_release);
     videoTrueHdrActive_.store(true, std::memory_order_release);
     return FFFResult::Success;
@@ -5744,9 +5572,6 @@ void PlayerVideoRenderer::ObserveFrameForAdaptiveDownscale(const bool dropped) n
     adaptiveWindowFrames_ = 0;
     adaptiveWindowDrops_ = 0;
     // Log only the edges: the policy is meant to be invisible until it matters.
-    if (nowActive != wasActive)
-        std::fprintf(stderr, "[adaptive] downscale-before-upload %s (drops %u%%)\n",
-            nowActive ? "engaged" : "released", percent);
 }
 
 bool PlayerVideoRenderer::PrepareAdaptiveDownscale(const AVFrame* frame,
@@ -7462,11 +7287,6 @@ std::uint32_t PlayerVideoRenderer::ResolveDecodeTransfer(
     if (lastFrameDeclaresTrc_ &&
         !(hdrState.format != FFF3FPHdrFormat::Sdr && displayReferredSdrTag))
         return lastTransferFromFrame_;
-    if (lastFrameDeclaresTrc_ && hdrState.format != FFF3FPHdrFormat::Sdr &&
-        !warnedSdrTagOnHdr_.exchange(true, std::memory_order_relaxed)) {
-        FFF3FP_KernelLogImpl("CICP: frame declares a display-referred SDR transfer on an "
-            "HDR stream; using the stream's own encoding (PQ/HLG) instead of the tag.");
-    }
     return hdrState.format == FFF3FPHdrFormat::Hlg ? 2u :
         (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
 }
@@ -7785,12 +7605,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // transform has no approximated inverse, so there is nothing honest to fall back to.
     bool supportedPrimaries = fff::render::CicpPrimariesSupported(frame->color_primaries);
     bool supportedTransfer = fff::render::CicpTransferSupported(frame->color_trc);
-    if (!supportedPrimaries && !warnedUnsupportedPrimaries_.exchange(true, std::memory_order_relaxed))
-        FFF3FP_KernelLogImpl("CICP: unsupported color primaries ignored; using the default "
-            "gamut (Rec.709 for SDR, Rec.2020 for HDR).");
-    if (!supportedTransfer && !warnedUnsupportedTransfer_.exchange(true, std::memory_order_relaxed))
-        FFF3FP_KernelLogImpl("CICP: unsupported transfer function ignored; using the "
-            "stream's declared encoding instead of the tag.");
     const bool frameDeclaresTrc = supportedTransfer &&
         frame->color_trc != AVCOL_TRC_UNSPECIFIED && frame->color_trc != AVCOL_TRC_RESERVED0;
     auto transferFromFrame = 0u;
@@ -7981,13 +7795,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
             ? cudaInterop_.Probe(frame, device_) : CudaD3D11Interop::Status::Refused;
         cudaInteropSource = probeStatus == CudaD3D11Interop::Status::Success;
         if (!cudaInteropSource) {
-            static const bool trace = [] {
-                wchar_t value[8]{};
-                return GetEnvironmentVariableW(L"FFF_CUDA_INTEROP_TRACE", value, 8) != 0 &&
-                    value[0] == L'1' && value[1] == L'\0';
-            }();
-            if (trace) std::fprintf(stderr, "[cuda] probe refused (status=%d)\n",
-                static_cast<int>(probeStatus));
         }
     }
     const auto pipelineResult = EnsurePipeline(uploadWidth, uploadHeight, input.layout, input.bitDepth,
@@ -8001,11 +7808,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         auto imported = CudaD3D11Interop::Status::Refused;
         if (cudaInteropSource && sourceCudaInterop_)
             imported = cudaInterop_.Import(frame);
-        static const bool traceImport = [] {
-            wchar_t value[8]{};
-            return GetEnvironmentVariableW(L"FFF_CUDA_INTEROP_TRACE", value, 8) != 0 &&
-                value[0] == L'1' && value[1] == L'\0';
-        }();
         if (imported == CudaD3D11Interop::Status::Success) {
             const auto importNs = std::chrono::steady_clock::now() - importStart;
             upload100ns_.fetch_add(To100ns(importNs), std::memory_order_relaxed);
@@ -8023,31 +7825,11 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
                 std::memory_order_relaxed);
             uploadCount_.fetch_add(1, std::memory_order_relaxed);
             uploadPath_.store(8, std::memory_order_relaxed);
-            if (traceImport) std::fprintf(stderr,
-                "[cuda] import ok %ux%u layout=%u copy_us=%lld\n",
-                uploadWidth, uploadHeight, static_cast<unsigned>(input.layout),
-                static_cast<long long>(
-                    std::chrono::duration_cast<std::chrono::microseconds>(importNs).count()));
         } else {
             // The driver would not take it after all. Download this frame and rebuild
             // the textures CPU-writable, so the picture is carried by the ordinary
             // planar upload (`UploadPlanarFrames`) rather than dropped; the refusal
             // is latched for the stream.
-            if (traceImport) {
-                std::fprintf(stderr,
-                    "[cuda] import refused (status=%d bound=%d import=%dx%d planes=%u)\n",
-                    static_cast<int>(imported), sourceCudaInterop_ ? 1 : 0,
-                    uploadWidth, uploadHeight, static_cast<unsigned>(input.layout));
-                for (std::size_t plane = 0; plane < ARRAYSIZE(sourceTextures_); ++plane) {
-                    if (sourceTextures_[plane] == nullptr) continue;
-                    D3D11_TEXTURE2D_DESC desc{};
-                    sourceTextures_[plane]->GetDesc(&desc);
-                    std::fprintf(stderr,
-                        "[cuda]   plane%zu %ux%u fmt=%d usage=%d mips=%u array=%u\n", plane,
-                        desc.Width, desc.Height, static_cast<int>(desc.Format),
-                        static_cast<int>(desc.Usage), desc.MipLevels, desc.ArraySize);
-                }
-            }
             cudaInteropRefused_.store(true, std::memory_order_relaxed);
             if (cudaTransferFrame_ == nullptr) cudaTransferFrame_ = av_frame_alloc();
             if (cudaTransferFrame_ == nullptr) {
@@ -8245,14 +8027,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         dynamicSettings.transformDomain = 0;
         cachedTransformEnabled_ = false;
     }
-    // Diagnostic only, same shape as FFF_LADDER_TRACE / FFF_CADENCE_TRACE: the
-    // auxiliary layer's pairing is invisible in the picture when it silently
-    // does not happen, and "requested but not paired" is exactly the state that
-    // withholds the table. Silent unless the variable is set.
-    if (GetEnvironmentVariableW(L"FFF_EL_TRACE", nullptr, 0) != 0)
-        std::fprintf(stderr, "[el] frame=%lld request=%u paired=%u composed=%u\n",
-            static_cast<long long>(frameIndex), elRequested ? 1u : 0u,
-            auxiliaryFrame != nullptr ? 1u : 0u, cachedElComposeEnabled_ ? 1u : 0u);
     if (elCompositionBuffer_ != nullptr)
         context_->UpdateSubresource(elCompositionBuffer_, 0, nullptr, &elSettings, 0, 0);
     if (dynamicConstants_ != nullptr) {
@@ -8330,20 +8104,6 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     cachedFrameEpoch_.store(presentationEpoch_.load(std::memory_order_acquire),
         std::memory_order_release);
     cachedFramePts_.store(frame->pts, std::memory_order_relaxed);
-    // docs/111 D-01 observability: the upload line stamps (pts, epoch) as a record; the
-    // presenter's own trace line now also carries pts, so the probe reads the post-seek
-    // frame sequence straight off the present line without joining.
-    {
-        static const bool traceEnabled = [] {
-            wchar_t value[8] = {};
-            if (GetEnvironmentVariableW(L"FFF_MEMARB_TRACE", value, 8) == 0) return false;
-            return value[0] != L'0';
-        }();
-        if (traceEnabled)
-            std::fprintf(stderr, "[epoch] upload pts=%lld epoch=%llu\n",
-                static_cast<long long>(frame->pts),
-                static_cast<unsigned long long>(cachedFrameEpoch_.load(std::memory_order_acquire)));
-    }
     if (coverArt) RequestCoverBackdropRender();
     {
         std::lock_guard lock(timedTextMutex_);
@@ -9053,12 +8813,6 @@ void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
     if (!composited && landedRefresh > 0 && lastLandedRefresh_ > 0) {
         neverCompositedPresents_.fetch_add(1, std::memory_order_relaxed);
         ++intervalNeverComposited_;
-        if (HoldTraceEnabled())
-            std::fprintf(stderr, "HOLDNC dPresent=%lld dPresentRefresh=%lld dSync=%lld flips=%u\n",
-                static_cast<long long>(presentDelta),
-                static_cast<long long>(landedRefresh - lastLandedRefresh_),
-                static_cast<long long>(syncRefresh - lastSyncRefresh_),
-                intervalFlips_);
     }
     if (composited) {
         const auto held = landedRefresh - lastLandedRefresh_;
@@ -9080,26 +8834,6 @@ void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
             // ratio = 这一段的预期停留（内容周期 ÷ 声明面板周期，逐次累加前的那一条）；
             // err = 上限合规误差换算成"几个刷新周期"，分母优先用标定面板周期，没标定时
             // 退回声明周期——两个都是面板周期，只是一个是量的、一个是系统声明的。
-            const double errPanelPeriodQpc = gridPeriodQpc_ > 0.0 ? gridPeriodQpc_ :
-                (declaredHz > 0.0 ? static_cast<double>(frequency) / declaredHz : 0.0);
-            if (HoldTraceEnabled())
-                std::fprintf(stderr,
-                    "HOLD flips=%u adv=%u nc=%u pend=%.2f held=%lld band=[%lld,%lld] %s "
-                    "dPresent=%lld ratio=%.3f err=%.2f\n",
-                    intervalFlips_, intervalAdvances_, intervalNeverComposited_,
-                    pendingHoldRatio_, static_cast<long long>(held),
-                    static_cast<long long>(low), static_cast<long long>(high),
-                    within ? "in" : "OUT", static_cast<long long>(presentDelta),
-                    holdContentRatio, errPanelPeriodQpc > 0.0 ?
-                        static_cast<double>(lastSlotError100ns_.load(std::memory_order_acquire)) *
-                        static_cast<double>(frequency) / 10'000'000.0 / errPanelPeriodQpc : 0.0);
-        } else if (intervalUnscoreable_ && HoldTraceEnabled()) {
-            // 跳过也要留痕：这个计数不走 API，只能靠这一行证明它没有把真卡顿一起扔掉。
-            // meas= 是面板周期的标定读数（0 = 还没标定），不是判带的分母——那条用声明值。
-            std::fprintf(stderr, "HOLDSKIP flips=%u adv=%u nc=%u pend=%.2f held=%lld meas=%.3fHz\n",
-                intervalFlips_, intervalAdvances_, intervalNeverComposited_,
-                pendingHoldRatio_, static_cast<long long>(held),
-                measuredRefreshHz_.load(std::memory_order_acquire));
         }
         pendingHoldRatio_ = 0.0;
         intervalFlips_ = 0;
@@ -9180,12 +8914,6 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
             static_cast<std::uint64_t>(timedTextThreadId_.load(std::memory_order_relaxed));
         const bool onPresenter = presenterTid != 0 && callerTid == presenterTid;
         if (forPresent != onPresenter) {
-            const auto stamp = (forPresent ? 1ull : 0ull) << 32 | callerTid;
-            if (loggedDrawContractMismatch_.exchange(stamp, std::memory_order_relaxed) != stamp)
-                std::fprintf(stderr,
-                    "[epoch] draw-cached-video contract mismatch forPresent=%d onPresenter=%d tid=%llu\n",
-                    forPresent ? 1 : 0, onPresenter ? 1 : 0,
-                    static_cast<unsigned long long>(callerTid));
             // Readback on the presenter thread is the dangerous direction (stalls flips on
             // a staging Map): refuse. Off-thread present degrades to the historical draw.
             if (!forPresent && onPresenter) return FFFResult::InvalidState;
@@ -9644,15 +9372,6 @@ void PlayerVideoRenderer::AdvancePresentationEpoch() noexcept {
     // any content uploaded afterwards can be stamped with it.
     const auto next = presentationEpoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
     epochAdvances_.store(next, std::memory_order_relaxed);
-    static const bool traceEnabled = [] {
-        wchar_t value[8] = {};
-        if (GetEnvironmentVariableW(L"FFF_MEMARB_TRACE", value, 8) == 0) return false;
-        return value[0] != L'0';
-    }();
-    if (traceEnabled)
-        std::fprintf(stderr, "[epoch] advance=%llu staleSkips=%llu\n",
-            static_cast<unsigned long long>(next),
-            static_cast<unsigned long long>(staleEpochSkips_.load(std::memory_order_relaxed)));
 }
 
 std::uint64_t PlayerVideoRenderer::PresentationEpoch() const noexcept {
@@ -9683,15 +9402,6 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
             presentationEpoch_.load(std::memory_order_acquire)) {
         const auto skips = staleEpochSkips_.fetch_add(1, std::memory_order_relaxed) + 1;
         const auto epoch = presentationEpoch_.load(std::memory_order_relaxed);
-        static const bool traceEnabled = [] {
-            wchar_t value[8] = {};
-            if (GetEnvironmentVariableW(L"FFF_MEMARB_TRACE", value, 8) == 0) return false;
-            return value[0] != L'0';
-        }();
-        if (traceEnabled && loggedStaleEpoch_.exchange(epoch, std::memory_order_relaxed) != epoch)
-            std::fprintf(stderr, "[epoch] stale-skip epoch=%llu skipped=%llu\n",
-                static_cast<unsigned long long>(epoch),
-                static_cast<unsigned long long>(skips));
         return FFFResult::Success;
     }
     // Hold both locks across EnsureSwapChain: it may resize or recreate the
@@ -9785,19 +9495,6 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
         cachedFrameEpoch_.load(std::memory_order_acquire) !=
             presentationEpoch_.load(std::memory_order_acquire))
         flipsAfterBump_.fetch_add(1, std::memory_order_relaxed);
-    {
-        static const bool traceEnabled = [] {
-            wchar_t value[8] = {};
-            if (GetEnvironmentVariableW(L"FFF_MEMARB_TRACE", value, 8) == 0) return false;
-            return value[0] != L'0';
-        }();
-        if (traceEnabled && hasCachedVideo_)
-            std::fprintf(stderr, "[epoch] present pts=%lld epoch=%llu stale=%llu afterBump=%llu\n",
-                static_cast<long long>(cachedFramePts_.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(presentationEpoch_.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(staleEpochSkips_.load(std::memory_order_relaxed)),
-                static_cast<unsigned long long>(flipsAfterBump_.load(std::memory_order_relaxed)));
-    }
     // A format/color-space switch destroys and recreates the flip-model chain.
     // Drop every reference to the old chain and its back buffer before handing
     // presentMutex_ to the reconfiguration path. Otherwise CreateSwapChainForHwnd

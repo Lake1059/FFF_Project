@@ -37,11 +37,9 @@ import io
 import json
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import traceback
 import unicodedata
@@ -317,8 +315,6 @@ def same_language(reported, target):
     return a == b or a.startswith(b) or b.startswith(a)
 
 
-def log(msg):
-    print(f"[asr-worker] {msg}", file=sys.stderr, flush=True)
 
 
 def emit(obj):
@@ -482,9 +478,7 @@ class SherpaBackend(InferenceBackend):
 # llama.cpp 后端（GGUF Q8_0）
 #
 # 两条硬约束，违反任意一条都表现为"起了但永远没结果"，而不是报错：
-#   1. 子进程 stdout/stderr 必须重定向到文件。worker 的 stdout 是长度前缀 +
-#      JSON 行协议，llama.cpp 一上来就往 stdout 打模型加载日志，混进协议流里
-#      宿主那边就是解析崩溃。
+#   1. 子进程输出不得混入 worker 的标准输出协议。
 #   2. 子进程 stdin 必须 DEVNULL。否则父子抢同一个管道句柄，PCM 帧被
 #      llama-server 吃掉一部分，worker 侧表现为"窗口一直凑不齐"。
 #
@@ -494,7 +488,6 @@ class SherpaBackend(InferenceBackend):
 # 不是"快点挂"。
 # --------------------------------------------------------------------------
 
-_LLAMA_TEMP_PREFIX = "fff-asr-"
 _LLAMA_LOAD_TIMEOUT = 180.0
 _LLAMA_CTX = "4096"
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -621,9 +614,6 @@ class LlamaBackend(InferenceBackend):
         self._proc = None
         self._port = 0
         self._model_id = ""
-        self._tmp = None
-        self._log = None
-        self._log_path = None
 
     # ---- 启动前 -----------------------------------------------------------
     def _exe(self):
@@ -663,34 +653,16 @@ class LlamaBackend(InferenceBackend):
         best = max(strong, key=lambda d: d["vram_mb"])
         return best["idx"], f"{best['idx']} {best['name']}"
 
-    def _log_tail(self, limit=800):
-        if not self._log_path or not os.path.exists(self._log_path):
-            return ""
-        try:
-            with open(self._log_path, "rb") as f:
-                return f.read()[-limit:].decode("utf-8", "replace").strip()
-        except Exception:
-            return ""
-
     # ---- 生命周期 ---------------------------------------------------------
     def load(self):
         exe = self._exe()
         main, mmproj = _llama_weights(self.model_dir)
 
-        device, why = ("", "指定 CPU")
+        device = ""
         if self.want_gpu:
-            device, why = self._pick_device(exe)
-        log(f"llama: {why}")
+            device, _ = self._pick_device(exe)
 
         self._port = _free_port()
-        # 临时目录不能无条件用系统 TEMP：实测 schtasks 派发的宿主子进程对 C:\Users\<user>\AppData\Local\Temp 真实写被拒（os.access 还骗真），tempfile 全候选失败报 "No usable temporary directory"。包根与宿主同盘部署、宿主能写日志就能写包根，故优先用包根，失败再退回系统 TEMP。
-        try:
-            self._tmp = tempfile.mkdtemp(prefix=_LLAMA_TEMP_PREFIX,
-                                         dir=str(self.model_dir.parent))
-        except OSError:
-            self._tmp = tempfile.mkdtemp(prefix=_LLAMA_TEMP_PREFIX)
-        self._log_path = os.path.join(self._tmp, "llama-server.log")
-        self._log = open(self._log_path, "wb")
         cmd = [str(exe), "-m", str(main), "--mmproj", str(mmproj),
                "--host", "127.0.0.1", "--port", str(self._port),
                "--ctx-size", _LLAMA_CTX, "--threads", str(self.threads),
@@ -700,11 +672,10 @@ class LlamaBackend(InferenceBackend):
                "--temp", "0", "--n-predict", "512", "--cache-ram", "0"]
         if device:
             cmd += ["--device", device]
-        log("llama 命令：" + " ".join(cmd[1:]))
         try:
             self._proc = subprocess.Popen(
                 cmd, cwd=str(exe.parent), stdin=subprocess.DEVNULL,
-                stdout=self._log, stderr=self._log, creationflags=_NO_WINDOW)
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW)
         except Exception as exc:  # noqa: BLE001 - 起不来就是这一档不可用
             self.close()
             raise RuntimeError(f"启动 llama-server 失败：{exc}") from exc
@@ -718,25 +689,23 @@ class LlamaBackend(InferenceBackend):
         while time.time() - t0 < _LLAMA_LOAD_TIMEOUT:
             if self._proc.poll() is not None:
                 raise RuntimeError(
-                    f"llama-server 启动即退出（rc={self._proc.returncode}）："
-                    f"{self._log_tail(400)}")
+                    f"llama-server 启动即退出（rc={self._proc.returncode}）")
             try:
                 if _http_json(self._port, "/health", timeout=5).get("status") == "ok":
                     self._model_id = _http_json(self._port, "/v1/models")["data"][0]["id"]
-                    log(f"llama-server 就绪，用时 {time.time() - t0:.1f}s")
                     return
             except Exception:
                 pass
             time.sleep(0.3)
         raise RuntimeError(
-            f"llama-server 在 {_LLAMA_LOAD_TIMEOUT:.0f}s 内没有就绪：{self._log_tail(400)}")
+            f"llama-server 在 {_LLAMA_LOAD_TIMEOUT:.0f}s 内没有就绪")
 
     def transcribe(self, samples):
         if self._proc is None:
             raise RuntimeError("llama-server 尚未启动")
         if self._proc.poll() is not None:
             raise RuntimeError(
-                f"llama-server 已退出（rc={self._proc.returncode}）：{self._log_tail(300)}")
+                f"llama-server 已退出（rc={self._proc.returncode}）")
         try:
             out = _post_wav(self._port, _wav_bytes(samples), self._model_id)
         except Exception as exc:  # noqa: BLE001 - 这一窗失败，别拖垮整条管道
@@ -775,7 +744,6 @@ class LlamaBackend(InferenceBackend):
                 "stream": False, "cache_prompt": False,
                 "stop": ["\n\n", "\nEnglish:", "\n中文:", "<|im_end|>"]})
         except Exception as exc:  # noqa: BLE001 - 翻译失败只影响副行
-            log(f"translate failed: {exc}")
             return ""
         return clean_translation(out.get("content") or "")
 
@@ -809,30 +777,11 @@ class LlamaBackend(InferenceBackend):
                     self._proc.kill()
                 except Exception:
                     pass
-            # 必须等进程真的退出。taskkill 是异步的：不等就删临时目录，
-            # Windows 上 log 文件还被子进程占着，rmtree 会静默失败，
-            # 于是每跑一次就在包根留一个 fff-asr-xxxx 空目录。
             try:
                 self._proc.wait(timeout=10)
             except Exception:
                 pass
             self._proc = None
-        if self._log is not None:
-            try:
-                self._log.close()
-            except Exception:
-                pass
-            self._log = None
-        if self._tmp and os.path.isdir(self._tmp):
-            # 句柄释放有个几毫秒的滞后：重试三次，还不行就算了，别为清理日志
-            # 把正常的关闭流程搞成异常。
-            for _ in range(3):
-                try:
-                    shutil.rmtree(self._tmp)
-                    break
-                except OSError:
-                    time.sleep(0.15)
-            self._tmp = None
 
 
 # --------------------------------------------------------------------------
@@ -930,7 +879,7 @@ class OvBackend(InferenceBackend):
         # 只有 GPU 家族需要挑：NPU / CPU 不存在"同族不同厂商"的问题。
         ov_dev = _pick_intel_gpu(core, have) if want.upper() == "GPU" else None
         if ov_dev and ov_dev != want:
-            log(f"OpenVINO {want} 钉到 {ov_dev}（{_ov_device_name(core, ov_dev)}）")
+            pass
 
         # NPU 编译器只吃"有上界"的形状，conv_frontend 的帧维是 INT64_MAX，直接编
         # 会报 Upper bounds are not specified。给上界就能过（离线实测 NPU4000：
@@ -977,8 +926,6 @@ class OvBackend(InferenceBackend):
                 raise RuntimeError(
                     f"{self.provider} 上算错了：{detail}。这是「不报错但算错」的"
                     f"那类假绿，拒绝继续（int8 段请留 CPU）")
-            log(f"{self.id} 数值门禁通过："
-                + "，".join(f"{n} {rep[n]['rel_err']}" for n in rep))
 
     def transcribe(self, samples):
         if self._engine is None:
@@ -1342,7 +1289,6 @@ class WindowBuilder:
         # Media-time jump (pause/seek residue) larger than 2x window: cut,
         # never bridge across the gap (section 6.3).
         if now_end100ns - self.window_start > int(2 * self.window_s * 1e7):
-            log(f"media time jump {now_end100ns - self.window_start} 100ns; cutting window")
             self.reset_generation()
             self.window_start = now_end100ns
             return None
@@ -1487,7 +1433,6 @@ def _run_selftest(backend, model_dir):
     wav_path = model_dir / "selftest.wav"
     txt_path = model_dir / "selftest.txt"
     if not wav_path.exists() or not txt_path.exists():
-        log("未提供自检样本（model_dir 下缺 selftest.wav 或 selftest.txt），跳过自检")
         return True, "未提供自检样本，跳过"
     try:
         audio, rate = _read_wav_mono(wav_path)
@@ -1495,7 +1440,6 @@ def _run_selftest(backend, model_dir):
         expected = _normalize_for_compare(
             txt_path.read_text(encoding="utf-8-sig"))
     except Exception as exc:  # noqa: BLE001 - 样本坏了不算设备坏了
-        log(f"自检样本不可用（{type(exc).__name__}: {exc}），跳过自检")
         return True, f"自检样本不可用，跳过：{exc}"
     if not audio.size:
         return True, "自检样本是空音频，跳过"
@@ -1525,22 +1469,18 @@ def _select_backend(request, engine, model_dir, runtime_dir, threads):
         # 就晚了——它根本不报错，只打一行日志然后静默跑 CPU。
         ready, why = _capability(backend_id, engine, runtime_dir)
         if not ready:
-            log(f"{backend_id} 跳过：{why}")
             notes.append(f"{backend_id} 跳过（{why}）")
             continue
         backend = _make_backend(backend_id, engine, model_dir, runtime_dir, threads)
         try:
             backend.load()
         except Exception as exc:  # noqa: BLE001 - 设备不可用是常态，不是崩溃
-            log(f"{backend_id} 不可用：{exc}")
             notes.append(f"{backend_id} 不可用（{exc}）")
             backend.close()
             continue
         ok, detail = _run_selftest(backend, model_dir)
         if ok:
-            log(f"{backend_id} 采用：{detail}")
             return backend, notes, detail
-        log(f"{backend_id} 自检不通过，降档：{detail}")
         notes.append(f"{backend_id} 自检不通过（{detail}）")
         backend.close()
     return None, notes, ""
@@ -1560,9 +1500,6 @@ def build_arg_parser():
     # 0 = 自动（min(6, 核数)）。CPU 上线程数直接决定速度；超过 6 在 P+E 混合
     # 架构上会退化（见 main() 里的实测数字）。GPU 上够采样即可。
     ap.add_argument("--threads", type=int, default=0)
-    # 诊断模式：只做"加载 + 自检"，打一行结果 JSON 就退出。宿主排障时用它区分
-    # "模型坏了"和"协议/管道坏了"。
-    ap.add_argument("--selftest", action="store_true", dest="selftest")
     # 引擎：auto = 按模型目录里的容器自己判（有 *.gguf 就是 llama，否则 onnx）。
     # 清单里写了 engine 时宿主会显式传进来；传错也不致命，因为模型文件是唯一真相，
     # 这里只做一次交叉校验，不一致就按文件判并记一行日志。
@@ -1599,7 +1536,7 @@ def main():
     engine = _detect_engine(model_dir)
     declared = (args.engine or "auto").strip().lower()
     if declared in (_ENGINE_LLAMA, _ENGINE_ONNX) and declared != engine:
-        log(f"清单声明 engine={declared}，但模型目录里是 {engine} 的容器；按文件判")
+        pass
     missing = _missing_items(model_dir, engine)
     if missing:
         emit({"type": "status", "state": "error", "fatal": True,
@@ -1612,13 +1549,12 @@ def main():
               "detail": "这是 GGUF 包，但找不到 llama 运行时：清单里要写 runtime 目录"
                         "（便携包标准布局是 runtime/vulkan）"})
         return 2
-    log(f"engine={engine} model={model_dir} runtime={runtime_dir or '(无)'}")
 
     request = _normalize_request(args.device, engine)
     if request != (args.device or "").strip().lower():
         # 设备值是宿主的自由文本，拼错不该让字幕整个起不来：当成 auto 继续跑，
         # 只在日志里留下原值。
-        log(f"设备值 {args.device!r} 在 {engine} 引擎下不认识，按 {request} 处理")
+        pass
 
     # 上限 6 是实测卡出来的，不是拍的：这台 6P+8E 的机器上超过 6 个线程会有
     # 线程被排到 E-core，慢核拖住同步点，rtf 从 0.91 一路涨到 1.05(8) / 1.64(10)
@@ -1631,14 +1567,14 @@ def main():
         # OpenVINO 那条腿（qwen3_ort.Engine）也从 `language X<asr_text>` 模板里抠，
         # 实测能回 cantonese；只有 sherpa 的 result 没有独立 language 字段。
         # 选后端是下一步的事，所以这里只说目标，结论留给 ready 行。
-        log(f"language target: {target_language}")
+        pass
 
     emit({"type": "status", "state": "loading",
           "detail": f"engine={engine} device={request} "
                     f"候选={'、'.join(_CANDIDATES[engine][request])} "
                     f"threads={threads}"})
 
-    backend, notes, selfcheck = _select_backend(request, engine, model_dir,
+    backend, notes, _ = _select_backend(request, engine, model_dir,
                                                 runtime_dir, threads)
     if backend is None:
         emit({"type": "status", "state": "error", "fatal": True,
@@ -1654,20 +1590,8 @@ def main():
         emit({"type": "status", "state": "warning",
               "detail": f"双语字幕需要 GGUF 引擎（当前 {engine} 引擎没有文本生成能力），"
                         f"已按单语输出"})
-        log(f"bilingual requested ({args.bilingual}) but backend {backend.id} cannot translate")
     if bilingual_ok:
-        log(f"bilingual: up={up_lang} down={down_lang}"
-            f"（同一 llama-server 的 /completion，不额外加载模型）")
-
-    if args.selftest:
-        # 自检模式把"最终跑在哪个设备、为什么没跑在首选设备、自检结论"打成一行：
-        # 排障时读这一行就够，不必再去翻 stderr。
-        emit({"type": "selftest", "ok": True, "device": backend.id,
-              "provider": backend.provider, "detail": selfcheck,
-              "provider_note": _provider_note(backend.id, engine),
-              "notes": notes})
-        backend.close()
-        return 0
+        pass
 
     # 请求的档没拿到（指定了 cuda / npu 却降了档）：说一句，别让用户以为自己
     # 选错了。auto 不报 —— 它本来就是"有什么用什么"，落到 cpu 是预期行为，
@@ -1692,7 +1616,6 @@ def main():
           "detail": f"window={args.window}s step={args.step}s device={backend.id} "
                     f"provider={backend.provider} threads={threads} {lang_detail} "
                     f"[{_provider_note(backend.id, engine)}]"})
-    log(f"ready; reading frames from stdin（{selfcheck}）")
 
     builder = WindowBuilder(args.window, args.step)
     windows = dropped = failures = 0
@@ -1708,14 +1631,12 @@ def main():
         while True:
             head = read_exact(stdin, 4)
             if head is None:
-                log("stdin EOF; shutting down")
                 break
             meta_len = int.from_bytes(head, "little")
             if meta_len <= 0 or meta_len > _META_BYTES_MAX:
                 # 长度前缀被写坏 ⇒ 帧边界已丢，长度前缀流无法重同步——继续读
                 # 只会把 PCM 当元数据，错误滚雪球。停 worker：宿主收到 EOF 后
                 # 关字幕，播放不受影响（P2，2026-11-03 审查定案）。
-                log(f"stdin 帧头长度异常（{meta_len}），流边界已丢失；shutting down")
                 break
             meta_bytes = read_exact(stdin, meta_len)
             if meta_bytes is None:
@@ -1727,7 +1648,6 @@ def main():
                 # bytes"盲读 PCM（首帧时 meta 未定义，直接 NameError）——两种
                 # 结果都是把后面每一帧全部读歪。帧边界已丢，唯一正确的动作
                 # 是停 worker（P2，2026-11-03 审查定案）。
-                log("stdin 元数据不是合法 JSON，流边界已丢失；shutting down")
                 break
             pcm = read_exact(stdin, meta.get("bytes", 0))
             if pcm is None:
@@ -1736,7 +1656,6 @@ def main():
             if meta.get("generation") != generation:
                 generation = meta.get("generation", 0)
                 builder.reset_generation()
-                log(f"generation -> {generation}; buffer cleared")
 
             rate = int(meta.get("sampleRate", 48000))
             channels = int(meta.get("channels", 2))
@@ -1774,7 +1693,6 @@ def main():
                 emit({"type": "status", "state": "error", "fatal": False,
                       "detail": f"inference failed ({failures}): {e}"})
                 if failures >= 5:
-                    log("too many consecutive failures; exiting for host restart")
                     emit({"type": "status", "state": "error", "fatal": True,
                           "detail": "consecutive inference failures"})
                     return 4
@@ -1801,8 +1719,6 @@ def main():
                     emit({"type": "status", "state": "warning",
                           "detail": "这段音频疑似没有语音或语种不受支持（模型在重复同一个"
                                     "字，或把指令当内容输出），已跳过；字幕不会凭空编字"})
-                log(f"{原因} dropped [{start100ns/1e7:.2f}s..{end100ns/1e7:.2f}s] "
-                    f"len={len(text)} preview={text[:40]!r}")
                 continue
 
             infer_seconds.append(dt)
@@ -1818,7 +1734,6 @@ def main():
                 try:
                     up_text, down_text = backend.bilingual(text, language, up_lang, down_lang)
                 except Exception as exc:  # noqa: BLE001 - 翻译坏了也只掉副行
-                    log(f"bilingual failed: {exc}")
                     up_text, down_text = text, ""
                 dt += time.perf_counter() - t1
                 # 翻译也是这一窗推理成本，rtf 必须算进去，否则统计把人骗了。
@@ -1831,11 +1746,6 @@ def main():
                   "text": up_text, "text2": down_text, "bilingual": bilingual_ok,
                   "language": language,
                   "target": target_language or "", "matched": matched})
-            log(f"final [{start100ns/1e7:.2f}s..{end100ns/1e7:.2f}s] "
-                f"lang={language or '?'}"
-                f"{'' if matched else f' (target={target_language}, mismatched)'}"
-                f" rtf={dt/max(0.001, len(samples)/TARGET_RATE):.3f} :: {text[:60]}"
-                + (f" || {down_text[:60]}" if down_text else ""))
 
             if time.time() - last_stats >= 30.0:
                 rtf = (sum(infer_seconds) /

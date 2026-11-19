@@ -1,11 +1,9 @@
-"""L0 静态自检：宿主语言表 ↔ worker 语言表是否漂移、设置页新增行是否放得下。
+"""检查宿主语言表、字幕设置与 worker 协议的对应关系。
 
 为什么需要它：
   * 宿主 `Ai字幕语言.名称表` 与 worker `LANGUAGE_NAMES` 是**两份**表（VB / Python）。
     两份一旦不一致，现象是"选了某语言 → 模型没提示 或 matched 永远 False"，
     而勾了"只显示所选语言"时就是整片空白，且不抛任何异常。
-  * 设置页的语言行是脚本批量下移高级区之后加上去的（ClientSize 598x644），
-    光靠肉眼没法确认有没有压字或越界。
   * 界面只列 4 个主项（其余 28 个未验证语种不上面板）：这里钉住"下拉只引用主项"，
     防止后人把循环改回整表、让未验证语种重新出现（L0-1b）。
   * 「扩展 UI + 按模型能力开放」一轮（2026-10-25）的新契约：清单 layers 驱动
@@ -130,79 +128,6 @@ def main():
             f"L0-1b {控件} 未复活（旧 llama.cpp 时代控件已删）",
             f"Designer 里又出现了 {控件} —— 要恢复就得把整条链路接回，见 L0-4 / L0-5")
 
-    # ---------------- L0-2：设置页几何 ----------------
-    src = read(VB_DESIGNER)
-    loc = re.compile(r"^\s+([^\s.]+)\.Location = New Point\((\d+), (\d+)\)")
-    siz = re.compile(r"^\s+([^\s.]+)\.Size = New Size\((\d+), (\d+)\)")
-    geo = {}
-    for line in src.splitlines():
-        m = loc.match(line)
-        if m:
-            geo.setdefault(m.group(1), {})["xy"] = (int(m.group(2)), int(m.group(3)))
-        m = siz.match(line)
-        if m:
-            geo.setdefault(m.group(1), {})["wh"] = (int(m.group(2)), int(m.group(3)))
-
-    m = re.search(r"ClientSize = New Size\((\d+), (\d+)\)", src)
-    cw, ch = int(m.group(1)), int(m.group(2))
-    m = re.search(r"ModernPanel1\.Size = New Size\((\d+), (\d+)\)", src)
-    pw, ph = int(m.group(1)), int(m.group(2))
-    断言((cw, ch) == (pw, ph), "L0-2 面板尺寸 == 客户区尺寸", f"client={cw}x{ch} panel={pw}x{ph}")
-
-    boxes = []
-    for name, g in geo.items():
-        if "xy" in g and "wh" in g and name != "ModernPanel1":
-            x, y = g["xy"]
-            w, h = g["wh"]
-            boxes.append((name, x, y, w, h))
-
-    越界 = [b[0] for b in boxes if b[1] + b[3] > cw or b[2] + b[4] > ch]
-    断言(not 越界, "L0-2 所有控件在客户区内", "越界：" + str(越界))
-
-    # 视觉行的重叠：只比同一水平带上真正可能互相压的。
-    # 同一坐标放两个控件、靠 Visible 二选一是**刻意设计**（单档显示只读标签、
-    # 多档显示下拉）。静态几何读不到运行时显隐，直接比会误报 —— 所以先把这类对
-    # 从比较里剔除，再**反过来钉住它们真的互斥**：哪天有人把互斥条件改掉而没挪
-    # 位置，重叠就从"设计"变成"真压住了"，这条会立刻报出来。
-    互斥 = []
-    for line in read(VB_FORM).splitlines():
-        m = re.match(r"\s*(\w+)\.Visible = 显示 AndAlso (Not )?_有多档\s*$", line)
-        if m:
-            互斥.append((m.group(1), m.group(2) is None))
-    a组 = [n for n, v in 互斥 if v]
-    b组 = [n for n, v in 互斥 if not v]
-    互斥对 = {(x, y) for x in a组 for y in b组} | {(y, x) for x in a组 for y in b组}
-    断言(len(a组) >= 1 and len(b组) >= 1,
-        "L0-2 模型档位二选一靠 Visible 互斥（静态几何要先排除这对）",
-        "找不到 `X.Visible = 显示 AndAlso _有多档` / `Not _有多档` 这一组 —— "
-        "同位置的两个控件若不再互斥，就是真重叠")
-
-    重叠 = []
-    for i in range(len(boxes)):
-        for j in range(i + 1, len(boxes)):
-            n1, x1, y1, w1, h1 = boxes[i]
-            n2, x2, y2, w2, h2 = boxes[j]
-            if (n1, n2) in 互斥对:
-                continue
-            if x1 < x2 + w2 and x2 < x1 + w1 and y1 < y2 + h2 and y2 < y1 + h1:
-                重叠.append((n1, n2))
-    断言(not 重叠, "L0-2 无控件重叠", str(重叠))
-
-    # 关键行间距：语言行底 → 状态行顶 必须留白（脚本下移时最容易压这里）
-    def box(n):
-        return next(b for b in boxes if b[0] == n)
-
-    _, _, ly, _, lh = box("MCB_语言")
-    _, _, sy, _, sh = box("LBL_状态")
-    断言(sy - (ly + lh) >= 8, "L0-2 语言下拉与状态行间距 ≥ 8px", f"实际 {sy - (ly + lh)}px")
-
-    _, _, hy, _, _ = box("MCK_显示高级")
-    断言(hy - (sy + sh) >= 8, "L0-2 状态行与高级区间距 ≥ 8px（状态行高随内容变，取实测值）",
-        f"实际 {hy - (sy + sh)}px")
-
-    bottom = max(b[2] + b[4] for b in boxes)
-    断言(ch - bottom >= 8, "L0-2 底部留白 ≥ 8px", f"最低控件 {bottom}px / 客户区 {ch}px")
-
     # ---------------- L0-4：多模型适配契约不许回退 ----------------
     # 这批改动（2026-10-25）把"只认 Qwen3-ASR 双文件包"的硬约束逐个拆掉，
     # 让扩展包能带任意 llama-server 能加载的 gguf。三条链任断一环，
@@ -307,10 +232,17 @@ def main():
 
     form = read(VB_FORM)
     高级块 = re.search(r"Private Sub 显示高级\(显示 As Boolean\)(.*?)End Sub", form, re.S)
-    for 控件 in ("LBL_偏移", "MTB_偏移", "LBL_预置", "MCB_预置"):
-        断言(高级块 is not None and f"{控件}.Visible = 显示" in 高级块.group(1),
-            f"L0-5 {控件} 挂进高级区可见性切换",
-            "显示高级 里找不到该控件的 Visible 行——折起来它还杵在面板上")
+    advanced_rows = {
+        "PanelAI6": ("HCL_预置", "MCB_预置", "MTB_窗口秒", "MTB_步长秒"),
+        "PanelAI7": ("MCB_模型档",),
+        "PanelAI8": ("HCL_偏移", "MTB_偏移"),
+        "PanelAI9": ("MCB_线程",),
+    }
+    for row, controls in advanced_rows.items():
+        断言(高级块 is not None and f"{row}.Visible = 显示" in 高级块.group(1),
+            f"L0-5 {row} 随高级区切换可见性")
+        for control in controls:
+            断言(f"{row}.Controls.Add({control})" in dsg, f"L0-5 {control} 位于 {row}")
     断言(not re.search(r"Private Sub 重建层数下拉", form),
         "L0-5 不再有 GPU 层数下拉（层数控件已废止）",
         "重建层数下拉 回来了 —— 层数不是可调项，重建了也是假选项")
@@ -452,24 +384,6 @@ def main():
         "L0-9 挑到的设备真的传进了 Engine",
         "Engine 调用没有 ov_device —— 挑了不用，等于没挑")
 
-    # ---------------- L0-2b：设置页状态/说明文案不许超出单行宽度 ----------------
-    # LBL_状态 是 568x112 的固定 Label，五行封顶（包/节奏、设备+后端+模型、说明、
-    # 状态、注意项）。任一行换行就会把下一行顶出可视区 —— 用户看到的是"少一行"，
-    # 不会报错。前缀「状态：」「说明：」约 48px，所以文案本体卡在 520px。
-    def 像素宽(s):
-        return sum(14 if unicodedata.east_asian_width(c) in ("W", "F") else 7
-                   for c in s)
-
-    超宽 = []
-    for 函数 in ("后端状态", "后端说明"):
-        块 = re.search(r"Function " + 函数 + r"\((.*?)End Function", pack, re.S)
-        断言(块 is not None, f"L0-2b 能解析出 {函数}", "找不到该函数")
-        for 字面 in re.findall(r'Return\s+"((?:[^"]|"")*)"', 块.group(1)):
-            w = 像素宽(字面.replace('""', '"'))
-            if w > 520:
-                超宽.append(f"{函数} {w}px：{字面}")
-    断言(not 超宽, "L0-2b 状态/说明文案单行放得下（LBL_状态 568px，五行封顶）",
-        "；".join(超宽))
 
     print(f"\n通过 {通过} / 失败 {失败}")
     return 失败

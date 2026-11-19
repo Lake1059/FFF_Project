@@ -41,7 +41,6 @@ Public Module 系统媒体缩略图
                 End Using
             End Using
         Catch ex As Exception
-            Debug.WriteLine("SMTC：缩略图 PNG 编码失败（已忽略）：" & ex.GetType().Name)
             Return Array.Empty(Of Byte)()
         End Try
     End Function

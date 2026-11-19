@@ -36,7 +36,6 @@ Public Class Form设置_设备与性能
             Try
                 设备列表.AddRange(枚举设备())
             Catch ex As Exception
-                Debug.WriteLine("设备设置页：" & ex.Message)
             End Try
             Dim 选中 = 设备列表.FindIndex(Function(x) x.标识 = 配置.GPU解码设备标识)
             If 选中 < 0 Then

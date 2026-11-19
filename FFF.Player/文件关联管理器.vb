@@ -131,7 +131,6 @@ Friend NotInheritable Class 文件关联管理器
                 同步门.Release()
             End Try
         Catch ex As Exception
-            Debug.WriteLine($"启动时同步文件关联失败：{ex}")
         End Try
     End Function
 

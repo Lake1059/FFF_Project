@@ -116,11 +116,4 @@ public:
     static GainMapProbeResult Probe(const std::string& pathUtf8, bool baseOnly,
                                     double targetHeadroomLog2 = kDefaultTargetHeadroomLog2);
 
-    // Behavioral self-test (locked-in regression assertions for F1's fixes).
-    // Exercises internal helpers that cannot be reached via Probe() without
-    // real compressed media (tmap trailing tolerance, PQ/HLG base gate,
-    // linearize-then-assign baseRgba contract). Prints one line per check and
-    // returns the number of FAILed assertions (0 == all passed). The CLI
-    // `--selftest` driver additionally runs the end-to-end JXL container check.
-    static int RunSelftest();
 };

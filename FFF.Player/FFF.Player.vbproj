@@ -130,12 +130,10 @@
     <ProductNative Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" />
     <!-- RAW 内核用 /DELAYLOAD 依赖 libraw.dll，运行时从 FFF.Native.dll 所在目录加载。
          必须与产品内核一起进散装输出与发布目录；单文件模式另见下方 PublishSingleFile 的 Content。 -->
-    <LibRawRuntime Include="..\third_party\libraw\bin\x64\libraw.dll"
-                   Condition="Exists('..\third_party\libraw\bin\x64\libraw.dll')" />
+    <LibRawRuntime Include="..\third_party\libraw\bin\x64\libraw.dll" Condition="Exists('..\third_party\libraw\bin\x64\libraw.dll')" />
     <!-- Side-lane helper is optional: when it has not been built the kernel
          degrades to the in-process lane, so an empty item must not break build. -->
-    <PrefetchHelper Include="..\build\FFF.PrefetchHost.exe"
-                    Condition="Exists('..\build\FFF.PrefetchHost.exe')" />
+    <PrefetchHelper Include="..\build\FFF.PrefetchHost.exe" Condition="Exists('..\build\FFF.PrefetchHost.exe')" />
     <DevelopmentRuntime Include="..\runtime\avcodec*.dll" />
     <DevelopmentRuntime Include="..\runtime\avformat*.dll" />
     <DevelopmentRuntime Include="..\runtime\avutil*.dll" />
@@ -158,6 +156,7 @@
   <PackageReference Include="Svg" Version="3.4.8" />
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectComposition" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectX" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
@@ -211,10 +210,8 @@
       <_PlayerSessionVb>$(MSBuildThisFileDirectory)Core\播放器会话.vb</_PlayerSessionVb>
     </PropertyGroup>
 
-    <Error Condition="!Exists('$(_PlayerApiCpp)')"
-           Text="版本校验找不到内核源文件：$(_PlayerApiCpp)" />
-    <Error Condition="!Exists('$(_PlayerSessionVb)')"
-           Text="版本校验找不到宿主源文件：$(_PlayerSessionVb)" />
+    <Error Condition="!Exists('$(_PlayerApiCpp)')" Text="版本校验找不到内核源文件：$(_PlayerApiCpp)" />
+    <Error Condition="!Exists('$(_PlayerSessionVb)')" Text="版本校验找不到宿主源文件：$(_PlayerSessionVb)" />
 
 
     <PropertyGroup>
@@ -235,30 +232,22 @@
         '期望API版本\s+As\s+UInteger\s*=\s*(\d+)UI').Groups[1].Value)</_HostCheckedVersion>
     </PropertyGroup>
 
-    <Error Condition="'$(_KernelApiVersion)' == ''"
-           Text="无法从 PlayerApi.cpp 解析 PlayerApiVersion。校验无法进行。" />
-    <Error Condition="'$(_HostSentVersion)' == ''"
-           Text="无法从 播放器会话.vb 解析配置写入的版本（'原生播放器配置大小, .版本 = ...'）。校验无法进行。" />
-    <Error Condition="'$(_HostCheckedVersion)' == ''"
-           Text="无法从 播放器会话.vb 解析 '期望API版本 As UInteger = NNUI'。校验无法进行。" />
+    <Error Condition="'$(_KernelApiVersion)' == ''" Text="无法从 PlayerApi.cpp 解析 PlayerApiVersion。校验无法进行。" />
+    <Error Condition="'$(_HostSentVersion)' == ''" Text="无法从 播放器会话.vb 解析配置写入的版本（'原生播放器配置大小, .版本 = ...'）。校验无法进行。" />
+    <Error Condition="'$(_HostCheckedVersion)' == ''" Text="无法从 播放器会话.vb 解析 '期望API版本 As UInteger = NNUI'。校验无法进行。" />
 
-    <Message Importance="high"
-             Text="3FP API 版本：内核=$(_KernelApiVersion) 宿主发送=$(_HostSentVersion) 宿主校验=$(_HostCheckedVersion) 工程声明=$(PlayerApiVersion)" />
+    <Message Importance="high" Text="3FP API 版本：内核=$(_KernelApiVersion) 宿主发送=$(_HostSentVersion) 宿主校验=$(_HostCheckedVersion) 工程声明=$(PlayerApiVersion)" />
 
-    <Error Condition="'$(_KernelApiVersion)' != '$(PlayerApiVersion)'"
-           Text="发布中止：内核 API 版本 ($(_KernelApiVersion)) 与本工程声明 ($(PlayerApiVersion)) 不一致。请同步 FFF.Player.vbproj 的 &lt;PlayerApiVersion&gt;，并重新构建 FFF.Native。" />
-    <Error Condition="'$(_HostCheckedVersion)' != '$(PlayerApiVersion)'"
-           Text="发布中止：宿主常量 期望API版本 ($(_HostCheckedVersion)) 与本工程声明 ($(PlayerApiVersion)) 不一致。请同步 播放器会话.vb 的 'Friend Const 期望API版本 As UInteger = NNUI'。" />
+    <Error Condition="'$(_KernelApiVersion)' != '$(PlayerApiVersion)'" Text="发布中止：内核 API 版本 ($(_KernelApiVersion)) 与本工程声明 ($(PlayerApiVersion)) 不一致。请同步 FFF.Player.vbproj 的 &lt;PlayerApiVersion&gt;，并重新构建 FFF.Native。" />
+    <Error Condition="'$(_HostCheckedVersion)' != '$(PlayerApiVersion)'" Text="发布中止：宿主常量 期望API版本 ($(_HostCheckedVersion)) 与本工程声明 ($(PlayerApiVersion)) 不一致。请同步 播放器会话.vb 的 'Friend Const 期望API版本 As UInteger = NNUI'。" />
 
-    <Error Condition="'$(_HostSentVersion)' != '期望API版本'"
-           Text="发布中止：配置里的版本写法为 '$(_HostSentVersion)'，应为常量 '期望API版本'。字面量会让版本号出现第四份副本。" />
+    <Error Condition="'$(_HostSentVersion)' != '期望API版本'" Text="发布中止：配置里的版本写法为 '$(_HostSentVersion)'，应为常量 '期望API版本'。字面量会让版本号出现第四份副本。" />
 
 
     <PropertyGroup>
       <_NativeResourceRc>$(MSBuildThisFileDirectory)..\FFF.Native\FFF.Native.rc</_NativeResourceRc>
     </PropertyGroup>
-    <Error Condition="!Exists('$(_NativeResourceRc)')"
-           Text="版本校验找不到原生版本资源：$(_NativeResourceRc)" />
+    <Error Condition="!Exists('$(_NativeResourceRc)')" Text="版本校验找不到原生版本资源：$(_NativeResourceRc)" />
     <PropertyGroup>
       <_RcVerApi>$([System.Text.RegularExpressions.Regex]::Match(
         $([System.IO.File]::ReadAllText('$(_NativeResourceRc)')),
@@ -274,32 +263,22 @@
         '\(api (\d+)\)').Groups[1].Value)</_RcProductApi>
     </PropertyGroup>
 
-    <Error Condition="'$(_RcVerApi)' == '' Or '$(_RcFileVersion)' == '' Or
-                     '$(_RcApiVersion)' == '' Or '$(_RcProductApi)' == ''"
-           Text="无法从 FFF.Native.rc 解析版本号（应同时找到 VER_API、FileVersion、ApiVersion 与 &quot;(api NN)&quot;）。版本校验无法进行。" />
-    <Message Importance="high"
-             Text="3FP API 版本（第四份：原生版本资源）：VER_API=$(_RcVerApi) FileVersion=$(_RcFileVersion) ApiVersion=$(_RcApiVersion) ProductVersion 内 api=$(_RcProductApi)" />
-    <Error Condition="'$(_RcVerApi)' != '$(PlayerApiVersion)'"
-           Text="发布中止：FFF.Native.rc 的 VER_API ($(_RcVerApi)) 与 API 版本 ($(PlayerApiVersion)) 不一致。改 rc 主版本号后必须重新构建 FFF.Native。" />
-    <Error Condition="'$(_RcFileVersion)' != '$(PlayerApiVersion)'"
-           Text="发布中止：FFF.Native.rc 的 FileVersion 字符串 ($(_RcFileVersion)) 与 API 版本 ($(PlayerApiVersion)) 不一致 —— 部署现场读的就是这一段。" />
-    <Error Condition="'$(_RcApiVersion)' != '$(PlayerApiVersion)'"
-           Text="发布中止：FFF.Native.rc 的 ApiVersion 字符串 ($(_RcApiVersion)) 与 API 版本 ($(PlayerApiVersion)) 不一致。" />
-    <Error Condition="'$(_RcProductApi)' != '$(PlayerApiVersion)'"
-           Text="发布中止：FFF.Native.rc 的 ProductVersion &quot;(api NN)&quot; ($(_RcProductApi)) 与 API 版本 ($(PlayerApiVersion)) 不一致。" />
+    <Error Condition="'$(_RcVerApi)' == '' Or '$(_RcFileVersion)' == '' Or&#xD;&#xA;                     '$(_RcApiVersion)' == '' Or '$(_RcProductApi)' == ''" Text="无法从 FFF.Native.rc 解析版本号（应同时找到 VER_API、FileVersion、ApiVersion 与 &quot;(api NN)&quot;）。版本校验无法进行。" />
+    <Message Importance="high" Text="3FP API 版本（第四份：原生版本资源）：VER_API=$(_RcVerApi) FileVersion=$(_RcFileVersion) ApiVersion=$(_RcApiVersion) ProductVersion 内 api=$(_RcProductApi)" />
+    <Error Condition="'$(_RcVerApi)' != '$(PlayerApiVersion)'" Text="发布中止：FFF.Native.rc 的 VER_API ($(_RcVerApi)) 与 API 版本 ($(PlayerApiVersion)) 不一致。改 rc 主版本号后必须重新构建 FFF.Native。" />
+    <Error Condition="'$(_RcFileVersion)' != '$(PlayerApiVersion)'" Text="发布中止：FFF.Native.rc 的 FileVersion 字符串 ($(_RcFileVersion)) 与 API 版本 ($(PlayerApiVersion)) 不一致 —— 部署现场读的就是这一段。" />
+    <Error Condition="'$(_RcApiVersion)' != '$(PlayerApiVersion)'" Text="发布中止：FFF.Native.rc 的 ApiVersion 字符串 ($(_RcApiVersion)) 与 API 版本 ($(PlayerApiVersion)) 不一致。" />
+    <Error Condition="'$(_RcProductApi)' != '$(PlayerApiVersion)'" Text="发布中止：FFF.Native.rc 的 ProductVersion &quot;(api NN)&quot; ($(_RcProductApi)) 与 API 版本 ($(PlayerApiVersion)) 不一致。" />
   </Target>
 
 
-  <Target Name="VerifyPlayerConfigSize" BeforeTargets="Publish"
-          DependsOnTargets="VerifyPlayerApiVersion">
+  <Target Name="VerifyPlayerConfigSize" BeforeTargets="Publish" DependsOnTargets="VerifyPlayerApiVersion">
     <PropertyGroup>
       <_PlayerApiHeader>$(MSBuildThisFileDirectory)..\FFF.Native\3FP\Api\FFF.Player.Api.h</_PlayerApiHeader>
       <_HostInteropVb>$(MSBuildThisFileDirectory)Interop\播放器原生接口.vb</_HostInteropVb>
     </PropertyGroup>
-    <Error Condition="!Exists('$(_PlayerApiHeader)')"
-           Text="结构体校验找不到内核头文件：$(_PlayerApiHeader)" />
-    <Error Condition="!Exists('$(_HostInteropVb)')"
-           Text="结构体校验找不到宿主互操作文件：$(_HostInteropVb)" />
+    <Error Condition="!Exists('$(_PlayerApiHeader)')" Text="结构体校验找不到内核头文件：$(_PlayerApiHeader)" />
+    <Error Condition="!Exists('$(_HostInteropVb)')" Text="结构体校验找不到宿主互操作文件：$(_HostInteropVb)" />
 
 
     <PropertyGroup>
@@ -318,16 +297,12 @@
         '$(_HostConfigBody)', '(?m)^\s+Public \w+ As ').Count)</_HostConfigFields>
     </PropertyGroup>
 
-    <Error Condition="'$(_KernelConfigFields)' == '' Or '$(_KernelConfigFields)' == '0'"
-           Text="无法解析 FFF3FPConfiguration 的字段。结构体校验无法进行。" />
-    <Error Condition="'$(_HostConfigFields)' == '' Or '$(_HostConfigFields)' == '0'"
-           Text="无法解析 原生播放器配置 的字段。结构体校验无法进行。" />
+    <Error Condition="'$(_KernelConfigFields)' == '' Or '$(_KernelConfigFields)' == '0'" Text="无法解析 FFF3FPConfiguration 的字段。结构体校验无法进行。" />
+    <Error Condition="'$(_HostConfigFields)' == '' Or '$(_HostConfigFields)' == '0'" Text="无法解析 原生播放器配置 的字段。结构体校验无法进行。" />
 
-    <Message Importance="high"
-             Text="3FP 配置结构体字段数：内核=$(_KernelConfigFields) 宿主=$(_HostConfigFields)" />
+    <Message Importance="high" Text="3FP 配置结构体字段数：内核=$(_KernelConfigFields) 宿主=$(_HostConfigFields)" />
 
-    <Error Condition="'$(_KernelConfigFields)' != '$(_HostConfigFields)'"
-           Text="发布中止：配置结构体字段数不一致（内核 $(_KernelConfigFields) vs 宿主 $(_HostConfigFields)）。宿主会因 size 不足被 FFF3FP_Create 拒绝。请在 原生播放器接口.vb 的 原生播放器配置 末尾补齐缺失字段。" />
+    <Error Condition="'$(_KernelConfigFields)' != '$(_HostConfigFields)'" Text="发布中止：配置结构体字段数不一致（内核 $(_KernelConfigFields) vs 宿主 $(_HostConfigFields)）。宿主会因 size 不足被 FFF3FP_Create 拒绝。请在 原生播放器接口.vb 的 原生播放器配置 末尾补齐缺失字段。" />
   </Target>
 
   <Target Name="CopyNativeRuntime" AfterTargets="Build">
@@ -346,17 +321,14 @@
 
 
   <Target Name="CopyProductNativeToPublish" AfterTargets="Publish" Condition="'$(PublishSingleFile)' != 'true'">
-    <Error Condition="'@(DevelopmentRuntime)' == '' and '$(BodyOnly)' != 'true'"
-           Text="找不到 FFmpeg 运行库（..\runtime\av*.dll 等）。请确认 kernel\runtime 已就位，或使用 BodyOnly=true 生成本体包。" />
-    <Error Condition="'@(LibRawRuntime)' == ''"
-           Text="找不到 LibRaw 运行库（..\third_party\libraw\bin\x64\libraw.dll）—— 散装发布目录必须与 FFF.Native.dll 同目录携带它。" />
+    <Error Condition="'@(DevelopmentRuntime)' == '' and '$(BodyOnly)' != 'true'" Text="找不到 FFmpeg 运行库（..\runtime\av*.dll 等）。请确认 kernel\runtime 已就位，或使用 BodyOnly=true 生成本体包。" />
+    <Error Condition="'@(LibRawRuntime)' == ''" Text="找不到 LibRaw 运行库（..\third_party\libraw\bin\x64\libraw.dll）—— 散装发布目录必须与 FFF.Native.dll 同目录携带它。" />
     <ItemGroup>
       <!-- BodyOnly=true 时只复制本体与 libass/libraw 栈，不把外部 FFmpeg runtime 带进 publish。 -->
       <_ProductPublishFiles Include="@(ProductNative);@(LibRawRuntime);@(LibassRuntime);@(PrefetchHelper)" />
       <_ProductPublishFiles Include="@(DevelopmentRuntime)" Condition="'$(BodyOnly)' != 'true'" />
     </ItemGroup>
-    <Copy SourceFiles="@(_ProductPublishFiles)"
-          DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_ProductPublishFiles)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
   </Target>
 
 
@@ -368,8 +340,7 @@
   </Target>
 
   <!-- WinRT 投影配对护栏：随包托管件引用投影件时必须同时存在。 -->
-  <UsingTask TaskName="AssertWindowsSdkProjectionPairing" TaskFactory="RoslynCodeTaskFactory"
-             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+  <UsingTask TaskName="AssertWindowsSdkProjectionPairing" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
     <ParameterGroup>
       <ScanDirectory ParameterType="System.String" Required="true" />
     </ParameterGroup>
@@ -445,12 +416,9 @@
       <_NetTfmMajor Condition="$(NetTFM.Length) &gt;= 7">$(NetTFM.Substring(3, 4))</_NetTfmMajor>
       <_LakeUiTfmMajor Condition="$(LakeUITfm.Length) &gt;= 7">$(LakeUITfm.Substring(3, 4))</_LakeUiTfmMajor>
     </PropertyGroup>
-    <Error Condition="'$(_NetTfmMajor)' == '' Or '$(_LakeUiTfmMajor)' == ''"
-           Text="无法从 TFM 解析大版本号（NetTFM='$(NetTFM)'，LakeUITfm='$(LakeUITfm)'）。期望形如 net10.0-windows10.0.26100.0；混血检测靠它，解析不了就不能放行。" />
-    <Error Condition="!Exists('$(_LakeUIRef)')"
-           Text="LakeUI 引用缺失，未找到：$(_LakeUIRef)（当前 LakeUIConfig=$(LakeUIConfig)，LakeUITfm=$(LakeUITfm)）。请先在兄弟仓 LakeUI 用该配置与目标框架产出产物：Release 档必须是 R2R 件（dotnet publish -c Release -r win-x64 --self-contained false -p:PublishReadyToRun=true，纯 build 产物不含本机码不算 R2R），Debug 档用 dotnet build -c Debug 即可；也可对本工程传 -p:LakeUIConfig=Debug 回退，或 -p:LakeUITfm=某已有目标框架 指向既有产物。" />
-    <Warning Condition="'$(_NetTfmMajor)' != '$(_LakeUiTfmMajor)'"
-             Text="宿主 TFM ($(NetTFM)) 与 LakeUI TFM ($(LakeUITfm)) 大版本不一致 —— 当前是「宿主 .NET $(_NetTfmMajor) + UI 库 .NET $(_LakeUiTfmMajor)」的混血状态。运行时可工作（程序集引用向下兼容），但 LakeUI 上游一旦重建别的 TFM，本 HintPath 会静默失效。建议推进 LakeUI 同步升级到与宿主一致的目标框架。" />
+    <Error Condition="'$(_NetTfmMajor)' == '' Or '$(_LakeUiTfmMajor)' == ''" Text="无法从 TFM 解析大版本号（NetTFM='$(NetTFM)'，LakeUITfm='$(LakeUITfm)'）。期望形如 net10.0-windows10.0.26100.0；混血检测靠它，解析不了就不能放行。" />
+    <Error Condition="!Exists('$(_LakeUIRef)')" Text="LakeUI 引用缺失，未找到：$(_LakeUIRef)（当前 LakeUIConfig=$(LakeUIConfig)，LakeUITfm=$(LakeUITfm)）。请先在兄弟仓 LakeUI 用该配置与目标框架产出产物：Release 档必须是 R2R 件（dotnet publish -c Release -r win-x64 --self-contained false -p:PublishReadyToRun=true，纯 build 产物不含本机码不算 R2R），Debug 档用 dotnet build -c Debug 即可；也可对本工程传 -p:LakeUIConfig=Debug 回退，或 -p:LakeUITfm=某已有目标框架 指向既有产物。" />
+    <Warning Condition="'$(_NetTfmMajor)' != '$(_LakeUiTfmMajor)'" Text="宿主 TFM ($(NetTFM)) 与 LakeUI TFM ($(LakeUITfm)) 大版本不一致 —— 当前是「宿主 .NET $(_NetTfmMajor) + UI 库 .NET $(_LakeUiTfmMajor)」的混血状态。运行时可工作（程序集引用向下兼容），但 LakeUI 上游一旦重建别的 TFM，本 HintPath 会静默失效。建议推进 LakeUI 同步升级到与宿主一致的目标框架。" />
   </Target>
 
 </Project>

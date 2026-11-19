@@ -10,21 +10,9 @@ extern "C" {
 
 namespace {
 
-// One-shot diagnostic switch: FFF_CUDA_INTEROP_TRACE=1 makes the import arm report
-// which driver call refused, so a silent conversion to the download route can be
-// told apart from a wrong geometry.
-// Shared read for the three switches: a value counts when it STARTS with the
-// lead character (empty values never match). Reading only the leading character
-// is deliberate -- the earlier strict "0\0"/"1\0" comparisons turned "00" and
-// "0 " (trailing space) into ENABLED, the opposite of the "=0 disables" intent.
 bool CudaEnvStartsWith(const wchar_t* name, const wchar_t lead) noexcept {
     wchar_t value[8]{};
     return GetEnvironmentVariableW(name, value, 8) != 0 && value[0] == lead;
-}
-
-bool InteropTraceEnabled() noexcept {
-    static const bool enabled = CudaEnvStartsWith(L"FFF_CUDA_INTEROP_TRACE", L'1');
-    return enabled;
 }
 
 // --- CUDA driver API, declared locally -------------------------------------------
@@ -230,13 +218,6 @@ bool CudaD3D11Interop::SupportsPixelFormat(const std::int32_t pixelFormat) noexc
 CudaD3D11Interop::Status CudaD3D11Interop::Probe(const AVFrame* const frame,
     ID3D11Device* const device) noexcept {
     if (!Enabled() || frame == nullptr || device == nullptr) return Status::Refused;
-    // One-shot diagnostic injection: FFF_CUDA_INTEROP_PROBE_REFUSE=1 makes the
-    // device-side probe refuse every stream, which drives Render's CUDA fallback
-    // (download + UploadPlanarFrames + latch) without needing a misbehaving
-    // driver. Same family as FFF_CUDA_INTEROP_TRACE; off by default.
-    static const bool probeRefuse =
-        CudaEnvStartsWith(L"FFF_CUDA_INTEROP_PROBE_REFUSE", L'1');
-    if (probeRefuse) return Status::Refused;
     if (frame->format != AV_PIX_FMT_CUDA || frame->hw_frames_ctx == nullptr) return Status::Refused;
     const auto* const frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
     if (frames == nullptr || frames->device_ref == nullptr) return Status::Refused;
@@ -337,34 +318,16 @@ CudaD3D11Interop::Status CudaD3D11Interop::Import(const AVFrame* const frame) no
     // to agree before a single byte moves.
     if (static_cast<std::uint32_t>(frame->width) != state_->planeWidth[0] ||
         static_cast<std::uint32_t>(frame->height) != state_->planeHeight[0]) {
-        if (InteropTraceEnabled()) std::fprintf(stderr,
-            "[cuda] import geometry %dx%d != bound %ux%u\n", frame->width, frame->height,
-            state_->planeWidth[0], state_->planeHeight[0]);
         return Status::Refused;
     }
     for (std::uint32_t plane = 0; plane < state_->planeCount; ++plane) {
         if (frame->data[plane] == nullptr ||
             static_cast<std::size_t>(frame->linesize[plane]) < state_->planeRowBytes[plane]) {
-            if (InteropTraceEnabled()) std::fprintf(stderr,
-                "[cuda] import plane%u unusable: data=%p linesize=%d rowBytes=%u\n", plane,
-                static_cast<void*>(frame->data[plane]), frame->linesize[plane],
-                state_->planeRowBytes[plane]);
             return Status::Refused;
         }
     }
     auto& driver = state_->driver;
     if (driver.ctxPushCurrent(state_->context) != CudaSuccess) return Status::Failed;
-    if (InteropTraceEnabled()) {
-        CUcontext current = nullptr;
-        CUdevice device = -1;
-        const auto getResult = driver.ctxGetCurrent(&current);
-        const auto deviceResult = driver.ctxGetDevice(&device);
-        std::fprintf(stderr,
-            "[cuda] import ctx=%p current=%p (get=%d) dev=%d (devGet=%d) stream=%p\n",
-            reinterpret_cast<void*>(state_->context), reinterpret_cast<void*>(current),
-            static_cast<int>(getResult), static_cast<int>(device),
-            static_cast<int>(deviceResult), reinterpret_cast<void*>(state_->stream));
-    }
     auto status = Status::Success;
     std::uint32_t mapped = 0;
     // Map and copy on the same stream: a copy issued on a different stream than the
@@ -373,8 +336,6 @@ CudaD3D11Interop::Status CudaD3D11Interop::Import(const AVFrame* const frame) no
         const auto mapResult = driver.graphicsMapResources(1, &state_->resources[mapped],
             state_->stream);
         if (mapResult != CudaSuccess) {
-            if (InteropTraceEnabled()) std::fprintf(stderr,
-                "[cuda] import map plane%u failed (%d)\n", mapped, static_cast<int>(mapResult));
             break;
         }
     }
@@ -386,9 +347,6 @@ CudaD3D11Interop::Status CudaD3D11Interop::Import(const AVFrame* const frame) no
             const auto arrayResult = driver.graphicsSubResourceGetMappedArray(&array,
                 state_->resources[plane], 0, 0);
             if (arrayResult != CudaSuccess || array == nullptr) {
-                if (InteropTraceEnabled()) std::fprintf(stderr,
-                    "[cuda] import mappedArray plane%u failed (%d)\n", plane,
-                    static_cast<int>(arrayResult));
                 status = Status::Failed;
                 break;
             }
@@ -411,10 +369,6 @@ CudaD3D11Interop::Status CudaD3D11Interop::Import(const AVFrame* const frame) no
                 copyResult = driver.memcpy2D(&copy);
             }
             if (copyResult != CudaSuccess) {
-                if (InteropTraceEnabled()) std::fprintf(stderr,
-                    "[cuda] import copy plane%u failed (%d) srcPitch=%zu rowBytes=%u h=%u\n",
-                    plane, static_cast<int>(copyResult), copy.srcPitch,
-                    state_->planeRowBytes[plane], state_->planeHeight[plane]);
                 status = Status::Failed;
                 break;
             }
@@ -441,21 +395,10 @@ void CudaD3D11Interop::Reset() noexcept {
     if (driver.ctxPushCurrent != nullptr && state_->context != nullptr &&
         driver.ctxPushCurrent(state_->context) == CudaSuccess) {
         for (std::uint32_t plane = 0; plane < state_->planeCount; ++plane) {
-            // A per-plane failure means the registration is stale (its context
-            // moved on or died). It cannot be leaked indefinitely -- the driver
-            // drops registrations when their context is destroyed -- but the
-            // condition must not pass silently.
-            if (driver.graphicsUnregisterResource(state_->resources[plane]) != CudaSuccess &&
-                InteropTraceEnabled()) {
-                std::fprintf(stderr, "[cuda] reset unregister failed for plane %u; "
-                    "the registration dies with its context\n", plane);
-            }
+            driver.graphicsUnregisterResource(state_->resources[plane]);
         }
         CUcontext popped = nullptr;
         driver.ctxPopCurrent(&popped);
-    } else if (state_->planeCount != 0 && InteropTraceEnabled()) {
-        std::fprintf(stderr, "[cuda] reset could not re-enter the context; "
-            "%u registration(s) left with the driver\n", state_->planeCount);
     }
     for (auto& resource : state_->resources) resource = nullptr;
     for (auto& bytes : state_->planeRowBytes) bytes = 0;

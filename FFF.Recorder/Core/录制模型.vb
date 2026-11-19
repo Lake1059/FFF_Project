@@ -213,7 +213,6 @@ Public NotInheritable Class 录制配置
     Public Property 音频声道数 As UInteger = 2
     Public Property 音频码率 As Long = 320000
     Public Property 音频模式 As UInteger
-    Public Property 诊断日志文件 As String = String.Empty
     Public Property 捕获后端 As String = String.Empty
     Public Property 捕获源说明 As String = String.Empty
     Public Property 捕获源格式 As String = String.Empty

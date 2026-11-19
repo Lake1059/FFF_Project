@@ -62,7 +62,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FFF.Native\FFF.Native.vcxproj" Condition="'$(MSBuildRuntimeType)' != 'Core'" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\FFF.Native\FFF.Native.vcxproj" Condition="'$(MSBuildRuntimeType)' != 'Core'" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true">
+      <SetPlatform>Platform=x64</SetPlatform>
+    </ProjectReference>
   </ItemGroup>
 
   <ItemGroup Condition="'$(PublishSingleFile)' == 'true'">

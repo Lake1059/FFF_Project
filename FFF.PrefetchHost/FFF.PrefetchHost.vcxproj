@@ -11,6 +11,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
+    <Platform Condition="'$(Platform)'==''">x64</Platform>
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{C7E4A1D9-3B6F-4A82-9E15-6D0C8F2B7A43}</ProjectGuid>
@@ -94,11 +95,4 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
-  <!-- OutDir=$(ProjectDir)..\build\ resolves to 3fp\kernel\build\, while
-       FFF.Native.dll and the four FFmpeg DLLs live two levels up in 3fp\build\.
-       Mirror the exe there so the launcher finds it next to the kernel DLL and
-       the helper can resolve avformat-63.dll at load time. -->
-  <Target Name="MirrorPrefetchHostToBuildDir" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
-    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(ProjectDir)..\..\build\FFF.PrefetchHost.exe" SkipUnchangedFiles="true" />
-  </Target>
 </Project>

@@ -147,14 +147,12 @@ Public NotInheritable Class 系统媒体会话
             设回调Fn(按钮Ptr, 跳转Ptr, 倍速Ptr, IntPtr.Zero)
 
             If 初始化Fn(窗口句柄) <> 0 Then
-                Debug.WriteLine("SMTC：内核 FFF3FP_SmtcInitialize 返回非零，降级为无系统媒体卡")
                 Return False
             End If
 
             已启用 = True
             Return True
         Catch ex As Exception
-            Debug.WriteLine("SMTC：初始化失败，降级为无系统媒体卡：" & ex.GetType().Name & " - " & ex.Message)
             已启用 = False
             Return False
         End Try
@@ -174,7 +172,6 @@ Public NotInheritable Class 系统媒体会话
         Try
             If 清卡片Fn IsNot Nothing Then 清卡片Fn()
         Catch ex As Exception
-            Debug.WriteLine("SMTC：清空卡片失败（已忽略）：" & ex.GetType().Name)
         End Try
         上次播放状态 = 系统媒体播放状态.已关闭
         上次显示类型 = Nothing
@@ -190,7 +187,6 @@ Public NotInheritable Class 系统媒体会话
         Try
             If 关闭Fn IsNot Nothing Then 关闭Fn()
         Catch ex As Exception
-            Debug.WriteLine("SMTC：摘事件失败（已忽略）：" & ex.GetType().Name)
         End Try
         SyncLock 待发布
             待发布.Clear()
@@ -211,7 +207,6 @@ Public NotInheritable Class 系统媒体会话
     Public Sub 设置缩略图(png字节 As Byte())
         If 已释放 OrElse 已关闭 OrElse Not 已启用 Then Return
         Dim rc = 测试用设置缩略图(png字节)
-        If rc <> 0 Then Debug.WriteLine("SMTC：内核设置缩略图返回非零（已忽略）：" & rc)
     End Sub
 
     ''' <summary>测试钩子：返回内核 FFF3FP_SmtcPublishThumbnail 的真实返回码，
@@ -223,7 +218,6 @@ Public NotInheritable Class 系统媒体会话
             Dim 数据 As Byte() = If(png字节, Array.Empty(Of Byte)())
             Return 发缩略图Fn(数据, CUInt(数据.Length))
         Catch ex As Exception
-            Debug.WriteLine("SMTC：设置缩略图失败（已忽略）：" & ex.GetType().Name)
             Return -2
         End Try
     End Function
@@ -300,7 +294,6 @@ Public NotInheritable Class 系统媒体会话
             设按钮Fn(6, If(可下一曲, 1, 0))
             设按钮Fn(7, If(可上一曲, 1, 0))
         Catch ex As Exception
-            Debug.WriteLine("SMTC：设置按钮可用性失败（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
 
@@ -312,7 +305,6 @@ Public NotInheritable Class 系统媒体会话
                 Return If(命令接收器(CType(按钮序号, 系统媒体按钮)), 1, 0)
             End If
         Catch ex As Exception
-            Debug.WriteLine("SMTC：按钮回调失败（已忽略）：" & ex.GetType().Name)
         End Try
         Return 0
     End Function
@@ -323,7 +315,6 @@ Public NotInheritable Class 系统媒体会话
                 Return If(跳转请求接收器(TimeSpan.FromSeconds(位置秒)), 1, 0)
             End If
         Catch ex As Exception
-            Debug.WriteLine("SMTC：seek 回调失败（已忽略）：" & ex.GetType().Name)
         End Try
         Return 0
     End Function
@@ -334,7 +325,6 @@ Public NotInheritable Class 系统媒体会话
                 Return If(倍速请求接收器(倍速), 1, 0)
             End If
         Catch ex As Exception
-            Debug.WriteLine("SMTC：倍速回调失败（已忽略）：" & ex.GetType().Name)
         End Try
         Return 0
     End Function
@@ -348,7 +338,6 @@ Public NotInheritable Class 系统媒体会话
                 命令接收器(按钮)
             End If
         Catch ex As Exception
-            Debug.WriteLine("SMTC：测试分派按钮回调失败（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
 
@@ -364,7 +353,6 @@ Public NotInheritable Class 系统媒体会话
                 Try
                     同步上下文.Post(AddressOf 发布队列回调, Nothing)
                 Catch ex As Exception
-                    Debug.WriteLine("SMTC：Post 发布队列失败，改为同步发布：" & ex.GetType().Name)
                     发布队列回调(Nothing)
                 End Try
             Else
@@ -385,7 +373,6 @@ Public NotInheritable Class 系统媒体会话
             Try
                 应用更新(项)
             Catch ex As Exception
-                Debug.WriteLine("SMTC：应用发布项失败（已忽略）：" & ex.GetType().Name)
             End Try
         Loop
     End Sub
@@ -445,15 +432,12 @@ Public NotInheritable Class 系统媒体会话
             ' 不增加 LoadLibrary 计数。
             库句柄 = GetModuleHandle(动态库名称)
             If 库句柄 <> IntPtr.Zero Then
-                Debug.WriteLine("SMTC：内核模块已在进程中（GetModuleHandle 命中）")
             Else
                 ' 测试进程（--smtc-runtime-smoke）不经过 播放器会话，FFF.Native.dll
                 ' 还没被加载。按需 Load：NativeLibrary.TryLoad 走与单文件自解压
                 ' 同一套 AssemblyLoadContext 解析路径，不会绕过宿主的 DLL 查找逻辑。
                 If NativeLibrary.TryLoad(动态库名称, GetType(系统媒体会话).Assembly, Nothing, 库句柄) Then
-                    Debug.WriteLine("SMTC：内核模块按需 NativeLibrary.TryLoad 成功")
                 Else
-                    Debug.WriteLine("SMTC：内核模块既未加载也无法按需加载（降级为无系统媒体卡）")
                     Return False
                 End If
             End If
@@ -471,12 +455,10 @@ Public NotInheritable Class 系统媒体会话
             ' 任一关键导出缺失就视为内核不支持 SMTC。
             If 初始化Fn Is Nothing OrElse 设回调Fn Is Nothing OrElse
                发卡片Fn Is Nothing OrElse 发时间轴Fn Is Nothing Then
-                Debug.WriteLine("SMTC：内核模块已加载，但 FFF3FP_Smtc* 关键导出缺失（旧内核？降级）")
                 Return False
             End If
             Return True
         Catch ex As Exception
-            Debug.WriteLine("SMTC：解析内核导出失败（已忽略，降级）：" & ex.GetType().Name & " - " & ex.Message)
             Return False
         End Try
     End Function

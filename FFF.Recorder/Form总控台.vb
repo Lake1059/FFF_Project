@@ -81,7 +81,7 @@ Public Class Form总控台
             AddHandler 设备监视器.设备已变更, AddressOf 音频设备已变更
         Catch ex As Exception
             设备监视器 = Nothing
-            MTB_执行日志.AppendText($"[{DateTime.Now:HH:mm:ss}] 音频设备变更通知初始化失败：{ex.Message}{vbCrLf}")
+            MTB_录制状态.AppendText($"[{DateTime.Now:HH:mm:ss}] 音频设备变更通知初始化失败：{ex.Message}{vbCrLf}")
         End Try
         更新录制状态()
         刷新统计(Nothing, EventArgs.Empty)

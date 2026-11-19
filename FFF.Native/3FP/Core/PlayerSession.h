@@ -981,7 +981,6 @@ private:
     std::uint32_t paceWindowLate_ = 0;          // late arrivals inside it
     std::int64_t paceWindowStart100ns_ = 0;     // clock at the window's first arrival
     std::int64_t paceWindowLateLagSum100ns_ = 0; // sum of late lags; the mean is the drift-cap test
-    std::size_t readTraceCount_ = 0;   // 仅 FFF_SEEK_TRACE=1 时用，给定位失败排查读位置
     // Frames discarded because the source delivers faster than the panel can scan out, kept
     // apart from snapshot_.droppedVideoFrames (which means "the pipeline fell behind the
     // media clock"). Read from the API thread, written on the worker thread.
@@ -1076,7 +1075,7 @@ private:
     // drain while the new position refills. Borrowing is capped (one device buffer)
     // and time-boxed (5 s); Reconcile returns it on expiry or once the queue is
     // back under the target.
-    void TryAudioHeadroomBorrow(const char* reason) noexcept;
+    void TryAudioHeadroomBorrow() noexcept;
     void ReconcileAudioHeadroomBorrow() noexcept;
     // docs/109 A-03/A-04: the water level may come back down, but only when the
     // stream is demonstrably calm, and a rollback after a short wrong step locks
@@ -1089,8 +1088,6 @@ private:
     std::uint64_t audioWatermarkUnderrunBaseline_ = 0;
     std::size_t VideoFrameCapTier() const noexcept;
     std::uint64_t AudioBytesPerSecond() const noexcept;
-    void TraceMemoryBudget(const char* event, std::size_t limitFrames,
-        std::uint64_t grantedBytes, std::int64_t now100ns) const noexcept;
     bool memoryBudgetAttached_ = false;
     // Verdict of the open-time Σfloor precheck (docs/108 §4.3), as DegradeStep.
     // 0 = no degradation, 1 = video floor 2 frames, 2 = decode 4 threads, 3 = refused.
@@ -1154,8 +1151,6 @@ private:
     // On timeout the caller bumps this generation; a queued toggle that has not
     // started yet sees the mismatch and returns without touching the session.
     std::atomic<std::uint64_t> gainMapToggleGeneration_{0};
-    // One-shot guard for the toggle-off fallback note (baseRgba unavailable):
-    // RawTrace at most once per open so a still frame never floods the log.
     bool gainMapBaseFallbackNoted_ = false;
     // A layered ("progressive") AV1 still image: the primary item was stored as
     // several contiguous extents, which is the shape AvifIlocShim repairs. Set at
@@ -1196,8 +1191,6 @@ private:
     std::atomic<std::uint64_t> videoRecoveryLastSteadyMs_{0};
     // Last [queue] trace values, so an animation logs its depth accounting once per
     // distinct combination instead of once per pump. Worker thread only.
-    mutable std::int64_t tracedQueuePipelineFrames_ = -1;
-    mutable std::int64_t tracedQueueLimit_ = -1;
     // APNG and AVIF/HEIC rewind per pass; reset this policy when reusing a session.
     bool sessionWrapLoop_;
     // Consecutive failed wrap-around seeks. A seek that is refused while the

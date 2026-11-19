@@ -49,7 +49,7 @@ Friend Structure 原生会话配置
     Public 麦克风增益 As Single
     Public 静音系统音频 As UInteger
     Public 静音麦克风 As UInteger
-    Public 诊断日志路径UTF8 As IntPtr
+    Public 保留日志路径 As IntPtr
     Public 捕获后端UTF8 As IntPtr
     Public 源说明UTF8 As IntPtr
     Public 源格式UTF8 As IntPtr

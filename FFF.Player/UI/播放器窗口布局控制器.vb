@@ -262,7 +262,6 @@ Friend NotInheritable Class 播放器窗口布局控制器
             设置原生尺寸封顶?.Invoke(开启)
         Catch ex As Exception
             ' 旧内核缺导出时上面的包装已经返回 False；这里只防 UI 线程被异常打断。
-            System.Diagnostics.Debug.WriteLine("视口封顶设置失败：" & ex.Message)
         End Try
     End Sub
 

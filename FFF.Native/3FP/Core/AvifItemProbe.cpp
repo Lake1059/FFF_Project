@@ -570,13 +570,9 @@ bool AvifItemProbe::Read(const char* pathUtf8, const std::int64_t maxBytes,
             if (tailOk && static_cast<std::size_t>(tailRead) == tail.size()) {
                 std::string tailDetail;
                 tailInspected = InspectTailBytes(tail.data(), tail.size(), info, tailDetail);
-                if (!tailInspected && GetEnvironmentVariableW(L"FFF_AVIF_TRACE", nullptr, 0))
-                    std::fprintf(stderr, "[avif-probe tail] %s\n", tailDetail.c_str());
             }
         }
     }
     const auto result = inspected || tailInspected;
-    if (!result && GetEnvironmentVariableW(L"FFF_AVIF_TRACE", nullptr, 0))
-        std::fprintf(stderr, "[avif-probe] %s\n", detail.c_str());
     return result;
 }

@@ -45,7 +45,6 @@ Friend NotInheritable Class Raw格式
         Catch ex As Exception
             ' 开发目录可能还没复制 libraw.dll；此时按“不支持 .x3f”处理，
             ' 不把没有能力证据的格式写进关联承诺。
-            System.Diagnostics.Debug.WriteLine($"LibRaw 能力探测失败：{ex.Message}")
             Return False
         End Try
     End Function

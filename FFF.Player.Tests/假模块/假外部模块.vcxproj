@@ -11,6 +11,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
+    <Platform Condition="'$(Platform)'==''">x64</Platform>
     <VCProjectVersion>17.0</VCProjectVersion>
     <ProjectGuid>{6B3A7E2D-6E4F-4A8D-9C1B-7F5E2D3C4A11}</ProjectGuid>
     <RootNamespace>FakeExternalModule</RootNamespace>

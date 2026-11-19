@@ -80,37 +80,6 @@ inline void DedupSmtSiblings(const std::vector<CpuSetEntry>& input,
 
 }  // namespace placement_detail
 
-/// Adaptive CPU placement for machines whose cores are not interchangeable: Intel
-/// hybrid parts (performance/efficiency classes) and multi-CCD AMD parts (one L3
-/// domain per die).
-///
-/// Three tiers, cheapest action first, because each one is strictly more intrusive
-/// than the last:
-///
-///   1 Preferred  every player thread is eligible only on tier0. One call.
-///   2 Spilled    the process-wide restriction is lifted so decode workers may use the
-///                second domain; the present thread keeps its explicit selection.
-///   3 Boosted    process priority class and the present thread's priority are raised.
-///
-/// Which domain is preferred comes from the OS, never from a table of model names:
-///   * two or more efficiency classes -> the highest class (values are ordered by the
-///     OS: bigger is faster, verified on this machine as SMT P-cores=1, E=0);
-///   * otherwise two or more last-level-cache indices -> the L3 domain whose logical
-///     processors are least busy overall (sampled, with hysteresis);
-///   * otherwise Domain::None, and every call is a documented no-op.
-///
-/// The decode thread ladder reads the preferred group's size (PreferredDomainThreads)
-/// to keep its first step inside one class/domain before crossing onto another.
-///
-/// Threads that were explicitly selected keep that selection: a process default only
-/// governs threads that never picked a set. Measured on Windows 11 26100: child threads
-/// do NOT inherit a parent's explicit selection, so pinning the present thread does not
-/// pin FFmpeg's frame threads and the spill still reaches them.
-///
-/// With FFF_PLACEMENT_TRACE set, every evaluation window also emits one
-/// PLACEMENT_SAMPLE line with the present thread's landing counts and per-tier busy
-/// percentages, and Release() emits a final total. Read-only instrumentation: it adds
-/// log lines and counters, never API calls, so the negative control stays negative.
 class PlacementPolicy final {
 public:
     enum class Domain { None, EfficiencyClass, CacheDomain };
@@ -163,23 +132,12 @@ public:
     /// Refused in the forced negative-control arms (their ceiling is below Boosted).
     bool Prioritize() noexcept;
 
-    /// Trace hook: counts the calling (present/worker) thread's current processor against
-    /// the tier partition. Called once per presented frame. No-op unless
-    /// FFF_PLACEMENT_TRACE was set at construction; it never changes placement, it only
-    /// lets a playback test report where the present thread really ran.
-    void SamplePresentThread() noexcept;
-
     bool Available() const noexcept { return kind_ != Domain::None; }
     bool Spilled() const noexcept { return tier_ == Tier::Spilled || tier_ == Tier::Boosted; }
     bool Boosted() const noexcept { return tier_ == Tier::Boosted; }
     Domain Kind() const noexcept { return kind_; }
 
     /// One line describing the decision, including why it is Unavailable. Never empty.
-    const std::string& Describe() const noexcept { return description_; }
-
-    /// FFF_PLACEMENT_TRACE presence read at construction. Diagnostics only: the session
-    /// uses it to gate its PLACEMENT_SNAPSHOT trace line, never a behaviour change.
-    bool TraceEnabled() const noexcept { return trace_; }
 
     /// Diagnostic read-out for FFF3FP_GetCpuPlacementSnapshot (P3-12). Fills the
     /// placement-owned fields of `snapshot` with what the policy believes is in force
@@ -225,13 +183,9 @@ private:
     bool ReadProcessorTimes(std::vector<std::uint64_t>& idle,
                             std::vector<std::uint64_t>& busy) noexcept;
     void ChooseCacheDomain() noexcept;
-    void Log(const char* transition) noexcept;
 
-    int ClassifyCurrentProcessor() const noexcept;
     bool ReadTierUtilization(double& busy0, double& busy1) noexcept;
     void ApplyDomainSwap(double busy0, double busy1) noexcept;
-    void EmitWindowSample(bool busyKnown, double busy0, double busy1) noexcept;
-    void EmitFinalSample() noexcept;
 
     Domain kind_ = Domain::None;
     Tier tier_ = Tier::None;
@@ -277,18 +231,6 @@ private:
     bool havePrevSample_ = false;
     std::int64_t lastDomainSwitch100ns_ = 0;
 
-    // FFF_PLACEMENT_TRACE: presence-gated instrumentation (same convention as
-    // FFF_CADENCE_TRACE). Read-only: adds log lines and counters, never API calls.
-    bool trace_ = false;
-    std::uint64_t sampleTier0_ = 0;   // present-thread samples, whole session
-    std::uint64_t sampleTier1_ = 0;
-    std::uint64_t sampleOther_ = 0;
-    std::uint64_t windowTier0_ = 0;   // since the previous window line
-    std::uint64_t windowTier1_ = 0;
-    std::uint64_t windowOther_ = 0;
-    std::uint64_t windows_ = 0;
-    bool finalSampleLogged_ = false;
-
     // priority baseline, so a host that already runs at HIGH is not demoted
     std::uint32_t baselinePriorityClass_ = 0;
     bool prioritySaved_ = false;
@@ -300,5 +242,4 @@ private:
     // what the policy put there instead of re-querying the OS on every call.
     std::uint32_t processDefaultSetCount_ = 0;
 
-    std::string description_;
 };

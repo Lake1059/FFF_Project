@@ -20,7 +20,6 @@ Friend Structure 播放性能选项
                     FirstOrDefault(Function(x) x.标识 = 保存标识)
                 If 设备 IsNot Nothing Then GPU设备索引 = 设备.索引
             Catch ex As Exception
-                Debug.WriteLine("枚举 GPU 解码设备失败，使用自动选择：" & ex.Message)
             End Try
         End If
         视频缓冲区策略 = 配置.视频缓冲区策略

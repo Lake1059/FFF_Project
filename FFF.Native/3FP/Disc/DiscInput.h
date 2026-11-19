@@ -90,7 +90,6 @@ private:
     int bluraySubtitle_ = 1;
     bool bluraySubtitleEnabled_ = true;
     unsigned playItem_ = 0;
-    bool trace_ = false;
     std::vector<int> audioPids_, subtitlePids_;
     std::vector<std::uint8_t> pendingRead_;
     unsigned invalidReads_ = 0;
