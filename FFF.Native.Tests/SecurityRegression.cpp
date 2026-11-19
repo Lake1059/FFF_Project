@@ -121,6 +121,14 @@ struct PlayerSecurityRegression {
         }
         std::string normalized, error;
         Check(PlayerSession::NormalizeLocalPath(local.c_str(), normalized, error), "native local path accepted");
+        Check(PlayerSession::NormalizeNetworkPath(local.c_str(), normalized, error),
+            "native network entry accepts local path");
+        Check(!PlayerSession::NormalizeNetworkPath("\\\\.\\pipe\\invalid", normalized, error),
+            "native network entry rejects device paths");
+        Check(!PlayerSession::NormalizeNetworkPath("\\\\?\\GLOBALROOT\\invalid", normalized, error),
+            "native network entry rejects extended paths");
+        Check(!PlayerSession::NormalizeNetworkPath("https://invalid.example/file.mp4", normalized, error),
+            "native network entry rejects URL schemes");
     }
     static void Tap() {
         FFF3FPConfiguration config{};

@@ -58,6 +58,10 @@ public:
     ~PlayerSession();
 
     FFFResult Open(const char* localPathUtf8) noexcept;
+    // Explicit network-media entry. UNC paths are accepted only here; device,
+    // pipe and extended paths stay rejected, and FFF3FP_Open keeps its original
+    // local-only contract.
+    FFFResult OpenNetwork(const char* networkPathUtf8) noexcept;
     FFFResult ConfigurePlaybackPerformance(std::int32_t decodeAdapterIndex,
         std::uint32_t videoBufferPolicy, std::uint32_t audioBufferPolicy) noexcept;
     FFFResult GetImageInfo(FFF3FPImageInfo& info) const noexcept;
@@ -570,6 +574,9 @@ private:
     std::int64_t AudioMediaPosition(std::int64_t position100ns) const noexcept;
     static bool NormalizeLocalPath(const char* pathUtf8, std::string& normalized,
         std::string& error) noexcept;
+    static bool NormalizeNetworkPath(const char* pathUtf8, std::string& normalized,
+        std::string& error) noexcept;
+    FFFResult OpenWithPolicy(const char* pathUtf8, bool allowNetwork) noexcept;
 
     // The route the host asked for, normalized in the constructor: Unspecified
     // ("no preference") becomes Gpu, which is the GPU-first default -- the CPU is

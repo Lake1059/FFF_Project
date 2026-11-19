@@ -248,9 +248,9 @@
             If IO.File.Exists(值) Then
                 If 播放列表.是支持的媒体文件(值) Then Yield IO.Path.GetFullPath(值)
             ElseIf IO.Directory.Exists(值) Then
-                For Each 文件 In IO.Directory.EnumerateFiles(值, "*", IO.SearchOption.TopDirectoryOnly).
-                    Where(AddressOf 播放列表.是支持的媒体文件).
-                    OrderBy(Function(x) IO.Path.GetFileName(x), StringComparer.CurrentCultureIgnoreCase)
+                ' 普通目录按有界递归展开；网络目录最多向下两层、1000 项，避免一次拖入
+                ' 变成对整个共享的无限扫描。真正的 BDMV 目录不在播放列表里展开。
+                For Each 文件 In 媒体路径.枚举媒体文件(值)
                     Yield 文件
                 Next
             End If

@@ -2064,8 +2064,19 @@ FFFResult PlayerSession::ConfigurePlaybackPerformance(
 }
 
 FFFResult PlayerSession::Open(const char* path) noexcept {
+    return OpenWithPolicy(path, false);
+}
+
+FFFResult PlayerSession::OpenNetwork(const char* path) noexcept {
+    return OpenWithPolicy(path, true);
+}
+
+FFFResult PlayerSession::OpenWithPolicy(const char* path, bool allowNetwork) noexcept {
     std::string normalized, error;
-    if (!NormalizeLocalPath(path, normalized, error)) { ReportError(FFFResult::InvalidArgument, std::move(error), "open"); return FFFResult::InvalidArgument; }
+    if (!(allowNetwork ? NormalizeNetworkPath : NormalizeLocalPath)(path, normalized, error)) {
+        ReportError(FFFResult::InvalidArgument, std::move(error), "open");
+        return FFFResult::InvalidArgument;
+    }
     if (state_.exchange(FFF3FPState::Opening) == FFF3FPState::Opening) return FFFResult::InvalidState;
     { std::lock_guard lock(snapshotMutex_); publishedSnapshot_.state = FFF3FPState::Opening; }
     discCancel_.store(false);
@@ -11558,20 +11569,55 @@ void PlayerSession::PublishSnapshot() noexcept {
     publishedSnapshot_ = snapshot_;
 }
 
-bool PlayerSession::NormalizeLocalPath(const char* path, std::string& normalized, std::string& error) noexcept {
+namespace {
+bool NormalizeMediaPath(const char* path, bool allowNetwork, std::string& normalized,
+    std::string& error) noexcept {
     try {
-        auto wide = FromUtf8(path); if (wide.empty()) { error = "A non-empty UTF-8 local path is required."; return false; }
-        if (wide.rfind(L"\\\\", 0) == 0 || wide.rfind(L"//", 0) == 0 || wide.find(L"://") != std::wstring::npos ||
-            wide.rfind(L"\\\\.\\", 0) == 0 || wide.rfind(L"\\\\?\\GLOBALROOT", 0) == 0) { error = "Network, device and pipe paths are disabled."; return false; }
-        std::vector<wchar_t> full(32768); const auto length = GetFullPathNameW(wide.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr);
-        if (length == 0 || length >= full.size()) { error = "The local path is invalid."; return false; }
-        if (length >= 2 && (full[0] == L'\\' || full[0] == L'/') &&
-            (full[1] == L'\\' || full[1] == L'/')) {
-            error = "Network, device and pipe paths are disabled."; return false;
+        auto wide = FromUtf8(path);
+        if (wide.empty()) { error = "A non-empty UTF-8 media path is required."; return false; }
+        const bool extended = wide.rfind(L"\\\\.\\", 0) == 0 || wide.rfind(L"\\\\?\\", 0) == 0 ||
+                              wide.rfind(L"//./", 0) == 0 || wide.rfind(L"//?/", 0) == 0;
+        const bool hasScheme = wide.find(L"://") != std::wstring::npos;
+        const bool unc = wide.rfind(L"\\\\", 0) == 0 || wide.rfind(L"//", 0) == 0;
+        if (extended || hasScheme || (unc && !allowNetwork)) {
+            error = "Network, device and pipe paths are disabled.";
+            return false;
+        }
+        std::vector<wchar_t> full(32768);
+        const auto length = GetFullPathNameW(wide.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr);
+        if (length == 0 || length >= full.size()) { error = "The media path is invalid."; return false; }
+        const bool fullUnc = length >= 2 &&
+            (full[0] == L'\\' || full[0] == L'/') && (full[1] == L'\\' || full[1] == L'/');
+        if (fullUnc && !allowNetwork) {
+            error = "Network, device and pipe paths are disabled.";
+            return false;
+        }
+        // Extended paths can alias UNC/device namespaces after normalization; keep
+        // them out of the network entry too.
+        if (fullUnc && allowNetwork &&
+            (wide.rfind(L"\\\\?\\", 0) == 0 || wide.rfind(L"//?/", 0) == 0)) {
+            error = "Network, device and pipe paths are disabled.";
+            return false;
         }
         const auto attributes = GetFileAttributesW(full.data());
         if (attributes == INVALID_FILE_ATTRIBUTES ||
-            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) { error = "The path must identify an existing regular local file."; return false; }
-        normalized = ToUtf8(full.data()); return !normalized.empty();
-    } catch (...) { error = "The local path could not be normalized."; return false; }
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            error = "The path must identify an existing regular media file.";
+            return false;
+        }
+        normalized = ToUtf8(full.data());
+        return !normalized.empty();
+    } catch (...) {
+        error = "The media path could not be normalized.";
+        return false;
+    }
+}
+}
+
+bool PlayerSession::NormalizeLocalPath(const char* path, std::string& normalized, std::string& error) noexcept {
+    return NormalizeMediaPath(path, false, normalized, error);
+}
+
+bool PlayerSession::NormalizeNetworkPath(const char* path, std::string& normalized, std::string& error) noexcept {
+    return NormalizeMediaPath(path, true, normalized, error);
 }

@@ -1056,8 +1056,9 @@ Public Class Form1
 
     Private Sub 打开或替换文件(路径 As IEnumerable(Of String))
         If 路径 Is Nothing Then Return
-        Dim 存在的文件 = 路径.Where(Function(x) Not String.IsNullOrWhiteSpace(x) AndAlso
-                                             光盘路径.媒体存在(x)).
+        ' 文件夹先展开：普通目录枚举媒体，只有真正的 BDMV 布局才作为光盘路径保留。
+        Dim 存在的文件 = 媒体路径.展开打开路径(路径).
+            Where(Function(x) 光盘路径.媒体存在(x)).
             Select(Function(x) Path.GetFullPath(x)).
             Distinct(StringComparer.OrdinalIgnoreCase).
             ToArray()
@@ -1071,7 +1072,7 @@ Public Class Form1
 
     Private Sub 打开或替换文件(路径 As String)
         If String.IsNullOrWhiteSpace(路径) Then Return
-        打开或替换单个文件(Path.GetFullPath(路径))
+        打开或替换文件({Path.GetFullPath(路径)})
     End Sub
 
     Private Sub 添加并打开多个媒体文件(路径 As IEnumerable(Of String))
