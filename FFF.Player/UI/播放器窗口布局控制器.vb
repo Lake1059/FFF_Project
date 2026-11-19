@@ -1,6 +1,6 @@
 ''' <summary>
-''' 管理视频宿主窗口的重绑节流、首次 16:9 容器比例校正，以及“按内容原始尺寸 1:1”模式。
-''' 1:1 模式只负责窗口几何；画面不放大由原生视口封顶兜底（旧内核缺失时静默跳过）。
+''' 管理视频宿主窗口的重绑节流、首次 16:9 容器比例校正，以及“按内容原始尺寸”模式。
+''' 内容原始尺寸只用于决定初始窗口几何；画面允许随窗口缩放，不锁定源像素 1:1。
 ''' </summary>
 Friend NotInheritable Class 播放器窗口布局控制器
     Implements IDisposable
@@ -87,7 +87,7 @@ Friend NotInheritable Class 播放器窗口布局控制器
             ' 纯音频/无视频：清掉上一次媒体的尺寸，避免 DPI 变化时拿旧尺寸改窗口。
             最后内容原始大小 = Size.Empty
             最后内容设备大小 = Size.Empty
-            ' 没有内容可 1:1，临时放宽的 MinimumSize 与视口封顶都要撤回默认。
+            ' 没有内容可定尺寸，临时放宽的 MinimumSize 与视口封顶都要撤回默认。
             复位最小尺寸到默认()
             设置封顶(False)
             Return
@@ -125,6 +125,8 @@ Friend NotInheritable Class 播放器窗口布局控制器
             窗体.MinimumSize = 默认最小尺寸
             Return
         End If
+        ' 原始尺寸模式只控制初始窗口，不限制画面放大；先释放可能残留的封顶。
+        设置封顶(False)
         If Not 最后内容设备大小.IsEmpty AndAlso 界面已就绪标志 AndAlso Not 全屏状态 Then
             请求应用内容尺寸()
         End If
@@ -142,7 +144,7 @@ Friend NotInheritable Class 播放器窗口布局控制器
         If 已释放 Then Return
         全屏状态 = 全屏
         If 全屏 Then
-            ' 全屏必须铺满屏幕；1:1 的视口封顶只属于普通窗口/最大化窗口。
+            ' 全屏必须铺满屏幕；任何视口封顶都与全屏的缩放语义冲突。
             设置封顶(False)
             Return
         End If
@@ -154,7 +156,7 @@ Friend NotInheritable Class 播放器窗口布局控制器
         If 已释放 Then Return
         手动覆盖 = True
         应用代数 += 1
-        ' 手动尺寸按菜单语义缩放适配，不能继续用 1:1 封顶把画面钉在源尺寸。
+        ' 手动尺寸按菜单语义缩放适配，不能再让原生尺寸限制把画面钉在源尺寸。
         设置封顶(False)
         ' 离开内容模式自动布局：把临时放宽的 MinimumSize 收回设计默认，
         ' 否则后续 Math.Clamp 仍夹在上次小内容留下的放宽下限里。
@@ -239,7 +241,7 @@ Friend NotInheritable Class 播放器窗口布局控制器
             窗体.WindowState = FormWindowState.Maximized
         Else
             ' 内容模式的目标可能小于平时允许的 MinimumSize（例如 640×360 源视频）。
-            ' 这里只按本次目标临时放宽最小尺寸；退出模式时恢复原值，保证内容区仍是严格的 1:1。
+            ' 这里只按本次目标临时放宽最小尺寸，退出模式时恢复原值；目标窗口只表示初始几何。
             Dim 最小窗口 = 计算内容模式最小尺寸(默认最小尺寸, 目标窗口大小)
             If 窗体.MinimumSize <> 最小窗口 Then 窗体.MinimumSize = 最小窗口
             Dim 最终大小 = New Size(
@@ -249,8 +251,9 @@ Friend NotInheritable Class 播放器窗口布局控制器
             窗体.Bounds = 计算工作区居中边界(最终大小, 工作区)
         End If
 
-        ' 窗口受 MinimumSize/最大化影响可能大于内容；封顶让画面按源原生尺寸居中，不放大。
-        设置封顶(True)
+        ' 原始尺寸只作为窗口初始尺寸；不启用原生视口封顶，画面随窗口缩放。
+        ' 否则最大化后会停留在源像素尺寸，表现为“固定 1:1”并留下黑边。
+        设置封顶(False)
         重绑输出窗口()
     End Sub
 
@@ -280,7 +283,7 @@ Friend NotInheritable Class 播放器窗口布局控制器
             Math.Max(1, 内容设备大小.Height + 客户区非内容.Height + 非客户区.Height))
     End Function
 
-    ''' <summary>内容模式下允许窗口小于平时 MinimumSize，才能让 640×360 这类小内容保持内容区 1:1。
+    ''' <summary>内容模式下允许窗口小于平时 MinimumSize，让 640×360 这类小内容也能得到贴近源尺寸的初始窗口。
     ''' 目标窗口本身仍以工作区为上限；该函数只负责放宽最小尺寸，不放大目标。</summary>
     Friend Shared Function 计算内容模式最小尺寸(基础最小尺寸 As Size, 目标窗口大小 As Size) As Size
         If 目标窗口大小.Width <= 0 OrElse 目标窗口大小.Height <= 0 Then Return 基础最小尺寸
