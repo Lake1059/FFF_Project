@@ -27,10 +27,10 @@ Public Class Form设置_界面与尺寸
             Else
                 MCB_全局字体.Text = 设置.实例对象.字体
             End If
-            MCB_初始画面尺寸选项.SelectedIndex = 设置.实例对象.初始画面尺寸选项
+            MCB_初始画面尺寸选项.SelectedIndex = If(设置.实例对象.内容原始尺寸模式,
+                10, Math.Clamp(设置.实例对象.初始画面尺寸选项, 0, 9))
             MTB_自定义初始画面尺寸宽度.Text = 设置.实例对象.自定义初始画面宽度.ToString()
             MTB_自定义初始画面尺寸高度.Text = 设置.实例对象.自定义初始画面高度.ToString()
-            MCK_内容原始尺寸.Checked = 设置.实例对象.内容原始尺寸模式
             更新自定义尺寸控件状态()
             更新内容尺寸提示()
         Finally
@@ -46,13 +46,11 @@ Public Class Form设置_界面与尺寸
 
     Private Sub MCB_初始画面尺寸选项_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_初始画面尺寸选项.SelectedIndexChanged
         If 正在初始化 OrElse MCB_初始画面尺寸选项.SelectedIndex < 0 Then Return
-        设置.实例对象.初始画面尺寸选项 = MCB_初始画面尺寸选项.SelectedIndex
-        更新自定义尺寸控件状态()
-    End Sub
-
-    Private Sub MCK_内容原始尺寸_CheckedChanged(sender As Object, e As EventArgs) Handles MCK_内容原始尺寸.CheckedChanged
-        If 正在初始化 Then Return
-        设置.实例对象.内容原始尺寸模式 = MCK_内容原始尺寸.Checked
+        Dim 使用内容原始尺寸 = MCB_初始画面尺寸选项.SelectedIndex = 10
+        设置.实例对象.内容原始尺寸模式 = 使用内容原始尺寸
+        If Not 使用内容原始尺寸 Then
+            设置.实例对象.初始画面尺寸选项 = MCB_初始画面尺寸选项.SelectedIndex
+        End If
         更新自定义尺寸控件状态()
         更新内容尺寸提示()
         Form1.当前主窗体?.应用内容尺寸模式设置()
@@ -70,10 +68,9 @@ Public Class Form设置_界面与尺寸
     End Sub
 
     Private Sub 更新自定义尺寸控件状态()
-        Dim 使用内容原始尺寸 = MCK_内容原始尺寸.Checked
+        Dim 使用内容原始尺寸 = MCB_初始画面尺寸选项.SelectedIndex = 10
         Dim 显示自定义尺寸 = Not 使用内容原始尺寸 AndAlso MCB_初始画面尺寸选项.SelectedIndex = 0
         Dim 停靠顺序 As Control() = {
-            MCK_内容原始尺寸,
             MTB_自定义初始画面尺寸高度,
             JustEmptyControl2,
             MTB_自定义初始画面尺寸宽度,
@@ -92,7 +89,6 @@ Public Class Form设置_界面与尺寸
             For Each 控件 In 自定义尺寸控件
                 控件.Visible = 显示自定义尺寸
             Next
-            MCB_初始画面尺寸选项.Enabled = Not 使用内容原始尺寸
             ' LakeUI 控件显隐会改变 Z 顺序；显隐后需连同 JEC 间隔恢复 DockStyle.Left 的反向停靠顺序。
             For index = 0 To 停靠顺序.Length - 1
                 Panel2.Controls.SetChildIndex(停靠顺序(index), index)
@@ -103,8 +99,8 @@ Public Class Form设置_界面与尺寸
     End Sub
 
     Private Sub 更新内容尺寸提示()
-        If 设置.实例对象.内容原始尺寸模式 Then
-            HtmlColorLabel4.Text = "打开媒体后视频区域按内容原始像素显示；内容达到显示器或窗口放不下时自动最大化"
+        If MCB_初始画面尺寸选项.SelectedIndex = 10 Then
+            HtmlColorLabel4.Text = "按内容原始尺寸决定初始窗口；画面随窗口缩放，窗口连同边框超过屏幕工作区时自动最大化"
         Else
             HtmlColorLabel4.Text = "每次启动软件后视频渲染区域的尺寸，会跟随 DPI 缩放"
         End If

@@ -108,12 +108,13 @@ Partial Class Form设置_设备与性能
         ModernPanel1.Controls.Add(HtmlColorLabel1)
         ModernPanel1.Controls.Add(Panel1)
         ModernPanel1.Padding = New Padding(15, 20, 20, 20)
-        ' 这一页有 835 逻辑像素高，而设置窗口客户区只有 493 —— 与 Form设置_AI字幕
-        ' 同款处理：根面板不能用 Dock.Fill（Dock 的控件不参与 AutoScroll 滚动，
-        ' 会被钉在边上），改成绝对定位 + 保留设计高度，窗体 AutoScroll 出滚动条；
-        ' 宽度跟随容器（见 Form设置_设备与性能.vb 的 对齐面板宽度）。
+        ' 这一页有 835 逻辑像素高，而设置窗口客户区只有 493；根面板 Dock=Fill，
+        ' 由 LakeUI ModernPanel 的 ScrollBarMode=Vertical 自绘滚动条接管滚轮/拖动，
+        ' 子面板继续 Dock=Top 堆叠。窗体 AutoScroll 保持关闭。
+        ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
+        ModernPanel1.ScrollBarMode = LakeUI.ModernPanel.ScrollMode.Vertical
         ModernPanel1.Size = New Size(652, 835)
         ModernPanel1.TabIndex = 1
         ' 
@@ -967,9 +968,6 @@ Partial Class Form设置_设备与性能
         ' 
         AutoScaleDimensions = New SizeF(96F, 96F)
         AutoScaleMode = AutoScaleMode.Dpi
-        ' 页面设计高度 835 超出设置窗口客户区 493，靠窗体滚动条露出下半页
-        ' （根面板为此改成了绝对定位，见 ModernPanel1 段的注释）。
-        AutoScroll = True
         BackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ClientSize = New Size(652, 493)
         Controls.Add(ModernPanel1)

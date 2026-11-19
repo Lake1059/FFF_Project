@@ -159,6 +159,7 @@ Partial Class Form设置_界面与尺寸
         MCB_初始画面尺寸选项.Items.Add("1920x1080")
         MCB_初始画面尺寸选项.Items.Add("2560x1440")
         MCB_初始画面尺寸选项.Items.Add("3840x2160")
+        MCB_初始画面尺寸选项.Items.Add("内容原始尺寸 1:1")
         MCB_初始画面尺寸选项.Location = New Point(0, 0)
         MCB_初始画面尺寸选项.Margin = New Padding(2, 2, 2, 2)
         MCB_初始画面尺寸选项.Name = "MCB_初始画面尺寸选项"
@@ -194,6 +195,7 @@ Partial Class Form设置_界面与尺寸
         MCK_内容原始尺寸.Size = New Size(170, 32)
         MCK_内容原始尺寸.TabIndex = 19
         MCK_内容原始尺寸.Text = "内容原始尺寸 1:1"
+        MCK_内容原始尺寸.Visible = False
         '
         ' Panel1
         ' 
