@@ -9,9 +9,9 @@
 - **WARM（顺序预热）**：把邻居文件按 64 KiB 一块、最多前 8 MiB，老老实实顺序读一遍，让操作系统把字节提前放进文件缓存。报告读了多少字节 `warmedBytes`。
 - **PROBE（轻量容器预分析）**：用 FFmpeg `avformat_open_input` 只读地打开一下容器，读它自带的流表，把「几个流、视频流是第几个、编码 id、宽高、文件大小、类型标记」这些纯数字（POD）报回来。**不建解码器、不读一帧、不解码**。
 
-**它绝对不碰的东西**：窗口、GPU、音频设备、播放列表、WASAPI、注入泵、`AVFrame`，也**绝不加载 `FFF.Native.dll`**（不引用 `PlayerSession` / `VideoRenderer` / `PlacementPolicy` / `g_logSink`，不链任何 3FP 内核库）。FFmpeg 的 DLL 只由这个小助手自己加载，播放器主进程不替它加载。
+**它绝对不碰的东西**：窗口、GPU、音频设备、播放列表、WASAPI、注入泵、`AVFrame`，也**绝不加载 `FFF.Native.dll`**（不引用 `PlayerSession` / `VideoRenderer` / `PlacementPolicy`，不链任何 3FP 内核库）。FFmpeg 的 DLL 只由这个小助手自己加载，播放器主进程不替它加载。
 
-**它还会主动「让路」**：进程进 background 模式、设极低内存优先级、放进 Job 里限制 CPU 最多约单核 25%、线程降到最低优先级，并对每个打开的文件标 `IoPriorityHintVeryLow`。这些设置只作用于它自己；缺哪个 API 就静静跳过，绝不报错。日志单独写 exe 同目录的 `prefetch.log`（每行带 pid），**不碰 `kernel.log`**。
+**它还会主动「让路」**：进程进 background 模式、设极低内存优先级、放进 Job 里限制 CPU 最多约单核 25%、线程降到最低优先级，并对每个打开的文件标 `IoPriorityHintVeryLow`。这些设置只作用于它自己；缺哪个 API 就静静跳过，绝不报错。
 
 ## 两边怎么说话（帧格式）
 

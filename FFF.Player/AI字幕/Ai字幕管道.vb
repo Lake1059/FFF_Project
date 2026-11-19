@@ -16,7 +16,7 @@ Imports System.Threading
 ''' 三条线程边界（§8）：
 '''   * pump 线程：ReadAudioTap → 写 stdin。禁碰 UI、禁碰状态机；
 '''   * result 线程：读 stdout → 解析 → 状态机.提交结果。禁碰 UI；
-'''   * stderr 线程：worker 诊断日志进环形缓冲（信息图层/日志用）。
+'''   * 排空子进程的标准错误流，避免子进程阻塞。
 ''' worker 进程自身只做转换与推理，没有任何反压播放器的能力——播放侧唯一的
 ''' 代价是 ring 满时 drop-oldest（内核行为，见 FFF.Player.AudioTap.h）。
 '''
@@ -41,13 +41,11 @@ Friend NotInheritable Class Ai字幕管道
 
     Private ReadOnly 句柄提供器 As Func(Of 播放器原生句柄)
     Private ReadOnly 状态机 As Ai字幕状态机
-    Private ReadOnly 日志 As Action(Of String)
 
     Private ReadOnly 锁 As New Object()
     Private _进程 As Process = Nothing
     Private _pump线程 As Thread = Nothing
     Private _result线程 As Thread = Nothing
-    Private _stderr线程 As Thread = Nothing
     ' 结果线程代次：每停一次/每启一次 worker 就 +1。旧结果线程的收尾（Finally 里
     ' 置"worker 已退出"）只允许在代次未变时生效——重启时旧线程可能在进程退场后
     ' 很久才 unwind，迟到的置位会把新 worker 的每一条结果全部丢掉，字幕从此永久
@@ -56,15 +54,9 @@ Friend NotInheritable Class Ai字幕管道
     Private _停止事件 As New ManualResetEventSlim(False)
     Private _已释放 As Boolean = False
 
-    ' worker 最新诊断（信息图层展示用；纯内存，无线程安全问题）。
-    Private ReadOnly 诊断锁 As New Object()
-    Private _诊断文本 As String = String.Empty
-    Private _统计文本 As String = String.Empty
 
     ' 语言闸门丢弃计数：只有 result 线程读写，不需要锁。
     ' 限流是为了"整片语言都不符"时别每 5s 刷一行日志（2MB 上限撑不住长期挂机）。
-    Private _语言不符丢弃 As Integer = 0
-    Private _上次语言日志 As Long = 0L
 
     ' worker warning（模型不认音频端点、设备回落）的用户可见通道：result 线程
     ' 触发，按文案去重后交宿主提示（信息图层）。每条不同的 warning 首见必显——
@@ -76,11 +68,9 @@ Friend NotInheritable Class Ai字幕管道
     Private _上次警告计时 As Long = 0L
 
     Public Sub New(句柄提供器 As Func(Of 播放器原生句柄), 状态机 As Ai字幕状态机,
-                   Optional 日志 As Action(Of String) = Nothing,
                    Optional 提示 As Action(Of String) = Nothing)
         Me.句柄提供器 =句柄提供器
         Me.状态机 = 状态机
-        Me.日志 = 日志
         Me._提示 = 提示
     End Sub
 
@@ -89,24 +79,6 @@ Friend NotInheritable Class Ai字幕管道
         Get
             SyncLock 锁
                 Return _进程 IsNot Nothing AndAlso Not _进程.HasExited
-            End SyncLock
-        End Get
-    End Property
-
-    ''' <summary>worker 最新状态行（loading/ready/error）。</summary>
-    Public ReadOnly Property 诊断文本 As String
-        Get
-            SyncLock 诊断锁
-                Return _诊断文本
-            End SyncLock
-        End Get
-    End Property
-
-    ''' <summary>worker 最新统计行（rtf/windows/dropped）。</summary>
-    Public ReadOnly Property 统计文本 As String
-        Get
-            SyncLock 诊断锁
-                Return _统计文本
             End SyncLock
         End Get
     End Property
@@ -132,7 +104,6 @@ Friend NotInheritable Class Ai字幕管道
         If _已释放 Then Return False
         If 配置 Is Nothing Then Return False
         If String.IsNullOrWhiteSpace(配置.Worker脚本) OrElse Not IO.File.Exists(配置.Worker脚本) Then
-            记录($"AI 字幕：worker 脚本不存在（{配置.Worker脚本}）")
             Return False
         End If
         Dim 窗口秒 = If(窗口覆盖 > 0, 窗口覆盖, 配置.窗口秒)
@@ -204,24 +175,17 @@ Friend NotInheritable Class Ai字幕管道
             ' 双语空串也显式传：worker 日志里能直接看出这一路是关着还是开着。
             启动信息.ArgumentList.Add("--bilingual")
             启动信息.ArgumentList.Add(Ai字幕双语.传参值(双语))
-            记录($"AI 字幕：模型 {档说明}（{模型目录}）")
-            记录($"AI 字幕：推理后端 {Ai字幕推理档.后端显示名(推理档, 配置.引擎)}（--device {推理档}，" &
-                 $"线程 {(If(线程数 > 0, 线程数.ToString(Globalization.CultureInfo.InvariantCulture), "自动"))}）")
             If Ai字幕双语.已启用(双语) AndAlso
                Not String.Equals(配置.引擎, Ai字幕包.引擎Llama, StringComparison.OrdinalIgnoreCase) Then
                 ' 双语靠 llama 的 /completion 续写，ONNX 那条腿没有文本生成能力。
                 ' 提前说清楚：否则用户要等到一行译文都不出现才发现"这个包不支持"。
-                记录($"AI 字幕：{配置.引擎} 引擎没有文本生成能力，双语已降级为单语")
             End If
             If Not Ai字幕推理档.当前worker可用(推理档, 配置.引擎) Then
                 ' worker 不认这个后端（例如 GGUF 包收到 dml），它会按 auto 处理。
                 ' 这句必须提前说：否则用户会以为选了 DirectML 就在 DirectML 上跑。
-                记录($"AI 字幕：{配置.引擎} 引擎不认后端 {推理档}，会被按 auto 处理")
             End If
             ' 「（提示，不筛除）」是旧文案：worker 已不接受语言提示，且闸门开不开由
             ' 设置决定、不由这句决定。写"提示"等于告诉用户有个不存在的提示通道。
-            记录($"AI 字幕：字幕语言 {Ai字幕语言.显示名(语言)}" &
-                 If(设置.实例对象.Ai字幕仅所选语言, "（开闸门，不符的窗不上屏）", "（不筛选）"))
             ' OpenVINO 的匿名遥测默认收集；worker 是隐藏窗口、无 TTY，不能指望它弹
             ' consent 对话框。仅在 consent 文件不存在时写 "0"（拒绝），已有 "1"
             ' （用户明确同意）不覆盖——这既避免静默上报，也不篡改用户选择。
@@ -231,7 +195,6 @@ Friend NotInheritable Class Ai字幕管道
             Try
                 _进程 = Process.Start(启动信息)
             Catch ex As Exception
-                记录($"AI 字幕：worker 启动失败 {ex.Message}")
                 _进程 = Nothing
                 Return False
             End Try
@@ -243,11 +206,10 @@ Friend NotInheritable Class Ai字幕管道
             _pump线程 = New Thread(AddressOf Pump循环) With {.IsBackground = True, .Name = "AI字幕-取数"}
             Dim 代 As Integer = Interlocked.Increment(_结果线程代)
             _result线程 = New Thread(Sub() Result循环(代)) With {.IsBackground = True, .Name = "AI字幕-结果"}
-            _stderr线程 = New Thread(AddressOf Stderr循环) With {.IsBackground = True, .Name = "AI字幕-诊断"}
+            Dim 标准错误线程 = New Thread(AddressOf 排空标准错误) With {.IsBackground = True, .Name = "AI字幕-诊断"}
             _pump线程.Start()
             _result线程.Start()
-            _stderr线程.Start()
-            记录("AI 字幕：worker 已启动")
+            标准错误线程.Start()
             Return True
         End SyncLock
     End Function
@@ -273,7 +235,6 @@ Friend NotInheritable Class Ai字幕管道
                 ' 关 stdin：worker 的读帧循环见到 EOF 即优雅退出。
                 进程本地.StandardInput.Close()
                 If Not 进程本地.WaitForExit(停止等待毫秒) Then
-                    记录($"AI 字幕：worker 未在 {停止等待毫秒}ms 内退出，Kill")
                     进程本地.Kill(entireProcessTree:=True)
                     ' Kill 是异步的：再等一小会儿让进程树真的退干净。重启路径紧接着
                     ' 就会拉新 worker（llama 引擎会绑固定端口），不看它离场可能撞端口。
@@ -281,10 +242,8 @@ Friend NotInheritable Class Ai字幕管道
                 End If
             End If
         Catch ex As Exception
-            记录($"AI 字幕：停止时异常 {ex.Message}")
         End Try
         状态机?.通知Worker已退出()
-        记录("AI 字幕：worker 已停止")
     End Sub
 
     ' ---------------- pump 线程：内核环 → worker stdin ----------------
@@ -317,7 +276,6 @@ Friend NotInheritable Class Ai字幕管道
                                 Continue While
                             End If
                             If Not 写帧(块, 缓冲) Then
-                                记录("AI 字幕：取数线程因写帧失败退出")
                                 Return
                             End If
                         Case 原生播放器结果.缓冲区不足
@@ -338,15 +296,12 @@ Friend NotInheritable Class Ai字幕管道
                     Dim 现在 As Long = Stopwatch.GetTimestamp()
                     If 异常计数 = 1 OrElse
                        (现在 - 上次异常计时) / CDbl(Stopwatch.Frequency) >= 30.0 Then
-                        记录($"AI 字幕：取数轮次异常（累计 {异常计数} 次）{ex.GetType().Name} {ex.Message}")
                         上次异常计时 = 现在
                     End If
                     If _停止事件.Wait(50) Then Return
                 End Try
             End While
-            记录("AI 字幕：取数线程收到停止信号，正常退出")
         Catch ex As Exception
-            记录($"AI 字幕：取数线程退出 {ex.GetType().Name} {ex.Message}")
         End Try
     End Sub
 
@@ -388,7 +343,6 @@ Friend NotInheritable Class Ai字幕管道
             Return True
         Catch ex As Exception
             ' worker 消失/管道断：安静退出取数线程，播放不受影响。
-            记录($"AI 字幕：写帧失败 {ex.GetType().Name} {ex.Message}")
             Return False
         End Try
     End Function
@@ -409,9 +363,7 @@ Friend NotInheritable Class Ai字幕管道
                 If 行.Length = 0 Then Continue While
                 处理结果行(行)
             End While
-            记录("AI 字幕：worker 输出流结束")
         Catch ex As Exception
-            记录($"AI 字幕：结果线程退出 {ex.GetType().Name} {ex.Message}")
         Finally
             ' 代次 gate：只有"当前这一代"结果线程的退场才算 worker 真的死了。
             ' 重启时旧线程可能在新线程已开始收结果之后才 unwinding（进程退场≠
@@ -435,11 +387,8 @@ Friend NotInheritable Class Ai字幕管道
                             ' 只有用户显式要求"只显示所选语言"时才丢——默认那句提示压不住
                             ' 模型，但丢结果会让整片空白，那是更坏的默认。
                             Dim 匹配 = 取布尔(根, "matched", True)
-                            If Ai字幕语言.应丢弃(语言值, 匹配, 设置.实例对象.Ai字幕语言,
-                                                  设置.实例对象.Ai字幕仅所选语言) Then
-                                _语言不符丢弃 += 1
-                                记语言不符(语言值)
-                            Else
+                            If Not Ai字幕语言.应丢弃(语言值, 匹配, 设置.实例对象.Ai字幕语言,
+                                                      设置.实例对象.Ai字幕仅所选语言) Then
                                 ' text2 是双语的下行；旧 worker 没这个字段，取不到就是空串，
                                 ' 呈现器按单行画 —— 协议向后兼容，不需要版本判断。
                                 Dim 条目 As New Ai字幕状态机.Ai字幕条目(
@@ -454,36 +403,24 @@ Friend NotInheritable Class Ai字幕管道
                         Case "status"
                             Dim 状态 = 取字符串(根, "state")
                             Dim 详情 = 取字符串(根, "detail")
-                            SyncLock 诊断锁
-                                _诊断文本 = If(String.IsNullOrEmpty(详情), 状态, $"{状态}: {详情}")
-                            End SyncLock
-                            记录($"AI 字幕：worker 状态 {_诊断文本}")
-                            ' warning（模型不认音频端点、设备回落）不是死亡，但必须
+                            ' 设备告警由宿主显示。
                             ' 让人看见：只进日志的话，用户面对的是空白字幕+无解释。
-                            If 状态 = "warning" Then 记警告(详情)
+                            If 状态 = "warning" OrElse 状态 = "error" Then 记警告(详情)
                             ' 只有 worker 自述"我不干了"才当死亡。缺省按致命处理（旧 worker 没这个字段），
                             ' 但必须让"这一窗推理失败、我继续重试"（fatal=false）走开——否则本地 HTTP
                             ' 抖一次就把字幕永久关掉，而 worker 其实活得好好的。
                             If 状态 = "error" AndAlso 取布尔(根, "fatal", True) Then
                                 状态机?.通知Worker已退出()
                             End If
-                        Case "stats"
-                            SyncLock 诊断锁
-                                _统计文本 = $"rtf={取双精度(根, "rtf"):0.000} 窗口={取Long(根, "windows")} 丢弃={取Long(根, "dropped")}" &
-                                            If(_语言不符丢弃 > 0, $" 语言不符={_语言不符丢弃}", "")
-                            End SyncLock
                     End Select
                 End If
             End Using
         Catch ex As Exception
             ' 单行解析失败不影响后续行。
-            记录($"AI 字幕：结果行解析失败 {ex.Message}")
         End Try
     End Sub
 
-    ' ---------------- stderr 线程：worker 诊断 ----------------
-
-    Private Sub Stderr循环()
+    Private Sub 排空标准错误()
         Try
             Dim 进程本地 As Process = Nothing
             SyncLock 锁
@@ -494,22 +431,9 @@ Friend NotInheritable Class Ai字幕管道
             While Not _停止事件.IsSet
                 Dim 行 = 读取器.ReadLine()
                 If 行 Is Nothing Then Exit While
-                If 行.Length > 0 Then 记录($"AI 字幕(worker)：{行}")
             End While
         Catch
-            ' 诊断流无关紧要。
         End Try
-    End Sub
-
-    ''' <summary>语言闸门丢弃一条：首条必记，之后每 30s 汇总一行。
-    ''' 整片语言都不符时（例如选了中文看英语片），这是用户唯一能看到的线索。</summary>
-    Private Sub 记语言不符(实际语言 As String)
-        Dim 现在 As Long = Stopwatch.GetTimestamp()
-        If _语言不符丢弃 > 1 AndAlso
-           (现在 - _上次语言日志) / CDbl(Stopwatch.Frequency) < 30.0 Then Return
-        _上次语言日志 = 现在
-        记录($"AI 字幕：语言不符已丢弃 {_语言不符丢弃} 条（实际 {If(实际语言, "未知")}，" &
-             $"只显示 {Ai字幕语言.短名(设置.实例对象.Ai字幕语言)}）")
     End Sub
 
     ' ---------------- worker warning → 用户可见 ----------------
@@ -626,14 +550,6 @@ Friend NotInheritable Class Ai字幕管道
         End Try
     End Sub
 
-
-    Private Sub 记录(消息 As String)
-        Try
-            日志?.Invoke(消息)
-        Catch
-            ' 日志本身失败也必须安静。
-        End Try
-    End Sub
 
     Public Sub Dispose() Implements IDisposable.Dispose
         If _已释放 Then Return

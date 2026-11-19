@@ -3,8 +3,6 @@
 #include "Audio/WasapiCapture.h"
 #include "Ffmpeg/VideoMuxer.h"
 
-#include <filesystem>
-
 extern "C" {
 #include <libavutil/avutil.h>
 }
@@ -117,7 +115,6 @@ RecorderSession::RecorderSession(const FFFSessionConfiguration& configuration)
       followDefaultSystemAudioDevice_(configuration.followDefaultSystemAudioDevice != 0),
       qualityMode_(configuration.qualityMode),
       customVideoParameters_(configuration.customVideoParametersUtf8 == nullptr ? "" : configuration.customVideoParametersUtf8),
-      diagnosticLogPath_(configuration.diagnosticLogPathUtf8 == nullptr ? "" : configuration.diagnosticLogPathUtf8),
       captureBackend_(configuration.captureBackendUtf8 == nullptr ? "" : configuration.captureBackendUtf8),
       sourceDescription_(configuration.sourceDescriptionUtf8 == nullptr ? "" : configuration.sourceDescriptionUtf8),
       sourceFormat_(configuration.sourceFormatUtf8 == nullptr ? "" : configuration.sourceFormatUtf8),
@@ -125,7 +122,7 @@ RecorderSession::RecorderSession(const FFFSessionConfiguration& configuration)
       diagnosticCallbackContext_(configuration.diagnosticCallbackContext),
       state_(FFFSessionState::Created), submittedFrames_(0), droppedFrames_(0), repeatedFrames_(0),
       lastVideoQpc_(0), lastErrorCode_(0), lastEncodeMicroseconds_(0), peakEncodeMicroseconds_(0),
-      trailerWritten_(false), completedVideoBytes_(0), completedAudioBytes_(0), diagnosticFirstEntry_(true),
+      trailerWritten_(false), completedVideoBytes_(0), completedAudioBytes_(0),
       videoMuxer_(std::make_unique<VideoMuxer>()) {
     if (device_ != nullptr) {
         device_->AddRef();
@@ -156,21 +153,6 @@ FFFResult RecorderSession::Start() noexcept {
         frameRateNumerator_ == 0 || frameRateDenominator_ == 0) {
         SetError(FFFResult::InvalidArgument, "The recording configuration is incomplete.");
         return FFFResult::InvalidArgument;
-    }
-    if (!diagnosticLogPath_.empty()) {
-        try {
-            const std::u8string utf8Path(reinterpret_cast<const char8_t*>(diagnosticLogPath_.data()),
-                reinterpret_cast<const char8_t*>(diagnosticLogPath_.data() + diagnosticLogPath_.size()));
-            diagnosticLog_.open(std::filesystem::path(utf8Path), std::ios::out | std::ios::trunc);
-            if (diagnosticLog_) diagnosticLog_ << "[\n";
-        } catch (...) {
-            diagnosticLog_.setstate(std::ios::failbit);
-        }
-        if (!diagnosticLog_) {
-            SetError(FFFResult::NativeFailure, "Could not create the recording diagnostic log.");
-            state_.store(FFFSessionState::Failed);
-            return FFFResult::NativeFailure;
-        }
     }
     WriteDiagnostic("start", "\"windows\":\"" + DescribeWindowsVersion() +
         "\",\"ffmpeg\":\"" + EscapeDiagnosticJson(av_version_info()) + "\"," + DescribeGraphicsDevice(device_) +
@@ -524,10 +506,6 @@ FFFResult RecorderSession::Stop() noexcept {
         ",\"repeatedFrames\":" + std::to_string(repeatedFrames_.load()) +
         ",\"peakEncodeMicroseconds\":" + std::to_string(peakEncodeMicroseconds_.load()) +
         ",\"trailerWritten\":true");
-    if (diagnosticLog_.is_open()) {
-        diagnosticLog_ << "\n]\n";
-        diagnosticLog_.close();
-    }
     return FFFResult::Success;
 }
 
@@ -544,10 +522,6 @@ FFFResult RecorderSession::Abort() noexcept {
     std::scoped_lock lock(mutex_);
     videoMuxer_->Abort();
     WriteDiagnostic("abort", "\"trailerWritten\":false");
-    if (diagnosticLog_.is_open()) {
-        diagnosticLog_ << "\n]\n";
-        diagnosticLog_.close();
-    }
     return FFFResult::Success;
 }
 
@@ -648,20 +622,6 @@ void RecorderSession::SetError(const FFFResult result, std::string message) noex
 // 向 JSON 数组追加一条诊断事件。每条记录包含原始 QPC，detail 只能是已经转义的 JSON 字段片段；
 // 写入失败不会递归覆盖主录制错误，避免日志磁盘故障掩盖编码器的首要失败原因。
 void RecorderSession::WriteDiagnostic(const char* eventName, const std::string& detail) noexcept {
-    LARGE_INTEGER now{};
-    QueryPerformanceCounter(&now);
-    try {
-        if (diagnosticLog_.is_open()) {
-            std::scoped_lock lock(diagnosticMutex_);
-            if (!diagnosticFirstEntry_) diagnosticLog_ << ",\n";
-            diagnosticFirstEntry_ = false;
-            diagnosticLog_ << "  {\"event\":\"" << eventName << "\",\"qpc\":" << now.QuadPart;
-            if (!detail.empty()) diagnosticLog_ << ',' << detail;
-            diagnosticLog_ << "}\n";
-            diagnosticLog_.flush();
-        }
-    } catch (...) {
-    }
     if (diagnosticCallback_ != nullptr) {
         try {
             const auto callbackDetail = detail.empty() ? std::string("{}") : "{" + detail + "}";

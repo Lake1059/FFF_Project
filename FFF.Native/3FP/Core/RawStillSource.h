@@ -63,9 +63,6 @@ private:
 
 // Defaults used when the host never calls FFF3FP_SetRawProcessingOptions.
 FFF3FPRawOptions DefaultRawOptions() noexcept;
-// Diagnostic sink. It is silent unless FFF_RAW_TRACE=1 is set in the
-// environment, so shipping builds never write a trace file.
-void RawTrace(const char* text) noexcept;
 // Same rules the setter applies: supported size/version, enum ranges and the
 // M1 colour/tone-curve subset.
 bool ValidateRawOptions(const FFF3FPRawOptions& options) noexcept;

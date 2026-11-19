@@ -132,49 +132,42 @@ function Copy-Stage {
 
 $includeDir = Join-Path $RepoPath "code\include"
 $oarInclude = Join-Path $RepoPath "code\dep_external\src\oar\include"
+. (Join-Path $PSScriptRoot "Resolve-NativeDependencies.ps1")
+
+# 从内核工程读取链接清单，按构建配置定位 CMake 及其依赖的产物。
+$configurationLibraries = @(Get-ChildItem -LiteralPath $BuildDir -Recurse -File -Filter *.lib |
+    Where-Object { $_.Directory.Name -eq $Configuration })
+$requiredLibraries = @(Get-LibiamfRequiredFiles -ProjectRoot $ProjectRoot -Configuration $Configuration |
+    Where-Object { $_ -like '*.lib' })
+$artifacts = foreach ($relative in $requiredLibraries) {
+    $name = Split-Path -Leaf $relative
+    $hits = @($configurationLibraries | Where-Object { $_.Name -eq $name })
+    if ($hits.Count -ne 1) {
+        throw "Expected one $Configuration library for $name, found $($hits.Count): $($hits.FullName -join ', ')"
+    }
+    $source = $hits[0].FullName
+    $destination = Join-Path $StageRoot $relative
+    if ($Configuration -eq 'Debug') {
+        # 链接器可从静态库所在目录读取同一次构建生成的 PDB。
+        $pdb = [IO.Path]::ChangeExtension($source, '.pdb')
+        if (-not (Test-Path -LiteralPath $pdb -PathType Leaf)) { throw "Missing compiler PDB for ${name}: $pdb" }
+        @{ Source = $pdb; Destination = [IO.Path]::ChangeExtension($destination, '.pdb') }
+    }
+    @{ Source = $source; Destination = $destination }
+}
+
 Copy-Stage -SourceDir $includeDir -TargetDir (Join-Path $StageRoot "include") `
     -Names @("IAMF_decoder.h", "IAMF_defines.h", "vlogging_tool_sr.h")
 Copy-Stage -SourceDir $oarInclude -TargetDir (Join-Path $StageRoot "oar\include") `
     -Names @("oar.h", "oar_base.h", "oar_metadata.h", "animation.h")
-$libraryDirectory = Join-Path $StageRoot "lib\x64"
-if ($Configuration -eq 'Debug') { $libraryDirectory = Join-Path $libraryDirectory 'debug' }
-New-Item -ItemType Directory -Force -Path $libraryDirectory | Out-Null
-
-# 双耳 + 编解码传递依赖。CMake 把 dep_external 下的每个包各自输出到
-# <build>\dep_external\src\<pkg>\Release 还是 <build>\Release 取决于 libiamf 那一版的
-# CMakeLists，所以按配置查找唯一命中项，避免混入另一配置或陈旧的同名库；
-# 找不到就响亮报错——绝大多数情况就是忘了 -DIAMF_ENABLE_BINAURALIZER=ON。
-$configurationLibraries = @(Get-ChildItem -LiteralPath $BuildDir -Recurse -File -Filter *.lib |
-    Where-Object { $_.Directory.Name -eq $Configuration })
-foreach ($spec in @(
-    @{ Name = "iamf.lib";      Why = "IAMF 解码器" },
-    @{ Name = "oar.lib";       Why = "OAR 元数据/布局" },
-    @{ Name = "obr.lib";       Why = "双耳 HRTF 实现（BedBinauralRenderer 的直接依赖）" },
-    @{ Name = "obr_capi.lib";  Why = "obr 的 C API 封装" },
-    @{ Name = "pffft.lib";     Why = "obr 的 FFT" },
-    @{ Name = "FLAC.lib";      Why = "iamf.lib 的 flac_multistream_decoder.obj" },
-    @{ Name = "opus.lib";      Why = "iamf.lib 的 opus_multistream2_decoder.obj" },
-    @{ Name = "fdk-aac.lib";   Why = "iamf.lib 的 aac_multistream_decoder.obj" })) {
-    $hits = @($configurationLibraries | Where-Object { $_.Name -eq $spec.Name })
-    if ($hits.Count -ne 1) {
-        throw "需要唯一的 $Configuration/$($spec.Name)（$($spec.Why)），找到 $($hits.Count) 个：$($hits.FullName -join ', ')"
-    }
-    $hit = $hits[0]
-    Copy-Item -LiteralPath $hit.FullName -Destination $libraryDirectory -Force
-    Write-Host ("  staged {0} <- {1}" -f $spec.Name, $hit.FullName.Substring($BuildDir.Length + 1))
+foreach ($directory in @($artifacts | ForEach-Object { Split-Path -Parent $_.Destination } | Sort-Object -Unique)) {
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
-# OBR 的静态依赖不能只复制 obr.lib；从工程读取所需 Abseil 名称，避免清单漂移。
-. (Join-Path $PSScriptRoot "Resolve-NativeDependencies.ps1")
-$abslDirectory = Join-Path $libraryDirectory "absl"
-New-Item -ItemType Directory -Force -Path $abslDirectory | Out-Null
-foreach ($relative in @(Get-LibiamfRequiredFiles -ProjectRoot $ProjectRoot -Configuration $Configuration | Where-Object { $_ -like '*\absl\*' })) {
-    $name = Split-Path -Leaf $relative
-    $hits = @($configurationLibraries | Where-Object { $_.Name -eq $name })
-    if ($hits.Count -ne 1) { throw "Expected one $Configuration library for $name, found $($hits.Count)." }
-    Copy-Item -LiteralPath $hits[0].FullName -Destination $abslDirectory -Force
+foreach ($artifact in $artifacts) {
+    Copy-Item -LiteralPath $artifact.Source -Destination $artifact.Destination -Force
 }
 Copy-Item -LiteralPath (Join-Path $RepoPath "LICENSE") -Destination (Join-Path $StageRoot "LICENSE.libiamf.txt") -Force
-Assert-LibiamfReady -ProjectRoot $ProjectRoot -Configuration $Configuration
+Assert-LibiamfReady -ProjectRoot $ProjectRoot -Configuration $Configuration -IncludeDebugSymbols
 
 Write-Host ""
 Write-Host "已落地 $StageRoot"

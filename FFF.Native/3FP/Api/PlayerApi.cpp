@@ -10,7 +10,6 @@
 #include "3FP/Subtitle/SubtitleProbe.h"
 
 #include <cmath>
-#include <atomic>
 #include <cstring>
 #include <cstddef>
 
@@ -40,9 +39,6 @@ namespace {
 using PlayerMediaText::CopyUtf8;
 constexpr std::uint32_t PlayerApiVersion = 20;
 
-// Process-wide native log sink, installed through FFF3FP_SetLogCallback.
-std::atomic<FFF3FPLogCallback> g_logSink{nullptr};
-std::atomic<void*> g_logContext{nullptr};
 
 }
 
@@ -75,22 +71,7 @@ FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept {
     return FFFResult::NotSupported;
 }
 
-// ---- Process-wide native log sink (public surface: FFF3FP_SetLogCallback) ----
-void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context) noexcept {
-    g_logContext.store(context, std::memory_order_release);
-    g_logSink.store(callback, std::memory_order_release);
-}
-
-// Internal sink invoker for kernel log lines. Deliberately a plain C++ symbol and not
-// FFF3FP_API: it stays out of the export table (the surface the ABI checks walk), and
-// in-module callers declare it locally (PlayerSession::Fail, PlayerVideoRenderer).
-void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept {
-    if (utf8Line == nullptr) return;
-    const auto sink = g_logSink.load(std::memory_order_acquire);
-    if (sink == nullptr) return;
-    const auto ctx = g_logContext.load(std::memory_order_acquire);
-    sink(ctx, utf8Line);
-}
+void FFF3FP_SetLogCallback(FFF3FPLogCallback, void*) noexcept {}
 
 FFFResult FFF3FP_EvaluateHdrProcessing(FFF3FPHdrProcessingProbe* probe) noexcept {
     return probe == nullptr ? FFFResult::InvalidArgument : HdrProcessor::EvaluateProbe(*probe);

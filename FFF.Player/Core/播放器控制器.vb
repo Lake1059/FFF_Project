@@ -288,14 +288,12 @@ Public NotInheritable Class 播放器控制器
         Catch ex As ObjectDisposedException
         Catch ex As 播放器异常
         Catch ex As Exception
-            Debug.WriteLine("SMTC：读取 SDR 缩略图帧失败（回落原帧）：" & ex.GetType().Name)
         End Try
         Try
             Return 目标.读取原始帧()
         Catch ex As ObjectDisposedException
         Catch ex As 播放器异常
         Catch ex As Exception
-            Debug.WriteLine("SMTC：读取原始缩略图帧失败（忽略）：" & ex.GetType().Name)
         End Try
         Return Nothing
     End Function
@@ -343,7 +341,6 @@ Public NotInheritable Class 播放器控制器
             Return 目标.唤醒色彩变换通路()
         Catch ex As ObjectDisposedException
         Catch ex As Exception
-            Debug.WriteLine("扩展模块：唤醒通路异常（已忽略）：" & ex.GetType().Name)
         End Try
         Return False
     End Function
@@ -1079,7 +1076,6 @@ Public NotInheritable Class 播放器控制器
         Catch ex As ObjectDisposedException
         Catch ex As 播放器异常
         Catch ex As Exception
-            Debug.WriteLine("播放进度：采集失败（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
 
@@ -1089,7 +1085,6 @@ Public NotInheritable Class 播放器控制器
         Try
             播放进度存储.记录(当前文件路径, 位置, 总时长, 立即落盘:=True)
         Catch ex As Exception
-            Debug.WriteLine("播放进度：跳转记录失败（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
 
@@ -1104,7 +1099,6 @@ Public NotInheritable Class 播放器控制器
         Try
             Return 播放进度存储.查询(路径, 实际总时长.Ticks)
         Catch ex As Exception
-            Debug.WriteLine("播放进度：读取失败（已忽略）：" & ex.GetType().Name)
             Return TimeSpan.Zero
         End Try
     End Function
@@ -1474,7 +1468,6 @@ Public NotInheritable Class 播放器控制器
             目标.设置音频延迟(TimeSpan.FromTicks(补偿))
             上次蓝牙补偿100纳秒 = 补偿
         Catch ex As Exception
-            Debug.WriteLine("蓝牙音频延迟：下发失败（保留上次值）：" & ex.Message)
         End Try
     End Sub
 

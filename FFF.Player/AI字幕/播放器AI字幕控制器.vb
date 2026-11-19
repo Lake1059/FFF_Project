@@ -1,7 +1,6 @@
 Option Strict On
 Option Explicit On
 
-Imports System.IO
 Imports System.Runtime.InteropServices
 
 ''' <summary>
@@ -46,12 +45,6 @@ Friend NotInheritable Class 播放器AI字幕控制器
     Private 停用 As Boolean
     Private 已报告跳过 As Boolean
     Private 已释放 As Boolean
-    ' 已上屏的文本（仅变化时落一行日志：端到端验收的机器可验证据，
-    ' 也是"字幕确实走到了显示路径"的唯一自动探针）。
-    Private 已上屏文本 As String = String.Empty
-    ' 内核侧"字幕图层真的被呈现了几次"的采样节流（每 10 秒一次）。宿主侧日志只能证明
-    ' 文本交给了绘制事件；这一条是像素真到屏幕的证据（纯音频无视频轨时尤其关键）。
-    Private 上次图层状态时刻 As DateTime = DateTime.MinValue
     ' 当前管道是用哪套设备选项起起来的。播放中改设置时，管道会因为"已在运行"直接
     ' 返回成功，必须先比对这两项决定是否重启（否则改了后端照样跑旧的）。
     Private 已启动后端 As String = Ai字幕推理档.后端自动
@@ -65,14 +58,6 @@ Friend NotInheritable Class 播放器AI字幕控制器
     Private 已启动线程 As Integer = -1
     ' 双语也是启动期参数：worker 只在进程启动时拿一次 --bilingual，中途改必须重启。
     Private 已启动双语 As String = Ai字幕双语.关闭
-    ' 日志滚动：-1 = 还没量过现有文件长度（首次写时取实际大小，这样跨进程追加也准）。
-    Private Const 日志上限字节 As Long = 2L * 1024L * 1024L
-    Private Shared 日志字节 As Long = -1L
-    ' 四个线程都会记日志（pump / result / stderr / UI）。File.AppendAllText 用
-    ' FileShare.Read 打开，并发写必抛 IOException 并被下面的 Catch 吞掉——也就是
-    ' 丢行，而且专挑 llama-server 启动那种"一次吐几十行"的时刻丢。
-    Private Shared ReadOnly 日志锁 As New Object()
-
     Public Sub New(AI菜单 As LakeUI.ModernContextMenu,
                    句柄提供器值 As Func(Of 播放器原生句柄),
                    媒体信息提供器值 As Func(Of 媒体信息),
@@ -111,11 +96,6 @@ Friend NotInheritable Class 播放器AI字幕控制器
         Dim 新包 = Ai字幕包.载入(设置.实例对象.Ai字幕包目录, 错误)
         包 = 新包
         If 新包 Is Nothing Then
-            ' 没装包是完全正常的默认状态，不提示、只记一次日志。
-            If Not String.IsNullOrWhiteSpace(设置.实例对象.Ai字幕包目录) AndAlso Not 已报告跳过 Then
-                已报告跳过 = True
-                记日志($"AI 字幕：扩展包不可用（{错误}）")
-            End If
             停止()
             字幕菜单.刷新(Nothing)
             同步宿主()
@@ -180,49 +160,8 @@ Friend NotInheritable Class 播放器AI字幕控制器
     ''' 只在 PrecisionTimer 线程（字幕图层绘制事件）调用。</summary>
     Friend Function 取当前条目(播放位置 As TimeSpan, 时间轴代次 As ULong) As (主 As String, 副 As String)
         If 已释放 OrElse Not 启用 Then Return (String.Empty, String.Empty)
-        Dim 两行 = 状态机.取当前两行(播放位置, 时间轴代次)
-        ' 日志签名把两行拼起来算：只比主行的话，英文行变化（主行不变）不会留痕，
-        ' 排查"译文有没有跟上"时就成瞎的。
-        Dim 签名 = 两行.主 & vbLf & 两行.副
-        If Not String.Equals(签名, 已上屏文本, StringComparison.Ordinal) Then
-            已上屏文本 = 签名
-            If Not String.IsNullOrEmpty(两行.主) Then
-                记日志($"字幕[代次 {时间轴代次}] {两行.主}" &
-                       If(String.IsNullOrEmpty(两行.副), "", $" ‖ {两行.副}"))
-            End If
-        End If
-        ' 诊断采样与"文本变化"解耦：整段只有一句话时文本不变，采样却必须继续，
-        ' 否则丢块/呈现计数会整段空白（旧实现挂在文本变化分支上，正是这个毛病）。
-        采样诊断()
-        Return 两行
+        Return 状态机.取当前两行(播放位置, 时间轴代次)
     End Function
-
-    ''' <summary>每 5 秒读一次内核侧的字幕图层状态与音频 tap 计数，落一行日志。
-    ''' 失败静默：这只是验收探针，读不到不代表字幕没上屏。
-    '''
-    ''' 两层含义：图层计数证明"画了并且 present 了"；<c>已丢块数</c> 证明"取数端跟得上"。
-    ''' 后者是唯一能发现"推理慢到音频环溢出"的指标（CPU 臂 rtf 0.3 时尤其要看）。</summary>
-    Private Sub 采样诊断(Optional 强制 As Boolean = False)
-        Dim 现在 = DateTime.Now
-        If Not 强制 AndAlso (现在 - 上次图层状态时刻).TotalSeconds < 5.0R Then Return
-        上次图层状态时刻 = 现在
-        Try
-            Dim 句柄 = 句柄提供器()
-            If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return
-            Dim 值 As New 原生定时文字状态 With {
-                .大小 = CUInt(Marshal.SizeOf(Of 原生定时文字状态)()), .版本 = 20UI}
-            If 播放器原生接口.FFF3FP_GetTimedTextStatus(句柄, 值) <> 原生播放器结果.成功 Then Return
-            Dim 统计 As New 原生音频Tap统计
-            Dim 采集文本 = String.Empty
-            If 播放器原生接口.取音频Tap统计(句柄, 统计) = 原生播放器结果.成功 Then
-                采集文本 = $" 采集块={统计.已产块数} 丢块={统计.已丢块数} 积压={统计.缓冲字节数}B"
-            End If
-            记日志($"字幕图层状态 呈现帧数={值.图层呈现帧数} 已绘制序号={值.已绘制序号} " &
-                   $"命令数={值.命令数} 画布={值.画布宽度}x{值.画布高度}{采集文本}")
-        Catch
-            ' 探针失败必须安静。
-        End Try
-    End Sub
 
     ''' <summary>worker 是否在运行（诊断/测试用）。</summary>
     Friend ReadOnly Property Worker运行中 As Boolean
@@ -243,7 +182,6 @@ Friend NotInheritable Class 播放器AI字幕控制器
     Friend Sub 停止()
         ' 收尾前读一次内核侧的图层计数与采集计数：这是"字幕真的被呈现过、取数端
         ' 跟得上"的终值证据。必须在卸 tap 之前读，否则统计已被清零。
-        If 管道 IsNot Nothing Then 采样诊断(True)
         Dim 管道本地 = 管道
         管道 = Nothing
         If 管道本地 IsNot Nothing Then
@@ -262,7 +200,6 @@ Friend NotInheritable Class 播放器AI字幕控制器
             Dim 句柄 = 句柄提供器()
             If 句柄 IsNot Nothing AndAlso Not 句柄.IsInvalid Then
                 If 播放器原生接口.停用音频Tap(句柄) = 原生播放器结果.成功 Then
-                    记日志("AI 字幕：音频 tap 已卸载")
                 End If
             End If
         Catch
@@ -270,7 +207,6 @@ Friend NotInheritable Class 播放器AI字幕控制器
         End Try
         Try
             状态机.重置()
-            已上屏文本 = String.Empty
         Catch
         End Try
     End Sub
@@ -283,7 +219,6 @@ Friend NotInheritable Class 播放器AI字幕控制器
             If Not 播放器原生接口.支持音频Tap Then
                 If Not 已报告跳过 Then
                     已报告跳过 = True
-                    记日志("AI 字幕：当前内核没有音频 tap 导出（FFF3FP_EnableAudioTap 缺席），功能不可用")
                     操作提示("AI 字幕：当前内核不支持，功能已跳过")
                 End If
                 Return
@@ -298,23 +233,18 @@ Friend NotInheritable Class 播放器AI字幕控制器
             ' 有音轨才值得拉一个 1GB 模型起来（图片/无音轨视频直接跳过）。
             Dim 信息 = If(e IsNot Nothing, e.媒体信息, 媒体信息提供器())
             If 信息 Is Nothing OrElse Not 信息.流.Any(Function(x) x.类型 = "audio") Then
-                If Not 已报告跳过 Then
-                    已报告跳过 = True
-                    记日志("AI 字幕：当前媒体没有音轨，跳过")
-                End If
                 Return
             End If
 
             Dim 结果 = 播放器原生接口.启用音频Tap(句柄, 0)
             If 结果 <> 原生播放器结果.成功 Then
-                记日志($"AI 字幕：tap 安装失败（{结果}），本次不启动")
                 Return
             End If
 
             If 管道 Is Nothing Then
                 ' 提示通道随管道一起给：worker 的 warning（模型不认音频端点等）
                 ' 由 result 线程节流后经它上屏，只进日志的话用户面对的是无解释空白。
-                管道 = New Ai字幕管道(句柄提供器, 状态机, AddressOf 记日志, 操作提示)
+                管道 = New Ai字幕管道(句柄提供器, 状态机, 操作提示)
                 ' 首启提示：从起到首句字幕有一段明显空窗（权重首次搬进显存 + CUDA
                 ' graph 捕获 + 音频路径初始化）。实测（2026-10-25，CUDA0 / Q8_0）
                 ' 启动后前 1~2 个转写请求各需 57~60s，第 3 个起才降到 0.3~1.1s——
@@ -333,7 +263,7 @@ Friend NotInheritable Class 播放器AI字幕控制器
             If Not 管道.启动(包, 设置对象.Ai字幕窗口秒覆盖, 设置对象.Ai字幕步长秒覆盖,
                              后端, 语言, 新模型档, 设置对象.Ai字幕线程数, 新双语) Then
                 管道 = Nothing
-                操作提示("AI 字幕：worker 启动失败，详见日志")
+                操作提示("AI 字幕：识别进程启动失败")
             Else
                 已启动后端 = 后端
                 已启动语言 = 语言
@@ -342,47 +272,7 @@ Friend NotInheritable Class 播放器AI字幕控制器
                 已启动双语 = 新双语
             End If
         Catch ex As Exception
-            记日志($"AI 字幕：启动路径异常 {ex.GetType().Name} {ex.Message}")
-        End Try
-    End Sub
-
-    ''' <summary>诊断日志：落 <程序目录>\ai-subtitles.log（追加， best-effort，失败即丢）。
-    ''' 实验分支的排障主线；不进信息图层，避免刷屏。
-    ''' 有上限：到 2 MB 换成 .log.1（覆盖旧的 .1）。正常态一窗一行，长期挂机也不会
-    ''' 无限涨；只留一份历史，排障够用。</summary>
-    Private Shared Sub 记日志(消息 As String)
-        Try
-            Dim 行 = $"[{DateTime.Now:HH:mm:ss}] {消息}"
-            Debug.WriteLine(行)
-            SyncLock 日志锁
-                Dim 路径 = Path.Combine(程序目录, "ai-subtitles.log")
-                Dim 字节 = System.Text.Encoding.UTF8.GetByteCount(行) + 2
-                If 日志字节 < 0L Then
-                    Try
-                        日志字节 = If(File.Exists(路径), New FileInfo(路径).Length, 0L)
-                    Catch
-                        日志字节 = 0L
-                    End Try
-                End If
-                If 日志字节 + 字节 > 日志上限字节 Then
-                    滚动日志(路径)
-                    日志字节 = 0L
-                End If
-                File.AppendAllText(路径, 行 & vbCrLf, System.Text.Encoding.UTF8)
-                日志字节 += 字节
-            End SyncLock
-        Catch
-            ' 日志失败必须安静。
-        End Try
-    End Sub
-
-    ''' <summary>只留一份历史：删掉旧的 .1，把当前文件改名过去。</summary>
-    Private Shared Sub 滚动日志(路径 As String)
-        Try
-            Dim 旧 = 路径 & ".1"
-            If File.Exists(旧) Then File.Delete(旧)
-            If File.Exists(路径) Then File.Move(路径, 旧)
-        Catch
+            操作提示("AI 字幕：启动失败。" & ex.Message)
         End Try
     End Sub
 

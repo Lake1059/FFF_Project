@@ -90,14 +90,11 @@ Public NotInheritable Class 播放进度存储
                 Try
                     Directory.CreateDirectory(目录)
                 Catch ex As Exception
-                    Debug.WriteLine("播放进度：预热建目录被拦（仍按 LocalAppData 路径）：" & ex.GetType().Name)
                 End Try
                 Return 目录
             End If
         Catch ex As Exception
-            Debug.WriteLine("播放进度：%LOCALAPPDATA% 不可用，回落到 exe 目录：" & ex.GetType().Name)
         End Try
-        Debug.WriteLine("播放进度：已回落到 exe 目录（" & 程序目录 & "），进度记忆可能不持久。")
         Return 程序目录
     End Function
 
@@ -241,7 +238,6 @@ Public NotInheritable Class 播放进度存储
                 Try
                     If File.Exists(路径) Then File.Delete(路径)
                 Catch ex As Exception
-                    Debug.WriteLine("播放进度：删除空文件失败（已忽略）：" & ex.GetType().Name)
                 End Try
                 _脏 = False
                 _上次写盘 = Environment.TickCount64
@@ -296,7 +292,6 @@ Public NotInheritable Class 播放进度存储
                 Catch
                 End Try
                 ' 进度不是播放的前提：不可写目录 / 磁盘满 / 文件被占用一律静默。
-                Debug.WriteLine("播放进度：写入失败（已忽略）：" & ex.GetType().Name)
             End Try
         End SyncLock
     End Sub
@@ -349,7 +344,6 @@ Public NotInheritable Class 播放进度存储
             Try
                 If File.Exists(路径) Then File.Delete(路径)
             Catch ex As Exception
-                Debug.WriteLine("播放进度：清空失败（已忽略）：" & ex.GetType().Name)
             End Try
             _上次写盘 = Environment.TickCount64
         End SyncLock
@@ -443,7 +437,6 @@ Public NotInheritable Class 播放进度存储
                     File.Copy(路径, 路径 & ".broken-" & DateTime.Now.ToString("yyyyMMddHHmmss"), True)
                 Catch
                 End Try
-                Debug.WriteLine("播放进度：读取失败，按空表继续：" & ex.GetType().Name)
             End Try
         End SyncLock
     End Sub

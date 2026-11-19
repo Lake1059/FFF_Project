@@ -4,7 +4,6 @@
 #include "Timeline/QpcTimeline.h"
 
 #include <atomic>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -104,7 +103,6 @@ private:
     bool followDefaultSystemAudioDevice_;
     std::uint32_t qualityMode_;
     std::string customVideoParameters_;
-    std::string diagnosticLogPath_;
     std::string captureBackend_;
     std::string sourceDescription_;
     std::string sourceFormat_;
@@ -124,9 +122,6 @@ private:
     std::vector<WasapiCaptureStatistics> completedAudioStatistics_;
     std::vector<std::int64_t> completedAudioTimelineErrors_;
     std::vector<std::int32_t> completedAudioCompensationPpm_;
-    std::ofstream diagnosticLog_;
-    mutable std::mutex diagnosticMutex_;
-    bool diagnosticFirstEntry_;
     std::string lastError_;
     QpcTimeline timeline_;
     std::unique_ptr<VideoMuxer> videoMuxer_;

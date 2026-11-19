@@ -949,6 +949,7 @@ FFF3FP_API const char* FFF3FP_GetColorExtensionStatusText(std::uint32_t state, s
 FFF3FP_API void FFF3FP_SetColorExtensionAuthorizationPrompt(int (__cdecl* callback)(char*, std::uint32_t)) noexcept;
 FFF3FP_API FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept;
 // Install the process-wide native log sink.
+// Reserved for binary compatibility.
 FFF3FP_API void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context) noexcept;
 FFF3FP_API FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration,
     FFF3FPHandle* player) noexcept;

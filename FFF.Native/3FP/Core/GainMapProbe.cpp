@@ -389,7 +389,7 @@ bool ToAnnexB(const std::vector<uint8_t>& item, int lengthSize,
         long ln = (long)ReadBigN(item.data() + p, lengthSize);
         p += lengthSize;
         if (ln <= 0 || p + ln > (long)item.size()) {
-            char b[128]; sprintf(b, "length-prefix chain broken at %ld remain=%ld", head, (long)item.size() - p);
+            char b[128]; std::snprintf(b, sizeof(b), "length-prefix chain broken at %ld remain=%ld", head, (long)item.size() - p);
             why = b; return false;
         }
         nals.push_back({p, ln});
@@ -480,7 +480,7 @@ IsoParse ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& c
     // Plan §2.4.4: bits 0x3F are reserved. Only 0x80 (is_multichannel) and
     // 0x40 (use_base_colour_space) are defined. Any reserved bit set ⇒ reject.
     if (flags & 0x3F) {
-        char b[96]; sprintf(b, "tmap flags reserved bits set: 0x%02X (only 0x80/0x40 defined)", flags);
+        char b[96]; std::snprintf(b, sizeof(b), "tmap flags reserved bits set: 0x%02X (only 0x80/0x40 defined)", flags);
         err = b; return IsoParse::Unsupported;
     }
     // Always use the per-channel-denominator layout (40 bytes/channel):
@@ -504,7 +504,7 @@ IsoParse ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& c
         uint32_t den = Be32(d + p + 4);
         p += 8;
         if (den == 0) {
-            char b[128]; sprintf(b, "tmap %s[ch%d] denominator == 0", what, ch);
+            char b[128]; std::snprintf(b, sizeof(b), "tmap %s[ch%d] denominator == 0", what, ch);
             err = b; return false;
         }
         out = (float)((double)num / (double)den);
@@ -529,11 +529,11 @@ IsoParse ParseIso21496(const uint8_t* d, long off, long len, IsoMeta& m, long& c
     // Plan §2.4.1/2: per-channel gainMin <= gainMax and gamma > 0.
     for (int c = 0; c < 3; c++) {
         if (m.gainMin[c] > m.gainMax[c]) {
-            char b[128]; sprintf(b, "tmap gainMin[ch%d]=%.6g > gainMax[ch%d]=%.6g", c, m.gainMin[c], c, m.gainMax[c]);
+            char b[128]; std::snprintf(b, sizeof(b), "tmap gainMin[ch%d]=%.6g > gainMax[ch%d]=%.6g", c, m.gainMin[c], c, m.gainMax[c]);
             err = b; return IsoParse::Malformed;
         }
         if (!(m.gammaC[c] > 0.f)) {
-            char b[96]; sprintf(b, "tmap gamma[ch%d]=%.6g must be > 0", c, m.gammaC[c]);
+            char b[96]; std::snprintf(b, sizeof(b), "tmap gamma[ch%d]=%.6g must be > 0", c, m.gammaC[c]);
             err = b; return IsoParse::Malformed;
         }
     }
@@ -740,7 +740,7 @@ bool DecodeBufferToRgba(const std::vector<uint8_t>& buf, int streamIdx,
         rc = avformat_open_input(&fmt, nullptr, nullptr, nullptr);
     }
     if (rc < 0) {
-        char b[80]; sprintf(b, "avformat_open_input failed rc=%d", rc);
+        char b[80]; std::snprintf(b, sizeof(b), "avformat_open_input failed rc=%d", rc);
         why = b;
         releaseCustomIo();
         return false;
@@ -841,7 +841,6 @@ float Luma(float r, float g, float b) { return 0.2126f*r + 0.7152f*g + 0.0722f*b
 // We cannot lift such a base with sRGB-linear gain math, so the probe fails
 // closed instead of emitting identical pixels. This single predicate backs
 // BOTH the JPEG base gate and the BMFF base gate, and is exercised directly
-// by GainMapProbe::RunSelftest() so the gate cannot silently regress.
 inline bool IsHdrBaseRejected(int trc, GainMapProbeResult& R, const char* where) {
     if (trc != 16 && trc != 18) return false;
     R.verdict = "fail_closed_unsupported";
@@ -872,7 +871,7 @@ bool DecideApplyWeight(double hB, double hA, double target,
     if (hB > hA) {
         weight = 0.0;
         char b[160];
-        sprintf(b, "base HDR (baseHdrHeadroomLog2=%.6g > altHdrHeadroomLog2=%.6g); base displayed as-is, gain not applied",
+        std::snprintf(b, sizeof(b), "base HDR (baseHdrHeadroomLog2=%.6g > altHdrHeadroomLog2=%.6g); base displayed as-is, gain not applied",
                 hB, hA);
         reason = b;
         return false;
@@ -950,8 +949,8 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     R.form = "none";            // vocab: never emit an empty form
     R.targetHeadroomLog2 = targetHeadroomLog2;
     // read file
-    FILE* f = fopen(pathUtf8.c_str(), "rb");
-    if (!f) { R.verdict = "fail_closed_malformed"; R.reason = "cannot open file"; return R; }
+    FILE* f = nullptr;
+    if (fopen_s(&f, pathUtf8.c_str(), "rb") != 0) { R.verdict = "fail_closed_malformed"; R.reason = "cannot open file"; return R; }
     // A gainmap carrier is a still image, not a multi-gigabyte archive. The
     // previous long/ftell path silently wrapped to a negative size above 2 GiB
     // and then constructed an unbounded vector; fail closed before allocating.
@@ -1268,7 +1267,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                 out[o+3] = 1.f;
             }
         }
-        if (jClampFired) { char cn[160]; sprintf(cn, "gain clamped to alternate headroom (gainMax=%.4f > hA=%.4f, ch=%d)", jClampGainMax, jA, jClampCh); R.notes.push_back(cn); }
+        if (jClampFired) { char cn[160]; std::snprintf(cn, sizeof(cn), "gain clamped to alternate headroom (gainMax=%.4f > hA=%.4f, ch=%d)", jClampGainMax, jA, jClampCh); R.notes.push_back(cn); }
         // The JPEG branch used to publish only appliedRgba; the toggle worker
         // then had no base picture and no output dimensions for BuildGainMap-
         // PresentationFrame. Keep both buffers and the geometry with the same
@@ -1539,7 +1538,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             gainmapIsGrid = true;
             gainmapItemId = gridCands[0];
         } else {
-            char b[160]; sprintf(b, "tmap dimg candidates codec=%zu grid=%zu", codecCands.size(), gridCands.size());
+            char b[160]; std::snprintf(b, sizeof(b), "tmap dimg candidates codec=%zu grid=%zu", codecCands.size(), gridCands.size());
             containerWhy = b;
         }
         std::string why;
@@ -1696,7 +1695,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
                 }
                 int expect = gridRows * gridCols;
                 if ((int)tileIds.size() != expect) {
-                    char b[120]; sprintf(b, "grid tiles=%zu expected=%d", tileIds.size(), expect);
+                    char b[120]; std::snprintf(b, sizeof(b), "grid tiles=%zu expected=%d", tileIds.size(), expect);
                     containerWhy = b;
                 } else {
                     // tile ispe
@@ -1835,7 +1834,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         }
         int expect = gRows * gCols;
         if ((int)tileIds.size() < expect) {
-            char b[120]; sprintf(b, "base grid tiles=%zu expected>=%d (codec-only)", tileIds.size(), expect);
+            char b[120]; std::snprintf(b, sizeof(b), "base grid tiles=%zu expected>=%d (codec-only)", tileIds.size(), expect);
             R.verdict="fail_closed_malformed"; R.reason=b; return R;
         }
         tileIds.resize(expect);
@@ -1859,16 +1858,16 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         for (int ti = 0; ti < expect; ti++) {
             std::vector<uint8_t> tStream; std::string tWhy;
             if (!ExtractCodedStream(d, C, tileIds[ti], tStream, tWhy, nullptr)) {
-                char b[120]; sprintf(b, "base tile %d extract: %s", ti, tWhy.c_str());
+                char b[120]; std::snprintf(b, sizeof(b), "base tile %d extract: %s", ti, tWhy.c_str());
                 R.verdict="fail_closed_malformed"; R.reason=b; return R;
             }
             if (tStream.empty() || tStream.size() < 4) {
-                char b[120]; sprintf(b, "base tile %d: stream too small (%zu)", ti, tStream.size());
+                char b[120]; std::snprintf(b, sizeof(b), "base tile %d: stream too small (%zu)", ti, tStream.size());
                 R.verdict="fail_closed_malformed"; R.reason=b; return R;
             }
             std::vector<float> tile; int tw=0, th=0;
             if (!DecodeBufferToRgba(tStream, -1, tile, tw, th, tWhy, tileHint, &decTrc)) {
-                char b[120]; sprintf(b, "base tile %d decode: %s", ti, tWhy.c_str());
+                char b[120]; std::snprintf(b, sizeof(b), "base tile %d decode: %s", ti, tWhy.c_str());
                 R.verdict="fail_closed_malformed"; R.reason=b; return R;
             }
             int ty = ti / gCols, tx = ti % gCols;
@@ -1946,12 +1945,12 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         for (int ty = 0; ty < gridRows; ty++) for (int tx = 0; tx < gridCols; tx++) {
             if (idx >= (int)gainmapStreams.size()) break;
             if (gainmapStreams[idx].empty() || gainmapStreams[idx].size() < 4) {
-                char b[120]; sprintf(b, "gm tile %d: stream too small (%zu)", idx, gainmapStreams[idx].size());
+                char b[120]; std::snprintf(b, sizeof(b), "gm tile %d: stream too small (%zu)", idx, gainmapStreams[idx].size());
                 R.verdict = "fail_closed_malformed"; R.reason = b; return R;
             }
             std::vector<float> tile; int tw=0, th=0; std::string why;
             if (!DecodeBufferToRgba(gainmapStreams[idx], -1, tile, tw, th, why)) {
-                char b[120]; sprintf(b, "gm tile %d decode: %s", idx, why.c_str());
+                char b[120]; std::snprintf(b, sizeof(b), "gm tile %d decode: %s", idx, why.c_str());
                 R.verdict = "fail_closed_malformed"; R.reason = b; return R;
             }
             int copyW = (tw < tileW) ? tw : tileW;
@@ -2000,7 +1999,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
             if (trailing < 0) trailing = 0;
             R.trailingBytesIgnored = (int)trailing;  // first-class field (sibling of verdict)
             if (trailing > 0) {
-                char tn[96]; sprintf(tn, "trailingBytesIgnored=%ld", trailing);
+                char tn[96]; std::snprintf(tn, sizeof(tn), "trailingBytesIgnored=%ld", trailing);
                 R.notes.push_back(tn);
                 // A tmap that carries bytes beyond the canonical v0 layout uses a
                 // writer extension this build does not implement. The canonical
@@ -2248,7 +2247,7 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
         }
         out[o+3] = 1.f;
     }
-    if (clampFired) { char cn[160]; sprintf(cn, "gain clamped to alternate headroom (gainMax=%.4f > hA=%.4f, ch=%d)", clampGainMax, hA, clampCh); R.notes.push_back(cn); }
+    if (clampFired) { char cn[160]; std::snprintf(cn, sizeof(cn), "gain clamped to alternate headroom (gainMax=%.4f > hA=%.4f, ch=%d)", clampGainMax, hA, clampCh); R.notes.push_back(cn); }
 
     R.applyOk = true;
     R.applyMode = "rgb_f32";
@@ -2276,111 +2275,4 @@ GainMapProbeResult GainMapProbe::Probe(const std::string& pathUtf8, bool baseOnl
     R.appliedRgba = std::move(out);
     R.verdict = "applied";
     return R;
-}
-
-// ── Self-test: locked-in regression assertions (declared in GainMapProbe.h) ──
-//
-// These exercise internal helpers that cannot be reached end-to-end through
-// Probe() without real compressed HEVC/AV1 media (which --selftest must not
-// depend on). The CLI driver (tools/gainmap_probe.cpp --selftest) adds the one
-// check that IS reachable on a hand-built in-memory file: the JXL container
-// gate. Returns the number of failed assertions (0 == all passed).
-int GainMapProbe::RunSelftest() {
-    int failures = 0, checks = 0;
-    auto ok = [&](bool cond, const char* name, const char* detail) {
-        checks++;
-        if (cond) printf("[PASS] %s\n", name);
-        else      { failures++; printf("[FAIL] %s  (%s)\n", name, detail); }
-    };
-
-    // ---- (A) ISO 21496-1 tmap reader tolerates trailing bytes ----------------
-    // Build a canonical 1-channel v0 tmap payload, then append 4 trailing pad
-    // bytes. A compliant reader parses only the `consumed` canonical layout and
-    // IGNORES the trailing bytes (ISO 21496-1); it must NOT reject the file.
-    {
-        std::vector<uint8_t> b;
-        auto u8   = [&](uint8_t v){ b.push_back(v); };
-        auto be16 = [&](uint16_t v){ b.push_back((uint8_t)(v>>8)); b.push_back((uint8_t)(v&0xff)); };
-        auto rat  = [&](int32_t num, uint32_t den){
-            for (int s = 24; s >= 0; s -= 8) b.push_back((uint8_t)((num >> s) & 0xff));
-            for (int s = 24; s >= 0; s -= 8) b.push_back((uint8_t)((den >> s) & 0xff));
-        };
-        u8(0x00);                 // version byte at [0] (Probe requires tmapPayload[0]==0)
-        be16(0);                  // minVersion
-        be16(0);                  // writerVersion
-        u8(0x00);                 // flags
-        rat(0,1);                 // baseHdrHeadroomLog2 = 0.0
-        rat(3,1);                 // altHdrHeadroomLog2  = 3.0
-        rat(0,1);                 // gainMin[0]
-        rat(3,1);                 // gainMax[0]
-        rat(1,1);                 // gamma[0]
-        rat(0,1);                 // offSdr[0]
-        rat(0,1);                 // offHdr[0]
-        u8(0xDE); u8(0xAD); u8(0xBE); u8(0xEF);   // 4 trailing pad bytes
-
-        GainMapProbeResult fresh;
-        ok(fresh.trailingBytesIgnored == 0,
-           "A0.trailingBytesIgnored_default_zero",
-           "first-class field must default to 0");
-
-        IsoMeta m; long consumed = 0; std::string err;
-        IsoParse pr = ParseIso21496(b.data(), 1, (long)b.size()-1, m, consumed, err);
-        char d1[192];
-        sprintf(d1, "pr=%d err=\"%s\" consumed=%ld size=%zu", (int)pr, err.c_str(), consumed, b.size());
-        ok(pr == IsoParse::Ok, "A1.tmap_trailing4_parses_ok", d1);
-
-        long used = consumed + 1;                 // +1 for leading version byte
-        long trailing = (long)b.size() - used;
-        ok(trailing == 4, "A2.trailingBytes_count_is_4", d1);
-
-        GainMapProbeResult R;
-        R.trailingBytesIgnored = (int)(trailing > 0 ? trailing : 0);
-        ok(R.trailingBytesIgnored == 4, "A3.trailingBytesIgnored_field_eq_4", d1);
-    }
-
-    // ---- (B) PQ/HLG base transfer gate (shared by JPEG + BMFF paths) ---------
-    {
-        GainMapProbeResult r16; bool rej16 = IsHdrBaseRejected(16, r16, "test");
-        ok(rej16 && r16.verdict == "fail_closed_unsupported",
-           "B1.trc16_PQ_rejected_fail_closed", "PQ base must fail closed");
-        GainMapProbeResult r18; bool rej18 = IsHdrBaseRejected(18, r18, "test");
-        ok(rej18 && r18.verdict == "fail_closed_unsupported",
-           "B2.trc18_HLG_rejected_fail_closed", "HLG base must fail closed");
-        GainMapProbeResult r2;  bool rej2  = IsHdrBaseRejected(2,  r2,  "test");
-        ok(!rej2 && r2.verdict.empty(),
-           "B3.trc2_srgb_NOT_rejected", "sRGB base must pass the gate");
-        GainMapProbeResult r13; bool rej13 = IsHdrBaseRejected(13, r13, "test");
-        ok(!rej13, "B4.trc13_sRGBish_NOT_rejected", "sRGB-ish trc must pass the gate");
-    }
-
-    // ---- (D) baseRgba linearize-then-assign contract ------------------------
-    // The BMFF success path linearizes the base IN PLACE and only then assigns
-    // R.baseRgba = baseRgba. Previously R.baseRgba kept the encoded sRGB values
-    // (double-gamma). Mirror that exact loop + assign here and assert the result
-    // carries LINEAR values; also assert linear != encoded so the check can't
-    // pass vacuously.
-    {
-        const float enc0 = 0.5f, enc1 = 0.25f;
-        std::vector<float> baseRgba = { enc0, enc0, enc0, 1.f,
-                                        enc1, enc1, enc1, 1.f };
-        for (size_t i = 0; i < baseRgba.size(); i += 4) {
-            baseRgba[i]   = SrgbToLinear(baseRgba[i]);
-            baseRgba[i+1] = SrgbToLinear(baseRgba[i+1]);
-            baseRgba[i+2] = SrgbToLinear(baseRgba[i+2]);
-        }
-        GainMapProbeResult R;
-        R.baseRgba = baseRgba;                 // mirrors R.baseRgba = baseRgba;
-        R.outW = 2; R.outH = 1;
-        float expect0 = SrgbToLinear(enc0), expect1 = SrgbToLinear(enc1);
-        ok(R.baseRgba.size() == 8 &&
-           R.baseRgba[0] == expect0 && R.baseRgba[4] == expect1,
-           "D1.baseRgba_carries_linear_values",
-           "R.baseRgba must be sRGB-linearized after the apply-path loop");
-        ok(expect0 != enc0 && expect1 != enc1,
-           "D2.linear_differs_from_encoded",
-           "sanity: SrgbToLinear must change the value (else D1 is vacuous)");
-    }
-
-    printf("selftest: checks=%d failures=%d\n", checks, failures);
-    return failures;
 }

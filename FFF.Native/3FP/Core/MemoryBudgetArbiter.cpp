@@ -93,12 +93,6 @@ std::uint64_t ComputeBudgetNow() noexcept {
     const std::uint64_t computed = MemBudgetMath::ComputeTotalBudgetRaw(SampleMemory());
     const std::uint64_t cap = MemBudgetMath::TestCapBytesSlot();
     const std::uint64_t budget = MemBudgetMath::ApplyTestCapBytes(computed, cap);
-    if (budget != computed &&
-            GetEnvironmentVariableW(L"FFF_MEMARB_TRACE", nullptr, 0) != 0) {
-        std::fprintf(stderr, "[arbiter] cap-test computed=%llumib cap=%llumib\n",
-            static_cast<unsigned long long>(computed / MemBudgetMath::MiB),
-            static_cast<unsigned long long>(cap / MemBudgetMath::MiB));
-    }
     return budget;
 }
 
@@ -152,32 +146,10 @@ void MemoryBudgetArbiter::AttachSession(const SessionBudgetContext& context) noe
     pendingRaise_ = false;
     suppressCount_.store(0, std::memory_order_relaxed);
     totalBudget_ = ComputeBudgetNow();
-    std::fprintf(stderr, "[arbiter] attach budget=%llu MiB\n",
-        static_cast<unsigned long long>(totalBudget_ / MemBudgetMath::MiB));
 }
 
 void MemoryBudgetArbiter::DetachSession() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    // Sum inline: TotalGranted() takes the same mutex and would self-deadlock.
-    std::uint64_t sum = 0;
-    for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i) sum += granted_[i];
-    // End-of-session summary. Chosen over a 2 s timer: detach already owns the
-    // "how did this session end" line, so it costs zero extra events and no
-    // thread. samples = budget resamples (≈ the 250 ms tick); limitChanges = how
-    // many consumer grants actually moved past their dead zone; suppress counts
-    // the grow-gate rejections PlayerSession reported via NoteReplanSuppressed();
-    // flap counts up->down oscillation rings; borrowOverrun counts Σgranted +
-    // Σborrowed exceeding the budget after a recompute.
-    std::fprintf(stderr,
-        "[arbiter] budget total=%llumib granted=%llumib samples=%u limitChanges=%u "
-        "suppress=%u flap=%u borrowOverrun=%u\n",
-        static_cast<unsigned long long>(totalBudget_ / MemBudgetMath::MiB),
-        static_cast<unsigned long long>(sum / MemBudgetMath::MiB),
-        static_cast<unsigned>(budgetSamples_),
-        static_cast<unsigned>(limitChanges_),
-        static_cast<unsigned>(suppressCount_.load(std::memory_order_relaxed)),
-        static_cast<unsigned>(flapCount_),
-        static_cast<unsigned>(borrowOverruns_));
     attached_ = false;
     flapCount_ = 0;
     pendingRaise_ = false;
@@ -381,9 +353,6 @@ std::uint64_t MemoryBudgetArbiter::DistributeLocked() noexcept {
     if (sum > totalBudget_) {
         // Should be unreachable; counted rather than clamped so a trace shows it.
         ++violations_;
-        std::fprintf(stderr, "[arbiter] INVARIANT VIOLATED sum=%llu budget=%llu\n",
-            static_cast<unsigned long long>(sum),
-            static_cast<unsigned long long>(totalBudget_));
     }
     // The REAL invariant is Σgranted + Σborrowed ≤ totalBudget_. The borrow side
     // is NOT redistributed here: TryBorrow's headroom check counted borrowed_ at
@@ -394,13 +363,6 @@ std::uint64_t MemoryBudgetArbiter::DistributeLocked() noexcept {
     const std::uint64_t borrowedSum = BorrowedLocked();
     if (sum + borrowedSum > totalBudget_) {
         ++borrowOverruns_;
-        if (GetEnvironmentVariableW(L"FFF_MEMARB_TRACE", nullptr, 0) != 0) {
-            std::fprintf(stderr,
-                "[arbiter] invariant borrowed-overrun total=%llu granted=%llu borrowed=%llu\n",
-                static_cast<unsigned long long>(totalBudget_),
-                static_cast<unsigned long long>(sum),
-                static_cast<unsigned long long>(borrowedSum));
-        }
     }
     return sum;
 }

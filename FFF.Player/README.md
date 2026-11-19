@@ -32,8 +32,9 @@
 
 ~~~powershell
 .\tools\准备FFmpeg.ps1
+.\tools\准备LibRaw.ps1
 .\tools\准备Libass.ps1
-.\tools\准备Libiamf.ps1
+.\tools\准备Libiamf.ps1 -Configuration Debug
 ~~~
 
 LakeUI 是仓库外的同级项目，宿主通过 hint path 引用它。首次构建前先生成：
@@ -45,7 +46,7 @@ dotnet build ..\LakeUI\LakeUI\LakeUI.vbproj -c Debug
 然后运行：
 
 ~~~powershell
-.\tools\构建3FP.ps1 -Configuration Debug
+.\tools\构建3FP.ps1 -Configuration Debug -LakeUIConfig Debug
 ~~~
 
 脚本会构建 FFF.Native、FFF.Player 和 FFF.Player.Tests。

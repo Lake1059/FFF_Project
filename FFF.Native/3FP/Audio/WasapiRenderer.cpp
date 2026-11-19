@@ -1478,20 +1478,6 @@ void PlayerWasapiRenderer::RenderThread() noexcept {
             ? static_cast<std::int64_t>(bufferFrames) * 10'000'000 / outputSampleRate_ : 0;
         initializationResult_ = FFFResult::Success; initializationFinished_ = true;
     }
-    if (bitstreamActive_) {
-        // One-line endpoint fact so a machine log can tell "driver rejected the
-        // carrier" from "driver accepted it but the queue was metered at 2x".
-        // blockAlign must read 4 (2ch) or 16 (8ch HBR); 8/32 means the P0-1
-        // formula regressed.
-        char text[160]{};
-        wsprintfA(text, "pt-endpoint: bits=%u blockAlign=%u avg=%lu linkRate=%u linkCh=%u\n",
-            static_cast<unsigned>(outputBitsPerSample_),
-            static_cast<unsigned>(outputBlockAlign_),
-            static_cast<unsigned long>(outputSampleRate_) * outputBlockAlign_,
-            static_cast<unsigned>(outputSampleRate_),
-            static_cast<unsigned>(outputChannels_));
-        OutputDebugStringA(text);
-    }
     if (runtimeState_ != nullptr) runtimeState_->SetChannels(activeFormat->nChannels);
     initializedCondition_.notify_all();
     std::unique_ptr<wchar_t, CoTaskMemDeleter> openedEndpointId;

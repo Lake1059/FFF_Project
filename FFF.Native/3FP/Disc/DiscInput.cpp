@@ -30,7 +30,7 @@ std::string Utf8Path(const std::filesystem::path& path) {
 }
 }
 
-DiscInput::DiscInput(std::atomic<bool>& cancel) : cancel_(cancel) { trace_ = GetEnvironmentVariableW(L"FFF_DISC_TRACE", nullptr, 0) != 0; }
+DiscInput::DiscInput(std::atomic<bool>& cancel) : cancel_(cancel) {}
 DiscInput::~DiscInput() {
     ResetSubtitleDecoder();
     if (io_) { av_freep(&io_->buffer); avio_context_free(&io_); }
@@ -85,7 +85,6 @@ int DiscInput::InterruptCallback(void* context) {
 }
 
 bool DiscInput::OpenDemux(AVFormatContext** format) {
-    if (trace_) std::fprintf(stderr, "DISC demux open held=%d restart=%d title=%d playlist=%u\n", held_, restart_, title_, playlist_);
     if (io_) { av_freep(&io_->buffer); avio_context_free(&io_); }
     auto* buffer = static_cast<unsigned char*>(av_malloc(32768));
     if (!buffer) return false;
@@ -104,16 +103,6 @@ bool DiscInput::OpenDemux(AVFormatContext** format) {
     auto result = avformat_open_input(format, nullptr, av_find_input_format(bd_ ? "mpegts" : "mpeg"), nullptr);
     if (result >= 0) result = avformat_find_stream_info(*format, nullptr);
     opening_ = false;
-    if (trace_) std::fprintf(stderr, "DISC demux result=%d streams=%u held=%d\n", result, *format ? (*format)->nb_streams : 0, held_);
-    if (trace_ && *format) {
-        std::fprintf(stderr, "DISC format start=%lld duration=%lld\n", (*format)->start_time, (*format)->duration);
-        for (unsigned i = 0; i < (*format)->nb_streams; ++i) {
-            const auto* st = (*format)->streams[i];
-            std::fprintf(stderr, "DISC stream=%u type=%d id=%x codec=%d size=%dx%d start=%lld tb=%d/%d\n", i,
-                st->codecpar->codec_type, st->id, st->codecpar->codec_id, st->codecpar->width, st->codecpar->height,
-                st->start_time, st->time_base.num, st->time_base.den);
-        }
-    }
     restart_ = false;
     if (result < 0) { error_ = "Could not inspect audio/video at the current disc position."; return false; }
     return true;
@@ -146,7 +135,6 @@ int DiscInput::Read(std::uint8_t* buffer, int size) {
         {
             BD_EVENT event{};
             const int result = bd_read_ext(bd_, buffer, size, &event);
-            if (trace_ && event.event) std::fprintf(stderr, "DISC bd event=%u param=%u result=%d opening=%d\n", event.event, event.param, result, opening_);
             HandleBluRayEvent(event.event, event.param);
             if (failed_) return AVERROR(EIO);
             if (result > 0) {
@@ -237,7 +225,6 @@ bool DiscInput::PollHold(bool drained) {
         wait_ = false;
     }
     held_ = false;
-    if (trace_) std::fprintf(stderr, "DISC hold released restart=%d\n", restart_);
     return true;
 }
 void DiscInput::UpdateBluRayTitle(unsigned playlist) {
@@ -280,7 +267,6 @@ bool DiscInput::Seek(std::int64_t value) {
     return ok;
 }
 bool DiscInput::Navigate(Command command, int value, int y) {
-    if (trace_) std::fprintf(stderr, "DISC command=%d value=%d y=%d\n", static_cast<int>(command), value, y);
     if (command == Command::Subtitle) { subtitleSelection_ = value; ClearSubtitle(); }
     bool ok = false, jump = false;
     if (bd_) {
@@ -329,8 +315,6 @@ void DiscInput::OverlayCallback(void* context, const bd_overlay_s* overlay) {
 void DiscInput::HandleOverlay(const bd_overlay_s* overlay) {
     if (!overlay) { for (auto& plane : planes_) plane = {}; PublishGraphics(); return; }
     if (overlay->plane > 1) return;
-    if (trace_) std::fprintf(stderr, "DISC overlay plane=%u cmd=%u xy=%u,%u size=%u,%u palette=%d img=%d\n",
-        overlay->plane, overlay->cmd, overlay->x, overlay->y, overlay->w, overlay->h, overlay->palette != nullptr, overlay->img != nullptr);
     auto& plane = planes_[overlay->plane];
     if (overlay->cmd == BD_OVERLAY_INIT) {
         if (!overlay->w || !overlay->h || overlay->w > 4096 || overlay->h > 2160) return;
@@ -379,11 +363,6 @@ void DiscInput::PublishGraphics() {
         }
     }
     ++graphics_.sequence;
-    if (trace_) {
-        size_t visible = 0;
-        for (size_t i = 3; i < graphics_.pixels.size(); i += 4) if (graphics_.pixels[i]) ++visible;
-        std::fprintf(stderr, "DISC graphics %dx%d visible=%zu sequence=%llu\n", width, height, visible, graphics_.sequence);
-    }
 }
 void DiscInput::ResetSubtitleDecoder() {
     avcodec_free_context(&subtitleDecoder_); subtitleDecoderStream_ = -1;
@@ -416,7 +395,6 @@ void DiscInput::DecodeSubtitle(const AVPacket* packet, AVFormatContext* format) 
     }
     AVSubtitle sub{}; int got = 0;
     const auto result = avcodec_decode_subtitle2(subtitleDecoder_, &sub, &got, const_cast<AVPacket*>(packet));
-    if (trace_ && bd_) std::fprintf(stderr, "DISC PGS decoded=%d got=%d rects=%u\n", result, got, sub.num_rects);
     if (result >= 0 && got) {
         if (subtitleDecoder_->width > 0 && subtitleDecoder_->height > 0) {
             subtitleWidth_ = subtitleDecoder_->width; subtitleHeight_ = subtitleDecoder_->height;

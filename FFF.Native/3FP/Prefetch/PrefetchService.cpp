@@ -23,8 +23,6 @@ extern "C" {
 #include <cstring>
 #include <unordered_map>
 
-extern void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept;
-
 namespace FFFPrefetch {
 namespace {
 
@@ -56,35 +54,6 @@ std::uint32_t EnvUint(const wchar_t* name, std::uint32_t fallback,
     if (parsed < low) return low;
     if (parsed > high) return high;
     return parsed;
-}
-
-void Trace(const char* action, std::uint32_t generation, std::uint64_t bytes) noexcept {
-    static const bool enabled = EnvOn(L"FFF3FP_PREFETCH_TRACE", false);
-    if (!enabled) return;
-    char line[192]{};
-    std::snprintf(line, sizeof(line), "[prefetch] gen=%u action=%s bytes=%llu",
-        generation, action, static_cast<unsigned long long>(bytes));
-    FFF3FP_KernelLogImpl(line);
-}
-
-// Memory-budget observation snapshot. Separate env gate from Trace(): this one
-// is read by the membudget probe lane, so it must not ride on the prefetch-only
-// toggle. cached/budget are byte counts. Called with mutex_ held.
-void TraceMemarbSnapshot(std::uint64_t hits, std::uint64_t misses,
-    std::uint64_t lruEvictions, std::uint64_t budgetTrims,
-    std::uint64_t cachedBytes, std::uint64_t budgetBytes) noexcept {
-    static const bool enabled = EnvOn(L"FFF_MEMARB_TRACE", false);
-    if (!enabled) return;
-    char line[256]{};
-    std::snprintf(line, sizeof(line),
-        "[prefetch] hits=%llu misses=%llu lru=%llu trim=%llu cached=%llu budget=%llu",
-        static_cast<unsigned long long>(hits),
-        static_cast<unsigned long long>(misses),
-        static_cast<unsigned long long>(lruEvictions),
-        static_cast<unsigned long long>(budgetTrims),
-        static_cast<unsigned long long>(cachedBytes),
-        static_cast<unsigned long long>(budgetBytes));
-    FFF3FP_KernelLogImpl(line);
 }
 
 std::wstring Utf8ToWide(const std::string& utf8) noexcept {
@@ -234,7 +203,6 @@ AVFrame* DecodeFirstStill(const std::string& pathUtf8, std::uint32_t generation,
     // that also carries audio (or extra video tracks) is a video, whatever its
     // name says, and decoding it here would violate the split.
     if (format->nb_streams != 1u) {
-        Trace("still-skip-streams", generation, format->nb_streams);
         avformat_close_input(&format);
         return nullptr;
     }
@@ -247,7 +215,6 @@ AVFrame* DecodeFirstStill(const std::string& pathUtf8, std::uint32_t generation,
     // libdav1d there, and a different decoder can emit different planes.
     const auto codecId = format->streams[stream]->codecpar->codec_id;
     if (!IsStillImageCodec(static_cast<int>(codecId))) {
-        Trace("still-skip-codec", generation, static_cast<std::uint64_t>(codecId));
         avformat_close_input(&format);
         return nullptr;
     }
@@ -536,12 +503,10 @@ void PrefetchService::EvaluatePressure() noexcept {
         cancel_.store(true, std::memory_order_release);
         paused_ = true;
         helperStopRequested_ = true;
-        Trace("release-all", generation_.load(std::memory_order_acquire), 0);
     } else if (tier == PressureTier::Tight) {
         TrimToHalfLocked();
         cancel_.store(true, std::memory_order_release);
         paused_ = true;
-        Trace("trim-half", generation_.load(std::memory_order_acquire), cachedBytes_);
     } else {
         // Clearing the pause only ALLOWS work again. Nothing is rebuilt here:
         // reconstruction is content-driven, i.e. the next real plan/switch.
@@ -616,8 +581,6 @@ void PrefetchService::NoteResult(const FFFPrefetchResult& result) noexcept {
     // cachedProbeEntries. Only a real PROBE may populate the table.
     if (result.kind != FFF_PREFETCH_TASK_PROBE) {
         if (result.kind == FFF_PREFETCH_TASK_WARM && result.status == 0)
-            Trace("warm", result.generation,
-                static_cast<std::uint64_t>(result.warmedBytes));
         return;
     }
     if (result.status != 0 || result.pathBytes == 0 ||
@@ -638,7 +601,6 @@ void PrefetchService::NoteResult(const FFFPrefetchResult& result) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (generation_.load(std::memory_order_acquire) != result.generation) return;
     probes_[path] = pod;
-    Trace("probe", result.generation, static_cast<std::uint64_t>(result.warmedBytes));
 }
 
 void PrefetchService::EnsureHelper() noexcept {
@@ -819,7 +781,6 @@ void PrefetchService::WorkerLoop() noexcept {
                     stills_[path] = entry;
                     cachedBytes_ += bytes;
                 }
-                Trace("still", generation, bytes);
                 EvaluatePressure();
             }
         }
@@ -862,12 +823,9 @@ FFFResult PrefetchService::SetPlan(const FFF3FPPrefetchPlan* plan) noexcept {
         PruneToPlanLocked(paths);
         // Snapshot at plan landing (this is the natural per-open checkpoint):
         // inside the lock so the four counters agree with cachedBytes_ here.
-        TraceMemarbSnapshot(hits_, misses_, lruEvictions_, budgetTrims_,
-            cachedBytes_, budgetBytes_);
     }
     EvaluatePressure();
     cv_.notify_all();
-    Trace("plan", plan->generation, static_cast<std::uint64_t>(paths.size()));
     return FFFResult::Success;
 }
 
@@ -898,8 +856,6 @@ FFFResult PrefetchService::GetStatus(FFF3FPPrefetchStatus* status) noexcept {
     // not zero-initialise its status struct must never read stale bytes here.
     for (std::uint32_t i = 2; i < 8; ++i) status->reserved[i] = 0u;
     // Snapshot at the moment a host reads the status (e.g. C# on session close).
-    TraceMemarbSnapshot(hits_, misses_, lruEvictions_, budgetTrims_,
-        cachedBytes_, budgetBytes_);
     return FFFResult::Success;
 }
 
@@ -955,7 +911,6 @@ void PrefetchService::NoteUnsupportedRoute(const std::string& pathUtf8,
     pod.generation = generation_.load(std::memory_order_acquire);
     pod.fingerprint = fingerprint;
     routes_[CacheKey(pathUtf8)] = pod;
-    Trace("route-note", pod.generation, routeKey);
 }
 
 bool PrefetchService::TakeUnsupportedRoute(const std::string& pathUtf8,
@@ -968,7 +923,6 @@ bool PrefetchService::TakeUnsupportedRoute(const std::string& pathUtf8,
     const auto it = routes_.find(CacheKey(pathUtf8));
     if (it == routes_.end() || it->second.routeKey != routeKey ||
         !(it->second.fingerprint == fingerprint)) return false;
-    Trace("route-hit", it->second.generation, routeKey);
     return true;
 }
 

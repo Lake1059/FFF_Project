@@ -91,7 +91,7 @@ Public Module 录制交互
 
     Public Sub 开始录制()
         If 当前控制器 IsNot Nothing OrElse 是否正在停止 Then Return
-        Form总控台.MTB_执行日志.Text = String.Empty
+        Form总控台.MTB_录制状态.Text = String.Empty
         Form总控台.重置录制统计()
         Try
             Form总控台.预览?.开始录制预览()
@@ -176,14 +176,13 @@ Public Module 录制交互
             AddHandler 当前控制器.录制失败, AddressOf 录制失败
             AddHandler 当前控制器.收到诊断事件, AddressOf 诊断事件
             AddHandler 当前控制器.收到处理后帧, AddressOf 处理录制预览帧
-            写入录制配置日志(源, 音频, 配置, 录制帧率, 输出文件)
             当前控制器.开始()
             录制开始计数 = Stopwatch.GetTimestamp()
             暂停开始计数 = 0
             累计暂停计数 = 0
-            写日志("录制已开始。")
+            显示录制状态("录制已开始。")
         Catch ex As Exception
-            写日志($"开始录制失败：{ex.Message}")
+            显示录制状态($"开始录制失败：{ex.Message}")
             清理控制器()
         Finally
             Form总控台.更新录制状态()
@@ -195,9 +194,9 @@ Public Module 录制交互
         Try
             当前控制器.暂停()
             暂停开始计数 = Stopwatch.GetTimestamp()
-            写日志("录制已暂停。")
+            显示录制状态("录制已暂停。")
         Catch ex As Exception
-            写日志($"暂停录制失败：{ex.Message}")
+            显示录制状态($"暂停录制失败：{ex.Message}")
         Finally
             Form总控台.更新录制状态()
         End Try
@@ -210,9 +209,9 @@ Public Module 录制交互
             Dim 现在 = Stopwatch.GetTimestamp()
             If 暂停开始计数 > 0 Then 累计暂停计数 += 现在 - 暂停开始计数
             暂停开始计数 = 0
-            写日志("录制已继续。")
+            显示录制状态("录制已继续。")
         Catch ex As Exception
-            写日志($"继续录制失败：{ex.Message}")
+            显示录制状态($"继续录制失败：{ex.Message}")
         Finally
             Form总控台.更新录制状态()
         End Try
@@ -226,7 +225,7 @@ Public Module 录制交互
         ' 对外任务覆盖原生 drain、统计读取、资源释放和 UI 状态复位，关闭窗口和重复点击等待同一事务。
         正在停止任务 = 完成信号.Task
         Dim 收尾计时 = Stopwatch.StartNew()
-        写日志("正在停止录制并写入文件尾……")
+        显示录制状态("正在停止录制并写入文件尾……")
         Form总控台.更新录制状态()
         执行停止录制异步(待停止控制器, 记录正常停止, 收尾计时, 完成信号)
         Return 完成信号.Task
@@ -237,14 +236,14 @@ Public Module 录制交互
         Try
             ' 捕获线程、编码器 drain 和 MKV trailer 都可能等待 CPU 编码器；不得阻塞 UI 消息循环。
             Await Task.Run(Sub() 待停止控制器.停止())
-            If 记录正常停止 Then 写日志($"录制已停止，收尾耗时 {收尾计时.Elapsed.TotalSeconds:F2} 秒。")
+            If 记录正常停止 Then 显示录制状态($"录制已停止，收尾耗时 {收尾计时.Elapsed.TotalSeconds:F2} 秒。")
         Catch ex As Exception
-            写日志($"停止录制失败：{ex.Message}")
+            显示录制状态($"停止录制失败：{ex.Message}")
         Finally
             Try
                 清理控制器(待停止控制器)
             Catch ex As Exception
-                写日志($"释放录制资源失败：{ex.Message}")
+                显示录制状态($"释放录制资源失败：{ex.Message}")
             Finally
                 正在停止任务 = Nothing
                 Form总控台.更新录制状态()
@@ -260,9 +259,9 @@ Public Module 录制交互
             Directory.CreateDirectory(输出目录)
             Dim 新文件 = 生成输出文件(输出目录)
             当前控制器.切分(新文件)
-            写日志($"已切分到新文件：{新文件}")
+            显示录制状态($"已切分到新文件：{新文件}")
         Catch ex As Exception
-            写日志($"切分文件失败：{ex.Message}")
+            显示录制状态($"切分文件失败：{ex.Message}")
         End Try
     End Sub
 
@@ -283,9 +282,9 @@ Public Module 录制交互
         Try
             当前控制器.切换系统音频端点(端点标识, 强制刷新)
             当前录制音频端点 = 端点标识
-            写日志(If(强制刷新, "播放设备已重载，录制时间线已重新接续。", "播放设备已切换，录制时间线保持连续。"))
+            显示录制状态(If(强制刷新, "播放设备已重载，录制时间线已重新接续。", "播放设备已切换，录制时间线保持连续。"))
         Catch ex As Exception
-            写日志($"{If(强制刷新, "重建", "切换")}播放设备失败：{ex.Message}")
+            显示录制状态($"{If(强制刷新, "重建", "切换")}播放设备失败：{ex.Message}")
         End Try
     End Sub
 
@@ -354,25 +353,6 @@ Public Module 录制交互
             编码速率控制.可变码率, 编码速率控制.恒定质量)
     End Function
 
-    Private Sub 写入录制配置日志(源 As 视频源条目, 音频 As 音频源条目,
-                             配置 As 录制配置, 录制帧率 As (分子 As UInteger, 分母 As UInteger),
-                             输出文件 As String)
-        Dim 捕获模式 = If(源.捕获模式 = 0, "显示器", If(源.捕获模式 = 2, "窗口客户区", "窗口带标题栏"))
-        Dim 质量模式名称 = {"通用 QP 恒定量化", "CRF - CPU", "CQ - NVIDIA", "global_quality - Intel", "自定义参数"}
-        Dim 质量模式文本 = If(配置.质量控制模式 < CUInt(质量模式名称.Length),
-            质量模式名称(CInt(配置.质量控制模式)), "未知")
-        写日志($"录制源：{源.显示文本}", False)
-        写日志($"捕获选项：模式={捕获模式}，捕获鼠标={If(设置.实例对象.捕获鼠标, "是", "否")}", False)
-        写日志($"视频选项：分辨率={If(String.IsNullOrWhiteSpace(Form视频参数.MCB_视频分辨率.Text), "原生分辨率", Form视频参数.MCB_视频分辨率.Text)}（实际 {配置.宽度} × {配置.高度}），帧率={格式化帧率(录制帧率.分子, 录制帧率.分母)} 帧/秒，帧率模式={If(配置.可变帧率, "VFR", "CFR")}", False)
-        写日志($"编码选项：编码器={配置.编码器名称}，预设={If(String.IsNullOrWhiteSpace(配置.编码预设), "默认", 配置.编码预设)}，配置档={If(String.IsNullOrWhiteSpace(配置.编码配置档), "默认", 配置.编码配置档)}，场景优化={If(String.IsNullOrWhiteSpace(配置.场景优化), "默认", 配置.场景优化)}", False)
-        写日志($"色彩选项：采样={取得采样描述(配置.视频采样)}，位深选项={Form视频参数.MCB_灰阶位深.Text}（实际 {If(配置.使用十位色, "10bit", "8bit")}），色彩模式={Form视频参数.MCB_色彩模式.Text}，HDR={If(配置.使用HDR10, "是", "否")}", False)
-        写日志($"色彩处理：SDR白电平={设置.实例对象.SDR亮度} nit，HDR标称峰值={配置.HDR标称峰值} nit，色彩范围={配置.色彩范围}", False)
-        写日志($"质量控制：模式={质量模式文本}（{配置.质量控制模式}），质量值={配置.质量值}，速率控制={配置.速率控制}", False)
-        写日志($"自定义视频参数：{If(String.IsNullOrWhiteSpace(配置.自定义视频参数), "无", 配置.自定义视频参数)}", False)
-        写日志($"音频选项：来源={If(音频 Is Nothing, "未选择", 音频.名称)}，跟随默认设备={If(配置.跟随默认系统音频设备, "是", "否")}，编码器={取得音频编码器显示名称(设置.实例对象.音频编码器索引)}，采样率={配置.音频采样率} 赫兹，声道={配置.音频声道数}，码率={If(配置.音频码率 > 0, $"{配置.音频码率 \ 1000} kbps", "无损/由编码器决定")}", False)
-        写日志($"输出文件：{输出文件}", False)
-    End Sub
-
     Private Function 取得采样描述(采样 As 视频采样格式) As String
         Select Case 采样
             Case 视频采样格式.YUV四二二 : Return "4:2:2"
@@ -392,13 +372,9 @@ Public Module 录制交互
         End Select
     End Function
 
-    Private Sub 写日志(文本 As String, Optional 是否带时间戳 As Boolean = True)
-        If 当前主窗体 Is Nothing OrElse 当前主窗体.IsDisposed Then Return
-        If 是否带时间戳 Then
-            Form总控台.MTB_执行日志.AppendText($"[{DateTime.Now:HH:mm:ss}] {文本}{vbCrLf}")
-        Else
-            Form总控台.MTB_执行日志.AppendText($"{文本}{vbCrLf}")
-        End If
+    Private Sub 显示录制状态(文本 As String)
+        If Form总控台.IsDisposed Then Return
+        Form总控台.MTB_录制状态.Text = 文本
     End Sub
 
     Private Sub 录制失败(sender As Object, e As 录制失败事件参数)
@@ -407,7 +383,7 @@ Public Module 录制交互
     End Sub
 
     Private Async Sub 处理录制失败(错误 As Exception)
-        写日志($"录制失败：{错误.Message}")
+        显示录制状态($"录制失败：{错误.Message}")
         Await 停止录制异步(False)
     End Sub
 
@@ -500,30 +476,30 @@ Public Module 录制交互
                                        "recording_controller_failed"
                                       Return
                                   Case "encoder_initialization_failed"
-                                      写日志($"视频编码器初始化失败：{消息}")
+                                      显示录制状态($"视频编码器初始化失败：{消息}")
                                   Case "video_failed"
-                                      写日志($"视频编码失败：{消息}")
+                                      显示录制状态($"视频编码失败：{消息}")
                                   Case "audio_failed"
-                                      写日志($"音频编码失败：{消息}")
+                                      显示录制状态($"音频编码失败：{消息}")
                                   Case "audio_device_failed"
-                                      写日志($"音频设备异常：{消息}")
+                                      显示录制状态($"音频设备异常：{消息}")
                                       Dim 端点 = If(Form总控台.当前音频源条目 Is Nothing OrElse Form总控台.当前音频源条目.默认设备,
                                           获取默认音频端点(), 当前录制音频端点)
                                       If Not String.IsNullOrWhiteSpace(端点) Then
                                           同步录制音频端点(端点, True)
                                       End If
                                   Case "dxgi_access_lost_rebuilt"
-                                      写日志($"显示画面捕获中断后已自动恢复。{格式化可选诊断消息(消息)}")
+                                      显示录制状态($"显示画面捕获中断后已自动恢复。{格式化可选诊断消息(消息)}")
                                   Case "wgc_resize"
-                                      写日志($"目标窗口尺寸已变化：{消息}")
+                                      显示录制状态($"目标窗口尺寸已变化：{消息}")
                                   Case "wgc_failed"
-                                      写日志($"窗口画面捕获失败：{消息}")
+                                      显示录制状态($"窗口画面捕获失败：{消息}")
                                   Case "wgc_closed"
-                                      写日志(If(String.IsNullOrWhiteSpace(消息), "目标窗口已关闭。", 消息))
+                                      显示录制状态(If(String.IsNullOrWhiteSpace(消息), "目标窗口已关闭。", 消息))
                                   Case "abort"
-                                      写日志("录制已异常中止。")
+                                      显示录制状态("录制已异常中止。")
                                   Case Else
-                                      If Not String.IsNullOrWhiteSpace(消息) Then 写日志($"录制组件提示：{消息}")
+                                      If Not String.IsNullOrWhiteSpace(消息) Then 显示录制状态($"录制组件提示：{消息}")
                               End Select
                           End Sub)
     End Sub

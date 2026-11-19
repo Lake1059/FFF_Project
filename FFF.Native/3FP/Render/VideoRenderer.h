@@ -1090,14 +1090,6 @@ private:
     // 停留样本并清零——这样被后来者取代、从未上屏的那些翻帧会把自己应得的那份计入带内，
     // 而不是让下一次停留凭空多出好几格。
     double pendingHoldRatio_ = 0.0;
-    // 结算一个停留样本所用的区间账，三个数各自独立数同一段区间：
-    //   intervalFlips_          —— 这段区间里有几次翻帧；
-    //   intervalAdvances_       —— 这些翻帧一共带进来几张新画面（生成号差值之和）；
-    //   intervalNeverComposited_—— 其中几次翻帧的 PresentRefreshCount 没有前进。
-    // 这三条就是它们的答案（2026-10-16 用 FPT_HOLD_TRACE 逐样本量的，不是推的）：
-    //   adv == flips 在每趟 ~500 个样本里成立（只有重启后那一个例外）⇒ "按新画面数开带"
-    //   与"按翻帧数开带"操作数相同，那个改法因此没做；
-    //   nc=1 的区间实测 meanHeld 4.61~4.80 对预测 2×ratio=4.80 ⇒ 累计口径是对的。
     std::uint32_t intervalFlips_ = 0;
     std::uint32_t intervalAdvances_ = 0;
     std::uint32_t intervalNeverComposited_ = 0;
@@ -1191,28 +1183,6 @@ private:
     // Why the last frame did not use VSR, for the status report.
     std::atomic<FFF3FPVideoSuperResolutionReason> videoSuperResolutionReason_{
         FFF3FPVideoSuperResolutionReason::NotRequested };
-    // Last reason written to the process log, so a steady state (e.g. VSR Off)
-    // logs its transition once instead of once per frame. Sentinelled with a
-    // value outside the enum.
-    std::atomic<std::uint32_t> videoSuperResolutionLoggedReason_{ 0xFFFFFFFFu };
-    // 临时诊断：VSR 步进账。只在 deviceMutex_ 保护的渲染路径上累加，所以是普通量；
-    // 每 300 帧经内核日志槽报一次，重建计数器用来判几何是否逐帧抖动。
-    std::int64_t vsrBuildTicks_{ 0 };
-    std::int64_t vsrBltTicks_{ 0 };
-    std::uint64_t vsrFrames_{ 0 };
-    std::uint64_t vsrRebuilds_{ 0 };
-    // 临时诊断：TrueHDR 步进账，与 VSR 同款但走 FPT_HDR_TRACE。两路抢同一条
-    // 视频处理器时，混在一份日志里分不清是谁在重建。
-    std::int64_t trueHdrBuildTicks_{ 0 };
-    std::int64_t trueHdrBltTicks_{ 0 };
-    std::uint64_t trueHdrFrames_{ 0 };
-    std::uint64_t trueHdrRebuilds_{ 0 };
-    // Geometry this frame *would* have used, in the *picture's* axes (see
-    // ApplySuperResolution). Published before the geometry gates so the host can
-    // explain a skip (0x0 said nothing about why NotUpscaling fired). Atomic
-    // because the status getter reads them on the host's thread. These are a
-    // diagnostic only: they must never be the cache key, or the comparison
-    // becomes a value against itself.
     std::atomic<std::uint32_t> videoSuperResolutionSourceWidth_{ 0 };
     std::atomic<std::uint32_t> videoSuperResolutionSourceHeight_{ 0 };
     std::atomic<std::uint32_t> videoSuperResolutionTargetWidth_{ 0 };
@@ -1264,7 +1234,6 @@ private:
     std::atomic<FFF3FPVideoAutoHdrReason> videoTrueHdrReason_{
         FFF3FPVideoAutoHdrReason::NotRequested };
     // Last reason written to the process log (dedup, sentinel outside enum).
-    std::atomic<std::uint32_t> videoTrueHdrLoggedReason_{ 0xFFFFFFFFu };
     // Geometry of the cached TrueHDR surface in the picture's axes. Atomic
     // because the status getter reads them on the host's thread.
     std::atomic<std::uint32_t> videoTrueHdrSourceWidth_{ 0 };

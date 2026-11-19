@@ -44,7 +44,6 @@
   ai-subtitles.json
   asr_worker.py
   qwen3_ort.py               ← NPU / Intel GPU 的逐段实现；缺它 ov-* 档全部跳过
-  npu_precheck.py            ← 可选，一条命令查本机有没有 NPU（见 §4.3）
   model\
     conv_frontend.onnx
     encoder.onnx  (或 encoder.int8.onnx …)
@@ -435,15 +434,6 @@ model.reshape({0: ov.PartialShape([(1, 1), (1, 3200), (128, 128)])})
 首次编译约 20 s（96 MB 的 vcl 编译器），结果写进 `runtime/npu-cache/`
 （OpenVINO `CACHE_DIR`），第二次启动直接命中。
 
-**怎么在没有 NPU 的机器上验证这条链**：`npu_precheck.py`。它用 `NPU_PLATFORM` 做
-离线编译，所以"包里编译器是否完整"和"这台机器有没有 NPU"可以分开回答：
-
-```
-runtime\python\python.exe npu_precheck.py --model-dir model
-```
-
-发包里的 `自检-NPU.bat` 就是它 + 金样本自检两步。
-
 **真机执行过的证据**（第三方，2026-10-29，Ultra 9 285H + Arc 140T + AI Boost，
 OpenVINO 2026.4.1；原文见 `docs/ai-subtitles/NPU-第三方实测-2026-10-29.md`）：
 
@@ -483,7 +473,6 @@ OpenVINO 2026.4.1；原文见 `docs/ai-subtitles/NPU-第三方实测-2026-10-29.
 | type | 字段 |
 | --- | --- |
 | `status` | `state` = `loading` / `ready` / `warning` / `error`，`detail` 是人话，`fatal` 标记是否致命 |
-| `selftest` | `ok` / `device` / `provider` / `detail` / `notes`（仅 `--selftest` 模式） |
 | `final` | `generation` / `start100ns` / `end100ns` / `text` / `language` / `target` / `matched` |
 | `stats` | `rtf` / `windows` / `dropped`（每 30 秒一条，退出前再一条累计值） |
 
@@ -508,14 +497,13 @@ worker 由本体托管：BelowNormal 优先级、无窗口、stdin 关闭后 2 �
 | 参数 | 默认 | 含义 |
 | --- | --- | --- |
 | `--model-dir` | **必填** | 模型目录 |
-| `--engine` | `auto` | `auto` / `llama` / `onnx`；`auto` 按目录里有没有 `*.gguf` 判。**写错不判死**：与文件事实不符时按文件走并记日志（清单字段只是备注） |
+| `--engine` | `auto` | `auto` / `llama` / `onnx`；`auto` 按目录里有没有 `*.gguf` 判。**写错不判死**：与文件事实不符时按实际模型文件选择引擎（清单字段只是备注） |
 | `--runtime-dir` | 空 | llama 引擎的原生运行时目录（含 `llama-server.exe` 与 17 个 `ggml-cpu-*.dll`）。空则猜 `模型目录/../runtime/vulkan`；llama 引擎下解析不出来直接 fatal |
-| `--device` | `auto` | 按引擎取值：<br>llama — `auto` / `gpu` / `cpu` / `ov-npu`<br>onnx — `auto` / `gpu` / `cuda` / `cpu` / `ov-npu` / `ov-gpu` / `ov-cpu`<br>未知值按 `auto` 并记日志。`npu` 是 `ov-npu` 的别名；onnx 上 `cuda` 在 llama 上归一为 `gpu`（`_normalize_request` 做这一步，别指望后端自己认）。**onnx 的 `gpu` 不是 `cuda` 的别名**：它按 `cuda → ov-gpu → cpu` 依次试，同一台机器上 NVIDIA 走 CUDA、Intel 走 OpenVINO |
+| `--device` | `auto` | 按引擎取值：<br>llama — `auto` / `gpu` / `cpu` / `ov-npu`<br>onnx — `auto` / `gpu` / `cuda` / `cpu` / `ov-npu` / `ov-gpu` / `ov-cpu`<br>未知值按 `auto`。`npu` 是 `ov-npu` 的别名；onnx 上 `cuda` 在 llama 上归一为 `gpu`（`_normalize_request` 做这一步，别指望后端自己认）。**onnx 的 `gpu` 不是 `cuda` 的别名**：它按 `cuda → ov-gpu → cpu` 依次试，同一台机器上 NVIDIA 走 CUDA、Intel 走 OpenVINO |
 | `--window` | 5.0 | 推理窗口秒 |
 | `--step` | 5.0 | 推进步长秒 |
 | `--language` | `auto` | 只作**判定目标**，不传给模型（两个引擎都没有语言输入口）。闸门强度按引擎不同，见下 |
 | `--threads` | 0 | 0 = `min(6, cpu_count)` |
-| `--selftest` | 关 | 只加载 + 自检 + 打一行 `selftest`，然后退出（排障用） |
 
 > **语言闸门的真实强度按后端分**：llama 与 OpenVINO（`ov-*`）的输出恒带
 > `language X<asr_text>` 模板，`X` 是模型自报的语言 ⇒ `matched` 有意义
@@ -528,9 +516,6 @@ worker 由本体托管：BelowNormal 优先级、无窗口、stdin 关闭后 2 �
 
 排障时最省事的组合：
 
-```
-python asr_worker.py --model-dir <目录> --engine llama --device gpu --selftest
-```
 
 一行 JSON 就能看到"最终跑在哪个设备、为什么没跑在首选设备、自检结论"。
 
