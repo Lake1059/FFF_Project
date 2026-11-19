@@ -240,6 +240,8 @@ Public NotInheritable Class 播放列表
 
     Public Function 从媒体扫描同目录Async(本地路径 As String,
                                       Optional 取消令牌 As CancellationToken = Nothing) As Task
+        ' 网络目录已经在打开时显式展开过，不再自动重扫；避免同一次打开触发第二轮 SMB 请求。
+        If 媒体路径.是网络路径(本地路径) Then Return Task.CompletedTask
         Dim 版本 As Integer
         Dim 可复用 As Boolean
         Dim 目录时间 As DateTime

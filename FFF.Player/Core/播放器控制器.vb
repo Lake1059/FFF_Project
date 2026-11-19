@@ -982,7 +982,9 @@ Public NotInheritable Class 播放器控制器
         Dim 目标 = 会话
         If 正在切换会话 Then Return
         If 目标 Is Nothing Then
-            If 光盘路径.媒体存在(最后打开文件路径) Then 打开媒体(最后打开文件路径)
+            ' 不从“上次打开”里自动恢复网络路径：恢复动作不是用户当下的显式选择。
+            If Not 媒体路径.是网络路径(最后打开文件路径) AndAlso
+               光盘路径.媒体存在(最后打开文件路径) Then 打开媒体(最后打开文件路径)
             Return
         End If
 

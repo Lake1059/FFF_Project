@@ -1037,7 +1037,10 @@ Public Class Form1
 
     Friend Shared Function 取得命令行文件(参数 As IEnumerable(Of String)) As String
         If 参数 Is Nothing Then Return String.Empty
-        Dim 文件路径 = 参数.FirstOrDefault(AddressOf 光盘路径.媒体存在)
+        ' 命令行/关联启动不自动探测网络路径：UNC 的 File.Exists 会触发 SMB 认证，
+        ' 网络位置必须由用户在打开对话框或拖入时显式选择。
+        Dim 文件路径 = 参数.Where(Function(x) Not 媒体路径.是网络路径(x)).
+            FirstOrDefault(AddressOf 光盘路径.媒体存在)
         Return If(String.IsNullOrEmpty(文件路径), String.Empty, Path.GetFullPath(文件路径))
     End Function
 
@@ -1054,20 +1057,66 @@ Public Class Form1
         打开或替换文件(文件路径)
     End Sub
 
-    Private Sub 打开或替换文件(路径 As IEnumerable(Of String))
+    Private Async Sub 打开或替换文件(路径 As IEnumerable(Of String))
         If 路径 Is Nothing Then Return
-        ' 文件夹先展开：普通目录枚举媒体，只有真正的 BDMV 布局才作为光盘路径保留。
-        Dim 存在的文件 = 媒体路径.展开打开路径(路径).
-            Where(Function(x) 光盘路径.媒体存在(x)).
+        Dim 输入 = 路径.Where(Function(x) Not String.IsNullOrWhiteSpace(x)).ToArray()
+        If 输入.Length = 0 Then Return
+
+        Dim 是网络路径 = 输入.Any(AddressOf 媒体路径.是网络路径)
+        Dim 存在的文件 As String()
+        If 是网络路径 Then
+            ' 网络目录的枚举放到后台线程；共享离线或服务器挂起时不能阻塞 UI。
+            Dim 取消 As New CancellationTokenSource()
+            Dim 扫描任务 = Task.Run(
+                Function() 媒体路径.展开打开路径(输入, 1000, 2, 取消.Token).ToArray(),
+                取消.Token)
+            Try
+                存在的文件 = Await 扫描任务.WaitAsync(TimeSpan.FromSeconds(10))
+            Catch ex As TimeoutException
+                取消.Cancel()
+                If Not 正在关闭 Then
+                    LakeUI.ExOverlayMsgBox(Me,
+                        "访问网络文件夹超过 10 秒，已停止本次扫描。请检查网络连接或共享是否可访问。",
+                        MsgBoxStyle.Exclamation Or MsgBoxStyle.OkOnly, "网络文件夹扫描超时")
+                End If
+                Return
+            Catch ex As OperationCanceledException
+                取消.Cancel()
+                If Not 正在关闭 Then
+                    LakeUI.ExOverlayMsgBox(Me,
+                        "本次网络文件夹扫描已取消。",
+                        MsgBoxStyle.Information Or MsgBoxStyle.OkOnly, "网络文件夹扫描已取消")
+                End If
+                Return
+            Catch ex As Exception
+                取消.Cancel()
+                If Not 正在关闭 Then
+                    LakeUI.ExOverlayMsgBox(Me,
+                        "无法读取网络文件夹：" & ex.Message,
+                        MsgBoxStyle.Exclamation Or MsgBoxStyle.OkOnly, "网络文件夹访问失败")
+                End If
+                Return
+            Finally
+                取消.Dispose()
+            End Try
+        Else
+            存在的文件 = 媒体路径.展开打开路径(输入).ToArray()
+        End If
+        If 正在关闭 Then Return
+
+        ' 网络路径已在后台扫描时验证过存在性；这里不要再对 UNC 同步 File.Exists，
+        ' 否则一次打开动作会二次触发 SMB 认证并可能卡住 UI。
+        Dim 过滤后 = 存在的文件.
+            Where(Function(x) 媒体路径.是网络路径(x) OrElse 光盘路径.媒体存在(x)).
             Select(Function(x) Path.GetFullPath(x)).
             Distinct(StringComparer.OrdinalIgnoreCase).
             ToArray()
-        If 存在的文件.Length = 0 Then Return
-        If 存在的文件.Length > 1 Then
-            添加并打开多个媒体文件(存在的文件)
+        If 过滤后.Length = 0 Then Return
+        If 过滤后.Length > 1 Then
+            添加并打开多个媒体文件(过滤后)
             Return
         End If
-        打开或替换单个文件(存在的文件(0))
+        打开或替换单个文件(过滤后(0))
     End Sub
 
     Private Sub 打开或替换文件(路径 As String)
