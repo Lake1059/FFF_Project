@@ -177,6 +177,11 @@ Public Class Form设置_设备与性能
     End Function
 
     Private Sub 初始化蓝牙区域()
+        ' 设计器会执行窗体构造函数。运行时控件没有设计器 Site，也不在 InitializeComponent
+        ' 里；参与设计器序列化会让复制/粘贴控件保存时抛 NullReferenceException。
+        ' 构造函数阶段 DesignMode 仍为 False，必须用 LicenseManager.UsageMode 判定。
+        If System.ComponentModel.LicenseManager.UsageMode =
+           System.ComponentModel.LicenseUsageMode.Designtime Then Return
         ' 运行时创建的 ModernPanel 不像 Designer 里的页内面板那样自动继承根面板透明，
         ' Transparent 底色在 GPU 合成时会露黑；显式使用与上游设置页一致的 24 底色。
         蓝牙控制行.BackColor = Color.FromArgb(24, 24, 24)
@@ -333,6 +338,8 @@ Public Class Form设置_设备与性能
     ''' 这里按固定列宽做一次显式布局，列宽随行高同比缩放；说明列吃掉剩余宽度。
     ''' </summary>
     Private Sub 布局蓝牙编码行()
+        If System.ComponentModel.LicenseManager.UsageMode =
+           System.ComponentModel.LicenseUsageMode.Designtime Then Return
         If 蓝牙编码行 Is Nothing OrElse 蓝牙编码行.IsDisposed Then Return
         Dim 行宽 = 蓝牙编码行.ClientSize.Width
         If 行宽 <= 0 Then Return
