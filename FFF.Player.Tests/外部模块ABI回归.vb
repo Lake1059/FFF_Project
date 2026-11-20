@@ -14,6 +14,7 @@ Friend Module 外部模块ABI回归
         失败数 = 0
         用例数 = 0
         测结构布局()
+        测内核快照与直通模式()
         测模块缺席()
         测中性模块()
         测假模块分支()
@@ -127,13 +128,53 @@ Friend Module 外部模块ABI回归
         检查整数("cpuSnap.domain offset", CInt(Marshal.OffsetOf(Of 原生CPU策略快照)(NameOf(原生CPU策略快照.放置域))), 8)
     End Sub
 
+    <DllImport(播放器原生接口.动态库名称, EntryPoint:="FFF3FP_GetSnapshot", ExactSpelling:=True,
+               CallingConvention:=CallingConvention.Cdecl)>
+    Private Function 读取快照缓冲(会话 As 播放器原生句柄, 快照 As IntPtr) As 原生播放器结果
+    End Function
+
+    Private Sub 测内核快照与直通模式()
+        Const 前缀大小 As Integer = 512
+        Using 会话 As New 播放器会话(New 播放器配置 With {.解码器 = 解码模式.CPU})
+            Dim 句柄 = 会话.取得句柄()
+            Dim 缓冲 = Marshal.AllocHGlobal(前缀大小 + 8)
+            Try
+                Const 哨兵 As Long = &H102030405060708L
+                Marshal.WriteInt64(缓冲, 前缀大小, 哨兵)
+                Marshal.WriteInt32(缓冲, 前缀大小)
+                Marshal.WriteInt32(缓冲, 4, 21)
+                检查整数("v21 快照：接受前缀", CInt(读取快照缓冲(句柄, 缓冲)), 0)
+                检查整数("v21 快照：报告前缀大小", Marshal.ReadInt32(缓冲), 前缀大小)
+                检查整数("v21 快照：保留布局版本", Marshal.ReadInt32(缓冲, 4), 21)
+                检查长整数("v21 快照：帧号", Marshal.ReadInt64(缓冲, 40), -1L)
+                检查长整数("v21 快照：不写入前缀之外", Marshal.ReadInt64(缓冲, 前缀大小), 哨兵)
+                Marshal.WriteInt32(缓冲, 前缀大小 - 1)
+                检查整数("v21 快照：拒绝短缓冲", CInt(读取快照缓冲(句柄, 缓冲)), -1)
+                Marshal.WriteInt32(缓冲, 前缀大小)
+                Marshal.WriteInt32(缓冲, 4, 99)
+                检查整数("快照：拒绝未知版本", CInt(读取快照缓冲(句柄, 缓冲)), -1)
+            Finally
+                Marshal.FreeHGlobal(缓冲)
+            End Try
+
+            检查整数("音频直通：重复设置默认模式成功",
+                   CInt(播放器原生接口.FFF3FP_SetAudioPassthroughMode(句柄, 0UI)), 0)
+            检查整数("音频直通：有效模式成功",
+                   CInt(播放器原生接口.FFF3FP_SetAudioPassthroughMode(句柄, 2UI)), 0)
+            检查整数("音频直通：重复设置非默认模式成功",
+                   CInt(播放器原生接口.FFF3FP_SetAudioPassthroughMode(句柄, 2UI)), 0)
+            检查整数("音频直通：拒绝未知模式",
+                   CInt(播放器原生接口.FFF3FP_SetAudioPassthroughMode(句柄, 3UI)), -1)
+        End Using
+    End Sub
+
     Private Sub 测模块缺席()
         Dim 旧目录 = Environment.GetEnvironmentVariable(外部模块接口.模块目录环境变量)
         Dim 旧文件 = Environment.GetEnvironmentVariable(外部模块接口.模块文件名环境变量)
         Dim 空目录 = IO.Path.Combine(IO.Path.GetTempPath(), "FFF3FP-empty-" & Guid.NewGuid().ToString("N"))
         Try
             Environment.SetEnvironmentVariable(外部模块接口.模块目录环境变量, 空目录)
-            Environment.SetEnvironmentVariable(外部模块接口.模块文件名环境变量, Nothing)
+            Environment.SetEnvironmentVariable(外部模块接口.模块文件名环境变量, IO.Path.GetFileName(空目录) & ".dll")
             Dim 原因 As String = Nothing
             Dim 形态 = 外部模块接口.探测(原因)
             检查文本("模块缺席：形态", 形态.ToString(), 外部模块接口.模块在场形态.缺席.ToString())
@@ -312,7 +353,55 @@ Friend Module 外部模块ABI回归
         检查布尔("模块在盘上", 外部模块接口.模块在盘上(目录), True)
         检查文本("显示名称", 外部模块接口.显示名称(目录), "假外部模块")
         Environment.SetEnvironmentVariable("FFF_TEST_MODULE_BRANCH", 旧分支)
+        测同级模块发现(目录)
+        测处理器会话交接()
         测假模块生命周期(7)
+    End Sub
+
+    Private Sub 测同级模块发现(假目录 As String)
+        Dim 文件名 = "FFF3FP-" & Guid.NewGuid().ToString("N") & ".Test.dll"
+        Dim 目标 = IO.Path.Combine(AppContext.BaseDirectory, 文件名)
+        Dim 原目录 = Environment.GetEnvironmentVariable(外部模块接口.模块目录环境变量)
+        Dim 原名 = Environment.GetEnvironmentVariable(外部模块接口.模块文件名环境变量)
+        Dim 原值 = Environment.GetEnvironmentVariable("FFF_TEST_MODULE_BRANCH")
+        IO.File.Copy(IO.Path.Combine(假目录, "FFF.HDRdp.Test.dll"), 目标)
+        Try
+            Environment.SetEnvironmentVariable("FFF_TEST_MODULE_BRANCH", "7")
+            Environment.SetEnvironmentVariable(外部模块接口.模块目录环境变量, Nothing)
+            Environment.SetEnvironmentVariable(外部模块接口.模块文件名环境变量, Nothing)
+            Dim 原因 As String = Nothing
+            Using 件 = 外部模块接口.尝试装载(原因)
+                检查文本("同级模块：自动发现", If(件?.描述符.Id, 原因), "test.fake.external")
+            End Using
+            Environment.SetEnvironmentVariable(外部模块接口.模块文件名环境变量, IO.Path.GetFileNameWithoutExtension(文件名))
+            Using 件 = 外部模块接口.尝试装载(原因)
+                检查文本("同级模块：按名称发现", If(件?.描述符.Id, 原因), "test.fake.external")
+            End Using
+        Finally
+            Environment.SetEnvironmentVariable("FFF_TEST_MODULE_BRANCH", 原值)
+            Environment.SetEnvironmentVariable(外部模块接口.模块目录环境变量, 原目录)
+            Environment.SetEnvironmentVariable(外部模块接口.模块文件名环境变量, 原名)
+            IO.File.Delete(目标)
+        End Try
+    End Sub
+
+    Private Sub 测处理器会话交接()
+        Dim 原因 As String = Nothing
+        Dim 旧句柄 As New IntPtr(1), 新句柄 As New IntPtr(2)
+        Using 旧件 = 装载假模块(7, 原因), 新件 = 装载假模块(7, 原因)
+            检查布尔("处理器交接：两实例已装载", 旧件 IsNot Nothing AndAlso 新件 IsNot Nothing, True)
+            If 旧件 Is Nothing OrElse 新件 Is Nothing Then Return
+            检查布尔("处理器交接：旧会话启动", 旧件.启动处理器(旧句柄), True)
+            检查布尔("处理器交接：同一会话重复启动", 旧件.启动处理器(旧句柄), True)
+            检查布尔("处理器交接：新会话接管", 新件.启动处理器(新句柄), True)
+            Dim 状态 As 注入状态 = Nothing
+            检查布尔("处理器交接：旧会话无权读取新状态", 旧件.读取注入状态(状态), False)
+            检查布尔("处理器交接：旧会话无权停泵", 旧件.停止处理器(旧句柄), False)
+            旧件.Dispose()
+            检查布尔("处理器交接：释放旧会话后新泵仍运行",
+                   新件.读取注入状态(状态) AndAlso 状态.运行 = 1UI, True)
+            检查布尔("处理器交接：新会话停止自己的泵", 新件.停止处理器(新句柄), True)
+        End Using
     End Sub
 
     Private Sub 测假模块生命周期(分支 As Integer)

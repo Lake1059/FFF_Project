@@ -55,14 +55,15 @@ using PlayerMediaText::CodecTagName;
 constexpr std::int64_t TicksPerSecond = 10'000'000;
 // The published snapshot carries its own version, separate from PlayerApiVersion:
 // the export surface is append-only and rarely moves, while this number moves
-// every time the struct grows. GetSnapshot rejects any other value outright, so
-// it has to be one symbol rather than a literal repeated at the publish site and
-// the gate -- a mismatch between those two reads as "every snapshot call fails"
-// with no other symptom.
+// every time the struct grows. Keep one current version for publication and
+// requests. The explicitly supported older layout is a bounded prefix read.
 // 22 -> 23: FFF3FPSnapshot gained the audio bitstream passthrough diagnostics at
 // its tail (audioPassthroughActive/Mode/Codec). Hosts must be
 // rebuilt in lockstep with the header; the export surface itself is untouched.
 constexpr std::uint32_t SnapshotVersion = 23;
+constexpr std::uint32_t SnapshotPrefixVersion = 21;
+constexpr std::uint32_t SnapshotPrefixSize = offsetof(FFF3FPSnapshot, corruptPackets);
+static_assert(SnapshotPrefixSize == 512, "v21 snapshot prefix changed");
 // Every snapshot timing field counts 100 ns units; this keeps the new split
 // counters from repeating the duration_cast boilerplate at each site.
 inline std::uint64_t To100ns(const std::chrono::steady_clock::duration& d) noexcept {
@@ -310,8 +311,8 @@ std::size_t VideoFrameQueueLimit(const std::deque<AVFrame*>& queue,
 // data, re-resolved on display/target changes but never per frame) -- the info
 // surfaces read file data, so a frame without HDR10+ SEI must not pull the
 // reported caliber back while the next frame pushes it forward again. Only the
-// ST 2094-40 diagnostics blocks stay per-frame: they are deliberately live
-// readouts of the metadata currently on screen.
+// per-frame metadata diagnostics and the external transform path are live
+// readouts of the renderer state.
 void ApplyHdrState(FFF3FPSnapshot& snapshot, const HdrFrameState& stream,
     const HdrFrameState& frame) noexcept {
     const auto toUnsigned = [](const float value, const float scale = 1.0f) {
@@ -322,11 +323,14 @@ void ApplyHdrState(FFF3FPSnapshot& snapshot, const HdrFrameState& stream,
     };
     snapshot.hdrFormat = stream.format;
     snapshot.compatibleHdrFormats = stream.compatibility;
-    snapshot.hdrProcessingPath = stream.processingPath;
+    // The source format stays stream-scoped. External transforms are a live
+    // processing path and can only be reported while the renderer uses one.
+    const bool externalTransform = frame.dynamic.externalTransform;
+    snapshot.hdrProcessingPath = externalTransform ? frame.processingPath : stream.processingPath;
     snapshot.hdrDpProfile = 0;  // deprecated: no longer classified
     snapshot.hdrDpLevel = 0;  // deprecated: no longer classified
     snapshot.hasHdrDpMetadata = 0;  // deprecated: no longer classified
-    snapshot.dynamicHdrMetadataActive = stream.dynamicMetadata ? 1u : 0u;
+    snapshot.dynamicHdrMetadataActive = (stream.dynamicMetadata || externalTransform) ? 1u : 0u;
     snapshot.hdrFallbackActive = stream.fallback ? 1u : 0u;
     snapshot.displayMinLuminanceMilliNits = toUnsigned(stream.display.minimumNits, 1000.0f);
     snapshot.displayPeakNits = toUnsigned(stream.display.maximumNits);
@@ -4076,8 +4080,19 @@ std::uint64_t PlayerSession::PresentationCounter() const noexcept {
     return videoRenderer_.SwapChainPresents();
 }
 
-FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
-    if (output.size < sizeof(FFF3FPSnapshot) || output.version != SnapshotVersion) return FFFResult::InvalidArgument;
+FFFResult PlayerSession::GetSnapshot(void* destination) const noexcept {
+    // v21 consumers may provide only the original prefix, so read just the
+    // common header before treating the buffer as the current structure.
+    std::uint32_t header[2];
+    std::memcpy(header, destination, sizeof(header));
+    const auto [capacity, version] = header;
+    const bool prefixRead = version == SnapshotPrefixVersion;
+    if (prefixRead ? capacity < SnapshotPrefixSize
+                   : (version != SnapshotVersion || capacity < sizeof(FFF3FPSnapshot)))
+        return FFFResult::InvalidArgument;
+
+    FFF3FPSnapshot full;
+    auto& output = prefixRead ? full : *static_cast<FFF3FPSnapshot*>(destination);
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
     // Presentation completes asynchronously on the dedicated swap-chain owner;
     // expose its live counters even if no later decode-frame snapshot was needed.
@@ -4152,6 +4167,11 @@ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     output.audioDroppedOverlapFrames = audioRuntimeState_.droppedOverlapFrames.load(std::memory_order_relaxed);
     if (output.selectedAudioStream >= 0 || output.isExternalAudio != 0)
         output.audioPosition100ns = output.position100ns;
+    if (prefixRead) {
+        output.size = SnapshotPrefixSize;
+        output.version = SnapshotPrefixVersion;
+        std::memcpy(destination, &output, SnapshotPrefixSize);
+    }
     return FFFResult::Success;
 }
 
@@ -5124,7 +5144,13 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     if (DiscInput::IsDiscPath(path)) {
         try {
             disc_ = std::make_unique<DiscInput>(discCancel_);
-            if (!disc_->Open(path) || !disc_->OpenDemux(&format_)) {
+            bool opened = disc_->Open(path) && disc_->OpenDemux(&format_, disc_->StartedAtTopMenu());
+            if (!opened && disc_->StartedAtTopMenu() && !discCancel_.load()) {
+                disc_->CloseDemux(&format_);
+                disc_ = std::make_unique<DiscInput>(discCancel_);
+                opened = disc_->Open(path, false) && disc_->OpenDemux(&format_);
+            }
+            if (!opened) {
                 openResult = FFFResult::NotSupported; openError = disc_->Error();
             } else discOpened_.store(true, std::memory_order_release);
         } catch (...) { openResult = FFFResult::NativeFailure; openError = "Could not open the disc."; }
@@ -5395,8 +5421,13 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     {
         std::lock_guard lock(mutex_);
         bool declaredDuration = false;
-        snapshot_.duration100ns = IsLoopAwareImageDemuxer(format_->iformat)
-            ? 0 : EstimateDuration100ns(format_, &declaredDuration);
+        if (disc_ && disc_->Duration() > 0) {
+            snapshot_.duration100ns = disc_->Duration();
+            declaredDuration = true;
+        } else {
+            snapshot_.duration100ns = IsLoopAwareImageDemuxer(format_->iformat)
+                ? 0 : EstimateDuration100ns(format_, &declaredDuration);
+        }
         // The refill accumulator is per-media state like the duration it feeds;
         // restart it here so the next media grows from its own packets
         // (C-DURATION-REFILL@1 §3).
@@ -6453,6 +6484,8 @@ void PlayerSession::PumpPlayback() noexcept {
     ++skipWindowIterations_;
     if (videoFrameQueue_.size() < MinimumQueuedVideoFrames) ++skipWindowStarvedIterations_;
     if (disc_) {
+        disc_->TickMenu();
+        if (disc_->Failed()) { Fail(FFFResult::FfmpegFailure, disc_->Error(), "disc-navigation"); return; }
         PublishDisc();
         if (disc_->RestartRequired() && !disc_->Held()) {
             if (!ReopenDiscDemux()) return;

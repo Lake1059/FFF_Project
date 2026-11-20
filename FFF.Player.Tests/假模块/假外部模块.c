@@ -120,19 +120,20 @@ static void dummy_release(void* context) { (void)context; }
 static void dummy_start(void* context) { (void)context; }
 static void dummy_stop(void* context) { (void)context; }
 
-static uint32_t running_state = 1;
+static void* processor_session;
 
 static int processor_start(void* context, void* session)
 {
-    (void)context; (void)session;
-    running_state = 1;
+    (void)context;
+    if (processor_session != NULL || session == NULL) return 3;
+    processor_session = session;
     return 0;
 }
 
 static void processor_stop(void* context)
 {
     (void)context;
-    running_state = 0;
+    processor_session = NULL;
 }
 
 static void processor_status(void* context, ProcessorStatus* status)
@@ -141,7 +142,7 @@ static void processor_status(void* context, ProcessorStatus* status)
     if (!status) return;
     status->size = (uint32_t)sizeof(ProcessorStatus);
     status->version = 1;
-    status->running = running_state;
+    status->running = processor_session != NULL;
     status->processedFrames = 9;
     status->unchangedFrames = 3;
     status->skippedFrames = 2;

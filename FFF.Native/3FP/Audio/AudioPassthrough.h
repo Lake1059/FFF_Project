@@ -54,7 +54,7 @@ public:
     FFFResult InstallTable(const FFF3FPAudioPassthroughApi* api) noexcept;
     bool TableInstalled() const noexcept;
     // FFF3FP_PT_MODE_*. Takes effect at the next track open; the active track is
-    // not re-opened mid-flight (contract header). Returns true when it changed.
+    // not re-opened mid-flight (contract header). Returns true for every valid mode.
     bool SetMode(std::uint32_t mode) noexcept;
     std::uint32_t Mode() const noexcept;
 

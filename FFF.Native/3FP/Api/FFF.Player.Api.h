@@ -1172,6 +1172,8 @@ FFF3FP_API FFFResult FFF3FP_GetAudioBinauralStatus(FFF3FPHandle player,
 FFF3FP_API FFFResult FFF3FP_SetVolume(FFF3FPHandle player, float volume, std::uint32_t muted) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetTimedTextLayer(FFF3FPHandle player,
     const FFF3FPTimedTextLayer* layer) noexcept;
+// Accepts the current layout or the v21 (512-byte) prefix. A v21 request
+// reports its own size/version and writes only that prefix.
 FFF3FP_API FFFResult FFF3FP_GetSnapshot(FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept;
 // Live swap-chain presentation counter. Append-only export: the export surface
 // does not move for additive entries, so PlayerApiVersion and the snapshot
@@ -1866,15 +1868,9 @@ FFF3FP_API FFFResult FFF3FP_GetViewRotation(FFF3FPHandle player,
 // exports above: resolve it dynamically (GetProcAddress) and treat it as absent as a
 // missing optional feature, not a broken session.
 //
-// The snapshot field it reports through is not optional, and that is the part with
-// teeth: GetSnapshot rejects a caller whose declared size is smaller than
-// sizeof(FFF3FPSnapshot), so growing the struct forces every snapshot consumer to be
-// rebuilt against this header in lockstep with the snapshot's own version. That number
-// is separate from PlayerApiVersion -- the export surface is append-only and rarely
-// moves, the snapshot version moves whenever a field is appended -- and the bump belongs
-// to whichever change grows the struct, not to the feature that adds one field. A host
-// built against the older header failing with InvalidArgument is the contract working,
-// not a defect.
+// Snapshot consumers that need the current fields request the current version and
+// sizeof(FFF3FPSnapshot). The snapshot version is independent of PlayerApiVersion
+// and changes when the snapshot grows. Older layout support is explicit.
 //
 // Positive = audio plays later than the video (lip-sync correction). Bounded to
 // +/- 10 minutes; outside that bound, or called outside Ready/Playing/Paused/Ended, the

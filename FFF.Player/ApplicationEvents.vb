@@ -26,6 +26,8 @@ Namespace My
             启动期CPU放置开始()
             启动期拉高优先级()
             启动期预取大件()
+            ' 湖界必须先选定渲染后端，设备工厂才允许预热。
+            LakeUI.GlobalOptions.SetRenderBackendAsync(LakeUI.RenderBackend.Direct3D11).GetAwaiter().GetResult()
             启动期预热GPU设备()
             记录初次启动命令行(e.CommandLine)
         End Sub

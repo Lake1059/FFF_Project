@@ -2,12 +2,8 @@
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
     [string]$OutputDirectory = "",
-    # 目标框架。留空 = 用播放器默认值（当前 net11.0-windows，不带 Windows SDK 版本后缀）。
-    # 旧口径带 SDK 版本是为了 SMTC 的 WinRT 投影；SMTC 迁到内核 COM ABI 后宿主不再需要。
-    # 需要老口径/别的大版本时显式覆盖：发布3FP.ps1 -NetTFM net10.0-windows10.0.26100.0
+    # 可覆盖项目默认的 .NET 11 Windows 目标框架。
     [string]$NetTFM = "",
-    # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
-    [string]$LakeUITfm = "",
     # 跨产品框架配对：默认拒绝不同 .NET 运行时版本，见 Resolve-Toolchain.ps1。
     [switch]$AllowFrameworkMismatch,
     # IAMF 空间音频：默认强制携带（缺料即报错，而非静默编译成无 IAMF 内核）。
@@ -76,7 +72,6 @@ try {
     # TFM 参数包：留空时展开为 0 个参数，命令行与改动前逐字符一致。
     $TfmArgs = @()
     if (-not [string]::IsNullOrWhiteSpace($NetTFM)) { $TfmArgs += "-p:NetTFM=$NetTFM" }
-    if (-not [string]::IsNullOrWhiteSpace($LakeUITfm)) { $TfmArgs += "-p:LakeUITfm=$LakeUITfm" }
     $BodyOnlyArgs = if ($IncludeExternalRuntime) { "-p:BodyOnly=false" } else { "-p:BodyOnly=true" }
     & $DotNet publish (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
         -c $Configuration -r win-x64 --self-contained false -o $StagingDirectory `

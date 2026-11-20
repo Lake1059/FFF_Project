@@ -28,10 +28,13 @@ public:
     explicit DiscInput(std::atomic<bool>& cancel);
     ~DiscInput();
     static bool IsDiscPath(const std::string& path);
-    bool Open(const std::string& path);
-    bool OpenDemux(AVFormatContext** format);
+    bool Open(const std::string& path, bool preferTopMenu = true);
+    bool StartedAtTopMenu() const { return startedAtTopMenu_; }
+    bool OpenDemux(AVFormatContext** format, bool openingTopMenu = false);
     void CloseDemux(AVFormatContext** format);
     bool Navigate(Command command, int value, int y);
+    void TickMenu();
+    bool MenuActivationPending() const { return activation_.deadline != 0; }
     bool Seek(std::int64_t position100ns);
     bool PollHold(bool drained);
     bool Held() const { return held_; }
@@ -63,7 +66,10 @@ private:
     void ResetSubtitleDecoder();
     void UpdateBluRayTitle(unsigned playlist);
     void HandleBluRayEvent(unsigned event, unsigned parameter);
+    bool CallTopMenu();
+    int ActivateMenuButton(Command command, int x, int y);
     void PollBluRayNavigation();
+    void ResetAfterNavigationJump();
     void Barrier(bool restart);
     std::atomic<bool>& cancel_;
     bluray* bd_ = nullptr;
@@ -94,6 +100,12 @@ private:
     std::vector<std::uint8_t> pendingRead_;
     unsigned invalidReads_ = 0;
     std::uint64_t openDeadline_ = 0;
-    bool startupMenuPending_ = false;
-    bool startupTitleReached_ = false;
+    bool topMenuSupported_ = false;
+    bool startedAtTopMenu_ = false;
+    std::uint64_t nextMenuTick_ = 0;
+    struct PendingActivation {
+        Command command = Command::Activate;
+        int x = 0, y = 0;
+        std::uint64_t deadline = 0;
+    } activation_;
 };

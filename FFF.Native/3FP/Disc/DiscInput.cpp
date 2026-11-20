@@ -45,15 +45,15 @@ bool DiscInput::IsDiscPath(const std::string& path) {
             std::filesystem::is_directory(p);
     } catch (...) { return false; }
 }
-bool DiscInput::Open(const std::string& path) {
+bool DiscInput::Open(const std::string& path, bool preferTopMenu) {
     auto p = LocalPath(path);
     auto extension = p.extension().wstring();
     std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
-    if (extension == L".bdmv") p = p.parent_path();
+    if (extension == L".bdmv" && !std::filesystem::is_directory(p)) p = p.parent_path();
     if (p.filename().empty() && p != p.root_path()) p = p.parent_path();
     auto name = p.filename().wstring();
     std::transform(name.begin(), name.end(), name.begin(), ::towupper);
-    if (name == L"BDMV") p = p.parent_path();
+    if (name == L"BDMV" && !std::filesystem::is_directory(p / L"BDMV")) p = p.parent_path();
     auto source = Utf8Path(p);
     bd_ = bd_open(source.c_str(), nullptr);
     if (bd_) {
@@ -70,9 +70,12 @@ bool DiscInput::Open(const std::string& path) {
                 error_ = "This disc uses BD-J menus, which are not available in this build."; return false;
             }
             titleCount_ = info->num_hdmv_titles;
-            startupMenuPending_ = info->top_menu_supported != 0;
+            topMenuSupported_ = !info->no_menu_support && info->top_menu_supported;
             bd_register_overlay_proc(bd_, this, OverlayCallback);
             if (!bd_play(bd_)) { error_ = "The Blu-ray navigation VM could not start."; return false; }
+            // Enter the top menu before reads execute the First Play commands.
+            // The session retries with First Play if the menu cannot open a demuxer.
+            startedAtTopMenu_ = preferTopMenu && topMenuSupported_ && bd_menu_call(bd_, -1) == 1;
             aspect_ = 16.0 / 9;
             return true;
         }
@@ -84,7 +87,7 @@ int DiscInput::InterruptCallback(void* context) {
     return self->cancel_.load() || (self->opening_ && GetTickCount64() > self->openDeadline_) ? 1 : 0;
 }
 
-bool DiscInput::OpenDemux(AVFormatContext** format) {
+bool DiscInput::OpenDemux(AVFormatContext** format, bool openingTopMenu) {
     if (io_) { av_freep(&io_->buffer); avio_context_free(&io_); }
     auto* buffer = static_cast<unsigned char*>(av_malloc(32768));
     if (!buffer) return false;
@@ -99,12 +102,21 @@ bool DiscInput::OpenDemux(AVFormatContext** format) {
     (*format)->probesize = 256 * 1024;
     (*format)->max_analyze_duration = 500000;
     opening_ = true;
-    openDeadline_ = GetTickCount64() + 15000;
+    openDeadline_ = GetTickCount64() + (openingTopMenu ? 4000 : 15000);
     auto result = avformat_open_input(format, nullptr, av_find_input_format(bd_ ? "mpegts" : "mpeg"), nullptr);
     if (result >= 0) result = avformat_find_stream_info(*format, nullptr);
     opening_ = false;
     restart_ = false;
+    if (failed_) return false;
     if (result < 0) { error_ = "Could not inspect audio/video at the current disc position."; return false; }
+    if (openingTopMenu) {
+        const auto video = av_find_best_stream(*format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        const auto* parameters = video >= 0 ? (*format)->streams[video]->codecpar : nullptr;
+        if (!parameters || parameters->width <= 0 || parameters->height <= 0) {
+            error_ = "The Blu-ray top menu did not open a usable video stream.";
+            return false;
+        }
+    }
     return true;
 }
 void DiscInput::CloseDemux(AVFormatContext** format) {
@@ -138,17 +150,14 @@ int DiscInput::Read(std::uint8_t* buffer, int size) {
             HandleBluRayEvent(event.event, event.param);
             if (failed_) return AVERROR(EIO);
             if (result > 0) {
-                invalidReads_ = 0;
-                if (startupMenuPending_ && startupTitleReached_) {
-                    // First Play initializes the disc VM. Prefer its top menu once
-                    // that sequence completes, before presenting the main title.
-                    if (bd_menu_call(bd_, -1)) {
-                        startupMenuPending_ = false;
-                        Barrier(true);
-                        if (held_) return AVERROR_EOF;
-                        continue;
-                    }
+                // A read at a clip boundary can return bytes from the new clip
+                // with PLAYITEM before the queued DISCONTINUITY. Handle the rest
+                // of that read's events before handing its bytes to the demuxer.
+                while (bd_get_event(bd_, &event)) {
+                    HandleBluRayEvent(event.event, event.param);
+                    if (failed_) return AVERROR(EIO);
                 }
+                invalidReads_ = 0;
                 if (held_) { pendingRead_.assign(buffer, buffer + result); return AVERROR_EOF; }
                 return result;
             }
@@ -170,13 +179,11 @@ void DiscInput::HandleBluRayEvent(unsigned event, unsigned parameter) {
     case BD_EVENT_ERROR: case BD_EVENT_ENCRYPTED: case BD_EVENT_READ_ERROR:
         failed_ = true; error_ = "Blu-ray navigation or disc read error: " + std::to_string(event); break;
     case BD_EVENT_TITLE:
+        if (title_ != static_cast<int>(parameter)) activation_ = {};
         title_ = parameter;
-        // Title 1 can be reported while First Play is still running. Title 0
-        // is the boundary after which the top-menu call is allowed.
-        if (parameter == 0) startupTitleReached_ = true;
         break;
     case BD_EVENT_PLAYLIST:
-        if (playlist_ != parameter) Barrier(true);
+        if (playlist_ != parameter) { activation_ = {}; Barrier(true); }
         playItem_ = 0; UpdateBluRayTitle(parameter); break;
     case BD_EVENT_PLAYITEM: playItem_ = parameter; UpdateBluRayTitle(playlist_); break;
     case BD_EVENT_CHAPTER: chapter_ = parameter; break;
@@ -185,7 +192,7 @@ void DiscInput::HandleBluRayEvent(unsigned event, unsigned parameter) {
     case BD_EVENT_PG_TEXTST: bluraySubtitleEnabled_ = parameter != 0; ClearSubtitle(); break;
     case BD_EVENT_MENU:
         menu_ = parameter != 0;
-        if (menu_) startupMenuPending_ = false;
+        if (!menu_) activation_ = {};
         break;
     case BD_EVENT_STILL_TIME:
         stillSeconds_ = parameter; stillStarted_ = 0; held_ = true; break;
@@ -204,13 +211,33 @@ void DiscInput::PollBluRayNavigation() {
         HandleBluRayEvent(event.event, event.param);
         if (failed_) break;
     }
-    if (restart_) {
-        held_ = ended_ = wait_ = false;
-        stillSeconds_ = -1;
-        pendingRead_.clear();
-        ClearSubtitle();
+    if (restart_) ResetAfterNavigationJump();
+}
+
+void DiscInput::ResetAfterNavigationJump() {
+    held_ = ended_ = wait_ = false;
+    stillSeconds_ = -1;
+    pendingRead_.clear();
+    activation_ = {};
+    restart_ = true;
+    ClearSubtitle();
+}
+
+void DiscInput::TickMenu() {
+    const auto now = GetTickCount64();
+    if (!menu_ || failed_ || restart_ || now < nextMenuTick_) return;
+    nextMenuTick_ = now + 16;
+    // Advance button effects independently of transport reads, including during stills.
+    PollBluRayNavigation();
+    if (failed_ || !MenuActivationPending()) return;
+    if (now >= activation_.deadline) {
+        activation_ = {};
+    } else if (ActivateMenuButton(activation_.command, activation_.x, activation_.y) != 0) {
+        activation_ = {};
+        PollBluRayNavigation();
     }
 }
+
 bool DiscInput::PollHold(bool drained) {
     if (!held_ || !drained) return false;
     if (stillSeconds_ >= 0) {
@@ -263,41 +290,80 @@ void DiscInput::SelectAudioStream(AVFormatContext* format, int stream) {
 bool DiscInput::Seek(std::int64_t value) {
     if (menu_ || value < 0) return false;
     bool ok = bd_ && bd_seek_time(bd_, value * 9 / 1000) >= 0;
-    if (ok) { held_ = ended_ = wait_ = false; stillSeconds_ = -1; restart_ = true; ClearSubtitle(); }
+    if (ok) ResetAfterNavigationJump();
     return ok;
 }
-bool DiscInput::Navigate(Command command, int value, int y) {
-    if (command == Command::Subtitle) { subtitleSelection_ = value; ClearSubtitle(); }
-    bool ok = false, jump = false;
-    if (bd_) {
-        int key = -1;
-        switch (command) {
-        case Command::Up: key = BD_VK_UP; break;
-        case Command::Down: key = BD_VK_DOWN; break;
-        case Command::Left: key = BD_VK_LEFT; break;
-        case Command::Right: key = BD_VK_RIGHT; break;
-        case Command::Activate: key = BD_VK_ENTER; jump = true; break;
-        case Command::PopupMenu: key = BD_VK_POPUP; break;
-        case Command::Back: key = BD_VK_ROOT_MENU; jump = true; break;
-        case Command::RootMenu: ok = bd_menu_call(bd_, -1) != 0; jump = true; break;
-        case Command::MouseMove: ok = bd_mouse_select(bd_, -1, value, y) >= 0; break;
-        case Command::MouseActivate:
-            bd_mouse_select(bd_, -1, value, y); key = BD_VK_MOUSE_ACTIVATE; jump = true; break;
-        case Command::Title: ok = value > 0 && bd_play_title(bd_, value); jump = true; break;
-        case Command::Chapter:
-            if (value > 0 && value <= static_cast<int>(chapters_.size())) return Seek(chapters_[value - 1]);
-            break;
-        case Command::Audio: ok = bd_select_stream(bd_, BLURAY_AUDIO_STREAM, value, 1) >= 0; break;
-        case Command::Subtitle: ok = bd_select_stream(bd_, BLURAY_PG_TEXTST_STREAM, std::max(1, value), value > 0) >= 0; break;
-        }
-        if (key >= 0) ok = bd_user_input(bd_, -1, key) >= 0;
+
+bool DiscInput::CallTopMenu() {
+    if (!topMenuSupported_) return false;
+    // Explicitly asking for the player menu also works during a masked intro.
+    // Scope the restriction change to this one call.
+    if (!bd_set_player_setting(bd_, BLURAY_PLAYER_SETTING_UO_RESTRICTION_LEVEL,
+            BLURAY_PLAYER_SETTING_UO_RESTRICTION_DISABLED)) return false;
+    const bool opened = bd_menu_call(bd_, -1) == 1;
+    bd_set_player_setting(bd_, BLURAY_PLAYER_SETTING_UO_RESTRICTION_LEVEL,
+        BLURAY_PLAYER_SETTING_UO_RESTRICTION_RELAXED);
+    return opened;
+}
+
+// Zero defers a click rejected during a menu effect. A mouse miss is final.
+int DiscInput::ActivateMenuButton(Command command, int x, int y) {
+    if (command == Command::MouseActivate) {
+        if (x < 0 || y < 0 || x >= graphics_.width || y >= graphics_.height) return -1;
+        const auto hit = bd_mouse_select(bd_, -1, x, y);
+        if (hit <= 0) return hit < 0 ? 0 : -1;
+        return bd_user_input(bd_, -1, BD_VK_MOUSE_ACTIVATE);
     }
-    if (bd_ && ok) {
+    return bd_user_input(bd_, -1, BD_VK_ENTER);
+}
+
+bool DiscInput::Navigate(Command command, int value, int y) {
+    if (!bd_ || failed_) return false;
+    if (command == Command::RootMenu || command == Command::Back || command == Command::Title) {
+        const auto jumped = command == Command::Title ? value > 0 && bd_play_title(bd_, value) == 1 : CallTopMenu();
+        if (!jumped) return false;
+        ResetAfterNavigationJump();
         PollBluRayNavigation();
         return !failed_;
     }
-    if (ok && jump) { held_ = ended_ = wait_ = false; stillSeconds_ = -1; restart_ = true; pendingRead_.clear(); ClearSubtitle(); }
-    return ok;
+    if (command == Command::Chapter) {
+        return value > 0 && value <= static_cast<int>(chapters_.size()) && Seek(chapters_[value - 1]);
+    }
+    // A natural clip boundary already owns its buffered first packets.
+    if (restart_) return false;
+    PollBluRayNavigation();
+    if (failed_ || restart_) return false;
+    switch (command) {
+    case Command::Up: case Command::Down: case Command::Left: case Command::Right: {
+        activation_ = {};
+        constexpr int keys[] = { BD_VK_UP, BD_VK_DOWN, BD_VK_LEFT, BD_VK_RIGHT };
+        bd_user_input(bd_, -1, keys[static_cast<int>(command)]);
+        break;
+    }
+    case Command::Activate: case Command::MouseActivate:
+        if (!menu_) return false;
+        activation_ = {};
+        if (ActivateMenuButton(command, value, y) == 0)
+            activation_ = {command, value, y, GetTickCount64() + 1500};
+        break;
+    case Command::PopupMenu:
+        activation_ = {};
+        bd_user_input(bd_, -1, BD_VK_POPUP);
+        break;
+    case Command::MouseMove:
+        if (!menu_ || value < 0 || y < 0 || value >= graphics_.width || y >= graphics_.height) return false;
+        bd_mouse_select(bd_, -1, value, y);
+        break;
+    case Command::Audio: bd_select_stream(bd_, BLURAY_AUDIO_STREAM, value, 1); break;
+    case Command::Subtitle:
+        subtitleSelection_ = value;
+        ClearSubtitle();
+        bd_select_stream(bd_, BLURAY_PG_TEXTST_STREAM, std::max(1, value), value > 0);
+        break;
+    default: return false;
+    }
+    PollBluRayNavigation();
+    return !failed_;
 }
 std::string DiscInput::StatusJson() const {
     std::ostringstream json;

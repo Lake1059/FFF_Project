@@ -89,7 +89,6 @@ bool AudioPassthroughLane::SetMode(const std::uint32_t mode) noexcept {
         mode != FFF3FP_PT_MODE_OFF)
         return false;
     std::lock_guard lock(mutex_);
-    if (mode_ == mode) return false;
     mode_ = mode;
     return true;
 }

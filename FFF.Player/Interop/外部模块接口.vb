@@ -187,7 +187,7 @@ Friend Interface 外部模块实例
     Function 尝试取音频渲染表(ByRef 原因 As String) As Nullable(Of 音频渲染能力表)
     Function 尝试取音频直通表(ByRef 原因 As String) As Nullable(Of 音频直通能力表)
     Function 启动处理器(会话句柄 As IntPtr) As Boolean
-    Sub 停止处理器(Optional 会话句柄 As IntPtr = Nothing)
+    Function 停止处理器(会话句柄 As IntPtr) As Boolean
     Function 读取注入状态(ByRef 状态 As 注入状态) As Boolean
     Function 授权状态() As 外部授权状态
     Function 授权文本(用途 As 外部授权文本用途, Optional 目录覆盖 As String = Nothing) As String
@@ -209,6 +209,10 @@ Friend Class NeutralExternalModule
     Private _授权取文本 As 外部授权取文本原型
     Private _授权提交 As 外部授权提交原型
 
+    ' 处理器的 stop 只有模块上下文参数。交接前先停止上一会话，随后只允许当前会话停止它。
+    Private Shared ReadOnly 处理器交接锁 As New Object()
+    Private Shared ReadOnly 处理器归属 As New Dictionary(Of IntPtr, NeutralExternalModule)()
+    Private _处理器会话 As IntPtr
     Private _处理器 As Nullable(Of 外部处理器Api)
     Private _处理器启动 As 外部处理器启动原型
     Private _处理器停止 As 外部处理器停止原型
@@ -370,33 +374,44 @@ Friend Class NeutralExternalModule
     End Function
 
     Public Function 启动处理器(会话句柄 As IntPtr) As Boolean Implements 外部模块实例.启动处理器
-        If 会话句柄 = IntPtr.Zero Then Return False
-        If Not _处理器.HasValue Then Return False
-        Dim 处理器 = _处理器
-        SyncLock _锁
-            If _已释放 Then Return False
-            Try
-                If _处理器启动.Invoke(处理器.Value.上下文, 会话句柄) = 0 Then Return True
-                ' 重复 start 可能被模块拒绝；只有快照明确说运行中才按成功算。
-                Dim 状态 As New 外部处理器状态()
-                If 读取中性状态(状态) AndAlso 状态.运行 <> 0UI Then Return True
-            Catch
-            End Try
-            Return False
+        If 会话句柄 = IntPtr.Zero OrElse Not _处理器.HasValue Then Return False
+        SyncLock 处理器交接锁
+            SyncLock _锁
+                If _已释放 Then Return False
+                Try
+                    If _处理器会话 = 会话句柄 Then
+                        Dim 状态 As New 外部处理器状态()
+                        If 读取中性状态(状态) AndAlso 状态.运行 <> 0UI Then Return True
+                    End If
+                    Dim 上一实例 As NeutralExternalModule = Nothing
+                    If 处理器归属.TryGetValue(_模块, 上一实例) AndAlso
+                        Not 上一实例.停止处理器(上一实例._处理器会话) Then Return False
+                    If _处理器启动.Invoke(_处理器.Value.上下文, 会话句柄) <> 0 Then Return False
+                    _处理器会话 = 会话句柄
+                    处理器归属(_模块) = Me
+                    Return True
+                Catch
+                    Return False
+                End Try
+            End SyncLock
         End SyncLock
     End Function
 
-    Public Sub 停止处理器(Optional 会话句柄 As IntPtr = Nothing) Implements 外部模块实例.停止处理器
-        If Not _处理器.HasValue Then Return
-        Dim 处理器 = _处理器
-        SyncLock _锁
-            If _已释放 Then Return
-            Try
-                _处理器停止.Invoke(处理器.Value.上下文)
-            Catch
-            End Try
+    Public Function 停止处理器(会话句柄 As IntPtr) As Boolean Implements 外部模块实例.停止处理器
+        SyncLock 处理器交接锁
+            SyncLock _锁
+                If _已释放 OrElse _处理器会话 = IntPtr.Zero OrElse _处理器会话 <> 会话句柄 Then Return False
+                Try
+                    _处理器停止.Invoke(_处理器.Value.上下文)
+                    _处理器会话 = IntPtr.Zero
+                    处理器归属.Remove(_模块)
+                    Return True
+                Catch
+                    Return False
+                End Try
+            End SyncLock
         End SyncLock
-    End Sub
+    End Function
 
     Private Function 读取中性状态(ByRef 状态 As 外部处理器状态) As Boolean
         状态.大小 = CUInt(Marshal.SizeOf(Of 外部处理器状态)())
@@ -414,7 +429,7 @@ Friend Class NeutralExternalModule
     Public Function 读取注入状态(ByRef 状态 As 注入状态) As Boolean Implements 外部模块实例.读取注入状态
         状态 = New 注入状态 With {.末帧帧号 = -1L}
         SyncLock _锁
-            If _已释放 Then Return False
+            If _已释放 OrElse _处理器会话 = IntPtr.Zero Then Return False
             Dim 中性 As New 外部处理器状态()
             If Not 读取中性状态(中性) Then Return False
             状态.大小 = CUInt(Marshal.SizeOf(Of 注入状态)())
@@ -508,10 +523,13 @@ Friend Class NeutralExternalModule
 
     Public Sub Dispose() Implements IDisposable.Dispose
         Dim 需要保留 As Boolean
-        SyncLock _锁
-            If _已释放 Then Return
-            _已释放 = True
-            需要保留 = _音频所有权 OrElse _直通所有权
+        SyncLock 处理器交接锁
+            SyncLock _锁
+                If _已释放 Then Return
+                If _处理器会话 <> IntPtr.Zero Then 停止处理器(_处理器会话)
+                _已释放 = True
+                需要保留 = _处理器会话 <> IntPtr.Zero OrElse _音频所有权 OrElse _直通所有权
+            End SyncLock
         End SyncLock
         If 需要保留 Then Return
         If _模块 <> IntPtr.Zero Then
@@ -735,20 +753,30 @@ Friend Module 外部模块接口
 
     Private Iterator Function 中性候选路径(目录覆盖 As String) As IEnumerable(Of String)
         Dim 已见 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-        Dim 目录列表 = 模块目录列表(目录覆盖)
         Dim 文件名 = Environment.GetEnvironmentVariable(模块文件名环境变量)
+        Dim 按名查找 = Not String.IsNullOrWhiteSpace(文件名)
+        If 按名查找 AndAlso Not 文件名.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) Then 文件名 &= ".dll"
 
-        If Not String.IsNullOrWhiteSpace(文件名) Then
-            If Not 文件名.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) Then 文件名 &= ".dll"
-            For Each 目录 In 目录列表
+        Dim 程序目录 As New List(Of String)
+        添加目录(程序目录, IO.Path.GetDirectoryName(Environment.ProcessPath))
+        添加目录(程序目录, AppContext.BaseDirectory)
+        Dim 专用目录 As New List(Of String)
+        添加目录(专用目录, 目录覆盖)
+        添加目录(专用目录, Environment.GetEnvironmentVariable(模块目录环境变量))
+        For Each 目录 In 程序目录
+            添加目录(专用目录, IO.Path.Combine(目录, "Modules"))
+        Next
+
+        ' 先搜索显式目录和 Modules，再兼容外部模块与 exe 同级的部署。
+        ' 同级目录默认只枚举遵守发布护栏命名的候选，避免加载渲染器、编解码器等普通依赖 DLL。
+        For Each 目录 In 专用目录.Concat(程序目录).Distinct(StringComparer.OrdinalIgnoreCase)
+            If 按名查找 Then
                 Dim 完整 = 尝试完整路径(目录, 文件名)
                 If 完整 IsNot Nothing AndAlso 已见.Add(完整) Then Yield 完整
-            Next
-            Return
-        End If
-
-        For Each 目录 In 目录列表
+                Continue For
+            End If
             If Not IO.Directory.Exists(目录) Then Continue For
+            Dim 同级目录 = Not 专用目录.Contains(目录, StringComparer.OrdinalIgnoreCase)
             Dim 文件列表 As String()
             Try
                 文件列表 = IO.Directory.GetFiles(目录, "*.dll", IO.SearchOption.TopDirectoryOnly)
@@ -756,20 +784,13 @@ Friend Module 外部模块接口
                 Continue For
             End Try
             For Each 文件 In 文件列表
-                Dim 完整 = 尝试完整路径(目录, IO.Path.GetFileName(文件))
+                Dim 候选文件名 = IO.Path.GetFileName(文件)
+                If 同级目录 AndAlso Not (候选文件名.EndsWith(".Test.dll", StringComparison.OrdinalIgnoreCase) OrElse
+                        候选文件名.Contains("ExternalModule", StringComparison.OrdinalIgnoreCase)) Then Continue For
+                Dim 完整 = 尝试完整路径(目录, 候选文件名)
                 If 完整 IsNot Nothing AndAlso 已见.Add(完整) Then Yield 完整
             Next
         Next
-    End Function
-
-    Private Function 模块目录列表(目录覆盖 As String) As List(Of String)
-        Dim 列表 As New List(Of String)
-        添加目录(列表, 目录覆盖)
-        添加目录(列表, Environment.GetEnvironmentVariable(模块目录环境变量))
-        Dim 进程目录 = IO.Path.GetDirectoryName(Environment.ProcessPath)
-        If Not String.IsNullOrWhiteSpace(进程目录) Then 添加目录(列表, IO.Path.Combine(进程目录, "Modules"))
-        添加目录(列表, IO.Path.Combine(AppContext.BaseDirectory, "Modules"))
-        Return 列表
     End Function
 
     Private Sub 添加目录(列表 As List(Of String), 目录 As String)

@@ -25,6 +25,7 @@ Friend NotInheritable Class 播放器光盘控制器
             .SubMenu = 创建光驱子菜单()
         }
         菜单.Items.Add(光驱项)
+        AddHandler 播放器.媒体已打开, AddressOf 刷新
         AddHandler 刷新计时器.Tick, AddressOf 刷新
         AddHandler 画面.光盘鼠标移动, AddressOf 鼠标移动
         AddHandler 画面.光盘鼠标确认, AddressOf 鼠标确认
@@ -94,6 +95,7 @@ Friend NotInheritable Class 播放器光盘控制器
         画面.光盘交互已启用 = 状态.已打开 AndAlso 状态.菜单可见
         If 状态.已打开 <> 菜单项已显示 Then
             菜单项已显示 = 状态.已打开
+            刷新计时器.Interval = If(菜单项已显示, 100, 1000)
             If 菜单项已显示 Then
                 If Not 菜单.Items.Contains(根菜单项) Then 菜单.Items.Add(根菜单项)
                 If Not 菜单.Items.Contains(叠加层项) Then 菜单.Items.Add(叠加层项)
@@ -105,23 +107,22 @@ Friend NotInheritable Class 播放器光盘控制器
     End Sub
 
     Friend Function 处理按键(键 As Keys) As Boolean
-        If Not 状态.已打开 Then Return False
-        If 键 = (Keys.Control Or Keys.M) Then
-            播放器.光盘导航(光盘命令.根菜单) : Return True
-        End If
-        If 键 = (Keys.Control Or Keys.Shift Or Keys.M) Then
-            播放器.光盘导航(光盘命令.弹出菜单) : Return True
-        End If
-        If Not 状态.菜单可见 Then Return False
+        Dim 命令 As 光盘命令
         Select Case 键
-            Case Keys.Up : 播放器.光盘导航(光盘命令.上)
-            Case Keys.Down : 播放器.光盘导航(光盘命令.下)
-            Case Keys.Left : 播放器.光盘导航(光盘命令.左)
-            Case Keys.Right : 播放器.光盘导航(光盘命令.右)
-            Case Keys.Enter : 播放器.光盘导航(光盘命令.确认)
-            Case Keys.Escape, Keys.Back : 播放器.光盘导航(光盘命令.返回)
+            Case Keys.Control Or Keys.M : 命令 = 光盘命令.根菜单
+            Case Keys.Control Or Keys.Shift Or Keys.M : 命令 = 光盘命令.弹出菜单
+            Case Keys.Up : 命令 = 光盘命令.上
+            Case Keys.Down : 命令 = 光盘命令.下
+            Case Keys.Left : 命令 = 光盘命令.左
+            Case Keys.Right : 命令 = 光盘命令.右
+            Case Keys.Enter : 命令 = 光盘命令.确认
+            Case Keys.Escape, Keys.Back : 命令 = 光盘命令.返回
             Case Else : Return False
         End Select
+        Dim 当前状态 = 播放器.读取光盘状态()
+        If Not 当前状态.已打开 Then Return False
+        If Not 当前状态.菜单可见 AndAlso 命令 <> 光盘命令.根菜单 AndAlso 命令 <> 光盘命令.弹出菜单 Then Return False
+        播放器.光盘导航(命令)
         Return True
     End Function
 
@@ -146,6 +147,7 @@ Friend NotInheritable Class 播放器光盘控制器
 
     Public Sub Dispose() Implements IDisposable.Dispose
         刷新计时器.Stop() : 刷新计时器.Dispose()
+        RemoveHandler 播放器.媒体已打开, AddressOf 刷新
         RemoveHandler 画面.光盘鼠标移动, AddressOf 鼠标移动
         RemoveHandler 画面.光盘鼠标确认, AddressOf 鼠标确认
     End Sub

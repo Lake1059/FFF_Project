@@ -49,8 +49,7 @@ Public NotInheritable Class 播放器会话
 
     ''' <summary>快照自己的版本，须与 PlayerSession.cpp 的 SnapshotVersion 同步。</summary>
     ''' <remarks>与 期望API版本 是两个独立的门，都是严格相等：导出面只追加所以 API 轴很少动，
-    ''' 快照结构一追字段这个数就动。混版时 GetSnapshot 每次都返回 InvalidArgument，
-    ''' 而 Create 照样成功——宿主会拿到一个能播放但快照全空的会话。</remarks>
+    ''' 快照结构追加字段时版本独立递增。当前宿主请求完整布局，创建时校验此版本。</remarks>
     Friend Const 原生播放器快照版本 As UInteger = 23UI
 
     Public Sub New(配置 As 播放器配置)
@@ -148,85 +147,85 @@ Public NotInheritable Class 播放器会话
     Public Event 首帧呈现 As EventHandler(Of 首帧呈现事件参数)
 
     Public Sub 打开(本地路径 As String)
-        调用路径(AddressOf 播放器原生接口.FFF3FP_Open, 本地路径)
-        ' 呈现策略一次性接上：请求 VRR 低时延路径（tearing present）。偏好语义——
-        ' 渲染侧只在自适应降速（pace）真正介入时兑现，健康播放仍是 vblank 钳制；
-        ' 旧内核没有该导出时静默跳过，不影响播放。
-        播放器原生接口.设置呈现配置(取得句柄(), True)
-        启动色彩变换通路()
+        ArgumentException.ThrowIfNullOrWhiteSpace(本地路径)
+        SyncLock 色彩模块锁
+            ' 先清掉旧片的处理器游标和变换表。视频处理器在 OpenCompleted 后才接触新一代边数据环。
+            Dim 已停泵 = 停止色彩变换处理器()
+            准备外部模块()
+            Try
+                调用路径(AddressOf 播放器原生接口.FFF3FP_Open, 本地路径)
+            Catch
+                If 已停泵 Then 启动色彩变换处理器()
+                Throw
+            End Try
+            ' VRR 低时延偏好只在自适应降速时生效，旧内核忽略。
+            播放器原生接口.设置呈现配置(取得句柄(), True)
+        End SyncLock
     End Sub
 
-    ' 外部色彩变换通路：缺席静默，就绪装载并把内核会话句柄交给模块自驱动注入泵。
-    Private Sub 启动色彩变换通路()
+    ' 音频表需在打开音轨前安装，视频处理器需等边数据环切到新媒体。调用方持有色彩模块锁。
+    Private Sub 准备外部模块()
         If Volatile.Read(已释放) <> 0 Then Return
         Try
-            ' 旧内核没有环/注入导出：模块泵要用的就是这几支，缺席即静默。
-            If Not 播放器原生接口.支持帧边数据环 OrElse Not 播放器原生接口.支持动态元数据注入 Then Return
-
-            Dim 原因 As String = Nothing
-            Dim 形态 = 外部模块接口.探测(原因)
-            If 形态 = 外部模块接口.模块在场形态.缺席 Then
-                Return
-            End If
-
-            ' 实例与床渲染插槽共用映射；未解锁时这里不建，解锁后唤醒。
-            If 形态 = 外部模块接口.模块在场形态.就绪 AndAlso 色彩模块实例 Is Nothing Then
+            If 色彩模块实例 Is Nothing Then
+                Dim 原因 As String = Nothing
                 Dim 模块 = 外部模块接口.尝试装载(原因)
-                If 模块 IsNot Nothing Then 色彩模块实例 = 模块
-            End If
-
-            ' 已解锁才安装外部床渲染表；否则内核继续矩阵折叠。
-            安装音频渲染插槽()
-            ' 音频直通表同理：模式≠关 且模块有这一面才钉入（见 安装音频直通插槽）。
-            安装音频直通插槽()
-
-            ' 把内核句柄交给模块自驱动注入泵；未解锁或拒绝都静默。
-            Dim 实例 = 色彩模块实例
-            If 实例 IsNot Nothing AndAlso 实例.处理器可用 Then
-                Dim 句柄 = 取得句柄()
-                If 句柄 IsNot Nothing AndAlso Not 句柄.IsInvalid Then
-                    实例.启动处理器(句柄.DangerousGetHandle())
+                If 模块 Is Nothing Then Return
+                Dim 授权 = 模块.授权状态()
+                If 授权 = 外部授权状态.已锁定 OrElse
+                    (授权 <> 外部授权状态.就绪 AndAlso Not 模块.处理器可用) Then
+                    模块.Dispose()
+                    Return
                 End If
+                色彩模块实例 = 模块
             End If
         Catch
+            Return
+        End Try
+
+        Try
+            安装音频渲染插槽()
+        Catch
+            ' 保持内核自带的音频渲染。
+        End Try
+        Try
+            安装音频直通插槽()
+        Catch
+            ' 保持解码输出。
         End Try
     End Sub
 
-    ' 流重启由模块泵用内核快照自行判断。
-
-    ''' <summary>解锁后装载模块并启动注入泵；失败答 False。</summary>
-    Public Function 唤醒色彩变换通路() As Boolean
-        If Volatile.Read(已释放) <> 0 Then Return False
+    Private Function 启动色彩变换处理器() As Boolean
+        If Volatile.Read(已释放) <> 0 OrElse 色彩模块实例 Is Nothing Then Return False
         Try
-            If Not 播放器原生接口.支持帧边数据环 OrElse
-               Not 播放器原生接口.支持动态元数据注入 Then Return False
-
-            Dim 原因 As String = Nothing
-            Dim 形态 = 外部模块接口.探测(原因)
-            If 形态 <> 外部模块接口.模块在场形态.就绪 Then
-                Return False
-            End If
-
-            If 色彩模块实例 Is Nothing Then
-                Dim 模块 = 外部模块接口.尝试装载(原因)
-                If 模块 Is Nothing Then
+            If Not 色彩模块实例.处理器可用 OrElse Not 播放器原生接口.支持帧边数据环 OrElse
+                Not 播放器原生接口.支持动态元数据注入 Then Return False
+            Select Case 当前快照.状态
+                Case 播放状态.就绪, 播放状态.正在播放, 播放状态.已暂停, 播放状态.播放结束
+                    Return 色彩模块实例.启动处理器(句柄.DangerousGetHandle())
+                Case Else
                     Return False
-                End If
-                ' 与 启动色彩变换通路 同一份实例：注入泵与床渲染插槽必须绑在同一份映射上。
-                色彩模块实例 = 模块
-                ' 解锁也可能刚刚让音频那一面可用（未解锁时模块拒交那张表）。
-                安装音频渲染插槽()
-                安装音频直通插槽()
-            End If
-
-            Dim 实例 = 色彩模块实例
-            If 实例 Is Nothing OrElse Not 实例.处理器可用 Then Return False
-            Dim 句柄 = 取得句柄()
-            If 句柄 Is Nothing OrElse 句柄.IsInvalid Then Return False
-            Return 实例.启动处理器(句柄.DangerousGetHandle())
-        Catch ex As Exception
+            End Select
+        Catch
             Return False
         End Try
+    End Function
+
+    Private Function 停止色彩变换处理器() As Boolean
+        If 色彩模块实例 Is Nothing OrElse Not 色彩模块实例.处理器可用 Then Return False
+        Dim 已停泵 = 色彩模块实例.停止处理器(句柄.DangerousGetHandle())
+        ' 处理器交给别的会话后，旧会话的渲染器仍可能持有上一条变换表。
+        播放器原生接口.清除外部色彩变换(句柄)
+        Return 已停泵
+    End Function
+
+    ''' <summary>解锁后装载模块并启动注入泵。没有可用处理器时返回 False。</summary>
+    Public Function 唤醒色彩变换通路() As Boolean
+        SyncLock 色彩模块锁
+            If Volatile.Read(已释放) <> 0 Then Return False
+            准备外部模块()
+            Return 启动色彩变换处理器()
+        End SyncLock
     End Function
 
     ''' <summary>
@@ -332,10 +331,16 @@ Public NotInheritable Class 播放器会话
         检查结果(播放器原生接口.FFF3FP_DiscardAudioOutput(取得句柄()))
     End Sub
     Public Sub 停止()
-        检查结果(播放器原生接口.FFF3FP_Stop(取得句柄()))
+        SyncLock 色彩模块锁
+            检查结果(播放器原生接口.FFF3FP_Stop(取得句柄()))
+            停止色彩变换处理器()
+        End SyncLock
     End Sub
     Public Sub 关闭媒体()
-        检查结果(播放器原生接口.FFF3FP_Close(取得句柄()))
+        SyncLock 色彩模块锁
+            检查结果(播放器原生接口.FFF3FP_Close(取得句柄()))
+            停止色彩变换处理器()
+        End SyncLock
     End Sub
     Public Sub 跳转(位置 As TimeSpan)
         If 位置 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(位置))
@@ -680,6 +685,7 @@ Public NotInheritable Class 播放器会话
         End Try
     End Function
     ' 色彩模块实例与床渲染插槽共用同一份映射。
+    Private ReadOnly 色彩模块锁 As New Object()
     Private 色彩模块实例 As 外部模块实例
     Private 音频插槽已装 As Boolean
     Private ReadOnly 音频插槽锁 As New Object()
@@ -1113,11 +1119,9 @@ Public NotInheritable Class 播放器会话
             Dim 当前视频 = 信息?.流.FirstOrDefault(Function(流) 流.索引 = 快照.当前视频流 AndAlso 流.类型 = "video")
             If 当前视频 IsNot Nothing Then
                 ' 原生媒体 JSON 缓存静态信息；逐帧处理结果以实时快照为准。
-                ' 外部色彩变换已启用由内核自报（HDR处理路径=外部色彩变换）；外部色彩变换可用
-                ' 内核不写（该字段在两侧都是死读位），由宿主按“模块 DLL 在盘上”回填——
-                ' 只查文件存在，不装载、不握手，每次调用都是廉价读数。
+                ' 内核报告变换是否生效，宿主报告模块是否可用。已装载的会话无需再次握手。
                 当前视频.外部色彩变换已启用 = 快照.HDR处理路径 = HDR处理路径.外部色彩变换
-                当前视频.外部色彩变换可用 = 外部模块接口.模块在盘上()
+                当前视频.外部色彩变换可用 = 色彩模块实例 IsNot Nothing OrElse 外部模块接口.模块在盘上()
                 当前视频.动态HDR元数据 = 快照.动态HDR元数据有效
                 当前视频.HDR回退 = 快照.HDR回退有效
             End If
@@ -1251,19 +1255,14 @@ Public NotInheritable Class 播放器会话
     End Property
 
     Public Sub 释放() Implements IDisposable.Dispose
-        If Interlocked.Exchange(已释放, 1) <> 0 Then Return
-        释放取消源.Cancel()
-        ' 先停模块注入泵：泵的每次原生调用都要用活句柄，停止（含线程 join）必须在
-        ' 句柄销毁前，否则就是拿着正在销毁的句柄进内核导出（use-after-free）。
-        ' 交出句柄让它自己判归属：泵是进程级单例，换文件时它可能已经归了新会话，
-        ' 那一边不能因为这里释放旧会话就被顺手停死。
-        Try
+        SyncLock 色彩模块锁
+            If Interlocked.Exchange(已释放, 1) <> 0 Then Return
+            ' 只停本会话拥有的泵，在线程退出后再销毁原生会话句柄。
             If 色彩模块实例 IsNot Nothing AndAlso 句柄 IsNot Nothing Then
                 色彩模块实例.停止处理器(句柄.DangerousGetHandle())
             End If
-        Catch ex As Exception
-            ' 停泵失败不该阻断会话的其余清理。
-        End Try
+        End SyncLock
+        释放取消源.Cancel()
         ' 两张裸表都先撤再销毁句柄：撤表会让内核对模块 context 调 destroy，而 destroy
         ' 的函数指针指向模块代码段——模块 Dispose（FreeLibrary）之前做才是安全的。
         Try
@@ -1384,6 +1383,11 @@ Public NotInheritable Class 播放器会话
     End Sub
 
     Private Sub 引发事件(参数 As 播放器事件参数)
+        If 参数.类型 = 播放器事件类型.打开完成 Then
+            SyncLock 色彩模块锁
+                启动色彩变换处理器()
+            End SyncLock
+        End If
         RaiseEvent 播放器事件(Me, 参数)
         Select Case 参数.类型
             Case 播放器事件类型.状态变化 : RaiseEvent 状态变化(Me, 参数)

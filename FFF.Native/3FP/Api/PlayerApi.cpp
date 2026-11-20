@@ -260,7 +260,7 @@ FFFResult FFF3FP_SetTimedTextLayer(const FFF3FPHandle player,
     return player && layer ? static_cast<PlayerSession*>(player)->SetTimedTextLayer(*layer)
         : FFFResult::InvalidArgument;
 }
-FFFResult FFF3FP_GetSnapshot(const FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept { return player && snapshot ? static_cast<PlayerSession*>(player)->GetSnapshot(*snapshot) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_GetSnapshot(const FFF3FPHandle player, FFF3FPSnapshot* snapshot) noexcept { return player && snapshot ? static_cast<PlayerSession*>(player)->GetSnapshot(snapshot) : FFFResult::InvalidArgument; }
 // HDR presentation diagnostics. The ST 2094 curve gate and the per-frame
 // display signaling were previously only assertable by reading the shader source; a
 // host can now ask which mechanism actually ran for the frames drawn so far.

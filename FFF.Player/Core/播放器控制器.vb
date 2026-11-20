@@ -645,7 +645,7 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Public Sub 打开媒体(路径 As String)
-        If 已释放 OrElse Not 光盘路径.媒体存在(路径) Then Return
+        If 已释放 Then Return
         启动后台任务(打开媒体Async(路径))
     End Sub
 
@@ -670,12 +670,12 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Public Function 打开媒体Async(路径 As String) As Task
-        If 已释放 OrElse Not 光盘路径.媒体存在(路径) Then
-            Return Task.CompletedTask
-        End If
+        If 已释放 Then Return Task.CompletedTask
+        Dim 完整路径 = 光盘路径.取得媒体路径(路径)
+        If 完整路径 Is Nothing Then Return Task.CompletedTask
         ' 只有「用户打开媒体」这一路读进度记忆；换解码器 / 换流等内部切换仍以调用方
         ' 传入的恢复位置为准——那条路上"当前位置"必须原样保留，不能被历史进度覆盖。
-        Return 切换媒体会话Async(Path.GetFullPath(路径), 用户解码器偏好, TimeSpan.Zero,
+        Return 切换媒体会话Async(完整路径, 用户解码器偏好, TimeSpan.Zero,
                                   True, -1, -1, False, 使用进度记忆:=True)
     End Function
 
@@ -1614,7 +1614,8 @@ Public NotInheritable Class 播放器控制器
 
         Dim 候选会话 As 播放器会话 = Nothing
         Dim 原会话 = 会话
-        Dim 原光盘状态 = If(原会话 Is Nothing, Nothing, 原会话.当前光盘状态)
+        Dim 原光盘状态 = If(原会话 IsNot Nothing AndAlso String.Equals(当前文件路径, 路径, StringComparison.OrdinalIgnoreCase),
+                         原会话.当前光盘状态, Nothing)
         Dim 保留WASAPI模式 = 当前WASAPI模式
         Dim 已临时释放独占 = False
         Dim 打开异常 As Exception = Nothing
@@ -2440,7 +2441,7 @@ Public NotInheritable Class 播放器控制器
                                   取消 As CancellationToken) As Task
         If 原光盘 IsNot Nothing AndAlso 原光盘.已打开 Then
             If 原光盘.菜单可见 Then
-                目标.光盘导航(光盘命令.根菜单)
+                If Not 目标.当前光盘状态.菜单可见 Then 目标.光盘导航(光盘命令.根菜单)
                 Return
             End If
             If 原光盘.当前标题 > 0 Then

@@ -1014,8 +1014,7 @@ Public Class Form1
 
     Friend Shared Function 取得命令行文件(参数 As IEnumerable(Of String)) As String
         If 参数 Is Nothing Then Return String.Empty
-        Dim 文件路径 = 参数.FirstOrDefault(AddressOf 光盘路径.媒体存在)
-        Return If(String.IsNullOrEmpty(文件路径), String.Empty, Path.GetFullPath(文件路径))
+        Return If(参数.Select(AddressOf 光盘路径.取得媒体路径).FirstOrDefault(Function(x) x IsNot Nothing), String.Empty)
     End Function
 
     Private Sub 打开外部文件(文件路径 As String)
@@ -1032,12 +1031,7 @@ Public Class Form1
     End Sub
 
     Private Sub 打开或替换文件(路径 As IEnumerable(Of String))
-        If 路径 Is Nothing Then Return
-        Dim 存在的文件 = 路径.Where(Function(x) Not String.IsNullOrWhiteSpace(x) AndAlso
-                                             光盘路径.媒体存在(x)).
-            Select(Function(x) Path.GetFullPath(x)).
-            Distinct(StringComparer.OrdinalIgnoreCase).
-            ToArray()
+        Dim 存在的文件 = 取得打开路径(路径)
         If 存在的文件.Length = 0 Then Return
         If 存在的文件.Length > 1 Then
             添加并打开多个媒体文件(存在的文件)
@@ -1046,13 +1040,21 @@ Public Class Form1
         打开或替换单个文件(存在的文件(0))
     End Sub
 
+    Friend Shared Function 取得打开路径(路径 As IEnumerable(Of String)) As String()
+        If 路径 Is Nothing Then Return Array.Empty(Of String)()
+        Return 路径.Select(AddressOf 光盘路径.取得媒体路径).
+            Where(Function(x) x IsNot Nothing).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToArray()
+    End Function
+
     Private Sub 打开或替换文件(路径 As String)
-        If String.IsNullOrWhiteSpace(路径) Then Return
-        打开或替换单个文件(Path.GetFullPath(路径))
+        Dim 完整路径 = 光盘路径.取得媒体路径(路径)
+        If 完整路径 IsNot Nothing Then 打开或替换单个文件(完整路径)
     End Sub
 
     Private Sub 添加并打开多个媒体文件(路径 As IEnumerable(Of String))
-        Dim 媒体文件 = 路径.Where(Function(x) File.Exists(x) AndAlso
+        Dim 媒体文件 = 路径.Where(Function(x) 光盘路径.是光盘路径(x) OrElse
                                       播放列表.是支持的媒体文件(x)).ToArray()
         If 媒体文件.Length = 0 Then Return
 
@@ -1064,7 +1066,12 @@ Public Class Form1
     End Sub
 
     Private Sub 打开或替换单个文件(路径 As String)
-        If LRC歌词自动加载器.是支持的歌词文件(路径) Then
+        If 光盘路径.是光盘路径(路径) Then
+            播放列表数据.取消自动扫描()
+            播放列表数据.添加(路径)
+            播放列表数据.选择路径(路径)
+            播放控制器.打开媒体(路径)
+        ElseIf LRC歌词自动加载器.是支持的歌词文件(路径) Then
             播放控制器.替换歌词(路径)
         ElseIf 外部字幕自动加载器.是支持的字幕文件(路径) Then
             播放控制器.替换字幕(路径)
@@ -1074,11 +1081,7 @@ Public Class Form1
             播放控制器.当前媒体是视频 Then
             播放控制器.加载外部音轨(路径)
         Else
-            If Not 光盘路径.是光盘路径(路径) Then
-                启动后台任务(播放列表数据.从媒体扫描同目录Async(路径))
-            Else
-                播放列表数据.取消自动扫描()
-            End If
+            启动后台任务(播放列表数据.从媒体扫描同目录Async(路径))
             播放控制器.打开媒体(路径)
         End If
     End Sub

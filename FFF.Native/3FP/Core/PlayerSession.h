@@ -207,7 +207,7 @@ public:
     // still frame once. Video / non-applicable images are rejected and the flag
     // stays untouched (a failure never half-applies).
     FFFResult SetGainMapEnabled(bool enabled) noexcept;
-    FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
+    FFFResult GetSnapshot(void* snapshot) const noexcept;
     // CPU placement diagnostics (appended export FFF3FP_GetCpuPlacementSnapshot, P3-12).
     // Advisory read-only snapshot: it deliberately takes no session lock and changes no
     // behaviour, so a field may be one state transition old while it is being filled.
