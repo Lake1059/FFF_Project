@@ -548,6 +548,7 @@ private:
     void UpdateAudioDiagnostics() noexcept;
     void TrackPacketBitRate(const AVPacket* packet, AVFormatContext* owner) noexcept;
     void UpdateBitRateForPosition(std::int64_t position100ns) noexcept;
+    void UpdateNetworkReadHint() noexcept;
     void ResetBitRateTracking() noexcept;
     void FlushAtEnd() noexcept;
     void PublishSnapshot() noexcept;

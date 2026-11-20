@@ -8,20 +8,30 @@ extern "C" {
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <cwchar>
+#include <deque>
 #include <memory>
 #include <mutex>
+#include <new>
+#include <stdio.h>
 #include <thread>
 #include <vector>
 
 namespace {
-constexpr int SlotCount = 4;
 constexpr int SlotBytes = 1024 * 1024;
+constexpr int MinSlots = 2;
+constexpr int MaxSlots = 12;
+constexpr int DefaultSlots = 4;
 constexpr DWORD PollIntervalMs = 50;
 constexpr DWORD RetryDelayMs = 150;
 constexpr int RetryCount = 1;
+constexpr ULONGLONG StopWaitMs = 3000;
 
 bool IsTransientError(const DWORD error) noexcept {
     switch (error) {
@@ -41,47 +51,387 @@ bool IsTransientError(const DWORD error) noexcept {
         return false;
     }
 }
+
+int EnvironmentInt(const wchar_t* name, const int fallback,
+    const int minimum, const int maximum) noexcept {
+    wchar_t text[32]{};
+    const auto length = GetEnvironmentVariableW(name, text, 32);
+    if (length == 0 || length >= 32) return fallback;
+    wchar_t* end = nullptr;
+    const auto value = wcstol(text, &end, 10);
+    if (end == text || *end != L'\0' || value < minimum || value > maximum)
+        return fallback;
+    return static_cast<int>(value);
 }
 
-struct IocpMediaReader::Impl {
-    struct Slot {
-        // OVERLAPPED must remain the first member: completions map it back with
-        // reinterpret_cast<Slot*>(overlapped).
-        OVERLAPPED ov{};
-        std::uint8_t* data = nullptr;
-        std::int64_t offset = 0;
-        int bytes = 0;
-        int consumed = 0;
-        int attempts = 0;
-        std::uint64_t epoch = 0;
-        enum class State { Free, Reading, Ready, Eof, Error } state = State::Free;
-    };
+bool TraceEnabled() noexcept {
+    wchar_t text[16]{};
+    const auto length = GetEnvironmentVariableW(L"FFF_NET_IO_TRACE", text, 16);
+    return length > 0 && length < 16 && !(text[0] == L'0' && text[1] == L'\0');
+}
 
+std::wstring TraceFilePath() {
+    wchar_t text[32768]{};
+    const auto length = GetEnvironmentVariableW(L"FFF_NET_IO_TRACE_FILE", text, 32768);
+    if (length == 0 || length >= 32768) return {};
+    return std::wstring(text);
+}
+
+struct Slot {
+    enum class State { Free, Reading, Ready, RetryWait, Eof, Error };
+
+    // OVERLAPPED must remain the first member: completions map it back with
+    // reinterpret_cast<Slot*>(overlapped).
+    OVERLAPPED ov{};
+    std::uint8_t* data = nullptr;
+    std::int64_t offset = 0;
+    int requestBytes = 0;
+    int bytes = 0;
+    int consumed = 0;
+    int attempts = 0;
+    std::uint64_t epoch = 0;
+    bool pending = false;
+    ULONGLONG issueTick = 0;
+    State state = State::Free;
+
+    ~Slot() {
+        std::free(data);
+        data = nullptr;
+    }
+};
+
+struct Hole {
+    std::int64_t begin = 0;
+    std::int64_t end = 0;
+};
+
+struct Retry {
+    Slot* slot = nullptr;
+    ULONGLONG due = 0;
+    std::uint64_t epoch = 0;
+};
+
+// Slots that could not be reaped within StopWaitMs are deliberately leaked.
+// The kernel may still own their OVERLAPPED/data pointers; freeing them here
+// would turn a stuck share into a use-after-free. This path should be rare and
+// only happens when the completion port cannot observe cancellation.
+std::mutex AbandonedMutex;
+std::vector<std::unique_ptr<Slot>> AbandonedSlots;
+
+void TraceLine(const char* line) noexcept {
+    if (line == nullptr) return;
+    std::fprintf(stderr, "%s\n", line);
+    const auto path = TraceFilePath();
+    if (path.empty()) return;
+    FILE* file = _wfopen(path.c_str(), L"a");
+    if (file == nullptr) return;
+    std::fprintf(file, "%s\n", line);
+    std::fclose(file);
+}
+} // namespace
+
+struct IocpMediaReader::Impl {
     HANDLE file = INVALID_HANDLE_VALUE;
     HANDLE iocp = nullptr;
     std::int64_t size = -1;
     std::int64_t position = 0;
-    std::int64_t nextFill = 0;
+    std::int64_t issuedEnd = 0;
     std::int64_t eofOffset = -1;
     std::uint64_t epoch = 0;
     int inFlight = 0;
+    int targetSlots = DefaultSlots;
+    bool fixedTarget = false;
     bool stop = false;
+    bool trace = false;
     DWORD lastError = 0;
     std::vector<std::unique_ptr<Slot>> slots;
-    std::mutex mutex;
+    std::deque<Hole> holes;
+    std::vector<Retry> retries;
+    Metrics metrics;
+    mutable std::mutex mutex;
     std::condition_variable changed;
     std::thread worker;
 
     ~Impl() {
-        for (const auto& slot : slots) {
-            if (slot != nullptr && slot->data != nullptr) {
-                std::free(slot->data);
-                slot->data = nullptr;
+        slots.clear();
+    }
+
+    bool EnsureSlotsLocked() noexcept {
+        while (slots.size() < static_cast<std::size_t>(targetSlots) &&
+            slots.size() < static_cast<std::size_t>(MaxSlots)) {
+            auto slot = std::unique_ptr<Slot>(new (std::nothrow) Slot());
+            if (slot == nullptr) return false;
+            slot->data = static_cast<std::uint8_t*>(std::malloc(SlotBytes));
+            if (slot->data == nullptr) return false;
+            slot->epoch = epoch;
+            try {
+                slots.push_back(std::move(slot));
+            } catch (...) {
+                return false;
             }
+        }
+        metrics.allocatedSlots = static_cast<int>(slots.size());
+        return true;
+    }
+
+    void AddHoleLocked(std::int64_t begin, std::int64_t end) noexcept {
+        if (begin >= end) return;
+        if (size >= 0 && begin >= size) return;
+        if (size >= 0 && end > size) end = size;
+        if (eofOffset >= 0 && begin >= eofOffset) return;
+        if (eofOffset >= 0 && end > eofOffset) end = eofOffset;
+        if (begin >= end) return;
+
+        auto it = holes.begin();
+        while (it != holes.end() && it->end < begin) ++it;
+        if (it != holes.end() && it->begin <= end) {
+            begin = (std::min)(begin, it->begin);
+            end = (std::max)(end, it->end);
+            it = holes.erase(it);
+        }
+        while (it != holes.end() && it->begin <= end) {
+            end = (std::max)(end, it->end);
+            it = holes.erase(it);
+        }
+        holes.insert(it, Hole{begin, end});
+        ++metrics.holesCreated;
+    }
+
+    void PublishSuccessLocked(Slot* slot, const DWORD bytes) noexcept {
+        slot->pending = false;
+        slot->bytes = static_cast<int>(bytes);
+        slot->state = bytes == 0 ? Slot::State::Eof : Slot::State::Ready;
+        slot->attempts = 0;
+        if (bytes == 0) {
+            eofOffset = slot->offset;
+            return;
+        }
+
+        metrics.bytesRead += static_cast<std::int64_t>(bytes);
+        if (static_cast<int>(bytes) > metrics.maxObservedReadBytes)
+            metrics.maxObservedReadBytes = static_cast<std::int64_t>(bytes);
+        if (slot->issueTick != 0) {
+            const auto latency = GetTickCount64() - slot->issueTick;
+            metrics.readLatencyMs = metrics.readLatencyMs == 0
+                ? static_cast<std::int64_t>(latency)
+                : (metrics.readLatencyMs * 7 + static_cast<std::int64_t>(latency)) / 8;
+        }
+        if (bytes < static_cast<DWORD>(slot->requestBytes)) {
+            ++metrics.shortReads;
+            AddHoleLocked(slot->offset + static_cast<std::int64_t>(bytes),
+                slot->offset + static_cast<std::int64_t>(slot->requestBytes));
+        }
+    }
+
+    bool IssueReadAtLocked(Slot* slot, const std::int64_t offset, const int request,
+        const bool advanceFill, const int attempts = 0) noexcept {
+        if (slot == nullptr || request <= 0) return false;
+        slot->offset = offset;
+        slot->requestBytes = request;
+        slot->bytes = 0;
+        slot->consumed = 0;
+        slot->attempts = attempts;
+        slot->pending = true;
+        slot->state = Slot::State::Reading;
+        slot->epoch = epoch;
+        slot->issueTick = GetTickCount64();
+        std::memset(&slot->ov, 0, sizeof(slot->ov));
+        slot->ov.Offset = static_cast<DWORD>(static_cast<std::uint64_t>(offset) & 0xffffffffu);
+        slot->ov.OffsetHigh = static_cast<DWORD>(static_cast<std::uint64_t>(offset) >> 32);
+        if (advanceFill) issuedEnd = offset + request;
+
+        DWORD bytes = 0;
+        if (ReadFile(file, slot->data, static_cast<DWORD>(request), &bytes, &slot->ov)) {
+            // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS means this operation will not
+            // produce a completion packet; publish it directly.
+            PublishSuccessLocked(slot, bytes);
+            return true;
+        }
+        const auto error = GetLastError();
+        if (error == ERROR_IO_PENDING) {
+            ++inFlight;
+            if (inFlight > metrics.maxInFlight) metrics.maxInFlight = inFlight;
+            return true;
+        }
+        slot->pending = false;
+        lastError = error;
+        slot->state = Slot::State::Error;
+        return false;
+    }
+
+    Slot* FindFreeLocked() noexcept {
+        for (const auto& slot : slots) {
+            if (slot->state == Slot::State::Free && !slot->pending) return slot.get();
+        }
+        return nullptr;
+    }
+
+    bool IssueNextHoleLocked(Slot* slot) noexcept {
+        while (!holes.empty()) {
+            auto& hole = holes.front();
+            std::int64_t limit = size;
+            if (eofOffset >= 0 && (limit < 0 || eofOffset < limit)) limit = eofOffset;
+            if (limit >= 0 && hole.begin >= limit) {
+                holes.pop_front();
+                continue;
+            }
+            std::int64_t end = hole.end;
+            if (limit >= 0 && end > limit) end = limit;
+            if (end <= hole.begin) {
+                holes.pop_front();
+                continue;
+            }
+            const auto start = hole.begin;
+            const auto length = end - start;
+            const auto request = static_cast<int>((std::min<std::int64_t>)(length, SlotBytes));
+            if (request <= 0) {
+                holes.pop_front();
+                continue;
+            }
+            if (request == length) holes.pop_front();
+            else hole.begin += request;
+            if (!IssueReadAtLocked(slot, start, request, false)) {
+                AddHoleLocked(start, start + request);
+                return false;
+            }
+            return true;
+        }
+        return true;
+    }
+
+    bool AtEndLocked() const noexcept {
+        if (size >= 0 && issuedEnd >= size) return true;
+        if (eofOffset >= 0 && issuedEnd >= eofOffset) return true;
+        return false;
+    }
+
+    void PostMoreLocked() noexcept {
+        if (stop) return;
+        EnsureSlotsLocked();
+        while (inFlight < targetSlots) {
+            auto* slot = FindFreeLocked();
+            if (slot == nullptr) break;
+            if (!holes.empty()) {
+                if (!IssueNextHoleLocked(slot)) break;
+                continue;
+            }
+            if (AtEndLocked()) break;
+            std::int64_t remaining = static_cast<std::int64_t>(SlotBytes);
+            if (size >= 0) remaining = (std::min)(remaining, size - issuedEnd);
+            if (remaining <= 0) break;
+            const auto request = static_cast<int>(remaining);
+            if (!IssueReadAtLocked(slot, issuedEnd, request, true)) break;
+        }
+    }
+
+    void CancelPendingLocked() noexcept {
+        ++epoch;
+        for (const auto& slot : slots) {
+            if (slot->state == Slot::State::Reading) CancelIoEx(file, &slot->ov);
+            slot->state = Slot::State::Free;
+        }
+        changed.notify_all();
+    }
+
+    void TrimSlotsLocked() noexcept {
+        while (slots.size() > static_cast<std::size_t>(targetSlots)) {
+            auto found = slots.end();
+            for (auto it = slots.begin(); it != slots.end(); ++it) {
+                if (!(*it)->pending && (*it)->state == Slot::State::Free) {
+                    found = it;
+                    break;
+                }
+            }
+            if (found == slots.end()) break;
+            slots.erase(found);
+        }
+        metrics.allocatedSlots = static_cast<int>(slots.size());
+    }
+
+    void RetryReadLocked(Slot* slot) noexcept {
+        const auto attempts = slot->attempts;
+        if (!IssueReadAtLocked(slot, slot->offset, slot->requestBytes, false, attempts))
+            changed.notify_all();
+    }
+
+    void ProcessRetriesLocked() noexcept {
+        const auto now = GetTickCount64();
+        for (auto it = retries.begin(); it != retries.end();) {
+            auto* slot = it->slot;
+            if (stop || slot->epoch != epoch || slot->state != Slot::State::RetryWait) {
+                it = retries.erase(it);
+                continue;
+            }
+            if (it->due > now) {
+                ++it;
+                continue;
+            }
+            it = retries.erase(it);
+            RetryReadLocked(slot);
+        }
+    }
+
+    void HandleCompletion(const BOOL ok, const DWORD bytes, Slot* slot) noexcept {
+        {
+            std::lock_guard lock(mutex);
+            slot->pending = false;
+            if (inFlight > 0) --inFlight;
+            if (stop || slot->epoch != epoch) {
+                slot->state = Slot::State::Free;
+                changed.notify_all();
+                return;
+            }
+
+            if (ok) {
+                PublishSuccessLocked(slot, bytes);
+            } else {
+                lastError = GetLastError();
+                if (IsTransientError(lastError) && slot->attempts < RetryCount && !stop) {
+                    ++slot->attempts;
+                    ++metrics.retries;
+                    slot->state = Slot::State::RetryWait;
+                    retries.push_back({slot, GetTickCount64() + RetryDelayMs, slot->epoch});
+                } else {
+                    slot->state = Slot::State::Error;
+                }
+            }
+            changed.notify_all();
+        }
+        {
+            std::lock_guard lock(mutex);
+            if (!stop) PostMoreLocked();
+        }
+    }
+
+    void Worker() noexcept {
+        while (true) {
+            DWORD bytes = 0;
+            ULONG_PTR key = 0;
+            OVERLAPPED* overlapped = nullptr;
+            const auto ok = GetQueuedCompletionStatus(
+                iocp, &bytes, &key, &overlapped, PollIntervalMs);
+            (void)key;
+            if (overlapped == nullptr) {
+                std::lock_guard lock(mutex);
+                if (stop) break;
+                ProcessRetriesLocked();
+                PostMoreLocked();
+                continue;
+            }
+            HandleCompletion(ok, bytes, reinterpret_cast<Slot*>(overlapped));
         }
     }
 
     bool Start(std::string& error) {
+        trace = TraceEnabled();
+        fixedTarget = false;
+        targetSlots = DefaultSlots;
+        const auto depth = EnvironmentInt(L"FFF_NET_IO_DEPTH", 0, 0, MaxSlots);
+        if (depth >= MinSlots) {
+            targetSlots = depth;
+            fixedTarget = true;
+        }
+
         iocp = CreateIoCompletionPort(file, nullptr, 0, 0);
         if (iocp == nullptr) {
             error = "Could not create the media I/O completion port.";
@@ -93,20 +443,23 @@ struct IocpMediaReader::Impl {
             iocp = nullptr;
             return false;
         }
-        slots.resize(SlotCount);
-        for (auto& slot : slots) {
-            slot = std::make_unique<Slot>();
-            slot->data = static_cast<std::uint8_t*>(std::malloc(SlotBytes));
-            if (slot->data == nullptr) {
-                error = "Could not allocate network read-ahead buffers.";
-                CloseHandle(iocp);
-                iocp = nullptr;
-                return false;
-            }
+        try {
+            slots.reserve(MaxSlots);
+        } catch (...) {
+            error = "Could not reserve network read-ahead slots.";
+            CloseHandle(iocp);
+            iocp = nullptr;
+            return false;
+        }
+        if (!EnsureSlotsLocked()) {
+            error = "Could not allocate network read-ahead buffers.";
+            CloseHandle(iocp);
+            iocp = nullptr;
+            return false;
         }
         epoch = 1;
         position = 0;
-        nextFill = 0;
+        issuedEnd = 0;
         try {
             worker = std::thread([this] { Worker(); });
         } catch (...) {
@@ -117,13 +470,23 @@ struct IocpMediaReader::Impl {
         }
         {
             std::lock_guard lock(mutex);
-            for (auto& slot : slots) slot->epoch = epoch;
+            for (const auto& slot : slots) slot->epoch = epoch;
             PostMoreLocked();
+        }
+        if (trace) {
+            char line[256]{};
+            std::snprintf(line, sizeof(line),
+                "[net-io] start id=%llu target=%d slots=%d size=%lld fixed=%d",
+                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(this)),
+                targetSlots, static_cast<int>(slots.size()),
+                static_cast<long long>(size), fixedTarget ? 1 : 0);
+            TraceLine(line);
         }
         return true;
     }
 
     void Stop() noexcept {
+        bool timedOut = false;
         {
             std::lock_guard lock(mutex);
             stop = true;
@@ -131,16 +494,16 @@ struct IocpMediaReader::Impl {
             for (const auto& slot : slots) {
                 if (slot->state == Slot::State::Reading) CancelIoEx(file, &slot->ov);
             }
+            changed.notify_all();
         }
-        // Let the worker reap cancellation completions before the slots (and
-        // their OVERLAPPED blocks) are released. A completion can be queued
-        // after CancelIoEx returns; closing the port first would leave the
-        // kernel owning memory that the destructor is about to free.
         {
             std::unique_lock lock(mutex);
-            const auto deadline = GetTickCount64() + 2000;
+            const auto deadline = GetTickCount64() + StopWaitMs;
             while (inFlight > 0 && GetTickCount64() < deadline)
                 changed.wait_for(lock, std::chrono::milliseconds(PollIntervalMs));
+            if (inFlight > 0) timedOut = true;
+            retries.clear();
+            holes.clear();
         }
         if (iocp != nullptr) PostQueuedCompletionStatus(iocp, 0, 0, nullptr);
         if (worker.joinable()) worker.join();
@@ -148,144 +511,133 @@ struct IocpMediaReader::Impl {
             CloseHandle(iocp);
             iocp = nullptr;
         }
+        if (timedOut) {
+            std::lock_guard lock(AbandonedMutex);
+            for (auto& slot : slots) AbandonedSlots.push_back(std::move(slot));
+            slots.clear();
+        }
+        metrics.inFlight = inFlight;
+        metrics.abandoned = timedOut;
+        if (trace) {
+            char line[512]{};
+            std::snprintf(line, sizeof(line),
+                "[net-io] stop id=%llu target=%d slots=%d inFlight=%d maxInFlight=%d bytes=%lld "
+                "short=%lld holes=%lld retries=%lld resets=%lld waits=%lld maxRead=%lld "
+                "latency=%lldms abandoned=%d",
+                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(this)),
+                targetSlots, static_cast<int>(slots.size()), inFlight, metrics.maxInFlight,
+                static_cast<long long>(metrics.bytesRead),
+                static_cast<long long>(metrics.shortReads),
+                static_cast<long long>(metrics.holesCreated),
+                static_cast<long long>(metrics.retries),
+                static_cast<long long>(metrics.resets),
+                static_cast<long long>(metrics.waitEvents),
+                static_cast<long long>(metrics.maxObservedReadBytes),
+                static_cast<long long>(metrics.readLatencyMs),
+                timedOut ? 1 : 0);
+            TraceLine(line);
+        }
+    }
+
+    void ApplyTargetLocked(const int requested) noexcept {
+        const int next = (std::max)(MinSlots, (std::min)(MaxSlots, requested));
+        if (next == targetSlots) return;
+        targetSlots = next;
+        ++metrics.targetChanges;
+        EnsureSlotsLocked();
+        PostMoreLocked();
+        changed.notify_all();
+        if (trace) {
+            char line[128]{};
+            std::snprintf(line, sizeof(line), "[net-io] target id=%llu target=%d slots=%d",
+                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(this)),
+                targetSlots, static_cast<int>(slots.size()));
+            TraceLine(line);
+        }
+    }
+
+    bool ResetAt(const std::int64_t target, const DWORD timeoutMs, DWORD& error) noexcept {
+        std::unique_lock lock(mutex);
+        if (stop) {
+            error = ERROR_OPERATION_ABORTED;
+            return false;
+        }
+        ++metrics.resets;
+        CancelPendingLocked();
+        const auto deadline = GetTickCount64() + timeoutMs;
+        while (inFlight > 0 && GetTickCount64() < deadline)
+            changed.wait_for(lock, std::chrono::milliseconds(PollIntervalMs));
+        if (inFlight > 0) {
+            error = ERROR_TIMEOUT;
+            return false;
+        }
+        retries.clear();
+        holes.clear();
+        for (const auto& slot : slots) {
+            slot->state = Slot::State::Free;
+            slot->pending = false;
+            slot->bytes = 0;
+            slot->consumed = 0;
+            slot->attempts = 0;
+            slot->epoch = epoch;
+        }
+        TrimSlotsLocked();
+        position = target;
+        issuedEnd = target;
+        eofOffset = -1;
+        PostMoreLocked();
+        changed.notify_all();
+        return true;
+    }
+
+    int Read(std::uint8_t* buffer, const int bufferSize,
+        const AVIOInterruptCB& interrupt, const DWORD timeoutMs, DWORD& error) noexcept {
+        if (buffer == nullptr || bufferSize < 0) {
+            error = ERROR_INVALID_PARAMETER;
+            return AVERROR(EINVAL);
+        }
+        if (bufferSize == 0) return 0;
+        std::unique_lock lock(mutex);
+        PostMoreLocked();
+        const auto deadline = timeoutMs == 0 ? 0 : GetTickCount64() + timeoutMs;
+        while (!stop) {
+            if (Interrupted(interrupt)) {
+                error = ERROR_OPERATION_ABORTED;
+                CancelPendingLocked();
+                return AVERROR_EXIT;
+            }
+            if (deadline != 0 && GetTickCount64() >= deadline) {
+                error = ERROR_TIMEOUT;
+                CancelPendingLocked();
+                return AVERROR(ETIMEDOUT);
+            }
+            if (size >= 0 && position >= size) return AVERROR_EOF;
+            if (eofOffset >= 0 && position >= eofOffset) return AVERROR_EOF;
+
+            auto* slot = FindReadySlot(position);
+            if (slot != nullptr) {
+                const auto offsetInSlot = position - slot->offset;
+                const auto available = slot->bytes - static_cast<int>(offsetInSlot);
+                if (available > 0) {
+                    const auto count = (std::min)(bufferSize, available);
+                    std::memcpy(buffer, slot->data + offsetInSlot, static_cast<std::size_t>(count));
+                    position += count;
+                    slot->consumed += count;
+                    if (slot->consumed >= slot->bytes) slot->state = Slot::State::Free;
+                    PostMoreLocked();
+                    return count;
+                }
+            }
+            if (FindEofSlot(position) != nullptr) return AVERROR_EOF;
+            ++metrics.waitEvents;
+            changed.wait_for(lock, std::chrono::milliseconds(PollIntervalMs));
+        }
+        error = ERROR_OPERATION_ABORTED;
+        return AVERROR_EXIT;
     }
 
     static bool Interrupted(const AVIOInterruptCB& interrupt) noexcept {
         return interrupt.callback != nullptr && interrupt.callback(interrupt.opaque) != 0;
-    }
-
-    void PostMoreLocked() noexcept {
-        if (stop) return;
-        while (inFlight < SlotCount) {
-            if (size >= 0 && nextFill >= size) break;
-            if (eofOffset >= 0 && nextFill >= eofOffset) break;
-            Slot* slot = nullptr;
-            for (const auto& candidate : slots) {
-                if (candidate->state == Slot::State::Free) {
-                    slot = candidate.get();
-                    break;
-                }
-            }
-            if (slot == nullptr) break;
-            IssueReadLocked(slot);
-            if (slot->state == Slot::State::Error) break;
-        }
-    }
-
-    void IssueReadLocked(Slot* slot) noexcept {
-        IssueReadAtLocked(slot, nextFill, true);
-    }
-
-    void RetryReadLocked(Slot* slot) noexcept {
-        IssueReadAtLocked(slot, slot->offset, false);
-    }
-
-    void IssueReadAtLocked(Slot* slot, const std::int64_t offset,
-        const bool advanceFill) noexcept {
-        slot->offset = offset;
-        slot->bytes = 0;
-        slot->consumed = 0;
-        slot->state = Slot::State::Reading;
-        slot->epoch = epoch;
-        std::memset(&slot->ov, 0, sizeof(slot->ov));
-        slot->ov.Offset = static_cast<DWORD>(static_cast<std::uint64_t>(offset) & 0xffffffffu);
-        slot->ov.OffsetHigh = static_cast<DWORD>(static_cast<std::uint64_t>(offset) >> 32);
-        if (advanceFill) nextFill = offset + SlotBytes;
-
-        DWORD bytes = 0;
-        if (ReadFile(file, slot->data, SlotBytes, &bytes, &slot->ov)) {
-            // FILE_SKIP_COMPLETION_PORT_ON_SUCCESS means this operation will not
-            // produce a completion packet; publish it directly.
-            slot->bytes = static_cast<int>(bytes);
-            slot->state = bytes == 0 ? Slot::State::Eof : Slot::State::Ready;
-            if (bytes == 0) {
-                eofOffset = offset;
-            } else {
-                // A short read is not necessarily EOF (SMB may cap a single
-                // response). Re-arm at the actual end of this range and let a
-                // subsequent zero-byte read establish EOF.
-                if (bytes < SlotBytes)
-                    nextFill = offset + bytes;
-                else if (offset + bytes > nextFill)
-                    nextFill = offset + bytes;
-                if (size >= 0 && nextFill > size) nextFill = size;
-            }
-            return;
-        }
-        const auto error = GetLastError();
-        if (error == ERROR_IO_PENDING) {
-            ++inFlight;
-            return;
-        }
-        lastError = error;
-        slot->state = Slot::State::Error;
-    }
-
-    void HandleCompletion(const BOOL ok, const DWORD bytes, Slot* slot) noexcept {
-        bool retry = false;
-        {
-            std::lock_guard lock(mutex);
-            if (stop || slot->epoch != epoch) {
-                slot->state = Slot::State::Free;
-                if (inFlight > 0) --inFlight;
-                changed.notify_all();
-                return;
-            }
-            if (inFlight > 0) --inFlight;
-
-            if (ok && bytes == 0) {
-                slot->bytes = 0;
-                slot->state = Slot::State::Eof;
-                eofOffset = slot->offset;
-            } else if (ok) {
-                slot->bytes = static_cast<int>(bytes);
-                slot->state = Slot::State::Ready;
-                slot->attempts = 0;
-                const auto end = slot->offset + static_cast<std::int64_t>(bytes);
-                if (bytes < SlotBytes)
-                    nextFill = end;
-                else if (end > nextFill)
-                    nextFill = end;
-                if (size >= 0 && nextFill > size) nextFill = size;
-            } else {
-                lastError = GetLastError();
-                if (IsTransientError(lastError) && slot->attempts < RetryCount && !stop) {
-                    ++slot->attempts;
-                    slot->state = Slot::State::Free;
-                    retry = true;
-                } else {
-                    slot->state = Slot::State::Error;
-                }
-            }
-            changed.notify_all();
-        }
-        if (retry) {
-            Sleep(RetryDelayMs);
-            std::lock_guard lock(mutex);
-            if (!stop && slot->epoch == epoch && slot->state == Slot::State::Free)
-                RetryReadLocked(slot);
-            changed.notify_all();
-        } else {
-            std::lock_guard lock(mutex);
-            PostMoreLocked();
-        }
-    }
-
-    void Worker() noexcept {
-        while (true) {
-            DWORD bytes = 0;
-            ULONG_PTR key = 0;
-            OVERLAPPED* overlapped = nullptr;
-            const auto ok = GetQueuedCompletionStatus(
-                iocp, &bytes, &key, &overlapped, INFINITE);
-            if (overlapped == nullptr) {
-                std::lock_guard lock(mutex);
-                if (stop) break;
-                continue;
-            }
-            auto* slot = reinterpret_cast<Slot*>(overlapped);
-            HandleCompletion(ok, bytes, slot);
-        }
     }
 
     Slot* FindReadySlot(std::int64_t at) noexcept {
@@ -302,83 +654,10 @@ struct IocpMediaReader::Impl {
 
     Slot* FindEofSlot(std::int64_t at) noexcept {
         for (const auto& candidate : slots) {
-            if (candidate->state == Slot::State::Eof && candidate->offset <= at) return candidate.get();
+            if (candidate->state == Slot::State::Eof && candidate->offset <= at)
+                return candidate.get();
         }
         return nullptr;
-    }
-
-    void CancelPendingLocked() noexcept {
-        ++epoch;
-        for (const auto& slot : slots) {
-            if (slot->state == Slot::State::Reading) CancelIoEx(file, &slot->ov);
-            slot->state = Slot::State::Free;
-        }
-    }
-
-    bool ResetAt(std::int64_t target, DWORD timeoutMs, DWORD& error) noexcept {
-        std::unique_lock lock(mutex);
-        CancelPendingLocked();
-        const auto deadline = GetTickCount64() + timeoutMs;
-        while (inFlight > 0 && GetTickCount64() < deadline)
-            changed.wait_for(lock, std::chrono::milliseconds(PollIntervalMs));
-        if (inFlight > 0) {
-            error = ERROR_TIMEOUT;
-            return false;
-        }
-        for (const auto& slot : slots) {
-            slot->state = Slot::State::Free;
-            slot->bytes = 0;
-            slot->consumed = 0;
-            slot->attempts = 0;
-            slot->epoch = epoch;
-        }
-        position = target;
-        nextFill = target;
-        eofOffset = -1;
-        PostMoreLocked();
-        return true;
-    }
-
-    int Read(std::uint8_t* buffer, const int bufferSize,
-        const AVIOInterruptCB& interrupt, const DWORD timeoutMs, DWORD& error) noexcept {
-        if (buffer == nullptr || bufferSize < 0) {
-            error = ERROR_INVALID_PARAMETER;
-            return AVERROR(EINVAL);
-        }
-        std::unique_lock lock(mutex);
-        const auto deadline = timeoutMs == 0 ? 0 : GetTickCount64() + timeoutMs;
-        while (!stop) {
-            if (Interrupted(interrupt)) {
-                error = ERROR_OPERATION_ABORTED;
-                CancelPendingLocked();
-                return AVERROR_EXIT;
-            }
-            if (deadline != 0 && GetTickCount64() >= deadline) {
-                error = ERROR_TIMEOUT;
-                CancelPendingLocked();
-                return AVERROR(ETIMEDOUT);
-            }
-            if (size >= 0 && position >= size) return AVERROR_EOF;
-            if (eofOffset >= 0 && position >= eofOffset) return AVERROR_EOF;
-
-            if (auto* slot = FindReadySlot(position)) {
-                const auto offsetInSlot = position - slot->offset;
-                const auto available = slot->bytes - static_cast<int>(offsetInSlot);
-                if (available > 0) {
-                    const auto count = (std::min)(bufferSize, available);
-                    std::memcpy(buffer, slot->data + offsetInSlot, static_cast<std::size_t>(count));
-                    position += count;
-                    slot->consumed += count;
-                    if (slot->consumed >= slot->bytes) slot->state = Slot::State::Free;
-                    PostMoreLocked();
-                    return count;
-                }
-            }
-            if (FindEofSlot(position) != nullptr) return AVERROR_EOF;
-            changed.wait_for(lock, std::chrono::milliseconds(PollIntervalMs));
-        }
-        error = ERROR_OPERATION_ABORTED;
-        return AVERROR_EXIT;
     }
 };
 
@@ -424,4 +703,45 @@ bool IocpMediaReader::Seek(const std::int64_t position, const DWORD timeoutMs,
 std::int64_t IocpMediaReader::Position() const noexcept {
     std::lock_guard lock(impl_->mutex);
     return impl_->position;
+}
+
+void IocpMediaReader::SetTargetBytes(const std::int64_t targetBytes) noexcept {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->fixedTarget || impl_->stop) return;
+    int slots = DefaultSlots;
+    if (targetBytes > 0) {
+        const auto capped = (std::min<std::int64_t>)(targetBytes,
+            static_cast<std::int64_t>(MaxSlots) * SlotBytes);
+        slots = static_cast<int>((capped + SlotBytes - 1) / SlotBytes);
+    }
+    if (impl_->trace) {
+        char line[128]{};
+        std::snprintf(line, sizeof(line), "[net-io] hint id=%llu bytes=%lld target=%d",
+            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(impl_.get())),
+            static_cast<long long>(targetBytes), slots);
+        TraceLine(line);
+    }
+    impl_->ApplyTargetLocked(slots);
+}
+
+void IocpMediaReader::SetTargetSlots(const int slots) noexcept {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->stop) return;
+    impl_->fixedTarget = true;
+    impl_->ApplyTargetLocked(slots);
+}
+
+int IocpMediaReader::TargetSlots() const noexcept {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->targetSlots;
+}
+
+IocpMediaReader::Metrics IocpMediaReader::MetricsSnapshot() const noexcept {
+    std::lock_guard lock(impl_->mutex);
+    Metrics metrics = impl_->metrics;
+    metrics.targetSlots = impl_->targetSlots;
+    metrics.allocatedSlots = static_cast<int>(impl_->slots.size());
+    metrics.inFlight = impl_->inFlight;
+    if (metrics.maxInFlight < metrics.inFlight) metrics.maxInFlight = metrics.inFlight;
+    return metrics;
 }

@@ -4,6 +4,7 @@
 #include "3FP/Audio/AsrAudioTap.h"
 #include "3FP/Prefetch/PrefetchService.h"
 #include "Shared/Ffmpeg/IocpMediaReader.h"
+#include "Shared/Ffmpeg/SharedFileInput.h"
 #include <cstdio>
 #include <stdexcept>
 extern "C" {
@@ -196,6 +197,14 @@ struct PlayerSecurityRegression {
         std::string error;
         auto reader = IocpMediaReader::Create(file, size.QuadPart, error);
         Check(reader != nullptr, "iocp reader created");
+        // Demand-driven target: 8 MiB asks for 8 slots, 2 MiB for 2. The
+        // public slot setter pins the target for the rest of this fixture.
+        reader->SetTargetBytes(8 * 1024 * 1024);
+        Check(reader->TargetSlots() == 8, "iocp target grows with demand");
+        reader->SetTargetBytes(2 * 1024 * 1024);
+        Check(reader->TargetSlots() == 2, "iocp target shrinks with demand");
+        reader->SetTargetSlots(8);
+        Check(reader->TargetSlots() == 8, "iocp target pinned for high queue");
         AVIOInterruptCB interrupt{};
         std::vector<std::uint8_t> buffer(64 * 1024);
         const auto limit = (std::min)(size.QuadPart, static_cast<LONGLONG>(4 * 1024 * 1024));
@@ -224,8 +233,35 @@ struct PlayerSecurityRegression {
         DWORD eofError = 0;
         Check(reader->Read(buffer.data(), static_cast<int>(buffer.size()),
             interrupt, 3000, eofError) == AVERROR_EOF, "iocp end of file");
+        reader->SetTargetSlots(2);
+        Check(reader->Seek(0, 3000, seekError), "iocp seek after shrink");
+        auto metrics = reader->MetricsSnapshot();
+        Check(metrics.targetSlots == 2 && metrics.allocatedSlots == 2,
+            "iocp shrink trims unused slots on seek");
+        DWORD shrinkError = 0;
+        Check(reader->Read(buffer.data(), static_cast<int>(buffer.size()),
+            interrupt, 3000, shrinkError) > 0, "iocp read after shrink");
         reader.reset();
         CloseHandle(file);
+    }
+
+    static void Network(const char* path) {
+        // Opt-in only: the default test run must never touch a real share. The
+        // caller supplies a UNC path; this exercises the same SharedFileInput
+        // classification and asynchronous open path the player uses.
+        std::string error;
+        auto input = SharedFileInput::Open(path, error, 0);
+        Check(input != nullptr, "network UNC input opened");
+        Check(input->Context() != nullptr, "network UNC avio context");
+        std::vector<std::uint8_t> buffer(64 * 1024);
+        std::int64_t total = 0;
+        while (total < 2 * 1024 * 1024) {
+            const auto count = avio_read(input->Context(), buffer.data(),
+                static_cast<int>(buffer.size()));
+            if (count <= 0) break;
+            total += count;
+        }
+        Check(total >= 2 * 1024 * 1024, "network UNC sequential read");
     }
 
     static void Seek(const std::string& path) {
@@ -315,6 +351,8 @@ extern "C" __declspec(dllexport) int FFF3FP_RunSecurityRegression(const char* ro
         PlayerSecurityRegression::Tempo();
         PlayerSecurityRegression::Seek(std::string(root) + "/seek.mp4");
         PlayerSecurityRegression::Iocp(std::string(root) + "/small.bmp");
+        if (const auto* unc = std::getenv("FFF_TEST_UNC_PATH"); unc != nullptr && *unc != '\0')
+            PlayerSecurityRegression::Network(unc);
         FFFPrefetch::PrefetchSecurityRegression::Run(root);
         std::printf("Native security regression: %d passed\n", checks);
         return 0;

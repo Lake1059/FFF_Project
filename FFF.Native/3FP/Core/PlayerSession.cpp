@@ -5401,6 +5401,7 @@ void PlayerSession::DoOpen(std::string path, const bool networkInput) noexcept {
     RawTrace("DoOpen: OpenFormat succeeded");
     // Remembered so the IAMF decoder can re-open the file and drive the raw OBU stream.
     mediaPath_ = path;
+    UpdateNetworkReadHint();
     // fragmented MP4（fMP4）判定（R1.1，C-FMP4-DETECT@1）：独立旁路只读句柄扫顶层
     // box 头，判定失败/非 fragmented 都不影响打开成功（R1.2/R1.3）。此处 staticImage_
     // 尚未定值（下文 IsStillImage 才赋值），但 DoClose 已把它清零，且静图容器
@@ -9354,6 +9355,23 @@ void PlayerSession::UpdateBitRateForPosition(const std::int64_t position) noexce
     snapshot_.videoBitRate = rateFor(videoBitRateBuckets_);
     snapshot_.audioBitRate = rateFor(audioBitRateBuckets_);
     PublishSnapshot();
+    UpdateNetworkReadHint();
+}
+
+void PlayerSession::UpdateNetworkReadHint() noexcept {
+    if (formatIo_ == nullptr || format_ == nullptr) return;
+    std::int64_t bitRate = format_->bit_rate > 0 ? format_->bit_rate : 0;
+    if (bitRate <= 0) {
+        for (unsigned index = 0; index < format_->nb_streams; ++index) {
+            const auto* stream = format_->streams[index];
+            if (stream != nullptr && stream->codecpar != nullptr && stream->codecpar->bit_rate > 0)
+                bitRate += stream->codecpar->bit_rate;
+        }
+    }
+    const auto measured = static_cast<std::int64_t>(snapshot_.videoBitRate) +
+        static_cast<std::int64_t>(snapshot_.audioBitRate);
+    if (measured > bitRate) bitRate = measured;
+    formatIo_->SetNetworkWindowHint(bitRate);
 }
 
 void PlayerSession::PumpExternalAudio() noexcept {
@@ -10112,6 +10130,7 @@ bool PlayerSession::PrepareGrowingSeek(const std::int64_t position) noexcept {
     CloseFormat(&format_, formatIo_);
     format_ = candidate;
     formatIo_ = std::move(candidateIo);
+    UpdateNetworkReadHint();
     return true;
 }
 
@@ -10140,6 +10159,7 @@ bool PlayerSession::ReopenFormatForSeek(std::int64_t recallPosition100ns) noexce
             "seek");
         return false;
     }
+    UpdateNetworkReadHint();
     // 解码器不持有 AVStream 指针（extradata 已内嵌，同一文件流表确定不变），
     // flush 即可，无需重开。
     if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);

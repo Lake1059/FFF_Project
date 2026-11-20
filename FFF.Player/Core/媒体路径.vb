@@ -16,8 +16,17 @@ Public Module 媒体路径
         Catch
             完整路径 = 路径.Trim()
         End Try
-        Return 完整路径.StartsWith("\\", StringComparison.Ordinal) OrElse
-              完整路径.StartsWith("//", StringComparison.Ordinal)
+        If 完整路径.StartsWith("\\", StringComparison.Ordinal) OrElse
+           完整路径.StartsWith("//", StringComparison.Ordinal) Then Return True
+        ' 映射盘（Z:\ 等）同样是 SMB 路径，只是带盘符；不能让它退回本地同步读路径。
+        If 完整路径.Length >= 2 AndAlso 完整路径.Chars(1) = ":"c Then
+            Try
+                Return New IO.DriveInfo(完整路径.Substring(0, 3)).DriveType = IO.DriveType.Network
+            Catch
+                Return False
+            End Try
+        End If
+        Return False
     End Function
 
     ''' <summary>

@@ -32,6 +32,10 @@ public:
     void SetInterrupt(AVIOInterruptCB interrupt) noexcept { interrupt_ = interrupt; }
     void DetectUnwrittenData(bool enabled) noexcept { detectUnwrittenData_ = enabled; }
 
+    // Feed-forward hint for the IOCP read-ahead window. `bitsPerSecond` is the
+    // container/stream bitrate; the reader converts it to a slot target.
+    void SetNetworkWindowHint(std::int64_t bitsPerSecond) noexcept;
+
 private:
     static constexpr DWORD NetworkReadTimeoutMs = 8000;
     static constexpr DWORD NetworkOpenTimeoutMs = 15000;

@@ -10,13 +10,37 @@ extern "C" {
 #include <memory>
 #include <string>
 
-// A bounded read-ahead pipeline for UNC/SMB media. The file handle is associated
-// with an I/O completion port; a dedicated worker keeps several ReadFile
-// operations in flight while the demux worker drains completed slots. This is
-// deliberately not an IOCP abstraction over a synchronous read: the point is
-// overlap between network latency and decode, plus a finite cancellation point.
+// A bounded, elastic read-ahead pipeline for UNC/SMB media. The file handle is
+// associated with an I/O completion port; a dedicated worker keeps several
+// ReadFile operations in flight while the demux worker drains completed slots.
+//
+// The slot count is a demand-driven target (2..12 by default), not a compile-
+// time constant. Slots are stable heap objects because the completion port maps
+// OVERLAPPED back to its slot; resizing a vector of slot values would invalidate
+// every in-flight request.
+//
+// `SetTargetBytes` is fed with an approximate stream bitrate by the player. The
+// reader turns it into a slot target; `FFF_NET_IO_DEPTH` can pin the target for
+// diagnostics and tests.
 class IocpMediaReader final {
 public:
+    struct Metrics {
+        int targetSlots = 0;
+        int allocatedSlots = 0;
+        int inFlight = 0;
+        int maxInFlight = 0;
+        std::int64_t bytesRead = 0;
+        std::int64_t waitEvents = 0;
+        std::int64_t shortReads = 0;
+        std::int64_t holesCreated = 0;
+        std::int64_t retries = 0;
+        std::int64_t resets = 0;
+        std::int64_t targetChanges = 0;
+        std::int64_t maxObservedReadBytes = 0;
+        std::int64_t readLatencyMs = 0;
+        bool abandoned = false;
+    };
+
     static std::unique_ptr<IocpMediaReader> Create(HANDLE file, std::int64_t size,
         std::string& error) noexcept;
 
@@ -31,10 +55,20 @@ public:
         DWORD timeoutMs, DWORD& lastError) noexcept;
 
     // Cancels outstanding reads, waits for the completion port to observe them,
-    // then re-arms the pipeline at `position`. Returns false on timeout/stop.
+    // trims unused slots, then re-arms the pipeline at `position`.
     bool Seek(std::int64_t position, DWORD timeoutMs, DWORD& lastError) noexcept;
 
     std::int64_t Position() const noexcept;
+
+    // Demand hint in bytes. 0 restores the default target of four slots.
+    void SetTargetBytes(std::int64_t targetBytes) noexcept;
+
+    // Explicit slot target, used by diagnostics/tests. Pins the target so a
+    // later bitrate hint cannot overwrite it.
+    void SetTargetSlots(int slots) noexcept;
+
+    int TargetSlots() const noexcept;
+    Metrics MetricsSnapshot() const noexcept;
 
 private:
     struct Impl;

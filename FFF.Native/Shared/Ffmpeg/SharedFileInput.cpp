@@ -10,9 +10,31 @@ extern "C" {
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <thread>
+
+void NetTrace(const char* format, ...) noexcept {
+    wchar_t enabled[8]{};
+    if (GetEnvironmentVariableW(L"FFF_NET_IO_TRACE", enabled, 8) == 0) return;
+    char line[512]{};
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    wchar_t file[1024]{};
+    const auto length = GetEnvironmentVariableW(L"FFF_NET_IO_TRACE_FILE", file, 1024);
+    if (length > 0 && length < 1024) {
+        if (auto* stream = _wfopen(file, L"a")) {
+            std::fprintf(stream, "%s\n", line);
+            std::fclose(stream);
+        }
+    } else {
+        std::fputs(line, stderr);
+        std::fputc('\n', stderr);
+    }
+}
 
 namespace {
 constexpr int AvioBufferSize = 64 * 1024;
@@ -113,6 +135,14 @@ struct OpenedFile {
 
 OpenedFile OpenNetworkFile(const std::wstring& path, const ULONGLONG deadlineTick) noexcept {
     OpenedFile result{};
+    struct TraceResult {
+        const OpenedFile& result;
+        ~TraceResult() {
+            NetTrace("net-open error=%lu timedOut=%d sizeKnown=%d size=%lld",
+                static_cast<unsigned long>(result.error), result.timedOut ? 1 : 0,
+                result.sizeKnown ? 1 : 0, static_cast<long long>(result.size));
+        }
+    } traceResult{result};
     auto job = std::make_shared<OpenJob>();
     job->path = path;
     job->done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -226,14 +256,37 @@ void SharedFileInput::CloseHandles() noexcept {
     }
 }
 
+static bool IsRemoteDrive(const std::wstring& path) noexcept {
+    if (path.size() < 2 || path[1] != L':') return false;
+    const wchar_t root[4] = {path[0], L':', L'\\', L'\0'};
+    return GetDriveTypeW(root) == DRIVE_REMOTE;
+}
+
 bool SharedFileInput::IsNetworkPath(const std::wstring& path) noexcept {
-    return path.size() >= 2 &&
+    if (path.size() >= 2 &&
         ((path[0] == L'\\' && path[1] == L'\\') ||
-         (path[0] == L'/' && path[1] == L'/'));
+         (path[0] == L'/' && path[1] == L'/'))) return true;
+    // A mapped SMB drive is still a network media path even though it has a
+    // drive letter. Classifying it here keeps it on the IOCP/overlapped path;
+    // otherwise it silently falls back to the local synchronous read path.
+    return IsRemoteDrive(path);
 }
 
 bool SharedFileInput::IsTransientNetworkError(const DWORD error) noexcept {
     return ::IsTransientNetworkError(error);
+}
+
+void SharedFileInput::SetNetworkWindowHint(const std::int64_t bitsPerSecond) noexcept {
+    if (!iocpReader_) return;
+    if (bitsPerSecond <= 0) {
+        iocpReader_->SetTargetBytes(0);
+        return;
+    }
+    // Keep roughly half a second of video in the prefetch window, plus one
+    // slot for jitter. The reader clamps this to its 2..12 slot range.
+    const auto bytesPerSecond = bitsPerSecond / 8;
+    const auto targetBytes = bytesPerSecond / 2 + 1024 * 1024;
+    iocpReader_->SetTargetBytes(targetBytes);
 }
 
 bool SharedFileInput::Interrupted(const AVIOInterruptCB& interrupt) noexcept {
@@ -260,6 +313,9 @@ std::unique_ptr<SharedFileInput> SharedFileInput::Open(const char* pathUtf8,
         auto input = std::make_unique<SharedFileInput>();
         input->path_ = path;
         input->network_ = IsNetworkPath(path);
+        NetTrace("open network=%d driveRemote=%d",
+            input->network_ ? 1 : 0,
+            IsRemoteDrive(path) ? 1 : 0);
 
         if (input->network_) {
             if (deadlineTick != 0 && deadlineTick <= GetTickCount64()) {

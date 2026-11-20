@@ -59,7 +59,7 @@ Friend Module 安全修复回归
 
         检查(媒体路径.是网络路径("\\server\share\file.mp4"), "UNC path classified as network")
         检查(媒体路径.是网络路径("//server/share/file.mp4"), "slash UNC classified as network")
-        检查(Not 媒体路径.是网络路径("Z:\media\file.mp4"), "drive path not classified as network")
+        检查(Not 媒体路径.是网络路径(Path.Combine(Path.GetPathRoot(AppContext.BaseDirectory), "media\file.mp4")), "local drive path not classified as network")
         检查(Form1.取得命令行文件({"\\server\share\file.mp4"}) = String.Empty,
             "command line does not probe network media")
         检查(Form1.取得命令行文件({"\\?\UNC\server\share\file.mp4"}) = String.Empty,
