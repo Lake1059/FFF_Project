@@ -74,6 +74,26 @@ inline std::uint64_t To100ns(const std::chrono::steady_clock::duration& d) noexc
 // 2e6 包 ≈ 9 小时 60fps / 18 小时 30fps 的参考流样本总量，超过它判定目标不可达，
 // 转 B2 重开还原而不是无限预滚（过大→卡顿，过小→大文件长跳失败率上升）。
 constexpr std::int64_t MaximumSeekPrerollPackets = 2'000'000;
+// Network seeks get one wall-clock budget across av_seek_frame, fragmented
+// preroll, a demux reopen, and the decode-to-target loop. Local seeks keep the
+// existing unbounded behavior; a slow local disk is still allowed to finish.
+constexpr ULONGLONG NetworkSeekDeadlineMs = 6000;
+constexpr ULONGLONG NetworkOpenDeadlineMs = 15000;
+// Pre-roll is additionally capped by bytes for network inputs: packet count
+// alone can still read gigabytes before the packet fuse trips.
+constexpr std::int64_t MaximumNetworkSeekPrerollBytes = 64LL * 1024 * 1024;
+
+class ScopedInputDeadline final {
+public:
+    ScopedInputDeadline(std::atomic<ULONGLONG>& deadline, const ULONGLONG budgetMs) noexcept
+        : deadline_(deadline), previous_(deadline.exchange(GetTickCount64() + budgetMs)) {}
+    ~ScopedInputDeadline() { deadline_.store(previous_); }
+    ScopedInputDeadline(const ScopedInputDeadline&) = delete;
+    ScopedInputDeadline& operator=(const ScopedInputDeadline&) = delete;
+private:
+    std::atomic<ULONGLONG>& deadline_;
+    ULONGLONG previous_;
+};
 // 预滚循环内检查 terminate_（acquire）与刷新扫描表快照的包间隔（契约上限 1024），
 // 决定关闭请求的最坏响应延迟。
 constexpr std::int64_t SeekPrerollInterruptInterval = 1024;
@@ -2082,7 +2102,7 @@ FFFResult PlayerSession::OpenWithPolicy(const char* path, bool allowNetwork) noe
     discCancel_.store(false);
     firstFramePresentedEmitted_.store(false, std::memory_order_release);
     Emit(FFF3FPEvent::StateChanged, "{\"state\":1}");
-    Enqueue([this, value = std::move(normalized)] { DoOpen(value); }); return FFFResult::Success;
+    Enqueue([this, value = std::move(normalized), allowNetwork] { DoOpen(value, allowNetwork); }); return FFFResult::Success;
 }
 FFFResult PlayerSession::Play() noexcept {
     RawTrace("Play enter");
@@ -2193,8 +2213,12 @@ FFFResult PlayerSession::Seek(const std::int64_t value) noexcept { RawTrace("See
         // 错误消息写的是 "playback remained active"。实测裸 Annex-B：探针一句 Seek(0) ⇒
         // 解码 0 帧＋state=Ended；跳过那句 seek，同一个文件正常播（88 帧、位置推进 3.41s）。
         const auto seeked = DoSeek(value);
-        if (seeked == FFFResult::Success && state_.load() != FFF3FPState::Playing &&
-            rawStill_ == nullptr) DecodeUntilSeekTarget(); Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":" + std::to_string(snapshot_.position100ns) + "}"); }); return FFFResult::Success; }
+        if (seeked != FFFResult::Success) return;
+        if (state_.load() != FFF3FPState::Playing && rawStill_ == nullptr)
+            DecodeUntilSeekTarget();
+        Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":" +
+            std::to_string(snapshot_.position100ns) + "}");
+    }); return FFFResult::Success; }
 FFFResult PlayerSession::SeekKeyframe(const std::int64_t value) noexcept {
     if (value < 0) return FFFResult::InvalidArgument;
     const auto state = state_.load();
@@ -2203,7 +2227,8 @@ FFFResult PlayerSession::SeekKeyframe(const std::int64_t value) noexcept {
     Enqueue([this, value] {
         const auto hasVideo = videoStream_ >= 0 && videoDecoder_ != nullptr;
         const auto seeked = DoSeek(value, -1, !hasVideo);
-        if (seeked == FFFResult::Success && hasVideo && state_.load() != FFF3FPState::Playing)
+        if (seeked != FFFResult::Success) return;
+        if (hasVideo && state_.load() != FFF3FPState::Playing)
             DecodeUntilSeekTarget();
         Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek-keyframe\",\"position100ns\":" +
             std::to_string(snapshot_.position100ns) + "}");
@@ -2225,13 +2250,15 @@ FFFResult PlayerSession::SeekFrame(const std::int64_t value) noexcept {
     Enqueue([this, value] {
         const auto end = framePtsIndexBase_ + static_cast<std::int64_t>(framePtsIndex_.size());
         if (value >= framePtsIndexBase_ && value < end) {
-            DoSeek(StreamTimestampPosition100ns(format_, videoStream_,
+            const auto seeked = DoSeek(StreamTimestampPosition100ns(format_, videoStream_,
                 framePtsIndex_[static_cast<std::size_t>(value - framePtsIndexBase_)]), value);
+            if (seeked != FFFResult::Success) return;
         } else {
             // Preserve exact frame navigation outside the bounded index window.
             // Rebuild the sparse rolling index from the stream start while decoding.
             framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = true;
-            DoSeek(0, value);
+            const auto seeked = DoSeek(0, value);
+            if (seeked != FFFResult::Success) return;
             // DoSeek stores targetFrame-1 so a normal exact frame seek can
             // resume at the requested ordinal. A rebuild must count from zero
             // while decoding the stream prefix toward that ordinal.
@@ -4431,7 +4458,7 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
     if (mergedExtents != nullptr)
         *mergedExtents = repaired ? repairedExtents : 0;
     io = repaired ? SharedFileInput::OpenMemory(repairedBytes.data(), repairedBytes.size(), error)
-                  : SharedFileInput::Open(path.c_str(), error);
+                  : SharedFileInput::Open(path.c_str(), error, inputDeadlineTick_.load());
     if (io == nullptr) {
         av_dict_free(&options);
         return FFFResult::NativeFailure;
@@ -4564,7 +4591,7 @@ FFFResult PlayerSession::OpenProbeFormat(const std::string& path, AVFormatContex
     if (mergedExtents != nullptr)
         *mergedExtents = repaired ? repairedExtents : 0;
     io = repaired ? SharedFileInput::OpenMemory(repairedBytes.data(), repairedBytes.size(), error)
-                  : SharedFileInput::Open(path.c_str(), error);
+                  : SharedFileInput::Open(path.c_str(), error, inputDeadlineTick_.load());
     if (io == nullptr) {
         av_dict_free(&options);
         return FFFResult::NativeFailure;
@@ -5307,7 +5334,13 @@ bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const s
     return finish(produced || !streamCountMatches || cancelled, detail);
 }
 
-void PlayerSession::DoOpen(std::string path) noexcept {
+void PlayerSession::DoOpen(std::string path, const bool networkInput) noexcept {
+    networkInput_ = networkInput;
+    std::unique_ptr<ScopedInputDeadline> openDeadline;
+    if (networkInput_) {
+        openDeadline = std::make_unique<ScopedInputDeadline>(
+            inputDeadlineTick_, NetworkOpenDeadlineMs);
+    }
     // A new file is a new timeline: whatever the tap buffered from the previous
     // one must not survive into it -- and neither may what the ASR worker has
     // accumulated. The worker's only re-anchor mechanism is a generation change
@@ -5363,6 +5396,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
             } else discOpened_.store(true, std::memory_order_release);
         } catch (...) { openResult = FFFResult::NativeFailure; openError = "Could not open the disc."; }
     } else openResult = OpenFormat(path, &format_, formatIo_, openError, &mergedExtents, &avifInfo);
+    openDeadline.reset();
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
     RawTrace("DoOpen: OpenFormat succeeded");
     // Remembered so the IAMF decoder can re-open the file and drive the raw OBU stream.
@@ -9703,6 +9737,14 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
         return FFFResult::Success;
     }
     if (!format_) return FFFResult::Success;
+    // One network deadline covers the seek, any fragmented pre-roll, a demux
+    // reopen and the decode-to-target pass. It is deliberately not applied to
+    // local media: a slow local disk is allowed to finish.
+    std::unique_ptr<ScopedInputDeadline> seekDeadline;
+    if (networkInput_) {
+        seekDeadline = std::make_unique<ScopedInputDeadline>(
+            inputDeadlineTick_, NetworkSeekDeadlineMs);
+    }
     position = std::clamp<std::int64_t>(position, 0, snapshot_.durationKnown ? snapshot_.duration100ns : position);
     // Still-image seek is a no-op: single-image demuxers have no seekable timeline.
     if (staticImage_) { PublishSnapshot(); return FFFResult::Success; }    auto decodeStartPosition = position;
@@ -9742,6 +9784,20 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     auto seekResult = growingInput_ ? (PrepareGrowingSeek(position) ? 0 : AVERROR(EAGAIN))
         : fragmentedPrerollHit ? 0
         : av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD);
+    if (seekResult < 0 && networkInput_ && !growingInput_ && !fragmentedPrerollHit &&
+        (seekResult == AVERROR(EIO) || seekResult == AVERROR(ETIMEDOUT)) &&
+        byteOffsetBeforeSeek >= 0 && format_->pb != nullptr &&
+        avio_seek(format_->pb, byteOffsetBeforeSeek, SEEK_SET) >= 0) {
+        // An SMB read/timeout can fail a seek without leaving the demuxer
+        // permanently at the failed position. Roll back to the captured byte
+        // offset, flush, and retry the same timestamp once. Permission errors,
+        // malformed indexes and explicit cancellation are not retried.
+        avformat_flush(format_);
+        Sleep(200);
+        if (!inputDeadlineTick_.load() || GetTickCount64() < inputDeadlineTick_.load()) {
+            seekResult = av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD);
+        }
+    }
     if (growingInput_ && seekResult < 0) {
         if (!snapshot_.waitingForInput) {
             ++snapshot_.incompleteReads;
@@ -9750,7 +9806,7 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
         PublishSnapshot();
         return FFFResult::FfmpegFailure;
     }
-    if (seekResult < 0 && format_->pb != nullptr &&
+    if (seekResult < 0 && !networkInput_ && format_->pb != nullptr &&
         (format_->pb->seekable & AVIO_SEEKABLE_NORMAL) != 0 && !fragmentedMp4_) {
         const auto fileSize = avio_size(format_->pb);
         const auto timelineExtent = snapshot_.duration100ns > 0
@@ -9796,9 +9852,14 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
             avformat_flush(format_);
             rolledBack = true;
         }
-        ReportError(FFFResult::FfmpegFailure, rolledBack
-            ? "FFmpeg could not seek to the requested position; the reader was rolled back and playback remained active."
-            : "FFmpeg could not seek to the requested position and the reader could not be rolled back; playback will run to the end.",
+        ReportError(FFFResult::FfmpegFailure,
+            networkInput_
+                ? (rolledBack
+                    ? "Network media could not seek to the requested position; the reader was rolled back and playback remains at the previous position."
+                    : "Network media could not seek and the reader could not be rolled back; playback may be unavailable until the media is reopened.")
+                : (rolledBack
+                    ? "FFmpeg could not seek to the requested position; the reader was rolled back and playback remained active."
+                    : "FFmpeg could not seek to the requested position and the reader could not be rolled back; playback will run to the end."),
             "seek");
         return FFFResult::FfmpegFailure;
     }
@@ -9966,6 +10027,7 @@ bool PlayerSession::SeekFragmentedPreroll(std::int64_t target100ns) noexcept {
     };
     refreshStopPoint();
     std::int64_t packetsRead = 0;
+    std::int64_t bytesRead = 0;
     while (true) {
         const auto readResult = av_read_frame(format_, playbackPacket_);
         if (readResult < 0) {
@@ -9973,6 +10035,11 @@ bool PlayerSession::SeekFragmentedPreroll(std::int64_t target100ns) noexcept {
             return false;   // EOF（目标超出内容）/IO 错误 → B2 还原
         }
         ++packetsRead;
+        bytesRead += playbackPacket_->size > 0 ? playbackPacket_->size : 0;
+        if (networkInput_ && bytesRead > MaximumNetworkSeekPrerollBytes) {
+            av_packet_unref(playbackPacket_);
+            return false;
+        }
         if (playbackPacket_->stream_index == referenceStream) {
             auto decodeTs = playbackPacket_->dts;
             if (decodeTs == AV_NOPTS_VALUE) decodeTs = playbackPacket_->pts;   // dts 缺失回落 pts
@@ -9990,6 +10057,8 @@ bool PlayerSession::SeekFragmentedPreroll(std::int64_t target100ns) noexcept {
         if (demuxReference100ns >= stopPoint100ns) return true;   // 判停命中（此后不校验是否恰好关键帧）
         if (packetsRead % SeekPrerollInterruptInterval == 0) {
             if (terminate_.load(std::memory_order_acquire)) return false;   // 关闭请求 → B2
+            if (networkInput_ && inputDeadlineTick_.load() &&
+                GetTickCount64() >= inputDeadlineTick_.load()) return false;
             refreshStopPoint();
         }
         if (packetsRead >= MaximumSeekPrerollPackets) return false;   // R2.5 上限 → B2

@@ -3,6 +3,7 @@
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Audio/AsrAudioTap.h"
 #include "3FP/Prefetch/PrefetchService.h"
+#include "Shared/Ffmpeg/IocpMediaReader.h"
 #include <cstdio>
 #include <stdexcept>
 extern "C" {
@@ -185,6 +186,48 @@ struct PlayerSecurityRegression {
         }
     }
 
+    static void Iocp(const std::string& path) {
+        const auto file = CreateFileA(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        Check(file != INVALID_HANDLE_VALUE, "iocp fixture opened");
+        LARGE_INTEGER size{};
+        Check(GetFileSizeEx(file, &size) && size.QuadPart > 0, "iocp fixture sized");
+        std::string error;
+        auto reader = IocpMediaReader::Create(file, size.QuadPart, error);
+        Check(reader != nullptr, "iocp reader created");
+        AVIOInterruptCB interrupt{};
+        std::vector<std::uint8_t> buffer(64 * 1024);
+        const auto limit = (std::min)(size.QuadPart, static_cast<LONGLONG>(4 * 1024 * 1024));
+        std::int64_t total = 0;
+        while (total < limit) {
+            DWORD errorCode = 0;
+            const auto count = reader->Read(buffer.data(), static_cast<int>(buffer.size()),
+                interrupt, 3000, errorCode);
+            if (count == AVERROR_EOF) break;
+            Check(count > 0, "iocp sequential read");
+            total += count;
+        }
+        Check(total == limit, "iocp sequential length");
+        DWORD seekError = 0;
+        Check(reader->Seek(size.QuadPart / 2, 3000, seekError), "iocp seek to middle");
+        DWORD middleError = 0;
+        const auto middle = reader->Read(buffer.data(), static_cast<int>(buffer.size()),
+            interrupt, 3000, middleError);
+        Check(middle > 0, "iocp read after seek");
+        Check(reader->Seek(0, 3000, seekError), "iocp seek to start");
+        DWORD startError = 0;
+        const auto start = reader->Read(buffer.data(), static_cast<int>(buffer.size()),
+            interrupt, 3000, startError);
+        Check(start > 0 && reader->Position() == start, "iocp read after rewind");
+        Check(reader->Seek(size.QuadPart, 3000, seekError), "iocp seek to end");
+        DWORD eofError = 0;
+        Check(reader->Read(buffer.data(), static_cast<int>(buffer.size()),
+            interrupt, 3000, eofError) == AVERROR_EOF, "iocp end of file");
+        reader.reset();
+        CloseHandle(file);
+    }
+
     static void Seek(const std::string& path) {
         for (bool skip : {true, false}) {
             SetEnvironmentVariableW(L"FFF_SEEK_SKIP", skip ? L"1" : L"0");
@@ -271,6 +314,7 @@ extern "C" __declspec(dllexport) int FFF3FP_RunSecurityRegression(const char* ro
         PlayerSecurityRegression::Tap();
         PlayerSecurityRegression::Tempo();
         PlayerSecurityRegression::Seek(std::string(root) + "/seek.mp4");
+        PlayerSecurityRegression::Iocp(std::string(root) + "/small.bmp");
         FFFPrefetch::PrefetchSecurityRegression::Run(root);
         std::printf("Native security regression: %d passed\n", checks);
         return 0;

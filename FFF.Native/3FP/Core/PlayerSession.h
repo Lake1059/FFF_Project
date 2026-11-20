@@ -312,7 +312,7 @@ private:
     void ReleaseAudioWithoutVideo() noexcept;
     void ApplyAudioPlaybackPause(bool playing) noexcept;
     bool PresentAudioBoundary() noexcept;
-    void DoOpen(std::string pathUtf8) noexcept;
+    void DoOpen(std::string pathUtf8, bool networkInput = false) noexcept;
     bool ReopenDiscDemux();
     void PublishDisc();
     bool HoldDisc();
@@ -874,6 +874,9 @@ private:
     bool inputReadBlocked_ = false;
     std::int64_t inputRetryTick_ = 0;
     std::atomic<ULONGLONG> inputDeadlineTick_{0};
+    // Set by OpenNetwork for the whole life of this file. It only selects the
+    // bounded network I/O/seek policy; path validation still happens in OpenApi.
+    bool networkInput_ = false;
     std::int64_t inputResumePosition100ns_ = 0;
     std::int32_t decodedSurfaceFormat_ = -1;
     AVCodecContext* decodedSurfaceDecoder_ = nullptr;
