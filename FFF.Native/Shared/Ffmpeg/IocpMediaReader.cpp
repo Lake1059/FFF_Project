@@ -6,6 +6,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -32,6 +33,17 @@ constexpr DWORD PollIntervalMs = 50;
 constexpr DWORD RetryDelayMs = 150;
 constexpr int RetryCount = 1;
 constexpr ULONGLONG StopWaitMs = 3000;
+constexpr DWORD TrimDelayMs = 2000;
+constexpr int MaxHoles = 64;
+constexpr std::int64_t MaxHoleBytes = 16 * 1024 * 1024;
+constexpr std::int64_t MaxAbandonedBytes = 64 * 1024 * 1024;
+constexpr ULONGLONG AdaptiveIntervalMs = 1000;
+constexpr ULONGLONG AdaptiveHoldMs = 2000;
+constexpr int AdaptiveMaxBias = 4;
+constexpr std::int64_t AdaptiveLatencyMs = 40;
+constexpr std::array<ULONGLONG, 16> LatencyBounds = {
+    0, 1, 2, 3, 5, 8, 12, 18, 25, 40, 60, 90, 140, 220, 500, 1000
+};
 
 bool IsTransientError(const DWORD error) noexcept {
     switch (error) {
@@ -46,6 +58,8 @@ bool IsTransientError(const DWORD error) noexcept {
     case ERROR_REM_NOT_LIST:
     case ERROR_NETWORK_UNREACHABLE:
     case ERROR_HOST_UNREACHABLE:
+    case ERROR_NOT_ENOUGH_QUOTA:
+    case ERROR_NO_SYSTEM_RESOURCES:
         return true;
     default:
         return false;
@@ -68,6 +82,20 @@ bool TraceEnabled() noexcept {
     wchar_t text[16]{};
     const auto length = GetEnvironmentVariableW(L"FFF_NET_IO_TRACE", text, 16);
     return length > 0 && length < 16 && !(text[0] == L'0' && text[1] == L'\0');
+}
+
+bool SeekProfileEnabled() noexcept {
+    static const bool enabled = []() noexcept {
+        wchar_t text[8]{};
+        const auto length = GetEnvironmentVariableW(L"FFF_SEEK_PROFILE", text, 8);
+        return length > 0 && length < 8 && !(text[0] == L'0' && text[1] == L'\0');
+    }();
+    return enabled;
+}
+
+inline double ElapsedMs(const std::chrono::steady_clock::time_point& begin,
+    const std::chrono::steady_clock::time_point& end) noexcept {
+    return std::chrono::duration<double, std::milli>(end - begin).count();
 }
 
 std::wstring TraceFilePath() {
@@ -117,6 +145,14 @@ struct Retry {
 // only happens when the completion port cannot observe cancellation.
 std::mutex AbandonedMutex;
 std::vector<std::unique_ptr<Slot>> AbandonedSlots;
+std::atomic<std::int64_t> AbandonedBytes{0};
+std::atomic<std::int64_t> AbandonedCount{0};
+
+#ifdef FFF_SECURITY_REGRESSION_TESTS
+std::atomic<int> TestShortReadBytes{0};
+std::atomic<int> TestShortReadCount{0};
+std::atomic<int> TestCompletionDelayMs{0};
+#endif
 
 void TraceLine(const char* line) noexcept {
     if (line == nullptr) return;
@@ -140,10 +176,25 @@ struct IocpMediaReader::Impl {
     std::uint64_t epoch = 0;
     int inFlight = 0;
     int targetSlots = DefaultSlots;
+    int initialTargetSlots = DefaultSlots;
+    int hintTargetSlots = DefaultSlots;
+    int adaptiveBias = 0;
+    int highWaitStreak = 0;
+    int lowWaitStreak = 0;
     bool fixedTarget = false;
+    bool adaptive = false;
     bool stop = false;
     bool trace = false;
+    bool trimPending = false;
+    bool holeLimitHit = false;
+    ULONGLONG trimEligibleTick = 0;
+    DWORD trimDelayMs = TrimDelayMs;
+    ULONGLONG lastAdaptTick = 0;
+    ULONGLONG lastTargetChangeTick = 0;
+    std::int64_t adaptWaitMark = 0;
+    std::int64_t adaptReadMark = 0;
     DWORD lastError = 0;
+    std::array<std::uint64_t, 16> latencyBuckets{};
     std::vector<std::unique_ptr<Slot>> slots;
     std::deque<Hole> holes;
     std::vector<Retry> retries;
@@ -156,8 +207,25 @@ struct IocpMediaReader::Impl {
         slots.clear();
     }
 
+    int AllocationSlotsLocked() const noexcept {
+        int limit = targetSlots;
+        if (size >= 0) {
+            const auto sizeSlots = (size + SlotBytes - 1) / SlotBytes;
+            limit = (std::min)(limit, (std::max)(MinSlots,
+                static_cast<int>((std::min<std::int64_t>)(sizeSlots, MaxSlots))));
+        }
+        return limit;
+    }
+
+    std::int64_t HoleBytesLocked() const noexcept {
+        std::int64_t total = 0;
+        for (const auto& hole : holes) total += hole.end - hole.begin;
+        return total;
+    }
+
     bool EnsureSlotsLocked() noexcept {
-        while (slots.size() < static_cast<std::size_t>(targetSlots) &&
+        const int limit = AllocationSlotsLocked();
+        while (slots.size() < static_cast<std::size_t>(limit) &&
             slots.size() < static_cast<std::size_t>(MaxSlots)) {
             auto slot = std::unique_ptr<Slot>(new (std::nothrow) Slot());
             if (slot == nullptr) return false;
@@ -171,6 +239,8 @@ struct IocpMediaReader::Impl {
             }
         }
         metrics.allocatedSlots = static_cast<int>(slots.size());
+        if (metrics.peakAllocatedSlots < metrics.allocatedSlots)
+            metrics.peakAllocatedSlots = metrics.allocatedSlots;
         return true;
     }
 
@@ -195,27 +265,68 @@ struct IocpMediaReader::Impl {
         }
         holes.insert(it, Hole{begin, end});
         ++metrics.holesCreated;
+        if (static_cast<int>(holes.size()) > MaxHoles ||
+            HoleBytesLocked() > MaxHoleBytes) {
+            holeLimitHit = true;
+            metrics.holeLimitHit = true;
+            lastError = ERROR_NOT_ENOUGH_QUOTA;
+        }
     }
 
-    void PublishSuccessLocked(Slot* slot, const DWORD bytes) noexcept {
+    void RecordLatencyLocked(const ULONGLONG latency) noexcept {
+        std::size_t bucket = 0;
+        while (bucket + 1 < LatencyBounds.size() && latency >= LatencyBounds[bucket + 1])
+            ++bucket;
+        ++latencyBuckets[bucket];
+        if (metrics.maxReadLatencyMs < static_cast<std::int64_t>(latency))
+            metrics.maxReadLatencyMs = static_cast<std::int64_t>(latency);
+    }
+
+    std::int64_t P95LatencyLocked() const noexcept {
+        std::uint64_t total = 0;
+        for (const auto count : latencyBuckets) total += count;
+        if (total == 0) return 0;
+        const auto target = (total * 95 + 99) / 100;
+        std::uint64_t seen = 0;
+        for (std::size_t bucket = 0; bucket < latencyBuckets.size(); ++bucket) {
+            seen += latencyBuckets[bucket];
+            if (seen >= target)
+                return static_cast<std::int64_t>(LatencyBounds[bucket]);
+        }
+        return static_cast<std::int64_t>(LatencyBounds.back());
+    }
+
+    void PublishSuccessLocked(Slot* slot, DWORD bytes) noexcept {
         slot->pending = false;
         slot->bytes = static_cast<int>(bytes);
         slot->state = bytes == 0 ? Slot::State::Eof : Slot::State::Ready;
         slot->attempts = 0;
+        if (slot->issueTick != 0) {
+            const auto latency = GetTickCount64() - slot->issueTick;
+            metrics.readLatencyMs = metrics.readLatencyMs == 0
+                ? static_cast<std::int64_t>(latency)
+                : (metrics.readLatencyMs * 7 + static_cast<std::int64_t>(latency)) / 8;
+            RecordLatencyLocked(latency);
+        }
+#ifdef FFF_SECURITY_REGRESSION_TESTS
+        const int shortCap = TestShortReadBytes.load(std::memory_order_relaxed);
+        if (shortCap > 0 && bytes > static_cast<DWORD>(shortCap) &&
+            TestShortReadCount.load(std::memory_order_relaxed) > 0) {
+            TestShortReadCount.fetch_sub(1, std::memory_order_relaxed);
+            bytes = static_cast<DWORD>(shortCap);
+        }
+#endif
+        slot->bytes = static_cast<int>(bytes);
         if (bytes == 0) {
             eofOffset = slot->offset;
+            trimPending = true;
+            trimEligibleTick = GetTickCount64() + trimDelayMs;
             return;
         }
 
         metrics.bytesRead += static_cast<std::int64_t>(bytes);
         if (static_cast<int>(bytes) > metrics.maxObservedReadBytes)
             metrics.maxObservedReadBytes = static_cast<std::int64_t>(bytes);
-        if (slot->issueTick != 0) {
-            const auto latency = GetTickCount64() - slot->issueTick;
-            metrics.readLatencyMs = metrics.readLatencyMs == 0
-                ? static_cast<std::int64_t>(latency)
-                : (metrics.readLatencyMs * 7 + static_cast<std::int64_t>(latency)) / 8;
-        }
         if (bytes < static_cast<DWORD>(slot->requestBytes)) {
             ++metrics.shortReads;
             AddHoleLocked(slot->offset + static_cast<std::int64_t>(bytes),
@@ -255,6 +366,18 @@ struct IocpMediaReader::Impl {
         }
         slot->pending = false;
         lastError = error;
+        if (IsTransientError(error) && attempts < RetryCount && !stop) {
+            ++metrics.retries;
+            slot->attempts = attempts + 1;
+            slot->state = Slot::State::RetryWait;
+            try {
+                retries.push_back({slot, GetTickCount64() + RetryDelayMs, slot->epoch});
+            } catch (...) {
+                slot->state = Slot::State::Error;
+                return false;
+            }
+            return true;
+        }
         slot->state = Slot::State::Error;
         return false;
     }
@@ -306,7 +429,8 @@ struct IocpMediaReader::Impl {
     }
 
     void PostMoreLocked() noexcept {
-        if (stop) return;
+        if (stop || holeLimitHit) return;
+        MaybeTrimLocked();
         EnsureSlotsLocked();
         while (inFlight < targetSlots) {
             auto* slot = FindFreeLocked();
@@ -333,8 +457,9 @@ struct IocpMediaReader::Impl {
         changed.notify_all();
     }
 
-    void TrimSlotsLocked() noexcept {
-        while (slots.size() > static_cast<std::size_t>(targetSlots)) {
+    void TrimToSlotsLocked(const int requested) noexcept {
+        const int keep = (std::max)(MinSlots, (std::min)(MaxSlots, requested));
+        while (slots.size() > static_cast<std::size_t>(keep)) {
             auto found = slots.end();
             for (auto it = slots.begin(); it != slots.end(); ++it) {
                 if (!(*it)->pending && (*it)->state == Slot::State::Free) {
@@ -348,6 +473,75 @@ struct IocpMediaReader::Impl {
         metrics.allocatedSlots = static_cast<int>(slots.size());
     }
 
+    void TrimSlotsLocked() noexcept {
+        TrimToSlotsLocked(AllocationSlotsLocked());
+    }
+
+    void SetAdaptiveLocked(const bool enabled) noexcept {
+        adaptive = enabled;
+        adaptiveBias = 0;
+        highWaitStreak = 0;
+        lowWaitStreak = 0;
+        lastAdaptTick = GetTickCount64();
+        adaptWaitMark = metrics.waitEvents;
+        adaptReadMark = metrics.readCalls;
+    }
+
+    void ProcessAdaptiveLocked() noexcept {
+        if (!adaptive || fixedTarget || stop) return;
+        const auto now = GetTickCount64();
+        if (now - lastAdaptTick < AdaptiveIntervalMs) return;
+        const auto waitDelta = metrics.waitEvents - adaptWaitMark;
+        const auto readDelta = metrics.readCalls - adaptReadMark;
+        adaptWaitMark = metrics.waitEvents;
+        adaptReadMark = metrics.readCalls;
+        lastAdaptTick = now;
+
+        // A wait event is expensive only when it is a meaningful fraction of
+        // the read calls in the interval. P95 catches high-RTT shares where
+        // several completions still arrive too late for the current window.
+        const bool high = (waitDelta >= 2 &&
+            (readDelta == 0 || waitDelta * 8 >= readDelta)) ||
+            (waitDelta > 0 && P95LatencyLocked() >= AdaptiveLatencyMs);
+        const bool low = waitDelta == 0 && inFlight < targetSlots;
+        if (high) {
+            ++highWaitStreak;
+            lowWaitStreak = 0;
+        } else if (low) {
+            ++lowWaitStreak;
+            highWaitStreak = 0;
+        } else {
+            highWaitStreak = 0;
+            lowWaitStreak = 0;
+        }
+
+        bool changed = false;
+        if (highWaitStreak >= 2 && adaptiveBias < AdaptiveMaxBias &&
+            now - lastTargetChangeTick >= AdaptiveHoldMs) {
+            ++adaptiveBias;
+            highWaitStreak = 0;
+            changed = true;
+        } else if (lowWaitStreak >= 4 && adaptiveBias > 0 &&
+            now - lastTargetChangeTick >= AdaptiveHoldMs) {
+            --adaptiveBias;
+            lowWaitStreak = 0;
+            changed = true;
+        }
+        if (!changed) return;
+        ApplyTargetLocked((std::max)(MinSlots,
+            (std::min)(MaxSlots, hintTargetSlots + adaptiveBias)));
+    }
+
+    void MaybeTrimLocked() noexcept {
+        if (!trimPending || inFlight > 0) return;
+        if (GetTickCount64() < trimEligibleTick) return;
+        const int keep = eofOffset >= 0 && issuedEnd >= eofOffset
+            ? MinSlots
+            : AllocationSlotsLocked();
+        TrimToSlotsLocked(keep);
+        trimPending = slots.size() > static_cast<std::size_t>(keep);
+    }
+
     void RetryReadLocked(Slot* slot) noexcept {
         const auto attempts = slot->attempts;
         if (!IssueReadAtLocked(slot, slot->offset, slot->requestBytes, false, attempts))
@@ -356,22 +550,27 @@ struct IocpMediaReader::Impl {
 
     void ProcessRetriesLocked() noexcept {
         const auto now = GetTickCount64();
-        for (auto it = retries.begin(); it != retries.end();) {
-            auto* slot = it->slot;
+        for (std::size_t index = 0; index < retries.size();) {
+            auto* slot = retries[index].slot;
             if (stop || slot->epoch != epoch || slot->state != Slot::State::RetryWait) {
-                it = retries.erase(it);
+                retries.erase(retries.begin() + static_cast<std::ptrdiff_t>(index));
                 continue;
             }
-            if (it->due > now) {
-                ++it;
+            if (retries[index].due > now) {
+                ++index;
                 continue;
             }
-            it = retries.erase(it);
-            RetryReadLocked(slot);
+            const auto retry = retries[index];
+            retries.erase(retries.begin() + static_cast<std::ptrdiff_t>(index));
+            RetryReadLocked(retry.slot);
         }
     }
 
     void HandleCompletion(const BOOL ok, const DWORD bytes, Slot* slot) noexcept {
+#ifdef FFF_SECURITY_REGRESSION_TESTS
+        const int delay = TestCompletionDelayMs.load(std::memory_order_relaxed);
+        if (delay > 0) Sleep(static_cast<DWORD>(delay));
+#endif
         {
             std::lock_guard lock(mutex);
             slot->pending = false;
@@ -399,7 +598,10 @@ struct IocpMediaReader::Impl {
         }
         {
             std::lock_guard lock(mutex);
-            if (!stop) PostMoreLocked();
+            if (!stop) {
+                ProcessAdaptiveLocked();
+                PostMoreLocked();
+            }
         }
     }
 
@@ -415,6 +617,7 @@ struct IocpMediaReader::Impl {
                 std::lock_guard lock(mutex);
                 if (stop) break;
                 ProcessRetriesLocked();
+                ProcessAdaptiveLocked();
                 PostMoreLocked();
                 continue;
             }
@@ -422,15 +625,26 @@ struct IocpMediaReader::Impl {
         }
     }
 
-    bool Start(std::string& error) {
+    bool Start(std::string& error, const int requestedInitialSlots) {
         trace = TraceEnabled();
         fixedTarget = false;
         targetSlots = DefaultSlots;
-        const auto depth = EnvironmentInt(L"FFF_NET_IO_DEPTH", 0, 0, MaxSlots);
-        if (depth >= MinSlots) {
-            targetSlots = depth;
+        if (requestedInitialSlots >= MinSlots) {
+            targetSlots = (std::max)(MinSlots, (std::min)(MaxSlots, requestedInitialSlots));
             fixedTarget = true;
+        } else {
+            const auto depth = EnvironmentInt(L"FFF_NET_IO_DEPTH", 0, 0, MaxSlots);
+            if (depth >= MinSlots) {
+                targetSlots = depth;
+                fixedTarget = true;
+            }
         }
+        initialTargetSlots = targetSlots;
+        metrics.initialTargetSlots = initialTargetSlots;
+        hintTargetSlots = targetSlots;
+        trimDelayMs = static_cast<DWORD>(EnvironmentInt(
+            L"FFF_NET_IO_TRIM_DELAY_MS", static_cast<int>(TrimDelayMs), 0, 30000));
+        lastTargetChangeTick = GetTickCount64();
 
         iocp = CreateIoCompletionPort(file, nullptr, 0, 0);
         if (iocp == nullptr) {
@@ -512,6 +726,10 @@ struct IocpMediaReader::Impl {
             iocp = nullptr;
         }
         if (timedOut) {
+            const auto bytes = static_cast<std::int64_t>(slots.size()) * SlotBytes;
+            AbandonedBytes.fetch_add(bytes, std::memory_order_relaxed);
+            AbandonedCount.fetch_add(static_cast<std::int64_t>(slots.size()),
+                std::memory_order_relaxed);
             std::lock_guard lock(AbandonedMutex);
             for (auto& slot : slots) AbandonedSlots.push_back(std::move(slot));
             slots.clear();
@@ -519,22 +737,27 @@ struct IocpMediaReader::Impl {
         metrics.inFlight = inFlight;
         metrics.abandoned = timedOut;
         if (trace) {
-            char line[512]{};
+            char line[640]{};
             std::snprintf(line, sizeof(line),
-                "[net-io] stop id=%llu target=%d slots=%d inFlight=%d maxInFlight=%d bytes=%lld "
-                "short=%lld holes=%lld retries=%lld resets=%lld waits=%lld maxRead=%lld "
-                "latency=%lldms abandoned=%d",
+                "[net-io] stop id=%llu target=%d slots=%d peak=%d inFlight=%d maxInFlight=%d "
+                "bytes=%lld short=%lld holes=%lld holeBytes=%lld retries=%lld resets=%lld "
+                "waits=%lld maxRead=%lld latency=%lldms p95=%lldms abandoned=%d "
+                "abandonedBytes=%lld",
                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(this)),
-                targetSlots, static_cast<int>(slots.size()), inFlight, metrics.maxInFlight,
+                targetSlots, static_cast<int>(slots.size()), metrics.peakAllocatedSlots,
+                inFlight, metrics.maxInFlight,
                 static_cast<long long>(metrics.bytesRead),
                 static_cast<long long>(metrics.shortReads),
                 static_cast<long long>(metrics.holesCreated),
+                static_cast<long long>(HoleBytesLocked()),
                 static_cast<long long>(metrics.retries),
                 static_cast<long long>(metrics.resets),
                 static_cast<long long>(metrics.waitEvents),
                 static_cast<long long>(metrics.maxObservedReadBytes),
                 static_cast<long long>(metrics.readLatencyMs),
-                timedOut ? 1 : 0);
+                static_cast<long long>(P95LatencyLocked()),
+                timedOut ? 1 : 0,
+                static_cast<long long>(AbandonedBytes.load(std::memory_order_relaxed)));
             TraceLine(line);
         }
     }
@@ -544,14 +767,22 @@ struct IocpMediaReader::Impl {
         if (next == targetSlots) return;
         targetSlots = next;
         ++metrics.targetChanges;
+        lastTargetChangeTick = GetTickCount64();
+        if (next < static_cast<int>(slots.size())) {
+            trimPending = true;
+            trimEligibleTick = GetTickCount64() + trimDelayMs;
+        } else {
+            trimPending = false;
+        }
         EnsureSlotsLocked();
         PostMoreLocked();
         changed.notify_all();
         if (trace) {
-            char line[128]{};
-            std::snprintf(line, sizeof(line), "[net-io] target id=%llu target=%d slots=%d",
+            char line[160]{};
+            std::snprintf(line, sizeof(line),
+                "[net-io] target id=%llu target=%d slots=%d trim=%d",
                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(this)),
-                targetSlots, static_cast<int>(slots.size()));
+                targetSlots, static_cast<int>(slots.size()), trimPending ? 1 : 0);
             TraceLine(line);
         }
     }
@@ -563,12 +794,26 @@ struct IocpMediaReader::Impl {
             return false;
         }
         ++metrics.resets;
+        const bool profile = SeekProfileEnabled();
+        const int inFlightAtStart = inFlight;
+        const int targetSlotsAtStart = targetSlots;
+        const int slotsAtStart = static_cast<int>(slots.size());
+        const auto resetStart = std::chrono::steady_clock::now();
         CancelPendingLocked();
+        const auto cancelEnd = std::chrono::steady_clock::now();
         const auto deadline = GetTickCount64() + timeoutMs;
         while (inFlight > 0 && GetTickCount64() < deadline)
             changed.wait_for(lock, std::chrono::milliseconds(PollIntervalMs));
+        const auto waitEnd = std::chrono::steady_clock::now();
         if (inFlight > 0) {
             error = ERROR_TIMEOUT;
+            if (profile)
+                std::fprintf(stderr,
+                    "[seek-profile] iocp reset target=%lld inFlight=%d/%d targetSlots=%d slots=%d "
+                    "cancel=%.2fms wait=%.2fms result=timeout\n",
+                    static_cast<long long>(target), inFlight, inFlightAtStart,
+                    targetSlotsAtStart, slotsAtStart, ElapsedMs(resetStart, cancelEnd),
+                    ElapsedMs(cancelEnd, waitEnd));
             return false;
         }
         retries.clear();
@@ -585,8 +830,18 @@ struct IocpMediaReader::Impl {
         position = target;
         issuedEnd = target;
         eofOffset = -1;
+        const auto clearEnd = std::chrono::steady_clock::now();
         PostMoreLocked();
         changed.notify_all();
+        const auto refillEnd = std::chrono::steady_clock::now();
+        if (profile)
+            std::fprintf(stderr,
+                "[seek-profile] iocp reset target=%lld inFlight=%d/%d targetSlots=%d slots=%d "
+                "cancel=%.2fms wait=%.2fms clear=%.2fms refill=%.2fms total=%.2fms result=ok\n",
+                static_cast<long long>(target), inFlight, inFlightAtStart,
+                targetSlotsAtStart, slotsAtStart, ElapsedMs(resetStart, cancelEnd),
+                ElapsedMs(cancelEnd, waitEnd), ElapsedMs(waitEnd, clearEnd),
+                ElapsedMs(clearEnd, refillEnd), ElapsedMs(resetStart, refillEnd));
         return true;
     }
 
@@ -598,6 +853,11 @@ struct IocpMediaReader::Impl {
         }
         if (bufferSize == 0) return 0;
         std::unique_lock lock(mutex);
+        ++metrics.readCalls;
+        if (holeLimitHit) {
+            error = lastError != 0 ? lastError : ERROR_NOT_ENOUGH_QUOTA;
+            return AVERROR(EIO);
+        }
         PostMoreLocked();
         const auto deadline = timeoutMs == 0 ? 0 : GetTickCount64() + timeoutMs;
         while (!stop) {
@@ -605,6 +865,10 @@ struct IocpMediaReader::Impl {
                 error = ERROR_OPERATION_ABORTED;
                 CancelPendingLocked();
                 return AVERROR_EXIT;
+            }
+            if (holeLimitHit) {
+                error = lastError != 0 ? lastError : ERROR_NOT_ENOUGH_QUOTA;
+                return AVERROR(EIO);
             }
             if (deadline != 0 && GetTickCount64() >= deadline) {
                 error = ERROR_TIMEOUT;
@@ -668,16 +932,21 @@ IocpMediaReader::~IocpMediaReader() {
 }
 
 std::unique_ptr<IocpMediaReader> IocpMediaReader::Create(const HANDLE file,
-    const std::int64_t size, std::string& error) noexcept {
+    const std::int64_t size, std::string& error,
+    const int initialTargetSlots) noexcept {
     try {
         if (file == INVALID_HANDLE_VALUE) {
             error = "The network media handle is invalid.";
             return nullptr;
         }
+        if (AbandonedBytes.load(std::memory_order_relaxed) >= MaxAbandonedBytes) {
+            error = "The abandoned network read-ahead budget is exhausted.";
+            return nullptr;
+        }
         auto impl = std::make_unique<Impl>();
         impl->file = file;
         impl->size = size;
-        if (!impl->Start(error)) return nullptr;
+        if (!impl->Start(error, initialTargetSlots)) return nullptr;
         return std::unique_ptr<IocpMediaReader>(new IocpMediaReader(std::move(impl)));
     } catch (...) {
         error = "Could not prepare the IOCP media reader.";
@@ -714,20 +983,32 @@ void IocpMediaReader::SetTargetBytes(const std::int64_t targetBytes) noexcept {
             static_cast<std::int64_t>(MaxSlots) * SlotBytes);
         slots = static_cast<int>((capped + SlotBytes - 1) / SlotBytes);
     }
+    impl_->hintTargetSlots = slots;
+    const int requested = impl_->adaptive
+        ? (std::max)(MinSlots, (std::min)(MaxSlots, slots + impl_->adaptiveBias))
+        : slots;
     if (impl_->trace) {
-        char line[128]{};
-        std::snprintf(line, sizeof(line), "[net-io] hint id=%llu bytes=%lld target=%d",
+        char line[160]{};
+        std::snprintf(line, sizeof(line),
+            "[net-io] hint id=%llu bytes=%lld target=%d bias=%d",
             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(impl_.get())),
-            static_cast<long long>(targetBytes), slots);
+            static_cast<long long>(targetBytes), requested, impl_->adaptiveBias);
         TraceLine(line);
     }
-    impl_->ApplyTargetLocked(slots);
+    impl_->ApplyTargetLocked(requested);
+}
+
+void IocpMediaReader::SetAdaptiveReadAhead(const bool enabled) noexcept {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->stop || impl_->fixedTarget) return;
+    impl_->SetAdaptiveLocked(enabled);
 }
 
 void IocpMediaReader::SetTargetSlots(const int slots) noexcept {
     std::lock_guard lock(impl_->mutex);
     if (impl_->stop) return;
     impl_->fixedTarget = true;
+    impl_->adaptive = false;
     impl_->ApplyTargetLocked(slots);
 }
 
@@ -739,9 +1020,30 @@ int IocpMediaReader::TargetSlots() const noexcept {
 IocpMediaReader::Metrics IocpMediaReader::MetricsSnapshot() const noexcept {
     std::lock_guard lock(impl_->mutex);
     Metrics metrics = impl_->metrics;
+    metrics.initialTargetSlots = impl_->initialTargetSlots;
     metrics.targetSlots = impl_->targetSlots;
     metrics.allocatedSlots = static_cast<int>(impl_->slots.size());
+    metrics.peakAllocatedSlots = (std::max)(metrics.peakAllocatedSlots, metrics.allocatedSlots);
+    metrics.allocatedBytes = static_cast<std::int64_t>(metrics.allocatedSlots) * SlotBytes;
     metrics.inFlight = impl_->inFlight;
     if (metrics.maxInFlight < metrics.inFlight) metrics.maxInFlight = metrics.inFlight;
+    metrics.holeCount = static_cast<std::int64_t>(impl_->holes.size());
+    metrics.holeBytes = impl_->HoleBytesLocked();
+    metrics.readLatencyP95Ms = impl_->P95LatencyLocked();
+    metrics.holeLimitHit = impl_->holeLimitHit;
+    metrics.abandoned = impl_->metrics.abandoned;
+    metrics.abandonedSlots = AbandonedCount.load(std::memory_order_relaxed);
+    metrics.abandonedBytes = AbandonedBytes.load(std::memory_order_relaxed);
     return metrics;
 }
+
+#ifdef FFF_SECURITY_REGRESSION_TESTS
+void IocpMediaReader::TestSetShortRead(const int bytes, const int count) noexcept {
+    TestShortReadBytes.store((std::max)(0, bytes), std::memory_order_relaxed);
+    TestShortReadCount.store((std::max)(0, count), std::memory_order_relaxed);
+}
+
+void IocpMediaReader::TestSetCompletionDelayMs(const int delayMs) noexcept {
+    TestCompletionDelayMs.store((std::max)(0, delayMs), std::memory_order_relaxed);
+}
+#endif

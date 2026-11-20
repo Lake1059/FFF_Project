@@ -55,6 +55,24 @@ bool ForceIocpReader() noexcept {
     return length > 0 && length < 16 && _wcsicmp(value, L"force") == 0;
 }
 
+bool AdaptiveReadAheadEnabled() noexcept {
+    wchar_t value[16]{};
+    const auto length = GetEnvironmentVariableW(L"FFF_NET_IO_ADAPTIVE", value, 16);
+    if (length == 0 || length >= 16) return true;
+    return !(value[0] == L'0' || _wcsicmp(value, L"off") == 0);
+}
+
+int AvioBufferBytes() noexcept {
+    wchar_t value[32]{};
+    const auto length = GetEnvironmentVariableW(L"FFF_NET_IO_AVIO", value, 32);
+    if (length == 0 || length >= 32) return AvioBufferSize;
+    wchar_t* end = nullptr;
+    const auto bytes = wcstol(value, &end, 10);
+    if (end == value || *end != L'\0' || bytes < AvioBufferSize ||
+        bytes > 1024 * 1024) return AvioBufferSize;
+    return static_cast<int>(bytes);
+}
+
 std::wstring FromUtf8(const char* value) {
     if (value == nullptr || *value == '\0') return {};
     const auto length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
@@ -302,7 +320,7 @@ bool SharedFileInput::IsUnwrittenBlock(const std::uint8_t* buffer,
 }
 
 std::unique_ptr<SharedFileInput> SharedFileInput::Open(const char* pathUtf8,
-    std::string& error, const ULONGLONG deadlineTick) noexcept {
+    std::string& error, const ULONGLONG deadlineTick, const bool probe) noexcept {
     try {
         const auto path = FromUtf8(pathUtf8);
         if (path.empty()) {
@@ -313,9 +331,10 @@ std::unique_ptr<SharedFileInput> SharedFileInput::Open(const char* pathUtf8,
         auto input = std::make_unique<SharedFileInput>();
         input->path_ = path;
         input->network_ = IsNetworkPath(path);
-        NetTrace("open network=%d driveRemote=%d",
+        NetTrace("open network=%d driveRemote=%d probe=%d",
             input->network_ ? 1 : 0,
-            IsRemoteDrive(path) ? 1 : 0);
+            IsRemoteDrive(path) ? 1 : 0,
+            probe ? 1 : 0);
 
         if (input->network_) {
             if (deadlineTick != 0 && deadlineTick <= GetTickCount64()) {
@@ -357,19 +376,25 @@ std::unique_ptr<SharedFileInput> SharedFileInput::Open(const char* pathUtf8,
         if ((input->network_ || ForceIocpReader()) && UseIocpReader()) {
             std::string iocpError;
             input->iocpReader_ = IocpMediaReader::Create(
-                input->file_, input->sizeKnown_ ? input->size_ : -1, iocpError);
+                input->file_, input->sizeKnown_ ? input->size_ : -1, iocpError,
+                probe ? 2 : 0);
+            if (input->iocpReader_ != nullptr && input->network_ && !probe &&
+                AdaptiveReadAheadEnabled()) {
+                input->iocpReader_->SetAdaptiveReadAhead(true);
+            }
             // IOCP is the preferred network path. If the completion port cannot
             // be initialized, keep the per-read overlapped fallback instead of
             // making the media unopenable.
         }
 
-        input->buffer_ = static_cast<std::uint8_t*>(av_malloc(AvioBufferSize));
+        const int avioBufferSize = AvioBufferBytes();
+        input->buffer_ = static_cast<std::uint8_t*>(av_malloc(avioBufferSize));
         if (input->buffer_ == nullptr) {
             error = "Could not allocate the media input buffer.";
             return nullptr;
         }
 
-        input->context_ = avio_alloc_context(input->buffer_, AvioBufferSize, 0,
+        input->context_ = avio_alloc_context(input->buffer_, avioBufferSize, 0,
             input.get(), &SharedFileInput::Read, nullptr, &SharedFileInput::Seek);
         if (input->context_ == nullptr) {
             error = "Could not allocate the FFmpeg media input context.";

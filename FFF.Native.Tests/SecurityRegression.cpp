@@ -245,6 +245,156 @@ struct PlayerSecurityRegression {
         CloseHandle(file);
     }
 
+    static void IocpBudget(const std::string& path) {
+        const auto file = CreateFileA(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        Check(file != INVALID_HANDLE_VALUE, "iocp budget fixture opened");
+        LARGE_INTEGER size{};
+        Check(GetFileSizeEx(file, &size) && size.QuadPart > 0, "iocp budget fixture sized");
+        std::string error;
+        // Probe readers are created with a two-slot ceiling; the file size cap
+        // must still hold for a short fixture.
+        auto probe = IocpMediaReader::Create(file, size.QuadPart, error, 2);
+        Check(probe != nullptr, "iocp probe reader created");
+        auto probeMetrics = probe->MetricsSnapshot();
+        Check(probeMetrics.targetSlots == 2 && probeMetrics.allocatedSlots == 2,
+            "iocp probe reader allocates only two slots");
+        probe.reset();
+        CloseHandle(file);
+
+        const auto readerFile = CreateFileA(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        Check(readerFile != INVALID_HANDLE_VALUE, "iocp budget reader fixture reopened");
+        auto reader = IocpMediaReader::Create(readerFile, size.QuadPart, error);
+        Check(reader != nullptr, ("iocp budget reader created: " + error).c_str());
+        reader->SetTargetSlots(8);
+        auto metrics = reader->MetricsSnapshot();
+        const auto sizeSlots = static_cast<int>((size.QuadPart + 1024 * 1024 - 1) / (1024 * 1024));
+        Check(metrics.allocatedSlots <= (std::max)(2, (std::min)(8, sizeSlots)),
+            "iocp allocation follows file size");
+        reader->SetTargetSlots(2);
+        DWORD seekError = 0;
+        Check(reader->Seek(0, 3000, seekError), "iocp budget seek");
+        metrics = reader->MetricsSnapshot();
+        Check(metrics.allocatedSlots == 2 && metrics.allocatedBytes == 2 * 1024 * 1024,
+            "iocp shrink releases idle slots");
+
+        // Two deliberately short completions must become holes and still
+        // return the exact original byte sequence.
+        IocpMediaReader::TestSetCompletionDelayMs(0);
+        const int shortCap = (std::max)(1, static_cast<int>(
+            (std::min)(size.QuadPart / 4, static_cast<LONGLONG>(16 * 1024))));
+        IocpMediaReader::TestSetShortRead(shortCap, 2);
+        reader->SetTargetSlots(2);
+        Check(reader->Seek(0, 3000, seekError), "iocp short-read seek");
+        AVIOInterruptCB interrupt{};
+        std::vector<std::uint8_t> buffer(64 * 1024);
+        std::int64_t total = 0;
+        while (total < size.QuadPart) {
+            DWORD errorCode = 0;
+            const auto count = reader->Read(buffer.data(), static_cast<int>(buffer.size()),
+                interrupt, 3000, errorCode);
+            if (count == AVERROR_EOF) break;
+            Check(count > 0, "iocp short-read sequential read");
+            total += count;
+        }
+        IocpMediaReader::TestSetShortRead(0, 0);
+        metrics = reader->MetricsSnapshot();
+        Check(total == size.QuadPart, "iocp short-read preserves length");
+        Check(metrics.shortReads >= 2, "iocp short-read fault observed");
+        Check(metrics.holesCreated >= 2 && metrics.holeCount <= 2,
+            "iocp short-read holes bounded by slots");
+        Check(!metrics.holeLimitHit, "iocp short-read hole budget not exhausted");
+        reader.reset();
+        CloseHandle(readerFile);
+    }
+
+    static void IocpTrim(const std::string& path) {
+        SetEnvironmentVariableW(L"FFF_NET_IO_TRIM_DELAY_MS", L"100");
+        const auto file = CreateFileA(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        Check(file != INVALID_HANDLE_VALUE, "iocp trim fixture opened");
+        LARGE_INTEGER size{};
+        Check(GetFileSizeEx(file, &size) && size.QuadPart > 8 * 1024 * 1024,
+            "iocp trim fixture large enough");
+        std::string error;
+        auto reader = IocpMediaReader::Create(file, size.QuadPart, error);
+        Check(reader != nullptr, "iocp trim reader created");
+        reader->SetTargetSlots(8);
+        AVIOInterruptCB interrupt{};
+        std::vector<std::uint8_t> buffer(1024 * 1024);
+        std::int64_t total = 0;
+        while (total < 8 * 1024 * 1024) {
+            DWORD errorCode = 0;
+            const auto count = reader->Read(buffer.data(), static_cast<int>(buffer.size()),
+                interrupt, 3000, errorCode);
+            if (count == AVERROR_EOF) break;
+            Check(count > 0, "iocp trim sequential read");
+            total += count;
+        }
+        reader->SetTargetSlots(2);
+        while (total < size.QuadPart) {
+            DWORD errorCode = 0;
+            const auto count = reader->Read(buffer.data(), static_cast<int>(buffer.size()),
+                interrupt, 3000, errorCode);
+            if (count == AVERROR_EOF) break;
+            Check(count > 0, "iocp trim drain read");
+            total += count;
+        }
+        for (int attempt = 0; attempt < 20; ++attempt) {
+            if (reader->MetricsSnapshot().allocatedSlots == 2) break;
+            Sleep(100);
+        }
+        const auto metrics = reader->MetricsSnapshot();
+        Check(metrics.targetSlots == 2 && metrics.allocatedSlots == 2,
+            "iocp idle target drop trims slots without a seek");
+        reader.reset();
+        CloseHandle(file);
+        SetEnvironmentVariableW(L"FFF_NET_IO_TRIM_DELAY_MS", nullptr);
+    }
+
+    static void IocpAdaptive(const std::string& path) {
+        const auto file = CreateFileA(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        Check(file != INVALID_HANDLE_VALUE, "iocp adaptive fixture opened");
+        LARGE_INTEGER size{};
+        Check(GetFileSizeEx(file, &size) && size.QuadPart > 8 * 1024 * 1024,
+            "iocp adaptive fixture large enough");
+        std::string error;
+        auto reader = IocpMediaReader::Create(file, size.QuadPart, error);
+        Check(reader != nullptr, "iocp adaptive reader created");
+        reader->SetTargetBytes(2 * 1024 * 1024);
+        Check(reader->TargetSlots() == 2, "iocp adaptive starts at hint");
+        reader->SetAdaptiveReadAhead(true);
+        // A 200 ms completion delay makes the two-slot window demonstrably
+        // starved; the feedback loop must raise the target without waiting for
+        // the bitrate hint to change.
+        IocpMediaReader::TestSetCompletionDelayMs(200);
+        AVIOInterruptCB interrupt{};
+        std::vector<std::uint8_t> buffer(1024 * 1024);
+        std::int64_t total = 0;
+        const auto limit = (std::min)(size.QuadPart, static_cast<LONGLONG>(24 * 1024 * 1024));
+        while (total < limit) {
+            DWORD errorCode = 0;
+            const auto count = reader->Read(buffer.data(), static_cast<int>(buffer.size()),
+                interrupt, 3000, errorCode);
+            if (count == AVERROR_EOF) break;
+            Check(count > 0, "iocp adaptive sequential read");
+            total += count;
+        }
+        IocpMediaReader::TestSetCompletionDelayMs(0);
+        auto metrics = reader->MetricsSnapshot();
+        Check(metrics.targetSlots >= 3, "iocp adaptive target grows under latency");
+        Check(metrics.waitEvents > 0, "iocp adaptive observed waits");
+        Check(metrics.allocatedSlots <= 12, "iocp adaptive target remains bounded");
+        reader.reset();
+        CloseHandle(file);
+    }
+
     static void Network(const char* path) {
         // Opt-in only: the default test run must never touch a real share. The
         // caller supplies a UNC path; this exercises the same SharedFileInput
@@ -351,6 +501,9 @@ extern "C" __declspec(dllexport) int FFF3FP_RunSecurityRegression(const char* ro
         PlayerSecurityRegression::Tempo();
         PlayerSecurityRegression::Seek(std::string(root) + "/seek.mp4");
         PlayerSecurityRegression::Iocp(std::string(root) + "/small.bmp");
+        PlayerSecurityRegression::IocpBudget(std::string(root) + "/seek.mp4");
+        PlayerSecurityRegression::IocpTrim(std::string(root) + "/4k.bmp");
+        PlayerSecurityRegression::IocpAdaptive(std::string(root) + "/4k.bmp");
         if (const auto* unc = std::getenv("FFF_TEST_UNC_PATH"); unc != nullptr && *unc != '\0')
             PlayerSecurityRegression::Network(unc);
         FFFPrefetch::PrefetchSecurityRegression::Run(root);

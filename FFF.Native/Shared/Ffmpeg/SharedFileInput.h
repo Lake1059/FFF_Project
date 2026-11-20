@@ -20,7 +20,8 @@ public:
     SharedFileInput& operator=(const SharedFileInput&) = delete;
 
     static std::unique_ptr<SharedFileInput> Open(const char* pathUtf8,
-        std::string& error, ULONGLONG deadlineTick = 0) noexcept;
+        std::string& error, ULONGLONG deadlineTick = 0,
+        bool probe = false) noexcept;
 
     // Serves a copy of `data` instead of a file on disk, for the callers that
     // have to hand FFmpeg bytes they had to repair first (see AvifIlocShim).

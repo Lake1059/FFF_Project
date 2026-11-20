@@ -4591,7 +4591,7 @@ FFFResult PlayerSession::OpenProbeFormat(const std::string& path, AVFormatContex
     if (mergedExtents != nullptr)
         *mergedExtents = repaired ? repairedExtents : 0;
     io = repaired ? SharedFileInput::OpenMemory(repairedBytes.data(), repairedBytes.size(), error)
-                  : SharedFileInput::Open(path.c_str(), error, inputDeadlineTick_.load());
+                  : SharedFileInput::Open(path.c_str(), error, inputDeadlineTick_.load(), true);
     if (io == nullptr) {
         av_dict_free(&options);
         return FFFResult::NativeFailure;

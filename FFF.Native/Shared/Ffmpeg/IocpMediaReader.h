@@ -25,24 +25,38 @@ extern "C" {
 class IocpMediaReader final {
 public:
     struct Metrics {
+        int initialTargetSlots = 0;
         int targetSlots = 0;
         int allocatedSlots = 0;
+        int peakAllocatedSlots = 0;
         int inFlight = 0;
         int maxInFlight = 0;
+        std::int64_t allocatedBytes = 0;
         std::int64_t bytesRead = 0;
+        std::int64_t readCalls = 0;
         std::int64_t waitEvents = 0;
         std::int64_t shortReads = 0;
         std::int64_t holesCreated = 0;
+        std::int64_t holeCount = 0;
+        std::int64_t holeBytes = 0;
         std::int64_t retries = 0;
         std::int64_t resets = 0;
         std::int64_t targetChanges = 0;
         std::int64_t maxObservedReadBytes = 0;
         std::int64_t readLatencyMs = 0;
+        std::int64_t readLatencyP95Ms = 0;
+        std::int64_t maxReadLatencyMs = 0;
+        std::int64_t abandonedSlots = 0;
+        std::int64_t abandonedBytes = 0;
+        bool holeLimitHit = false;
         bool abandoned = false;
     };
 
+    // `initialTargetSlots` is used by short-lived probe readers: they must not
+    // allocate the playback default before their first read. Zero keeps the
+    // normal adaptive default.
     static std::unique_ptr<IocpMediaReader> Create(HANDLE file, std::int64_t size,
-        std::string& error) noexcept;
+        std::string& error, int initialTargetSlots = 0) noexcept;
 
     ~IocpMediaReader();
     IocpMediaReader(const IocpMediaReader&) = delete;
@@ -63,12 +77,23 @@ public:
     // Demand hint in bytes. 0 restores the default target of four slots.
     void SetTargetBytes(std::int64_t targetBytes) noexcept;
 
+    // Enables the measured-wait/latency feedback loop on top of the bitrate
+    // hint. It is only used for playback IO, not short-lived probe readers.
+    void SetAdaptiveReadAhead(bool enabled) noexcept;
+
     // Explicit slot target, used by diagnostics/tests. Pins the target so a
     // later bitrate hint cannot overwrite it.
     void SetTargetSlots(int slots) noexcept;
 
     int TargetSlots() const noexcept;
     Metrics MetricsSnapshot() const noexcept;
+
+#ifdef FFF_SECURITY_REGRESSION_TESTS
+    // Deterministic fault injection for the native regression harness. These
+    // hooks are compiled only into the SecurityRegressionTests build.
+    static void TestSetShortRead(int bytes, int count) noexcept;
+    static void TestSetCompletionDelayMs(int delayMs) noexcept;
+#endif
 
 private:
     struct Impl;
