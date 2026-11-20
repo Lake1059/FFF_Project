@@ -916,6 +916,21 @@ private:
     std::int64_t seekTarget100ns_;
     std::int64_t seekTargetFrame_;
     bool keyframeSeekPending_;
+    // Coalesced seek pump: for repeated fast-forward/rewind, only the newest
+    // absolute target is worth executing. Older queued targets and the
+    // decode-to-target pass for them are abandoned instead of being replayed.
+    // seekRequestMutex_ protects the pending triplet; the active fields are
+    // atomics because Seek() and the worker/decode loop are on different threads.
+    void RunSeekPump() noexcept;
+    bool CoalescedSeekSuperseded() const noexcept;
+    mutable std::mutex seekRequestMutex_;
+    std::int64_t pendingSeekTarget100ns_ = -1;
+    std::uint64_t pendingSeekGeneration_ = 0;
+    bool seekRequestPending_ = false;
+    bool seekPumpQueued_ = false;
+    std::atomic<std::uint64_t> seekRequestGeneration_{0};
+    std::atomic<std::int64_t> activeSeekTarget100ns_{-1};
+    std::atomic<bool> coalescedSeekActive_{false};
     // --- seek preview (progressive presentation) ---
     // A seek is exact: the target picture waits for its whole reference chain.
     // That wait is unavoidable, but leaving the previous picture frozen on screen
@@ -925,6 +940,8 @@ private:
     bool seekPreviewAllowed_ = true;
     // Wall clock of the previous DoSeek, used to tell a single press from a held key.
     std::int64_t lastSeekStartedMs_ = 0;
+    // Diagnostic-only anchor for FFF_SEEK_PROFILE; zero when no seek is in flight.
+    std::uint64_t seekProfileStartTick_ = 0;
     bool seekPreviewPresented_ = false;
     std::int64_t seekPreviewMargin100ns_ = 0;
     // Pictures decoded and offered to the presenter while a seek is outstanding.
