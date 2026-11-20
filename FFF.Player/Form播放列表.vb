@@ -235,9 +235,7 @@
         Dim 路径 = TryCast(e.Data?.GetData(DataFormats.FileDrop), String())
         If 路径 Is Nothing OrElse 路径.Length = 0 Then Return
         Try
-            For Each 媒体路径 In 枚举拖入媒体(路径)
-                列表数据.添加(媒体路径)
-            Next
+            列表数据.添加多个(枚举拖入媒体(路径))
         Catch ex As Exception
             显示错误("无法添加媒体", ex.Message)
         End Try
@@ -245,7 +243,10 @@
 
     Friend Shared Iterator Function 枚举拖入媒体(路径 As IEnumerable(Of String)) As IEnumerable(Of String)
         For Each 值 In 路径
-            If IO.File.Exists(值) Then
+            If 光盘路径.是光盘路径(值) Then
+                Dim 光盘 = 光盘路径.取得媒体路径(值)
+                If 光盘 IsNot Nothing Then Yield 光盘
+            ElseIf IO.File.Exists(值) Then
                 If 播放列表.是支持的媒体文件(值) Then Yield IO.Path.GetFullPath(值)
             ElseIf IO.Directory.Exists(值) Then
                 For Each 文件 In IO.Directory.EnumerateFiles(值, "*", IO.SearchOption.TopDirectoryOnly).

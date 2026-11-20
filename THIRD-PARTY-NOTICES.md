@@ -68,7 +68,7 @@ LGPL 组件如随完整包分发，应保留许可文本，并提供对应源码
 
 ## 4. LakeUI
 
-- 本仓引用 `third_party/LakeUI`（`FFF.Player.vbproj` 的 `LakeUI` HintPath；`FFF.Recorder.vbproj` 的 `LakeUI.Notifications`）。
+- 3FP 和 3FR 通过项目引用使用同级仓库 `../LakeUI` 中的 LakeUI 源码。3FR 另通过 NuGet 引用 `LakeUI.Notifications`。
 - 上游 `LICENSE.txt` 为 **GPL-3.0-only**，README 说明公开产品使用需取得许可。
 - 项目权利人已确认**已取得上游商业授权**，覆盖 `FFF.Player`、`FFF.Recorder`、`LakeUI.Notifications` 与当前分发方式；授权凭证由权利人另行归档，不随公开仓库发布。记录见 `licenses/LakeUI-COMMERCIAL-AUTHORIZATION-NOTICE.md`。
 - 许可原文：`licenses/LakeUI-GPL-3.0.txt`（由发布脚本从 `third_party/LakeUI/LICENSE.txt` 收集）；商业授权记录用于说明实际分发依据，不替代授权合同。

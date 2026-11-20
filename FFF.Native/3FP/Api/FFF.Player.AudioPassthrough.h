@@ -96,7 +96,7 @@ struct FFF3FPAudioPassthroughApi {
 FFF3FP_API FFFResult FFF3FP_SetAudioPassthroughApi(FFF3FPHandle player,
     const FFF3FPAudioPassthroughApi* api) noexcept;
 
-// FFF3FP_PT_MODE_*. Applies at the next track open.
+// FFF3FP_PT_MODE_*. Applies at the next track open. Repeating a valid mode succeeds.
 FFF3FP_API FFFResult FFF3FP_SetAudioPassthroughMode(FFF3FPHandle player,
     std::uint32_t mode) noexcept;
 

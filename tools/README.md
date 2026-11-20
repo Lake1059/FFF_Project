@@ -1,6 +1,6 @@
 # 构建与发布脚本
 
-需要 Windows、Visual Studio C++ v145 / Windows SDK、支持目标框架的 .NET SDK（3FP 默认面向 .NET 11，3FR 默认面向 .NET 10），以及已按对应 `LakeUITfm` 构建的兄弟仓 `..\LakeUI\LakeUI`。`构建3FP.ps1` 默认读取 LakeUI 的 Release 产物，也可用 `-LakeUIConfig Debug` 指定已构建的 Debug 产物。脚本优先使用环境变量和 PATH 中的工具，其次查找正式版和 Preview Visual Studio。
+需要 Windows、Visual Studio C++ v145、Windows SDK、.NET 11 SDK 和同级 `..\LakeUI` 中包含渲染后端配置的 LakeUI 源码。3FP 和 3FR 通过项目引用自动构建 LakeUI。脚本优先使用环境变量和 PATH 中的工具，其次查找正式版和 Preview Visual Studio。
 
 在仓库根目录执行（PowerShell 7 或 Windows PowerShell 5.1）：
 
@@ -21,7 +21,7 @@
 - `-SkipDependencyPreparation`：只检查本地原生依赖，缺件直接报错，不调用准备脚本；`dotnet` 仍按正常流程还原 NuGet 包。
 - `-SkipIamf`：显式禁用 IAMF，传入 `HaveLibiamf=false`；默认要求完整 IAMF 依赖。
 - `-SkipTests`：构建时跳过测试工程的编译。目前 `FFF.Player.Tests` 尚未注册测试项，编译成功不代表运行回归测试。
-- `-NetTFM` / `-LakeUITfm`：分别覆盖宿主和 LakeUI 的目标框架。
+- `-NetTFM`：覆盖宿主的默认 Windows 目标框架，需与 LakeUI 项目兼容。
 - 发布脚本的 `-OutputDirectory`：指定输出目录；相对路径以仓库根目录为准。
 
 单独准备 IAMF：

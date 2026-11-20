@@ -698,9 +698,17 @@ Friend Module 播放器原生接口
         End Get
     End Property
 
-    ' （整表注入/清表/帧与流边数据的宿主侧包装已随宿主泵删除：模块自驱动泵直接
-    '   解析内核导出，宿主不再搬运载荷。上面两支能力探测保留——通路启动前的
-    '   旧内核降级判断仍要用。）
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 清除动态元数据原型(播放器 As 播放器原生句柄,
+        类型 As UInteger) As 原生播放器结果
+
+    Private ReadOnly 清除动态元数据函数 As 清除动态元数据原型 =
+        解析可选导出(Of 清除动态元数据原型)("FFF3FP_ClearDynamicMetadata")
+
+    Friend Sub 清除外部色彩变换(播放器 As 播放器原生句柄)
+        ' FFF3FPDynamicMetadataKind.ExternalColorTransform。保留其他类型的注入。
+        If 清除动态元数据函数 IsNot Nothing Then 清除动态元数据函数(播放器, 3UI)
+    End Sub
 
     ' ---- ASR 音频 tap（可选导出，与字幕流探测同一动态解析模式） ----
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>

@@ -24,6 +24,9 @@ Namespace My
     ' End Sub
 
     Partial Friend Class MyApplication
+        Private Sub MyApplication_Startup(sender As Object, e As StartupEventArgs) Handles Me.Startup
+            LakeUI.GlobalOptions.SetRenderBackendAsync(LakeUI.RenderBackend.Direct3D11).GetAwaiter().GetResult()
+        End Sub
 
     End Class
 End Namespace

@@ -4,8 +4,8 @@
 
 ## 支持范围
 
-- Windows 10 2004 及以上，x64，.NET 10 Desktop Runtime。
-- 本地文件、Blu-ray 光驱根目录、BDMV 目录和 .bdmv 文件。
+- Windows 10 2004 及以上，x64，.NET 11 Desktop Runtime。
+- 本地文件、Blu-ray 光驱根目录、包含 BDMV 的蓝光碟文件夹、BDMV 目录和 .bdmv 文件。可拖入蓝光碟文件夹开始播放。
 - 视频、音频和静态或多帧图片；不提供 ISO、DVD、网络协议、管道或视频帧服务器。
 - SRT、ASS/SSA、SUP/PGS 字幕；LRC 歌词；B 站 XML 弹幕。
 - CPU/GPU 解码。GPU 后端按驱动实际能力选择 CUDA/NVDEC 或 D3D11VA，失败时回退 CPU。
@@ -37,19 +37,13 @@
 .\tools\准备Libiamf.ps1 -Configuration Debug
 ~~~
 
-LakeUI 是仓库外的同级项目，宿主通过 hint path 引用它。首次构建前先生成：
+将包含渲染后端配置的 .NET 11 LakeUI 源码放在同级 `..\LakeUI`。构建会通过项目引用自动编译 LakeUI 并带上其依赖。
 
 ~~~powershell
-dotnet build ..\LakeUI\LakeUI\LakeUI.vbproj -c Debug
+.\tools\构建3FP.ps1 -Configuration Debug
 ~~~
 
-然后运行：
-
-~~~powershell
-.\tools\构建3FP.ps1 -Configuration Debug -LakeUIConfig Debug
-~~~
-
-脚本会构建 FFF.Native、FFF.Player 和 FFF.Player.Tests。
+脚本会构建 FFF.Native、LakeUI、FFF.Player 和 FFF.Player.Tests。WinForms 设计器默认使用 `DX11`，由项目的 `LakeUIDesignerBackend` 属性配置。
 
 ## 发布与依赖
 

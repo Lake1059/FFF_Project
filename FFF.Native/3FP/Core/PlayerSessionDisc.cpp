@@ -21,11 +21,18 @@ FFFResult PlayerSession::DiscNavigate(int command, int value, int y) noexcept {
         const auto current = state_.load();
         if (current != FFF3FPState::Playing && current != FFF3FPState::Ready && current != FFF3FPState::Paused) return;
         if (!disc_) { ReportError(FFFResult::InvalidState, "No disc is open.", "disc-navigation"); return; }
-        if (command == static_cast<int>(DiscInput::Command::Subtitle)) {
-            disc_->ClearSubtitle();
+        const auto action = static_cast<DiscInput::Command>(command);
+        if (!disc_->Navigate(action, value, y)) {
+            if (disc_->Failed()) Fail(FFFResult::FfmpegFailure, disc_->Error(), "disc-navigation");
+            else if (action == DiscInput::Command::RootMenu)
+                ReportError(FFFResult::NotSupported, "Could not open the Blu-ray top menu.", "disc-navigation");
+            return;
         }
-        if (!disc_->Navigate(static_cast<DiscInput::Command>(command), value, y)) return;
-        if (disc_->RestartRequired() && !ReopenDiscDemux()) return;
+        const bool menuAction = action == DiscInput::Command::RootMenu || action == DiscInput::Command::Back ||
+            action == DiscInput::Command::Activate || action == DiscInput::Command::MouseActivate;
+        const bool jumped = disc_->RestartRequired() && !disc_->Held();
+        if (jumped && !ReopenDiscDemux()) return;
+        if (current != FFF3FPState::Playing && menuAction && (jumped || disc_->MenuActivationPending())) Play();
         PublishDisc();
     });
     return FFFResult::Success;
@@ -66,14 +73,16 @@ bool PlayerSession::ReopenDiscDemux() {
     const bool playing = state_.load() == FFF3FPState::Playing;
     if (audioRenderer_) { audioRenderer_->Stop(); audioRenderer_.reset(); }
     ClearVideoQueue();
+    ClearPacketQueue(pendingVideoPackets_, pendingVideoPacketBytes_);
+    ClearPacketQueue(pendingAudioPackets_, pendingAudioPacketBytes_);
     avcodec_free_context(&videoDecoder_); avcodec_free_context(&audioDecoder_);
     disc_->CloseDemux(&format_);
     disc_->AcknowledgeRestart();
     if (!disc_->OpenDemux(&format_)) {
         Fail(FFFResult::FfmpegFailure, disc_->Error(), "disc-demux"); return false;
     }
-    videoStream_ = av_find_best_stream(format_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    audioStream_ = av_find_best_stream(format_, AVMEDIA_TYPE_AUDIO, -1, videoStream_, nullptr, 0);
+    videoStream_ = std::max(-1, av_find_best_stream(format_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0));
+    audioStream_ = std::max(-1, av_find_best_stream(format_, AVMEDIA_TYPE_AUDIO, -1, videoStream_, nullptr, 0));
     if (videoStream_ >= 0) {
         // The same two rules as every other open: a route the GPU already refused for
         // this stream is not asked again, and a refusal that happens now is reported
@@ -115,6 +124,7 @@ bool PlayerSession::ReopenDiscDemux() {
     discPositionOffset_ = disc_->Menu() ? 0 : disc_->Position();
     snapshot_.position100ns = discPositionOffset_;
     snapshot_.duration100ns = disc_->Duration();
+    snapshot_.durationKnown = snapshot_.duration100ns > 0 ? 1u : 0u;
     snapshot_.selectedVideoStream = videoStream_; snapshot_.selectedAudioStream = audioStream_;
     snapshot_.videoWidth = videoDecoder_ ? videoDecoder_->width : 0;
     snapshot_.videoHeight = videoDecoder_ ? videoDecoder_->height : 0;
@@ -125,6 +135,7 @@ bool PlayerSession::ReopenDiscDemux() {
     seekTarget100ns_ = seekTargetFrame_ = -1;
     lastVideoFrameDuration100ns_ = 0;
     draining_ = demuxEnded_ = audioDecoderDrained_ = externalAudioDrained_ = audioClockFinished_ = discDrained_ = false;
+    ResetTempo(discPositionOffset_);
     ResetClock(discPositionOffset_);
     if (audioRenderer_) audioRenderer_->Reset(discPositionOffset_);
     ArmAudioUntilVideoFrame();
@@ -154,17 +165,32 @@ bool PlayerSession::HoldDisc() {
         DecodePendingPacket(false);
         return true;
     }
+    // The boundary can arrive during preroll with only video queued. Mark
+    // audio drained as soon as its packet queue is empty so the video queue
+    // can make progress before we drain the video decoder.
+    if (!audioDecoderDrained_) {
+        audioDecoderDrained_ = true;
+        if (audioDecoder_) DecodePacket(audioDecoder_, nullptr, false, format_);
+        if (audioRenderer_ && tempoGraph_) (void)TempoAudio(nullptr, 0);
+        if (audioRenderer_ && audioRenderer_->Finish() != FFFResult::Success) {
+            Fail(FFFResult::FfmpegFailure, "Could not drain disc audio output.", "disc-audio-drain");
+            return true;
+        }
+    }
     if (!pendingVideoPackets_.empty()) {
-        if (VideoQueueSaturated()) { PumpVideoPresentation(); Sleep(1); return true; }
+        if (VideoQueueSaturated()) {
+            TryCompletePlaybackPreroll();
+            TryReleaseAudioAfterVideoPresentation();
+            UpdateDrainedAudioClock();
+            if (!PumpVideoPresentation()) Sleep(1);
+            return true;
+        }
         DecodePendingPacket(true);
         return true;
     }
     if (!draining_) {
         draining_ = true;
         if (videoDecoder_) DecodePacket(videoDecoder_, nullptr, true, format_);
-        if (audioDecoder_) DecodePacket(audioDecoder_, nullptr, false, format_);
-        audioDecoderDrained_ = true;
-        if (audioRenderer_) audioRenderer_->Finish();
     }
     if (disc_->Still() && videoFrameQueue_.empty() && videoDecoder_) {
         // MPEG-2 still cells can hold delayed reference frames behind the first
@@ -173,13 +199,17 @@ bool PlayerSession::HoldDisc() {
         for (int attempt = 0; attempt < 4 && videoFrameQueue_.empty(); ++attempt)
             DecodePacket(videoDecoder_, nullptr, true, format_);
     }
-    if (!videoFrameQueue_.empty()) { PumpVideoPresentation(); TryCompletePlaybackPreroll(); return true; }
-    if (audioRenderer_ && audioRenderer_->Buffered100ns() > 0) {
-        TryReleaseAudioAfterVideoPresentation(); TryCompletePlaybackPreroll(); Sleep(2); return true;
-    }
     TryCompletePlaybackPreroll();
-    DrainInternalAudio();
+    // The last video frame can be later than the final audio sample. Once
+    // audio drains, advance the clock before waiting for queued video.
     UpdateDrainedAudioClock();
+    if (!videoFrameQueue_.empty()) {
+        if (!PumpVideoPresentation()) Sleep(1);
+        return true;
+    }
+    if (audioRenderer_ && audioRenderer_->Buffered100ns() > 0) {
+        TryReleaseAudioAfterVideoPresentation(); Sleep(2); return true;
+    }
     PublishDisc();
     if (!disc_->PollHold(true)) { Sleep(10); return true; }
     if (disc_->RestartRequired()) return ReopenDiscDemux();

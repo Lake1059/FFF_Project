@@ -15,8 +15,13 @@ End Enum
 
 Public NotInheritable Class 播放列表项
     Public Sub New(本地路径 As String)
-        路径 = 播放列表.规范本地文件(本地路径)
-        标题 = IO.Path.GetFileNameWithoutExtension(路径)
+        路径 = 播放列表.规范本地文件(本地路径, 允许蓝光目录:=True)
+        If IO.Directory.Exists(路径) Then
+            标题 = IO.Path.GetFileName(路径)
+            If String.IsNullOrEmpty(标题) Then 标题 = 路径
+        Else
+            标题 = IO.Path.GetFileNameWithoutExtension(路径)
+        End If
     End Sub
     Public ReadOnly Property 路径 As String
     Public Property 标题 As String
@@ -451,11 +456,15 @@ Public NotInheritable Class 播放列表
         Return Raw格式.是RAW(路径)
     End Function
 
-    Friend Shared Function 规范本地文件(值 As String) As String
+    Friend Shared Function 规范本地文件(值 As String, Optional 允许蓝光目录 As Boolean = False) As String
         ArgumentException.ThrowIfNullOrWhiteSpace(值)
         If 值.Contains("://", StringComparison.Ordinal) OrElse 值.StartsWith("\\", StringComparison.Ordinal) OrElse 值.StartsWith("//", StringComparison.Ordinal) Then Throw New ArgumentException("只允许本地普通文件。", NameOf(值))
         Dim 完整路径 = IO.Path.GetFullPath(值)
         If 完整路径.StartsWith("\\", StringComparison.Ordinal) OrElse 完整路径.StartsWith("//", StringComparison.Ordinal) Then Throw New ArgumentException("只允许本地普通文件。", NameOf(值))
+        If 允许蓝光目录 Then
+            Dim 媒体路径 = 光盘路径.取得媒体路径(完整路径)
+            If 媒体路径 IsNot Nothing Then Return 媒体路径
+        End If
         If Not IO.File.Exists(完整路径) Then Throw New FileNotFoundException("找不到本地文件。", 完整路径)
         If (IO.File.GetAttributes(完整路径) And IO.FileAttributes.ReparsePoint) <> 0 Then Throw New ArgumentException("不允许重解析点文件。", NameOf(值))
         Return 完整路径
