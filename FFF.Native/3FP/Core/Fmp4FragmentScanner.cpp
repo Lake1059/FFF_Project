@@ -209,7 +209,9 @@ bool Fmp4FragmentScanner::DetectFragmented(const char* pathUtf8) noexcept {
         if (pathUtf8 == nullptr || *pathUtf8 == '\0') return false;   // 空路径
         std::string error;
         // 独立旁路只读句柄：不触碰调用方的 format_/formatIo_（demux 句柄独立）。
-        const auto input = SharedFileInput::Open(pathUtf8, error);
+        // 扫描只读顶层 box 头，不会消费 4 MiB 预读窗口；按短生命周期 reader
+        // 限制到两槽，避免和播放 reader 同时占满内存。
+        const auto input = SharedFileInput::Open(pathUtf8, error, 0, true);
         if (!input) return false;
         auto* io = input->Context();
         if (io == nullptr) return false;
@@ -263,7 +265,7 @@ bool Fmp4FragmentScanner::Start(const char* pathUtf8, AVRational referenceStream
         // 先同步打开：SharedFileInput::Open 失败时不启动线程（契约失败路径）；
         // 成功则把该独立旁路句柄移交给扫描线程（R5.1，与 demux 句柄无共享）。
         std::string error;
-        auto input = SharedFileInput::Open(pathUtf8, error);
+        auto input = SharedFileInput::Open(pathUtf8, error, 0, true);
         if (!input) return false;
 
         // 此时无线程运行、无并发读者：安全重置共享状态。

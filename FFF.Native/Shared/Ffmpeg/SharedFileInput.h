@@ -10,6 +10,8 @@ extern "C" {
 #include <memory>
 #include <string>
 
+class IocpMediaReader;
+
 class SharedFileInput final {
 public:
     SharedFileInput() = default;
@@ -18,7 +20,8 @@ public:
     SharedFileInput& operator=(const SharedFileInput&) = delete;
 
     static std::unique_ptr<SharedFileInput> Open(const char* pathUtf8,
-        std::string& error) noexcept;
+        std::string& error, ULONGLONG deadlineTick = 0,
+        bool probe = false) noexcept;
 
     // Serves a copy of `data` instead of a file on disk, for the callers that
     // have to hand FFmpeg bytes they had to repair first (see AvifIlocShim).
@@ -30,16 +33,37 @@ public:
     void SetInterrupt(AVIOInterruptCB interrupt) noexcept { interrupt_ = interrupt; }
     void DetectUnwrittenData(bool enabled) noexcept { detectUnwrittenData_ = enabled; }
 
+    // Feed-forward hint for the IOCP read-ahead window. `bitsPerSecond` is the
+    // container/stream bitrate; the reader converts it to a slot target.
+    void SetNetworkWindowHint(std::int64_t bitsPerSecond) noexcept;
+
 private:
+    static constexpr DWORD NetworkReadTimeoutMs = 8000;
+    static constexpr DWORD NetworkOpenTimeoutMs = 15000;
+    static constexpr int NetworkReadRetryCount = 2;
+
     static int Read(void* opaque, std::uint8_t* buffer, int bufferSize) noexcept;
     static std::int64_t Seek(void* opaque, std::int64_t offset, int whence) noexcept;
+    static bool IsNetworkPath(const std::wstring& path) noexcept;
+    static bool IsTransientNetworkError(DWORD error) noexcept;
+    static bool Interrupted(const AVIOInterruptCB& interrupt) noexcept;
+
+    int ReadFileOnce(std::uint8_t* buffer, int bufferSize,
+        ULONGLONG deadlineTick) noexcept;
+    bool IsUnwrittenBlock(const std::uint8_t* buffer, int bytes) const noexcept;
+    void CloseHandles() noexcept;
 
     HANDLE file_{INVALID_HANDLE_VALUE};
+    HANDLE readEvent_{INVALID_HANDLE_VALUE};
+    std::unique_ptr<IocpMediaReader> iocpReader_;
     AVIOContext* context_{};
     std::uint8_t* buffer_{};
     std::uint8_t* data_{};      // owned copy of the in-memory media, when used
-    std::int64_t position_{};   // read cursor for the in-memory media
+    std::int64_t position_{};   // logical read cursor for file and memory media
     std::int64_t size_{};
+    bool sizeKnown_{false};
+    bool network_{false};
+    DWORD lastError_{0};
     std::wstring path_;
     bool detectUnwrittenData_ = false;
     AVIOInterruptCB interrupt_{};

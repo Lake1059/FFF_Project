@@ -2,6 +2,7 @@ Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Text.Json
 Imports System.Threading
+Imports System.Threading.Tasks
 
 ''' <summary>
 ''' 管理原生播放器会话的完整生命周期，以及所有与媒体状态相关的操作。
@@ -63,6 +64,15 @@ Public NotInheritable Class 播放器控制器
     Private 已静音 As Boolean
     Private 正在切换会话 As Boolean
     Private 已释放 As Boolean
+    ' 一次只有最新一次用户 seek 持有看门狗；旧请求用代次淘汰，避免旧完成事件
+    ' 把新目标误判成成功。原生 OperationCompleted 不携带请求 id，所以还要用
+    ' 事件里的实际位置做一次目标匹配。
+    Private Shared ReadOnly 跳转超时 As TimeSpan = TimeSpan.FromSeconds(10)
+    Private 跳转等待 As TaskCompletionSource(Of Boolean)
+    Private 跳转等待会话 As 播放器会话
+    Private 跳转等待目标 As TimeSpan
+    Private 跳转等待总时长 As TimeSpan
+    Private 跳转等待代次 As Long
 
     Public Sub New(输出窗口提供器 As Func(Of IntPtr), 事件同步上下文 As SynchronizationContext,
                    Optional 初始解码器 As 解码模式 = 解码模式.CPU)
@@ -982,7 +992,9 @@ Public NotInheritable Class 播放器控制器
         Dim 目标 = 会话
         If 正在切换会话 Then Return
         If 目标 Is Nothing Then
-            If 光盘路径.媒体存在(最后打开文件路径) Then 打开媒体(最后打开文件路径)
+            ' 不从“上次打开”里自动恢复网络路径：恢复动作不是用户当下的显式选择。
+            If Not 媒体路径.是网络路径(最后打开文件路径) AndAlso
+               光盘路径.媒体存在(最后打开文件路径) Then 打开媒体(最后打开文件路径)
             Return
         End If
 
@@ -1027,8 +1039,13 @@ Public NotInheritable Class 播放器控制器
             Dim 新位置 = 快照.播放位置 + TimeSpan.FromSeconds(秒数)
             If 新位置 < TimeSpan.Zero Then 新位置 = TimeSpan.Zero
             If 快照.总时长 > TimeSpan.Zero Then 新位置 = 最小时间(新位置, 快照.总时长)
-            目标.跳转(新位置)
-            记录跳转位置(新位置, 快照.总时长)
+            Dim 等待 = 启动跳转等待(目标, 新位置, 快照.总时长)
+            Try
+                目标.跳转(新位置)
+            Catch
+                完成跳转(等待, False)
+                Throw
+            End Try
         Catch ex As 播放器异常
         End Try
     End Sub
@@ -1043,8 +1060,13 @@ Public NotInheritable Class 播放器控制器
                 If 读取光盘状态().已打开 Then Return
                 ' 夹取只算一次：跳转和进度记录都用同一个值，否则会把未夹取的原始位置写回进度文件。
                 Dim 夹取后位置 = 限定跳转位置(位置, 快照.总时长)
-                目标.跳转(夹取后位置)
-                记录跳转位置(夹取后位置, 快照.总时长)
+                Dim 等待 = 启动跳转等待(目标, 夹取后位置, 快照.总时长)
+                Try
+                    目标.跳转(夹取后位置)
+                Catch
+                    完成跳转(等待, False)
+                    Throw
+                End Try
             End If
         Catch ex As 播放器异常
         End Try
@@ -1092,6 +1114,89 @@ Public NotInheritable Class 播放器控制器
             Debug.WriteLine("播放进度：跳转记录失败（已忽略）：" & ex.GetType().Name)
         End Try
     End Sub
+
+    ''' <summary>为一次用户 seek 建立看门狗。只有原生真正回报 seek/seek-keyframe
+    ''' 且落点与目标一致时才写进度；超时、错误或 seek-unavailable 都保留上一可靠位置。</summary>
+    Private Function 启动跳转等待(目标会话 As 播放器会话, 目标位置 As TimeSpan,
+                                   总时长 As TimeSpan) As TaskCompletionSource(Of Boolean)
+        If 已释放 OrElse 目标会话 Is Nothing OrElse 总时长 <= TimeSpan.Zero Then Return Nothing
+        取消跳转等待()
+        Dim 等待 As New TaskCompletionSource(Of Boolean)(TaskCreationOptions.RunContinuationsAsynchronously)
+        跳转等待 = 等待
+        跳转等待会话 = 目标会话
+        跳转等待目标 = 目标位置
+        跳转等待总时长 = 总时长
+        Dim 本次代次 = 跳转等待代次
+        等待跳转超时Async(目标会话, 本次代次, 等待)
+        Return 等待
+    End Function
+
+    Private Sub 取消跳转等待()
+        Dim 等待 = 跳转等待
+        跳转等待 = Nothing
+        跳转等待会话 = Nothing
+        跳转等待代次 += 1
+        等待?.TrySetResult(False)
+    End Sub
+
+    Private Sub 完成跳转(等待 As TaskCompletionSource(Of Boolean), 成功 As Boolean,
+                          Optional 实际位置 As TimeSpan = Nothing)
+        If 等待 Is Nothing OrElse Not ReferenceEquals(等待, 跳转等待) Then Return
+        Dim 总时长 = 跳转等待总时长
+        跳转等待 = Nothing
+        跳转等待会话 = Nothing
+        跳转等待代次 += 1
+        If 成功 Then 记录跳转位置(实际位置, 总时长)
+        等待.TrySetResult(成功)
+    End Sub
+
+    Private Async Sub 等待跳转超时Async(目标会话 As 播放器会话, 代次 As Long,
+                                        等待 As TaskCompletionSource(Of Boolean))
+        Try
+            Await Task.Delay(跳转超时).ConfigureAwait(True)
+            If 代次 <> 跳转等待代次 OrElse Not ReferenceEquals(等待, 跳转等待) Then Return
+            Dim 超时会话 = 跳转等待会话
+            完成跳转(等待, False)
+            If Not 已释放 AndAlso ReferenceEquals(超时会话, 会话) Then
+                RaiseEvent 操作提示(Me, New 播放器操作提示事件参数("跳转超时，已保留原位置"))
+            End If
+        Catch ex As Exception
+            Debug.WriteLine("跳转看门狗：超时处理失败（已忽略）：" & ex.GetType().Name)
+        End Try
+    End Sub
+
+    ''' <summary>原生 OperationCompleted 不携带请求 id，因此同时用会话、operation
+    ''' 和实际 position100ns 匹配；旧 seek 的完成事件不会误判成新目标成功。</summary>
+    Private Function 尝试完成跳转(发送者 As 播放器会话, 详情JSON As String) As Boolean
+        Dim 等待 = 跳转等待
+        If 等待 Is Nothing OrElse Not ReferenceEquals(发送者, 跳转等待会话) Then Return False
+        Try
+            Using 文档 = JsonDocument.Parse(详情JSON)
+                Dim 操作 As JsonElement
+                If Not 文档.RootElement.TryGetProperty("operation", 操作) OrElse
+                    操作.ValueKind <> JsonValueKind.String Then Return False
+                Dim 名称 = 操作.GetString()
+                If 名称 = "seek-unavailable" OrElse 名称 = "seek-failed" Then
+                    完成跳转(等待, False)
+                    Return True
+                End If
+                If 名称 <> "seek" AndAlso 名称 <> "seek-keyframe" Then Return False
+                Dim 位置 As JsonElement
+                If Not 文档.RootElement.TryGetProperty("position100ns", 位置) OrElse
+                    位置.ValueKind <> JsonValueKind.Number Then Return False
+                Dim 实际 = TimeSpan.FromTicks(位置.GetInt64())
+                Dim 容差 = If(名称 = "seek-keyframe",
+                    TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(500))
+                If 实际 < 跳转等待目标 - 容差 OrElse 实际 > 跳转等待目标 + 容差 Then Return False
+                完成跳转(等待, True, 实际)
+                Return True
+            End Using
+        Catch ex As JsonException
+        Catch ex As Exception
+            Debug.WriteLine("跳转看门狗：完成匹配失败（已忽略）：" & ex.GetType().Name)
+        End Try
+        Return False
+    End Function
 
     ''' <summary>用户打开媒体时的恢复位置：显式恢复位置优先；否则读进度记忆，
     ''' 并按本次实际片长再夹一次（同名文件被替换时，旧位置可能已经越过片尾）。</summary>
@@ -1171,13 +1276,33 @@ Public NotInheritable Class 播放器控制器
             Dim 快照 = 目标.当前快照
             If 可操作(快照.状态) AndAlso 快照.总时长 > TimeSpan.Zero Then
                 If 读取光盘状态().已打开 Then
-                    目标.跳转(位置)
+                    Dim 等待 = 启动跳转等待(目标, 位置, 快照.总时长)
+                    Try
+                        目标.跳转(位置)
+                    Catch
+                        完成跳转(等待, False)
+                        Throw
+                    End Try
                     Return
                 End If
                 If 目标.当前光盘状态.已打开 Then
-                    If Not 目标.当前光盘状态.菜单可见 Then 目标.跳转(位置)
+                    If Not 目标.当前光盘状态.菜单可见 Then
+                        Dim 等待 = 启动跳转等待(目标, 位置, 快照.总时长)
+                        Try
+                            目标.跳转(位置)
+                        Catch
+                            完成跳转(等待, False)
+                            Throw
+                        End Try
+                    End If
                 Else
-                    目标.跳转到关键帧(位置)
+                    Dim 等待 = 启动跳转等待(目标, 位置, 快照.总时长)
+                    Try
+                        目标.跳转到关键帧(位置)
+                    Catch
+                        完成跳转(等待, False)
+                        Throw
+                    End Try
                 End If
             End If
         Catch ex As 播放器异常
@@ -2010,6 +2135,7 @@ Public NotInheritable Class 播放器控制器
 
     Private Sub 会话_操作完成(sender As Object, e As 播放器事件参数)
         If sender IsNot 会话 Then Return
+        尝试完成跳转(sender, e.详情JSON)
         Try
             Using 文档 = JsonDocument.Parse(e.详情JSON)
                 Dim 操作 As JsonElement
@@ -2147,6 +2273,7 @@ Public NotInheritable Class 播放器控制器
 
     Private Sub 会话_错误(sender As Object, e As 播放器事件参数)
         If sender IsNot 会话 OrElse 已释放 Then Return
+        If ReferenceEquals(sender, 跳转等待会话) Then 完成跳转(跳转等待, False)
         RaiseEvent 播放错误(Me, New 播放器错误事件参数(读取事件消息(e.详情JSON), "播放错误"))
         RaiseEvent 状态已变化(Me, EventArgs.Empty)
     End Sub
@@ -2361,6 +2488,7 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Private Sub 释放当前会话(Optional 保留已加载字幕 As Boolean = False)
+        取消跳转等待()
         取消外部音频加载()
         If Not 保留已加载字幕 Then
             释放当前字幕()

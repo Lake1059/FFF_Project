@@ -1,4 +1,7 @@
-﻿Public Class Form播放列表
+﻿Imports System.Threading
+Imports System.Threading.Tasks
+
+Public Class Form播放列表
 
     <Runtime.InteropServices.DllImport("user32.dll")>
     Private Shared Function GetDpiForWindow(hwnd As IntPtr) As UInteger
@@ -231,26 +234,60 @@
                       DragDropEffects.Copy, DragDropEffects.None)
     End Sub
 
-    Private Sub 播放列表_DragDrop(sender As Object, e As DragEventArgs) Handles Me.DragDrop, ModernPanel1.DragDrop, Panel1.DragDrop, UltraDetailListView1.DragDrop
+    Private Async Sub 播放列表_DragDrop(sender As Object, e As DragEventArgs) Handles Me.DragDrop, ModernPanel1.DragDrop, Panel1.DragDrop, UltraDetailListView1.DragDrop
         Dim 路径 = TryCast(e.Data?.GetData(DataFormats.FileDrop), String())
         If 路径 Is Nothing OrElse 路径.Length = 0 Then Return
+        Dim 是网络路径 = 路径.Any(AddressOf 媒体路径.是网络路径)
+        Dim 媒体文件 As String()
+        If 是网络路径 Then
+            Dim 取消 As New CancellationTokenSource()
+            Dim 扫描任务 = Task.Run(
+                Function() 枚举拖入媒体(路径, 取消.Token).ToArray(),
+                取消.Token)
+            Try
+                媒体文件 = Await 扫描任务.WaitAsync(TimeSpan.FromSeconds(10))
+            Catch ex As TimeoutException
+                取消.Cancel()
+                显示错误("无法添加网络媒体", "网络目录扫描超过 10 秒，已停止。")
+                Return
+            Catch ex As OperationCanceledException
+                取消.Cancel()
+                Return
+            Catch ex As Exception
+                取消.Cancel()
+                显示错误("无法添加网络媒体", ex.Message)
+                Return
+            Finally
+                取消.Dispose()
+            End Try
+        Else
+            Try
+                媒体文件 = 枚举拖入媒体(路径).ToArray()
+            Catch ex As Exception
+                显示错误("无法添加媒体", ex.Message)
+                Return
+            End Try
+        End If
+        If 媒体文件.Length = 0 Then Return
         Try
-            For Each 媒体路径 In 枚举拖入媒体(路径)
-                列表数据.添加(媒体路径)
+            For Each 文件 In 媒体文件
+                列表数据.添加(文件)
             Next
         Catch ex As Exception
             显示错误("无法添加媒体", ex.Message)
         End Try
     End Sub
 
-    Friend Shared Iterator Function 枚举拖入媒体(路径 As IEnumerable(Of String)) As IEnumerable(Of String)
+    Friend Shared Iterator Function 枚举拖入媒体(路径 As IEnumerable(Of String),
+                                               Optional 取消 As CancellationToken = Nothing) As IEnumerable(Of String)
         For Each 值 In 路径
+            取消.ThrowIfCancellationRequested()
             If IO.File.Exists(值) Then
                 If 播放列表.是支持的媒体文件(值) Then Yield IO.Path.GetFullPath(值)
             ElseIf IO.Directory.Exists(值) Then
-                For Each 文件 In IO.Directory.EnumerateFiles(值, "*", IO.SearchOption.TopDirectoryOnly).
-                    Where(AddressOf 播放列表.是支持的媒体文件).
-                    OrderBy(Function(x) IO.Path.GetFileName(x), StringComparer.CurrentCultureIgnoreCase)
+                ' 普通目录按有界递归展开；网络目录最多向下两层、1000 项，避免一次拖入
+                ' 变成对整个共享的无限扫描。真正的 BDMV 目录不在播放列表里展开。
+                For Each 文件 In 媒体路径.枚举媒体文件(值, 1000, 2, 取消)
                     Yield 文件
                 Next
             End If
