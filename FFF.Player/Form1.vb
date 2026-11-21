@@ -1037,10 +1037,11 @@ Public Class Form1
 
     Friend Shared Function 取得命令行文件(参数 As IEnumerable(Of String)) As String
         If 参数 Is Nothing Then Return String.Empty
-        ' 命令行/关联启动不自动探测网络路径：UNC 的 File.Exists 会触发 SMB 认证，
-        ' 网络位置必须由用户在打开对话框或拖入时显式选择。
-        Dim 文件路径 = 参数.Where(Function(x) Not 媒体路径.是网络路径(x)).
-            FirstOrDefault(AddressOf 光盘路径.媒体存在)
+        ' 命令行/关联启动来自用户显式双击或拖入，网络文件同样必须能打开；
+        ' 但这里仍在 UI 线程，不能对 UNC 调 File.Exists/Directory.Exists 触发 SMB 认证。
+        ' 网络路径只做字符串分类，存在性与文件夹展开交给 打开或替换文件 的后台扫描。
+        Dim 文件路径 = 参数.Where(Function(x) Not String.IsNullOrWhiteSpace(x)).
+            FirstOrDefault(Function(x) 媒体路径.是网络路径(x) OrElse 光盘路径.媒体存在(x))
         Return If(String.IsNullOrEmpty(文件路径), String.Empty, Path.GetFullPath(文件路径))
     End Function
 
