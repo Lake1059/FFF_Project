@@ -56,6 +56,40 @@ std::uint32_t EnvUint(const wchar_t* name, std::uint32_t fallback,
     return parsed;
 }
 
+// The still-frame cache is derived data. Mark the pages allocated by this
+// worker (AVFrame buffers included) very low priority so the memory manager
+// reclaims them to disk before touching playback/audio/render pages. The helper
+// process already applies the same policy to its whole process.
+bool LowerCurrentThreadMemoryPriority() noexcept {
+#ifndef MEMORY_PRIORITY_VERY_LOW
+#define MEMORY_PRIORITY_VERY_LOW 1u
+#endif
+    // SetThreadInformation is Win8+; resolve it dynamically so older SDK
+    // configurations still build. ThreadMemoryPriority == 0 and the
+    // information payload is one ULONG by ABI.
+    using SetThreadInformationFn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+    using GetThreadInformationFn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (kernel32 == nullptr) return false;
+    const auto setThreadInformation = reinterpret_cast<SetThreadInformationFn>(
+        GetProcAddress(kernel32, "SetThreadInformation"));
+    if (setThreadInformation == nullptr) return false;
+    struct { ULONG MemoryPriority; } info{MEMORY_PRIORITY_VERY_LOW};
+    if (!setThreadInformation(GetCurrentThread(), 0, &info,
+            static_cast<DWORD>(sizeof(info)))) {
+        return false;
+    }
+    const auto getThreadInformation = reinterpret_cast<GetThreadInformationFn>(
+        GetProcAddress(kernel32, "GetThreadInformation"));
+    if (getThreadInformation == nullptr) return false;
+    ULONG readback = 0;
+    if (!getThreadInformation(GetCurrentThread(), 0, &readback,
+            static_cast<DWORD>(sizeof(readback)))) {
+        return false;
+    }
+    return readback == MEMORY_PRIORITY_VERY_LOW;
+}
+
 std::wstring Utf8ToWide(const std::string& utf8) noexcept {
     if (utf8.empty()) return std::wstring();
     const int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
@@ -235,6 +269,10 @@ AVFrame* DecodeFirstStill(const std::string& pathUtf8, std::uint32_t generation,
     // OpenDecoder sets this; without it best_effort_timestamp is computed in a
     // different time base and the hit frame would carry a wrong position.
     decoder->pkt_timebase = format->streams[stream]->time_base;
+    // Keep every AVFrame allocation on this prefetch worker. Codec-internal
+    // threads start at normal memory priority, so a multi-threaded still decode
+    // would leave pages the memory manager is not allowed to trim first.
+    decoder->thread_count = 1;
     decoder->max_pixels = static_cast<std::int64_t>(std::min<std::uint64_t>(
         byteBudget / 4, 64ull * 1024 * 1024));
     decoder->opaque = &limits;
@@ -349,7 +387,7 @@ PrefetchService::PrefetchService() noexcept {
     disabled_ = !EnvOn(L"FFF3FP_PREFETCH", true);
     hostEnabled_ = EnvOn(L"FFF3FP_PREFETCH_HOST", true);
     mode_ = EnvUint(L"FFF3FP_PREFETCH_MODE", 2u, 0u, 3u);
-    const std::uint32_t megabytes = EnvUint(L"FFF3FP_PREFETCH_MAX_MB", 256u, 16u, 4096u);
+    const std::uint32_t megabytes = EnvUint(L"FFF3FP_PREFETCH_MAX_MB", 1024u, 16u, 4096u);
     budgetBytes_ = static_cast<std::uint64_t>(megabytes) * 1024ull * 1024ull;
     try {
         worker_ = std::thread([this] { WorkerLoop(); });
@@ -694,6 +732,11 @@ void PrefetchService::StopHelper() noexcept {
 
 void PrefetchService::WorkerLoop() noexcept {
     FFFThreadNaming::SetCurrentThreadName("FFF.Player.Prefetch");
+    const bool memoryPriorityLow = LowerCurrentThreadMemoryPriority();
+    if (EnvOn(L"FFF_MEMARB_TRACE", false)) {
+        std::fprintf(stderr, "[prefetch] worker memory-priority=very-low ok=%d\n",
+            memoryPriorityLow ? 1 : 0);
+    }
     for (;;) {
         std::vector<std::string> paths;
         std::uint32_t flags = 0;
