@@ -11,12 +11,12 @@ param(
     # 跨产品框架配对：默认拒绝不同 .NET 运行时版本，见 Resolve-Toolchain.ps1。
     [switch]$AllowFrameworkMismatch,
     # ReadyToRun：默认关闭（JIT 交付），参数保留作为体积/启动权衡的余量开关：
-    # -ReadyToRun 实测冷启动 T2 中位 1717 ms（JIT 1893，−176 ms，发布实测 §十二同窗对照），
+    # -ReadyToRun 实测冷启动 T2 中位 1717 ms（JIT 1893，−176 ms，docs/105 §十二同窗对照），
     # 代价 +7.84 MB 托管体积。勿同时开 PublishReadyToRunEmitSymbols
-    #（与 -p:DebugType=None 冲突，单文件发布记录 §4.1）。
+    #（与 -p:DebugType=None 冲突，docs/17 §4.1）。
     [switch]$ReadyToRun,
     # IAMF 空间音频：默认强制携带（缺料即报错，而非静默编译成无 IAMF 内核）。
-    # 体积敏感/无准备环境用 -SkipIamf 显式放弃该能力（发布实测 §十三/§十四）。
+    # 体积敏感/无准备环境用 -SkipIamf 显式放弃该能力（docs/105 §十三/§十四）。
     [switch]$SkipIamf,
     [switch]$SkipDependencyPreparation
 )
@@ -117,17 +117,22 @@ try {
         -p:DebugType=None -p:DebugSymbols=false @TfmArgs @R2rArgs
     if ($LASTEXITCODE -ne 0) { throw "FFF.Player single-file publish failed." }
     # 单文件本体包只交付 exe：发布输出里可能被 None 项带出的许可文本、许可目录、
-    # AI 包声明与 ICO sidecar 在这里清掉；UI 图标回退到 exe 内嵌图标。
+    # AI 最小资源目录以及 ICO sidecar 在这里清掉；UI 图标回退到 exe 内嵌图标。
     foreach ($Name in @("LICENSE.txt", "LICENSING.md", "NOTICE", "THIRD-PARTY-NOTICES.md", "ICO.ico")) {
         $Path = Join-Path $StagingDirectory $Name
         if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force }
     }
     $LicenseDirectory = Join-Path $StagingDirectory "licenses"
     if (Test-Path -LiteralPath $LicenseDirectory -PathType Container) { Remove-Item -LiteralPath $LicenseDirectory -Recurse -Force }
-    $AiNotice = Join-Path $StagingDirectory "ai-subtitles\AI字幕包声明.txt"
-    if (Test-Path -LiteralPath $AiNotice -PathType Leaf) { Remove-Item -LiteralPath $AiNotice -Force }
-    $UnexpectedFiles = @(Get-ChildItem -LiteralPath $StagingDirectory -File | Where-Object { $_.Name -ne "FFF.Player.exe" })
-    if ($UnexpectedFiles) { throw "Unexpected files in single-file output: $($UnexpectedFiles.Name -join ', ')" }
+    # AI 资源已经在单文件程序集里；staging 里的 ai-subtitles 目录只是 publish 带出的
+    # 源文件副本，不能随发布目录一起交付（否则会出现“exe 内嵌一份、旁边又一份”）。
+    $AiDirectory = Join-Path $StagingDirectory "ai-subtitles"
+    if (Test-Path -LiteralPath $AiDirectory -PathType Container) { Remove-Item -LiteralPath $AiDirectory -Recurse -Force }
+    $UnexpectedEntries = @(Get-ChildItem -LiteralPath $StagingDirectory -Force |
+        Where-Object { $_.Name -ne "FFF.Player.exe" })
+    if ($UnexpectedEntries) {
+        throw "Unexpected entries in single-file output: $($UnexpectedEntries.Name -join ', ')"
+    }
     # staging 双保险：本体包不随包发布任何外部模块 DLL。
     $ForbiddenModules = @(Get-ChildItem -LiteralPath $StagingDirectory -File -Recurse -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like "*ExternalModule*.dll" -or $_.Name -like "*.Test.dll" })
@@ -136,6 +141,19 @@ try {
     }
     $PublishedExecutable = Join-Path $StagingDirectory "FFF.Player.exe"
     if (-not (Test-Path -LiteralPath $PublishedExecutable -PathType Leaf)) { throw "FFF.Player.exe is missing from publish output." }
+    # 单文件包必须同时带 native payload 与 AI 最小资源；只看“publish exit 0”会漏掉
+    # 资源逻辑名被改坏、EmbeddedResource 条件没生效等沉默失败。
+    $PublishedAscii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($PublishedExecutable))
+    foreach ($Marker in @(
+        "FFF.Player.NativePayload.bin",
+        "FFF.Player.AiSub.asr_worker_py",
+        "FFF.Player.AiSub.qwen3_ort_py",
+        "FFF.Player.AiSub.License_MIT_txt"
+    )) {
+        if (-not $PublishedAscii.Contains($Marker)) {
+            throw "单文件包缺少嵌入资源标记：$Marker"
+        }
+    }
     Assert-ProductFrameworkPair -OutputDirectory $OutputDirectory -Product "FFF.Player" `
         -Framework (Get-ProductTargetFramework -ProjectPath (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
             -NetTFM $NetTFM -DotNet $DotNet) `
@@ -151,7 +169,8 @@ try {
     }
     $PendingExecutable = $null
     $PublishedFile = Get-Item -LiteralPath $Executable
-    Write-Host "Single-file publish completed: $($PublishedFile.FullName) ($($PublishedFile.Length) bytes)"
+    $PublishedHash = (Get-FileHash -LiteralPath $PublishedFile.FullName -Algorithm SHA256).Hash
+    Write-Host "Single-file publish completed: $($PublishedFile.FullName) ($($PublishedFile.Length) bytes, SHA256 $PublishedHash)"
 }
 finally {
     if ($PendingExecutable -and (Test-Path -LiteralPath $PendingExecutable)) { Remove-Item -LiteralPath $PendingExecutable -Force }
