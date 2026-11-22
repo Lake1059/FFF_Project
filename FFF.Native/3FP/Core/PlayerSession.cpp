@@ -1440,12 +1440,15 @@ void PlayerSession::AttachMemoryBudgetLedger() noexcept {
         arbiter.Claim(FFFPlayer::MemConsumer::AudioPcmQueue, claim);
     }
 
-    // Prefetch: the only consumer whose floor is zero, so it is the first to yield.
+    // Prefetch: the only consumer whose floor is zero, so it is the first to
+    // yield. The 1 GiB ceiling is intentional: its pages are marked low
+    // priority by the prefetch worker, so the memory manager can page them
+    // back to disk instead of letting them compete with playback memory.
     {
         FFFPlayer::MemClaim claim{};
         claim.floorBytes = 0;
-        claim.targetBytes = 128ull * 1024 * 1024;
-        claim.ceilingBytes = 256ull * 1024 * 1024;
+        claim.targetBytes = 1024ull * 1024 * 1024;
+        claim.ceilingBytes = 1024ull * 1024 * 1024;
         claim.priority = 0;
         arbiter.Claim(FFFPlayer::MemConsumer::PrefetchCache, claim);
     }
