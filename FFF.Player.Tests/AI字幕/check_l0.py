@@ -10,7 +10,7 @@
     已废止的 GPU 层数和附加参数不应重新出现，见 L0-5。
 
 用法（从仓库根目录）：
-    python tools/ai-subtitles/check_l0.py
+    python FFF.Player.Tests/AI字幕/check_l0.py
 退出码 = 失败项数。
 """
 import io
@@ -31,8 +31,8 @@ VB_SET = os.path.join(ROOT, "FFF.Player", "设置.vb")
 VB_CTRLER = os.path.join(ROOT, "FFF.Player", "Core", "播放器控制器.vb")
 CPP_SESSION = os.path.join(ROOT, "FFF.Native", "3FP", "Core", "PlayerSession.cpp")
 CPP_RENDER = os.path.join(ROOT, "FFF.Native", "3FP", "Render", "VideoRenderer.cpp")
-WORKER = os.path.join(ROOT, "tools", "ai-subtitles", "asr_worker.py")
-PY_ORT = os.path.join(ROOT, "tools", "ai-subtitles", "qwen3_ort.py")
+WORKER = os.path.join(ROOT, "FFF.Player", "AI字幕", "Worker", "asr_worker.py")
+PY_ORT = os.path.join(ROOT, "FFF.Player", "AI字幕", "Worker", "qwen3_ort.py")
 
 通过 = 0
 失败 = 0

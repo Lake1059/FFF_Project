@@ -22,9 +22,9 @@
 
 - **3FP 本体包**：`FFF.Player.exe`、`FFF.Native.dll`、本仓第一方代码、libass 字幕栈与 .NET 运行依赖。**本体不内嵌、不随包 FFmpeg**；FFmpeg 是用户自备或另行分发的**外部/独立运行时**。
 - **完整运行时包（可选）**：仅在显式使用 `发布3FP.ps1 -IncludeExternalRuntime` 时，才会检查并复制 `avcodec-*` / `avformat-*` / `avutil-*` / `avfilter-*` / `swresample-*` / `swscale-*` 六个 DLL；该模式是“外部运行时打包”，不是 3FP 本体的一部分。
-- 默认 `发布3FP.ps1` 生成本体包，并在 staging 层拒绝任何 `av*.dll`；不得把开发输出目录 `bin` 直接当发布包分发。
-- 单文件形态（`tools/发布3FP单文件.ps1`）按项目分发策略只产出 `FFF.Player.exe`，不内嵌、不随包 `LICENSE.txt`、`NOTICE`、本文件或 `licenses/`；程序“关于”页提供本仓主页链接（<https://github.com/Lake1059/FFF_Project>），许可入口以仓库主页与 `LICENSING.md` 为准。散装本体包仍按上一款保留上述文件。
-- 当前树 `runtime/` 的实测构建串含 `--enable-gpl --enable-version3 --enable-libx264 --enable-libx265 --enable-libfdk-aac`，其中六个 DLL 还含 `--enable-nonfree`。`third_party/ffmpeg/` 有 `COPYING.LGPLv2.1`、`COPYING.LGPLv3`；GPLv2/GPLv3 原文已补到 `licenses/GPL-2.0-only.txt`、`licenses/GPL-3.0-only.txt`（完整运行时包适用）。
+- 默认 `发布3FP.ps1` 生成本体包，并在暂存目录校验 FFmpeg 的 `av*.dll` 和 `sw*.dll`；不得把开发输出目录 `bin` 直接当发布包分发。
+- 单文件形态（`tools/发布3FP单文件.ps1`）按项目分发策略只产出 `FFF.Player.exe`。AI 字幕扩展包所需的许可文本随资源内嵌。程序“关于”页提供本仓主页链接（<https://github.com/Lake1059/FFF_Project>），许可入口以仓库主页与 `LICENSING.md` 为准。散装本体包仍按上一款保留上述文件。
+- 开发用 FFmpeg DLL 位于 `third_party/ffmpeg/bin/x64/`。完整运行时包以实际 DLL 的构建选项为准，发布脚本会检查 `--enable-nonfree`。`third_party/ffmpeg/` 有 `COPYING.LGPLv2.1`、`COPYING.LGPLv3`；GPLv2/GPLv3 原文已补到 `licenses/GPL-2.0-only.txt`、`licenses/GPL-3.0-only.txt`（完整运行时包适用）。
 - 因此：**本体包不得出现 FFmpeg DLL**；若另行分发完整运行时包，必须补齐对应 GPL/LGPL 文本、源码获取方式，并按 `--enable-nonfree` 构建的实际条件处理。`FFF_ALLOW_NONFREE=1` 只能作为显式承担后果的放行，不是正常公开 Release 开关。
 - FFmpeg 许可说明：<https://ffmpeg.org/legal.html>。
 
@@ -86,7 +86,7 @@ NuGet 包的完整许可文本按其 `.nuspec`/包内 LICENSE 保留；汇总与
 
 ## 6. AI 字幕（宿主内建 + 运行期第三方包）
 
-AI 字幕的宿主侧集成代码（控制器、菜单、设置页、worker 启动与状态机）是第一方代码，按本仓 MIT 随本体分发；第三方模型与运行时由 `FFF.Player` 的下载器按用户选择从公开官方源组装，不随本体 exe 固定分发。组件与许可见 `tools/ai-subtitles/AI字幕包声明.txt`，许可原文在 `licenses/ai/`。这组许可均为宽松许可，允许嵌入/复制/再分发，但必须保留版权、许可、NOTICE 与来源说明。
+AI 字幕的宿主侧集成代码（控制器、菜单、设置页、worker 启动与状态机）是第一方代码，按本仓 MIT 随本体分发；第三方模型与运行时由 `FFF.Player` 的下载器按用户选择从公开官方源组装，不随本体 exe 固定分发。组件与许可见 `FFF.Player/AI字幕/Worker/AI字幕包声明.txt`，许可原文在 `licenses/ai/`。这组许可均为宽松许可，允许嵌入/复制/再分发，但必须保留版权、许可、NOTICE 与来源说明。
 
 | 组件 | 许可 | 来源 |
 |---|---|---|
@@ -109,7 +109,7 @@ AI 字幕的宿主侧集成代码（控制器、菜单、设置页、worker 启�
 - `licenses/`：本仓第一方收集的第三方许可原文（abseil、libiamf、OAR/OBR、pffft、FLAC、opus、GPLv2/GPLv3、LGPL-2.1、LGPL 版权归属、LakeUI GPL-3.0、vcpkg 回退文本、NuGet 汇总等）。
 - `licenses/ai/`：AI 扩展包用的 Apache-2.0、MIT、BSD-3-Clause、PSF-2.0 与 AI NOTICE。
 - `tools/发布3FP.ps1` **已实现**在打包时收集 `ASSETS.md`、`NOTICE`、本文件、`LICENSING.md`、`licenses/`（含 `LIBASS-SOURCE-OFFER.md`、`NUGET-NOTICES.md`、`LakeUI-COMMERCIAL-AUTHORIZATION-NOTICE.md`）与 vcpkg/LakeUI 文本；缺件默认中止，`FFF_ALLOW_MISSING_LICENSES=1` 只能显式放行。
-- 默认 `发布3FP.ps1` 生成本体包，不检查/不复制 FFmpeg；`-IncludeExternalRuntime` 才生成完整运行时包，并按 FFmpeg 自身许可单独扫描。
+- 默认 `发布3FP.ps1` 生成本体包。`-IncludeExternalRuntime` 检查并复制 FFmpeg 运行库，生成完整运行时包。
 
 ## 8. 仍未闭环（不是“已合规”）
 

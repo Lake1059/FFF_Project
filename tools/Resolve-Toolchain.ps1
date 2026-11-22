@@ -267,15 +267,20 @@ function Assert-ProductFrameworkPair {
         [Parameter(Mandatory = $true)] [string]$OutputDirectory,
         [Parameter(Mandatory = $true)] [string]$Product,
         [Parameter(Mandatory = $true)] [string]$Framework,
-        [switch]$AllowMismatch
+        [switch]$AllowMismatch,
+        [switch]$CheckOnly
     )
 
     # Record the full TFM, but compare the .NET runtime version: a Windows SDK
     # target version affects API projections, not the shared .NET runtime version.
-    $manifest = Join-Path $OutputDirectory ".product-frameworks.txt"
+    # Keep framework bookkeeping beside the output directory so it cannot enter the package.
+    $manifest = "$OutputDirectory.product-frameworks.txt"
+    $previousManifest = if (Test-Path -LiteralPath $manifest -PathType Leaf) { $manifest } else {
+        Join-Path $OutputDirectory ".product-frameworks.txt"
+    }
     $entries = @{}
-    if (Test-Path -LiteralPath $manifest -PathType Leaf) {
-        foreach ($line in @(Get-Content -LiteralPath $manifest -ErrorAction SilentlyContinue)) {
+    if (Test-Path -LiteralPath $previousManifest -PathType Leaf) {
+        foreach ($line in Get-Content -LiteralPath $previousManifest) {
             $parts = $line.Split("=", 2)
             if ($parts.Count -eq 2 -and -not [string]::IsNullOrWhiteSpace($parts[0])) {
                 $entries[$parts[0].Trim()] = $parts[1].Trim()
@@ -295,9 +300,9 @@ function Assert-ProductFrameworkPair {
         if (-not $AllowMismatch) { throw $message }
         Write-Warning $message
     }
+    if ($CheckOnly) { return }
     $entries[$Product] = $Framework
     $lines = @($entries.Keys | Sort-Object | ForEach-Object { "$_=$($entries[$_])" })
-    New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     [IO.File]::WriteAllLines($manifest, $lines, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "Product framework recorded: $Product=$Framework ($manifest)"
 }

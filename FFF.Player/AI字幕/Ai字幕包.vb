@@ -127,11 +127,10 @@ Friend NotInheritable Class Ai字幕包
     End Function
 
     Friend Shared Function 生效Worker脚本(包 As Ai字幕包配置) As String
-        Dim 随播放器部署 = Path.Combine(AppContext.BaseDirectory, "ai-subtitles", "asr_worker.py")
-        ' 官方包使用播放器随附的协议实现，让已经安装好的模型和运行时同步获得修复。
-        If File.Exists(随播放器部署) AndAlso 有归属哨兵(包.包目录) AndAlso
-            String.Equals(包.Worker脚本, 解析路径(包.包目录, "asr_worker.py"), StringComparison.OrdinalIgnoreCase) Then
-            Return 随播放器部署
+        ' 官方包优先使用当前宿主附带的 worker；第三方清单仍使用自己的脚本。
+        If String.Equals(包.Worker脚本, 解析路径(包.包目录, "asr_worker.py"), StringComparison.OrdinalIgnoreCase) AndAlso
+            有归属哨兵(包.包目录) Then
+            Return If(Ai字幕包资源.取得内置Worker(), 包.Worker脚本)
         End If
         Return 包.Worker脚本
     End Function
@@ -545,7 +544,7 @@ End Class
 ''' 反过来给一张混着 CUDA / DirectML / OpenVINO 的大列表，就是 llama.cpp 时代的老
 ''' 毛病：挑了个名字，最后要在日志里才知道到底跑了哪。
 '''
-''' 后端标识**就是**引擎（tools/ai-subtitles/qwen3_ort.py）BACKENDS 的键，宿主原样
+''' 后端标识**就是**引擎（FFF.Player/AI字幕/Worker/qwen3_ort.py）BACKENDS 的键，宿主原样
 ''' 塞进 worker 的 --device，中间不再翻译一层 —— 多一层映射就多一处漂移。
 ''' 设备维只用来过滤「后端下拉列出哪些项」，不参与传参；所以设置里存两个字段而不是
 ''' 一个合成串（合成串要解析，脏值就会解析成别的档）。

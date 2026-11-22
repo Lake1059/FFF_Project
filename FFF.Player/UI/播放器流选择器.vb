@@ -27,8 +27,8 @@ Friend NotInheritable Class 播放器流选择器
         Dim 字体名称 = If(String.IsNullOrWhiteSpace(fontName), "Microsoft YaHei UI", fontName.Trim())
         Dim 旧菜单字体 = 菜单.MenuFont
         Dim 旧说明字体 = 菜单.DescriptionFont
-        Dim 新菜单字体 = 创建菜单字体(字体名称, 旧菜单字体, 9.0F)
-        Dim 新说明字体 = 创建菜单字体(字体名称, 旧说明字体, 8.0F)
+        Dim 新菜单字体 = 字体控制.创建菜单字体(字体名称, 旧菜单字体, 9.0F)
+        Dim 新说明字体 = 字体控制.创建菜单字体(字体名称, 旧说明字体, 8.0F)
         菜单.MenuFont = 新菜单字体
         菜单.DescriptionFont = 新说明字体
         If 旧菜单字体 IsNot Nothing AndAlso Not ReferenceEquals(旧菜单字体, 新菜单字体) Then 旧菜单字体.Dispose()
@@ -299,19 +299,6 @@ Friend NotInheritable Class 播放器流选择器
         Next
         Return New Size(maxContentWidth + padL + padR + border * 2 + 1,
                         height + padB + border + 1)
-    End Function
-
-    Private Shared Function 创建菜单字体(字体名称 As String, 当前字体 As Font, 默认字号 As Single) As Font
-        Dim 字号 = If(当前字体 Is Nothing, 默认字号, 当前字体.SizeInPoints)
-        Try
-            Return New Font(字体名称, 字号, FontStyle.Regular, GraphicsUnit.Point)
-        Catch
-            Try
-                Return New Font("Microsoft YaHei UI", 字号, FontStyle.Regular, GraphicsUnit.Point)
-            Catch
-                Return New Font(SystemFonts.DefaultFont.FontFamily, 字号, FontStyle.Regular, GraphicsUnit.Point)
-            End Try
-        End Try
     End Function
 
     Public Sub Dispose() Implements IDisposable.Dispose

@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <Import Project="..\tools\DiscRuntime.props" />
+  <Import Project="..\build-config\FFmpegRuntime.props" />
+  <Import Project="..\build-config\DiscRuntime.props" />
   <PropertyGroup>
       <OutputType>WinExe</OutputType>
       <NetTFM Condition="'$(NetTFM)' == ''">net11.0-windows10.0.19041.0</NetTFM>
@@ -30,8 +31,6 @@
       <ApplicationIcon>ICO.ico</ApplicationIcon>
 
       <PlayerApiVersion>20</PlayerApiVersion>
-      <PlayerNoticeRoot>..</PlayerNoticeRoot>
-      <PlayerNoticeRoot Condition="Exists('..\licenses\NOTICE')">..\licenses</PlayerNoticeRoot>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
@@ -53,66 +52,19 @@
     <InternalsVisibleTo Include="FFF.Player.Tests" />
   </ItemGroup>
 
-  <!-- AI 字幕包下载器要能就地生成扩展包：worker 脚本随播放器部署（包契约要求
-       worker 在包根，下载器从程序目录的这份复制过去）。源=kernel/tools 的维护版。
-       qwen3_ort.py 同理：NPU 包的三段 OpenVINO 推理实现，须与 worker 同级（docs/157）。 -->
+  <!-- Python is still external. Only the scripts and notices needed to assemble
+       an AI subtitle pack are built into the host (including single-file publish). -->
   <ItemGroup>
-    <None Include="..\tools\ai-subtitles\asr_worker.py">
-      <Link>ai-subtitles\asr_worker.py</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\tools\ai-subtitles\qwen3_ort.py">
-      <Link>ai-subtitles\qwen3_ort.py</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\tools\ai-subtitles\AI字幕包声明.txt">
-      <Link>ai-subtitles\AI字幕包声明.txt</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\LICENSE.txt">
-      <Link>LICENSE.txt</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="$(PlayerNoticeRoot)\NOTICE">
-      <Link>NOTICE</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="$(PlayerNoticeRoot)\LICENSING.md">
-      <Link>LICENSING.md</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="$(PlayerNoticeRoot)\THIRD-PARTY-NOTICES.md">
-      <Link>THIRD-PARTY-NOTICES.md</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <!-- AI 扩展包第三方许可原文：随播放器部署到 licenses\ai，下载器再复制进包。 -->
-    <None Include="..\licenses\ai\Apache-2.0.txt">
-      <Link>licenses\ai\Apache-2.0.txt</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\licenses\ai\MIT.txt">
-      <Link>licenses\ai\MIT.txt</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\licenses\ai\BSD-3-Clause.txt">
-      <Link>licenses\ai\BSD-3-Clause.txt</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\licenses\ai\PSF-2.0.txt">
-      <Link>licenses\ai\PSF-2.0.txt</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\licenses\ai\NOTICE.txt">
-      <Link>licenses\ai\NOTICE.txt</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
-
-  <!-- 窗口图标运行时从 ICO.ico 加载（Form1.Designer.vb），随 exe 部署。 -->
-  <ItemGroup>
-    <None Include="ICO.ico">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
+    <EmbeddedResource Include="AI字幕\Worker\*.py;AI字幕\Worker\*.txt"
+                      WithCulture="false" LogicalName="AiSubtitles.Pack/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\LICENSE.txt"
+                      WithCulture="false" LogicalName="AiSubtitles.Pack/LICENSE.txt" />
+    <EmbeddedResource Include="..\licenses\ai\*.txt"
+                      WithCulture="false" LogicalName="AiSubtitles.Pack/licenses/ai/%(Filename)%(Extension)" />
+    <None Update="ICO.ico" CopyToOutputDirectory="PreserveNewest" Condition="'$(PublishSingleFile)' != 'true'" />
+    <None Include="..\LICENSE.txt;..\licenses\NOTICE;..\licenses\LICENSING.md;..\licenses\THIRD-PARTY-NOTICES.md"
+          Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest"
+          Condition="'$(PublishSingleFile)' != 'true'" />
   </ItemGroup>
 
   <ItemGroup>
@@ -122,13 +74,8 @@
     <LibRawRuntime Include="..\third_party\libraw\bin\x64\libraw.dll" Condition="Exists('..\third_party\libraw\bin\x64\libraw.dll')" />
     <!-- Side-lane helper is optional: when it has not been built the kernel
          degrades to the in-process lane, so an empty item must not break build. -->
-    <PrefetchHelper Include="..\build\FFF.PrefetchHost.exe" Condition="Exists('..\build\FFF.PrefetchHost.exe')" />
-    <DevelopmentRuntime Include="..\runtime\avcodec*.dll" />
-    <DevelopmentRuntime Include="..\runtime\avformat*.dll" />
-    <DevelopmentRuntime Include="..\runtime\avutil*.dll" />
-    <DevelopmentRuntime Include="..\runtime\swresample*.dll" />
-    <DevelopmentRuntime Include="..\runtime\swscale*.dll" />
-    <DevelopmentRuntime Include="..\runtime\avfilter*.dll" />
+    <PrefetchHelper Include="..\build\$(Configuration)\FFF.PrefetchHost.exe"
+                    Condition="'$(PublishSingleFile)' != 'true' and Exists('..\build\$(Configuration)\FFF.PrefetchHost.exe')" />
     <LibassMainRuntime Include="$(LibassRuntimeDirectory)\ass-*.dll" />
     <LibassRuntime Include="@(LibassMainRuntime);$(LibassRuntimeDirectory)\brotlicommon.dll;$(LibassRuntimeDirectory)\brotlidec.dll;$(LibassRuntimeDirectory)\fribidi-0.dll;$(LibassRuntimeDirectory)\harfbuzz.dll" />
     <LibassRuntime Include="$(LibassRuntimeDirectory)\bz2d.dll;$(LibassRuntimeDirectory)\freetyped.dll;$(LibassRuntimeDirectory)\libpng16d.dll;$(LibassRuntimeDirectory)\zd.dll" Condition="'$(Configuration)' == 'Debug'" />
@@ -174,23 +121,15 @@
     </ProjectReference>
   </ItemGroup>
 
-  <ItemGroup Condition="'$(PublishSingleFile)' == 'true'">
-    <Content Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" Link="FFF.Native.dll">
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
-    </Content>
-    <!-- 单文件发布只产出一个 exe：libraw.dll 必须随 bundle 一起自解压，
-         否则 FFF.Native.dll 被解到临时目录后找不到同目录的 libraw.dll。 -->
-    <Content Include="@(LibRawRuntime)" Link="%(Filename)%(Extension)" Condition="'@(LibRawRuntime)' != ''">
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
-    </Content>
-    <Content Include="@(LibassRuntime)" Link="%(Filename)%(Extension)">
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
-    </Content>
+  <ItemGroup>
+    <PlayerBundledNative Include="@(ProductNative);@(LibRawRuntime);@(LibassRuntime)" />
+    <PlayerNativeRuntime Include="@(PlayerBundledNative);@(PrefetchHelper)" />
+    <PlayerNativeRuntime Include="@(DevelopmentRuntime)" Condition="'$(BodyOnly)' != 'true' and '$(PublishSingleFile)' != 'true'" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <Content Include="@(PlayerBundledNative)" Link="%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 
   <Target Name="VerifyPlayerApiVersion" BeforeTargets="Build;Publish">
     <PropertyGroup>
@@ -293,38 +232,40 @@
     <Error Condition="'$(_KernelConfigFields)' != '$(_HostConfigFields)'" Text="发布中止：配置结构体字段数不一致（内核 $(_KernelConfigFields) vs 宿主 $(_HostConfigFields)）。宿主会因 size 不足被 FFF3FP_Create 拒绝。请在 原生播放器接口.vb 的 原生播放器配置 末尾补齐缺失字段。" />
   </Target>
 
-  <Target Name="CopyNativeRuntime" AfterTargets="Build">
-    <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
+  <Target Name="VerifyPlayerNativeRuntime" BeforeTargets="CopyNativeRuntime;CopyProductNativeToPublish;ComputeFilesToPublish">
+    <Error Condition="!Exists('@(ProductNative)')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
     <Error Condition="'@(LibassMainRuntime)' == ''" Text="缺少 libass 运行库；请先运行 tools\准备Libass.ps1。" />
-    <Error Condition="'@(LibRawRuntime)' == ''" Text="缺少 LibRaw 运行库 ..\third_party\libraw\bin\x64\libraw.dll —— RAW 内核依赖它，不能构建出缺件产物。" />
-    <ItemGroup>
-      <!-- BodyOnly=true（本体单文件/本体包）只带内核 + libraw + libass，
-           不把外部 FFmpeg runtime 复制进 bin，否则 IncludeNativeLibrariesForSelfExtract
-           会把六个 av*.dll 一起吞进单文件本体。 -->
-      <_NativeRuntimeFiles Include="@(ProductNative);@(LibRawRuntime);@(LibassRuntime);@(PrefetchHelper)" />
-      <_NativeRuntimeFiles Include="@(DevelopmentRuntime)" Condition="'$(BodyOnly)' != 'true'" />
-    </ItemGroup>
-    <Copy SourceFiles="@(_NativeRuntimeFiles)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Error Condition="'@(LibRawRuntime)' == ''" Text="缺少 LibRaw 运行库；请先运行 tools\准备LibRaw.ps1。" />
   </Target>
 
+  <Target Name="CopyNativeRuntime" AfterTargets="Build">
+    <Copy SourceFiles="@(PlayerNativeRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
 
   <Target Name="CopyProductNativeToPublish" AfterTargets="Publish" Condition="'$(PublishSingleFile)' != 'true'">
-    <Error Condition="'@(DevelopmentRuntime)' == '' and '$(BodyOnly)' != 'true'" Text="找不到 FFmpeg 运行库（..\runtime\av*.dll 等）。请确认 kernel\runtime 已就位，或使用 BodyOnly=true 生成本体包。" />
-    <Error Condition="'@(LibRawRuntime)' == ''" Text="找不到 LibRaw 运行库（..\third_party\libraw\bin\x64\libraw.dll）—— 散装发布目录必须与 FFF.Native.dll 同目录携带它。" />
-    <ItemGroup>
-      <!-- BodyOnly=true 时只复制本体与 libass/libraw 栈，不把外部 FFmpeg runtime 带进 publish。 -->
-      <_ProductPublishFiles Include="@(ProductNative);@(LibRawRuntime);@(LibassRuntime);@(PrefetchHelper)" />
-      <_ProductPublishFiles Include="@(DevelopmentRuntime)" Condition="'$(BodyOnly)' != 'true'" />
-    </ItemGroup>
-    <Copy SourceFiles="@(_ProductPublishFiles)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(PlayerNativeRuntime)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
   </Target>
 
-
-  <Target Name="RejectPrivateColorExtensionPublish" AfterTargets="ComputeFilesToPublish" BeforeTargets="GenerateSingleFileBundle">
+  <Target Name="RejectPrivateColorExtensionPublish" AfterTargets="ComputeFilesToPublish">
     <ItemGroup>
-      <PrivateColorExtension Include="@(ResolvedFileToPublish)" Condition="$([System.String]::Copy('%(Filename)').Contains('ExternalModule')) Or $([System.String]::Copy('%(Filename)').EndsWith('.Test'))" />
+      <PrivateColorExtension Include="@(ResolvedFileToPublish)"
+          Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)', '(?i)(ExternalModule.*|\.Test)\.dll$'))" />
     </ItemGroup>
-    <Error Condition="'@(PrivateColorExtension)' != ''" Text="外部模块 DLL 不得发布或打包；外部模块是可选外部件。" />
+    <Error Condition="'@(PrivateColorExtension)' != ''" Text="外部模块 DLL 不得发布或打包：@(PrivateColorExtension)" />
+  </Target>
+
+  <!-- Check the SDK's final bundle inputs, not the reused build output or the
+       directory left after publish. Native DLLs must have bundle-root paths. -->
+  <Target Name="VerifyPlayerBundle" BeforeTargets="GenerateSingleFileBundle" DependsOnTargets="PrepareForBundle"
+          Condition="'$(PublishSingleFile)' == 'true'">
+    <ItemGroup>
+      <_UnexpectedBundleDll Include="@(FilesToBundle)"
+          Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(FilesToBundle.Filename)%(FilesToBundle.Extension)', '(?i)^((av(codec|filter|format|util)|sw(resample|scale))(-\d+)?\.dll|FFF\.PrefetchHost\.exe)$'))" />
+      <_BundledPath Include="@(FilesToBundle->'%(RelativePath)')" />
+      <_MissingBundlePath Include="@(PlayerBundledNative->'%(Filename)%(Extension)');@(DiscRuntime->'%(Filename)%(Extension)')" Exclude="@(_BundledPath)" />
+    </ItemGroup>
+    <Error Condition="'@(_UnexpectedBundleDll)' != ''" Text="单文件不得内置外部 FFmpeg 或预取助手：@(_UnexpectedBundleDll)" />
+    <Error Condition="'@(_MissingBundlePath)' != ''" Text="单文件缺少原生 DLL：@(_MissingBundlePath)" />
   </Target>
 
   <!-- WinRT 投影配对护栏：随包托管件引用投影件时必须同时存在。 -->
@@ -368,15 +309,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Remove="UI\播放器画面控件.vb" />
-    <EmbeddedResource Remove="F:\Git\3F_Project\tools\..\third_party\vcpkg_installed\x64-windows\share\libbluray\copyright" />
-    <EmbeddedResource Remove="F:\Git\3F_Project\tools\..\third_party\vcpkg_installed\x64-windows\share\libiconv\copyright" />
-    <EmbeddedResource Remove="F:\Git\3F_Project\tools\..\third_party\vcpkg_installed\x64-windows\share\libudfread\copyright" />
-    <EmbeddedResource Remove="F:\Git\3F_Project\tools\..\third_party\vcpkg_installed\x64-windows\share\libxml2\copyright" />
-    <Compile Include="UI\播放器画面控件.vb">
+    <Compile Update="UI\播放器画面控件.vb">
       <SubType>Code</SubType>
     </Compile>
-    <Content Include="ICO.ico" />
     <Compile Update="My Project\Application.Designer.vb">
       <DesignTime>True</DesignTime>
       <AutoGen>True</AutoGen>

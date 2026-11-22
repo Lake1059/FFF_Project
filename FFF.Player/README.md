@@ -47,6 +47,6 @@
 
 ## 发布与依赖
 
-正式发布可使用 tools/发布3FP单文件.ps1。FFF.Native 和 libass 运行库随单文件释放；FFmpeg Shared DLL 保持外置，由用户提供同一 ABI 的整套 DLL。3FP 自有代码采用 MIT，第三方依赖保留各自许可证和发布义务。
+正式发布可使用 `tools/发布3FP单文件.ps1`。单文件自解压 FFF.Native、LibRaw、libass 和光盘库。AI 字幕扩展包脚本与许可文本由播放器写入扩展包目录。FFmpeg Shared DLL 保持外置，由用户提供同一 ABI 的整套 DLL。3FP 自有代码采用 MIT，第三方依赖保留各自许可证和发布义务。
 
 FFF.Player.Tests 保留可编译的测试接入点，不是产品运行时依赖。API 版本和配置结构体大小在构建或发布阶段由项目目标自动校验。

@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "3FP/Core/PlaybackTimeMath.h"
 #include "3FP/Core/Fmp4FragmentScanner.h"
 
 #include "Shared/Ffmpeg/SharedFileInput.h"
@@ -96,21 +97,8 @@ std::int64_t SaturatingToInt64(std::uint64_t value) noexcept {
 // 有符号饱和加减：病态容器字段（近 2^63 的 tfdt 基准、极端 trun 时长）经
 // av_rescale_q 得到不可表示结果时直接相减/相加会有符号溢出（UB，G.INT.OVERFLOW.001）。
 // 饱和化把时间轴极端值裁到 int64 边界，后果仅为一条 fragment 时间轴记录失真。
-std::int64_t SaturatingAddInt64(std::int64_t left, std::int64_t right) noexcept {
-    if (right >= 0 && left > std::numeric_limits<std::int64_t>::max() - right)
-        return std::numeric_limits<std::int64_t>::max();
-    if (right < 0 && left < std::numeric_limits<std::int64_t>::min() - right)
-        return std::numeric_limits<std::int64_t>::min();
-    return left + right;
-}
-
-std::int64_t SaturatingSubInt64(std::int64_t left, std::int64_t right) noexcept {
-    if (right >= 0 && left < std::numeric_limits<std::int64_t>::min() + right)
-        return std::numeric_limits<std::int64_t>::min();
-    if (right < 0 && left > std::numeric_limits<std::int64_t>::max() + right)
-        return std::numeric_limits<std::int64_t>::max();
-    return left - right;
-}
+using FFFPlaybackTime::SaturatingAddInt64;
+using FFFPlaybackTime::SaturatingSubInt64;
 
 // 返回文件大小；无法确定（<0 或 0）时返回 0（0 不是合法的绝对终点，调用方据此判失败）。
 std::uint64_t ResolveEndOfFile(AVIOContext* io) noexcept {

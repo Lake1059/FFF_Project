@@ -20,7 +20,7 @@
 第三方组件的再许可。
 
 第三方清单、版本、来源和分发边界见 `THIRD-PARTY-NOTICES.md`；许可原文在
-`licenses/`。AI 字幕扩展包另见 `tools/ai-subtitles/AI字幕包声明.txt` 与
+`licenses/`。AI 字幕扩展包另见 `FFF.Player/AI字幕/Worker/AI字幕包声明.txt` 与
 `licenses/ai/`。
 
 AI 字幕的宿主侧集成代码（控制器、菜单、设置页、worker 启动与状态机）属于第一方
@@ -32,7 +32,7 @@ BSD-3-Clause、PSF-2.0）条件下使用。该组许可允许嵌入、复制与�
 ## 3. 分发时的归属规则
 
 1. 散装本体包保留 `LICENSE.txt`、`NOTICE`、`THIRD-PARTY-NOTICES.md`、`ASSETS.md` 与 `licenses/`。
-   单文件形态是明确例外：`发布3FP单文件.ps1` 只输出 `FFF.Player.exe`，不内嵌上述文件；单文件通过“关于”页的“项目主页 / GitHub”链接指向本仓主页，许可入口以仓库主页和本文件为准。
+   单文件形态是明确例外：`发布3FP单文件.ps1` 只输出 `FFF.Player.exe`。AI 字幕扩展包所需的许可文本随资源内嵌，单文件通过“关于”页的“项目主页 / GitHub”链接指向本仓主页，许可入口以仓库主页和本文件为准。
 2. `发布3FP.ps1` 默认生成本体包，不包含外部 FFmpeg runtime；完整运行时包需显式
    `-IncludeExternalRuntime`，并按各自许可补齐文本、版权声明和源码获取方式。
    不要把“本体不内嵌 FFmpeg”当成“完整包无需处理”。

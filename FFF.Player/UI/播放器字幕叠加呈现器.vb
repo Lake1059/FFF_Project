@@ -20,7 +20,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     Private ReadOnly SRT测量缓存 As New Dictionary(Of 字幕行测量键, 字幕行测量结果)()
     Private ReadOnly SUP绘制项 As New List(Of SUP字幕绘制项)(1)
     Private ReadOnly 图层命令 As New List(Of 定时文字命令)()
-    Private ReadOnly 命令对象池 As New List(Of 定时文字命令)(128)
+    Private ReadOnly 命令对象池 As New 定时文字命令池(128)
     Private ReadOnly 刷新计时器 As LakeUI.PrecisionTimer
     Private Const 当前目标帧率 As Integer = 60
     Private 图层序号 As ULong
@@ -38,7 +38,6 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
         End Get
     End Property
     Private 上次图层签名 As ULong
-    Private 命令对象使用数 As Integer
     Private 缓存客户区宽度 As Integer
     Private 缓存客户区高度 As Integer
     Private 缓存DPI位元 As Integer
@@ -175,7 +174,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
                 AI字幕绘制行.Clear()
                 SRT测量缓存.Clear()
                 图层命令.Clear()
-                命令对象池.Clear()
+                命令对象池.清空()
                 Volatile.Write(上一拍有AI字幕标志, 0)
             End If
             Dim 快照 = 快照提供器()
@@ -260,7 +259,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
                          Optional 时间轴代次 As ULong = 0,
                          Optional 显示AI字幕 As Boolean = True) As IReadOnlyList(Of 定时文字命令)
         图层命令.Clear()
-        命令对象使用数 = 0
+        命令对象池.开始帧()
         Dim 无视频 = 视频宽度 = 0 OrElse 视频高度 = 0
         If Volatile.Read(已释放标志) <> 0 OrElse (无视频 AndAlso Not AI字幕已选中) OrElse
             客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return 图层命令
@@ -729,18 +728,6 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
         Next
     End Sub
 
-    Private Function 取得复用命令() As 定时文字命令
-        Dim result As 定时文字命令
-        If 命令对象使用数 < 命令对象池.Count Then
-            result = 命令对象池(命令对象使用数)
-        Else
-            result = New 定时文字命令()
-            命令对象池.Add(result)
-        End If
-        命令对象使用数 += 1
-        Return result
-    End Function
-
     Private Sub 添加文字命令(文本 As String, 字体 As String, 字号 As Single,
                           区域 As RectangleF, 前景色ARGB As UInteger,
                           描边色ARGB As UInteger, 描边宽度 As Single,
@@ -750,7 +737,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
                           Optional 阴影色ARGB As UInteger = 0,
                           Optional 阴影X偏移 As Single = 0,
                           Optional 阴影Y偏移 As Single = 0)
-        Dim command = 取得复用命令()
+        Dim command = 命令对象池.取得()
         command.设置文字(文本, 字体, 字号, 区域, 前景色ARGB, 描边色ARGB, 描边宽度,
                      水平对齐, 垂直对齐, 样式, 内容标识,
                      阴影色ARGB, 阴影X偏移, 阴影Y偏移)
@@ -760,7 +747,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     Private Sub 添加位图命令(像素BGRA As Byte(), 位图宽度 As Integer, 位图高度 As Integer,
                            行跨度 As Integer, 区域 As RectangleF, 内容标识 As ULong,
                            Optional HDR高亮 As Boolean = False)
-        Dim command = 取得复用命令()
+        Dim command = 命令对象池.取得()
         command.设置位图(像素BGRA, 位图宽度, 位图高度, 行跨度, 区域, 内容标识, HDR高亮)
         图层命令.Add(command)
     End Sub

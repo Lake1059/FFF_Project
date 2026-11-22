@@ -39,11 +39,14 @@ Friend Module Program
             If String.Equals(项, "--smtc-runtime-smoke", StringComparison.OrdinalIgnoreCase) Then
                 Return 系统媒体会话冒烟.运行()
             End If
+            If String.Equals(项, "--ai-pack-resource-regression", StringComparison.OrdinalIgnoreCase) Then
+                Return 内置资源回归.运行()
+            End If
             If String.Equals(项, "--first-frame-event-regression", StringComparison.OrdinalIgnoreCase) Then
                 Return 首帧事件解析回归.运行()
             End If
         Next
-        Console.WriteLine("可用套件：--bluray-drop-regression  --security-regression  --360-identification-regression  --pr57-fixes-regression  --settings-designer-regression  --content-size-regression  --module-abi-regression  --raw-file-association-regression  --bluetooth-latency-regression  --playback-progress-regression  --smtc-mapping-regression  --smtc-runtime-smoke  --first-frame-event-regression")
+        Console.WriteLine("可用套件：--bluray-drop-regression  --security-regression  --360-identification-regression  --pr57-fixes-regression  --settings-designer-regression  --content-size-regression  --module-abi-regression  --raw-file-association-regression  --bluetooth-latency-regression  --playback-progress-regression  --smtc-mapping-regression  --smtc-runtime-smoke  --first-frame-event-regression  --ai-pack-resource-regression")
         Return 2
     End Function
 End Module

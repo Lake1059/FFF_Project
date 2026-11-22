@@ -27,7 +27,7 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     dll = args.dll or root / "FFF.Native/x64/Release/FFF.Native.dll"
-    directories = [root / "runtime", root / "third_party/vcpkg_installed/x64-windows/bin", dll.parent]
+    directories = [root / "third_party/ffmpeg/bin/x64", root / "third_party/vcpkg_installed/x64-windows/bin", dll.parent]
     handles = [os.add_dll_directory(str(path)) for path in directories]
     os.environ["FFF3FP_PREFETCH_HOST"] = "0"
     with tempfile.TemporaryDirectory(prefix="3fp-security-media-") as folder:

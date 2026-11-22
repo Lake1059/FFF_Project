@@ -9,18 +9,19 @@
 .\tools\构建3FP.ps1 -Configuration Release
 .\tools\发布3FP单文件.ps1
 .\tools\发布3FR单文件.ps1
-.\tools\发布3FP.ps1                         # 包含运行依赖的文件夹
+.\tools\发布3FP.ps1                         # 散装本体包
+.\tools\发布3FP.ps1 -IncludeExternalRuntime # 散装包 + 外部 FFmpeg DLL
 ```
 
-构建和发布会检查当前配置所需的 FFmpeg、LibRaw、libass、光盘库及 IAMF 文件，仅在缺失时调用准备脚本。修复 FFmpeg 开发文件时优先复用 `runtime` 中的现有 DLL。
+构建和发布会检查当前配置所需的 FFmpeg、LibRaw、libass、光盘库及 IAMF 文件，仅在缺失时调用准备脚本。FFmpeg DLL 统一位于 `third_party/ffmpeg/bin/x64`。`准备FFmpeg.ps1` 优先复用本地整套 DLL 来生成导入库；首次下载或 `-ForceDownload` 使用 LGPL shared 变体，可能减少编解码能力，应把变体更换作为单独决策。已有旧布局的工作区可把根目录 `runtime` 中的六个 FFmpeg DLL 移到这个位置。
 
-直接用 Visual Studio 或 MSBuild 构建时，可以先运行 `准备LibRaw.ps1`。它校验固定版本的源码压缩包，构建启用 `USE_X3FTOOLS` 的 x64 动态库，并把头文件、导入库和 DLL 放在 `third_party\libraw`。
+`准备Libass.ps1` 根据同一份 vcpkg 清单准备 libass 和光盘库。`准备LibRaw.ps1` 将启用 `USE_X3FTOOLS` 的 x64 动态库暂存到 `third_party/libraw`。构建配置和 vcpkg overlay 位于 `build-config`。
 
-发布脚本会额外构建 `FFF.PrefetchHost.vcxproj`（前后预加载小助手，独立进程）。它由 `FFF.Player.vbproj` 的 `@(PrefetchHelper)` 随 `dotnet publish` 拷入交付目录；内核 `EnsureHelper()` 按自身 DLL 所在目录查找它；缺件时**只**降级 helper 侧的 WARM/PROBE，进程内静图解码线与静图缓存命中不受影响，播放不受影响。单文件发布形态（`发布3FP单文件.ps1`）按白名单只保留 `FFF.Player.exe`，不会携带这枚伴随 exe。
+3FP 散装发布会携带 `FFF.PrefetchHost.exe` 独立预取进程。单文件发布只生成 `FFF.Player.exe`，由它展开必要的原生 DLL。两种发布形态都可从内置资源组装 AI 字幕扩展包。框架版本记录保存在输出目录旁，用于检查同一目录中 3FP 和 3FR 的 .NET 运行时版本。
 
 - `-SkipDependencyPreparation`：只检查本地原生依赖，缺件直接报错，不调用准备脚本；`dotnet` 仍按正常流程还原 NuGet 包。
 - `-SkipIamf`：显式禁用 IAMF，传入 `HaveLibiamf=false`；默认要求完整 IAMF 依赖。
-- `-SkipTests`：构建时跳过测试工程的编译。目前 `FFF.Player.Tests` 尚未注册测试项，编译成功不代表运行回归测试。
+- `-SkipTests`：构建时跳过测试工程的编译。`FFF.Player.Tests` 通过命令行选项运行不同的回归套件。
 - `-NetTFM`：覆盖宿主的默认 Windows 目标框架，需与 LakeUI 项目兼容。
 - 发布脚本的 `-OutputDirectory`：指定输出目录；相对路径以仓库根目录为准。
 

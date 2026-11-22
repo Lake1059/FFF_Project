@@ -25,8 +25,7 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
     ' 重载。外层包装会让 TryCast 落空、丢掉粗体/斜体，所以缓存必须做进那个类型内部。
 
     Private ReadOnly 图层命令 As New List(Of 定时文字命令)()
-    Private ReadOnly 命令对象池 As New List(Of 定时文字命令)(128)
-    Private 命令对象使用数 As Integer
+    Private ReadOnly 命令对象池 As New 定时文字命令池(128)
     Private 图层序号 As ULong
 
     Private 缓存客户区宽度 As Integer
@@ -277,7 +276,7 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
     Private Function 生成命令(客户区大小 As Size, 视频宽度 As UInteger, 视频高度 As UInteger,
                           播放位置 As TimeSpan, DPI As Single) As IReadOnlyList(Of 定时文字命令)
         图层命令.Clear()
-        命令对象使用数 = 0
+        命令对象池.开始帧()
         If Volatile.Read(已释放标志) <> 0 OrElse 视频宽度 = 0 OrElse 视频高度 = 0 OrElse
             客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return 图层命令
         Dim DPI缩放 = DPI / 96.0F
@@ -354,18 +353,6 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
 
     ' ── 命令复用 ────────────────────────────────────────────────────────────
 
-    Private Function 取得复用命令() As 定时文字命令
-        Dim result As 定时文字命令
-        If 命令对象使用数 < 命令对象池.Count Then
-            result = 命令对象池(命令对象使用数)
-        Else
-            result = New 定时文字命令()
-            命令对象池.Add(result)
-        End If
-        命令对象使用数 += 1
-        Return result
-    End Function
-
     Private Sub 添加文字命令(文本 As String, 字体 As String, 字号 As Single,
                           区域 As RectangleF, 前景色ARGB As UInteger,
                           描边色ARGB As UInteger, 描边宽度 As Single,
@@ -375,7 +362,7 @@ Friend NotInheritable Class 播放器弹幕图层呈现器
                           Optional 阴影色ARGB As UInteger = 0,
                           Optional 阴影X偏移 As Single = 0,
                           Optional 阴影Y偏移 As Single = 0)
-        Dim command = 取得复用命令()
+        Dim command = 命令对象池.取得()
         command.设置文字(文本, 字体, 字号, 区域, 前景色ARGB, 描边色ARGB, 描边宽度,
                      水平对齐, 垂直对齐, 样式, 内容标识,
                      阴影色ARGB, 阴影X偏移, 阴影Y偏移)

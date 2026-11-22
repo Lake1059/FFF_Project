@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "Shared/Windows/Utf8.h"
 #include "3FP/Core/AvifIlocShim.h"
 
 #include <algorithm>
@@ -19,18 +20,6 @@ bool IsKnownBrand(const char brand[4]) {
         if (std::memcmp(brand, candidate, 4) == 0) return true;
     }
     return false;
-}
-
-std::wstring FromUtf8(const char* value) {
-    if (value == nullptr || *value == '\0') return {};
-    const auto length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        value, -1, nullptr, 0);
-    if (length <= 1) return {};
-    std::wstring result(static_cast<std::size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1,
-        result.data(), length);
-    result.resize(static_cast<std::size_t>(length - 1));
-    return result;
 }
 
 }  // namespace
@@ -486,7 +475,7 @@ bool AvifIlocShim::ReadAndRepair(const char* pathUtf8, const std::int64_t maxByt
     bytes.clear();
     detail.clear();
     if (pathUtf8 == nullptr || *pathUtf8 == '\0' || maxBytes <= 0) { detail = "The path is not usable."; return false; }
-    const auto path = FromUtf8(pathUtf8);
+    const auto path = FFFText::FromUtf8(pathUtf8);
     if (path.empty()) { detail = "The path is not valid UTF-8."; return false; }
     const auto file = CreateFileW(path.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,

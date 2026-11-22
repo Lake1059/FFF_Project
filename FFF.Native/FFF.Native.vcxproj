@@ -157,6 +157,8 @@
     <ClInclude Include="3FP\Core\PlaybackPerformancePolicy.h" />
     <ClInclude Include="3FP\Core\DecodeDeviceSelection.h" />
     <ClInclude Include="3FP\Core\MediaText.h" />
+    <ClInclude Include="3FP\Core\PlaybackTimeMath.h" />
+    <ClInclude Include="Shared\Windows\Utf8.h" />
     <ClInclude Include="3FP\Subtitle\SubtitleProbe.h" />
     <ClInclude Include="3FP\Render\NvidiaVideoExtensions.h" />
     <ClInclude Include="3FP\Render\CudaD3D11Interop.h" />

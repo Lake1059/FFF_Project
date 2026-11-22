@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "Shared/Windows/Utf8.h"
 #include "3FP/Core/AvifItemProbe.h"
 
 #include <algorithm>
@@ -51,18 +52,6 @@ bool FindBox(const std::uint8_t* data, const std::int64_t from, const std::int64
         position = end;
     }
     return false;
-}
-
-std::wstring FromUtf8(const char* value) {
-    if (value == nullptr || *value == '\0') return {};
-    const auto length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        value, -1, nullptr, 0);
-    if (length <= 1) return {};
-    std::wstring result(static_cast<std::size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1,
-        result.data(), length);
-    result.resize(static_cast<std::size_t>(length - 1));
-    return result;
 }
 
 struct Property {
@@ -515,7 +504,7 @@ bool AvifItemProbe::Read(const char* pathUtf8, const std::int64_t maxBytes,
         detail = "The probe path or byte limit is not usable.";
         return false;
     }
-    const auto path = FromUtf8(pathUtf8);
+    const auto path = FFFText::FromUtf8(pathUtf8);
     if (path.empty()) {
         detail = "The probe path is not valid UTF-8.";
         return false;
