@@ -37,6 +37,9 @@
     <Filter Include="3FP\Render">
       <UniqueIdentifier>{30b1418b-c1cb-42e7-90d2-40de01e186a4}</UniqueIdentifier>
     </Filter>
+    <Filter Include="3FP\Render\D3D12">
+      <UniqueIdentifier>{f3c34856-d627-40fc-bdb8-35a8cccbca20}</UniqueIdentifier>
+    </Filter>
     <Filter Include="3FP\Subtitle">
       <UniqueIdentifier>{78d6dce7-80fe-42ce-b996-4c12d76f4e5a}</UniqueIdentifier>
     </Filter>
@@ -99,6 +102,21 @@
     <ClInclude Include="3FP\Render\VideoRenderer.h">
       <Filter>3FP\Render</Filter>
     </ClInclude>
+    <ClInclude Include="3FP\Render\VideoShaderSettings.h">
+      <Filter>3FP\Render</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Render\TimedTextStrokeStyle.h">
+      <Filter>3FP\Render</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Render\D3D12\D3D12VideoRenderer.h">
+      <Filter>3FP\Render\D3D12</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Render\D3D12\BackdropBlurBytecode.h">
+      <Filter>3FP\Render\D3D12</Filter>
+    </ClInclude>
+    <None Include="3FP\Render\D3D12\BackdropBlur.hlsl">
+      <Filter>3FP\Render\D3D12</Filter>
+    </None>
     <ClInclude Include="3FR\Api\FFF.Native.Api.h">
       <Filter>3FR\Api</Filter>
     </ClInclude>
@@ -181,6 +199,9 @@
     </ClCompile>
     <ClCompile Include="3FP\Render\VideoRenderer.cpp">
       <Filter>3FP\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Render\D3D12\D3D12VideoRenderer.cpp">
+      <Filter>3FP\Render\D3D12</Filter>
     </ClCompile>
     <ClCompile Include="3FR\Api\NativeApi.cpp">
       <Filter>3FR\Api</Filter>

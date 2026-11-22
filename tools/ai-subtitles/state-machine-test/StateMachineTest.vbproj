@@ -16,8 +16,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>StateMachineTest</RootNamespace>
     <StartupObject>StateMachineTest.Program</StartupObject>
-    <OptionStrict>On</OptionStrict>
-    <OptionExplicit>On</OptionExplicit>
     <OptionInfer>On</OptionInfer>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>

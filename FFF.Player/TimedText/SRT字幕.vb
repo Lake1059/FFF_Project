@@ -83,6 +83,45 @@ Public NotInheritable Class SRT字幕样式
     Public Property 底部对齐方式 As Integer
     Public Property 尺寸缩放方式 As Integer
 
+    Friend Function 计算缩放(区域 As 视频显示区域, 画布宽度 As Single, 画布高度 As Single) As Single
+        Select Case 尺寸缩放方式
+            Case 1 : Return If(画布宽度 > 0, 画布宽度 / 1920.0F, 区域.缩放系数)
+            Case 2 : Return If(画布高度 > 0, 画布高度 / 基准视频高度, 区域.缩放系数)
+            Case 3 : Return 1.0F
+            Case Else : Return 区域.高度像素 / 基准视频高度
+        End Select
+    End Function
+
+    Friend Function 计算底部位置(区域 As 视频显示区域, 画布高度 As Single, 缩放 As Single) As Single
+        Dim 底边 = If(底部对齐方式 = 1 AndAlso 画布高度 > 0, 画布高度, 区域.Y像素 + 区域.高度像素)
+        Return 底边 - 底部边距 * 缩放
+    End Function
+
+    Friend Function 格式化行(文本 As String, 语言 As 字幕语言类型, 行索引 As Integer,
+                          缩放 As Single, Optional 顶部对齐 As Boolean = False) As SRT字幕绘制行
+        Dim 回退字体 = If(Not 顶部对齐 AndAlso 语言 = 字幕语言类型.拉丁, 拉丁字体, 中文字体)
+        Dim 字体 As String, 基准字号 As Single, 样式 As FontStyle, 颜色 As UInteger
+        Select Case If(顶部对齐, 0, 行索引)
+            Case 0
+                字体 = 第一行字体
+                基准字号 = 第一行字号.GetValueOrDefault(字号)
+                样式 = 第一行字体样式.GetValueOrDefault(FontStyle.Regular)
+                颜色 = 第一行颜色ARGB.GetValueOrDefault(颜色ARGB)
+            Case 1
+                字体 = 第二行字体
+                基准字号 = 第二行字号.GetValueOrDefault(字号)
+                样式 = 第二行字体样式.GetValueOrDefault(FontStyle.Regular)
+                颜色 = 第二行颜色ARGB.GetValueOrDefault(颜色ARGB)
+            Case Else
+                字体 = 其他行字体
+                基准字号 = 其他行字号.GetValueOrDefault(字号)
+                样式 = 其他行字体样式.GetValueOrDefault(FontStyle.Regular)
+                颜色 = 颜色ARGB
+        End Select
+        Return New SRT字幕绘制行(文本, If(String.IsNullOrWhiteSpace(字体), 回退字体, 字体), 基准字号 * 缩放,
+                                颜色, 描边颜色ARGB, 描边宽度 * 缩放, 阴影颜色ARGB, 阴影偏移 * 缩放, 样式)
+    End Function
+
     Friend Sub 验证()
         If String.IsNullOrWhiteSpace(中文字体) Then Throw New ArgumentException("中文字体不能为空。", NameOf(中文字体))
         If String.IsNullOrWhiteSpace(拉丁字体) Then Throw New ArgumentException("拉丁字体不能为空。", NameOf(拉丁字体))
@@ -198,41 +237,13 @@ Public NotInheritable Class SRT字幕帧生成器
         当前样式.验证()
         活动提示.Clear()
         文档.索引.查询时刻(时间, 活动提示)
-        Dim scale As Single
-        Select Case 当前样式.尺寸缩放方式
-            Case 1 : scale = If(画布宽度 > 0, 画布宽度 / 1920.0F, 区域.缩放系数)
-            Case 2 : scale = If(画布高度 > 0, 画布高度 / 当前样式.基准视频高度, 区域.缩放系数)
-            Case 3 : scale = 1.0F
-            Case Else : scale = 区域.高度像素 / 当前样式.基准视频高度
-        End Select
+        Dim scale = 当前样式.计算缩放(区域, 画布宽度, 画布高度)
         For Each cue In 活动提示
             Dim 顶部对齐 = 顶部提示.Contains(cue) OrElse cue.ASS对齐 >= 7
             Dim lines As New List(Of SRT字幕绘制行)(cue.行.Count)
             For lineIndex = 0 To cue.行.Count - 1
                 Dim line = cue.行(lineIndex)
-                Dim fallbackFont = If(Not 顶部对齐 AndAlso line.语言 = 字幕语言类型.拉丁,
-                                      当前样式.拉丁字体, 当前样式.中文字体)
-                Dim fontName As String, fontSize As Single, fontStyle As FontStyle, color As UInteger
-                Select Case If(顶部对齐, 0, lineIndex)
-                    Case 0
-                        fontName = If(String.IsNullOrWhiteSpace(当前样式.第一行字体), fallbackFont, 当前样式.第一行字体)
-                        fontSize = 当前样式.第一行字号.GetValueOrDefault(当前样式.字号)
-                        fontStyle = 当前样式.第一行字体样式.GetValueOrDefault(FontStyle.Regular)
-                        color = 当前样式.第一行颜色ARGB.GetValueOrDefault(当前样式.颜色ARGB)
-                    Case 1
-                        fontName = If(String.IsNullOrWhiteSpace(当前样式.第二行字体), fallbackFont, 当前样式.第二行字体)
-                        fontSize = 当前样式.第二行字号.GetValueOrDefault(当前样式.字号)
-                        fontStyle = 当前样式.第二行字体样式.GetValueOrDefault(FontStyle.Regular)
-                        color = 当前样式.第二行颜色ARGB.GetValueOrDefault(当前样式.颜色ARGB)
-                    Case Else
-                        fontName = If(String.IsNullOrWhiteSpace(当前样式.其他行字体), fallbackFont, 当前样式.其他行字体)
-                        fontSize = 当前样式.其他行字号.GetValueOrDefault(当前样式.字号)
-                        fontStyle = 当前样式.其他行字体样式.GetValueOrDefault(FontStyle.Regular)
-                        color = 当前样式.颜色ARGB
-                End Select
-                lines.Add(New SRT字幕绘制行(line.文本, fontName, fontSize * scale,
-                                             color, 当前样式.描边颜色ARGB, 当前样式.描边宽度 * scale,
-                                             当前样式.阴影颜色ARGB, 当前样式.阴影偏移 * scale, fontStyle))
+                lines.Add(当前样式.格式化行(line.文本, line.语言, lineIndex, scale, 顶部对齐))
             Next
             Dim 使用定位 = cue.定位X.HasValue AndAlso cue.定位Y.HasValue
             Dim x = 区域.X像素 + 区域.宽度像素 * 0.5F
@@ -244,9 +255,7 @@ Public NotInheritable Class SRT字幕帧生成器
                 y = 区域.Y像素 + cue.定位Y.Value / ASS默认画布高度 * 区域.高度像素
                 取得ASS对齐(cue.ASS对齐, 水平对齐, 垂直对齐)
             Else
-                Dim bottom = If(当前样式.底部对齐方式 = 1 AndAlso 画布高度 > 0,
-                                画布高度, 区域.Y像素 + 区域.高度像素)
-                y = bottom - 当前样式.底部边距 * scale
+                y = 当前样式.计算底部位置(区域, 画布高度, scale)
                 If 顶部对齐 Then
                     垂直对齐 = 定时文字对齐.靠前
                     y = 区域.Y像素 + 当前样式.底部边距 * scale
@@ -421,7 +430,7 @@ Public NotInheritable Class SRT字幕解析器
         Next
     End Sub
 
-    Private Shared Function 检测语言(value As String) As 字幕语言类型
+    Friend Shared Function 检测语言(value As String) As 字幕语言类型
         Dim hasCjk = False
         Dim hasLatin = False
         For Each rune In value.EnumerateRunes()

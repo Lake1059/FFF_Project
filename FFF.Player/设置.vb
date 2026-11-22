@@ -12,6 +12,8 @@ Public Class 设置
     ' 打开媒体时按内容原始像素 1:1 设置窗口；内容达到显示器工作区时最大化。
     ' 默认 False：不改变既有“初始画面尺寸”行为，旧设置文件缺键也落到 False。
     Public Property 内容原始尺寸模式 As Boolean = False
+    Public Property 单独打开视频尺寸 As 视频打开尺寸策略
+    Public Property 播放列表打开视频尺寸 As 视频打开尺寸策略
     ' 解码方式默认 GPU（2026-10-21 起，此前为 CPU）。理由：硬解不通时内核自己会回退 CPU
     ' （打开时试解首包 + 播放中失败即切换，均已实机验证），用户侧没有"选错就放不出"的风险，
     ' 而默认 CPU 等于让大多数机器白白放弃硬解。主界面「解码」按钮仍可随时翻转，并写回本项。
@@ -37,9 +39,15 @@ Public Class 设置
     ' 音频源码直通三态（0=自动 1=强制 2=关，默认自动）。直通要接管整条轨并抢 WASAPI
     ' 独占，与单声道/变速/床渲染天然互斥——内核侧直接拒绝，UI 侧在这里联动提示。
     Public Property 音频直通选项 As Integer = 0
+    ' 对解码后的 PCM 进行实时响度调整。
+    Public Property 启用音频响度标准化 As Boolean = False
+    Friend Const 最低音频目标响度 As Integer = -24
+    Friend Const 最高音频目标响度 As Integer = -12
+    Public Property 音频目标响度 As Integer = -18
+    Public Property 音频动态范围 As Integer = 7
     ' 蓝牙低延迟：仅在默认输出被识别为已连接蓝牙端点时生效。额外提前量为正 = 音频更早，
     ' 用于吸收设备型号/固件与屏幕响应差异；0 表示只按协议区间中值补偿。
-    Public Property 蓝牙低延迟模式 As Boolean = False
+    Public Property 蓝牙低延迟模式 As Boolean = True
     Public Property 蓝牙额外提前量毫秒 As Integer = 0
     ' 0=自动（按协议区间），1..9 对应 A2DP/LE codec 手动覆盖。Windows 用户态不暴露
     ' 活动 codec，所以这里不做“自动识别 codec”的假承诺；用户按耳机/驱动实际编码选择。
@@ -52,27 +60,8 @@ Public Class 设置
     ' 也是 libplacebo / mpv 的 PL_COLOR_SDR_WHITE 取值。不是面板峰值。
     Public Property HDR映射SDR参考亮度 As Integer = 203
 
-    ' ── LakeUI 呈现引擎性能选项（2026-11-11，自 3FUI/FFmpegFreeUI 同款移植）──────
-    ' 3FUI 把 LakeUI.GlobalOptions 的引擎旋钮全部暴露成设置项，这里是同一套：
-    ' 字段存「档位下标」，档位数值表在 应用图形性能设置() 上方；设置页下拉的
-    ' Items 顺序必须与档位表逐位对齐（两处都有一致性注释）。
-    ' 默认值铁律：与移植前宿主行为逐位一致 —— 文字渲染原是 Form1_Load 顶部
-    ' 硬编码 Outline（档 3），其余取 LakeUI 引擎默认（PerPrimitive / SSAA OFF /
-    ' GPU 128MiB / 画刷 256 / 字体 128 / CPU 96MiB / 脏区 8 区+60% / 分桶 64px /
-    ' 动画 60FPS）。老设置文件没有这些键 → 反序列化留默认 → 升级不改观感。
-    Public Property LakeUI抗锯齿 As Integer = 0
-    Public Property LakeUI文字渲染 As Integer = 3
-    Public Property LakeUI超采样 As Integer = 0
-    Public Property LakeUI_GPU缓存档 As Integer = 2
-    Public Property LakeUI_画刷缓存档 As Integer = 6
-    Public Property LakeUI_字体缓存档 As Integer = 3
-    Public Property LakeUI_CPU缓存档 As Integer = 3
-    Public Property LakeUI_背景脏区档 As Integer = 4
-    Public Property LakeUI_SSAA分桶档 As Integer = 1
-    ' 界面控件动画帧率：0 = 不限制（LakeUI 语义，会尽量快地请求重绘）。
-    ' 经 字体控制 的控件树遍历反射下发到每个控件的 AnimationFPS；3FUI 的注释是
-    ' 「帧率属性的更新与字体更新绑定」——这里同样搭字体管道的车，不另设遍历。
-    Public Property LakeUI动画帧率 As Integer = 60
+    Public Property 视频渲染引擎 As 播放器渲染引擎 = 播放器渲染引擎.Direct3D11
+    Public Property LakeUI渲染引擎 As LakeUI.RenderBackend = LakeUI.RenderBackend.Direct3D11
 
     Public Property 音量百分比 As Integer = 100
 
@@ -97,6 +86,8 @@ Public Class 设置
     Public Property 字幕底部间距 As Integer = 10
     Public Property 字幕底部对齐方式 As Integer = 0
     Public Property 字幕尺寸缩放方式 As Integer = 0
+    Friend Const 默认ASS替代字体 As String = "Arial"
+    Public Property ASS替代字体 As String = 默认ASS替代字体
 
     Public Property 弹幕已启用 As Boolean = True
     Public Property 弹幕字体 As String = "Microsoft YaHei UI"
@@ -201,30 +192,17 @@ Public Class 设置
     ' 与设备是一对：换设备后旧后端可能不在新设备的候选表里，读取时由
     ' Ai字幕推理档.规整后端 一次性归位，不落盘（用户一动下拉就写回正确值）。
     Public Property Ai字幕推理后端 As String = ""
-    ' 字幕语言："" / "auto" = 不筛（默认，模型按窗自判）；其余取 Ai字幕语言 的
-    ' 标识（zh/en/zh-en），配合 仅所选语言 形成过滤器，见 Ai字幕语言 类文档。
-    ' ⚠ 换到 sherpa-onnx 之后这条降级为**无操作**：该运行时只返回文本、不返回语言
-    ' 标签，所以 worker 报上来的 language 恒为空，下面那个闸门也就压不住任何东西。
+    ' 指定的语言用于过滤可识别的语种标签；自动模式显示所有语种。
     Public Property Ai字幕语言 As String = ""
-    ' 只显示所选语言：模型自报语言与所选不符时该窗不上屏。能不能真判取决于**最终
-    ' 选中的后端**（llama 与 OpenVINO 自报语言，闸门真生效；sherpa 只有 text，闸门
-    ' 形同虚设），见 Ai字幕推理档.后端自报语言 —— 别再写"恒不触发"，那是旧事实。
-    ' 保留字段是为了不丢老设置，界面按"暂不可用"置灰显示。
+    ' 保留老配置字段。新版根据语言下拉统一决定是否过滤。
     Public Property Ai字幕仅所选语言 As Boolean = False
-    ' 双语对照："" = 关闭；"zh-en" = 中文在上、English 在下；"en-zh" 反之。
-    ' 它不改变识别本身，只让 worker 在同一窗里多译一行 —— 用的是同一个 llama-server
-    ' 的原始 /completion 续写，不额外加载模型、不改任何权重。
-    ' ONNX（NPU / Intel）那条腿是纯 ASR，没有文本生成能力，worker 会降级成单语并报
-    ' 一条 warning，不静默。
+    ' 自动翻译中文的显示顺序：空串关闭，zh-above 在原文上方，zh-below 在原文下方。
+    ' 仅支持文本生成的扩展包可用。旧档的 zh-en 和 en-zh 归到 zh-above。
     Public Property Ai字幕双语 As String = ""
     ' 模型档位："" = 跟包清单的默认档（清单 model 字段指向的目录）；其余取清单 models 里的键。
     ' 它属于启动期参数 —— 换档就是换一套 ONNX 权重，必须重启 worker 才生效。
     Public Property Ai字幕模型档 As String = ""
-    ' 字幕驻留偏移（秒）：[-3, +3]，0 = 不偏移。作用在状态机守卫判定的播放位置上
-    '（播放位置 − 偏移）：正值 = 每行多驻留一会儿（慢读者、或下一句来得慢时不等空窗），
-    ' 负值 = 提前收起（嫌字幕拖音）。**它不能让一行字幕更早出现** —— 出现时机由推理
-    ' 窗口与推理耗时决定（批式 ASR 的物理下限），要更贴脸请调小窗口/步长（设置页
-    ' 「节奏」预置）。纯显示侧：改它不重启 worker。
+    ' 字幕时间偏移（秒）：[-3, +3]。正值晚一些显示与收起，负值提前，纯呈现参数。
     Public Property Ai字幕字幕偏移秒 As Double = 0
 
 
@@ -232,16 +210,7 @@ Public Class 设置
     ' 三条理由写在这儿，免得以后有人"顺手改成 True"：
     '   ① 它要拉一个独立 Python 进程 + llama-server 子进程，还要一块显卡显存；
     
-    Public Property 关联常见视频 As Boolean = False
-    Public Property 关联不常见视频 As Boolean = False
-    Public Property 关联老旧视频 As Boolean = False
-    Public Property 关联常见音频 As Boolean = False
-    Public Property 关联不常见音频 As Boolean = False
-    Public Property 关联老旧音频 As Boolean = False
-    Public Property 关联常见图片 As Boolean = False
-    Public Property 关联不常见图片 As Boolean = False
-    Public Property 关联老旧图片 As Boolean = False
-    Public Property 关联相机RAW As Boolean = False
+    Public Property 关联扩展名 As String() = Array.Empty(Of String)()
 
     Public Property SP_窗口边框颜色_A As Integer = 255
     Public Property SP_窗口边框颜色_R As Integer = Color.Gray.R
@@ -309,6 +278,8 @@ Public Class 设置
     Public Sub 规范化()
         字体 = 规范字体(字体, SystemFonts.DefaultFont.FontFamily.Name)
         初始画面尺寸选项 = Math.Clamp(初始画面尺寸选项, 0, 9)
+        If Not [Enum].IsDefined(单独打开视频尺寸) Then 单独打开视频尺寸 = 视频打开尺寸策略.跟随界面设置
+        If Not [Enum].IsDefined(播放列表打开视频尺寸) Then 播放列表打开视频尺寸 = 视频打开尺寸策略.跟随界面设置
         自定义初始画面宽度 = Math.Clamp(自定义初始画面宽度, 320, 7680)
         自定义初始画面高度 = Math.Clamp(自定义初始画面高度, 180, 4320)
         ' 非法值归一到默认档（GPU）：与字段默认值保持一致，破损/越界的配置不会把用户按在 CPU 上。
@@ -325,24 +296,15 @@ Public Class 设置
         If 双耳策略选项 = CInt(双耳策略.自动) Then 双耳策略形态 = 0
         If 双耳策略形态 < 0 OrElse 双耳策略形态 > 10 Then 双耳策略形态 = 0
         If 音频直通选项 < 0 OrElse 音频直通选项 > 2 Then 音频直通选项 = 0
+        音频目标响度 = Math.Clamp(音频目标响度, 最低音频目标响度, 最高音频目标响度)
+        音频动态范围 = Math.Clamp(音频动态范围, 1, 10)
         蓝牙额外提前量毫秒 = Math.Clamp(蓝牙额外提前量毫秒, -100, 100)
         蓝牙音频编码 = Math.Clamp(蓝牙音频编码, 0, 9)
         HDR峰值亮度选项 = Math.Clamp(HDR峰值亮度选项, 0, 9)
         If HDR峰值亮度 < 0 OrElse HDR峰值亮度 > 10000 Then HDR峰值亮度 = 0
         HDR映射SDR参考亮度 = Math.Clamp(HDR映射SDR参考亮度, 1, 500)
-        ' LakeUI 图形性能档：越界/脏数据归默认档（与字段默认一致），不把用户按在极端档上。
-        LakeUI抗锯齿 = Math.Clamp(LakeUI抗锯齿, 0, 1)
-        LakeUI文字渲染 = Math.Clamp(LakeUI文字渲染, 0, 3)
-        LakeUI超采样 = Math.Clamp(LakeUI超采样, 0, 3)
-        LakeUI_GPU缓存档 = Math.Clamp(LakeUI_GPU缓存档, 0, 8)
-        LakeUI_画刷缓存档 = Math.Clamp(LakeUI_画刷缓存档, 0, 8)
-        LakeUI_字体缓存档 = Math.Clamp(LakeUI_字体缓存档, 0, 6)
-        LakeUI_CPU缓存档 = Math.Clamp(LakeUI_CPU缓存档, 0, 8)
-        LakeUI_背景脏区档 = Math.Clamp(LakeUI_背景脏区档, 0, 8)
-        LakeUI_SSAA分桶档 = Math.Clamp(LakeUI_SSAA分桶档, 0, 8)
-        ' 帧率只认档位表里的离散值；手改 json 塞进来的脏值（如 75）归默认 60，
-        ' 否则反射下发会把所有控件的动画节拍设成一个没对齐过的数。
-        If Array.IndexOf(LakeUI动画帧率档, LakeUI动画帧率) < 0 Then LakeUI动画帧率 = 60
+        If Not [Enum].IsDefined(视频渲染引擎) Then 视频渲染引擎 = 播放器渲染引擎.Direct3D11
+        If Not [Enum].IsDefined(LakeUI渲染引擎) Then LakeUI渲染引擎 = LakeUI.RenderBackend.Direct3D11
         音量百分比 = Math.Clamp(音量百分比, 0, 100)
         If Not Single.IsFinite(视角360视场角) Then 视角360视场角 = 90.0F
         视角360视场角 = Math.Clamp(视角360视场角, 30.0F, 90.0F)
@@ -356,6 +318,7 @@ Public Class 设置
         字幕底部间距 = Math.Clamp(字幕底部间距, 0, 50)
         字幕底部对齐方式 = Math.Clamp(字幕底部对齐方式, 0, 1)
         字幕尺寸缩放方式 = Math.Clamp(字幕尺寸缩放方式, 0, 3)
+        ASS替代字体 = 规范字体(ASS替代字体, 默认ASS替代字体)
         弹幕字体 = 规范字体(弹幕字体, "Microsoft YaHei UI")
         If Not Single.IsFinite(弹幕字号) OrElse 弹幕字号 < 8 OrElse 弹幕字号 > 200 Then 弹幕字号 = 36
         弹幕字体样式 = 规范字体样式(弹幕字体样式)
@@ -467,62 +430,6 @@ Public Class 设置
         Dim 合成Alpha = CUInt((原始Alpha * CULng(限定不透明度) + 127UL) \ 255UL)
         Return (value And &HFFFFFFUI) Or (合成Alpha << 24)
     End Function
-
-    ' ── LakeUI 图形性能档位表（与 Form设置_设备与性能 各下拉 Items 逐位对齐）──────
-    ' 首档 0 = 「禁用缓存」：3FUI 在 2026-07 两次迭代后把禁用档排到最前（省内存模式
-    ' 首选），这里沿用。GPU/CPU 预算按进程总量约束（LakeUI GlobalOptions 注释原文：
-    ' 「可见合成表面是必要显示工作集，只参与计量并促使其他缓存收缩，不会为满足预算而销毁」）。
-    Private Shared ReadOnly LakeUI_GPU缓存预算选项MiB As Long() =
-        {0L, 64L, 128L, 256L, 512L, 1024L, 2048L, 4096L, 8192L}
-    Private Shared ReadOnly LakeUI_CPU缓存预算选项MiB As Long() =
-        {0L, 32L, 64L, 96L, 128L, 256L, 512L, 1024L, 2048L}
-    Private Shared ReadOnly LakeUI_缓存条目选项 As Integer() =
-        {0, 8, 16, 32, 64, 128, 256, 512, 1024}
-    Private Shared ReadOnly LakeUI_字体缓存条目选项 As Integer() =
-        {0, 32, 64, 128, 256, 512, 1024}
-    Private Shared ReadOnly LakeUI_背景脏区数量选项 As Integer() =
-        {4, 4, 4, 8, 8, 8, 16, 16, 16}
-    Private Shared ReadOnly LakeUI_背景脏区完整重采阈值选项 As Single() =
-        {0.4F, 0.6F, 0.8F, 0.4F, 0.6F, 0.8F, 0.4F, 0.6F, 0.8F}
-    Private Shared ReadOnly LakeUI_SSAA分桶粒度选项 As Integer() =
-        {32, 64, 96, 128, 192, 256, 384, 512, 1024}
-    Friend Shared ReadOnly LakeUI动画帧率档 As Integer() = {0, 15, 30, 45, 50, 60, 90, 120}
-
-    ''' <summary>
-    ''' 把 LakeUI 图形性能选项写入 LakeUI.GlobalOptions。启动时（设置加载后）与
-    ''' 设置页改动时各调一次；GlobalOptions 是进程级静态，写入即对后续绘制生效，
-    ''' 不需要触发全量重绘（HDR 那种"改档位要预热曲线表"的路径宿主不暴露）。
-    ''' </summary>
-    Public Shared Sub 应用图形性能设置()
-        LakeUI.GlobalOptions.GlobalAntialiasMode = If(实例对象.LakeUI抗锯齿 = 1,
-            Vortice.Direct2D1.AntialiasMode.Aliased, Vortice.Direct2D1.AntialiasMode.PerPrimitive)
-        Select Case 实例对象.LakeUI文字渲染
-            Case 0 : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.ClearType
-            Case 1 : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Grayscale
-            Case 2 : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Aliased
-            Case Else : LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Outline
-        End Select
-        Select Case 实例对象.LakeUI超采样
-            Case 1 : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.x2
-            Case 2 : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.x3
-            Case 3 : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.x4
-            Case Else : LakeUI.GlobalOptions.GlobalSSAA = LakeUI.GlobalOptions.SuperSamplingScaleEnum.OFF
-        End Select
-        LakeUI.GlobalOptions.GpuCacheBudgetBytes =
-            LakeUI_GPU缓存预算选项MiB(Math.Clamp(实例对象.LakeUI_GPU缓存档, 0, LakeUI_GPU缓存预算选项MiB.Length - 1)) * 1024L * 1024L
-        LakeUI.GlobalOptions.CpuCacheBudgetBytes =
-            LakeUI_CPU缓存预算选项MiB(Math.Clamp(实例对象.LakeUI_CPU缓存档, 0, LakeUI_CPU缓存预算选项MiB.Length - 1)) * 1024L * 1024L
-        LakeUI.GlobalOptions.BrushCacheLimit =
-            LakeUI_缓存条目选项(Math.Clamp(实例对象.LakeUI_画刷缓存档, 0, LakeUI_缓存条目选项.Length - 1))
-        Dim 字体上限 = LakeUI_字体缓存条目选项(Math.Clamp(实例对象.LakeUI_字体缓存档, 0, LakeUI_字体缓存条目选项.Length - 1))
-        LakeUI.GlobalOptions.TextFormatCacheLimit = 字体上限
-        LakeUI.GlobalOptions.FontResolveCacheLimit = 字体上限
-        ' 【P2-9】LakeUI 的 BackgroundDirtyRectLimit / BackgroundFullDirtyRatio / SsaaBucketSize
-        ' 在本 LakeUI 构建里除定义外零读取方（E2：GlobalOptions.vb:142 / :194 / :198），写进去
-        ' 也不会被任何绘制路径读到 ⇒ 三处写入已删（连同 脏区索引）。档位数组（LakeUI_背景脏区
-        ' 数量选项 / LakeUI_背景脏区完整重采阈值选项 / LakeUI_SSAA分桶粒度选项）、设置属性与
-        ' 设置页控件全部保留：这三个旋钮当前是 no-op，删设置还是补实现待 P3-13 决定。
-    End Sub
 
     Public Shared Sub 应用SP个性化设置()
         If Not SP_UnLock OrElse Form1.当前主窗体 Is Nothing Then Return

@@ -95,6 +95,12 @@ int CreateDecodeHardwareDevice(AVBufferRef** const output, const int deviceType,
     const std::int32_t adapterIndex, PlayerVideoRenderer& renderer) noexcept {
     *output = nullptr;
     const auto type = static_cast<AVHWDeviceType>(deviceType);
+    if (type == AV_HWDEVICE_TYPE_D3D12VA) {
+        // Bind to the exact rendering device, not just a matching adapter.
+        // An explicit different adapter is considered by the legacy decode routes.
+        if (adapterIndex >= 0 && adapterIndex != renderer.DeviceAdapterIndex()) return AVERROR(ENODEV);
+        return renderer.CreateD3D12HardwareDeviceContext(output) == FFFResult::Success ? 0 : AVERROR(ENODEV);
+    }
     if (type == AV_HWDEVICE_TYPE_D3D11VA) {
         const auto shared = renderer.CreateD3D11HardwareDeviceContext(output);
         if (adapterIndex < 0) return shared == FFFResult::Success ? 0 : AVERROR(ENODEV);
@@ -133,6 +139,8 @@ int CreateDecodeHardwareDevice(AVBufferRef** const output, const int deviceType,
 
 bool CanPresentHardwareFrameDirectly(const AVFrame* const frame,
     PlayerVideoRenderer& renderer) noexcept {
-    if (!frame || frame->format != AV_PIX_FMT_D3D11 || !frame->data[0]) return false;
+    if (!frame || !frame->data[0]) return false;
+    if (frame->format == AV_PIX_FMT_D3D12) return renderer.CanImportD3D12Frame(frame);
+    if (frame->format != AV_PIX_FMT_D3D11) return false;
     return renderer.OwnsD3D11Texture(reinterpret_cast<ID3D11Texture2D*>(frame->data[0]));
 }

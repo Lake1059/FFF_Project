@@ -105,6 +105,12 @@ public:
     // a gap the renderer's own silence-insertion path bridges. Session-level preference:
     // DoClose does not clear it, so it is expected to survive Close/Open.
     FFFResult SetAudioDelay(std::int64_t delay100ns) noexcept;
+    FFFResult SetVideoRenderBackend(std::uint32_t backend) noexcept;
+    std::uint32_t ActiveVideoRenderBackend() const noexcept { return videoRenderer_.ActiveRenderBackend(); }
+    void GetVideoRenderDiagnostics(FFF3FPVideoRenderDiagnostics& status) noexcept {
+        videoRenderer_.GetVideoRenderDiagnostics(status);
+    }
+    FFFResult SetAudioLoudness(bool enabled, int targetLufs, int rangeLu) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
     FFFResult SetPresentConfig(bool enableTearing) noexcept;
@@ -181,6 +187,7 @@ public:
         std::int64_t position100ns) noexcept;
     FFFResult ReadAudioTap(void* dst, std::uint32_t capacity,
         FFF3FPAudioTapBlock* block) const noexcept;
+    bool IsAudioTapReadingAhead() const noexcept;
     FFFResult GetAudioTapStats(FFF3FPAudioTapStats* stats) const noexcept;
     FFFResult SetTimedTextLayer(const FFF3FPTimedTextLayer& layer) noexcept;
     // RTX Video Super Resolution opt-in switch (default Off).
@@ -227,6 +234,9 @@ public:
         std::uint32_t dstFloatCount, std::uint32_t* outputBitDepth) noexcept;
     FFFResult GetAudioPeakLevels(FFF3FPAudioPeakLevels& levels) const noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept;
+    void GetSubtitlePresentation(std::uint64_t& sequence, std::int64_t& qpc) noexcept {
+        videoRenderer_.GetSubtitlePresentation(sequence, qpc);
+    }
     FFFResult GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcept;
     FFFResult GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept;
     // Render-target diagnostics
@@ -282,6 +292,7 @@ private:
     // everything it has buffered. Called on the worker thread from open and
     // seek; a no-op while no tap is installed.
     void NoteTapGeneration() noexcept;
+    void UpdateAsrReadAhead() noexcept;
     void NotifyAudioRestart() noexcept;
     void NotifyVideoRecovery() noexcept;
     FFFResult ScheduleStep(StepOperation operation, std::int32_t direction) noexcept;
@@ -799,6 +810,9 @@ private:
     std::string externalAudioPath_;
     PlayerAudioRuntimeState audioRuntimeState_;
     std::unique_ptr<PlayerWasapiRenderer> audioRenderer_;
+    bool loudnessEnabled_ = false;
+    int loudnessTargetLufs_ = -18;
+    int loudnessRangeLu_ = 7;
     bool monoAudio_ = false; // Worker-owned; survives seeks, media and endpoint changes.
     // Binaural bed-render policy. Atomic rather than worker-owned because the reader
     // is the API thread (GetAudioBinauralStatus) and the writer is a queued command;
@@ -831,6 +845,8 @@ private:
     // audio path never takes it.
     mutable std::mutex asrTapMutex_;
     std::shared_ptr<AsrAudioTap> asrTap_;
+    std::shared_ptr<class AsrAudioReadAhead> asrAhead_;
+    std::shared_ptr<class AsrAudioReadAhead> asrAheadWorker_;
     // Worker-owned reference for shadow decode. Only the worker changes it,
     // so Produce takes no mutex and API replacement cannot release its ring.
     std::shared_ptr<AsrAudioTap> asrTapWorker_;

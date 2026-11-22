@@ -9,10 +9,15 @@
     <Prefer32Bit>false</Prefer32Bit>
     <RootNamespace></RootNamespace>
     <StartupObject>Program</StartupObject>
+    <AssRuntimeDir>..\third_party\vcpkg_installed\x64-windows\bin</AssRuntimeDir>
+    <AssRuntimeDir Condition="'$(Configuration)' == 'Debug'">..\third_party\vcpkg_installed\x64-windows\debug\bin</AssRuntimeDir>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\FFF.Player\FFF.Player.vbproj" />
+    <!-- ASS 字体回退回归加载与播放器同一套 libass。 -->
+    <None Include="$(AssRuntimeDir)\ass-*.dll;$(AssRuntimeDir)\brotli*.dll;$(AssRuntimeDir)\fribidi-*.dll;$(AssRuntimeDir)\harfbuzz.dll;$(AssRuntimeDir)\bz2*.dll;$(AssRuntimeDir)\freetype*.dll;$(AssRuntimeDir)\libpng*.dll;$(AssRuntimeDir)\z*.dll"
+          Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" Link="FFF.Native.dll"
           CopyToOutputDirectory="PreserveNewest" />
     <!-- 关联回归用 Raw格式.X3F可用 判断随包 LibRaw 的能力位；测试进程必须能加载同一份 DLL。 -->

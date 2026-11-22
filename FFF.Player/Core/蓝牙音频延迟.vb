@@ -44,6 +44,21 @@ Public Class 蓝牙音频信息
     Public Property 端点状态 As Integer = 0
     Public Property 说明 As String = ""
 
+    Friend ReadOnly Property 显示设备名称 As String
+        Get
+            If Not 是蓝牙 OrElse Not 已连接 Then Return "无"
+            If Not String.IsNullOrWhiteSpace(设备名称) Then Return 设备名称
+            Return If(String.IsNullOrWhiteSpace(端点名称), "未知", 端点名称)
+        End Get
+    End Property
+
+    Friend ReadOnly Property 显示协议名称 As String
+        Get
+            If Not 是蓝牙 OrElse Not 已连接 Then Return "无"
+            Return If(String.IsNullOrWhiteSpace(协议名称), "未知", 协议名称)
+        End Get
+    End Property
+
     ''' <summary>区间中位；未知协议返回 0，由策略层兜底。</summary>
     Public ReadOnly Property 估计延迟毫秒 As Integer
         Get

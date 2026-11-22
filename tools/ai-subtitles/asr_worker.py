@@ -33,7 +33,11 @@
 # 会串窗）、对白优先下混、三条文本污染过滤、语言归一。它们的实测依据留在原处。
 
 import argparse
+from bisect import bisect_left, bisect_right
+from collections import deque
+from difflib import SequenceMatcher
 import io
+from itertools import accumulate
 import json
 import os
 import re
@@ -47,8 +51,18 @@ import urllib.request
 import uuid
 import wave
 from pathlib import Path
+from typing import NamedTuple
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    if __name__ != "__main__":
+        raise
+    sys.stdout.reconfigure(encoding="utf-8")
+    print(json.dumps({"type": "status", "state": "error", "fatal": True,
+                      "detail": "识别进程无法加载 NumPy。请在 AI 字幕设置中补全官方扩展包。"},
+                     ensure_ascii=False), flush=True)
+    sys.exit(2)
 
 # sherpa_onnx 是可选的安装项：缺了它这个 worker 一个设备也跑不了，但"缺依赖"
 # 必须走协议报 fatal（宿主能显示原因），而不是在 import 期甩一串 traceback 让
@@ -516,41 +530,434 @@ def _http_json(port, path, timeout=10.0):
 # 但它的底座文本能力还在：**绕开 ASR 的 chat 模板**、用原始 /completion 续写，
 # 就能做中英互译（实测 zh->en 0.13 s/句，与 ASR 交替调用互不污染）。
 # 所以双语不引入第二个模型、不碰任何权重，同一个 llama-server 进程多打一个请求。
-_ZH_FAMILY = {"zh", "chinese", "cantonese", "mandarin", "yue", "cmn", "中文", "粤语", "普通话"}
+_ZH_FAMILY = {"zh", "zho", "chi", "chinese", "cantonese", "mandarin", "yue", "cmn", "中文", "粤语", "普通话"}
 _EN_FAMILY = {"en", "english", "英文", "英语"}
-_BILINGUAL_PAIRS = {"zh-en": ("zh", "en"), "en-zh": ("en", "zh")}
 
 
 def language_family(value):
     """把模型自报的语种名归到 zh / en；不认识的按原样返回（第三种语言）。"""
     v = (value or "").strip().lower()
-    if v in _ZH_FAMILY:
+    if v in _ZH_FAMILY or v.startswith(("zh-", "zh_", "yue-", "yue_")):
         return "zh"
     if v in _EN_FAMILY:
         return "en"
     return v
 
 
-def normalize_bilingual(value):
-    """返回 (上行语言, 下行语言)；关闭时返回 ("", "")。
-
-    zh-en 就是「中文在上、英文在下」。只给一个目标语言时把它当下行，
-    另一种语言自动补到上行 —— 界面只需要暴露这两档。
-    """
-    v = (value or "").strip().lower()
-    if v in ("", "off", "none", "0"):
-        return ("", "")
-    if v in _BILINGUAL_PAIRS:
-        return _BILINGUAL_PAIRS[v]
-    fam = language_family(v)
-    if fam in ("zh", "en"):
-        return (("en" if fam == "zh" else "zh"), fam)
-    return ("", "")
+def bilingual_enabled(value):
+    """兼容旧档位和直接调用 worker 时使用的语言简写。"""
+    value = (value or "").strip().lower()
+    return value in ("zh-en", "en-zh") or language_family(value) in ("zh", "en")
 
 
 _QUOTE_STRIP = "\"'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f \t"
 _TRANSLATION_MARKERS = ("translation:", "english:", "\u4e2d\u6587:", "\u8bd1\u6587:",
                         "translated:")
+
+
+_HAN = r"\u3400-\u9fff\uf900-\ufaff\U00020000-\U000323af"
+_EAST_ASIAN = r"\u3040-\u30ff" + _HAN
+_EAST_ASIAN_WORD = re.compile(fr"[{_EAST_ASIAN}]")
+_HAN_WORD = re.compile(fr"[{_HAN}]")
+_KANA = re.compile(r"[\u3041-\u3096\u30a1-\u30fa\uff66-\uff9d]")
+_CAPTION_WORD = re.compile(
+    fr"[{_EAST_ASIAN}]|\d{{1,3}}(?:[,，]\d{{3}})+(?!\d)(?:[.．]\d+)?|\d+(?:[.．:/]\d+)+|"
+    fr"[^\W_{_EAST_ASIAN}]+(?:['’\-‐‑][^\W_{_EAST_ASIAN}]+)*")
+_SENTENCE_END = re.compile(r"[.!?。！？][\s\"'”’」』）)\]】]*$")
+_CLAUSE_BREAK = re.compile(r"[,，、،､;；؛:：…—‒–]|\.{2,}")
+_ABBREVIATIONS = {"dr", "jr", "mr", "mrs", "ms", "prof", "sr", "st", "vs"}
+_TICKS_PER_SECOND = 10_000_000
+_ACTIVITY_BLOCK_TICKS = _TICKS_PER_SECOND // 50
+_SPEECH_PAUSE_TICKS = 2_400_000
+_DIALOGUE_PAUSE_TICKS = _TICKS_PER_SECOND // 2
+_MAX_SENTENCE_TICKS = 16 * _TICKS_PER_SECOND
+_MAX_SENTENCE_CHARS = 320
+_ALIGNMENT_WORDS = 64
+_CONTEXT_TICKS = 30 * _TICKS_PER_SECOND
+
+
+class _SubtitleWord(NamedTuple):
+    key: str
+    text: str
+    start: int
+    end: int
+    sentence_end: bool
+    clause_end: bool
+
+
+class SubtitleCue(NamedTuple):
+    start: int
+    end: int
+    language: str
+    text: str
+    words: tuple[_SubtitleWord, ...] = ()
+
+
+def subtitle_audio_spans(samples, start, end):
+    """Estimate voiced spans, keeping sustained quiet out of the caption clock."""
+    block = TARGET_RATE // 50  # 20 ms
+    count = len(samples) // block
+    if count < 15:
+        return ((start, end),)
+    audio = samples[:count * block].reshape(count, block)
+    rms = np.sqrt(np.mean(audio * audio, axis=1))
+    peak = float(np.max(rms))
+    # Adapt to a quiet noise bed, but don't turn a continuous soundtrack into
+    # silence merely because parts of it are louder than others.
+    floor = float(np.quantile(rms, 0.2))
+    threshold = max(0.001, min(0.005, peak * 0.06), min(0.012, peak * 0.12, floor * 2.0))
+    edges = np.flatnonzero(np.diff(rms >= threshold, prepend=False, append=False))
+    runs = []
+    for left, right in zip(edges[::2], edges[1::2]):
+        if right - left < 4:  # an isolated click is not a speech onset
+            continue
+        if runs and left - runs[-1][1] < _SPEECH_PAUSE_TICKS // _ACTIVITY_BLOCK_TICKS:
+            runs[-1] = (runs[-1][0], int(right))
+        else:
+            runs.append((int(left), int(right)))
+    if not runs:
+        return ()
+
+    # No lead or release padding across silence. Partial blocks have at most
+    # 20 ms of quantization error.
+    def tick(index):
+        return start + (end - start) * block * index // len(samples)
+
+    return tuple((tick(a), end if b == count else tick(b)) for a, b in runs)
+
+
+def _subtitle_words(text, start, end, spans=None):
+    """The bundled recognizer supplies window times without word alignment."""
+    matches = list(_CAPTION_WORD.finditer(text))
+    if not matches:
+        return []
+    words = []
+    for i, match in enumerate(matches):
+        next_match = matches[i + 1] if i + 1 < len(matches) else None
+        right = next_match.start() if next_match else len(text)
+        punctuation = text[match.end():right]
+        key = unicodedata.normalize("NFKC", match.group()).casefold().replace("’", "'")
+        terminal = bool(_SENTENCE_END.search(punctuation))
+        if terminal and punctuation.strip() == "." and next_match is not None:
+            initial = len(key) == 1 and match.group().isupper() and key not in ("a", "i")
+            terminal = not (initial or key in _ABBREVIATIONS)
+        words.append(_SubtitleWord(key, text[match.start() if i else 0:right], start, end,
+                                   terminal, terminal or bool(_CLAUSE_BREAK.search(punctuation))))
+    if end <= start:  # translated text has no clock of its own
+        return words
+    if spans is None:
+        spans = ((start, end),)
+    spans = [(max(start, a), min(end, b)) for a, b in spans if b > start and a < end]
+    if not spans:
+        return []
+    voiced = list(accumulate((b - a for a, b in spans), initial=0))
+    weights = list(accumulate((min(8, len(word.key)) + 2 for word in words), initial=0))
+    estimates = [voiced[-1] * w // weights[-1] for w in weights]
+
+    # Fit breaks in the audio to word boundaries, preferring a nearby comma
+    # or sentence end. No timestamp is allocated to the quiet between spans.
+    gaps = sorted(sorted(range(1, len(spans)), key=lambda i: spans[i][0] - spans[i - 1][1],
+                         reverse=True)[:len(words) - 1])
+    anchors = [(0, 0)]
+    for j, gap in enumerate(gaps):
+        lo = anchors[-1][0] + 1
+        hi = len(words) - (len(gaps) - j)
+        mark = voiced[gap]
+        near = [i for i in range(lo, hi + 1)
+                if words[i - 1].clause_end and abs(estimates[i] - mark) <= 2_200_000]
+        index = min(near or range(lo, hi + 1), key=lambda i: abs(estimates[i] - mark))
+        anchors.append((index, mark))
+    anchors.append((len(words), voiced[-1]))
+
+    def media_time(offset, opening):
+        # A word beginning on the boundary belongs to the *next* span; a
+        # word ending there must clear at the end of the preceding span.
+        i = bisect_right(voiced, offset) if opening else bisect_left(voiced, offset)
+        i = min(len(spans) - 1, max(0, i - 1))
+        return spans[i][0] + offset - voiced[i]
+
+    for (first, a), (last, b) in zip(anchors, anchors[1:]):
+        duration = b - a
+        weight = weights[last] - weights[first]
+        for i in range(first, last):
+            word_start = media_time(a + duration * (weights[i] - weights[first]) // weight, True)
+            word_end = media_time(a + duration * (weights[i + 1] - weights[first]) // weight, False)
+            words[i] = words[i]._replace(start=word_start, end=word_end)
+    return words
+
+
+class SubtitleAssembler:
+    """Join repeated observations before assigning a start and end to a sentence."""
+
+    def __init__(self, overlap_ticks):
+        self.overlap = overlap_ticks
+        self.reset()
+
+    def reset(self):
+        self.words = []
+        self.committed = 0
+        self.last_end = None
+        self.previous = None
+        self.language = ""
+
+    def _overlap_match(self, incoming, start, end):
+        # Limit text matching to the shared portion of adjacent audio, allowing
+        # for the fact that the ASR output has only estimated word times.
+        slack = min(12_000_000, (end - start) // 3)
+        left = len(self.words)
+        while left > max(0, len(self.words) - _ALIGNMENT_WORDS) and self.words[left - 1].end >= start - slack:
+            left -= 1
+        previous_end = self.previous[1]
+        head = [word for word in incoming[:_ALIGNMENT_WORDS] if word.start <= previous_end + slack]
+        old = self.words[left:]
+        matcher = SequenceMatcher(None, [word.key for word in old], [word.key for word in head], autojunk=False)
+        best = None
+        for i, j, length in matcher.get_matching_blocks():
+            if not length:
+                continue
+            old_index = left + i
+            if old_index + length < self.committed:
+                continue
+            delta = abs(old[i].start - head[j].start)
+            key = old[i].key
+            if length == 1 and (len(key) < 5 or j > 1 or delta > slack):
+                continue
+            if length == 2 and sum(len(word.key) for word in old[i:i + length]) < 3 and not (
+                    all(_EAST_ASIAN_WORD.fullmatch(word.key) for word in old[i:i + length]) and delta <= slack):
+                continue
+            if delta > previous_end - start + slack:
+                continue
+            # Earlier anchors let a new observation correct more of the old
+            # trailing words while retaining the established sentence start.
+            score = (length, -delta, -j)
+            if best is None or score > best[0]:
+                best = (score, old_index, j)
+        return best[1:] if best else None
+
+    def _drain(self, cutoff, force=False):
+        cues = []
+        i = self.committed
+        while i < len(self.words):
+            length = 0
+            boundary = None
+            for j in range(i, len(self.words)):
+                word = self.words[j]
+                if not force and word.end > cutoff:
+                    break
+                length += len(word.text)
+                reached_limit = word.end - self.words[i].start >= _MAX_SENTENCE_TICKS or length >= _MAX_SENTENCE_CHARS
+                if word.sentence_end or reached_limit:
+                    boundary = j + 1
+                    break
+            else:
+                if force:
+                    boundary = len(self.words)
+            if boundary is None:
+                break
+            words = tuple(self.words[i:boundary])
+            text = "".join(word.text for word in words).strip()
+            start = words[0].start
+            if self.last_end is not None:
+                start = max(start, self.last_end)
+            end = words[-1].end
+            if text and start < end:
+                cues.append(SubtitleCue(start, end, self.language, text, words))
+                self.last_end = end
+            i = boundary
+        # Keep a small tail of committed words to recognise duplicate input.
+        drop = max(0, i - _ALIGNMENT_WORDS)
+        if drop:
+            del self.words[:drop]
+        self.committed = i - drop
+        return cues
+
+    def finish(self):
+        return self._drain(0, force=True)
+
+    def _join(self, incoming, old_index, new_index):
+        # Closed cues are immutable. Move an anchor within a closed cue to
+        # the next uncommitted word in both observations.
+        committed_words = max(0, self.committed - old_index)
+        old_index += committed_words
+        new_index += committed_words
+        if new_index >= len(incoming):
+            return
+        first = incoming[new_index].start
+        if old_index < len(self.words):
+            original = self.words[old_index]
+            current = incoming[new_index]
+            if current.key == original.key and old_index > self.committed:
+                # Preserve case at the seam when the model capitalized the
+                # beginning of a window inside an existing sentence.
+                original_word = _CAPTION_WORD.search(original.text)
+                current_word = _CAPTION_WORD.search(current.text)
+                if original_word and current_word:
+                    text = original_word.group() + current.text[current_word.end():]
+                    incoming[new_index] = current._replace(text=text)
+        if old_index:
+            first = max(first, self.words[old_index - 1].end)
+        if self.last_end is not None:
+            first = max(first, self.last_end)
+        original_start = incoming[new_index].start
+        end = incoming[-1].end
+        span = end - original_start
+        if first >= end or span <= 0:
+            return
+        # Keep the incoming audio clock whenever it fits. In particular, don't
+        # stretch words backwards into audio preceding this observation.
+        self.words[old_index:] = [word._replace(
+            start=first + (word.start - original_start) * (end - first) // span,
+            end=first + (word.end - original_start) * (end - first) // span,
+        ) for word in incoming[new_index:]]
+
+    def accept(self, start, end, language, text, speech_spans=None):
+        cutoff = end - self.overlap
+        text = unicodedata.normalize("NFC", " ".join(text.split()))
+        incoming = _subtitle_words(text, start, end, speech_spans)
+        if not incoming:
+            # Don't close an unfinished sentence on a single filtered window.
+            # One more observation can still have a usable overlap or show a pause.
+            if self.previous and start >= self.previous[1]:
+                cues = self.finish()
+                self.previous = None
+                return cues
+            return self._drain(cutoff)
+        overlapping = self.previous is not None and self.previous[0] < start < self.previous[1]
+        same_language = not language or not self.language or language_family(language) == language_family(self.language)
+        anchor = self._overlap_match(incoming, start, end) if overlapping and same_language else None
+        if anchor:
+            self._join(incoming, *anchor)
+            self.previous = (start, end)
+            self.language = language or self.language
+            return self._drain(cutoff)
+
+        cues = self.finish()
+        first = max(incoming[0].start, self.last_end or 0)
+        if first < incoming[-1].end:
+            self.words = _subtitle_words(text, first, end, speech_spans) if first > incoming[0].start else incoming
+            self.committed = 0
+            self.previous = (start, end)
+            self.language = language
+            cues.extend(self._drain(cutoff))
+        return cues
+
+
+def _caption_text(text, chinese):
+    """Strip display punctuation only; analysis and translation keep it."""
+    if chinese:
+        # Don't turn a spoken decimal into a different number when removing its point.
+        text = re.sub(r"(?<=\d)[.．](?=\d)", "点", text)
+        text = re.sub(r"(\d+(?:[,，]\d{3})*(?:点\d+)?)[%％]", r"百分之\1", text)
+    out = []
+    for i, ch in enumerate(text):
+        if not (unicodedata.category(ch).startswith("P") or ch in "~～<>"):
+            out.append(ch)
+            continue
+        before, after = text[i - 1:i], text[i + 1:i + 2]
+        if chinese:
+            # Joined clauses still need a visual separator, without punctuation.
+            if ch in "，、,；;：:。！？.!?…—" and not (before.isdecimal() and after.isdecimal()):
+                out.append(" ")
+        else:
+            # Preserve punctuation that changes a word/number, not typography.
+            if ((ch in "'’-‐‑" and before.isalnum() and after.isalnum()) or
+                    (ch in ".．,，:/" and before.isdecimal() and after.isdecimal()) or
+                    (ch in "%％" and before.isdecimal())):
+                out.append(ch)
+            elif before.isalnum() and after.isalnum():
+                out.append(" ")
+    return " ".join("".join(out).split())
+
+
+def _caption_clauses(words, *, include_soft=False):
+    """Keep a dialogue cue through brief pauses; separate sentences or long gaps."""
+    first = 0
+    for i in range(1, len(words)):
+        before, after = words[i - 1], words[i]
+        if (before.sentence_end or after.start - before.end >= _DIALOGUE_PAUSE_TICKS or
+                (include_soft and before.clause_end)):
+            yield words[first:i]
+            first = i
+    if first < len(words):
+        yield words[first:]
+
+
+def _caption_width(text):
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+               for ch in text if not unicodedata.category(ch).startswith("M"))
+
+
+def _short_phrases(clause, chinese):
+    """Fit a readable dialogue line; prefer commas only when the line needs a split."""
+    limit = 40 if chinese else 56
+    words = []
+    for word in clause:
+        if _caption_width(_caption_text(word.text, chinese)) <= limit:
+            words.append(word)
+            continue
+        # Fallback for scripts with no spaces, or unusually long Latin tokens.
+        text = _caption_text(word.text, chinese)
+        first = width = 0
+        for i, ch in enumerate(text):
+            cw = _caption_width(ch)
+            if cw > 0 and width + cw > limit:
+                words.append(word._replace(text=text[first:i],
+                    start=word.start + (word.end - word.start) * first // len(text),
+                    end=word.start + (word.end - word.start) * i // len(text)))
+                first, width = i, 0
+            width += cw
+        words.append(word._replace(text=text[first:], start=word.start + (word.end - word.start) * first // len(text)))
+
+    first = 0
+    while first < len(words):
+        end, soft_end = first, None
+        while end < len(words):
+            text = _caption_text("".join(word.text for word in words[first:end + 1]), chinese)
+            width = _caption_width(text)
+            if end > first and width > limit:
+                break
+            end += 1
+            if words[end - 1].clause_end and width >= limit // 2:
+                soft_end = end
+        if end < len(words) and soft_end is not None:
+            end = soft_end
+        yield words[first:end]
+        first = end
+
+
+def _caption_pieces(clauses, chinese):
+    return [(words, _caption_text("".join(word.text for word in words), chinese))
+            for clause in clauses for words in _short_phrases(clause, chinese)]
+
+
+def _pair_caption_pieces(source, translated):
+    if not translated:
+        yield from ((words[0].start, words[-1].end, text, "") for words, text in source)
+        return
+    for i, (words, original) in enumerate(source):
+        # Keep the ordering of both sides. A shorter side can remain on screen
+        # for multiple short phrases, but cannot move their onset times.
+        first = i * len(translated) // len(source)
+        last = max(first + 1, (i + 1) * len(translated) // len(source))
+        glosses = translated[first:last]
+        if len(glosses) <= len(words):
+            groups = [words[k * len(words) // len(glosses):(k + 1) * len(words) // len(glosses)]
+                      for k in range(len(glosses))]
+            intervals = [(group[0].start, group[-1].end) for group in groups]
+        else:
+            # A single short source word can translate into several words.
+            a, b = words[0].start, words[-1].end
+            edges = [a + (b - a) * k // len(glosses) for k in range(len(glosses) + 1)]
+            intervals = zip(edges, edges[1:])
+        for (a, b), (_, translation) in zip(intervals, glosses):
+            yield a, b, translation, original
+
+
+def looks_like_isolated_character(text):
+    # Music and sound effects often make the ASR model emit one isolated Han
+    # character followed by punctuation. Do not strip it from real sentences.
+    content = [ch for ch in text if ch.isalnum()]
+    return len(content) == 1 and unicodedata.name(content[0], "").startswith("CJK ")
 
 
 def clean_translation(text):
@@ -563,6 +970,96 @@ def clean_translation(text):
             break
     s = s.split("\n")[0].strip(_QUOTE_STRIP)
     return s
+
+
+def translation_prompt(text, target, history=()):
+    language, label = ("简体中文", "中文") if target == "zh" else ("英文", "English")
+    request = f"把下面这句译成{language}，保留自然的分句标点，只输出译文："
+    if not history:
+        return f"{request}\n{text}\n{label}:"
+    lines = [f"前文只用于理解名字、词义和指代。{request}", "前文对白（参考）："]
+    for source, translated in history:
+        lines.append(f"原文：{source}")
+        if translated:
+            lines.append(f"{label}：{translated}")
+    return "\n".join([*lines, f"当前原文：{text}", f"{label}:"])
+
+
+def is_context_echo(translation, text, history):
+    def letters(value):
+        return "".join(ch for ch in value.casefold() if ch.isalnum())
+
+    current = letters(text)
+    result = letters(translation)
+    for source, gloss in history:
+        old = letters(gloss)
+        if not old or not current or current == letters(source):
+            continue
+        if old == result:
+            return True
+        # Allow shared names and terms, but reject a substantial passage copied
+        # from another line, even when the model has changed its first words.
+        if len(old) < 12 or len(result) < 12:
+            continue
+        reused = SequenceMatcher(None, old, result, autojunk=False).find_longest_match().size
+        if reused >= max(12, int(len(result) * 0.6)):
+            return True
+    return False
+
+
+class SubtitleTranslator:
+    """Translate complete sentences, then schedule dialogue cues for display."""
+
+    def __init__(self, backend, chinese=False, bilingual=False):
+        self.backend = backend
+        self.chinese = chinese
+        self.bilingual = bilingual
+        self.history = deque(maxlen=3)
+
+    def reset(self):
+        self.history.clear()
+
+    def phrases(self, cue):
+        source = cue.text
+        translated = ""
+        target = ""
+        family = language_family(cue.language)
+        if family in ("", "und", "unknown") and not _KANA.search(source):
+            # Some backends don't return a language tag. Avoid translating Han
+            # text to itself, without treating mixed Kana/Han Japanese as Chinese.
+            han_count = len(_HAN_WORD.findall(source))
+            if han_count and han_count * 2 >= sum(ch.isalnum() for ch in source):
+                family = "zh"
+        if self.chinese:
+            if family != "zh":
+                target = "zh"
+        elif self.bilingual:
+            target = "en" if family == "zh" else "zh"
+        while self.history and cue.start - self.history[0][0] > _CONTEXT_TICKS:
+            self.history.popleft()
+        if target:
+            context = tuple((line, gloss if language == target else "") for _, line, gloss, language in self.history)
+            translated = self.backend.translate(source, target, context)
+            if translated and translated.casefold() == source.casefold():
+                translated = ""
+        if self.chinese or self.bilingual:
+            self.history.append((cue.end, source[-160:], translated[-120:], target))
+        originals = list(_caption_clauses(cue.words or _subtitle_words(source, cue.start, cue.end)))
+        translated_words = _subtitle_words(translated, 0, 0)
+        groups = [(originals, [translated_words] if translated_words else [])]
+        if translated_words and len(originals) > 1:
+            # Translation punctuation can match a pause already found in the
+            # source, but should not create additional display transitions.
+            glosses = list(_caption_clauses(translated_words, include_soft=True))
+            if len(glosses) == len(originals):
+                groups = [([a], [b]) for a, b in zip(originals, glosses)]
+        for original, gloss in groups:
+            pieces = _caption_pieces(original, family == "zh")
+            translations = _caption_pieces(gloss, target == "zh")
+            for a, b, text, text2 in _pair_caption_pieces(pieces, translations):
+                a, b = max(a, cue.start), min(b, cue.end)
+                if a < b and text:
+                    yield {"start100ns": a, "end100ns": b, "text": text, "text2": text2}
 
 
 def _post_wav(port, wav_bytes, model_id, timeout=600.0):
@@ -720,7 +1217,7 @@ class LlamaBackend(InferenceBackend):
         return "", raw
 
     # ---- 双语 ----
-    def translate(self, text, target):
+    def translate(self, text, target, history=()):
         """把 text 译成 target（zh / en）。
 
         必须走原始 /completion：/v1/chat/completions 与 /v1/audio/transcriptions
@@ -732,40 +1229,34 @@ class LlamaBackend(InferenceBackend):
         text = (text or "").strip()
         if not text or self._proc is None or self._proc.poll() is not None:
             return ""
-        if target == "en":
-            prompt = f"把下面这句译成英文，只输出译文：\n{text}\nEnglish:"
-        elif target == "zh":
-            prompt = f"把下面这句译成简体中文，只输出译文：\n{text}\n中文:"
-        else:
+        if target not in ("en", "zh"):
             return ""
-        try:
-            out = _post_json(self._port, "/completion", {
-                "prompt": prompt, "temperature": 0, "n_predict": 256,
-                "stream": False, "cache_prompt": False,
-                "stop": ["\n\n", "\nEnglish:", "\n中文:", "<|im_end|>"]})
-        except Exception as exc:  # noqa: BLE001 - 翻译失败只影响副行
-            return ""
-        return clean_translation(out.get("content") or "")
-
-    def bilingual(self, text, detected, up_lang, down_lang):
-        """把一次转写排成 (上行, 下行)。原文属于哪一行就留在哪一行，另一行翻译。
-
-        第三种语言（模型自报日/韩等）两行都要译：用户要的是"中文在上英文在下"，
-        把原文塞进任何一行都不符合这个约定；两译皆空才退回把原文放上行。
-        """
-        text = (text or "").strip()
-        if not text:
-            return ("", "")
-        src = language_family(detected)
-        if src == up_lang:
-            return (text, self.translate(text, down_lang))
-        if src == down_lang:
-            return (self.translate(text, up_lang), text)
-        up = self.translate(text, up_lang)
-        down = self.translate(text, down_lang)
-        if not up and not down:
-            return (text, "")
-        return (up, down)
+        contexts = (history, ()) if history else ((),)
+        for context in contexts:
+            prompt = translation_prompt(text, target, context)
+            try:
+                out = _post_json(self._port, "/completion", {
+                    "prompt": prompt, "temperature": 0, "n_predict": min(192, max(24, len(text) * 2)),
+                    "stream": False, "cache_prompt": False,
+                    "stop": ["\n", "<|im_end|>"]})
+            except Exception:  # Translation failure leaves the source line usable.
+                return ""
+            translation = clean_translation(out.get("content") or "")
+            if (not translation or out.get("stop_type") == "limit" or
+                    looks_like_prompt_leak(translation) or looks_degenerate(translation)):
+                continue
+            if context and translation.startswith(("前文", "当前原文", "待翻译", "请将", "请把")):
+                # The completion echoed the instruction instead of clearing the cue.
+                continue
+            if context and len(translation) > max(24, len(text) * (1.25 if target == "zh" else 5) + 12):
+                continue
+            if target == "zh":
+                if not any(unicodedata.name(ch, "").startswith("CJK ") for ch in translation):
+                    continue
+            if is_context_echo(translation, text, context):
+                continue
+            return translation
+        return ""
 
     def close(self):
         if self._proc is not None:
@@ -1209,11 +1700,15 @@ class WindowBuilder:
         self.last_channels = None
         self.last_positions = None
         self.buffered_bytes = 0
+        self.covered_until = None
+        self.revision = 0
 
     def reset_generation(self):
+        self.revision += 1
         self.buf.clear()
         self.window_start = None
         self.buffered_bytes = 0
+        self.covered_until = None
 
     def add(self, position100ns, samples, rate, channels, positions=None):
         """samples: float32 [frames, channels], de-interleaved (row = frame)."""
@@ -1221,9 +1716,12 @@ class WindowBuilder:
         if size > self.MAX_BUFFER_BYTES:
             self.reset_generation()
             return
-        if self.buf and (position100ns < self.buf[-1][0] or
-                         self.last_rate != rate or self.last_channels != channels):
-            self.reset_generation()
+        if self.buf:
+            last_position, last_samples = self.buf[-1]
+            last_end = last_position + round(last_samples.shape[0] * _TICKS_PER_SECOND / self.last_rate)
+            if (position100ns < last_position or position100ns - last_end > _TICKS_PER_SECOND // 2 or
+                    self.last_rate != rate or self.last_channels != channels or self.last_positions != positions):
+                self.reset_generation()
         if (len(self.buf) >= self.MAX_BUFFER_BLOCKS or
                 size > self.MAX_BUFFER_BYTES - self.buffered_bytes):
             self.reset_generation()
@@ -1270,7 +1768,7 @@ class WindowBuilder:
         mono = _downmix(raw, channels, self.last_positions)
         # The slice may start/end mid-frame; trim by media position.
         skip = max(0, int(round((start100ns - first_pos) * rate / 1e7)))
-        keep = int(round((last_end - first_pos) * rate / 1e7)) - skip
+        keep = int(round((min(last_end, end100ns) - first_pos) * rate / 1e7)) - skip
         mono = mono[skip:skip + max(0, keep)]
         # Resample to 16 kHz for the model.
         return _resample_to_16k(mono, rate)
@@ -1292,16 +1790,29 @@ class WindowBuilder:
             self.reset_generation()
             self.window_start = now_end100ns
             return None
-        end = now_end100ns
-        start = end - int(self.window_s * 1e7)
-        if start < self.window_start:
-            start = self.window_start
+        start = self.window_start
+        end = start + int(self.window_s * 1e7)
         samples = self._slice(start, end)
         if len(samples) < int(0.3 * self.target_rate):
             return None
         # Advance: next window overlaps by (window - step).
-        self.window_start = end - int((self.window_s - self.step_s) * 1e7)
+        self.window_start = start + int(self.step_s * 1e7)
+        self.covered_until = end
         return (start, end, samples)
+
+    def finish(self, end):
+        """Keep overlap so an EOF window can complete the preceding sentence."""
+        if end is None or self.window_start is None or not self.buf:
+            return None
+        uncovered_start = max(self.window_start, self.covered_until or self.window_start)
+        if end - uncovered_start < 3_000_000:
+            return None
+        start = self.window_start
+        samples = self._slice(start, end)
+        self.reset_generation()
+        if len(samples) >= int(0.3 * self.target_rate):
+            return start, end, samples
+        return None
 
 
 def looks_degenerate(text):
@@ -1507,7 +2018,7 @@ def build_arg_parser():
     # llama 引擎的原生运行时目录（含 llama-server.exe 与 ggml-*.dll）。
     # 缺省取 模型目录的兄弟目录 runtime/vulkan，也就是便携包的标准布局。
     ap.add_argument("--runtime-dir", default="")
-    # 双语对照："zh-en" = 中文在上英文在下，"en-zh" 反之，空/off = 关闭。
+    # zh-en 和旧档 en-zh 均启用双语：译文在上、原文在下。
     # 只有 GGUF（llama）引擎做得到 —— 它靠同一进程的原始 /completion 续写，
     # ONNX 那条腿是纯 ASR，没有文本生成能力，见 main() 里的降级告警。
     ap.add_argument("--bilingual", default="")
@@ -1581,17 +2092,15 @@ def main():
               "detail": "没有可用的推理设备：" + ("；".join(notes) or "无候选")})
         return 3
 
-    # 双语能力只跟"后端能不能产出文本"有关，不跟引擎名有关：llama 有
-    # translate/bilingual，sherpa 与 OpenVINO 三件套没有。用 hasattr 判，
-    # 将来给某条腿补上文本能力时不用回来改这里。
-    up_lang, down_lang = normalize_bilingual(args.bilingual)
-    bilingual_ok = bool(up_lang) and hasattr(backend, "bilingual")
-    if up_lang and not bilingual_ok:
+    # 译文依赖后端的文本生成能力。
+    translation_mode = args.bilingual.strip().lower()
+    chinese_requested = translation_mode in ("zh-above", "zh-below")
+    bilingual_requested = bilingual_enabled(args.bilingual)
+    bilingual_ok = bilingual_requested and hasattr(backend, "translate")
+    chinese_ok = chinese_requested and hasattr(backend, "translate")
+    if (chinese_requested and not chinese_ok) or (bilingual_requested and not bilingual_ok):
         emit({"type": "status", "state": "warning",
-              "detail": f"双语字幕需要 GGUF 引擎（当前 {engine} 引擎没有文本生成能力），"
-                        f"已按单语输出"})
-    if bilingual_ok:
-        pass
+              "detail": "翻译需要支持文本生成的推理包，已按原语种输出"})
 
     # 请求的档没拿到（指定了 cuda / npu 却降了档）：说一句，别让用户以为自己
     # 选错了。auto 不报 —— 它本来就是"有什么用什么"，落到 cpu 是预期行为，
@@ -1612,20 +2121,40 @@ def main():
         lang_detail = f"lang={target_language} lang-gate=on"
     else:
         lang_detail = f"lang={target_language} lang-gate=off"
-    emit({"type": "status", "state": "ready",
-          "detail": f"window={args.window}s step={args.step}s device={backend.id} "
+    device_kind = "NPU" if backend.id == "ov-npu" else (
+        "CPU" if backend.id in ("cpu", "ov-cpu") else "GPU")
+    # Leave enough shared audio to recognise the words around a window edge.
+    overlap = min(2.0, args.window * 0.4)
+    step = round(min(args.step, args.window - overlap), 6)
+    emit({"type": "status", "state": "ready", "device": device_kind,
+          "chineseTranslation": chinese_ok, "detail": f"window={args.window}s step={step}s device={backend.id} "
                     f"provider={backend.provider} threads={threads} {lang_detail} "
                     f"[{_provider_note(backend.id, engine)}]"})
 
-    builder = WindowBuilder(args.window, args.step)
-    windows = dropped = failures = 0
-    # 三种"这一窗没内容"只提示一次：它们通常整段片子都在发生，每窗报一次会把
-    # 信息图层刷成刷屏。
-    已报污染 = False
-    infer_seconds = []
+    builder = WindowBuilder(args.window, step)
+    assembler = SubtitleAssembler(round((args.window - step) * _TICKS_PER_SECOND))
+    translator = SubtitleTranslator(backend, chinese_ok, bilingual_ok)
+    windows = cues_sent = dropped = failures = 0
+    infer_seconds = 0.0
+    attempts = 0
+    filtered = dict(empty=0, isolated=0, degenerate=0, leak=0)
+    last_frame_end = None
     last_stats = time.time()
     generation = 0
     stdin = sys.stdin.buffer
+
+    def publish_cues(cues, t0, audio_through):
+        nonlocal cues_sent
+        for cue in cues:
+            for phrase in translator.phrases(cue):
+                cues_sent += 1
+                # An independent media-time interval per phrase, not a list
+                # of equal-length pages for the host to guess timestamps for.
+                emit({"type": "final", "generation": generation, **phrase,
+                      "audioThrough100ns": audio_through if audio_through is not None else cue.end,
+                      "bilingual": bilingual_ok, "inferenceMs": round((time.perf_counter() - t0) * 1000, 1),
+                      "translationFirst": True, "language": cue.language,
+                      "target": target_language or "", "matched": same_language(cue.language, target_language)})
 
     try:
         while True:
@@ -1656,37 +2185,58 @@ def main():
             if meta.get("generation") != generation:
                 generation = meta.get("generation", 0)
                 builder.reset_generation()
+                assembler.reset()
+                translator.reset()
+                last_frame_end = None
 
-            rate = int(meta.get("sampleRate", 48000))
-            channels = int(meta.get("channels", 2))
-            fmt = int(meta.get("sampleFormat", 8))  # 8 = AV_SAMPLE_FMT_FLTP
-            frames = int(meta.get("frames", len(pcm) // (4 * max(1, channels))))
-            if frames <= 0 or channels <= 0:
-                dropped += 1
-                continue
-            # tap 原样携带解码器输出（设计如此，AudioTap.h §1），所以每种
-            # AVSampleFormat 都要在这里落成 float32 —— 旧实现只认 FLTP 时
-            # FLAC(s32p)/PCM WAV(s16) 整段乱码（P1，2026-11-03 审查定案）。
-            arr = decode_pcm_frame(pcm, fmt, channels)
-            if arr is None:
-                dropped += 1
-                continue
-
-            positions = meta.get("positions") or ()
-            builder.add(int(meta.get("position100ns", 0)), arr, rate, channels, positions)
-            frame_end = int(meta.get("position100ns", 0)) + int(round(frames * 1e7 / rate))
-
-            due = builder.poll(frame_end)
+            eof = meta.get("kind") == "eof"
+            if eof:
+                due = builder.finish(last_frame_end)
+                audio_through = last_frame_end
+                last_frame_end = None
+            else:
+                rate = int(meta.get("sampleRate", 48000))
+                channels = int(meta.get("channels", 2))
+                fmt = int(meta.get("sampleFormat", 8))
+                frames = int(meta.get("frames", 0))
+                if frames <= 0 or channels <= 0 or rate <= 0:
+                    dropped += 1
+                    continue
+                arr = decode_pcm_frame(pcm, fmt, channels)
+                if arr is None:
+                    dropped += 1
+                    continue
+                position = int(meta.get("position100ns", 0))
+                revision = builder.revision
+                builder.add(position, arr, rate, channels, tuple(meta.get("positions") or ()))
+                last_frame_end = position + int(round(frames * 1e7 / rate))
+                audio_through = last_frame_end
+                due = builder.poll(last_frame_end)
+                if builder.revision != revision:
+                    assembler.reset()
+                    translator.reset()
             if due is None:
+                if eof:
+                    tail = assembler.finish()
+                    if tail:
+                        t0 = time.perf_counter()
+                        emit({"type": "inference", "busy": True, "generation": generation})
+                        publish_cues(tail, t0, audio_through)
+                        infer_seconds += time.perf_counter() - t0
+                        emit({"type": "inference", "busy": False, "generation": generation})
                 continue
             start100ns, end100ns, samples = due
 
+            emit({"type": "inference", "busy": True, "generation": generation})
+            attempts += 1
             t0 = time.perf_counter()
             try:
                 language, text = backend.transcribe(samples)
                 failures = 0
             except Exception as e:  # noqa: BLE001 - 丢这一窗，绝不让播放等它
                 failures += 1
+                infer_seconds += time.perf_counter() - t0
+                emit({"type": "inference", "busy": False, "generation": generation})
                 # fatal=False: this window failed, the worker keeps running and
                 # retries. The host must not treat it as "worker died" -- doing so
                 # blanked subtitles for the rest of the session on a single hiccup.
@@ -1697,61 +2247,35 @@ def main():
                           "detail": "consecutive inference failures"})
                     return 4
                 continue
-            dt = time.perf_counter() - t0
 
-            # 三种"这一窗没有有效内容"，一律丢弃不上屏（宁可不出字幕，也不要
-            # 把一屏编造的字糊在画面上——那比没字幕更像"功能坏了"）：
-            #   empty      —— 只有语言头、正文为空（静音段的常见形态）
-            #   degenerate —— 失控编字（重复同一个字直到撞上限）
-            #   leak       —— 把 instruction 当内容输出（模板串 / chat 标记残留）
-            if not text.strip():
-                原因 = "empty"
+            if not any(ch.isalnum() for ch in text):
+                reason = "empty"
+            elif looks_like_isolated_character(text):
+                reason = "isolated"
             elif looks_degenerate(text):
-                原因 = "degenerate"
+                reason = "degenerate"
             elif looks_like_prompt_leak(text):
-                原因 = "leak"
+                reason = "leak"
             else:
-                原因 = ""
-            if 原因:
-                dropped += 1
-                if not 已报污染:
-                    已报污染 = True
-                    emit({"type": "status", "state": "warning",
-                          "detail": "这段音频疑似没有语音或语种不受支持（模型在重复同一个"
-                                    "字，或把指令当内容输出），已跳过；字幕不会凭空编字"})
-                continue
+                reason = ""
 
-            infer_seconds.append(dt)
-            windows += 1
-            # matched 只是"报给宿主看"：worker 从不自己丢结果（宿主可选择丢弃，
-            # 而且那个开关不该逼 worker 重启）。
-            matched = same_language(language, target_language)
-            # 双语在"这一窗已经确认有有效内容"之后才做：丢弃判定用原文，
-            # 不给被丢掉的窗口白付一次翻译。
-            up_text, down_text = text, ""
-            if bilingual_ok:
-                t1 = time.perf_counter()
-                try:
-                    up_text, down_text = backend.bilingual(text, language, up_lang, down_lang)
-                except Exception as exc:  # noqa: BLE001 - 翻译坏了也只掉副行
-                    up_text, down_text = text, ""
-                dt += time.perf_counter() - t1
-                # 翻译也是这一窗推理成本，rtf 必须算进去，否则统计把人骗了。
-                if infer_seconds:
-                    infer_seconds[-1] = dt
-                if not up_text:
-                    up_text = text
-            emit({"type": "final", "generation": generation,
-                  "start100ns": start100ns, "end100ns": end100ns,
-                  "text": up_text, "text2": down_text, "bilingual": bilingual_ok,
-                  "language": language,
-                  "target": target_language or "", "matched": matched})
+            if reason:
+                dropped += 1
+                filtered[reason] += 1
+            else:
+                windows += 1
+            speech_spans = None if reason else subtitle_audio_spans(samples, start100ns, end100ns)
+            cues = assembler.accept(start100ns, end100ns, language or target_language or "",
+                                    "" if reason else text, speech_spans)
+            if eof:
+                cues.extend(assembler.finish())
+            publish_cues(cues, t0, audio_through)
+            infer_seconds += time.perf_counter() - t0
+            emit({"type": "inference", "busy": False, "generation": generation})
 
             if time.time() - last_stats >= 30.0:
-                rtf = (sum(infer_seconds) /
-                       max(0.001, windows * args.step)) if windows else 0.0
-                emit({"type": "stats", "rtf": round(rtf, 3),
-                      "windows": windows, "dropped": dropped})
+                emit({"type": "stats", "rtf": round(infer_seconds / max(0.001, attempts * step), 3),
+                      "windows": windows, "cues": cues_sent, "attempts": attempts, "dropped": dropped, "filtered": filtered})
                 last_stats = time.time()
     except Exception as e:  # noqa: BLE001 - 兜底上报后按失败退出
         # 循环里任何未捕获异常过去会直接打死 worker 且一个字不吐：宿主只见
@@ -1765,9 +2289,9 @@ def main():
 
     # Final stats carry the real cumulative rtf (this used to hardcode 0.0, which
     # made every shutdown look like "no inference ever ran").
-    final_rtf = (sum(infer_seconds) / max(0.001, windows * args.step)) if windows else 0.0
-    emit({"type": "stats", "rtf": round(final_rtf, 3),
-          "windows": windows, "dropped": dropped})
+    final_rtf = infer_seconds / max(0.001, attempts * step)
+    emit({"type": "stats", "rtf": round(final_rtf, 3), "windows": windows,
+          "cues": cues_sent, "attempts": attempts, "dropped": dropped, "filtered": filtered})
     return 0
 
 

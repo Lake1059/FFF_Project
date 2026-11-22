@@ -23,16 +23,7 @@ Partial Class Form设置_文件关联
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
-        MCK_关联相机RAW = New LakeUI.ModernCheckBox()
-        MCK_关联老旧图片 = New LakeUI.ModernCheckBox()
-        MCK_关联不常见图片 = New LakeUI.ModernCheckBox()
-        MCK_关联常见图片 = New LakeUI.ModernCheckBox()
-        MCK_关联老旧音频 = New LakeUI.ModernCheckBox()
-        MCK_关联不常见音频 = New LakeUI.ModernCheckBox()
-        MCK_关联常见音频 = New LakeUI.ModernCheckBox()
-        MCK_关联老旧视频 = New LakeUI.ModernCheckBox()
-        MCK_关联不常见视频 = New LakeUI.ModernCheckBox()
-        MCK_关联常见视频 = New LakeUI.ModernCheckBox()
+        UltraDetailListView1 = New 文件关联列表()
         ModernPanel1.SuspendLayout()
         SuspendLayout()
         ' 
@@ -40,236 +31,69 @@ Partial Class Form设置_文件关联
         ' 
         ModernPanel1.BackColor1 = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ModernPanel1.BorderSize = 0
-        ModernPanel1.Controls.Add(MCK_关联相机RAW)
-        ModernPanel1.Controls.Add(MCK_关联老旧图片)
-        ModernPanel1.Controls.Add(MCK_关联不常见图片)
-        ModernPanel1.Controls.Add(MCK_关联常见图片)
-        ModernPanel1.Controls.Add(MCK_关联老旧音频)
-        ModernPanel1.Controls.Add(MCK_关联不常见音频)
-        ModernPanel1.Controls.Add(MCK_关联常见音频)
-        ModernPanel1.Controls.Add(MCK_关联老旧视频)
-        ModernPanel1.Controls.Add(MCK_关联不常见视频)
-        ModernPanel1.Controls.Add(MCK_关联常见视频)
+        ModernPanel1.Controls.Add(UltraDetailListView1)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
-        ModernPanel1.Padding = New Padding(15, 20, 20, 20)
-        ModernPanel1.Size = New Size(554, 419)
+        ModernPanel1.Padding = New Padding(5)
+        ModernPanel1.Size = New Size(554, 461)
         ModernPanel1.TabIndex = 0
         ' 
-        ' MCK_关联老旧图片
+        ' UltraDetailListView1
         ' 
-        MCK_关联老旧图片.AutoSize = True
-        MCK_关联老旧图片.BackColor = Color.Transparent
-        MCK_关联老旧图片.BoxBorderRadius = 5
-        MCK_关联老旧图片.BoxBorderSize = 0
-        MCK_关联老旧图片.BoxCheckedBackColor = Color.OliveDrab
-        MCK_关联老旧图片.BoxInnerPadding = 6
-        MCK_关联老旧图片.BoxSize = 24
-        MCK_关联老旧图片.BoxTextSpacing = 10
-        MCK_关联老旧图片.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_关联老旧图片.Dock = DockStyle.Top
-        MCK_关联老旧图片.Location = New Point(15, 292)
-        MCK_关联老旧图片.Name = "MCK_关联老旧图片"
-        MCK_关联老旧图片.Size = New Size(519, 24)
-        MCK_关联老旧图片.TabIndex = 38
-        MCK_关联老旧图片.Text = "老旧图片"
-        ' 
-        ' MCK_关联相机RAW
-        '
-        MCK_关联相机RAW.AutoSize = True
-        MCK_关联相机RAW.BackColor = Color.Transparent
-        MCK_关联相机RAW.BoxBorderRadius = 5
-        MCK_关联相机RAW.BoxBorderSize = 0
-        MCK_关联相机RAW.BoxCheckedBackColor = Color.OliveDrab
-        MCK_关联相机RAW.BoxInnerPadding = 6
-        MCK_关联相机RAW.BoxSize = 24
-        MCK_关联相机RAW.BoxTextSpacing = 10
-        MCK_关联相机RAW.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_关联相机RAW.Dock = DockStyle.Top
-        MCK_关联相机RAW.Location = New Point(15, 326)
-        MCK_关联相机RAW.Name = "MCK_关联相机RAW"
-        MCK_关联相机RAW.Size = New Size(519, 24)
-        MCK_关联相机RAW.TabIndex = 39
-        MCK_关联相机RAW.Text = "相机 RAW"
-        '
-        ' MCK_关联不常见图片
-        ' 
-        MCK_关联不常见图片.AutoSize = True
-        MCK_关联不常见图片.BackColor = Color.Transparent
-        MCK_关联不常见图片.BoxBorderRadius = 5
-        MCK_关联不常见图片.BoxBorderSize = 0
-        MCK_关联不常见图片.BoxCheckedBackColor = Color.OliveDrab
-        MCK_关联不常见图片.BoxInnerPadding = 6
-        MCK_关联不常见图片.BoxSize = 24
-        MCK_关联不常见图片.BoxTextSpacing = 10
-        MCK_关联不常见图片.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_关联不常见图片.Dock = DockStyle.Top
-        MCK_关联不常见图片.Location = New Point(15, 258)
-        MCK_关联不常见图片.Name = "MCK_关联不常见图片"
-        MCK_关联不常见图片.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联不常见图片.Size = New Size(519, 34)
-        MCK_关联不常见图片.TabIndex = 37
-        MCK_关联不常见图片.Text = "不常见图片"
-        ' 
-        ' MCK_关联常见图片
-        ' 
-        MCK_关联常见图片.AutoSize = True
-        MCK_关联常见图片.BackColor = Color.Transparent
-        MCK_关联常见图片.BoxBorderRadius = 5
-        MCK_关联常见图片.BoxBorderSize = 0
-        MCK_关联常见图片.BoxCheckedBackColor = Color.OliveDrab
-        MCK_关联常见图片.BoxInnerPadding = 6
-        MCK_关联常见图片.BoxSize = 24
-        MCK_关联常见图片.BoxTextSpacing = 10
-        MCK_关联常见图片.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_关联常见图片.Dock = DockStyle.Top
-        MCK_关联常见图片.Location = New Point(15, 224)
-        MCK_关联常见图片.Name = "MCK_关联常见图片"
-        MCK_关联常见图片.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联常见图片.Size = New Size(519, 34)
-        MCK_关联常见图片.TabIndex = 36
-        MCK_关联常见图片.Text = "常见图片"
-        ' 
-        ' MCK_关联老旧音频
-        ' 
-        MCK_关联老旧音频.AutoSize = True
-        MCK_关联老旧音频.BackColor = Color.Transparent
-        MCK_关联老旧音频.BoxBorderRadius = 5
-        MCK_关联老旧音频.BoxBorderSize = 0
-        MCK_关联老旧音频.BoxCheckedBackColor = Color.OliveDrab
-        MCK_关联老旧音频.BoxInnerPadding = 6
-        MCK_关联老旧音频.BoxSize = 24
-        MCK_关联老旧音频.BoxTextSpacing = 10
-        MCK_关联老旧音频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_关联老旧音频.Dock = DockStyle.Top
-        MCK_关联老旧音频.Location = New Point(15, 190)
-        MCK_关联老旧音频.Name = "MCK_关联老旧音频"
-        MCK_关联老旧音频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联老旧音频.Size = New Size(519, 34)
-        MCK_关联老旧音频.TabIndex = 35
-        MCK_关联老旧音频.Text = "老旧音频"
-        ' 
-        ' MCK_关联不常见音频
-        ' 
-        MCK_关联不常见音频.AutoSize = True
-        MCK_关联不常见音频.BackColor = Color.Transparent
-        MCK_关联不常见音频.BoxBorderRadius = 5
-        MCK_关联不常见音频.BoxBorderSize = 0
-        MCK_关联不常见音频.BoxCheckedBackColor = Color.OliveDrab
-        MCK_关联不常见音频.BoxInnerPadding = 6
-        MCK_关联不常见音频.BoxSize = 24
-        MCK_关联不常见音频.BoxTextSpacing = 10
-        MCK_关联不常见音频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_关联不常见音频.Dock = DockStyle.Top
-        MCK_关联不常见音频.Location = New Point(15, 156)
-        MCK_关联不常见音频.Name = "MCK_关联不常见音频"
-        MCK_关联不常见音频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联不常见音频.Size = New Size(519, 34)
-        MCK_关联不常见音频.TabIndex = 34
-        MCK_关联不常见音频.Text = "不常见音频"
-        ' 
-        ' MCK_关联常见音频
-        ' 
-        MCK_关联常见音频.AutoSize = True
-        MCK_关联常见音频.BackColor = Color.Transparent
-        MCK_关联常见音频.BoxBorderRadius = 5
-        MCK_关联常见音频.BoxBorderSize = 0
-        MCK_关联常见音频.BoxCheckedBackColor = Color.OliveDrab
-        MCK_关联常见音频.BoxInnerPadding = 6
-        MCK_关联常见音频.BoxSize = 24
-        MCK_关联常见音频.BoxTextSpacing = 10
-        MCK_关联常见音频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_关联常见音频.Dock = DockStyle.Top
-        MCK_关联常见音频.Location = New Point(15, 122)
-        MCK_关联常见音频.Name = "MCK_关联常见音频"
-        MCK_关联常见音频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联常见音频.Size = New Size(519, 34)
-        MCK_关联常见音频.TabIndex = 33
-        MCK_关联常见音频.Text = "常见音频"
-        ' 
-        ' MCK_关联老旧视频
-        ' 
-        MCK_关联老旧视频.AutoSize = True
-        MCK_关联老旧视频.BackColor = Color.Transparent
-        MCK_关联老旧视频.BoxBorderRadius = 5
-        MCK_关联老旧视频.BoxBorderSize = 0
-        MCK_关联老旧视频.BoxCheckedBackColor = Color.OliveDrab
-        MCK_关联老旧视频.BoxInnerPadding = 6
-        MCK_关联老旧视频.BoxSize = 24
-        MCK_关联老旧视频.BoxTextSpacing = 10
-        MCK_关联老旧视频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_关联老旧视频.Dock = DockStyle.Top
-        MCK_关联老旧视频.Location = New Point(15, 88)
-        MCK_关联老旧视频.Name = "MCK_关联老旧视频"
-        MCK_关联老旧视频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联老旧视频.Size = New Size(519, 34)
-        MCK_关联老旧视频.TabIndex = 32
-        MCK_关联老旧视频.Text = "老旧视频"
-        ' 
-        ' MCK_关联不常见视频
-        ' 
-        MCK_关联不常见视频.AutoSize = True
-        MCK_关联不常见视频.BackColor = Color.Transparent
-        MCK_关联不常见视频.BoxBorderRadius = 5
-        MCK_关联不常见视频.BoxBorderSize = 0
-        MCK_关联不常见视频.BoxCheckedBackColor = Color.OliveDrab
-        MCK_关联不常见视频.BoxInnerPadding = 6
-        MCK_关联不常见视频.BoxSize = 24
-        MCK_关联不常见视频.BoxTextSpacing = 10
-        MCK_关联不常见视频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_关联不常见视频.Dock = DockStyle.Top
-        MCK_关联不常见视频.Location = New Point(15, 54)
-        MCK_关联不常见视频.Name = "MCK_关联不常见视频"
-        MCK_关联不常见视频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联不常见视频.Size = New Size(519, 34)
-        MCK_关联不常见视频.TabIndex = 31
-        MCK_关联不常见视频.Text = "不常见视频"
-        ' 
-        ' MCK_关联常见视频
-        ' 
-        MCK_关联常见视频.AutoSize = True
-        MCK_关联常见视频.BackColor = Color.Transparent
-        MCK_关联常见视频.BoxBorderRadius = 5
-        MCK_关联常见视频.BoxBorderSize = 0
-        MCK_关联常见视频.BoxCheckedBackColor = Color.OliveDrab
-        MCK_关联常见视频.BoxInnerPadding = 6
-        MCK_关联常见视频.BoxSize = 24
-        MCK_关联常见视频.BoxTextSpacing = 10
-        MCK_关联常见视频.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_关联常见视频.Dock = DockStyle.Top
-        MCK_关联常见视频.Location = New Point(15, 20)
-        MCK_关联常见视频.Name = "MCK_关联常见视频"
-        MCK_关联常见视频.Padding = New Padding(0, 0, 0, 10)
-        MCK_关联常见视频.Size = New Size(519, 34)
-        MCK_关联常见视频.TabIndex = 30
-        MCK_关联常见视频.Text = "常见视频"
+        UltraDetailListView1.AllowColumnResize = False
+        UltraDetailListView1.AnimationDuration = 300
+        UltraDetailListView1.BackColor = Color.Transparent
+        UltraDetailListView1.BackgroundColor = Color.Transparent
+        UltraDetailListView1.BorderSize = 0
+        UltraDetailListView1.BottomLinesSpacing = 3
+        UltraDetailListView1.CheckBoxBorderRadius = 3
+        UltraDetailListView1.CheckBoxBorderSize = 0
+        UltraDetailListView1.CheckBoxInnerPadding = 5
+        UltraDetailListView1.CheckBoxSize = 20
+        UltraDetailListView1.CheckBoxUncheckedBackColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.CheckBoxVisible = True
+        UltraDetailListView1.Dock = DockStyle.Fill
+        UltraDetailListView1.GroupBackColor = Color.Transparent
+        UltraDetailListView1.GroupBorderColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.GroupForeColor = Color.Gainsboro
+        UltraDetailListView1.GroupHeight = 35
+        UltraDetailListView1.HeaderBackColor = Color.Transparent
+        UltraDetailListView1.HeaderBorderColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.HeaderBorderWidth = 2
+        UltraDetailListView1.HeaderForeColor = Color.DarkGray
+        UltraDetailListView1.HeaderHeight = 40
+        UltraDetailListView1.HeaderVisible = False
+        UltraDetailListView1.ItemCornerRadius = 10
+        UltraDetailListView1.ItemPadding = New Padding(10, 5, 5, 5)
+        UltraDetailListView1.ItemSelectedBackColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.Location = New Point(5, 5)
+        UltraDetailListView1.Margin = New Padding(2, 2, 2, 2)
+        UltraDetailListView1.MoreIndicatorColor = Color.FromArgb(CByte(120), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.Name = "UltraDetailListView1"
+        UltraDetailListView1.ScrollBarThumbColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.ScrollBarThumbHoverColor = Color.FromArgb(CByte(120), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.ScrollBarTrackColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.SelectionRectBorderColor = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.SelectionRectFillColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        UltraDetailListView1.Size = New Size(544, 451)
+        UltraDetailListView1.TabIndex = 8
         ' 
         ' Form设置_文件关联
         ' 
         AutoScaleDimensions = New SizeF(96F, 96F)
         AutoScaleMode = AutoScaleMode.Dpi
         BackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))
-        ClientSize = New Size(554, 419)
+        ClientSize = New Size(554, 461)
         Controls.Add(ModernPanel1)
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver
         Name = "Form设置_文件关联"
         Text = "Form设置_文件关联"
         ModernPanel1.ResumeLayout(False)
-        ModernPanel1.PerformLayout()
         ResumeLayout(False)
     End Sub
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
-    Friend WithEvents MCK_关联不常见视频 As LakeUI.ModernCheckBox
-    Friend WithEvents MCK_关联常见视频 As LakeUI.ModernCheckBox
-    Friend WithEvents MCK_关联老旧视频 As LakeUI.ModernCheckBox
-    Friend WithEvents MCK_关联老旧音频 As LakeUI.ModernCheckBox
-    Friend WithEvents MCK_关联不常见音频 As LakeUI.ModernCheckBox
-    Friend WithEvents MCK_关联常见音频 As LakeUI.ModernCheckBox
-    Friend WithEvents MCK_关联常见图片 As LakeUI.ModernCheckBox
-    Friend WithEvents MCK_关联不常见图片 As LakeUI.ModernCheckBox
-    Friend WithEvents MCK_关联老旧图片 As LakeUI.ModernCheckBox
-    Friend WithEvents MCK_关联相机RAW As LakeUI.ModernCheckBox
+    Friend WithEvents UltraDetailListView1 As 文件关联列表
 End Class

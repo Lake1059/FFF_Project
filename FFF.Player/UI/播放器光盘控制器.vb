@@ -7,7 +7,8 @@ Friend NotInheritable Class 播放器光盘控制器
     Private ReadOnly 画面 As 播放器画面控件
     Private ReadOnly 播放器 As 播放器控制器
     Private ReadOnly 菜单 As LakeUI.ModernContextMenu
-    Private ReadOnly 刷新计时器 As New Timer With {.Interval = 1000}
+    Private ReadOnly 刷新计时器 As LakeUI.PrecisionTimer
+    Private 已释放 As Boolean
     Private 状态 As New 光盘状态()
     Private 上次鼠标提交 As Long
     Private 菜单项已显示 As Boolean
@@ -17,6 +18,11 @@ Friend NotInheritable Class 播放器光盘控制器
 
     Friend Sub New(窗体 As Form, 视频 As 播放器画面控件, 控制器 As 播放器控制器, 标题菜单 As LakeUI.ModernContextMenu)
         主窗体 = 窗体 : 画面 = 视频 : 播放器 = 控制器 : 菜单 = 标题菜单
+        刷新计时器 = New LakeUI.PrecisionTimer With {
+            .Interval = 1000, .SynchronizingObject = 主窗体,
+            .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
+            .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop
+        }
         根菜单项 = New LakeUI.ModernContextMenu.ModernMenuItem("光盘菜单页面")
         叠加层项 = New LakeUI.ModernContextMenu.ModernMenuItem("光盘菜单叠加层")
         绑定命令(根菜单项, 光盘命令.根菜单)
@@ -89,6 +95,7 @@ Friend NotInheritable Class 播放器光盘控制器
     End Sub
 
     Private Sub 刷新(sender As Object, e As EventArgs)
+        If 已释放 Then Return
         状态 = 播放器.读取光盘状态()
         Dim 快照 = 播放器.安全读取快照()
         If 快照 Is Nothing OrElse 快照.状态 = 播放状态.失败 OrElse 快照.状态 = 播放状态.正在打开 Then 状态 = New 光盘状态()
@@ -146,7 +153,11 @@ Friend NotInheritable Class 播放器光盘控制器
     End Sub
 
     Public Sub Dispose() Implements IDisposable.Dispose
-        刷新计时器.Stop() : 刷新计时器.Dispose()
+        If 已释放 Then Return
+        已释放 = True
+        刷新计时器.Stop()
+        RemoveHandler 刷新计时器.Tick, AddressOf 刷新
+        刷新计时器.Dispose()
         RemoveHandler 播放器.媒体已打开, AddressOf 刷新
         RemoveHandler 画面.光盘鼠标移动, AddressOf 鼠标移动
         RemoveHandler 画面.光盘鼠标确认, AddressOf 鼠标确认

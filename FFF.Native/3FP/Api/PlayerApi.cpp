@@ -225,6 +225,12 @@ FFFResult FFF3FP_GetRawInfo(const FFF3FPHandle player, FFF3FPRawInfo* info) noex
     return player && info ? static_cast<PlayerSession*>(player)->GetRawInfo(*info)
         : FFFResult::InvalidArgument;
 }
+FFFResult FFF3FP_SetAudioLoudness(const FFF3FPHandle player, const std::uint32_t enabled,
+    const std::int32_t targetLufs, const std::int32_t rangeLu) noexcept {
+    return player && enabled <= 1
+        ? static_cast<PlayerSession*>(player)->SetAudioLoudness(enabled != 0, targetLufs, rangeLu)
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_SetAudioEndpoint(const FFF3FPHandle player, const char* endpoint) noexcept { return player ? static_cast<PlayerSession*>(player)->SetAudioEndpoint(endpoint) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetAudioExclusiveMode(const FFF3FPHandle player, const std::uint32_t exclusive) noexcept {
     return player && exclusive <= 1 ? static_cast<PlayerSession*>(player)->SetAudioExclusiveMode(exclusive != 0)
@@ -288,6 +294,12 @@ FFFResult FFF3FP_GetAudioPeakLevels(const FFF3FPHandle player,
     FFF3FPAudioPeakLevels* levels) noexcept {
     return player && levels ? static_cast<PlayerSession*>(player)->GetAudioPeakLevels(*levels)
         : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_GetSubtitlePresentation(const FFF3FPHandle player,
+    std::uint64_t* const sequence, std::int64_t* const qpc) noexcept {
+    if (!player || !sequence || !qpc) return FFFResult::InvalidArgument;
+    static_cast<PlayerSession*>(player)->GetSubtitlePresentation(*sequence, *qpc);
+    return FFFResult::Success;
 }
 FFFResult FFF3FP_GetTimedTextStatus(const FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept {
@@ -371,6 +383,24 @@ FFFResult FFF3FP_GetLastError(const FFF3FPHandle player, char* output, const std
 FFFResult FFF3FP_ProbeSubtitleStreams(const char* localPathUtf8, char* output, const std::uint32_t size,
     std::uint32_t* required) noexcept { try { return ProbeSubtitleStreams(localPathUtf8, output, size, required); } catch (...) { return FFFResult::NativeFailure; } }
 // Render-target diagnostics
+FFFResult FFF3FP_SetVideoRenderBackend(const FFF3FPHandle player, const std::uint32_t backend) noexcept {
+    return player != nullptr ? static_cast<PlayerSession*>(player)->SetVideoRenderBackend(backend) : FFFResult::InvalidArgument;
+}
+
+FFFResult FFF3FP_GetVideoRenderBackend(const FFF3FPHandle player, std::uint32_t* const backend) noexcept {
+    if (player == nullptr || backend == nullptr) return FFFResult::InvalidArgument;
+    *backend = static_cast<PlayerSession*>(player)->ActiveVideoRenderBackend();
+    return FFFResult::Success;
+}
+
+FFFResult FFF3FP_GetVideoRenderDiagnostics(const FFF3FPHandle player,
+    FFF3FPVideoRenderDiagnostics* const status) noexcept {
+    if (!player || !status || status->size < sizeof(*status) || status->version != 20)
+        return FFFResult::InvalidArgument;
+    static_cast<PlayerSession*>(player)->GetVideoRenderDiagnostics(*status);
+    return FFFResult::Success;
+}
+
 FFFResult FFF3FP_GetRenderTargetInfo(const FFF3FPHandle player,
     FFF3FPRenderTargetInfo* info) noexcept {
     return player && info ? static_cast<PlayerSession*>(player)->GetRenderTargetInfo(*info)
@@ -587,6 +617,11 @@ FFFResult FFF3FP_ReadAudioTap(const FFF3FPHandle player, void* const dst,
         : FFFResult::InvalidArgument;
 }
 
+FFFResult FFF3FP_GetAudioTapReadAhead(const FFF3FPHandle player, std::uint32_t* const readingAhead) noexcept {
+    if (!player || !readingAhead) return FFFResult::InvalidArgument;
+    *readingAhead = static_cast<PlayerSession*>(player)->IsAudioTapReadingAhead() ? 1u : 0u;
+    return FFFResult::Success;
+}
 FFFResult FFF3FP_GetAudioTapStats(const FFF3FPHandle player,
     FFF3FPAudioTapStats* const stats) noexcept {
     return player != nullptr

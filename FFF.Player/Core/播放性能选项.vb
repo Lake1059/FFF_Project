@@ -1,6 +1,7 @@
 ' 设置页只写偏好；一次媒体打开捕获一份快照，用于创建和复用会话。
 ' 新偏好不能漏过原位重开路径，否则缩放质量/解码设备会一直沿用旧会话。
 Friend Structure 播放性能选项
+    Friend ReadOnly 渲染引擎 As 播放器渲染引擎
     Friend ReadOnly 缩放质量 As 视频缩放质量
     Friend ReadOnly GPU设备标识 As String
     Friend ReadOnly GPU设备索引 As Integer
@@ -10,6 +11,7 @@ Friend Structure 播放性能选项
     Friend ReadOnly 启用单声道音频 As Boolean
 
     Friend Sub New(配置 As 设置, Optional 枚举设备 As Func(Of IReadOnlyList(Of GPU解码设备)) = Nothing)
+        渲染引擎 = 配置.视频渲染引擎
         缩放质量 = CType(配置.视频缩放质量选项, 视频缩放质量)
         GPU设备标识 = 配置.GPU解码设备标识
         GPU设备索引 = -1

@@ -1,16 +1,20 @@
 Imports System
 Imports System.Collections.Generic
+Imports System.Drawing
 Imports System.IO
 Imports System.Linq
 Imports System.Reflection
+Imports System.Text.Json
 Imports System.Text.RegularExpressions
+Imports System.Windows.Forms
 Imports Microsoft.Win32
 Imports FFF.Player
+Imports LakeUI
 
 ''' <summary>相机 RAW 关联/打开白名单回归。
 ''' 跑法：dotnet FFF.Player.Tests.dll --raw-file-association-regression
 ''' （注册表往返必须用 dotnet 宿主；未签名的 apphost 会被系统拒绝写 HKCU）
-''' 判据：关联档位、播放列表媒体/图片白名单、RAW 识别必须共用 Raw格式.扩展名列表；
+''' 判据：RAW 分组、播放列表媒体/图片白名单、RAW 识别必须共用 Raw格式.扩展名列表；
 ''' 任何一处漏项都会让“设置页可勾选但双击打不开”或“能打开但图片模式不认”重新出现。</summary>
 Friend Module 文件关联回归
 
@@ -25,7 +29,7 @@ Friend Module 文件关联回归
             Console.WriteLine("FAIL  随包 libraw.dll 未启用 X3F 支持（需要 USE_X3FTOOLS）；不能把 .x3f 当普通 RAW 承诺")
         ElseIf Not 关联扩展名.Contains(".x3f") Then
             失败 += 1
-            Console.WriteLine("FAIL  LibRaw 已启用 X3F，但 RAW 关联档位缺少 .x3f")
+            Console.WriteLine("FAIL  LibRaw 已启用 X3F，但 RAW 关联分组缺少 .x3f")
         End If
 
         If Not 播放列表.相机RAW格式筛选器.Contains("*.dng") Then
@@ -33,69 +37,18 @@ Friend Module 文件关联回归
             Console.WriteLine("FAIL  RAW 打开对话框筛选器未包含 *.dng")
         End If
 
-        ' 设置页布局用反射实例化，避免测试工程为 LakeUI 控件类型再加一条编译引用。
-        Dim 窗体类型 = GetType(Form1).Assembly.GetType("FFF.Player.Form设置_文件关联", throwOnError:=True)
-        Dim 窗体 = DirectCast(Activator.CreateInstance(窗体类型), System.Windows.Forms.Form)
-        Try
-            窗体.PerformLayout()
-            Dim 面板 As System.Windows.Forms.Control = Nothing
-            For Each 控件 As System.Windows.Forms.Control In 窗体.Controls
-                If 控件.Name = "ModernPanel1" Then 面板 = 控件
-            Next
-            Dim 相机复选框 As System.Windows.Forms.Control = Nothing
-            If 面板 IsNot Nothing Then
-                For Each 控件 As System.Windows.Forms.Control In 面板.Controls
-                    If 控件.Name = "MCK_关联相机RAW" Then 相机复选框 = 控件
-                Next
-            End If
-            If 相机复选框 Is Nothing Then
-                失败 += 1
-                Console.WriteLine("FAIL  设置页未找到 MCK_关联相机RAW")
-            ElseIf 相机复选框.Bottom > 窗体.ClientSize.Height Then
-                失败 += 1
-                Console.WriteLine($"FAIL  设置页相机 RAW 复选框超出客户区：bottom={相机复选框.Bottom}, client={窗体.ClientSize.Height}")
-            End If
-            If 相机复选框 IsNot Nothing Then
-                Dim 初始化方法 = 窗体类型.GetMethod("初始化页面",
-                    BindingFlags.NonPublic Or BindingFlags.Instance)
-                If 初始化方法 Is Nothing Then
-                    失败 += 1
-                    Console.WriteLine("FAIL  设置页缺少 初始化页面")
-                Else
-                    Dim 原值 = 设置.实例对象.关联相机RAW
-                    Try
-                        设置.实例对象.关联相机RAW = True
-                        初始化方法.Invoke(窗体, Nothing)
-                        Dim 选中 = CBool(相机复选框.GetType().GetProperty("Checked").GetValue(相机复选框))
-                        If Not 选中 Then
-                            失败 += 1
-                            Console.WriteLine("FAIL  设置.关联相机RAW=True 未加载到设置页复选框")
-                        End If
-                        设置.实例对象.关联相机RAW = False
-                        初始化方法.Invoke(窗体, Nothing)
-                        Dim 未选中 = CBool(相机复选框.GetType().GetProperty("Checked").GetValue(相机复选框))
-                        If 未选中 Then
-                            失败 += 1
-                            Console.WriteLine("FAIL  设置.关联相机RAW=False 仍显示为勾选")
-                        End If
-                    Finally
-                        设置.实例对象.关联相机RAW = 原值
-                    End Try
-                End If
-            End If
-        Finally
-            窗体.Dispose()
-        End Try
+        运行设置页(失败)
+        运行列表交互(失败)
 
         If 关联扩展名.Count <> Raw格式.扩展名列表.Length Then
             失败 += 1
-            Console.WriteLine($"FAIL  RAW 关联档位数量：期望 {Raw格式.扩展名列表.Length}，实际 {关联扩展名.Count}")
+            Console.WriteLine($"FAIL  RAW 关联分组数量：期望 {Raw格式.扩展名列表.Length}，实际 {关联扩展名.Count}")
         End If
 
         For Each 扩展名 In Raw格式.扩展名列表
             If Not 关联扩展名.Contains(扩展名) Then
                 失败 += 1
-                Console.WriteLine($"FAIL  关联档位缺少 {扩展名}")
+                Console.WriteLine($"FAIL  RAW 关联分组缺少 {扩展名}")
             End If
             If Not 播放列表.是支持的媒体文件("sample" & 扩展名) Then
                 失败 += 1
@@ -128,10 +81,102 @@ Friend Module 文件关联回归
         Return If(失败 = 0, 0, 1)
     End Function
 
+    Private Sub 运行设置页(ByRef 失败 As Integer)
+        Dim 原设置 = 设置.实例对象
+        Try
+            设置.实例对象 = New 设置 With {.关联扩展名 = {".mp4", ".DNG"}}
+            Using 窗体 As New Form设置_文件关联()
+                窗体.初始化页面()
+                Dim 列表 = 窗体.UltraDetailListView1
+                Dim 类别集合 = [Enum].GetValues(Of 文件关联类别)()
+                断言条件(列表.Groups.Count = 类别集合.Length, "列表分组数量与关联类别一致", 失败)
+                For Each 类别 In 类别集合
+                    Dim 组名 = 类别.ToString()
+                    Dim 实际 = 列表.Items.Where(Function(项) 项.GroupName = 组名).Select(Function(项) CStr(项.Tag))
+                    断言条件(实际.SequenceEqual(文件关联管理器.取得扩展名(类别)), $"{组名}显示对应的扩展名", 失败)
+                Next
+                断言条件(列表.MultiSelect AndAlso Not 列表.AllowDragReorder AndAlso Not 列表.AllowColumnResize,
+                        "列表开启多选并禁用拖动排序和手动列宽", 失败)
+                断言条件(列表.CheckedItems.Select(Function(项) CStr(项.Tag)).SequenceEqual({".mp4", ".dng"}),
+                        "列表只勾选配置中的后缀", 失败)
+                Dim 原数量 = 列表.Items.Count
+                设置.实例对象.关联扩展名 = {".mkv"}
+                窗体.初始化页面()
+                断言条件(列表.Items.Count = 原数量 AndAlso
+                        列表.CheckedItems.Select(Function(项) CStr(项.Tag)).SequenceEqual({".mkv"}),
+                        "重新初始化回显新勾选且不重复增加列表项", 失败)
+
+                窗体.PerformLayout()
+                Dim 原列宽 = 列表.Columns(0).Width
+                Dim 原列表宽 = 列表.ClientSize.Width
+                窗体.ClientSize = New Size(窗体.ClientSize.Width + 80, 窗体.ClientSize.Height)
+                断言条件(列表.Columns(0).Width > 原列宽 AndAlso
+                        列表.Columns(0).Width - 原列宽 = 列表.ClientSize.Width - 原列表宽,
+                        "列宽跟随列表调整", 失败)
+                Dim 滚动条宽 = CInt(列表.ScrollBarWidth * D3D_D2DInterop.GetCurrentDpiScale(列表))
+                断言条件(列表.ClientSize.Width - 列表.Columns(0).Width >= 滚动条宽 + D3D_ScrollBarRenderer.Margin * 2,
+                        "列宽预留纵向滚动条及其命中区", 失败)
+            End Using
+        Finally
+            设置.实例对象 = 原设置
+        End Try
+    End Sub
+
+    Private Sub 运行列表交互(ByRef 失败 As Integer)
+        Using 列表 As New 可测试关联列表 With {
+            .Size = New Size(220, 200), .CheckBoxVisible = True, .CheckBoxSize = 20,
+            .CheckBoxBorderSize = 0, .BorderSize = 0, .ItemPadding = New Padding(8, 4, 4, 4)}
+            列表.Columns.Add(New UltraDetailListView.ListColumn("扩展名", 180))
+            Dim 首项 As New UltraDetailListView.ListItem(New UltraDetailListView.ListSubItem(".mp4"))
+            Dim 次项 As New UltraDetailListView.ListItem(New UltraDetailListView.ListSubItem(".mkv")) With {.Checked = True}
+            Dim 其他项 As New UltraDetailListView.ListItem(New UltraDetailListView.ListSubItem(".mov")) With {.Checked = True}
+            列表.Items.AddRange({首项, 次项, 其他项})
+            首项.Selected = True
+            次项.Selected = True
+            Dim 已处理 = 列表.模拟按键(Keys.Enter)
+            断言条件(已处理 AndAlso 首项.Checked AndAlso 次项.Checked AndAlso 其他项.Checked,
+                    "Enter 勾选所选项并保留已勾选状态", 失败)
+            已处理 = 列表.模拟按键(Keys.Delete)
+            断言条件(已处理 AndAlso Not 首项.Checked AndAlso Not 次项.Checked AndAlso 其他项.Checked,
+                    "Delete 取消所选项，保留未选中项的勾选", 失败)
+            断言条件(列表.SelectedItems.Count = 2, "批量勾选不改变列表选区", 失败)
+
+            Dim 首行坐标 = Enumerable.Range(0, 列表.ClientSize.Height).Where(Function(y) 列表.GetItemAt(100, y) Is 首项).ToArray()
+            断言条件(首行坐标.Length > 0, "列表可命中第一行", 失败)
+            If 首行坐标.Length = 0 Then Return
+            Dim 行中点 = 首行坐标(首行坐标.Length \ 2)
+            列表.模拟双击(MouseButtons.Left, New Point(100, 行中点))
+            断言条件(首项.Checked AndAlso Not 次项.Checked AndAlso 其他项.Checked, "双击行只切换该行的勾选", 失败)
+            列表.模拟双击(MouseButtons.Right, New Point(100, 行中点))
+            断言条件(首项.Checked, "右键双击不改变勾选", 失败)
+            Dim 复选框中点 = CInt((列表.ItemPadding.Left + 列表.CheckBoxSize / 2.0F) * 列表.DeviceDpi / 96.0F)
+            列表.模拟双击(MouseButtons.Left, New Point(复选框中点, 行中点))
+            断言条件(Not 首项.Checked, "双击复选框的结果仍是切换一次", 失败)
+        End Using
+    End Sub
+
+    Private Class 可测试关联列表
+        Inherits 文件关联列表
+
+        Friend Function 模拟按键(按键 As Keys) As Boolean
+            Dim 消息 As New Message()
+            Return ProcessCmdKey(消息, 按键)
+        End Function
+
+        Friend Sub 模拟双击(按钮 As MouseButtons, 位置 As Point)
+            Dim 单击 As New MouseEventArgs(按钮, 1, 位置.X, 位置.Y, 0)
+            Dim 双击 As New MouseEventArgs(按钮, 2, 位置.X, 位置.Y, 0)
+            OnMouseDown(单击)
+            OnMouseUp(单击)
+            OnMouseDown(双击)
+            OnMouseDoubleClick(双击)
+            OnMouseUp(单击)
+        End Sub
+    End Class
+
     ''' <summary>在独立的 HKCU 测试根上跑一次注册→回读→注销→恢复，不碰真实 .dng 关联。</summary>
     Private Sub 运行注册表往返(ByRef 失败 As Integer)
-        Dim 测试根 = "Software\Classes\3FCompareTests"
-        Dim 根 = 测试根 & "\RawAssociation\" & Guid.NewGuid().ToString("N")
+        Dim 根 = "Software\Classes\3FCompareRawAssociationTest-" & Guid.NewGuid().ToString("N")
         Dim 位置 As New 文件关联注册表位置(
             根 & "\Classes", 根 & "\Application", 根 & "\RegisteredApplications")
         Dim 程序路径 = Path.Combine(AppContext.BaseDirectory, "FFF.Player.exe")
@@ -152,8 +197,8 @@ Friend Module 文件关联回归
                 End Using
             End Using
 
-            Dim 选项 As New 文件关联选项 With {.关联相机RAW = True}
-            调用同步核心(选项, 程序路径, 位置)
+            Dim 配置 As New 设置 With {.关联扩展名 = {".dng"}}
+            调用同步核心(文件关联选项.从设置(配置), 程序路径, 位置)
 
             断言字符串(位置.ClassesRoot & "\.dng", String.Empty, "FFF.Player.dng", 失败)
             断言字符串(位置.ClassesRoot & "\.dng", "Content Type", "image/x-adobe-dng", 失败)
@@ -166,26 +211,41 @@ Friend Module 文件关联回归
             断言字符串(位置.RegisteredApplications, "FFF.Player", 位置.CapabilitiesRoot, 失败)
             断言键存在(位置.ApplicationRoot & "\FileAssociationBackups\dng", True, 失败)
 
-            ' 全部取消后：恢复原有 .dng 值，删掉本程序自己的 ProgID/应用注册，不碰其他值。
-            Dim 空选项 As New 文件关联选项()
-            调用同步核心(空选项, 程序路径, 位置)
+            断言键存在(位置.ClassesRoot & "\.nef", False, 失败)
+            断言值存在(位置.CapabilitiesRoot & "\FileAssociations", ".nef", False, 失败)
+            断言值存在(位置.ClassesRoot & "\Applications\FFF.Player.exe\SupportedTypes", ".nef", False, 失败)
+
+            ' 关联两个同组后缀后只取消 .dng，.nef 仍应关联到播放器。
+            配置.关联扩展名 = {".dng", ".nef"}
+            调用同步核心(文件关联选项.从设置(配置), 程序路径, 位置)
+            配置.关联扩展名 = {".nef"}
+            调用同步核心(文件关联选项.从设置(配置), 程序路径, 位置)
 
             断言字符串(位置.ClassesRoot & "\.dng", String.Empty, "Existing.DNG", 失败)
             断言字符串(位置.ClassesRoot & "\.dng", "Content Type", "image/x-existing", 失败)
             断言字符串(位置.ClassesRoot & "\.dng", "PerceivedType", "document", 失败)
             断言值存在(位置.ClassesRoot & "\.dng\OpenWithProgids", "FFF.Player.dng", False, 失败)
             断言值存在(位置.ClassesRoot & "\.dng\OpenWithProgids", "Existing.DNG", True, 失败)
-            断言键存在(位置.ApplicationRoot & "\Applications\FFF.Player.exe", False, 失败)
+            断言键存在(位置.ClassesRoot & "\FFF.Player.dng", False, 失败)
+            断言键存在(位置.ApplicationRoot & "\FileAssociationBackups\dng", False, 失败)
+            断言字符串(位置.ClassesRoot & "\.nef", String.Empty, "FFF.Player.nef", 失败)
+            断言值存在(位置.ClassesRoot & "\Applications\FFF.Player.exe\SupportedTypes", ".dng", False, 失败)
+            断言值存在(位置.ClassesRoot & "\Applications\FFF.Player.exe\SupportedTypes", ".nef", True, 失败)
+            断言值存在(位置.CapabilitiesRoot & "\FileAssociations", ".dng", False, 失败)
+            断言字符串(位置.CapabilitiesRoot & "\FileAssociations", ".nef", "FFF.Player.nef", 失败)
+
+            配置.关联扩展名 = Array.Empty(Of String)()
+            调用同步核心(文件关联选项.从设置(配置), 程序路径, 位置)
+            断言键存在(位置.ClassesRoot & "\.nef", False, 失败)
+            断言键存在(位置.ClassesRoot & "\Applications\FFF.Player.exe", False, 失败)
             断言键存在(位置.CapabilitiesRoot, False, 失败)
             断言值存在(位置.RegisteredApplications, "FFF.Player", False, 失败)
-            断言键存在(位置.ApplicationRoot & "\FileAssociationBackups\dng", False, 失败)
         Catch ex As Exception
             失败 += 1
             Console.WriteLine($"FAIL  注册表往返异常：{ex}")
         Finally
             Try
                 Registry.CurrentUser.DeleteSubKeyTree(根, False)
-                Registry.CurrentUser.DeleteSubKeyTree(测试根, False)
             Catch ex As Exception
                 Console.WriteLine($"WARN  清理临时注册表根失败：{ex.Message}")
             End Try
@@ -193,19 +253,19 @@ Friend Module 文件关联回归
     End Sub
 
     Private Sub 运行设置映射往返(ByRef 失败 As Integer)
-        Dim 设置对象 As New 设置()
-        设置对象.关联相机RAW = True
-        Dim 选项 = 文件关联选项.从设置(设置对象)
-        If Not 选项.已启用(文件关联类别.相机RAW) Then
-            失败 += 1
-            Console.WriteLine("FAIL  设置.关联相机RAW=True 未映射到关联选项")
-        End If
-        设置对象.关联相机RAW = False
-        Dim 关闭选项 = 文件关联选项.从设置(设置对象)
-        If 关闭选项.已启用(文件关联类别.相机RAW) Then
-            失败 += 1
-            Console.WriteLine("FAIL  设置.关联相机RAW=False 仍映射为启用")
-        End If
+        Dim 配置 As New 设置 With {.关联扩展名 = {".DNG", ".mp4"}}
+        Dim 回读 = JsonSerializer.Deserialize(Of 设置)(JsonSerializer.Serialize(配置))
+        Dim 选项 = 文件关联选项.从设置(回读)
+        断言条件(选项.已启用(".dng") AndAlso 选项.已启用(".mp4") AndAlso Not 选项.已启用(".nef"),
+                "JSON 回读后仍按扩展名独立启用，忽略大小写", 失败)
+        Dim 空选项 = 文件关联选项.从设置(JsonSerializer.Deserialize(Of 设置)("{}"))
+        断言条件(Not 空选项.已启用(".dng"), "缺少扩展名设置时默认未勾选", 失败)
+    End Sub
+
+    Private Sub 断言条件(条件 As Boolean, 说明 As String, ByRef 失败 As Integer)
+        If 条件 Then Return
+        失败 += 1
+        Console.WriteLine("FAIL  " & 说明)
     End Sub
 
     Private Sub 运行宿主内核一致(ByRef 失败 As Integer)

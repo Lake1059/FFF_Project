@@ -1,6 +1,3 @@
-Option Strict On
-Option Explicit On
-
 Imports System.Collections.Concurrent
 Imports System.Diagnostics
 Imports System.IO
@@ -53,6 +50,18 @@ Friend NotInheritable Class Ai字幕管道
     Private _结果线程代 As Integer = 0
     Private _停止事件 As New ManualResetEventSlim(False)
     Private _已释放 As Boolean = False
+    Private _推理设备 As String = ""
+    Private _推理忙 As Integer
+    Private _推理开始 As Long
+    Private _指定后端 As String = ""
+
+    Public Function 性能文本(呈现延迟 As Double) As String
+        If Not 运行中 Then Return String.Empty
+        Dim 设备 = Volatile.Read(_推理设备)
+        Dim 状态 = If(设备 = "", "加载模型", If(Volatile.Read(_推理忙) <> 0, "正在推理", "当前闲置"))
+        Dim 延迟 = If(呈现延迟 >= 0, $"{呈现延迟:0} ms", "—")
+        Return $"AI 字幕   {If(设备 = "", "—", 设备)}   {状态}   {延迟}"
+    End Function
 
 
     ' 语言闸门丢弃计数：只有 result 线程读写，不需要锁。
@@ -103,7 +112,8 @@ Friend NotInheritable Class Ai字幕管道
                         Optional 双语 As String = "") As Boolean
         If _已释放 Then Return False
         If 配置 Is Nothing Then Return False
-        If String.IsNullOrWhiteSpace(配置.Worker脚本) OrElse Not IO.File.Exists(配置.Worker脚本) Then
+        Dim 脚本 = Ai字幕包.生效Worker脚本(配置)
+        If String.IsNullOrWhiteSpace(脚本) OrElse Not IO.File.Exists(脚本) Then
             Return False
         End If
         Dim 窗口秒 = If(窗口覆盖 > 0, 窗口覆盖, 配置.窗口秒)
@@ -133,6 +143,8 @@ Friend NotInheritable Class Ai字幕管道
                         后端.Trim().ToLowerInvariant())
         SyncLock 锁
             If _进程 IsNot Nothing AndAlso Not _进程.HasExited Then Return True
+            _进程?.Dispose()
+            _进程 = Nothing
             ' 合并裁定（forkfb/prbranch 3e0b27d / cf7b6c6）：llama 版的模型目录推导与
             ' 临时目录探测不适用于 sherpa 版 —— 音频以 numpy 进推理不落盘，worker
             ' 没有 --tmp-dir 参数；探测反而正是 cf7b6c6 要消掉的噪声源。代次 gate
@@ -149,7 +161,8 @@ Friend NotInheritable Class Ai字幕管道
                 .StandardErrorEncoding = Encoding.UTF8,
                 .WindowStyle = ProcessWindowStyle.Hidden
             }
-            启动信息.ArgumentList.Add(配置.Worker脚本)
+            启动信息.ArgumentList.Add("-B")
+            启动信息.ArgumentList.Add(脚本)
             启动信息.ArgumentList.Add("--model-dir")
             启动信息.ArgumentList.Add(模型目录)
             启动信息.ArgumentList.Add("--window")
@@ -174,18 +187,11 @@ Friend NotInheritable Class Ai字幕管道
             启动信息.ArgumentList.Add(Math.Max(0, 线程数).ToString(Globalization.CultureInfo.InvariantCulture))
             ' 双语空串也显式传：worker 日志里能直接看出这一路是关着还是开着。
             启动信息.ArgumentList.Add("--bilingual")
-            启动信息.ArgumentList.Add(Ai字幕双语.传参值(双语))
-            If Ai字幕双语.已启用(双语) AndAlso
-               Not String.Equals(配置.引擎, Ai字幕包.引擎Llama, StringComparison.OrdinalIgnoreCase) Then
-                ' 双语靠 llama 的 /completion 续写，ONNX 那条腿没有文本生成能力。
-                ' 提前说清楚：否则用户要等到一行译文都不出现才发现"这个包不支持"。
-            End If
-            If Not Ai字幕推理档.当前worker可用(推理档, 配置.引擎) Then
-                ' worker 不认这个后端（例如 GGUF 包收到 dml），它会按 auto 处理。
-                ' 这句必须提前说：否则用户会以为选了 DirectML 就在 DirectML 上跑。
-            End If
-            ' 「（提示，不筛除）」是旧文案：worker 已不接受语言提示，且闸门开不开由
-            ' 设置决定、不由这句决定。写"提示"等于告诉用户有个不存在的提示通道。
+            _指定后端 = 推理档
+            Volatile.Write(_推理设备, "")
+            Volatile.Write(_推理忙, 0)
+            _推理开始 = 0
+            启动信息.ArgumentList.Add(If(Ai字幕双语.已启用(双语), Ai字幕双语.中文在上, Ai字幕双语.关闭))
             ' OpenVINO 的匿名遥测默认收集；worker 是隐藏窗口、无 TTY，不能指望它弹
             ' consent 对话框。仅在 consent 文件不存在时写 "0"（拒绝），已有 "1"
             ' （用户明确同意）不覆盖——这既避免静默上报，也不篡改用户选择。
@@ -242,8 +248,11 @@ Friend NotInheritable Class Ai字幕管道
                 End If
             End If
         Catch ex As Exception
+            Debug.WriteLine(ex)
+        Finally
+            进程本地.Dispose()
+            状态机?.通知Worker已退出()
         End Try
-        状态机?.通知Worker已退出()
     End Sub
 
     ' ---------------- pump 线程：内核环 → worker stdin ----------------
@@ -270,6 +279,10 @@ Friend NotInheritable Class Ai字幕管道
                     Dim 结果 = 读音频Tap(句柄, 缓冲, 块)
                     Select Case 结果
                         Case 原生播放器结果.成功
+                            If 块.已写字节数 = 0UI AndAlso 块.采样格式 = -2 Then
+                                If Not 写帧(块, 缓冲) Then Return
+                                Continue While
+                            End If
                             If 块.已写字节数 = 0UI Then
                                 ' 空环：tap 未装（会话未开）或已排空。
                                 If _停止事件.Wait(空转睡眠毫秒) Then Return
@@ -310,6 +323,7 @@ Friend NotInheritable Class Ai字幕管道
         Try
             Dim 元数据 = New StringBuilder(192)
             元数据.Append("{""generation"":").Append(块.代次.ToString(Globalization.CultureInfo.InvariantCulture))
+            If 块.采样格式 = -2 Then 元数据.Append(",""kind"":""eof""")
             元数据.Append(",""position100ns"":").Append(块.位置100纳秒.ToString(Globalization.CultureInfo.InvariantCulture))
             元数据.Append(",""frames"":").Append(块.帧数.ToString(Globalization.CultureInfo.InvariantCulture))
             元数据.Append(",""sampleRate"":").Append(块.采样率.ToString(Globalization.CultureInfo.InvariantCulture))
@@ -356,13 +370,15 @@ Friend NotInheritable Class Ai字幕管道
                 进程本地 = _进程
             End SyncLock
             If 进程本地 Is Nothing Then Return
-            Dim 读取器 = 进程本地.StandardOutput
-            While Not _停止事件.IsSet
-                Dim 行 = 读取器.ReadLine()
-                If 行 Is Nothing Then Exit While     ' EOF：worker 退出
-                If 行.Length = 0 Then Continue While
-                处理结果行(行)
-            End While
+            Using 读取器 = 进程本地.StandardOutput
+                While Not _停止事件.IsSet
+                    Dim 行 = 读取器.ReadLine()
+                    If 行 Is Nothing Then Exit While
+                    If 行.Length = 0 Then Continue While
+                    If Volatile.Read(_结果线程代) <> 代 Then Return
+                    处理结果行(行)
+                End While
+            End Using
         Catch ex As Exception
         Finally
             ' 代次 gate：只有"当前这一代"结果线程的退场才算 worker 真的死了。
@@ -381,6 +397,10 @@ Friend NotInheritable Class Ai字幕管道
                 Dim 类型 As String = 取字符串(根, "type")
                 If 类型 <> String.Empty Then
                     Select Case 类型
+                        Case "inference"
+                            Dim 忙 = 取布尔(根, "busy", False)
+                            If 忙 Then _推理开始 = Stopwatch.GetTimestamp()
+                            Volatile.Write(_推理忙, If(忙, 1, 0))
                         Case "final"
                             Dim 语言值 = 取字符串(根, "language")
                             ' matched 缺省 True：旧 worker 没这个字段，不能被当"不符"杀掉。
@@ -388,16 +408,29 @@ Friend NotInheritable Class Ai字幕管道
                             ' 模型，但丢结果会让整片空白，那是更坏的默认。
                             Dim 匹配 = 取布尔(根, "matched", True)
                             If Not Ai字幕语言.应丢弃(语言值, 匹配, 设置.实例对象.Ai字幕语言,
-                                                      设置.实例对象.Ai字幕仅所选语言) Then
-                                ' text2 是双语的下行；旧 worker 没这个字段，取不到就是空串，
-                                ' 呈现器按单行画 —— 协议向后兼容，不需要版本判断。
+                                                      Ai字幕语言.已指定(设置.实例对象.Ai字幕语言)) Then
+                                Dim 译文优先 = 取布尔(根, "translationFirst", False)
+                                Dim 两行 = Ai字幕双语.排列结果(取字符串(根, "text"), 取字符串(根, "text2"), 语言值, 译文优先)
+                                ' 新 worker 直接为短句发布 start/end。nextPages 仅用于兼容旧包。
+                                Dim 附加页 As JsonElement
+                                Dim 后续页面 As List(Of (上行 As String, 下行 As String)) = Nothing
+                                If 根.TryGetProperty("nextPages", 附加页) AndAlso 附加页.ValueKind = JsonValueKind.Array Then
+                                    后续页面 = New List(Of (上行 As String, 下行 As String))()
+                                    For Each 页 In 附加页.EnumerateArray()
+                                        If 页.ValueKind <> JsonValueKind.Object Then Continue For
+                                        Dim 页面 = Ai字幕双语.排列结果(取字符串(页, "text"), 取字符串(页, "text2"), 语言值, 译文优先)
+                                        If Not String.IsNullOrWhiteSpace(页面.上行) Then 后续页面.Add(页面)
+                                    Next
+                                End If
                                 Dim 条目 As New Ai字幕状态机.Ai字幕条目(
                                     取ULong(根, "generation"),
                                     取Long(根, "start100ns"),
                                     取Long(根, "end100ns"),
-                                    取字符串(根, "text"),
+                                    两行.上行,
                                     语言值,
-                                    取字符串(根, "text2"))
+                                    两行.下行, 后续页面, _推理开始,
+                                    实时音频:=Not 播放器原生接口.正在预读音频Tap(句柄提供器()),
+                                    推理输入结束100纳秒:=取Long(根, "audioThrough100ns"))
                                 状态机?.提交结果(条目)
                             End If
                         Case "status"
@@ -405,6 +438,20 @@ Friend NotInheritable Class Ai字幕管道
                             Dim 详情 = 取字符串(根, "detail")
                             ' 设备告警由宿主显示。
                             ' 让人看见：只进日志的话，用户面对的是空白字幕+无解释。
+                            If 状态 = "ready" Then
+                                Dim 设备 = 取字符串(根, "device")
+                                If 设备 = "" Then
+                                    ' 外部旧包只在描述中写实际 device。
+                                    Dim 旧设备 = Text.RegularExpressions.Regex.Match(详情, "(?:^| )device=([^ ]+)")
+                                    Dim 标识 = If(旧设备.Success, 旧设备.Groups(1).Value, _指定后端)
+                                    Select Case 标识
+                                        Case "cpu", "ov-cpu" : 设备 = "CPU"
+                                        Case "npu", "ov-npu" : 设备 = "NPU"
+                                        Case "gpu", "cuda", "dml", "ov-gpu", "vulkan" : 设备 = "GPU"
+                                    End Select
+                                End If
+                                Volatile.Write(_推理设备, 设备)
+                            End If
                             If 状态 = "warning" OrElse 状态 = "error" Then 记警告(详情)
                             ' 只有 worker 自述"我不干了"才当死亡。缺省按致命处理（旧 worker 没这个字段），
                             ' 但必须让"这一窗推理失败、我继续重试"（fatal=false）走开——否则本地 HTTP
@@ -427,11 +474,11 @@ Friend NotInheritable Class Ai字幕管道
                 进程本地 = _进程
             End SyncLock
             If 进程本地 Is Nothing Then Return
-            Dim 读取器 = 进程本地.StandardError
-            While Not _停止事件.IsSet
-                Dim 行 = 读取器.ReadLine()
-                If 行 Is Nothing Then Exit While
-            End While
+            Using 读取器 = 进程本地.StandardError
+                While Not _停止事件.IsSet
+                    If 读取器.ReadLine() Is Nothing Then Exit While
+                End While
+            End Using
         Catch
         End Try
     End Sub

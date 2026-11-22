@@ -20,6 +20,7 @@ Friend Module 播放进度回归
         Directory.CreateDirectory(临时目录)
         Try
             测记录与重载()
+            测只统计视频文件()
             测开关关闭不读写()
             测太靠前不记()
             测片尾视为看完()
@@ -63,6 +64,36 @@ Friend Module 播放进度回归
         ' 清空静态缓存后重新读盘：模拟下一次启动。
         播放进度存储.测试用重定向(进度)
         检查("重启后仍能续播", 播放进度存储.查询(媒体, TimeSpan.FromSeconds(120).Ticks) = TimeSpan.FromSeconds(30))
+    End Sub
+
+    Private Sub 测只统计视频文件()
+        Dim 音频 = 建媒体("音乐.mp3", "audio")
+        Dim 视频 = 建媒体("电影.mkv", "video")
+        Dim 进度 = 建进度路径("视频限定")
+        Dim 配置 = 设置.实例对象
+        Dim 开关 = 配置.播放进度记忆
+        Try
+            配置.播放进度记忆 = True
+            播放进度存储.测试用重定向(进度)
+            Using 页面 As New Form设置_播放行为()
+                播放进度存储.记录(音频, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(120))
+                页面.初始化页面()
+                检查("纯音频不计入清除按钮", 页面.MB_清除播放进度.Text = "当前没有记录的视频播放进度")
+                播放进度存储.记录(视频, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(120), 立即落盘:=True)
+                页面.刷新进度数量()
+                检查("清除按钮显示精确视频数量", 页面.MB_清除播放进度.Text = "清除已记录的 1 个视频文件的进度")
+                Dim 文本 = File.ReadAllText(进度)
+                Dim 文件 = JsonSerializer.Deserialize(Of 播放进度存储.进度文件)(文本)
+                文件.条目.Add(New 播放进度存储.进度条目 With {
+                    .路径 = 音频, .时长100纳秒 = TimeSpan.FromSeconds(120).Ticks, .位置100纳秒 = TimeSpan.FromSeconds(30).Ticks
+                })
+                File.WriteAllText(进度, JsonSerializer.Serialize(文件))
+                播放进度存储.测试用重定向(进度)
+                检查("旧纯音频条目不计入视频数量", 播放进度存储.统计条目数() = 1)
+            End Using
+        Finally
+            配置.播放进度记忆 = 开关
+        End Try
     End Sub
 
     Private Sub 测开关关闭不读写()

@@ -1,5 +1,7 @@
 #include "pch.h"
 #include "3FP/Render/VideoRenderer.h"
+#include "3FP/Render/D3D12/D3D12VideoRenderer.h"
+#include "3FP/Render/TimedTextStrokeStyle.h"
 #include "3FP/Core/ThreadNaming.h"
 #include "3FP/Render/CicpSupport.h"
 #include "3FP/Render/ShaderBytecode.h"
@@ -57,6 +59,7 @@ extern "C" {
 #include <libavutil/buffer.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
+#include <libavutil/hwcontext_d3d12va.h>
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/pixdesc.h>
@@ -1423,25 +1426,6 @@ bool ResizeVideoConversionBuffer(std::vector<std::uint8_t>& buffer,
     return ResizeStagingBuffer(buffer, requiredBytes);
 }
 
-struct ShaderSettings {
-    // gamut: 0 = Rec.709, 1 = Rec.2020, 2 = P3 (DCI/Display).
-    std::uint32_t colorMode, transfer, gamut, reserved;
-    float sdrPeak, hdrPeak, paperWhite, targetPeak;
-    float sourceWidth, sourceHeight, outputWidth, outputHeight;
-    std::uint32_t inputLayout;
-    float sampleScale, yOffset, yScale;
-    float cOffset, cScale, kr, kb;
-    // imageModeX drives the still-image pixel-block enlargement in SampleVideo;
-    // padding2 stays reserved. Both reuse what the HLSL cbuffer calls ImageMode.
-    float chromaOffsetX, chromaOffsetY, imageModeX, padding2;
-    std::uint32_t projection360;
-    float viewYaw, viewPitch, viewFovY;
-    // viewRotation holds quarter turns clockwise (0..3). It reuses what used to be
-    // padding, so the constant buffer layout (and the HLSL cbuffer above) is
-    // unchanged in size -- only the meaning of one slot moved.
-    float viewAspect, viewRotation, padding4, padding5;
-};
-
 struct ScaleShaderSettings {
     float sourceWidth, sourceHeight, destinationWidth, destinationHeight;
     std::uint32_t axis, filter;
@@ -2438,9 +2422,11 @@ TimedTextEffectExtents DescribeTimedTextEffects(const float outline,
 class TimedTextEffectRenderer final : public IDWriteTextRenderer {
 public:
     TimedTextEffectRenderer(ID2D1Factory1* factory, ID2D1DeviceContext* context,
-        ID2D1Brush* outlineBrush, ID2D1Brush* shadowBrush, const float outline,
+        ID2D1StrokeStyle* strokeStyle, ID2D1Brush* outlineBrush,
+        ID2D1Brush* shadowBrush, const float outline,
         const float shadowX, const float shadowY, D2D1_RECT_F* inkBounds = nullptr) noexcept
-        : factory_(factory), context_(context), outlineBrush_(outlineBrush),
+        : factory_(factory), context_(context), strokeStyle_(strokeStyle),
+          outlineBrush_(outlineBrush),
           shadowBrush_(shadowBrush), outline_(outline), shadowX_(shadowX), shadowY_(shadowY),
           inkBounds_(inkBounds) {}
 
@@ -2481,9 +2467,17 @@ public:
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*, FLOAT baselineX, FLOAT baselineY,
-        DWRITE_MEASURING_MODE, const DWRITE_GLYPH_RUN* glyphRun,
-        const DWRITE_GLYPH_RUN_DESCRIPTION*, IUnknown*) override {
+        DWRITE_MEASURING_MODE measuringMode, const DWRITE_GLYPH_RUN* glyphRun,
+        const DWRITE_GLYPH_RUN_DESCRIPTION* description, IUnknown*) override {
         if (glyphRun == nullptr || glyphRun->fontFace == nullptr || glyphRun->glyphCount == 0)
+            return S_OK;
+        if (shadowBrush_ != nullptr) {
+            // Use the same glyph coverage path as text fill for the body of
+            // the shadow, including fallback fonts and complex CJK contours.
+            context_->DrawGlyphRun(D2D1::Point2F(baselineX + shadowX_, baselineY + shadowY_),
+                glyphRun, description, shadowBrush_, measuringMode);
+        }
+        if (inkBounds_ == nullptr && (outline_ <= 0.0f || (shadowBrush_ == nullptr && outlineBrush_ == nullptr)))
             return S_OK;
         ComPtr<ID2D1PathGeometry> path;
         ComPtr<ID2D1GeometrySink> sink;
@@ -2496,7 +2490,7 @@ public:
         if (FAILED(outlineResult) || FAILED(closeResult)) return E_FAIL;
         if (inkBounds_ != nullptr) {
             D2D1_RECT_F bounds{};
-            const auto result = path->GetWidenedBounds(outline_ * 2.0f, nullptr,
+            const auto result = path->GetWidenedBounds(outline_ * 2.0f, strokeStyle_,
                 D2D1::Matrix3x2F::Translation(baselineX, baselineY), &bounds);
             if (FAILED(result)) return result;
             inkBounds_->left = std::min(inkBounds_->left, bounds.left);
@@ -2506,11 +2500,10 @@ public:
             return S_OK;
         }
         if (shadowBrush_ != nullptr) {
-            DrawEffect(path.Get(), baselineX + shadowX_, baselineY + shadowY_,
-                shadowBrush_, true);
+            DrawStroke(path.Get(), baselineX + shadowX_, baselineY + shadowY_, shadowBrush_);
         }
-        if (outlineBrush_ != nullptr && outline_ > 0.0f) {
-            DrawEffect(path.Get(), baselineX, baselineY, outlineBrush_, false);
+        if (outlineBrush_ != nullptr) {
+            DrawStroke(path.Get(), baselineX, baselineY, outlineBrush_);
         }
         return S_OK;
     }
@@ -2522,22 +2515,18 @@ public:
         BOOL, BOOL, IUnknown*) override { return S_OK; }
 
 private:
-    void DrawEffect(ID2D1Geometry* path, const float x, const float y,
-        ID2D1Brush* brush, const bool fill) noexcept {
+    void DrawStroke(ID2D1Geometry* path, const float x, const float y, ID2D1Brush* brush) noexcept {
         ComPtr<ID2D1TransformedGeometry> transformed;
         if (FAILED(factory_->CreateTransformedGeometry(path,
             D2D1::Matrix3x2F::Translation(x, y), &transformed))) return;
-        if (fill) context_->FillGeometry(transformed.Get(), brush);
-        if (outline_ > 0.0f) {
-            // D2D strokes are centered. Drawing a 2x stroke before the glyph fill
-            // leaves exactly outline_ pixels visible outside the final glyph.
-            context_->DrawGeometry(transformed.Get(), brush, outline_ * 2.0f);
-        }
+        // A centered 2x stroke leaves outline_ pixels visible outside the glyph.
+        context_->DrawGeometry(transformed.Get(), brush, outline_ * 2.0f, strokeStyle_);
     }
 
     std::atomic<ULONG> references_{1};
     ID2D1Factory1* factory_;
     ID2D1DeviceContext* context_;
+    ID2D1StrokeStyle* strokeStyle_;
     ID2D1Brush* outlineBrush_;
     ID2D1Brush* shadowBrush_;
     float outline_;
@@ -2781,6 +2770,7 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       timedTextResourcesHdr_(false), timedTextAtlasHdr_(false),
       timedTextSpriteVertexShader_(nullptr), timedTextSpritePixelShader_(nullptr),
       timedTextSpriteInstanceBuffer_(nullptr), timedTextSpriteInstanceView_(nullptr),
+      timedTextStrokeStyle_(nullptr),
       d2dFactory_(nullptr), d2dDevice_(nullptr), d2dContext_(nullptr),
       d2dCoverBackdropSource_(nullptr), d2dCoverBackdropTarget_(nullptr),
       coverBackdropBlurEffect_(nullptr),
@@ -2885,7 +2875,7 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
     }
     if (swapChain_ != nullptr) {
         std::lock_guard presentLock(presentMutex_);
-        swapChain_->Release(); swapChain_ = nullptr;
+        ReleaseSwapChain();
     }
     window_ = window;
     {
@@ -2924,6 +2914,16 @@ FFFResult PlayerVideoRenderer::SetPreferredAdapterIndex(const std::int32_t index
     return FFFResult::Success;
 }
 
+void PlayerVideoRenderer::SetRenderBackend(const std::uint32_t backend) noexcept {
+    // Only called from Idle. A new explicit selection clears a prior fallback.
+    std::lock_guard lock(deviceMutex_);
+    if (requestedBackend_.load() != backend || (backend == 1 && d3d12Rejected_))
+        ReleaseDeviceObjects();
+    requestedBackend_.store(backend);
+    d3d12Rejected_.store(false);
+    d3d12FallbackReason_ = 0;
+}
+
 void PlayerVideoRenderer::SetInteractiveMove(const bool enabled) noexcept {
     interactiveMove_.store(enabled, std::memory_order_release);
 }
@@ -2937,13 +2937,6 @@ FFFResult PlayerVideoRenderer::SetScalingQuality(
     scalingQuality_ = quality;
     scaledVideoGeneration_ = UINT64_MAX;
     return FFFResult::Success;
-}
-
-FFFResult PlayerVideoRenderer::WarmDevice() noexcept {
-    // Same entry point the first Render uses, so nothing here can put the renderer into
-    // a state Render would not have reached on its own.
-    std::lock_guard deviceLock(deviceMutex_);
-    return EnsureDevice();
 }
 
 FFFResult PlayerVideoRenderer::SetViewTransform(const float zoom,
@@ -3183,6 +3176,7 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
         cachedVideoSettings_.sdrPeak = sdrPeakNits_;
         cachedVideoSettings_.paperWhite = EffectivePaperWhiteNits();
         cachedVideoSettings_.targetPeak = hdrProcessor_.State().targetPeakNits;
+        if (d3d12_) hdrInputsDirty_.store(true, std::memory_order_release);
     }
     const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
     const auto outputBits = PreferredOutputBitDepth(sourceBitDepth_, hdr);
@@ -3226,78 +3220,69 @@ FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
 }
 
 FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
-    if (device_ != nullptr) return FFFResult::Success;
-    const D3D_FEATURE_LEVEL levels[] = {
-        D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
-    D3D_FEATURE_LEVEL selected{};
-    ComPtr<IDXGIAdapter1> selectedAdapter;
-    // An explicitly requested adapter outranks the
-    // monitor match. Any enumeration failure (bad index, no factory) leaves
-    // selectedAdapter null so the built-in policy below still runs — the caller
-    // never sees a hard failure just because a GPU preference could not be honoured.
-    const auto preferredAdapterIndex =
-        preferredAdapterIndex_.load(std::memory_order_acquire);
-    if (preferredAdapterIndex >= 0) {
-        ComPtr<IDXGIFactory6> preferredFactory;
-        if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&preferredFactory)))) {
-            preferredFactory->EnumAdapters1(
-                static_cast<UINT>(preferredAdapterIndex), &selectedAdapter);
-        }
-    }
-    if (!selectedAdapter && window_ != nullptr && IsWindow(window_)) {
-        const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    if (d3d12_ || device_) return FFFResult::Success;
+    if (!renderAdapter_) {
         ComPtr<IDXGIFactory6> factory;
+        ComPtr<IDXGIAdapter1> selected;
         if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
-            for (UINT adapterIndex = 0; !selectedAdapter; ++adapterIndex) {
-                ComPtr<IDXGIAdapter1> candidate;
-                if (factory->EnumAdapters1(adapterIndex, &candidate) == DXGI_ERROR_NOT_FOUND) break;
-                for (UINT outputIndex = 0;; ++outputIndex) {
-                    ComPtr<IDXGIOutput> output;
-                    if (candidate->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) break;
-                    DXGI_OUTPUT_DESC description{};
-                    if (SUCCEEDED(output->GetDesc(&description)) && description.Monitor == monitor) {
-                        selectedAdapter = candidate;
-                        break;
+            const auto preferred = preferredAdapterIndex_.load(std::memory_order_acquire);
+            if (preferred >= 0) factory->EnumAdapters1(static_cast<UINT>(preferred), &selected);
+            if (!selected && window_ && IsWindow(window_)) {
+                const auto monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+                for (UINT i = 0; !selected; ++i) {
+                    ComPtr<IDXGIAdapter1> adapter;
+                    if (FAILED(factory->EnumAdapters1(i, &adapter))) break;
+                    for (UINT j = 0;; ++j) {
+                        ComPtr<IDXGIOutput> output;
+                        if (FAILED(adapter->EnumOutputs(j, &output))) break;
+                        DXGI_OUTPUT_DESC desc{};
+                        if (SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor == monitor) {
+                            selected = std::move(adapter);
+                            break;
+                        }
                     }
                 }
             }
+            if (!selected) factory->EnumAdapters1(0, &selected);
         }
+        renderAdapter_ = selected.Detach();
     }
-    const auto result = D3D11CreateDevice(selectedAdapter.Get(), selectedAdapter
-        ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr,
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-        levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &device_, &selected, &context_);
-    if (FAILED(result)) { SetError("Could not create the D3D11 playback device."); return FFFResult::DeviceFailure; }
+    DXGI_ADAPTER_DESC1 desc{};
+    if (renderAdapter_ && SUCCEEDED(renderAdapter_->GetDesc1(&desc))) {
+        dedicatedVideoMemoryBytes_.store(desc.DedicatedVideoMemory, std::memory_order_release);
+        nvidiaAdapter_.store(desc.VendorId == FFF3FP::NvidiaVideo::NvidiaVendorId, std::memory_order_release);
+    }
+    uploadRingUnavailable_.store(false, std::memory_order_release);
+    if (WantsD3D12() && !d3d12Rejected_) {
+        auto dx12 = std::unique_ptr<D3D12VideoRenderer>(new (std::nothrow) D3D12VideoRenderer);
+        const HRESULT hr = dx12 ? dx12->Initialize(renderAdapter_) : E_OUTOFMEMORY;
+        if (SUCCEEDED(hr)) {
+            d3d12_ = std::move(dx12);
+            return FFFResult::Success;
+        }
+        d3d12Rejected_ = true;
+        d3d12FallbackReason_ = hr;
+        OutputDebugStringA("3FP: D3D12 device unavailable; using the D3D11 backend.\n");
+    }
+    return EnsureD3D11Device();
+}
 
-    // Report the actual adapter to the debugger and public log sink.
-    {
-        ComPtr<IDXGIDevice> dxgiDevice;
+FFFResult PlayerVideoRenderer::EnsureD3D11Device() noexcept {
+    if (device_) return FFFResult::Success;
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+    const auto hr = D3D11CreateDevice(renderAdapter_, renderAdapter_ ? D3D_DRIVER_TYPE_UNKNOWN :
+        D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, ARRAYSIZE(levels),
+        D3D11_SDK_VERSION, &device_, nullptr, &context_);
+    if (FAILED(hr)) {
+        SetError("Could not create the D3D11 playback device.");
+        return FFFResult::DeviceFailure;
+    }
+    if (!renderAdapter_) {
+        ComPtr<IDXGIDevice> dxgi;
         ComPtr<IDXGIAdapter> adapter;
-        if (SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) &&
-            SUCCEEDED(dxgiDevice->GetAdapter(&adapter))) {
-            DXGI_ADAPTER_DESC desc{};
-            if (SUCCEEDED(adapter->GetDesc(&desc))) {
-                // Captured for the upload ring's capacity gate (UploadStagingVramFloor).
-                // Zero -- an adapter that reports nothing, or a GetDesc failure -- is
-                // deliberately read as "unknown, so try" rather than "cannot afford",
-                // because the conservative answer here would silently move every large
-                // software decode onto the one-transfer Map path.
-                dedicatedVideoMemoryBytes_.store(
-                    static_cast<std::uint64_t>(desc.DedicatedVideoMemory),
-                    std::memory_order_release);
-                // A new device is a new chance for the ring: whatever refused the
-                // allocation before (fragmentation, a mode change) does not have to
-                // hold for this one.
-                uploadRingUnavailable_.store(false, std::memory_order_release);
-                // RTX Video Super Resolution is a vendor-private NVIDIA
-                // extension; probe once per device so the status report can say
-                // "not an NVIDIA adapter" instead of silently doing nothing.
-                nvidiaAdapter_ =
-                    desc.VendorId == FFF3FP::NvidiaVideo::NvidiaVendorId;
-            }
-        }
+        if (SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&dxgi))) && SUCCEEDED(dxgi->GetAdapter(&adapter)))
+            (void)adapter->QueryInterface(IID_PPV_ARGS(&renderAdapter_));
     }
-
     ComPtr<ID3D11Multithread> multithread;
     if (SUCCEEDED(context_->QueryInterface(IID_PPV_ARGS(&multithread)))) multithread->SetMultithreadProtected(TRUE);
     return FFFResult::Success;
@@ -3429,13 +3414,9 @@ bool PlayerVideoRenderer::OwnsD3D11Texture(ID3D11Texture2D* const texture) const
 
 std::int32_t PlayerVideoRenderer::DeviceAdapterIndex() const noexcept {
     std::lock_guard deviceLock(deviceMutex_);
-    if (device_ != nullptr) {
-        ComPtr<IDXGIDevice> dxgiDevice;
-        ComPtr<IDXGIAdapter> adapter;
-        DXGI_ADAPTER_DESC own{};
-        if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
-            FAILED(dxgiDevice->GetAdapter(&adapter)) ||
-            FAILED(adapter->GetDesc(&own))) return -1;
+    if (renderAdapter_ != nullptr) {
+        DXGI_ADAPTER_DESC1 own{};
+        if (FAILED(renderAdapter_->GetDesc1(&own))) return -1;
         ComPtr<IDXGIFactory1> factory;
         if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return -1;
         for (UINT index = 0; index < 16; ++index) {
@@ -3479,6 +3460,7 @@ FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** ou
     std::lock_guard deviceLock(deviceMutex_);
     const auto result = EnsureDevice();
     if (result != FFFResult::Success) return result;
+    if (d3d12_) return FFFResult::NotSupported;
     auto* reference = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
     if (reference == nullptr) return FFFResult::NativeFailure;
     auto* hardware = reinterpret_cast<AVHWDeviceContext*>(reference->data);
@@ -3493,6 +3475,58 @@ FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** ou
     }
     *output = reference;
     return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::CreateD3D12HardwareDeviceContext(AVBufferRef** output) noexcept {
+    if (!output) return FFFResult::InvalidArgument;
+    *output = nullptr;
+    std::lock_guard lock(deviceMutex_);
+    if (!WantsD3D12() || EnsureDevice() != FFFResult::Success || !d3d12_)
+        return FFFResult::NotSupported;
+    auto* reference = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D12VA);
+    if (!reference) return FFFResult::NotSupported;
+    auto* context = reinterpret_cast<AVHWDeviceContext*>(reference->data);
+    auto* decode = static_cast<AVD3D12VADeviceContext*>(context->hwctx);
+    decode->device = d3d12_->Device();
+    decode->device->AddRef();
+    // Allow concurrent reference reads on the video queue and source-copy
+    // reads on the native graphics queue without sharing a writable state.
+    decode->resource_flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+    if (av_hwdevice_ctx_init(reference) < 0) {
+        av_buffer_unref(&reference);
+        return FFFResult::NotSupported;
+    }
+    d3d12DecoderBound_ = true;
+    *output = reference;
+    return FFFResult::Success;
+}
+
+bool PlayerVideoRenderer::CanImportD3D12Frame(const AVFrame* frame) const noexcept {
+    if (!frame || frame->format != AV_PIX_FMT_D3D12) return false;
+    std::lock_guard lock(deviceMutex_);
+    return d3d12_ && d3d12_->CanImport(frame);
+}
+
+void PlayerVideoRenderer::GetVideoRenderDiagnostics(FFF3FPVideoRenderDiagnostics& status) noexcept {
+    std::lock_guard lock(deviceMutex_);
+    status = {};
+    status.size = sizeof(status);
+    status.version = 20;
+    status.requestedBackend = requestedBackend_.load();
+    status.activeBackend = activeBackend_.load();
+    status.backendFallbackHresult = d3d12FallbackReason_;
+    if (!d3d12_) return;
+    const auto stats = d3d12_->GetStats();
+    status.nativeVideoDraws = stats.draws;
+    status.nativeScalePasses = stats.scalePasses;
+    status.nativeOverlayDraws = stats.overlayDraws;
+    status.gpuDraw100ns = stats.gpu100ns;
+    status.gpuDrawSamples = stats.gpuSamples;
+    status.fenceWait100ns = stats.wait100ns;
+    status.localBytes = stats.localBytes;
+    status.uploadHeapBytes = stats.uploadBytes;
+    status.readbackHeapBytes = stats.readbackBytes;
+    status.scaleBudgetSkips = stats.scaleBudgetSkips;
 }
 
 namespace {
@@ -3670,6 +3704,7 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
         } catch (...) {}
         if (nextMode != actualMode_) {
             actualMode_ = nextMode;
+            if (d3d12_ && hasCachedVideo_) hdrInputsDirty_.store(true, std::memory_order_release);
             if (swapChain_ != nullptr) {
                 const auto modeResult = ReconfigureSwapChain(
                     nextMode == FFF3FPColorMode::MapToHdr,
@@ -3700,9 +3735,9 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     if (swapChain_ != nullptr && width == swapWidth_ && height == swapHeight_ &&
         hdr == swapHdr_ && outputBits == swapOutputBits_) return FFFResult::Success;
     if (swapChain_ != nullptr && hdr == swapHdr_ && outputBits == swapOutputBits_) {
-        context_->ClearState();
+        if (context_) context_->ClearState();
         const auto resizeFlags = swapAllowTearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
-        const auto resize = swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, resizeFlags);
+        const auto resize = ResizeSwapChain(width, height, DXGI_FORMAT_UNKNOWN, resizeFlags);
         if (SUCCEEDED(resize)) {
             swapWidth_ = width; swapHeight_ = height;
             ReleaseTimedTextResources();
@@ -3721,13 +3756,11 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
 FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     const std::uint32_t height, const bool hdr, const std::uint32_t outputBits,
     const std::uint32_t sourceBitDepth) noexcept {
-    ComPtr<IDXGIDevice> dxgiDevice;
-    ComPtr<IDXGIAdapter> adapter;
     ComPtr<IDXGIFactory2> factory;
-    if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
-        FAILED(dxgiDevice->GetAdapter(&adapter)) || FAILED(adapter->GetParent(IID_PPV_ARGS(&factory)))) {
+    if (!renderAdapter_ || FAILED(renderAdapter_->GetParent(IID_PPV_ARGS(&factory)))) {
         if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
-        SetError("Could not obtain the DXGI playback factory."); return FFFResult::DeviceFailure;
+        SetError("Could not obtain the DXGI playback factory.");
+        return FFFResult::DeviceFailure;
     }
     BOOL allowTearing = FALSE;
     ComPtr<IDXGIFactory5> factory5;
@@ -3738,12 +3771,37 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     description.Width = width; description.Height = height;
     description.Format = SwapChainFormatForOutputBits(outputBits);
     description.SampleDesc.Count = 1; description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    description.BufferCount = 3; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    description.BufferCount = D3D12VideoRenderer::BufferCount; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_NONE;
     description.Flags = allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
-    ComPtr<IDXGISwapChain1> chain1;
-    const auto result = factory->CreateSwapChainForHwnd(device_, window_, &description, nullptr, nullptr, &chain1);
-    if (FAILED(result) || FAILED(chain1->QueryInterface(IID_PPV_ARGS(&swapChain_)))) {
+    const auto create = [&](IUnknown* presenter) {
+        ComPtr<IDXGISwapChain1> chain;
+        const auto result = factory->CreateSwapChainForHwnd(presenter, window_, &description, nullptr, nullptr, &chain);
+        return FAILED(result) ? result : chain->QueryInterface(IID_PPV_ARGS(&swapChain_));
+    };
+    auto result = E_FAIL;
+    if (d3d12_) {
+        description.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        result = create(d3d12_->Queue());
+        if (SUCCEEDED(result)) result = d3d12_->PrepareBuffers(swapChain_);
+        if (SUCCEEDED(result)) {
+            swapChain_->SetMaximumFrameLatency(ResolveMaxFrameLatency());
+            activeBackend_.store(1);
+        } else {
+            if (hasCachedVideo_ || d3d12DecoderBound_)
+                return HandleD3D12Error(result, "D3D12 swap chain");
+            ReleaseSwapChain();
+            d3d12_.reset();
+            d3d12Rejected_ = true;
+            d3d12FallbackReason_ = result;
+            description.Flags &= ~DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        }
+    }
+    if (swapChain_ == nullptr) {
+        if (EnsureD3D11Device() != FFFResult::Success) return FFFResult::DeviceFailure;
+        result = create(device_);
+    }
+    if (FAILED(result)) {
         if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
         std::ostringstream message;
         message << "Could not create the playback swap chain (HRESULT 0x" << std::hex
@@ -3768,8 +3826,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
             hdrSwapChainRejected_ = true;
             hdrSupportCheckedAt_ = std::chrono::steady_clock::now();
             swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-            swapChain_->Release();
-            swapChain_ = nullptr;
+            ReleaseSwapChain();
             swapWidth_ = swapHeight_ = 0;
             swapHdr_ = false;
             swapOutputBits_ = 8;
@@ -3794,7 +3851,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     // so the queue cannot outrun the chain. Measured via the queue-depth effect on
     // dropped frames; see docs/45.
     ComPtr<IDXGIDevice1> latencyDevice;
-    if (SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&latencyDevice))))
+    if (!d3d12_ && SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&latencyDevice))))
         latencyDevice->SetMaximumFrameLatency(ResolveMaxFrameLatency());
     {
         std::lock_guard lock(timedTextMutex_);
@@ -3828,8 +3885,7 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr,
         // The caller holds presentMutex_ for the entire rewrite (see
         // EnsureSwapChain/SetColorMode); do not relock it here.
         swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-        swapChain_->Release();
-        swapChain_ = nullptr;
+        ReleaseSwapChain();
         swapWidth_ = swapHeight_ = 0;
         swapHdr_ = false;
         swapOutputBits_ = 8;
@@ -3837,7 +3893,7 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr,
     }
     const auto format = SwapChainFormatForOutputBits(formatBits);
     const auto resizeFlags = swapAllowTearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
-    const auto resize = swapChain_->ResizeBuffers(0, std::max(1u, swapWidth_),
+    const auto resize = ResizeSwapChain(std::max(1u, swapWidth_),
         std::max(1u, swapHeight_), format, resizeFlags);
     if (FAILED(resize)) {
         if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
@@ -3863,8 +3919,7 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr,
             hdrSwapChainRejected_ = true;
             hdrSupportCheckedAt_ = std::chrono::steady_clock::now();
             swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-            swapChain_->Release();
-            swapChain_ = nullptr;
+            ReleaseSwapChain();
             const auto width = std::max(1u, swapWidth_);
             const auto height = std::max(1u, swapHeight_);
             swapWidth_ = swapHeight_ = 0;
@@ -3882,19 +3937,166 @@ FFFResult PlayerVideoRenderer::ReconfigureSwapChain(const bool hdr,
     return FFFResult::Success;
 }
 
+void PlayerVideoRenderer::ReleaseSwapChain() noexcept {
+    if (d3d12_ && swapChain_) (void)d3d12_->ReleaseBuffers();
+    ReleaseCom(swapChain_);
+    activeBackend_.store(0);
+}
+
+HRESULT PlayerVideoRenderer::ResizeSwapChain(const std::uint32_t width, const std::uint32_t height,
+    const std::uint32_t format, std::uint32_t flags) noexcept {
+    if (d3d12_) {
+        flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        const auto drain = d3d12_->ReleaseBuffers();
+        if (FAILED(drain)) {
+            HandleD3D12Error(drain, "D3D12 resize fence");
+            return drain;
+        }
+    }
+    const auto resized = swapChain_->ResizeBuffers(0, width, height, static_cast<DXGI_FORMAT>(format), flags);
+    if (!d3d12_) return resized;
+    const auto result = d3d12_->PrepareBuffers(swapChain_);
+    if (FAILED(result)) {
+        HandleD3D12Error(result, "D3D12 frame targets");
+        return result;
+    }
+    return resized;
+}
+
+FFFResult PlayerVideoRenderer::HandleD3D12Error(const long result, const char* operation) noexcept {
+    if (SUCCEEDED(result)) return FFFResult::Success;
+    d3d12Rejected_ = true;
+    d3d12FallbackReason_ = result;
+    RequestDeviceRecovery(result, operation);
+    return FFFResult::DeviceFailure;
+}
+
+void PlayerVideoRenderer::BuildD3D12Picture(FFF3FPD3D12Picture& picture,
+    const std::uint32_t width, const std::uint32_t height) noexcept {
+    if (hdrInputsDirty_.exchange(false)) RefreshHdrShaderInputs();
+    const auto destination = LayoutPicture(width, height);
+    videoSuperResolutionActive_.store(false, std::memory_order_release);
+    videoTrueHdrActive_.store(false, std::memory_order_release);
+    videoSuperResolutionReason_.store(requestedVideoSuperResolution_.load() == FFF3FPVideoSuperResolution::Off
+        ? FFF3FPVideoSuperResolutionReason::NotRequested : FFF3FPVideoSuperResolutionReason::UnsupportedRenderBackend);
+    videoTrueHdrReason_.store(requestedVideoAutoHdr_.load() == FFF3FPVideoAutoHdr::Off
+        ? FFF3FPVideoAutoHdrReason::NotRequested : FFF3FPVideoAutoHdrReason::UnsupportedRenderBackend);
+    SetDrawSettings(destination.drawWidth, destination.drawHeight, 0);
+    picture.video = cachedVideoSettings_;
+    picture.dynamic = cachedD3D12Dynamic_;
+    picture.auxiliary = cachedD3D12Auxiliary_;
+    picture.viewport = {destination.left, destination.top, destination.drawWidth, destination.drawHeight, 0, 1};
+    picture.planeCount = sourceInputLayout_ == 1 ? 3u : sourceInputLayout_ == 2 ? 2u : 1u;
+    picture.allowScale = cachedVideoSettings_.projection360 == 0;
+    const auto swap = (viewRotation_.load(std::memory_order_acquire) & 1u) != 0;
+    picture.scaleFilter = SelectScaleFilter(static_cast<float>(swap ? destination.height : destination.width) / sourceWidth_,
+        static_cast<float>(swap ? destination.width : destination.height) / sourceHeight_);
+    picture.coverBackdrop = sourceCoverArt_;
+    if (picture.coverBackdrop) {
+        picture.backdropTint = coverBackdropTintArgb_.load(std::memory_order_acquire);
+        picture.backdropRadius = std::bit_cast<float>(coverBackdropBlurRadiusBits_.load(std::memory_order_acquire));
+        picture.backdropPasses = coverBackdropBlurPasses_.load(std::memory_order_acquire);
+        picture.backdropDownsample = coverBackdropDownsampleFactor_.load(std::memory_order_acquire);
+    }
+}
+
+std::size_t PlayerVideoRenderer::CollectD3D12Overlays(FFF3FPD3D12Overlay* overlays,
+    const bool discOnly) noexcept {
+    static_assert(D3D12VideoRenderer::OverlayCount == static_cast<UINT>(TimedTextLayerSlot::Disc) + 1);
+    std::size_t count = 0;
+    for (const auto slot : {TimedTextLayerSlot::Danmaku, TimedTextLayerSlot::Subtitle,
+        TimedTextLayerSlot::Lyrics, TimedTextLayerSlot::Disc, TimedTextLayerSlot::PlayerInformation}) {
+        if (discOnly && slot != TimedTextLayerSlot::Disc) continue;
+        const auto index = static_cast<UINT>(slot);
+        if (!timedTextTextures_[index] || !timedTextRenderedCommandCounts_[index]) continue;
+        auto& overlay = overlays[count++];
+        overlay.index = index;
+        overlay.viewport = {0, 0, static_cast<float>(swapWidth_), static_cast<float>(swapHeight_), 0, 1};
+        if (slot == TimedTextLayerSlot::Disc) {
+            const auto aspect = discAspect_.load();
+            const auto rect = CalculateVideoDestination(aspect > 0 ? static_cast<unsigned>(aspect * 10000) : sourceWidth_,
+                aspect > 0 ? 10000u : sourceHeight_, swapWidth_, swapHeight_);
+            overlay.viewport = {static_cast<float>(rect.x), static_cast<float>(rect.y),
+                static_cast<float>(rect.width), static_cast<float>(rect.height), 0, 1};
+        }
+        const auto flags = (timedTextRenderedHdrHighlights_[index] ? 1u : 0u) | (swapHdr_ ? 2u : 0u);
+        overlay.constants = {static_cast<std::uint32_t>(actualMode_), 0, 0, flags, 0, 0,
+            std::bit_cast<std::uint32_t>(cachedVideoSettings_.paperWhite),
+            std::bit_cast<std::uint32_t>(cachedVideoSettings_.targetPeak)};
+    }
+    return count;
+}
+
+FFFResult PlayerVideoRenderer::SubmitD3D12Frame(const bool compositesTimedText,
+    const bool drawVideo) noexcept {
+    if (!d3d12_) return FFFResult::InvalidState;
+    const auto start = std::chrono::steady_clock::now();
+    FFF3FPD3D12Picture picture{};
+    const bool video = drawVideo && hasCachedVideo_;
+    if (video) BuildD3D12Picture(picture, swapWidth_, swapHeight_);
+    if (deviceRecoveryRequested_.load()) return FFFResult::DeviceFailure;
+    std::array<FFF3FPD3D12Overlay, D3D12VideoRenderer::OverlayCount> overlays{};
+    const auto count = compositesTimedText ? CollectD3D12Overlays(overlays.data(), false) : 0;
+    // Diff only the inexpensive counters; timestamp reads belong to the diagnostic API.
+    const auto previous = d3d12_->ScaleStats();
+    const auto hr = d3d12_->Submit(swapChain_, video ? &picture : nullptr, std::span(overlays.data(), count));
+    if (FAILED(hr)) return HandleD3D12Error(hr, "D3D12 video/overlay submission");
+    ++backBufferAcquisitionCount_;
+    if (video) {
+        const auto scale = d3d12_->ScaleStats();
+        scalePassCount_.fetch_add(scale.first - previous.first, std::memory_order_relaxed);
+        scalePass100ns_.fetch_add(scale.second - previous.second, std::memory_order_relaxed);
+        mainDraw100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - start), std::memory_order_relaxed);
+        actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
+        PublishPictureLayout(LayoutPicture(swapWidth_, swapHeight_));
+    }
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::ReadD3D12Picture(const std::uint32_t width, const std::uint32_t height,
+    const std::uint32_t format, const std::uint32_t x, const std::uint32_t y,
+    const std::uint32_t regionWidth, const std::uint32_t regionHeight, void* pixels,
+    const std::uint64_t capacity, const bool withOverlays, const bool discOnly) noexcept {
+    if (!d3d12_) return FFFResult::InvalidState;
+    const auto rowBytes = static_cast<std::uint64_t>(regionWidth) *
+        (format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8u : 4u);
+    if (!pixels || rowBytes * regionHeight > capacity) return FFFResult::BufferTooSmall;
+    FFF3FPD3D12Picture picture{};
+    if (!discOnly) BuildD3D12Picture(picture, width, height);
+    std::array<FFF3FPD3D12Overlay, D3D12VideoRenderer::OverlayCount> overlays{};
+    std::size_t count = 0;
+    if (withOverlays) {
+        for (const auto slot : {TimedTextLayerSlot::Danmaku, TimedTextLayerSlot::Subtitle,
+            TimedTextLayerSlot::Lyrics, TimedTextLayerSlot::Disc, TimedTextLayerSlot::PlayerInformation}) {
+            if (discOnly && slot != TimedTextLayerSlot::Disc) continue;
+            const auto result = DrawTimedText(slot);
+            if (result != FFFResult::Success) return result;
+        }
+        count = CollectD3D12Overlays(overlays.data(), discOnly);
+    }
+    const D3D12_BOX box{x, y, 0, x + regionWidth, y + regionHeight, 1};
+    const auto hr = d3d12_->ReadPicture(width, height, static_cast<DXGI_FORMAT>(format),
+        discOnly ? nullptr : &picture, std::span(overlays.data(), count), box, pixels, capacity);
+    if (FAILED(hr)) {
+        if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
+        return hr == E_OUTOFMEMORY ? FFFResult::NotSupported : FFFResult::DeviceFailure;
+    }
+    return FFFResult::Success;
+}
+
 FFFResult PlayerVideoRenderer::AcquireBackBufferTarget(ID3D11Texture2D** buffer,
     ID3D11RenderTargetView** target) noexcept {
-    if (buffer == nullptr || target == nullptr) return FFFResult::InvalidArgument;
-    *buffer = nullptr; *target = nullptr;
-    if (swapChain_ == nullptr || device_ == nullptr) return FFFResult::InvalidState;
+    if (!buffer || !target) return FFFResult::InvalidArgument;
+    *buffer = nullptr;
+    *target = nullptr;
+    if (!swapChain_ || !device_ || d3d12_) return FFFResult::InvalidState;
     // D3D11 flip-model exposes the current writable buffer through logical
-    // index 0. Its physical identity changes after Present, so neither this
-    // texture nor its RTV may be cached across presentation cycles.
+    // index 0; neither this texture nor its RTV may be cached across flips.
     if (FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(buffer))) ||
         FAILED(device_->CreateRenderTargetView(*buffer, nullptr, target))) {
-        if (*target != nullptr) { (*target)->Release(); *target = nullptr; }
-        if (*buffer != nullptr) { (*buffer)->Release(); *buffer = nullptr; }
-        SetError("Could not acquire the current playback back-buffer render target.");
+        ReleaseCom(*target);
+        ReleaseCom(*buffer);
+        SetError("Could not acquire the current D3D11 playback back buffer.");
         return FFFResult::DeviceFailure;
     }
     ++backBufferAcquisitionCount_;
@@ -4000,7 +4202,7 @@ FFFResult PlayerVideoRenderer::CopyFrame(void* const pixels,
     const std::uint32_t layout, const std::uint32_t format) noexcept {
     if (layout > 1 || format > 1) return FFFResult::InvalidArgument;
     std::lock_guard deviceLock(deviceMutex_);
-    if (!hasCachedVideo_ || device_ == nullptr || context_ == nullptr)
+    if (!hasCachedVideo_ || (!d3d12_ && (!device_ || !context_)))
         return FFFResult::InvalidState;
     std::lock_guard presentLock(presentMutex_);
 
@@ -4018,6 +4220,13 @@ FFFResult PlayerVideoRenderer::CopyFrame(void* const pixels,
     height = targetHeight;
     if (pixels == nullptr)
         return FFFResult::BufferTooSmall;   // size query: caller re-calls with a buffer
+
+    if (d3d12_) {
+        const auto result = ReadD3D12Picture(width, height, format == 1 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+            DXGI_FORMAT_B8G8R8A8_UNORM, 0, 0, width, height, pixels, capacity, true);
+        if (result == FFFResult::Success) finalReadbackFormat_ = format == 1 ? 16u : 8u;
+        return result;
+    }
 
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11RenderTargetView> target;
@@ -4103,7 +4312,7 @@ FFFResult PlayerVideoRenderer::EnsurePipeline(const std::uint32_t sourceWidth,
         D3D11_SAMPLER_DESC panoramaSampler = sampler;
         panoramaSampler.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
         D3D11_BUFFER_DESC buffer{};
-        buffer.ByteWidth = sizeof(ShaderSettings); buffer.Usage = D3D11_USAGE_DEFAULT; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        buffer.ByteWidth = sizeof(VideoShaderSettings); buffer.Usage = D3D11_USAGE_DEFAULT; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         D3D11_BUFFER_DESC scaleBuffer = buffer;
         scaleBuffer.ByteWidth = sizeof(ScaleShaderSettings);
         if (FAILED(device_->CreateSamplerState(&sampler, &sampler_)) ||
@@ -4367,6 +4576,7 @@ bool PlayerVideoRenderer::CanImportCudaFrame(const AVFrame* const frame) const n
     // Called for every frame, including D3D11 and software ones: those are the normal
     // answer "no" and must not turn the trace switch into per-frame spam.
     if (frame->format != AV_PIX_FMT_CUDA) return false;
+    if (WantsD3D12() && !d3d12Rejected_.load(std::memory_order_relaxed)) return false;
     if (frame->hw_frames_ctx == nullptr) return false;
     if (!CudaD3D11Interop::Enabled()) return false;
     if (cudaInteropRefused_.load(std::memory_order_relaxed)) return false;
@@ -5238,16 +5448,8 @@ FFFResult PlayerVideoRenderer::EnsureVideoProcessorInputSurface(
     return FFFResult::Success;
 }
 
-FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
-    const float x, const float y, const float width, const float height,
-    const std::uint32_t effect, ID3D11ShaderResourceView* const* sourceViews) noexcept {
-    if (target == nullptr || context_ == nullptr || width <= 0.0f || height <= 0.0f)
-        return FFFResult::InvalidArgument;
-    // An injected ST 2094 table is applied on the present path rather than from the API
-    // call: this is the one place that pushes the constant buffers immediately before a
-    // draw, so refreshing here is serialised with the draw by construction and never
-    // races the presentation pump against the same immediate context.
-    if (hdrInputsDirty_.exchange(false)) RefreshHdrShaderInputs();
+void PlayerVideoRenderer::SetDrawSettings(const float width, const float height,
+    const std::uint32_t effect) noexcept {
     cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
     cachedVideoSettings_.inputLayout = cachedOriginalInputLayout_;
     cachedVideoSettings_.sampleScale = cachedOriginalSampleScale_;
@@ -5298,6 +5500,15 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     cachedVideoSettings_.imageModeX = sourceImageMode_ &&
         (width > cachedVideoSettings_.sourceWidth || height > cachedVideoSettings_.sourceHeight)
         ? 1.0f : 0.0f;
+}
+
+FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
+    const float x, const float y, const float width, const float height,
+    const std::uint32_t effect, ID3D11ShaderResourceView* const* sourceViews) noexcept {
+    if (!target || !context_ || width <= 0.0f || height <= 0.0f) return FFFResult::InvalidArgument;
+    if (hdrInputsDirty_.exchange(false)) RefreshHdrShaderInputs();
+    SetDrawSettings(width, height, effect);
+    const auto projection360 = cachedVideoSettings_.projection360;
     context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
     context_->OMSetRenderTargets(1, &target, nullptr);
     const D3D11_VIEWPORT viewport{x, y, width, height, 0.0f, 1.0f};
@@ -6028,6 +6239,12 @@ void PlayerVideoRenderer::StopTimedTextThread() noexcept {
     timedTextThreadRunning_ = false;
 }
 
+void PlayerVideoRenderer::GetSubtitlePresentation(std::uint64_t& sequence, std::int64_t& qpc) noexcept {
+    std::lock_guard lock(timedTextMutex_);
+    sequence = presentedSubtitleSequence_;
+    qpc = presentedSubtitleQpc_;
+}
+
 FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
     const TimedTextLayerSlot slot) noexcept {
     const auto slotIndex = static_cast<std::size_t>(slot);
@@ -6052,8 +6269,13 @@ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
             timedTextCompositePixelInvocations_[slotIndex];
     }
     if (status.submittedSequence != status.renderedSequence || status.commandCount == 0 ||
-        timedTextTextures_[slotIndex] == nullptr || device_ == nullptr || context_ == nullptr)
+        timedTextTextures_[slotIndex] == nullptr)
         return FFFResult::Success;
+    if (d3d12_) {
+        const auto hr = d3d12_->ReadOverlayAlpha(static_cast<UINT>(slotIndex), status.visiblePixelCount);
+        return SUCCEEDED(hr) ? FFFResult::Success : FFFResult::DeviceFailure;
+    }
+    if (!device_ || !context_) return FFFResult::InvalidState;
     if (timedTextPipelineQueries_[slotIndex] == nullptr) {
         D3D11_QUERY_DESC query{}; query.Query = D3D11_QUERY_PIPELINE_STATISTICS;
         // Pipeline statistics are diagnostic-only. Do not allocate or poll them
@@ -6070,19 +6292,33 @@ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return FFFResult::DeviceFailure;
     std::uint64_t visible = 0;
+    const bool half = description.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
     for (std::uint32_t y = 0; y < description.Height; ++y) {
         const auto* row = static_cast<const std::uint8_t*>(mapped.pData) +
             static_cast<std::size_t>(mapped.RowPitch) * y;
         for (std::uint32_t x = 0; x < description.Width; ++x)
-            if (row[static_cast<std::size_t>(x) * 4 + 3] != 0) ++visible;
+            visible += half ? (reinterpret_cast<const std::uint16_t*>(row)[x * 4u + 3u] & 0x7fffu) != 0 :
+                row[static_cast<std::size_t>(x) * 4 + 3] != 0;
     }
     context_->Unmap(staging.Get(), 0);
     status.visiblePixelCount = visible;
     return FFFResult::Success;
 }
 
+ID3D11Device* PlayerVideoRenderer::TimedTextDevice() const noexcept {
+    return d3d12_ ? d3d12_->TextDevice() : device_;
+}
+
+ID3D11DeviceContext* PlayerVideoRenderer::TimedTextContext() const noexcept {
+    return d3d12_ ? d3d12_->TextContext() : context_;
+}
+
 FFFResult PlayerVideoRenderer::EnsureD2DContext() noexcept {
-    if (device_ == nullptr) return FFFResult::InvalidState;
+    if (d3d12_) {
+        const auto hr = d3d12_->EnsureTextDevice();
+        if (FAILED(hr)) return HandleD3D12Error(hr, "D3D12 Direct2D interop device");
+    }
+    if (!TimedTextDevice()) return FFFResult::InvalidState;
     // The deferred cover backdrop worker and timed-text presenter share the
     // device context under deviceMutex_. Use a multithreaded factory so the
     // resource remains valid when ownership moves between those threads.
@@ -6093,11 +6329,11 @@ FFFResult PlayerVideoRenderer::EnsureD2DContext() noexcept {
     }
     if (d2dContext_ == nullptr) {
         ComPtr<IDXGIDevice> dxgiDevice;
-        if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
+        if (FAILED(TimedTextDevice()->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
             FAILED(d2dFactory_->CreateDevice(dxgiDevice.Get(), &d2dDevice_)) ||
             FAILED(d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
                 &d2dContext_))) {
-            SetError("Could not bind Direct2D to the D3D11 playback device.");
+            SetError("Could not bind Direct2D to the playback text device.");
             return FFFResult::DeviceFailure;
         }
     }
@@ -6116,6 +6352,14 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
     ReleaseTimedTextSlotResources(slot);
     const auto d2dResult = EnsureD2DContext();
     if (d2dResult != FFFResult::Success) return d2dResult;
+    if (timedTextStrokeStyle_ == nullptr) {
+        const auto properties = fff::render::TimedTextStrokeStyleProperties();
+        if (FAILED(d2dFactory_->CreateStrokeStyle(&properties, nullptr, 0,
+            &timedTextStrokeStyle_))) {
+            SetError("Could not create the timed-text outline stroke style.");
+            return FFFResult::DeviceFailure;
+        }
+    }
     if (writeFactory_ == nullptr && FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
         __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&writeFactory_)))) {
         SetError("Could not create the DirectWrite timed-text factory."); return FFFResult::DeviceFailure;
@@ -6136,36 +6380,74 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
     texture.Format = hdrLinear ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
     texture.SampleDesc.Count = 1; texture.Usage = D3D11_USAGE_DEFAULT;
     texture.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(device_->CreateTexture2D(&texture, nullptr, &timedTextTextures_[slotIndex])) ||
-        FAILED(device_->CreateRenderTargetView(timedTextTextures_[slotIndex], nullptr,
+    const auto textureResult = d3d12_ ? d3d12_->CreateOverlay(static_cast<UINT>(slotIndex),
+        texture.Width, texture.Height, texture.Format, &timedTextTextures_[slotIndex]) :
+        TimedTextDevice()->CreateTexture2D(&texture, nullptr, &timedTextTextures_[slotIndex]);
+    if (FAILED(textureResult) && d3d12_) {
+        HandleD3D12Error(textureResult, "D3D12 overlay allocation");
+    }
+    if (FAILED(textureResult) ||
+        FAILED(TimedTextDevice()->CreateRenderTargetView(timedTextTextures_[slotIndex], nullptr,
             &timedTextTargets_[slotIndex])) ||
-        FAILED(device_->CreateShaderResourceView(timedTextTextures_[slotIndex], nullptr,
-            &timedTextViews_[slotIndex]))) {
+        (!d3d12_ && FAILED(TimedTextDevice()->CreateShaderResourceView(timedTextTextures_[slotIndex], nullptr,
+            &timedTextViews_[slotIndex])))) {
         ReleaseTimedTextSlotResources(slot);
         SetError("Could not create the requested subtitle/danmaku surface.");
         return FFFResult::DeviceFailure;
     }
     ComPtr<IDXGISurface> surface;
-    const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+    // The D3D12 wrapper is render-target-only to D2D. Sampling is done by
+    // the native compositor after ReleaseWrappedResources transitions it.
+    const auto bitmapOptions = d3d12_ ? D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW :
+        D2D1_BITMAP_OPTIONS_TARGET;
+    const auto properties = D2D1::BitmapProperties1(bitmapOptions,
         D2D1::PixelFormat(texture.Format, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
-    if (FAILED(timedTextTextures_[slotIndex]->QueryInterface(IID_PPV_ARGS(&surface))) ||
-        FAILED(d2dContext_->CreateBitmapFromDxgiSurface(surface.Get(), &properties,
-            &d2dTargets_[slotIndex]))) {
+    auto wrappedResult = timedTextTextures_[slotIndex]->QueryInterface(IID_PPV_ARGS(&surface));
+    if (SUCCEEDED(wrappedResult)) wrappedResult = d2dContext_->CreateBitmapFromDxgiSurface(
+        surface.Get(), &properties, &d2dTargets_[slotIndex]);
+    if (FAILED(wrappedResult)) {
         ReleaseTimedTextSlotResources(slot);
+        if (d3d12_) return HandleD3D12Error(wrappedResult, "D3D12 Direct2D overlay interop");
         SetError("Could not bind the requested subtitle/danmaku surface to Direct2D.");
         return FFFResult::DeviceFailure;
     }
+    if (!d3d12_) {
+        const auto blend = EnsureTimedTextBlend();
+        if (blend != FFFResult::Success) {
+            ReleaseTimedTextSlotResources(slot);
+            return blend;
+        }
+    }
+    timedTextResourcesHdr_ = hdrLinear;
+    timedTextWidths_[slotIndex] = swapWidth_;
+    timedTextHeights_[slotIndex] = swapHeight_;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerVideoRenderer::EnsureTimedTextSpritePipeline() noexcept {
     if (timedTextSpriteVertexShader_ == nullptr || timedTextSpritePixelShader_ == nullptr) {
-        if (FAILED(device_->CreateVertexShader(FFFTimedTextSpriteVertexShaderBytecode,
+        if (FAILED(TimedTextDevice()->CreateVertexShader(FFFTimedTextSpriteVertexShaderBytecode,
                 sizeof(FFFTimedTextSpriteVertexShaderBytecode), nullptr,
                 &timedTextSpriteVertexShader_)) ||
-            FAILED(device_->CreatePixelShader(FFFTimedTextSpritePixelShaderBytecode,
+            FAILED(TimedTextDevice()->CreatePixelShader(FFFTimedTextSpritePixelShaderBytecode,
                 sizeof(FFFTimedTextSpritePixelShaderBytecode), nullptr,
                 &timedTextSpritePixelShader_))) {
             SetError("Could not create the precompiled timed-text sprite shaders.");
             return FFFResult::DeviceFailure;
         }
     }
+    if (d3d12_ && !timedTextAtlasSampler_) {
+        D3D11_SAMPLER_DESC sampler{};
+        sampler.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler.MaxLOD = D3D11_FLOAT32_MAX;
+        const auto hr = TimedTextDevice()->CreateSamplerState(&sampler, &timedTextAtlasSampler_);
+        if (FAILED(hr)) return HandleD3D12Error(hr, "D3D12 text atlas sampler");
+    }
+    return EnsureTimedTextBlend();
+}
+
+FFFResult PlayerVideoRenderer::EnsureTimedTextBlend() noexcept {
     if (timedTextBlend_ == nullptr) {
         D3D11_BLEND_DESC blend{};
         blend.RenderTarget[0].BlendEnable = TRUE;
@@ -6176,15 +6458,10 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextResources(const TimedTextLayerSlot
         blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
         blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
         blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        if (FAILED(device_->CreateBlendState(&blend, &timedTextBlend_))) {
+        if (FAILED(TimedTextDevice()->CreateBlendState(&blend, &timedTextBlend_))) {
             SetError("Could not create the GPU timed-text blend state."); return FFFResult::DeviceFailure;
         }
     }
-    const auto atlasResult = EnsureTimedTextAtlas(InitialTimedTextAtlasSize);
-    if (atlasResult != FFFResult::Success) return atlasResult;
-    timedTextResourcesHdr_ = hdrLinear;
-    timedTextWidths_[slotIndex] = swapWidth_;
-    timedTextHeights_[slotIndex] = swapHeight_;
     return FFFResult::Success;
 }
 
@@ -6195,7 +6472,9 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requeste
     if (timedTextAtlasTexture_ != nullptr && timedTextAtlasSize_ >= size &&
         timedTextAtlasHdr_ == hdrLinear)
         return FFFResult::Success;
-    if (d2dContext_ == nullptr || device_ == nullptr) return FFFResult::InvalidState;
+    if (d3d12_ && !d3d12_->CanAllocateLocal(static_cast<std::uint64_t>(size) * size *
+        (hdrLinear ? 16u : 8u))) return FFFResult::NotSupported;
+    if (d2dContext_ == nullptr || !TimedTextDevice()) return FFFResult::InvalidState;
     if (d2dContext_ != nullptr) d2dContext_->SetTarget(nullptr);
     if (timedTextShadowBlurEffect_ != nullptr) {
         timedTextShadowBlurEffect_->SetInput(0, nullptr);
@@ -6211,8 +6490,8 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextAtlas(const std::uint32_t requeste
     texture.SampleDesc.Count = 1;
     texture.Usage = D3D11_USAGE_DEFAULT;
     texture.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(device_->CreateTexture2D(&texture, nullptr, &timedTextAtlasTexture_)) ||
-        FAILED(device_->CreateShaderResourceView(timedTextAtlasTexture_, nullptr, &timedTextAtlasView_))) {
+    if (FAILED(TimedTextDevice()->CreateTexture2D(&texture, nullptr, &timedTextAtlasTexture_)) ||
+        FAILED(TimedTextDevice()->CreateShaderResourceView(timedTextAtlasTexture_, nullptr, &timedTextAtlasView_))) {
         SetError("Could not create the GPU timed-text sprite atlas.");
         return FFFResult::DeviceFailure;
     }
@@ -6271,8 +6550,8 @@ FFFResult PlayerVideoRenderer::EnsureTimedTextInstanceCapacity(const std::size_t
     D3D11_SHADER_RESOURCE_VIEW_DESC view{};
     view.Format = DXGI_FORMAT_UNKNOWN; view.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
     view.Buffer.NumElements = capacity;
-    if (FAILED(device_->CreateBuffer(&buffer, nullptr, &timedTextSpriteInstanceBuffer_)) ||
-        FAILED(device_->CreateShaderResourceView(timedTextSpriteInstanceBuffer_, &view,
+    if (FAILED(TimedTextDevice()->CreateBuffer(&buffer, nullptr, &timedTextSpriteInstanceBuffer_)) ||
+        FAILED(TimedTextDevice()->CreateShaderResourceView(timedTextSpriteInstanceBuffer_, &view,
             &timedTextSpriteInstanceView_))) {
         SetError("Could not create the timed-text sprite instance buffer.");
         return FFFResult::DeviceFailure;
@@ -6360,22 +6639,37 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         return (static_cast<std::uint32_t>(command.flags) &
             static_cast<std::uint32_t>(FFF3FPTimedTextFlags::SoftShadow)) != 0;
     };
+    const auto usesSprite = [](const TimedTextRenderCommand& command) noexcept {
+        return command.type == FFF3FPTimedTextCommandType::Text && command.contentId != 0 &&
+            command.horizontalAlignment == FFF3FPTimedTextAlignment::Near &&
+            command.verticalAlignment == FFF3FPTimedTextAlignment::Near;
+    };
+    bool sprites = std::ranges::any_of(layer->commands, usesSprite);
+    if (sprites) {
+        const auto atlas = EnsureTimedTextAtlas(InitialTimedTextAtlasSize);
+        if (atlas == FFFResult::NotSupported) sprites = false;
+        else if (atlas != FFFResult::Success) return atlas;
+        if (sprites) {
+            const auto pipeline = EnsureTimedTextSpritePipeline();
+            if (pipeline != FFFResult::Success) return pipeline;
+        }
+    }
     const auto softShadowDepth = [](const float shadowX, const float shadowY) noexcept {
         return std::max(std::abs(shadowX), std::abs(shadowY));
     };
     const auto drawLayout = [&getBrush, this](const TimedTextRenderCommand& command,
         IDWriteTextLayout* layout, const D2D1_POINT_2F origin, const float outline,
-        const float shadowX, const float shadowY) noexcept {
+        const float shadowX, const float shadowY, const bool maskAlreadyDrawn = false) noexcept {
         if (layout == nullptr) return;
         const auto softShadow = (static_cast<std::uint32_t>(command.flags) &
             static_cast<std::uint32_t>(FFF3FPTimedTextFlags::SoftShadow)) != 0;
         auto* outlineBrush = outline > 0.0f && (command.outlineArgb >> 24) != 0
             ? getBrush(command.outlineArgb) : nullptr;
-        auto* shadowBrush = !softShadow && (command.shadowArgb >> 24) != 0
+        auto* shadowBrush = !(softShadow && maskAlreadyDrawn) && (command.shadowArgb >> 24) != 0
             ? getBrush(command.shadowArgb) : nullptr;
         if (outlineBrush != nullptr || shadowBrush != nullptr) {
             auto* effects = new (std::nothrow) TimedTextEffectRenderer(d2dFactory_, d2dContext_,
-                outlineBrush, shadowBrush, outline, shadowX, shadowY);
+                timedTextStrokeStyle_, outlineBrush, shadowBrush, outline, shadowX, shadowY);
             if (effects != nullptr) {
                 layout->Draw(nullptr, effects, origin.x, origin.y);
                 effects->Release();
@@ -6393,7 +6687,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         auto* shadowBrush = getBrush(command.shadowArgb);
         if (shadowBrush == nullptr) return;
         auto* effects = new (std::nothrow) TimedTextEffectRenderer(d2dFactory_, d2dContext_,
-            nullptr, shadowBrush, outline, 0.0f, 0.0f);
+            timedTextStrokeStyle_, nullptr, shadowBrush, outline, 0.0f, 0.0f);
         if (effects != nullptr) {
             layout->Draw(nullptr, effects, origin.x, origin.y);
             effects->Release();
@@ -6401,7 +6695,8 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     };
 
     auto& pendingSprites = timedTextPendingSprites_;
-    pendingSprites.reserve(layer->commands.size());
+    pendingSprites.clear();
+    if (sprites) pendingSprites.reserve(std::min<std::size_t>(layer->commands.size(), MaximumTimedTextSprites));
     const auto clearAtlas = [this]() noexcept -> bool {
         timedTextSprites_.clear();
         timedTextAtlasFreeRects_.clear();
@@ -6497,9 +6792,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         pendingSprites.clear();
         // 先标记本帧全部可见精灵，再回收过期矩形，避免后面的命令引用已被覆盖的图集区域。
         for (const auto& command : layer->commands) {
-            if (command.type != FFF3FPTimedTextCommandType::Text || command.contentId == 0 ||
-                command.horizontalAlignment != FFF3FPTimedTextAlignment::Near ||
-                command.verticalAlignment != FFF3FPTimedTextAlignment::Near) continue;
+            if (!usesSprite(command)) continue;
             const auto key = TimedTextSpriteKey(command, std::max(command.width * scaleX, 1.0f),
                 std::max(command.height * scaleY, 1.0f), std::max(command.fontSize * scaleY, 1.0f),
                 std::max(command.outlineWidth * (scaleX + scaleY) * 0.5f, 0.0f),
@@ -6512,9 +6805,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             static_cast<std::size_t>(MaximumTimedTextSprites)));
         for (std::size_t commandIndex = 0; commandIndex < layer->commands.size(); ++commandIndex) {
             const auto& command = layer->commands[commandIndex];
-            if (command.type != FFF3FPTimedTextCommandType::Text || command.contentId == 0 ||
-                command.horizontalAlignment != FFF3FPTimedTextAlignment::Near ||
-                command.verticalAlignment != FFF3FPTimedTextAlignment::Near) continue;
+            if (!usesSprite(command)) continue;
             const auto fontSize = std::max(command.fontSize * scaleY, 1.0f);
             const auto outline = std::max(command.outlineWidth * (scaleX + scaleY) * 0.5f, 0.0f);
             const auto shadowX = command.shadowOffsetX * scaleX;
@@ -6545,7 +6836,8 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
                 layout->GetMaxWidth() + overhang.right, layout->GetMaxHeight() + overhang.bottom);
             if (outline > 0.0f && ((command.outlineArgb | command.shadowArgb) >> 24) != 0) {
                 auto* boundsRenderer = new (std::nothrow) TimedTextEffectRenderer(
-                    d2dFactory_, d2dContext_, nullptr, nullptr, outline, 0.0f, 0.0f, &inkBounds);
+                    d2dFactory_, d2dContext_, timedTextStrokeStyle_, nullptr, nullptr,
+                    outline, 0.0f, 0.0f, &inkBounds);
                 if (boundsRenderer == nullptr) continue;
                 const auto boundsResult = layout->Draw(nullptr, boundsRenderer, 0.0f, 0.0f);
                 boundsRenderer->Release();
@@ -6587,10 +6879,11 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     // Rasterize new strings into one GPU atlas. If the bounded atlas fills, it
     // is rebuilt from the currently visible set; old off-screen content never
     // forces unbounded GPU memory growth.
-    auto pendingFit = buildPendingSprites(true);
+    auto pendingFit = !sprites || buildPendingSprites(true);
     while (!pendingFit && timedTextAtlasSize_ < MaximumTimedTextAtlasSize) {
         const auto growResult = EnsureTimedTextAtlas(std::min(
             timedTextAtlasSize_ * 2, MaximumTimedTextAtlasSize));
+        if (growResult == FFFResult::NotSupported) break;
         if (growResult != FFFResult::Success) return growResult;
         pendingFit = buildPendingSprites(true);
     }
@@ -6685,7 +6978,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             drawLayout(command, pending.layout.get(),
                 D2D1::Point2F(sprite.atlasX - sprite.offsetX,
                     sprite.atlasY - sprite.offsetY), pending.outline,
-                pending.shadowX, pending.shadowY);
+                pending.shadowX, pending.shadowY, true);
             d2dContext_->PopAxisAlignedClip();
         }
         const auto atlasEnd = d2dContext_->EndDraw();
@@ -6703,6 +6996,17 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
     }
 
     timedTextSpriteInstances_.clear();
+    if (d3d12_) {
+        const auto hr = d3d12_->BeginOverlay(static_cast<UINT>(slotIndex), timedTextTextures_[slotIndex]);
+        if (FAILED(hr)) return HandleD3D12Error(hr, "D3D12 text surface acquire");
+    }
+    const auto finishOverlay = [this, slotIndex](void*) noexcept {
+        if (d3d12_) {
+            const auto hr = d3d12_->EndOverlay(static_cast<UINT>(slotIndex), timedTextTextures_[slotIndex]);
+            if (FAILED(hr)) HandleD3D12Error(hr, "D3D12 text surface release");
+        }
+    };
+    std::unique_ptr<void, decltype(finishOverlay)> overlayScope(timedTextTextures_[slotIndex], finishOverlay);
     d2dContext_->SetTarget(d2dTargets_[slotIndex]);
     d2dContext_->BeginDraw();
     d2dContext_->Clear(D2D1::ColorF(0, 0));
@@ -6730,9 +7034,7 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
         const auto outline = std::max(command.outlineWidth * (scaleX + scaleY) * 0.5f, 0.0f);
         const auto shadowX = command.shadowOffsetX * scaleX;
         const auto shadowY = command.shadowOffsetY * scaleY;
-        if (command.contentId != 0 &&
-            command.horizontalAlignment == FFF3FPTimedTextAlignment::Near &&
-            command.verticalAlignment == FFF3FPTimedTextAlignment::Near) {
+        if (sprites && usesSprite(command)) {
             const auto spriteKey = TimedTextSpriteKey(command, std::max(command.width * scaleX, 1.0f),
                 std::max(command.height * scaleY, 1.0f), fontSize, outline, shadowX, shadowY);
             const auto sprite = timedTextSprites_.find(spriteKey);
@@ -6776,33 +7078,34 @@ FFFResult PlayerVideoRenderer::DrawTimedText(const TimedTextLayerSlot slot) noex
             timedTextSpriteInstances_.size());
         if (capacityResult != FFFResult::Success) return capacityResult;
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        if (FAILED(context_->Map(timedTextSpriteInstanceBuffer_, 0,
+        if (FAILED(TimedTextContext()->Map(timedTextSpriteInstanceBuffer_, 0,
             D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
             SetError("Could not update the timed-text sprite instances.");
             return FFFResult::DeviceFailure;
         }
         std::memcpy(mapped.pData, timedTextSpriteInstances_.data(),
             timedTextSpriteInstances_.size() * sizeof(TimedTextSpriteInstance));
-        context_->Unmap(timedTextSpriteInstanceBuffer_, 0);
+        TimedTextContext()->Unmap(timedTextSpriteInstanceBuffer_, 0);
         constexpr float blendFactor[] = {0, 0, 0, 0};
         D3D11_VIEWPORT viewport{0, 0, static_cast<float>(swapWidth_),
             static_cast<float>(swapHeight_), 0, 1};
-        context_->OMSetRenderTargets(1, &timedTextTargets_[slotIndex], nullptr);
-        context_->OMSetBlendState(timedTextBlend_, blendFactor, UINT_MAX);
-        context_->RSSetViewports(1, &viewport);
-        context_->IASetInputLayout(nullptr);
-        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        context_->VSSetShader(timedTextSpriteVertexShader_, nullptr, 0);
-        context_->VSSetShaderResources(1, 1, &timedTextSpriteInstanceView_);
-        context_->PSSetShader(timedTextSpritePixelShader_, nullptr, 0);
-        context_->PSSetShaderResources(0, 1, &timedTextAtlasView_);
-        context_->PSSetSamplers(0, 1, &sampler_);
-        context_->DrawInstanced(6, static_cast<UINT>(timedTextSpriteInstances_.size()), 0, 0);
+        TimedTextContext()->OMSetRenderTargets(1, &timedTextTargets_[slotIndex], nullptr);
+        TimedTextContext()->OMSetBlendState(timedTextBlend_, blendFactor, UINT_MAX);
+        TimedTextContext()->RSSetViewports(1, &viewport);
+        TimedTextContext()->IASetInputLayout(nullptr);
+        TimedTextContext()->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        TimedTextContext()->VSSetShader(timedTextSpriteVertexShader_, nullptr, 0);
+        TimedTextContext()->VSSetShaderResources(1, 1, &timedTextSpriteInstanceView_);
+        TimedTextContext()->PSSetShader(timedTextSpritePixelShader_, nullptr, 0);
+        TimedTextContext()->PSSetShaderResources(0, 1, &timedTextAtlasView_);
+        auto* sampler = d3d12_ ? timedTextAtlasSampler_ : sampler_;
+        TimedTextContext()->PSSetSamplers(0, 1, &sampler);
+        TimedTextContext()->DrawInstanced(6, static_cast<UINT>(timedTextSpriteInstances_.size()), 0, 0);
         ID3D11ShaderResourceView* nullView = nullptr;
-        context_->VSSetShaderResources(1, 1, &nullView);
-        context_->PSSetShaderResources(0, 1, &nullView);
-        context_->OMSetRenderTargets(0, nullptr, nullptr);
-        context_->OMSetBlendState(nullptr, blendFactor, UINT_MAX);
+        TimedTextContext()->VSSetShaderResources(1, 1, &nullView);
+        TimedTextContext()->PSSetShaderResources(0, 1, &nullView);
+        TimedTextContext()->OMSetRenderTargets(0, nullptr, nullptr);
+        TimedTextContext()->OMSetBlendState(nullptr, blendFactor, UINT_MAX);
     }
     {
         std::lock_guard lock(timedTextMutex_);
@@ -6881,6 +7184,7 @@ void PlayerVideoRenderer::ReleaseTimedTextSlotResources(
     if (index >= ARRAYSIZE(timedTextTextures_)) return;
     if (d2dContext_ != nullptr) d2dContext_->SetTarget(nullptr);
     ReleaseCom(d2dTargets_[index]);
+    if (d3d12_) d3d12_->ReleaseOverlay(static_cast<UINT>(index), timedTextTextures_[index]);
     ReleaseCom(timedTextPipelineQueries_[index]);
     ReleaseCom(timedTextViews_[index]);
     ReleaseCom(timedTextTargets_[index]);
@@ -6907,6 +7211,7 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
     timedTextSpriteInstanceCapacity_ = 0;
     timedTextSpriteCacheHits_ = timedTextSpriteCacheMisses_ = 0;
     ReleaseCom(timedTextRenderingParams_);
+    ReleaseCom(timedTextStrokeStyle_);
     if (timedTextShadowBlurEffect_ != nullptr) {
         timedTextShadowBlurEffect_->SetInput(0, nullptr);
         timedTextShadowBlurEffect_->Release(); timedTextShadowBlurEffect_ = nullptr;
@@ -6924,6 +7229,7 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
     ReleaseCom(timedTextSpriteInstanceBuffer_);
     ReleaseCom(timedTextSpritePixelShader_);
     ReleaseCom(timedTextSpriteVertexShader_);
+    ReleaseCom(timedTextAtlasSampler_);
     ReleaseCom(timedTextAtlasView_);
     ReleaseCom(timedTextAtlasTexture_);
     timedTextAtlasHdr_ = false;
@@ -7006,8 +7312,8 @@ bool PlayerVideoRenderer::BuildDynamicToneSettings(const HdrDynamicMetadata& met
     DynamicShaderSettings& settings, std::array<float, kDynamicCurveLutWidth *
         kHdrMaxProcessingWindows>& curves) noexcept {
     settings = DynamicShaderSettings{};
-    if (!dynamicCurveBuilt_ || dynamicConstants_ == nullptr ||
-        dynamicCurveView_ == nullptr || metadata.windowCount == 0 ||
+    if ((!d3d12_ && (!dynamicCurveBuilt_ || dynamicConstants_ == nullptr || !dynamicCurveView_)) ||
+        metadata.windowCount == 0 ||
         metadata.kind == HdrMetadataKind::None) {
         return false;
     }
@@ -7078,25 +7384,28 @@ bool PlayerVideoRenderer::BuildDynamicToneSettings(const HdrDynamicMetadata& met
 // frame is avoidable, and a static table -- the common case -- then costs one
 // upload per install instead of one per frame.
 bool PlayerVideoRenderer::BuildColorTransformSettings(const HdrFrameState& hdrState,
-    DynamicShaderSettings& settings) noexcept {
+    DynamicShaderSettings& settings,
+    std::shared_ptr<const FFF3FPColorTransformPayload>* nativeLut) noexcept {
     cachedTransformEnabled_ = false;
     if (!hdrState.dynamic.externalTransform) return false;
     std::shared_ptr<const FFF3FPColorTransformPayload> payload;
     if (!hdrProcessor_.ActiveColorTransform(payload) || payload == nullptr) return false;
     // The processor validated the shape when the table was installed; the extra
     // checks here are the ones the GPU path depends on.
-    if (!transformLutBuilt_ || transformLutTexture_ == nullptr ||
-        transformLutView_ == nullptr ||
+    if ((!nativeLut && (!transformLutBuilt_ || !transformLutTexture_ || !transformLutView_)) ||
         payload->lutResolution != kColorTransformLutResolution ||
         payload->lutDomain > 1u)
         return false;
     if (uploadedTransform_ != payload) {
-        constexpr std::uint32_t texels = kColorTransformLutResolution;
-        constexpr std::uint32_t rowPitch = texels * 3 * static_cast<std::uint32_t>(sizeof(float));
-        constexpr std::uint32_t depthPitch = rowPitch * texels;
-        context_->UpdateSubresource(transformLutTexture_, 0, nullptr,
-            payload->curveLut, rowPitch, depthPitch);
-        uploadedTransform_ = payload;
+        if (nativeLut) {
+            *nativeLut = payload;
+        } else {
+            constexpr std::uint32_t texels = kColorTransformLutResolution;
+            constexpr std::uint32_t rowPitch = texels * 3 * static_cast<std::uint32_t>(sizeof(float));
+            constexpr std::uint32_t depthPitch = rowPitch * texels;
+            context_->UpdateSubresource(transformLutTexture_, 0, nullptr, payload->curveLut, rowPitch, depthPitch);
+            uploadedTransform_ = payload;
+        }
     }
     settings.transformEnabled = 1;
     settings.transformDomain = payload->lutDomain;
@@ -7295,7 +7604,7 @@ void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
     // Present-path only (called from DrawWithShader under the device/present locks):
     // cachedVideoSettings_ and the constant buffers belong to that lock, not to the
     // thread that received FFF3FP_SetHdrDynamicMetadata.
-    if (!hasCachedVideo_ || context_ == nullptr) return;
+    if (!hasCachedVideo_ || (!d3d12_ && !context_)) return;
     const auto hdrState = hdrProcessor_.State();
     cachedVideoSettings_.transfer = decodedTransfer_.load(std::memory_order_acquire) == 3u ?
         3u : ResolveDecodeTransfer(hdrState);
@@ -7320,7 +7629,8 @@ void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
     }
     // Kind-3 rows are additive to whatever the ST 2094 gate decided: a transform
     // can drive the picture with or without a curve in force.
-    (void)BuildColorTransformSettings(hdrState, dynamicSettings);
+    std::shared_ptr<const FFF3FPColorTransformPayload> nativeLut;
+    (void)BuildColorTransformSettings(hdrState, dynamicSettings, d3d12_ ? &nativeLut : nullptr);
     // A frame whose auxiliary layer could not be paired withheld the table, and a
     // refresh of that same cached frame must not put it back: the pixels on the
     // surface are the uncomposed base layer.
@@ -7328,6 +7638,26 @@ void PlayerVideoRenderer::RefreshHdrShaderInputs() noexcept {
         dynamicSettings.transformEnabled = 0;
         dynamicSettings.transformDomain = 0;
         cachedTransformEnabled_ = false;
+    }
+    if (d3d12_) {
+        d3d12_->InvalidateBackdrop();
+        std::array<D3D12VideoRenderer::UploadPlane, D3D12VideoRenderer::ResourceCount> planes{};
+        if (dynamicSettings.enabled) planes[3] = {dynamicCurves.data(), kDynamicCurveLutWidth * sizeof(float),
+            kDynamicCurveLutWidth, kHdrMaxProcessingWindows, 1, DXGI_FORMAT_R32_FLOAT};
+        if (dynamicSettings.transformEnabled && nativeLut) {
+            constexpr auto n = kColorTransformLutResolution;
+            planes[4] = {nativeLut->curveLut, n * 3 * sizeof(float), n, n, n, DXGI_FORMAT_R32G32B32_FLOAT};
+        }
+        if (planes[3].data || planes[4].data) {
+            const auto hr = d3d12_->UpdateColorResources(planes);
+            if (FAILED(hr)) {
+                HandleD3D12Error(hr, "D3D12 HDR metadata upload");
+                return;
+            }
+            if (planes[4].data) uploadedTransform_ = std::move(nativeLut);
+        }
+        decodedTransfer_.store(cachedVideoSettings_.transfer, std::memory_order_relaxed);
+        cachedD3D12Dynamic_ = dynamicSettings;
     }
     // Uploaded unconditionally, exactly like the per-frame path: a stale table with
     // enabled == 0 must never survive into the next draw.
@@ -7492,6 +7822,156 @@ FFFResult PlayerVideoRenderer::UploadPlanarFrames(const std::uint8_t* const* upl
     return FFFResult::Success;
 }
 
+FFFResult PlayerVideoRenderer::UploadD3D11Frame(const AVFrame*& frame,
+    std::uint8_t* const* uploadPlanes, const int* uploadLines,
+    const std::uint32_t uploadWidth, const std::uint32_t uploadHeight,
+    const InputDescription& input) noexcept {
+    const bool d3d11Frame = frame->format == AV_PIX_FMT_D3D11;
+    const bool cudaFrame = frame->format == AV_PIX_FMT_CUDA;
+    const bool floatRgb = input.layout == 3;
+    const bool directYuv = input.layout != 0 && !floatRgb;
+    const bool cudaInteropSource = cudaFrame && CanImportCudaFrame(frame) &&
+        cudaInterop_.Probe(frame, device_) == CudaD3D11Interop::Status::Success;
+    const auto pipelineResult = EnsurePipeline(uploadWidth, uploadHeight, input.layout, input.bitDepth,
+        input.chromaWidthShift, input.chromaHeightShift, d3d11Frame, cudaInteropSource);
+    if (pipelineResult != FFFResult::Success) return pipelineResult;
+    if (cudaFrame) {
+        // Telemetry (uploadPath 8): a GPU-to-GPU paste with no PCIe traffic in either
+        // direction. uploadCopy100ns is the whole copy -- cuMemcpy2D is synchronous, so
+        // there is no separate map-wait interval to record.
+        const auto importStart = std::chrono::steady_clock::now();
+        auto imported = CudaD3D11Interop::Status::Refused;
+        if (cudaInteropSource && sourceCudaInterop_)
+            imported = cudaInterop_.Import(frame);
+        if (imported == CudaD3D11Interop::Status::Success) {
+            const auto importNs = std::chrono::steady_clock::now() - importStart;
+            upload100ns_.fetch_add(To100ns(importNs), std::memory_order_relaxed);
+            uploadCopy100ns_.fetch_add(To100ns(importNs), std::memory_order_relaxed);
+            // Exactly what moved: three planes, the chroma ones at the input's own
+            // subsampling, one byte per sample at 8 bit and two above it.
+            const auto lumaSamples = static_cast<std::uint64_t>(uploadWidth) * uploadHeight;
+            const auto chromaSamples =
+                static_cast<std::uint64_t>((uploadWidth + (1u << input.chromaWidthShift) - 1) >>
+                    input.chromaWidthShift) *
+                ((uploadHeight + (1u << input.chromaHeightShift) - 1) >>
+                    input.chromaHeightShift);
+            uploadCopyBytes_.fetch_add(static_cast<std::size_t>(
+                (lumaSamples + 2u * chromaSamples) * (input.bitDepth <= 8 ? 1u : 2u)),
+                std::memory_order_relaxed);
+            uploadCount_.fetch_add(1, std::memory_order_relaxed);
+            uploadPath_.store(8, std::memory_order_relaxed);
+        } else {
+            // The driver would not take it after all. Download this frame and rebuild
+            // the textures CPU-writable, so the picture is carried by the ordinary
+            // planar upload (`UploadPlanarFrames`) rather than dropped; the refusal
+            // is latched for the stream.
+            cudaInteropRefused_.store(true, std::memory_order_relaxed);
+            if (cudaTransferFrame_ == nullptr) cudaTransferFrame_ = av_frame_alloc();
+            if (cudaTransferFrame_ == nullptr) {
+                SetError("Could not allocate the hardware frame transfer target.");
+                return FFFResult::NativeFailure;
+            }
+            av_frame_unref(cudaTransferFrame_);
+            if (av_hwframe_transfer_data(cudaTransferFrame_, frame, 0) < 0) {
+                SetError("Could not transfer the hardware-decoded frame for presentation.");
+                return FFFResult::FfmpegFailure;
+            }
+            av_frame_copy_props(cudaTransferFrame_, frame);
+            frame = cudaTransferFrame_;
+            uploadPlanes = frame->data;
+            uploadLines = frame->linesize;
+            const auto rebuild = EnsurePipeline(uploadWidth, uploadHeight, input.layout,
+                input.bitDepth, input.chromaWidthShift, input.chromaHeightShift, false, false);
+            if (rebuild != FFFResult::Success) return rebuild;
+            const auto uploaded = UploadPlanarFrames(uploadPlanes, uploadLines,
+                uploadWidth, uploadHeight, input);
+            if (uploaded != FFFResult::Success) return uploaded;
+        }
+    } else if (d3d11Frame) {
+        auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
+        const auto slice = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
+        if (texture == nullptr || input.layout != 2) {
+            SetError("The shared D3D11 decoder produced an unsupported surface.");
+            return FFFResult::NotSupported;
+        }
+        // Decoder array slices are transient and are reused as soon as the AVFrame
+        // is released. Retain only one shader-readable GPU surface and copy the
+        // selected slice; this remains GPU-to-GPU and removes the full CPU transfer.
+        //
+        // Telemetry (uploadPath 7): this arm used to record nothing at all, so a
+        // hardware-decode run showed uploads=0 / upload_ms=0 / upath=0 and the whole
+        // upload family of CSV columns read as "no work happened" -- which made the
+        // "unmetered 97%" of hardware arms impossible to attribute. The counters
+        // below are the same ones the CPU arms use; CopySubresourceRegion IS the
+        // copy, so upload100ns and uploadCopy100ns are the same interval here and
+        // uploadMapWait100ns stays 0 by construction (no Map on this path).
+        const auto hwCopyStart = std::chrono::steady_clock::now();
+        context_->CopySubresourceRegion(sourceTextures_[0], 0, 0, 0, 0, texture, slice, nullptr);
+        const auto hwCopyNs = std::chrono::steady_clock::now() - hwCopyStart;
+        upload100ns_.fetch_add(To100ns(hwCopyNs), std::memory_order_relaxed);
+        uploadCopy100ns_.fetch_add(To100ns(hwCopyNs), std::memory_order_relaxed);
+        // Byte count mirrors how buildSourceTextures sizes this texture
+        // (NV12 / P010 / P016 by bit depth, :3762-3765): 1.5 bytes per pixel at
+        // 8 bit, 3 at 10/12 bit. Recording it keeps bytes_per_upload (and the
+        // bandwidth column) comparable across paths instead of silently zero.
+        const std::uint64_t hwCopyBytes = static_cast<std::uint64_t>(uploadWidth) * uploadHeight *
+            (input.bitDepth <= 8 ? 3u : 6u) / 2u;
+        uploadCopyBytes_.fetch_add(static_cast<std::size_t>(hwCopyBytes), std::memory_order_relaxed);
+        uploadCount_.fetch_add(1, std::memory_order_relaxed);
+        uploadPath_.store(7, std::memory_order_relaxed);
+    } else if (directYuv) {
+        // Planar (1) and semi-planar (2) frames arrive as CPU planes and must be
+        // copied into shader-visible textures. Two upload strategies: the policy
+        // block above picks one (Map by default since 2026-10-20), and
+        // WantsStagingUpload can still turn the ring off when this adapter cannot
+        // carry it (see the constants above):
+        //
+        //  - Default: Map(WRITE_DISCARD) into a DYNAMIC texture. The driver can
+        //    rename storage rather than waiting for the previous frame to stop
+        //    sampling the same DEFAULT texture, which is why this path exists --
+        //    and since 2026-10-20 it is also the measured winner at every size.
+        //  - Opt-in (FFF3FP_UPLOAD_FORCE_STAGING=1, >= 4K): CPU-write STAGING ->
+        //    alternating DEFAULT textures, keeping upload and sampling on separate
+        //    resources. EnsurePipeline creates the matching resource ring.
+        const auto uploaded = UploadPlanarFrames(uploadPlanes, uploadLines,
+            uploadWidth, uploadHeight, input);
+        if (uploaded != FFFResult::Success) return uploaded;
+    } else if (floatRgb) {
+        // Verbatim (no quantisation) so negatives and super-whites survive; taken from uploadPlanes/
+        // uploadLines, like directYuv above, so an engaged downscale cannot leave a top-left crop.
+        const auto floatUploadStart = std::chrono::steady_clock::now();
+        context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, uploadPlanes[0], uploadLines[0], 0);
+        const auto floatUploadNs = std::chrono::steady_clock::now() - floatUploadStart;
+        upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+            std::chrono::nanoseconds>(floatUploadNs).count() / 100));
+        uploadCopy100ns_.fetch_add(To100ns(floatUploadNs), std::memory_order_relaxed);
+        uploadCount_.fetch_add(1, std::memory_order_relaxed);
+        uploadCopyBytes_.fetch_add(static_cast<std::uint64_t>(uploadWidth) * uploadHeight * (input.bitDepth == 32 ? 16u : 8u), std::memory_order_relaxed);
+        uploadPath_.store(4, std::memory_order_relaxed);
+    } else {
+        // Layout 0: convertedRgb_ already holds the frame at uploadWidth x uploadHeight,
+        // so the row pitch has to be the uploaded width. A decoded-width pitch inside a
+        // destination-sized texture makes UpdateSubresource read only the top-left corner
+        // of the conversion and drop the rest of the frame.
+        const auto bytesPerPixel = input.bitDepth <= 8 ? 4u : 8u;
+        const auto rgbUploadStart = std::chrono::steady_clock::now();
+        context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, uploadPlanes[0], uploadLines[0], 0);
+        const auto rgbUploadNs = std::chrono::steady_clock::now() - rgbUploadStart;
+        upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+            std::chrono::nanoseconds>(rgbUploadNs).count() / 100));
+        // This arm's upload IS its copy. Without this the layout-0 route reports
+        // uploadCopy100ns == 0 while upload100ns is non-zero, which reads as "moved no
+        // bytes" instead of "bytes moved that nobody instrumented".
+        uploadCopy100ns_.fetch_add(To100ns(rgbUploadNs), std::memory_order_relaxed);
+        // Exact here: the whole box moves and both dimensions and the pitch are known.
+        uploadCopyBytes_.fetch_add(static_cast<std::size_t>(uploadWidth) * uploadHeight *
+            bytesPerPixel, std::memory_order_relaxed);
+        uploadCount_.fetch_add(1, std::memory_order_relaxed);
+        uploadPath_.store(5, std::memory_order_relaxed);
+    }
+    return FFFResult::Success;
+}
+
 FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t frameIndex,
     const bool limitToNativeSize,
     const bool coverArt, const bool prepareOnly, const bool imageMode,
@@ -7506,8 +7986,10 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // device, so bring such a frame back to CPU planes before any pipeline, HDR or
     // input-layout decision is made. The session normally does this already; this
     // keeps cover-art, retained-still and device-recovery callers correct too.
-    if (frame->format == AV_PIX_FMT_D3D11 && frame->data[0] != nullptr &&
-        !OwnsD3D11Texture(reinterpret_cast<ID3D11Texture2D*>(frame->data[0]))) {
+    if ((frame->format == AV_PIX_FMT_D3D11 && frame->data[0] &&
+            !OwnsD3D11Texture(reinterpret_cast<ID3D11Texture2D*>(frame->data[0]))) ||
+        (frame->format == AV_PIX_FMT_D3D12 && !CanImportD3D12Frame(frame)) ||
+        (frame->format == AV_PIX_FMT_CUDA && WantsD3D12() && !d3d12Rejected_)) {
         std::lock_guard transferLock(deviceMutex_);
         if (d3d11TransferFrame_ == nullptr) d3d11TransferFrame_ = av_frame_alloc();
         if (d3d11TransferFrame_ == nullptr) {
@@ -7633,7 +8115,8 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     auto input = DescribeInput(static_cast<AVPixelFormat>(frame->format));
     const auto d3d11Frame = frame->format == AV_PIX_FMT_D3D11;
     const auto cudaFrame = frame->format == AV_PIX_FMT_CUDA;
-    if (d3d11Frame && frame->hw_frames_ctx != nullptr) {
+    const auto d3d12Frame = frame->format == AV_PIX_FMT_D3D12;
+    if ((d3d11Frame || d3d12Frame) && frame->hw_frames_ctx != nullptr) {
         const auto* frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
         input = DescribeInput(frames->sw_format);
     }
@@ -7685,6 +8168,8 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         ++presentedVideoFrames_;
         return FFFResult::Success;
     }
+    std::uint8_t* outputData[4]{};
+    int outputLines[4]{};
     if (!directYuv && !floatRgb) {
         const auto* yuvDescriptor = av_pix_fmt_desc_get(
             static_cast<AVPixelFormat>(frame->format));
@@ -7739,11 +8224,13 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
             SetError("Could not allocate the video conversion buffer.");
             return FFFResult::NotSupported;
         }
-        std::uint8_t* outputData[] = { convertedRgb_.data(), nullptr, nullptr, nullptr };
-        int outputLines[] = { static_cast<int>(uploadWidth * bytesPerPixel), 0, 0, 0 };
+        outputData[0] = convertedRgb_.data();
+        outputLines[0] = static_cast<int>(uploadWidth * bytesPerPixel);
         if (sws_scale(scaler_, frame->data, frame->linesize, 0, frame->height, outputData, outputLines) <= 0) {
             SetError("FFmpeg could not convert the decoded video frame."); return FFFResult::FfmpegFailure;
         }
+        uploadPlanes = outputData;
+        uploadLines = outputLines;
         softwareConvert100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
             std::chrono::nanoseconds>(std::chrono::steady_clock::now() - conversionStart).count() / 100));
     }
@@ -7786,156 +8273,20 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         uploadPlanes = AdaptivePlanes();
         uploadLines = AdaptiveLines();
     }
-    // Whether this frame can be pasted into the sampled textures instead of being
-    // downloaded first. Probe() is the device-side half of CanImportCudaFrame and runs
-    // here, under the device lock, because it pushes the decoder's CUDA context.
-    auto cudaInteropSource = false;
-    if (cudaFrame) {
-        const auto probeStatus = CanImportCudaFrame(frame)
-            ? cudaInterop_.Probe(frame, device_) : CudaD3D11Interop::Status::Refused;
-        cudaInteropSource = probeStatus == CudaD3D11Interop::Status::Success;
-        if (!cudaInteropSource) {
-        }
-    }
-    const auto pipelineResult = EnsurePipeline(uploadWidth, uploadHeight, input.layout, input.bitDepth,
-        input.chromaWidthShift, input.chromaHeightShift, d3d11Frame, cudaInteropSource);
-    if (pipelineResult != FFFResult::Success) return pipelineResult;
-    if (cudaFrame) {
-        // Telemetry (uploadPath 8): a GPU-to-GPU paste with no PCIe traffic in either
-        // direction. uploadCopy100ns is the whole copy -- cuMemcpy2D is synchronous, so
-        // there is no separate map-wait interval to record.
-        const auto importStart = std::chrono::steady_clock::now();
-        auto imported = CudaD3D11Interop::Status::Refused;
-        if (cudaInteropSource && sourceCudaInterop_)
-            imported = cudaInterop_.Import(frame);
-        if (imported == CudaD3D11Interop::Status::Success) {
-            const auto importNs = std::chrono::steady_clock::now() - importStart;
-            upload100ns_.fetch_add(To100ns(importNs), std::memory_order_relaxed);
-            uploadCopy100ns_.fetch_add(To100ns(importNs), std::memory_order_relaxed);
-            // Exactly what moved: three planes, the chroma ones at the input's own
-            // subsampling, one byte per sample at 8 bit and two above it.
-            const auto lumaSamples = static_cast<std::uint64_t>(uploadWidth) * uploadHeight;
-            const auto chromaSamples =
-                static_cast<std::uint64_t>((uploadWidth + (1u << input.chromaWidthShift) - 1) >>
-                    input.chromaWidthShift) *
-                ((uploadHeight + (1u << input.chromaHeightShift) - 1) >>
-                    input.chromaHeightShift);
-            uploadCopyBytes_.fetch_add(static_cast<std::size_t>(
-                (lumaSamples + 2u * chromaSamples) * (input.bitDepth <= 8 ? 1u : 2u)),
-                std::memory_order_relaxed);
-            uploadCount_.fetch_add(1, std::memory_order_relaxed);
-            uploadPath_.store(8, std::memory_order_relaxed);
-        } else {
-            // The driver would not take it after all. Download this frame and rebuild
-            // the textures CPU-writable, so the picture is carried by the ordinary
-            // planar upload (`UploadPlanarFrames`) rather than dropped; the refusal
-            // is latched for the stream.
-            cudaInteropRefused_.store(true, std::memory_order_relaxed);
-            if (cudaTransferFrame_ == nullptr) cudaTransferFrame_ = av_frame_alloc();
-            if (cudaTransferFrame_ == nullptr) {
-                SetError("Could not allocate the hardware frame transfer target.");
-                return FFFResult::NativeFailure;
-            }
-            av_frame_unref(cudaTransferFrame_);
-            if (av_hwframe_transfer_data(cudaTransferFrame_, frame, 0) < 0) {
-                SetError("Could not transfer the hardware-decoded frame for presentation.");
-                return FFFResult::FfmpegFailure;
-            }
-            av_frame_copy_props(cudaTransferFrame_, frame);
-            frame = cudaTransferFrame_;
-            uploadPlanes = frame->data;
-            uploadLines = frame->linesize;
-            const auto rebuild = EnsurePipeline(uploadWidth, uploadHeight, input.layout,
-                input.bitDepth, input.chromaWidthShift, input.chromaHeightShift, false, false);
-            if (rebuild != FFFResult::Success) return rebuild;
-            const auto uploaded = UploadPlanarFrames(uploadPlanes, uploadLines,
-                uploadWidth, uploadHeight, input);
-            if (uploaded != FFFResult::Success) return uploaded;
-        }
-    } else if (d3d11Frame) {
-        auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
-        const auto slice = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
-        if (texture == nullptr || input.layout != 2) {
-            SetError("The shared D3D11 decoder produced an unsupported surface.");
-            return FFFResult::NotSupported;
-        }
-        // Decoder array slices are transient and are reused as soon as the AVFrame
-        // is released. Retain only one shader-readable GPU surface and copy the
-        // selected slice; this remains GPU-to-GPU and removes the full CPU transfer.
-        //
-        // Telemetry (uploadPath 7): this arm used to record nothing at all, so a
-        // hardware-decode run showed uploads=0 / upload_ms=0 / upath=0 and the whole
-        // upload family of CSV columns read as "no work happened" -- which made the
-        // "unmetered 97%" of hardware arms impossible to attribute. The counters
-        // below are the same ones the CPU arms use; CopySubresourceRegion IS the
-        // copy, so upload100ns and uploadCopy100ns are the same interval here and
-        // uploadMapWait100ns stays 0 by construction (no Map on this path).
-        const auto hwCopyStart = std::chrono::steady_clock::now();
-        context_->CopySubresourceRegion(sourceTextures_[0], 0, 0, 0, 0, texture, slice, nullptr);
-        const auto hwCopyNs = std::chrono::steady_clock::now() - hwCopyStart;
-        upload100ns_.fetch_add(To100ns(hwCopyNs), std::memory_order_relaxed);
-        uploadCopy100ns_.fetch_add(To100ns(hwCopyNs), std::memory_order_relaxed);
-        // Byte count mirrors how buildSourceTextures sizes this texture
-        // (NV12 / P010 / P016 by bit depth, :3762-3765): 1.5 bytes per pixel at
-        // 8 bit, 3 at 10/12 bit. Recording it keeps bytes_per_upload (and the
-        // bandwidth column) comparable across paths instead of silently zero.
-        const std::uint64_t hwCopyBytes = static_cast<std::uint64_t>(uploadWidth) * uploadHeight *
-            (input.bitDepth <= 8 ? 3u : 6u) / 2u;
-        uploadCopyBytes_.fetch_add(static_cast<std::size_t>(hwCopyBytes), std::memory_order_relaxed);
-        uploadCount_.fetch_add(1, std::memory_order_relaxed);
-        uploadPath_.store(7, std::memory_order_relaxed);
-    } else if (directYuv) {
-        // Planar (1) and semi-planar (2) frames arrive as CPU planes and must be
-        // copied into shader-visible textures. Two upload strategies: the policy
-        // block above picks one (Map by default since 2026-10-20), and
-        // WantsStagingUpload can still turn the ring off when this adapter cannot
-        // carry it (see the constants above):
-        //
-        //  - Default: Map(WRITE_DISCARD) into a DYNAMIC texture. The driver can
-        //    rename storage rather than waiting for the previous frame to stop
-        //    sampling the same DEFAULT texture, which is why this path exists --
-        //    and since 2026-10-20 it is also the measured winner at every size.
-        //  - Opt-in (FFF3FP_UPLOAD_FORCE_STAGING=1, >= 4K): CPU-write STAGING ->
-        //    alternating DEFAULT textures, keeping upload and sampling on separate
-        //    resources. EnsurePipeline creates the matching resource ring.
-        const auto uploaded = UploadPlanarFrames(uploadPlanes, uploadLines,
-            uploadWidth, uploadHeight, input);
+    if (!d3d12_) {
+        const auto uploaded = UploadD3D11Frame(frame, uploadPlanes, uploadLines, uploadWidth, uploadHeight, input);
         if (uploaded != FFFResult::Success) return uploaded;
-    } else if (floatRgb) {
-        // Verbatim (no quantisation) so negatives and super-whites survive; taken from uploadPlanes/
-        // uploadLines, like directYuv above, so an engaged downscale cannot leave a top-left crop.
-        const auto floatUploadStart = std::chrono::steady_clock::now();
-        context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, uploadPlanes[0], uploadLines[0], 0);
-        const auto floatUploadNs = std::chrono::steady_clock::now() - floatUploadStart;
-        upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
-            std::chrono::nanoseconds>(floatUploadNs).count() / 100));
-        uploadCopy100ns_.fetch_add(To100ns(floatUploadNs), std::memory_order_relaxed);
-        uploadCount_.fetch_add(1, std::memory_order_relaxed);
-        uploadCopyBytes_.fetch_add(static_cast<std::uint64_t>(uploadWidth) * uploadHeight * (input.bitDepth == 32 ? 16u : 8u), std::memory_order_relaxed);
-        uploadPath_.store(4, std::memory_order_relaxed);
     } else {
-        // Layout 0: convertedRgb_ already holds the frame at uploadWidth x uploadHeight,
-        // so the row pitch has to be the uploaded width. A decoded-width pitch inside a
-        // destination-sized texture makes UpdateSubresource read only the top-left corner
-        // of the conversion and drop the rest of the frame.
-        const auto bytesPerPixel = input.bitDepth <= 8 ? 4u : 8u;
-        const auto rgbUploadStart = std::chrono::steady_clock::now();
-        context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, convertedRgb_.data(),
-            uploadWidth * bytesPerPixel, 0);
-        const auto rgbUploadNs = std::chrono::steady_clock::now() - rgbUploadStart;
-        upload100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
-            std::chrono::nanoseconds>(rgbUploadNs).count() / 100));
-        // This arm's upload IS its copy. Without this the layout-0 route reports
-        // uploadCopy100ns == 0 while upload100ns is non-zero, which reads as "moved no
-        // bytes" instead of "bytes moved that nobody instrumented".
-        uploadCopy100ns_.fetch_add(To100ns(rgbUploadNs), std::memory_order_relaxed);
-        // Exact here: the whole box moves and both dimensions and the pitch are known.
-        uploadCopyBytes_.fetch_add(static_cast<std::size_t>(uploadWidth) * uploadHeight *
-            bytesPerPixel, std::memory_order_relaxed);
-        uploadCount_.fetch_add(1, std::memory_order_relaxed);
-        uploadPath_.store(5, std::memory_order_relaxed);
+        sourceWidth_ = uploadWidth;
+        sourceHeight_ = uploadHeight;
+        sourceInputLayout_ = input.layout;
+        sourceBitDepth_ = input.bitDepth;
+        sourceChromaWidthShift_ = input.chromaWidthShift;
+        sourceChromaHeightShift_ = input.chromaHeightShift;
+        sourceExternal_ = d3d12Frame;
+        sourceCudaInterop_ = false;
     }
-    ShaderSettings settings{};
+    VideoShaderSettings settings{};
     settings.colorMode = static_cast<std::uint32_t>(actualMode_);
     settings.reserved = 0;
     // The decode transfer function must follow the *pixels*, not the metadata
@@ -8005,8 +8356,9 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // curve when this frame has none: the buffer and texture are bound on every
     // draw, and a stale table with enabled==0 would still be sampled if the
     // shader were ever changed to ignore the gate.
+    std::shared_ptr<const FFF3FPColorTransformPayload> nativeLut;
     if (!prepareOnly)
-        (void)BuildColorTransformSettings(hdrState, dynamicSettings);
+        (void)BuildColorTransformSettings(hdrState, dynamicSettings, d3d12_ ? &nativeLut : nullptr);
     // Optional auxiliary layer. A request without a paired frame must NOT leave the
     // kind-3 table running: the caller baked that table against composed samples,
     // and sampling it on the bare base layer would map the wrong signal onto every
@@ -8016,10 +8368,29 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     const bool elRequested = auxiliaryComposition != nullptr && auxiliaryComposition->enabled != 0;
     ElCompositionSettings elSettings{};
     cachedElComposeEnabled_ = false;
-    if (elRequested && auxiliaryFrame != nullptr && directYuv && !floatRgb &&
+    if (!d3d12_ && elRequested && auxiliaryFrame != nullptr && directYuv && !floatRgb &&
         PrepareElComposition(auxiliaryFrame, *auxiliaryComposition, elSettings) ==
             FFFResult::Success)
         cachedElComposeEnabled_ = true;
+    std::array<D3D12VideoRenderer::UploadPlane, D3D12VideoRenderer::ResourceCount> nativePlanes{};
+    if (d3d12_ && elRequested && auxiliaryFrame && directYuv &&
+        auxiliaryFrame->format == AV_PIX_FMT_YUV420P10LE && auxiliaryFrame->width > 0 && auxiliaryFrame->height > 0 &&
+        auxiliaryComposition->residualShift >= -8 && auxiliaryComposition->residualShift <= 8 &&
+        auxiliaryComposition->residualCenter && auxiliaryComposition->maxValue) {
+        cachedElComposeEnabled_ = true;
+        for (UINT i = 0; i < 3; ++i) {
+            const auto aw = static_cast<UINT>(i == 0 ? auxiliaryFrame->width : (auxiliaryFrame->width + 1LL) / 2);
+            const auto ah = static_cast<UINT>(i == 0 ? auxiliaryFrame->height : (auxiliaryFrame->height + 1LL) / 2);
+            if (!auxiliaryFrame->data[i] || auxiliaryFrame->linesize[i] < static_cast<int>(aw * 2u)) {
+                cachedElComposeEnabled_ = false;
+                break;
+            }
+            nativePlanes[i + 5] = {auxiliaryFrame->data[i], auxiliaryFrame->linesize[i], aw, ah, 1, DXGI_FORMAT_R16_UINT};
+        }
+        if (cachedElComposeEnabled_) elSettings = {1, auxiliaryComposition->residualCenter,
+            auxiliaryComposition->residualShift, auxiliaryComposition->maxValue};
+        else for (UINT i = 5; i < nativePlanes.size(); ++i) nativePlanes[i] = {};
+    }
     if (!cachedElComposeEnabled_) elSettings = ElCompositionSettings{};
     cachedElTransformBlocked_ = elRequested && !cachedElComposeEnabled_;
     if (cachedElTransformBlocked_) {
@@ -8027,6 +8398,44 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         dynamicSettings.transformDomain = 0;
         cachedTransformEnabled_ = false;
     }
+    if (d3d12_) {
+        if (!d3d12Frame) {
+            const auto planeCount = input.layout == 1 ? 3u : input.layout == 2 ? 2u : 1u;
+            for (UINT i = 0; i < planeCount; ++i) {
+                const auto w = i == 0 ? uploadWidth :
+                    (uploadWidth + (1u << input.chromaWidthShift) - 1) >> input.chromaWidthShift;
+                const auto h = i == 0 ? uploadHeight :
+                    (uploadHeight + (1u << input.chromaHeightShift) - 1) >> input.chromaHeightShift;
+                const auto format = input.layout == 3 ?
+                    (input.bitDepth == 32 ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R16G16B16A16_FLOAT) :
+                    input.layout == 0 ? (input.bitDepth <= 8 ? DXGI_FORMAT_B8G8R8A8_UNORM : DXGI_FORMAT_R16G16B16A16_UNORM) :
+                    (input.layout == 2 && i == 1 ?
+                        (input.bitDepth <= 8 ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R16G16_UNORM) :
+                        (input.bitDepth <= 8 ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R16_UNORM));
+                if (!uploadPlanes[i]) return FFFResult::InvalidArgument;
+                nativePlanes[i] = {uploadPlanes[i], uploadLines[i], w, h, 1, format};
+            }
+        }
+        if (dynamicSettings.enabled) nativePlanes[3] = {dynamicCurves.data(), kDynamicCurveLutWidth * sizeof(float),
+            kDynamicCurveLutWidth, kHdrMaxProcessingWindows, 1, DXGI_FORMAT_R32_FLOAT};
+        if (dynamicSettings.transformEnabled && nativeLut) {
+            constexpr auto n = kColorTransformLutResolution;
+            nativePlanes[4] = {nativeLut->curveLut, n * 3 * sizeof(float), n, n, n, DXGI_FORMAT_R32G32B32_FLOAT};
+        }
+        const auto start = std::chrono::steady_clock::now();
+        UINT64 bytes = 0;
+        const auto hr = d3d12_->UploadPicture(nativePlanes, d3d12Frame ? frame : nullptr, bytes);
+        if (FAILED(hr)) return HandleD3D12Error(hr, "D3D12 video upload/import");
+        const auto elapsed = To100ns(std::chrono::steady_clock::now() - start);
+        upload100ns_.fetch_add(elapsed, std::memory_order_relaxed);
+        uploadCopy100ns_.fetch_add(elapsed, std::memory_order_relaxed);
+        uploadCopyBytes_.fetch_add(bytes, std::memory_order_relaxed);
+        uploadCount_.fetch_add(1, std::memory_order_relaxed);
+        uploadPath_.store(d3d12Frame ? 10u : 9u, std::memory_order_relaxed);
+        if (nativePlanes[4].data) uploadedTransform_ = std::move(nativeLut);
+    }
+    cachedD3D12Auxiliary_ = elSettings;
+    cachedD3D12Dynamic_ = dynamicSettings;
     if (elCompositionBuffer_ != nullptr)
         context_->UpdateSubresource(elCompositionBuffer_, 0, nullptr, &elSettings, 0, 0);
     if (dynamicConstants_ != nullptr) {
@@ -8090,8 +8499,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     sourceChromaLocation_ = chromaLocation;
     sourceFullRange_ = IsFullRange(frame);
     sourceInterlaced_ = (frame->flags & AV_FRAME_FLAG_INTERLACED) != 0;
-    static_assert(sizeof(CachedVideoSettings) == sizeof(ShaderSettings));
-    std::memcpy(&cachedVideoSettings_, &settings, sizeof(settings));
+    cachedVideoSettings_ = settings;
     sourceLimitedToNativeSize_ = limitToNativeSize;
     sourceCoverArt_ = coverArt;
     sourceImageMode_ = imageMode;
@@ -8104,7 +8512,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     cachedFrameEpoch_.store(presentationEpoch_.load(std::memory_order_acquire),
         std::memory_order_release);
     cachedFramePts_.store(frame->pts, std::memory_order_relaxed);
-    if (coverArt) RequestCoverBackdropRender();
+    if (coverArt && !d3d12_) RequestCoverBackdropRender();
     {
         std::lock_guard lock(timedTextMutex_);
         if (!timedTextThread_.joinable()) {
@@ -8187,25 +8595,30 @@ FFFResult PlayerVideoRenderer::PresentAfterBind() noexcept {
     if (chainResult != FFFResult::Success || swapChain_ == nullptr) return chainResult;
     ComPtr<ID3D11Texture2D> backBuffer;
     ComPtr<ID3D11RenderTargetView> backBufferTarget;
-    const auto targetResult = AcquireBackBufferTarget(
-        backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
-    if (targetResult != FFFResult::Success) return targetResult;
-    if (hasCachedVideo_) {
-        // Present path: this blit feeds a bind-time repaint flip. It runs off the
-        // presenter thread (the worker/bind thread), which the contract guard degrades
-        // with a trace rather than rejects -- this one-shot repaint is the known exception.
-        const auto drawResult = DrawCachedVideo(backBufferTarget.Get(), /*forPresent=*/true);
-        if (drawResult != FFFResult::Success) return drawResult;
+    if (d3d12_) {
+        const auto submitted = SubmitD3D12Frame();
+        if (submitted != FFFResult::Success) return submitted;
     } else {
-        // No frame was ever rendered into this window (headless open dropped
-        // them all). One black frame is strictly better than a window with no
-        // swap chain at all: it proves the chain works, gives the text layers a
-        // real canvas to size themselves against, and is superseded by the next
-        // decoded frame.
-        constexpr float black[] = {0, 0, 0, 1};
-        context_->ClearRenderTargetView(backBufferTarget.Get(), black);
+        const auto targetResult = AcquireBackBufferTarget(
+            backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
+        if (targetResult != FFFResult::Success) return targetResult;
+        if (hasCachedVideo_) {
+            // Present path: this blit feeds a bind-time repaint flip. It runs off the
+            // presenter thread (the worker/bind thread), which the contract guard degrades
+            // with a trace rather than rejects -- this one-shot repaint is the known exception.
+            const auto drawResult = DrawCachedVideo(backBufferTarget.Get(), /*forPresent=*/true);
+            if (drawResult != FFFResult::Success) return drawResult;
+        } else {
+            // No frame was ever rendered into this window (headless open dropped
+            // them all). One black frame is strictly better than a window with no
+            // swap chain at all: it proves the chain works, gives the text layers a
+            // real canvas to size themselves against, and is superseded by the next
+            // decoded frame.
+            constexpr float black[] = {0, 0, 0, 1};
+            context_->ClearRenderTargetView(backBufferTarget.Get(), black);
+        }
+        context_->OMSetRenderTargets(0, nullptr, nullptr);
     }
-    context_->OMSetRenderTargets(0, nullptr, nullptr);
     ComPtr<IDXGISwapChain4> retainedChain = swapChain_;
     const auto generation = videoGeneration_.load();
     deviceLock.unlock();
@@ -8371,6 +8784,7 @@ PlayerVideoRenderer::TryRenderCoverBackdropCache() noexcept {
 }
 
 void PlayerVideoRenderer::RequestCoverBackdropRender(const bool force) noexcept {
+    if (activeBackend_.load(std::memory_order_acquire) == 1) return;
     try {
         {
             std::lock_guard lock(coverBackdropThreadMutex_);
@@ -8851,7 +9265,7 @@ FFFResult PlayerVideoRenderer::GetRenderTargetInfo(RenderTargetInfo& info) noexc
     // indistinguishable from a real 0x0 target, and callers use these numbers to
     // map pixel-probe coordinates, so a stale/zero swap size would silently
     // produce wrong probe results rather than a diagnosable failure.
-    if (swapChain_ == nullptr || device_ == nullptr || context_ == nullptr)
+    if (!swapChain_ || (!d3d12_ && (!device_ || !context_)))
         return FFFResult::InvalidState;
     info.swapWidth = swapWidth_;
     info.swapHeight = swapHeight_;
@@ -8896,31 +9310,8 @@ FFFResult PlayerVideoRenderer::Set360View(const bool enabled, const float yaw,
     return FFFResult::Success;
 }
 
-FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
-    const std::uint32_t outputWidth, const std::uint32_t outputHeight,
-    const bool forPresent) noexcept {
-    // Explicit-contract guard (docs/111 D-01): forPresent declares which timeline this
-    // blit serves. The presenter thread is the one that runs PresentTimedText; a readback
-    // arriving ON that thread would block the flip cadence on a staging Map, so reject
-    // it. A present blit arriving OFF the presenter thread is the documented
-    // PresentAfterBind bind-time repaint (a one-shot best-effort on the worker thread) --
-    // degrade: draw as today, but trace it once. We trace rather than silently tolerate
-    // because a future refactor could otherwise route a readback through the present path
-    // (or vice versa) with no signal; we do NOT hard-assert in release because the one
-    // legitimate off-thread present exists and must not crash a paused session.
-    {
-        const auto callerTid = static_cast<std::uint64_t>(::GetCurrentThreadId());
-        const auto presenterTid =
-            static_cast<std::uint64_t>(timedTextThreadId_.load(std::memory_order_relaxed));
-        const bool onPresenter = presenterTid != 0 && callerTid == presenterTid;
-        if (forPresent != onPresenter) {
-            // Readback on the presenter thread is the dangerous direction (stalls flips on
-            // a staging Map): refuse. Off-thread present degrades to the historical draw.
-            if (!forPresent && onPresenter) return FFFResult::InvalidState;
-        }
-    }
-    if (!hasCachedVideo_ || target == nullptr) return FFFResult::InvalidState;
-    if (outputWidth == 0 || outputHeight == 0) return FFFResult::InvalidArgument;
+PlayerVideoRenderer::PictureLayout PlayerVideoRenderer::LayoutPicture(const std::uint32_t outputWidth,
+    const std::uint32_t outputHeight) const noexcept {
     const auto projection360 = projection360Enabled_.load(std::memory_order_acquire) != 0;
     VideoDestination destination{};
     // The destination rect is integral because diagnostics/hit testing read it
@@ -9003,6 +9394,47 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
         subPixelW = zoomedWidth - static_cast<float>(destination.width);
         subPixelH = zoomedHeight - static_cast<float>(destination.height);
     }
+    return {destination.x, destination.y, destination.width, destination.height,
+        static_cast<float>(destination.x) + subPixelX,
+        static_cast<float>(destination.y) + subPixelY,
+        static_cast<float>(destination.width) + subPixelW,
+        static_cast<float>(destination.height) + subPixelH};
+}
+
+void PlayerVideoRenderer::PublishPictureLayout(const PictureLayout& destination) noexcept {
+    lastDestX_.store(destination.x, std::memory_order_relaxed);
+    lastDestY_.store(destination.y, std::memory_order_relaxed);
+    lastDestWidth_.store(destination.width, std::memory_order_relaxed);
+    lastDestHeight_.store(destination.height, std::memory_order_relaxed);
+}
+
+FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
+    const std::uint32_t outputWidth, const std::uint32_t outputHeight,
+    const bool forPresent) noexcept {
+    // Explicit-contract guard (docs/111 D-01): forPresent declares which timeline this
+    // blit serves. The presenter thread is the one that runs PresentTimedText; a readback
+    // arriving ON that thread would block the flip cadence on a staging Map, so reject
+    // it. A present blit arriving OFF the presenter thread is the documented
+    // PresentAfterBind bind-time repaint (a one-shot best-effort on the worker thread) --
+    // degrade: draw as today, but trace it once. We trace rather than silently tolerate
+    // because a future refactor could otherwise route a readback through the present path
+    // (or vice versa) with no signal; we do NOT hard-assert in release because the one
+    // legitimate off-thread present exists and must not crash a paused session.
+    {
+        const auto callerTid = static_cast<std::uint64_t>(::GetCurrentThreadId());
+        const auto presenterTid =
+            static_cast<std::uint64_t>(timedTextThreadId_.load(std::memory_order_relaxed));
+        const bool onPresenter = presenterTid != 0 && callerTid == presenterTid;
+        if (forPresent != onPresenter) {
+            // Readback on the presenter thread is the dangerous direction (stalls flips on
+            // a staging Map): refuse. Off-thread present degrades to the historical draw.
+            if (!forPresent && onPresenter) return FFFResult::InvalidState;
+        }
+    }
+    if (!hasCachedVideo_ || target == nullptr) return FFFResult::InvalidState;
+    if (outputWidth == 0 || outputHeight == 0) return FFFResult::InvalidArgument;
+    const auto destination = LayoutPicture(outputWidth, outputHeight);
+    const auto projection360 = projection360Enabled_.load(std::memory_order_acquire) != 0;
     ID3D11ShaderResourceView* presentationViews[3]{};
     if (projection360) {
         // The panorama projection is view-dependent. Scaling the equirectangular
@@ -9089,11 +9521,8 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
     // the Windows HDR SDR-white adjustment.
     // mainDraw 口径 = 整个 DrawWithShader 调用（含内部状态设置与最终 Draw）。
     const auto mainDrawStart = std::chrono::steady_clock::now();
-    const auto result = DrawWithShader(target,
-        static_cast<float>(destination.x) + subPixelX,
-        static_cast<float>(destination.y) + subPixelY,
-        static_cast<float>(destination.width) + subPixelW,
-        static_cast<float>(destination.height) + subPixelH, 0, presentationViews);
+    const auto result = DrawWithShader(target, destination.left, destination.top,
+        destination.drawWidth, destination.drawHeight, 0, presentationViews);
     mainDraw100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - mainDrawStart),
         std::memory_order_relaxed);
     if (result == FFFResult::Success) {
@@ -9115,14 +9544,50 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
     return result;
 }
 
+namespace {
+void DecodeReadbackPixel(const DXGI_FORMAT format, const void* bytes, float* rgba) noexcept {
+    if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        DirectX::PackedVector::HALF components[4];
+        std::memcpy(components, bytes, sizeof(components));
+        for (UINT i = 0; i < 4; ++i) rgba[i] = DirectX::PackedVector::XMConvertHalfToFloat(components[i]);
+    } else if (format == DXGI_FORMAT_R10G10B10A2_UNORM) {
+        std::uint32_t pixel;
+        std::memcpy(&pixel, bytes, sizeof(pixel));
+        for (UINT i = 0; i < 3; ++i) rgba[i] = static_cast<float>((pixel >> (i * 10)) & 1023) / 1023.0f;
+        rgba[3] = static_cast<float>(pixel >> 30) / 3.0f;
+    } else {
+        const auto* bgra = static_cast<const std::uint8_t*>(bytes);
+        rgba[0] = bgra[2] / 255.0f;
+        rgba[1] = bgra[1] / 255.0f;
+        rgba[2] = bgra[0] / 255.0f;
+        rgba[3] = bgra[3] / 255.0f;
+    }
+}
+}
+
 FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept {
     if (probe.version != 20 || probe.size < sizeof(FFF3FPVideoPixelProbe))
         return FFFResult::InvalidArgument;
     std::lock_guard deviceLock(deviceMutex_);
-    if (!hasCachedVideo_ || swapChain_ == nullptr || device_ == nullptr || context_ == nullptr ||
+    if (!hasCachedVideo_ || !swapChain_ || (!d3d12_ && (!device_ || !context_)) ||
         probe.x >= swapWidth_ || probe.y >= swapHeight_)
         return FFFResult::InvalidState;
     std::lock_guard presentLock(presentMutex_);
+    if (d3d12_) {
+        std::uint8_t bytes[8]{};
+        const auto format = SwapChainFormatForOutputBits(swapOutputBits_);
+        const auto result = ReadD3D12Picture(swapWidth_, swapHeight_, format, probe.x, probe.y, 1, 1,
+            bytes, sizeof(bytes), false);
+        if (result != FFFResult::Success) return result;
+        float rgba[4];
+        DecodeReadbackPixel(format, bytes, rgba);
+        probe.red = rgba[0]; probe.green = rgba[1]; probe.blue = rgba[2]; probe.alpha = rgba[3];
+        probe.scalingMode = FFF3FPVideoScalingMode::Shader;
+        probe.outputBitDepth = swapOutputBits_;
+        probe.colorMode = actualMode_;
+        probe.reserved = 0;
+        return FFFResult::Success;
+    }
     ComPtr<ID3D11Texture2D> backBuffer;
     ComPtr<ID3D11RenderTargetView> target;
     const auto targetResult = AcquireBackBufferTarget(
@@ -9197,7 +9662,7 @@ FFFResult PlayerVideoRenderer::ReadPixelRegion(const std::uint32_t x, const std:
         dstFloatCount < static_cast<std::uint64_t>(width) * height * 4u)
         return FFFResult::InvalidArgument;
     std::lock_guard deviceLock(deviceMutex_);
-    if (!hasCachedVideo_ || swapChain_ == nullptr || device_ == nullptr || context_ == nullptr ||
+    if (!hasCachedVideo_ || !swapChain_ || (!d3d12_ && (!device_ || !context_)) ||
         x >= swapWidth_ || y >= swapHeight_)
         return FFFResult::InvalidState;
     // The header documents dst as a width x height row-major block. Truncating
@@ -9207,6 +9672,22 @@ FFFResult PlayerVideoRenderer::ReadPixelRegion(const std::uint32_t x, const std:
     if (width > swapWidth_ - x || height > swapHeight_ - y)
         return FFFResult::InvalidArgument;
     std::lock_guard presentLock(presentMutex_);
+    if (d3d12_) {
+        const auto format = SwapChainFormatForOutputBits(swapOutputBits_);
+        const auto result = ReadD3D12Picture(swapWidth_, swapHeight_, format, x, y, width, height,
+            dst, static_cast<std::uint64_t>(dstFloatCount) * sizeof(float), false);
+        if (result != FFFResult::Success) return result;
+        // Expand the packed readback in place backwards; no second CPU frame buffer.
+        const auto bytes = format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8u : 4u;
+        const auto* packed = reinterpret_cast<const std::uint8_t*>(dst);
+        for (auto count = static_cast<std::size_t>(width) * height; count > 0; --count) {
+            float rgba[4];
+            DecodeReadbackPixel(format, packed + (count - 1) * bytes, rgba);
+            std::memcpy(dst + (count - 1) * 4, rgba, sizeof(rgba));
+        }
+        if (outputBitDepth) *outputBitDepth = swapOutputBits_;
+        return FFFResult::Success;
+    }
     ComPtr<ID3D11Texture2D> backBuffer;
     ComPtr<ID3D11RenderTargetView> target;
     const auto targetResult = AcquireBackBufferTarget(
@@ -9289,7 +9770,7 @@ FFFResult PlayerVideoRenderer::ReadPixelRegion(const std::uint32_t x, const std:
 }
 
 FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
-    const std::uint64_t renderedVideoGeneration) noexcept {
+    const std::uint64_t renderedVideoGeneration, const bool compositesTimedText) noexcept {
     if (chain == nullptr) return FFFResult::InvalidState;
     const auto start = std::chrono::steady_clock::now();
     // 普通播放与垂直同步对齐；系统移动期间使用零同步间隔。
@@ -9360,9 +9841,19 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
         ++presentedVideoFrames_;
     if (renderedVideoGeneration > previous + 1)
         coalescedVideoFrames_.fetch_add(renderedVideoGeneration - previous - 1);
-    std::lock_guard lock(timedTextMutex_);
-    for (std::size_t index = 0; index < ARRAYSIZE(timedTextPresentCounts_); ++index)
-        if (timedTextRenderedCommandCounts_[index] != 0) ++timedTextPresentCounts_[index];
+    if (compositesTimedText) {
+        std::lock_guard lock(timedTextMutex_);
+        for (std::size_t index = 0; index < ARRAYSIZE(timedTextPresentCounts_); ++index)
+            if (timedTextRenderedCommandCounts_[index] != 0) ++timedTextPresentCounts_[index];
+        constexpr auto subtitle = static_cast<std::size_t>(TimedTextLayerSlot::Subtitle);
+        const auto sequence = timedTextRenderedSequences_[subtitle];
+        if (timedTextRenderedCommandCounts_[subtitle] != 0 && sequence != presentedSubtitleSequence_) {
+            LARGE_INTEGER now{};
+            QueryPerformanceCounter(&now);
+            presentedSubtitleSequence_ = sequence;
+            presentedSubtitleQpc_ = now.QuadPart;
+        }
+    }
     return FFFResult::Success;
 }
 
@@ -9424,8 +9915,10 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     // fresh generation instead of being hidden by the current presentation.
     view360RedrawPending_.store(false, std::memory_order_release);
     if (!hasCachedVideo_) {
-        const auto pipelineResult = EnsurePipeline(1, 1, 0, 8, 0, 0, false);
-        if (pipelineResult != FFFResult::Success) return pipelineResult;
+        if (!d3d12_) {
+            const auto pipelineResult = EnsurePipeline(1, 1, 0, 8, 0, 0, false);
+            if (pipelineResult != FFFResult::Success) return pipelineResult;
+        }
         cachedVideoSettings_ = {};
         cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
         cachedVideoSettings_.sdrPeak = sdrPeakNits_;
@@ -9435,18 +9928,20 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     }
     ComPtr<ID3D11Texture2D> backBuffer;
     ComPtr<ID3D11RenderTargetView> backBufferTarget;
-    const auto targetResult = AcquireBackBufferTarget(
-        backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
-    if (targetResult != FFFResult::Success) return targetResult;
-    if (hasCachedVideo_) {
-        // Present path: the eye-side flip. The stale-epoch gate above (before presentMutex_)
-        // already ran on this presenter thread and decided this frame is current; this blit
-        // is on the gated timeline, so forPresent=true.
-        const auto drawResult = DrawCachedVideo(backBufferTarget.Get(), /*forPresent=*/true);
-        if (drawResult != FFFResult::Success) return drawResult;
-    } else {
-        constexpr float black[] = {0, 0, 0, 1};
-        context_->ClearRenderTargetView(backBufferTarget.Get(), black);
+    if (!d3d12_) {
+        const auto targetResult = AcquireBackBufferTarget(
+            backBuffer.GetAddressOf(), backBufferTarget.GetAddressOf());
+        if (targetResult != FFFResult::Success) return targetResult;
+        if (hasCachedVideo_) {
+            // Present path: the eye-side flip. The stale-epoch gate above (before presentMutex_)
+            // already ran on this presenter thread and decided this frame is current; this blit
+            // is on the gated timeline, so forPresent=true.
+            const auto drawResult = DrawCachedVideo(backBufferTarget.Get(), /*forPresent=*/true);
+            if (drawResult != FFFResult::Success) return drawResult;
+        } else {
+            constexpr float black[] = {0, 0, 0, 1};
+            context_->ClearRenderTargetView(backBufferTarget.Get(), black);
+        }
     }
     const auto danmakuResult = DrawTimedText(TimedTextLayerSlot::Danmaku);
     if (danmakuResult != FFFResult::Success) return danmakuResult;
@@ -9458,12 +9953,14 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     if (informationResult != FFFResult::Success) return informationResult;
     const auto discResult = DrawTimedText(TimedTextLayerSlot::Disc);
     if (discResult != FFFResult::Success) return discResult;
-    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Danmaku);
-    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Subtitle);
-    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Lyrics);
-    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Disc);
-    CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::PlayerInformation);
-    context_->OMSetRenderTargets(0, nullptr, nullptr);
+    if (!d3d12_) {
+        CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Danmaku);
+        CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Subtitle);
+        CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Lyrics);
+        CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::Disc);
+        CompositeTimedText(backBufferTarget.Get(), TimedTextLayerSlot::PlayerInformation);
+        context_->OMSetRenderTargets(0, nullptr, nullptr);
+    }
     const auto generation = videoGeneration_.load();
     // presentMutex_ protects the chain/back buffer from reconfiguration, and it is
     // still held across Present. deviceMutex_ guards the immediate context, and is
@@ -9481,9 +9978,13 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     //
     // If the jitter ever becomes a problem, the clean fix is a deferred context for
     // uploads rather than re-taking this lock, which would reintroduce the stall.
+    if (d3d12_) {
+        const auto submitted = SubmitD3D12Frame(true);
+        if (submitted != FFFResult::Success) return submitted;
+    }
     ComPtr<IDXGISwapChain4> retainedChain = swapChain_;
     deviceLock.unlock();
-    const auto result = PresentCurrentFrame(retainedChain.Get(), generation);
+    const auto result = PresentCurrentFrame(retainedChain.Get(), generation, true);
     if (result != FFFResult::Success) return result;
     // docs/111 D-04: the stale gate above ran before this flip, but AdvancePresentationEpoch
     // (seek / track switch) can fire on the worker thread in between. Re-reading both epochs
@@ -9523,7 +10024,10 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
 void PlayerVideoRenderer::ClearSurface() noexcept {
     // Precondition: the caller holds deviceMutex_. Presenting here only needs
     // presentMutex_; swapChain_ was already validated under deviceMutex_.
-    if (context_ != nullptr && device_ != nullptr && swapChain_ != nullptr) {
+    if (d3d12_ && swapChain_) {
+        std::lock_guard presentLock(presentMutex_);
+        if (SubmitD3D12Frame(false, false) == FFFResult::Success) swapChain_->Present(0, 0);
+    } else if (context_ != nullptr && device_ != nullptr && swapChain_ != nullptr) {
         ComPtr<ID3D11Texture2D> backBuffer;
         ComPtr<ID3D11RenderTargetView> backBufferTarget;
         if (AcquireBackBufferTarget(backBuffer.GetAddressOf(),
@@ -9568,11 +10072,21 @@ bool PlayerVideoRenderer::RequestRecoveryIfDeviceLost() noexcept {
 
 bool PlayerVideoRenderer::RequestRecoveryIfDeviceLostLocked() noexcept {
     if (deviceRecoveryRequested_.load(std::memory_order_acquire)) return true;
-    if (device_ == nullptr) return false;
-    const auto reason = device_->GetDeviceRemovedReason();
-    if (SUCCEEDED(reason)) return false;
-    RequestDeviceRecovery(reason, "D3D11 device removal");
-    return true;
+    if (device_) {
+        const auto reason = device_->GetDeviceRemovedReason();
+        if (FAILED(reason)) {
+            RequestDeviceRecovery(reason, "D3D11 device removal");
+            return true;
+        }
+    }
+    if (d3d12_) {
+        const auto dx12Reason = d3d12_->DeviceStatus();
+        if (FAILED(dx12Reason)) {
+            HandleD3D12Error(dx12Reason, "D3D12 device removal");
+            return true;
+        }
+    }
+    return false;
 }
 
 void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
@@ -9591,9 +10105,12 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     }
     if (swapChain_ != nullptr) {
         std::lock_guard presentLock(presentMutex_);
-        swapChain_->Release();
-        swapChain_ = nullptr;
+        ReleaseSwapChain();
     }
+    d3d12_.reset();
+    d3d12DecoderBound_ = false;
+    cachedD3D12Dynamic_ = {};
+    cachedD3D12Auxiliary_ = {};
     // Unregister before the textures go away: the CUDA driver holds a reference to
     // every registered plane and would be left with dangling handles.
     cudaInterop_.Reset();
@@ -9631,6 +10148,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseCom(vertexShader_);
     ReleaseCom(context_);
     ReleaseCom(device_);
+    ReleaseCom(renderAdapter_);
     swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
     displayWidth_ = displayHeight_ = 0;
     swapHdr_ = false;
@@ -9672,6 +10190,15 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     StopTimedTextThread();
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
+    ReleaseTimedTextResources();
+    if (d3d12_) {
+        const auto hr = d3d12_->ResetVideo();
+        if (FAILED(hr)) HandleD3D12Error(hr, "D3D12 media teardown");
+    }
+    d3d12DecoderBound_ = false;
+    uploadedTransform_.reset();
+    cachedD3D12Dynamic_ = {};
+    cachedD3D12Auxiliary_ = {};
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
     if (adaptiveScaler_ != nullptr) { sws_freeContext(adaptiveScaler_); adaptiveScaler_ = nullptr; }
     ReleaseVideoProcessor();
@@ -9707,6 +10234,9 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     // A previous 8K/RGBA64 source can leave hundreds of MiB in this staging
     // vector. Media replacement is already a pipeline boundary, so release it.
     std::vector<std::uint8_t>().swap(convertedRgb_);
+    std::vector<float>().swap(packedFloat_);
+    std::vector<std::uint8_t>().swap(adaptiveBuffer_);
+    std::fill(std::begin(adaptivePlanes_), std::end(adaptivePlanes_), nullptr);
     hasCachedVideo_ = false; sourceExternal_ = false; sourceCudaInterop_ = false;
     sourceLimitedToNativeSize_ = false;
     sourceCoverArt_ = false;
@@ -9772,6 +10302,9 @@ void PlayerVideoRenderer::Close() noexcept {
         timedTextLayerTargetHz_.store(0.0f, std::memory_order_release);
     }
     std::vector<std::uint8_t>().swap(convertedRgb_);
+    std::vector<float>().swap(packedFloat_);
+    std::vector<std::uint8_t>().swap(adaptiveBuffer_);
+    std::fill(std::begin(adaptivePlanes_), std::end(adaptivePlanes_), nullptr);
     deviceRecoveryRequested_.store(false, std::memory_order_release);
 }
 
@@ -9818,11 +10351,16 @@ bool PlayerVideoRenderer::HasPendingVideoPresentation() const noexcept {
 FFFResult PlayerVideoRenderer::CopySdrFrame(void* pixels, std::uint32_t capacity,
     std::uint32_t& width, std::uint32_t& height, bool discOnly) noexcept {
     std::lock_guard deviceLock(deviceMutex_);
-    if (!hasCachedVideo_ || !swapChain_ || !device_ || !context_) return FFFResult::InvalidState;
+    if (!hasCachedVideo_ || !swapChain_ || (!d3d12_ && (!device_ || !context_))) return FFFResult::InvalidState;
     std::lock_guard presentLock(presentMutex_);
     width = swapWidth_; height = swapHeight_;
     const auto bytes = static_cast<std::uint64_t>(width) * height * 4;
     if (!pixels || bytes > capacity) return FFFResult::BufferTooSmall;
+    if (d3d12_) {
+        if (swapOutputBits_ != 8) return FFFResult::NotSupported;
+        return ReadD3D12Picture(width, height, DXGI_FORMAT_B8G8R8A8_UNORM,
+            0, 0, width, height, pixels, capacity, true, discOnly);
+    }
     ComPtr<ID3D11Texture2D> backBuffer;
     ComPtr<ID3D11RenderTargetView> target;
     auto result = AcquireBackBufferTarget(backBuffer.GetAddressOf(), target.GetAddressOf());

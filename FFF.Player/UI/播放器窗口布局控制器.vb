@@ -116,9 +116,10 @@ Friend NotInheritable Class 播放器窗口布局控制器
     End Sub
 
     ''' <summary>设置内容尺寸模式；关闭时释放原生封顶，当前窗口不做强制缩回。</summary>
-    Friend Sub 设置内容尺寸模式(启用 As Boolean)
+    Friend Sub 设置内容尺寸模式(启用 As Boolean, Optional 立即应用 As Boolean = True)
         If 已释放 Then Return
         内容模式启用 = 启用
+        应用代数 += 1
         手动覆盖 = False
         If Not 启用 Then
             设置封顶(False)
@@ -127,9 +128,22 @@ Friend NotInheritable Class 播放器窗口布局控制器
         End If
         ' 原始尺寸模式只控制初始窗口，不限制画面放大；先释放可能残留的封顶。
         设置封顶(False)
-        If Not 最后内容设备大小.IsEmpty AndAlso 界面已就绪标志 AndAlso Not 全屏状态 Then
+        If 立即应用 AndAlso Not 最后内容设备大小.IsEmpty AndAlso 界面已就绪标志 AndAlso Not 全屏状态 Then
             请求应用内容尺寸()
         End If
+    End Sub
+
+    Friend Sub 应用视频打开尺寸(策略 As 视频打开尺寸策略, 初始画面大小 As Size)
+        If 已释放 OrElse 窗体.IsDisposed OrElse Not 窗体.IsHandleCreated OrElse 全屏状态 OrElse
+            窗体.WindowState = FormWindowState.Minimized Then Return
+        Select Case 策略
+            Case 视频打开尺寸策略.初始画面尺寸
+                If 窗体.WindowState <> FormWindowState.Normal Then 窗体.WindowState = FormWindowState.Normal
+                应用画面尺寸(初始画面大小)
+                重绑输出窗口()
+            Case 视频打开尺寸策略.最大化
+                窗体.WindowState = FormWindowState.Maximized
+        End Select
     End Sub
 
     ''' <summary>图片启动时 Attach 完成后再调用；此前媒体事件可能已经存下内容尺寸。</summary>
@@ -190,8 +204,9 @@ Friend NotInheritable Class 播放器窗口布局控制器
         Dim 目标宽度 = 目标画面设备大小.Width + 客户区非视频宽度 + 非客户区宽度
         Dim 目标高度 = 目标画面设备大小.Height + 客户区非视频高度 + 非客户区高度
         Dim workingArea = Screen.FromControl(窗体).WorkingArea
-        Dim 最终大小 = New Size(Math.Clamp(目标宽度, 窗体.MinimumSize.Width, workingArea.Width),
-                               Math.Clamp(目标高度, 窗体.MinimumSize.Height, workingArea.Height))
+        If workingArea.Width <= 0 OrElse workingArea.Height <= 0 Then Return
+        Dim 最终大小 = New Size(Math.Min(workingArea.Width, Math.Max(目标宽度, 窗体.MinimumSize.Width)),
+                               Math.Min(workingArea.Height, Math.Max(目标高度, 窗体.MinimumSize.Height)))
         窗体.StartPosition = FormStartPosition.Manual
         If 居中窗口 Then
             窗体.Bounds = 计算工作区居中边界(最终大小, workingArea)
@@ -217,7 +232,8 @@ Friend NotInheritable Class 播放器窗口布局控制器
 
     Private Sub 应用内容尺寸布局()
         If 已释放 OrElse 窗体.IsDisposed OrElse Not 窗体.IsHandleCreated Then Return
-        If Not 内容模式启用 OrElse 手动覆盖 OrElse 全屏状态 OrElse 最后内容设备大小.IsEmpty Then Return
+        If Not 内容模式启用 OrElse 手动覆盖 OrElse 全屏状态 OrElse 最后内容设备大小.IsEmpty OrElse
+            窗体.WindowState = FormWindowState.Minimized Then Return
 
         ' 只有在 Normal 下才量得到“非最大化”的 chrome；最终要最大化时再切回去。
         If 窗体.WindowState <> FormWindowState.Normal Then

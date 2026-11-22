@@ -142,8 +142,10 @@
     <ClInclude Include="3FP\Prefetch\MemoryGuard.h" />
     <ClInclude Include="3FP\Disc\DiscInput.h" />
     <ClInclude Include="3FP\Audio\AsrAudioTap.h" />
+    <ClInclude Include="3FP\Audio\AsrAudioReadAhead.h" />
     <ClInclude Include="3FP\Audio\AudioPassthrough.h" />
     <ClInclude Include="3FP\Audio\WasapiRenderer.h" />
+    <ClInclude Include="3FP\Audio\RealtimeLoudness.h" />
     <ClInclude Include="3FP\Core\RawStillSource.h" />
     <ClInclude Include="3FP\Core\PlayerSession.h" />
     <ClInclude Include="3FP\Core\AvifIlocShim.h" />
@@ -165,6 +167,11 @@
     <ClInclude Include="3FP\Render\ShaderBytecode.h" />
     <ClInclude Include="3FP\Render\SmtcController.h" />
     <ClInclude Include="3FP\Render\VideoRenderer.h" />
+    <ClInclude Include="3FP\Render\VideoShaderSettings.h" />
+    <ClInclude Include="3FP\Render\TimedTextStrokeStyle.h" />
+    <ClInclude Include="3FP\Render\D3D12\D3D12VideoRenderer.h" />
+    <ClInclude Include="3FP\Render\D3D12\BackdropBlurBytecode.h" />
+    <None Include="3FP\Render\D3D12\BackdropBlur.hlsl" />
     <ClInclude Include="3FR\Api\FFF.Native.Api.h" />
     <ClInclude Include="3FR\Audio\AudioTrackEncoder.h" />
     <ClInclude Include="3FR\Audio\AudioMixer.h" />
@@ -184,6 +191,7 @@
     <ClCompile Include="3FP\Disc\DiscInput.cpp" />
     <ClCompile Include="3FP\Core\PlayerSessionDisc.cpp" />
     <ClCompile Include="3FP\Audio\AsrAudioTap.cpp" />
+    <ClCompile Include="3FP\Audio\AsrAudioReadAhead.cpp" />
     <ClCompile Include="3FP\Audio\AudioPassthrough.cpp" />
     <ClCompile Include="3FP\Audio\WasapiRenderer.cpp" />
     <ClCompile Include="3FP\Audio\IamfAudioDecoder.cpp" />
@@ -206,6 +214,7 @@
     <ClCompile Include="3FP\Hdr\HdrMetadataParse.cpp" />
     <ClCompile Include="3FP\Hdr\HdrToneCurve.cpp" />
     <ClCompile Include="3FP\Render\VideoRenderer.cpp" />
+    <ClCompile Include="3FP\Render\D3D12\D3D12VideoRenderer.cpp" />
     <ClCompile Include="3FP\Render\SmtcController.cpp" />
     <ClCompile Include="3FP\Render\NvidiaVideoExtensions.cpp" />
     <ClCompile Include="3FP\Render\CudaD3D11Interop.cpp" />

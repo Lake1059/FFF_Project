@@ -1,209 +1,141 @@
-Option Strict On
-Option Explicit On
-
-Imports System.Collections.Concurrent
-Imports System.Threading
-
-''' <summary>
-''' AI 字幕状态机：收 worker 的识别结果，按"最新 wins + 陈旧守卫 + 代次清空"策略
-''' 回答"此刻该显示什么文本"。
-'''
-''' 为什么是这三条策略（docs/ai-subtitles/IMPLEMENTATION_ANALYSIS.md §7）：
-'''   * latest-wins：批式推理必然滞后于画面（5s 窗 + 0.2s 推理 ≈ 1.2~2.7s），
-'''     新条目到达即成为当前文本，显示到下一条到达——这是物理下限，不是缺陷；
-'''   * 陈旧守卫：条目的媒体结束时间 + 2×窗口仍早于播放位置 → 隐藏。推理卡住时
-'''     字幕不会僵在屏上（用户红线：ASR 失败绝不能表现为播放卡顿或鬼影字幕）；
-'''   * 代次跳变：seek 作废在途结果，立即清空，不等 worker 确认。
-'''
-''' 并发契约：result 线程只调 <see cref="提交结果"/>；PrecisionTimer 线程每帧只调
-''' <see cref="取当前条目"/>。所有 public 方法绝不抛异常——字幕是可选图层，任何
-''' 失败只当"本帧没有 AI 字幕"（若把异常抛进字幕呈现器，整帧图层都不提交，
-''' 外部字幕也会跟着消失，那是不可接受的连带损伤）。
-''' </summary>
+''' <summary>按媒体时间排队，seek 时清除上一代。已经推理出的未来字幕不会抢占当前字幕。</summary>
 Friend NotInheritable Class Ai字幕状态机
     Implements IDisposable
 
-    ''' <summary>一条识别结果。时间是媒体时间（100ns 单位），与墙钟无关。</summary>
     Public NotInheritable Class Ai字幕条目
         Public ReadOnly Property 代次 As ULong
         Public ReadOnly Property 起始100纳秒 As Long
         Public ReadOnly Property 结束100纳秒 As Long
         Public ReadOnly Property 文本 As String
         Public ReadOnly Property 语言 As String
-        ' 双语的下行文本。未开双语或翻译失败时为空串 —— 空串就只画上行一行，
-        ' 不会在屏幕上留一条空白行。
         Public ReadOnly Property 副文本 As String
+        Public ReadOnly Property 后续页面 As IReadOnlyList(Of (上行 As String, 下行 As String))
+        Public ReadOnly Property 推理开始计时 As Long
+        Public ReadOnly Property 实时音频 As Boolean
+        Public ReadOnly Property 最晚结束100纳秒 As Double
 
         Public Sub New(代次 As ULong, 起始100纳秒 As Long, 结束100纳秒 As Long,
-                       文本 As String, 语言 As String, Optional 副文本 As String = Nothing)
+                       文本 As String, 语言 As String, Optional 副文本 As String = Nothing,
+                       Optional 后续页面 As IReadOnlyList(Of (上行 As String, 下行 As String)) = Nothing,
+                       Optional 推理开始计时 As Long = 0, Optional 实时音频 As Boolean = False,
+                       Optional 推理输入结束100纳秒 As Long = 0)
             Me.代次 = 代次
             Me.起始100纳秒 = 起始100纳秒
             Me.结束100纳秒 = 结束100纳秒
             Me.文本 = If(文本, String.Empty)
             Me.语言 = If(语言, String.Empty)
             Me.副文本 = If(副文本, String.Empty)
+            Me.后续页面 = If(后续页面, Array.Empty(Of (上行 As String, 下行 As String))())
+            Me.推理开始计时 = 推理开始计时
+            Me.实时音频 = 实时音频
+            最晚结束100纳秒 = CDbl(结束100纳秒)
+            If 实时音频 Then
+                ' 等候分句所用的后续音频也在实时播放中。用 worker 已读到的
+                ' 媒体时间计算固定期限，避免用每次绘制的时间重新延长。
+                最晚结束100纳秒 = CDbl(Math.Max(结束100纳秒, 推理输入结束100纳秒)) + 实时迟到余量
+            End If
         End Sub
     End Class
 
-    Private ReadOnly 收件箱 As New BlockingCollection(Of Ai字幕条目)(128)
-
-    ' 当前条目与其代次。锁只护这两个字段的替换，临界区 < 1μs。
     Private ReadOnly 锁 As New Object()
-    Private 当前条目 As Ai字幕条目 = Nothing
-    Private 当前条目代次 As ULong = 0UL
-    Private 已见代次 As Boolean = False
+    Private ReadOnly 队列 As New List(Of Ai字幕条目)()
+    Private 当前条目 As Ai字幕条目
+    Private 当前代次 As ULong?
+    Private 首次显示100纳秒 As Long
+    Private Worker已退出 As Boolean
+    Private 已释放 As Boolean
 
-    ' worker 生命周期信号（由管道在 worker 退出时置位）。
-    ' 跨线程：result 线程/UI 线程写，呈现泵线程读 ⇒ 必须 Volatile，否则读侧
-    ' 可能长期看不到置位（或看到已复位的旧值），与 当前条目 的锁口径也不一致
-    ' （P2，2026-11-02 审查定案）。用 Integer 存 0/1：Volatile.Read/Write 对
-    ' Boolean 的泛型重载在 VB 里容易踩装箱，整数最省事且语义等价。
-    Private _worker已退出标志 As Integer
-
-    Private ReadOnly Property Worker已退出 As Boolean
-        Get
-            Return Volatile.Read(_worker已退出标志) <> 0
-        End Get
-    End Property
-
-    ''' <summary>条目过期余量：媒体结束时间 + 2×窗口 仍早于播放位置则隐藏。</summary>
-    Public Property 陈旧余量100纳秒 As Long = 10L * 10_000_000L   ' 默认 2×5s 窗口
-
-    ''' <summary>跨时间条守卫：条目起始时间比播放位置还超前 3×窗口 → 它属于另一条
-    ''' 时间线（切文件/切列表项时 worker 在途的旧结果），隐藏并清空。
-    ''' 正常 latest-wins 下条目起始只可能略早于播放位置（推理滞后），不会误触。</summary>
-    Public Property 未来余量100纳秒 As Long = 15L * 10_000_000L   ' 默认 3×5s 窗口
-
-    ''' <summary>字幕驻留偏移（100ns 单位）：守卫判定用的播放位置 = 实际播放位置 − 本偏移。
-    ''' 正值 = 每行多驻留一会儿（慢读者、下一句来得慢时不等空窗）；负值 = 提前收起。
-    ''' 来自设置项 Ai字幕字幕偏移秒（[-3, +3] 秒），由控制器在起 worker / 应用设置时同步。
-    ''' 注意它**不影响一行字幕何时出现**——那由推理窗口与推理耗时决定；这里只调驻留。</summary>
-    Public Property 时间偏移100纳秒 As Long = 0L
+    ' 无法预读的实时音频需要给迟到的结果留出短暂的阅读时间。
+    Private Const 实时迟到余量 As Long = 2 * TimeSpan.TicksPerSecond
+    ' 支持内核最多 24 秒预读，再留出设置允许的时间偏移与一帧余量。
+    Public Property 未来余量100纳秒 As Long = 28 * TimeSpan.TicksPerSecond
+    Public Property 时间偏移100纳秒 As Long
 
     Public Sub 提交结果(条目 As Ai字幕条目)
-        If 条目 Is Nothing Then Return
-        Try
-            If Not 收件箱.TryAdd(条目, 50) Then
-                ' 消费端从未读取（状态机未接入呈现循环）时丢弃最旧的，绝不阻塞调用方。
-                Try
-                    收件箱.Take()
-                    收件箱.TryAdd(条目, 0)
-                Catch
-                End Try
-            End If
-        Catch
-            ' 状态机是可选功能：提交失败只当本帧没有 AI 字幕。
-        End Try
+        If 条目 Is Nothing OrElse String.IsNullOrWhiteSpace(条目.文本) OrElse 条目.结束100纳秒 <= 条目.起始100纳秒 Then Return
+        SyncLock 锁
+            If Worker已退出 OrElse 已释放 OrElse (当前代次.HasValue AndAlso 条目.代次 < 当前代次.Value) Then Return
+            队列.Add(条目)
+            If 队列.Count > 128 Then 队列.RemoveAt(0)
+        End SyncLock
     End Sub
 
-    ''' <summary>worker 退出通知：此后 worker 在途的一切结果作废，显示立即清空。</summary>
     Public Sub 通知Worker已退出()
-        Volatile.Write(_worker已退出标志, 1)
         SyncLock 锁
+            Worker已退出 = True
+            队列.Clear()
             当前条目 = Nothing
         End SyncLock
     End Sub
 
-    ''' <summary>
-    ''' 撤销"worker 已退出"。**每次起 worker 前必须调用**（<see cref="重置"/> 已包含）。
-    '''
-    ''' 这是一个曾经吞掉整个功能的陷阱：标志只置位、从没复位过，而
-    ''' <see cref="取当前条目"/> 进门就看它。于是"停止一次 / 关开关再开 /
-    ''' 换推理后端"（三条都要先停管道，停管道必调 <see cref="通知Worker已退出"/>）
-    ''' 之后，进程余生所有结果都被丢弃，字幕永久空白，只有重启播放器能救。
-    ''' </summary>
     Public Sub 复位Worker退出()
-        Volatile.Write(_worker已退出标志, 0)
-    End Sub
-
-    ''' <summary>重置（切文件/切列表项/起 worker 前调用）：清空当前条目与在途结果，
-    ''' 并复位 worker 退出标志——调用它的场合都意味着"要重新开始收结果"。</summary>
-    Public Sub 重置()
-        Try
-            While True
-                Dim 丢弃 As Ai字幕条目 = Nothing
-                Try
-                    If Not 收件箱.TryTake(丢弃) Then Exit While
-                Catch
-                    Exit While
-                End Try
-            End While
-        Catch
-            ' 重置失败不影响播放；下一条目的守卫会兜住旧结果。
-        End Try
         SyncLock 锁
-            当前条目 = Nothing
-            已见代次 = False
+            Worker已退出 = False
         End SyncLock
-        ' 清在途结果的同时把"worker 已死"也清掉：调用方（停止后的重启、切文件、
-        ' 起 worker）都在等下一批结果，标志留着就会把它们全部丢掉。
-        复位Worker退出()
     End Sub
 
-    ''' <summary>处理积压的结果队列。由呈现循环每帧调用（同一线程），保持无锁读路径。</summary>
-    Public Sub 处理待决结果()
-        While True
-            Dim 条目 As Ai字幕条目 = Nothing
-            Try
-                If Not 收件箱.TryTake(条目) Then Return
-            Catch
-                Return
-            End Try
-            If 条目 Is Nothing OrElse Worker已退出 Then Continue While
-            SyncLock 锁
-                当前条目 = 条目
-                当前条目代次 = 条目.代次
-                已见代次 = True
-            End SyncLock
-        End While
+    Public Sub 重置()
+        SyncLock 锁
+            队列.Clear()
+            当前条目 = Nothing
+            当前代次 = Nothing
+            Worker已退出 = False
+        End SyncLock
     End Sub
 
-    ''' <summary>取当前应显示的文本；无有效条目返回空串。只在 PrecisionTimer 线程调用。</summary>
-    ''' <summary>只取上行文本；等价于 取当前两行 的主行，留着给只关心一行的调用方。</summary>
     Public Function 取当前条目(播放位置 As TimeSpan, 时间轴代次 As ULong) As String
         Return 取当前两行(播放位置, 时间轴代次).主
     End Function
 
-    ''' <summary>此刻应显示的两行文本（上行 / 下行）。下行空串 = 不是双语或译文没出来。
-    ''' 守卫（代次 / 跨时间条 / 陈旧）与单语时代完全一致，只是把一次判定同时喂给两行：
-    ''' 分成两次调用会出现"上行过守卫、下行没过"的撕裂帧。</summary>
-    Public Function 取当前两行(播放位置 As TimeSpan, 时间轴代次 As ULong) As (主 As String, 副 As String)
-        Try
-            处理待决结果()
-            If Worker已退出 Then Return (String.Empty, String.Empty)
-            SyncLock 锁
-                If 当前条目 Is Nothing OrElse Not 已见代次 Then Return (String.Empty, String.Empty)
-                If 时间轴代次 <> 0UL AndAlso 当前条目代次 <> 时间轴代次 Then
-                    ' seek 已作废这批结果：立即清空，不等 worker 确认。
-                    当前条目 = Nothing
-                    Return (String.Empty, String.Empty)
-                End If
-                If String.IsNullOrWhiteSpace(当前条目.文本) Then Return (String.Empty, String.Empty)
-                ' 守卫判定位置 = 实际播放位置 − 驻留偏移（见 时间偏移100纳秒：正值多留）。
-                Dim 播放位置100纳秒 = CLng(播放位置.Ticks) - 时间偏移100纳秒
-                ' 跨时间条守卫：切文件后 worker 在途的旧结果（起始远大播放位置）。
-                If 当前条目.起始100纳秒 - 播放位置100纳秒 > 未来余量100纳秒 Then
-                    当前条目 = Nothing
-                    Return (String.Empty, String.Empty)
-                End If
-                ' 陈旧守卫：推理卡住时字幕不得僵在屏上。
-                If 当前条目.结束100纳秒 + 陈旧余量100纳秒 < 播放位置100纳秒 Then
-                    当前条目 = Nothing
-                    Return (String.Empty, String.Empty)
-                End If
-                Return (当前条目.文本, 当前条目.副文本)
-            End SyncLock
-        Catch
-            ' 任何意外都只当"本帧没有 AI 字幕"。
-            Return (String.Empty, String.Empty)
-        End Try
+    Public Function 取当前两行(播放位置 As TimeSpan, 时间轴代次 As ULong,
+                            Optional ByRef 推理开始计时 As Long = 0) As (主 As String, 副 As String)
+        推理开始计时 = 0
+        SyncLock 锁
+            If Worker已退出 OrElse 已释放 Then Return (String.Empty, String.Empty)
+            If Not 当前代次.HasValue OrElse 当前代次.Value <> 时间轴代次 Then
+                当前代次 = 时间轴代次
+                当前条目 = Nothing
+            End If
+            Dim 位置 = 播放位置.Ticks - 时间偏移100纳秒
+            队列.RemoveAll(Function(项) 项.代次 < 时间轴代次 OrElse
+                (项.代次 = 时间轴代次 AndAlso (位置 >= 项.最晚结束100纳秒 OrElse
+                    CDbl(项.起始100纳秒) - 位置 > 未来余量100纳秒)))
+            Dim 最佳 As Ai字幕条目 = Nothing
+            For Each 项 In 队列
+                If 项.代次 = 时间轴代次 AndAlso 项.起始100纳秒 <= 位置 AndAlso
+                    (最佳 Is Nothing OrElse 项.起始100纳秒 >= 最佳.起始100纳秒) Then 最佳 = 项
+            Next
+            If 最佳 Is Nothing Then
+                当前条目 = Nothing
+                Return (String.Empty, String.Empty)
+            End If
+            If Not ReferenceEquals(当前条目, 最佳) Then
+                当前条目 = 最佳
+                首次显示100纳秒 = 位置
+            End If
+            Dim 起点 = 最佳.起始100纳秒
+            Dim 终点 = CDbl(最佳.结束100纳秒)
+            If 最佳.实时音频 AndAlso 首次显示100纳秒 >= 最佳.结束100纳秒 Then
+                起点 = 首次显示100纳秒
+                终点 = 最佳.最晚结束100纳秒
+            End If
+            If 位置 >= 终点 Then Return (String.Empty, String.Empty)
+            推理开始计时 = 最佳.推理开始计时
+            If 最佳.后续页面.Count = 0 Then Return (最佳.文本, 最佳.副文本)
+            ' 仅旧 worker 使用均分分页；新 worker 已独立安排每个短句的起止时间。
+            Dim 可读区间 = Math.Max(1.0, (终点 - 起点) / (最佳.后续页面.Count + 1))
+            Dim 页 = CInt(Math.Clamp(Math.Floor((CDbl(位置) - 起点) / 可读区间),
+                                     0, 最佳.后续页面.Count))
+            If 页 > 0 Then Return 最佳.后续页面(页 - 1)
+            Return (最佳.文本, 最佳.副文本)
+        End SyncLock
     End Function
 
     Public Sub Dispose() Implements IDisposable.Dispose
-        Try
-            收件箱.Dispose()
-        Catch
-        End Try
-        GC.SuppressFinalize(Me)
+        SyncLock 锁
+            已释放 = True
+            队列.Clear()
+            当前条目 = Nothing
+        End SyncLock
     End Sub
 End Class

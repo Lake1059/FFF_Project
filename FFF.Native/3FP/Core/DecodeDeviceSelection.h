@@ -10,7 +10,7 @@ class PlayerVideoRenderer;
 int CreateDecodeHardwareDevice(AVBufferRef** output, int deviceType,
     std::int32_t adapterIndex, PlayerVideoRenderer& renderer) noexcept;
 
-// D3D11 textures from a different device must be downloaded before presentation.
+// D3D11/D3D12 textures from a different device must be downloaded before presentation.
 bool CanPresentHardwareFrameDirectly(const struct AVFrame* frame,
     PlayerVideoRenderer& renderer) noexcept;
 

@@ -2,7 +2,7 @@
 
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Hdr/HdrProcessor.h"
-#include "3FP/Hdr/HdrToneCurve.h"
+#include "3FP/Render/VideoShaderSettings.h"
 #include "3FP/Render/CudaD3D11Interop.h"
 
 #include <array>
@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
+class D3D12VideoRenderer;
 struct AVFrame;
 struct AVCodecParameters;
 struct AVBufferRef;
@@ -39,12 +40,16 @@ struct ID3D11VideoProcessorEnumerator;
 struct ID3D11VideoProcessor;
 struct ID3D11BlendState;
 struct ID3D11Query;
+struct IDXGIAdapter1;
 struct IDXGISwapChain4;
+struct FFF3FPD3D12Picture;
+struct FFF3FPD3D12Overlay;
 struct ID2D1Factory1;
 struct ID2D1Device;
 struct ID2D1DeviceContext;
 struct ID2D1Bitmap1;
 struct ID2D1Effect;
+struct ID2D1StrokeStyle;
 struct ID2D1SolidColorBrush;
 struct IDWriteFactory;
 struct IDWriteTextLayout;
@@ -113,73 +118,6 @@ FFFResult MeasureTimedText(const char* textUtf8, const char* fontFamilyUtf8,
 FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8,
     float fontSize, FFF3FPTimedTextFlags flags, float& width) noexcept;
 
-// Curve table width. Tied to the reconstruction's own LUT size: the shader
-// samples the table with normalised coordinates, so a mismatch would rescale
-// the tone curve silently instead of failing.
-inline constexpr std::uint32_t kDynamicCurveLutWidth = kHdrToneCurveLutSize;
-// The pixel shader divides a window's row number by a literal 3.0 to centre it in
-// the LUT's rows, so the two have to stay equal.
-static_assert(kHdrMaxProcessingWindows == 3,
-    "SampleCurve's row centring hardcodes the window count");
-
-// Half-width of the cross-window transition band, in normalised frame units.
-// Only consulted for multi-window ST 2094 streams.
-inline constexpr float kDynamicWindowBlend = 0.05f;
-
-// CPU mirror of the HLSL `DynamicSettings` cbuffer (register b2). Bound only
-// when a stream carries usable ST 2094 metadata; DynamicEnabled == 0 otherwise,
-// in which case the pixel shader takes its original mapping path.
-//
-// Layout must match the HLSL declaration exactly:
-//   row 0: enabled, windowCount, flags, windowBlend   (4 x 4 = 16)
-//   row 1: sourcePeak, targetPeak, pad0.xy            (16)
-//   row 2: windowMin0.xy, windowMax0.xy               (16)
-//   row 3: windowMin1.xy, windowMax1.xy               (16)
-//   row 4: windowMin2.xy, windowMax2.xy               (16)
-//   row 5: transformEnabled, transformDomain, lutBound, pad (16)
-//   row 6: outputMatrixRows[0][0..2], pad             (16)
-//   row 7: outputMatrixRows[1][0..2], pad             (16)
-//   row 8: outputMatrixRows[2][0..2], pad             (16)
-struct DynamicShaderSettings {
-    std::uint32_t enabled = 0, windowCount = 1, flags = 0;
-    float windowBlend = 0.0f;
-    float sourcePeak = 0.0f, targetPeak = 0.0f;
-    float pad0[2] = {};
-    float windowMin0[2] = {}, windowMax0[2] = {};
-    float windowMin1[2] = {}, windowMax1[2] = {};
-    float windowMin2[2] = {}, windowMax2[2] = {};
-    // Caller-supplied colour transform (FFF3FP_SetDynamicMetadata kind 3). Rows
-    // 5..8 are appended, so the ST 2094 rows above keep their offsets and the
-    // two features cannot shift each other's fields.
-    std::uint32_t transformEnabled = 0;  // 0 = no transform this frame
-    std::uint32_t transformDomain = 0;   // payload lutDomain: 0 = coded components, 1 = coded RGB
-    std::uint32_t transformLutBound = 0; // 1 = the 3-D LUT is bound at t4
-    std::uint32_t transformPad0 = 0;
-    // Row-major output matrix (out = M * rgb) applied to the linear-light signal
-    // after transfer decoding, before gamut conversion. All-zero = identity, so
-    // the uploader normalises an all-zero payload to the identity matrix.
-    // Three padded register rows, deliberately NOT a flat float[9]: the
-    // shader reads each float4 row's .xyz, so a compact array would put m3
-    // into TransformMatrix0.w -- a component nothing reads -- and shift rows
-    // 1 and 2 by one float each. sizeof is 144 either way, so only
-    // tools/check_shader_cbuffer_layout.py can tell the two apart.
-    float outputMatrixRows[3][4] = {};
-};
-static_assert(sizeof(DynamicShaderSettings) == 144,
-    "DynamicShaderSettings must stay in lockstep with the HLSL DynamicSettings cbuffer");
-
-// Optional auxiliary-layer composition, bound as its own constant buffer (b3) so
-// the b0 and b2 layouts stay bit-identical to the single-stream path. With
-// `enabled == 0` the shader takes its original branches untouched.
-struct ElCompositionSettings {
-    std::uint32_t enabled = 0;        // 1 = the auxiliary planes at t5..t7 are composed
-    std::uint32_t residualCenter = 0; // neutral code of the auxiliary component
-    std::int32_t residualShift = 0;   // right shift applied to (auxiliary - centre)
-    std::uint32_t maxValue = 0;       // (1 << base bit depth) - 1
-};
-static_assert(sizeof(ElCompositionSettings) == 16,
-    "ElCompositionSettings must stay in lockstep with the HLSL ElComposition cbuffer");
-
 // The decoder-side description of the frame the renderer is about to upload,
 // resolved by DescribeInput() in VideoRenderer.cpp -- the format table and its
 // static_assert matrix stay next to DescribeInput in the .cpp. Data only, and
@@ -198,13 +136,16 @@ public:
     ~PlayerVideoRenderer();
 
     FFFResult SetWindow(HWND window) noexcept;
-    // Choose which DXGI adapter creates the D3D11 device.
+    // Choose the DXGI adapter for either rendering backend.
     // index = -1 (default) keeps the built-in policy: the adapter driving the monitor
     // that contains the output window. index >= 0 is used as the argument of
     // IDXGIFactory1::EnumAdapters1. Takes effect on the next device creation
     // (EnsureDevice), including device-loss recovery.
     // Out-of-range / non-enumerable indices silently fall back to the built-in policy.
     FFFResult SetPreferredAdapterIndex(std::int32_t index) noexcept;
+    void SetRenderBackend(std::uint32_t backend) noexcept;
+    bool WantsD3D12() const noexcept { return requestedBackend_.load() == 1; }
+    std::uint32_t ActiveRenderBackend() const noexcept { return activeBackend_.load(); }
     void SetDiscAspect(double aspect) noexcept { discAspect_.store(static_cast<float>(aspect)); }
     void SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
@@ -217,12 +158,6 @@ public:
     //   the 16-bit scRGB chain when the display runs Advanced Color).
     FFFResult SetSdrScRgbMode(std::uint32_t mode) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
-    // Creates the D3D11 device ahead of the first frame. Measured at 195-245 ms on this
-    // machine, and inside the first Open it is the whole of the delay a user sees before
-    // the first picture appears. Doing it while the host is still setting up moves that
-    // cost off the critical path. Safe to call at any time; a no-op once the device
-    // exists, and failure is not fatal because Open still creates it on demand.
-    FFFResult WarmDevice() noexcept;
     // Multiplies the zoom by `factor` while keeping the viewport point
     // (anchorX, anchorY) -- both normalised to [0,1] over the client area -- under the
     // cursor. Hosts that implement wheel zoom themselves have to redo the fit and pan
@@ -406,6 +341,9 @@ public:
     // single place that decides it, for Render() and for the refresh above.
     std::uint32_t ResolveDecodeTransfer(const HdrFrameState& hdrState) const noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
+    FFFResult CreateD3D12HardwareDeviceContext(AVBufferRef** context) noexcept;
+    bool CanImportD3D12Frame(const AVFrame* frame) const noexcept;
+    void GetVideoRenderDiagnostics(FFF3FPVideoRenderDiagnostics& status) noexcept;
     bool OwnsD3D11Texture(ID3D11Texture2D* texture) const noexcept;
     // DXGI index of the adapter owning the playback D3D11 device, resolved by
     // LUID rather than by whatever enumeration order a caller happened to use.
@@ -472,6 +410,7 @@ public:
     std::uint32_t FinalReadbackBitDepth() const noexcept { return finalReadbackFormat_; }
     FFFResult SetTimedTextLayer(TimedTextRenderLayer layer, TimedTextLayerSlot slot) noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status, TimedTextLayerSlot slot) noexcept;
+    void GetSubtitlePresentation(std::uint64_t& sequence, std::int64_t& qpc) noexcept;
     bool DeviceRecoveryRequested() const noexcept;
     bool RequestRecoveryIfDeviceLost() noexcept;
     FFFResult RecreateDeviceResources() noexcept;
@@ -633,6 +572,7 @@ private:
     };
 
     FFFResult EnsureDevice() noexcept;
+    FFFResult EnsureD3D11Device() noexcept;
     std::uint32_t PreferredOutputBitDepth(std::uint32_t sourceBitDepth, bool hdr) noexcept;
     FFFResult EnsureSwapChain(std::uint32_t width, std::uint32_t height,
         std::uint32_t sourceBitDepth) noexcept;
@@ -643,6 +583,16 @@ private:
     // first chain and forces a second reconfigure one frame later.
     FFFResult CreateSwapChain(std::uint32_t width, std::uint32_t height,
         bool hdr, std::uint32_t outputBits, std::uint32_t sourceBitDepth) noexcept;
+    void ReleaseSwapChain() noexcept;
+    HRESULT ResizeSwapChain(std::uint32_t width, std::uint32_t height, std::uint32_t format,
+        std::uint32_t flags) noexcept;
+    FFFResult SubmitD3D12Frame(bool compositesTimedText = false, bool drawVideo = true) noexcept;
+    void BuildD3D12Picture(FFF3FPD3D12Picture& picture, std::uint32_t width, std::uint32_t height) noexcept;
+    std::size_t CollectD3D12Overlays(FFF3FPD3D12Overlay* overlays, bool discOnly) noexcept;
+    FFFResult ReadD3D12Picture(std::uint32_t width, std::uint32_t height, std::uint32_t format,
+        std::uint32_t x, std::uint32_t y, std::uint32_t regionWidth, std::uint32_t regionHeight,
+        void* pixels, std::uint64_t capacity, bool overlays, bool discOnly = false) noexcept;
+    FFFResult HandleD3D12Error(long result, const char* operation) noexcept;
     FFFResult ReconfigureSwapChain(bool hdr, std::uint32_t outputBits,
         std::uint32_t sourceBitDepth) noexcept;
     FFFResult EnsurePipeline(std::uint32_t sourceWidth, std::uint32_t sourceHeight,
@@ -656,6 +606,9 @@ private:
     FFFResult UploadPlanarFrames(const std::uint8_t* const* uploadPlanes,
         const int* uploadLines, std::uint32_t uploadWidth, std::uint32_t uploadHeight,
         const InputDescription& input) noexcept;
+    FFFResult UploadD3D11Frame(const AVFrame*& frame, std::uint8_t* const* uploadPlanes,
+        const int* uploadLines, std::uint32_t uploadWidth, std::uint32_t uploadHeight,
+        const InputDescription& input) noexcept;
     FFFResult EnsureVideoProcessor(ID3D11Texture2D* inputTexture,
         ID3D11Texture2D* outputTexture, std::uint32_t inputColorSpace,
         std::uint32_t outputColorSpace) noexcept;
@@ -664,6 +617,7 @@ private:
     FFFResult DrawWithShader(ID3D11RenderTargetView* target, float x, float y,
         float width, float height, std::uint32_t effect = 0,
         ID3D11ShaderResourceView* const* sourceViews = nullptr) noexcept;
+    void SetDrawSettings(float width, float height, std::uint32_t effect) noexcept;
     // Resamples the decoded frame down to the display size into an internal buffer,
     // returning false when the frame should be uploaded untouched. On true, the
     // caller uploads AdaptivePlanes()/AdaptiveLines() at the requested size.
@@ -732,27 +686,18 @@ private:
     FFFResult ReadbackTexture(ID3D11Texture2D* source, void* pixels,
         std::uint32_t capacity, std::uint32_t width, std::uint32_t height,
         std::uint32_t format) noexcept;
-    struct CachedVideoSettings {
-        // gamut: 0 = Rec.709, 1 = Rec.2020, 2 = P3 (DCI/Display).
-        std::uint32_t colorMode = 0, transfer = 0, gamut = 0, reserved = 0;
-        // sdrPeak is the SDR reference white (BT.2408 = 203 nits), not the panel peak.
-        float sdrPeak = 203, hdrPeak = 100, paperWhite = 203, targetPeak = 1000;
-        float sourceWidth = 0, sourceHeight = 0, outputWidth = 0, outputHeight = 0;
-        std::uint32_t inputLayout = 0;
-        float sampleScale = 1, yOffset = 0, yScale = 1;
-        float cOffset = 0.5f, cScale = 1, kr = 0.2126f, kb = 0.0722f;
-        // imageModeX drives the still-image pixel-block enlargement in SampleVideo;
-        // it reuses what used to be a padding slot, so the constant-buffer layout
-        // stays the same size.
-        float chromaOffsetX = 0, chromaOffsetY = 0, imageModeX = 0, padding2 = 0;
-        std::uint32_t projection360 = 0;
-        float viewYaw = 0, viewPitch = 0, viewFovY = 90;
-        // viewRotation is quarter turns clockwise (0..3) and reuses a former
-        // padding slot, so the constant-buffer layout the HLSL cbuffer expects
-        // is unchanged in size.
-        float viewAspect = 1, viewRotation = 0, padding4 = 0, padding5 = 0;
+    struct PictureLayout {
+        std::int32_t x, y;
+        std::uint32_t width, height;
+        float left, top, drawWidth, drawHeight;
     };
+    PictureLayout LayoutPicture(std::uint32_t width, std::uint32_t height) const noexcept;
+    void PublishPictureLayout(const PictureLayout& layout) noexcept;
+    ID3D11Device* TimedTextDevice() const noexcept;
+    ID3D11DeviceContext* TimedTextContext() const noexcept;
     FFFResult EnsureTimedTextResources(TimedTextLayerSlot slot) noexcept;
+    FFFResult EnsureTimedTextSpritePipeline() noexcept;
+    FFFResult EnsureTimedTextBlend() noexcept;
     FFFResult EnsureD2DContext() noexcept;
     FFFResult EnsureTimedTextAtlas(std::uint32_t size) noexcept;
     FFFResult EnsureTimedTextInstanceCapacity(std::size_t count) noexcept;
@@ -785,7 +730,7 @@ private:
         return DrawCachedVideo(target, swapWidth_, swapHeight_, forPresent);
     }
     FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
-        std::uint64_t renderedVideoGeneration) noexcept;
+        std::uint64_t renderedVideoGeneration, bool compositesTimedText = false) noexcept;
     // True for a short window after the last still-image Redraw(). The gesture
     // timer's intermediate states are only useful inside their own tick, so the
     // presenter skips its cadence hold and submits an off-vblank flip instead.
@@ -829,7 +774,8 @@ private:
     // is in force for this frame; the b2 rows stay zero otherwise. Call with the
     // device lock held (it uploads on the immediate context).
     bool BuildColorTransformSettings(const HdrFrameState& hdrState,
-        DynamicShaderSettings& settings) noexcept;
+        DynamicShaderSettings& settings,
+        std::shared_ptr<const FFF3FPColorTransformPayload>* nativeLut = nullptr) noexcept;
     // Upload the optional auxiliary layer's three planes and fill the b3 row.
     // Fails (leaving `settings` zeroed) when the frame is not a 10-bit planar
     // 4:2:0 picture or a plane is not CPU-addressable; the caller then treats
@@ -851,9 +797,16 @@ private:
     // EnsureDevice() on the render path. The device is created lazily and
     // re-created on device loss, so the preference must survive both.
     std::atomic<std::int32_t> preferredAdapterIndex_{ -1 };
+    IDXGIAdapter1* renderAdapter_ = nullptr;
     ID3D11Device* device_;
     ID3D11DeviceContext* context_;
     IDXGISwapChain4* swapChain_;
+    std::unique_ptr<D3D12VideoRenderer> d3d12_;
+    std::atomic<std::uint32_t> requestedBackend_{0};
+    std::atomic<std::uint32_t> activeBackend_{0};
+    std::atomic<bool> d3d12Rejected_{false};
+    bool d3d12DecoderBound_ = false;
+    long d3d12FallbackReason_ = 0;
     ID3D11VertexShader* vertexShader_;
     ID3D11PixelShader* pixelShader_;
     ID3D11PixelShader* sdrPixelShaders_[3]{};
@@ -892,6 +845,8 @@ private:
     // SDR layout specialisation (which fixes InputLayout/ColorMode/Transfer/Gamut
     // at compile time) can be skipped while a transform is in force.
     bool cachedTransformEnabled_ = false;
+    DynamicShaderSettings cachedD3D12Dynamic_{};
+    ElCompositionSettings cachedD3D12Auxiliary_{};
     // Optional auxiliary-layer composition resources. Three R16_UINT planes bound
     // at t5..t7 (the code values themselves, never normalised, so the integer
     // composition in the shader is exact) and the parameter row at b3. Created on
@@ -1011,12 +966,14 @@ private:
     ID3D11BlendState* timedTextBlend_;
     ID3D11Texture2D* timedTextAtlasTexture_;
     ID3D11ShaderResourceView* timedTextAtlasView_;
+    ID3D11SamplerState* timedTextAtlasSampler_ = nullptr;
     bool timedTextResourcesHdr_;
     bool timedTextAtlasHdr_;
     ID3D11VertexShader* timedTextSpriteVertexShader_;
     ID3D11PixelShader* timedTextSpritePixelShader_;
     ID3D11Buffer* timedTextSpriteInstanceBuffer_;
     ID3D11ShaderResourceView* timedTextSpriteInstanceView_;
+    ID2D1StrokeStyle* timedTextStrokeStyle_;
     ID2D1Factory1* d2dFactory_;
     ID2D1Device* d2dDevice_;
     ID2D1DeviceContext* d2dContext_;
@@ -1357,11 +1314,13 @@ private:
     // Counts successful final swap-chain presents that included each visible
     // layer. A texture redraw is not a presentation and must not advance this.
     std::uint32_t timedTextPresentCounts_[5];
+    std::uint64_t presentedSubtitleSequence_ = 0;
+    std::int64_t presentedSubtitleQpc_ = 0;
     std::atomic<std::uint64_t> backBufferAcquisitionCount_;
     bool timedTextPipelineQueryInFlight_[5];
     std::uint64_t timedTextCompositePixelInvocations_[5];
     std::atomic<float> discAspect_{0};
-    CachedVideoSettings cachedVideoSettings_;
+    VideoShaderSettings cachedVideoSettings_;
     bool hasCachedVideo_;
     std::atomic<std::uint64_t> videoGeneration_;
     // Epoch written by the session/decode thread, read by the presenter thread.

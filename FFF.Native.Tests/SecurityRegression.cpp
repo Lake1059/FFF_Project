@@ -3,6 +3,7 @@
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Audio/AsrAudioTap.h"
 #include "3FP/Prefetch/PrefetchService.h"
+#include "3FP/Render/TimedTextStrokeStyle.h"
 #include <cstdio>
 #include <stdexcept>
 extern "C" {
@@ -17,6 +18,11 @@ void Check(bool value, const char* name) {
     if (!value) throw std::runtime_error(name);
     ++checks;
     std::printf("PASS %s\n", name);
+}
+void TimedTextStrokeStyleTests() {
+    const auto properties = fff::render::TimedTextStrokeStyleProperties();
+    Check(properties.lineJoin == D2D1_LINE_JOIN_ROUND && properties.miterLimit == 1.0f,
+        "timed-text outline uses round joins to avoid glyph spikes");
 }
 using Bytes = std::vector<std::uint8_t>;
 void UInt(Bytes& bytes, std::uint64_t value, int width) {
@@ -258,6 +264,7 @@ struct PrefetchSecurityRegression {
 extern "C" __declspec(dllexport) int FFF3FP_RunSecurityRegression(const char* root) {
     try {
         checks = 0;
+        TimedTextStrokeStyleTests();
         AvifTests();
         PlayerSecurityRegression::Paths(std::string(root) + "/small.bmp");
         PlayerSecurityRegression::Tap();

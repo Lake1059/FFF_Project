@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <string_view>
 #include "3FP/Core/AvifIlocShim.h"
 #include "3FP/Core/GainMapProbe.h"
 #include "3FP/Core/IccProfileParser.h"
@@ -7,6 +8,7 @@
 #include "3FP/Core/Fmp4FragmentScanner.h"
 #include "3FP/Core/MediaText.h"
 #include "3FP/Core/PlayerSession.h"
+#include "3FP/Audio/AsrAudioReadAhead.h"
 #include "3FP/Core/ThreadNaming.h"
 #include "3FP/Core/MemoryBudgetMath.h"
 #include "3FP/Render/CicpSupport.h"
@@ -592,7 +594,7 @@ bool IsJpegCodec(const AVCodecID codecId) noexcept {
 // format and the frame size, and on nothing else in the stream description. Two files
 // that agree on those four agree on the answer, which is what makes a key out of them
 // safe to reuse.
-std::uint64_t HardwareRouteKey(const AVCodecParameters* parameters) noexcept {
+std::uint64_t HardwareRouteKey(const AVCodecParameters* parameters, const bool d3d12) noexcept {
     if (parameters == nullptr) return 0;
     const auto mix = [](const std::uint64_t value, const std::uint64_t seed) noexcept {
         return seed ^ (value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2));
@@ -601,13 +603,15 @@ std::uint64_t HardwareRouteKey(const AVCodecParameters* parameters) noexcept {
     key = mix(static_cast<std::uint32_t>(parameters->profile), key);
     key = mix(static_cast<std::uint32_t>(parameters->format), key);
     key = mix(static_cast<std::uint32_t>(parameters->width), key);
-    return mix(static_cast<std::uint32_t>(parameters->height), key);
+    key = mix(static_cast<std::uint32_t>(parameters->height), key);
+    return d3d12 ? mix(12, key) : key;
 }
 
 AVPixelFormat FindHardwareFormat(const AVCodec* codec, const AVHWDeviceType deviceType) noexcept {
     if (codec == nullptr) return AV_PIX_FMT_NONE;
     const auto expectedFormat = deviceType == AV_HWDEVICE_TYPE_D3D11VA
-        ? AV_PIX_FMT_D3D11 : deviceType == AV_HWDEVICE_TYPE_CUDA ? AV_PIX_FMT_CUDA : AV_PIX_FMT_NONE;
+        ? AV_PIX_FMT_D3D11 : deviceType == AV_HWDEVICE_TYPE_D3D12VA ? AV_PIX_FMT_D3D12 :
+            deviceType == AV_HWDEVICE_TYPE_CUDA ? AV_PIX_FMT_CUDA : AV_PIX_FMT_NONE;
     if (expectedFormat == AV_PIX_FMT_NONE) return AV_PIX_FMT_NONE;
     for (int configIndex = 0;; ++configIndex) {
         const auto* hardware = avcodec_get_hw_config(codec, configIndex);
@@ -1046,6 +1050,7 @@ std::string HardwareAccelerationName(const AVCodecContext* decoder) {
     const auto* type = av_hwdevice_get_type_name(context->type);
     if (type == nullptr) return {};
     if (context->type == AV_HWDEVICE_TYPE_D3D11VA) return "DXVA (D3D11VA)";
+    if (context->type == AV_HWDEVICE_TYPE_D3D12VA) return "DXVA (D3D12VA)";
     return type;
 }
 }
@@ -1131,26 +1136,8 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
         configuration.forceHdrOutput != 0);
     snapshot_.actualColorMode = videoRenderer_.ActualColorMode();
     publishedSnapshot_ = snapshot_;
-    // Create the D3D11 device now rather than inside the first Open. Measured on this
-    // machine: 195-245 ms the first time and free afterwards. In the image-browsing
-    // pattern -- one player, one picture at a time -- that made the first picture take
-    // ~365 ms while every following one took 54-78 ms, so it is the whole of the delay
-    // before the first frame. The window is already known here, so the cost moves into
-    // host setup. Failure is ignored on purpose: Open still creates the device on demand
-    // and reports any real problem with full context.
-    //
-    // Only worth paying when the session has a video output window. EnsureDevice() uses
-    // window_ for adapter *selection* only -- it does not decline to create the device
-    // when there is none -- so an unconditional call made audio-only and headless
-    // sessions pay the same full ~150-170 ms of device creation inside FFF3FP_Create,
-    // which the caller waits on, for a device that session may never touch. Measured with
-    // create_cost_probe: 170 ms without a window against 150 ms with one, versus ~0 ms
-    // for both before this warm-up was added. The window test is the same one
-    // EnsureDevice() applies, so a non-null but invalid HWND does not qualify either,
-    // and a session that turns out to need the device later is unaffected: the render
-    // path still creates it on demand.
-    const auto outputWindow = static_cast<HWND>(configuration.outputWindow);
-    if (outputWindow != nullptr && IsWindow(outputWindow)) (void)videoRenderer_.WarmDevice();
+    // The host selects its renderer after Create. Allocate the chosen device
+    // on demand so DX12 and audio-only sessions never warm a DX11 renderer.
     worker_ = std::thread(&PlayerSession::Worker, this);
 }
 
@@ -1816,7 +1803,7 @@ void PlayerSession::TryCompletePlaybackPreroll() noexcept {
         // there falls back to the download route, so letting the frame through cannot
         // leave the preroll without a picture. D3D11 retained-surface frames skip the
         // transfer the same way, now decided by format directly.
-        if (IsHardwareFrame(frame) && frame->format != AV_PIX_FMT_D3D11 &&
+        if (IsHardwareFrame(frame) && !CanPresentHardwareFrameDirectly(frame, videoRenderer_) &&
             !videoRenderer_.CanImportCudaFrame(frame)) {
             transferred = av_frame_alloc();
             if (transferred == nullptr || av_hwframe_transfer_data(transferred, frame, 0) < 0) {
@@ -2505,6 +2492,13 @@ FFFResult PlayerSession::ClearExternalAudio() noexcept {
 }
 FFFResult PlayerSession::SetExternalAudioOffset(const std::int64_t offset) noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, offset] { externalAudioOffset100ns_ = offset; snapshot_.externalAudioOffset100ns = offset; if (externalFormat_) DoSeek(snapshot_.position100ns); else PublishSnapshot(); }); return FFFResult::Success; }
 
+FFFResult PlayerSession::SetVideoRenderBackend(const std::uint32_t backend) noexcept {
+    if (backend > 1) return FFFResult::InvalidArgument;
+    if (state_.load() != FFF3FPState::Idle) return FFFResult::InvalidState;
+    videoRenderer_.SetRenderBackend(backend);
+    return FFFResult::Success;
+}
+
 FFFResult PlayerSession::SetAudioDelay(const std::int64_t delay) noexcept {
     // ±10 minutes: larger values are almost certainly caller bugs, and the
     // renderer's silence-insertion alignment was never designed for wider gaps.
@@ -2769,6 +2763,7 @@ FFFResult PlayerSession::RecreateAudioRenderer(const std::wstring& endpointId,
             return result;
         }
         replacement->SetVolume(volume_, muted_);
+        replacement->SetLoudness(loudnessEnabled_, loudnessTargetLufs_, loudnessRangeLu_);
         replacement->SetMonoAudio(monoAudio_);
         replacement->SetPaused(paused ||
             (state_.load() == FFF3FPState::Playing && videoStream_ >= 0));
@@ -3353,6 +3348,17 @@ FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position,
     return result;
 }
 
+FFFResult PlayerSession::SetAudioLoudness(const bool enabled, const int targetLufs, const int rangeLu) noexcept {
+    if (targetLufs < -24 || targetLufs > -12 || rangeLu < 1 || rangeLu > 10) return FFFResult::InvalidArgument;
+    Enqueue([this, enabled, targetLufs, rangeLu] {
+        loudnessEnabled_ = enabled;
+        loudnessTargetLufs_ = targetLufs;
+        loudnessRangeLu_ = rangeLu;
+        if (audioRenderer_) audioRenderer_->SetLoudness(enabled, targetLufs, rangeLu);
+    });
+    return FFFResult::Success;
+}
+
 FFFResult PlayerSession::SetVolume(const float volume, const bool muted) noexcept { if (!std::isfinite(volume) || volume < 0 || volume > 1) return FFFResult::InvalidArgument; Enqueue([this, volume, muted] { volume_ = volume; muted_ = muted; if (audioRenderer_) audioRenderer_->SetVolume(volume_, muted_); }); return FFFResult::Success; }
 
 FFFResult PlayerSession::SetAudioRenderPlug(const FFF3FPAudioRenderPlug* const plug) noexcept {
@@ -3449,14 +3455,19 @@ FFFResult PlayerSession::EnableAudioTap(const FFF3FPAudioTapConfig* const config
     capacity = std::min(std::max(capacity, FFF3FP_AUDIO_TAP_MIN_RING_BYTES),
         FFF3FP_AUDIO_TAP_MAX_RING_BYTES);
     std::shared_ptr<AsrAudioTap> tap;
+    std::shared_ptr<AsrAudioReadAhead> ahead;
     try {
         tap = std::make_shared<AsrAudioTap>(capacity);
+        if (config != nullptr && config->flags >= 1500 && config->flags <= 24000)
+            ahead = std::make_shared<AsrAudioReadAhead>(config->flags * 10'000ll, tap);
     } catch (...) {
         return FFFResult::NativeFailure;   // no memory for the ring
     }
     {
         std::lock_guard lock(asrTapMutex_);
+        if (asrAhead_) asrAhead_->Cancel();
         asrTap_ = std::move(tap);
+        asrAhead_ = std::move(ahead);
     }
     // Install on the worker thread: the renderer reads the tap from the same
     // thread that calls Enqueue, so the swap must happen there. The command
@@ -3473,7 +3484,11 @@ FFFResult PlayerSession::EnableAudioTap(const FFF3FPAudioTapConfig* const config
     // they find; this closes the gap for the tap installed after them.
     Enqueue([this] {
         std::shared_ptr<AsrAudioTap> installed;
-        { std::lock_guard lock(asrTapMutex_); installed = asrTap_; }
+        {
+            std::lock_guard lock(asrTapMutex_);
+            installed = asrTap_;
+            asrAheadWorker_ = asrAhead_;
+        }
         if (installed != nullptr) installed->NoteGeneration(snapshot_.timelineGeneration);
         // The worker owns its view independently of API-thread replacements and
         // of renderer reconstruction when switching to bitstream output.
@@ -3481,19 +3496,26 @@ FFFResult PlayerSession::EnableAudioTap(const FFF3FPAudioTapConfig* const config
         asrShadowErrors_ = 0;
         asrShadowDisabled_ = false;
         if (audioRenderer_ != nullptr) audioRenderer_->SetAsrTap(std::move(installed));
+        UpdateAsrReadAhead();
     });
     return FFFResult::Success;
 }
 
 void PlayerSession::DisableAudioTap() noexcept {
     std::shared_ptr<AsrAudioTap> tap;
-    { std::lock_guard lock(asrTapMutex_); tap.swap(asrTap_); }
+    {
+        std::lock_guard lock(asrTapMutex_);
+        tap.swap(asrTap_);
+        if (asrAhead_) asrAhead_->Cancel();
+        asrAhead_.reset();
+    }
     // Uninstall on the worker thread first: Produce runs there, and the tap must
     // be unreachable from the renderer before the last reference can release
     // it. That last reference is this capture, dropped when the command runs --
     // the earliest safe point. A host ReadAudioTap call in flight holds its own
     // copy and finishes safely either way.
     Enqueue([this, tap] {
+        asrAheadWorker_.reset();
         asrTapWorker_.reset();
         asrShadowErrors_ = 0;
         asrShadowDisabled_ = false;
@@ -3509,7 +3531,7 @@ void PlayerSession::FeedAsrShadow(const std::uint8_t* const data, const std::siz
     // parsed access unit through the playback decoder and hand the frames to the
     // tap only -- they must never reach the bitstream renderer, which owns the
     // endpoint for the whole track.
-    if (asrTapWorker_ == nullptr || asrShadowDisabled_) return;
+    if (asrTapWorker_ == nullptr || asrShadowDisabled_ || asrTapWorker_->Suspended()) return;
     if (audioDecoder_ == nullptr || data == nullptr || size == 0) return;
     if (size > 0x7fffffffu) return;   // AVPacket::size is int
     AVPacket packet{};
@@ -3562,7 +3584,13 @@ FFFResult PlayerSession::ReadAudioTap(void* const dst, const std::uint32_t capac
     FFF3FPAudioTapBlock* const block) const noexcept {
     if (block == nullptr) return FFFResult::InvalidArgument;
     std::shared_ptr<AsrAudioTap> tap;
-    { std::lock_guard lock(asrTapMutex_); tap = asrTap_; }
+    std::shared_ptr<AsrAudioReadAhead> ahead;
+    {
+        std::lock_guard lock(asrTapMutex_);
+        tap = asrTap_;
+        ahead = asrAhead_;
+    }
+    *block = {};
     block->size = sizeof(FFF3FPAudioTapBlock);
     block->version = FFF3FP_AUDIO_TAP_VERSION;
     if (tap == nullptr) {
@@ -3573,6 +3601,10 @@ FFFResult PlayerSession::ReadAudioTap(void* const dst, const std::uint32_t capac
         return FFFResult::Success;
     }
     if (dst == nullptr && capacity > 0) return FFFResult::InvalidArgument;
+    if (ahead) {
+        auto result = FFFResult::Success;
+        if (ahead->Read(dst, capacity, *block, result)) return result;
+    }
     switch (tap->Consume(dst, capacity, *block)) {
     case AsrAudioTap::ConsumeResult::Ok:
         return FFFResult::Success;
@@ -3584,6 +3616,11 @@ FFFResult PlayerSession::ReadAudioTap(void* const dst, const std::uint32_t capac
         return FFFResult::BufferTooSmall;
     }
     return FFFResult::NativeFailure;
+}
+
+bool PlayerSession::IsAudioTapReadingAhead() const noexcept {
+    std::lock_guard lock(asrTapMutex_);
+    return asrTap_ && asrTap_->Suspended();
 }
 
 FFFResult PlayerSession::GetAudioTapStats(FFF3FPAudioTapStats* const stats) const noexcept {
@@ -4815,35 +4852,14 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
     // discovered later during playback costs DoSeek + ClearVideoQueue +
     // RebuildMediaInfo; discovered here it costs one avio seek back to where the
     // reader already was.
+    // Use the renderer's own decoder first. D3D11 sessions keep the legacy
+    // D3D11VA/CUDA order, and stills retain their software normalization path.
     const AVHWDeviceType Backends[] = {
-        // Prefer the renderer's own D3D11 device: decoded surfaces can then be
-        // sampled directly without a GPU-to-CPU-to-GPU round trip. CUDA remains
-        // available for profiles rejected by D3D11VA.
-        AV_HWDEVICE_TYPE_D3D11VA,
-        AV_HWDEVICE_TYPE_CUDA,
+        AV_HWDEVICE_TYPE_D3D12VA, AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_CUDA,
     };
-    // A still image is presented one frame and then kept, so the renderer's own device
-    // is the preferred route: a D3D11 surface is sampled as-is, which is the path every
-    // sampled file measures bit-exact on. A backend whose surfaces the renderer cannot
-    // sample directly (CUDA) has to be consumed through a frame transfer into
-    // semi-planar CPU memory, and that route measured two things against the CPU arm:
-    //   - it is not bit-exact: the CUDA JPEG decode differs from libjpeg by 1/255 at a
-    //     stripe edge (09h) and by 4/255 on a 4:4:4 sample, and a 4:2:0 surface loses
-    //     the chroma detail of a 4:4:4 source outright;
-    //   - it is slower: +64 ms to +196 ms measured, because the decoder is built for
-    //     one frame that never amortises it.
-    // Neither is worth paying while the alternative is a CPU decode of one frame, so
-    // stills ask D3D11VA first and only extend the list to CUDA once it has refused: a
-    // stream the renderer's own device will not take (4:4:4 HEVC, some AV1, MJPEG) then
-    // still decodes on the GPU instead of falling all the way to the CPU. The backend
-    // order is what makes this a fallback -- CUDA is only reached after a refusal,
-    // never before. FFF3FP_HWCAP_STILL_CUDA=0 restores the D3D11VA-only list. Video
-    // keeps the full list either way: there a CUDA frame is downloaded every frame only
-    // when the D3D11 interop refuses it (it is on by default, opt out with
-    // FFF3FP_CUDA_D3D11_INTEROP=0), and a QSV frame always is; the CPU upload in
-    // VideoRenderer is what carries those.
     const std::size_t backendCount =
-        (staticImage_ && !StillCudaFallbackEnabled()) ? 1u : std::size(Backends);
+        (staticImage_ && !StillCudaFallbackEnabled()) ? 2u : std::size(Backends);
+    const std::size_t firstBackend = videoRenderer_.WantsD3D12() && !staticImage_ ? 0u : 1u;
     std::string lastFailure = "No compatible hardware decoder was found.";
     // What this refusal says, told apart for the memory written at the end: only an
     // answer the GPU itself gave is worth remembering (see the comment on
@@ -4854,7 +4870,7 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
     const auto multiAdapter = MultiAdapterDecodeFallbackEnabled();
     const auto adapterPlan = BuildDecodeAdapterPlan(decodeAdapterIndex_, videoRenderer_,
         multiAdapter);
-    // The playback GPU leads: its D3D11 surfaces are presented without a CPU round
+    // The playback GPU leads: same-device DXVA surfaces avoid the CPU round
     // trip. Only after every backend and codec there has refused the stream do the
     // remaining hardware adapters get their turn, and only after all of them fail
     // does the caller fall back to the software decoder.
@@ -4863,8 +4879,9 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
         // QueryD3D11DecodeSupport asks the playback device. On another adapter it
         // would answer for the wrong GPU, so only the trial decode judges those.
         const auto usesPlaybackDevice = adapter < 0 || adapter == adapterPlan.rendererIndex;
-        for (std::size_t backendIndex = 0; backendIndex < backendCount; ++backendIndex) {
+        for (std::size_t backendIndex = firstBackend; backendIndex < backendCount; ++backendIndex) {
             const auto backend = Backends[backendIndex];
+            if (backend == AV_HWDEVICE_TYPE_D3D12VA && !usesPlaybackDevice) continue;
             // A backend can expose both a dedicated wrapper and the native FFmpeg
             // decoder. Try both: profiles accepted by one parser are not always
             // accepted by the other, notably 4:2:2/4:4:4 and some AV1 streams.
@@ -4937,7 +4954,7 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const 
 
 bool PlayerSession::HardwareRouteKnownUnsupported(const AVStream* stream) const noexcept {
     if (stream == nullptr || stream->codecpar == nullptr) return false;
-    const auto key = HardwareRouteKey(stream->codecpar);
+    const auto key = HardwareRouteKey(stream->codecpar, videoRenderer_.WantsD3D12());
     for (const auto remembered : unsupportedHardwareRoutes_)
         if (remembered == key) return true;
     return false;
@@ -4953,6 +4970,8 @@ bool PlayerSession::HardwareDecodableForCurrentStream() const noexcept {
     if (parameters == nullptr) return false;
     const auto* codec = avcodec_find_decoder(parameters->codec_id);
     if (codec == nullptr) return false;
+    if (videoRenderer_.WantsD3D12() && !staticImage_ && FindHardwareFormat(codec, AV_HWDEVICE_TYPE_D3D12VA) != AV_PIX_FMT_NONE)
+        return true;
     // Same elements and still-image restriction as the local Backends array in
     // OpenHardwareVideoDecoder.
     const AVHWDeviceType Backends[] = { AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_CUDA };
@@ -4965,7 +4984,7 @@ bool PlayerSession::HardwareDecodableForCurrentStream() const noexcept {
 
 void PlayerSession::RememberUnsupportedHardwareRoute(const AVStream* stream) noexcept {
     if (stream == nullptr || stream->codecpar == nullptr) return;
-    const auto key = HardwareRouteKey(stream->codecpar);
+    const auto key = HardwareRouteKey(stream->codecpar, videoRenderer_.WantsD3D12());
     // P1-a write side: ConfigurePlaybackPerformance() clears the in-session
     // vector, and a later re-open would otherwise pay for the same trial
     // demux again. Persist the refusal keyed by the current media path; the
@@ -5194,7 +5213,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         videoStream_ < static_cast<std::int32_t>(format_->nb_streams)) {
         const AVStream* routeStream = format_->streams[videoStream_];
         if (routeStream != nullptr && routeStream->codecpar != nullptr) {
-            const auto routeKey = HardwareRouteKey(routeStream->codecpar);
+            const auto routeKey = HardwareRouteKey(routeStream->codecpar, videoRenderer_.WantsD3D12());
             if (FFFPrefetch::PrefetchService::Instance().TakeUnsupportedRoute(path, routeKey)) {
                 bool alreadyKnown = false;
                 for (const auto remembered : unsupportedHardwareRoutes_)
@@ -8568,11 +8587,8 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
     // renderer's textures: the two resources belong to different devices.
     // Download it to CPU planes first. The renderer guards the same case at its
     // own entry point, so no cross-device copy can slip through either path.
-    const auto d3d11Direct = CanPresentHardwareFrameDirectly(frame, videoRenderer_);
-    if (IsHardwareFrame(frame) &&
-        ((frame->format == AV_PIX_FMT_D3D11 && !d3d11Direct) ||
-            (frame->format != AV_PIX_FMT_D3D11 && !cudaDirect) ||
-            (staticImage_ && owner == format_))) {
+    const auto directlyImportable = CanPresentHardwareFrameDirectly(frame, videoRenderer_) || cudaDirect;
+    if (IsHardwareFrame(frame) && (!directlyImportable || (staticImage_ && owner == format_))) {
         if (videoTransferFrame_ == nullptr) videoTransferFrame_ = av_frame_alloc();
         if (videoTransferFrame_ == nullptr) {
             Fail(FFFResult::NativeFailure, "Could not allocate the reusable hardware-transfer frame.");
@@ -10042,6 +10058,8 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
     // Drop the worker-side tap view before the decoder/frame it feeds: the
     // shared_ptr in asrTap_ may outlive this close (a host read can still hold
     // its own reference), but nothing may Produce into it from here on.
+    if (asrAheadWorker_)
+        asrAheadWorker_->Update(nullptr, nullptr, -1, snapshot_.timelineGeneration, 0, 0);
     asrTapWorker_.reset();
     if (audioDecoder_) avcodec_free_context(&audioDecoder_);
     ReleaseIamfDecoder();
@@ -11092,7 +11110,22 @@ void PlayerSession::ResetClock(const std::int64_t position) noexcept {
     PublishPlaybackClock(position, position);
 }
 
+void PlayerSession::UpdateAsrReadAhead() noexcept {
+    if (!asrAheadWorker_) return;
+    // Use the exact selected track of regular, seekable containers. Live capture,
+    // disc navigation, IAMF and external tracks retain the playback PCM tap.
+    const auto* demuxer = format_ ? format_->iformat : nullptr;
+    const auto name = demuxer && demuxer->name ? std::string_view(demuxer->name) : std::string_view{};
+    const bool eligible = (name == "matroska,webm" || name == "mov,mp4,m4a,3gp,3g2,mj2" ||
+        name == "avi" || name == "mpegts") && !disc_ && !externalFormat_ && !iamfDecoder_ &&
+        audioStream_ >= 0 && format_->pb && (format_->pb->seekable & AVIO_SEEKABLE_NORMAL) != 0;
+    asrAheadWorker_->Update(eligible ? &mediaPath_ : nullptr, eligible ? demuxer : nullptr,
+        eligible ? audioStream_ : -1, snapshot_.timelineGeneration,
+        eligible ? TimelineOrigin100ns(format_) : 0, snapshot_.position100ns);
+}
+
 void PlayerSession::PublishSnapshot() noexcept {
+    UpdateAsrReadAhead();
     snapshot_.presentedVideoFrames = videoRenderer_.PresentedVideoFrames();
     snapshot_.coalescedVideoFrames = videoRenderer_.CoalescedVideoFrames();
     snapshot_.swapChainPresents = videoRenderer_.SwapChainPresents();

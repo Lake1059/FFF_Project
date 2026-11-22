@@ -113,6 +113,9 @@ Public NotInheritable Class 播放器会话
             检查结果(播放器原生接口.FFF3FP_ConfigurePlaybackPerformance(句柄,
                 配置.首选解码适配器索引, CUInt(配置.视频缓冲区策略), CUInt(配置.音频缓冲区策略)))
             检查结果(播放器原生接口.FFF3FP_SetMonoAudio(句柄, If(配置.启用单声道音频, 1UI, 0UI)))
+            If 配置.渲染引擎 = 播放器渲染引擎.Direct3D12 AndAlso 播放器原生接口.支持渲染后端 Then
+                检查结果(播放器原生接口.设置渲染后端(句柄, 配置.渲染引擎))
+            End If
         Catch
             释放()
             Throw
@@ -530,6 +533,7 @@ Public NotInheritable Class 播放器会话
             ' 内核明确报了这一值（FFF.Player.Api.h:753 YieldedToAutoHdr），漏了它就会落到
             ' Case Else 报"内核未报告原因"——把一条有名字的读数说成没有。
             Case 7UI : Return "自动 HDR 占用同一条视频处理器通道，本次超分未单独生效（两者互斥）"
+            Case 8UI : Return "RTX 视频超分辨率仅在 DX11 视频后端可用；DX12 使用自己的着色器缩放"
             Case Else : Return If(状态.驱动拒绝闩 <> 0UI, "驱动拒绝过", "内核未报告原因")
         End Select
     End Function
@@ -565,6 +569,7 @@ Public NotInheritable Class 播放器会话
             Case 5UI : Return "当前输出路径不是 HDR（需 10 位 HDR 输出契约）"
             Case 6UI : Return "源格式不支持送入视频处理器"
             Case 7UI : Return "驱动拒绝或 Blt 失败，已闩住；关掉再打开可重新探测"
+            Case 8UI : Return "RTX 自动 HDR 仅在 DX11 视频后端可用；不影响 DX12 对 HDR 片源的输出"
             Case Else : Return If(状态.驱动拒绝闩 <> 0UI, "驱动拒绝过", "内核未报告原因")
         End Select
     End Function
@@ -725,6 +730,12 @@ Public NotInheritable Class 播放器会话
                 Marshal.GetDelegateForFunctionPointer(Of 释放音频上下文)(本地表.释放).Invoke(本地表.上下文)
             End If
         End Try
+    End Sub
+
+    Friend Sub 设置音频响度(配置 As 设置)
+        If Not 播放器原生接口.支持音频响度设置 Then Return
+        检查结果(播放器原生接口.FFF3FP_SetAudioLoudness(取得句柄(), 配置.启用音频响度标准化,
+            配置.音频目标响度, 配置.音频动态范围))
     End Sub
 
     Public Sub 设置音频效果(启用空间音频 As Boolean, 启用单声道音频 As Boolean)
@@ -1033,6 +1044,10 @@ Public NotInheritable Class 播放器会话
             定时文字临时指针.Add(pointer)
         End If
         Return pointer
+    End Function
+
+    Friend Function 实际渲染引擎() As 播放器渲染引擎?
+        Return 播放器原生接口.读取渲染后端(句柄)
     End Function
 
     Public ReadOnly Property 当前定时文字状态 As 定时文字状态

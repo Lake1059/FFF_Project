@@ -921,6 +921,26 @@ void PlayerWasapiRenderer::ApplyGain(std::vector<std::uint8_t>& converted) noexc
     const auto channels = static_cast<std::size_t>(std::max<std::uint16_t>(1, outputChannels_));
     const auto bytesPerFrame = static_cast<std::size_t>(outputBlockAlign_);
     const auto totalFrames = bytesPerFrame == 0 ? 0 : converted.size() / bytesPerFrame;
+    if (loudness_.Enabled() && totalFrames > 0 && outputSampleRate_ > 0 && channels <= RealtimeLoudness::MaxChannels) {
+        if (!loudness_.HasFormat(outputSampleRate_, outputChannels_)) {
+            RealtimeLoudness::Weights weights{};
+            AVChannelLayout layout{};
+            av_channel_layout_default(&layout, outputChannels_);
+            for (std::size_t channel = 0; channel < channels; ++channel) {
+                switch (av_channel_layout_channel_from_index(&layout, static_cast<unsigned>(channel))) {
+                case AV_CHAN_LOW_FREQUENCY: case AV_CHAN_LOW_FREQUENCY_2: weights[channel] = 0.0; break;
+                case AV_CHAN_SIDE_LEFT: case AV_CHAN_SIDE_RIGHT:
+                case AV_CHAN_BACK_LEFT: case AV_CHAN_BACK_RIGHT: weights[channel] = 1.41; break;
+                default: weights[channel] = 1.0; break;
+                }
+            }
+            av_channel_layout_uninit(&layout);
+            loudness_.SetFormat(outputSampleRate_, outputChannels_, weights);
+        }
+        if (outputFloat_) loudness_.Process(reinterpret_cast<float*>(converted.data()), totalFrames);
+        else if (outputBitsPerSample_ == 16) loudness_.Process(reinterpret_cast<std::int16_t*>(converted.data()), totalFrames);
+        else loudness_.Process(reinterpret_cast<std::int32_t*>(converted.data()), totalFrames);
+    }
     const auto fadeFrames = std::min<std::size_t>(fadeInFramesRemaining_, totalFrames);
     const auto fadeTotalFrames = outputSampleRate_ == 0 ? 1u :
         std::max<std::uint32_t>(1, outputSampleRate_ * StartupFadeInMilliseconds / 1000);
@@ -1017,6 +1037,7 @@ void PlayerWasapiRenderer::SetPaused(const bool paused) noexcept {
     if (controlEvent_ != nullptr) SetEvent(controlEvent_);
 }
 void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
+    loudness_.Reset();
     {
         std::lock_guard lock(mutex_);
         // A-07: release the deque's peak block capacity on seek as well.
@@ -1068,6 +1089,9 @@ void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
 }
 void PlayerWasapiRenderer::SetVolume(const float volume, const bool muted) noexcept {
     volume_.store(std::clamp(volume, 0.0f, 1.0f)); muted_.store(muted);
+}
+void PlayerWasapiRenderer::SetLoudness(const bool enabled, const int targetLufs, const int rangeLu) noexcept {
+    loudness_.SetTarget(enabled, targetLufs, rangeLu);
 }
 std::int64_t PlayerWasapiRenderer::Position100ns() const noexcept {
     std::int64_t position = 0;

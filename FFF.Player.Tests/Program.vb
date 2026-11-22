@@ -14,6 +14,9 @@ Friend Module Program
             If String.Equals(项, "--pr57-fixes-regression", StringComparison.OrdinalIgnoreCase) Then
                 Return PR57修复回归.运行()
             End If
+            If String.Equals(项, "--settings-designer-regression", StringComparison.OrdinalIgnoreCase) Then
+                Return 设置页回归.运行()
+            End If
             If String.Equals(项, "--content-size-regression", StringComparison.OrdinalIgnoreCase) Then
                 Return 窗口内容尺寸回归.运行()
             End If
@@ -40,7 +43,7 @@ Friend Module Program
                 Return 首帧事件解析回归.运行()
             End If
         Next
-        Console.WriteLine("可用套件：--bluray-drop-regression  --security-regression  --360-identification-regression  --pr57-fixes-regression  --content-size-regression  --module-abi-regression  --raw-file-association-regression  --bluetooth-latency-regression  --playback-progress-regression  --smtc-mapping-regression  --smtc-runtime-smoke  --first-frame-event-regression")
+        Console.WriteLine("可用套件：--bluray-drop-regression  --security-regression  --360-identification-regression  --pr57-fixes-regression  --settings-designer-regression  --content-size-regression  --module-abi-regression  --raw-file-association-regression  --bluetooth-latency-regression  --playback-progress-regression  --smtc-mapping-regression  --smtc-runtime-smoke  --first-frame-event-regression")
         Return 2
     End Function
 End Module
