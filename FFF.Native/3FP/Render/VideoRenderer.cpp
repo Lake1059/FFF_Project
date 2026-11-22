@@ -3489,6 +3489,12 @@ FFFResult PlayerVideoRenderer::CreateD3D12HardwareDeviceContext(AVBufferRef** ou
     auto* decode = static_cast<AVD3D12VADeviceContext*>(context->hwctx);
     decode->device = d3d12_->Device();
     decode->device->AddRef();
+    // FFmpeg installs its device-release callback only in av_hwdevice_ctx_create.
+    // This context wraps our device with alloc/init, so own that reference until
+    // the last decoder/frame reference releases the hardware context.
+    context->free = [](AVHWDeviceContext* hardware) noexcept {
+        ReleaseCom(static_cast<AVD3D12VADeviceContext*>(hardware->hwctx)->device);
+    };
     // Allow concurrent reference reads on the video queue and source-copy
     // reads on the native graphics queue without sharing a writable state.
     decode->resource_flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
@@ -7159,6 +7165,7 @@ void PlayerVideoRenderer::ReleaseTimedTextResources(const bool resetRenderedStat
     for (auto& [key, layout] : timedTextLayouts_) if (layout != nullptr) layout->Release();
     timedTextLayouts_.clear();
     timedTextLayoutOrder_.clear();
+    timedTextPendingSprites_.clear();
     for (auto& [color, brush] : timedTextBrushes_) if (brush != nullptr) brush->Release();
     timedTextBrushes_.clear();
     timedTextSprites_.clear();
@@ -10058,11 +10065,6 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseCoverBackdropResources();
     ReleaseTimedTextResources();
     ReleaseScaleResources();
-    if (context_ != nullptr &&
-        (device_ == nullptr || SUCCEEDED(device_->GetDeviceRemovedReason()))) {
-        context_->ClearState();
-        context_->Flush();
-    }
     if (swapChain_ != nullptr) {
         std::lock_guard presentLock(presentMutex_);
         ReleaseSwapChain();
@@ -10106,6 +10108,16 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     ReleaseCom(coverBackdropPixelShader_);
     ReleaseCom(timedTextPixelShader_);
     ReleaseCom(vertexShader_);
+    // D3D11 defers destruction. Flush after dropping the swap chain, views and
+    // textures so their releases are submitted before the device goes away.
+    if (context_ != nullptr &&
+        (device_ == nullptr || SUCCEEDED(device_->GetDeviceRemovedReason()))) {
+        context_->ClearState();
+        context_->Flush();
+        ComPtr<IDXGIDevice3> dxgiDevice;
+        if (device_ != nullptr && SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))))
+            dxgiDevice->Trim();
+    }
     ReleaseCom(context_);
     ReleaseCom(device_);
     ReleaseCom(renderAdapter_);
