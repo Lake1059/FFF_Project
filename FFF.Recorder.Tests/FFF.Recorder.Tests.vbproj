@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <Import Project="..\build-config\FFmpegRuntime.props" />
+  <Import Project="..\third_party\FFmpegRuntime.props" />
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>

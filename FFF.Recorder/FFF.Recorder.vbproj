@@ -1,11 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <Import Project="..\build-config\FFmpegRuntime.props" />
+  <Import Project="..\third_party\FFmpegRuntime.props" />
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <NetTFM Condition="'$(NetTFM)' == ''">net11.0-windows10.0.26100.0</NetTFM>
     <TargetFramework>$(NetTFM)</TargetFramework>
+    <!-- Windows.Graphics.Capture and the notification library use managed WinRT projections. -->
+    <IncludeWindowsSDKRefFrameworkReferences>true</IncludeWindowsSDKRefFrameworkReferences>
     <LakeUIDesignerBackend>DX11</LakeUIDesignerBackend>
     <StartupObject>Sub Main</StartupObject>
     <UseWindowsForms>true</UseWindowsForms>
@@ -64,6 +66,23 @@
     </Content>
   </ItemGroup>
 
+  <Target Name="VerifyRecorderFramework" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(TargetFrameworkIdentifier)' != '.NETCoreApp' Or '$(TargetFrameworkVersion)' != 'v11.0' Or '$(TargetPlatformIdentifier)' != 'Windows'"
+           Text="3FR 需要 .NET 11 Windows 目标框架。当前目标为 $(TargetFramework)。" />
+    <Error Condition="'$(IncludeWindowsSDKRefFrameworkReferences)' != 'true'"
+           Text="3FR 的屏幕捕获需要 Windows SDK 的 WinRT 投影。" />
+  </Target>
+
+  <Target Name="VerifyRecorderBundle" BeforeTargets="GenerateSingleFileBundle" DependsOnTargets="PrepareForBundle"
+          Condition="'$(PublishSingleFile)' == 'true'">
+    <ItemGroup>
+      <_RecorderBundlePath Include="@(FilesToBundle->'%(RelativePath)')" />
+      <_MissingRecorderProjection Include="Microsoft.Windows.SDK.NET.dll;WinRT.Runtime.dll" Exclude="@(_RecorderBundlePath)" />
+    </ItemGroup>
+    <Error Condition="'@(_MissingRecorderProjection)' != ''"
+           Text="3FR 单文件缺少 WinRT 投影 @(_MissingRecorderProjection)。" />
+  </Target>
+
   <Target Name="CopyNativeRuntime" AfterTargets="Build">
     <Error Condition="!Exists('..\FFF.Native\x64\$(Configuration)\FFF.Native.dll')" Text="请先构建 FFF.Native 的 x64 $(Configuration) 配置。" />
     <Copy SourceFiles="@(ProductNative)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
@@ -119,4 +138,33 @@
 
   <Import Project="..\..\LakeUI\LakeUI\buildTransitive\LakeUI.targets" />
 
+  <ItemGroup>
+    <Compile Update="Form1.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Form个性化.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Form总控台.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Form支持者.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Form视频参数.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Form设置.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Form输出设置.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Form音频参数.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Graphics\实时预览控件.vb">
+      <SubType>Component</SubType>
+    </Compile>
+  </ItemGroup>
 </Project>

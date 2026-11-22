@@ -1,3 +1,3 @@
 {
-  "overlay-ports": ["build-config/vcpkg-ports"]
+  "overlay-ports": ["third_party/vcpkg-ports"]
 }

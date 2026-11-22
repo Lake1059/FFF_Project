@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <FFmpegRoot>$(MSBuildThisFileDirectory)..\third_party\ffmpeg</FFmpegRoot>
+    <FFmpegRoot>$(MSBuildThisFileDirectory)ffmpeg</FFmpegRoot>
     <FFmpegRuntimeDirectory>$(FFmpegRoot)\bin\x64</FFmpegRuntimeDirectory>
   </PropertyGroup>
   <ItemGroup>

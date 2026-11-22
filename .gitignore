@@ -37,13 +37,25 @@ bld/
 [Ll]og/
 [Ll]ogs/
 
-# Generated release executables
-/*.exe
-tools/*.exe
+# Native build outputs
+*.exe
+*.dll
+*.lib
+*.exp
 
 publish/
 runtime/
-third_party/
+# Prepared dependencies and download caches stay local.
+# Open the parent directories needed by the checked-in vcpkg port.
+/third_party/*
+!/third_party/DiscRuntime.props
+!/third_party/FFmpegRuntime.props
+!/third_party/vcpkg-ports/
+/third_party/vcpkg-ports/*
+!/third_party/vcpkg-ports/libbluray/
+/third_party/vcpkg-ports/libbluray/*
+!/third_party/vcpkg-ports/libbluray/portfile.cmake
+!/third_party/vcpkg-ports/libbluray/vcpkg.json
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/

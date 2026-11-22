@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <DiscRuntimeRoot>$(MSBuildThisFileDirectory)..\third_party\vcpkg_installed\x64-windows</DiscRuntimeRoot>
+    <DiscRuntimeRoot>$(MSBuildThisFileDirectory)vcpkg_installed\x64-windows</DiscRuntimeRoot>
     <DiscRuntimeDirectory Condition="'$(Configuration)'=='Debug'">$(DiscRuntimeRoot)\debug\bin</DiscRuntimeDirectory>
     <DiscRuntimeDirectory Condition="'$(Configuration)'!='Debug'">$(DiscRuntimeRoot)\bin</DiscRuntimeDirectory>
   </PropertyGroup>

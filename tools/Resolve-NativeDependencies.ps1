@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 
 function Get-FFmpegComponentNames {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot)
-    [xml]$manifest = [IO.File]::ReadAllText((Join-Path $ProjectRoot 'build-config\FFmpegRuntime.props'))
+    [xml]$manifest = [IO.File]::ReadAllText((Join-Path $ProjectRoot 'third_party\FFmpegRuntime.props'))
     $manifest.Project.ItemGroup.FFmpegComponent.Include.Split(';')
 }
 
