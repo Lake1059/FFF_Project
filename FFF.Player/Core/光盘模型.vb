@@ -53,6 +53,7 @@ Public Module 光盘路径
 
     Private Function 取得媒体路径核心(路径 As String, 仅光盘 As Boolean) As String
         If String.IsNullOrWhiteSpace(路径) OrElse 路径.Contains("://", StringComparison.Ordinal) Then Return Nothing
+        If 媒体路径.是网络路径(路径) Then Return Nothing
         Try
             Dim 完整路径 = Path.TrimEndingDirectorySeparator(Path.GetFullPath(路径))
             If 完整路径.StartsWith("\\", StringComparison.Ordinal) OrElse

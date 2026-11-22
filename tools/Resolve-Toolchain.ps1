@@ -294,10 +294,10 @@ function Assert-ProductFrameworkPair {
         $currentMatch = [regex]::Match($Framework, '^(net\d+\.\d+)-windows(?:\d+(?:\.\d+)*)?$', 'IgnoreCase')
         if ($otherMatch.Success -and $currentMatch.Success -and
             $otherMatch.Groups[1].Value -eq $currentMatch.Groups[1].Value) { continue }
-        $message = ("$name in $OutputDirectory was published for $($entries[$name]) but " +
-            "$Product resolves to $Framework. Re-publish both for the same .NET runtime version, " +
-            "or pass -AllowFrameworkMismatch on purpose.")
-        if (-not $AllowMismatch) { throw $message }
+        $message = "$name in $OutputDirectory was published for $($entries[$name]), and $Product targets $Framework."
+        if (-not $AllowMismatch) {
+            throw "$message Use a separate -OutputDirectory or pass -AllowFrameworkMismatch to allow both versions."
+        }
         Write-Warning $message
     }
     if ($CheckOnly) { return }

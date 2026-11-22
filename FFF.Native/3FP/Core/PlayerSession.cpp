@@ -3,6 +3,7 @@
 #include "3FP/Core/PlaybackTimeMath.h"
 
 #include <initializer_list>
+#include <optional>
 #include <string_view>
 #include "3FP/Core/AvifIlocShim.h"
 #include "3FP/Core/GainMapProbe.h"
@@ -76,11 +77,80 @@ inline std::uint64_t To100ns(const std::chrono::steady_clock::duration& d) noexc
     const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
     return static_cast<std::uint64_t>(ns > 0 ? ns / 100 : 0);
 }
+
+// Opt-in seek profiling. It is deliberately separate from FFF_SEEK_TRACE: the
+// latter reports decode-loop work, while this reports the queue, demux, IOCP
+// reset and target-presentation boundaries that explain where wall time went.
+bool SeekProfileEnabled() noexcept {
+    static const bool enabled = []() noexcept {
+        wchar_t text[8]{};
+        const auto length = GetEnvironmentVariableW(L"FFF_SEEK_PROFILE", text, 8);
+        return length > 0 && length < 8 && !(text[0] == L'0' && text[1] == L'\0');
+    }();
+    return enabled;
+}
+
+inline double ElapsedMs(const std::chrono::steady_clock::time_point& begin,
+    const std::chrono::steady_clock::time_point& end) noexcept {
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
+class SeekStageProfile final {
+public:
+    explicit SeekStageProfile(const std::int64_t target100ns) noexcept
+        : enabled_(SeekProfileEnabled()), targetMs_(target100ns / 10'000.0),
+          begin_(std::chrono::steady_clock::now()), mark_(begin_) {}
+
+    ~SeekStageProfile() {
+        if (!enabled_) return;
+        const auto end = std::chrono::steady_clock::now();
+        std::fprintf(stderr,
+            "[seek-profile] do total=%.2fms stage=%s target=%.3fms\n",
+            ElapsedMs(begin_, end), stage_, targetMs_);
+    }
+
+    void Mark(const char* stage) noexcept {
+        if (!enabled_) return;
+        const auto end = std::chrono::steady_clock::now();
+        std::fprintf(stderr,
+            "[seek-profile] do stage=%s ms=%.2f target=%.3fms\n",
+            stage, ElapsedMs(mark_, end), targetMs_);
+        mark_ = end;
+        stage_ = stage;
+    }
+
+private:
+    bool enabled_;
+    double targetMs_;
+    std::chrono::steady_clock::time_point begin_;
+    std::chrono::steady_clock::time_point mark_;
+    const char* stage_ = "begin";
+};
 // fMP4 前向 seek 的顺序预滚包数上限（R2.5 防死滚保险丝）。正常预滚只需滚过目标
 // 之前的少数几个 moof；上限只对病态文件（无限 moof 链、判停点永不满足）生效。
 // 2e6 包 ≈ 9 小时 60fps / 18 小时 30fps 的参考流样本总量，超过它判定目标不可达，
 // 转 B2 重开还原而不是无限预滚（过大→卡顿，过小→大文件长跳失败率上升）。
 constexpr std::int64_t MaximumSeekPrerollPackets = 2'000'000;
+// Network seeks get one wall-clock budget across av_seek_frame, fragmented
+// preroll, a demux reopen, and the decode-to-target loop. Local seeks keep the
+// existing unbounded behavior; a slow local disk is still allowed to finish.
+constexpr ULONGLONG NetworkSeekDeadlineMs = 6000;
+constexpr ULONGLONG NetworkOpenDeadlineMs = 15000;
+// Pre-roll is additionally capped by bytes for network inputs: packet count
+// alone can still read gigabytes before the packet fuse trips.
+constexpr std::int64_t MaximumNetworkSeekPrerollBytes = 64LL * 1024 * 1024;
+
+class ScopedInputDeadline final {
+public:
+    ScopedInputDeadline(std::atomic<ULONGLONG>& deadline, const ULONGLONG budgetMs) noexcept
+        : deadline_(deadline), previous_(deadline.exchange(GetTickCount64() + budgetMs)) {}
+    ~ScopedInputDeadline() { deadline_.store(previous_); }
+    ScopedInputDeadline(const ScopedInputDeadline&) = delete;
+    ScopedInputDeadline& operator=(const ScopedInputDeadline&) = delete;
+private:
+    std::atomic<ULONGLONG>& deadline_;
+    ULONGLONG previous_;
+};
 // 预滚循环内检查 terminate_（acquire）与刷新扫描表快照的包间隔（契约上限 1024），
 // 决定关闭请求的最坏响应延迟。
 constexpr std::int64_t SeekPrerollInterruptInterval = 1024;
@@ -1129,9 +1199,19 @@ PlayerSession::~PlayerSession() {
     ReleasePrimariesCarrierFilter();
 }
 
-void PlayerSession::Enqueue(Command command) noexcept {
-    try { { std::lock_guard lock(mutex_); if (terminate_) return; commands_.push_back(std::move(command)); } commandCondition_.notify_one(); }
-    catch (...) { ReportError(FFFResult::NativeFailure, "Could not queue the playback command."); }
+bool PlayerSession::Enqueue(Command command) noexcept {
+    try {
+        {
+            std::lock_guard lock(mutex_);
+            if (terminate_) return false;
+            commands_.push_back(std::move(command));
+        }
+        commandCondition_.notify_one();
+        return true;
+    } catch (...) {
+        ReportError(FFFResult::NativeFailure, "Could not queue the playback command.");
+        return false;
+    }
 }
 
 void PlayerSession::NotifyAudioRestart() noexcept {
@@ -1879,14 +1959,41 @@ FFFResult PlayerSession::ConfigurePlaybackPerformance(
 }
 
 FFFResult PlayerSession::Open(const char* path) noexcept {
+    return OpenWithPolicy(path, false);
+}
+
+FFFResult PlayerSession::OpenNetwork(const char* path) noexcept {
+    return OpenWithPolicy(path, true);
+}
+
+FFFResult PlayerSession::OpenWithPolicy(const char* path, bool allowNetwork) noexcept {
     std::string normalized, error;
-    if (!NormalizeLocalPath(path, normalized, error)) { ReportError(FFFResult::InvalidArgument, std::move(error), "open"); return FFFResult::InvalidArgument; }
+    if (!(allowNetwork ? NormalizeNetworkPath : NormalizeLocalPath)(path, normalized, error)) {
+        ReportError(FFFResult::InvalidArgument, std::move(error), "open");
+        return FFFResult::InvalidArgument;
+    }
     if (state_.exchange(FFF3FPState::Opening) == FFF3FPState::Opening) return FFFResult::InvalidState;
     { std::lock_guard lock(snapshotMutex_); publishedSnapshot_.state = FFF3FPState::Opening; }
+    bool networkInput = normalized.starts_with("\\\\");
+    if (!networkInput && normalized.size() >= 2 && normalized[1] == ':') {
+        const wchar_t root[] = {static_cast<wchar_t>(normalized[0]), L':', L'\\', L'\0'};
+        networkInput = GetDriveTypeW(root) == DRIVE_REMOTE;
+    }
+    // Interrupt any old media read promptly; the queued open owns its teardown.
+    const auto generation = inputCancelGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
     discCancel_.store(false);
     firstFramePresentedEmitted_.store(false, std::memory_order_release);
     Emit(FFF3FPEvent::StateChanged, "{\"state\":1}");
-    Enqueue([this, value = std::move(normalized)] { DoOpen(value); }); return FFFResult::Success;
+    try {
+        if (Enqueue([this, value = std::move(normalized), networkInput, generation] {
+            DoOpen(value, networkInput, generation);
+        })) return FFFResult::Success;
+    } catch (...) {
+    }
+    state_.store(FFF3FPState::Failed, std::memory_order_release);
+    { std::lock_guard lock(snapshotMutex_); publishedSnapshot_.state = FFF3FPState::Failed; }
+    ReportError(FFFResult::NativeFailure, "Could not queue the media open request.", "open", true);
+    return FFFResult::NativeFailure;
 }
 FFFResult PlayerSession::Play() noexcept {
     // A LibRaw still has no timeline and no decoder: Play is a no-op, exactly
@@ -1986,17 +2093,179 @@ FFFResult PlayerSession::DiscardAudioOutput() noexcept {
         return FFFResult::NativeFailure;
     }
 }
-FFFResult PlayerSession::Stop() noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this] { DoClose(FFF3FPState::Idle); }); return FFFResult::Success; }
-FFFResult PlayerSession::Close() noexcept { discCancel_.store(true); Enqueue([this] { DoClose(); }); return FFFResult::Success; }
-FFFResult PlayerSession::Seek(const std::int64_t value) noexcept { if (value < 0) return FFFResult::InvalidArgument; const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; if (rawStill_ != nullptr) { Enqueue([this] { Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":0}"); }); return FFFResult::Success; } Enqueue([this, value] {
-        // 定位失败时 DoSeek 会提前返回：不动队列、不装 seekTarget100ns_、也不改位置。这时
-        // 照常去 DecodeUntilSeekTarget()，就是朝一个"根本没装上的靶"抽干 demuxer——EOF 一到
-        // 而 pendingVideoPackets_ 已空，FlushAtEnd 直接把会话判成 Ended，而 DoSeek 自己的
-        // 错误消息写的是 "playback remained active"。实测裸 Annex-B：探针一句 Seek(0) ⇒
-        // 解码 0 帧＋state=Ended；跳过那句 seek，同一个文件正常播（88 帧、位置推进 3.41s）。
-        const auto seeked = DoSeek(value);
-        if (seeked == FFFResult::Success && state_.load() != FFF3FPState::Playing &&
-            rawStill_ == nullptr) DecodeUntilSeekTarget(); Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":" + std::to_string(snapshot_.position100ns) + "}"); }); return FFFResult::Success; }
+FFFResult PlayerSession::Stop() noexcept {
+    const auto state = state_.load();
+    if (state != FFF3FPState::Opening && state != FFF3FPState::Ready &&
+        state != FFF3FPState::Playing && state != FFF3FPState::Paused &&
+        state != FFF3FPState::Ended) return FFFResult::InvalidState;
+    inputCancelGeneration_.fetch_add(1, std::memory_order_acq_rel);
+    discCancel_.store(true, std::memory_order_release);
+    return Enqueue([this] { DoClose(FFF3FPState::Idle); })
+        ? FFFResult::Success : FFFResult::NativeFailure;
+}
+FFFResult PlayerSession::Close() noexcept {
+    inputCancelGeneration_.fetch_add(1, std::memory_order_acq_rel);
+    discCancel_.store(true, std::memory_order_release);
+    return Enqueue([this] { DoClose(); }) ? FFFResult::Success : FFFResult::NativeFailure;
+}
+FFFResult PlayerSession::Seek(const std::int64_t value) noexcept {
+    if (value < 0) return FFFResult::InvalidArgument;
+    const auto state = state_.load();
+    if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState;
+    if (rawStill_ != nullptr) { Enqueue([this] { Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek\",\"position100ns\":0}"); }); return FFFResult::Success; }
+    {
+        std::lock_guard lock(seekRequestMutex_);
+        const auto activeTarget = activeSeekTarget100ns_.load(std::memory_order_acquire);
+        if (coalescedSeekActive_.load(std::memory_order_acquire) && activeTarget == value) {
+            if (SeekProfileEnabled())
+                std::fprintf(stderr, "[seek-profile] coalesce dedup active target=%.3fms\n",
+                    value / 10'000.0);
+            return FFFResult::Success;
+        }
+        if (seekRequestPending_ && pendingSeekTarget100ns_ == value) {
+            if (SeekProfileEnabled())
+                std::fprintf(stderr, "[seek-profile] coalesce dedup pending target=%.3fms\n",
+                    value / 10'000.0);
+            return FFFResult::Success;
+        }
+        pendingSeekTarget100ns_ = value;
+        pendingSeekGeneration_ = seekRequestGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        seekRequestPending_ = true;
+        if (seekPumpQueued_) {
+            if (SeekProfileEnabled())
+                std::fprintf(stderr,
+                    "[seek-profile] coalesce replace target=%.3fms gen=%llu pending=1\n",
+                    value / 10'000.0,
+                    static_cast<unsigned long long>(pendingSeekGeneration_));
+            return FFFResult::Success;
+        }
+        seekPumpQueued_ = true;
+    }
+    if (SeekProfileEnabled())
+        std::fprintf(stderr, "[seek-profile] coalesce start target=%.3fms\n",
+            value / 10'000.0);
+    Enqueue([this] { RunSeekPump(); });
+    return FFFResult::Success;
+}
+
+bool PlayerSession::CoalescedSeekSuperseded() const noexcept {
+    if (!coalescedSeekActive_.load(std::memory_order_acquire)) return false;
+    std::lock_guard lock(seekRequestMutex_);
+    return seekRequestPending_ &&
+        pendingSeekTarget100ns_ != activeSeekTarget100ns_.load(std::memory_order_acquire);
+}
+
+void PlayerSession::RunSeekPump() noexcept {
+    // This is the only queued "seek" command. Every Seek() call updates the
+    // pending target instead of enqueueing another command; the worker always
+    // takes the newest target and abandons work for a superseded one.
+    while (!terminate_.load(std::memory_order_acquire)) {
+        std::int64_t target = 0;
+        std::uint64_t generation = 0;
+        {
+            std::lock_guard lock(seekRequestMutex_);
+            if (!seekRequestPending_) {
+                seekPumpQueued_ = false;
+                coalescedSeekActive_.store(false, std::memory_order_release);
+                return;
+            }
+            target = pendingSeekTarget100ns_;
+            generation = pendingSeekGeneration_;
+            seekRequestPending_ = false;
+        }
+        activeSeekTarget100ns_.store(target, std::memory_order_release);
+        coalescedSeekActive_.store(true, std::memory_order_release);
+        const auto pumpStartTick = GetTickCount64();
+        seekProfileStartTick_ = pumpStartTick;
+        if (SeekProfileEnabled())
+            std::fprintf(stderr,
+                "[seek-profile] coalesce take target=%.3fms gen=%llu state=%u\n",
+                target / 10'000.0, static_cast<unsigned long long>(generation),
+                static_cast<unsigned>(state_.load()));
+        // A slider drag emits several targets back-to-back. Give a short burst a
+        // chance to settle before the expensive part: while new targets keep
+        // arriving, only the pending value is updated, and no old pipeline is
+        // touched. Capped so a continuous drag cannot starve pause/stop handling.
+        if (networkInput_) {
+            for (int settle = 0; settle < 4; ++settle) {
+                Sleep(6);
+                std::lock_guard lock(seekRequestMutex_);
+                if (!seekRequestPending_) break;
+                target = pendingSeekTarget100ns_;
+                generation = pendingSeekGeneration_;
+                seekRequestPending_ = false;
+                activeSeekTarget100ns_.store(target, std::memory_order_release);
+            }
+        }
+        // DoSeek clears the old video queue, flushes both decoders and installs
+        // target; if a newer request arrives during DoSeek, the decode pass below
+        // is skipped and the loop immediately installs the newer target.
+        {
+            // A newer target already queued while this one was being set up: drop
+            // it before touching the old pipeline, otherwise a slider drag would
+            // still pay one reopen per intermediate position.
+            std::lock_guard lock(seekRequestMutex_);
+            if (seekRequestPending_) {
+                if (SeekProfileEnabled())
+                    std::fprintf(stderr,
+                        "[seek-profile] coalesce skip-before-open gen=%llu\n",
+                        static_cast<unsigned long long>(generation));
+                continue;
+            }
+        }
+        const auto seeked = DoSeek(target, -1, true, true);
+        if (seeked != FFFResult::Success) {
+            bool hasPending = false;
+            {
+                std::lock_guard lock(seekRequestMutex_);
+                hasPending = seekRequestPending_;
+                if (!hasPending) {
+                    seekPumpQueued_ = false;
+                    coalescedSeekActive_.store(false, std::memory_order_release);
+                }
+            }
+            if (hasPending) continue;
+            seekProfileStartTick_ = 0;
+            return;
+        }
+        if (state_.load() != FFF3FPState::Playing && rawStill_ == nullptr)
+            DecodeUntilSeekTarget();
+        if (CoalescedSeekSuperseded()) {
+            std::int64_t nextTarget = -1;
+            {
+                std::lock_guard lock(seekRequestMutex_);
+                nextTarget = pendingSeekTarget100ns_;
+            }
+            if (SeekProfileEnabled())
+                std::fprintf(stderr,
+                    "[seek-profile] coalesce drop gen=%llu next=%.3fms\n",
+                    static_cast<unsigned long long>(generation),
+                    nextTarget / 10'000.0);
+            continue;
+        }
+        {
+            std::lock_guard lock(seekRequestMutex_);
+            if (seekRequestPending_) continue;
+            seekPumpQueued_ = false;
+            coalescedSeekActive_.store(false, std::memory_order_release);
+        }
+        if (SeekProfileEnabled())
+            std::fprintf(stderr,
+                "[seek-profile] coalesce done target=%.3fms gen=%llu total=%.2fms\n",
+                target / 10'000.0, static_cast<unsigned long long>(generation),
+                static_cast<double>(GetTickCount64() - pumpStartTick));
+        seekProfileStartTick_ = 0;
+        Emit(FFF3FPEvent::OperationCompleted,
+            "{\"operation\":\"seek\",\"position100ns\":" +
+            std::to_string(snapshot_.position100ns) + "}");
+        return;
+    }
+    {
+        std::lock_guard lock(seekRequestMutex_);
+        seekPumpQueued_ = false;
+        coalescedSeekActive_.store(false, std::memory_order_release);
+    }
+}
 FFFResult PlayerSession::SeekKeyframe(const std::int64_t value) noexcept {
     if (value < 0) return FFFResult::InvalidArgument;
     const auto state = state_.load();
@@ -2004,8 +2273,9 @@ FFFResult PlayerSession::SeekKeyframe(const std::int64_t value) noexcept {
         state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState;
     Enqueue([this, value] {
         const auto hasVideo = videoStream_ >= 0 && videoDecoder_ != nullptr;
-        const auto seeked = DoSeek(value, -1, !hasVideo);
-        if (seeked == FFFResult::Success && hasVideo && state_.load() != FFF3FPState::Playing)
+        const auto seeked = DoSeek(value, -1, !hasVideo, true);
+        if (seeked != FFFResult::Success) return;
+        if (hasVideo && state_.load() != FFF3FPState::Playing)
             DecodeUntilSeekTarget();
         Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek-keyframe\",\"position100ns\":" +
             std::to_string(snapshot_.position100ns) + "}");
@@ -2027,13 +2297,15 @@ FFFResult PlayerSession::SeekFrame(const std::int64_t value) noexcept {
     Enqueue([this, value] {
         const auto end = framePtsIndexBase_ + static_cast<std::int64_t>(framePtsIndex_.size());
         if (value >= framePtsIndexBase_ && value < end) {
-            DoSeek(StreamTimestampPosition100ns(format_, videoStream_,
-                framePtsIndex_[static_cast<std::size_t>(value - framePtsIndexBase_)]), value);
+            const auto seeked = DoSeek(StreamTimestampPosition100ns(format_, videoStream_,
+                framePtsIndex_[static_cast<std::size_t>(value - framePtsIndexBase_)]), value, true, true);
+            if (seeked != FFFResult::Success) return;
         } else {
             // Preserve exact frame navigation outside the bounded index window.
             // Rebuild the sparse rolling index from the stream start while decoding.
             framePtsIndex_.clear(); framePtsIndexBase_ = 0; rebuildingFrameIndex_ = true;
-            DoSeek(0, value);
+            const auto seeked = DoSeek(0, value, true, true);
+            if (seeked != FFFResult::Success) return;
             // DoSeek stores targetFrame-1 so a normal exact frame seek can
             // resume at the requested ordinal. A rebuild must count from zero
             // while decoding the stream prefix toward that ordinal.
@@ -4216,12 +4488,17 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
     std::int32_t* mergedExtents, AvifItemInfo* avifInfo) noexcept {
     if (mergedExtents != nullptr) *mergedExtents = 0;
     if (avifInfo != nullptr) *avifInfo = AvifItemInfo{};
+    const AVIOInterruptCB inputInterrupt{&PlayerSession::ProbeInterrupt, this};
+    if (ProbeInterrupt(this)) {
+        error = "Media input open was cancelled or its deadline expired.";
+        return FFFResult::NativeFailure;
+    }
     // RAW is a deliberate front branch, not a fallback: FFmpeg's bundled build
     // recognizes CR2/NEF/ARW/DNG as TIFF containers and reports a successful
     // open that decodes nothing (or only the embedded preview), so letting it
     // try first would turn "unsupported" into a convincing empty picture.
     bool rawFallback = false;
-    if (RawStillSource::LooksLikeRawPath(path)) {
+    if (!networkInput_ && RawStillSource::LooksLikeRawPath(path)) {
         auto candidate = std::make_unique<RawStillSource>();
         if (!candidate->Open(path, rawOptions_, error)) {
             if (!IsAmbiguousRawFallbackName(path)) {
@@ -4255,10 +4532,15 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
 }
 
 // Playback and trial decode share the same local input and demuxer policy.
-// Trial decode opens only the container header and uses its own cancellation flag.
+// Trial decode opens only the container header and shares the input deadline.
 FFFResult PlayerSession::OpenLocalDemuxer(const std::string& path, AVFormatContext** output,
     std::unique_ptr<SharedFileInput>& io, std::string& error, bool trial,
     std::int32_t* mergedExtents, AvifItemInfo* avifInfo) noexcept {
+    const AVIOInterruptCB inputInterrupt{&PlayerSession::ProbeInterrupt, this};
+    if (ProbeInterrupt(this)) {
+        error = "Media input open was cancelled or its deadline expired.";
+        return FFFResult::NativeFailure;
+    }
     // A layered ("progressive") AVIF stores its primary item as several extents,
     // and the mov demuxer refuses those before any decoder runs. Repairing the box
     // means editing the bytes, so such a file is read and repaired here and handed
@@ -4272,7 +4554,8 @@ FFFResult PlayerSession::OpenLocalDemuxer(const std::string& path, AVFormatConte
     // properties are the standard signal. Probe before the repair so a single-
     // extent layered file (which ReadAndRepair returns false for) is still seen.
     if (stillContainer && avifInfo != nullptr) {
-        AvifItemProbe::Read(path.c_str(), MaxAvifProbeBytes, *avifInfo, repairDetail);
+        AvifItemProbe::Read(path.c_str(), MaxAvifProbeBytes, *avifInfo, repairDetail,
+            inputDeadlineTick_.load(), &inputInterrupt);
     }
     // A single file-offset extent is already legal for the mov demuxer: there is
     // nothing for the shim to merge. Only skip the whole-file read when the probe
@@ -4283,7 +4566,8 @@ FFFResult PlayerSession::OpenLocalDemuxer(const std::string& path, AVFormatConte
         avifInfo->dataReferenceIndex == 0;
     const bool repaired = stillContainer && !singleExtent &&
         AvifIlocShim::ReadAndRepair(path.c_str(), MaxRepairedStillImageBytes,
-            repairedBytes, repairDetail, &repairedExtents);
+            repairedBytes, repairDetail, &repairedExtents,
+            inputDeadlineTick_.load(), &inputInterrupt);
     // A merged item is by definition multi-extent, which is how a layered image is
     // stored. Report the count but do not write the session member here: this
     // helper also opens external audio and seek-probe formats, and those must not
@@ -4291,7 +4575,8 @@ FFFResult PlayerSession::OpenLocalDemuxer(const std::string& path, AVFormatConte
     if (mergedExtents != nullptr)
         *mergedExtents = repaired ? repairedExtents : 0;
     io = repaired ? SharedFileInput::OpenMemory(repairedBytes.data(), repairedBytes.size(), error)
-                  : SharedFileInput::Open(path.c_str(), error);
+                  : SharedFileInput::Open(path.c_str(), error, inputDeadlineTick_.load(),
+                      trial, &inputInterrupt);
     if (io == nullptr) return FFFResult::NativeFailure;
     auto* context = avformat_alloc_context();
     if (context == nullptr) {
@@ -4300,20 +4585,8 @@ FFFResult PlayerSession::OpenLocalDemuxer(const std::string& path, AVFormatConte
         return FFFResult::NativeFailure;
     }
     context->pb = io->Context();
-    context->interrupt_callback.opaque = this;
-    if (trial) {
-        context->interrupt_callback.callback = [](void* opaque) {
-            const auto* session = static_cast<PlayerSession*>(opaque);
-            return session->terminate_.load(std::memory_order_acquire) ? 1 : 0;
-        };
-    } else {
-        context->interrupt_callback.callback = [](void* opaque) {
-            const auto* session = static_cast<PlayerSession*>(opaque);
-            const auto deadline = session->inputDeadlineTick_.load();
-            return session->terminate_.load() || (deadline && GetTickCount64() >= deadline) ? 1 : 0;
-        };
-        io->SetInterrupt(context->interrupt_callback);
-    }
+    context->interrupt_callback = inputInterrupt;
+    io->SetInterrupt(inputInterrupt);
     context->flags |= AVFMT_FLAG_CUSTOM_IO;
     *output = context;
     // P0-b: with a decoded still already cached for this exact file, cap
@@ -4374,6 +4647,16 @@ void PlayerSession::CloseFormat(AVFormatContext** format,
         }
     }
     io.reset();
+}
+
+int PlayerSession::ProbeInterrupt(void* opaque) noexcept {
+    const auto* self = static_cast<const PlayerSession*>(opaque);
+    if (self == nullptr) return 0;
+    const auto deadline = self->inputDeadlineTick_.load(std::memory_order_acquire);
+    return self->terminate_.load(std::memory_order_acquire) ||
+        self->inputCancelGeneration_.load(std::memory_order_acquire) !=
+            self->activeInputGeneration_.load(std::memory_order_acquire) ||
+        (deadline != 0 && GetTickCount64() >= deadline) ? 1 : 0;
 }
 
 // Reads how many clockwise quarter turns the source asks to be displayed with.
@@ -4877,7 +5160,7 @@ bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const s
     // checking at all: a 3 s HEVC stream decoded 0 of 90 frames and playback ended
     // immediately. Playback's context is therefore never touched here.
     //
-    // That second context goes through OpenProbeFormat, so it carries the session's
+    // That second context goes through OpenLocalDemuxer, so it carries the session's
     // own IO policy and an interrupt callback tied to terminate_; the bare url this
     // used to open skipped the protocol lists, the repaired-memory input and the
     // demuxer gate, and could not be cancelled at all.
@@ -4969,7 +5252,27 @@ bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const s
     return finish(produced || !streamCountMatches || cancelled, detail);
 }
 
-void PlayerSession::DoOpen(std::string path) noexcept {
+bool PlayerSession::AbortOpenIfInterrupted() noexcept {
+    if (!ProbeInterrupt(this)) return false;
+    if (terminate_.load(std::memory_order_acquire) ||
+        inputCancelGeneration_.load(std::memory_order_acquire) !=
+            activeInputGeneration_.load(std::memory_order_acquire)) {
+        DoClose();
+    } else {
+        Fail(FFFResult::NativeFailure, "Media open timed out before initialization completed.", "open");
+    }
+    return true;
+}
+
+void PlayerSession::DoOpen(std::string path, const bool networkInput,
+    const std::uint64_t inputGeneration) noexcept {
+    activeInputGeneration_.store(inputGeneration != 0 ? inputGeneration :
+        inputCancelGeneration_.load(std::memory_order_acquire), std::memory_order_release);
+    if (AbortOpenIfInterrupted()) return;
+    const AVIOInterruptCB inputInterrupt{&PlayerSession::ProbeInterrupt, this};
+    networkInput_ = networkInput;
+    std::optional<ScopedInputDeadline> openDeadline;
+    if (networkInput_) openDeadline.emplace(inputDeadlineTick_, NetworkOpenDeadlineMs);
     // A new file is a new timeline: whatever the tap buffered from the previous
     // one must not survive into it -- and neither may what the ASR worker has
     // accumulated. The worker's only re-anchor mechanism is a generation change
@@ -5017,7 +5320,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     std::int32_t mergedExtents = 0;
     AvifItemInfo avifInfo{};
     auto openResult = FFFResult::Success;
-    if (DiscInput::IsDiscPath(path)) {
+    if (!networkInput_ && DiscInput::IsDiscPath(path)) {
         try {
             disc_ = std::make_unique<DiscInput>(discCancel_);
             bool opened = disc_->Open(path) && disc_->OpenDemux(&format_, disc_->StartedAtTopMenu());
@@ -5034,12 +5337,14 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
     // Remembered so the IAMF decoder can re-open the file and drive the raw OBU stream.
     mediaPath_ = path;
+    UpdateNetworkReadHint();
     // fragmented MP4（fMP4）判定（R1.1，C-FMP4-DETECT@1）：独立旁路只读句柄扫顶层
     // box 头，判定失败/非 fragmented 都不影响打开成功（R1.2/R1.3）。此处 staticImage_
     // 尚未定值（下文 IsStillImage 才赋值），但 DoClose 已把它清零，且静图容器
     // （AVIF/HEIC）不含 mvex，DetectFragmented 自身就会返回 false，双保险。
     fragmentedMp4_ = !disc_ && !staticImage_ &&
-        Fmp4FragmentScanner::DetectFragmented(path.c_str());
+        Fmp4FragmentScanner::DetectFragmented(path.c_str(), inputDeadlineTick_.load(),
+            &inputInterrupt);
     videoStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_VIDEO);
     animatedImage_ = IsLoopAwareImageDemuxer(format_ != nullptr ? format_->iformat : nullptr);
     // An AVIF/HEIC image sequence keeps its animation on a later track than the
@@ -5277,7 +5582,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // track id 已定，此处挂载。启动失败不影响打开成功（R1.2）：fragmentedMp4_
     // 保持 true，F3 预滚退化为以 target 为判停点继续可用，R2.1 的字节估算禁用
     // 与 B2 重开还原照常生效。
-    StartFragmentScanIfNeeded(mediaPath_);
+    StartFragmentScanIfNeeded(mediaPath_, inputDeadlineTick_.load());
     if (videoStream_ < 0 && coverArtStream_ >= 0) {
         const auto result = LoadCoverArt();
         if (result != FFFResult::Success) { Fail(result, "Could not decode or render the attached cover art.", "cover-art"); return; }
@@ -5294,6 +5599,11 @@ void PlayerSession::DoOpen(std::string path) noexcept {
             parameters->bits_per_raw_sample,
             PixelFormatBitDepth(static_cast<AVPixelFormat>(parameters->format))));
     }
+    const bool matroska = format_->iformat && format_->iformat->name &&
+        std::string_view(format_->iformat->name).find("matroska") != std::string_view::npos;
+    const bool hasGrowingWriter = matroska &&
+        (IsIncompleteDownloadName(mediaPath_) || (formatIo_ && formatIo_->HasWriter()));
+    if (AbortOpenIfInterrupted()) return;
     {
         std::lock_guard lock(mutex_);
         bool declaredDuration = false;
@@ -5310,9 +5620,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         demuxedExtent100ns_ = 0;
         snapshot_.durationKnown = declaredDuration ? 1u : 0u;
         lastPacketDts_.assign(format_->nb_streams, AV_NOPTS_VALUE);
-        const bool matroska = format_->iformat && format_->iformat->name &&
-            std::string_view(format_->iformat->name).find("matroska") != std::string_view::npos;
-        growingInput_ = matroska && (IsIncompleteDownloadName(mediaPath_) || (formatIo_ && formatIo_->HasWriter()));
+        growingInput_ = hasGrowingWriter;
         if (growingInput_ && !snapshot_.durationKnown) snapshot_.duration100ns = 0;
         if (formatIo_ && growingInput_) formatIo_->DetectUnwrittenData(true);
         snapshot_.position100ns = 0; snapshot_.frameIndex = -1; snapshot_.framePts = AV_NOPTS_VALUE;
@@ -5395,6 +5703,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
             return;
         }
     }
+    if (AbortOpenIfInterrupted()) return;
     RebuildMediaInfo(); SetState(FFF3FPState::Ready, "open");
     // A freshly opened file resets the device-recovery storm streak.
     videoRecoveryStreakCount_.store(0);
@@ -5419,7 +5728,9 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     // docs/108 M-11: the ledger is attached once per session, here, so the first
     // audio enqueue and the first decoded frame already see a budget.
     AttachMemoryBudgetLedger();
-    Emit(FFF3FPEvent::OpenCompleted, "{\"success\":true}");
+    if (AbortOpenIfInterrupted()) return;
+    Emit(FFF3FPEvent::OpenCompleted, "{\"success\":true,\"generation\":" +
+        std::to_string(activeInputGeneration_.load(std::memory_order_acquire)) + "}");
     if (hardwareFallback)
         Emit(FFF3FPEvent::DeviceChanged,
             "{\"type\":\"video\",\"decodeMode\":1,\"fallback\":true,\"reason\":\"" +
@@ -8233,6 +8544,12 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
     if (!seekPreview) CacheFrameSideData(frame, nextIndex);
 
     if (keyframeSeekPending_) {
+        if (seekProfileStartTick_ != 0 && SeekProfileEnabled())
+            std::fprintf(stderr,
+                "[seek-profile] present kind=keyframe target=%.3fms actual=%.3fms wall=%llums\n",
+                seekTarget100ns_ / 10'000.0, position / 10'000.0,
+                static_cast<unsigned long long>(GetTickCount64() - seekProfileStartTick_));
+        seekProfileStartTick_ = 0;
         keyframeSeekPending_ = false;
         seekTarget100ns_ = -1;
         seekTargetFrame_ = -1;
@@ -8602,6 +8919,12 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
         Emit(FFF3FPEvent::ColorModeChanged, json.str());
     }
     if (!seekPreview) {
+        if (seekProfileStartTick_ != 0 && SeekProfileEnabled())
+            std::fprintf(stderr,
+                "[seek-profile] present kind=exact target=%.3fms actual=%.3fms wall=%llums\n",
+                seekTarget100ns_ / 10'000.0, position / 10'000.0,
+                static_cast<unsigned long long>(GetTickCount64() - seekProfileStartTick_));
+        seekProfileStartTick_ = 0;
         seekTarget100ns_ = -1; seekTargetFrame_ = -1; keyframeSeekPending_ = false;
         rebuildingFrameIndex_ = false;
     }
@@ -8823,6 +9146,23 @@ void PlayerSession::UpdateBitRateForPosition(const std::int64_t position) noexce
     snapshot_.videoBitRate = rateFor(videoBitRateBuckets_);
     snapshot_.audioBitRate = rateFor(audioBitRateBuckets_);
     PublishSnapshot();
+    UpdateNetworkReadHint();
+}
+
+void PlayerSession::UpdateNetworkReadHint() noexcept {
+    if (formatIo_ == nullptr || format_ == nullptr) return;
+    std::int64_t bitRate = format_->bit_rate > 0 ? format_->bit_rate : 0;
+    if (bitRate <= 0) {
+        for (unsigned index = 0; index < format_->nb_streams; ++index) {
+            const auto* stream = format_->streams[index];
+            if (stream != nullptr && stream->codecpar != nullptr && stream->codecpar->bit_rate > 0)
+                bitRate += stream->codecpar->bit_rate;
+        }
+    }
+    const auto measured = static_cast<std::int64_t>(snapshot_.videoBitRate) +
+        static_cast<std::int64_t>(snapshot_.audioBitRate);
+    if (measured > bitRate) bitRate = measured;
+    formatIo_->SetNetworkWindowHint(bitRate);
 }
 
 void PlayerSession::PumpExternalAudio() noexcept {
@@ -9195,7 +9535,7 @@ void PlayerSession::FlushAtEnd() noexcept {
 }
 
 FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t targetFrame,
-    const bool exact) noexcept {
+    const bool exact, const bool restartNetworkInput) noexcept {
     if (!growingInput_) StopSoftwareVideoDecode();
     if (disc_) {
         if (!disc_->Seek(position)) { ReportError(FFFResult::NotSupported, "This disc position cannot be seeked.", "seek"); return FFFResult::NotSupported; }
@@ -9204,9 +9544,31 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
         return FFFResult::Success;
     }
     if (!format_) return FFFResult::Success;
+    // One network deadline covers the seek, any fragmented pre-roll, a demux
+    // reopen and the decode-to-target pass. It is deliberately not applied to
+    // local media: a slow local disk is allowed to finish.
+    std::optional<ScopedInputDeadline> seekDeadline;
     position = std::clamp<std::int64_t>(position, 0, snapshot_.durationKnown ? snapshot_.duration100ns : position);
     // Still-image seek is a no-op: single-image demuxers have no seekable timeline.
-    if (staticImage_) { PublishSnapshot(); return FFFResult::Success; }    auto decodeStartPosition = position;
+    if (staticImage_) { PublishSnapshot(); return FFFResult::Success; }
+    // Network seek is a stop-and-restart, not a salvage: the current demuxer and
+    // its read-ahead pipeline are closed outright, then the same path is reopened
+    // on a fresh reader. The av_seek_frame below therefore runs against an empty
+    // pipeline instead of waiting out in-flight SMB reads from the old position.
+    // The pump already collapses bursts to the newest target, so a rapid second
+    // seek reopens once more from that latest target rather than replaying the
+    // intermediate one.
+    if (restartNetworkInput && networkInput_ && !growingInput_ && format_ != nullptr) {
+        // Reopen gets the open budget, not the tighter seek budget: a fresh SMB
+        // handshake and header parse are part of starting over, and cutting them
+        // off at 6 s would turn a slow share into a failed session. The seek
+        // budget starts once the new demuxer is in hand.
+        ScopedInputDeadline reopenDeadline(inputDeadlineTick_, NetworkOpenDeadlineMs);
+        if (!ReopenNetworkInputForSeek()) return FFFResult::FfmpegFailure;
+        seekDeadline.emplace(inputDeadlineTick_, NetworkSeekDeadlineMs);
+    }
+    auto decodeStartPosition = position;
+    SeekStageProfile seekProfile(position);
     const auto referenceStream = videoStream_ >= 0 ? videoStream_ : audioStream_;
     // 时间戳定位对"没有 read_seek 的解容器"会退到去找一对时间戳——那要把输入一路读下去。
     // 找不到时它返回失败，可输入指针已经停在末尾：裸 Annex-B 就是这个形状，Seek 返回 -5
@@ -9223,14 +9585,25 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     // 与 position==0 byte-seek 兜底对 fragmented 一律禁用（R2.1），
     // byteOffsetBeforeSeek 只保留给失败还原的诊断日志。
     bool fragmentedPrerollHit = false;
-    if (fragmentedMp4_ && position > snapshot_.position100ns) {
+    wchar_t fragPrerollEnv[8] = {};
+    const auto fragPrerollEnvLength = GetEnvironmentVariableW(L"FFF_SEEK_FMP4_PREROLL", fragPrerollEnv, 8);
+    // The sequential preroll was a workaround for fragmented files whose index
+    // could not be trusted. In practice it reads the whole fragment payload and
+    // used to drop the keyframe at the stop boundary; standard BACKWARD seek
+    // lands on K_prev and decodes the same exact target with far less I/O.
+    // Keep preroll as an explicit opt-in for pathological files only.
+    const bool fragPrerollAllowed =
+        fragPrerollEnvLength > 0 && fragPrerollEnv[0] == L'1';
+    if (fragPrerollAllowed && fragmentedMp4_ && position > snapshot_.position100ns) {
         fragmentedPrerollHit = SeekFragmentedPreroll(position);
         if (!fragmentedPrerollHit) {
             // 预滚 EOF/错误/超限/terminate → C-SEEK-ROLLBACK@1 (B2)。
             (void)ReopenFormatForSeek(snapshot_.position100ns);
+            seekProfile.Mark("fmp4-fail");
             return FFFResult::FfmpegFailure;
         }
     }
+    seekProfile.Mark(fragmentedPrerollHit ? "fmp4-hit" : "fmp4-none");
     auto timestamp = av_rescale_q(position + TimelineOrigin100ns(format_),
         AVRational{1, static_cast<int>(TicksPerSecond)},
         format_->streams[referenceStream]->time_base);
@@ -9239,15 +9612,31 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     auto seekResult = growingInput_ ? (PrepareGrowingSeek(position) ? 0 : AVERROR(EAGAIN))
         : fragmentedPrerollHit ? 0
         : av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD);
+    if (seekResult < 0 && networkInput_ && !growingInput_ && !fragmentedPrerollHit &&
+        (seekResult == AVERROR(EIO) || seekResult == AVERROR(ETIMEDOUT)) &&
+        byteOffsetBeforeSeek >= 0 && format_->pb != nullptr &&
+        avio_seek(format_->pb, byteOffsetBeforeSeek, SEEK_SET) >= 0) {
+        // An SMB read/timeout can fail a seek without leaving the demuxer
+        // permanently at the failed position. Roll back to the captured byte
+        // offset, flush, and retry the same timestamp once. Permission errors,
+        // malformed indexes and explicit cancellation are not retried.
+        avformat_flush(format_);
+        Sleep(200);
+        if (!inputDeadlineTick_.load() || GetTickCount64() < inputDeadlineTick_.load()) {
+            seekResult = av_seek_frame(format_, referenceStream, timestamp, AVSEEK_FLAG_BACKWARD);
+        }
+    }
+    seekProfile.Mark("demux-seek");
     if (growingInput_ && seekResult < 0) {
         if (!snapshot_.waitingForInput) {
             ++snapshot_.incompleteReads;
             Emit(FFF3FPEvent::OperationCompleted, "{\"operation\":\"seek-unavailable\"}");
         }
         PublishSnapshot();
+        seekProfile.Mark("growing-fail");
         return FFFResult::FfmpegFailure;
     }
-    if (seekResult < 0 && format_->pb != nullptr &&
+    if (seekResult < 0 && !networkInput_ && format_->pb != nullptr &&
         (format_->pb->seekable & AVIO_SEEKABLE_NORMAL) != 0 && !fragmentedMp4_) {
         const auto fileSize = avio_size(format_->pb);
         const auto timelineExtent = snapshot_.duration100ns > 0
@@ -9278,6 +9667,7 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
         // demux 句柄重开再回定位；B1 的 avio_seek+avformat_flush 只保留给非 fragmented。
         if (fragmentedMp4_) {
             (void)ReopenFormatForSeek(snapshot_.position100ns);
+            seekProfile.Mark("fail-fmp4");
             return FFFResult::FfmpegFailure;
         }
         // 还原读位置，让"playback remained active"这句话真的成立。还原失败时不再含糊其辞，
@@ -9289,10 +9679,16 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
             avformat_flush(format_);
             rolledBack = true;
         }
-        ReportError(FFFResult::FfmpegFailure, rolledBack
-            ? "FFmpeg could not seek to the requested position; the reader was rolled back and playback remained active."
-            : "FFmpeg could not seek to the requested position and the reader could not be rolled back; playback will run to the end.",
+        ReportError(FFFResult::FfmpegFailure,
+            networkInput_
+                ? (rolledBack
+                    ? "Network media could not seek to the requested position; the reader was rolled back and playback remains at the previous position."
+                    : "Network media could not seek and the reader could not be rolled back; playback may be unavailable until the media is reopened.")
+                : (rolledBack
+                    ? "FFmpeg could not seek to the requested position; the reader was rolled back and playback remained active."
+                    : "FFmpeg could not seek to the requested position and the reader could not be rolled back; playback will run to the end."),
             "seek");
+        seekProfile.Mark("fail");
         return FFFResult::FfmpegFailure;
     }
     // A seek re-arms the decode-skip window at the flush point; the rung itself
@@ -9367,6 +9763,7 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     NoteTapGeneration();
     ResetClock(position);
     if (audioRenderer_) audioRenderer_->Reset(position);
+    seekProfile.Mark("flush");
     if (state_.load() == FFF3FPState::Ended)
         SetState(FFF3FPState::Paused, "seek");
     else
@@ -9403,6 +9800,7 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     // parser forgets half-frames, so the next complete frame re-packs from the
     // seek target (the module re-waits for the next complete frame).
     NotePassthroughSeek();
+    seekProfile.Mark("done");
     return FFFResult::Success;
 }
 
@@ -9458,14 +9856,34 @@ bool PlayerSession::SeekFragmentedPreroll(std::int64_t target100ns) noexcept {
         }
     };
     refreshStopPoint();
+    if (SeekProfileEnabled()) {
+        std::fprintf(stderr,
+            "[seek-profile] fmp4-stop target=%.3f stop=%.3f fromTable=%d table=%zu\n",
+            target100ns / 10'000.0, stopPoint100ns / 10'000.0,
+            stopPointFromTable ? 1 : 0, table.size());
+        const auto shown = (std::min<std::size_t>)(table.size(), 8);
+        for (std::size_t i = 0; i < shown; ++i)
+            std::fprintf(stderr,
+                "[seek-profile] fmp4-entry i=%zu seq=%u start=%.3f end=%.3f key=%d moof=%lld\n",
+                i, table[i].sequenceNumber, table[i].startDecodeTime100ns / 10'000.0,
+                table[i].endDecodeTime100ns / 10'000.0, table[i].hasKeyframe ? 1 : 0,
+                static_cast<long long>(table[i].moofOffset));
+    }
     std::int64_t packetsRead = 0;
+    std::int64_t bytesRead = 0;
     while (true) {
+        if (CoalescedSeekSuperseded()) return false;   // 新目标到来，放弃旧预滚
         const auto readResult = av_read_frame(format_, playbackPacket_);
         if (readResult < 0) {
             av_packet_unref(playbackPacket_);
             return false;   // EOF（目标超出内容）/IO 错误 → B2 还原
         }
         ++packetsRead;
+        bytesRead += playbackPacket_->size > 0 ? playbackPacket_->size : 0;
+        if (networkInput_ && bytesRead > MaximumNetworkSeekPrerollBytes) {
+            av_packet_unref(playbackPacket_);
+            return false;
+        }
         if (playbackPacket_->stream_index == referenceStream) {
             auto decodeTs = playbackPacket_->dts;
             if (decodeTs == AV_NOPTS_VALUE) decodeTs = playbackPacket_->pts;   // dts 缺失回落 pts
@@ -9480,9 +9898,19 @@ bool PlayerSession::SeekFragmentedPreroll(std::int64_t target100ns) noexcept {
         }
         // 不属参考流的包直接丢弃；全部包 unref——预滚不解码、不入任何队列（R2.2）。
         av_packet_unref(playbackPacket_);
-        if (demuxReference100ns >= stopPoint100ns) return true;   // 判停命中（此后不校验是否恰好关键帧）
+        if (demuxReference100ns >= stopPoint100ns) {
+            if (SeekProfileEnabled())
+                std::fprintf(stderr,
+                    "[seek-profile] fmp4-hit target=%.3f stop=%.3f demux=%.3f packets=%lld bytes=%lld\n",
+                    target100ns / 10'000.0, stopPoint100ns / 10'000.0,
+                    demuxReference100ns / 10'000.0, static_cast<long long>(packetsRead),
+                    static_cast<long long>(bytesRead));
+            return true;   // 判停命中（此后不校验是否恰好关键帧）
+        }
         if (packetsRead % SeekPrerollInterruptInterval == 0) {
             if (terminate_.load(std::memory_order_acquire)) return false;   // 关闭请求 → B2
+            if (networkInput_ && inputDeadlineTick_.load() &&
+                GetTickCount64() >= inputDeadlineTick_.load()) return false;
             refreshStopPoint();
         }
         if (packetsRead >= MaximumSeekPrerollPackets) return false;   // R2.5 上限 → B2
@@ -9536,6 +9964,7 @@ bool PlayerSession::PrepareGrowingSeek(const std::int64_t position) noexcept {
     CloseFormat(&format_, formatIo_);
     format_ = candidate;
     formatIo_ = std::move(candidateIo);
+    UpdateNetworkReadHint();
     return true;
 }
 
@@ -9564,6 +9993,7 @@ bool PlayerSession::ReopenFormatForSeek(std::int64_t recallPosition100ns) noexce
             "seek");
         return false;
     }
+    UpdateNetworkReadHint();
     // 解码器不持有 AVStream 指针（extradata 已内嵌，同一文件流表确定不变），
     // flush 即可，无需重开。
     if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);
@@ -9587,7 +10017,43 @@ bool PlayerSession::ReopenFormatForSeek(std::int64_t recallPosition100ns) noexce
     return true;
 }
 
-void PlayerSession::StartFragmentScanIfNeeded(const std::string& path) noexcept {
+bool PlayerSession::ReopenNetworkInputForSeek() noexcept {
+    // Deliberately does not try to preserve the old read position or its prefetch
+    // state. CloseFormat tears down the demuxer, and the SharedFileInput it owns
+    // drops the IOCP reader: pending reads are cancelled or abandoned by that
+    // reader's bounded stop, and the duplicated handle goes with it. The new
+    // OpenFormat starts a brand-new reader, so nothing from the previous seek can
+    // stall the next one.
+    const auto previousStreamCount = format_ != nullptr ? format_->nb_streams : 0;
+    CloseFormat(&format_, formatIo_);
+    std::string reopenError;
+    const auto reopenResult = OpenFormat(mediaPath_, &format_, formatIo_, reopenError);
+    if (reopenResult != FFFResult::Success || format_ == nullptr) {
+        CloseFormat(&format_, formatIo_);
+        Fail(reopenResult, reopenError.empty()
+            ? "The network media could not be reopened for the seek." : reopenError, "seek");
+        return false;
+    }
+    if (format_->nb_streams != previousStreamCount) {
+        CloseFormat(&format_, formatIo_);
+        Fail(FFFResult::FfmpegFailure,
+            "The reopened network demuxer reports a different stream table; the seek was cancelled.",
+            "seek");
+        return false;
+    }
+    UpdateNetworkReadHint();
+    // Decoders hold codec parameters, not AVStream pointers (see ReopenFormatForSeek):
+    // a flush is enough for a same-file reopen with an identical stream table.
+    if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);
+    if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
+    if (GetEnvironmentVariableW(L"FFF_SEEK_TRACE", nullptr, 0))
+        std::fprintf(stderr, "SEEK network-restart reopened path-streams=%d\n",
+            static_cast<int>(format_->nb_streams));
+    return true;
+}
+
+void PlayerSession::StartFragmentScanIfNeeded(const std::string& path,
+    const ULONGLONG openDeadlineTick) noexcept {
     // C-FMP4-SCANNER@1 挂载点（R1.4）：仅在 fragmented 判定成立时构造扫描器并
     // 启动后台 moof 扫描线程。视频优先、无视频用音频；参考流缺失时保持
     // fragmentedMp4_（F3 预滚会失败走 B2，不会退回字节估算毒源）。
@@ -9600,9 +10066,11 @@ void PlayerSession::StartFragmentScanIfNeeded(const std::string& path) noexcept 
     catch (...) { return; }   // 分配失败：无扫描器（预滚退化为 target 判停），不影响打开
     // Start 失败（旁路打开失败、time_base 非法等）不产生线程：保留 fragmentedMp4_，
     // 让 R2.1 的字节估算禁用与 B2 重开还原照常生效。
+    const AVIOInterruptCB openInterrupt{&PlayerSession::ProbeInterrupt, this};
     if (!fragmentScanner_->Start(path.c_str(), format_->streams[referenceStream]->time_base,
         TimelineOrigin100ns(format_),
-        static_cast<std::int32_t>(format_->streams[referenceStream]->id)))
+        static_cast<std::int32_t>(format_->streams[referenceStream]->id),
+        openDeadlineTick, &openInterrupt))
         fragmentScanner_.reset();
 }
 
@@ -9688,6 +10156,13 @@ void PlayerSession::DecodeUntilSeekTarget(const bool timeSliced) noexcept {
         if (videoDecoder_ != nullptr) videoDecoder_->skip_frame = discard;
     };
     while ((seekTarget100ns_ >= 0 || seekTargetFrame_ >= 0 || keyframeSeekPending_) && !terminate_) {
+        // A newer fast-forward/rewind target makes the current reference-chain
+        // rebuild useless. Return without clearing seekTarget100ns_: RunSeekPump
+        // immediately installs the newest target (and DoSeek flushes the old
+        // queue/packets), so the intermediate frames are deliberately abandoned.
+        if (CoalescedSeekSuperseded()) {
+            return;
+        }
         if (std::chrono::steady_clock::now() >= batchDeadline) break;
         if (av_read_frame(format_, playbackPacket_) < 0) {
             // Delayed B-frames may contain the target nearest EOF. Drain once,
@@ -9704,6 +10179,10 @@ void PlayerSession::DecodeUntilSeekTarget(const bool timeSliced) noexcept {
             break;
         }
         TrackPacketBitRate(playbackPacket_, format_);
+        if (CoalescedSeekSuperseded()) {
+            av_packet_unref(playbackPacket_);
+            return;
+        }
         if (playbackPacket_->stream_index == videoStream_) {
             if (seekSkipEnabled) {
                 const auto packetTs = playbackPacket_->pts != AV_NOPTS_VALUE
@@ -10889,13 +11368,21 @@ void PlayerSession::SetState(const FFF3FPState state, const char* operation) noe
 }
 
 void PlayerSession::Fail(const FFFResult result, std::string message, const char* operation) noexcept {
+    if (state_.load(std::memory_order_acquire) == FFF3FPState::Opening &&
+        inputCancelGeneration_.load(std::memory_order_acquire) !=
+            activeInputGeneration_.load(std::memory_order_acquire)) {
+        // A replacement Open or Close is already queued. Let that command own
+        // teardown without emitting an old failure/Closed into the new attempt.
+        return;
+    }
     try {
         SuspendAudioRenderer(true); snapshot_.state = FFF3FPState::Failed; state_.store(FFF3FPState::Failed); PublishSnapshot();
-        ReportError(result, std::move(message), operation); }
+        ReportError(result, std::move(message), operation, true); }
     catch (...) {}
 }
 
-void PlayerSession::ReportError(const FFFResult result, std::string message, const char* operation) noexcept {
+void PlayerSession::ReportError(const FFFResult result, std::string message,
+    const char* operation, const bool terminal) noexcept {
     if (operation && std::string_view(operation).find("audio") != std::string_view::npos) {
         audioFailures_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -10904,6 +11391,8 @@ void PlayerSession::ReportError(const FFFResult result, std::string message, con
         std::string json = "{\"result\":" + std::to_string(static_cast<int>(result)) +
             ",\"message\":\"" + EscapeJson(message) + "\"";
         if (operation) json += ",\"operation\":\"" + EscapeJson(operation) + "\"";
+        if (terminal) json += ",\"terminal\":true,\"state\":" +
+            std::to_string(static_cast<unsigned>(FFF3FPState::Failed));
         json += '}';
         Emit(FFF3FPEvent::Error, json);
     } catch (...) {}
@@ -11007,20 +11496,83 @@ void PlayerSession::PublishSnapshot() noexcept {
     publishedSnapshot_ = snapshot_;
 }
 
-bool PlayerSession::NormalizeLocalPath(const char* path, std::string& normalized, std::string& error) noexcept {
+namespace {
+bool IsNetworkMediaPath(const std::vector<wchar_t>& path) noexcept {
+    if (path.size() >= 2 &&
+        ((path[0] == L'\\' && path[1] == L'\\') ||
+         (path[0] == L'/' && path[1] == L'/'))) return true;
+    if (path.size() >= 2 && path[1] == L':') {
+        const wchar_t root[4] = {path[0], L':', L'\\', L'\0'};
+        return GetDriveTypeW(root) == DRIVE_REMOTE;
+    }
+    return false;
+}
+
+bool NormalizeMediaPath(const char* path, bool allowNetwork, std::string& normalized,
+    std::string& error) noexcept {
     try {
-        auto wide = FromUtf8(path); if (wide.empty()) { error = "A non-empty UTF-8 local path is required."; return false; }
-        if (wide.rfind(L"\\\\", 0) == 0 || wide.rfind(L"//", 0) == 0 || wide.find(L"://") != std::wstring::npos ||
-            wide.rfind(L"\\\\.\\", 0) == 0 || wide.rfind(L"\\\\?\\GLOBALROOT", 0) == 0) { error = "Network, device and pipe paths are disabled."; return false; }
-        std::vector<wchar_t> full(32768); const auto length = GetFullPathNameW(wide.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr);
-        if (length == 0 || length >= full.size()) { error = "The local path is invalid."; return false; }
-        if (length >= 2 && (full[0] == L'\\' || full[0] == L'/') &&
-            (full[1] == L'\\' || full[1] == L'/')) {
-            error = "Network, device and pipe paths are disabled."; return false;
+        auto wide = FromUtf8(path);
+        if (wide.empty()) { error = "A non-empty UTF-8 media path is required."; return false; }
+        const bool hasScheme = wide.find(L"://") != std::wstring::npos;
+        std::replace(wide.begin(), wide.end(), L'/', L'\\');
+        if (hasScheme || wide.starts_with(L"\\\\.\\") || wide.starts_with(L"\\\\?\\") ||
+            (!allowNetwork && wide.starts_with(L"\\\\"))) {
+            error = "The media path must refer to a disk file.";
+            return false;
         }
-        const auto attributes = GetFileAttributesW(full.data());
-        if (attributes == INVALID_FILE_ATTRIBUTES ||
-            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) { error = "The path must identify an existing regular local file."; return false; }
-        normalized = ToUtf8(full.data()); return !normalized.empty();
-    } catch (...) { error = "The local path could not be normalized."; return false; }
+        std::vector<wchar_t> full(32768);
+        const auto length = GetFullPathNameW(wide.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr);
+        if (length == 0 || length >= full.size()) { error = "The media path is invalid."; return false; }
+        const std::wstring_view canonical(full.data(), length);
+        if (canonical.starts_with(L"\\\\")) {
+            const auto serverEnd = canonical.find(L'\\', 2);
+            const auto shareEnd = serverEnd == std::wstring_view::npos ? std::wstring_view::npos
+                : canonical.find(L'\\', serverEnd + 1);
+            if (!allowNetwork || canonical.starts_with(L"\\\\.\\") || canonical.starts_with(L"\\\\?\\") ||
+                serverEnd == 2 || shareEnd == std::wstring_view::npos || shareEnd <= serverEnd + 1 ||
+                shareEnd + 1 == length || canonical.find(L':') != std::wstring_view::npos) {
+                error = "The network media path must identify a file on a UNC share.";
+                return false;
+            }
+            const std::wstring share(canonical.substr(serverEnd + 1, shareEnd - serverEnd - 1));
+            if (_wcsicmp(share.c_str(), L"pipe") == 0 || _wcsicmp(share.c_str(), L"mailslot") == 0 ||
+                _wcsicmp(share.c_str(), L"IPC$") == 0) {
+                error = "The network media path must refer to a disk file.";
+                return false;
+            }
+        }
+        const bool networkPath = IsNetworkMediaPath(full);
+        // GetFileAttributesW has no timeout and no cancellation. On a dead
+        // share it can block the open worker before CreateFileW's 15-second
+        // budget is even applied. Let the asynchronous open job own network
+        // existence/permission validation; only local paths are checked here.
+        if (!networkPath) {
+            const auto attributes = GetFileAttributesW(full.data());
+            if (SeekProfileEnabled()) {
+                std::fprintf(stderr,
+                    "[seek-profile] normalize full=%ls attrs=0x%lx lastError=%lu\n",
+                    full.data(), static_cast<unsigned long>(attributes),
+                    static_cast<unsigned long>(GetLastError()));
+            }
+            if (attributes == INVALID_FILE_ATTRIBUTES ||
+                (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                error = "The path must identify an existing regular media file.";
+                return false;
+            }
+        }
+        normalized = ToUtf8(full.data());
+        return !normalized.empty();
+    } catch (...) {
+        error = "The media path could not be normalized.";
+        return false;
+    }
+}
+}
+
+bool PlayerSession::NormalizeLocalPath(const char* path, std::string& normalized, std::string& error) noexcept {
+    return NormalizeMediaPath(path, false, normalized, error);
+}
+
+bool PlayerSession::NormalizeNetworkPath(const char* path, std::string& normalized, std::string& error) noexcept {
+    return NormalizeMediaPath(path, true, normalized, error);
 }

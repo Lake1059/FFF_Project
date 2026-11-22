@@ -150,6 +150,9 @@
     <ClInclude Include="Shared\Ffmpeg\SharedFileInput.h">
       <Filter>Shared\Ffmpeg</Filter>
     </ClInclude>
+    <ClInclude Include="Shared\Ffmpeg\IocpMediaReader.h">
+      <Filter>Shared\Ffmpeg</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -162,6 +165,9 @@
       <Filter>Shared\Ffmpeg</Filter>
     </ClCompile>
     <ClCompile Include="Shared\Ffmpeg\SharedFileInput.cpp">
+      <Filter>Shared\Ffmpeg</Filter>
+    </ClCompile>
+    <ClCompile Include="Shared\Ffmpeg\IocpMediaReader.cpp">
       <Filter>Shared\Ffmpeg</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Subtitle\BitmapSubtitleDecoder.cpp">

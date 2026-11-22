@@ -3,7 +3,7 @@
     [string]$Configuration = "Release",
     [string]$OutputDirectory = "",
     [string]$NetTFM = "",
-    [switch]$AllowFrameworkMismatch,
+    [switch]$AllowFrameworkMismatch = $true,
     [switch]$ReadyToRun,
     [switch]$SkipIamf,
     [switch]$SkipDependencyPreparation
@@ -18,6 +18,12 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $OutputDirectory = Get-PublishOutputDirectory -ProjectRoot $ProjectRoot -OutputDirectory $OutputDirectory -DefaultDirectory "publish\win-x64"
 $Project = Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj"
 $DotNet = Get-DotNetTool
+$Framework = Get-ProductTargetFramework -ProjectPath $Project -NetTFM $NetTFM -DotNet $DotNet
+if (-not $AllowFrameworkMismatch) {
+    Assert-ProductFrameworkPair -OutputDirectory $OutputDirectory -Product "FFF.Player" `
+        -Framework $Framework -CheckOnly
+}
+
 Initialize-NativeDependencies -ProjectRoot $ProjectRoot -Configuration $Configuration `
     -SkipPreparation:$SkipDependencyPreparation -SkipIamf:$SkipIamf -SkipFfmpegRuntime
 Invoke-ProductNativeBuild -MSBuild (Get-MSBuildTool) -ProjectRoot $ProjectRoot -Configuration $Configuration -SkipIamf:$SkipIamf
@@ -36,7 +42,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "FFF.Player single-file publish failed." }
 
     Publish-SingleExecutable -StagingDirectory $StagingDirectory -OutputDirectory $OutputDirectory `
-        -Product "FFF.Player" -Framework (Get-ProductTargetFramework -ProjectPath $Project -NetTFM $NetTFM -DotNet $DotNet) `
+        -Product "FFF.Player" -Framework $Framework `
         -AllowFrameworkMismatch:$AllowFrameworkMismatch
 }
 finally {

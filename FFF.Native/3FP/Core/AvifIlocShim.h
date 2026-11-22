@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+struct AVIOInterruptCB;
+
 // Repairs the one thing that stops a layered ("progressive") AVIF from opening.
 //
 // A progressive AVIF stores its primary image item as several AV1 spatial layers,
@@ -42,9 +44,12 @@ public:
     // holds a repaired copy; on false `bytes` is left empty and `detail` says why.
     // `mergedExtents` (optional) receives the repaired primary item's extent
     // count after a successful repair (always 1); it is 0 on failure.
+    // Input is capped at 256 MiB. deadlineTick is an absolute GetTickCount64
+    // deadline (0 disables it); interrupt is checked during open and reads.
     static bool ReadAndRepair(const char* pathUtf8, const std::int64_t maxBytes,
         std::vector<std::uint8_t>& bytes, std::string& detail,
-        std::int32_t* mergedExtents = nullptr) noexcept;
+        std::int32_t* mergedExtents = nullptr, ULONGLONG deadlineTick = 0,
+        const AVIOInterruptCB* interrupt = nullptr) noexcept;
 
     // The container edit itself, exposed on bytes so it can be exercised on its own.
     // On entry `bytes` holds a complete file; on a true return it holds the repaired

@@ -247,7 +247,7 @@ Public Class Form1
                 String.Empty,
                 String.Join(vbCrLf, 缺失文件.Select(Function(文件名) $"  {文件名}")),
                 String.Empty,
-                "请将完整且同一份的 Shared FFmpeg 的 DLL 放到程序目录或环境变量后重新启动。"})
+                "请将完整且同一份的 Shared FFmpeg 的 DLL 放到原程序目录（或 FFF3FP_HOST_DIR 指向的目录），或加入 PATH 后重新启动。"})
             Return
         End If
 
@@ -1038,7 +1038,8 @@ Public Class Form1
 
     Friend Shared Function 取得命令行文件(参数 As IEnumerable(Of String)) As String
         If 参数 Is Nothing Then Return String.Empty
-        Return If(参数.Select(AddressOf 光盘路径.取得媒体路径).FirstOrDefault(Function(x) x IsNot Nothing), String.Empty)
+        Return If(参数.Select(Function(x) If(媒体路径.规范网络路径(x), 光盘路径.取得媒体路径(x))).
+            FirstOrDefault(Function(x) x IsNot Nothing), String.Empty)
     End Function
 
     Private Sub 打开外部文件(文件路径 As String)
@@ -1054,9 +1055,19 @@ Public Class Form1
         打开或替换文件(文件路径)
     End Sub
 
-    Private Sub 打开或替换文件(路径 As IEnumerable(Of String))
-        Dim 存在的文件 = 取得打开路径(路径)
-        If 存在的文件.Length = 0 Then Return
+    Private Async Sub 打开或替换文件(路径 As IEnumerable(Of String))
+        If 路径 Is Nothing OrElse 正在关闭 Then Return
+        Dim 输入 = 路径.ToArray()
+        Dim 存在的文件 As String()
+        Try
+            存在的文件 = Await 媒体路径.扫描打开路径Async(输入)
+        Catch ex As TimeoutException
+            If Not 正在关闭 Then LakeUI.ExOverlayMsgBox(Me,
+                "网络文件夹扫描超过 10 秒，已停止等待。请检查网络连接或共享权限。",
+                MsgBoxStyle.Exclamation Or MsgBoxStyle.OkOnly, "网络文件夹扫描超时")
+            Return
+        End Try
+        If 正在关闭 OrElse 存在的文件.Length = 0 Then Return
         If 存在的文件.Length > 1 Then
             添加并打开多个媒体文件(存在的文件)
             Return
@@ -1066,15 +1077,11 @@ Public Class Form1
 
     Friend Shared Function 取得打开路径(路径 As IEnumerable(Of String)) As String()
         If 路径 Is Nothing Then Return Array.Empty(Of String)()
-        Return 路径.Select(AddressOf 光盘路径.取得媒体路径).
-            Where(Function(x) x IsNot Nothing).
-            Distinct(StringComparer.OrdinalIgnoreCase).
-            ToArray()
+        Return 媒体路径.展开打开路径(路径)
     End Function
 
     Private Sub 打开或替换文件(路径 As String)
-        Dim 完整路径 = 光盘路径.取得媒体路径(路径)
-        If 完整路径 IsNot Nothing Then 打开或替换单个文件(完整路径)
+        打开或替换文件({路径})
     End Sub
 
     Private Sub 添加并打开多个媒体文件(路径 As IEnumerable(Of String))

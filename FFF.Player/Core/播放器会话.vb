@@ -156,7 +156,11 @@ Public NotInheritable Class 播放器会话
             Dim 已停泵 = 停止色彩变换处理器()
             准备外部模块()
             Try
-                调用路径(AddressOf 播放器原生接口.FFF3FP_Open, 本地路径)
+                If 媒体路径.是网络路径(本地路径) Then
+                    调用路径(AddressOf 播放器原生接口.FFF3FP_OpenNetwork, 本地路径)
+                Else
+                    调用路径(AddressOf 播放器原生接口.FFF3FP_Open, 本地路径)
+                End If
             Catch
                 If 已停泵 Then 启动色彩变换处理器()
                 Throw

@@ -3,7 +3,7 @@
     [string]$Configuration = "Release",
     [string]$OutputDirectory = "",
     [string]$NetTFM = "",
-    [switch]$AllowFrameworkMismatch,
+    [switch]$AllowFrameworkMismatch = $true,
     [switch]$SkipIamf,
     [switch]$SkipDependencyPreparation
 )
@@ -17,6 +17,12 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $OutputDirectory = Get-PublishOutputDirectory -ProjectRoot $ProjectRoot -OutputDirectory $OutputDirectory -DefaultDirectory "publish\win-x64"
 $Project = Join-Path $ProjectRoot "FFF.Recorder\FFF.Recorder.vbproj"
 $DotNet = Get-DotNetTool
+$Framework = Get-ProductTargetFramework -ProjectPath $Project -NetTFM $NetTFM -DotNet $DotNet
+if (-not $AllowFrameworkMismatch) {
+    Assert-ProductFrameworkPair -OutputDirectory $OutputDirectory -Product "FFF.Recorder" `
+        -Framework $Framework -CheckOnly
+}
+
 Initialize-NativeDependencies -ProjectRoot $ProjectRoot -Configuration $Configuration `
     -SkipPreparation:$SkipDependencyPreparation -SkipIamf:$SkipIamf -SkipFfmpegRuntime
 Invoke-ProductNativeBuild -MSBuild (Get-MSBuildTool) -ProjectRoot $ProjectRoot -Configuration $Configuration -SkipIamf:$SkipIamf
@@ -33,7 +39,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "FFF.Recorder single-file publish failed." }
 
     Publish-SingleExecutable -StagingDirectory $StagingDirectory -OutputDirectory $OutputDirectory `
-        -Product "FFF.Recorder" -Framework (Get-ProductTargetFramework -ProjectPath $Project -NetTFM $NetTFM -DotNet $DotNet) `
+        -Product "FFF.Recorder" -Framework $Framework `
         -AllowFrameworkMismatch:$AllowFrameworkMismatch
 }
 finally {

@@ -958,6 +958,10 @@ FFF3FP_API void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context)
 FFF3FP_API FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration,
     FFF3FPHandle* player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Open(FFF3FPHandle player, const char* localPathUtf8) noexcept;
+// Explicit network-media entry. Accepts canonical UNC file paths (and local
+// paths) while keeping device, pipe, extended and scheme URLs rejected.
+// FFF3FP_Open keeps its original local-only contract.
+FFF3FP_API FFFResult FFF3FP_OpenNetwork(FFF3FPHandle player, const char* networkPathUtf8) noexcept;
 // Configure before Open. Appended export: existing ABI layouts stay unchanged.
 // Profiles: 0 balanced, 1 more, 2 stress. Decode and render adapters are independent.
 FFF3FP_API FFFResult FFF3FP_ConfigurePlaybackPerformance(FFF3FPHandle player,

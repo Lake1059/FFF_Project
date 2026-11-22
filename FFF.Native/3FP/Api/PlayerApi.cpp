@@ -100,6 +100,7 @@ FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration, FFF3FPHandle* 
 }
 
 FFFResult FFF3FP_Open(const FFF3FPHandle player, const char* path) noexcept { return player ? static_cast<PlayerSession*>(player)->Open(path) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_OpenNetwork(const FFF3FPHandle player, const char* path) noexcept { return player ? static_cast<PlayerSession*>(player)->OpenNetwork(path) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_ConfigurePlaybackPerformance(const FFF3FPHandle player,
     const std::int32_t decodeAdapterIndex, const std::uint32_t videoBufferPolicy,
     const std::uint32_t audioBufferPolicy) noexcept {
