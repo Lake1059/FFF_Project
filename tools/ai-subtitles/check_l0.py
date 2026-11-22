@@ -230,7 +230,7 @@ def main():
     映射块 = re.search(r'For Each 附加 In 合并参数(.*?)Next', pipe, re.S)
     # 必须是等号形式（"--llama-arg=" & 附加）：拆成两个 token 传的话，argparse 的
     # append action 不收以 -- 开头的值，llamaArgs 的标准用法（["--ctx-size","8192"]）
-    # 会让 worker 启动即 exit 2（2026-10-25 审查实测，见 PACK_FORMAT §2.5）。
+    # 会让 worker 启动即 exit 2（2026-10-25 审查实测，见 包格式 §2.5）。
     断言(映射块 is None,
         "L0-4 管道不再映射 --llama-arg=（附加参数链已废止）",
         "管道又在拼 --llama-arg —— worker 已经不认这个参数，拼了等于启动即退出")

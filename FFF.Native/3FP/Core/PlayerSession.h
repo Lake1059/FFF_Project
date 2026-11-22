@@ -729,7 +729,7 @@ private:
     std::uint32_t threadLadderMin_ = 4;            // floor / first rung (soft-decode minimum)
     std::uint32_t threadLadderMax_ = 32;
     std::uint32_t decoderThreads_ = 0;             // current rung; 0 = not yet chosen
-    // Σfloor precheck cap (docs/108 M-17): when ResolveFloors lands on step 2
+    // Σfloor precheck cap (内存预算契约 M-17): when ResolveFloors lands on step 2
     // (DecodeFourThreads) the arbiter granted a floor built on a 4-worker decode
     // pipeline, so the real worker count must never exceed 4 for this open. 0 = no
     // precheck cap (the ladder's own ceiling rules). It is folded onto the value
@@ -1059,7 +1059,7 @@ private:
     static constexpr std::int64_t kAudioTargetBufferStep100ns = 300'000;
     std::int64_t audioTargetBuffer100ns_ = performance_.AudioInitial100ns();
 
-    // ── Unified memory budget ledger (docs/108, contract v1) ──────────────────
+    // ── Unified memory budget ledger (内存预算契约, contract v1) ──────────────────
     // Every value below is bytes unless the name says 100ns. All of it is inert
     // when FFF3FP_MEMARB=0: the ledger is never attached and every consumer keeps
     // reading its own static table.
@@ -1069,16 +1069,16 @@ private:
     void ApplyMemoryBudgetMask(std::uint32_t changedMask) noexcept;
     void EnsureVideoBudgetClaim(std::uint64_t grantedBytes) const noexcept;
     void ApplyAudioMemoryCap() noexcept;
-    // docs/108 §4.3: refuse to open a stream whose Σfloor cannot fit the pool. Runs
+    // 内存预算契约 §4.3: refuse to open a stream whose Σfloor cannot fit the pool. Runs
     // before any decoder/surface exists, so a refusal leaves nothing half-built.
     FFFResult PrecheckMemoryBudget() noexcept;
-    // docs/111 D-04: a seek or a track switch needs room for the pre-seek tail to
+    // 预算联动设计 D-04: a seek or a track switch needs room for the pre-seek tail to
     // drain while the new position refills. Borrowing is capped (one device buffer)
     // and time-boxed (5 s); Reconcile returns it on expiry or once the queue is
     // back under the target.
     void TryAudioHeadroomBorrow(const char* reason) noexcept;
     void ReconcileAudioHeadroomBorrow() noexcept;
-    // docs/109 A-03/A-04: the water level may come back down, but only when the
+    // 音频缓冲池契约 A-03/A-04: the water level may come back down, but only when the
     // stream is demonstrably calm, and a rollback after a short wrong step locks
     // the automatic adjustment for a minute.
     void MaybeLowerAudioWatermark() noexcept;
@@ -1092,7 +1092,7 @@ private:
     void TraceMemoryBudget(const char* event, std::size_t limitFrames,
         std::uint64_t grantedBytes, std::int64_t now100ns) const noexcept;
     bool memoryBudgetAttached_ = false;
-    // Verdict of the open-time Σfloor precheck (docs/108 §4.3), as DegradeStep.
+    // Verdict of the open-time Σfloor precheck (内存预算契约 §4.3), as DegradeStep.
     // 0 = no degradation, 1 = video floor 2 frames, 2 = decode 4 threads, 3 = refused.
     // The video claim below reads it so the degraded floor is the one actually claimed.
     std::uint8_t precheckFloorStep_ = 0;
@@ -1100,7 +1100,7 @@ private:
     std::uint32_t lastMemoryBudgetMask_ = 0;
     std::uint32_t memoryBudgetInvariantSeen_ = 0;
     mutable std::uint64_t videoBudgetFloorBytes_ = 0;
-    // Borrowed audio headroom (docs/111 D-04) and the deadline that caps it.
+    // Borrowed audio headroom (预算联动设计 D-04) and the deadline that caps it.
     std::uint64_t audioBorrowedBytes_ = 0;
     std::int64_t audioBorrowDeadline100ns_ = 0;      // 100ns
     std::uint32_t audioBorrowHits_ = 0;

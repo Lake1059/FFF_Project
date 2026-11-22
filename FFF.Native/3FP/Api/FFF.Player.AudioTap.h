@@ -6,7 +6,7 @@
 // Why a tap at all: real-time speech recognition needs the decoded audio bed
 // *before* any bed route, fold-down, resample or gain touches it, and the
 // recognition engine deliberately lives outside the player process (a separate
-// worker, per docs/ai-subtitles/IMPLEMENTATION_ANALYSIS.md). This is the
+// worker, per AI 字幕协议). This is the
 // neutral socket that carries raw frames across that boundary: the kernel keeps
 // a bounded ring, the host pulls blocks on its own thread, and the audio path
 // pays one pointer load in Enqueue() while the tap is off.

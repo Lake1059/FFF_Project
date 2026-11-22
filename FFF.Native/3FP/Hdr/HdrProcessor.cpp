@@ -350,7 +350,7 @@ HdrFrameState HdrProcessor::ProcessFrame(const AVFrame* frame,
     // frame (ResolveDecodeTransfer prefers lastTransferFromFrame_), so keeping
     // the stream-level classification here would leave metadata, peaks and HUD
     // disagreeing with the picture whenever the container mislabels the
-    // transfer -- the docs/21 failure shape (HLG tagged SMPTE2084 decodes as
+    // transfer -- the HLG/PQ 标记记录 failure shape (HLG tagged SMPTE2084 decodes as
     // PQ, overestimating signal 0.75 by ~7.7x). Streams that really carry
     // Vivid/HDR10+ are unaffected: their frames declare UNSPECIFIED trc
     // (verified on the FATE vectors, see the Vivid comment below), and formats

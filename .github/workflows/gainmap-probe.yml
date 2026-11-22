@@ -15,7 +15,7 @@
 #       - Visual Studio 2022 (v145 toolset) + Windows 10/11 SDK,
 #       - third_party/ffmpeg (and third_party/libraw) restored/cached,
 #       - the repo checked out with those siblings present.
-#     See docs/gainmap-testing.md and FFF.Native/tools/Resolve-NativeDependencies.ps1.
+#     See tools/gainmap-corpus/expectations.json and FFF.Native/tools/Resolve-NativeDependencies.ps1.
 #
 # Failure policy: any non-zero step (build OR probe smoke) FAILS the job. There is
 # deliberately NO `::notice` that swallows a missing probe / non-zero exit. If the
@@ -23,9 +23,9 @@
 # job is red — that is the point of running it.
 #
 # The 38+41-file GainMap corpus lives OUTSIDE the repo (licensing/size; see
-# docs/gainmap-testing.md) and is NOT downloaded here. Corpus matching is a local,
+# tools/gainmap-corpus/expectations.json) and is NOT downloaded here. Corpus matching is a local,
 # manual step: run tools/run_corpus.ps1 on a machine that has the corpus, and treat
-# docs/corpus_matrix.json as the per-run record.
+# tools/gainmap-corpus/corpus_matrix.json as the per-run record.
 # =============================================================================
 
 name: gainmap-probe
@@ -70,7 +70,7 @@ jobs:
           if (-not $probe) {
             throw "gainmap_probe.exe was not produced. On this self-hosted runner third_party/ffmpeg " +
                   "must be restored (see FFF.Native/tools/Resolve-NativeDependencies.ps1 and " +
-                  "docs/gainmap-testing.md). This is a hard failure, not a notice."
+                  "tools/gainmap-corpus/expectations.json). This is a hard failure, not a notice."
           }
           Write-Host "Found probe: $($probe.FullName)"
           & $probe.FullName --help

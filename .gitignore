@@ -409,3 +409,6 @@ tests/
 build/
 FFF.PrefetchHost/obj/
 FFF.PrefetchHost/x64/
+
+# GainMap 语料生成结果，本地输出，不入库。
+tools/gainmap-corpus/corpus_matrix.json

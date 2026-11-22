@@ -63,7 +63,7 @@ Friend Class Form设置_AI字幕
         "8 线程：P+E 混合架构上通常更慢；全大核机器可以试",
         "12 线程：只有全大核且核数足够时才可能有用"}
 
-    ' 包类型下拉：两种包是不同引擎、不同运行时，下载前必须先选（docs/157）。
+    ' 包类型下拉：两种包是不同引擎、不同运行时，下载前必须先选（AI 包说明）。
     ' 下标 ↔ Ai字幕包下载器.包类型：0=GpuCpu（GGUF/Vulkan），1=Npu（ONNX/OpenVINO）。
     ' 两种包都有完整公共源链（模型直链官方 HF 仓 + 运行时官方构建/PyPI），零上传零配置。
     Private Shared ReadOnly _包类型显示 As String() = {
@@ -705,7 +705,7 @@ Friend Class Form设置_AI字幕
     ' 本版只有一个模型：Qwen3-ASR 0.6B · int8。**定了的事不摆成选项** ——
     ' 一个永远只有一项的下拉，哪怕置灰，也在暗示「还能选别的」，用户就得去试。
     ' 所以单档时这一格只报事实（形态 · 体积），只有包作者真并排放了第二套权重
-    ' （清单 models，PACK_FORMAT §2.4）时，下拉才出现 —— 那时是包要求选，不是
+    ' （清单 models，包格式 §2.4）时，下拉才出现 —— 那时是包要求选，不是
     ' 我们在造维度。
     Private Const 默认档显示 As String = "默认档"
     Private _档名表 As New List(Of String) From {String.Empty}

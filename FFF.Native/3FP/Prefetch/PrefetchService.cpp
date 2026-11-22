@@ -523,7 +523,7 @@ void PrefetchService::PruneToPlanLocked(const std::vector<std::string>& paths) n
 }
 
 void PrefetchService::EvaluatePressure() noexcept {
-    // docs/108 L-01: broadcast first, then trim ourselves. The ledger is the only
+    // 内存预算契约 L-01: broadcast first, then trim ourselves. The ledger is the only
     // authority on how many bytes each consumer may hold. The prefetch cache is still
     // the first consumer to yield, but it must yield because it was told to, not
     // because it read the tier on its own -- otherwise it trims while the queue

@@ -63,7 +63,7 @@ Public Class Form1
     Private 图片浏览控制器 As 播放器图片浏览控制器
     Private 视图旋转控制器 As 播放器视图旋转控制器
     Private 视频超分辨率控制器 As 播放器视频超分辨率控制器
-    ' AI 实时字幕（docs/ai-subtitles/）：默认关；开启后由控制器自理 worker 生命周期。
+    ' AI 实时字幕（AI 字幕）：默认关；开启后由控制器自理 worker 生命周期。
     Private AI字幕控制器 As 播放器AI字幕控制器
     Private 视频自动HDR控制器 As 播放器视频自动HDR控制器
     Private 显示器唤醒 As 显示器唤醒请求
@@ -693,7 +693,7 @@ Public Class Form1
             降回线程.Start()
         End If
 
-        ' 启动期 CPU 放置的兜底释放（docs/146）：正常路径由内核在首帧呈现时自己结束；
+        ' 启动期 CPU 放置的兜底释放（CPU 放置设计）：正常路径由内核在首帧呈现时自己结束；
         ' 用户只是打开软件、没有媒体可放时首帧永远不来，这里 3 s 兜底，避免进程默认
         ' CPU 集合常驻到播放期（那会静默改变解码/音频线程的落点）。
         If My.MyApplication.启动CPU放置已启用 Then
@@ -1140,7 +1140,7 @@ Public Class Form1
         ' 原生每张开图都把 gainMapEnabled_ 复位为启用，宿主镜像同步复位——
         ' 否则上一张图切到"原始"后，新图按钮会误显示成"原始"。
         播放控制器.GainMap已启用 = True
-        ' IAMF 空间音频声明（docs/52 验收 #6 的产品拍板：UI 声明即可）。
+        ' IAMF 空间音频声明（IAMF 声明 验收 #6 的产品拍板：UI 声明即可）。
         ' 调试层的"声场："行要手动开信息层才可见；libiamf 接管与否决定用户听到
         ' 的是沉浸声渲染还是降级下混，值得在打开媒体时主动声明一次。
         ' 内容声道数小于渲染目标时补一句（libiamf 对缺失声道填数字静音），
@@ -1858,7 +1858,7 @@ Public Class Form1
     End Function
 
     ' ===== 系统媒体面板（SMTC）接线 =====
-    ' 设计约束（docs/165/166）：
+    ' 设计约束（设计约束）：
     '   · 只在首次真正打开音视频时惰性初始化，图片/RAW/动图/光盘/失败一律不建卡片；
     '   · 所有 WinRT 写操作经 系统媒体会话 的 SynchronizationContext 回 UI；
     '   · 系统按钮复用 处理多媒体命令，不另造第二套分发器；

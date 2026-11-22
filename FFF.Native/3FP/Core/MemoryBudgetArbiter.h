@@ -7,7 +7,7 @@
 #include "3FP/Prefetch/MemoryGuard.h"
 
 // Unified memory budget ledger for the five playback-side consumers.
-// Contract v1 is frozen: docs/108-统一内存预算仲裁器设计（2026-11-17） is the spec.
+// Contract v1 is frozen; this header is the spec.
 //
 // Rules that this header encodes and that callers must not bend around:
 //  * Only this object decides how much memory a consumer may hold. Consumers do

@@ -26,7 +26,7 @@ $ErrorActionPreference = "Stop"
 #       以及 libplacebo 滤镜链（HDR 色调映射的承接线）——能力矩阵整体降级。
 #   换变体（lgpl ⇄ nonfree）属**团队 license 决策**，不要顺手改 URL：
 #   nonfree 变体含 GPL(x264/x265)+nonfree(fdk-aac) 组件，分发合规性需另行评估。
-#   刷新 runtime 前先读 3fp/docs/98（FFmpeg 能力矩阵与变体查证）。
+#   刷新 runtime 前先读 FFmpeg 能力矩阵（FFmpeg 能力矩阵与变体查证）。
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "Resolve-Toolchain.ps1")
 $ThirdPartyDirectory = Join-Path $ProjectRoot "third_party\ffmpeg"
