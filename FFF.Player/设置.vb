@@ -159,7 +159,7 @@ Public Class 设置
     ' 生效条件（内核逐帧判定）：NVIDIA 适配器 + 驱动探测通过 + SDR 源 + 已是 10 位 HDR
     ' 输出契约。任一条不满足是静默不生效（不是错误），默认开只会让人以为坏了。
     Public Property NVIDIA自动HDR As Boolean = False
-    ' AI 实时字幕（docs/ai-subtitles/，实验分支功能）：默认全关。
+    ' AI 实时字幕（AI 字幕，实验分支功能）：默认全关。
     ' 三条理由写在这儿，免得以后有人"顺手改成 True"：
     '   ① 它要拉一个独立 Python 进程 + llama-server 子进程，还要一块显卡显存；
     '      默认开等于改变既有播放行为，而 ASR 是"锦上添花"不是"必需"；
@@ -167,7 +167,7 @@ Public Class 设置
     '   ③ 识别滞后于画面是物理下限（5s 窗 + ~0.2s 推理），默认开会让
     '      第一次用的人以为"字幕坏了"。
     ' 老设置文件没有这些键 → 反序列化留默认 → 同样关闭，无需迁移。
-    ' AI 实时字幕（docs/ai-subtitles/，实验分支功能）：本体不内置任何 ASR 能力，
+    ' AI 实时字幕（AI 字幕，实验分支功能）：本体不内置任何 ASR 能力，
     ' 只认"扩展包"这一个契约 —— 一个含 ai-subtitles.json 的目录，worker / python /
     ' 模型 / llama-server 在哪一律由包自己说清。于是这里只剩一个路径。
     ' 未选包（默认空）就完全不启用：不拉进程、不占显存、不碰播放路径。
@@ -228,7 +228,7 @@ Public Class 设置
     Public Property Ai字幕字幕偏移秒 As Double = 0
 
 
-    ' AI 实时字幕（docs/ai-subtitles/，实验分支功能）：默认全关。
+    ' AI 实时字幕（AI 字幕，实验分支功能）：默认全关。
     ' 三条理由写在这儿，免得以后有人"顺手改成 True"：
     '   ① 它要拉一个独立 Python 进程 + llama-server 子进程，还要一块显卡显存；
     

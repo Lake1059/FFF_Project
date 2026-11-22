@@ -11,7 +11,7 @@
     # 跨产品框架配对：默认拒绝不同 .NET 运行时版本，见 Resolve-Toolchain.ps1。
     [switch]$AllowFrameworkMismatch,
     # IAMF 空间音频：默认强制携带（缺料即报错，而非静默编译成无 IAMF 内核）。
-    # 体积敏感/无准备环境用 -SkipIamf 显式放弃该能力（docs/105 §十三/§十四）。
+    # 体积敏感/无准备环境用 -SkipIamf 显式放弃该能力（发布实测 §十三/§十四）。
     [switch]$SkipIamf,
     [switch]$SkipDependencyPreparation,
     # 默认生成本体包：不检查、不复制 FFmpeg 外部 runtime。

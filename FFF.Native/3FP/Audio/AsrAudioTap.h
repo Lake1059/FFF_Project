@@ -12,7 +12,7 @@ struct AVFrame;
 
 // Bounded single-producer / single-consumer ring of raw decoded audio frames:
 // the ASR (real-time subtitle) data source. Design and ABI:
-// docs/ai-subtitles/IMPLEMENTATION_ANALYSIS.md section 4.
+// AI 字幕协议 section 4.
 //
 // The producer is exactly one thread -- the session worker that calls
 // PlayerWasapiRenderer::Enqueue -- and it never blocks, never allocates in

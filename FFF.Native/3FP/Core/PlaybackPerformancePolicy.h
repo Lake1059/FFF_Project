@@ -47,7 +47,7 @@ struct PlaybackPerformancePolicy final {
 };
 
 // Pin the numbers the review is written against. If any branch is retuned, this
-// trips at compile time and the docs/scheme that quote them must move with it.
+// trips at compile time and the 设计说明 that quote them must move with it.
 static_assert(PlaybackPerformancePolicy{0u, 0u}.VideoLookAhead100ns() == 1'500'000,
     "profile 0 video look-ahead must stay 1'500'000 x 100 ns == 150 ms");
 static_assert(PlaybackPerformancePolicy{0u, 0u}.AudioInitial100ns() == 600'000,

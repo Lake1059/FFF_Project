@@ -189,8 +189,7 @@ worker、宿主（`Ai字幕包.vb` 的 `找权重`）与打包工具（`pick_onn
 `MatMulInteger`）**。它能在 CPU / CUDA / DirectML / OpenVINO 上加载并出正确结果
 （CPU 与 CUDA 有对应融合核；DirectML 走 DX12 通用路径）。**不要再转 int4**：
 实测 int4（`MatMulNBits`）只省 28% 体积（+674 MB 独立目录换 −317 MB）、
-CUDA 上仅追平 CPU、数值偏差约 20%，已判定不做 — 见
-`交接文档-2026-10-27-设备选择统一方案.md` §13 与 §20。GGUF **不能**直接转成这套
+CUDA 上仅追平 CPU、数值偏差约 20%，已判定不做。GGUF **不能**直接转成这套
 ONNX，必须从 HF 原始权重重导。
 
 ### 2.4 `models`：**保留但一般不要用**
@@ -445,7 +444,7 @@ runtime\python\python.exe npu_precheck.py --model-dir model
 发包里的 `自检-NPU.bat` 就是它 + 金样本自检两步。
 
 **真机执行过的证据**（第三方，2026-10-29，Ultra 9 285H + Arc 140T + AI Boost，
-OpenVINO 2026.4.1；原文见 `docs/ai-subtitles/NPU-第三方实测-2026-10-29.md`）：
+OpenVINO 2026.4.1）：
 
 | 设备 | 100 帧 | 500 帧 | 动态形状 | conv 相对误差 |
 | --- | --- | --- | --- | --- |
@@ -497,8 +496,7 @@ OpenVINO 2026.4.1；原文见 `docs/ai-subtitles/NPU-第三方实测-2026-10-29.
 * **onnx（sherpa 包）**：`result` 只有 `text`，**没有独立 language 字段**，只能从正文残留
   的前缀里抠，多数时候是空串 ⇒ `matched` 恒真，那句话**实际不生效**。
 
-两种情况下 worker 都只如实上报 `matched`，**丢弃策略一律留在宿主侧**
-（见 `LANGUAGE_SUPPORT.md`）。`ready` 行会打 `lang-gate=on` / `lang-gate=off` 标明当前是哪一种。
+两种情况下 worker 都只如实上报 `matched`，**丢弃策略一律留在宿主侧**。`ready` 行会打 `lang-gate=on` / `lang-gate=off` 标明当前是哪一种。
 
 worker 由本体托管：BelowNormal 优先级、无窗口、stdin 关闭后 2 秒未退出即 Kill 整棵进程树。
 **worker 崩溃只关字幕，播放不受影响**（P5 已实测）。

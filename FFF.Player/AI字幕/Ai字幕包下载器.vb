@@ -10,7 +10,7 @@ Imports System.Threading.Tasks
 ''' <summary>
 ''' AI 字幕包下载器（乙′ 方案，2026-11-12；双包 2026-11-13；NPU 全公共源同日）：
 '''   * 两种包：GPU+CPU（GGUF Q8_0 / llama 引擎 / Vulkan）与 NPU（ONNX int8 / onnx 引擎 /
-'''     OpenVINO）。两者是不同引擎、不同运行时，不能混用（见 docs/157）。
+'''     OpenVINO）。两者是不同引擎、不同运行时，不能混用（见 AI 包说明）。
 '''   * GGUF 模型直链 ggml-org 官方 HF 仓（hf-mirror 兜底）；运行时回退 llama.cpp
 '''     b12110 官方 Vulkan 构建。
 '''   * NPU 模型直链 sherpa 官方维护者 HF 仓（csukuangfj2，六件 SHA256 与验证包逐字节
@@ -60,7 +60,7 @@ Friend NotInheritable Class Ai字幕包下载器
     Private Const 投影字节 As Long = 214392480
     Private Const 投影哈希 As String = "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d"
 
-    ' NPU 包（2026-11-13 全公共源化，docs/157 §六）：模型 = sherpa 官方维护者的公开 HF 仓
+    ' NPU 包（2026-11-13 全公共源化，AI 包说明 §六）：模型 = sherpa 官方维护者的公开 HF 仓
     ' （csukuangfj2 = k2-fsa），六个文件 SHA256 与 dist\AI字幕包-NPU 逐字节一致（HF LFS
     ' oid 实核）；运行时 = python.org 官方 embeddable + PyPI 官方 wheel（版本与验证包
     ' 精确一致：numpy 2.5.4 / ort 1.27.0 / openvino 2026.4.1-22982 / sherpa 2.0.1）。
@@ -182,7 +182,7 @@ Friend NotInheritable Class Ai字幕包下载器
         Return 清单
     End Function
 
-    ''' <summary>NPU 清单（全公共源，docs/157 §六）：
+    ''' <summary>NPU 清单（全公共源，AI 包说明 §六）：
     ''' 模型六件直链 sherpa 官方 HF 仓（hf-mirror 兜底）；运行时 = python.org embeddable
     ''' + PyPI 五个 wheel（解压进 Lib\site-packages）+ ._pth 配置（下载完成后写）。
     ''' 母仓配置了的话，两 zip 作为可选优先源排在前面（少 11 个请求），失败自动回落。

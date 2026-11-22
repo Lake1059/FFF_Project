@@ -250,14 +250,14 @@ public:
     // per-media ceiling), and that ceiling is executed by the presenter's own schedule plus
     // the vblank clamp that Present(1,0) already applies on a fixed-refresh panel. Nothing
     // here picks which refresh slot a flip lands on any more. What killed the slot-aiming
-    // system was two measurements on this machine's 144 Hz panel (2026-10-16, docs/03 §A9/A12):
+    // system was two measurements on this machine's 144 Hz panel (2026-10-16, 消融记录 §A9/A12):
     // on a quiet box the aiming arm and the fully-yielded variable-refresh arm both read 100.0%
     // of on-screen holds inside the rounding band with zero out-of-band samples -- aiming
     // bought no measurable difference at 60 fps on 144 Hz -- and the 4K60 run put 100% of 4214
     // submit-error samples inside one refresh period while 40% of its flips never reached the
     // display, so accuracy was not the bottleneck. Whether removing the aiming degrades the
     // 1/2-alternation case (120 fps content, 1.2 refreshes per frame) is measured, not
-    // asserted: see the 12e_cfr_120 before/after arm in docs/03. The pacing readings below are
+    // asserted: see the 12e_cfr_120 before/after arm in 消融记录. The pacing readings below are
     // what is left of the grid, kept as instrumentation.
     // The source frame period, in 100 ns, handed over by the session for each frame it
     // releases. It no longer feeds the ceiling (the setters below do, per media); it stays
@@ -511,7 +511,7 @@ public:
     /// stale answer there costs at most one redundant present.
     bool HasCachedVideo() const noexcept { return hasCachedVideo_; }
 
-    // ── Presentation epoch (docs/111 D-01) ───────────────────────────────────
+    // ── Presentation epoch (预算联动设计 D-01) ───────────────────────────────────
     // The session bumps the epoch whenever the timeline it wants on screen changes
     // (seek, track switch). Every upload stamps the epoch current at upload time,
     // and the presenter refuses to blit a stamp that is no longer current: the

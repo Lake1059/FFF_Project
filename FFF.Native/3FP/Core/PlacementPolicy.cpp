@@ -74,7 +74,7 @@ int ClassRank(DWORD value) noexcept {
     }
 }
 
-// Process-wide startup placement state (docs/146). The startup assignment is opt-in
+// Process-wide startup placement state (CPU 放置设计). The startup assignment is opt-in
 // (FFF_STARTUP_PLACEMENT) and is released by the host fallback or by the first
 // presented frame. A playback session takes ownership of the process-default CPU set
 // as soon as its own tier writes it, and the startup release must not clear that.
@@ -701,7 +701,7 @@ bool PlacementPolicy::ApplyTier(Tier wanted) noexcept {
             ok = SetProcessDefaultCpuSets(GetCurrentProcess(), nullptr, 0);
         }
         // The session owns the process default from here on (see the startup placement in
-        // docs/146): its release must not be mistaken for the startup one.
+        // CPU 放置设计): its release must not be mistaken for the startup one.
         if (ok) {
             g_sessionOwnsProcessDefaultCpuSets = restricted;
             // Diagnostic bookkeeping only (P3-12): what this policy last put there.
@@ -774,9 +774,9 @@ bool PlacementPolicy::Spill() noexcept {
     return ApplyTier(Tier::Spilled);
 }
 
-// 规则锚点（docs/150「进程优先级写者规则」，P0-2）：进程 priority class 只允许内核按
+// 规则锚点（优先级规则「进程优先级写者规则」，P0-2）：进程 priority class 只允许内核按
 // 测量升级，并且只恢复到播放开始时的基线（baselinePriorityClass_）；宿主启动期默认
-// 不再写进程 class（docs/145 两次实测零收益，P0-1 已删启动 HIGH）。Boost() 是这条规则
+// 不再写进程 class（优先级实测 两次实测零收益，P0-1 已删启动 HIGH）。Boost() 是这条规则
 // 的升级入口之一，所以它只在最贵的一档动作，且从不把已经更高的宿主降下来。
 bool PlacementPolicy::Boost() noexcept {
     if (disabled_ || tier_ == Tier::None) return false;
@@ -791,7 +791,7 @@ bool PlacementPolicy::Recover() noexcept {
     return false;
 }
 
-// 规则锚点（docs/150「进程优先级写者规则」，P0-2）：Prioritize() 也只写"进程 class +
+// 规则锚点（优先级规则「进程优先级写者规则」，P0-2）：Prioritize() 也只写"进程 class +
 // 呈现线程"这一层，由测出的线程饥饿触发；LakeUI PrecisionTimer 的线程级 AboveNormal
 // 属于另一层（单个计时线程），两者不能混算成"进程被拉高了"。进程 class 的底线仍是
 // 播放开始时的基线：降档 / Release 都按 baselinePriorityClass_ 回退。
@@ -828,12 +828,12 @@ bool PlacementPolicy::Prioritize() noexcept {
     return changed;
 }
 
-// ---- Process-wide startup placement (docs/146) -------------------------------------
+// ---- Process-wide startup placement (CPU 放置设计) -------------------------------------
 //
 // Same discovery as the playback policy, but only the process-default CPU set is
 // written: this runs before any session exists. Everything here is a soft preference;
 // the scheduler may still use other CPUs. See FFF.Player.CpuPlacement.h for the
-// contract and docs/146 for why the domain is chosen this way.
+// contract and CPU 放置设计 for why the domain is chosen this way.
 
 bool PlacementPolicy::BuildStartupCpuSetIds(std::vector<std::uint32_t>& ids) noexcept {
     ids.clear();
@@ -854,7 +854,7 @@ bool PlacementPolicy::BuildStartupCpuSetIds(std::vector<std::uint32_t>& ids) noe
     // Multi-CCD AMD: "main CCD" is not exposed by any public Win32 API. The definition
     // that cannot be wrong is "stay on the L3 domain the UI thread was already given" --
     // it still buys locality (no cross-CCD migration, same L3) without guessing which
-    // die is "main" or trading cache for clock on X3D parts (docs/146 §四).
+    // die is "main" or trading cache for clock on X3D parts (CPU 放置设计 §四).
     PROCESSOR_NUMBER current{};
     GetCurrentProcessorNumberEx(&current);
     for (const auto& group : orderedGroups_) {
@@ -953,7 +953,7 @@ void PlacementPolicy::EndProcessStartupPlacement(const char* reason) noexcept {
     }
 }
 
-// ---- CPU placement diagnostics (P3-12, docs/148 §四) -------------------------------
+// ---- CPU placement diagnostics (P3-12, 放置诊断 §四) -------------------------------
 //
 // One read-only summary for the host's A/B harness: what the policy decided, and what
 // the OS currently says about the worker thread. Nothing here changes placement; the
@@ -996,7 +996,7 @@ void PlacementPolicy::FillDiagnosticSnapshot(FFF3FPCpuPlacementSnapshot& snapsho
     if (overlayPriority_) flags |= Flag(FFF3FPCpuPlacementFlags::OVERLAY_PRIORITY);
     if (prioritySaved_) flags |= Flag(FFF3FPCpuPlacementFlags::PRIORITY_SAVED);
     // Startup history is process-wide, not session state: Begin applied it before any
-    // session existed and End intentionally does not clear it (docs/146).
+    // session existed and End intentionally does not clear it (CPU 放置设计).
     if (StartupPlacementHistory() == 1) flags |= Flag(FFF3FPCpuPlacementFlags::STARTUP_APPLIED);
     // The worker holds an explicit set exactly while a restricted tier is in force and a
     // usable domain exists (ApplyTier step 2). This mirrors the apply path; the actual

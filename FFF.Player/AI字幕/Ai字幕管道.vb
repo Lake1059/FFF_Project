@@ -10,7 +10,7 @@ Imports System.Threading
 
 ''' <summary>
 ''' AI 字幕管道：宿主侧 worker 进程管理 + tap 取数搬运（stdin/stdout 协议）。
-''' 协议与 worker 内部逻辑见 docs/ai-subtitles/IMPLEMENTATION_ANALYSIS.md §6；
+''' 协议与 worker 内部逻辑见 AI 字幕协议 §6；
 ''' 本类型只负责"帧从内核环流到 worker、结果从 worker 流到状态机"。
 '''
 ''' 三条线程边界（§8）：

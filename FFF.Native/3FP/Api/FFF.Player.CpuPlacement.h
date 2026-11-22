@@ -2,7 +2,7 @@
 
 #include "3FP/Api/FFF.Player.Api.h"
 
-// Startup CPU placement control surface (docs/146). Appended additively like the
+// Startup CPU placement control surface (CPU 放置设计). Appended additively like the
 // prefetch and audio-tap entries: this header is NOT included from FFF.Player.Api.h,
 // adds no FFF3FPSnapshot field and does not move PlayerApiVersion (20) or
 // SnapshotVersion (23). Hosts resolve both exports dynamically and degrade to today's
@@ -12,7 +12,7 @@
 // threads that open the first frame prefer the fastest domain --
 //   * Intel hybrid parts: the fastest EfficiencyClass group (the P-cores);
 //   * AMD multi-CCD parts: the L3 domain the calling (UI) thread was already placed on
-//     ("main CCD" has no public Windows definition; see docs/146 §四);
+//     ("main CCD" has no public Windows definition; see CPU 放置设计 §四);
 //   * machines with more than one processor group: refused, because the OS ignores CPU
 //     Set assignments whose group does not match the thread's affinity group.
 // CPU Sets are a soft affinity preference, not a hard pin.
@@ -31,7 +31,7 @@
 FFF3FP_API int FFF3FP_BeginStartupCpuPlacement() noexcept;
 FFF3FP_API void FFF3FP_EndStartupCpuPlacement() noexcept;
 
-// ---- CPU placement diagnostics (P3-12, docs/148 §四) ------------------------------
+// ---- CPU placement diagnostics (P3-12, 放置诊断 §四) ------------------------------
 //
 // Read-only snapshot of what the placement policy decided and what the OS currently says
 // about the worker / present threads. Appended additively to this header, exactly like

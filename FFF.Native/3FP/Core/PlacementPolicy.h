@@ -142,14 +142,14 @@ public:
     /// One step down (boost -> spill -> preferred). Returns true when it changed state.
     bool Recover() noexcept;
 
-    /// Process-wide startup placement (docs/146). Reuses the same discovery as the
+    /// Process-wide startup placement (CPU 放置设计). Reuses the same discovery as the
     /// playback policy but writes only the process-default CPU set, so it works before
     /// any session exists. Opt-in through FFF_STARTUP_PLACEMENT; returns true when the
     /// process default was actually written. Intel hybrid prefers the fastest
     /// EfficiencyClass group; multi-CCD AMD keeps the L3 domain the calling (UI) thread
     /// is already on, because "main CCD" has no public Windows definition. Multi-group
     /// machines are refused: the OS ignores CPU Set assignments that do not match the
-    /// thread's affinity group. See docs/146 for the evidence behind those choices.
+    /// thread's affinity group. See CPU 放置设计 for the evidence behind those choices.
     static bool BeginProcessStartupPlacement() noexcept;
     /// Clears the startup process-default assignment. Safe to call repeatedly; leaves a
     /// session-owned assignment alone (the playback policy owns it from then on).
@@ -268,7 +268,7 @@ private:
     std::uint32_t preferredDomainThreads_ = 0;
     // Processor groups seen at discovery. CPU Set assignments whose group does not match
     // a thread's affinity group are ignored by the OS, so the startup placement refuses
-    // such machines instead of half-applying (docs/146 §四).
+    // such machines instead of half-applying (CPU 放置设计 §四).
     std::uint32_t groupCount_ = 1;
 
     // cache-domain load sampling

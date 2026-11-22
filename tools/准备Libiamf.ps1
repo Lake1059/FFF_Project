@@ -103,9 +103,9 @@ try {
 
 # 动态 CRT 是硬要求：Release /MD、Debug /MDd，与 FFF.Native 配置一致。用 /MT 会报
 # __imp_realloc / __imp_fmax / __imp__localtime64 等未解析外部符号。
-# /DNDEBUG 显式注入（2026-11-07，docs/139 §欠账2）：上游 code\CMakeLists.txt 会向
+# /DNDEBUG 显式注入（2026-11-07，Libiamf 构建记录 §欠账2）：上游 code\CMakeLists.txt 会向
 # CMAKE_C_FLAGS 追加全局旗标（`set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3")`），为防未来
-# 上游改写 per-config 旗标让断言代码回归成品（docs/110 §三 实测过断言串进出货件），
+# 上游改写 per-config 旗标让断言代码回归成品（视频缓冲池设计 §三 实测过断言串进出货件），
 # 这里把 Release 的 C/C++ 旗标显式写死（与 CMake 默认值等价，仅显式化）；Debug 不动，
 # 保留 /RTC1 与断言语义。产物串实测：11-6 构建（默认旗标已含 NDEBUG）断言串已为 0。
 Write-Host "configure（iamf + oar + OBR 双耳链）"

@@ -19,7 +19,7 @@ Namespace My
         ''' <summary>启动期 GPU 预热后台线程；UI 线程须在首个 D2D 触点（Form1_Load）前 Join 它，使 D3D_DeviceGlobals 的设备创建与 UI 使用在时间上互斥。</summary>
         Friend Shared GPU预热线程 As Threading.Thread
 
-        ''' <summary>启动期 CPU 放置（docs/146）是否真的写下了进程默认 CPU 集合；Form1_Shown 的 3 s 兜底据此决定要不要发结束。</summary>
+        ''' <summary>启动期 CPU 放置（CPU 放置设计）是否真的写下了进程默认 CPU 集合；Form1_Shown 的 3 s 兜底据此决定要不要发结束。</summary>
         Friend Shared 启动CPU放置已启用 As Boolean = False
 
         Private Sub MyApplication_Startup(sender As Object, e As StartupEventArgs) Handles Me.Startup
@@ -62,10 +62,10 @@ Namespace My
         ''' 优先级（启动期原始优先级 字段，非常量 Normal）。默认路径**完全不碰**
         ''' Process.PriorityClass —— 进程优先级是内核 PlacementPolicy 的领地，宿主只在
         ''' 显式 A/B 负控时临时扮演旧行为。
-        ''' 默认关的理由：docs/145 两次独立实测都不支持它有效 —— 唯一一次支持性读数
-        ''' （docs/120 的 −111.7 ms）是「预取+优先级」合测的归因伪影，拆开后优先级单独测
-        ''' 是 Δ +4.4 ms、p=0.783（docs/124 §2.3，14 轮交替），落在噪声内且符号对 ON 不利。
-        ''' 附带收益：docs/124 §4.1 的基线竞态降级为「默认不可能发生」——内核 PlacementPolicy
+        ''' 默认关的理由：优先级实测 两次独立实测都不支持它有效 —— 唯一一次支持性读数
+        ''' （预取实测 的 −111.7 ms）是「预取+优先级」合测的归因伪影，拆开后优先级单独测
+        ''' 是 Δ +4.4 ms、p=0.783（优先级统计 §2.3，14 轮交替），落在噪声内且符号对 ON 不利。
+        ''' 附带收益：优先级统计 §4.1 的基线竞态降级为「默认不可能发生」——内核 PlacementPolicy
         ''' 在首次播放 OnPlaybackStart 采样 baselinePriorityClass_，若播放泵在 Shown+1500 ms
         ''' 之前启动就会把 HIGH 记成基线；默认不写 class 时这里根本不存在 HIGH 窗口。
         ''' 内核 PlacementPolicy 的播放期 Boost 与本处互不踩踏：它最早在播放泵启动后才触发
@@ -93,7 +93,7 @@ Namespace My
         End Sub
 
         ''' <summary>
-        ''' 启动期 CPU 放置（docs/146）：把启动窗口的进程默认 CPU 集合软限制到首选域——
+        ''' 启动期 CPU 放置（CPU 放置设计）：把启动窗口的进程默认 CPU 集合软限制到首选域——
         ''' Intel 大小核 = EfficiencyClass 最高的 P-core 组；AMD 多 CCD = UI 线程当前所在的
         ''' L3 域（Windows 不暴露 CCD 编号，"主 CCD"没有权威定义，所以不猜、只保局部性）；
         ''' 多 processor group 的机型内核会拒绝（CPU Set 跨 group 赋值会被 OS 忽略）。

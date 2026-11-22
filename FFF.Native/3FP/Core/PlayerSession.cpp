@@ -135,7 +135,7 @@ constexpr double PoolBoundRatioFloor = 0.80;      // ticks that found the queue 
 constexpr double PoolStarvedRatioCeiling = 0.20;  // ticks with the queue below its minimum
 constexpr double PoolUploadSaturateShare = 0.80;  // upload cost / frame period that marks presentation saturation
 constexpr double PoolUploadHeadroomShare = 0.50;  // below this the upload path still has room to spare
-// Pre-climb symptom gate (docs/110): the pool ladder used to require an actual dropped
+// Pre-climb symptom gate (视频缓冲池设计): the pool ladder used to require an actual dropped
 // frame before it would deepen. A window that sits pinned at the admission bound the
 // whole time (boundRatio ~= 1.0) but has not dropped yet is the night before the drop --
 // the queue is one jitter away from rejecting frames. Let that window earn the next rung
@@ -543,7 +543,7 @@ bool DecodeAdapterTraceEnabled() noexcept {
 
 // JPEG stills stay on the CPU decoder by policy: opening the hardware session costs
 // ~204 ms per open, the same for a 320x240 and a 1920x1080 frame, and a second open in
-// the same process is not cheaper (docs/123 section 16), while the two routes differ by
+// the same process is not cheaper (缓冲池实验 section 16), while the two routes differ by
 // at most 3/255 on 4:2:0. FFF3FP_STILL_JPEG_HW=1 restores the hardware attempt for A/B.
 bool StillJpegHardwareEnabled() noexcept {
     wchar_t value[8]{};
@@ -1319,7 +1319,7 @@ std::size_t PlayerSession::VideoQueuePipelineReservation() const noexcept {
 
 std::size_t PlayerSession::VideoQueueLimit() const noexcept {
     const auto pipelineFrames = VideoQueuePipelineReservation();
-    // docs/108 V-01: while the ledger is live it owns the budget. With
+    // 内存预算契约 V-01: while the ledger is live it owns the budget. With
     // FFF3FP_MEMARB=0 nothing is attached, grantBytes stays 0 and this function
     // is bit-identical to the rung-table build.
     const auto& arbiter = FFFPlayer::MemoryBudgetArbiter::Instance();
@@ -1338,7 +1338,7 @@ std::size_t PlayerSession::VideoQueueLimit() const noexcept {
     const auto limit = std::max(MinimumMemoryBoundVideoFrames,
         originalLimit - std::min(originalLimit - 1, static_cast<std::size_t>(softwareVideoOutputLimit_ - 1)));
     if (grantBytes == 0) return limit;
-    // docs/108 V-03: the limit is what the queue may hold, so recomputing it on
+    // 内存预算契约 V-03: the limit is what the queue may hold, so recomputing it on
     // every saturation check would make the admission bound follow every
     // millisecond of system memory noise. Shrinking is immediate (a too-deep queue
     // is the defect being fixed); growing must clear both the dead zone and the
@@ -1405,7 +1405,7 @@ std::size_t PlayerSession::VideoQueueLimit() const noexcept {
     return effectiveLimit;
 }
 
-// ── Memory budget ledger plumbing (docs/108) ─────────────────────────────────
+// ── Memory budget ledger plumbing (内存预算契约) ─────────────────────────────────
 
 std::uint64_t PlayerSession::AudioBytesPerSecond() const noexcept {
     if (audioRenderer_ == nullptr) return 0;
@@ -1420,7 +1420,7 @@ std::uint64_t PlayerSession::AudioBytesPerSecond() const noexcept {
 }
 
 std::size_t PlayerSession::VideoFrameCapTier() const noexcept {
-    // docs/108 V-02: the frame cap follows the media resolution, not the rung.
+    // 内存预算契约 V-02: the frame cap follows the media resolution, not the rung.
     // Hardware decoding keeps its own fixed 8 elsewhere; this is the software path.
     const AVFrame* frame = videoFrameQueue_.empty() ? nullptr : videoFrameQueue_.back();
     if (frame == nullptr) return MaxQueuedVideoFrames;
@@ -1518,7 +1518,7 @@ void PlayerSession::MaybeLowerAudioWatermark() noexcept {
     const auto now100ns = SessionQpcNow100ns();
     const auto underruns = audioRenderer_->UnderrunCount();
     if (now100ns < audioDecreaseLockUntil100ns_) {
-        // docs/109 A-04: an underrun inside the cooldown means the last step went
+        // 音频缓冲池契约 A-04: an underrun inside the cooldown means the last step went
         // one notch too far. Put it back, then refuse to move again for a minute --
         // repeated sawtooth correction is worse than a level that is 30 ms too deep.
         if (underruns > audioWatermarkUnderrunBaseline_) {
@@ -1605,7 +1605,7 @@ FFFResult PlayerSession::PrecheckMemoryBudget() noexcept {
     const auto budget = FFFPlayer::MemBudgetMath::ComputeTotalBudget(sample);
     const auto verdict = FFFPlayer::MemBudgetMath::ResolveFloors(budget, floors);
     precheckFloorStep_ = static_cast<std::uint8_t>(verdict.step);
-    // docs/108 M-17: step 2 (DecodeFourThreads) is a 4-worker decode floor. Honour it on
+    // 内存预算契约 M-17: step 2 (DecodeFourThreads) is a 4-worker decode floor. Honour it on
     // the real decoder: the worker count is held at this cap for the whole open, so the
     // resident decode surfaces match the Σfloor the arbiter actually granted. 0 = no cap.
     constexpr std::uint32_t kArbiterStep2DecoderThreads = 4u;
@@ -1673,11 +1673,11 @@ void PlayerSession::EnsureVideoBudgetClaim(std::uint64_t grantedBytes) const noe
     if (bytesPerFrame == 0) return;
     // Re-claim only when the frame size moved: Claim replaces, so a resolution
     // change must refresh the floor instead of stacking on the previous one.
-    // A degraded precheck (docs/108 §4.3 step 1) claims the 2-frame floor it promised.
+    // A degraded precheck (内存预算契约 §4.3 step 1) claims the 2-frame floor it promised.
     const std::uint64_t videoFloorFrames = precheckFloorStep_ >= 1 ? 2ull : 3ull;
     if (grantedBytes != 0 && videoBudgetFloorBytes_ == videoFloorFrames * bytesPerFrame) return;
     FFFPlayer::MemClaim claim{};
-    claim.floorBytes = videoFloorFrames * bytesPerFrame;  // docs/108 M-16: 3 frames, not 128 MiB
+    claim.floorBytes = videoFloorFrames * bytesPerFrame;  // 内存预算契约 M-16: 3 frames, not 128 MiB
     claim.targetBytes = (std::max)(claim.floorBytes, 256ull * 1024 * 1024);
     claim.ceilingBytes = (std::max)(claim.targetBytes, 1024ull * 1024 * 1024);
     claim.priority = 2;
@@ -1738,7 +1738,7 @@ void PlayerSession::ApplyMemoryBudgetMask(std::uint32_t changedMask) noexcept {
     lastMemoryBudgetMask_ = changedMask;
 }
 
-// Test-only pressure switch (docs/109 A-02): FFF_AUDIO_CAP_KB forces a smaller PCM hard
+// Test-only pressure switch (音频缓冲池契约 A-02): FFF_AUDIO_CAP_KB forces a smaller PCM hard
 // cap, in whole KiB, so a real playback can drive audioRejectedFrames up on the pressure
 // side. Read once per process. 0 / unset / non-numeric / absurdly large = off; the
 // switch may only SHRINK the derived hard cap, never widen it (ApplyAudioMemoryCap mins
@@ -2054,7 +2054,7 @@ FFFResult PlayerSession::ConfigurePlaybackPerformance(
         decodeAdapterIndex_ = decodeAdapterIndex;
         performance_ = {videoBufferPolicy, audioBufferPolicy};
         audioTargetBuffer100ns_ = performance_.AudioInitial100ns();
-        // docs/108 M-14: the audio floor is 1 x AudioMaximum, so a profile switch
+        // 内存预算契约 M-14: the audio floor is 1 x AudioMaximum, so a profile switch
         // changes the claim itself. Re-attaching re-samples the budget and re-places
         // every claim with the new profile instead of leaving the old floor behind.
         if (memoryBudgetAttached_) AttachMemoryBudgetLedger();
@@ -4810,7 +4810,7 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
                 "[ladder] soft decode workers=%d budget=%u adaptive=%d boundary=%u\n",
                 context->thread_count, DecoderThreadBudget(), adaptiveThreadsEnabled_ ? 1 : 0,
                 placement_.PreferredDomainThreads());
-        // Σfloor step-2 degrade (docs/108 M-17): fold the precheck cap onto whatever the
+        // Σfloor step-2 degrade (内存预算契约 M-17): fold the precheck cap onto whatever the
         // ladder / dav1d policy picked -- this chokepoint runs after BOTH the
         // SelectSoftwareDecoderThreads assignment above and the dav1d heavy-tier worker
         // rewrite, so the value FFmpeg finally opens with is bounded. Written into
@@ -5752,7 +5752,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
     }
     PublishDisc();
     RawTrace("DoOpen: publish disc done");
-    // docs/108 M-11: the ledger is attached once per session, here, so the first
+    // 内存预算契约 M-11: the ledger is attached once per session, here, so the first
     // audio enqueue and the first decoded frame already see a budget.
     AttachMemoryBudgetLedger();
     Emit(FFF3FPEvent::OpenCompleted, "{\"success\":true}");
@@ -6231,7 +6231,7 @@ std::uint32_t PlayerSession::SelectSoftwareDecoderThreads(const std::uint32_t wi
         const auto largeFrame = width >= 3840 && height >= 2160;
         const auto limit = largeFrame ? 16u : MaximumSoftwareDecoderThreads;
         const auto picked = (std::min)(limit, budget);
-        // Σfloor precheck cap (docs/108 M-17): a step-2 open is pinned to the degraded
+        // Σfloor precheck cap (内存预算契约 M-17): a step-2 open is pinned to the degraded
         // worker count, so the ladder never opens above what the arbiter's floor priced.
         return precheckDecoderThreadCap_ == 0 ? picked
             : (std::min)(picked, precheckDecoderThreadCap_);
@@ -6382,7 +6382,7 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
     const auto current = static_cast<std::uint32_t>(videoDecoder_->thread_count);
     auto ceiling = (std::min)({ std::max(1u, std::thread::hardware_concurrency()),
         threadLadderMax_, 64u, DecoderThreadBudget() });
-    // Σfloor precheck cap (docs/108 M-17): when the open landed on step 2, the runtime
+    // Σfloor precheck cap (内存预算契约 M-17): when the open landed on step 2, the runtime
     // ladder must never climb back above the 4-worker floor the arbiter granted -- the
     // resident decode surfaces are priced at 4, so a runtime climb to 8 would blow the
     // Σfloor the precheck promised. Folded into the same ceiling the climb self-guards
@@ -6409,7 +6409,7 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
         ? static_cast<double>(windowBoundIters) / static_cast<double>(windowPumpIters) : 0.0;
     const double starvedRatio = windowPumpIters != 0
         ? static_cast<double>(windowStarvedIters) / static_cast<double>(windowPumpIters) : 0.0;
-    // Pre-climb (docs/110): the queue sat pinned at the admission bound the whole window
+    // Pre-climb (视频缓冲池设计): the queue sat pinned at the admission bound the whole window
     // but has not dropped a frame yet -- the drop is imminent, not overdue. Earning the
     // next rung on that symptom (rather than on a real drop) is safe because the pool
     // climb itself costs nothing (no seek/reopen, no settling) and is capped at
@@ -6443,7 +6443,7 @@ void PlayerSession::EvaluateDecoderLoad() noexcept {
         case PoolVerdict::Hold: break;
     }
     if (poolVerdict == PoolVerdict::Climb && softwarePoolRung_ + 1 < SoftwarePoolRungCount) {
-        // Pre-climb ceiling (docs/110): a symptom-only advance -- earned on a pinned bound
+        // Pre-climb ceiling (视频缓冲池设计): a symptom-only advance -- earned on a pinned bound
         // with no real dropped frame -- may only deepen to PoolPreClimbMaxRung, the 384 MiB
         // rung. Past rung 2 a real dropped frame is still required, so the pool cannot be
         // opened up on a 4 GiB box on a hunch; the arbiter's Overcommitted() check still
@@ -6718,11 +6718,11 @@ FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noex
 }
 
 void PlayerSession::PumpPlayback() noexcept {
-    // docs/108 §9 S2: the pump is the guaranteed sampling point. It rides an
+    // 内存预算契约 §9 S2: the pump is the guaranteed sampling point. It rides an
     // existing loop, so the ledger needs no thread and no timer of its own, and it
     // keeps working when the prefetch guard's event line is dead.
     RefreshMemoryBudgetLedger();
-    ReconcileAudioHeadroomBorrow();   // docs/111 D-04: hand the borrow back on expiry/drain
+    ReconcileAudioHeadroomBorrow();   // 预算联动设计 D-04: hand the borrow back on expiry/drain
     MaybeLowerAudioWatermark();
     if (snapshot_.waitingForInput) {
         PublishPlaybackClock(inputResumePosition100ns_, inputResumePosition100ns_);
@@ -7976,7 +7976,7 @@ void PlayerSession::QueueVideoFrame(AVFrame* frame) noexcept {
 }
 
 void PlayerSession::ClearVideoQueue() noexcept {
-    // docs/111 D-01: every call site of this function is a point where the timeline
+    // 预算联动设计 D-01: every call site of this function is a point where the timeline
     // the user wants on screen changes (seek, rung reopen, fallback, track switch,
     // open/close). Bumping the presentation epoch here is what makes the presenter
     // hold the last flipped image instead of re-presenting the pre-seek texture.
@@ -8610,7 +8610,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
         // 这条不是保险，是必需的：`r_frame_rate` 的误差方向**不是**只会偏松——TS 没有全局索引，
         // 解容器按流头采样，`12b_vfr_20then40.ts` 实测 `r_frame_rate=20/1`、`av_guess=20/1`，
         // 而后半段真的是 40fps（电池读到的平台段是 [2.60s@20][1.88s@40]）。
-        // 消融实测（docs/03 §A12）说清危害的边界：关掉上抬以后报出去的上限停在 20，那是个假数，
+        // 消融实测（消融记录 §A12）说清危害的边界：关掉上抬以后报出去的上限停在 20，那是个假数，
         // 但**视频翻帧并没有被它掐住**——后半段仍以 40.1Hz 呈现、传统口径丢弃 0，因为有新画面时
         // presenter 不等排程。所以危害是"读数错"＋"没有新画面时那条覆盖层排程按错周期走"，不是
         // 丢帧；真要让上限去钳视频就只能丢真帧，那是错的。偏松同理无害：上限松只等于让面板那一半
@@ -8908,7 +8908,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
     // applies no offset, and images have always been presented through the plane route.
     // Measured: hardware-decoded AVIF stills at 640x480 / 960x540 / 1280x720 differed from
     // the CPU arm on 1.07%-2.24% of pixels, in full-height vertical stripes up to 0.518
-    // (docs/99 section 13). Downloading puts both arms on the route that already matched
+    // (GainMap 语料记录 section 13). Downloading puts both arms on the route that already matched
     // HEVC and every >=1920x1080 sample exactly.
     const auto cudaDirect = videoRenderer_.CanImportCudaFrame(frame);
     // A D3D11 surface decoded on another adapter cannot be pasted into this
@@ -9076,7 +9076,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner,
     PublishSnapshot();
     if (firstFrameForMedia && !seekPreview) {
         RebuildMediaInfo();
-        // docs/146: the startup CPU-set window ends with the first picture on screen.
+        // CPU 放置设计: the startup CPU-set window ends with the first picture on screen.
         // Idempotent, and a no-op unless FFF_STARTUP_PLACEMENT was enabled; the host keeps
         // a timeout fallback for sessions that never present anything.
         PlacementPolicy::EndProcessStartupPlacement("first-frame");
@@ -9804,7 +9804,7 @@ FFFResult PlayerSession::DoSeek(std::int64_t position, const std::int64_t target
     ResetBitRateTracking();
     if (videoDecoder_) avcodec_flush_buffers(videoDecoder_);
     if (audioDecoder_) avcodec_flush_buffers(audioDecoder_);
-    // docs/111 D-04: the seek just flushed both queues, and the refill burst is what
+    // 预算联动设计 D-04: the seek just flushed both queues, and the refill burst is what
     // the borrow exists for. It is time-boxed and returns itself once the queue is fed.
     TryAudioHeadroomBorrow("seek");
     // The shadow decode shares this decoder: after a flush it must resync to the
@@ -10315,7 +10315,7 @@ void PlayerSession::DoSelectStream(const std::int32_t index, const bool video) n
         // re-arms below (module reset happens in the release, bursts stop here).
         ReleasePassthroughTrack();
         audioDecoder_ = replacement; audioStream_ = index; snapshot_.selectedAudioStream = index;
-        // docs/111 D-04: a track switch refills the queue from scratch, same shape as a
+        // 预算联动设计 D-04: a track switch refills the queue from scratch, same shape as a
         // seek, so it borrows the same one-device-buffer headroom under the same cap.
         TryAudioHeadroomBorrow("track-switch");
         // A new audio track is a new pool round, same as a new file.
@@ -10395,7 +10395,7 @@ void PlayerSession::DoLoadExternalAudio(std::string path, const std::int32_t req
 
 void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVideoOutput,
     const bool keepStillImage) noexcept {
-    // docs/108 M-11: detach first, so nothing keeps holding granted bytes after the
+    // 内存预算契约 M-11: detach first, so nothing keeps holding granted bytes after the
     // session is gone and the audio cap returns to "unlimited".
     DetachMemoryBudgetLedger();
     ResetTempo(0);

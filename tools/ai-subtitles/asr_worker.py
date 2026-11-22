@@ -1,6 +1,6 @@
 # 3FP realtime AI-subtitle ASR worker —— sherpa-onnx 路线（进程内推理）。
 #
-# 协议（冻结，见 docs/ai-subtitles/IMPLEMENTATION_ANALYSIS.md §6）：
+# 协议（冻结，见 AI 字幕协议 §6）：
 #   stdin  逐帧：[u32 LE metaLen][metaLen 字节 UTF-8 JSON][PCM 字节]
 #   stdout 逐行：一行一个 JSON 对象
 #       {"type":"status","state":"loading|ready|warning|error","detail":"...","fatal":bool}

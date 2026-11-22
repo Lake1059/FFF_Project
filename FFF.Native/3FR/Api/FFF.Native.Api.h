@@ -26,7 +26,7 @@ enum class FFFResult : std::int32_t {
     // nonzero as failure, so the ABI stays intact.
     NotFound = -8,
     // The session refused to open because the memory budget cannot hold the floors
-    // of the streams it would have to run (docs/108 §4.3 Σfloor degradation, final
+    // of the streams it would have to run (内存预算契约 §4.3 Σfloor degradation, final
     // step). Appended value: hosts that do not know it treat nonzero as failure, so
     // the ABI stays intact.
     ResourceExhausted = -9,

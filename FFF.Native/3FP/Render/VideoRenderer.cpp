@@ -15,7 +15,7 @@
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 
-// MMCSS for the presenter thread (docs/111 D-03). Same reasoning as winmm above:
+// MMCSS for the presenter thread (预算联动设计 D-03). Same reasoning as winmm above:
 // a source-side reference is the one no configuration can miss.
 #include <avrt.h>
 #pragma comment(lib, "avrt.lib")
@@ -563,7 +563,7 @@ struct Float3 { float r, g, b; };
 // grays; on saturated pixels it effectively multiplies every channel by
 // Yc^(-0.2) -- up to 1.76x on pure blue -- which is exactly the
 // saturated-highlight over-brightening the DWM rolloff renders as blown-out
-// HDR (see docs/141).
+// HDR (see HDR 处理说明).
 Float3 HlgToNits(const Float3 value) noexcept {
     const Float3 scene{HlgInvOetf(value.r), HlgInvOetf(value.g), HlgInvOetf(value.b)};
     const auto yc = 0.2627f * scene.r + 0.6780f * scene.g + 0.0593f * scene.b;
@@ -738,7 +738,7 @@ float HlgInvOetf(float v) {
 // equivalent for grays; on saturated pixels it effectively multiplies every
 // channel by Yc^(-0.2) -- up to 1.76x on pure blue -- which is exactly the
 // saturated-highlight over-brightening the DWM rolloff renders as blown-out
-// HDR (see docs/141).
+// HDR (see HDR 处理说明).
 float3 HlgToNits(float3 v) {
     const float3 e=max(float3(HlgInvOetf(v.r),HlgInvOetf(v.g),HlgInvOetf(v.b)),0.0);
     const float yc=dot(e,float3(0.2627,0.6780,0.0593));
@@ -1929,7 +1929,7 @@ constexpr InputDescription DescribeInput(const AVPixelFormat format) noexcept {
     // rather than only a bitDepth, because downstream picks the shader-visible
     // texture format from `layout`: layout 0 would give R16G16B16A16_UNORM, which
     // cannot represent the >1.0 and <0.0 components that float RGB legitimately
-    // carries. See docs/65 (measured saturation 2.79%-10.73%) and docs/68.
+    // carries. See HDR 饱和实测 (measured saturation 2.79%-10.73%) and HDR 白点记录.
     case AV_PIX_FMT_RGBAF16LE:
         return {3, 16, 1.0f, 0, 0};
     case AV_PIX_FMT_RGBAF32LE:
@@ -3829,7 +3829,7 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     // two permits one frame rendering while another waits on Present, which is the
     // overlap this path wants, and it stays strictly below the 3-deep buffer count
     // so the queue cannot outrun the chain. Measured via the queue-depth effect on
-    // dropped frames; see docs/45.
+    // dropped frames; see 上传路径记录.
     ComPtr<IDXGIDevice1> latencyDevice;
     if (SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&latencyDevice))))
         latencyDevice->SetMaximumFrameLatency(ResolveMaxFrameLatency());
@@ -6074,7 +6074,7 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
 
 void PlayerVideoRenderer::TimedTextThread() noexcept {
     FFFThreadNaming::SetCurrentThreadName("FFF.Player.Present");
-    // docs/111 D-03: the presenter works against flip deadlines. Task "Games" is the
+    // 预算联动设计 D-03: the presenter works against flip deadlines. Task "Games" is the
     // registered MMCSS name whose category is un-throttled, which is what a present
     // loop needs; "Pro Audio" is deliberately left to the WASAPI thread, because a
     // render hiccup must not outrank audio. Failure is ignored on purpose: the
@@ -7834,7 +7834,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     // path. Unlike layout 0 it needs no CPU conversion at all -- the decoded buffer is
     // already half-float, which is bit-compatible with DXGI_FORMAT_R16G16B16A16_FLOAT,
     // so sws_scale would only re-quantise it into an integer range that cannot hold the
-    // negatives and super-whites float RGB legitimately carries (see docs/65, docs/70).
+    // negatives and super-whites float RGB legitimately carries (see HDR 饱和实测, HDR 超白记录).
     const auto floatRgb = input.layout == 3;
     const auto directYuv = input.layout != 0 && !floatRgb;
     const auto* sourceDescriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format));
@@ -7888,7 +7888,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
         // a 4K rgb24 frame: 4.73 ms with BILINEAR against 4.76 ms with POINT, i.e.
         // identical -- the cost is memory bandwidth (~58 MB moved at ~12 GB/s), not
         // filtering. The flags are therefore not worth changing; a real win would need the
-        // conversion itself to move to the GPU (see docs/45 section 6).
+        // conversion itself to move to the GPU (see 上传路径记录 section 6).
         // The fold: when the policy is engaged this pass resamples to the destination size
         // instead of the frame size, so the buffer, the texture EnsurePipeline creates and
         // the row pitch of the upload all describe the same picture. Converting at full
@@ -8324,13 +8324,13 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
     if (prepareOnly) return FFFResult::Success;
     hasCachedVideo_ = true;
     videoGeneration_.fetch_add(1);
-    // docs/111 D-01: stamp the epoch at the moment the texture actually receives this
+    // 预算联动设计 D-01: stamp the epoch at the moment the texture actually receives this
     // frame's pixels. A seek that lands afterwards bumps the epoch and invalidates
     // exactly this content -- the case the old build kept presenting.
     cachedFrameEpoch_.store(presentationEpoch_.load(std::memory_order_acquire),
         std::memory_order_release);
     cachedFramePts_.store(frame->pts, std::memory_order_relaxed);
-    // docs/111 D-01 observability: the upload line stamps (pts, epoch) as a record; the
+    // 预算联动设计 D-01 observability: the upload line stamps (pts, epoch) as a record; the
     // presenter's own trace line now also carries pts, so the probe reads the post-seek
     // frame sequence straight off the present line without joining.
     {
@@ -8836,7 +8836,7 @@ void PlayerVideoRenderer::SetPresentPaceFloorHz(const double paceHz) noexcept {
 // 只上抬、永不回落的那个方向。必需，不是保险：`r_frame_rate` 在 MPEG-TS 上会**偏低**
 // （解容器没有索引，按流头采样），本机实测 `12b_vfr_20then40.ts` 的 r=20/1、
 // av_guess=20/1，而后半段真是 40fps（无窗口电池读到 [2.60s@20.0Hz][1.88s@40.0Hz]）。
-// 危害的边界由消融划清（docs/03 §A12）：不上抬时**报出去的上限是假的**，而视频翻帧并不会
+// 危害的边界由消融划清（消融记录 §A12）：不上抬时**报出去的上限是假的**，而视频翻帧并不会
 // 被它掐住（有 new picture 时 presenter 不等排程，实测后半段仍 40.1Hz、丢弃 0）；这条真正
 // 保护的读数与"没有新画面时那条覆盖层排程"。所以钳视频不是它的职责——那样只能靠丢真帧兑现。
 void PlayerVideoRenderer::RaiseMediaFrameRateCeilingHz(const double ceilingHz) noexcept {
@@ -9165,7 +9165,7 @@ FFFResult PlayerVideoRenderer::Set360View(const bool enabled, const float yaw,
 FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
     const std::uint32_t outputWidth, const std::uint32_t outputHeight,
     const bool forPresent) noexcept {
-    // Explicit-contract guard (docs/111 D-01): forPresent declares which timeline this
+    // Explicit-contract guard (预算联动设计 D-01): forPresent declares which timeline this
     // blit serves. The presenter thread is the one that runs PresentTimedText; a readback
     // arriving ON that thread would block the flip cadence on a staging Map, so reject
     // it. A present blit arriving OFF the presenter thread is the documented
@@ -9674,7 +9674,7 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     if (window_ == nullptr ||
         (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout && !subtitleOverlay))
         return FFFResult::Success;
-    // docs/111 D-01: a texture uploaded before the current epoch belongs to a
+    // 预算联动设计 D-01: a texture uploaded before the current epoch belongs to a
     // timeline the session has already left. Hold the last flipped image instead of
     // re-presenting it: skipping the flip is what stops "seeked" from looking like
     // "still playing the old position", and no flip is spent on stale content.
@@ -9775,7 +9775,7 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     deviceLock.unlock();
     const auto result = PresentCurrentFrame(retainedChain.Get(), generation);
     if (result != FFFResult::Success) return result;
-    // docs/111 D-04: the stale gate above ran before this flip, but AdvancePresentationEpoch
+    // 预算联动设计 D-04: the stale gate above ran before this flip, but AdvancePresentationEpoch
     // (seek / track switch) can fire on the worker thread in between. Re-reading both epochs
     // now tells us whether this flip published content the session already moved past. Under
     // the "hold the last image" semantics that has no visible effect, but the count lets the

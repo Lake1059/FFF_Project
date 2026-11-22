@@ -57,7 +57,7 @@ Friend NotInheritable Class 播放器画面控件
     Friend Event 全景视角拖动 As EventHandler(Of 播放器360视角拖动事件参数)
     Friend Event 图片缩放滚轮 As EventHandler(Of MouseEventArgs)
     Friend Event 图片平移拖动 As EventHandler(Of 播放器图片平移拖动事件参数)
-    ''' <summary>图片模式下左键双击（docs/00 §6.4：适应窗口 ↔ 1:1）。由 图片交互已启用 门控。</summary>
+    ''' <summary>图片模式下左键双击（图片交互设计 §6.4：适应窗口 ↔ 1:1）。由 图片交互已启用 门控。</summary>
     Friend Event 图片双击切换 As EventHandler
 
     <Browsable(False), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)>

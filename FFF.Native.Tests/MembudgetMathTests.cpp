@@ -1,4 +1,4 @@
-// Offline arithmetic tests for the memory budget (docs/108 §4, §5, §12).
+// Offline arithmetic tests for the memory budget (内存预算契约 §4, §5, §12).
 //
 // No Windows dependency: only MemoryBudgetMath.h, which is pure constexpr math.
 // That is the point -- the four budget tiers, the dead zone and the Σfloor

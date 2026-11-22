@@ -9,7 +9,7 @@ Friend NotInheritable Class 播放器字幕叠加呈现器
     Private ReadOnly 快照提供器 As Func(Of 播放器快照)
     Private ReadOnly 字幕提供器 As Func(Of 外部字幕轨道)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
-    ' AI 实时字幕（docs/ai-subtitles/）：可选注入点。Nothing = 未接入，本类行为与从前一致。
+    ' AI 实时字幕（AI 字幕）：可选注入点。Nothing = 未接入，本类行为与从前一致。
     ' 签名取（播放位置, 时间轴代次）→ 文本：控制器自己管 worker 与状态机，呈现器只问
     ' 「这一帧该显示哪句」，不持有任何 ASR 类型，也不参与它的启停。
     Private ReadOnly AI字幕提供器 As Func(Of TimeSpan, ULong, (主 As String, 副 As String))

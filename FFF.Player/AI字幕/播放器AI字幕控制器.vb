@@ -16,7 +16,7 @@ Imports System.Runtime.InteropServices
 ''' 本体不认识任何具体模型或路径：一切来自扩展包（一个含 ai-subtitles.json 的目录，
 ''' 见 <see cref="Ai字幕包"/>）。设置里选到有效包即启用；包被删或清单失效则自动停用。
 '''
-''' 生命周期（docs/ai-subtitles/IMPLEMENTATION_ANALYSIS.md §5）：
+''' 生命周期（AI 字幕协议 §5）：
 '''   * 打开媒体（<c>媒体已打开</c>）且已启用 → 装 tap + 启 worker（幂等，
 '''     切文件时 worker 不重启，只在新会话上重装 tap）；
 '''   * 停止播放 / 关窗体 / 拨到关 → 停 worker（宿主侧铁律：停管道必须在

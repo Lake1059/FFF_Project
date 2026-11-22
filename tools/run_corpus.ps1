@@ -11,7 +11,7 @@
         probe's own verdict/form/reason as "probeVerdict"/"probeForm"/"probeReason".
 
     A versioned, in-repo expected table can be supplied with -Expected <json> (see
-    docs\gainmap-corpus-expectations.json). When given, per-file expected values are looked up
+    tools\gainmap-corpus\expectations.json). When given, per-file expected values are looked up
     by relative path from that table, overriding whatever the manifest embeds.
 
     Compared fields (when present on either side): verdict, form, family, metaSource,
@@ -36,7 +36,7 @@
     Path to gainmap_probe.exe. Default: <root>\FFF.Native\tools\build_out\gainmap_probe.exe.
 
 .PARAMETER OutFile
-    Where to write the machine-readable result table. Default: <root>\docs\corpus_matrix.json.
+    Where to write the machine-readable result table. Default: <root>\tools\gainmap-corpus\corpus_matrix.json.
 
 .PARAMETER TargetHeadroom
     Optional; appended as "--target-headroom <v>".
@@ -100,7 +100,7 @@ $FfmpegDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPS
 
 # --- 5. Out file ---
 if (-not $OutFile)     { $OutFile = $env:FFF_CORPUS_OUT }
-if (-not $OutFile)     { $OutFile = (Join-Path $Root 'docs\corpus_matrix.json') }
+if (-not $OutFile)     { $OutFile = (Join-Path $Root 'tools\gainmap-corpus\corpus_matrix.json') }
 $OutFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutFile)
 
 Write-Host "Root      = $Root"
@@ -112,7 +112,7 @@ Write-Host "OutFile   = $OutFile"
 
 $manifestPath = Join-Path $Corpus 'manifest.json'
 if (-not (Test-Path -LiteralPath $manifestPath)) {
-    Write-Error "Corpus manifest not found: $manifestPath`nPlace the corpus per docs\gainmap-testing.md, or pass -Corpus."
+    Write-Error "Corpus manifest not found: $manifestPath`nPlace the corpus under testmedia\gainmap-corpus, or pass -Corpus."
     exit 2
 }
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
