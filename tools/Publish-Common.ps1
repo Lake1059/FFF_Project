@@ -41,7 +41,7 @@ function Publish-SingleExecutable {
         throw "Expected only $fileName in ${StagingDirectory}; found: $($entries.Name -join ', ')"
     }
     $pair = @{ OutputDirectory = $OutputDirectory; Product = $Product; Framework = $Framework; AllowMismatch = $AllowFrameworkMismatch }
-    Assert-ProductFrameworkPair @pair -CheckOnly
+    if (-not $AllowFrameworkMismatch) { Assert-ProductFrameworkPair @pair -CheckOnly }
 
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     $executable = Join-Path $OutputDirectory $fileName

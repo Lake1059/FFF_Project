@@ -6,7 +6,8 @@
 
 - Windows 10 2004 及以上，x64，.NET 11 Desktop Runtime。
 - 本地文件、Blu-ray 光驱根目录、包含 BDMV 的蓝光碟文件夹、BDMV 目录和 .bdmv 文件。可拖入蓝光碟文件夹开始播放。
-- 视频、音频和静态或多帧图片；不提供 ISO、DVD、网络协议、管道或视频帧服务器。
+- 可显式打开 SMB/UNC 共享中的媒体文件。网络目录在后台有界扫描，跳转时重新打开读取器。
+- 视频、音频和静态或多帧图片；不提供 ISO、DVD、媒体 URL、管道或视频帧服务器。
 - SRT、ASS/SSA、SUP/PGS 字幕；LRC 歌词；B 站 XML 弹幕。
 - CPU/GPU 解码。GPU 后端按驱动实际能力选择 CUDA/NVDEC 或 D3D11VA，失败时回退 CPU。
 - WASAPI 共享与独占模式，音频位置以 IAudioClock 为准。

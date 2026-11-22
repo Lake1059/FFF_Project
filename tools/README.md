@@ -17,7 +17,7 @@
 
 `准备Libass.ps1` 根据同一份 vcpkg 清单准备 libass 和光盘库。`准备LibRaw.ps1` 将启用 `USE_X3FTOOLS` 的 x64 动态库暂存到 `third_party/libraw`。构建配置和 vcpkg overlay 位于 `build-config`。
 
-3FP 散装发布会携带 `FFF.PrefetchHost.exe` 独立预取进程。单文件发布只生成 `FFF.Player.exe`，由它展开必要的原生 DLL。两种发布形态都可从内置资源组装 AI 字幕扩展包。框架版本记录保存在输出目录旁，用于检查同一目录中 3FP 和 3FR 的 .NET 运行时版本。
+3FP 散装发布会携带 `FFF.PrefetchHost.exe` 独立预取进程。单文件发布只生成 `FFF.Player.exe`，由它展开必要的原生 DLL。两种发布形态都可从内置资源组装 AI 字幕扩展包。单文件打包会校验原生 DLL 清单和 AI 字幕资源清单，并要求暂存目录只含播放器 EXE。框架版本记录保存在输出目录旁。3FP 和 3FR 的单文件 EXE 各自选择 .NET 运行时，版本不同时发布脚本提示并继续。若需强制同目录版本一致，在 PowerShell 中传入 `-AllowFrameworkMismatch:$false`。
 
 - `-SkipDependencyPreparation`：只检查本地原生依赖，缺件直接报错，不调用准备脚本；`dotnet` 仍按正常流程还原 NuGet 包。
 - `-SkipIamf`：显式禁用 IAMF，传入 `HaveLibiamf=false`；默认要求完整 IAMF 依赖。

@@ -42,17 +42,24 @@ public:
 
     // 判定 pathUtf8 指向的文件是否为 fragmented MP4：用独立旁路只读句柄
     // （SharedFileInput::Open）顺序扫描顶层 box（仅读 8/16 字节 box 头），
-    // 当存在 moov 且其子 box 中含 mvex 时返回 true。
-    static bool DetectFragmented(const char* pathUtf8) noexcept;
+    // 当存在 moov 且其子 box 中含 mvex 时返回 true。deadlineTick 为绝对
+    // GetTickCount64 截止点，0 表示不额外限制。打开、探测读和 seek 都会检查
+    // 截止时间及可选的外部取消回调。
+    static bool DetectFragmented(const char* pathUtf8,
+        ULONGLONG deadlineTick = 0,
+        const AVIOInterruptCB* externalInterrupt = nullptr) noexcept;
 
     // 启动后台扫描线程。referenceStreamTimeBase 为参考流 time_base（视频优先、
     // 无视频用音频，由调用方从 format_->streams[ref]->time_base 取值传入）；
     // timelineOrigin100ns 为 PlayerSession::TimelineOrigin100ns(format_) 的结果；
     // referenceTrackId 为参考流的 track id（调用方取 format_->streams[ref]->id）。
+    // openDeadlineTick 和 openInterrupt 约束旁路句柄的打开。启动后的扫描由 RequestStop 中断。
     // 返回 false（未启动任何线程）的情形：pathUtf8 为空、SharedFileInput::Open
     // 失败、timeBase 分母为 0。成功返回 true 后 IsRunning() 为 true。
     bool Start(const char* pathUtf8, AVRational referenceStreamTimeBase,
-               std::int64_t timelineOrigin100ns, std::int32_t referenceTrackId) noexcept;
+               std::int64_t timelineOrigin100ns, std::int32_t referenceTrackId,
+               ULONGLONG openDeadlineTick = 0,
+               const AVIOInterruptCB* openInterrupt = nullptr) noexcept;
 
     // 置停止标志（acquire/release），不等待线程。幂等。
     void RequestStop() noexcept;
@@ -76,6 +83,7 @@ private:
         std::uint64_t moofEnd, AVRational timeBase, std::int64_t timelineOrigin100ns,
         std::int32_t referenceTrackId) noexcept;
     bool AppendEntry(const Fmp4FragmentEntry& entry) noexcept;
+    static int ScanInterruptCallback(void* opaque) noexcept;
 
     std::thread worker_;
     std::vector<Fmp4FragmentEntry> table_;    // worker 追加 / CopyTable 读取（tableMutex_ 保护）

@@ -1,6 +1,6 @@
 #include "pch.h"
-#include "Shared/Windows/Utf8.h"
 #include "3FP/Core/AvifIlocShim.h"
+#include "Shared/Ffmpeg/SharedFileInput.h"
 
 #include <algorithm>
 #include <array>
@@ -21,6 +21,31 @@ bool IsKnownBrand(const char brand[4]) {
     }
     return false;
 }
+
+// The callback state must outlive SharedFileInput and any of its I/O waits.
+struct ReadControl {
+    ULONGLONG deadlineTick = 0;
+    AVIOInterruptCB interrupt{};
+
+    static int Interrupted(void* opaque) noexcept {
+        const auto& control = *static_cast<const ReadControl*>(opaque);
+        return (control.deadlineTick != 0 && GetTickCount64() >= control.deadlineTick) ||
+            (control.interrupt.callback != nullptr &&
+                control.interrupt.callback(control.interrupt.opaque) != 0);
+    }
+
+    bool Check(std::string& detail) const {
+        if (deadlineTick != 0 && GetTickCount64() >= deadlineTick) {
+            detail = "The image read deadline expired.";
+            return false;
+        }
+        if (interrupt.callback != nullptr && interrupt.callback(interrupt.opaque) != 0) {
+            detail = "The image read was interrupted.";
+            return false;
+        }
+        return true;
+    }
+};
 
 }  // namespace
 
@@ -470,37 +495,49 @@ bool AvifIlocShim::RepairInPlace(std::vector<std::uint8_t>& bytes, std::string& 
 
 bool AvifIlocShim::ReadAndRepair(const char* pathUtf8, const std::int64_t maxBytes,
     std::vector<std::uint8_t>& bytes, std::string& detail,
-    std::int32_t* mergedExtents) noexcept try {
+    std::int32_t* mergedExtents, const ULONGLONG deadlineTick,
+    const AVIOInterruptCB* interrupt) noexcept try {
     if (mergedExtents != nullptr) *mergedExtents = 0;
     bytes.clear();
     detail.clear();
     if (pathUtf8 == nullptr || *pathUtf8 == '\0' || maxBytes <= 0) { detail = "The path is not usable."; return false; }
-    const auto path = FFFText::FromUtf8(pathUtf8);
-    if (path.empty()) { detail = "The path is not valid UTF-8."; return false; }
-    const auto file = CreateFileW(path.c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) { detail = "Could not open the file with shared access."; return false; }
-    struct FileCloser { HANDLE file; ~FileCloser() { CloseHandle(file); } } closer{file};
-    LARGE_INTEGER fileSize{};
-    const auto sized = GetFileSizeEx(file, &fileSize);
-    if (!sized || fileSize.QuadPart < 0) { detail = "Could not read the file size."; return false; }
-    if (fileSize.QuadPart > maxBytes || fileSize.QuadPart > MAXDWORD) { detail = "The file is larger than the still-image repair limit."; return false; }
+    ReadControl control{deadlineTick, interrupt != nullptr ? *interrupt : AVIOInterruptCB{}};
+    const AVIOInterruptCB ioInterrupt{&ReadControl::Interrupted, &control};
+    if (!control.Check(detail)) return false;
+    auto input = SharedFileInput::Open(pathUtf8, detail, deadlineTick, true, &ioInterrupt);
+    if (!control.Check(detail) || input == nullptr) return false;
+    auto* context = input->Context();
+    const auto fileSize = avio_size(context);
+    if (!control.Check(detail)) return false;
+    if (fileSize < 0) { detail = "Could not read the file size."; return false; }
+    const auto readLimit = std::min<std::int64_t>(maxBytes, 256 * 1024 * 1024);
+    if (fileSize > readLimit) { detail = "The file is larger than the still-image repair limit."; return false; }
     // Small enough that reading it whole costs less than the demuxer's own probing:
     // still images are the only files that reach this code.
-    std::vector<std::uint8_t> content(static_cast<std::size_t>(fileSize.QuadPart));
-    DWORD read = 0;
-    const auto ok = content.empty()
-        ? TRUE
-        : ReadFile(file, content.data(), static_cast<DWORD>(content.size()), &read, nullptr);
-    if (!ok || static_cast<std::size_t>(read) != content.size()) {
-        detail = "Could not read the whole file.";
-        return false;
+    std::vector<std::uint8_t> content(static_cast<std::size_t>(fileSize));
+    std::size_t position = 0;
+    while (position < content.size()) {
+        if (!control.Check(detail)) return false;
+        const auto chunk = static_cast<int>(
+            std::min<std::size_t>(content.size() - position, 64 * 1024));
+        const auto read = avio_read(context, content.data() + position, chunk);
+        if (!control.Check(detail)) return false;
+        // A short positive read is progress, not EOF. A zero/negative result
+        // before the advertised file size refuses repair of an incomplete file.
+        if (read <= 0) {
+            detail = "Could not read the whole file.";
+            return false;
+        }
+        position += static_cast<std::size_t>(read);
     }
+    if (!control.Check(detail)) return false;
     auto reason = std::string{};
-    if (!RepairInPlace(content, reason, mergedExtents)) { detail = std::move(reason); return false; }
+    std::int32_t repairedExtents = 0;
+    if (!RepairInPlace(content, reason, &repairedExtents)) { detail = std::move(reason); return false; }
+    if (!control.Check(detail)) return false;
     bytes = std::move(content);
     detail = std::move(reason);
+    if (mergedExtents != nullptr) *mergedExtents = repairedExtents;
     return true;
 } catch (...) {
     bytes.clear();

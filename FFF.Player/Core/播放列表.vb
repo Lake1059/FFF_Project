@@ -15,8 +15,9 @@ End Enum
 
 Public NotInheritable Class 播放列表项
     Public Sub New(本地路径 As String)
-        路径 = 播放列表.规范本地文件(本地路径, 允许蓝光目录:=True)
-        If IO.Directory.Exists(路径) Then
+        Dim 网络路径 = 媒体路径.规范网络路径(本地路径)
+        路径 = If(网络路径, 播放列表.规范本地文件(本地路径, 允许蓝光目录:=True))
+        If 网络路径 Is Nothing AndAlso IO.Directory.Exists(路径) Then
             标题 = IO.Path.GetFileName(路径)
             If String.IsNullOrEmpty(标题) Then 标题 = 路径
         Else
@@ -245,6 +246,8 @@ Public NotInheritable Class 播放列表
 
     Public Function 从媒体扫描同目录Async(本地路径 As String,
                                       Optional 取消令牌 As CancellationToken = Nothing) As Task
+        ' 网络目录已经在打开时显式展开过，不再自动重扫；避免同一次打开触发第二轮 SMB 请求。
+        If 媒体路径.是网络路径(本地路径) Then Return Task.CompletedTask
         Dim 版本 As Integer
         Dim 可复用 As Boolean
         Dim 目录时间 As DateTime
@@ -385,9 +388,8 @@ Public NotInheritable Class 播放列表
         For Each 原始行 In IO.File.ReadLines(完整列表路径, Encoding.UTF8)
             Dim 行 = 原始行.Trim()
             If 行.Length = 0 OrElse 行.StartsWith("#", StringComparison.Ordinal) Then Continue For
-            If 行.Contains("://", StringComparison.Ordinal) OrElse 行.StartsWith("\\", StringComparison.Ordinal) Then Throw New InvalidDataException("M3U8 中包含被禁止的网络路径。")
             Dim 路径 = If(IO.Path.IsPathRooted(行), 行, IO.Path.Combine(目录, 行))
-            Dim 值 As New 播放列表项(路径)
+            Dim 值 As New 播放列表项(规范本地文件(路径, 允许蓝光目录:=True))
             If 已发现.Add(值.路径) Then 新列表.Add(值)
         Next
         SyncLock 项目
@@ -457,6 +459,7 @@ Public NotInheritable Class 播放列表
     End Function
 
     Friend Shared Function 规范本地文件(值 As String, Optional 允许蓝光目录 As Boolean = False) As String
+        If 媒体路径.是网络路径(值) Then Throw New ArgumentException("只允许本地文件。", NameOf(值))
         ArgumentException.ThrowIfNullOrWhiteSpace(值)
         If 值.Contains("://", StringComparison.Ordinal) OrElse 值.StartsWith("\\", StringComparison.Ordinal) OrElse 值.StartsWith("//", StringComparison.Ordinal) Then Throw New ArgumentException("只允许本地普通文件。", NameOf(值))
         Dim 完整路径 = IO.Path.GetFullPath(值)

@@ -1,4 +1,7 @@
-﻿Public Class Form播放列表
+﻿Imports System.Threading
+Imports System.Threading.Tasks
+
+Public Class Form播放列表
 
     <Runtime.InteropServices.DllImport("user32.dll")>
     Private Shared Function GetDpiForWindow(hwnd As IntPtr) As UInteger
@@ -231,31 +234,25 @@
                       DragDropEffects.Copy, DragDropEffects.None)
     End Sub
 
-    Private Sub 播放列表_DragDrop(sender As Object, e As DragEventArgs) Handles Me.DragDrop, ModernPanel1.DragDrop, Panel1.DragDrop, UltraDetailListView1.DragDrop
+    Private Async Sub 播放列表_DragDrop(sender As Object, e As DragEventArgs) Handles Me.DragDrop, ModernPanel1.DragDrop, Panel1.DragDrop, UltraDetailListView1.DragDrop
         Dim 路径 = TryCast(e.Data?.GetData(DataFormats.FileDrop), String())
         If 路径 Is Nothing OrElse 路径.Length = 0 Then Return
         Try
-            列表数据.添加多个(枚举拖入媒体(路径))
+            Dim 文件 = Await 媒体路径.扫描打开路径Async(路径)
+            If Not IsDisposed Then 列表数据.添加多个(筛选拖入媒体(文件))
+        Catch ex As TimeoutException
+            If Not IsDisposed Then 显示错误("无法添加网络媒体", "网络目录扫描超过 10 秒，已停止等待。")
         Catch ex As Exception
-            显示错误("无法添加媒体", ex.Message)
+            If Not IsDisposed Then 显示错误("无法添加媒体", ex.Message)
         End Try
     End Sub
 
-    Friend Shared Iterator Function 枚举拖入媒体(路径 As IEnumerable(Of String)) As IEnumerable(Of String)
-        For Each 值 In 路径
-            If 光盘路径.是光盘路径(值) Then
-                Dim 光盘 = 光盘路径.取得媒体路径(值)
-                If 光盘 IsNot Nothing Then Yield 光盘
-            ElseIf IO.File.Exists(值) Then
-                If 播放列表.是支持的媒体文件(值) Then Yield IO.Path.GetFullPath(值)
-            ElseIf IO.Directory.Exists(值) Then
-                For Each 文件 In IO.Directory.EnumerateFiles(值, "*", IO.SearchOption.TopDirectoryOnly).
-                    Where(AddressOf 播放列表.是支持的媒体文件).
-                    OrderBy(Function(x) IO.Path.GetFileName(x), StringComparer.CurrentCultureIgnoreCase)
-                    Yield 文件
-                Next
-            End If
-        Next
+    Friend Shared Function 枚举拖入媒体(路径 As IEnumerable(Of String)) As IEnumerable(Of String)
+        Return 筛选拖入媒体(媒体路径.展开打开路径(路径))
+    End Function
+
+    Private Shared Function 筛选拖入媒体(路径 As IEnumerable(Of String)) As IEnumerable(Of String)
+        Return 路径.Where(Function(x) 播放列表.是支持的媒体文件(x) OrElse 光盘路径.是光盘路径(x))
     End Function
 
     Private Function 取得当前媒体路径() As String

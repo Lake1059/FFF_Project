@@ -41,8 +41,12 @@ bool DiscInput::IsDiscPath(const std::string& path) {
         const auto p = LocalPath(path);
         auto ext = p.extension().wstring();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-        return ext == L".bdmv" ||
-            std::filesystem::is_directory(p);
+        if (ext == L".bdmv") return true;
+        if (!std::filesystem::is_directory(p)) return false;
+        auto name = p.filename().wstring();
+        std::transform(name.begin(), name.end(), name.begin(), ::towupper);
+        if (name == L"BDMV") return true;
+        return std::filesystem::is_directory(p / L"BDMV");
     } catch (...) { return false; }
 }
 bool DiscInput::Open(const std::string& path, bool preferTopMenu) {

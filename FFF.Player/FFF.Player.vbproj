@@ -262,11 +262,40 @@
       <_UnexpectedBundleDll Include="@(FilesToBundle)"
           Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(FilesToBundle.Filename)%(FilesToBundle.Extension)', '(?i)^((av(codec|filter|format|util)|sw(resample|scale))(-\d+)?\.dll|FFF\.PrefetchHost\.exe)$'))" />
       <_BundledPath Include="@(FilesToBundle->'%(RelativePath)')" />
+      <_PlayerBundleAssembly Include="@(FilesToBundle)" Condition="'%(FilesToBundle.RelativePath)' == 'FFF.Player.dll'" />
+      <_RequiredAiResource Include="asr_worker.py;qwen3_ort.py;AI字幕包声明.txt;LICENSE.txt" />
+      <_RequiredAiResource Include="licenses/ai/Apache-2.0.txt;licenses/ai/BSD-3-Clause.txt;licenses/ai/MIT.txt;licenses/ai/NOTICE.txt;licenses/ai/PSF-2.0.txt" />
       <_MissingBundlePath Include="@(PlayerBundledNative->'%(Filename)%(Extension)');@(DiscRuntime->'%(Filename)%(Extension)')" Exclude="@(_BundledPath)" />
     </ItemGroup>
     <Error Condition="'@(_UnexpectedBundleDll)' != ''" Text="单文件不得内置外部 FFmpeg 或预取助手：@(_UnexpectedBundleDll)" />
     <Error Condition="'@(_MissingBundlePath)' != ''" Text="单文件缺少原生 DLL：@(_MissingBundlePath)" />
+    <Error Condition="'@(_PlayerBundleAssembly->Count())' != '1'" Text="单文件必须包含一份 FFF.Player.dll。" />
+    <VerifyPlayerAiResources AssemblyFile="@(_PlayerBundleAssembly->'%(FullPath)')" RequiredResources="@(_RequiredAiResource)" />
   </Target>
+
+  <UsingTask TaskName="VerifyPlayerAiResources" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <AssemblyFile ParameterType="System.String" Required="true" />
+      <RequiredResources ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.Collections.Generic" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Reflection" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        var assembly = Assembly.Load(File.ReadAllBytes(AssemblyFile));
+        var embedded = new HashSet<string>(assembly.GetManifestResourceNames(), StringComparer.Ordinal);
+        foreach (var item in RequiredResources)
+        {
+            var name = "AiSubtitles.Pack/" + item.ItemSpec;
+            if (!embedded.Contains(name) ||
+                assembly.GetManifestResourceInfo(name).ResourceLocation !=
+                    (ResourceLocation.Embedded | ResourceLocation.ContainedInManifestFile))
+                Log.LogError("单文件缺少 AI 字幕资源 {0}", item.ItemSpec);
+        }
+      ]]></Code>
+    </Task>
+  </UsingTask>
 
   <!-- WinRT 投影配对护栏：随包托管件引用投影件时必须同时存在。 -->
   <UsingTask TaskName="AssertWindowsSdkProjectionPairing" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
