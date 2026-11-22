@@ -61,6 +61,19 @@ Public NotInheritable Class 字体控制
         Next
     End Sub
 
+    Friend Shared Function 创建菜单字体(字体名称 As String, 当前字体 As Font, 默认字号 As Single) As Font
+        Dim 字号 = If(当前字体 Is Nothing, 默认字号, 当前字体.SizeInPoints)
+        Try
+            Return New Font(字体名称, 字号, FontStyle.Regular, GraphicsUnit.Point)
+        Catch
+            Try
+                Return New Font("Microsoft YaHei UI", 字号, FontStyle.Regular, GraphicsUnit.Point)
+            Catch
+                Return New Font(SystemFonts.DefaultFont.FontFamily, 字号, FontStyle.Regular, GraphicsUnit.Point)
+            End Try
+        End Try
+    End Function
+
     Private Shared Sub 替换字体(控件 As Control, 字体名称 As String)
         Try
             Dim 字体属性 = 控件.GetType().GetProperty("Font", BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic)

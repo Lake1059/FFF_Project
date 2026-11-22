@@ -88,11 +88,15 @@ $TripletRoot = Join-Path $InstallRoot $Triplet
 $RequiredFiles = @(
     (Join-Path $TripletRoot "include\ass\ass.h"),
     (Join-Path $TripletRoot "lib\ass.lib"),
-    (Join-Path $TripletRoot "debug\lib\ass.lib")
+    (Join-Path $TripletRoot "debug\lib\ass.lib"),
+    (Join-Path $TripletRoot "include\libbluray\bluray.h"),
+    (Join-Path $TripletRoot "include\udfread\udfread.h"),
+    (Join-Path $TripletRoot "lib\bluray.lib"),
+    (Join-Path $TripletRoot "debug\lib\bluray.lib")
 )
 foreach ($file in $RequiredFiles) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
-        throw "The libass package is incomplete: $file"
+        throw "The libass/disc packages are incomplete: $file"
     }
 }
 
@@ -108,26 +112,18 @@ $RuntimeSets = @(
             "fribidi-0.dll", "harfbuzz.dll", "libpng16d.dll", "zd.dll")
     }
 )
+$discDlls = @("bluray-3.dll", "udfread-3.dll", "libxml2.dll", "iconv-2.dll", "charset-1.dll")
 foreach ($runtimeSet in $RuntimeSets) {
     $assRuntime = @(Get-ChildItem -LiteralPath $runtimeSet.Directory -Filter "ass-*.dll" -File)
     if ($assRuntime.Count -ne 1) {
         throw "Expected one versioned libass DLL under $($runtimeSet.Directory), found $($assRuntime.Count)."
     }
-    foreach ($runtimeFile in $runtimeSet.Files) {
+    foreach ($runtimeFile in ($runtimeSet.Files + $discDlls)) {
         $runtimePath = Join-Path $runtimeSet.Directory $runtimeFile
         if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
-            throw "The libass runtime dependency is missing: $runtimePath"
+            throw "The libass/disc runtime dependency is missing: $runtimePath"
         }
     }
 }
 
-$ReadyDirectory = Join-Path $TripletRoot "share\3f-project"
-$ReadyMarker = Join-Path $ReadyDirectory "libass-ready.txt"
-New-Item -ItemType Directory -Force -Path $ReadyDirectory | Out-Null
-@(
-    "triplet=$Triplet",
-    "git=$resolvedVcpkgGit",
-    "git-version=$gitVersion"
-) | Set-Content -LiteralPath $ReadyMarker -Encoding ASCII
-
-Write-Host "libass Debug and Release files are ready under $TripletRoot"
+Write-Host "libass and disc Debug and Release files are ready under $TripletRoot"

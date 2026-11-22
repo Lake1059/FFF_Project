@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "Shared/Windows/Utf8.h"
 #include "Shared/Ffmpeg/SharedFileInput.h"
 
 extern "C" {
@@ -13,18 +14,6 @@ extern "C" {
 
 namespace {
 constexpr int AvioBufferSize = 64 * 1024;
-
-std::wstring FromUtf8(const char* value) {
-    if (value == nullptr || *value == '\0') return {};
-    const auto length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        value, -1, nullptr, 0);
-    if (length <= 1) return {};
-    std::wstring result(static_cast<std::size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1,
-        result.data(), length);
-    result.resize(static_cast<std::size_t>(length - 1));
-    return result;
-}
 
 std::string LastWin32Error() {
     const auto error = GetLastError();
@@ -50,10 +39,6 @@ SharedFileInput::~SharedFileInput() {
     if (context_ != nullptr) {
         av_freep(&context_->buffer);
         avio_context_free(&context_);
-        buffer_ = nullptr;
-    } else if (buffer_ != nullptr) {
-        av_free(buffer_);
-        buffer_ = nullptr;
     }
     if (data_ != nullptr) {
         av_free(data_);
@@ -68,7 +53,7 @@ SharedFileInput::~SharedFileInput() {
 std::unique_ptr<SharedFileInput> SharedFileInput::Open(const char* pathUtf8,
     std::string& error) noexcept {
     try {
-        const auto path = FromUtf8(pathUtf8);
+        const auto path = FFFText::FromUtf8(pathUtf8);
         if (path.empty()) {
             error = "The local path is not valid UTF-8.";
             return nullptr;
@@ -84,20 +69,7 @@ std::unique_ptr<SharedFileInput> SharedFileInput::Open(const char* pathUtf8,
             return nullptr;
         }
 
-        input->buffer_ = static_cast<std::uint8_t*>(av_malloc(AvioBufferSize));
-        if (input->buffer_ == nullptr) {
-            error = "Could not allocate the media input buffer.";
-            return nullptr;
-        }
-
-        input->context_ = avio_alloc_context(input->buffer_, AvioBufferSize, 0,
-            input.get(), &SharedFileInput::Read, nullptr, &SharedFileInput::Seek);
-        if (input->context_ == nullptr) {
-            error = "Could not allocate the FFmpeg media input context.";
-            return nullptr;
-        }
-        input->buffer_ = nullptr;
-        input->context_->seekable = AVIO_SEEKABLE_NORMAL;
+        if (!input->InitializeContext(error)) return nullptr;
         return input;
     } catch (...) {
         error = "Could not prepare the shared media input.";
@@ -119,25 +91,29 @@ std::unique_ptr<SharedFileInput> SharedFileInput::OpenMemory(const std::uint8_t*
             return nullptr;
         }
         std::memcpy(input->data_, data, size);
-        input->buffer_ = static_cast<std::uint8_t*>(av_malloc(AvioBufferSize));
-        if (input->buffer_ == nullptr) {
-            error = "Could not allocate the media input buffer.";
-            return nullptr;
-        }
-        input->context_ = avio_alloc_context(input->buffer_, AvioBufferSize, 0,
-            input.get(), &SharedFileInput::Read, nullptr, &SharedFileInput::Seek);
-        if (input->context_ == nullptr) {
-            error = "Could not allocate the FFmpeg media input context.";
-            return nullptr;
-        }
-        input->buffer_ = nullptr;
         input->size_ = static_cast<std::int64_t>(size);
-        input->context_->seekable = AVIO_SEEKABLE_NORMAL;
+        if (!input->InitializeContext(error)) return nullptr;
         return input;
     } catch (...) {
         error = "Could not prepare the in-memory media input.";
         return nullptr;
     }
+}
+
+bool SharedFileInput::InitializeContext(std::string& error) {
+    auto* buffer = static_cast<std::uint8_t*>(av_malloc(AvioBufferSize));
+    if (buffer == nullptr) {
+        error = "Could not allocate the media input buffer.";
+        return false;
+    }
+    context_ = avio_alloc_context(buffer, AvioBufferSize, 0, this, &Read, nullptr, &Seek);
+    if (context_ == nullptr) {
+        av_free(buffer);
+        error = "Could not allocate the FFmpeg media input context.";
+        return false;
+    }
+    context_->seekable = AVIO_SEEKABLE_NORMAL;
+    return true;
 }
 
 int SharedFileInput::Read(void* opaque, std::uint8_t* buffer,

@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-spec = importlib.util.spec_from_file_location("asr_worker", Path(__file__).with_name("asr_worker.py"))
+spec = importlib.util.spec_from_file_location("asr_worker", Path(__file__).resolve().parents[2] / "FFF.Player" / "AI字幕" / "Worker" / "asr_worker.py")
 worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
 

@@ -1,4 +1,8 @@
 #include "pch.h"
+#include "Shared/Windows/Utf8.h"
+#include "3FP/Core/PlaybackTimeMath.h"
+
+#include <initializer_list>
 #include <string_view>
 #include "3FP/Core/AvifIlocShim.h"
 #include "3FP/Core/GainMapProbe.h"
@@ -460,28 +464,8 @@ std::string ToUtf8(const wchar_t* value) {
     result.resize(length - 1); return result;
 }
 
-std::wstring FromUtf8(const char* value) {
-    if (value == nullptr || *value == '\0') return {};
-    const auto length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, nullptr, 0);
-    if (length <= 1) return {};
-    std::wstring result(length, L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, result.data(), length);
-    result.resize(length - 1); return result;
-}
-
-bool FromUtf8Strict(const char* value, std::wstring& output) noexcept {
-    try {
-        if (value == nullptr) { output.clear(); return true; }
-        const auto length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, nullptr, 0);
-        if (length <= 0) return false;
-        std::wstring converted(static_cast<std::size_t>(length), L'\0');
-        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1,
-            converted.data(), length) <= 0) return false;
-        converted.resize(static_cast<std::size_t>(length - 1));
-        output = std::move(converted);
-        return true;
-    } catch (...) { return false; }
-}
+using FFFText::FromUtf8;
+using FFFText::TryFromUtf8;
 
 AVPixelFormat SelectHardwareFormat(AVCodecContext* context, const AVPixelFormat* formats) {
     const auto expected = static_cast<AVPixelFormat>(reinterpret_cast<std::intptr_t>(context->opaque));
@@ -713,25 +697,20 @@ constexpr std::int64_t MaxRepairedStillImageBytes = 256 * 1024 * 1024;
 // keeps the read-only property probe cheap even for a huge grid image.
 constexpr std::int64_t MaxAvifProbeBytes = 16 * 1024 * 1024;
 
-// Cheap gate in front of AvifIlocShim, so no other media pays for the read.
-bool IsStillImageContainerName(const std::string& path) noexcept {
-    // Compared against the extension without its dot.
-    static const std::string_view kNames[] = {"avif", "avifs", "heic", "heif", "heics", "heifs"};
+bool HasExtension(std::string_view path, std::initializer_list<std::string_view> candidates) noexcept {
     const auto dot = path.find_last_of('.');
-    if (dot == std::string::npos || dot + 1 >= path.size()) return false;
-    const std::string_view extension(path.data() + dot + 1, path.size() - dot - 1);
-    for (const auto name : kNames) {
-        if (extension.size() != name.size()) continue;
-        bool match = true;
-        for (std::size_t index = 0; index < name.size(); ++index) {
-            const auto character = extension[index];
-            const auto lower = character >= 'A' && character <= 'Z'
-                ? static_cast<char>(character - 'A' + 'a') : character;
-            if (lower != name[index]) { match = false; break; }
-        }
-        if (match) return true;
+    if (dot == std::string_view::npos) return false;
+    const auto extension = path.substr(dot + 1);
+    for (const auto candidate : candidates) {
+        if (std::equal(extension.begin(), extension.end(), candidate.begin(), candidate.end(),
+            [](char a, char b) { return (a >= 'A' && a <= 'Z' ? a - 'A' + 'a' : a) == b; })) return true;
     }
     return false;
+}
+
+// Only AVIF/HEIC stills go through the iloc repair.
+bool IsStillImageContainerName(const std::string& path) noexcept {
+    return HasExtension(path, {"avif", "avifs", "heic", "heif", "heics", "heifs"});
 }
 
 // RawStillSource creates this synthetic context instead of letting a demuxer
@@ -748,48 +727,16 @@ bool IsSyntheticRawFormat(const AVFormatContext* format) noexcept {
 // IsStillImageContainerName: the latter gates iloc/layered repair and must stay
 // AVIF/HEIC-only.
 bool IsGainMapContainerName(const std::string& path) noexcept {
-    if (IsStillImageContainerName(path)) return true;
-    static const std::string_view kNames[] = {"jpg", "jpeg", "webp"};
-    const auto dot = path.find_last_of('.');
-    if (dot == std::string::npos || dot + 1 >= path.size()) return false;
-    const std::string_view extension(path.data() + dot + 1, path.size() - dot - 1);
-    for (const auto name : kNames) {
-        if (extension.size() != name.size()) continue;
-        bool match = true;
-        for (std::size_t index = 0; index < name.size(); ++index) {
-            const auto character = extension[index];
-            const auto lower = character >= 'A' && character <= 'Z'
-                ? static_cast<char>(character - 'A' + 'a') : character;
-            if (lower != name[index]) { match = false; break; }
-        }
-        if (match) return true;
-    }
-    return false;
+    return IsStillImageContainerName(path) || HasExtension(path, {"jpg", "jpeg", "webp"});
 }
 
 bool IsIncompleteDownloadName(const std::string& path) noexcept {
-    const auto dot = path.find_last_of('.');
-    if (dot == std::string::npos) return false;
-    const auto extension = std::string_view(path).substr(dot);
-    for (const auto suffix : {".xltd", ".part", ".crdownload", ".download"}) {
-        if (extension.size() != std::strlen(suffix)) continue;
-        if (std::equal(extension.begin(), extension.end(), suffix,
-            [](char a, char b) { return (a >= 'A' && a <= 'Z' ? a - 'A' + 'a' : a) == b; })) return true;
-    }
-    return false;
+    return HasExtension(path, {"xltd", "part", "crdownload", "download"});
 }
 
-// ".raw" is a shared extension: raw video/audio uses it as well as cameras.
-// LibRaw gets first refusal, but a failed LibRaw open must not turn those
-// non-camera files into NotSupported; fall through to FFmpeg instead.
+// LibRaw gets first refusal for .raw, but FFmpeg may still open raw audio/video.
 bool IsAmbiguousRawFallbackName(const std::string& path) noexcept {
-    const auto dot = path.find_last_of('.');
-    if (dot == std::string::npos || dot + 1 >= path.size()) return false;
-    const std::string_view extension(path.data() + dot + 1, path.size() - dot - 1);
-    return extension.size() == 3 &&
-        (extension[0] == 'r' || extension[0] == 'R') &&
-        (extension[1] == 'a' || extension[1] == 'A') &&
-        (extension[2] == 'w' || extension[2] == 'W');
+    return HasExtension(path, {"raw"});
 }
 
 // The FFmpeg fallback is only valid when it found real media. A camera raw
@@ -1223,21 +1170,8 @@ std::int64_t PlayerSession::TimelineOrigin100ns(const AVFormatContext* owner) co
 // （FFmpeg 返回 INT64_MIN），随后的加减会有符号溢出（UB）。饱和化处理：
 // 时间轴极端值裁到 int64 边界，避免未定义行为（G.INT.OVERFLOW.001）。
 namespace {
-std::int64_t SaturatingAddInt64(std::int64_t left, std::int64_t right) noexcept {
-    if (right >= 0 && left > std::numeric_limits<std::int64_t>::max() - right)
-        return std::numeric_limits<std::int64_t>::max();
-    if (right < 0 && left < std::numeric_limits<std::int64_t>::min() - right)
-        return std::numeric_limits<std::int64_t>::min();
-    return left + right;
-}
-
-std::int64_t SaturatingSubInt64(std::int64_t left, std::int64_t right) noexcept {
-    if (right >= 0 && left < std::numeric_limits<std::int64_t>::min() + right)
-        return std::numeric_limits<std::int64_t>::min();
-    if (right < 0 && left > std::numeric_limits<std::int64_t>::max() + right)
-        return std::numeric_limits<std::int64_t>::max();
-    return left - right;
-}
+using FFFPlaybackTime::SaturatingAddInt64;
+using FFFPlaybackTime::SaturatingSubInt64;
 } // namespace
 
 std::int64_t PlayerSession::StreamTimestampPosition100ns(const AVFormatContext* owner,
@@ -3337,8 +3271,7 @@ FFFResult PlayerSession::TempoAudio(AVFrame* frame, const std::int64_t position,
     if (!output) return FFFResult::NativeFailure;
     FFFResult result = FFFResult::Success;
     while (av_buffersink_get_frame(tempoOutput_, output) >= 0) {
-        const auto outSamples = tempoSamples_;
-        const auto outputPosition = SaturatingAddInt64(origin, av_rescale(outSamples, 10000000, output->sample_rate));
+        const auto outputPosition = SaturatingAddInt64(origin, av_rescale(tempoSamples_, 10000000, output->sample_rate));
         result = audioRenderer_->Enqueue(output, outputPosition, 0);
         tempoSamples_ = SaturatingAddInt64(tempoSamples_, output->nb_samples);
         av_frame_unref(output);
@@ -3734,8 +3667,8 @@ FFFResult PlayerSession::SetTimedTextLayer(const FFF3FPTimedTextLayer& input) no
                     auto content = std::make_shared<TimedTextRenderCommand::TextContent>();
                     content->identity = TimedTextContentKey(source.contentId,
                         source.textUtf8, source.fontFamilyUtf8);
-                    if (!FromUtf8Strict(source.textUtf8, content->text) || content->text.empty() ||
-                        !FromUtf8Strict(source.fontFamilyUtf8, content->fontFamily)) return FFFResult::InvalidArgument;
+                    if (!TryFromUtf8(source.textUtf8, content->text) || content->text.empty() ||
+                        !TryFromUtf8(source.fontFamilyUtf8, content->fontFamily)) return FFFResult::InvalidArgument;
                     if (content->fontFamily.empty()) content->fontFamily = L"Segoe UI";
                     command.content = content;
                     if (key != 0) {
@@ -4309,9 +4242,23 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
             return FFFResult::Success;
         }
     }
-    AVDictionary* options = nullptr;
-    av_dict_set(&options, "protocol_whitelist", "file,crypto,data", 0);
-    av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
+    const auto openResult = OpenLocalDemuxer(path, output, io, error, false, mergedExtents, avifInfo);
+    if (openResult != FFFResult::Success) return openResult;
+    const auto result = avformat_find_stream_info(*output, nullptr);
+    if (result < 0) { CloseFormat(output, io); error = "Could not read media streams: " + FfmpegError(result); return FFFResult::FfmpegFailure; }
+    if (rawFallback && (IsStaticImageDemuxer((*output)->iformat) || HasOnlyStillImageStreams(*output))) {
+        CloseFormat(output, io);
+        error = "Ambiguous .raw was not a LibRaw file and FFmpeg found only a still image.";
+        return FFFResult::NotSupported;
+    }
+    return FFFResult::Success;
+}
+
+// Playback and trial decode share the same local input and demuxer policy.
+// Trial decode opens only the container header and uses its own cancellation flag.
+FFFResult PlayerSession::OpenLocalDemuxer(const std::string& path, AVFormatContext** output,
+    std::unique_ptr<SharedFileInput>& io, std::string& error, bool trial,
+    std::int32_t* mergedExtents, AvifItemInfo* avifInfo) noexcept {
     // A layered ("progressive") AVIF stores its primary item as several extents,
     // and the mov demuxer refuses those before any decoder runs. Repairing the box
     // means editing the bytes, so such a file is read and repaired here and handed
@@ -4345,26 +4292,28 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
         *mergedExtents = repaired ? repairedExtents : 0;
     io = repaired ? SharedFileInput::OpenMemory(repairedBytes.data(), repairedBytes.size(), error)
                   : SharedFileInput::Open(path.c_str(), error);
-    if (io == nullptr) {
-        av_dict_free(&options);
-        return FFFResult::NativeFailure;
-    }
+    if (io == nullptr) return FFFResult::NativeFailure;
     auto* context = avformat_alloc_context();
     if (context == nullptr) {
-        av_dict_free(&options);
         io.reset();
-        error = "Could not allocate the FFmpeg input context.";
+        error = trial ? "Could not allocate the trial demuxer context." : "Could not allocate the FFmpeg input context.";
         return FFFResult::NativeFailure;
     }
     context->pb = io->Context();
-    context->interrupt_callback.callback = [](void* opaque) {
-        const auto* session = static_cast<PlayerSession*>(opaque);
-        const auto deadline = session->inputDeadlineTick_.load();
-        return session->terminate_.load() || (deadline && GetTickCount64() >= deadline) ? 1 : 0;
-    };
     context->interrupt_callback.opaque = this;
-    io->SetInterrupt(context->interrupt_callback);
-    const auto incompleteName = IsIncompleteDownloadName(path);
+    if (trial) {
+        context->interrupt_callback.callback = [](void* opaque) {
+            const auto* session = static_cast<PlayerSession*>(opaque);
+            return session->terminate_.load(std::memory_order_acquire) ? 1 : 0;
+        };
+    } else {
+        context->interrupt_callback.callback = [](void* opaque) {
+            const auto* session = static_cast<PlayerSession*>(opaque);
+            const auto deadline = session->inputDeadlineTick_.load();
+            return session->terminate_.load() || (deadline && GetTickCount64() >= deadline) ? 1 : 0;
+        };
+        io->SetInterrupt(context->interrupt_callback);
+    }
     context->flags |= AVFMT_FLAG_CUSTOM_IO;
     *output = context;
     // P0-b: with a decoded still already cached for this exact file, cap
@@ -4373,41 +4322,39 @@ FFFResult PlayerSession::OpenFormat(const std::string& path, AVFormatContext** o
     // identity object. Caps mirror PrefetchService.cpp's side-lane decoder
     // and the shape of DiscInput.cpp:100-101. Gated on the P0-a hit arm so
     // FFF3FP_PREFETCH_HIT=0 restores byte-for-byte baseline behaviour.
-    if (PrefetchFastFormatEnabled() && PrefetchHitEnabled() &&
+    if (!trial && PrefetchFastFormatEnabled() && PrefetchHitEnabled() &&
         FFFPrefetch::PrefetchService::Instance().HasStillEntry(path)) {
         context->probesize = 8 * 1024 * 1024;
         context->max_analyze_duration = 2 * 1000 * 1000;
     }
-    auto result = avformat_open_input(output, path.c_str(), nullptr, &options);
+    AVDictionary* options = nullptr;
+    av_dict_set(&options, "protocol_whitelist", "file,crypto,data", 0);
+    av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
+    const auto result = avformat_open_input(output, path.c_str(), nullptr, &options);
     av_dict_free(&options);
     if (result < 0) {
         if (*output != nullptr) avformat_free_context(*output);
         *output = nullptr;
         io.reset();
-        error = "Could not open local media: " + FfmpegError(result);
+        error = FfmpegError(result);
+        if (!trial) error.insert(0, "Could not open local media: ");
         return FFFResult::FfmpegFailure;
     }
-    if ((*output)->iformat == nullptr) {
-        CloseFormat(output, io); error = "Network and virtual-device demuxers are disabled."; return FFFResult::NotSupported;
-    }
-    const std::string_view demuxerName(
-        (*output)->iformat->name == nullptr ? "" : (*output)->iformat->name);
-    if (demuxerName.find("hls") != std::string_view::npos ||
+    const auto* demuxer = (*output)->iformat;
+    const std::string_view demuxerName = demuxer != nullptr && demuxer->name != nullptr ? demuxer->name : "";
+    if (demuxer == nullptr || demuxerName.find("hls") != std::string_view::npos ||
         demuxerName.find("dash") != std::string_view::npos) {
-        CloseFormat(output, io); error = "Network and virtual-device demuxers are disabled."; return FFFResult::NotSupported;
+        CloseFormat(output, io);
+        error = "Network and virtual-device demuxers are disabled.";
+        return FFFResult::NotSupported;
     }
-    if (demuxerName.find("matroska") != std::string_view::npos &&
-        (incompleteName || io->HasWriter())) io->DetectUnwrittenData(true);
+    if (!trial && demuxerName.find("matroska") != std::string_view::npos &&
+        (IsIncompleteDownloadName(path) || io->HasWriter())) io->DetectUnwrittenData(true);
     // Set image-loop options before the first packet on every OpenFormat path.
     if (!ApplyLoopingOptions(*output, demuxerName)) {
-        CloseFormat(output, io); error = "The image demuxer could not be configured."; return FFFResult::FfmpegFailure;
-    }
-    result = avformat_find_stream_info(*output, nullptr);
-    if (result < 0) { CloseFormat(output, io); error = "Could not read media streams: " + FfmpegError(result); return FFFResult::FfmpegFailure; }
-    if (rawFallback && (IsStaticImageDemuxer((*output)->iformat) || HasOnlyStillImageStreams(*output))) {
         CloseFormat(output, io);
-        error = "Ambiguous .raw was not a LibRaw file and FFmpeg found only a still image.";
-        return FFFResult::NotSupported;
+        error = "The image demuxer could not be configured.";
+        return FFFResult::FfmpegFailure;
     }
     return FFFResult::Success;
 }
@@ -4427,96 +4374,6 @@ void PlayerSession::CloseFormat(AVFormatContext** format,
         }
     }
     io.reset();
-}
-
-int PlayerSession::ProbeInterrupt(void* opaque) noexcept {
-    const auto* self = static_cast<const PlayerSession*>(opaque);
-    return (self != nullptr && self->terminate_.load(std::memory_order_acquire)) ? 1 : 0;
-}
-
-FFFResult PlayerSession::OpenProbeFormat(const std::string& path, AVFormatContext** output,
-    std::unique_ptr<SharedFileInput>& io, std::string& error,
-    std::int32_t* mergedExtents, AvifItemInfo* avifInfo) noexcept {
-    if (mergedExtents != nullptr) *mergedExtents = 0;
-    if (avifInfo != nullptr) *avifInfo = AvifItemInfo{};
-    // Mirrors OpenFormat rather than avformat_open_input(path): the trial used to
-    // reopen the bare url, which skipped the protocol lists, the repaired-memory
-    // input for layered AVIF and every demuxer gate -- so the "same file" it
-    // measured was not always the file the session plays.
-    AVDictionary* options = nullptr;
-    av_dict_set(&options, "protocol_whitelist", "file,crypto,data", 0);
-    av_dict_set(&options, "protocol_blacklist", "http,https,tcp,tls,udp,rtp,rtsp,srt,rist,ftp,ssh", 0);
-    std::vector<std::uint8_t> repairedBytes;
-    std::string repairDetail;
-    std::int32_t repairedExtents = 0;
-    const bool stillContainer = IsStillImageContainerName(path);
-    // The extent count is a storage layout; the primary item's a1lx/lsel/layer
-    // properties are the standard signal. Probe before the repair so a single-
-    // extent layered file (which ReadAndRepair returns false for) is still seen.
-    if (stillContainer && avifInfo != nullptr) {
-        AvifItemProbe::Read(path.c_str(), MaxAvifProbeBytes, *avifInfo, repairDetail);
-    }
-    // A single file-offset extent is already legal for the mov demuxer: there is
-    // nothing for the shim to merge. Only skip the whole-file read when the probe
-    // positively identified that safe shape; any unknown iloc still takes the
-    // repair path so a malformed/unsupported item cannot be misclassified.
-    const bool singleExtent = avifInfo != nullptr && avifInfo->valid && avifInfo->hasIloc &&
-        avifInfo->extentCount == 1 && avifInfo->constructionMethod == 0 &&
-        avifInfo->dataReferenceIndex == 0;
-    const bool repaired = stillContainer && !singleExtent &&
-        AvifIlocShim::ReadAndRepair(path.c_str(), MaxRepairedStillImageBytes,
-            repairedBytes, repairDetail, &repairedExtents);
-    if (mergedExtents != nullptr)
-        *mergedExtents = repaired ? repairedExtents : 0;
-    io = repaired ? SharedFileInput::OpenMemory(repairedBytes.data(), repairedBytes.size(), error)
-                  : SharedFileInput::Open(path.c_str(), error);
-    if (io == nullptr) {
-        av_dict_free(&options);
-        return FFFResult::NativeFailure;
-    }
-    auto* context = avformat_alloc_context();
-    if (context == nullptr) {
-        av_dict_free(&options);
-        io.reset();
-        error = "Could not allocate the trial demuxer context.";
-        return FFFResult::NativeFailure;
-    }
-    context->pb = io->Context();
-    context->flags |= AVFMT_FLAG_CUSTOM_IO;
-    // The read itself is a synchronous file read and cannot be cut short, but
-    // avformat's own probing loops do consult this, and the packet loop below
-    // checks the same flag, so the non-cancellable window shrinks to one read.
-    context->interrupt_callback.callback = &PlayerSession::ProbeInterrupt;
-    context->interrupt_callback.opaque = this;
-    *output = context;
-    const auto result = avformat_open_input(output, path.c_str(), nullptr, &options);
-    av_dict_free(&options);
-    if (result < 0) {
-        if (*output != nullptr) avformat_free_context(*output);
-        *output = nullptr;
-        io.reset();
-        error = FfmpegError(result);
-        return FFFResult::FfmpegFailure;
-    }
-    if ((*output)->iformat == nullptr) {
-        CloseFormat(output, io);
-        error = "Network and virtual-device demuxers are disabled.";
-        return FFFResult::NotSupported;
-    }
-    const std::string_view demuxerName(
-        (*output)->iformat->name == nullptr ? "" : (*output)->iformat->name);
-    if (demuxerName.find("hls") != std::string_view::npos ||
-        demuxerName.find("dash") != std::string_view::npos) {
-        CloseFormat(output, io);
-        error = "Network and virtual-device demuxers are disabled.";
-        return FFFResult::NotSupported;
-    }
-    if (!ApplyLoopingOptions(*output, demuxerName)) {
-        CloseFormat(output, io);
-        error = "The image demuxer could not be configured.";
-        return FFFResult::FfmpegFailure;
-    }
-    return FFFResult::Success;
 }
 
 // Reads how many clockwise quarter turns the source asks to be displayed with.
@@ -5032,7 +4889,7 @@ bool PlayerSession::HardwareDecoderProducesFrame(AVFormatContext* owner, const s
     AVFormatContext* probe = nullptr;
     std::unique_ptr<SharedFileInput> probeIo;
     std::string probeError;
-    if (OpenProbeFormat(owner->url, &probe, probeIo, probeError) != FFFResult::Success ||
+    if (OpenLocalDemuxer(owner->url, &probe, probeIo, probeError, true) != FFFResult::Success ||
         probe == nullptr)
         return finish(true, "reopen failed: " + probeError);
     const auto streamCountMatches = probe->nb_streams == owner->nb_streams;

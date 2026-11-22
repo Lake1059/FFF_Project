@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Drive the memory budget arithmetic tests (no Windows runtime needed for tests).
 
-  1. vcvars64 -> cl compile MembudgetMathTests.cpp (header-only, no .cpp to link)
-     AND PlacementPolicyTests.cpp (self-contained header-only dedup checks)
-  2. run both exes, tee stdout to --log
+  1. vcvars64 -> cl compile header-only memory budget, placement, and playback time tests
+  2. run the test exes, tee stdout to --log
   3. exit non-zero if either exe fails (or the compiler does)
 
 Nothing is written into the repository: build artifacts live in a temp directory.
@@ -111,16 +110,17 @@ def main() -> int:
         args.log.write_text("\n".join(log), encoding="utf-8")
         return rc
 
-    # 2) PlacementPolicyTests: the SMT-brother dedup checks (self-contained
-    # header-only; used to be a hand-run cl command, so CI never saw it).
-    place_exe = work / "placement_policy_tests.exe"
-    rc = build_one(work, vcvars, include_dir,
-                   here / "PlacementPolicyTests.cpp", place_exe, log)
-    if rc != 0:
-        args.log.write_text("\n".join(log), encoding="utf-8")
-        print("compile failed; see", args.log)
-        return rc
-    rc = run_one(place_exe, [], "placement dedup", log)
+    for source, name in (("PlacementPolicyTests.cpp", "placement dedup"),
+                         ("PlaybackTimeMathTests.cpp", "playback timestamp arithmetic")):
+        exe = work / (Path(source).stem + ".exe")
+        rc = build_one(work, vcvars, include_dir, here / source, exe, log)
+        if rc != 0:
+            args.log.write_text("\n".join(log), encoding="utf-8")
+            print("compile failed; see", args.log)
+            return rc
+        rc = run_one(exe, [], name, log)
+        if rc != 0:
+            break
     args.log.write_text("\n".join(log), encoding="utf-8")
     return rc
 

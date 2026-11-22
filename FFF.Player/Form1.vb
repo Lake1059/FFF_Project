@@ -1105,7 +1105,7 @@ Public Class Form1
             播放控制器.当前媒体是视频 Then
             播放控制器.加载外部音轨(路径)
         Else
-            启动后台任务(播放列表数据.从媒体扫描同目录Async(路径))
+            后台任务.观察(播放列表数据.从媒体扫描同目录Async(路径))
             播放控制器.打开媒体(路径)
         End If
     End Sub
@@ -2281,21 +2281,6 @@ Public Class Form1
             待选中播放列表路径 = String.Empty
             播放列表窗口?.更新正在播放项()
         End If
-    End Sub
-
-    Private Shared Sub 启动后台任务(任务 As Task)
-        If 任务 Is Nothing Then Return
-        If 任务.IsCompleted Then
-            Dim 忽略 = 任务.Exception
-            Return
-        End If
-        Dim 忽略继续 = 任务.ContinueWith(
-            Sub(t)
-                Dim 忽略 = t.Exception
-            End Sub,
-            CancellationToken.None,
-            TaskContinuationOptions.OnlyOnFaulted,
-            TaskScheduler.Default)
     End Sub
 
     Private Sub MB_软件设置_Click(sender As Object, e As EventArgs) Handles MB_软件设置.Click

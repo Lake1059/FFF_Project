@@ -59,7 +59,7 @@ Friend NotInheritable Class 播放器歌词呈现器
         歌词呈现设置, Boolean)
     Private ReadOnly 呈现设置提供器 As Func(Of 歌词呈现设置)
     Private ReadOnly 图层命令 As New List(Of 定时文字命令)(32)
-    Private ReadOnly 命令对象池 As New List(Of 定时文字命令)(32)
+    Private ReadOnly 命令对象池 As New 定时文字命令池(32)
     Private ReadOnly 字体缓存 As New Dictionary(
         Of (字体 As String, 字号位元 As Integer, 样式 As FontStyle), Font)()
     Private ReadOnly 换行缓存 As New Dictionary(
@@ -70,7 +70,6 @@ Friend NotInheritable Class 播放器歌词呈现器
     Private 缓存客户区宽度 As Integer
     Private 缓存客户区高度 As Integer
     Private 缓存DPI位元 As Integer
-    Private 命令对象使用数 As Integer
     Private 图层序号 As ULong
     Private 上次图层签名 As ULong
     Private 图层签名有效标志 As Integer
@@ -182,7 +181,7 @@ Friend NotInheritable Class 播放器歌词呈现器
     Friend Function 生成命令(客户区大小 As Size, 播放位置 As TimeSpan, 歌词 As LRC歌词资料,
                          有封面 As Boolean, Optional DPI As Single = 96.0F) As IReadOnlyList(Of 定时文字命令)
         图层命令.Clear()
-        命令对象使用数 = 0
+        命令对象池.开始帧()
         If Volatile.Read(已释放标志) <> 0 OrElse 歌词 Is Nothing OrElse 歌词.条目.Count = 0 OrElse
             客户区大小.Width <= 0 OrElse 客户区大小.Height <= 0 Then Return 图层命令
         If Not Single.IsFinite(DPI) OrElse DPI <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(DPI))
@@ -262,7 +261,7 @@ Friend NotInheritable Class 播放器歌词呈现器
             For lineIndex = 0 To lines.Length - 1
                 Dim text = lines(lineIndex)
                 If String.IsNullOrEmpty(text) Then Continue For
-                Dim command = 取得复用命令()
+                Dim command = 命令对象池.取得()
                 command.设置文字(text, 字体名称, fontSize,
                     New RectangleF(region.Left, top + lineIndex * lineStep, region.Width, lineHeight),
                     color, 歌词描边颜色,
@@ -454,18 +453,6 @@ Friend NotInheritable Class 播放器歌词呈现器
                                   groupGap As Single) As Single
         Dim lineCount = Math.Max(1, lines.Length)
         Return lineCount * lineHeight + Math.Max(0, lineCount - 1) * groupGap
-    End Function
-
-    Private Function 取得复用命令() As 定时文字命令
-        Dim result As 定时文字命令
-        If 命令对象使用数 < 命令对象池.Count Then
-            result = 命令对象池(命令对象使用数)
-        Else
-            result = New 定时文字命令()
-            命令对象池.Add(result)
-        End If
-        命令对象使用数 += 1
-        Return result
     End Function
 
     Private Sub 提交当前帧(客户区大小 As Size, 播放位置 As TimeSpan,

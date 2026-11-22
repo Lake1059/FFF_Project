@@ -557,17 +557,6 @@ Friend NotInheritable Class Ai字幕管道
         Return 0UL
     End Function
 
-    Private Shared Function 取双精度(根 As JsonElement, 名 As String) As Double
-        Dim 值 As JsonElement = Nothing
-        If 根.TryGetProperty(名, 值) Then
-            If 值.ValueKind = JsonValueKind.Number Then
-                Dim n As Double
-                If 值.TryGetDouble(n) Then Return n
-            End If
-        End If
-        Return 0.0
-    End Function
-
     ''' <summary>取布尔；缺字段或类型不符时返回 <paramref name="缺省"/>（向后兼容旧 worker）。</summary>
     Private Shared Function 取布尔(根 As JsonElement, 名 As String, 缺省 As Boolean) As Boolean
         Dim 值 As JsonElement = Nothing

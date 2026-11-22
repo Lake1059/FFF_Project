@@ -4629,46 +4629,6 @@ bool PlayerVideoRenderer::CanUseVideoProcessorForUpscale() const noexcept {
     return (inputDescription.BindFlags & D3D11_BIND_DECODER) != 0;
 }
 
-// Human-readable text for a VSR decision, used by the transition log in
-// ApplySuperResolution. Kept next to its only consumer rather than in the
-// public API header.
-static const char* VideoSuperResolutionReasonText(
-    const FFF3FPVideoSuperResolutionReason reason) noexcept {
-    switch (reason) {
-    case FFF3FPVideoSuperResolutionReason::None: return "none";
-    case FFF3FPVideoSuperResolutionReason::NotRequested: return "not requested";
-    case FFF3FPVideoSuperResolutionReason::NotNvidiaAdapter: return "not an NVIDIA adapter";
-    case FFF3FPVideoSuperResolutionReason::NotUpscaling: return "source is not being upscaled";
-    case FFF3FPVideoSuperResolutionReason::SourceResolutionOutOfRange:
-        return "source height outside 360p..1440p";
-    case FFF3FPVideoSuperResolutionReason::UnsupportedSourceFormat:
-        return "unsupported source format";
-    case FFF3FPVideoSuperResolutionReason::DriverRejected: return "driver rejected";
-    case FFF3FPVideoSuperResolutionReason::YieldedToAutoHdr:
-        return "yielded to automatic HDR this frame";
-    }
-    return "unknown";
-}
-
-// Human-readable text for a TrueHDR decision, for the same transition log.
-static const char* VideoAutoHdrReasonText(
-    const FFF3FPVideoAutoHdrReason reason) noexcept {
-    switch (reason) {
-    case FFF3FPVideoAutoHdrReason::None: return "none";
-    case FFF3FPVideoAutoHdrReason::NotRequested: return "not requested";
-    case FFF3FPVideoAutoHdrReason::NotNvidiaAdapter: return "not an NVIDIA adapter";
-    case FFF3FPVideoAutoHdrReason::NotSupportedByDriver:
-        return "driver does not support TrueHDR";
-    case FFF3FPVideoAutoHdrReason::NotSdrSource: return "source is not SDR";
-    case FFF3FPVideoAutoHdrReason::OutputPathNotHdr:
-        return "output path is not HDR (needs the scRGB chain)";
-    case FFF3FPVideoAutoHdrReason::UnsupportedSourceFormat:
-        return "unsupported source or output format";
-    case FFF3FPVideoAutoHdrReason::DriverRejected: return "driver rejected";
-    }
-    return "unknown";
-}
-
 bool PlayerVideoRenderer::CreateYuvPlaneViews(ID3D11Texture2D* const texture,
     const std::uint32_t format, ID3D11ShaderResourceView** const views) noexcept {
     if (texture == nullptr || views == nullptr || device_ == nullptr) return false;

@@ -661,7 +661,7 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 打开媒体(路径 As String, Optional 从播放列表 As Boolean = False)
         If 已释放 Then Return
-        启动后台任务(打开媒体Async(路径, 从播放列表))
+        后台任务.观察(打开媒体Async(路径, 从播放列表))
     End Sub
 
     ''' <summary>在当前视频时间线上加载 MKA 外挂音频。</summary>
@@ -1624,23 +1624,8 @@ Public NotInheritable Class 播放器控制器
                               恢复播放 As Boolean, 视频流 As Integer, 音频流 As Integer,
                               Optional 保留已加载字幕 As Boolean = False,
                               Optional 使用进度记忆 As Boolean = False)
-        启动后台任务(切换媒体会话Async(路径, 解码器, 恢复位置, 恢复播放, 视频流, 音频流,
+        后台任务.观察(切换媒体会话Async(路径, 解码器, 恢复位置, 恢复播放, 视频流, 音频流,
                                       保留已加载字幕, 使用进度记忆))
-    End Sub
-
-    Private Shared Sub 启动后台任务(任务 As Task)
-        If 任务 Is Nothing Then Return
-        If 任务.IsCompleted Then
-            Dim 忽略 = 任务.Exception
-            Return
-        End If
-        Dim 忽略继续 = 任务.ContinueWith(
-            Sub(t)
-                Dim 忽略 = t.Exception
-            End Sub,
-            CancellationToken.None,
-            TaskContinuationOptions.OnlyOnFaulted,
-            TaskScheduler.Default)
     End Sub
 
     Private Async Function 切换媒体会话Async(路径 As String, 解码器 As 解码模式, 恢复位置 As TimeSpan,

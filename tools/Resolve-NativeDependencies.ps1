@@ -2,6 +2,20 @@
 # than a marker left by an earlier (possibly incomplete) preparation run.
 $ErrorActionPreference = 'Stop'
 
+function Get-FFmpegComponentNames {
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
+    [xml]$manifest = [IO.File]::ReadAllText((Join-Path $ProjectRoot 'build-config\FFmpegRuntime.props'))
+    $manifest.Project.ItemGroup.FFmpegComponent.Include.Split(';')
+}
+
+function Invoke-ProductNativeBuild {
+    param([string]$MSBuild, [string]$ProjectRoot, [string]$Configuration, [switch]$SkipIamf)
+    $iamfProperty = if ($SkipIamf) { '/p:HaveLibiamf=false' } else { '/p:FFF_FORCE_LIBIAMF=true' }
+    & $MSBuild (Join-Path $ProjectRoot 'FFF.Native\FFF.Native.vcxproj') `
+        /p:Configuration=$Configuration /p:Platform=x64 $iamfProperty /m /v:minimal /nologo
+    if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }
+}
+
 function Get-LibiamfRequiredFiles {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot,
         [string]$Configuration = 'Release', [switch]$IncludeDebugSymbols)
@@ -47,26 +61,23 @@ function Initialize-NativeDependencies {
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
         [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
         [switch]$SkipPreparation,
-        [switch]$SkipIamf
+        [switch]$SkipIamf,
+        [switch]$SkipFfmpegRuntime
     )
 
     $toolsDirectory = Join-Path $ProjectRoot 'tools'
-    $ffmpegFiles = @()
-    foreach ($component in @('avcodec-63', 'avformat-63', 'avutil-61', 'avfilter-12', 'swresample-7', 'swscale-10')) {
+    $ffmpegRoot = Join-Path $ProjectRoot 'third_party\ffmpeg'
+    $components = @(Get-FFmpegComponentNames -ProjectRoot $ProjectRoot)
+    $ffmpegFiles = @(foreach ($component in $components) {
         $prefix = $component.Split('-')[0]
-        $ffmpegFiles += "third_party\ffmpeg\include\lib$prefix\$prefix.h"
-        $ffmpegFiles += "third_party\ffmpeg\lib\x64\$component.lib"
-        $ffmpegFiles += "runtime\$component.dll"
-    }
-    $missing = @(Get-MissingDependencyFiles -Root $ProjectRoot -RelativePaths $ffmpegFiles)
+        "include\lib$prefix\$prefix.h"
+        "lib\x64\$component.lib"
+        if (-not $SkipFfmpegRuntime) { "bin\x64\$component.dll" }
+    })
+    $missing = @(Get-MissingDependencyFiles -Root $ffmpegRoot -RelativePaths $ffmpegFiles)
     if ($missing.Count -and -not $SkipPreparation) {
-        # Reuse an existing runtime so repairing headers/libs does not replace the
-        # user's FFmpeg variant with a fresh download.
-        $runtime = Join-Path $ProjectRoot 'runtime'
-        $runtimeArgs = @{}
-        if (Test-Path -LiteralPath (Join-Path $runtime 'avcodec-63.dll')) { $runtimeArgs.RuntimeSource = $runtime }
-        & (Join-Path $toolsDirectory '准备FFmpeg.ps1') @runtimeArgs
-        $missing = @(Get-MissingDependencyFiles -Root $ProjectRoot -RelativePaths $ffmpegFiles)
+        & (Join-Path $toolsDirectory '准备FFmpeg.ps1')
+        $missing = @(Get-MissingDependencyFiles -Root $ffmpegRoot -RelativePaths $ffmpegFiles)
     }
     if ($missing.Count) { throw "Incomplete FFmpeg dependencies. Run tools/准备FFmpeg.ps1. Missing: $($missing -join ', ')" }
 
@@ -94,10 +105,10 @@ function Initialize-NativeDependencies {
     $vcpkgFiles += @($runtimeNames | ForEach-Object { "$binDirectory\$_" })
     $missing = @(Get-MissingDependencyFiles -Root $vcpkgRoot -RelativePaths $vcpkgFiles)
     if ($missing.Count -and -not $SkipPreparation) {
-        & (Join-Path $toolsDirectory '准备光盘库.ps1')
+        & (Join-Path $toolsDirectory '准备Libass.ps1')
         $missing = @(Get-MissingDependencyFiles -Root $vcpkgRoot -RelativePaths $vcpkgFiles)
     }
-    if ($missing.Count) { throw "Incomplete libass/disc dependencies. Run tools/准备光盘库.ps1. Missing: $($missing -join ', ')" }
+    if ($missing.Count) { throw "Incomplete libass/disc dependencies. Run tools/准备Libass.ps1. Missing: $($missing -join ', ')" }
 
     if (-not $SkipIamf) {
         $missing = @(Get-MissingDependencyFiles -Root (Join-Path $ProjectRoot 'third_party\libiamf') `

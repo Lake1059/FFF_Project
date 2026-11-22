@@ -7,11 +7,11 @@ $ErrorActionPreference = "Stop"
 $ScriptDirectory = if ($PSScriptRoot) { $PSScriptRoot } else {
     Split-Path -Parent $MyInvocation.MyCommand.Path
 }
-$ProjectRoot = [IO.Path]::GetFullPath((Join-Path $ScriptDirectory ".."))
-. (Join-Path $ScriptDirectory "Resolve-Toolchain.ps1")
+$ProjectRoot = [IO.Path]::GetFullPath((Join-Path $ScriptDirectory "..\.."))
+. (Join-Path $ProjectRoot "tools\Resolve-Toolchain.ps1")
 
 $MSBuild = Get-MSBuildTool
-$Project = Join-Path $ProjectRoot "FFF.Player.Tests\假模块\假外部模块.vcxproj"
+$Project = Join-Path $ScriptDirectory "假外部模块.vcxproj"
 if (-not (Test-Path -LiteralPath $Project -PathType Leaf)) {
     throw "假模块工程不存在：$Project"
 }

@@ -1369,8 +1369,6 @@ class OvBackend(InferenceBackend):
                 f"本机没有 {want} 设备（OpenVINO 只看到 {'、'.join(devices) or '无'}）")
         # 只有 GPU 家族需要挑：NPU / CPU 不存在"同族不同厂商"的问题。
         ov_dev = _pick_intel_gpu(core, have) if want.upper() == "GPU" else None
-        if ov_dev and ov_dev != want:
-            pass
 
         # NPU 编译器只吃"有上界"的形状，conv_frontend 的帧维是 INT64_MAX，直接编
         # 会报 Upper bounds are not specified。给上界就能过（离线实测 NPU4000：

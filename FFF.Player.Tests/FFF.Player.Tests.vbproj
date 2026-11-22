@@ -14,6 +14,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Standalone tests link the same AI state machine and can run without the player. -->
+    <Compile Remove="AI字幕\state-machine-test\**\*.vb" />
     <ProjectReference Include="..\FFF.Player\FFF.Player.vbproj" />
     <!-- ASS 字体回退回归加载与播放器同一套 libass。 -->
     <None Include="$(AssRuntimeDir)\ass-*.dll;$(AssRuntimeDir)\brotli*.dll;$(AssRuntimeDir)\fribidi-*.dll;$(AssRuntimeDir)\harfbuzz.dll;$(AssRuntimeDir)\bz2*.dll;$(AssRuntimeDir)\freetype*.dll;$(AssRuntimeDir)\libpng*.dll;$(AssRuntimeDir)\z*.dll"

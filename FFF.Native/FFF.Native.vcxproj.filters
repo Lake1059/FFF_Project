@@ -141,6 +141,12 @@
     <ClInclude Include="3FR\Timeline\QpcTimeline.h">
       <Filter>3FR\Timeline</Filter>
     </ClInclude>
+    <ClInclude Include="3FP\Core\PlaybackTimeMath.h">
+      <Filter>3FP\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Shared\Windows\Utf8.h">
+      <Filter>Shared</Filter>
+    </ClInclude>
     <ClInclude Include="Shared\Ffmpeg\SharedFileInput.h">
       <Filter>Shared\Ffmpeg</Filter>
     </ClInclude>

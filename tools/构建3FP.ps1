@@ -34,10 +34,7 @@ Initialize-NativeDependencies -ProjectRoot $ProjectRoot -Configuration $Configur
 $TfmArgs = @()
 if (-not [string]::IsNullOrWhiteSpace($NetTFM)) { $TfmArgs += "-p:NetTFM=$NetTFM" }
 
-$NativeArgs = @(if ($SkipIamf) { '/p:HaveLibiamf=false' } else { '/p:FFF_FORCE_LIBIAMF=true' })
-& $MSBuild (Join-Path $ProjectRoot "FFF.Native\FFF.Native.vcxproj") `
-    /p:Configuration=$Configuration /p:Platform=x64 @NativeArgs /m /v:minimal
-if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }
+Invoke-ProductNativeBuild -MSBuild $MSBuild -ProjectRoot $ProjectRoot -Configuration $Configuration -SkipIamf:$SkipIamf
 
 & $DotNet build (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
     -c $Configuration --nologo @TfmArgs
@@ -47,7 +44,6 @@ if (-not $SkipTests) {
     & $DotNet build (Join-Path $ProjectRoot "FFF.Player.Tests\FFF.Player.Tests.vbproj") `
         -c $Configuration --nologo @TfmArgs
     if ($LASTEXITCODE -ne 0) { throw "FFF.Player.Tests x64 $Configuration build failed." }
-
 }
 
 Write-Host "3FP $Configuration build completed with MSBuild: $MSBuild"

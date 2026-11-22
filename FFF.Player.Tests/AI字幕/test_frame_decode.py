@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 spec = importlib.util.spec_from_file_location(
-    "asr_worker", Path(__file__).resolve().parent / "asr_worker.py")
+    "asr_worker", Path(__file__).resolve().parents[2] / "FFF.Player" / "AI字幕" / "Worker" / "asr_worker.py")
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)  # 顶层只有 import 与常量表，main() 有 __main__ 护栏
 

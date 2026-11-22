@@ -16,49 +16,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# ⚠ 变体不符警示（2026-10-14 实盘查证，勿删）：
-#   盘上 runtime\*.dll 经 avutil_configuration() 实测是 **nonfree-shared** 变体
-#   （--enable-gpl --enable-nonfree --enable-libx264 --enable-libx265
-#    --enable-libfdk-aac --enable-libplacebo …，BtbN 构建农场 /home/dominic/ffmpeg/bin），
-#   与上面 $DownloadUrl 默认的 lgpl-shared **不是同一件**：
-#     · lgpl-shared 明确不含 x264/x265 与 fdk-aac（BtbN README 变体定义）；
-#     · 按默认 URL 重新下载会**静默丢掉** libx264/libx265 编码器与 libfdk_aac，
-#       以及 libplacebo 滤镜链（HDR 色调映射的承接线）——能力矩阵整体降级。
-#   换变体（lgpl ⇄ nonfree）属**团队 license 决策**，不要顺手改 URL：
-#   nonfree 变体含 GPL(x264/x265)+nonfree(fdk-aac) 组件，分发合规性需另行评估。
-#   刷新 runtime 前先读 3fp/docs/98（FFmpeg 能力矩阵与变体查证）。
+# 修补开发文件时优先复用本地的整套 DLL，避免更换构建变体。
+# 首次准备或 -ForceDownload 使用 LGPL shared URL；替换 DLL 可能移除 GPL 编码器。
+# 更换 FFmpeg 变体前先比较实际能力和分发许可，勿当作常规依赖更新。
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "Resolve-Toolchain.ps1")
+. (Join-Path $PSScriptRoot "Resolve-NativeDependencies.ps1")
 $ThirdPartyDirectory = Join-Path $ProjectRoot "third_party\ffmpeg"
 $IncludeDirectory = Join-Path $ThirdPartyDirectory "include"
 $LibraryDirectory = Join-Path $ThirdPartyDirectory "lib\x64"
-$RuntimeDirectory = Join-Path $ProjectRoot "runtime"
+$RuntimeDirectory = Join-Path $ThirdPartyDirectory "bin\x64"
 $PinnedCommit = "7f6b35d6c804ed8d1bc517c33044f075d72852ba"
-$Components = @("libavcodec", "libavformat", "libavutil", "libswresample", "libswscale", "libavfilter")
-$RuntimeFiles = @(
-    @{ ImportName = "avcodec-63"; Prefix = "avcodec" },
-    @{ ImportName = "avformat-63"; Prefix = "avformat" },
-    @{ ImportName = "avutil-61"; Prefix = "avutil" },
-    @{ ImportName = "swresample-7"; Prefix = "swresample" },
-    @{ ImportName = "swscale-10"; Prefix = "swscale" },
-    @{ ImportName = "avfilter-12"; Prefix = "avfilter" }
-)
-
-function Get-RuntimeDll {
-    param(
-        [Parameter(Mandatory = $true)] [string]$Directory,
-        [Parameter(Mandatory = $true)] [string]$Prefix
-    )
-
-    $pattern = "^" + [regex]::Escape($Prefix) + "(?:-\d+)?\.dll$"
-    $matches = @(Get-ChildItem -LiteralPath $Directory -File -Recurse |
-        Where-Object { $_.Name -match $pattern })
-    if ($matches.Count -ne 1) {
-        $names = if ($matches.Count -eq 0) { "none" } else { $matches.FullName -join ", " }
-        throw "Expected exactly one $Prefix DLL under $Directory, found: $names"
-    }
-    return $matches[0]
-}
+$Components = @(Get-FFmpegComponentNames -ProjectRoot $ProjectRoot)
+$RuntimeFiles = @($Components | ForEach-Object { "$_.dll" })
 
 function Invoke-Git {
     param(
@@ -74,6 +44,10 @@ function Invoke-Git {
 
 $Git = Get-GitTool
 
+if ([string]::IsNullOrWhiteSpace($RuntimeSource) -and -not $ForceDownload -and
+    -not (Get-MissingDependencyFiles -Root $RuntimeDirectory -RelativePaths $RuntimeFiles)) {
+    $RuntimeSource = $RuntimeDirectory
+}
 if ([string]::IsNullOrWhiteSpace($RuntimeSource)) {
     New-Item -ItemType Directory -Force -Path $DownloadDirectory | Out-Null
     $archiveName = Split-Path -Leaf ([Uri]$DownloadUrl).AbsolutePath
@@ -85,6 +59,12 @@ if ([string]::IsNullOrWhiteSpace($RuntimeSource)) {
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $archivePath
     }
     if ($ForceDownload -and (Test-Path -LiteralPath $extractDirectory)) {
+        $downloadRoot = (Resolve-Path -LiteralPath $DownloadDirectory).ProviderPath
+        $extractDirectory = (Resolve-Path -LiteralPath $extractDirectory).ProviderPath
+        if ($extractDirectory -ne (Join-Path $downloadRoot 'extracted') -or
+            (Get-Item -LiteralPath $extractDirectory -Force).Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
+            throw "Unexpected FFmpeg extraction path: $extractDirectory"
+        }
         Remove-Item -LiteralPath $extractDirectory -Recurse -Force
     }
     if (-not (Test-Path -LiteralPath $extractDirectory)) {
@@ -96,6 +76,12 @@ if ([string]::IsNullOrWhiteSpace($RuntimeSource)) {
 $RuntimeSource = [IO.Path]::GetFullPath($RuntimeSource)
 if (-not (Test-Path -LiteralPath $RuntimeSource -PathType Container)) {
     throw "FFmpeg runtime directory was not found: $RuntimeSource"
+}
+
+$SourceDlls = foreach ($name in $RuntimeFiles) {
+    $files = @(Get-ChildItem -LiteralPath $RuntimeSource -Filter $name -File -Recurse)
+    if ($files.Count -ne 1) { throw "Expected one $name under $RuntimeSource, found $($files.Count)." }
+    $files[0]
 }
 
 if (-not (Test-Path -LiteralPath $SourceDirectory)) {
@@ -111,10 +97,11 @@ if ($currentCommit -ne $PinnedCommit) {
 }
 
 New-Item -ItemType Directory -Force -Path $IncludeDirectory, $LibraryDirectory, $RuntimeDirectory | Out-Null
-foreach ($Component in $Components) {
-    $Destination = Join-Path $IncludeDirectory $Component
+foreach ($component in $Components) {
+    $headers = 'lib' + $component.Split('-')[0]
+    $Destination = Join-Path $IncludeDirectory $headers
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-    Get-ChildItem -LiteralPath (Join-Path $SourceDirectory $Component) -Filter "*.h" -File |
+    Get-ChildItem -LiteralPath (Join-Path $SourceDirectory $headers) -Filter "*.h" -File |
         Copy-Item -Destination $Destination -Force
 }
 Copy-Item -LiteralPath (Join-Path $SourceDirectory "COPYING.LGPLv2.1") -Destination $ThirdPartyDirectory -Force
@@ -123,20 +110,13 @@ Copy-Item -LiteralPath (Join-Path $SourceDirectory "COPYING.LGPLv3") -Destinatio
 $Dumpbin = Get-VisualCppTool -Name "dumpbin.exe"
 $Lib = Get-VisualCppTool -Name "lib.exe"
 
-foreach ($item in $RuntimeFiles) {
-    $SourceDll = Get-RuntimeDll -Directory $RuntimeSource -Prefix $item.Prefix
-    $sourceIsRuntimeDirectory = [string]::Equals(
-        ([IO.Path]::GetFullPath($SourceDll.DirectoryName)).TrimEnd('\'),
-        ([IO.Path]::GetFullPath($RuntimeDirectory)).TrimEnd('\'),
-        [StringComparison]::OrdinalIgnoreCase)
-    $namePattern = "^" + [regex]::Escape($item.Prefix) + "(?:-\d+)?\.dll$"
-    if (-not $sourceIsRuntimeDirectory) {
-        Get-ChildItem -LiteralPath $RuntimeDirectory -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match $namePattern } |
-            Remove-Item -Force
-        Copy-Item -LiteralPath $SourceDll.FullName -Destination $RuntimeDirectory -Force
+foreach ($sourceDll in $SourceDlls) {
+    $destination = Join-Path $RuntimeDirectory $sourceDll.Name
+    if ($sourceDll.FullName -ne $destination) {
+        Copy-Item -LiteralPath $sourceDll.FullName -Destination $destination -Force
     }
-    $Dump = & $Dumpbin /nologo /exports $SourceDll.FullName
+    $Dump = & $Dumpbin /nologo /exports $sourceDll.FullName
+    if ($LASTEXITCODE -ne 0) { throw "Failed to read exports from $($sourceDll.FullName)" }
     $Symbols = $Dump | ForEach-Object {
         if ($_ -match '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)\s*$') { $Matches[1] }
     }
@@ -144,14 +124,14 @@ foreach ($item in $RuntimeFiles) {
         throw "No exported symbols were found in $($SourceDll.FullName)"
     }
 
-    $DefFile = Join-Path $LibraryDirectory ($item.ImportName + ".def")
-    @("LIBRARY `"$($item.ImportName)`"", "EXPORTS") + $Symbols |
+    $DefFile = Join-Path $LibraryDirectory ($sourceDll.BaseName + ".def")
+    @("LIBRARY `"$($sourceDll.BaseName)`"", "EXPORTS") + $Symbols |
         Set-Content -LiteralPath $DefFile -Encoding ASCII
-    & $Lib /nologo /machine:x64 "/def:$DefFile" "/out:$(Join-Path $LibraryDirectory ($item.ImportName + '.lib'))"
+    & $Lib /nologo /machine:x64 "/def:$DefFile" "/out:$(Join-Path $LibraryDirectory ($sourceDll.BaseName + '.lib'))"
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to generate $($item.ImportName).lib"
+        throw "Failed to generate $($sourceDll.BaseName).lib"
     }
 }
 
 Write-Host "FFmpeg headers, import libraries, and runtime DLLs are ready."
-Write-Host "Native accepts all prepared FFmpeg DLL names with an optional numeric suffix."
+Write-Host "FFmpeg runtime: $RuntimeDirectory"

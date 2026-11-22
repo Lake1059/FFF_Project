@@ -31,12 +31,12 @@ public:
     void DetectUnwrittenData(bool enabled) noexcept { detectUnwrittenData_ = enabled; }
 
 private:
+    bool InitializeContext(std::string& error);
     static int Read(void* opaque, std::uint8_t* buffer, int bufferSize) noexcept;
     static std::int64_t Seek(void* opaque, std::int64_t offset, int whence) noexcept;
 
     HANDLE file_{INVALID_HANDLE_VALUE};
     AVIOContext* context_{};
-    std::uint8_t* buffer_{};
     std::uint8_t* data_{};      // owned copy of the in-memory media, when used
     std::int64_t position_{};   // read cursor for the in-memory media
     std::int64_t size_{};
