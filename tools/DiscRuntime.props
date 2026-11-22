@@ -11,7 +11,10 @@
     <EmbeddedResource Include="$(DiscRuntimeRoot)\share\libxml2\copyright" LogicalName="ThirdParty.Licenses.libxml2.txt" />
     <EmbeddedResource Include="$(DiscRuntimeRoot)\share\libiconv\copyright" LogicalName="ThirdParty.Licenses.libiconv.txt" />
   </ItemGroup>
-  <ItemGroup Condition="'$(PublishSingleFile)'=='true'">
+  <!-- 单文件形态：有压缩载荷时（NativePayloadFile 非空）光盘栈随内核一起进
+       FFF.Player.vbproj 的 BuildNativePayload 系列流程，不再作为 bundle Content；
+       没有载荷时保持旧形态（散装/无载荷单文件）。 -->
+  <ItemGroup Condition="'$(PublishSingleFile)'=='true' And '$(NativePayloadFile)'==''">
     <Content Include="@(DiscRuntime)" Link="%(Filename)%(Extension)">
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <ExcludeFromSingleFile>false</ExcludeFromSingleFile>

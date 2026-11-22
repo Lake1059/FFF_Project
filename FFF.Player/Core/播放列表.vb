@@ -15,7 +15,7 @@ End Enum
 
 Public NotInheritable Class 播放列表项
     Public Sub New(本地路径 As String)
-        路径 = 播放列表.规范本地文件(本地路径)
+        路径 = 播放列表.规范媒体文件(本地路径)
         标题 = IO.Path.GetFileNameWithoutExtension(路径)
     End Sub
     Public ReadOnly Property 路径 As String
@@ -240,6 +240,8 @@ Public NotInheritable Class 播放列表
 
     Public Function 从媒体扫描同目录Async(本地路径 As String,
                                       Optional 取消令牌 As CancellationToken = Nothing) As Task
+        ' 网络目录已经在打开时显式展开过，不再自动重扫；避免同一次打开触发第二轮 SMB 请求。
+        If 媒体路径.是网络路径(本地路径) Then Return Task.CompletedTask
         Dim 版本 As Integer
         Dim 可复用 As Boolean
         Dim 目录时间 As DateTime
@@ -380,7 +382,11 @@ Public NotInheritable Class 播放列表
         For Each 原始行 In IO.File.ReadLines(完整列表路径, Encoding.UTF8)
             Dim 行 = 原始行.Trim()
             If 行.Length = 0 OrElse 行.StartsWith("#", StringComparison.Ordinal) Then Continue For
-            If 行.Contains("://", StringComparison.Ordinal) OrElse 行.StartsWith("\\", StringComparison.Ordinal) Then Throw New InvalidDataException("M3U8 中包含被禁止的网络路径。")
+            If 行.Contains("://", StringComparison.Ordinal) OrElse
+               行.StartsWith("\\", StringComparison.Ordinal) OrElse
+               行.StartsWith("//", StringComparison.Ordinal) Then
+                Throw New InvalidDataException("M3U8 中包含被禁止的网络路径。")
+            End If
             Dim 路径 = If(IO.Path.IsPathRooted(行), 行, IO.Path.Combine(目录, 行))
             Dim 值 As New 播放列表项(路径)
             If 已发现.Add(值.路径) Then 新列表.Add(值)
@@ -449,6 +455,27 @@ Public NotInheritable Class 播放列表
 
     Friend Shared Function 是相机RAW文件(路径 As String) As Boolean
         Return Raw格式.是RAW(路径)
+    End Function
+
+    Friend Shared Function 规范媒体文件(值 As String) As String
+        ArgumentException.ThrowIfNullOrWhiteSpace(值)
+        If 是扩展或设备路径(值) OrElse 值.Contains("://", StringComparison.Ordinal) Then
+            Throw New ArgumentException("只允许普通文件或网络媒体文件。", NameOf(值))
+        End If
+        Dim 完整路径 = IO.Path.GetFullPath(值)
+        If 是扩展或设备路径(完整路径) OrElse 完整路径.Contains("://", StringComparison.Ordinal) Then
+            Throw New ArgumentException("只允许普通文件或网络媒体文件。", NameOf(值))
+        End If
+        If Not IO.File.Exists(完整路径) Then Throw New FileNotFoundException("找不到媒体文件。", 完整路径)
+        If (IO.File.GetAttributes(完整路径) And IO.FileAttributes.ReparsePoint) <> 0 Then Throw New ArgumentException("不允许重解析点文件。", NameOf(值))
+        Return 完整路径
+    End Function
+
+    Private Shared Function 是扩展或设备路径(值 As String) As Boolean
+        Return 值.StartsWith("\\?\", StringComparison.Ordinal) OrElse
+               值.StartsWith("//?/", StringComparison.Ordinal) OrElse
+               值.StartsWith("\\.\", StringComparison.Ordinal) OrElse
+               值.StartsWith("//./", StringComparison.Ordinal)
     End Function
 
     Friend Shared Function 规范本地文件(值 As String) As String

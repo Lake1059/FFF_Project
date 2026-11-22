@@ -810,6 +810,7 @@ Friend Module 外部模块接口
         Dim 列表 As New List(Of String)
         添加目录(列表, 目录覆盖)
         添加目录(列表, Environment.GetEnvironmentVariable(模块目录环境变量))
+        添加目录(列表, IO.Path.Combine(宿主目录, "Modules"))
         Dim 进程目录 = IO.Path.GetDirectoryName(Environment.ProcessPath)
         If Not String.IsNullOrWhiteSpace(进程目录) Then 添加目录(列表, IO.Path.Combine(进程目录, "Modules"))
         添加目录(列表, IO.Path.Combine(AppContext.BaseDirectory, "Modules"))
@@ -819,7 +820,11 @@ Friend Module 外部模块接口
     Private Sub 添加目录(列表 As List(Of String), 目录 As String)
         If String.IsNullOrWhiteSpace(目录) Then Return
         Try
-            列表.Add(IO.Path.GetFullPath(目录))
+            Dim 完整 = IO.Path.GetFullPath(目录).TrimEnd(IO.Path.DirectorySeparatorChar, IO.Path.AltDirectorySeparatorChar)
+            For Each 已有 In 列表
+                If String.Equals(已有, 完整, StringComparison.OrdinalIgnoreCase) Then Return
+            Next
+            列表.Add(完整)
         Catch
         End Try
     End Sub

@@ -282,6 +282,21 @@ Friend NotInheritable Class Ai字幕包下载器
     ''' （.part 保留，可再次点击续传）。进度为结构化：总百分比（0-100，跨文件累计）
     ''' + 状态行文本。类型决定清单与生成清单的引擎（GGUF/llama 或 ONNX/onnx）。
     ''' 两种包都有完整公共源链，母仓只是可选加速（zip 整包优先，散件兜底）。</summary>
+    ''' <summary>随播放器部署的 AI 资源根：数据目录优先，其次原程序目录/单文件基准目录。
+    ''' 内层 exe 被缓存到 3FP.runtime\payload 后，资源仍应从宿主数据目录找。
+    ''' 单文件发布：首次访问时把嵌入的 worker/声明/许可解到该根。</summary>
+    Friend Shared Function 本体资源根() As String
+        For Each 根 In {数据目录, 程序目录, AppContext.BaseDirectory}
+            If String.IsNullOrWhiteSpace(根) Then Continue For
+            Try
+                AI字幕资源.确保(根)
+                If File.Exists(Path.Combine(根, "ai-subtitles", "asr_worker.py")) Then Return 根
+            Catch
+            End Try
+        Next
+        Return 数据目录
+    End Function
+
     Friend Shared Async Function 下载包Async(目标目录 As String, 类型 As 包类型,
                                               进度 As IProgress(Of 下载进度),
                                               取消 As CancellationToken) As Task(Of String)
@@ -379,22 +394,24 @@ Friend NotInheritable Class Ai字幕包下载器
         Next
         报告(总字节, "组装扩展包（worker / 清单）…")
 
+        ' 本体资源优先跟随数据目录；旧散装/单文件布局依次回退程序目录、AppContext。
+        Dim 资源根 = 本体资源根()
         ' worker：随播放器部署的副本复制进包（包契约要求 worker 在包根）。
-        Dim 本体worker = Path.Combine(AppContext.BaseDirectory, "ai-subtitles", "asr_worker.py")
+        Dim 本体worker = Path.Combine(资源根, "ai-subtitles", "asr_worker.py")
         If Not File.Exists(本体worker) Then
             Return "随播放器部署的 ai-subtitles\asr_worker.py 缺失（安装不完整），无法生成扩展包"
         End If
         File.Copy(本体worker, Path.Combine(根, "asr_worker.py"), True)
 
         ' 第三方许可/来源与处理声明：随播放器部署，包根必须有一份；缺了就说明安装不完整。
-        Dim 本体声明 = Path.Combine(AppContext.BaseDirectory, "ai-subtitles", "AI字幕包声明.txt")
+        Dim 本体声明 = Path.Combine(资源根, "ai-subtitles", "AI字幕包声明.txt")
         If Not File.Exists(本体声明) Then
             Return "随播放器部署的 ai-subtitles\AI字幕包声明.txt 缺失（安装不完整），无法生成扩展包"
         End If
         File.Copy(本体声明, Path.Combine(根, "AI字幕包声明.txt"), True)
 
         ' 包内第一方 worker/适配代码仍按 MIT；没有 LICENSE.txt 就谈不上保留版权声明。
-        Dim 本体许可 = Path.Combine(AppContext.BaseDirectory, "LICENSE.txt")
+        Dim 本体许可 = Path.Combine(资源根, "LICENSE.txt")
         If Not File.Exists(本体许可) Then
             Return "随播放器部署的 LICENSE.txt 缺失（安装不完整），无法生成扩展包"
         End If
@@ -402,7 +419,7 @@ Friend NotInheritable Class Ai字幕包下载器
 
         ' 第三方许可原文：随播放器部署在 licenses\ai，整目录复制进包；
         ' 缺目录即视为安装不完整，不在包内留下指向不存在的路径。
-        Dim 许可源 = Path.Combine(AppContext.BaseDirectory, "licenses", "ai")
+        Dim 许可源 = Path.Combine(资源根, "licenses", "ai")
         If Not Directory.Exists(许可源) Then
             Return "随播放器部署的 licenses\ai 缺失（安装不完整），无法生成扩展包"
         End If
@@ -420,7 +437,7 @@ Friend NotInheritable Class Ai字幕包下载器
         If 类型 = 包类型.Npu Then
             ' qwen3_ort.py：我们自己的推理实现，随 exe 部署（与 worker 同一套路），
             ' 复制进包根——worker 用 Path(__file__).with_name 找它。
-            Dim 本体ort = Path.Combine(AppContext.BaseDirectory, "ai-subtitles", "qwen3_ort.py")
+            Dim 本体ort = Path.Combine(资源根, "ai-subtitles", "qwen3_ort.py")
             If Not File.Exists(本体ort) Then
                 Return "随播放器部署的 ai-subtitles\qwen3_ort.py 缺失（安装不完整），无法生成 NPU 扩展包"
             End If

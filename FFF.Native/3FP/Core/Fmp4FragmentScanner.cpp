@@ -204,18 +204,33 @@ bool AccumulateTrun(AVIOContext* io, std::uint32_t defaultDuration,
 // ---------------------------------------------------------------------------
 // C-FMP4-DETECT@1
 // ---------------------------------------------------------------------------
-bool Fmp4FragmentScanner::DetectFragmented(const char* pathUtf8) noexcept {
+bool Fmp4FragmentScanner::DetectFragmented(const char* pathUtf8,
+    const ULONGLONG deadlineTick, const AVIOInterruptCB* externalInterrupt) noexcept {
     try {
         if (pathUtf8 == nullptr || *pathUtf8 == '\0') return false;   // 空路径
+        struct InterruptContext {
+            ULONGLONG deadline;
+            const AVIOInterruptCB* external;
+        } interruptContext{deadlineTick, externalInterrupt};
+        const auto cancelled = [](void* opaque) noexcept -> int {
+            const auto& context = *static_cast<const InterruptContext*>(opaque);
+            if (context.deadline != 0 && GetTickCount64() >= context.deadline) return 1;
+            return context.external != nullptr && context.external->callback != nullptr &&
+                context.external->callback(context.external->opaque) != 0;
+        };
+        const AVIOInterruptCB interrupt{cancelled, &interruptContext};
         std::string error;
-        // 独立旁路只读句柄：不触碰调用方的 format_/formatIo_（demux 句柄独立）。
-        const auto input = SharedFileInput::Open(pathUtf8, error);
+        // 独立旁路只读句柄按短生命周期 reader 限制到两槽。Open 保存同一个
+        // 回调用于读和 seek，input 在局部 interruptContext 之前析构。
+        const auto input = SharedFileInput::Open(pathUtf8, error, deadlineTick, true, &interrupt);
         if (!input) return false;
         auto* io = input->Context();
         if (io == nullptr) return false;
 
+        // avio 可能直接读取缓冲的 box 头，因此每轮也主动检查取消。
         // 从偏移 0 逐顶层 box 读头；只读 box 头，绝不读 mdat 载荷（R1.3）。
         for (;;) {
+            if (cancelled(&interruptContext)) return false;
             const auto boxOffset = avio_tell(io);
             if (boxOffset < 0) return false;
             BoxHeader header;
@@ -227,11 +242,12 @@ bool Fmp4FragmentScanner::DetectFragmented(const char* pathUtf8) noexcept {
                 if (moovEnd == 0) return false;
                 auto childOffset = header.bodyOffset;
                 while (childOffset < moovEnd && moovEnd - childOffset >= 8) {
+                    if (cancelled(&interruptContext)) return false;
                     if (avio_seek(io, static_cast<std::int64_t>(childOffset), SEEK_SET) < 0)
                         return false;
                     BoxHeader child;
                     if (!ReadBoxHeader(io, childOffset, child)) return false; // IO/EOF → false
-                    if (child.type == BoxTypeMvex) return true;
+                    if (child.type == BoxTypeMvex) return !cancelled(&interruptContext);
                     if (child.toEndOfFile) break;
                     if (child.endOffset > moovEnd) break; // 越界子 box：停止该 moov 遍历
                     childOffset = child.endOffset;
@@ -252,7 +268,8 @@ bool Fmp4FragmentScanner::DetectFragmented(const char* pathUtf8) noexcept {
 // C-FMP4-SCANNER@1 — 生命周期
 // ---------------------------------------------------------------------------
 bool Fmp4FragmentScanner::Start(const char* pathUtf8, AVRational referenceStreamTimeBase,
-    std::int64_t timelineOrigin100ns, std::int32_t referenceTrackId) noexcept {
+    std::int64_t timelineOrigin100ns, std::int32_t referenceTrackId,
+    const ULONGLONG openDeadlineTick, const AVIOInterruptCB* openInterrupt) noexcept {
     try {
         // 契约失败路径：空路径 / timeBase 分母 0 → 不产生线程与表。
         if (pathUtf8 == nullptr || *pathUtf8 == '\0') return false;
@@ -263,8 +280,11 @@ bool Fmp4FragmentScanner::Start(const char* pathUtf8, AVRational referenceStream
         // 先同步打开：SharedFileInput::Open 失败时不启动线程（契约失败路径）；
         // 成功则把该独立旁路句柄移交给扫描线程（R5.1，与 demux 句柄无共享）。
         std::string error;
-        auto input = SharedFileInput::Open(pathUtf8, error);
+        auto input = SharedFileInput::Open(pathUtf8, error, openDeadlineTick, true, openInterrupt);
         if (!input) return false;
+        // 打开回调只在 Start 内有效。移交前替换为扫描器自己的回调，使
+        // RequestStop 能中断后台读等待和 seek 排空。
+        input->SetInterrupt(AVIOInterruptCB{&Fmp4FragmentScanner::ScanInterruptCallback, this});
 
         // 此时无线程运行、无并发读者：安全重置共享状态。
         {
@@ -298,6 +318,12 @@ Fmp4FragmentScanner::~Fmp4FragmentScanner() {
 
 void Fmp4FragmentScanner::RequestStop() noexcept {
     stopRequested_.store(true, std::memory_order_release);
+}
+
+int Fmp4FragmentScanner::ScanInterruptCallback(void* opaque) noexcept {
+    const auto* scanner = static_cast<const Fmp4FragmentScanner*>(opaque);
+    return scanner != nullptr &&
+        scanner->stopRequested_.load(std::memory_order_acquire) ? 1 : 0;
 }
 
 void Fmp4FragmentScanner::StopAndJoin() noexcept {

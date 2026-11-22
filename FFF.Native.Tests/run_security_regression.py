@@ -1,6 +1,7 @@
 """Build first with /p:SecurityRegressionTests=true; runs only synthetic media."""
 import argparse
 import ctypes
+from contextlib import nullcontext
 import os
 from pathlib import Path
 import shutil
@@ -24,13 +25,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ffmpeg", default=shutil.which("ffmpeg"))
     parser.add_argument("--dll", type=Path)
+    parser.add_argument("--media-dir", type=Path,
+                        help="Create and retain fixtures in a new directory instead of system temp")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     dll = args.dll or root / "FFF.Native/x64/Release/FFF.Native.dll"
     directories = [root / "runtime", root / "third_party/vcpkg_installed/x64-windows/bin", dll.parent]
     handles = [os.add_dll_directory(str(path)) for path in directories]
     os.environ["FFF3FP_PREFETCH_HOST"] = "0"
-    with tempfile.TemporaryDirectory(prefix="3fp-security-media-") as folder:
+    if args.media_dir is not None:
+        args.media_dir.mkdir(parents=True, exist_ok=False)
+    media_scope = (nullcontext(str(args.media_dir)) if args.media_dir is not None
+                   else tempfile.TemporaryDirectory(prefix="3fp-security-media-"))
+    with media_scope as folder:
         media = Path(folder)
         for name, w, h in [("small.bmp", 64, 64), ("4k.bmp", 3840, 2160), ("8k.bmp", 7680, 4320)]:
             bmp(media / name, w, h)

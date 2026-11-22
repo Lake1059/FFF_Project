@@ -40,9 +40,7 @@ End Class
 
 Public Module 光盘路径
     Public Function 是光盘路径(路径 As String) As Boolean
-        If String.IsNullOrWhiteSpace(路径) Then Return False
-        Dim 扩展名 = Path.GetExtension(路径)
-        Return String.Equals(扩展名, ".bdmv", StringComparison.OrdinalIgnoreCase) OrElse Directory.Exists(路径)
+        Return 媒体路径.是蓝光光盘路径(路径)
     End Function
     Public Function 媒体存在(路径 As String) As Boolean
         Return Not String.IsNullOrWhiteSpace(路径) AndAlso (File.Exists(路径) OrElse Directory.Exists(路径))

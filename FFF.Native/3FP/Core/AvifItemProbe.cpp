@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "3FP/Core/AvifItemProbe.h"
+#include "Shared/Ffmpeg/SharedFileInput.h"
 
 #include <algorithm>
 #include <array>
@@ -53,16 +54,50 @@ bool FindBox(const std::uint8_t* data, const std::int64_t from, const std::int64
     return false;
 }
 
-std::wstring FromUtf8(const char* value) {
-    if (value == nullptr || *value == '\0') return {};
-    const auto length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        value, -1, nullptr, 0);
-    if (length <= 1) return {};
-    std::wstring result(static_cast<std::size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1,
-        result.data(), length);
-    result.resize(static_cast<std::size_t>(length - 1));
-    return result;
+// Keep this state alive until after SharedFileInput is destroyed: its reads
+// and seeks invoke the copied AVIO callback while waiting for I/O completion.
+struct ReadControl {
+    ULONGLONG deadlineTick = 0;
+    AVIOInterruptCB interrupt{};
+
+    static int Interrupted(void* opaque) noexcept {
+        const auto& control = *static_cast<const ReadControl*>(opaque);
+        return (control.deadlineTick != 0 && GetTickCount64() >= control.deadlineTick) ||
+            (control.interrupt.callback != nullptr &&
+                control.interrupt.callback(control.interrupt.opaque) != 0);
+    }
+
+    bool Check(std::string& detail) const {
+        if (deadlineTick != 0 && GetTickCount64() >= deadlineTick) {
+            detail = "The image read deadline expired.";
+            return false;
+        }
+        if (interrupt.callback != nullptr && interrupt.callback(interrupt.opaque) != 0) {
+            detail = "The image read was interrupted.";
+            return false;
+        }
+        return true;
+    }
+};
+
+bool ReadExactly(AVIOContext* context, std::vector<std::uint8_t>& bytes,
+    const ReadControl& control, std::string& detail, const char* failure) {
+    std::size_t position = 0;
+    while (position < bytes.size()) {
+        if (!control.Check(detail)) return false;
+        const auto chunk = static_cast<int>(
+            std::min<std::size_t>(bytes.size() - position, 64 * 1024));
+        const auto read = avio_read(context, bytes.data() + position, chunk);
+        if (!control.Check(detail)) return false;
+        // avio_read can return a short positive read before EOF or an error.
+        // Only a complete window is safe to hand to the metadata parser.
+        if (read <= 0) {
+            detail = failure;
+            return false;
+        }
+        position += static_cast<std::size_t>(read);
+    }
+    return control.Check(detail);
 }
 
 struct Property {
@@ -508,75 +543,69 @@ bool AvifItemProbe::InspectTailBytes(const std::uint8_t* data, const std::size_t
 }
 
 bool AvifItemProbe::Read(const char* pathUtf8, const std::int64_t maxBytes,
-    AvifItemInfo& info, std::string& detail) noexcept {
+    AvifItemInfo& info, std::string& detail, const ULONGLONG deadlineTick,
+    const AVIOInterruptCB* interrupt) noexcept try {
     info = AvifItemInfo{};
     detail.clear();
     if (pathUtf8 == nullptr || *pathUtf8 == '\0' || maxBytes <= 0) {
         detail = "The probe path or byte limit is not usable.";
         return false;
     }
-    const auto path = FromUtf8(pathUtf8);
-    if (path.empty()) {
-        detail = "The probe path is not valid UTF-8.";
-        return false;
-    }
-    const auto file = CreateFileW(path.c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        detail = "Could not open the file for property probing.";
-        return false;
-    }
-    LARGE_INTEGER fileSize{};
-    if (!GetFileSizeEx(file, &fileSize) || fileSize.QuadPart <= 0) {
-        CloseHandle(file);
+    ReadControl control{deadlineTick, interrupt != nullptr ? *interrupt : AVIOInterruptCB{}};
+    const AVIOInterruptCB ioInterrupt{&ReadControl::Interrupted, &control};
+    if (!control.Check(detail)) return false;
+    auto input = SharedFileInput::Open(pathUtf8, detail, deadlineTick, true, &ioInterrupt);
+    if (!control.Check(detail) || input == nullptr) return false;
+    auto* context = input->Context();
+    const auto fileSize = avio_size(context);
+    if (!control.Check(detail)) return false;
+    if (fileSize <= 0) {
         detail = "Could not read the file size for property probing.";
         return false;
     }
-    const auto readBytes = std::min<std::int64_t>(fileSize.QuadPart, maxBytes);
-    if (readBytes > 64 * 1024 * 1024) {
-        CloseHandle(file);
-        detail = "The property probe byte limit is too large.";
-        return false;
-    }
+    const auto prefixLimit = std::min<std::int64_t>(maxBytes, 16 * 1024 * 1024);
+    const auto readBytes = std::min(fileSize, prefixLimit);
     std::vector<std::uint8_t> bytes(static_cast<std::size_t>(readBytes));
-    DWORD read = 0;
-    const auto ok = ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
-    CloseHandle(file);
-    if (!ok || read != bytes.size()) {
-        detail = "Could not read the property-probe prefix.";
+    if (!ReadExactly(context, bytes, control, detail,
+        "Could not read the complete property-probe prefix.")) return false;
+    const bool inspected = InspectBytes(bytes.data(), bytes.size(), info, detail);
+    if (!control.Check(detail)) {
+        info = AvifItemInfo{};
         return false;
     }
-    const bool inspected = InspectBytes(bytes.data(), bytes.size(), info, detail);
     // The meta box may follow a large mdat. The prefix read above cannot see it,
     // and the old fallback was the full-file iloc repair. Try a bounded tail
     // window first so a normal single-extent file still avoids that read.
     bool tailInspected = false;
     const auto tailLimit = std::min<std::int64_t>(maxBytes, 4 * 1024 * 1024);
-    if (!inspected && fileSize.QuadPart > readBytes && tailLimit > 0) {
-        const auto tailBytes = std::min<std::int64_t>(fileSize.QuadPart, tailLimit);
-        const auto tailFile = CreateFileW(path.c_str(), GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (tailFile != INVALID_HANDLE_VALUE) {
-            LARGE_INTEGER offset{};
-            offset.QuadPart = fileSize.QuadPart - tailBytes;
-            std::vector<std::uint8_t> tail(static_cast<std::size_t>(tailBytes));
-            DWORD tailRead = 0;
-            const auto positioned = SetFilePointerEx(tailFile, offset, nullptr, FILE_BEGIN);
-            const auto tailOk = positioned != FALSE &&
-                ReadFile(tailFile, tail.data(), static_cast<DWORD>(tail.size()), &tailRead, nullptr);
-            CloseHandle(tailFile);
-            if (tailOk && static_cast<std::size_t>(tailRead) == tail.size()) {
-                std::string tailDetail;
-                tailInspected = InspectTailBytes(tail.data(), tail.size(), info, tailDetail);
-                if (!tailInspected && GetEnvironmentVariableW(L"FFF_AVIF_TRACE", nullptr, 0))
-                    std::fprintf(stderr, "[avif-probe tail] %s\n", tailDetail.c_str());
-            }
+    if (!inspected && fileSize > readBytes && tailLimit > 0) {
+        const auto tailBytes = std::min(fileSize, tailLimit);
+        const auto offset = fileSize - tailBytes;
+        if (!control.Check(detail)) return false;
+        const auto positioned = avio_seek(context, offset, SEEK_SET);
+        if (!control.Check(detail)) return false;
+        if (positioned != offset) {
+            detail = "Could not seek to the property-probe tail.";
+            return false;
         }
+        std::vector<std::uint8_t> tail(static_cast<std::size_t>(tailBytes));
+        if (!ReadExactly(context, tail, control, detail,
+            "Could not read the complete property-probe tail.")) return false;
+        std::string tailDetail;
+        tailInspected = InspectTailBytes(tail.data(), tail.size(), info, tailDetail);
+        if (!tailInspected && GetEnvironmentVariableW(L"FFF_AVIF_TRACE", nullptr, 0))
+            std::fprintf(stderr, "[avif-probe tail] %s\n", tailDetail.c_str());
+    }
+    if (!control.Check(detail)) {
+        info = AvifItemInfo{};
+        return false;
     }
     const auto result = inspected || tailInspected;
     if (!result && GetEnvironmentVariableW(L"FFF_AVIF_TRACE", nullptr, 0))
         std::fprintf(stderr, "[avif-probe] %s\n", detail.c_str());
     return result;
+} catch (...) {
+    info = AvifItemInfo{};
+    detail.clear();
+    return false;
 }

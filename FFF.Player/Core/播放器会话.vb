@@ -153,7 +153,11 @@ Public NotInheritable Class 播放器会话
         ' 未设 FFF_CT_LOAD_TRACE=1 时这里连一次分配都不做。
         Dim 计时 As 通路计时 = Nothing
         If 色彩变换装载计时已启用 Then 计时 = New 通路计时()
-        调用路径(AddressOf 播放器原生接口.FFF3FP_Open, 本地路径)
+        If 媒体路径.是网络路径(本地路径) Then
+            调用路径(AddressOf 播放器原生接口.FFF3FP_OpenNetwork, 本地路径)
+        Else
+            调用路径(AddressOf 播放器原生接口.FFF3FP_Open, 本地路径)
+        End If
         ' 呈现策略一次性接上：请求 VRR 低时延路径（tearing present）。偏好语义——
         ' 渲染侧只在自适应降速（pace）真正介入时兑现，健康播放仍是 vblank 钳制；
         ' 旧内核没有该导出时静默跳过，不影响播放。

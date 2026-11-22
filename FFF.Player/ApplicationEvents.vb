@@ -23,6 +23,12 @@ Namespace My
         Friend Shared 启动CPU放置已启用 As Boolean = False
 
         Private Sub MyApplication_Startup(sender As Object, e As StartupEventArgs) Handles Me.Startup
+            宿主路径.准备搜索路径(宿主目录)
+            原生载荷.跟踪("MyApplication_Startup 触发")
+            ' 第一件事：单文件分发的原生件压在载荷里，必须先解包再碰内核。
+            ' 散装/开发运行没有载荷，这里立即返回 Nothing，不产生任何动作。
+            原生载荷.确保就绪()
+            AI字幕资源.确保(数据目录)
             启动期CPU放置开始()
             启动期拉高优先级()
             启动期预取大件()
@@ -133,6 +139,10 @@ Namespace My
                 If Not String.IsNullOrEmpty(托管目录) AndAlso
                     Not 候选目录.Any(Function(d) String.Equals(d, 托管目录, StringComparison.OrdinalIgnoreCase)) Then
                     候选目录.Add(托管目录)
+                End If
+                If Not String.IsNullOrWhiteSpace(宿主目录) AndAlso
+                    Not 候选目录.Any(Function(d) String.Equals(d, 宿主目录, StringComparison.OrdinalIgnoreCase)) Then
+                    候选目录.Add(宿主目录)
                 End If
                 Dim 预取线程 As New Thread(Sub()
                     Try

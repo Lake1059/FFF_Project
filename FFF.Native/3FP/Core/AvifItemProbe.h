@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <string>
 
+struct AVIOInterruptCB;
+
 // Read-only probe for the item properties a layered AVIF actually declares.
 //
 // The previous layered-still signal was the iloc extent count. That is a storage
@@ -52,9 +54,12 @@ public:
     // Reads only the beginning of the file (the meta box is normally in the
     // first few KiB) and fills `info`. Returns false with `detail` when the
     // primary item or its property associations cannot be read. `info.valid`
-    // is still false on failure.
+    // is still false on failure. Prefix reads are capped at 16 MiB; the optional
+    // tail window is capped at 4 MiB. deadlineTick is an absolute GetTickCount64
+    // deadline (0 disables it); interrupt is checked during open, reads and seek.
     static bool Read(const char* pathUtf8, std::int64_t maxBytes,
-        AvifItemInfo& info, std::string& detail) noexcept;
+        AvifItemInfo& info, std::string& detail, ULONGLONG deadlineTick = 0,
+        const AVIOInterruptCB* interrupt = nullptr) noexcept;
 
     // Same parsing on an in-memory prefix. Exposed for tests and for callers
     // that already hold the bytes.

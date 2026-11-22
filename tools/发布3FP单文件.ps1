@@ -1,4 +1,4 @@
-﻿param(
+param(
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release",
     [string]$OutputDirectory = "",
@@ -47,9 +47,12 @@ if ($LASTEXITCODE -ne 0) { throw "FFF.Native x64 $Configuration build failed." }
 
 # 单文件形态按项目分发策略：只输出 FFF.Player.exe，不复制 licenses/ 或其他
 # 许可文件；许可入口由“关于”页的项目主页链接和仓库主页提供。
-# 单文件模式最容易出的坑是“内核更新了、libraw.dll 没进 bundle”：内核自解压到临时目录后
-# 从自身目录找 libraw.dll，而发布目录只有一个 exe。这里先卡内核 RAW 标识；bundling 由
-# FFF.Player.vbproj 的 PublishSingleFile Content 项负责（libraw.dll 与内核同批自解压）。
+# 原生件不再作为 bundle 条目：.NET 的 bundle 压缩只对自包含发布成立（框架依赖发布被
+# SDK 直接拒绝，运行时的 FDD apphost 也拒绝压缩条目，见 FFF.Player.vbproj 注释）。
+# 这里改用 tools\native_payload.cs 把它们压成 Brotli 载荷，由 vbproj 内嵌进宿主程序集，
+# 宿主 Core\原生载荷.vb 在启动早期解压到缓存后再加载内核。
+# 清单只从工程的 WriteSingleFileNativePayloadList target 取，脚本不另写一份文件列表——
+# 两处各维护一份，漂移的结果就是发出去的单文件包缺件。
 $KernelDllBuilt = Join-Path $ProjectRoot "FFF.Native\x64\$Configuration\FFF.Native.dll"
 $KernelAscii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($KernelDllBuilt))
 if (-not ($KernelAscii.Contains('libraw.dll') -and $KernelAscii.Contains('FFF3FP_GetRawInfo'))) {
@@ -57,6 +60,7 @@ if (-not ($KernelAscii.Contains('libraw.dll') -and $KernelAscii.Contains('FFF3FP
 }
 
 $StagingDirectory = Join-Path ([IO.Path]::GetTempPath()) ("3FP-publish-" + [Guid]::NewGuid().ToString("N"))
+$PayloadDirectory = Join-Path ([IO.Path]::GetTempPath()) ("3FP-native-payload-" + [Guid]::NewGuid().ToString("N"))
 $PendingExecutable = $null
 try {
     New-Item -ItemType Directory -Path $StagingDirectory | Out-Null
@@ -67,6 +71,36 @@ try {
         Get-ChildItem -Path $HostBinRoot -Recurse -File -Include 'av*.dll','sw*.dll' -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
     }
+    # ── 单文件原生载荷（Brotli）────────────────────────────────────────────
+    # 清单口径由 vbproj 的 WriteSingleFileNativePayloadList 决定（内核 + LibRaw +
+    # libass 栈 + 光盘栈，16 件）；清单为空说明依赖没准备齐，vbproj 会 fail-closed。
+    New-Item -ItemType Directory -Path $PayloadDirectory -Force | Out-Null
+    $PayloadList = Join-Path $PayloadDirectory "payload-list.txt"
+    $global:LASTEXITCODE = $null
+    & $MSBuild (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
+        -t:WriteSingleFileNativePayloadList -nologo `
+        "-p:Configuration=$Configuration" "-p:PublishSingleFile=true" "-p:NativePayloadListFile=$PayloadList"
+    if ($LASTEXITCODE -ne 0) { throw "生成单文件原生载荷清单失败（$LASTEXITCODE）。" }
+    if (-not (Test-Path -LiteralPath $PayloadList -PathType Leaf)) {
+        throw "单文件原生载荷清单没有生成：$PayloadList"
+    }
+    $PayloadFile = Join-Path $PayloadDirectory "native-payload.bin"
+    # 打包器是 .NET 10+ 文件式应用，必须在没有工程文件的目录里跑，否则 dotnet run 会把
+    # 当前目录的工程当成入口。
+    Push-Location (Join-Path $ProjectRoot "tools")
+    try {
+        $global:LASTEXITCODE = $null
+        & $DotNet run native_payload.cs -- $PayloadFile $PayloadList
+    } finally {
+        Pop-Location
+    }
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $PayloadFile -PathType Leaf)) {
+        throw "打包单文件原生载荷失败（$LASTEXITCODE）。"
+    }
+    $PayloadBytes = (Get-Item -LiteralPath $PayloadFile).Length
+    $PayloadCount = @(Get-Content -LiteralPath $PayloadList | Where-Object { $_.Trim() }).Count
+    Write-Host ("  原生载荷：{0} 件 → {1:N0} 字节（Brotli）" -f $PayloadCount, $PayloadBytes)
+
     # TFM 参数包：留空时展开为 0 个参数，命令行与改动前逐字符一致。
     $TfmArgs = @()
     if (-not [string]::IsNullOrWhiteSpace($NetTFM)) { $TfmArgs += "-p:NetTFM=$NetTFM" }
@@ -77,6 +111,7 @@ try {
     & $DotNet publish (Join-Path $ProjectRoot "FFF.Player\FFF.Player.vbproj") `
         -c $Configuration -r win-x64 --self-contained false -o $StagingDirectory `
         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+        -p:NativePayloadFile=$PayloadFile `
         -p:BodyOnly=true `
         -p:PublishDocumentationFiles=false `
         -p:DebugType=None -p:DebugSymbols=false @TfmArgs @R2rArgs
@@ -120,5 +155,6 @@ try {
 }
 finally {
     if ($PendingExecutable -and (Test-Path -LiteralPath $PendingExecutable)) { Remove-Item -LiteralPath $PendingExecutable -Force }
+    if ($PayloadDirectory -and (Test-Path -LiteralPath $PayloadDirectory)) { Remove-Item -LiteralPath $PayloadDirectory -Recurse -Force }
     if (Test-Path -LiteralPath $StagingDirectory) { Remove-Item -LiteralPath $StagingDirectory -Recurse -Force }
 }

@@ -45,13 +45,40 @@ Friend Module 安全修复回归
             End Try
             检查(拒绝, "network path rejected before existence check: " & 前缀)
         Next
-        Dim 路径 = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString() & "中文.mp4")
+        Dim 测试目录 = Path.Combine(AppContext.BaseDirectory, "security-path-" & Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(测试目录)
+        Dim 路径 = Path.Combine(测试目录, "中文.mp4")
         Try
             File.WriteAllBytes(路径, {0})
             检查(播放列表.规范本地文件(路径) = 路径, "local Unicode path")
             检查(播放列表.规范本地文件(Path.GetRelativePath(Environment.CurrentDirectory, 路径)) = 路径, "relative local path")
+            检查(播放列表.规范媒体文件(路径) = 路径, "media path accepts local file")
         Finally
             File.Delete(路径)
+        End Try
+
+        检查(媒体路径.是网络路径("\\server\share\file.mp4"), "UNC path classified as network")
+        检查(媒体路径.是网络路径("//server/share/file.mp4"), "slash UNC classified as network")
+        检查(Not 媒体路径.是网络路径(Path.Combine(Path.GetPathRoot(AppContext.BaseDirectory), "media\file.mp4")), "local drive path not classified as network")
+        检查(Form1.取得命令行文件({"\\server\share\file.mp4"}) <> String.Empty,
+            "command line accepts network media without probing")
+        检查(Form1.取得命令行文件({"\\?\UNC\server\share\file.mp4"}) <> String.Empty,
+            "command line accepts extended UNC media without probing")
+        Dim 蓝光目录 = Path.Combine(测试目录, "bluray")
+        Dim 普通目录 = Path.Combine(测试目录, "ordinary")
+        Dim 媒体目录 = Path.Combine(测试目录, "media")
+        Try
+            Directory.CreateDirectory(Path.Combine(蓝光目录, "BDMV"))
+            Directory.CreateDirectory(普通目录)
+            Directory.CreateDirectory(媒体目录)
+            File.WriteAllBytes(Path.Combine(媒体目录, "sample.mp4"), {0})
+            检查(媒体路径.是蓝光光盘路径(蓝光目录), "BDMV directory classified as Blu-ray")
+            检查(Not 媒体路径.是蓝光光盘路径(普通目录), "ordinary directory is not Blu-ray")
+            检查(媒体路径.展开打开路径({普通目录}).Count() = 0, "ordinary empty folder expands to no media")
+            检查(媒体路径.展开打开路径({媒体目录}).Count() = 1, "folder expands to contained media")
+            检查(媒体路径.展开打开路径({蓝光目录}).Single() = 蓝光目录, "Blu-ray folder stays a disc path")
+        Finally
+            Directory.Delete(测试目录, True)
         End Try
     End Sub
 
