@@ -90,6 +90,15 @@ bool LowerCurrentThreadMemoryPriority() noexcept {
     return readback == MEMORY_PRIORITY_VERY_LOW;
 }
 
+// The still lane is background work. Matching the helper's THREAD_PRIORITY_LOWEST
+// means a foreground image open keeps the CPU when both are runnable; the worker
+// still uses idle cores, but never preempts the decoder/renderer the user is
+// waiting on. This is scheduling priority, not memory priority.
+bool LowerCurrentThreadCpuPriority() noexcept {
+    if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST)) return false;
+    return GetThreadPriority(GetCurrentThread()) == THREAD_PRIORITY_LOWEST;
+}
+
 std::wstring Utf8ToWide(const std::string& utf8) noexcept {
     if (utf8.empty()) return std::wstring();
     const int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
@@ -733,9 +742,11 @@ void PrefetchService::StopHelper() noexcept {
 void PrefetchService::WorkerLoop() noexcept {
     FFFThreadNaming::SetCurrentThreadName("FFF.Player.Prefetch");
     const bool memoryPriorityLow = LowerCurrentThreadMemoryPriority();
+    const bool cpuPriorityLow = LowerCurrentThreadCpuPriority();
     if (EnvOn(L"FFF_MEMARB_TRACE", false)) {
-        std::fprintf(stderr, "[prefetch] worker memory-priority=very-low ok=%d\n",
-            memoryPriorityLow ? 1 : 0);
+        std::fprintf(stderr,
+            "[prefetch] worker memory-priority=very-low ok=%d cpu-priority=lowest ok=%d\n",
+            memoryPriorityLow ? 1 : 0, cpuPriorityLow ? 1 : 0);
     }
     for (;;) {
         std::vector<std::string> paths;
