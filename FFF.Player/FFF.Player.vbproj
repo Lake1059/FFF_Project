@@ -1,11 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <Import Project="..\build-config\FFmpegRuntime.props" />
-  <Import Project="..\build-config\DiscRuntime.props" />
+  <Import Project="..\third_party\FFmpegRuntime.props" />
+  <Import Project="..\third_party\DiscRuntime.props" />
   <PropertyGroup>
       <OutputType>WinExe</OutputType>
       <NetTFM Condition="'$(NetTFM)' == ''">net11.0-windows10.0.19041.0</NetTFM>
       <TargetFramework>$(NetTFM)</TargetFramework>
+      <!-- Native FFF.Native implements SMTC. The managed player does not need the WinRT projection. -->
+      <IncludeWindowsSDKRefFrameworkReferences>false</IncludeWindowsSDKRefFrameworkReferences>
+      <!-- Suppress package symbols found beside the explicit Mathematics reference in release bundles. -->
+      <AllowedReferenceRelatedFileExtensions Condition="'$(PublishSingleFile)' == 'true' And '$(DebugSymbols)' == 'false'">.xml;.pri;.dll.config;.exe.config</AllowedReferenceRelatedFileExtensions>
       <LakeUIDesignerBackend>DX11</LakeUIDesignerBackend>
       <StartupObject>Sub Main</StartupObject>
       <UseWindowsForms>true</UseWindowsForms>
@@ -90,6 +94,10 @@
        恢复引用后消融验证双向成立（移除=崩、恢复=活、事后拷 DLL 不救，属构建期差异而非运行时缺文件）。
        故保留该引用（代价仅输出目录被动文件 ~0.6MB，启动路径不加载），烘焙收益全部保留。 -->
   <PackageReference Include="Svg" Version="3.4.8" />
+    <!-- The Windows-specific Mathematics asset only adds WinRT overloads that
+         3FP and LakeUI do not use. Use the same package's portable assembly. -->
+    <PackageReference Include="Vortice.Mathematics" Version="2.1.0" ExcludeAssets="compile;runtime" GeneratePathProperty="true" />
+    <Reference Include="Vortice.Mathematics" HintPath="$(PkgVortice_Mathematics)\lib\net10.0\Vortice.Mathematics.dll" Private="true" />
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectComposition" Version="3.8.3" />
@@ -261,6 +269,8 @@
     <ItemGroup>
       <_UnexpectedBundleDll Include="@(FilesToBundle)"
           Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(FilesToBundle.Filename)%(FilesToBundle.Extension)', '(?i)^((av(codec|filter|format|util)|sw(resample|scale))(-\d+)?\.dll|FFF\.PrefetchHost\.exe)$'))" />
+      <_BundledWinRTProjection Include="@(FilesToBundle)"
+          Condition="'%(FilesToBundle.Filename)%(FilesToBundle.Extension)' == 'Microsoft.Windows.SDK.NET.dll' Or '%(FilesToBundle.Filename)%(FilesToBundle.Extension)' == 'WinRT.Runtime.dll'" />
       <_BundledPath Include="@(FilesToBundle->'%(RelativePath)')" />
       <_PlayerBundleAssembly Include="@(FilesToBundle)" Condition="'%(FilesToBundle.RelativePath)' == 'FFF.Player.dll'" />
       <_RequiredAiResource Include="asr_worker.py;qwen3_ort.py;AI字幕包声明.txt;LICENSE.txt" />
@@ -269,6 +279,7 @@
     </ItemGroup>
     <Error Condition="'@(_UnexpectedBundleDll)' != ''" Text="单文件不得内置外部 FFmpeg 或预取助手：@(_UnexpectedBundleDll)" />
     <Error Condition="'@(_MissingBundlePath)' != ''" Text="单文件缺少原生 DLL：@(_MissingBundlePath)" />
+    <Error Condition="'@(_BundledWinRTProjection)' != ''" Text="3FP 单文件包含意外的 WinRT 投影：@(_BundledWinRTProjection)" />
     <Error Condition="'@(_PlayerBundleAssembly->Count())' != '1'" Text="单文件必须包含一份 FFF.Player.dll。" />
     <VerifyPlayerAiResources AssemblyFile="@(_PlayerBundleAssembly->'%(FullPath)')" RequiredResources="@(_RequiredAiResource)" />
   </Target>

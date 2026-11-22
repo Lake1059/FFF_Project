@@ -217,8 +217,8 @@ void TraceLine(const char* line) noexcept {
     std::fprintf(stderr, "%s\n", line);
     const auto path = TraceFilePath();
     if (path.empty()) return;
-    FILE* file = _wfopen(path.c_str(), L"a");
-    if (file == nullptr) return;
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"a") != 0 || file == nullptr) return;
     std::fprintf(file, "%s\n", line);
     std::fclose(file);
 }
