@@ -86,7 +86,7 @@ Friend NotInheritable Class 播放器流选择器
         添加标题("字幕流", 字幕流.Length + 外部字幕.Count + If(有AI字幕, 1, 0))
         Dim 当前字幕索引 = 播放控制器.当前字幕流索引
         Dim 当前字幕 = 播放控制器.当前字幕
-        Dim 关闭项 = 创建流项("关闭字幕", 当前字幕索引 = -2 AndAlso Not 播放控制器.AI字幕已启用)
+        Dim 关闭项 = 创建流项("关闭字幕", 当前字幕索引 = 播放器控制器.字幕来源关闭)
         AddHandler 关闭项.Click, Sub() 播放控制器.关闭字幕()
         菜单.Items.Add(关闭项)
 
@@ -98,7 +98,7 @@ Friend NotInheritable Class 播放器流选择器
             If AI配置 IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(AI配置.名称) Then
                 AI文字 &= " · " & 缩短文本(AI配置.名称, 24)
             End If
-            Dim AI项 = 创建流项(AI文字, 播放控制器.AI字幕已启用)
+            Dim AI项 = 创建流项(AI文字, 当前字幕索引 = 播放器控制器.字幕来源AI)
             AddHandler AI项.Click, Sub() 播放控制器.选择AI字幕()
             菜单.Items.Add(AI项)
         End If
@@ -113,7 +113,7 @@ Friend NotInheritable Class 播放器流选择器
         For Each 字幕 In 外部字幕
             Dim 字幕路径 = 字幕.路径
             Dim 字幕轨索引 = 字幕.轨索引
-            Dim 已选择 = 当前字幕索引 = -1 AndAlso 当前字幕 IsNot Nothing AndAlso
+            Dim 已选择 = 当前字幕索引 = 播放器控制器.字幕来源外部 AndAlso 当前字幕 IsNot Nothing AndAlso
                 String.Equals(当前字幕.路径, 字幕路径, StringComparison.OrdinalIgnoreCase) AndAlso
                 当前字幕.流索引 = 字幕轨索引
             Dim 项 = 创建流项(格式化外部字幕(字幕), 已选择)

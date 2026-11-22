@@ -76,6 +76,7 @@ void AsrAudioTap::ReadAt(const std::size_t index, void* const dst,
 
 void AsrAudioTap::Produce(const AVFrame* const frame,
     const std::int64_t position100ns) noexcept {
+    if (Suspended()) return;
     if (frame == nullptr || frame->nb_samples <= 0 ||
         frame->ch_layout.nb_channels <= 0 || capacity_ == 0)
         return;

@@ -22,731 +22,849 @@ Partial Class Form设置_AI字幕
     '不要使用代码编辑器修改它。
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
+        Dim ToolTipEntry1 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry2 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry3 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry4 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry5 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry6 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry7 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry8 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry9 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry10 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry11 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry12 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry13 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry14 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry15 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry16 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry17 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry18 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
+        Dim ToolTipEntry19 As LakeUI.ModernComboBox.ToolTipEntry = New LakeUI.ModernComboBox.ToolTipEntry()
         ModernPanel1 = New LakeUI.ModernPanel()
-        PanelAI9 = New LakeUI.ModernPanel()
-        HCL_线程 = New LakeUI.HtmlColorLabel()
-        MCB_线程 = New LakeUI.ModernComboBox()
-        PanelAI8 = New LakeUI.ModernPanel()
-        HCL_偏移 = New LakeUI.HtmlColorLabel()
-        MTB_偏移 = New LakeUI.ModernTextBox()
-        PanelAI7 = New LakeUI.ModernPanel()
-        HCL_模型档值 = New LakeUI.HtmlColorLabel()
+        MP_高级时间 = New LakeUI.ModernPanel()
+        ModernPanel2 = New LakeUI.ModernPanel()
         MCB_模型档 = New LakeUI.ModernComboBox()
-        PanelAI6 = New LakeUI.ModernPanel()
-        HCL_预置 = New LakeUI.HtmlColorLabel()
-        MCB_预置 = New LakeUI.ModernComboBox()
+        HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
+        JEC_模型档位间距 = New LakeUI.JustEmptyControl()
+        MP_偏移列 = New LakeUI.ModernPanel()
+        MTB_偏移 = New LakeUI.ModernTextBox()
+        HCL_偏移 = New LakeUI.HtmlColorLabel()
+        JEC_步长偏移间距 = New LakeUI.JustEmptyControl()
+        MP_步长列 = New LakeUI.ModernPanel()
         MTB_步长秒 = New LakeUI.ModernTextBox()
+        HCL_步长 = New LakeUI.HtmlColorLabel()
+        JEC_窗口步长间距 = New LakeUI.JustEmptyControl()
+        MP_窗口列 = New LakeUI.ModernPanel()
         MTB_窗口秒 = New LakeUI.ModernTextBox()
-        PanelAI5 = New LakeUI.ModernPanel()
-        HCL_显示高级 = New LakeUI.HtmlColorLabel()
-        MCK_显示高级 = New LakeUI.ModernCheckBox()
-        HCL_状态 = New LakeUI.HtmlColorLabel()
-        PanelAI4 = New LakeUI.ModernPanel()
-        HCL_语言 = New LakeUI.HtmlColorLabel()
-        MCK_仅所选语言 = New LakeUI.ModernCheckBox()
-        MCB_语言 = New LakeUI.ModernComboBox()
-        PanelAI3 = New LakeUI.ModernPanel()
-        HCL_后端 = New LakeUI.HtmlColorLabel()
-        MCB_后端 = New LakeUI.ModernComboBox()
-        PanelAI2 = New LakeUI.ModernPanel()
-        HCL_设备 = New LakeUI.HtmlColorLabel()
-        MCB_设备 = New LakeUI.ModernComboBox()
-        PanelAI1 = New LakeUI.ModernPanel()
-        HCL_包目录 = New LakeUI.HtmlColorLabel()
-        MB_浏览 = New LakeUI.ModernButton()
-        MTB_包目录 = New LakeUI.ModernTextBox()
-        PanelAI11 = New LakeUI.ModernPanel()
+        HCL_窗口 = New LakeUI.HtmlColorLabel()
+        MP_高级下拉 = New LakeUI.ModernPanel()
+        MCB_推理线程 = New LakeUI.ModernComboBox()
+        JEC_高级下拉间距 = New LakeUI.JustEmptyControl()
+        MCB_节奏预置 = New LakeUI.ModernComboBox()
+        HCL_使用说明 = New LakeUI.HtmlColorLabel()
+        MP_语言 = New LakeUI.ModernPanel()
+        MCB_自动翻译为中文 = New LakeUI.ModernComboBox()
+        JEC_语言间距 = New LakeUI.JustEmptyControl()
+        MCB_字幕语言 = New LakeUI.ModernComboBox()
+        MP_推理 = New LakeUI.ModernPanel()
+        MCB_推理后端 = New LakeUI.ModernComboBox()
+        JEC_推理间距 = New LakeUI.JustEmptyControl()
+        MCB_推理设备 = New LakeUI.ModernComboBox()
+        MP_下载进度条的容器 = New LakeUI.ModernPanel()
         EPB_下载 = New LakeUI.ExcellentProgressBar()
-        HCL_下载进度 = New LakeUI.HtmlColorLabel()
-        PanelAI12 = New LakeUI.ModernPanel()
-        HCL_包类型 = New LakeUI.HtmlColorLabel()
-        MCB_包类型 = New LakeUI.ModernComboBox()
-        PanelAI10 = New LakeUI.ModernPanel()
-        HCL_下载状态 = New LakeUI.HtmlColorLabel()
-        MB_删除包 = New LakeUI.ModernButton()
-        MB_取消下载 = New LakeUI.ModernButton()
+        MP_扩展包 = New LakeUI.ModernPanel()
+        MCB_选择推理包 = New LakeUI.ModernComboBox()
+        JEC_下载间距 = New LakeUI.JustEmptyControl()
         MB_下载包 = New LakeUI.ModernButton()
+        JEC_删除间距 = New LakeUI.JustEmptyControl()
+        MB_删除选中包 = New LakeUI.ModernButton()
+        MP_目录 = New LakeUI.ModernPanel()
+        MTB_包目录 = New LakeUI.ModernTextBox()
+        JEC_目录间距 = New LakeUI.JustEmptyControl()
+        MB_浏览 = New LakeUI.ModernButton()
         HCL_标题 = New LakeUI.HtmlColorLabel()
-        ' 各行容器按「后加者靠上」从底往上加：PanelAI9 最底，标题行最后加。
-        ' 行内 Dock=Left 同理反序：先加 Dock=Fill 的说明标签，再加左侧控件
-        ' （后加者靠左），视觉上才是 控件……说明标签。
-        PanelAI9.Controls.Add(HCL_线程)
-        PanelAI9.Controls.Add(MCB_线程)
-        PanelAI8.Controls.Add(HCL_偏移)
-        PanelAI8.Controls.Add(MTB_偏移)
-        PanelAI7.Controls.Add(HCL_模型档值)
-        PanelAI7.Controls.Add(MCB_模型档)
-        PanelAI6.Controls.Add(HCL_预置)
-        PanelAI6.Controls.Add(MCB_预置)
-        PanelAI6.Controls.Add(MTB_步长秒)
-        PanelAI6.Controls.Add(MTB_窗口秒)
-        PanelAI5.Controls.Add(HCL_显示高级)
-        PanelAI5.Controls.Add(MCK_显示高级)
-        PanelAI4.Controls.Add(HCL_语言)
-        PanelAI4.Controls.Add(MCK_仅所选语言)
-        PanelAI4.Controls.Add(MCB_语言)
-        PanelAI3.Controls.Add(HCL_后端)
-        PanelAI3.Controls.Add(MCB_后端)
-        PanelAI2.Controls.Add(HCL_设备)
-        PanelAI2.Controls.Add(MCB_设备)
-        PanelAI1.Controls.Add(HCL_包目录)
-        PanelAI1.Controls.Add(MB_浏览)
-        PanelAI1.Controls.Add(MTB_包目录)
-        PanelAI11.Controls.Add(HCL_下载进度)
-        PanelAI11.Controls.Add(EPB_下载)
-        PanelAI12.Controls.Add(HCL_包类型)
-        PanelAI12.Controls.Add(MCB_包类型)
-        PanelAI10.Controls.Add(HCL_下载状态)
-        PanelAI10.Controls.Add(MB_删除包)
-        PanelAI10.Controls.Add(MB_取消下载)
-        PanelAI10.Controls.Add(MB_下载包)
-        ModernPanel1.Controls.Add(PanelAI9)
-        ModernPanel1.Controls.Add(PanelAI8)
-        ModernPanel1.Controls.Add(PanelAI7)
-        ModernPanel1.Controls.Add(PanelAI6)
-        ModernPanel1.Controls.Add(PanelAI5)
-        ModernPanel1.Controls.Add(HCL_状态)
-        ModernPanel1.Controls.Add(PanelAI4)
-        ModernPanel1.Controls.Add(PanelAI3)
-        ModernPanel1.Controls.Add(PanelAI2)
-        ModernPanel1.Controls.Add(PanelAI11)
-        ModernPanel1.Controls.Add(PanelAI10)
-        ModernPanel1.Controls.Add(PanelAI12)
-        ModernPanel1.Controls.Add(PanelAI1)
-        ModernPanel1.Controls.Add(HCL_标题)
         ModernPanel1.SuspendLayout()
-        PanelAI9.SuspendLayout()
-        PanelAI8.SuspendLayout()
-        PanelAI7.SuspendLayout()
-        PanelAI6.SuspendLayout()
-        PanelAI5.SuspendLayout()
-        PanelAI4.SuspendLayout()
-        PanelAI3.SuspendLayout()
-        PanelAI2.SuspendLayout()
-        PanelAI11.SuspendLayout()
-        PanelAI12.SuspendLayout()
-        PanelAI10.SuspendLayout()
-        PanelAI1.SuspendLayout()
+        MP_高级时间.SuspendLayout()
+        ModernPanel2.SuspendLayout()
+        MP_偏移列.SuspendLayout()
+        MP_步长列.SuspendLayout()
+        MP_窗口列.SuspendLayout()
+        MP_高级下拉.SuspendLayout()
+        MP_语言.SuspendLayout()
+        MP_推理.SuspendLayout()
+        MP_下载进度条的容器.SuspendLayout()
+        MP_扩展包.SuspendLayout()
+        MP_目录.SuspendLayout()
         SuspendLayout()
-        '
-        ' PanelAI9 / HCL_线程 / MCB_线程：推理线程数
-        '
-        PanelAI9.BackColor = Color.Transparent
-        PanelAI9.BackColor1 = Color.Transparent
-        PanelAI9.BorderSize = 0
-        PanelAI9.Controls.Add(HCL_线程)
-        PanelAI9.Dock = DockStyle.Top
-        PanelAI9.Location = New Point(15, 602)
-        PanelAI9.Name = "PanelAI9"
-        PanelAI9.Padding = New Padding(0, 10, 0, 0)
-        PanelAI9.Size = New Size(563, 42)
-        PanelAI9.TabIndex = 21
-        HCL_线程.AutoSize = True
-        HCL_线程.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_线程.Dock = DockStyle.Fill
-        HCL_线程.Location = New Point(200, 10)
-        HCL_线程.Name = "HCL_线程"
-        HCL_线程.Padding = New Padding(10, 0, 0, 0)
-        HCL_线程.Size = New Size(363, 32)
-        HCL_线程.TabIndex = 0
-        HCL_线程.Text = "推理线程数（0 = 自动）"
-        HCL_线程.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        MCB_线程.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_线程.BorderRadius = 10
-        MCB_线程.BorderSize = 0
-        MCB_线程.Dock = DockStyle.Left
-        MCB_线程.DropDownBackdropBlurPasses = 2
-        MCB_线程.DropDownBackdropBlurRadius = 30
-        MCB_线程.DropDownBackdropMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
-        MCB_线程.DropDownPadding = New Padding(10)
-        MCB_线程.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_线程.DropDownSelectedForeColor = Color.White
-        MCB_线程.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_线程.Location = New Point(0, 10)
-        MCB_线程.Name = "MCB_线程"
-        MCB_线程.Padding = New Padding(10, 0, 10, 0)
-        MCB_线程.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_线程.Size = New Size(200, 32)
-        MCB_线程.TabIndex = 1
-        MCB_线程.ToolTipGap = -1
-        MCB_线程.ToolTipMaxWidth = 350
-        MCB_线程.ToolTipPadding = New Padding(15)
-        MCB_线程.WaterText = "线程数"
-        MCB_线程.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        '
-        ' PanelAI8 / HCL_偏移 / MTB_偏移：字幕驻留偏移
-        '
-        PanelAI8.BackColor = Color.Transparent
-        PanelAI8.BackColor1 = Color.Transparent
-        PanelAI8.BorderSize = 0
-        PanelAI8.Dock = DockStyle.Top
-        PanelAI8.Location = New Point(15, 560)
-        PanelAI8.Name = "PanelAI8"
-        PanelAI8.Padding = New Padding(0, 10, 0, 0)
-        PanelAI8.Size = New Size(563, 42)
-        PanelAI8.TabIndex = 20
-        HCL_偏移.AutoSize = True
-        HCL_偏移.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_偏移.Dock = DockStyle.Fill
-        HCL_偏移.Location = New Point(90, 10)
-        HCL_偏移.Name = "HCL_偏移"
-        HCL_偏移.Padding = New Padding(10, 0, 0, 0)
-        HCL_偏移.Size = New Size(473, 32)
-        HCL_偏移.TabIndex = 0
-        HCL_偏移.Text = "字幕驻留偏移（秒，±3）"
-        HCL_偏移.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        MTB_偏移.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_偏移.BorderColor = Color.Transparent
-        MTB_偏移.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MTB_偏移.BorderRadius = 10
-        MTB_偏移.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
-        MTB_偏移.Dock = DockStyle.Left
-        MTB_偏移.Location = New Point(0, 10)
-        MTB_偏移.Name = "MTB_偏移"
-        MTB_偏移.Padding = New Padding(10, 0, 10, 0)
-        MTB_偏移.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_偏移.Size = New Size(90, 32)
-        MTB_偏移.TabIndex = 1
-        MTB_偏移.WaterText = "0"
-        MTB_偏移.WaterTextForeColor = Color.DarkGray
-        '
-        ' PanelAI7 / HCL_模型档值 / MCB_模型档：模型档（单档=事实行，多档=下拉）
-        '
-        PanelAI7.BackColor = Color.Transparent
-        PanelAI7.BackColor1 = Color.Transparent
-        PanelAI7.BorderSize = 0
-        PanelAI7.Dock = DockStyle.Top
-        PanelAI7.Location = New Point(15, 518)
-        PanelAI7.Name = "PanelAI7"
-        PanelAI7.Padding = New Padding(0, 10, 0, 0)
-        PanelAI7.Size = New Size(563, 42)
-        PanelAI7.TabIndex = 19
-        HCL_模型档值.AutoSize = True
-        HCL_模型档值.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_模型档值.Dock = DockStyle.Fill
-        HCL_模型档值.Location = New Point(200, 10)
-        HCL_模型档值.Name = "HCL_模型档值"
-        HCL_模型档值.Padding = New Padding(10, 0, 0, 0)
-        HCL_模型档值.Size = New Size(363, 32)
-        HCL_模型档值.TabIndex = 0
-        HCL_模型档值.Text = "—"
-        HCL_模型档值.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        MCB_模型档.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_模型档.BorderRadius = 10
-        MCB_模型档.BorderSize = 0
-        MCB_模型档.Dock = DockStyle.Left
-        MCB_模型档.DropDownBackdropBlurPasses = 2
-        MCB_模型档.DropDownBackdropBlurRadius = 30
-        MCB_模型档.DropDownBackdropMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
-        MCB_模型档.DropDownPadding = New Padding(10)
-        MCB_模型档.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_模型档.DropDownSelectedForeColor = Color.White
-        MCB_模型档.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_模型档.Location = New Point(0, 10)
-        MCB_模型档.Name = "MCB_模型档"
-        MCB_模型档.Padding = New Padding(10, 0, 10, 0)
-        MCB_模型档.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_模型档.Size = New Size(200, 32)
-        MCB_模型档.TabIndex = 1
-        MCB_模型档.ToolTipGap = -1
-        MCB_模型档.ToolTipMaxWidth = 350
-        MCB_模型档.ToolTipPadding = New Padding(15)
-        MCB_模型档.WaterText = "模型档位"
-        MCB_模型档.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        '
-        ' PanelAI6 / HCL_预置 / MCB_预置 / MTB_步长秒 / MTB_窗口秒：窗口·步长·预置
-        '
-        PanelAI6.BackColor = Color.Transparent
-        PanelAI6.BackColor1 = Color.Transparent
-        PanelAI6.BorderSize = 0
-        PanelAI6.Dock = DockStyle.Top
-        PanelAI6.Location = New Point(15, 476)
-        PanelAI6.Name = "PanelAI6"
-        PanelAI6.Padding = New Padding(0, 10, 0, 0)
-        PanelAI6.Size = New Size(563, 42)
-        PanelAI6.TabIndex = 18
-        HCL_预置.AutoSize = True
-        HCL_预置.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_预置.Dock = DockStyle.Fill
-        HCL_预置.Location = New Point(410, 10)
-        HCL_预置.Name = "HCL_预置"
-        HCL_预置.Padding = New Padding(10, 0, 0, 0)
-        HCL_预置.Size = New Size(153, 32)
-        HCL_预置.TabIndex = 0
-        HCL_预置.Text = "窗口 / 步长（秒）；预置选中即填两格"
-        HCL_预置.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        MCB_预置.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_预置.BorderRadius = 10
-        MCB_预置.BorderSize = 0
-        MCB_预置.Dock = DockStyle.Left
-        MCB_预置.DropDownBackdropBlurPasses = 2
-        MCB_预置.DropDownBackdropBlurRadius = 30
-        MCB_预置.DropDownBackdropMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
-        MCB_预置.DropDownPadding = New Padding(10)
-        MCB_预置.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_预置.DropDownSelectedForeColor = Color.White
-        MCB_预置.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_预置.Location = New Point(190, 10)
-        MCB_预置.Name = "MCB_预置"
-        MCB_预置.Padding = New Padding(10, 0, 10, 0)
-        MCB_预置.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_预置.Size = New Size(220, 32)
-        MCB_预置.TabIndex = 1
-        MCB_预置.ToolTipGap = -1
-        MCB_预置.ToolTipMaxWidth = 350
-        MCB_预置.ToolTipPadding = New Padding(15)
-        MCB_预置.WaterText = "预置"
-        MCB_预置.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        MTB_步长秒.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_步长秒.BorderColor = Color.Transparent
-        MTB_步长秒.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MTB_步长秒.BorderRadius = 10
-        MTB_步长秒.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
-        MTB_步长秒.Dock = DockStyle.Left
-        MTB_步长秒.Location = New Point(95, 10)
-        MTB_步长秒.Name = "MTB_步长秒"
-        MTB_步长秒.Padding = New Padding(10, 0, 10, 0)
-        MTB_步长秒.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_步长秒.Size = New Size(95, 32)
-        MTB_步长秒.TabIndex = 2
-        MTB_步长秒.WaterText = "步长"
-        MTB_步长秒.WaterTextForeColor = Color.DarkGray
-        MTB_窗口秒.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_窗口秒.BorderColor = Color.Transparent
-        MTB_窗口秒.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MTB_窗口秒.BorderRadius = 10
-        MTB_窗口秒.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
-        MTB_窗口秒.Dock = DockStyle.Left
-        MTB_窗口秒.Location = New Point(0, 10)
-        MTB_窗口秒.Name = "MTB_窗口秒"
-        MTB_窗口秒.Padding = New Padding(10, 0, 10, 0)
-        MTB_窗口秒.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_窗口秒.Size = New Size(95, 32)
-        MTB_窗口秒.TabIndex = 3
-        MTB_窗口秒.WaterText = "窗口"
-        MTB_窗口秒.WaterTextForeColor = Color.DarkGray
-        '
-        ' PanelAI5 / HCL_显示高级 / MCK_显示高级：高级选项折叠开关
-        '
-        PanelAI5.BackColor = Color.Transparent
-        PanelAI5.BackColor1 = Color.Transparent
-        PanelAI5.BorderSize = 0
-        PanelAI5.Dock = DockStyle.Top
-        PanelAI5.Location = New Point(15, 434)
-        PanelAI5.Name = "PanelAI5"
-        PanelAI5.Padding = New Padding(0, 10, 0, 0)
-        PanelAI5.Size = New Size(563, 42)
-        PanelAI5.TabIndex = 17
-        HCL_显示高级.AutoSize = True
-        HCL_显示高级.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_显示高级.Dock = DockStyle.Fill
-        HCL_显示高级.Location = New Point(150, 10)
-        HCL_显示高级.Name = "HCL_显示高级"
-        HCL_显示高级.Padding = New Padding(10, 0, 0, 0)
-        HCL_显示高级.Size = New Size(413, 32)
-        HCL_显示高级.TabIndex = 0
-        HCL_显示高级.Text = "窗口 / 步长 / 模型档 / 偏移 / 线程"
-        HCL_显示高级.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        MCK_显示高级.BackColor = Color.Transparent
-        MCK_显示高级.BoxBorderRadius = 5
-        MCK_显示高级.BoxBorderSize = 0
-        MCK_显示高级.BoxCheckedBackColor = Color.CornflowerBlue
-        MCK_显示高级.BoxInnerPadding = 7
-        MCK_显示高级.BoxSize = 24
-        MCK_显示高级.BoxTextSpacing = 10
-        MCK_显示高级.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_显示高级.ClickAnywhere = True
-        MCK_显示高级.Dock = DockStyle.Left
-        MCK_显示高级.Location = New Point(0, 10)
-        MCK_显示高级.Name = "MCK_显示高级"
-        MCK_显示高级.Size = New Size(150, 32)
-        MCK_显示高级.TabIndex = 1
-        MCK_显示高级.Text = "高级选项"
-        '
-        ' HCL_状态：多行富文本状态区（颜色由 刷新状态 用 <font> 内联）
-        '
-        HCL_状态.AutoSize = True
-        HCL_状态.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_状态.BackColor = Color.Transparent
-        HCL_状态.Dock = DockStyle.Top
-        HCL_状态.Location = New Point(15, 356)
-        HCL_状态.Name = "HCL_状态"
-        HCL_状态.Padding = New Padding(0, 4, 0, 4)
-        HCL_状态.Size = New Size(563, 78)
-        HCL_状态.TabIndex = 16
-        HCL_状态.Text = "未启用。选择一个扩展包目录（含 ai-subtitles.json）即可启用。"
-        '
-        ' PanelAI4 / HCL_语言 / MCK_仅所选语言 / MCB_语言：字幕语言
-        '
-        PanelAI4.BackColor = Color.Transparent
-        PanelAI4.BackColor1 = Color.Transparent
-        PanelAI4.BorderSize = 0
-        PanelAI4.Dock = DockStyle.Top
-        PanelAI4.Location = New Point(15, 314)
-        PanelAI4.Name = "PanelAI4"
-        PanelAI4.Padding = New Padding(0, 10, 0, 0)
-        PanelAI4.Size = New Size(563, 42)
-        PanelAI4.TabIndex = 15
-        HCL_语言.AutoSize = True
-        HCL_语言.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_语言.Dock = DockStyle.Fill
-        HCL_语言.Location = New Point(430, 10)
-        HCL_语言.Name = "HCL_语言"
-        HCL_语言.Padding = New Padding(10, 0, 0, 0)
-        HCL_语言.Size = New Size(133, 32)
-        HCL_语言.TabIndex = 0
-        HCL_语言.Text = "字幕语言（只是提示，不翻译）"
-        HCL_语言.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        MCK_仅所选语言.AutoSize = True
-        MCK_仅所选语言.BackColor = Color.Transparent
-        MCK_仅所选语言.BoxBorderRadius = 5
-        MCK_仅所选语言.BoxBorderSize = 0
-        MCK_仅所选语言.BoxCheckedBackColor = Color.CornflowerBlue
-        MCK_仅所选语言.BoxInnerPadding = 7
-        MCK_仅所选语言.BoxSize = 24
-        MCK_仅所选语言.BoxTextSpacing = 10
-        MCK_仅所选语言.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_仅所选语言.ClickAnywhere = True
-        MCK_仅所选语言.Dock = DockStyle.Left
-        MCK_仅所选语言.Location = New Point(200, 10)
-        MCK_仅所选语言.Name = "MCK_仅所选语言"
-        MCK_仅所选语言.Size = New Size(230, 32)
-        MCK_仅所选语言.TabIndex = 1
-        MCK_仅所选语言.Text = "只显示所选语言（不符的窗不上屏）"
-        MCB_语言.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_语言.BorderRadius = 10
-        MCB_语言.BorderSize = 0
-        MCB_语言.Dock = DockStyle.Left
-        MCB_语言.DropDownBackdropBlurPasses = 2
-        MCB_语言.DropDownBackdropBlurRadius = 30
-        MCB_语言.DropDownBackdropMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
-        MCB_语言.DropDownPadding = New Padding(10)
-        MCB_语言.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_语言.DropDownSelectedForeColor = Color.White
-        MCB_语言.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_语言.Location = New Point(0, 10)
-        MCB_语言.Name = "MCB_语言"
-        MCB_语言.Padding = New Padding(10, 0, 10, 0)
-        MCB_语言.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_语言.Size = New Size(200, 32)
-        MCB_语言.TabIndex = 2
-        MCB_语言.ToolTipGap = -1
-        MCB_语言.ToolTipMaxWidth = 350
-        MCB_语言.ToolTipPadding = New Padding(15)
-        MCB_语言.WaterText = "字幕语言"
-        MCB_语言.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        '
-        ' PanelAI3 / HCL_后端 / MCB_后端：推理后端
-        '
-        PanelAI3.BackColor = Color.Transparent
-        PanelAI3.BackColor1 = Color.Transparent
-        PanelAI3.BorderSize = 0
-        PanelAI3.Dock = DockStyle.Top
-        PanelAI3.Location = New Point(15, 272)
-        PanelAI3.Name = "PanelAI3"
-        PanelAI3.Padding = New Padding(0, 10, 0, 0)
-        PanelAI3.Size = New Size(563, 42)
-        PanelAI3.TabIndex = 14
-        HCL_后端.AutoSize = True
-        HCL_后端.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_后端.Dock = DockStyle.Fill
-        HCL_后端.Location = New Point(300, 10)
-        HCL_后端.Name = "HCL_后端"
-        HCL_后端.Padding = New Padding(10, 0, 0, 0)
-        HCL_后端.Size = New Size(263, 32)
-        HCL_后端.TabIndex = 0
-        HCL_后端.Text = "后端——列出什么由设备决定"
-        HCL_后端.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        MCB_后端.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_后端.BorderRadius = 10
-        MCB_后端.BorderSize = 0
-        MCB_后端.Dock = DockStyle.Left
-        MCB_后端.DropDownBackdropBlurPasses = 2
-        MCB_后端.DropDownBackdropBlurRadius = 30
-        MCB_后端.DropDownBackdropMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
-        MCB_后端.DropDownPadding = New Padding(10)
-        MCB_后端.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_后端.DropDownSelectedForeColor = Color.White
-        MCB_后端.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_后端.Location = New Point(0, 10)
-        MCB_后端.Name = "MCB_后端"
-        MCB_后端.Padding = New Padding(10, 0, 10, 0)
-        MCB_后端.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_后端.Size = New Size(300, 32)
-        MCB_后端.TabIndex = 1
-        MCB_后端.ToolTipGap = -1
-        MCB_后端.ToolTipMaxWidth = 350
-        MCB_后端.ToolTipPadding = New Padding(15)
-        MCB_后端.WaterText = "推理后端"
-        MCB_后端.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        '
-        ' PanelAI2 / HCL_设备 / MCB_设备：推理设备
-        '
-        PanelAI2.BackColor = Color.Transparent
-        PanelAI2.BackColor1 = Color.Transparent
-        PanelAI2.BorderSize = 0
-        PanelAI2.Dock = DockStyle.Top
-        PanelAI2.Location = New Point(15, 230)
-        PanelAI2.Name = "PanelAI2"
-        PanelAI2.Padding = New Padding(0, 10, 0, 0)
-        PanelAI2.Size = New Size(563, 42)
-        PanelAI2.TabIndex = 13
-        HCL_设备.AutoSize = True
-        HCL_设备.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_设备.Dock = DockStyle.Fill
-        HCL_设备.Location = New Point(200, 10)
-        HCL_设备.Name = "HCL_设备"
-        HCL_设备.Padding = New Padding(10, 0, 0, 0)
-        HCL_设备.Size = New Size(363, 32)
-        HCL_设备.TabIndex = 0
-        HCL_设备.Text = "设备——哪块硬件来算"
-        HCL_设备.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        MCB_设备.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_设备.BorderRadius = 10
-        MCB_设备.BorderSize = 0
-        MCB_设备.Dock = DockStyle.Left
-        MCB_设备.DropDownBackdropBlurPasses = 2
-        MCB_设备.DropDownBackdropBlurRadius = 30
-        MCB_设备.DropDownBackdropMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
-        MCB_设备.DropDownPadding = New Padding(10)
-        MCB_设备.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_设备.DropDownSelectedForeColor = Color.White
-        MCB_设备.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_设备.Location = New Point(0, 10)
-        MCB_设备.Name = "MCB_设备"
-        MCB_设备.Padding = New Padding(10, 0, 10, 0)
-        MCB_设备.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_设备.Size = New Size(200, 32)
-        MCB_设备.TabIndex = 1
-        MCB_设备.ToolTipGap = -1
-        MCB_设备.ToolTipMaxWidth = 350
-        MCB_设备.ToolTipPadding = New Padding(15)
-        MCB_设备.WaterText = "推理设备"
-        MCB_设备.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        '
-        ' PanelAI1 / HCL_包目录 / MB_浏览 / MTB_包目录：扩展包目录
-        '
-        PanelAI1.BackColor = Color.Transparent
-        PanelAI1.BackColor1 = Color.Transparent
-        PanelAI1.BorderSize = 0
-        PanelAI1.Dock = DockStyle.Top
-        PanelAI1.Location = New Point(15, 188)
-        PanelAI1.Name = "PanelAI1"
-        PanelAI1.Padding = New Padding(0, 10, 0, 0)
-        PanelAI1.Size = New Size(563, 42)
-        PanelAI1.TabIndex = 12
-        HCL_包目录.AutoSize = True
-        HCL_包目录.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_包目录.Dock = DockStyle.Fill
-        HCL_包目录.Location = New Point(400, 10)
-        HCL_包目录.Name = "HCL_包目录"
-        HCL_包目录.Padding = New Padding(10, 0, 0, 0)
-        HCL_包目录.Size = New Size(163, 32)
-        HCL_包目录.TabIndex = 0
-        HCL_包目录.Text = "扩展包目录（含 ai-subtitles.json）"
-        HCL_包目录.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        MB_浏览.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MB_浏览.BorderRadius = 10
-        MB_浏览.BorderSize = 0
-        MB_浏览.Dock = DockStyle.Left
-        MB_浏览.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_浏览.Location = New Point(300, 10)
-        MB_浏览.Name = "MB_浏览"
-        MB_浏览.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_浏览.Size = New Size(100, 32)
-        MB_浏览.TabIndex = 1
-        MB_浏览.Text = "浏览…"
-        MTB_包目录.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_包目录.BorderColor = Color.Transparent
-        MTB_包目录.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MTB_包目录.BorderRadius = 10
-        MTB_包目录.CaretColor = Color.FromArgb(CByte(220), CByte(220), CByte(220))
-        MTB_包目录.Dock = DockStyle.Left
-        MTB_包目录.Location = New Point(0, 10)
-        MTB_包目录.Name = "MTB_包目录"
-        MTB_包目录.Padding = New Padding(10, 0, 10, 0)
-        MTB_包目录.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MTB_包目录.Size = New Size(300, 32)
-        MTB_包目录.TabIndex = 2
-        MTB_包目录.WaterText = "D:\...\3FP-AI-Subtitles"
-        MTB_包目录.WaterTextForeColor = Color.DarkGray
-        '
-        ' PanelAI12 / MCB_包类型 / HCL_包类型：下载哪种包（GPU+CPU / NPU）。
-        ' 两种包是不同引擎（GGUF/Vulkan vs ONNX/OpenVINO），下载前必须先选。
-        '
-        PanelAI12.BackColor = Color.Transparent
-        PanelAI12.BackColor1 = Color.Transparent
-        PanelAI12.BorderSize = 0
-        PanelAI12.Dock = DockStyle.Top
-        PanelAI12.Location = New Point(15, 188)
-        PanelAI12.Name = "PanelAI12"
-        PanelAI12.Padding = New Padding(0, 10, 0, 0)
-        PanelAI12.Size = New Size(563, 42)
-        PanelAI12.TabIndex = 24
-        HCL_包类型.AutoSize = True
-        HCL_包类型.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_包类型.Dock = DockStyle.Fill
-        HCL_包类型.Location = New Point(250, 10)
-        HCL_包类型.Name = "HCL_包类型"
-        HCL_包类型.Padding = New Padding(10, 0, 0, 0)
-        HCL_包类型.Size = New Size(313, 32)
-        HCL_包类型.TabIndex = 0
-        HCL_包类型.Text = "下载哪种包——GPU+CPU 通用，NPU 需 Core Ultra"
-        HCL_包类型.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        MCB_包类型.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_包类型.BorderRadius = 10
-        MCB_包类型.BorderSize = 0
-        MCB_包类型.Dock = DockStyle.Left
-        MCB_包类型.DropDownBackdropBlurPasses = 2
-        MCB_包类型.DropDownBackdropBlurRadius = 30
-        MCB_包类型.DropDownBackdropMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
-        MCB_包类型.DropDownPadding = New Padding(10)
-        MCB_包类型.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_包类型.DropDownSelectedForeColor = Color.White
-        MCB_包类型.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_包类型.Location = New Point(0, 10)
-        MCB_包类型.Name = "MCB_包类型"
-        MCB_包类型.Padding = New Padding(10, 0, 10, 0)
-        MCB_包类型.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_包类型.Size = New Size(250, 32)
-        MCB_包类型.TabIndex = 1
-        MCB_包类型.ToolTipGap = -1
-        MCB_包类型.ToolTipMaxWidth = 350
-        MCB_包类型.ToolTipPadding = New Padding(15)
-        MCB_包类型.WaterText = "包类型"
-        MCB_包类型.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        '
-        ' PanelAI11 / EPB_下载 / HCL_下载进度：整体下载进度（仅下载中显示）。
-        ' 进度条占满整行宽，下面一行专用进度文本（百分比+总量+当前文件）——
-        ' 不放按钮行右侧的窄标签里，那里放不下会被裁断。
-        '
-        PanelAI11.BackColor = Color.Transparent
-        PanelAI11.BackColor1 = Color.Transparent
-        PanelAI11.BorderSize = 0
-        PanelAI11.Dock = DockStyle.Top
-        PanelAI11.Location = New Point(15, 272)
-        PanelAI11.Name = "PanelAI11"
-        PanelAI11.Padding = New Padding(0, 4, 0, 2)
-        PanelAI11.Size = New Size(563, 40)
-        PanelAI11.TabIndex = 23
-        PanelAI11.Visible = False
-        EPB_下载.Dock = DockStyle.Top
-        EPB_下载.FillColor = Color.CornflowerBlue
-        EPB_下载.Location = New Point(0, 4)
-        EPB_下载.Maximum = 100
-        EPB_下载.Minimum = 0
-        EPB_下载.Name = "EPB_下载"
-        EPB_下载.Size = New Size(563, 12)
-        EPB_下载.TabIndex = 0
-        EPB_下载.TrackColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        EPB_下载.Value = 0
-        HCL_下载进度.AutoSize = True
-        HCL_下载进度.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_下载进度.Dock = DockStyle.Fill
-        HCL_下载进度.Location = New Point(0, 16)
-        HCL_下载进度.Name = "HCL_下载进度"
-        HCL_下载进度.Padding = New Padding(0, 2, 0, 0)
-        HCL_下载进度.Size = New Size(563, 22)
-        HCL_下载进度.TabIndex = 1
-        HCL_下载进度.Text = ""
-        HCL_下载进度.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        '
-        ' PanelAI10 / HCL_下载状态 / MB_下载包 / MB_取消下载 / MB_删除包：包的获取与移除
-        '
-        PanelAI10.BackColor = Color.Transparent
-        PanelAI10.BackColor1 = Color.Transparent
-        PanelAI10.BorderSize = 0
-        PanelAI10.Dock = DockStyle.Top
-        PanelAI10.Location = New Point(15, 230)
-        PanelAI10.Name = "PanelAI10"
-        PanelAI10.Padding = New Padding(0, 10, 0, 0)
-        PanelAI10.Size = New Size(563, 42)
-        PanelAI10.TabIndex = 22
-        HCL_下载状态.AutoSize = True
-        HCL_下载状态.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_下载状态.Dock = DockStyle.Fill
-        HCL_下载状态.Location = New Point(360, 10)
-        HCL_下载状态.Name = "HCL_下载状态"
-        HCL_下载状态.Padding = New Padding(10, 0, 0, 0)
-        HCL_下载状态.Size = New Size(203, 32)
-        HCL_下载状态.TabIndex = 0
-        HCL_下载状态.Text = "—"
-        HCL_下载状态.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        MB_下载包.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MB_下载包.BorderRadius = 10
-        MB_下载包.BorderSize = 0
-        MB_下载包.Dock = DockStyle.Left
-        MB_下载包.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_下载包.Location = New Point(0, 10)
-        MB_下载包.Name = "MB_下载包"
-        MB_下载包.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_下载包.Size = New Size(150, 32)
-        MB_下载包.TabIndex = 1
-        MB_下载包.Text = "下载官方包…"
-        MB_下载包.ToolTipText = "从 Hugging Face 下载 Qwen3-ASR 官方模型与运行环境，自动生成本页要的扩展包"
-        MB_下载包.ToolTipShowDelaySeconds = 1R
-        MB_取消下载.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MB_取消下载.BorderRadius = 10
-        MB_取消下载.BorderSize = 0
-        MB_取消下载.Dock = DockStyle.Left
-        MB_取消下载.Enabled = False
-        MB_取消下载.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_取消下载.Location = New Point(150, 10)
-        MB_取消下载.Name = "MB_取消下载"
-        MB_取消下载.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_取消下载.Size = New Size(100, 32)
-        MB_取消下载.TabIndex = 2
-        MB_取消下载.Text = "取消"
-        MB_删除包.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MB_删除包.BorderRadius = 10
-        MB_删除包.BorderSize = 0
-        MB_删除包.Dock = DockStyle.Left
-        MB_删除包.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MB_删除包.Location = New Point(250, 10)
-        MB_删除包.Name = "MB_删除包"
-        MB_删除包.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
-        MB_删除包.Size = New Size(110, 32)
-        MB_删除包.TabIndex = 3
-        MB_删除包.Text = "删除包"
-        MB_删除包.ToolTipText = "删除本页当前选中的有效扩展包（会先停止 worker 并要求确认）"
-        MB_删除包.ToolTipShowDelaySeconds = 1R
-        '
-        ' HCL_标题：页首标题 + 一句说明（与字幕/弹幕页同款）
-        '
-        HCL_标题.AutoSize = True
-        HCL_标题.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HCL_标题.BackColor = Color.Transparent
-        HCL_标题.Dock = DockStyle.Top
-        HCL_标题.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        HCL_标题.Location = New Point(15, 20)
-        HCL_标题.Name = "HCL_标题"
-        HCL_标题.Padding = New Padding(0, 0, 0, 10)
-        HCL_标题.Size = New Size(563, 168)
-        HCL_标题.TabIndex = 0
-        HCL_标题.Text = "<span style=""font-size:13; color:Silver"">AI 实时字幕</span><br>" &
-                        "<span style=""color:Gray"">以扩展包形式提供：选一个含 ai-subtitles.json 的目录即可启用，" &
-                        "包里自带 worker、模型与运行环境，本体不需要任何别的配置。<br>" &
-                        "目录失效或删掉时功能自动停用，不影响播放。</span>"
-        '
-        ' ModernPanel1：Dock.Fill + LakeUI 自绘竖滚动条；Dock=Top 子面板自然堆叠，
-        ' 面板自己负责滚轮/拖动/轨道点击，窗体不再开 AutoScroll。
-        '
-        ModernPanel1.BackColor1 = Color.FromArgb(CByte(24), CByte(24), CByte(24))
+        ' 
+        ' ModernPanel1
+        ' 
+        ModernPanel1.BackColor = Color.Transparent
+        ModernPanel1.BackColor1 = Color.Transparent
         ModernPanel1.BorderSize = 0
+        ModernPanel1.Controls.Add(MP_高级时间)
+        ModernPanel1.Controls.Add(MP_高级下拉)
+        ModernPanel1.Controls.Add(HCL_使用说明)
+        ModernPanel1.Controls.Add(MP_语言)
+        ModernPanel1.Controls.Add(MP_推理)
+        ModernPanel1.Controls.Add(MP_下载进度条的容器)
+        ModernPanel1.Controls.Add(MP_扩展包)
+        ModernPanel1.Controls.Add(MP_目录)
+        ModernPanel1.Controls.Add(HCL_标题)
         ModernPanel1.Dock = DockStyle.Fill
         ModernPanel1.Location = New Point(0, 0)
         ModernPanel1.Name = "ModernPanel1"
         ModernPanel1.Padding = New Padding(15, 20, 20, 20)
         ModernPanel1.ScrollBarMode = LakeUI.ModernPanel.ScrollMode.Vertical
-        ModernPanel1.Size = New Size(598, 644)
+        ModernPanel1.Size = New Size(624, 434)
         ModernPanel1.TabIndex = 0
-        '
+        ' 
+        ' MP_高级时间
+        ' 
+        MP_高级时间.BackColor = Color.Transparent
+        MP_高级时间.BackColor1 = Color.Transparent
+        MP_高级时间.BorderSize = 0
+        MP_高级时间.Controls.Add(ModernPanel2)
+        MP_高级时间.Controls.Add(JEC_模型档位间距)
+        MP_高级时间.Controls.Add(MP_偏移列)
+        MP_高级时间.Controls.Add(JEC_步长偏移间距)
+        MP_高级时间.Controls.Add(MP_步长列)
+        MP_高级时间.Controls.Add(JEC_窗口步长间距)
+        MP_高级时间.Controls.Add(MP_窗口列)
+        MP_高级时间.Dock = DockStyle.Top
+        MP_高级时间.Location = New Point(15, 316)
+        MP_高级时间.Name = "MP_高级时间"
+        MP_高级时间.Size = New Size(589, 55)
+        MP_高级时间.TabIndex = 10
+        ' 
+        ' ModernPanel2
+        ' 
+        ModernPanel2.BackColor = Color.Transparent
+        ModernPanel2.BackColor1 = Color.Transparent
+        ModernPanel2.BorderSize = 0
+        ModernPanel2.Controls.Add(MCB_模型档)
+        ModernPanel2.Controls.Add(HtmlColorLabel1)
+        ModernPanel2.Dock = DockStyle.Fill
+        ModernPanel2.Location = New Point(364, 0)
+        ModernPanel2.Name = "ModernPanel2"
+        ModernPanel2.Size = New Size(225, 55)
+        ModernPanel2.TabIndex = 6
+        ' 
+        ' MCB_模型档
+        ' 
+        MCB_模型档.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_模型档.BorderRadius = 10
+        MCB_模型档.BorderSize = 0
+        MCB_模型档.Dock = DockStyle.Fill
+        MCB_模型档.DropDownBackdropBlurPasses = 2
+        MCB_模型档.DropDownBackdropBlurRadius = 30
+        MCB_模型档.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_模型档.DropDownItemHeight = 32
+        MCB_模型档.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_模型档.DropDownPadding = New Padding(10)
+        MCB_模型档.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_模型档.Items.Add("默认档")
+        MCB_模型档.Location = New Point(0, 23)
+        MCB_模型档.Margin = New Padding(2, 2, 2, 2)
+        MCB_模型档.Name = "MCB_模型档"
+        MCB_模型档.Padding = New Padding(10, 0, 10, 0)
+        MCB_模型档.Size = New Size(225, 32)
+        MCB_模型档.TabIndex = 12
+        MCB_模型档.ToolTipMaxWidth = 360
+        MCB_模型档.ToolTipPadding = New Padding(12)
+        ' 
+        ' HtmlColorLabel1
+        ' 
+        HtmlColorLabel1.AutoSizeMode = AutoSizeMode.GrowAndShrink
+        HtmlColorLabel1.BackColor = Color.Transparent
+        HtmlColorLabel1.Dock = DockStyle.Top
+        HtmlColorLabel1.ForeColor = Color.FromArgb(CByte(140), CByte(255), CByte(255), CByte(255))
+        HtmlColorLabel1.LineSpacing = 3
+        HtmlColorLabel1.Location = New Point(0, 0)
+        HtmlColorLabel1.Margin = New Padding(2)
+        HtmlColorLabel1.Name = "HtmlColorLabel1"
+        HtmlColorLabel1.Size = New Size(225, 23)
+        HtmlColorLabel1.TabIndex = 2
+        HtmlColorLabel1.TabStop = False
+        HtmlColorLabel1.Text = "模型档位"
+        ' 
+        ' JEC_模型档位间距
+        ' 
+        JEC_模型档位间距.BackColor = Color.Transparent
+        JEC_模型档位间距.Dock = DockStyle.Left
+        JEC_模型档位间距.Location = New Point(354, 0)
+        JEC_模型档位间距.Name = "JEC_模型档位间距"
+        JEC_模型档位间距.Size = New Size(10, 55)
+        JEC_模型档位间距.TabIndex = 5
+        JEC_模型档位间距.TabStop = False
+        ' 
+        ' MP_偏移列
+        ' 
+        MP_偏移列.BackColor = Color.Transparent
+        MP_偏移列.BackColor1 = Color.Transparent
+        MP_偏移列.BorderSize = 0
+        MP_偏移列.Controls.Add(MTB_偏移)
+        MP_偏移列.Controls.Add(HCL_偏移)
+        MP_偏移列.Dock = DockStyle.Left
+        MP_偏移列.Location = New Point(254, 0)
+        MP_偏移列.Name = "MP_偏移列"
+        MP_偏移列.Size = New Size(100, 55)
+        MP_偏移列.TabIndex = 2
+        ' 
+        ' MTB_偏移
+        ' 
+        MTB_偏移.AccessibleName = "驻留偏移（秒）"
+        MTB_偏移.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MTB_偏移.BorderColor = Color.Transparent
+        MTB_偏移.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MTB_偏移.BorderRadius = 10
+        MTB_偏移.Dock = DockStyle.Fill
+        MTB_偏移.Location = New Point(0, 23)
+        MTB_偏移.Margin = New Padding(2)
+        MTB_偏移.Name = "MTB_偏移"
+        MTB_偏移.Padding = New Padding(10, 0, 10, 0)
+        MTB_偏移.Size = New Size(100, 32)
+        MTB_偏移.TabIndex = 0
+        MTB_偏移.WaterText = "0"
+        MTB_偏移.WaterTextForeColor = Color.DarkGray
+        ' 
+        ' HCL_偏移
+        ' 
+        HCL_偏移.AutoSizeMode = AutoSizeMode.GrowAndShrink
+        HCL_偏移.BackColor = Color.Transparent
+        HCL_偏移.Dock = DockStyle.Top
+        HCL_偏移.ForeColor = Color.FromArgb(CByte(140), CByte(255), CByte(255), CByte(255))
+        HCL_偏移.LineSpacing = 3
+        HCL_偏移.Location = New Point(0, 0)
+        HCL_偏移.Margin = New Padding(2)
+        HCL_偏移.Name = "HCL_偏移"
+        HCL_偏移.Size = New Size(100, 23)
+        HCL_偏移.TabIndex = 2
+        HCL_偏移.TabStop = False
+        HCL_偏移.Text = "驻留偏移"
+        HCL_偏移.ToolTipText = "−3 至 +3 秒"
+        ' 
+        ' JEC_步长偏移间距
+        ' 
+        JEC_步长偏移间距.BackColor = Color.Transparent
+        JEC_步长偏移间距.Dock = DockStyle.Left
+        JEC_步长偏移间距.Location = New Point(244, 0)
+        JEC_步长偏移间距.Name = "JEC_步长偏移间距"
+        JEC_步长偏移间距.Size = New Size(10, 55)
+        JEC_步长偏移间距.TabIndex = 3
+        JEC_步长偏移间距.TabStop = False
+        ' 
+        ' MP_步长列
+        ' 
+        MP_步长列.BackColor = Color.Transparent
+        MP_步长列.BackColor1 = Color.Transparent
+        MP_步长列.BorderSize = 0
+        MP_步长列.Controls.Add(MTB_步长秒)
+        MP_步长列.Controls.Add(HCL_步长)
+        MP_步长列.Dock = DockStyle.Left
+        MP_步长列.Location = New Point(129, 0)
+        MP_步长列.Name = "MP_步长列"
+        MP_步长列.Size = New Size(115, 55)
+        MP_步长列.TabIndex = 1
+        ' 
+        ' MTB_步长秒
+        ' 
+        MTB_步长秒.AccessibleName = "步长上限（秒）"
+        MTB_步长秒.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MTB_步长秒.BorderColor = Color.Transparent
+        MTB_步长秒.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MTB_步长秒.BorderRadius = 10
+        MTB_步长秒.Dock = DockStyle.Fill
+        MTB_步长秒.Location = New Point(0, 23)
+        MTB_步长秒.Margin = New Padding(2)
+        MTB_步长秒.Name = "MTB_步长秒"
+        MTB_步长秒.Padding = New Padding(10, 0, 10, 0)
+        MTB_步长秒.Size = New Size(115, 32)
+        MTB_步长秒.TabIndex = 0
+        MTB_步长秒.WaterText = "跟随包清单"
+        MTB_步长秒.WaterTextForeColor = Color.DarkGray
+        ' 
+        ' HCL_步长
+        ' 
+        HCL_步长.AutoSizeMode = AutoSizeMode.GrowAndShrink
+        HCL_步长.BackColor = Color.Transparent
+        HCL_步长.Dock = DockStyle.Top
+        HCL_步长.ForeColor = Color.FromArgb(CByte(140), CByte(255), CByte(255), CByte(255))
+        HCL_步长.LineSpacing = 3
+        HCL_步长.Location = New Point(0, 0)
+        HCL_步长.Margin = New Padding(2)
+        HCL_步长.Name = "HCL_步长"
+        HCL_步长.Size = New Size(115, 23)
+        HCL_步长.TabIndex = 1
+        HCL_步长.TabStop = False
+        HCL_步长.Text = "步长上限（秒）"
+        ' 
+        ' JEC_窗口步长间距
+        ' 
+        JEC_窗口步长间距.BackColor = Color.Transparent
+        JEC_窗口步长间距.Dock = DockStyle.Left
+        JEC_窗口步长间距.Location = New Point(119, 0)
+        JEC_窗口步长间距.Name = "JEC_窗口步长间距"
+        JEC_窗口步长间距.Size = New Size(10, 55)
+        JEC_窗口步长间距.TabIndex = 4
+        JEC_窗口步长间距.TabStop = False
+        ' 
+        ' MP_窗口列
+        ' 
+        MP_窗口列.BackColor = Color.Transparent
+        MP_窗口列.BackColor1 = Color.Transparent
+        MP_窗口列.BorderSize = 0
+        MP_窗口列.Controls.Add(MTB_窗口秒)
+        MP_窗口列.Controls.Add(HCL_窗口)
+        MP_窗口列.Dock = DockStyle.Left
+        MP_窗口列.Location = New Point(0, 0)
+        MP_窗口列.Name = "MP_窗口列"
+        MP_窗口列.Size = New Size(119, 55)
+        MP_窗口列.TabIndex = 0
+        ' 
+        ' MTB_窗口秒
+        ' 
+        MTB_窗口秒.AccessibleName = "窗口（秒）"
+        MTB_窗口秒.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MTB_窗口秒.BorderColor = Color.Transparent
+        MTB_窗口秒.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MTB_窗口秒.BorderRadius = 10
+        MTB_窗口秒.Dock = DockStyle.Fill
+        MTB_窗口秒.Location = New Point(0, 23)
+        MTB_窗口秒.Margin = New Padding(2)
+        MTB_窗口秒.Name = "MTB_窗口秒"
+        MTB_窗口秒.Padding = New Padding(10, 0, 10, 0)
+        MTB_窗口秒.Size = New Size(119, 32)
+        MTB_窗口秒.TabIndex = 0
+        MTB_窗口秒.WaterText = "跟随包清单"
+        MTB_窗口秒.WaterTextForeColor = Color.DarkGray
+        ' 
+        ' HCL_窗口
+        ' 
+        HCL_窗口.AutoSizeMode = AutoSizeMode.GrowAndShrink
+        HCL_窗口.BackColor = Color.Transparent
+        HCL_窗口.Dock = DockStyle.Top
+        HCL_窗口.ForeColor = Color.FromArgb(CByte(140), CByte(255), CByte(255), CByte(255))
+        HCL_窗口.LineSpacing = 3
+        HCL_窗口.Location = New Point(0, 0)
+        HCL_窗口.Margin = New Padding(2)
+        HCL_窗口.Name = "HCL_窗口"
+        HCL_窗口.Size = New Size(119, 23)
+        HCL_窗口.TabIndex = 0
+        HCL_窗口.TabStop = False
+        HCL_窗口.Text = "窗口（秒）"
+        ' 
+        ' MP_高级下拉
+        ' 
+        MP_高级下拉.BackColor = Color.Transparent
+        MP_高级下拉.BackColor1 = Color.Transparent
+        MP_高级下拉.BorderSize = 0
+        MP_高级下拉.Controls.Add(MCB_推理线程)
+        MP_高级下拉.Controls.Add(JEC_高级下拉间距)
+        MP_高级下拉.Controls.Add(MCB_节奏预置)
+        MP_高级下拉.Dock = DockStyle.Top
+        MP_高级下拉.Location = New Point(15, 274)
+        MP_高级下拉.Name = "MP_高级下拉"
+        MP_高级下拉.Padding = New Padding(0, 0, 0, 10)
+        MP_高级下拉.Size = New Size(589, 42)
+        MP_高级下拉.TabIndex = 9
+        ' 
+        ' MCB_推理线程
+        ' 
+        MCB_推理线程.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_推理线程.BorderRadius = 10
+        MCB_推理线程.BorderSize = 0
+        MCB_推理线程.Dock = DockStyle.Fill
+        MCB_推理线程.DropDownBackdropBlurPasses = 2
+        MCB_推理线程.DropDownBackdropBlurRadius = 30
+        MCB_推理线程.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_推理线程.DropDownItemHeight = 32
+        MCB_推理线程.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_推理线程.DropDownPadding = New Padding(10)
+        MCB_推理线程.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_推理线程.Items.Add("自动（最多 6）")
+        MCB_推理线程.Items.Add("4")
+        MCB_推理线程.Items.Add("6")
+        MCB_推理线程.Items.Add("8（全大核）")
+        MCB_推理线程.Items.Add("12（全大核）")
+        ToolTipEntry1.ItemText = "自动（最多 6）"
+        ToolTipEntry1.ToolTipText = "worker 取 min(6, 核数) —— 混合架构上的最优解"
+        ToolTipEntry2.ItemText = "4"
+        ToolTipEntry2.ToolTipText = "4 线程：把核留给播放与系统"
+        ToolTipEntry3.ItemText = "6"
+        ToolTipEntry3.ToolTipText = "6 线程：默认上限"
+        ToolTipEntry4.ItemText = "8（全大核）"
+        ToolTipEntry4.ToolTipText = "8 线程：P+E 混合架构上通常更慢；全大核机器可以试"
+        ToolTipEntry5.ItemText = "12（全大核）"
+        ToolTipEntry5.ToolTipText = "12 线程：只有全大核且核数足够时才可能有用"
+        MCB_推理线程.ItemToolTips.AddRange(New LakeUI.ModernComboBox.ToolTipEntry() {ToolTipEntry1, ToolTipEntry2, ToolTipEntry3, ToolTipEntry4, ToolTipEntry5})
+        MCB_推理线程.Location = New Point(300, 0)
+        MCB_推理线程.Margin = New Padding(2, 2, 2, 2)
+        MCB_推理线程.Name = "MCB_推理线程"
+        MCB_推理线程.Padding = New Padding(10, 0, 10, 0)
+        MCB_推理线程.PrefixForeColor = Color.Orange
+        MCB_推理线程.PrefixGap = 8
+        MCB_推理线程.PrefixText = "推理线程"
+        MCB_推理线程.Size = New Size(289, 32)
+        MCB_推理线程.TabIndex = 1
+        MCB_推理线程.ToolTipMaxWidth = 360
+        MCB_推理线程.ToolTipPadding = New Padding(12)
+        ' 
+        ' JEC_高级下拉间距
+        ' 
+        JEC_高级下拉间距.BackColor = Color.Transparent
+        JEC_高级下拉间距.Dock = DockStyle.Left
+        JEC_高级下拉间距.Location = New Point(290, 0)
+        JEC_高级下拉间距.Name = "JEC_高级下拉间距"
+        JEC_高级下拉间距.Size = New Size(10, 32)
+        JEC_高级下拉间距.TabIndex = 2
+        JEC_高级下拉间距.TabStop = False
+        ' 
+        ' MCB_节奏预置
+        ' 
+        MCB_节奏预置.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_节奏预置.BorderRadius = 10
+        MCB_节奏预置.BorderSize = 0
+        MCB_节奏预置.Dock = DockStyle.Left
+        MCB_节奏预置.DropDownBackdropBlurPasses = 2
+        MCB_节奏预置.DropDownBackdropBlurRadius = 30
+        MCB_节奏预置.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_节奏预置.DropDownItemHeight = 32
+        MCB_节奏预置.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_节奏预置.DropDownPadding = New Padding(10)
+        MCB_节奏预置.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_节奏预置.Items.Add("跟随包清单")
+        MCB_节奏预置.Items.Add("省资源")
+        MCB_节奏预置.Items.Add("均衡 1.5×")
+        MCB_节奏预置.Items.Add("长句 1.6×")
+        MCB_节奏预置.Items.Add("低延迟 2.0×")
+        MCB_节奏预置.Items.Add("自定义")
+        ToolTipEntry6.ItemText = "跟随包清单"
+        ToolTipEntry6.ToolTipText = "用清单里的 window / step，不覆盖"
+        ToolTipEntry7.ItemText = "不重叠 1.0×"
+        ToolTipEntry7.ToolTipText = "窗 6s · 步长 6s：窗口等于步长，每段音频只算一次 —— CPU 上唯一追得上实时的组合"
+        ToolTipEntry8.ItemText = "均衡 1.5×"
+        ToolTipEntry8.ToolTipText = "窗 6s · 步长 4s：每 4 秒要处理 6 秒音频（1.5 倍），rtf 需 ≤ 0.67"
+        ToolTipEntry9.ItemText = "长句 1.6×"
+        ToolTipEntry9.ToolTipText = "窗 8s · 步长 5s：窗更大、上下文更完整，倍率 1.6"
+        ToolTipEntry10.ItemText = "低延迟 2.0×"
+        ToolTipEntry10.ToolTipText = "窗 4s · 步长 2s：出字最快，算力翻倍（2.0×），建议配显卡"
+        ToolTipEntry11.ItemText = "自定义"
+        ToolTipEntry11.ToolTipText = "当前值与任何预置都对不上（手填的）"
+        MCB_节奏预置.ItemToolTips.AddRange(New LakeUI.ModernComboBox.ToolTipEntry() {ToolTipEntry6, ToolTipEntry7, ToolTipEntry8, ToolTipEntry9, ToolTipEntry10, ToolTipEntry11})
+        MCB_节奏预置.Location = New Point(0, 0)
+        MCB_节奏预置.Margin = New Padding(2, 2, 2, 2)
+        MCB_节奏预置.Name = "MCB_节奏预置"
+        MCB_节奏预置.Padding = New Padding(10, 0, 10, 0)
+        MCB_节奏预置.PrefixForeColor = Color.Orange
+        MCB_节奏预置.PrefixGap = 8
+        MCB_节奏预置.PrefixText = "节奏预置"
+        MCB_节奏预置.Size = New Size(290, 32)
+        MCB_节奏预置.TabIndex = 0
+        MCB_节奏预置.ToolTipMaxWidth = 360
+        MCB_节奏预置.ToolTipPadding = New Padding(12)
+        ' 
+        ' HCL_使用说明
+        ' 
+        HCL_使用说明.AutoSize = True
+        HCL_使用说明.AutoSizeMode = AutoSizeMode.GrowAndShrink
+        HCL_使用说明.BackColor = Color.Transparent
+        HCL_使用说明.Dock = DockStyle.Top
+        HCL_使用说明.ForeColor = Color.FromArgb(CByte(140), CByte(255), CByte(255), CByte(255))
+        HCL_使用说明.LineSpacing = 3
+        HCL_使用说明.Location = New Point(15, 247)
+        HCL_使用说明.Margin = New Padding(2)
+        HCL_使用说明.Name = "HCL_使用说明"
+        HCL_使用说明.Padding = New Padding(0, 0, 0, 10)
+        HCL_使用说明.Size = New Size(589, 27)
+        HCL_使用说明.TabIndex = 7
+        HCL_使用说明.Text = "播放时从字幕来源菜单选择 AI 实时字幕。语言筛选需要推理后端提供识别语言。"
+        ' 
+        ' MP_语言
+        ' 
+        MP_语言.BackColor = Color.Transparent
+        MP_语言.BackColor1 = Color.Transparent
+        MP_语言.BorderSize = 0
+        MP_语言.Controls.Add(MCB_自动翻译为中文)
+        MP_语言.Controls.Add(JEC_语言间距)
+        MP_语言.Controls.Add(MCB_字幕语言)
+        MP_语言.Dock = DockStyle.Top
+        MP_语言.Location = New Point(15, 205)
+        MP_语言.Name = "MP_语言"
+        MP_语言.Padding = New Padding(0, 0, 0, 10)
+        MP_语言.Size = New Size(589, 42)
+        MP_语言.TabIndex = 6
+        ' 
+        ' MCB_自动翻译为中文
+        ' 
+        MCB_自动翻译为中文.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_自动翻译为中文.BorderRadius = 10
+        MCB_自动翻译为中文.BorderSize = 0
+        MCB_自动翻译为中文.Dock = DockStyle.Fill
+        MCB_自动翻译为中文.DropDownBackdropBlurPasses = 2
+        MCB_自动翻译为中文.DropDownBackdropBlurRadius = 30
+        MCB_自动翻译为中文.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_自动翻译为中文.DropDownItemHeight = 32
+        MCB_自动翻译为中文.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_自动翻译为中文.DropDownPadding = New Padding(10)
+        MCB_自动翻译为中文.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_自动翻译为中文.Enabled = False
+        MCB_自动翻译为中文.Items.Add("不使用自动翻译为中文")
+        MCB_自动翻译为中文.Items.Add("中文在原文上面")
+        MCB_自动翻译为中文.Items.Add("中文在原文下面")
+        MCB_自动翻译为中文.Location = New Point(300, 0)
+        MCB_自动翻译为中文.Margin = New Padding(2, 2, 2, 2)
+        MCB_自动翻译为中文.Name = "MCB_自动翻译为中文"
+        MCB_自动翻译为中文.Padding = New Padding(10, 0, 10, 0)
+        MCB_自动翻译为中文.PrefixForeColor = Color.Orange
+        MCB_自动翻译为中文.PrefixGap = 8
+        MCB_自动翻译为中文.PrefixText = "中文翻译"
+        MCB_自动翻译为中文.Size = New Size(289, 32)
+        MCB_自动翻译为中文.TabIndex = 3
+        MCB_自动翻译为中文.ToolTipMaxWidth = 360
+        MCB_自动翻译为中文.ToolTipPadding = New Padding(12)
+        ' 
+        ' JEC_语言间距
+        ' 
+        JEC_语言间距.BackColor = Color.Transparent
+        JEC_语言间距.Dock = DockStyle.Left
+        JEC_语言间距.Location = New Point(290, 0)
+        JEC_语言间距.Name = "JEC_语言间距"
+        JEC_语言间距.Size = New Size(10, 32)
+        JEC_语言间距.TabIndex = 2
+        JEC_语言间距.TabStop = False
+        ' 
+        ' MCB_字幕语言
+        ' 
+        MCB_字幕语言.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_字幕语言.BorderRadius = 10
+        MCB_字幕语言.BorderSize = 0
+        MCB_字幕语言.Dock = DockStyle.Left
+        MCB_字幕语言.DropDownBackdropBlurPasses = 2
+        MCB_字幕语言.DropDownBackdropBlurRadius = 30
+        MCB_字幕语言.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_字幕语言.DropDownItemHeight = 32
+        MCB_字幕语言.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_字幕语言.DropDownPadding = New Padding(10)
+        MCB_字幕语言.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_字幕语言.Items.Add("自动（显示所有语种）")
+        MCB_字幕语言.Items.Add("中文")
+        MCB_字幕语言.Items.Add("English")
+        MCB_字幕语言.Items.Add("中英混说")
+        MCB_字幕语言.Location = New Point(0, 0)
+        MCB_字幕语言.Margin = New Padding(2, 2, 2, 2)
+        MCB_字幕语言.Name = "MCB_字幕语言"
+        MCB_字幕语言.Padding = New Padding(10, 0, 10, 0)
+        MCB_字幕语言.PrefixForeColor = Color.Orange
+        MCB_字幕语言.PrefixGap = 8
+        MCB_字幕语言.PrefixText = "字幕语言"
+        MCB_字幕语言.Size = New Size(290, 32)
+        MCB_字幕语言.TabIndex = 0
+        MCB_字幕语言.ToolTipMaxWidth = 360
+        MCB_字幕语言.ToolTipPadding = New Padding(12)
+        ' 
+        ' MP_推理
+        ' 
+        MP_推理.BackColor = Color.Transparent
+        MP_推理.BackColor1 = Color.Transparent
+        MP_推理.BorderSize = 0
+        MP_推理.Controls.Add(MCB_推理后端)
+        MP_推理.Controls.Add(JEC_推理间距)
+        MP_推理.Controls.Add(MCB_推理设备)
+        MP_推理.Dock = DockStyle.Top
+        MP_推理.Location = New Point(15, 163)
+        MP_推理.Name = "MP_推理"
+        MP_推理.Padding = New Padding(0, 0, 0, 10)
+        MP_推理.Size = New Size(589, 42)
+        MP_推理.TabIndex = 5
+        ' 
+        ' MCB_推理后端
+        ' 
+        MCB_推理后端.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_推理后端.BorderRadius = 10
+        MCB_推理后端.BorderSize = 0
+        MCB_推理后端.Dock = DockStyle.Fill
+        MCB_推理后端.DropDownBackdropBlurPasses = 2
+        MCB_推理后端.DropDownBackdropBlurRadius = 30
+        MCB_推理后端.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_推理后端.DropDownItemHeight = 32
+        MCB_推理后端.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_推理后端.DropDownPadding = New Padding(10)
+        MCB_推理后端.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_推理后端.Enabled = False
+        MCB_推理后端.Items.Add("自动（由能力探测）")
+        MCB_推理后端.Location = New Point(300, 0)
+        MCB_推理后端.Margin = New Padding(2, 2, 2, 2)
+        MCB_推理后端.Name = "MCB_推理后端"
+        MCB_推理后端.Padding = New Padding(10, 0, 10, 0)
+        MCB_推理后端.PrefixForeColor = Color.Orange
+        MCB_推理后端.PrefixGap = 8
+        MCB_推理后端.PrefixText = "推理后端"
+        MCB_推理后端.Size = New Size(289, 32)
+        MCB_推理后端.TabIndex = 1
+        MCB_推理后端.ToolTipMaxWidth = 360
+        MCB_推理后端.ToolTipPadding = New Padding(12)
+        ' 
+        ' JEC_推理间距
+        ' 
+        JEC_推理间距.BackColor = Color.Transparent
+        JEC_推理间距.Dock = DockStyle.Left
+        JEC_推理间距.Location = New Point(290, 0)
+        JEC_推理间距.Name = "JEC_推理间距"
+        JEC_推理间距.Size = New Size(10, 32)
+        JEC_推理间距.TabIndex = 2
+        JEC_推理间距.TabStop = False
+        ' 
+        ' MCB_推理设备
+        ' 
+        MCB_推理设备.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_推理设备.BorderRadius = 10
+        MCB_推理设备.BorderSize = 0
+        MCB_推理设备.Dock = DockStyle.Left
+        MCB_推理设备.DropDownBackdropBlurPasses = 2
+        MCB_推理设备.DropDownBackdropBlurRadius = 30
+        MCB_推理设备.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_推理设备.DropDownItemHeight = 32
+        MCB_推理设备.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_推理设备.DropDownPadding = New Padding(10)
+        MCB_推理设备.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_推理设备.Items.Add("自动（按能力挑）")
+        MCB_推理设备.Items.Add("CPU（不用显卡）")
+        MCB_推理设备.Items.Add("NVIDIA 显卡")
+        MCB_推理设备.Items.Add("AMD 显卡")
+        MCB_推理设备.Items.Add("Intel 显卡")
+        MCB_推理设备.Items.Add("NPU（Core Ultra）")
+        ToolTipEntry12.ItemText = "自动（按能力挑）"
+        ToolTipEntry12.ToolTipText = "根据当前扩展包和本机能力选择推理设备。"
+        ToolTipEntry13.ItemText = "CPU（不用显卡）"
+        ToolTipEntry13.ToolTipText = "仅使用 CPU。"
+        ToolTipEntry14.ItemText = "NVIDIA 显卡"
+        ToolTipEntry14.ToolTipText = "GGUF 包使用 Vulkan，ONNX 包的选项见后端下拉。"
+        ToolTipEntry15.ItemText = "AMD 显卡"
+        ToolTipEntry15.ToolTipText = "GGUF 包使用 Vulkan，ONNX 包的选项见后端下拉。"
+        ToolTipEntry16.ItemText = "Intel 显卡"
+        ToolTipEntry16.ToolTipText = "GGUF 包使用 Vulkan，ONNX 包的选项见后端下拉。"
+        ToolTipEntry17.ItemText = "NPU（Core Ultra）"
+        ToolTipEntry17.ToolTipText = "使用 NPU 扩展包及 OpenVINO。"
+        MCB_推理设备.ItemToolTips.AddRange(New LakeUI.ModernComboBox.ToolTipEntry() {ToolTipEntry12, ToolTipEntry13, ToolTipEntry14, ToolTipEntry15, ToolTipEntry16, ToolTipEntry17})
+        MCB_推理设备.Location = New Point(0, 0)
+        MCB_推理设备.Margin = New Padding(2, 2, 2, 2)
+        MCB_推理设备.Name = "MCB_推理设备"
+        MCB_推理设备.Padding = New Padding(10, 0, 10, 0)
+        MCB_推理设备.PrefixForeColor = Color.Orange
+        MCB_推理设备.PrefixGap = 8
+        MCB_推理设备.PrefixText = "推理设备"
+        MCB_推理设备.Size = New Size(290, 32)
+        MCB_推理设备.TabIndex = 0
+        MCB_推理设备.ToolTipMaxWidth = 360
+        MCB_推理设备.ToolTipPadding = New Padding(12)
+        ' 
+        ' MP_下载进度条的容器
+        ' 
+        MP_下载进度条的容器.BackColor = Color.Transparent
+        MP_下载进度条的容器.BackColor1 = Color.Transparent
+        MP_下载进度条的容器.BorderSize = 0
+        MP_下载进度条的容器.Controls.Add(EPB_下载)
+        MP_下载进度条的容器.Dock = DockStyle.Top
+        MP_下载进度条的容器.Location = New Point(15, 135)
+        MP_下载进度条的容器.Name = "MP_下载进度条的容器"
+        MP_下载进度条的容器.Padding = New Padding(0, 0, 0, 10)
+        MP_下载进度条的容器.Size = New Size(589, 28)
+        MP_下载进度条的容器.TabIndex = 11
+        MP_下载进度条的容器.Visible = False
+        ' 
+        ' EPB_下载
+        ' 
+        EPB_下载.AccessibleName = "AI 字幕扩展包状态与下载进度"
+        EPB_下载.BorderRadius = 9
+        EPB_下载.Dock = DockStyle.Fill
+        EPB_下载.FillColor = Color.FromArgb(CByte(64), CByte(105), CByte(177))
+        EPB_下载.Font = New Font("Microsoft YaHei UI", 8F)
+        EPB_下载.ForeColor = Color.WhiteSmoke
+        EPB_下载.Location = New Point(0, 0)
+        EPB_下载.Margin = New Padding(2, 2, 2, 2)
+        EPB_下载.Name = "EPB_下载"
+        EPB_下载.Size = New Size(589, 18)
+        EPB_下载.TabIndex = 4
+        EPB_下载.TextAlign = ContentAlignment.MiddleLeft
+        EPB_下载.TextPadding = New Padding(10, 0, 10, 0)
+        EPB_下载.TrackColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        ' 
+        ' MP_扩展包
+        ' 
+        MP_扩展包.BackColor = Color.Transparent
+        MP_扩展包.BackColor1 = Color.Transparent
+        MP_扩展包.BorderSize = 0
+        MP_扩展包.Controls.Add(MCB_选择推理包)
+        MP_扩展包.Controls.Add(JEC_下载间距)
+        MP_扩展包.Controls.Add(MB_下载包)
+        MP_扩展包.Controls.Add(JEC_删除间距)
+        MP_扩展包.Controls.Add(MB_删除选中包)
+        MP_扩展包.Dock = DockStyle.Top
+        MP_扩展包.Location = New Point(15, 93)
+        MP_扩展包.Name = "MP_扩展包"
+        MP_扩展包.Padding = New Padding(0, 0, 0, 10)
+        MP_扩展包.Size = New Size(589, 42)
+        MP_扩展包.TabIndex = 2
+        ' 
+        ' MCB_选择推理包
+        ' 
+        MCB_选择推理包.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_选择推理包.BorderRadius = 10
+        MCB_选择推理包.BorderSize = 0
+        MCB_选择推理包.Dock = DockStyle.Fill
+        MCB_选择推理包.DropDownBackdropBlurPasses = 2
+        MCB_选择推理包.DropDownBackdropBlurRadius = 30
+        MCB_选择推理包.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_选择推理包.DropDownItemHeight = 32
+        MCB_选择推理包.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_选择推理包.DropDownPadding = New Padding(10)
+        MCB_选择推理包.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_选择推理包.Items.Add("Qwen3-ASR-0.6B | GPU+CPU (GGUF & Vulkan)")
+        MCB_选择推理包.Items.Add("Qwen3-ASR-0.6B | NPU (ONNX & OpenVINO)")
+        ToolTipEntry18.ItemText = "GPU+CPU 包（GGUF · Vulkan）"
+        ToolTipEntry18.ToolTipText = "通用包，模型约 1 GB。支持 CPU 和 NVIDIA / AMD / Intel 的 Vulkan 显卡。"
+        ToolTipEntry19.ItemText = "NPU 包（ONNX · OpenVINO）"
+        ToolTipEntry19.ToolTipText = "NPU 包，模型约 1.1 GB。需支持 OpenVINO 的 Intel Core Ultra NPU。"
+        MCB_选择推理包.ItemToolTips.AddRange(New LakeUI.ModernComboBox.ToolTipEntry() {ToolTipEntry18, ToolTipEntry19})
+        MCB_选择推理包.Location = New Point(0, 0)
+        MCB_选择推理包.Margin = New Padding(2, 2, 2, 2)
+        MCB_选择推理包.Name = "MCB_选择推理包"
+        MCB_选择推理包.Padding = New Padding(10, 0, 10, 0)
+        MCB_选择推理包.PrefixForeColor = Color.Orange
+        MCB_选择推理包.PrefixGap = 8
+        MCB_选择推理包.PrefixText = "选择推理包"
+        MCB_选择推理包.Size = New Size(429, 32)
+        MCB_选择推理包.TabIndex = 0
+        MCB_选择推理包.ToolTipMaxWidth = 360
+        MCB_选择推理包.ToolTipPadding = New Padding(12)
+        ' 
+        ' JEC_下载间距
+        ' 
+        JEC_下载间距.BackColor = Color.Transparent
+        JEC_下载间距.Dock = DockStyle.Right
+        JEC_下载间距.Location = New Point(429, 0)
+        JEC_下载间距.Name = "JEC_下载间距"
+        JEC_下载间距.Size = New Size(10, 32)
+        JEC_下载间距.TabIndex = 1
+        JEC_下载间距.TabStop = False
+        ' 
+        ' MB_下载包
+        ' 
+        MB_下载包.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_下载包.BorderRadius = 10
+        MB_下载包.BorderSize = 0
+        MB_下载包.Dock = DockStyle.Right
+        MB_下载包.Location = New Point(439, 0)
+        MB_下载包.Margin = New Padding(2)
+        MB_下载包.Name = "MB_下载包"
+        MB_下载包.Size = New Size(70, 32)
+        MB_下载包.TabIndex = 1
+        MB_下载包.Text = "下载"
+        ' 
+        ' JEC_删除间距
+        ' 
+        JEC_删除间距.BackColor = Color.Transparent
+        JEC_删除间距.Dock = DockStyle.Right
+        JEC_删除间距.Location = New Point(509, 0)
+        JEC_删除间距.Name = "JEC_删除间距"
+        JEC_删除间距.Size = New Size(10, 32)
+        JEC_删除间距.TabIndex = 3
+        JEC_删除间距.TabStop = False
+        ' 
+        ' MB_删除选中包
+        ' 
+        MB_删除选中包.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_删除选中包.BorderRadius = 10
+        MB_删除选中包.BorderSize = 0
+        MB_删除选中包.Dock = DockStyle.Right
+        MB_删除选中包.Location = New Point(519, 0)
+        MB_删除选中包.Margin = New Padding(2)
+        MB_删除选中包.Name = "MB_删除选中包"
+        MB_删除选中包.Size = New Size(70, 32)
+        MB_删除选中包.TabIndex = 3
+        MB_删除选中包.Text = "删除"
+        ' 
+        ' MP_目录
+        ' 
+        MP_目录.BackColor = Color.Transparent
+        MP_目录.BackColor1 = Color.Transparent
+        MP_目录.BorderSize = 0
+        MP_目录.Controls.Add(MTB_包目录)
+        MP_目录.Controls.Add(JEC_目录间距)
+        MP_目录.Controls.Add(MB_浏览)
+        MP_目录.Dock = DockStyle.Top
+        MP_目录.Location = New Point(15, 51)
+        MP_目录.Name = "MP_目录"
+        MP_目录.Padding = New Padding(0, 0, 0, 10)
+        MP_目录.Size = New Size(589, 42)
+        MP_目录.TabIndex = 1
+        ' 
+        ' MTB_包目录
+        ' 
+        MTB_包目录.AccessibleName = "扩展包目录"
+        MTB_包目录.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MTB_包目录.BorderColor = Color.Transparent
+        MTB_包目录.BorderColorFocus = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MTB_包目录.BorderRadius = 10
+        MTB_包目录.Dock = DockStyle.Fill
+        MTB_包目录.Location = New Point(0, 0)
+        MTB_包目录.Margin = New Padding(2)
+        MTB_包目录.Name = "MTB_包目录"
+        MTB_包目录.Padding = New Padding(10, 0, 10, 0)
+        MTB_包目录.Size = New Size(509, 32)
+        MTB_包目录.TabIndex = 0
+        MTB_包目录.WaterText = "输入扩展包目录"
+        MTB_包目录.WaterTextForeColor = Color.DarkGray
+        ' 
+        ' JEC_目录间距
+        ' 
+        JEC_目录间距.BackColor = Color.Transparent
+        JEC_目录间距.Dock = DockStyle.Right
+        JEC_目录间距.Location = New Point(509, 0)
+        JEC_目录间距.Name = "JEC_目录间距"
+        JEC_目录间距.Size = New Size(10, 32)
+        JEC_目录间距.TabIndex = 1
+        JEC_目录间距.TabStop = False
+        ' 
+        ' MB_浏览
+        ' 
+        MB_浏览.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_浏览.BorderRadius = 10
+        MB_浏览.BorderSize = 0
+        MB_浏览.Dock = DockStyle.Right
+        MB_浏览.Location = New Point(519, 0)
+        MB_浏览.Margin = New Padding(2)
+        MB_浏览.Name = "MB_浏览"
+        MB_浏览.Size = New Size(70, 32)
+        MB_浏览.TabIndex = 1
+        MB_浏览.Text = "浏览"
+        MB_浏览.ToolTipText = "从本机选择 ai-subtitles.json"
+        ' 
+        ' HCL_标题
+        ' 
+        HCL_标题.AutoSize = True
+        HCL_标题.AutoSizeMode = AutoSizeMode.GrowAndShrink
+        HCL_标题.BackColor = Color.Transparent
+        HCL_标题.Dock = DockStyle.Top
+        HCL_标题.ForeColor = Color.FromArgb(CByte(140), CByte(255), CByte(255), CByte(255))
+        HCL_标题.LineSpacing = 3
+        HCL_标题.Location = New Point(15, 20)
+        HCL_标题.Margin = New Padding(2)
+        HCL_标题.Name = "HCL_标题"
+        HCL_标题.Padding = New Padding(0, 0, 0, 10)
+        HCL_标题.Size = New Size(589, 31)
+        HCL_标题.TabIndex = 0
+        HCL_标题.Text = "<span style=""font-size:12; color:Silver"">AI 实时字幕</span>   选用含 ai-subtitles.json 的扩展包"
+        HCL_标题.ToolTipText = "包内 AI字幕包声明.txt 与 licenses\ai\ 列明第三方许可和来源。"
+        ' 
         ' Form设置_AI字幕
-        '
+        ' 
         AutoScaleDimensions = New SizeF(96F, 96F)
         AutoScaleMode = AutoScaleMode.Dpi
         BackColor = Color.FromArgb(CByte(24), CByte(24), CByte(24))
-        ClientSize = New Size(598, 644)
+        ClientSize = New Size(624, 434)
         Controls.Add(ModernPanel1)
         Font = New Font("Microsoft YaHei UI", 10F)
         ForeColor = Color.Silver
@@ -754,65 +872,61 @@ Partial Class Form设置_AI字幕
         Text = "Form设置_AI字幕"
         ModernPanel1.ResumeLayout(False)
         ModernPanel1.PerformLayout()
-        PanelAI9.ResumeLayout(False)
-        PanelAI8.ResumeLayout(False)
-        PanelAI7.ResumeLayout(False)
-        PanelAI6.ResumeLayout(False)
-        PanelAI5.ResumeLayout(False)
-        PanelAI4.ResumeLayout(False)
-        PanelAI3.ResumeLayout(False)
-        PanelAI2.ResumeLayout(False)
-        PanelAI10.ResumeLayout(False)
-        PanelAI12.ResumeLayout(False)
-        PanelAI11.ResumeLayout(False)
-        PanelAI1.ResumeLayout(False)
-        PanelAI1.PerformLayout()
+        MP_高级时间.ResumeLayout(False)
+        ModernPanel2.ResumeLayout(False)
+        MP_偏移列.ResumeLayout(False)
+        MP_步长列.ResumeLayout(False)
+        MP_窗口列.ResumeLayout(False)
+        MP_高级下拉.ResumeLayout(False)
+        MP_语言.ResumeLayout(False)
+        MP_推理.ResumeLayout(False)
+        MP_下载进度条的容器.ResumeLayout(False)
+        MP_扩展包.ResumeLayout(False)
+        MP_目录.ResumeLayout(False)
         ResumeLayout(False)
     End Sub
 
     Friend WithEvents ModernPanel1 As LakeUI.ModernPanel
     Friend WithEvents HCL_标题 As LakeUI.HtmlColorLabel
-    Friend WithEvents PanelAI1 As LakeUI.ModernPanel
-    Friend WithEvents HCL_包目录 As LakeUI.HtmlColorLabel
+    Friend WithEvents MP_目录 As LakeUI.ModernPanel
     Friend WithEvents MTB_包目录 As LakeUI.ModernTextBox
     Friend WithEvents MB_浏览 As LakeUI.ModernButton
-    Friend WithEvents PanelAI11 As LakeUI.ModernPanel
-    Friend WithEvents EPB_下载 As LakeUI.ExcellentProgressBar
-    Friend WithEvents HCL_下载进度 As LakeUI.HtmlColorLabel
-    Friend WithEvents PanelAI12 As LakeUI.ModernPanel
-    Friend WithEvents MCB_包类型 As LakeUI.ModernComboBox
-    Friend WithEvents HCL_包类型 As LakeUI.HtmlColorLabel
-    Friend WithEvents PanelAI10 As LakeUI.ModernPanel
-    Friend WithEvents HCL_下载状态 As LakeUI.HtmlColorLabel
+    Friend WithEvents MP_扩展包 As LakeUI.ModernPanel
+    Friend WithEvents MCB_选择推理包 As LakeUI.ModernComboBox
     Friend WithEvents MB_下载包 As LakeUI.ModernButton
-    Friend WithEvents MB_取消下载 As LakeUI.ModernButton
-    Friend WithEvents MB_删除包 As LakeUI.ModernButton
-    Friend WithEvents PanelAI2 As LakeUI.ModernPanel
-    Friend WithEvents HCL_设备 As LakeUI.HtmlColorLabel
-    Friend WithEvents MCB_设备 As LakeUI.ModernComboBox
-    Friend WithEvents PanelAI3 As LakeUI.ModernPanel
-    Friend WithEvents HCL_后端 As LakeUI.HtmlColorLabel
-    Friend WithEvents MCB_后端 As LakeUI.ModernComboBox
-    Friend WithEvents PanelAI4 As LakeUI.ModernPanel
-    Friend WithEvents HCL_语言 As LakeUI.HtmlColorLabel
-    Friend WithEvents MCK_仅所选语言 As LakeUI.ModernCheckBox
-    Friend WithEvents MCB_语言 As LakeUI.ModernComboBox
-    Friend WithEvents HCL_状态 As LakeUI.HtmlColorLabel
-    Friend WithEvents PanelAI5 As LakeUI.ModernPanel
-    Friend WithEvents HCL_显示高级 As LakeUI.HtmlColorLabel
-    Friend WithEvents MCK_显示高级 As LakeUI.ModernCheckBox
-    Friend WithEvents PanelAI6 As LakeUI.ModernPanel
-    Friend WithEvents HCL_预置 As LakeUI.HtmlColorLabel
-    Friend WithEvents MCB_预置 As LakeUI.ModernComboBox
-    Friend WithEvents MTB_步长秒 As LakeUI.ModernTextBox
-    Friend WithEvents MTB_窗口秒 As LakeUI.ModernTextBox
-    Friend WithEvents PanelAI7 As LakeUI.ModernPanel
-    Friend WithEvents HCL_模型档值 As LakeUI.HtmlColorLabel
-    Friend WithEvents MCB_模型档 As LakeUI.ModernComboBox
-    Friend WithEvents PanelAI8 As LakeUI.ModernPanel
+    Friend WithEvents MB_删除选中包 As LakeUI.ModernButton
+    Friend WithEvents MP_推理 As LakeUI.ModernPanel
+    Friend WithEvents MCB_推理设备 As LakeUI.ModernComboBox
+    Friend WithEvents MCB_推理后端 As LakeUI.ModernComboBox
+    Friend WithEvents MP_语言 As LakeUI.ModernPanel
+    Friend WithEvents MCB_字幕语言 As LakeUI.ModernComboBox
+    Friend WithEvents HCL_使用说明 As LakeUI.HtmlColorLabel
+    Friend WithEvents MP_高级下拉 As LakeUI.ModernPanel
+    Friend WithEvents MCB_节奏预置 As LakeUI.ModernComboBox
+    Friend WithEvents MCB_推理线程 As LakeUI.ModernComboBox
+    Friend WithEvents MP_高级时间 As LakeUI.ModernPanel
+    Friend WithEvents HCL_窗口 As LakeUI.HtmlColorLabel
+    Friend WithEvents HCL_步长 As LakeUI.HtmlColorLabel
     Friend WithEvents HCL_偏移 As LakeUI.HtmlColorLabel
+    Friend WithEvents MTB_窗口秒 As LakeUI.ModernTextBox
+    Friend WithEvents MTB_步长秒 As LakeUI.ModernTextBox
     Friend WithEvents MTB_偏移 As LakeUI.ModernTextBox
-    Friend WithEvents PanelAI9 As LakeUI.ModernPanel
-    Friend WithEvents HCL_线程 As LakeUI.HtmlColorLabel
-    Friend WithEvents MCB_线程 As LakeUI.ModernComboBox
+    Friend WithEvents MP_窗口列 As LakeUI.ModernPanel
+    Friend WithEvents MP_步长列 As LakeUI.ModernPanel
+    Friend WithEvents MP_偏移列 As LakeUI.ModernPanel
+    Friend WithEvents JEC_目录间距 As LakeUI.JustEmptyControl
+    Friend WithEvents JEC_下载间距 As LakeUI.JustEmptyControl
+    Friend WithEvents JEC_删除间距 As LakeUI.JustEmptyControl
+    Friend WithEvents JEC_推理间距 As LakeUI.JustEmptyControl
+    Friend WithEvents JEC_语言间距 As LakeUI.JustEmptyControl
+    Friend WithEvents JEC_高级下拉间距 As LakeUI.JustEmptyControl
+    Friend WithEvents JEC_窗口步长间距 As LakeUI.JustEmptyControl
+    Friend WithEvents JEC_步长偏移间距 As LakeUI.JustEmptyControl
+    Friend WithEvents MCB_自动翻译为中文 As LakeUI.ModernComboBox
+    Friend WithEvents ModernPanel2 As LakeUI.ModernPanel
+    Friend WithEvents MCB_模型档 As LakeUI.ModernComboBox
+    Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
+    Friend WithEvents JEC_模型档位间距 As LakeUI.JustEmptyControl
+    Friend WithEvents MP_下载进度条的容器 As LakeUI.ModernPanel
+    Friend WithEvents EPB_下载 As LakeUI.ExcellentProgressBar
 End Class

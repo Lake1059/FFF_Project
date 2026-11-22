@@ -114,7 +114,6 @@ Partial Class Form设置_音乐与歌词
         MCK_是否启用歌词支持.BoxSize = 24
         MCK_是否启用歌词支持.BoxTextSpacing = 10
         MCK_是否启用歌词支持.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_是否启用歌词支持.Checked = True
         MCK_是否启用歌词支持.Dock = DockStyle.Top
         MCK_是否启用歌词支持.Location = New Point(15, 88)
         MCK_是否启用歌词支持.Name = "MCK_是否启用歌词支持"
@@ -134,7 +133,6 @@ Partial Class Form设置_音乐与歌词
         MCK_是否渲染封面图毛玻璃背景.BoxSize = 24
         MCK_是否渲染封面图毛玻璃背景.BoxTextSpacing = 10
         MCK_是否渲染封面图毛玻璃背景.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_是否渲染封面图毛玻璃背景.Checked = True
         MCK_是否渲染封面图毛玻璃背景.Dock = DockStyle.Top
         MCK_是否渲染封面图毛玻璃背景.Location = New Point(15, 54)
         MCK_是否渲染封面图毛玻璃背景.Name = "MCK_是否渲染封面图毛玻璃背景"
@@ -154,7 +152,6 @@ Partial Class Form设置_音乐与歌词
         MCK_是否渲染封面图.BoxSize = 24
         MCK_是否渲染封面图.BoxTextSpacing = 10
         MCK_是否渲染封面图.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_是否渲染封面图.Checked = True
         MCK_是否渲染封面图.Dock = DockStyle.Top
         MCK_是否渲染封面图.Location = New Point(15, 20)
         MCK_是否渲染封面图.Name = "MCK_是否渲染封面图"
@@ -174,7 +171,6 @@ Partial Class Form设置_音乐与歌词
         MCK_启用系统媒体集成.BoxSize = 24
         MCK_启用系统媒体集成.BoxTextSpacing = 10
         MCK_启用系统媒体集成.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_启用系统媒体集成.Checked = True
         MCK_启用系统媒体集成.Dock = DockStyle.Top
         MCK_启用系统媒体集成.Location = New Point(15, 20)
         MCK_启用系统媒体集成.Name = "MCK_启用系统媒体集成"

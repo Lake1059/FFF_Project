@@ -71,6 +71,7 @@ Friend NotInheritable Class ASS特效字幕帧生成器
     Private ReadOnly 句柄 As ASS字幕原生句柄
     Private 像素缓冲 As Byte() = Array.Empty(Of Byte)()
     Private 上一帧 As ASS特效字幕帧
+    Private 当前替代字体 As String = 设置.默认ASS替代字体
     Private 已释放 As Boolean
 
     Public Sub New(字幕路径 As String, 媒体路径 As String, Optional 流索引 As Integer = -1)
@@ -102,6 +103,11 @@ Friend NotInheritable Class ASS特效字幕帧生成器
         检查未释放()
         If 时间 < TimeSpan.Zero Then Throw New ArgumentOutOfRangeException(NameOf(时间))
         If 画布宽度 <= 0 OrElse 画布高度 <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(画布宽度))
+        Dim 替代字体 = 设置.实例对象.ASS替代字体
+        If 播放器原生接口.支持ASS替代字体 AndAlso Not String.Equals(当前替代字体, 替代字体, StringComparison.Ordinal) Then
+            检查结果(播放器原生接口.FFF3FP_SetAssFallbackFont(句柄, 替代字体))
+            当前替代字体 = 替代字体
+        End If
         Dim 信息 As New 原生位图字幕帧 With {
             .大小 = CUInt(Marshal.SizeOf(Of 原生位图字幕帧)()), .版本 = 20UI}
         检查结果(播放器原生接口.FFF3FP_RenderAssSubtitle(

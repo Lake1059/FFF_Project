@@ -49,14 +49,14 @@ Partial Class Form设置
         ModernTabPage4.IsSeparator = True
         ModernTabPage5.Text = "界面与尺寸"
         ModernTabPage6.Text = "设备与性能"
-        ModernTabPage7.Text = "HDR"
-        ModernTabPage8.Text = "字幕"
-        ModernTabPage9.Text = "弹幕"
-        ModernTabPage10.Text = "音乐与歌词"
-        ModernTabPage11.Text = "文件关联"
-        ModernTabPage12.Text = "RTX 视频增强"
-        ModernTabPage13.Text = "AI 字幕"
-        ModernTabPage14.Text = "播放进度"
+        ModernTabPage7.Text = "播放行为"
+        ModernTabPage8.Text = "HDR"
+        ModernTabPage9.Text = "字幕"
+        ModernTabPage10.Text = "弹幕"
+        ModernTabPage11.Text = "音乐与歌词"
+        ModernTabPage12.Text = "文件关联"
+        ModernTabPage13.Text = "RTX 视频增强"
+        ModernTabPage14.Text = "AI 字幕"
         ModernTabListControl1.Items.Add(ModernTabPage1)
         ModernTabListControl1.Items.Add(ModernTabPage2)
         ModernTabListControl1.Items.Add(ModernTabPage3)

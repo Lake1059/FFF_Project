@@ -47,7 +47,7 @@ struct FFF3FPAudioTapConfig {
     std::uint32_t size;              // sizeof(FFF3FPAudioTapConfig) as compiled
     std::uint32_t version;           // FFF3FP_AUDIO_TAP_VERSION
     std::uint32_t ringCapacityBytes; // 0 = default; clamped to [MIN, MAX]
-    std::uint32_t flags;             // v1: all zero, reserved
+    std::uint32_t flags;             // 0 = live PCM; nonzero 1500–24000 = preferred read-ahead in ms
 };
 
 // One ring block's metadata plus the PCM that follows it in the caller's
@@ -56,6 +56,9 @@ struct FFF3FPAudioTapConfig {
 // reports the needed size and the block is NOT consumed (a bigger call gets
 // the same block). PCM layout is the decoded frame's own: channel-major
 // (plane by plane) for planar sample formats, interleaved for packed ones.
+// Read-ahead reports EOF once with bytesWritten == 0 and this sampleFormat.
+inline constexpr std::int32_t FFF3FP_AUDIO_TAP_END_OF_INPUT = -2;
+
 struct FFF3FPAudioTapBlock {
     std::uint32_t size;              // sizeof(FFF3FPAudioTapBlock) as compiled
     std::uint32_t version;           // FFF3FP_AUDIO_TAP_VERSION
@@ -102,5 +105,8 @@ FFF3FP_API FFFResult FFF3FP_DisableAudioTap(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_ReadAudioTap(FFF3FPHandle player,
     void* dst, std::uint32_t capacity, FFF3FPAudioTapBlock* block) noexcept;
 
+// True when the tap is feeding from an independent media read head.
+FFF3FP_API FFFResult FFF3FP_GetAudioTapReadAhead(FFF3FPHandle player,
+    std::uint32_t* readingAhead) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetAudioTapStats(FFF3FPHandle player,
     FFF3FPAudioTapStats* stats) noexcept;

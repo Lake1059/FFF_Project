@@ -1,6 +1,3 @@
-Option Strict On
-Option Explicit On
-
 ''' <summary>
 ''' 字幕语言标识：用户选什么、worker 传给 llama-server 的完整名、怎么显示、闸门怎么判。
 '''

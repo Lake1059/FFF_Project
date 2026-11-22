@@ -16,6 +16,9 @@ Public NotInheritable Class 播放器控制器
     Private 当前SDR峰值尼特 As Single = 默认SDR峰值尼特
     Private 当前HDR输出峰值尼特 As Single = 0.0F
     Private Const SDR纸白尼特 As Single = 203.0F
+    Friend Const 字幕来源AI As Integer = -3
+    Friend Const 字幕来源关闭 As Integer = -2
+    Friend Const 字幕来源外部 As Integer = -1
 
     Private ReadOnly 输出窗口提供器 As Func(Of IntPtr)
     Private ReadOnly 事件同步上下文 As SynchronizationContext
@@ -31,7 +34,7 @@ Public NotInheritable Class 播放器控制器
     Private 已导入外部字幕 As 外部字幕轨道
     Private 外部字幕候选快照 As 外部字幕候选() = Array.Empty(Of 外部字幕候选)()
     Private 当前内嵌字幕 As 外部字幕轨道
-    Private 当前字幕来源索引 As Integer = -2
+    Private 当前字幕来源索引 As Integer = 字幕来源关闭
     ' 快照被内核按 ABI 拒绝时，过去一律静默返回默认值，界面就显示『尚未打开媒体』——
     ' 一次真实的合同违约被读成『健康但没片子』。这里只把那一类失败说出来，
     ' 并且一个会话内只报一次，避免每次刷新都弹。
@@ -58,6 +61,15 @@ Public NotInheritable Class 播放器控制器
     ' 蓝牙补偿是会话级偏好：新会话先归零，只有实际改变时才下发，避免每次打开都触发一次
     ' 无意义的 re-seek。失败时不记账，等下一轮轮询/打开完成再试。
     Private 上次蓝牙补偿100纳秒 As Long = Long.MinValue
+    Private 蓝牙补偿信息行 As String = String.Empty
+
+    Friend Function 实际渲染引擎() As 播放器渲染引擎?
+        Return 安全读取会话(Function(目标) 目标.实际渲染引擎())
+    End Function
+
+    Friend Function 蓝牙补偿图层文本() As String
+        Return 蓝牙补偿信息行
+    End Function
     Private 当前音量 As Single = 1.0F
     Private 当前播放速度 As Double = 1.0R
     Private 已静音 As Boolean
@@ -153,16 +165,19 @@ Public NotInheritable Class 播放器控制器
         Get
             If Not 是否有媒体 Then Return False
             Dim 信息 = 安全读取媒体信息()
-            Return 信息 IsNot Nothing AndAlso 信息.流 IsNot Nothing AndAlso Not 信息.是静态图片 AndAlso
-                信息.流.Any(Function(x) x IsNot Nothing AndAlso
-                                      String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso
-                                      Not x.是封面图)
+            Return 有视频轨(信息)
         End Get
     End Property
 
+    Private Shared Function 有视频轨(信息 As 媒体信息) As Boolean
+        Return 信息 IsNot Nothing AndAlso 信息.流 IsNot Nothing AndAlso Not 信息.是静态图片 AndAlso
+            信息.流.Any(Function(x) x IsNot Nothing AndAlso
+                String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso Not x.是封面图)
+    End Function
+
     Public ReadOnly Property 当前字幕 As 外部字幕轨道
         Get
-            Return Volatile.Read(当前字幕轨道)
+            Return If(AI字幕已启用, Nothing, Volatile.Read(当前字幕轨道))
         End Get
     End Property
 
@@ -178,10 +193,10 @@ Public NotInheritable Class 播放器控制器
         End Get
     End Property
 
-    ''' <summary>-2 表示关闭，-1 表示外部字幕，非负数表示内嵌字幕流索引。</summary>
+    ''' <summary>-3 表示 AI 字幕，-2 表示关闭，-1 表示外部字幕，非负数表示内嵌字幕流索引。</summary>
     Public ReadOnly Property 当前字幕流索引 As Integer
         Get
-            Return Volatile.Read(当前字幕来源索引)
+            Return If(AI字幕已启用, 字幕来源AI, Volatile.Read(当前字幕来源索引))
         End Get
     End Property
 
@@ -644,9 +659,9 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
-    Public Sub 打开媒体(路径 As String)
+    Public Sub 打开媒体(路径 As String, Optional 从播放列表 As Boolean = False)
         If 已释放 Then Return
-        启动后台任务(打开媒体Async(路径))
+        启动后台任务(打开媒体Async(路径, 从播放列表))
     End Sub
 
     ''' <summary>在当前视频时间线上加载 MKA 外挂音频。</summary>
@@ -669,14 +684,15 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
-    Public Function 打开媒体Async(路径 As String) As Task
+    Public Function 打开媒体Async(路径 As String, Optional 从播放列表 As Boolean = False) As Task
         If 已释放 Then Return Task.CompletedTask
         Dim 完整路径 = 光盘路径.取得媒体路径(路径)
         If 完整路径 Is Nothing Then Return Task.CompletedTask
         ' 只有「用户打开媒体」这一路读进度记忆；换解码器 / 换流等内部切换仍以调用方
         ' 传入的恢复位置为准——那条路上"当前位置"必须原样保留，不能被历史进度覆盖。
+        Dim 尺寸策略 = If(从播放列表, 设置.实例对象.播放列表打开视频尺寸, 设置.实例对象.单独打开视频尺寸)
         Return 切换媒体会话Async(完整路径, 用户解码器偏好, TimeSpan.Zero,
-                                  True, -1, -1, False, 使用进度记忆:=True)
+                                  True, -1, -1, False, 使用进度记忆:=True, 打开尺寸策略:=尺寸策略)
     End Function
 
     ''' <summary>
@@ -707,17 +723,17 @@ Public NotInheritable Class 播放器控制器
         Dim 候选轨道 As 外部字幕轨道 = Nothing
         Try
             候选轨道 = Await 外部字幕自动加载器.加载字幕Async(字幕路径, 媒体路径, 本次取消.Token, 指定流索引)
-            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
-                Not ReferenceEquals(字幕加载取消, 本次取消) OrElse
-                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
+            If Not 字幕加载仍有效(媒体路径, 本次取消) Then Return
+            AI字幕?.作为字幕源停用()
+            关闭光盘字幕()
             ' Interlocked documents the publication contract for test hosts that
             ' do not provide a UI SynchronizationContext. In the application the
             ' continuation and renderer timer are additionally serialized by UI.
+            Dim 参数 As New 播放器字幕事件参数(候选轨道.路径, 候选轨道.格式)
             注册容器字幕轨候选(候选轨道)
             发布外部字幕(候选轨道)
             候选轨道 = Nothing
-            RaiseEvent 外部字幕已加载(Me,
-                New 播放器字幕事件参数(已导入外部字幕.路径, 已导入外部字幕.格式))
+            RaiseEvent 外部字幕已加载(Me, 参数)
         Catch ex As OperationCanceledException
             ' A newer manual choice, media replacement or shutdown superseded it.
         Catch ex As Exception
@@ -726,7 +742,7 @@ Public NotInheritable Class 播放器控制器
             End If
         Finally
             候选轨道?.释放()
-            If ReferenceEquals(字幕加载取消, 本次取消) Then 字幕加载取消 = Nothing
+            Interlocked.CompareExchange(字幕加载取消, Nothing, 本次取消)
             本次取消.Dispose()
         End Try
     End Function
@@ -773,34 +789,47 @@ Public NotInheritable Class 播放器控制器
         If 已释放 Then Return
         Dim AI = AI字幕
         If AI Is Nothing Then Return
-        ' 清普通字幕由控制器的 清除普通字幕 回调统一做（避免这里重复清两次）。
         AI.作为字幕源启用()
     End Sub
 
-    ''' <summary>关闭字幕。<paramref name="保留AI字幕"/>=True 只清普通字幕，
-    ''' 供 AI 字幕启用路径内部使用，避免自己把自己关掉。</summary>
-    Public Sub 关闭字幕(Optional 保留AI字幕 As Boolean = False)
+    Public Sub 关闭字幕()
         If 已释放 Then Return
-        If Not 保留AI字幕 Then AI字幕?.作为字幕源停用()
+        AI字幕?.作为字幕源停用()
+        清除普通字幕选择()
+    End Sub
+
+    Friend Sub 切换到AI字幕()
+        If 已释放 OrElse Not AI字幕已启用 Then Return
+        清除普通字幕选择()
+        ' 若刚才取消了第一次目录扫描，仍要提供同名外挂候选供用户手动切换。
+        If 是否有媒体 AndAlso 可用外部字幕.Count = 0 Then 开始自动加载字幕(当前文件路径)
+    End Sub
+
+    Private Sub 关闭光盘字幕()
         If 读取光盘状态().已打开 Then 光盘导航(光盘命令.字幕, 0)
+    End Sub
+
+    Private Sub 清除普通字幕选择()
         取消字幕加载()
         Dim 待释放内嵌 = Interlocked.Exchange(当前内嵌字幕, Nothing)
         Interlocked.Exchange(当前字幕轨道, Nothing)
-        Volatile.Write(当前字幕来源索引, -2)
+        Volatile.Write(当前字幕来源索引, 字幕来源关闭)
         待释放内嵌?.释放()
+        关闭光盘字幕()
         RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
         RaiseEvent 状态已变化(Me, EventArgs.Empty)
     End Sub
 
     Public Sub 选择外部字幕()
         If 已释放 Then Return
-        AI字幕?.作为字幕源停用()
         Dim 外部 = Volatile.Read(已导入外部字幕)
         If 外部 Is Nothing Then Return
         取消字幕加载()
+        AI字幕?.作为字幕源停用()
+        关闭光盘字幕()
         Dim 待释放内嵌 = Interlocked.Exchange(当前内嵌字幕, Nothing)
         Interlocked.Exchange(当前字幕轨道, 外部)
-        Volatile.Write(当前字幕来源索引, -1)
+        Volatile.Write(当前字幕来源索引, 字幕来源外部)
         待释放内嵌?.释放()
         RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
         RaiseEvent 状态已变化(Me, EventArgs.Empty)
@@ -809,7 +838,6 @@ Public NotInheritable Class 播放器控制器
     ''' <summary>选择外部字幕；字幕容器（MKS）可带轨索引切轨，-1 表示文件本身。</summary>
     Public Sub 选择外部字幕(路径 As String, Optional 指定流索引 As Integer = -1)
         If 已释放 OrElse String.IsNullOrWhiteSpace(路径) Then Return
-        AI字幕?.作为字幕源停用()
         Dim 完整路径 = Path.GetFullPath(路径)
         Dim 已加载 = Volatile.Read(已导入外部字幕)
         If 已加载 IsNot Nothing AndAlso
@@ -827,14 +855,18 @@ Public NotInheritable Class 播放器控制器
 
     Public Sub 选择内嵌字幕(流索引 As Integer)
         If 已释放 OrElse 正在切换会话 OrElse 流索引 < 0 Then Return
-        ' 选任何一条普通字幕轨都意味着离开 AI 字幕来源，即使索引与当前相同。
-        AI字幕?.作为字幕源停用()
         Dim 光盘 = 读取光盘状态()
         If 光盘.已打开 Then
             Dim 字幕信息 = 安全读取媒体信息()?.流.Where(Function(x) x.类型 = "subtitle").ToArray()
             If 字幕信息 IsNot Nothing Then
                 Dim 编号 = Array.FindIndex(字幕信息, Function(x) x.索引 = 流索引)
-                If 编号 >= 0 Then 光盘导航(光盘命令.字幕, 编号 + 1)
+                If 编号 >= 0 Then
+                    清除普通字幕选择()
+                    AI字幕?.作为字幕源停用()
+                    光盘导航(光盘命令.字幕, 编号 + 1)
+                    Volatile.Write(当前字幕来源索引, 流索引)
+                    RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
+                End If
             End If
             Return
         End If
@@ -858,17 +890,11 @@ Public NotInheritable Class 播放器控制器
             候选轨道 = Await Task.Run(
                 Function() 外部字幕自动加载器.加载内嵌字幕(媒体路径, 字幕流, 本次取消.Token),
                 本次取消.Token)
-            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
-                Not ReferenceEquals(字幕加载取消, 本次取消) OrElse
-                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
+            If Not 字幕加载仍有效(媒体路径, 本次取消) Then Return
 
-            Dim 待释放 = Interlocked.Exchange(当前内嵌字幕, 候选轨道)
-            Interlocked.Exchange(当前字幕轨道, 候选轨道)
-            Volatile.Write(当前字幕来源索引, 字幕流.索引)
+            AI字幕?.作为字幕源停用()
+            发布内嵌字幕(候选轨道, 字幕流.索引)
             候选轨道 = Nothing
-            待释放?.释放()
-            RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
-            RaiseEvent 状态已变化(Me, EventArgs.Empty)
         Catch ex As OperationCanceledException
         Catch ex As Exception
             If Not 已释放 AndAlso Not 本次取消.IsCancellationRequested Then
@@ -876,7 +902,7 @@ Public NotInheritable Class 播放器控制器
             End If
         Finally
             候选轨道?.释放()
-            If ReferenceEquals(字幕加载取消, 本次取消) Then 字幕加载取消 = Nothing
+            Interlocked.CompareExchange(字幕加载取消, Nothing, 本次取消)
             本次取消.Dispose()
         End Try
     End Function
@@ -1057,7 +1083,7 @@ Public NotInheritable Class 播放器控制器
     ''' <param name="已完成">看到片尾后调用；下次打开从头开始。</param>
     ''' <param name="立即落盘">True 用于显式保存点，不等 10 秒合并窗口。</param>
     Public Sub 保存当前播放进度(Optional 已完成 As Boolean = False, Optional 立即落盘 As Boolean = False)
-        If Not 设置.实例对象.播放进度记忆 Then Return
+        If Not 设置.实例对象.播放进度记忆 OrElse Not 当前媒体是视频 Then Return
         Dim 目标 = 会话
         If 目标 Is Nothing Then Return
         Dim 路径 = 当前文件路径
@@ -1081,7 +1107,7 @@ Public NotInheritable Class 播放器控制器
 
     ''' <summary>跳转成功后立刻记目标位置；下一次 100ms 心跳会把实际落点校正回来。</summary>
     Private Sub 记录跳转位置(位置 As TimeSpan, 总时长 As TimeSpan)
-        If 总时长 <= TimeSpan.Zero Then Return
+        If 总时长 <= TimeSpan.Zero OrElse Not 当前媒体是视频 Then Return
         Try
             播放进度存储.记录(当前文件路径, 位置, 总时长, 立即落盘:=True)
         Catch ex As Exception
@@ -1318,6 +1344,15 @@ Public NotInheritable Class 播放器控制器
         End Try
     End Sub
 
+    Friend Sub 应用音频响度设置()
+        If 已释放 Then Return
+        Try
+            会话?.设置音频响度(设置.实例对象)
+        Catch ex As Exception
+            RaiseEvent 播放错误(Me, New 播放器错误事件参数(ex.Message, "无法应用音频响度设置"))
+        End Try
+    End Sub
+
     Friend Sub 应用音频效果设置()
         If 已释放 OrElse 会话 Is Nothing Then Return
         Try
@@ -1450,26 +1485,42 @@ Public NotInheritable Class 播放器控制器
 
     ''' <summary>把当前默认蓝牙端点的协议区间换算成内核音频时间线偏移。
     ''' 只在值真正变化时下发；新会话由 会话_打开完成 调用，播放中由主窗体 500ms 轮询调用。</summary>
-    Friend Sub 应用蓝牙音频延迟()
+    Friend Sub 应用蓝牙音频延迟(Optional 端点 As 蓝牙音频信息 = Nothing)
         Dim 目标 = 会话
-        If 已释放 OrElse 目标 Is Nothing OrElse Not 是否有媒体 Then Return
+        If 已释放 OrElse 目标 Is Nothing OrElse Not 是否有媒体 Then
+            蓝牙补偿信息行 = String.Empty
+            Return
+        End If
         Try
             Dim 配置 = 设置.实例对象
-            Dim 信息 = 蓝牙音频检测器.检测默认输出()
-            Dim 刷新率 = 蓝牙音频检测器.取刷新率(输出窗口提供器())
+            Dim 信息 = If(配置.蓝牙低延迟模式, If(端点, 蓝牙音频检测器.检测默认输出()), 蓝牙音频信息.非蓝牙)
+            Dim 刷新率 = If(信息.是蓝牙 AndAlso 信息.已连接, 蓝牙音频检测器.取刷新率(输出窗口提供器()), 0.0)
             Dim 补偿 = 蓝牙音频延迟策略.计算补偿100纳秒(
                 配置.蓝牙低延迟模式, 信息, 刷新率, 配置.蓝牙额外提前量毫秒,
                 CType(配置.蓝牙音频编码, 蓝牙音频编码))
-            If 补偿 = 上次蓝牙补偿100纳秒 Then Return
+            If 补偿 = 上次蓝牙补偿100纳秒 Then
+                蓝牙补偿信息行 = 生成蓝牙补偿信息行(配置, 信息)
+                Return
+            End If
             If 补偿 = 0 AndAlso 上次蓝牙补偿100纳秒 = Long.MinValue Then
                 上次蓝牙补偿100纳秒 = 0
+                蓝牙补偿信息行 = 生成蓝牙补偿信息行(配置, 信息)
                 Return
             End If
             目标.设置音频延迟(TimeSpan.FromTicks(补偿))
             上次蓝牙补偿100纳秒 = 补偿
+            蓝牙补偿信息行 = 生成蓝牙补偿信息行(配置, 信息)
         Catch ex As Exception
+            蓝牙补偿信息行 = String.Empty
         End Try
     End Sub
+
+    Friend Shared Function 生成蓝牙补偿信息行(配置 As 设置, 信息 As 蓝牙音频信息) As String
+        If Not 配置.蓝牙低延迟模式 OrElse Not 信息.是蓝牙 OrElse Not 信息.已连接 Then Return String.Empty
+        Dim 手动 = 配置.蓝牙额外提前量毫秒
+        Return $"{信息.显示设备名称}   {信息.显示协议名称}" &
+            If(手动 = 0, String.Empty, $"   手动补偿 {手动:+0;-0} ms")
+    End Function
 
     Public Sub 强制开启HDR模式()
         Dim 目标 = 会话
@@ -1595,7 +1646,8 @@ Public NotInheritable Class 播放器控制器
     Private Async Function 切换媒体会话Async(路径 As String, 解码器 As 解码模式, 恢复位置 As TimeSpan,
                                               恢复播放 As Boolean, 视频流 As Integer, 音频流 As Integer,
                                               保留已加载字幕 As Boolean,
-                                              Optional 使用进度记忆 As Boolean = False) As Task
+                                              Optional 使用进度记忆 As Boolean = False,
+                                              Optional 打开尺寸策略 As 视频打开尺寸策略? = Nothing) As Task
         ' 旧会话的读数只有接管前才拿得到。先把旧媒体最后位置落盘；
         ' 失败回退时旧会话仍在播，这笔记录不会造成任何状态变化。
         If 会话 IsNot Nothing Then 保存当前播放进度(立即落盘:=True)
@@ -1658,7 +1710,8 @@ Public NotInheritable Class 播放器控制器
                         Dim 原位包含封面 = 原位是纯音频 AndAlso 原位媒体信息.流.Any(
                             Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso x.是封面图)
                         恢复流选择(原会话, 原位媒体信息, 视频流, 音频流)
-                        Dim 原位恢复位置 = 解析进度恢复位置(路径, 恢复位置, 原位初始快照.总时长, 使用进度记忆)
+                        Dim 原位恢复位置 = 解析进度恢复位置(路径, 恢复位置, 原位初始快照.总时长,
+                            使用进度记忆 AndAlso 有视频轨(原位媒体信息))
                         Dim 原位已恢复进度 As TimeSpan? = Nothing
                         If 原位恢复位置 > TimeSpan.Zero Then 原位已恢复进度 = 原位恢复位置
                         Await 恢复媒体位置Async(原会话, 原光盘状态, 原位恢复位置, 原位初始快照.总时长, 此次取消.Token)
@@ -1683,9 +1736,10 @@ Public NotInheritable Class 播放器控制器
                         If 恢复播放 Then 会话.播放()
 
                         正在切换会话 = False
+                        If AI字幕已启用 Then 关闭光盘字幕()
                         RaiseEvent 媒体已打开(Me,
                             New 播放器媒体事件参数(当前文件路径, 原位媒体信息, 原位快照, 原位保留当前字幕,
-                                                   原位已恢复进度))
+                                                   原位已恢复进度, 打开尺寸策略))
                         开始自动加载外部音频(当前文件路径)
                         If Not 原位保留当前字幕 Then
                             开始自动加载字幕(当前文件路径)
@@ -1748,7 +1802,8 @@ Public NotInheritable Class 播放器控制器
                 Dim 候选包含封面 = 候选是纯音频 AndAlso 媒体信息.流.Any(
                 Function(x) String.Equals(x.类型, "video", StringComparison.OrdinalIgnoreCase) AndAlso x.是封面图)
                 恢复流选择(候选会话, 媒体信息, 视频流, 音频流)
-                Dim 候选恢复位置 = 解析进度恢复位置(路径, 恢复位置, 初始快照.总时长, 使用进度记忆)
+                Dim 候选恢复位置 = 解析进度恢复位置(路径, 恢复位置, 初始快照.总时长,
+                    使用进度记忆 AndAlso 有视频轨(媒体信息))
                 Dim 候选已恢复进度 As TimeSpan? = Nothing
                 If 候选恢复位置 > TimeSpan.Zero Then 候选已恢复进度 = 候选恢复位置
                 Await 恢复媒体位置Async(候选会话, 原光盘状态, 候选恢复位置, 初始快照.总时长, 此次取消.Token)
@@ -1788,8 +1843,9 @@ Public NotInheritable Class 播放器控制器
                 ' “媒体已打开”是可操作边界。事件处理器可能立即切换色彩、音轨或跳转，
                 ' 因而不能等到 Finally 才清除切换标记，否则首个操作会被静默忽略。
                 正在切换会话 = False
+                If AI字幕已启用 Then 关闭光盘字幕()
                 RaiseEvent 媒体已打开(Me,
-                New 播放器媒体事件参数(当前文件路径, 媒体信息, 快照, 保留当前字幕, 候选已恢复进度))
+                New 播放器媒体事件参数(当前文件路径, 媒体信息, 快照, 保留当前字幕, 候选已恢复进度, 打开尺寸策略))
                 开始自动加载外部音频(当前文件路径)
                 If Not 保留当前字幕 Then
                     开始自动加载字幕(当前文件路径)
@@ -1892,8 +1948,9 @@ Public NotInheritable Class 播放器控制器
     Private Function 创建会话(解码器 As 解码模式, 色彩模式 As 色彩输出模式,
                             性能 As 播放性能选项) As 播放器会话
         上次蓝牙补偿100纳秒 = Long.MinValue
-        Return New 播放器会话(New 播放器配置 With {
+        Dim 新会话 As New 播放器会话(New 播放器配置 With {
             .解码器 = 解码器,
+            .渲染引擎 = 性能.渲染引擎,
             .色彩模式 = 色彩模式,
             .SDR峰值尼特 = 当前SDR峰值尼特,
             .HDR峰值尼特 = 取得HDR输出峰值参数(色彩模式),
@@ -1908,6 +1965,13 @@ Public NotInheritable Class 播放器控制器
             .输出窗口句柄 = IntPtr.Zero,
             .事件同步上下文 = 事件同步上下文
         })
+        Try
+            新会话.设置音频响度(设置.实例对象)
+            Return 新会话
+        Catch
+            新会话.释放()
+            Throw
+        End Try
     End Function
 
     Friend Function 取得HDR输出峰值参数(色彩模式 As 色彩输出模式) As Single
@@ -2153,42 +2217,53 @@ Public NotInheritable Class 播放器控制器
     End Sub
 
     Private Sub 开始自动加载字幕(媒体路径 As String)
-        If 光盘路径.是光盘路径(媒体路径) Then Return
-        释放当前字幕()
+        If 已释放 OrElse String.IsNullOrWhiteSpace(媒体路径) OrElse 光盘路径.是光盘路径(媒体路径) OrElse
+            Volatile.Read(当前字幕来源索引) <> 字幕来源关闭 Then Return
         Dim 本次取消 As New CancellationTokenSource()
-        字幕加载取消 = 本次取消
-        Dim 忽略 = 自动加载同名字幕Async(媒体路径, 本次取消)
+        If Interlocked.CompareExchange(字幕加载取消, 本次取消, Nothing) IsNot Nothing Then
+            本次取消.Dispose()
+            Return
+        End If
+        Dim 忽略 = 自动加载同名字幕Async(媒体路径, 本次取消, 仅扫描:=AI字幕已启用)
     End Sub
 
-    Private Async Function 自动加载同名字幕Async(媒体路径 As String, 本次取消 As CancellationTokenSource) As Task
+    Private Function 字幕加载仍有效(媒体路径 As String, 本次取消 As CancellationTokenSource) As Boolean
+        Return Not 本次取消.IsCancellationRequested AndAlso Not 已释放 AndAlso
+            ReferenceEquals(Volatile.Read(字幕加载取消), 本次取消) AndAlso
+            String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Async Function 自动加载同名字幕Async(媒体路径 As String, 本次取消 As CancellationTokenSource,
+                                              仅扫描 As Boolean) As Task
         Dim 候选轨道 As 外部字幕轨道 = Nothing
         Try
             Dim 候选字幕 = Await 外部字幕自动加载器.扫描同名字幕Async(媒体路径, 本次取消.Token)
-            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
-                Not ReferenceEquals(字幕加载取消, 本次取消) OrElse
-                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
+            If Not 字幕加载仍有效(媒体路径, 本次取消) Then Return
             发布外部字幕候选(候选字幕)
+            If 仅扫描 OrElse AI字幕已启用 OrElse Not 字幕加载仍有效(媒体路径, 本次取消) Then Return
             Dim 内嵌字幕 = 安全读取媒体信息()?.流.
                 Where(Function(x) x.类型 = "subtitle").
                 OrderByDescending(Function(x) x.是默认流).FirstOrDefault()
             If 内嵌字幕 IsNot Nothing Then
-                选择内嵌字幕(内嵌字幕.索引)
+                候选轨道 = Await Task.Run(
+                    Function() 外部字幕自动加载器.加载内嵌字幕(媒体路径, 内嵌字幕, 本次取消.Token), 本次取消.Token)
+                If AI字幕已启用 OrElse Not 字幕加载仍有效(媒体路径, 本次取消) Then Return
+                发布内嵌字幕(候选轨道, 内嵌字幕.索引)
+                候选轨道 = Nothing
                 Return
             End If
             If 候选字幕.Count = 0 Then Return
 
             候选轨道 = Await 外部字幕自动加载器.尝试加载候选字幕Async(
                 候选字幕, 媒体路径, 本次取消.Token)
-            If 本次取消.IsCancellationRequested OrElse 已释放 OrElse
-                Not ReferenceEquals(字幕加载取消, 本次取消) OrElse
-                Not String.Equals(当前文件路径, 媒体路径, StringComparison.OrdinalIgnoreCase) Then Return
+            If AI字幕已启用 OrElse Not 字幕加载仍有效(媒体路径, 本次取消) Then Return
             If 候选轨道 Is Nothing Then Return
 
+            Dim 参数 As New 播放器字幕事件参数(候选轨道.路径, 候选轨道.格式)
             注册容器字幕轨候选(候选轨道)
             发布外部字幕(候选轨道)
             候选轨道 = Nothing
-            RaiseEvent 外部字幕已加载(Me,
-                New 播放器字幕事件参数(已导入外部字幕.路径, 已导入外部字幕.格式))
+            RaiseEvent 外部字幕已加载(Me, 参数)
         Catch ex As OperationCanceledException
             ' 新媒体、停止或关闭会取消尚未完成的自动加载。
         Catch ex As NotSupportedException
@@ -2200,17 +2275,26 @@ Public NotInheritable Class 播放器控制器
             ' 外部字幕是可选资源，加载失败不影响媒体播放。
         Finally
             候选轨道?.释放()
-            If ReferenceEquals(字幕加载取消, 本次取消) Then 字幕加载取消 = Nothing
+            Interlocked.CompareExchange(字幕加载取消, Nothing, 本次取消)
             本次取消.Dispose()
         End Try
     End Function
+
+    Private Sub 发布内嵌字幕(轨道 As 外部字幕轨道, 流索引 As Integer)
+        Dim 待释放 = Interlocked.Exchange(当前内嵌字幕, 轨道)
+        Interlocked.Exchange(当前字幕轨道, 轨道)
+        Volatile.Write(当前字幕来源索引, 流索引)
+        待释放?.释放()
+        RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
+        RaiseEvent 状态已变化(Me, EventArgs.Empty)
+    End Sub
 
     Private Sub 发布外部字幕(轨道 As 外部字幕轨道)
         ArgumentNullException.ThrowIfNull(轨道)
         Dim 旧外部 = Interlocked.Exchange(已导入外部字幕, 轨道)
         Dim 旧内嵌 = Interlocked.Exchange(当前内嵌字幕, Nothing)
         Interlocked.Exchange(当前字幕轨道, 轨道)
-        Volatile.Write(当前字幕来源索引, -1)
+        Volatile.Write(当前字幕来源索引, 字幕来源外部)
         旧内嵌?.释放()
         旧外部?.释放()
         RaiseEvent 字幕选择已变化(Me, EventArgs.Empty)
@@ -2248,7 +2332,7 @@ Public NotInheritable Class 播放器控制器
         Dim 外部 = Interlocked.Exchange(已导入外部字幕, Nothing)
         Volatile.Write(外部字幕候选快照, Array.Empty(Of 外部字幕候选)())
         Dim 内嵌 = Interlocked.Exchange(当前内嵌字幕, Nothing)
-        Volatile.Write(当前字幕来源索引, -2)
+        Volatile.Write(当前字幕来源索引, 字幕来源关闭)
         当前?.释放()
         外部?.释放()
         内嵌?.释放()
@@ -2487,12 +2571,14 @@ Public NotInheritable Class 播放器媒体事件参数
     Inherits EventArgs
 
     Public Sub New(文件路径 As String, 媒体信息 As 媒体信息, 快照 As 播放器快照,
-                   保留剪辑区间 As Boolean, Optional 恢复进度 As TimeSpan? = Nothing)
+                   保留剪辑区间 As Boolean, Optional 恢复进度 As TimeSpan? = Nothing,
+                   Optional 打开尺寸策略 As 视频打开尺寸策略? = Nothing)
         Me.文件路径 = 文件路径
         Me.媒体信息 = 媒体信息
         Me.快照 = 快照
         Me.保留剪辑区间 = 保留剪辑区间
         Me.恢复进度 = 恢复进度
+        Me.打开尺寸策略 = 打开尺寸策略
     End Sub
 
     Public ReadOnly Property 文件路径 As String
@@ -2501,6 +2587,7 @@ Public NotInheritable Class 播放器媒体事件参数
     Public ReadOnly Property 保留剪辑区间 As Boolean
     ''' <summary>非空表示这次打开确实从历史位置续播；供界面提示，不参与播放逻辑。</summary>
     Public ReadOnly Property 恢复进度 As TimeSpan?
+    Public ReadOnly Property 打开尺寸策略 As 视频打开尺寸策略?
 End Class
 
 Public NotInheritable Class 播放器错误事件参数

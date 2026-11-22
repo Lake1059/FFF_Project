@@ -4,6 +4,7 @@
 #include "3FP/Api/FFF.Player.AudioRenderPlug.h"
 #include "3FP/Api/FFF.Player.AudioPassthrough.h"
 #include "3FP/Audio/AsrAudioTap.h"
+#include "3FP/Audio/RealtimeLoudness.h"
 
 extern "C" {
 #include <libavutil/channel_layout.h>
@@ -150,6 +151,7 @@ public:
     void SetPaused(bool paused) noexcept;
     void Reset(std::int64_t position100ns) noexcept;
     void SetVolume(float volume, bool muted) noexcept;
+    void SetLoudness(bool enabled, int targetLufs, int rangeLu) noexcept;
     void SetMonoAudio(bool enabled) noexcept;
     // A-02: external hard upper bound on resident decoded-PCM bytes.
     // hardCapBytes == 0 disables the cap and restores the previous unbounded
@@ -413,6 +415,7 @@ private:
     std::uint16_t outputBitsPerSample_;
     std::uint16_t outputValidBitsPerSample_;
     bool outputFloat_;
+    RealtimeLoudness loudness_;
     std::atomic<float> volume_;
     std::atomic<bool> muted_;
     std::atomic<bool> running_;

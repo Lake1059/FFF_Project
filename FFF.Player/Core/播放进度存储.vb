@@ -160,7 +160,14 @@ Public NotInheritable Class 播放进度存储
         End SyncLock
     End Function
 
-    ''' <summary>设置页显示用：当前已有记录条数。功能关闭时仍可读，方便看清要清理什么。</summary>
+    ' 历史版本误收录了纯音频。已知纯音频扩展名在读取进度文件时过滤；
+    ' 新记录与恢复还要由播放器检查实际视频流（排除封面）。
+    Private Shared ReadOnly 纯音频扩展名 As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+        ".mp3", ".flac", ".wav", ".m4a", ".aac", ".opus", ".wma", ".ape",
+        ".ac3", ".eac3", ".dts", ".mka", ".wv", ".tak", ".alac", ".aiff", ".aif", ".dsf", ".dff"
+    }
+
+    ''' <summary>设置页显示用：当前已有记录条数。功能关闭时仍可读。</summary>
     Public Shared Function 统计条目数() As Integer
         确保已加载()
         If _不兼容版本 Then Return 0
@@ -174,7 +181,8 @@ Public NotInheritable Class 播放进度存储
     Public Shared Sub 记录(路径 As String, 位置 As TimeSpan, 时长 As TimeSpan,
                            Optional 已完成 As Boolean = False, Optional 立即落盘 As Boolean = False)
         If Not 播放进度记忆已启用() Then Return
-        If String.IsNullOrWhiteSpace(路径) OrElse 时长 <= TimeSpan.Zero Then Return
+        If String.IsNullOrWhiteSpace(路径) OrElse 时长 <= TimeSpan.Zero OrElse
+            纯音频扩展名.Contains(Path.GetExtension(路径)) Then Return
         ' 光盘/目录没有文件身份，不能当媒体记录；图片总时长为 0，前面已排除。
         If Not File.Exists(路径) Then Return
 
@@ -418,6 +426,10 @@ Public NotInheritable Class 播放进度存储
                     If 项 Is Nothing OrElse String.IsNullOrWhiteSpace(项.路径) Then Continue For
                     If 项.时长100纳秒 <= 0 Then Continue For
                     Dim 键 = 规范化路径(项.路径)
+                    If 纯音频扩展名.Contains(Path.GetExtension(键)) Then
+                        _脏 = True
+                        Continue For
+                    End If
                     项.路径 = 键
                     ' 重载时按当前媒体文件刷新指纹：磁盘上的进度可能是上一会话或外部手改留下的，
                     ' 其文件大小/mtime 早已过期（例如手改 JSON 写死 1024/0）。直接按旧指纹判失效会把

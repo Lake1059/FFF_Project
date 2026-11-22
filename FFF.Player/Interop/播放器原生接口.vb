@@ -380,7 +380,7 @@ Friend Structure 原生音频Tap配置
     Public 大小 As UInteger
     Public 版本 As UInteger
     Public 环容量字节 As UInteger   ' 0 = 默认；内核钳到 [最小, 最大] 并向上取 2 的幂
-    Public 标志 As UInteger         ' v1 全零预留
+    Public 标志 As UInteger         ' 0 = 播放端 PCM；1500–24000 = 优先预读的毫秒数
 End Structure
 
 <StructLayout(LayoutKind.Sequential)>
@@ -731,6 +731,52 @@ Friend Module 播放器原生接口
         解析可选导出(Of 音频Tap统计原型)("FFF3FP_GetAudioTapStats")
 
     ''' <summary>内核是否提供 ASR 音频 tap（旧内核缺席 → AI 字幕静默降级）。</summary>
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置渲染后端原型(播放器 As 播放器原生句柄, 后端 As 播放器渲染引擎) As 原生播放器结果
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取渲染后端原型(播放器 As 播放器原生句柄, ByRef 后端 As 播放器渲染引擎) As 原生播放器结果
+    Private ReadOnly 设置渲染后端函数 As 设置渲染后端原型 = 解析可选导出(Of 设置渲染后端原型)("FFF3FP_SetVideoRenderBackend")
+    Private ReadOnly 读取渲染后端函数 As 读取渲染后端原型 = 解析可选导出(Of 读取渲染后端原型)("FFF3FP_GetVideoRenderBackend")
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取字幕呈现原型(播放器 As 播放器原生句柄, ByRef 序号 As ULong, ByRef 计时 As Long) As 原生播放器结果
+    Private ReadOnly 读取字幕呈现函数 As 读取字幕呈现原型 = 解析可选导出(Of 读取字幕呈现原型)("FFF3FP_GetSubtitlePresentation")
+
+    Friend Function 读取字幕呈现(播放器 As 播放器原生句柄) As (序号 As ULong, 计时 As Long)
+        Dim 序号 As ULong
+        Dim 计时 As Long
+        If 读取字幕呈现函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid OrElse 播放器.IsClosed OrElse
+            读取字幕呈现函数(播放器, 序号, 计时) <> 原生播放器结果.成功 Then Return (0UL, 0L)
+        Return (序号, 计时)
+    End Function
+
+    Friend ReadOnly Property 支持渲染后端 As Boolean
+        Get
+            Return 设置渲染后端函数 IsNot Nothing
+        End Get
+    End Property
+
+    Friend Function 设置渲染后端(播放器 As 播放器原生句柄, 后端 As 播放器渲染引擎) As 原生播放器结果
+        Return If(设置渲染后端函数 Is Nothing, 原生播放器结果.不支持, 设置渲染后端函数(播放器, 后端))
+    End Function
+
+    Friend Function 读取渲染后端(播放器 As 播放器原生句柄) As 播放器渲染引擎?
+        Dim 后端 As 播放器渲染引擎
+        If 读取渲染后端函数 Is Nothing OrElse 读取渲染后端函数(播放器, 后端) <> 原生播放器结果.成功 Then Return Nothing
+        Return 后端
+    End Function
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取Tap预读状态原型(播放器 As 播放器原生句柄, ByRef 正在预读 As UInteger) As 原生播放器结果
+    Private ReadOnly 读取Tap预读状态函数 As 读取Tap预读状态原型 = 解析可选导出(Of 读取Tap预读状态原型)("FFF3FP_GetAudioTapReadAhead")
+
+    Friend Function 正在预读音频Tap(播放器 As 播放器原生句柄) As Boolean
+        Dim 正在预读 As UInteger
+        Return 读取Tap预读状态函数 IsNot Nothing AndAlso 播放器 IsNot Nothing AndAlso
+            Not 播放器.IsClosed AndAlso Not 播放器.IsInvalid AndAlso
+            读取Tap预读状态函数(播放器, 正在预读) = 原生播放器结果.成功 AndAlso 正在预读 <> 0UI
+    End Function
+
     Friend ReadOnly Property 支持音频Tap As Boolean
         Get
             Return 启用音频Tap函数 IsNot Nothing
@@ -738,14 +784,15 @@ Friend Module 播放器原生接口
     End Property
 
     ''' <summary>安装 tap；环容量传 0 用默认（32 MiB）。已安装则重建（旧内容不保留）。</summary>
-    Friend Function 启用音频Tap(播放器 As 播放器原生句柄, 环容量字节 As UInteger) As 原生播放器结果
+    Friend Function 启用音频Tap(播放器 As 播放器原生句柄, 环容量字节 As UInteger,
+                           Optional 预读毫秒 As UInteger = 0UI) As 原生播放器结果
         Dim 函数 = 启用音频Tap函数
         If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid Then Return 原生播放器结果.不支持
         Dim 配置 As New 原生音频Tap配置 With {
             .大小 = CUInt(Marshal.SizeOf(Of 原生音频Tap配置)()),
             .版本 = 音频Tap版本,
             .环容量字节 = 环容量字节,
-            .标志 = 0UI
+            .标志 = 预读毫秒
         }
         Dim 钉住 = GCHandle.Alloc(配置, GCHandleType.Pinned)
         Dim 已引用 As Boolean = False
@@ -821,7 +868,9 @@ Friend Module 播放器原生接口
         Dim 已引用 As Boolean = False
         Try
             播放器.DangerousAddRef(已引用)
-            Return 函数(播放器.DangerousGetHandle(), 钉住.AddrOfPinnedObject())
+            Dim 结果 = 函数(播放器.DangerousGetHandle(), 钉住.AddrOfPinnedObject())
+            If 结果 = 原生播放器结果.成功 Then 统计 = DirectCast(钉住.Target, 原生音频Tap统计)
+            Return 结果
         Finally
             If 已引用 Then 播放器.DangerousRelease()
             钉住.Free()
@@ -1697,6 +1746,25 @@ Friend Module 播放器原生接口
         解析可选导出(Of 设置音频直通表原型)("FFF3FP_SetAudioPassthroughApi")
 
     <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置音频响度原型(播放器 As 播放器原生句柄, 启用 As UInteger,
+                                             目标响度 As Integer, 动态范围 As Integer) As 原生播放器结果
+
+    Private ReadOnly 设置音频响度函数 As 设置音频响度原型 =
+        解析可选导出(Of 设置音频响度原型)("FFF3FP_SetAudioLoudness")
+
+    Friend ReadOnly Property 支持音频响度设置 As Boolean
+        Get
+            Return 设置音频响度函数 IsNot Nothing
+        End Get
+    End Property
+
+    Friend Function FFF3FP_SetAudioLoudness(播放器 As 播放器原生句柄, 启用 As Boolean,
+                                           目标响度 As Integer, 动态范围 As Integer) As 原生播放器结果
+        If 设置音频响度函数 Is Nothing Then Return 原生播放器结果.不支持
+        Return 设置音频响度函数(播放器, If(启用, 1UI, 0UI), 目标响度, 动态范围)
+    End Function
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
     Private Delegate Function 设置音频直通模式原型(播放器 As 播放器原生句柄,
                                                    模式 As UInteger) As 原生播放器结果
 
@@ -1862,6 +1930,24 @@ Friend Module 播放器原生接口
     Friend Function FFF3FP_OpenAssSubtitle(路径UTF8 As IntPtr, 字体目录UTF8 As IntPtr,
                                             流索引 As Integer, ByRef 渲染器 As IntPtr) As 原生播放器结果
     End Function
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 设置ASS替代字体原型(渲染器 As ASS字幕原生句柄,
+        <MarshalAs(UnmanagedType.LPUTF8Str)> 字体 As String) As 原生播放器结果
+
+    Private ReadOnly 设置ASS替代字体函数 As 设置ASS替代字体原型 =
+        解析可选导出(Of 设置ASS替代字体原型)("FFF3FP_SetAssFallbackFont")
+
+    Friend ReadOnly Property 支持ASS替代字体 As Boolean
+        Get
+            Return 设置ASS替代字体函数 IsNot Nothing
+        End Get
+    End Property
+
+    Friend Function FFF3FP_SetAssFallbackFont(渲染器 As ASS字幕原生句柄, 字体 As String) As 原生播放器结果
+        If 设置ASS替代字体函数 Is Nothing Then Return 原生播放器结果.不支持
+        Return 设置ASS替代字体函数(渲染器, 字体)
+    End Function
+
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_RenderAssSubtitle(渲染器 As ASS字幕原生句柄, 位置100纳秒 As Long,
                                              画布宽度 As Integer, 画布高度 As Integer,

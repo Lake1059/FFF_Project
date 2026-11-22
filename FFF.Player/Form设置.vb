@@ -10,12 +10,8 @@ Public Class Form设置
     Private ReadOnly 音乐与歌词页面 As New Form设置_音乐与歌词()
     Private ReadOnly 文件关联页面 As New Form设置_文件关联()
     Private ReadOnly 视频超分辨率页面 As New Form设置_视频超分辨率()
-    ' AI 实时字幕页。放在注册表最末：导航项是 Designer 里按添加顺序硬绑的，
-    ' 中间插一项会把后面每一页都错位，而这一页的位置没有硬约束。
     Private ReadOnly AI字幕页面 As New Form设置_AI字幕()
-    ' 播放进度页。同样放在注册表最末：导航项按 Designer 添加顺序硬绑，
-    ' 中间插一项会把它后面的每一页都错位。追加在 AI 字幕之后没有硬约束。
-    Private ReadOnly 播放进度页面 As New Form设置_播放进度()
+    Private ReadOnly 播放行为页面 As New Form设置_播放行为()
     Private ReadOnly 页面注册 As (页面 As Form, 初始化 As Action)()
 
     Public Sub New()
@@ -27,14 +23,14 @@ Public Class Form设置
             (支持者页面, AddressOf 支持者页面.初始化页面),
             (界面与尺寸页面, AddressOf 界面与尺寸页面.初始化页面),
             (设备与性能页面, AddressOf 设备与性能页面.初始化页面),
+            (播放行为页面, AddressOf 播放行为页面.初始化页面),
             (HDR页面, AddressOf HDR页面.初始化页面),
             (字幕页面, AddressOf 字幕页面.初始化页面),
             (弹幕页面, AddressOf 弹幕页面.初始化页面),
             (音乐与歌词页面, AddressOf 音乐与歌词页面.初始化页面),
             (文件关联页面, AddressOf 文件关联页面.初始化页面),
             (视频超分辨率页面, AddressOf 视频超分辨率页面.初始化页面),
-            (AI字幕页面, AddressOf AI字幕页面.初始化页面),
-            (播放进度页面, AddressOf 播放进度页面.初始化页面)
+            (AI字幕页面, AddressOf AI字幕页面.初始化页面)
         }
         Dim 导航项 = ModernTabListControl1.Items.Where(Function(x) Not x.IsSeparator).ToArray()
         If 导航项.Length <> 页面注册.Length Then Throw New InvalidOperationException("设置导航与页面注册数量不一致。")
@@ -54,8 +50,19 @@ Public Class Form设置
         应用字体(设置.实例对象.字体)
     End Sub
 
-    ' 从别处（如 AI 实时字幕菜单的「设置…」）直达某一页时用：统一在显示后应用，
-    ' 因为 SelectedIndex 必须在 Show 之后设置，否则会被 Form设置_Shown 的默认 0 盖掉。
+    Friend ReadOnly Property 正在显示设备页 As Boolean
+        Get
+            Return Visible AndAlso 设备与性能页面.Visible
+        End Get
+    End Property
+
+    Friend Sub 刷新实时设置页(端点 As 蓝牙音频信息)
+        If Not Visible Then Return
+        If 正在显示设备页 Then 设备与性能页面.刷新蓝牙设备显示(端点)
+        If 播放行为页面.Visible Then 播放行为页面.刷新进度数量()
+    End Sub
+
+    Private 首次显示完成 As Boolean
     Private 待选中页索引 As Integer = -1
 
     Friend Sub 显示窗口()
@@ -63,28 +70,19 @@ Public Class Form设置
         打开并定位()
     End Sub
 
-
     Private Sub 打开并定位()
-        If Visible Then
-            初始化所有页面()
-            应用待选中页()
-            Activate()
-            BringToFront()
-            Return
-        End If
-        If IsHandleCreated Then 初始化所有页面()
-        Show()
-        ' Shown 只在窗体首次显示时触发一次，而本窗口「关闭」时走的是 Hide 不是
-        ' Close（见 Form设置_FormClosing），所以从第二次起必须在这里自己收尾。
-        应用待选中页()
+        If 首次显示完成 Then 初始化所有页面()
+        If Not Visible Then Show()
+        ' 首次打开由 Shown 消费目标页面，后续从隐藏状态恢复时在这里定位。
+        If 首次显示完成 Then 应用待选中页()
+        Activate()
+        BringToFront()
     End Sub
 
-    ''' <summary>打开设置窗口并直接选中「AI 字幕」页。
-    ''' 按 Text 查找而不硬编码下标：Designer 里 Items 是按添加顺序硬绑的，
-    ''' 今后再插入新页会让它整体移位。</summary>
+    ''' <summary>打开设置窗口并选中 AI 字幕页。</summary>
     Friend Sub 显示Ai字幕页()
-        待选中页索引 = 查找页索引("AI 字幕")
-        显示窗口()
+        待选中页索引 = ModernTabListControl1.Items.ToList().FindIndex(Function(项) 项.BoundControl Is AI字幕页面)
+        打开并定位()
     End Sub
 
     Private Sub 应用待选中页()
@@ -93,15 +91,9 @@ Public Class Form设置
         待选中页索引 = -1
     End Sub
 
-    Private Function 查找页索引(标题 As String) As Integer
-        For i = 0 To ModernTabListControl1.Items.Count - 1
-            If String.Equals(ModernTabListControl1.Items(i).Text, 标题, StringComparison.Ordinal) Then Return i
-        Next
-        Return 0
-    End Function
-
     Private Sub Form设置_Shown(sender As Object, e As EventArgs) Handles Me.Shown
         初始化所有页面()
+        首次显示完成 = True
         If 待选中页索引 >= 0 Then
             应用待选中页()
         Else
@@ -112,6 +104,18 @@ Public Class Form设置
     Private Sub 初始化所有页面()
         For Each 注册 In 页面注册
             注册.初始化?.Invoke()
+        Next
+    End Sub
+
+    ' 调整停靠在左侧的等宽列，最右列由 DockStyle.Fill 占满剩余空间。
+    Friend Shared Sub 均分设置列(行 As LakeUI.ModernPanel, 固定宽度 As Integer, ParamArray 左侧列 As Control())
+        Dim 可用宽度 = Math.Max(0, 行.DisplayRectangle.Width - 固定宽度)
+        Dim 列数 = 左侧列.Length + 1
+        Dim 基础列宽 = 可用宽度 \ 列数
+        Dim 余量 = 可用宽度 Mod 列数
+        For 索引 = 0 To 左侧列.Length - 1
+            Dim 列宽 = 基础列宽 + If(索引 < 余量, 1, 0)
+            If 左侧列(索引).Width <> 列宽 Then 左侧列(索引).Width = 列宽
         Next
     End Sub
 

@@ -6,9 +6,8 @@
     而勾了"只显示所选语言"时就是整片空白，且不抛任何异常。
   * 界面只列 4 个主项（其余 28 个未验证语种不上面板）：这里钉住"下拉只引用主项"，
     防止后人把循环改回整表、让未验证语种重新出现（L0-1b）。
-  * 「扩展 UI + 按模型能力开放」一轮（2026-10-25）的新契约：清单 layers 驱动
-    GPU 层数预置、用户 llamaArgs 进 UI 并合并透传、驻留偏移进状态机——
-    断链现象全是"UI 看着能改、实际不生效"且不抛异常，见 L0-5。
+  * 高级设置直接显示，模型档在多档时才可修改，字幕偏移由状态机应用；
+    已废止的 GPU 层数和附加参数不应重新出现，见 L0-5。
 
 用法（从仓库根目录）：
     python tools/ai-subtitles/check_l0.py
@@ -109,10 +108,10 @@ def main():
     # 用户裁定"未验证的内容不出现"：一旦有人把下拉改回 Ai字幕语言.全部，
     # 28 个未验证语种会重新出现在面板上（而规整只认主项，选了也白选）。
     form = read(VB_FORM)
-    填充块 = re.search(r"For Each id In Ai字幕语言\.(\w+)\s*\n\s*MCB_语言\.Items\.Add", form)
-    断言(填充块 is not None and 填充块.group(1) == "主项",
-        "L0-1b 设置页语言下拉只列主项 4 项",
-        "实际引用：" + (填充块.group(1) if 填充块 else "（没找到语言填充循环）"))
+    dsg = read(VB_DESIGNER)
+    语言项 = re.findall(r'^\s*MCB_字幕语言\.Items\.Add\("([^"]+)"\)', dsg, re.M)
+    断言(语言项 == ["自动（显示所有语种）", "中文", "English", "中英混说"],
+        "L0-1b 设置页设计器按顺序列出 4 个语言主项", str(语言项))
     下标块 = re.search(r"For i = 0 To Ai字幕语言\.(\w+)\.Length - 1\s*\n\s*If String\.Equals\(Ai字幕语言\.\w+\(i\), id", form)
     断言(下标块 is not None and 下标块.group(1) == "主项",
         "L0-1b 语言下标映射只认主项",
@@ -121,7 +120,6 @@ def main():
     # 的参数全部由 worker 决定，用户逃生门没有可传的对象（见 Form设置_AI字幕 头部
     # 注释「删掉的老东西不再复活」）。所以这里钉的是**不许复活** —— 只把控件加回来
     # 而不接链路，就是「UI 看着能改、实际不生效」，比没有这项更糟。
-    dsg = read(VB_DESIGNER)
     for 控件 in ("LBL_Gpu层数", "MCB_Gpu层数", "LBL_附加参数", "MTB_附加参数",
                  "LBL_设备序号", "MCB_设备序号"):
         断言(控件 not in dsg,
@@ -200,11 +198,7 @@ def main():
         "L0-4 载入路径不再调 读附加参数（已废止）",
         "还有 读附加参数 的调用 —— 链路复活要整条接，不能只接一半")
 
-    # ---------------- L0-5：「扩展 UI + 按模型能力开放」契约不许回退 ----------------
-    # 2026-10-25 这一轮把设置页从"只认 Qwen3-ASR 双文件 28 层"扩成按包声明的能力
-    # 开放：清单 layers 驱动 GPU 层数预置、用户 llamaArgs 接进 UI 并与清单合并、
-    # 驻留偏移进状态机、新控件全部挂进折叠区。任一处断链，现象都是"UI 看着能改、
-    # 实际不生效"或"折叠后控件杵在面板上"，且不抛异常。
+    # ---------------- L0-5：高级设置布局与字幕偏移 ----------------
     st = read(VB_SET)
     断言('Ai字幕附加参数' not in st,
         "L0-5 设置不再带 Ai字幕附加参数（逃生门已废止）",
@@ -226,23 +220,26 @@ def main():
     fsm = read(VB_FSM)
     断言(re.search(r"Public Property 时间偏移100纳秒 As Long", fsm),
         "L0-5 状态机带 时间偏移100纳秒（驻留偏移入口）")
-    断言(re.search(r"CLng\(播放位置\.Ticks\) - 时间偏移100纳秒", fsm),
+    断言(re.search(r"播放位置\.Ticks - 时间偏移100纳秒", fsm),
         "L0-5 守卫判定用 播放位置 − 偏移",
         "取当前条目 里找不到偏移项——偏移设了等于没设")
 
     form = read(VB_FORM)
-    高级块 = re.search(r"Private Sub 显示高级\(显示 As Boolean\)(.*?)End Sub", form, re.S)
+    断言(not re.search(r"MCK_显示高级|Private Sub 显示高级\b", form + "\n" + dsg),
+        "L0-5 高级选项不再依赖折叠开关")
     advanced_rows = {
-        "PanelAI6": ("HCL_预置", "MCB_预置", "MTB_窗口秒", "MTB_步长秒"),
-        "PanelAI7": ("MCB_模型档",),
-        "PanelAI8": ("HCL_偏移", "MTB_偏移"),
-        "PanelAI9": ("MCB_线程",),
+        "MP_高级下拉": ("MCB_节奏预置", "MCB_推理线程"),
+        "MP_高级时间": ("MP_窗口列", "MP_步长列", "MP_偏移列", "ModernPanel2"),
     }
     for row, controls in advanced_rows.items():
-        断言(高级块 is not None and f"{row}.Visible = 显示" in 高级块.group(1),
-            f"L0-5 {row} 随高级区切换可见性")
+        断言(f"ModernPanel1.Controls.Add({row})" in dsg and f"{row}.Visible = False" not in dsg,
+            f"L0-5 {row} 默认显示在页内")
         for control in controls:
             断言(f"{row}.Controls.Add({control})" in dsg, f"L0-5 {control} 位于 {row}")
+    for column, text_box in (("MP_窗口列", "MTB_窗口秒"), ("MP_步长列", "MTB_步长秒"), ("MP_偏移列", "MTB_偏移")):
+        断言(f"{column}.Controls.Add({text_box})" in dsg, f"L0-5 {text_box} 位于 {column}")
+    断言("ModernPanel2.Controls.Add(MCB_模型档)" in dsg and "MCB_模型档.Enabled = _有多档" in form,
+        "L0-5 模型档放在高级时间行，仅在多档时可修改")
     断言(not re.search(r"Private Sub 重建层数下拉", form),
         "L0-5 不再有 GPU 层数下拉（层数控件已废止）",
         "重建层数下拉 回来了 —— 层数不是可调项，重建了也是假选项")
@@ -265,7 +262,7 @@ def main():
         "L0-5 控制器把偏移同步进状态机（应用设置即生效，不重启 worker）")
     # 文案与实测对齐：早期写「十几秒」，实测（2026-10-25，CUDA0）前 1~2 个转写
     # 请求各需 57~60s。提示低估会让人按错的方向排查（以为卡死），所以钉住口径。
-    断言(re.search(r"模型加载中，首句字幕约需 1 分钟", ctrl),
+    断言(re.search(r"AI 字幕：模型加载中", ctrl),
         "L0-5 首启加载提示（空窗期不解释，用户会以为开了没反应）")
 
     # ---------------- L0-6：实机验收抓到的输出护栏不许回退 ----------------
@@ -288,13 +285,10 @@ def main():
         "looks_like_prompt_leak 没被调用 —— 模板串会原样上屏")
     # 三种"这窗没有有效内容"，缺一种就漏一种污染：empty（只有语言头）/
     # degenerate（重复字）/ leak（模板串）。
-    for 原因 in ("empty", "degenerate", "leak"):
-        断言(f'原因 = "{原因}"' in worker,
-            f"L0-6 丢弃分支覆盖 {原因}",
-            f"主循环里找不到 原因 = \"{原因}\" —— 这类内容会重新上屏")
-    断言("字幕不会凭空编字" in worker,
-        "L0-6 丢弃时给用户一次解释（空白字幕 + 无提示 = 用户以为坏了）",
-        "找不到丢弃提示文案 —— 用户面对空白字幕得不到任何解释")
+    for reason in ("empty", "isolated", "degenerate", "leak"):
+        断言(f'reason = "{reason}"' in worker, f"L0-6 无有效对白的统计覆盖 {reason}")
+    断言('"filtered": filtered' in worker and "字幕不会凭空编字" not in worker,
+        "L0-6 普通无对白仅计入诊断，无操作提示")
 
     # ---------------- L0-7：切文件/切解码器会话损坏（2026-10-25 实机 P0）------------
     # 实机矩阵第 6 项（切文件）暴露的永久沉默：worker 持续出 final、rtf 正常，
@@ -353,8 +347,8 @@ def main():
     断言("now_end100ns - self.window_start < int(self.window_s * 1e7)" in worker,
         "L0-8 出窗阈值是 window_s（攒够窗口才出，不是过了步长就出）",
         "阈值又退回 step_s —— 窗长会退化成 window-step，窗口秒这一格等于骗人")
-    断言("self.window_start = end - int((self.window_s - self.step_s) * 1e7)" in worker,
-        "L0-8 出窗后按 (window - step) 推进左边界（窗长恒为 window 时即步进 = step）",
+    断言("self.window_start = start + int(self.step_s * 1e7)" in worker,
+        "L0-8 出窗后按 step 精确推进左边界",
         "advance 写法变了 —— 要先确认步进仍是 step_s")
 
     # ---------------- L0-9：NPU 路径的两条不变量 ----------------

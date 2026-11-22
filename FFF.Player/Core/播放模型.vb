@@ -119,7 +119,13 @@ Public Enum 播放器事件类型 As UInteger
     首帧呈现 = 8
 End Enum
 
+Public Enum 播放器渲染引擎 As UInteger
+    Direct3D11 = 0
+    Direct3D12 = 1
+End Enum
+
 Public NotInheritable Class 播放器配置
+    Public Property 渲染引擎 As 播放器渲染引擎
     Public Property 解码器 As 解码模式
     Public Property 色彩模式 As 色彩输出模式 = 色彩输出模式.映射到SDR
     ' HDR→SDR 的目标参考白（BT.2408 的 203 nit 漫反射白），与设置项同一口径。

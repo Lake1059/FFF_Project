@@ -322,6 +322,14 @@ public:
         }
     }
 
+    FFFResult SetFallbackFont(const char* family) noexcept {
+        if (!renderer_ || !family || !*family) return FFFResult::InvalidArgument;
+        ass_set_fonts(renderer_, nullptr, family, ASS_FONTPROVIDER_AUTODETECT, nullptr, 1);
+        hasRenderedFrame_ = false;
+        hasPendingCopy_ = false;
+        return FFFResult::Success;
+    }
+
     FFFResult Render(const std::int64_t position, const std::int32_t width,
         const std::int32_t height, FFF3FPBitmapSubtitleFrame& output) noexcept {
         if (position < 0 || width <= 0 || height <= 0 ||
@@ -769,6 +777,10 @@ FFFResult FFF3FP_OpenAssSubtitle(const char* path, const char* fontDirectories,
         *output = renderer.release();
         return result;
     } catch (...) { return FFFResult::NativeFailure; }
+}
+
+FFFResult FFF3FP_SetAssFallbackFont(const FFF3FPAssSubtitleHandle renderer, const char* family) noexcept {
+    return renderer ? static_cast<AssSubtitleRenderer*>(renderer)->SetFallbackFont(family) : FFFResult::InvalidArgument;
 }
 
 FFFResult FFF3FP_RenderAssSubtitle(const FFF3FPAssSubtitleHandle renderer,

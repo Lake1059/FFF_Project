@@ -88,7 +88,6 @@ Partial Class Form设置_HDR
         ETB_HDR映射SDR亮度.ThumbWidth = 38
         ETB_HDR映射SDR亮度.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_HDR映射SDR亮度.TrackFillColor = Color.Transparent
-        ETB_HDR映射SDR亮度.Value = 203R
         ' 
         ' HtmlColorLabel2
         ' 
@@ -205,7 +204,6 @@ Partial Class Form设置_HDR
         MCK_自动切换到真实HDR高亮模式.BoxSize = 24
         MCK_自动切换到真实HDR高亮模式.BoxTextSpacing = 10
         MCK_自动切换到真实HDR高亮模式.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_自动切换到真实HDR高亮模式.Checked = True
         MCK_自动切换到真实HDR高亮模式.Dock = DockStyle.Top
         MCK_自动切换到真实HDR高亮模式.Location = New Point(15, 20)
         MCK_自动切换到真实HDR高亮模式.Name = "MCK_自动切换到真实HDR高亮模式"

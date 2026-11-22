@@ -19,7 +19,7 @@ Friend NotInheritable Class 播放器360视角控制器
     Private Const 阻尼时间秒 As Single = 0.25F
     ' Native presentation is paced to the active monitor (up to 120 Hz).
     ' Sample input at that ceiling so a 120 Hz display is not quantized by a
-    ' 16 ms WinForms timer; native coalescing keeps slower displays bounded.
+    ' 16 ms LakeUI timer; native coalescing keeps slower displays bounded.
     Private Const 输入刷新间隔毫秒 As Integer = 8
 
     ' 键名先归一化（去掉 _ 和 -、转小写）再比对：MKV 会把 SimpleTag 名大写化
@@ -33,7 +33,7 @@ Friend NotInheritable Class 播放器360视角控制器
     Private ReadOnly 应用视角 As Action(Of Boolean, Single, Single, Single)
     Private ReadOnly 操作提示 As Action(Of String)
     Private ReadOnly 模式菜单项 As LakeUI.ModernContextMenu.ModernMenuItem
-    Private ReadOnly 按键刷新计时器 As Timer
+    Private ReadOnly 按键刷新计时器 As LakeUI.PrecisionTimer
     Private ReadOnly 计时器 As Stopwatch = Stopwatch.StartNew()
     Private ReadOnly 已按下方向键 As New HashSet(Of Keys)
     Private 视场角滚轮余量 As Integer
@@ -66,7 +66,11 @@ Friend NotInheritable Class 播放器360视角控制器
             .Text = "360° 视频模式", .ToggleCheckOnClick = False, .CloseOnClick = True
         }
         标题栏菜单.Items.Add(模式菜单项)
-        按键刷新计时器 = New Timer With {.Interval = 输入刷新间隔毫秒}
+        按键刷新计时器 = New LakeUI.PrecisionTimer With {
+            .Interval = 输入刷新间隔毫秒, .SynchronizingObject = 宿主窗口,
+            .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
+            .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop
+        }
         AddHandler 模式菜单项.Click, AddressOf 模式菜单项_Click
         AddHandler 按键刷新计时器.Tick, AddressOf 按键刷新计时器_Tick
         AddHandler 画面控件.全景视角拖动, AddressOf 画面控件_全景视角拖动
@@ -197,7 +201,7 @@ Friend NotInheritable Class 播放器360视角控制器
             水平角速度 = 0
             垂直角速度 = 0
             提交视角()
-        ElseIf 模式已启用 AndAlso Not 按键刷新计时器.Enabled Then
+        ElseIf 模式已启用 AndAlso Not 按键刷新计时器.IsRunning Then
             上次刷新秒数 = 计时器.Elapsed.TotalSeconds
             按键刷新计时器.Start()
         End If
@@ -230,7 +234,7 @@ Friend NotInheritable Class 播放器360视角控制器
             调整视场角(计算视场角调整(方向键, 修饰键))
         ElseIf 修饰键 = Keys.None Then
             已按下方向键.Add(方向键)
-            If Not 按键刷新计时器.Enabled Then
+            If Not 按键刷新计时器.IsRunning Then
                 上次刷新秒数 = 计时器.Elapsed.TotalSeconds
                 按键刷新计时器.Start()
             End If
@@ -276,6 +280,7 @@ Friend NotInheritable Class 播放器360视角控制器
     End Sub
 
     Private Sub 按键刷新计时器_Tick(sender As Object, e As EventArgs)
+        If 已释放 OrElse Not 按键刷新计时器.IsRunning Then Return
         Dim 当前秒数 = 计时器.Elapsed.TotalSeconds
         Dim 间隔 = CSng(Math.Clamp(当前秒数 - 上次刷新秒数, 0.0R, 0.05R))
         上次刷新秒数 = 当前秒数
@@ -308,7 +313,7 @@ Friend NotInheritable Class 播放器360视角控制器
         目标水平角度 -= e.水平位移 * 鼠标每像素角度
         目标垂直角度 = Math.Clamp(目标垂直角度 + e.垂直位移 * 鼠标每像素角度,
                                 -最大垂直角度, 最大垂直角度)
-        If Not 按键刷新计时器.Enabled Then
+        If Not 按键刷新计时器.IsRunning Then
             上次刷新秒数 = 计时器.Elapsed.TotalSeconds
             按键刷新计时器.Start()
         End If

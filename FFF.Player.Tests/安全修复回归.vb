@@ -164,31 +164,12 @@ Friend Module 安全修复回归
     End Class
 
     Private Async Function 下载测试() As Task
-        Using 内容 As New 无穷流(), 输出 As New MemoryStream()
-            Dim 拒绝 = False
-            Try
-                Await Ai字幕包下载器.复制受限响应Async(内容, 输出, 0, 100000, Nothing, CancellationToken.None)
-            Catch ex As InvalidDataException
-                拒绝 = True
-            End Try
-            检查(拒绝 AndAlso 输出.Length <= 100000 AndAlso 内容.已读 = 100001, "infinite body stops at limit plus one")
-        End Using
-        Using 内容 As New 无穷流(), 输出 As New MemoryStream(), 取消 As New CancellationTokenSource()
-            取消.Cancel()
-            Dim 已取消 = False
-            Try
-                Await Ai字幕包下载器.复制受限响应Async(内容, 输出, 0, 20, Nothing, 取消.Token)
-            Catch ex As OperationCanceledException
-                已取消 = True
-            End Try
-            检查(已取消 AndAlso 输出.Length = 0, "download cancellation")
-        End Using
         Dim 根 = Path.Combine(Path.GetTempPath(), "3fp-download-" & Guid.NewGuid().ToString())
         Directory.CreateDirectory(根)
         Try
             Dim 数据 = Enumerable.Range(0, 100).Select(Function(x) CByte(x)).ToArray()
             Dim 哈希 = Convert.ToHexString(SHA256.HashData(数据))
-            For Each 场景 In {"exact", "restart", "resume", "wrong-range", "oversize", "short", "complete-part"}
+            For Each 场景 In {"exact", "restart", "resume", "wrong-range", "oversize", "short", "bad-hash", "complete-part"}
                 Dim 目标 = Path.Combine(根, 场景)
                 Dim 已有 = If(场景 = "restart" OrElse 场景 = "resume" OrElse 场景 = "wrong-range", 40, 0)
                 If 场景 = "complete-part" Then 已有 = 数据.Length
@@ -205,7 +186,8 @@ Friend Module 安全修复回归
                         处理器.响应.Content.Headers.ContentRange = New ContentRangeHeaderValue(If(场景 = "wrong-range", 39, 40), 99, 100)
                     End If
                     Dim 项 As New Ai字幕包下载器.包文件项 With {.相对路径 = 场景}
-                    项.源列表.Add(New Ai字幕包下载器.包源("https://example.invalid/test", 100, 哈希))
+                    项.源列表.Add(New Ai字幕包下载器.包源("https://example.invalid/test", 100,
+                        If(场景 = "bad-hash", New String("0"c, 64), 哈希)))
                     Dim 错误 = Await Ai字幕包下载器.下载文件Async(目标, 项, 0, 100, New 静默进度(), CancellationToken.None, 客户端)
                     Dim 成功 = {"exact", "restart", "resume", "complete-part"}.Contains(场景)
                     检查((错误 = "") = 成功, "download result: " & 场景)
@@ -216,6 +198,28 @@ Friend Module 安全修复回归
                     If 已有 = 40 Then 检查(处理器.范围 = 40, "resume requests correct range")
                 End Using
             Next
+            Using 取消 As New CancellationTokenSource()
+                取消.Cancel()
+                Dim 项 As New Ai字幕包下载器.包文件项 With {.相对路径 = "cancelled"}
+                项.源列表.Add(New Ai字幕包下载器.包源("https://example.invalid/test", 100, 哈希))
+                Dim 已取消 = False
+                Try
+                    Await Ai字幕包下载器.下载文件Async(Path.Combine(根, "cancelled"), 项, 0, 100, New 静默进度(), 取消.Token)
+                Catch ex As OperationCanceledException
+                    已取消 = True
+                End Try
+                检查(已取消 AndAlso Not File.Exists(Path.Combine(根, "cancelled.part")), "download cancellation")
+            End Using
+            Dim GPU = Directory.CreateDirectory(Path.Combine(根, "GPU")).FullName
+            Dim NPU = Directory.CreateDirectory(Path.Combine(根, "NPU")).FullName
+            检查(Ai字幕包.写归属哨兵(GPU, "GpuCpu") AndAlso Ai字幕包.写归属哨兵(NPU, "Npu"), "ownership fixtures")
+            Try
+                Ai字幕包.删除指定下载包(GPU, "Npu")
+            Catch ex As IOException
+            End Try
+            检查(Directory.Exists(GPU) AndAlso Directory.Exists(NPU), "wrong package type deletes nothing")
+            Ai字幕包.删除指定下载包(GPU, "GpuCpu")
+            检查(Not Directory.Exists(GPU) AndAlso Directory.Exists(NPU), "only selected package deleted")
         Finally
             Directory.Delete(根, True)
         End Try

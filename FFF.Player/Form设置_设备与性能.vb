@@ -1,20 +1,10 @@
+Imports LakeUI
+
 Public Class Form设置_设备与性能
-
     Private 正在初始化 As Boolean = True
-    Private 设备列表 As New List(Of GPU解码设备)
+    Private 正在切换LakeUI As Boolean
     Private ReadOnly 枚举设备 As Func(Of IReadOnlyList(Of GPU解码设备))
-
-    ' 蓝牙行加在页面最底部（后加者靠上，因此显式 SetChildIndex 到 0/1/2），
-    ' 不挤占既有的 GPU/缓冲/音频效果行；这一页底部本来就有空白。
-    Private ReadOnly 蓝牙开关 As New LakeUI.ModernCheckBox()
-    Private ReadOnly 蓝牙提前量 As New LakeUI.ModernTextBox()
-    Private ReadOnly 蓝牙检测按钮 As New LakeUI.ModernButton()
-    Private ReadOnly 蓝牙编码 As New LakeUI.ModernComboBox()
-    Private ReadOnly 蓝牙编码标签 As New Label()
-    Private ReadOnly 蓝牙控制行 As New LakeUI.ModernPanel()
-    Private ReadOnly 蓝牙编码行 As New LakeUI.ModernPanel()
-    Private ReadOnly 蓝牙状态行 As New LakeUI.ModernPanel()
-    Private ReadOnly 蓝牙状态 As New Label()
+    Private ReadOnly 设备列表 As New List(Of GPU解码设备)
 
     Public Sub New()
         Me.New(AddressOf GPU解码设备.枚举)
@@ -23,7 +13,6 @@ Public Class Form设置_设备与性能
     Friend Sub New(枚举设备 As Func(Of IReadOnlyList(Of GPU解码设备)))
         Me.枚举设备 = 枚举设备
         InitializeComponent()
-        初始化蓝牙区域()
         正在初始化 = False
     End Sub
 
@@ -31,396 +20,160 @@ Public Class Form设置_设备与性能
         正在初始化 = True
         Try
             Dim 配置 = 设置.实例对象
-            配置.规范化()
-            设备列表 = New List(Of GPU解码设备) From {New GPU解码设备(String.Empty, "自动选择", -1)}
-            Try
-                设备列表.AddRange(枚举设备())
-            Catch ex As Exception
-            End Try
-            Dim 选中 = 设备列表.FindIndex(Function(x) x.标识 = 配置.GPU解码设备标识)
-            If 选中 < 0 Then
-                选中 = 设备列表.Count
-                设备列表.Add(New GPU解码设备(配置.GPU解码设备标识, "已保存设备当前不可用（暂用自动选择）", -1))
-            End If
-            MCB_GPU解码设备.Items.Clear()
-            For Each 设备 In 设备列表
-                MCB_GPU解码设备.Items.Add(设备.名称)
-            Next
-            MCB_GPU解码设备.SelectedIndex = 选中
+            回显GPU设备(配置.GPU解码设备标识)
+            MCB_视频渲染引擎API.SelectedIndex = CInt(配置.视频渲染引擎)
+            MCB_视频渲染引擎API.Enabled = 播放器原生接口.支持渲染后端
+            If Not 正在切换LakeUI Then MCB_LakeUI渲染引擎API.SelectedIndex = CInt(LakeUI渲染后端.当前)
             MCB_视频缓冲区策略.SelectedIndex = 配置.视频缓冲区策略
             MCB_音频缓冲区策略.SelectedIndex = 配置.音频缓冲区策略
             MCB_视频缩放质量.SelectedIndex = 配置.视频缩放质量选项
             MCB_音频效果.SelectedIndex = If(配置.启用单声道音频, 2, If(配置.启用空间音频, 1, 0))
             MCB_音频直通.SelectedIndex = 配置.音频直通选项
-            ' LakeUI 图形性能组：档位下标直接回显；下拉 Items 与 设置.vb 档位表逐位对齐
-            ' （一致性由两处注释互相钉住，改任何一边必须同步另一边）。
-            MCB_LakeUI抗锯齿.SelectedIndex = 配置.LakeUI抗锯齿
-            MCB_LakeUI文字渲染.SelectedIndex = 配置.LakeUI文字渲染
-            MCB_LakeUI超采样.SelectedIndex = 配置.LakeUI超采样
-            MCB_LakeUI_GPU缓存.SelectedIndex = 配置.LakeUI_GPU缓存档
-            MCB_LakeUI_画刷缓存.SelectedIndex = 配置.LakeUI_画刷缓存档
-            MCB_LakeUI_字体缓存.SelectedIndex = 配置.LakeUI_字体缓存档
-            MCB_LakeUI_CPU缓存.SelectedIndex = 配置.LakeUI_CPU缓存档
-            MCB_LakeUI_背景脏区.SelectedIndex = 配置.LakeUI_背景脏区档
-            MCB_LakeUI_SSAA分桶.SelectedIndex = 配置.LakeUI_SSAA分桶档
-            Dim 帧率档 = Array.IndexOf(设置.LakeUI动画帧率档, 配置.LakeUI动画帧率)
-            MCB_LakeUI动画帧率.SelectedIndex = If(帧率档 >= 0, 帧率档, 5)
-            ' 清理是动作不是状态，永远空档；规范化保证上面每个下标都落在合法区间。
-            MCB_LakeUI缓存清理.SelectedIndex = -1
-            蓝牙开关.Checked = 配置.蓝牙低延迟模式
-            蓝牙提前量.Text = CStr(配置.蓝牙额外提前量毫秒)
-            蓝牙编码.SelectedIndex = 配置.蓝牙音频编码
-            刷新蓝牙状态()
+            刷新蓝牙设备显示()
+            MCK_蓝牙延迟补偿.Checked = 配置.蓝牙低延迟模式
+            MCB_蓝牙编码.SelectedIndex = 配置.蓝牙音频编码
+            ETB_蓝牙额外延迟补偿.Value = 配置.蓝牙额外提前量毫秒
+            更新蓝牙控件状态()
+            MCK_音频响度标准化.Checked = 配置.启用音频响度标准化
+            MCB_目标响度.SelectedIndex = 设置.最高音频目标响度 - 配置.音频目标响度
+            MCB_动态范围.SelectedIndex = 配置.音频动态范围 - 1
+            更新响度控件状态()
         Finally
             正在初始化 = False
         End Try
     End Sub
 
-    Private Sub 选项_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_GPU解码设备.SelectedIndexChanged,
-        MCB_视频缓冲区策略.SelectedIndexChanged, MCB_音频缓冲区策略.SelectedIndexChanged,
-        MCB_视频缩放质量.SelectedIndexChanged, MCB_音频效果.SelectedIndexChanged,
-        MCB_音频直通.SelectedIndexChanged
+    Private Sub 同步行内下拉框宽度(sender As Object, e As LayoutEventArgs) Handles ModernPanel6.Layout, ModernPanel2.Layout,
+        ModernPanel5.Layout, ModernPanel7.Layout
+        If sender Is ModernPanel6 Then
+            Form设置.均分设置列(ModernPanel6, JustEmptyControl1.Width, MCB_视频渲染引擎API)
+        ElseIf sender Is ModernPanel2 Then
+            Form设置.均分设置列(ModernPanel2, JustEmptyControl2.Width, MCB_视频缓冲区策略)
+            MCB_视频缩放质量.Width = MCB_视频缓冲区策略.Width
+        ElseIf sender Is ModernPanel5 Then
+            Form设置.均分设置列(ModernPanel5, JustEmptyControl6.Width, MCB_音频效果)
+        ElseIf sender Is ModernPanel7 Then
+            Form设置.均分设置列(ModernPanel7, MCK_音频响度标准化.Width + JustEmptyControl7.Width + JustEmptyControl5.Width, MCB_目标响度)
+        End If
+    End Sub
+
+    Private Sub 回显GPU设备(保存标识 As String)
+        设备列表.Clear()
+        Try
+            设备列表.AddRange(枚举设备())
+        Catch ex As Exception
+            Debug.WriteLine("枚举 GPU 解码设备失败：" & ex.Message)
+        End Try
+        While MCB_GPU视频解码设备.Items.Count > 1
+            MCB_GPU视频解码设备.Items.RemoveAt(MCB_GPU视频解码设备.Items.Count - 1)
+        End While
+        For Each 设备 In 设备列表
+            MCB_GPU视频解码设备.Items.Add(设备.名称)
+        Next
+        Dim 选中 = If(保存标识.Length = 0, 0, 设备列表.FindIndex(Function(x) x.标识 = 保存标识) + 1)
+        If 保存标识.Length > 0 AndAlso 选中 = 0 Then
+            设备列表.Add(New GPU解码设备(保存标识, "已保存设备不可用（暂用自动选择）", -1))
+            MCB_GPU视频解码设备.Items.Add(设备列表.Last().名称)
+            选中 = 设备列表.Count
+        End If
+        MCB_GPU视频解码设备.SelectedIndex = 选中
+    End Sub
+
+    Private Sub 选项_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_GPU视频解码设备.SelectedIndexChanged,
+        MCB_视频缓冲区策略.SelectedIndexChanged, MCB_音频缓冲区策略.SelectedIndexChanged, MCB_视频缩放质量.SelectedIndexChanged,
+        MCB_音频效果.SelectedIndexChanged, MCB_音频直通.SelectedIndexChanged
         If 正在初始化 Then Return
-        Dim 控件 = DirectCast(sender, LakeUI.ModernComboBox)
-        If 控件.SelectedIndex < 0 Then Return
+        Dim 控件 = DirectCast(sender, ModernComboBox)
+        Dim 选项 = 控件.SelectedIndex
+        If 选项 < 0 Then Return
         Dim 配置 = 设置.实例对象
-        If 控件 Is MCB_GPU解码设备 Then
-            配置.GPU解码设备标识 = 设备列表(控件.SelectedIndex).标识
+        If 控件 Is MCB_GPU视频解码设备 Then
+            配置.GPU解码设备标识 = If(选项 = 0, "", 设备列表(选项 - 1).标识)
         ElseIf 控件 Is MCB_视频缓冲区策略 Then
-            配置.视频缓冲区策略 = 控件.SelectedIndex
+            配置.视频缓冲区策略 = 选项
         ElseIf 控件 Is MCB_音频缓冲区策略 Then
-            配置.音频缓冲区策略 = 控件.SelectedIndex
+            配置.音频缓冲区策略 = 选项
         ElseIf 控件 Is MCB_视频缩放质量 Then
-            配置.视频缩放质量选项 = 控件.SelectedIndex
+            配置.视频缩放质量选项 = 选项
         ElseIf 控件 Is MCB_音频效果 Then
-            配置.启用空间音频 = 控件.SelectedIndex = 1
-            配置.启用单声道音频 = 控件.SelectedIndex = 2
+            配置.启用空间音频 = 选项 = 1
+            配置.启用单声道音频 = 选项 = 2
             Form1.当前主窗体?.应用音频效果设置()
         ElseIf 控件 Is MCB_音频直通 Then
-            配置.音频直通选项 = 控件.SelectedIndex
+            配置.音频直通选项 = 选项
             Form1.当前主窗体?.应用音频直通设置()
         End If
     End Sub
 
-    ' LakeUI 图形性能组（2026-11-11 自 3FUI 移植）：写档位下标 → 统一走
-    ' 设置.应用图形性能设置() 下发 GlobalOptions。动画帧率例外——它不走
-    ' GlobalOptions，靠字体管道反射下发，所以这里触发一次全量字体重放。
-    Private Sub 图形性能选项_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_LakeUI抗锯齿.SelectedIndexChanged,
-        MCB_LakeUI文字渲染.SelectedIndexChanged, MCB_LakeUI超采样.SelectedIndexChanged,
-        MCB_LakeUI_GPU缓存.SelectedIndexChanged, MCB_LakeUI_画刷缓存.SelectedIndexChanged,
-        MCB_LakeUI_字体缓存.SelectedIndexChanged, MCB_LakeUI_CPU缓存.SelectedIndexChanged,
-        MCB_LakeUI_背景脏区.SelectedIndexChanged, MCB_LakeUI_SSAA分桶.SelectedIndexChanged,
-        MCB_LakeUI动画帧率.SelectedIndexChanged
-        If 正在初始化 Then Return
-        Dim 控件 = DirectCast(sender, LakeUI.ModernComboBox)
-        If 控件.SelectedIndex < 0 Then Return
+    Friend Sub 刷新蓝牙设备显示(Optional 信息 As 蓝牙音频信息 = Nothing)
+        信息 = If(信息, 蓝牙音频检测器.检测默认输出())
+        Dim 文案 = "仅输出到蓝牙设备时生效，推荐选择自动识别协议编码，还可使用滑块进行额外调整<br>" &
+            $"当前蓝牙设备：{Net.WebUtility.HtmlEncode(信息.显示设备名称)} | 当前编码协议：{Net.WebUtility.HtmlEncode(信息.显示协议名称)}"
+        If HCL_蓝牙延迟补偿说明和显示.Text <> 文案 Then HCL_蓝牙延迟补偿说明和显示.Text = 文案
+    End Sub
+
+    Private Sub 蓝牙设置改变(sender As Object, e As EventArgs) Handles MCK_蓝牙延迟补偿.CheckedChanged,
+        MCB_蓝牙编码.SelectedIndexChanged, ETB_蓝牙额外延迟补偿.ValueChanged
+        If 正在初始化 OrElse MCB_蓝牙编码.SelectedIndex < 0 Then Return
         Dim 配置 = 设置.实例对象
-        If 控件 Is MCB_LakeUI抗锯齿 Then
-            配置.LakeUI抗锯齿 = 控件.SelectedIndex
-        ElseIf 控件 Is MCB_LakeUI文字渲染 Then
-            配置.LakeUI文字渲染 = 控件.SelectedIndex
-        ElseIf 控件 Is MCB_LakeUI超采样 Then
-            配置.LakeUI超采样 = 控件.SelectedIndex
-        ElseIf 控件 Is MCB_LakeUI_GPU缓存 Then
-            配置.LakeUI_GPU缓存档 = 控件.SelectedIndex
-        ElseIf 控件 Is MCB_LakeUI_画刷缓存 Then
-            配置.LakeUI_画刷缓存档 = 控件.SelectedIndex
-        ElseIf 控件 Is MCB_LakeUI_字体缓存 Then
-            配置.LakeUI_字体缓存档 = 控件.SelectedIndex
-        ElseIf 控件 Is MCB_LakeUI_CPU缓存 Then
-            配置.LakeUI_CPU缓存档 = 控件.SelectedIndex
-        ElseIf 控件 Is MCB_LakeUI_背景脏区 Then
-            配置.LakeUI_背景脏区档 = 控件.SelectedIndex
-        ElseIf 控件 Is MCB_LakeUI_SSAA分桶 Then
-            配置.LakeUI_SSAA分桶档 = 控件.SelectedIndex
-        ElseIf 控件 Is MCB_LakeUI动画帧率 Then
-            配置.LakeUI动画帧率 = 设置.LakeUI动画帧率档(控件.SelectedIndex)
-            ' 帧率搭字体管道下发（3FUI 语义：动字体才生效），这里主动重放一次
-            ' 让改动即时到达主窗体与设置窗全部控件；后开窗体由各自 Load 的字体
-            ' 应用自然带上。
-            字体控制.更新所有控件字体属性()
-            Return
-        End If
-        设置.应用图形性能设置()
-    End Sub
-
-    ' 缓存清理是「动作」不是「设置」：执行完把下拉弹回空档（3FUI 起始页同款交互），
-    ' 用户的清理诉求不落盘，也不该在下一次打开设置页时被重放。
-    Private Sub MCB_LakeUI缓存清理_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_LakeUI缓存清理.SelectedIndexChanged
-        If 正在初始化 Then Return
-        Select Case MCB_LakeUI缓存清理.SelectedIndex
-            Case 0
-                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, True, True)
-                GC.WaitForPendingFinalizers()
-            Case 1
-                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, True, True)
-                GC.WaitForPendingFinalizers()
-                EmptyWorkingSet(System.Diagnostics.Process.GetCurrentProcess().Handle)
-            Case 2
-                LakeUI.D3D_PaintBridge.CleanupD2DResources(LakeUI.D3DCacheCleanupLevel.TrimToBudget, Me)
-            Case 3
-                LakeUI.D3D_PaintBridge.CleanupD2DResources(LakeUI.D3DCacheCleanupLevel.ReleaseAllCaches, Me)
-            Case 4
-                ' 最重的一档：连 D2D 设备一起重建。播放画面走内核自己的交换链不受影响，
-                ' 受影响的只是 LakeUI 控件的下一次重绘（会按需重建资源）。
-                LakeUI.D3D_PaintBridge.CleanupD2DResources(LakeUI.D3DCacheCleanupLevel.ReleaseEverything, Me)
-        End Select
-        MCB_LakeUI缓存清理.SelectedIndex = -1
-    End Sub
-
-    ' 页面根面板 Dock=Fill，由 LakeUI ModernPanel 的 ScrollBarMode=Vertical
-    ' 自绘滚动条接管；不再调根面板宽度，宽度由 Dock 布局跟容器走。
-
-    <Runtime.InteropServices.DllImport("psapi.dll")>
-    Private Shared Function EmptyWorkingSet(hProcess As IntPtr) As Boolean
-    End Function
-
-    Private Sub 初始化蓝牙区域()
-        ' 运行时创建的 ModernPanel 不像 Designer 里的页内面板那样自动继承根面板透明，
-        ' Transparent 底色在 GPU 合成时会露黑；显式使用与上游设置页一致的 24 底色。
-        蓝牙控制行.BackColor = Color.FromArgb(24, 24, 24)
-        蓝牙控制行.BackColor1 = Color.FromArgb(24, 24, 24)
-        蓝牙控制行.BorderSize = 0
-        蓝牙控制行.Dock = DockStyle.Top
-        蓝牙控制行.Name = "蓝牙控制行"
-        蓝牙控制行.Padding = New Padding(0, 10, 0, 0)
-        蓝牙控制行.Size = New Size(617, 42)
-
-        蓝牙开关.BackColor = Color.Transparent
-        蓝牙开关.BoxBorderRadius = 5
-        蓝牙开关.BoxBorderSize = 0
-        蓝牙开关.BoxCheckedBackColor = Color.CornflowerBlue
-        蓝牙开关.BoxInnerPadding = 7
-        蓝牙开关.BoxSize = 24
-        蓝牙开关.BoxTextSpacing = 10
-        蓝牙开关.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        蓝牙开关.ClickAnywhere = True
-        蓝牙开关.Dock = DockStyle.Left
-        蓝牙开关.Size = New Size(200, 32)
-        蓝牙开关.Text = "蓝牙低延迟模式"
-
-        蓝牙检测按钮.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        蓝牙检测按钮.BorderRadius = 10
-        蓝牙检测按钮.BorderSize = 0
-        蓝牙检测按钮.Dock = DockStyle.Left
-        蓝牙检测按钮.Size = New Size(90, 32)
-        蓝牙检测按钮.Text = "重新检测"
-
-        Dim 蓝牙说明 As New Label With {
-            .AutoSize = False,
-            .Dock = DockStyle.Fill,
-            .ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255)),
-            .Text = "正 = 音频更早",
-            .TextAlign = ContentAlignment.MiddleLeft,
-            .Padding = New Padding(10, 0, 0, 0)
-        }
-        ' 行内 Dock=Left 后加者靠左：说明填满剩余宽度，按钮/开关依次向左。
-        蓝牙控制行.Controls.Add(蓝牙说明)
-        蓝牙控制行.Controls.Add(蓝牙检测按钮)
-        蓝牙控制行.Controls.Add(蓝牙开关)
-
-        蓝牙编码行.BackColor = Color.FromArgb(24, 24, 24)
-        蓝牙编码行.BackColor1 = Color.FromArgb(24, 24, 24)
-        蓝牙编码行.BorderSize = 0
-        蓝牙编码行.Dock = DockStyle.Top
-        蓝牙编码行.Name = "蓝牙编码行"
-        蓝牙编码行.Padding = New Padding(0, 8, 0, 0)
-        蓝牙编码行.Size = New Size(617, 42)
-
-        蓝牙编码标签.AutoSize = False
-        蓝牙编码标签.Dock = DockStyle.None
-        蓝牙编码标签.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        蓝牙编码标签.Text = "A2DP 编码"
-        蓝牙编码标签.TextAlign = ContentAlignment.MiddleLeft
-        蓝牙编码标签.Size = New Size(80, 32)
-
-        蓝牙编码.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        蓝牙编码.BorderRadius = 10
-        蓝牙编码.BorderSize = 0
-        蓝牙编码.Dock = DockStyle.None
-        蓝牙编码.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
-        蓝牙编码.Name = "蓝牙编码"
-        蓝牙编码.Size = New Size(160, 32)
-        蓝牙编码.WaterTextForeColor = Color.DarkGray
-        蓝牙编码.Items.Add("自动（按协议）")
-        蓝牙编码.Items.Add("SBC（约200ms）")
-        蓝牙编码.Items.Add("AAC（约150ms）")
-        蓝牙编码.Items.Add("aptX（约120ms）")
-        蓝牙编码.Items.Add("aptX HD（约130ms）")
-        蓝牙编码.Items.Add("aptX LL（≤40ms）")
-        蓝牙编码.Items.Add("LDAC（约130ms）")
-        蓝牙编码.Items.Add("LHDC/HWA（约120ms）")
-        蓝牙编码.Items.Add("L2HC（约90ms）")
-        蓝牙编码.Items.Add("LC3（30–100ms）")
-
-        Dim 提前量标签 As New Label With {
-            .AutoSize = False,
-            .Dock = DockStyle.None,
-            .ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255)),
-            .Text = "额外提前量 ms",
-            .TextAlign = ContentAlignment.MiddleLeft,
-            .Name = "蓝牙提前量标签",
-            .Size = New Size(110, 32)
-        }
-
-        蓝牙提前量.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        蓝牙提前量.BorderRadius = 10
-        蓝牙提前量.BorderSize = 0
-        蓝牙提前量.Dock = DockStyle.None
-        蓝牙提前量.Padding = New Padding(10, 0, 10, 0)
-        蓝牙提前量.Size = New Size(80, 32)
-        蓝牙提前量.WaterText = "0"
-        蓝牙提前量.WaterTextForeColor = Color.DarkGray
-
-        Dim 编码说明 As New Label With {
-            .AutoSize = False,
-            .Dock = DockStyle.None,
-            .ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255)),
-            .Text = "自动=协议中值；手动=codec 表",
-            .TextAlign = ContentAlignment.MiddleLeft,
-            .Name = "蓝牙编码说明",
-            .Padding = New Padding(10, 0, 0, 0)
-        }
-        蓝牙编码行.Controls.Add(编码说明)
-        蓝牙编码行.Controls.Add(蓝牙提前量)
-        蓝牙编码行.Controls.Add(提前量标签)
-        蓝牙编码行.Controls.Add(蓝牙编码)
-        蓝牙编码行.Controls.Add(蓝牙编码标签)
-
-        蓝牙状态行.BackColor = Color.FromArgb(24, 24, 24)
-        蓝牙状态行.BackColor1 = Color.FromArgb(24, 24, 24)
-        蓝牙状态行.BorderSize = 0
-        蓝牙状态行.Dock = DockStyle.Top
-        蓝牙状态行.Name = "蓝牙状态行"
-        蓝牙状态行.Size = New Size(617, 54)
-
-        蓝牙状态.AutoSize = False
-        蓝牙状态.Dock = DockStyle.Fill
-        蓝牙状态.ForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        蓝牙状态.TextAlign = ContentAlignment.MiddleLeft
-        蓝牙状态.Text = "尚未检测蓝牙输出"
-        蓝牙状态行.Controls.Add(蓝牙状态)
-
-        ' 页面是 652×835 的 Dock=Top 栈，根面板 Dock=Fill + ModernPanel.ScrollBarMode
-        ' 负责滚动；Dock 次序与 Add 相反，后加者靠上，所以把蓝牙三行插到最底部
-        ' （索引 0/1/2），不依赖固定 y 坐标。
-        ' 运行时新增的控件不会参与 InitializeComponent 的 Dpi 自动缩放，这里按控件
-        ' 当前 DeviceDpi 补做一次 Scale，避免 150% 下变成小号控件。
-        Dim 缩放 = CSng(Math.Max(1.0, ModernPanel1.DeviceDpi / 96.0))
-        If 缩放 > 1.01 Then
-            蓝牙控制行.Scale(New SizeF(缩放, 缩放))
-            蓝牙编码行.Scale(New SizeF(缩放, 缩放))
-            蓝牙状态行.Scale(New SizeF(缩放, 缩放))
-        End If
-        ModernPanel1.Controls.Add(蓝牙状态行)
-        ModernPanel1.Controls.SetChildIndex(蓝牙状态行, 0)
-        ModernPanel1.Controls.Add(蓝牙编码行)
-        ModernPanel1.Controls.SetChildIndex(蓝牙编码行, 1)
-        ModernPanel1.Controls.Add(蓝牙控制行)
-        ModernPanel1.Controls.SetChildIndex(蓝牙控制行, 2)
-
-        AddHandler 蓝牙开关.CheckedChanged, AddressOf 蓝牙开关_CheckedChanged
-        AddHandler 蓝牙提前量.Leave, AddressOf 蓝牙提前量_Leave
-        AddHandler 蓝牙检测按钮.Click, AddressOf 蓝牙检测按钮_Click
-        AddHandler 蓝牙编码.SelectedIndexChanged, AddressOf 蓝牙编码_SelectedIndexChanged
-        AddHandler 蓝牙编码行.Resize, AddressOf 蓝牙编码行_Resize
-        布局蓝牙编码行()
-    End Sub
-
-    ''' <summary>
-    ''' 蓝牙编码行不用 Dock=Left：Dpi 缩放后 Dock 会按旧宽度重排，标签和输入框会叠在一起。
-    ''' 这里按固定列宽做一次显式布局，列宽随行高同比缩放；说明列吃掉剩余宽度。
-    ''' </summary>
-    Private Sub 布局蓝牙编码行()
-        If 蓝牙编码行 Is Nothing OrElse 蓝牙编码行.IsDisposed Then Return
-        Dim 行宽 = 蓝牙编码行.ClientSize.Width
-        If 行宽 <= 0 Then Return
-        Dim s = Math.Max(1.0F, 蓝牙编码行.Height / 42.0F)
-        Dim 顶 = CInt(8 * s)
-        Dim 高 = CInt(32 * s)
-        ' 固定列：A2DP 编码标签 80、编码下拉 160、额外提前量标签 110、数字框 80。
-        蓝牙编码标签.SetBounds(0, 顶, CInt(80 * s), 高)
-        蓝牙编码.SetBounds(CInt(80 * s), 顶, CInt(160 * s), 高)
-        Dim 提前量标签 = TryCast(蓝牙编码行.Controls("蓝牙提前量标签"), Label)
-        If 提前量标签 IsNot Nothing Then 提前量标签.SetBounds(CInt(240 * s), 顶, CInt(110 * s), 高)
-        蓝牙提前量.SetBounds(CInt(350 * s), 顶, CInt(80 * s), 高)
-        Dim 编码说明 = TryCast(蓝牙编码行.Controls("蓝牙编码说明"), Label)
-        If 编码说明 IsNot Nothing Then
-            编码说明.SetBounds(CInt(430 * s), 顶, Math.Max(0, 行宽 - CInt(430 * s)), 高)
-        End If
-    End Sub
-
-    Private Sub 蓝牙编码行_Resize(sender As Object, e As EventArgs)
-        布局蓝牙编码行()
-    End Sub
-
-    Private Sub 蓝牙开关_CheckedChanged(sender As Object, e As EventArgs)
-        If 正在初始化 Then Return
-        设置.实例对象.蓝牙低延迟模式 = 蓝牙开关.Checked
-        刷新蓝牙状态()
+        配置.蓝牙低延迟模式 = MCK_蓝牙延迟补偿.Checked
+        配置.蓝牙音频编码 = MCB_蓝牙编码.SelectedIndex
+        配置.蓝牙额外提前量毫秒 = CInt(ETB_蓝牙额外延迟补偿.Value)
+        更新蓝牙控件状态()
         Form1.当前主窗体?.应用蓝牙音频延迟()
     End Sub
 
-    Private Sub 蓝牙提前量_Leave(sender As Object, e As EventArgs)
-        If 正在初始化 Then Return
-        Dim 值 As Integer = 0
-        Integer.TryParse(蓝牙提前量.Text.Trim(), 值)
-        值 = Math.Clamp(值, -100, 100)
-        设置.实例对象.蓝牙额外提前量毫秒 = 值
-        蓝牙提前量.Text = CStr(值)
-        刷新蓝牙状态()
-        Form1.当前主窗体?.应用蓝牙音频延迟()
+    Private Sub 更新蓝牙控件状态()
+        MCB_蓝牙编码.Enabled = MCK_蓝牙延迟补偿.Checked
+        ETB_蓝牙额外延迟补偿.Enabled = MCK_蓝牙延迟补偿.Checked
     End Sub
 
-    Private Sub 蓝牙检测按钮_Click(sender As Object, e As EventArgs)
-        If 正在初始化 Then Return
-        刷新蓝牙状态()
-        Form1.当前主窗体?.应用蓝牙音频延迟()
-    End Sub
-
-    Private Sub 蓝牙编码_SelectedIndexChanged(sender As Object, e As EventArgs)
-        If 正在初始化 Then Return
-        设置.实例对象.蓝牙音频编码 = Math.Clamp(蓝牙编码.SelectedIndex, 0, 9)
-        刷新蓝牙状态()
-        Form1.当前主窗体?.应用蓝牙音频延迟()
-    End Sub
-
-    Private Sub 刷新蓝牙状态()
+    Private Sub 响度设置改变(sender As Object, e As EventArgs) Handles MCK_音频响度标准化.CheckedChanged,
+        MCB_目标响度.SelectedIndexChanged, MCB_动态范围.SelectedIndexChanged
+        If 正在初始化 OrElse MCB_目标响度.SelectedIndex < 0 OrElse MCB_动态范围.SelectedIndex < 0 Then Return
         Dim 配置 = 设置.实例对象
-        Dim 信息 = 蓝牙音频检测器.检测默认输出()
-        Dim 刷新率 = 蓝牙音频检测器.取刷新率(IntPtr.Zero)
-        Dim 编码 = CType(配置.蓝牙音频编码, 蓝牙音频编码)
-        Dim 补偿 = 蓝牙音频延迟策略.计算补偿100纳秒(
-            配置.蓝牙低延迟模式, 信息, 刷新率, 配置.蓝牙额外提前量毫秒, 编码)
-        Dim 区间 = 蓝牙音频延迟策略.有效延迟区间(信息, 编码)
+        配置.启用音频响度标准化 = MCK_音频响度标准化.Checked
+        配置.音频目标响度 = 设置.最高音频目标响度 - MCB_目标响度.SelectedIndex
+        配置.音频动态范围 = MCB_动态范围.SelectedIndex + 1
+        更新响度控件状态()
+        Form1.当前主窗体?.应用音频响度设置()
+    End Sub
 
-        Dim 文本 As String
-        If 信息.是蓝牙 Then
-            Dim 设备 = If(String.IsNullOrWhiteSpace(信息.设备名称), "蓝牙音频", 信息.设备名称)
-            Dim 格式 = If(信息.输出格式 IsNot Nothing AndAlso 信息.输出格式.已获取,
-                信息.输出格式.描述, "格式未知")
-            Dim 编码文本 As String
-            If 蓝牙音频延迟策略.是否使用编码(信息.协议, 编码) Then
-                编码文本 = 蓝牙音频延迟策略.编码名称(编码)
-            ElseIf 编码 <> 蓝牙音频编码.自动 Then
-                编码文本 = "自动（" & 信息.协议名称 & "）"
-            Else
-                编码文本 = "自动"
+    Private Sub 更新响度控件状态()
+        Dim 可用 = 播放器原生接口.支持音频响度设置
+        MCK_音频响度标准化.Enabled = 可用
+        MCB_目标响度.Enabled = 可用 AndAlso MCK_音频响度标准化.Checked
+        MCB_动态范围.Enabled = 可用 AndAlso MCK_音频响度标准化.Checked
+    End Sub
+
+    Private Sub 视频渲染后端_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_视频渲染引擎API.SelectedIndexChanged
+        If 正在初始化 OrElse MCB_视频渲染引擎API.SelectedIndex < 0 Then Return
+        设置.实例对象.视频渲染引擎 = CType(MCB_视频渲染引擎API.SelectedIndex, 播放器渲染引擎)
+    End Sub
+
+    Private Async Sub LakeUI后端_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_LakeUI渲染引擎API.SelectedIndexChanged
+        If 正在初始化 OrElse 正在切换LakeUI OrElse MCB_LakeUI渲染引擎API.SelectedIndex < 0 Then Return
+        正在切换LakeUI = True
+        MCB_LakeUI渲染引擎API.Enabled = False
+        Dim 成功 As Boolean
+        Try
+            Dim 请求 = CType(MCB_LakeUI渲染引擎API.SelectedIndex, RenderBackend)
+            成功 = Await LakeUI渲染后端.尝试切换Async(请求)
+            If 成功 Then
+                设置.实例对象.LakeUI渲染引擎 = 请求
+                设置.退出时保存设置()
             End If
-            文本 = 设备 & "｜" & 信息.协议名称 & "｜" & 格式 & "｜" &
-                CStr(刷新率) & " Hz｜编码 " & 编码文本 & "｜" &
-                CStr(区间.下界) & "–" & CStr(区间.上界) & " ms｜" & 信息.说明
-            If Not 信息.已连接 Then
-                文本 &= "｜未连接，不补偿"
-            Else
-                文本 &= "｜补偿 " & 蓝牙音频延迟策略.格式化毫秒(补偿)
+        Finally
+            If Not IsDisposed Then
+                MCB_LakeUI渲染引擎API.SelectedIndex = CInt(LakeUI渲染后端.当前)
+                MCB_LakeUI渲染引擎API.Enabled = True
             End If
-        Else
-            文本 = 信息.说明
+            正在切换LakeUI = False
+        End Try
+        If Not 成功 AndAlso Not IsDisposed AndAlso Visible Then
+            ExOverlayMsgBox(FindForm(), "无法切换 LakeUI 渲染引擎，当前使用 " &
+                            If(LakeUI渲染后端.当前 = RenderBackend.Direct3D12, "Direct3D 12", "Direct3D 11"),
+                            MsgBoxStyle.Exclamation, "LakeUI 渲染引擎")
         End If
-        If Not 配置.蓝牙低延迟模式 Then 文本 &= "｜模式未启用"
-        蓝牙状态.Text = 文本
-        蓝牙状态.ForeColor = If(信息.是蓝牙 AndAlso 信息.已连接,
-            Color.LightGreen, Color.FromArgb(CByte(150), CByte(220), CByte(220), CByte(220)))
     End Sub
 End Class

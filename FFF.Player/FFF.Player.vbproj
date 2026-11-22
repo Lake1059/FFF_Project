@@ -18,9 +18,9 @@
       <Authors>1059 Studio</Authors>
       <Company>1059 Studio</Company>
       <Copyright>Copyright (c) 2026 1059 Studio</Copyright>
-      <AssemblyVersion>2026.11.5</AssemblyVersion>
-      <FileVersion>2026.11.5</FileVersion>
-      <Version>2026.11.5</Version>
+      <AssemblyVersion>2026.11.23</AssemblyVersion>
+      <FileVersion>2026.11.23</FileVersion>
+      <Version>2026.11.23</Version>
       <Title>FFF.Player</Title>
       <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
       <ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
@@ -30,6 +30,8 @@
       <ApplicationIcon>ICO.ico</ApplicationIcon>
 
       <PlayerApiVersion>20</PlayerApiVersion>
+      <PlayerNoticeRoot>..</PlayerNoticeRoot>
+      <PlayerNoticeRoot Condition="Exists('..\licenses\NOTICE')">..\licenses</PlayerNoticeRoot>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
@@ -71,15 +73,15 @@
       <Link>LICENSE.txt</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="..\NOTICE">
+    <None Include="$(PlayerNoticeRoot)\NOTICE">
       <Link>NOTICE</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="..\LICENSING.md">
+    <None Include="$(PlayerNoticeRoot)\LICENSING.md">
       <Link>LICENSING.md</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="..\THIRD-PARTY-NOTICES.md">
+    <None Include="$(PlayerNoticeRoot)\THIRD-PARTY-NOTICES.md">
       <Link>THIRD-PARTY-NOTICES.md</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

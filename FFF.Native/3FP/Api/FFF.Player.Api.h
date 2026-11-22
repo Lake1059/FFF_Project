@@ -418,6 +418,8 @@ struct FFF3FPSnapshot {
     //     the planar YUV size (1 byte per sample at 8 bit, 2 above). When the
     //     interop refuses a frame, the fallback download records paths 1/2/6
     //     like any CPU planar frame, so a run that mixed both shows both.
+    //   9 native D3D12 upload heap -> video textures, no D3D11 upload.
+    //  10 D3D12VA decoder -> retained D3D12 texture (GPU copy; no CPU download).
     // uploadCopyBytes is exact for 1 and 2; the UpdateSubresource arms do not know
     // their own byte total here, so they leave it untouched and stay identifiable
     // by this field instead of being silently averaged in.
@@ -837,6 +839,7 @@ enum class FFF3FPVideoSuperResolutionReason : std::uint32_t {
     // extension may still ride along inside that pass. Tail-appended only, so
     // an older host reports it as an unknown value.
     YieldedToAutoHdr = 7,
+    UnsupportedRenderBackend = 8,
 };
 
 struct FFF3FPVideoSuperResolutionStatus {
@@ -909,6 +912,7 @@ enum class FFF3FPVideoAutoHdrReason : std::uint32_t {
     OutputPathNotHdr = 5,
     UnsupportedSourceFormat = 6,
     DriverRejected = 7,
+    UnsupportedRenderBackend = 8,
 };
 
 struct FFF3FPVideoAutoHdrStatus {
@@ -1132,6 +1136,10 @@ FFF3FP_API FFFResult FFF3FP_SetFitLimitToNative(FFF3FPHandle player,
 // pitch is clamped by the renderer so the horizon never rolls or flips.
 FFF3FP_API FFFResult FFF3FP_Set360View(FFF3FPHandle player,
     std::uint32_t enabled, float yaw, float pitch, float fovY) noexcept;
+// Streaming PCM loudness normalization; an exclusive bitstream is never modified.
+FFF3FP_API FFFResult FFF3FP_SetAudioLoudness(FFF3FPHandle player, std::uint32_t enabled,
+    std::int32_t targetLufs, std::int32_t rangeLu) noexcept;
+
 FFF3FP_API FFFResult FFF3FP_SetAudioEndpoint(FFF3FPHandle player,
     const char* endpointIdUtf8) noexcept;
 // Recreates only the WASAPI renderer.  The media session and its selected
@@ -1200,6 +1208,9 @@ FFF3FP_API FFFResult FFF3FP_ReadVideoPixelRegion(FFF3FPHandle player,
     std::uint32_t* outputBitDepth) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetAudioPeakLevels(FFF3FPHandle player,
     FFF3FPAudioPeakLevels* levels) noexcept;
+// Last actually presented subtitle layer sequence and its Windows QPC time.
+FFF3FP_API FFFResult FFF3FP_GetSubtitlePresentation(FFF3FPHandle player,
+    std::uint64_t* sequence, std::int64_t* qpc) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetTimedTextStatus(FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetDanmakuStatus(FFF3FPHandle player,
@@ -1387,6 +1398,33 @@ struct FFF3FPRenderTargetInfo {
     std::uint32_t outputBitDepth;
     std::uint32_t hdr;
 };
+// Set before opening media. 0 = D3D11, 1 = native D3D12 video rendering.
+// The getter reports the active chain, including a hardware fallback to D3D11.
+FFF3FP_API FFFResult FFF3FP_SetVideoRenderBackend(FFF3FPHandle player, std::uint32_t backend) noexcept;
+FFF3FP_API FFFResult FFF3FP_GetVideoRenderBackend(FFF3FPHandle player, std::uint32_t* backend) noexcept;
+// Read-only; no GPU flush or wait. gpuDraw* samples are opt-in through
+// FFF3FP_D3D12_GPU_TIMING=1 and exclude uploads/Present. Memory is in bytes;
+// includes backend-owned resources, not the decoder pool or Direct2D internals.
+struct FFF3FPVideoRenderDiagnostics {
+    std::uint32_t size;
+    std::uint32_t version; // == 20
+    std::uint32_t requestedBackend;
+    std::uint32_t activeBackend;
+    std::int32_t backendFallbackHresult;
+    std::uint32_t reserved;
+    std::uint64_t nativeVideoDraws;
+    std::uint64_t nativeScalePasses;
+    std::uint64_t nativeOverlayDraws;
+    std::uint64_t gpuDraw100ns;
+    std::uint64_t gpuDrawSamples;
+    std::uint64_t fenceWait100ns;
+    std::uint64_t localBytes;
+    std::uint64_t uploadHeapBytes;
+    std::uint64_t readbackHeapBytes;
+    std::uint64_t scaleBudgetSkips;
+};
+FFF3FP_API FFFResult FFF3FP_GetVideoRenderDiagnostics(FFF3FPHandle player,
+    FFF3FPVideoRenderDiagnostics* status) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetRenderTargetInfo(FFF3FPHandle player,
     FFF3FPRenderTargetInfo* info) noexcept;
 // Re-present the last cached frame on the presenter thread.
@@ -1767,6 +1805,10 @@ FFF3FP_API void FFF3FP_DestroyBitmapSubtitle(FFF3FPBitmapSubtitleHandle decoder)
 FFF3FP_API FFFResult FFF3FP_OpenAssSubtitle(const char* localPathUtf8,
     const char* fontDirectoriesUtf8, std::int32_t streamIndex,
     FFF3FPAssSubtitleHandle* renderer) noexcept;
+// Change libass font fallback without overriding faces authored in the script.
+FFF3FP_API FFFResult FFF3FP_SetAssFallbackFont(FFF3FPAssSubtitleHandle renderer,
+    const char* familyUtf8) noexcept;
+
 FFF3FP_API FFFResult FFF3FP_RenderAssSubtitle(FFF3FPAssSubtitleHandle renderer,
     std::int64_t position100ns, std::int32_t canvasWidth, std::int32_t canvasHeight,
     FFF3FPBitmapSubtitleFrame* frame) noexcept;

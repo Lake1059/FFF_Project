@@ -1,6 +1,3 @@
-Option Strict On
-Option Explicit On
-
 Imports System.Collections.Generic
 Imports System.IO
 Imports System.Text.Json
@@ -128,6 +125,52 @@ Friend NotInheritable Class Ai字幕包
     Friend Shared Function 有归属哨兵(目录 As String) As Boolean
         Return String.Equals(读取哨兵归属(目录), 哨兵归属, StringComparison.Ordinal)
     End Function
+
+    Friend Shared Function 生效Worker脚本(包 As Ai字幕包配置) As String
+        Dim 随播放器部署 = Path.Combine(AppContext.BaseDirectory, "ai-subtitles", "asr_worker.py")
+        ' 官方包使用播放器随附的协议实现，让已经安装好的模型和运行时同步获得修复。
+        If File.Exists(随播放器部署) AndAlso 有归属哨兵(包.包目录) AndAlso
+            String.Equals(包.Worker脚本, 解析路径(包.包目录, "asr_worker.py"), StringComparison.OrdinalIgnoreCase) Then
+            Return 随播放器部署
+        End If
+        Return 包.Worker脚本
+    End Function
+
+    Friend Shared Function 有指定类型归属哨兵(目录 As String, 类型 As String) As Boolean
+        Try
+            If Not 有归属哨兵(目录) Then Return False
+            Using 文档 = JsonDocument.Parse(File.ReadAllText(Path.Combine(目录, 哨兵文件名)))
+                Return String.Equals(读字符串(文档.RootElement, "name"), 类型, StringComparison.Ordinal)
+            End Using
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Friend Shared Sub 删除指定下载包(目录 As String, 类型 As String)
+        Dim 根 = New DirectoryInfo(Path.GetFullPath(目录))
+        If 根.Parent Is Nothing OrElse Not 有指定类型归属哨兵(根.FullName, 类型) Then
+            Throw New IOException("包的目录或归属已变更。")
+        End If
+        ' 拒绝重解析点（包括目录祖先）与嵌套的另一个包，避免删除越过所选包的边界。
+        Dim 检查 = 根
+        While 检查 IsNot Nothing
+            If (检查.Attributes And FileAttributes.ReparsePoint) <> 0 Then Throw New IOException("包路径包含目录链接。")
+            检查 = 检查.Parent
+        End While
+        Dim 待查 As New Stack(Of DirectoryInfo)()
+        待查.Push(根)
+        While 待查.Count > 0
+            For Each 项 In 待查.Pop().EnumerateFileSystemInfos()
+                If (项.Attributes And FileAttributes.ReparsePoint) <> 0 Then Throw New IOException("包中包含文件或目录链接。")
+                If TypeOf 项 Is DirectoryInfo Then
+                    If File.Exists(Path.Combine(项.FullName, 哨兵文件名)) Then Throw New IOException("该目录内还有另一个推理包。")
+                    待查.Push(DirectCast(项, DirectoryInfo))
+                End If
+            Next
+        End While
+        根.Delete(recursive:=True)
+    End Sub
 
     ''' <summary>在包根写归属哨兵。返回 False 表示目录只读/无权限，调用方应放弃下载。</summary>
     Friend Shared Function 写归属哨兵(目录 As String, 包名称 As String) As Boolean

@@ -39,14 +39,14 @@ Public Class Form1
     Private 播放控制器 As 播放器控制器
     ' 蓝牙端点/协议可能在播放中切换（耳机回连、A2DP 与 HFP 互换），500ms 复查一次默认端点；
     ' 只有补偿值变化才真正下发，空闲时只探测不 re-seek。
-    Private 蓝牙延迟计时器 As System.Windows.Forms.Timer
+    Private 蓝牙延迟计时器 As LakeUI.PrecisionTimer
     ' 播放进度兜底：暂停/跳转/换片/停止/退出都有显式保存点，这个 15 秒计时器
     ' 只覆盖"一直在播、没有任何用户动作"的场景（异常退出最多丢 15 秒）。
-    Private 播放进度计时器 As System.Windows.Forms.Timer
+    Private 播放进度计时器 As LakeUI.PrecisionTimer
     ' 系统媒体面板（SMTC）：首次真正打开音视频时才创建，冷启动不加载 WinRT 投影。
     ' 心跳独立于 15 秒进度计时器和 60 Hz 渲染泵，只在 正在播放 时以 1 Hz 推送时间轴。
     Private 系统媒体 As 系统媒体会话
-    Private 系统媒体心跳 As System.Windows.Forms.Timer
+    Private 系统媒体心跳 As LakeUI.PrecisionTimer
     Private 系统媒体卡已注册 As Boolean
     Private 系统媒体上次签名 As String = String.Empty
     Private 界面呈现器 As 播放器界面呈现器
@@ -70,6 +70,7 @@ Public Class Form1
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
     Private 媒体信息窗口 As Form媒体信息
+    Private 当前视频打开尺寸策略 As 视频打开尺寸策略?
     Private ReadOnly 播放列表数据 As New 播放列表 With {.播放模式 = 列表播放模式.顺序播放}
     Private 前后预取控制器 As 前后预取控制器
     Private 播放列表窗口 As Form播放列表
@@ -204,10 +205,7 @@ Public Class Form1
             My.MyApplication.GPU预热线程?.Join()
         Catch
         End Try
-        ' LakeUI 文字渲染质量原先在这里硬编码 Outline；2026-11-11 起由设置驱动
-        ' （设置.应用图形性能设置()，默认档 = Outline，行为不变）。调用点挪到了
-        ' 下面 启动时加载设置() 之后——它读的就是设置值，太早调用拿到的是默认对象。
-        ' Attach（chrome 句柄）不画字，晚于它设置文字质量没有观感差异。
+        LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Outline
         LakeUI.MessageDialogOptions.BackdropEnabled = True
         LakeUI.MessageDialogOptions.BackdropMode = LakeUI.PopupBackdropMode.Auto
         LakeUI.MessageDialogOptions.BackdropTintColor = Color.FromArgb(120, 0, 0, 0)
@@ -232,9 +230,6 @@ Public Class Form1
         更新弹幕按钮可见性()
         SP加载器.启动时加载()
         设置.启动时加载设置()
-        ' LakeUI 图形性能选项（文字渲染/抗锯齿/SSAA/缓存预算/脏区策略）在设置加载后
-        ' 一次性下发；动画帧率不走这里，搭下面字体管道的车（见 字体控制.替换字体）。
-        设置.应用图形性能设置()
         文件关联管理器.启动后台同步(文件关联选项.从设置(设置.实例对象))
         字体控制.更新所有控件字体属性()
         设置.应用SP个性化设置()
@@ -285,7 +280,6 @@ Public Class Form1
         ' Form1 只保留这一处传参和一个事件订阅（失败静默，绝不影响既有字幕）。
         ' 控制器只建对象、不开线程，代价可忽略。
         AI字幕控制器 = New 播放器AI字幕控制器(
-            MCM_AI字幕,
             Function() 播放控制器.取当前句柄(),
             Function() 播放控制器.安全读取媒体信息(),
             AddressOf 安全显示操作信息,  ' 封送包装：worker 结果线程也会调它，裸调即跨线程写 UI
@@ -293,10 +287,10 @@ Public Class Form1
             AddressOf 打开Ai字幕设置,
             AddressOf 同步AI字幕派生状态)
         ' 字幕来源是一个四选一：关 / 内嵌 / 外挂 / AI 实时。两条互斥边都从这里接上：
-        ' 控制器启用前清掉普通字幕；播放控制器选普通字幕时把 AI 停掉。
+        ' 选择 AI 时清掉普通字幕；手动选择普通字幕成功后停用 AI。
         播放控制器.AI字幕 = AI字幕控制器
-        AI字幕控制器.清除普通字幕 = Sub() 播放控制器.关闭字幕(保留AI字幕:=True)
-        ' 启动时就读一次包：装了就起，没装就完全不动（本体默认不带任何 ASR 能力）。
+        AI字幕控制器.清除普通字幕 = AddressOf 播放控制器.切换到AI字幕
+        ' 启动时读取扩展包，按上次的选择恢复 AI 字幕。
         AI字幕控制器.应用设置()
         AddHandler 播放控制器.媒体已打开, AddressOf AI字幕控制器.媒体已打开
 
@@ -599,10 +593,11 @@ Public Class Form1
         字幕图层呈现器 = New 播放器字幕叠加呈现器(画面控件,
             AddressOf 播放控制器.安全读取快照, Function() 播放控制器.当前字幕,
             AddressOf 播放控制器.提交定时文字图层,
-            AddressOf AI字幕控制器.取当前条目)
+            AddressOf AI字幕控制器.取当前条目,
+            Function() 播放器原生接口.读取字幕呈现(播放控制器.取当前句柄()))
         ' 纯音频（无视频轨）原本不驱动字幕图层，AI 字幕就永远上不了屏。装了有效包才
         ' 打开这条回退路径：没装包时呈现器行为与从前完全一致。
-        字幕图层呈现器.无视频时也绘制 = AI字幕控制器.启用
+        字幕图层呈现器.AI字幕已选中 = 播放控制器.AI字幕已启用
         ' 弹幕与字幕分轨：弹幕有自己的呈现器，节拍跟随视频（见 播放器弹幕图层呈现器）。
         ' 字幕仍走 播放器字幕叠加呈现器，保留它那套为静态内容设计的节拍与去重。
         弹幕图层呈现器 = New 播放器弹幕图层呈现器(画面控件,
@@ -629,9 +624,22 @@ Public Class Form1
             AddressOf 播放控制器.读取视频超分辨率图层文本,
             AddressOf 播放控制器.读取视频自动HDR图层文本,
             AddressOf 播放控制器.读取色彩变换合成文本,
-            AI字幕活动提供器:=Function() AI字幕控制器 IsNot Nothing AndAlso AI字幕控制器.Worker运行中,
-            直通文本提供器:=AddressOf 播放控制器.音频直通图层文本)
+            AI字幕状态提供器:=Function() AI字幕控制器?.性能图层文本(If(字幕图层呈现器?.AI字幕呈现毫秒, -1)),
+            直通文本提供器:=AddressOf 播放控制器.音频直通图层文本,
+            蓝牙补偿提供器:=AddressOf 播放控制器.蓝牙补偿图层文本,
+            渲染引擎提供器:=AddressOf 播放控制器.实际渲染引擎)
         信息图层呈现器.应用全局字体(设置.实例对象.字体)
+    End Sub
+
+    Private Async Sub 恢复LakeUI渲染后端()
+        Try
+            Await LakeUI.GlobalOptions.WaitForFirstFrameAsync().WaitAsync(TimeSpan.FromSeconds(10))
+            If Not 正在关闭 AndAlso 设置.实例对象.LakeUI渲染引擎 = LakeUI.RenderBackend.Direct3D12 Then
+                Await LakeUI渲染后端.尝试切换Async(LakeUI.RenderBackend.Direct3D12)
+            End If
+        Catch ex As Exception
+            Debug.WriteLine("恢复 LakeUI 渲染引擎失败：" & ex.Message)
+        End Try
     End Sub
 
     Private Sub Form1_Shown(sender As Object, e As EventArgs) Handles Me.Shown
@@ -646,6 +654,9 @@ Public Class Form1
         End If
 
         启动解锁轮询()
+        If 设置.实例对象.LakeUI渲染引擎 = LakeUI.RenderBackend.Direct3D12 Then
+            BeginInvoke(New Action(AddressOf 恢复LakeUI渲染后端))
+        End If
 
         Dim 启动文件 = My.Application.取出待处理启动文件()
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
@@ -713,19 +724,28 @@ Public Class Form1
     Private Const 解锁弹窗最早毫秒 As Long = 1000
     Private Const 解锁弹窗最晚毫秒 As Long = 60000
 
-    Private 解锁轮询计时器 As System.Windows.Forms.Timer
+    Private 解锁轮询计时器 As LakeUI.PrecisionTimer
     Private 解锁轮询起点 As Long
     Private 解锁轮询已收工 As Boolean
+
+    Private Function 创建UI计时器(毫秒 As Integer) As LakeUI.PrecisionTimer
+        Return New LakeUI.PrecisionTimer With {
+            .Interval = 毫秒, .SynchronizingObject = Me,
+            .DispatchMode = LakeUI.PrecisionTimer.DispatchModeEnum.NonBlocking,
+            .OverrunPolicy = LakeUI.PrecisionTimer.OverrunPolicyEnum.Drop
+        }
+    End Function
 
     Private Sub 启动解锁轮询()
         解锁轮询起点 = Environment.TickCount64
         解锁轮询已收工 = False
-        解锁轮询计时器 = New System.Windows.Forms.Timer With {.Interval = 1000}
+        解锁轮询计时器 = 创建UI计时器(1000)
         AddHandler 解锁轮询计时器.Tick, AddressOf 解锁轮询_Tick
         解锁轮询计时器.Start()
     End Sub
 
     Private Sub 解锁轮询_Tick(sender As Object, e As EventArgs)
+        If 正在关闭 OrElse Not ReferenceEquals(sender, 解锁轮询计时器) OrElse Not 解锁轮询计时器.IsRunning Then Return
         If 解锁轮询已收工 Then
             停止解锁轮询()
             Return
@@ -768,7 +788,7 @@ Public Class Form1
 
     Private Sub 启动蓝牙延迟计时器()
         停止蓝牙延迟计时器()
-        蓝牙延迟计时器 = New System.Windows.Forms.Timer With {.Interval = 500}
+        蓝牙延迟计时器 = 创建UI计时器(500)
         AddHandler 蓝牙延迟计时器.Tick, AddressOf 蓝牙延迟计时器_Tick
         蓝牙延迟计时器.Start()
     End Sub
@@ -784,7 +804,7 @@ Public Class Form1
 
     Private Sub 启动播放进度计时器()
         停止播放进度计时器()
-        播放进度计时器 = New System.Windows.Forms.Timer With {.Interval = 15000}
+        播放进度计时器 = 创建UI计时器(15000)
         AddHandler 播放进度计时器.Tick, AddressOf 播放进度计时器_Tick
         播放进度计时器.Start()
     End Sub
@@ -799,6 +819,7 @@ Public Class Form1
     End Sub
 
     Private Sub 播放进度计时器_Tick(sender As Object, e As EventArgs)
+        If 正在关闭 OrElse Not ReferenceEquals(sender, 播放进度计时器) OrElse Not 播放进度计时器.IsRunning Then Return
         If 正在关闭 Then Return
         Try
             播放控制器?.保存当前播放进度()
@@ -807,8 +828,11 @@ Public Class Form1
     End Sub
 
     Private Sub 蓝牙延迟计时器_Tick(sender As Object, e As EventArgs)
+        If 正在关闭 OrElse Not ReferenceEquals(sender, 蓝牙延迟计时器) OrElse Not 蓝牙延迟计时器.IsRunning Then Return
         Try
-            播放控制器?.应用蓝牙音频延迟()
+            Dim 端点 = If(设置窗口?.正在显示设备页 = True, 蓝牙音频检测器.检测默认输出(), Nothing)
+            播放控制器?.应用蓝牙音频延迟(端点)
+            设置窗口?.刷新实时设置页(端点)
         Catch ex As Exception
         End Try
     End Sub
@@ -1062,7 +1086,7 @@ Public Class Form1
         播放列表数据.添加多个(媒体文件)
         Dim 首个路径 = 媒体文件(0)
         播放列表数据.选择路径(首个路径)
-        播放控制器.打开媒体(首个路径)
+        播放控制器.打开媒体(首个路径, 从播放列表:=True)
     End Sub
 
     Private Sub 打开或替换单个文件(路径 As String)
@@ -1144,9 +1168,20 @@ Public Class Form1
             信息图层呈现器?.显示操作信息(
                 "已从 " & 格式化播放进度(e.恢复进度.Value) & " 继续播放", &HFF69DF8BUI, "播放进度")
         End If
-        ' 内容尺寸模式：每次打开媒体重算一次；普通播放过程中不逐帧跟随，避免窗口抖动。
         Dim 内容尺寸 = 解析内容尺寸(e.快照, e.媒体信息)
-        窗口布局控制器?.应用内容原始尺寸(内容尺寸, 播放控制器.当前视图旋转)
+        If 播放控制器.当前媒体是视频 Then
+            If e.打开尺寸策略.HasValue Then
+                当前视频打开尺寸策略 = e.打开尺寸策略
+                Dim 策略 = 解析视频打开尺寸策略(当前视频打开尺寸策略)
+                窗口布局控制器?.设置内容尺寸模式(策略 = 视频打开尺寸策略.内容原始尺寸, 立即应用:=False)
+                窗口布局控制器?.应用内容原始尺寸(内容尺寸, 播放控制器.当前视图旋转)
+                窗口布局控制器?.应用视频打开尺寸(策略, 设置.实例对象.取得初始画面尺寸())
+            End If
+        Else
+            当前视频打开尺寸策略 = Nothing
+            窗口布局控制器?.设置内容尺寸模式(设置.实例对象.内容原始尺寸模式, 立即应用:=False)
+            窗口布局控制器?.应用内容原始尺寸(内容尺寸, 播放控制器.当前视图旋转)
+        End If
         ' 纯音频/无视频没有内容尺寸；内容模式启动时跳过了初始画面尺寸，这里补回默认画面尺寸，
         ' 否则会停在设计器默认的大窗口。图片和视频的内容尺寸非空，不会走到这里。
         If 内容尺寸.IsEmpty AndAlso Not 播放控制器.当前媒体是视频 Then
@@ -1307,7 +1342,7 @@ Public Class Form1
         Dim 下一项 = 播放列表数据.移动到播放结束后的项目()
         If 下一项 IsNot Nothing Then
             播放列表数据.取消自动扫描()
-            播放控制器.打开媒体(下一项.路径)
+            播放控制器.打开媒体(下一项.路径, 从播放列表:=True)
         End If
     End Sub
 
@@ -1486,6 +1521,10 @@ Public Class Form1
         播放控制器?.应用自动HDR模式设置()
     End Sub
 
+    Friend Sub 应用音频响度设置()
+        播放控制器?.应用音频响度设置()
+    End Sub
+
     Friend Sub 应用音频效果设置()
         播放控制器?.应用音频效果设置()
     End Sub
@@ -1497,8 +1536,9 @@ Public Class Form1
     End Sub
 
     Friend Sub 应用字幕设置()
-        播放控制器?.当前字幕?.SRT生成器?.设置样式(设置.实例对象.创建SRT字幕样式())
-        字幕图层呈现器?.使图层失效()
+        Dim 样式 = 设置.实例对象.创建SRT字幕样式()
+        播放控制器?.当前字幕?.SRT生成器?.设置样式(样式)
+        字幕图层呈现器?.应用SRT字幕样式(样式)
     End Sub
 
     Friend Sub 应用弹幕设置()
@@ -1506,10 +1546,8 @@ Public Class Form1
         更新弹幕按钮状态()
     End Sub
 
-    ''' <summary>设置页 → AI 字幕 的后端：只把设置同步进控制器（起停 worker、
-    ''' 菜单复选状态、持久化都在控制器里）；相等时控制器自然空转。
-    ''' 宿主侧的派生状态由控制器回调 <see cref="同步AI字幕派生状态"/> 收敛，
-    ''' 标题栏菜单与设置页两条入口因此走同一条路。</summary>
+    ''' <summary>将 AI 字幕设置同步到 worker。
+    ''' 字幕选择通过流选择器，宿主状态由 <see cref="同步AI字幕派生状态"/> 统一更新。</summary>
     Friend Sub 应用Ai字幕设置()
         If AI字幕控制器 Is Nothing Then Return
         Try
@@ -1525,7 +1563,7 @@ Public Class Form1
     Private Sub 同步AI字幕派生状态()
         If 字幕图层呈现器 Is Nothing Then Return
         字幕图层呈现器.使图层失效()
-        字幕图层呈现器.无视频时也绘制 = AI字幕控制器 IsNot Nothing AndAlso AI字幕控制器.启用
+        字幕图层呈现器.AI字幕已选中 = 播放控制器.AI字幕已启用
     End Sub
 
     ' ── 设置页 → 视频超分辨率 的后端（10-18 从标题栏菜单移到这里）───────────────
@@ -1685,7 +1723,7 @@ Public Class Form1
         Dim 项目 = 播放列表数据.移动到相邻项目(方向)
         If 项目 IsNot Nothing Then
             播放列表数据.取消自动扫描()
-            播放控制器.打开媒体(项目.路径)
+            播放控制器.打开媒体(项目.路径, 从播放列表:=True)
         End If
     End Sub
 
@@ -1727,10 +1765,15 @@ Public Class Form1
         窗口布局控制器?.重新应用内容尺寸()
     End Sub
 
-    ''' <summary>设置页选择“内容原始尺寸 1:1”后立即作用于当前媒体（没有媒体时自然早退）。</summary>
+    Private Shared Function 解析视频打开尺寸策略(策略 As 视频打开尺寸策略?) As 视频打开尺寸策略
+        Dim 选择 = 策略.GetValueOrDefault()
+        If 选择 <> 视频打开尺寸策略.跟随界面设置 Then Return 选择
+        Return If(设置.实例对象.内容原始尺寸模式, 视频打开尺寸策略.内容原始尺寸, 视频打开尺寸策略.保持当前尺寸)
+    End Function
+
     Friend Sub 应用内容尺寸模式设置()
         If 正在关闭 Then Return
-        窗口布局控制器?.设置内容尺寸模式(设置.实例对象.内容原始尺寸模式)
+        窗口布局控制器?.设置内容尺寸模式(解析视频打开尺寸策略(当前视频打开尺寸策略) = 视频打开尺寸策略.内容原始尺寸)
     End Sub
 
     Protected Overrides Function ProcessDialogKey(keyData As Keys) As Boolean
@@ -1984,10 +2027,10 @@ Public Class Form1
     Private Sub 启动系统媒体心跳()
         If 正在关闭 OrElse Not 系统媒体卡已注册 Then Return
         If 系统媒体心跳 Is Nothing Then
-            系统媒体心跳 = New System.Windows.Forms.Timer With {.Interval = 1000}
+            系统媒体心跳 = 创建UI计时器(1000)
             AddHandler 系统媒体心跳.Tick, AddressOf 系统媒体心跳_Tick
         End If
-        If Not 系统媒体心跳.Enabled Then 系统媒体心跳.Start()
+        If Not 系统媒体心跳.IsRunning Then 系统媒体心跳.Start()
     End Sub
 
     Private Sub 停止系统媒体心跳()
@@ -1995,6 +2038,7 @@ Public Class Form1
     End Sub
 
     Private Sub 系统媒体心跳_Tick(sender As Object, e As EventArgs)
+        If 正在关闭 OrElse Not ReferenceEquals(sender, 系统媒体心跳) OrElse Not 系统媒体心跳.IsRunning Then Return
         If 正在关闭 OrElse Not 系统媒体卡已注册 OrElse 系统媒体 Is Nothing Then
             停止系统媒体心跳()
             Return
@@ -2222,7 +2266,7 @@ Public Class Form1
         播放列表数据.取消自动扫描()
         播放列表数据.选择(索引)
         Dim 项目 = 播放列表数据.当前项目
-        If 项目 IsNot Nothing Then 播放控制器.打开媒体(项目.路径)
+        If 项目 IsNot Nothing Then 播放控制器.打开媒体(项目.路径, 从播放列表:=True)
     End Sub
 
     Private Sub 播放列表数据_列表变化(sender As Object, e As EventArgs)

@@ -24,7 +24,6 @@ Partial Class Form设置_弹幕
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
         Panel8 = New LakeUI.ModernPanel()
-        HtmlColorLabel8 = New LakeUI.HtmlColorLabel()
         MCB_弹幕尺寸缩放方式 = New LakeUI.ModernComboBox()
         Panel9 = New LakeUI.ModernPanel()
         HtmlColorLabel6 = New LakeUI.HtmlColorLabel()
@@ -70,13 +69,13 @@ Partial Class Form设置_弹幕
         ' 
         ModernPanel1.BackColor1 = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ModernPanel1.BorderSize = 0
-        ModernPanel1.Controls.Add(Panel8)
         ModernPanel1.Controls.Add(Panel9)
         ModernPanel1.Controls.Add(Panel7)
         ModernPanel1.Controls.Add(Panel6)
         ModernPanel1.Controls.Add(Panel5)
         ModernPanel1.Controls.Add(Panel4)
         ModernPanel1.Controls.Add(Panel3)
+        ModernPanel1.Controls.Add(Panel8)
         ModernPanel1.Controls.Add(Panel2)
         ModernPanel1.Controls.Add(Panel1)
         ModernPanel1.Controls.Add(HtmlColorLabel2)
@@ -92,28 +91,13 @@ Partial Class Form设置_弹幕
         Panel8.BackColor = Color.Transparent
         Panel8.BackColor1 = Color.Transparent
         Panel8.BorderSize = 0
-        Panel8.Controls.Add(HtmlColorLabel8)
         Panel8.Controls.Add(MCB_弹幕尺寸缩放方式)
         Panel8.Dock = DockStyle.Top
-        Panel8.Location = New Point(15, 379)
+        Panel8.Location = New Point(15, 127)
         Panel8.Name = "Panel8"
         Panel8.Padding = New Padding(0, 10, 0, 0)
         Panel8.Size = New Size(563, 42)
         Panel8.TabIndex = 28
-        ' 
-        ' HtmlColorLabel8
-        ' 
-        HtmlColorLabel8.AutoSize = True
-        HtmlColorLabel8.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HtmlColorLabel8.Dock = DockStyle.Fill
-        HtmlColorLabel8.Location = New Point(200, 10)
-        HtmlColorLabel8.Margin = New Padding(2)
-        HtmlColorLabel8.Name = "HtmlColorLabel8"
-        HtmlColorLabel8.Padding = New Padding(10, 0, 0, 0)
-        HtmlColorLabel8.Size = New Size(363, 32)
-        HtmlColorLabel8.TabIndex = 15
-        HtmlColorLabel8.Text = "尺寸缩放方式"
-        HtmlColorLabel8.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
         ' 
         ' MCB_弹幕尺寸缩放方式
         ' 
@@ -138,8 +122,11 @@ Partial Class Form设置_弹幕
         MCB_弹幕尺寸缩放方式.Margin = New Padding(2, 2, 2, 2)
         MCB_弹幕尺寸缩放方式.Name = "MCB_弹幕尺寸缩放方式"
         MCB_弹幕尺寸缩放方式.Padding = New Padding(10, 0, 10, 0)
+        MCB_弹幕尺寸缩放方式.PrefixForeColor = Color.Orange
+        MCB_弹幕尺寸缩放方式.PrefixGap = 10
+        MCB_弹幕尺寸缩放方式.PrefixText = "尺寸缩放"
         MCB_弹幕尺寸缩放方式.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_弹幕尺寸缩放方式.Size = New Size(200, 32)
+        MCB_弹幕尺寸缩放方式.Size = New Size(245, 32)
         MCB_弹幕尺寸缩放方式.TabIndex = 16
         MCB_弹幕尺寸缩放方式.ToolTipGap = -1
         MCB_弹幕尺寸缩放方式.ToolTipMaxWidth = 350
@@ -154,7 +141,7 @@ Partial Class Form设置_弹幕
         Panel9.Controls.Add(HtmlColorLabel6)
         Panel9.Controls.Add(ETB_弹幕不透明度)
         Panel9.Dock = DockStyle.Top
-        Panel9.Location = New Point(15, 337)
+        Panel9.Location = New Point(15, 379)
         Panel9.Name = "Panel9"
         Panel9.Padding = New Padding(0, 10, 0, 0)
         Panel9.Size = New Size(563, 42)
@@ -195,7 +182,6 @@ Partial Class Form设置_弹幕
         ETB_弹幕不透明度.ThumbWidth = 38
         ETB_弹幕不透明度.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_弹幕不透明度.TrackFillColor = Color.Transparent
-        ETB_弹幕不透明度.Value = 255R
         ' 
         ' Panel7
         ' 
@@ -205,7 +191,7 @@ Partial Class Form设置_弹幕
         Panel7.Controls.Add(HtmlColorLabel1)
         Panel7.Controls.Add(ETB_弹幕滚动速度)
         Panel7.Dock = DockStyle.Top
-        Panel7.Location = New Point(15, 295)
+        Panel7.Location = New Point(15, 337)
         Panel7.Name = "Panel7"
         Panel7.Padding = New Padding(0, 10, 0, 0)
         Panel7.Size = New Size(563, 42)
@@ -245,7 +231,6 @@ Partial Class Form设置_弹幕
         ETB_弹幕滚动速度.ThumbWidth = 38
         ETB_弹幕滚动速度.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_弹幕滚动速度.TrackFillColor = Color.Transparent
-        ETB_弹幕滚动速度.Value = 30R
         ' 
         ' Panel6
         ' 
@@ -255,7 +240,7 @@ Partial Class Form设置_弹幕
         Panel6.Controls.Add(HtmlColorLabel5)
         Panel6.Controls.Add(ETB_弹幕行内前后间距)
         Panel6.Dock = DockStyle.Top
-        Panel6.Location = New Point(15, 253)
+        Panel6.Location = New Point(15, 295)
         Panel6.Name = "Panel6"
         Panel6.Padding = New Padding(0, 10, 0, 0)
         Panel6.Size = New Size(563, 42)
@@ -295,7 +280,6 @@ Partial Class Form设置_弹幕
         ETB_弹幕行内前后间距.ThumbWidth = 38
         ETB_弹幕行内前后间距.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_弹幕行内前后间距.TrackFillColor = Color.Transparent
-        ETB_弹幕行内前后间距.Value = 30R
         ' 
         ' Panel5
         ' 
@@ -305,7 +289,7 @@ Partial Class Form设置_弹幕
         Panel5.Controls.Add(HtmlColorLabel3)
         Panel5.Controls.Add(ETB_弹幕最大渲染数量)
         Panel5.Dock = DockStyle.Top
-        Panel5.Location = New Point(15, 211)
+        Panel5.Location = New Point(15, 253)
         Panel5.Name = "Panel5"
         Panel5.Padding = New Padding(0, 10, 0, 0)
         Panel5.Size = New Size(563, 42)
@@ -346,7 +330,6 @@ Partial Class Form设置_弹幕
         ETB_弹幕最大渲染数量.ThumbWidth = 38
         ETB_弹幕最大渲染数量.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_弹幕最大渲染数量.TrackFillColor = Color.Transparent
-        ETB_弹幕最大渲染数量.Value = 100R
         ' 
         ' Panel4
         ' 
@@ -356,7 +339,7 @@ Partial Class Form设置_弹幕
         Panel4.Controls.Add(HtmlColorLabel4)
         Panel4.Controls.Add(ETB_弹幕最大行数)
         Panel4.Dock = DockStyle.Top
-        Panel4.Location = New Point(15, 169)
+        Panel4.Location = New Point(15, 211)
         Panel4.Name = "Panel4"
         Panel4.Padding = New Padding(0, 10, 0, 0)
         Panel4.Size = New Size(563, 42)
@@ -397,7 +380,6 @@ Partial Class Form设置_弹幕
         ETB_弹幕最大行数.ThumbWidth = 38
         ETB_弹幕最大行数.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_弹幕最大行数.TrackFillColor = Color.Transparent
-        ETB_弹幕最大行数.Value = 5R
         ' 
         ' Panel3
         ' 
@@ -408,7 +390,7 @@ Partial Class Form设置_弹幕
         Panel3.Controls.Add(MCK_是否渲染顶部弹幕)
         Panel3.Controls.Add(MCK_是否渲染常规滚动弹幕)
         Panel3.Dock = DockStyle.Top
-        Panel3.Location = New Point(15, 127)
+        Panel3.Location = New Point(15, 169)
         Panel3.Name = "Panel3"
         Panel3.Padding = New Padding(0, 10, 0, 0)
         Panel3.Size = New Size(563, 42)
@@ -424,7 +406,6 @@ Partial Class Form设置_弹幕
         MCK_是否渲染底部弹幕.BoxSize = 24
         MCK_是否渲染底部弹幕.BoxTextSpacing = 10
         MCK_是否渲染底部弹幕.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_是否渲染底部弹幕.Checked = True
         MCK_是否渲染底部弹幕.ClickAnywhere = True
         MCK_是否渲染底部弹幕.Dock = DockStyle.Left
         MCK_是否渲染底部弹幕.Location = New Point(300, 10)
@@ -443,7 +424,6 @@ Partial Class Form设置_弹幕
         MCK_是否渲染顶部弹幕.BoxSize = 24
         MCK_是否渲染顶部弹幕.BoxTextSpacing = 10
         MCK_是否渲染顶部弹幕.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_是否渲染顶部弹幕.Checked = True
         MCK_是否渲染顶部弹幕.ClickAnywhere = True
         MCK_是否渲染顶部弹幕.Dock = DockStyle.Left
         MCK_是否渲染顶部弹幕.Location = New Point(150, 10)
@@ -462,7 +442,6 @@ Partial Class Form设置_弹幕
         MCK_是否渲染常规滚动弹幕.BoxSize = 24
         MCK_是否渲染常规滚动弹幕.BoxTextSpacing = 10
         MCK_是否渲染常规滚动弹幕.BoxUncheckedBackColor = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCK_是否渲染常规滚动弹幕.Checked = True
         MCK_是否渲染常规滚动弹幕.ClickAnywhere = True
         MCK_是否渲染常规滚动弹幕.Dock = DockStyle.Left
         MCK_是否渲染常规滚动弹幕.Location = New Point(0, 10)
@@ -504,23 +483,25 @@ Partial Class Form设置_弹幕
         MCB_弹幕阴影样式.Items.Add("不使用阴影")
         MCB_弹幕阴影样式.Items.Add("使用基础阴影")
         MCB_弹幕阴影样式.Items.Add("使用更深阴影")
-        MCB_弹幕阴影样式.Location = New Point(210, 10)
+        MCB_弹幕阴影样式.Location = New Point(255, 10)
         MCB_弹幕阴影样式.Margin = New Padding(2, 2, 2, 2)
         MCB_弹幕阴影样式.Name = "MCB_弹幕阴影样式"
         MCB_弹幕阴影样式.Padding = New Padding(10, 0, 10, 0)
+        MCB_弹幕阴影样式.PrefixForeColor = Color.YellowGreen
+        MCB_弹幕阴影样式.PrefixGap = 10
+        MCB_弹幕阴影样式.PrefixText = "阴影样式"
         MCB_弹幕阴影样式.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_弹幕阴影样式.Size = New Size(200, 32)
+        MCB_弹幕阴影样式.Size = New Size(245, 32)
         MCB_弹幕阴影样式.TabIndex = 21
         MCB_弹幕阴影样式.ToolTipGap = -1
         MCB_弹幕阴影样式.ToolTipMaxWidth = 350
         MCB_弹幕阴影样式.ToolTipPadding = New Padding(15)
-        MCB_弹幕阴影样式.WaterText = "阴影样式"
         MCB_弹幕阴影样式.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ' 
         ' JustEmptyControl1
         ' 
         JustEmptyControl1.Dock = DockStyle.Left
-        JustEmptyControl1.Location = New Point(200, 10)
+        JustEmptyControl1.Location = New Point(245, 10)
         JustEmptyControl1.Name = "JustEmptyControl1"
         JustEmptyControl1.Size = New Size(10, 32)
         JustEmptyControl1.TabIndex = 20
@@ -547,13 +528,15 @@ Partial Class Form设置_弹幕
         MCB_弹幕描边样式.Margin = New Padding(2, 2, 2, 2)
         MCB_弹幕描边样式.Name = "MCB_弹幕描边样式"
         MCB_弹幕描边样式.Padding = New Padding(10, 0, 10, 0)
+        MCB_弹幕描边样式.PrefixForeColor = Color.YellowGreen
+        MCB_弹幕描边样式.PrefixGap = 10
+        MCB_弹幕描边样式.PrefixText = "描边样式"
         MCB_弹幕描边样式.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_弹幕描边样式.Size = New Size(200, 32)
+        MCB_弹幕描边样式.Size = New Size(245, 32)
         MCB_弹幕描边样式.TabIndex = 17
         MCB_弹幕描边样式.ToolTipGap = -1
         MCB_弹幕描边样式.ToolTipMaxWidth = 350
         MCB_弹幕描边样式.ToolTipPadding = New Padding(15)
-        MCB_弹幕描边样式.WaterText = "描边样式"
         MCB_弹幕描边样式.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ' 
         ' Panel1
@@ -636,7 +619,6 @@ Partial Class Form设置_弹幕
         ModernPanel1.ResumeLayout(False)
         ModernPanel1.PerformLayout()
         Panel8.ResumeLayout(False)
-        Panel8.PerformLayout()
         Panel9.ResumeLayout(False)
         Panel9.PerformLayout()
         Panel7.ResumeLayout(False)
@@ -680,7 +662,6 @@ Partial Class Form设置_弹幕
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents ETB_弹幕滚动速度 As LakeUI.ExcellentTrackBar
     Friend WithEvents Panel8 As LakeUI.ModernPanel
-    Friend WithEvents HtmlColorLabel8 As LakeUI.HtmlColorLabel
     Friend WithEvents MCB_弹幕尺寸缩放方式 As LakeUI.ModernComboBox
     Friend WithEvents Panel9 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel6 As LakeUI.HtmlColorLabel

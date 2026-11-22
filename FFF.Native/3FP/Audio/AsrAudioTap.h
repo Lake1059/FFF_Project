@@ -63,6 +63,8 @@ public:
     // blocksDropped. `position100ns` is the media position the session already
     // computed (AV_NOPTS_VALUE when the frame is untimed).
     void Produce(const AVFrame* frame, std::int64_t position100ns) noexcept;
+    void Suspend(bool value) noexcept { suspended_.store(value, std::memory_order_relaxed); }
+    bool Suspended() const noexcept { return suspended_.load(std::memory_order_relaxed); }
 
     // ---- generation stamping: session worker thread only ----
     // Called on open and on every successful seek: drops everything buffered.
@@ -104,6 +106,7 @@ private:
     std::atomic<std::size_t> writeIdx_{0};
     std::atomic<std::size_t> readIdx_{0};
     std::atomic<std::uint64_t> generation_{0};
+    std::atomic<bool> suspended_{false};
     std::atomic<std::uint64_t> blocksProduced_{0};
     std::atomic<std::uint64_t> blocksDropped_{0};
     mutable std::mutex consumeMutex_;

@@ -19,47 +19,19 @@ Friend Enum 文件关联类别
 End Enum
 
 Friend NotInheritable Class 文件关联选项
-    Public Property 关联常见视频 As Boolean
-    Public Property 关联不常见视频 As Boolean
-    Public Property 关联老旧视频 As Boolean
-    Public Property 关联常见音频 As Boolean
-    Public Property 关联不常见音频 As Boolean
-    Public Property 关联老旧音频 As Boolean
-    Public Property 关联常见图片 As Boolean
-    Public Property 关联不常见图片 As Boolean
-    Public Property 关联老旧图片 As Boolean
-    Public Property 关联相机RAW As Boolean
+    Private ReadOnly 勾选的扩展名 As HashSet(Of String)
+
+    Private Sub New(扩展名 As String())
+        勾选的扩展名 = New HashSet(Of String)(If(扩展名, Array.Empty(Of String)()), StringComparer.OrdinalIgnoreCase)
+    End Sub
 
     Friend Shared Function 从设置(值 As 设置) As 文件关联选项
         ArgumentNullException.ThrowIfNull(值)
-        Return New 文件关联选项 With {
-            .关联常见视频 = 值.关联常见视频,
-            .关联不常见视频 = 值.关联不常见视频,
-            .关联老旧视频 = 值.关联老旧视频,
-            .关联常见音频 = 值.关联常见音频,
-            .关联不常见音频 = 值.关联不常见音频,
-            .关联老旧音频 = 值.关联老旧音频,
-            .关联常见图片 = 值.关联常见图片,
-            .关联不常见图片 = 值.关联不常见图片,
-            .关联老旧图片 = 值.关联老旧图片,
-            .关联相机RAW = 值.关联相机RAW
-        }
+        Return New 文件关联选项(值.关联扩展名)
     End Function
 
-    Friend Function 已启用(类别 As 文件关联类别) As Boolean
-        Select Case 类别
-            Case 文件关联类别.常见视频 : Return 关联常见视频
-            Case 文件关联类别.不常见视频 : Return 关联不常见视频
-            Case 文件关联类别.老旧视频 : Return 关联老旧视频
-            Case 文件关联类别.常见音频 : Return 关联常见音频
-            Case 文件关联类别.不常见音频 : Return 关联不常见音频
-            Case 文件关联类别.老旧音频 : Return 关联老旧音频
-            Case 文件关联类别.常见图片 : Return 关联常见图片
-            Case 文件关联类别.不常见图片 : Return 关联不常见图片
-            Case 文件关联类别.老旧图片 : Return 关联老旧图片
-            Case 文件关联类别.相机RAW : Return 关联相机RAW
-            Case Else : Throw New ArgumentOutOfRangeException(NameOf(类别))
-        End Select
+    Friend Function 已启用(扩展名 As String) As Boolean
+        Return 勾选的扩展名.Contains(扩展名)
     End Function
 End Class
 
@@ -106,25 +78,18 @@ Friend NotInheritable Class 文件关联管理器
         ' 启动时全部未勾选表示用户没有委托播放器管理关联；不要清理
         ' 其他播放器留下的关联。运行期间的取消操作仍通过同步全部Async
         ' 显式执行注销和备份恢复。
-        If Not 有已启用的类别(选项) Then
+        If Not 文件类型.Any(Function(定义) 选项.已启用(定义.扩展名)) Then
             启动同步任务 = Task.CompletedTask
             Return
         End If
         启动同步任务 = 启动后台同步核心Async(选项)
     End Sub
 
-    '''判据取自类别枚举，不取自逐个选项属性：后者新增类别时容易漏改，
-    '''漏改的后果是该类别的勾选只在运行期间有效、重启后静默失效。
-    Friend Shared Function 有已启用的类别(选项 As 文件关联选项) As Boolean
-        ArgumentNullException.ThrowIfNull(选项)
-        Return [Enum].GetValues(Of 文件关联类别)().Any(Function(类别) 选项.已启用(类别))
-    End Function
-
     Private Shared Async Function 启动后台同步核心Async(选项 As 文件关联选项) As Task
         Try
             Await 同步门.WaitAsync().ConfigureAwait(False)
             Try
-                ' 启动时只接管当前勾选的类别；未勾选的类别保留系统和其他
+                ' 启动时只接管当前勾选的扩展名；未勾选的扩展名保留系统和其他
                 ' 播放器现状，只有运行期间的显式取消才执行注销恢复。
                 Await Task.Run(Sub() 同步核心(选项, 程序路径, 默认注册表位置, True, True)).ConfigureAwait(False)
             Finally
@@ -154,16 +119,18 @@ Friend NotInheritable Class 文件关联管理器
         If Not File.Exists(完整程序路径) Then Throw New FileNotFoundException("找不到用于文件关联的程序。", 完整程序路径)
 
         Dim 有变更 As Boolean
+        Dim 已启用文件类型 As New List(Of 文件类型定义)
         For Each 定义 In 文件类型
-            If 选项.已启用(定义.类别) Then
+            If 选项.已启用(定义.扩展名) Then
+                已启用文件类型.Add(定义)
                 有变更 = 注册文件类型(定义, 完整程序路径, 注册表位置) OrElse 有变更
             ElseIf Not 仅同步已启用 Then
                 有变更 = 注销文件类型(定义, 注册表位置) OrElse 有变更
             End If
         Next
 
-        If 文件类型.Any(Function(x) 选项.已启用(x.类别)) Then
-            有变更 = 注册应用(选项, 完整程序路径, 注册表位置, 仅同步已启用) OrElse 有变更
+        If 已启用文件类型.Count > 0 Then
+            有变更 = 注册应用(已启用文件类型, 完整程序路径, 注册表位置, 仅同步已启用) OrElse 有变更
         ElseIf Not 仅同步已启用 Then
             有变更 = 注销应用(注册表位置) OrElse 有变更
         End If
@@ -281,7 +248,7 @@ Friend NotInheritable Class 文件关联管理器
         Return 有变更
     End Function
 
-    Private Shared Function 注册应用(选项 As 文件关联选项, executablePath As String,
+    Private Shared Function 注册应用(已启用文件类型 As IReadOnlyList(Of 文件类型定义), executablePath As String,
                                 注册表位置 As 文件关联注册表位置,
                                 Optional 保留未启用 As Boolean = False) As Boolean
         Dim 有变更 As Boolean
@@ -293,7 +260,7 @@ Friend NotInheritable Class 文件关联管理器
                 有变更 = 设置字符串(commandKey, String.Empty, $"""{executablePath}"" ""%1""") OrElse 有变更
             End Using
             Using supportedTypes = application.CreateSubKey("SupportedTypes", True)
-                For Each 定义 In 文件类型.Where(Function(x) 选项.已启用(x.类别))
+                For Each 定义 In 已启用文件类型
                     If Not 存在注册表值(supportedTypes, 定义.扩展名) Then
                         supportedTypes.SetValue(定义.扩展名, String.Empty, RegistryValueKind.String)
                         有变更 = True
@@ -301,7 +268,7 @@ Friend NotInheritable Class 文件关联管理器
                 Next
                 If Not 保留未启用 Then
                     For Each extension In supportedTypes.GetValueNames().Except(
-                            文件类型.Where(Function(x) 选项.已启用(x.类别)).Select(Function(x) x.扩展名),
+                            已启用文件类型.Select(Function(x) x.扩展名),
                             StringComparer.OrdinalIgnoreCase).ToArray()
                         supportedTypes.DeleteValue(extension, False)
                         有变更 = True
@@ -317,7 +284,7 @@ Friend NotInheritable Class 文件关联管理器
                 有变更 = True
             End If
             Using associations = capabilities.CreateSubKey("FileAssociations", True)
-                For Each 定义 In 文件类型.Where(Function(x) 选项.已启用(x.类别))
+                For Each 定义 In 已启用文件类型
                     有变更 = 设置字符串(associations, 定义.扩展名, 定义.ProgId) OrElse 有变更
                 Next
             End Using

@@ -2,7 +2,6 @@ Imports System.IO
 Imports System.IO.Compression
 Imports System.Linq
 Imports System.Net.Http
-Imports System.Net.Http.Headers
 Imports System.Security.Cryptography
 Imports System.Threading
 Imports System.Threading.Tasks
@@ -11,8 +10,7 @@ Imports System.Threading.Tasks
 ''' AI 字幕包下载器（乙′ 方案，2026-11-12；双包 2026-11-13；NPU 全公共源同日）：
 '''   * 两种包：GPU+CPU（GGUF Q8_0 / llama 引擎 / Vulkan）与 NPU（ONNX int8 / onnx 引擎 /
 '''     OpenVINO）。两者是不同引擎、不同运行时，不能混用（见 docs/157）。
-'''   * GGUF 模型直链 ggml-org 官方 HF 仓（hf-mirror 兜底）；运行时回退 llama.cpp
-'''     b12110 官方 Vulkan 构建。
+'''   * GGUF 包包括模型、llama.cpp Vulkan 运行时、嵌入式 Python 和 NumPy。
 '''   * NPU 模型直链 sherpa 官方维护者 HF 仓（csukuangfj2，六件 SHA256 与验证包逐字节
 '''     一致）；运行时 = python.org embeddable + PyPI 官方 wheel（numpy/ort/openvino/
 '''     sherpa，版本与验证包精确一致），下载后解压组装 + 写 ._pth。
@@ -115,10 +113,6 @@ Friend NotInheritable Class Ai字幕包下载器
     Private Const NpuPythonZip字节 As Long = 147339686
     Private Const NpuPythonZip哈希 As String = "45e5814a4d9efa307cde73d667a125a1fd466575245907023c96d73dcd5af9e2"
 
-    Private Shared ReadOnly _客户端 As New HttpClient() With {
-        .Timeout = TimeSpan.FromSeconds(120)
-    }
-
     ''' <summary>清单里的一项。源列表按顺序回退：前一个下载/校验失败才试下一个。
     ''' 覆盖前缀非空 = 整包 zip 项：它成功落位后，相对路径以该前缀开头的散件全部跳过
     ''' （母仓加速命中时不再重复下载公共源散件）。</summary>
@@ -141,8 +135,7 @@ Friend NotInheritable Class Ai字幕包下载器
         Friend 哈希 As String
     End Class
 
-    ''' <summary>组装下载清单。GPU+CPU：两个 GGUF + 运行时 zip（+ 母仓提供时的包内 Python）。
-    ''' NPU：model.zip + python.zip + qwen3_ort.py，全部来自母仓（无回退源）。</summary>
+    ''' <summary>按引擎选择模型与运行时，并提供包内 Python 环境。</summary>
     Friend Shared Function 组清单(类型 As 包类型) As List(Of 包文件项)
         If 类型 = 包类型.Npu Then Return 组Npu清单()
         Return 组Gpu清单()
@@ -174,11 +167,11 @@ Friend NotInheritable Class Ai字幕包下载器
 
         If 母仓地址 <> "" Then
             Dim py As New 包文件项 With {
-                .相对路径 = "python.zip",
-                .解压到 = "runtime/python"}
+                .相对路径 = "python.zip", .解压到 = "runtime/python", .覆盖前缀 = "runtime/python/"}
             py.源列表.Add(New 包源(母仓地址 & "/python.zip", 母仓Python字节, 母仓Python哈希))
             清单.Add(py)
         End If
+        添加Python底座(清单)
         Return 清单
     End Function
 
@@ -219,33 +212,34 @@ Friend NotInheritable Class Ai字幕包下载器
             清单.Add(项)
         Next
 
-        ' Python 底座 + 五个 wheel。wheel 解压到 site-packages（顶层=包目录+dist-info，
-        ' 无 scripts 特殊件，实测确认）；._pth 由组装阶段写。
-        Dim embed As New 包文件项 With {
-            .相对路径 = "python-embed.zip", .解压到 = "runtime/python"}
-        embed.源列表.Add(New 包源(Embed网址, Embed字节, Embed哈希))
-        清单.Add(embed)
-
-        Dim wheels = {
-            ("numpy.whl", WhlNumpy网址, WhlNumpy字节, WhlNumpy哈希),
-            ("onnxruntime.whl", WhlOrt网址, WhlOrt字节, WhlOrt哈希),
-            ("sherpa_onnx.whl", WhlSherpa网址, WhlSherpa字节, WhlSherpa哈希),
-            ("openvino.whl", WhlOv网址, WhlOv字节, WhlOv哈希),
-            ("openvino_telemetry.whl", WhlOvTel网址, WhlOvTel字节, WhlOvTel哈希)}
-        For Each 件 In wheels
-            Dim 项 As New 包文件项 With {
-                .相对路径 = 件.Item1, .解压到 = "runtime/python/Lib/site-packages"}
-            项.源列表.Add(New 包源(件.Item2, 件.Item3, 件.Item4))
-            清单.Add(项)
-        Next
+        添加Python底座(清单)
+        添加PythonWheel(清单, "onnxruntime.whl", WhlOrt网址, WhlOrt字节, WhlOrt哈希)
+        添加PythonWheel(清单, "sherpa_onnx.whl", WhlSherpa网址, WhlSherpa字节, WhlSherpa哈希)
+        添加PythonWheel(清单, "openvino.whl", WhlOv网址, WhlOv字节, WhlOv哈希)
+        添加PythonWheel(清单, "openvino_telemetry.whl", WhlOvTel网址, WhlOvTel字节, WhlOvTel哈希)
         Return 清单
     End Function
 
+    Private Shared Sub 添加Python底座(清单 As List(Of 包文件项))
+        Dim 项 As New 包文件项 With {.相对路径 = "python-embed.zip", .解压到 = "runtime/python"}
+        项.源列表.Add(New 包源(Embed网址, Embed字节, Embed哈希))
+        清单.Add(项)
+        添加PythonWheel(清单, "numpy.whl", WhlNumpy网址, WhlNumpy字节, WhlNumpy哈希)
+    End Sub
+
+    Private Shared Sub 添加PythonWheel(清单 As List(Of 包文件项), 文件名 As String,
+                                      网址 As String, 字节 As Long, 哈希 As String)
+        Dim 项 As New 包文件项 With {.相对路径 = 文件名, .解压到 = "runtime/python/Lib/site-packages"}
+        项.源列表.Add(New 包源(网址, 字节, 哈希))
+        清单.Add(项)
+    End Sub
+
     ''' <summary>整体下载进度：总百分比按「全部清单字节的已完成量」计（跨文件累计），
-    ''' 文本为状态行显示用的一行话。</summary>
+    ''' 文本包含字节数和下载阶段，由界面配合百分比显示。</summary>
     Friend NotInheritable Class 下载进度
         Friend 总百分比 As Integer
         Friend 文本 As String
+        Friend 速度字节每秒 As Double
     End Class
 
     ''' <summary>下载目标白名单：不存在的目录 / 空目录 / 已有本程序哨兵的目录。
@@ -280,7 +274,7 @@ Friend NotInheritable Class Ai字幕包下载器
 
     ''' <summary>下载整包。返回空串=成功并已生成 ai-subtitles.json；否则返回人话错误
     ''' （.part 保留，可再次点击续传）。进度为结构化：总百分比（0-100，跨文件累计）
-    ''' + 状态行文本。类型决定清单与生成清单的引擎（GGUF/llama 或 ONNX/onnx）。
+    ''' + 下载状态文本。类型决定清单与生成清单的引擎（GGUF/llama 或 ONNX/onnx）。
     ''' 两种包都有完整公共源链，母仓只是可选加速（zip 整包优先，散件兜底）。</summary>
     Friend Shared Async Function 下载包Async(目标目录 As String, 类型 As 包类型,
                                               进度 As IProgress(Of 下载进度),
@@ -306,7 +300,7 @@ Friend NotInheritable Class Ai字幕包下载器
                        Dim pct = CInt(已完成 * 100.0R / Math.Max(1, 总字节))
                        进度.Report(New 下载进度 With {
                            .总百分比 = Math.Min(100, Math.Max(0, pct)),
-                           .文本 = $"{Math.Min(100, pct)}%　{已完成 \ 1048576}/{总字节 \ 1048576} MB　{文本}"})
+                           .文本 = $"{已完成 \ 1048576}/{总字节 \ 1048576} MB　{文本}"})
                    End Sub
 
         Dim 根 = Path.GetFullPath(目标目录)
@@ -316,6 +310,9 @@ Friend NotInheritable Class Ai字幕包下载器
         Dim 目标错误 = 校验下载目标(根)
         If 目标错误 <> "" Then Return 目标错误
         ' 先落哨兵再下文件：中途失败/取消后目录仍归本程序所有，删除按钮仍可用。
+        If Ai字幕包.有归属哨兵(根) AndAlso Not Ai字幕包.有指定类型归属哨兵(根, 类型.ToString()) Then
+            Return "这个目录已用于另一种推理包，请选择独立目录。"
+        End If
         If Not Ai字幕包.写归属哨兵(根, 类型.ToString()) Then
             Return $"无法在下载目录写入归属标记（目录只读或没有权限）：{根}"
         End If
@@ -346,31 +343,35 @@ Friend NotInheritable Class Ai字幕包下载器
             Dim 目标 = Path.Combine(根, 项.相对路径.Replace("/"c, Path.DirectorySeparatorChar))
             Directory.CreateDirectory(Path.GetDirectoryName(目标))
 
-            ' 已合格（体积+哈希都对）就跳过：断电/重启后重按按钮=只补缺的部分。
-            If File.Exists(目标) AndAlso New FileInfo(目标).Length = 项.源列表(0).字节 Then
-                Dim 哈希 = Await Task.Run(Function() 计算哈希(目标), 取消)
-                If String.Equals(哈希, 项.源列表(0).哈希, StringComparison.OrdinalIgnoreCase) Then
-                    已完成字节 += 项.源列表(0).字节
-                    If 项.覆盖前缀 <> "" Then 已覆盖.Add(项.覆盖前缀)
-                    报告(已完成字节, $"{项.相对路径} 已就位，跳过")
-                    Continue For
+            ' 只下载未通过体积和校验哈希检查的文件，允许复用原先来自任一源的缓存。
+            Dim 可复用 = False
+            If File.Exists(目标) Then
+                Dim 长度 = New FileInfo(目标).Length
+                If 项.源列表.Any(Function(源) 源.字节 = 长度) Then
+                    Dim 哈希 = Await Task.Run(Function() 计算哈希(目标), 取消)
+                    可复用 = 项.源列表.Any(Function(源) 源.字节 = 长度 AndAlso
+                        String.Equals(源.哈希, 哈希, StringComparison.OrdinalIgnoreCase))
                 End If
             End If
-
-            Dim 错误 = Await 下载文件Async(目标, 项, 已完成字节, 总字节, 进度, 取消)
-            If 错误 <> "" Then
-                ' 母仓 zip 失败不致命：散件公共源链兜底（GGUF 的 runtime.zip 同理，
-                ' 它自带回退源在项内）。只有散件全源失败才真正报错。
-                If 项.覆盖前缀 <> "" Then
-                    报告(已完成字节, $"{项.相对路径} 母仓不可用，改用公共源散件…")
-                    Continue For
+            If 可复用 Then
+                报告(已完成字节 + 项.源列表(0).字节, $"{项.相对路径} 已校验，复用文件")
+            Else
+                Dim 错误 = Await 下载文件Async(目标, 项, 已完成字节, 总字节, 进度, 取消)
+                If 错误 <> "" Then
+                    If 项.覆盖前缀 <> "" Then
+                        报告(已完成字节, $"{项.相对路径} 母仓不可用，改用公共源散件…")
+                        Continue For
+                    End If
+                    Return 错误
                 End If
-                Return 错误
             End If
             已完成字节 += 项.源列表(0).字节
             If 项.覆盖前缀 <> "" Then 已覆盖.Add(项.覆盖前缀)
 
-            If 项.解压到 <> "" Then
+            ' 补装 Python 时可以复用已经解压好的 Vulkan 运行时，正在运行的 DLL 无需重写。
+            Dim 保留Vulkan = 可复用 AndAlso 项.解压到 = "runtime/vulkan" AndAlso
+                File.Exists(Path.Combine(根, "runtime", "vulkan", "llama-server.exe"))
+            If 项.解压到 <> "" AndAlso Not 保留Vulkan Then
                 Dim 解压目标 = Path.Combine(根, 项.解压到)
                 报告(已完成字节, $"解压 {项.相对路径} → {项.解压到} …")
                 Await Task.Run(
@@ -425,22 +426,17 @@ Friend NotInheritable Class Ai字幕包下载器
                 Return "随播放器部署的 ai-subtitles\qwen3_ort.py 缺失（安装不完整），无法生成 NPU 扩展包"
             End If
             File.Copy(本体ort, Path.Combine(根, "qwen3_ort.py"), True)
-
-            ' embeddable Python 的 ._pth：默认只认 python312.zip 和 .，必须补
-            ' site-packages 并打开 import site，wheel 解压的包才 import 得到。
-            ' 母仓整包 Python 自带配置好的环境，但重写无害（内容一致）。
-            Dim py根 = Path.Combine(根, "runtime", "python")
-            If File.Exists(Path.Combine(py根, "python.exe")) Then
-                File.WriteAllText(Path.Combine(py根, "python312._pth"),
-                    "python312.zip" & vbCrLf & "." & vbCrLf &
-                    "Lib\site-packages" & vbCrLf & "import site" & vbCrLf,
-                    Text.Encoding.ASCII)
-            End If
         End If
 
-        ' 清单 v3：python 字段只有在包内 Python 真就位时才写——空串=回落 PATH python。
-        Dim 有包内Python = File.Exists(Path.Combine(根, "runtime", "python", "python.exe"))
-        Dim 清单Python = If(有包内Python, "runtime/python/python.exe", "")
+        Const 清单Python As String = "runtime/python/python.exe"
+        Dim py根 = Path.Combine(根, "runtime", "python")
+        If Not File.Exists(Path.Combine(根, 清单Python)) OrElse
+           Not File.Exists(Path.Combine(py根, "Lib", "site-packages", "numpy", "__init__.py")) Then
+            Return "扩展包缺少 Python 或 NumPy，未生成新的扩展包清单。"
+        End If
+        File.WriteAllText(Path.Combine(py根, "python312._pth"),
+            "python312.zip" & vbCrLf & "." & vbCrLf & "Lib\site-packages" & vbCrLf & "import site" & vbCrLf,
+            Text.Encoding.ASCII)
         Dim 清单内容 As String
         If 类型 = 包类型.Npu Then
             ' NPU = onnx 引擎：无 runtime 字段（推理在包内 Python 的 OpenVINO 里跑，
@@ -484,125 +480,45 @@ Friend NotInheritable Class Ai字幕包下载器
                                                 总字节 As Long, 进度 As IProgress(Of 下载进度),
                                                 取消 As CancellationToken,
                                                 Optional 客户端 As HttpClient = Nothing) As Task(Of String)
-        Dim 临时 = 目标 & ".part"
-        ' 进度上报（文件字节 → 整体字节 → 百分比）。放在源循环外：校验阶段也要上报。
-        ' 文本一行放得下（进度条下方的整行宽标签）：百分比 + 总量 + 当前文件名。
-        Dim 报告 = Sub(文件收到 As Long, 尾注 As String, 文件字节 As Long)
-                       Dim 整体 = 基数 + 文件收到
-                       Dim pct = CInt(整体 * 100.0R / Math.Max(1, 总字节))
-                       进度.Report(New 下载进度 With {
-                           .总百分比 = Math.Min(100, Math.Max(0, pct)),
-                           .文本 = $"{pct}%　{整体 \ 1048576}/{总字节 \ 1048576} MB　{项.相对路径}{尾注}"})
-                   End Sub
+        Dim 错误 = String.Empty
         For Each 源 In 项.源列表
-            Try
-                Dim 已有 As Long = If(File.Exists(临时), New FileInfo(临时).Length, 0L)
-                If 已有 > 源.字节 Then
-                    File.Delete(临时)
-                    已有 = 0L
+            取消.ThrowIfCancellationRequested()
+            Using 下载 = If(客户端 Is Nothing, New LakeUI.DownloadFile(), New LakeUI.DownloadFile(客户端))
+                下载.Url = 源.网址
+                下载.SavePath = 目标
+                下载.ExpectedLength = 源.字节
+                下载.ExpectedSha256 = 源.哈希
+                Dim 报告进度 As EventHandler(Of LakeUI.DownloadProgressEventArgs) =
+                    Sub(sender, e)
+                        If 下载.State <> LakeUI.DownloadState.Running Then Return
+                        报告单文件进度(进度, 基数 + e.BytesDownloaded, 总字节,
+                            Path.GetFileName(项.相对路径), e.SpeedBytesPerSecond)
+                    End Sub
+                AddHandler 下载.ProgressChanged, 报告进度
+                Try
+                    Await 下载.StartAsync(取消)
+                Finally
+                    RemoveHandler 下载.ProgressChanged, 报告进度
+                End Try
+                取消.ThrowIfCancellationRequested()
+                If 下载.State = LakeUI.DownloadState.Completed Then
+                    报告单文件进度(进度, 基数 + 源.字节, 总字节, Path.GetFileName(项.相对路径) & " 校验完成", 0)
+                    Return ""
                 End If
-
-                If 已有 < 源.字节 Then
-                    Using 请求 As New HttpRequestMessage(HttpMethod.Get, 源.网址)
-                        If 已有 > 0 Then
-                            请求.Headers.Range = New RangeHeaderValue(已有, Nothing)
-                        End If
-                        Using 响应 = Await If(客户端, _客户端).SendAsync(请求, HttpCompletionOption.ResponseHeadersRead, 取消)
-                            If Not 响应.IsSuccessStatusCode Then Continue For
-                            If 响应.StatusCode = Net.HttpStatusCode.OK Then
-                                ' A server may ignore Range. Restart instead of appending a full response.
-                                已有 = 0
-                            ElseIf 响应.StatusCode = Net.HttpStatusCode.PartialContent Then
-                                Dim 范围 = 响应.Content.Headers.ContentRange
-                                If 范围 Is Nothing OrElse Not 范围.HasRange OrElse
-                                   Not String.Equals(范围.Unit, "bytes", StringComparison.OrdinalIgnoreCase) OrElse
-                                   范围.From.Value <> 已有 OrElse Not 范围.HasLength OrElse 范围.Length.Value <> 源.字节 Then
-                                    Return $"{项.相对路径}：续传范围不符，未写入响应。"
-                                End If
-                            Else
-                                Continue For
-                            End If
-                            If 响应.Content.Headers.ContentLength.HasValue AndAlso
-                               响应.Content.Headers.ContentLength.Value <> 源.字节 - 已有 Then
-                                Return $"{项.相对路径}：上游文件大小不符（期望剩余 {源.字节 - 已有}，得到 {响应.Content.Headers.ContentLength.Value}）" &
-                                       "——上游可能已更新，请更新下载清单"
-                            End If
-
-                            Dim 写入模式 = If(已有 > 0, FileMode.Append, FileMode.Create)
-                            Dim 文件流 As FileStream = Nothing
-                            Dim 内容流 As Stream = Nothing
-                            Try
-                                文件流 = New FileStream(临时, 写入模式, FileAccess.Write,
-                                                        FileShare.None, 1048576,
-                                                        FileOptions.SequentialScan)
-                                内容流 = Await 响应.Content.ReadAsStreamAsync(取消)
-                                Dim 上次报告字节 = 已有
-                                Dim 上次报告时刻 = DateTime.UtcNow
-                                Await 复制受限响应Async(内容流, 文件流, 已有, 源.字节,
-                                    Sub(收到)
-                                        If 收到 - 上次报告字节 >= 4194304 OrElse
-                                           (DateTime.UtcNow - 上次报告时刻).TotalSeconds >= 1.0 Then
-                                            报告(收到, "", 源.字节)
-                                            上次报告字节 = 收到
-                                            上次报告时刻 = DateTime.UtcNow
-                                        End If
-                                    End Sub, 取消)
-                                报告(源.字节, " 完成", 源.字节)
-                            Finally
-                                内容流?.Dispose()
-                                文件流?.Dispose()
-                            End Try
-                        End Using
-                    End Using
-                End If
-
-                If New FileInfo(临时).Length <> 源.字节 Then
-                    Return $"{项.相对路径}：下载不完整（连接中断），已保留 .part 可续传"
-                End If
-
-                报告(源.字节, " 校验中…", 源.字节)
-                Dim 哈希 = Await Task.Run(Function() 计算哈希(临时), 取消)
-                If Not String.Equals(哈希, 源.哈希, StringComparison.OrdinalIgnoreCase) Then
-                    File.Delete(临时)
-                    Return $"{项.相对路径}：SHA256 校验失败（期望 {源.哈希.Substring(0, 12)}…，" &
-                           $"得到 {哈希.Substring(0, 12)}…）——请更换网络或更新下载清单"
-                End If
-
-                File.Move(临时, 目标, True)
-                Return ""
-            Catch oce As OperationCanceledException When Not 取消.IsCancellationRequested
-                ' The response body stalled. Keep the bounded prefix and try the next source.
-            Catch oce As OperationCanceledException
-                Throw
-            Catch ex As InvalidDataException
-                Return $"{项.相对路径}：{ex.Message}"
-            Catch
-                ' 网络/IO 失败：保留 .part，试下一个源。
-            End Try
+                错误 = If(下载.LastError?.Message, "下载未完成，部分数据已保留")
+            End Using
         Next
-        Return $"{项.相对路径}：所有下载源都失败了（已保留 .part，再次点击继续续传）"
+        Return $"{项.相对路径}：{错误}"
     End Function
 
-    Friend Shared Async Function 复制受限响应Async(内容 As Stream, 输出 As Stream,
-                                                   已有 As Long, 期望 As Long,
-                                                   报告 As Action(Of Long),
-                                                   取消 As CancellationToken) As Task
-        If 已有 < 0 OrElse 期望 < 已有 Then Throw New ArgumentOutOfRangeException(NameOf(已有))
-        Dim 缓冲(65535) As Byte
-        Dim 收到 = 已有
-        Using 读取超时 = CancellationTokenSource.CreateLinkedTokenSource(取消)
-            Do
-                读取超时.CancelAfter(TimeSpan.FromSeconds(30))
-                Dim 本次上限 = CInt(Math.Min(CLng(缓冲.Length), 期望 - 收到 + If(期望 - 收到 < 缓冲.Length, 1L, 0L)))
-                Dim 读到 = Await 内容.ReadAsync(缓冲, 0, 本次上限, 读取超时.Token)
-                If 读到 = 0 Then Exit Do
-                If 读到 > 期望 - 收到 Then Throw New InvalidDataException("下载响应超过清单大小，已停止写入。")
-                Await 输出.WriteAsync(缓冲, 0, 读到, 读取超时.Token)
-                收到 += 读到
-                报告?.Invoke(收到)
-            Loop
-        End Using
-    End Function
+    Private Shared Sub 报告单文件进度(进度 As IProgress(Of 下载进度), 已完成 As Long,
+                                    总字节 As Long, 文本 As String, 速度 As Double)
+        Dim 百分比 = CInt(Math.Clamp(已完成 * 100.0R / Math.Max(1L, 总字节), 0, 100))
+        进度?.Report(New 下载进度 With {
+            .总百分比 = 百分比,
+            .文本 = $"{已完成 \ 1048576}/{总字节 \ 1048576} MB　{文本}",
+            .速度字节每秒 = Math.Max(0, 速度)})
+    End Sub
 
     Private Shared Function 计算哈希(路径 As String) As String
         Using 哈希器 As SHA256 = SHA256.Create()

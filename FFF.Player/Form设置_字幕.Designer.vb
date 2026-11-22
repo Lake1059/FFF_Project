@@ -23,15 +23,11 @@ Partial Class Form设置_字幕
     <System.Diagnostics.DebuggerStepThrough()> _
     Private Sub InitializeComponent()
         ModernPanel1 = New LakeUI.ModernPanel()
-        Panel7 = New LakeUI.ModernPanel()
-        HtmlColorLabel8 = New LakeUI.HtmlColorLabel()
-        MCB_尺寸缩放方式 = New LakeUI.ModernComboBox()
         Panel6 = New LakeUI.ModernPanel()
         MB_重置其他位置样式 = New LakeUI.ModernButton()
         JustEmptyControl3 = New LakeUI.JustEmptyControl()
         MB_设置其他位置字体样式 = New LakeUI.ModernButton()
         Panel5 = New LakeUI.ModernPanel()
-        HtmlColorLabel6 = New LakeUI.HtmlColorLabel()
         MCB_底部对齐方式 = New LakeUI.ModernComboBox()
         Panel9 = New LakeUI.ModernPanel()
         HtmlColorLabel1 = New LakeUI.HtmlColorLabel()
@@ -59,8 +55,13 @@ Partial Class Form设置_字幕
         JustEmptyControl2 = New LakeUI.JustEmptyControl()
         MB_设置第一行字体样式 = New LakeUI.ModernButton()
         HtmlColorLabel2 = New LakeUI.HtmlColorLabel()
+        ModernPanel2 = New LakeUI.ModernPanel()
+        MB_重置特效字幕无对应字体时的样式 = New LakeUI.ModernButton()
+        JustEmptyControl7 = New LakeUI.JustEmptyControl()
+        MB_设置特效字幕无对应字体时的样式 = New LakeUI.ModernButton()
+        JustEmptyControl8 = New LakeUI.JustEmptyControl()
+        MCB_尺寸缩放方式 = New LakeUI.ModernComboBox()
         ModernPanel1.SuspendLayout()
-        Panel7.SuspendLayout()
         Panel6.SuspendLayout()
         Panel5.SuspendLayout()
         Panel9.SuspendLayout()
@@ -69,18 +70,19 @@ Partial Class Form设置_字幕
         Panel8.SuspendLayout()
         Panel2.SuspendLayout()
         Panel1.SuspendLayout()
+        ModernPanel2.SuspendLayout()
         SuspendLayout()
         ' 
         ' ModernPanel1
         ' 
         ModernPanel1.BackColor1 = Color.FromArgb(CByte(24), CByte(24), CByte(24))
         ModernPanel1.BorderSize = 0
-        ModernPanel1.Controls.Add(Panel7)
+        ModernPanel1.Controls.Add(ModernPanel2)
         ModernPanel1.Controls.Add(Panel6)
-        ModernPanel1.Controls.Add(Panel5)
         ModernPanel1.Controls.Add(Panel9)
         ModernPanel1.Controls.Add(Panel4)
         ModernPanel1.Controls.Add(Panel3)
+        ModernPanel1.Controls.Add(Panel5)
         ModernPanel1.Controls.Add(Panel8)
         ModernPanel1.Controls.Add(Panel2)
         ModernPanel1.Controls.Add(Panel1)
@@ -92,65 +94,6 @@ Partial Class Form设置_字幕
         ModernPanel1.Size = New Size(651, 486)
         ModernPanel1.TabIndex = 0
         ' 
-        ' Panel7
-        ' 
-        Panel7.BackColor = Color.Transparent
-        Panel7.BackColor1 = Color.Transparent
-        Panel7.BorderSize = 0
-        Panel7.Controls.Add(HtmlColorLabel8)
-        Panel7.Controls.Add(MCB_尺寸缩放方式)
-        Panel7.Dock = DockStyle.Top
-        Panel7.Location = New Point(15, 379)
-        Panel7.Name = "Panel7"
-        Panel7.Padding = New Padding(0, 10, 0, 0)
-        Panel7.Size = New Size(616, 42)
-        Panel7.TabIndex = 25
-        ' 
-        ' HtmlColorLabel8
-        ' 
-        HtmlColorLabel8.AutoSize = True
-        HtmlColorLabel8.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HtmlColorLabel8.Dock = DockStyle.Fill
-        HtmlColorLabel8.Location = New Point(200, 10)
-        HtmlColorLabel8.Margin = New Padding(2)
-        HtmlColorLabel8.Name = "HtmlColorLabel8"
-        HtmlColorLabel8.Padding = New Padding(10, 0, 0, 0)
-        HtmlColorLabel8.Size = New Size(416, 32)
-        HtmlColorLabel8.TabIndex = 15
-        HtmlColorLabel8.Text = "尺寸缩放方式"
-        HtmlColorLabel8.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
-        ' 
-        ' MCB_尺寸缩放方式
-        ' 
-        MCB_尺寸缩放方式.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_尺寸缩放方式.BorderRadius = 10
-        MCB_尺寸缩放方式.BorderSize = 0
-        MCB_尺寸缩放方式.Dock = DockStyle.Left
-        MCB_尺寸缩放方式.DropDownBackdropBlurPasses = 2
-        MCB_尺寸缩放方式.DropDownBackdropBlurRadius = 30
-        MCB_尺寸缩放方式.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
-        MCB_尺寸缩放方式.DropDownHoverColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
-        MCB_尺寸缩放方式.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
-        MCB_尺寸缩放方式.DropDownPadding = New Padding(10)
-        MCB_尺寸缩放方式.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_尺寸缩放方式.DropDownSelectedForeColor = Color.White
-        MCB_尺寸缩放方式.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
-        MCB_尺寸缩放方式.Items.Add("视频呈现缩放（推荐）")
-        MCB_尺寸缩放方式.Items.Add("渲染区域宽度")
-        MCB_尺寸缩放方式.Items.Add("渲染区域高度")
-        MCB_尺寸缩放方式.Items.Add("不缩放（不推荐）")
-        MCB_尺寸缩放方式.Location = New Point(0, 10)
-        MCB_尺寸缩放方式.Margin = New Padding(2, 2, 2, 2)
-        MCB_尺寸缩放方式.Name = "MCB_尺寸缩放方式"
-        MCB_尺寸缩放方式.Padding = New Padding(10, 0, 10, 0)
-        MCB_尺寸缩放方式.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_尺寸缩放方式.Size = New Size(200, 32)
-        MCB_尺寸缩放方式.TabIndex = 16
-        MCB_尺寸缩放方式.ToolTipGap = -1
-        MCB_尺寸缩放方式.ToolTipMaxWidth = 350
-        MCB_尺寸缩放方式.ToolTipPadding = New Padding(15)
-        MCB_尺寸缩放方式.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
-        ' 
         ' Panel6
         ' 
         Panel6.BackColor = Color.Transparent
@@ -160,7 +103,7 @@ Partial Class Form设置_字幕
         Panel6.Controls.Add(JustEmptyControl3)
         Panel6.Controls.Add(MB_设置其他位置字体样式)
         Panel6.Dock = DockStyle.Top
-        Panel6.Location = New Point(15, 337)
+        Panel6.Location = New Point(15, 331)
         Panel6.Name = "Panel6"
         Panel6.Padding = New Padding(0, 10, 0, 0)
         Panel6.Size = New Size(616, 42)
@@ -209,28 +152,15 @@ Partial Class Form设置_字幕
         Panel5.BackColor = Color.Transparent
         Panel5.BackColor1 = Color.Transparent
         Panel5.BorderSize = 0
-        Panel5.Controls.Add(HtmlColorLabel6)
+        Panel5.Controls.Add(MCB_尺寸缩放方式)
+        Panel5.Controls.Add(JustEmptyControl8)
         Panel5.Controls.Add(MCB_底部对齐方式)
         Panel5.Dock = DockStyle.Top
-        Panel5.Location = New Point(15, 295)
+        Panel5.Location = New Point(15, 163)
         Panel5.Name = "Panel5"
         Panel5.Padding = New Padding(0, 10, 0, 0)
         Panel5.Size = New Size(616, 42)
         Panel5.TabIndex = 23
-        ' 
-        ' HtmlColorLabel6
-        ' 
-        HtmlColorLabel6.AutoSize = True
-        HtmlColorLabel6.AutoSizeMode = AutoSizeMode.GrowAndShrink
-        HtmlColorLabel6.Dock = DockStyle.Fill
-        HtmlColorLabel6.Location = New Point(200, 10)
-        HtmlColorLabel6.Margin = New Padding(2)
-        HtmlColorLabel6.Name = "HtmlColorLabel6"
-        HtmlColorLabel6.Padding = New Padding(10, 0, 0, 0)
-        HtmlColorLabel6.Size = New Size(416, 32)
-        HtmlColorLabel6.TabIndex = 15
-        HtmlColorLabel6.Text = "底部对齐方式"
-        HtmlColorLabel6.TextAlign = LakeUI.HtmlColorLabel.TextAlignEnum.MiddleLeft
         ' 
         ' MCB_底部对齐方式
         ' 
@@ -253,8 +183,11 @@ Partial Class Form设置_字幕
         MCB_底部对齐方式.Margin = New Padding(2, 2, 2, 2)
         MCB_底部对齐方式.Name = "MCB_底部对齐方式"
         MCB_底部对齐方式.Padding = New Padding(10, 0, 10, 0)
+        MCB_底部对齐方式.PrefixForeColor = Color.Orange
+        MCB_底部对齐方式.PrefixGap = 10
+        MCB_底部对齐方式.PrefixText = "底部对齐"
         MCB_底部对齐方式.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_底部对齐方式.Size = New Size(200, 32)
+        MCB_底部对齐方式.Size = New Size(245, 32)
         MCB_底部对齐方式.TabIndex = 16
         MCB_底部对齐方式.ToolTipGap = -1
         MCB_底部对齐方式.ToolTipMaxWidth = 350
@@ -269,7 +202,7 @@ Partial Class Form设置_字幕
         Panel9.Controls.Add(HtmlColorLabel1)
         Panel9.Controls.Add(ETB_字幕不透明度)
         Panel9.Dock = DockStyle.Top
-        Panel9.Location = New Point(15, 253)
+        Panel9.Location = New Point(15, 289)
         Panel9.Name = "Panel9"
         Panel9.Padding = New Padding(0, 10, 0, 0)
         Panel9.Size = New Size(616, 42)
@@ -310,7 +243,6 @@ Partial Class Form设置_字幕
         ETB_字幕不透明度.ThumbWidth = 38
         ETB_字幕不透明度.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_字幕不透明度.TrackFillColor = Color.Transparent
-        ETB_字幕不透明度.Value = 255R
         ' 
         ' Panel4
         ' 
@@ -320,7 +252,7 @@ Partial Class Form设置_字幕
         Panel4.Controls.Add(HtmlColorLabel5)
         Panel4.Controls.Add(ETB_字幕底部间距)
         Panel4.Dock = DockStyle.Top
-        Panel4.Location = New Point(15, 211)
+        Panel4.Location = New Point(15, 247)
         Panel4.Name = "Panel4"
         Panel4.Padding = New Padding(0, 10, 0, 0)
         Panel4.Size = New Size(616, 42)
@@ -360,7 +292,6 @@ Partial Class Form设置_字幕
         ETB_字幕底部间距.ThumbWidth = 38
         ETB_字幕底部间距.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_字幕底部间距.TrackFillColor = Color.Transparent
-        ETB_字幕底部间距.Value = 10R
         ' 
         ' Panel3
         ' 
@@ -370,7 +301,7 @@ Partial Class Form设置_字幕
         Panel3.Controls.Add(HtmlColorLabel4)
         Panel3.Controls.Add(ETB_字幕行间距)
         Panel3.Dock = DockStyle.Top
-        Panel3.Location = New Point(15, 169)
+        Panel3.Location = New Point(15, 205)
         Panel3.Name = "Panel3"
         Panel3.Padding = New Padding(0, 10, 0, 0)
         Panel3.Size = New Size(616, 42)
@@ -411,7 +342,6 @@ Partial Class Form设置_字幕
         ETB_字幕行间距.ThumbWidth = 38
         ETB_字幕行间距.TrackColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ETB_字幕行间距.TrackFillColor = Color.Transparent
-        ETB_字幕行间距.Value = 10R
         ' 
         ' Panel8
         ' 
@@ -422,7 +352,7 @@ Partial Class Form设置_字幕
         Panel8.Controls.Add(JustEmptyControl6)
         Panel8.Controls.Add(MCB_字幕描边样式)
         Panel8.Dock = DockStyle.Top
-        Panel8.Location = New Point(15, 127)
+        Panel8.Location = New Point(15, 121)
         Panel8.Name = "Panel8"
         Panel8.Padding = New Padding(0, 10, 0, 0)
         Panel8.Size = New Size(616, 42)
@@ -446,23 +376,25 @@ Partial Class Form设置_字幕
         MCB_字幕阴影样式.Items.Add("不使用阴影")
         MCB_字幕阴影样式.Items.Add("使用基础阴影")
         MCB_字幕阴影样式.Items.Add("使用更深阴影")
-        MCB_字幕阴影样式.Location = New Point(210, 10)
+        MCB_字幕阴影样式.Location = New Point(255, 10)
         MCB_字幕阴影样式.Margin = New Padding(2, 2, 2, 2)
         MCB_字幕阴影样式.Name = "MCB_字幕阴影样式"
         MCB_字幕阴影样式.Padding = New Padding(10, 0, 10, 0)
+        MCB_字幕阴影样式.PrefixForeColor = Color.YellowGreen
+        MCB_字幕阴影样式.PrefixGap = 10
+        MCB_字幕阴影样式.PrefixText = "阴影样式"
         MCB_字幕阴影样式.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_字幕阴影样式.Size = New Size(200, 32)
+        MCB_字幕阴影样式.Size = New Size(245, 32)
         MCB_字幕阴影样式.TabIndex = 21
         MCB_字幕阴影样式.ToolTipGap = -1
         MCB_字幕阴影样式.ToolTipMaxWidth = 350
         MCB_字幕阴影样式.ToolTipPadding = New Padding(15)
-        MCB_字幕阴影样式.WaterText = "阴影样式"
         MCB_字幕阴影样式.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ' 
         ' JustEmptyControl6
         ' 
         JustEmptyControl6.Dock = DockStyle.Left
-        JustEmptyControl6.Location = New Point(200, 10)
+        JustEmptyControl6.Location = New Point(245, 10)
         JustEmptyControl6.Name = "JustEmptyControl6"
         JustEmptyControl6.Size = New Size(10, 32)
         JustEmptyControl6.TabIndex = 20
@@ -489,13 +421,15 @@ Partial Class Form设置_字幕
         MCB_字幕描边样式.Margin = New Padding(2, 2, 2, 2)
         MCB_字幕描边样式.Name = "MCB_字幕描边样式"
         MCB_字幕描边样式.Padding = New Padding(10, 0, 10, 0)
+        MCB_字幕描边样式.PrefixForeColor = Color.YellowGreen
+        MCB_字幕描边样式.PrefixGap = 10
+        MCB_字幕描边样式.PrefixText = "描边样式"
         MCB_字幕描边样式.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
-        MCB_字幕描边样式.Size = New Size(200, 32)
+        MCB_字幕描边样式.Size = New Size(245, 32)
         MCB_字幕描边样式.TabIndex = 17
         MCB_字幕描边样式.ToolTipGap = -1
         MCB_字幕描边样式.ToolTipMaxWidth = 350
         MCB_字幕描边样式.ToolTipPadding = New Padding(15)
-        MCB_字幕描边样式.WaterText = "描边样式"
         MCB_字幕描边样式.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ' 
         ' Panel2
@@ -509,7 +443,7 @@ Partial Class Form设置_字幕
         Panel2.Controls.Add(JustEmptyControl1)
         Panel2.Controls.Add(MB_设置第二行字体样式)
         Panel2.Dock = DockStyle.Top
-        Panel2.Location = New Point(15, 85)
+        Panel2.Location = New Point(15, 79)
         Panel2.Name = "Panel2"
         Panel2.Padding = New Padding(0, 10, 0, 0)
         Panel2.Size = New Size(616, 42)
@@ -587,7 +521,7 @@ Partial Class Form设置_字幕
         Panel1.Controls.Add(JustEmptyControl2)
         Panel1.Controls.Add(MB_设置第一行字体样式)
         Panel1.Dock = DockStyle.Top
-        Panel1.Location = New Point(15, 43)
+        Panel1.Location = New Point(15, 37)
         Panel1.Name = "Panel1"
         Panel1.Padding = New Padding(0, 10, 0, 0)
         Panel1.Size = New Size(616, 42)
@@ -663,9 +597,105 @@ Partial Class Form设置_字幕
         HtmlColorLabel2.Location = New Point(15, 20)
         HtmlColorLabel2.Margin = New Padding(2)
         HtmlColorLabel2.Name = "HtmlColorLabel2"
-        HtmlColorLabel2.Size = New Size(616, 23)
+        HtmlColorLabel2.Size = New Size(616, 17)
         HtmlColorLabel2.TabIndex = 18
-        HtmlColorLabel2.Text = "<span style=""font-size:13; color:Silver"">SRT 字幕设置</span>   特效和位图字幕不支持调整"
+        HtmlColorLabel2.Text = "特效和位图字幕不支持调整"
+        '
+        ' ModernPanel2
+        '
+        ModernPanel2.BackColor = Color.Transparent
+        ModernPanel2.BackColor1 = Color.Transparent
+        ModernPanel2.BorderSize = 0
+        ModernPanel2.Controls.Add(MB_重置特效字幕无对应字体时的样式)
+        ModernPanel2.Controls.Add(JustEmptyControl7)
+        ModernPanel2.Controls.Add(MB_设置特效字幕无对应字体时的样式)
+        ModernPanel2.Dock = DockStyle.Top
+        ModernPanel2.Location = New Point(15, 373)
+        ModernPanel2.Name = "ModernPanel2"
+        ModernPanel2.Padding = New Padding(0, 10, 0, 0)
+        ModernPanel2.Size = New Size(616, 42)
+        ModernPanel2.TabIndex = 28
+        '
+        ' MB_重置特效字幕无对应字体时的样式
+        '
+        MB_重置特效字幕无对应字体时的样式.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_重置特效字幕无对应字体时的样式.BorderRadius = 10
+        MB_重置特效字幕无对应字体时的样式.BorderSize = 0
+        MB_重置特效字幕无对应字体时的样式.Dock = DockStyle.Left
+        MB_重置特效字幕无对应字体时的样式.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MB_重置特效字幕无对应字体时的样式.Location = New Point(420, 10)
+        MB_重置特效字幕无对应字体时的样式.Margin = New Padding(2)
+        MB_重置特效字幕无对应字体时的样式.Name = "MB_重置特效字幕无对应字体时的样式"
+        MB_重置特效字幕无对应字体时的样式.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MB_重置特效字幕无对应字体时的样式.Size = New Size(80, 32)
+        MB_重置特效字幕无对应字体时的样式.TabIndex = 18
+        MB_重置特效字幕无对应字体时的样式.Text = "重置"
+        '
+        ' JustEmptyControl7
+        '
+        JustEmptyControl7.Dock = DockStyle.Left
+        JustEmptyControl7.Location = New Point(410, 10)
+        JustEmptyControl7.Name = "JustEmptyControl7"
+        JustEmptyControl7.Size = New Size(10, 32)
+        JustEmptyControl7.TabIndex = 19
+        '
+        ' MB_设置特效字幕无对应字体时的样式
+        '
+        MB_设置特效字幕无对应字体时的样式.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MB_设置特效字幕无对应字体时的样式.BorderRadius = 10
+        MB_设置特效字幕无对应字体时的样式.BorderSize = 0
+        MB_设置特效字幕无对应字体时的样式.Dock = DockStyle.Left
+        MB_设置特效字幕无对应字体时的样式.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MB_设置特效字幕无对应字体时的样式.Location = New Point(0, 10)
+        MB_设置特效字幕无对应字体时的样式.Margin = New Padding(2)
+        MB_设置特效字幕无对应字体时的样式.Name = "MB_设置特效字幕无对应字体时的样式"
+        MB_设置特效字幕无对应字体时的样式.PressedBackColor1 = Color.FromArgb(CByte(80), CByte(220), CByte(220), CByte(220))
+        MB_设置特效字幕无对应字体时的样式.Size = New Size(410, 32)
+        MB_设置特效字幕无对应字体时的样式.TabIndex = 17
+        MB_设置特效字幕无对应字体时的样式.Text = "设置 ASS/SSA 缺失字体时的回退字体"
+        MB_设置特效字幕无对应字体时的样式.ToolTipText = "使用所选字体族回退。字号和字形样式沿用字幕文件。"
+        '
+        ' JustEmptyControl8
+        '
+        JustEmptyControl8.Dock = DockStyle.Left
+        JustEmptyControl8.Location = New Point(245, 10)
+        JustEmptyControl8.Name = "JustEmptyControl8"
+        JustEmptyControl8.Size = New Size(10, 32)
+        JustEmptyControl8.TabIndex = 20
+        '
+        ' MCB_尺寸缩放方式
+        '
+        MCB_尺寸缩放方式.BackColor1 = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_尺寸缩放方式.BorderRadius = 10
+        MCB_尺寸缩放方式.BorderSize = 0
+        MCB_尺寸缩放方式.Dock = DockStyle.Left
+        MCB_尺寸缩放方式.DropDownBackdropBlurPasses = 2
+        MCB_尺寸缩放方式.DropDownBackdropBlurRadius = 30
+        MCB_尺寸缩放方式.DropDownBackdropMode = LakeUI.PopupBackdropMode.Auto
+        MCB_尺寸缩放方式.DropDownHoverColor = Color.FromArgb(CByte(20), CByte(220), CByte(220), CByte(220))
+        MCB_尺寸缩放方式.DropDownMode = LakeUI.ModernComboBox.DropDownDisplayMode.Overlay
+        MCB_尺寸缩放方式.DropDownPadding = New Padding(10)
+        MCB_尺寸缩放方式.DropDownSelectedColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_尺寸缩放方式.DropDownSelectedForeColor = Color.White
+        MCB_尺寸缩放方式.HoverBackColor1 = Color.FromArgb(CByte(60), CByte(220), CByte(220), CByte(220))
+        MCB_尺寸缩放方式.Items.Add("视频呈现缩放（推荐）")
+        MCB_尺寸缩放方式.Items.Add("渲染区域宽度")
+        MCB_尺寸缩放方式.Items.Add("渲染区域高度")
+        MCB_尺寸缩放方式.Items.Add("不缩放（不推荐）")
+        MCB_尺寸缩放方式.Location = New Point(255, 10)
+        MCB_尺寸缩放方式.Margin = New Padding(2, 2, 2, 2)
+        MCB_尺寸缩放方式.Name = "MCB_尺寸缩放方式"
+        MCB_尺寸缩放方式.Padding = New Padding(10, 0, 10, 0)
+        MCB_尺寸缩放方式.PrefixForeColor = Color.Orange
+        MCB_尺寸缩放方式.PrefixGap = 10
+        MCB_尺寸缩放方式.PrefixText = "尺寸缩放"
+        MCB_尺寸缩放方式.SelectionColor = Color.FromArgb(CByte(40), CByte(220), CByte(220), CByte(220))
+        MCB_尺寸缩放方式.Size = New Size(245, 32)
+        MCB_尺寸缩放方式.TabIndex = 21
+        MCB_尺寸缩放方式.ToolTipGap = -1
+        MCB_尺寸缩放方式.ToolTipMaxWidth = 350
+        MCB_尺寸缩放方式.ToolTipPadding = New Padding(15)
+        MCB_尺寸缩放方式.WaterTextForeColor = Color.FromArgb(CByte(120), CByte(255), CByte(255), CByte(255))
         ' 
         ' Form设置_字幕
         ' 
@@ -680,11 +710,8 @@ Partial Class Form设置_字幕
         Text = "Form设置_字幕"
         ModernPanel1.ResumeLayout(False)
         ModernPanel1.PerformLayout()
-        Panel7.ResumeLayout(False)
-        Panel7.PerformLayout()
         Panel6.ResumeLayout(False)
         Panel5.ResumeLayout(False)
-        Panel5.PerformLayout()
         Panel9.ResumeLayout(False)
         Panel9.PerformLayout()
         Panel4.ResumeLayout(False)
@@ -694,6 +721,7 @@ Partial Class Form设置_字幕
         Panel8.ResumeLayout(False)
         Panel2.ResumeLayout(False)
         Panel1.ResumeLayout(False)
+        ModernPanel2.ResumeLayout(False)
         ResumeLayout(False)
     End Sub
 
@@ -712,15 +740,11 @@ Partial Class Form设置_字幕
     Friend WithEvents Panel4 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel5 As LakeUI.HtmlColorLabel
     Friend WithEvents Panel5 As LakeUI.ModernPanel
-    Friend WithEvents HtmlColorLabel6 As LakeUI.HtmlColorLabel
     Friend WithEvents MCB_底部对齐方式 As LakeUI.ModernComboBox
     Friend WithEvents Panel6 As LakeUI.ModernPanel
     Friend WithEvents MB_重置其他位置样式 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl3 As LakeUI.JustEmptyControl
     Friend WithEvents MB_设置其他位置字体样式 As LakeUI.ModernButton
-    Friend WithEvents Panel7 As LakeUI.ModernPanel
-    Friend WithEvents HtmlColorLabel8 As LakeUI.HtmlColorLabel
-    Friend WithEvents MCB_尺寸缩放方式 As LakeUI.ModernComboBox
     Friend WithEvents JustEmptyControl5 As LakeUI.JustEmptyControl
     Friend WithEvents MB_设置第二行文字颜色 As LakeUI.ModernButton
     Friend WithEvents JustEmptyControl4 As LakeUI.JustEmptyControl
@@ -734,4 +758,10 @@ Partial Class Form设置_字幕
     Friend WithEvents Panel9 As LakeUI.ModernPanel
     Friend WithEvents HtmlColorLabel1 As LakeUI.HtmlColorLabel
     Friend WithEvents ETB_字幕不透明度 As LakeUI.ExcellentTrackBar
+    Friend WithEvents ModernPanel2 As LakeUI.ModernPanel
+    Friend WithEvents MB_重置特效字幕无对应字体时的样式 As LakeUI.ModernButton
+    Friend WithEvents JustEmptyControl7 As LakeUI.JustEmptyControl
+    Friend WithEvents MB_设置特效字幕无对应字体时的样式 As LakeUI.ModernButton
+    Friend WithEvents MCB_尺寸缩放方式 As LakeUI.ModernComboBox
+    Friend WithEvents JustEmptyControl8 As LakeUI.JustEmptyControl
 End Class

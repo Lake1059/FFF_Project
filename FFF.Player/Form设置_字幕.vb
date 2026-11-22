@@ -22,6 +22,8 @@ Public Class Form设置_字幕
             ETB_字幕底部间距.Value = 设置.实例对象.字幕底部间距
             MCB_底部对齐方式.SelectedIndex = 设置.实例对象.字幕底部对齐方式
             MCB_尺寸缩放方式.SelectedIndex = 设置.实例对象.字幕尺寸缩放方式
+            MB_设置特效字幕无对应字体时的样式.Enabled = 播放器原生接口.支持ASS替代字体
+            MB_重置特效字幕无对应字体时的样式.Enabled = 播放器原生接口.支持ASS替代字体
             更新颜色预览()
         Finally
             正在初始化 = False
@@ -113,6 +115,20 @@ Public Class Form设置_字幕
     Private Sub MCB_尺寸缩放方式_SelectedIndexChanged(sender As Object, e As EventArgs) Handles MCB_尺寸缩放方式.SelectedIndexChanged
         If 正在初始化 OrElse MCB_尺寸缩放方式.SelectedIndex < 0 Then Return
         设置.实例对象.字幕尺寸缩放方式 = MCB_尺寸缩放方式.SelectedIndex
+        应用更改()
+    End Sub
+
+    Private Sub 设置ASS替代字体_Click(sender As Object, e As EventArgs) Handles MB_设置特效字幕无对应字体时的样式.Click
+        Dim 字体 = 设置.实例对象.ASS替代字体
+        Dim 预览字号 = 12.0F
+        Dim 预览样式 = CInt(FontStyle.Regular)
+        If Not 字体控制.选择字体(字体, 预览字号, 预览样式) Then Return
+        设置.实例对象.ASS替代字体 = 字体
+        应用更改()
+    End Sub
+
+    Private Sub 重置ASS替代字体_Click(sender As Object, e As EventArgs) Handles MB_重置特效字幕无对应字体时的样式.Click
+        设置.实例对象.ASS替代字体 = 设置.默认ASS替代字体
         应用更改()
     End Sub
 
