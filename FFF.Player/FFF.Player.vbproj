@@ -187,7 +187,45 @@
     </ProjectReference>
   </ItemGroup>
 
+  <!-- 单文件分发的原生载荷（2026-11-22）
+       .NET 的 bundle 压缩只对自包含发布成立：框架依赖发布被 SDK 直接拒绝
+       （NETSDK1176），手工压好的 FDD bundle 运行时也拒绝启动
+       （"Compressed files used with a standalone apphost"），而自包含 + 压缩实测 84.85 MB
+       （当前单文件包 22.9 MB）。所以只压「本来就要被吐到磁盘」的那批原生件：
+       发布脚本用 tools\native_payload.cs 把它们压成一个 Brotli 载荷，这里内嵌进宿主
+       程序集，运行期由 Core\原生载荷.vb 解压到缓存目录后再加载内核；原生件因此不再
+       作为 bundle Content 条目进入单文件包。
+       ⚠ 载荷清单必须与 bundle 时代一致（内核 + LibRaw + libass 栈 + 光盘栈，16 件）；
+       漏一件就是运行期裸名解析失败，故清单为空时 fail-closed。
+       未给 NativePayloadFile 时退回旧形态（原生件作为 bundle Content、不压缩），
+       保证直接 dotnet publish -p:PublishSingleFile=true 仍能出可运行的单文件包。 -->
+  <ItemGroup Condition="'$(PublishSingleFile)' == 'true' And '$(NativePayloadFile)' != ''">
+    <EmbeddedResource Include="$(NativePayloadFile)" LogicalName="FFF.Player.NativePayload.bin" />
+  </ItemGroup>
+
+  <!-- 单文件发布没有 ai-subtitles 目录；把下载器需要的最小资源嵌进程序集，
+       首次启动由 AI字幕资源.确保 解到数据目录。散装构建仍从目录读取。 -->
   <ItemGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <EmbeddedResource Include="..\tools\ai-subtitles\asr_worker.py"
+                      LogicalName="FFF.Player.AiSub.asr_worker_py" />
+    <EmbeddedResource Include="..\tools\ai-subtitles\qwen3_ort.py"
+                      LogicalName="FFF.Player.AiSub.qwen3_ort_py" />
+    <EmbeddedResource Include="..\tools\ai-subtitles\AI字幕包声明.txt"
+                      LogicalName="FFF.Player.AiSub.AI字幕包声明_txt" />
+    <EmbeddedResource Include="..\LICENSE.txt"
+                      LogicalName="FFF.Player.AiSub.License_LICENSE_txt" />
+    <EmbeddedResource Include="..\licenses\ai\Apache-2.0.txt"
+                      LogicalName="FFF.Player.AiSub.License_Apache-2_0_txt" />
+    <EmbeddedResource Include="..\licenses\ai\BSD-3-Clause.txt"
+                      LogicalName="FFF.Player.AiSub.License_BSD-3-Clause_txt" />
+    <EmbeddedResource Include="..\licenses\ai\MIT.txt"
+                      LogicalName="FFF.Player.AiSub.License_MIT_txt" />
+    <EmbeddedResource Include="..\licenses\ai\PSF-2.0.txt"
+                      LogicalName="FFF.Player.AiSub.License_PSF-2_0_txt" />
+    <EmbeddedResource Include="..\licenses\ai\NOTICE.txt"
+                      LogicalName="FFF.Player.AiSub.License_NOTICE_txt" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(PublishSingleFile)' == 'true' And '$(NativePayloadFile)' == ''">
     <Content Include="..\FFF.Native\x64\$(Configuration)\FFF.Native.dll" Link="FFF.Native.dll">
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
@@ -203,6 +241,19 @@
       <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
     </Content>
   </ItemGroup>
+
+  <!-- 载荷清单：把单文件包该带的那批原生件逐条写给发布脚本的打包器。
+       清单口径与上面旧形态的 Content 一致，再加 DiscRuntime（光盘栈）。 -->
+  <Target Name="WriteSingleFileNativePayloadList" Condition="'$(PublishSingleFile)' == 'true'">
+    <ItemGroup>
+      <_NativePayloadFile Include="@(ProductNative);@(LibRawRuntime);@(LibassRuntime);@(DiscRuntime)" />
+    </ItemGroup>
+    <Error Condition="'@(_NativePayloadFile)' == ''"
+           Text="单文件原生载荷为空：ProductNative / LibRawRuntime / LibassRuntime / DiscRuntime 一项都没解析到，拒绝生成缺件的单文件包。" />
+    <Error Condition="'$(NativePayloadListFile)' == ''"
+           Text="NativePayloadListFile 为空：该 target 只供发布脚本（tools\发布3FP单文件.ps1）调用。" />
+    <WriteLinesToFile File="$(NativePayloadListFile)" Lines="@(_NativePayloadFile)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
 
 
   <Target Name="VerifyPlayerApiVersion" BeforeTargets="Build;Publish">

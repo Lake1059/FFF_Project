@@ -597,6 +597,10 @@ Friend Module 播放器原生接口
     Private ReadOnly 可选导出库句柄 As IntPtr = 加载可选导出库()
 
     Private Function 加载可选导出库() As IntPtr
+        原生载荷.跟踪("播放器原生接口模块初始化")
+        ' 单文件分发的内核在压缩载荷里：先在启动早期解包并预加载，否则按裸名找不到模块。
+        ' 幂等；散装/开发运行返回 Nothing，随后仍按程序目录解析。
+        原生载荷.确保就绪()
         Dim 句柄 As IntPtr
         Try
             If NativeLibrary.TryLoad(动态库名称, GetType(播放器原生接口).Assembly, Nothing, 句柄) Then Return 句柄
@@ -905,6 +909,9 @@ Friend Module 播放器原生接口
 
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_Open(播放器 As 播放器原生句柄, 路径UTF8 As IntPtr) As 原生播放器结果
+    End Function
+    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+    Friend Function FFF3FP_OpenNetwork(播放器 As 播放器原生句柄, 路径UTF8 As IntPtr) As 原生播放器结果
     End Function
     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
     Friend Function FFF3FP_Play(播放器 As 播放器原生句柄) As 原生播放器结果

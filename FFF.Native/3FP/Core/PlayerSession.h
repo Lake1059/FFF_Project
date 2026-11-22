@@ -58,6 +58,10 @@ public:
     ~PlayerSession();
 
     FFFResult Open(const char* localPathUtf8) noexcept;
+    // Explicit network-media entry. UNC paths are accepted only here; device,
+    // pipe and extended paths stay rejected, and FFF3FP_Open keeps its original
+    // local-only contract.
+    FFFResult OpenNetwork(const char* networkPathUtf8) noexcept;
     FFFResult ConfigurePlaybackPerformance(std::int32_t decodeAdapterIndex,
         std::uint32_t videoBufferPolicy, std::uint32_t audioBufferPolicy) noexcept;
     FFFResult GetImageInfo(FFF3FPImageInfo& info) const noexcept;
@@ -277,7 +281,7 @@ private:
         Frame,
         Keyframe
     };
-    void Enqueue(Command command) noexcept;
+    bool Enqueue(Command command) noexcept;
     // Stamps the current timeline generation into the ASR tap and drops
     // everything it has buffered. Called on the worker thread from open and
     // seek; a no-op while no tap is installed.
@@ -308,21 +312,25 @@ private:
     void ReleaseAudioWithoutVideo() noexcept;
     void ApplyAudioPlaybackPause(bool playing) noexcept;
     bool PresentAudioBoundary() noexcept;
-    void DoOpen(std::string pathUtf8) noexcept;
+    void DoOpen(std::string pathUtf8, bool networkInput = false,
+        std::uint64_t inputGeneration = 0) noexcept;
+    bool AbortOpenIfInterrupted() noexcept;
     bool ReopenDiscDemux();
     void PublishDisc();
     bool HoldDisc();
     void DoClose(FFF3FPState finalState = FFF3FPState::Closed,
         bool preserveVideoOutput = false, bool keepStillImage = false) noexcept;
     FFFResult DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1,
-        bool exact = true) noexcept;
+        bool exact = true, bool restartNetworkInput = false) noexcept;
     // timeSliced=true（播放态批量臂）：循环每 250 ms 让出一次 worker，命令与快照
     // 得以在片间处理，seek 目标保持挂起由下一 tick 续推。默认 false：暂停态的
     // 一次性调用保持「一次解到位」语义。
     void DecodeUntilSeekTarget(bool timeSliced = false) noexcept;
     // —— fragmented MP4（fMP4）seek 支撑（C-SEEK-FRAGMENTED@1 / C-SEEK-ROLLBACK@1）——
     // DoOpen 挂载：fragmented 判定成立时构造扫描器并启动后台 moof 扫描线程。
-    void StartFragmentScanIfNeeded(const std::string& path) noexcept;
+    // openDeadlineTick 只约束扫描器旁路句柄的打开（0 表示本地/无期限）。
+    void StartFragmentScanIfNeeded(const std::string& path,
+        ULONGLONG openDeadlineTick = 0) noexcept;
     // F3 顺序预滚：从当前 demux 位置把参考流包顺序读完直到判停点。true=判停命中
     //（落入现有成功收尾）；false=走 B2 重开还原。
     bool SeekFragmentedPreroll(std::int64_t target100ns) noexcept;
@@ -330,6 +338,13 @@ private:
     // B2 重开还原：CloseFormat→OpenFormat→flush→重定位→ReportError。返回 false 表示
     // 重开失败、已走 Fail 会话失败路径，调用方返回 FfmpegFailure 即可。
     bool ReopenFormatForSeek(std::int64_t recallPosition100ns) noexcept;
+    // Network seek policy: stop every in-flight prefetch/seek immediately, throw the
+    // old demuxer and AVIO away, and reopen the same path on a fresh reader. The
+    // caller then seeks the fresh demuxer to the target. No epoch reset, no bounded
+    // drain, no rollback on the old pipeline: a stuck SMB read is abandoned with the
+    // old handle instead of being waited on. Returns false after Fail() on reopen
+    // failure; the caller returns FfmpegFailure.
+    bool ReopenNetworkInputForSeek() noexcept;
     void DoSelectStream(std::int32_t streamIndex, bool video) noexcept;
     void DoLoadExternalAudio(std::string pathUtf8, std::int32_t streamIndex,
         std::int64_t offset100ns) noexcept;
@@ -544,11 +559,13 @@ private:
     void UpdateAudioDiagnostics() noexcept;
     void TrackPacketBitRate(const AVPacket* packet, AVFormatContext* owner) noexcept;
     void UpdateBitRateForPosition(std::int64_t position100ns) noexcept;
+    void UpdateNetworkReadHint() noexcept;
     void ResetBitRateTracking() noexcept;
     void FlushAtEnd() noexcept;
     void PublishSnapshot() noexcept;
     void SetState(FFF3FPState state, const char* operation = nullptr) noexcept;
-    void ReportError(FFFResult result, std::string message, const char* operation = nullptr) noexcept;
+    void ReportError(FFFResult result, std::string message, const char* operation = nullptr,
+        bool terminal = false) noexcept;
     void Fail(FFFResult result, std::string message, const char* operation = nullptr) noexcept;
     void Emit(FFF3FPEvent eventType, const std::string& detailJson) const noexcept;
     void RebuildMediaInfo() noexcept;
@@ -570,6 +587,9 @@ private:
     std::int64_t AudioMediaPosition(std::int64_t position100ns) const noexcept;
     static bool NormalizeLocalPath(const char* pathUtf8, std::string& normalized,
         std::string& error) noexcept;
+    static bool NormalizeNetworkPath(const char* pathUtf8, std::string& normalized,
+        std::string& error) noexcept;
+    FFFResult OpenWithPolicy(const char* pathUtf8, bool allowNetwork) noexcept;
 
     // The route the host asked for, normalized in the constructor: Unspecified
     // ("no preference") becomes Gpu, which is the GPU-first default -- the CPU is
@@ -867,6 +887,12 @@ private:
     bool inputReadBlocked_ = false;
     std::int64_t inputRetryTick_ = 0;
     std::atomic<ULONGLONG> inputDeadlineTick_{0};
+    // Close/Stop cancel immediately on the API thread, ahead of worker commands.
+    std::atomic<std::uint64_t> inputCancelGeneration_{1};
+    std::atomic<std::uint64_t> activeInputGeneration_{1};
+    // Set by OpenNetwork for the whole life of this file. It only selects the
+    // bounded network I/O/seek policy; path validation still happens in OpenApi.
+    bool networkInput_ = false;
     std::int64_t inputResumePosition100ns_ = 0;
     std::int32_t decodedSurfaceFormat_ = -1;
     AVCodecContext* decodedSurfaceDecoder_ = nullptr;
@@ -905,6 +931,21 @@ private:
     std::int64_t seekTarget100ns_;
     std::int64_t seekTargetFrame_;
     bool keyframeSeekPending_;
+    // Coalesced seek pump: for repeated fast-forward/rewind, only the newest
+    // absolute target is worth executing. Older queued targets and the
+    // decode-to-target pass for them are abandoned instead of being replayed.
+    // seekRequestMutex_ protects the pending triplet; the active fields are
+    // atomics because Seek() and the worker/decode loop are on different threads.
+    void RunSeekPump() noexcept;
+    bool CoalescedSeekSuperseded() const noexcept;
+    mutable std::mutex seekRequestMutex_;
+    std::int64_t pendingSeekTarget100ns_ = -1;
+    std::uint64_t pendingSeekGeneration_ = 0;
+    bool seekRequestPending_ = false;
+    bool seekPumpQueued_ = false;
+    std::atomic<std::uint64_t> seekRequestGeneration_{0};
+    std::atomic<std::int64_t> activeSeekTarget100ns_{-1};
+    std::atomic<bool> coalescedSeekActive_{false};
     // --- seek preview (progressive presentation) ---
     // A seek is exact: the target picture waits for its whole reference chain.
     // That wait is unavoidable, but leaving the previous picture frozen on screen
@@ -914,6 +955,8 @@ private:
     bool seekPreviewAllowed_ = true;
     // Wall clock of the previous DoSeek, used to tell a single press from a held key.
     std::int64_t lastSeekStartedMs_ = 0;
+    // Diagnostic-only anchor for FFF_SEEK_PROFILE; zero when no seek is in flight.
+    std::uint64_t seekProfileStartTick_ = 0;
     bool seekPreviewPresented_ = false;
     std::int64_t seekPreviewMargin100ns_ = 0;
     // Pictures decoded and offered to the presenter while a seek is outstanding.

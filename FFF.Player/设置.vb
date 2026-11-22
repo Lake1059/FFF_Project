@@ -258,15 +258,24 @@ Public Class 设置
     Public Property SP_毛玻璃背景来源 As Integer = -1
     Public Property SP_毛玻璃噪点颗粒 As Integer = -1
 
-    Public Shared ReadOnly 设置文件路径 As String = Path.Combine(程序目录, "FFF.Player.Settings.json")
+    Public Shared ReadOnly 设置文件路径 As String = Path.Combine(数据目录, "FFF.Player.Settings.json")
 
-    Public Shared ReadOnly 自定义图标路径 As String = Path.Combine(程序目录, "3FP_Icon")
-    Public Shared ReadOnly 自定义背景图路径 As String = Path.Combine(程序目录, "3FP_BackImage")
+    Public Shared ReadOnly 自定义图标路径 As String = Path.Combine(数据目录, "3FP_Icon")
+    Public Shared ReadOnly 自定义背景图路径 As String = Path.Combine(数据目录, "3FP_BackImage")
     Private Shared 当前自有背景图 As Image
     Private Shared 当前自有图标 As Icon
 
+    Private Shared Sub 确保数据目录()
+        Try
+            Directory.CreateDirectory(数据目录)
+        Catch
+            ' 目录不可写时保留原行为：加载/保存各自兜底，不在启动路径抛出。
+        End Try
+    End Sub
+
     Public Shared Sub 启动时加载设置()
         Try
+            确保数据目录()
             If Not File.Exists(设置文件路径) Then
                 If FontFamily.Families.Any(Function(f) f.Name = "微软雅黑") Then 实例对象.字体 = "微软雅黑"
                 退出时保存设置()
@@ -291,6 +300,7 @@ Public Class 设置
     Public Shared Sub 退出时保存设置()
         Dim 临时路径 As String = Nothing
         Try
+            确保数据目录()
             实例对象.规范化()
             临时路径 = 设置文件路径 & ".tmp-" & Guid.NewGuid().ToString("N")
             File.WriteAllText(临时路径, JsonSerializer.Serialize(实例对象, JsonSO), Text.Encoding.UTF8)
