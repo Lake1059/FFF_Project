@@ -23,7 +23,8 @@
 
 第三方清单、版本、来源和分发边界见 `licenses/THIRD-PARTY-NOTICES.md`；许可原文在
 `licenses/`。AI 字幕扩展包另见 `FFF.Player/AI字幕/Worker/AI字幕包声明.txt` 与
-`licenses/ai/`。
+`licenses/ai/`。其中 LibRaw 0.22.3 采用 LGPL-2.1-only / CDDL-1.0 双许可，以
+`libraw.dll` 动态链接分发，详见 `THIRD-PARTY-NOTICES.md` §2.1。
 
 AI 字幕的宿主侧集成代码（控制器、菜单、设置页、worker 启动与状态机）属于第一方
 代码，按本仓 MIT 使用；第三方模型/运行时只在其自身宽松许可（Apache-2.0、MIT、
@@ -33,7 +34,7 @@ BSD-3-Clause、PSF-2.0）条件下使用。该组许可允许嵌入、复制与�
 
 ## 3. 分发时的归属规则
 
-1. 散装本体包在包根保留 `LICENSE.txt`、`NOTICE`、`THIRD-PARTY-NOTICES.md`、`ASSETS.md`，并保留 `licenses/` 子树。
+1. 散装本体包在包根保留 `LICENSE.txt`、`NOTICE`、`THIRD-PARTY-NOTICES.md`、`ASSETS.md`，并保留 `licenses/` 子树（含 LibRaw 双许可原文）。
    单文件形态是明确例外：`发布3FP单文件.ps1` 只输出 `FFF.Player.exe`。AI 字幕扩展包所需的许可文本随资源内嵌，单文件通过“关于”页的“项目主页 / GitHub”链接指向本仓主页，许可入口以仓库主页和本文件为准。
 2. `发布3FP.ps1` 默认生成本体包，不包含外部 FFmpeg runtime；完整运行时包需显式
    `-IncludeExternalRuntime`，并按各自许可补齐文本、版权声明和源码获取方式。
