@@ -15,7 +15,7 @@
       <UseWindowsForms>true</UseWindowsForms>
       <MyType>WindowsForms</MyType>
       <UseWPF>True</UseWPF>
-      <!--<PublishReadyToRun>True</PublishReadyToRun>
+      <!--<PublishReadyToRun>True</PublishReadyToRun>-
       <PublishReadyToRunEmitSymbols>True</PublishReadyToRunEmitSymbols>-->
       <SelfContained>False</SelfContained>
       <!--<IncludeNativeLibrariesForSelfExtract>True</IncludeNativeLibrariesForSelfExtract>-->

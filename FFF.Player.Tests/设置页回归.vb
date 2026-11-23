@@ -183,7 +183,7 @@ Friend Module 设置页回归
     End Sub
 
     Private Sub 测AI字幕渲染()
-        Dim 清单 = Ai字幕包下载器.组清单(Ai字幕包下载器.包类型.GpuCpu)
+        Dim 清单 = Ai字幕包下载器.组运行时清单(Ai字幕包下载器.包类型.GpuCpu)
         断言(清单.Any(Function(项) 项.相对路径 = "python-embed.zip") AndAlso
              清单.Any(Function(项) 项.相对路径 = "numpy.whl"), "GGUF 官方回退源包含 Python 和 NumPy")
         断言(Ai字幕双语.规整("en-zh") = Ai字幕双语.译文优先 AndAlso
