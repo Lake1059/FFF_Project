@@ -3,6 +3,14 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
+# === 文档边界（全局规范） ===
+# 仓库只保留根 README.md 与 licenses/ 下的法律文本。
+# docs/、组件级 README 与过程分析文档一律不入库。
+# 任何情况下新增额外文档，必须经仓库所有者本人明确同意。
+/docs/
+**/README.md
+!/README.md
+
 # User-specific files
 *.rsuser
 *.suo

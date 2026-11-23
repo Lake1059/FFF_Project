@@ -3,6 +3,8 @@
 本文件说明 FFF Project / 3FP 的许可与第三方归属，不是法律意见；具体条款以
 `LICENSE.txt`、`NOTICE`、`THIRD-PARTY-NOTICES.md` 和各组件许可原文为准。
 
+文件位置：仓库内 `LICENSE.txt` 位于根目录，`NOTICE`、`LICENSING.md`、`THIRD-PARTY-NOTICES.md`、`ASSETS.md` 位于 `licenses/`。散装发布包会将后四者复制到包根，并保留 `licenses/` 子树；本文按同名文件引用。
+
 ## 1. 第一方代码
 
 - 许可：MIT。
@@ -19,7 +21,7 @@
 本仓 MIT。它们保留各自版权与许可，只按各自条款使用。不要把本仓 MIT 当作
 第三方组件的再许可。
 
-第三方清单、版本、来源和分发边界见 `THIRD-PARTY-NOTICES.md`；许可原文在
+第三方清单、版本、来源和分发边界见 `licenses/THIRD-PARTY-NOTICES.md`；许可原文在
 `licenses/`。AI 字幕扩展包另见 `FFF.Player/AI字幕/Worker/AI字幕包声明.txt` 与
 `licenses/ai/`。
 
@@ -31,7 +33,7 @@ BSD-3-Clause、PSF-2.0）条件下使用。该组许可允许嵌入、复制与�
 
 ## 3. 分发时的归属规则
 
-1. 散装本体包保留 `LICENSE.txt`、`NOTICE`、`THIRD-PARTY-NOTICES.md`、`ASSETS.md` 与 `licenses/`。
+1. 散装本体包在包根保留 `LICENSE.txt`、`NOTICE`、`THIRD-PARTY-NOTICES.md`、`ASSETS.md`，并保留 `licenses/` 子树。
    单文件形态是明确例外：`发布3FP单文件.ps1` 只输出 `FFF.Player.exe`。AI 字幕扩展包所需的许可文本随资源内嵌，单文件通过“关于”页的“项目主页 / GitHub”链接指向本仓主页，许可入口以仓库主页和本文件为准。
 2. `发布3FP.ps1` 默认生成本体包，不包含外部 FFmpeg runtime；完整运行时包需显式
    `-IncludeExternalRuntime`，并按各自许可补齐文本、版权声明和源码获取方式。
@@ -39,7 +41,7 @@ BSD-3-Clause、PSF-2.0）条件下使用。该组许可允许嵌入、复制与�
 3. AI 字幕宿主集成随本体按 MIT 分发；第三方模型/运行时如随包嵌入，保留
    `AI字幕包声明.txt`、`licenses/ai/` 与 manifest 的 `notice`/`license` 字段；
    运行期下载包同样必须带这些文件。
-4. 第一方界面图标、应用图标与默认背景图的来源见 `ASSETS.md`；新增美术资产必须
+4. 第一方界面图标、应用图标与默认背景图的来源见 `licenses/ASSETS.md`（发布包根目录同名）；新增美术资产必须
    同步登记来源/作者/许可，不得把来源不明的网络素材放入 `Resources` 或 `Assets`。
 5. 第三方名称、商标、Logo 归各自权利人；本仓只做合理、惯常的归属说明，
    不授予商标许可。

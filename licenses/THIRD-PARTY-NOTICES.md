@@ -2,7 +2,9 @@
 
 适用范围：`FFF.Player`（3FP）、`FFF.Native.dll`、随包运行库与 AI 字幕扩展包。
 本文件是**事实与分发边界清单**，不是法律意见；许可条款以各组件原文为准。
-最后核对：2026-11-13。
+最后核对：2026-11-23。
+
+文件位置：仓库内 `LICENSE.txt` 位于根目录，`NOTICE`、`LICENSING.md`、`THIRD-PARTY-NOTICES.md`、`ASSETS.md` 位于 `licenses/`。散装发布包会把后四者复制到包根，并保留 `licenses/` 子树；下文对这些文件的引用在仓库与发布包两种布局中均按同名文件解析。
 
 ## 0. 本仓自身
 
@@ -13,8 +15,8 @@
 | 许可 | MIT，全文见根目录 `LICENSE.txt` |
 | 文件级标识 | 新增第一方源码建议使用 `SPDX-FileCopyrightText: 2026 1059 Studio` + `SPDX-License-Identifier: MIT`；历史文件不批量改写，避免制造无意义 diff |
 | Windows 版本资源 | `FFF.Native.rc` 的 `LegalCopyright` 与 `LICENSE.txt` 一致 |
-| 归属声明 | 根目录 `NOTICE`；第三方清单为本文件；文件级许可说明见 `LICENSING.md`；许可原文在 `licenses/` |
-| 美术资产 | 本仓界面背景、按钮图标与应用图标为 1059 Studio 自绘；来源清单见 `ASSETS.md` |
+| 归属声明 | `licenses/NOTICE`（发布包根目录同名）；第三方清单为本文件；文件级许可说明见 `licenses/LICENSING.md`；许可原文在 `licenses/` |
+| 美术资产 | 本仓界面背景、按钮图标与应用图标为 1059 Studio 自绘；来源清单见 `licenses/ASSETS.md`（发布包根目录同名） |
 
 `third_party/` 下的上游代码、头文件、静态库和运行时**不适用**本仓 MIT；它们保留各自版权与许可，只按各自条款使用。
 
@@ -23,7 +25,7 @@
 - **3FP 本体包**：`FFF.Player.exe`、`FFF.Native.dll`、本仓第一方代码、libass 字幕栈与 .NET 运行依赖。**本体不内嵌、不随包 FFmpeg**；FFmpeg 是用户自备或另行分发的**外部/独立运行时**。
 - **完整运行时包（可选）**：仅在显式使用 `发布3FP.ps1 -IncludeExternalRuntime` 时，才会检查并复制 `avcodec-*` / `avformat-*` / `avutil-*` / `avfilter-*` / `swresample-*` / `swscale-*` 六个 DLL；该模式是“外部运行时打包”，不是 3FP 本体的一部分。
 - 默认 `发布3FP.ps1` 生成本体包，并在暂存目录校验 FFmpeg 的 `av*.dll` 和 `sw*.dll`；不得把开发输出目录 `bin` 直接当发布包分发。
-- 单文件形态（`tools/发布3FP单文件.ps1`）按项目分发策略只产出 `FFF.Player.exe`。AI 字幕扩展包所需的许可文本随资源内嵌。程序“关于”页提供本仓主页链接（<https://github.com/Lake1059/FFF_Project>），许可入口以仓库主页与 `LICENSING.md` 为准。散装本体包仍按上一款保留上述文件。
+- 单文件形态（`tools/发布3FP单文件.ps1`）按项目分发策略只产出 `FFF.Player.exe`。AI 字幕扩展包所需的许可文本随资源内嵌。程序“关于”页提供本仓主页链接（<https://github.com/Lake1059/FFF_Project>），许可入口以仓库主页与 `licenses/LICENSING.md` 为准。散装本体包仍按上一款保留上述文件。
 - 开发用 FFmpeg DLL 位于 `third_party/ffmpeg/bin/x64/`。完整运行时包以实际 DLL 的构建选项为准，发布脚本会检查 `--enable-nonfree`。`third_party/ffmpeg/` 有 `COPYING.LGPLv2.1`、`COPYING.LGPLv3`；GPLv2/GPLv3 原文已补到 `licenses/GPL-2.0-only.txt`、`licenses/GPL-3.0-only.txt`（完整运行时包适用）。
 - 因此：**本体包不得出现 FFmpeg DLL**；若另行分发完整运行时包，必须补齐对应 GPL/LGPL 文本、源码获取方式，并按 `--enable-nonfree` 构建的实际条件处理。`FFF_ALLOW_NONFREE=1` 只能作为显式承担后果的放行，不是正常公开 Release 开关。
 - FFmpeg 许可说明：<https://ffmpeg.org/legal.html>。

@@ -7,6 +7,10 @@ source locations and distribution boundaries, and licenses/ for the
 corresponding license texts. First-party licensing and contribution rules are
 summarized in LICENSING.md.
 
+Repository paths: licenses/THIRD-PARTY-NOTICES.md and licenses/LICENSING.md.
+The release package places these files at its root and keeps licenses/ beside
+them, so the same references resolve in both layouts.
+
 The AI subtitle host integration is first-party code under the repository
 MIT license. The third-party AI models and runtimes (Qwen3-ASR, llama.cpp,
 sherpa-onnx, OpenVINO, Python, NumPy and ONNX Runtime) are downloaded

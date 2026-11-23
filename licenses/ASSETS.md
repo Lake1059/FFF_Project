@@ -1,6 +1,6 @@
 # 资源资产来源 / Asset Provenance
 
-本文件记录随 3FP 本体分发的界面图像、图标与其他美术资产的来源、作者与许可。它不是第三方软件许可清单；第三方软件见 `THIRD-PARTY-NOTICES.md` 与 `licenses/`。
+本文件记录随 3FP 本体分发的界面图像、图标与其他美术资产的来源、作者与许可。它不是第三方软件许可清单；第三方软件见 `licenses/THIRD-PARTY-NOTICES.md` 与 `licenses/`（发布包根目录为 `THIRD-PARTY-NOTICES.md` 与 `licenses/`）。
 
 ## 1. 自有美术资产
 
