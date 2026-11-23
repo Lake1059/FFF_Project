@@ -59,16 +59,11 @@
   <!-- Python is still external. Only the scripts and notices needed to assemble
        an AI subtitle pack are built into the host (including single-file publish). -->
   <ItemGroup>
-    <EmbeddedResource Include="AI字幕\Worker\*.py;AI字幕\Worker\*.txt"
-                      WithCulture="false" LogicalName="AiSubtitles.Pack/%(Filename)%(Extension)" />
-    <EmbeddedResource Include="..\LICENSE.txt"
-                      WithCulture="false" LogicalName="AiSubtitles.Pack/LICENSE.txt" />
-    <EmbeddedResource Include="..\licenses\ai\*.txt"
-                      WithCulture="false" LogicalName="AiSubtitles.Pack/licenses/ai/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="AI字幕\Worker\*.py;AI字幕\Worker\*.txt" WithCulture="false" LogicalName="AiSubtitles.Pack/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\LICENSE.txt" WithCulture="false" LogicalName="AiSubtitles.Pack/LICENSE.txt" />
+    <EmbeddedResource Include="..\licenses\ai\*.txt" WithCulture="false" LogicalName="AiSubtitles.Pack/licenses/ai/%(Filename)%(Extension)" />
     <None Update="ICO.ico" CopyToOutputDirectory="PreserveNewest" Condition="'$(PublishSingleFile)' != 'true'" />
-    <None Include="..\LICENSE.txt;..\licenses\NOTICE;..\licenses\LICENSING.md;..\licenses\THIRD-PARTY-NOTICES.md"
-          Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest"
-          Condition="'$(PublishSingleFile)' != 'true'" />
+    <None Include="..\LICENSE.txt;..\licenses\NOTICE;..\licenses\LICENSING.md;..\licenses\THIRD-PARTY-NOTICES.md" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Condition="'$(PublishSingleFile)' != 'true'" />
   </ItemGroup>
 
   <ItemGroup>
@@ -78,8 +73,7 @@
     <LibRawRuntime Include="..\third_party\libraw\bin\x64\libraw.dll" Condition="Exists('..\third_party\libraw\bin\x64\libraw.dll')" />
     <!-- Side-lane helper is optional: when it has not been built the kernel
          degrades to the in-process lane, so an empty item must not break build. -->
-    <PrefetchHelper Include="..\build\$(Configuration)\FFF.PrefetchHost.exe"
-                    Condition="'$(PublishSingleFile)' != 'true' and Exists('..\build\$(Configuration)\FFF.PrefetchHost.exe')" />
+    <PrefetchHelper Include="..\build\$(Configuration)\FFF.PrefetchHost.exe" Condition="'$(PublishSingleFile)' != 'true' and Exists('..\build\$(Configuration)\FFF.PrefetchHost.exe')" />
     <LibassMainRuntime Include="$(LibassRuntimeDirectory)\ass-*.dll" />
     <LibassRuntime Include="@(LibassMainRuntime);$(LibassRuntimeDirectory)\brotlicommon.dll;$(LibassRuntimeDirectory)\brotlidec.dll;$(LibassRuntimeDirectory)\fribidi-0.dll;$(LibassRuntimeDirectory)\harfbuzz.dll" />
     <LibassRuntime Include="$(LibassRuntimeDirectory)\bz2d.dll;$(LibassRuntimeDirectory)\freetyped.dll;$(LibassRuntimeDirectory)\libpng16d.dll;$(LibassRuntimeDirectory)\zd.dll" Condition="'$(Configuration)' == 'Debug'" />
@@ -97,7 +91,6 @@
     <!-- The Windows-specific Mathematics asset only adds WinRT overloads that
          3FP and LakeUI do not use. Use the same package's portable assembly. -->
     <PackageReference Include="Vortice.Mathematics" Version="2.1.0" ExcludeAssets="compile;runtime" GeneratePathProperty="true" />
-    <Reference Include="Vortice.Mathematics" HintPath="$(PkgVortice_Mathematics)\lib\net10.0\Vortice.Mathematics.dll" Private="true" />
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectComposition" Version="3.8.3" />
@@ -256,21 +249,17 @@
 
   <Target Name="RejectPrivateColorExtensionPublish" AfterTargets="ComputeFilesToPublish">
     <ItemGroup>
-      <PrivateColorExtension Include="@(ResolvedFileToPublish)"
-          Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)', '(?i)(ExternalModule.*|\.Test)\.dll$'))" />
+      <PrivateColorExtension Include="@(ResolvedFileToPublish)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)', '(?i)(ExternalModule.*|\.Test)\.dll$'))" />
     </ItemGroup>
     <Error Condition="'@(PrivateColorExtension)' != ''" Text="外部模块 DLL 不得发布或打包：@(PrivateColorExtension)" />
   </Target>
 
   <!-- Check the SDK's final bundle inputs, not the reused build output or the
        directory left after publish. Native DLLs must have bundle-root paths. -->
-  <Target Name="VerifyPlayerBundle" BeforeTargets="GenerateSingleFileBundle" DependsOnTargets="PrepareForBundle"
-          Condition="'$(PublishSingleFile)' == 'true'">
+  <Target Name="VerifyPlayerBundle" BeforeTargets="GenerateSingleFileBundle" DependsOnTargets="PrepareForBundle" Condition="'$(PublishSingleFile)' == 'true'">
     <ItemGroup>
-      <_UnexpectedBundleDll Include="@(FilesToBundle)"
-          Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(FilesToBundle.Filename)%(FilesToBundle.Extension)', '(?i)^((av(codec|filter|format|util)|sw(resample|scale))(-\d+)?\.dll|FFF\.PrefetchHost\.exe)$'))" />
-      <_BundledWinRTProjection Include="@(FilesToBundle)"
-          Condition="'%(FilesToBundle.Filename)%(FilesToBundle.Extension)' == 'Microsoft.Windows.SDK.NET.dll' Or '%(FilesToBundle.Filename)%(FilesToBundle.Extension)' == 'WinRT.Runtime.dll'" />
+      <_UnexpectedBundleDll Include="@(FilesToBundle)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(FilesToBundle.Filename)%(FilesToBundle.Extension)', '(?i)^((av(codec|filter|format|util)|sw(resample|scale))(-\d+)?\.dll|FFF\.PrefetchHost\.exe)$'))" />
+      <_BundledWinRTProjection Include="@(FilesToBundle)" Condition="'%(FilesToBundle.Filename)%(FilesToBundle.Extension)' == 'Microsoft.Windows.SDK.NET.dll' Or '%(FilesToBundle.Filename)%(FilesToBundle.Extension)' == 'WinRT.Runtime.dll'" />
       <_BundledPath Include="@(FilesToBundle->'%(RelativePath)')" />
       <_PlayerBundleAssembly Include="@(FilesToBundle)" Condition="'%(FilesToBundle.RelativePath)' == 'FFF.Player.dll'" />
       <_RequiredAiResource Include="asr_worker.py;qwen3_ort.py;AI字幕包声明.txt;LICENSE.txt" />
@@ -280,7 +269,7 @@
     <Error Condition="'@(_UnexpectedBundleDll)' != ''" Text="单文件不得内置外部 FFmpeg 或预取助手：@(_UnexpectedBundleDll)" />
     <Error Condition="'@(_MissingBundlePath)' != ''" Text="单文件缺少原生 DLL：@(_MissingBundlePath)" />
     <Error Condition="'@(_BundledWinRTProjection)' != ''" Text="3FP 单文件包含意外的 WinRT 投影：@(_BundledWinRTProjection)" />
-    <Error Condition="'@(_PlayerBundleAssembly->Count())' != '1'" Text="单文件必须包含一份 FFF.Player.dll。" />
+    <Error Condition="'@(_PlayerBundleAssembly-&gt;Count())' != '1'" Text="单文件必须包含一份 FFF.Player.dll。" />
     <VerifyPlayerAiResources AssemblyFile="@(_PlayerBundleAssembly->'%(FullPath)')" RequiredResources="@(_RequiredAiResource)" />
   </Target>
 
@@ -367,6 +356,6 @@
   </ItemGroup>
 
 
-  <Import Project="..\..\LakeUI\LakeUI\buildTransitive\LakeUI.targets" />
+  <Import Project="..\..\LakeUI\LakeUI\Build\LakeUI.targets" />
 
 </Project>

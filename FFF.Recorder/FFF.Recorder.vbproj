@@ -136,7 +136,7 @@
   </ItemGroup>
 
 
-  <Import Project="..\..\LakeUI\LakeUI\buildTransitive\LakeUI.targets" />
+  <Import Project="..\..\LakeUI\LakeUI\Build\LakeUI.targets" />
 
   <ItemGroup>
     <Compile Update="Form1.vb">

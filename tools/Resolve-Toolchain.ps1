@@ -108,7 +108,11 @@ function Get-VisualStudioCandidateDirectories {
 
     # Keep a useful fallback for preview installations when vswhere is not on
     # disk (for example, a copied portable build).
-    & $addCandidate (ConvertTo-ExistingDirectoryPath "C:\Program Files\Microsoft Visual Studio\18\Insiders")
+    foreach ($programFiles in @($env:ProgramW6432, $env:ProgramFiles) | Select-Object -Unique) {
+        if (-not [string]::IsNullOrWhiteSpace($programFiles)) {
+            & $addCandidate (ConvertTo-ExistingDirectoryPath (Join-Path $programFiles "Microsoft Visual Studio\18\Insiders"))
+        }
+    }
     return @($candidates)
 }
 
