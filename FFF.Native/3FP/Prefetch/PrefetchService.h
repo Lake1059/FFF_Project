@@ -143,7 +143,7 @@ private:
     std::unordered_map<std::string, RoutePod> routes_;
 
     std::uint64_t cachedBytes_ = 0;
-    std::uint64_t budgetBytes_ = 256ull * 1024ull * 1024ull;
+    std::uint64_t budgetBytes_ = 1024ull * 1024ull * 1024ull;
     std::uint64_t useTick_ = 0;
     std::uint64_t hits_ = 0;
     std::uint64_t misses_ = 0;

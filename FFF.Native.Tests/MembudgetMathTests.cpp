@@ -298,16 +298,17 @@ void TestGuardSurvivesRelax() {
 // ---------------------------------------------------------------------------
 // 7. Dead zone max(floor/8, ceiling/16) at the boundary that matters:
 //    prefetch has no floor, audio has ceiling == 2*floor and the two terms tie.
-//    Untouched by this round -- kept as a regression.
+//    The prefetch ceiling is now 1 GiB; the formula is unchanged.
 // ---------------------------------------------------------------------------
 void TestDeadZone() {
-    const std::uint64_t prefetchCeiling = 256 * MiB;
+    // Current prefetch ceiling is 1 GiB; the dead zone scales with it.
+    const std::uint64_t prefetchCeiling = 1024 * MiB;
     const auto prefetch = DeadZoneBytes(0, prefetchCeiling);
     char detail[256];
     std::snprintf(detail, sizeof(detail), "prefetch dead zone=%llu B expected=%llu B",
         static_cast<unsigned long long>(prefetch),
         static_cast<unsigned long long>(prefetchCeiling / 16));
-    Check("dead zone: prefetch floor=0 -> ceiling/16 == 16 MiB",
+    Check("dead zone: prefetch floor=0 -> ceiling/16 == 64 MiB",
         prefetch == prefetchCeiling / 16, detail);
 
     // Stereo 48 kHz float32 audio: 240 ms ceiling = 180 KiB, floor = 90 KiB.
