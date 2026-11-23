@@ -91,6 +91,7 @@
     <!-- The Windows-specific Mathematics asset only adds WinRT overloads that
          3FP and LakeUI do not use. Use the same package's portable assembly. -->
     <PackageReference Include="Vortice.Mathematics" Version="2.1.0" ExcludeAssets="compile;runtime" GeneratePathProperty="true" />
+    <Reference Include="Vortice.Mathematics" HintPath="$(PkgVortice_Mathematics)\lib\net10.0\Vortice.Mathematics.dll" Private="true" />
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectComposition" Version="3.8.3" />
