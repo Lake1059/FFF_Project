@@ -1,13 +1,15 @@
 Imports Vortice.DirectWrite
 
 ''' <summary>
-''' 使用 LakeUI 的窗口级 D3D11/Direct2D 合成器绘制剪辑时间轴。
+''' 使用 LakeUI 的窗口级 D3D11 和 D3D12 合成器绘制剪辑时间轴。
 ''' 控件只保存显示和鼠标交互状态，不直接操作播放器会话。
 ''' </summary>
 Friend NotInheritable Class 剪辑区间进度条控件
     Inherits Control
     Implements LakeUI.D3D_IGpuRenderable, LakeUI.D3D_IGpuInvalidationSource,
-               LakeUI.V5_IGpuPresentationSource
+               LakeUI.V5_IGpuPresentationSource, LakeUI.ID3D12Renderable
+
+    Private Const 空状态提示 As String = "打开媒体后可设置剪辑区间"
 
     Private 当前播放位置 As TimeSpan
     Private 媒体总时长 As TimeSpan
@@ -80,16 +82,30 @@ Friend NotInheritable Class 剪辑区间进度条控件
     End Sub
 
     Public Sub RenderGpu(context As LakeUI.D3D_PaintContext) Implements LakeUI.D3D_IGpuRenderable.RenderGpu
-        If context Is Nothing OrElse ClientSize.Width <= 0 OrElse ClientSize.Height <= 0 Then Return
+        If context Is Nothing Then Return
+        绘制时间轴(AddressOf context.FillRectangle, AddressOf context.DrawRectangle,
+            Sub(区域) context.DrawText(空状态提示, Font, Color.Gray, 区域,
+                TextAlignment.Center, ParagraphAlignment.Center))
+    End Sub
+
+    Public Sub RenderGpu12(context As LakeUI.D3D12_PaintContext) Implements LakeUI.ID3D12Renderable.RenderGpu12
+        If context Is Nothing Then Return
+        绘制时间轴(AddressOf context.FillRectangle, AddressOf context.DrawRectangle,
+            Sub(区域) context.DrawText(空状态提示, Font, Color.Gray, 区域,
+                DeviceDpi / 96.0F, TextAlignment.Center, ParagraphAlignment.Center))
+    End Sub
+
+    Private Sub 绘制时间轴(填充矩形 As Action(Of RectangleF, Color), 绘制边框 As Action(Of RectangleF, Color, Single),
+                         绘制空状态提示 As Action(Of RectangleF))
+        If ClientSize.Width <= 0 OrElse ClientSize.Height <= 0 Then Return
 
         Dim 宽度 = CSng(ClientSize.Width)
         Dim 高度 = CSng(ClientSize.Height)
         Dim 全区域 As New RectangleF(0.0F, 0.0F, 宽度, 高度)
-        If BackColor.A > 0 Then context.FillRectangle(全区域, BackColor)
+        If BackColor.A > 0 Then 填充矩形(全区域, BackColor)
 
         If 媒体总时长 <= TimeSpan.Zero Then
-            context.DrawText("打开媒体后可设置剪辑区间", Font, Color.Gray, 全区域,
-                TextAlignment.Center, ParagraphAlignment.Center)
+            绘制空状态提示(全区域)
             Return
         End If
 
@@ -97,23 +113,23 @@ Friend NotInheritable Class 剪辑区间进度条控件
         Dim 进度宽度 = 时间到X(显示位置, 宽度)
         If 进度宽度 > 0.0F Then
             Dim 进度区域 As New RectangleF(0.0F, 0.0F, 进度宽度, 高度)
-            context.FillRectangle(进度区域, Color.FromArgb(120, 220, 220, 220))
-            context.DrawRectangle(New RectangleF(0.5F, 0.5F,
+            填充矩形(进度区域, Color.FromArgb(120, 220, 220, 220))
+            绘制边框(New RectangleF(0.5F, 0.5F,
                 Math.Max(0.0F, 进度宽度 - 1.0F), Math.Max(0.0F, 高度 - 1.0F)),
-                Color.FromArgb(120, 120, 120))
+                Color.FromArgb(120, 120, 120), 1.0F)
         End If
 
         If 当前入点.HasValue Then
-            绘制标记(context, 时间到X(当前入点.Value, 宽度), 高度,
+            绘制标记(填充矩形, 时间到X(当前入点.Value, 宽度), 高度,
                 Color.FromArgb(255, 100, 100), True)
         End If
         If 当前出点.HasValue Then
-            绘制标记(context, 时间到X(当前出点.Value, 宽度), 高度,
+            绘制标记(填充矩形, 时间到X(当前出点.Value, 宽度), 高度,
                 Color.FromArgb(100, 150, 255), False)
         End If
 
         Dim 当前X = 时间到X(显示位置, 宽度)
-        context.FillRectangle(New RectangleF(Math.Max(0.0F, 当前X - 1.0F), 0.0F, 2.0F, 高度),
+        填充矩形(New RectangleF(Math.Max(0.0F, 当前X - 1.0F), 0.0F, 2.0F, 高度),
             Color.FromArgb(200, 200, 200))
     End Sub
 
@@ -171,15 +187,15 @@ Friend NotInheritable Class 剪辑区间进度条控件
         Return CSng(比例 * Math.Max(0.0F, 宽度 - 1.0F))
     End Function
 
-    Private Shared Sub 绘制标记(context As LakeUI.D3D_PaintContext, x As Single, 高度 As Single,
+    Private Shared Sub 绘制标记(填充矩形 As Action(Of RectangleF, Color), x As Single, 高度 As Single,
                               颜色 As Color, 顶部 As Boolean)
-        context.FillRectangle(New RectangleF(Math.Max(0.0F, x - 1.0F), 0.0F, 2.0F, 高度), 颜色)
+        填充矩形(New RectangleF(Math.Max(0.0F, x - 1.0F), 0.0F, 2.0F, 高度), 颜色)
         Const 标记高度 As Integer = 10
         Const 半宽 As Single = 5.0F
         For 行 = 0 To 标记高度 - 1
             Dim 本行半宽 = 半宽 * (1.0F - CSng(行) / 标记高度)
             Dim y = If(顶部, CSng(行), Math.Max(0.0F, 高度 - 行 - 1.0F))
-            context.FillRectangle(New RectangleF(x - 本行半宽, y,
+            填充矩形(New RectangleF(x - 本行半宽, y,
                 Math.Max(1.0F, 本行半宽 * 2.0F), 1.0F), 颜色)
         Next
     End Sub
