@@ -22,7 +22,7 @@
 
 ## 1. 分发形态与 FFmpeg 边界
 
-- **3FP 本体包**：`FFF.Player.exe`、`FFF.Native.dll`、本仓第一方代码、libass 字幕栈与 .NET 运行依赖。**本体不内嵌、不随包 FFmpeg**；FFmpeg 是用户自备或另行分发的**外部/独立运行时**。
+- **3FP 本体包**：`FFF.Player.exe`、`FFF.Native.dll`、`libraw.dll`、本仓第一方代码、libass 字幕栈与 .NET 运行依赖。**本体不内嵌、不随包 FFmpeg**；FFmpeg 是用户自备或另行分发的**外部/独立运行时**。
 - **完整运行时包（可选）**：仅在显式使用 `发布3FP.ps1 -IncludeExternalRuntime` 时，才会检查并复制 `avcodec-*` / `avformat-*` / `avutil-*` / `avfilter-*` / `swresample-*` / `swscale-*` 六个 DLL；该模式是“外部运行时打包”，不是 3FP 本体的一部分。
 - 默认 `发布3FP.ps1` 生成本体包，并在暂存目录校验 FFmpeg 的 `av*.dll` 和 `sw*.dll`；不得把开发输出目录 `bin` 直接当发布包分发。
 - 单文件形态（`tools/发布3FP单文件.ps1`）按项目分发策略只产出 `FFF.Player.exe`。AI 字幕扩展包所需的许可文本随资源内嵌。程序“关于”页提供本仓主页链接（<https://github.com/Lake1059/FFF_Project>），许可入口以仓库主页与 `licenses/LICENSING.md` 为准。散装本体包仍按上一款保留上述文件。
@@ -50,6 +50,19 @@
 | libxml2 | MIT | `libxml2.dll` |
 
 LGPL 组件如随完整包分发，应保留许可文本，并提供对应源码/可重新链接的获取方式。**已补齐**：`licenses/LGPL-2.1-only.txt`、`licenses/LGPL-CREDITS.md` 与 `licenses/LIBASS-SOURCE-OFFER.md`；后者列明上游源码、动态 DLL 替换方式和三年书面提供承诺，前者保留 libbluray/libudfread/libiconv/fribidi 的版权归属。vcpkg 的 `libbluray`、`libudfread`、`libiconv`、`libxml2` 共享目录 `copyright` 在本机为 0 字节，本仓已用上游 `COPYING` / `Copyright` 回退文本补齐到 `licenses/vcpkg-*.txt`，发布脚本按回退件收集，避免 0 字节缺件。
+
+## 2.1 LibRaw（libraw.dll，动态链接）
+
+| 项 | 记录 |
+|---|---|
+| 组件/版本 | LibRaw 0.22.3 |
+| 许可 | LGPL-2.1-only 或 CDDL-1.0（双许可，任选其一） |
+| 分发方式 | 动态链接 `libraw.dll`；`FFF.Native` 通过导入库 `libraw.lib` + delay-load 使用，不与第一方代码静态合并 |
+| 版权 | Copyright (C) 2008-2025 LibRaw LLC；`COPYRIGHT` 另列 dcraw、DCB/FBDD（BSD-3-Clause）、X3F（BSD-style）、Adobe DNG SDK（MIT）等内置代码 |
+| 源码 | <https://www.libraw.org/data/LibRaw-0.22.3.zip>；SHA-256 `114CA5CF9F774114CB99CE7ACBB521AF5F6895E76372098EA4BEF5741BD089AC`（`tools/准备LibRaw.ps1` 固定） |
+| 许可原文 | `licenses/libraw-LICENSE.LGPL.txt`、`licenses/libraw-LICENSE.CDDL.txt`、`licenses/libraw-COPYRIGHT.txt` |
+
+LibRaw 以 DLL 形式独立分发，用户可用同版本或兼容构建替换；源码归档地址与哈希由 `tools/准备LibRaw.ps1` 固定，发布包保留上述三份原文。
 
 ## 3. 静态链进 FFF.Native.dll 的 libiamf 一族
 
@@ -80,6 +93,7 @@ LGPL 组件如随完整包分发，应保留许可文本，并提供对应源码
 | 包 | 许可 |
 |---|---|
 | `Svg 3.4.8` | MS-PL |
+| `Vortice.Mathematics 2.1.0` | MIT |
 | `Vortice.Direct2D1 / Direct3D11 / DirectComposition / DirectX / DXGI 3.8.3` | MIT ×5 |
 | `ExCSS 4.2.3`（Svg 传递依赖） | MIT |
 | `SharpGen.Runtime 2.4.2-beta`、`SharpGen.Runtime.COM 2.4.2-beta`（Vortice 传递依赖） | MIT ×2 |
@@ -108,7 +122,7 @@ AI 字幕的宿主侧集成代码（控制器、菜单、设置页、worker 启�
 
 ## 7. 许可文本目录与发布门禁
 
-- `licenses/`：本仓第一方收集的第三方许可原文（abseil、libiamf、OAR/OBR、pffft、FLAC、opus、GPLv2/GPLv3、LGPL-2.1、LGPL 版权归属、LakeUI GPL-3.0、vcpkg 回退文本、NuGet 汇总等）。
+- `licenses/`：本仓第一方收集的第三方许可原文（abseil、libiamf、OAR/OBR、pffft、FLAC、opus、LibRaw 双许可、GPLv2/GPLv3、LGPL-2.1、LGPL 版权归属、LakeUI GPL-3.0、vcpkg 回退文本、NuGet 汇总等）。
 - `licenses/ai/`：AI 扩展包用的 Apache-2.0、MIT、BSD-3-Clause、PSF-2.0 与 AI NOTICE。
-- `tools/发布3FP.ps1` **已实现**在打包时收集 `ASSETS.md`、`NOTICE`、本文件、`LICENSING.md`、`licenses/`（含 `LIBASS-SOURCE-OFFER.md`、`NUGET-NOTICES.md`、`LakeUI-COMMERCIAL-AUTHORIZATION-NOTICE.md`）与 vcpkg/LakeUI 文本；缺件默认中止，`FFF_ALLOW_MISSING_LICENSES=1` 只能显式放行。
+- `tools/发布3FP.ps1` **已实现**在打包时收集 `ASSETS.md`、`NOTICE`、本文件、`LICENSING.md`、`licenses/`（含 `LIBASS-SOURCE-OFFER.md`、`NUGET-NOTICES.md`、`LakeUI-COMMERCIAL-AUTHORIZATION-NOTICE.md`、`libraw-*`）与 vcpkg/LakeUI 文本；缺件默认中止，`FFF_ALLOW_MISSING_LICENSES=1` 只能显式放行。
 - 默认 `发布3FP.ps1` 生成本体包。`-IncludeExternalRuntime` 检查并复制 FFmpeg 运行库，生成完整运行时包。
