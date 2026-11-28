@@ -14,6 +14,12 @@
 // value static_asserts compile instead of sitting uninstantiated in a header.
 #include "3FP/Core/MemoryBudgetArbiter.h"
 #include "3FP/Core/RawStillSource.h"
+#include "3FP/IO/IoOptions.h"
+#include "3FP/IO/IoBudgetMath.h"
+#include "3FP/IO/InputPacketPump.h"
+#include "3FP/IO/PacketCache.h"
+#include "3FP/IO/ProgressWatchdog.h"
+#include "3FP/IO/RouteBudgetArbiter.h"
 // IAMF needs the AOM reference decoder: FFmpeg splits an IAMF element into
 // dependent substreams and never mixes them (see IamfAudioDecoder.h).
 #include "3FP/Audio/IamfAudioDecoder.h"
@@ -27,6 +33,7 @@
 #include <deque>
 #include <map>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -47,6 +54,9 @@ struct AVFilterContext;
 // ABI struct appended to 3FP/Api/FFF.Player.CpuPlacement.h (P3-12). Forward-declared so
 // this header does not depend on the public diagnostic header; the .cpp includes it.
 struct FFF3FPCpuPlacementSnapshot;
+// Same arrangement for the appended decode-adapter read-back
+// (3FP/Api/FFF.Player.DecodeAdapter.h): forward-declared here, included by the .cpp.
+struct FFF3FPDecodeAdapterInfo;
 class Fmp4FragmentScanner;
 
 class PlayerSession final {
@@ -62,6 +72,11 @@ public:
     // pipe and extended paths stay rejected, and FFF3FP_Open keeps its original
     // local-only contract.
     FFFResult OpenNetwork(const char* networkPathUtf8) noexcept;
+    // Additive I/O 2.0 entry. `allowNetwork` is separate from the timeout
+    // options so an OpenEx caller cannot accidentally turn a local-only
+    // contract into a network one by filling a struct.
+    FFFResult OpenEx(const char* pathUtf8, const FFFPlayer::Io::IoOptions& options,
+        bool allowNetwork) noexcept;
     FFFResult ConfigurePlaybackPerformance(std::int32_t decodeAdapterIndex,
         std::uint32_t videoBufferPolicy, std::uint32_t audioBufferPolicy) noexcept;
     FFFResult GetImageInfo(FFF3FPImageInfo& info) const noexcept;
@@ -223,6 +238,11 @@ public:
     // Advisory read-only snapshot: it deliberately takes no session lock and changes no
     // behaviour, so a field may be one state transition old while it is being filled.
     FFFResult GetCpuPlacementSnapshot(FFF3FPCpuPlacementSnapshot& snapshot) const noexcept;
+    // Actual decode-adapter read-back (appended export FFF3FP_GetDecodeAdapterInfo).
+    // Reports the adapter a hardware video decoder really opened on, which is not
+    // necessarily the host's preferred index: the open path falls through the
+    // candidate plan. Read-only and lock-free (worker-owned atomics).
+    FFFResult GetDecodeAdapterInfo(FFF3FPDecodeAdapterInfo& info) const noexcept;
     // Live swap-chain flip count, read without copying the 608-byte snapshot.
     // Used by the still-image view timer to align submissions with flips.
     std::uint64_t PresentationCounter() const noexcept;
@@ -305,11 +325,25 @@ private:
     void DoStepKeyframe(std::int32_t direction);
     void Worker() noexcept;
     void PumpPlayback() noexcept;
+    // P2 input/decode split: a dedicated reader thread owns av_read_frame for
+    // this session. Start/Stop are worker-thread-only, and Stop is synchronous
+    // so a following av_seek_frame/close cannot race the reader.
+    bool ThreadedInputEnabled() const noexcept;
+    bool StartInputPump() noexcept;
+    void RefreshVbrBudget(bool force) noexcept;
+    void StopInputPump() noexcept;
+    // Moves one packet from the pump into `packet`. Returns false when the
+    // caller must fall back to a direct bounded read (no pump configured).
+    bool PopInputPumpPacket(AVPacket* packet, int& readResult) noexcept;
     bool VideoQueueSaturated() const noexcept;
     // Decoded pictures the decoder is holding right now, charged against the same
     // memory budget as the queue. Non-zero only for an animated image whose decoder
     // actually ended up running frame threads.
     std::size_t VideoQueuePipelineReservation() const noexcept;
+    // True only when this session is the sole live ledger. The single-route profile
+    // caps the software/hardware admission budgets and the empty-queue transient; it
+    // deliberately does not change the nine-route equal-share policy.
+    bool SingleRouteProfileActive() const noexcept;
     // VideoFrameQueueLimit for this session, i.e. the queue depth the 128 MB budget
     // allows once the pipeline reservation above is subtracted.
     std::size_t VideoQueueLimit() const noexcept;
@@ -325,6 +359,7 @@ private:
     bool PresentAudioBoundary() noexcept;
     void DoOpen(std::string pathUtf8, bool networkInput = false,
         std::uint64_t inputGeneration = 0) noexcept;
+    void StartDevicePrewarm(const std::string& path) noexcept;
     bool AbortOpenIfInterrupted() noexcept;
     bool ReopenDiscDemux();
     void PublishDisc();
@@ -333,6 +368,12 @@ private:
         bool preserveVideoOutput = false, bool keepStillImage = false) noexcept;
     FFFResult DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1,
         bool exact = true, bool restartNetworkInput = false) noexcept;
+    // P2-2: a seek whose GOP is still in PacketCache is served by replaying
+    // cached interleaved packets. The demuxer and input pump stay untouched, so
+    // the live queue continues exactly after the cached tail. Returns false when
+    // the cache lacks a keyframe or the target is outside the retained range.
+    bool TryCacheBackedSeek(std::int64_t position100ns, std::int64_t targetFrame,
+        bool exact) noexcept;
     // timeSliced=true（播放态批量臂）：循环每 250 ms 让出一次 worker，命令与快照
     // 得以在片间处理，seek 目标保持挂起由下一 tick 续推。默认 false：暂停态的
     // 一次性调用保持「一次解到位」语义。
@@ -470,6 +511,15 @@ private:
     bool PumpVideoPresentation() noexcept;
     void QueueVideoFrame(AVFrame* frame) noexcept;
     void ClearVideoQueue() noexcept;
+    // Pause keeps the last presented picture in the renderer, so the queued future
+    // frames are pure residency. Keep one frame for a fast resume and release the rest.
+    void TrimQueuedVideoForPause() noexcept;
+    // Single-route pause reclaim: a software decoder's DPB is the dominant
+    // 4K/8K residency and is not owned by the visible queue. Free the decoder
+    // on pause and reopen/re-prime it on resume or seek. Skipped on very high
+    // RTT links, where the re-prime seek would cost more than the pause saved.
+    void ReleaseSoftwareVideoDecoderForPause() noexcept;
+    bool RestoreSoftwareVideoDecoderAfterPause() noexcept;
     // Copies the side data of one about-to-be-presented frame into the ring.
     // seek 期间被跳过的帧不会走 PresentVideoFrame 的索引维护；不补的话索引会缺条目，
     // seek 之后的帧号整体偏小（实测全解 121、跳帧 67），而双流辅层合成按帧号对齐。
@@ -590,6 +640,12 @@ private:
         std::int64_t timestampResolution100ns = 0) noexcept;
     std::int64_t AudioMediaPosition(std::int64_t position100ns) const noexcept;
     static int ProbeInterrupt(void* opaque) noexcept;
+    // HLS/DASH child opens are routed through the session's abortable HTTP
+    // source instead of a protocol-owned socket that Pause/Seek/Close cannot
+    // interrupt. See SharedFileInput::OpenNestedIo.
+    static int NestedIoOpen(AVFormatContext* format, AVIOContext** context,
+        const char* url, int flags, AVDictionary** options) noexcept;
+    static int NestedIoClose(AVFormatContext* format, AVIOContext* context) noexcept;
     static bool NormalizeLocalPath(const char* pathUtf8, std::string& normalized,
         std::string& error) noexcept;
     static bool NormalizeNetworkPath(const char* pathUtf8, std::string& normalized,
@@ -601,12 +657,43 @@ private:
     // what a hardware refusal falls back to, never what is asked for up front.
     FFF3FPDecodeMode decodeMode_;
     std::int32_t decodeAdapterIndex_ = -1;
+    // Adapter the accepted hardware decoder actually opened on (worker-owned; -1 =
+    // unknown / software route). Atomic because the API thread reads it while the
+    // worker re-opens decoders; a stale value is harmless, a torn one is not.
+    std::atomic<std::int32_t> decodeAdapterActive_{-1};
     PlaybackPerformancePolicy performance_;
     // See SetComparisonMode(). Plain bool: only ever touched on the host's
     // calling thread, never read from the render thread.
     bool comparisonModeActive_ = false;
     FFF3FPEventCallback callback_;
     void* callbackContext_;
+    // P6: one fixed route slot per open session. Nine slots share the process
+    // pool; the lease is released on Close and on destruction.
+    FFFPlayer::Io::RouteBudgetLease routeLease_;
+    // P2 progress health. It observes successful demux reads and the worker
+    // pump's clock; a stalled input never turns into a terminal failure here.
+    FFFPlayer::Io::ProgressWatchdog progressWatchdog_;
+    // P2: bounded forward packet queue fed by the input thread. The cache is the
+    // GOP/history side that survives consumption; the pump is the live queue.
+    std::unique_ptr<FFFPlayer::Io::InputPacketPump> inputPump_;
+    FFFPlayer::Io::PacketCache packetCache_;
+    // P2-2 cache seek replay, worker-thread affine. Shared references keep the
+    // packets alive after the cache history is reset for the new generation.
+    std::vector<FFFPlayer::Io::PacketPtr> cachedSeekPackets_;
+    std::size_t cachedSeekPacketIndex_ = 0;
+    // P0 VBR: the last admitted stream budget and the tick at which measured
+    // bitrate/RTT are sampled again. The pump/cache/route lease all read this
+    // one object so they cannot disagree about the current stream peak.
+    FFFPlayer::Io::VbrBudget vbrBudget_{};
+    std::uint64_t nextVbrUpdateTickMs_ = 0;
+    bool networkSegmented_ = false;
+    bool inputPumpFaultReported_ = false;
+    // P2 cache-pause: an empty forward queue is not an EOF. After a short
+    // hysteresis the audio renderer is paused and a buffering operation is
+    // published; the first packet after refill resumes it. The threshold keeps
+    // a one-packet jitter from toggling the device every tick.
+    bool inputCachePaused_ = false;
+    std::uint64_t inputStarvedSinceMs_ = 0;
     mutable std::mutex mutex_;
     mutable std::mutex snapshotMutex_;
     mutable std::mutex errorMutex_;
@@ -619,6 +706,10 @@ private:
     std::int32_t pendingStepDirection_;
     std::thread worker_;
     std::atomic<bool> terminate_;
+    // Caller-thread close request. Unlike terminate_ this stops the seek pump
+    // and paused decode before the queued DoClose runs, so Close cannot wait
+    // behind a long seek to the end of a slow file.
+    std::atomic<bool> closeRequested_{false};
     std::thread softwareVideoWorker_;
     std::mutex softwareVideoMutex_;
     std::mutex softwareVideoCodecMutex_;
@@ -645,6 +736,10 @@ private:
     bool discDrained_ = false;
     unsigned discInvalidPackets_ = 0;
     std::unique_ptr<SharedFileInput> formatIo_;
+    // True when the current byte source can satisfy an offset seek. A 200-only
+    // HTTP source is forward-only; expose that before the async seek queue so
+    // callers do not receive a false Success for a seek that cannot be honored.
+    std::atomic<bool> seekSupported_{true};
     // These objects belong exclusively to the session worker.  FFmpeg permits
     // reuse after av_packet_unref/av_frame_unref, avoiding per-packet heap churn
     // on both the audio and video decode paths.
@@ -660,6 +755,9 @@ private:
     AVFrame* externalAudioDecodeFrame_;
     AVCodecContext* videoDecoder_;
     AVCodecContext* audioDecoder_;
+    // Single-route pause released the software decoder and left format_ alive;
+    // Play/seek must reopen it before touching the decode path.
+    bool videoDecoderReleasedForPause_ = false;
     // Set when the audio track is IAMF and the AOM reference decoder took over
     // from FFmpeg. Null for every other codec, which keeps the ordinary path
     // byte-for-byte unchanged.
@@ -778,10 +876,14 @@ private:
     std::uint64_t ladderWindowConvert100ns_ = 0;
     std::uint64_t ladderWindowDropped_ = 0;
     // Current rung of the software look-ahead pool ladder: indexes SoftwarePoolBudgets
-    // / SoftwarePoolFrameCaps (128 MB / 4 frames at the floor, 2048 MB / 24 at the top).
-    // Climbs one rung per window the pool gate finds pool-starved; like the thread
-    // ladder it never descends, and it resets per media (see DoClose).
+    // (128 MB / 4 frames at the floor, 2048 MB / 24 at the top). It climbs one rung per
+    // pool-starved window and descends one rung after a run of healthy windows; the
+    // descent is admission-only and never reopens the decoder. It resets per media
+    // (see DoClose).
     std::uint8_t softwarePoolRung_ = 0;
+    // Consecutive healthy windows since the last pool-rung move. Three are required
+    // before a descent, so one lucky two-second sample cannot undo a real climb.
+    std::uint32_t softwarePoolHealthyWindows_ = 0;
     // Frames dropped by ClearVideoQueue (seek, rung reopen, fallback, close). They have
     // no drop counter of their own; the trace line reports them.
     std::uint64_t clearedVideoFrames_ = 0;
@@ -880,6 +982,9 @@ private:
     mutable std::atomic<double> playbackClockRate_{1.0};
     mutable std::atomic<std::int64_t> playbackClockIdentityUntil_{0};
     PlayerVideoRenderer videoRenderer_;
+    // Destroyed before videoRenderer_ (members die in reverse declaration order),
+    // so a still-running prewarm cannot outlive the renderer it touches.
+    std::future<void> devicePrewarm_;
     std::wstring audioEndpointId_;
     bool audioExclusive_;
     float volume_;
@@ -897,12 +1002,16 @@ private:
     bool inputReadBlocked_ = false;
     std::int64_t inputRetryTick_ = 0;
     std::atomic<ULONGLONG> inputDeadlineTick_{0};
+    FFFPlayer::Io::IoOptions ioOptions_{};
+    bool ioOptionsConfigured_ = false;
     // Close/Stop cancel immediately on the API thread, ahead of worker commands.
     std::atomic<std::uint64_t> inputCancelGeneration_{1};
     std::atomic<std::uint64_t> activeInputGeneration_{1};
     // Set by OpenNetwork for the whole life of this file. It only selects the
     // bounded network I/O/seek policy; path validation still happens in OpenApi.
     bool networkInput_ = false;
+    bool realtimeInput_ = false;
+    bool realtimeUdp_ = false;
     std::int64_t inputResumePosition100ns_ = 0;
     std::int32_t decodedSurfaceFormat_ = -1;
     AVCodecContext* decodedSurfaceDecoder_ = nullptr;
@@ -1047,7 +1156,15 @@ private:
     std::int64_t nextUntimedVideoPosition100ns_;
     std::deque<std::int64_t> framePtsIndex_;
     std::int64_t framePtsIndexBase_;
+    // First video keyframe PTS of the active seek. Kept across the time-sliced
+    // DecodeUntilSeekTarget batches so a batch that starts mid-GOP still anchors
+    // the packet-side index instead of dropping every later packet timestamp.
+    std::int64_t seekIndexKeyframePts_;
     bool rebuildingFrameIndex_;
+    // True while an out-of-window SeekFrame rebuild indexes video packets as it
+    // decodes them. Packet ordinals then carry the absolute frame number even
+    // when AVDISCARD_NONREF drops pictures that never reach PresentVideoFrame.
+    bool rebuildPacketIndex_;
     bool audioBlockedUntilVideoFrame_;
     bool playbackPreroll_;
     std::uint64_t audioUnblockVideoGeneration_;
@@ -1139,9 +1256,13 @@ private:
     std::uint32_t audioQuietBufferedTicks_ = 0;
     std::uint32_t audioRollbackCount_ = 0;
     std::uint64_t audioWatermarkUnderrunBaseline_ = 0;
-    std::size_t VideoFrameCapTier() const noexcept;
+    std::size_t VideoLookAheadFrames() const noexcept;
     std::uint64_t AudioBytesPerSecond() const noexcept;
     bool memoryBudgetAttached_ = false;
+    // Token returned by the process-wide ledger's AttachSession. Non-owner sessions
+    // get 0 and fall back to their own software-pool table instead of clearing the
+    // owner's claims.
+    std::uint64_t memoryBudgetToken_ = 0;
     // Verdict of the open-time Σfloor precheck (docs/108 §4.3), as DegradeStep.
     // 0 = no degradation, 1 = video floor 2 frames, 2 = decode 4 threads, 3 = refused.
     // The video claim below reads it so the degraded floor is the one actually claimed.
@@ -1150,12 +1271,18 @@ private:
     std::uint32_t lastMemoryBudgetMask_ = 0;
     std::uint32_t memoryBudgetInvariantSeen_ = 0;
     mutable std::uint64_t videoBudgetFloorBytes_ = 0;
+    // Target the current frame size + source frame rate actually need. Claim replaces
+    // the old fixed 256 MiB target; the field also lets EnsureVideoBudgetClaim skip
+    // the expensive Claim call when nothing changed.
+    mutable std::uint64_t videoBudgetTargetBytes_ = 0;
     // Borrowed audio headroom (docs/111 D-04) and the deadline that caps it.
     std::uint64_t audioBorrowedBytes_ = 0;
     std::int64_t audioBorrowDeadline100ns_ = 0;      // 100ns
     std::uint32_t audioBorrowHits_ = 0;
     std::uint32_t audioBorrowMisses_ = 0;
     mutable std::uint64_t videoBudgetCeilingBytes_ = 0;
+    mutable std::uint64_t hardwareQueueClaimBytes_ = 0;
+    mutable std::size_t hardwareQueueClaimedCap_ = 0;
     mutable std::uint64_t arbiterVideoGrantSeenBytes_ = 0;
     mutable std::size_t arbiterVideoLimitFrames_ = 0;
     mutable std::int64_t arbiterVideoLimitStamp100ns_ = 0;   // 100ns

@@ -1,5 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <Import Project="..\third_party\FFmpegRuntime.props" />
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <NetTFM Condition="'$(NetTFM)' == ''">net11.0-windows10.0.19041.0</NetTFM>
@@ -25,6 +27,10 @@
     <!-- 关联回归用 Raw格式.X3F可用 判断随包 LibRaw 的能力位；测试进程必须能加载同一份 DLL。 -->
     <None Include="..\third_party\libraw\bin\x64\libraw.dll" Link="libraw.dll"
           Condition="Exists('..\third_party\libraw\bin\x64\libraw.dll')"
+          CopyToOutputDirectory="PreserveNewest" />
+    <!-- 真实解码回归要打开样片。内核按 DELAYLOAD 约定**只**从 FFF.Native.dll 所在目录
+         与 exe 目录找 avcodec/avformat 等运行库，不走 PATH，所以测试输出必须带上同一套 dll。 -->
+    <None Include="@(DevelopmentRuntime)" Link="%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

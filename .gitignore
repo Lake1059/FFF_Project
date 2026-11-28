@@ -51,6 +51,19 @@ bld/
 *.lib
 *.exp
 
+# I/O 2.0 local test artifacts: compiled probes, downloaded test servers,
+# generated HLS/DASH assets, and server logs are reproducible and not source.
+/FFF.Native.Tests/*_build/
+/FFF.Native.Tests/*build*/
+/FFF.Native.Tests/http_stats.txt
+/FFF.Native.Tests/http_latency.txt
+/FFF.Native.Tests/assets/
+/FFF.Native.Tests/tools/
+/FFF.Native.Tests/*.log
+/FFF.Native.Tests/*.err
+/FFF.Native.Tests/*.out
+/FFF.Native.Tests/p1_file_source.bin
+
 publish/
 runtime/
 # Prepared dependencies and download caches stay local.

@@ -4,6 +4,7 @@
 #include "3FP/Api/FFF.Player.AudioRenderPlug.h"
 #include "3FP/Api/FFF.Player.AudioTap.h"
 #include "3FP/Api/FFF.Player.CpuPlacement.h"
+#include "3FP/Api/FFF.Player.DecodeAdapter.h"
 #include "3FP/Core/PlacementPolicy.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Render/VideoRenderer.h"
@@ -101,6 +102,33 @@ FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration, FFF3FPHandle* 
 
 FFFResult FFF3FP_Open(const FFF3FPHandle player, const char* path) noexcept { return player ? static_cast<PlayerSession*>(player)->Open(path) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_OpenNetwork(const FFF3FPHandle player, const char* path) noexcept { return player ? static_cast<PlayerSession*>(player)->OpenNetwork(path) : FFFResult::InvalidArgument; }
+FFFResult FFF3FP_OpenEx(const FFF3FPHandle player, const char* path,
+    const FFF3FPIoOptions* options) noexcept {
+    if (player == nullptr || path == nullptr) return FFFResult::InvalidArgument;
+    if (options != nullptr &&
+        (options->size < sizeof(FFF3FPIoOptions) || options->version != 1))
+        return FFFResult::InvalidArgument;
+    FFFPlayer::Io::IoOptions io;
+    bool allowNetwork = true;
+    if (options != nullptr) {
+        io.mode = (options->flags & FFF3FPIoCorrectnessFirst) != 0
+            ? FFFPlayer::Io::IoMode::CorrectnessFirst
+            : FFFPlayer::Io::IoMode::Realtime;
+        io.readIdleTimeoutMs = options->readIdleTimeoutMs;
+        io.openDeadlineMs = options->openDeadlineMs == 0
+            ? io.openDeadlineMs : options->openDeadlineMs;
+        io.seekDeadlineMs = options->seekDeadlineMs == 0
+            ? io.seekDeadlineMs : options->seekDeadlineMs;
+        io.maxBytesInFlight = options->maxBytesInFlight == 0
+            ? io.maxBytesInFlight : options->maxBytesInFlight;
+        io.allowReconnect = (options->flags & FFF3FPIoAllowReconnect) != 0;
+        io.allowDegrade = (options->flags & FFF3FPIoAllowDegrade) != 0;
+        io.allowRealtimeUdpFallback =
+            (options->flags & FFF3FPIoAllowRtspUdpFallback) != 0;
+        allowNetwork = (options->flags & FFF3FPIoAllowNetwork) != 0;
+    }
+    return static_cast<PlayerSession*>(player)->OpenEx(path, io, allowNetwork);
+}
 FFFResult FFF3FP_ConfigurePlaybackPerformance(const FFF3FPHandle player,
     const std::int32_t decodeAdapterIndex, const std::uint32_t videoBufferPolicy,
     const std::uint32_t audioBufferPolicy) noexcept {
@@ -718,4 +746,20 @@ FFFResult FFF3FP_GetCpuPlacementSnapshot(const FFF3FPHandle player,
         return FFFResult::InvalidArgument;
     }
     return static_cast<PlayerSession*>(player)->GetCpuPlacementSnapshot(*snapshot);
+}
+
+// Actual decode-adapter read-back (3FP/Api/FFF.Player.DecodeAdapter.h), appended additively
+// at the tail like the CPU-placement entry above: PlayerApiVersion/SnapshotVersion unchanged,
+// no snapshot field added, hosts resolve it by name and fall back to "unknown" when an older
+// kernel does not export it.
+FFFResult FFF3FP_GetDecodeAdapterInfo(const FFF3FPHandle player,
+    FFF3FPDecodeAdapterInfo* info) noexcept {
+    if (player == nullptr || info == nullptr) return FFFResult::InvalidArgument;
+    // Reject an ABI mismatch before the session overwrites the caller's struct with the
+    // version-1 layout (same guard the placement snapshot uses).
+    if (info->version != FFF3FP_DECODE_ADAPTER_VERSION ||
+        info->size < sizeof(FFF3FPDecodeAdapterInfo)) {
+        return FFFResult::InvalidArgument;
+    }
+    return static_cast<PlayerSession*>(player)->GetDecodeAdapterInfo(*info);
 }

@@ -1306,6 +1306,59 @@ Friend Module 播放器原生接口
         End Try
     End Function
 
+    ' 实际解码适配器读取：内核 FFF3FP_GetDecodeAdapterInfo（追加 ABI，见
+    ' FFF.Native/3FP/Api/FFF.Player.DecodeAdapter.h）。
+    '
+    ' ⚠ 同款动态解析：这是"同版本号（20）内的追加导出"，静态导入会让一个还不含它的
+    '   20 版内核在载入期抛 EntryPointNotFoundException。缺失时 支持解码适配器查询 = False，
+    '   信息层退回只显示"GPU"，不显示显卡名。
+    '
+    ' 结构必须与内核 FFF3FPDecodeAdapterInfo 逐字段同宽同序：2×UInteger + Integer + UInteger
+    '   = 16 字节。版本门是内核自己的 1（FFF3FP_DECODE_ADAPTER_VERSION），不是 PlayerApiVersion。
+    <StructLayout(LayoutKind.Sequential)>
+    Friend Structure 原生解码适配器信息
+        Public 大小 As UInteger
+        Public 版本 As UInteger
+        ' DXGI EnumAdapters1 下标（与设置页 GPU 下拉同一索引空间）；-1 = 未知
+        Public 适配器索引 As Integer
+        ' 1 = 当前媒体正在用硬件解码；0 = 软解 / 没有视频
+        Public 硬件解码 As UInteger
+    End Structure
+
+    Private Const 解码适配器版本 As UInteger = 1UI
+
+    <UnmanagedFunctionPointer(CallingConvention.Cdecl)>
+    Private Delegate Function 读取解码适配器原型(播放器 As 播放器原生句柄,
+        ByRef 信息 As 原生解码适配器信息) As 原生播放器结果
+
+    Private ReadOnly 读取解码适配器函数 As 读取解码适配器原型 =
+        解析可选导出(Of 读取解码适配器原型)("FFF3FP_GetDecodeAdapterInfo")
+
+    ''' <summary>当前内核是否导出实际解码适配器读取（旧内核返回 False）。</summary>
+    Friend ReadOnly Property 支持解码适配器查询 As Boolean
+        Get
+            Return 读取解码适配器函数 IsNot Nothing
+        End Get
+    End Property
+
+    ''' <summary>读取内核当前实际解码所在的适配器。取不到（旧内核 / 句柄无效 / 调用失败）返回 Nothing。
+    ''' 调用前由本方法填好 大小 与 版本，调用方不碰 ABI 头字段。</summary>
+    Friend Function 读取解码适配器(播放器 As 播放器原生句柄) As 原生解码适配器信息?
+        Dim 函数 = 读取解码适配器函数
+        If 函数 Is Nothing OrElse 播放器 Is Nothing OrElse 播放器.IsInvalid OrElse 播放器.IsClosed Then Return Nothing
+        Dim 信息 As New 原生解码适配器信息 With {
+            .大小 = CUInt(Marshal.SizeOf(Of 原生解码适配器信息)()),
+            .版本 = 解码适配器版本
+        }
+        Try
+            If 函数(播放器, 信息) <> 原生播放器结果.成功 Then Return Nothing
+            Return 信息
+        Catch ex As Exception
+            Return Nothing
+        End Try
+    End Function
+
+
     ' 呈现策略（VRR / G-SYNC / FreeSync 低时延路径）：内核 FFF3FP_SetPresentConfig。
     '
     ' ⚠ 与视图旋转/VSR 同款，必须动态解析：同版本号内的新增导出，静态导入会让一个

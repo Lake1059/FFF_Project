@@ -78,6 +78,9 @@ Friend NotInheritable Class 播放器信息图层呈现器
     Private ReadOnly 获取AI字幕状态 As Func(Of String)
     Private ReadOnly 获取蓝牙补偿 As Func(Of String)
     Private ReadOnly 获取渲染引擎 As Func(Of 播放器渲染引擎?)
+    ' 当前实际解码所在的显卡名（自动选卡时由内核回报落点，宿主只负责改名）。
+    ' 取不到就为空，视频行退回只显示"GPU"，绝不编造型号。
+    Private ReadOnly 获取解码设备名称 As Func(Of String)
     Private ReadOnly 提交图层 As Action(Of Size, IReadOnlyList(Of 定时文字命令), ULong, Single)
     Private ReadOnly 刷新定时器 As LakeUI.PrecisionTimer
     Private 普通字体 As New Font(默认信息字体, 信息字号, FontStyle.Regular, GraphicsUnit.Point)
@@ -139,7 +142,8 @@ Friend NotInheritable Class 播放器信息图层呈现器
                    Optional AI字幕状态提供器 As Func(Of String) = Nothing,
                    Optional 直通文本提供器 As Func(Of String) = Nothing,
                    Optional 蓝牙补偿提供器 As Func(Of String) = Nothing,
-                   Optional 渲染引擎提供器 As Func(Of 播放器渲染引擎?) = Nothing)
+                   Optional 渲染引擎提供器 As Func(Of 播放器渲染引擎?) = Nothing,
+                   Optional 解码设备名提供器 As Func(Of String) = Nothing)
         ArgumentNullException.ThrowIfNull(画面)
         ArgumentNullException.ThrowIfNull(快照提供器)
         ArgumentNullException.ThrowIfNull(媒体信息提供器)
@@ -159,6 +163,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
         获取AI字幕状态 = AI字幕状态提供器
         获取蓝牙补偿 = 蓝牙补偿提供器
         获取渲染引擎 = 渲染引擎提供器
+        获取解码设备名称 = 解码设备名提供器
         提交图层 = 图层提交器
         文本测量格式 = DirectCast(StringFormat.GenericTypographic.Clone(), StringFormat)
         文本测量格式.FormatFlags = 文本测量格式.FormatFlags Or
@@ -321,8 +326,14 @@ Friend NotInheritable Class 播放器信息图层呈现器
         添加配对行如果有值(结果, "文件异常：", 文件异常(快照), 告警色)
 
         If 视频 IsNot Nothing Then
-            Dim 解码器 = If(快照.解码器 = 解码模式.GPU, "GPU",
-                         If(快照.解码器 = 解码模式.CPU, "CPU", String.Empty))
+            ' 硬解时写出"具体在哪张卡上解码"：内核回报的是打开路径真正落到的适配器
+            ' （自动选卡、或主卡硬解失败后回退到另一张适配器，都可能与设置里挑的卡不同）。
+            ' 名称来自设置页同一份 GPU 枚举（Interop\GPU解码设备枚举.vb）；查不到名字时
+            ' 仍保留 "GPU" —— 不能因为认不出型号就把"正在硬解"这条事实丢掉。
+            Dim 解码设备名 = If(快照.解码器 = 解码模式.GPU, 安全获取(获取解码设备名称), String.Empty)
+            Dim 解码器 = If(快照.解码器 = 解码模式.GPU,
+                        If(String.IsNullOrWhiteSpace(解码设备名), "GPU", 解码设备名.Trim()),
+                        If(快照.解码器 = 解码模式.CPU, "CPU", String.Empty))
             Dim 编码 = If(String.IsNullOrWhiteSpace(视频.编码), String.Empty,
                         视频.编码.ToUpperInvariant())
             Dim 视频概要 = If(String.IsNullOrEmpty(编码), 解码器,

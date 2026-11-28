@@ -64,6 +64,7 @@ D3D12VideoRenderer::~D3D12VideoRenderer() {
     }
     (void)DrainQueue();
     for (auto& slot : uploads_) av_buffer_unref(&slot.decoded);
+    if (nvidiaSourceFenceHandle_ != nullptr) CloseHandle(nvidiaSourceFenceHandle_);
     if (event_ != nullptr) CloseHandle(event_);
 }
 
@@ -79,6 +80,22 @@ HRESULT D3D12VideoRenderer::Initialize(IDXGIAdapter* adapter) noexcept {
     queue_->SetName(L"3FP D3D12 graphics queue");
     event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (event_ == nullptr) return HRESULT_FROM_WIN32(GetLastError());
+    // The bridge is optional: a machine without NVIDIA extensions must still
+    // render through D3D12 normally. Keep the shared source fence whenever the
+    // device supports it, and let the bridge initialize lazily.
+    if (SUCCEEDED(hr = device_->CreateFence(0, D3D12_FENCE_FLAG_SHARED,
+            IID_PPV_ARGS(&nvidiaSourceFence_)))) {
+        hr = device_->CreateSharedHandle(nvidiaSourceFence_.Get(), nullptr, GENERIC_ALL,
+            nullptr, &nvidiaSourceFenceHandle_);
+    }
+    if (FAILED(hr)) {
+        nvidiaSourceFence_.Reset();
+        if (nvidiaSourceFenceHandle_ != nullptr) {
+            CloseHandle(nvidiaSourceFenceHandle_);
+            nvidiaSourceFenceHandle_ = nullptr;
+        }
+        hr = S_OK;
+    }
     const auto allocator = [this](Slot& slot) noexcept {
         return device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator));
     };
@@ -116,6 +133,17 @@ HRESULT D3D12VideoRenderer::Initialize(IDXGIAdapter* adapter) noexcept {
 
 HRESULT D3D12VideoRenderer::DeviceStatus() const noexcept {
     return device_ ? device_->GetDeviceRemovedReason() : S_OK;
+}
+
+void D3D12VideoRenderer::SetNvidiaRequests(
+    const NvidiaD3D12VideoBridge::Request& request) noexcept {
+    nvidiaRequest_ = request;
+}
+
+void D3D12VideoRenderer::ResetNvidiaFailures() noexcept {
+    if (nvidiaBridge_) nvidiaBridge_->ResetFailures();
+    nvidiaStatus_.lastHr = S_OK;
+    nvidiaStatus_.lastStage = "";
 }
 
 HRESULT D3D12VideoRenderer::Wait(const UINT64 value) noexcept {
@@ -210,9 +238,10 @@ bool D3D12VideoRenderer::CanAllocateLocal(const UINT64 bytes) const noexcept {
 }
 
 HRESULT D3D12VideoRenderer::EnsureTexture(Texture& texture, const D3D12_RESOURCE_DESC& desc,
-    const D3D12_RESOURCE_STATES initial) noexcept {
+    const D3D12_RESOURCE_STATES initial, const bool shared) noexcept {
     const auto& current = texture.desc;
-    if (texture.resource && desc.Width == current.Width && desc.Height == current.Height &&
+    if (texture.resource && texture.sharedHeap == shared && desc.Width == current.Width &&
+        desc.Height == current.Height &&
         desc.DepthOrArraySize == current.DepthOrArraySize && desc.Format == current.Format &&
         desc.Flags == current.Flags) return S_OK;
     if (texture.resource) {
@@ -223,18 +252,28 @@ HRESULT D3D12VideoRenderer::EnsureTexture(Texture& texture, const D3D12_RESOURCE
     const auto bytes = device_->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
     if (!CanAllocateLocal(bytes)) return E_OUTOFMEMORY;
     const auto heap = Heap(D3D12_HEAP_TYPE_DEFAULT);
-    const auto hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+    const auto heapFlags = shared ? D3D12_HEAP_FLAG_SHARED : D3D12_HEAP_FLAG_NONE;
+    const auto hr = device_->CreateCommittedResource(&heap, heapFlags, &desc,
         initial, nullptr, IID_PPV_ARGS(&texture.resource));
-    if (SUCCEEDED(hr)) {
-        texture.desc = desc;
-        texture.bytes = bytes;
-        stats_.localBytes += bytes;
-        texture.resource->SetName(L"3FP D3D12 owned texture");
+    if (FAILED(hr)) return hr;
+    if (shared) {
+        auto shareHr = device_->CreateSharedHandle(texture.resource.Get(), nullptr, GENERIC_ALL,
+            nullptr, &texture.sharedHandle);
+        if (FAILED(shareHr)) {
+            texture.resource.Reset();
+            return shareHr;
+        }
     }
-    return hr;
+    texture.desc = desc;
+    texture.bytes = bytes;
+    texture.sharedHeap = shared;
+    stats_.localBytes += bytes;
+    texture.resource->SetName(L"3FP D3D12 owned texture");
+    return S_OK;
 }
 
 void D3D12VideoRenderer::Release(Texture& texture) noexcept {
+    if (texture.sharedHandle != nullptr) CloseHandle(texture.sharedHandle);
     stats_.localBytes -= texture.bytes;
     texture = {};
 }
@@ -424,8 +463,10 @@ HRESULT D3D12VideoRenderer::Upload(std::span<const UploadPlane, ResourceCount> p
         copyWidth = (static_cast<UINT>(decoded->width) + 1u) & ~1u;
         copyHeight = (static_cast<UINT>(decoded->height) + 1u) & ~1u;
         if (copyWidth > source.Width || copyHeight > source.Height) return E_INVALIDARG;
-        hr = EnsureTexture(decodedTexture_, TextureDesc(copyWidth, copyHeight, source.Format),
-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        hr = EnsureTexture(decodedTexture_, TextureDesc(copyWidth, copyHeight, source.Format,
+                D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS),
+            D3D12_RESOURCE_STATE_COMMON, true);
         if (FAILED(hr)) return hr;
         // The video decoder can still reference this picture while the copy queue
         // reads it. Its allocation enables simultaneous access. Do not change
@@ -481,7 +522,7 @@ HRESULT D3D12VideoRenderer::Upload(std::span<const UploadPlane, ResourceCount> p
     if (surface) {
         const auto src = surface->texture->GetDesc();
         auto* dest = decodedTexture_.resource.Get();
-        Transition(dest, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        Transition(dest, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
         for (UINT plane = 0; plane < 2; ++plane) {
             D3D12_TEXTURE_COPY_LOCATION from{};
             from.pResource = surface->texture;
@@ -494,7 +535,7 @@ HRESULT D3D12VideoRenderer::Upload(std::span<const UploadPlane, ResourceCount> p
             const D3D12_BOX crop{0, 0, 0, copyWidth >> plane, copyHeight >> plane, 1};
             commands_->CopyTextureRegion(&to, 0, 0, 0, &from, &crop);
         }
-        Transition(dest, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        Transition(dest, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         bytes = static_cast<UINT64>(copyWidth) * copyHeight * (src.Format == DXGI_FORMAT_NV12 ? 3u : 6u) / 2;
         if (surface->sync_ctx.fence->GetCompletedValue() < surface->sync_ctx.fence_value)
             hr = queue_->Wait(surface->sync_ctx.fence, surface->sync_ctx.fence_value);
@@ -507,6 +548,10 @@ HRESULT D3D12VideoRenderer::Upload(std::span<const UploadPlane, ResourceCount> p
     slot.decoded = lease;
     hr = Execute(slot);
     if (FAILED(hr)) return hr;
+    if (surface && nvidiaSourceFence_ != nullptr) {
+        hr = queue_->Signal(nvidiaSourceFence_.Get(), ++nvidiaSourceFenceValue_);
+        if (FAILED(hr)) return hr;
+    }
     if (replacePicture) {
         decodedActive_ = decoded != nullptr;
         ++pictureGeneration_;
@@ -865,27 +910,111 @@ void D3D12VideoRenderer::RecordBackdrop(const UINT index, UINT& viewOffset, UINT
     commands_->DrawInstanced(3, 1, 0, 0);
 }
 
+HRESULT D3D12VideoRenderer::TryNvidiaBridge(const Picture* picture,
+    std::array<View, VideoPlaneCount>& source, Picture& bridgePicture, bool& active) noexcept {
+    active = false;
+    nvidiaDrawActive_ = false;
+    nvidiaOutput_ = nullptr;
+    if (picture == nullptr || !decodedActive_ || !decodedTexture_.resource ||
+        (!nvidiaRequest_.vsrRequested && !nvidiaRequest_.hdrRequested)) return S_FALSE;
+    // The D3D12 bridge consumes the same unrotated NV12/P010 planes as the
+    // shader path. Projection and cover-art modes deliberately bypass the
+    // video processor in the D3D11 renderer too.
+    if (picture->planeCount != 2 || picture->coverBackdrop || !picture->allowScale) return S_FALSE;
+    if (!nvidiaBridge_ && !nvidiaBridgeInitAttempted_) {
+        nvidiaBridgeInitAttempted_ = true;
+        auto bridge = std::make_unique<NvidiaD3D12VideoBridge>();
+        if (nvidiaSourceFenceHandle_ != nullptr && budgetAdapter_ != nullptr)
+            (void)bridge->Initialize(device_.Get(), budgetAdapter_.Get(), nvidiaSourceFenceHandle_);
+        nvidiaStatus_ = bridge->GetStatus();
+        nvidiaBridge_ = std::move(bridge);
+    }
+    if (!nvidiaBridge_ || !nvidiaStatus_.initialized) return S_FALSE;
+
+    auto request = nvidiaRequest_;
+    request.sourceWidth = request.sourceWidth != 0 ? request.sourceWidth :
+        static_cast<UINT>(decodedTexture_.desc.Width);
+    request.sourceHeight = request.sourceHeight != 0 ? request.sourceHeight : decodedTexture_.desc.Height;
+    request.targetWidth = request.targetWidth != 0 ? request.targetWidth :
+        static_cast<UINT>(std::max(picture->viewport.Width, 1.0f));
+    request.targetHeight = request.targetHeight != 0 ? request.targetHeight :
+        static_cast<UINT>(std::max(picture->viewport.Height, 1.0f));
+    request.rotation = static_cast<UINT>(picture->video.viewRotation);
+
+    ++nvidiaReadyValue_;
+    ID3D12Resource* output = nullptr;
+    UINT outputSlot = UINT_MAX;
+    const auto hr = nvidiaBridge_->Process(decodedTexture_.resource.Get(),
+        decodedTexture_.sharedHandle, nvidiaSourceFenceValue_, request, nvidiaReadyValue_,
+        &output, outputSlot);
+    nvidiaStatus_ = nvidiaBridge_->GetStatus();
+    if (FAILED(hr) || output == nullptr) return S_OK;
+
+    auto wait = queue_->Wait(nvidiaBridge_->ReadyFence(), nvidiaReadyValue_);
+    if (FAILED(wait)) return wait;
+
+    bridgePicture = *picture;
+    const auto& status = nvidiaBridge_->GetStatus();
+    if (status.hdrActive) {
+        // Same re-tag as ApplyTrueHdr: the extension wrote PQ-coded BT.2020
+        // samples into an R10G10B10A2 surface.
+        bridgePicture.video.inputLayout = 0;
+        bridgePicture.video.sampleScale = 1.0f;
+        bridgePicture.video.transfer = 1;
+        bridgePicture.video.gamut = 1;
+        bridgePicture.video.hdrPeak = 1000.0f;
+        bridgePicture.planeCount = 1;
+        source[0] = {output, DXGI_FORMAT_R10G10B10A2_UNORM, 0};
+        source[1] = {};
+        source[2] = {};
+    } else {
+        const auto eightBit = decodedTexture_.desc.Format == DXGI_FORMAT_NV12;
+        bridgePicture.planeCount = 2;
+        source[0] = {output, eightBit ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R16_UNORM, 0};
+        source[1] = {output, eightBit ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R16G16_UNORM, 1};
+        source[2] = {};
+    }
+    active = true;
+    nvidiaDrawActive_ = true;
+    nvidiaOutput_ = output;
+    nvidiaOutputSlot_ = outputSlot;
+    return S_OK;
+}
+
 HRESULT D3D12VideoRenderer::RecordDraw(const UINT index, ID3D12Resource* target,
     const Picture* picture, std::span<const Overlay> overlays, const D3D12_RESOURCE_STATES initial,
     const D3D12_RESOURCE_STATES final) noexcept {
+    nvidiaDrawActive_ = false;
+    nvidiaOutput_ = nullptr;
+    nvidiaOutputSlot_ = UINT_MAX;
     const auto desc = target->GetDesc();
     const auto formatIndex = OutputIndex(desc.Format);
     auto hr = PreparePipelines(desc.Format);
     if (FAILED(hr)) return hr;
     auto& slot = draws_[index];
     std::array<View, VideoPlaneCount> source{};
+    bool decodedNeedsTransition = false;
     constexpr DXGI_FORMAT nullFormats[ResourceCount] = {DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM,
         DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT,
         DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_UINT};
     bool scale = false;
     bool backdrop = picture && picture->coverBackdrop;
+    Picture bridgePicture{};
+    bool nvidiaActive = false;
     if (picture) {
         if (picture->planeCount == 0 || picture->planeCount > VideoPlaneCount) return E_INVALIDARG;
         if (decodedActive_) {
-            if (picture->planeCount != 2 || !decodedTexture_.resource) return E_INVALIDARG;
-            const auto eightBit = decodedTexture_.desc.Format == DXGI_FORMAT_NV12;
-            source[0] = {decodedTexture_.resource.Get(), eightBit ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R16_UNORM, 0};
-            source[1] = {decodedTexture_.resource.Get(), eightBit ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R16G16_UNORM, 1};
+            const auto bridgeResult = TryNvidiaBridge(picture, source, bridgePicture, nvidiaActive);
+            if (FAILED(bridgeResult)) return bridgeResult;
+            if (nvidiaActive) {
+                picture = &bridgePicture;
+            } else {
+                if (picture->planeCount != 2 || !decodedTexture_.resource) return E_INVALIDARG;
+                const auto eightBit = decodedTexture_.desc.Format == DXGI_FORMAT_NV12;
+                source[0] = {decodedTexture_.resource.Get(), eightBit ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R16_UNORM, 0};
+                source[1] = {decodedTexture_.resource.Get(), eightBit ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R16G16_UNORM, 1};
+                decodedNeedsTransition = true;
+            }
         } else {
             for (UINT i = 0; i < picture->planeCount; ++i) {
                 if (!textures_[i].resource) return E_INVALIDARG;
@@ -916,6 +1045,12 @@ HRESULT D3D12VideoRenderer::RecordDraw(const UINT index, ID3D12Resource* target,
     }
     hr = Begin(slot);
     if (FAILED(hr)) return hr;
+    if (decodedNeedsTransition)
+        Transition(decodedTexture_.resource.Get(), D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    if (nvidiaActive)
+        Transition(nvidiaOutput_, D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     const auto timing = timestamps_ && index < BufferCount;
     if (timing) commands_->EndQuery(timestamps_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index * 2);
     UINT viewOffset = 0, rtvOffset = 0;
@@ -986,6 +1121,17 @@ HRESULT D3D12VideoRenderer::RecordDraw(const UINT index, ID3D12Resource* target,
         }
     }
     Transition(target, D3D12_RESOURCE_STATE_RENDER_TARGET, final);
+    if (nvidiaActive)
+        Transition(nvidiaOutput_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_COMMON);
+    else if (decodedNeedsTransition)
+        // Upload() always begins from COMMON. The shader path borrowed the
+        // decoded texture as an SRV for this draw, so hand it back in the
+        // state the next frame's upload expects instead of leaving it
+        // PIXEL_SHADER_RESOURCE (which made the next COPY_DEST transition
+        // invalid and failed playback after the first frame).
+        Transition(decodedTexture_.resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_COMMON);
     if (timing) {
         commands_->EndQuery(timestamps_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index * 2 + 1);
         commands_->ResolveQueryData(timestamps_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
@@ -1004,12 +1150,15 @@ HRESULT D3D12VideoRenderer::Submit(IDXGISwapChain4* chain, const Picture* pictur
     if (FAILED(hr)) return hr;
     hr = Execute(draws_[index]);
     if (SUCCEEDED(hr)) {
-        if (picture) ++stats_.draws;
+        if (nvidiaDrawActive_ && nvidiaBridge_)
+            hr = nvidiaBridge_->SignalConsumed(queue_.Get(), nvidiaOutputSlot_);
+        if (SUCCEEDED(hr) && picture) ++stats_.draws;
         for (const auto& overlay : overlays) {
             if (overlay.index >= OverlayCount || !overlays_[overlay.index].resource) continue;
             overlayFences_[overlay.index] = value_;
             ++stats_.overlayDraws;
         }
+        nvidiaDrawActive_ = false;
     }
     return hr;
 }
@@ -1183,7 +1332,11 @@ HRESULT D3D12VideoRenderer::ReadPicture(const UINT width, const UINT height, con
     hr = ReadTexture(readTarget_.resource.Get(), region, fp);
     if (FAILED(hr)) { (void)commands_->Close(); return hr; }
     auto& slot = draws_[ReadSlot];
-    if (FAILED(hr = Execute(slot)) || FAILED(hr = Wait(slot.fence))) return hr;
+    if (FAILED(hr = Execute(slot))) return hr;
+    if (nvidiaDrawActive_ && nvidiaBridge_)
+        if (FAILED(hr = nvidiaBridge_->SignalConsumed(queue_.Get(), nvidiaOutputSlot_))) return hr;
+    nvidiaDrawActive_ = false;
+    if (FAILED(hr = Wait(slot.fence))) return hr;
     D3D12_RANGE range{0, static_cast<SIZE_T>(fp.Footprint.RowPitch) * fp.Footprint.Height};
     void* mapped = nullptr;
     hr = readback_.resource->Map(0, &range, &mapped);

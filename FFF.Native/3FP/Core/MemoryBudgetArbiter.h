@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -56,10 +57,13 @@ class MemoryBudgetArbiter final {
 public:
     static MemoryBudgetArbiter& Instance() noexcept;
 
-    // Once per session, at DoOpen; DetachSession at DoClose. AttachSession samples
-    // the context immediately (S1) so the first Claim already has a budget.
-    void AttachSession(const SessionBudgetContext& context) noexcept;
-    void DetachSession() noexcept;
+    // Attach a session to the process-wide ledger. Every supported concurrent
+    // session gets a non-zero token; the process budget is split equally between
+    // live sessions, so a 4K route cannot keep the pair-only budget while eight
+    // other sessions are open. Consumers call Claim/Granted from their own session
+    // worker; the token is thread-affine and does not leak into another session.
+    std::uint64_t AttachSession(const SessionBudgetContext& context) noexcept;
+    void DetachSession(std::uint64_t token) noexcept;
 
     // Register (overwrite) this consumer's claim and return the granted byte count.
     // Claim is idempotent-replacing, never additive: re-claiming after a resolution
@@ -80,6 +84,10 @@ public:
 
     std::uint64_t Granted(MemConsumer who) const noexcept;
     std::uint64_t TotalBudget() const noexcept;
+    // Number of live ledgers. The single-route profile uses this to tell a lone
+    // session apart from a nine-route batch; it is a race-free snapshot under the
+    // same mutex that owns attach/detach.
+    std::uint32_t LiveSessions() const noexcept;
     std::uint64_t TotalGranted() const noexcept;
     // Σgranted + Σborrowed: the run-time invariant is on THIS sum, not on
     // Σgranted alone -- a borrow taken earlier may outlive a recompute.
@@ -114,39 +122,44 @@ private:
     MemoryBudgetArbiter(const MemoryBudgetArbiter&) = delete;
     MemoryBudgetArbiter& operator=(const MemoryBudgetArbiter&) = delete;
 
-    // Caller must hold mutex_. Resamples memory, distributes the budget and
-    // returns the changed-consumer bitmask.
-    std::uint32_t RecomputeLocked() noexcept;
-    std::uint64_t DistributeLocked() noexcept;
-    std::uint64_t BorrowedLocked() const noexcept;
-    std::uint64_t DeadZoneFor(std::uint32_t index) const noexcept;
+    // One ledger per live session. The arrays are deliberately fixed: the route
+    // arbiter already caps the session count, and a heap allocation on the
+    // attach/detach path would be one more failure mode under memory pressure.
+    struct SessionState final {
+        std::uint64_t token = 0;
+        SessionBudgetContext context{};
+        MemClaim claims_[static_cast<std::uint32_t>(MemConsumer::Count)]{};
+        std::uint64_t granted_[static_cast<std::uint32_t>(MemConsumer::Count)]{};
+        std::uint64_t borrowed_[static_cast<std::uint32_t>(MemConsumer::Count)]{};
+        std::uint64_t previousGranted_[static_cast<std::uint32_t>(MemConsumer::Count)]{};
+        std::uint64_t totalBudget = 0;
+        std::uint32_t budgetSamples = 0;
+        std::uint32_t limitChanges = 0;
+        std::uint32_t borrowOverruns = 0;
+        std::uint32_t violations = 0;
+        std::uint32_t flapCount = 0;
+        std::uint64_t lastRaiseTickMs = 0;
+        bool pendingRaise = false;
+        bool overcommitted = false;
+        std::uint32_t suppressCount = 0;
+    };
+
+    // Caller must hold mutex_. Recompute every session's equal share of the
+    // process budget and return the OR of changed-consumer masks.
+    std::uint32_t RecomputeAllLocked() noexcept;
+    std::uint32_t DistributeLocked(SessionState& session) noexcept;
+    std::uint64_t BorrowedLocked(const SessionState& session) const noexcept;
+    std::uint64_t DeadZoneFor(const SessionState& session, std::uint32_t index) const noexcept;
+    SessionState* FindLocked(std::uint64_t token) noexcept;
+    const SessionState* FindLocked(std::uint64_t token) const noexcept;
+    SessionState* CurrentLocked() noexcept;
+    const SessionState* CurrentLocked() const noexcept;
 
     mutable std::mutex mutex_;
-    SessionBudgetContext context_{};
-    MemClaim claims_[static_cast<std::uint32_t>(MemConsumer::Count)]{};
-    std::uint64_t granted_[static_cast<std::uint32_t>(MemConsumer::Count)]{};
-    std::uint64_t borrowed_[static_cast<std::uint32_t>(MemConsumer::Count)]{};
-    std::uint64_t previousGranted_[static_cast<std::uint32_t>(MemConsumer::Count)]{};
+    std::array<SessionState, 9> sessions_{};
+    std::uint32_t sessionCount_ = 0;
     std::uint64_t totalBudget_ = 0;
-    bool attached_ = false;
-    bool overcommitted_ = false;
-    std::uint32_t violations_ = 0;
-    // How many times the budget was resampled/redistributed (≈ the 250 ms
-    // sample tick), and how many of those actually moved a consumer's grant
-    // past its dead zone. Kept apart so the summary line cannot look busy just
-    // because the pump ticks.
-    std::uint32_t budgetSamples_ = 0;
-    std::uint32_t limitChanges_ = 0;
-    // Σgranted + Σborrowed briefly exceeded the new budget after a recompute.
-    std::uint32_t borrowOverruns_ = 0;
-    // Flap accounting: a total-budget up-step arms the wall clock; a down-step
-    // inside the flap window counts one oscillation ("flap ring"). Read on the
-    // existing recompute path only -- no thread, no timer.
-    std::uint32_t flapCount_ = 0;
-    std::uint64_t lastRaiseTickMs_ = 0;
-    bool pendingRaise_ = false;
-    // Written by the playback thread via NoteReplanSuppressed(), read at detach.
-    // Atomic so it needs no arbiter mutex on the hot path.
+    std::atomic<std::uint64_t> nextToken_{0};
     std::atomic<std::uint32_t> suppressCount_{0};
 };
 

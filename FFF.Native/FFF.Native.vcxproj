@@ -88,7 +88,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(LibRawRoot)\lib\x64;$(LibassRoot)\debug\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\third_party\ffmpeg\lib\x64;$(LibRawRoot)\lib\x64;$(LibassRoot)\debug\lib;$(LibassRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>ass.lib;avcodec-63.lib;avformat-63.lib;avutil-61.lib;swresample-7.lib;swscale-10.lib;avfilter-12.lib;delayimp.lib;libraw.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;d2d1.lib;dwrite.lib;ole32.lib;runtimeobject.lib;propsys.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>ass-9.dll;avcodec-63.dll;avformat-63.dll;avutil-61.dll;swresample-7.dll;swscale-10.dll;avfilter-12.dll;libraw.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
@@ -134,6 +134,31 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="3FP\Api\FFF.Player.Api.h" />
+    <ClInclude Include="3FP\IO\BudgetController.h" />
+    <ClInclude Include="3FP\IO\ByteWindow.h" />
+    <ClInclude Include="3FP\IO\Deadline.h" />
+    <ClInclude Include="3FP\IO\FileMediaSource.h" />
+    <ClInclude Include="3FP\IO\HttpMediaSource.h" />
+    <ClInclude Include="3FP\IO\IMediaSource.h" />
+    <ClInclude Include="3FP\IO\IoBudgetMath.h" />
+    <ClInclude Include="3FP\IO\IoOptions.h" />
+    <ClInclude Include="3FP\IO\IoStatus.h" />
+    <ClInclude Include="3FP\IO\InputPacketPump.h" />
+    <ClInclude Include="3FP\IO\PacketCache.h" />
+    <ClInclude Include="3FP\IO\ProgressWatchdog.h" />
+    <ClInclude Include="3FP\IO\ReadLedger.h" />
+    <ClInclude Include="3FP\IO\RouteBudgetArbiter.h" />
+    <ClInclude Include="3FP\IO\SessionBudgetLease.h" />
+    <ClInclude Include="3FP\IO\SourceCapabilities.h" />
+    <ClInclude Include="3FP\IO\StepGate.h" />
+    <ClInclude Include="3FP\Stream\DashManifest.h" />
+    <ClInclude Include="3FP\Stream\DashAvailability.h" />
+    <ClInclude Include="3FP\Stream\DashSegmentPlan.h" />
+    <ClInclude Include="3FP\Stream\DashSegmentSource.h" />
+    <ClInclude Include="3FP\Stream\HlsLiveWindow.h" />
+    <ClInclude Include="3FP\Stream\HlsPlaylist.h" />
+    <ClInclude Include="3FP\Stream\HlsSegmentLoader.h" />
+    <ClInclude Include="3FP\Stream\SegmentCache.h" />
     <ClInclude Include="3FP\Api\FFF.Player.AudioPassthrough.h" />
     <ClInclude Include="3FP\Api\FFF.Player.AudioTap.h" />
     <ClInclude Include="3FP\Api\FFF.Player.Prefetch.h" />
@@ -172,6 +197,7 @@
     <ClInclude Include="3FP\Render\VideoShaderSettings.h" />
     <ClInclude Include="3FP\Render\TimedTextStrokeStyle.h" />
     <ClInclude Include="3FP\Render\D3D12\D3D12VideoRenderer.h" />
+    <ClInclude Include="3FP\Render\D3D12\NvidiaD3D12VideoBridge.h" />
     <ClInclude Include="3FP\Render\D3D12\BackdropBlurBytecode.h" />
     <None Include="3FP\Render\D3D12\BackdropBlur.hlsl" />
     <ClInclude Include="3FR\Api\FFF.Native.Api.h" />
@@ -182,6 +208,7 @@
     <ClInclude Include="3FR\Core\Session.h" />
     <ClInclude Include="3FR\Ffmpeg\VideoMuxer.h" />
     <ClInclude Include="Shared\Ffmpeg\SharedFileInput.h" />
+    <ClInclude Include="Shared\Ffmpeg\HttpMediaReader.h" />
     <ClInclude Include="Shared\Ffmpeg\IocpMediaReader.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="pch.h" />
@@ -189,6 +216,17 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="3FP\Api\PlayerApi.cpp" />
+    <ClCompile Include="3FP\IO\FileMediaSource.cpp" />
+    <ClCompile Include="3FP\IO\HttpMediaSource.cpp" />
+    <ClCompile Include="3FP\IO\IoV2.cpp" />
+    <ClCompile Include="3FP\IO\InputPacketPump.cpp" />
+    <ClCompile Include="3FP\IO\PacketCache.cpp" />
+    <ClCompile Include="3FP\Stream\HlsPlaylist.cpp" />
+    <ClCompile Include="3FP\Stream\HlsLiveWindow.cpp" />
+    <ClCompile Include="3FP\Stream\DashManifest.cpp" />
+    <ClCompile Include="3FP\Stream\DashAvailability.cpp" />
+    <ClCompile Include="3FP\Stream\DashSegmentSource.cpp" />
+    <ClCompile Include="3FP\Stream\HlsSegmentLoader.cpp" />
     <ClCompile Include="3FP\Prefetch\PrefetchService.cpp" />
     <ClCompile Include="3FP\Prefetch\MemoryGuard.cpp" />
     <ClCompile Include="3FP\Disc\DiscInput.cpp" />
@@ -218,6 +256,7 @@
     <ClCompile Include="3FP\Hdr\HdrToneCurve.cpp" />
     <ClCompile Include="3FP\Render\VideoRenderer.cpp" />
     <ClCompile Include="3FP\Render\D3D12\D3D12VideoRenderer.cpp" />
+    <ClCompile Include="3FP\Render\D3D12\NvidiaD3D12VideoBridge.cpp" />
     <ClCompile Include="3FP\Render\SmtcController.cpp" />
     <ClCompile Include="3FP\Render\NvidiaVideoExtensions.cpp" />
     <ClCompile Include="3FP\Render\CudaD3D11Interop.cpp" />
@@ -233,6 +272,7 @@
     <ClCompile Include="3FR\Ffmpeg\VideoMuxer.cpp" />
     <ClCompile Include="Shared\Ffmpeg\FfmpegRuntime.cpp" />
     <ClCompile Include="Shared\Ffmpeg\SharedFileInput.cpp" />
+    <ClCompile Include="Shared\Ffmpeg\HttpMediaReader.cpp" />
     <ClCompile Include="Shared\Ffmpeg\IocpMediaReader.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>

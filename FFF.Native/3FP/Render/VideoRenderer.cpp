@@ -3168,6 +3168,15 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
         try { std::lock_guard fallbackLock(fallbackMutex_);
             fallbackReason_ = "True HDR output is only available for HDR or wide-gamut sources.";
         } catch (...) {}
+    } else if (requestedMode_ == FFF3FPColorMode::MapToHdr && !OutputSupportsHdr()) {
+        // The request is valid in principle, but this window's current output
+        // cannot carry an HDR swap chain. Demote at the same point the SDR-only
+        // source policy does, instead of letting ActualColorMode() claim HDR
+        // until the first Present fails.
+        actualMode_ = FFF3FPColorMode::MapToSdr;
+        try { std::lock_guard fallbackLock(fallbackMutex_);
+            fallbackReason_ = "The target display or Windows Advanced Color mode does not support true HDR output.";
+        } catch (...) {}
     }
     // hdrPeakNits_ is an output-display override, never the source mastering
     // peak. SDR callers pass zero; source peak metadata is configured per frame.
@@ -3219,6 +3228,11 @@ FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
     return FFFResult::Success;
 }
 
+FFFResult PlayerVideoRenderer::PrewarmDevice() noexcept {
+    std::lock_guard deviceLock(deviceMutex_);
+    return EnsureDevice();
+}
+
 FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
     if (d3d12_ || device_) return FFFResult::Success;
     if (!renderAdapter_) {
@@ -3267,8 +3281,91 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
     return EnsureD3D11Device();
 }
 
+// A D3D11 device owns one immediate context, so two renderers must not use the
+// same device at the same time: their bindings would interleave.  Keep one idle
+// device instead and hand it to the next renderer only after the previous owner
+// has released every resource.  This removes the driver's 200-330 ms device
+// creation from a second PlayerSession (the common "new session per file" host
+// flow) without serializing nine concurrent routes.
+struct IdleD3D11Device {
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+    LUID luid{};
+};
+
+std::mutex IdleD3D11Mutex;
+std::vector<IdleD3D11Device> IdleD3D11Devices;
+constexpr std::size_t MaxIdleD3D11Devices = 1;
+
+bool DeviceAdapterLuid(ID3D11Device* device, LUID* out) noexcept {
+    if (device == nullptr || out == nullptr) return false;
+    ComPtr<IDXGIDevice> dxgi;
+    ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC desc{};
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgi))) || !dxgi) return false;
+    if (FAILED(dxgi->GetAdapter(&adapter)) || !adapter) return false;
+    if (FAILED(adapter->GetDesc(&desc))) return false;
+    *out = desc.AdapterLuid;
+    return true;
+}
+
+bool AcquireIdleD3D11Device(const LUID& luid,
+    ID3D11Device** device, ID3D11DeviceContext** context) noexcept {
+    if (device == nullptr || context == nullptr) return false;
+    *device = nullptr;
+    *context = nullptr;
+    std::lock_guard lock(IdleD3D11Mutex);
+    for (auto it = IdleD3D11Devices.begin(); it != IdleD3D11Devices.end();) {
+        if (it->luid.HighPart != luid.HighPart || it->luid.LowPart != luid.LowPart ||
+            it->device == nullptr || it->context == nullptr ||
+            FAILED(it->device->GetDeviceRemovedReason())) {
+            ReleaseCom(it->device);
+            ReleaseCom(it->context);
+            it = IdleD3D11Devices.erase(it);
+            continue;
+        }
+        *device = it->device;
+        *context = it->context;
+        (*device)->AddRef();
+        (*context)->AddRef();
+        ReleaseCom(it->device);
+        ReleaseCom(it->context);
+        IdleD3D11Devices.erase(it);
+        return true;
+    }
+    return false;
+}
+
+// Called after the renderer has released its swap chain, views and textures.
+// The caller still owns its reference; only the pool's reference is added here.
+void ReturnD3D11DeviceToPool(ID3D11Device* device, ID3D11DeviceContext* context) noexcept {
+    if (device == nullptr || context == nullptr ||
+        FAILED(device->GetDeviceRemovedReason())) return;
+    LUID luid{};
+    if (!DeviceAdapterLuid(device, &luid)) return;
+    std::lock_guard lock(IdleD3D11Mutex);
+    if (IdleD3D11Devices.size() >= MaxIdleD3D11Devices) return;
+    IdleD3D11Device entry{};
+    entry.device = device;
+    entry.context = context;
+    entry.luid = luid;
+    device->AddRef();
+    context->AddRef();
+    IdleD3D11Devices.push_back(entry);
+}
+
 FFFResult PlayerVideoRenderer::EnsureD3D11Device() noexcept {
     if (device_) return FFFResult::Success;
+    DXGI_ADAPTER_DESC1 adapterDesc{};
+    const bool hasAdapterLuid = renderAdapter_ != nullptr &&
+        SUCCEEDED(renderAdapter_->GetDesc1(&adapterDesc));
+    if (hasAdapterLuid &&
+        AcquireIdleD3D11Device(adapterDesc.AdapterLuid, &device_, &context_)) {
+        ComPtr<ID3D11Multithread> multithread;
+        if (SUCCEEDED(context_->QueryInterface(IID_PPV_ARGS(&multithread))))
+            multithread->SetMultithreadProtected(TRUE);
+        return FFFResult::Success;
+    }
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
     const auto hr = D3D11CreateDevice(renderAdapter_, renderAdapter_ ? D3D_DRIVER_TYPE_UNKNOWN :
         D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, ARRAYSIZE(levels),
@@ -3981,12 +4078,30 @@ void PlayerVideoRenderer::BuildD3D12Picture(FFF3FPD3D12Picture& picture,
     const std::uint32_t width, const std::uint32_t height) noexcept {
     if (hdrInputsDirty_.exchange(false)) RefreshHdrShaderInputs();
     const auto destination = LayoutPicture(width, height);
+    const bool vsrRequested = requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
+        FFF3FPVideoSuperResolution::Off;
+    const bool hdrRequested = EffectiveVideoAutoHdrRequest() != FFF3FPVideoAutoHdr::Off;
     videoSuperResolutionActive_.store(false, std::memory_order_release);
     videoTrueHdrActive_.store(false, std::memory_order_release);
-    videoSuperResolutionReason_.store(requestedVideoSuperResolution_.load() == FFF3FPVideoSuperResolution::Off
-        ? FFF3FPVideoSuperResolutionReason::NotRequested : FFF3FPVideoSuperResolutionReason::UnsupportedRenderBackend);
-    videoTrueHdrReason_.store(requestedVideoAutoHdr_.load() == FFF3FPVideoAutoHdr::Off
-        ? FFF3FPVideoAutoHdrReason::NotRequested : FFF3FPVideoAutoHdrReason::UnsupportedRenderBackend);
+    if (!vsrRequested)
+        videoSuperResolutionReason_.store(FFF3FPVideoSuperResolutionReason::NotRequested,
+            std::memory_order_release);
+    if (!hdrRequested)
+        videoTrueHdrReason_.store(FFF3FPVideoAutoHdrReason::NotRequested,
+            std::memory_order_release);
+    if (d3d12_) {
+        NvidiaD3D12VideoBridge::Request request;
+        request.vsrRequested = vsrRequested;
+        request.hdrRequested = hdrRequested;
+        request.hdrOutputAvailable = actualMode_ == FFF3FPColorMode::MapToHdr && swapHdr_;
+        request.sourceSdr = decodedTransfer_.load(std::memory_order_acquire) == 0;
+        request.sourceWidth = sourceWidth_;
+        request.sourceHeight = sourceHeight_;
+        request.targetWidth = static_cast<UINT>(std::max(destination.drawWidth, 1.0f));
+        request.targetHeight = static_cast<UINT>(std::max(destination.drawHeight, 1.0f));
+        request.rotation = viewRotation_.load(std::memory_order_acquire);
+        d3d12_->SetNvidiaRequests(request);
+    }
     SetDrawSettings(destination.drawWidth, destination.drawHeight, 0);
     picture.video = cachedVideoSettings_;
     picture.dynamic = cachedD3D12Dynamic_;
@@ -4033,6 +4148,87 @@ std::size_t PlayerVideoRenderer::CollectD3D12Overlays(FFF3FPD3D12Overlay* overla
     return count;
 }
 
+void PlayerVideoRenderer::PublishD3D12NvidiaStatus() noexcept {
+    if (!d3d12_) return;
+    const auto& bridge = d3d12_->NvidiaStatus();
+    const auto nvidia = nvidiaAdapter_.load(std::memory_order_acquire);
+    const auto vsrRequested = requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
+        FFF3FPVideoSuperResolution::Off;
+    const auto hdrRequested = EffectiveVideoAutoHdrRequest() != FFF3FPVideoAutoHdr::Off;
+    const auto stageContains = [&](const char* text) noexcept {
+        return bridge.lastStage != nullptr && std::strstr(bridge.lastStage, text) != nullptr;
+    };
+
+    if (!vsrRequested) {
+        videoSuperResolutionActive_.store(false, std::memory_order_release);
+        videoSuperResolutionRejected_.store(false, std::memory_order_release);
+        videoSuperResolutionReason_.store(FFF3FPVideoSuperResolutionReason::NotRequested,
+            std::memory_order_release);
+        videoSuperResolutionSourceWidth_.store(0, std::memory_order_release);
+        videoSuperResolutionSourceHeight_.store(0, std::memory_order_release);
+        videoSuperResolutionTargetWidth_.store(0, std::memory_order_release);
+        videoSuperResolutionTargetHeight_.store(0, std::memory_order_release);
+    } else {
+        videoSuperResolutionActive_.store(bridge.vsrActive, std::memory_order_release);
+        videoSuperResolutionRejected_.store(bridge.vsrRejected, std::memory_order_release);
+        videoSuperResolutionSourceWidth_.store(bridge.sourceWidth, std::memory_order_release);
+        videoSuperResolutionSourceHeight_.store(bridge.sourceHeight, std::memory_order_release);
+        videoSuperResolutionTargetWidth_.store(bridge.targetWidth, std::memory_order_release);
+        videoSuperResolutionTargetHeight_.store(bridge.targetHeight, std::memory_order_release);
+        auto reason = FFF3FPVideoSuperResolutionReason::DriverRejected;
+        if (bridge.vsrActive) reason = FFF3FPVideoSuperResolutionReason::None;
+        else if (bridge.vsrYieldedToHdr) reason = FFF3FPVideoSuperResolutionReason::YieldedToAutoHdr;
+        else if (bridge.vsrNotUpscaling) reason = FFF3FPVideoSuperResolutionReason::NotUpscaling;
+        else if (bridge.vsrResolutionOutOfRange)
+            reason = FFF3FPVideoSuperResolutionReason::SourceResolutionOutOfRange;
+        else if (!nvidia) reason = FFF3FPVideoSuperResolutionReason::NotNvidiaAdapter;
+        else if (!bridge.initialized) reason = FFF3FPVideoSuperResolutionReason::UnsupportedRenderBackend;
+        else if (stageContains("not NV12")) reason = FFF3FPVideoSuperResolutionReason::UnsupportedSourceFormat;
+        else if (stageContains("geometry")) {
+            const auto sourceW = bridge.sourceWidth;
+            const auto sourceH = bridge.sourceHeight;
+            const auto targetW = bridge.targetWidth;
+            const auto targetH = bridge.targetHeight;
+            reason = targetW <= sourceW && targetH <= sourceH ?
+                FFF3FPVideoSuperResolutionReason::NotUpscaling :
+                FFF3FPVideoSuperResolutionReason::SourceResolutionOutOfRange;
+        }
+        videoSuperResolutionReason_.store(reason, std::memory_order_release);
+    }
+
+    if (!hdrRequested) {
+        videoTrueHdrActive_.store(false, std::memory_order_release);
+        videoTrueHdrRejected_.store(false, std::memory_order_release);
+        videoTrueHdrReason_.store(FFF3FPVideoAutoHdrReason::NotRequested,
+            std::memory_order_release);
+        videoTrueHdrSourceWidth_.store(0, std::memory_order_release);
+        videoTrueHdrSourceHeight_.store(0, std::memory_order_release);
+        videoTrueHdrOutputWidth_.store(0, std::memory_order_release);
+        videoTrueHdrOutputHeight_.store(0, std::memory_order_release);
+    } else {
+        videoTrueHdrActive_.store(bridge.hdrActive, std::memory_order_release);
+        videoTrueHdrRejected_.store(bridge.hdrRejected, std::memory_order_release);
+        videoTrueHdrSourceWidth_.store(bridge.sourceWidth, std::memory_order_release);
+        videoTrueHdrSourceHeight_.store(bridge.sourceHeight, std::memory_order_release);
+        videoTrueHdrOutputWidth_.store(bridge.hdrActive ? bridge.outputWidth : 0,
+            std::memory_order_release);
+        videoTrueHdrOutputHeight_.store(bridge.hdrActive ? bridge.outputHeight : 0,
+            std::memory_order_release);
+        auto reason = FFF3FPVideoAutoHdrReason::DriverRejected;
+        if (bridge.hdrActive) reason = FFF3FPVideoAutoHdrReason::None;
+        else if (!nvidia) reason = FFF3FPVideoAutoHdrReason::NotNvidiaAdapter;
+        else if (!bridge.hdrOutputAvailable) reason = FFF3FPVideoAutoHdrReason::OutputPathNotHdr;
+        else if (!bridge.sourceSdr) reason = FFF3FPVideoAutoHdrReason::NotSdrSource;
+        else if (!bridge.initialized) reason = FFF3FPVideoAutoHdrReason::UnsupportedRenderBackend;
+        else if (stageContains("not NV12")) reason = FFF3FPVideoAutoHdrReason::UnsupportedSourceFormat;
+        else if (stageContains("TrueHDR)") || stageContains("TrueHDR")) {
+            // RebuildProcessor(TrueHDR) is the capability probe/set stage.
+            reason = FFF3FPVideoAutoHdrReason::NotSupportedByDriver;
+        }
+        videoTrueHdrReason_.store(reason, std::memory_order_release);
+    }
+}
+
 FFFResult PlayerVideoRenderer::SubmitD3D12Frame(const bool compositesTimedText,
     const bool drawVideo) noexcept {
     if (!d3d12_) return FFFResult::InvalidState;
@@ -4053,7 +4249,12 @@ FFFResult PlayerVideoRenderer::SubmitD3D12Frame(const bool compositesTimedText,
         scalePassCount_.fetch_add(scale.first - previous.first, std::memory_order_relaxed);
         scalePass100ns_.fetch_add(scale.second - previous.second, std::memory_order_relaxed);
         mainDraw100ns_.fetch_add(To100ns(std::chrono::steady_clock::now() - start), std::memory_order_relaxed);
-        actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
+        PublishD3D12NvidiaStatus();
+        actualVideoScalingMode_.store(
+            videoSuperResolutionActive_.load(std::memory_order_acquire) ||
+            videoTrueHdrActive_.load(std::memory_order_acquire)
+                ? FFF3FPVideoScalingMode::D3D11VideoProcessor
+                : FFF3FPVideoScalingMode::Shader);
         PublishPictureLayout(LayoutPicture(swapWidth_, swapHeight_));
     }
     return FFFResult::Success;
@@ -4087,6 +4288,7 @@ FFFResult PlayerVideoRenderer::ReadD3D12Picture(const std::uint32_t width, const
         if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
         return hr == E_OUTOFMEMORY ? FFFResult::NotSupported : FFFResult::DeviceFailure;
     }
+    if (!discOnly) PublishD3D12NvidiaStatus();
     return FFFResult::Success;
 }
 
@@ -4861,10 +5063,10 @@ FFFResult PlayerVideoRenderer::ApplySuperResolution(const std::uint32_t targetWi
     videoSuperResolutionSourceHeight_ = sourceHeight_;
     videoSuperResolutionTargetWidth_ = surfaceWidth;
     videoSuperResolutionTargetHeight_ = surfaceHeight;
-    if (!IsUpscaleTarget(sourceWidth_, sourceHeight_, targetSource))
-        return skip(FFF3FPVideoSuperResolutionReason::NotUpscaling);
     if (sourceHeight_ < 360 || sourceHeight_ > 1440)
         return skip(FFF3FPVideoSuperResolutionReason::SourceResolutionOutOfRange);
+    if (!IsUpscaleTarget(sourceWidth_, sourceHeight_, targetSource))
+        return skip(FFF3FPVideoSuperResolutionReason::NotUpscaling);
     if (videoSuperResolutionRejected_.load(std::memory_order_acquire))
         return skip(FFF3FPVideoSuperResolutionReason::DriverRejected);
 
@@ -5069,8 +5271,7 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
 
     bool rebuilt = false;
 
-    if (requestedVideoAutoHdr_.load(std::memory_order_acquire) ==
-        FFF3FPVideoAutoHdr::Off)
+    if (EffectiveVideoAutoHdrRequest() == FFF3FPVideoAutoHdr::Off)
         return skip(FFF3FPVideoAutoHdrReason::NotRequested);
     if (!nvidiaAdapter_.load(std::memory_order_acquire))
         return skip(FFF3FPVideoAutoHdrReason::NotNvidiaAdapter);
@@ -5112,10 +5313,16 @@ FFFResult PlayerVideoRenderer::ApplyTrueHdr(const std::uint32_t targetWidth,
 
     // Whether this pass must also carry the super-resolution extension: it is
     // stream state on the processor, so it belongs to the cached pass identity.
+    // The extension is only meaningful for an actual upscale in the supported
+    // source-height band; requesting it on a downscale makes the status look
+    // like a driver rejection when the pass is owned by TrueHDR.
+    const bool vsrHeightInRange = sourceHeight_ >= 360 && sourceHeight_ <= 1440;
+    const bool vsrUpscale = surfaceWidth > sourceWidth_ || surfaceHeight > sourceHeight_;
     const bool ppeRequested =
         requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
             FFF3FPVideoSuperResolution::Off &&
-        !videoSuperResolutionRejected_.load(std::memory_order_acquire);
+        !videoSuperResolutionRejected_.load(std::memory_order_acquire) &&
+        vsrHeightInRange && vsrUpscale;
     ID3D11Texture2D* const inputTexture = sourceTextures_[0];
     // One key and one rebuild path for the whole pass. The earlier shape split
     // surface identity (output size) from pass identity (source size, texture,
@@ -9437,6 +9644,9 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
             videoTrueHdrActive_.load(std::memory_order_acquire) &&
             trueHdrView_ != nullptr;
         if (trueHdrEngaged) {
+            const bool trueHdrVsrHeightInRange = sourceHeight_ >= 360 && sourceHeight_ <= 1440;
+            const bool trueHdrVsrUpscale =
+                destination.width > sourceWidth_ || destination.height > sourceHeight_;
             effectiveSourceViews_[0] = trueHdrView_;
             effectiveSourceViews_[1] = nullptr;
             effectiveSourceViews_[2] = nullptr;
@@ -9452,15 +9662,30 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target,
             // range, unsupported format) is the reading the user can act on,
             // and "yields to automatic HDR" would hide it.
             videoSuperResolutionActive_.store(false, std::memory_order_release);
-            const auto previousReason = videoSuperResolutionReason_.load(std::memory_order_acquire);
+            videoSuperResolutionSourceWidth_ = sourceWidth_;
+            videoSuperResolutionSourceHeight_ = sourceHeight_;
+            videoSuperResolutionTargetWidth_ = destination.width;
+            videoSuperResolutionTargetHeight_ = destination.height;
             if (requestedVideoSuperResolution_.load(std::memory_order_acquire) !=
-                    FFF3FPVideoSuperResolution::Off &&
-                (previousReason == FFF3FPVideoSuperResolutionReason::None ||
-                    previousReason == FFF3FPVideoSuperResolutionReason::NotRequested ||
-                    previousReason == FFF3FPVideoSuperResolutionReason::YieldedToAutoHdr))
-                videoSuperResolutionReason_.store(
-                    FFF3FPVideoSuperResolutionReason::YieldedToAutoHdr,
-                    std::memory_order_release);
+                    FFF3FPVideoSuperResolution::Off) {
+                if (videoSuperResolutionRejected_.load(std::memory_order_acquire)) {
+                    videoSuperResolutionReason_.store(
+                        FFF3FPVideoSuperResolutionReason::DriverRejected,
+                        std::memory_order_release);
+                } else if (!trueHdrVsrHeightInRange) {
+                    videoSuperResolutionReason_.store(
+                        FFF3FPVideoSuperResolutionReason::SourceResolutionOutOfRange,
+                        std::memory_order_release);
+                } else if (!trueHdrVsrUpscale) {
+                    videoSuperResolutionReason_.store(
+                        FFF3FPVideoSuperResolutionReason::NotUpscaling,
+                        std::memory_order_release);
+                } else {
+                    videoSuperResolutionReason_.store(
+                        FFF3FPVideoSuperResolutionReason::YieldedToAutoHdr,
+                        std::memory_order_release);
+                }
+            }
         } else if ([&] {
                 const auto vsrBlitStart = std::chrono::steady_clock::now();
                 const auto blitResult = ApplySuperResolution(destination.width, destination.height);
@@ -9549,7 +9774,7 @@ FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept 
         float rgba[4];
         DecodeReadbackPixel(format, bytes, rgba);
         probe.red = rgba[0]; probe.green = rgba[1]; probe.blue = rgba[2]; probe.alpha = rgba[3];
-        probe.scalingMode = FFF3FPVideoScalingMode::Shader;
+        probe.scalingMode = actualVideoScalingMode_.load(std::memory_order_acquire);
         probe.outputBitDepth = swapOutputBits_;
         probe.colorMode = actualMode_;
         probe.reserved = 0;
@@ -10056,7 +10281,7 @@ bool PlayerVideoRenderer::RequestRecoveryIfDeviceLostLocked() noexcept {
     return false;
 }
 
-void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
+void PlayerVideoRenderer::ReleaseDeviceObjects(const bool releaseDevice) noexcept {
     ReleaseVideoProcessor();
     ReleaseVideoProcessorInputSurface();
     ReleaseSuperResolutionResources();
@@ -10118,9 +10343,10 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
         if (device_ != nullptr && SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice))))
             dxgiDevice->Trim();
     }
-    ReleaseCom(context_);
-    ReleaseCom(device_);
-    ReleaseCom(renderAdapter_);
+    // Keep one idle device for the next PlayerSession only after the owning
+    // PlayerSession has also released the decoder and all hardware frames.
+    // ReleaseDeviceObjects may run while those still reference the device, so
+    // the pool hand-off is explicit (ReturnIdleDevice) instead of automatic.
     swapWidth_ = swapHeight_ = sourceWidth_ = sourceHeight_ = 0;
     displayWidth_ = displayHeight_ = 0;
     swapHdr_ = false;
@@ -10140,6 +10366,10 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
     hdrSupportValid_ = false;
     hdrSupportCheckedAt_ = std::chrono::steady_clock::time_point::min();
     hdrSwapChainRejected_ = false;
+    if (!releaseDevice) return;
+    ReleaseCom(context_);
+    ReleaseCom(device_);
+    ReleaseCom(renderAdapter_);
 }
 
 FFFResult PlayerVideoRenderer::RecreateDeviceResources() noexcept {
@@ -10253,7 +10483,15 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
     timedTextCondition_.notify_one();
 }
 
-void PlayerVideoRenderer::Close() noexcept {
+void PlayerVideoRenderer::ReturnIdleDevice() noexcept {
+    std::lock_guard deviceLock(deviceMutex_);
+    if (device_ != nullptr && context_ != nullptr) ReturnD3D11DeviceToPool(device_, context_);
+    ReleaseCom(context_);
+    ReleaseCom(device_);
+    ReleaseCom(renderAdapter_);
+}
+
+void PlayerVideoRenderer::Close(const bool deferDeviceRelease) noexcept {
     // Join before taking deviceMutex_: the presenter may already be waiting in
     // PresentTimedText and must be allowed to leave that critical section.
     StopCoverBackdropThread();
@@ -10262,7 +10500,7 @@ void PlayerVideoRenderer::Close() noexcept {
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
     if (adaptiveScaler_ != nullptr) { sws_freeContext(adaptiveScaler_); adaptiveScaler_ = nullptr; }
-    ReleaseDeviceObjects();
+    ReleaseDeviceObjects(!deferDeviceRelease);
     ReleaseCom(writeFactory_);
     ReleaseCom(d2dFactory_);
     {
@@ -10301,6 +10539,12 @@ bool PlayerVideoRenderer::WantsScRgbPresentationPath(const std::uint32_t bitDept
     // HDR and wide gamut always need scRGB; Auto SDR also admits >8-bit sources.
     // Use the supplied depth because sourceBitDepth_ is unset before the first frame.
     if (hdrProcessor_.IsHdrSourceStream() || IsWideGamutSource()) return true;
+    // RTX Video HDR turns an 8-bit SDR source into HDR output. MapToHdr
+    // implies Auto unless the host explicitly opted out, so an HDR output
+    // switch also brings the scRGB chain up for SDR content.
+    if (requestedMode_ == FFF3FPColorMode::MapToHdr &&
+        EffectiveVideoAutoHdrRequest() == FFF3FPVideoAutoHdr::Auto)
+        return true;
     return sdrScRgbMode_ != 0 && bitDepth > 8;
 }
 float PlayerVideoRenderer::SourcePeakNits() const noexcept { return sourcePeakNits_; }
@@ -10418,6 +10662,7 @@ FFFResult PlayerVideoRenderer::SetVideoSuperResolution(
     // texture alive. Requests are user-paced, so the rebuild cost is noise.
     {
         std::lock_guard deviceLock(deviceMutex_);
+        if (d3d12_) d3d12_->ResetNvidiaFailures();
         ReleaseSuperResolutionResources();
     }
     return FFFResult::Success;
@@ -10455,8 +10700,15 @@ FFFResult PlayerVideoRenderer::SetVideoAutoHdr(
     // a driver update (or an NVIDIA panel switch) can make TrueHDR appear
     // without the adapter changing. Same discipline as VSR.
     if (mode == FFF3FPVideoAutoHdr::Auto) {
+        videoAutoHdrExplicitOff_.store(false, std::memory_order_release);
         videoTrueHdrRejected_.store(false, std::memory_order_release);
         videoTrueHdrProbed_.store(false, std::memory_order_release);
+    } else {
+        // Off is a real opt-out only while the HDR output mode is active. An
+        // Off sent by a host before it selects MapToHdr is just its default,
+        // and must not veto the automatic promotion described above.
+        videoAutoHdrExplicitOff_.store(requestedMode_ == FFF3FPColorMode::MapToHdr,
+            std::memory_order_release);
     }
     requestedVideoAutoHdr_.store(mode, std::memory_order_release);
     if (mode == FFF3FPVideoAutoHdr::Off) {
@@ -10470,13 +10722,32 @@ FFFResult PlayerVideoRenderer::SetVideoAutoHdr(
     // frees the 10-bit surface when the user turns the feature off.
     {
         std::lock_guard deviceLock(deviceMutex_);
+        if (d3d12_) d3d12_->ResetNvidiaFailures();
         ReleaseTrueHdrResources();
     }
     return FFFResult::Success;
 }
 
+FFF3FPVideoAutoHdr PlayerVideoRenderer::EffectiveVideoAutoHdrRequest() const noexcept {
+    if (comparisonModeActive_.load(std::memory_order_acquire))
+        return FFF3FPVideoAutoHdr::Off;
+    if (requestedVideoAutoHdr_.load(std::memory_order_acquire) == FFF3FPVideoAutoHdr::Auto)
+        return FFF3FPVideoAutoHdr::Auto;
+    if (videoAutoHdrExplicitOff_.load(std::memory_order_acquire))
+        return FFF3FPVideoAutoHdr::Off;
+    // MapToHdr is the HDR output switch; without an explicit Off, it also
+    // requests TrueHDR for the SDR sources that feature exists to convert.
+    return requestedMode_ == FFF3FPColorMode::MapToHdr
+        ? FFF3FPVideoAutoHdr::Auto
+        : FFF3FPVideoAutoHdr::Off;
+}
+
 FFF3FPVideoAutoHdr PlayerVideoRenderer::RequestedVideoAutoHdr() const noexcept {
-    return requestedVideoAutoHdr_.load(std::memory_order_acquire);
+    return EffectiveVideoAutoHdrRequest();
+}
+
+void PlayerVideoRenderer::SetComparisonModeActive(const bool active) noexcept {
+    comparisonModeActive_.store(active, std::memory_order_release);
 }
 
 bool PlayerVideoRenderer::VideoAutoHdrActive() const noexcept {
@@ -10485,7 +10756,7 @@ bool PlayerVideoRenderer::VideoAutoHdrActive() const noexcept {
 
 void PlayerVideoRenderer::FillVideoAutoHdrStatus(
     FFF3FPVideoAutoHdrStatus& status) const noexcept {
-    status.requested = requestedVideoAutoHdr_.load(std::memory_order_acquire);
+    status.requested = EffectiveVideoAutoHdrRequest();
     status.nvidiaAdapter = nvidiaAdapter_.load(std::memory_order_acquire) ? 1u : 0u;
     status.active = videoTrueHdrActive_.load(std::memory_order_acquire) ? 1u : 0u;
     status.driverRejected = videoTrueHdrRejected_.load(std::memory_order_acquire) ? 1u : 0u;

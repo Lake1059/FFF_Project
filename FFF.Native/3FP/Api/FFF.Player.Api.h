@@ -886,17 +886,25 @@ struct FFF3FPVideoSuperResolutionStatus {
 //     (R10G10B10A2_UNORM, HDR10). mpv 0.41.0 shipped the trap: it enabled the
 //     extension but never retagged, and the frames came out identical
 //     (byte-identical screenshots). The renderer therefore only engages this
-//     path when it already presents the scRGB/10-bit HDR output contract, and
-//     feeds the PQ surface into the normal HDR colour pipeline.
+//     path when it already presents an HDR output chain (MapToHdr + an HDR-capable
+//     display), and feeds the PQ surface into the normal HDR colour pipeline.
+//     Since TrueHDR's input is SDR, an 8-bit SDR source is promoted onto that
+//     scRGB chain when TrueHDR is active; without it the source keeps the classic
+//     SDR path.
 //
-// Like VSR: a switch, NOT a default; Off keeps the renderer byte-identical to
-// the pre-enhancement behaviour, and the renderer refuses to enable it while a
-// comparison-style mode is active.
+// Unlike VSR, MapToHdr itself is the switch: a session that requests MapToHdr
+// also requests TrueHDR automatically, so enabling HDR output does not require
+// a second call. A host that wants an HDR presentation container without
+// NVIDIA's SDR->HDR conversion can explicitly call SetVideoAutoHdr(Off) while
+// MapToHdr is active; that Off is honoured as an opt-out. Off sent before
+// MapToHdr is merely the default and does not veto the automatic request.
 enum class FFF3FPVideoAutoHdr : std::uint32_t {
-    // Default. SDR frames take the classic path exactly as before.
+    // Classic path. In MapToHdr sessions this also means an explicit opt-out;
+    // in SDR sessions it is the default.
     Off = 0,
     // Attempt the driver's SDR->HDR conversion whenever the source and the
-    // output path satisfy the conditions above.
+    // output path satisfy the conditions above. MapToHdr implies Auto unless
+    // the host explicitly opted out with Off.
     Auto = 1,
 };
 
@@ -918,6 +926,8 @@ enum class FFF3FPVideoAutoHdrReason : std::uint32_t {
 struct FFF3FPVideoAutoHdrStatus {
     std::uint32_t size;
     std::uint32_t version; // == 20
+    // Effective request, not merely the last SetVideoAutoHdr argument:
+    // MapToHdr reports Auto unless the host explicitly opted out with Off.
     FFF3FPVideoAutoHdr requested;
     // The adapter backing the renderer's D3D11 device is NVIDIA.
     std::uint32_t nvidiaAdapter;
@@ -936,6 +946,31 @@ struct FFF3FPVideoAutoHdrStatus {
     std::uint32_t sourceHeight;
     std::uint32_t outputWidth;
     std::uint32_t outputHeight;
+};
+
+// Additive OpenEx options. Existing FFF3FP_Open / FFF3FP_OpenNetwork keep
+// their contracts; a host resolves this export dynamically. Flags:
+//   1 = allow network/UNC/HTTP input
+//   2 = correctness-first mode (default)
+//   4 = allow reconnect/retry
+//   8 = allow degradation when the source cannot keep up
+//  16 = allow RTSP UDP fallback after a TCP setup failure
+struct FFF3FPIoOptions {
+    std::uint32_t size;       // sizeof(FFF3FPIoOptions)
+    std::uint32_t version;    // 1
+    std::uint32_t flags;      // FFF3FPIoOptionsFlags
+    std::uint32_t readIdleTimeoutMs; // 0 = derive from measured RTT
+    std::uint32_t openDeadlineMs;
+    std::uint32_t seekDeadlineMs;
+    std::uint64_t maxBytesInFlight;
+};
+
+enum FFF3FPIoOptionsFlags : std::uint32_t {
+    FFF3FPIoAllowNetwork = 1u << 0,
+    FFF3FPIoCorrectnessFirst = 1u << 1,
+    FFF3FPIoAllowReconnect = 1u << 2,
+    FFF3FPIoAllowDegrade = 1u << 3,
+    FFF3FPIoAllowRtspUdpFallback = 1u << 4,
 };
 
 #ifdef FFFNATIVE_EXPORTS
@@ -962,6 +997,11 @@ FFF3FP_API FFFResult FFF3FP_Open(FFF3FPHandle player, const char* localPathUtf8)
 // paths) while keeping device, pipe, extended and scheme URLs rejected.
 // FFF3FP_Open keeps its original local-only contract.
 FFF3FP_API FFFResult FFF3FP_OpenNetwork(FFF3FPHandle player, const char* networkPathUtf8) noexcept;
+// Additive I/O 2.0 entry. Accepts local, UNC and HTTP/HTTPS paths according to
+// the flags; options may be null (kernel defaults). The struct is size/version
+// checked, so an older host cannot pass a shorter layout by accident.
+FFF3FP_API FFFResult FFF3FP_OpenEx(FFF3FPHandle player, const char* pathUtf8,
+    const FFF3FPIoOptions* options) noexcept;
 // Configure before Open. Appended export: existing ABI layouts stay unchanged.
 // Profiles: 0 balanced, 1 more, 2 stress. Decode and render adapters are independent.
 FFF3FP_API FFFResult FFF3FP_ConfigurePlaybackPerformance(FFF3FPHandle player,
@@ -1843,6 +1883,8 @@ FFF3FP_API FFFResult FFF3FP_GetVideoSuperResolutionStatus(FFF3FPHandle player,
 // RTX Video HDR (driver-level "auto HDR" / TrueHDR). Appended entry points
 // like the VSR pair above: additive, so PlayerApiVersion is unchanged and a
 // host that never resolves them keeps working against this DLL.
+// MapToHdr implicitly requests Auto; calling SetVideoAutoHdr(Off) while
+// MapToHdr is active opts out without tearing down the HDR output chain.
 FFF3FP_API FFFResult FFF3FP_SetVideoAutoHdr(FFF3FPHandle player,
     FFF3FPVideoAutoHdr mode) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetVideoAutoHdrStatus(FFF3FPHandle player,

@@ -51,11 +51,6 @@ MemBudgetMath::MemorySample SampleMemory() noexcept {
     return sample;
 }
 
-// Time->bytes rule (kept here so nobody re-invents the truncated version):
-// seconds x rate / 1e7, multiply FIRST then divide. Dividing first makes the
-// per-100ns quantity zero for every real format -- the bug this file used to
-// carry. The shared form lives in PlayerSession::AudioBytesPerSecond.
-
 std::uint32_t Index(MemConsumer who) noexcept {
     return static_cast<std::uint32_t>(who);
 }
@@ -85,16 +80,16 @@ struct TestCapInstaller {
 };
 const TestCapInstaller g_testCapInstaller;
 
-// Sample the machine, run the raw formula, then apply the installed one-directional
-// test cap. Every ledger-side budget assignment goes through this helper. The
-// precheck and any probe do NOT need this helper: they call ComputeTotalBudget,
-// which applies the same installed cap on their side.
 std::uint64_t ComputeBudgetNow() noexcept {
     const std::uint64_t computed = MemBudgetMath::ComputeTotalBudgetRaw(SampleMemory());
     const std::uint64_t cap = MemBudgetMath::TestCapBytesSlot();
-    const std::uint64_t budget = MemBudgetMath::ApplyTestCapBytes(computed, cap);
-    return budget;
+    return MemBudgetMath::ApplyTestCapBytes(computed, cap);
 }
+
+// Attach/Granted/Claim are called on the session worker. A thread-local token
+// lets the frozen five-consumer API stay unchanged while each live session
+// claims against its own ledger; the process total is still one number.
+thread_local std::uint64_t CurrentSessionToken = 0;
 
 } // namespace
 
@@ -109,121 +104,179 @@ bool MemoryBudgetArbiter::Active() const noexcept {
 
 bool MemoryBudgetArbiter::Overcommitted() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    return overcommitted_;
+    for (const auto& session : sessions_) {
+        if (session.token != 0 && session.overcommitted) return true;
+    }
+    return false;
 }
 
 std::uint32_t MemoryBudgetArbiter::InvariantViolations() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    return violations_;
+    std::uint32_t sum = 0;
+    for (const auto& session : sessions_) sum += session.violations;
+    return sum;
 }
 
 void MemoryBudgetArbiter::NoteReplanSuppressed() noexcept {
-    // Relaxed RMW on the playback thread; the detach summary reads it later.
     suppressCount_.fetch_add(1, std::memory_order_relaxed);
 }
 
-std::uint64_t MemoryBudgetArbiter::DeadZoneFor(std::uint32_t index) const noexcept {
-    return MemBudgetMath::DeadZoneBytes(claims_[index].floorBytes,
-        claims_[index].ceilingBytes);
-}
-
-void MemoryBudgetArbiter::AttachSession(const SessionBudgetContext& context) noexcept {
-    if (!Active()) return;
-    std::lock_guard<std::mutex> lock(mutex_);
-    context_ = context;
-    attached_ = true;
-    for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i) {
-        granted_[i] = 0;
-        previousGranted_[i] = 0;
-        borrowed_[i] = 0;
-        claims_[i] = MemClaim{};
+MemoryBudgetArbiter::SessionState* MemoryBudgetArbiter::FindLocked(
+    const std::uint64_t token) noexcept {
+    for (auto& session : sessions_) {
+        if (session.token == token) return &session;
     }
-    budgetSamples_ = 0;
-    limitChanges_ = 0;
-    borrowOverruns_ = 0;
-    overcommitted_ = false;
-    flapCount_ = 0;
-    pendingRaise_ = false;
-    suppressCount_.store(0, std::memory_order_relaxed);
-    totalBudget_ = ComputeBudgetNow();
+    return nullptr;
 }
 
-void MemoryBudgetArbiter::DetachSession() noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    attached_ = false;
-    flapCount_ = 0;
-    pendingRaise_ = false;
-    budgetSamples_ = 0;
-    limitChanges_ = 0;
-    borrowOverruns_ = 0;
-    suppressCount_.store(0, std::memory_order_relaxed);
-    totalBudget_ = 0;
-    overcommitted_ = false;
-    for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i) {
-        granted_[i] = 0;
-        previousGranted_[i] = 0;
-        borrowed_[i] = 0;
+const MemoryBudgetArbiter::SessionState* MemoryBudgetArbiter::FindLocked(
+    const std::uint64_t token) const noexcept {
+    for (const auto& session : sessions_) {
+        if (session.token == token) return &session;
     }
+    return nullptr;
 }
 
-std::uint64_t MemoryBudgetArbiter::Claim(MemConsumer who, const MemClaim& claim) noexcept {
+MemoryBudgetArbiter::SessionState* MemoryBudgetArbiter::CurrentLocked() noexcept {
+    if (CurrentSessionToken == 0) return nullptr;
+    return FindLocked(CurrentSessionToken);
+}
+
+const MemoryBudgetArbiter::SessionState* MemoryBudgetArbiter::CurrentLocked() const noexcept {
+    if (CurrentSessionToken == 0) return nullptr;
+    return FindLocked(CurrentSessionToken);
+}
+
+std::uint64_t MemoryBudgetArbiter::DeadZoneFor(const SessionState& session,
+    const std::uint32_t index) const noexcept {
+    return MemBudgetMath::DeadZoneBytes(session.claims_[index].floorBytes,
+        session.claims_[index].ceilingBytes);
+}
+
+std::uint64_t MemoryBudgetArbiter::AttachSession(
+    const SessionBudgetContext& context) noexcept {
+    if (!Active()) return 0;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (sessionCount_ >= sessions_.size()) return 0;
+    auto* slot = static_cast<SessionState*>(nullptr);
+    for (auto& session : sessions_) {
+        if (session.token == 0) {
+            slot = &session;
+            break;
+        }
+    }
+    if (slot == nullptr) return 0;
+    const auto token = nextToken_.fetch_add(1, std::memory_order_relaxed) + 1;
+    slot->token = token;
+    slot->context = context;
+    for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i) {
+        slot->claims_[i] = MemClaim{};
+        slot->granted_[i] = 0;
+        slot->previousGranted_[i] = 0;
+        slot->borrowed_[i] = 0;
+    }
+    slot->budgetSamples = 0;
+    slot->limitChanges = 0;
+    slot->borrowOverruns = 0;
+    slot->violations = 0;
+    slot->flapCount = 0;
+    slot->pendingRaise = false;
+    slot->overcommitted = false;
+    slot->suppressCount = 0;
+    ++sessionCount_;
+    CurrentSessionToken = token;
+    RecomputeAllLocked();
+    return token;
+}
+
+void MemoryBudgetArbiter::DetachSession(const std::uint64_t token) noexcept {
+    if (token == 0) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto* session = FindLocked(token);
+    if (session == nullptr) return;
+    // Swap-with-last keeps the fixed array dense; no pointer escapes this lock.
+    const auto index = static_cast<std::size_t>(session - sessions_.data());
+    if (index + 1 < sessions_.size()) {
+        if (sessions_[sessions_.size() - 1].token != 0) {
+            // The removed slot must be reset before the move so its token cannot
+            // alias a new attach while the array is being compacted.
+            sessions_[index] = std::move(sessions_[sessions_.size() - 1]);
+        }
+    }
+    auto& last = sessions_[sessions_.size() - 1];
+    last = SessionState{};
+    if (sessions_[index].token == token) {
+        // Defensive: if the moved slot still points at the removed token, clear it.
+        sessions_[index] = SessionState{};
+    }
+    if (CurrentSessionToken == token) CurrentSessionToken = 0;
+    if (sessionCount_ != 0) --sessionCount_;
+    RecomputeAllLocked();
+}
+
+std::uint64_t MemoryBudgetArbiter::Claim(const MemConsumer who,
+    const MemClaim& claim) noexcept {
     if (!Active() || who >= MemConsumer::Count) return 0;
     std::lock_guard<std::mutex> lock(mutex_);
-    // Replacement, never accumulation: a resolution change re-claims the same
-    // consumer and must not stack its old floor on top of the new one.
-    claims_[Index(who)] = claim;
-    if (!attached_) {
-        attached_ = true;
-        totalBudget_ = ComputeBudgetNow();
-    }
-    DistributeLocked();
-    return granted_[Index(who)];
+    auto* session = CurrentLocked();
+    if (session == nullptr) return 0;
+    session->claims_[Index(who)] = claim;
+    DistributeLocked(*session);
+    return session->granted_[Index(who)];
 }
 
-void MemoryBudgetArbiter::Release(MemConsumer who, std::uint64_t bytes) noexcept {
+void MemoryBudgetArbiter::Release(const MemConsumer who, const std::uint64_t bytes) noexcept {
     if (who >= MemConsumer::Count) return;
     std::lock_guard<std::mutex> lock(mutex_);
+    auto* session = CurrentLocked();
+    if (session == nullptr) return;
     const auto index = Index(who);
-    const std::uint64_t held = granted_[index] + borrowed_[index];
+    const std::uint64_t held = session->granted_[index] + session->borrowed_[index];
     const std::uint64_t release = bytes < held ? bytes : held;
-    if (borrowed_[index] >= release) {
-        borrowed_[index] -= release;
+    if (session->borrowed_[index] >= release) {
+        session->borrowed_[index] -= release;
     } else {
-        const std::uint64_t fromGranted = release - borrowed_[index];
-        borrowed_[index] = 0;
-        granted_[index] = granted_[index] > fromGranted ? granted_[index] - fromGranted : 0;
-        // A release below the floor means the consumer shrank by itself; keep the
-        // ledger honest and let the next Evaluate restore the floor.
-        previousGranted_[index] = granted_[index];
+        const std::uint64_t fromGranted = release - session->borrowed_[index];
+        session->borrowed_[index] = 0;
+        session->granted_[index] = session->granted_[index] > fromGranted
+            ? session->granted_[index] - fromGranted : 0;
+        session->previousGranted_[index] = session->granted_[index];
     }
 }
 
-bool MemoryBudgetArbiter::TryBorrow(MemConsumer who, std::uint64_t extraBytes) noexcept {
+bool MemoryBudgetArbiter::TryBorrow(const MemConsumer who,
+    const std::uint64_t extraBytes) noexcept {
     if (!Active() || who >= MemConsumer::Count || extraBytes == 0) return false;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!attached_ || overcommitted_) return false;
-    // Summed inline; TotalGranted() would re-enter this mutex.
+    auto* session = CurrentLocked();
+    if (session == nullptr || session->overcommitted) return false;
     std::uint64_t grantedSum = 0;
-    for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i) grantedSum += granted_[i];
-    const std::uint64_t used = grantedSum + BorrowedLocked();
-    const std::uint64_t headroom = totalBudget_ > used ? totalBudget_ - used : 0;
+    for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i) grantedSum += session->granted_[i];
+    const std::uint64_t used = grantedSum + BorrowedLocked(*session);
+    const std::uint64_t headroom = session->totalBudget > used
+        ? session->totalBudget - used : 0;
     if (extraBytes > headroom) return false;
-    borrowed_[Index(who)] += extraBytes;
+    session->borrowed_[Index(who)] += extraBytes;
     return true;
 }
 
-void MemoryBudgetArbiter::ReturnExtra(MemConsumer who, std::uint64_t bytes) noexcept {
+void MemoryBudgetArbiter::ReturnExtra(const MemConsumer who,
+    const std::uint64_t bytes) noexcept {
     if (who >= MemConsumer::Count) return;
     std::lock_guard<std::mutex> lock(mutex_);
+    auto* session = CurrentLocked();
+    if (session == nullptr) return;
     const auto index = Index(who);
-    borrowed_[index] = borrowed_[index] > bytes ? borrowed_[index] - bytes : 0;
+    session->borrowed_[index] = session->borrowed_[index] > bytes
+        ? session->borrowed_[index] - bytes : 0;
 }
 
-std::uint64_t MemoryBudgetArbiter::Granted(MemConsumer who) const noexcept {
+std::uint64_t MemoryBudgetArbiter::Granted(const MemConsumer who) const noexcept {
     if (!Active() || who >= MemConsumer::Count) return 0;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!attached_) return 0;
-    return granted_[Index(who)];
+    const auto* session = CurrentLocked();
+    if (session == nullptr) return 0;
+    return session->granted_[Index(who)];
 }
 
 std::uint64_t MemoryBudgetArbiter::TotalBudget() const noexcept {
@@ -231,18 +284,29 @@ std::uint64_t MemoryBudgetArbiter::TotalBudget() const noexcept {
     return totalBudget_;
 }
 
+std::uint32_t MemoryBudgetArbiter::LiveSessions() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return sessionCount_;
+}
+
 std::uint64_t MemoryBudgetArbiter::TotalGranted() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     std::uint64_t sum = 0;
-    for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i) sum += granted_[i];
+    for (const auto& session : sessions_) {
+        if (session.token == 0) continue;
+        for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i) sum += session.granted_[i];
+    }
     return sum;
 }
 
 std::uint64_t MemoryBudgetArbiter::TotalGrantedWithBorrow() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     std::uint64_t sum = 0;
-    for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i)
-        sum += granted_[i] + borrowed_[i];
+    for (const auto& session : sessions_) {
+        if (session.token == 0) continue;
+        for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i)
+            sum += session.granted_[i] + session.borrowed_[i];
+    }
     return sum;
 }
 
@@ -253,83 +317,67 @@ FFFPrefetch::PressureTier MemoryBudgetArbiter::Tier() const noexcept {
 std::uint32_t MemoryBudgetArbiter::Evaluate() noexcept {
     if (!Active()) return 0;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!attached_) return 0;
-    // The guard's tier is read, not driven: a tier change reaches us through the
-    // prefetch pump, which calls Evaluate right after observing it.
-    return RecomputeLocked();
+    if (sessionCount_ == 0) return 0;
+    return RecomputeAllLocked();
 }
 
-std::uint32_t MemoryBudgetArbiter::RecomputeLocked() noexcept {
-    const std::uint64_t previousBudget = totalBudget_;
+std::uint32_t MemoryBudgetArbiter::RecomputeAllLocked() noexcept {
     totalBudget_ = ComputeBudgetNow();
-    // Flap ring detection on the wall clock, only on this path: an up-step arms
-    // the clock, a down-step inside kFlapWindowMs counts one oscillation. The
-    // clock read rides the existing event, so no thread and no timer is added.
-    const std::uint64_t nowMs = GetTickCount64();
-    if (totalBudget_ > previousBudget) {
-        pendingRaise_ = true;
-        lastRaiseTickMs_ = nowMs;
-    } else if (totalBudget_ < previousBudget && pendingRaise_) {
-        if (nowMs - lastRaiseTickMs_ <= kFlapWindowMs) ++flapCount_;
-        pendingRaise_ = false;   // consumed (counted) or expired: either way disarm
-    } else if (pendingRaise_ && nowMs - lastRaiseTickMs_ > kFlapWindowMs) {
-        pendingRaise_ = false;
-    }
-    DistributeLocked();
+    const auto perSession = sessionCount_ == 0 ? 0 : totalBudget_ / sessionCount_;
     std::uint32_t mask = 0;
-    for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i) {
-        const std::uint64_t delta = granted_[i] > previousGranted_[i]
-            ? granted_[i] - previousGranted_[i] : previousGranted_[i] - granted_[i];
-        if (delta > DeadZoneFor(i)) mask |= (1u << i);
-        previousGranted_[i] = granted_[i];
+    const std::uint64_t nowMs = GetTickCount64();
+    for (auto& session : sessions_) {
+        if (session.token == 0) continue;
+        const std::uint64_t previousBudget = session.totalBudget;
+        session.totalBudget = perSession;
+        if (session.totalBudget > previousBudget) {
+            session.pendingRaise = true;
+            session.lastRaiseTickMs = nowMs;
+        } else if (session.totalBudget < previousBudget && session.pendingRaise) {
+            if (nowMs - session.lastRaiseTickMs <= kFlapWindowMs) ++session.flapCount;
+            session.pendingRaise = false;
+        } else if (session.pendingRaise && nowMs - session.lastRaiseTickMs > kFlapWindowMs) {
+            session.pendingRaise = false;
+        }
+        mask |= DistributeLocked(session);
+        ++session.budgetSamples;
     }
-    // samples: every resample counts (the pump ticks ~4/s regardless of whether
-    // anything moved); limitChanges: only consumers whose grant actually moved
-    // past their dead zone. Previously both were one counter named "recompute",
-    // which read as "we reshaped the limit 3.5 times a second" when the truth
-    // was "we sampled 4 times a second and almost never moved a limit".
-    ++budgetSamples_;
-    limitChanges_ += static_cast<std::uint32_t>(std::bitset<32>(mask).count());
     return mask;
 }
 
-std::uint64_t MemoryBudgetArbiter::DistributeLocked() noexcept {
+std::uint32_t MemoryBudgetArbiter::DistributeLocked(SessionState& session) noexcept {
     const auto count = Index(MemConsumer::Count);
     MemBudgetMath::FloorSet floors{};
-    floors.audioBytes = claims_[Index(MemConsumer::AudioPcmQueue)].floorBytes;
-    floors.videoBytes = claims_[Index(MemConsumer::VideoFrameQueue)].floorBytes;
-    floors.decodeBytes = claims_[Index(MemConsumer::DecodeSurfaces)].floorBytes;
-    floors.renderBytes = claims_[Index(MemConsumer::RenderSlot)].floorBytes;
-    floors.prefetchBytes = claims_[Index(MemConsumer::PrefetchCache)].floorBytes;
+    floors.audioBytes = session.claims_[Index(MemConsumer::AudioPcmQueue)].floorBytes;
+    floors.videoBytes = session.claims_[Index(MemConsumer::VideoFrameQueue)].floorBytes;
+    floors.decodeBytes = session.claims_[Index(MemConsumer::DecodeSurfaces)].floorBytes;
+    floors.renderBytes = session.claims_[Index(MemConsumer::RenderSlot)].floorBytes;
+    floors.prefetchBytes = session.claims_[Index(MemConsumer::PrefetchCache)].floorBytes;
     const std::uint64_t floorSum = MemBudgetMath::SumFloors(floors);
-    overcommitted_ = floorSum > totalBudget_;
+    session.overcommitted = floorSum > session.totalBudget;
 
-    for (std::uint32_t i = 0; i < count; ++i) granted_[i] = 0;
-    if (floorSum == 0) {
-        // Nothing registered yet: hand everything to nobody. Consumers that
-        // claim later re-trigger a distribution through Claim().
-        return 0;
-    }
+    for (std::uint32_t i = 0; i < count; ++i) session.granted_[i] = 0;
+    if (floorSum == 0) return 0;
 
-    if (overcommitted_) {
+    if (session.overcommitted) {
         // Proportional shrink, never below zero and never more than the budget.
         // The session is expected to degrade and re-claim; until it does, this
         // keeps ΣGranted ≤ TotalBudget true instead of handing out phantom bytes.
         for (std::uint32_t i = 0; i < count; ++i) {
-            granted_[i] = claims_[i].floorBytes * totalBudget_ / floorSum;
+            session.granted_[i] = session.claims_[i].floorBytes * session.totalBudget / floorSum;
         }
     } else {
-        std::uint64_t remaining = totalBudget_ - floorSum;
-        for (std::uint32_t i = 0; i < count; ++i) granted_[i] = claims_[i].floorBytes;
+        std::uint64_t remaining = session.totalBudget - floorSum;
+        for (std::uint32_t i = 0; i < count; ++i) session.granted_[i] = session.claims_[i].floorBytes;
         // Raise in the fixed order: audio, video, the never-yielding pair, prefetch.
         const auto raise = [&](MemConsumer who) {
             const auto index = Index(who);
-            const std::uint64_t target = (std::min)(claims_[index].targetBytes,
-                claims_[index].ceilingBytes);
-            if (target <= granted_[index] || remaining == 0) return;
-            const std::uint64_t want = target - granted_[index];
+            const std::uint64_t target = (std::min)(session.claims_[index].targetBytes,
+                session.claims_[index].ceilingBytes);
+            if (target <= session.granted_[index] || remaining == 0) return;
+            const std::uint64_t want = target - session.granted_[index];
             const std::uint64_t give = want < remaining ? want : remaining;
-            granted_[index] += give;
+            session.granted_[index] += give;
             remaining -= give;
         };
         raise(MemConsumer::AudioPcmQueue);
@@ -339,37 +387,35 @@ std::uint64_t MemoryBudgetArbiter::DistributeLocked() noexcept {
         // Prefetch gets the leftovers only, capped by its own ceiling.
         {
             const auto index = Index(MemConsumer::PrefetchCache);
-            const std::uint64_t cap = claims_[index].ceilingBytes;
-            if (remaining != 0 && cap > granted_[index]) {
-                const std::uint64_t give = (std::min)(remaining, cap - granted_[index]);
-                granted_[index] += give;
+            const std::uint64_t cap = session.claims_[index].ceilingBytes;
+            if (remaining != 0 && cap > session.granted_[index]) {
+                const std::uint64_t give = (std::min)(remaining, cap - session.granted_[index]);
+                session.granted_[index] += give;
                 remaining -= give;
             }
         }
     }
 
     std::uint64_t sum = 0;
-    for (std::uint32_t i = 0; i < count; ++i) sum += granted_[i];
-    if (sum > totalBudget_) {
-        // Should be unreachable; counted rather than clamped so a trace shows it.
-        ++violations_;
+    for (std::uint32_t i = 0; i < count; ++i) sum += session.granted_[i];
+    if (sum > session.totalBudget) ++session.violations;
+    if (sum + BorrowedLocked(session) > session.totalBudget) ++session.borrowOverruns;
+
+    std::uint32_t mask = 0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint64_t delta = session.granted_[i] > session.previousGranted_[i]
+            ? session.granted_[i] - session.previousGranted_[i]
+            : session.previousGranted_[i] - session.granted_[i];
+        if (delta > DeadZoneFor(session, i)) mask |= (1u << i);
+        session.previousGranted_[i] = session.granted_[i];
     }
-    // The REAL invariant is Σgranted + Σborrowed ≤ totalBudget_. The borrow side
-    // is NOT redistributed here: TryBorrow's headroom check counted borrowed_ at
-    // borrow time, but a recompute can shrink totalBudget_ afterwards, so the
-    // old borrow can briefly push the sum over the new budget (about one device
-    // buffer) until it expires. Counted, never clamped -- borrowOverrun>0 after a
-    // long session would prove the window exists, 0 proves it does not.
-    const std::uint64_t borrowedSum = BorrowedLocked();
-    if (sum + borrowedSum > totalBudget_) {
-        ++borrowOverruns_;
-    }
-    return sum;
+    session.limitChanges += static_cast<std::uint32_t>(std::bitset<32>(mask).count());
+    return mask;
 }
 
-std::uint64_t MemoryBudgetArbiter::BorrowedLocked() const noexcept {
+std::uint64_t MemoryBudgetArbiter::BorrowedLocked(const SessionState& session) const noexcept {
     std::uint64_t sum = 0;
-    for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i) sum += borrowed_[i];
+    for (std::uint32_t i = 0; i < Index(MemConsumer::Count); ++i) sum += session.borrowed_[i];
     return sum;
 }
 

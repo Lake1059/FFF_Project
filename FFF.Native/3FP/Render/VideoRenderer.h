@@ -136,6 +136,11 @@ public:
     ~PlayerVideoRenderer();
 
     FFFResult SetWindow(HWND window) noexcept;
+    // Start device creation before the decoder needs it. D3D11CreateDevice and
+    // D3D12CreateDevice both spend a few hundred milliseconds in the driver on
+    // first use; the open path can overlap that with demux/probe work instead of
+    // paying it serially at the first hardware-frame bind.
+    FFFResult PrewarmDevice() noexcept;
     // Choose the DXGI adapter for either rendering backend.
     // index = -1 (default) keeps the built-in policy: the adapter driving the monitor
     // that contains the output window. index >= 0 is used as the argument of
@@ -416,7 +421,10 @@ public:
     FFFResult RecreateDeviceResources() noexcept;
     void ClearDeviceRecoveryRequest() noexcept;
     void ResetMedia() noexcept;
-    void Close() noexcept;
+    void Close(bool deferDeviceRelease = false) noexcept;
+    /// Returns the retained D3D11 device after the decoder and every hardware
+    /// frame have been released. Safe to call more than once.
+    void ReturnIdleDevice() noexcept;
 
     FFF3FPColorMode ActualColorMode() const noexcept;
     /// True when the current stream's primaries are wider than Rec.709
@@ -495,6 +503,10 @@ public:
     /// its video-processor pass writes PQ/BT.2020 samples, which VSR's
     /// same-format YUV intermediate contract cannot represent.
     FFFResult SetVideoAutoHdr(FFF3FPVideoAutoHdr mode) noexcept;
+    // Comparison views must never see driver-generated pixels. This is a
+    // hard off independent of the public request, because MapToHdr itself now
+    // implies Auto.
+    void SetComparisonModeActive(bool active) noexcept;
     FFF3FPVideoAutoHdr RequestedVideoAutoHdr() const noexcept;
     bool VideoAutoHdrActive() const noexcept;
     void FillVideoAutoHdrStatus(FFF3FPVideoAutoHdrStatus& status) const noexcept;
@@ -513,6 +525,12 @@ public:
     std::uint32_t HdrMetadataSource() const noexcept;
 
 private:
+    // TrueHDR follows the colour mode unless the host explicitly opts out:
+    // SetColorMode(MapToHdr) is the HDR switch, so it must not also require a
+    // separate SetVideoAutoHdr(Auto) call. An explicit SetVideoAutoHdr(Off)
+    // vetoes that promotion for hosts that want an HDR output chain without
+    // RTX Video HDR's SDR->HDR conversion.
+    FFF3FPVideoAutoHdr EffectiveVideoAutoHdrRequest() const noexcept;
     enum class CoverBackdropRenderResult {
         Complete,
         Deferred,
@@ -588,6 +606,7 @@ private:
         std::uint32_t flags) noexcept;
     FFFResult SubmitD3D12Frame(bool compositesTimedText = false, bool drawVideo = true) noexcept;
     void BuildD3D12Picture(FFF3FPD3D12Picture& picture, std::uint32_t width, std::uint32_t height) noexcept;
+    void PublishD3D12NvidiaStatus() noexcept;
     std::size_t CollectD3D12Overlays(FFF3FPD3D12Overlay* overlays, bool discOnly) noexcept;
     FFFResult ReadD3D12Picture(std::uint32_t width, std::uint32_t height, std::uint32_t format,
         std::uint32_t x, std::uint32_t y, std::uint32_t regionWidth, std::uint32_t regionHeight,
@@ -785,7 +804,7 @@ private:
         ElCompositionSettings& settings) noexcept;
     void ReleaseElCompositionResources() noexcept;
     void ClearSurface() noexcept;
-    void ReleaseDeviceObjects() noexcept;
+    void ReleaseDeviceObjects(bool releaseDevice = true) noexcept;
     void RequestDeviceRecovery(long result, const char* operation) noexcept;
     bool RequestRecoveryIfDeviceLostLocked() noexcept;
     void SetError(std::string message) noexcept;
@@ -1175,6 +1194,11 @@ private:
     // Host-visible switch. Off keeps the renderer byte-identical to the
     // pre-TrueHDR behaviour, same invariant as VSR.
     std::atomic<FFF3FPVideoAutoHdr> requestedVideoAutoHdr_{ FFF3FPVideoAutoHdr::Off };
+    // Set by an explicit Off request. Without it, MapToHdr sessions request
+    // TrueHDR automatically; with it, Off really means off and the HDR chain
+    // is used only as a presentation container.
+    std::atomic<bool> videoAutoHdrExplicitOff_{ false };
+    std::atomic<bool> comparisonModeActive_{ false };
     // Driver capability answer for the current Auto request, probed once per
     // request (the probe needs a live video processor, so it runs on the
     // render path -- latched so a negative answer costs one call, not one

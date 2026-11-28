@@ -63,9 +63,30 @@ Public NotInheritable Class 播放器控制器
     ' 无意义的 re-seek。失败时不记账，等下一轮轮询/打开完成再试。
     Private 上次蓝牙补偿100纳秒 As Long = Long.MinValue
     Private 蓝牙补偿信息行 As String = String.Empty
+    ' 解码设备名缓存：键 = 内核回报的 DXGI 索引。信息层每 200ms 刷一次，
+    ' 不能每刷都建一次 DXGI 工厂（枚举适配器要实例化 IDXGIFactory1）。
+    ' 初值 -2 是"还没有键"，与合法的 -1（软解/未知）以及 >=0 的索引都不同。
+    Private 解码设备缓存索引 As Integer = -2
+    Private 解码设备缓存名称 As String = String.Empty
 
     Friend Function 实际渲染引擎() As 播放器渲染引擎?
         Return 安全读取会话(Function(目标) 目标.实际渲染引擎())
+    End Function
+
+    ''' <summary>信息层"视频"行的解码设备名：内核当前实际解码所在的显卡。
+    ''' <para>自动选卡（设置未指定设备）与手动指定都以内核回报为准：打开路径会按
+    ''' 候选计划在主卡之外再试其它适配器，最终落到哪张只有内核知道。</para>
+    ''' <para>名称复用设置页的同一份 GPU 枚举（<see cref="GPU解码设备.按索引名称"/>），
+    ''' 并按索引缓存，避免每 200ms 重建 DXGI 工厂。取不到（软解 / 旧内核 / 枚举失败）
+    ''' 返回空字符串，信息层据此退回只显示"GPU"。</para></summary>
+    Friend Function 解码GPU显示文本() As String
+        Dim 索引 = 安全读取会话(Function(目标) 目标.实际解码适配器索引(), -1)
+        If 索引 < 0 Then Return String.Empty
+        If 索引 = 解码设备缓存索引 Then Return 解码设备缓存名称
+        Dim 名称 = GPU解码设备.按索引名称(索引)
+        解码设备缓存索引 = 索引
+        解码设备缓存名称 = If(名称, String.Empty)
+        Return 解码设备缓存名称
     End Function
 
     Friend Function 蓝牙补偿图层文本() As String
