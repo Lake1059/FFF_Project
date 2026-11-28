@@ -11,6 +11,7 @@ extern "C" {
 #include <string>
 
 class IocpMediaReader;
+class HttpMediaReader;
 struct SharedFileInputEventReadRequest;
 
 class SharedFileInput final {
@@ -28,15 +29,47 @@ public:
     // have to hand FFmpeg bytes they had to repair first (see AvifIlocShim).
     static std::unique_ptr<SharedFileInput> OpenMemory(const std::uint8_t* data,
         std::size_t size, std::string& error) noexcept;
+    // P0-2: fetch a small HLS/DASH manifest once and let both the top-level
+    // open and FFmpeg's immediate nested reload use the same bytes. This
+    // removes one serial RTT from a high-latency manifest startup.
+    static bool PrefetchHttpManifest(const char* urlUtf8, std::string& error) noexcept;
 
     AVIOContext* Context() const noexcept { return context_; }
     bool HasWriter() const noexcept;
+    bool IsHttp() const noexcept { return http_ != nullptr || cachedNetwork_; }
+    bool HttpSeekable() const noexcept;
+    // Last measured HTTP round-trip and goodput. Zero means not measured yet;
+    // the session treats zero as "use the declared bitrate only", never as a
+    // zero-latency link.
+    std::uint32_t NetworkRttMs() const noexcept;
+    std::uint64_t NetworkGoodputBps() const noexcept;
     void SetInterrupt(AVIOInterruptCB interrupt) noexcept { interrupt_ = interrupt; }
     void DetectUnwrittenData(bool enabled) noexcept { detectUnwrittenData_ = enabled; }
 
     // Feed-forward hint for the IOCP read-ahead window. `bitsPerSecond` is the
     // container/stream bitrate; the reader converts it to a slot target.
     void SetNetworkWindowHint(std::int64_t bitsPerSecond) noexcept;
+    // OpenEx seam: 0 keeps the adaptive RTT-derived timeout. A non-zero value
+    // is clamped by the same 2..30 s / 3..30 s contract as Deadline.h.
+    void SetHttpTimeouts(DWORD readIdleTimeoutMs, DWORD seekDeadlineMs) noexcept;
+
+    // P2: break a currently blocked HTTP read without closing the AVIO context.
+    // Call this before joining the input thread so a slow server cannot keep the
+    // session worker inside StopInputPump.
+    void Abort() noexcept;
+    void ClearAbort() noexcept;
+
+    // P0: nested AVIO for virtual demuxers (HLS/DASH). FFmpeg opens each child
+    // playlist/segment through AVFormatContext::io_open when a custom callback is
+    // installed. Routing those opens through the same HTTP reader gives the
+    // session one abort path for the manifest, every segment, and every retry.
+    // The owner token is opaque to this layer; the session uses `this`.
+    static AVIOContext* OpenNestedIo(void* owner, const char* urlUtf8,
+        const AVIOInterruptCB& interrupt, std::string& error) noexcept;
+    static int CloseNestedIo(AVIOContext* context) noexcept;
+    static void AbortNestedIo(void* owner) noexcept;
+    static void ClearNestedAbortIo(void* owner) noexcept;
+    static void CloseAllNestedIo(void* owner) noexcept;
 
 private:
     static constexpr DWORD NetworkReadTimeoutMs = 8000;
@@ -50,6 +83,8 @@ private:
     static bool IsNetworkPath(const std::wstring& path) noexcept;
     static bool IsTransientNetworkError(DWORD error) noexcept;
     static bool Interrupted(const AVIOInterruptCB& interrupt) noexcept;
+    DWORD HttpReadTimeoutMs(int bytes) const noexcept;
+    DWORD HttpSeekTimeoutMs() const noexcept;
 
     int ReadFileOnce(std::uint8_t* buffer, int bufferSize,
         ULONGLONG deadlineTick) noexcept;
@@ -59,6 +94,7 @@ private:
     HANDLE file_{INVALID_HANDLE_VALUE};
     std::unique_ptr<SharedFileInputEventReadRequest> eventRead_;
     std::unique_ptr<IocpMediaReader> iocpReader_;
+    std::unique_ptr<HttpMediaReader> http_;
     AVIOContext* context_{};
     std::uint8_t* data_{};      // owned copy of the in-memory media, when used
     std::int64_t position_{};   // logical read cursor for file and memory media
@@ -66,8 +102,15 @@ private:
     bool sizeKnown_{false};
     bool network_{false};
     bool overlapped_{false};
+    // Manifest bytes served from the prefetch cache are still logically HTTP:
+    // the HLS demuxer must install the nested IO callback and keep the HTTP
+    // protocol whitelist, even though this SharedFileInput itself is memory-backed.
+    bool cachedNetwork_{false};
+    std::uint32_t cachedRttMs_{0};
     DWORD lastError_{0};
     std::wstring path_;
+    DWORD httpReadTimeoutMs_ = 0;
+    DWORD httpSeekTimeoutMs_ = 0;
     bool detectUnwrittenData_ = false;
     AVIOInterruptCB interrupt_{};
 };

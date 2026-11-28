@@ -1,10 +1,12 @@
 #pragma once
 
 #include "3FP/Render/VideoShaderSettings.h"
+#include "3FP/Render/D3D12/NvidiaD3D12VideoBridge.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <utility>
 #include <d3d11on12.h>
@@ -93,12 +95,20 @@ public:
     Stats GetStats() noexcept;
     std::pair<UINT64, UINT64> ScaleStats() const noexcept { return {stats_.scalePasses, stats_.scaleCpu100ns}; }
 
+    // NVIDIA VSR / TrueHDR request for the next frame. The actual state is
+    // reported only after the bridge's VideoProcessorBlt succeeded.
+    void SetNvidiaRequests(const NvidiaD3D12VideoBridge::Request& request) noexcept;
+    const NvidiaD3D12VideoBridge::Status& NvidiaStatus() const noexcept { return nvidiaStatus_; }
+    void ResetNvidiaFailures() noexcept;
+
 private:
     template<class T> using ComPtr = Microsoft::WRL::ComPtr<T>;
     struct Texture {
         ComPtr<ID3D12Resource> resource;
         D3D12_RESOURCE_DESC desc{};
         UINT64 bytes = 0;
+        HANDLE sharedHandle = nullptr;
+        bool sharedHeap = false;
     };
     struct Buffer {
         ComPtr<ID3D12Resource> resource;
@@ -142,7 +152,7 @@ private:
     HRESULT Begin(Slot& slot) noexcept;
     HRESULT Execute(Slot& slot) noexcept;
     HRESULT EnsureTexture(Texture& texture, const D3D12_RESOURCE_DESC& desc,
-        D3D12_RESOURCE_STATES initial) noexcept;
+        D3D12_RESOURCE_STATES initial, bool shared = false) noexcept;
     void Release(Texture& texture) noexcept;
     HRESULT EnsureBuffer(Buffer& buffer, UINT64 size, D3D12_HEAP_TYPE type) noexcept;
     void Release(Buffer& buffer) noexcept;
@@ -153,6 +163,8 @@ private:
         DXGI_FORMAT format, bool blend, ID3D12PipelineState** pipeline) noexcept;
     HRESULT PrepareScale(const Picture& picture, std::array<View, VideoPlaneCount>& inputs,
         bool& runScale) noexcept;
+    HRESULT TryNvidiaBridge(const Picture* picture, std::array<View, VideoPlaneCount>& source,
+        Picture& bridgePicture, bool& active) noexcept;
     void RecordScale(UINT drawIndex, UINT& viewOffset, UINT& rtvOffset,
         const Picture& picture, std::array<View, VideoPlaneCount>& inputs, bool runScale) noexcept;
     HRESULT PrepareBackdrop(const Picture* picture) noexcept;
@@ -203,6 +215,22 @@ private:
     Buffer timestampReadback_;
     UINT viewStride_ = 0, targetStride_ = 0, uploadIndex_ = 0;
     HANDLE event_ = nullptr;
+
+    // Shared source/ready/consumed fences for the NVIDIA bridge. The source
+    // fence is created with the renderer so every upload is visible to a
+    // bridge that may be created later (first frame after the host toggles VSR).
+    ComPtr<ID3D12Fence> nvidiaSourceFence_;
+    HANDLE nvidiaSourceFenceHandle_ = nullptr;
+    UINT64 nvidiaSourceFenceValue_ = 0;
+    UINT64 nvidiaReadyValue_ = 0;
+    std::unique_ptr<NvidiaD3D12VideoBridge> nvidiaBridge_;
+    bool nvidiaBridgeInitAttempted_ = false;
+    NvidiaD3D12VideoBridge::Request nvidiaRequest_{};
+    NvidiaD3D12VideoBridge::Status nvidiaStatus_{};
+    bool nvidiaDrawActive_ = false;
+    UINT nvidiaOutputSlot_ = UINT_MAX;
+    ID3D12Resource* nvidiaOutput_ = nullptr;
+
     UINT64 value_ = 0, timestampHz_ = 0, backBufferBytes_ = 0;
     UINT64 pictureGeneration_ = 0, scaledGeneration_ = 0, backdropGeneration_ = 0;
     UINT scaledFilter_ = 0, backdropPasses_ = 0, backdropColorMode_ = UINT_MAX;

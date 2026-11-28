@@ -518,8 +518,23 @@ Public NotInheritable Class 播放器会话
         Return 播放器原生接口.设置GainMap启用(目标, 启用)
     End Function
 
-    ''' <summary>把内核的原因码翻成人话。逐值对应 FFF3FPVideoSuperResolutionReason。
-    ''' <para>最后一句是刻意的：内核的"生效"只表示驱动没有拒绝这次请求，
+    ''' <summary>内核当前实际解码所在的 DXGI 适配器索引（-1 = 软件解码、没有视频，
+    ''' 或这台内核未导出该查询）。
+    ''' <para>与 <see cref="播放性能选项.GPU设备索引"/> 的分工：那个是用户**请求**的卡，
+    ''' 这个是打开路径真正落到的卡。自动选卡（首选索引 -1）以及主卡硬解失败后回退到
+    ''' 另一张适配器时，两者会不同 —— 信息层要显示的是后者。</para>
+    ''' <para>软解时内核回 hardware = 0，这里一律归一成 -1，调用方只看索引就能决定
+    ''' 显示"GPU + 卡名"还是"CPU"。</para></summary>
+    Friend Function 实际解码适配器索引() As Integer
+        If Volatile.Read(已释放) <> 0 Then Return -1
+        Dim 目标 = 句柄
+        If 目标 Is Nothing OrElse 目标.IsInvalid Then Return -1
+        Dim 信息 = 播放器原生接口.读取解码适配器(目标)
+        If 信息 Is Nothing OrElse 信息.Value.硬件解码 = 0UI Then Return -1
+        Return 信息.Value.适配器索引
+    End Function
+
+    ''' <summary>把内核的原因码翻成人话。逐值对应 FFF3FPVideoSuperResolutionReason。    ''' <para>最后一句是刻意的：内核的"生效"只表示驱动没有拒绝这次请求，
     ''' 该路径没有任何能力查询可用（实测连伪造的 GUID 都返回成功），
     ''' 所以这里不能写成"已增强"。</para></summary>
     Friend Shared Function 视频超分辨率状态文本(状态 As 原生视频超分辨率状态) As String

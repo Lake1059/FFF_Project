@@ -28,6 +28,12 @@
     <Filter Include="3FP\Core">
       <UniqueIdentifier>{774e6ff6-694a-4d50-9e87-1906fd1f1bfd}</UniqueIdentifier>
     </Filter>
+    <Filter Include="3FP\IO">
+      <UniqueIdentifier>{2f7b0b9e-3c3a-4e0d-9c45-6a1e2d8f4b71}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3FP\Stream">
+      <UniqueIdentifier>{8e6e3a7c-5b7d-4a1f-9f0e-3c2d1b0a9e64}</UniqueIdentifier>
+    </Filter>
     <Filter Include="3FP\Disc">
       <UniqueIdentifier>{C156F4A9-55EC-44F0-BD20-41228DE82879}</UniqueIdentifier>
     </Filter>
@@ -77,6 +83,81 @@
     </ClInclude>
     <ClInclude Include="3FP\Api\FFF.Player.Api.h">
       <Filter>3FP\Api</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\BudgetController.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\ByteWindow.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\Deadline.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\FileMediaSource.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\HttpMediaSource.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\IMediaSource.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\IoBudgetMath.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\IoOptions.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\IoStatus.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\InputPacketPump.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\PacketCache.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\ProgressWatchdog.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\ReadLedger.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\RouteBudgetArbiter.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\SessionBudgetLease.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\SourceCapabilities.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\IO\StepGate.h">
+      <Filter>3FP\IO</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Stream\HlsPlaylist.h">
+      <Filter>3FP\Stream</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Stream\HlsLiveWindow.h">
+      <Filter>3FP\Stream</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Stream\DashManifest.h">
+      <Filter>3FP\Stream</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Stream\DashAvailability.h">
+      <Filter>3FP\Stream</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Stream\DashSegmentSource.h">
+      <Filter>3FP\Stream</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Stream\DashSegmentPlan.h">
+      <Filter>3FP\Stream</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Stream\HlsSegmentLoader.h">
+      <Filter>3FP\Stream</Filter>
+    </ClInclude>
+    <ClInclude Include="3FP\Stream\SegmentCache.h">
+      <Filter>3FP\Stream</Filter>
     </ClInclude>
     <ClInclude Include="3FP\Disc\DiscInput.h">
       <Filter>3FP\Disc</Filter>
@@ -150,6 +231,9 @@
     <ClInclude Include="Shared\Ffmpeg\SharedFileInput.h">
       <Filter>Shared\Ffmpeg</Filter>
     </ClInclude>
+    <ClInclude Include="Shared\Ffmpeg\HttpMediaReader.h">
+      <Filter>Shared\Ffmpeg</Filter>
+    </ClInclude>
     <ClInclude Include="Shared\Ffmpeg\IocpMediaReader.h">
       <Filter>Shared\Ffmpeg</Filter>
     </ClInclude>
@@ -165,6 +249,9 @@
       <Filter>Shared\Ffmpeg</Filter>
     </ClCompile>
     <ClCompile Include="Shared\Ffmpeg\SharedFileInput.cpp">
+      <Filter>Shared\Ffmpeg</Filter>
+    </ClCompile>
+    <ClCompile Include="Shared\Ffmpeg\HttpMediaReader.cpp">
       <Filter>Shared\Ffmpeg</Filter>
     </ClCompile>
     <ClCompile Include="Shared\Ffmpeg\IocpMediaReader.cpp">
@@ -187,6 +274,39 @@
     </ClCompile>
     <ClCompile Include="3FP\Audio\WasapiRenderer.cpp">
       <Filter>3FP\Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\IO\FileMediaSource.cpp">
+      <Filter>3FP\IO</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\IO\HttpMediaSource.cpp">
+      <Filter>3FP\IO</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\IO\IoV2.cpp">
+      <Filter>3FP\IO</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\IO\InputPacketPump.cpp">
+      <Filter>3FP\IO</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\IO\PacketCache.cpp">
+      <Filter>3FP\IO</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Stream\HlsPlaylist.cpp">
+      <Filter>3FP\Stream</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Stream\HlsLiveWindow.cpp">
+      <Filter>3FP\Stream</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Stream\DashManifest.cpp">
+      <Filter>3FP\Stream</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Stream\DashAvailability.cpp">
+      <Filter>3FP\Stream</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Stream\DashSegmentSource.cpp">
+      <Filter>3FP\Stream</Filter>
+    </ClCompile>
+    <ClCompile Include="3FP\Stream\HlsSegmentLoader.cpp">
+      <Filter>3FP\Stream</Filter>
     </ClCompile>
     <ClCompile Include="3FP\Core\PlayerSession.cpp">
       <Filter>3FP\Core</Filter>

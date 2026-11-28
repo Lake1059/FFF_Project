@@ -1,0 +1,35 @@
+name: io-v2-contracts
+
+on:
+  pull_request:
+    paths:
+      - 'FFF.Native/3FP/IO/**'
+      - 'FFF.Native.Tests/IoV2Tests.cpp'
+      - 'FFF.Native.Tests/run_io_v2_tests.py'
+      - '.github/workflows/io-v2-contracts.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'FFF.Native/3FP/IO/**'
+      - 'FFF.Native.Tests/IoV2Tests.cpp'
+      - 'FFF.Native.Tests/run_io_v2_tests.py'
+      - '.github/workflows/io-v2-contracts.yml'
+
+jobs:
+  contract-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Compile and run I/O 2.0 contract tests
+        run: python FFF.Native.Tests/run_io_v2_tests.py --log FFF.Native.Tests/io_v2_tests.log
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: io-v2-contract-log
+          path: FFF.Native.Tests/io_v2_tests.log
+          if-no-files-found: ignore

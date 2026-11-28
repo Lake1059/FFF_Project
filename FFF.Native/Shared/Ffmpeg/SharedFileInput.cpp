@@ -1,12 +1,16 @@
 #include "pch.h"
 #include "Shared/Windows/Utf8.h"
 #include "Shared/Ffmpeg/SharedFileInput.h"
+#include "Shared/Ffmpeg/HttpMediaReader.h"
 #include "Shared/Ffmpeg/IocpMediaReader.h"
+#include "3FP/IO/Deadline.h"
 
 extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
 }
+
+#include <winhttp.h>
 
 #include <algorithm>
 #include <atomic>
@@ -18,6 +22,7 @@ extern "C" {
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -54,6 +59,111 @@ bool ReserveEventRequest(const int bytes) noexcept {
     EventRequestCount.fetch_sub(1, std::memory_order_acq_rel);
     return false;
 }
+}
+
+namespace {
+// Nested opens belong to one top-level session. FFmpeg may create several child
+// AVFormatContexts while probing HLS/DASH; keeping the owner separately means a
+// single StopInputPump can abort every segment currently blocked in WinHTTP.
+struct NestedIoEntry {
+    std::unique_ptr<SharedFileInput> input;
+    void* owner = nullptr;
+};
+std::mutex NestedIoMutex;
+std::unordered_map<AVIOContext*, NestedIoEntry> NestedInputs;
+
+bool IsHttpUrl(const char* url) noexcept {
+    if (url == nullptr) return false;
+    return _strnicmp(url, "http://", 7) == 0 || _strnicmp(url, "https://", 8) == 0;
+}
+
+constexpr std::size_t MaxManifestPrefetchBytes = 2ull * 1024 * 1024;
+struct ManifestCacheEntry {
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t rttMs = 0;
+    int uses = 0;
+    ULONGLONG expiresTick = 0;
+};
+std::mutex ManifestCacheMutex;
+std::unordered_map<std::string, ManifestCacheEntry> ManifestCache;
+
+bool FetchManifestBytes(const std::string& url, std::vector<std::uint8_t>& bytes,
+    std::uint32_t& rttMs, std::string& error) noexcept {
+    auto reader = HttpMediaReader::Open(url, GetTickCount64() + 120000, nullptr,
+        error, 120000);
+    if (reader == nullptr) return false;
+    const auto size = reader->Size();
+    if (size > 0 && size > static_cast<std::int64_t>(MaxManifestPrefetchBytes)) {
+        error = "The manifest is too large to prefetch.";
+        return false;
+    }
+    bytes.clear();
+    if (size > 0) bytes.reserve(static_cast<std::size_t>(size));
+    std::uint8_t chunk[32 * 1024];
+    std::int64_t position = 0;
+    for (;;) {
+        const int read = reader->Read(chunk, static_cast<int>(sizeof(chunk)), 60000,
+            AVIOInterruptCB{}, position);
+        if (read == AVERROR_EOF) break;
+        if (read < 0) {
+            error = "Could not read the manifest body.";
+            return false;
+        }
+        if (read == 0) break;
+        if (bytes.size() + static_cast<std::size_t>(read) > MaxManifestPrefetchBytes) {
+            error = "The manifest is too large to prefetch.";
+            return false;
+        }
+        bytes.insert(bytes.end(), chunk, chunk + read);
+        position += read;
+    }
+    rttMs = reader->RttMs();
+    return !bytes.empty();
+}
+
+bool TakeCachedManifest(const std::string& url, std::vector<std::uint8_t>& bytes,
+    std::uint32_t& rttMs) noexcept {
+    std::lock_guard lock(ManifestCacheMutex);
+    const auto it = ManifestCache.find(url);
+    if (it == ManifestCache.end() || it->second.uses <= 0 ||
+        (it->second.expiresTick != 0 && GetTickCount64() > it->second.expiresTick)) {
+        return false;
+    }
+    bytes = it->second.bytes;
+    rttMs = it->second.rttMs;
+    if (--it->second.uses <= 0) ManifestCache.erase(it);
+    return true;
+}
+
+}
+
+bool SharedFileInput::PrefetchHttpManifest(const char* urlUtf8,
+    std::string& error) noexcept {
+    if (!IsHttpUrl(urlUtf8)) {
+        error = "The manifest URL is not HTTP.";
+        return false;
+    }
+    const std::string url = urlUtf8;
+    {
+        std::lock_guard lock(ManifestCacheMutex);
+        const auto it = ManifestCache.find(url);
+        if (it != ManifestCache.end() && it->second.uses > 0 &&
+            (it->second.expiresTick == 0 || GetTickCount64() <= it->second.expiresTick))
+            return true;
+    }
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t rttMs = 0;
+    if (!FetchManifestBytes(url, bytes, rttMs, error)) return false;
+    {
+        std::lock_guard lock(ManifestCacheMutex);
+        // Five minutes, not seconds: on a 30 s-RTT link the first segment fetch
+        // can outlive a short TTL, which would turn the reload back into a
+        // third serial round trip. The use count, not the clock, is what stops
+        // stale bytes from serving later HLS refreshes.
+        ManifestCache[url] = ManifestCacheEntry{
+            std::move(bytes), rttMs, 2, GetTickCount64() + 300000};
+    }
+    return true;
 }
 
 struct SharedFileInputEventReadRequest {
@@ -196,10 +306,23 @@ bool IsTransientNetworkError(const DWORD error) noexcept {
     case ERROR_REM_NOT_LIST:
     case ERROR_NETWORK_UNREACHABLE:
     case ERROR_HOST_UNREACHABLE:
+    case ERROR_WINHTTP_TIMEOUT:
+    case ERROR_WINHTTP_CONNECTION_ERROR:
+    case ERROR_WINHTTP_NAME_NOT_RESOLVED:
+    case ERROR_WINHTTP_CANNOT_CONNECT:
+    // A valid short 206 ends at its Content-Range boundary, not at the media
+    // end. HttpMediaReader reports this as ERROR_MORE_DATA so the shared input
+    // path seeks to the delivered byte and opens the next Range request.
+    case ERROR_MORE_DATA:
         return true;
     default:
         return false;
     }
+}
+
+bool HasHttpScheme(const std::wstring& path) noexcept {
+    return (path.size() >= 7 && _wcsnicmp(path.c_str(), L"http://", 7) == 0) ||
+        (path.size() >= 8 && _wcsnicmp(path.c_str(), L"https://", 8) == 0);
 }
 
 struct OpenJob {
@@ -390,6 +513,7 @@ SharedFileInput::~SharedFileInput() {
 
 void SharedFileInput::CloseHandles() noexcept {
     // Stop the IOCP worker before closing the file it is reading.
+    http_.reset();
     iocpReader_.reset();
     // ReadFileOnce never leaves a request in eventRead_ while still pending:
     // an uncompleted cancellation is moved to the abandoned reaper instead.
@@ -421,12 +545,116 @@ bool SharedFileInput::IsTransientNetworkError(const DWORD error) noexcept {
     return ::IsTransientNetworkError(error);
 }
 
+DWORD SharedFileInput::HttpReadTimeoutMs(const int bytes) const noexcept {
+    if (http_ == nullptr) return NetworkReadTimeoutMs;
+    if (httpReadTimeoutMs_ != 0) return httpReadTimeoutMs_;
+    const auto rtt = http_->RttMs() != 0 ? http_->RttMs() : 300u;
+    const auto goodput = http_->GoodputBps() != 0 ? http_->GoodputBps() : 6ull * 1024 * 1024;
+    const auto chunkTime = static_cast<std::uint32_t>((std::min<std::uint64_t>)(
+        static_cast<std::uint64_t>(bytes > 0 ? bytes : 0) * 1000 / goodput, 30000));
+    return FFFPlayer::Io::ReadIdleTimeoutMs(rtt, chunkTime);
+}
+
+DWORD SharedFileInput::HttpSeekTimeoutMs() const noexcept {
+    if (http_ == nullptr) return NetworkSeekTimeoutMs;
+    if (httpSeekTimeoutMs_ != 0) return httpSeekTimeoutMs_;
+    const auto rtt = http_->RttMs() != 0 ? http_->RttMs() : 300u;
+    const auto goodput = http_->GoodputBps() != 0 ? http_->GoodputBps() : 6ull * 1024 * 1024;
+    return FFFPlayer::Io::SeekDeadlineMs(rtt, 8ull * 1024 * 1024, goodput);
+}
+
 void SharedFileInput::SetNetworkWindowHint(const std::int64_t bitsPerSecond) noexcept {
+    if (http_) return;
     if (!iocpReader_) return;
     // Pass the actual bitrate, not only the derived byte count: the adaptive
     // window needs it to translate a high-latency coverage target into bytes.
     iocpReader_->SetStreamBitRate(bitsPerSecond > 0 ? bitsPerSecond : 0);
 }
+
+void SharedFileInput::SetHttpTimeouts(const DWORD readIdleTimeoutMs,
+    const DWORD seekDeadlineMs) noexcept {
+    httpReadTimeoutMs_ = readIdleTimeoutMs;
+    httpSeekTimeoutMs_ = seekDeadlineMs;
+}
+
+void SharedFileInput::Abort() noexcept {
+    if (http_ != nullptr) http_->Abort();
+}
+
+void SharedFileInput::ClearAbort() noexcept {
+    if (http_ != nullptr) http_->ClearAbort();
+}
+
+AVIOContext* SharedFileInput::OpenNestedIo(void* owner, const char* urlUtf8,
+    const AVIOInterruptCB& interrupt, std::string& error) noexcept {
+    if (owner == nullptr || urlUtf8 == nullptr || *urlUtf8 == '\0') {
+        error = "The nested media URL is empty.";
+        return nullptr;
+    }
+    auto input = Open(urlUtf8, error, 0, false, &interrupt);
+    if (input == nullptr) return nullptr;
+    auto* context = input->Context();
+    if (context == nullptr) {
+        error = "The nested media source has no AVIO context.";
+        return nullptr;
+    }
+    try {
+        std::lock_guard lock(NestedIoMutex);
+        NestedInputs.emplace(context, NestedIoEntry{std::move(input), owner});
+    } catch (...) {
+        error = "Could not register the nested media source.";
+        return nullptr;
+    }
+    return context;
+}
+
+int SharedFileInput::CloseNestedIo(AVIOContext* context) noexcept {
+    if (context == nullptr) return 0;
+    std::unique_ptr<SharedFileInput> input;
+    {
+        std::lock_guard lock(NestedIoMutex);
+        const auto it = NestedInputs.find(context);
+        if (it == NestedInputs.end()) return 0;
+        input = std::move(it->second.input);
+        NestedInputs.erase(it);
+    }
+    // `input` is destroyed after the lock, so closing the WinHTTP request cannot
+    // re-enter the registry while other segments are being aborted.
+    return 0;
+}
+
+void SharedFileInput::AbortNestedIo(void* owner) noexcept {
+    if (owner == nullptr) return;
+    std::lock_guard lock(NestedIoMutex);
+    for (auto& [_, entry] : NestedInputs) {
+        if (entry.owner == owner && entry.input != nullptr) entry.input->Abort();
+    }
+}
+
+void SharedFileInput::ClearNestedAbortIo(void* owner) noexcept {
+    if (owner == nullptr) return;
+    std::lock_guard lock(NestedIoMutex);
+    for (auto& [_, entry] : NestedInputs) {
+        if (entry.owner == owner && entry.input != nullptr) entry.input->ClearAbort();
+    }
+}
+
+void SharedFileInput::CloseAllNestedIo(void* owner) noexcept {
+    if (owner == nullptr) return;
+    std::vector<std::unique_ptr<SharedFileInput>> pending;
+    {
+        std::lock_guard lock(NestedIoMutex);
+        for (auto it = NestedInputs.begin(); it != NestedInputs.end();) {
+            if (it->second.owner != owner) {
+                ++it;
+                continue;
+            }
+            pending.push_back(std::move(it->second.input));
+            it = NestedInputs.erase(it);
+        }
+    }
+}
+
 
 bool SharedFileInput::Interrupted(const AVIOInterruptCB& interrupt) noexcept {
     return interrupt.callback != nullptr && interrupt.callback(interrupt.opaque) != 0;
@@ -458,6 +686,30 @@ std::unique_ptr<SharedFileInput> SharedFileInput::Open(const char* pathUtf8,
         auto input = std::make_unique<SharedFileInput>();
         if (interrupt != nullptr) input->interrupt_ = *interrupt;
         input->path_ = path;
+        const bool http = HasHttpScheme(path);
+        if (http) {
+            std::vector<std::uint8_t> manifestBytes;
+            std::uint32_t manifestRttMs = 0;
+            if (TakeCachedManifest(pathUtf8, manifestBytes, manifestRttMs)) {
+                auto memory = OpenMemory(manifestBytes.data(), manifestBytes.size(), error);
+                if (memory != nullptr) {
+                    memory->path_ = path;
+                    memory->network_ = true;
+                    memory->cachedNetwork_ = true;
+                    memory->cachedRttMs_ = manifestRttMs;
+                    return memory;
+                }
+            }
+            input->http_ = HttpMediaReader::Open(pathUtf8, deadlineTick,
+                interrupt != nullptr ? interrupt : &input->interrupt_, error);
+            if (input->http_ == nullptr) return nullptr;
+            input->network_ = true;
+            input->size_ = input->http_->Size();
+            input->sizeKnown_ = input->http_->SizeKnown();
+            input->overlapped_ = false;
+            if (!input->InitializeContext(error)) return nullptr;
+            return input;
+        }
         input->network_ = IsNetworkPath(path);
         const bool useIocp = (input->network_ || ForceIocpReader()) && UseIocpReader();
         input->overlapped_ = input->network_ || useIocp;
@@ -559,7 +811,8 @@ bool SharedFileInput::InitializeContext(std::string& error) {
         error = "Could not allocate the FFmpeg media input context.";
         return false;
     }
-    context_->seekable = AVIO_SEEKABLE_NORMAL;
+    context_->seekable = http_ != nullptr && !http_->Seekable()
+        ? 0 : AVIO_SEEKABLE_NORMAL;
     return true;
 }
 
@@ -683,6 +936,35 @@ int SharedFileInput::Read(void* opaque, std::uint8_t* buffer,
     if (input == nullptr || buffer == nullptr || bufferSize < 0)
         return AVERROR(EINVAL);
     if (Interrupted(input->interrupt_)) return AVERROR_EXIT;
+    if (input->http_ != nullptr) {
+        int result = AVERROR(EIO);
+        for (int attempt = 0; attempt <= SharedFileInput::NetworkReadRetryCount; ++attempt) {
+            if (Interrupted(input->interrupt_)) return AVERROR_EXIT;
+            result = input->http_->Read(buffer, bufferSize,
+                input->HttpReadTimeoutMs(bufferSize), input->interrupt_,
+                input->position_);
+            input->lastError_ = input->http_->LastError();
+            if (GetEnvironmentVariableW(L"FFF_HTTP_TRACE", nullptr, 0))
+                std::fwprintf(stderr, L"[http] shared read pos=%lld readerPos=%lld result=%d first=%02x%02x%02x%02x\n",
+                    static_cast<long long>(input->position_),
+                    static_cast<long long>(input->http_->Position()), result,
+                    bufferSize > 0 ? buffer[0] : 0, bufferSize > 1 ? buffer[1] : 0,
+                    bufferSize > 2 ? buffer[2] : 0, bufferSize > 3 ? buffer[3] : 0);
+            if (result >= 0) {
+                input->position_ += result;
+                return result;
+            }
+            if (result == AVERROR_EXIT || result == AVERROR_EOF) return result;
+            if (attempt == SharedFileInput::NetworkReadRetryCount) return result;
+            if (!IsTransientNetworkError(input->lastError_)) return result;
+            std::string seekError;
+            if (!input->http_->Seek(input->position_,
+                input->HttpSeekTimeoutMs(), input->interrupt_, seekError))
+                return Interrupted(input->interrupt_) ? AVERROR_EXIT : result;
+            Sleep(static_cast<DWORD>(125 * (attempt + 1)));
+        }
+        return result;
+    }
     // In-memory media: copy what is left of the buffer and advance the cursor.
     if (input->file_ == INVALID_HANDLE_VALUE) {
         if (input->data_ == nullptr) return AVERROR(EINVAL);
@@ -800,6 +1082,18 @@ int SharedFileInput::Read(void* opaque, std::uint8_t* buffer,
     return result;
 }
 
+bool SharedFileInput::HttpSeekable() const noexcept {
+    return http_ == nullptr || http_->Seekable();
+}
+
+std::uint32_t SharedFileInput::NetworkRttMs() const noexcept {
+    return http_ != nullptr ? http_->RttMs() : cachedRttMs_;
+}
+
+std::uint64_t SharedFileInput::NetworkGoodputBps() const noexcept {
+    return http_ != nullptr ? http_->GoodputBps() : 0;
+}
+
 bool SharedFileInput::HasWriter() const noexcept {
     if (file_ == INVALID_HANDLE_VALUE || path_.empty() || Interrupted(interrupt_)) return false;
     if (network_) {
@@ -825,6 +1119,31 @@ std::int64_t SharedFileInput::Seek(void* opaque, const std::int64_t offset,
     if (input == nullptr) return AVERROR(EINVAL);
     const auto origin = whence & ~AVSEEK_FORCE;
     if (Interrupted(input->interrupt_)) return AVERROR_EXIT;
+    if (input->http_ != nullptr) {
+        if (origin == AVSEEK_SIZE)
+            return input->http_->SizeKnown() ? input->http_->Size() : AVERROR(EIO);
+        if (origin != SEEK_SET && origin != SEEK_CUR && origin != SEEK_END)
+            return AVERROR(EINVAL);
+        std::int64_t base = 0;
+        if (origin == SEEK_CUR) base = input->position_;
+        else if (origin == SEEK_END) {
+            if (!input->http_->SizeKnown()) return AVERROR(EIO);
+            base = input->http_->Size();
+        }
+        if (offset < -base || offset > (std::numeric_limits<std::int64_t>::max)() - base)
+            return AVERROR(EINVAL);
+        const auto target = base + offset;
+        std::string error;
+        if (!input->http_->Seek(target, input->HttpSeekTimeoutMs(),
+            input->interrupt_, error)) {
+            input->lastError_ = input->http_->LastError();
+            if (Interrupted(input->interrupt_)) return AVERROR_EXIT;
+            return input->lastError_ == ERROR_WINHTTP_TIMEOUT
+                ? AVERROR(ETIMEDOUT) : AVERROR(EIO);
+        }
+        input->position_ = target;
+        return target;
+    }
     const bool localFile = input->file_ != INVALID_HANDLE_VALUE && !input->overlapped_;
     if (origin == AVSEEK_SIZE) {
         if (localFile) {
